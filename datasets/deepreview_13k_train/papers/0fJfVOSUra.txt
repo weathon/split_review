@@ -1,0 +1,418 @@
+\title{ThunderKittens: Simple, Fast, and $\textit{Adorable}$ Kernels}
+
+\begin{abstract}
+    The challenge of mapping AI architectures to GPU hardware is creating a critical bottleneck in AI progress. Despite substantial efforts, hand-written custom kernels fail to meet their theoretical performance thresholds, even on well-established operations like linear attention.
+    The diverse hardware capabilities of GPUs might suggest that we need a wide variety of techniques to achieve high performance. However, our work explores whether a small number of key abstractions can drastically simplify the process. We present \name{} (\shortname{}), a framework for writing performant AI kernels while remaining easy to use and maintain. 
+    Our abstractions map to the three levels of the GPU hierarchy: (1) at the warp-level, we provide 16x16 matrix tiles as basic data structures and PyTorch-like parallel compute operations over tiles, (2) at the thread-block level, we provide a template for overlapping asynchronous operations across parallel warps, and (3) at the grid-level, we provide support to help hide the block launch and tear-down, and memory costs. We show the value of \shortname{} by providing kernels that match or outperform prior kernels for a range of AI operations. We match CuBLAS and FlashAttention-3 on GEMM and attention inference performance and outperform the strongest baselines by $10-40\%$ on attention backwards, $8\times$ on state space models, and $14\times$ on linear attention.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+AI is bottlenecked by the problem of efficiently mapping AI architectures onto accelerated GPU hardware.
+There has been a Cambrian explosion of ML architectures \citep{ho2020denoising, gu2023mamba}; however, the performance of these architectures remains substantially below their theoretical potential, despite substantial effort to develop \textit{kernels}, or GPU implementations.
+Notably, kernel support has been poor even for softmax attention, which is used throughout industry. FlashAttention-2 \citep{dao2023flashattention2} suffered a 47\% performance degradation when translated to the H100 GPU, and it took over two years from the release of the H100 to develop FlashAttention-3 \citep{dao2024flashattention3}. 
+We are inspired by several approaches to supporting the development of AI kernels. 
+Ideally, we would have a framework that supports high \textbf{performance} for a \textbf{breadth} of primitives, while being \textbf{easy to use}, learn from, and maintain.
+High performance C++ embedded libraries like NVIDIA CUTLASS/CuTe~\citep{nvidia2017cutlass} contain a myriad of nested templates, while compiler based approaches like Triton~\citep{triton} provide users with simpler interfaces, but fewer optimizations. We ask how broad and fast we can go by choosing a small and opinionated set of abstractions. 
+
+The main vector of growth for accelerated compute is in specialized matrix multiply units. On the NVIDIA A100 and NVIDIA H100 GPUs, BF16 tensor cores represent $16\times$ the FLOPs available relative to general-purpose BF16 / FP32 compute. Consequently, any high performance framework must prioritize keeping tensor cores at high utilization whenever possible. However, all kernels have other operations too (like memory loads or the softmax in attention), and it is crucial to minimize the overhead of
+non-tensor core operations. This proposition is at the heart of our approach.
+
+\input{Sections/figures/placeholder/figure}
+To understand the complexities and opportunities in building a simple, yet high performance framework, we examine a simplified model of GPU parallelism, further detailed in section 2.\footnote{We discuss NVIDIA, but the parallelism types hold across architectures, including AMD and Apple GPUs.}
+\begin{enumerate}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item \textbf{Warp-level parallelism:} 
+    Modern GPUs consist of tens of thousands of hardware threads which execute in parallel. Threads are organized into small groups, ``warps'', which execute instructions together. Memory \textit{layouts} determine how the logical data elements are mapped to physical thread ownership. If multiple threads try to access the same region (``bank'') of memory, this can create expensive serializations between the threads (called ``bank conflicts'').
+    
+    \item \textbf{Block-level parallelism:} Warps are grouped into ``blocks'' of threads, which can quickly share data. Warps execute their instructions on physical execution units, and having more warps in a block (called \textit{occupancy}) can help run more instructions at the same time, reducing runtime. For example, one warp can run tensor cores for matmul, while another uses the ALU for $\max$.
+    \item \textbf{Grid-level parallelism.} GPUs run many blocks of threads at once, which communicate through large but slow global memory (HBM). An on-chip shared L2 cache helps reduce memory latencies and increase bandwidth if thread blocks reuse the same data. Thread blocks also face setup and tear-down latency overheads, called ``pipeline bubbles''
+\end{enumerate}
+
+Despite the apparent need for a myriad of techniques to leverage all these  hardware capabilities, our central technical finding is that indeed, for many AI kernels, \textit{a small number of key abstractions exist that can simplify the process of writing high-performance kernels}.
+Our exploration led us to develop \name{} (\shortname{}), an AI kernel framework built around three key principles:
+\begin{enumerate}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item \textbf{Tile data structures with managed layouts:} Our interface is inspired by familiar ML frameworks like PyTorch and NumPy~\citep{paszke2019pytorchimperativestylehighperformance}, as highlighted in \Cref{fig:listing_1}. At the warp level, we use a $16 \times 16$ matrix tile as our basic data structure, maximizing compatibility with and encouraging the use of tensor cores. 
+    \shortname{} automatically picks the optimal memory layouts for the tiles to minimize bank conflicts while remaining compatible with specialized hardware instructions, avoiding user effort. 
+    We provide a set of parallel compute primitives over tiles, based on the suite of operations in PyTorch (e.g., pointwise $\mathrm{multiply}$, $\mathrm{mma}$, $\exp$, and $\mathrm{cumsum}$ over tiles).
+    \item \textbf{Program template for asynchronous work:} At the block level, \shortname{} provides a general kernel template for coordinating asynchronous execution across warps in a thread block, built on the producer-consumer paradigm~\citep{dijkstraPC}.
+    The developer's effort reduces to populating a few  boilerplate functions within this model, using our PyTorch-like operands, and the template internally hides latencies through memory pipelines and synchronization primitives  (\Cref{fig:main_fig}). 
+    \item \textbf{Grid scheduling for pipelining thread-blocks.} At the grid level, we show
+    \shortname{} can help developers reduce pipeline bubbles and improve L2 cache hit rates. 
+    Our template supports a \textit{persistent grid}, where we overlap
+     memory loads across thread block boundaries.
+\end{enumerate}
+
+\clearpage
+\noindent We highlight the value of these abstractions for developers in two ways:
+\begin{itemize}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item Through our exploration, we identify a few fundamental tradeoffs between achieving different types of parallelism including in setting the tile layouts (warp-level), occupancy (block level), and block launch order (grid level). Through our ablation studies (\Cref{sec3_method}), we show how the simplified interface in \shortname{} gives users the control to navigate the tradeoffs.
+    \item We validate the \shortname{} abstractions by providing kernels that match or outperform prior kernels for a range of AI operations. We match CuBLAS GEMMs and FlashAttention-3 attention inference, and outperform the strongest baselines by $10-40\%$ on attention backwards, up to $8\times$ on state space models, and up to $14\times$ on linear attention.
+    These kernels are written by a small academic team, including by undergraduates with no prior CUDA experience.
+\end{itemize}
+\input{Sections/listings/pythonic_listing}
+Our contributions are (1) showing a small and opinionated set of abstractions in \shortname{} that goes surprisingly far for writing simple and performant kernels; and (2) providing a collection of performant AI kernels.
+\shortname{} kernels are in production at ML inference providers and high-frequency trading firms alike. 
+We hope that \shortname{} and its insights help improve the accessibility of AI kernels.
+
+
+\section{GPU fundamentals}
+
+\label{sec2_preliminaries}
+\input{Sections/figures/gpu/figure}
+
+GPU tasks are divided into small programs called \textit{kernels}. A kernel loads data from high bandwidth memory (HBM), performs work on it, and writes the outputs back to HBM before concluding. Before we explain \name{}'s abstractions, we provide background on GPU parallelism including \textit{warp}, \textit{block} and \textit{grid-level} parallelism. We follow NVIDIA's terminology and focus on the H100 SXM GPU, though the principles apply across GPU vendors and generations.
+
+\subsection{GPU hierarchy} The GPU software hierarchy closely follows its physical hardware hierarchy (\Cref{fig:gpu_graphic}). Here, we illustrate several of its most important components and aspects.
+
+\begin{enumerate}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item \textbf{Warps} consist of groups of $32$ nearby \textit{threads} that operate on data in small but fast \textit{register} memory. These instructions run on various physical \textit{execution units}, which are specialized for different compute operations (below) and different threads can occupy different units simultaneously:
+    \begin{enumerate}
+        \item Load and store units, to bring data into and out of registers. Advanced GPUs have also introduced dedicated hardware acceleration for bulk loads and stores.
+        \item General purpose compute pipelines, such as \textbf{ALU} for $\max, \min$, \textbf{FMA} for multiplies and adds, and \textbf{XU} for complex operations like $\exp$. Throughput differs across the pipelines.
+        \item Accelerated matrix multiply hardware (tensor cores), which have most of the GPU compute.
+    \end{enumerate}
+    
+    \item \textbf{Thread blocks} are groups of warps which together execute a kernel on a physical core, called a \textit{streaming multiprocessor} (SM). Although each SM has just four physical execution units, up to 64 software warps can simultaneously run on it (called ``occupancy''). These collocated warps often contend on hardware resources: registers, shared memory, issue slots, and compute pipelines, but together they can help keep many work streams running at the same time within each execution unit. Warps \textit{synchronize} at barriers, during which they cannot issue new work.
+
+    Importantly, warps within the same block can quickly communicate through special \textit{shared memory} (SMEM, 227 KB, 33 TB/s). To improve bandwidth, SMEM is grouped into 32 physical ``banks'' of memory, which can serve memory simultaneously. However, if different threads try to access the same bank at the same time (called a \textit{bank conflict}), their accesses must be serialized, which both increases access latencies and reduces available bandwidth. 
+    Hopper has limit of 255 registers per thread and attempts to request more, results in \textit{spills} to the L1 cache. SMEM can be reallocated as an \textit{L1 cache} for fast access to frequently used memory like spilled registers.
+
+    \item \textbf{Grids} of multiple thread blocks are launched to run the kernel. The H100 SXM GPU has 132 physical SM's which can run thread blocks at the same time. Although SM's are capable of collocating multiple thread blocks, most AI kernels can achieve high performance by simply collocating more warps within a single thread block (increasing the occupancy).
+
+    Thread blocks on the same GPU share common memory resources: large but slow high-bandwidth memory (80 GB, 3 TB/s), which has both the greatest latency and least bandwidth of all GPU memory, and a smaller but faster L2 cache (50 MB, 12 TB/s).
+
+    There are overheads to scheduling blocks. First, the block launch incurs \textit{setup} costs and although this cost must be paid at least once at the initial kernel launch, kernels that continuously launch many large blocks can incur further costs. Second, there are \textit{tail effect} costs if the grid is sized poorly.
+    If a kernel of 133 blocks is executed on an H100 with 132 physical SMs, the kernel would require two waves to execute, the first with full efficiency, and the second with $<1\%$ efficiency.
+\end{enumerate} 
+\subsection{Cost model}
+\label{eqn:model2cost}
+Beyond reducing the total amount of work, the other key way to reduce execution time is to overlap multiple kinds of work at once. Summarizing the above components, we provide a simplified cost model for GPU parallelism. We break down the overall kernel execution time $\mathbf{C}_{\mathrm{Overall}}$ as:
+\begin{align}
+    \mathbf{C}_{\text{Overall}} = 
+    \max\Big(
+    \underbrace{
+    \mathbf{C}_{\text{HBM}}, 
+    \mathbf{C}_{\text{L2}}, 
+    \mathbf{C}_{\text{L1}}, 
+    \mathbf{C}_{\text{Shared}}
+    }_{\textbf{Memory}},
+    \underbrace{
+    \mathbf{C}_{\text{Tensor}},
+    \mathbf{C}_{\text{ALU}},
+    \mathbf{C}_{\text{FMA}},
+    \mathbf{C}_{\text{XU}}
+    }_{\textbf{Compute}}
+    \Big) +
+    \underbrace{
+    \mathbf{C}_{\text{Setup}} + 
+    \mathbf{C}_{\text{Sync}}
+    }_{\textbf{Overhead}}
+    \nonumber
+\end{align}
+where memory costs are a combination of the latency and bandwidth, and compute costs are a combination of latency and throughput.
+
+This model represents the \textit{ideal case} of perfect overlapping between memory, compute, and tensor core costs. A kernel's actual performance will lie between the $\max$ and the $\mathrm{sum}$ of these components, depending on the workload properties (\textit{i.e.}, some operations are inherently sequential), as well as the efficiency of its implementation. Nonetheless, our explorations will be guided by trying to (1) reduce these individual costs, and (2) improve their collective overlapping.
+
+\subsection{GPU programming frameworks}
+We are inspired by a number of related efforts to simplify the development of AI kernels, such as NVIDIA CUTLASS/CuTe ~\citep{nvidia2017cutlass} and Triton~\citep{triton}.
+
+CUTLASS's myriad of nested CUDA templates helps power highly optimized AI kernels~\citep{dao2024flashattention3, bikshandi2023acase, bikshandi2023developing} and fundamentally, the same kernels are expressible in \shortname{} and CUTLASS, since both are \textit{embedded} libraries, giving users the full power of C++. We take a complementary approach by being rather opinionated about the abstractions. We ask: \textit{(1) How far can we get with a small of templates? and (2) Does concision sacrifice performance?} An appealing outcome is improved accessibility to AI researchers, since it can be challenging to fully leverage the capabilities of CUTLASS~\citep{bikshandi2023developing}. We find that even industrially popular kernels written in CUTLASS, like FlashAttention-3, struggle from  preventable issues like bank conflicts. We seek abstractions that manage such issues for users. Most recent AI architectures use high level compilers instead~\citep{dao2024transformers, yang2024fla, fu2023flashfftconv}. 
+
+Triton, PyTorch~\citep{paszke2019pytorchimperativestylehighperformance}, TVM~\citep{tvm}, TensorFlow XLA~\citep{tensorflow}, and others approach the problem from a compiler perspective. 
+The frameworks are not C++ embedded, so it can be challenging to use unsupported specialized hardware instructions. It can also be difficult to manage asynchronous execution and register usage in high level frameworks.
+We explore avenues that retain the simple, PyTorch-like feel \textit{and} enable high performance in the next section. An extended discussion of related work is in \Cref{app:related_work}.
+
+
+
+
+\section{ThunderKittens}
+
+\label{sec3_method}
+We present \name{} (TK), a framework designed to simplify the development of high-performance AI kernels while leveraging the full capabilities of modern GPUs. 
+This section (1) introduces our key programming abstractions and (2) shows how they can help developers navigate the tradeoffs between different types of parallelism. \Cref{sec3_model_1} focuses on warp level, \Cref{sec3_model_2} on thread block level, and \Cref{sec3:sec3_grid} on grid level parallelism. 
+
+As running examples in this section, we show how \shortname{} helps optimize attention~\citep{vaswani2018attention} and GEMM kernels. \Cref{sec:sec4_results} demonstrates how the principles yield performant kernels for a breadth of AI operations (\textit{e.g.}, attention variants, convolution, SSM, rotary).
+\subsection{Warp parallelism with familiar data structures and operations}
+\label{sec3_model_1}
+
+At its core, \name{} is built on two fundamental abstractions -- \textbf{tile data structures} at each level of the memory hierarchy and \textbf{bulk operands on tiles} akin to the familiar suite of operations in PyTorch and NumPy. We first define the abstractions, and then show they can help developers navigate tradeoffs between the tile \textit{sizes} and efficiency.
+
+\paragraph{Programming abstractions}
+\shortname{} is heavily inspired by PyTorch and NumPy, given their familiarity to ML audiences~\citep{paszke2019pytorchimperativestylehighperformance}.
+We provide a concise set of parallel compute operations, based on the suite of operations in PyTorch (e.g., in \Cref{fig:listing_1}). The operations are executed by a ``worker'' abstraction, or a warp or warpgroup ($4$ warps) of threads that collaboratively own and operate on a piece of data. 
+\shortname{} uses a $16 \times 16$ matrix tile as its basic data structure, designed to maximize compatibility with tensor cores. We provide tiles for each level of the memory hierarchy:
+\begin{enumerate}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item Register tiles and vectors, which are templated by type, shape, and layout. In \Cref{fig:listing_1} we initialize a bfloat16 type tile with a column-major layout, height $16$, width $64$.
+    \item Shared tiles and vectors, which are templated by type and shape. 
+    \item Global layout descriptors: We set up HBM loads and stores as indexing into $4$D tensors (similar to $\{$\texttt{batch}, \texttt{head}, \texttt{length}, and \texttt{embed}$\}$ in PyTorch). Dimensions can be known at compile-time or runtime. Compile-time dimensions can be stored in the instruction cache, saving registers.
+\end{enumerate}
+
+An advantage of these tile-based abstractions is that they enable \shortname{} to statically check layouts and operations, which is important because GPU kernels are often difficult to debug. For example, an in-register tensor core multiply \texttt{mma\_AB} requires $A$ to be in a row-major layout, and $B$ to be in a column-major layout, and \shortname{} can raise compile-time errors if these conditions are not met. 
+
+\input{Sections/figures/layouts/shared_layouts}
+
+\paragraph{Choosing a memory layout} Layouts specify how logical data elements are mapped to physical thread ownership. Different execution units, tile sizes and types, and hardware-accelerated instructions benefit from different layouts. A poor choice of layout can lead to bank conflicts ($\mathbf{C}_{\text{Shared}}$, \Cref{sec2_preliminaries}). 
+Our goals are:
+\begin{itemize}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item We want our register tiles (the fastest GPU memory) to by-default keep memory in the layouts required by tensor core units (the fastest GPU compute units). Shown in \Cref{fig:main_fig} (Left), where each color represents a different thread's ownership over the data elements, the tensor formats are rather difficult to use and reason about, highlighted in our discussion of naive layouts in \Cref{fig:shared_layouts}.
+    \item We want to support the use of hardware-accelerated instructions (\textit{e.g.}, asynchronous matrix multiply and bulk copy instructions), which also require specific shared memory layouts. 
+\end{itemize}
+
+In \shortname{}, we simplify the search space to $3$ layouts -- strided at 32, 64, and 128 byte intervals -- and automatically give shared tiles with the largest layout that the tile size supports to minimize bank conflicts. 
+Highlighted in \Cref{sec4:exotic_kernels}, even optimized FlashAttention-3 kernel written using CUTLASS and CuTe templates suffer from bank conflicts, hurting performance. Our approach helps minimize conflicts.
+\subsection{Block parallelism with a generalized asynchronous template}
+\label{sec3_model_2}
+\name{} helps developers reduce overheads by coordinating how workers in a thread block asynchronously overlap execution.
+ Though the GPU hierarchy might suggest that we need a wide variety of techniques, we propose a \textit{single} concise template that we find enables high performance on a surprisingly broad range of AI workloads.
+We first define the template, which has four steps -- load-compute-store-finish (LCSF for short) -- and builds on the classical producer-consumer paradigm~\citep{dijkstraPC, bauer2011cudadma}. We then show how the LCSF template can help developers navigate the tradeoffs between occupancy and efficiency.
+
+\begin{figure}[h]
+  \begin{minipage}{0.35\textwidth}
+Load function:
+\begin{lstlisting}
+if(warpgroup::warpid() == 0) {
+    tma::expect(inputs_arrived,
+        block.k, block.v);
+    tma::load_async(
+        block.k, globals.k,
+        {batch, head, iter, 0},
+        inputs_arrived);
+    tma::load_async(
+        block.v, globals.v,
+        {batch, head, iter, 0},
+        inputs_arrived);
+}
+else arrive(inputs_arrived);
+\end{lstlisting}  \end{minipage}
+  \hfill
+  \begin{minipage}{0.58\textwidth}
+Compute function:
+\begin{lstlisting}
+warpgroup::mm_ABt(att, scratch.q[state.id], block.k);
+warpgroup::mma_async_wait();
+
+// softmax (simplified)
+sub_row(att, att, max_vec);
+exp(att, att);
+div_row(att, att, norm_vec);
+
+copy(att_bf16, att); 
+
+warpgroup::mma_AB(state.o, att_bf16, block.v);
+warpgroup::mma_async_wait();
+arrive(inputs_finished);
+\end{lstlisting}
+  \end{minipage}
+\caption{An attention kernel within the LCSF template. The left shows the functionality for workers focused on managing HBM to SRAM memory movement, and the right shows the functionality for parallel compute workers that operate in fast memory, registers and SRAM. 
+}
+\label{fig:pc_attn_listing}
+\end{figure}
+
+\paragraph{Programming abstractions} As discussed in ~\Cref{sec2_preliminaries}, the general pattern of an AI kernel is to load tiles of large tensors from HBM to SRAM, perform computation in fast memory, store the result for the tile back to HBM, and repeat this for the next tiles. To use the LCSF template, the developer writes four functions:
+\begin{enumerate}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item Load function: The load function specifies the data that load workers should load from HBM to shared memory, and when to signal to compute workers that this memory is ready for use. 
+    \item Compute function: This function specifies the kernel instructions that compute workers should execute, using the tile data structure and operation primitives from \Cref{sec3_model_1}.
+    \item Store function: The store function specifies what data needs to be stored to HBM by store workers.
+    \item Finish function: At the end of the kernel, the workers store any final state and exit.
+\end{enumerate}
+
+\noindent \shortname{} provides abstractions to help the developer manage worker overlapping and synchronization.
+\begin{wraptable}{r}{0.4\textwidth}
+\begin{center}
+\centering
+\begin{tabular}{ccc}
+\toprule
+M = N = K & Stages & TFLOPS \\ 
+\midrule
+4096 & 1 & 260 \\ 
+4096 & 2 & 484 \\ 
+4096 & 3 & 683 \\ 
+4096 & 4 & 760 \\ 
+\bottomrule
+\end{tabular}
+\label{tab:pc_stages}
+\caption{\textbf{Pipeline buffer stages} We measure efficiency in TFLOPS for our GEMM kernels as we vary the number of pipeline buffer stages in the \shortname{} template.}
+\end{center}
+\end{wraptable}
+1. Multi-stage buffer: The template maintains $N$-stage \textit{pipelined buffers} in shared memory, which are used for loads and stores from HBM. Load/store workers add/remove tiles of data from the buffers, based on the status of compute workers.  With a single stage, load workers would need to wait for all compute workers to finish executing before replacing the input tile. A 2-stage buffer can hide the HBM load (store) latency since the next tile can asynchronously load, while the compute workers execute on the current tile. Deep buffers can reduce the amount of synchronization required across compute workers, allowing them to operate on different tiles concurrently. 
+
+\shortname{} lets the user set a single number to specify the number of stages, and manages the setup and use of these buffers for the user. We demonstrate this in \Cref{tab:pc_stages}, where we vary the number of stages $N \in \{1, 2, 3, 4\}$ for our GEMM kernel.
+\newline
+
+2. Synchronization barriers: Load/store workers need to alert compute workers when new memory is written to the input buffer. Compute workers need to alert load/store workers when tiles are written to the output buffer, or when input tiles can be evicted from the input buffer. Within the \shortname{} template, we provide an \texttt{arrive} function for workers to signal that they have finished their stage. \newline
+
+3. Asynchronous I/O: We wrap synchronous and asynchronous load and store instructions, including \texttt{cp.async} and TMA, in the same interface. We automate tensor map descriptor creation for TMA hardware-accelerated address generation for our global layout descriptors (\texttt{gl}). 
+
+\paragraph{Tradeoffs between occupancy and efficiency}
+\input{Sections/figures/gantt/figure}
+\shortname{} parametrizes  the \textit{number} of load/store and compute workers (or occupancy)  
+providing a simple way for developers tune their kernels.
+As discussed in \Cref{sec2_preliminaries}, higher occupancy increases overlapping, but creates contention over limited hardware resources (e.g., registers). With fewer registers, workers need to operate on smaller tiles of data, resulting in more instruction issues, SRAM to register I/O, and potentially higher synchronization costs due to the increased data partitioning across workers. 
+ 
+\Cref{fig:gantt} shows the occupancy tradeoffs for attention kernels. 
+We consider (1) a simple kernel that only uses warp level parallelism (Listing \ref{fig:listing_1}) and (2) a kernel written in the LCSF template (Listing \ref{fig:pc_attn_listing}).
+With \textit{both} kernels, performance increases until resource contention dominates.
+Second, we observe that \textbf{LCSF expands the Pareto frontier} beyond the warp-level parallel kernel as we vary occupancy. \newline 
+
+
+\noindent We find the general LCSF template to be effective across a range of AI workloads. We keep the template lightweight and simple by making opinionated design choices. However, we don't want \shortname{} to get in the way of achieving peak GPU performance -- in contrast to frameworks like Triton, \shortname{} is \textit{embedded}, meaning developers can use the full power of C++ to extend the library as warranted.
+\subsection{Grid parallelism with block launch scheduling}
+\label{sec3:sec3_grid}
+Next, at the grid level, we explore how to coordinate thread block launches. \shortname{}'s template does not explicitly choose grid structures for the user, however we provide a tradeoffs study of two key opportunities: reducing the setup and tear-down costs for each thread block ($\mathbf{C}_{\text{Setup}})$, and encouraging memory reuse between thread blocks to avoid slow HBM accesses ($\mathbf{C}_{\text{HBM}})$. 
+
+\begin{wraptable}{r}{0.5\textwidth}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+M=N &  K  & \shortname{}-No & \shortname{}-Yes & CuBLAS \\ 
+\midrule
+4096 & 64   & 93  & 108 & 69  \\ 
+4096 & 128  & 161 & 184 & 133 \\ 
+4096 & 256  & 271 & 309 & 242 \\ 
+4096 & 512  & 414 & 450 & 407 \\ 
+4096 & 1024 & 565 & 600 & 633 \\ 
+\bottomrule
+\end{tabular}
+\caption{\textbf{Persistent block launch} TFLOPS for \shortname{} GEMM kernels with (\textbf{yes}) persistent and without (\textbf{no}) persistent launch as we vary matrix dimension $K$.}
+\label{tab:persistent_table}
+\end{wraptable}
+\paragraph{Block launch costs} We first explore the use of a \textit{persistent grid}, where we launch thread blocks on the full set of 132 SMs upfront, and simply load the next chunk of work for the kernel within the existing block, instead of launching a new block. We also explore the idea of having the block load shared memory into the input stage of our template's memory buffer to prepare for the next chunk of work, while the thread block runs the finish stage for the prior chunk of work. \Cref{tab:persistent_table} shows the benefit of the optimizations for our GEMM kernels. 
+
+
+\paragraph{L2 reuse and block launch order}
+Recall that thread blocks need to communicate via HBM. As introduced in \Cref{sec2_preliminaries}, when thread blocks reuse memory, the data is often available in L2 cache, which is significantly faster than HBM. However, cache eviction means that these reuse qualities depend on the order in which blocks get launched. 
+For our attention and GEMM kernels, we measure efficiency as we vary block order, summarized in \Cref{tab:l2_table}. Block order substantially affects L2 reuse (measured through HBM bandwidth), which in turn can control kernel performance. 
+\begin{table}[]
+\centering
+\begin{minipage}{.48\textwidth}
+  \centering
+  \begin{tabular}{ccc}
+    \toprule
+    \multicolumn{3}{c}{\textbf{Matrix Multiply (M=N=K=16384)}} \\
+    \midrule
+    Block Order & HBM GB/s & TFLOPS \\ 
+    \midrule
+    \{8, N, M/8\} & 982 & 805 \\ 
+    \{N, M\} & 3,070 & 392 \\ 
+    \bottomrule
+  \end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}{.48\textwidth}
+  \centering
+  \begin{tabular}{ccc}
+    \toprule
+    \multicolumn{3}{c}{\textbf{Attention Forward (D=128)}} \\
+    \midrule
+    Block Order & HBM GB/s & TFLOPS \\ 
+    \midrule
+    \{N, H, B\} & 213 & 600 \\ 
+    \{B, H, N\} & 2,390 & 494 \\ 
+    \bottomrule
+  \end{tabular}
+\end{minipage}%
+\caption{\textbf{L2 reuse} We vary the block orders and measure both consumed bandwidth from HBM (GB/s) and efficiency (TFLOPs). For attention, we consider an optimized kernel, with an internal tiling of 8 rows of blocks, versus a naive kernel that schedules blocks in row-major order. For attention, we compare block order (1) sequence length $N$, heads $H$, and outermost batch $B$ vs. (2) innermost $B$, $H$, then outermost $N$. Different block orders have significant performance implications.}
+\label{tab:l2_table}
+\end{table}
+
+
+\section{Experiments}
+
+\label{sec:sec4_results}
+
+In experiments, we validate that \name{} speeds up a broad range of ML primitives. We compare to well-optimized kernels from prior work, written in alternate frameworks such as CutLass, CuBLAS, general CUDA, and Triton.
+We compare our kernels for the ``workhorse'' operations in AI, GEMM and attention, as well as kernels for emerging AI architectures, such as linear attention and state space models (\Cref{sec_4:workhorse_kernels}). We profile the kernels to understand \shortname{}'s role in achieving high performance in \Cref{sec4:exotic_kernels}. Kernel listings, in the \shortname{} template, are in \Cref{app:kernel_listings}.
+\clearpage
+
+\input{Sections/figures/results/optimized_kernels_2}
+
+\subsection{\shortname{} enables simple and performant AI kernels}
+This section shows a suite of kernels that we develop in the \shortname{} framework.  We benchmark the kernels on NVIDIA H100 80GB SXM GPUs using CUDA 12.6 and report the average TFLOPS. 
+
+ \paragraph{Workhorse kernels for AI}
+\label{sec_4:workhorse_kernels}
+Industry teams and researchers have made significant investments into optimizing GEMMs and attention over the past several years \citep[inter alia.]{nvidia2023cublas, dao2022flashattention, bikshandi2023acase, dao2024flashattention3}, two workhorse operations that power the Transformer architecture \citep{vaswani2018attention}.
+Despite the investment, \shortname{} kernels written entirely in the \shortname{} abstractions and LCSF template can match or outperform the strongest baselines:
+
+\begin{itemize}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item \textbf{GEMM} We compare to the strongest available baseline: CuBLAS for GEMMs \citep{nvidia2023cublas}. We show a single matrix multiply kernel, with just 40 lines of device code, can compete with CuBLAS
+
+    \item \textbf{Attention.} We support multiple variants of attention: causal, non-causal, and grouped query attention~\citep{ainslie2023gqa} at head dimensions $64$ and $128$. We compare to the strongest available baseline, which is concurrent to our work: FlashAttention-3 (FA3)~\citep{dao2024flashattention3}. \shortname{} competes with FA3 across sequence lengths on the non-causal forwards pass, and outperforms FA3 on the causal and non-causal backwards pass by over $40\%$ at short sequences and $10\%$ at longer sequences. 
+\end{itemize}
+
+\input{Sections/figures/results/optimized_kernels}
+
+We find that \shortname{} makes it easy to use the GPU effectively by simplifying the choice of memory layouts, exploration of grid patterns for L2 reuse, and selection of occupancy and pipeline depth. The baseline kernels successfully use specialized H100 instructions and manage memory. However, the existing kernels are relatively complex: FlashAttention-3 proposes a ``ping-pong scheduler'' for workers, and the CuBLAS library is $>$600MB in CUDA 12.6 (\Cref{tab:libraries}), containing many tuned GEMM variants and logic to select the best option at runtime~\citep{schuetze2024reverse}. 
+With \shortname{}, we remove the ping-pong and maintain FA3-level efficiency, and we compete with CuBLAS on the demonstrated matrix sizes, using a single GEMM kernel (entirely in \Cref{app:listing_gemm}). 
+ 
+
+\paragraph{Kernels for emerging AI architectures} In addition to supporting peak performance on popular operations like GEMMs and attention, \shortname{} is also designed for to be extensible to emerging AI workloads.
+We release a family of kernels across newer machine learning primitives, including linear attention \citep{katharopoulos-et-al-2020}, FFT convolutions \citep{cooley1965algorithm}, and state space models \citep{gu2021efficiently}. 
+
+\input{Sections/figures/results/exotic_kernels}
+
+\begin{itemize}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item \textbf{Linear attention} We optimize two different classes of linear attention architectures, polynomial-based feature maps as in \citep{arora2024simple, rebased, keles2023on, kacham2024polysketchformerfasttransformerssketching} and \textit{learned} feature maps as in \citep{zhang2024hedgehog, zhang2024lolcats}. In \Cref{fig:exotic_kernels}, we compare to the strongest available baselines: the popular Flash Linear Attention (FLA) CUDA kernels~\citep{yang2024fla}, which are written in Triton. We show \shortname{} outperforms FLA's polynomial-based linear attention by $14\times$. \shortname{} outperforms FLA's learned map linear attention by $6.5\times$.
+    \item \textbf{State space models} The long convolution, implemented with Fourier transforms using the convolution theorem,  is the key primitive in popular state space modeling architectures such as S4, H3, and Hyena \citep[inter alia.]{gu2021efficiently, poli2023hyena, dao2022hungry, hasani2022liquid, agarwal2024spectralstatespacemodels}. In \Cref{fig:exotic_kernels}, we compare to the strongest available baseline: the FlashFFTConv CUDA kernels in \citet{fu2023flashfftconv} and show \shortname{} outperforms the prior work by $4.7\times$ at sequence length $4096$ and $7.9\times$ at $1024$. \shortname{} outperforms PyTorch's FFT operations by up to $8.7\times$.
+     
+     We also optimize the recent Mamba-2 state space model~\citep{dao2024transformers}. We provide a \shortname{} kernel that outperforms the Triton kernels in prior work ~\citet{dao2024transformers} by $>3\times$  (\Cref{fig:exotic_kernels}). This gap is primarily due to the ease of fusing complex operations in \shortname{}.
+\end{itemize}
+
+The abstractions in \shortname{} -- including specialized instructions such as TMA and WGMMA, and register tiles to manage register memory effectively -- contribute to these large improvements. The baseline kernels do not use these GPU features. 
+\paragraph{\shortname{}'s programming model is extensible.}
+We develop kernels for common memory AI operations -- fused dropout-residual-layernorm~\citep{ba2016layer}, and rotary~\citep{su2023roformer} -- and show \shortname{} is effective. We compare to popular Triton kernels for these operations.}
+
+\subsection{Comparing kernel implementations}
+\label{sec4:exotic_kernels}
+
+\begin{table}[]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+& \multicolumn{2}{c}{Occupancy utilizations (\%)} & \multicolumn{2}{c}{HBM} & \multicolumn{1}{c}{Shared} \\ 
+\cmidrule(r){2-3} \cmidrule(r){4-5} \cmidrule(r){6-6}
+Impl. & Tensor core & Issue slots & TPS (GB/s) & Stalls (Cycles) & Stalls (Cycles) \\ 
+\midrule
+FA3  Bkwd        & 61.2 & 25.1 & 328 & 1.83 & 0.92  \\ 
+\shortname{} Bkwd & 58.2 & 34.8 & 490 & 1.63 & 0.14  \\ 
+\midrule
+FlashFFT &  13.4 & 25.5 & 14.8 & 2.5 & 1.6 \\ 
+\shortname{} &  54.8 & 40.0 & 31.4 & 0.6 & 0.3  \\ 
+\bottomrule
+\end{tabular}
+\caption{Profiles for 1) attention backwards pass kernels from FlashAttention-3~\citep{dao2024flashattention3} vs. \shortname{} and 2) long convolution kernels from FlashFFTConv~\citep{fu2023flashfftconv} vs. \shortname{}, obtained using NVIDIA NSight Compute. }
+\label{tab:ncu_profiles}
+\end{table}
+To further compare \shortname{} and baseline kernels,  we profile the kernels using NVIDIA's NSight Compute (NCU) tool.
+\footnote{\url{https://developer.nvidia.
+\begin{itemize}[itemsep=0.1pt,topsep=0pt,leftmargin=*]
+    \item \textbf{Long convolution} We profile FlashFFTConv (FC) and \shortname{} long convolution kernels at $B,D,N=16,1024,4096$ in NCU. We find \shortname{} helps both with overlapping the workers (indicated by higher issue slots and fewer memory stalls) and in tensor core utilization ($4.1\times$ increase). This is enabled by our \shortname{} template, and use of \shortname{} warpgroup operations (which saves registers and establishes a SMEM to register memory pipeline through warpgroup matrix-multiply-add (WGMMA) operations).
+    \item \textbf{Attention backwards} We consider FA3 and \shortname{} at $B,H,N,D=16,16,3072,128$. The methods match in tensor core utilization, but \shortname{} gives higher issue slot utilization, suggesting the occupancy may be better-tuned. In HBM costs, \shortname{} gives higher memory throughput and correspondingly incurs $10\%$ fewer stalled cycles on HBM waits. For shared memory, \shortname{} incurs $85\%$ fewer stalled cycles -- we find \shortname{} has \textit{no bank conflicts}, but NVIDA's NCU profiler reports up to $9.6$-way bank conflicts in FA-3.
+\end{itemize}
+The kernel profiles highlight the difficulty of simultaneously managing each type of GPU parallelism, and we hope \shortname{} can help reduce the effort. 
+We provide example \shortname{} kernels listings in \Cref{app:kernel_listings}.
+
+
+
+\section{Conclusion}
+
+Given the challenge of mapping AI architectures to GPU hardware, our work asks how far we can get with a few easy to use GPU programming abstractions. In \name{}, we give an abstraction for each level of the GPU hierarchy: tiles with managed layouts at the worker level and a asynchronous execution LCSF template at the thread block level. We highlight options and tradeoffs for persistent block launches and L2 reuse at the grid level. The natural question is whether we sacrifice anything in performance when we write kernels with so few abstractions. We implement a breadth of AI kernels in \shortname{} and excitingly find that our abstractions are both general and consistently meet or exceed state-of-the-art. We are optimistic about the potential for simple and accessible ways of programming AI hardware. 
+
+ 
+
+
+\section{Acknowledgements}
+
+We are grateful to Together.ai for making this work possible. 
+We than Arjun Parthasarthy for assistance in developing the complex tile support and FlashFFT kernels. 
+We thank Mayee Chen, Tri Dao, Kawin Ethyarajh, Sabri Eyuboglu, Neel Guha, David Hou, Jordan Juravsky, Hermann Kumbong, Jerry Liu, Avner May, Quinn McIntyre, Jon Saad-Falcon, Vijay Thakkar, Albert Tseng, Michael Zhang for helpful feedback and discussions during this work. 
+We gratefully acknowledge the support of NIH under No. U54EB020405 (Mobilize), NSF under Nos. CCF2247015 (Hardware-Aware), CCF1763315 (Beyond Sparsity), CCF1563078 (Volume to Velocity), and 1937301 (RTML); US DEVCOM ARL under Nos. W911NF-23-2-0184 (Long-context) and W911NF-21-2-0251 (Interactive Human-AI Teaming); ONR under Nos. N000142312633 (Deep Signal Processing); Stanford HAI under No. 247183; NXP, Xilinx, LETI-CEA, Intel, IBM, Microsoft, NEC, Toshiba, TSMC, ARM, Hitachi, BASF, Accenture, Ericsson, Qualcomm, Analog Devices, Google Cloud, Salesforce, Total, the HAI-GCP Cloud Credits for Research program, the Stanford Data Science Initiative (SDSI), BFS is supported by a Hertz Fellowship, SA is supported by a SGF Fellowship, and members of the Stanford DAWN project: Meta, Google, and VMWare. The U.S. Government is authorized to reproduce and distribute reprints for Governmental purposes notwithstanding any copyright notation thereon. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the authors and do not necessarily reflect the views, policies, or endorsements, either expressed or implied, of NIH, ONR, or the U.S. Government. 
+
+
+
+
+
+

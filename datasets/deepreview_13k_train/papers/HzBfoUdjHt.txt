@@ -1,0 +1,324 @@
+\title{Dynamic Discriminative Operations for Efficient Generative Inference of LLMs}
+
+\begin{abstract}
+Efficient generative inference in Large Language Models (LLMs) is impeded by the growing memory demands of Key-Value (KV) cache, especially for longer sequences. Traditional KV Cache eviction strategies, which discard less critical KV-pairs based on attention scores, often degrade generation quality, leading to issues such as context loss or hallucinations. To address this, we introduce **D**ynamic **D**iscriminative **O**perations ($\mathbf{D_2 O}$), a novel method that optimizes KV cache size dynamically and discriminatively at two levels without fine-tuning, while preserving essential context. At **layer-level**, by observing the varying densities of attention weights between shallow and deep layers, we dynamically determine which layers should avoid excessive eviction via our proposed ***dynamic allocation strategy*** to minimize information loss. At **token-level**, for the eviction strategy in each layer, $\mathbf{D_2 O}$ innovatively incorporates a ***compensation mechanism*** that maintains a similarity threshold to re-discriminate the importance of currently discarded tokens, determining whether they should be recalled and merged with similar tokens. Extensive experiments on various benchmarks and LLM architectures have shown that $\mathbf{D_2 O}$ not only achieves significant memory savings and enhances inference throughput by more than 3$\times$ but also maintains high-quality long-text generation.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) (Achiam et al., 2023; Touvron et al., 2023; Meta, 2024; Jiang et al., 2023; Wan et al., 2023; Wang et al., 2024) excel in tasks requiring long contexts such as dialog systems (Chiang et al., 2023), document summarization (Zhang et al., 2023), question answering (Kamalloo et al., 2023), and code completion (Roziere et al., 2023). Such long contexts demand a significant amount of KV cache. For instance, a model with 30 billion parameters, processing inputs of 1024 tokens at a batch size of 128, requires up to 180 GB for KV cache (Zhang et al., 2024c). Such bottleneck underscores the critical need for KV cache optimization.  
+
+To minimize memory demands of KV cache, one of the most effective methods is KV cache eviction (Xiao et al., 2023b; Zhang et al., 2024c; Liu et al., 2023; Ren & Zhu, 2024; Zhang et al.; Ge et al., 2023), where the key is to precisely identify a subset of KVs to be evicted from the cache. However, existing studies all suffer from both layer-level and token-level information loss. Specifically, at layer-level, existing methods equally treat all the layers and indiscriminately evicts KV pairs at each layer. However, not all the layers exhibit the same patterns. Figure 1 visualizes the attention weights on the GSM8K dataset (Cobbe et al., 2021a). The shallower layers (layers 0 and 1) display densely interconnected attention maps, while the deeper layers (layers 30 and 31) exhibit a staircase sparse pattern, where attention is localized to specific context segments, with only a few tokens in each segment receiving substantial attention. This observation aligns with findings from (Zhao et al., 2024a;b), indicating that while shallower layers primarily engage with syntactic structures through global attention, deeper layers target task-related semantic knowledge with localized attention. Consequently, applying the same eviction strategy indiscriminately across all the layers will compromise important information in long contexts. At token-level, as shown in Figure 2 (a), existing methods enable models to operate within a constrained KV cache budget by either directly dropping KV pairs (e.g., StreamingLLM (Xiao et al., 2023b)) or selectively removing them based on specific eviction strategies, such as using cumulative attention scores (e.g., $\mathrm{H_{2}O}$ (Zhang et al., 2024c)) or mean attention scores (e.g., RoCo (Ren & Zhu, 2024)). However, the irreversible nature of eviction and the difficulty in accurately predicting which KV pairs are essential for future text generation can lead to information loss, causing hallucinations, contextual inconsistencies (Yang et al., 2024b), and challenges in maintaining long content integrity (Bai et al., 2024).  
+
+![](images/239e79edfd13437de2cb5b8f270733e0136ef6cdd2ca2c6a03feb964d16de0c1.jpg)  
+Figure 1: Attention map density comparisons of selected shallow (layers 0, 1) and deep layers (layers 16, 30, 31) of LLaMA-2-7B on the GSM8K dataset. We use the mean value of heads for each layer.  
+
+In this paper, we introduce Dynamic Discriminative   
+Operations $\left(\mathbf{D_{2}O}\right)$ , a KV compression method that tackles   
+the two fundamental issues of existing methods described   
+above. The key idea of $\mathrm{D_{2}O}$ is to incorporate dynamic   
+discriminative operations at both layer-level and token  
+level. Specifically, at layer-level, based on the findings   
+in Figure 1, unlike existing methods that indiscriminately   
+evict KV pairs, $\mathrm{D_{2}O}$ implements a novel dynamic allo  
+cation strategy using inverse variance softmax, adjusting   
+the KV cache budget for each layer based on the density   
+metric of the attention weights. At token-level, given   
+the uncertainties about how discarded tokens might affect   
+future outputs, $\mathrm{D_{2}O}$ introduces an effective compensa  
+tion mechanism by maintaining an exponential moving   
+average (EMA) threshold that assesses the degree of sim  
+ilarity between previously discarded and retained tokens, Figure 2: Illustration of  
+
+![](images/6f28b050f2501fdff609faaf06826f77fea3b25e671daf6ce8f7bb79c1cbca88.jpg)  
+
+$\mathrm{D_{2}O}$ VS. existing allowing D2O to dynamically decide whether a currently methods. More details are shown in Figure 3. discarded token should be recalled and merged with a similar token retained in the current KV cache according to the current EMA threshold in order to compensate the information loss of KV cache eviction, as shown in Figure 2 (b). Through these operations at two levels, $\mathrm{D_{2}O}$ maintains the KV cache at a consistent size while being able to preserve valuable information from evicted tokens, enabling LLMs to handle the generation of extended texts with improved memory efficiency and high-throughput inference while minimizing the loss of contextual information.  
+
+We compare $\mathrm{D_{2}O}$ with state-of-the-art KV cache eviction methods StreamingLLM (Xiao et al., 2023b), $\mathrm{H_{2}O}$ (Zhang et al., 2024c), RoCo (Ren & Zhu, 2024), and CaM (Zhang et al.). To demonstrate the generability of $\mathrm{D_{2}O}$ , we conduct our evaluation on four models from three different LLM families (Llama, Falcon, and Mistral) and a range of tasks involving math and commonsense reasoning, long-context QA, summarization, and code completion, drawn from LM-Eval (Gao et al., 2021), LongBench (Bai et al., 2023), long-context fact retrieval (Kamradt, 2023), and language modeling (Rae et al., 2019) benchmarks. We highlight five of our findings: (1) $\mathrm{D_{2}O}$ significantly enhances performance on reasoning tasks, especially with reduced budgets compared to baselines. (2) $\mathrm{D_{2}O}$ manages KV cache compression effectively with minimal accuracy impact, outperforming other eviction-based baselines on LongBench. (3) $\mathrm{D_{2}O}$ demonstrates superior long-context retrieval capabilities with a compressed KV cache compared to baselines. (4) $\mathrm{D_{2}O}$ effectively leverages long-distance dependencies in language modeling with a limited KV cache. (5) $\mathrm{D_{2}O}$ reduces memory usage, enabling up to larger batch sizes and 3 times higher throughput than the full cache setting in our experimental setting.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+KV Cache Eviction. KV cache eviction compresses KV caches by retaining key KVs and discarding less crucial ones. For example, Mistral-7B (Jiang et al., 2023) and Streaming LLM (Xiao et al., 2023a) and SirLLMs (Yao et al., 2024) focus on tokens crucial for near-sequence generation. $\mathrm{H_{2}O}$ (Zhang et al., 2024c), Scissorhands (Liu et al., 2023), and RoCo (Ren & Zhu, 2024) maintain a small set of influential tokens based on attention scores. FlexGen (Ge et al., 2023) adopts importance policies based on attention scores for KV eviction, while SnapKV (Li et al., 2024) uses a recent window strategy to compress KV cache for long prompts. Besides, PyramidKV (Cai et al., 2024b) and PyramidInfer (Yang et al., 2024a) propose the layer-wise eviction strategy. NaCL (Chen et al., 2024) combines proxy-tokens and random eviction to keep robustness of LLMs. However, these methods can significantly lose context from evicted KVs.  
+
+KV Cache Trainable Compression. Some methods attempt to adapt LLMs to learn KV cache compression by training on select datasets. LESS (Dong et al., 2024) learns the residuals between the original and approximated attention outputs from a sparse policy applied during training. DMC (Nawrot et al., 2024) pre-trains on original data to learn parameters that control compression across various heads and layers in the KV cache. However, training on partial datasets poses challenges in adapting these methods to diverse downstream tasks due to limited generalizability. Unlike these approaches, $\mathrm{D_{2}O}$ employs a plug-and-play method that requires no additional training, offering broader applicability without the need for dataset-specific tuning.  
+
+Token Merging. Token merging (Bolya et al., 2022; Shi et al., 2023) consolidates tokens into fewer, more meaningful units while preserving information integrity. This approach has emerged as a preferred alternative to token pruning for reducing the token count. Methods such as ToMe (Bolya et al., 2022), TPS (Wei et al., 2023), MG-ViT (Zhang et al., 2024b), and PPT (Wu et al., 2023) have applied token merging and pruning techniques for visual representation. However, these approaches mainly focus on merging the hidden states and are primarily designed for visual classification tasks. Recently, CaM (Zhang et al.) pioneers using a bernoulli process to generate a mask for value state merging on the KV cache during long-text generation. It still employs a uniform merging strategy across all layers, disregarding variations in attention density between layers. $\mathrm{D_{2}O}$ addresses the above issues by performing merging directly on the KV cache with a dynamic layer-level KV cache allocation and a dynamic merging strategy based on an EMA threshold. This prevents excessive information loss during KV cache compression in long-text generation tasks and improves efficiency for autoregressive tasks in LLMs.  
+
+
+
+\section{3 PRELIMINARY: GENERATIVE INFERENCE WITH KV CACHE  }
+
+
+The standard generative inference of an LLM includes prompt encoding and token generation.  
+
+Prompt Encoding. In the prompt encoding stage, a prompt sequence is utilized to generate a KV cache for each transformer layer within LLMs. Consider an input prompt tensor $\bar{\mathbf{X}}\in\mathbb{R}^{L_{\mathrm{prompt}}\times D}$ , where $L_{\mathrm{prompt}}$ represents the length of the prompt and $D$ denotes the hidden dimension of the model. For simplicity, the indices for heads and layers have been omitted. The key and value tensors are derived as follows:  
+
+$$
+\mathbf{K}=\mathbf{X}\mathbf{W}_{K},\mathbf{V}=\mathbf{X}\mathbf{W}_{V},
+$$  
+
+With $\mathbf{W}_{K},\mathbf{W}_{V}\in\mathbb{R}^{D\times D}$ representing the weights for the key and value layers, respectively. Once $\kappa$ and $V$ are computed, they are stored in the KV cache to facilitate the token generation process Ott et al. (2019); Wolf et al. (2020).  
+
+Token Generation. In the Token Generation phase, the KV cache is both utilized and updated to sequentially produce tokens. For each time step $i$ , only the keys and values for the new token $\mathbf{x}_{i}$ are computed whereas those for $\mathbf{x}_{<i}$ are retrieved from the cache. We define the concatenation as $[\cdot]$ . Then the cache is updated and the output of newly generated token is as:  
+
+$$
+\mathbf{K}=[\mathbf{K},\mathbf{x}_{i}\mathbf{W}_{K}],\mathbf{V}=[\mathbf{V},\mathbf{x}_{i}\mathbf{W}_{V}],
+$$  
+
+$$
+\mathbf{x}_{i,o u t}=\mathrm{Softmax}\left(\mathbf{q}_{i}\mathbf{K}^{\top}/\sqrt{D}\right)\mathbf{V},\mathbf{q}_{i}=\mathbf{x}_{i}\mathbf{W}_{Q},
+$$  
+
+where $\mathbf{W}_{Q}\in\mathbb{R}^{D\times D}$ is the weight matrix of the query layer, the linear expansion of the KV cache with each new token significantly increases memory usage and latency, particularly for longer prompts or during token generation. It underscores the importance of compressing the KV cache.  
+
+
+
+\section{4 METHOD: DYNAMIC DISCRIMINATIVE OPERATIONS  }
+
+
+The overview of $\mathrm{D_{2}O}$ is shown in Figure 3. For simplicity, each layer with a single attention head in the figure. The layer-level and token-level operations are illustrated in Section 4.1 and Section 4.2.  
+
+![](images/0afbe522aeec1f420a2270fc7fd3f9030f6e7208ce69641c695793d40b26b09e.jpg)  
+Figure 3: Overview of $\mathrm{D_{2}O}$ . Firstly, for the layer cache size allocation at the layer level, $\mathrm{D_{2}O}$ addresses the issue of inconsistent attention density across higher and lower layers by incorporating a dynamic cache at each layer. The size of the cache is determined by the variance metric of attention and dynamic allocation strategy. Then, at the token level, $\mathrm{D_{2}O}$ addresses long-context information loss by incorporating a combination of a token eviction scheme and a dynamic token merging technique (where compensation mechanism is located).  
+
+4.1 DYNAMIC LAYER-LEVEL DISCRIMINATIVE OPERATION  
+
+Employing a uniform layer-wise size such as the ones proposed in $\mathrm{H_{2}O}$ (Zhang et al., 2024c) and StreamingLLM (Xiao et al., 2023b) across all the layers could potentially compromise model performance. To address this, we propose to utilize a specific metric, $F_{v}^{l}$ , to evaluate the attention density of each layer $l$ :  
+
+$$
+\mathbf{A}_{p}^{l}=\mathrm{Softmax}\left(\mathbf{Q}_{p}^{l}\mathbf{K}_{p}^{l}{^{\top}}/\sqrt{D}\right),\;\;\mathrm{and}\;F_{v}^{l}=\mathrm{Var}\left(\sum_{i=0}^{L_{\mathrm{promp}}}\mathbf{A}_{p}^{l}[i,:]\right),
+$$  
+
+where $\mathbf{A}_{p}^{l}$ denotes the attention score of prompt encoding in each layer, $\mathbf{Q}_{p}^{l},\mathbf{K}_{p}^{l}\in\mathbb{R}^{L_{\mathrm{prompt}}\times D}$ . We sum the elements of each column in $\mathbf{A}_{p}^{l}$ to establish the initial state of the cumulative attention sequence. The attention density for each layer is then quantified by the variance of this sequence, as denser attention weights correspond to smaller variances. This relationship is illustrated in Figure 4, we observe a consistent phenomenon across all models on the GSM8K dataset: the variance of attention scores is lower in the shallow layers (e.g., 0, 1, 2) and the middle layers (e.g., 13, 14), indicating that the attention weights are dense, as also shown in Figure 1. This density makes Figure 4: Variances of attention score across it difficult to distinguish which tokens should be discarded. different layers for various models. In deeper layers, the variance increases and the attention weights display a sparse pattern.  
+
+![](images/f099426db5d37422145947f6d2b2cc4723f52c8d4b63f3adb19a0741a267fdcb.jpg)  
+
+Dynamic Allocation Strategy. Leveraging this consistency, we propose a new dynamic allocation Strategy using inverse variance softmax to adjust the KV cache size in each layer: layers with higher variance $F_{v}^{l}$ are allocated a smaller cache size, while shallower layers with lower variance receive a larger cache allocation. Specifically, for a given compression ratio $\rho$ , the cache size for each layer $S_{l}$ is calculated as:  
+
+$$
+S_{l}=\alpha_{l}\cdot S,\,\mathrm{~where~}\alpha_{l}=\frac{\exp(-F_{v}^{l})}{\sum_{l=1}^{L}\exp(-F_{v}^{l})}\cdot L\cdot\rho,
+$$  
+
+Here, $\rho$ represents the compression ratio of the cache size, $S$ is the original cache size, which is equal to $L_{\mathrm{prompt}}$ in the prompt encoding phase, and $L$ is the number of model layers. We adopted a softmax-like function to dynamically distribute cache proportions $\alpha_{l}$ .9, respectively.  
+
+4.2 DYNAMIC TOKEN-LEVEL DISCRIMINATIVE OPERATION  
+
+After the layer-level discriminative operation, to compensate for the loss of long context information, we introduce two critical steps in the token-level discriminative operation: token eviction and dynamic token merging strategies. Note that our $\mathrm{D_{2}O}$ is compatible with any token eviction technique. Here, $\mathrm{D_{2}O}$ primarily utilizes an eviction strategy based on accumulative attention (Zhang et al., 2024c) to dynamically prune the KV cache in generation tasks. For token merging, we introduce a new strategy that uses a similarity threshold based on the exponential moving average (EMA) to dynamically determine whether to merge discarded tokens back into the preserved KV cache by weighted merging.  
+
+
+
+\section{4.2.1 TOKEN EVICTION  }
+
+
+The core concept of token eviction involves dynamically updating the KV cache by leveraging cumulative attention scores. This process systematically excludes the least essential KV pairs to maintain the compressed cache size $S_{l}$ for each layer, thereby preserving only the most valuable tokens for efficient inference. A recent study (Xiao et al., 2023a) suggests that retaining crucial attention sink tokens within the most recent KV cache window enhances the stability of attention score distributions across extended texts. Unlike traditional accumulation-based approaches such as $\mathrm{H_{2}O}$ (Zhang et al., 2024c), our strategy improves performance by maintaining attention sink tokens from the initial $T$ tokens of the input and integrating them within a recent size window $M$ . The attention score is formulated as follows:  
+
+$$
+\mathrm{AtuScore}=\left\{\begin{array}{l l}{\sum_{i=0}^{L_{\mathrm{promp}}}\mathbf{A}_{p}[i,:],}&{\mathrm{~if~token~}i<=L_{\mathrm{prompt}},}\\ {\mathrm{Softmax}\left(\mathbf{q}_{i}\mathbf{K}^{\top}/\sqrt{D}\right)+\sum_{i=1}^{L_{\mathrm{promp}}}\mathbf{A}_{p}[i,:],}&{\mathrm{~otherwise,~token~generation}}\end{array}\right.
+$$  
+
+After obtaining the current cumulative attention scores, we retain the most recent window consisting of size $M$ and include $T$ attention sink tokens. We then select the top $N$ tokens with the highest scores from the remaining KV cache to complete the eviction. The process is defined as follows:  
+
+$$
+\mathbf{K}_{c}=[\mathbf{K}[:T,:],\mathbf{K}[I,:],\mathbf{K}[-M:,:]],\quad\mathbf{V}_{c}=[\mathbf{V}[:T,:],\mathbf{V}[I,:],\mathbf{V}[-M:,:]],
+$$  
+
+$$
+I=\mathrm{Top}_{N}\left(\mathrm{AttnScore}[T:-M],N\right),
+$$  
+
+where $\mathrm{Top}_{N}\left(\cdot,N\right)$ selects the top $N$ important tokens with the indices $I$ in AttnScore, $(\mathbf{K}_{c},\mathbf{V}_{c})$ is the conserved KV cache after eviction, and $S=T+N+M$ denotes the current cache size.  
+
+
+
+\section{4.2.2 DYNAMIC TOKEN MERGING  }
+
+
+Then, we obtain the eviction set $\mathbf{K}_{e}=\mathbf{K}-\mathbf{K}_{c}$ . However, directly discarding these tokens will compromise the integrity of the long context. To compensate the information loss, we propose the dynamic token merging approach that retrieves tokens still containing potential value at minimal computational cost and integrates these selected tokens with similar reserved tokens. Considering the alignment properties of KV-pairs, we only compute the similarity matrix on the key’s tokens and share the similarity metric and weighted merging weights with the value’s tokens. We outline this approach in three key steps: nearest-neighbor matching, EMA threshold judgment, and weighted merging.  
+
+Nearest Neighbor Matching. We implement a many-to-one nearest-neighbor matching algorithm (Dang et al., 2021) to calculate the similarity matrix $\mathbf{U}$ between ${\bf K}_{e}$ and $\mathbf{K}_{c}$ . We subsequently identify the most similar tokens from $\mathbf{K}_{c}$ as candidates for merging. Specifically, let $I^{e}$ and $I^{c}$ denote the indices, and $L^{e}$ and $L^{c}$ represent the lengths of tokens in $\mathbf{K}_{e}$ and $\mathbf{K}_{c}$ , respectively. Each element $u_{i,j}$ in $\mathbf{U}$ represents the interaction between tokens for matching, where $i\in I^{e}$ and $j\in I^{c}$ . We then determine the closest token $\mathbf{k}_{*}^{\mathrm{nearest}}$ in $\mathbf{K}_{c}$ for each evicted token $\mathbf{k}_{i}$ . The formulas are as follows:  
+
+$$
+\mathbf{k}_{*}^{\mathrm{nearest}}=\mathop{\operatorname{Argmax}}_{j\in I^{c}}\left(u_{i,j}\right),\;\mathrm{where}\;u_{i,j}={\frac{\mathbf{k}_{i}^{\top}\mathbf{k}_{j}}{\left\|\mathbf{k}_{i}\right\|\left\|\mathbf{k}_{j}\right\|}}
+$$  
+
+Here, we adopt cosine similarity, and $\|\cdot\|$ is the norm. Given that the similarity matrix $\mathbf{U}\in\mathbb{R}^{L^{e}\times L^{c}}$ is derived directly from input prompts and $\textbf{U}\in\mathbb{R}^{c}$ during token generation, it introduces no additional parameters and ensures that the computation remains efficient.  
+
+EMA Threshold. After calculating similarities and identifying candidate tokens $\{\mathbf{K}_{*}^{\mathrm{nearest}}\}$ , directly applying average weighted fusion to token pairs can lead to feature dispersion (Liang et al., 2022). Additionally, as depicted in Figure 1, attention patterns in higher layers exhibit a staircase-like pattern, indicating a focus on local window information. Besides, since only a few critical tokens exist outside these local windows, indiscriminately merging all candidate tokens can introduce redundant information or noise, ultimately impacting inference accuracy. Inspired by the exponential moving average (EMA) (Hunter, 1986; Busbridge et al., 2023) feature used in time-series tasks, which prioritizes more recent data thus enhancing sensitivity to data changes, we propose EMA threshold for token-level operation. Our approach emphasizes the importance of recent similarity between current evicted tokens and conserved tokens while smoothing historical similarity information between previously evicted tokens and conserved tokens. Specifically, the impact of past token similarity thresholds diminishes exponentially over time, assigning increased weight to more recent thresholds. The EMA threshold is shown as:  
+
+$$
+\tau_{t}=\left\{\begin{array}{l l}{\frac{1}{L^{\epsilon}}\sum_{i=0}^{L^{\epsilon}}\mathbf{M}\mathrm{ax}(\mathbf{U}_{t}[i,:]),}&{\mathrm{if~}t=0\mathrm{~for~prompt~encoding~}<=L_{\mathrm{prompt}},\mathbf{U}_{t}\in\mathbb{R}^{L^{\epsilon}\times L^{\epsilon}}}\\ {\beta\mathbf{M}\mathrm{ax}(\mathbf{U}_{t}[:])+\left(1-\beta\right)\tau_{t-1}}&{\mathrm{otherwise},t>0\mathrm{~for~token~generation},\mathbf{U}_{t}\in\mathbb{R}^{L^{\epsilon}}}\end{array}\right.
+$$  
+
+where the initial threshold $\tau$ is set to the average of the highest similarity values from the eviction token to the conserved set, as calculated within the similarity matrix $\mathbf{U}_{t}$ at each forward step $t$ The smoothing constant $\beta$ modulates the balance between the current similarity matrix $\mathbf{U}_{t}$ and the previous similarity thresholds $\tau_{t-1}$ , with higher values of $\beta$ increasing sensitivity to changes in current similarity. If the maximum similarity of the current evicted token is less than $\tau_{i}$ , it is permanently discarded. Otherwise, a weighted merge strategy is used.  
+
+Weighted Merging. Specifically, for a conserved token, eviction tokens that exhibit higher similarity should be assigned greater weights. Thereby, we use weighted merging instead of averaged merging since the approach mitigates potential errors stemming from imperfect token scoring. The weighted merging formulas are defined as:  
+
+$$
+\mathbf{k}_{c j}=\mathbf{w}_{c j}\mathbf{k}_{c j}+\sum_{\mathbf{k}_{e i}\in\mathbf{K}_{e}}\mathbf{w}_{e i}\mathbf{k}_{e},\quad\mathbf{v}_{c j}=\mathbf{w}_{c j}\mathbf{v}_{c j}+\sum_{\mathbf{v}_{e i}\in\mathbf{V}_{e}}\mathbf{w}_{e i}\mathbf{v}_{e},
+$$  
+
+where $\mathbf{w}_{c}$ and ${\bf w}_{e}$ represent the weights assigned to each reserved and evicted key-value pair, respectively. We adopt a similarity-based weighting strategy, inspired by Graph Attention Network (Velicˇkovic´ et al., 2017). The weight calculation is as follows:  
+
+$$
+\mathbf{w}_{c j}=\frac{e}{\sum_{\mathbf{k}_{e i}\in\mathbf{K}_{e}}\exp(\mathbf{u}_{i j})\mathbf{m}_{i j}+e},\quad\mathbf{w}_{e i}=\frac{\sum_{\mathbf{k}_{e i}\in\mathbf{K}_{e}}\exp(\mathbf{u}_{i j})\mathbf{m}_{i j}}{\sum_{\mathbf{k}_{e i}\in\mathbf{K}_{e}}\exp(\mathbf{u}_{i j})\mathbf{m}_{i j}+e}.
+$$  
+
+According to the formulas, $\mathbf{m}_{i,j}\in\mathbf{M}$ is the mask matrix of $\mathbf{U}$ . If $\mathbf{x}_{j}\in\mathbf{K}_{c}$ is the most similar token to ${\bf x}_{i}\in{\bf K}_{e}$ , then $\mathbf{m}_{i,j}=1$ ; otherwise, $\mathbf{m}_{i,j}=0$ . The fusion weights ${\bf w}_{c j}$ and $\mathbf{w}_{e i}$ are determined by the mask values $\mathbf{m}_{i,j}$ and similarities ${\bf{u}}_{i,j}$ . Specifically, $\mathbf{w}_{e i}$ represents the weight for each evicted token ${\bf k}_{e i}$ , while ${\bf w}_{c j}$ pertains to the weight of the conserved token itself. Each conserved token $\mathbf{k}_{c j}$ retains the highest fusion weight, as its self-similarity equals 1. Thereby, conserved tokens are not selected as the most similar tokens remain unchanged, whereas evicted tokens are integrated into the most similar ones, replacing the originals.  
+
+
+
+\section{5 EXPERIMENTS AND ANALYSIS  }
+
+
+5.1 EXPERIMENTAL SETUP  
+
+Backbones. We evaluate $\mathrm{D_{2}O}$ using four models: Llama-2 (Touvron et al., 2023), Llama-3 (Meta, 2024), Falcon (Almazrouei et al., 2023), and Mistral (Jiang et al., 2023). For Llama-2, we employ model sizes ranging from 7B to 13B. For Llama-3, we use an 8B model. Notably, both Llama-2 and Mistral models utilize multi-head attention, while Falcon employs multi-query attention (Shazeer, 2019) and Llama-3 uses grouped query attention (Ainslie et al., 2023). We implement the $\mathrm{D_{2}O}$ algorithm using the Hugging Face Transformers codebase (Wolf et al., 2019).  
+
+Tasks. We evaluate $\mathrm{D_{2}O}$ using datasets with both standard and extended context lengths. For standard contexts, we utilize generation tasks from LM-Eval (Gao et al., 2021), assessing model performance across commonsense and math reasoning on CoQA (Exact Match Accuracy) (Reddy et al., 2019), TruthfulQA (BLEU score) (Lin et al., 2022), and GSM8K (Exact Match Accuracy)Cobbe et al. (2021b). For long-context tasks, we apply LongBench (Bai et al., 2023), which is particularly suited for evaluating the effects of compressed KV cache. This involves tasks from subgroups such as SingleDocument QA, Multi-Document QA, Summarization, Synthetic, and Code Completion. Additionally, we assess $\mathrm{D_{2}O}$ ’s capability in long-context retrieval with the Needle-in-a-Haystack test (Briakou et al., 2023), challenging the model to retrieve a specific sentence within a large document. We also validate our method’s long sequence modeling ability using PG-19 (Rae et al., 2019).1.  
+
+Implementation. In our principal experiment, we choose the $\beta$ value for EMA threshold merging from the range $0.5\sim0.9$ .3 shows that $\beta=0.7$ achieves optimal performance. Besides, the number of top $N$ important tokens and the recent token $M$ are typically set as $N=3:1$ , with $N+M+T=\alpha_{l}\cdot S$ . The overall KV cache compression ratio $\rho$ varied across settings, including values such as 0.2, 0.4, and 0.8. All experiments were conducted on NVIDIA A100 80GB GPUs.3, respectively, and additional ablation studies are included in Section 5.6.  
+
+![](images/e4c22312c40a6e7bf04c7f8a5083519ac5c8820471824f569fb114eb146efaf7.jpg)  
+Figure 5: Performance of $\mathrm{D_{2}O}$ and other methods for LLama backbones on reasoning datasets including CoQA, GSM8k, TruthfulQA.  
+
+5.2 COMPARATIVE ANALYSIS OF KV CACHE COMPRESSION RATIOS  
+
+In Figure 5, we benchmark $\mathrm{D_{2}O}$ on GSM8K, CoQA, and TruthfulQA datasets.We compare models equipped with a full KV cache against those utilizing our $\mathrm{D_{2}O}$ compression technique over several Llama models: Llama-1-7B, Llama-2-7B, Llama-2-13B, and the latest Llama-3-8B. The ratio represents the proportion of the overall compressed KV cache budget to the prompt length $L_{\mathrm{prompt}}$ Results indicate that $\mathrm{D_{2}O}$ consistently outperforms all other KV compression methods across all configurations. Notably, $\mathrm{D_{2}O}$ significantly enhances performance, particularly under reduced budgets. This performance reflects the ability of $\mathrm{D_{2}O}$ ’s context retention strategy to compensate for the severe loss of contextual information inherent in eviction-based methods and prevent the degradation of LLMs’s reasoning capabilities, particularly for Llama-3-8B on the GSM8K and CoQA datasets. Intriguingly, on the TruthfulQA dataset, $\mathrm{D_{2}O}$ even outperforms the full model across four Llama backbone settings and most of the budget ratios, demonstrating that $\mathrm{D_{2}O}$ ’s unified eviction and dynamic merging strategies can prune irrelevant tokens from LLMs’ input texts, preserving essential context and then enhancing reasoning accuracy.  
+
+5.3 ACCURACY COMPARISON ON LONG-CONTEXT TASKS  
+
+LongBench Results. We evaluate D2O on five models us- Table 1: LongBench Code Performance ing LongBench, as shown in Table 21, including Falcon-7B, on 34B model.   
+Mistral-7B, Llama-2-7B, Llama-2-13B, and Llama-3-8B. To   
+Code-LLama-34B Lcc RB-P assess the performance of $\mathrm{D_{2}O}$ and various baselines under   
+high compression conditions, we set the default KV cache Full 75.52 65.46 budget ratio $\rho=0.2$ . Table 21 demonstrates that $\mathrm{D_{2}O}$ effec- Local 37.38 21.49 tively manages KV cache compression with minimal impact StreamLLM 63.42 55.27 on accuracy, and successfully captures key information in H2O 68.85 61.02 lengthy texts compared to the full model. In particular, the lo- RoCo 67.21 59.21 cal window method exhibits severe performance degradation CaM 69.21 58.71 due to significant context loss. Furthermore, we compare D2O 75.28 64.77 $\mathrm{D_{2}O}$ with other recent eviction-based baselines to further   
+demonstrate $\mathrm{D_{2}O}$ ’s capability to retain key information. The results show that $\mathrm{D_{2}O}$ significantly outperforms other eviction-based methods, such as StreamingLLM (Xiao et al., 2023a), $\mathrm{H_{2}O}$ (Zhang et al., 2024c), RoCo (Ren & Zhu, 2024), and CaM Zhang et al., especially on the Llama-3-8B backbone. In addition to the experiments involving 7B, 8B, and 13B models presented in Table 21, we have also conducted additional experiments with the Code-LLama-34B model in Table 1. We tested the 34B model on the LongBench code task type. As shown in the table, $\mathrm{D_{2}O}$ ’s performance surpasses other eviction-based baselines and closely matches the results of the Full Cache. This demonstrates that $\mathrm{D_{2}O}$ effectively generalizes to larger LLM scales, validating its scalability and robustness across different model sizes.  
+
+Table 2: Performance evaluation of $\mathrm{D_{2}O}$ on various models in LongBench benchmarks. For each baseline, except for the full model, we retain $20\%$ of $L_{\mathrm{prompt}}$ $\varphi=0.2$ , $S=L_{\mathrm{prompt}})$ ) as the preserved KV cache size and highlight the best method.  
+
+![](images/eff774243d7e4172974e0e497b6c802c32e3bbc75db2cd6fb4d916544c0244f5.jpg)  
+
+models were tested on contexts with maximum lengths of 50k and 100k. The average accuracy is reported in Table 3. $\mathrm{D_{2}O}$ not only outperforms other eviction-based methods but also exhibits the smallest drop in performance accuracy when compared to the full model without the help of a well-designed retriever, especially when the cache budget is 8192. These results underscore $\mathrm{D_{2}O}$ ’s robust long-context retrieval capabilities even with a compressed KV cache.  
+
+Table 3: Needle-in-a-haystack results.   
+
+![](images/9a5a52ae7d2cefeba63c2cfd5dbc8d22d925993d67300358f0d81ee267143333.jpg)  
+
+Long Sequence Modeling Perplexity. We sample data from the PG-19 (Rae et al., 2019) and to evaluate the long language modelling perplexity of To ensure a fair comparison, we set the capacity of the KV cache to 2048. Figure 6 depicts the cumulative average negative log-likelihood (NLL) as a function of context length. $\mathrm{D_{2}O}$ enables LLMs to handle long sequences and achieve superior performance (lower perplexity) compared to other eviction-based compression methods. The results demonstrate that $\mathrm{D_{2}O}$ can effectively leverage long-distance dependencies in language modeling with a limited KV cache.  
+
+![](images/7026a16b52bdde63dde61ff1634258af6365b418d6e11fd249f196b4f2bd2dc0.jpg)  
+Figure 6: Long sequence modeling PPL.  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+
+
+\section{5.4 DYNAMIC ALLOCATION POLICY ANALYSIS  }
+
+
+To evaluate the impact of our proposed dynamic allocation policy at layer-level, we conduct an experiment comparing various designs for the cache allocation factor $\alpha_{l}$ , where each design influences how the cache is distributed across layers based on their attention variance $F_{v}^{l}$ . We consider several settings:  
+
+Table 4: Comparison of Cache Allocation Strategies.   
+
+![](images/15d27e7d24c9153451278677b8a98a1d94e07af26a40c95be0e5667b23ea6706.jpg)  
+
+(1) Inverse Variance Softmax (Ours): αl = $\begin{array}{r}{\alpha_{l}=\frac{\exp(-F_{v}^{l})}{\sum_{l=1}^{L}\exp(-F_{v}^{l})}\cdot L\cdot\rho,}\end{array}$ , which allocates smaller cache sizes to layers with higher variance; (2) Reciprocal of Variance: αl = F1 vl · lL=11 1l , where the cache allocation is inversely proportional to the attention variance; (3) Exponential Decay Allocation: $\alpha_{l}=e^{-F_{v}^{l}}$ , where cache is allocated in an exponentially decreasing manner based on the variance. (4)Uniform Allocation: $\alpha_{l}=\rho$ , where all layers are assigned equal cache sizes. As shown in Table 4, the comparison of these settings demonstrates the effectiveness of our proposed approach in efficiently distributing cache based on variance, leading to superior performance in key metrics.  
+
+5.5 THROUGHPUT ANALYSIS  
+
+We demonstrate that reducing the KV cache with $\mathrm{D_{2}O}$ significantly enhances real-world throughput, as illustrated in Table 5. All experiments are conducted using the Llama-3-8B architecture on an A100-80G GPU without CPU offloading. The KV cache budget is set to be the same as the length of the prompts to maintain the contextual integrity of the input $\mathrm{D_{2}O}$  
+
+Table 5: Throughput comparison of full model and $\mathrm{D_{2}O}$ . 32 (256) means the max batch size is 32 with a 256 cache budget.   
+
+![](images/02f8a00d9953af8c42fdeb24c39b3769228e0b433e93e35b3fc8881eebd538c3.jpg)  
+
+prompts. We observe that reduces memory usage, enabling larger batch sizes and higher throughput. Specifically, as text length increases, $\mathrm{D_{2}O}$ ’s throughput advantage over the entire model also grows. For example, throughput improves from $2.34\times$ at the $256\!+\!1024$ setting to $3.04\times$ at the $2048\substack{+8192}$ setting, showing $\mathrm{D_{2}O}$ ’s efficiency in processing longer texts. Moreover, the table above also shows that our method achieves throughput comparable to $\mathrm{H_{2}O}$ for long sequence inference, with a throughput 3.0-3.1 times that of the Full Model. This validates the GPU memory efficiency of our merging strategy in increasing throughput compared to the full cache size. While our merging strategy incurs some computational overhead compared to $\mathrm{H_{2}O}$ ’s evicted-based strategy, the beneftis are clear in long text generation and inference tasks.4 (Multi-turn Conversations) in the main text, $\mathrm{D_{2}O}$ significantly reduces information loss due to eviction, enhancing inference accuracy.5.  
+
+
+
+\section{5.6 ABLATION ANALYSIS  }
+
+
+In this section, we conduct a series of experiments to investigate the importance of each component and parameter setting in our proposed method. Unless otherwise specified, Llama-3-8B is used as the default model under the cache budget $20\%$ .  
+
+Ablation Study of Each Component. To demonstrate the effectiveness of each component, we have included a table comparing the Full Model, $\mathrm{H_{2}O}$ , $\mathrm{D_{2}O}$ , and its key components. We evaluated these models on four datasets from Longbench: Single-Document QA (MFen), Multi-Document QA (2WikiMQA), Sum  
+
+Table 6: Performance of Each Component.   
+
+![](images/d685c08d91d4bd187fce01f6e694c31a815760a6361b0f08da353c0e453ebf6c.jpg)  
+
+marization (GovReport), and Synthetic (PRe). As shown in the following table, the removal of any component of $\mathrm{D_{2}O}$ results in performance degradation. When two components are removed (leaving only the weighted merging), the performance loss is even greater, but still better than the $\mathrm{H_{2}O}$ method, which is purely evicted-based. These results demonstrate that each component of $\mathrm{D_{2}O}$ effectively mitigates the information loss associated with evicted-based KV optimization.  
+
+![](images/c53d75c12c3248ef7879512a71e722a8ffdb2acf0af83d318be2ba082a7fbec7.jpg)  
+
+Token Similarity Metric. Here we discuss various choices based on keys, values, or both of them for token similarity metrics to determine which tokens should be merged. As shown in Table 7, the attention keys $(\mathcal{K})$ exhibit significantly higher performance than the attention values $(\mathcal{V})$ . Additionally, we observe a notable decrease in performance when using independent metrics for the key-value $(\kappa/\nu)$ cache, which we attribute to the disruption of the corresponding relationships between key-value pairs within the cache.  
+
+Merge Policy. After deciding what tokens to merge, we explore the policy for token merging in our proposed method. Specifically, we compare the performance of average merging and weighted merging. The results in Table 8 reflect that the weighted average policy can achieve better performance.  
+
+Balancing Important Token Size $(N)$ and Recent Size $(M)$ . We also investigates the impact of different important token sizes and recent size ratios on performance, given a fixed budget. This ratio determines the emphasis placed on influential tokens from a historical context (larger ratio) versus tokens from a recent context (smaller ratio). The results in Table 9 suggest that important tokens reflecting global information seem to have a larger impact on performance.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we propose Dynamic Discriminative Operations $\mathrm{(D_{2}O)}$ that can effectively address the challenges of KV cache management in LLMs by dynamically merging tokens to maintain essential contextual information without requiring fine-tuning. By leveraging the varying densities of attention features across layers, $\mathrm{D_{2}O}$ minimizes information loss during eviction and significantly reduces both computational and memory demands. Our experiments confirm that $\mathrm{D_{2}O}$ not only preserves the quality of generation in long-text scenarios but also achieves an optimal balance between KVcache compression and performance. Future research could explore integrating $\mathrm{D_{2}O}$ with additional compression methods like quantization, distillation, and efficient attention architectures.  
+
+
+

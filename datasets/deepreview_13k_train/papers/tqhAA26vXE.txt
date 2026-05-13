@@ -1,0 +1,336 @@
+\title{ChatKBQA: A Generate-then-Retrieve Framework for Knowledge Base Question Answering with Fine-tuned Large Language Models}
+
+\begin{abstract}
+Knowledge Base Question Answering (KBQA) aims to answer natural language questions over large-scale knowledge bases (KBs), which can be summarized into two crucial steps: knowledge retrieval and semantic parsing. However, three core challenges remain: inefficient knowledge retrieval,  mistakes of retrieval adversely impacting semantic parsing, and the complexity of previous KBQA methods. To tackle these challenges, we introduce ChatKBQA, a novel and simple generate-then-retrieve KBQA framework, which proposes first generating the logical form with fine-tuned LLMs, then retrieving and replacing entities and relations with an unsupervised retrieval method, to improve both generation and retrieval more directly. Experimental results show that ChatKBQA achieves new state-of-the-art performance on standard KBQA datasets, WebQSP, and CWQ. This work can also be regarded as a new paradigm for combining LLMs with knowledge graphs (KGs) for interpretable and knowledge-required question answering.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Knowledge Base Question Answering (KBQA) is a classical NLP task to answer natural language questions based on facts over a large-scale knowledge base (KB), such as Freebase~\citep{Freebase}, Wikidata~\citep{Wikidata}, and DBpedia~\citep{DBpedia}, which are composed of structured knowledge graphs (KGs) built from triples consisting of (head entity, relation, tail entity). Previous KBQA methods primarily addressed two core issues: knowledge retrieval~\citep{KR} and semantic parsing~\citep{SP}. Knowledge retrieval mainly aims to locate the most relevant entities, relations, or triples according to the question from KB, to narrow the scope of consideration. Then, semantic parsing essentially converts the question from unstructured natural language into a structured logical form (such as S-expression~\citep{GrailQA}), which can then be converted into an executable graph database query (such as SPARQL~\citep{SPARQL}) to obtain precise answers and interpretable paths, as shown in Figure~\ref{f0}.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=7.8cm]{F0.drawio.pdf}
+\caption{An example of KBQA task to answer a natural language question by converting the question to a graph query which can be executed over Knowledge Base. }
+\label{f0}
+\end{figure}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=15.9cm]{F1.drawio.pdf}
+\caption{Comparison of the previous retrieve-then-generate KBQA framework (left) and our proposed generate-then-retrieve KBQA framework, ChatKBQA (right). Note that labels such as "\texttt{g.g.a}" etc. in the computational graph are acronyms for relation names such as "\texttt{government.government\_position\_held.appointed\_by}". }
+\label{f1}
+\end{figure*}
+
+Previous KBQA work~\citep{KV-Mem,PullNet,SR} proposed different knowledge retrieval methods with technologies of named entity recognition (NER)~\citep{BERT}, entity linking~\citep{ELQ} or subgraph retrieval~\citep{SR} to align natural language questions with structured KB. After retrieving factual triples, some studies~\citep{STAGG,QGG,UniKGQA} utilized strategies of step-wise query graph generation and search answers with semantic parsing. On the other hand, other work~\citep{RnG-KBQA,GMT-KBQA,TIARA,DECAF,FC-KBQA} performed semantic parsing by using a seq2seq model like T5~\citep{T5} to generate a logical form and then converted it to an SPARQL query to fetch answers when executed over KB.
+Despite this, three main challenges remain, as shown on the left side of Figure~\ref{f1}: (i) \textbf{Low retrieval efficiency.} Traditional methods first identify the span of candidate entities and then do entity retrieval and relation retrieval. Since the structure of natural language questions differs from KB facts, most approaches require training dedicated models for extraction and linking inefficiently. (ii) \textbf{Incorrect retrieval results will mislead semantic parsing.} Previous methods have utilized retrieved triples also as input of reference to the seq2seq model along with the original question. However, since the retrieved triples are not always accurate, they adversely impact semantic parsing outcomes. Additionally, if there are numerous retrieved triples, the seq2seq model requires a much longer context length. (iii) \textbf{Multiple processing steps make KBQA a redundantly complex task.} Previous work decomposed the KBQA task into multiple sub-tasks~\citep{GMT-KBQA,TIARA,DECAF}, forming a complex pipeline, which made reproduction and migration challenging. In the era when large language models (LLMs)~\citep{GPT4,Llama2,LLMKGsurvey} are restructuring traditional NLP tasks~\citep{Flan-T5,LLMKGsurvey}, a more straightforward solution utilizing LLMs to reformulate the traditional KBQA paradigm is promising.
+
+To overcome these challenges, we introduce \textbf{ChatKBQA}, a novel generate-then-retrieve KBQA framework based on open-source LLMs, such as Llama~\citep{Llama2}, ChatGLM~\citep{GLM} and Baichuan~\citep{Baichuan2}. As illustrated on the right side of Figure~\ref{f1}, ChatKBQA simplifies KBQA into two efficient phases: generating logical forms and then retrieving relevant entities and relations. \textbf{In the generation phase}, leveraging instruction tuning~\citep{PEFT}, fine-tuned LLMs exhibit high accuracy in semantic parsing of natural language questions without retrieval. The generated logical forms are not only mostly correct in skeleton (entities and relations masked) but also semantically consistent or close to the ground truth in terms of entities and relations. \textbf{In the retrieval phase}, ChatKBQA proposes an unsupervised retrieval method that employs phrase-level semantic retrieval within knowledge bases to improve generation accuracy and retrieval efficiency further. Additionally, ChatKBQA features a plug-and-play characteristic, ensuring compatibility with various LLMs and retrieval models, making it a flexible solution for KBQA tasks.
+
+To valid the performance of our proposed framework, we conduct experiments on two standard KBQA datasets, WebQSP~\citep{STAGG} and ComplexWebQuestions (CWQ)~\citep{CWQ}, with both settings of using and not using golden entities. The experimental results demonstrate that ChatKBQA achieves a new state-of-the-art performance in the KBQA task. We also set up additional experiments to validate that our generate-then-retrieve approach improves both generation and retrieval results efficiency. 
+Finally, we also discuss how insights from this framework lead us to envision future combinations of LLMs and KGs for knowledgable and interpretable Q\&A.
+
+
+\section{Related Work}
+
+\label{s2}
+\subsection{Knowledge Base Question Answering}
+Existing Knowledge Base Question Answering (KBQA) methods can be broadly categorized into Information Retrieval-based (IR-based) and Semantic Parsing-based (SP-based) methods. Recently, there have been some KBQA methods based on large language models (LLM-based) as well.
+
+\textbf{(a) IR-based KBQA methods}~\citep{KV-Mem,PullNet,EmbedKGQA,NSM,TransferNet,SR} primarily retrieve relevant factual triples or text from KBs based on natural language questions, forming a subgraph to determine answers.
+
+\textbf{(b) SP-based KBQA methods} focus on translating questions into logical forms executable against KBs, such as SPARQL, query graph, and S-expression. Some SP-based approaches~\citep{STAGG,UHop,TopicUnits,TextRay,QGG,UniKGQA} utilize strategies of \textbf{step-wise} query graph generation and search for semantic parsing. Alternatively, other SP-based methods~\citep{CBR-KBQA,RnG-KBQA,ProgramTransfer,TIARA,GMT-KBQA,UnifiedSKG,DECAF,FC-KBQA} employ \textbf{seq2seq} models to generate S-expressions completely and offer various enhancements to the semantic parsing process. 
+
+\textbf{(c) LLM-based KBQA methods}~\citep{StructGPT,PanGu,ToG} utilize the thinking capabilities of LLMs to find answers by retrieving from the graph in a step-wise manner.
+
+In this paper, our proposed ChatKBQA is the first SP-based KBQA method using fine-tuned LLMs, which innovatively proposes a generate-then-retrieve approach to simplify KBQA method.
+
+\subsection{Large Language Models} 
+With ChatGPT~\citep{GPT4} displaying the prowess of decoder-only large language models (LLMs), many traditional NLP tasks are becoming simplified~\citep{LLMKGsurvey}. Subsequently, open-source LLMs like Llama~\citep{Llama2}, ChatGLM~\citep{GLM}, and Baichuan~\citep{Baichuan2} emerged and can be supervisedly fine-tuned (SFT) using Parameter-Efficient Fine-Tuning (PEFT) technologies~\citep{PEFT} such as LoRA~\citep{LoRA}, QLoRA~\citep{QLoRA}, P-Tuning v2~\citep{P-Tuningv2}, and Freeze~\citep{Freeze}, enhancing the capabilities of LLMs for specific tasks. 
+
+\subsection{Knowledge Retrieval for KBQA} General retrieval methods are typically divided into lexical methods, such as BM25~\citep{BM25}, and dense retrieval models, such as Dense Passage Retrieval (DPR)~\citep{DPR}, SimCSE~\citep{SimCSE}, and Contriever~\citep{Contriever}. In KBQA task, to better utilize knowledge related to the question from KB, ELQ~\citep{ELQ} and FACC1~\citep{FACC1} are commonly used to entity retrieval. 
+
+In this paper, our ChatKBQA framework proposes a phrase-level retrieval method for entities and relations in an unsupervised manner after LLM's generation of logical form, improving both generation performance and retrieval efficiency. 
+
+
+
+\section{Preliminaries}
+
+In this section, we define two basic concepts of our work: the knowledge base and the logical form, followed by the problem statement for KBQA task.
+
+\textbf{Definition 1: Knowledge Base (KB).} A KB $\mathcal{K}=\{(s,r,o)|s \in \mathcal{E}, r \in \mathcal{R}, o \in \mathcal{E} \cup \mathcal{L}\}$ is an RDF graph consisting of triples $(s,r,o)$ where $s$ is an entity, $r$ is a relation , and $o$ can be an entity or a literal. Each entity $e \in \mathcal{E}$ in the entity set $\mathcal{E}$ is represented by a unique ID, e.g., \texttt{$e$.id="m.0fm2h"}, which can be queried to get its label as \texttt{$e$.label="Benjamin\ Netanyahu"}. Each relation $r \in \mathcal{R}$ in the relation set $\mathcal{R}$ has a multiple-level label, e.g. \texttt{$r$="government. government\_position\_held. appointed\_by"}. 
+
+\textbf{Definition 2: Logical Form. } A logical form is a structured representation of a natural language question. Taking the S-expression as an example, a logical form usually consists of projection and various operators. Projection operation represents a one-hop query of a triple $(s,r,o)$ on $s$ or $o$, where, $(?,r,o)$ is denoted as \texttt{(JOIN $r$ $o$)}, while $(s,r,?)$ is denoted as \texttt{(JOIN (R $r$) $s$)}. Other operators, e.g.
+
+\SetKwFunction{Convert}{Convert}
+\SetKwFunction{Execute}{Execute}
+\SetKwFunction{Sp}{Sp}
+\textbf{Problem Statement. }For KBQA task, given a natural language question $Q$, and a knowledge base $\mathcal{K}$, we need to first convert $Q$ into a logical form $F=\Sp(Q)$, where $\Sp(.)$ is a semantic parsing function. Then convert $F$ to the equivalent SPARQL query $q=\Convert(F)$, where $\Convert(.)$ is the fixed conversion function. Finally, the final set of answers $A=\Execute(q|\mathcal{K})$ is obtained by executing $q$ against $\mathcal{K}$, where $\Execute(.)$ is the query execution function.
+
+\begin{figure*}[h!t]
+\centering
+\includegraphics[width=15.8cm]{F2.drawio.pdf}
+\caption{The overview of ChatKBQA framework for generate-then-retrieve KBQA method with fine-tuned LLMs and unsupervised retrieval for entities and relations in candidate logical forms.}
+\label{f2}
+\end{figure*}
+
+
+
+\section{Methodology}
+
+In this section, we first present an overview of the ChatKBQA framework as shown in Figure~\ref{f2}, and introduce efficient fine-tuning on large language models (LLMs), logical form generation by fine-tuned LLMs, unsupervised retrieval for entities and relations, and interpretable query execution.
+\subsection{Overview of ChatKBQA}
+ChatKBQA is a generate-then-retrieve KBQA framework with fine-tuned LLMs. First, the ChatKBQA framework needs to efficiently fine-tune an open-source LLM based on the (natural language question, logical form) pairs in the KBQA dataset by instruction tuning. The fine-tuned LLM is then used to convert the new natural language questions to according candidate logical forms by semantic parsing. Then, ChatKBQA retrieves the entities and relations in these logical forms at the phrase level, and searches for the logical forms that can be executed against KB after being converted to SPARQL. Finally, the converted SPARQL generates the final set of answers, resulting in interpretable and knowledge-required responses to natural language questions.
+
+\subsection{Efficient Fine-Tuning on LLMs }
+To construct the instruction fine-tuning training data, ChatKBQA first converts the SPARQL corresponding to the natural language questions of the train set in the KBQA dataset into equivalent logical forms and then replaces the entity IDs (e.g., "\texttt{m.06w2sn5}") in these logical forms with the corresponding entity tags (e.g., "\texttt{[ Justin Bieber ]}"), to let LLMs understand entity labels better than meaningless entity IDs. We then combine the natural language question (e.g. "\texttt{What is the name of Justin Bieber's brother?}") and the processed corresponding logical form (e.g. "\texttt{(AND (JOIN [ people, person, gender ] [ Male ]) (JOIN (R [ people, sibling relationship, sibling ]) (JOIN (R [ people, person, sibling s ]) [ Justin Bieber ])))}") as "input" and "output" respectively, and add "instruction" as "\texttt{Generate a Logical Form query that retrieves the information corresponding to the given question.}" constitutes the instruction fine-tuning training data for LLMs.
+
+ChatKBQA employs Parameter Efficient Fine-Tuning (PEFT)~\citep{PEFT} techniques including various efficient fine-tuning methods, such as LoRA~\citep{LoRA}, QLoRA~\citep{QLoRA}, P-tuning v2~\citep{P-Tuningv2}, and Freeze~\citep{Freeze}, to minimize the cost of fine-tuning LLMs with a large number of parameters. ChatKBQA can switch between all the above fine-tuning methods as well as open-source LLMs, such as Llama-2-7B~\citep{Llama2} and ChatGLM2-6B~\citep{GLM}.
+
+\subsection{Logical Form Generation by LLMs}
+Through fine-tuning, the LLMs have acquired expertise in semantic parsing, enabling them to convert natural language questions into logical forms. We apply the fine-tuned LLMs to perform semantic parsing on the new questions in the test set and observe that approximately 63\% of the samples match the ground truth logical forms exactly. When employing beam search, the set of candidate logical forms $\mathcal{C}$ generated by our LLMs includes approximately 74\% of the instances with correct logical forms, indicating that fine-tuned LLMs possess effective learning and parsing abilities for semantic parsing tasks. In addition, by replacing the entities and relations in the candidate logical forms with "\texttt{[]}" (for example, "\texttt{(AND (JOIN [] []) (JOIN (R []) (JOIN (R []) [])))}"), more than 91\% of the samples contain the candidate skeleton. Hence, the next step involves retrieving the entities and relations in the logical form with the corresponding ones from the KB to enhance performance further.
+
+\subsection{Unsupervised Retrieval for Ents and Rels}
+Due to the strong generative capabilities of fine-tuned LLMs for logical form skeletons, we employ an unsupervised retrieval approach during the retrieval phase. This method involves subjecting the entities and relations in the candidate logical forms to phrase-level semantic retrieval and replacement. The result is a final logical form that can be executed as a SPARQL query against the KB.
+
+\setlength{\algomargin}{6pt}
+\SetInd{0em}{1.2em}
+\begin{algorithm}[h] 
+\small
+\SetKwFunction{TopKwithThreshold}{TopKwithThreshold}
+\SetKwFunction{PermuteByEntity}{PermuteByEntity}
+\SetKwFunction{PermuteByRelation}{PermuteByRelation}
+\SetKwFunction{SimiEntities}{SimiEntities}
+\SetKwFunction{SimiRelations}{SimiRelations}
+\SetKwFunction{Neighborhood}{Neighborhood}
+\SetKw{continue}{continue}
+\SetKw{return}{return}
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\Input{Candidate logical forms generated from LLM $\mathcal{C}$, top-k threshold $k_e, k_r, k_1, k_2$, probability threshold $t_e, t_r, t_1, t_2$, the entity set of KB $\mathcal{E}$}
+\Output{The equivalent SPARQL query $q$}
+$\mathcal{C}^\prime\ \leftarrow\ \emptyset$\ \ForEach{$F \in \mathcal{C}$}{
+    \ForEach{$e \in F$}{
+        $e_{list} \leftarrow \emptyset$\ \ForEach{$e^\prime \in \mathcal{E}$}{
+            $s_e \leftarrow \SimiEntities(e, e^\prime)$\;
+            $e_{list}.append((e^\prime, s_e))$\;
+        }
+        $e_{list} \leftarrow \TopKwithThreshold(e_{list}, k_e, t_e)$\;
+        $F.attach(e_{list})$\;
+    }
+    $F_{list} \leftarrow \PermuteByEntity(F)$\;
+    $\mathcal{C}^\prime.append(\TopKwithThreshold(F_{list}, k_1, t_1))$\;
+}
+$\mathcal{C}^{\prime\prime}\ \leftarrow\ \emptyset$\ \ForEach{$F \in \mathcal{C}^\prime$}{
+    \ForEach{$e \in F$}{
+        $r_{list} \leftarrow \emptyset$\ \ForEach{$r \in \Neighborhood(\mathcal{E}_F)$}{
+            $s_r \leftarrow \SimiRelations(r, r^\prime)$\;
+            $r_{list}.append((r^\prime, s_r))$\;
+        }
+        $r_{list} \leftarrow \TopKwithThreshold(r_{list}, k_r, t_r)$\;
+        $F.attach(r_{list})$\;
+    }
+    $F_{list} \leftarrow \PermuteByRelation(F)$\;
+    $\mathcal{C}^{\prime\prime}.append(\TopKwithThreshold(F_{list}, k_2, t_2))$\;
+}
+\ForEach{$F \in \mathcal{C}^{\prime\prime}$}{
+    $q=\Convert(F)$\ \If{$q$ is valid to execute}{
+        \return $q$\;
+    }
+}
+$\return\ \emptyset$\;
+\caption{Unsupervised Retrieval}
+\label{algo:er_retrival}
+\end{algorithm}
+Specifically, as shown in the Algorithm~\ref{algo:er_retrival}, the input is the generated candidate logical form list $\mathcal{C}$, and we traverse each of these logical forms $F$ in order. First, we perform the entity retrieval. For each entity $e$ in $F$, we compute the similarity $s_e \leftarrow \SimiEntities(e, e^\prime)$ with the label of each entity $e^\prime$ in the knowledge base $\mathcal{K}$ entity set $\mathcal{E}$. We sort the retrieved entities based on the similarities, take the top $k_e$ and greater than the threshold $t_e$ to get the retrieval result for that entity $e_{list} \leftarrow \TopKwithThreshold(e_{list}, k_e, t_e)$. Function $\PermuteByEntity$ performs permutation on the retrieved entities at each position, and we get the result $F_{list}$ after entity retrieval. Based on probabilities in $F_{list}$, we take top $k_1$ and greater than threshold $t_1$ to get a new candidate logical form list $\mathcal{C}^\prime.append(\TopKwithThreshold(F_{list}, k _1, t_1))$.
+
+Then, we perform the relation retrieval. Similar to entity retrieval, for each relation $r$ in $F \in \mathcal{C}^\prime$, we compute the similarity $s_r \leftarrow \SimiRelations(r, r^\prime)$ with each candidate relation $r^\prime$ according to the neighborhood of entity set of the logical form $\mathcal{E}_{F}$. We also sort the retrieved relations according to the similarities, take the top $k_r$ and greater than the threshold $t_r$ to get the retrieval result $r_{list} \leftarrow \TopKwithThreshold(r_{list}, k_r, t_r)$. By permuting the retrieval results of the relations at each position, we get the result $F_{list}$ after relation retrieval and then take top $k_2$ and greater than the threshold $t_2$ to get a new list of candidate logical forms $\mathcal{C}^{\prime\prime}.append(\TopKwithThreshold(F_{list}, k_2, t_2))$.
+
+Given a query, unsupervised retrieval methods such as SimCSE~\citep{SimCSE}, Contriever~\citep{Contriever}, and BM25~\citep{BM25}, require no additional training to identify the top k most semantically similar candidates from the set of retrieved answers. ChatKBQA can switch between all the above unsupervised retrieval methods.
+
+\subsection{Interpretable Query Execution}
+After retrieval, we get a final candidate logical form list $\mathcal{C}^{\prime\prime}$, which we sequentially iterate through the logical form $F \in \mathcal{C}^{\prime\prime}$ and convert to the equivalent of the SPARQL query $q=\Convert(F)$. When the first $q$ that can be executed against KB $\mathcal{K}$ is found, we execute to get the final answer set $A=\Execute(q|\mathcal{K})$. With this approach, we can also get a complete reasoning path for natural language questions based on SPARQL query with good interpretability. To summarize, ChatKBQA proposes a thought taking both the advantages of using LLMs to do natural language semantic parsing for graph query generation and calling external KBs to interpretably reason with queries.
+
+
+
+\section{Experiments}
+
+This section presents the experimental setup, results, and analysis. We answer the following research questions (RQs):
+\textbf{RQ1}: Does ChatKBQA outperform other KBQA methods?
+\textbf{RQ2}: Does the main components of ChatKBQA work?
+\textbf{RQ3}: Why use Generate-then-Retrieve method instead of Retrieve-then-Generate method?
+\textbf{RQ4}: Why use fine-tuned open-source LLMs instead of calling ChatGPT or training traditional T5 models?
+\textbf{RQ5}: Does Generate-then-Retrieve method improve retrieval efficiency?
+\textbf{RQ6}: Does ChatKBQA has plug-and-play characteristics?
+\subsection{Experimental Setup}
+\textbf{\ \ \ \ Datasets. } All experiments are conducted on two standard KBQA datasets: WebQuestionsSP (WebQSP)~\citep{STAGG} containing 4,737 natural language questions with SPARQL queries and ComplexWebQuestions (CWQ)~\citep{CWQ} containing 34,689 natural language questions with SPARQL queries. Both datasets are based on Freebase~\citep{Freebase} KB.
+
+\textbf{Baselines. } We compare ChatKBQA with numerous KBQA baseline methods, including IR-based methods~\citep{KV-Mem}, SP-based methods~\citep{STAGG, CBR-KBQA}, and LLM-based methods~\citep{StructGPT} in Section~\ref{s2}.
+
+\textbf{Evaluation Metrics. }
+Following previous work~\citep{TIARA,DECAF}, we use $F_1$ score, Hits@1, and Accuracy (Acc) to denote coverage of all the answers, single top-ranked answer, and strict exact-match accuracy, respectively.
+
+\textbf{Hyperparameters and Enviroment. }
+We fine-tune LLMs 100 epochs on WebQSP and 10 epochs on CWQ with batch size 4 and learning rate 5e-5, detailed in Apendix~\ref{hyper}. All experiments were done on a single NVIDIA A40 GPU (48GB), with results averaged from five randomly seeded experiments. 
+\begin{table}[h!t]
+\small
+\setlength{\tabcolsep}{0.6mm}{
+\begin{tabular}{lcccccc}
+\toprule
+                                 & \multicolumn{3}{c}{\textbf{WebQSP}}                                                               & \multicolumn{3}{c}{\textbf{CWQ}}                                             \\ \cline{2-7} 
+\multirow{-2}{*}{\textbf{Model}} & \textbf{F1}   & \textbf{Hits@1}  & \multicolumn{1}{c|}{\textbf{Acc}}  & \textbf{F1}   & \textbf{Hits@1} & \textbf{Acc}  \\ \hline
+\multicolumn{7}{c}{\textit{IR-based KBQA Methods}}                                                                \\ \hline
+KV-Mem                           & 34.5          & 46.7                                         & \multicolumn{1}{c|}{-}             & 15.7          & 21.1                                         & -             \\
+PullNet                          & -             & 68.1                                         & \multicolumn{1}{c|}{-}             & -             & 47.2                                         & -             \\
+EmbedKGQA*                       & -             & 66.6                                         & \multicolumn{1}{c|}{-}             & -             & 44.7                                         & -             \\
+NSM+h*                          & 67.4          & 74.3                                         & \multicolumn{1}{c|}{-}             & 44.0          & 48.8                                         & -             \\
+TransferNet                     & -             & 71.4                                         & \multicolumn{1}{c|}{-}             & -             & 48.6                                         & -             \\
+Subgraph Retrieval*              & 64.1          & 69.5                                         & \multicolumn{1}{c|}{-}             & 47.1          & 50.2                                         & -             \\ \hline
+\multicolumn{7}{c}{\textit{SP-based KBQA Methods (step-wise)}}                                                                \\ \hline
+STAGG                           & 71.7          & -                                            & \multicolumn{1}{c|}{63.9}          & -             & -                                            & -             \\
+UHop                             & 68.5          & -                                            & \multicolumn{1}{c|}{-}             & 29.8          & -                                            & -             \\
+Topic Units                     & 67.9          & 68.2                                         & \multicolumn{1}{c|}{-}             & 36.5          & 39.3                                         & -             \\
+QGG                             & 74.0          & 73.0                                         & \multicolumn{1}{c|}{-}             & 40.4          & 44.1                                         & -             \\
+UniKGQA*                         & 72.2          & 77.2                                         & \multicolumn{1}{c|}{-}             & 49.4          & 51.2                                         & -             \\ \hline
+\multicolumn{7}{c}{\textit{SP-based KBQA Methods (seq2seq)}}                                                                \\ \hline
+CBR-KBQA                         & 72.8          & -                                            & \multicolumn{1}{c|}{69.9}          & 70.0          & 70.4                                         & 67.1          \\ 
+RnG-KBQA                         & 75.6          & -                                            & \multicolumn{1}{c|}{71.1}          & -             & -                                            & -             \\
+Program Transfer*                & 76.5          & 74.6                                         & \multicolumn{1}{c|}{-}             & 58.7          & 58.1                                         & -             \\
+TIARA*                           & 78.9          & 75.2                                         & \multicolumn{1}{c|}{-}             & -             & -                                            & -             \\
+GMT-KBQA                         & 76.6          & -                                            & \multicolumn{1}{c|}{73.1}          & 77.0          & -                                            & 72.2          \\
+UnifiedSKG                       & 73.9          & -                                            & \multicolumn{1}{c|}{-}             & 68.8          & -                                            & -             \\
+DecAF                            & 78.8          & 82.1                                         & \multicolumn{1}{c|}{-}             & -             & 70.4                                         & -             \\
+FC-KBQA                          & 76.9          & -                                            & \multicolumn{1}{c|}{-}             & 56.4          & -                                            & -             \\ \hline
+\multicolumn{7}{c}{\textit{LLM-based KBQA Methods}}                                                                \\ \hline
+StructGPT*                       & 72.6          & -                                            & \multicolumn{1}{c|}{-}             & -             & -                                            & -             \\
+Pangu                            & 79.6          & -                                            & \multicolumn{1}{c|}{-}             & -             & -                                            & -             \\ 
+ToG*                         & -          & 82.6                                            & \multicolumn{1}{c|}{-}             & -         & 69.5                                            & -             \\ \hline\hline
+ChatKBQA (ours)                        & 79.8          & 83.2                                         & \multicolumn{1}{c|}{73.8}          & 77.8          & 82.7                                         & 73.3          \\
+ChatKBQA* (ours)                      & \textbf{83.5} & \textbf{86.4}                                & \multicolumn{1}{c|}{\textbf{77.8}} & \textbf{81.3} & \textbf{86.0}                                & \textbf{76.8} \\ \bottomrule
+\end{tabular}}
+\caption{\label{main}
+KBQA comparison of ChatKBQA with other baselines on WebQSP and CWQ datasets. * denotes using oracle entity linking annotations. The results of the models are mainly taken from their original paper. For our proposed ChatKBQA framework, we display the results of the best setup on WebQSP and CWQ, respectively. The best results in each metric are in \textbf{bold}. 
+}
+\end{table}
+
+\subsection{Main Results (RQ1)}
+For the KBQA task, Table~\ref{main} lists the experimental results for our proposed generate-then-retrieve ChatKBQA framework, with the best setup of LoRA~\citep{LoRA} fine-tuning Llama-2-7B~\citep{Llama2} (beam size = 15) on WebQSP, Llama-2-13B~\citep{Llama2} (beam size = 8) on CWQ, with SimCSE~\citep{SimCSE} for unsupervised retrieval, and other baseline models. We can see that ChatKBQA has shown improvement over all existing KBQA methods on both WebQSP and CWQ datasets. The $F_1$ score, Hits@1, and Acc have improved by about 4, 4, and 4 percentage points on WebQSP and about 4, 16, and 4 percentage points on CWQ, respectively, compared to the previous best results, which reflects ChatKBQA's superior KBQA capability to reach the new state-of-the-art performance.
+
+\begin{figure*}[h!t]
+    \centering
+    \subfigure[\label{a}]{
+        \includegraphics[width=0.235\textwidth, height=0.18\textwidth]{output1.pdf}
+    }
+    \subfigure[\label{b}]{
+        \includegraphics[width=0.20\textwidth, height=0.18\textwidth]{output2.pdf}
+    }
+    \subfigure[\label{c}]{
+        \includegraphics[width=0.245\textwidth, height=0.18\textwidth]{output4.pdf}
+    }
+    \subfigure[\label{d}]{
+        \includegraphics[width=0.25\textwidth, height=0.18\textwidth]{output3.pdf}
+    }
+	\caption{(a) Ablation study in ChatKBQA generation phase. (b) Ablation study in ChatKBQA retrieval phase. (c) Comparison with other language models in the generation phase. (d) Comparison of retrieval efficiency between retrieval from nature language questions (NL-R) and generated logical forms (AG-R) in the retrieval phase.}
+	\label{f3}
+\end{figure*}
+
+\subsection{Ablation Study (RQ2)}
+
+To validate the effectiveness of the generation and retrieval phases of ChatKBQA, we ablate the two phases separately. 
+For the generation phase, we use 20\%, 40\%, 60\%, and 80\% of the training data for fine-tuning versus full training set fine-tuning. 
+For the retrieval phase, to validate entity retrieval (ER) and relation retrieval (RR) separately, we remove ER or RR from the framework and obtain three simplified variants for comparison.
+\textbf{Effectiveness of LLM's Fine-tuning. }
+As shown in Figure~\ref{a}, the performance of KBQA gets better as the training volume increases, proving the effectiveness of fine-tuning. We also observe that the F1 score has exceeded 70\% when only using 20\% training data to fine-tune, which indicates that the fine-tuned LLMs are also effective at learning from a limited dataset.
+
+\textbf{Effectiveness of Entity Retrieval (ER). }
+As shown in Figure~\ref{b}, ER improves about 15 percentage points on average over no oracle entity linking in the F1 score at different beam sizes. This is because, after LLM's fine-tuning, the generated logical forms contain entities unseen in the train set, which can be further aligned to KB after retrieving the entities from the KB entity set.
+
+\textbf{Effectiveness of Relation Retrieval (RR). }
+As shown in Figure~\ref{b}, RR enhances the F1 score by an average of 5\% across various beam sizes in ablation experiments. Although relations are rarely directly present in natural language questions, the number of thousand-level relations in the KB is still small compared to the tens of millions of entities, and the LLM perceives relational information well during fine-tuning. Thus, RR does not improve performance as much as ER, but combined with ER, RR makes KBQA perform at its best.
+
+\subsection{Generate-then-Retrieve Or Retrieve-then-Generate (RQ3)}
+To verify that our proposed LLM-based Generate-then-Retrieve method is better than previous Retrieve-then-Generate methods, we add Top1, Top2, Top5, and Top10 retrieval knowledge fragments obtained in DecAF~\citep{DECAF}  to the instruction, respectively, compared with the fine-tuning of Llama-2-7B without retrieval. 
+\begin{table}[h!t]
+\centering
+\small
+\centering
+\setlength{\tabcolsep}{0.05mm}{
+\begin{tabular}{lcccc}
+\toprule
+\multirow{2}{*}{\textbf{Fine-tuning Settings}} & \multicolumn{4}{c}{\textbf{WebQSP}}                               \\ \cline{2-5} 
+                                      & \textbf{Max Token↓} & \textbf{EM↑} \% & \textbf{BM↑} \% & \textbf{SM↑} \% \\ \hline
+Llama-2-7B w/o R             & \textbf{512}     & \textbf{63.5}     & \textbf{74.7 }         & \textbf{91.1}              \\ \hline
+Llama-2-7B w Top1 R          & 612     & 58.5     & 72.3          & 88.4              \\
+Llama-2-7B w Top2 R          & 712     & 59.7     & 73.6          & 89.0              \\
+Llama-2-7B w Top5 R          & 1012    & 55.6     & 68.3          & 85.3              \\
+Llama-2-7B w Top10 R         & 2012    & 53.1     & 67.9          & 84.8              \\ \bottomrule
+\end{tabular}
+}
+\caption{\label{t2}
+Comparison of whether or not utilizing retrieval results before fine-tuning Llama-2-7B for logical form generation in ChatKBQA. 
+}
+\end{table}
+
+As shown in Table~\ref{t2}, we find that without retrieval is better than with retrieval in the logical form generation in terms of extract match ratio (EM), match after beam search ratio (BM), and skeleton match ratio (SM), because the information obtained from retrieval will \textbf{have erroneous interfering information} and \textbf{increase Max Token of instruction}, which leads to catastrophic forgetting of the original problem for LLMs and increases the difficulty of training. At the same time, we observe that Llama-2-7B fine-tuning without retrieval achieves a BM of 74.7\% and SM hits 91.1\%, with good performance because of LLM's well-learned schema of entities and relations, which provides the basis for the retrieval after generation.
+\subsection{Comparison with ChatGPT and T5 in Generation Phase (RQ4)}
+
+To illustrate why ChatKBQA chooses to fine-tune open-source generative LLMs such as Llama-2-7B and ChatGLM2-6B, we replace the LLMs in the generation phase with ChatGPT and GPT-4~\citep{GPT4} with API call in a zero-shot setting, T5~\citep{T5} and Flan-T5~\citep{Flan-T5} with seq2seq training, respectively, and observe their results in Extract Match (EM) and Skeleton Match (SM) results without beam search. 
+
+\textbf{Comparison with zero-shot ChatGPT. }
+As shown in Figure~\ref{c}, ChatGPT and GPT-4, although having large parametric quantities, cannot generate standard logical forms well because they aren't open-source to be fine-tuned. They can generate the SPARQL language, but it is challenging to build the correct query skeleton, entities, and relations because they cannot perceive the complex structure of the external KB well through designing prompts in limited context length.
+
+\textbf{Comparison with fine-tuned T5 \& Flan-T5. }
+While T5 and Flan-T5 can capture the skeletons well after fine-tuning, the EM is only about 10\%, which is much worse than the 63\% of Llama-2-7B, and therefore does not guarantee subsequent unsupervised entity and relation retrieval. Fine-tuned open-source LLMs such as Llama-2-7B~\citep{Llama2} and ChatGLM2-6B~\citep{GLM} show stronger semantic parsing ability than models such as T5 and ChatGPT and can generate higher-quality logical forms in both EM \& SM.
+
+\subsection{Analysis of Efficiency of Retrieval in Retrieval Phase (RQ5)}
+
+To embody the Generate-then-Retrieve method improving the efficiency of retrieval, we compare entity retrieval (ER) and retrieval (RR) after logical form generation (AG-R) with traditional retrieval from natural language questions (NL-R). We define the efficiency of retrieval as the average similarity ranging [0,1] between the text to be retrieved and the set of retrieved answers, which is scored by different retrieval models. Note that the BM25 score needs to be mapped to the similarity range of [0,1]. 
+
+\textbf{Efficiency gains in both ER \& RR. }
+As Figure~\ref{d} shows, all three retrieval methods SimCSE~\citep{SimCSE}, Contriever~\citep{Contriever}, and BM25~\citep{BM25} consider AG-R to be more efficient than NL-R for both ER and RR. This is due to NL-R still needs to determine the boundaries of the entities or relations. However, this step has been completed in AG-R after LLM generates the logical forms. 
+
+\textbf{RR has more efficiency gains than ER. }
+Moreover, although the generated logical form has fewer kinds of relations than entities in general, the relations generally exist implicitly in natural language questions. Thus, relations are more difficult to determine the boundaries than entities in natural language questions, and the generation of logical forms with the help of fine-tuned LLMs can help us to better determine the boundaries of relations, resulting in a more significant improvement in the efficiency of RR over ER.
+
+\subsection{Plug-and-Play Characteristics (RQ6)}
+
+\begin{table}[t]
+\small
+\centering
+\setlength{\tabcolsep}{0.7mm}{
+\begin{tabular}{cccccc}
+\toprule
+\multicolumn{3}{c}{\textbf{ChatKBQA Framework}}                    & \multicolumn{3}{c}{\textbf{WebQSP}}                                                                        \\ \hline
+\textbf{LLMs} & \textbf{Tuning} & \textbf{Retrieval} & \textbf{F1}                  & \textbf{Hits@1} & \textbf{Acc}                 \\ \hline
+Baichuan2-7B  & LoRA                   & SimCSE                    & 79.1                         & 81.5                                         & 74.1                         \\
+Baichuan2-13B & LoRA                   & SimCSE                    & 79.4                         & 82.1                                         & 74.4                         \\
+ChatGLM2-6B   & LoRA                   & SimCSE                    & 79.8                         & 82.7                                         & 74.5                         \\
+Llama-2-7B    & LoRA                   & SimCSE                    & 80.0                         & 82.4                                         & 75.2                         \\
+\textbf{Llama-2-13B}   & \textbf{LoRA}                   & \textbf{SimCSE}                    & \textbf{82.6}                & \textbf{85.2}                                & \textbf{77.5}                \\ \hline
+Llama-2-13B   & QLoRA                  & SimCSE                    & 81.9 & 85.0                 & 76.9 \\
+ChatGLM2-6B   & P-Tuning v2            & SimCSE                    & 74.6 & 77.8                 & 70.6 \\
+Llama-2-13B   & Freeze                 & SimCSE                    & 81.7 & 84.7                 & 76.8 \\ \hline
+Llama-2-13B   & LoRA                   & Contriever                & 81.5 & 83.6                 & 76.8 \\
+Llama-2-13B   & LoRA                   & BM25                      & 79.8 & 80.5                 & 72.7 \\ \bottomrule
+\end{tabular}
+}
+\caption{\label{framework}
+Plug-and-play performance comparison of ChatKBQA framework for replacing LLMs, tuning methods, and unsupervised retrieval methods, respectively, with the beam size all set as 8.
+}
+\end{table}
+ChatKBQA is a KBQA framework based on LLMs with plug-and-play characteristics that can flexibly replace three parts: LLM, efficient tuning method, and unsupervised retrieval method. We choose Llama-2-13B~\citep{Llama2} for LLM, LoRA~\citep{LoRA} for the tuning method, and SimCSE~\citep{SimCSE} for the retrieval method as the basic variant, setting the beam size for all variants to 8 for comparison. 
+
+We replace Baichuan2-7B~\citep{Baichuan2}, Baichuan2-13B~\citep{Baichuan2}, ChatGLM2-6B~\citep{GLM}, Llama-2-7B~\citep{Llama2} \textbf{in the LLM part}, QLoRA~\citep{QLoRA}, P-Tuning v2~\citep{P-Tuningv2}, Freeze~\citep{Freeze} \textbf{in the tuning part}, and Contriever~\citep{Contriever}, BM25~\citep{BM25} \textbf{in the retrieval part}. Benefiting from the plug-and-play characteristics of the ChatKBQA framework, as the LLMs and the methods of tuning and retrieval are upgraded, the KBQA task will be solved better with good flexibility and extensibility.
+
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduce ChatKBQA, a generate-then-retrieve KBQA framework that utilizes advanced fine-tuned LLMs, which overcomes traditional challenges like retrieval inefficiencies, semantic parsing errors, and complexity of KBQA methods. Experimental results on WebQSP and CWQ benchmarks show that ChatKBQA achieves a new state-of-the-art KBQA performance. Its simplicity, flexibility, and plug-and-play make it an effective approach for combining LLM and KG in interpretable knowledge-required KBQA tasks.
+
+
+

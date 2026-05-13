@@ -1,0 +1,388 @@
+\title{SEPARATE: A Simple Low-rank Projection for Gradient Compression in Modern Large-scale Model Training Process}
+
+\begin{abstract}
+Training Large Language Models (LLMs) presents a significant communication bottleneck, predominantly due to the growing scale of the gradient to communicate across multi-device clusters. However, how to mitigate communication overhead in practice remains a formidable challenge due to the weakness of the methodology of the existing compression methods, especially the neglect of the characteristics of the gradient. In this paper, we consider and demonstrate the low-rank properties of gradient and Hessian observed in LLMs training dynamic, and take advantage of such natural properties to design SEPARATE, a simple low-rank projection for gradient compression in modern large-scale model training processes. SEPARATE realizes dimensional reduction by common random Gaussian variables and an improved moving average error-feedback technique. We theoretically demonstrate that SEPARATE-based optimizers maintain the original convergence rate for SGD and Adam-Type optimizers for general non-convex objectives. Experimental results show that SEPARATE accelerates training speed by up to 2× for GPT-2-Medium pre-training, and improves performance on various benchmarks for LLAMA2-7B fine-tuning.
+\end{abstract}
+
+\section{1 Introduction  }
+
+
+With massive amounts of data, billions of parameters, and multi-device clusters, the remarkable strides of Large Language Models (LLMs) across multiple disciplines [9, 48, 5, 8] are attributed to such scalable intrinsic characteristics and training paradigms. However, corresponding challenges erupt, as multiple rounds of communication of massive model parameters across multi-device clusters have created a significant communication bottleneck in training process. For example, pre-training a BERT-Large model (340M parameters) with a single batch size on 16 GPUs shows that $92\%$ of the training time is spent on gradient all-reduce in backward propagation [49]. Therefore, a critical problem urgently to be addressed is how to relieve the communication burden while ensuring the quality of model training.  
+
+In response to the aforementioned problem, a variety of gradient compression strategies have been proposed to reduce the communication overhead of gradients between devices. Such strategies can be broadly categorized into two compression techniques, including lowprecision compressors (e.g., SignSGD [6], 1-bit Adam [49] and 1-bit LAMB [29]) and low-rank compressors (e.g., Atomo [57] and PowerSGD [55]). Moreover, error-feedback technique [46, 49, 29] focuses on compensating for errors accumulated during compression by changing the objects to compress from the gradient to the gradient and historical error summation [49, 29]. Error-feedback-based compression algorithms have been theoretically proven to have lower communication complexity when applied to SGD-Type optimizers [53, 30, 18].  
+
+However, from the system perspective, how to mitigate communication overhead in practice remains a core problem and a formidable challenge. For example, low-bit gradients (e.g., less than 8-bit) are not supported by typical hardware. Thus, quantizing gradients into less than 8 bits can lead to significant precision loss and numerical instability. For biased low-precision compressors with error-feedback techniques, which do not support communication primitive all-reduce due to their inherent structures, they must use all-gather for aggregation. It limits them only suitable for master-server communication patterns, incompatible with advanced ring-based and tree-based patterns in current large-scale model training [38] and extremely slows down the communication speed [1]. Therefore, there remains a significant gap between the performance of these methods in training practice and their theoretical results. Considering the system-level speed, recent studies [1, 59] indicate that when training representative LLMs with off-the-shelf DistributedDataParallel (DDP), most of gradient compressors show longer wall-clock training time than vanilla Adam. Furthermore, integrating these gradient compressors into commonly used optimizers often requires significant modifications, necessitating additional effort to ensure compatibility and maintain effective.  
+
+These system-level limitations drive us to consider improvements at the methodological level. The ineffectiveness of these methods stems from inherent flaws in their methodology. Specifically, these algorithms seldom take the characteristics of the gradient of LLMs into account, leading to additional computation or communication rounds to compensate for the errors introduced by compression. For low-precision compressors, the compression ratio is upper bounded by floating-point digit number 32. Worse, vector-wise quantization is independent of the properties of the gradient and is commonly computationally heavy. Several low-rank compressors [55] consider the low-rank approximation of gradient, but the compression and decompression are so complex that the time cost in extra computation is close to or even larger than the saved communication time cost. Therefore, the design concept of modern "workable" gradient compression algorithms is that  
+
+
+
+\section{2 Related Work  }
+
+
+Communication Efifcient Training. As the scale of models explosively grows in recent years [48, 36, 25, 52], the redundant communication of gradient has become the main bottleneck of training. Gradient compression [29, 55, 49, 46, 56, 34] is a promising solution for communication-efficient training among GPUs clusters. In general, the compression techniques can be divided into low-precision methods [49, 29, 46, 34] and low-rank methods [55, 32, 2]. Besides, several theoretical and empirical analyses of more general unbiased compressor $\mathcal{C}$ [18, 53, 21] are also proposed to show the effect of gradient compression theoretically. Moreover, ZeRO++ [56] has been proposed to apply quantization techniques to sharding strategy [41].  
+
+Error-feedback Technique. Gradient compression techniques bring information loss during the training process and impair the training accuracy and performance of the model. The accumulation of error may cause algorithm divergence [46]. To solve such a problem, the error-feedback technique was first proposed by [46], which adds the compression error to the gradient before compression in this iteration. Afterward, various works study the effect of the error feedback technique from theory to practical methods. Recent works [18, 53] study the theoretical convergence of unbiased compressor $\mathcal{C}$ with error-feedback technique on convex and non-convex settings. Moreover, many induce the error-feedback technique to adaptive gradient algorithms[27, 15] which is commonly used in training of large models, such as 1-bit Adam [49] and $0/1$ Adam [34].  
+
+Low-rank Approximation. Many studies focus on the low-rank approximation of weight or gradient matrix in neural network training dynamic and propose the error bound [55, 22]. However, such a low-rank approximation of weight (e.g., LoRA [22]) may not reach a comparable performance as full-rank in pre-training [31] and fine-tuning [58]. Some studies show that the Hessian in deep neural networks is "top-heavy" [43, 33, 44], which means the eigenvalue drops fast and the Hessian maintains low-rank, and some recent studies theoretically illustrate that the gradient is naturally low-rank [13, 60]. In fact, some classical methods have considered low-rank estimation of trace, like the Hutchinson estimator [23]. Such related works provide the potential to design a simple gradient compression by low-rank projection with restricted variance. Some recent research about training or gradient accumulation consider the low-rank property of gradient or Hessian, and use random projection for memory reduction [64, 19], but lack deep analysis on bounded variance.  
+
+
+
+\section{3 Low-rank Property of Gradient and Hessian in Training  }
+
+
+Through some phenomena observed in practice and simple theoretical analysis of Transformer [54], we further illustrate the widespread existence of the low-rank property of gradient. Moreover, we also demonstrate that the eigen-spectrum of Hessian is "top-heavy", consistent with some previous work about Hessian spectrum of neural networks [43, 44]. We study these observations practically in this work. As shown in Figure 1, the landscape of gradient in representative LLMs training possesses low-rank property. Specificaly, We observe the spectrum of GPT-2-Small (125M, with 12 Transformer-based layers) and GPT-2-Medium (345M, with 24 Transformer-based layers). We observe the gradient spectrums of attention and MLP in middle layer and last layer, respectively. The eigenvalues of grad drop fast, especially in MLP layers. This phenomenon is more pronounced in larger models.  
+
+![](images/48556c752c3ebf202b3c89199d0953f1c5988ce96f682dd7a32d1780ee17a777.jpg)  
+Figure 1: Low-rank gradient and Hessian observations in practice. The two pictures on the left show the spectrum of gradient matrices of chosen layers in GPT-2-125M and GPT-2-345M respectively. The X-axis represents the order of eigenvalues from largest to smallest, and the Y-axis represents the magnitude of eigenvalues. The two pictures on the right show the spectrum of Hessian in ResNet-20 and ResNet-110 trained on CIFAR-10 respectively. The X-axis represents the eigenvalue, and the Y-axis represents the corresponding density.  
+
+Require: Initialization model parameters, $N$ nodes, one-round communication budget ${\boldsymbol{r}}n$ , error reset frequency $T$ , $\beta\in\lfloor0,1\rfloor$ , a common Gaussian random number generator, initialize ${\bf e}^{0}\in B({\bf0},c_{1})$  
+
+
+
+\section{4 SEPARATE: A Simple Low-rank projection  }
+
+
+Considering low-rank property of gradient and "top-heavy" observation of Hessian, a natural idea of gradient compression is to randomly project the gradient to low-dimensional subspace. As the sample is up to a certain level (usually much less than dimension $d$ ), the dominant information of gradient can be exactly recovered. This leads to our SEPARATE method. The core idea of SEPARATE is composed with two parts. First, we design a Gaussian random projection compressor for dimensionality reduction of gradient. Hessian-trace-bounded proposes the theoretical guarantee for random projection. Second, to solve the critical challenge that the compression error in gradient compression would accumulate during the training process, we propose a novel moving average error feedback technique to ensure practical utility. We introduce SEPARATE method in Algorithm 1.  
+
+4.1 Common Random Projection Compressor  
+
+For classic multi-node parallel training, each node computes its local stochastic gradient ${\bf g}_{n}^{k}$ with their mini-batch data. Then through communication like all-reduce each node obtains the global gradient for model update.  
+
+As mentioned early, we take the low-rank property of gradient and "top-heavy" property of Hessian into account to design a variance-bounded low-rank projection for gradient compression, applicable to most of practical scenarios in large-scale model training. Specifically, for the gradient vector $\mathbf{g}$ , each node generates $m$ common random Gaussian variables $\xi_{i},\cdot\cdot\cdot,\xi_{m}\sim N(0,{\bf I}_{d})$ . Then each node computes  
+
+$$
+p_{i}=\left\langle\mathbf{g},\pmb{\xi}_{i}\right\rangle,\forall i\in[m].
+$$  
+
+After compression, each node constructs $[p_{1},\cdot\cdot\cdot,p_{m}]$ as the compressed gradient for communication like all-reduce. Then they obtain the global $[\tilde{p}_{1},\cdot\cdot\cdot\,,\tilde{p}_{m}]$ ,and reconstruct the gradient as  
+
+$$
+\tilde{\mathbf{g}}=\frac{1}{m}\sum_{i=1}^{m}\tilde{p}_{i}\cdot\boldsymbol{\xi}_{i}.
+$$  
+
+Then we theoretically illustrate the unbiasedness and variance-bounded property of our common random projection in Lemma 4.1 and Lemma 4.2 as below.  
+
+Lemma 4.1. $\tilde{\bf g}$ is an unbiased estimator of g,  
+
+$$
+\mathbb{E}_{\pmb{\xi}_{1},\cdots\pmb{\xi}_{m}}\tilde{\mathbf{g}}=\mathbf{g}.
+$$  
+
+Lemma 4.2. The variance of $\tilde{\bf g}$ under norm $\Vert\cdot\Vert_{\mathbf{A}}$ , where A is a given positive semi-definite symmetric matrix, can be bounded by 3trm(A)∥g∥2 −m1∥g∥2A,  
+
+$$
+\mathbb{E}_{\pmb{\xi}_{1},\cdots,\pmb{\xi}_{m}}\|\tilde{\mathbf{g}}-\mathbf{g}\|_{\mathbf{A}}^{2}\leq\frac{3\mathrm{tr}(\mathbf{A})}{m}\|\mathbf{g}\|^{2}-\frac{1}{m}\|\mathbf{g}\|_{\mathbf{A}}^{2}.
+$$  
+
+Remark 4.3. Lemma 4.1 directly indicates the unbiasedness of common random projection, which is standard for low-rank compression techniques [55, 64, 19]. What we really highlight is Lemma 4.2, which illustrate that the variance of our compression strategy under the Mahalanobis norm can be bounded by the trace of given matrix. Considering the standard convergence analysis of SGD or Adam-Type optimizers, the second order factor of Taylor expansion of the objective function can be written as Mahalanobis norm under Hessian matrix, and the "top-heavy" $\eta$ property ensures the trace of Hessian is much smaller than dL, where d is the dimension and L is Lipschitz constant defined in Assumption 5.2. This provides the potential for SEPARATE-based algorithms to surpass other compressors in the order of d in convergence speed. We show the theoretical results in Section 5.  
+
+4.2 Moving Average Error Feedback  
+
+Error-feedback technique is widely used in gradient compression methods [46, 42] to mitigate the information loss during compression. It is worth considering how error-feedback works for our common random projection compressor, even though Lemma 4.1 and Lemma 4.2 show the unbiasedness and trace-bounded variance, because the accumulated error in continuous updates may cause wide deviation. One straight solution is to use the gradient compression error from the previous iteration as $\begin{array}{r}{\mathbf{e}_{n}^{k}=\arg\operatorname*{min}_{\mathbf{e}\in\mathbb{R}^{d}}\left\|\mathbf{e}-\left(\tilde{\mathbf{h}}_{n}^{k}-\mathbf{g}_{n}^{k}\right)\right\|^{2}=\tilde{\mathbf{h}}_{n}^{k}-\mathbf{g}_{n}^{k}}\end{array}$ , where ${\bf g}_{n}^{k}$ is the original gradient on the $n$ -th node and $\tilde{\mathbf{h}}_{n}^{k}$ is the reconstruction of compressed gradient. However, we empirically discover the instability of this estimate, because for single-step iteration, random vectors for projection may have a large deviation from the direction of true gradient. This means potential abrupt fluctuations of $\mathbf{e}_{n}^{k}$ , especially for several continuous iterations with a series of random vectors with very different directions. This may lead to the whole training process converging to another suboptimal region. This phenomenon is particularly prominent when training from scratch, changing the shape of loss curve and the convergence result of loss (see Section 6.3). To solve this problem, inspired by the idea of momentum technique in the analyses of accelerated gradient descent [37], we take the moving average of the historical compression error and the current one to maintain the continuity to some degree:  
+
+$$
+\mathbf{e}_{n}^{k}=\mathop{\operatorname{argmin}}_{\mathbf{e}\in\mathbb{R}^{d}}\frac{\beta}{2}\left\|\mathbf{e}-\left(\tilde{\mathbf{h}}_{n}^{k}-\mathbf{g}_{n}^{k}\right)\right\|^{2}+\frac{1-\beta}{2}\left\|\mathbf{e}-\mathbf{e}_{n}^{k-1}\right\|^{2}=\left(1-\beta\right)\mathbf{e}_{n}^{k-1}+\beta\left(\tilde{\mathbf{h}}_{n}^{k}-\mathbf{g}_{n}^{k}\right),
+$$  
+
+where $\beta\in[0,1]$ represents the trade-off between two factors. We demonstrate that the moving average error feedback can reduce the total accumulated error when applying it to SGD or Adam-Type optimizers in Lemma C.2 and Lemma C.3. In brief, we simply formulate the iteration of SGD and Adam-Type optimizers as $\begin{array}{r}{\pmb{\theta}^{k}=\pmb{\theta}^{0}-\sum_{i=i}^{k}\pmb{\eta}^{i}\circ\pmb{\mathrm{g}}^{i}}\end{array}$ , where $\pmb{\theta}$ means the model’s weight and $\mathrm{o}$ means the Hadamard product of two vectors. Our analysis shows that moving average error-feedback effectively reduces the accumulated gap of weights updated by $\mathbf{g}$ and by $\tilde{\bf g}$ as  
+
+$$
+\left\|\sum_{i=i}^{k}\eta^{i}\circ\mathbf{g}^{i}-\sum_{i=i}^{k}\eta^{i}\circ\tilde{\mathbf{g}}^{i}\right\|\leq\mathcal{O}\left(\eta\|\mathbf{e}^{k}\|\right),
+$$  
+
+which means as the training goes on, the accumulated compression error of the top $k$ rounds is only of $\mathbf{e}^{k}$ -order, instead of the accumulation from $\mathbf{e}^{0}$ to $\mathbf{e}^{k}$ . Compared with vanilla error feedback technique [46], taking moving average of the historical error maintains stability to some extent and reduces the variance of accumulated error.  
+
+Moreover, we consider the compression error in the early training process cannot guide the later iteration, so we reset the compression error after a given number of iterations like 128. Combining the techniques above we propose SEPARATE method in Algorithm 1. Our SEPARATE can be applied to all the gradient-based optimizers with a few lines of codes, as shown in Algorithm 2.  
+
+
+
+\section{5 Convergence Guarantee  }
+
+
+In this section, we propose the convergence guarantee of our SEPARATE method. We consider the following non-convex optimization problem  
+
+$$
+\operatorname*{min}_{\pmb{\theta}}f(\pmb{\theta})=\mathbb{E}_{\zeta\sim\mathcal{D}}\left[F(\pmb{\theta},\zeta)\right],
+$$  
+
+where $F$ is the non-convex optimization objective and $\pmb{\theta}$ is the model weight to update. Data is sampled from a given distribution $\mathcal{D}$ . We focus on the convergence rate of SEPARATEbased SGD and Adam-Type Optimizer to find an $\epsilon$ -approximate first-order stationary point of the objective $f(\cdot)$ . For such SEPARATE-based optimizers, they update the model weight as below:  
+
+$$
+\mathbf{S}\mathbf{G}\mathbf{D}:\theta^{k+1}=\theta^{k}-\eta\tilde{\mathbf{h}}^{k},\quad\quad\mathrm{Adam-Type:}\left\{\begin{array}{l l}{\mathbf{m}^{k}=(1-\beta_{1})\mathbf{m}^{k-1}+\beta_{1}\tilde{\mathbf{h}}^{k},}\\ {\eta^{k}=\eta\times v\left(\tilde{\mathbf{h}}^{0},\cdots,\tilde{\mathbf{h}}^{k}\right),}\\ {\theta^{k+1}=\theta^{k}-\eta^{k}\circ\mathbf{m}^{k},}\end{array}\right.
+$$  
+
+where $\beta_{1}\in(0,1)$ , and $\boldsymbol{v}(\cdot)$ computes a series of pre-conditioners based on different AdamType optimizers. For example, $\boldsymbol{v}(\cdot)$ computes the inverse of the second order moment of Adam’s gradient like $v\left(\tilde{\mathbf{h}}^{0},\cdot\cdot\cdot\mathbf{\Phi},\tilde{\mathbf{h}}^{k}\right)=1/\sqrt{\mathbf{v}^{k}+\delta}$ where $\mathbf{v}^{k}=(1-\beta_{2})\mathbf{v}^{k-1}+\beta_{2}(\tilde{\mathbf{h}}^{k})^{2}$ . Adam-Type optimizers differ from various definitions of $v(\cdot)$ [27, 15, 47]. We analyze them uniformly.  
+
+Like the common analysis of the convergence rate of general non-convex objective [24], we define the $\epsilon$ -approximate first-order stationary point as below.  
+
+Definition 5.1 ( $\epsilon$ -stationary point). The model weight $\theta$ is an $\epsilon$ -appriximate first-order stationary point of $f$ if $\|\nabla f(\mathbf{x})\|\leq\epsilon$ .  
+
+Definition 5.1 means for SGD and Adam-Type optimizers, we need to find the iteration round $K$ such that $\begin{array}{r}{\operatorname*{min}_{k\in[K]}\mathbb{E}\left\|\nabla f(\pmb{\theta}^{k})\right\|\leq\epsilon}\end{array}$ , or more tightly  
+
+$$
+\frac{1}{K}\sum_{k=0}^{K-1}\mathbb{E}\left\|\nabla f(\pmb{\theta}^{k})\right\|^{2}\leq\epsilon^{2}.
+$$  
+
+Moreover, we formally present some assumptions to constrain the objective function and the optimization problem. Assumption 5.2 and 5.3 are commonly used to describe the properties of the objective in stochastic setting [24, 16]. Assumption 5.4 ensures the trace of Hessian is bounded globally, which is also common in practical applications [43].  
+
+Assumption 5.2 (L-smoothness). The function $f$ is $L$ -smooth if it satisfies  
+
+$$
+\lVert f(\pmb\theta_{1})-f(\pmb\theta_{2})\rVert\leq L\lVert\pmb\theta_{1}-\pmb\theta_{2}\rVert,\quad\forall\pmb\theta_{1},\pmb\theta_{2}\in\mathbb{R}^{d}.
+$$  
+
+Assumption 5.3 (Stochastic Gradient Boundness). The stochastic gradient $\mathbf{g}^{k}$ on each device is unbiased and its infinite norm and variance are bounded as:  
+
+$$
+\begin{array}{r}{\mathbb{E}\|\mathbf{g}^{k}\|_{\infty}\leq c_{\infty},\qquad\mathbb{E}\left\|\nabla f(\pmb{\theta}^{k})-\mathbf{g}^{k}\right\|^{2}\leq\sigma^{2},\quad\forall k\in[K].}\end{array}
+$$  
+
+Assumption 5.4 (Hessian-domination). The function $f$ is A-Hessian dominated if there exists a matrix A such that $\nabla^{2}f(\pmb{\theta})\preceq\mathbf{A},\forall\pmb{\theta}\in\mathbb{R}^{d}$ .  
+
+Now we present the main theorem of the convergence rate of SEPARATE-based SGD and Adam-Type optimizers in general non-convex setting.  
+
+Theorem 5.5 (SEPARATE-based SGD convergence). Suppose Assumption 5.2, 5.3 and 5.4 hold. Let ${\bf e}^{0}\in B({\bf0},c_{1})$ , namely $\forall\mathbf{x}\in B(\mathbf{0},c_{1}),\|\mathbf{x}\|\leq c_{1}$ . Let $m\leq{\frac{\operatorname{tr}(\mathbf{A})}{L}}$ and $\begin{array}{r}{\eta\leq\frac{m}{4\mathrm{tr}(\mathbf{A})}}\end{array}$ . With $\eta=\mathcal{O}\left(d^{-1/2}\epsilon^{2}\right)$ in SEPARATE-based $S G D$ , after $K=\Omega\left(d^{1/2}\epsilon^{-4}\right)$ iterations in Algorithm 1, it holds  
+
+$$
+\frac{1}{K}\sum_{k=0}^{K}\mathbb{E}\left\|\nabla f(\tilde{\pmb{\theta}}^{k})\right\|^{2}\leq\mathcal{O}\left(\epsilon^{2}\right).
+$$  
+
+Remark 5.6. This improved convergence rate under standard non-convex stochastic setting is derived from our analysis of trace-bounded variance in Lemma 4.2. In the common analysis of compression techniques, compression reduces the amount of information through single step communication by $O(d)$ times, or with $O(d)$ -variance $\it{[2]}$ . Moreover, considering error feedback technique brings bias, the analysis is commonly element-wise [2, 46]. Thus the convergence rate is often dimensional dependent $\mathcal{O}\left(d\epsilon^{-4}\right)$ , but they assume it is default and usually ignore this item [46]. Considering modern LLMs training, the dimension of parameters is often extremely large and cannot be ignored. Fortunately, our analysis provides an improved rate on the order of $d$ from $O(d)$ to $\mathcal{O}\left(d^{1/2}\right)$ under natural defined Assumption 5.3 from "top-heavy" $\eta$ Hessian observation. It is the first gradient compression method to achieve such rate to the best of our knowledge.  
+
+Theorem 5.7 (SEPARATE-based Adam-Type convergence). Suppose Assumption 5.2, 5.3 hold. Assume $c_{l}\leq\|v(\cdot)\|_{\infty}\leq c_{u}$ and $\|\eta^{k}-\eta^{k-1}\|_{\infty}\leq\eta\beta_{1}(1-\beta_{1})^{K-k}c_{u}$ . Let $\mathbf{e}^{0}\in B(\mathbf{0},c_{1})$ , η ≤min 2Lclc2u ,5c1u. 5(11l−β1)L . With $\eta=\mathcal{O}\left(d^{-1}\epsilon^{2}\right)$ and $\beta_{1}\,=\,\mathcal{O}\left(d^{-1}\epsilon^{2}\right)$ in SEPARATEbased Adam-Type optimizers, after $K=\Omega\left(d\epsilon^{-4}\right)$ iterations in Algorithm $\boldsymbol{\mathit{1}}$ , it holds  
+
+$$
+\frac{1}{K}\sum_{k=0}^{K-1}\mathbb{E}\left[\left\|\nabla f(\tilde{\pmb{\theta}}^{k})\right\|^{2}+\frac{1}{4}\left\|\mathbf{m}^{k}\right\|^{2}\right]\leq\mathcal{O}\left(\epsilon^{2}\right).
+$$  
+
+Remark 5.8. Because different coordinates of the gradient are updated with different step sizes in Adam-Type optimizers, the convergence rate is inevitably dependent on dimension $d$ , and combined with compression and error feedback, Adam-Type optimizers are often $O(d)$ at the order of $d$ . Theorem 5.7 shows that integrating SEPARATE with various Adam-Type optimizers does not affect their convergence speed. Thus SEPARATE-based Adam-Type optimizers share the same stochastic gradient complexity as $\mathcal{O}\left(\epsilon^{-4}\right)$ when ignoring the dimensional factor $d$ .  
+
+6 Experiments  
+
+6.1 SOTA Comparison with Communication Efficient Methods  
+
+We evaluate SEPARATE on both pre-training and fine-tuning tasks of LLMs.  
+
+Pre-Training GPT-2 from Scratch. We train GPT-2-345M with vanilla Adam optimizer as a baseline and compare the convergence speed with our SEPARATE-based Adam optimizer with baseline and PowerSGD [55]. We set different compression ratios of SEPARATE and compare the convergence speed of iteration steps and wall-clock time, respectively in Figure 2 (a) and (b). Figure 2 (a) demonstrates that though high compression ratio results in more  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/a0811f999e6d275840e8d2b3d6d1877415080ef132d185503be5f5d105ef9b40.jpg)  
+Figure 2: Loss curve and single step time cost of vanilla Adam and SEPARATE with different compression ratios (CR) on GPT-2-345M trained with 50B tokens OpenWebtext dataset. (a) shows the loss against the iteration steps, and (b) shows the loss against the wall-clock time. (c) shows the single-step time cost of vanilla Adam and SEPARATE with different compression ratios.  
+
+Table 1: Performance comparison with representative communicatio-efficient methods. We fine-tune LLAMA2-7B on the alpaca-gpt4 dataset and evaluate the performance on downstream tasks, including commonsense reasoning, world knowledge, math, and code.   
+
+![](images/d0ccfb3e37399bbd9cf55d3b6391b71901b5e293cb9b15b626c89a85b5078ec8.jpg)  
+
+steps to reach the same loss, SEPARATE-based optimizer with the proper compression ratio even has a faster convergence speed of iteration steps. Figure 2 (b) shows that SEPARATE can accelerate the training speed up to $2\times$ for GPT-2-345M pre-training by trade-off the compression ratio and one-step cost, compared with baseline and PowerSGD. Thus we think effective designing algorithms based on low-rank gradient and Hessian of model ensures accurate training with lower cost. Moreover, we test the single-step time cost of vanilla Adam and SEPARATE with different compression ratios on GPT-2-125M and GPT-2-345M. We find that when model scale increases, the effect of SEPARATE is more remarkable, so SEPARATE is significant in training large-scale models.  
+
+Fine-tuning LLAMA2 and Evaluating on Downstream Tasks. We follow LlamaAccessory [63] and fine-tune LLAMA2-7B[51] model on alpaca-gpt4 [39] dataset for three epochs, and evaluate the ability of fine-tuned model on several downstream tasks including commonsense reasoning, world knowledge, math and code. We report the scores obtained on these evaluation benchmarks in Table 1. We compute the average score (Avg.S, ↑) and average rank $\scriptstyle(\mathrm{Avg}.\mathrm{R},\downarrow)$ ) of each method. The results indicate that SEPARATE outperforms other lowrank or low-bit optimizers with error feedback and ZeRO $^{++}$ , even beyond the performance of vanilla Adam optimizer without compression on the comprehensive performance of all the downstream tasks. Moreover, other communication-efficient optimizers have much worse performance than SEPARATE and vanilla Adam, especially on commonsense reasoning tasks. The possible reason for this result is that their last-iteration-based error feedback cannot deal with the accumulated error during the whole process, while SEPARATE is applied with the moving average of the historical error to stabilize the error and error reset mechanism to remove useless information.  
+
+6.2 Ablation Experiments  
+
+We conduct ablation experiments to explore the effect of each component in SEPARATE, including 1)error-feedback technique (Err.Fed.), 2)moving average update of error (Err.Avg.) and 3)error reset mechanism (Err.Re.). For training from scratch, without error-feedback and moving average techniques, the training process becomes unstable and cannot converge. We show the results in Section 6.3. For fine-tuning tasks, we fine-tune the LLAMA2-7B model on alpaca-gpt4 dataset, applying SEPARATE on Adam optimizer with bfloat16 precision. The results are shown in Table 2.  
+
+Table 2: Effects of components in SEPARATE to the performance of LLAMA2-7B fine-tuned  
+
+![](images/6b3d63d9cdf04d0132f97ddfc3470c7a991933b0cd75b92f61e145189a798131.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+![](images/8697bdfe54102c566e57870f42f80cd31cdcd7e74abfbda339922483879b9baf.jpg)  
+Figure 3: Hyper-parameter choice of SEPARATE and memory cost report. (a) shows the effect of different common random seeds to SEPARATE training with compression ratio 16. (b) shows the effect of different $\beta$ choices of moving average update of error to SEPARATE training with compression ratio 16. (c) shows the peak memory in Adam and SEPARATE training on different models with compression ratio 16.  
+
+means we do not use moving average update of error, the convergence speed shows down remarkably in the first few steps, and in the subsequent iterations it seriously deviates from the optimal dynamic. Setting $\beta\,=\,0.95$ seems to be acceptable, and when decreasing $\beta$ , the convergence speed slows down again. When $\beta\leq0.80$ , the training dynamic becomes unstable with loss value increasing to NaN, which means that if we gradually ignore the compression error of current iteration, (specifically $\beta=0$ means we do not use error-feedback technique), the training process becomes unstable and cannot converge.  
+
+Compression Ratio. We conduct experiments to test the effect of the scale of compression ratio on the performance of models. One advantage of SEPARATE is that SEPARATE can set the compression ratio by users themselves instead of 4 or 8 (at most 32) like quantization methods. We set the compression ratio as 8,16,64, and 128, respectively, and tested the performance of the fine-tuned model on downstream tasks. The results are shown in Table 3. The results show that increasing the compression ratio to a certain extent enhances the performance of the model, due to the certain noise improving the generalization of models. Besides, an overlarge compression ratio reduces the performance of models, but the accuracy loss is within the acceptable range because if we compress the gradient 128 times, the communication cost is a quarter of 1-bit quantization methods and the performance is better than it. We also find that with different compression ratios, SEPARATE focuses on different types of tasks, so users can set the ratio adaptively.  
+
+
+
+\section{6.4 Memory Cost of SEPARATE  }
+
+
+We report the peak memory in Figure 3 (c). Results show the peak memory when training or fine-tuning corresponding models, which demonstrates that the extra memory SEPARATE is negligible in comparison with the communication cost it saves. Moreover, by expanding the random vector buffer, we can save time in generating random Gaussian vectors, which means we can use some memory cost to exchange computational time in compression and decompression to accelerate training process.  
+
+
+
+\section{7 Conclusion  }
+
+
+In this paper, we propose a simple low-rank projection for gradient compression in modern large-scale model training process named SEPARATE. We have carried out theoretical analysis and a lot of experimental verification to illustrate SEPARATE provides an easy way to apply gradient compression to all types of gradient-based optimizers across various training frameworks, while maintaining high-quality training performance and achieving significant compression. We think SEPARATE is helpful for the further study and popularization of large-scale models.  
+
+[1] Saurabh Agarwal et al. “On the utility of gradient compression in distributed training systems”. In: Proceedings of Machine Learning and Systems 4 (2022), pp. 652–672. [2] Alham Fikri Aji and Kenneth Heafield. “Sparse communication for distributed gradient descent”. In: arXiv preprint arXiv:1704.05021 (2017). [3] Krizhevsky Alex. “Learning multiple layers of features from tiny images”. In: https://www. cs. toronto. edu/kriz/learning-features-2009-TR. pdf (2009).   
+[4] Jacob Austin et al. “Program synthesis with large language models”. In: arXiv preprint arXiv:2108.07732 (2021). [5] Yutong Bai et al. “Sequential modeling enables scalable learning for large vision models”. In: arXiv preprint arXiv:2312.00785 (2023).   
+[6] Jeremy Bernstein et al. “signSGD: Compressed optimisation for non-convex problems”. In: International Conference on Machine Learning. PMLR. 2018, pp. 560–569. [7] Yonatan Bisk et al. “Piqa: Reasoning about physical commonsense in natural language”. In: Proceedings of the AAAI conference on artificial intelligence. Vol. 34. 05. 2020, pp. 7432–7439.   
+[8] Andreas Blattmann et al. “Align your latents: High-resolution video synthesis with latent diffusion models”. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2023, pp. 22563–22575.   
+[9] Tom Brown et al. “Language models are few-shot learners”. In: Advances in neural information processing systems 33 (2020), pp. 1877–1901.   
+[10] Peter Clark et al. “Think you have solved question answering? try arc, the ai2 reasoning challenge”. In: arXiv preprint arXiv:1803.05457 (2018).   
+[11] Karl Cobbe et al. “Training verifiers to solve math word problems”. In: arXiv preprint arXiv:2110.14168 (2021).   
+[12] OpenCompass Contributors. “Opencompass: A universal evaluation platform for foundation models”.   
+[13] Romain Cosson et al. “Low-Rank Gradient Descent”. In: IEEE Open Journal of Control Systems (2023).   
+[14] Ning Ding et al. “Delta tuning: A comprehensive study of parameter efficient methods for pre-trained language models”. In: arXiv preprint arXiv:2203.06904 (2022).   
+[15] John Duchi, Elad Hazan, and Yoram Singer. “Adaptive subgradient methods for online learning and stochastic optimization.” In: Journal of machine learning research 12.7 (2011).   
+[16] Cong Fang, Zhouchen Lin, and Tong Zhang. “Sharp analysis for nonconvex sgd escaping from saddle points”. In: Conference on Learning Theory. PMLR. 2019, pp. 1192–1234.   
+[17] Aaron Gokaslan and Vanya Cohen. OpenWebText Corpus. http : / / Skylion007 .io/OpenWebTextCorpus. 2019.   
+[18] Eduard Gorbunov et al. “MARINA: Faster non-convex distributed learning with compression”. In: International Conference on Machine Learning. PMLR. 2021, pp. 3788– 3798.   
+[19] Yongchang Hao, Yanshuai Cao, and Lili Mou. Flora: Low-Rank Adapters Are Secretly Gradient Compressors. 2024. arXiv: 2402.03293 [cs.LG]. url: https://arxiv.org/ abs/2402.03293.   
+[20] Kaiming He et al. “Deep residual learning for image recognition”. In: Proceedings of the IEEE conference on computer vision and pattern recognition. 2016, pp. 770–778.   
+[21] Yutong He, Xinmeng Huang, and Kun Yuan. “Unbiased Compression Saves Communication in Distributed Optimization: When and How Much?” In: Advances in Neural Information Processing Systems 36 (2024).   
+[22] Edward J Hu et al. “Lora: Low-rank adaptation of large language models”. In: arXiv preprint arXiv:2106.09685 (2021).   
+[23] M.F. Hutchinson. “A stochastic estimator of the trace of the influence matrix for Laplacian smoothing splines”. In: Communication in Statistics- Simulation and Computation 18 (Jan. 1989), pp. 1059–1076. doi: 10.1080/03610919008812866.   
+[24] Prateek Jain, Purushottam Kar, et al. “Non-convex optimization for machine learning”. In: Foundations and Trends® in Machine Learning 10.3-4 (2017), pp. 142–363.   
+[25] Albert Q Jiang et al. “Mixtral of experts”. In: arXiv preprint arXiv:2401.04088 (2024).   
+[26] Mandar Joshi et al. “Triviaqa: A large scale distantly supervised challenge dataset for reading comprehension”. In: arXiv preprint arXiv:1705.03551 (2017).   
+[27] Diederik P Kingma and Jimmy Ba. “Adam: A method for stochastic optimization”. In: arXiv preprint arXiv:1412.6980 (2014).   
+[28] Tom Kwiatkowski et al. “Natural questions: a benchmark for question answering research”. In: Transactions of the Association for Computational Linguistics 7 (2019), pp. 453–466.   
+[29] Conglong Li et al. “1-bit LAMB: communication efficient large-scale large-batch training with LAMB’s convergence speed”. In: 2022 IEEE 29th International Conference on High Performance Computing, Data, and Analytics (HiPC). IEEE. 2022, pp. 272–281.   
+[30] Zhize Li et al. “Acceleration for compressed gradient descent in distributed and federated optimization”. In: arXiv preprint arXiv:2002.11364 (2020).   
+[31] Vladislav Lialin et al. “Relora: High-rank training through low-rank updates”. In: The Twelfth International Conference on Learning Representations. 2023.   
+[32] Yujun Lin et al. “Deep gradient compression: Reducing the communication bandwidth for distributed training”. In: arXiv preprint arXiv:1712.01887 (2017).   
+[33] Yuanshi Liu et al. Accelerated Gradient Algorithms with Adaptive Subspace Search for Instance-Faster Optimization. 2023. arXiv: 2312.03218 [cs.LG].   
+[34] Yucheng Lu et al. “Maximizing communication efficiency for large-scale training via 0/1 adam”. In: arXiv preprint arXiv:2202.06009 (2022).   
+[35] David Luebke. “CUDA: Scalable parallel programming for high-performance scientific computing”. In: 2008 5th IEEE international symposium on biomedical imaging: from nano to macro. IEEE. 2008, pp. 836–838.   
+[36] Deepak Narayanan et al. “Efficient large-scale language model training on gpu clusters using megatron-lm”. In: Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis. 2021, pp. 1–15.   
+[37] Yurii Nesterov. Introductory lectures on convex optimization: A basic course. Vol. 87. Springer Science & Business Media, 2013.   
+[38] Pitch Patarasuk and Xin Yuan. “Bandwidth optimal all-reduce algorithms for clusters of workstations”. In: Journal of Parallel and Distributed Computing 69.2 (2009), pp. 117– 124.   
+[39] Baolin Peng et al. “Instruction tuning with gpt-4”. In: arXiv preprint arXiv:2304.03277 (2023).   
+[40] Alec Radford et al. “Language models are unsupervised multitask learners”. In: OpenAI blog 1.8 (2019), p. 9.   
+[41] Samyam Rajbhandari et al. “Zero: Memory optimizations toward training trillion parameter models”. In: SC20: International Conference for High Performance Computing, Networking, Storage and Analysis. IEEE. 2020, pp. 1–16.   
+[42] Peter Richtárik, Igor Sokolov, and Ilyas Fatkhullin. “EF21: A new, simpler, theoretically better, and practically faster error feedback”. In: Advances in Neural Information Processing Systems 34 (2021), pp. 4384–4396.   
+[43] Levent Sagun, Leon Bottou, and Yann LeCun. “Eigenvalues of the hessian in deep learning: Singularity and beyond”. In: arXiv preprint arXiv:1611.07476 (2016).   
+[44] Levent Sagun et al. Empirical Analysis of the Hessian of Over-Parametrized Neural Networks. 2018. arXiv: 1706.04454 [cs.LG]. url: https://arxiv.org/abs/1706. 04454.   
+[45] Keisuke Sakaguchi et al. “Winogrande: An adversarial winograd schema challenge at scale”. In: Communications of the ACM 64.9 (2021), pp. 99–106.   
+[46] Frank Seide et al. “1-bit stochastic gradient descent and its application to data-parallel distributed training of speech dnns”. In: Fifteenth annual conference of the international speech communication association. 2014.   
+[47] Noam Shazeer and Mitchell Stern. “Adafactor: Adaptive learning rates with sublinear memory cost”. In: International Conference on Machine Learning. PMLR. 2018, pp. 4596–4604.   
+[48] Mohammad Shoeybi et al. “Megatron-lm: Training multi-billion parameter language models using model parallelism”. In: arXiv preprint arXiv:1909.08053 (2019).   
+[49] Hanlin Tang et al. “1-bit adam: Communication efficient large-scale training with adam’s convergence speed”. In: International Conference on Machine Learning. PMLR. 2021, pp. 10118–10129.   
+[50] Yuandong Tian et al. “Joma: Demystifying multilayer transformers via joint dynamics of mlp and attention”. In: arXiv preprint arXiv:2310.00535 (2023).   
+[51] Hugo Touvron et al. “Llama 2: Open foundation and fine-tuned chat models”. In: arXiv preprint arXiv:2307.09288 (2023).   
+[52] Hugo Touvron et al. “Llama: Open and efficient foundation language models”. In: arXiv preprint arXiv:2302.13971 (2023).   
+[53] Alexander Tyurin and Peter Richtárik. “DASHA: Distributed nonconvex optimization with communication compression, optimal oracle complexity, and no client synchronization”. In: arXiv preprint arXiv:2202.01268 (2022).   
+[54] Ashish Vaswani et al. “Attention is all you need”. In: Advances in neural information processing systems 30 (2017).   
+[55] Thijs Vogels, Sai Praneeth Karimireddy, and Martin Jaggi. “PowerSGD: Practical low-rank gradient compression for distributed optimization”. In: Advances in Neural Information Processing Systems 32 (2019).   
+[56] Guanhua Wang et al. “Zero++: Extremely efficient collective communication for giant model training”. In: arXiv preprint arXiv:2306.10209 (2023).   
+[57] Hongyi Wang et al. “Atomo: Communication-efficient learning via atomic sparsification”. In: Advances in neural information processing systems 31 (2018).   
+[58] Wenhan Xia, Chengwei Qin, and Elad Hazan. “Chain of lora: Efficient fine-tuning of language models via residual learning”. In: arXiv preprint arXiv:2401.04151 (2024).   
+[59] Hang Xu et al. “Compressed communication for distributed deep learning: Survey and quantitative evaluation”. In: (2020).   
+[60] Greg Yang, James B Simon, and Jeremy Bernstein. “A spectral condition for feature learning”. In: arXiv preprint arXiv:2310.17813 (2023).   
+[61] Pengyun Yue et al. CORE: Common Random Reconstruction for Distributed Optimization with Provable Low Communication Complexity. 2023. arXiv: 2309.13307 [cs.LG].   
+[62] Rowan Zellers et al. “Hellaswag: Can a machine really finish your sentence?” In: arXiv preprint arXiv:1905.07830 (2019).   
+[63] Renrui Zhang et al. “Llama-adapter: Efficient fine-tuning of language models with zero-init attention”. In: arXiv preprint arXiv:2303.16199 (2023).   
+[64] Jiawei Zhao et al. “Galore: Memory-efficient llm training by gradient low-rank projection”. In: arXiv preprint arXiv:2403.03507 (2024).   
+[65] Yanli Zhao et al. “Pytorch fsdp: experiences on scaling fully sharded data parallel”. In: arXiv preprint arXiv:2304.11277 (2023).  
+
+![](images/b5bf5cb382860fd1b2fde891b6510f285893416c3cfd1c49024f21f09b563144.jpg)  
+
+additional overhead in actual application, because we can easily set a dedicated common random seed to generate the same random variables on each node during initialization. Moreover, we could easily apply SEPARATE to all kinds of gradient-based optimizers and can be regarded as a plug-in, which can be simply implemented with a few lines of code in off-the-shelf frameworks as shown in Algorithm 2. This means that our method is also the first gradient compression technique that can be seamlessly integrated with FSDP rather than DDP to the best of our knowledge.  
+
+Robustness with Few Parameter Tuning. We expect to propose a simple and effective gradient compression method that can be efficiently adapted to existing LLMs training frameworks. Therefore, we expect the method to have a certain degree of robustness, that is, it does not depend on the resetting of hyperparameters. In our experiments, all hyperparameters are derived from the default settings of the corresponding model trained under the corresponding framework. In other words, we do not adjust the hyperparameters individually for SEPARATE. In addition, the method introduces the compression ratio. Our variance analysis and the main theorem demonstrate that, provided the selection of the compression ratio aligns with the conditions in our theoretical analysis (Theorem 5.5 and 5.7), our method can exhibit effective performance. This theoretical underpinning ensures that our method is robust within the specified compression ratio. Second, in practical applications, especially for models with a substantial number of parameters, such as those in the millions or billions, we can defaultly set the compression ratio as 16, 32 or 64. As illustrated in Table 3, the performance differences between compression ratios of 16, 32, or 64 times for gradient information are minimal. Consequently, the choice of compression ratio is more influenced by the user’s device constraints rather than the intrinsic characteristics of the model.  
+
+
+

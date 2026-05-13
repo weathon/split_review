@@ -1,0 +1,364 @@
+\title{Interpolating Video-LLMs:  Toward Longer-sequence LMMs in a Training-free Manner}
+
+\begin{abstract}
+Advances in Large Language Models (LLMs) have inspired various strategies for integrating video modalities. 
+A key approach is Video-LLMs, which incorporate an optimizable interface linking sophisticated video encoders to LLMs. 
+However, due to computation and data limitations, existing Video-LLMs are typically pre-trained to process only short videos, limiting their broader application for understanding longer video content. Additionally, fine-tuning Video-LLMs to handle longer videos is cost-prohibitive.
+Consequently, it is essential to explore the interpolation of Video-LLMs under a completely training-free setting. In this paper, we first identify the primary challenges in interpolating Video-LLMs: \raisebox{-1.1pt}{\ding[1.1]{182\relax}} the video encoder and modality alignment projector are fixed, preventing the integration of additional frames into Video-LLMs, and \raisebox{-1.1pt}{\ding[1.1]{183\relax}} the LLM backbone is limited in its content length capabilities, which complicates the processing of an increased number of video tokens.
+To address these challenges, we propose an \textbf{INT}er\textbf{P}olation method for Video-LLMs (\intp-Video-LLMs). We introduce a video token rearrangement technique that circumvents limitations imposed by the fixed video encoder and alignment projector. Furthermore, we introduce a training-free LLM context window extension method to enable Video-LLMs to understand a correspondingly increased number of visual tokens. 
+We analyze the deployment costs of \intp-Video-LLM, and find its efficiency bottleneck is on its KV cache cost. Accordingly, we introduce a training-free KV-cache compression mechanism that reduces memory overhead during inference. 
+\intp-VideoLLM not only supports the processing of longer video sequences but also optimizes memory usage during inference---all achieved without the need for additional training. 
+In practice, whereas pre-trained Video-LLaVA~\citep{lin2023video} models are configured to process just 8 frames, \intp~allows these models to comprehend 32 frames.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Large Language Models (LLMs)~\citep{gpt4,touvron2023llama,touvron2023llama2}, have shown tremendous capabilities in question answering and reasoning. 
+Building on this foundation, Vision LLMs extend these abilities to include images, employing a vision encoder and an LLM to generate text responses given an image and a related question~\citep{liu2023llava,zhang2024mm}.
+Recent advancements aim to extend this capability from image understanding to video understanding~\citep{lin2023video,zhang2023video,kim2024image}.
+Video-LLMs combine video data with language models by integrating learnable interfaces that capture both spatial and temporal information in video. 
+Typically, these interfaces use a projection network~\citep{li2023llama,maaz2023video,li2023videochat} to transform video content into video tokens that can be interpreted by LLMs, thereby bridging the gap between video information and text processing capabilities of LLMs (see Fig.\ref{fig:brief}).
+However, existing Video-LLMs \citep{li2023llama,lin2023video,maaz2023video,li2023videochat,kim2024image} struggle to process long videos. 
+In particular, Video-LLMs often lack the temporal resolution necessary to precisely model temporal events, limiting its application to long video~\citep{huang2024lita}. 
+For instance, Video-LLaMA~\citep{li2023llama} and Video-LLaVA~\citep{lin2023video} only sample 8 frames uniformly across an entire video, which is often too short for detailed temporal analysis~\citep{huang2024lita}. 
+Simply feeding more frames into these models does not resolve the issue, as their architectures cannot effectively process a larger number of frames.
+Consequently, there is a pressing need for Video-LLMs that can understand larger numbers of video frames.
+
+To reach this goal, one could consider training Video-LLMs from scratch to handle more extensive video frames. 
+Unfortunately, this approach can be impractical due to prohibitive training costs and data accessibility issues. 
+On the one hand, Video-LLMs require increasingly large datasets, making data acquisition more challenging, especially considering copyright restrictions on video-language paired data. 
+In some cases, the training data are not publicly available. Sometimes, only the model weights are released while the data is not open. 
+On the other hand, the computation cost of training a Video-LLM is expensive. For example, even the relatively less costly Video-LLaVA~\citep{lin2023video} requires thousands of hours on Nvidia A100 GPUs. Therefore, retraining a Video-LLM to process more frames is not feasible in many scenarios.
+\begin{figure}[!t]
+\centering
+    \includegraphics[width=0.999\textwidth]{figures/brief.pdf}
+\captionsetup{font=small}
+\caption{\textbf{(Left) Video-LLMs} consist of three main components: a video encoder, an alignment projector layer, and a fine-tuned LLM backbone. The process begins with the video encoder transforming video frames into a series of visual tokens. A projector then maps these tokens, aligning visual features with text features. The resulting aligned features, along with text prompts, are subsequently fed into the LLM backbone for visual understanding.
+\textbf{(Right) \intp}, a training-free Video-LLM interpolation technique, addresses the existing constraints of Video-LLMs. We employ a video token \colorbox[rgb]{0.8, 0.8, 1.0}{\textbf{rearrangement}} that bypasses the limitations set by the fixed video encoder and alignment projector. Additionally, we implement a training-free LLM context window \colorbox[rgb]{0.6667, 0.8863, 0.4510}{\textbf{interpolation}} method to allow Video-LLMs to process an increased number of visual tokens effectively.}
+\label{fig:brief}
+\end{figure}
+In this paper, we aim to significantly increase the number of frames that existing Video-LLMs can use to understand videos in a training-free manner. We first delineate the primary challenges associated with interpolating Video-LLMs: \raisebox{-1.1pt}{\ding[1.1]{182\relax}} the video encoder and modality alignment projector are fixed, which prevents the integration of additional frames, and \raisebox{-1.1pt}{\ding[1.1]{183\relax}} the content length capacity of the LLM backbone is limited, hindering the processing of an increased number of visual tokens.
+
+To overcome these obstacles, we propose an \texttt{int}er\texttt{p}olation method for Video-LLMs, dubbed \intp. For the \raisebox{-1.1pt}{\ding[1.1]{182\relax}} challenge, we propose a video token rearrangement technique that bypasses the restrictions imposed by the fixed video encoder and alignment projector. 
+This approach allows utilizing the pre-trained video encoder and alignment projector to generate an increased number of video tokens for LLM reasoning while maintaining the video tokens' temporal consistency.
+For the \raisebox{-1.1pt}{\ding[1.1]{183\relax}} challenge, derived from the positional embedding mechanism in Video-LLMs (i.e., Rotary Position Embedding, RoPE~\citep{su2024roformer}), we develop a training-free Video-LLM context window extension method. This design ensures that the interpolated Video-LLM can handle any number of video frames.
+
+Upon developing the \intp-Video-LLM, we examine its deployment constraints and identify that the handling of an increased number of video tokens incurs additional memory usage. This finding echos the memory bottleneck in long-sequence LLM deployment~\citep{yuan2023asvd,yuan2024llm}.  
+To address this issue and enhance the deployment efficiency of \intp-Video-LLM, we introduce a training-free KV-cache compression technique that reduces memory overhead during inference. Consequently, \intp-Video-LLM not only facilitates the processing of longer video sequences but also optimizes memory usage during inference, all without necessitating further training.
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\subsection{Video Language Models}
+Prior to the emergence of LLMs, \citet{yang2022zero} introduced FrozenBiLM, which combined a frozen vision encoder with a bidirectional language model for efficient video processing.
+In the LLM era, video-language models continue to evolve. 
+For instance, Video-ChatGPT enhances video instruction tuning using high-quality instructional data~\citep{maaz2023video}. 
+\cite{li2023videochat} propose VideoChat, which utilizes cross-attention mechanisms to integrate video tokens with user queries and dialogue context. \cite{li2024mvbench} propose a follow-up work, VideoChat2, which advances this integration with a multi-stage bootstrapping method, focusing on modality alignment and further instruction tuning.
+Video-LLaVA~\citep{lin2023video} introduces a pre-aligned encoder that supports both image and video modalities, enabling shared projections and joint training across tasks.
+However, handling long videos is very challenging due to the high computational complexity and memory demands of representing extensive video content with video tokens. To address these issues, various advanced temporal modeling techniques have been deployed. 
+Chat-UniVi~\citep{jin2023chat} proposes a unified model that dynamically merges spatial and temporal tokens using k-NN techniques to streamline processing. 
+LLaMA-VID~\citep{li2023llama} uses a dual token system to effectively compress video tokens. 
+Despite these explorations, all previous methods rely on some form of training. In contrast, our work is the first to explore the extension of the Video-LLM context window in a \emph{training-free} manner, offering an approach to handling long video sequences without the computational expense and data requirements of traditional training methods. 
+\subsection{Long-context LLMs}
+LLMs are generally pre-trained with a specified context length, with models like LLaMA and LLaMA2 employing 2k and 4k tokens respectively \citep{touvron2023llama,touvron2023llama2}. Training LLMs from scratch to handle extended context is often prohibitively expensive for many researchers. 
+Thus, recent innovations have focused on extending the context length through fine-tuning methods. 
+Recent advancements focus on modifying the position embedding (PE), particularly RoPE \citep{su2024roformer}, employed in LLMs such as LLaMA and Mistral \citep{jiang2023mistral}. One of the main strategies is embedding scaling \citep{chen2023extending,liu2023scaling,peng2023yarn}, which modifies position embeddings to accommodate longer sequences, ensuring they remain within the pre-training scope and preventing feature extrapolation. For instance, \citet{chen2023extending} condense position indices to maintain alignment with the pre-training range, effectively expanding LLaMA's context to 16,000 tokens with minimal fine-tuning, requiring only 1,000 steps.
+In a different approach, \citet{liu2023scaling,roziere2023code} adjust the rotary base of RoPE, known as ``NTK-aware'' scaling.
+To the best of our knowledge, our work is the first exploration to extend the context window of Video-LLMs in a training-free manner.
+
+\subsection{Post-training Compression for KV Cache}
+Recently, the compression of Key-Value (KV) caches has garnered significant attention due to the prohibitively high memory consumption associated with generating long contextual sequences in LLMs. Current methods can be briefly categorized into three types: Quantization-aware, eviction-based, and attention-based.
+Quantization-aware compression reduces KV cache size by substituting the original KV cache with lower-precision approximations. KVQuant~\citep{hooper2024kvquant}, KIVI~\citep{liu2024kivi} and WKVQuant~\citep{yue2024wkvquant} are pioneering studies in KV cache quantization, revealing that keys and values should be quantized along different dimensions. Notably, KIVI compresses the KV cache to as few as 2 bits. \citet{yang2024no,dong2024qaq} further enhance quantization performance by identifying and selectively preserving more significant keys and values. 
+SKVQ~\citep{duanmu2024skvq} advances upon KIVI using a sliding window technique, wherein quantization parameters are determined on a window-wise basis. ZipCache~\citep{he2024zipcache} establishes a robust baseline for KV cache quantization, achieving compression ratios as high as 5x with negligible performance degradation.
+In this work, we analyze the development bottlenecks of long-context Video-LLMs and identify that the major constraint lies in the LLM's KV cache. To address this computational overhead, we leverage quantization techniques, effectively optimizing the model's memory usage and inference efficiency.
+
+
+\section{Method: Interpolating Video-LLMs}
+
+\label{sec:method}
+
+In this section, we first review the standard implementation of Video Large Language Models (Video-LLMs), with a particular focus on the main components and training pipelines. We highlight the difficulties of obtaining a long-video-LLM from scratch (Sec.\ref{subsec:prelim}). 
+Next, we present a totally training-free method specifically designed for Video-LLM \textbf{INT}er\textbf{P}olation, called \intp. 
+There are three advancements in the development and optimization of \intp: 
+(1) A video encoder and modality-alignment projector extension method (Sec.\ref{subsec:video-encoder-extension}); (2) A video-LLM context window extension method (Sec.~\ref{subsec:interpolatingllm}); and (3) An inference bottleneck analysis and a post-training quantization solution (Sec.\ref{subsec:efficiencybottleneck}). 
+
+\subsection{Preliminaries: Video Large Language Models (Video-LLMs)}
+\label{subsec:prelim}
+
+Video-LLMs are typically composed of three core modules: a video encoder, an alignment projector layer, and a fine-tuned large language model (LLM) backbone. The process begins with a video encoder—often a Vision Transformer (ViT)—which converts video input $\mathbf{X}_v\in\mathbb{R}^{N \times W\times H}$ into a series of visual tokens $\mathbf{Z}_v$, in which $N$ is number of frames, $W$ and $H$ is the pixel width and height of each frame. These tokens are processed by the input projector $\mathbf{\Theta}_{\mathbf{Z}_v\rightarrow\mathbf{H}_v}$, which maps the encoded visual features to the text feature space $\mathbf{H}$. The aligned features, along with text prompts $\mathbf{H}_{q}$, are then input into a LLM backbone, and then the language model can generate the response. The architecture of a typical Video-LLMs is illustrated in Fig.~\ref{fig:brief} (left). 
+
+Video encoders are crucial for compressing the raw video into compact representations. These encoders are often trained from scratch via multimodal alignment pretraining~\citep{yin2023survey}. For instance, LanguageBind \citep{zhu2023languagebind} employs contrastive learning during the pretraining phase to gradually align video modality with language modality. 
+Given that LLMs inherently process text, bridging the modality gap between natural language and video is essential. However, training a Video-LLM from scratch is prohibitively expensive. A more feasible approach involves using a learnable connector between the pre-trained visual encoder and the LLM, along with fine-tuning the LLM to better interpret visual tokens.
+Although those components can be trained via instruction tuning \citep{gong2023multimodal} or alignment tuning \citep{sun2023aligning}, their training remains costly. 
+For example, to train the video encoder, \citet{zhu2023languagebind} collect a large-scale video-and-text dataset, VIDAL-10M. In addition, even without pre-training the video encoder, fine-tuning the Video-LLaVA \citep{lin2023video} still consumes approximately 200 hours on Nvidia A100 GPUs.
+
+In summary, given the significant data and computational expenses associated with training Video-LLMs, developing these models from scratch to process long videos is challenging. 
+This underscores the importance of \textit{exploring methods to adapt existing Video-LLMs for extended video processing in a training-free manner}.
+
+In practice, the challenges in extending the Video-LLMs can be summarized from two key aspects: 
+\raisebox{-1.1pt}{\ding[1.1]{182\relax}} the \textit{fixed nature of the \ul{video encoder and modality alignment projector}}, and \raisebox{-1.1pt}{\ding[1.1]{183\relax}} the \textit{limited content length capacity of the \ul{LLM backbone}}. 
+First, the video encoder and alignment projector are typically configured during initial training and remain unchanged thereafter. 
+This prevents the system from incorporating additional frames beyond the preset limit, which limits the model's ability to adapt to videos of different lengths or to capture more granular temporal details within prolonged video sequences. 
+Second, the LLM backbone has a predefined limit on the number of tokens it can handle. This constrains the model's capacity to interpret a larger number of visual tokens, effectively capping the amount of visual information that can be processed. As the complexity and length of videos increase, these constraints become significant bottlenecks, hindering the model’s ability to fully understand and generate coherent responses based on longer video inputs.
+
+\subsection{Alternative Video Token Rearrangement}
+\label{subsec:video-encoder-extension}
+
+To address challenge \raisebox{-1.1pt}{\ding[1.1]{182\relax}}, we enable the video encoder and alignment projector to map video inputs with an increased number of frames into the text feature space.
+As shown in Fig.~\ref{fig:encoder}, the pre-trained video encoder is configured to process a fixed-length video sequence, $\mathbf{X}_v$, consisting of $N$ frames.
+The most straightforward approach is repeatedly using the encoder and projector to process $m \cdot N$ frames by sampling and encoding multiple subsets of frames $m$ times. 
+Once we have collected $m$ groups of video tokens, we can concatenate them together to get the whole long video's visual tokens. 
+
+However, since these video encoders and projectors are pre-trained to process only $N$ frames collectively, such repetitive usages lead to distorted temporal representations in the video token sequence.
+The concatenating video tokens may carry the frame's relative information—such as the inconsistency between the tokens of the $N$-th frame and those of the $(N+1)$-th frame (i.e., tokens of the $1$-th frame and those of the $(N+1)$-th frame end up sharing more similarity). 
+This discrepancy emerges because the transformer-processed tokens are not designed to naturally accommodate the increased spatial and temporal variety, potentially causing misalignments and inconsistencies in the encoded video features~\citep{xiao2023efficient,shang2024llava}.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/encoder.pdf}
+    \caption{\textbf{Alternative Video Token Rearrangement.} (Left) A video input sampled with fewer frames, such as 2 frames $\mathbf{X}_v$, is processed through a video encoder and projector to produce visual tokens $\mathbf{Z}_v$ and transformed features $\mathbf{H}_v$. 
+    (Right) Increasing the number of sampled frames, for example to 4 (Frame \#1 - \#4), results in a richer video input $\mathbf{X}_v'$. 
+    By pairing Frames \#1 with \#3 and \#2 with \#4, we obtain two subsequences, $\mathbf{X}_{v,1}$ and $\mathbf{X}_{v,1}$, each processed by the same frozen encoder and projector.
+    This results in new sets of tokens ($\mathbf{Z}_{v,1}$, $\mathbf{H}_{v,1}$; $\mathbf{Z}_{v,2}$, $\mathbf{H}_{v,2}$). These tokens are then correspondingly integrated into an extended sequence of features $\mathbf{H}_v'$.}
+    \label{fig:encoder}
+\end{figure}
+To overcome this issue, we propose a video token rearrangement technique that preserves the temporal consistency of the video tokens. 
+The technique allows the generation of an increased number of temporal-consistent video tokens, which enable the model to process extended video sequences without requiring retraining.
+The module employs a dynamic rearrangement of input frames and their corresponding tokens. Here's how the rearrangement works: 
+\begin{enumerate}[leftmargin=0.2in,topsep=0.01in,parsep=0.01in]
+\item  For a given video input $\mathbf{X}_v$ with $N$ frames, the video encoder generates an initial set of visual tokens $\mathbf{Z}_v$. These tokens are subsequently mapped by the alignment projector to produce $\mathbf{H}_v$. Both the encoder and the projector remain frozen to maintain consistency in processing.
+\item To enhance temporal coverage, the number of frames sampled is increased to $m\cdot N$, and the video is divided into subsequences to capture various temporal segments. For example: The first subsequence might include Frames $\{\#1, \#(m+1),\cdots\#(mN-m+1)\}$, providing some new but temporally overlapped ``view'' of these segments.
+Similarly, the rest $i$-th subsequence might consist of Frames $\{\#i, \#(m+i),\cdots\#(mN-m+i)\}$. These subsequences are processed separately through the same fixed video encoder and projector: The $i$-th subsequence processes to yield visual tokens $\mathbf{Z}_{v,i}$ and corresponding projected tokens $\mathbf{H}_{v,i}$.
+This approach increases the amount of visual data that can be processed without modifying the architecture or requiring retraining of the encoder and projector.
+\item  The visual tokens generated from each frame group are correspondingly integrated into a new sequence based on their frame's absolute location, $\mathbf{H}_v'$, as illustrated in Fig.~\ref{fig:encoder}. 
+\end{enumerate}
+This newly assembled token sequence can represent a more extended duration of the video than a single processing pass of the original input would allow. 
+In the following subsection, we demonstrate how to adapt the Video-LLM backbone to process the increased number of video tokens.
+
+\subsection{Interpolating Video-LLM backbone}
+\label{subsec:interpolatingllm}
+To address challenge \raisebox{-1.1pt}{\ding[1.1]{183\relax}}, we introduce a post-training interpolation method for the Video-LLM's backbone, specifically targeting its positional embedding. As discussed in the related work (Sec.~\ref{sec:related}), Rotary Position Embedding (RoPE)~\citep{su2024roformer}  is a widely-used positional encoding scheme adopted by several prominent LLMs, including Llama, Phi, Mistral, and Gemma. Consequently, RoPE has become the standard method for position embedding in Video-LLMs.
+
+\subsubsection{RoPE Fundamentals} RoPE integrates positional information into both the query vector $\mathbf{q}$ and key vector $\mathbf{k}$ of transformer models. Specifically, for a sequence of tokens $s_1, s_2,\cdots, s_L$ with embeddings $\mathbf{x}_1,\cdots,\mathbf{x}_L \in \mathbb{R}^D$ ($D$ is the dimension of the embedding), RoPE applies the following transformations:
+\begin{equation}
+    \mathbf{q}_m = f_q(\mathbf{x}_m, m) \in \mathbb{R}^{D}~~~\text{and}~~~\mathbf{k}_n = f_k(\mathbf{x}_n, n) \in \mathbb{R}^{D}.
+\end{equation}
+The transformation functions $f_q$ and $f_k$ incorporate positional information as:
+\begin{equation}
+    f_q(\mathbf{x}_m, m) = e^{im\theta} \mathbf{W}_q \mathbf{x}_m~~~\text{and}~~~f_k(\mathbf{x}_n, n) =  e^{in\theta} \mathbf{W}_k \mathbf{x}_n,
+\end{equation}
+where $\theta_d = b^{-2d/|D|}$ with a base $b = 10000$. These transformations ensure that the relative positions of tokens are reflected in their interactions through the inner product operations, represented by $m - n$ of the tokens as follows: $\langle f_q(\mathbf{x}_m, m), f_k(\mathbf{x}_n, n) \rangle_{\mathbb{R}} = $
+\begin{equation}
+\text{Re}(\langle f_q(\mathbf{x}_m, m), f_k(\mathbf{x}_n, n) \rangle_{\mathbb{C}})
+= \text{Re}(\mathbf{x}_m^* \mathbf{W}_q^* \mathbf{W}_k \mathbf{x}_n e^{i\theta(m-n)}) = g(\mathbf{x}_m, \mathbf{x}_n, m - n)
+\end{equation}
+where $^*$ is the conjugate of a complex number,  $\text{Re}(\mathbf{q}, \mathbf{k})$ is the real part of the inner product of  $\mathbf{q}$, $\mathbf{k}$, and $g(\cdot)$ is an abstract mapping function. In real coordinates, the RoPE can be expressed as follows:
+\begin{equation}
+\resizebox{.8 \textwidth}{!}{$
+    f_{\mathbf{W}}(\mathbf{x}_m, m, \theta_d) = 
+\begin{pmatrix}
+\cos m\theta_1 & -\sin m\theta_1 & 0 & 0 & \cdots & 0 & 0 \\
+\sin m\theta_1 & \cos m\theta_1 & 0 & 0 & \cdots & 0 & 0 \\
+0 & 0 & \cos m\theta_2 & -\sin m\theta_2 & \cdots & 0 & 0 \\
+0 & 0 & \sin m\theta_2 & \cos m\theta_2 & \cdots & 0 & 0 \\
+\vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\
+0 & 0 & 0 & 0 & \cdots & \cos m\theta_l & -\sin m\theta_l \\
+0 & 0 & 0 & 0 & \cdots & \sin m\theta_l & \cos m\theta_l \\
+\end{pmatrix}
+\mathbf{W} \mathbf{x}_m$}.
+\label{eq:rope}
+\end{equation}
+
+\subsubsection{Context Window Scaling} Given the fixed context lengths of pre-trained Video-LLMs, a significant question is how to extend these lengths cost-effectively. Utilizing the inherent flexibility of RoPE, we modify the embedding functions to handle extended sequences without extensive retraining:
+\begin{equation}
+    f'_{\mathbf{W}} (\mathbf{x}_m, m, \theta_d) = f_{\mathbf{W}} \left( \mathbf{x}_m, \frac{mL}{L'}, \theta_d \right),
+\end{equation}
+where $L' > L$ denotes a new, extended context window. It allows us to adapt the pre-trained positional embeddings to longer contexts, maintaining accuracy.
+
+\subsubsection{NTK-aware Interpolation} The ``NTK-aware'' 
+interpolation further refines this adjustment by recalibrating the base of the RoPE function:
+\begin{equation}
+    \theta^{\prime} = {b^{\prime}}^{-2d/|D|}~~~\text{and}~~~b^{\prime} = b\cdot{s}^{\frac{|D|}{|D|-2}},
+\end{equation}
+where $s = \frac{L'}{L}$ is the scaling ratio. This adjustment ensures that the extended embeddings retain their functionality within the longer context length~\citep{roziere2023code}.
+
+By leveraging these techniques, we can extend the context window of Video-LLM's backbone, enhancing their capacity for understanding longer video in a training-free manner.
+
+\subsection{Efficiency Bottleneck Analysis and a Post-training Solution}
+\label{subsec:efficiencybottleneck}
+
+Implementing the Alternative Video Token Rearrangement (Sec.~\ref{subsec:video-encoder-extension}) and the Interpolating Video-LLM Backbone (Sec.~\ref{subsec:interpolatingllm}) lead to the development of an interpolated Video-LLM (\intp-Video-LLM). Indeed, this enhances long-video understanding capabilities without incurring additional training costs. This advancement, however, raises a crucial question: \textit{does \intp-Video-LLM introduce any additional costs during the model inference phase?}
+
+\subsubsection{Inference Cost Analysis} 
+To quantify the inference costs, we employ a modified roofline-based LLM-Viewer analysis, initially developed in~\citep{yuan2024llm}. Consider a typical scenario in which each frame is represented by 256 visual tokens. In standard Video-LLaVA~\citep{lin2023video} configurations, 8 frames represent a video, totaling 2048 visual tokens. With the implementation of \intp, more frames can be processed, escalating the number of visual tokens significantly. This increase is thoroughly analyzed in Tab.~\ref{tab:efficiency}, which details the computational cost implications for the LLM backbone’s decoding process, especially focusing on the model latency and memory cost.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Computation Cost Analysis. The development device is A100 GPU, and time estimated by the roofline model represents the theoretical performance that the hardware can achieve.}
+\scalebox{0.88}{
+\begin{tabular}{l|ccc|cccc}
+\toprule
+\multirow{2}{*}{Method} & Frame   & LLM      & \multirow{2}{*}{Quantization} & OPs& Decode      & Total & Storing\\
+                   & Number     & Backbone &                                &  (TB) &  Time (ms)  &  Memory (GB)  &  KV (GB)\\
+\midrule
+Video-LLaVA &  8 & Vicuna-7B     & FP16 &  14.2 & 18.6 & 14.0 & 1.1  \\\hline
+\intp-Video-LLaVA  &  16 & Vicuna-7B & FP16 & 15.3 & 20.1 & 15.1 & 2.1  \\
+\rowcolor{blue!10} \intp-Video-LLaVA  &  16 & Vicuna-7B & INT2 & 15.3 & 17.6 & 13.2 & 0.3  \\\cline{2-8}
+\intp-Video-LLaVA  &  32 & Vicuna-7B & FP16 & 17.4 & 22.9 & 17.2 & 4.3  \\
+\rowcolor{blue!10} \intp-Video-LLaVA  &  32 & Vicuna-7B & INT2 & 17.4 & 22.9 & 13.5 & 0.5 \\\cline{2-8}
+\intp-Video-LLaVA  &  64 & Vicuna-7B & FP16 & 21.8 & 28.6 & 21.5 & 8.6  \\
+\rowcolor{blue!10} \intp-Video-LLaVA  &  64 & Vicuna-7B & INT2 & 21.8 & 18.8 & 14.0 & 1.1  \\\cline{2-8}
+\intp-Video-LLaVA  &  128 & Vicuna-7B & FP16 & 30.4 & 39.9 & 30.1 & 17.2  \\
+\rowcolor{blue!10} \intp-Video-LLaVA  &  128 & Vicuna-7B & INT2 & 30.4 & 20.4 &  15.1 & 2.1  \\ 
+\bottomrule
+\end{tabular}}
+\label{tab:efficiency}
+\end{table}
+
+The analysis indicates that the primary additional cost during the inference phase for \intp-Video-LLaVA is due to an increased demand for KV-cache storage, a requirement driven by the larger volume of visual tokens being processed. This finding aligns with studies in long-context LLMs~\citep{fu2024challenges,ashkboos2024quarot}, which highlight that the decoding phase of LLMs is predominantly memory-bounded. 
+This underscores the critical need for effective KV-cache management strategies to ensure that the enhanced capabilities of \intp-Video-LLaVA can be deployed efficiently.
+
+To address this issue, we introduce a KV-cache compression technique aimed at optimizing KV-cache storage efficiency. \textbf{Post-training quantization (PTQ)} is utilized to convert full-precision tensor inputs into quantized tensors, focusing primarily on selecting optimal quantization parameters. The process requires only two parameters: the scaling factor $S$ and the zero point $Z$, which are crucial for the quantization process~\citep{shang2024enhancing,yuan2024llm}.
+Formally, once appropriate values for $S$ and $Z$ are determined, a full-precision key (or value) tensor can be quantized as follows: 
+\begin{equation}
+    \mathbf{K}_{Q} =S(\text{clamp}(\lfloor \frac{\mathbf{K}_{F}}{S} \rceil-Z,p_{min},p_{max})+Z),
+    \label{eq:quantization}
+\end{equation}
+where $\left[p_{min},p_{max}\right]$ is the quantization range determined by bit-width, for 2 bit integer, and the bins are $\{-2,-1,0,1\}$. However, direct application of this method to KV quantization is not straightforward because KV tensors require the input to be accessed. To address this, we employ a calibration dataset (a significantly smaller set of input samples compared to the training dataset) to collect the necessary tensors. Once the full-precision KV tensors at the $k$-th layer, $\mathbf{K}^{k}_F$ and $\mathbf{V}^{k}_F$, are obtained, they can be quantized using the same method to produce $\mathbf{K}^{k}_Q$ and $\mathbf{V}^{k}_Q$ based on Eqn.~\ref{eq:quantization}.
+
+By implementing this quantization technique, \intp-Video-LLM can manage the increased volume of visual tokens during inference, ensuring that the model's enhanced capabilities are aligned with practical deployment constraints.
+
+
+
+\section{Experiments}
+
+
+We detail the experimental setup and model configurations in Sec.~\ref{subsec:config}, followed by an analysis of the quantitative and qualitative performance of our approach in Sec.~\ref{subsec:quant_result} and Sec.~\ref{subsec:qualit_result}. 
+Finally, we ablate the effectiveness of each component in our model in Sec.~\ref{subsec:ablation}.
+
+\subsection{Experimental Setup}
+\label{subsec:config}
+
+\subsubsection{Model Settings} We use the Video-LLaVA~\citep{lin2023video} framework to explore Video-LLM interpolation.\footnote{We develop our method based on the Video-LLaVA codebase. The evaluation of our approach is conducted using the IG-VLM~\citep{kim2024image} codebase.} We employ Vicuna-7B v1.5 as the LLM backbone, mirroring the architecture used in Video-LLaVA. The visual encoders are adapted from LanguageBind, and the text tokenization is handled by the LLaMA tokenizer, which includes approximately 32,000 classes. 
+The projection layers consist of 2 fully connected layers, facilitating the integration of visual and textual data.
+
+\subsubsection{Data and Training Details} Consistent with our focus on developing a training-free method, our approach requires no traditional data training processes. This aspect underscores the innovative nature of our interpolation method, which leverages existing model architectures and tools without the need for retraining or additional data, simplifying the implementation and reducing the computational overhead typically associated with training new models.
+\subsubsection{Datasets and Evaluation Metric}
+We assess \intp~across a variety of zero-shot video question-answer benchmarks, which we classify as either open-ended or multiple-choice, depending on the type of question posed~\citep{kim2024image}. 
+Our evaluation for open-ended VQA includes MSVD-QA \citep{xu2017video}, MSRVTT-QA \citep{xu2017video}, and ActivityNet-QA \citep{yu2019activitynet} benchmarks. We utilize GPT-assisted assessments as outlined in Video-ChatGPT \citep{maaz2023video}, which provide a thorough evaluation of the model’s response accuracy and correctness.
+For multiple-choice VQA tasks, we evaluate the model's performance on NExT-QA \citep{xiao2021next} and EgoSchema \citep{mangalam2024egoschema}.
+We determine accuracy by the model's ability to correctly select the appropriate answer from the provided options.
+
+\begin{table*}[t]
+\centering
+\caption{A comparison of different LVMs on video reasoning benchmarks. Like Video-LLaVA~\citep{lin2023video}, ChatGPT-Assistant is employed to evaluate the following performance. The version of ChatGPT is ``gpt-3.5-turbo''.} 
+\scalebox{0.8}{
+\begin{tabular}{@{}lc|cc|cc|cc@{}}
+\toprule
+\multirow{2}{*}{Methods}         & \multirow{2}{*
+}{LLM size} & \multicolumn{2}{c|}{\textbf{MSVD-QA}} & \multicolumn{2}{c|}{\textbf{MSRVT-QA}} & \multicolumn{2}{c}{\textbf{ActivityNet-QA}} \\ 
+                &           & Accuracy    & Score        & Accuracy     & Score         & Accuracy    & Score            \\ \hline
+FrozenBiLM~\citep{yang2022zero} & 1B        & 32.2        & -            & 16.8         & -             & 24.7         & -           \\
+VideoChat~\citep{li2023videochat}  & 7B        & 56.3        & 2.8          & 45.0         & 2.5           & -            & 2.2    \\
+LLaMA-Adapter~\citep{zhang2023llama}   & 7B        & 54.9        & 3.1          & 43.8         & 2.7           & 34.2         & 2.7   \\
+Video-LLaMA~\citep{zhang2023video}  & 7B        & 51.6        & 2.5          & 29.6         & 1.8           & 12.4         & 1.1    \\
+Video-ChatGPT~\citep{maaz2023video}   & 7B        & 64.9        & 3.3          & 49.3         & 2.8           & 35.2         & 2.7    \\\hline
+Video-LLaVA~\citep{lin2023video}      & 7B        & 70.7 & 3.9 & 59.2 & 3.5   & 45.3 & 3.3 \\
+\rowcolor{blue!10} Video-LLaVA+\intp   & 7B        & \textbf{72.0 \textcolor{teal}{\scriptsize +1.3}} & \textbf{4.0 \textcolor{teal}{\scriptsize +0.1}} & \textbf{61.4 \textcolor{teal}{\scriptsize +2.2}} & \textbf{3.5 \textcolor{teal}{\scriptsize +0.0}} & \textbf{48.9 \textcolor{teal}{\scriptsize +3.6}} & \textbf{3.5 \textcolor{teal}{\scriptsize +0.2}} \\ \bottomrule
+\end{tabular}}
+\label{tab:main_table_qa}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\caption{Performance results on multiple-choice question benchmarks.} 
+\scalebox{0.92}{
+\begin{tabular}{@{}lc|c|cccc@{}}
+\toprule
+\multirow{2}{*}{Methods}    &   \multirow{2}{*}{LLM size}    & \textbf{Ego-} & \multicolumn{4}{c}{\textbf{NExT-QA}}\\ 
+                &             & \textbf{Schema}   &  Cas. & Tem. & Des. & Avg.     \\ \hline
+FrozenBiLM~\citep{yang2022zero}      & 1B        & 26.9 & - & - & - & -         \\
+InternVideo~\citep{wang2024internvideo2}     & 1.3B      & 32.1 & 48.0 & 43.4 & 65.1 & 59.1             \\
+Sevilla~\citep{yu2024self}    & 7B       & -  & 61.3 & 61.5 & 75.6 & 63.6            \\
+Video-ChatGPT~\citep{maaz2023video}   & 7B        & - & 61.9 & 57.4 & 69.9 & 61.7            \\\hline
+Video-LLaVA~\citep{lin2023video}      & 7B        & 37.0 & 61.2 & 54.2 & 71.1 & 60.5 \\
+\rowcolor{blue!10} Video-LLaVA+\intp   & 7B    & \textbf{38.6 \textcolor{teal}{\scriptsize +1.6}} & \textbf{61.9 \textcolor{teal}{\scriptsize +0.7}} & \textbf{58.6 \textcolor{teal}{\scriptsize +4.4}} & 72.2 \textcolor{teal}{\scriptsize +1.1}  &  62.7 \textcolor{teal}{\scriptsize +2.2} \\ \bottomrule
+\end{tabular}}
+\label{tab:main_table_multichoise}
+\end{table*}
+
+\subsection{Quantitative Results}
+\label{subsec:quant_result}
+The experimental results for three open-ended VQA benchmarks are detailed in Tab.~\ref{tab:main_table_qa}, and the results for two multiple-choice VQA benchmarks are presented in Tab.~\ref{tab:main_table_multichoise}. These results demonstrate that our training-free \intp~enhances the performance of existing Video-LLMs. Notably, \intp~acts as a plug-and-play enhancement, boosting Video-LLM capabilities without incurring additional costs. This compatibility underscores \intp's potential as a universally applicable upgrade for current Video-LLM frameworks.
+
+\subsection{Ablation Studies}
+\label{subsec:ablation}
+\begin{table*}[t]
+
+\centering
+\caption{Ablation Studies on using different numbers of frames of \intp.} 
+\scalebox{0.85}{
+\begin{tabular}{@{}l|c|cc|cc|cc@{}}
+\toprule
+\multirow{2}{*}{Methods}         & Number of & \multicolumn{2}{c|}{\textbf{MSVD-QA}} & \multicolumn{2}{c|}{\textbf{MSRVT-QA}} & \multicolumn{2}{c}{\textbf{ActivityNet-QA}} \\ 
+                &  Frames    & Accuracy    & Score        & Accuracy     & Score         & Accuracy    & Score            \\ \hline
+Video-LLaVA~\citep{lin2023video}     & 8        & 70.7 & 3.9 & 59.2 & 3.5   & 45.3 & 3.3 \\\hline
+\rowcolor{blue!4}Video-LLaVA+\intp     & 8 & 69.5 & 3.9	& 58.2 & 3.5 &	55.3 & 3.3
+ \\
+\rowcolor{blue!7} Video-LLaVA+\intp     & 16 & \textbf{72.1 \textcolor{teal}{\scriptsize +1.4}} & \textbf{4.0 \textcolor{teal}{\scriptsize +0.1}} &	61.0	& 3.5	& 46.9	& 3.3
+ \\
+\rowcolor{blue!15} Video-LLaVA+\intp   & 32        & 72.0  & \textbf{4.0 \textcolor{teal}{\scriptsize +0.1}} & \textbf{61.4 \textcolor{teal}{\scriptsize +2.2}} & \textbf{3.5 \textcolor{teal}{\scriptsize +0.0}} & \textbf{48.9 \textcolor{teal}{\scriptsize +3.6}} & \textbf{3.5 \textcolor{teal}{\scriptsize +0.2}} \\ 
+\rowcolor{orange!10} Video-LLaVA+\intp      & 64  & 67.5 \textcolor{red}{\scriptsize -3.2} &	3.8 \textcolor{red}{\scriptsize -0.2} &	55.2 \textcolor{red}{\scriptsize -4.0} &	3.3 \textcolor{red}{\scriptsize -0.2} & 41.5 \textcolor{red}{\scriptsize -3.8} & 3.1 \textcolor{red}{\scriptsize -0.2}
+ \\\bottomrule
+\end{tabular}}
+\label{tab:ablation}
+\end{table*}
+We consider Alternative Video Token Rearrangement and Interpolating Video-LLM Backbone as one unit for realizing a long-video-LLM. Therefore, in our ablation study, we assess the impact of varying the number of frames processed by \intp-Video-LLaVA. The results are presented in Tab.~\ref{tab:ablation}. This analysis leads to two main conclusions: \textbf{(i, Performance Improvement with Increased Frames)} A general improvement in performance as the number of frames increases, validating the effectiveness of the \intp. By feeding more frames into \intp-Video-LLMs are able to comprehend more extensive video content, thereby enhancing their performance. Note that \intp~is realized on the pre-trained Video-LLMs in a training-free manner. \textbf{(ii, Performance Plateau at Higher Frame Number)} However, a performance plateau is observed when the number of frames is scaled to 64. This suggests a limitation in the NTK-based LLM backbone extension method, which appears to struggle with significantly expanding the LLM content window capacity beyond a certain point. This finding highlights a potential area for future research and optimization to further enhance the capacity of Video-LLMs to handle long video sequences effectively.
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.999\linewidth]{figures/chat1.pdf}
+    \noindent\rule{0pt}{0.1in}
+    \includegraphics[width=0.999\linewidth]{figures/chat4.pdf}
+    \captionsetup{font=small}
+    \caption{Video content and questions from ActivityNet~\citep{yu2019activitynet}. The standard Video-LLaVA model exhibits limitations in accurately answering the questions, primarily due to its inability to process a sufficient number of frames (only the \textcolor[rgb]{0.847,0.431,0.8}{pink labeled frames} are fed into Video-LLaVA). This constraint significantly hinders its effectiveness in managing complex video question-answering tasks. With our proposed \intp, the enhanced Video-LLM can process extended sequences of video frames. This not only addresses the frame limitations but also substantially enhances the model's understanding in complex video question-answering scenarios.}
+    \label{fig:realchat}
+\end{figure}
+\subsection{Qualitative Results}
+\label{subsec:qualit_result}
+Finally, we visualize the question-and-answer samples within the ActivityNet dataset to assess the qualitative performance of our approach in Fig.~\ref{fig:realchat}. 
+In the first example, while Video-LLaVA incorrectly describes a person ``riding a bike on a skateboard'' and misidentifies the hair length, \intp-Video-LLaVA accurately describes the scene as a person ``wearing orange clothes and jumping on stilts on a trampoline'' and correctly states that the person does not have long hair. This shows \intp-Video-LLaVA's superior ability to process and interpret a larger number of video frames, leading to more accurate scene description and detail recognition.
+In the second example, Video-LLaVA hallucinates the presence of a second person playing a guitar, which is not shown in the video frames. In contrast, \intp-Video-LLaVA correctly identifies that there are two people in the video, accurately describes the main activity (playing drums), and even provides specific details about the types of drums being played (congas and tabla). Additionally, \intp-Video-LLaVA correctly identifies the gender of the person playing the drums, demonstrating its improved ability to process and understand visual information across a longer sequence of frames.
+These examples highlight how \intp-Video-LLaVA's capacity to handle more video frames leads to more accurate, detailed, and coherent descriptions of video content, significantly reducing errors and hallucinations compared to the standard Video-LLaVA model.
+
+
+
+
+
+\section{Conclusion}
+
+
+In conclusion, we presented \intp, an innovative interpolation method for Video-LLMs that effectively addresses the limitations of current models in processing extended video sequences. By developing an alternative video token rearrangement technique and a training-free LLM context window extension, \intp~enables Video-LLMs to handle significantly more visual data (32 frames) without the need for additional training or substantial computational resources. Furthermore, the introduction of a KV-cache compression module optimizes memory usage during inference, enhancing deployment efficiency. These advancements not only extend the practical utility of Video-LLMs but also demonstrate the potential of training-free approaches in advancing Video-LLMs.
+
+
+
+\noindent\textbf{Societal Impacts.}
+Our approach can democratize the access to advanced video processing technologies by reducing computational demands. Despite these advancements, it is important to note that \intp~does not address potential security concerns related to the misuse of Video-LLMs. The ease of accessibility and enhanced capabilities could potentially be exploited by malicious actors to generate or manipulate video content in harmful ways. Thus, while \intp~expands the practical applications of Video-LLMs and reduces barriers to their use, it also necessitates careful consideration of the ethical implications and security measures associated with their deployment.
+
+\noindent\textbf{Acknowledgement}
+We thanks for the help from Yang Zhou, Haoxuan Wang, Zhihang Yuan for discussing the long-content LLM and KV-cache compression. 
+
+
+
+
+{\small
+
+
+

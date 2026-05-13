@@ -1,0 +1,297 @@
+\title{Parameter and Memory Efficient Pretraining via Low-rank Riemannian Optimization}
+
+\begin{abstract}
+Pretraining large language models often requires significant computational resources and memory due to their vast parameter amount. An effective approach to enhance parameter efficiency in both training and inference is to parameterize each full-size weight as the product of two trainable low-rank factors. While low-rank fine-tuning has achieved great success, low-rank pretraining remains challenging as it requires learning extensive knowledge from scratch under the restrictive low-rank parameterization. During standard low-rank pretraining, separately optimizing the low-rank factors introduces redundant information from the full gradient, which hinders the learning process. To achieve efficient yet effective low-rank pretraining, we propose a **Lo**w-rank **R**iemannian **O**ptimizer (**LORO**). At each LORO update step, the low-rank factor pairs are jointly updated to ensure their full-size product moves along the steepest descent direction on the low-rank manifold, without the need to compute any memory-intensive full-size matrices or gradients. Hence, our LORO finds low-rank models that achieve high performance comparable to full-size pretrained models, while significantly reducing memory usage and accelerating both training and inference. A LLaMA 1B model pretrained with LORO achieves a perplexity score of 2\% better than the full-size baseline, with a 54\% reduction in model memory, a $\times1.8$ speedup in training, and a $\times2.2$ speedup in inference.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+In recent years, large language models (LLMs) (Brown et al., 2020; Touvron et al., 2023a;b; Team et al., 2024a;b), whose parameter sizes often reach hundreds of billions, have obtained remarkable performance across a wide range of applications. Typically, a pretraining and fine-tuning paradigm is adopted for building powerful LLMs from scratch: a model is first pretrained on large-scale unsupervised corpora (Devlin et al., 2019; Brown et al., 2020) to acquire general semantics and extensive knowledge, and then fine-tuned on a smaller downstream dataset to enhance its domainspecific capabilities (Hu et al., 2022; Team et al., 2024b; Ramesh et al., 2024).  
+
+An extensive amount of trainable parameters results in a substantial memory footprint and high computational costs during pretraining and fine-tuning. To alleviate these issues, various memoryefficient training techniques have been proposed to reduce memory usage and accelerate training. These approaches stem from either an engineering perspective, such as gradient checkpointing (Chen et al., 2016), memory offloading (Rajbhandari et al., 2020), or an optimization perspective, including low-rank optimizers (Hu et al., 2022; Zhang et al., 2023; Hayou et al., 2024; Lialin et al., 2024) and low-precision optimizers (Dettmers et al., 2021; Li et al., 2023; Zhang et al., 2024b). Since Hu et al. (2022), low-rank adaptation (LoRA) has gained increasing attention, becoming one of the most popular parameter-efficient fine-tuning methods. At each layer, LoRA replaces the fullsize pretrained weight $\textbf{W}\in\mathbb{R}^{d\times d}$ with $\mathbf{W}+\bar{\mathbf{B}}\mathbf{A}$ , where $\textbf{B}\in\,\mathbb{R}^{d\times r}$ and $\textbf{A}\in\ \overset{\cdot}{\mathbb{R}}^{r\times d}$ are two trainable low-rank factors, while W is frozen during fine-tuning to reduce training memory footprint. However, these methods depend on full-size pretrained weights, making them inapplicable to pretraining scenarios. Furthermore, they ultimately produce models with full-size weights, which do not result in any memory reduction or speedup in the inference phase.  
+
+as $\mathbf{W}\triangleq\mathbf{B}\mathbf{A}$ , the product of two rank- $^r$ matrices. In practice, such low-rank parameterization enjoys great potential in improving both training and inference efficiency, as it reduces the parameter size at each layer from ${\dot{d}}^{2}$ to $2r d$ and decreases the FLOPS from $\dot{O}(d^{3})$ to $O(r d^{2})$ . Theoretically, a low-rank model can achieve a $\times(2r/d)$ memory reduction and a $\times(d/2r)$ inference speedup.  
+
+However, pre-training low-rank language models from scratch using standard stochastic gradient descent methods is much more challenging. As shown in (Kamalakara et al., 2022; Zhao et al., 2024), separately optimizing each low-rank factor of the model may result in a significant performance drop compared to full-size models. Therefore, as a compromise, recent works consider pretraining language models with full-size weights while utilizing low-rank or sparse updates to enhance training efficiency: ReLoRA (Lialin et al., 2024) periodically merges a low-rank update into the full-size weight after a full-size warm-up training phase; GaLore (Zhao et al., 2024) updates the full-size model weights using low-rank yet fullsize gradients; SLTrain (Han et al., 2024) proposes sparse plus low-rank pretraining, where the full-size weights are decomposed into sum of sparse and low-rank matrices. However, these methods can merely produce full-size models, leading to limited or no memory reduction or acceleration during inference.  
+
+![](images/e7d44ff61fc1e5468a9228e89320dd6e2bc32baeb9d72ea562c60e659418422d.jpg)  
+Figure 1: Visualization of the perplexity (log-scaled) and memory-efficiency trade-off of pretraining LLaMA-1B on C4 dataset (Table 1). Methods located closer to the bottom-left corner and associated with smaller bubble sizes exhibit superior performance and memory efficiency.  
+
+While recent studies (Zhao et al., 2024; Han et al., 2024) observe that the rank of the resulting weight matrix W obtained from full-size pretraining methods is typically high (close to $d_{.}$ ), this does not necessarily mean that low-rank pretraining approaches (learning BA instead of W) are incapable of achieving satisfactory performance in learning foundation models. We argue that with careful design of the learning process for the low-rank factors A and B, it is possible to train a model with performance comparable to full-size models. Therefore, this paper aims to address the research question: Can we train a low-rank parameterized language model from scratch to achieve performance comparable to the full-size baseline? In essence, low-rank pretraining is more challenging than fine-tuning. Given the pretrained full-size weights, fine-tuning only requires capturing the minor domain-specific knowledge through a low-rank adaptation. In contrast, learning extensive pretraining knowledge from scratch under the restrictive low-rank parameterization requires a more careful optimization process. As noted in the discussions of (3) in Section 3, optimizing the low-rank factors separately introduces redundant information from the full gradient, which hinders the feature learning process. In this scenario, the separate optimization of $\mathbf{B}$ and A fails to direct their product BA along the steepest descent direction of the loss on the rank- $^r$ matrix manifold. This necessitates considering the intricate geometry of the manifold, prompting us to optimize the low-rank factors jointly through Riemannian optimization. While recent works (Savostianova et al., 2023; Schottho¨fer et al., 2022) have attempted to train low-rank vision classifiers using Riemannian gradient methods, they either require evaluating full-size gradients or rely on SVD-like parameterization, which introduces $O(r^{2})$ additional parameters, making them less preferable for pretraining language models. To the best of our knowledge, this paper is the first to explore the pretraining of low-rank language models through the lens of Riemannian optimization.  
+
+Contributions. We propose the Low-rank Riemannian Optimizer (LORO) for effective low-rank pretraining. At each LORO update step, each pair of low-rank factors is jointly updated to ensure their product is transported along the Riemannian gradient of the rank- $^r$ matrix manifold to pursue effective descent in the model loss. All LORO’s updates are performed directly within the lowrank parameterization, without the need to evaluate the costly full-size weights or gradients. To our knowledge, we are the first to show that pretraining low-rank language models with Riemannian gradients achieve perplexity scores comparable to full-size pretraining, based on extensive experiments conducted on LLaMA models ranging from 60M to 1B in size. On LLaMA-1B, LORO achieves a perplexity score of $2\%$ better than the full-size baseline, with $54\%$ less model memory cost and offers a $\times1.8$ speedup in training and a $\times2.2$ speedup in inference. Within the same parameter budget, we further show that LORO outperforms its full-size counterparts, highlighting LORO’s capacity to unblock the potential of low-rank parameterization for enhanced representation learning.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+Low-rank fine-tuning. Pioneered by LoRA (Hu et al., 2022), which achieves parameter-efficient fine-tuning by restricting optimization exclusively to the low-rank factors BA, various low-rank fine-tuning methods have been proposed to enhance downstream adaptation (Zhang et al., 2023; Ding et al., 2023; Hayou et al., 2024; Zhang & Pilanci, 2024; Xia et al., 2024), improve crosstask generalization (Agiza et al., 2024; Huang et al., 2023; Buehler & Buehler, 2024), and increase fine-tuning efficiency (Chen et al., 2023; Dettmers et al., 2023; Gamal & Rabusseau, 2023; Koohpayegani et al., 2024; Valipour et al., 2023). However, all these low-rank fine-tuning methods require access to the full-size pretrained weights so the model can be adapted within a low-rank parameter space. When directly applied to pretraining, the absence of pretrained full-size weights—where most knowledge resides—often results in significant performance drops.  
+
+Low-rank pretraining. While a few works have attempted to train low-rank vision models Sui et al. (2023); Khodak et al. (2021); Savostianova et al. (2023), training low-rank parameterized language models from scratch has been observed to be challenging and remains an open problem (Kamalakara et al., 2022; Zhao et al., 2024). Existing methods circumvent these challenges by employing low-rank or sparse updates while still using full-size weights, such as updating fullsize weights with low-rank gradients (Zhao et al., 2024; Zhang et al., 2024b), periodically merging low-rank factors into full-size weights (Lialin et al., 2024), or using a low-rank plus sparse weight parameterization (Han et al., 2024). As a result, these methods provide little to no improvement in inference efficiency. In contrast, LORO is the first to directly tackle language model pretraining using low-rank parameterized weights.  
+
+Optimization on low-rank matrix manifolds. Abundant theories and algorithms (Absil & Oseledets, 2015; Absil et al., 2009; Mishra et al., 2014) have been proposed to perform Riemannian optimization on low-rank matrix manifolds for traditional applications, such as matrix completion (Vandereycken, 2013; Bian et al., 2023) and regressions (Bleakley & Yamanishi, 2009; Yuan et al., 2007; Amit et al., 2007). Recent works (Savostianova et al., 2023; Schottho¨fer et al., 2022) aim to train low-rank vision classifiers using Riemannian gradient flow (Koch & Lubich, 2007). However, these methods either require evaluating full-size gradient and weight matrices or rely on SVD-like parameterization, which introduces parameter overhead, making them incompatible with low-rank parameterized language models. In contrast, LORO operates under the low-rank parameterization, avoiding full-size matrix evaluations and enabling efficient pretraining on language models.  
+
+
+
+\section{3 PRELIMINARIES  }
+
+
+Low-rank pretraining. The rank- ${\bf\nabla}r$ parameterization of a $d$ -by- $\cdot d$ matrix is defined as $\mathbf{W}=\mathbf{B}\mathbf{A}$ , where $\mathbf{B}\in\bar{\mathbb{R}}^{d\times r}$ and $\mathbf{\bar{A}}\in\mathbb{R}^{r\times d}$ are the associated rank- $^r$ factors. When $r<d$ , BA is called the low-rank parameterization of W. In this work, we focus on training the decoder-only transformerbased language models (Vaswani et al., 2017; Touvron et al., 2023a) from scratch using low-rank parameterization. Recall that the two fundamental building block of the transformer model are the linear projection $f_{\mathrm{proj}}(\cdot)$ and the self-attention function $f_{\mathrm{attn}}(\cdot)$ , which are defined as  
+
+$$
+f_{\mathrm{proj}}(\mathbf{X})\triangleq\mathbf{X}\mathbf{W}_{p},\,\,f_{\mathrm{attn}}(\mathbf{X})\triangleq\mathrm{softmax}\left(\mathbf{X}\mathbf{W}_{q}\mathbf{W}_{k}^{\top}\mathbf{X}^{\top}/\sqrt{d}\right)\mathbf{X}\mathbf{W}_{v},
+$$  
+
+where $\mathbf{X}\in\mathbb{R}^{n\times d}$ is the hidden feature, $n$ is the token number, $d$ is the hidden dimension, and $\mathbf{W}_{p}$ , $\mathbf{W}_{q}$ , $\mathbf{W}_{k}$ , $\mathbf{W}_{v}\in\mathbb{R}^{d\times d}$ denote the trainable projection, query, key, and value matrices, respectively. For notation simplicity, we assume that $d$ remains constant across all layers, though all derivations in this work also apply to scenarios with varying dimensions. As the composition of multiple layers of linear projections, self-attention functions, and various operations (e.g., activation, normalization, and positional embedding), the target language model can be parameterized by the stack of trainable matrices across all $N$ layers, denoted as $(\mathbf{\bar{W}}_{1},\cdot\cdot\cdot,\mathbf{W}_{N})$ . Therefore, the rank- $^r$ parameterized language model is implemented by parameterizing each trainable matrix as a rank- $^r$ factorization $\mathbf{W}_{i}\,=\,\mathbf{B}_{i}\mathbf{A}_{i}$ with $\mathbf{B}_{i}^{\star}\in\mathbb{R}^{d\times r}$ and $\mathbf{A}_{i}\,\in\,\mathbb{R}^{r\times d}$ , and is represented by $(\mathbf{B}_{1}\mathbf{A}_{1},\ldots,\mathbf{B}_{N}\mathbf{A}_{N})$ . In practice, we set $r<d$ for parameter efficiency. During pretraining, the rank- $^r$ model is trained from scratch on unsupervised corpus data for next token prediction, defined as:  
+
+$$
+\operatorname*{min}L(\mathbf{W}_{1},\cdots,\mathbf{W}_{N}),\;\mathrm{s.t.}\;\mathbf{W}_{i}=\mathbf{B}_{i}\mathbf{A}_{i},\mathbf{B}_{i}\in\mathbb{R}^{d\times r},\mathbf{A}_{i}\in\mathbb{R}^{r\times d},i=1,...,N,
+$$  
+
+where $L(\cdot)\,:\,\mathbb{R}^{d\times d}\times\,\cdot\,\cdot\,\cdot\times\,\mathbb{R}^{d\times d}\mapsto\mathbb{R}^{+}$ denotes the smooth next token prediction loss (i.e., the logarithm of perplexity score (Radford & Narasimhan, 2018)). At the $t$ -th training step with learning rate $\eta>0$ , the full-size weight is updated by the full gradient $\mathbf{W}_{i}^{t+1}\leftarrow\eta\nabla_{\mathbf{W}_{i}^{t}}L$ . In contrast, during the standard low-rank pretraining, the low-rank factors are updated separately, which leads to  
+
+$$
+\mathbf{W}_{i}^{t+1}\longleftarrow(\mathbf{B}_{i}^{t}-\eta\,\nabla_{\mathbf{B}_{i}^{t}}L)(\mathbf{A}_{i}^{t}-\eta\,\nabla_{\mathbf{A}_{i}^{t}}L)\approx\mathbf{W}_{i}^{t}-\eta\,(\mathbf{B}_{i}^{t}\mathbf{B}_{i}^{t\top}\cdot\nabla_{\mathbf{W}_{i}^{t}}L+\nabla_{\mathbf{W}_{i}^{t}}L\cdot\mathbf{A}_{i}^{t\top}\mathbf{A}_{i}^{t})
+$$  
+
+where the last line is derived from the chain-rule $\mathbf{B}_{i}^{t\top}\nabla_{\mathbf{W}_{i}^{t}}L=\nabla_{\mathbf{A}_{i}^{t}}$ and $\nabla_{\mathbf{W}_{i}^{t}}L\cdot\mathbf{A}_{i}^{t\top}=\nabla_{\mathbf{B}_{i}^{t}}L$ . The update direction in (3) is the sum of two sketched versions of the full gradient, each projected onto the low-rank subspaces spanned by the columns of $\mathbf{B}_{i}^{t}$ and the rows of $\mathbf{A}_{i}^{t}$ . When these two subspaces overlap, the sketched gradient introduces redundant information from the full gradient, hindering the learning of effective representations. From a geometric perspective, separately optimizing the low-rank factors overlooks the intricate structure of the low-rank parameterization and fails to guide their product toward the steepest loss descent on the low-rank matrix manifold 1. To address this issue, we recast (2) into a Riemannian optimization problem:  
+
+$$
+\operatorname*{min}_{\mathbf{B}_{i}\in\mathbb{R}^{d\times r},\,\mathbf{A}_{i}\in\mathbb{R}^{r\times d}}L\big(\mathbf{B}_{1}\mathbf{A}_{1},\cdots,\mathbf{B}_{N}\mathbf{A}_{N}\big)\;\;\Longrightarrow\;\;\operatorname*{min}_{(\mathbf{B}_{i}\mathbf{A}_{i})\in M_{r}}L\big(\mathbf{B}_{1}\mathbf{A}_{1},\cdots,\mathbf{B}_{N}\mathbf{A}_{N}\big),
+$$  
+
+where $\mathcal{M}_{r}$ denotes the manifold of all $d_{\cdot}$ -by- $d$ rank- $^r$ matrices. In essence, this reformulation accounts for the geometric structure of $\mathcal{M}_{r}$ by treating the product $(\mathbf{B}_{i}\mathbf{A}_{i})$ as a whole: it emphasizes that the principle for updating $\mathbf{B}_{i}$ and $\mathbf{A}_{i}$ is to guide the product $\left(\mathbf{B}_{i}\mathbf{A}_{i}\right)$ towards the steepest descent direction within the manifold, rather than optimizing them separately in the ambient space.  
+
+Optimization on low-rank matrix manifold. We briefly review the retraction-based Riemannian optimization on manifold, and refer interested readers to Lee (2019); Absil & Oseledets (2015) for rigorous definitions and a more comprehensive review. Imagine an ant on the Earth’s surface seeking the highest point. Although it wants to climb straight up along the steepest path—an infeasible option that would send it into space—it must navigate the curved surface, choosing the best direction from the feasible tangents at its current location to remain on the Earth. This thought experiment helps illustrate the difference between optimization in the flat full-size matrix space (e.g., the ambient space) and on the curved rank- $^r$ matrix manifold $\mathcal{M}_{r}$ (e.g., the Earth).  
+
+As visualized in Figure 2, when optimizing in the ambient space, we evaluate the negative Euclidean gradient (blue vector) at each step by backpropagation, then update the current weight by moving it a small step towards the blue vector. However, this update is infeasible on $\mathcal{M}_{r}$ , as it moves the current weight off the manifold. Instead, we aim to update along the black dashed curve on the manifold, which guides us toward smaller loss values. To this end, we need to identify the Riemannian gradient (red solid vector) within the tangent space (gray plane) that aligns most closely with the Euclidean gradient. This can be done by projecting the blue vector onto the tangent space. We then update the weight for a small step along the red solid vector and retract it back to the manifold (via the red dashed vector) to avoid violating the rank constraint. This process is known as the retraction-based Riemannian optimization step, involving: 1. Updating with the projected gradient and 2. Retracting back to the manifold.  
+
+![](images/806a316a71e02cb94ce6f970bce8bbbedf2f8f7ba3694a9de2040e93d4d50e5f.jpg)  
+Figure 2: Retraction-based Riemannian optimization, where the grey plane is the tangent space, $\bar{\nabla}L(\bar{\mathbf{W}}^{t})$ and grad ${\cal L}(\dot{\bf W}^{t})$ denote the Euclidean and Riemannian gradient at $\mathbf{W}^{t}$ , respectively.  
+
+Thanks to the embedded manifold theories, Proposition 1 (see Lee (2019, Example 8.14) and Absil et al. (2009, Equation 3.37)) shows how to compute the Riemannian gradient via orthogonal projection onto the tangent space, while Proposition 2 (see Lewis & Malick (2008, Lemma 2.1)) shows that retraction to $\mathcal{M}_{r}$ can be done by rank- $^r$ singular value decomposition (SVD).  
+
+Proposition 1 (Tangent Space and Riemannian Gradient on $\mathcal{M}_{r}$ ). $\mathcal{M}_{r}$ is a smooth submanifold embedded in the ambient space $\mathbb{R}^{d\times d}$ . For any base point $\mathbf{W}\in\mathcal{M}_{r}$ with singular value decomposition $\mathbf{W}=\mathbf{U}\pmb{\Sigma}\mathbf{V}^{\top}$ with U, $\mathbf{\Delta},\mathbf{V}\in\mathbb{R}^{d\times r}$ being orthogonal, the tangent space at W is given by  
+
+$$
+T_{\mathbf{W}}\mathbf{\mathcal{M}}_{r}\triangleq\left\{\mathbf{U}\mathbf{Z}\mathbf{V}^{\top}+\mathbf{U}^{\prime}\mathbf{V}^{\top}+\mathbf{U}\mathbf{V}^{'\top}:\mathbf{Z}\in\mathbb{R}^{r\times r},\mathbf{U}^{\prime},\mathbf{V}^{\prime}\in\mathbb{R}^{d\times r},\mathbf{U}^{\top}\mathbf{U}^{\prime}=\mathbf{V}^{\top}\mathbf{V}^{\prime}=\mathbf{0}\right\},
+$$  
+
+and the orthogonal projection to ${T}_{\mathbf{W}}{\mathcal{M}}_{r}$ is given by $\mathcal{P}(\mathbf{G})=\mathbf{UU}^{\top}\mathbf{G}+\mathbf{GVV}^{\top}-\mathbf{UU}^{\top}\mathbf{GVV}^{\top}$ . When equipped with the matrix inner-product metric, $\mathcal{M}_{r}$ becomes a Riemannian manifold. Then, the Riemannian gradient of any smooth function $L(\cdot)\,:\,\mathbb{R}^{d\times d}\,\mapsto\,\mathbb{R}$ evaluated at W, denoted as grad $L(\mathbf{W})$ , can be calculated by projecting the Euclidean gradient $\nabla L(\mathbf{W})$ to $T_{\mathbf{W}}\mathbf{\mathcal{M}}_{r}$ :  
+
+$$
+\begin{array}{r}{\operatorname{grad}L(\mathbf{W})=\mathcal{P}(\nabla L(\mathbf{W}))=\mathbf{UU}^{\top}\nabla L(\mathbf{W})+\nabla L(\mathbf{W})\mathbf{V}\mathbf{V}^{\top}-\mathbf{UU}^{\top}\nabla L(\mathbf{W})\mathbf{V}\mathbf{V}^{\top}.}\end{array}
+$$  
+
+Proposition 2 (Retraction to $\mathcal{M}_{r}$ via SVD). Informally, for any base point $\mathbf{W}\in\mathcal{M}_{r}$ and tangent vector $\mathbf{G}\in T_{\mathbf{W}}\mathcal{M}_{r}$ , a retraction is a function $R(\cdot)$ that maps the shifted base point $(\mathbf{W}+\mathbf{G})$ back to $\mathcal{M}_{r}$ . A feasible retraction on $\mathcal{M}_{r}$ is $R(\mathbf{W}\!+\!\mathbf{G})\triangleq\mathrm{SVD}_{r}(\mathbf{W}\!+\!\mathbf{G})$ , where $\mathrm{SVD}_{r}(\cdot)$ is the rank- $r$ singular value decomposition, projecting the updated base point from $\mathbb{R}^{d\times d}$ back to $\mathcal{M}_{r}$ .  
+
+
+
+\section{4 METHODOLOGY  }
+
+
+4.1 RIEMANNIAN UPDATE UNDER LOW-RANK PARAMETERIZATION  
+
+Proposition 1 and Proposition 2 enable us to perform Riemannian low-rank pretraining on $\mathcal{M}_{r}$ via  
+
+$$
+\mathbf{W}_{i}^{t+1}\leftarrow R(\mathbf{W}_{i}^{t}-\eta\operatorname{grad}L(\mathbf{W}_{i}^{t}))=\mathrm{SVD}_{r}\left(\mathbf{W}_{i}^{t}-\eta\,\mathcal{P}_{i}\left(\nabla_{\mathbf{W}_{i}^{t}}L\right)\right),
+$$  
+
+where $\mathcal{P}_{i}(\cdot)$ denotes the orthogonal projection to the tangent space $T_{\mathbf{W}_{i}}\mathbf{\mathcal{M}}_{r}$ as defined in Proposition 1. For each trainable weight, we: 1. evaluate the Euclidean gradient $\nabla\mathbf{w}_{i}L$ , and derive the tangent space projection $P_{i}(\cdot)$ from the SVD of base point $\mathbf{W}_{i}=\mathbf{U}_{i}\bar{\pmb{\Sigma}}_{i}\mathbf{V}_{i}^{\top}$ ; 2. find the Riemannian gradient $\mathscr{P}_{i}(\nabla_{\mathbf{W}_{i}}L)$ by projecting $\nabla\mathbf{w}_{i}L$ to the tangent space; 3. transport the base point along the negative Riemannian gradient; 4. retract the updated base point back to $\mathcal{M}_{r}$ via the $\bar{\mathrm{SVD}}_{r}(\cdot)$ projection.  
+
+However, these update steps encounter several practical issues that render them incompatible with low-rank parameterization: First, the full-size gradient $\nabla\mathbf{w}_{i}L$ is inaccessible during backpropagation Rumelhart et al. (1988); we can only obtain $\nabla_{\mathbf{B}_{i}}L$ and $\nabla_{\mathbf{A}_{i}}L$ , the gradients of the low-rank factors. Second, in steps 1, 2, and 4, we need to manipulate the memory-intensive full-size matrix $\mathbf{W}_{i}$ , either by performing SVD or matrix multiplication, which compromises memory efficiency.  
+
+This motivates us to revise the update steps of (7) into a “low-rank parameterization friendly” form by avoiding any computations with full-size $d$ -by- $d$ matrices (e.g., the weight $\mathbf{W}_{i}$ and gradient $\nabla\mathbf{w}_{i}L)$ and ensuring all operations can be performed under the low-rank parameterization. To achieve this objective, our focus is on the following two goals: 1. Eliminating the need for the full-size gradient when calculating the Riemannian gradient through tangent space projection; 2. Keeping the Riemannian update in its factorized form to avoid the necessity of performing SVD on full-size matrices. To achieve the 1st goal, we propose Proposition 3, which shows that the Riemannian gradient on $\mathcal{M}_{r}$ can be computed from $\nabla_{\mathbf{B}_{i}}L$ and $\nabla_{\mathbf{A}_{i}}L$ .  
+
+Proposition 3 (Riemannian Gradient under Low-rank Parameterization). Following the previous notation, for any low-rank parameterized weight $\mathbf{W}=\mathbf{BA}\in\mathcal{M}_{r}$ , where $\mathbf{B}\,\in\,\mathbb{R}^{d\times r}$ and $\textbf{A}\in$ $\mathbb{R}^{r\times d}$ , the Riemannian gradient of any smooth function $L(\cdot):\mathbb{R}^{d\times d}\mapsto\mathbb{R}$ evaluated at W is  
+
+$$
+\operatorname{grad}L(\mathbf{W})=\mathbf{B}(\mathbf{B}^{\top}\mathbf{B})^{-1}\cdot\nabla_{\mathbf{A}}L+\nabla_{\mathbf{B}}L\cdot(\mathbf{A}\mathbf{A}^{\top})^{-1}\mathbf{A}-\mathbf{B}(\mathbf{B}^{\top}\mathbf{B})^{-1}\cdot\nabla_{\mathbf{A}}L\cdot\mathbf{A}^{\top}(\mathbf{A}\mathbf{A}^{\top})^{-1}\mathbf{A}.
+$$  
+
+The proof of Proposition 3 can be obtained from Proposition 1 based on two key observations: 1. Let $\bar{\mathbf{U}}\mathbf{\Sigma}\mathbf{U}^{\top}$ be the SVD of BA, the column space of $\mathbf{B}$ coincides with that of $\mathbf{U}$ , and the row space of A coincides with the column space of $\mathbf{V}$ . 2. Backpropagation gives $\nabla_{\mathbf{W}}L\cdot\mathbf{A}^{\top}=\nabla_{\mathbf{B}}L^{\top}$ and $\mathbf{B}\cdot\nabla_{\mathbf{W}}L=\nabla_{\mathbf{A}}L$ . In practice, for each weight matrix $\mathbf{W}_{i}$ , (8) involves only multiplications of $r$ -by- $d$ and $r$ -by- $^r$ matrices, as well as the inversion of $r$ -by- $^r$ matrices, eliminating the need to compute any expensive $d_{\cdot}$ -by- $d$ matrices or use the $d$ -by- $d$ gradient $\nabla\mathbf{w}_{i}L$ . Additionally, all terms in (8) can be efficiently computed from the readily available variables— $\mathbf{\nabla}\cdot\mathbf{B}_{i}$ , ${\bf A}_{i}$ , $\nabla_{\mathbf{B}_{i}}L$ , and $\nabla_{\mathbf{A}_{i}}L$ —obtained during backpropagation.  
+
+Although Proposition 3 provides a memory-efficient approach for calculating the Riemannian gradient, the resulting grad $L(\mathbf{W})$ remains a full-size $d_{\cdot}$ -by- $d$ matrix, which compromises the feasibility of the subsequent Riemannian update and retraction. To address this issue and achieve the 2nd goal, we propose Proposition 4, which shows that the successive update steps can be achieved within a factorized form, avoiding the need to compute any full-size weight or gradient.  
+
+Proposition 4 (Riemannian Update under Low-rank Parameterization). Following the previous notations, for any low-rank parameterized weight $\mathbf{W}\ =\ \mathbf{B}\mathbf{A}\ \in\ {\mathcal{M}}_{r}$ , let $\textbf{B}=\textbf{Q}_{B}\mathbf{\dot{R}}_{B}$ and $\mathbf{A}^{\top}\,=\,\mathbf{Q}_{\cal A}\mathbf{R}_{\cal A}$ be the QR-decomposition of $\mathbf{B}$ and $\mathbf{A}^{\top}$ , such that $\mathbf{Q}_{B},\mathbf{Q}_{A}\,\in\,\mathbb{R}^{d\times r}$ are columnwise orthogonal, and ${\bf R}_{B},{\bf R}_{A}\in\mathbb{R}^{r\times r}$ are upper-triangular. Then the Riemannian updated weight, defined by $\mathbf{W}^{\prime}\triangleq\mathrm{SVD}_{r}(\mathbf{W}-\boldsymbol{\eta}$ grad $L(\mathbf{W})$ ), admits a low-rank factorization $\mathbf{W}^{\prime}=\mathbf{B}^{\prime}\mathbf{A}^{\prime}$ , with $\mathbf{B}^{\prime}=\left(\mathbf{Q}_{B},\overline{{\mathbf{Q}}}_{B}\right)\mathbf{U}_{*}\boldsymbol{\Sigma}_{*}^{1/2}$ and $\mathbf{A}^{\prime}=\Sigma_{*}^{1/2}\mathbf{V}_{*}^{\top}\left(\mathbf{Q}_{A},\overline{{\mathbf{Q}}}_{A}\right)^{\top}$ . Specifically, $\mathbf{U}_{*}\pmb{\Sigma}_{*}\mathbf{V}_{*}^{\top}$ is determined by the rank- $^r$ SVD of the following $2r$ -by- $2r$ matrix, i.e.,  
+
+$$
+\mathbf{U}_{*}\boldsymbol{\Sigma}_{*}\mathbf{V}_{*}^{\top}=\operatorname{SVD}_{r}\left(\underset{-\eta}{\mathbf{S}}\frac{}{\mathbf{R}_{B}}\quad-\eta\,\overline{{\mathbf{R}}}_{A}^{\top}\right)\in\mathbb{R}^{2r\times2r},\ \mathbf{S}\triangleq\mathbf{R}_{B}\mathbf{R}_{A}^{\top}-\eta\,\mathbf{R}_{B}^{-\top}\nabla_{\mathbf{A}}L\cdot\mathbf{Q}_{A}\in\mathbb{R}^{r\times r},
+$$  
+
+and $\overline{{\mathbf{Q}}}_{B}\overline{{\mathbf{R}}}_{B}$ is the QR decomposition of the $d$ -by- $^r$ matrix $(\nabla_{\mathbf{B}}L\cdot\mathbf{R}_{A}^{-1}-\mathbf{Q}_{B}\mathbf{Q}_{B}^{\top}\nabla_{\mathbf{B}}L\cdot\mathbf{R}_{A}^{-1})$ , while $\overline{{\mathbf{Q}}}_{A}\overline{{\mathbf{R}}}_{A}$ is the QR decomposition of the $d$ -by- $^r$ matrix $(\nabla_{\mathbf{A}}L^{\top}\mathbf{R}_{B}^{-1}-\mathbf{Q}_{A}\mathbf{Q}_{A}^{\top}\nabla_{\mathbf{A}}L^{\top}\mathbf{R}_{B}^{-1})$ .  
+
+The proof of Proposition 4 can be derived from Proposition 3 using the tangent space decomposition (Vandereycken, 2013; Bian et al. The key to avoid SVD on full-size $d$ -by- $d$ matrices lies in factorizing the $d\!.$ -by- $d$ tangent vector into a product of a $d$ -by- $.2r$ orthogonal matrix, a $2r$ -by- $2r$ full-rank matrix, and a $2r$ -by- $d$ orthogonal matrix, enabling SVD to be applied to the smaller $2r$ -by- $2r$ matrix instead. Notably, the revised Riemannian update in Proposition 4 only involves QR decomposition of a $d$ -by- $^r$ matrix, inversion of an $r$ -by- $^r$ matrix, SVD on a $2r$ -by- $2r$ matrix, and multiplication of $d$ -by- $.2r$ matrices.  
+
+4.2 LOW-RANK RIEMANNIAN OPTIMIZER  
+
+In Proposition 4, we have derived the “low-rank parameterization friendly” Riemannian update:  
+
+$$
+\mathbf{B}_{i}^{t+1}\leftarrow(\mathbf{Q}_{B},\overline{{\mathbf{Q}}}_{B})\mathbf{U}_{*}\boldsymbol{\Sigma}_{*}^{1/2},\,\mathbf{A}_{i}^{t+1}\leftarrow\boldsymbol{\Sigma}_{*}^{1/2}\mathbf{V}_{*}^{\top}(\mathbf{Q}_{A},\overline{{\mathbf{Q}}}_{A})^{\top},
+$$  
+
+where $\mathbf{Q}_{B},\,\mathbf{\overline{{Q}}}_{B},\,\mathbf{Q}_{A},\,\mathbf{\overline{{Q}}}_{A},\,\mathbf{U}_{*},\,\Sigma_{*}.$ , and $\mathbf{V}_{*}$ can be directly computed from $\mathbf{B}_{i}^{t}$ , $\mathbf{A}_{i}^{t}$ , $\nabla_{\mathbf{B}_{i}^{t}}L$ , and $\nabla_{\mathbf{A}_{i}^{t}}L$ , without evaluating any full-size weight or gradient. Although being memory-efficient, the QR decomposition, SVD, and matrix inversion involved in (10) impede the computational efficiency of low-rank pretraining. This motivates us to develop a rough but efficient approximation of the exact Riemannian update, which enables us to amortize the computational cost across multiple steps by periodically applying the exact update while primarily using the approximated update.  
+
+To this end, a simple approach is to skip the costly Riemannian SVD retraction and directly update the weight along the Riemannian gradient. Unfortunately, the Riemannian gradient in (8) has a maximum rank of $2r$ , making it incompatible with the rank- $^r$ parameterization. To establish an approximate update that can be applied to $\mathbf{B}_{i}$ and $\mathbf{A}_{i}$ respectively, we highlight the differences between the standard low-rank update (3) and Riemannian update (8) in blue:  
+
+Standard low-ra  
+
+Riemannian up $\begin{array}{r l}&{\mathrm{ink~update}\;=-\eta\left(\mathbf{B}_{i}^{t}\cdot\nabla_{\mathbf{A}_{i}^{t}}L+\nabla_{\mathbf{B}_{i}^{t}}L\cdot\mathbf{A}_{i}^{t}\right)+O(\eta^{2}),}\\ &{\mathrm{iate}\;=-\eta\big(\mathbf{B}_{i}^{t}(\mathbf{B}_{i}^{t^{\top}}\mathbf{B}_{i}^{t})^{-1}\nabla_{\mathbf{A}_{i}^{t}}L\cdot\underbrace{(\mathbf{I}-\mathbf{A}_{i}^{t^{\top}}(\mathbf{A}_{i}^{t}\mathbf{A}_{i}^{t^{\top}})^{-1}\mathbf{A}_{i}^{t})}_{=\!\!\!\!\!\!\!\!\mathbf{A}_{i}^{t}}+\!\!\nabla_{\mathbf{B}_{i}^{t}}L\cdot\big(\mathbf{A}_{i}^{t}\mathbf{A}_{i}^{t^{\top}}\big)^{-1}\mathbf{A}_{i}^{t}\big).}\end{array}$ Orthogona l  projection  
+
+In the Riemannian update, the gradients are additionally normalized by multiplying them with either $(\mathbf{B}_{i}^{t\top}\mathbf{B}_{i}^{t})^{-1}$ or $(\mathbf{A}_{i}^{t}\bar{\mathbf{A}}_{i}^{t\top})^{-1}$ . Additionally, $\nabla_{\mathbf{A}_{i}^{t}}L$ is projected onto the orthogonal space of the row space of $\mathbf{A}_{i}^{t}$ (the middle blue term), thereby removing the redundant gradient components. This motivates us to approximate this normalization by scaling the gradient terms in proportion to the spectral norm of either $(\mathbf{B}_{i}^{t\top}\mathbf{B}_{i}^{t})^{-1}$ or $(\mathbf{A}_{i}^{t}\mathbf{A}_{i}^{t\top})^{-1}$ . The orthogonal projection can be omitted, as it does not affect the gradient scale. We derive a heuristic scaling factor of $(\mathbf{B}_{i}^{t\top}\mathbf{B}_{i}^{t})^{-1}$ as follows:  
+
+$$
+\left\|(\mathbf{B}_{i}^{t^{\top}}\mathbf{B}_{i}^{t})^{-1}\right\|_{2}=\sigma_{1}\left((\mathbf{B}_{i}^{t^{\top}}\mathbf{B}_{i}^{t})^{-1}\right)=\sigma_{r}\left(\mathbf{B}_{i}^{t^{\top}}\mathbf{B}_{i}^{t}\right)^{-1}=\sigma_{r}\left(\mathbf{B}_{i}^{t}\right)^{-2}
+$$  
+
+where $\Vert\cdot\Vert_{2}$ is the spectral norm and $\sigma_{k}(\cdot)$ denotes the $k$ -th largest singular value of a matrix. We estimate $\sigma_{r}(\mathbf{B}_{i}^{t})^{2}$ by the average of the squared singular values, i.e., $\begin{array}{r}{(\bar{1}/r)\sum_{k=1}^{r}{\sigma_{k}({\bf B}_{i}^{t})^{2}}}\end{array}$ , which equals $(1/r)\lVert\mathbf{B}_{i}^{t}\rVert_{\mathrm{F}}^{2}$ , where $\Vert\cdot\Vert_{\mathrm{F}}$ denotes the Frobenius norm. Assuming each row of $\mathbf{B}_{i}^{t}$ contains no extreme values and its norm is upper-bounded by a constant, we obtain $\|\mathbf{B}_{i}^{t}\|_{\mathrm{F}}^{2}=O(d)$ . Thus, we approximate the scaling factor as $r/d$ to avoid explicitly computing $\|\mathbf{B}_{i}^{t}\|_{\mathrm{F}}^{2}$ . By repeating a similar argument on $\left(\mathbf{A}_{i}^{t}\mathbf{A}_{i}^{t\top}\right)^{-1}$ , the approximated Riemannian update step is given by  
+
+$$
+\mathbf{B}_{i}^{t+1}\leftarrow\mathbf{B}_{i}^{t}-\eta\cdot(r/d)\cdot\nabla_{\mathbf{B}_{i}^{t}}L,\ \mathbf{A}_{i}^{t+1}\leftarrow\mathbf{A}_{i}^{t}-\eta\cdot(r/d)\cdot\nabla_{\mathbf{A}_{i}^{t}}L.
+$$  
+
+We now propose the Low-rank Riemannian Optimizer): for every $K$ training steps, LORO periodically employs an exact low-rank Riemannian update step (equation 10), while in between, it uses the approximated low-rank Riemannian update (equation 12). In practice, LORO accumulates the gradients of $\mathbf{B}_{i}^{t}$ and $\mathbf{A}_{i}^{t}$ using the momentum strategy as the Adam optimizer (Kingma & Ba, 2015). A pseudo-code of LORO is outlined in Algorithm 1, and a PyTorch code is attached in Algorithm 2.  
+
+Complexity Analysis. As shown in Algorithm 1, the algorithmic complexity of the approximate LORO update step is $O(r{\bar{d}})$ as it only involves element-wise operations. On the other hand, the exact update step includes QR decomposition of $d$ -by- $^r$ matrices with a complexity of $O(r^{2}d)$ , inversion of $r$ -by- $^r$ triangular matrices with a complexity of $O(r^{2})$ , SVD of $2r$ -by- $.2r$ matrices at  
+
+![](images/5217e7289a4327ba594a1677ba214776d2273ad210dff0ef361963b7cfce1bf6.jpg)  
+
+$O(r^{3})$ , and matrix multiplications with a complexity of $O(r^{2}d)$ . Suppose the frequency of the exact update is $K$ , then the average complexity of LORO is $O(r^{2}(r+d)/\bar{K}+r d)$ . In practice, we set the frequency $K$ in the same order as $r$ , which simplifies the LORO complexity to $\dot{O}(r^{2}+r d)$ . Therefore, when comparing with the standard Euclidean low-rank pretraining with a $O(r d)$ complexity, LORO does not introduce evident computational overhead.  
+
+
+
+\section{5 EXPERIMENT RESULTS  }
+
+
+
+
+\section{5.1 EFFICIENT LOW-RANK PRETRAINING  }
+
+
+Experiment setup. In this section, we evaluate the effectiveness of our proposed LORO in training low-rank language models from scratch. All the experiments are implemented in PyTorch (Paszke et al., 2019) and conducted on NVIDIA 40G A100 GPUs. For a fair comparison with existing baselines, we follow a standard experiment setup used in Zhao et al. (2024); Lialin et al. (2024). Specifically, we adopt the LLaMA-based language model (Touvron et al., 2023b) equipped with RMSNorm (Zhang & Sennrich, 2019) and SwiGLU activations (Shazeer, 2020). We follow the same model configurations as (Zhao et al., 2024, Table 5) for the LLaMA-60M, -130M, -350M, and -1B models2 and we conduct all the pretraining experiments using BF16 (bfloat16) format. We train all the models on the C4 (Colossal Clean Crawled Corpus) dataset (Raffel et al., 2019), a large-scale cleaned dataset designed for language models pretraining. The models are trained on a sufficiently large volume of data without repetition to simulate the pretraining setting in practice.  
+
+LORO configurations. We consider the low-rank parameterization that represents each target weight matrix as the product of a rank- ${\bf\nabla}r$ tall matrix and a rank- $^r$ wide matrix as defined in equation 2. In this paper, we apply low-rank parameterization to all weights in attention functions (e.g. query-, key-, value-, and out-projection) and all linear projection layers (e.g. down-, up-, and gateprojection) with the same rank $r$ . Following the setup in Zhao et al. (2024); Han et al. (2024), we keep the embedding layer and the output language model head to be full-size. We fix the LORO update frequency as $K=500$ step for all pretraining experiments, and we only tune the learning rate.  
+
+Baselines. We compare our LORO against multiple baselines that involve low-rank structures. ‘Fullsize’ denotes pretraining the full-size model with the Adam optimizer (Kingma & Ba, 2015). ‘Lowrank’ is a traditional low-rank training approach (Kamalakara et al., 2022). ‘LoRA’ (Hu et al., 2022) is a low-rank fine-tuning method that reparameterize each weight as $\mathbf{W}+\mathbf{B}\mathbf{A}$ , where W is a full-size matrix that remains fixed during training, and $\mathbf{B}$ and A are trainable low-rank factors. In pretraining scenarios, the full-size matrix W is randomly initialized. ‘ReLoRA’ (Lialin et al., 2024) is a variant of LoRA that are adapted to pretraining by periodically absorbing the updated  
+
+BA into W. ‘GaLore’ (Zhao et al., 2024) leverages a low-rank gradient to update the full-size weights. ‘SLTrain’ (Han et al., 2024) parameterizes each weight as the sum of low-rank factors and a sparse matrix, with both components being jointly optimized. However, all baselines, except for ‘Low-rank’, work with full-size models and do not engage in the challenging low-rank pretraining.  
+
+LORO finds high-performing low-rank Models. Table 1 shows that, our LORO consistently outperforms all other memory-efficient baselines in terms of both perplexity and total memory cost (including the memory usage of model parameters and optimizer states, as estimated in Han et al. For LLaMA-1B model, our LORO achieves a perplexity score that is $2\%$ lower than the full-size baseline. These results validate the existence of competitive low-rank models within the low-rank matrix manifold, which exhibit comparable or superior performance compared to the full-size baselines. Moreover, our LORO offers a practical approach for training low-rank models from scratch without sacrificing the performance.  
+
+Table 1: Results of low-rank pretraining on C4 dataset, including validation perplexity (PPL), the number of parameters in millions (Param), the estimated total memory cost in GB (Mem), where 1GB contains $10^{9}$ bytes. r, $d_{1}$ , and $d_{2}$ denote the rank, the hidden- and intermediate-dimension of the LLaMA model. Results of the baselines are reported from Zhao et al. (2024); Han et al. (2024).  
+
+![](images/e65be6eec1f5dd8aba14cde195e5e56fb7513fc78ee81f0a43dc532a32d300dd.jpg)  
+
+LORO enhances training efficiency. Section 1 shows that a low-rank model with $d_{1}=d_{2}=d$ is expected to achieve a $(2r/d)$ -times reduction in memory and a $(d/2r)$ -times speedup in inference. In practice, we set $r=d_{1}/4$ across all runs to pursue an approximate $\times0.5$ FLOPS reduction and about $\times0.5$ model size reduction. As shown in Table 2, for a LLaMA-1B model, LORO achieves $\times1.82$ training speedup and a $54\%$ reduction in memory compared to the full-size baseline, while GaLore does not exhibit practical speedup as it still works on the full-size model. We observe that the training speedup of LORO is less evident on LLaMA-350M model. This is because the data loading process introduces additional overhead and execution time, which overshadow the efficiency gains provided by LORO on smaller models.  
+
+Table 2: Training efficiency metrics evaluated on $1\!\times\!400$ A100 GPU, including ratio of memory cost reduction (MemRd), token batch size (TBSZ), and throughput (Tokens / sec).   
+
+![](images/e53ab14dfb3d57819f06418ad510564201d74a18b12903acbfa84c89c41d6fef.jpg)  
+
+LORO enhances inference efficiency. In Table 3, we empirically evaluate the inference efficiency of the low-rank LLaMA-1B model obtained by LORO with varying batch sizes and sequence lengths. Compared to the full-size baseline, our LORO achieves a $\times2.08\,\sim\,\times4.04$ inference speedup and a $5\%\sim17\%$ reduction in maximum memory allocation, across all settings. The speedup of LORO is evident for small batch sizes, and it converges to $\times2$ as the batch size increases. This occurs as full-size baselines benefit more from GPU parallelization at larger batch sizes.  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+LORO finds flatter minima. As Table 1 shows that LORO is able to find minima within the low-rank matrix manifold with high performance comparable to the full-size models, we aim to compare between the low-rank minima found by LORO, denoted by $(\mathbf{B}_{i}^{*}\mathbf{A}_{i}^{*})$ , and the full-size minima, denoted by $(\mathbf{W}_{i}^{*})$ . To this end, we probe the loss landscape of these minima by via linear model interpolation (Lucas et al., 2021; Gueta et al., 2023). Specifically, for $\alpha\,\in\,\{0,0.1,...,1\}$ , we visualize the perplexity score of the model with weights $(1\stackrel{\cdot}{-}\alpha)\mathbf{B}_{i}^{*}\hat{\mathbf{A}}_{i}^{*}+\alpha\mathbf{W}_{i}^{*}$ . As shown in Figure 3, a steep loss barrier is observed between the low-rank LORO-pretrained models and the full-size pretrained models, indicating that the LORO minima do not reside in the same basin as the full-size minima. Furthermore, the loss barrier exhibits an asymmetry, with the side closer to the full-size models being significantly steeper than the side closer to the low-rank models. This implies that LORO can find flatter low-rank minima, which may explain why it sometimes outperforms the full-size baselines as shown in Table 2.  
+
+Table 3: Inference efficiency metrics on $1\!\times\!40\mathbf{G}$ A100 GPU, including maximum memory allocation in GB (MaxMem), memory reduction (MemRd), and total time of processing 500 batches.  
+
+![](images/dcbe0bfdac3d808b2a664248456d6a26f1009d37cf9269ccb84071c61669a91e.jpg)  
+
+LORO explores effective low-rank structures. We compare the performance of LORO low-rank pretrained models against various full-size counterparts within the same parameter budget. Specifically, we evaluate three full-size variants of the original model: 1) ‘Full-size Shallow,’ with fewer layers than the full model, 2) ‘Full-size Slim,’ with a reduced hidden dimension but the same number of layers, and 3) $\mathrm{^{\cdot}L O R O+S l i m~M L P},$ ’ where LORO is applied only to the attention weights, while the MLP layers are slimmer but retain full-size matrices. As reported in Table 4, the LORO low-rank pretrained models outperform full-size variants, demonstrating that LORO unlocks the potential of low-rank structures as a more effective parameterization scheme. We attribute this to the fact that, within the same parameter budget, low-rank structures benefit from a larger hidden dimension, which enhances their ability in learning high-dimensional features.  
+
+Figure 3: Linear interpolation between LORO pretrained models and full-size baselines.  
+
+Table 4: Comparison between LORO and other pretrained full-size architectures within the same parameter budget.  
+
+![](images/095232909501a7f2b7ff99d18bafe305649c5fb8030598d00b1b6793712cf52c.jpg)  
+5.2 ABLATION STUDIES  
+
+![](images/683e1eb74cf00cec24fd4ad01c2e08d4b38da742b57522d296012839382464a8.jpg)  
+
+Ablation on the LORO rank $r$ . In Table 5, we evaluate the perplexity scores of LORO pretrained LLaMA-60M models with varying ranks. As anticipated, the performance decays as $r$ decreases. In practice, setting $r=d_{1}/4$ is preferable, as it achieves a $50\%$ reduction in both memory and FLOPS while maintaining high performance.  
+
+Ablation on the LORO exact update frequency $K$ . In Figure 4, we compare the convergence of different runs of LORO with varying exact update frequencies. It is observed that, for $K\geqslant750$ when the LORO exact update is overly lazy, the training curve tends to explode and fail to converge to performing minima. In practice, we recommend to set $K\,=\,500$ , as it significantly reduces training overhead and results in competitive low-rank models with performance comparable to fullsize baselines across LLaMA models of varying sizes, ranging from 60M to 1B parameters.  
+
+Table 5: Ablation on LORO rank $r$ .   
+
+![](images/14c4e54fad4761c36dead84286c581d7424d4dc188fa31423fc0b870c816ebe8.jpg)  
+
+![](images/2a148dec4366edecddd37c269d65d2f4a5891cc67f044ab9deeddaadeec7e11f.jpg)  
+
+Figure 4: Ablation on LORO exact update frequency $K$   
+
+![](images/4d164e3cf99540424902a095fa57fb120dd1eece3c2f636e7a3fdbf075f32174.jpg)  
+
+5.3 EFFICIENT LOW-RANK FINE-TUNING  
+
+Following the experiment setup in Zhao et al. (2024, Section 5.4), we extend our LORO to fine-tune the pretrained RoBERTa-base model Liu et al., 2019 on GLUE datasets (Wang et al., 2019). Specifically, we reparameterized each weight in the query- and key-projections as $\mathbf{W}+\mathbf{B}\mathbf{A}$ , where W is the full-size pretrained weight and B and A are low-rank factors. Then, we apply LORO to $\mathbf{B}$ and A exclusively and freeze the remaining parameters.2. In Table 6, we compare the fine-tuning performance of LORO with three baselines, including ‘LoRA’ (Hu et al., 2022), ‘GaLore’ (Zhao et al., 2024), and ‘SLTrain’ (Han et al., 2024). Although LORO achieves decent performance, its outperformance over other baselines in fine-tuning is less significant than in pretraining. We argue that, with full-size pretrained weights provided, fine-tuning requires learning only a small amount of domain-specific knowledge, which can be easily captured through low-rank adjustments in each weight matrix. As a result, the potential for improvement with different low-rank techniques is limited, and the performance gains become less noticeable.  
+
+Table 6: Extending LORO to fine-tuning RoBERTa-base models on GLUE benchmark. Results of the baselines are reported from Zhao et al. (2024); Han et al. (2024).  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we proposed LORO for efficient yet effective pretraining of low-rank parameterized language models. Specifically, LORO optimizes the full-size product of the low-rank factors toward the steepest gradient descent direction on the low-rank matrix manifold, without computing any expensive full-size weight or gradient. Extensive experiments demonstrate that LORO can discover competitive low-rank models with performance comparable to full-size baselines, while providing significant memory reduction and acceleration in both training and inference. This work demonstrates the potential of low-rank structures in language model pretraining, inspiring us to explore efficient low-rank pretraining methods for vision and multi-modal generative models.  
+
+
+

@@ -1,0 +1,451 @@
+\title{Block Verification Accelerates Speculative Decoding}
+
+\begin{abstract}
+Speculative decoding is an  effective method for lossless acceleration of large language models during inference. It uses a fast model to draft a block of tokens which are then verified in parallel by the target model, and provides a guarantee that the output is distributed identically to a sample from the target model. In prior works, draft verification is performed independently token-by-token. Surprisingly, we show that this approach is not optimal. We propose \emph{Block Verification}, a simple draft verification algorithm that verifies the entire block jointly and provides additional wall-clock speedup. We prove that the proposed mechanism is optimal in the expected number of tokens produced each iteration and specifically is never worse than the standard token-level verification.
+Empirically, block verification provides modest but consistent wall-clock speedups over the standard token verification algorithm of 5\%-8\% in a range of tasks and datasets. 
+Given that block verification does not increase code complexity, maintains the strong lossless guarantee of the standard speculative decoding verification algorithm, cannot deteriorate performance, and, in fact, consistently improves it, it can be used as a good default in speculative decoding implementations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\footnotetext[2]{Listed in alphabetical order.}
+Large language models (LLMs) \citep{chowdhery2022palm, touvron2023llama, openai2023gpt4, team2023gemini} are often decoded through autoregressive sampling, where 
+generating $k$ tokens requires $k$ costly serial evaluations of the model.
+To improve generation latency, \citet{leviathan2022fast} proposed \emph{speculative decoding}, which enables an LLM to generate several tokens concurrently.
+In each iteration, conditioned on the current decoded prefix, a guess of the next block of $\nt$ tokens is made by a fast drafter (\eg a small model or a heuristic).
+Each of the resulting $\nt+1$ prefixes are then evaluated by the large target model in parallel. To guarantee that the final output follows the same distribution as that of the large model, some of the generated tokens are accepted while others are rejected.
+The accepted tokens\footnote{With an extra token sampled from either a residual distribution or the large model distribution.} are then appended to the prefix, and the process repeats until generation ends.
+See \cref{fig:speculative-decoding-diagram} and \cref{alg:speculative_decoding_framework}.
+
+\pagebreak
+
+\begin{figure*}[h]
+\centering
+\includegraphics[width=0.7\textwidth]{neurips/fig-blockverify.pdf}
+\caption{One iteration of speculative decoding (\cref{alg:speculative_decoding_framework}). The prefixes and verified tokens are in blue, the unverified tokens from the draft model are in red, and the tokens sampled from the residual distribution are underlined.
+}
+\label{fig:speculative-decoding-diagram}
+\end{figure*}
+In \cite{leviathan2022fast}, the drafts are verified through a sequence of token-level rejection steps.
+More specifically, given a prefix $\context$, let $X_1, X_2, \ldots, X_\nt$ be one sample block of length $\nt$ from the draft model $\msmall$, where $\forall i \le \nt$,
+$
+    X_i \sim \msmall(\cdot \mid \context, X^{i-1}).
+$
+Using the conditional distributions under the target large model $\mbig$ returned by the parallel evaluation step ($\forall i \le \nt$,
+$
+    \mbig(\cdot \mid \context, X^{i-1})
+$)
+, the algorithm iterates over the draft tokens sequentially, and accepts each token $X_i$ with probability 
+\begin{equation} \label{eqn:accept_probability}
+     \min\left\{1, \frac{\mbig(X_i \mid \context, X^{i-1})}{\msmall(X_i \mid \context, X^{i-1})} \right\},
+\end{equation}
+
+The process continues until a token is rejected, at which point an extra token is sampled, for free, according to a residual distribution (see \cref{alg:token_verify} and \cite{leviathan2022fast} for more details). We refer to this algorithm as \emph{Token Verification}.
+Since its introduction in \cite{leviathan2022fast}, this
+token-by-token verification procedure has been the standard for follow-up works (see \cref{sec:related}).
+
+In this work, we make the surprising observation that {\emph{the standard token verification algorithm, is not optimal}}, and propose a \emph{strictly better method}. Our key observation is that we can increase the number of accepted tokens, while maintaining the identical distribution guarantee, by \emph{jointly verifying the entire block of draft tokens} instead of verifying each token independently.  %
+Our proposed algorithm, which we call \emph{Block Verification}, has the following advantages:
+\begin{itemize}
+  \item \textbf{Simple to use.} The algorithm is a plug-and-play replacement of the standard token verification algorithm of speculative decoding. It
+  does not incur additional computation or code complexity costs.
+    \item \textbf{Strict improvement.} With the same drafting model, the speedup of block verification is no worse than that of standard token verification.
+    Moreover, we show that block verification is an optimal verification procedure (\cref{thm:optimal_decoded_length}).
+    \item \textbf{Identical distribution.} Importantly, our method is not an approximation and maintains the identical distribution guarantee of speculative decoding.
+\end{itemize}
+
+We empirically test \emph{block verification} and compare it with the standard \emph{token verification} on a range of tasks and datasets. We show that our algorithm consistently improves over block efficiency (i.e. the expected number of generated tokens) by 7\%-10\% and overall empirical wall clock times by 5\%-8\% (see \cref{tab:exp_comparison_l_8}). Notably, our algorithm provides improvements only through  the  verification  phase  of  speculative decoding, and hence the improvements can be combined with improvements obtained from other works that aim at improving the drafting phase.
+Since these improvements come for free, our block verification algorithm can be used as the draft verification algorithm by default in speculative decoding implementations.
+
+
+\section{A Motivating Example}
+
+The standard token verification algorithm  stochastically rejects draft tokens with a higher probability from $\msmall$ than from $\mbig$. This is necessary to guarantee that the generated tokens follow the same distribution as that of $\mbig$. Our main observation is that considering whether to reject a block of draft tokens jointly, instead of one-by-one, can result in accepting more tokens. We now illustrate this through a simple example.
+
+Consider the following trivial language model whose token space consists only of 2 tokens: $\a$ and $\b$. Further, assume that both the large model $\mbig$ and the small model $\msmall$ are context-independent, and specifically that $\forall \context$,
+
+\[
+    \mbig(\a) = 1/3, \quad
+    \mbig(\b) = 2/3, \quad \msmall(\a) = 2/3, \quad \msmall(\b) = 1/3.
+\]
+
+In this setting, token verification will accept each draft token $X$ independently with probability 1 if $X = \b$ and $1/2$ if $X = \a$.
+With a block size of $\gamma = 2$, since the total variation (TV) distance $\dtv{\mbig}{\msmall} = 1/3$, the expected number of accepted tokens\footnote{This is different from the number of generated token in one iteration, which is the number of accepted tokens plus one (corrected token).} from $\msmall$ with the token verification algorithm is $1 - 1/3 + (1 - 1/3)^2 = 10/9$ (see analysis in \cite{leviathan2022fast}).
+
+\medskip
+\noindent \textbf{An ideal algorithm with full information.} Suppose an algorithm can decide on what tokens to accept from $\msmall$ based on the \textit{full joint distributions} of both tokens, \ie
+\[
+    \mbig(\a\a) = 1/9, \quad
+    \mbig(\a\b) = 2/9, \quad \mbig(\b\a) = 2/9, \quad \mbig(\b\b) = 4/9,
+\]
+\[
+    \msmall(\a\a) = 4/9, \quad
+    \msmall(\a\b) = 2/9, \quad \msmall(\b\a) = 2/9, \quad \msmall(\b\b) = 1/9.
+\]
+The algorithm would have performed the following improved acceptance logic: always accept $X_1X_2$ when $X_1X_2 = $ $\a\b$, $\b\a$, or $\b\b$ since $\mbig(X_1X_2) \ge \msmall(X_1X_2)$, and accept $\a\a$ with probability $\mbig(\a\a)/\msmall(\a\a) = 1/4$ (correcting the samples to $\b\b$). 
+The expected number of accepted tokens from $\msmall$ now becomes: $2(\msmall(\a\b)+\msmall(\b\a)+\msmall(\b\b)+1/4 \times \msmall(\a\a))=12/9 > 10/9$. This illustrates the benefit of considering the distribution of draft blocks jointly.
+
+\medskip
+\noindent \textbf{Verification with partial information.} In general the full distribution over the next block of tokens is intractable to calculate. Instead, we only have access to the conditional distributions of the next token along the \emph{sample path} of the draft block, $\mbig(\cdot \mid \context, X^{i}), \msmall(\cdot \mid \context, X^{i})$ for various $i$'s. To emphasize, the ideal rejection logic does not need access to the full distribution, but care is needed in properly assigning the residual distribution. Our block verification does exactly this, as follows.
+
+With block verification, when the draft tokens $X_1X_2 = \a\b$ or $\b\b$, $\probof{\text{Accept } X_1X_2} = 1$ similar to the idealized algorithm. When $X_1X_2 = \a\a$, $\probof{\text{Accept } X_1X_2} = 1/4$, and else the algorithm rejects both tokens and only corrects the first token to $\b$ since the algorithm doesn't have access to $\mbig(\cdot \mid\b)$. When $X_1X_2 = \b\a$, it always accepts $\b$, and then accepts $\a$ with probability $1/2$ (else it corrects the second token to $\b$). Importantly, the marginal distributions of the generated tokens at the first token and the second token are always $\mbig(\cdot)$. We then simply add the generated tokens to the prefix and proceed to the next iteration. The expected number of accepted tokens is $2\times (\msmall(\a\b)+\msmall(\b\b)) + (1 + 1/2) \times \msmall(\b\a)  + 1/4 \times 2 \times \msmall(\a\a)=11/9$, which is better than the $10/9$ obtained by token verification.
+This example proves the following result:
+\begin{lemma}\label{cor:non_optimal_speed}
+    The standard token verification algorithm of speculative decoding is not optimal.
+\end{lemma}
+
+Note that while the expected number of accepted tokens in the example for block verification ($11/9$) is higher than that of the standard token verification algorithm ($10/9$), it is still less than that of the ideal algorithm with access to the full distribution ($12/9$).
+In \cref{sec:guarantee_block}, we show that block verification is indeed optimal in the partial information case, with natural assumptions.
+
+
+
+
+
+\begin{figure}[h]
+\begin{minipage}{0.46\textwidth}
+\begin{algorithm}[H]
+\caption{Token Verification}
+\label{alg:token_verify}
+\begin{algorithmic}[1]
+\REQUIRE{Draft block $X^{\nt}$; small model distributions $\forall i< \nt, \msmall(\cdot \mid \context, X^{i})$; large model distributions $\forall i \le \nt, \mbig(\cdot \mid \context, X^{i})$.}
+\STATE Sample $\eta_1, \ldots, \eta_{\nt} \sim U(0, 1)$.
+\STATE Set $\tau = 0$.
+\FOR{$i = 1, \ldots \nt$}
+\STATE[]
+\ifnum\ifarxiv=0
+\item[]
+\fi
+\item[]
+\STATE Set $h_i = \min\{\frac{\mbig(X_{i} \mid \context, X^{i-1})}{\msmall(X_{i} \mid \context,  X^{i-1})}, 1\}.$
+\IF{$\eta_i \le h_i$}
+\STATE Set $\tau = i$.
+\ELSE
+\STATE \textbf{break.}
+\ENDIF
+\ENDFOR
+\IF{$\tau = \nt$}
+\STATE Sample $Y$ from $\mbig(\cdot \mid \context, X^{\nt})$.
+\ELSE
+\STATE Sample $Y$ from $\pres^{\rm token}(\cdot \mid \context, X^{\tau})$ as in \cref{eqn:pres-token}.
+\ENDIF
+\STATE \textbf{Return} $X^\tau, Y$.
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.46\textwidth}
+\begin{algorithm}[H]
+\caption{Block Verification}
+\label{alg:block_verify}
+\begin{algorithmic}[1]
+\REQUIRE{Draft block $X^{\nt}$; small model distributions $\forall i< \nt, \msmall(\cdot \mid \context, X^{i})$; large model distributions $\forall i \le \nt, \mbig(\cdot \mid \context, X^{i})$.}
+\STATE Sample $\eta_1, \ldots, \eta_{\nt} \sim U(0, 1)$.
+\STATE Set $\tau = 0$, \diff{$\pab_0 = 1$}.
+\FOR{$i = 1, \ldots \nt$}
+\STATE \diff{Set $\pab_i = \min \{\pab_{i-1}\frac{\mbig(X_{i} \mid \context,  X^{i-1})}{\msmall(X_{i} \mid \context, X^{i-1})}, 1 \}$.}
+\STATE Set $h_i$ \diff{as in \cref{eqn:pacc_block}.}
+\IF{$\eta_i \le h_i$}
+\STATE Set $\tau = i$.
+\ELSE
+\STATE \diff{\textbf{continue.}} \label{line:continue}
+\ENDIF
+\ENDFOR
+\IF{$\tau = \nt$}
+\STATE Sample $Y$ from $\mbig(\cdot \mid \context, X^{\nt})$.
+\ELSE
+\STATE Sample $Y$ from $\pres^{\rm block}(\cdot \mid \context, X^{\tau})$ as in \diff{\cref{eqn:pres-block}.}
+\ENDIF
+\STATE \textbf{Return} $X^\tau, Y$.
+\end{algorithmic}
+\end{algorithm}\end{minipage}
+\end{figure}
+
+
+
+\section{Block Verification}
+
+
+
+In this section, we extend the above intuition to develop a general block verification algorithm, which works for standard speculative decoding with partial information. The high-level idea is to couple the acceptance of each draft token with other draft tokens. To do this, the algorithm considers draft sub-blocks with different lengths, and decides whether to accept each sub-block independently. The final accepted draft block is the longest accepted sub-block in the above process. The acceptance probabilities for each sub-block and the residual distributions are carefully chosen to maintain the distribution guarantee of the final output, and achieve optimal speedup.
+
+\begin{figure}[h]
+    \centering
+   \begin{tcolorbox}[width=0.95\textwidth]
+ Residual distribution in \cref{alg:token_verify} (Line 15): $
+ \forall x \in \cX,$
+ \begin{equation}
+     \pres^{\rm token}(x \mid \context, X^{i}) = \frac{\max\{ \mbig(x \mid \context, X^{i}) - \msmall(x \mid \context, X^{i}), 0 \}}{\sum_{x'\in\cX} \mbig(x' \mid \context, X^{i}) - \msmall(x' \mid \context, X^{i}), 0 \}}.\label{eqn:pres-token}
+ \end{equation}
+ Residual distribution in \cref{alg:block_verify} (Line 15): $
+ \forall x \in \cX,$
+ \begin{equation}
+     \pres^{\rm block}(x \mid \context, X^{i}) = \frac{\max\{ \diff{$\pab_{i}$} \cdot \mbig(x \mid \context, X^{i}) - \msmall(x \mid \context, X^{i}), 0 \}}{\sum_{x'\in\cX} \max\{ \diff{$\pab_{i}$} \cdot \mbig(x' \mid \context, X^{i}) - \msmall(x' \mid \context, X^{i}), 0 \}}.\label{eqn:pres-block}
+ \end{equation}
+ Acceptance probability in \cref{alg:block_verify} (Line 5): $h_\nt = \pab_\nt$, and when $i < \nt$,
+ \begin{equation}\label{eqn:pacc_block}
+    h_i = 
+    \frac{\sum_{x' \in \cX} \max\{\pab_i \cdot \mbig(x' \mid \context, X^{i}) -\msmall(x' \mid \context, X^{i}), 0\}}{\sum_{x' \in \cX}  \max\{\pab_{i}\cdot \mbig(x' \mid \context, X^{i}) -\msmall(x' \mid \context, X^{i}), 0\} + 1 - \pab_i}.
+\end{equation}
+ \end{tcolorbox}
+    \caption{The acceptance probabilities and residual distributions in \cref{alg:token_verify,alg:block_verify}.}
+    \label{fig:missing_definition}
+\end{figure}
+
+
+See \cref{alg:block_verify} for a sketch implementation of block verification, and \cref{alg:token_verify} for a sketch implementation of the standard token verification for comparison.
+Note that the implementations follow the same overall structure (the differences are highlighted).
+See \cref{alg:speculative_decoding_framework} for the outer loop of the speculative decoding algorithm, which remains unchanged for both verification methods.
+See \cref{fig:missing_definition} for additional definitions. See \cref{sec:python_code} for sketch Python implementations.
+
+Importantly, note that token verification stops as soon as a token is rejected (the \textbf{break} in Line~9 of \cref{alg:token_verify}), while block verification always operates on the full block.
+
+\begin{algorithm}[h]
+\caption{Speculative decoding (\spec) \citep{leviathan2022fast}}
+\label{alg:speculative_decoding_framework}
+\begin{algorithmic}[1]
+\REQUIRE{Prefix $\context$, target model $\mbig$, draft model $\msmall$. Draft length $\nt$. Verification algorithm $\draftverify$. }
+\WHILE{$\eos \notin (X^\tau, Y)$}
+\STATE Sample $X_1, \ldots, X_{\nt} \sim  \msmall(\cdot \mid \context)$ using autoregressive sampling, keep the conditional\\
+probabilities at each step $\msmall(\cdot \mid \context, X^{i})$ for $i = 0, \ldots, {\nt-1}$. \hfill \coloredcomment{Obtain draft block.}
+\STATE Call the large model $\mbig$ and compute conditional probabilities $\mbig(\cdot \mid \context, X^{i})$ \\
+for $i = 0, 1, \ldots, \nt$ in parallel. \hfill \coloredcomment{Parallel scoring.}
+\STATE Get the accepted tokens with draft verification \hfill \coloredcomment{Draft verification and correction.}
+\[
+   X^\tau, Y = \draftverify(X^{\nt}, \{\msmall(\cdot \mid \context, X^{i}) \}_{i = 0}^{\nt-1}, \{\mbig(\cdot \mid \context, X^{i}) \}_{i = 0}^{\nt}).
+\]
+\STATE $\context \leftarrow \context, X^\tau, Y.$ \hfill \coloredcomment{Add decoded tokens to the prefix.}
+\ENDWHILE
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Theoretical guarantees.} Speculative decoding with block verification preserves the distribution of its outputs (\cref{thm:distribution_match}). Moreover, block verification achieves the {\em optimal} speedup among all valid draft verification algorithms in speculative decoding (\cref{alg:speculative_decoding_framework}), resulting in a strict improvement over the standard token verification (\cref{thm:optimal_decoded_length}). We defer the formal statements to \cref{sec:guarantee_block}. Below we give some intuitions on the parameter choices.
+
+
+\paragraph{Intuition on parameter choices.} The key quantities for achieving the theoretical guarantees are $\pab_i$'s, which correspond to the probability that the sub-block $X^{i}$ will be kept in the final output (see \cref{lem:accept_prob} in \cref{proof:distribution_match}). The per-step acceptance probability $h_i$ in \cref{eqn:pacc_block} is then decided based on $\pab_i$'s since block verification keeps the longest accepted sub-block.
+
+\medskip
+\noindent \textit{Intuition: $\pab_i$'s.} To start, we ignore the minimum operation in the recursion. Then each $\pab_i$ is simply $\mbig(X^i\mid\context) / \msmall(X^i\mid\context)$, which is an upper bound on the actual $\pab_i$'s. This guarantees that the probability of getting $X^i$ by accepting it from the draft will be at most $\mbig(X^i\mid\context),$ and hence the algorithm is not accepting $X^i$ more than needed.
+
+Moreover, the minimum operation also guarantees that for any prefix $X^j$ that could be obtained from multiple draft sample paths, the distribution over subsequent tokens are always the same $\mbig(\cdot \mid \context, X^j)$.
+This enables block verification to be used as a plug-and-play replacement of token verification in speculative decoding (\cref{alg:speculative_decoding_framework}).
+
+\medskip
+\noindent \textit{Intuition: $\pres^{\rm block}$.} As shown in \cref{lem:accept_prob}, for any $X^i$, the probability that it is in the accepted block is $\msmall(X^i) \pab_i(X^i)$. The goal of choosing  $\pres^{\rm block}$ is to make sure that the distribution on the next token follows $\mbig(\cdot \mid X^i)$. For any possible next token $x$,  $(X^i, x)$ could also be obtained by accepting $X^{i+1}$ when $X_{i+1} = x$, 
+with a probability of $\msmall(X^{i}, x)\pab_{i+1}(X^{i}, x)$, 
+which should be subtracted to obtain the residual mass on $(X^i, x)$. %
+This leads to the choice of $\pres^{\rm block}$ in \cref{eqn:pres-block}.
+
+
+
+
+
+\section{Theoretical Guarantees}
+
+
+In this section, we present the formal theoretical guarantees of block verification. Notably, that it produces the correct distribution and that it is optimal in terms of the expected number of generated tokens.
+Let $\cM^*(\cdot \mid \context)$ denote the distribution of the sequence up to the end of the generative process under model $\cM$ and context $\context$.
+
+\begin{definition}[Valid draft verification algorithm.] \label{def:draft_verify}
+An algorithm \draftverify~is said to be a valid draft verification algorithm if $\forall \context$, models $\msmall, \mbig$, and block length $\nt$, the outputs of \cref{alg:speculative_decoding_framework} (\spec) with verification algorithm~\draftverify~satisfy
+    \begin{equation}
+        \spec(\context, \mbig, \msmall, \nt, \draftverify) \simp \mbig^*(\cdot \mid \context)\footnote{We use $\simp$ to denote that two distributions are the same.}, \label{eqn:spec_goal}
+    \end{equation}
+\ie the distribution of the outputs is preserved.
+\end{definition}
+
+
+1 in \cite{leviathan2022fast}). We now claim the following:
+
+\begin{theorem}\label{thm:distribution_match}
+    Block verification is a valid draft verification algorithm.
+\end{theorem}
+
+I.e. speculative decoding with block verification preserves the distribution of the output sequence.
+
+We now further claim that block verification is optimal for all valid draft verification algorithms.
+
+\begin{theorem}\label{thm:optimal_decoded_length}
+For $i > 0$, let $N(i)$ be the number of decoded tokens after $i$ iterations in \cref{alg:speculative_decoding_framework}.
+    For any valid draft verification algorithm \draftverify~in \cref{def:draft_verify}, we have $\forall \context, \msmall, \mbig$, $\nt$, and $i$,
+    \[
+        \EE_{\specblock}[N(i)] \ge  \EE_{\draftverify}[N(i)],
+    \]
+    where the randomness is over the randomness of the draft block and the randomness of the algorithm. 
+    
+    In particular,
+    \[
+     \EE_{\specblock}[N(i)] \ge  \EE_{\spectoken}[N(i)].
+    \]
+\end{theorem}
+
+In other words, among all valid verification algorithms\footnote{We use \specblock and \spectoken to denote block verification and token verification respectively.}, speculative decoding with block verification decodes the highest number of tokens in expectation in a fixed number of iterations. Note that since the computation overhead added by block verification is negligibly small, this establishes the overall optimality of the block verification algorithm.
+In particular, block verification provides a greater speedup than the standard token verification. We defer the proofs to \cref{sec:formal_guarantee}.
+
+Note that the optimality guarantee holds for all verification algorithms that can be used in \cref{alg:speculative_decoding_framework} as is. 
+Specifically, there exist verification procedures that force the decoding logic to depend on the previous accept/reject decisions that produce more accepted tokens in average \emph{in one iteration}. Note that this will affect the decoding speed in subsequent iterations. In \cref{sec:block_verify_greedy} we present such an algorithm and name it \emph{greedy block verification}. We empirically observe that block verification consistently outperforms it, so we include it mainly as a theoretical result.
+
+
+
+
+\section{Experiment Setup}
+
+
+We use PALM-2 models \citep{chowdhery2022palm} for the drafter and target models, with PALM-2-S as the large target model and PALM-2-XXS / PALM-2-XXXS as the small drafter model. The order of the sizes of the models is PALM-2-XXXS $<$ PALM-2-XXS $<$ PALM-2-S.
+We evaluate on prompts from a wide range of datasets and tasks, including Language modeling with one-billion language benchmark (LM1B) \citep{chelba2013one}, 
+ChatGPT prompts sourced from LearnGPT (GPT Prompt) \citep{chatgptprompts}, %
+reasoning questions (WebQA) \citep{berant-etal-2013-semantic}, physical commonsense reasoning questions (PIQA) \citep{Bisk_Zellers_Le-bras_Gao_Choi_2020}, scraped conversations with ChatGPT (ShareGPT) \citep{chatgptprompts, sharegpt}, summarization tasks (XSum) \citep{Narayan2018DontGM}, grade school math problems (GSM8K) \citep{cobbe2021gsm8k}, and German to English translation (WMT DeEn) \citep{bojar-EtAl:2014:W14-33}.
+For all datasets, we decode the first $1000$ prompts using a max input prompt length of $512$ and decode up to $128$ output tokens.
+
+
+\section{Results}
+
+
+
+We empirically compare speculative decoding with block verification to speculative decoding with token verification, and find that block verification provides small yet consistent improvements in a wide range of settings, both when measuring idealized \emph{block efficiency} and real world \emph{wall clock time}.
+
+\emph{Block efficiency} measures the speedup in an idealized settings where we neglect the evaluation time of the draft model and assume that we have enough compute capacity for evaluating the large model on all draft prefixes in parallel.
+I.e. it measures the average number of decoded tokens per serial call to the target model.
+We observe consistent improvements for all datasets and draft models.
+For $\nt = 8$ with PALM-2-XXS as the drafter, the improvement in block efficiency ranges from $7.00\%$ to $10.06\%$ with an average of $8.30\%$. 
+
+We also observe consistent improvements in \emph{wall clock time}, which measures the actual speedup, including all the real-world overheads.
+See \citep{leviathan2022fast, chen2023accelerating} for a more detailed discussion of these overheads.
+For $\nt = 8$ with PALM-2-XXS as the drafter, the improvement in block efficiency ranges from $5.36\%$ to $8.14\%$ with an average of $6.49\%$. The detailed numbers for this setting are listed in \cref{tab:exp_comparison_l_8}.
+
+
+\begin{table*}[h]
+\caption{Speedup comparison between token verification (\textsc{TokenV}) and block verification (\textsc{BlockV}) with $\nt = 8$ and PALM-2-XXS as the draft model on various datasets and tasks. We list the average and standard deviation across 3 runs with different seeds on $1000$ test prompts.}
+ \setlength{\tabcolsep}{2pt}
+\begin{center}
+\begin{tabular}{  c c c c c c c}
+\toprule
+\multirow{2}{*}{Dataset} &  \multicolumn{3}{c}{Block efficiency} & \multicolumn{3}{c}{Wall clock time speedup over baseline} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} 
+& \textsc{TokenV} & \textsc{BlockV}   & Improve. $\uparrow$ \% & \textsc{TokenV} & \textsc{BlockV}  & Improve. $\uparrow$ \% \\ 
+ \midrule
+LM1B & $3.21\pm 0.01$ & $3.49\pm 0.02$ & $8.68\pm 0.79$ & $2.17\pm 0.01$ & $2.32\pm 0.01$ & $6.85\pm 0.74$ \\
+GPT Prompt & $3.41\pm 0.04$ & $3.76\pm 0.02$ & $10.06\pm 1.66$ & $2.30\pm 0.02$ & $2.48\pm 0.01$ & $8.14\pm 1.55$ \\
+WebQA & $3.44\pm 0.01$ & $3.70\pm 0.01$ & $7.53\pm 0.24$ & $2.32\pm 0.00$ & $2.45\pm 0.01$ & $5.75\pm 0.22$ \\
+PIQA & $3.40\pm 0.02$ & $3.68\pm 0.00$ & $8.30\pm 0.62$ & $2.29\pm 0.01$ & $2.44\pm 0.00$ & $6.52\pm 0.58$ \\
+ShareGPT & $3.34\pm 0.01$ & $3.62\pm 0.03$ & $8.45\pm 0.98$ & $2.25\pm 0.01$ & $2.40\pm 0.02$ & $6.68\pm 0.91$ \\
+XSum & $3.49\pm 0.02$ & $3.76\pm 0.01$ & $7.63\pm 0.94$ & $2.35\pm 0.01$ & $2.49\pm 0.01$ & $5.82\pm 0.88$ \\
+GSM8K & $3.81\pm 0.01$ & $4.15\pm 0.03$ & $8.74\pm 0.56$ & $2.55\pm 0.01$ & $2.73\pm 0.02$ & $6.84\pm 0.51$ \\
+WMT-DeEn & $3.19\pm 0.01$ & $3.41\pm 0.02$ & $7.00\pm 0.78$ & $2.15\pm 0.01$ & $2.27\pm 0.01$ & $5.36\pm 0.73$ \\
+\midrule
+Average & $3.41$ &	$3.70$ & $8.30$ & $2.30$ &	$2.45$  &$6.49$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\label{tab:exp_comparison_l_8}
+\end{table*}
+\paragraph{The effect of draft length $\nt$.} We also perform comparisons of the algorithms for other block lengths ($\nt = 4$ and $\nt = 6$) and observe consistent improvements. We plot the average improvement over all datasets in \cref{fig:average_improvement}. With the same drafter, the relative improvement of block verification over token verification increases as $\nt$ increases. This is consistent with our intuition since when $\nt = 1$, the two algorithms are the same and as $\nt$ increases, block verification would benefit more from coordinating the acceptance rule considering the realization of all tokens in the draft block.
+
+\paragraph{The effect of the drafter.} We also consider the effect of the quality of the drafter on the improvement. In \cref{tab:avg_improvement}, we list the average block efficiency and wall clock speed up under different draft lengths for both drafters. Note that PALM-2-XXS is a larger model than PALM-2-XXXS, and hence a better drafter in terms of quality, as demonstrated by the better average block efficiencies in the table.
+In \cref{fig:average_improvement}, we plot the average improvement under different drafter models, PALM-2-XXS and PALM-2-XXXS. The improvements hold for both drafters. And the relative improvement in block efficiency under PALM-2-XXS  is greater than that under PALM-2-XXXS.
+This shows that the improvement obtained from block verification can be combined with the improvement on the quality of the drafter, and the improvement might be more significant under better drafters.
+
+\begin{figure}[h]
+        \begin{minipage}{0.45\textwidth}
+    \centering
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{ c c  c  c  c c }
+\toprule
+\multirow{2}{*}{$\nt$} & \multirow{2}{*}{Drafter} & \multicolumn{2}{c}{\textsc{TokenV}}  & \multicolumn{2}{c}{\textsc{BlockV}}  \\ 
+ & & BE  & WS  & BE  & WS \\ 
+ \midrule
+\multirow{2}{*}{$4$ } & XXS & $2.89$ & $2.44$ & $2.99$ & $2.50$ \\
+& XXXS & $2.35$ & $2.36$ & $2.43$ & $2.43$ \\ 
+\midrule 
+\multirow{2}{*}{$6$ }& XXS & $3.23$ & $2.43$ & $3.43$ & $\mathbf{2.54}$ \\
+& XXXS & $2.50$ & $2.39$ & $2.63$  & $2.50$ \\
+\midrule
+\multirow{2}{*}{$8$ }& XXS & $3.41$ & $2.30$ & $\mathbf{3.70}$ & $2.45$ \\
+& XXXS & $2.57$ & $2.28$ & $2.73$ & $2.40$ \\
+  \bottomrule
+\end{tabular}
+\caption{Average block efficiency (BE) and wall clock speedup (WS) across all datasets for token verification (\textsc{TokenV}) and block verification (\textsc{BlockV}) with different $\nt$.  The large model is PALM-2-S and the drafter model is either PALM-2-XXS (XXS) or PALM-2-XXXS (XXXS).}
+\label{tab:avg_improvement}
+    \end{minipage}
+        \hfill
+    \begin{minipage}{0.45\textwidth}
+        \centering
+    \includegraphics[width = 0.95\textwidth]{neurips/average_improvement.pdf}
+    \caption{Average relative improvement of block verification over token verification in block efficiency (BE) and wall clock speedup (WS) across all datasets for different drafters and draft lengths.}
+    \label{fig:average_improvement}
+    \end{minipage}
+\end{figure}
+
+Detailed results for experiments performed with different drafters, different datasets, and different draft lengths are listed in \cref{sec:experiments_app}.
+
+
+\section{Related work}
+
+
+\textbf{Parallel decoding.} Our work improves speculative decoding \citep{leviathan2022fast}, a framework for decoding several tokens concurrently. \emph{Draft and verify} \citep{stern2018blockwise} was an earlier work, which proposed to independently predict and decode several tokens in parallel, for the greedy decoding case (zero temperature). Speculative decoding has later also been proposed in \cite{chen2023accelerating}.
+
+\medskip
+\noindent\textbf{Single draft improvements.}
+There have been many works aiming to improve speculative decoding without making use of more than one deocding draft. In Table~\ref{tab:related}, we list a set of works in the draft and verify framework with a breakdown of their drafting and verification algorithms. See \cite{xia2024unlocking} for a comprehensive study.  
+In the single-draft case, %
+despite several works have worked on 
+improving the drafting phase of speculative decoding \citep{he2023rest, chen2023cascade, sun2024triforce, zhou2023distillspec, liu2023online, gloeckle2024better, zhang2024draft, elhoushi2024layerskip}.
+However, all existing algorithms use the token verification algorithm, and little has been done to improve the verification phase. Our proposed block verification algorithm can be used in tandem with the drafting techniques in \cref{tab:related}, yielding combined gains.
+We leave a more systematic study of the improvement of block verification in these cases for future study.
+
+\medskip
+\noindent \textbf{Multiple drafts.} Recently, speculative decoding is extended to multiple drafts \citep{sun2023spectr, miao2023specinfer} and new verification algorithms for the multi-draft scenario are proposed \citep{li2024eagle, chen2024sequoia}. While increasing the number of draft sequences has shown to improve the overall speedup, it comes at the cost of more computation. In all of these works, the verification algorithm is a generalization of the token verification procedure. Extending block verification to the multi-sample case is an interesting future direction.
+
+\begin{table*}[h]
+\centering
+\caption{Recent works based on the draft and verify framework.
+Temperature 0 refers to greedy decoding and non-zero temperature refers to sampling.}
+
+ \setlength{\tabcolsep}{3pt}
+\begin{tabular}{ c c c c c }
+ \toprule
+Work & \# drafts & Temp. & Drafting & Verification \\
+ \midrule
+ \cite{stern2018blockwise}& $1$ & $0$ & parallel softmax layers  & token matching \\ 
+ \cite{yang2023inference} & $1$ & $0$ & additional 
+ text  &  token matching \\
+ \midrule
+ \cite{leviathan2022fast}& $1$ & $\geq 0$ & small LM  & \spectoken~ (\cref{alg:token_verify})  \\
+  \cite{chen2023accelerating} & $1$ & $\geq 0$& small LM  & \spectoken~ (\cref{alg:token_verify})  \\
+  \cite{he2023rest}  & $1$ & $\geq 0$ & database retrieval  & \spectoken~ (\cref{alg:token_verify})  \\
+  \cite{chen2023cascade}& $1$ & $\geq 0$ & cascade of small LMs & \spectoken~ (\cref{alg:token_verify})  \\
+  \cite{sun2024triforce} & $1$ & $\geq 0$ & hierarchical drafters & \spectoken~(\cref{alg:token_verify}) \\
+  \cite{zhou2023distillspec} & $1$ & $\geq 0$ & distilled small LMs & \spectoken~(\cref{alg:token_verify})\\
+  \cite{liu2023online} & $1$ & $\geq 0$ & distilled small LMs & \spectoken~(\cref{alg:token_verify})\\
+   \cite{gloeckle2024better} & $1$ & $\geq 0$ & parallel softmax layers & \spectoken~(\cref{alg:token_verify})\\
+   \cite{zhang2024draft} & $1$ & $\geq 0$ & layer skip & \spectoken~(\cref{alg:token_verify})\\
+    \cite{elhoushi2024layerskip} & $1$ & $\geq 0$ & early exit  & \spectoken~(\cref{alg:token_verify})\\
+    \midrule
+    {\bf This work}& $1$ & $\geq 0$ & small LM &  \specblock~ (\cref{alg:block_verify}) \\
+ \midrule
+ \cite{sun2023spectr} & $\geq 2$ & $\geq 0$ & small LM  &   SpecTr \\
+  \cite{miao2023specinfer}  & $\geq 2$ & $\geq 0$& small LM  &   multi-round  \spectoken\\
+  \cite{li2024eagle} & $\geq 2$ & $\geq 0$& small LM  &   multi-round  \spectoken\\
+  \cite{chen2024sequoia} & $\geq 2$ & $\geq 0$& small LM  &   multi-round  \spectoken \\
+  \bottomrule
+\end{tabular}
+\label{tab:related}
+\end{table*}
+
+
+
+\section{Discussion}
+
+We showed that the standard \emph{token verification} algorithm used by speculative decoding is not optimal.
+Further, we proposed a new verification algorithm, \emph{block verification} and proved that it is an optimal verification algorithm.
+We also demonstrated empirically that block verification consistently outperforms token
+verification in a range of tasks.
+While the theoretical proofs are somewhat involved, the actual implementation of block verification is not more complex than the standard algorithm (see \cref{sec:python_code}), and since our proposed algorithm can only perform better, never worse, than the standard token verification algorithm (see \cref{thm:optimal_decoded_length}), it can be used as a good default in speculative decoding implementations.
+
+\newpage
+
+
+
+

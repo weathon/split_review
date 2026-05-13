@@ -1,0 +1,441 @@
+\title{Fira: Can We Achieve Full-rank Training of LLMs Under Low-rank Constraint?}
+
+\begin{abstract}
+Low-rank training has emerged as a promising approach for reducing memory usage in training Large Language Models (LLMs). Previous methods either rely on decomposing weight matrices (e.g., LoRA), or seek to decompose gradient matrices (e.g., GaLore) to ensure reduced memory consumption. However, both of them constrain the training in a low-rank subspace, thus inevitably leading to sub-optimal performance. This raises a question: whether it is possible to consistently preserve the low-rank constraint for memory efficiency, while achieving full-rank training (i.e., training with full-rank gradients of full-rank weights) to avoid inferior outcomes? In this paper, we propose a new plug-and-play training framework for LLMs called Fira, as the first attempt to achieve this goal. First, we observe an interesting phenomenon during LLM training: the scaling impact of adaptive optimizers (e.g., Adam) on the gradient norm remains similar from low-rank to full-rank training. Based on this observation, we propose a norm-based scaling method, which utilizes the scaling impact of low-rank optimizers as substitutes for that of original full-rank optimizers to enable full-rank training. In this way, we can preserve the low-rank constraint in the optimizer while achieving full-rank training for better performance. Moreover, we find that there are sudden gradient rises during the optimization process, potentially causing loss spikes. To address this, we further put forward a norm-growth limiter to smooth the gradient via regulating the relative increase of gradient norms. Extensive experiments on the pre-training and fine-tuning of LLMs show that Fira outperforms both LoRA and GaLore, achieving performance that is comparable to or even better than full-rank training. For instance, our Fira can reduce the memory usage of optimizer states by 61.1\%, while achieving improved performance for pre-training on the LLaMA 1B architecture. Notably, for pre-training on the LLaMA 7B architecture, our method uses an $8\times$ smaller rank than GaLore, yet outperforms it by a large margin. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{intro}
+In recent years, Large Language Models (LLMs) have achieved remarkable advancements in various domains \citep{achiam2023gpt, sima2023drivelm, fengkeypoint}. While the substantial increase in model size contributes significantly to these advancements, it also introduces considerable memory bottlenecks, especially for optimizer states \citep{zhao2024GaLore}. 
+For instance, pre-training a LLaMA-7B model from scratch \footnote{Training the model with a single batch size and maximum sequence length of 2048 under BF16 precision.} requires at least 58 GB memory, allocated as follows:  14GB for loading parameters, 14GB for weight gradients, 28GB for Adam \citep{kingma2014adam} optimizer states, and 2GB for activations \citep{zhao2024GaLore}.
+Notably, the optimizer states consume even more memory than the parameters themselves. To address this, low-rank training has demonstrated its effectiveness to reduce the memory usage of the optimizer states by conducting training in a low-rank subspace \citep{zhao2024GaLore, hulora}.
+
+The current low-rank training methods can be broadly divided into two categories: weight matrix-based and gradient matrix-based low-rank decomposition.
+For the {weight matrix decomposition} methods, the most representative one is Low-Rank Adaptation (LoRA) \citep{hulora}, where its basic idea is to use low-rank matrices as decomposed representations of the pre-trained weights during training, as shown in Figure~\ref{fig:total} (a). However,  the optimization of LoRA is constrained in a low-rank subspace of the weights. 
+This will inevitably cause the reduction of representation capacity, leading to sub-optimal outcomes \citep{zhang2023lora, xia2024chain}.
+Although the variant ReLoRA \citep{lialin2024relora} attempts to extend the application of LoRA from fine-tuning to pre-training, by periodically
+updating high-rank weights with multiple low-rank updates. It still requires full-rank weight training as a warm-up before low-rank training, thus rendering memory efficiency unachievable \citep{zhao2024GaLore}.
+For the {gradient matrix decomposition} based methods, the typical one is the gradient low-rank projection (GaLore) proposed recently \citep{zhao2024GaLore}. In contrast to LoRA, GaLore attempts to reduce the memory usage in optimizer states via decomposing the gradient matrix, as shown in Figure~\ref{fig:total} (b). 
+While GaLore supports the training of full-rank weights, it leverages only low-rank gradients, restricting them to a low-rank subspace. Consequently, any gradient information outside this subspace is lost, in contrast to training with full-rank gradients.
+Note that since these methods constrain LLM training to a low-rank subspace, this inevitably leads to sub-optimal results compared to full-rank training (i.e., training with full-rank gradients and full-rank weights). This raises the question: \textbf{Can we achieve full-rank training for LLMs while consistently maintaining a low-rank constraint?}
+
+\begin{figure}
+\centering
+\hspace{-0.05\linewidth}
+\subfigure[LoRA]{
+\begin{minipage}[t]{0.33\linewidth}
+\centering
+\includegraphics[height=2.9cm]{figures/LoRA.pdf}
+\end{minipage}%
+\hspace{-0.02\linewidth}
+}%
+\subfigure[GaLore]{
+\begin{minipage}[t]{0.33\linewidth}
+\centering
+\includegraphics[height=2.9cm]{figures/GP.pdf}
+\end{minipage}
+\hspace{-0.055\linewidth}
+}%
+\subfigure[Fira (ours)]{
+\begin{minipage}[t]{0.33\linewidth}
+\centering
+\includegraphics[height=2.9cm]{figures/Fira.pdf}
+\end{minipage}
+}%
+\centering
+\caption{This analyses three types of memory-efficient approaches at a macro level.}
+\label{fig:total}
+\end{figure}
+
+In light of this, we propose a new memory-efficient training framework for LLMs, called \textbf{Fira}, which, to the best of our knowledge, is the first to achieve \textbf{f}ull-rank tra\textbf{i}ning while consistently maintaining a low-\textbf{ra}nk constraint.
+To achieve this goal, a significant challenge is that the low-rank constraint makes it hard to preserve complete optimizer states (e.g., gradient momentum and variance) of full-rank weights in the commonly-used adaptive optimizer (e.g., Adam).
+As a result, the adaptive optimizer fails to correct the full-rank raw gradient according to the optimizer states.
+Without this correction, adaptive optimization algorithms would degrade into simple SGD, leading to significantly reduced optimization performance \citep{kingma2014adam, zhang2019gradient}. This point is further validated in Section \ref{Norm-Based-Scaling} and Section \ref{Ablation_Study}.  
+Fortunately, we observe an interesting phenomenon during LLM training: the \emph{scaling factor} \footnote{The scaling factor $\phi_t(R_t)$ is defined as $\frac{||\psi(R_t)||}{||R_t||}$, where $||R_t||$ is the norm of the raw gradient, $||\psi(R_t)||$ is the norm of the gradient corrected by the gradient correction function $\psi$ of the optimizer  (e.g., Adam).} of the optimizer (e.g., Adam) is similar from low-rank training to full-rank training. 
+As illustrated in Figure~\ref{fig:motivation}, if we sort the weight matrices by their average scaling factors, we can obtain a similar rank order.
+ 
+
+Based on this observation, we put forward a norm-based scaling method that utilizes the scaling factor of a weight matrix in low-rank training to replace the corresponding matrix's scaling factor in full-rank training.
+In this way, our scaling factor can also play a similar role in correcting the raw gradient, as adaptive optimizers do.
+Therefore, we can enable full-rank training while preserving the low-rank constraint.
+Additionally, we observe sudden increases in the gradient during training, which results in a spike in training loss (as depicted in Figure~\ref{fig:limiter}). 
+This issue could lead to substantial parameter updates, causing the loss function to reach a much higher value and undermining prior optimization efforts \citep{goodfellow2016deep,zhang2019gradient}. Despite the use of gradient clipping techniques \citep{pascanu2013difficulty}, this issue may not be adequately resolved, as shown in Figure~\ref{fig:limiter}. 
+To this end, we propose a norm-growth limiter, which aims to smooth the gradient by restricting the magnitude of the gradient norm's increase.  
+By employing our limiter, we adaptively convert sudden rises in gradients into gradual increases, thereby facilitating a smooth update that mitigates the problem of loss spikes.
+
+Our main contributions can be summarized as follows:
+
+\begin{enumerate}
+    \item We propose Fira, a plug-and-play memory-efficient training framework of LLMs, constituting the first attempt to enable full-rank training consistently under the low-rank constraint. 
+    \item We design two components in Fira: a norm-based scaling strategy that leverages the scaling effects of low-rank optimizers to facilitate full-rank training, and a norm-growth limiter to address the issue of loss spikes by limiting the growth of gradient norm.
+    \item Extensive experiments across various parameter counts (60M, 130M, 350M, 1B, 7B) validate the effectiveness of Fira in both pre-training and fine-tuning tasks. Our framework not only outperforms both LoRA and GaLore, but also achieves performance comparable to or better than full-rank training.
+ 
+\end{enumerate}
+
+
+\section{Related Work}
+
+\textbf{Low-rank Adaptation.} Low-Rank Adaptation (LoRA) has been introduced by \citet{hulora} as an efficient fine-tuning method for LLMs. The core idea of LoRA is to freeze the pre-trained weights and introduce trainable low-rank matrices as decomposed representations of the pre-trained weights.
+In this way, the memory usage of training LLMs could be saved.
+Recently, a variety of methods by extending LoRA have been proposed to further improve the performance \citep{zhang2023adalora,wen2023batched,xia2024chain,zhang2023lora,dettmers2024qlora}. 
+For instance,  ReLoRA \citep{lialin2024relora} is proposed to extend the application of LoRA from fine-tuning to pre-training. However, it still requires full-rank warm-up training before low-rank training, which prevents achieving memory efficiency. It is worth noting that while LoRA based methods reduce memory usage by limiting training to a low-rank parameter subspace, they inevitably reduce representation capacity \citep{xia2024chain}.
+
+\textbf{Gradient Projection.} Recent works \citep{zhang2023lora,xia2024chain,valipour2022dylora} have indicated that LoRA may yield sub-optimal performance since its low-rank constraints in parameters. 
+Inspired by traditional projected gradient descent methods \citep{chen2015fast,chen2019non},  GaLore \citep{zhao2024GaLore} has been proposed recently to mitigate this problem. It enables full-parameter learning under low-rank constraints by projecting the gradient into a low-rank subspace, reducing memory usage for optimizer states. However, while GaLore allows memory-efficient full-parameter training, it confines the gradient to a low-rank subspace, discarding the portion outside the subspace and resulting in significant information loss. 
+
+\textbf{System-Based Memory-Efficient Techniques.} 
+Many system-based techniques have been developed to reduce memory usage in LLM training \citep{chen2016training, ren2021zero}. However, most of these methods achieve memory efficiency by compromising either time or precision. Gradient checkpointing \citep{chen2016training} is proposed to reduce memory usage by trading increased computational time for the re-computation of activations. Quantization \citep{dettmers2024qlora} reduces memory consumption by using lower-bit data types, but at the cost of model precision. Memory offloading \citep{zhang2023g10, ren2021zero} reduces GPU memory usage by using non-GPU memory (e.g., CPU) as an extension. However, it introduces additional communication overhead, such as CPU-GPU transfer time.
+It’s important to note that our proposed method is complementary to these approaches and can potentially be combined with them to further reduce memory usage.
+
+
+
+\section{Preliminaries}
+
+\subsection{Regular full-rank training}
+At time step $t$, we denote the full-rank weight matrix as $W_t \in \displaystyle \R^{m\times n}$. The full-rank gradient can be represented as $G_t=\nabla_{W} f_t(W_{t}) \in \displaystyle \R^{m\times n}$, where $f$ is the objective function. Then the regular full-rank training can be expressed as follows: 
+\begin{equation}{\label{update}}
+    W_{t+1}=W_{t} - \eta\psi_t(G_t),
+\end{equation}
+where $\eta$ is the learning rate, and $\psi_t$ is the gradient correction function of the optimizer (for vanilla SGD, $\psi_t(G_t)=G_t$). Instead of vanilla SGD, adaptive optimizers (e.g., Adam \citep{kingma2014adam}, AdamW \citep{loshchilovdecoupled}) are usually employed to correct the raw gradient for improving the training performance. 
+However, this typically requires additional memory for storing optimizer states used in gradient correction.
+For instance,  Adam \citep{kingma2014adam} requires storing the optimizer states $M$ and $V$, which consume $2mn$ of memory. The gradient correction process is as follows:
+\begin{equation}{\label{adaptive1}}
+    M_t=\beta_1M_{t-1}+(1-\beta_1)G_t,
+\end{equation}
+\begin{equation}{\label{adaptive2}}
+    V_t=\beta_2V_{t-1}+(1-\beta_2)G_t^2,
+\end{equation}
+\begin{equation}{\label{adaptive3}}
+\psi_t(G_t) = \frac{\sqrt{1-\beta_2^{t}}}{1-\beta_1^{t}}\cdot \frac{M_t}{\sqrt{V_t} + \epsilon},
+\end{equation}
+where all matrix operations are element-wise. $\beta_1$ and $\beta_2$ are Adam’s hyper-parameters, and $\epsilon $ is a small constant (e.g., $1 \times 10^{-8}$) used for numerical stability. 
+Since this regular full-rank training typically consumes a large amount of memory for training LLMs, many representative low-rank training methods, e.g., LoRA \citep{hulora}  and Galore \citep{zhao2024GaLore}, have been proposed to reduce memory usage in recent years.
+
+\subsection{Low-Rank Adaptation}
+The basic idea behind LoRA \citep{hulora} is to use low-rank matrices as decomposed representations of the pre-trained weights during training, in order to reduce memory usage. Formally, LoRA freezes the full-rank weight matrix $W_0 \in \displaystyle \R^{m\times n}$ and incorporates two low-rank matrices $A_t$ and $B_t$ for training as:
+\begin{equation}{\label{lora}}
+    W_{t}=W_{0} + B_tA_t,
+\end{equation}
+where $B_t \in \displaystyle \R^{m\times r}$, $A_t \in \displaystyle \R^{r\times n}$, and the rank $r < \min (m,n)$. While LoRA reduces memory usage by limiting training to a low-rank subspace of the weight, it inevitably diminishes the representation capacity of the weight matrix $W_{t}$.
+
+\subsection{Gradient Low-Rank Projection}
+In contrast to LoRA, GaLore \citep{zhao2024GaLore} utilizes a projection matrix $P_t \in \displaystyle \R^{m\times r}$ to project the full-rank gradient $G_t \in \displaystyle \R^{m\times n}$ to a low-rank gradient $R_{t} = P^{\top}_tG_t \in \displaystyle \R^{r\times n}$ ($m \le n$)\footnote{For simplicity, we assume $m \le n$, following \citep{zhao2024GaLore}. If $m > n$, $R_{t} = G_tQ_t \in \displaystyle \R^{m\times r}, Q_t \in \displaystyle \R^{n\times r}$.}. By doing so, the memory usage of optimizer states could be reduced. The parameter update in GaLore can be formulated as:
+\begin{equation}{\label{GaLore_update}}
+    W_{t+1}=W_{t} - \eta P_t\psi_t(R_t),
+\end{equation}
+where 
+the projection matrix $P_t$ can be obtained through singular value decomposition (SVD) of $G_t$ and can be updated every $T$ steps:
+\begin{equation}{\label{svd}}
+    G_t = U \Sigma V^{\top} \approx \sum_{i=1}^{r} \sigma_i u_i v_i^{\top}, \quad P_t = [u_1, u_2, \ldots, u_r],
+\end{equation}
+where  $u_i $ is the $i$-th column vector of the left singular matrix $U$. 
+By selecting the first $r$ columns of matrix $U$ that correspond to the largest singular values, the projection matrix $P_t$ effectively captures the most significant directions in the gradient space, leading to faster convergence \citep{zhao2024GaLore}.
+The optimal switching frequency $T$ is usually set to be between $50$ to $1000$, and the additional computational overhead introduced by SVD is negligible ($< 10\%$), as stated in \citep{zhao2024GaLore}. Since Galore restricts the gradient in the low-rank subspace, the gradient information outside this subspace is lost, leading to inferior performance.  
+
+
+
+\section{Proposed Method}
+
+To achieve full-rank training under low-rank constraints, our framework, named Fira, consists of two important components: 
+(i) a norm-based scaling method, enabling full-rank training by leveraging the scaling effects of adaptive optimizers; (ii) a norm-growth limiter, which restricts the growth of the gradient norm to prevent spikes in training loss. Next, we will elaborate on these two components.
+
+\subsection{Norm-Based Scaling}
+
+The low-rank constraint makes it challenging to record complete optimizer states for correcting raw gradients in full-rank training. 
+Fortunately, we find an interesting phenomenon in LLM training: the  scaling factor at the matrix level remains similar from low-rank training to full-rank training. Based on this observation, we propose a norm-based scaling strategy that approximately corrects the raw gradient, similar to adaptive optimizers, thereby enabling full-rank training. 
+\label{Norm-Based-Scaling}
+\begin{wrapfigure}{r}{0.43\textwidth}
+  \begin{center}
+\includegraphics[width=0.43\textwidth]{figures/vs.pdf}
+  \end{center}
+  \caption{Training loss of different methods for pre-training LLaMA 60M on C4 dataset with $r/d_{model}$ = 16/256 and \textit{T} = 200.}
+    \label{vs}
+\end{wrapfigure}
+
+\textbf{Challenge Analysis.} 
+Given the difficulty of incorporating trainable low-rank weights into LoRA to achieve full-rank weight training \citep{zhao2024GaLore}, we focus on investigating how to achieve full-rank gradient training by extending the gradient projection method, Galore, in this paper.
+In GaLore, the projection matrix $P_t \in \displaystyle \R^{m\times r}$ projects the full-rank gradient  $G_t \in  \displaystyle \R^{m\times n}$ of the full-rank weight $W_t \in \displaystyle \R^{m\times n}$, to the low-rank subspace gradient $R_{t} = P^{\top}_tG_t \in \displaystyle \R^{r\times n}$. 
+The gradient outside this subspace can be represented as: $(I-P_tP^{\top}_t)G_t = G_t -  P_tR_t$. In other words, the full-rank gradient $G_t$ can be divided into two terms: $P_tR_t$ and $(G_t-P_tR_t)$.
+
+In GaLore, the optimizer states only store the information of $R_{t}$ instead of $G_{t}$ to realize the low-rank constraint. The term of $(G_t-P_tR_t)$  is directly discarded in Galore due to the lack of corresponding optimizer states of $G_{t}$ for correction in optimizers. This would lead to significant information loss especially when $r \ll d_{model}$, where $d_{model}=\min(m,n)$ is the full-rank dimension of models (This point can be  verified in our experiment section, as illustrated in Figure \ref{low-rank}. In Figure \ref{low-rank}, the validation perplexity of GaLore significantly increases at $r=4$ compared to $r=128$ when $d_{model}=256$, indicating a substantial loss of information and decreased training performance). Intuitively, to capture the information of $(G_t-P_tR_t)$, we can directly add it based on Eq. (\ref{GaLore_update}) as follows:
+\begin{equation}{\label{full_update}}
+    W_{t+1}=W_{t} - \eta P_t\psi_t(R_t) - \eta(G_t-P_tR_t).
+\end{equation}
+
+We denote the update strategy in Eq.~(\ref{full_update}) as GaLore-add. However, as illustrated in Figure~\ref{vs}, GaLore-add exhibits almost no improvement compared to updates using Eq. (\ref{GaLore_update}) in GaLore. This phenomenon primarily arises because the term of $(G_t-P_tR_t)$ doesn't have corresponding optimizer states for gradient correction. As a result, the optimization of $(G_t-P_tR_t)$ uses vanilla SGD, yielding sub-optimal outputs. Besides, in GaLore-add, $ P_t\psi_t(R_t)$ employs the Adam optimizer for training while $(G_t-P_tR_t)$ employs vanilla SGD. This gradient misalignment may also account for the lack of noticeable improvement.
+
+\textbf{Similarity of Scaling Factor.} To tackle this challenge, we propose the concept of the \emph{scaling factor}, which is defined as follows:
+\begin{equation}{\label{scaling_factor}}
+\phi_t(R_t) = \frac{||\psi_t(R_t)||}{||R_t||},
+\end{equation}
+where the scaling factor $\phi_t$ represents the magnitude of the correction applied by the adaptive optimizer to the gradient norm. 
+Based on the scaling factor $\phi_t$, we observe an interesting phenomenon during LLM training: the scaling factors at the matrix level exhibit a high degree of similarity between low-rank and full-rank training.
+As shown in Figure~\ref{fig:motivation}, sorting weight matrices by their average scaling factors results in an almost similar order.
+
+Based on this observation, we can use the scaling factors in low-rank training to replace those in full-rank training, even though the absolute magnitude of the scaling factors may vary between low-rank and full-rank training.
+This is because the absolute magnitude can be regarded as the learning rate, to which adaptive optimizers (e.g., Adam) are not sensitive \citep{zhao2024deconstructing,liu2019variance}. Instead, the discrepancies (or relative orders) in the correction magnitudes of different parameters (or weight matrices) are of greater significance.
+
+\textbf{Norm-based Scaling.} Inspired by this, we propose a norm-based scaling method that utilizes the scaling factor of a weight matrix in low-rank training as a substitute for the corresponding factor in full-rank training:
+\begin{equation}{\label{Fira_pure_update}}
+    W_{t+1}=W_{t} - \eta P_t\psi_t(R_t) - \eta \phi_t(R_t)  (G_t-P_tR_t).
+\end{equation}
+ By Eq. (\ref{Fira_pure_update}), we can approximately correct $(G_t-P_tR_t)$ as adaptive optimizers do, so as to achieve full-rank training under low-rank constraints. 
+
+\begin{figure}
+\centering
+\subfigure[$r/d_{model}$ = 16/256]{
+\begin{minipage}[t]{0.32\linewidth}
+\centering
+\includegraphics[height=3.9cm]{figures/16.pdf}
+\end{minipage}%
+}%
+\subfigure[$r/d_{model}$ = 128/256]{
+\begin{minipage}[t]{0.32\linewidth}
+\centering
+\includegraphics[height=3.9cm]{figures/128.pdf}
+\end{minipage}
+}%
+\subfigure[$r/d_{model}$ = 256/256]{
+\begin{minipage}[t]{0.36\linewidth}
+\centering
+\includegraphics[height=3.9cm]{figures/256.pdf}
+\end{minipage}
+}%
+\centering
+\caption{Scaling factor $\phi_t(R_t)$ of different weight matrices for pre-training LLaMA 60M on the C4 dataset for 10K steps with varying ranks. Here  $x$-axis is the number of recorded steps and $y$-axis is the ID of the weight matrices. Each row is labeled according to the order of its average scaling factor value.}
+\label{fig:motivation}
+\end{figure}
+
+Furthermore, we can use a more fine-grained average of the scaling factor in Eq.(\ref{Fira_pure_update}), by considering each column in the weight matrix:
+\begin{equation}{\label{Fira_update}}
+\phi_t(R_t)_i = \frac{||\psi(R_{t,:,i})||}{||R_{t,:,i}||}, \quad i = 1, 2, \dots, n,
+\end{equation}
+where $R_{t,:,i}$ is the $i$-th column of $R_t$, and $\phi_t(R_t)_i$ is the $i$-th scaling factor.
+
+\subsection{Norm-Growth Limiter}
+We find that there are suddenly sharp increases of the gradient during training, which could introduce loss spikes. As shown in Figure~\ref{fig:limiter},  Fira-w.o.-limiter (our method without using the proposed norm-growth limiter) experiences spikes in both gradient norm and training loss.
+In this section, we analyze the reasons for this issue and propose a norm-growth limiter which transforms abrupt gradient spikes into gradual, smooth increases.
+\textbf{Loss Spike Analysis.} There are two main reasons for the spikes: (i)  Switching the projection matrix $P_t$ in gradient projection methods would cause instability during training.  As illustrated in Figure~\ref{vs}, both GaLore and GaLore-add exhibit significant training loss spikes at integer multiples of $T$ (i.e., the frequency of switching the projection matrix $P_t$). This instability occurs because, when switching projection matrices $P_t$, the optimizer retains states linked to the previous matrix, while the current input gradient uses a new projection matrix, leading to significant misalignment. Furthermore, as shown in Figure~\ref{vs}, GaLore-add also exhibits training spikes, reinforcing our earlier claim that directly incorporating $(G_t - P_tR_t)$ may introduce instability and hinder training; 
+(ii) Maintaining the original direction of the raw gradient $(G_t-P_tR_t)$ may be insufficient for handling the sharp loss landscapes in LLM training, unlike Adam \citep{zhang2019gradient}.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/limiter.pdf}
+    \caption{Training loss and gradient norm of three variants of Fira  for pre-training LLaMA 60M on C4 dataset.}
+    \label{fig:limiter}
+\end{figure}
+
+\textbf{Addressing Loss Spikes.} To address this issue, a straightforward solution is to use gradient clipping techniques \citep{pascanu2013difficulty} to avoid loss spikes.  
+However, clipping based on the absolute norm of gradient matrices fails to account for significant differences between them, leading to sub-optimal results. 
+This point can be also verified in Figure~\ref{fig:limiter} and Table \ref{ablation_study}.  
+To this end, we propose a norm-growth limiter method that constrains the ratio of the current gradient norm to the previous step's norm to a fixed ratio $\gamma$ when the gradient norm increases:
+\begin{equation}{\label{Fira_limiter}}
+\text{if } \frac{\displaystyle || S_t ||}{\displaystyle || S_{t-1} ||} > \gamma \text{ then } S_t \leftarrow  \frac{S_t }{\displaystyle || S_t ||} \cdot \gamma \displaystyle || S_{t-1} ||,
+\end{equation}
+where $\gamma$ is a threshold ensuring that the rate of gradient growth does not exceed this value. $S_t = \phi_t(R_t)  (G_t-P_tR_t) $  is the corrected gradient by applying our norm-based scaling. This approach limits the magnitude of gradient norm increases, converting sudden spikes into gradual rises and thus preventing loss spikes. Moreover, by constraining the relative increase of each gradient matrix's norm, our method is more flexible  than the absolute norm clipping. As illustrated in Figure~\ref{vs} and Figure \ref{fig:limiter}, Fira with our proposed limiter improves the optimization performance without significant spikes.
+
+\begin{algorithm}
+\caption{Fira with Adam}
+\label{Fira_adam}
+\begin{algorithmic}[1]
+\Statex \textbf{Input:} $\eta:$ step size, $\{\beta_{1},\beta_{2}\}:$ decay rates, $W \in \displaystyle \R^{m\times n}$ with $m \le n:$ weight matrices, $r:$ rank, $T:$ switching frequency, $\alpha:$ hyper-parameter of Galore, $\gamma :$ limiter threshold.
+\Statex \textbf{Output:} $W_t:$ resulting weight matrix
+\State $M_0, V_0 \in \displaystyle \R^{r\times n} \leftarrow 0, 0 \quad t\leftarrow 0$ \Comment{Initialize moving 1st, 2nd moment and step}
+\Repeat
+    \State $G_t \in \displaystyle \R^{m\times n}\leftarrow \nabla_W f_t(W_{t})$ \Comment{Calculate full-rank gradients of full-rank weights}
+    \If {$t$ mod $T = 0$} 
+    \State $U, \Sigma, V^{\top} \leftarrow$ SVD($G_t$) \quad $P_t \leftarrow U[:,:r]$ \Comment{Initialize the projection matrix every \textit{T} steps}
+    \Else \quad $P_t \leftarrow P_{t-1}$ \Comment{Reuse the previous projection matrix}
+    \EndIf 
+    \State $R_t, S_t \leftarrow P_t^{\top}G_t, (I-P_tP_t^{\top})G_t$ 
+    \Comment{Divide gradients into two terms by gradient projection}
+    \Statex \rule{0.95\textwidth}{0.3pt} % 在这里插入横线
+    \State $M_t\leftarrow \beta_1M_{t-1}+(1-\beta_1)R_t$ \Comment{\textbf{$\psi_t$}($R_t$): Apply Adam with low-rank gradients $R_t$}
+    \State $V_t\leftarrow \beta_2V_{t-1}+(1-\beta_2)R_t^2$
+    \State $N_t \leftarrow \frac{\sqrt{1-\beta_2^{t}}}{1-\beta_1^{t}}\cdot \frac{M_t}{\sqrt{V_t} + \epsilon}$ 
+    \Statex \rule{0.95\textwidth}{0.3pt} % 在这里插入横线
+    \State $K \leftarrow [ \frac{\displaystyle || N_{t}[:,1] ||}{\displaystyle || R_{t}[:,1]||+ \epsilon}, \frac{\displaystyle || N_{t}[:,2] ||}{\displaystyle || R_{t}[:,2]||+ \epsilon}, \cdots , \frac{\displaystyle || N_{t}[:,n] ||}{\displaystyle || R_{t}[:,n]||+ \epsilon} ]$ \Comment{Norm-Based Scaling}
+    \State $S_t \leftarrow [k_1S_{t}[:,1], k_2S_{t}[:,2], \cdots , k_nS_{t}[:,n]]$ 
+     \State $S_t \leftarrow S_t \cdot \gamma / \max\{ \frac{\displaystyle || S_t ||}{\displaystyle || S_{t-1} || + \epsilon}, \gamma\} $ \Comment{Norm-Growth Limiter}
+    \Statex \rule{0.95\textwidth}{0.3pt} % 在这里插入横线
+    \State $\tilde{G}_t\leftarrow\alpha\cdot (P_tN_t+S_t)$ \Comment{Project back and complete full-rank gradients}
+    \State $W_t \leftarrow W_{t-1} - \eta \cdot \tilde{G}_t$ \quad $t \leftarrow t+1$ \Comment{Update the weight matrix}
+\Until{convergence criteria met}
+\State \textbf{return} $W_T$
+\end{algorithmic}
+\end{algorithm}
+\begin{wraptable}{r}{8.5cm}
+\caption{Comparison between Fira, GaLore, and LoRA. Denote $W_t \in \mathbb{R}^{m \times n}$ ($m \leq n$), rank $r$.}
+\label{Comparison}
+\begin{center}
+\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{l|ccc}
+\toprule
+     & Fira & GaLore & LoRA \\
+\midrule
+     Weights & $mn$ & $mn$ & $mn + mr + nr$ \\
+     Optimizer States & $mr + 2nr + 1$ & $mr + 2nr$ & $2mr + 2nr$ \\ 
+\midrule
+    Full-Rank Gradients & \Checkmark & \XSolidBrush & \Checkmark \\
+    Full-Rank Weights & \Checkmark & \Checkmark & \XSolidBrush \\
+    Pre-Training & \Checkmark & \Checkmark & \XSolidBrush\\
+    Fine-Tuning & \Checkmark & \Checkmark & \Checkmark\\       
+\bottomrule
+\end{tabular}
+\end{center}
+\end{wraptable}
+
+\subsection{Overall Algorithm}
+We present the overall algorithm of Fira with Adam in Algorithm \ref{Fira_adam}. Our main components, the norm-based scaling method and the norm-growth limiter, are straightforward to implement, requiring only 3 additional lines of code. Moreover, Fira is a plug-and-play framework which can be easily integrated into the training process without requiring significant modifications.
+
+It's worth noting that Fira only introduces one parameter $||S_{t-1}||$ for each weight matrix in the optimizer state, which is negligible, as shown in Table \ref{Comparison}.
+Besides, in addition to the original hyper-parameters of optimizers and gradient projection methods, Fira only adds one hyper-parameter $\gamma$ in the norm-growth limiter.
+The hyper-parameter $\gamma$ is set to 1.01 across all experiments, which consistently yields satisfactory results. 
+
+
+
+
+\section{Experiments}
+
+In this section, we validate the effectiveness of Fira in pre-training and fine-tuning tasks of LLMs. In our experiments, we denote our method using the strategy of Eq. (\ref{Fira_pure_update}) as Fira-matrix, and denote our method additionally using the column-wise strategy of Eq. (\ref{Fira_update}) as Fira. 
+
+\subsection{Memory-Efficient Pre-training}
+\label{Pre-training}
+
+\textbf{Experimental Setup.} We follow the settings in Galore \citep{zhao2024GaLore} to conduct the pre-training experiments. We compare Fira with GaLore~\citep{zhao2024GaLore}, LoRA~\citep{hulora}, ReLoRA~\citep{lialin2024relora}, and full-rank training baselines. Adam optimizer is used for training all baselines and our method on the C4 dataset in the BF16 format. The settings of these baselines can be found in \citet{zhao2024GaLore}. The dataset C4 is a colossal, cleaned version of Common Crawl’s web crawl corpus, which is widely used in LLM pre-training~\citep{raffel2020exploring}. Following \citet{zhao2024GaLore}, we utilize LLaMA-based architectures equipped with RMSNorm and SwiGLU activations \citep{zhang2019root, shazeer2020glu, touvron2023LLaMA}. As in \citet{zhao2024GaLore}, our training protocol excludes data repetition and spans a sufficiently large dataset, encompassing a diverse array of model sizes (60M, 130M, 350M, 1B). To guarantee a fair comparison, we employ the same learning rate $0.01$ as used in GaLore and maintain the same rank $r$ for each model size. 
+
+We use 8 A100 80G GPUs to conduct pre-training experiments.
+
+\begin{table}
+    \caption{Comparison of different methods for pre-training LLaMA models of various sizes on the C4 dataset. We report validation perplexity ($\downarrow$) with a memory estimate of total parameters and optimizer states. Results and memory estimates of all baselines are taken from \citet{zhao2024GaLore}.  $r$ refers to the rank and $d_{model}$ is the full-rank dimension of models.}
+    \label{method-comparasion}
+    \begin{center}
+        \begin{tabular}{lcccc}
+        \toprule
+         & \textbf{60M} & \textbf{130M} & \textbf{350M} & \textbf{1B} \\
+        \midrule
+        Full-Rank & 34.06 (0.36G) & 25.08 (0.76G) & 18.80 (2.06G) & 15.56 (7.80G) \\
+        \midrule
+        \textbf{Fira} & \textbf{31.06} (0.24G) & \textbf{22.73} (0.52G) &  \textbf{16.85} (1.22G)&  \textbf{14.31} (4.38G) \\
+        GaLore & 34.88 (0.24G) & 25.36 (0.52G) & 18.95 (1.22G) & 15.64 (4.38G) \\
+        LoRA & 34.99 (0.36G) & 33.92 (0.80G) & 25.58 (1.76G) & 19.21 (6.17G) \\
+        ReLoRA & 37.04 (0.36G) & 29.37 (0.80G) & 29.08 (1.76G) & 18.33 (6.17G) \\
+        \midrule
+        $r/d_{model}$ & 128 / 256 & 256 / 768 & 256 / 1024 & 512 / 2048 \\
+        Training Tokens & 1.1B & 2.2B & 6.4B & 13.1B \\
+        \bottomrule
+        \end{tabular}
+    \end{center}
+\end{table}
+
+
+\textbf{Result Analysis.} As shown in Table \ref{method-comparasion}, Fira consistently outperforms low-rank training baselines by a large margin under the same rank constraint,  and even surpasses full-rank training. 
+Following \citet{zhao2024GaLore}, we estimate the memory reduction of the optimizer states via the same memory estimation method introduced in \citet{zhao2024GaLore}.
+From Table \ref{method-comparasion}, our  Fira saves 61.1\% memory usage of the optimizer states when pre-training the LLaMA 1B architecture compared to full-rank training, while Fira achieving better results.
+Compared to full-rank training, Fira's superior performance may be attributed to the following reason: the gradient direction in the norm-based scaling method is determined by the current state, rather than by historical gradients in Adam. Therefore, Fira introduces a higher degree of randomness in training, which can enhance the model's ability to escape the local optima, leading to better training performance \citep{zhou2020towards}. 
+
+\subsection{Scaling up to LLaMA 7B Pre-training.}
+
+\begin{wrapfigure}{r}{0.43\textwidth}
+  \begin{center}
+\includegraphics[width=0.43\textwidth]{figures/7B.pdf}
+  \end{center}
+  \caption{Pre-training LLaMA 7B with different methods on the C4 dataset.}
+    \label{7B_Pre}
+\end{wrapfigure}
+
+To validate the scalability of our method, we scale up by pre-training the LLaMA 7B model with the full-rank dimension $d_{\text{model}} = 4096$.
+We compare Fira with the GaLore baseline, which generally achieves the  best performance among low-rank training baselines, as shown in Table \ref{method-comparasion}. 
+As illustrated in Figure \ref{7B_Pre}, our method demonstrates a 
+significant improvement over GaLore for pre-training LLaMA 7B, while using an $8\times$ smaller rank.
+This highlights Fira’s effectiveness, suggesting it could be a viable solution for large-scale LLM pre-training.
+
+\begingroup
+\setlength{\tabcolsep}{2pt} % 默认是6pt
+\begin{table}[b]
+    \caption{Accuracy ($\uparrow$) of various fine-tuning methods on eight commonsense reasoning datasets with LLaMA 7B. Results for all baseline methods, except GaLore, are taken from \citet{hu2023llm}.}
+    \label{finetuning-comparasion}
+    \begin{center}
+        \begin{tabularx}{\textwidth}{l|c|cccccccc|c}
+        \toprule
+          \textbf{Method} & \textbf{Memory} &\textbf{BoolQ} & \textbf{PIQA} & \textbf{SIQA} & \textbf{HellaSwag} & \textbf{WinoGrande} & \textbf{ARC-e} & \textbf{ARC-c} & \textbf{OBQA} & \textbf{Avg} \\
+        \midrule
+         \textbf{Fira} & 0.26G &69.4 & \textbf{82.6} & 78.0 & 76.8 & \textbf{81.2} & \textbf{82.2} & 64.4 & \textbf{80.8} & \textbf{76.9}\\
+         Prefix& 0.05G& 64.3 & 76.8 & 73.9 & 42.1 & 72.1 & 72.9 & 54.0 & 60.6 & 64.6\\
+         Series & 0.42G & 63.0 & 79.2 & 76.3 & 67.9 & 75.7 & 74.5 & 57.1 & 72.4 & 70.8\\
+         Parallel& 1.49G & 67.9 & 76.4 & \textbf{78.8} & 69.8 & 78.9 & 73.7 & 57.3 & 75.2 & 72.2\\
+         LoRA & 0.35G & 68.9 & 80.7 & 77.4 & \textbf{78.1} & 78.8 & 77.8 & 61.3 & 74.8 & 74.7\\
+         GaLore & 0.26G & \textbf{69.5} & 82.0 & 75.1 & 32.2 & 18.0 & 80.7 & \textbf{65.8} & 78.0 & 62.7\\
+        \bottomrule
+        \end{tabularx}
+    \end{center}
+\end{table}
+\endgroup
+
+\subsection{Memory-Efficient Fine-Tuning}
+\textbf{Experimental Setup.} Following \citet{hu2023llm}, we perform the fine-tuning task to compare  Fira with LoRA, GaLore, and other baseline methods, including Prefix-tuning (Prefix) \citep{li2021prefix}, Series Adapter (Series) \citep{houlsby2019parameter}, and Parallel Adapter (Parallel) \citep{he2021towards}, on the LLaMA-7B model for commonsense reasoning tasks. 
+This task consists of eight sub-tasks, each with its own designated training and testing sets. Following the approach of \citet{hu2023llm}, we combine the training datasets from all eight sub-tasks into a unified training set, while evaluating each sub-task individually using its respective testing dataset.  In the fine-tuning task, the rank $r$ is set to 32 and the learning rate is set to 1e-4. We adopt RTX 4090 GPUs for fine-tuning experiments.
+
+\textbf{Result Analysis.}
+As shown in Table \ref{finetuning-comparasion}, our Fira achieves the highest performance on 4 out of 8 datasets, demonstrating better or comparable performance compared to the baseline methods. Notably,  GaLore struggles to adapt to the HellaSwag and WinoGrande datasets, resulting in a significant decline in scores. In contrast, our Fira adapts to these tasks well and achieves the highest scores on WinoGrande. In terms of memory efficiency, our method uses comparable or even less memory than the low-rank training methods LoRA and GaLore. These results illustrate the effectiveness of our method for the fine-tuning of LLMs.
+
+
+\subsection{Ablation Study}
+\label{Ablation_Study}
+
+In this section, we conduct an ablation study to assess the effectiveness of each component in our method. We adopt the same settings in Section \ref{Pre-training} for pre-training the LLaMA 60M model. We design four variants of our method for the ablation study: (1) \textbf{Fira-w.o.-scaling:} our Fira without using the scaling factor to correct the gradient (i.e., setting $\phi_t(R_t)$ to a fixed value of 1). (2) \textbf{Fira-matrix:} our Fira using the scaling factor at the matrix level instead of at the column level. (3) \textbf{Fira-w.o.-limiter:} our Fira without using norm-growth limiter to avoid training loss spikes. (4) \textbf{Fira-gradient-clipping:} our Fira using gradient clipping to avoid loss spikes instead of our proposed norm-growth limiter.
+
+\begin{wraptable}{r}{6cm}
+    \caption{Ablation study on the C4 dataset.}
+    \label{ablation_study}
+    \begin{center}
+        \footnotesize
+        \begin{tabular}{c|c}
+            \toprule
+            \textbf{Method} & \textbf{Perplexity ($\downarrow$)} \\
+            \midrule
+            Fira-w.o.-scaling & 37.06 \\
+            Fira-matrix & 31.52 \\
+            Fira-w.o.-limiter & 32.22 \\
+            Fira-gradient-clipping & 31.22 \\
+            Fira & \textbf{31.06} \\
+            \bottomrule
+        \end{tabular}
+    \end{center}
+\end{wraptable}
+
+Table \ref{ablation_study} presents the results. It can be found that  Fira outperforms Fira-w.o.-scaling, thereby demonstrating the effectiveness of our proposed norm-based scaling method for gradient correction. This also suggests that directly incorporating the raw gradient outside the subspace without correction will lead to sub-optimal results. Besides, Fira yields better performance than Fira-matrix, illustrating  that a more fine-grained consideration of the scaling factor is beneficial. 
+Furthermore, Fira demonstrates improved performance over Fira-w.o.-limiter and Fira-gradient-clipping, indicating the effectiveness of our proposed norm-growth limiter in addressing the issue of training loss spikes.
+
+\subsection{Performance under varying ranks}
+
+\label{low-rank_rob}
+
+\begin{wrapfigure}{r}{0.43\textwidth}
+  \begin{center}
+\includegraphics[width=0.43\textwidth]{figures/low-rank.pdf}
+  \end{center}
+  \caption{Validation perplexity of Fira and GaLore for varying ranks when pre-training LLaMA 60M on the C4 dataset with $d_{model} = 256$.}
+    \label{low-rank}
+\end{wrapfigure}
+
+In this section, we illustrate the advantages of our Fira over Galore under a lower rank. We adjust various rank configurations within the set $\{4, 16,64,128\}$ and $d_{model} = 256$, and then assess the performance of pre-training the LLaMA 60M model on the C4 dataset as outlined in Section \ref{Pre-training}. The validation perplexity of Fira and GaLore after 10K steps across different ranks is depicted in Figure \ref{low-rank}. 
+From Figure \ref{low-rank}, we can observe that Fira consistently surpasses GaLore across all rank configurations. Notably, even when the ranks are set very low (4 and 16), Fira still achieves performance comparable to full-rank training. In contrast, the performance of GaLore significantly declines in these cases.
+These results highlight the superiority of our proposed Fira at lower ranks and its effectiveness in reducing memory usage.
+
+
+
+\section{Conclusion}
+
+In this paper, we present a plug-and-play memory-efficient training framework for LLMs, called Fira, as the first attempt to facilitate full-rank training consistently under low-rank constraints. First,  we find a notable phenomenon in LLM training: the scaling effect of adaptive optimizers on the gradient norm remains similar between low-rank and full-rank training. Building on this observation, we propose a norm-based scaling method that applies the scaling effect of low-rank optimizers in place of full-rank optimizers to facilitate full-rank training.
+ This allows us to maintain the low-rank constraint within the optimizer while still benefiting from the advantages of full-rank training for improved performance. Additionally, we observe there are sudden spikes in gradient values during optimization, which could lead to spikes in loss. To mitigate this, we propose a norm-growth limiter that smooths gradients by regulating the relative increase in gradient norms. Extensive experiments in both pre-training and fine-tuning of LLMs demonstrate the effectiveness of our proposed Fira.
+
+
+
+
+
+

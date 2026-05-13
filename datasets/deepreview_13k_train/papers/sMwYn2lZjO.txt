@@ -1,0 +1,402 @@
+\title{Examining Post-Training Quantization for Mixture-of-Experts: A Benchmark}
+
+\begin{abstract}
+
+Large Language Models~(LLMs) have become foundational in the realm of natural language processing, demonstrating performance improvements as model sizes increase. 
+The Mixture-of-Experts~(MoE) approach offers a promising way to scale LLMs more efficiently by using fewer computational FLOPs through sparse activation.
+However, it suffers from significant memory overheads, necessitating model compression techniques. 
+Post-training quantization, a popular method for model compression, proves less effective when directly applied to MoE models due to MoE's overlooked inherent sparsity.
+This paper explores several MoE structure-aware quantization heuristics, ranging from coarse to fine granularity, from MoE block to individual linear weight. 
+Our investigations reveal critical principles: different MoE structures (\textit{i.e.}, blocks, experts, linear layers) require varying numbers of weight bits for effective and efficient quantization. Conclusions are supported by extensive benchmarking across two representative MoE models and six tasks. We further introduce novel enhancements to more accurately identify the most critical weights in MoE quantization that necessitate higher bit allocations, including the linear weight outlier scorer and MoE block scorer. Additionally, subsequent experiments validate our findings in the context of both weight and activation quantization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models~(LLMs) have achieved remarkable success in various natural language processing tasks, such as language understanding, reasoning, and generation, demonstrating superior performance and adaptability~\cite{brown2020language,jiang2023mistral,kaplan2020scaling,openai2024gpt4,touvron2023llama}. 
+However, the rapid growth in model size, with state-of-the-art LLMs containing billions of parameters, poses significant challenges to computational resources and memory consumption~\cite{aminabadi2022deepspeed,lin2024awq,shoeybi2020megatronlm}.
+The Mixture of Experts~(MoE)~\cite{shazeer2017outrageously} architecture has emerged as a promising solution to address these challenges. 
+MoE allows for the scaling up of LLMs while maintaining roughly constant FLOPs. 
+By incorporating multiple expert networks and employing a sparse gating mechanism, MoE achieves efficient computation, enabling the development of larger models within the constraints of limited computational resources~\cite{dai2024deepseekmoe,fedus2022switch,jiang2024mixtral}.
+
+Despite its advantages, MoE suffers from extensive memory costs, which hinder its practical deployment and widespread adoption. For example, the \texttt{Mixtral-8x7B}~\cite{jiang2024mixtral} MoE model takes around $180$ GB memory while only $28$ GB parameters are activated for each input token\footnote{This is evaluated in full precision~(float$32$).}. 
+Model compression techniques tailored to MoE architectures are essential to address this issue. 
+Existing MoE compression methods can be categorized into two main approaches: merging and pruning.
+Expert merging, such as MC-MoE\cite{li2024merge}, aims to reduce the memory footprint by combining similar experts based on routing policy and compressing the resulting model using low-rank decomposition. 
+On the other hand, expert pruning, such as task-specific pruning~\cite{chen2022taskspecific}, focuses on identifying and removing the least important experts or connections based on their contribution to a specific task.
+However, these approaches \ding{172} necessitate model retraining, which is both extremely costly and time-consuming, particularly for state-of-the-art MoE LLMs of billion-size scale, and \ding{173} operate under task-specific settings, which limits their practicality for real-world applications.
+Post-training quantization has emerged as a promising compression method widely applied to dense LLM models. Recent works, such as GPTQ~\cite{frantar2023gptq}, which adapts quantization intervals based on the Hessian information, SmoothQuant~\cite{lin2024awq}, which jointly quantizes the model weight and activation by offline migrating the activation outliers, have demonstrated the effectiveness of post-training quantization for LLMs toward $4$ bits compression. 
+ 
+However, directly applying existing quantization methods to MoE models in a more extreme quantization setting, \textit{e.g.} under $3$ bits, leads to suboptimal results, potentially due to the overlooked sparsity nature of the MoE architecture. 
+The sparse activation patterns and the dynamic routing mechanism in MoE pose unique challenges and opportunities for quantization, requiring novel approaches to utilize it effectively.
+The sparse expert activations in MoE models exhibit different statistical properties methodologies compared to dense activations, making conventional quantization methods difficult.
+Moreover, the dynamic routing mechanism, which selects a subset of experts for each input token, introduces additional complexity in terms of quantizing the routing weights and maintaining the sparsity pattern during inference. This yields the primary question to be explored:
+
+\textit{(Q) Can we leverage the sparsity nature of MoE architecture to establish more efficient and effective coarse-grained mixed-precision MoE quantization methods?} 
+
+To answer \textit{(Q)}, we explore a wide range of MoE structure-aware quantization heuristics, ranging from coarse to fine granularity. We conduct a detailed comparative analysis of each of them, revealing critical principles: different MoE structures (\textit{i.e.}, blocks, experts, linear layers) require varying numbers of weight bits for effective and efficient quantization. Extended from the gained insights, we propose methods to further improve the efficiency and effectiveness of mixed-precision quantization, including linear weight quantization scorer and MoE block quantization scorer. 
+
+In summary, our key contributions are listed below:
+
+\begin{enumerate}
+    \item We establish the first benchmark for post-training quantization specifically designed for the Mixture-of-Experts architecture. This benchmark encompasses investigations into four critical MoE-related heuristics, evaluations across two MoE LLMs, six benchmark tasks, and a combination of both weight and activation quantization.
+    \item Our benchmark study uncovers a range of previously unexplored quantization principles and insights for MoE. These insights include empirical rules supporting optimal bit allocation strategies, highlighting the trade-offs such us those between attention and FFNN layers, and among different experts. 
+    \item Leveraging the insights from our benchmark study, we introduce novel enhancements to improve existing heuristics. These include the development of linear-weight and MoE block scorers to identify the most critical components of the MoE model, thereby guiding more effective quantization bit assignments.
+\end{enumerate}
+
+
+
+
+\section{Related Works}
+
+
+
+\paragraph{Mixture-of-Experts.} The Mixture-of-Experts (MoE) approach~\cite{shazeer2017outrageously} enhances neural network scalability by using router networks to activate model segments according to input tokens selectively. As the dominant architecture in NLP, numerous efforts have adapted feed-forward neural networks~(FFNNs) within Transformers to incorporate MoE layers, constructing MoE language models\cite{dai2024deepseekmoe,fedus2022switch,jiang2024mixtral}. Additionally, several variants of the standard MoE architecture exist. For example, DeepSeek-MoE~\cite{dai2024deepseekmoe} employs numerous finely segmented experts and designates a select few as shared experts to capture common knowledge. MoE's application in LLMs is widely acknowledged for its superior generative abilities and remarkable computing efficiency~\cite{artetxe2022efficient,dai2024deepseekmoe,fedus2022switch,jiang2024mixtral,krajewski2024scaling,rajbhandari2022deepspeedmoe}. The recent work Mixtral~\cite{jiang2024mixtral} illustrates that MoE can match the performance of equivalent full-parameter LLMs while utilizing far fewer active parameters. 
+However, MoE suffers from significant memory overhead issues, posing challenges to its efficient deployment~\cite{li2024merge}.
+
+\paragraph{MoE Compression.} MoE models benefit from reduced FLOPs but are constrained by their significant memory overhead. Current works to reduce the memory overhead of MoE models mainly focus on reducing the number of experts. An earlier approach~\cite{chen2022taskspecific} involves pruning non-essential experts for a specific downstream task during fine-tuning, utilizing statistics based on cumulative usage frequency. Another method, MC-SMoE~\cite{li2024merge}, introduces a pipeline that identifies and groups similar experts, subsequently merging them and further decomposing the merged expert into low-rank components within each group. However, these approaches are developed under task-specific fine-tuning settings and do not explore the development of the MoE compression towards a general post-training model.
+
+\paragraph{Post-Training Quantization.} 
+Post-training quantization reduces computational and storage demands by converting pre-trained models from high-precision to lower-precision formats without extensive retraining~\cite{frantar2023optimal, frantar2023gptq}. It has been widely applied to LLMs, optimizing them for deployment on resource-constrained devices. Techniques like layer-wise quantization and mixed-precision schemes are designed for minimal performance degradation while reducing model size and computational requirements efficiently~\cite{liu2023llm, pan2023smoothquant+,sharify2024combining}. Recent methods such as SmoothQuant~\cite{xiao2024smoothquant}, GPTQ~\cite{frantar2023gptq}, AWQ~\cite{lin2024awq}, and address specific challenges for LLMs. 
+SmoothQuant~\cite{xiao2024smoothquant} ensures smooth precision transitions across layers, reducing quantization errors and maintaining performance.
+GPTQ~\cite{frantar2023gptq} employs layer-wise and mixed-precision quantization to balance efficiency and accuracy. 
+AWQ~\cite{lin2024awq} adapts to weight sensitivity, preserving critical weights' precision while aggressively quantizing less sensitive ones. 
+These advancements in PTQ enable significant reductions in computational and storage requirements while preserving LLM performance.
+
+
+
+\section{Reviewing Quantization and MoE}
+
+
+\subsection{Quantization Method}
+The primary objective of this work is to benchmark several MoE-related heuristics combined with established LLM quantization techniques. Given that the substantial memory overhead of MoE models predominantly originates from their weights, we adopt GPTQ~\cite{frantar2023gptq}, a popular weight quantization method. GPTQ executes layer-by-layer weight quantization by addressing a specific reconstruction problem for each layer. Specifically, let $\mathbf{W}$ represent the weights of a linear layer and $\mathbf{X}$ denote the input to that layer derived from a small subset of calibration data, the reconstruction problem is defined as follows:
+\begin{equation}
+\texttt{argmin}_{\mathbf{\widehat{W}}} , ||\mathbf{W} \mathbf{X} - \mathbf{\widehat{W}} \mathbf{X}||_2^2.
+\end{equation}
+This objective, being the sum of squared errors, forms a quadratic equation, allowing the greedy-optimal update of weights to be calculated element-by-element using the Hessian information, $\mathbf{H} = 2\mathbf{X}\mathbf{X}^\top$. GPTQ further enhances this process by incorporating a lazy-batch update and a Cholesky reformulation, to improve scalability and numerical stability for LLM quantization.
+
+\subsection{Mixture-of-Experts}
+There are several variants of MoE in the context of LLMs, such as attention MoE and FFNN MoE. In this work, we explore the quantization of MoE models that utilize router networks to selectively activate FFNNs for different input tokens. Specifically, for the $i$-th expert's feed-forward function at the $l$-th transformer layer, denoted as $\mathtt{FFNN}i^l(\cdot)$, the output of the MoE layer for the input hidden states $\mathbf{X}$ is given by:
+\begin{equation}
+    \mathtt{FFNN}_{\text{MoE}}^l(\mathbf{X}) = \sum_{i=1}^{l} \mathcal{G}(\mathbf{W}_{l}\mathbf{X})\cdot \mathtt{FFNN}_i^l(\mathbf{X}),
+\end{equation}
+where $\mathbf{W}_l$ represents a linear routing matrix and $\mathcal{G}(\cdot)$ is a routing function that typically employs a top-$k$ selection mechanism, resulting in a sparse output. Due to the duplication of FFNN layers, the principal memory overhead in the MoE model is attributed to the FFNN component.
+
+
+\subsection{Expert Usage as A Heuristic}\label{sec:usage-heuristic}
+As the routing of experts in MoE models is not ideally balanced, expert usage frequency and its variants have emerged as prevalent heuristics for measuring the importance of different experts within an MoE block~\cite{chen2022taskspecific, li2024merge}. For instance, task-specific expert pruning proposed by~\cite{chen2022taskspecific} uses a criterion based on cumulatively calculated expert routing probabilities for pruning during fine-tuning on a specific task. In this paper, focusing on post-training quantization, we utilize the routing distribution from the calibration data as the heuristic for expert usage. Specifically, for the $l$-th MoE block, equipped with a routing matrix $\mathbf{W}l \in \mathbb{R}^{e\times d}$ and input hidden states $\mathbf{X} \in \mathbb{R}^{b\times d}$ from the calibration data, the expert usage heuristic is calculated as follows:
+\begin{equation}
+\texttt{usage} = \texttt{normalize}\left(\sum_i\mathcal{G}(\mathbf{W}_{l}\mathbf{X}_{i})\right),
+\end{equation}
+where $\mathcal{G}(\cdot)$ is the routing function employing a top-$k$ selection mechanism that yields a sparse binary output. We visualize the calculated expert usage of \texttt{Mixtral-8x7B} and \texttt{DeepSeek-MoE-16B-base} MoE models on the quantization calibration data, as shown in Figure~\ref{fig:routing-frequency}. Note that \texttt{Mixtral-8x7B} demonstrates a more balanced routing distribution than \texttt{DeepSeek-MoE-16B-base}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{figs/routing-frequency.pdf}
+    \caption{Visualization of expert usage of the two MoE models used in this work. It is evaluated on the quantization calibration data, \textit{i.e.}, $512$ random $4096$ token sequences from the WikiText dataset~\cite{merity2016pointer}.}
+    \label{fig:routing-frequency}
+\end{figure}
+
+
+
+\section{Benchmark Post-Quantization Methods for MoE}
+
+In this section, we present several heuristics for MoE quantization and the empirical performance of them. Our benchmarking covers two MoE models and six popular tasks.
+
+\subsection{Benchmark Setups}
+
+\paragraph{MoE Models.} We select two representative MoE models for our benchmark evaluation, \textit{i.e.}, \texttt{Mixtral-8x7B}~\cite{jiang2024mixtral} and \texttt{DeepSeek-MoE-16B-base}~\cite{dai2024deepseekmoe}. \texttt{Mixtral-8x7B} substitutes every FFNN with a MoE block and has $8$ experts per MoE block with top-$2$ routing, while \texttt{DeepSeed-MoE-16B-base} uses a fine-grained MoE architecture by including $64$ experts with top-$6$ routing and $2$ shared experts per MoE block. Notably, the \texttt{DeepSeek-MoE-16B-base} model incorporates a dense architecture in its first transformer block while employing an MoE architecture in subsequent blocks for better training stability.
+
+\paragraph{Quantization.}
+We mainly focus on \textit{weight-only grouped mixed-precision} quantization, though we also extend our experiments and conclusions to its combination with activation quantization in Section~\ref{sec:extended-study}. The weight-only experiments utilize GPTQ~\cite{frantar2023gptq}, while those that combine weight and activation quantization utilize SmoothQuant~\cite{xiao2024smoothquant}, without loss of generality. Throughout this work, we use a group size of $128$. Our experiments emphasize an extreme quantization scenario, where most weights are quantized to either $2$ or $4$ bits.
+\paragraph{Calibration and Evaluation Details.} We use the calibration data consisting of $512$ random $4096$ token
+sequences from the WikiText dataset~\cite{merity2016pointer}, following GPTQ~\cite{frantar2023gptq}. Unlike previous literature that focuses on language modeling benchmarks~\cite{xiao2024smoothquant,lin2024awq,frantar2023gptq}, we evaluate all the methods on six popular LLM tasks for a practical benchmarking: WinoGrande~\cite{ai2:winogrande}, COPA~\cite{gordon-etal-2012-semeval}, OpenBookQA~(OBQA)~\cite{mihaylov2018suit}, HellaSwag~\cite{zellers2019hellaswag}, and MMLU~\cite{hendrycks2021measuring}. We report the performance on MMLU with $5$-shot and all others with zero-shot.
+\subsection{Benchmark Results}\label{sec:benchmark-results}
+
+We first evaluate several MoE heuristics quantization methods based on GPTQ on \texttt{Mixtral-8x7B} and \texttt{DeepSeek-MoE-16B}. We present our benchmark conclusions by answering the following research questions.
+
+\paragraph{\uline{Q1}: Is expert usage frequency a good quantization heuristic? A: Fairly good.}
+
+Expert usage frequency is a popular heuristic in the compression of MoE models, predicated on the insight that less frequently used experts are likely less crucial. Our experiments, detailed in Table~\ref{tab:usage-frequency}, corroborate its effectiveness as a quantization heuristic for MoE models. In particular, for the \texttt{DeepSeek-MoE-16B-base} model, this heuristic markedly outperforms the strategy of randomly allocating more bits to experts, likely due to the model's unbalanced routing distribution. However, with the \texttt{Mixtral-8x7B} model, where the routing distribution is more balanced, the advantage of using expert usage frequency over random allocation is less significant.
+\begin{table}[ht]
+\centering
+\caption{Comparison of the expert usage frequency heuristic \textit{v.s.} random allocation. For the \texttt{Mixtral-8x7B} model,  we compare the allocation of $4$ bits to the top-\{$2$, $4$\} most frequently used experts per MoE block against randomly selecting \{$2$, $4$\} experts for the same bit allocation. For the \texttt{DeepSeek-MoE-16B-base} model, we keep shared expert \{$8$\} bits and compare between top-\{$10$, $15$, $20$, $25$\} most frequently used experts against randomly selecting \{$10$, $15$, $20$, $25$\} experts per MoE block. The remaining experts are quantized to $2$ bits, while all attention layers are uniformly quantized to $4$ bits. All random experimental results in the format of $a\pm b$ provide the mean value $a$ and its standard deviation $b$ over $3$ independent trials.} \label{tab:usage-frequency}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|ccccccc}
+\toprule[1pt]
+\midrule
+   Methodology & Bits  & WinoGrande (\%) & COPA (\%) & OBQA (\%) & HellaSwag (\%) & PIQA (\%) & MMLU (\%) & Average (\%) \\ \midrule
+\multicolumn{9}{c}{\texttt{Mixtral-8x7B}} \\ \midrule
+Random $2$ & $2.54$ & $\mathbf{58.59\pm 2.57}$ & $68.00\pm 11.27$ & $\mathbf{33.00\pm 1.78}$ & $46.60\pm 18.21$ & $60.14\pm 9.32$ & $28.26\pm 4.64$ & $49.10\pm 7.73$ \\
+Frequent $2$ & $2.54$ & $58.33$ & $\mathbf{76.00}$ & $32.00$ & $\mathbf{56.62}$ & $\mathbf{66.21}$ & $\mathbf{36.01}$ & $\mathbf{54.20}$ \\ \midrule
+Random $4$ & $3.03$ & $67.77\pm 0.36$ & $\mathbf{86.33\pm 3.51}$ & $38.47\pm 0.31$ & $67.48\pm 0.52$ & $\mathbf{73.99\pm 0.52}$ & $48.13\pm 2.57$ & $63.70\pm 0.49$ \\
+Frequent $4$ & $3.03$ & $\mathbf{68.82}$ & $86.00$  & $\mathbf{38.80}$   & $\mathbf{67.68}$   & $72.20$   & $\mathbf{49.42}$  & $\mathbf{63.82}$ \\ \midrule
+\multicolumn{9}{c}{\texttt{DeepSeek-MoE-16B-base}} \\ \midrule
+
+Random $10$ & $2.53$ & $\mathbf{67.28}\pm\mathbf{0.04}$ & $\mathbf{88.50}\pm\mathbf{1.50}$ & $38.40\pm0.80$ & $\mathbf{70.99}\pm\mathbf{0.50}$ & $\mathbf{76.74}\pm\mathbf{0.84}$ & $35.23\pm0.09$ & $62.86\pm0.60$\\
+
+Frequent $10$ & $2.53$ & $66.46$ & $87.00$    & $\mathbf{39.60}$  & $70.31$ & $76.71$ & $\mathbf{37.84}$ & $\mathbf{62.99}$ \\ \midrule
+
+Random $15$ & $2.68$ & $\mathbf{67.25}\pm\mathbf{0.47}$ & $84.50\pm2.50$ & $\mathbf{40.00}\pm\mathbf{0.60}$ & $\mathbf{71.79}\pm\mathbf{0.43}$ & $76.85\pm0.08$ & $35.71\pm0.82$ & $62.68\pm0.71$\\
+Frequent $15$ & $2.68$ & $67.17$ & $\mathbf{88.00}$    & $39.00$    & $71.09$ & $\mathbf{76.93}$ & $\mathbf{40.59}$ & $\mathbf{63.80}$\\ \midrule
+
+Random $20$ & $2.83$ & $67.25\pm0.47$ & $84.50\pm2.50$ & $40.00\pm0.60$ & $71.79\pm0.43$ & $76.85\pm0.08$ & $35.71\pm0.82$ & $62.68\pm0.71$ \\
+Frequent $20$ & $2.83$ & $\mathbf{67.25}$ & $\mathbf{86.00}$ & $\mathbf{40.40}$ & $\mathbf{72.06}$ & $\mathbf{77.58}$ & $\mathbf{40.78}$ & $\mathbf{64.01}$ 
+ \\ \midrule
+
+Random $25$ & $2.97$ & $67.72\pm0.24$ & $89.00\pm1.00$ & $\mathbf{40.70}\pm\mathbf{0.10}$ & $71.98\pm0.19$ & $77.04\pm0.05$ & $36.54\pm1.55$ & $63.83\pm0.04$\\
+Frequent $25$ & $2.97$ & $\mathbf{67.72}$ & $\mathbf{90.00}$ & $39.20$  & $\mathbf{72.83}$ & $\mathbf{77.15}$ & $\mathbf{41.06}$ & $\mathbf{64.66}$ \\ \midrule
+
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+\begin{wrapfigure}{r}{0.4\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figs/ffnn_vs_attn.pdf}
+  \caption{Comparison of quantizing more bits for attention \textit{vs.} FFNN. It is evaluated on the \texttt{Mixtral-8x7B} model. FFNN results show the mean and standard deviation~(error bars) from $3$ independent trials.}
+  \label{fig:attention-vs-ffnn}
+\end{wrapfigure}
+
+\paragraph{\uline{Q2}: Attention \textit{vs.} FFNN: Which Deserves More Bits in MoE? A: Attention layers are more bit-efficient.}
+Because of the unique characteristics of the feedforward neural network (FFNN) within the mixture of experts (MoE) framework. we explore the attention layer and the feedforward neural network layer, which deserves more bits.
+We compare the performance evaluated by quantizing the attention layers with more bits \textit{v.s.} randomly selecting experts in the FFNN layers with more bits, maintaining the same average bits of the entire MoE model for a fair comparison. 
+Specifically, we quantize the attention weight or randomly selected FFNN weight to \{$2$, $4$, $8$\} bits, while All other weights are quantized to $2$ bits by default. 
+As illustrated in Figure~\ref{fig:attention-vs-ffnn}, quantizing attention weights to higher bit levels (\textit{i.e.}, $4$ or $8$ bits) consistently results in significant performance gains (over $5\%$) under each average bit allocation for the MoE model. This greater efficiency likely stems from the fact that attention weights are activated for every token, while FFNN weights only engage with a subset of the input tokens. Consequently, increasing the quantization bits for FFNN weights does not benefit all inputs. Based on these findings, attention weights are quantized to $4$ bits by default in all following experiments.
+
+ 
+
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison between quantizing first $k$ \textit{v.s.} last $k$ MoE blocks with higher~(\textit{i.e.} $4$) bits. All weights in attention layers are quantized to $4$ bits, and the other weights are quantized to $2$ bits. In \texttt{DeepSeek-MoE-16B-base} model, we keep the first block that is dense block as $4$ bits by default. We evaluate $k$ of $4$ and $8$. The higher performance of each comparison pair is marked as \textbf{bold}.} \label{tab:layer-depth-bits}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|ccccccc}
+\toprule[1pt]
+\midrule
+   Methodology & Bits  & WinoGrande (\%) & COPA (\%) & OBQA (\%) & HellaSwag (\%) & PIQA (\%) & MMLU (\%) & Average (\%) \\ \midrule
+\multicolumn{9}{c}{\texttt{Mixtral-8x7B}} \\ 
+\midrule
+First $4$ & $2.30$ & $\mathbf{57.85}$ & $\mathbf{72.00}$ & $\mathbf{32.80}$ & $\mathbf{52.80}$ & $\mathbf{61.59}$ & $\mathbf{29.65}$ & $\mathbf{51.12}$ \\
+Last $4$ & $2.30$ & $53.75$ & $60.00$ & $27.80$ & $46.25$ & $58.87$ & $26.56$ & $45.54$ \\
+\midrule
+First $8$ & $2.54$ & $\mathbf{62.11}$ & $\mathbf{85.00}$ & $\mathbf{35.80}$ & $\mathbf{62.72}$ & $\mathbf{67.74}$ & $\mathbf{35.61}$ & $\mathbf{58.16}$ \\
+Last $8$ & $2.54$ & $52.09$ & $69.00$ & $29.60$ & $47.87$ & $59.58$ & $26.03$ & $47.36$ \\
+\midrule
+\multicolumn{9}{c}{\texttt{DeepSeek-MoE-16B-base}} \\ \midrule
+First $4$ & $2.29$ & $\mathbf{65.27}$ & $\mathbf{85.00}$ & $\mathbf{38.40}$ & $\mathbf{64.42}$ & $\mathbf{72.74}$ & $\mathbf{28.88}$ & $\mathbf{59.12}$ \\
+Last $4$ & $2.29$ & $62.90$ & $83.00$ & $36.00$ & $64.41$ & $74.65$ & $27.38$ & $58.06$ \\
+\midrule
+First $8$ & $2.63$ & $\mathbf{64.09}$ & $\mathbf{86.00}$ & $\mathbf{38.75}$ & $\mathbf{67.84}$ & $\mathbf{75.35}$ & $30.12$ & $\mathbf{60.36}$ \\
+Last $8$ & $2.63$ & $62.83$ & $83.00$ & $37.80$ & $65.94$ & $75.73$ & $\mathbf{31.00}$ & $59.38$ \\
+\midrule
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+\paragraph{\uline{Q3}: Do the model's first or last MoE blocks deserve more bits in quantization? A: The first MoE blocks.}
+As more and more Mixture-of-Experts (MoE) architectures emerge, we investigate which layer of the MoE block is more critical and thus deserves more bits during the quantization process.
+As shown in Table~\ref{tab:layer-depth-bits}, we evaluate the performance of allocating more bits to the first $k$ blocks versus the last $k$ blocks in quantization. The results consistently indicate that higher bit quantization of the first few blocks yields better performance, suggesting that we can allocate more bits to the quantization of the first blocks of the model. 
+This observation aligns with prior studies that have empirically confirmed the greater importance of the first few Transformer blocks~\cite{dai2024deepseekmoe,ma2023llmpruner}. 
+
+\begin{wrapfigure}{r}{0.4\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figs/shared_experts.pdf}
+  \caption{Comparison of quantizing more bits for shared experts \textit{vs.} others experts. "Others" results show the mean and standard deviation from $3$ independent trials of random selecting $2$ experts from the non-shared experts.}
+  \label{fig:shared-experts}
+  
+\end{wrapfigure}
+
+\paragraph{\uline{Q4}: Does the shared expert always deserve more bits? A: Yes.} 
+The \texttt{DeepSeek-MoE-16B-base} model includes two shared experts within each MoE block to obtain 
+common knowledge across varying domains and alleviate the parameter redundancy. 
+To evaluate their role in quantization, we compare quantizing these two shared experts with more bits \textit{v.s.} randomly selecting two non-shared experts for more bit allocation, maintaining the same average bits for a fair comparison. 
+The shared or random non-shared experts are quantized to {$2$, $4$, $8$} bits, while attention weights are set to $4$ bits and all other weights to $2$ bits. 
+As depicted in Figure~\ref{fig:shared-experts}, allocating higher bit levels~(\textit{i.e.}, $4$ or $8$ bits) to shared experts consistently yields superior performance. 
+This enhanced efficiency and effectiveness are attributed to the shared experts being activated for every input token, unlike non-shared experts, which only engage with specific subsets of the tokens. Allocating more quantization bits to shared experts thus proves to be both more efficient and effective.
+
+
+
+    
+
+
+
+\section{Extended Study to Improve MoE Quantization}
+
+
+In this section, we expand our benchmark results from weight quantization to include activation quantization. Additionally, we introduce two novel algorithmic advancements aimed at enhancing the effectiveness of identifying crucial components within MoE models for improved quantization performance.
+
+\subsection{Quantizing Both Weight and Activation}
+
+We further expand our study by simultaneously including weight and activation quantization to validate our conclusions. Specifically, we employ SmoothQuant~\cite{xiao2024smoothquant} combined with our expert-usage-frequency heuristic. It selects the top-$2$ experts’ weights per MoE block in the \texttt{Mixtral-8x7B} model and the top-$16$ experts’ weights per MoE block in the \texttt{DeepSeek-MoE-16B-base} for quantization to $4$ bits, while quantizing all other weights to $2$ bits. The evaluation results, presented in Table~\ref{tab:activation-quantization}, reveal the marginal performance gap across different activation quantization bits. This demonstrates that our conclusions regarding weight quantization are robust and can be reliably extended to various activation quantization scenarios as well.
+\begin{table}[ht]
+\centering
+    \setlength{\tabcolsep}{3pt}
+    
+\caption{Combination of activation quantization with the expert-usage-based heuristic. We evaluate it on the top-$2$ most frequently used experts per MoE block in \texttt{Mixtral-8x7B} and the top-$16$ frequent experts per MoE block in \texttt{DeepSeek-MoE-16B-base}, quantizing these experts to $4$ bits. All attention weights are also quantized to $4$ bits, while all other weights are quantized to $2$ bits. The higher performance of each comparison pair is marked as \textbf{bold}.}\label{tab:activation-quantization}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{cc|ccccccc}
+\toprule[1pt]
+\midrule
+Weight Bits & Activation Bits  & WinoGrande (\%) & COPA (\%) & OBQA (\%) & HellaSwag (\%) & PIQA (\%) & MMLU (\%) & Average (\%) \\ \midrule
+\multicolumn{9}{c}{\texttt{Mixtral-8x7B}} \\ \midrule
+\multirow{3}{*}{$2.54$} & $4$ & $\mathbf{50.28}$ & $51.00$ & $\mathbf{26.80}$ & $25.99$ & $\mathbf{51.90}$ & $23.85$ & $38.30$ \\
+ & $8$ & $50.04$ & $\mathbf{60.00}$ & $\mathbf{26.80}$ & $\mathbf{26.55}$ & $51.58$ & $23.77$ & $\mathbf{39.79}$ \\
+ & $16$ & $49.41$ & $\mathbf{60.00}$ & $26.60$ & $26.53$ & $51.85$ & $\mathbf{23.86}$ & $39.71$ \\
+\midrule
+\multicolumn{9}{c}{\texttt{DeepSeek-MoE-16B-base}} \\ \midrule
+\multirow{3}{*}{$2.71$} & $4$ & $48.22$ & $\mathbf{53.00}$ & $27.20$ & $26.12$ & $50.65$ & $\mathbf{26.86}$ & $38.67$  \\
+ & $8$ & $49.96$ & $51.00$ & $\mathbf{27.60}$ & $\mathbf{26.58}$ & $\mathbf{53.86}$ & $25.91$ & $\mathbf{39.15}$ \\
+ & $16$ & $\mathbf{50.19}$ & $51.00$ &$\mathbf{27.60}$ & $26.43$ & $53.70$ & $25.16$ & $39.01$ \\
+\midrule
+
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+\subsection{Concentrating Linear Layers with Larger Weight Outliers}
+
+\paragraph{Insight.} From the quantization perspective, the larger the range of a weight magnitude group, the more difficult it will be for quantization. 
+We found that, in MoE, each FFNN linear weight matrix consists predominantly of values within a narrow range, interspersed with a few significant outliers. Consequently, we propose a weight-magnitude-based metric to identify those linear layers that are challenging to quantize effectively, thereby necessitating a higher allocation of quantization bits.
+
+\paragraph{Methodology.} We define the metrics to estimate the outliers of weights by the maximum ratio of the largest to the average absolute magnitude within each column. Specifically, for a weight matrix $\mathbf{W} \in \mathbb{R}^{m\times n}$, we compute the metric $\texttt{outlier-score}(\mathbf{W})$ as follows:
+\begin{equation}
+\texttt{outlier-score}(\mathbf{W}) = \texttt{max}_{j}\left(\frac{\texttt{max}(|\mathbf{W}{:,j}|)}{\texttt{mean}(|\mathbf{W}{:,j}|)}\right),
+\end{equation}
+where $|\mathbf{W}{:,j}|$ is the absolute value of $\mathbf{W}$'s $j$-th column. With this metric, we can identify those linear layers that require more quantization bits and allocate more to them, providing an effective trade-off between performance and efficiency. The overall procedure is detailed in Algorithm~\ref{alg:outlier-score}.
+
+\begin{algorithm}[htb]
+\caption{The Procedure of MoE Mixed-Precision Quantization with \texttt{outlier-score}.}
+\begin{algorithmic}[1]
+\State \textbf{Initialize:} A MoE model with $l$ linear layers across all the FFNN experts, the number of linear layers for $4$ bit quantization $k$.
+\State Let $\mathcal{M}$ and $\mathcal{S}$ represent the set of each linear layer matrix in FFNN and its score, respectively.
+\For{linear layer $i=1,\ldots,l$}
+    \State $\mathbf{W} \gets \mathcal{M}[i]$
+    \State $\mathcal{S}[i] \gets \texttt{max}_{j}\left(\frac{\texttt{max}(|\mathbf{W}{:,j}|)}{\texttt{mean}(|\mathbf{W}{:,j}|)}\right)$    
+\EndFor
+\State $\alpha \gets \texttt{sorted}(\mathcal{S})[k]$
+\State $\mathtt{4}\texttt{bits-quantize}\left(\{\mathcal{M}[i]\mid \mathcal{S}[i] >= \alpha\}\right)$
+\State $\mathtt{2}\texttt{bits-quantize}\left(\{\mathcal{M}[i]\mid \mathcal{S}[i] < \alpha\}\right)$
+\State \textbf{Return:} A quantized mixed-precision MoE model.
+\end{algorithmic}
+\label{alg:outlier-score}
+\end{algorithm}
+
+\paragraph{Experiments.} We evaluate this metric by comparing its application for the top-$p\%$ of linear layers against randomly selecting linear layers, using percentages of $25\%$ and $50\%$. 
+In \texttt{DeepSeek-MoE-16B-base} model, we also involve shared experts using this metric.
+As illustrated in Table~\ref{tab:linear-layer-outliers}, our proposed scorer consistently outperforms the random baseline on both models and almost all tasks~(except HellaSwag and MMLU). This is particularly evident in the \texttt{DeepSeek-MoE-16B-base} model, where it achieves an average performance improvement of about $3\%$, aligning with our expectations.
+
+\begin{table}[ht]
+\centering
+
+\caption{Comparison between using our linear weight scorer \textit{vs.} random selection of linear layers for bit allocation in quantization. We evaluate by quantizing $25\%$ of the linear layers across all MoE blocks (\textit{i.e.}, FFNN) to $4$ bits. All attention weights are quantized to $4$ bits, and all other weights are quantized to $2$ bits. 
+In each comparison pair, the higher performance is highlighted in \textbf{bold}. All random experimental results in the format of $a\pm b$ provide the mean value $a$ and its standard deviation $b$ over $3$ independent trials.} \label{tab:linear-layer-outliers}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|ccccccc}
+\toprule[1pt]
+\midrule
+   Methodology & Bits  & WinoGrande (\%) & COPA (\%) & OBQA (\%) & HellaSwag (\%) & PIQA (\%) & MMLU (\%) & Average (\%) \\ \midrule
+\multicolumn{9}{c}{\texttt{Mixtral-8x7B}} \\ \midrule
+Random $25\%$ & $2.54$ & $60.74\pm 0.63$                   & $78.67\pm 4.62$  & $34.07\pm 1.63$   & $\mathbf{57.36}\pm 0.53$   & $68.19\pm 0.74$  & $\mathbf{32.49\pm 1.60}$ & $55.25\pm 0.95$ \\
+\rowcolor[gray]{0.9}
+Ours top-$25\%$ & $2.54$ & $\mathbf{62.19}$ & $\mathbf{83.00}$ & $\mathbf{35.80}$ & $57.04$ & $\mathbf{68.23}$ & $30.95$ & $\mathbf{56.20}$ \\
+\midrule
+\multicolumn{9}{c}{\texttt{DeepSeek-MoE-16B-base}} \\ 
+\midrule
+Random $25\%$ &2.54 & $64.04\pm0.78$ & $84.67\pm4.73$ & $37.53\pm0.46$ & $67.39\pm0.71$ & $74.61\pm0.60$ & $29.43\pm1.31$ & $59.61\pm0.76$ \\
+\rowcolor[gray]{0.9}
+Ours top-$25\%$ & $2.54$ & $\mathbf{66.14}$ & $\mathbf{85.00}$ & $\mathbf{38.80}$ & $\mathbf{71.65}$ & $\mathbf{76.82}$ & $\mathbf{36.19}$ & $\mathbf{62.43}$   \\
+\midrule
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+\paragraph{Visualization.} As shown in Figure~\ref{fig:outlier-score}, we visualize the proposed \texttt{outlier-score} for each FFNN linear weight within the \texttt{Mixtral-8x7B} model. Given that each FFNN expert includes three linear layers, namely the \textit{gate projection}, \textit{up projection}, and \textit{down projection}, we visualize these components separately to ensure clarity. Notably, many of the \textit{down projection} linear layers, particularly those positioned later in the MoE model, exhibit significantly higher \texttt{outlier-scores} compared to others.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1\textwidth]{figs/outlier_mixtral.pdf}
+    \caption{Visualization of the \texttt{outlier-score} metric applied to each FFNN linear weight matrix within the \texttt{Mixtral-8x7B} model. For clearer visualization, we present separate components, including the \textit{gate projection}~(left), \textit{up projection}~(middle), and \textit{down projection}~(right) in FFNN experts.}
+    \label{fig:outlier-score}
+\end{figure}
+
+\subsection{Training Block Quantization Importance Score Predictor.}
+
+Inspired by \uline{Q3} in Section~\ref{sec:benchmark-results}, which demonstrates that allocating more bits to different MoE blocks yields variable performance improvements, we propose a novel method to identify and quantize those critical blocks with additional bits. Specifically, this section outlines our approach to calculating importance scores for bit allocation using a data-driven method with a lightweight predictor.
+
+\paragraph{Insight.} We find an increasing cosine similarity between the tensors generated before and after the FFN blocks for some of the MoE blocks, indicating less important computation results produced by these blocks. This observation also aligns with observations on dense models in previous literature~\cite{jaiswal2024ffnskipllm}. Therefore, the basic idea is that less accurate output of these blocks producing tokens with high cosine similarity will not affect the overall model performance much, thus lower weight bits might not hurt performance much. 
+
+\paragraph{Methodology.} To capture the generalized hidden states' dynamic information of each MoE block, we train a small two-layer FFNN with a tangent activation function. This network predicts the cosine similarity between the input and output hidden states. We utilize a dataset of $400$ random sequences, each containing $1024$ tokens from the WikiText dataset~\cite{merity2016pointer}, for training. The detailed training procedure is in Algorithm~\ref{alg:block-predictor}. During quantization, we employ this predictor to run inference on the calibration data, computing the average predicted score for each MoE block across all tokens. A higher predicted score indicates less important and fewer bits for quantization.
+
+\begin{algorithm}[htb]
+\caption{The Training Procedure of Block Score Predictor.}
+\begin{algorithmic}[1]
+\State \textbf{Initialize:} A MoE block $M$, token input and output embedding set at block $M$ $\{(\mathbf{x}_i, \mathbf{y}_i)\}_{i\in [N]}$.
+\State Let $\mathcal{BSP}$ denotes the block score predictor.
+\State $\mathcal{X} \gets \left\{\mathbf{x}_i \mid i\in [N]\right\}$
+\State $\mathcal{S} \gets \left\{\texttt{cosine}(\mathbf{x}_i, \mathbf{y}_i) \mid i\in [N]\right\}$
+\State $\mathcal{BSP} \gets \texttt{train}(\mathcal{X}, \mathcal{S})$
+\State \textbf{Return:} The importance score predictor $\mathcal{BSP}$ for MoE Block $M$.
+\end{algorithmic}
+\label{alg:block-predictor}
+\end{algorithm}
+
+\paragraph{Experiments.} In Table~\ref{tab:block-predictor}, we compare the performance of using our block importance predictor to select $k$ MoE blocks for $4$ bits and others for $2$ bits quantization with two other baselines: \ding{172} random selecting $k$ MoE blocks, and \ding{173} first $k$ MoE blocks~(as it is the best in \uline{Q3} in Section~\ref{sec:benchmark-results}). Evaluation results on the \texttt{DeepSeek-MoE-16B-base} model are presented in Table~\ref{tab:block-predictor}, showing the superiority of our method against the other two baselines.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison between using our MoE block importance predictor \textit{v.s.} two baselines: \ding{172}random selecting and \ding{173}first $k$ MoE blocks. The predicted or selected MoE blocks are quantized to $4$ bits, all attention weights are quantized to $4$ bits, and all other weights are quantized to $2$ bits. In each comparison, the highest performance is highlighted in \textbf{bold}. All random experimental results in the format of $a\pm b$ provide the mean value $a$ and its standard deviation $b$ over $3$ independent trials.} \label{tab:block-predictor}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|ccccccc}
+\toprule[1pt]
+\midrule
+   Methodology & Bits  & WinoGrande (\%) & COPA (\%) & OBQA (\%) & HellaSwag (\%) & PIQA (\%) & MMLU (\%) & Average (\%) \\ \midrule
+\multicolumn{9}{c}{\texttt{DeepSeek-MoE-16B-base}} \\ \midrule
+Random $4$ & $2.29$ & $61.09\pm0.78$ & $83.00\pm0.00$ & $37.20\pm0.85$ & $64.88\pm0.30$ & $74.21\pm0.08$ & $27.82\pm0.46$ & $58.03\pm0.13$\\
+
+First $4$ & $2.29$ & $65.27$ & $\mathbf{85.00}$ & $\mathbf{38.40}$ & $64.42$ & $72.74$ & $28.88$ & $59.12$ \\
+\rowcolor[gray]{0.9}
+Predicted $4$ & $2.29$ & $\mathbf{65.27}$ & $83.00$ & $36.60$ & $\mathbf{64.88}$ & $\mathbf{74.54}$ & $\mathbf{37.75}$ & $\mathbf{60.34}$ 
+
+\\\midrule
+
+Random $8$ & 2.63 & $64.48\pm0.83$ & $85.33\pm3.21$ & $38.73\pm0.95$ & $67.57\pm0.40$ & $\mathbf{75.43}\pm\mathbf{0.14}$ & $\mathbf{31.41}\pm\mathbf{2.17}$ & $60.49\pm0.56$\\
+
+First $8$ & $2.63$ &  $64.09$ & $\mathbf{86.00}$ & $\mathbf{38.75}$ & $67.84$ & $75.35$ & $30.12$ & $60.36$ \\
+\rowcolor[gray]{0.9} 
+Predicted $8$ & $2.63$ & $\mathbf{65.35}$ & $\mathbf{86.00}$ & $38.00$ & $\mathbf{68.77}$ & $75.35$ & $30.01$ & $\mathbf{60.58}$  
+
+\\\midrule
+
+Random $12$ & 2.92 & $64.64\pm0.89$ & $83.50\pm0.71$ & $\mathbf{39.60}\pm2.83$ & $69.51\pm0.56$ & $75.98\pm0.42$ & $32.57\pm0.30$ & $60.97\pm0.62$ \\
+First $12$ & $2.92$ & $67.48$ & $\mathbf{88.00}$ & $38.60$ & $70.59$ & $75.95$ & $\mathbf{39.25}$ & $63.31$ \\
+\rowcolor[gray]{0.9} 
+Predicted $12$ & $2.92$ & $\mathbf{68.11}$ & $\mathbf{88.00}$ & $39.20$ & $\mathbf{71.82}$ & $\mathbf{76.66}$ & $38.45$ & $\mathbf{63.71}$ 
+
+\\\midrule
+
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+\begin{wrapfigure}{r}{0.5\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figs/deepseek_block_score.pdf}
+  \caption{Visualization of the predicted MoE block importance score using our trained predictors. }
+  \label{fig:block-score}
+\end{wrapfigure}
+
+\paragraph{Visualization.} We visualize the predicted scores of each MoE block using our trained predictors in the \texttt{DeepSeek-MoE-16B-base} model, as shown in Figure~\ref{fig:block-score}. Notably, MoE blocks situated in the middle of the model, which exhibit higher scores, are regarded as less critical. Consequently, these blocks will be quantized with fewer bits (specifically, $2$ bits), reflecting their lower importance.
+Besides, Figure~\ref{fig:block-score} also demonstrates that the first few MoE blocks are more important aligned with \uline{Q3}. Interestingly, the last two blocks of the \texttt{DeepSeek-MoE-16B-base} model are also crucial, thereby allocating more bits and yielding better performance.
+
+
+\section{Conclusion}
+
+This work investigates various heuristic-based MoE quantization methods in the post-training setting. While vanilla quantization techniques~(\textit{e.g.}, GPTQ) prove less effective and efficient when applied directly to MoE models, determining which MoE model components should be allocated more quantization bits remains an open question. We present the first benchmark study on MoE quantization, revealing critical heuristic-based principles, such as the importance disparities among different MoE blocks. Drawing on these insights, we introduce innovative techniques, including a block importance predictor and a linear layer outlier range scorer, to more precisely identify components that benefit from increased bit quantization. These methods substantially improve the quantization process's effectiveness and efficiency for MoE models.
+
+\newpage
+
+
+
+
+

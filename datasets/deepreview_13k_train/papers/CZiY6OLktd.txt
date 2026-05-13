@@ -1,0 +1,411 @@
+\title{MG-TSD: Multi-Granularity Time Series Diffusion Models with Guided Learning Process}
+
+\begin{abstract}
+
+Recently, diffusion probabilistic models have attracted attention in generative time series forecasting due to their remarkable capacity to generate high-fidelity samples. However, the effective utilization of their strong modeling ability in the probabilistic time series forecasting task remains an open question, partially due to the challenge of instability arising from their stochastic nature. To address this challenge, we introduce a novel \textbf{M}ulti-\textbf{G}ranularity \textbf{T}ime \textbf{S}eries \textbf{D}iffusion (\mgtsdnospace) model, which achieves state-of-the-art predictive performance by leveraging the inherent granularity levels within the data as given targets at intermediate diffusion steps to guide the learning process of diffusion models. The way to construct the targets is motivated by the observation that the forward process of the diffusion model, which sequentially corrupts the data distribution to a standard normal distribution, intuitively aligns with the process of smoothing fine-grained data into a coarse-grained representation, both of which result in a gradual loss of fine distribution features. In the study, we derive a novel multi-granularity guidance diffusion loss function and propose a concise implementation method to effectively utilize coarse-grained data across various granularity levels. More importantly, our approach does not rely on additional external data, making it versatile and applicable across various domains. Extensive experiments conducted on real-world datasets demonstrate that our \mgtsd model outperforms existing time series prediction methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Time series prediction is a critical task with applications in various domains such as finance forecasting~\citep{hou2021stock,chen2018incorporating}, energy planning~\citep{koprinska2018convolutional,wu2021autoformer}, climate modeling~\citep{wu2023interpretable, wu2021autoformer}, and biological sciences~\citep{luo2020hitanet,rajpurkar2022ai}. Considering that time series forecasting problems can be effectively addressed as a conditional generation task, many works leverage generative models for predictive purposes. For instance,~\citet{salinas2019high} utilizes a low-rank plus diagonal covariance Gaussian copula;~\citet{rasul2021autoregressive} models the predictive distribution using normalizing flows. Recent advancements in diffusion probabilistic models~\citep{ho2020denoising} have sparked interest in utilizing them into probabilistic time series prediction. For example,~\citet{rasul2020multivariate} auto-regressively generates data through iterative denoising diffusion models.~\citet{tashiro2021csdi}
+uses a conditional score-based diffusion model explicitly trained for probabilistic time series imputation and prediction. These methods relying on diffusion models have exhibited remarkable predictive capabilities.
+However, there is still considerable scope for improvement. One challenge that diffusion models face in time series forecasting tasks is the instability due to their stochastic nature when compared to deterministic models like RNNs and variants like LSTMs~\citep{hochreiter1997lstm,laiModelingLongShortTerm2018}, GRUs~\citep{ballakur2020Empirical, yamak2019comparison}, and Transformers that rely on self-attention mechanisms~\citep{Vaswani2017attention, zhouInformerEfficientTransformer2021,zhou2022fedformer,wu2021autoformer}. 
+More specifically, the diffusion models yield diverse samples from the conditional distributions, including possible low-fidelity samples from the low-density regions within the data manifold~\citep{sehwag2022generating}. In the context of time series forecasting, where fixed observations exclusively serve as objectives, such variability would result in forecasting instability and inferior prediction performance.
+\begin{wrapfigure}{r}{0.45\textwidth}
+\centering
+\includegraphics[width=0.45\textwidth]{fig_MG-TSD.pdf}
+\caption{The process of smoothing data from finest-grained to coarsest-grained naturally aligns with the diffusion process.}
+\label{fig-concept}
+\end{wrapfigure}
+
+To stabilize the output of a diffusion model in time series prediction, one straightforward method is to constrain the intermediate states during the sampling process. 
+Prior research in the realm of diffusion models has introduced the idea of classifier-guidance~\citep{nichol2021glide} and classifier-free guidance~\citep{ho2022classifier}, where the predicted posterior mean is shifted with the gradient of either explicit or implicit classifier. However, these methods require labels as the source of guidance while sampling, which are unavailable during out-of-sample inference.
+We observe that the forward process of the diffusion model, which sequentially corrupts the data distribution to a standard normal distribution, intuitively aligns with the process of smoothing fine-grained data into a coarser-grained representation, both of which result in a gradual loss of finer distribution features.
+This provides the insights that intrinsic features within data granularities may also serve as a source of guidance.
+
+In this paper, we propose a novel \textbf{M}ulti-\textbf{G}ranularity \textbf{T}ime \textbf{S}eries \textbf{D}iffusion (\mgtsdnospace) model that leverages multiple granularity levels within data to guide the learning process of diffusion models. The coarse-grained data at different granularity levels are utilized as targets to guide the learning of the denoising process. These targets serve as constraints for the intermediate latent states, ensuring a regularized sampling path that preserves the trends and patterns within the coarse-grained data. They introduce inductive bias which promotes the generation of coarser features during intermediate steps and facilitates the recovery of finer features in subsequent diffusion steps. Consequently, this design reduces variability and results in high-quality predictions. Our key contributions can be summarized as below:
+\begin{enumerate}
+\item We introduce a novel \mgtsd model with an innovatively designed multi-granularity guidance loss function that efficiently guides the diffusion learning process, resulting in reliable sampling paths and more precise forecasting results.
+\item We provide a concise implementation that leverages coarse-grained data instances at various granularity levels. 
+Furthermore, we explore the optimal configuration for different granularity levels and propose a practical rule of thumb.  
+\item Extensive experiments conducted on real-world datasets demonstrate the superiority of the proposed model, achieving the best performance compared to the state-of-the-art methods.
+\end{enumerate}
+
+
+
+\section{Background}
+
+ 
+\subsection{Denoising diffusion probabilistic models}\label{sec-ddpm}
+
+Suppose $\vx_{0}\sim q_{\mathcal{X}}(\vx_{0})$ is a multivariate vector from space $\mathcal{X}=\mathbb{R}^{D}$. Denoising diffusion probabilistic models aim to learn a model distribution $p_\theta(\vx_0)$ that approximates the data distribution $q(\vx_0)$. Briefly, they are latent variable models of the form $p_{\theta}(\vx_{0})=\int p_{\theta}(\vx_{0:N})\dd \vx_{1:N}$, where $\vx_n$ for {$n = 1,\ldots,N$} is a sequence of latent variables in the same sample space as $\vx_0$. 
+The denoising diffusion models are composed of two processes: the forward process and the reverse process. During the forward process, a small amount of Gaussian noise is added gradually in $N$ steps to samples. It is characterized by the following Markov chain:
+${q(\vx_{1:N}|\vx_0) = \prod^N_{n=1} q(\vx_n | \vx_{n-1})}, \ \text{where} \ q (\vx_{n}|\vx_{n-1}):= \mathcal{N} (\sqrt{1-\beta_n}\vx_{n-1}, \beta_n \mI)$. The step sizes are controlled by a variance schedule  $\{\beta_{n}\in (0,1)\}_{n=1}^{N}$, where $n$ represents a diffusion step. A nice property of the above process is that one can sample at any arbitrary diffusion step in a closed form, let $\alpha_n := 1 - \beta_n$ and $\baralp_n =\prod^n_{i=1} \alpha_i$. It has been shown that  $\vx_{n}=\sqrt{\baralp_n}\vx_{0}+ \sqrt{1-\baralp_{n}}\epsb$. The reverse diffusion process is to recreate the real samples from a Gaussian noise input. It is defined as a Markov chain with learned Gaussian transitions starting with $p(\vx_N)=\mathcal{N}(\vx_N;\textbf{0},\mI)$. The reverse process is characterized as
+$p_\theta(\vx_{0:N}) := p(\vx_{N})\prod^1_{n=N} p_\theta(\vx_{n-1} {|} \vx_{n}),\ \text{where}\ p_\theta(\vx_{n-1} {|} \vx_{n}) := \mathcal{N}(\vx_{n-1}; \mu_\theta(\vx_{n}, n), \Sigma_\theta(\vx_n, n)\mI)$;
+$\mu_{\theta}:\R^{D}\times \mathbb{N} \to \R^{D}$ and $\Sigma_{\theta}: \R^{D}\times \mathbb{N} \to \R^{+}$ take the variable $\vx_{n}\in \R^{D}$ and the diffusion step $n\in \mathbb{N}$ as inputs, and share the parameters $\theta$.
+The parameters in the model are optimized to minimize the negative log-likelihood 
+$\min_{\theta} \E_{\vx_{0}\sim q(\vx_0)}[-\log p_{\theta}(\vx_{0})]$
+via a variational bound.
+According to denoising diffusion probabilistic models (DDPM) in~\citet{ho2020denoising}, the parameterization of {$p_\theta(\vx_{n-1}| \vx_n)$ } is chosen as:
+\begin{equation}\label{eq-mu}
+\mu_\theta(\vx_n, n) = {\frac{1}{\sqrt{\alpha_n}}} \bigg( \vx_n- \frac{1-\alpha_n}{\sqrt{1-\baralp_n}} \epsb_\theta(  \sqrt{\baralp_n}\vx_{0}+\sqrt{1-\baralp_{n}}\epsb,n)\bigg),
+\end{equation}
+where $\epsb_{\theta}$ is a network which predicts $\epsb\sim \mathcal{N}(\textbf{0},\textbf{I})$ from $\vx_{n}$. We simplify the objective function into 
+\begin{equation}\label{eq-diffusion-loss}
+L_{n}^{\text{simple}}=
+\E_{n,\epsb_n,\vx_0}\bigg[\|\epsb_{n}-\epsb_{\theta}(\sqrt{\baralp_n}\vx_0+\sqrt{1-\baralp_n}\epsb_n,n)\|^2\bigg].
+\end{equation}
+Once trained, we can iteratively sample from the reverse process $p_{\theta}(\vx_{n-1}|\vx_{n})$ to reconstruct $\vx_0$.
+\subsection{TimeGrad Model}\label{sec-timegrad}
+
+We treat the time series forecasting task as a conditional generation task and utilize the diffusion models presented in \secref{sec-ddpm} as the backbone generative model.
+TimeGrad model is a related work by~\citet{rasul2020multivariate} which first explored the use of diffusion models for forecasting multivariate time series. Consider a contiguous time series sampled from the complete history training data, indexed from 1 to $T$. This time series is partitioned into a context window of interval $[1,t_0)$ and a prediction interval $[t_0,T]$. TimeGrad utilizes diffusion models from~\citet{ho2020denoising} to learn the conditional distribution of the future timesteps of the multivariate time series given their past. 
+An RNN is employed to capture the temporal dependencies, and the time series sequence up to timestep $t$ is encoded in the updated hidden state $\rvh_{t}$. 
+Mathematically, TimeGrad models $q_{\mathcal{X}}(\vx_{t_0:T}|\vx_{1:t_0-1})=\prod_{t=t_0}^{T}q_{\mathcal{X}}(\vx_t|\vx_{1:t-1})\approx \prod_{t=t_0}^{T}q_{\mathcal{X}}(\vx_{t}|\rvh_{t-1})$, where $\vx_{t}\in\R^{D}$ denotes the time series at timestep $t$ and $\rvh_{t}=\text{RNN}_{\psi}(\vx_t,\rvh_{t-1})$. 
+Each factor is learned via a shared conditional denoising diffusion model. 
+In contrast to~\citet{ho2020denoising}, the hidden states $\rvh_{t-1}$ are taken as an additional input in the denoising network $\epsb_{\theta}(\vx_t^{n},\rvh_{t-1},n)$, and the loss function for timestep $t$ and diffusion step $n$ is given by:
+\begin{equation}
+\E_{\epsb,\vx_{0,t},n}[\|\epsb-\epsb_{\theta}(\sqrt{\baralp_n}\vx_{0,t}+\sqrt{1-\baralp_n}\epsb,n,\rvh_{t-1})\|^2],
+\end{equation}
+where the first subscript in $\vx_{0,t}$ represents the index of the diffusion step, while $t$ denotes the timestep within the time series.
+
+\subsection{Problem formulation}  
+
+In the time series prediction task, let $\mX^{(1)}$ represent the original observed data. 
+The time series data is denoted as $\mX^{(1)} = [\vx_{1}^1,\ldots,\vx_{t}^1,\ldots, \vx_{T}^1]$, where $t$ represents the timestep $t\in [1,T]$ and $\vx_{t}\in \R^{D}$.
+Specifically, our task is to model the conditional distribution of future timesteps of the time series $[\vx_{t_0}^1,\ldots,\vx_{T}^1]$ given the fixed window of history context. Mathematically, the problem we consider can be formulated as follows:
+\begin{equation}
+q_{\mathcal{X}}\bigg(\vx_{t_0:T}^1|\big\{\vx_{1:t_0-1}^1\big\}\bigg)=\prod_{t=t_0}^{T}q_{\mathcal{X}}\bigg(\vx_{t}^1|\big\{\vx_{1:t-1}^1\big\}\bigg).
+\end{equation}
+
+
+\section{Method}
+
+In this section, we provide an overview of the \mgtsd model architecture in Section \ref{sec-overview}, followed by a detailed discussion of the novel guided diffusion process module in Section \ref{sec-guide-module}, including the derivation of the heuristic loss function and its implementation across various granularity levels.
+
+\subsection{MG-TSD model architecture}\label{sec-overview}
+
+The proposed methodology consists of three key modules, as depicted in Figure~\ref{fig-archi}.  
+
+\textbf{Multi-granularity Data Generator} is responsible for generating multi-granularity data from observations. In this module, various coarse-grained time series are obtained by smoothing out the fine-grained data using historical sliding windows with different sizes. Suppose $f$ is a pre-defined smoothing (for example, average) function, and $s^g$ is the pre-defined sliding window size for granularity level $g$. Then $\mX^{(g)}=f(\mX^{(1)},s^g)$. The sliding windows are non-overlapping and the obtained coarse-grained data for granularity $g$ are replicated $s^g$ times to align over the timeline $[1,T]$.
+
+\textbf{Temporal Process Module} is designed to capture the temporal dynamics of the multi-granularity time series data. 
+We utilize RNN architecture on each granularity level $g$ separately to encode the time series sequence up to a specific timestep $t$ and the encoded hidden states 
+are denoted as $\rvh_t^{g}$. The RNN cell type is implemented as 
+GRU in~\citet{chung2014empirical}.
+
+\textbf{Guided Diffusion Process Module} is designed to generate stable time series predictions at each timestep $t$. We utilize multi-granularity data as given targets to guide the diffusion learning process. A detailed discussion of the module can be found in \secref{sec-guide-module}.
+
+\begin{figure}[!htbp]
+\centering  \includegraphics[width=0.98\linewidth]{fig_model.pdf}  \caption{{Overview of the Multi-Granularity Time Series Diffusion (\mgtsdnospace) model, consisting of three key modules: \textbf{Multi-granularity Data Generator}, \textbf{Temporal Process Module ({TPM})}, and \textbf{Guided Diffusion Process Module} for time series forecasting at a specific granularity level.}}
+\label{fig-archi}
+\end{figure}
+ 
+\subsection{Multi-granularity Guided Diffusion}\label{sec-guide-module}
+In this section, we delve into the details of the \textbf{Guided Diffusion Process Module}, a key component in our model. \secref{sec-2-gran-guidance} presents the derivation of a heuristic guidance loss for the two-granularity case. In \secref{sec-multi-gran-loss}, we generalize the loss to the multi-granularity case and provide a concise implementation to effectively utilize coarse-grained data across various granularity levels. Briefly, the optimization of the heuristic loss function can be simply achieved by training denoising diffusion models on the multi-granularity data with shared denoising network parameters and partially shared variance schedule.
+
+\subsubsection{Coarse-grained guidance}\label{sec-2-gran-guidance}
+
+Without loss of generality, consider two granularities: finest-grained data $\vx_{t}^{g_1}$ ($g_1=1$) from $\mX^{(g_1)}$ and coarse-grained data $\vx_{t}^{g}$ from $\mX^{(g)}$ at a fixed timestep $t$, where $1<t<T$. We omit the subscript $t$ in the derivation for notation brevity. Suppose the denoising diffusion models presented in~\secref{sec-ddpm} are employed to approximate the distribution $q(\vx^{g_1})$ and let the variance schedule be $\{\beta_{n}^{1}=1-\alpha_{n}^{1}\in (0,1)\}_{n=1}^{N}$. Suppose $\vx_0^{g_1}\sim q(\vx_0^{g_1})$, where the subscript $0$ denotes the index of diffusion step.
+The diffusion models in~\secref{sec-timegrad} define a forward trajectory $q(\vx^{g_1}_{0:N})$ and a $\theta$-parameterized reverse trajectory $p_{\theta}(\vx^{g_1}_{0:N})$. 
+
+While~\secref{sec-timegrad} focuses on predicting samples over a specific timestep, it does not account for the intrinsic structure of time series, such as trends, which are represented by coarse-grained time series. In this paper, we guide the generation of samples by ensuring that the intermediate latent space retains the underlying time series structure. This is achieved by introducing coarse-grained targets $\vx^{g}$ at intermediate diffusion step $\Nn^g \in [1,N-1]$. Specifically, we establish the objective function as the log-likelihood of observed coarse-grained data $\vx^g$ evaluated at the marginal distributions at diffusion step $\Nn^g$, which can be expressed as $\log p_{\theta}(\vx^{g})$. With an appropriate choice of diffusion step $\Nn^g$, the coarser features recovered from the denoising process could gain information from the realistic coarse-grained sample. Recall that the marginal distribution of latent variable at denoising step $\Nn^g$ determined by the $\theta$-parameterized trajectory $p_{\theta}(\vx_{\Nn^g:N})$ can be expressed as:
+\begin{equation}\label{eq-ptheta}
+    p_{\theta}(\vx_{\Nn^{g}})=\int p_{\theta}(\vx_{\Nn^g:N})\dd \vx_{(\Nn^g+1):N}=\int p(\vx_N)\prod^{N}_{\Nn^g+1}{p_\theta(\vx_{n-1} \vert \vx_n})\dd \vx_{(\Nn^g+1):N},
+\end{equation}
+where $\vx_N\sim \mathcal{N}(\bm{0},\mI)$, $p_\theta(\vx_{n-1} \vert \vx_n) = \mathcal{N}(\vx_{n-1}; \vmu_\theta(\vx_n, n), \boldsymbol{\Sigma}_\theta(\vx_n, n))$. 
+
+To make the objective tractable, a common technique involves optimizing a variational lower bound on the likelihood in \eqref{eq-ptheta}. This can be achieved by specifying a latent variable sequence of length $N-\Nn^g$, such that the joint distribution of $\vx^{g}$ and these latent variables is available. 
+Conveniently, we employ a diffusion process on $\vx^{g}$ with a total of $N-\Nn^g$ diffusion steps,  defining a sequence of noisy samples $\vx^{g}_{\Nn^g+1}$, $\ldots$, $\vx^{g}_{N}$ as realizations of the latent variable sequence. Then, the guidance objective can be expressed as:
+\begin{equation}\label{eq-objective}
+\log p_{\theta}(\vx^{g}) = \log \int p_{\theta}(\vx^{g}_{\Nn^g},\vx^{g}_{\Nn^g+1},\ldots,\vx^{g}_{N})\dd \vx^{g}_{(\Nn^g+1):N}.
+\end{equation}
+Applying the same technique as in~\citet{ho2020denoising}, the guidance objective function in \eqref{eq-objective} simplifies the loss function of the diffusion models (see the \appref{sec_derivation_of_loss_function} for proof details):
+\begin{equation}\label{eq-loss-guidance} 
+\E_{\epsb,\vx^{g},n }[\|\epsb-\epsb_{\theta}(\vx^{g}_n,n)\|^2],
+\end{equation}
+where $\vx^{g}_n=(\prod_{i=\Nn^g}^{n}\alpha_{i}^{1})\vx^{g}+\sqrt{1-\prod_{i=\Nn^g}^{n}\alpha_i^{1}}\epsb$ and $\epsb\sim \mathcal{N}(\textbf{0},\mI)$. When the variance schedule is chosen as $\{\alpha^1_n\}_{n=\Nn^g}^{N}$, the loss function of the diffusion model in~\citet{ho2020denoising} is equivalent to the guidance loss function presented in \eqref{eq-loss-guidance}.
+\subsubsection{Multi-granularity Guidance}\label{sec-multi-gran-loss}
+In general, for $G$ granularity levels, data of different granularities generated by \textbf{Multi-granularity Data Generator} can be represented as $\mX^{(1)},\mX^{(2)},\ldots,\mX^{(G)}$.
+We expect these coarse-grained data can guide the learning process of the diffusion model at different steps, serving as constraints along the sampling trajectory. For coarse-grained data at granularity level $g$, where $g\in \{2, \ldots, G\}$, we define the $\textbf{share ratio}$ as $r_g := 1 - (\Nn^g - 1) / N$. It represents the shared percentage of variance schedule between the $g$th granularity data and the finest-grained data. For the finest-grained data, $\Nn^1=1$ and $r^1=1$. Formally, the variance schedule for granularity $g$ is defined as 
+\begin{equation}
+\alpha_{n}^{g}(\Nn^g) = 
+\begin{cases}
+1 & \text{if} \ n = 1,\ldots,\Nn^g \\
+\alpha_{n}^{1} & \text{if } n = \Nn^g+1,\ldots,N,
+\end{cases}
+\end{equation}
+and $\{\beta_{n}^{g}\}_{n=1}^{N}=\{1-\alpha_{n}^{g}\}_{n=1}^{N}$. Accordingly, define $a_{n}^{g}(\Nn^g)  = \prod_{k=1}^{n} \alpha_{k}^{g}$, and $b_{n}^{g}(\Nn^g) = 1-a_{n}^{g}(\Nn^g)$. We suppose $\Nn^{1}<\Nn^{2}\ldots<\Nn^g<\ldots<\Nn^{G}$, which represents the diffusion index for starting sharing the variance schedule across granularity level $g\in\{1,\ldots,G\}$. The starting index $\Nn^g$ is larger for coarser granularity level, aligning with the intuition that the coarser-grained data loses fine distribution features to a greater extent and is expected to resemble the samples from earlier sampling steps.
+
+Furthermore, we use the temporal hidden states for granularity level $g$ up to timestep $t$ from the \textbf{Temporal Process Module} as conditional inputs for the model to generate time series at corresponding granularity levels similar to~\citet{rasul2020multivariate}. Then the guidance loss function $L^{(g)}(\theta)$ for $g$th-granularity $\vx_{n,t}^{g}$ at timestep $t$ and diffusion step $n$, can be expressed as:
+\begin{equation}\label{eq-loss2}
+L^{(g)}(\theta)=\E_{\epsb, \vx_{0,t}^{g}, n} \|(\epsb-\epsb_{\theta} (\sqrt{a_{n}^{g}} \vx_{0,t}^{g}+\sqrt{b_{n}^{g}}\epsb,n,\rvh^{g}_{t-1})\|^2_2,
+\end{equation}
+where 
+$\rvh_{t}^{g} = \text{RNN}_{\theta}(\vx_{t}^{g}, \rvh_{t-1}^{g})$
+is the updated hidden states from the last step.
+
+The guidance loss function with $G-1$ granularity levels of data is $L^{\text{guidance}}=\sum_{g=2}^{G}\omega^gL^{(g)}(\theta)$, where $\omega^g\in [0,1]$ is a hyper-parameter controlling the scale of guidance from granularity $g$. 
+\textbf{Training.} The training algorithm is in Algorithm~\ref{alg-training}.
+The final training objective is the weighted summation of loss for all granularities, including the finest granularity:
+\begin{equation}\label{eq-loss}
+L^{\text{final}}=\omega^1{L}^{(1)}(\theta) +  L^{\text{guidance}}(\theta)=\sum_{g=1}^{G}\omega^g\E_{\epsb,\vx^{g}_{0,t},n }[\|\epsb-\epsb_{\theta}(\vx^{g}_{n,t},n,\rvh_{t-1}^{g})\|^2],
+\end{equation}
+where $\vx_{n,t}^g=\sqrt{a_{n}^{g}}\vx_{0,t}^{g}+\sqrt{b_{n}^{g}}\epsb$ and $\sum_{g=1}^{G}\omega^g=1$.
+The denoising network parameters are shared across all granularities during training.
+\begin{algorithm}[ht]
+ \caption{Training procedure}
+\label{alg-training}
+ \textbf{Input:} Context interval $[1, t_0)$; prediction interval $[t_0, T]$; number of diffusion step $N$; a set of share ratio for $g$ granularity (or equivalently $\{N_{*}^{g},g \in \{1,\ldots,G\}\}$); generated multi-granularity data $[\vx_{1}^{g}, \ldots, \vx_{t_0}^{g},\ldots,\vx_{T}^{g}], g \in \{1,\ldots,G\}$; initial hidden states $\rvh_{0}^{g}, g \in \{1,\ldots,G\}]$\\
+ \textbf{repeat}
+ \begin{algorithmic}[1]
+ \State Sample the multi-granularity time series $[\vx_{1}^{g},\ldots,\vx_{T}^{g}], g\in\{1,\ldots,G\}$.
+ \State Obtain $\rvh_{t}^{g} = \text{RNN}^{g}(\vx_{{t}}^{g},\rvh_{t-1}^{g}), g \in \{1,\ldots,G\}$, $t \in [1,\ldots, T]$.
+ \For{$t = t_0$ to $T$}
+ \State Initialize $n \sim \text{Uniform}(1,\ldots, N)$ and $\epsb \sim \mathcal{N}(\mathbf{0},\mI)$
+ \State Reset the variance schedule $\{\beta_{n}^{g}=1-\alpha_{n}^{g}(N_{*}^{g})\}_{n=1}^{N}$, $g \in \{1,\ldots,G\}$.
+ \State Compute loss $L^\text{final}$ according to \eqref{eq-loss}
+ \State Take the gradient $\nabla_\theta L^\text{final}$
+ \EndFor
+\end{algorithmic}
+\textbf{until} converged
+\end{algorithm}
+
+\textbf{Inference.} Once the model is trained, our goal is to make predictions on the finest-grained data, up to a certain number of future prediction steps. Suppose that the last context window ends at timestep $t_0-1$, we use Algorithm \ref{alg-inference} to perform the sampling procedure and generate a sample $\vx_{t_0}^{1}$ for the next timestep. This process is repeated until reaching the desired forecast horizon. With different hidden states as conditional inputs, the model can sample time series at respective granularity levels.
+
+\begin{algorithm}[ht]
+\caption{Inference procedure for each timestep $t\in [t_0,T]$}
+\label{alg-inference}
+\textbf{Input:} Noise $\vx_t^{N}\sim \mathcal{N}(\mathbf{0},\mI)$ and hidden states $\rvh^{g}_{t-1}$, $g\in \{1,\ldots,G\}$
+
+\begin{algorithmic}[1]
+\For{$n = N$ to $1$}
+    \If{$n > 1$}
+        \State Sample $\vz \sim \mathcal{N}(\mathbf{0}, \mI)$
+    \Else
+        \State $\vz = \mathbf{0}$
+    \EndIf
+    \For{$g = 1$ to $G$}
+    \State $\vx_{n-1,t}^{g} = \frac{1}{\sqrt{\alpha_{n}^{g}}} (\vx_{n,t}^{g} - \frac{\beta_n^{g}} {\sqrt{1 - a_{n}^{g}}} \epsilon_{\theta}(\vx_{n,t}^{g}, n,\rvh_{t-1}^{g})) + \sqrt{\sigma_{n}^{g}} \vz$, where $\sigma_{n}^{g}=\frac{1-a_{n-1}^{g}}{1-a_{n}^{g}}\beta_{n}^{g}$.
+    \EndFor
+\EndFor
+\end{algorithmic}
+\textbf{Return}: $\vx_{0,t}^{g},g=1$(finest-grained data); (Optional: $\vx_{0,t}^{g}$, $g \in \{2,\ldots,G\}$)
+\end{algorithm}
+
+\textbf{Selection of share ratio.} We propose a heuristic approach to help select the appropriate share ratio $r^{g}$, which is derived from $N_{*}^{g}$. 
+We determine the choice of $\Nn^{g}$ as the diffusion step at which the distance between two distributions $q(\vx^{g})$ and $p_{\theta}(\vx^{g_1}_{n})$ is minimum, as shown below:
+\begin{equation}
+    \Nn^g:=\arg \min_n \mathcal{D}(q(\vx^{g}),p_{\theta}(\vx^{g_1}_n)),
+\end{equation}
+where $\mathcal{D}$ is a measure for accessing discrepancy between two distributions, such as KL divergence. In practice, we first pre-train a TimeGrad model and then compute the \crps between the coarse-grained targets and the samples along the sampling path of finest-grained data during inference. The range of steps where the \crps values can consistently maintain relatively small values suggests a proper range of share ratios. 
+
+
+
+\section{Experiments}
+
+In this section, we conduct extensive experiments on six real-world datasets to evaluate the performance of the proposed \mgtsd model and compare it with previous state-of-the-art baselines.
+
+\subsection{Settings}
+\textbf{Datasets.} We consider six real-word datasets characterized by a range of temporal dynamics, namely $\texttt{Solar}$, $\texttt{Electricity}$, $\texttt{Traffic}$, $\texttt{Taxi}$, $\texttt{KDD-cup}$ and $\texttt{Wikipedia}$. The data is recorded at intervals of 30 minutes, 1 hour, or 1 day frequencies. Refer to \appref{sec_benchmark_datasets} for details.
+
+\textbf{Evaluation Metrics.} 
+We assess our model and all baselines using $\text{CRPS}_{\text{sum}}$ (Continuous Ranked Probability Score), a widely used metric for probabilistic time series forecasting, as well as $\text{NMAE}_{\text{sum}}$ (Normalized Mean Absolute Error) and $\text{NRMSE}_{\text{sum}}$ (Normalized Root Mean Squared Error). For detailed descriptions, refer to \appref{sec_app_metrics}.
+
+\textbf{Baselines.} 
+We assess the predictive performance of the proposed \mgtsd model in comparison with multivariate time series forecasting models, including {Vec-LSTM-ind-scaling}~\citep{salinas2019high}, {GP-scaling}~\citep{salinas2019high}, {GP-Copula}~\citep{salinas2019high}, {Transformer-MAF}~\citep{rasul2020multivariate}, {LSTM-MAF}~\citep{rasul2020multivariate}, {TimeGrad}~\citep{rasul2021autoregressive}, and {TACTiS}~\citep{drouin2022tactis}. 
+The MG-Input ensemble model serves as the baseline with multi-granularity inputs. It combines two TimeGrad models trained on one coarse-grained and finest-grained data respectively, and generates the final predictions by a weighted average of their outputs. 
+\textbf{Implementation details.} We train our model for 30 epochs using the Adam optimizer with a fixed learning rate of $10^{-5}$. We set the mini-batch size to 128 for {solar} and 32 for other datasets. The diffusion step is configured as 100. Additional hyper-parameters, such as share ratios, granularity levels, and loss weights, are detailed in \appref{sec_app_hyper_parameter}. All models are trained and tested on a single NVIDIA A100 80GB GPU.
+
+\subsection{Results}
+The \crps values averaged
+over 10 independent runs are reported
+in Table \ref{tab-compare}. The results show our model achieves the lowest \crps and outperforms the baseline models across all six datasets. 
+The {MG-Input} model exhibits marginal improvement on certain datasets when compared to the TimeGrad. This implies that while integrating multi-granularity information may result in some information gain, direct ensembling of coarse-grained outputs is inefficient in boosting performance.
+\subsection{Ablation Study}
+
+\textbf{Share ratio of variance schedule.} To investigate the effect of share ratio, we evaluate the performance of \mgtsd using various share ratios across different coarse granularities. The experiment is conducted in a two-granularity setting, where one coarse granularity is utilized to guide the learning process for the finest-grained data. 
+Table \ref{tab-ablation} shows that for each coarse granularity level, the $\text{CRPS}_{\text{sum}}$ values initially decrease to their lowest values and then ascend again as the share ratio gets larger. Furthermore, we observe for coarser granularities, the model performs better with a smaller share ratio.
+This suggests that the model achieves optimal performance when the share ratio is chosen at the step where the coarse-grained samples most closely resemble intermediate states. Utilizing 4-hour or 6-hour granularity as guidance greatly enhances the model performance. However, the improvement in performance diminishes as the granularity becomes coarser, such as 12 hours or 24 hours, possibly due to the greater loss of information on local fluctuations.
+
+\begin{table}[!ht]
+\caption{{Comparison of $\text{CRPS}_{\text{sum}}$ (smaller is better) of models on six real-world datasets. The reported mean and standard error are obtained from 10 re-training and evaluation independent runs.}}
+\label{tab-compare}
+\resizebox{\textwidth}{!}{%
+    \begin{tabular}{lllllllll}
+    \toprule
+    \multicolumn{1}{c}{\bfseries Method} & \multicolumn{1}{c}{\bfseries \texttt{Solar}}  &\multicolumn{1}{c}{\bfseries \texttt{Electricity}} &   \multicolumn{1}{c}{\bfseries \texttt{Traffic}}  &  \multicolumn{1}{c}{\bfseries \texttt{KDD-cup}} & \multicolumn{1}{c}{\bfseries \texttt{Taxi}} & \multicolumn{1}{c}{\bfseries \texttt{Wikipedia}}  \\ 
+    \midrule
+    Vec-LSTM ind-scaling & $0.4825_{\pm 0.0027}$ & $0.0949_{\pm 0.0175}$ & $0.0915_{\pm 0.0197}$  & $0.3560_{\pm 0.1667}$ &  $0.4794_{\pm 0.0343}$& $0.1254_{\pm 0.0174}$\\
+    GP-Scaling& $0.3802_{\pm 0.0052}$ & $0.0499_{\pm 0.0031}$ & $0.0753_{\pm 0.0152}$ & $0.2983_{\pm 0.0448}$ & $0.2265_{\pm 0.0210}$ & $0.1351_{\pm 0.0612}$ & \\
+    GP-Copula & $0.3612_{\pm 0.0035}$ & $0.0287_{\pm 0.0005}$ & $0.0618_{\pm 0.0018}$ & $0.3157_{\pm 0.0462}$ & $0.1894_{\pm 0.0087}$ & $0.0669_{\pm 0.0009}$  \\ 
+    LSTM-MAF  & $0.3427_{\pm 0.0082}$ & $0.0312_{\pm 0.0046}$ & $0.0526_{\pm 0.0021}$ & $0.2919_{\pm 0.1486}$ & $0.2295_{\pm 0.0082}$ & $0.0763_{\pm 0.0051}$ \\
+    Transformer-MAF  & $0.3532_{\pm 0.0053}$ & $0.0272_{\pm 0.0017}$ & $0.0499_{\pm 0.0011}$ & $0.2951_{\pm 0.0504}$ & $0.1531_{\pm 0.0038}$ &${0.0644}_{\pm 0.0037}$ \\
+    TimeGrad & $0.3335_{\pm 0.0653}$ & $0.0232_{\pm 0.0035}$ & $0.0414_{\pm 0.0112}$ & $0.2902_{\pm 0.2178}$ & $0.1255_{\pm 0.0207}$ & $0.0555_{\pm 0.0088}$\\
+  
+
+    TACTiS & $0.4209_{\pm 0.0330}$ & $0.0259_{\pm 0.0019}$ & $0.1093_{\pm 0.0076}$ & $0.5406_{\pm 0.1584}$ & $0.2070_{\pm 0.0159}$& $-$ \\  
+    MG-Input & $0.3239_{\pm 0.0427}$  &  $0.0238_{\pm 0.0035}$ & $0.0658_{\pm 0.0065}$ & $0.2977_{\pm 0.1163}$ &  $0.1592_{\pm 0.0087}$ & $0.0567_{\pm 0.0091}$\\
+    MG-TSD & $\bm{0.3081_{\pm 0.0099}}$ & $\bm{{0.0149}_{\pm 0.0017}}$ & $\bm{0.0323_{\pm 0.0125}}$ & $\bm{{0.1837}_{\pm 0.0865}}$ & $\bm{0.1159_{\pm 0.0132}}$ & $\bm{0.0529}_{\pm 0.0054}$\\
+    \bottomrule
+    \end{tabular}%
+}
+\end{table}
+\begin{table}[!ht]
+\caption{Influence of share ratios for different granularities on \texttt{Solar} dataset. The reported mean and standard error are obtained from 10 re-training and evaluation independent runs.}
+\label{tab-ablation}
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{cccccccccccccccc}
+\toprule
+\multicolumn{1}{c}{\textbf{Ratio}} & \multicolumn{3}{c}{\textbf{4 hour}} & \multicolumn{3}{c}{\textbf{6 hour}}\\
+\cmidrule(r){2-4} \cmidrule(r){5-7}
+& $\textbf{\crpsnospace}$ &$\textbf{NMAE}_{\textbf{sum}}$
+ & $\textbf{NRMSE}_{\textbf{sum}}$ & $\textbf{\crpsnospace}$   & $\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ \\
+\midrule
+\textbf{20\%} & $0.3489_{\pm 0.0190}$  &  $0.3826_{\pm 0.0200}$    & $0.7177_{\pm 0.0445}$ & $0.3378_{\pm 0.0305}$ & $0.3703_{\pm 0.0368}$ & $0.6916_{\pm 0.0536}$ \\
+
+\textbf{40\%} & $0.3405_{\pm 0.0415}$   & $0.3792_{\pm 0.0386}$   & $0.6870_{\pm 0.0870}$  & $0.3275_{\pm 0.0250}$ & $0.3608_{\pm 0.0267}$ & $0.6650_{\pm 0.0374}$\\
+
+\textbf{60\%} & $0.3268_{\pm 0.0475}$  & $0.3604_{\pm 0.0463}$   & $0.6579_{\pm 0.0919}$ & $\bm{0.3166}_{\pm 0.0376}$&   $\bm{0.3491}_{\pm 0.0368}$ &   $\bm{0.6478}_{\pm 0.0696}$\\
+
+\textbf{80\%} & $\bm{0.3172_{\pm 0.0249}}$ & $\bm{0.3510_{\pm 0.0240}}$ &  $\bm{0.6515_{\pm 0.051}}$ & $0.3221_{\pm 0.0425}$ & $0.3555_{\pm 0.0443}$ & $0.6542_{\pm 0.0747}$\\
+
+\textbf{100\%} & $0.3178_{\pm 0.0342}$  & $0.3480_{\pm 0.0356}$  &  $0.6591_{\pm 0.0503}$ & $0.3232_{\pm 0.0396}$ & $0.3548_{\pm 0.0417}$ & $0.6550_{\pm 0.0660}$\\
+
+\midrule
+
+\multicolumn{1}{c}{\textbf{Ratio}} & \multicolumn{3}{c}{\textbf{12 hour}} & \multicolumn{3}{c}{\textbf{24 hour}}  \\
+\cmidrule(r){2-4} \cmidrule(r){5-7}
+& $\textbf{\crpsnospace}$ &$\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ & $\textbf{\crpsnospace}$   & $\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ \\
+
+\midrule
+
+\textbf{20\%}& $0.3440_{\pm 0.0391}$  &  $0.3767_{\pm 0.0450}$   & $0.6999_{\pm 0.0772}$  & $0.3315_{\pm 0.0266}$ &  $0.3693_{\pm 0.0298}$ &  $0.6801_{\pm 0.0554}$ \\
+
+\textbf{40\%} &  $0.3374_{\pm 0.0370}$  &  $0.3713_{\pm 0.0346}$  & $0.6837_{\pm 0.0641}$ & $\bm{0.3276_{\pm 0.0358}}$ &    $\bm{0.3612_{\pm 0.0361}}$ &       $\bm{0.6722_{\pm 0.0552}}$ \\
+
+\textbf{60\%}  & $\bm{0.3240}_{\pm 0.0382}$ & $\bm{0.3597}_{\pm 0.0388}$ & $\bm{0.6694}_{\pm 0.0746}$  & $0.3382_{\pm 0.0343}$ &    $0.3737_{\pm 0.0365}$ &      $0.6878_{\pm 0.0655}$ \\
+
+\textbf{80\%} &$0.3391_{\pm 0.0390}$  &  $0.3719_{\pm 0.0403}$   & $0.6953_{\pm 0.0691}$ & $0.3288_{\pm 0.0460}$&    $0.3639_{\pm 0.0476}$  &  $0.6741_{\pm 0.0929}$ \\
+
+\textbf{100\%} & $0.3284_{\pm 0.0323}$ & $0.3538_{\pm 0.0450}$ &   $0.6609_{\pm 0.0917}$ & $0.3407_{\pm 0.0248}$  &  $0.3692_{\pm 0.0244}$ &  $0.6933_{\pm 0.0528}$ & \\
+
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+In practice, the selection of share ratio can follow the heuristic rule outlined in Section~\ref{sec-multi-gran-loss}. Figure~\ref{fig-select-ratio} provides illustrative plots for the share ratio selection curve of different granularities. The blue curve in each plot represents \crps values between coarse-grained targets and 1-hour samples come from 1-gran(finest-gran) model at each intermediate denoising step; each point on the orange polylines represents the \crps value of 1-hour predictions by 2-gran MG-TSD models with different share ratios ranging from [0.2, 0.4, 0.6, 0.8, 1.0], and the lowest point of the line segment can be used to characterize the most suitable share ratio for the corresponding granularity.
+
+The diffusion steps that can achieve relatively small \crps values are colored in grey, suggesting a proper range for the share ratio at which the model can achieve satisfactory performance. From the plots, a strong correlation exists between the polyline of \crps calculated during test time and the share ratio selection curve, which validates the effectiveness of the selection rule. In addition, as granularity transitions from fine to coarse (4h→6h→12h→24h), the diffusion steps at which the distribution most resembles the coarse-grained targets increase (approximately at steps 20→40→60→60). This comparison shows
+the similarity between the diffusion process and the smoothing process from the finest-grained to coarse-grained data, both of which involve a gradual loss of finer characteristics from the finest-grained data through a smooth and convex transformation.
+
+\begin{figure}[htbp]
+    \resizebox{\textwidth}{!}{%
+        \centering
+        \begin{subfigure}{0.25\textwidth}
+            \includegraphics[width=\linewidth]{fig_select_4_h.png}
+            \caption{\scriptsize{\crps values between 4-hour targets and samples}}
+            \label{fig:plot1}
+        \end{subfigure}%
+        \hfill
+        
+        \begin{subfigure}{0.25\textwidth}
+            \includegraphics[width=\linewidth]{fig_select_6_h.png}
+            \caption{\scriptsize{\crps values between 6-hour targets and samples}}
+            \label{fig:plot2}
+        \end{subfigure}
+        \hfill
+        
+        \begin{subfigure}{0.25\textwidth}
+            \includegraphics[width=\linewidth]{fig_select_12_h.png}
+            \caption{\scriptsize{\crps values between 12-hour targets and samples}}
+            \label{fig:plot3}
+        \end{subfigure}%
+        \hfill
+        
+        \begin{subfigure}{0.25\textwidth}
+        \includegraphics[width=\linewidth]{fig_select_24_h.png}
+            \caption{\scriptsize{\crps values between 24h-granularity targets and samples}}
+            \label{fig:plot4}
+        \end{subfigure}
+    }
+    \caption{{Selection of share ratio for \mgtsd models
+}}
+    \label{fig-select-ratio}
+\end{figure}
+
+\textbf{The number of granularities.} We further explore the impact of the number of granularities on 
+the \mgtsd model. As presented in Table \ref{tab-ablation-2}, increasing the number of granularity levels generally boosts the performance of the \mgtsd model, which demonstrates that the introduction of multi-granularity information effectively guides the learning process of diffusion models. However, the marginal benefit diminishes with the increase in granularity amounts. The results suggest that utilizing four to five granularity levels generally suffices for achieving favorable performance.
+
+\begin{table}[!ht]
+\caption{Influence of the number of granularities on \mgtsd performance for \texttt{Solar} and \texttt{Electricity} Dataset.}
+\label{tab-ablation-2}
+ \begin{small}
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllllllll}
+\toprule
+\multicolumn{1}{c}{\textbf{Num of gran}} & \multicolumn{3}{c}{\textbf{\texttt{Solar}}} & \multicolumn{3}{c}{\textbf{\texttt{Electricity}}}\\
+\cmidrule(r){2-4} \cmidrule(r){5-7}
+& $\textbf{\crpsnospace}$ &$\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ & $\textbf{\crpsnospace}$   & $\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ \\
+\midrule
+2& $\scriptsize{{0.3172}_{\pm 0.0249}}$ & $\scriptsize{{0.3510}_{\pm 0.0240}}$ & $\scriptsize{{0.6515}_{\pm 0.0571}}$ & ${{0.0174}_{\pm 0.0042}}$ & ${{0.0226}_{\pm 0.0071}}$ & 
+${{0.0296}_{\pm 0.0086}}$\\
+
+3 & ${0.3110}_{\pm 0.0329}$ & $\scriptsize{{0.3494}_{\pm 0.0378}} $ & $\scriptsize{{0.6452}_{\pm 0.0632}} $ & ${{0.0160}_{\pm 0.0020}}$ & ${{0.0198}_{\pm 0.0029}}$ & 
+${{0.0262}_{\pm 0.0039}}$\\
+4& $\bm{0.3081}_{\pm 0.0099}$ & $\bm{0.3445}_{\pm 0.0102}$ & $\bm{0.6245}_{\pm 0.0268}$ & $\bm{{0.0149}_{\pm 0.0017}}$ & $\bm{{0.0178}_{\pm 0.0018}}$ & $\bm{{0.0241}_{\pm 0.0030}}$\\
+5 & 
+$0.3093_{\pm 0.0411}$ & $0.3430_{\pm 0.0451}$  & ${0.6117}_{\pm 0.0746}$
+& ${{0.0153}_{\pm 0.0027}}$ & ${{0.0181}_{\pm 0.0043}}$ & ${{0.0254}_{\pm 0.0058}}$\\
+
+\midrule
+
+\multicolumn{1}{c}{\textbf{Num of gran}} & \multicolumn{3}{c}{\textbf{\texttt{Traffic}}} & \multicolumn{3}{c}{\textbf{\texttt{KDD-cup}}}\\
+\cmidrule(r){2-4} \cmidrule(r){5-7}
+& $\textbf{\crpsnospace}$ &$\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ & $\textbf{\crpsnospace}$   & $\textbf{NMAE}_{\textbf{sum}}$ & $\textbf{NRMSE}_{\textbf{sum}}$ \\
+\midrule
+2&  $0.0347_{\pm 0.0020}$ & ${0.0396}_{\pm 0.0022}$ & $0.0593_{\pm 0.0043}$ & $0.2427_{\pm 0.1167}$ & $0.3171_{\pm 0.1557}$ & $0.3745_{\pm 0.1652}$ \\
+3 & $0.0334_{\pm 0.0034}$ & $0.0382_{\pm 0.0035}$ & $0.0574_{\pm 0.0066}$ & $0.2414_{\pm 0.1619}$ & $0.3030_{\pm 0.1789}$ & $0.3808_{\pm 0.2168}$ \\
+4  & ${0.0326}_{\pm 0.0041}$ &    ${0.0374}_{\pm 0.0048}$ &       ${0.0573}_{\pm 0.0050}$ &  $0.2198_{\pm 0.1162}$ & $0.2893_{\pm 0.1554}$ &$0.3315_{\pm 0.1882}$\\
+5 & $\bm{0.0323}_{\pm 0.0125}$ & $\bm{0.0370}_{\pm 0.0140}$ & $\bm{0.0563}_{\pm 0.0230}$ &  $\bm{0.1837}_{\pm 0.0636}$ &
+$\bm{0.2463}_{\pm 0.0865}$ &
+$\bm{0.3001}_{\pm 0.0997}$\\
+
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{small}
+\end{table}
+\subsection{Case Study}
+To illustrate the guidance effect of coarse-grained data, we visualize the ground truth and the predicted mean for both 1-hour and 4-hour granularity time series across four dimensions in the \texttt{Solar} dataset in Figure \ref{fig-case}. For comparison, the prediction results for the 1-hour data from TimeGrad are also included. The results indicate that the TimeGrad model struggles to accurately capture the peaks in the series and tends to underestimate the peaks in solar energy. In the \mgtsd model, the coarse-grained samples display a more robust capacity to capture the trends, subsequently guiding the generation of more precise fine-grained data. 
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\includegraphics[width=1.0\linewidth]{fig_case_study.pdf}}
+\caption{
+\textcolor{black}{Visualization of the ground-truth (\texttt{Solar} dataset), \mgtsd predicted mean for 4-hour and 1-hour time series, and TimeGrad predicted mean for the 1-hour time series.}
+Additionally, the 50\% prediction intervals for the 1-hour data are also included. 
+These plots represent some illustrative dimensions out of 370 dimensions from the first 24-hour rolling-window.
+}
+\label{fig-case}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce a novel \textbf{M}ulti-\textbf{G}ranularity \textbf{T}ime \textbf{S}eries \textbf{D}iffusion (\mgtsdnospace) model, which leverages the inherent granularity levels within the data as given targets at intermediate diffusion steps to guide the learning process of diffusion models. We derive a novel multi-granularity guidance diffusion loss function and propose a concise implementation method to effectively utilize coarse-grained data across various granularity levels. Extensive experiments conducted on real-world datasets demonstrate that \mgtsd outperforms existing time series prediction methods.
+
+\newpage
+
+
+
+

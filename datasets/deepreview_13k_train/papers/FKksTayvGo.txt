@@ -1,0 +1,451 @@
+\title{Denoising Diffusion Bridge Models}
+
+\begin{abstract}
+
+    Diffusion models are powerful generative models that map noise to data using stochastic processes. However, for many applications such as image editing, the model input comes from a distribution that is not random noise. As such, diffusion models must rely on cumbersome methods like guidance or projected sampling to incorporate this information in the generative process. In our work, we propose Denoising Diffusion Bridge Models (DDBMs), a natural alternative to this paradigm based on \textit{diffusion bridges}, a family of processes that interpolate between two paired distributions given as endpoints. Our method 
+    learns the score of the diffusion bridge from data and maps from one endpoint distribution to the other by solving a (stochastic) differential equation based on the learned score. Our method naturally unifies several classes of generative models, such as score-based diffusion models and OT-Flow-Matching, allowing us to adapt existing design and architectural choices to our more general problem. Empirically, we apply DDBMs to challenging image datasets in both pixel and latent space. On standard image translation problems, DDBMs achieve significant improvement over baseline methods, and, when we reduce the problem to image generation by setting the source distribution to random noise, DDBMs achieve comparable FID scores to state-of-the-art methods despite being built for a more general task.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models are a powerful class of generative models which learn to reverse a diffusion process mapping data to noise \citep{sohl2015deep,song2019generative, ho2020denoising, song2020score}. For image generation tasks, they have surpassed GAN-based methods \citep{Goodfellow2014GenerativeAN} and achieved a new state-of-the-art for perceptual quality \citep{dhariwal2021diffusion}. Furthermore, these capabilities have spurred the development of modern text-to-image generative AI systems\citep{Ramesh2022HierarchicalTI}.
+
+Despite these impressive results, standard diffusion models are ill-suited for other tasks. In particular, the diffusion framework assumes that the prior distribution is random noise, which makes it difficult to adapt to tasks such as image translation, where the goal is to map between pairs of images. As such, one resorts to cumbersome techniques, such as conditioning the model \citep{ho2022classifier, Saharia2021PaletteID} or manually altering the sampling procedure \citep{meng2022sdedit, song2020score}. These methods are not theoretically principled and map in one direction (typically from corrupted to clean images), losing the cycle consistency condition \citep{Zhu2017UnpairedIT}. 
+
+Instead, we consider methods which directly model a transport between two arbitrary probability distributions. This framework naturally captures the desiderata of image translation, but existing methods fall short empirically. For instance, ODE based flow-matching methods \citep{lipman2023flow,albergo2023building,liu2022flow}, which learn a deterministic path between two arbitrary probability distributions, have mainly been applied to image generation problems and have not been investigated for image translation. Furthermore, on image generation, ODE methods have not achieved the same empirical success as diffusion models.
+Schr\"odinger Bridge and models \citep{de2021diffusion} are another type of model which instead learn an entropic optimal transport between two probability distributions. However, these rely on expensive iterative approximation methods and have also found limited empirical use. More recent extensions including Diffusion Bridge Matching~\citep{shi2023diffusion,peluchetti2023diffusion} similarly require expensive iterative calculations.
+
+In our work, we seek a scalable alternative that unifies diffusion-based unconditional generation methods and transport-based distribution translation methods, and we name our general framework Denoising Diffusion Bridge Models (DDBMs). We consider a reverse-time perspective of \textit{diffusion bridges}, a diffusion process conditioned on given endpoints, and use this perspective to establish a general framework for distribution translation. We then note that this framework subsumes existing generative modeling paradigms such as score matching diffusion models~\citep{song2020score} and flow matching optimal transport paths~\citep{albergo2023building,lipman2023flow,liu2022flow}. This allows us to reapply many design choices to our more general task. In particular, we use this to generalize and improve the architecture pre-conditioning, noise schedule, and model sampler, minimizing input sensitivity and stabilizing performance. We then apply DDBMs to high-dimensional images using both pixel and latent space based models. For standard image translation tasks, we achieve better image quality (as measured by FID \citep{heusel2017gans}) and significantly better translation faithfulness (as measured by LPIPS~\citep{zhang2018perceptual} and MSE). Furthermore, when we reduce our problem to image generation, we match standard diffusion model performance. 
+
+    
+    
+
+
+\section{Preliminaries}
+
+\label{sec:prelim}
+
+Recent advances in generative models have relied on the classical notion of transporting a data distribution $\pdata(\rvx)$ gradually to a prior distribution $\pprior(\rvx)$ \citep{Villani2008OptimalTO}. By learning to reverse this process, one can sample from the prior and generate realistic samples.
+
+\subsection{Generative Modeling with Diffusion Models}
+
+\mypara{Diffusion process.}
+We are interested in modeling the distribution $\pdata(\rvx)$, for $\rvx \in \R^d$. We do this by constructing a diffusion process, which is represented by a set of time-indexed variables $\{\rvx_{t}\}_{t=0}^{T}$ such that $\rvx_0 \sim p_0(\rvx) := \pdata(\rvx)$ and $\rvx_T \sim p_T(\rvx) := \pprior(\rvx)$. Here $\pdata(\rvx)$ is the initial ``data" distribution and $\pprior(\rvx)$ is the final ``prior" distribution. The process can be modeled as the solution to the following SDE
+\begin{align}\label{eq:diffusion}
+\quad d\rvx_t = \rvf(\rvx_t, t) dt + g(t) d\rvw_t
+\end{align}
+where $\rvf: \R^d\times [0,T] \rightarrow \R^d$ is vector-valued \textit{drift} function, $g: [0,T]\rightarrow \R$ is a scalar-valued \textit{diffusion} coefficient, and $\rvw_t$ is a Wiener process. Following this diffusion process forward in time constrains the final variable $\rvx_T$ to follow distribution $\pprior(\rvx)$.  The reverse of this process is given by
+\begin{align}\label{eq:reverse_diffusion}
+\quad d\rvx_t = \rvf(\rvx_t, t) - g(t)^2 \nabla_{\rvx_t}\log p(\rvx_t)) dt + g(t) d\rvw_t
+\end{align}
+where $p(\rvx_t) \defeq p(\rvx_t, t)$ is the marginal distribution of $\rvx_t$ at time $t$. Furthermore, one can derive an equivalent deterministic process called the probability flow ODE \citep{song2020score}, which has the same marginal distributions:
+\begin{align}\label{eq:diffusion-ode}
+    d\rvx_t = \Big[\rvf(\rvx_t, t) - \frac{1}{2}g(t)^2 \nabla_{\rvx_t}\log p(\rvx_t)\Big] dt
+\end{align}
+In particular, one can draw $\rvx_T\sim \pdata(\rvy)$ and sample $\pdata$ by solving either the above reverse SDE or ODE backward in time.
+
+\mypara{Denoising score-matching.}
+The score, $\gradnd{\log p(\rvx_t)}{\rvx_t}$, can be learned by the score-matching loss
+\begin{align}\label{eq:sm}
+    \Ls(\theta) = \E_{\rvx_t\sim p(\rvx_t\mid \rvx_0), \rvx_0 \sim \pdata(\rvx),t\sim\gU(0,T)}\Big[\norm{\rvs_\theta(\rvx_t, t) - \gradnd{\log p(\rvx_t\mid\rvx_0)}{\rvx_t}}^2\Big]
+\end{align}
+such that the minimizer $\rvs^*_\theta(\rvx_t, t)$ of the above loss approximates the true score. Crucially, the above loss is tractable because the transition kernel $p(\rvx_t\mid \rvx_0)$, which depends on specific choices of drift and diffusion functions, is designed to be Gaussian $\rvx_t = \alpha_t \rvx_0 + \sigma_t \rvepsilon$, where $\alpha_t$ and $\sigma_t$ are functions of time and $\rvepsilon\sim \gN(\vzero, \vI)$. It is also common to view the diffusion process in terms of the $\rvx_t$'s signal-to-noise ratio (SNR), defined as $\alpha_t^2/\sigma_t^2$.
+ 
+
+\subsection{Diffusion Process with Fixed Endpoints}
+
+Diffusion models are limited because they can only transport complex data distributions to a standard Gaussian distribution and cannot be naturally adapted to translating between two arbitrary distributions, \eg in the case of image-to-image translation. Luckily, classical results have shown that one can condition a diffusion process on a fixed known endpoint via the famous Doob's $h$-transform:
+
+\mypara{Stochastic bridges via $h$-transform.}
+Specifically, a diffusion process defined in \equref{eq:diffusion} can be driven to arrive at a particular point of interest $y \in \R^d$ almost surely via Doob's $h$-transform \citep{doob1984classical,rogers2000diffusions},
+\begin{align}\label{eq:doob}
+    d\rvx_t = \rvf(\rvx_t, t) dt + g(t)^2 \rvh(\rvx_t, t, y, T) + g(t) d\rvw_t, \quad \rvx_0\sim \pdata(\rvx),\quad \rvx_T = y
+\end{align}
+where $\rvh(x, t, y, T) = \nabla_{\rvx_t}\log p(\rvx_T\mid \rvx_t)\big \rvert_{\rvx_t = x, \rvx_T=y}$ is the gradient of the log transition kernel of from $t$ to $T$ generated by the original SDE, evaluated at points $\rvx_t=x$ and $\rvx_T=y$, and each $\rvx_t$ now explicitly depends on $y$ at time $T$. Furthermore, $p(\rvx_T=y\mid \rvx_t)$ satisfies the Kolmogorov backward equation (specified in \appref{sec:proof}). With specific drift and diffusion choices, \eg $\rvf(\rvx_t, t)=\vzero$, $\rvh$ is tractable due to the tractable (Gaussian) transition kernel of the underlying diffusion process.
+
+When the initial point $\rvx_0$ is fixed, 
+the process is often called a \textit{diffusion bridge} \citep{sarkka2019applied,heng2021simulating,delyon2006simulation,schauer2017guided,peluchettinon,liu2022let}, and its ability to connect any given $\rvx_0$ to a given value of $\rvx_T$ is promising for image-to-image translation. Furthermore, the transition kernel may be tractable, which serves as further motivation. 
+
+
+
+\section{Denoising Diffusion Bridge Models}
+
+\label{sec:methods}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/bridge.pdf}
+    \caption{\textbf{A schematic for Denoising Diffusion Bridge Models.} DDBM uses a diffusion process guided by a drift adjustment (in blue) towards an endpoint $\rvx_T = y$. They lears to reverse such a bridge process by matching the denoising bridge score (in orange), which allows one to reverse from $\rvx_T$ to $\rvx_0$ for any $\rvx_T=\rvy\sim\pdata(\rvy)$. The forward SDE process shown on the top is unidirectional while the probability flow ODE shown at the bottom is deterministic and bidirectional. White nodes are stochastic while grey nodes are deterministic.}
+    \label{fig:bridge}
+\end{figure}
+Assuming that the endpoints of a diffusion bridge both exist in $\R^d$ and come from an arbitrary and unknown joint distribution, \ie $(\rvx_0, \rvx_T) =(\rvx, \rvy)\sim \pdata(\rvx,\rvy)$, we wish to devise a process that learns to approximately sample from $\pdata(\rvx\mid \rvy)$ by reversing the diffusion bridge with boundary distribution $\pdata(\rvx,\rvy)$, given a training set of \emph{paired} samples drawn from $\pdata(\rvx,\rvy)$. 
+\subsection{Time-Reversed SDE and Probability Flow ODE}\label{sec:time-rev}
+Inspired by diffusion bridges, we construct the stochastic process $\{\rvx_t\}_{t=0}^{T}$ with marginal distribution $q(\rvx_t)$ such that $q(\rvx_0, \rvx_T)$ approximates $\pdata(\rvx_0,\rvx_T)$. Reversing the process amounts to sampling from $q(\rvx_t\mid \rvx_T)$. Note that distribution $q(\cdot)$ is different from $p(\cdot)$, \ie the diffusion marginal distribution, in that the endpoint distributions are now $\pdata(\rvx_0, \rvx_T) = \pdata(\rvx, \rvy)$ instead of the distribution of a diffusion $p(\rvx_0, \rvx_T) = p(\rvx_T\mid \rvx_0)\pdata(\rvx_0)$, which defines a Gaussian $\rvx_T$ given $\rvx_0$. 
+We can construct the time-reversed SDE/probability flow ODE of $q(\rvx_t\mid \rvx_T)$ via the following theorem.
+\begin{restatable}[]{theorem}{revbridge}\label{thm:revbridge}
+The evolution of conditional probability $q(\rvx_t\mid \rvx_T)$  has a time-reversed SDE of the form
+\begin{align}\label{eq:bridgesde}
+    d\rvx_t = \Big[\rvf(\rvx_t, t) - g^2(t) \Big(\rvs(\rvx_t, t, y, T) - \rvh(\rvx_t, t, y, T)\Big)\Big]dt + g(t) d\hat{\rvw}_t, \quad \rvx_T = y
+\end{align}
+with an associated probability flow ODE
+\begin{align}\label{eq:bridgeode}
+    d\rvx_t = \Big[\rvf(\rvx_t, t) - g^2(t) \Big( \frac{1}{2}\rvs(\rvx_t, t, y, T) - \rvh(\rvx_t, t, y, T)\Big)\Big]dt,\quad \rvx_T = y
+\end{align}
+on $t\le T-\epsilon$ for any $\epsilon>0$, where $\hat{\rvw}_t$ denotes a Wiener process, $\rvs(x, t, y, T) = \gradnd{\log q(\rvx_t\mid \rvx_T)}{\rvx_t}\big \vert_{\rvx_t = x, \rvx_T = y}$ and $\rvh$ is as defined in \equref{eq:doob}.
+\end{restatable}
+A schematic of the bridge process is shown in \figref{fig:bridge}. Note that this process is defined up to $T-\epsilon$. To recover the initial distribution in the SDE case, we make an approximation that $\rvx_{T-\epsilon}\approx y$ for some small $\epsilon$ simulate SDE backward in time. For the ODE case, since we need to sample from $p(\rvx_{T-\epsilon})$ which cannot be Dirac delta, we cannot approximate $\rvx_{T-\epsilon}$ with a single $y$. Instead, we can first approximate $\rvx_{T-\epsilon'}\approx y$ where $\epsilon>\epsilon' > 0$, and then take an Euler-Maruyama step to $\rvx_{T-\epsilon}$, and \equref{eq:bridgeode} can be used afterward.
+A toy visualization of VE bridge and VP bridges are shown in \figref{fig:bridge-example}. The top and bottom shows the respective SDE and ODE paths for VE and VP bridges. %One can notice that VP bridges result in blurry images in between due to the signal-destroying properties of the underlying VP diffusion. 
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/ve_interp.png}
+        \label{fig:ve-interp}
+    \end{subfigure}
+    \hspace{0.02\linewidth}
+    \begin{subfigure}[t]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/vp_interp.png}
+        \label{fig:vp-interp}
+    \end{subfigure}
+    \caption{VE bridge (left) and VP bridge (right) with their SDE (top) and ODE (bottom) visualization. }
+    \label{fig:bridge-example}
+\end{figure}
+
+\subsection{Marginal Distributions and Denoising Bridge Score Matching}
+
+The sampling process in \thmref{thm:revbridge} requires approximation of the score $\rvs(x, t, y, T) = \gradnd{\log q(\rvx_t\mid \rvx_T)}{\rvx_t}\big \vert_{\rvx_t = x, \rvx_T = y}$ where $q(\rvx_t\mid\rvx_T)=\int_{\rvx_0}q(\rvx_t\mid \rvx_0, \rvx_T)\pdata(\rvx_0\mid\rvx_T)d\rvx_0$. However, as the true score is not known in closed-form, we take inspiration from denoising score-matching~\citep{song2020score} and use a neural network to approximate the true score by matching against a tractable quantity. This usually results in closed-form marginal sampling of $\rvx_t$ given data (\eg $\rvx_0$ in the case of diffusion models and $(\rvx_0, \rvx_T)$ in our case), and given $\rvx_t$, the model is trained to match against the closed-form denoising score objective. We are motivated to follow a similar approach because (1) tractable marginal sampling of $\rvx_t$ and (2) closed-form objectives enable a simple and scalable algorithm. We specify how to design the marginal sampling distribution and the tractable score objective below to approximate the ground-truth conditional score $\gradnd{\log q(\rvx_t\mid \rvx_T)}{\rvx_t}$.
+
+ 
+\begin{table}[t]
+    \centering
+\resizebox{0.98\linewidth}{!}{
+    \begin{tabular}{cccccc}
+    \toprule
+     & $\rvf(\rvx_t, t)$ & $g^2(t)$ & $p(\rvx_t\mid \rvx_0)$ & $\text{SNR}_t$ & $\nabla_{\rvx_t}\log p(\rvx_T\mid \rvx_t)$ \\
+     \midrule
+        VP & $\frac{d\log\alpha_t }{dt}\rvx_t$ & $\frac{d}{dt}\sigma_t^2 - 2\frac{d\log\alpha_t}{dt}  \sigma_t^2$ & $\gN(\alpha_t \rvx_0, \sigma_t^2\mI)$ & $\alpha_t^2/\sigma_t^2$ & $\frac{(\alpha_t /\alpha_T) \rvx_T - \rvx_t}{\sigma_t^2 (\text{SNR}_t/\text{SNR}_T - 1)}$\\
+     \midrule
+         VE & $\vzero$ & $\frac{d}{dt}\sigma_t^2$ & $\gN(\rvx_0, \sigma_t^2\mI)$& $1/\sigma_t^2$ & $\frac{\rvx_T - \rvx_t}{ \sigma_T^2 - \sigma_t^2}$ \\
+     \bottomrule
+    \end{tabular}
+    }
+    \caption{VP and VE instantiations of diffusion bridges.}
+    \label{tab:bridge_ins}
+\end{table}
+\mypara{Sampling distribution.} Fortunately, for the former condition, we can design our sampling distribution $q(\cdot)$ such that $q(\rvx_t\mid \rvx_0, \rvx_T) \defeq p(\rvx_t\mid \rvx_0, \rvx_T )$, where $p(\cdot)$ is the diffusion distribution pinned at both endpoints as in \equref{eq:doob}. For diffusion processes with Gaussian transition kernels, \eg VE, VP~\citep{song2020score}, our sampling distribution is a Gaussian distribution of the form
+\begin{equation}\label{eq:marginal}
+\begin{aligned}
+    q(\rvx_t\mid \rvx_0, \rvx_T) &= \gN(\hat{\mu}_t, \hat{\sigma}_t^2\bm{I}),\quad \text{where}\\ 
+    \hat{\mu}_t&= \frac{\text{SNR}_T}{\text{SNR}_t} \frac{\alpha_t}{\alpha_T}\rvx_T + \alpha_t \rvx_0(1-\frac{\text{SNR}_T}{\text{SNR}_t})\\
+    \hat{\sigma}_t^2&=\sigma_t^2(1-\frac{\text{SNR}_T}{\text{SNR}_t})
+\end{aligned}
+\end{equation}
+where $\alpha_t$ and $\sigma_t$ are pre-defined signal and noise schedules and $\normalfont\text{SNR}_t = \alpha_t^2/\sigma_t^2$ is the signal-to-noise ratio at time $t$. For VE schedule, we assume $\alpha_t=1$ and derivation details are provided in \appref{sec:marginal-proof}. Notably, the mean of this distribution is a linear interpolation between the (scaled) endpoints, and the distribution approaches a Dirac distribution when nearing either end. For concreteness, we present the bridge processes generated by both VP and VE diffusion in \tabref{tab:bridge_ins} and recommend choosing $\rvf$ and $g$ specified therein.
+
+\mypara{Training objective.} For the latter condition, diffusion bridges benefit from a similar setup as in diffusion models, since a pre-defined signal/noise schedule gives rise to a closed-form conditional score $\gradnd{\log q(\rvx_t\mid\rvx_0, \rvx_T)}{\rvx_t}$. We show in the following theorem that with $\rvx_t\sim q(\rvx_t \mid \rvx_0, \rvx_T)$, a neural network $\rvs_\theta(\rvx_t, \rvx_T, t)$ that matches against this closed-form score approximates the true score. 
+\begin{restatable}[Denoising Bridge Score Matching]{theorem}{naiveobj}\label{thm:naiveobj}
+Let $(\rvx_0, \rvx_T)\sim \pdata(\rvx, \rvy)$, $\rvx_t\sim q(\rvx_t\mid \rvx_0, \rvx_T)$, $t\sim p(t)$ for any non-zero time sampling distribution $p(t)$ in $[0,T]$, and $w(t)$ be a non-zero loss weighting term of any choice. Minimum of the following objective:
+\begin{align}\label{eq:naive-obj}
+\mathcal{L}(\theta) &= \E_{\rvx_t, \rvx_0, \rvx_T, t}\Big[ w(t) \norm{\rvs_\theta(\rvx_t, \rvx_T, t) - \gradnd{\log q(\rvx_t\mid\rvx_0, \rvx_T)}{\rvx_t}}^2 \Big]
+\end{align}
+satisfies $\rvs_\theta(\rvx_t, \rvx_T, t) = \gradnd{\log q(\rvx_t\mid \rvx_T)}{\rvx_t}$.
+\end{restatable}
+
+In short, we establish a tractable diffusion bridge over two endpoints and, by matching the conditional score of the Gaussian bridge, we can learn the score of the new distribution $q(\rvx_t\mid \rvx_T)$ that satisfies the boundary distribution $\pdata(\rvx, \rvy)$. %We illustrate how we can sample using $q(\rvx_t\mid \rvx_T)$ in the following section.
+
+
+
+
+
+
+
+\section{Generalized Parameterization for Distribution Translation}
+
+
+Building the bridge process upon diffusion process allows us to further adapt many recent advancements in the score network parameterization $\rvs_\theta(\rvx_t, \rvx_T, t)$~\citep{ho2020denoising, song2020score,salimans2022progressive, ho2022imagen, karras2022elucidating}, different noise schedules, and efficient ODE sampling~\citep{song2020denoising, karras2022elucidating, lu2022dpm,lu2022dpm2,zhang2022fast} to our more general framework. Among these works, EDM~\citep{karras2022elucidating} proposes to parameterize the model output to be $D_\theta(\rvx_t, t) = c_{\text{skip}}(t)\rvx_t + c_{\text{out}}(t)F_\theta(c_{\text{in}}(t) \rvx_t, c_{\text{noise}}(t) )$ where $F_\theta$ is a neural network with parameter $\theta$ that predicts $\rvx_0$. 
+In a similar spirit, %we are also motivated to adopt this parameterization for image translation because (1) the bridge score-matching objective can be re-written to predict $\rvx_0$, (2) the variance of prediction target $\rvx_0$ does not change with time and (3) optimal scaling functions minimize sensitivity to changes in variance of both model inputs and outputs. In this section, 
+we adopt this pred-$\rvx$ parameterization and additionally derive a set of 
+scaling functions for distribution translation, which we show is a strict superset.
+
+\mypara{Score reparameterization.} 
+Following the sampling distribution proposed in~\eqref{eq:marginal}, a pred-$\rvx$ model can predict bridge score by
+\begin{align}
+    \nabla_{\rvx_t}\log q(\rvx_t\mid \rvx_T) \approx -\frac{\rvx_t - \Big(\frac{\text{SNR}_T}{\text{SNR}_t} \frac{\alpha_t}{\alpha_T}\rvx_T + \alpha_t D_\theta(\rvx_t,\rvx_T, t)(1-\frac{\text{SNR}_T}{\text{SNR}_t})\Big)}{\sigma_t^2(1-\frac{\text{SNR}_T}{\text{SNR}_t})}
+\end{align}
+
+\mypara{Scaling functions and loss weighting.} Following \citet{karras2022elucidating}, and let $a_t = \alpha_t/\alpha_T* \text{SNR}_T/\text{SNR}_t$, $b_t = \alpha_t (1 -  \text{SNR}_T/\text{SNR}_t)$, $c_t = \sigma_t^2 (1- \text{SNR}_T/\text{SNR}_t)$, the scaling functions and weighting function $w(t)$ can be derived to be
+\begin{align}
+    &c_{\text{in}}(t) = \frac{1}{\sqrt{a_t^2 \sigma_T^2 + b_t^2 \sigma_0^2 + 2a_t b_t
+\sigma_{0T} + c_t )}}, \quad
+c_{\text{out}}(t) = \sqrt{a_t^2(\sigma_T^2\sigma_0^2 - \sigma_{0T}^2) + \sigma_0^2 c_t} * c_{\text{in}}(t)\\
+ &c_{\text{skip}}(t) = \Big(b_t \sigma_0^2 + a_t \sigma_{0T} \Big) * c_{\text{in}}^2(t), \quad  w(t) = \frac{1}{c_{\text{out}}(t)^2}, \quad c_{\text{noise}}(t) = \frac{1}{4}\log{(t)}
+\end{align}
+where $\sigma_0^2$, $\sigma_T^2$, and $\sigma_{0T}$ denote the variance of $\rvx_0$, variance of $\rvx_T$, and the covariance of the two, respectively. The only additional hyperparameters compared to EDM are $\sigma_T$ and $\sigma_{0T}$, which characterize the distribution of $\rvx_T$ and its correlation with $\rvx_0$. One can notice that in the case of EDM, $\sigma_t = t$, $\sigma_T^2 = \sigma_0^2 + T^2$ because $\rvx_T = \rvx_0 + T \rvepsilon$ for some Gaussian noise $\rvepsilon$, $\sigma_{0T} = \sigma_0^2$, and $\text{SNR}_T/\text{SNR}_t = t^2 / T^2$. One can show that the scaling functions then reduce to those in EDM. We leave details in \appref{sec:edm-proof}.
+
+\mypara{Generalized time-reversal.} Due to the probability flow ODE's resemblance with classifier-guidance~\citep{dhariwal2021diffusion, ho2022classifier}, we can introduce an additional parameter $w$ to set the "strength" of drift adjustment as below.
+\begin{align}\label{eq:guidance-ode}
+    d\rvx_t = \Big[\rvf(\rvx_t, t) - g^2(t) \Big( \frac{1}{2}\rvs(\rvx_t, t, y, T) - w\rvh(\rvx_t, t, y, T)\Big)\Big]dt,\quad \rvx_T = y
+\end{align}
+which allows for a strictly wider class of marginal density of $\rvx_t$ generated by the resulting probability flow ODE. We examine the effect of this parameter in our ablation studies.
+
+
+\section{Stochastic Sampling for Denoising Diffusion Bridges}
+
+
+
+\begin{algorithm}[t]
+\caption{Denoising Diffusion Bridge Hybrid Sampler}\label{alg:sampler}
+\begin{algorithmic}
+\State {\bf Input:} model $D_\theta(\rvx_t, t)$, time steps $\{t_i\}_{i=0}^{N}$, max time $T$, guidance strength $w$, step ratio $s$, distribution $\pdata(\rvy)$
+\State {\bf Output:} $\rvx_0$
+\State {\bf Sample} $\rvx_{N}\sim \pdata(\rvy)$
+\For{$i = N,\dots, 1$}
+
+\State {\bf Sample} $\rvepsilon_i \sim \gN(\vzero, \vI)$
+\State $\hat{t}_i \gets$ $t_i + s(t_{i-1} - t_i)$
+\State $\bm{d}_i\gets$ $-\rvf(\rvx_i, t_i) + g^2(t_i) \Big(\rvs(\rvx_i, t_i, \rvx_N, T) - \rvh(\rvx_i, t_i, \rvx_N, T)\Big)$
+\State $\hat{\rvx}_i \gets \rvx_i + \bm{d}_i(\hat{t}_i - t_i) + g(t_i) \sqrt{\hat{t}_i - t_i} \rvepsilon_i$
+
+\State $\hat{\bm{d}}_i \gets -\rvf(\hat{\rvx}_i, \hat{t}_i) + g^2(\hat{t}_i) \Big(\frac{1}{2}\rvs(\hat{\rvx}_i, \hat{t}_i, \rvx_N, T) - w \rvh(\hat{\rvx}_i, \hat{t}_i, \rvx_N, T)\Big)$
+\State $\rvx_{i-1} \gets \hat{\rvx}_i + \hat{\bm{d}}_i (t_{i-1} - \hat{t}_i)$
+\If{$i \neq 1$}
+    \State $\bm{d}'_i \gets -\rvf(\rvx_{i-1}, t_{i-1}) + g^2(t_{i-1}) \Big(\frac{1}{2}\rvs(\rvx_{i-1}, t_{i-1}, \rvx_N, T) - w \rvh(\rvx_{i-1}, t_{i-1}, \rvx_N, T)\Big)$
+    \State $\rvx_{i-1} \gets \hat{\rvx}_i + (\frac{1}{2}\bm{d}'_i + \frac{1}{2}\hat{\bm{d}}_i)(t_{i-1} - \hat{t}_i) $
+\EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+Although the probability flow ODE allows for one to use fast integration techniques to accelerate the sampling process~\citep{zhang2022fast,song2020denoising,karras2022elucidating}, purely following an ODE path is problematic because diffusion bridges have fixed starting points given as data $\rvx_T = \rvy \sim \pdata(\rvy)$, and following the probability flow ODE backward in time generates a deterministic "expected" path. This can result in "averaged" or blurry outputs given initial conditions. Thus, we are motivated to introduce noise into our sampling process to improve the sampling quality and diversity. 
+\mypara{Higher-order hybrid sampler.} Our sampler is built upon prior higher-order ODE sampler in \citep{karras2022elucidating}, which discretizes the sampling steps into $t_N > t_{N-1} > \dots > t_0$ with decreasing intervals (see \appref{sec:discretization} for details).  Inspired by the predictor-corrector sampler introduced by \citet{song2020score}, we additionally introduce a scheduled Euler-Maruyama step which follows the backward SDE in between higher-order ODE steps. This ensures that the marginal distribution at each step approximately stays the same. We introduce additional scaling hyperparameter $s$, which define a step ratio in between $t_{i-1}$ and $t_{i}$ such that the interval $[t_{i} - s(t_{i} - t_{i-1}), t_{i}]$ is used for Euler-Maruyama steps and $[t_{i-1}, t_{i} - s(t_{i} - t_{i-1})]$ is used for Heun steps, as described in \algoref{alg:sampler}.
+
+
+\section{Related Works and Special Cases}
+
+
+\mypara{Diffusion models.} The advancements in diffusion models~\citep{sohl2015deep,ho2020denoising,song2020score} have improved state-of-the-art in image generation and outperformed GANs~\citep{Goodfellow2014GenerativeAN}. The success of diffusion models goes hand in hand with important design choices such as network design~\citep{song2020score,karras2022elucidating,nichol2021improved,hoogeboom2023simple,peebles2023scalable}, improved noise-schedules~\citep{nichol2021improved,karras2022elucidating,peebles2023scalable}, faster and more accurate samplers~\citep{song2020denoising,lu2022dpm,lu2022dpm2,zhang2022fast}, and guidance methods~\citep{dhariwal2021diffusion,ho2022classifier}. Given the large body of literature on diffusion models for unconditional generation, which largely is based on these various design choices, we seek to design our bridge formulation to allow for a seamless integration with this literature. As such, we adopt a time-reversal perspective to directly extend these methods.
+
+\mypara{Diffusion bridges, Sch\"odinger bridges, and Doob's h-transform.}
+Diffusion bridges~\citep{sarkka2019applied} are a common tool in probability theory and have been actively studied in recent years in the context of generative modeling~\citep{liu2022let, somnath2023aligned,de2021diffusion,peluchettinon,peluchetti2023diffusion}. \citet{heng2021simulating} explores diffusion bridges conditioned on fixed starting/ending points and learns to simulate the time-reversal of the bridge given an approximation of the score $\nabla_{\rvx_t}\log p(\rvx_t)$. More recently, instead of considering bridges with fixed endpoints, \citet{liu2022let} uses Doob's h-transform to bridge between arbitrary distributions. A forward bridge is learned via score-matching by simulating entire paths during training. In contrast, other works~\citep{somnath2023aligned,peluchettinon}, while also adopting Doob's h-transform, propose simulation-free algorithms for forward-time generation. \citet{delbracio2023inversion} similarly constructs a Brownian Bridge for direct iteration and is successfully applied to image-restoration tasks. Another approach~\cite{de2021diffusion} proposes Iterative Proportional Fitting (IPF) to tractably solve Sch\"odinger Bridge (SB) problems in translating between different distributions. \citet{liu2023i2sb} is built on a tractable class of SB which results in a simulation-free algorithm and has demonstrated strong performance in image translation tasks. More recently, extending SB with IPF, Bridge-Matching~\citep{shi2023diffusion} proposes to use Iterative Markovian Fitting to solve the SB problem. A similar algorithm is also developed by \citet{peluchetti2023diffusion} for distribution translation. A more related work to ours is \citet{li2023bbdm}, which proposes to directly reverse a Brownian Bridge for distribution translation in discrete time.  Our method instead shows how to construct a bridge model from any existing VP and VE diffusion processes in continuous time, and Brownian Bridge (as considered in most previous works) is but a special case of VE bridges. We additionally show that, when implemented correctly, VP bridges can achieve very strong empirical performance. Although similar perspective can be derived using forward-time diffusion as in ~\citet{peluchettinon} which also proposes VE/VP bridge schedules, our framework enjoys additional empirical (reusing diffusion designs) and theoretical (connection with OT-Flow-Matching\citep{lipman2023flow, tong2023improving} and Rectified Flow~\citep{liu2022flow}) benefits.
+
+\mypara{Flow and Optimal Transport} Works based on Flow-Matching~\citep{lipman2023flow, tong2023improving, pooladian2023multisample, tong2023simulation} learn an ODE-based transport map to bridge two distributions. \citet{lipman2023flow} has demonstrated that by matching the velocity field of predefined transport maps, one can create powerful generative models competitive with the diffusion counterparts. Improving this approach, \citet{tong2023improving,pooladian2023multisample} exploit potential couplings between distributions using minibatch simulation-free OT. Rectified Flow~\citep{liu2022flow} directly constructs the OT bridge and uses neural networks to fit the intermediate velocity field. Another line of work uses stochastic interpolants \citep{albergo2023building} to build flow models and directly avoid the use of Doob's h-functions and provide an easy way to construct interpolation maps between distributions. \citet{albergo2023stochastic} presents a general theory with stochastic interpolants unifying flow and diffusion, and shows that a bridge can be constructed from both an ODE and SDE perspctive. Separate from these methods, our model uses a different denoising bridge score-matching loss than this class of models. Constructing from this perspective allows us to extend many existing successful designs of diffusion models (which are not directly applicable to these works) to the bridge framework and push state-of-the-art further for image translation while retaining strong performance for unconditional generation.
+
+
+\subsection{Special Cases of Denoising Diffusion Bridge Models}
+
+\mypara{Case 1: Unconditional diffusion process~\citep{song2020score}.} For unconditional diffusion processes (which map data to noise), we can first show that the marginal $p(\rvx_t)$ when $p(\rvx_0)=\pdata(\rvx)$ exactly matches that of a regular diffusion process when $\rvx_T\sim \pdata(\rvy\mid\rvx)=\gN(\alpha_T\rvx,\sigma_T^2\mI)$. By taking expectation over $\rvx_T$ in \equref{eq:marginal}, we have
+\begin{align}
+    p(\rvx_t\mid \rvx_0) = \gN(\alpha_t\rvx_0, \sigma_t\mI)
+\end{align}
+One can further show that during sampling, \twoequref{eq:bridgesde}{eq:bridgeode} reduce to the reverse SDE and ODE (respectively) of a diffusion process when $\rvx_T$ is sampled from a Gaussian. We leave derivation details to \appref{sec:special-case-proof}. 
+
+\mypara{Case 2: OT-Flow-Matching~\citep{lipman2023flow,tong2023improving} and Rectified Flow~\citep{liu2022flow}.} These works learn to match deterministic dynamics defined through ODEs instead of SDEs. In this particular case, they work with ``straight line" paths defined by $\rvx_T - \rvx_0$.
+
+To see that our framework generalizes this, first let us define a family of diffusion bridges with variance scaled by $c\in (0,1)$ such that  $p(\rvx_t\mid \rvx_0, \rvx_T) = \gN(\hat{\mu}_t, c^2\hat{\sigma}_t^2\bm{I})$ where $\hat{\mu}_t$ and $\hat{\sigma}_t$ are as defined in \equref{eq:marginal}. One can therefore show that with a VE diffusion where $\sigma_t^2 = c^2 t$, given some fixed $\rvx_0$ and $\rvx_t$, \ie $T=1$, and $\rvx_t$ sampled from \equref{eq:marginal},
+\begin{align}
+    \lim_{c\to 0} \Big[\rvf(\rvx_t, t) - c^2g^2(t) \Big(\frac{1}{2} \gradnd{\log p(\rvx_t\mid\rvx_0, \rvx_1)}{\rvx_t} - \gradnd{\log p(\rvx_1\mid\rvx_t)}{\rvx_t})\Big)\Big]
+    = \rvx_1 - \rvx_0
+\end{align}
+where inside the bracket is the drift of probability flow ODE in \equref{eq:bridgeode} given $\rvx_0$ and $\rvx_1$, and the right hand side is exactly the straight line path term. In other words, these methods learn to match the drift in the bridge probability flow ODE (with a specific VE schedule) in the noiseless limit. The score model can then be matched against $\rvx_T - \rvx_0$, with some additional caveat to handle additional input $\rvx_T$, our framework exactly reduces to that of OT-Flow-Matching and Rectified Flow (details in \appref{sec:special-case-proof}).
+
+
+\section{Experiments}
+
+
+In this section we verify the generative capability of \model, and we want to answer the following questions: (1) How well does \model perform in image-to-image translation in pixel space? (2) Can \model perform well in unconditional generation when one side of the bridge reduces to Gaussian distribution? (3) How does the additional design choices introduced affect the final performance? Unless noted otherwise, we use the same VE diffusion schedule as in  EDM for our bridge model by default. We leave further experiment details to \appref{sec:exp-details}.
+
+\begin{figure}[t]
+    \centering
+    \setlength\tabcolsep{0.6pt}
+    \begin{tabular}{c|cccccc}
+      \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/cond.png}
+    \end{subfigure}
+    \hspace{0.0002\linewidth} &
+    \hspace{0.0002\linewidth} 
+    \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/pix2pix.png}
+    \end{subfigure} &
+     \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/sdedit.png}
+    \end{subfigure} & 
+     \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/flow.png}
+    \end{subfigure} & 
+     \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/i2sb.png}
+    \end{subfigure} & 
+      \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/ours_ve_deter.png}
+    \end{subfigure} & 
+     \begin{subfigure}[t]{0.138\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qual_comp/ours_ve_stoch.png}
+    \end{subfigure} \\
+    Condition & Pix2Pix~\scitenum{isola2017image} & SDEdit~\scitenum{meng2022sdedit} & \thead{Rectified\\ Flow}~\scitenum{liu2022flow}  & I$^2$SB~\scitenum{liu2023i2sb} & \thead{\textbf{DDBM (VE)}, \\ ODE sampler} &  \thead{\textbf{DDBM (VE)}, \\ hybrid sampler}
+       
+    \end{tabular}
+    \caption{Qualitative comparison with the most relevant baselines.}
+    \label{fig:e2h-diode}
+\end{figure}
+
+\subsection{Image-to-Image Translation}
+
+We demonstrate that \model can deliver competitive results in general image-to-image translation tasks. We evaluate on datasets with different image resolutions to demonstrate its applicability on a variety of scales. We choose Edges$\to$Handbags~\citep{isola2017image}  scaled to $64\times 64$ pixels, which contains image pairs for translating from edge maps to colored handbags, and DIODE-Outdoor~\citep{diode_dataset} scaled to $256\times 256$, which contains normal maps and RGB images of real-world outdoor scenes. For evaluation metrics, we use Fr\'echet Inception Distance (FID)~\citep{heusel2017gans} and Inception Scores (IS)~\citep{barratt2018note} evaluated on all training samples translation quality, and we use LPIPS~\citep{zhang2018perceptual} and MSE (in $[-1, 1]$ scale) to measure perceptual similarity and translation faithfulness. 
+
+We compare with Pix2Pix~\citep{isola2017image}, SDEdit~\citep{meng2022sdedit}, DDIB~\citep{su2022dual}, Rectified Flow~\citep{liu2022flow}, and I$^2$SB~\citep{liu2023i2sb} as they are built for image-to-image translation. For SDEdit we train unconditional EDM on the target domain, \eg colored images, and initialize the translation by noising source image, \eg sketches, and generate by EDM sampler given the noisy image. The other baseline methods are run with their respective repo while using the same network architecture as ours. Diffusion and transport-based methods are evaluated with the same number of function evaluations ($N=40$, which is the default for EDM sampler for $64\times 64$ images) to demonstrate our sampler's effectiveness in the regime when the number of sampling steps are low. Results are shown in \tabref{tab:pix-i2i} and additional settings are specified in \appref{sec:exp-details}.
+
+ We observe that our model can perform translation with both high generation quality and faithfulness, and we find that VP bridges outperform VE bridges in some cases. In contrast, Rectified-Flow as an OT-based method struggles to perform well when the two domains share little low-level similarities (\eg color, hue). DDIB also fails to produce coherent translation due to the wide differences in pixel-space distribution between the paired data. I$^{2}$SB comes closest to our method, but falls short when limited by computational constraints, \ie NFE is low. We additionally show qualitative comparison with the most performant baselines in \figref{fig:e2h-diode}. More visual results can be found in \appref{sec:more-res}.
+
+
+\subsection{Ablation Studies}
+
+We now study the effect of our preconditioning and hybrid samplers on generation quality in the context of both VE and VP bridge (see \appref{sec:exp-details} for VP bridge parameterization). In the left column of \figref{fig:ablation}, we fix the guidance scale $w$ at 1 and vary the Euler step size $s$ from 0 to 0.9 to introduce stochasticity. We see a significant decrease in FID score as we increase $s$ which produces the best performance at some value between 0 and 1 (\eg $s=0.3$ for Edges$\rightarrow$Handbags). \figref{fig:e2h-diode} also shows that the ODE sampler (\ie $s=0$) produces blurry images while our hybrid sampler produces considerably sharper results. On the right column, we study the effect of $w$ (from 0 to 1) with fixed $s$. We observe that VE bridges are not affected by the change in $w$ whereas VP bridges heavily rely on setting $w=1$. We hypothesize that this is due to the fact that VP bridges follow "curved paths" and destroy signals in between, so it is reliant on Doob's $h$-function for further guidance towards correct probability distribution.
+
+We also study the effect of our preconditioning in \tabref{tab:ablation}. Our baseline without our preconditioning and our sampler is a simple model that directly matches output of the neural network to the training target and generates using EDM~\citep{karras2022elucidating} sampler. We see that each introduced component further boosts the generation performance. Therefore, we can conclude that the introduced practical components are essential for the success of our \model.
+\begin{table}[t]
+
+\centering
+
+\resizebox{0.98\linewidth}{!}{
+\begin{tabular}{lcccccccc}
+\toprule
+  &   \multicolumn{4}{c}{Edges$\to$Handbags-64$\times$64}  & \multicolumn{4}{c}{DIODE-256$\times$256}  \\
+\cmidrule(r){2-5} \cmidrule(l){6-9}
+& FID $\downarrow$ & IS $\uparrow$ & LPIPS $\downarrow$ & MSE $\downarrow$ & FID $\downarrow$ & IS $\uparrow$ & LPIPS $\downarrow$& MSE $\downarrow$  \\
+\midrule
+Pix2Pix~\citep{isola2017image} & 74.8 & 4.24 & 0.356 & 0.209 & 82.4 & 4.22 & 0.556 &  0.133 \\
+\midrule
+DDIB~\citep{su2022dual} &186.84  &   2.04& 0.869 & 1.05 & 242.3&  4.22 & 0.798 & 0.794 \\
+\midrule
+SDEdit~\citep{meng2022sdedit} & 26.5 &  \textbf{3.58} & 0.271 & 0.510 & 31.14 &  5.70& 0.714  &  0.534\\
+\midrule
+Rectified Flow~\citep{liu2022flow} &  25.3& 2.80 & 0.241 & 0.088 & 77.18 & 5.87 & 0.534 &0.157 \\
+\midrule
+I$^{2}$SB~\citep{liu2023i2sb} & 7.43 & 3.40 & 0.244  &0.191& 9.34 & 5.77 & 0.373 & 0.145 \\
+\midrule
+\midrule
+\textbf{\model (VE)} &  2.93 & 3.58  & \textbf{0.131} &  \textbf{0.013} & 8.51 & 6.03 &  \textbf{0.226} & \textbf{0.0107} \\
+\textbf{\model (VP)} & \textbf{1.83} &  \textbf{3.73} & 0.142 & 0.0402 & \textbf{4.43} & \textbf{6.21} &  0.244 & 0.0839 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Quantitative evaluation of pixel-space image-to-image translation.}
+\label{tab:pix-i2i}
+\end{table}
+
+\begin{figure}[h]
+    \centering
+    \parbox{0.49\linewidth}{
+    \begin{tabular}{c}
+        \begin{subfigure}[t]{\linewidth}
+        \centering
+        \caption{Edges$\rightarrow$Handbags}
+        \includegraphics[width=\linewidth]{figures/ablation/e2h_ablation.png}
+    \end{subfigure} \\
+          \begin{subfigure}[t]{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/ablation/diode_ablation.png}
+        \caption{DIODE}
+    \end{subfigure}
+    \end{tabular}
+    \caption{Ablation studies on Euler step ratio $s$ and guidance scale $w$: $w=1$ for all ablation on $s$ and $s$ is set to the best-performing value for each dataset for ablation on $w$. }
+    \label{fig:ablation}
+    }
+    \hfill
+\parbox{.48\linewidth}{
+\resizebox{\linewidth}{!}{
+\begin{tabular}{cccccc}
+\toprule
+ \multirow{2}{*}{\thead{Our\\ precond.}} & \multirow{2}{*}{\thead{Our\\ sampler}} &   \multicolumn{2}{c}{E$\to$H-64$\times$64}  & \multicolumn{2}{c}{DIODE-256$\times$256}  \\
+\cmidrule(r){3-4} \cmidrule(l){5-6}
+& & VE & VP &   VE & VP  \\
+\midrule
+\xmark & \xmark  & 14.02 &  11.76 & 126.3 & 96.93  \\
+\midrule
+\cmark & \xmark  & 13.26 & 11.19 & 79.25 & 91.07 \\
+\midrule
+\xmark & \cmark    & 13.11 & 29.91  &  91.31 & 21.92 \\
+\midrule
+\cmark & \cmark   & \textbf{2.93} & \textbf{1.83}  &  \textbf{8.51} & \textbf{4.43} \\
+\bottomrule
+\end{tabular}}
+\captionof{table}{Ablation study on the effect of sampler and preconditioning on FID. Cross mark on our preconditioning means no output reparameterization and directly use network output to match training target. Cross mark on our sampler means we reuse the ODE sampler from EDM with the same setting. E$\rightarrow$H is a short-hand for Edges$\rightarrow$Handbags.}
+\label{tab:ablation}
+}
+\end{figure}
+\begin{figure}[t]
+\centering
+\parbox{0.51\linewidth}{
+\begin{subfigure}[t]{\linewidth}
+     \includegraphics[width=\linewidth]{figures/cifar10_ffhq.png}
+\end{subfigure}
+\caption{Generation on CIFAR-10 and FFHQ-$64\times 64$.}
+    \label{fig:gen}
+}
+\hfill
+\parbox{.47\linewidth}{
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lcccc}
+\toprule
+  &   \multicolumn{2}{c}{CIFAR-10} & \multicolumn{2}{c}{FFHQ-$64\times64$ }\\
+  \cmidrule{2-5}
+  &NFE $\downarrow$ & FID $\downarrow$ & NFE $\downarrow$& FID $\downarrow$\\
+\midrule
+DDPM~\scitenum{ho2020denoising} & 1000 & 3.17 & 1000 & 3.52 \\
+\midrule
+DDIM~\scitenum{song2020denoising} & 50 & 4.67 & 50 & 5.18 \\
+\midrule
+DDPM++~\scitenum{song2020score} & 1000 & 3.01 & 1000 & 3.39 \\
+\midrule
+NCSN++~\scitenum{song2020score} & 1000 & 3.77 & 1000 & 25.95 \\
+\midrule
+Rectified Flow~\scitenum{liu2022flow} & 127 & 2.58 & 152 &  4.45    \\
+\midrule
+EDM~\scitenum{karras2022elucidating} & 35 & \textbf{2.04} & 79 & 2.53 \\
+\midrule
+\midrule
+\textbf{\model} & 35 & 2.06 & 79 & \textbf{2.44}   \\
+\bottomrule
+\end{tabular}}
+\captionof{table}{Evaluation of unconditional generation.}
+\label{tab:genresults}
+}
+
+\end{figure}
+
+\subsection{Unconditional Generation}
+When one side of the distribution becomes Gaussian distribution, our framework exactly reduces to that of diffusion models. Specifically, during training when the end point $\rvx_T\sim\gN(\alpha_T\rvx_0, \sigma_T^2\mI)$, our intermediate bridge samples $\rvx_t$ follows the distribution $\rvx_t\sim\gN(\alpha_t\rvx_0, \sigma_t^2\mI)$.  We empirically verify that using our bridge sampling and the pred-$\rvx$ objective inspired by EDM, we can recover its performance by using our more generalized parameterization. 
+
+We evaluate our method on CIFAR-10~\citep{krizhevsky2009learning} and FFHQ-$64\times 64$~\citep{karras2019style} which are processed according to \citet{karras2022elucidating}. We use FID score for quantitative evaluation using 50K generated images and use number of function evaluations (NFE) for generation efficiency. 
+We compare our generation results against diffusion-based and optimal transport-based models including DDPM~\citep{ho2020denoising}, 
+DDIM~\citep{song2020denoising},
+DDPM++~\citep{song2020score}, 
+NCSN++~\citep{song2020score}, Rectified Flow~\citep{liu2022flow}, EDM~\citep{karras2022elucidating}. Quantitative results are presented in \tabref{tab:genresults} and generated samples are shown in \figref{fig:gen}.
+We observe that our model is able to match EDM performance with negligible degradation in FID scores for CIFAR-10 and marginal improvement for FFHQ-$64\times 64$. This corroborates our claim that our method can benefit from advances in diffusion models and generalize many of the advanced parameterization techniques such as those introduced in EDM. 
+
+
+\section{Conclusion}
+
+
+In this work, we introduce Denoising Diffusion Bridge Models, a novel class of models that builds a stochastic bridge between paired samples with tractable marginal distributions in between. 
+The model is learned by matching the conditional score of a tractable bridge distribution, which allows one to transport from one distribution to another via a new reverse SDE or probability flow ODE. Additionally, this generalized framework shares many similarities with diffusion models, thus allowing us to reuse and generalize many designs of diffusion models.
+We believe that \model is a significant contribution towards a general framework for distribution translation. In the era of generative AI, \model has a further role to play.
+
+
+\clearpage
+{\small
+
+
+
+

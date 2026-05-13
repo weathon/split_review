@@ -1,0 +1,725 @@
+\title{Efficient Planning with Latent Diffusion}
+
+\begin{abstract}
+Temporal abstraction and efficient planning pose significant challenges in offline reinforcement learning, mainly when dealing with domains that involve temporally extended tasks and delayed sparse rewards. 
+Existing methods typically plan in the raw action space and can be inefficient and inflexible. 
+Latent action spaces offer a more flexible paradigm, capturing only possible actions within the behavior policy support and decoupling the temporal structure between planning and modeling. 
+However, current latent-action-based methods are limited to discrete spaces and require expensive planning.
+This paper presents a unified framework for continuous latent action space representation learning and planning by leveraging latent, score-based diffusion models.
+We establish the theoretical equivalence between planning in the latent action space and energy-guided sampling with a pretrained diffusion model and incorporate a novel sequence-level exact sampling method. 
+Our proposed method, \texttt{LatentDiffuser}, demonstrates competitive performance on low-dimensional locomotion control tasks and surpasses existing methods in higher-dimensional tasks. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+A considerable volume of samples gathered by operational systems gives rise to the issue of offline reinforcement learning (RL), specifically, the recovery of high-performing policies without additional environmental exploration~\citep{wu2019behavior,kumar2020conservative,kostrikov2021fisher,iql,ghosh2022offline}. 
+However, domains that encompass temporally extended tasks and severely delayed sparse rewards can present a formidable challenge for standard offline approaches~\citep{li2015toward,ren2021nearly,hdmi}.
+Analogous to the online setting, an emergent objective in offline RL involves the development of efficacious hierarchy methodologies that can obtain temporally extended lower-level primitives, subsequently facilitating the construction of a higher-level policy operating at a more abstract temporal scale~\citep{ajay2020opal,pertsch2021skild,villecroze2022bayesian,rosete2022latent,rao2021learning,yang2022flow}.
+
+Within the hierarchical framework, current offline RL approaches can be broadly categorized into \textit{model-free} and \textit{model-based}. 
+The former conceptualizes the higher-level policy optimization as a auxilary offline RL issue~\citep{liu2020gochat,liu2022safe,ma2022offline,kipf2019compile,ajay2020opal,rosete2022latent}. 
+In contrast, the latter encompasses planning in the higher-level policy space by generating future trajectories through a dynamics model of the environment, either predefined or learned~\citep{li2022hierarchical,co2018self,lynch2020learning,lee2022learning,venkatraman2023latent}.
+Concerning lower-level primitive learning, these two methods exhibit similarities and are typically modeled as goal-conditioned or skill-based imitation learning or offline RL problems.
+Conversely, the instabilities arising from offline hierarchical RL methodologies due to the ``deadly triad~\citep{sutton2018reinforcement,van2018deep},'' restricted data access~\citep{fujimoto2019off,kumar2020conservative}, and sparse rewards~\citep{andrychowicz2017hindsight,ma2022offline} remain unaddressed. 
+This spawns another subset of model-based approaches along with more effective hierarchical variants that endeavor to resolve problems from a sequence modeling viewpoint~\citet{dt,tt,janner2022planning,ajay2022conditional}.
+
+Irrespective of whether a method is model-free or model-based, it adheres to the traditional settings, wherein planning occurs in the raw action space of the Markov Decision Process (MDP). 
+Although seemingly intuitive, planning in raw action space can be inefficient and inflexible~\citep{wang2020learning,yang2021learning,jiang2023efficient}. 
+Challenges include ensuring model accuracy across the entire space and the constraint of being tied to the temporal structure. 
+Conversely, human planning offers enhanced flexibility through temporal abstractions, high-level actions, backward planning, and incremental refinement.
+
+Drawing motivation from TAP~\citep{jiang2023efficient}, we put forth the notion of the \textit{latent action}.
+Planning within the domain of latent actions delivers a twofold advantage compared to planning with raw actions. 
+Primarily, it encompasses only plausible actions under behavior policy support, yielding a reduced space despite the raw action space's dimensionality and preventing the exploitation of model frailties. 
+Secondarily, it permits the separation of the temporal structure between planning and modeling, thus enabling a more adaptable and efficient planning process unconstrained by specific transitions. 
+These dual benefits render latent-action-based approaches naturally superior to extant methodologies when handling temporally extended offline tasks.
+
+Nevertheless, two shortcomings of TAP inhibit its ability to serve as a general and practical framework. 
+Initially, TAP is confined to \textit{discrete} latent action spaces. 
+In real-world contexts, agents are likely to carry out a narrow, discrete assortment of tasks and a broader spectrum of behaviors~\citep{co2018self}. 
+This introduces a predicament — should a minor skill modification be necessary, such as opening a drawer by seizing the handle from top to bottom instead of bottom to top, a completely novel set of demonstrations or reward functions might be mandated for behavior acquisition. 
+Subsequently, once the latent action space has been ascertained, TAP necessitates a distinct, resource-intensive planning phase for generating reward-maximizing policies. 
+The price of planning consequently restricts latent actions to discrete domains.
+
+To tackle these limitations, this paper proposes a novel framework, \texttt{LatentDiffuser}, by concurrently modeling \textit{continuous} latent action space representation learning and latent action-based planning as a conditional generative problem within the latent domain. 
+Specifically, \texttt{LatentDiffuser} employs unsupervised techniques to discern the latent action space by utilizing score-based diffusion models (SDMs)~\citep{song2021scorebased,nichol2021improved,ho2021classifierfree} within the latent sphere in conjunction with a variational autoencoder (VAE) framework~\citep{vae,rezende2014stochastic,vahdat2021score}. 
+We first segment the input trajectories, map each slice to latent action space (which needs to be learned), and apply the SDM to the latent sequence. 
+Subsequently, the SDM is entrusted with approximating the distribution over the offline trajectory embeddings, conditioned on the related return values. 
+Planning—or reward-maximizing trajectory synthesis—is realized by initially producing latent actions through sampling from a simple base distribution, followed by iterative, conditional denoising, and eventually translating latent actions into the trajectory space using a decoder.
+In other words, \texttt{LatentDiffuser} can be regarded as a VAE equipped with an SDM prior~\citep{vahdat2021score}.
+
+Theoretically, we demonstrate that planning in the domain of latent actions is tantamount to energy-guided sampling using a pre-trained diffusion behavior model. 
+Exact energy-guided sampling is essential to carry out high-quality and efficient planning. 
+To achieve this objective, we modify QGPO~\citep{cep} to realize exact sampling at the sequence level.
+Comprehensive numerical results on low-dimensional locomotion control tasks reveal that \texttt{LatentDiffuser} exhibits competitive performance against robust baselines and outperforms them on tasks of greater dimensionality.
+Our main contributions encompass:
+1) Developing a unified framework for continuous latent action space representation learning and planning that delivers flexibility and efficiency in temporally extended offline decision-making.
+2) Our theoretical derivation confirms the equivalence between planning in the latent action space and energy-guided sampling with a pretrained diffusion model. It introduces an innovative sequence-level exact sampling technique.
+3) Numerical experiments exhibit the competitive performance of \texttt{LatentDiffuser} and its applicability across a range of low- and high-dimensional continuous control tasks.
+
+
+
+\section{Related Work}
+
+
+Owing to spatial constraints, this section will briefly present the most pertinent domain of \texttt{LatentDiffuser}: hierarchical offline RL or imitation learning (IL). 
+In terms of algorithmic specificity, existing techniques can be broadly classified into \textit{goal-based} and \textit{skill-based} methods~\citep{pateria2021hierarchical}. 
+\textit{Goal-based} approaches primarily concentrate on attaining a designated state. 
+The vital aspect of such techniques concerns the selection or creation of subgoals, which reside in the raw state space. 
+Once the higher-level subgoal is ascertained, the lower-level policy is generally acquired through standard IL methods or offline RL based on subgoal-augmented/conditioned policy, a universal value function~\citep{schaul2015universal}, or their combination. 
+In extant methods, the subgoal is either predefined~\citep{zhou2019hierarchical, xie2021hierarchical, ma2021hierarchical}, chosen based on heuristics~\citep{ding2014autonomic, guo2016k, pateria2020hierarchical, iris}, or generated via planning or an additional offline RL technique~\citep{liu2020gochat, liu2022safe, li2022hierarchical, ma2022offline}. 
+Moreover, some methods~\citep{eysenbach2019search, paul2019learning, lai2020hindsight, kujanpaa2023hierarchical} are solely offline during the subgoal selection or generation process. 
+This paper also pertains to the options framework~\citep{sutton1999between, stolle2002learning, bacon2017option, wulfmeier2021data, salter2022mo2, villecroze2022bayesian}), as both the (continuous) latent actions of \texttt{LatentDiffuser} and (discrete) options introduce a mechanism for temporal abstraction.
+
+\textit{Skill-based} methods embody higher-level skills as low-dimensional latent codes. 
+In this context, a skill signifies a subtask's policy, semantically representing "the capability to perform something adeptly"~\citep{pateria2021hierarchical}. 
+Analogous to goal-based approaches, once the higher-level skill is identified, the lower-level skill-conditioned policy is generally acquired through standard IL or offline RL methods. 
+More precisely, few works utilize predefined skills~\citep{nasiriany2022augmenting, fatemi2022semi}. 
+The majority of studies employ a two- or multi-phase training framework: 
+initially, state sequences are projected into continuous latent variables (i.e., skills) via unsupervised learning; 
+next, optimal skills are generated based on offline RL~\citep{kipf2019compile, pertsch2021skild, ajay2020opal, rosete2022latent, lee2022learning, venkatraman2023latent} or planning\footnote{It is worthy to note that planning is only feasible when the environment model is known or can be sampled from. Consequently, some of these works focus on online RL tasks, while others first learn an additional environment model from the offline dataset and then plan in the skill space.}~\citep{co2018self, lynch2020learning, lee2022learning, venkatraman2023latent} in the skill space.
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=.7\textwidth]{figs/latent-actions.pdf}
+    \caption{The physical meaning of the goal-conditioned policy, skill and latent action (corresponding to $2$ timesteps in the raw MDP). The red diamond represents a particular (goal) state, the gray, dotted diamond is a placeholder, and the red circle denotes any state.}
+    \label{fig:latent-action}
+\end{figure}
+In contrast with the above hierarchical methods, \texttt{LatentDiffuser} initially learns a more compact latent action space and subsequently employs the latent actions to make decisions. 
+As demonstrated in Figure~\ref{fig:latent-action}, latent action not only differs from the goal-conditioned policy, which pertains to the trajectory of reaching a particular state, but also from the skill, which relates to the trajectory of completing a specific (multi-step) state transition. 
+The latent action also corresponds to the agent's received reward and the subsequent expected return.
+The unique physical implications of latent action and the methodology utilized by \texttt{LatentDiffuser} render the proposed method advantageous in several ways. 
+1) The future information in the latent action allows the algorithm to execute more efficient planning. 
+2) Unlike existing works wherein multiple optimization objectives and the fully coupling or seperating of representation learning and decision making (RL or planning) lead to intricate training processes and reduced training efficiency, \texttt{LatentDiffuser} exhibits end-to-end training and unifies representation learning, sampling, and planning.
+
+
+
+
+
+\section{Problem Formulation}
+
+
+In this paper, we approach the offline RL problem as a sequence modeling task, in alignment with previous work~\citep{janner2022planning, ajay2022conditional, hdmi}. 
+The following subsection delineates the specificities of sequence modeling, or more accurately, the conditional generative modeling paradigm. 
+We examine a trajectory, $\tau$, of length $T$, which is sampled from a MDP that features a fixed stochastic behavior policy. 
+
+\begin{equation}
+    \tau:=\left(s_1, a_1, r_1, G_1, s_2, a_2, r_2, G_2, \ldots, s_T, a_T, r_T, G_T\right).
+\end{equation}
+It is crucial to note that the definition of $\tau$ diverges from that in prior studies~\citep{janner2022planning, ajay2022conditional, hdmi}, as each timestep now contains both the reward and reward-to-go values. 
+This modification has been specifically engineered to facilitate the subsequent learning of latent action spaces.
+Sequential decision-making is subsequently formulated as the standard problem of conditional generative modeling:
+\begin{equation}\label{eq:diffusion-obj}
+\max _\theta \mathbb{E}_{\tau \sim \mathcal{D}}\left[\log p_\theta\left(\boldsymbol{x}_0(\tau) \mid \boldsymbol{y}(\tau)\right)\right].
+\end{equation}
+The objective is to estimate the conditional trajectory distribution using $p_\theta$ to enable planning or generating the desired trajectory $\boldsymbol{x}_0(\tau)$ based on the information $\boldsymbol{y}(\tau)$. 
+Existing instances of $\boldsymbol{y}$ may encompass the return under the trajectory~\citep{janner2022planning, hdmi}, the constraints met by the trajectory~\citep{ajay2022conditional, hdmi}, or the skill demonstrated in the trajectory~\citep{ajay2022conditional}. 
+The generative model is constructed in accordance with the conditional diffusion process:
+\begin{equation}
+q\left(\boldsymbol{x}_{k+1}(\tau) \mid \boldsymbol{x}_k(\tau)\right), \quad p_\theta\left(\boldsymbol{x}_{k-1}(\tau) \mid \boldsymbol{x}_k(\tau), \boldsymbol{y}(\tau)\right).
+\end{equation}
+As per standard convention, $q$ signifies the forward noising process while $p_\theta$ represents the reverse denoising process~\citep{ajay2022conditional}.
+
+\paragraph{Latent Actions}
+We introduce the concept of \textit{latent action} (Figure~\ref{fig:latent-action}) proposed in TAP~\citep{jiang2023efficient}. 
+TAP specifically models the \textit{optimal} conditional trajectory distribution $p^*(\tau \mid s_1, \boldsymbol{z})$ using a series of latent variables, $\boldsymbol{z}:=(z_1,\ldots,z_M)$. 
+Assuming that the state and latent variables $(s_1, \boldsymbol{z})$ can be deterministically mapped to trajectory $\tau$, $p^*(\tau \mid s_1, \boldsymbol{z}):=p(s_1)\mathbbm{1}(\tau=h(s_1, \boldsymbol{z}))\pi^{*}(\boldsymbol{z} \mid s_1)$ is obtained. 
+The terms $\boldsymbol{z}$ and $\pi^*(\boldsymbol{z} \mid s_1)$ are subsequently referred to as the \textit{latent actions} and the \textit{optimal latent policy}, respectively.
+In a \textit{deterministic} MDP, the trajectory corresponding to an arbitrary function $h(s_1, \boldsymbol{z})$ with $\pi^*(\boldsymbol{z} \mid s_1)>0$ will constitute an optimal executable plan, implying that the optimal trajectory can be recovered by following the latent actions $\boldsymbol{z}$, beginning from the initial state $s_1$. 
+Consequently, planning within the latent action space $\mathcal{Z}$ facilitates the discovery of an desired, optimal trajectory. 
+TAP, however, remain restricted to discrete latent action spaces and necessitate indepentdent, resource-intensive planning. 
+Motivated by these limitations, we present a unified framework that integrates representation learning and planning for continuous latent action via latent, score-based diffusion models. 
+Further elaboration on modeling choices, decision-making (or planning), which equates to exact sampling from the learned conditional diffusion model, and training details will be provided soon.
+
+
+
+\section{Algorithm Framework}
+
+
+This section provides a comprehensive elaboration of the model components and design choices, such as the network architecture, loss functions, as well as the details of training and planning. 
+By unifying the representation learning and planning of latent action through the incorporation of a latent diffusion model and the exact energy-guided sampling technique, \texttt{LatentDiffuser} achieves effective decision-making capabilities for temporally-extended, sparse reward tasks.
+Specifically, we first explore the latent action representation learning in Section~\ref{sec:latent-model-learning}, followed by a detailed discussion on planning using energy-guided sampling in Section~\ref{sec:latent-action-planning}, and provide a algorithm summary in Section~\ref{sec:alg-summary} to close this section.
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=\textwidth]{figs/latent-diffuser.pdf}
+    \caption{Latent action representation learning with the latent score-based diffusion model.}
+    \label{fig:latent-diffuser}
+\end{figure}
+
+\subsection{Latent Action Representation Learning}\label{sec:latent-model-learning}
+
+The latent action space allows for a more compact, efficient, and adaptable method by effectively capturing behavior policy support and detaching the temporal structure, thus providing innate benefits in handling temporally extended offline tasks. 
+As indicated in Section~\ref{sec:latent-action-modeling}, before proceeding to planning, we must first learn a continuous latent action space. 
+For this purpose, we propose the \texttt{LatentDiffuser} based on a latent diffusion model (LDM)~\citep{vahdat2021score}, as depicted in Figure~\ref{fig:latent-diffuser}.
+\texttt{LatentDiffuser} is constituted by an encoder $q_\phi\left(\boldsymbol{z}_0 \mid s_1, \tau \right)$, a score-based prior $p_\theta\left(\boldsymbol{z}_0 \mid s_1\right)$, and a decoder $p_{\boldsymbol{\psi}}\left(\tau \mid s_1, \boldsymbol{z}_0\right)$. 
+In accordance with~\citet{vahdat2021score}, we train \texttt{LatentDiffuser} by minimizing the variational upper bound on the negative trajectory log-likelihood $\log p(\tau \mid s_1)$, meaning that the information $\boldsymbol{y}(\tau)$ in Equation (\ref{eq:diffusion-obj}) is instantiated as the initial state $s_1$:
+\begin{equation}\label{eq:loss}
+\begin{aligned}
+\mathcal{L}(s_1, \tau, \boldsymbol{\phi}, \boldsymbol{\theta}, \boldsymbol{\psi}) & =\mathbb{E}_{q_{\boldsymbol{\phi}}\left(\mathbf{z}_0 \mid s_1, \tau\right)}\left[-\log p_{\boldsymbol{\psi}}\left(\tau \mid s_1, \mathbf{z}_0\right)\right]+\operatorname{KL}\left(q_{\boldsymbol{\phi}}\left(\mathbf{z}_0 \mid s_1, \tau\right) \| p_{\boldsymbol{\theta}}\left(\mathbf{z}_0 \mid s_1\right)\right) \\
+& =\mathbb{E}_{q_{\boldsymbol{\phi}}\left(\mathbf{z}_0 \mid s_1, \tau\right)}\left[-\log p_{\boldsymbol{\psi}}\left(\tau \mid s_1, \mathbf{z}_0\right)\right]+\mathbb{E}_{q_\phi\left(\mathbf{z}_0 \mid s_1, \tau\right)}\left[\log q_{\boldsymbol{\phi}}\left(\mathbf{z}_0 \mid s_1, \tau\right)\right] \\
+& +\mathbb{E}_{q_{\boldsymbol{\phi}}\left(\mathbf{z}_0 \mid s_1, \tau\right)}\left[-\log p_{\boldsymbol{\theta}}\left(\mathbf{z}_0 \mid s_1\right)\right]
+\end{aligned}
+\end{equation} utilizing a VAE approach~\citep{vae,rezende2014stochastic}, wherein the $q_\phi\left(\mathbf{z}_0 \mid s_0, \tau\right)$ approximates the true posterior $p\left(\mathbf{z}_0 \mid s_0, \tau\right)$.
+
+This paper emploies Equation (\ref{eq:loss}) with a decomposed KL divergence into entropy and cross entropy terms. 
+The reconstruction and entropy terms are easily estimated for any explicit encoder as long as the reparameterization trick is applicable~\citep{vae}. 
+The challenging aspect of training \texttt{LatentDiffuser} pertains to training the cross entropy term, which involves the score-based prior. 
+Unlike~\citet{vahdat2021score}, which addresses this challenge by simultaneously learning an encoder/decoder architecture alongside a score-based prior, we adopt a simpler yet efficacious approach~\citep{ldm} by training a VAE $\{q_{\boldsymbol{\phi}},p_{\boldsymbol{\psi}}\}$ and a score-based diffusion model $\{q_{\boldsymbol{\theta}}\}$ consecutively based on the offline dataset $\mathcal{D}_{\tau}$. 
+This does not necessitate a delicate balancing of reconstruction and generative capabilities. 
+
+\paragraph{Encoder $q_{\boldsymbol{\phi}}$ and Decoder $p_{\boldsymbol{\psi}}$}
+
+We use the almost consistent encoder design with TAP~\citep{jiang2023efficient}. 
+Specifically, we handle $\boldsymbol{x}_t:=\left(s_t, a_t, r_t, G_t\right)$ as a single token. 
+}, yielding $T$ feature vectors, where $T$ is the episode horizon.
+Subsequently, we apply a $1$-dimensional max pooling with a kernel size and stride of $L$, followed by a linear layer, and generate $T / L$ latent actions.
+Moreover, different from the TAP Decoder architecture, we use a modular design idea.
+More concretely, each latent action is tiled $L$ times to match the number of input/output tokens $T$.
+We then concatenate the initial state $s_1$ and the latent action, and apply a linear projection to provide state information to the decoder. 
+After adding positional embedding, the decoder reconstructs the trajectory $\hat{\tau}:=(\hat{\boldsymbol{x}}_1, \hat{\boldsymbol{x}}_2, \ldots, \hat{\boldsymbol{x}}_T)$, with $\hat{\boldsymbol{x}}_t:=(\hat{\boldsymbol{s}}_t, \hat{\boldsymbol{a}}_t, \hat{r}_t, \hat{G}_t)$.
+To enhance the decoder's representation ability, we design the decoder modularly for different elements in $\boldsymbol{x}_t$, as shown in Figure~\ref{fig:latent-diffuser}.
+Noting that the action decoder is designed based on the inverse dynamics model~\citep{agrawal2015learning,pathak2017curiosity} in a manner similar to~\citep{ajay2022conditional,hdmi}, with the aim of generating raw action sequences founded on the state sequences.
+The encoder and decoders training finally entails the use of a reconstruction loss computed as the mean squared error between input trajectories $\{\tau\}$ and reconstructed trajectories $\{\hat{\tau}\}$, coupled with a low-weighted ($\approx 10^{-6}$) KL penalty towards a standard normal on the learned latent actions, akin to VAE approaches~\citep{vae,rezende2014stochastic}. 
+This prevents the arbitrary scaling of latent action space.
+
+\paragraph{Score-based Prior $\boldsymbol{\theta}$}
+
+Having trained the VAE $\{q_{\boldsymbol{\phi}},p_{\boldsymbol{\psi}}\}$, we now have access to a compact latent action space.
+Distinct from VAE's adoption of a uniform prior or TAP's utilization of an autoregressive, parameterized prior over latent actions, \texttt{LatentDiffuser} employs a score-based one. 
+Thus, by harnessing the ``diffusion-sampling-as-planning'' framework, we seamlessly transform planning into conditional diffusion sampling, ultimately circumventing the need for an independent, costly planning stage.
+Concretely, the score-based prior is modeled as a conditional, score-based diffusion probabilistic model, which is parameterized using a temporal U-Net architecture~\citep{janner2022planning,ajay2022conditional}. 
+This architecture effectively treats a sequence of noised latent action $\boldsymbol{x}_k(\boldsymbol{z})$ as an image, where the height represents a single latent action's dimension and the width signifies the number of the latent actions. 
+Conditioning information $\boldsymbol{y}(\boldsymbol{z}):=s_1$ is then projected using a multi-layer perceptron (MLP).
+ 
+\subsection{Planning with Energy-guided Sampling}\label{sec:latent-action-planning}
+
+Upon acquiring the latent action space, we are able to effectively address temporally-extended offline tasks using planning. 
+Intriguingly, when examined from a probabilistic standpoint, the optimal latent action sequence sampling coincides with a guided diffusion sampling problem~\citep{cep}, wherein the guidance is shaped by an (unnormalized) energy function. 
+By adopting a "diffusion-sampling-as-planning" framework~\citep{janner2022planning}, we can perform planning through conditional sampling using the pretrained \texttt{LatentDiffuser}, without necessitating further costly planning steps~\citep{tt, jiang2023efficient}. 
+This renders \texttt{LatentDiffuser} a holistic framework that seamlessly consolidates representation learning and planning within the latent action space. 
+In the subsequent sections, the equivalence between optimal latent actions sampling and energy-guided diffusion sampling is demonstrated, followed by the introduction of a practical sampling algorithm to facilitate efficient planning.
+
+\paragraph{Planning is Energy-Guided Diffusion Sampling}
+
+Considering a deterministic mapping from $\tau$ to $\boldsymbol{z}$, achieved by the learned encoder $q_{\boldsymbol{\phi}}$, the following theorem is derived for the \textit{optimal latent policy} defined in Section~\ref{sec:latent-action-modeling}:
+
+\begin{tcolorbox}[breakable, enhanced]
+\begin{theorem}[Optimal latent policy]\label{the:optimal-latent-actions}
+    Given an initial state $s_1$, the optimal latent policy satisfies:
+    $
+        \pi^{*}(\boldsymbol{z} \mid s_1) \propto \mu(\boldsymbol{z} \mid s_1) e^{\beta\sum_{t=1}^{T}Q_{\zeta}(s_t,a_t)},
+    $
+    wherein $\mu(\boldsymbol{z} \mid s_1)$ represents the behavior latent policy and $Q_{\zeta}(\cdot,\cdot)$ refers to the estimated $Q$-value function. $\beta \geq 0$ signifies the inverse temperature controlling the energy strength.
+\end{theorem}
+\end{tcolorbox}
+
+By rewriting $p_0 := \pi^*$, $q_0 = \mu$ and $\boldsymbol{z}_0 = \boldsymbol{z}$, we can reformulate the optimal planning into the following diffusion sampling problem:
+\begin{equation}
+    p_0(\boldsymbol{z}_0 \mid s_1) \propto q_0(\boldsymbol{z}_0 \mid s_1) \exp\left(-\beta \mathcal{E}(h(\boldsymbol{z}_0, s_1))\right),
+\end{equation}
+where $\mathcal{E}(h(\boldsymbol{z}_0, s_1)) := -\sum_{t=1}^{T}Q_{\zeta}(s_{t},a_{t})$ and $h(\boldsymbol{z}_0, s_1)$ denotes the pretrained decoder $p_{\boldsymbol{\psi}}$. 
+The behavior latent policy $q_0(\boldsymbol{z}_0 \mid s_1)$ is modeled by the pretrained \texttt{LatentDiffuser}.
+We then adopt the ``diffusion-sampling-as-planning'' to generate desired (e.g., reward-maximizing) latent actions $\boldsymbol{z}_0$.
+Concretely, we employ $q_0 := q$, $p_0 = p$ at diffusion timestep $k=0$. 
+Then a forward diffusion process is constructed to simultaneously diffuse $q_0$ and $p_0$ into an identical noise distribution, where $p_{k0}(\boldsymbol{z}_k|\boldsymbol{z}_0,s_1):=q_{k0}(\boldsymbol{z}_k|\boldsymbol{z}_0,s_1)=\mathcal{N}(\boldsymbol{z}_k|\alpha_k\boldsymbol{z}_0, \sigma_t^2 \mathbf{I})$. 
+Based on \cite[Theorem 3.1]{cep}, the marginal distribution $q_k$ and $p_k$ of the noised latent actions $\boldsymbol{z}_k$ at the diffusion timestep $k$ adhere to:
+\begin{equation}\label{eq:intermediate-guidance-latent}
+    p_k(\boldsymbol{z}_k \mid s_1) \propto q_k(\boldsymbol{z}_k \mid s_1)\exp\left(\mathcal{E}_k(h(\boldsymbol{z}_k, s_1))\right),
+\end{equation}
+where $\mathcal{E}_k(h(\boldsymbol{z}_k, s_1))$ is $\beta\mathcal{E}(h(\boldsymbol{z}_0, s_1))$ when $k=0$ and $-\log\mathbb{E}_{q_{0k(\boldsymbol{z}_0|\boldsymbol{z}_k)}}[\exp(-\beta\mathcal{E}(h(\boldsymbol{z}_0, s_1)))]$ when $k>0$.
+We then need to estimate the score function of $p_{k}(\boldsymbol{z}_k \mid s_1)$.
+Quoting the derivation of~\citet{cep}, the score function satisfies:
+$
+    \nabla_{\boldsymbol{z}_k} \log p_k\left(\boldsymbol{z}_k \mid s_1\right)=\nabla_{\boldsymbol{z}_k} \log q_k\left(\boldsymbol{z}_k \mid s_1\right)+\nabla_{\boldsymbol{z}_k} \mathcal{E}_k\left(h(\boldsymbol{z}_k, s_1)\right).
+$
+Consequently, the optimal planning has been formulated as energy-guided sampling within the latent action space, with $\nabla_{\boldsymbol{z}_k}\mathcal{E}(h(\boldsymbol{z}_k, s_1))$ as the desired guidance.
+
+\paragraph{Practical Sampling Method}
+
+Estimating the target score function $\nabla_{\boldsymbol{z}_k}\log p_k(\boldsymbol{z}_k \mid s_1)$ is non-trivial because of the intractable energy guidance $\nabla_{\boldsymbol{z}_k}\mathcal{E}(h(\boldsymbol{z}_k, s_1))$.
+We borrow the energy-guided sampling method proposd in~\citep{cep} and propose a sequence-level, exact sampling methods by training a total of three neural networks:
+(1) a diffusion model to model the behavior latent policy $q_0(\boldsymbol{z}_0 \mid s_1)$;
+(2) a state-action value function $Q_{\zeta}(s,a)$ to define the intermediate energy function $\mathcal{E}(h(\boldsymbol{z}_0, s_1))$; and
+(3) an time-dependent energy model $f_{\eta}(\boldsymbol{z}_k,s_1,k)$ to estimate $\mathcal{E}_k(h(\boldsymbol{z}_k,s_1))$ and guide the diffusion sampling process.
+
+Recall that we already have (1) a diffusion model, i.e., the socre-based prior $p_{\theta}(\boldsymbol{z}_0 \mid s_1)$ and (2) a state-action value function $Q_{\zeta}(s,a)$, i.e., the return decoder.
+According to~\citet[Theorem 3.2]{cep}, the only remained time-dependent energy model, $f_{\eta}(\boldsymbol{z}_k,s_1,k)$, can be trained by minizing the following contrastive loss:
+\begin{equation}\label{eq:cep-latent}
+    \begin{aligned}
+        \min_\eta \mathbb{E}_{p(k,s1)} \mathbb{E}_{\prod_{i=1}^M q\left(\boldsymbol{z}_0^{(i)} \mid s_1\right) p\left(\epsilon^{(i)}\right)}\left[
+        -\sum_{i=1}^M \frac{e^{-\beta\mathcal{E}_0(h(\boldsymbol{z}_0^{(i)},s_1))}}{\sum_{j=1}^M e^{-\beta\mathcal{E}_0(h(\boldsymbol{z}_0^{(j)},s_1))}} \log \frac{e^{f_\eta\left(\boldsymbol{z}_k^{(i)},s_1,k\right)}}{\sum_{j=1}^M e^{f_\eta\left(\boldsymbol{z}_k^{(j)},s_1,k\right)}}\right],
+    \end{aligned}
+\end{equation} where $k \sim \mathcal{U}(0,K)$, $\boldsymbol{z}_k = \alpha_k \boldsymbol{z}_0 + \sigma_k\epsilon$, and $\epsilon \sim \mathcal{N}(0, \mathbb{I})$.
+To estimate true latent actions distribution $q(\boldsymbol{z}_0 \mid s_1)$ in Equation~\ref{eq:cep-latent}, we utilize the pretrained encoder $q_{\boldsymbol{\phi}}$ and score-based prior $p_{\theta}$ to generate $M$ support latent actions $\{\hat{\boldsymbol{z}_0}^{(i)}\}_M$ for each initial state $s_1$ by diffusion sampling.
+The contrastive loss in Equation~(\ref{eq:cep-latent}) is then estimated by:
+\begin{equation}\label{eq:cep-latent-final}
+    \min_\eta \mathbb{E}_{k, s_1, \epsilon}-\sum_{i=1}^M \frac{e^{-\beta\mathcal{E}_0(h(\hat{\boldsymbol{z}}_0^{(i)},s_1))}}{\sum_{j=1}^M e^{-\beta\mathcal{E}_0(h(\hat{\boldsymbol{z}}_0^{(j)},s_1))}} \log \frac{e^{f_\eta\left(\hat{\boldsymbol{z}}_k^{(i)},s_1,k\right)}}{\sum_{j=1}^M e^{f_\eta\left(\hat{\boldsymbol{z}}_k^{(j)},s_1,k\right)}},
+\end{equation} where $\hat{\boldsymbol{z}_0}^{(i)},\hat{\boldsymbol{z}_0}^{(j)}$ correspond to the support latent actions for each initial state $s_1$. 
+
+\subsection{Algorithm Summary}\label{sec:alg-summary}
+
+In general, the training phase of \texttt{LatentDiffuse} is composed of three parts, corresponding to the training of encoder and decoders $\{q_{\boldsymbol{\phi}},p_{\boldsymbol{\psi}}\}$, score-based prior $p_{\theta}$, and intermediated energy model $f_{\eta}$, as shown in Algorithm~\ref{alg:latent-diffuser}.
+Throughout the training process, it is imperative to employ two distinct datasets:
+the first being a standard offline RL dataset, $\mathcal{D}$, which encompasses trajectories sampled from behavior policies, whereas the second dataset consists of support latent actions for each initial state $s_1 \in \mathcal{D}$, generated by the pre-trained VAE, i.e., the encoder, score-based prior and decoders.
+
+\begin{algorithm*}[htb!]
+    \caption{\texttt{LatentDiffuser}: Efficient Planning with Latent Diffusion}
+    \label{alg:latent-diffuser}
+        \begin{algorithmic}
+            \STATE Initialize the latent diffusion model, i.e., the encoder $q_{\boldsymbol{\phi}}$, the score-based prior $p_{\theta}$ and the decoder $p_{\boldsymbol{\psi}}$; the intermediate energy model $f_{\eta}$
+            \FOR[{Training the encoder and decoders}]{each gradient step}
+                \STATE Sample $B_1$ trajectories $\tau$ from offline dataset $\mathcal{D}$
+                \STATE Generate reconstructed trajectories $\hat{\tau}$ with the encoder $q_{\boldsymbol{\phi}}$ and decoder $p_{\boldsymbol{\psi}}$
+                \STATE Update $\{\boldsymbol{\phi},\boldsymbol{\psi}\}$ based on the standard \textcolor{gray}{\textit{VAE loss}}
+            \ENDFOR
+            \FOR[{Training the score-based prior}]{each gradient step}
+                \STATE Sample $B_2$ trajectories $\tau$ from offline dataset $\mathcal{D}$
+                \STATE Sample $B_2$ Gaussian noises $\epsilon$ from $\mathcal{N}(0,\mathbf{I})$ and $B_2$ time $k$ from $\mathcal{U}(0, K)$
+                \STATE Generate latent actions $\boldsymbol{z}_0$ with the pretrained encoder $q_{\boldsymbol{\phi}}$ and decoder $p_{\boldsymbol{\psi}}$
+                \STATE Perturb $\boldsymbol{z}_0$ according to $\boldsymbol{z}_k := \alpha_k \boldsymbol{z}_0 + \sigma_k \epsilon$
+
+            \ENDFOR
+            \FOR[Generating the support latent actions]{each initial state $s_1$ in offline dataset $\mathcal{D}$}
+                \STATE Sample $M$ support latent actions $\{\hat{\boldsymbol{z}_0}^{(i)}\}_M$ from the pretrained score-based prior $p_{\theta}$
+            \ENDFOR
+            \FOR[Training the intermediate energy model]{each gradient step}
+                \STATE Sample $B_3$ initial state $s_1$ from offline dataset $\mathcal{D}$
+                \STATE Sample $B_3$ Gaussian noises $\epsilon$ from $\mathcal{N}(0,\mathbf{I})$ and $B_3$ time $k$ from $\mathcal{U}(0, K)$
+                \STATE Retrieve support latent actions $\{\hat{\boldsymbol{z}_0}^{(i)}\}_M$ for each $s_1$
+                \STATE Perturb $\hat{\boldsymbol{z}_0}^{(i)}$ according to $\hat{\boldsymbol{z}_k}^{(i)}:=\alpha_k \hat{\boldsymbol{z}_0}^{(i)} + \sigma_k \epsilon$
+                \STATE Update $\{\eta\}$ based on the \textcolor{gray}{\textit{contrastive loss}} in Equation~(\ref{eq:cep-latent-final})
+            \ENDFOR
+    \end{algorithmic}
+\end{algorithm*}
+Moreover, the optimal planning is tantamount to conducting conditional diffusion sampling based on the score-based prior and the intermediate energy model.
+Formally, the generation employs reverse denoising process at each diffusion timestep $k$ by utilizing the score function $ \nabla_{\boldsymbol{z}_k} \log p_k\left(\boldsymbol{z}_k \mid s_1\right)$ based on the score function of the score-based prior $\nabla_{\boldsymbol{z}_k} \log q_k\left(\boldsymbol{z}_k \mid s_1\right)$ and intermediate energy model $\nabla_{\boldsymbol{z}_k} \mathcal{E}_k\left(h(\boldsymbol{z}_k, s_1)\right)$, along with the state and action decoder $p_{\boldsymbol{\psi}}\left(\tau \mid s_1, \boldsymbol{z}_0\right)$ to map the sampled latent actions $\boldsymbol{z}_0$ back to the original trajectory space. 
+Explicitly, the generative process is $p\left(s_1,\boldsymbol{z}_0,\tau\right)=p_{0}\left(\boldsymbol{z}_0 \mid s_1\right) p_{\boldsymbol{\psi}}\left(\tau \mid s_1,\boldsymbol{z}_0\right)$.
+To avoid the accumulation of errors during sampling, we adopt the \textit{receding horizon control} used in the existing methods~\citep{ajay2022conditional,hdmi}.
+
+
+
+\section{Experiments}
+
+
+This section aims to assess the efficacy of the \texttt{LatentDiffuser} for extended temporal offline tasks in comparison to current SOTA offline RL methods, which integrate hierarchical structures, and conditional generation models. 
+The empirical evaluation encompasses three task categories derived from D4RL~\citep{fu2020d4rl}: namely, \textit{Gym locomotion control}, \textit{Adroit}, and \textit{AntMaze}. 
+Gym locomotion tasks function as a proof-of-concept in the lower-dimensional realm, in order to ascertain whether \texttt{LatentDiffuser} is capable of accurately reconstructing trajectories for decision-making and control purposes. 
+Subsequently, \texttt{LatentDiffuser} is evaluated on Adroit—a task with significant state and action dimensionality—as well as on \texttt{LatentDiffuser} within the AntMaze environment, which represents a sparse-reward continuous-control challenge in a series of extensive long-horizon maps~\citep{hdmi}. 
+The subsequent sections will describe and examine the performance of these tasks and their respective baselines individually. 
+Scores within $5\%$ of the maximum per task will be emphasized in bold~\citep{iql}.
+
+\subsection{Proof-of-Concept: Gym Locomotion Control}
+
+\paragraph{Baselines}
+
+Initially, an outline of the baselines is provided: CQL~\citep{kumar2020conservative}, IQL~\citep{iql}, D-QL~\citep{wang2023diffusion}, and QGPO~\citep{cep} are all model-free offline RL methods. 
+MoReL~\citep{kidambi2020morel} is a model-based offline RL method. 
+DT~\citep{dt}, TT~\citep{tt}, Diffuser~\citep{janner2022planning}, and DD~\citep{ajay2022conditional} address offline RL tasks via conditional generative modeling. 
+Finally, TAP~\citep{jiang2023efficient} and HDMI~\citep{hdmi} employ a hierarchical framework grounded in generative modeling. 
+\begin{table}[htb!]
+\centering
+\caption{The performance in Gym locomotion control in terms of normalized average returns. Results correspond to the mean and standard error over $5$ planning seeds.}
+\label{tab:locomotion-main}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrrrr}
+\toprule
+\multicolumn{1}{c}{\textbf{Dataset}} &
+  \multicolumn{1}{c}{\textbf{Environment}} &
+  \multicolumn{1}{c}{\textbf{CQL}} &
+  \multicolumn{1}{c}{\textbf{TT}} &
+  \multicolumn{1}{c}{\textbf{DD}} &
+  \multicolumn{1}{c}{\textbf{D-QL}} &
+  \multicolumn{1}{c}{\textbf{TAP}} &
+  \multicolumn{1}{c}{\textbf{QGPO}} &
+  \multicolumn{1}{c}{\textbf{HDMI}} &
+  \multicolumn{1}{c}{\textbf{LD}} \\ \hline
+Med-Expert &
+  HalfCheetah &
+  91.6 &
+  \textbf{95} &
+  90.6$\pm$1.3 &
+  \textbf{96.8$\pm$0.3} &
+  91.8 $\pm$ 0.8 &
+  \textbf{93.5$\pm$0.3} &
+  \textbf{92.1$\pm$1.4} &
+  \textbf{95.2$\pm$0.2} \\
+Med-Expert &
+  Hopper &
+  105.4 &
+  \textbf{110.0} &
+  \textbf{111.8$\pm$1.8} &
+  \textbf{111.1$\pm$1.3} &
+  105.5 $\pm$ 1.7 &
+  \textbf{108.0$\pm$2.5} &
+  \textbf{113.5$\pm$0.9} &
+  \textbf{112.9$\pm$0.3} \\
+Med-Expert &
+  Walker2d &
+  \textbf{108.8} &
+  101.9 &
+  \textbf{108.8$\pm$1.7} &
+  \textbf{110.1$\pm$0.3} &
+  \textbf{107.4 $\pm$ 0.9} &
+  \textbf{110.7 $\pm$ 0.6} &
+  \textbf{107.9$\pm$1.2} &
+  \textbf{111.3$\pm$0.2} \\ \hline
+Medium &
+  HalfCheetah &
+  44.0 &
+  46.9 &
+  49.1$\pm$1.0 &
+  51.1$\pm$0.5 &
+  45.0 $\pm$ 0.1 &
+  \textbf{54.1 $\pm$ 0.4} &
+  48.0$\pm$0.9 &
+  \textbf{53.6$\pm$0.4} \\
+Medium &
+  Hopper &
+  58.5 &
+  61.1 &
+  79.3$\pm$3.6 &
+  90.5$\pm$4.6 &
+  63.4 $\pm$ 1.4 &
+  \textbf{98.0 $\pm$ 2.6} &
+  76.4$\pm$2.6 &
+  \textbf{98.5$\pm$0.7} \\
+Medium &
+  Walker2d &
+  72.5 &
+  79 &
+  82.5$\pm$1.4 &
+  \textbf{87.0$\pm$0.9} &
+  64.9 $\pm$ 2.1 &
+  \textbf{86.0 $\pm$ 0.7} &
+  79.9$\pm$1.8 &
+  \textbf{86.3$\pm$0.9} \\ \hline
+Med-Replay &
+  HalfCheetah &
+  \textbf{45.5} &
+  41.9 &
+  39.3$\pm$4.1 &
+  \textbf{47.8$\pm$0.3} &
+  40.8 $\pm$ 0.6 &
+  \textbf{47.6 $\pm$ 1.4} &
+  44.9$\pm$2.0 &
+  \textbf{47.3$\pm$1.2} \\
+Med-Replay &
+  Hopper &
+  95 &
+  91.5 &
+  \textbf{100$\pm$0.7} &
+  \textbf{101.3$\pm$0.6} &
+  87.3 $\pm$ 2.3 &
+  \textbf{96.9 $\pm$ 2.6} &
+  \textbf{99.6$\pm$1.5} &
+  \textbf{100.4$\pm$0.5} \\
+Med-Replay &
+  Walker2d &
+  77.2 &
+  \textbf{82.6} &
+  75$\pm$4.3 &
+  \textbf{95.5$\pm$1.5} &
+  66.8 $\pm$ 3.1 &
+  84.4 $\pm$ 4.1 &
+  80.7$\pm$2.1 &
+  82.6 $\pm$ 2.1 \\ \hline
+\multicolumn{2}{c}{\textbf{Average}} &
+  77.6 &
+  78.9 &
+  81.8 &
+  \textbf{88.0} &
+  82.5 &
+  \textbf{86.6} &
+  82.6 &
+  \textbf{87.5} \\ \toprule
+\end{tabular}%
+}
+\end{table}
+
+Table~\ref{tab:locomotion-main} shows that \texttt{LatentDiffuser} surpasses offline RL methods in the majority of tasks. 
+Furthermore, the performance discrepancy between \texttt{LatentDiffuser} and two-stage algorithms, such as TAP and HDMI, underscores the benefits provided by the the proposed framework, which unifies learning of latent action space representation and planning.
+
+\subsection{High-dimensional MDP: Adroit}
+
+\paragraph{Baselines}
+
+Taking into account the large dimensions characterizing the Adroit task actions, only baselines that perform well in the previous task are evaluated. 
+Additionally, D-QL necessitates $50$ repeated samplings by default for action generation~\citep{wang2023diffusion}. 
+This requirement would result in a substantial training overhead for high-dimensional action tasks. 
+Consequently, to ensure a fair comparison, D-QL is configured to allow only $1$ sampling, akin to QGPO~\citep{cep}.
+\begin{table}[htb!]
+\centering
+\caption{Adroit results. These tasks have high action dimensionality ($24$ degrees of freedom)}
+\label{tab:adroit}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrrrr}
+\toprule
+\textbf{Dataset} &
+  \textbf{Environment} &
+  \multicolumn{1}{c}{\textbf{CQL}} &
+  \multicolumn{1}{c}{\textbf{TT}} &
+  \multicolumn{1}{c}{\textbf{DD}} &
+  \multicolumn{1}{c}{\textbf{D-QL@1}} &
+  \multicolumn{1}{c}{\textbf{TAP}} &
+  \multicolumn{1}{c}{\textbf{QGPO}} &
+  \multicolumn{1}{c}{\textbf{HDMI}} &
+  \multicolumn{1}{c}{\textbf{LD}} \\ \hline
+Human &
+  Pen &
+  37.5 &
+  36.4 &
+  64.1 $\pm$ 9.0 &
+  66.0 $\pm$ 8.3 &
+  \textbf{76.5 $\pm$ 8.5} &
+  73.9 $\pm$ 8.6 &
+  66.2 $\pm$ 8.8 &
+  \textbf{79.0 $\pm$ 8.1} \\
+Human &
+  Hammer &
+  \textbf{4.4} &
+  0.8 &
+  1.0 $\pm$ 0.1 &
+  1.3 $\pm$ 0.1 &
+  1.4 $\pm$ 0.1 &
+  1.4 $\pm$ 0.1 &
+  1.2 $\pm$ 0.1 &
+  \textbf{4.6 $\pm$ 0.1} \\
+Human &
+  Door &
+  \textbf{9.9} &
+  0.1 &
+  6.9 $\pm$ 1.2 &
+  8.0 $\pm$ 1.2 &
+  8.8 $\pm$ 1.1 &
+  8.5 $\pm$ 1.2 &
+  7.1 $\pm$ 1.1 &
+  \textbf{9.8 $\pm$ 1.0} \\
+Human &
+  Relocate &
+  \textbf{0.2} &
+  0.0 &
+  \textbf{0.2 $\pm$ 0.1} &
+  \textbf{0.2 $\pm$ 0.1} &
+  \textbf{0.2 $\pm$ 0.1} &
+  \textbf{0.2 $\pm$ 0.1} &
+  0.1 $\pm$ 0.1 &
+  \textbf{0.2 $\pm$ 0.1} \\ \hline
+Cloned &
+  Pen &
+  39.2 &
+  11.4 &
+  47.7 $\pm$ 9.2 &
+  49.3 $\pm$ 8.0 &
+  57.4 $\pm$ 8.7 &
+  54.2 $\pm$ 9.0 &
+  48.3 $\pm$ 8.9 &
+  \textbf{60.7 $\pm$ 9.1} \\
+Cloned &
+  Hammer &
+  2.1 &
+  0.5 &
+  0.9 $\pm$ 0.1 &
+  1.1 $\pm$ 0.1 &
+  1.2 $\pm$ 0.1 &
+  1.1 $\pm$ 0.1 &
+  1.0 $\pm$ 0.1 &
+  \textbf{4.2 $\pm$ 0.1} \\
+Cloned &
+  Door &
+  0.4 &
+  -0.1 &
+  9.0 $\pm$ 1.6 &
+  10.6 $\pm$ 1.7 &
+  \textbf{11.7 $\pm$ 1.5} &
+  11.2 $\pm$ 1.4 &
+  9.3 $\pm$ 1.6 &
+  \textbf{12.0 $\pm$ 1.6} \\
+Cloned &
+  Relocate &
+  \textbf{-0.1} &
+  \textbf{-0.1} &
+  -0.2 $\pm$ 0.0 &
+  -0.2 $\pm$ 0.0 &
+  -0.2 $\pm$ 0.0 &
+  -0.2 $\pm$ 0.0 &
+  \textbf{-0.1 $\pm$ 0.0} &
+  \textbf{-0.1 $\pm$ 0.0} \\ \hline
+Expert &
+  Pen &
+  107.0 &
+  72.0 &
+  107.6 $\pm$ 7.6 &
+  112.6 $\pm$ 8.1 &
+  \textbf{127.4 $\pm$ 7.7} &
+  119.1 $\pm$ 8.1 &
+  109.5 $\pm$ 8.0 &
+  \textbf{131.2 $\pm$ 7.3} \\
+Expert &
+  Hammer &
+  86.7 &
+  15.5 &
+  106.7 $\pm$ 1.8 &
+  114.8 $\pm$ 1.7 &
+  \textbf{127.6 $\pm$ 1.7} &
+  123.2 $\pm$ 1.8 &
+  111.8 $\pm$ 1.7 &
+  \textbf{132.5 $\pm$ 1.8} \\
+Expert &
+  Door &
+  101.5 &
+  94.1 &
+  87.0 $\pm$ 0.8 &
+  93.7 $\pm$ 0.8 &
+  104.8 $\pm$ 0.8 &
+  98.8 $\pm$ 0.8 &
+  85.9 $\pm$ 0.9 &
+  \textbf{111.9 $\pm$ 0.8} \\
+Expert &
+  Relocate &
+  95.0 &
+  10.3 &
+  87.5 $\pm$ 2.8 &
+  95.2 $\pm$ 2.8 &
+  \textbf{105.8 $\pm$ 2.7} &
+  102.5 $\pm$ 2.8 &
+  91.3 $\pm$ 2.6 &
+  \textbf{109.5 $\pm$ 2.8} \\ \hline
+\multicolumn{2}{c}{\textbf{Average (w/o expert)}} &
+  \multicolumn{1}{c}{11.7} &
+  \multicolumn{1}{c}{6.1} &
+  \multicolumn{1}{c}{16.2} &
+  \multicolumn{1}{c}{17.1} &
+  \multicolumn{1}{c}{19.6} &
+  \multicolumn{1}{c}{18.79} &
+  \multicolumn{1}{c}{16.6} &
+  \multicolumn{1}{c}{21.3} \\ \hline \hline
+\multicolumn{2}{c}{\textbf{Average (w/ expert)}} &
+  \multicolumn{1}{c}{40.3} &
+  \multicolumn{1}{c}{20.1} &
+  \multicolumn{1}{c}{43.2} &
+  \multicolumn{1}{c}{46.1} &
+  \multicolumn{1}{c}{\textbf{51.9}} &
+  \multicolumn{1}{c}{49.5} &
+  \multicolumn{1}{c}{44.3} &
+  \multicolumn{1}{c}{\textbf{54.6}} \\ \toprule
+\end{tabular}%
+}
+\end{table}
+
+Table~\ref{tab:adroit} demonstrates the advantages of \texttt{LatentDiffuser} become even more pronounced in high-dimensional tasks. 
+Furthermore, a marked decrease in sequence modeling method performance is observed. 
+Two primary factors are identified: 
+first, larger action dimensions necessitate tokenization- and autoregression-based techniques (such as TT) to process increasingly lengthy sequences; 
+second, DD and HDMI employ an inverse dynamic model to generate actions independently, while the expansion in action dimension renders the model fitting process more challenging.
+
+\subsection{Long-horizion Continuous Control: AntMaze}
+
+\paragraph{Baselines}
+
+To validate the benefits of latent actions in longer-horizon tasks, an additional comparison is made with hierarchical offline RL methods designed explicitly for long-horizon tasks: CompILE~\citep{kipf2019compile}, GoFAR~\citep{ma2022offline}, and HiGoC~\citep{li2022hierarchical}. 
+Concurrently, CQL and TT are removed due to their inability to perform well in high-dimensional Adroit.
+
+\begin{table}[htb!]
+\centering
+\caption{AntMaze performance correspond to the mean and standard error over $5$ seeds.}
+\label{tab:antmaze}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrrrrrr}
+\toprule
+\multicolumn{2}{c}{\textbf{Environment}} &
+  \multicolumn{1}{c}{\textbf{CompILE}} &
+  \multicolumn{1}{c}{\textbf{GoFAR}} &
+  \multicolumn{1}{c}{\textbf{HiGoC}} &
+  \multicolumn{1}{c}{\textbf{DD}} &
+  \multicolumn{1}{c}{\textbf{D-QL@1}} &
+  \multicolumn{1}{c}{\textbf{TAP}} &
+  \multicolumn{1}{c}{\textbf{QGPO}} &
+  \multicolumn{1}{c}{\textbf{HDMI}} &
+  \multicolumn{1}{c}{\textbf{LD}} \\ \hline
+AntMaze-Play &
+  U-Maze-3 &
+  $41.2 \pm 3.6$ &
+  $38.5 \pm 2.2$ &
+  $31.2 \pm 3.2$ &
+  $73.1 \pm 2.5$ &
+  $52.9 \pm 4.1$ &
+  \textbf{82.2$\pm$ 2.1} &
+  $59.3 \pm 1.3$ &
+  \textbf{86.1$\pm$ 2.4} &
+  \textbf{85.4$\pm$ 1.9} \\
+AntMaze-Diverse &
+  U-Maze-3 &
+  $23.5 \pm 1.8$ &
+  $25.1 \pm 3.1$ &
+  $25.5 \pm 1.6$ &
+  $49.2 \pm 3.1$ &
+  $32.5 \pm 5.9$ &
+  69.8$\pm$0.5 &
+  $38.5 \pm 2.6$ &
+  \textbf{73.7$\pm$1.1} &
+  \textbf{75.6$\pm$2.1} \\
+AntMaze-Diverse &
+  Large-2 &
+  - &
+  - &
+  - &
+  $46.8 \pm 4.4$ &
+  - &
+  69.2$\pm$3.2 &
+  - &
+  71.5$\pm$3.5 &
+  \textbf{75.8$\pm$2.0} \\ \hline
+\multicolumn{2}{c}{\textbf{Single-task Average}} &
+  \multicolumn{1}{c}{$32.4$} &
+  \multicolumn{1}{c}{$31.8$} &
+  \multicolumn{1}{c}{$28.4$} &
+  \multicolumn{1}{c}{$56.4$} &
+  \multicolumn{1}{c}{$39.0$} &
+  \multicolumn{1}{c}{73.7} &
+  \multicolumn{1}{c}{$45.4$} &
+  \multicolumn{1}{c}{\textbf{77.1}} &
+  \multicolumn{1}{c}{\textbf{78.9}} \\ \hline \hline
+MultiAnt-Diverse &
+  Large-2 &
+  - &
+  - &
+  - &
+  $45.2 \pm 4.9$ &
+  - &
+  \textbf{71.6 $\pm$ 3.3} &
+  - &
+  \textbf{73.6 $\pm$ 3.8} &
+  \textbf{73.3 $\pm$ 2.6} \\ \hline \hline
+\multicolumn{2}{c}{\textbf{Multi-task Average}} &
+  - &
+  - &
+  - &
+  \multicolumn{1}{c}{$45.2$} &
+  - &
+  \multicolumn{1}{c}{\textbf{71.6}} &
+  - &
+  \multicolumn{1}{c}{\textbf{73.6}} &
+  \multicolumn{1}{c}{\textbf{73.3}} \\ \toprule
+\end{tabular}%
+}
+\end{table}
+
+Table~\ref{tab:antmaze} highlights that sequence modeling-based hierarchical methods significantly surpass RL-based approaches. 
+Moreover, \texttt{LatentDiffuser} demonstrates performance comparable to two-stage techniques such as TAP and HDMI through end-to-end training.
+
+
+
+\section{Conclusions}
+
+
+In this work, we present a novel approach, \texttt{LatentDiffuser}, for tackling temporal-extended offline tasks, addressing the limitations of previous state-of-the-art offline reinforcement learning methods and conditional generation models in handling high-dimensional, long-horizon tasks. 
+\texttt{LatentDiffuser} is capable of end-to-end learning for both latent action space representation and latent action planning, delivering a unified, comprehensive solution for offline decision-making and control.
+Numerical results on \textit{Gym locomotion control}, \textit{Adroit}, and \textit{AntMaze}, demonstrate the effectiveness of \texttt{LatentDiffuser} in comparison with existing hierarchical- and planning-based offline methods. 
+The performance gains are particularly noticeable in high-dimensional and long-horizon tasks, illustrating the advantages of \texttt{LatentDiffuser} in addressing these challenging scenarios.
+
+
+
+

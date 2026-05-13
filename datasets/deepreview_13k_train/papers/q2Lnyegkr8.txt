@@ -1,0 +1,195 @@
+\title{Forgetting Transformer: Softmax Attention with a Forget Gate}
+
+\begin{abstract}
+An essential component of modern recurrent sequence models is the *forget gate*. While Transformers do not have an explicit recurrent form, we show that a forget gate can be naturally incorporated into Transformers by down-weighting the unnormalized attention scores in a data-dependent way. We name the resulting model the *Forgetting Transformer*. We show that the Forgetting Transformer outperforms the Transformer on long-context language modeling, length extrapolation, and short-context downstream tasks, while performing on par with the Transformer on long-context downstream tasks. Moreover, it is fully compatible with the Flash Attention algorithm and does not require any positional embeddings.  Several analyses, including the needle-in-the-haystack test, show that the Forgetting Transformer also retains the Transformer's superior long-context capabilities over recurrent sequence models such as Mamba-2, HGRN2, and DeltaNet.  We also introduce a  "Pro" block design that incorporates some common architectural components in recurrent sequence models and find it significantly improves the performance of both the Forgetting Transformer and the Transformer.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Despite the growing interest in reviving recurrent sequence models (Gu et al., 2021; Peng et al., 2021; Yang et al., 2023; Gu & Dao, 2023; Sun et al., 2023; De et al., 2024; Qin et al., 2024b; Dao & Gu, 2024; Peng et al., 2024; Beck et al., 2024; Zhang et al., 2024), these models still underperform the Transformer (Vaswani et al., 2017) in terms of long-context capabilities (Hsieh et al., 2024; Waleffe et al., 2024; Shen et al., 2024; Qin et al., 2024a), likely due to their relatively small fixedsized hidden states (Jelassi et al., 2024). While the Transformer excels in handling long-context information, it lacks an explicit mechanism for forgetting past information in a data-dependent way. Such a mechanism – often implemented as some form of the forget gate (Gers et al., 2000) – is ubiquitous in recurrent sequence models and has proven critical in their success in short-context tasks (Greff et al., 2016; Van Der Westhuizen & Lasenby, 2018; Peng et al., 2021; Yang et al., 2023; Gu & Dao, 2023). A natural question to ask is then: can we have a forget gate in Transformers?  
+
+To address this question, we leverage an important fact: many recurrent sequence models with a forget gate can be written in a parallel linear attention form (Katharopoulos et al., 2020) analogous to softmax attention (Yang et al., 2023; Dao & Gu, 2024). In this parallel form, the forget gate mechanism translates into down-weighing the unnormalized attention scores in a data-dependent way. Our key insight is that this exact mechanism is also applicable to softmax attention. We name the resulting model the Forgetting Transformer.  
+
+We show that the Forgetting Transformer outperforms the Transformer on long-context language modeling, length extrapolation, and short-context downstream tasks, while performing on par with the Transformer on long-context downstream tasks. Notably, it does not require any positional embeddings. It also retains the ability of the Transformer to perform accurate long-context retrieval and achieves perfect accuracy in a simplified needle-in-the-haystack test (Kamradt, 2023). In contrast, all the tested recurrent sequence models fail. We also introduce a “Pro” block design that integrates several architectural components commonly used in recurrent sequence models, which significantly improves the performance of both the Forgetting Transformer and the baseline Transformer. Finally, we show that the Forgetting Transformer can be implemented in a hardware-aware way with a simple modification to the Flash Attention (Dao, 2023) algorithm.  
+
+
+
+\section{2 BACKGROUND: LINEAR ATTENTION WITH A FORGET GATE  }
+
+
+This section introduces the notation used in this work and gives a brief background on linear attention. We also introduce a gated variant of linear attention and discuss its parallel form, which naturally leads to the Forgetting Transformer. Throughout this work, we only consider causal sequence modeling. We also mainly consider the single-head case; extension to the multi-head case is straightforward.  
+
+2.1 LINEAR ATTENTION  
+
+Standard causal softmax attention takes a sequence of input vectors $({\pmb x}_{i})_{i=1}^{L}$ and produces a sequence of output vectors $(o_{i})_{i=1}^{L}$ , where $\mathbf{\boldsymbol{x}}_{i},\mathbf{\boldsymbol{o}}_{i}\in\mathbb{R}^{d},i\in\{1,\ldots,L\}$ . Each $\pmb{o}_{i}$ is computed as follows:  
+
+$$
+\begin{array}{r l}&{\quad\quad q_{i},k_{i},v_{i}=W_{q}x_{i},W_{k}x_{i},W_{v}x_{i}\in\mathbb{R}^{d},}\\ &{\quad\quad\quad\displaystyle\sigma_{i}=\frac{\sum_{j=1}^{i}k_{\mathrm{exp}}(q_{i},k_{j})v_{j}}{\sum_{j=1}^{i}k_{\mathrm{exp}}(q_{i},k_{j})}=\frac{\sum_{j=1}^{i}\exp(q_{i}^{\top}k_{j})v_{j}}{\sum_{j=1}^{i}\exp(q_{i}^{\top}k_{j})},}\end{array}
+$$  
+
+where $\pmb{W_{q}},\pmb{W_{k}},\pmb{W_{v}}\in\mathbb{R}^{d\times d}$ are projection matrices and $k_{\mathrm{exp}}(\boldsymbol{q},\boldsymbol{k})=\exp(\boldsymbol{q}^{\intercal}\boldsymbol{k})$ is the exponential dot product kernel.1  
+
+Linear attention (Katharopoulos et al., 2020) replaces the exponential dot product kernel $k_{\mathrm{exp}}(\boldsymbol{q},\boldsymbol{k})=\exp(\boldsymbol{q}^{\intercal}\boldsymbol{k})$ with a kernel $k_{\phi}(\pmb q,\pmb k)$ with some feature representation $\phi:\mathbb{R}^{d}\rightarrow(\mathbb{R}^{+})^{d^{\prime}}$ :  
+
+$$
+\pmb{o}_{i}=\frac{\sum_{j=1}^{i}k_{\phi}(\pmb{q}_{i},\pmb{k}_{j})\pmb{v}_{j}}{\sum_{j=1}^{i}k_{\phi}(\pmb{q}_{i},\pmb{k}_{j})}=\frac{\sum_{j=1}^{i}(\phi(\pmb{q}_{i})^{\top}\phi(\pmb{k}_{j}))\pmb{v}_{j}}{\sum_{j=1}^{i}\phi(\pmb{q}_{i})^{\top}\phi(\pmb{k}_{j})}
+$$  
+
+Following Yang et al. (2023), we call the above the parallel form of linear attention as it can be computed with matrix multiplications. Alternatively, linear attention can be computed in a recurrent form:  
+
+$$
+\begin{array}{r l}&{\boldsymbol{S}_{t}=\boldsymbol{S}_{t-1}+\boldsymbol{v}_{t}\phi(\boldsymbol{k}_{t})^{\top}}\\ &{\boldsymbol{z}_{t}=\boldsymbol{z}_{t-1}+\phi(\boldsymbol{k}_{t})}\\ &{\boldsymbol{o}_{t}=\frac{\boldsymbol{S}_{t}\phi(\boldsymbol{q}_{t})}{\boldsymbol{z}_{t}^{\top}\phi(\boldsymbol{q}_{t})},}\end{array}
+$$  
+
+where $\pmb{S}_{t}\in\mathbb{R}^{d\times d^{\prime}},\pmb{z}_{t}\in\mathbb{R}^{d^{\prime}},t\in\{0,\dots,L\}$ are computed recurrently, with $S_{0}=\mathbf{0}$ and $z_{t}=\mathbf{0}$  
+
+2.2 LINEAR ATTENTION WITH A FORGET GATE  
+
+The recurrent form of linear attention makes it natural to introduce a forget gate. Specifically, we can compute a scalar forget gate $f_{t}=\sigma(\pmb{w}_{f}^{\top}\pmb{x}_{t}+b_{f})\in\mathbb{R}$ at each timestep, where $\sigma$ is the sigmoid function and $\pmb{w}_{f}\in\mathbb{R}^{d},b_{f}\in\mathbb{R}$ are learnable parameters. The recurrent computation is then:  
+
+$$
+\begin{array}{l}{{{\displaystyle{\cal S}_{t}=f_{t}{\cal S}_{t-1}+v_{t}\phi(k_{t})^{\top}}}}\\ {{{\displaystyle z_{t}=f_{t}z_{t-1}+\phi(k_{t})}}}\\ {{{\displaystyle o_{t}=\frac{{\cal S}_{t}\phi(q_{t})}{z_{t}^{\top}\phi(q_{t})}}.}}\end{array}
+$$  
+
+Note that this gated variant of linear attention differs from most models in the literature. In particular, most gated variants of linear attention models such as GLA (Yang et al., 2023) and Mamba-2 (Dao & Gu, 2024) do not have the normalization term (i.e., there is no $\boldsymbol{z}_{t}$ and the output is just $o_{t}=$ $S_{t}\phi(\pmb{q}_{t}))$ . We keep the normalization term to maintain similarity with softmax attention. The most similar model is gated-RFA (Peng et al., 2021), with the only difference being the lack of a $(1-f_{t})$ term in the recurrence.  
+
+Crucially, similar to the normalization-free version derived in GLA and Mamba-2, we can show that this gated variant of linear attention also has a parallel form:  
+
+$$
+\pmb{o}_{i}=\frac{\sum_{j=1}^{i}F_{i j}\phi(\pmb{q}_{i})^{\top}\phi(\pmb{k}_{j})\pmb{v}_{j}}{\sum_{j=1}^{i}F_{i j}\phi(\pmb{q}_{i})^{\top}\phi(\pmb{k}_{j})}=\frac{\sum_{j=1}^{i}F_{i j}k_{\phi}(\pmb{q}_{i},\pmb{k}_{j})\pmb{v}_{j}}{\sum_{j=1}^{i}F_{i j}k_{\phi}(\pmb{q}_{i},\pmb{k}_{j})},
+$$  
+
+where $\begin{array}{r}{F_{i j}=\prod_{l=j+1}^{i}f_{l}}\end{array}$ . We adopt the convention that $F_{i j}=1$ if $i=j$ .  
+
+Our key observation is that Equation 10 and the softmax attention in Equation 2 are very similar in form. In fact, if we just change the kernel $k_{\phi}$ in Equation 10 back to the exponential dot product kernel $k_{\mathrm{exp}}$ , we obtain the softmax attention with a forget gate. We introduce this formally in the next section.  
+
+
+
+\section{3 FORGETTING TRANSFORMER  }
+
+
+Our proposed model, the Forgetting Transformer (also abbreviated as $F o T$ throughout this work), features a modified softmax attention mechanism with a forget gate. We name this attention mechanism the Forgetting Attention. Similar to the gated variant of linear attention introduced in the previous section, we first compute a scalar forget gate $f_{t}=\sigma(\pmb{w}_{f}^{\top}\pmb{x}_{t}+b_{f})\in\mathbb{R}$ for each timestep $t$ . The output of the attention is then  
+
+$$
+o_{i}=\frac{\sum_{j=1}^{i}F_{i j}\exp(\pmb q_{i}^{\top}k_{j})\pmb v_{j}}{\sum_{j=1}^{i}F_{i j}\exp(\pmb q_{i}^{\top}k_{j})}=\frac{\sum_{j=1}^{i}\exp(\pmb q_{i}^{\top}k_{j}+d_{i j})\pmb v_{j}}{\sum_{j=1}^{i}\exp(\pmb q_{i}^{\top}k_{j}+d_{i j})},
+$$  
+
+where $\begin{array}{r}{F_{i j}=\prod_{l=j+1}^{i}f_{l}}\end{array}$ and $\begin{array}{r}{d_{i j}=\sum_{l=j+1}^{i}\log{f_{l}}}\end{array}$ . This can be written in matrix form:  
+
+$$
+\begin{array}{r l}&{D=\log{\pmb F}\in\mathbb{R}^{L\times L},}\\ &{O=\mathrm{softmax}({\pmb Q}{\pmb K}^{\top}+{\pmb D}){\pmb V}\in\mathbb{R}^{L\times d},}\end{array}
+$$  
+
+where $\pmb{F}\in\mathbb{R}^{L\times L}$ is a lower triangular matrix whose non-zero entries are $F_{i j}$ , i.e., $F_{i j}\,=\,F_{i j}$ if $i\geq j$ and 0 otherwise. We adopt the convention that $\log0\,=\,-\infty$ . $Q,K,V,O\,\in\,\mathbb{R}^{L\times d}$ are matrices containing ${\pmb q}_{i},{\pmb k}_{i},{\pmb v}_{i},{\pmb o}_{i},\dot{\pmb\iota}\in\ \{1,\ldots,L\}$ as the rows. The softmax operation is applied row-wise. For multi-head attention with $h$ heads, we maintain $h$ instances of forget gate parameters $(\pmb{w}_{f}^{(i)})_{i=1}^{h}$ and $(b_{f}^{(i)})_{i=1}^{h}$ and compute the forget gates separately for each head.  
+
+Hardware-aware implementation The logit bias form on the rightmost side of Equation 11 allows the Forgetting Attention to be computed with a simple modification to the Flash Attention (Dao, 2023) algorithm. Here we briefly describe the forward pass. The backward pass follows a similar idea. First, we compute the cumulative sum $\begin{array}{r}{c_{i}=\sum_{l=1}^{i}\log f_{l}}\end{array}$ for $i\,\in\,\{1,\ldots,L\}$ and store it in HBM. Note that this allows us to compute $d_{i j}\,=\,c_{i}\,-\,c_{j}$ easily later. Whenever we compute the attention logit via the dot product $\pmb q_{i}^{\top}\pmb k_{j}$ in the GPU’s fast shared memory (SRAM) (as in Flash Attention), we also load $c_{i}$ and $c_{j}$ to SRAM, compute $d_{i j}$ , and add the bias to the attention logit. The rest of the forward pass remains the same as Flash Attention. This algorithm avoids instantiating $L\times L\ d_{i j}$ matrices on the slow high-bandwidth memory of the GPU. Moreover, since the forget gates are scalars instead of vectors, the additional computation and parameter count introduced are negligible.  
+
+Connection to ALiBi Besides its natural connection to gated linear attention, the Forgetting Attention can also be seen as a data-dependent and learnable version of ALiBi (Press et al., 2021). ALiBi applies a data-independent bias $b_{i j}=-(i-j)m_{h}$ to the attention logits, where $m_{h}$ is a fixed slope specific to each head $h$ . It is easy to show that ALiBi is equivalent to Forgetting Attention with a fixed, head-specific, and data-independent forget gate $f_{t}=\exp(-m_{h})$ . In Section 4.5, we verify the superiority of Forgetting Attention over ALiBi-based attention.  
+
+Positional embeddings Though we find that using Rotary Position Embeddings (RoPE) (Su et al., 2024) slightly improves the performance of the Forgetting Transformer, it is not necessary as it is for the standard Transformer. For simplicity, we do not use RoPE or any other positional embeddings for the Forgetting Transformer by default. This is discussed further in Section 4.5.  
+
+![](images/ea0c21e6e8ea0bc37a49fc87e638e59b777ba016be354190c93c9c25a678884e.jpg)  
+Figure 1: Default architecture of FoT. (left) A single FoT block. (right) A single FoT (Pro) timemixing layer. All RMSNorms on the right are applied independently to each head. $\sigma$ is the sigmoid function. $\otimes$ represents element-wise multiplication. The ShiftLinear layer implements the computation in Equation 14.  
+
+Architecture design Forgetting Attention can be used as a drop-in replacement for standard softmax attention in any Transformer architecture. In this work we test two different architectures. First, we replace softmax attention $^+$ RoPE in the LLaMA architecture (Touvron et al., 2023) with Forgetting Attention and refer to this model as FoT (LLaMA). Second, we test an improved “Pro” architecture that incorporates output gates2 and output normalization used in GLA and Mamba-2 (with slight variations). We also use QK-norm (Dehghani et al., 2023) and apply a simplified variant of data-dependent token shift (Peng et al., 2024) to the keys and values (KV-shift). Concretely, to compute the keys $(k_{i})_{i=1}^{L}$ , we perform the following computation with additional parameters $\pmb{w}_{k}\in\mathbb{R}^{d}$ for each timestep $t$ :  
+
+$$
+\begin{array}{r l}&{\tilde{\boldsymbol{k}}_{t}=W_{\boldsymbol{k}}\boldsymbol{x}_{t}\in\mathbb{R}^{d},\quad\alpha_{t}^{\mathrm{key}}=\sigma(\boldsymbol{w}_{\boldsymbol{k}}^{\top}\boldsymbol{x}_{t})\in\mathbb{R}}\\ &{\boldsymbol{k}_{t}=\mathrm{RMSNorm}(\alpha_{t}^{\mathrm{key}}\tilde{\boldsymbol{k}}_{t-1}+(1-\alpha_{t}^{\mathrm{key}})\tilde{\boldsymbol{k}}_{t})}\end{array}
+$$  
+
+The values $({\pmb v}_{i})_{i=1}^{L}$ are computed in the same way, but without RMSNorm. As discussed in Olsson et al. (2022), token shift may be beneficial for forming induction heads. We refer to the resulting model as $F o T(P r o)$ .  
+
+4 EMPIRICAL STUDY  
+
+The advantage of Transformers in long-context capabilities over recurrent sequence models have been demonstrated multiple times (Hsieh et al., 2024; Waleffe et al., 2024; Shen et al., 2024; Qin et al., 2024a). However, a forget gate introduces a recency bias. It is thus natural to ask whether the Forgetting Transformer still maintains this advantage. Therefore, our empirical study places a special focus on long-context capabilities.  
+
+4.1 EXPERIMENTAL SETUP  
+
+Dataset We focus on long-context language modeling and train all models on LongCrawl64 (Buckman, 2024). LongCrawl64 is a filtered long-sequence subset of RedPajamav2 (Together Computer, 2023). It consists of pre-tokenized sequences truncated to exactly 65536 tokens.The sequences are tokenized with the TikToken tokenizer (OpenAI, 2022) for GPT-2 (Radford et al., 2019).  
+
+Baselines We are interested in two types of comparisons. First, to understand the benefits of the forget gate, we compare our proposed models with the standard Transformer. For the standard Transformer, we also test both the LLaMA architecture and our enhanced Pro architecture (referred to as Transformer (LLaMA) and Transformer $(P r o)$ repsectively). Similar to Xiong et al. (2023), we find it crucial to use a large RoPE angle $\theta$ for the Transformer. Following Xiong et al. (2023) we use $\theta=500000$ .  
+
+Second, to show the advantage of the Forgetting Transformer over recurrent sequence models in long-context capabilities, we compare with Mamba-2 (Dao & Gu, 2024), HGRN2 (Qin et al., 2024a), and DeltaNet (Yang et al., 2024). Notably, all of them have reported better language modeling perplexity and short-context downstream task performance than Transformers. The implementation of all models is based on the Flash Linear Attention repository (Yang & Zhang, 2024).  
+
+Training setup Due to limited compute resources, for our main experiments, we train models with 760M non-embedding parameters on a $15\times2^{30}$ -token (roughly 16B tokens) subset of LongCrawl64 with a training context length of 16384 tokens. This roughly matches the compute-optimal model size/data ratio in Chinchilla scaling law (Hoffmann et al., 2022). For the validation set, we use a $2\times2^{30}$ -token (roughly 2.1B tokens) subset of the LongCrawl64 held-out set consisting of sequences of 65536 tokens. We choose a much longer validation context length than the training context length to test the length generalization capabilities of the models.  
+
+All models are trained with AdamW (Loshchilov, 2017) with $(\beta_{1},\beta_{2})\,=\,(0.9,0.95)$ . We use a linear learning rate warmup from 0 to $1.25\times10^{-3}$ for the first $256\times2^{20}$ tokens and then a cosine decay schedule to $1.25\times\dot{1}0^{-4}$ . Each training batch contains $0.5\times2^{20}$ (roughly 0.5M) tokens. All models use a weight decay of 0.1 and gradient clipping of 1.0. We use bfloat16 mixed-precision training for all models.  
+
+4.2 LONG-CONTEXT LANGUAGE MODELING  
+
+Metrics Before we present our results, it is important to understand one of our main metrics: pertoken loss on the validation set at different token positions. To be precise, let $V$ be the vocabulary size, $\pmb{y}_{i}^{(j)}\in\{0,1\}^{V}$ be the one-hot vector encoding the language modeling target for the $i$ -th token in the $j$ -th validation sequence, and $p_{i}^{(j)}\,\in\,\mathbb{R}^{V}$ be the corresponding output probabilities of the model, then the per-token loss $L(i)$ at token position $i$ is simply  
+
+$$
+L(i)=\frac{1}{M}\sum_{j=1}^{M}-\log[(p_{i}^{(j)})^{\top}y_{i}^{(j)}],
+$$  
+
+where $M$ is the number of validation sequences.  
+
+The per-token loss is particularly meaningful for understanding the long-context capabilities of a model. Informally, a monotonically decreasing $L(i)$ with a steep slope indicates the model is using the full context well. On the other hand, if $L(i)$ plateaus after some token position $k$ , it indicates the model struggles to use tokens that are $k$ tokens away from the current token position for its prediction.  
+
+Besides per-token loss, we also report perplexity over different validation context lengths $P(l)$ . Specifically, perplexity over a context length $l$ is defined as $\begin{array}{r}{P(l)=\exp(\frac{1}{l}\sum_{i=1}^{l}L(i))}\end{array}$ . We warn the readers that the slope of $P(l)$ is less meaningful. Since $P(l)$ is just the exponential of the cumulative average of $L(i)$ , even if $L(i)$ plateaus after some token position $k$ , $P(\bar{l})$ may still monotonically decrease after $k$ , giving the wrong impression that the model can make use of the part of the context that is $k$ tokens away.  
+
+Results In Figure 2, we show the per-token loss $L(i)$ at different token indices $i$ and perplexity $P(l)$ over different validation context lengths $l$ . As shown in Figure 2, the Forgetting Transformer consistently outperforms the standard Transformer with either architecture, though with the Pro architecture the advantage within the training context length is less significant. Similarly to the standard Transformer, it also maintains a monotonic decreasing per-token loss within the training context length, indicating that it utilizes the entire training context for its prediction. In contrast, the per-token loss curves of all recurrent sequence models start flattening at around $5\mathbf{k}$ tokens and completely plateau after 10k tokens. This indicates that these recurrent sequence models struggle to use the full context effectively for their prediction.  
+
+![](images/1bf610e2311f83708e56b30e4313f32dc5449cade169c9fbf22e1bea9101a6d2.jpg)  
+270 271 272 273 274 275 276 277 278 279 280 281 282 283 284 285 286 287 288 289 290 291 292 293 294 295 296 297 298 299 300 301 302 303 304 305 306 307 308 309 310 311 312 313 314 315 316 317 318 319 320 321 322 323  
+
+over different validation context length $l$ . The vertical dashed line indicates the training context length. The per-token loss is typically noisy, so we smooth the curve using a moving average sliding window of 101 tokens. In this plot $1k=1024$ .  
+
+![](images/b259617e3c92b2437d6cb5fe702930396add0bf49b57d6f1bf612934a621ed9a.jpg)  
+Figure 3: Visualization of the forget gate weight matrix $\pmb{F}$ (top row) and the attention score matrix $\pmb{A}$ (bottom row) from two heads in different layers. Since $\pmb{A}$ is very sparse, we only show entries with scores larger than 0.5. These results use FoT (LLaMA).  
+
+The Forgetting Transformer also generalizes beyond the training context length with either architecture. Interestingly, although Transformer (LLaMA) performs poorly beyond the training context length, Transformer (Pro) shows decent length extrapolation.2 we show that this may be due to the use of QK-norm and output norm. In terms of the absolute values of the loss and perplexity, the Forgetting Transformer also clearly outperforms HGRN2 and DeltaNet, and outperforms Mamba-2 when using the Pro architecture.  
+
+Visualization of forget gate values and attention map In Figure 3, we visualize the forget gate weight matrix $\pmb{F}$ and the attention scores $\pmb{A}=\mathrm{softmax}\hat{(}Q\pmb{K}^{\top}+\mp\log\pmb{F})$ from two heads in different layers. The head on the left-hand side exhibits strong decay, and most entries of $\pmb{F}$ are close to zero; accordingly, the attention focuses on local entries. The head on the right-hand side has much weaker decay, and the attention is distributed across the entire context. This shows that the Forgetting Transformer can learn to retain information across long contexts when necessary.  
+
+![](images/4618556a5ee24ca2f11827851f5bc95c000db7b7f115ba084fb9b0e972f94c0f.jpg)  
+Figure 4: Needle-in-the-haystack analysis for different models. The results are scored on a scale of 1 (red) to 10 (green) by GPT-4o. The vertical dashed line indicates the training context length.  
+
+
+
+\section{4.3 NEEDLE IN THE HAYSTACK  }
+
+
+The needle-in-the-haystack analysis (Kamradt, 2023) (referred to as the “needle test” in the following) is a popular test for the long-context retrieval abilities of language models. Following Qin et al. (2024a), we use an “easy mode” of the needle test, where the “needle” placed within the context includes both the question and the answer. This easy mode is particularly suitable for base models that have not been instruction-tuned.3.  
+
+In Figure 4, we show the results of the needle test for Transformer (Pro), FoT (Pro), Transformer (LLaMA), FoT (LLaMA), Mamba2, and DeltaNet.6. As shown in Figure 4, with either architecture, both FoT and Transformer achieve near-perfect needle retrieval within the training context length, and FoT extrapolates better than the Transformer.6) fails even within the training context length, except when the needle is placed right at the end of the text. These results are consistent with the previous analysis of the slope of per-token loss curves in Section 4.2.  
+
+Table 1: Evaluation results on LM-eval-harness. All models have roughly 760M non-embedding parameters and are trained on roughly 16B tokens on LongCrawl64. ”acc-n” means length-normalized accuracy. Bold and underlined numbers indicate the best and the second best results, respectively.  
+
+![](images/38dba19690239f89a68527853fe8cee543fc08bcab34ca5d0f20aeab0f9d9827.jpg)  
+
+Table 2: Evalution results on LongBench. All models have roughly 760M non-embedding parameters and are trained on roughly 16B tokens on LongCrawl64. Bold and underlined numbers indicate the best and the second best results, respectively.  
+
+![](images/8b08cf6dcf0c679cbc7042680f62b387c7bff26f6f55fe88873b998229e70106.jpg)  
+4.4 DOWNSTREAM TASKS  
+
+We evaluate the models on two sets of downstream tasks: a set of short-context tasks from LMevaluation-harness (Gao et al., 2024) and a set of long-context tasks from LongBench (Bai et al., 2023).  
+
+Short-context tasks We use Wikitext (Merity et al., 2016), LAMBADA (Paperno et al., 2016), PiQA (Bisk et al., 2020), HellaSwag (Zellers et al., 2019), WinoGrande (Zellers et al., 2019), ARCeasy, ARC-challenge (Clark et al., 2018), Copa (Roemmele et al., 2011), SciQA (Auer et al., 2023), OpenbookQA (Mihaylov et al., 2018), and BoolQA (Clark et al., 2019). Following Yang et al. (2023), we report perplexity for Wikitext and LAMBADA, length-normalized accuracy for HellaSwag, ARC-challenge, and OpenbookQA, and accuracy for all other tasks (we also report accuracy for LAMBADA). All results are zero-shot.  
+
+As shown in Table 1, the Forgetting Transformer outperforms the Transformer with either architecture. FoT (Pro) performs the best among all models.  
+
+Long-context tasks We use 14 tasks from LongBench: HotpotQA (Yang et al., 2018), 2WikiMultihopQA (Ho et al., 2020), MuSiQue (Trivedi et al., 2022), MultiFieldQA-en, NarrativeQA (Kocˇisky\` et al., 2018), Qasper (Dasigi et al., 2021), GovReport (Huang et al., 2021), QMSum (Zhong et al., 2021), MultiNews (Fabbri et al., 2019), TriviaQA (Joshi et al., 2017), SAMSum (Gliwa et al., 2019), TREC (Li & Roth, 2002), LCC (Guo et al., 2023), and RepoBench-P (Liu et al., 2023). We use the default metrics of LongBench for different tasks, which are either F1, Rough-L, accuracy, or edit similarity.  
+
+As shown in Table 2, with either architecture, the Forgetting Transformer performs on par with the Transformer and better than the recurrent sequence models. This provides further evidence that the forget gate does not damage the long-context capabilities of the model.  
+
+4.5 ABLATION STUDIES  
+
+We present two sets of ablation studies. First, we investigate the contribution of each component in FoT and the effect of RoPE. Second, we study the importance of using a forget gate that is data  
+
+Table 3: Ablation experiments for the Forgetting Transformer. All models have roughly 360M nonembedding parameters and are trained on roughly 7.5B tokens on LongCrawl64. The perplexity is measured over a validation context length of 16384 tokens. For the bottom half, all addition  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/76e1e2103a4685cebfcf43df78525360cd08bbfe0de1eeeb4e93380f1d7668b5.jpg)  
+
+is the number of heads. It can be shown that ALiBi with a maximum slope $\frac{1}{2}$ and a minimum slope $\textstyle{\frac{1}{256}}$ (the default values in Press et al. (2021)) is equivalent using a fixed forget gate with $(T_{\mathrm{min}},T_{\mathrm{max}})=(2,256)$ . We refer to this initialization as long-init.3 We always set $T_{\mathrm{min}}=2$ . In Figure 5, we show the per-token loss of different forget gate designs with both the LLaMA and the Pro architecture. As shown in Figure 5, a fixed forget gate (i.e., ALiBi) always underperforms the data-dependent forget gate. With careful initialization, the performance of the data-independent forget gate can approach that of the data-dependent forget gate within the training context length, though it is still worse in terms of length extrapolation.   
+5 RELATED WORK   
+Recurrent sequence models While the Transformer has become the de facto standard architecture for sequence modeling, there has been a growing interest in reviving recurrent sequence models (Katharopoulos et al., 2020; Peng et al., 2021; Gu et al., 2021; Orvieto et al., 2023; Yang et al., 2023; Gu & Dao, 2023; Katsch, 2023; De et al., 2024; Sun et al., 2024; Peng et al., 2024; Qin et al., 2024a; Dao & Gu, 2024; Beck et al., 2024; Zhang et al., 2024; Buckman et al., 2024). Many recent recurrent sequence models feature some form of the forget gate, which has been shown to be essential in these architectures (Qin et al., 2024b; Gu & Dao, 2023; Yang et al., 2023). Notably, GLA (Yang et al., 2023) and Mamba-2 (Dao & Gu, 2024) show that gated variants of linear attention could be written in a form similar to softmax attention, which directly inspired our work. Several works (Ma et al., 2022; 2024; Ren et al., 2024) combine recurrent layers with quadratic attention. However, unlike our method which embeds the forget gate into the attention mechanism, in these hybrid architectures, the recurrent layers and the quadratic attention layers are independent. Modifications of softmax attention Several positional embedding methods (Press et al., 2021; Raffel et al., 2020; Chi et al., 2022a;b) add bias to the attention logits depending on the distances between the keys and queries, which can implement data-independent decay. LAS-attention (Zimerman & Wolf) applies multiplicative exponential decay to the attention logits. RoPE (Su et al., 2024) also has a similar decay effect that becomes stronger with increasing relative query/key distances. However, all these methods can only achieve data-independent decay based on the relative distances of the queries and keys. CoPE (Olsson et al., 2022) and Selective Attention (Leviathan et al., 2024) modify the attention logit at the current timestep based on cumulative sums of some transformation of attention logits from previous timesteps. Our method is distinct from these in that we calculate forget values separately for the decay instead of reusing the attention logits. Crucially, it is unclear whether CoPE and Selective Attention can be integrated into Flash Attention, which is essential for efficient long-context training.   
+6 CONCLUSION   
+We propose the Forgetting Transformer, a Transformer variant with a forget gate. Our experiments show that the Forgetting Transformer outperforms the standard Transformer and several recurrent sequence models on long-context language modeling and various downstream tasks. We also show that our Transformer Pro block design greatly outperforms the basic LLaMA architecture, with or without a forget gate. We thus recommend future work to adopt FoT (Pro) and Transformer (Pro) as baselines besides the commonly used LLaMA architecture.   
+We discuss several limitations of our work and potential future work. First, due to our limited computing resources, we can only perform experiments on models up to 760M parameters and a training context length of 16384 tokens. Thus, an important future work is to extend the Forgetting Transformer to larger scales. Second, we only consider causal sequence modeling. It would be interesting to extend the Forgetting Transformer to the non-causal case. Finally, it is possible to perform KV-cache eviction based on the forget gate values, which may greatly reduce inference costs.   
+
+

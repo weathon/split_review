@@ -1,0 +1,513 @@
+\title{u-$\mu$P: The Unit-Scaled Maximal Update Parametrization}
+
+\begin{abstract}
+
+The Maximal Update Parametrization (\mup) aims to make the optimal hyperparameters (HPs) of a model independent of its size, allowing them to be swept using a cheap proxy model rather than the full-size target model.
+We present a new scheme, \umup, which improves upon \mup\ by combining it with Unit Scaling, a method for designing models that makes them easy to train in low-precision.
+The two techniques have a natural affinity: \mup\ ensures that the scale of activations is independent of model size, and Unit Scaling ensures that activations, weights and gradients begin training with a scale of one.
+This synthesis opens the door to a simpler scheme, whose default values are near-optimal. This in turn facilitates a more efficient sweeping strategy, with \umup\ models reaching a loss that is equal to or lower than comparable \mup\ models and working out-of-the-box in FP8.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[bh!]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/fig1_combined_v3.2.pdf}
+    \end{subfigure}
+    \caption{\textbf{(a)} Two different HP sweeping processes used for \mup\ and \umup\ proxy models. Unlike \mup, \umup\ admits independent (1D) search due to careful HP design. The first part of independent search is an LR sweep, which alone reaches near-optimal loss for \umup. \textbf{(b)} Using the best proxy HPs from (a), we train many models at different widths and LRs. The best LR for width 256 is \char`\~ optimal for 4096, showing LR transfer along with lower loss. \textbf{(c)} We re-train with a simple un-scaled {\texttt{.to(float8)}} cast on matmul inputs. This would fail for other models, but \umup\ trains with minimal degradation.}
+    \label{fig:fig1}
+\end{figure}
+The challenges of large-model training extend beyond the domain of engineering; they are also \mbox{\textit{algorithmic}} in nature. Effective approaches for training smaller models are not guaranteed to work at the multi-billion-parameter scale used for today's large language models (LLMs). These difficulties can be framed in terms of stability, which we consider in three forms: 
+
+\begin{enumerate}
+    \item feature learning stability, which ensures that parts of the model do not learn too fast or slow relative to each other. 
+    \item hyperparameter stability, which ensures that the optimal HPs for small models remain unchanged as the model size grows.
+    \item numerical stability, which ensures that floating-point representations during training stay within the range of a given number format.
+\end{enumerate}
+The Maximal Update Parametrization (\mup)~\citep{Tensor_Programs_IV,Tensor_Programs_V} targets the first two sources of instability. \mup\ defines a set of scaling rules that in principle make a model's optimal HP values consistent across model sizes and ensure `maximal feature learning' in the infinite-width limit. The practical benefits of this are that models continue to improve as they get larger, and that practitioners can re-use a set of HP values (especially the learning rate) found for a small \textit{proxy} version of their model, on a larger \textit{target} model. This is vital for modern LLM training, where the cost of sweeping over candidate HP values for the target model is prohibitive. Consequently, \mup\ has been adopted by several open LLM training efforts \citep{Cerebras_GPT, BTLM, LLM360, MiniCPM} and there are indications of its use in state-of-the-art LLMs\footnotemark.
+
+\footnotetext{The GPT-4 technical report~\citep{GPT4} hints at the use of \mup\ by including \citep{Tensor_Programs_V} in its references, without citing it directly. The multipliers present in the Grok~\citep{Grok} codebase also suggest the use of \mup.}
+
+However, there exists a gap between the extensive theory underpinning \mup\ and its effective use in practice. This relates to issues surrounding efficient HP search, HP transfer, interpretability, ease-of-use and low-precision training. Some of these problems have been observed in the literature \citep{Exploration_Of_Mu_Transfer, Falcon, Tensor_Programs_V}; others we outline here for the first time. As a result, \mup\ does not necessarily provide the kind of simple, stable scaling for which a user might hope. 
+
+To address this, we propose the Unit-Scaled Maximal Update Parametrization (\umup). \umup\ combines \mup\ with another closely-related training innovation, Unit Scaling \citep{Unit_Scaling}. \mup\ ideally provides consistent training dynamics across model sizes, but says little about what those dynamics should be. Unit Scaling addresses this by proposing an ideal principle for dynamics: unit variance for all activations, weights and gradients. Unit Scaling was initially designed to ensure stable numerics, but in the context of \mup\ the principle of unit-scale brings many additional benefits. We show that it provides a foundation upon which the broader range of drawbacks identified for \mup\ can be addressed.
+
+\subsection{Contributions} \label{sec:introduction:contributions}
+
+We focus on LLMs in this work as this is the domain where \mup\ has primarily been used in the literature (though \umup's principles should extend to other architectures). We contribute the following:
+
+\begin{enumerate}
+    \item \textbf{Drawbacks of standard \mup:} We show that the way \mup\ is typically applied has several limitations, and does not give effective transfer for Llama-style models (\Cref{sec:the_challenges_with_mup_in_practice}).
+
+    \item \textbf{Simpler scaling rules:} \umup\ is easier to implement in practice than \mup, and removes the unnecessary `base shape' and initialization-scale HPs (\Cref{{sec:umup:combining_mup_with_us}}; \Cref{table:mup_umup_schemes}).
+
+    \item \textbf{Out-of-the-box FP8 training:} \umup\ models generate tensors that lie close to the center of a floating point format's range, meaning that most matrix multiplications can be performed in FP8 via a simple \texttt{.to(float8)} cast without dynamic rescaling.
+
+    \item \textbf{A principled, interpretable \& independent set of HPs:} The set of transferable HPs used in the \mup\ literature is chosen in an inconsistent and arbitrary way. We provide concrete recommendations for a good set of transferable HPs to use with \umup\ (\Cref{sec:umup:principled_hps}).
+
+    \item \textbf{Improved HP transfer:} We identify a problem with the scaling of the embedding layer's LR under \mup. Fixing this for \umup\ gives us better scaling with width (\Cref{sec:umup:emb_lr_rule}).
+
+    \item \textbf{A more efficient approach to HP search:} We show that \umup\ facilitates a cheaper independent search method, attaining near-optimal loss when only sweeping the LR (\Cref{sec:umup_hp_search}).
+\end{enumerate}
+
+We provide a guide for using \umup\ in \Cref{app:using_umup_guide}, and a library \citep{us_library} implementing \umup\ functions, layers and optimizers, outlined in \Cref{app:us_lib_guide}.
+
+
+
+\section{Background}
+
+
+\subsection{The Maximal Update Parametrization} \label{sec:background:the_maximal_update_parameterization}
+
+Tensor Programs V \citep{Tensor_Programs_V} defines a parametrization as `a rule for how to change hyperparameters when the widths of a neural network change'. They show that \mup\ is the only parametrization that gives `maximal feature learning' in the limit,
+whereas standard parametrization (SP) has imbalanced learning (parts of the network blow up or cease to learn).
+
+One consequence of this improved stability is that learning dynamics under \mup\ are ideally independent of model-size, as are optimal HPs. This facilitates a method known as \mut, which describes the process of training many smaller proxy models to evaluate candidate HP values, then using the best-performing ones to train a larger target model. An HP is said to be \mutable\ if its optimal value is the same across model-sizes.
+
+\paragraph{ABC-parametrizations} \mup, SP, and the Neural Tangent Kernel (NTK) \citep{NTK} are all instances of abc-parametrizations. This assumes a model under training where weights are defined as:
+\begin{align} \label{eq:abc}
+    w_0 &\sim \mathcal{N}(0,B_W^2),
+    \\
+    W_t &= A_W \cdot w_t, \nonumber
+    \\
+    w_{t+1} &= w_t + C_W \cdot \Phi_t(\nabla \mathcal{L}_0,...,\nabla \mathcal{L}_t), \nonumber
+\end{align}
+with $t$ a time-step and $\Phi_t(\nabla \mathcal{L}_0,...,\nabla \mathcal{L}_t)$ the weight update based on previous loss gradients.
+A parametrization scheme such as \mup\ is then defined specifying how scalars $A_W,B_W,C_W$ change with model width. This can be expressed in terms of width-dependent factors $a_W, b_W, c_W$, such that $A_W \propto a_W$, $B_W \propto b_W$, $C_W \propto c_W$. The values these factors take are what characterize a particular scheme. For \mup\ these are given in \Cref{table:mup}.
+For depth a similar result has been proved using \depthmup\ \citep{Tensor_Programs_VI}, albeit in a restricted setting. When we refer to \mup\ in the paper we assume the \depthmup\ scaling rules (\Cref{table:mup_umup_schemes}, `Residual' column).
+
+A key property of the abc-parametrization is that one can shift scales between $A_W,B_W,C_W$ in a way that preserves learning dynamics (i.e. the activations computed during training are unchanged). We term this \textit{abc-symmetry}. For a fixed $\theta > 0$, the behavior of a network trained with Adam is invariant to changes of the kind:
+\begin{align} \label{eq:abc_symmetry}
+    A_W \leftarrow A_W \cdot \theta, \quad B_W \leftarrow B_W / \theta, \quad C_W \leftarrow C_W / \theta
+\end{align}
+(reproduced from Tensor Programs V, Section~J.2.1). This means that parametrizations like \mup\ can be presented in different but equivalent ways. ABC-symmetry is a key component in developing \umup.
+
+\begin{table}[b]
+  \centering
+  \caption{The scaling rules defining \mup. The type of a weight is determined by whether $\fanin$ \& $\fanout$ both depend on width (hidden), only $\fanout$ does (input), or only $\fanin$ (output). Hence $\fanin$ is always a multiple of width here.}
+  \label{table:mup}
+  \begin{tabular}{rl @{\hspace{0.8\tabcolsep}} lccc}
+      \toprule
+      & \multicolumn{2}{c}{\multirow{2}{*}{ABC-multiplier}} & \multicolumn{3}{c}{Weight ($W$) Type}
+      \\
+      \rule{0pt}{1em} & & & Input & Hidden & Output
+      \\  % \& Bias
+      \midrule
+      \multirow{3}{*}{\textbf{\mup}} & parameter & ($a_W$) & $\one$ & $\one$ & $\nicefrac \one {\fanin(W)}$
+      \\
+      & initialization & ($b_W$) & $\one$ & $\nicefrac{\one}{\sqrt{\fanin(W)}}$ & $\one$
+      \\
+      & Adam LR & ($c_W$) & $\one$ & $\nicefrac \one {\fanin(W)}$ & $\one$
+      \\
+      \bottomrule
+      \\
+  \end{tabular}
+\end{table}
+
+\paragraph{Transferable HPs} \mup\ focuses on the subset of HPs whose optimal values we expect to \textit{transfer across} axes such as width and depth. We term these \mutable\ HPs. All \mutable\ HPs function as multipliers and can be split into three kinds, which contribute to the three (non-HP) multipliers given by the abc-parametrization: $\alpha_W, \sigma_W, \eta_W$ where $A_W \propto \alpha_W, B_W \propto \sigma_W, C_W \propto \eta_W$. The difference between these multipliers and the ones that define a parametrization is that they are specified by the user, rather than being a function of width. $\alpha_W$ and $ \eta_W$ are rarely introduced outside of the \mup\ literature, but can be valuable to tune for both \mup\ and SP models. In the \mup\ literature the term `HPs' often implicitly refers to \mutable\ HPs. We adopt this convention here, unless specified otherwise.
+\paragraph{Base shape} Two additional (non-\mutable) HPs introduced by \mup\ are the $\basewidth$ and $\basedepth$. This refers to a mechanism where a user specifies a particular shape for the model, where its behavior under \mup\ and SP are the same. The \mup\ model still \textit{scales} according to the abc-rules, so for all other shapes the two models will be different. This is implemented by dividing the \mup\ scaling rules for the given model by those of a fixed-shape model at the $\basewidth$ and $\basedepth$.
+
+Putting this together with our abc-parametrization given in \Cref{eq:abc}, and the \mutable\ HPs outlined above, we now derive our final, absolute expressions for $A_W,B_W,C_W$:
+\begin{align} \label{eq:abc_mup_absolute}
+    A_W \leftarrow \alpha_W \frac{a_W}{a_{W_\textrm{base}}},
+    \quad
+    B_W \leftarrow \sigma_W \frac{b_W}{b_{W_\textrm{base}}},
+    \quad
+    C_W \leftarrow \eta_W \frac{c_W}{c_{W_\textrm{base}}}
+\end{align}
+Though base shapes are necessary for \mup, they are not typically swept. Rather, they are considered a preference of the user, who may wish to retain the behavior of an existing SP model at a given shape.
+
+\paragraph{Choosing HPs to sweep} 
+
+In theory, the search space of \mutable\ HPs includes $\alpha_W, \sigma_W, \eta_W$ for every parameter tensor $W$ in the model. In practice far fewer HPs are swept, with global grouping often used for $\sigma_W$ and $\eta_W$, and many $\alpha_W$s dropped or grouped across layers.
+
+The sets of HPs chosen for sweeps in the \mup\ literature is explored in \Cref{app:additional_background:mup}. Tensor Programs V uses a random search to identify the best HP values, which has become the standard approach to sweeping. The number of runs in a sweep is typically in the low 100s, incurring a non-negligible cost (though usually less than a single training run of the target model). This high number partly owes to dependencies between HPs (shown in \Cref{sec:experiments:hp_independence}), making the search space hard to explore.
+
+\subsection{Low-precision training} \label{sec:background:low_precision_training}
+
+All the major potential bottlenecks of model training---compute, communication and storage---see roughly linear improvements as the bit-width of their number format is reduced.
+In modern LLM training, the compute cost of large matrix multiplications (matmuls) means that substantial gains are available if these can be done in low-precision ($<32$ bit) formats.
+With the ending of Dennard scaling and Moore's law \citep{Moores_Law_A,Moores_Law_B}, the use of low-precision formats represents one of the most promising avenues towards increased efficiency in deep learning.
+
+Recent AI hardware offers substantial acceleration for the 8-bit FP8 E4 and E5 formats. However the reduced range of these formats means that they cannot directly represent some values generated during training. Various methods have been introduced to address this, such as the per-tensor dynamic re-scaling in Transformer Engine \citep{Transformer_Engine}. However, this comes at the cost of added complexity and potential overheads. For a more in-depth treatment of low-precision formats, see \Cref{app:low_precision_and_its_trade_offs}.
+
+\subsection{Unit Scaling} \label{sec:background:unit_scaling}
+
+An alternative approach to low-precision training is Unit Scaling \citep{Unit_Scaling}, which also uses fine-grained scaling factors to control range, but instead finds these factors via an analysis of expected tensor statistics at initialization. These are fixed factors, calculated independently of the contents of a tensor, at the beginning of training. As such, the method is easy to use and only adds the overhead of applying static scaling factors (which we show to be negligible in \Cref{app:scaled_mm_benchmarking}).
+
+These factors are chosen to ensure the unit variance of activations, weights and gradients at initialization.
+This is a useful criterion as it places values around the center of floating-point formats' absolute range. This applies to all tensors, meaning every operation in the network requires a scaling factor that ensures unit-scaled outputs, assuming unit-scaled inputs. Unit Scaling does not provide a mechanism for re-scaling tensors dynamically during training, but due to its ideal starting scale for gradients, activations and weights this may not be required. Empirically this is shown to be true across multiple architectures, though it is not guaranteed.
+
+We provide an example of deriving the Unit Scaling rule for a matmul op in \Cref{app:additional_background:us}, resulting in the scaling factor: $1 / \sqrt{d_\fanin}$. We accompany this example with a full recipe for applying Unit Scaling to an arbitrary model.
+
+
+
+\section{The challenges with \mup\ in practice}
+
+
+
+\footnotetext{As in other work, we use \mup\ as a shorthand for the method outlined in Tensor Programs V, including \mut. Strictly speaking, \mup\ ought only to refer to the parametrization outlined in Tensor Programs IV.}
+
+\subsection{Not all training setups give \mut} \label{sec:challenges:mut}
+
+Lingle \citep{Exploration_Of_Mu_Transfer} shows that directly applying \mup\ to a decoder LM fails to provide LR transfer across width. Given that the primary use of \mup\ in the literature has been LM training of this kind, this result suggests a significant limitation. How do we reconcile this with the strong LR transfer across width shown for language models in Tensor Programs V?
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/fig_TPV_improvements.pdf}
+    \end{subfigure}
+    \caption{Effective \mut\ does not hold across all training setups.
+    \textbf{(a)} We show strong transfer for the unrealistic setup used in Tensor Programs V (too many epochs; constant LR). \textbf{(b)} Moving to a more standard Llama training setup, transfer breaks down. \textbf{(c)} This is restored by the introduction of two stability fixes: non-parametric norms and independent weight decay.}
+    \label{fig:experiments:tpv_setup}
+\end{figure}
+
+We answer this \Cref{fig:experiments:tpv_setup}. The first training setup (a) is aligned with that used in Tensor Programs V (their Figure 4). There are several atypical aspects to their training setup, primarily the use of a constant LR schedule and a high number of epochs. This overfitting regime makes validation loss unusable, and transfer misleadingly good. When we remove these and shift to a standard Llama training setup (b), optimal HPs begin to drift with width. This confirms Lingle's findings that standard \mup\ is in fact a poor fit for modern LM training. We fix this (c) by the removal of parameters from LayerNorms/RMSNorms, as suggested by Lingle, and the introduction of \textit{independent} weight decay for AdamW, as suggested by Wortsman et al. \citep{Small_Scale_Proxies} \footnote{Lingle suggests independent weight decay is unstable, but we find it to be more so than Adam or standard AdamW.} (see \citep{AdamW_Weight_Decay} for further analysis). With these changes adopted, we recover the strong transfer shown in Tensor Programs V's experiments.
+\subsection{It's not clear which hyperparameters to sweep} \label{sec:challenges:which_hps}
+
+The problem of selecting HPs to sweep can be framed as choosing a subset of the per-tensor $\alpha_W, \sigma_W, \eta_W$ HPs outlined in \Cref{sec:background:the_maximal_update_parameterization}, and grouping across/within layers. As shown in \Cref{table:mup_hps}, \mut\ experiments in the literature have done this in a variety ways. Practitioners have not justified these choices, appearing to rely on a mixture of precedent and intuition. We outline two major downsides to the lack of a principled approach.
+
+Firstly, not all groupings of HPs are suitable. Consider the commonly-used global $\sigma_\mathrm{init}$ HP. At initialization the activations going into the FFN swish function have $\operatorname{std}(x_\mathrm{swish}) \propto \sigma_{W_\mathrm{gate}}$, whereas the self-attention softmax activations have $\operatorname{std}(x_\mathrm{attn}) \propto \sigma_{W_\mathrm{Q}}\sigma_{W_\mathrm{K}}$. A global $\sigma$ HP thus has a linear effect on the FFN and a quadratic effect on attention, suggesting that this grouping may be unideal.
+
+Secondly, not all HPs are independent of one another. The key example of this is the interaction between $\sigma_W$ and $\eta_W$. The relative size of a weight update is determined by the ratio $\eta_W / \sigma_W$, not by either HP individually. Because of this, the optimal values for $\sigma$ and $\eta$ depend on each other, which we demonstrate empirically in \Cref{sec:experiments:hp_independence}. This can make the problem of HP search much harder, and may be why hundreds of random-search runs have been required for sweeps in the literature.
+\subsection{Base shape complicates usage}
+
+Most practitioners are unlikely to require alignment with an SP model, in which case it is unclear what $\basewidth$ (and $\basedepth$) should be used. The literature has aligned on a standard $\basewidth$ of $256$ (see \Cref{table:mup_hps}), but this appears to lacking a principled motivation---though the fact that they are not dropped entirely suggests they may be beneficial under \umup.
+
+Implementing base-shape HPs (see \Cref{eq:abc_mup_absolute}) can also add complications from an engineering perspective. The proposed implementation in the $\texttt{mup}$ library \citep{Mup_Library} reflects this, requiring an extra `base' model to be created and the original model to be re-initialized. This can interact awkwardly with other model-transforms for features like quantization, compilation, etc:
+
+\codefig{base_shapes.py}
+\subsection{\mup\ appears to struggle with low-precision}
+
+Finally, we note an interesting contradiction observed in the relationship between \mup\ and low-precision. One of the stated aims for \mup\ is that its activations have $\Theta(1)$-sized coordinates in the limit \citep[Desiderata J.1]{Tensor_Programs_V}. This desideratum is specifically given in order that values can be represented using finite-range floating-point numbers \citep[Section 3]{Tensor_Programs_IV}.
+Yet despite numerical stability being central to the theory underlying \mup, this is not leveraged to ensure that \mup\ models can \textit{actually} be trained in low-precision. Indeed, for the LLM runs in Tensor Programs V the SP model trains successfully in FP16, while the \mup\ model diverges (attributed to underflow of gradients). We remedy this with \umup.
+
+
+\section{The Unit-Scaled Maximal Update Parametrization}
+
+
+In this section we show how \mup\ can be adapted to satisfy Unit Scaling, and provide a new set of HPs which---thanks to Unit Scaling---are more interpretable and separable than those commonly used for \mup, unlocking several practical benefits. For those wishing to apply \umup\ to their own models, we provide a user-guide in \Cref{app:using_umup_guide} and an overview of our library implementing \umup\ in \Cref{app:us_lib_guide}.
+\subsection{Combining \mup\ with Unit Scaling} \label{sec:umup:combining_mup_with_us}
+
+Whereas Unit Scaling provides rules for scaling all operations, \mup\ only does so for parametrized ones. It's these operations we need to address to arrive at a unified scheme, resolving differences in the scaling rules each recommends. We begin with the expressions for the $A_W,B_W,C_W$ scaling factors in \Cref{eq:abc_mup_absolute}, and substitute in the \mup\ scaling rules defined in \Cref{table:mup}. This results in a complete implementation of \mup, which is shown in the top half of \Cref{table:mup_umup_schemes} (using the \textit{extended} set of \mup\ HPs given in \Cref{table:hp_sets}). We set out to turn this into a valid Unit Scaling scheme, which requires unit initializations ($B_W \leftarrow 1$) and matmuls with the Unit Scaling factor we identified in \Cref{sec:background:unit_scaling} ($A_W \leftarrow 1/\sqrt{\fanin}$).
+
+Our first step is to drop the $\sigma_W$ and $\basefanin$ HPs entirely, and associate the $\alpha_W$ HPs with certain functions instead of weights---decisions we justify in the rest of this section (this results in the simplified intermediate implementation in \Cref{table:mup_to_umup_1}). Our input weights now have unit initializations as desired, and a unit parameter multiplier, which is also the appropriate scaling factor (as input layers here are embedding lookups, not matmuls).
+
+Hidden weights now have the implementation:
+\begin{align} \label{eq:mup_comparison}
+    A_W \leftarrow 1,
+    \quad
+    B_W \leftarrow \frac{1}{\sqrt{\fanin}},
+    \quad
+    C_W \leftarrow \eta \, \frac{1}{\fanin},
+\end{align}
+which differs from our Unit Scaling criteria. However, using the abc-symmetry outlined in \Cref{eq:abc_symmetry} we can shift scales by a factor of $\sqrt{\fanin}$, arriving at a unit-scaled scheme:
+\begin{align} \label{eq:mup_comparison_2}
+    A_W \leftarrow \frac{1}{\sqrt{\fanin}},
+    \quad
+    B_W \leftarrow 1,
+    \quad
+    C_W \leftarrow \eta \, \frac{1}{\sqrt{\fanin}}.
+\end{align}
+Finally, our output layers also have unit initialization, but a parameter multiplier of $A_W \leftarrow 1/\fanin$. This differs from the Unit Scaling rule, but in the forward pass this is permissible as there are no subsequent matmuls of a transformer. In the backward pass this mis-scaling would propagate, so we apply the desired $\leftarrow 1/\sqrt{\fanin}$ factor. Using different forward and backward scales in this way is usually not allowed, but is valid for output layers due to the cut-edge rule (\Cref{app:cut_edge_rule}).
+
+The final change we make is to the input LR scaling rule, which we show in \Cref{sec:umup:emb_lr_rule} is more effective if $c_W \leftarrow 1$ is replaced with $c_W \leftarrow 1 / \sqrt{\fanout}$~\footnote{This represents a slight deviation from the Maximal Update Parametrization, though we still refer to our scheme as a form of \mup\ as it conforms in all other aspects.}. With these changes made, we arrive at our final \umup\ scheme, given in \Cref{table:mup_umup_schemes}. It's important to note that the scaling rules in this table must be combined with the standard Unit Scaling rules for other non-matmul operations. These are covered in \Cref{app:additional_unit_scaled_ops}, and implemented in our library (see \Cref{app:us_lib_guide}).
+
+\begin{table}[t]
+  \centering
+  \caption{The definition of \umup\, along with an implementation of \mup\ (assuming the \textit{extended} HP set in \Cref{table:hp_sets}). \umup\ aims to simplify \mup\ and provide the benefits of Unit Scaling.}
+  \label{table:mup_umup_schemes}
+  \begin{tabular}{rl @{\hspace{0.8\tabcolsep}} lcccc}
+      \toprule
+      \\\cline{4-6}
+      \rule{0pt}{1em} & & & Input & Hidden & Output &
+      \\
+      \midrule
+      & parameter & ($A_W$) & $\alpha_{\mathrm{emb}}$ & \hspace{1em} $1$ (or $\alpha_\mathrm{attn}$) & $\alpha_{\mathrm{out}} \frac \basefanin {\fanin}$ & $\sqrt{\frac \basedepth {\depth}}$\textsuperscript{*}
+      \\
+      \textbf{\mup} & initialization & ($B_W$) & $\sigma_{\mathrm{init}}$ & $\sigma_{\mathrm{init}} \sqrt{\frac \basefanin {\fanin}}$ & $\sigma_{\mathrm{init}} $ & ---
+      \\
+      & Adam LR & ($C_W$) & $\eta \, \hat \eta_\mathrm{emb}$ & $\eta \, \frac \basefanin {\fanin}$ & $\eta$ & $\sqrt{\frac \basedepth {\depth}}$\phantom{\textsuperscript{*}}
+      \\
+      \midrule
+      & parameter\textsuperscript{†} & ($A_W$) & $1$ & $\frac 1 {\sqrt{\fanin}}$ & $\frac 1 {\fanin}$\textsuperscript{‡} & $\frac 1 {\sqrt{\depth}}$\textsuperscript{*}
+      \rule{0pt}{1.2em}\\[0.75em]
+      \textbf{\umup} & initialization & ($B_W$) & $1$ & $1$ & $1$ & ---
+      \\[0.65em]
+      & Adam LR & ($C_W$) & $\eta \, \frac 1 {\sqrt{\fanout}}$ & $\eta \, \frac 1 {\sqrt{\fanin}}$ & $\eta$ & $\frac 1 {\sqrt{\depth}}$\phantom{\textsuperscript{*}}
+      \\[0.25em]
+      \bottomrule
+      \\
+      \multicolumn{7}{l}{\small{\textsuperscript{*}Residual multipliers are applied to the end of each branch, rather than the output of linear layers.}}
+      \rule{0pt}{1.2em}\\
+      \multicolumn{7}{l}{\small{\textsuperscript{†}\umup's $\alpha$ HPs are associated with operations, not weights, so are not included here (see \Cref{sec:umup:principled_hps}).}}
+      \\
+      \multicolumn{7}{l}{\small{\textsuperscript{‡}To maintain unit scale we apply $ 1 / \sqrt{\fanin}$ scaling in the backward pass (see \Cref{app:cut_edge_rule}).}}
+      \\
+  \end{tabular}
+\end{table}
+
+
+
+\subsection{Out-of-the-box low-precision training} \label{sec:umup:low_prec_training}
+
+By applying the principles of Unit Scaling to \mup, \umup\ gains a key feature: the easy use of low-precision number formats during training. We can attribute the difficulties \mup\ has with low precision to the fact that it ignores constant factors (along with weight and gradient-scaling), only ensuring that activations are \textit{of order} $\Theta(1)$. The stricter condition of unit scale across all tensors at initialization provides a way of leveraging \mup's rules in order to make low-precision training work.
+When training a transformer model with \umup\, most scales in the model stabilize while certain tensors exhibit scale growth that potentially pushes them out of FP8 range. We empirically identify these \textit{critical tensors} to be the inputs to the attention dense projection and final FFN matmul as well as the weight of the decoder head (for details see \Cref{app:fp8_training}). The latter becomes negligible in terms of model flops as width and depth of the model increase, so we generally keep this operation in higher precision. 
+
+Following these observations, we propose the following FP8 mixed precision scheme for \umup\ transformer models:
+\begin{itemize}
+    \item For non-critical matmul operations, we cast the input and weight to \texttt{E4M3}, and the gradient with respect to the output to \texttt{E5M2}. This is done in the forward computation, as well as the two backward computations (for the gradient w.r.t. the weight, respectively the input). Non-critical layers are query, key, value as well as the input layer(s) to the FFN.
+    \item All layers involving critical tensors, as well as embedding layer, residual addition and nonlinear functions are performed in higher precision. This also means that we directly aggregate into higher precision in each FP8 matmul. We keep optimizer states in FP32, as is usually the case in mixed precision training. 
+\end{itemize}
+We note that in some cases one can deal with the critical tensors by casting them to \texttt{E5M2} instead of \texttt{E4M3}, however we observed some instabilities applying this in a large scale setting, possibly due to loss of precision. In small scale scenarios we also empirically find that applying the \texttt{E4M3} format instead of \texttt{E5M2} for the gradients is possible, but becomes problematic in a more realistic setting where gradients require a higher dynamic range. 
+
+With our proposed mixed precision scheme, about $70$\% of the matmul computations in the transformer block are performed natively in FP8 (assuming a standard architecture, e.g. Llama). If desired, a dynamic per-tensor scaling could still be applied to the critical tensors.
+
+
+\subsection{A principled approach to hyperparameters} \label{sec:umup:principled_hps}
+
+We saw in \Cref{sec:challenges:which_hps} that approaches for selecting which HPs to sweep are poorly motivated in the literature. Our objective in \umup\ is to find a simple, well-justified and effective alternative. To this end, we propose the following ideal criteria:
+
+\begin{enumerate}
+    \item \textbf{Minimal cardinality}: the use of as few HPs as possible.
+    \item \textbf{Maximal expressivity}: the ability to still express any model defined using the per-tensor $\alpha_W, \sigma_W, \eta_W$ HPs outlined in \Cref{sec:background:the_maximal_update_parameterization} (in practice, we relax this slightly).
+    \item \textbf{Minimal interdependency}: the optimal value of each HP should not depend on the value of other HPs, simplifying the search space.
+    \item \textbf{Interpretability}: there should be a clear explanation for what an HP's value `means' in the context of the model.
+\end{enumerate}
+
+\begin{wraptable}{r}{17.6em}
+    \caption{Typical transformer HPs used under different schemes. \textit{Basic} HPs in \textbf{bold} are considered most impactful and are commonly swept. \textit{Extended} HPs in non-bold are not always swept, often set heuristically or dropped.}
+    \label{table:hp_sets}
+    \begin{tabular}{ccc}\\\toprule  
+        SP & \mup\ & \umup\ \\\midrule
+        {$\boldsymbol{\eta}$} & {$\boldsymbol{\eta}$} & {$\boldsymbol{\eta}$}
+        \\ 
+        $\sigma\text{-}\mathrm{scheme}$ & $\boldsymbol{\sigma_\mathrm{init}}$ &
+        \\
+          & $\boldsymbol{\alpha_\mathrm{emb}}|\boldsymbol{\eta_\mathrm{emb}}$ & $\alpha_\mathrm{ffn\text{-}act}$
+        \\
+          & $\alpha_\mathrm{attn}$ & $\alpha_\mathrm{attn\text{-}softmax}$
+        \\
+          & $\alpha_\mathrm{out}$ & $\alpha_\mathrm{res}$
+        \\
+          & $\basewidth$ & $\alpha_\mathrm{res\text{-}attn\text{-}ratio}$
+        \\
+          & $\basedepth$ & $\alpha_\mathrm{loss\text{-}softmax}$
+        \\
+        \bottomrule
+    \end{tabular}
+\end{wraptable}
+
+The \umup\ HPs given in \Cref{table:hp_sets} are designed to satisfy these criteria, to the fullest extent possible. The placement of these HPs in the model is given in \Cref{tab:ops_compendium}.
+
+\paragraph{Cardinality \& expressivity} We arrive at our set of HPs in three steps, starting with the full $\alpha_W, \sigma_W, \eta_W$ for each weight tensor $W$. Firstly, we can choose to `drop' any one of these three HPs by permuting under abc-symmetry, such that one HP $=1$. As we want our weights to begin with unit scale, we choose $\sigma_W$ (i.e. $\theta = \sigma_W$ in \Cref{eq:abc_symmetry}), leaving just $\alpha_W, \eta_W$.
+
+Secondly, we observe that several of the $\alpha_W$ HPs combine linearly with other $\alpha_W$ HPs, providing an opportunity to re-parametrize with a single HP. For instance, we noted in \Cref{sec:the_challenges_with_mup_in_practice} that the scale of self-attention softmax activations is proportional to the product of $\sigma_W$ multipliers, and the same is true for $\alpha_W$ multipliers: $\operatorname{std}(x_\mathrm{attn}) \propto \alpha_{W_\mathrm{Q}}\alpha_{W_\mathrm{K}}$. In this instance it appears more natural to use a single $\alpha$ parameter and associate it with the attention operation, rather than the weights. We term this $\alpha_\mathrm{attn\text{-}softmax}$.
+
+We apply the same principle to the rest of the model, associating $\alpha$ HPs with operations instead of weights. This applies to all operations, unless they are unary and $k$-homogeneous for $k \ge 0$, in which case they propagate scale and don't require an HP (see \Cref{app:non-homogeneous}). This results in the set of HPs shown, with their placement in the model given in \Cref{tab:ops_compendium}.
+
+Thirdly, we use a single global $\eta$ and group $\alpha$ HPs across layers. This breaks our expressivity criterion, but we argue represents the best trade-off between expressivity and cardinality. We show in \Cref{app:umup_lr_mults} that having tuned a global $\eta$ HP and our extended $\alpha$ HPs, the further benefits of tuning per-tensor $\hat{\eta}_W$ HPs (which modify the global $\eta$) is minimal, justifying our decision to only use one global $\eta$.
+
+\paragraph{Interdependency}
+
+The second stage above, moving $\alpha$ HPs from weights into subsequent operations, not only reduces the number of HPs, but also minimizes the interdependence between those that remain. Interactions between HPs are complex and unlikely to be entirely separable, but we find that \umup's optimal HP values depend less on each other than under \mup\ (see \Cref{sec:experiments:hp_independence}).
+
+\paragraph{Interpretability} 
+
+The combination of unit scale and reduced dependencies between HPs means that each $\alpha$ can be interpreted as determining some fundamental property of the model at initialization. For example, the $\alpha_\mathrm{loss\text{-}softmax}$ HP defines the (inverse of) the softmax's \textit{temperature} for a unit-scaled input. We also introduce a new scaling scheme (defined in \Cref{subsubsec:umup_residual_in_full}) for residual connections, designed to give HPs independence and a clear interpretation: $\alpha_\mathrm{res}$ defines the contribution of the residual connections to the output scale, and $\alpha_\mathrm{res\text{-}attn\text{-}ratio}$ defines the relative contribution of attention versus FFN branches.
+Finally, we choose not to include base shape HPs in \umup. They do not add to expressivity, lack a clear interpretation (besides alignment to a base model at a particular shape), break the interpretations of other HPs (as given above), and complicate implementation.
+
+\subsection{A new embedding LR rule} \label{sec:umup:emb_lr_rule}
+
+Although theoretical transfer properties have been proved for \mup, not all its HPs have had \mut\ shown empirically. We do so for the \textit{extended} \mup\ transformer HPs in \Cref{{fig:experiments:hp_transfer_over_width}}, where we observe poor transfer across width for the embedding LR multiplier $\hat{\eta}_\mathrm{emb}$. The associated scaling rule for the embedding LR is constant in width ($c_\mathrm{emb} = 1$), but this poor multiplier transfer suggests the rule is mis-specified. We show in \Cref{fig:umup:emb_lr_rule} (left) that a more effective rule is $c_\mathrm{emb} = 1 / \sqrt{\fanout}$. 
+
+This keeps the optimal value of $\hat{\eta}_\mathrm{emb}$ the same regardless of width. \Cref{fig:umup:emb_lr_rule} (right) shows that a constant scaling rule leads to diminishing returns as width increases, whereas our new rule continues to work well at scale, attaining the same loss at 2048-width that constant scaling attains at 4096-width.
+Our adoption of this change is a key factor in the improved performance of \umup\ over \mup\ in \Cref{fig:fig1}. 
+We offer no theoretical justification for our rule, which we leave to further work.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/fig_embeddingLR.pdf}
+    \end{subfigure}
+    \caption{(Left) holding the embedding LR ($\hat{\eta}_\mathrm{emb}$) constant, vs. scaling with $\sqrt{\nicefrac{\basewidth}{\mathrm{width}}}$, both with a fixed global LR. This suggests the \mup\ embedding LR rule ($c_\mathrm{emb}$) should follow the latter scaling. (Right) we test this by sweeping the global LR under the two scaling rules. The new rule leads to lower loss on large models. (Dot/cross markers represent the same runs across both graphs).}
+    \label{fig:umup:emb_lr_rule}
+\end{figure}
+
+\subsection{Hyperparameter search} \label{sec:umup_hp_search}
+
+As shown in section \Cref{sec:background:the_maximal_update_parameterization}, the standard approach to HP search for \mut\ is via a random sweep over all HPs simultaneously. Sweeping individual HPs separately is challenging due to the dependencies between them. In contrast, \umup's HPs are designed to admit such a strategy due to our interdependence criterion. Because of this, we propose a simpler sweeping strategy for \umup\ which we term \textit{independent search} (outlined in detail in \Cref{app:umup_hp_search_algorithm}).
+
+Independent search involves a sweep of the LR, followed by a set of one-dimensional sweeps of the other HPs (which can be run in parallel). The best results from the individual sweeps are combined to form the final set of HP values. We also consider an even simpler scheme, which only sweeps the LR, leaving other HP values at 1 (i.e. dropping them). For caution, we recommend the full approach, but in practice we find that only sweeping the LR is surprisingly effective, as shown in \Cref{fig:fig1} (a). This indicates that not only is the principle of unit scale good for numerics, but also for learning dynamics where it provides near-optimal scaling.
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental setup}
+
+Our experiments all use the Llama \citep{Llama} architecture trained on WikiText-103~\citep{WikiText103} (excepting the large-scale runs in \Cref{sec:fp8_training}). We apply current best-practice LLM training techniques from the literature (full settings are given in \Cref{tab:experiment_defaults}). In accordance with our analysis of settings for \mut\ in \Cref{sec:challenges:mut}, we remove parameters from norm layers, use independent AdamW, and avoid training on too many epochs for both \umup\ and \mup\ for the sake of fair comparison.
+
+\subsection{Quantifying hyperparameter interdependence} \label{sec:experiments:hp_independence}
+
+Our principled approach to HPs (\Cref{sec:umup:principled_hps}) contains the requirement that their optimal values should depend minimally on the value of other HPs. We now investigate this empirically, conducting a 2D sweep over every pair of HPs for \mup\ and \umup, shown in \Cref{fig:additional_experiments:mult_grid_mup,,fig:additional_experiments:mult_grid_umup} respectively.
+
+To derive an empirical measure of HP dependency, we introduce the notion of \textit{transfer error} (see \Cref{alg:transfer_error}). This considers a pair of HPs, with one `fixed' and the other for `transfer'. We take the best value of the transfer HP for each non-optimal value of the fixed HP, and use it with the optimal value of the fixed HP. The transfer error is the difference between the losses obtained and the minimum loss. \Cref{fig:experiments:transfer_error} shows this measure for each pair of HPs under \mup\ and \umup, reflecting the improvement in HP dependency as a result of our scheme. This gives \umup\ a reduced risk of small transfer errors leading to large degradations, and the potential to sweep HPs in a more separable way.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{arXiv/figures/hp_pair_dependencies_val.pdf}
+    \caption{A visualization of the dependencies between pairs of HPs under each scheme. Transfer error measures the extent to which the optimal value of the transfer HP depends on the fixed HP (see \Cref{alg:transfer_error}). On average, \mup\ has a transfer error of 0.03, whereas \umup\ has 0.005.}
+    \label{fig:experiments:transfer_error}
+\end{figure}
+
+\subsection{Hyperparameter search} We now leverage this improved separability of HPs for the purpose of efficient sweeping. In \Cref{fig:fig1}~(a) we conduct a standard random search for \mup\ and \umup, along with the independent search outlined in \Cref{sec:umup_hp_search} (and \Cref{app:umup_hp_search_algorithm}). We observe the following:
+
+\begin{enumerate}
+    \item For \umup\ the LR-sweep phase of independent search alone is sufficient to reach near-optimal loss (totaling 9 runs). During this phase other HPs are fixed at 1, which for \umup\ means that the inputs to operations are generally unit-scaled.
+
+    \item Consequently, we conclude that unit scale at initialization is close to the ideal scaling for effective learning here. This is not a property we asserted a priori, nor do we argue that it necessarily holds for other training setups and models; hence why we still provide a set of extended HPs to be swept.
+
+    \item In contrast \mup\ still requires non-LR HPs to be swept to attain a reasonable loss. Unlike \umup, fixing HPs at 1 results in arbitrarily-scaled inputs, which appear to result in worse training.
+
+    \item The `combined mults' phase causes the loss to spike for \mup. This is due to the HP dependencies shown in \Cref{fig:experiments:transfer_error}, which mean HPs cannot be swept independently and used together. Conversely, lower dependence means this can be done for \umup, making random search unnecessary.
+\end{enumerate}
+
+\subsection{Hyperparameter transfer}
+We demonstrate the transfer of LR across width in \Cref{fig:fig1} (b), of the other extended HPs across width in \Cref{fig:lr_transfer}, and of LR across training steps, batch size and depth in \Cref{fig:experiments:hp_transfer_over_width}. We find that:
+
+\begin{enumerate}
+    \item The optimal LR is constant for all widths under \umup, from 128 to 4096.
+
+    \item The optimal LR is also approximately constant for training steps, batch size and depth. This means we can scale our proxy model down across all these axes and maintain LR transfer. Of these, width appears the most stable and depth the least.
+
+    \item Whereas \mup\ sees diminishing returns for larger widths, \umup\ continues to benefit from width, with the 2048 \umup\ model matching the 4096 \mup\ model. We attribute this primarily to our improved embedding LR rule.
+
+    \item Non-LR HPs also have approximately constant optima across width under \umup. This is not true for \mup, where $\hat{\eta}_\mathrm{emb}$ has poor transfer due to the embedding scaling rule issue identified in \Cref{sec:umup:emb_lr_rule}, along with $\sigma_\mathrm{init}$ which in \Cref{sec:challenges:which_hps} we argue should not be grouped across all weights (and drop from the \umup\ HP scheme).
+
+    \item The optimal values found for non-LR HPs are all close to 1. In practice this means that dropping these HPs entirely is potentially viable for similar models and training setups.
+\end{enumerate}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/lr_transfer_mup.pdf}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/lr_transfer_u-mup.pdf}
+    \end{subfigure}
+    \caption{Learning rate transfer for \mup{} (top) and \umup{} (bottom), over training steps, batch size and depth. See \Cref{fig:fig1}~(b) for transfer over width. The \textbf{default} shape parameter for other panels is shown in bold. The shaded area shows the $95\%$ confidence interval for the mean.}
+    \label{fig:lr_transfer}
+\end{figure}
+
+\subsection{FP8 training} \label{sec:fp8_training}
+
+In this section we justify the simple mixed-precision scheme described in \Cref{sec:umup:low_prec_training} and demonstrate that it can be used to train \umup\ models out-of-the-box.
+
+\paragraph{Proof-of-concept} \Cref{fig:numerics:scale} shows the RMS of all linear layer inputs for a moderately sized transformer. RMS captures the larger of the mean and scale of a distribution, and as such is a good test of whether a tensor is likely to suffer over/underflow in low-precision. We observe that \umup\ tensors largely have RMS starting close to $1$ and remaining so at the end of training, supporting our scheme.
+
+\Cref{fig:numerics:rms_during_training} demonstrates the scale-growth of critical tensors which our scheme is designed to accommodate, showing RMS on a per-tensor basis over steps. \Cref{fig:numerics:scale_scaling} provides further insight into this issue, showing the effect of LR, width, depth, steps and batch size on the RMS of critical tensors.
+
+As an initial proof-of-concept we train a \umup\ model using our FP8 scheme over 8k steps, using HPs from a proxy model, as shown in \Cref{fig:fig1}~(c). We see only a small degradation versus FP32, and at this scale critical tensors can still be cast to FP8 using \texttt{E5M2}, while gradients can even use \texttt{E4M3}.
+
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/rms_at_init.pdf}
+    \end{subfigure}
+    \begin{subfigure}{.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/rms_end_training.pdf}
+    \end{subfigure}
+    \caption{Per-tensor $\mathrm{RMS} = \sqrt{\sigma^2 + \mu^2}$ across \umup\ and \mup\ models at initialization (left) and after training (right). \umup\ tensors have RMS that starts close to $1$ and remains within E4M3 range at the end of training. Dashed and solid red lines show each format's min. normal and subnormal values.}
+    \label{fig:numerics:scale}
+\end{figure}
+ We have also released model checkpoints, which are available at \url{https://huggingface.co/Aleph-Alpha}.}.
+Using the same architecture, and following the steps set out in our \umup\ user-guide (\Cref{app:using_umup_guide}), we train our target models on 300B tokens of the SlimPajama dataset \citep{SlimPajama} (see \Cref{app:large_model_training} for training details).
+
+We begin with an independent search (\Cref{sec:umup_hp_search}) over our \umup\ proxy model's HPs. Here we make the following observations:
+\begin{enumerate}
+    \item When using a relatively small proxy model (8 layers and 512 width), the HP-loss landscape is rather noisy. By doubling the width we can discern optimal HP values more clearly.
+    \item The most important HPs are $\eta$ and $\alpha_\mathrm{res\text{-}attn\text{-}ratio}$. All others can be left at the default of $1$.
+    \item The optimal values of these HPs are $\eta = 2^{3.5}$ and $\alpha_\mathrm{res\text{-}attn\text{-}ratio} = 2^{-2.0}$ and thus differ non-trivially from the observed HPs in our smaller-scale experiments.
+\end{enumerate}
+
+We then train \umup\ models of approximately 1B, 3B and 7B parameters, using our FP8 mixed-precision scheme (see \Cref{sec:umup:low_prec_training}). We also train two baselines at each size: the first is a BF16 version of our \umup\ models, and the second is a set of SP models using the weight init scheme from the Pythia model family~\citep{Pythia} and the LR scheme from Llama 3~\citep{LLAMA3}, scaling inversely with width and using a LR of 3e-4 at 7B scale.
+The loss curves are shown in \Cref{fig:scaleup}. All FP8 runs converge and show no significant loss degradation. In comparison to SP, the \umup\ models have a qualitatively different training curve with a higher loss for most of training that catches up in latter stages, hinting at a fundamentally different optimization trajectory. In terms of downstream performance, both of the \umup\ 7B models are competitive with SP. In particular, the scores of the FP8 model are mostly on par with the BF16 models (see \Cref{tab:eval_results}).
+
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/large_scale_BF16_vs_FP8.pdf}
+    \end{subfigure}
+    \hspace{2em}
+    \begin{subfigure}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{arXiv/figures/large_scale_umup_vs_sp.pdf}
+    \end{subfigure}
+    \caption{Large-scale training runs. (Left) \umup\ BF16 vs \umup\ FP8. (Right) \umup\ BF16 vs SP BF16.}
+    \label{fig:scaleup}
+\end{figure}
+
+\begin{table}[t] 
+  \centering
+  \caption{0-shot benchmark results at 7B scale.}
+\begin{tabular}{llcccccc}
+\toprule
+Scheme & Format & MMLU & HellaSwag & OpenBook QA & PIQA & TriviaQA & WinoGr \\
+\midrule
+SP & BF16 & 29.6 & 52.4 & 27.8 & 76.5 & 22.2 & 63.3 \\
+\umup\ & BF16 & 29.0 & \textbf{53.4} & \textbf{31.6} & 77.1 & \textbf{23.4} & 63.7 \\
+\umup\ & FP8 & \textbf{31.2} & \textbf{53.4} & 29.6 & \textbf{77.6} & 21.3 & \textbf{65.7} \\
+\bottomrule
+\label{tab:eval_results}
+\end{tabular}
+\end{table}
+
+
+
+
+
+\section{Related Work}
+
+
+\paragraph{Low-precision training}
+
+Techniques introduced to facilitate FP8 training include those covered in \Cref{app:low_precision_and_its_trade_offs} and more \citep{Training_And_Inference_Using_8_Bit,DNNs_With_8_Bit,Mixed_Precision_8_Bit}. These largely concern the quantizing of activations, weights and gradients, though \citep{FP8-LM} also explore FP8 optimizer states and cross-device communication, which we consider interesting avenues of further exploration. Recently, stable training has been demonstrated for the MX family of formats which use a shared block-exponent \citep{MX1,MX2}, and even for the ternary BitNet format \citep{BitNet1,BitNet2,BitNet3}. Again, we consider these formats for follow-up work.
+
+\paragraph{Stability features}
+
+Another recent research trend has been the analysis of features that contribute to (or resolve) numerical and algorithmic instability. \citep{Small_Scale_Proxies} show that unstable training dynamics can result from attention logit growth (fixed by QK-norm \citep{Scaling_Vision_Transformers}) and from divergent output logits (fixed by z-loss \citep{Palm}). \citep{Stable_And_Low_Precision_Training} find large feature magnitudes can be avoided by zero-initialization, and loss spikes avoided via a modified AdamW, specifically for low-precision training. \citep{Intriguing_Properties} investigate how pre-training settings affect instabilities revealed during post-training quantization. \citep{Dynamics_Of_Diffusion_Models} apply a similar philosophy to Unit Scaling for the training of diffusion models, to address uncontrolled magnitude changes. Extreme activation values seen in large models \citep{LLM_INT8,SmoothQuant} have been addressed by softmax-clipping \citep{Quantizable_Transformers}, and by the addition of extra terms \citep{Massive_Activations} or tokens \citep{Vision_Transformers_Need_Registers} to bias the attention computation. We do not adopt these features in our experiments to avoid confounding effects, but we expect them to benefit \umup\ and hope to explore their usage.
+
+\paragraph{Learning dynamics}
+
+Several recent efforts have tried to improve \mup\ from different angles.
+\citep{Modula} introduces the notion of the \textit{modular norm} over the full weight-space, which like \mup\ aims to ensure stable updates that provide LR transfer, and like \umup\ is implemented via modules designed to ensure stable training.
+Challenging the assumptions underpinning \mup, \citep{Scaling_Exponents} explores the notion of \textit{alignment} between parameters and data, demonstrating that other parametrizations with per-layer learning rates can outperform standard \mup. We consider comparing these parametrizations against \umup\ and trying unit-scaled versions valuable future work. Recent applications of \mup\ to the problems of weight sparsity \citep{Sparse_Mup} and structured matrices \citep{Compute_Better_Spent} are also interesting candidates for \umup.
+
+
+
+\section{Conclusions}
+
+
+We introduce \umup, a modified and improved version of \mup\ that satisfies Unit Scaling. Through careful analysis guided by first principles we identify an interpretable set of HPs that has minimal interdependencies and facilitates an efficient independent sweeping strategy. We show that the stability properties of \mup\ combined with Unit Scaling enable a simple and robust FP8 mixed precision scheme that works in a realistic large scale training scenario.
+\umup\ provides further evidence that the principle of Unit Scaling is beneficial for model design.
+
+\paragraph{Limitations and future work} Some choices like the modified embedding LR rule are only justified by empirical observations, and currently lack a theoretical explanation. Additionally, neither \mup\ nor Unit Scaling give guarantees for network quantities to be well-behaved over the course of training. In particular we would like to understand the issue (or feature) of scale growth in the critical layers better and look into possible mitigations. We also believe that low-precision training techniques can be pushed further, with \umup\ offering an ideal starting point for future optimizations.
+
+
+

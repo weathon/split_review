@@ -1,0 +1,752 @@
+\title{Which Examples to Annotate for In-Context Learning? Towards Effective and Efficient Selection}
+
+\begin{abstract}
+ Large Language Models (LLMs) can adapt to new tasks via in-context learning (ICL). ICL is efficient as it does not require any parameter updates to the trained LLM, but only few annotated examples as input for the LLM. In this work, we investigate an active learning approach for ICL, where there is a limited budget for annotating examples. We propose a model-adaptive optimization-free algorithm, termed \adaicl, which identifies examples that the model is uncertain about, and performs semantic diversity-based example selection. Diversity-based sampling improves overall effectiveness, while uncertainty sampling improves budget efficiency and helps the LLM learn new information. Moreover, \adaicl poses its sampling strategy as a Maximum Coverage problem, that dynamically adapts based on the model's feedback and can be approximately solved via greedy algorithms. Extensive experiments on nine datasets and seven LLMs show that \adaicl improves performance by 4.4\% accuracy points over SOTA (7.7\% relative improvement), is up to $3\times$ more budget-efficient than performing annotations uniformly at random, while it outperforms SOTA with $2 \times$ fewer ICL examples.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have shown remarkable performance in various natural language tasks.  One of the LLMs' advantages is their ability to perform few-shot learning~\citep{brown2020fewshot}, where they can adapt to new tasks, e.g., topic classification or sentiment prediction, via in-context learning (ICL).  ICL uses few-shot labeled examples $\{(x_i, y_i)\}_{i=1}^k$, e.g., $(x_i, y_i)=$ \texttt{\footnotesize (Amazing movie!, positive)}, to construct a prompt $P$.
+Prompt $P$ is used as a new input to the LLM, e.g., 
+``\texttt{\footnotesize Amazing movie!: positive \textbackslash n Awful acting: negative \textbackslash n Terrible movie:}'', before making predictions for the query $x_{\text{test}}$. 
+The new input enables the LLM to infer the missing label $y_{\text{test}}$ by conditioning the generation on the few-shot examples. As semantically similar demonstrations to the test query improve ICL performance~\citep{liu2021makes}, it is common practice that a $k$-NN retriever is used to determine the $k$-nearest examples for each test query. 
+ICL is efficient as it does not require any parameter updates or fine-tuning, wherein users can leverage ICL to generate task-adaptive responses from black-box LLMs.
+However, ICL is sensitive to the input prompt~\citep{lu2021fantastically} (the art of constructing successful prompts is referred to as prompt engineering),  where acquiring ground-truth labeling of the input demonstrations is important
+for good ICL performance~\citep{yoo2022ground}. Ground-truth labeling requires expert annotators and can be costly, especially for tasks in which the annotators need to provide elaborate responses~\citep{wei2022chain}. Apart from lowering the labeling cost, carefully reducing the number of the ICL examples can benefit inference costs and the LLM's input context length requirements.
+Consequently, we study the following problem: \textit{Given a budget $B$, which examples do we select to annotate and include in the prompt of ICL?} 
+
+Given an unlabeled set (pool) where we can draw ICL examples from, the  above selection problem resembles a typical active learning setting~\cite{settles2009active,zhang-etal-2022-survey}.
+Active learning selects \textit{informative} examples, e.g., via uncertainty sampling~\citep{Lewis1994ASA}, which are used to improve the model's performance. 
+Although traditional active learning involves model parameter updates, uncertainty sampling has been explored in an optimization-free manner for ICL with black-box LLMs~\citep{diao2023active,pitis2023boosted}. Yet, recent studies show that  uncertainty sampling yields inferior performance in comparison to other approaches~\citep{margatina2023active} and thus, current methods rely on semantic diversity to determine which examples are the most informative. For example, AutoCoT~\citep{zhang2022automatic} performs clustering based on semantic similarity and selects the most representative examples of each cluster. In order to adapt the selection based on the LLM used,  Vote$k$~\citep{su2022selective} selects diverse examples with respect to the LLM's feedback, i.e., examples that the model is both uncertain and confident about.  However, these approaches do not consider which examples help the LLM learn new information and may waste resources for annotating examples whose answers are already within the model's knowledge.
+
+\begin{wrapfigure}{r}{0.5\textwidth} %
+    \centering
+    \includegraphics[width=0.4\textwidth]{figs/illustrations/AdaICL-intro-all.pdf}
+    \caption{\adaicl effectively combines diversity and uncertainty sampling, outperforming other strategies in the low-resource scenario, averaged over seven datasets. Here, the budget is 20 annotations for retrieval-based 5-shot ICL.}
+    \label{fig:ada_intro}
+\end{wrapfigure}
+  
+To overcome the aforementioned limitations of active learning for ICL, we pair uncertainty-based sampling with diversity-based sampling.  
+To best combine the two sampling strategies, we propose a model-adaptive optimization-free method, termed \adaicl, which is tailored to retrieval-based $k$-shot
+ICL. \adaicl uses the LLM's feedback (output probabilities) to identify the examples that the  model is most uncertain about (\emph{hard examples}). The algorithm then identifies different semantic regions of hard examples, with the goal to select the most representative examples within each region. Diversity-based sampling is posed as the well-studied Maximum Coverage problem (\mcp), which can be approximately solved via greedy algorithms.
+
+By selecting representative examples of diverse hard regions, \adaicl aims for \emph{effectiveness}, so that it helps the LLM learn information that it does not already know. Moreover,  \adaicl is \emph{efficient} and results in budget savings by omitting the selection of examples that the model already knows how to tackle (easy examples). Finally, we show that \adaicl's uncertainty sampling improves the LLM's calibration~\citep{jiang2021can, zhao2021calibrate}, i.e., how model's confidence aligns with epistemic uncertainty, which measures how well the model understands the task.
+
+We conduct experiments on nine datasets across five NLP tasks (topic classification, sentiment analysis, natural language inference, summarization, and math reasoning) with seven LLMs of varying sizes (1.3B to 65B parameters), including LLMs such as GPT-J~\citep{wang2021gpt-j}, Mosaic~\citep{MosaicML2023Introducing}, Falcon~\citep{penedo2023falcon}, and LLaMa~\citep{touvron2023llama}. Experimental results show that (i) \adaicl is effective with an average performance improvement of 4.4\% accuracy points over SOTA (\Figref{fig:ada_intro}),  (ii) \adaicl is robust and achieves up to $3\times$ budget savings over random annotation, while it needs $2 \times$ fewer ICL examples than SOTA (\Secref{sec:res2}), and (iii) \adaicl improves the calibration of the LLM's predictions (\Secref{sec:res-calib}). 
+
+
+
+
+
+
+\section{Related Work}
+
+
+\textbf{ICL Mechanism}. In-context learning (ICL), also referred to as few-shot learning~\citep{brown2020fewshot}, has been shown to elicit reasoning capabilities of LLMs without any fine-tuning~\citep{wei2022emergent,bommasani2021opportunities,dong2022survey-icl}.
+While ICL performance correlates to the pretraining data distribution~\citep{xie2021explanation,hahn2023theory,shin2022effect,razeghi2022impact,chan2022data} and improves with larger LMs~\citep{bansal2022rethinking,wei2023larger}, recent works study how the transformer architecture~\citep{vaswani2017attention} enables in-context learning~\citep{akyurek2022learning,olsson2022context}. Theoretical analyses and empirical studies show that ICL is a learning algorithm that acts as a linear regression~\citep{akyurek2022learning,garg2022icl-linear,von2023transformers,zhang2023trained} and ridge (kernel) regression~\citep{han2023icl-kernel,bai2023statisticians} classifier. In this work, we leverage the recent connections of ICL with kernel regression to highlight the challenges of active learning for ICL.
+\textbf{Prompt Influence for ICL}. Although ICL is widely used with LLMs, its success is not guaranteed as it is sensitive to the input prompts~\citep{lu2021fantastically,chen2022relation}. ICL tuning improves stability~\cite{min2021metaicl,chen2021meta,xu2023knn} but requires additional training data, while other works analyze how the prompt design and the semantics of the labels~\cite{min2022rethinking,yoo2022ground,wang2022towards,wei2023larger} affect ICL performance. More related to our setting, \citet{liu2021makes},\citet{Rubin2021LearningTR}, \citet{margatina2023active}, and \citet{su2022selective} illustrate the importance of the $k$-NN retriever for ICL. Our work also highlights the importance of the $k$-NN retriever and provides new insights for improving ICL performance. 
+\textbf{Active Learning for NLP}. Active learning~\citep{settles2009active} for NLP has been well-studied~\citep{zhang-etal-2022-survey} with applications to text classification~\citep{schröder2020survey}, machine translation~\citep{haffari2009active}, and name entity recognition~\citet{erdmann-etal-2019-practical}, among others. \citet{ein-dor-etal-2020-active} studied the application of traditional active learning techniques~\citep{Lewis1994ASA,sener2018active} for BERT pretrained models~\citep{devlin2019bert}, with many works following up~\citep{margatina-etal-2021-active, schroder2021revisiting}. However, these approaches rely on LM fine-tuning, which can be more difficult to scale for larger models with tens of billions of parameters. Furthermore, most of the current approaches of active learning for ICL~\citep{zhang2022activeICL,li2023finding,nguyen2023context,shum2023automatic,ma2023fairness} assume a high-resource setting, where a large set of ICL examples is already annotated.  This limits the applicability in practical low-resource scenarios~\citep{perez2021true}, where annotations are costly to obtain.
+
+
+
+\section{Problem Statement \& Motivation}
+
+
+
+Given an unlabeled set $\gU = \{x_i\}_{i=1}^N$ and a fixed budget $B \in \mathbb{Z}^+$, the goal is to select a subset $\gL \subset \gU$, where $\gL = \{ (x_i, y_i)\}_{i=1}^B$ contains $B$ selected examples that are annotated.
+ Due to token-length limits or inference cost considerations, we consider a $k$-shot ICL inference, where 
+set $\gL$ is used to draw $k$-shot ICL examples from ($k < B$). The $k$-shot examples are used to construct a new prompt $P$ as input to the LLM by
+\begin{equation}
+P = \pi (x_1, y_1) \oplus \pi (x_2, y_2)  \oplus \cdots  \oplus \pi(x_k, y_k) \oplus \pi(x_\text{test}, *).
+\end{equation}
+Template $\pi$ denotes a natural language verbalization for each demonstration $(x,y)$ and it also expresses how the labels $y$ map to the target tokens.
+The selected $B$ examples for set $\gL$ should maximize the ICL model performance on the testing set.
+
+To determine which ICL examples to use (and in which order), a $k$-NN retriever selects the top-$k$ examples from $\gL$, e.g., $(x_k, y_k)$, for a test instance $x_{\text{test}}$ based on the similarity between $x_i \in \gL$ and $x_{\text{test}}$ over a semantic space $\gS$ (the order is determined by similarity scores). Employing a $k$-NN retriever for ICL example selection has demonstrated superior performance over random or fixed example selection ~\citep{su2022selective,margatina2023active,liu2021makes}. We illustrate the overall problem setting in \Figref{fig:setting}. %
+To understand the impact of the ICL examples on model predictions, we express ICL inference as a non-parametric kernel regression, following the theoretical works from~\citet{han2023icl-kernel, bai2023statisticians}. The prediction for the test instance $x_{\text{test}}$ is related to
+\begin{equation}
+    \tilde{y}_{\text{test}} = \frac{\sum_{i=1}^k y_i K_\gD (x_{\text{test}}, x_i)}{\sum_{i=1}^k K_\gD (x_{\text{test}},x_i)},
+    \label{eq:kernel}
+\end{equation}
+where $K_\gD(x_{\text{test}}, x_i)$ is a kernel that measures the similarity between  $x_{\text{test}}$ with each of the $k$-shot retrieved instance $x_i$, which depends on the pretraining data distribution $\gD$ for model $M$. 
+The importance of the $k$-NN retriever in the lens of \Eqref{eq:kernel} becomes clear: it fetches \emph{semantically similar} examples to compute  $\tilde{y}_{\text{test}}$ by regressing over their labels $y_i$. However, it does not account for which examples help the model learn the task to a larger extent, which depends on $K_\gD$ and is infeasible to determine for pre-trained LLMs as there is usually no direct access to $\gD$. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/illustrations/prob_figure.pdf}
+    \caption{Our studied problem setting. Given an unlabeled set $\gU$ and a fixed budget $B$, the goal is to select the $B$ most informative examples for annotation (set $\gL$), which are used to maximize ICL performance with an LLM $M$.  During ICL inference, a $k$-NN retriever based on a similarity space $\gS$ determines the $k$-shot demonstrations for each test instance.  
+    }
+    \label{fig:setting}
+\end{figure*}
+
+
+
+
+
+
+
+\section{Adaptive Example Annotation for ICL}
+
+
+{\em Can we improve example selection for ICL motivated by the aforementioned challenges?} We answer affirmatively by putting forth a \textbf{diversity-based uncertainty sampling} strategy, termed \adaicl, which adaptively identifies semantically different examples that help the model learn new information about the task.
+
+The \adaicl algorithm works as follows (see \Figref{fig:framework} for an overview). First, it uses the LLM's feedback to determine which examples the model is most uncertain about, which we refer to as \emph{hard examples}. Then, it builds different regions of hard examples and the goal is to select the most representative example for each region. The regions are determined based on the semantic similarity space $\gS$, apart from the LLM's feedback, and denser regions are considered as more important.
+
+By selecting representative examples of dense hard regions, we seek \textbf{effectiveness} by assuming that (i) these examples are informative for the hard examples that are close in the semantic space, and (ii) these examples will likely be retrieved during inference to improve predictions for similar hard examples (\Eqref{eq:kernel}).
+Moreover, by focusing on hard examples, we are interested in examples that the model is uncertain about in order to fill two needs. First, we seek \textbf{budget-efficiency} by avoiding annotating examples that the model already knows how to tackle, i.e., if $K_\gD(x_{\text{test}}, \cdot)$ is high. Second, we seek examples that the model is \emph{truly uncertain} for and can help the model learn the task. 
+
+
+\subsection{\adaiclb: A $k$means Approach} \label{sec:base}
+
+A straightforward solution is to perform $k$means clustering~\citep{macqueen1967kmeans} over the identified hard examples for the model, where different clusters represent regions of hard examples.
+
+To determine the set $\gU_h$ of hard examples, we use the LLM's feedback as follows. We assume we are given a small initially annotated pool $\gL_0$ for $k$-shot ICL (if $\gL_0 = \emptyset$, we perform zero-shot ICL) and use the LLM $M$ to generate a prediction for each $x_i \in \gU$. For classification problems, we compute the
+conditional probability of each class $y \in \gY$, and the label $\tilde{y}_i$ with the maximum conditional probability is returned as the prediction for $x_i$. Then, the probability score of the predicted label is regarded as the model's confidence score $u_i$, where lower probability means that the model is less certain for its prediction $\tilde{y}_i$~\citep{min2021metaicl}. For generation problems, we average the log-probabilities of the generated tokens as the model's confidence score $u_i$.  
+We sort the examples $x_i \in \gU$ based on their uncertainty scores $u_i$, and select the top-$N_\theta$ out of $N$ total examples, which are collected to $\gU_h$. Here, $N_\theta = \lfloor \theta N \rfloor$ and $\theta \in [0, 1]$ is a hyperparameter  with default value $\theta = 0.5$, which is the portion of the examples that we consider as hard ones.
+
+Then, we can select representative examples for each region by sampling the example closest to each of the cluster centroids. Here, the number of clusters for $k$means is $B$, so we sample as many examples as the budget $B$ allows.
+ Yet, \adaiclb suffers from the known limitations of $k$means clustering. It is sensitive to outlier examples, which may be selected to be annotated, under the assumption that the $B$ regions formed by $k$means are equally important, and it does not account for the effect of overlapping clusters.
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/illustrations/adaicl.pdf}
+    \caption{\adaicl algorithm. \adaicl uses $k$-shot ICL to determine which examples the model $M$ is uncertain for (hard examples). Then, it performs diversity-based uncertainty sampling over $\gS$ by optimizing the \mcp problem in \Eqref{eq:mcp-1} via \Algref{alg:greedy} to identify the examples that help the model learn new information. The process is repeated until the budget $B$ is exhausted, and when done, it returns the annotated set $\gL$.}
+    \label{fig:framework}
+\end{figure*}
+
+\subsection{\adaicl: Selection by Maximum Coverage } \label{sec:sub-adaicl}
+
+\adaicl overcomes the aforementioned limitations of \adaiclb by quantifying whether each each example can convey new information to the model. \adaicl constructs semantic regions $S_i$ \emph{around every} hard example $x_i$ and solves a Maximum Coverage (\mcp) problem that accounts for information overlaps between different regions. \mcp aims to select regions that cover the hardest examples, giving  importance to denser regions and disregarding regions already covered (see \Figref{fig:framework} for an overview). 
+Formally, \mcp takes $m$ sets $\{S_1, \dots, S_m\}$ (regions that contain semantically similar examples) and a number $B$ as input. Each set includes some examples, e.g., $S_i=\{x_1,x_2, \dots ,x_n\}$ and different sets may have common examples, while the goal is to select the $B$ most representative sets that include (cover) as many examples as possible. We assume that if an example is marked as covered by another selected set, it conveys little new information to the model. 
+In our setting, we are interested in hard examples, which we collect in the set $\gU_h$ as previously explained. First, we discuss how we construct the regions and then we provide the \mcp problem.
+
+\textbf{Set Construction.} \label{sec:sets}
+We represent the region $S_i$ around each example $x_i$ as its egonet. Initially, we build a global graph $\gG_m$ %
+as the $m$-nearest neighbors graph. The nearest neighbors are   determined based on a semantic space $\gS$ given by off-the-self encoders, such as SBERT~\citep{reimers2019sentence}. We compute SBERT embeddings of each query $x_i$ and determine its neighbors based on cosine similarity of the embeddings.
+Graph $\gG_m$ depends on the similarity space, while 
+deriving sets $S_i$ from the global graph $\gG_m$ depends on the LLM's feedback as we are interested in hard examples $x_i \in \gU_h$ for the model. 
+
+For every hard node $v \in \gU_h$, we construct its 1-hop egonet. We consider edges that \emph{direct towards} $v$ from other hard nodes $v' \in \gU_h$. This ensures that representative examples $x_i$, that are likely to be retrieved during ICL inference, have denser egonets. We experiment with both 1-hop and 2-hop set constructions. In the latter case, each node $v$ is represented by its egonet along with union of the egonets of its neighbors. 
+One hyperparameter that controls the quality of the generated egonets is $m$, which is used during the construction of graph $\gG_m$. In order to determine $m$, we employ a heuristic rule based on the desired maximum iterations $\hat{T}$ until the budget $B$ is exhausted, as well as the minimum number of hard examples $N_{\hat{\theta}}$ to be covered at each iteration. Due to space limitations, additional analysis of our approach are provided in Appendices~\ref{app:Adaicl-A} and~\ref{app:Abla-D}. 
+
+\textbf{Greedy Optimization.}
+The \mcp problem is expressed as 
+\begin{align}
+    \text{maximize} \; &  \sum_{x_i \in \gU_h} c_i, \label{eq:mcp-1}
+    \end{align}
+\begin{align}
+    \text{where} \; & c_j \in \{0,1\},  s_i \in \{0,1\}, \label{eq:mcp-2}
+    \end{align}
+\begin{align}
+    \text{subject to} & \; \sum s_i \leq B, \sum_{x_j \in S_i} s_i \geq c_j. \label{eq:mcp-3}
+\end{align}
+\Eqref{eq:mcp-1} maximizes the coverage of the hard examples $\gU_h$, indicator variable $c_j$ denotes if example $x_j$ is covered, and $s_i$ denotes if set $S_i$ is selected. The goal is to select the examples that convey new information to the model (measured by the indicator $c_j$).
+\Eqref{eq:mcp-3} ensures that we select at most $B$ sets and covered examples belong to at least one selected set (the hard examples covered in more sets are selected before others). 
+To adjust the problem in our scenario, selecting set $S_i$, i.e., \mcp marks $s_i = 1$, means that we select example $x_i$ for the annotated set $\gL$. 
+
+The \mcp problem is known to be NP-hard \citep{vazirani2001approximation}. A natural greedy solution for the \mcp chooses sets according to one rule: at each stage, choose a set that contains the largest number of uncovered elements. This approximation algorithm is summarized below in \Algref{alg:greedy}, and is well-known to approximately solve \mcp and can be further improved due to its submodularity~\citep{krause2005note} .
+\begin{wrapfigure}{R}{0.62\textwidth}
+    \begin{minipage}{0.62\textwidth}
+\begin{algorithm}[H]
+\centering
+\caption{Greedy approximation for \mcp.} \label{alg:greedy}
+\begin{algorithmic}[1]
+   \STATE {\bfseries Input:} Examples $\gU_h$, Sets $\{S_1, \dots, S_m\}$, Budget $B$.
+   \WHILE{$B$ not exhausted}
+    \STATE Pick the set that covers the most uncovered examples.
+    \STATE Mark examples of the chosen set as covered.
+   \ENDWHILE
+\end{algorithmic}
+\end{algorithm}
+    \end{minipage}
+ \end{wrapfigure}
+Note that the greedy algorithm is terminated when every hard example is covered, regardless of whether the budget $B$ is exhausted. In this case, the selected examples are added to the annotation set $\gL$, and the model's feedback is re-evaluated to define the new hard set $\gU'_h$. The iterative process is terminated when the total budget $B$ is exhausted.
+
+
+
+
+
+\subsection{\adaiclp: Dynamically Re-Weighted \mcp}
+The greedy \Algref{alg:greedy} for \adaicl may cover all hard examples if the budget allows. However, this might include selecting sets that contain very few hard examples, e.g., outliers, or sets that belong to isolated sparse regions. 
+
+\adaiclp tackles this pitfall by a re-weighting schema for the \mcp problem. Whenever a hard example is covered, instead of being marked as covered, \adaiclp reduces its weight. By having new weights, dense regions with hard examples are preferred over sparse regions if their total weight is greater.
+
+Unfortunately, \emph{dynamically} updating the weights of each example does not satisfy the submodularity property of \mcp, which is satisfied for \emph{fixed} weights. Nevertheless, such that we can use the greedy algorithm to approximate the optimal solution, we propose a re-weighting trick by reusing $\gU_h$ multiple times. Specifically, we copy the set $\gU_h$ multiple times, i.e., to $\gU^0_h, \gU^1_h$, etc., where different sets have different weights for their elements. If hard example $x_i$ is covered in $\gU^0_h$, then we use its weights from the other sets. Formally, we optimize 
+\begin{align}
+    \argmax  \sum_{t=0}^{\lfloor B/T \rfloor}\sum_{x^{t}_i \in U^{t}_h} w^t c^t_i,
+    \label{eq:wmcp}
+\end{align}
+We set the weights $w^t$, so that $w^t \approx w^t + w^{t+1} + w^{t+2} + \cdots$, which can be achieved by exponentially reducing the weights. In our case, we set $w^t = 10^{-t}$. In the beginning, every hard example of $\gU^0_h$ has weight $w^0 = 1$ . If one example is covered in $\gU^0_h$, i.e., $c^0_i = 1$, then its new weight is obtained from $\gU^1_h$, where $w^1 = 0.1$. We introduce a new hyperparameter $T$, which denotes the desired total number of iterations until we exhaust the budget. At each iteration, we can annotate $\lfloor B/T \rfloor$ new examples by solving \Eqref{eq:wmcp} and then, the model $M$ re-evaluates its predictions.
+
+
+
+\section{Experimental Setting}
+
+With our experimental analysis, we address the following research questions (RQs):
+\begin{itemize}[leftmargin=*]
+    \item {RQ1}. How does \adaicl compare with SOTA active learning strategies for ICL?
+    \item {RQ2}. How efficient is \adaicl regarding labeling and inference costs? 
+    \item {RQ3}. How robust is \adaicl under different setups of the problem (\Figref{fig:setting})? 
+    \item {RQ4}. Does \adaicl help the LLM understand the task? 
+\end{itemize}
+
+\textbf{Datasets.}
+We performed empirical evaluation  with nine NLP datasets that cover well-studied tasks, such as topic classification (AGNews~\citep{zhang2015agnews}, TREC~\citep{hovy2001trec}), sentiment analysis (SST2~\citep{socher2013sst2}, Amazon~\citep{mcauley2013amazon}), natural language inference (RTE~\citep{bentivogli2009rte}, MRPC~\citep{dolan2004mrpc}, MNLI~\citep{williams2018mnli}), text summarization (XSUM~\citep{narayan2018xsum}) and math reasoning (GSM8K~\citep{cobbe2021gsm8k}). 
+
+\textbf{Baselines.}
+We use the following approaches as baselines for comparison: (i) \textbf{Random} performs random example selection for annotation. (ii) \textbf{Pseudo-labeling} uses the LLM to generate pseudo-labels for the unlabeled instances as additional annotated data. (iii) \textbf{Fast-vote$k$} \citep{su2022selective} is a diversity-based sampling strategy that selects representative examples in the similarity space. (iv) \textbf{Vote$k$} \citep{su2022selective} additionally  accounts for the model's feedback. It sorts the examples based on the model's confidence scores and  stratifies them into $B$ equally-sized buckets. It selects the top-scoring fast-vote$k$ example from each bucket.  (v) \textbf{Hardest} resembles the uncertainty sampling strategy of active learning. The examples that the model is the most uncertain for are selected. Additionally, we include (vi) \textbf{\adaiclb} method (\Secref{sec:base}) as further ablations. 
+\begin{figure}
+  \centering
+  \begin{subfigure}[b]{0.4\textwidth}
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J    & 65.2  & 62.1  & 59.1 \\
+GPT-Neo   & 64.6  & 59.2  & 57.1 \\
+}\tcdata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J    & 88.4 & 87.6  & 84.8 \\
+GPT-Neo    & 78.7 & 76.8 & 71.2 \\
+}\sadata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J & 55.8 & 54.0 & 53.8 \\
+GPT-Neo & 54.4 & 52.2 & 51.3 \\
+}\nlidata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J   & 69.8 & 67.9 & 65.9 \\
+GPT-Neo   & 65.9 & 62.7 & 59.9 \\
+}\alldata
+
+\begin{tikzpicture}
+\tikzstyle{every node}=[font=\scriptsize]
+    \begin{axis}[
+            ybar=.2cm,
+            bar width=.3cm,
+            enlarge x limits={0.4},
+            width=\textwidth,
+            height=0.6\textwidth,
+            legend style={at={(1,1.3)},
+                anchor=north,legend columns=-1},
+            symbolic x coords={ GPT-J, GPT-Neo},
+            xtick=data,
+            nodes near coords,
+            nodes near coords align={vertical},
+            ymin=55,ymax=70,
+            ylabel={Accuracy \%},
+            ylabel near ticks,
+            compat=1.5, 
+        ]
+	\addplot table[x=Dataset,y=Ada]{\tcdata};
+        \addplot table[x=Dataset,y=BB]{\tcdata};
+        \addplot table[x=Dataset,y=Ran]{\tcdata};
+        \legend{\adaicl, Best Base., Random}
+    \end{axis}
+    
+\end{tikzpicture}
+
+
+    \caption{Topic Classif. (AGNews, TREC)}
+     \label{fig:maina}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.4\textwidth}
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J    & 65.2  & 61.7  & 59.1 \\
+GPT-Neo   & 64.6  & 59.2  & 57.1 \\
+}\tcdata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J    & 88.4 & 87.6  & 84.8 \\
+GPT-Neo    & 78.7 & 76.8 & 71.2 \\
+}\sadata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J & 55.8 & 54.0 & 53.8 \\
+GPT-Neo & 54.4 & 52.2 & 51.3 \\
+}\nlidata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J   & 69.8 & 67.9 & 65.9 \\
+GPT-Neo   & 65.9 & 62.7 & 59.9 \\
+}\alldata
+
+\begin{tikzpicture}
+\tikzstyle{every node}=[font=\scriptsize]
+    \begin{axis}[
+            ybar=.2cm,
+            bar width=.3cm,
+            enlarge x limits={0.45},
+            width=\textwidth,
+            height=0.6\textwidth,
+            legend style={at={(1,1)},
+                anchor=north,legend columns=-1},
+            symbolic x coords={ GPT-J, GPT-Neo},
+            xtick=data,
+            nodes near coords,
+            nodes near coords align={vertical},
+            ymin=70,ymax=95,
+            compat=1.5, 
+        ]
+	\addplot table[x=Dataset,y=Ada]{\sadata};
+        \addplot table[x=Dataset,y=BB]{\sadata};
+        \addplot table[x=Dataset,y=Ran]{\sadata};
+    \end{axis}
+
+\end{tikzpicture}
+
+
+  \caption{Sentim. Analysis (SST2, Amazon)}
+   \label{fig:mainb}
+  \end{subfigure}
+  
+  \begin{subfigure}[b]{0.4\textwidth}
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J    & 65.2  & 61.7  & 59.1 \\
+GPT-Neo   & 64.6  & 59.2  & 57.1 \\
+}\tcdata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J    & 88.4 & 87.6  & 84.8 \\
+GPT-Neo    & 78.7 & 76.8 & 71.2 \\
+}\sadata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J & 55.8 & 54.0 & 53.8 \\
+GPT-Neo & 54.4 & 52.2 & 51.3 \\
+}\nlidata
+
+\pgfplotstableread[row sep=\\,col sep=&]{
+Dataset & Ada  & BB & Ran \\
+GPT-J   & 69.8 & 67.9 & 65.9 \\
+GPT-Neo   & 65.9 & 62.7 & 59.9 \\
+}\alldata
+
+\begin{tikzpicture}
+\tikzstyle{every node}=[font=\scriptsize]
+    \begin{axis}[
+            ybar=.2cm,
+            bar width=.3cm,
+            enlarge x limits={0.4},
+            width=\textwidth,
+            height=0.6\textwidth,
+            legend style={at={(1,1)},
+                anchor=north,legend columns=-1},
+            symbolic x coords={ GPT-J, GPT-Neo},
+            xtick=data,
+            nodes near coords,
+            nodes near coords align={vertical},
+            ymin=50,ymax=60,
+            ylabel={Accuracy \%},
+            ylabel near ticks,
+            compat=1.5, 
+        ]
+	\addplot table[x=Dataset,y=Ada]{\nlidata};
+        \addplot table[x=Dataset,y=BB]{\nlidata};
+        \addplot table[x=Dataset,y=Ran]{\nlidata};
+    \end{axis}
+
+\end{tikzpicture}
+
+
+  \caption{Nat. Lang. Inf. (RTE, MRPC, MNLI)}
+   \label{fig:mainc}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.4\textwidth}
+  \hspace{.2in}
+  \resizebox{0.7\linewidth}{!}{
+  \centering
+
+
+\centering
+\begin{tabular}{l|rr}
+    \toprule
+    & \multicolumn{1}{c}{Falcon-40B} & \multicolumn{1}{c}{LLaMa-65B} \\
+    \midrule
+    & \multicolumn{2}{c}{\textbf{Summarization} (RougeL)} \\
+    Zero-shot & $18.50_{\pm 0.61}$ & $15.26_{\pm 0.69}$ \\
+    Vote$k$ & $20.83_{\pm 0.05}$ & $23.38_{\pm 0.84}$ \\
+   \adaicl & $21.42_{\pm 0.68}$ & $24.67_{\pm 0.45}$ \\
+    \midrule
+    & \multicolumn{2}{c}{\textbf{Math Reasoning} (Accuracy)} \\
+    Zero-shot &  $36.58_{\pm 3.14}$ & $32.54_{\pm 1.86}$ \\
+    Vote$k$ &  $37.23_{\pm 1.75}$ & $45.04_{\pm 1.47}$ \\ 
+   \adaicl &  $39.58_{\pm 3.01}$ & $49.08_{\pm 2.89}$  \\
+    \bottomrule
+\end{tabular}%
+  \caption{Generation Tasks (XSUM, GSM8K)}
+   \label{fig:maind}
+  \end{subfigure}
+  \caption{Performance comparison across different tasks with GPT-J (6B) and GPT-Neo (1.3B). ``\textit{Best Base.}'' denotes the \underline{best} baseline for the task.
+  }
+    \label{fig:main}
+\end{figure} 
+
+\textbf{Design Space.}
+As summarized in \Figref{fig:setting}, the design space includes the unlabeled set $\gU$, the number of ICL examples $k$, the similarity space $\gS$, the budget $B$, and the LLM $M$.
+We experiment with seven LLMs of varying sizes (1.3B to 65B parameters), including GPT, Mosaic, Falcon, and LLaMa model families,  all of which are open-source and allow the reproducibility of our research.
+Unless otherwise stated, we set $k=5$, $B=20$ and we obtain embeddings in the similarity space via SBERT~\citep{reimers2019sentence}.
+We experiment with inductive settings, where test instances come from an \emph{unseen} set $\gU_{\text{test}}$, but also for transductive settings, where test instances come from $\gU$. 
+\textbf{\adaicl}.
+ For the default problem setup, we construct 2-hop sets with $m=5$ for \adaicl, and 1-hop sets with $m=15$ for \adaiclp via \Eqref{eq:heuristic}.  The default number of iterations $T$ for \adaiclp is $T=2$, while in the additive budget scenario we have $T=1$. As the threshold hyper-parameter $\theta$, we have $\theta=0.5$, i.e., 50\% of the examples are considered as hard.
+
+
+
+\section{Results \& Analysis}
+
+
+\subsection{RQ1: \adaicl is Effective} \label{sec:res1}
+Figures~\ref{fig:maina},~\ref{fig:mainb}, and ~\ref{fig:mainc} show performance results for classification tasks with two different models GPT-J (6B) and GPT-Neo (1.3B). \adaicl is the method that achieves the best performance, with an improvement of up to 7.5\%  accuracy points over random selection. The overall improvement over the best baseline is 1.9\% points for GPT-J and 3.2\% for GPT-Neo, which shows that \adaicl is important for smaller sized LMs. 
+The second best performing method for topic classification and sentiment analysis is \adaiclb, which shows the  importance of diversity-based uncertainty sampling for ICL.
+Figure~\ref{fig:maind} provides results for generation tasks. On the challenging reasoning tasks, \adaicl outperforms Vote$k$ and zero-shot ICL by 4.04\% and 16.54\% in accuracy, respectively.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \centering
+\definecolor{col1}{rgb}{0.60, 0.31, 0.64}
+\definecolor{col2}{rgb}{0.30, 0.69, 0.29}
+\definecolor{col3}{rgb}{0.22, 0.49, 0.72}
+\definecolor{col4}{rgb}{0.89, 0.10, 0.11}
+\definecolor{col5}{rgb}{1, 1, 0.8}
+\begin{tikzpicture}
+\tikzstyle{every node}=[font=\Huge]
+\begin{axis}[legend style={at={(.9,0.9),anchor=north east}},
+             legend style={legend pos=outer north east,},  title={Topic Classif.},ylabel={Accuracy (\%)}, xlabel={Budget $B$ }, every axis plot/.append style={ultra thick}, ymin=25, ymax=72, compat=1.5, xtick={5,15,25,35,45}
+]
+
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 38.89) +- (5, 8.81) 
+    (15, 52.40) +- (15, 5.51)
+    (25, 62.57) +- (25, 5.72)
+    (35, 65.88) +- (35, 4.94)
+    (45, 67.95) +- (45, 3.91)
+};
+
+\addplot[dashed, orange] coordinates {(5, 52.40)(45,52.40)};
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 35.81) +- (5, 8.23)
+    (15, 40.16) +- (15, 5.20)
+    (25, 42.76) +- (25, 3.20)
+    (35, 46.22) +- (35, 1.39)
+    (45, 51.58) +- (45, 3.77)
+};
+\addplot[mark=*,col1, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 41.2) +- (5, 5.40)
+    (15, 42.44) +- (15, 2.61)
+    (25, 50.25) +- (25, 6.19)
+    (35, 56.96) +- (35, 5.85)
+    (45, 61.38) +- (45, 4.77)
+};
+
+\addplot[only marks, mark=asterisk,orange, mark size=10] 
+coordinates {
+(15, 52.40)
+};
+\end{axis}
+
+\begin{axis}[legend columns=-1,legend style={at={(2,1.45),anchor=north east,}},  title={Sentiment}, xlabel={Budget $B$ }, ymin=55, ymax=85,  every axis plot/.append style={ultra thick},  xshift=8cm, compat=1.5, xtick={5,15,25,35,45}
+]
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 61.38) +- (5, 4.01) 
+    (15, 79.35) +- (15, 2.15)
+    (25, 80.51) +- (25, 2.51)
+    (35, 81.70) +- (35, 1.82)
+    (45, 82.16) +- (45, 1.10)
+};
+\addlegendentry{\adaiclp \; \; } 
+
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 60.99) +- (5, 5.96)
+    (15, 67.76) +- (15, 5.05)
+    (25, 69.26) +- (25, 3.20)
+    (35, 73.69) +- (35, 2.79)
+    (45, 72.97) +- (45, 2.31)
+};
+\addlegendentry{Random \; \; } 
+
+\addplot[mark=*,col1, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 63.99) +- (5, 6.60)
+    (15, 69.00) +- (15, 5.17)
+    (25, 75.97) +- (25, 3.72)
+    (35, 79.28) +- (35, 1.79)
+    (45, 81.44) +- (45, 1.59)
+};
+\addlegendentry{Best Base. \; \; } 
+
+\addplot[only marks, mark=asterisk,orange, mark size=10] 
+coordinates {
+(15, 79.35)
+};
+\addlegendentry{Sweet Point} 
+
+
+\addplot[dashed, orange] coordinates {(5, 79.35)(45,80.51)};
+
+\end{axis}
+
+
+\begin{axis}[legend style={at={(.9,0.9),anchor=north east}},
+             legend style={legend pos=outer north east,},  title={Nat. Lang. Inf.}, xlabel={Budget $B$ }, every axis plot/.append style={ultra thick}, ymin=45, ymax=61, xshift=16cm, xtick={5,15,25,35,45}, compat=1.5, 
+]
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 53.05) +- (5, 1.84) 
+    (15, 52.94) +- (15, 1.81)
+    (25, 54.95) +- (25, 1.58)
+    (35, 57.23) +- (35, 2.50)
+    (45, 58.18) +- (45, 2.33)
+};
+
+\addplot[dashed, orange] coordinates {(5, 57.23)(45,57.23)};
+
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 47.61) +- (5, 3.61)
+    (15, 52.39) +- (15, 2.77)
+    (25, 54.20) +- (25, 2.81)
+    (35, 55.03) +- (35, 2.80)
+    (45, 56.20) +- (45, 2.71)
+};
+\addplot[mark=*,col1, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 47.32) +- (5, 4.37)
+    (15, 54.12) +- (15, 2.16)
+    (25, 53.03) +- (25, 2.11)
+    (35, 55.28) +- (35, 2.52)
+    (45, 54.80) +- (45, 2.73)
+};
+\addplot[only marks, mark=asterisk,orange, mark size=10] 
+coordinates {
+(35, 57.23)
+};
+\end{axis}
+
+\end{tikzpicture}
+      \caption{Multi-step results with GPT-Neo. Sweet point: the point at which we exceed the best performance achieved by random selection. 
+      }
+      \label{fig:phases}
+\end{wrapfigure}
+
+
+\subsection{RQ2 \& RQ3: \adaicl is Efficient and Robust} \label{sec:res2}
+
+\textbf{Budget-Efficiency}. We experiment with a scenario similar to mini-batch active learning, where the budget increases in different steps
+and the retriever uses as many ICL annotated examples as the context-length limit allows. \Figref{fig:phases} shows results when incrementing the budget with 10 more annotations (for 4 steps). \adaicl performs the best in all cases, where the average accuracy improvement over the best baseline is 7.09\% for topic classification, 3.08\% for sentiment analysis, and 2.36\% for natural language inference. \Figref{fig:phases}  also shows that for topic classification and sentiment analysis \adaicl exceeds the best performance achieved by random annotation with $3\times$ less budget. 
+\begin{wraptable}{r}{0.5 \textwidth} %
+\centering
+\caption{Impact of the number of ICL examples.}
+\label{tab:kshot}%
+\resizebox{\linewidth}{!}{
+\begin{threeparttable}
+    \begin{tabular}{l|cc|cc}
+        \toprule
+         & \multicolumn{2}{c|}{GPT-J (6B)} & \multicolumn{2}{c}{Mosaic (7B)}  \\
+        & AGNews & SST2 & AGNews & SST2 \\
+        \midrule
+        Vote$k$ 5-shot & $53.61_{\pm 7.72}$ & $72.89_{\pm 11.67}$ & $71.04_{\pm 8.12}$  & $	80.98_{\pm 5.26}$ \\
+        Vote$k$ 10-shot & $58.32_{\pm 2.74}$ & $80.08_{\pm 7.43}$& $76.09_{\pm 3.37}$ & $90.23_{\pm 0.31}$\\
+        \adaicl 5-shot & $67.44_{\pm 4.57}$& $83.98_{\pm 1.10}$ & $77.20_{\pm 3.42}$& $89.58_{\pm 1.75}$\\
+        
+        \bottomrule
+    \end{tabular}%
+		\begin{tablenotes}
+  \item $B=5$ and $B=10$ for 5-shot and 10-shot ICL, respectively.
+        \end{tablenotes}
+    \end{threeparttable}
+}
+
+\end{wraptable}%
+\textbf{Impact of ICL examples}. Table~\ref{tab:kshot} investigates \adaicl's efficiency with respect to the number of ICL examples used during inference (and annotated). As shown, \adaicl outperforms vote$k$ although it uses and annotates $2 \times$ fewer ICL examples. This indicates that \adaicl identifies examples that help the LLM learn the task, while it can reduce the inference costs due to shorter input prompts.
+
+
+\textbf{Retriever Effect}. Table~\ref{tab:sbert} shows results when we use different off-the-shelf encoders for the similarity space $\gS$, such as BERT~\citep{devlin2019bert} and RoBERTa~\citep{liu2019roberta}. As discussed in \Secref{sec:challenges}, it is difficult to approximate the true similarity between examples based on the pretraining distribution $\gD$, and thus different encoders lead to different results. 
+For example, SBERT achieves a maximum average performance of 55.33\% and 77.73\% for TREC and Amazon, respectively, while BERT achieves 44.06\% and 85.80\%. Despite the encoder choice, \adaicl performs overall the best as its diversity-based uncertainty sampling mitigates this effect.
+
+
+\begin{wrapfigure}{r}{0.7\textwidth}
+  \centering
+\definecolor{col1}{rgb}{0.60, 0.31, 0.64}
+\definecolor{col2}{rgb}{0.30, 0.69, 0.29}
+\definecolor{col3}{rgb}{0.22, 0.49, 0.72}
+\definecolor{col4}{rgb}{0.89, 0.10, 0.11}
+\definecolor{col5}{rgb}{1, 1, 0.8}
+\begin{tikzpicture}
+\tikzstyle{every node}=[font=\Huge]
+\begin{axis}[legend style={at={(.9,0.9),anchor=north east}},
+             legend style={legend pos=outer north east,},  title={GPT-J (6B)},ylabel={Accuracy (\%)}, xlabel={Budget $B$ }, every axis plot/.append style={ultra thick}, ymin=46, ymax=87, compat=1.5, xtick={5,10,15,20}
+]
+
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 68.42) +- (5, 5.62)
+    (10, 73.79) +- (10, 2.33)
+    (15, 79.31)  +- (15, 1.66)
+    (20, 80.49) +- (20, 1.88)
+};
+
+\addplot[dashed, gray] coordinates {(5, 78.06)(20,78.06)};
+
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 61.80) +- (5, 7.49)
+    (10, 66.78) +- (10, 6.09)
+    (15, 72.24) +- (15, 5.78)
+    (20, 73.83) +- (20, 3.12)
+};
+\addplot[only marks, mark=*,gray, error bars/.cd, y dir=both, y explicit] 
+coordinates {
+(20, 78.06) +- (20, 2.64)
+};
+
+\end{axis}
+
+\begin{axis}[legend columns=-1,legend style={at={(2,1.45),anchor=north east,}},  title={Mosaic-7B}, xlabel={Budget $B$ }, ymin=46, ymax=87,  every axis plot/.append style={ultra thick},  xshift=8cm, compat=1.5, xtick={5,10,15,20}
+]
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 72.29) +- (5, 5.44)
+    (10, 80.89) +- (10, 1.13)
+    (15, 82.50) +- (15, 1.59)
+    (20, 83.90) +- (20, 2.02)
+    
+};
+\addlegendentry{\adaiclp \; \; } 
+
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 69.71) +- (5, 6.17)
+    (10, 74.71) +- (10, 4.36)
+    (15, 79.43) +- (15, 2.80)
+    (20, 79.52) +- (20, 2.09)
+};
+\addlegendentry{Random \; \; } 
+\addplot[dashed, gray] coordinates {(5, 78.15)(20,78.15)};
+\addlegendentry{Vote$k$} 
+
+\addplot[only marks, mark=*,gray, error bars/.cd, y dir=both, y explicit] 
+coordinates {
+(20, 78.15) +- (20, 3.49)
+};
+\end{axis}
+
+\begin{axis}[legend style={at={(.9,0.9),anchor=north east}},
+             legend style={legend pos=outer north east,},  title={Falcon-7B}, xlabel={Budget $B$ }, every axis plot/.append style={ultra thick}, ymin=46, ymax=87, xshift=16cm, xtick={5,10,15,20}, compat=1.5, 
+]
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 70.41) +- (5, 3.77)
+    (10, 75.50) +- (10, 1.85)
+    (15, 74.06) +- (15, 2.97)
+    (20, 75.03) +- (20, 3.60)
+};
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 66.73) +- (5, 7.60)
+    (10, 70.99) +- (10, 6.00)
+    (15, 73.63) +- (15, 3.62)
+    (20, 72.39) +- (20, 4.64)
+    
+};
+
+\addplot[only marks, mark=*,gray, error bars/.cd, y dir=both, y explicit] 
+coordinates {
+(20, 73.50) +- (20, 2.29)
+};
+\addplot[dashed, gray] coordinates {(5, 73.50)(20, 73.50)};
+
+\end{axis}
+\begin{axis}[legend style={at={(.9,0.9),anchor=north east}},
+             legend style={legend pos=outer north east,},  title={LLaMa-7B}, xlabel={Budget $B$ }, every axis plot/.append style={ultra thick}, ymin=46, ymax=87, xshift=24cm, xtick={5,10,15,20}, compat=1.5, 
+]
+\addplot[mark=square*,col2, error bars/.cd, y dir=both, y explicit] coordinates {
+
+    (5, 54.16) +- (5, 7.04)
+    (10, 58.65) +- (10, 3.12)
+    (15, 60.12) +- (15, 3.87)
+    (20, 61.38) +- (20, 4.90)
+};
+\addplot[mark=*,col4, error bars/.cd, y dir=both, y explicit] coordinates {
+    (5, 53.60) +- (5, 7.16)
+    (10, 54.43) +- (10, 3.52)
+    (15, 54.20) +- (15, 3.75)
+    (20, 52.75) +- (20, 2.97)
+};
+
+\addplot[only marks, mark=*,gray, error bars/.cd, y dir=both, y explicit] 
+coordinates {
+(20, 58.33) +- (20, 1.91)
+};
+\addplot[dashed, gray] coordinates {(5, 58.33)(20, 58.33)};
+
+\end{axis}
+
+\end{tikzpicture}
+     \caption{Average results over AGNews, TREC, SST2, and Amazon datasets for four LLMs with similar size.}
+     \label{fig:llms}
+\end{wrapfigure}
+\textbf{LLM Effect}. \Figref{fig:llms} shows results when using different LLMs of similar sizes (6-7B parameters). The best performance is achieved for the Mosaic and GPT-J models. LLaMa does not display effective ICL capabilities and Falcon does not substantially improve with more annotated examples. For Mosaic and GPT-J models, \adaicl outperforms Vote$k$ by 4.09\% accuracy points, while the average accuracy improvement over random annotation for different budgets is 5.45\%  points.
+
+
+\begin{table}[tb]
+\centering
+
+\caption{Performance comparison across different retrieval and semantic similarity configurations.}
+\label{tab:sbert}%
+\resizebox{\linewidth}{!}{
+\begin{threeparttable}
+    \begin{tabular}{l|ccc|ccc|ccc|c}
+        \toprule
+         Retriever, $\gS \xrightarrow{}$ & \multicolumn{3}{c|}{SBERT-all-mpnet-base-v2} & \multicolumn{3}{c|}{RoBERTa-nli-large-mean-tokens} & \multicolumn{3}{c|}{BERT-nli-large-cls-pool} & Avg. \\
+        & TREC & SST2 & Amazon & TREC & SST2 & Amazon & TREC & SST2 & Amazon &  \\
+        \midrule
+        Pseudo-labeling & $48.56_{\pm 6.33}$& $69.13_{\pm 3.87}$ & $70.96_{\pm 3.35}$ & $33.98_{\pm 3.68}$ & $74.08_{\pm 4.40}$& $81.11_{\pm 4.14}$ & $41.27_{\pm 4.24}$ & $77.47_{\pm 1.60}$ & $81.63_{\pm 2.49}$ & $64.24$\\
+        Random &  $54.68_{\pm 1.68}$ & $68.48_{\pm 1.87}$ & $73.95_{\pm 2.03}$ & $37.23_{\pm 2.30}$ & $74.21_{\pm 3.50}$ & $84.46_{\pm 3.21}$ & $34.75_{\pm 2.41}$ & $72.65_{\pm 5.82}$ & $80.20_{\pm 3.34}$ & $64.51$\\
+        Vote$k$ & $54.81_{\pm 0.49}$ & $73.69_{\pm 9.05}$ & $ 75.13_{\pm 0.98}$ & $37.77_{\pm 4.65}$ &$76.16_{\pm 2.23}$ & $84.11_{\pm 1.28}$& $42.43_{\pm 3.34}$ & $80.85_{\pm 2.09}$& $83.59_{\pm 1.77}$ & $67.61$\\
+        \adaiclb &  $48.24_{\pm 0.98}$ & $77.86_{\pm 1.02}$ & $75.77_{\pm 3.63}$ & $38.12_{\pm 5.74}$ & $78.12_{\pm 5.30}$ & $\underline{85.93}_{\pm 2.30}$ & $	38.15_{\pm 3.10}$ & $78.64_{\pm 2.78}$ & $\underline{85.80}_{\pm 1.75}$ & $67.40$\\ 
+       \textbf{\adaicl} &    $\underline{55.33}_{\pm 2.57}$ & $\underline{79.68}_{\pm 2.47}$ & $\underline{77.73}_{\pm 2.23}$ & $\underline{39.06}_{\pm 3.37}$ & $\underline{81.11}_{\pm 1.50}$ & $ 85.15_{\pm 0.55}$ & $\underline{44.06}_{\pm 2.49}$ & $\underline{80.85}_{\pm 2.83}$ & $84.65_{\pm 3.52}$ & $\textbf{69.74}$\\
+        \bottomrule
+    \end{tabular}%
+    \end{threeparttable}
+}
+
+\end{table}%
+
+
+\subsection{RQ3: \adaicl improves Calibration} \label{sec:res-calib}
+
+One motivation behind uncertainty sampling is that it helps the LLM understand the task. Our hypothesis is that selecting examples that the LLM is over-confident for, i.e., easy examples, might not convey new information for the LLM to truly understand the task. We test our hypothesis by introducing a new variant of our method, termed \adaicl-easy, which constructs regions of hard examples \emph{around easy examples} for \mcp. To compare \adaicl-easy with our original \adaicl-hard, we compute the expected calibration error (ECE)~\citep{guo2017calibration} which quantifies the discrepancy between a model's predicted probabilities (how well it believes it understands the task) and observed outcomes (how well it actually solves the task). In addition, we visualize the discrepancy across probability bins by reliability plots, where any deviation from the straight diagonal indicates miscalibration and misunderstanding of the task.
+
+As shown in \Figref{fig:calibr}, ``phase changes'' in ECE could be observed for \adaicl-hard at different iterations and thus, improved calibration. We conjecture that the over-confident examples selected using \adaicl-easy lead to the bias towards making over-confident ICL predictions that are not always true. This is verified by the reliability plots for two snapshots: at iteration=7 for AGNews and at iteration=2 for SST2, where \adaicl-hard reduces the ECE from 0.20-0.30 to approximately 0.1.
+\adaicl-easy tends to make over-confident predictions (heavily skewed towards the right of the x-axis and large deviation from the diagonal), whereas \adaicl-hard produces more calibrated predictions, with more uniform probability distributions.
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figs/calibration/AdaICL-calibr-1.pdf}
+    \caption{Expected calibration errors (ECE -- the lower the better) and reliability plots for \adaicl when selecting easy (\adaicl-easy) and  selecting hard (\adaicl-hard) examples.}
+    \label{fig:calibr}
+\end{figure*}
+
+
+
+\section{Conclusions}
+
+In this work, we investigated budgeted example selection for annotation for ICL, a previously under-explored area. Seeking for an effective and efficient selection, we introduce \adaicl, a diversity-based uncertainty selection strategy. Diversity-based sampling improves effectiveness, while uncertainty sampling improves budget efficiency and helps the LLM learn new information about the task. 
+Extensive experiments in low-resource settings show that \adaicl outperforms other approaches in five NLP tasks using seven different LLMs. Moreover, \adaicl can result into considerable budget savings, while it also needs fewer ICL examples during inference to achieve a given level of performance, reducing inference costs. Finally, our calibration analysis showed that \adaicl selects examples that lead to well-calibrated predictions.
+
+
+
+
+
+
+\section{Reproducibility Statement}
+
+ For the datasets used, a complete description of the data processing steps is given in Appendices~\ref{app:data} and~\ref{app:prompt-data}.
+
+
+
+
+

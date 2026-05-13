@@ -1,0 +1,561 @@
+\title{ARB-LLM: Alternating Refined Binarizations for Large Language Models}
+
+\begin{abstract}
+\vspace{-3.5mm}
+Large Language Models (LLMs) have greatly pushed forward advancements in natural language processing, yet their high memory and computational demands hinder practical deployment. Binarization, as an effective compression technique, can shrink model weights to just 1 bit, significantly reducing the high demands on computation and memory. However, current binarization methods struggle to narrow the distribution gap between binarized and full-precision weights, while also overlooking the column deviation in LLM weight distribution. To tackle these issues, we propose ARB-LLM, a novel 1-bit post-training quantization (PTQ) technique tailored for LLMs. To narrow the distribution shift between binarized and full-precision weights, we first design an alternating refined binarization (ARB) algorithm to progressively update the binarization parameters, which significantly reduces the quantization error. Moreover, considering the pivot role of calibration data and the column deviation in LLM weights, we further extend ARB to ARB-X and ARB-RC. In addition, we refine the weight partition strategy with column-group bitmap (CGB), which further enhance performance. Equipping ARB-X and ARB-RC with CGB, we obtain ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ respectively, which significantly outperform state-of-the-art (SOTA) binarization methods for LLMs.
+As a binary PTQ method, our ARB-LLM$_\text{RC}$ is the first to surpass FP16 models of the same size.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setlength{\abovedisplayskip}{2pt}
+\setlength{\belowdisplayskip}{2pt}
+
+\begin{wrapfigure}{r}{0.48\textwidth}
+ \centering
+\includegraphics[trim=3 0 0 0, clip, width=0.42\textwidth]{figs/teaser.pdf}
+\caption{OPT performance on 7 zero-shot Question Answering (QA) datasets. Our ARB-LLM$_\text{RC}$ outperforms the same-size FP16 models.}
+\label{fig:teaser}
+\end{wrapfigure} 
+
+Recently, Transformer-based~\citep{vaswani2017attention} large language models have shown impressive performance across various natural language processing tasks. However, this unprecedented capability is largely attributed to the sheer scale of these models, which often encompass billions of parameters. For instance, open pre-trained Transformer (OPT) series~\citep{zhang2022opt} includes various models, with the largest boasting 66B parameters. Similarly, the LLaMA family~\citep{touvron2023llama} features variants such as LLaMA3-70B, showcasing even larger architectures. The substantial memory requirements for inference in such large models (\textit{e.g.,} 150 GB memory for a 70B model) pose significant challenges for their deployment on mobile devices.
+
+The study of compressing LLMs can be categorized into weight quantization~\citep{lin2024awq,frantar2022gptq}, low-rank factorization~\citep{zhang2023loraprune, yuan2023asvd}, network pruning~\citep{sun2023simple,frantar2023sparsegpt}, and knowledge distillation~\citep{zhong2024revisiting,gu2023knowledge}. Among these, binarization, a specific technique within the realm of quantization, is particularly distinguished for its ability to achieve extreme memory compression, reducing storage requirements to as low as 1 bit. Given the substantial size of LLMs, some binarization methods adopt the post-training quantization (PTQ) framework to enable a rapid transition from full-precision models to compact binarized versions, requiring minimal resources (\textit{e.g.}, binarizing a 70B model in one 80 GB GPU). 
+
+Recent binary PTQ methods, such as PB-LLM~\citep{shang2023pb} and BiLLM~\citep{huang2024billm}, emphasize the identification of salient weights, which are crucial for model performance~\citep{lin2024awq}. The higher-bit representation and refined searching strategy for salient weights help to achieve a better trade-off between performance and storage. Despite their success, the refinement of the binarization process itself remains largely unaddressed, resulting in a significant difference between the binarized weights and their full-precision counterparts. This gap presents a considerable obstacle to further enhance the performance of binary LLMs.
+
+\begin{wrapfigure}{r}{0.40\textwidth}
+ \centering
+\includegraphics[trim=3 0 0 0, clip, width=0.4\textwidth]{figs/distribution_shift_v7.pdf}
+\caption{Distribution shift between the mean of \textcolor{bimean}{binarized} and \textcolor{fpmean}{full-precision} weights. \textbf{Top}: distribution shift of one row. \textbf{Bottom}: distribution shifts of multiple rows. Each row represents a top view of the corresponding upper image.}
+\label{fig:distribution_shift}
+\end{wrapfigure} 
+To minimize quantization error during the binarization process, we revisit the solutions for the binarization objective. Our analyses reveal that:
+\textbf{(i)} The current approach is suboptimal due to the distribution shift between binarized and full-precision weights after binarization. As shown in~\Cref{fig:distribution_shift}, the mean of the binarized weights is not aligned with the full-precision mean. Consequently, refining the binarization parameters based on the initial distribution of the binarized weights can yield a more accurate estimation of the original weights. Furthermore, this refinement can be alternately applied to different binarization parameters, ultimately leading to a significantly improved estimation.
+\textbf{(ii)} While the calibration set is small, it plays a crucial role in the quantization of LLMs. However, the integration of calibration data for updating binarization parameters, which reflects a more realistic scenario, remains underexplored.
+\textbf{(iii)} The weight distribution in LLMs exhibits noticeable column-wise deviations (see~\Cref{fig:column_dev}), suggesting that the standard row-wise binarization method is inflexible and potentially unsuitable. Thus, incorporating both row and column scaling factors can produce more representative binarization results.
+\begin{wrapfigure}{r}{0.6\textwidth}
+ \centering
+\includegraphics[trim=18 20 15 15, clip, width=0.6\textwidth]{figs/column-wise_deviations_v3.pdf}
+\caption{\textbf{Left}: Full-precision weights exhibit column-wise deviations. \textbf{Right}: BiLLM~\citep{huang2024billm} with row-wise binarization smooths the deviations. Our ARB-RC with row-column-wise binarization effectively preserves them.}
+\label{fig:column_dev}
+\end{wrapfigure} 
+
+With the above observations and analyses, we first propose Alternating Refined Binarization (ARB) to align the distribution between binarized and full-precision weights in standard binarization process. Then, we extend this approach by incorporating the calibration data and row-column-wise scaling factors, leading to two advanced extensions: ARB-X and ARB-RC. Additionally, based on previous methods, which divide salient and non-salient weights and group weights by magnitude, we refine the integration of these two divisions by a column-group bitmap (CGB). 
+Our key contributions can be summarized as follows:
+\begin{itemize}
+    \item We propose a novel binarization framework \textbf{ARB}, designed to progressively align the distribution between binarized and full-precision weights. In addition, we provide rigorous theoretical analyses of the quantization error throughout the progressive updates.
+    \item Building on the basic \textbf{ARB} framework, we develop two advanced extensions: ARB with calibration data (\textbf{ARB-X}), and ARB along row-column axes (\textbf{ARB-RC}). They are tailored to address specific challenges in binarized large language models.
+    \item We propose a refined strategy to combine the salient column bitmap and group bitmap (\textbf{CGB}), which improves the bitmap utilization and further enhances the performance.
+    \item Extensive experiments demonstrate that our \textbf{ARB-LLM$_\text{RC}$ (ARB-RC + CGB)} significantly outperforms SOTA binary PTQ methods while requiring less memory. Furthermore, \textbf{ARB-LLM$_\text{RC}$}, for the first time, surpasses same-size FP16 models on zero-shot QA datasets.
+\end{itemize}
+
+
+
+\section{Related Works}
+
+
+
+\subsection{Network Binarization}
+
+Network binarization compresses the parameters to only 1 bit ($\pm 1$) by using the sign function.
+Then, the straight through estimator (STE)~\citep{bengio2013estimating} is used to tackle the gradient vanishing during back-propagation if training a binary network.
+Binary weight network (BWN)~\citep{rastegari2016xnor} implemented binarization on weights while maintaining full-precision activations. XNOR-Net~\citep{rastegari2016xnor} extended this by binarizing weights and activations.
+They both focus on standard first-order binarization and employ a scaling factor $\alpha$ to reduce quantization error. Network sketching~\citep{guo2017network} extended the first-order binarization by proposing a binary coding quantization (BCQ) to approximate the full-precision weights with multiple binary matrices. \citet{xu2018alternating} improved BCQ by using a binary search tree to determine the optimal code. However, both methods are tailored for scenarios involving multiple binarizations and are not applicable to standard first-order binarization processes. 
+In another direction, OneBit~\citep{xu2024onebit} extended the scaling factor to both weights and activations. BinaryMoS~\citep{jo2024mixture} introduced several scaling experts to improve the performance. Nevertheless, training these models requires substantial resources. For example, training OneBit on LLaMA-7B takes 7 days using 8 A100-80GB GPUs.
+\subsection{Large Language Model Quantization}
+Current quantization techniques for large language models mainly fall into quantization-aware training (QAT) and post-training quantization (PTQ) frameworks.
+
+\textbf{Quantization-Aware Training (QAT).\quad} QAT integrates quantization into the training process, enabling the model to adapt to low-bit representations. Recent works have successfully applied QAT to LLMs. LLM-QAT~\citep{liu2023llm} addressed data barrier issues in QAT training by adding data-free distillation. EfficientQAT~\citep{chen2024efficientqat} proposed an optimized QAT framework with two stages (\textit{i.e.,} Block-AP and E2E-QP) to reduce QAT's memory and computational overhead for LLMs. However, QAT still requires considerable computational resources, including significant GPU memory and more training time. Therefore, LLM quantization techniques such as QLoRA~\citep{dettmers2024qlora} focused on parameter-efficient fine-tuning methods, which enhanced the efficiency of QAT. Nevertheless, the efficiency of the LLM quantization methods remained unsatisfactory.
+
+\textbf{Post-Training Quantization (PTQ).\quad} PTQ applied quantization directly to the existing model weights instead of retraining it. Therefore, it is significantly faster and more resource-efficient than QAT. Recent studies have effectively deployed PTQ in LLMs. RTN rounds weights to the nearest quantization level in order to ensure efficient runtimes when quantizing LLMs.
+Works like ZerqQuant~\citep{yao2022zeroquant} and BRECQ~\citep{li2021brecq} enhanced quantization accuracy by adding additional grouping labels for custom quantization blocks. GPTQ~\citep{frantar2022gptq} utilized layer-wise quantization and reduced the quantization error by second-order error compensation.
+Moreover, PB-LLM~\citep{shang2023pb}, SpQR~\citep{dettmers2023spqr}, and BiLLM~\citep{huang2024billm} implemented a hybrid approach by selectively quantizing salient weights with low bits while binarizing non-salient weights.
+In addition, Smoothquant~\citep{xiao2023smoothquant} proposed a strategy of scaling weight and activation outliers, which simplified quantization. Thereafter, AWQ~\citep{lin2024awq} and OWQ~\citep{lee2024owq} also proposed scale transformations of salient weights for activation features to preserve their model capacity.
+Our work belongs to the category of binary PTQ, achieving a significant improvement over the SOTA method BiLLM.
+\begin{figure*}[t]
+  \centering
+   \includegraphics[width=1.0\textwidth]{figs/overview_v6.pdf}
+   \caption{Overview of our ARB series. \textcolor{arb}{\textbf{ARB}}: alternating refine mean, row scaling factor, and binarized matrix. \textcolor{arbx}{\textbf{ARB-X}}: introducing calibration data into the update of binarization parameters. \textcolor{arbrc}{\textbf{ARB-RC}}: alternating refine row and column scaling factors.}
+   \label{fig:overview}
+\end{figure*}
+
+
+
+\section{Method}
+
+\textbf{Overview.\quad} As shown in~\Cref{fig:overview}, to progressively align the distribution between binarized and full-precision weights in LLMs, we first propose a framework Alternating Refined Binarization (\textbf{ARB}) in Section \ref{ARB}. Based on \textbf{ARB} framework, we propose the Alternating Refined Binarization with calibration data (\textbf{ARB-X}) to enhance the usage of the calibration set, which is crucial for binary LLMs. Additionally, we introduce the Alternating Refined Binarization along row-column axes (\textbf{ARB-RC}) to address the column deviation challenge in LLM weights. These methods are detailed in Sections~\ref{ARB-X} and~\ref{ARB-RC}, respectively. Finally, we discuss our refined strategy to combine salient column bitmap and group bitmap (\textbf{CGB}) in Section~\ref{bitmap}. Our final models, \textbf{ARB-LLM$_\text{X}$} and \textbf{ARB-LLM$_\text{RC}$}, are obtained by equipping \textbf{ARB-X} and \textbf{ARB-RC} with \textbf{CGB} respectively.
+\subsection{ Alternating Refined Binarization (ARB)}\label{ARB}
+We begin by discussing standard weight binarization in LLMs. For a full-precision weight $\mathbf{W}\in \mathbb{R}^{ n \times m}$, we define the objective of binarization as (with dimension broadcasting omitted for simplicity)
+\begin{equation}
+    \label{eq:1} \mathop{\arg\min}\limits_{\alpha,\mathbf{B}}||\widetilde{\mathbf{W}}- 
+    \alpha \mathbf{B}||^2_F,\quad \text{where} \,  \widetilde{\mathbf{W}} = \mathbf{W} -  \mu,\,\mu= \frac{1}{m}\sum_{j=1}^m\mathbf{W}_{.j}\, ,
+\end{equation}
+where $\alpha \in \mathbb{R}^n$ denotes the row-wise scaling factor, and $\mathbf{B} \in \{+1, -1\}^{ n \times m}$ is a binary matrix. 
+
+Since the mean of $\mathbf{W}$ is not necessarily zero, a common practice is to apply a row-wise redistribution before binarization. After redistribution, the weights achieve a row-wise zero-mean distribution, which facilitates the binarization process. Under the objective of binarization (\Cref{eq:1}), the optimal solutions for $\alpha$ and $\mathbf{B}$ can be solved with $\alpha=\frac{1}{m}\sum_{j=1}^m|\widetilde{\mathbf{W}}_{.j}|$ and $\mathbf{B}=\operatorname{sign}(\widetilde{\mathbf{W}})$ respectively.
+Then we can define the quantization error $\mathcal{L}_1$ after binarization as
+\begin{equation}
+    \mathcal{L}_1=||\mathbf{W}-\widehat{\mathbf{W}}||_F^2,\quad \text{where}\, \widehat{\mathbf{W}}=\alpha\mathbf{B}+\mu\,.
+\end{equation}
+Moving forward, we aim to investigate how to reduce the quantization error $\mathcal{L}_1$. We first define the residual matrix as $\mathbf{R}=\mathbf{W}-\widehat{\mathbf{W}}$. In analyzing the residual matrix $\mathbf{R}$, we observe a distribution shift in $\mathbf{R}$, where the mean of $\mathbf{R}$ is not always zero due to inevitable errors during the binarization process (see~\Cref{fig:distribution_shift}). To address this, we introduce a correction term $\delta_{\mu}$ to the original mean $\mu$, effectively mitigating the distribution shift. The refined mean is defined as follows:
+\begin{equation}\label{refine_mu}
+    \mu_{\text{refine}}=\mu+\delta_{\mu},\quad \text{where}\,\delta_\mu = \frac{1}{m}\sum_{j=1}^m\mathbf{R}_{.j} .
+\end{equation}
+This is equivalent to taking the partial derivative of $\mathcal{L}_1$ with respect to $\mu$ and setting it to $0$, as shown in~\Cref{fig:overview}. Since $\mu$ has been updated to $\mu_{\text{refine}}$, the original 
+$\alpha$ and $\mathbf{B}$ are no longer optimal solutions for quantization error $\mathcal{L}_1$. To further minimize the quantization error, the optimal solutions for $\alpha_{\text{refine}}$ and $\mathbf{B}_{\text{refine}}$ can be obtained by setting $\partial \mathcal{L}_1 / \partial \alpha=0$, leading to the following expressions:
+\begin{equation}
+    \alpha_{\text{refine}} = \frac{1}{m} \operatorname{diag}(\mathbf{B}^\top (\mathbf{W} - \mu_{\text{refine}})), \quad \mathbf{B}_{\text{refine}} = \operatorname{sign}(\mathbf{W} - \mu_{\text{refine}}).
+\end{equation}
+After refining $\mu$, $\alpha$, and $\mathbf{B}$, we can obtain the $\widehat{\mathbf{W}}_{\text{refine}}$ as $\widehat{\mathbf{W}}_{\text{refine}} = \alpha_{\text{refine}}\cdot \mathbf{B}_{\text{refine}} + \mu_{\text{refine}}$. 
+We find that this parameter update strategy can be extended to an iterative algorithm. 
+
+In each iteration, we sequentially update $\mu$, $\alpha$, and $\mathbf{B}$ to ensure they are the optimal solutions under the current quantization error $\mathcal{L}_1$. The pseudocode is shown in Algorithm \ref{alg1}, which extends \textbf{ARB} with group mask (a bitmap detailed in~\Cref{bitmap}). Moreover, we theoretically analyze the quantization error during the \textbf{ARB} process and derive a specific value for the reduced quantization error after $\tau$ iterations, as stated in Theorem~\ref{theo1}. The proof is provided in supplementary file.
+\begin{tcolorbox}[colback=yellow!10, colframe=black, boxrule=0.2 mm]
+
+\begin{theorem}\label{theo1}
+For any $\tau\geq 0$, Algorithm~\ref{alg1} achieves a quantization error $\mathcal{L}_1^{\tau}$ satisfying
+\begin{align}\label{eq:4}
+\mathcal{L}_1^{\tau}
+&= \mathcal{L}_1^0-m( (\alpha^{\tau})^2-(\alpha^0)^2 - (\mu^{\tau}-\mu^0)^2)
+\leq \mathcal{L}_1^0,
+\end{align}
+where $\alpha^0$ and $\mu^0$ denote the initial scaling factor and mean respectively, $\alpha^{\tau}$, $\mu^{\tau}$, and $\mathcal{L}_1^{\tau}$ represent the scaling factor, mean, and quantization error after the 
+$\tau$-th iteration respectively.
+\end{theorem}
+\end{tcolorbox}
+
+To achieve better quantization precision, we extend $\textbf{ARB}$ to second-order binarization and apply it to salient weights, following BiLLM~\citep{huang2024billm}. The second-order binarized matrix $\widehat{\mathbf{W}}$ is
+\begin{equation}
+    \widehat{\mathbf{W}} = \alpha_1 \mathbf{B}_1  + \alpha_2 \mathbf{B}_2 +\mu,
+\end{equation}
+where $\mu_1$ and $\mu_2$ can be combined together as $\mu=\mu_1+\mu_2$.
+Based on the first-order \textbf{ARB}, we use Equation \ref{refine_mu} to update $\mu$, then sequentially update $\alpha_1$ and $\alpha_2$ by setting $\partial \mathcal{L}_1 / \partial \alpha_1 = 0$ and $\partial \mathcal{L}_1 / \partial \alpha_2 = 0$ respectively, leading to the following formulas:
+\begin{equation}
+\tilde{\alpha}_1 = \frac{1}{m} \operatorname{diag}(\mathbf{B}_1^\top (\mathbf{W} - \mu_{\text{refine}} - \alpha_2\mathbf{B}_2)),\quad
+\tilde{\alpha}_2 = \frac{1}{m} \operatorname{diag}(\mathbf{B}_2^\top (\mathbf{W} - \mu_{\text{refine}} - \tilde{\alpha}_1\mathbf{B}_1)).
+\end{equation}
+\begin{algorithm}[t]
+\caption{First-Order \textbf{A}lternating \textbf{R}efined \textbf{B}inarization}\label{alg1}
+\begin{multicols}{2}
+func $\operatorname{ARB^1}$($\mathbf{W}$, $\mathbf{M}$, $T$)\\ 
+{\bf Input:} $\mathbf{W} \in \mathbb{R}^{n\times m}$ - full-precision weight \\
+\hspace*{0.43in}$ \mathbf{M} \in \mathbb{R}^{n\times m}$ - group mask \\
+\hspace*{0.43in}$T$ - total iterations \\
+{\bf Output:} $ \mathbf{\widehat{W}} \in \mathbb{R}^{n\times m}$
+\begin{algorithmic}[1]
+
+\STATE $\mathbf{\widehat{W}},\alpha,\mathbf{B},\mu \coloneqq \operatorname{binary}(\mathbf{W},\mathbf{M})$
+\FOR{$\text{iter}=1, 2,...,T$} 
+    \STATE $\mathbf{R} \coloneqq \mathbf{W}-\mathbf{\widehat{W}}$  \mycomment{residual matrix}
+    \STATE $\delta_\mu \coloneqq \sum_j(\mathbf{R} \odot \mathbf{M})_{.j}$
+    \STATE $\mu \leftarrow \mu + \delta_\mu$  \mycomment{refine mean}
+    \STATE $\alpha\leftarrow \operatorname{refine\_alpha}(\mathbf{B},\mathbf{W},\mathbf{M},\mu)$
+    \STATE $\mathbf{B}\leftarrow\operatorname{sign}({\mathbf{W}-\mu})$ \mycomment{refine B}
+    \STATE $\mathbf{\widehat{W}}\leftarrow\alpha \mathbf{B}+\mu$
+\ENDFOR
+\STATE {\bf return}  $\mathbf{\widehat{W}}$
+
+\end{algorithmic}
+\vfill  % 填充垂直空间
+\columnbreak  % 强制换列
+func $\operatorname{binary}$ $(\mathbf{W},\mathbf{M})$
+\begin{algorithmic}[1]
+\STATE $\mu \coloneqq \frac{1}{m}\sum_{j=1}^m(\mathbf{W}\odot\mathbf{M})_{.j}$
+\STATE $\widetilde{\mathbf{W}}\coloneqq \mathbf{W}-\mu$
+\STATE $\alpha \coloneqq \frac{1}{m}\sum_{j=1}^m|(\widetilde{\mathbf{W}}\odot \mathbf{M})_{.j}|$
+\STATE $\mathbf{B} \coloneqq  \operatorname{sign}(\widetilde{\mathbf{W}}\odot\mathbf{M})$
+\STATE $\mathbf{\widehat{W}} \coloneqq \alpha\cdot \mathbf{B} + \mu $
+\STATE {\bf return}  $\mathbf{\widehat{W}},\alpha,\mathbf{B},\mu$
+\end{algorithmic}
+
+func $\operatorname{refine\_alpha}$ $(\mathbf{B},\mathbf{W},\mathbf{M},\mu)$
+\begin{algorithmic}[1]
+\STATE $num \coloneqq \sum_{j=1}^m (\mathbf{B}_{.j}\odot\mathbf{M}_{.j})  \cdot (\mathbf{W}_{.j} - \mu)$
+\STATE $den \coloneqq \sum_{j=1}^m (\mathbf{B}_{.j}\odot\mathbf{M}_{.j})^2 +\epsilon$ \mycomment{avoid zero-division}
+\STATE $\alpha \coloneqq \frac{num}{den}$
+\STATE {\bf return}  $\alpha$
+\end{algorithmic}
+\end{multicols}
+\end{algorithm}
+
+The final step is to update the binary matrices $\mathbf{B}_1$ and $\mathbf{B}_2$. The objective of refining $\mathbf{B}_1$ and $\mathbf{B}_2$ is:
+\begin{equation} \label{eq4}
+    \widetilde{\mathbf{B}}_1, \widetilde{\mathbf{B}}_2 = \mathop{\arg\min}\limits_{\mathbf{B}_1,\mathbf{B}_2}||\mathbf{W}-\mu_{\text{refine}} - \tilde{\alpha}_1\mathbf{B}_1-\tilde{\alpha}_2\mathbf{B}_2||_{\ell1}.
+\end{equation}
+Since $\mathbf{B}_1, \mathbf{B}_2 \in \{+1, -1\}^{n\times m}$, there are only four possible combinations for ($\tilde{\alpha}_1\mathbf{B}_1+\tilde{\alpha}_2\mathbf{B}_2$). Thus, we construct a candidate vector $\mathbf{V}=\{-\tilde{\alpha}_1-\tilde{\alpha}_2, -\tilde{\alpha}_1+\tilde{\alpha}_2, +\tilde{\alpha}_1-\tilde{\alpha}_2, +\tilde{\alpha}_1+\tilde{\alpha}_2\}\in \mathbb{R}^{4}$, then use binary search to find the combination that is closest to ($\mathbf{W}-\mu_{\text{refine}}$). The corresponding elements of $\widetilde{\mathbf{B}}_1$ and $\widetilde{\mathbf{B}}_2$ are then determined accordingly. Detailed pseudocode is provided in supplementary file.
+
+\subsection{ARB with Calibration Data (ARB-X)}\label{ARB-X}
+\label{subsection:3.1}
+Although the \textbf{ARB} algorithm can effectively reduce the quantization error $\mathcal{L}_1$, we observe that the weight matrix $\mathbf{W}$ operates in conjunction with the input data to produce the output. It means that $\mathcal{L}_1$ alone does not fully capture the true impact of quantization. To address this issue, we introduce calibration data $\mathbf{X}$ and define a new quantization error $\mathcal{L}_2$ as $\mathcal{L}_2=||\mathbf{W}\mathbf{X}-\widehat{\mathbf{W}}\mathbf{X}||_F^2$. Based on $\mathcal{L}_2$ and the \textbf{ARB} algorithm, we propose an extended algorithm, naming \textbf{ARB-X}.
+
+\textbf{Reformulation.}\quad
+However, incorporating calibration data necessitates a large number of matrix multiplications when computing $\mathcal{L}_2$, substantially increasing computational overhead, and often making the combination of calibration data impractical. To address this issue, we reformulate the error computation by decoupling the calibration data and weight matrix as:
+\begin{equation}
+    \mathcal{L}_2 = \langle \mathbf{S}, \mathbf{R^\top R} \rangle_F = \text{Tr}(\mathbf{R}\mathbf{S}\mathbf{R}^\top),\quad \text{where} \, \,\mathbf{S} = \sum\nolimits_b\mathbf{X}_b^T\mathbf{X}_b\,,
+    \mathbf{R} = \mathbf{W}-\mu-\alpha\mathbf{B}. 
+\end{equation}
+$\mathbf{X} \in \mathbb{R}^{B \times L \times m}$ denotes the calibration data with batch size $B$, sequence length $L$, and embedding dimension $m$. By compressing the high-dimensional tensor $\mathbf{X}$ into a 2D matrix $\mathbf{S}\in \mathbb{R}^{m\times m}$ and precomputing it, we can significantly reduce the computational overhead.
+To quantify the efficiency improvement of our reformulation, we define the speedup ratio $\eta$, which denotes the ratio between the time complexity of the original error computation and that of the revised method. We present the theoretical result in Theorem~\ref{theo2}, with the proof provided in supplementary file.
+\begin{tcolorbox}[colback=yellow!10, colframe=black, boxrule=0.2 mm]
+\begin{theorem}\label{theo2}
+The speedup ratio $\eta$ of the reformulation compared to the original method is% given by
+\begin{equation}
+    \eta \propto \frac{1}{k\cdot\left(\frac{1}{n\cdot T} + \frac{1}{B\cdot L}\right)},
+\end{equation}
+where $n$ is the hidden dimension of $\mathbf{W}$, $k$ is the block size, and $T$ is the number of iterations.
+\end{theorem}
+\end{tcolorbox}
+Typically, we set \( n \) to 4,096, \( B \) to 128, \( L \) to 2,048, \( T \) to 15, and \( k \) to 128. Under these circumstances, $\eta$ is proportional to 389, meaning that the reformulated method is approximately 389$\times$ faster than the original one. Further details are provided in supplementary file.
+
+\textbf{Parameter Update.}\quad
+By combining the parameter updating strategy with the reformulated $\mathcal{L}_2$, we can derive the parameter update formulas for \textbf{ARB-X} by setting $\partial \mathcal{L}_2 / \partial \mu=0$ and $\partial \mathcal{L}_2 / \partial \alpha=0$, 
+which results in the sequential updates of $\mu$ and $\alpha$ respectively:
+\begin{align}
+\mu = \frac{\mathbf{1}^\top \mathbf{S} (\mathbf{W} - \alpha \mathbf{B})^\top}{\mathbf{1}^\top \mathbf{S} \mathbf{1}},\quad
+\alpha= \frac{\operatorname{diag}(\mathbf{B}\mathbf{S}(\mathbf{W}-\mu)^\top)}{\operatorname{diag}(\mathbf{B}\mathbf{S}\mathbf{B}^\top)}.
+\end{align}
+More details are provided in supplementary file. It is worth noting that, during this process, the matrix $\mathbf{B}$ is not updated. Since $\mathbf{B}$ consists of discrete values (\textit{i.e.}, +1 and -1), it is not possible to update $\mathbf{B}$ directly by setting the partial derivative of $\mathcal{L}_2$ with respect to $\mathbf{B}$ to zero. The pseudocodes for the first-order and second-order $\textbf{ARB-X}$ are provided in supplementary file.
+
+\subsection{ARB along Row-Column Axes (ARB-RC)}\label{ARB-RC}
+Previous binarization methods use a row-wise scaling factor $\alpha^r$ for weight binarization. However, our analyses of the numerical distribution of the weight matrix $\mathbf{W}$ in LLMs reveal significant deviations across columns, with some columns exhibiting notably larger values (\Cref{fig:column_dev}). As a result, using a single row-wise scaling factor may not effectively capture the distribution characteristics of LLM parameters. Additionally, the weight distribution shows a mean close to zero, making the redistribution to zero-mean less effective in LLM binarization. 
+
+To address this, we propose the \textbf{ARB-RC} algorithm, which introduces a column-wise scaling factor $\alpha^c$ to better handle parameter variations across columns, while eliminating the redistribution parameter $\mu$ to enhance compression in LLMs. The row-column binarization process is performed as follows:
+\begin{equation}
+     \alpha^r = \frac{1}{m}\sum_{j=1}^m|\mathbf{W}_{.j}|,\quad \alpha^c = \frac{1}{n}\sum_{j=1}^n|\frac{\mathbf{W}_{j.}}{\alpha_j^r}|,\quad \mathbf{B} = \operatorname{sign}(\mathbf{W}).
+\end{equation}
+Then, we can obtain the binarized matrix as $\widehat{\mathbf{W}}=\alpha^r\alpha^c\mathbf{B}$, where removing $\mu$ while introducing $\alpha^c$ reduces parameters but improves model performance. However, introducing $\alpha^c$ without adopting an alternating parameter update strategy fails to improve performance and can even increase quantization error. Thus, it is necessary to combine $\alpha^c$ with the discussed $\textbf{ARB}$ algorithm. In this approach, we optimize the parameters using the quantization error $\mathcal{L}_1$. Although the quantization error $\mathcal{L}_2$ is more aligned with real-world conditions, our analysis shows that incorporating $\mathbf{X}$ in the $\textbf{ARB-RC}$ method results in parameter coupling, making optimization difficult (detailed in supplementary file). Thus, based on $\mathcal{L}_1$, we can update $\alpha^r$ and $\alpha^c$ by setting $\partial \mathcal{L}_1 / \partial \alpha^r=0$ and $\partial \mathcal{L}_1 / \partial \alpha^c=0$ respectively:
+\begin{align}
+\alpha^r=\frac{\operatorname{diag}(\mathbf{W}(\alpha^c\mathbf{B})^\top)}{\operatorname{diag}((\alpha^c\mathbf{B})(\alpha^c\mathbf{B})^\top)},\quad \alpha^c=\frac{\operatorname{diag}(\mathbf{W}^\top(\alpha^r\mathbf{B}))}{\operatorname{diag}((\alpha^r\mathbf{B})^\top(\alpha^r\mathbf{B}))}.
+\end{align}
+The first-order and second-order pseudocodes of the $\textbf{ARB-RC}$ are provided in supplementary file.
+
+\begin{table*}[!ht]
+\centering
+\caption{
+Perplexity of RTN, GPTQ, PB-LLM, BiLLM, and our methods on \textbf{OPT} family. The columns represent the perplexity results on \textbf{WikiText2} datasets with different model sizes. 
+}
+\begin{threeparttable}
+\resizebox{\textwidth}{!}{ 
+\begin{tabular}{lccrrrrrr} % Center alignment for all numeric columns
+\toprule
+\rowcolor{color3}
+\textbf{Method} & \makecell{\textbf{Block} \\ \textbf{Size}} & \makecell{\textbf{Weight} \\ \textbf{Bits}}  & \textbf{1.3B} & \textbf{2.7B} & \textbf{6.7B} & \textbf{13B} & \textbf{30B} &\textbf{66B}\\
+\midrule
+
+Full Precision  & - & 16.00 & 14.62 & 12.47 & 10.86 & 10.13 & \phantom{0}9.56 & \phantom{0}9.34 \\
+\cmidrule{1-9}
+RTN & - & 3.00  & 13,337.38 & 15,594.72 & 5,797.32 & 3,357.01 & 1,566.00 & 6,126.09 \\
+GPTQ & 128 & 3.00  & 16.45 & 13.61 & 11.31 & 10.47 & \phantom{0}9.71 & 10.55 \\
+RTN & - & 2.00  & 11,272.65 & 9,505.76 & 28,363.14 & 194,086.78 & 169,616.47 & 1,165,864.25 \\
+GPTQ & 128 & 2.00  & 121.64 & 59.53 & 20.81 & 20.05 & 13.04 & 46.38 \\
+\cdashline{1-9} 
+\addlinespace[0.2em]
+RTN & - & 1.00  & 17,165.72 & 36,516.69 & 11,550.91 & 69,863,488.00 & 6,485.99 & 184,796.30 \\
+GPTQ & 128 & 1.00 & 8,719.58 & 11,700.13 & 6,633.13 & 1,743,929.88 & 14,083.15 & 11,045.36 \\
+PB-LLM & 128 & 1.70  & 239.81 & 278.27 & 144.25 & 74.59 & 28.30 & 27.66 \\
+BiLLM & 128 & 1.11  & 69.05 & 48.61 & 47.65 & 18.75 & 13.86 & 12.05 \\
+\cdashline{1-9} 
+\addlinespace[0.2em]
+\textbf{ARB-LLM$_\text{X}$} & \textbf{128} & \textbf{1.11}  & \textbf{45.40} & \textbf{34.37} & \textbf{20.07} & \textbf{15.47} & \textbf{12.36} & \textbf{11.23} \\
+\textbf{ARB-LLM$_\text{RC}$} & \textbf{128} & \textbf{1.11}  & \textbf{26.63} & \textbf{19.84} & \textbf{14.92} & \textbf{12.92} & \textbf{11.12} & \textbf{10.30} \\
+\bottomrule
+\end{tabular}
+} 
+\label{exp_opt}
+\end{threeparttable}
+\end{table*}
+\subsection{Column-Group Bitmap (CGB)} \label{bitmap}
+Inspired by BiLLM~\citep{huang2024billm}, we partition the entire set of weights into salient and non-salient columns, and apply higher-bit representation, \textit{i.e.,} second-order binarization, to the salient weights. 
+However, different from BiLLM, we not only divide the non-salient weights into sparse and concentrated groups but also divide salient weights in a similar manner. This approach allows for more efficient use of both column bitmap and group bitmap, as shown in~\Cref{fig:cgb}.
+
+To identify the sensitivity of weights, \textit{i.e.,} salient weights, we follow well-established PTQ methods by utilizing the Hessian matrix as a standard criterion. The sensitivity is computed as $s_i=w_i^2 / [\mathbf{H}^{-1}]_{ii}^2,$ where $\mathbf{H}$ represents the Hessian matrix for each layer, and $w_i$ represents the original value of each weight element. Weight columns with higher $s_i$ are selected as salient columns, which are then marked using the salient \textbf{column bitmap}. For more details, please refer to~\citet{huang2024billm}.
+
+\begin{wrapfigure}{r}{0.48\textwidth}
+ \centering
+\includegraphics[width=0.48\textwidth]{figs/cgb_v2.pdf}
+\caption{Comparison between BiLLM and our combination of column and group bitmaps.}
+\label{fig:cgb}
+\end{wrapfigure} 
+
+For non-salient columns, BiLLM further divides them into sparse and concentrated groups based on their magnitude, marking them using a \textbf{group bitmap}. Although this grouping strategy significantly reduces the quantization error, it can be further refined since some regions of the group bitmap are underutilized. As shown on the left side of~\Cref{fig:cgb}, the salient columns of the group bitmap remain unused. Thus, to better utilize the space of the group bitmap, we optimize the combination of the column bitmap and group bitmap. Specifically, we further categorize the salient weights into sparse and concentrated groups, which improve the quantization accuracy of salient weights without increasing bitmap storage. Our combination format is defined as follows:
+\begin{equation}
+    \mathbf{G_s} = \mathbf{1}_n\mathbf{C_s}^\top \odot \mathbf{G}, \quad
+    \mathbf{G_{ns}} = \mathbf{1}_n\mathbf{C_{ns}}^\top \odot \mathbf{G},
+\end{equation}
+where $\mathbf{G_s}$ and $\mathbf{G_{ns}}$ represent group bitmaps for salient and non-salient weights, respectively. $\mathbf{C}_s$ indicates the salient columns, while $\mathbf{C_{ns}} = \neg \mathbf{C_s}$ indicates the non-salient columns. We extend the column bitmap along the row axis and then perform element-wise multiplication with the group bitmap to obtain the final partitions. Experiments demonstrate that our \textbf{C}olumn-\textbf{G}roup \textbf{B}itmap (\textbf{CGB}) further enhances the quantization performance when applied to ARB algorithms. Additionally, following BiLLM, we adopt the block-wise compensation~\citep{frantar2022gptq,frantar2022optimal} to mitigate quantization errors. For further details, please refer to their papers.
+\begin{table*}[t]
+\centering
+\caption{
+Perplexity of RTN, GPTQ, PB-LLM, BiLLM, and our methods on LLaMA family. The columns represent the perplexity results on \textbf{WikiText2} dataset with different model sizes. $\text{N/A}$: LLaMA-2 lacks a 30B version, and LLaMA-3 lacks both 13B and 30B versions. *: LLaMA has a 65B version, while both LLaMA-2 and LLaMA-3 have 70B versions.
+}
+\begin{threeparttable}
+\resizebox{\textwidth}{!}{ 
+\begin{tabular}{llccrrrr} % Center alignment for all numeric columns
+\toprule
+\rowcolor{color3}
+\textbf{Model} & \textbf{Method} & \makecell{\textbf{Block} \\ \textbf{Size}} & \makecell{\textbf{Weight} \\ \textbf{Bits}}  & \textbf{7B/8B*} & \textbf{13B} & \textbf{30B} & \textbf{65B/70B*} \\
+\midrule
+& Full Precision  & - & 16.00 & \phantom{0}5.68 & \phantom{0}5.09 & \phantom{0}4.10 & \phantom{0}3.53\\
+\cmidrule{2-8}
+& RTN & - & 3.00  & 25.54 & 11.40 & 14.89 & 10.59\\
+& GPTQ & 128 & 3.00  & \phantom{0}8.63 & 5.67 & \phantom{0}4.87 & \phantom{0}4.17\\
+& RTN & - & 2.00  & 106,767.34 & 57,409.93 & 26,704.36 & 19,832.87\\
+& GPTQ & 128 & 2.00  & 129.19 & 20.46 & 15.29 & \phantom{0}8.66\\
+\cdashline{2-8} 
+\addlinespace[0.2em]
+\textbf{LLaMA} & RTN & - & 1.00  & 168,388.00 & 1,412,020.25 & 14,681.76 & 65,253.24\\
+& GPTQ & 128 & 1.00 & 164,471.78 & 131,505.41 & 10,339.15 & 20,986.16\\
+& PB-LLM & 128 & 1.70  & 82.76 & 44.93 & 23.72 & 12.81\\
+& BiLLM & 128 & 1.09  & 49.79 & 14.58 & \phantom{0}9.90& \phantom{0}8.37\\
+\cdashline{2-8} 
+\addlinespace[0.2em]
+&\textbf{ARB-LLM$_\text{X}$} & \textbf{128} & \textbf{1.09}  & \textbf{21.81}& \textbf{11.20}& \textbf{\phantom{0}8.66} & \textbf{\phantom{0}7.27}\\
+&\textbf{ARB-LLM$_\text{RC}$} & \textbf{128} & \textbf{1.09}  & \textbf{14.03}& \textbf{10.18}& \textbf{\phantom{0}7.75} & \textbf{\phantom{0}6.56}\\
+\cmidrule{1-8}
+& Full Precision  & - & 16.00 & \phantom{0}5.47 & \phantom{0}4.88 & N/A & \phantom{0}3.32\\
+\cmidrule{2-8}
+& RTN & - & 3.00  & 542.80 & 10.68 & N/A & \phantom{0}7.53\\
+& GPTQ & 128 & 3.00  & 6.44 & \phantom{0}5.46 & N/A & \phantom{0}3.88\\
+& RTN & - & 2.00  & 17,788.94 & 51,145.61 & N/A & 26,066.13\\
+& GPTQ & 128 & 2.00  & 52.22 & 23.63 & N/A & \phantom{0}8.18\\
+\cdashline{2-8} 
+\addlinespace[0.2em]
+\textbf{LLaMA-2} & RTN & - & 1.00  & 157,058.34& 47,902.32 & N/A & 160,389.91\\
+& GPTQ & 128 & 1.00 & 59,758.69 & 22,926.54 & N/A & 14,219.35\\
+& PB-LLM & 128 & 1.70  & 66.41 & 236.40 & N/A & 28.37\\
+& BiLLM & 128 & 1.08  & 32.31 & 21.35 & N/A & 13.32\\
+\cdashline{2-8} 
+\addlinespace[0.2em]
+& \textbf{ARB-LLM$_\text{X}$} & \textbf{128} & \textbf{1.08}  & \textbf{21.61} & \textbf{14.86} & N/A & \textbf{\phantom{0}7.88}\\
+& \textbf{ARB-LLM$_\text{RC}$} & \textbf{128} & \textbf{1.08}  & \textbf{16.44} & \textbf{11.85} & N/A & \textbf{\phantom{0}6.16}\\
+\cmidrule{1-8}
+& Full Precision  & - & 16.00 & \phantom{0}6.14 & N/A & N/A & \phantom{0}2.86\\
+\cmidrule{2-8}
+& RTN & - & 3.00  & 2,194.98 & N/A & N/A & 13,592.69\\
+& GPTQ & 128 & 3.00  & 18.68 & N/A & N/A & \phantom{0}6.65\\
+& RTN & - & 2.00  & 1,335,816.13 & N/A & N/A & 481,927.66\\
+& GPTQ & 128 & 2.00  & 1,480.43 & N/A & N/A & 82.23\\
+\cdashline{2-8} 
+\addlinespace[0.2em]
+\textbf{LLaMA-3} & RTN & - & 1.00  & 1,353,698.38 & N/A & N/A & 375,658.34\\
+& GPTQ & 128 & 1.00 & 1,121,260.50 & N/A & N/A & 130,516.50\\
+& PB-LLM & 128 & 1.70  & 73.08 & N/A & N/A & 22.96\\
+& BiLLM & 128 & 1.06  & 55.80 & N/A & N/A & 66.30\\
+\cdashline{2-8} 
+\addlinespace[0.2em]
+& \textbf{ARB-LLM$_\text{X}$} & \textbf{128} & \textbf{1.06}  & \textbf{31.98} & N/A & N/A & \textbf{14.15}\\
+& \textbf{ARB-LLM$_\text{RC}$} & \textbf{128} & \textbf{1.06}  & \textbf{27.42} & N/A & N/A & \textbf{11.10}\\
+\bottomrule
+\end{tabular}
+}
+
+\label{exp_llama}
+\end{threeparttable}
+\end{table*}
+
+
+
+\section{Experiments}
+
+\label{exp_all}
+\subsection{Setup}
+All the experiments are conducted with PyTorch~\citep{paszke2019pytorch} and Huggingface~\citep{paszke1912imperative} on a single NVIDIA A800-80GB GPU. We implement 15 iterations for ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ to ensure the convergence of binarization parameters. Following~\citet{frantar2022gptq} and~\citet{huang2024billm}, we use 128 samples from C4~\citep{raffel2020exploring} dataset as calibration data.
+
+\textbf{Models and Datasets.$\quad$} We conduct extensive experiments on the LLaMA, LLaMA-2, and LLaMA-3 families~\citep{touvron2023llama}, the OPT family~\citep{zhang2022opt}, and \textit{instruction-tuned} LLMs Vicuna~\citep{chiang2023vicuna}. To evaluate the effectiveness of our proposed ARB-LLM$_\text{X}$ (ARB-X + CGB) and ARB-LLM$_\text{RC}$ (ARB-RC + CGB), we measure the perplexity of LLM's outputs on WikiText2~\citep{merity2016pointer}, PTB~\citep{marcus1994penn}, as well as a part of the C4~\citep{raffel2020exploring} data. Moreover, we also evaluate the accuracy for 7 zero-shot QA datasets: ARC-c~\citep{clark2018think}, ARC-e~\citep{clark2018think}, BoolQ~\citep{clark2019boolq}, Hellaswag~\citep{zellers2019hellaswag}, OBQA~\citep{mihaylov2018can}, PIQA~\citep{bisk2020piqa}, and Winogrande~\citep{sakaguchi2019adversarial}.
+
+\begin{wraptable}{r}{0.5\textwidth}
+\centering
+\caption{
+Perplexity of GPTQ, PB-LLM, BiLLM, and our methods on \textbf{Vicuna} family. The columns represent the perplexity results on \textbf{WikiText2} datasets with different model sizes. 
+}
+\begin{threeparttable}
+\resizebox{0.5\textwidth}{!}{ 
+\begin{tabular}{lccrr} % Remove extra columns
+\toprule
+\rowcolor{color3}
+\textbf{Method} & \makecell{\textbf{Block} \\ \textbf{Size}} & \makecell{\textbf{Weight} \\ \textbf{Bits}}  & \textbf{7B} & \textbf{13B} \\ % Keep only 1.3B and 2.7B
+\midrule
+
+Full Precision  & - &  16.00 & \phantom{0}6.34 & \phantom{0}5.57 \\
+\cmidrule{1-5}
+GPTQ & 128 & 2.00  & 688.08 & 37.97 \\
+PB-LLM & 128 & 1.70 & 58.68& 2,506.44 \\
+BiLLM & 128 & 1.08  & 39.36 & 43.39 \\
+\cdashline{1-5} 
+\addlinespace[0.2em]
+\textbf{ARB-LLM$_\text{X}$} & 128 & \textbf{1.08}  & \textbf{22.79} & \textbf{13.76} \\
+\textbf{ARB-LLM$_\text{RC}$} & 128 & \textbf{1.08}  & \textbf{17.60} & \textbf{13.38} \\
+\bottomrule
+\end{tabular}
+} 
+\label{exp_vicuna}
+\end{threeparttable}
+\end{wraptable}
+
+\textbf{Baselines.$\quad$} We mainly compare our ARB series with BiLLM~\citep{huang2024billm}, the SOTA PTQ approach on binary LLMs. Other recent PTQ algorithms, such as RTN (round-to-nearest), GPTQ~\citep{frantar2022gptq}, and PB-LLM~\citep{shang2023pb} are also selected.
+\subsection{Main Results}
+We follow BiLLM to report the average bit-width of all methods, where our methods have the same bit-width as BiLLM. \Cref{exp_opt} presents the perplexity comparison of the OPT family across different model sizes. It can be observed that both ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ significantly outperform SOTA BiLLM, and reduce the perplexity by up to \textbf{68.7\%} without increasing weight bit-width.
+\Cref{exp_llama} presents the perplexity comparison on LLaMA1\&2\&3 families, which also suggests the superior performance of our ARB-LLM. It is noteworthy that ARB-LLM$_\text{RC}$ outperforms RTN with 3-bit quantization on some models, such as the LLaMA1\&3 families, LlaMA2-70B model, as well as OPT family. Similarly, ARB-LLM$_\text{RC}$ also surpasses GPTQ with 3-bit quantization on OPT-66B model. For \textit{instruction-tuned} Vicuna comparison shown in~\Cref{exp_vicuna}, ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ also show superior performance, surpassing SOTA binary PTQ method BiLLM for a large margin. Regarding average accuracy on QA datasets, ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ both significantly outperform previous methods, as shown in~\Cref{fig:llama-acc}. More results are provided in the supplementary file.
+
+\begin{table*}[t]
+\caption{Ablation study on LLaMA-7B, where all ARB methods are equipped with CGB except for ablation (b). Results are measured by perplexity, with final results highlighted in \textbf{bold}.}
+
+\scalebox{0.75}{\begin{tabular}{l@{\hskip 12pt}c@{\hskip 12pt}c@{\hskip 12pt}c@{\hskip 12pt}c}
+\toprule
+\rowcolor{color3}
+\textbf{Method} & \makecell{\textbf{Calibration} \\ \textbf{update}} & \makecell{\textbf{Row-column} \\ \textbf{update}} &\textbf{WikiText2 $\downarrow$} &\textbf{C4 $\downarrow$}  \\
+				\midrule
+                    BiLLM & - & - & 49.79 & 46.96 \\
+                    \cdashline{1-5} \addlinespace[0.2em]
+				ARB & \ding{55} & \ding{55} & 22.67 & 26.44  \\
+                    ARB-LLM$_\text{X}$ & \ding{51} & \ding{55} & \textbf{21.81} & \textbf{22.73} \\
+				  ARB-LLM$_\text{RC}$ & \ding{55} & \ding{51} & \textbf{14.03} & \textbf{17.92} \\
+				\bottomrule
+        \subfloat[\small Effectiveness of CGB\label{tab:effect_cgb}]{
+		\scalebox{0.75}{\hspace{-1.5mm}
+			\begin{tabular}{l@{\hskip 12pt}c@{\hskip 12pt}c@{\hskip 12pt}c}
+				\toprule
+				\rowcolor{color3}\textbf{Method} &\textbf{CGB} &\textbf{WikiText2 $\downarrow$} &\textbf{C4 $\downarrow$}   \\
+				\midrule
+
+                    BiLLM   & - & 49.79 & 46.96  \\
+                    \cdashline{1-4} \addlinespace[0.2em]
+				ARB-LLM$_\text{X}$   & \ding{55} & 26.29 & 27.11  \\
+                ARB-LLM$_\text{X}$   & \ding{51} & \textbf{21.81} & \textbf{22.73}  \\
+                ARB-LLM$_\text{RC}$   & \ding{55} & 15.85 & 19.42  \\
+                ARB-LLM$_\text{RC}$   & \ding{51} & \textbf{14.03} & \textbf{17.92}  \\
+				\bottomrule
+
+\subfloat[\small Study of decoupling column and group bitmaps \label{tab:decouple_bitmap}]{
+		\scalebox{0.75}{\hspace{0.5mm}
+			\begin{tabular}{l@{\hskip 12pt}c@{\hskip 12pt}c@{\hskip 12pt}r@{\hskip 12pt}r}
+				\toprule
+				\rowcolor{color3}\textbf{Method} &\makecell{\textbf{Column} \\ \textbf{bitmap}} &\makecell{\textbf{Group} \\ \textbf{bitmap}} & \textbf{WikiText2} $\downarrow$ &\textbf{C4} $\downarrow$ \\
+				\midrule
+                    ARB-LLM$_\text{RC}$&  \ding{55} & \ding{55} & 10,942.45 & 11,032.93 \\
+				ARB-LLM$_\text{RC}$&  \ding{51} & \ding{55} & 369.20 & 205.56 \\
+                    ARB-LLM$_\text{RC}$&  \ding{55} & \ding{51} & 920.42 & 572.69 \\
+                    ARB-LLM$_\text{RC}$&  \ding{51} & \ding{51} & \textbf{14.03} & \textbf{17.92} \\
+				\bottomrule
+        \subfloat[\small Study of ARB-LLM$_\text{X}$ calibration set size\label{tab:calibration_size}]{
+		\scalebox{0.75}{\hspace{-1.5mm}
+			\begin{tabular}{l@{\hskip 10pt}c@{\hskip 12pt}c@{\hskip 12pt}c}
+				\toprule
+				\rowcolor{color3}\textbf{Method} &\makecell{\textbf{Calibration} \\ \textbf{set size}} &\textbf{WikiText2} $\downarrow$ &\textbf{C4} $\downarrow$   \\
+				\midrule
+
+                    BiLLM   & 128 & 49.79 & 46.96  \\
+                    \cdashline{1-4} \addlinespace[0.2em]
+				ARB-LLM$_\text{X}$   & 64 & 24.79 & 25.11  \\
+                ARB-LLM$_\text{X}$   & 128 & \textbf{21.81}& \textbf{22.73}  \\
+                ARB-LLM$_\text{X}$   & 256 & 21.88 & 24.28  \\
+				\bottomrule
+\scalebox{0.75}{\begin{tabular}{l@{\hskip 9pt}c@{\hskip 12pt}c@{\hskip 9pt}c@{\hskip 12pt}c}
+\toprule
+\rowcolor{color3}
+\textbf{Method} & & \textbf{\#Iteration} &  &\textbf{WikiText2 $\downarrow$}   \\
+				\midrule
+                    BiLLM & & 0 & &  49.79 \\
+                    \cdashline{1-5} \addlinespace[0.2em]
+                    ARB-LLM$_\text{X}$ & &  1 / 3 / 15 & & 22.59 / 21.12 / \textbf{21.81} \\
+				  ARB-LLM$_\text{RC}$ & &  1 / 3 / 15 & & 15.23 / 14.34 / \textbf{14.03} \\
+				\bottomrule
+	\subfloat[\small Study of ARB-LLM group number\label{tab:num_group}]{ 
+		\scalebox{0.75}{\hspace{-2mm}
+			\begin{tabular}{l@{\hskip 12pt}c@{\hskip 8.7pt}c@{\hskip 12pt}c@{\hskip 9pt}c@{\hskip 12pt}c}
+				\toprule
+				\rowcolor{color3}\textbf{Method} &\textbf{\#Group} & & \textbf{WikiText2 $\downarrow$} & & \textbf{C4 $\downarrow$} \\
+				\midrule
+                    BiLLM & 2 & & 49.79 & & 46.96 \\
+                    \cdashline{1-6} \addlinespace[0.2em]
+                    ARB-LLM$_\text{X}$& 2 / 4 & & \textbf{21.81} / \phantom{0}6.55 & & \textbf{22.73} / \phantom{0}8.56 \\
+				ARB-LLM$_\text{RC}$& 2 / 4 & & \textbf{14.03} / 12.77 & & \textbf{17.92} / 16.06 \\
+				\bottomrule
+	\end{tabular}}}
+\label{tab:ablations}
+\end{table*}
+\begin{figure*}[t]
+  \centering
+   \includegraphics[width=1.0\textwidth]{figs/llama_acc_V2.pdf}
+   \caption{Average accuracy of 7 zero-shot QA datasets on LLaMA1\&2\&3 families.}
+   \label{fig:llama-acc}
+\end{figure*}
+
+\subsection{Ablation Study}
+\textbf{Effectiveness of Advanced Variants. $\quad$} To validate the effectiveness of our advanced variants ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$, we compare them with the vanilla ARB algorithm in~\Cref{tab:effect_x_rc}. First, we observe that the vanilla ARB already significantly outperforms BiLLM. Furthermore, by introducing either the calibration update or the row-column update to the binarization process, performance is further improved. This demonstrates that our advanced variants, ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$, can further enhance the performance of binary LLMs based on ARB.
+
+\textbf{Effectiveness of CGB. $\quad$} To demonstrate the effectiveness of our column-group bitmap (CGB), we conduct an ablation study in \Cref{tab:effect_cgb}. In this study, the absence of CGB does not imply the exclusion of partitioning but rather the use of the partitioning strategy used by BiLLM. The results show that CGB further enhances the performance of both ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$. Notably, even when using BiLLM's partitioning strategy, our methods significantly outperform BiLLM.
+
+\textbf{Column Bitmap and Group Bitmap. $\quad$} We use a column bitmap to differentiate between salient and non-salient weights, and a group bitmap to separate weights based on their magnitude. The combination of column and group bitmaps creates four distinct zones. As shown in~\Cref{tab:decouple_bitmap}, we explore the effect of decoupling this combination by using either the column bitmap or the group bitmap individually. It is evident that using the column bitmap or group bitmap only will result in a significant performance drop. Omitting both column bitmap and group bitmap entirely (\textit{i.e.,} \#group=1), which reduces the method to naive binarization, leads to complete failure.
+
+\textbf{Calibration Set Size. $\quad$} Similar to other PTQ methods, our ARB-LLM requires a small calibration set of just 128 samples. We further incorporate the calibration data into the update of binarization parameters in ARB-LLM$_\text{X}$. To explore the effect of calibration set size on performance, we compare results using different set sizes, as shown in~\Cref{tab:calibration_size}. It can be observed that using fewer calibration samples (\textit{e.g.,} 64) results in a performance drop, while increasing the calibration set size from 128 to 256 yields similar results. This indicates that our ARB-LLM$_\text{X}$ requires only a small calibration set. Even with just 64 samples, ARB-LLM$_\text{X}$ significantly outperforms the baseline BiLLM.
+
+\textbf{ARB Iteration Number. $\quad$} We use 15 iterations for the main results (\Cref{exp_opt}, \Cref{exp_llama}, \Cref{exp_vicuna}, and \Cref{fig:llama-acc}), as all parameters have fully converged. To explore the impact of different iteration numbers, we compare results using 1, 3, and 15 iterations in~\Cref{tab:num_iter}. As can be seen, regardless of the iteration number, the perplexity of ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ significantly outperforms the baseline BiLLM. Increasing the iteration number further reduces perplexity, yet they can achieve superior results even with just one iteration.
+Additionally, we visualize the changes in the scaling factor $\alpha$ throughout the alternating iterations to provide further insights in supplementary file.
+
+\textbf{Group Number. $\quad$} Following BiLLM~\citep{huang2024billm}, we introduce an additional bitmap for grouping weights, which has been demonstrated to enhance performance. To explore the impact of group size, we expand the group bitmap from a 1-bit to a 2-bit system, increasing the number of groups from 2 to 4. As shown in~\Cref{tab:num_group}, increasing the number of groups leads to better performance, especially for ARB-LLM$_\text{X}$, which outperforms ARB-LLM$_\text{RC}$ with the same number of groups. Yet, this also results in extra storage (about 0.8 GB for LLaMA-7B). In contrast, using only one group (\textit{i.e.,} the first row of~\Cref{tab:decouple_bitmap}) results in total failure. Given the additional storage overhead, the 2-group configuration strikes a good balance between performance and memory efficiency.
+
+\subsection{Time and Memory Analyses}
+
+\begin{wraptable}{r}{0.48\textwidth}
+\caption{Time comparison between BiLLM and our ARB-LLM methods on LLaMA-7B.\label{tab:time}}
+\centering
+\scalebox{0.86}{
+\hspace{-1.5mm}
+\begin{tabular}{l@{\hskip 10pt}c@{\hskip 10pt}c@{\hskip 10pt}c@{\hskip 8pt}c}
+				\toprule
+				\rowcolor{color3}Method~ & CGB & \#Iter=1 & \#Iter=3 & \#Iter=15 \\
+				\midrule
+                         BiLLM & - & \multicolumn{3}{c}{45 min (\#Iter=0) }  \\
+                    \cdashline{1-5}
+                    \addlinespace[0.2em]
+                         ARB-LLM$_\text{X}$ & \ding{55}  & 52 min & 59 min & 70 min  \\
+                         ARB-LLM$_\text{X}$ &  \ding{51} & 72 min & 78 min  & 88 min  \\
+                         ARB-LLM$_\text{RC}$ & \ding{55} & 48 min & 49 min & 53 min  \\
+                         ARB-LLM$_\text{RC}$ & \ding{51} & 67 min & 68 min & 76 min  \\
+				\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+\textbf{Time Comparison. $\quad$} As a binary PTQ framework, ARB-LLM eliminates the need for fine-tuning. The alternating algorithm requires more computation to align the distribution progressively, yet this overhead is acceptable. In~\Cref{tab:time}, ARB-LLM$_\textbf{RC}$ with 15 iterations requires only 21 more minutes than BiLLM, while ARB-LLM$_\textbf{RC}$ (without CGB) requires only 3 more minutes than BiLLM using just 1 iteration. 
+The combination of CGB results in an increase of time overhead, due to the percentile search for optimal splitting.
+
+\begin{wraptable}{r}{0.48\textwidth}
+\caption{Memory comparison between FP16, PB-LLM, BiLLM, and our ARB-LLM methods.\label{tab:memory}}
+\centering
+\scalebox{0.86}{
+\hspace{-1.5mm}
+\begin{tabular}{l@{\hskip 10pt}c@{\hskip 10pt}r@{\hskip 10pt}r}
+				\toprule
+				\rowcolor{color3}Method~ & CGB & LLaMA-7B & LLaMA-13B \\
+				\midrule
+                        FP16 & - & 13.48 GB & 26.03 GB \\
+                    \cdashline{1-4}
+                    \addlinespace[0.2em]
+        			PB-LLM & - &  2.91 GB & 5.33 GB \\
+                         BiLLM & - & 2.93 GB & 5.36 GB \\
+                    \cdashline{1-4}
+                    \addlinespace[0.2em]
+                         ARB-LLM$_\text{X}$ & \ding{55} & 2.93 GB & 5.36 GB \\
+                         ARB-LLM$_\text{X}$ & \ding{51} & 3.23 GB  & 5.95 GB  \\
+                         ARB-LLM$_\text{RC}$ & \ding{55} & \textbf{2.63 GB} & \textbf{4.77 GB} \\
+                         ARB-LLM$_\text{RC}$ & \ding{51} & 2.83 GB & 5.17 GB \\
+				\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+\textbf{Memory Comparison. $\quad$} In~\Cref{tab:memory}, ARB-LLM$_\text{X}$ requires the same amount of memory as BiLLM, yet delivers significantly improved performance. ARB-LLM$_\text{RC}$, which replaces the row-wise mean with a column-wise scaling factor, achieves a higher compression ratio along with better performance. Although the refined column-group bitmap (CGB) strategy requires more memory due to more scaling factors, the combination of ARB-RC and CGB still results in lower storage requirements than BiLLM, while delivering outstanding performance. As shown in~\Cref{tab:memory}, ARB-LLM$_\text{RC}$ with or without CGB both require less storage than previous methods. The computation formulas can be found in supplementary file.
+
+
+\section{Conclusion}
+
+In this work, we propose ARB-LLM, a series of alternating refined binarization (ARB) methods for LLMs. Through the analyses of the distribution shift between binarized and full-precision weights, we propose an alternating refinement of binarization parameters to progressively align the weight distribution. Moreover, we extend the basic ARB by equipping the calibration data and scaling along row-column axes, resulting in ARB-X and ARB-RC respectively. Additionally, we propose a refined strategy to better combine the salient column bitmap and group bitmap. Our experiments on multiple open-source LLM families show that the final models ARB-LLM$_\text{X}$ and ARB-LLM$_\text{RC}$ can further push the performance boundary from the SOTA binary PTQ methods.
+
+
+
+
+

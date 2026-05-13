@@ -1,0 +1,365 @@
+\title{Safe Offline Reinforcement Learning with Feasibility-Guided Diffusion Model}
+
+\begin{abstract}
+\vspace{-6pt}
+Safe offline reinforcement learning is a promising way to bypass risky online interactions towards safe policy learning. Most existing methods only enforce soft constraints, \textit{i.e.,} constraining safety violations in expectation below thresholds predetermined. This can lead to potentially unsafe outcomes, thus unacceptable in safety-critical scenarios.
+An alternative is to enforce the hard constraint of zero violation. However, this can be challenging in offline setting, as it needs to strike the right balance among three highly intricate and correlated aspects: safety constraint satisfaction, reward maximization, and behavior regularization imposed by offline datasets.
+Interestingly, we discover that via reachability analysis of safe-control theory, the hard safety constraint can be equivalently translated to identifying the largest feasible region given the offline dataset. This seamlessly converts the original trilogy problem to a feasibility-dependent objective, \textit{i.e.}, maximizing reward value within the feasible region while minimizing safety risks in the infeasible region. Inspired by these, we propose \textit{FISOR} (\textit{FeasIbility-guided Safe Offline RL}), which allows safety constraint adherence, reward maximization, and offline policy learning to be realized via three decoupled processes, while offering strong safety performance and stability. In FISOR, the optimal policy for the translated optimization problem can be derived in a special form of weighted behavior cloning, which can be effectively extracted with a guided diffusion model thanks to its expressiveness. Moreover, we propose a novel energy-guided sampling method that does not require training a complicated time-dependent classifier to simplify the training.
+We compare FISOR against baselines on \textit{DSRL} benchmark for safe offline RL. Evaluation results show that FISOR is the only method that can guarantee safety satisfaction in all tasks, while achieving top returns in most tasks. Project website: \url{https://zhengyinan-air.io/FISOR/}.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\iffalse
+Reinforcement Learning (RL), as an important technology for developing high-performance artificial intelligence systems, is widely used in various fields such as electronic games \citep{kaiser2019model}, board games \citep{schrittwieser2020mastering}, and large language models \citep{ouyang2022training}. In these tasks, the agent learn the policy by interacting with the environment. However, in many real-world applications, such as industrial control systems \citep{zhan2022deepthermal} and autonomous driving \citep{kiran2021deep}, due to considerations of safety, agent cannot fully freely interact with the environment. For example, while optimizing its driving policy, autonomous vehicle should not take any actions that may cause harm to pedestrians. 
+\fi
+Autonomous decision making imposes paramount safety concerns in safety-critical tasks \citep{li2023reinforcement}, such as industrial control systems \citep{zhan2022deepthermal} and autonomous driving \citep{kiran2021deep}, where any unsafe outcome can lead to severe consequences. In these tasks, one top priority is to ensure persistent safety constraint satisfaction
+~\citep{zhao2023state}.
+Safe reinforcement learning (RL) holds the promise of safety guarantee by formulating and solving this problem as a Constrained Markov Decision Process (CMDP)
+~\citep{gu2022review}. However, most previous studies focus on online RL setting, which suffers from serious safety issues in both training and deployment phases, especially for scenarios that lack high-fidelity simulators and require real system interaction for policy learning~\citep{liu2023datasets}.
+\textit{Safe offline RL}, on the other hand, incorporates safety constraints into offline RL~\citep{levine2020offline} and provides a new alternative for learning safe policies in a fully offline manner~\citep{xu2022constraints}. In this setting, only the learned final policy needs safety guarantees, bypassing the inherent safety challenges during online training, thus providing an effective and practical solution to safety-critical real-world applications~\citep{zhan2022deepthermal}. 
+
+Though promising, current safe offline RL methods exhibit several limitations.
+Firstly, to the best of our knowledge, all previous studies adopt \textit{soft constraint} and only require constraint violations in expectation to remain under a given threshold throughout the entire trajectory~\citep{xu2022constraints, lee2022coptidice}, thus allowing potential unsafe outcome.
+Such soft constraint-based formulation is widely employed in the research community but unacceptable to safety-critical industrial application~\citep{yang2023model}.
+Instead, \textit{hard constraint} is more preferable for these tasks, where state-wise zero constraint violation is strictly enforced. To achieve this, a far more rigorous safety constraint is in demand, which however, inevitably imposes severe policy conservatism and suboptimality. Secondly, the difficulty is further exacerbated by the \textit{offline setting}, as additional consideration 
+of behavior regularization imposed by offline dataset is required to combat distributional shift~\citep{fujimoto2019off}. Thus, striking the right balance among \textit{constraint satisfaction}, \textit{reward maximization}, and \textit{offline policy learning} can be 
+exceptionally challenging. 
+Jointly optimizing these intricate and closely-correlated aspects, as in existing safe offline RL methods, can lead to very unstable training processes and unsatisfactory safety performance~\citep{lee2022coptidice,saxena2021generative}. 
+
+To tackle these challenges, we introduce a novel safe offline RL approach, \textit{FISOR (FeasIbility-guided Safe Offline RL)}, which provides stringent safety assurance while simultaneously optimizing for high rewards. 
+FISOR revisits safety constraint satisfaction in view of optimization under different feasibility conditions and comprises three simple decoupled learning processes, offering strong safety performance and learning stability. Specifically, we first revise Hamilton-Jacobi (HJ) Reachability~\citep{bansal2017hamilton} in safe-control theory to directly identify the largest feasible region through the offline dataset using a reversed version of expectile regression, which ensures zero constraint violation while maximally expanding the set of feasible solutions.
+With the knowledge of feasibility in hand, we further develop a feasibility-dependent objective that maximizes reward values within the feasible regions while minimizing safety risks in the infeasible regions. 
+This allows constraint satisfaction and reward maximization to be executed in decoupled offline learning processes.
+Furthermore, we show that the optimal policy for these reformulated problems has a special weighted behavior cloning form with distinct weighting schemes in feasible and infeasible regions.
+By noting the inherent connection between weighted regression and exact energy-guided sampling for diffusion models~\citep{lu2023contrastive}, we extract the policy using a novel time-independent classifier-guided method, enjoying both superior expressivity and efficient training.
+
+Extensive evaluations on the standard safe offline RL benchmark DSRL \citep{liu2023datasets}  show that FISOR is the only method that guarantees satisfactory safety performance in all evaluated tasks, while achieving the highest returns in most tasks. Moreover, we demonstrate the versatility of FISOR in the context of safe offline imitation learning (IL), still outperforming competing baselines.
+
+
+
+
+
+
+
+\section{Preliminary}
+
+Safe RL is typically formulated as a Constrained Markov Decision Process~\citep{altman2021constrained}, which is specified by a tuple $\mathcal{M}:=\left( \mathcal{S},\mathcal{A},T,r,h,c, \gamma\right)$. $\mathcal{S}$ and $\mathcal{A}$ represent the state and action space; $T:\mathcal{S} \times \mathcal{A} \to \Delta(\mathcal{S})$ is transition dynamics; $r:\mathcal{S} \times \mathcal{A} \to \mathbb{R}$ is the reward function; $h:\mathcal{S} \to \mathbb{R}$ is the constraint violation function; $c:\mathcal{S} \to \left[0,C_{\rm max} \right]$ is cost function; and $\gamma \in (0,1)$ is the discount factor. Typically, $c(s)=\max \left(h(s),0\right)$, which means that it takes on the value of $h(s)$ when the state constraint is violated ($h(s) > 0$), and zero otherwise ($h(s) \leq 0$). 
+
+Previous studies typically aim to find a policy $\pi:\mathcal{S} \to \Delta(\mathcal{A})$ to maximize the expected cumulative rewards while satisfying the soft constraint that restricts the expected cumulative costs below a pre-defined cost limit $l \ge 0$, \textit{i.e.}, $\max_{\pi} ~\mathbb{E}_{\tau \sim \pi}\left[ {\textstyle \sum_{t=0}^{\infty}}\gamma^{t}r(s_t,a_t)  \right], \mathrm{s.t.}~   \mathbb{E}_{\tau \sim \pi}\left[ {\textstyle \sum_{t=0}^{\infty}}\gamma^{t}c(s_t)  \right] \leq l$, where $\tau$ is the trajectory induced by policy $\pi$. Existing safe offline RL methods typically solve this problem in the following form~
+\citep{xu2022constraints, lee2022coptidice}:
+\begin{equation}
+\label{eq:safe_offline}
+\max_{\pi} ~\mathbb{E}_{s}\left[V^{\pi}_r(s)\right]  \quad\quad
+\mathrm{s.t.}~ \mathbb{E}_{s}\left[V^{\pi}_c(s)\right] \leq l;\; \text{D}(\pi \| \pi_\beta) \leq \epsilon,
+\end{equation}
+where $V^{\pi}_r$ is state-value function, $V^{\pi}_c$ is cost state-value function, $\pi_\beta$ is the underlying behavioral policy of the offline dataset $\mathcal{D}:= \left(s, a, s', r, c\right)$ with both safe and unsafe trajectories. 
+$\text{D}(\pi \| \pi_\beta)$ is a divergence term (\textit{e.g.}, KL divergence $\text{D}_{\text{KL}}(\pi\| \pi_\beta)$) used to prevent distributional shift from $\pi_\beta$ in offline setting. 
+To handle safety constraints, previous methods often consider solving the Lagrangian dual form of Eq. (\ref{eq:safe_offline}) with a Lagrangian multiplier $\lambda$~\citep{chow2017risk,tessler2018reward}:
+\begin{equation}
+\label{lagrangian}
+\min_{\lambda \ge 0}\max_{\pi} ~\mathbb{E}_{s}\left[V^{\pi}_r(s) - \lambda \left(V^{\pi}_c(s) - l \right)\right]  \quad\quad
+\mathrm{s.t.}~ \text{D}(\pi\| \pi_\beta) \leq \epsilon.
+\end{equation}
+
+\textbf{Limitations of Existing Methods}. The safety constraint in Eq.~(\ref{eq:safe_offline}) is a \textit{soft constraint} enforced on the expectation of all possible states, meaning that there exists a certain chance of violating the constraint with a positive $l$, which poses serious safety risks in real-world scenarios~\citep{ma2022joint}. Additionally, choosing a suitable cost limit $l$ that yields the best safety performance requires engineering insights, whereas the optimal limit may vary across tasks~\citep{yu2022reachability}. Besides, Eq.~(\ref{eq:safe_offline}) shows that safe offline RL necessitates the simultaneous
+optimization of three potentially conflicting objectives: maximizing rewards, ensuring safety, and adhering to the policy constraint w.r.t the behavior policy. Finding the right balance across all three is very difficult. Moreover, the optimization objective in Eq.~(\ref{lagrangian}) introduces an additional layer of optimization for the Lagrange multiplier, and the learning of $V_r^{\pi}$, $V_c^{\pi}$ and $\pi$ are mutually coupled, where minor approximation errors can bootstrap across them and lead to severe instability~\citep{kumar2019stabilizing}.
+\label{sec:pre}
+
+
+
+\section{Methods}
+
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.95\textwidth]{fig/map_region.jpg}
+\end{center}
+\caption{\small (a) Reach-avoid control task: the agent (red) aim to reach the goal (green) while avoiding hazards (blue). (b) Offline data distribution. (c)-(e) Comparisons with the  feasible region learned by feasible value $\left\{s|V^{\ast}_h(s) \leq 0 \right\}$ and cost value $\left\{s|V^{\ast}_c(s) \leq 1e^{-3} \right\}$.}
+\label{fig:toycase}
+\end{figure}
+\textbf{Feasibility-Dependent Optimization}. To address these challenges, we replace soft constraint with hard constraints that demand state-wise zero violations 
+ 
+A straightforward way is to remove the expectation and set the cost limit to zero, i.e., replacing the safety constraint in Eq.~(\ref{eq:safe_offline}) with $V^{\pi}_c \leq 0$:
+\begin{equation}
+\label{eq:safe_offline_hardc}
+\max_{\pi} ~\mathbb{E}_{s}\left[V^{\pi}_r(s)\right]  \quad\quad
+\mathrm{s.t.}~ V^{\pi}_c(s) \leq 0;\; \text{D}(\pi \| \pi_\beta) \leq \epsilon.
+\end{equation}
+However, this leads to a highly restricted policy set $\Pi_c(s):=\left\{ \pi|V^{\pi}_c(s)=0\right\}$, since $V_c^\pi$ is non-negative ($c\geq 0$) and the presence of approximation errors makes it difficult to take the exact value of 0 (Figure~\ref{fig:toycase}).
+To address this issue, We replace $\Pi_c(s)$ with a new safe policy set ${\Pi}_f(s)$ suitable for practical solving. Furthermore, not all states allow the existence of a policy that satisfies the hard constraint, rendering the problem unsolvable at these states. We refer to these as \textit{infeasible states} and the others \textit{feasible states}.~(\ref{eq:safe_offline_hardc}) and Eq.~(\ref{eq:feasible_hard_constraint_obj_abs})):
+\begin{equation}
+\small
+\label{eq:feasible_hard_constraint_obj_abs}
+\begin{aligned}
+{\rm \textbf{Feasible:}}\;\max_{\pi} ~&\mathbb{E}_{s}\left[V^{\pi}_r(s)\cdot \mathbb{I}_{s\in\mathcal{S}_f}\right]\\
+\mathrm{s.t.}~ &\pi\in\Pi_f(s), \forall s\in\mathcal{S}_f \\&\text{D}_{\text{KL}}(\pi \| \pi_\beta) \leq \epsilon 
+\end{aligned}
+\quad
+\begin{aligned}
+{\rm \textbf{Infeasible:}}\;\max_{\pi} ~&\mathbb{E}_{s}\left[- V^{\pi}_c(s)\cdot \mathbb{I}_{s\notin\mathcal{S}_f}\right] \\
+\mathrm{s.t.}~ &\text{D}_{\text{KL}}(\pi \| \pi_\beta) \leq \epsilon  \\
+{\color{white}}
+\end{aligned}
+\end{equation}
+Eq.~(\ref{eq:feasible_hard_constraint_obj_abs}) presents a feasibility-dependent objective. Here, $\mathbb{I}$ is the indicator function, and $\mathcal{S}_f$ is the feasible region including all feasible states, for which at least one policy exists that satisfies the hard constraint. This objective allows us to concentrate on maximizing rewards and minimizing safety risks individually to
+obtain the best possible performance.  In the case of infeasible states, maximizing rewards becomes meaningless since safety violations will always occur. Therefore, the focus is shifted to minimizing future constraint violation as much as possible~\citep{yu2022reachability}. For feasible states, adherence to the hard constraint is ensured by policies from the safe policy set $\Pi_f$, thus allowing for the focus on reward maximization. Next, we introduce using the reachability analysis from safe-control theory to determine $\mathcal{S}_f$ and $\Pi_f$.
+
+\subsection{Offline Identification of Feasibility}
+\label{sec:hjr}
+
+Accurately determining $\mathcal{S}_f$ and $\Pi_f$ plays a crucial role in the success of the feasibility-dependent objective. This reminds us of the effectiveness of Hamilton-Jacobi (HJ) reachability~\citep{bansal2017hamilton} for enforcing hard constraint in safe-control theory, which has recently been adopted in safe online RL studies~\citep{fisac2019bridging,yu2022reachability}. We first provide a brief overview of the basics in HJ reachability (Definition~\ref{def:feasible_value_function}) and then delve into the instantiation of the feasible region $\mathcal{S}_f$ and policy set $\Pi_f$ in the HJ reachability framework (Definition~\ref{def:feasible_region}-\ref{def:feasible_policy}).
+
+ \begin{definition}[Optimal feasible value function]
+\label{def:feasible_value_function}
+The optimal feasible state-value function $V_h^{\ast}$ , and the optimal feasible action-value function $Q_h^{\ast}$ are defined as~\citep{bansal2017hamilton}:
+\begin{align}
+\label{vh}
+V^{\ast}_h(s) &:= \min_{\pi} V_h^\pi(s):=\min_{\pi}\max_{t \in \mathbb{N}}h(s_t),s_0=s,a_t\sim\pi(\cdot \mid s_t), \\
+\label{qh}
+Q^{\ast}_h(s,a) &:= \min_{\pi} Q_h^\pi(s,a):=\min_{\pi}\max_{t \in \mathbb{N}}h(s_t),s_0=s,a_0=a,a_{t+1}\sim\pi(\cdot \mid s_{t+1}), 
+\end{align}
+\end{definition}
+where $V_h^\pi$ represents the maximum constraint violations in the trajectory induced by policy $\pi$ starting from a state $s$. The (optimal) feasible value function possesses the following properties:
+\begin{itemize}[leftmargin=*] %加[leftmargin=*]可以取消缩进
+\item $V_h^\pi(s)\le0 \Rightarrow \forall s_t, h(s_t) \le 0$, indicating $\pi$ can satisfy the hard constraint starting from $s$. Moreover, $V_h^*(s)\le0\Rightarrow  \min_\pi V_h^\pi\le0\Rightarrow \exists\pi, V_h^\pi\le0$, meaning that there exists a policy that satisfies the hard constraint.
+\item $V_h^\pi(s) > 0 \Rightarrow \exists s_t, h(s_t) > 0$, suggesting $\pi$ cannot satisfy the hard constraint; and $V_h^*(s)>0 \Rightarrow \min_\pi V_h^\pi>0\Rightarrow \forall \pi, V_h^\pi>0$, meaning that no policy can satisfy the hard constraint.
+\end{itemize}
+We can see from these properties that the feasible value function indicates whether policies can satisfy hard constraints (\textit{i.e.}, feasibility of policies); while the optimal feasible value function represents whether there exists a policy that achieves hard constraints (\textit{i.e.}, feasibility of state), from which we define the feasible region (Definition~\ref{def:feasible_region})~\citep{yu2022reachability} and feasible policy set (Definition~\ref{def:feasible_policy}):
+\begin{definition}[Feasible region]
+\label{def:feasible_region}
+The feasible region of $\pi$ and the largest feasible region are:
+\begin{align}
+\mathcal{S}_f^{\pi}:=\left\{s|V_h^\pi(s) \leq 0\right\}~~~~~~~~~~~~~~~~~~~~~~~~\mathcal{S}_f^{\ast}:=\left\{s|V_h^\ast(s) \leq 0\right\} \nonumber
+\end{align}
+\end{definition}
+\begin{definition}[Feasible policy set]
+\label{def:feasible_policy}
+For state $s$, the feasible policy set is: $\Pi_f(s):=\left\{ \pi|V_h^{\pi}(s)\leq 0\right\}$.
+\end{definition}
+$\mathcal{S}_f^\pi$ is induced by policy $\pi$ and includes all the states in which $\pi$ can satisfy the hard constraint. $\mathcal{S}_f^*$ is the largest feasible region, which is the union of all feasible regions~\citep{choi2021robust, li2023reinforcement}. Intuitively, $\mathcal{S}_f^*$ includes all the states where there exists at least one policy that satisfies hard constraint, and this property formally satisfies the requirement of feasible region in Eq.~(\ref{eq:feasible_hard_constraint_obj_abs}). Besides, 
+$\Pi_f(s)$ includes all policies that satisfy hard constraint starting from state $s$. This set can be employed as a constraint in Eq.~(\ref{eq:feasible_hard_constraint_obj_abs}). Note that the range of $V_h$ is the entire real number space, making $V_h$ more suitable as a hard constraint compared to $V_c$, as shown in Figure~\ref{fig:toycase}. 
+\textbf{Learning Feasible Value Function from Offline Data}. 
+Although HJ reachability holds the promise for enforcing hard constraint, calculating the optimal feasible value function based on Definition~\ref{def:feasible_value_function} requires Monte-Carlo estimation via interacting with the environment~\citep{bajcsy2019efficient}, which is inaccessible in offline setting. Fortunately, similar to approximate dynamic programming, we can obtain the approximated optimal feasible value by repeatedly applying a feasible bellman operator with a discounted factor $\gamma\rightarrow1$~\citep{fisac2019bridging} (Definition~\ref{feasible bellman operator}).
+
+\begin{definition}[Feasible Bellman operator] The feasible Bellman operator defined below is a contraction mapping, with its fixed point $Q_{h,\gamma}^*$ satisfying $\lim_{\gamma\rightarrow1}Q_{h,\gamma}^*\rightarrow Q_h^*$~\citep{fisac2019bridging}.
+\label{feasible bellman operator}
+\begin{equation}
+\label{operator}
+\mathcal{P}^{\ast}Q_h(s,a):=(1-\gamma)h(s)+\gamma \max \{h(s), V^{\ast}_h(s')\}, \quad V^{\ast}_h(s')=\min_{a'}Q_h(s',a')
+\end{equation}
+\end{definition}
+Given the offline dataset $\mathcal{D}$, we can approximate $Q_h^{\ast}$ by minimizing $\mathbb{E}_{\mathcal{D}}[\left(\mathcal{P}^{\ast}Q_h - Q_h\right)^2 ]$. Note that the $\min_{a'}$ operation in Eq. (\ref{operator}) could query the out-of-distribution (OOD) actions, potentially leading to severe underestimation issues in offline setting \citep{fujimoto2019off}. To mitigate this, we consider a data support constrained operation $\min_{a', {\rm s.t.} \pi_\beta(a'|s')>0}$ that aims to estimate the minimum value over actions that are in the support of data distribution, but this requires an estimation of the behavior policy $\pi_{\beta}$. Inspired by \citet{kostrikov2021offline} that uses expectile regression to approximate the maximum value function without explicit behavioral modeling, we adopt a reversed version of this for learning the optimal (minimum) feasible value function via minimizing Eq.~(\ref{eq:expectile_v})-(\ref{eq:qh_loss}):
+\begin{align}
+\mathcal{L}_{V_h} &= \mathbb{E}_{(s,a)\sim \mathcal{D}}\left[L^{\tau}_{\rm rev}\left(Q_h(s,a)-V_h(s)\right) \right] ,\label{eq:expectile_v}\\
+\mathcal{L}_{Q_h} &= \mathbb{E}_{(s,a,s')\sim \mathcal{D}}\left[\left(\left((1-\gamma)h(s)+\gamma\max \{h(s), V_h(s')\} \right) - Q_h(s,a)\right)^2 \right],\label{eq:qh_loss} 
+\end{align}
+where $L^{\tau}_{\rm rev}(u)=|\tau - \mathbb{I}(u>0)|u^2$. For $\tau\in(0.5, 1)$, this asymmetric loss diminishes the impact of $Q_h$ values that exceed $V_h$, placing greater emphasis on smaller values instead. Subsequently, we can substitute $V_h(s')$ for $\min_{a'}Q_h(s',a')$ within the feasible Bellman operator. By minimizing Eq. (\ref{eq:expectile_v}) and Eq. (\ref{eq:qh_loss}), we can predetermine the approximated largest feasible region, as shown in Figure~\ref{fig:toycase}.
+\subsection{Feasibility-Dependent Optimization Objective
+}
+\label{sec:fea}
+
+Given the feasible policy set $\Pi_f$ and the predetermined largest feasible region $\mathcal{S}_f^{\ast}$, we can instantiate the feasibility-dependent objective in Eq.~(\ref{eq:feasible_hard_constraint_obj_abs}) as follows, with $V_c$  changed to $V_h$:
+\begin{equation}
+\small
+\label{eq:feasible_hard_constraint_obj}
+\begin{aligned}
+{\rm \textbf{Feasible:}}\;\max_{\pi} ~&\mathbb{E}_{s}\left[V^{\pi}_r(s)\cdot \mathbb{I}_{s \in \mathcal{S}_f^{\ast}}\right]  \\
+\mathrm{s.t.}~ &V^{\pi}_h(s) \leq 0, \forall s \in \mathcal{S}_f^{\ast} \\&\text{D}_{\text{KL}}(\pi \| \pi_\beta) \leq \epsilon
+\end{aligned}
+\quad
+\begin{aligned}
+{\rm \textbf{Infeasible:}}\;\max_{\pi} ~&\mathbb{E}_{s}\left[- V^{\pi}_h(s)\cdot \mathbb{I}_{s \notin \mathcal{S}_f^{\ast}}\right]  \\
+\mathrm{s.t.}~ &\text{D}_{\text{KL}}(\pi \| \pi_\beta) \leq \epsilon\\
+{\color{white}}
+\end{aligned}
+\end{equation}
+Eq. (\ref{eq:feasible_hard_constraint_obj}) is similar to the objective in the safe online RL method, RCRL~\citep{yu2022reachability}. However, RCRL suffers from severe training instability due to its coupling training procedure. In contrast, we predetermine $\mathcal{S}_f^*$ from the offline data.
+However, the training of $V_r^\pi$, $V_h^\pi$, and $\pi$ is still coupling together, leading to potential training instability. To solve this, we show in Lemma~\ref{lemma:transformation} that these interrelated elements can be fully decoupled.
+Based on this insight, we devise a new surrogate learning objective that disentangles the intricate dependencies among these elements.
+\begin{lemma}The optimization objectives and safety constraints in Eq
+\label{lemma:transformation}
+\begin{itemize}[leftmargin=*]
+    \item Optimization objective in the feasible region: $\max_{\pi} ~\mathbb{E}_{a \sim \pi}\left[A^{\ast}_r(s,a)\right] \Rightarrow \max_{\pi} ~\mathbb{E}_{s}\left[V^{\pi}_r(s)\right]$.
+    \item Optimization objective in the infeasible region: $\max_{\pi} ~\mathbb{E}_{a \sim \pi}\left[-A^{\ast}_h(s,a)\right] \Rightarrow \max_{\pi} ~\mathbb{E}_{s}\left[-V^{\pi}_h(s)\right]$.
+    \item Safety constraint in the feasible region: $\int_{\{a|Q^{\ast}_h(s,a) \leq 0\}}^{}\pi(\cdot | s){\rm{d}}a=1 \Rightarrow V_h^{\pi}(s) \le 0$.
+\end{itemize}
+\end{lemma}
+Lemma~\ref{lemma:transformation} shows that the maximization objectives in Eq.~(\ref{eq:feasible_hard_constraint_obj}) can be achieved 
+ by finding the optimal advantages $A_r^*$, $A_h^*$ first, and then optimizing the policy $\pi$. The safety constraints in Eq.~(\ref{eq:feasible_hard_constraint_obj}) can also be enforced by using the predetermined $Q_h^*$ without coupling to other networks. Inspired by this, we propose a surrogate objective in Eq.~(\ref{eq:two_obj}) that fully decouples the intricate interrelations between the optimizations of $V_r^\pi, V_h^\pi$ and $\pi$. We dub this \textit{FISOR (FeasIbility-guided Safe Offline RL)} :
+\begin{equation}
+\small
+\label{eq:two_obj}
+\begin{aligned}
+{\rm \textbf{Feasible:}}\;\max_{\pi} ~\mathbb{E}_{a \sim \pi}&\left[A^{\ast}_r(s,a)\cdot \mathbb{I}_{V^{\ast}_h(s) \leq 0}\right]  \\
+\mathrm{s.t.}~ \int_{\{a|Q^{\ast}_h(s,a) \leq 0\}}& \pi(a | s){\rm{d}}a=1 , \forall s \in \mathcal{S}_f^{\ast}  \\
+&{\textbf{\rm D}_\textbf{\rm KL}}(\pi \| \pi_\beta) \leq \epsilon
+\end{aligned}
+\quad
+\begin{aligned}
+{\rm \textbf{Infeasible:}}\;\max_{\pi} ~&\mathbb{E}_{a \sim \pi}\left[- A^{\ast}_h(s,a)\cdot \mathbb{I}_{V^{\ast}_h(s) > 0}\right]  \\
+\mathrm{s.t.}~ & \int_{a}^{}\pi(\cdot | s){\rm{d}}a=1  \\
+&{\textbf{\rm D}_\textbf{\rm KL}}(\pi \| \pi_\beta) \leq \epsilon\\
+\end{aligned}
+\end{equation}
+We present an intuitive illustration in Figure~\ref{fig:traj} to demonstrate the characteristics of Eq.~(\ref{eq:two_obj}). In feasible regions, FISOR favors actions that yield high rewards while ensuring that the agent remains within feasible regions. The largest feasible region grants the policy with more freedom to maximize reward, allowing for enhanced performance.
+As depicted in Figure~\ref{fig:traj}, agents originating from feasible regions can effectively find a direct and safe path to the goal. 
+
+In infeasible regions, FISOR chooses actions that minimize constraint violations as much as possible. Figure~\ref{fig:traj} shows that the agents starting from infeasible regions initially prioritize escaping from infeasible regions, and then navigate towards the destination along safe paths. 
+
+
+
+\begin{wrapfigure}{r}{0.33\textwidth} 
+\includegraphics[width=0.32\textwidth]{fig/traj.jpg}
+\caption{\small Trajectories induced by FISOR from different start points.}
+\label{fig:traj}
+\end{wrapfigure}
+The decoupled optimization objective in Eq
+
+\begin{theorem}
+\label{trm:solution}
+The optimal solution for Eq.~(\ref{eq:two_obj}) satisfies:
+\begin{equation}
+\label{eq:close-form}
+\pi^{\ast}(a|s) \propto \pi_\beta (a | s) \cdot w(s,a),
+\end{equation}
+where $w(s,a)$ is the weight function, and $\alpha_1$, $\alpha_2$ are temperatures that control the behavior regularization strength:
+\begin{equation}
+\small
+\label{eq:weight}
+ w(s,a) = \begin{cases}{
+\begin{aligned}
+& \exp\left(\alpha_1 A_r^{\ast}(s,a)\right)\cdot \mathbb{I}_{Q^{\ast}_h(s,a) \leq 0} &&V^{\ast}_h(s) \leq 0 \\
+& \exp\left(-\alpha_2 A_h^{\ast}(s,a)\right)&& V^{\ast}_h(s) > 0 
+\end{aligned}
+}\end{cases}
+\end{equation}
+\end{theorem}
+
+The optimal solution in Eq. (\ref{eq:weight}) is similar to weighted behavior cloning, but adopts distinct weighting schemes in feasible and infeasible regions. Using Eq. (\ref{eq:weight}), we can easily extract the optimal policy in a remarkably simple and stable way, while achieving a balance between safety assurance, reward maximization, and behavior regularization.
+\subsection{Guided Diffusion Policy Learning Without Time-dependent Classifier}
+Theorem \ref{trm:solution} shows that the optimal policy $\pi^*$ needs to choose drastically different behaviors based on the current state's feasibility. We use diffusion model to parameterize policies due to its strong ability in modeling complex distributions~\citep{ho2020denoising, wang2023diffusion}.
+To obtain the weighted distribution of $\pi^*$ in Eq.~(\ref{eq:close-form}), a simple way is to use classifier-guidance methods to guide the diffusion sampling procedures~\citep{lin2023safe,lu2023contrastive}. However, such methods require training an additional complicated time-dependent classifier, inevitably increasing the overall complexity. Instead, we demonstrate in Theorem~\ref{theorem:weighted_energy_equal_maintext} that the exact $\pi^*$ in Eq.~(\ref{eq:close-form}) can in fact be obtained without the training of time-dependent classifier, thus greatly reducing training difficulty. 
+\begin{theorem}[Weighted regression as exact energy guidance]
+    \label{theorem:weighted_energy_equal_maintext}
+    We can sample $a\sim\pi^*(a|s)$ by optimizing the weighted regression loss in Eq.~(\ref{eq:pi_loss}) and solving the diffusion ODEs/SDEs given the obtained $\boldsymbol{z}_\theta$
+\end{theorem}
+Specifically, the exact $\pi^*$ can be obtained by modifying the diffusion training loss for the behavior policy $\pi_\beta$: $\min_\theta\mathbb{E}_{t,(s,a),z}\left[\|z-z_\theta(a_t,s,t)\|_2^2\right]$ via simply augmenting the weight function $w(s,a)$ in Eq.~(\ref{eq:weight}) with the following weighted loss:
+\begin{equation}
+\label{eq:pi_loss}
+\min_\theta\mathcal{L}_{z}(\theta) = \min_\theta\mathbb{E}_{t\sim \mathcal{U}([0,T]),z \sim \mathcal{N}(0,I),(s,a)\sim \mathcal{D}}\left[ w(s,a) \cdot \left \| z-z_\theta\left(a_t,s,t\right) \right \|_2^2 \right],
+\end{equation}
+where $a_t=\alpha_t a+\sigma_t z$ is the noisy action that satisfies the forward transition distribution $\mathcal{N}(a_t|\alpha_t a, \sigma_t^2 I)$ in the diffusion model, and $\alpha_t, \sigma_t$ are human designed noise schedules. After obtaining $\theta$, we can sample from the approximated optimal policy $a\sim\pi^*_\theta(a|s)$ by solving the diffusion ODEs/SDEs~\citep{song2021score} as stated in Theorem~\ref{theorem:weighted_energy_equal_maintext}. Eq.~(\ref{eq:pi_loss}) bypasses the training of the complicated time-dependent classifier in typical guided diffusion models~\citep{lin2023safe,lu2023contrastive} and forms a weighted regression objective, which has proved stable against directly maximizing the value functions~\citep{kostrikov2021offline}. This weighted loss form has been used in recent studies~\citep{hansen2023idql, kang2023efficient}, but they did not provide theoretical investigation in its inherent connections to exact energy guidance for diffusion policies~\citep{lu2023contrastive} 
+\subsection{Practical Implementation}
+Theorem \ref{trm:solution} offers a decoupled solution for extracting the optimal policy from the dataset. The remaining challenge is how to obtain the optimal advantages $A_r^*$ in advance. In-sample learning methods, such as IQL~\citep{kostrikov2021offline}, SQL~\citep{xu2023offline} and XQL~\citep{garg2023extreme}, decouple policy learning from value function learning and allows the approximation of $A_r^*=Q_r^*-V_r^*$ without  explicit policy, offering improved training stability.
+We use IQL to learn the optimal value function $Q_r^{\ast}$ and $V_r^{\ast}$ in our method with $L^\tau(u)=\left|\tau-\mathbb{I}(u<0)\right|u^2$, $\tau\in(0.5, 1)$:
+\begin{align}
+\label{eq:vr_loss}
+\mathcal{L}_{V_r} & = \mathbb{E}_{(s,a)\sim \mathcal{D}}\left[L^{\tau}\left(Q_r(s,a)-V_r(s)\right) \right], \\
+\label{eq:qr_loss}
+\mathcal{L}_{Q_r} & = \mathbb{E}_{(s,a,s')\sim \mathcal{D}}\left[\left(r+ \gamma V_r(s') - Q_r(s,a)\right)^2 \right].
+\end{align}
+So far, we have transformed the original tightly-coupled safety-constrained offline RL problem into three decoupled simple supervised objectives:
+$1)$ Offline identification of the largest feasible region (Eq. (\ref{eq:expectile_v}-\ref{eq:qh_loss})); $2)$ Optimal advantage learning (Eq. (\ref{eq:vr_loss}-\ref{eq:qr_loss})); and $3)$ Optimal policy extraction via guided diffusion model (Eq. (\ref{eq:pi_loss})). This disentanglement of learning objectives provides a highly stable and conducive solution to safe offline RL for practical applications.
+To further enhance safety, we sample $N$ action candidates from the diffusion policy and select the safest one (\textit{i.e.}, the lowest $Q_h^{\ast}$ value) as the final output as in other safe RL methods~\citep{dalal2018safe, thananjeyan2021recovery}.
+    
+
+
+
+\section{Experiments}
+
+\input{tables/full_result}
+
+\textbf{Evaluation Setups.}
+We conduct extensive evaluations on Safety-Gymnasium \citep{Ray2019,ji2023omnisafe}, Bullet-Safety-Gym \citep{gronauer2022bullet} and MetaDrive \citep{li2022metadrive} tasks on DSRL benchmark \citep{liu2023datasets} to evaluate FISOR against
+other SOTA safe offline RL methods. We use \textit{normalized return} and \textit{normalized cost} as the evaluation metrics, where a normalized cost below 1 indicates safety. As stated in DSRL, we take safety as the primary criterion for evaluations, and pursue higher rewards on the basis of meeting safety requirements. In order to mimic safety-critical application scenarios, we set more stringent safety requirements, where the more difficult task Safety-Gymnasium has its cost limit set to 10, and other environments are set to 5.  
+\textbf{Baselines.} 
+We compare FISOR with the following baselines:
+$1)$ \textit{BC}: Behavior cloning that imitates the whole datasets. $2)$ \textit{CDT} \citep{liu2023constrained}: A Decision Transformer based method that considers safety constraints. $3)$ \textit{BCQ-Lag}: A Lagrangian-based method that considers safety constraints on the basis of BCQ \citep{fujimoto2019off}. $4)$ \textit{CPQ} \citep{xu2022constraints}: Treat the OOD action as an unsafe action and update the Q-value function with safe state-action. $5)$ \textit{COptiDICE} \citep{lee2022coptidice}: A DICE (distribution correction estimation) based safe offline RL method that builds on OptiDICE \citep{lee2021optidice}. $6)$ \textit{TREBI} \citep{lin2023safe}: A diffusion-based method using classifier-guidance to sample safe trajectory.
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig/cost_limit.jpg}
+\caption{\small Soft constraint sensitivity experiments for cost limit $l$ in three environments.}
+\label{fig:cost_limit}
+\includegraphics[width=0.95\textwidth]{fig/ablation_sample.jpg}
+\caption{\small Ablations on hyperparameter choices in CarPush1.}
+\label{fig:ablation_sample}
+\end{figure} 
+
+\textbf{Main Results.}
+Evaluation results are presented in Table \ref{tab:main-result}. FISOR is the only method that achieves satisfactory safety performance in all tasks and obtains the highest return in most tasks, demonstrating its superiority in achieving both safety and high rewards. Other methods either suffer from severe constraint violations or suboptimal returns. \textit{BCQ-Lag} tries to balance performance and safety using the Lagrangian method, but the coupled training procedure makes it unstable and difficult to find the right balance, leading to inferior safety and reward results. \textit{CPQ} takes a more conservative approach by only updating the value function on safe state-action pairs, which can result in very low returns when constraints are enforced. \textit{CDT} and \textit{TREBI} use complex network architectures, which can meet the constraints and achieve high returns on some tasks, but their overall safety performance is not very impressive since they use soft constraints.
+
+\subsection{Ablation Study and Analysis}
+\textbf{Soft Constraint Under Different Cost Limits}. 
+We evaluate the sensitivity of cost limit selection $l$ for soft-constraint-based methods to demonstrate the effectiveness of hard constraint. We evaluate three cost limits and present the results  in Figure~\ref{fig:cost_limit}. \textit{FISOR w/o constraint} refers to our algorithm without safety constraints, focusing solely on maximizing rewards. Figure~\ref{fig:cost_limit} shows that most soft-constraint-based methods are highly sensitive to the value of cost limit. In some cases, choosing a small cost limit even leads to an increase in the final cost. This shows that it is difficult for these methods to select the right cost limit to achieve the best performance, which requires task-specific tuning. 
+In contrast, our algorithm, which considers hard constraints, does not encounter this issue and achieves superior results using only one group of hyperparameters.
+
+\input{tables/ablation_hj}
+\textbf{Hyperparameter Choices}. We sweep two hyperparameters: the expectile value $\tau$ and the number of sampled action candidates $N$ during evaluation. Figure \ref{fig:ablation_sample} shows that $\tau$ and $N$ primarily affect conservatism level, but do not significantly impact safety satisfaction.
+A larger $\tau$ and smaller $N$ result in a more aggressive policy, whereas a smaller $\tau$ and larger $N$ lead to a more conservative behavior. We find that setting $\tau=0.9$ and $N=16$ consistently yields good results in terms of both safety and returns. Hence, we evaluate FISOR on all 26 tasks using these same hyperparameters.
+\textbf{Ablations on Each Design Choice.} 
+We demonstrate the effectiveness of individual components of our method: HJ reachability, feasibility-dependent objective, and diffusion model.
+$1)$ To verify the advantage of using HJ reachability, we ablate on the choice of determining the largest feasible region using cost value function instead of feasible value function. This variant is denoted as \textit{w/o HJ}. 
+The results are summarized in Figure \ref{fig:toycase} and Table \ref{tab:ablation_hj}. For the variant \textit{w/o HJ}, 
+the presence of approximation errors renders the estimated infeasible region pretty large and inaccurate, which leads to severe policy conservatism and hurt final returns. By contrast, the feasible value function in FISOR can accurately identify the largest feasible region, which greatly increases optimized returns. 
+$2)$ We train FISOR by setting the weight for the infeasible region in Eq.~(\ref{eq:weight}) to 0
+(\textit{w/o infeasible}) to examine the necessity of minimizing constraint violation in infeasible regions. $3)$ We also ablate on replacing diffusion policy with conventional Gaussian policy (\textit{w/o diffusion}). 
+The results are presented in Table \ref{tab:ablation}, where \textit{w/o infeasible} suffers from severe constraint violations without learning recovery behavior in infeasible regions. 
+Meanwhile, \textit{w/o diffusion} struggles to effectively fit the data distribution both inside and outside the feasible region, resulting in high constraint violations. 
+
+
+\begin{figure*}[t]
+\begin{minipage}[h]{.4\textwidth}
+   \captionof{table}{\small Ablations on infeasible objective and diffusion policies (normalized cost).}
+    \centering
+    \scriptsize
+    \setlength{\tabcolsep}{2pt}
+    \begin{tabular}{lccc}
+    \toprule
+        Task  &w/o infeasible &w/o diffusion &FISOR \\
+    \midrule
+        CarButton1  & 4.61 & 0.72  & \colorbox{mine}{0.26} \\
+        CarButton2  & 6.53 & 1.73  & \colorbox{mine}{0.58} \\
+        CarPush1  & 0.86  & 1.21 &\colorbox{mine}{0.28} \\
+        CarPush2  & 3.10  & 4.45 &\colorbox{mine}{0.89} \\
+        CarGoal1  & 4.00  & 2.71 &\colorbox{mine}{0.83} \\
+        CarGoal2  & 5.46  & 2.82 &\colorbox{mine}{0.33} \\
+    \bottomrule
+    \label{tab:ablation}
+    \end{tabular}
+\end{minipage}
+\begin{minipage}[h]{.6\textwidth}
+\centering
+\includegraphics[width=0.98\textwidth]{fig/imitation.jpg}
+\caption{\small Safe offline IL results in MetaDrive.}
+\label{fig:il}
+\end{minipage}
+\hfill
+\end{figure*}
+\textbf{Extension to Safe Offline Imitation Learning.} 
+We also show the versatility of FISOR by extending it to the safe offline Imitation Learning (IL) setting, where we aim to learn a safe policy given both safe and unsafe high-reward trajectories without reward labels.
+In comparison to $1)$ BC, $2)$ BC with fixed safety penalty (\textit{BC-P}), and $3)$ Lagrangian penalty (\textit{BC-L}), FISOR can imitate expert behavior and meanwhile avoid unsafe outcomes, as illustrated in Figure \ref{fig:il}.
+
+
+
+
+\section{Related Work}
+
+Most existing safe RL studies focus on the online setting, which typically use the Lagrangian method to solve the constrained problem~\citep{chow2017risk,tessler2018reward,ding2020natural}, thus resulting in an intertwined problem with stability issues~\citep{saxena2021generative}. CPO~\citep{achiam2017constrained} utilizes trust region technique and theoretically guarantees safety during training. However, all these methods cannot guarantee safety during the entire online training phase. By contrast, safe offline RL learns policies from offline datasets without risky online interactions. CPQ~\citep{xu2022constraints} is the first practical safe offline RL method that assigns high-cost values to both OOD and unsafe actions, which distorts the value function and may cause poor generalizability~\citep{li2023when}. COptiDICE~\citep{lee2022coptidice} is a DICE-based method~\citep{lee2021optidice} with safety constraints, but the residual learning of DICE may lead to inferior results~\citep{baird1995residual, mao2023revealing}. Recently, some methods~\citep{liu2023constrained, lin2023safe} incorporate safety into Decision Transformer~\citep{chen2021decision} or Diffuser~\citep{janner2022planning} architecture, but are highly computational inefficient. Moreover, all these safe offline RL methods only consider soft constraint that enforces constraint violations in expectation, which lacks strict safety assurance. Some studies~\citep{choi2020reinforcement,yang2023feasible,wabersich2023data} utilize safety certificates from control theory, such as control barrier function (CBF)~\citep{ames2019control,lee2023data,kim2023safety} and HJ reachability~\citep{bansal2017hamilton,fisac2019bridging,yu2022reachability}, to ensure state-wise zero violations (hard constraint), but only applicable to online RL.
+
+
+
+
+\section{Conclusion and Future Work}
+
+We propose FISOR, which enables safe offline policy learning with hard safety constraints.
+We introduce an offline version of the optimal feasible value function in HJ reachability to characterize the feasibility of states.% and propose its learning method in offline setting. 
+This leads to a feasibility-dependent objective which can be further solved using three simple decoupled learning objectives.
+Experiments show that FISOR can achieve superior performance and stability while guaranteeing safety requirements. It can also be extended to safe offline IL problems. One caveat is that limited offline data size could hurt the algorithm's performance.
+Therefore, extending FISOR to a safe offline-to-online RL framework can be a viable future direction to improve performance with online interactions, while retaining safety.
+
+
+

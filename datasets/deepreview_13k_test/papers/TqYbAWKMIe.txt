@@ -1,0 +1,278 @@
+\title{LILO: Learning Interpretable Libraries by Compressing and Documenting Code}
+
+\begin{abstract}
+While large language models (LLMs) now excel at code \textit{generation}, a key aspect of software development is the art of \textit{refactoring}: consolidating code into libraries of reusable and readable programs. In this paper, we introduce \lilo, a neurosymbolic framework that iteratively synthesizes, compresses, and documents code to build libraries tailored to particular problem domains.
+\lilo\ combines LLM-guided program synthesis with recent algorithmic advances in automated refactoring from \stitch: a symbolic compression system that efficiently identifies optimal $\lambda$-abstractions across large code corpora. To make these abstractions \textit{interpretable}, we introduce an auto-documentation (AutoDoc) procedure that infers natural language names and docstrings based on contextual examples of usage. In addition to improving human readability, we find that AutoDoc boosts performance by helping \lilo's synthesizer to interpret and deploy learned abstractions. We evaluate \lilo\ on three inductive program synthesis benchmarks for string editing, scene reasoning, and graphics composition. Compared to existing methods---including the state-of-the-art library learning algorithm DreamCoder---\lilo\ solves more complex tasks and learns richer libraries that are grounded in linguistic knowledge.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\doparttoc
+\faketableofcontents % Run a fake tableofcontents command for the partocs
+Large language models (LLMs) are growing highly adept at programming in many settings: completing partially-written code \citep{codex, fried2022incoder, liStarCoderMaySource2023}, conversing with human programmers \citep{austin2021program, salesforce}, and even solving competition-level programming puzzles \citep{hendrycks2021measuring, li2022competition, haluptzok2022language, openaiGPT4TechnicalReport2023}. However, beyond solving the immediate task at hand, software engineers are concerned with building libraries that can be applied to entire problem domains.
+To this end, a key aspect of software development is the art of \textit{refactoring} \citep{brown1998antipatterns, abrahamsson2017agile}:
+identifying \textit{abstractions} that make the codebase more concise (consolidating shared structure), reusable (generalizing to new tasks), and readable (intuitive to other programmers). Solving this multi-objective optimization will require broadening the scope of existing code completion tools---which are already used by millions of programmers---to approach the problem of \textit{library learning}.
+
+In this paper, we combine language models with recent algorithmic advances in automated refactoring from the programming languages (PL) literature to learn libraries of reusable function abstractions.
+We introduce \textbf{\lilo}, a neurosymbolic framework for \textbf{Library Induction from Language Observations}, which consists of three interconnected modules (\cref{fig:lilo_splash}):
+\begin{itemize}[leftmargin=0.2in]
+    \item A \textbf{dual-system synthesis} module, which searches for solutions to programming tasks using two distinct methods: \textit{LLM-guided search} imbues the system with strong domain-general priors, and \textit{enumerative search} enables the discovery of domain-specific expressions;
+    \item A \textbf{compression} module, which identifies useful abstractions from the existing solution set via \stitch\ \citep{stitch}, a high-performance symbolic compression system;
+    \item An \textbf{auto-documentation (AutoDoc)} module, which generates human-readable function names and docstrings, yielding better interpretability and improving downstream LLM-guided search.
+\end{itemize}
+
+\begin{figure}[ht!]
+\begin{center}
+\includegraphics[width=1.0\textwidth]{figures/main/lilo_splash.pdf}
+\end{center}
+\caption{\textbf{Overview of the \lilo\ learning loop.} (A) \lilo\ synthesizes programs based on natural language task descriptions using a dual-system search model. To refactor a set of program solutions, \lilo\ integrates a compression algorithm called \stitch\ (B; \citealp{stitch}) with LLM-generated auto-documentation (C) to produce an interpretable library of $\lambda$-abstractions. This search-compress-document loop simplifies the structure of program solutions (A vs. D), making it easier to solve more complex tasks on future iterations.}
+\label{fig:lilo_splash}
+\end{figure}
+
+Our architecture draws inspiration from \textsc{DreamCoder} \citep{ellis2021dreamcoder}, an iterative Wake-Sleep algorithm that alternates between searching for solutions to programming tasks (\textit{Wake} phase) and refactoring shared abstractions into a library (\textit{Sleep} phase) that in turn helps to guide search. Unlike standard deep learning approaches, DreamCoder can make strong generalizations from just a handful of examples, and the model's conceptual knowledge is represented symbolically in the learned library. However, DreamCoder's search procedure is extremely computationally intensive, requiring more than two CPU-\textit{months} just to learn a single domain (see \citealp{ellis2021dreamcoder}, Apx. J). Much of this search time is spent ``getting off the ground'': discovering a basic set of abstractions that human programmers typically already know, or might be able to grok quickly based on having solved problems in other domains. Moreover, DreamCoder libraries are not necessarily interpretable, requiring both domain expertise and knowledge of lambda calculus to decipher.
+
+To address these issues, \lilo\ leverages LLMs in two novel ways: (1) to expedite the discovery of program solutions during search, and (2) to improve the interpretability of learned libraries through documentation. We evaluate \lilo\ against a language-guided DreamCoder variant on three challenging program synthesis domains: \textbf{string editing} with regular expressions \citep{andreas2017learning}, \textbf{scene reasoning} on the CLEVR dataset \citep{johnson2017clevr}, and \textbf{graphics composition} in the 2D Logo turtle graphics language \citep{abelsonTurtleGeometry1986}. On all three domains, \lilo\ solves more tasks than DreamCoder and learns empirically richer libraries containing abstractions that are intractable to discover with existing methods. For instance, \lilo\ learns the concept of a \textit{vowel} (\cref{fig:autodoc}), which is a key stepping-stone in the string editing domain that would otherwise require searching over $26^5$ possible disjunctions of character primitives. Unlike LLM-only baselines---which can solve similar tasks---\lilo\ compresses this knowledge into symbolic abstractions that are useful for both traditional search methods and LLM-guided synthesis. Key to this neurosymbolic integration is our AutoDoc module, which not only improves interpretability, but also helps the LLM synthesizer use the library more effectively.
+\lilo\ illustrates how ideas and tools from the PL community can be integrated with recent breakthroughs in language models, representing a new evolution in a long line of work in inductive program synthesis, which we review below.
+
+
+
+\section{Preliminaries: Program Search and Library Learning}
+
+\label{sec:background}
+
+\textbf{Program synthesis.} In inductive program synthesis \citep{gulwani2017program}, we are given a library of primitives $\library = \{ \primitive_1, \primitive_2, \ldots \}$ that forms a \textbf{domain-specific language (DSL)}. For a given programming task $\task = \{(x_i, y_i)\}$ specified as a set of input-output pairs, the goal is to find a program $\program : \forall_i \program(x_i) = y_i$ that correctly maps all inputs to outputs, denoted $\program \vdash \task$. However, a typical task admits many such solutions that will not necessarily generalize (for instance, a simple lookup table). To address this inherent under-specification, concern is given to finding an \textit{optimal} program $\hat{\program} \vdash \task$ with respect to descriptive complexity \citep{solomonoff1964formal, kolmogorov1965three, chaitin1966length}. This optimization is naturally framed in terms of probabilistic inference:
+\begin{equation}\label{eq:program_synthesis_posterior}
+\argmax_\program \log \probability(\program \mid \task, \library) =  \argmax_\program \left[ \log \probability(\task \mid \program) + \log \probability(\program \mid \library) \right]
+\end{equation}
+In a typical setting, the likelihood $\probability (\task \mid \program) \triangleq \mathbbm{1}_{\program \vdash \task}$ is computed via program execution, while the prior $\probability(\program \mid \library) \triangleq \prod_{\primitive \in \program} \probability(\primitive \mid \library)$ is defined under a probabilistic context free grammar (PFCG; \citealp{johnson1998pcfg}) that assigns a weight $0 \leq \theta \leq 1$ to each production rule. This is equivalent to a weighted \textit{description length} prior, where longer programs have lower probability.
+
+This formulation highlights the central challenge of program synthesis: historically, approaches to \cref{eq:program_synthesis_posterior} have inevitably involved enumerative search through a combinatoral space of programs. A range of techniques have been proposed to improve search tractability, including type-directed synthesis \citep{polikarpova2016program}, Monte Carlo approximation \citep{liang2010learning, allamanisMiningSemanticLoop2018, shin2019program}, and neural network guidance \citep{gulwani2015inductive, balog2016deepcoder, parisotto2016neuro, devlin2017robustfill, nye2019learning, ellis2021dreamcoder}. However, even with these methods, traditional program synthesis hinges critically on DSL design. Omission of key primitives can make complex tasks unsolvable, while inclusion of extraneous primitives can make search intractable. Consequently, DSL engineering is a painstaking process that requires significant expertise to anticipate common patterns across tasks in a domain.
+
+\textbf{Library learning.} While classical approaches focus on synthesizing the best program for a task specification given a fixed DSL (as in \cref{eq:program_synthesis_posterior}), programmers in the wild are typically concerned with solving entire problem domains. Given the difficulty of manual DSL engineering, a natural evolution is to include $\library$ itself as part of the optimization problem. This is the main intuition behind \textit{library learning} methods \citep{liang2010learning, dechter2013bootstrap, lake0215, shin2019program, lazaro2019beyond, Ellis2018, ellis2021dreamcoder}, which start with a collection of tasks $\tasks = \{ \task_1, \task_2, \ldots \}$ and a base library $\library_0$, and jointly infer an expanded library $\library = \library_0 \cup \abstractions$ that includes additional \textbf{abstractions} $\abstraction$ built from $\library_0$ (\cref{fig:lilo_splash}B) and programs $\programs = \{ \program_1, \program_2, \ldots \}$ written in terms of $\library$:
+\begin{equation}\label{eq:library_learning_posterior}
+\argmax_{\programs, \library} \log \probability(\programs, \library \mid \tasks, \library_0) =
+\argmax_{\programs, \library} \left[\sum_{\task \in \tasks} \log \probability(\task \mid \program_\task) + \log \probability(\program_\task \mid \library)\right] + \log \probability(\library \mid \library_0)
+\end{equation}
+This objective carries over the program prior and likelihood from \cref{eq:program_synthesis_posterior}, but introduces a distribution over libraries $\probability(\library \mid \library_0)$, typically also defined in terms of description length.
+Intuitively, \cref{eq:library_learning_posterior} is optimized by inventing abstractions that are both \textit{reusable}, simplifying the solutions to multiple tasks in $\tasks$; and \textit{concise}, ideally building on one another hierarchically so as to share logic.
+\cite{ellis2021dreamcoder} approximate \cref{eq:library_learning_posterior} via coordinate ascent, alternating between a \textbf{search step}, which holds the library fixed and searches for task solutions $\programs$, and a \textbf{refactoring step}, which extracts common structure from the solution set to update $\library$. The tractability of this approach hinges critically on the ability to do efficient refactoring, which we discuss further in \cref{sec:methods:compression}.
+
+\textbf{Leveraging language guidance.} Given the size of the search space, generic priors such as description length are not always sufficient to solve \cref{eq:program_synthesis_posterior}; for this reason, a line of work considers natural language task descriptions $\desc$ as an additional source of learning signal \citep{mansahdi2013integrating, raza2015compositional, shin2019program}. Traditionally, making use of such descriptions has required learning a domain-specific semantic parsing model \citep{liang-etal-2011-learning, artzi2013weakly, chen2011learning}. More recent work \citep{rahmani2021multi, yinNaturalLanguageCode2022, zelikmanParselCompositionalFramework2023} uses LLMs, which excel when $\library$ resembles a common programming language that is well-represented in pretraining.
+
+In library learning settings---where $\library$ is novel by construction---it is currently less clear how to leverage language. In LAPS (Language for Abstraction and Program Search), \cite{wong2021leveraging} generalize \cref{eq:library_learning_posterior} to condition on $\desc$ by fitting an inverted ``program-to-language'' translation model. However, learning this mapping from scratch necessitates the use of a small alignment model (\textit{IBM Model 4}; \citealp{brown1993mathematics}) that makes strict token-to-token decomposition assumptions. In \lilo, we take the opposite approach: we start with a large model that already has strong priors over the joint distribution of language and code; then, we adapt the \textit{library} to resemble this distribution by building up contextual examples and documentation. In contrast to simply picking a more common $\library$ (e.g., Python) to work in, this procedure enables us to \textit{learn} a new $\library$ on-the-fly that is both optimized for the domain and grounded in natural language.
+
+
+
+\section{LILO: Library Induction with Language Observations}
+
+
+Our method, \lilo, aims to combine the strong inductive search biases encoded by LLMs with the key ideas from classical methods in library learning---namely, the ability to discover new symbolic abstractions through refactoring. Algorithmically, \lilo\ (\cref{alg:lilo_learning}) has a similar structure to existing approaches that optimize \cref{eq:library_learning_posterior} via coordinate ascent, alternating between search and refactoring. However, unlike prior work, our use of LLMs for search necessitates an additional step---AutoDoc---to render the learned abstractions legible to the synthesizer. We detail each of these modules below.
+
+\begin{algorithm}[b!]
+\captionsetup{font=footnotesize}
+\footnotesize
+\caption{Library learning loop with \lilo}
+\label{alg:lilo_learning}
+\begin{algorithmic}[1]
+\Function{LiloLearning}{$\library_0, \tasks$}
+\State $\library \gets \library_0$ \Comment{Initialize library with base DSL}
+\State $\programs \gets \{\task: \emptyset \mid \task \in \tasks\}$
+\Comment{Initialize task solution set}
+
+\For{$\iteration = 1, \ldots, N$ }
+    \For{$\task \in \tasks$} \Comment{Run LLM Solver}
+        \State $\programs_\task \gets \programs_\task \cup \textsc{LLM}(\texttt{TaskPrompt}(\library, \programs, \desc))$
+    \EndFor
+
+    \State $\programs \gets \programs \cup \search(\library_i, \tasks)$ \Comment{Run enumerative search (skipped in \scissors\ Search)}
+
+    \State $\abstractions \gets \textsc{compress}(\library, \programs, k)$ \Comment{Generate new abstractions}
+    \State $\library \gets \library_0 \cup \abstractions$\label{alg:lilo_learning:line:library_update}
+
+    \State $\programs \gets \textsc{rewrite}(\library, \programs)$
+
+    \For{$\alpha \in \abstractions$} \Comment{Document abstractions (skipped in \scissors\ AutoDoc)}
+        \State $\mathcal{D} \gets \textsc{LLM}(\texttt{AutoDocPrompt}(\library, \programs, \alpha))$
+        \State $\library \gets \texttt{add\_docs}(\library, \alpha, \mathcal{D})$
+    \EndFor
+\EndFor
+\State \textbf{return} $\library, \programs$ \Comment{Return final library and task solutions}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Dual-system program search (\cref{fig:lilo_splash}A).} \label{sec:methods:synthesis} Inspired by dual process theories of cognition \citep{sloman1996empirical, EVANS2003454, kahneman2011thinking}, \lilo\ is equipped with two distinct search procedures.
+We use a LLM as a ``fast'' approximate search model in string space that leverages strong inductive biases learned in pretraining.
+After this first pass, we perform ``slow'' enumerative search in program space, using a task-conditioned PCFG inferred by a ``recognition network'' for guidance. We focus here on LLM-guided synthesis and refer to \citealp{ellis2021dreamcoder} (Apx. E and I) for details on enumeration.
+
+Formally, we write $\probability_\text{LLM}(y \mid x)$ to denote the distribution over strings $y$ produced by a language model prompted with string $x$.
+Then, for some target task $\targettask$, our goal is to approximate the conditional distribution over programs
+\begin{equation} \label{eq:llm_programs_language}
+    \probability(\program_\targettask \mid \library, \programs, d_\targettask) \approx
+    \probability_\text{LLM}(\langle \program_\targettask \rangle \mid
+        \underbrace{
+            \langle \primitive \mid \primitive \in \library \rangle}_{\text{library functions}
+        } \circ
+        \underbrace{
+            \langle (\desc, \program_\task) \mid \program_\task \sim \programs \rangle}_{\text{program examples}
+        } \circ
+        \!\!\!
+        \underbrace{
+            \langle d_\targettask \rangle}_{\substack{\text{task desc.}}
+        }
+        \!\!\!
+    )
+\end{equation}
+where $\langle \ldots \rangle$ and $\circ$ denote string serialization and concatenation, respectively.
+To sample from the distribution in \cref{eq:llm_programs_language}, we procedurally construct few-shot prompts consisting of three parts: (1) A library description that enumerates the available primitives and any learned abstractions, (2) a set of exemplars consisting of description-solution pairs $(\desc, \program_t) \sim \programs$ sampled from the set of solved tasks, and (3) a description of the target task $d_\targettask$. For each completion, we run parsing, type inference, and execution checks to identify valid programs that solve the target task.)
+
+\textbf{Refactoring via Stitch compression (\cref{fig:lilo_splash}B).}\label{sec:methods:compression}
+As the learner solves more tasks, the solution set will grow to contain many recurring program fragments that we wish to refactor into a set of reusable abstractions. In library learning systems that rely on enumeration, refactoring improves search efficiency by avoiding the need to rediscover key building blocks for each new task. Analogously, in \lilo, refactoring makes the generation task easier: a LLM equipped with a library of abstractions can deploy entire blocks of code with just a few tokens. Additionally, refactoring helps to mitigate LLM context window limits by minimizing the description length of the few-shot examples.
+
+Various algorithms for refactoring have been proposed using combinatory logic \citep{liang2010learning}, tree substitution grammars \citep{allamanisMiningIdioms2014, allamanisMiningSemanticLoop2018, shin2019program}, version spaces \citep{lauProgrammingDemonstrationInductive1998, ellis2021dreamcoder}, and e-graphs \citep{CaoKNWTP23}. In \lilo, we cast refactoring as a \textit{compression problem} over a corpus of programs
+\begin{equation}\label{eq:compression}
+\abstraction = \underset{\library}{\compress} (\programs) = \argmin_{f}{|f| + \sum_{\program \in \programs} | \underset{\library \cup \{f\}}{\rewrite}(\program) |}
+\end{equation}
+where the goal is to identify abstractions with minimal description length $|f|$ that facilitate efficient rewriting of $\programs$.
+However, performing even a single round of compression as in \cref{eq:compression} necessitates an efficient search strategy. In \lilo, we leverage recent algorithmic advances from \stitch\ \citep{stitch}: a symbolic compression system that uses branch-and-bound search to identify reusable abstractions in large datasets of lambda calculus programs. While \citeauthor{stitch} demonstrate that Stitch is 1000--10000x faster and 100x more memory efficient than DreamCoder's compression algorithm, prior analyses were limited to static corpora of ground truth programs. In \lilo, we deploy Stitch for the first time in a synthesis loop and find it similarly performant, typically running in seconds on a single CPU.
+These efficiency improvements enable us to re-derive the entire library from $\library_0$ at every iteration (\cref{alg:lilo_learning} line \ref{alg:lilo_learning:line:library_update}). While many abstractions remain stable across iterations, this ``deep refactoring'' allows \lilo\ to discard suboptimal abstractions discovered early in learning.
+
+\begin{figure}[t!]
+\begin{center}
+\includegraphics[width=1.0\textwidth]{figures/main/autodoc.pdf}
+\end{center}
+\caption{\textbf{\lilo\ library auto-documentation (AutoDoc) workflow in the REGEX domain.} For each Stitch abstraction (A), we prompt an instruction-tuned LLM with usage examples from solved tasks (B) to generate a human-readable name and description (C). The chat-style structure of AutoDoc allows naming choices to cascade sequentially; e.g.,  \texttt{replace\_consonant\_with\_substring} \texttt{(fn\_51)} refers back to \texttt{vowel\_regex} \texttt{(fn\_42)} and other named abstractions in a consistent and interpretable manner.}
+\label{fig:autodoc}
+\end{figure}
+
+\textbf{Library auto-documentation (\cref{fig:lilo_splash}C).}\label{sec:methods:autodoc}
+Unlike traditional program synthesis methods, language models draw inferences about the semantics of programs from their lexical content. In other words, LLMs (like human programmers) care what functions are named. However, PL tools are typically not equipped to write human-readable function names, instead outputting anonymous lambda abstractions (in Stitch, these are represented numerically; e.g., \texttt{fn\_42}). In early experiments, we observed that naively providing a LLM with Stitch abstractions measurably degraded its ability to solve tasks (\cref{sec:experiments:quantitative}). We hypothesized that rewriting program examples in terms of these anonymous lambdas during the compression step (\cref{eq:compression}) was acting as a form of \textit{code obfuscation} \citep{srikantGeneratingAdversarialComputer2021, zengExtensiveStudyPretrained2022, miceli-baroneLargerTheyAre2023}.
+
+Motivated by these findings, as part of \lilo, we introduce a \textit{library auto-documentation} (AutoDoc) procedure that writes human-readable names and docstrings for abstractions generated by Stitch. AutoDoc leverages the fact that LLMs are naturally suited to code deobfuscation
+\citep{lachauxDOBFDeobfuscationPreTraining2021, sharma2021skill, cambroneroFlashFillScalingProgramming2023}. During AutoDoc, we sequentially prompt an instruction-tuned LLM to produce a human-readable name and docstring for each abstraction in the library. \cref{fig:autodoc} gives an overview of this workflow (the full prompt is reproduced in \cref{apx:autodoc_prompt}). In this example in the REGEX domain, the LLM has solved some problems that require vowel substitutions. During compression, Stitch pulls out the expression \mintinline[breaklines]{lisp}{(or 'a' (or 'e' (or 'i' (or 'o' 'u'))))} for occurring commonly in the solution set and defines it as an anonymous arity-0 function (i.e., a constant). Subsequently, AutoDoc names this abstraction \mintinline[breaklines]{lisp}{vowel_regex}, which forms the basis for more complex expressions. For instance, \textit{consonant} is expressed as \mintinline[breaklines]{lisp}{(not vowel_regex)}, which in turn supports an abstraction for consonant replacement. In \cref{sec:experiments}, we explore how AutoDoc benefits downstream synthesis performance, yielding both richer and more interpretable libraries.
+
+
+
+\section{Experiments and Results}
+
+
+\textbf{Domains.} Our goal is to build a system that can develop expertise in novel technical domains and leverage natural language guidance to bootstrap learning.
+We evaluate our approach on three inductive program synthesis domains: string editing (REGEX), scene reasoning (CLEVR), and graphics composition (LOGO).
+Detailed descriptions and metrics pertaining to each domain are provided in \cref{apx:domain_details}.
+These three domains were introduced in LAPS \citep{wong2021leveraging} as more challenging versions of the domains evaluated in DreamCoder and our evaluations are directly comparable to prior results (\cref{apx:laps_results}).
+Following \citeauthor{wong2021leveraging}, we use synthetic ground truth task descriptions in our primary experiments and evaluate on a noisier set of human language annotations in \cref{apx:comparison_human_synthetic_language}.
+
+\textbf{Experiment setup.} Our experiments are designed to simulate a ``lifelong learning'' setting where the learner starts from a small seed set of simple examples that it must generalize to solve a broader set of training tasks that range in complexity.
+Performance is measured as the percentage of tasks solved from an i.i.d. test set.
+We sequentially perform two experiments that test different aspects of models' learning.
+First, in \textbf{online synthesis}, each model runs for a fixed number of iterations, continually updating its library (if applicable) and attempting to solve test tasks. These experiments serve as a general benchmark of language-guided synthesis capabilities.
+Next, in \textbf{offline synthesis}, we freeze the final library $\library_f$ from each online synthesis run and perform enumerative search with no language guidance for a fixed time budget. (To compare against non-library learning baselines, we run \stitch\ to generate $\library_f$ \textit{post-hoc}.)
+We hold the hyperparameters of the search fixed so that performance depends entirely on $\library_f$ and not on the original model. Thus, the offline synthesis evaluations provide a controlled comparison of the off-the-shelf utility of different learned libraries in the absence of language guidance.
+Throughout, comparisons between models are expressed in terms of absolute percentage point changes in mean solve rates on the test set.
+
+\textbf{Implementation details.}
+For LLM-guided search, we queried OpenAI's Codex model (\texttt{code-davinci-002})\footnote{We accessed Codex through OpenAI's free beta program for researchers, which saved thousands of USD over the project lifetime (see \cref{apx:computational_efficiency}) and afforded higher rate limits than paid GPT models. To preserve reproducibility, we make all LLM generations available at: \repourl{}.} with up to 4 prompts per task, sampling 4 completions per prompt.
+For AutoDoc (which requires significantly fewer queries) we found that OpenAI's newer instruction-tuned models (\texttt{gpt-3.5-turbo} and \texttt{gpt-4}) better adhered to the AutoDoc task and schema. Further implementation details can be found in \cref{apx:implementation_details,apx:hyperparameters}.
+
+\subsection{Evaluation of Synthesis Performance}
+\label{sec:experiments:quantitative}
+
+We compare \lilo\ against two baseline models: a language-guided DreamCoder variant from \cite{wong2021leveraging} and a language model (\ExpTypeLLMSolver) that does not perform library learning (\cref{fig:main_results}). To study the effects of the different \lilo\ components, we introduce ablated variants that remove the enumerative search and/or AutoDoc steps. To ensure fair comparison and improve overall runtimes, Stitch is used as the compression module for all library learning models, including the DreamCoder baseline. \cref{tab:results_main} gives the full breakdown of task solution rates.
+
+\begin{figure}[!t]
+\begin{center}
+\includegraphics[width=1.0\textwidth]{figures/main/online_synthesis.pdf}
+\end{center}
+\caption{\textbf{Learning curves during online synthesis.} Within each plot, the x-axis tracks the experiment iteration and the y-axis shows the percent of tasks solved (top = test, bottom = train). Error bars show standard deviation across 3 randomly-seeded runs.}
+\label{fig:main_results}
+\end{figure}
+
+\begin{table}[!t]
+\centering
+\footnotesize
+
+\begin{tabular}{lRRRRRRRRR}
+\toprule
+{} & \multicolumn{3}{c}{\textsc{REGEX}} & \multicolumn{3}{c}{\textsc{CLEVR}} & \multicolumn{3}{c}{\textsc{LOGO}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+\textsc{Model} &              max &   mean &    std &    max &   mean &   std &    max &   mean &    std \\
+\midrule
+\ExpTypeDreamCoder & 45.60 & 43.93 & 1.53 & 97.09 & \underline{94.50} & 2.44 & 36.94 & \underline{28.53} & 13.79 \\
+\ExpTypeLLMSolver & 90.00 & \underline{76.13} & 12.04 & 90.29 & 88.67 & 1.48 & 41.44 & \underline{32.13} & 8.07 \\
+\ExpTypeLLMSolverSearch & 91.20 & \underline{76.60} & 13.02 & 97.09 & \underline{96.44} & 0.56 & 45.05 & \underline{37.84} & 6.80 \\
+\ExpTypeLILONoSearchAutoDoc & 59.40 & 53.20 & 5.38 & 93.20 & 85.76 & 9.72 & 45.05 & 21.02 & 20.88 \\
+\ExpTypeLILONoSearch & 63.80 & \underline{62.93} & 1.50 & 94.17 & 88.03 & 8.26 & 30.63 & 21.02 & 9.46 \\
+\ExpTypeLILO & \textbf{93.20} & \textbf{77.07} & 14.14 & \textbf{99.03} & \textbf{96.76} & 3.12 & \textbf{73.87} & \textbf{48.95} & 22.15 \\
+\midrule
+\ExpTypeBaseDSL & 22.00 & 22.00 & 0.00 & 29.13 & 29.13 & 0.00 & 0.90 & 0.90 & 0.00 \\
+\ExpTypeDreamCoder & 42.00 & 41.60 & 0.40 & 94.17 & 91.59 & 2.97 & 36.04 & 30.63 & 7.85 \\
+\ExpTypeLLMSolver$^{\ast}$ & 48.60 & 43.00 & 5.17 & 91.26 & 89.64 & 2.02 & 36.04 & 27.33 & 7.56 \\
+\ExpTypeLLMSolverSearch$^{\ast}$ & 63.40 & 55.67 & 7.51 & 91.26 & 89.00 & 3.92 & 28.83 & 27.63 & 1.04 \\
+\ExpTypeLILONoSearchAutoDoc & 60.80 & 50.73 & 8.85 & 95.15 & 93.85 & 2.24 & \textbf{51.35} & 30.63 & 18.22 \\
+\ExpTypeLILONoSearch & 57.60 & 56.20 & 2.25 & \textbf{96.12} & \textbf{95.79} & 0.56 & 28.83 & 26.13 & 3.25 \\
+\ExpTypeLILO & \textbf{71.40} & \textbf{64.27} & 6.31 & \textbf{96.12} & 92.56 & 6.17 & 50.45 & \textbf{41.14} & 8.66 \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Task solution rates for online (upper) and offline (lower) synthesis experiments.} We report the best (\textit{max}), average (\textit{mean}), and standard deviation (\textit{std}) test solve rates across model runs. In each mean column, results within $1 \sigma$ of the best (\textbf{bold}) result are \underline{underlined}. ${}^\ast$Asterisk indicates $\library_f$ computed \textit{post-hoc}.}
+\label{tab:results_main}
+\end{table}
+
+\textbf{LLMs facilitate effective search over lambda calculus programs.} Our first question is whether the LLM-based search procedure introduced in \cref{sec:methods:synthesis} can match the accuracy of enumerative search. Compared to DreamCoder, we find that the \ExpTypeLLMSolver, with no library learning, performs significantly better on REGEX ($+32.20$), slightly worse on CLEVR ($-5.83$), and comparably on LOGO ($+3.60$). The improvements on REGEX are primarily attributable to LLMs' ability to generate expressions for concepts like \texttt{vowel} and \texttt{consonant} that invoke prior knowledge.
+
+\textbf{\lilo\ achieves the strongest overall performance.} As observed in \cref{fig:main_results}, \ExpTypeLILO\ significantly outperforms \ExpTypeDreamCoder\ on REGEX ($+33.14$) and LOGO ($+20.42$). It also achieves small improvements on CLEVR ($+2.26$), though the DreamCoder baseline is already quite high for this domain ($\mu=94.50$, $\sigma=2.44$). Moreover, \lilo\ also improves on the \ExpTypeLLMSolver\ baseline by $+0.94$ (REGEX), $+8.09$ (CLEVR), and $+16.82$ (LOGO). A key advantage of \ExpTypeLILO\ is the ability to perform enumerative search, which aids in the discovery novel programs that differ structurally from existing solutions in the LLM prompts. To isolate the effects of search, we ran an ablation [\ExpTypeLILONoSearch] as well as an augmented baseline [\ExpTypeLLMSolverSearch]. We find that enumerative search is most helpful on LOGO, which requires certain domain-specific program structures (e.g., how to draw a ``snowflake'' or ``staircase''; see \cref{fig:logo_library_qualitative}) that are difficult to infer from language alone.
+
+\textbf{Auto-documentation unlocks effective contextual usage of abstractions.} Early experiments interfacing the LLM Solver with Stitch [\cref{tab:results_main}, \ExpTypeLILONoSearchAutoDoc] revealed a puzzling finding: providing the LLM with abstractions did not help---and in some cases, significantly hurt---downstream synthesis performance. Relative to the \ExpTypeLLMSolver\ baseline, we observed solution rate changes of $-30.60$ (REGEX), $-2.91$ (CLEVR), and $-11.11$ (LOGO) after introducing Stitch compression.
+Qualitative inspection found that GPT struggled to deploy anonymous abstractions in contextually-appropriate ways, which motivated our exploration of de-obfuscation methods (\cref{sec:methods:autodoc}). After introducing AutoDoc [\cref{tab:results_main}, \ExpTypeLILONoSearch], we see mean improvements of $+9.73$ (REGEX) and $+2.27$ (CLEVR) over the naive condition. On LOGO, AutoDoc does not improve performance ($+0.00$). We attribute this to the occurrence of semantic errors, which we analyze further in \cref{sec:library_results_qualitative}.
+
+\textbf{\lilo\ rivals symbolic search in terms of computational efficiency.} Compared to enumerative search, we find that we are able to achieve faster overall wall clock runtimes with LLM-based search due to orders of magnitude better sample efficiency (see \cref{apx:computational_efficiency}). Indeed, in terms of dollar cost, we estimate that one round of LLM synthesis is equivalent to 48 CPU-hours of \ExpTypeDreamCoder\ search. Of course, LLM-based and enumerative search are not mutually exclusive: our main \lilo\ variant integrates both of these procedures and achieves the highest solve rates of all models we evaluated. Our findings make a strong case that LLMs can reduce the need for exhaustive search in synthesis domains where language annotations are available.
+
+\begin{figure}[!t]
+\begin{center}
+\includegraphics[width=1.0\textwidth]{figures/main/offline_synthesis_v2.pdf}
+\end{center}
+\caption{\textbf{Evaluating library quality via offline synthesis.} We run a timed enumerative search (x-axis; note the log-scale) with the final library $\library_f$ learned by each model in online synthesis or inferred \textit{post-hoc}. In this setting, \lilo's $\library_f$ expedites discovery of test task solutions (y-axis) even without language guidance.}
+\label{fig:offline_synthesis}
+\end{figure}
+
+\textbf{\lilo\ libraries generalize well even in the absence of language.} In our offline synthesis experiments, we tested each model's final library $\library_f$ in an off-the-shelf setting with no language guidance.
+\cref{fig:offline_synthesis} shows the results of these evaluations (metrics are given in \cref{tab:results_main}, lower). As the baseline for each domain, we measure synthesis performance in $\library_0$ (Base DSL). As expected, we can significantly outperform $\library_0$ using library learning: \ExpTypeDreamCoder's $\library_f$ improves on the $\library_0$ solve rates by $+19.6$ (REGEX), $+62.46$ (CLEVR), and $+29.73$ (LOGO). Moreover, in each domain, \lilo's $\library_f$ improves further on \ExpTypeDreamCoder, showing solution rate gains of $+42.27$ (REGEX), $+63.43$ (CLEVR), and $+43.24$ (LOGO) over $\library_0$. \lilo's $\library_f$ also outperforms libraries derived \textit{post-hoc} from the two \ExpTypeLLMSolver\ baselines, highlighting the benefits of performing compression and documentation in-the-loop. As these results demonstrate, \lilo\ learns high-quality libraries that generalize well to downstream synthesis tasks and can be used even in the absence of language guidance.
+
+\subsection{Qualitative Analysis of Library Abstractions} \label{sec:library_results_qualitative}
+
+\begin{figure}[t!]
+\begin{center}
+\includegraphics[width=1.0\textwidth]{figures/main/logo_library_qualitative.pdf}
+\end{center}
+\caption{\textbf{Qualitative inspection of LOGO library.} Selected examples of graphics abstractions learned by \lilo. Highlights indicate ambiguities (orange) and errors (red) in naming and documentation that may affect code comprehension, which we discuss below.}
+\label{fig:logo_library_qualitative}
+\end{figure}
+
+In all three domains, the libraries learned by \lilo\ exhibit examples of compositional and hierarchical reuse.
+For instance, in the LOGO library (\cref{fig:logo_library_qualitative} and \cref{apx:library_autodoc_logo}), the top abstraction is a general method for drawing polygons that is invoked by several higher-level abstractions.
+Similarly, the CLEVR library (\cref{fig:lilo_splash} and \cref{apx:library_autodoc_clevr}) contains two layers of abstractions: a lower layer implements \texttt{filter} operations over size, color, shape, and material attributes that support a higher layer of more specialized abstractions for counting and filtering. These examples showcase how \lilo\ builds on one of the main strengths of DreamCoder---the ability to bootstrap hierarchies of learned concepts---while improving the richness and interpretability of the learned libraries through auto-documentation.
+
+While the GPT models do a remarkable job at inferring program semantics, we observe various cases where they produce unclear or even incorrect documentation. For instance, in LOGO (\cref{fig:logo_library_qualitative}), the two polygon functions (\texttt{fn\_27} and \texttt{fn\_34}) are assigned relatively uninformative names that emphasize their implementation (looping \texttt{move} and \texttt{rotate}) but not their behavior (drawing polygons).
+Moreover, because AutoDoc works sequentially, it occasionally ``doubles down'' on particular statements that may be correct in one context but not another.
+For example, AutoDoc correctly notes that \texttt{fn\_27} works by ``incrementing the angle of each side on each iteration,'' but this idea is ambiguous in \texttt{fn\_31} (\textit{which angle?}) and incorrect in \texttt{fn\_34} (\textit{the length is constant, not doubling}).
+In addition to affecting interpretability, these semantic errors may also impact downstream synthesis performance in LLM-guided search.
+Future work could adopt self-consistency and verification techniques \citep{Wang2022SelfConsistencyIC, dhuliawala2023chain} to improve the quality of AutoDoc generations.
+
+
+
+\section{Discussion and Conclusion}
+
+
+In this work, we introduced \lilo, a neurosymbolic framework for learning interpretable libraries for program synthesis. In our experiments, we found that \lilo\ performs favorably compared to both DreamCoder and an LLM-only baseline. Much of \lilo's advantage comes from synergy between neural and symbolic components: LLM-guided search enables \lilo\ to learn concepts that are intractable to discover with enumerative search; compression allows \lilo\ to consolidate these solutions into reusable abstractions available to symbolic search; and finally, AutoDoc makes these abstractions legible for both humans and LLMs.
+
+While \lilo\ improves on prior library learning approaches, notably, the LLM-only baseline also demonstrates the ability to bootstrap its performance over time. This result aligns with recent successes in automated prompting \citep{zhou2023large, yaoReActSynergizingReasoning2023}, suggesting that transformer attention can be viewed as implementing a form of \textit{non-compressive} library learning where task-relevant information is accumulated in the prompt. However, it is unclear whether this approach will scale to large software libraries: as context length grows, key information may be ``lost in the middle'' or ignored due to ordering effects \citep{oconnor-andreas-2021-context, luFantasticallyOrderedPrompts2022, liuLostMiddleHow2023a}. Accordingly, an important line of research looks to develop new strategies for equipping LLMs with long-term memory through retrieval \citep{Wu2022MemorizingT, parkGenerativeAgentsInteractive2023}, self-reflection \citep{shinnReflexionLanguageAgents2023}, or combinations of both that enable learning  libraries of programmatic skills in embodied environments \citep{wangVoyagerOpenEndedEmbodied2023}. Currently, these approaches face the common challenge of determining what information to preserve, leading to a large space of \textit{ad hoc} heuristics.
+
+\lilo\ offers a principled approach to the consolidation of knowledge in a lifelong learning setting, adding program compression to a growing toolkit of LLM integrations with symbolic computation \citep{schick2023toolformer, wolfram2023chatgpt}. Moreover, given the generality of Stitch's algorithmic approach, extending \lilo\ to modern imperative languages (e.g., Python) reduces to a PL research problem that is both presently tractable and technically compelling. In contrast to the view that LLMs will subsume formal accounts of programming languages, \lilo\ offers a blueprint for collaboration between the ML and PL communities towards the longstanding goal of learning interpretable software libraries that enable solutions to novel problem domains.
+
+\clearpage
+\newpage
+
+
+

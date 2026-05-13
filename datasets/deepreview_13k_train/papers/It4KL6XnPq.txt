@@ -1,0 +1,164 @@
+\title{Foundation Policies with Memory}
+
+\begin{abstract}
+A generalist agent should perform well on novel tasks in unfamiliar environments. While Foundation Policies (FPs) enable generalization across new tasks, they lack mechanisms for handling novel dynamics. Conversely, agents equipped with memory models can adapt to new dynamics, but struggle with unseen tasks. In this work, we bridge this gap by integrating memory models into the FP architecture, allowing policies to condition on both task and environment dynamics. We evaluate FPs enhanced with attention, state-space, and RNN-based memory models on POPGym, a memory benchmark, and ExORL, an unsupervised RL benchmark. Our results show that GRUs achieve the best generalization to unseen tasks and dynamics for a given recurrent state size, approaching the performance of a supervised baseline that has access to task information during training and significantly outperforming memory-free FPs. Additionally, our approach improves FP performance on entirely new environments not encountered during training. Our anonymized code is available at \url{https://anonymous.4open.science/r/zero-shot-96A1}.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Reinforcement Learning (RL) agents [92] exhibit superhuman decision-making skill when tasked with a single objective in a single environment [89, 67, 90, 91]. A new line of work focuses on producing generalist agents that replicate such results across many tasks and environments [83, 53, 105]. Foundation policies (FPs) [96, 97, 76, 45] are a promising approach for building generalist agents, providing a principled mechanism for generalising to any downstream task in an environment after an offline reward-free pre-training phase. However, as yet, FPs are not equipped to deal with a change in dynamics between pre-training and deployment.  
+
+A concurrent line of work on in-context RL attempts to build generalist agents by using memory models to condition policies on reward-labelled trajectories [14, 43, 56, 54, 62, 23] or to reach arbitrary goal states [31]. In principal, these models can perform dynamics generalisation by inferring changes between training and testing from the trajectory used to condition the policy. However, they lack the task generalisation ability of FPs for two reasons. They are either 1) trained with reward supervision and so cannot reliably generalise to new tasks with different reward functions, or are 2) trained without reward supervision to reach any goal-state in an environment and so cannot reliably generalise to new tasks not codified by a goal state.  
+
+Here, we reconcile these lines of work and propose foundation policies with memory, an architecture that, like in-context RL agents, infers the current dynamics context using powerful memory models and passes it to an FP for solving unseen tasks. We evaluate FPs with attention [98], state-space [32, 33], and RNN-based [24, 17] memory models across a range of experiments testing their ability to infer the dynamics context, and generalise to unseen tasks in unseen dynamics. We find that GRUs achieve the best generalisation to unseen tasks and dynamics for a given recurrent state size, approaching the performance of a supervised baseline that has access to task information during training and significantly outperforming memory-free FPs (Figure 1). Finally, we find that FPs with memory improve FP performance on entirely new environments not seen during training.  
+
+![](images/db9a2a9b2fc443d6bbacd7f3d91f99704289223ed2bb4843f48567298245ef9d.jpg)  
+Figure 1: Zero-shot task and dynamics generalisation. FPs with memory models generalise to test tasks and dynamics not seen during training on the ExORL benchmark. FB-GRU approaches the performance of a supervised baseline, TD3-GRU, despite being trained without rewards. A full discussion is provided in Section 4.3.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+Contextual markov decision processes. A Contextual Markov Decision Process (CMDP) is defined by $(C,S,O,\phi,A,R,\rho,\gamma,M(c))$ . $C$ is the set of contexts, $S$ is the underlying state space, $O$ and $A$ are sets of observations and actions, $\phi:S\rightarrow O$ is the observation function, $R:S\rightarrow\mathbb{R}$ is a reward-function specifying a task, $\gamma$ is a discount factor, and $\rho$ is the initial state distribution [35]. $M$ is a function that maps a context $c\in C$ to a Partially Observable Markov Decision Process (POMDP) [2] $M(c)\,=\,(S,O,A,R,\rho,\gamma,P^{c})$ with a context-dependent transition function $P^{c}$ : $S\!\times\!A\!\times\!C\to\Delta(S)$ . A Markov policy $\pi:S\to\Delta(A)$ is optimal in context $c$ for reward function $R$ if it maximises the expected discounted future reward i.e. $\begin{array}{r}{\pi_{c,R}^{*}=\arg\operatorname*{max}_{\pi}\mathbb{E}[\gamma^{t}R(s_{t+1})|s_{0},a_{0},\pi,c].}\end{array}$ , where $\mathbb{E}[\cdot|s_{0},a_{0},\pi,c]$ is the expectation under state-action sequence $(s_{t},a_{t})_{t\geq0}$ starting at $(s_{0},a_{0})$ with $s_{t}\,\sim\,P^{c}(\cdot|s_{t-1},a_{t-1})$ and $a_{t}\,\sim\,\pi(\cdot|s_{t})$ . Note that the context $c\in\bar{C}$ cannot be observed directly.  
+
+Problem setting. We split the CMDP into a set of training contexts $C_{\mathrm{train}}$ and testing contexts $C_{\mathrm{test}}$ . We assume access to a dataset $\mathcal{D}_{\mathrm{train}}$ of unlabelled observation-action trajectories $\boldsymbol{\tau}\;=\;\left(o_{0},a_{0},o_{1},\ldots,o_{T}\right)$ collected from the training contexts by a highly exploratory behaviour policy. Our goal is to pre-train an adaptive policy $\pi(a|h,z)$ , where $\textit{h}\in\mathbb{R}^{m}$ is a hidden state summarising both the context $c$ and inferred Markov state $s$ , and $z\,\in\,\mathbb{R}^{d}$ denotes a compact representation of the task. We will pre-train this policy solely from offline data $\ensuremath{\mathcal{D}}_{\mathrm{train}}$ , without online interactions.  
+
+We will evaluate the policy on an unseen test task $R_{\mathrm{test}}$ in an unseen test context $c_{\mathrm{test}}~\in~C_{\mathrm{test}}$ . The test task is revealed either via $\mathcal{D}_{\mathrm{test}}$ , a small dataset of labelled observation trajectories $\left(\left(o_{t-L},\ldots,o_{t}\right),R_{\mathrm{test}}(s_{t})\right)$ of length $L$ , or as an explicit function $o\ \mapsto\ R_{\mathrm{test}}(s)$ (like 1 at a goal state and 0 elsewhere)1. Unless, the agent can infer $c_{\mathrm{test}}$ from $\mathcal{D}_{\mathrm{test}}$ , it will need to infer it from the observation-action history it observes during evaluation. This problem setting is directly equivalent to [97]’s zero-shot RL setting with a change in the environment dynamics between training and testing. As a result, we call it zero-shot RL under changed dynamics.  
+
+Foundation policies. Foundation policies (FPs) approximate the (universal) successor features [6, 11] of near-optimal policies for any task in an environment. They require access to a feature map $\varphi:S\mapsto\mathbb{R}^{d}$ that embeds states into a representation space in which the reward is assumed to be linear i.e. $R(s)=\varphi(s)^{\top}z$ with weights $z\in\mathbb{R}^{d}$ representing a task. The USFs $\psi:S\times A\times\mathbb{R}^{d}\to\mathbb{R}^{d}$ are defined as the discounted sum of future features subject to a task-conditioned policy $\pi(s,z)$ :  
+
+$$
+\psi(s_{0},a_{0},z)=\mathbb{E}\left[\sum_{t\geq0}\gamma^{t}\varphi(s_{t+1})|s_{0},a_{0},\pi(s,z)\right]\ \forall\;s_{0}\in S,a_{0}\in A,z\in\mathbb{R}^{d}.
+$$  
+
+where the policy is trained in an actor-critic formulation [51] such that  
+
+$$
+\pi(s,z)\approx\arg\operatorname*{max}_{a}\psi(s,a,z)^{\top}z,\;\forall\;s\in S,a\in A,z\in\mathbb{R}^{d},
+$$  
+
+where $\psi(s,a,z)^{\top}z$ is the $Q$ function (critic) formed by $\psi$ . During training, candidate task weights are sampled from $\mathcal{Z}$ , a prior over the task space2. During evaluation, the test task weights are found by regressing labelled states onto the features: $z_{\mathrm{test}}:=\mathrm{arg}\operatorname*{min}_{z}\mathbb{E}_{s\sim d}[(R_{\mathrm{test}}(s)-\varphi(s)^{\top}z)^{2}]$ , before being passed to the policy. The features can be learned with Hilbert representations [76], laplacian eigenfunctions [97], contrastive methods [97], or in service of successor measure prediction [10], as is the case for the forward Backward (FB) foundation policy [96] used in this work.  
+
+
+
+\section{3 METHOD  }
+
+
+Recall that our goal is to pre-train an adaptive policy $\pi(a|h,z)$ that is conditioned on $h$ , a hidden state summarising both the context $c$ and inferred Markov state $s$ , and task $z$ . As we outlined in Section 2, the FP framework provides a principled way of pre-training $\pi(a|s,z)$ i.e. a policy conditioned solely on the task and Markov state. In this section, we will discuss amendments to the FP framework that allow policies to be conditioned on $h$ rather than $s$ .  
+
+
+
+\section{3.1 MEMORY MODELS  }
+
+
+Following past work on RL in CMDPs, we assume that we can produce an estimate of the dynamics context $c$ and Markov state $s$ from a trajectory of observation-action pairs ${\tau}={x_{0},...,x_{L}}$ , where $x_{n}=\epsilon(o_{n},a_{n})$ is some encoding of an observation-action pair and $L$ is the context length [31, 65]. We seek a model of the form  
+
+$$
+y_{j},h_{j}=f(x_{j},h_{j-1}),\;\;j\in[1,\ldots,L],
+$$  
+
+where $x_{j},y_{j}$ are the inputs and outputs at time $j$ , and $f$ updates a hidden state $h\in\mathbb{R}^{m}$ summarising the current Markov state and dynamics context prediction. This is the standard setup of a memory model in RL [4, 68, 69, 70, 82, 66, 73, 40, 86, 100, 8, 109], because the asymptotic inference time complexity is $\mathcal{O}(1)$ which is helpful for fast data collection, or high-frequency motor control [62]. Until recently, only Recurrent Neural Networks (RNNs) [24, 41, 17] have had this property, but newly proposed structured state-space models (S4) [32, 33, 34] and fast Transformers [98, 19, 48] have runtime complexity approaching that of RNNs, and model histories with large $L$ more accurately. We explore all of these memory models in Section 4.  
+
+3.2 FOUNDATION POLICIES WITH MEMORY  
+
+Equipped with memory model $f$ , we now condition the FP’s actor and critic on the hidden state it produces. We define contextual USFs as the discounted sum of future features extracted from the hidden state, subject to a policy conditioned on the inferred Markov state and dynamics context $\pi(h,z)$  
+
+$$
+\psi(h,z)=\mathbb{E}\left[\sum_{t\geq0}\gamma^{t}\varphi(h_{t+1})|h_{0},\pi(h,z)\right]\;\;h_{0}=\mathbf{0}^{m},\forall\;z\;\in\mathbb{R}^{d},
+$$  
+
+where $h_{t}=f(x_{t},h_{t-1})$ from Equation 3, $x_{t}$ is zero-padded for all $t<L$ , and $h_{0}=\mathbf{0}^{m}$ is an initial hidden-state of zeroes. The policy is trained such that  
+
+$$
+\pi(h,z)\approx\arg\operatorname*{max}_{a}\psi(h,z)^{\top}z,\;\;\forall\;h\in\mathbb{R}^{m},\;z\;\in\mathbb{R}^{d},
+$$  
+
+![](images/dd0f0dc1245926354186c264dab590aef85282388a6f427c66674fd3eeb6fee8.jpg)  
+Figure 2: Foundation policies with memory. FPs are optimised in a standard actor critic setup [51]. The policy $\pi$ selects an action $a_{t}$ conditioned on a history of observations and actions $o_{t-L},a_{t-L-1},\ldots,o_{t},a_{t-1}$ of length $L$ encoded by the actor’s memory model, and the task vector $z$ . The $Q$ function formed by the USF $\psi$ evaluates the sequence of observations and actions $o_{t-L},a_{t-L},\ldots,o_{t},a_{t}$ encoded by the critic’s memory model for task $z$ .  
+
+where $\psi(h,z)^{\top}z$ is the $Q$ function (critic) formed by $\psi$ . Training proceeds exactly as with conventional USFs, and the test-time task weights are found by regressing labelled states onto the hiddenstate features: $\begin{array}{r}{z_{\mathrm{test}}:=\arg\operatorname*{min}_{z}\mathbb{E}_{s_{t},(o_{t-L:t},a_{t-L:t})\sim d}[(\hat{R}_{\mathrm{test}}(\bar{s}_{t})-\bar{\varphi_{}}(f((o_{t-L:t},a_{t-L:t}),h_{0:L})^{\top}z)^{2}]}\end{array}$ , before being passed to the policy. The full architecture and optimisation procedure is summarised in Figure 2. We found that using a shared memory model for the actor and critic led to model collapse, so use separate memory models for each. This corroborates the findings of [73]. In the experiments discussed in Section 4 we use FB representations as our FP which follow a slightly different training procedure.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section we perform an empirical study to evaluate our proposed method. We seek answers to three questions: (Q1) Can our method encode trajectories into a Markov state for use in solving one task in an environment? (Q2) Can our method generalise to unseen tasks in an environment with different dynamics to those seen in training? I.e. can our method perform zero-shot RL under changed dynamics? And (Q3) Can our method generalise to unseen tasks in a completely different environment to those seen in training? I.e. can our method perform zero-shot environment generalisation?  
+
+4.1 SETUP  
+
+Environments. We respond to Q1 using the POPGym benchmark [68], a set of tests that evaluate an agent’s ability to infer Markov states from trajectories of observations and actions. We only evaluate on the “Hard” versions of CartPole, Pendulum, Noisy CartPole, Noisy Pendulum and Repeat Previous environments following [62]. For these experiments, we allow the agent to recondition its policy on the previous $L$ observation-action pairs every step so we can disentangle the memory model’s ability to accurately model the Markov state from its ability to carry forward an accurate hidden state. For all other experiments we do not allow such re-conditioning and require the policy to condition on only the previous hidden state, current observation-action pair, and task. Note for these experiments $C_{\mathrm{train}}=C_{\mathrm{test}}$ , so we are not yet testing whether our method can generalise across contexts.  
+
+We respond to Q2 using the $\mathrm{ExORL}$ benchmark [108], a set of tests that evaluate an agent’s ability to generalise to unseen tasks on the DeepMind Control Suite [93]. We evaluate on the same environments as [97]: Walker, Maze, Cheetah and Quadruped, removing the velocities from each of the state spaces to ensure the observations are not Markov, and call these variants occluded. To evaluate dynamics generalisation we train on datasets collected from environment instances where the robot’s mass and damping coefficient are scaled to $\{0.5x,1.5x\}$ of their usual values. We then evaluate on environment instances where the robot’s mass and damping coefficient are scaled by $\{1.0x,2.0x\}$ of their usual values, where $1.0x$ requires the agent to generalise via interpolation, and $2.0x$ requires the agent to generalise via extrapolation [74]. We evaluate on all tasks provided by the DeepMind control suite, and increase the number of goals in Maze from 4 to 20 for a total of 32 tasks across 4 environments.  
+
+We also respond to Q3 using the $\mathrm{ExORL}$ benchmark [108]. This time we train on Walker-Occluded and Quadruped-Occluded and test on Cheetah-Occluded. The dynamics are unscaled (i.e. $1.0x)$ and, as before, we evaluate on all tasks provided by the DeepMind control suite.  
+
+Aggregation across tasks or environments is always summarised by the Interquartile Mean (IQM) and standard deviation following the recommendations of [1]. On POPGym we report the meanmax epoch reward (MMER) metric used in the original paper. On ExORL, we report scores from the learning step for which the all-task IQM is maximised across seeds.3.  
+
+Baselines. We use FB [96] and HILP [76] as our FP baselines. FB is the most performant FP utilising successor measures, and HILP is the most performant FP utilising successor features. Both methods assume access to the Markov state for training as discussed in Section 2. So, instead of conditioning their predictions on a single observation, we provide them a stack of the 4 most recent observations i.e. $s_{t}\,=\,\bigl(o_{t-3},o_{t-2},o_{t-1},o_{t}\bigr)$ , also known as frame-stacking [67]. Frame-stacking is a naive method for inferring a Markov state from a short trajectory of observations, and is the first solution one would use when faced with our problem. We also baseline against a single-task, memory-based, supervised RL method. For this we use Offline TD3 [28] with a GRU memory model [17], which we refer to as TD3-GRU. Offline TD3 is the most performant single-task method on the ExORL benchmark [108]; TD3-GRU is the most performant method in [73], and TD3 with an LSTM memory model was shown to be particularly performant in [66]. TD3-GRU should indicate how well an agent optimising for one task performs if provided reward supervision.  
+
+Datasets. Though FPs can be deployed online they require an exploration policy for data collection. To disentangle test-time performance from an agent’s data collection ability, we collect datasets on their behalf in advance using RND [11], an unsupervised RL algorithm. Agents trained on datasets collected with RND exhibit better performance than comparable methods like APS [60], APT [61], Proto [107] and DIAYN [25] in [108, 97, 76]. RND is run for 5 million learning steps in each of our environments and every transition is cached. For the supervised baseline TD3-GRU, transitions are relabelled with the appropriate rewards for a given task following [108]. All other methods are trained on these datasets reward-free.  
+
+Memory models. We test the performance of FPs equipped with three memory models. We use the most performant versions from each of the categories discussed in Section 3: attention-based, state-space based, and RNN-based. For our attention-based memory model we use a Transformer [98] with FlashAttention [19] for faster inference than a conventional Transformer. For our statespace-based memory model we use Diagonalized S4 [33], which uses a diagonal update matrix to perform faster training and inference than the popular S4 model [32]. For our RNN-based memory model we use a GRU [17] as it is the most performant RNN on the POPGym benchmark. Hereafter we refer to the FB models we augment with these as FB-TF, FB-S4 and FB-GRU respectively. To ensure a fair comparison across memory models, we follow [68] and restrict each model to a fixed hidden state size, rather than a fixed parameter count. Concretely, we allow each model a hidden state size of $32^{2}=1024$ dimensions. In Section 4.3 we condition the models on trajectories of length 32, so a hidden state size of $32^{2}$ allows the attention-based, and state-space models to perform their tensor products across the full input trajectory, and gives the RNN two 512-dimension layers in which to summarise the trajectory.  
+
+
+
+\section{4.2 POPGYM  }
+
+
+We report the aggregate performance of all FB-based algorithms on the POPGym environments in Figure 3. Our supervised baseline, TD3-GRU, performs similarly to the PPO-GRU approach in the original POPGym paper. FB with frame-stacking performs poorly, reaching only $30\%$ of TD3-GRU’s aggregate score. Our three memory-based methods perform comparitively better, with FB-TF reaching $80\%$ of TD3-GRU’s performance, and FB-S4 and FB-GRU matching TD3-GRU’s performance. We find that all methods fail on the RepeatPreviousHard environment, where other in-context RL agents have shown strong performance [62, 31]. This suggests that the memory models are not accurately recalling information from the start of their context. The implications of our choice of length $L$ are discussed in Section 5.  
+
+![](images/87125a83b4a4ae977ab72df68791c277828ff646b8c4d28b409d944e0b4a3677.jpg)  
+Figure 3: POPGym results. Aggregate mean-maximum epoch reward (MMER) across all POPGym environments, normalised w.r.t. TD3-GRU performance.  
+
+
+
+\section{4.3 ZERO-SHOT RL UNDER CHANGED DYNAMICS  }
+
+
+We report the aggregate performance of all algorithms on our zero-shot RL under changed dynamics experiments in Figure 4 (left), and the ratios of interpolation/extrapolation performance to train performance in Figure 4 (right). As with our POPGym experiments, FB performs poorly, reaching $\sim25\%$ of the performance of our supervised baseline on the training environments. HILP performs slightly better, as we would expect given its results on ExORL in [76], but still much poorer than TD3-GRU. Of the three FPs with memory, FB-GRU performs best on train, interpolation and extrapolation evaluations, with results relative to the supervised baseline similar to FB trained on Markov states in [97]. Aggregate test performance approximately matches TD3-GRU aggregate test performance despite not seeing rewards during training. FB-TF exhibits the best interpolation-to-train ratio, and FB-GRU the best extrapolation-to-train ratio.  
+
+![](images/60b943d4ec3c6a154f6c193a68f30e55881ff89cedb10c0a55177e311a3c36e8.jpg)  
+Figure 4: Zero-shot dynamics generalisation on ExORL. (Left) Aggregate performance across all ExORL tasks and domains normalised w.r.t. TD3-GRU performance, averaged over 5 seeds. We train on dynamics $\{0.5x,1.5x\}$ their typical values and evaluate on $1.0x$ (interpolation) and $2.0x$ (extrapolation). (Right) The ratios of interpolation and extrapolation performance to train performance.  
+
+![](images/c360e49f5a90fa47b31cda719bb28ff1a5c6a1d28597661c880b4bca004ba6d9.jpg)  
+Figure 5: Zero-shot environment generalisation on $\mathbf{ExORL}$ . Aggregate performance across all tasks in the train environments (Walker, Quadruped), and the test environment (Cheetah), averaged across 5 seeds.  
+
+
+
+\section{4.4 ZERO-SHOT ENVIRONMENT GENERALISATION  }
+
+
+We report the aggregate performance of all FB-based algorithms on our zero-shot environment generalisation experiments in Figure 5. Here, FB-GRU performs best on the training environments, but poorest on the testing environment, with FB performing similarly poorly on the testing environment. FB-S4 improves performance on the testing environment by $\sim4\mathbf{x}$ over FB, but at the cost of reducing training environment performance by half. FB-TF improves both training performance by $5\%$ over FB and triples test performance. We emphasise that, although FPs with memory do improve zero-shot environment generalisation performance in some cases, the absolute returns remain low (a max of 33 for FB-S4 out of a possible 1000) suggesting their is significant room for improvement.  
+
+
+
+\section{5 DISCUSSION AND LIMITATIONS  }
+
+
+Context length. In Section 4 we train agents with a context length $L=64$ timesteps, which is the maximum context length we could afford with our computational budget3. We see two limitations with this. First, we have assumed the dynamics context and task for all of our experiments can be inferred from this context, but it is not clear that this is the case. Indeed, TD3-GRU with reward supervision and a maximally exploratory dataset does not match its performance with Markov states from [97]. Second, successful episodes run for a minimum of 200 timesteps (as in PendulumHard) and a maximum of 1000 timesteps (as in ExORL), meaning we never train the memory model over full episodes, nor can we reliably maintain an episode’s full trajectory in context at test-time. This introduces situations where the hidden state will be erroneously initialised mid-episode during training, creating well-established theoretical issues for memory models in RL [68], though these are yet to prove critical empirically [73, 66].  
+
+The obvious solution to these problems, were it available to us, would be to increase $L$ until it is the maximum episode length, and train for longer as in [31, 62, 68]. However, even if we were to do this, any real-world deployment may induce episodes longer than this assumed max length, or indeed we may wish to operate in the non-episodic, continual setting. The existing literature implicitly assumes that if $L$ is very large such issues will resolve themselves, but this is not clear to us. Exploring how to deal with such situations is an important future research direction.  
+
+Datasets. As outlined in Section 4.1, we train all methods on datasets pre-collected with RND [11] which is a highly exploratory algorithm designed for maximising data heterogeneity. However, deploying such an algorithm in any real setting may be costly, time-consuming or dangerous. As a result, our proposals are more likely to be trained on real-world datasets that are smaller and more homogeneous. It is not clear how our specific proposals will interact with such datasets. If, for example, the dataset only exhibits parts of the state space from which the dynamics cannot be wellinferred, like a robot stuck stationary, then we would expect our proposals to struggle. Indeed, with poor coverage of the state-action space, we would expect to see the OOD pathologies seen in the single-task Offline RL setting [52, 59]. That said, the proposals of [45] for conducting zero-shot RL from real-world datasets could be integrated into our proposals easily, and may help.  
+
+
+
+\section{6 RELATED WORK  }
+
+
+Generalist policy pre-training FPs build upon successor representations [20], universal value function approximators [85], successor features [6] and successor measures [10]. The stateof-the-art methods instantiate these ideas as either universal successor features (USFs) [11] or forward-backward (FB) representations [96, 97], with recent work showing they can be trained on low quality datasets [45], or used to perform a range of imitation learning techniques efficiently [80]. A representation learning method is required to learn the features for USFs, with past works using inverse curiosity modules [79], diversity methods [60, 38], Laplacian eigenfunctions [101], or contrastive learning [16]. No works have yet explored the generalisation capacity of FPs to unseen dynamics. Two concurrent lines of work on goal-conditioned RL and incontext RL also seek to build generalist policies. Goal-conditioned RL methods train policies to reach any goal state from any other goal state [75, 63, 104, 26, 99], but lack the ability to generalise to tasks with “dense” reward functions, like those on the locomotion tasks in ExORL. Incontext RL methods train policies using sequence models conditioned on reward-labelled histories [14, 43, 58, 83, 110, 13, 30, 88, 103, 102, 31, 62, 94, 23], but, unlike FPs, do not have a robust mechanism for training without access to rewards.  
+
+Dynamics Generalisation Dynamics generalisation in RL is a well-established problem [50, 65, 74]. Common remedies include: data augmentation [81, 5, 106, 37, 36, 55], domain randomisation [95, 21, 46, 47, 77], learning context-aware policies [87, 57, 9, 44], and meta-learning [15, 83, 27, 71, 72]. Our work is most similar to those that tackle dynamics generalisation by conditioning policies on dynamics inferred with a memory model [73, 18]. Where these methods are concerned with generalising to one unseen task in unseen dynamics contexts, our method can generalise to more than one unseen tasks in unseen dynamics contexts.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this paper, we explored augmenting Foundation Policies (FPs) with memory models to allow them to condition policies on a dynamics context inferred from a history of observations and actions. We evaluated our proposals with attention, state-space, and RNN-based memory models on POPGym, a memory benchmark, and $\mathrm{ExORL}$ , an unsupervised RL benchmark. Our results show that GRUs achieve the best generalisation to unseen tasks and dynamics for a given recurrent state size, approaching the performance of a supervised baseline that has access to task information during training and significantly outperforming memory-free FPs. We believe our proposals represent a further step toward the development of generalist, adaptive agents.  
+
+
+

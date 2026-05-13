@@ -1,0 +1,312 @@
+\title{SynFlowNet: Design of Diverse and Novel Molecules with Synthesis Constraints}
+
+\begin{abstract}
+
+Generative models see increasing use in computer-aided drug design. However, 
+while performing well at capturing distributions of molecular motifs, they often produce synthetically inaccessible molecules. 
+To address this, we introduce SynFlowNet, a GFlowNet model whose action space uses chemical reactions and buyable reactants to sequentially build new molecules. By incorporating forward synthesis as an explicit constraint of the generative mechanism, we aim at bridging the gap between in silico molecular generation and real world synthesis capabilities. We evaluate our approach using synthetic accessibility scores and an independent retrosynthesis tool to assess the synthesizability of our
+compounds, and motivate the choice of GFlowNets through considerable improvement in sample diversity compared to baselines. 
+Additionally, we identify challenges with reaction encodings that can complicate traversal of the MDP in the backward direction.
+To address this, we introduce various strategies for learning the GFlowNet backward policy and thus demonstrate how additional constraints can be integrated into the GFlowNet MDP framework. This approach enables our model to successfully identify synthesis pathways for previously unseen molecules.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+
+
+Designing molecules with targeted biochemical properties is a critical challenge in drug discovery, where computational models could play a significant role to increase efficiency and effectiveness.
+Recently, generative models have lead to a renaissance in \textit{de novo} molecular design \citep{stanley2023fake,du2024machine}.
+However, most current \textit{de novo} design models do not explicitly account for synthetic accessibility. Many approaches operate on SMILES strings \citep{segler_rnn, gupta2018generative} or assemble molecules by composing atoms or molecular fragments into a graph \citep{lewis1989automated, jensen2019graph,jin2018junction}, leaving no guarantee that the sampled molecules can be synthesized \citep{stanley2023fake,coley_synthesisability}.
+
+To address this limitation, synthetic complexity scores \citep{sa_score, scs_coley, liu2022retrognn} have been proposed as a method to assess molecules and complement generative models with knowledge on synthetic accessibility, however these heuristics and learned metrics are often oversimplified. Alternatively, computer-aided synthesis planning can can be performed as a subsequent step to molecule generation \citep{segler2018planning, sch_retro}. While synthesis planning can provide principled routes, it can take seconds to minutes to propose pathways, which hampers its integration as a reward function in the generation process \citep{liu2022retrognn}.  Finally, synthetically accessible chemical spaces can be assembled from combinations of reactions involving readily available reactants \citep{walters_synthData}, but virtual screening on these vast datasets is already impractical today \citep[screening only a fraction of such libraries amounts to thousands of years of compute on a single CPU;][]{Sadybekov2022} and these spaces are still growing exponentially. 
+Given the challenges of synthesizability in atom- and fragment-based generative models, we propose formulating molecule generation in an action space of chemical reactions which naturally enhances synthesizability.
+However, simply employing a synthesizable space is not sufficient. To be applicable to drug discovery programs, such a model needs to maximize desired properties and retrieve molecules from distinct modes of the available synthetic space. Generative Flow Networks \citep[GFlowNets;][]{bengio2021flow} have emerged as a framework capable of generating diverse samples and requiring fewer evaluations of the reward function compared to alternatives like Markov Chain Monte Carlo or Proximal Policy Optimization~\citep{schulman2017proximal}.
+
+In this work, we introduce SynFlowNet, a GFlowNet specifically trained to generate molecules from documented chemical reactions and purchasable starting materials, thereby constraining exploration to a synthetically accessible chemical space and sampling not only target compounds but also the synthetic routes leading to them. Our main contributions are:
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/figure_1_v10.pdf}
+    \caption{\textbf{SynFlowNet allows for synthesis-aware molecule generation.}
+    (A)
+    The state space
+    is induced by combining
+    purchasable building blocks (BBs) and chemical reactions.
+    Every final molecule (rectangle box) is associated with a reward.
+    Training trajectories are constructed by sampling the model forward.
+    Our policy $P_F(a|s)$ is parameterized as a graph transformer which at each timestep processes the current molecular state $s_t$ and outputs a shared embedding which is passed to separate MLP heads to predict the action logits for different action types (5 forward and 3 backward action types).
+    An action $a_t$ is then sampled from this hierarchical distribution to transition to the next state via a reaction.
+    Newly added BBs are highlighted in yellow.
+    (B)
+    To allow handling large sets of BBs (up to 200k), we represent them using Morgan fingerprints and compute the probability of sampling a particular BB from the normalised dot product between this representation and the embedding vector of the current state.
+    (C) Finally, when traversing the MDP backwards, to reduce the probability of exiting the MDP defined by our set of reactions and BBs, we train the backward policy to avoid paths that do not terminate in the initial state $s_0$.
+    }
+    \label{fig:concept}
+\end{figure}
+
+\begin{itemize}
+    \item We train a GFlowNet using an action space defined by documented chemical reactions and purchasable starting materials to generate synthesizable molecules.
+    \item We show the advantage of using a reaction-based environment over a fragment-based one in terms of synthesisability, and the benefits of GFlowNets over Reinforcement Learning (RL) in terms of sample diversity on several targets. Additionally, when comparing to other generative methods with synthetically-accessible outputs, we show that SynFlowNet generates more novel candidates w.r.t known drug-like molecules. 
+    \item We evaluate different action representation alternatives to allow efficient scaling of the action space to up to 200k chemical building blocks.
+    \item We identify an inherent problem of employing a reaction-based Markov Decision Process (MDP) with GFlowNets, stemming from the lack of guarantee that backward-constructed trajectories can return to $s_0$. To resolve this issue, we propose one of the first attempts at training the backward policy in a GFlowNet with a separate objective from for the forward policy, which we show to correct backward-generated trajectories and improve sample quality and diversity.
+    \item We show that our proposed framework can be integrated with target-specific experimental data to inform selection of building blocks, which improves the efficiency of our model.
+\end{itemize}
+
+
+
+\section{Background and Related Work}
+
+
+\subsection{GFlowNets}
+
+GFlowNets \citep{bengio2021flow} are a class of probabilistic models that learn a stochastic policy to generate objects $x$ through a sequence of actions, with probability proportional to a reward $R(x)$. The sequential construction of objects $x$ can be described as a trajectory $\tau \in \mathcal{T}$ in a directed acyclic graph (DAG) $G = (S, \mathcal{E})$, starting from an initial state $s_0$ and using actions $a$ to transition from a state to the next: $s\rightarrow s'$. A GFlowNet uses a forward policy $P_F(-|s)$, which is a distribution over the children of state $s$, to sample a sequence of actions based on the current states. Similarly, a backward policy $P_B(-|s)$ is the distribution over the parents of state $s$, and can be used to calculate probabilities of backward actions, leading from terminal to initial states. The training objective which we adopt in this paper is trajectory balance \citep{trajectory_balanace}:
+\begin{equation}\label{eq:tb}
+    \mathcal{L}_{\text{TB}}(\tau) = \left(\log \frac{Z_\theta \prod_{t=1}^T P_F(s_{t+1}|s_t; \theta)}{R(x) \prod_{t=1}^T P_B(s_{t-1}|s_t;\theta)}\right)^2
+\end{equation}
+used to learn the forward and backward policies $P_F(-|s;\theta)$ and $P_B(-|s;\theta)$ parameterized by $\theta$ and to estimate the partition function $Z_\theta \approx F(s_0) = \sum_{\tau \in \mathcal{T}}F(\tau)$.
+
+\citet{bengio2021flow} have used GFlowNets to generate molecules with high binding affinity to a protein target by linking fragments to form a junction tree \citep{jin2019junction}. For generative chemistry, the framework was extended to multi-objective optimisation \citep{jain2023multiobjective, roy2023goal}, where the model was trained to simultaneously optimise for binding affinity to the protein target, Synthetic Accessibility (SA), drug likeness (QED) and molecular weight. Recently, \citet{shen2023tacogfn} extended the framework to pocket-conditioned molecular generation, employing the same action space to generate molecules conditioned on different protein targets.
+
+\subsection{GFlowNets with a trained backward policy}
+
+GFlowNets train a forward policy $P_F$ to match the backward policy $P_B$ according to Eq. \ref{eq:tb}. The choice of $P_B$ therefore impacts the training of GFlowNets and sample quality. Despite this relationship, the choice of backward policy in GFlowNets has attracted limited attention but for a few works discussed here. \citet{trajectory_balanace} proposed parameterizing the backward policy and training $P_B$ and $P_F$ simultaneously using the trajectory balance objective (Eq. \ref{eq:tb}). They also proposed fixing the backward policy to a uniform distribution when modeling the distribution over parents states proves difficult. \citet{mohammadpour2024maximumentropygflownetssoft} compare a maximum-entropy GFlowNet to GFlowNets with a uniform backward policy. Closer to our work, \citet{jang2024pessimistic} propose Pessimistic GFlowNets, which use \textit{maximum likelihood} over observed trajectories to train $P_B$. %This ensures that the backward policy reduces the amount of unobserved backward flow, being pessimistic about unobserved trajectories inducing the observed object. 
+This ensures that the flow induced by the backward policy is concentrated around observed (training) states, making the model pessimistic about unobserved intermediate states having flow. 
+In this work, we address the idea of ensuring that backward-generated trajectories belong to the GFlowNet MDP. In doing so, we propose a data-driven solution to a MDP design challenge.
+
+\subsection{Generative models for molecule design}
+A large number of works have been proposed for generative molecular design \citep{du2024machine}. Early methods employed techniques such as variational autoencoders (VAEs)
+\citep{gomez_vae},
+deep reinforcement learning \citep{segler_rnn, olivecrona_deep_rl}, and generative adversarial networks (GANs) \citep{guimaraes2018objectivereinforced, decao2022molgan}. 
+More recently, methods like normalizing flows
+\citep{zhang_norm_flows}
+and diffusion models \citep{pmlr-v162-hoogeboom22a, schneuing2023structurebased, harris2023flexible, torge2023diffhopp, igashov2024equivariant} have gained significant attention due to their ability to model complex distributions more effectively.
+Despite these advances, challenges remain, particularly in ensuring that generated molecules adhere to physical and chemical constraints \citep{stanley2023fake, harris2023posecheck}.
+
+\subsection{Synthesis-aware molecule generation}
+
+The idea of tackling molecule generation and synthesis simultaneously has been investigated early by  \citet{synopsis}, who introduced SYNOPSIS, which generates molecules from a starting dataset of available compounds, relying on applying chemical modifications to functional groups and assessing the value of the product with a fitness function. The works of \citet{bradshaw} and \citet{pmlr-v108-korovina20a} provided early neural models for one-step synthetic pathways. \citet{bradshaw2020barking} generalized this idea as a generative model for synthesis DAGs, which can be optimized in a VAE or RL setup. 
+\citet{pmlr-v119-gottipati20a} used reinforcement learning to generate compounds from reactions and commercially available reactants. \citet{coley_tree} formulate an MDP to model the generation of synthesis trees, which can be optimized with respect to the desired properties of a product molecule. \citet{luo2024projectingmoleculessynthesizablechemical} proposed a model that can project unsynthesizable molecules from existing generative models to synthesizable chemical space by utilizing postfix notations to represent synthesis pathways. \citet{guo2024directlyoptimizingsynthesizabilitygenerative} showed that retrosynthesis models can be treated as an oracle in goal-directed molecule generation.
+Concurrently to our work, \citet{koziarski2024rgfn} propose a similar GFlowNet-based framework for synthesizable molecular generation but using a different set of reaction templates and making use of a different backward policy.
+
+While our work resembles an RL setting for synthesis-aware molecular generation \citep{pmlr-v119-gottipati20a, Horwood_2020}, the key difference lies in the sampling distribution of the learned model. Contrary to RL, the GFlowNet objective is not to generate the single highest-return sequence of actions, but rather to maximise both performance and diversity by sampling terminal states proportionally to their reward. This is especially useful in the context of molecule generation, where we want to explore different modes of the distribution of interest.
+
+
+
+\section{Methods}
+
+
+In this work, we present a framework to train GFlowNets on a Markov Decision Process (MDP) made of molecules obtained from sequences of chemical reactions. Below, we describe how this compositional space of synthesizable molecules is assembled (\ref{sec:MDP_formulation}), we present a method making use of backward policies to palliate imperfect information contained in reaction templates (\ref{sec:backward_policy_training}) and present the model used to navigate that state space and learn the target distribution (\ref{sec:scaling_method}).
+
+\subsection{MDP of chemically accessible space}
+\label{sec:MDP_formulation}
+
+\paragraph{Problem definition} We model synthetic pathways as trajectories in a GFlowNet, starting from purchasable compounds and ending with molecules that are optimized for some desired properties, via a set of permissible reaction templates. At each timestep $t$, the state $s_t$ represents the current molecule and stepping forward in the environment consists in building up the molecule by applying new pairs of reactions and reactants until either a termination action is chosen or the path reaches a maximum length. We encode reaction templates using RDKit reaction SMARTS (see Figure~\ref{fig:templates}).
+
+\paragraph{Forward Action Space} %The model can move forward in this action space by selecting actions from the Forward Action-Space. 
+We define five types of forward actions: % divided into two hierarchical levels. The first level includes the actions 
+\texttt{Stop}, \texttt{AddFirstReactant}, \texttt{ReactUni}, \texttt{ReactBi}, and \texttt{AddReactant}. \texttt{ReactUni} and \texttt{ReactBi} represent uni-molecular and bi-molecular reactions. The \texttt{AddReactant} action, which is available only after a \texttt{ReactBi} action, represents the choice of reactant for the bi-molecular reaction. 
+In more detail, each trajectory starts from an empty molecular graph which is followed by a building block sampled from \texttt{AddFirstReactant}. We then continue based on the sampled action type as follows: (a) if the action type is \texttt{Stop}, we reach a terminal state and end the trajectory; (b) if a \texttt{ReactUni} action is sampled, we apply the uni-molecular reaction template to the molecule in state $s$ to yield the product in state $s'$; (c) if the action type is \texttt{ReactBi}, the sampled reaction is used as input to an additional MLP, together with the state embedding, to sample a subsequent action of type \texttt{AddReactant}. 
+
+\paragraph{Backward Action Space} The GFlowNet framework requires us to model travelling \textit{backward} along trajectories in the state-space. To unfold a reverse trajectory we proceed similarly: (a) if the action-type is a \texttt{BckReactUni}, the action yields the reactant molecule directly; (b) if the action type is \texttt{BckReactBi}, we obtain two reactants, and the molecule that is \textbf{not} a building block becomes the \textit{next} state (or \textit{previous} state in the DAG). If the two resulting reactants are both building blocks (which happens at the beginning of the forward trajectory), the molecule that populates the next state is picked with $p=\sfrac{1}{2}$ from the two building blocks. 
+The last action in a backward trajectory is \texttt{BckRemoveFirstReactant}, leading to the empty molecular graph $s_0$ (initial state).
+
+\paragraph{Masking} Prior to sampling actions in both forward and backward direction, we ensure that the reactions and building blocks to be sampled are compatible with the current state using masks, obtained by checking for substructure match between the reaction template and the reactant (for forward actions) or product (for backward actions) molecules. We also enforce through masking that at least one of the resulting reactants when running a backward reaction is a building block. 
+
+\paragraph{Data}
+
+We use commercially available building blocks (BBs) from \citet{enamine}, which are small fragments of molecules prepared in bulk to be readily synthesised into candidate molecules. 
+Reaction templates are obtained from two publicly available template libraries \citep{button, templates}. After preprocessing, we obtain a total of 105 templates: 13 uni- and 92 bi-molecular reactions respectively (see App. \ref{reactions_datasets}). We also use 12 Enamine REAL reactions in a small number of experiments (see Section \ref{sec:mpro} and App. \ref{reactions_datasets}).
+
+\subsection{Challenges with Generating Backward Paths}
+\label{sec:backward_policy_training}
+Given the synthesis pointed DAG $\mathcal{G = (S, A)}$, one needs to define a forward probability function $P_F$ and a backward probability function $P_B$ both consistent with $\mathcal{G}$ (see Eq. \ref{eq:tb}). Contrary to previous fragment-based or atom-based molecule-generation GFlowNet environments, where any backward action can lead to $s_0$ \citep[removing nodes and edges sequentially will lead to an empty graph;][]{bengio2021flow}, defining $P_B$ in a reaction-based environment is non-trivial. This is because not every parent state (obtained by applying a reaction template backwards) will ensure that there exists a sequence of actions that leads all the way back to a building block, and therefore $s_0$.  Note that the masking described in Section \ref{sec:MDP_formulation} is insufficient to account for this, as it does not ensure that the state obtained is \emph{further} decomposable into building blocks. Consequently, to maintain a \textit{pointed} DAG, no flow should be assigned to such a transition. A uniform backward policy, which is a standard choice in GFlowNet literature \citep{trajectory_balanace}, will fail at achieving this as it will assign positive flow to every backward action, including those leading to states that are not attainable from forward trajectories initialised in $s_0$ (see Figure \ref{fig:concept}-C). To address this issue, we explore a few training schemes for a parameterized $P_B$ that force backward-constructed trajectories to end in $s_0$.
+
+\paragraph{Training the backward policy}
+
+We first explore a training scheme for $P_B$ which makes use of forward-generated trajectories. Similarly to \citet{jang2024pessimistic}, we train $P_B$ using the maximum likelihood objective over trajectories generated from $P_F$:
+\begin{equation}
+\label{eq:max_likelihood}
+    \mathcal{L}_B(\theta_B) = \mathbb{E}_{\tau \sim P_F}[-\log P_B(\tau;\theta_B)].
+\end{equation}
+ 
+
+While the maximum-likelihood approach presented above is sufficient to limit $P_B$ in allocating flow to paths that do not connect back to $s_0$, it restricts the model's exploration by encouraging $P_F$ to collapse on a single path for each terminal molecule. To allow $P_B$ to ban erroneous paths while retaining a higher entropy, we also explore the use of policy gradient methods. Specifically, we explore maximising an expected \emph{backwards} reward via REINFORCE \citep{reinforce}, which is suitable for short trajectory environments like our reaction-based MDP:
+\begin{equation}
+    J_B(\theta_B) = \mathbb{}{E}_{\tau\sim P_F, P_B}[R_B(\tau)] - \alpha H(P_B).
+\end{equation}
+Here, $H(P_B)=-\mathbb{E}_{\tau\sim P_B}[\log(P_B(\tau))]$ is the entropy term and the reward $R_B$ is set to 1 for a trajectory that ends in $s_0$ and -1 otherwise.
+
+Interestingly, training the backward policy to navigate back to $s_0$ is analogous to the retrosynthesis problem \citep{corey-retro,segler2018planning}. We employ this approach of training $P_B$ against a different objective than $P_F$ to palliate to a design challenge of the MDP, but a similar strategy could also be employed to fold additional preferences over different synthesis routes leading to the same terminal state into the system, for example to take into account the synthesis costs of a particular path. This possibility is left to future work.
+
+
+
+\subsection{Scaling of the reactant space to large number of building blocks}
+\label{sec:scaling_method}
+
+\paragraph{Estimating the size of the state space}
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+\label{fig:state_space_size}
+  \begin{center}
+    \includegraphics[width=0.38\textwidth]{figures/state_space_size.png}
+  \end{center}
+  \caption{\textbf{Estimated size of state spaces.} The full building block set contains 221,181 molecules. $L$ is the maximum trajectory length in the GFlowNet.}
+\end{wrapfigure}
+
+We leverage the properties of GFlowNets~\citep{bengio2021flow} to estimate the size of the state space induced by our action space. Specifically, noting that GFlowNets learn $\log Z=\log\sum_{x}R(x)$, we train a model with $R=1$ for all terminal states to estimate their total count. We do so for different numbers of building blocks and different maximum trajectory lengths ($L$), and find that SynFlowNet using $L=3$ and 10k building blocks matches the size of the Enamine REAL space \citep{enamine}, and that the size of the space quickly increases with the number of building blocks. We use our full set of 105 reactions. Note how reaction-constrained models considerably limit the exploration of the chemical space, with a fragments GFlowNet exploring a space $\sim$10 orders of magnitude larger. 
+
+\paragraph{Scaling method}
+
+To ensure synthetic accessibility of all samples, our model is inherently constrained by the initial set of available building blocks (BBs). To cover a large chemical space, it is thus crucial to use an extensive BB collection. The model must demonstrate scalability to accommodate larger sets of BBs, both in terms of training efficiency and overall performance. To do so, we change the representation of the BBs and their selection mechanism, as shown in Figure~\ref{fig:concept}B. 
+Instead of the weight matrix of the mapping from hidden units to logits associated with BBs to be randomly initialized, it is \emph{fixed} to be the matrix of binary Morgan fingerprints~\citep{ecfp}. 
+
+
+
+
+
+
+
+\section{Results}
+
+
+
+Our results support a number of claims: (i) a reaction-based MDP greatly improves the synthesisability of generated molecules (Sec. \ref{sec:results_mdp}), (ii) employing GFlowNets enables much more diverse molecule sampling over RL (Sec. \ref{sec:results_scaling}), (iii) learning a backward policy results in higher-reward molecules and enables finding retrosynthetic pathways for molecules belonging to our state-space (Sec. \ref{sec:results_backwards}), and (iv) our method of sampling molecules based on chemical fingerprints allows for efficient scaling to large chemical spaces (Sec. \ref{sec:results_scaling}). Finally, we show that this approach also allows to improve results for particular programs by curating the set of building blocks based on target-specific experimental data (Sec \ref{sec:mpro}). Unless otherwise specified, all experiments below use a backward policy trained with maximum likelihood, and Morgan fingerprint embeddings for our action space, with a library of 10,000 Enamine building blocks and 105 reaction templates.
+
+\subsection{Reaction-based MDP design}
+\label{sec:results_mdp}
+
+\begin{figure}
+    \centering
+ \includegraphics[width=\textwidth]{figures/synflownet_synthesis_pymol.png}
+    \caption{\textbf{Example of synthesis pathway generated by SynFlowNet.} The reward here is the sEH binding affinity proxy. Right shows the Vina docked pose and molecule metrics.}
+    \label{fig:synthesis_pathway}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+ \includegraphics[width=\textwidth]{figures/syn_vs_frag_vs_frag_sa_with_len3.png}
+
+    \caption{\textbf{Comparison across MDPs.}
+    We evaluate four GFlowNet models: SynFlowNet is trained with an action space of chemical reactions and maximum trajectory lengths (L) of 3 and 4, FragGFN and FragGFN SA are trained with an action space of fragments, however the latter also optimises for synthetic accessibility (SA), besides the sEH binding proxy reward. SynFlowNet molecules are achieving higher binding scores and better synthesisability.
+    }
+    \label{fig:syn_vs_frag_vs_frag_sa}
+\end{figure}
+
+We compare GFlowNets using two action spaces -- fragments vs. reactions -- and report reward, diversity and synthesizability of the generated samples.
+We retrain the GFlowNet model proposed by \citet{bengio2021flow} with fragments derived from our building blocks set. This ensures that we use similar chemical spaces and that we get as close as possible to a fair comparison between the two MDPs. In the fragment space, it is common practice to optimise for synthetic accessibility scores to improve synthesizability from the model. We therefore train two versions of the FragGFN model: one using the sEH binding proxy as reward function, and another that optimizes for both sEH binding and synthetic accessibility (SA) score. SynFlowNet was only trained with the sEH proxy as reward.
+
+The results in Fig. \ref{fig:syn_vs_frag_vs_frag_sa} show that our MDP design achieves great improvement in terms of synthesisability, while preserving high rewards and diversity. 
+We see that within the reaction environment, MDP design choices can further influence sample quality: a maximum trajectory length of 3 achieves better SA scores and AiZynthFinder \citep{aizynth} retrosynthesis success (62\%) compared to a maximum trajectory length of 4 (40\%)\footnote{The reactions available to AiZynthFinder are the US patent office (USPTO) set \citep{uspto}, which are different to the reactants used by SynFlowNet, so one should not expect a 100\% success score.}. 
+Note that synthesisability metrics are correlated with molecule size \citep{sa_correlated}, and that molecules assembled from longer synthesis routes are naturally larger (see Table \ref{table:results_table}). Both FragGFN models score 0\% with AiZynthFinder. Diversity, measured as average Tanimoto distances between molecular fingerprints, is preserved from a fragments to a reaction environment, albeit less so for shorter trajectories. Figure \ref{fig:synthesis_pathway} is an example of output from SynFlowNet, returning also the synthesis pathway extracted from the MDP.
+
+\subsection{GFlowNets as samplers of chemical space}
+\label{sec:results_baselines}
+
+\begin{figure}[h]
+    \centering
+ \includegraphics[width=\textwidth]{figures/comparison_to_baselines.png}
+    \caption{\textbf{Comparison between GFlowNet and RL.}
+    SynFlowNet (GFlowNet with synthesis actions) discovers more modes compared to entropy-regularised RL trained on the same state \& action space.}
+    \label{fig:baselines}
+\end{figure}
+
+While the works of \citet{pmlr-v119-gottipati20a} and \citet{Horwood_2020} are closest to our method, where RL is paired with a synthesis action space, their code is not publicly available. We reproduce their setting by pairing an RL algorithm with our MDP.
+
+In Fig. \ref{fig:baselines}, we show the reward distribution of generated samples after equal numbers of training steps. We notice that soft Q-learning collapses to sampling a narrower distribution of high-reward molecules for all targets. This is also shown in the number of Bemis-Murcko scaffolds counted for molecules with rewards above a certain threshold, where soft Q-learning quickly collapses (note the logarithmic scale of the y-axis). 
+
+\subsection{Further comparison to baselines}
+
+We continue by comparing SynFlowNet to strong baselines from the literature. First, REINVENT uses a policy-gradient method to tune an RNN pre-trained to generate SMILES strings \citep{reinvent2, reinvent4}. REINVENT has been shown to outperform many models in terms of sample efficiency \citep{gao2022sampleefficiencymattersbenchmark} and proposing realistic 3D molecules upon docking \citep{docking_benchmark}. Second, SyntheMol shares a similar MDP design with SynFlowNet, but is a search-based method using Monte Carlo Tree Search \citep{swanson2024generative}. Contrary to our model, synthesis pathways in SyntheMol contain one reaction, and its estimated state space has 30 billion molecules, reached from the Enamine building block set and 13 reactions \citep{swanson2024generative}.
+The comparison is summarized in Figure \ref{fig:baselines_reinvent_synthemol}. SynFlowNet achieves comparable rewards to REINVENT, and better sample diversity. 
+Although REINVENT does not use explicit knowledge of synthesizability in its generation process, it implicitly optimizes for it by being a likelihood model overfit on a curated ChEMBL dataset \citep{chembl}. This is reflected in our last sub-plot, where we look at the maximum similarity to ChEMBL molecules, as a proxy for novelty. This proxy is strong enough, as ChEMBL contains one of the largest collection of diverse drug-like molecules to date \citep{chembl2023}.
+While REINVENT seems to be competitive in terms of synthesizability and reward, it generates molecules with poor novelty, staying close to its pretraining distribution. Notably, SynFlowNet achieves high novelty for high-scoring molecules. Overall, SyntheMol scores comparably to SynFlowNet, however SynFlowNet achieves a better reward/diversity trade-off and SynFlowNet's capabilities are extended to explore larger state spaces (see Fig. \ref{fig:state_space_size}). We repeat the comparison on other targets, and again find that SynFlowNet outperforms SyntheMol (see App. \ref{app:results}).
+
+\begin{figure}[t]
+    \centering
+ \includegraphics[width=\textwidth]{figures/synflownet_vs_reinvent_vs_synthemol.png}
+
+    \caption{\textbf{SynFlowNet is competitive against other popular models from the literature.} SynFlowNet achieves a good balance between reward optimisation, diversity, synthesizability and novelty (assessed by maximum similarity to ChEMBL molecules). REINVENT stays close to its pretraining distribution, harming the novelty of the proposed molecules. SynFlowNet is closest to ideal.
+    }
+    \label{fig:baselines_reinvent_synthemol}
+\end{figure}
+
+\subsection{Improved MDP consistency through trained backward policy}
+\label{sec:results_backwards}
+
+We evaluate the effectiveness of our proposed training schemes for the backward policy $P_B$ by measuring (1) whether $P_B$ can ensure that backward-constructed trajectories reliably find a trajectory back to the initial state $s_0$ and (2) whether it brings any benefit to the forward policy. In Table \ref{table:retro_routes} we compare a fixed, uniform backward policy to three versions of a parameterized backward policy: a free policy, updated w.r.t. the trajectory balance loss, (see Eq. \ref{eq:tb}), a policy trained with maximum likelihood on the forward-generated trajectories and a policy that is allowed to explore the backward action space and trained with REINFORCE to find paths leading back to $s_0$. We observe that both the maximum likelihood and REINFORCE policies succeed in ensuring that backward flow is not lost outside of the MDP, as they manage to construct trajectories that start from terminal states sampled from $P_F$ all the way to $s_0$. We refer to such routes as \textit{solved routes (train)} in Table \ref{table:retro_routes}, as the terminal states have been visited by the GFlowNet during training. We also test the ability of the trained policies to retrieve synthesis routes for molecules which have not been visited during training ($test$). These were obtained from a random sampler using our set of reactions and building blocks. While we see small differences in the number of high-reward modes discovered for different backward policies, we see that a free policy consistently fails to be competitive with the rest. Overall, the maximum likelihood and REINFORCE policies prove effective in guiding $P_F$ to high reward modes, while ensuring MDP consistency.
+
+
+\begin{table}[h!]
+    \centering
+    \small
+    \begin{tabular}{cccc} % Adjusted column alignment to match the number of columns
+    \toprule
+    $P_B$ policy  & \% of solved routes (train)  & \% of solved routes (test) & \# of high reward modes from $P_F$  \\ \midrule
+    Uniform   &   $11.0\pm 3.7\%$   &  $11.0\pm 4.1\%$  &  
+  $47,515.0\pm 11,264.7$               \\
+    Free      &     $67.3\pm3.7\%$     & $1.0\pm 0.8\%$   &   $6,754.3\pm4,980.1$  \\ 
+    MaxLikelihood   &   $99.3\pm 0.5\%$    & $32.3\pm 7.3\%$  &  $37,708.2\pm 13,992.6$  \\
+    REINFORCE     &    $100.0\pm0.0\%$      & $44.3\pm 2.6\%$    &   $55,387.6\pm28,886.3$   \\ \bottomrule
+    \end{tabular}
+    \caption{\textbf{Effect of different training paradigms for $\boldsymbol{P_B}$.} Training the GFN ${P_B}$ ensures that backward-constructed trajectories belong to our MDP and can marginally improve ${P_F}$. \% of solved routes refers to the ability of $P_B$ to retrieve synthesis routes for on-policy (train) and off-policy (test) molecules reachable through our state space. Test molecules have not been seen during training. \# of high reward ($R>0.9$) modes from $P_F$ is reported out of $\sim500,000$ samples seen during training.}
+    \label{table:retro_routes}
+\end{table}
+
+\subsection{Scaling to the entire Enamine set}
+\label{sec:results_scaling}
+
+\begin{figure}[h]
+    \centering
+ \includegraphics[width=0.8\textwidth]{figures/figure_8_v2.pdf}
+    \caption{ \textbf{Ablation over action-selection mechanism.}
+    Average reward of samples (A), utilization of building blocks (B), and training times (C) for both models on different subsets of building blocks. Embeddings enable more efficient learning (D), as they help the agent navigate the set of available building blocks and tend to exploit more relevant BB clusters (F) rather than explore new clusters (E). For each experiment, three models trained with different random seeds were used.
+    }
+    \label{fig:scaling}
+\end{figure}
+In this section, we study the ability of SynFlowNet to scale to large sets of building blocks using the method proposed in Section~\ref{sec:scaling_method} as opposed to using a learnable embedding for each building block.
+First, we compare the performance of our models using the softmax action-selection mechanism and the fingerprints-based softmax on the full Enamine set of $221,181$ building blocks and randomly sampled subsets containing $75\%$, $50\%$, $25\%$, $10\%$, and $3\%$ of the full set. As shown in Figure~\ref{fig:scaling}A, increasing the number of building blocks in general negatively affects the quality of the sampled molecules in terms of reward. However, the model with fingerprints consistently outperforms the former and makes the reward degradation effect almost negligible. Next, we study whether models are able to use the blocks they are given. As shown in Figure~\ref{fig:scaling}B, the model with fingerprints consistently uses more unique building blocks than the baseline model. Notably, the baseline model is only able to use a small subset of building blocks to produce high-quality samples ($R > 0.8$). In contrast, fingerprints enable the use of a 5-fold larger set of blocks for the same quality level, thus significantly surpassing the baseline samples in terms of diversity. Finally, we measure the average time of the forward pass and average time of forward pass with auxiliary RDKit operations like template matching. Figure~\ref{fig:scaling}C shows that increasing the number of building blocks slows down training, and using fingerprints introduces additional overhead.
+
+As shown in Figure~\ref{fig:scaling}D, fingerprints enable more efficient learning on a large building block set. Indeed, instead of memorising all available BBs, the model learns to navigate in the space of embeddings and to maximise dot product with the relevant building blocks. To illustrate this, we clustered all available building blocks based on Tanimoto similarity. Next, we studied how both models explore new building blocks within and across these clusters. As shown in Figure~\ref{fig:scaling}E-F, the former model tends to explore more clusters and less unique building blocks within clusters. The model with fingerprints, on the contrary, is able to focus on clusters that maximise the reward.
+
+
+
+
+\subsection{Guiding SynFlowNet with experimental fragment screens}
+\label{sec:mpro}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/mpro_main_text.png}
+    \caption{\textbf{Effect of curating the building block set.} (A) We adapt SynFlowNet's building block library based on experimentally validated fragments for a given target. (B) The curated set improves Mpro rewards over random building blocks.}
+    \label{fig:mpro}
+\end{figure}
+
+One advantage of our framework is that building block sets can be used to specialize the model for a particular target.
+Fragment-based Drug Discovery (FBDD) \citep{thomas2019fbdd2} is a major strategy to increase the efficiency of drug discovery campaigns. In FBDD, instead of screening large chemical spaces, a low number of small compounds (called fragments) are screened and experimentally validated to bind, and are then linked \textit{in silico} to make full molecules.
+
+We hypothesise that experimental data from x-ray fragment screens \citep{murray2009fbdd1} can guide and enhance SynFlowNet's capabilities. As a proof-of-concept, we focus on the SARS-CoV-2 main protease (Mpro), leveraging strucural data from the COVID Moonshot project \citep{boby2023moonshot}. We compile a building block set from Enamine with high similarity to fragments confirmed by x-ray crystallography (see Fig. \ref{fig:mpro}A). We find that biasing the building block library towards fragments with known protein-ligand complementarity increases the reward over randomly selected molecules (see Fig. \ref{fig:mpro}B). Further details on methods and results are given in App. Section \ref{app:fragments_methods}.
+
+
+
+\section{Conclusion}
+
+
+
+
+In this work, we discuss the application of GFlowNets to  \textit{de novo} molecular design paired with forward synthesis. We demonstrate that an action space of chemical reactions is an effective way of enforcing synthesisability, and that pairing it with GFlowNets excels in terms of diversity. Comparisons to state-of-the-art baselines emphasised that SynFlowNet explores novel regions of the chemical space. We also proposed a novel paradigm for training the backward policy in the GFlowNet and in doing so we improved and validated the correctness of our MDP design. Furthermore, we studied the building block exploration and exploitation mechanisms of SynFlowNet, showing efficient scaling to using hundreds of thousands of building blocks. Finally, as a proof of concept for the adaptability of SynFlowNet to real drug discovery programs, we showed that the framework can be specialised to target-specific molecule generation by making use of experimental fragment screens.
+
+
+
+
+
+
+
+
+
+

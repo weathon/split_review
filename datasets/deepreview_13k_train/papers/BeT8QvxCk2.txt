@@ -1,0 +1,299 @@
+\title{No more hard-prompts: SoftSRV prompting for synthetic data generation}
+
+\begin{abstract}
+We present a novel soft prompt based framework, SoftSRV, that leverages a frozen pre-trained large language model (LLM) to generate targeted synthetic text sequences. Given a sample from the target distribution, our proposed framework uses data-driven loss minimization to train a parameterized ``contextual'' soft prompt. This soft prompt is then used to steer the frozen LLM to generate synthetic sequences that are similar to the target distribution. We argue that SoftSRV provides a practical improvement over common hard-prompting approaches that rely on human-curated prompt-templates, which can be idiosyncratic, labor-intensive to craft, and may need to be specialized per domain. We empirically evaluate SoftSRV and hard-prompting baselines by generating synthetic data to fine-tune a small Gemma model on three different domains (coding, math, reasoning). To stress the generality of SoftSRV, we perform these evaluations without any particular specialization of the framework to each domain. We find that SoftSRV significantly improves upon hard-prompting baselines, generating data with superior fine-tuning performance and that better matches the target distribution according to the {\sc mauve} similarity metric. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, pre-trained large language models (LLMs) have proven to be effective in generating synthetic natural language training data
+\citep{gunasekar2023textbooks,li2023textbooks,eldan2023tinystories,mukherjee2023orca,mitra2023orca,abdin2024phi}.
+This is particularly true when the synthetic data is used to pre-train or fine-tune smaller language models, enabling performances that rival models that are orders of magnitude larger \citep{liu2023tinygsm}. There are several motivations for generating and using synthetic training data; chief among them is the need to train models for domains where little natural high-quality text may be readily available or may be difficult to procure. %or, even if data is available, it may not be desirable to use it directly due to policy or privacy restrictions.
+  
+In order to generate synthetic text, a significant amount of human-driven prompt engineering is invested into developing prompts that steer the generating LLM into producing high-quality text from a targeted domain while also encouraging sufficient diversity. This point was very nicely summed up by the authors of the open-source synthetic text repository Cosmopedia \citep{cosmo}, when recounting their attempt to recreate a large synthetic dataset similar to the one generated to train Phi 1.5 \citep{li2023textbooks}:  
+\begin{quote}
+    ``Heads up: If you are anticipating tales about deploying large-scale generation tasks across hundreds of H100 GPUs, in reality most of the time for Cosmopedia was spent on meticulous prompt engineering.''
+    \quad-- \cite{cosmo}
+\end{quote}
+Furthermore, and especially in the case of generating fine-tuning data for targeted domains (e.g.,\ coding, math, customer service), this manual process may need to be repeated and refined per-domain, or even per sub-domain (e.g.,\ per coding language, math subject, service department).
+Apart from the human engineering cost, these manual prompting approaches do not directly optimize a data-driven objective. Rather they depend on human-in-the-loop style feedback for manually adjusting the prompt templates, resulting in approaches that lack robust mechanisms for aligning the LLM's generated data with the desired distribution.
+
+To address these issues, we propose an algorithmic framework, \emph{Soft prompt-based Synthesis with Randomized Variation} (SoftSRV), that leverages \emph{soft-prompting} (also known as prompt-tuning) for synthetic text data generation. 
+Soft prompt training is a parameter efficient tuning method and requires a relatively limited amount of compute \citep{lester2021power}. Perhaps equally important, since the soft prompt is trained using a data-driven training algorithm, it requires essentially no human-in-the-loop intervention, enabling the process to be readily deployed across many different domains. Furthermore, soft prompts themselves can allow for more expressive input contexts to the generating LLM compared to natural language hard prompts. A soft ``token'', represented by a dense vector, is not restricted to correspond to a particular discrete natural language token (e.g., sub-word or character). This intuitive observation is formalized in \cite{petrovprompting}, which shows that in specific settings soft prompts can induce an LMM to produce an exponential (in sequence length) number of text completions, while hard prompts only allow for a linear number of completions.
+
+Why do we expect soft-prompting to be effective for targeted synthetic data generation? Prior theoretical research on fine-tuning language models suggests that a data-driven optimization of soft prompts guides a pre-trained model towards specific concepts or tasks it has already learned, essentially steering the model towards a relevant subspace of interest \citep{wies2023,petrovprompting,petrov2024universal}. 
+Our goal is to use soft prompts to steer the pre-trained model towards generating text that most resembles the target distribution.
+Subsequently, fine-tuning a smaller model using the generated data provides an effective way to transfer knowledge from the larger model to the smaller model. 
+
+Unlike in typical prompt-tuning approaches, we do not prepend a soft prompt to an existing hard prompt, but instead use the soft prompt alone as input context to the LLM.
+We use a sample of text sequences (i.e., a sample from the desired target text distribution) and language-modeling loss to learn a parametrized soft prompt. Once trained, the soft prompt can be varied by conditioning on a context vector derived from an example sequence, allowing for additional expressive power and the potential to better fit different regions of a potentially complex target distribution.
+
+Our contributions presented in this work are as follows:
+\begin{itemize}
+    \item We demonstrate that soft prompts can be effectively trained for the purpose of targeted synthetic text generation used to fine-tune downstream models.
+    \item We investigate the value of learning parameterized families of soft prompts that can be conditioned on an input context, finding they are critical for best fitting complex target distributions. 
+    \item Our empirical evaluations on coding, math, and reasoning tasks find superior downstream performance for models fine-tuned on SoftSRV generated text compared to that of models fine-tuned on data generated by baseline hard-prompting approaches. 
+    \item  We show that the SoftSRV approach is general and offers greater versatility than hard-prompting approaches as it can be readily applied across different domains with minimal manual intervention.
+    \item We measure the similarity of the generated data to the target distribution using the {\sc mauve} metric and observe that SoftSRV methods align most closely with the target distribution. 
+\end{itemize}
+
+
+\section{Proposed Approach}
+
+
+In this section, we introduce the general SoftSRV framework as well as a few specific instantiations that are studied in this work. First, we start with some basic notation and terminology.
+
+Given a vocabulary $\mathcal{V}$ of textual tokens, let $\{x_1, \ldots, x_n\}$ denote a sample of $n$ text sequences, belonging to the set of all possible sequences $S^m$ of a finite maximum length $m$, drawn according to a fixed but unknown distribution $\mathcal{D}$. Although we are not able to directly sample additional sequences from $\mathcal{D}$, our goal is to synthesize sequences that could have plausibly been drawn according to $\mathcal{D}$.
+We assume access to a (frozen) LLM, denoted $L: S^m \to S^m$, where we input and output sequences of equal fixed length $m$ for notational simplicity and without loss of generality. Furthermore, we explicitly decompose the LLM, $L = H \circ E$, where $E: S^m \to \Rset^{d \times m}$ represents the initial embedding layer that embeds each token of the input sequence to a $d$-dimensional dense vector, and $H: \Rset^{d \times m} \to S^m$ represent the remainder of the language model that maps the embedded tokens to the output sequence. In contrast to the prompt tuning methods of \cite{lester2021power} in the standard fine-tuning setting, we do not prepend the learned soft tokens to a hard prompt after it passes the initial embedding layer, $E$. Instead, for our approach we discard $E$ entirely method and rely on the frozen model $H$.
+
+The SoftSRV framework seeks to synthesize sequences similar to those drawn from $\mathcal{D}$ by training a ``soft prompt'', i.e. a dense embedding (or parameterized family of embeddings) $\Pb \in \Rset^{d \times t}$ consisting of $0<t<m$ ``soft-tokens''. A successfully trained soft prompt, $\Pb$, should generate a sequence $x = H(\Pb)$, via frozen model $H$, that has a high likelihood of occurring under the distribution $\mathcal{D}$. More generally, we can sample several different sequences from a fixed prompt, $x, x', x'' \ldots \sim H(\Pb)$, by using randomized temperature-based decoding. Although temperature sampling alone does allow for some variability, we can further increase the variety of generated text by using a \emph{contextual} soft prompt, $\Pb(\cdot) : \Rset^{d_e} \to \Rset^{d \times t}$. A contextual soft prompt can be conditioned with different context vectors $\zb \in \Rset^{d_e}$, during training and generation, to induce variations of the soft prompt. % ($\Pb(\zb_1), \Pb(\zb_2), \ldots$). 
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.62]{figures/framework.pdf}
+    \caption{A diagram illustrating the training workflow of the SoftSRV framework. An example sequence $x$ is embedded into a dense vector $\zb$ via a (frozen) sequence encoder model. The SoftSRV model, parameterized by $\theta$ and conditioned on the embedding $\zb$, produces a soft prompt $\Pb_\theta(\zb)$. This is then fed to a (frozen) pre-trained LLM, which produces a synthetic example $x'$. Similar to autoencoder-based training, the gradient of a next-word-prediction ``reconstruction'' loss is computed and used to update the SoftSRV parameters.}
+    \label{fig:framework}
+\end{figure}
+Before introducing specific soft prompt instantiations, we describe the SoftSRV training procedure which is common throughout and also illustrated in Figure~\ref{fig:framework}. In addition to the sample of data ($x_1, \ldots, x_n$) and frozen LLM ($H$), we assume access to a sequence embedding function $\emb(\cdot): S^m \to \Rset^{d_e}$ and we let $\theta$ denote the trainable parameters of the (contextual) soft prompt $\Pb_\theta(\cdot)$. During training, each training sequence is embedded $\zb_i = \emb(x_i)$ and used to generate a conditioned soft prompt $\Pb_\theta(\zb)$, which is fed into the frozen LLM $H$ to produce a new sequence $x_i' \sim H(\Pb_\theta(\zb_i))$ using the standard sequential (next token) generation.
+A standard causal (next-word) prediction loss, denoted $\ell(\cdot, \cdot)$, is backpropagated through the network up to the soft prompt layer $\Pb_\theta$, and an SGD-style update is applied to $\theta$ using the gradient $\nabla_\theta \ell(x_i, x_i')$.
+This loss can be thought of as a ``reconstruction'' error and the entire pipeline is akin to an auto-encoder. Viewing the pipeline through this lens, it is apparent that the sequence embedder $\emb(\cdot)$ should be sufficiently ``lossy'' in order to avoid making the learning problem trivial. This lossiness can be enforced by restricting the dimension $d_e$ of the embedding, for example.
+
+Once the contextual soft prompt $\Pb(\zb)$ has been trained, we can then generate synthetic data by prompting the LLM using $\Pb(\zb)$ as embedded input context for different choices of context vector $\zb$. A natural choice is to sample embeddings $(\zb_1, \ldots, \zb_n)$ derived from the data sample set $(x_1, \ldots, x_n)$.
+We now introduce a few specific SoftSRV parameterizations studied in this work.
+
+\subsection{Non-contextual soft prompt ($\FSP$)}
+The simplest parameterization treats the $dt$ entries of a soft prompt, $\Pb \in \Rset^{d \times t}$, directly as trainable parameters, i.e., $\theta =\Pb$ , resulting in the following objective:
+\begin{equation}
+  \argmin_\theta \sum_{i=1}^n \ell(H(\Pb), x_i) \,  \,,
+\end{equation}
+where it is understood that, in practice, the argmin over $\theta$ is only approximated via SGD.
+This parameterization is an instance of a \emph{non-contextual} soft prompt, i.e., any context $\zb$ is ignored. Despite the lack of context, the synthesized output may still be diversified by using non-greedy (i.e., temperature sampling) decoding during LLM generation.
+
+\subsection{Mixture of prompts ($\MPK$)}
+
+Here, we train $k$ ``basis'' soft prompt matrices and define the final soft prompt, as a mixture of these bases.
+More precisely, in this variant the parameter set is $\theta = \{\Pb_1,\ldots,\Pb_k,\phi\}$, where $\Pb_i \in \Rset^{d \times t}$ are the basis prompts, 
+\begin{equation}
+    \Pb_\theta(\zb) = \sum_{i=1}^k w_i \Pb_i \,, \quad (w_1, \ldots, w_k) = W_\phi(\zb),
+\end{equation}
+and $W_\phi(\cdot): \Rset^{d_e} \to \Rset^k$ is a learned softmax function with parameters $\phi \in \Rset^{d_w}$. The trained $\MPK$ prompt is then the SGD solution to $\argmin_\theta \sum_{i=1}^n \ell(H(\Pb_\theta(\emb(x_i)), x_i)$.
+
+The intuition behind this formulation is for each learned basis soft prompt $\Pb_i$ to encode a different aspect (mode) of the target data distribution and have each training example $x_i$ approximated by a mixture of these modes (similar to the intuition behind mixture or topic models \citep{mclachlan1988mixture}). Previous prompt-tuning works have also made use of a mixture of soft prompts, albeit not focused on training data synthesis \citep{qin2021learning,dun2023sweeping}.
+
+
+\subsection{MLP Concatenated ($\MLPC$)}
+We consider a collection of $t$ small MLPs, whose output is concatenated to generate the final soft prompt. Let $F_{\phi_i} : \Rset^{d_e} \to \Rset^t$ denote the $i$th MLP with parameters $\phi_i$, and $\theta = \{\phi_1, \ldots, \phi_t\}$ denote the parameters for the collection of MLPs. Then, we define:
+\begin{equation}
+  \Pb_\theta(\zb) = \Big[ F_{\phi_1}(\zb), \ldots, F_{\phi_t}(\zb) \Big] \,,
+\end{equation}
+and the trained $\MLPC$ soft prompt is the SGD solution to $\argmin_\theta \sum_{i=1}^n \ell(H(\Pb_\theta(\emb(x_i)), x_i)$.
+
+This parameterization is the most expressive that we consider, in that each ``soft-token'' in the soft prompt is computed using a distinct non-linear transformation of the context vector $\zb$.
+
+
+\section{Empirical Evaluation}
+
+
+
+ 
+In the our empirical evaluation of the SoftSRV framework, we consider a supervised fine-tuning setting where a small Gemma 2B model \citep{team2024gemma} is fine-tuned on synthetic data generated by a larger decoder-only language model across several different benchmark datasets. 
+\subsection{Domains and datasets}\label{datasets-subsection}
+
+In order to demonstrate the generality of the proposed approach, we consider fine-tuning for several disparate domains (coding, mathematics, reasoning) using the same exact pipeline with no particular specialization to any of the particular domains.
+We briefly describe the specific benchmark we use from each domain.
+ 
+  {\bf{Code -- MBPP \citep{austin2021program}.}} For the coding domain, we consider the ``Mostly Basic Python Problems'' (MBPP) benchmark, which consists of short Python programming exercises, e.g. ``Write a python function to find the first repeated character in a given string'' and answers written in Python code. The task is evaluated using a 3-shot prompt (i.e. a prompt pre-pended with three instructional examples) and pass@1 metric, measuring if a single top generated result is correct.
+  
+  {\bf{Math -- GSM8K \citep{cobbe2021gsm8k}.}} For the math domain, we use the grade school math word problems from the GSM8K benchmark. This dataset contains only highly-curated word problems written by humans that are conceptually simple, but require multi-step reasoning. %and each question is accompanied by a solution.
+  For this generative task we use a 5-shot prompt, again, measuring the pass@1 metric.
+  
+  {\bf{Reasoning -- BoolQ \citep{clark2019boolq}.}} For the general reasoning domain, we consider the binary question answering dataset from the BoolQ benchmark. The questions arise organically from anonymized Google search queries which can be answered as either `true' or `false'.
+  Each question and answer is paired with a passage (average length of 108 tokens) that is extracted from a relevant Wikipedia page. This is evaluated as a scoring/classification task and accuracy is reported.
+
+The above chosen benchmarks aim to cover a wide variety of tasks, each with varying degrees of complexity -- both in terms of solving the task and in terms of generating synthetic data for the task. The MBBP task requires basic Python programming knowledge to solve, but the questions are generally short, follow a similar pattern and are concerned with a relatively narrow set of themes.  The GSM8K task requires basic math and language comprehension skills, but generating the problem is arguably even harder than solving it. It requires generating a premise containing several numerical quantities and then a question that can be answered using the provided information in a non-trivial fashion. Nonetheless the premises are somewhat formulaic and thematically similar.  The BoolQ reasoning task, which requires general reading comprehension to solve, is perhaps the most difficult task to generate synthetic data for.  Generating a problem requires writing a long (relative to MBPP and GSM8K) passage on an arbitrary topic that contains a collection of facts, but that does not necessarily stick to any formula or theme, and then generate a true/false question that can be answered directly by the passage. 
+As we shall see in the empirical evaluation that follows, the level of difficulty in generating a high-quality question can impact the relative quality and value of generated synthetic data.
+
+
+\subsection{Hard-prompting baselines}\label{hard-prompting-subsection}
+Typical hard prompt engineering approaches involve manually creating prompt templates that are then seeded with text from the desired target domain. To give a (simplistic) illustrative example, a template could be:
+ \begin{quote}{\small{\texttt{Consider the following [article], write a textbook quality summary of the topic suitable for a high-school audience}},}
+\end{quote}
+where the placeholder {\small{\texttt{[article]}}} would be replaced with example texts from the desired domain, producing several distinct prompts. 
+In this study, we consider the following two hard-prompting variants. 
+
+The first, denoted simply as hard prompt ($\HP$), uses a domain-specific hard prompt template to generate a question followed by another domain specific hard prompt template to generate answers (the detailed workflow is discussed in Subsection~\ref{pipeline}). 
+ To reach these templates, we undertook several iterations of hard prompt engineering and reported the result of the best performing method. %Furthermore, we tuned the sampling temperature to a value we found balanced diversity and quality.
+
+The second approach, hard-prompting with self-refinement ($\HPSR$), similarly uses a hard prompt template to generate questions but also iteratively conducts several rounds of self-critique to improve or accept the question \citep{madaan2024self}.
+
+\subsection{Empirical evaluation procedure}\label{pipeline}
+For each benchmark dataset and each data generation approach, the evaluation pipeline is as follows. 
+
+{\bf 1. Train SoftSRV prompts.} For the SoftSRV methods, we first train the soft prompt parameters with a frozen large decoder-only LM backbone using the questions found in the training fold of the dataset, which serves as our sample from the target distribution.
+Recalling we embed each question, $\zb_i = \emb(x_i)$, we run an Adam optimizer to minimize the causal next-word-prediction loss, $\argmin_\theta \sum_{i=1}^n \ell(H(\Pb_\theta(\zb_i), x_i)$, where $\Pb_\theta(\zb)$ is the conditioned soft prompt and $H$ is the frozen LLM (post input embedding layer). The sequence embeddings, $\emb(\cdot)$, are computed as the average of token embeddings computed by a small off-the-shelf decoder-only LM. This simple embedding approach is used to both limit the amount of additional computation, but also to ensure the embedding is somewhat lossy in order to make the reconstruction task (i.e. minimizing $\ell(H(\Pb_\theta(\emb(x_i)), x_i$) challenging. The simpler $\FSP$ method does not use this sequence embedding as it operates with a non-contextual soft prompt.
+
+Since we seek an automated hands off approach, we avoid any domain-specific hyperparameter tuning. Specifically, for all SoftSRV variants and all benchmarks, the length of the prompt $t$ is fixed to be 128, the number of training steps was set to 20K, and the learning rate is fixed to $5\mathrm{e}{-6}$, which we found to be reasonable defaults. The $\MLPC$ method uses MLPs with 3 feed forward layers and 128 hidden dimensions.
+
+{\bf 2. Generate Questions.} Once trained, we generate synthetic questions with the SoftSRV model. That is, we pass in the questions from the training dataset, $x_i$, and produce a new sequence $x_i' \sim H(\Pb_\theta(\emb(x_i)))$ via temperature sampling (with default temp=1). For the $\FSP$ variant, no context vector and, thus, no training examples are used during generation. For all SoftSRV methods, no hard prompt template of any kind is used. 
+
+For the hard prompt baselines, we generate synthetic questions by querying the same backbone LLM using the relevant domain specific hard prompt template and questions taken from the benchmark training fold to populate the template. We conducted a search over temperature=\{1,2,4\} and found a temperature of 2 to provide a balance of diversity and quality for these hard prompting methods.
+
+For all methods, we generate 100K questions, repeating example questions from the training fold in a round-robin fashion. We then run a simple filtering, deduplication and subsampling pipeline to arrive at a target fine-tuning dataset size $N_s$. We use $N_s$=50,000 for MBPP and GSM8K and $N_s$=20,000 for BoolQ.
+
+{\bf 3. Generate Answers.} 
+After generating the questions, all methods essentially follow the same procedure to generate answers using an off-the-self LLM. The only difference being, in the case of SoftSRV, we pass the question directly the the LLM without any domain specific prompting to preserve the domain agnostic nature. In the case of hard prompt baselines, we use a domain specific hard prompt template combined with the generated question to query the off-the-shelf LLM for an answer.
+
+{\bf 4. Fine-tune and Evaluate Downstream Model.} Finally, for all methods, we use the generated (question, answer) pairs to fine-tune the target Gemma 2B model. We use a batch-size of 16 with sequence length 8192 and with a learning rate with linear warmup from 0 to 1e-6 over 100 steps, followed by a cosine annealing schedule.
+We evaluate the performance of these fine-tuned models on the test fold of the respective benchmark using the procedure and metric stated in Section~\ref{datasets-subsection}.
+\subsection{Gemma 2B fine-tune \& downstream evaluation}
+
+\begin{figure}
+\centering
+    \includegraphics[scale=0.42]{figures/mbpp_2b.pdf}       
+    \includegraphics[scale=0.42]{figures/gsm8k_modern_5shot_2b.pdf} 
+    \includegraphics[scale=0.42]{figures/boolq_2b.pdf} 
+    \caption{Full fine-tuning curves for the Gemma 2B model using different synthetically generated datasets as well as the non-synthetic training set.}
+    \label{fig:gemma2b_curve}
+\end{figure}
+
+Here, we present the performance of Gemma 2B fine-tuned on the generated synthetic datasets. Figures~\ref{fig:gemma2b_curve} plots the eval metrics for each dataset as a function of the number of fine-tuning steps times batch size normalized by training set size (essentially the training epoch modulo an additional constant factor due to sequence packing).  These figures show that the model fine-tuned on data generated by the $\MLPC$ method generally outperforms the models fine-tuned on the data generated by the other methods. Comparing the hard prompt methods, the $\HP$ method outperforms the $\HPSR$ method on the GSM8K benchmark.  For the MBPP benchmark, $\HP$ initially attains a similar performance as that of $\HPSR$, but both methods start to degrade as a function of fine-tuning steps.  This may be due to a lack of diversity in the generated text given the small set of 384 training example questions for MBPP. We do not report the results of the $\HPSR$ method for BoolQ as it appears to struggle to produce reasonable outputs. The repeated self-critiques of $\HPSR$ on the lengthy input passages seems to lead it astray from the original intention of the task, producing questions asking for open-ended discussion of a passage rather than targeted true/false questions.
+
+In our soft-prompting setting, two salient questions are what type of parametrization is effective for soft prompts and whether it is essential to have a contextual soft prompt that leverages the context token as opposed to a non-contextual soft prompt.  Our empirical evaluations show that the non-contextual soft prompt method, $\FSP$, admits a lower performance than the other methods thereby indicating the effectiveness of contextual soft prompts. Then, by comparing the performance of the $\MLPC$ and $\MPtwo$ methods, we observe that the more expressive parametrization of  $\MLPC$ is generally beneficial. 
+
+We also find that the model fine-tuned on the $\MLPC$ generated data outperforms the model fine-tuned on the non-synthetic training dataset for MBPP and GSM8K, indicating that, given enough of it, synthetic data can outperform even non-synthetic data. However, the same observation does not hold for BoolQ. The training set curve on BoolQ admits high variance, but it attains a higher accuracy overall. As discussed in Section~\ref{datasets-subsection}, we expect generating questions for the BoolQ dataset to be more difficult stemming both from the fact that the data was generated by search queries thereby covering a wide range of topics, but also from containing much longer sequences extracted from the Wikipedia passages. 
+
+In Table~\ref{table:gemma2bfull}, we show a comparison of the methods at a fixed epoch and at their max metric value attained over all tested fine-tuning steps.  The fixed epoch was chosen to be the step where the model admits the largest fine-tuning performance on the training dataset. This clearly gives an advantage to the model fine-tuned on the training data, but it still provides a fair comparison between the synthetically generated datasets. We again find that the model performance when fine-tuned on the $\MLPC$ generated data outperforms the models fine-tuned on the other generated datasets at both the fixed epoch and at the max metric. For the the BoolQ dataset, the $\HP$ method admits a performance close to that of the $\MLPC$ method for the max metric, but its accuracy for the fixed epoch is considerably lower than that of $\MLPC$.  
+ 
+
+\begin{table}
+\caption{Downstream task performance of Gemma 2B models fine-tuned on various sources of data. The number of non-synthetic examples used as seed data for the hard prompt and SoftSRV models is reported as $N_r$. The number of synthesized examples post-deduplication, $N_s$, is 50k apart from BoolQ where it is 20k. The base column reports the pre-trained model performance without fine-tuning. The `train' column corresponds to the model fine-tuned on the non-synthetic examples. }
+\centering
+{%\scriptsize
+\begin{tabular}{l|l|lHlHl|llllHl}
+task & metric & $N_r$ & $N_s$ & base & published & train &  $\HP$ &  $\HPSR$ & $\FSP$ & $\MPtwo$ & mp\textsubscript{4} & $\MLPC$\\
+\hline
+\hline
+(fixed epoch)  &  &  &  &  &  &  &  &  &  &  &  & \\
+MBPP & pass@1 & 384 & 50,000 & 0.304 & 0.302 & 0.314 & 0.254 & 0.250 & 0.334 & 0.324 & 0.324 &  0.348\\
+GSM8K & accuracy & 7,473 & 50,000 & 0.29 & - & 0.441 & 0.435  &  0.422 & 0.411 & 0.439 & TBD &  0.471\\
+BoolQ  & accuracy & 9,427 & 20,000 & 0.757 & TBD &  0.877 & 0.833 & -- & 0.832 & 0.835 & TBD &	0.852\\
+\hline
+(max metric) &  &  &  &  &  &  &  &  &  &  &  & \\
+MBPP & pass@1 &  384 & 50,000 & 0.304 & 0.302 & 0.314 & 0.326 & 0.326 & 0.338 & 0.348 & 0.362 &  0.378\\
+GSM8K & accuracy & 7,473 & 50,000 & 0.29 & -- & 0.441 & 0.456 &  0.435 & 0.424 &  0.439 & TBD & 0.478 \\
+BoolQ  & accuracy & 9,427 & 20,000 & 0.757 & - & 0.877 & 0.851  & -- & 0.838 &	0.845 & TBD &	0.854\\
+\hline
+\end{tabular}
+}\label{table:gemma2bfull} 
+\end{table}
+
+\subsection{Data scaling}
+Next, we analyze the effects of varying the number of synthetic examples generated. Specifically, we increase the number of generated examples from 20K, 50K, to 100K, testing both the $\MLPC$ and $\HP$ approaches for the BoolQ benchmark, given this benchmark appears the most challenging in terms of generating effective synthetic questions. Figure~\ref{fig:datascaling} shows that the performance of the model fine-tuned on $\HP$ stagnates between 20K and 50K synthetic examples, and only shows improvement when the number of generated examples reaches 100K.  In contrast, the model fine-tuned on $\MLPC$ steadily improves as the generated dataset size increases. Going from 20K to 100K examples,  $\MLPC$  performance increases at a 1.8 times faster rate relative to $\HP$ with respect to the max metric value.  In particular, the $\HP$ method with 100K generated examples admits a comparable performance to that of the $\MLPC$ method with 50K generated examples. 
+   
+
+ \begin{figure}
+ \captionsetup{aboveskip=1pt}
+\centering
+\begin{subfigure}{.46\textwidth}
+\captionsetup{aboveskip=-1pt,belowskip=0pt}
+  \centering
+  \includegraphics[width=1\linewidth]{figures/boolq_growing_2b.pdf}
+  \caption{} %Comparing the Gemma 2B fine-tuning performance for the BoolQ benchmark as the number of generated examples increases for $\HP$ and $\MLPC$ approaches}
+  \label{fig:datascaling}
+\end{subfigure}
+\hspace{-10mm}
+\begin{subfigure}{.54\textwidth}
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/tinygsm_comparison_2b.pdf}
+  \caption{}%Comparing the Gemma 2B fine-tuning performance for the GSM8K benchmark on $\MLPC$ and $\HP$ generated datasets against a sample of the same size from TinyGSM dataset.}
+  \label{fig:gsm-modern}
+\end{subfigure}%
+\caption{In (a) we compare the BoolQ performance of Gemma 2B fine-tuned on data generated by  $\HP$ and $\FSP$ as the number of generated examples increases. In (b) for the GSM8K benchmark, we show the Gemma 2B performance after fine-tuning on the $\MLPC$ and $\HP$ generated datasets against a sample of the same size from the curated TinyGSM dataset.  }
+\label{fig:test}
+\end{figure}
+
+
+\subsection{Comparison with curated hard prompt generated dataset (TinyGSM)}
+
+ 
+ 
+
+ 
+
+Here, we compare against a high quality dataset, TinyGSM, within our fine-tuning evaluation framework. TinyGSM was expertly curated by \cite{liu2023tinygsm} for GSM8K-PAL, which is a program aided language model (PAL) variant of GSM8K that asks for questions to be answered in the form of Python functions. This has the advantage of enabling verification of the answer in a programmatic fashion.
+\cite{liu2023tinygsm} use GPT-3.5-turbo with hard prompts seeded with training questions from the original GSM8K dataset and from the GSM-IC dataset, which is a dataset crafted to incorporate irrelevant context in order to bolster model robustness \citep{shi2023largelanguagemodelseasily}. They use two types of prompts: the first asks to generate both questions and answers while the second requires two calls to the LLM to first generate a question and then an answer. Leveraging the fact that the solutions of the math word problems are written in Python, they then filter out any data that contains code that is not executable by a Python interpreter. They additionally filter out questions that do not contain numbers as this indicates flawed math problems.
+
+In order to evaluate the TinyGSM generated question in our setting, we randomly sample 100K questions from the publicly available TinyGSM dataset, then further subsample down to 50K using the same post-processing pipeline used by all other methods in our comparison. Finally, we generate answers, fine-tune and evaluate in the same fashion as the other hard prompt baselines.
+Figure~\ref{fig:gsm-modern} shows that a model fine-tuned on the $\MLPC$ dataset attains a performance close to that when fine-tuned on the sample from the $\TGSM$ dataset while the $\HP$ method lags behind both.  TinyGSM performing closely to $\MLPC$ is encouraging given that the TinyGSM dataset is highly curated and tailored specifically for the GSM8K benchmark. 
+\subsection{Distribution matching analysis}
+
+We next investigate the capacity of the SoftSRV and hard-prompting baseline to generate data samples that can match a target distribution of text. To assess the proximity between the generated and target distributions, we compute Mauve scores as in \cite{pillutla2021mauvemeasuringgapneural}, which can be viewed as a scalar summary of the divergence between the textual output of a generative model and a reference distribution. The {\sc mauve} score is able to simultaneously measure both the model's ability to avoid generating text outside the support of the target distribution (Type I error) and the ability to generate text with a large coverage of the target distribution support (Type II error). 
+
+\begin{table} 
+    \centering
+    \caption{The Mauve similarity scores of synthetic datasets computed with respect to the non-synthetic training and test fold of each dataset. The similarity computed between the train and test fold itself is also included in the final row of the table. Bolding indicates the max Mauve score achieved by a synthetic dataset.}
+    \begin{tabular}{|l|c|c|c|c|c|c|} % Added vertical bars for separators
+        \hline
+        & \multicolumn{3}{c|}{Train} & \multicolumn{3}{c|}{Test} \\
+        & MBPP & GSM8K & BoolQ & MBPP & GSM8K & BoolQ \\
+        \hline
+        $\HP$ & 0.622 & 0.933  & 0.663 & 0.463 & 0.914 & 0.784 \\
+        $\HPSR$ & 0.327  & 0.870 & --  & 0.397 & 0.865 & -- \\
+        $\FSP$ & {\bf 0.776} & 0.862 & 0.519 & {\bf 0.781} & 0.839 & 0.575 \\
+        $\MPtwo$ & 0.722 & 0.727 & 0.731 & 0.646 &0.735 & 0.689 \\
+        $\MLPC$  & 0.604 & {\bf 0.993} & {\bf 0.997} & 0.477 & {\bf 0.991} & {\bf 0.995} \\
+        \hline
+        Train &  1.000 & 1.000 & 1.000 & 0.963 & 0.998 & 0.999 \\
+        \hline
+    \end{tabular}
+    \label{mauve-table}
+\end{table}
+
+In Table \ref{mauve-table}, we report the {\sc mauve} scores for hard-prompt and SoftSRV-based synthetic datasets on the MBPP, GSM8K and BoolQ domains, measuring the distance to questions in both the train and test folds.
+In all cases, we find that a SoftSRV variant can synthesize text that is closer to the training and test dataset distribution than the hard-prompt approaches. This is perhaps unsurprising to see with respect to the train set since, by design, the SoftSRV prompts are trained to optimize the likelihood that the LLM sequentially decodes the text seen in these training examples, but is encouraging to see that the trend holds for the test set as well. Notably, among the SoftSRV variants, the $\MLPC$ method achieves the highest score on GSM8K and BoolQ, where it appears the additional flexibility afforded by its parameterization allows a very high-fidelity match to the target distribution.  On the other hand, in the case of MBPP, which has relatively simple question distribution (see discussion in Section~\ref{datasets-subsection}), the simplest SoftSRV parameterization ($\FSP$) attains the largest {\sc mauve} score while the more complex SoftSRV variants produce lower similarity scores, perhaps due to the relatively small MBPP training set (only 384 examples).
+While the hard-prompt datasets generally have lower {\sc mauve} scores than the SoftSRV counterparts, the $\HP$ variant is able to achieve high scores on GSM8K. % On the data-scarce version of GSM8K, HP and MLPC have similar scores. 
+Notably, in the case of the MBPP dataset, we measure very low similarity scores for $\HPSR$; we conjecture this may be due to the several rounds of rewriting, which results in straying further from the original seed question.
+Finally, we note that the {\sc mauve} score is not a direct indicator of downstream fine-tuning performance. However, it is another signal to provide further support for (parametrized) soft-prompting as a high-fidelity approach for text generation across domains.
+
+
+
+
+\section{Related Work}
+
+SoftSRV provides a novel contribution at the intersection of soft-prompting and synthetic text generation for targeted fine-tuning tasks. On each of these individual topics, there is a large and rapidly growing literature, which we touch on only briefly in the section.
+
+\subsection{Synthetic text for LLM training}
+As mentioned in the introduction, there is a significant recent body of work demonstrating the effectiveness of using a large language model to generate synthetic training data for a smaller model.
+ 
+In terms for generating pre-training data, the collection of ``Textbooks Are All You Need'' white-papers outlines the process of training the Phi series of small LMs, using carefully curated prompt templates and seed data sources, and shows the large boost in quality that synthetic data can provide \citep{gunasekar2023textbooks,li2023textbooks,abdin2024phi}. The Cosmopedia project \citep{cosmo} conducts a similar study, while also providing detailed and transparent steps as well as open-sourcing the prompts and generated data.
+\cite{li2024synthetic} construct a pretraining set almost ``from scratch'' using a diverse set of hard prompts. To build these prompts, they assume access to taxonomies of fields/sub-fields/disciplines within an area of expertise and build a syllabus which culminates in a series of ``key concepts'', each of which a large language model is then queried to generate a lesson on.
+Apart from focusing on pre-training rather than fine-tuning for a specific domain, these works require a non-trivial amount human effort for building and/or curating hard prompts for the generating LLM, which our effort seeks to minimize.
+\citet{mukherjee2023orca,mitra2023orca} focus on building synthetic data for better instruction tuning. In particular, they start with the FLAN-V2 instruction tuning dataset and ask a LLM to expand on the terse responses in different verbose styles (specified by so-called ``system instructions'') to introduce variation in presentation and approach. Although, shown to be quite effective across a broad array of reasoning tasks, in our setting we wish to generate data focused on a specific target task, likely requiring us to curate a set of bespoke ``system instructions'' for each task.
+
+Several works build fine-tuning data for specific domains, such as coding \citep{haluptzoklanguage,luowizardcoder} or mathematics \citep{yumetamath}. Although quite successful, these approaches leverage specific qualities of the target domain, for example, using a code interpreter to check correctness of generated code or using the fact that math problems contain numerical quantities that can be masked or manipulated to create variations of the original question.
+Finally, in the recent work of \cite{lee2024llm2llm}, the authors propose an adaptive procedure where a large language model is used to generate targeted fine-tuning data for a small model based on examples that the small model has made mistakes on. The large model is prompted to rewrite variants of these questions using specialized per-domain hard prompts. Extending the general-purpose SoftSRV approach to an adaptive framework is a current area of investigation.
+
+\subsection{Soft-prompting \& non-text data modalities}
+As mentioned previously, the use of soft-prompting (or prompt-tuning) already has a significant history outside of targeted synthetic fine-tuning data generation. Primarily known for its use as a parameter efficient fine-tuning method \citep{lester2021power}, soft prompt training has also been used as a framework to learn or compress in-context instructions \citep{mu2024learning}. \cite{limend} has proposed training a secondary model to compress in-context instructions into soft prompt that is then prepended to the task hard prompt and is meant to generalize to even new tasks.
+
+While our study has been focused on generating synthetic text, there have been similar efforts in other modalities. For example, the ControlNet approach of \cite{zhang2023adding} trains a diffusion model to produce images conditioned on contextual input, for example, image edges or 3D pose skeletons. Similarly, \cite{gaospeech} train a diffusion-based speech model to condition on a ``simple speech representation'' embedding to guide the generation of new synthetic speech data. Finally, in the case of text-to-image generators, there has been a significant amount of work in solving the ``inverse'' problem of mapping from an image back to a prompt (either hard prompt or a soft representation), so that one can  more predictably generate synthetic images in certain styles (see \cite{mahajan2024prompting} and many references therein).
+
+  
+
+
+\section{Conclusion}
+
+
+In this work, we have established the effectiveness of using contextual soft prompts, via the SoftSRV framework, for generating targeted synthetic fine-tuning data and its applicability across several different domains. 
+We deploy the same SoftSRV pipeline across math, coding, and reasoning tasks, in each case we find SoftSRV is able to generate fine-tuning data that provide good downstream performance and fits well to the target distribution without any per-domain specialization needed.
+Given these results, there are several natural directions for further research. For example, we can view soft prompts as one particular class of parameter efficient tuning approach that is natural to leverage for data synthethesis, however, other approaches (such as LoRA) may be worth investigating as well. Finally, adapting the choice of context vector in order to generate the most effective synthetic data for improving the downstream model is a current and ongoing line of work.
+
+
+
+
+
+
+
+

@@ -1,0 +1,515 @@
+\title{L3Ms — Lagrange Large Language Models}
+
+\begin{abstract}
+
+Supervised fine-tuning (SFT) and alignment of large language models (LLMs) are key steps in providing a good user experience. However, the concept of an appropriate alignment is inherently application-dependent, and current methods often rely on heuristic choices to drive the optimization. In this work, we formulate SFT and alignment as a constrained optimization problem, where the LLM is trained on a task while being required to meet application-specific requirements, without resorting to heuristics. To solve this, we propose Lagrange Large Language Models (L3Ms), which employ logarithmic barriers to enforce the constraints. This approach allows for the customization of L3Ms across diverse applications while avoiding heuristic-driven processes. We demonstrate experimentally the versatility and efficacy of L3Ms in achieving tailored alignments for various applications.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Large language models (LLMs) are used for a wide range of tasks: as chatbots \citep{brown2020language,openai2024gpt4}, for code generation \citep{ahmad2021unified,wang2021codet5,roziere2024code}, for medical assistance \citep{yang2022large,moor2023foundation}, and more.
+The key ingredients for their impressive downstream performance are supervised fine-tuning (SFT) and alignment; the former fine-tunes the LLM to a task of interest, while the latter instills it with preferential properties.
+Arguably, the \emph{right} combination of preferential properties is highly application/task-dependent.
+For instance, a scholar might want a chatbot to be honest and factual to assist with their work, whereas a fiction writer might prefer the opposite behavior to help create fantastical imaginary worlds.
+There is also plenty of (anecdotal) evidence in support: some LLMs refuse to provide information on how to ``kill'' a process in Unix, recommending the use of less violent strategies for dealing with wayward computer programs instead.\footnote{\url{https://www.reddit
+Therefore, we need frameworks for the customization of LLMs.
+
+Consequently, \citet{li2021deep,bai2022training,rame2023rewarded,wu2023finegrained,ji2023beavertails} train LLMs on varying combinations of such preferential properties.
+In practice, one tends to resort to trial and error to find the right preference combination for their particular task.
+In doing so, one verifies if certain \emph{minimum baselines} are satisfied, such as ensuring the factual correctness of statements or confirming that the response lengths are capped at 100 words.
+Since there isn't a way to enforce such requirements directly, current methods resort to heuristics.
+Additionally, existing pipelines carry out SFT and alignment in sequential steps.
+Hence they need to ensure that the LLM does not forget relevant task information learned during the SFT stage.
+This is achieved by penalizing the LLM for drastic deviations: the strength of the penalty is determined heuristically.
+
+In this work, we formulate SFT and alignment in LLMs as a constrained optimization problem.
+In particular, we fine-tune an LLM to minimize the task perplexity (the objective function) while simultaneously satisfying application-specific minimum requirements (the constraints).
+This merges the SFT and alignment stages and mitigates the reliance on heuristics altogether.
+Furthermore, we propose Lagrange Large Language Models, a.k.a. L3Ms, to solve such constrained optimization problems.
+Specifically, they do so by employing logarithmic barriers and enforcing the constraints gradually over the training procedure.
+Lastly, we empirically demonstrate how one can pick and choose different constraints and tailor L3Ms to a range of applications without resorting to heuristics.
+For example, \cref{tab:length-examples} provides the generated responses from two such L3Ms; both are trained on the task of instruction-following, but one is constrained to be concise while the other is to be verbose.
+
+In summary, our contributions are as follows:
+\begin{enumerate}
+    \item
+    We formulate SFT and alignment in LLMs as a constrained optimization problem: an LLM is fine-tuned on a task while simultaneously satisfying custom requirements (cf. \cref{sec:constrained}).
+    \item
+    We propose L3Ms, a family of LLMs fine-tuned using the above framework (cf. \cref{sec:l3m}).
+    \item
+    We demonstrate experimentally how L3Ms can be customized to different applications and their specific requirements while avoiding heuristic-driven processes (cf. \cref{sec:experiments}).
+\end{enumerate}
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{ll}
+        \toprule
+        \thead[l]{\textbf{Prompt}} & \thead[l]{What are the four main types of macromolecules found in living organisms?} \\
+        \midrule
+        \thead[l]{\textbf{Response} \\ \textbf{(short response L3M)}} & \thead[l]{1. Nucleic acids (DNA and RNA) \\ 2. Proteins \\ 3. Carbohydrates \\ 4. Lipids} \\
+        \midrule
+        \thead[l]{\textbf{Response} \\ \textbf{(long response L3M)}} & \thead[l]{1. Nucleic acids, including DNA and RNA, which carry genetic information \\ 2. Proteins, which are responsible for the structure, function, and regulation \\ \quad of living organisms \\ 3. Lipids, which provide energy and form the membranes that surround cells \\ 4. Carbohydrates, which are used as an energy source and as structural \\ \quad components of cells.} \\
+        \midrule
+        \midrule
+        \thead[l]{\textbf{Prompt}} & \thead[l]{Who discovered the law of universal gravitation?} \\
+        \midrule
+        \thead[l]{\textbf{Response} \\ \textbf{(short response L3M)}} & \thead[l]{Sir Isaac Newton is credited with discovering the law of universal \\ gravitation in the late 17th century.} \\
+        \midrule
+        \thead[l]{\textbf{Response} \\ \textbf{(long response L3M)}} & \thead[l]{Sir Isaac Newton is widely credited with the discovery of the law of \\ universal gravitation, which states that every particle in the universe attracts \\ every other particle with a force proportional to their masses and inversely \\ proportional to the square of the distance between them.} \\
+        \bottomrule
+    \end{tabular}
+    \caption{
+        \textbf{Example responses from length constrained L3Ms.}
+        We provide example responses from L3Ms with varying length constraints.
+        We include the prompt along with the generated responses from two L3Ms: one constrained to have short responses, and the other constrained to long ones.
+    }
+    \label{tab:length-examples}
+\end{table}
+
+
+
+\section{Optimization for LLMs}
+
+\label{sec:setup}
+
+Training an LLM proceeds in multiple stages \citep{ouyang2022training}, which we discuss below.
+
+\subsection{Pre-training}
+\label{sec:setup-pretraining}
+
+The pre-training stage instills the LLM with a generic knowledge of language.
+It entails regenerating text/token sequences by minimizing their perplexity, i.e., the negative log-likelihood of the sequence normalized by its length.
+More formally, the perplexity on a sequence $x$ is defined as:
+\begin{equation*}
+    l_{\theta} \rbr{x} \ = \ - \frac{\log \pi_{\theta} \rbr{x}}{| x |} \ = \ - \frac{1}{| x |} \sum_{i = 1}^{| x |} \log \pi_{\theta} \rbr{x_{i} | x_{< i}},
+\end{equation*}
+where $x_{i}$ and $x_{< i}$ denote the $i$-th token in the sequence and its prefix, respectively.
+Additionally, the function $\pi_{\theta} ( \cdot )$ denotes the LLM's predicted probability distribution over token sequences, where the LLM is parameterized with weights $\theta$.
+Then, the pre-training objective is given as follows:
+\begin{equation*}
+    \min_{\theta} \ \ev{x \sim q \rbr{\cdot}}{l_{\theta} \rbr{x}},
+\end{equation*}
+and the expectation is replaced by an empirical average over a large corpus with trillions of tokens.
+
+\subsection{Supervised fine-tuning (SFT)}
+\label{sec:setup-sft}
+
+Next, one fine-tunes the LLM to a task of interest, such as instruction-following, summarization, or translation.
+The data are (prompt, response) pairs $( x , y )$, and the LLM is trained to regenerate these responses.
+Thus, one minimizes the perplexity on the response conditioned on the prompt:
+\begin{equation}
+    \label{eq:sft}
+    \min_{\theta} \ \ev{\rbr{x , y} \sim p \rbr{\cdot}}{l_{\theta} \rbr{y | x}},
+\end{equation}
+for the distribution $p ( \cdot )$ over (prompt, response) pairs which reflects the task-related data.
+
+\subsection{Alignment}
+\label{sec:setup-alignment}
+
+This stage aligns the LLM to generate responses with preferential properties.
+A common setup is to learn preference reward functions that represent properties like helpfulness and harmlessness \citep{bai2022training}, followed by reinforcement learning to adapt the LLM to maximize said rewards.
+This is referred to as reinforcement learning from human feedback (RLHF; \citealp{knox2008tamer,griffith2013policy,christiano2017deep}).
+Note that the preference reward functions need not always be learned; they could also be engineered or rule-based, such as the length of the response.
+
+Given a single preference reward function $r ( \cdot )$, the alignment objective is given as follows:
+\begin{equation}
+    \label{eq:rlhf}
+    \max_{\theta} \ \ev{\substack{\rbr{x , \cdot} \sim p \rbr{\cdot} \\ y \sim \pi_{\theta} \rbr{\cdot | x}}}{r \rbr{y | x}}.
+\end{equation}
+This maximizes the rewards for the LLM's responses to prompts sampled from the task distribution.
+To prevent over-optimization of the reward and avoid drastic deviation away from the SFT model, it is common practice to add a regularization penalty such as the KL divergence \citep{gao2023scaling}.
+
+We are interested in $k \geq 1$ different preferential properties.
+In such a scenario, one could learn individual preference reward functions $r_{i}$'s and optimize the LLM to maximize their combination.
+In particular, \citet{li2021deep,rame2023rewarded,wu2023finegrained,ji2023beavertails} use a linear combination of the rewards, substituting the single reward in \cref{eq:rlhf} with $\sum_{i = 1}^{k} \alpha_{i} r_{i} ( y | x )$, for some choice of $\alpha_{i} \geq 0$.
+Alternatively, one could learn a single reward function by choosing the data proportions of the different properties used to train it.
+For instance, \citet{bai2022training} use a 3:1 proportion of helpfulness to harmlessness data to train a single preference reward function.
+Note that the proportions can also be represented via weights $\alpha_{i} \geq 0$ with $\sum_{i = 1}^{k} \alpha_{i} = 1$.
+Therefore, the choice of $\alpha_{i}$'s, combined with the strength of the regularization penalty, together steer the alignment.
+They are chosen based on the good judgment of the practitioner in a somewhat heuristic manner.
+
+\subsection{Shortcomings}
+\label{sec:setup-shortcomings}
+
+While the above pipeline is commonly used to train LLMs for deployment, it has shortcomings.
+
+Firstly, how does one choose the weights $\alpha_{i}$'s?
+Or equivalently, \emph{what is the right combination of preference properties?}
+Choosing between properties such as truthfulness, verbosity, and humor depends on the application at hand.
+However, even when the application is known, the weights are chosen through trial and error: trying different combinations and inspecting the achieved rewards.
+For instance, if one wants the responses to be under 100 words for a summarization task, one might repeatedly examine the length of the responses and adjust the weights $\alpha_{i}$'s to achieve that.
+This inherently involves verification against a set of minimum baselines being satisfied.
+\emph{Can we avoid heuristics and enforce such minimum requirements for the preference rewards in a principled way?}
+
+Secondly, recall that the original task objective is in \cref{eq:sft}.
+However, optimizing a special purpose objective like \cref{eq:rlhf} can lead to a decrease in performance on the original task.
+While penalizing the deviation away from the SFT model helps mitigate this to some extent, the strength of the penalty is again determined heuristically.
+\emph{Can we ensure the performance on the original task is maintained?}
+
+
+
+\section{Related work}
+
+\label{sec:related}
+
+\subsection{One size does not fit all}
+
+Early work on LLM alignment assumed homogeneity of preferences \citep{bakker2022finetuning}.
+However, the reality is quite different: human preferences vary widely and are highly application-specific \citep{rame2023rewarded,casper2023open}.
+Consequently, \citet{rame2023rewarded,wu2023finegrained,ji2023beavertails,zhou2024beyond} linearly combine several fine-grained preference rewards, where each combination reflects a different customized preference.
+However, the \emph{right} combination of preferential properties for a particular application is determined heuristically through trial and error.
+Conversely, we formulate alignment as a constrained optimization problem, where the custom requirements are naturally imposed as constraints.
+This alleviates the need for heuristic choices.
+
+\subsection{Constrained alignment for LLMs}
+
+Independent of our work, \citet{moskovitz2024confronting,dai2024safe} also introduced constrained optimization for LLM alignment but for varying reasons.
+Motivated to avoid over-optimization of preference rewards, \citet{moskovitz2024confronting} find ``proxy points'', values of the reward functions beyond which the performance of the LLM is negatively impacted.
+They constrain the average rewards to be in the vicinity of these proxy points.
+\citet{dai2024safe} trade-off between helpfulness and harmlessness from a safety standpoint.
+They maximize the LLM's helpfulness while constraining its average harmlessness reward.
+Our motivation on the other hand is to tailor to custom preferences through sets of different constraints, while simultaneously learning to perform the task at hand.
+
+Our work is different in two important ways.
+Firstly, both \citet{moskovitz2024confronting,dai2024safe} consider the alignment process in isolation, because of which their objective is either to maximize one of the preference rewards or to minimize the deviation away from the SFT model.
+On the other hand, we merge the SFT and alignment stages and choose task perplexity minimization as our objective.
+This directly ensures that the LLM's task-solving capabilities are preserved, and it avoids loading an additional reference (SFT) model during the training process to compute the deviations.
+
+Secondly, both \citet{moskovitz2024confronting,dai2024safe} obtain solutions to the constrained problem by computing the saddle-point of the Lagrangian.
+This is done by formulating a min-max game where the LLM minimizes the Lagrangian and the Lagrange multipliers adapt to maximize it.
+However, the non-convexity of the objective makes this nontrivial.
+Instead, we choose the logarithmic barrier approach as the associated Lagrange multipliers satisfy the KKT complementary slackness condition by design (cf. \cref{sec:l3m-lagrange-mult}) rather than letting the learning procedure do so (which in our experience is extremely sensitive to the choice of the learning rate).
+We empirically observe that while both methods satisfy the constraints, our approach using log-barriers minimizes the task perplexity better (cf. \cref{sec:experiments-hh}).
+As a side effect, we avoid introducing new learning parameters.
+
+Additionally, we provide experimental validation of our approach on more preferences than \citet{moskovitz2024confronting,dai2024safe}, and a 4.5$\times$ larger LLM than \citet{moskovitz2024confronting}.
+
+
+
+\section{Constrained optimization}
+
+\label{sec:constrained}
+
+Our goal is to reduce the task objective in \cref{eq:sft} for the LLM to solve the intended task, while also enabling custom alignment by having the LLM meet the application-specific minimum requirements on different preference rewards.
+To do so, we propose the constrained optimization problem:
+\begin{align}
+    \label{eq:objective}
+    & \min_{\theta} \ \ev{\rbr{x , y} \sim p \rbr{\cdot}}{l_{\theta} \rbr{y | x}} \\
+    \label{eq:average-constraints}
+    & \text{subject to} \ \ev{\substack{\rbr{x , \cdot} \sim p \rbr{\cdot} \\ y \sim \pi_{\theta} \rbr{\cdot | x}}}{r_{i} \rbr{y | x}} \ \geq \ b_{i} \ \text{for all} \ i \in \cbr{1 , 2 , \ldots , k}.
+\end{align}
+Here, the objective is the same as the task objective in SFT, and the constraints are enforced to satisfy the custom requirements; this merges the SFT and alignment stages.
+The $b_{i}$'s signify the minimum baselines for each preference reward function $r_{i} ( \cdot )$ and the constraints are enforced on average.
+
+Compared to the previous approach, we no longer rely on heuristics to find a set of weights $\alpha_{i}$'s to satisfy the minimum requirements; we can do so directly through the constraints.
+Furthermore, with the same objective as SFT, we can directly maintain task performance without any deviation penalty.
+Additionally, note that whenever a constraint is satisfied, its influence vanishes.
+For instance, if the LLM is naturally harmless and $r_{\text{harmless}} ( y | x ) \geq b_{\text{harmless}}$, then the constraint is not active and the LLM will not be penalized.
+Conversely, the previous approach would further penalize the LLM.
+
+\paragraph{Notation}
+For ease of notation, we rewrite the constrained problem in \cref{eq:objective,eq:average-constraints} as follows:
+\begin{equation}
+    \label{eq:constrained-problem}
+    \min_{\theta} \ L \rbr{\theta} \ \text{subject to} \ C_{i} \rbr{\theta} \ \leq \ 0 \ \text{for all} \ i \in \cbr{1 , 2 , \ldots , k},
+\end{equation}
+with the objective $L ( \theta ) = \mathds{E}_{( x , y ) \sim p ( \cdot )} [ l_{\theta} ( y | x ) ]$ and constraints  
+$C_{i} ( \theta ) = \mathds{E}_{\substack{( x , \cdot ) \sim p ( \cdot ) \\ y \sim \pi_{\theta} ( \cdot | x )}} [ b_i - r_{i} ( y | x ) ]$.
+
+\subsection{Types of constraints}
+\label{sec:constrained-types}
+
+While we write the constraints in \cref{eq:average-constraints} as expectation/average constraints, other forms exist.
+For instance, uniform constraints impose a minimum reward on every generated (prompt, response) pair:
+\begin{equation}
+    \label{eq:uniform-constraints}
+    r_{i} \rbr{y | x} \ \geq \ b_{i} \ \text{for all} \ \rbr{x , \cdot} \sim p \rbr{\cdot} , \ y \sim \pi_{\theta} \rbr{\cdot | x} \ \text{and all} \ i \in \cbr{1 , 2 , \ldots , k}.
+\end{equation}
+Additionally, chance constraints bound the probability of the inequality holding away from zero:
+\begin{equation}
+    \label{eq:chance-constraints}
+    \pr{\substack{\rbr{x , \cdot} \sim p \rbr{\cdot} \\ y \sim \pi_{\theta} \rbr{\cdot | x}}}{r_{i} \rbr{y | x} \ \geq \ b_{i}} \ \geq \ 1 - \epsilon_{i} \ \text{for all} \ i \in \cbr{1 , 2 , \ldots , k}.
+\end{equation}
+While these constraints are not equivalent, they are related.
+We can rewrite \cref{eq:chance-constraints} in the form of expectation constraints by using $1 - \epsilon_{i}$ as the threshold and taking the expectation of the indicator $\mathds{1} \{ r_{i} ( y | x ) \geq b_{i} \}$.
+Moreover, \cref{eq:uniform-constraints} implies \cref{eq:average-constraints}, but the converse is not true.
+Unfortunately, \cref{eq:uniform-constraints} is difficult to achieve in practice, especially when the data distribution is unknown.
+
+We continue using the expectation constraints, but similar discussions can extend to the other types.
+
+\subsection{Lagrange multipliers}
+\label{sec:constrained-lagrangian}
+
+We can introduce Lagrange multipliers $\lambda_{i} \geq 0$ for the constraints and obtain the Lagrangian:
+\begin{equation}
+    \label{eq:lagrangian}
+    \mathcal{L} \rbr{\theta} \ = \ L \rbr{\theta} + \sum_{i = 1}^{k} \lambda_{i} C_{i} \rbr{\theta}.
+\end{equation}
+There is a rich literature connecting the Lagrangian with constrained optimization.
+Notably, the KKT conditions \citep{karush1939minima,kuhn1951nonlinear} provide sufficiency conditions for global optimality under convexity, where the solution can be obtained by finding the saddle point of the Lagrangian.
+However, these conditions are not enough for highly non-convex scenarios like ours.
+
+Nonetheless, the Lagrangian is instructive in understanding the relative importance of the constraints.
+For an active constraint, i.e., one satisfied with equality, the corresponding Lagrange multiplier can be non-zero; the larger its value, the more important the constraint.
+Conversely, for an inactive constraint, i.e., one satisfied with strict inequality, the corresponding Lagrange multiplier must vanish to 0.
+This is known as complementary slackness and is one of the KKT conditions.
+
+\subsection{Logarithmic barrier}
+\label{sec:log-barrier}
+
+A practical way to enforce constraints is with barrier functions.
+Consider the (relaxed) log-barrier:
+\begin{equation}
+    \label{eq:log-barrier}
+    \mathcal{B}_{\mu , s} \rbr{z} \ = \ \begin{cases} - \mu \log \rbr{- z} , & z \ \leq \ - s \\ \frac{\mu}{s} z + \mu - \mu \log s , & z \ > \ - s \end{cases}, \ \text{and hence} \ \partial_z \mathcal{B}_{\mu , s} \rbr{z} \ = \ \frac{\mu}{\max \rbr{- z , s}},
+\end{equation}
+with parameters $\mu , s > 0$.
+This is a convex, continuous, and differentiable function, which is valid for all $z \in \mathds{R}$. 
+Importantly, for $s = \mu^{2}$, this barrier function converges to the characteristic function $\chi \{ z \leq 0 \}$ as $\mu \rightarrow 0$, i.e., it takes the value 0 when $z \leq 0$ and $\infty$ otherwise \citep{tal1992modified,nash1994numerical,hauser2006constraint,feller2017relaxed}; the condition $s = \mu^{2}$ is sufficient, but not necessary \citep{kervadec2022constrained}. 
+This convergence to the characteristic function is visually depicted in \cref{fig:log-barrier}, showing the change in the log-barrier function as we gradually decrease $\mu$.
+
+We can now use the log-barrier to enforce the constraints in \cref{eq:constrained-problem} and simply add them to the objective.
+We obtain an \emph{unconstrained} objective, with $\mu$ controlling the strength of the constraints:
+\begin{equation}
+    \label{eq:log-barrier-objective}
+    \mathcal{G}_{\mu} \rbr{\theta} \ = \ L \rbr{\theta} + \frac{1}{k} \sum_{i = 1}^{k} \mathcal{B}_{\mu, \mu^{2}} \rbr{C_{i} \rbr{\theta}}.
+\end{equation}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.4\columnwidth]{contents/figures/log_barrier.pdf}
+    \caption{
+        \textbf{The relaxed logarithmic barrier.}
+        We depict the convergence of the relaxed logarithmic barrier $\mathcal{B}_{\mu , \mu^{2}} ( z )$ to the characteristic function $\chi \{ z \leq 0 \}$ as $\mu \rightarrow 0$.
+        We gradually decrease $\mu$ from 1 (blue) to 0.01 (red).
+        Consequently, $\mathcal{B}_{\mu , \mu^{2}} ( z )$ gets closer to 0 for $z \leq 0$ and increases to $\infty$ otherwise.
+    }
+    \label{fig:log-barrier}
+\end{figure}
+
+
+
+\section{Lagrange Large Language Models (L3Ms)}
+
+\label{sec:l3m}
+
+We have thus far formulated the SFT and alignment stages as a constrained optimization problem in \cref{eq:constrained-problem}.
+We proceed to find solutions for the same by solving the unconstrained objective in \cref{eq:log-barrier-objective}.
+We call the family of models obtained in this way L3Ms, i.e., Lagrange Large Language Models. 
+
+\subsection{Optimization procedure}
+\label{sec:l3m-opt}
+
+Since the log-barrier converges to the characteristic function as $\mu \rightarrow 0$, we want to find the minimizer of $\mathcal{G}_{\mu} ( \theta )$ for a very small $\mu$.
+However, doing so directly leads to instabilities as the objective function is ill-conditioned.
+Instead, it is common practice to follow an iterative procedure where one finds the minimizer for a fixed $\mu$, reduces $\mu$, and repeats \citep{curtis2024stochastic}.
+Specifically, the procedure is instantiated with initial values $\theta_{0}$, $\mu_{1}$, and $0 < \gamma < 1$.
+On the $t$-th iteration, $\mu_{t} \leftarrow \gamma \mu_{t - 1}$ is reduced and $\theta_{t} \leftarrow \arg_{\theta} \min \mathcal{G}_{\mu_{t}} ( \theta )$ (with the initialization at $\theta_{t - 1}$).
+In doing so, the constraints are enforced gradually, nudging the LLM to satisfy them over the training procedure while avoiding instabilities.
+Furthermore, as $\{ \mu_{t} \} \searrow 0$, the weights $\theta_{t}$ converges to the minimizer of the constrained problem.
+
+It is impossible to minimize $\mathcal{G}_{\mu_{t}} ( \theta )$ exactly in many practical applications.
+Instead, at each iteration, we take a single optimization step toward the solution.
+Doing so is amenable to stochastic gradient methods and mitigates computational overhead --- the training proceeds as normal while the value of $\mu$ is reduced over the course of the training.
+One can guarantee convergence of such a procedure to the optimal solution in some settings; for instance, \citet{curtis2024stochastic} prove convergence when dealing with box constraints.
+However, convergence in a scenario like ours is not guaranteed.
+Nonetheless, we will experimentally demonstrate its use for our constrained problems.
+
+We employ stochastic gradient methods and derive the gradient of our objective function directly:
+\begin{equation}
+    \label{eq:log-barrier-objective-grad}
+    \partial_{\theta} \mathcal{G}_{\mu} \rbr{\theta} \ = \ \partial_{\theta} L \rbr{\theta} + \frac{\mu}{k} \sum_{i = 1}^{k} \frac{\partial_{\theta} C_{i} \rbr{\theta}}{\max \rbr{- C_{i} \rbr{\theta} , \mu^{2}}}.
+\end{equation}
+This follows immediately from \cref{eq:log-barrier,eq:log-barrier-objective}.
+Note that the $\partial_{\theta} C_{i} ( \theta )$'s are also known as the policy gradients in reinforcement learning literature.
+We discuss our strategy for estimating these gradients in \cref{app:policy-grad} and refer readers to \citet{schulman2016high} for a more detailed review.
+
+\subsection{Connection to Lagrange multipliers}
+\label{sec:l3m-lagrange-mult}
+
+The log-barrier and the Lagrangian are intrinsically connected; this becomes evident when comparing \cref{eq:log-barrier-objective-grad} with the (gradient of the) Lagrangian in \cref{eq:lagrangian}.
+In particular, we define the multipliers:
+\begin{equation*}
+    \hat{\lambda}_{i} \ = \ \frac{\mu}{k \max \rbr{- C_{i} \rbr{\theta} , \mu^{2}}},
+\end{equation*}
+corresponding to the gradients $\partial_{\theta} C_{i} ( \theta )$'s in \cref{eq:log-barrier-objective-grad}.
+They can be interpreted as Lagrange multipliers: for active constraints, $\hat{\lambda}_{i} = 1 / k \mu$ is non-zero; for inactive constraints, $\hat{\lambda}_{i} = - \mu / k C_{i} ( \theta )$ vanishes to $0$ as $\mu \rightarrow 0$.
+Hence, the KKT complementary slackness condition is satisfied by design.
+
+\subsection{Implementation details}
+\label{sec:l3m-implementation}
+
+\paragraph{Alternating objective and gradient clipping.}
+A simple, yet effective way to ensure stable training of large models is gradient clipping \citep{goodfellow2016deep,zhang2020why}.
+We employ this technique, albeit with the modification of clipping the gradients of both the task objective and the constraints separately, as they can have varying magnitudes.
+We achieve this by alternating between reducing the task objective and enforcing the constraints by flipping a fair coin to select one or the other.
+While this doubles the number of steps to achieve the same effect, it does not increase the amount of work done as now only one part of the objective or the other is evaluated at each step. 
+
+\paragraph{Length normalization.}
+The gradient of our objective function in \cref{eq:log-barrier-objective-grad} involves the log-likelihoods of the generated responses through the gradients $\partial_{\theta} C_{i} ( \theta )$'s (cf. \cref{eq:policy-grad}).
+To avoid a response length bias, we length-normalize the log-likelihoods, akin to the definition of perplexity.
+
+\paragraph{Estimating the mean preference rewards.}
+We need to estimate the expectations involved in the gradient of our objective function in \cref{eq:log-barrier-objective-grad}.
+The expectations in the numerators can be estimated with the per-mini-batch Monte Carlo averages \citep{mohamed2020monte}.
+However, $C_{i} ( \theta )$ in the denominator needs careful consideration.
+Note that: (i) $C_{i} ( \theta )$ does not involve the gradient, so its estimates can include information from previous mini-batches to reduce variance, and (ii) since the weights are updated during training, $C_{i} ( \theta )$ is non-stationary.
+Consequently, we use an exponential moving average estimate for the mean (offset) preference rewards $C_{i} ( \theta )$ in the denominator.
+
+
+
+\section{Experimental results}
+
+\label{sec:experiments}
+
+To illustrate the versatility of L3Ms, we empirically evaluate them on two criteria: (i) the satisfaction of the imposed custom constraints, and (ii) the task perplexity objective.
+Note that L3Ms have essentially the same time complexity as traditional approaches: the SFT and alignment stages have been combined into one and the log-barrier parameter is adjusted during the training procedure itself.
+
+\subsection{Setup}
+\label{sec:experiments-setup}
+
+We use LLaMA-7B \citep{touvron2023llama} for all our experiments, as it is a lightweight LLM pre-trained on a large corpus.
+We are interested in the instruction-following task, for which we use UltraChat \citep{ding2023enhancing}, a large-scale dataset of instructional conversations.
+We refer to the model trained via the SFT objective (without alignment) as the \emph{SFT} model.
+We train LLMs using the min-max approach to find the saddle-point of the Lagrangian, as proposed by \cite{moskovitz2024confronting,dai2024safe}, referring to them as \emph{MMs}.
+Lastly, we refer to models trained using our approach as \emph{L3Ms}.
+We use the Transformers package \citep{wolf2020transformers} for our implementation and run experiments on NVIDIA H100s.
+Further details on our setup are included in \cref{app:experiments-setup}.
+
+In what follows, we use different preference reward functions and vary the custom constraint requirements.
+All results are obtained on a held-out test dataset (not seen during training or validation).
+
+\subsection{Length constrained L3Ms}
+\label{sec:experiments-length}
+
+Consider tasks where the lengths of the responses need to be contained in the range $[ l_{\text{low}} , l_{\text{high}} ]$ to control its verbosity, in summarization tasks for example \citep{makino2019global}.
+The natural choice of reward functions in this case are the ones that compute the response length and its negation via $r_{1} ( y | x ) = | y |$ and $r_{2} ( y | x ) = - | y |$; correspondingly, these rewards are to be controlled with the requirements of $l_{\text{low}}$ and $l_{\text{high}}$ respectively. Note that these rewards are perfectly anti-correlated.
+
+If we naively average the rewards, any unconstrained formulation of alignment (including RLHF) will be ineffective as the loss will always vanish due to the anti-correlation. 
+We could use a weighted average and tune the weights heuristically, but this is tedious.
+Instead, we use the constrained formulation and directly constrain the rewards $r_{1} ( y | x ) = | y | \geq l_{\text{low}}$ and $r_{2} ( y | x ) = - | y | \geq - l_{\text{high}}$.
+
+We train several L3Ms with varying length constraints.
+We illustrate the distributions of the generated response lengths (in tokens) and report the perplexities achieved on the task-related data in \cref{fig:length}.
+We observe that the mean response lengths are in the required range in each case, satisfying the imposed expectation constraints.
+Additionally, the task perplexities increase slightly as the constraints on the response lengths are made more stringent.
+However, there is little to no degradation relative to the SFT model, with all mean task perplexities being within 0.02 standard deviations.
+
+The examples included in \cref{tab:length-examples} are generated from such L3Ms.
+While all the responses correctly answer the prompts, their lengths vary corresponding to the length constraints imposed on them.
+
+\begin{figure}[t]
+    \begin{minipage}[c]{.46\textwidth}
+        \small
+        \begin{tabular}{lcc}
+            \toprule
+            \textbf{LLM type}                                           & \textbf{Length}   & \textbf{Perplexity} \\
+            \midrule
+            SFT                                                         & 121.6             & 0.805\textsubscript{$\pm$0.3} \\
+            \midrule
+            L3M [\phantom{0}50\phantom{.5}, 100\phantom{.5}]            & \phantom{0}81.3   & 0.804\textsubscript{$\pm$0.3} \\
+            L3M [100\phantom{.5}, 150\phantom{.5}]                      & 120.7             & 0.804\textsubscript{$\pm$0.3} \\
+            \midrule
+            L3M [\phantom{0}50\phantom{.5}, \phantom{0}75\phantom{.5}]  & \phantom{0}64.4   & 0.807\textsubscript{$\pm$0.3} \\
+            L3M [\phantom{0}75\phantom{.5}, 100\phantom{.5}]            & \phantom{0}88.2   & 0.808\textsubscript{$\pm$0.3} \\
+            L3M [100\phantom{.5}, 125\phantom{.5}]                      & 111.7             & 0.810\textsubscript{$\pm$0.3} \\
+            L3M [125\phantom{.5}, 150\phantom{.5}]                      & 126.5             & 0.809\textsubscript{$\pm$0.3} \\
+            \midrule
+            L3M [\phantom{0}75\phantom{.5}, \phantom{0}87.5]            & \phantom{0}82.9   & 0.811\textsubscript{$\pm$0.3} \\
+            L3M [\phantom{0}87.5, 100\phantom{.5}]                      & \phantom{0}92.7   & 0.809\textsubscript{$\pm$0.3} \\
+            L3M [100\phantom{.5}, 112.5]                                & 104.8             & 0.810\textsubscript{$\pm$0.3} \\
+            L3M [112.5, 125\phantom{.5}]                                & 117.3             & 0.810\textsubscript{$\pm$0.3} \\
+            \bottomrule
+        \end{tabular}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[c]{.53\textwidth}
+        \includegraphics[width=\columnwidth]{contents/figures/length_constrained.pdf}
+    \end{minipage}
+    \caption{
+        \textbf{Length constrained L3Ms.}
+        We report the response lengths (in tokens) and task perplexities of the SFT model and the L3Ms with varying length constraints.
+        \emph{Left:} The mean response length with the mean and standard deviation of the task perplexities.
+        \emph{Right:} The distribution of the response lengths.
+        The notches indicate the medians and their 95\% confidence intervals, the boxes show the $\pm$25\% quantiles, and the whiskers denote the 1.5$\times$ interquartile ranges.
+        The white circles mark the means and the black dashed lines depict the constraints imposed on the different L3Ms.
+    }
+    \label{fig:length}
+\end{figure}
+
+\subsection{Helpful and harmless L3Ms}
+\label{sec:experiments-hh}
+
+Next, we consider the Helpful and Harmless preferences that have been extensively used in the LLM alignment literature \citep{ji2023beavertails,wang2024transforming,zhou2024beyond,guo2024controllable}.
+Specifically, we utilize the datasets by \citet{bai2022training} to train two preference reward functions respectively.
+These learned reward functions are negatively correlated \citep{bai2022training,dai2024safe}.
+Furthermore, note that the numerical outputs of both these reward functions are interpreted as ratings such that a higher numerical value indicates higher helpfulness/harmlessness and vice versa.
+
+We train several L3Ms with varying HH constraints.
+We compare our L3M approach of using log-barriers with the min-max optimization by \citet{moskovitz2024confronting,dai2024safe} to find the saddle-point of the Lagrangian (MMs). 
+In our experience, learning the Lagrange multipliers in this way is extremely sensitive to the choice of the learning rate.
+Moreover, to avoid loading an additional reference LLM during the training process, as is done by \citet{moskovitz2024confronting,dai2024safe}, our implementation of MM minimizes the task perplexity directly (as is done by L3Ms as well).
+
+\cref{fig:hh} shows the achieved task perplexities and helpful-harmless rewards for the different LLMs.
+At initialization, the helpful and harmless rewards are both low, with a high task perplexity of 1.316\textsubscript{$\pm$0.4}.
+This is improved upon by the SFT model, reducing the perplexity to 0.805\textsubscript{$\pm$0.3} and attaining a high helpfulness reward (attributed to the task data instilling instruction-following capabilities).
+Further, MMs sacrifice task performance to over-satisfy the constraints, with mean task perplexities higher than 0.822.
+On the other hand, L3Ms satisfy the imposed helpful-harmless reward constraints with lower task perplexities (the mean perplexities are in the range of 0.804-0.820).
+We attribute this to the L3Ms having better Lagrange multipliers by design rather than learning them as is done in MMs.
+
+\begin{figure}[t]
+    \begin{minipage}[c]{.53\textwidth}
+        \includegraphics[width=\columnwidth]{contents/figures/hh_constrained.pdf}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[c]{.46\textwidth}
+        \small
+        \begin{tabular}{cccc}
+            \toprule
+            \multicolumn{2}{c}{\textbf{Constraints}} & \multicolumn{2}{c}{\textbf{Perplexity}} \\
+            \textbf{Helpful}    & \textbf{Harmless} & \textbf{MM}                   & \textbf{L3M} \\
+            \midrule
+            4                   & 0                 &                               & 0.804\textsubscript{$\pm$0.3} \\
+            4                   & 1                 &                               & 0.809\textsubscript{$\pm$0.3} \\
+            4                   & 2                 & 0.822\textsubscript{$\pm$0.3}  & 0.818\textsubscript{$\pm$0.3} \\
+            3                   & 3                 & 0.822\textsubscript{$\pm$0.3} & 0.814\textsubscript{$\pm$0.3} \\
+            2                   & 4                 & 0.825\textsubscript{$\pm$0.3} & 0.820\textsubscript{$\pm$0.3} \\
+            1                   & 4                 &                               & 0.817\textsubscript{$\pm$0.3} \\
+            0                   & 4                 &                               & 0.816\textsubscript{$\pm$0.3} \\
+            \bottomrule
+        \end{tabular}
+    \end{minipage}
+    \caption{
+        \textbf{Helpful and harmless L3Ms.}
+        We report the helpful-harmless rewards and task perplexities achieved by the different LLMs.
+        \emph{Left:} The helpful-harmless rewards attained by the LLM at initialization (at the bottom-left in blue), the SFT model (at the top-left in orange), the MMs (in green), and the L3Ms (in red).
+        We depict the imposed constraints in black, with the dotted gray lines connecting LLMs to their corresponding constraints.
+        Note that constraints are satisfied if the obtained reward point is at the top-right of its corresponding constraint point.
+        \emph{Right:} The mean and standard deviation of the task perplexities for MMs and L3Ms, along with their corresponding constraints; the task perplexity at initialization is 1.316\textsubscript{$\pm$0.4} and that of the SFT model is 0.805\textsubscript{$\pm$0.3}.
+    }
+    \label{fig:hh}
+\end{figure}
+
+
+
+\section{Conclusions}
+
+\label{sec:conclusions}
+
+In this work, we formulate the SFT and alignment processes for LLMs as one of constrained optimization: we minimize the task perplexity while simultaneously imposing custom constraints on preferences.
+This enables customization of the LLM to different preferential properties while maintaining performance on the original task.
+Consequently, we propose Lagrange Large Language Models (L3Ms) to solve this constrained problem by incorporating the constraints in the objective function using the logarithmic barrier.
+We include experimental results to illustrate the customization qualities of L3Ms, which can fit to different preferences, providing a personalized user experience.
+
+
+
+
+
+

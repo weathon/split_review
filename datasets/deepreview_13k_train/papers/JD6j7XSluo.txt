@@ -1,0 +1,449 @@
+\title{Mitigating Embedding Collapse in Diffusion Models for Categorical Data}
+
+\begin{abstract}
+
+Latent diffusion models have enabled continuous-state diffusion models to handle a variety of datasets, including categorical data. However, most methods rely on fixed pretrained embeddings, limiting the benefits of joint training with the diffusion model. While jointly learning the embedding (via reconstruction loss) and the latent diffusion model (via score matching loss) could enhance performance, our analysis shows that end-to-end training risks embedding collapse, degrading generation quality. To address this issue, we introduce \method{}, a continuous diffusion framework within the embedding space that stabilizes training. We propose a novel objective combining the joint embedding-diffusion variational lower bound with a Consistency-Matching (CM) regularizer, alongside a shifted cosine noise schedule and random dropping strategy. The CM regularizer ensures the recovery of the true data distribution. Experiments on benchmarks show that \method{} mitigates embedding collapse, yielding superior results on FFHQ, LSUN Churches, and LSUN Bedrooms. In particular, \method{} achieves an FID of 6.81 on ImageNet $256\times256$ with 50 steps. It outperforms non-autoregressive models in machine translation and is on a par with previous methods in text generation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Continuous-state diffusion models (CSDMs)~\citep{sohl2015deep,ho2020denoising,song2020score} have recently achieved notable success in various application domains, including computer vision~\citep{he2023manifold,dhariwal2021diffusion,Chen2022AnalogBG}, natural language processing~\citep{li2022diffusion}, and audio~\citep{chen2020wavegrad,kong2020diffwave,hernandez2023vrdmg}. These probabilistic models learn the inverse of a Markov chain that gradually converts data into pure Gaussian noise, using noise-conditioned score functions (i.e., gradients of log density), which are defined only for continuous data.
+The core concept is to progressively recover the original data distribution using a learned transition kernel. Diffusion models are notable for their high-fidelity generation~\citep{dhariwal2021diffusion,lai2023fp,lai2023equivalence}. They offer stable and relatively efficient training procedures that contribute to their success. Recent advances, such as consistency models~\citep{song2023consistency,kim2023consistency,luo2023latent}, have further enhanced diffusion models by reducing the number of sampling steps, making them more practical for real-world applications.
+Despite the widespread popularity of CSDMs, their extension to categorical data remains limited. Previous attempts to address this limitation~\citep{austin2021structured,hoogeboom2021argmax,campbell2022continuous,sun2022score,lou2023discrete} have focused on discrete-state diffusion models (DSDMs), which define discrete corruption processes for categorical data and mimic Gaussian kernels used in continuous space. For instance, D3PMs~\citep{austin2021structured} implemented the corruption process as random masking or token swapping and learned to reverse this process from the noisy data. However, unlike continuous diffusion processes, these corruption techniques do not gradually erase the semantic meaning of the data, which ideally would place similar tokens close together and dissimilar ones further apart. This discrepancy leads to an unsmooth reverse procedure and limits their ability to fully exploit the advancements made in CSDMs.
+
+Alternatively, categorical data can be mapped into a continuous embedding space~\citep{vahdat2021score,rombach2022high,sinha2021d2c},
+followed by the application of CSDMs with Gaussian kernels, which enables progressive learning signals~\citep{ho2020denoising} and fine-grained sampling. This approach has been successful in various domains. However, it may not inherently yield comparable results~\citep{li2022diffusion, strudel2022self, dieleman2022continuous}. First, it requires a well-trained embedding for each new dataset~\citep{li2022diffusion} before training CSDMs. Since the embedding space and the denoising model are not trained end-to-end, this can result in suboptimal performance. Second, jointly training both components is challenging and prone to the \textit{embedding collapse problem}~\citep{dieleman2022continuous,gao2022difformer}, where all embeddings converge to a single vector.  While this convergence helps the diffusion model predict clean embeddings, it does not result in a meaningful model and instead leads to poor generation. To alleviate embedding collapse, previous work have explored normalizing embedding vectors to a fixed bounded norm~\citep{dieleman2022continuous} or mapping the predicted embedding to its nearest neighbor within the finite set of vectors~\citep{li2022diffusion}. However, our experiments have shown that these manipulations do not yield satisfactory results in practice.
+In response, this paper presents a simple but effective method called \textit{Enhanced Embedding for \textbf{CAT}egorical Data in \textbf{D}iffusion \textbf{M}odels} (\method{}), specifically designed to address the embedding collapse problem. Our key contributions are summarized as follows:
+\begin{enumerate}[(1)]
+    \item  We suggest that embedding collapse is driven by two factors: (1) the reconstruction loss does not provide enough learning feedback  to maintain diverse embeddings, leading to collapse, and (2) the denoising score matching disproportionately influences the variational lower-bound objective, overshadowing the contributions of the embeddings in the reconstruction loss.
+
+    \item We introduce several techniques to prevent trivial or collapsed embeddings. A new loss function is proposed to stabilize training. In particular, we enforce a \emph{Consistency Matching (CM)} regularization that requires the model predictions to remain consistent over time. This ensures that the model produces stable outputs throughout the generation process. To enhance generation quality, we implement (i) shifted cosine noise schedule and (ii) random dropping of embeddings.
+
+    \item We theoretically show that our newly proposed CM regularization helps learn the true data density (Theorem~\ref{thm:recover_data}) at its optimal. Furthermore, we connect this CM regularizer to heuristic regularizations found in the literature~\citep{dieleman2022continuous,gao2022difformer} (Proposition~\ref{prop:cross_entropy}).
+
+\end{enumerate}
+Comprehensive experiments across a range of benchmark datasets are conducted to evaluate \method{}. This comprehensive evaluation provides an in-depth analysis of the adaptability and performance of our proposed approach in image generation, text generation, and machine translation tasks. The results show that \method{} effectively mitigates the embedding collapse issue and consistently outperforms several baseline methods. Although our main focus is vision and text generation, \method{} can be applied to any task involving categorical variables. \method{} performs on a par with baselines in text generation and machine translation, and achieves FID scores of $7.25$ on FFHQ, $4.99$ on LSUN Churches, $4.16$ on LSUN Bedrooms, and $6.81$ on ImageNet $256\times256$ in image generation, outperforming discrete-based models.
+
+
+\section{Diffusion model in embedding space}
+
+Consider a sequence of tokens $\rvx=[\evx_1, \dots, \evx_M]$, where each element belongs to one of the $K$ categories, i.e., $\evx_i \in \{1, \dots, K\}$. Given a dataset of observations, the goal of generative models is to estimate the probability mass function $P_{\text{data}}(\rvx)$. To handle discontinuity, we propose using continuous embeddings, where different categories are represented by real-valued vectors in a continuous latent space. Specifically, let $\rvphi=\{\ve_1, \dots, \ve_K\}$, where $\ve_k \in \mathbb{R}^D$, be a learnable codebook, the embeddings of $\rvx$ are then defined as $\emb_\rvphi(\rvx) = [\ve_{\evx_1}, \dots, \ve_{\evx_M}]$. We define a sequence of increasingly noisy versions of $\emb_\rvphi(\rvx)$ as $\rvz_t$, where $t$ ranges from $t=0$ (least noisy) to $t=1$ (most noisy). In the following, we review the variational diffusion formulation~\citep{kingma2021variational} in latent space.
+
+\textbf{Forward process.} For any $t \in [0,1]$, the conditional distribution of $\rvz_t$ given $\rvx$ is modeled as
+\begin{align*}
+    q_\rvphi(\rvz_t | \rvx) &= \mathcal{N}(\rvz_t | \alpha_t \emb_\rvphi(\rvx), \sigma_t^2 \mI) \,,
+\end{align*}
+where $\alpha_t$ and $\sigma_t$ are non-negative scalar-value functions of $t$, which determine how much noise is added to the embeddings. We consider a variance-preserving process, i.e., $\alpha_t^2 + \sigma_t^2 = 1$. Under this parameterization, the marginal distribution $q_\rvphi(\rvz_t)$ is a mixture of Gaussian distributions. Due to the Markovian property by construction, the transition probability distributions are given by
+\begin{align*}
+    q(\rvz_t| \rvz_s) &= \mathcal{N} (\rvz_t | \alpha_{t|s}\rvz_s, \sigma^2_{t|s}\mI) \,,
+\end{align*}
+where $\alpha_{t|s}=\alpha_t / \alpha_s$ and $\sigma^2_{t|s}=\sigma_t^2 - \alpha^2_{t|s} \sigma_s^2$. Conditioned on the clean data $\rvx$, the forward process posterior distribution is  derived as
+\begin{align*}
+    q_{\rvphi}(\rvz_s | \rvz_t, \rvx) = \mathcal{N}(\rvz_s | \mu_{\rvphi}(\rvz_t, \rvx; s, t), \sigma^2(s, t) \mI) \,,
+\end{align*}
+where $\mu_{\rvphi}(\rvz_t, \rvx; s, t) = (\alpha_{t|s}\sigma^{2}_s/\sigma^{2}_t)\rvz_{t} + (\alpha_s \sigma^{2}_{t|s}/\sigma^{2}_{t})\emb_{\rvphi}(\rvx)$  and $\sigma^{2}(s,t) = \sigma^2_{t|s}\sigma^2_s / \sigma^2_t$.
+
+\textbf{Reverse process.} We gradually denoise the latent variables toward the data distribution by a Markov process where the timesteps run backward from $t=1$ to $t=0$. Let $\rvtheta$ denote the parameters of the denoising model, the conditional probability distribution $p_{\rvphi,\rvtheta}(\rvz_s | \rvz_t; s, t)$ for any $0 \le s \le t \le 1$ in the reverse diffusion process is parameterized by a Gaussian. More specifically, it is given by
+\begin{align}
+    p_{\rvphi,\rvtheta}(\rvz_s | \rvz_t; s, t) = \mathcal{N}(\rvz_s | \hat{\mu}_{\rvphi,\rvtheta}(\rvz_t; s, t), \sigma^2(s, t) \mI) \,, \label{eq:reparameterization}
+\end{align}
+where $\hat{\mu}_{\rvphi,\rvtheta}(\rvz_t; s, t) = (\alpha_{t|s}\sigma^{2}_s/\sigma^{2}_t)\rvz_{t} + (\alpha_s \sigma^{2}_{t|s}/\sigma^{2}_{t}) \femb_{\rvphi,\rvtheta}(\rvz_t; t)$
+and $\femb_{\rvphi,\rvtheta}(\rvz_t; t)$ denotes the predicted embeddings of $\emb_{\rvphi}(\rvx)$ based on its noisy version $\rvz_t$.
+
+
+Following previous work~\citep{dieleman2022continuous,gulrajani2024likelihood}, we parameterize $\femb_{\rvphi,\rvtheta}(\rvz_t; t)$ as an average over embeddings. The $i$-element of $\femb_{\rvphi,\rvtheta}(\rvz_t; t)$ is given by
+\begin{align}
+    \big[\femb_{\rvphi,\rvtheta}(\rvz_t; t)\big]_{i,:} = \sum_{k=1}^{K} P_{\rvtheta}(\tilde{\evx}_i = k| \rvz_t; t) \rve_k\,, \text{ where we write } \tilde \rvx=(\tilde x_i)_{i}\,. \label{eq:prediction}
+\end{align}
+To estimate the posterior probability $P_{\rvtheta}(\tilde{\rvx}| \rvz_t; t)$, we use  a neural network $f_{\rvtheta}(\rvz_t; t)$ to predict $K$ logits for each token, followed by a softmax nonlinearity, i.e., $P_{\rvtheta}(\tilde{\rvx}| \rvz_t; t)=\prod_{i=1}^M \mathrm{softmax}([f_{\rvtheta}(\rvz_t; t)]_{i,:})$.
+\textbf{Variational lower bound.} Following~\citet{kingma2021variational}, the negative variational lower bound (VLB) for our diffusion model can be derived as
+\begin{align}
+    - \log P_{\rvphi,\rvtheta}(\rvx) \leq
+    D_{\text{KL}}(q_{\rvphi}(\rvz_1|\rvx)||p(\rvz_1))
+    +
+    \E_{\bepsilon \sim \mathcal{N}(\mathbf{0}, \mI)}\left[ - \log P_{\rvtheta}(\rvx|\rvz_0; 0) \right]
+    +
+    \mathcal{L}_{\infty}(\rvx; \rvphi, \rvtheta)\,, \label{eq:vlb}
+\end{align}
+where $\rvz_t = \alpha_t\emb_{\rvphi}(\rvx) + \sigma_t \rvepsilon$ and the diffusion loss is simplified to
+\begin{align*}
+    \mathcal{L}_{\infty}(\rvx; \rvphi, \rvtheta) &= -\frac{1}{2} \mathbb{E}_{\bepsilon \sim \mathcal{N}(0, \mI), t \sim \mathcal{U}(0,1)} \left[  \snr(t)' \|  \emb_{\rvphi}(\rvx) - \femb_{\rvphi,\rvtheta}(\rvz_t; t) \|^2 \right]
+\end{align*}
+with $\snr(t)=\alpha_t^2/\sigma_t^2$ the signal-to-noise ratio. Under certain conditions\footnote{In theory, we require that $\alpha_1 \emb_\rvphi(\rvx)=0$ to ensure that the prior loss is equal zero.}, the prior loss is close to zero as $q_\rvphi(\rvz_1 | \rvx) \approx \mathcal{N}(0, \mI)$.
+Unlike CSDMs, the reconstruction loss in our case is important since it involves both denoising and embedding parameters. A remarkable result given by~\citet{kingma2021variational} is that the diffusion loss is invariant to the noise schedule except at $t = 0$ and $t = 1$.
+
+
+\section{Analysis of embedding collapse}
+
+\begin{figure}[!thp]
+    \centering
+    \subfigure[CSDM]{\includegraphics[width=0.25\linewidth]{fig/collapse/vdm_variance_distribution.pdf}\includegraphics[width=0.245\linewidth]{fig/collapse/vdm_cross_entropy_loss.pdf}} \hfill
+    \subfigure[\method{}]{\includegraphics[width=0.245\linewidth]{fig/collapse/catdm_cm_variance_distribution.pdf}\includegraphics[width=0.245\linewidth]{fig/collapse/catdm_cm_cross_entropy_loss.pdf}}
+     \caption{An illustration of embedding collapse. The  variances of the embedding space and cross-entropy loss of (a) CSDM and (b) \method{}.}
+     \label{fig:collapse_issue}
+\end{figure}
+
+This section empirically investigates the challenge of jointly learning the embedding and the denoising model. Consider the FFHQ dataset for image generation, where the discrete image tokens are derived from a pretrained VQGAN~\citep{esser2021taming}.  A more detailed description of the experimental setup is described in Section~\ref{exp:image:generation}. Both $\rvphi$ and $\rvtheta$ are jointly trained by directly minimizing Eq.~\eqref{eq:vlb}. This simple model is referred to as CSDM. After training, we then evaluate the dimensionality of the latent space by analyzing the embeddings from 10,000 data examples. Each embedding vector $\emb_\rvphi(\rvx)$ has a size of 65,536 in the latent space. We compute the variance of the embeddings along each dimension in sorted order. Figure~\ref{fig:collapse_issue} illustrates the comparison between CSDM and our method \method{} (see Sections~\ref{sec:catdm-cm} and \ref{sec:catdm}). For CSDM, most singular values are zero and the variances are nearly zero. This indicates that the embeddings have collapsed into constant vectors with no variance. In contrast, \method{} produces more diverse embeddings. Note that we use the FFHQ dataset for illustration, but similar results are consistently observed on other datasets such as LSUN Churches, LSUN Bedrooms, and ImageNet. Based on these observations, we suggest the following primary reasons for the embedding collapse.
+\begin{enumerate}[(i)]
+    \item \textbf{The reconstruction loss does not provide enough learning feedback.} Although it penalizes embeddings that are overly similar, this penalization is constrained by the small Gaussian perturbation $\sigma_0$ during the transition from $\emb_{\rvphi}(\rvx)$ to $\rvz_0$. This is evidenced by the cross-entropy loss being nearly zero only around $t=0$.
+
+    \item \textbf{The coeficient terms in the diffusion loss encourages constant embeddings}. As $t$ approaches zero, $-0.5\snr'(t)$ exerts a strong penalization, leading the predictive network to generate constant embeddings as a means to rapidly minimize the diffusion loss. In our ablation studies, we show that a right balance in the objective can help to avoid embedding collapse.
+\end{enumerate}
+\textbf{Why is embedding collapse undesirable?} One of the key strengths of diffusion models is their ability to enable progressive generation~\citep{ho2020denoising}. However, when embeddings become too similar or collapse, this progressive generation is no longer guaranteed. To illustrate this, we use the cross-entropy loss $\E_{\rvx\sim P_{\text{data}}(\rvx)}[-\log P_{\rvtheta}(\rvx|\rvz_t; t)]$ to measure the uncertainty in distinguishing the true embedding from others. As depicted in Figure~\ref{fig:collapse_issue}, the cross-entropy loss for CSDM is low around $t=0$ but increases rapidly as $t$ arises. The model has a limited time window to generate the global structure of a meaningful embedding, which is required in progressive generation. This indicates that CSDM suffers from an uneven distribution of model capacity. In contrast, for \method{}, the loss gradually increases over time, ensuring that each sampling step equally contributes to resolving uncertainty and facilitating progressive generation. Although the negative VLB values for both models are close (4.83 for CSDM and 4.30 for \method{}), \method{} is preferable due to its ability to support progressive generation.
+
+
+\section{Consistency matching for mitigating embedding collapse}
+
+
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\linewidth]{fig/catdm.pdf}
+    \caption{Training procedure of \method{}. Categorical data $\rvx$ is mapped into continuous embeddings $\emb_\rvphi(\rvx)$. We add the consistency-matching loss $\mathcal{L}_\mathrm{CM}$ to mitigate emebdding collapse.}
+    \label{fig:catdm}
+\end{figure}
+
+Considering $\emb_\rvphi (\rvx)$ as clean data in the continuous space, the evolution of $\emb_\rvphi (\rvx)$ over time can be described by the  probability flow  ordinary differential equation (PF ODE)~\citep{song2020score}. This PF ODE allows a deterministic bijection between the embedings $\emb_{\rvphi}(\rvx)$ and latent representations $\rvz_t$. Intuitively, a random noise perturbation $\rvz_t$ of $\emb_\rvphi (\rvx)$ and its relatively nearby point $\rvz_s$ along the same trajectory should yield nearly the same prediction.
+To ensure these consistent outputs for arbitrary $\rvz_t$, we propose the \emph{Consistency-Matching} (CM) loss
+\begin{align}\label{eq:consistency_loss}
+    \mathcal{L}_{\mathrm{CM}}(\rvx; \rvphi, \rvtheta) = \mathbb{E}_{\bepsilon \sim \mathcal{N}(0, \mI), t \sim \mathcal{U}(0,1), s \sim \mathcal{U}(0, t)} \left[ D_{\text{KL}} \big(P_{\overline{\rvtheta}}(\tilde\rvx|\rvz_s; s) \| P_\rvtheta(\tilde\rvx
+ |\rvz_t; t) \big)\right] \,,
+\end{align}
+where $\overline{\rvtheta}$ denotes the exponential moving average (EMA) $\overline{\rvtheta} \leftarrow \texttt{stopgrad} ( \eta \overline{\rvtheta} + (1 - \eta)\rvtheta )$ with stop gradient and a rate of $\eta \ge 0$. Here, $\rvz_t$ is obtained by perturbing $\emb_{\rvphi}(\rvx)$ to the noise level $t$, which corresponds to the kernel $q_\rvphi (\rvz_t |\rvx)$. In our experiment, we simply use the DDIM sampler~\citep{song2020denoising} to sample from $\rvz_t$ to $\rvz_s$. Under variance preserving settings, it is computed as
+\begin{align*}
+    \rvz_s = \alpha_s\emb_{\rvphi}(\rvx) + (\sigma_s/\sigma_t) (\rvz_t - \alpha_t \emb_\rvphi(\rvx)) \,.
+\end{align*}
+
+In the following sections, we establish connections between the proposed CM regularizer and existing literature, and demonstrate the theoretical implications of perfectly minimizing the CM objective.
+
+\subsection{Connection of CM regularizer to existing works}
+
+When the data distribution $ P_{\mathrm{data}}(\rvx) $ is continuous, Eq.~\eqref{eq:consistency_loss} recovers the consistency training objective in CSDMs~\citep{song2023consistency,kim2023consistency,lai2023equivalence}, which matches clean predictions from models along the same sampling PF ODE trajectory. Specifically, for any noisy sample $ \rvz_t $ at time $ t $, $ P_{\rvtheta}(\tilde\rvx|\rvz_t; t) $ serves as a deterministic consistency function~\citep{song2023consistency} $\bm{h}_{\rvtheta}(\rvz_t; t) $ predicting the clean sample at time $0$ from $\rvz_t$, regarded as a normal distribution centered around $\bm{h}_{\rvtheta}(\rvz_t; t) $ with small variance. Thus, using the closed-form KL divergence of two normal distributions, Eq.~\eqref{eq:consistency_loss} becomes:
+\begin{align*}
+    \mathcal{L}_{\mathrm{CM}}(\rvx; \rvphi, \rvtheta) \propto \mathbb{E}_{\bepsilon \sim \mathcal{N}(0, \mI), t \sim \mathcal{U}(0,1), s \sim \mathcal{U}(0, t)} \left[ \norm{\bm{h}_{\overline{\rvtheta}}(\rvz_s; s) - \bm{h}_{\rvtheta}(\rvz_t; t)}_2^2\right] \,,
+\end{align*}
+which coincides with objective proposed in \citep{song2023consistency,kim2023consistency}. Here, $\propto$ denotes the omission of multiplicative or additive constants that are independent of the training parameters.
+
+\subsection{CM regularizer helps learn true data distribution}
+When the timesteps $t$ are small, the model learns the true categorical distribution through the reconstruction loss. As training progresses, this consistency is propagated to later timesteps, eventually reaching $t=1$. In other words, the consistency-matching loss encourages the probability distributions of $\rvx$ in neighboring latent variables to converge. Once the model is fully trained, it consistently produces the same probability distribution for the clean data across the entire trajectory. Since the reconstruction loss enforces the mapping from the embedding space back to categorical data, the learning signal is propagated through the entire ODE trajectory.
+
+Below, we reinforce this intuition by theoretically demonstrating that with the CM regularizer, the true data distribution can be learned, provided that the model prediction $P_\rvtheta(\rvx|\rvz_t; t)$ can perfectly reconstruct categorical data at $t=0$ using the following reconstruction loss function:
+\begin{align*}
+    \mathcal{L}_{0}(\rvx; \rvphi, \rvtheta) &= \E_{\bepsilon \sim \mathcal{N}(0, \mI)}\left[ - \log P_{\rvtheta}(\rvx|\rvz_0; 0) \right].
+\end{align*}
+It is important to note that this condition prevents the trivial solution, where $P_\rvtheta(\rvx| \rvz_t;t)$ remains constant, from occurring during training.
+
+\begin{theorem}[The CM regularizer facilitates learning of the true data density]\label{thm:recover_data}
+   Let $(\rvphi^*, \rvtheta^*)$ be the optimal parameters such that
+    \begin{align*}
+        \E_{\rvx \sim P_{\mathrm{data}}}[\mathcal{L}_{\mathrm{CM}}(\rvx; \rvphi^*, \rvtheta^*)] = 0 \quad \text{and} \quad \E_{\rvx \sim P_{\mathrm{data}}}[\mathcal{L}_{0}(\rvx; \rvphi^*, \rvtheta^*)] = 0.
+    \end{align*}
+    Suppose that $\mathbb{E}_{\rvx \sim P_{\mathrm{data}}} \left[\| \emb_{\rvphi^*}(\rvx)\|^2\right]<\infty$.
+    Then, it follows that $P_{\rvphi^*,\rvtheta^*} = P_{\mathrm{data}}$.
+\end{theorem}
+
+Theorem~\ref{thm:recover_data} has an important implication. It indicates that we can accurately learn the true distribution of the data.
+
+\subsection{CM regularizer reduces cross-entropy of predictions across any time}
+
+In~\citep{gao2022difformer,dieleman2022continuous}, it is suggested that employing the cross-entropy loss:
+\begin{align*}
+\mathcal{L}_{\mathrm{CE}}(\rvx;\rvphi, \rvtheta) &=  \mathbb{E}_{\rvz_t, t \sim \mathcal{U}(0,1)} \left[ -\log P_\rvtheta(\rvx |  \rvz_t; t) \right],
+\end{align*}
+as a regularizer during the joint training of the embedding and diffusion model can help mitigate embedding collapse, although without a rigorous guarantee. The intuition behind this approach is that there is a discrepancy between the predicted embeddings, which arises from the prediction error of the denoising model. The cross-entropy loss aims to compensate for this discrepancy.
+
+Below, we establish a theoretical connection at the optimal point between our CM regularizer and the cross-entropy regularizer used during training:
+\begin{proposition} \label{prop:cross_entropy}
+    Let $(\rvphi^*,\rvtheta^*)$ be optimal parameters such that:
+\begin{align*}
+    \E_{\rvx \sim P_{\mathrm{data}}}[\mathcal{L}_{\mathrm{CM}}(\rvx; \rvphi^*,\rvtheta^*)] = 0 \quad \text{and} \quad \E_{\rvx \sim P_{\mathrm{data}}}[\mathcal{L}_{0}(\rvx; \rvphi^*,\rvtheta^*)] = 0.
+\end{align*}
+Then, $\E_{\rvx \sim P_{\mathrm{data}}}[\mathcal{L}_{\mathrm{CE}}(\rvx; \rvphi^*,\rvtheta^*)] = 0$.
+\end{proposition}
+
+\Cref{prop:cross_entropy} and \Cref{thm:recover_data} suggest that minimizing the proposed CM regularizer offers a more direct way to learning the true data distribution, avoiding embedding collapse.
+
+
+\section{Additional Techniques for Mitigating embedding collapse}
+
+This section introduces several techniques to further mitigate the embedding collapse issue in training the embedding and the denoising model. Comprehensive ablation studies are provided in Tables~\ref{tab:effect} and \ref{tab:masking}. An overview of \method{} is given in Figure~\ref{fig:catdm}.
+
+\subsection{Weighting function}
+
+Although $-\snr(t)'$ in Eq.~\eqref{eq:vlb} provides the correct scaling to treat the VLB as an Evidence Lower Bound, we suspect this weighting function may disrupt the balance between training the reconstruction loss and diffusion loss in practice. Instead of minimizing the diffusion loss, we simplify it as
+\begin{align*}
+    \mathcal{L}_{\mathrm{DM}}(\rvx; \rvphi, \rvtheta) &= \mathbb{E}_{\bepsilon \sim \mathcal{N}(0, \mI), t \sim \mathcal{U}(0,1)} \left[\| \emb_{\rvphi}(\rvx) - \femb_{\rvphi,\rvtheta}(\rvz_t; t)  \|_2^2 \right]\,.
+\end{align*}
+Essentially, we ensure that the loss is evenly distributed over different timesteps. The rationale is that alleviating the error in a large noise level can help the model avoid constant embeddings.
+
+Puting it all together, the overall objective function of \method{} is given by
+\begin{align*}
+    \min_{\rvphi, \rvtheta} \quad \E_{\rvx \sim P_{\text{data}}}[\mathcal{L}(\rvx; \rvphi, \rvtheta)] = \E_{\rvx \sim P_{\text{data}}}[\mathcal{L}_{0}(\rvx; \rvphi, \rvtheta) + \beta_{\mathrm{DM}} \mathcal{L}_{\mathrm{DM}}(\rvx; \rvphi, \rvtheta) +  \beta_{\mathrm{CM}}\mathcal{L}_{\mathrm{CM}}(\rvx; \rvphi, \rvtheta)]\,,
+\end{align*}
+where $\beta_{\mathrm{DM}} \ge 0$ and $\beta_{\mathrm{CM}} \ge 0$ are hyperparameters. By tuning $\beta_{\mathrm{DM}}$, we can find the right balance between $\mathcal{L}_{0}(\rvx; \rvphi, \rvtheta)$ and $\mathcal{L}_{\mathrm{DM}}(\rvx; \rvphi, \rvtheta)$.
+
+\subsection{Noise schedule}
+
+Determining the right amount of noise added to the embeddings in each timestep can play an important role in both the forward and reverse processes of \method{}. If the embedding norms are large, denoising would be a trivial task for low noise levels. This is not desired because the denoising model has only a small time window to generate the global structure of the meaningful embedding. Instead, we note that adjusting the noise schedule (NS) by shifting its $\log \text{SNR}$ curve~\citep{hoogeboom2023simple} is crucial. In particular, we use the shifted cosine noise schedule, defined as
+\begin{align*}
+    \log\snr(t) = -2\log \tan (\pi t / 2) + s\,,
+\end{align*}
+where $s \in \mathbb{R}$ is the shifting hyperparameter. When $s=0$, it corresponds to the cosine noise schedule~\citep{nichol2021improved}. Essentially, NS implies different weights in the diffusion loss per noise level~\citep{kingma2023understanding}. As illustrated in Figure~\ref{fig:noise_schedule}, by moving the curve to the left, it gives more importance for higher degrees of noise. Adjusting NS also increases the speed of noise injection in the forward process when $t\approx 0$, making the generation task more challenging for the model to prevent trivial generation and avoid embedding collapse.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \vskip -0.1in
+    \centering
+    \includegraphics[width=\linewidth]{fig/noise_schedule.pdf}
+    \caption{Shifted cosine noise schedule with different shifting factors $s$, $\lambda(t) = \log\snr(t)$.}
+    \label{fig:noise_schedule}
+\vskip -0.1in
+\end{wrapfigure}
+\subsection{Random dropping}
+Given the noised embeddings, $\mathcal{L}_{\mathrm{CM}}$ used in our training objective ensures the same prediction for the posterior probability $P_\rvtheta(\tilde{\rvx}| \rvz_t; t)$ at any timestep. During joint training, it encourages the model to distinguish the embeddings by increasing their parameter magnitudes. To alleviate this problem, we propose to randomly drop the embeddings.
+Let $\rvm_\mathrm{RD}\in \{0,1\}^M$ denote a binary mask that indicates which tokens are replaced with a special $\texttt{[mask]}$ token. During training, embeddings of $\rvx$ become $\emb_\rvphi(\rvx\odot\rvm_\mathrm{RD})$. Random dropping
+forces the representations to be more semantic, i.e., similar embeddings should be close to each other~\citep{he2022masked}. This is because only a portion of the embeddings is used to predict the other tokens. It requires the model to understand the relationship between seen and unseen tokens. When similar tokens frequently appear in similar contexts, the model learns to associate these tokens closely in the embedding space, as their contextual meanings are similar.
+
+
+\section{Experiments}
+
+In this section, we assess the performance of \method{} across several benchmark datasets, covering tasks such as image generation, text generation, and machine translation. We also present comprehensive ablation studies to analyze \method{}'s performance.
+
+\subsection{Image generation} \label{exp:image:generation}
+We present experiments covering both conditional and unconditional image generation tasks.
+
+\textbf{Datasets.} For unconditional generation tasks, our benchmark consists of three datasets: FFHQ~\citep{karras2019style}, LSUN Bedrooms, and LSUN Churches~\citep{yu2015lsun}.  The FFHQ dataset contains 70K examples of human faces, while the LSUN Bedrooms dataset contains 3M images of bedrooms, and the LSUN Church dataset contains 126K images of churches. For conditional generation tasks, we use ImageNet~\citep{5206848}. These datasets are widely used in the literature. All images have a resolution of $256\times 256$ and VQGAN~\citep{esser2021taming} is used to further downsample the images into discrete representations of $16\times 16$ with a codebook of size 1024.
+
+\textbf{Baselines.} We evaluate \method{} against several baselines, including D3PM with uniform transition probabilities~\citep{austin2021structured}, VQ-Diffusion~\citep{gu2022vector}, and MaskGIT~\cite{chang2022maskgit}. Additionally, we include results for CSDM using fixed embeddings (CSDM$^\dagger$), where embeddings are initialized from the pretrained VQGAN codebook and remain fixed throughout training. For evaluation, we report the Fréchet Inception Distance (FID) between 50,000 generated images and real images. We also provide performance metrics in terms of Precision and Recall. For conditional image generation, we use the Inception Score (IS) as an additional metric to measure the image quality.
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.33\textwidth}
+        \centering
+        \setlength{\tabcolsep}{1.8pt}
+        \captionof{table}{Results of ablation studies on the FFHQ dataset.}
+        \label{tab:effect}
+        \centering
+        \resizebox{\textwidth}{!}{
+            \begin{tabular}{lrrr}
+                \toprule
+                Method & FID$\downarrow$ & Prec.$\uparrow$ &  Rec.$\uparrow$\\
+                \midrule
+                CSDM & 77.09 & 0.41 & 0.07 \\
+                CSDM w $\ell_2$-norm & 52.35 & 0.55 & 0.12 \\
+                \midrule
+                \method{} w/o $\mathcal{L}_{\mathrm{CM}}$ & 186.95  & 0.02 & 0.00\\
+                \method{} w/o NS & 11.19 & 0.71 & 0.42 \\
+                \method{} w/o RD &  \sbest{8.20} & \best{0.73} & 0.42 \\
+                \midrule
+                \method{} & \best{7.25} & \sbest{0.72} & \best{0.46} \\
+                \bottomrule
+            \end{tabular}
+        }
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.64\textwidth}
+        \includegraphics[width=\textwidth]{fig/unconditional/unconditional.pdf}
+        \caption{CATDM samples on unconditional image generation.}
+        \label{fig:unconditional}
+    \end{minipage}
+\end{figure}
+
+\textbf{Results.} Table~\ref{tab:unconditional} presents the results on unconditional image generation. \method{} consistently achieves the lowest FID scores. Furthermore, we investigate the impact of using pretrained embeddings in CSDM$^\dagger$ and demonstrate that while it yields satisfactory results, employing trainable embeddings significantly enhances performance. On LSUN Bedrooms, \method{} outperforms the baseline methods by a substantial margin, achieving the highest Precision and Recall scores.  These findings underline the superiority of \method{} in generating high-quality samples. The observed improvements in our method compared to discrete diffusion baselines confirm that continuous diffusion models can provide an effective solution for categorical data. Figure~\ref{fig:unconditional} illustrates samples generated by \method{}.
+\begin{table*}[t]
+    \small
+    \centering
+    \caption{Results for unconditional generation on FFHQ, LSUN Churches, and LSUN Bedrooms. The scores of FID, Precision, and Recall are shown. The \best{best} and \sbest{second best} results  are marked.}
+    \label{tab:unconditional}
+    \begin{tabular}{lccc|ccc|ccc}
+    \toprule
+    \multirow{2}{*}{Method} & \multicolumn{3}{c|}{FFHQ} & \multicolumn{3}{c|}{LSUN Churches} & \multicolumn{3}{c}{LSUN Bedrooms} \\
+    \cmidrule{2-10}
+    & FID$\downarrow$ & Prec.$\uparrow$&Rec.$\uparrow$ & FID$\downarrow$ & Prec.$\uparrow$&Rec.$\uparrow$ & FID$\downarrow$ & Prec.$\uparrow$&Rec.$\uparrow$  \\
+    \midrule
+    \multicolumn{10}{l}{\textbf{\textit{Discrete-Space Diffusion Models}}}  \\
+    D3PM Uniform & 9.49 & 0.71 & 0.41 &  6.02 & 0.68 & 0.39 & 6.60 & 0.60 & 0.35\\
+    VQ-Diffusion & \sbest{8.79} & 0.70 & \sbest{0.43} & 6.88 & 0.72 & 0.37 & 7.19 & 0.54 & 0.37\\
+    MaskGIT & 11.45 & \best{0.75} & 0.42 &  \sbest{5.59} & 0.65 & \best{0.44} & 8.39 & 0.66 & 0.33\\
+    \midrule
+    \multicolumn{10}{l}{\textbf{\textit{Continuous-Space Diffusion Models}}}  \\
+    CSDM$^{\dagger}$ & 12.66 & \sbest{0.73} & 0.38 & 7.88 & \best{0.76} & 0.36 & \sbest{4.93} & \sbest{0.71} & \sbest{0.38} \\
+    \method{} (ours) & \best{7.25} & 0.72 & \best{0.46} & \best{4.99} & \sbest{0.75} & \sbest{0.42} & \best{4.16} & \best{0.72} & \best{0.40} \\
+    \bottomrule
+    \end{tabular}
+\end{table*}
+Table~\ref{tab:imagenet} presents the results for class-conditional image generation tasks. Our method achieves a FID of 6.81 and an IS of 225.31 with 50 sampling steps. \method{} notably outperforms both VQGAN and VQVAE-2 by a substantial margin. Compared to MaskGIT, \method{} provides competitive FID results and exceeds in IS. However, it is important to note, as highlighted by~\citet{besnier2023pytorch}, that MaskGIT requires specific sampling adjustments, such as adding Gumbel noise with a linear decay, to improve its FID. In contrast, \method{} operates without such sampling heuristics.  In addtiion, \method{} performs better than VQ-Diffusion in both FID and IS metrics.
+\begin{table}[!thp]
+
+    \centering
+    \small
+    \caption{Comparison with generative models on ImageNet $256\times256$. The results of the existing methods are obtained from their respective published works.}
+    \label{tab:imagenet}
+    \begin{tabular}{lcccccc}
+        \toprule
+        Model  & \# params & \# steps & FID$\downarrow$ & IS$\uparrow$ & Prec.$\uparrow$ & Rec.$\uparrow$ \\
+       \midrule
+       VQGAN~\citep{esser2021taming} & 1.4B & 256 & 15.78 & 74.3 & n/a& n/a \\
+       MaskGIT~\citep{chang2022maskgit} & 227M & 8 & \best{6.18} & 182.1 & 0.80 & 0.51 \\
+       VQVAE-2\citep{razavi2019generating} & 13.5B & 5120 & 31.11 & 45.00 & 0.36 & \sbest{0.57}\\
+       BigGAN-deep~\citep{brock2018large} & 160M & 1 & 6.95 & \sbest{198.2} & \textbf{0.87} & 0.28 \\
+       Improved DDPM~\citep{nichol2021improved} & 280M & 250 & 12.26 & n/a & 0.70 & \sbest{0.62}\\
+       VQ-Diffusion~\citep{gu2022vector} & 518M &  100 & 11.89 & n/a & n/a & n/a\\
+       \midrule
+       \method{} (ours) & 246M & 50 & \sbest{6.81} & \best{225.31} & \sbest{0.84} & 0.38 \\
+
+       \bottomrule
+\end{table}
+
+\subsection{Text generation}
+We evaluate \method{} on unconditional text generation, where the objective is to generate text without any predefined themes or prompts, using a training corpus as the basis for learning.
+
+\textbf{Datasets}. We train \method{} on text8~\citep{mikolov2014learning}, a character-level language modeling benchmark. The text8 dataset consists of Wikipedia articles with a small vocabulary of 26 letters and a whitespace token. Following~\citep{lou2023discrete,austin2021structured}, we use the same data split and parameterize \method{} on a neural network of similar size.
+
+\textbf{Baselines.} \method{} is compared against autoregressive, random-order autoregressive, and other diffusion-based models. Unless otherwise specified, all models are implemented as standard 12-layer transformers. Following~\citep{austin2021structured}, we report performance using bits per character (BPC).
+
+\textbf{Results.} Table~\ref{tab:text8} shows the results. Autoregressive models, including Discrete Flow~\citep{tran2019discrete} and Transformer AR~\citep{austin2021structured}, achieve the best BPC. \method{} outperforms Multinomial Diffusion~\citep{hoogeboom2021argmax} and D3PM Uniform~\citep{austin2021structured}. However, its performance is inferior to that of Plaid~\citep{gulrajani2024likelihood} and SEDD~\citep{lou2023discrete}. his discrepancy may be attributed to the fact that \method{} is not specifically designed to maximize the log-likelihood objective.
+\begin{table}[t]
+\footnotesize
+\parbox[t][][t]{.45\textwidth}{
+    \centering
+    \caption{Bits per character (BPC) on Text8. (*) Results reported by~\citet{shi2024simplified}.}
+    \label{tab:text8}
+    \setlength{\tabcolsep}{0pt}
+
+    \resizebox{0.45\textwidth}{!}{\begin{tabular}{lr}
+    \toprule
+    Method &  BPC $\downarrow$ \\
+    \midrule
+    \textbf{\textit{Random-order Autoregressive Models}} \\
+    ARDM \citep{hoogeboom2021autoregressive} & $\le$ 1.43 \\
+    MAC \citep{shih2022training} & $\le$ 1.40\\
+    \midrule
+    \textbf{\textit{Autoregressive Models}} & \\
+    IAF/SCF~\citep{ziegler2019latent}  & 1.88\\
+    Discrete Flow~\citep{tran2019discrete} ($8\times3$ layers) & \textbf{1.23}\\
+    AR Argmax Flow~\citep{hoogeboom2021argmax} & 1.39\\
+    Transformer AR~\citep{austin2021structured} & \textbf{1.23}\\
+    \midrule
+    \textbf{\textit{Discrete-State Diffusion Models}} & \\
+    Mult. Diffusion \citep{hoogeboom2021argmax} & $\le$ 1.72\\
+    D3PM Uniform \citep{austin2021structured} & $\le$ 1.61\\
+    D3PM Absorb~\citep{austin2021structured} & $\le$ 1.45\\
+    SEDD Uniform ~\citep{lou2023discrete} & $\le$ 1.47 \\
+    SEDD Absorb~\citep{lou2023discrete} & $\le$ 1.39 \\
+    MD4~\citep{shi2024simplified} & $\le$ 1.37 \\
+    \midrule
+    \textbf{\textit{Continuous-Space Diffusion Models}} & \\
+    BFN \citep{graves2023bayesian} & $\le$ 1.41\\
+    Plaid~\citep{gulrajani2024likelihood} (*) & $\le$ 1.48 \\
+    \method{} (ours) & $\le$ 1.54 \\
+    \bottomrule
+    \end{tabular}}
+}
+\hfill
+\parbox[t][][t]{.52\textwidth}{
+    \centering
+    \caption{Machine translation results. We do not use knowledge distillation. (*) Results obtained by re-running the code.}
+    \label{tab:machine_translation}
+    \setlength{\tabcolsep}{1pt}
+    \resizebox{0.52\textwidth}{!}{
+        \begin{tabular}{llrr}
+        \toprule
+        Model & \# steps &  En-De$\uparrow$ & De-En$\uparrow$ \\
+        \midrule
+        \textbf{\textit{Autoregressive Models}} & \\
+        Transformer~\citep{vaswani2017attention} & n/a & \best{26.37} & \best{32.62} \\
+        \midrule
+        \textbf{\textit{Discrete-State Diffusion Models}} & \\
+        Mult. Diffusion~\citep{hoogeboom2021argmax} & 25 & 3.69 & 20.06 \\
+        DiffuSeq~\citep{gong2022diffuseq} & 1000 & 13.73 & 27.03 \\
+        SeqDiffuSeq~\cite{yuan2022seqdiffuseq} & 2000 & 14.37 & 28.65 \\
+        \midrule
+        \textbf{\textit{Continuous-Space Diffusion Models}} & \\
+        Diffusion-LM~\citep{li2022diffusion} & 200 & 15.33 & 26.61 \\
+        CDCD~\citep{dieleman2022continuous}  & 200 & 20.0 & n/a \\
+        Difformer~\citep{gao2022difformer} (*) & 20 & 20.89 & 28.30 \\
+        \method{} (ours) & 20 & \sbest{21.67} &  \sbest{29.61} \\
+        \bottomrule
+        \end{tabular}
+    }
+
+    \centering
+    \setlength{\tabcolsep}{3pt}
+    \caption{FID results for different numbers of sampling steps.}
+    \label{tab:sampling_steps}
+    \centering
+    \small
+    \resizebox{0.52\textwidth}{!}{
+        \begin{tabular}{lccccccc}
+            \toprule
+             Steps & 5 & 10 & 15 & 20 & 50 & 100 & 200  \\
+            \midrule
+             Churches & 19.38 & 10.24 & 7.81 & 6.80 & 5.43 & 5.20 & \best{4.99}\\
+             Bedrooms & 14.55 & 6.05 & 4.42 & 4.00 & \best{3.86} & 4.01 & 4.16 \\
+             FFHQ & 28.80 & 15.55 & 11.44 & 9.57 & 7.56 & 7.34 & \best{7.25}  \\
+             ImageNet & 12.70 & 7.86 & 7.02 & 6.88 & \best{6.81} & 6.84 & 6.99 \\
+             \bottomrule
+        \end{tabular}
+    }
+}
+\end{table}
+
+
+\subsection{Machine translation}
+Significant efforts have been made to apply non-autoregressive iterative refinement models to the task of machine translation. This section explores the application of \method{} for machine translation.
+
+\textbf{Datasets.} We consider two standard datasets, including IWSLT14 German-English (IWSLT14 De-En)~\citep{cettolo2014report} and WMT14 English-German (WMT14 En-De)~\citep{bojar2014findings}. These datasets are the most popular and widely used benchmarks for evaluating a machine translation system. IWSLT14 De-En consists of transcripts from the TED talks, which are relatively informal, spoken language. WMT14 En-De consists of sentences collected from a variety of sources, including formal as well as less structured text.
+
+\textbf{Baselines.} We compare \method{} with the autoregressive Transformer~\citep{vaswani2017attention} and other recent diffusion models, including Difformer~\citep{gao2022difformer}, Multinomial~\citep{hoogeboom2021argmax},
+Diffusion-LM~\citep{li2022diffusion},
+CDCD~\citep{dieleman2022continuous}, DiffuSeq~\citep{gong2022diffuseq}, and SeqDiffuSeq~\cite{yuan2022seqdiffuseq}. For a fair comparison, we do not adopt any sequence-level knowledge distillation to distill the original training set. For Difformer, we rerun the code provided by the corresponding author.  For \method{}, we use the same architecture and setup as that of Difformer, which consists of an encoder-decoder architecture with two distinct Transformer stacks. Unlike autoregresive models where the sequence length is modeled by the EOS token, we explicitly predict the target length using the encoder output. The BLEU score is reported to evaluate our machine translation models.
+
+\textbf{Results.} All results, except Difformer and CATDM, were taken from previous studies. As shown in Table~\ref{tab:machine_translation}, CATDM achieves the best results among non-autogressive models, with a BLEU score of 29.61 on on IWSLT14 De-En and 21.67 on WMT14 En-De. Overall, \method{} underperforms compared to the autoregressive model of the same size. This outcome aligns with previous findings~\citep{dieleman2022continuous}, which can be attributed to the fact that non-autoregressive models are not trained to handle repeated or missing tokens.
+
+\subsection{Ablation studies} \label{sec:exp:ablation}
+In this section, we conduct various ablation studies.
+
+\begin{wraptable}{r}{0.4\textwidth}
+    \vskip -0.1in
+    \caption{Results on different dropping strategies: ``linear" means increasing the dropping ratio linearly, ``rand\_drop" uses a random dropping ratio; and ``rand($\gamma$)" uses a fixed dropping ratio of $\gamma$, where $0\le \gamma \le 1$.}
+    \label{tab:masking}
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+        & FID$\downarrow$ & Prec.$\uparrow$ &  Rec.$\uparrow$\\
+        \midrule
+        linear & 9.12 & \textbf{0.72} & 0.41 \\
+        rand\_drop & 8.44 & 0.71 & 0.42 \\
+        \midrule
+        rand (0.1) &  7.81 & 0.71 & 0.43  \\
+        rand (0.2) &  \textbf{7.25} & \textbf{0.72} & \textbf{0.46} \\
+        rand (0.3) &  8.45 & 0.70 & 0.43  \\
+        rand (0.4) &  9.89 & 0.70 & 0.41  \\
+        rand (0.5) &  9.11 & \textbf{0.72} & 0.41  \\
+         \bottomrule
+    \end{tabular}
+    \vskip -.1in
+\end{wraptable}
+
+\textbf{Effects of different components.}
+We investigate the impact of individual components introduced in \method{} on overall performance. The results are presented in Table~\ref{tab:effect}. The baseline method, CSDM, is unable to generate meaningful images. While incorporating an $\ell_2$-norm regularization on the embeddings provides some improvement, it does not completely resolve the collapse issue. \method{} (incorporating our novel components $\mathcal{L}_{\mathrm{CM}}+\text{NS}+\text{RD}$) achieves the best performance. Without RD, the model produces inferior results. Removing NS leads to notable performance degradation. On the other hand, omitting $\mathcal{L}_{\mathrm{CM}}$ results in embedding collapse. These findings highlight the essential role of each component in mitigating the embedding collapse and improving overall performance.
+
+\textbf{Number of sampling steps.}  We analyze the number of steps necessary to obtain high-fidelity samples. Table~\ref{tab:sampling_steps} presents the FID scores corresponding to different numbers of sampling steps. As expected, we observe a decrease in FID as the number of sampling steps increases. However, the improvement becomes marginal after reaching 50 steps. \method{} can accelerate the conventional diffusion models by a large margin, which is a notable advantage compared to ARs.%, where our method gives clear benefits.
+
+\textbf{Dropping strategies.} We explore various approaches to drop tokens during training. Three distinct strategies are considered. One strategy involves linearly increasing the dropping ratio concerning the time step (\textbf{linear}). In this scheme, early steps involve a small portion of tokens being dropped, while in later steps, a higher proportion of tokens are dropped. Another strategy is to randomly select a ratio and drop the tokens according to this ratio (\textbf{rand\_drop}).  Alternatively, a fixed dropping ratio can be employed (\textbf{rand(.)}). Table~\ref{tab:masking} summarizes the results. \method{} performs the best with an appropriately chosen fixed dropping ratio.
+
+
+
+\section{Conclusion}
+
+This paper introduces \method{}, a continuous diffusion model tailored for modeling categorical distributions, which jointly learns the embeddings and the denoising model. \method{} effectively addresses the issue of embedding collapse. We provide an empirical analysis of this phenomenon, identifying two key mechanisms responsible for collapse: insufficient feedback from the reconstruction loss and the diffusion loss that promotes constant embeddings. Experimental results show that \method{} not only alleviates the embedding collapse problem, but also exceeds the baseline diffusion models.
+
+
+\textbf{Limitations and future work.} In this work, \method{} is implemented using the Transformer architecture, but we emphasize that the architecture choice is orthogonal to the proposed framework and can be extended to other architectures. While we have thoroughly evaluated \method{} on image and text generation tasks, future work will focus on applying it to additional data types, such as graphs and audio. Furthermore, we plan to explore more advanced sampling techniques to improve the overall generation quality of \method{}.
+
+
+
+

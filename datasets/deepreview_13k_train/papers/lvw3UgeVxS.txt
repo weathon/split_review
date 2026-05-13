@@ -1,0 +1,385 @@
+\title{gRNAde: Geometric Deep Learning for 3D RNA inverse design}
+
+\begin{abstract}
+Computational RNA design tasks are often posed as inverse problems, where sequences are designed based on adopting a single desired secondary structure without considering 3D geometry and conformational diversity. 
+We introduce \textbf{gRNAde}, a \textbf{g}eometric \textbf{RNA} \textbf{de}sign pipeline operating on 3D RNA backbones to design sequences that explicitly account for structure and dynamics. 
+gRNAde uses a multi-state Graph Neural Network and autoregressive decoding to generates candidate RNA sequences conditioned on one or more 3D backbone structures where the identities of the bases are unknown. 
+On a single-state fixed backbone re-design benchmark of 14 RNA structures from the PDB identified by \citet{das2010atomic}, gRNAde obtains higher native sequence recovery rates (56\% on average) compared to Rosetta (45\% on average), taking under a second to produce designs compared to the reported hours for Rosetta. 
+We further demonstrate the utility of gRNAde on a new benchmark of multi-state design for structurally flexible RNAs, as well as zero-shot ranking of mutational fitness landscapes in a retrospective analysis of a recent ribozyme
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{fig/grnade_pipeline.pdf}
+    \caption{
+    \textbf{The gRNAde pipeline for 3D RNA inverse design.} gRNAde is a generative model for RNA sequence design conditioned on backbone 3D structure(s). 
+    gRNAde processes one or more RNA backbone graphs (a conformational ensemble) via a multi-state GNN encoder which is equivariant to 3D roto-translation of coordinates as well as conformational state order, followed by conformational state order-invariant pooling and autoregressive sequence decoding.
+    }
+    \label{fig:grnade_pipeline}
+\end{figure}
+\clearpage
+\textbf{Why RNA design? }
+Historical efforts in computational drug discovery have focussed on designing small molecule or protein-based medicines that either treat symptoms or counter the end stages of disease processes. 
+In recent years, there is a growing interest in designing new RNA-based therapeutics that intervene earlier in disease processes to cut off disease-causing information flow in the cell \citep{damase2021limitless, zhu2022rna}. 
+Notable examples of RNA molecules at the forefront of biotechnology today include mRNA vaccines \citep{metkar2024tailor} and CRISPR-based genomic medicine \citep{doudna2014new}.
+Of particular interest for structure-based design are ribozymes and riboswitches in the untranslated regions of mRNAs \citep{mandal2004gene, leppek2018functional}.
+In addition to coding for proteins (such as the spike protein in the Covid vaccine), naturally occurring mRNAs contain riboswitches that are responsible for cell-state dependent protein expression of the mRNA.
+Riboswitches act by `switching' their 3D structure from an unbound conformation to a bound one in the presence of specific metabolites or small molecules.
+Rational design of riboswitches will enable translation to be dependent on the presence or absence of partner molecules, essentially acting as `on-off' switches for highly targeted mRNA therapies in the future \citep{felletti2016twister, mustafina2019design, mohsen2023exploiting}.
+
+\textbf{Challenges of RNA modelling. }
+Despite the promises of RNA therapeutics, proteins have instead been the primary focus in the 3D biomolecular modelling community. 
+Availability of a large number of protein structures from the PDB combined with advances in deep learning for structured data \citep{bronstein2021geometric, duval2023hitchhiker} have revolutionized protein 3D structure prediction \citep{jumper2021highly} and rational design \citep{dauparas2022robust, watson2023novo}. 
+Applications of deep learning for computational RNA design are underexplored compared to proteins due to paucity of 3D structural data \citep{schneider2023will}.
+Most tools for RNA design primarily focus on secondary structure without considering 3D geometry \citep{churkin2018design} and use non-learnt algorithms for aligning 3D RNA fragments \citep{han2017single, yesselman2019computational}, which can be restrictive due to the hand-crafted nature of the heuristics used. 
+
+In addition to limited 3D data for training deep learning models, the key technical challenge is that RNA is more dynamic than proteins. 
+The same RNA can adopt multiple distinct conformational states to create and regulate complex biological functions \citep{ganser2019roles, hoetzel2022structural, ken2023rna}. 
+Computational RNA design pipelines must account for both the 3D geometric structure and conformational flexibility of RNA to engineer new biological functions.
+
+\textbf{Our contributions. }
+This paper introduces \textbf{gRNAde}, a \textbf{g}eometric deep learning-based pipeline for \textbf{RNA} inverse \textbf{de}sign conditioned on 3D structure, analogous to ProteinMPNN for proteins \citep{dauparas2022robust}. 
+As illustrated in \Cref{fig:grnade_pipeline}, gRNAde generates candidate RNA sequences conditioned on one or more backbone 3D conformations, enabling both single- and multi-state fixed-backbone sequence design. 
+We demonstrate the utility of gRNAde for the following design scenarios:
+\begin{itemize}
+    \item \textbf{Improved performance and speed over Rosetta.} We compare gRNAde to Rosetta \citep{leman2020macromolecular}, the state-of-the-art physically based tool for 3D RNA inverse design, for single-state fixed backbone design of 14 RNA structures of interest from the PDB identified by \citet{das2010atomic}. We obtain higher native sequence recovery rates with gRNAde (56\% on average) compared to Rosetta (45\% on average).
+    Additionally, gRNAde is significantly faster than Rosetta for inference; e.g. sampling 100+ designs in 1 second for an RNA of 60 nucleotides on an A100 GPU (<10 seconds on CPU), compared to the reported hours for Rosetta on CPU.
+    \item \textbf{Multi-state RNA design}, which was previously not possible with Rosetta.
+    gRNAde with multi-state GNNs improves sequence recovery by 5\% over an equivalent single-state model on a benchmark of structurally flexible RNAs, especially for surface nucleotides which undergo positional or secondary structural changes.
+    gRNAde's GNN is the first geometric deep learning architecture for multi-state biomolecule representation learning.
+    \item \textbf{Zero-shot learning of RNA fitness landscape.} 
+    In a retrospective analysis of mutational fitness landscape data for an RNA polymerase ribozyme \citep{mcrae2024cryo}, we show how gRNAde's perplexity, the likelihood of a sequence folding into a backbone structure, can be used to rank mutants based on fitness in a zero-shot/unsupervised manner and outperforms random mutagenesis for improving fitness over the wild type in low throughput scenarios. 
+\end{itemize}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{fig/backbone_featurizer.pdf}
+    \caption{
+    \textbf{gRNAde featurizes RNA backbone structures as 3D geometric graphs.} Each RNA nucleotide is a node in the graph, consisting of 3 coarse-grained beads for the coordinates for P, C4', N1 (pyrimidines) or N9 (purines) which are used to compute initial geometric features and edges to nearest neighbours in 3D space. 
+    Backbone chain figure adapted from \citet{ingraham2019generative}.
+    }
+    \label{fig:backbone_featurizer}
+\end{figure}
+
+
+\section{The gRNAde pipeline}
+
+
+\Cref{fig:grnade_pipeline} illustrates the RNA inverse folding problem: the task of designing new RNA sequences conditioned on a structural backbone. 
+Given the 3D coordinates of a backbone structure, machine learning models must generate sequences that are likely to fold into that shape. 
+The underlying assumption behind inverse folding (and rational biomolecule design) is that structure determines function \citep{huang2016coming}.
+
+Following best practices in protein design, gRNAde uses a structure-conditioned, autoregressive language model with geometric GNN encoder and decoder \citep{jing2020learning, dauparas2022robust}.
+
+To the best of our knowledge, gRNAde is the first explicitly multi-state inverse folding pipeline, allowing users to design sequences for backbone conformational ensembles (a set of 3D backbone structures) as opposed to a single structure.
+
+\subsection{RNA conformational ensembles as geometric multi-graphs}
+
+\textbf{Featurization. }
+The input to gRNAde is an RNA to be re-designed. 
+For instance, this could be a set of PDB files with 3D backbone structures for the given RNA (a conformational ensemble) and the corresponding sequence of $n$ nucleotides.
+As shown in \Cref{fig:backbone_featurizer}, gRNAde builds a geometric graph representation for each input structure:
+\begin{enumerate}
+    \item We start with a 3-bead coarse-grained representation of the RNA backbone, retaining the coordinates for P, C4', N1 (pyrimidine) or N9 (purine) for each nucleotide \citep{dawson2016coarse}. This `pseudotorsional' representation describes RNA backbones completely in most cases while reducing the size of the torsional space to prevent overfitting \citep{wadley2007evaluating}.
+    \item Each nucleotide $i$ is assigned a node in the geometric graph with the 3D coordinate $\vec{\vx}_i \in \mathbb{R}^3$ corresponding to the centroid of the 3 bead atoms.
+    Random Gaussian noise with standard deviation 0.1\AA\ is added to coordinates during training to prevent overfitting on crystallisation artifacts, following \citet{dauparas2022robust}. Each node is connected by edges to its 32 nearest neighbours as measured by the pairwise distance in 3D space, $\Vert \vec{\vx}_i-\vec{\vx}_j \Vert_2$.
+    \item Nodes are initialized with geometric features analogous to the featurization used in protein inverse folding \citep{ingraham2019generative, jing2020learning}: (a) forward and reverse unit vectors along the backbone from the 5' end to the 3' end, ($\vec{\vx}_{i+1}-\vec{\vx}_{i}$ and $\vec{\vx}_{i}-\vec{\vx}_{i-1}$); and (b) unit vectors, distances, angles, and torsions from each C4' to the corresponding P and N1/N9.
+    \item Edge features for each edge from node $j$ to $i$ are initialized as: (a) the unit vector from the source to destination node, $\vec{\vx}_j - \vec{\vx}_i$; (b) the distance in 3D space, $\Vert \vec{\vx}_j-\vec{\vx}_i \Vert_2$, encoded by 32 radial basis functions; and (c) the distance along the backbone, $j-i$, encoded by 32 sinusoidal positional encodings.
+\end{enumerate}
+\textbf{Multi-graph representation. }
+As described in the previous section, 
+given a set of $k$ (conformational state) structures in the input conformational ensemble, each RNA backbone is featurized as a separate geometric graph $\mathcal{G}^{(k)} = ( \mA^{(k)}, \mS^{(k)}, \vec{\mV}^{(k)} )$ with the scalar features $\mS^{(k)} \in \mathbb{R}^{n \times f}$, vector features $\vec{\mV}^{(k)} \in \mathbb{R}^{n \times f' \times 3}$, and $\mA^{(k)}$, an $n \times n$ adjacency matrix. 
+For clear presentation and without loss of generality, we omit edge features and use $f$, $f'$ to denote scalar/vector feature channels.
+
+The input to gRNAde is thus a set of geometric graphs $\{ \mathcal{G}^{(1)}, \dots, \mathcal{G}^{(k)}\}$ which is merged into what we term a `multi-graph' representation of the conformational ensemble, $\mathcal{M} = ( \mA, \mS, \vec{\mV} )$, by stacking the set of scalar features  $\{ \mS^{(1)}, \dots, \mS^{(k)}\}$ into one tensor $\mS \in \mathbb{R}^{n \times k \times f}$ along a new axis for the set size $k$. 
+Similarly, the set of vector features $\{ \vec{\mV}^{(1)}, \dots, \vec{\mV}^{(k)}\}$ is stacked into one tensor $\vec{\mV} \in \mathbb{R}^{n \times k \times f' \times 3}$.
+Lastly, the set of adjacency matrices $\{ \mA^{(1)}, \dots, \mA^{(k)} \}$ are merged via a union $\cup$ into one single joint adjacency matrix $\mA$.
+
+\subsection{Multi-state GNN for encoding conformational ensembles}
+\label{sec:methods:gnn}
+We describe each component in the following sections.
+
+\textbf{Multi-state GNN encoder. }
+When representing conformational ensembles as a multi-graph, each node feature tensor contains three axes:
+(\#nodes, \#conformations, feature channels).
+We perform message passing on the multi-graph adjacency to \textit{independently} process each conformational state, while maintaining permutation equivariance of the updated feature tensors along both the first (\#nodes) and second (\#conformations) axes.
+This works by operating on only the feature channels axis and generalising the PyTorch Geometric \citep{fey2019fast} message passing class to account for the extra conformations axis;
+We use multiple rotation-equivariant GVP-GNN \citep{jing2020learning} layers to update scalar features $\vs_i \in \mathbb{R}^{k \times f}$ and vector features $\vec{\vv}_i \in \mathbb{R}^{k \times f' \times 3}$ for each node $i$:
+\begin{align}
+    \vm_i, \vec{\vm}_i     & \defeq \sum_{j \in \mathcal{N}_i} \textsc{Msg} \big( \left(\vs_i, \vec{\vv}_i\right) , \left(\vs_j, \vec{\vv}_j\right) , \ve_{ij} \big) , \\
+    \vs_i', \vec{\vv}_i' & \defeq \textsc{Upd} \big( \left(\vs_i, \vec{\vv}_i\right) \ , \ \left(\vm_i, \vec{\vm}_i\right) \big) ,
+\end{align}
+where $\textsc{Msg}, \textsc{Upd}$ are Geometric Vector Perceptrons, a generalization of MLPs to take tuples of scalar and vector features as input and apply $O(3)$-equivariant non-linear updates.
+The overall GNN encoder is $SO(3)$-equivariant due to the use of reflection-sensitive input features (dihedral angles) combined with $O(3)$-equivariant GVP-GNN layers.
+
+Our multi-state GNN encoder is easy to implement in any message passing framework and can be used as a \textit{plug-and-play} extension for any geometric GNN pipeline to incorporate the multi-state inductive bias.
+It serves as an elegant alternative to batching all the conformations, which we found required major alterations to message passing and pooling depending on downstream tasks.
+\textbf{Conformation order-invariant pooling. }
+The final encoder representations in gRNAde account for multi-state information while being invariant to the permutation of the conformational ensemble. 
+To achieve this, we perform a Deep Set pooling \citep{zaheer2017deep} over the conformations axis after the final encoder layer to reduce $\mS \in \mathbb{R}^{n \times k \times f}$ and $\vec{\mV} \in \mathbb{R}^{n \times k \times f' \times 3}$ to $\mS' \in \mathbb{R}^{n \times f}$ and $\vec{\mV}' \in \mathbb{R}^{n \times f' \times 3}$:
+\begin{align}
+    \mS', \vec{\mV}' \defeq \frac{1}{k} \sum_{i=1}^k \left( \mS[: \ , \ i], \vec{\mV}[: \ , \ i] \right) .
+    \label{eq:pooling}
+\end{align}
+A simple sum or average pooling does not introduce any new learnable parameters to the pipeline and is flexible to handle a variable number of conformations, enabling both single-state and multi-state design with the same model.
+\textbf{Sequence decoding and loss function. }
+We feed the final encoder representations after pooling, $\mS', \vec{\mV}'$, to autoregressive GVP-GNN decoder layers to predict the probability of the four possible base identities (A, G, C, U) for each node/nucleotide. 
+Decoding proceeds according to the RNA sequence order from the 5' end to 3' end.
+gRNAde is trained in a self-supervised manner by minimising a cross-entropy loss (with label smoothing value of 0.05) between the predicted probability distribution and the ground truth identity for each base.
+During training, we use autoregressive teacher forcing \citep{williams1989learning} where the ground truth base identity is fed as input to the decoder at each step, encouraging the model to stay close to the ground-truth sequence.
+
+\textbf{Sampling. }
+When using gRNAde for inference and designing new sequences, we iteratively sample the base identity for a given nucleotide from the predicted conditional probability distribution, given the partially designed sequence up until that nucleotide/decoding step.
+We can modulate the smoothness or sharpness of the probability distribution by using a temperature parameter.
+At lower temperatures, for instance $\leq$1.0, we expect higher native sequence recovery and lower diversity in gRNAde's designs. 
+At higher temperatures, the model produces more diverse designs by sampling from a smoothed probability distribution.
+
+gRNAde can also use unordered decoding \citep{dauparas2022robust} with minimal impact on performance, as well as masking or logit biasing during sampling, depending on the design scenario at hand.
+This enables gRNAde to perform partial re-design of RNA sequences, retaining specified nucleotide identities while designing the rest of the sequence.
+Similar approaches for functional protein design have been shown to be successful in the wet lab \citep{sumida2024improving}.
+\subsection{Evaluation metrics for designed sequences}
+\label{sec:metrics}
+
+In principle, inverse folding models can be sampled from to obtain a large number of designed sequences for a given backbone structure.
+Thus, in-silico metrics to determine which sequences are useful and which ones to prioritise in wet lab experiments are a critical part of the overall pipeline.
+We currently use the following metrics to evaluate gRNAde's designs, visualised in \Cref{fig:evaluation}:
+\begin{itemize}
+    \item \textbf{Native sequence recovery}, which is the average percentage of native (ground truth) nucleotides correctly recovered in the sampled sequences. Recovery is the most widely used metric for biomolecule inverse design \citep{dauparas2022robust} but can be misleading in the case of RNAs where alternative nucleotide base pairings can form the same structural patterns.
+    \item \textbf{Secondary structure self-consistency score}, where we `forward fold' the sampled sequences using a secondary structure prediction tool (we used EternaFold \citep{wayment2022rna}) and measure the average Matthew's Correlation Coefficient (MCC) to the groundtruth secondary structure, represented as a binary adjacency matrix. 
+    MCC values range between -1 and +1, where +1 represents a perfect match, 0 an average random prediction and -1 an inverse prediction. 
+    This measures how well the designs recover base pairing patterns.
+    \item \textbf{Tertiary structure self-consistency scores}, where we `forward fold' the sampled sequences using a 3D structure prediction tool (we used RhoFold \citep{shen2022e2efold}) and compute the average RMSD, TM-score and GDT\_TS to the groundtruth C4' coordinates to measure how well the designs recover global structural similarity and 3D conformations.
+    \item \textbf{Perplexity}, which can be thought of as the average number of bases that the model is selecting from for each nucleotide. 
+    Formally, perplexity is the average exponential of the negative log-likelihood of the sampled sequences. A `perfect' model which regurgitates the groundtruth
+    would have perplexity of 1, while a perplexity of 4 means that the model is making random predictions (the model outputs a uniform probability over 4 possible bases). Perplexity does not require a ground truth structure to calculate, and can also be used for ranking sequences as it is the model's estimate of the compatibility of a sequence with the input backbone structure.
+\end{itemize}
+
+\textbf{Significance and limitations. }
+Self-consistency metrics, termed `designability' (eg. scRMSD$\leq$2\AA), as well as perplexity have been found to correlate with experimental success in protein design \citep{watson2023novo}.
+While precise designability thresholds are yet to be established for RNA, pairs of structures with TM-score$\geq$0.45 or GDT\_TS$\geq$0.5 are known to correspond to roughly the same fold \citep{zhang2022us}.
+Another major limitation for in-silico evaluation of 3D RNA design compared to proteins is the relatively worse state of structure prediction tools \citep{schneider2023will}.
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=0.7\linewidth]{fig/evaluation.pdf}
+    \caption{
+    \textbf{In-silico evaluation metrics for gRNAde designed sequences.} We consider (1) \textit{sequence recovery}, the percentage of native nucleotides recovered in designed samples, (2) \textit{self-consistency scores}, which are measured by `forward folding' designed sequences using a structure predictor and measuring how well 2D and 3D structure are recovered (we use EternaFold and RhoFold for 2D/3D structure prediction, respectively). 
+    We also report (3) \textit{perplexity}, the model's estimate of the likelihood of a sequence given a backbone.
+    }
+    \label{fig:evaluation}
+\end{figure}
+
+
+\section{Experimental Setup}
+
+\label{sec:expt-setup}
+
+\textbf{3D RNA structure dataset. }
+We create a machine learning-ready dataset for RNA inverse design using RNASolo \citep{adamczyk2022rnasolo}, a novel repository of RNA 3D structures extracted from solo RNAs, protein-RNA complexes, and DNA-RNA hybrids in the PDB.
+We used all currently known RNA structures at resolution $\leq$4.0\AA\, resulting in 4,223 unique RNA sequences for which a total of 12,011 structures are available (RNASolo date cutoff: 31 October 2023).
+As inverse folding is a per-node/per-nucleotide level task, our training data contains over 2.8 Million unique nucleotides.
+\textbf{Structural clustering. }
+In order to ensure that we evaluate gRNAde's generalization ability to novel RNAs, we cluster the 4,223 unique RNAs into groups based on structural similarity. 
+We use US-align \citep{zhang2022us} with a similarity threshold of TM-score >0.45 for clustering, and ensure that we train, validate and test gRNAde on structurally dissimilar clusters (see next paragraph).
+We also provide utilities for clustering based on sequence homology using CD-HIT \citep{fu2012cd}, which leads to splits containing biologically dissimilar clusters of RNAs.
+
+\textbf{Splits to evaluate generalization. }
+After clustering, we split the RNAs into training ($\sim$4000 samples), validation and test sets (100 samples each) to evaluate two different design scenarios:
+\begin{enumerate}
+    \item \textbf{Single-state split. }
+        This split is used to fairly evaluate gRNAde for single-state design on a set of RNA structures of interest from the PDB identified by \citet{das2010atomic}, which mainly includes riboswitches, aptamers, and ribozymes.
+        We identify the structural clusters belonging to the RNAs identified in \citet{das2010atomic} and add all the RNAs in these clusters to the test set (100 samples).
+        The remaining clusters are randomly added to the training and validation splits.
+    \item \textbf{Multi-state split. } 
+        This split is used to test gRNAde's ability to design RNA with multiple distinct conformational states.
+        We order the structural clusters based on median intra-sequence RMSD among available structures within the cluster\footnote{For each RNA sequence, we compute the pairwise C4' RMSD among all available structures. We then compute the median RMSD across all sequences within each structural cluster.}.
+        The top 100 samples from clusters with the highest median intra-sequence RMSD are added to the test set.
+        The next 100 samples are added to the validation set and all remaining samples are used for training.
+\end{enumerate}
+Validation and test samples come from clusters with at most 5 unique sequences, in order to ensure diversity.
+Any samples that were not assigned clusters are directly appended to the training set.
+We also directly add very large RNAs (> 1000 nts) to the training set, as it is unlikely that we want to design very large RNAs. 
+We exclude very short RNA strands (< 10 nts).
+
+\textbf{Evaluation metrics. }
+For a given data split, we evaluate models on the held-out test set by designing 16 sequences (sampled at temperature 0.1) for each test data point and computing averages for each of the metrics described in \Cref{sec:metrics}: native sequence recovery, structural self-consistency scores and perplexity.
+We employ early stopping by reporting test set performance for the model checkpoint for the epoch with the best validation set recovery.
+Standard deviations are reported across 3 consistent random seeds for all models.
+
+\textbf{Hyperparameters. }
+All models use 4 encoder and 4 decoder GVP-GNN layers, with 128 scalar/16 vector node features, 64 scalar/4 vector edge features, and drop out probability 0.5, resulting in 2,147,944 trainable parameters.
+All models are trained for a maximum of 50 epochs using the Adam optimiser with an initial learning rate of 0.0001, which is reduced by a factor 0.9 when validation performance plateaus with patience of 5 epochs.
+
+\begin{figure}[t!]
+    \centering
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{fig/singlestate-barplot.pdf}
+        \caption{gRNAde outperforms Rosetta.}
+        \label{fig:singlestate-barplot}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=0.9\textwidth]{fig/singlestate-scatterplot.pdf}
+        \caption{gRNAde's perplexity correlates with recovery.}
+        \label{fig:singlestate-scatterplot}
+    \end{subfigure}
+    \hfill
+        \caption{\textbf{gRNAde compared to Rosetta for single-state design.}
+        (a) We benchmark native sequence recovery of gRNAde, RDesign, Rosetta, FARNA and ViennaRNA on 14 RNA structures of interest identified by \citet{das2010atomic}.
+        gRNAde obtains higher native sequence recovery rates (56\% on average) compared to Rosetta (45\%) and all other methods.
+        (b) Sequence recovery per sample for Rosetta and gRNAde, shaded by gRNAde’s perplexity for each sample.
+        gRNAde's perplexity is correlated with native sequence recovery for designed sequences
+        (Pearson correlation: -0.76, Spearman correlation: -0.67).
+
+        }
+       \label{fig:singlestate}
+\end{figure}
+
+
+\section{Results}
+
+
+
+\subsection{Single-state RNA design benchmark}
+
+We set out to compare gRNAde to Rosetta, a state-of-the-art physically based toolkit for biomolecular modelling and design \citep{leman2020macromolecular}. 
+We reproduced the benchmark setup from \citet{das2010atomic} for Rosetta's fixed backbone RNA sequence design workflow on 14 RNA structures of interest from the PDB, which mainly includes riboswitches, aptamers, and ribozymes (full listing in \Cref{tab:singlestate}).
+We trained gRNAde on the single-state split detailed in \Cref{sec:expt-setup}, explicitly excluding the 14 RNAs as well as any structurally similar RNAs in order to ensure that we fairly evaluate gRNAde's generalization abilities vs. Rosetta.
+
+\textbf{gRNAde improves sequence recovery over Rosetta. }
+In \Cref{fig:singlestate}, we compare gRNAde's native sequence recovery for single-state design with numbers taken from \citet{das2010atomic} for Rosetta, FARNA (a predecessor of Rosetta), ViennaRNA (the most popular 2D inverse folding method), and RDesign \citep{tan2023hierarchical} (a concurrent GNN-based RNA inverse folding model).
+gRNAde has higher recovery of 56\% on average compared to 45\% for Rosetta, 32\% for FARNA, 27\% for ViennaRNA, and 43\% for RDesign.
+\textbf{gRNAde is significantly faster than Rosetta. }
+In addition to superior sequence recovery, gRNAde is significantly faster than Rosetta for high-throughout design pipelines. 
+Training gRNAde from scratch takes roughly 2--6 hours on a single A100 GPU, depending on the exact hyperparameters.
+Once trained, gRNAde can design hundreds of sequences for backbones with hundreds of nucleotides in $\sim$10 seconds on CPU and $\sim$1 second with GPU acceleration.
+On the other hand, Rosetta takes order of hours to produce a single design due to performing expensive Monte Carlo optimisation until convergence on CPU.\footnote{
+\href{https://www.rosettacommons.org/docs/latest/application_documentation/rna/rna-design}{Rosetta documentation} states that ``runs on RNA backbones longer than $\sim$ten nucleotides take many minutes or hours''.
+We have not run Rosetta ourselves as recent builds do not include RNA recipes.
+}
+Deep learning methods like gRNAde are arguably easier to use since no expert customization is required and setup is easier compared to Rosetta (the latest builds do not include RNA recipes), making RNA design more broadly accessible.
+
+\textbf{gRNAde's perplexity correlates with sequence recovery. }
+In \Cref{fig:singlestate-scatterplot}, we plot native sequence recovery per sample for Rosetta vs. gRNAde, shaded by gRNAde’s average perplexity for each sample. 
+Perplexity is an indicator of the model's confidence in its own prediction (lower perplexity implies higher confidence) and appears to be correlated with native sequence recovery. 
+In the subsequent \Cref{sec:results:fitness}, we further demonstrate the utility of gRNAde's perplexity for zero-shot ranking of RNA fitness landscapes.
+
+
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{0.43\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{fig/multistate-v2-boxplot-mean_recovery.pdf}
+        \caption{Per-sample sequence recovery}
+        \label{fig:multistate-sample}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.55\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{fig/multistate-v2-recovery-per-nt.pdf}
+        \caption{Per-nucleotide recovery vs. structural flexibility}
+        \label{fig:multistate-per-nt}
+    \end{subfigure}
+        \caption{
+        \textbf{Multi-state design benchmark.}
+        (a) Multi-state gRNAde shows a consistent 3-5\% improvement over the single-state variant in terms of sequence recovery on the multi-state test set of 100 RNAs, with the best performance obtained using 3 states.
+        (b) When plotting sequence recovery per-nucleotide, multi-state gRNAde improves over a single-state model for structurally flexible regions of RNAs, as characterised by nucleotides that tend to undergo changes in base pairing (left) and nucleotides with higher average RMSD across multiple states (right).
+        Marginal histograms in blue show the distribution of values.
+        We plot performance for one consistent random seed across all models; collated results and ablations are available in \Cref{app:ablation}.
+        }
+       \label{fig:multistate}
+\end{figure}
+\subsection{Multi-state RNA design benchmark}
+
+Structured RNAs often adopt multiple distinct conformational states to perform biological functions \citep{ken2023rna}.
+For instance, riboswitches adopt at least two distinct functional conformations: a ligand bound (holo) and unbound (apo) state, which helps them regulate and control gene expression \citep{stagno2017structures}.
+If we were to attempt single-state inverse design for such RNAs, each backbone structure may lead to a different set of sampled sequences. 
+It is not obvious how to select the input backbone as well as designed sequence when using single-state models for multi-state design.
+gRNAde's multi-state GNN, descibed in \Cref{sec:methods:gnn}, directly ‘bakes in’ the multi-state nature of RNA into the architecture and designs sequences explicitly conditioned on multiple states.
+
+In order to evaluate gRNAde's multi-state design capabilities, we trained equivalent single-state and multi-state gRNAde models on the multi-state split detailed in \Cref{sec:expt-setup}, where the validation and test sets contain progressively more structurally flexible RNAs as measured by median RMSD among multiple available states for an RNA.
+
+\textbf{Multi-state gRNAde consistently boosts sequence recovery. }
+In \Cref{fig:multistate-sample}, we compared a single-state variant of gRNAde with otherwise equivalent multi-state models (with up to 5 states) in terms of native sequence recovery.
+Multi-state variants show a consistent 3-5\% improvement, with the best performance obtained using 3 states.
+This trend holds to a lesser extent on the single-state benchmark where the multi-state model is being used with only one state as input.
+This suggests that seeing multiple states during training can be useful for teaching gRNAde about RNA conformational flexibility and improve performance even for single-state design tasks.
+As a caveat, it is worth noting that multi-state models consume more GPU memory than an equivalent single-state model during mini-batch training (approximate peak GPU usage for max. number of states = 1: 12GB, 3: 28GB, 5: 50GB on a single A100 with at most 3000 total nodes in a mini-batch).
+
+\textbf{Improved recovery in structurally flexible regions. }
+In \Cref{fig:multistate-per-nt}, we evaluated gRNAde's multi-state sequence recovery at a fine-grained, per-nucleotide level to understand the source of performance gains.
+Multi-state GNNs improve sequence recovery over the single-state variant on structurally flexible nucleotides, as characterised by undergoing changes in base pairing/secondary structure and higher average RMSD between 3D coordinates across states.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.95\textwidth]{fig/gRNAde_unsupervised_5TU_v2024-05-10-14-51.pdf}
+    \caption{\textbf{Retrospective study of gRNAde for ranking ribozyme mutant fitness. }
+    Using the backbone structure and mutational fitness landscape data from an RNA polymerase ribozyme \citep{mcrae2024cryo}, we retrospectively analyse how well we can rank variants at multiple design budgets using random selection vs. gRNAde's perplexity for mutant sequences conditioned on the backbone structure (catalytic subunit 5TU). 
+    Note that gRNAde is used zero-shot here, i.e. it was not fine-tuned on any assay data. For stochastic strategies, bars indicate median values, and error bars indicate the interquartile range estimated from 10,000 simulations per strategy and design budget.
+    At low throughput design budgets of up to $\sim$500 sequences, selecting mutants using gRNAde outperforms random baselines in terms of the expected maximum improvement in fitness over the wild type. 
+    In particular, gRNAde performs better than single site saturation mutagenesis, even when all single mutants are explored (total of 449 single mutants, 10,493 double mutants for the catalytic subunit 5TU in \citet{mcrae2024cryo}).
+
+    }
+    \label{fig:fitness}
+\end{figure}
+\subsection{Zero-shot ranking of RNA fitness landscape}
+\label{sec:results:fitness}
+
+Lastly, we explored the use of gRNAde as a zero-shot ranker of mutants in RNA engineering campaigns.
+Given the backbone structure of a wild type RNA of interest as well as a candidate set of mutant sequences, we can compute gRNAde's perplexity of whether a given sequence folds into the backbone structure.
+Perplexity is inversely related to the likelihood of a sequence conditioned on a structure, as described in \Cref{sec:metrics}.
+We can then rank sequences based on how `compatible' they are with the backbone structure in order to select a subset to be experimentally validated in wet labs.
+
+\textbf{Retrospective analysis on ribozyme fitness landscape. }
+A recent study by \citet{mcrae2024cryo} determined a cryo-EM structure of a dimeric RNA polymerase ribozyme at 5\AA\ resolution\footnote{This RNA was not present in gRNAde's training data, which contains structures at $\leq$4.0\AA\ resolution.}, along with fitness landscapes of $\sim$75K mutants for the catalytic subunit 5TU and $\sim$48K mutants for the scaffolding subunit t1.
+We design a retrospective study using this data of (sequence, fitness value) pairs where we simulate an RNA engineering campaign with the aim of improving catalytic subunit fitness over the wild type 5TU sequence.
+
+We consider various design budgets ranging from hundreds to thousands of sequences selected for experimental validation, and compare 4 unsupervised approaches for ranking/selecting variants:
+(1) random choice from all $\sim$75,000 sequences;
+(2) random choice from all 449 single mutant sequences;
+(3) random choice from all single and double mutant sequences (as sequences with higher mutation order tend to be less fit);
+and
+(4) negative gRNAde perplexity (lower perplexity is better).
+For each design budget and ranking approach, we compute the expected maximum change in fitness over the wild type that could be achieved by screening as many variants as allowed in the given design budget.
+We run 10,000 simulations to compute confidence intervals for the 3 random baselines.
+
+\textbf{gRNAde outperforms random baselines in low design budget scenarios. }
+\Cref{fig:fitness} illustrates the results of our retrospective study.
+At low design budgets of up to hundreds of sequences, which are relevant in the case of a low throughput fitness screening assay,
+gRNAde outperforms all random baselines in terms of the maximum change in fitness over the wild type.
+The top 10 mutants as ranked by gRNAde contain a sequence with 4-fold improved fitness, while the top 200 leads to a 5-fold improvement.
+Note that gRNAde is used zero-shot here, i.e. it was not fine-tuned on any assay data.
+
+Overall, it is promising that gRNAde's perplexity correlates with experimental fitness measurements out-of-the-box (zero-shot) and can be a useful ranker of mutant fitness in our retrospective study.
+In realistic design scenarios, improvements could likely be obtained by fine-tuning gRNAde on a low amount of experimental fitness data. For example, latent features from gRNAde may be finetuned or used as input to a prediction head with supervised learning on fitness landscape data.
+
+
+
+
+
+
+\section{Conclusion}
+
+
+We introduce gRNAde, a geometric deep learning pipeline for RNA sequence design conditioned on one or more 3D backbone structures.
+gRNAde represents a significant advance over physics-based Rosetta in terms of both computational and experimental performance, as well as inference speed and ease-of-use.
+Further, gRNAde enables explicit multi-state design for structurally flexible RNAs which was previously not possible with Rosetta.
+gRNAde's perplexity correlates with native sequence and structural recovery, and can be used for zero-shot ranking of mutants in RNA engineering campaigns.
+gRNAde is also the first geometric deep learning architecture for multi-state biomolecule representation learning; the model is generic and can be repurposed for other learning tasks on conformational ensembles, including multi-state protein design.
+
+\textbf{Limitations. } Key avenues for future development of gRNAde include supporting multiple interacting chains, accounting for partner molecules with RNAs, and supporting negative design against undesired conformations. 
+We discuss practical tradeoffs to using gRNAde in real-world RNA design scenarios in \Cref{app:faq}, including limitations due to the current state of 3D RNA structure prediction tools.
+
+
+
+
+
+

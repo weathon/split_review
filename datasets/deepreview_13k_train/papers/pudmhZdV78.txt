@@ -1,0 +1,496 @@
+\title{In-context learning in presence of spurious correlations}
+
+\begin{abstract}
+Large language models exhibit a remarkable capacity for in-context learning, where they learn to solve tasks given a few examples.
+Recent work has shown that transformers can be trained to perform simple regression tasks in-context.
+This work explores the possibility of training an in-context learner for classification tasks involving spurious features.
+We find that the conventional approach of training in-context learners is susceptible to spurious features.
+Moreover, when the meta-training dataset includes instances of only one task, the conventional approach leads to task memorization and fails to produce a model that leverages context for predictions.
+Based on these observations, we propose a novel technique to train such a learner for a given classification task.
+Remarkably, this in-context learner matches and sometimes outperforms strong methods like ERM and GroupDRO.
+However, unlike these algorithms, it does not generalize well to other tasks.
+We show that it is possible to obtain an in-context learner that generalizes to unseen tasks by training on a diverse dataset of synthetic in-context learning instances.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models, such as GPT-3, have the ability of in-context learning (ICL), wherein they learn to solve a task given a few examples in the context~\citep{brown2020language}.
+The most significant aspect of in-context learning is that the learning happens during the forward pass on the context and query, without updating network parameters.
+In order to study in-context learning in isolation, a number of studies considered training transformers~\citep{vaswani2017attention} from scratch to solve simple learning tasks in-context.
+In particular, \citet{garg2022can} show empirically that transformers can be trained to perform in-context learning of simple regression functions, such as
+dense or sparse linear functions, two-layer ReLU neural networks, and small decision trees.
+
+Training on ICL instances can be seen as an instance of meta-learning~\citep{schmidhuber1987evolutionary,naik1992meta,thrun1998learning}, where the goal is to learn a learning algorithm.
+What exact algorithm is learned when training transformers on ICL instances is still an open problem.
+\citet{akyurek2022learning} and \citet{von2023transformers} show that transformers can implement a single gradient descent step of ordinary least squares and update the closed-form solution of ridge regression when a new example is added.
+Additionally, they provide evidence that transformers trained on ICL instances of linear regression learn algorithms that closely match predictions of the known algorithms, such as gradient descent on ordinary least squares objective and ridge regression.
+However, there is evidence that the learned algorithm may vary with model scale, depth, and pretraining task diversity~\citep{akyurek2022learning, raventos2024pretraining}.
+In particular, ~\citet{raventos2024pretraining} demonstrate that in the setting of in-context learning of linear regression tasks with insufficient pretraining task diversity, the learned algorithm behaves like a Bayesian estimator with the pretraining task distribution as the prior, and hence fails to generalize well to unseen tasks.
+\citet{yadlowsky2023pretraining} show that when trained on ICL instances where the regression function belongs to a union of distinct function classes, the learned algorithm fails to generalize beyond the pretraining function classes.
+\cite{ahuja2023closer} show that in-context learning ability diminishes under strong distribution shifts.
+
+In this work, we explore the limits of in-context learning further by testing it on challenging settings.
+We deviate from the existing literature and consider visual classification tasks instead of regression tasks with simple function classes.
+In particular, we consider classification tasks where some features are \emph{spuriously correlated} with the label.
+Such features are predictive of the label but are not causally related to it, due to which their correlation might not hold at test time.
+A prominent example is the cow vs camel classification task, where the background often correlates with the label, as cows are typically photographed in pastures, while camels are typically photographed in deserts~\citep{beery2018recognition}.
+It is well-known that neural networks trained with gradient-based methods to minimize empirical risk can exploit spurious features, causing performance degradation under distribution shifts affecting these correlations~\citep{torralba2011unbiased,ribeiro2016should,gururangan-etal-2018-annotation,zech2018variable,mccoy-etal-2019-right,geirhos2018imagenettrained,geirhos2020shortcut,xiao2021noise}.
+
+We start our analysis in the standard setting of having a single classification task with spurious features.
+We consider the conventional approach of obtaining an in-context learner, wherein a transformer is trained on sequences of form $(x_1, y_1, \ldots, x_k, y_k, x_{k+1})$ to predict the label $y_{k+1}$ of the query example $x_{k+1}$.
+We find that this conventional approach leads to models that do classification \emph{ignoring the context}, essentially memorizing the task.
+Furthermore, these models lack robustness to changes of the correlation between the label and spurious features.
+In particular, we observe a significant performance drop when the query follows a distribution in which the label and spurious feature correlation is zero.
+We propose an effective approach of addressing the task memorization issue.
+Namely, we find that task memorization can be mitigated greatly by randomly permuting input embedding dimensions for each training sequence.
+To address the issue of spurious features, we propose a novel way of forming ICL instances and a suitable transformer architecture, which work together to simulate distribution shift with respect to spurious features in the context.
+Overall, our proposed techniques lead to strong in-context learners that outperform established methods such as 1-NN, empirical risk minimization (ERM), and GroupDRO~\citep{Sagawa*2020Distributionally}, suggesting that the in-context learner implements a more specialized algorithm.
+
+Despite being trained on instance of a single task, the learned algorithm generalizes to other tasks \emph{without} spurious features.
+However, it fails to generalize to unseen tasks with spurious features.
+For this reason, we next explore training an in-context learner that generalizes to unseen tasks with spurious features.
+We create a dataset of in-context learning instances for various binary classifications tasks with varying spurious features.
+We demonstrate the efficacy of the proposed techniques on this dataset too and find that it can be improved further by passing spurious feature annotations as input and injecting occasional queries requesting the label of a proceeding context example to promote learning induction heads.
+The resulting model generalizes perfectly to unseen tasks, as long as the data generating process is similar.
+However, generalization to unseen tasks with possibly different data generating process depends on the severity of the challenge posed by spurious features, indicating that the learned algorithm is more brittle to severe distribution shifts than conventional algorithms.
+We summarize our main contributions as follows.
+\begin{itemize}
+    \item[(i)] We show that the conventional approach of training an in-context learner is susceptible to presence of spurious features and also leads to task memorization in case of a single task.
+    \item[(ii)] We propose a suite of novel techniques of forming in-context training data to mitigate task memorization and increase robustness to spurious features, leading to in-context learners that outperform established learning algorithms.
+    \item[(iii)] We demonstrate that it is possible to obtain more general-purpose robust in-context learners by training on a diverse set of synthetic classification tasks involving spurious features.
+\end{itemize}
+
+\begin{figure}[!t]
+    \begin{subfigure}[T]{0.35\textwidth}
+        \centering
+        \includegraphics[height=6.05em]{figures/naive.png}
+        \captionsetup{position=below, skip=2.25em} 
+        \caption{Naive approach}
+        \label{fig:naive-arch}
+    \end{subfigure}%
+    \hspace{4em}
+    \begin{subfigure}[T]{0.455\textwidth}
+        \centering
+        \includegraphics[height=7.88em]{figures/v2.png}
+        \caption{Proposed approach}
+        \label{fig:v2-arch}
+    \end{subfigure}
+    \caption{In-context learning transformer architectures of the naive and proposed approaches. The proposed approach allows arbitrary query tokens after each learning example. Token positions and attention mask are modified so that these intermediate queries have no effect on other tokens.}
+    \label{fig:icl-settings}
+\end{figure}
+
+
+\section{In-context learning based on a single task}
+
+We start by considering the common setting of having a single classification task with spurious features.
+For simplicity, we focus on label-balanced binary classification tasks in presence of a single binary spurious feature,
+although what follows next applies to label-imbalanced multiclass settings as well.
+Let $\DD_\mathrm{train}$ be a set of training examples for the task, where each example is a triplet $(x, s, y)$ of input $x \in \bR^d$, spurious feature value $s \in \mathset{0, 1}$, and label $y \in \mathset{0, 1}$.
+Similarly, let $\DD_\mathrm{test}$ be a set of test examples.
+Importantly, we do not make any assumptions on the data generating process, except that $x$ has some information about $s$ and $s$ is predictive of $y$ on the training set, but their correlation does not hold on the test set.
+For an example $(x, s, y)$, we define its \emph{group} $g=2y+s$. 
+In a binary classification task with a single binary spurious feature, there are four groups.
+Without loss of generality, we assume that for a majority of training examples we have that $y=s$.
+Hence we refer to groups 0 and 3 as majority groups, while referring to groups 1 and 2 as minority groups.
+
+Training a transformer to perform linear regression in-context requires millions of ICL training instances, even for small dimensional cases. For example, \citet{garg2022can} use 32 million training instances for 20-dimensional inputs.
+We next consider ways of generating so many ICL instances from a single task.
+\subsection{A naive approach of constructing ICL instances}\label{subsec:naive}
+The standard approach of constructing an ICL instance is to sample a subset of $n+1$ examples $\mathset{(x_i, s_i, y_i)}_{i=1}^{n+1}$ from $\DD_\mathrm{train}$ and form a sequence $S=(x_1, \tilde{y}_1, x_2, \tilde{y}_2, \ldots, x_n, \tilde{y_n}, x_{n+1})$, where $\tilde{y}_i \in \bR^d$ is a fixed random representation of either $y_i$ or $g_i$
+(this distinction will be elaborated later).
+Then one trains a transformer $f_\theta : \cup_k \bR^{k \times d} \rightarrow [0,1]$ to predict $y_i$ given $S_{i} \triangleq (x_1, \tilde{y}_1, \ldots, x_{i-1}, \tilde{y}_{i-1}, x_i)$ (see \cref{fig:naive-arch}), optimizing the following loss function:
+\begin{equation}
+    \frac{1}{n+1}\sum_{i=1}^{n+1} \mathrm{CE}(y_i, f_\theta(S_i)),
+    \label{eq:naive-loss}
+\end{equation}
+where $\mathrm{CE}(y, \widehat{y}) = -y \log \widehat{y} - (1-y) \log (1-\widehat{y})$ is the binary cross-entropy loss.
+We explore two options of setting $\tilde{y}_i$.
+In the first option, we set $\tilde{y}_i$ to represent $y_i$ with a constant vector or its negative in $\bR^d$. In this case we aim to obtain an in-context learner that is robust to spurious features without receiving spurious feature annotations as input.
+ERM is one such learner that minimizes average loss on training examples and does not require spurious feature annotations.
+In the second option, we set $\tilde{y}_i$ to represent $g_i$ as a sum of two constant vectors in $\bR^d$, one representing the class and the other representing the spurious feature.
+In this case we aim to obtain an in-context learner that does robust classification with respect to a specified spurious feature.
+GroupDRO is one such learner that minimizes worst-group loss, therefore requiring spurious feature annotations at training time.
+
+Unfortunately, the simple approach of \eqref{eq:naive-loss} has several issues.
+First, as the classification task is the same in all ICL instances, the model can ignore context examples and predict $y_i$ based solely on $x_i$, essentially memorizing the task.
+Second, as all $n+1$ examples of a sequence $S$ are sampled from the training set and the spurious correlation holds for all of them, there is nothing preventing usage of spurious features in making predictions.
+To confirm these two issues, we consider the \waterbirds{} dataset~\citep{Sagawa*2020Distributionally}, which is landbird vs waterbird image classification task where image background (sea or land) is correlated with the label in the training set (4,795 examples), but not in validation % (1,199 examples)
+and test sets . %(5,794 examples).
+A robust classifier should predict \texttt{waterbird} or \texttt{landbird} without relying on image background.
+To separate out the representation learning challenge, we represent images with a pretrained and frozen DINOv2 ViT-B/14 distilled~\citep{oquab2023dinov2}.
+This way each image is embedded in $\bR^{768}$.
+While using powerful pretrained representations increases overall performance under distribution shifts~\citep{radford2021learning,mehta2022you}, we note that it does not eliminate the problem of spurious correlations.
+Representations obtained via large-scale self-supervised pretraining are likely rich enough to capture information about both the label and spurious feature.
+Furthermore, many works have indicated that the main contribution to the out-of-domain generalization error comes from the classification head (rather than the representation learning module) and called for designing better methods of training the classification head~\citep{galstyan2022failure,menon2021overparameterisation,kirichenko2023last,izmailov2022feature,shi2023robust}.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/wb_issues_of_naive_val_train_test_accuracy_majority.pdf}
+    \end{subfigure}%
+    \hspace{2em}
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/wb_issues_of_naive_val_train_test_worst_group_accuracy.pdf}
+    \end{subfigure}
+    \caption{Majority-group and worst-group test accuracies on \waterbirds{} as a function of context size for the naive and proposed approaches with or without permuting input dimensions. Shaded regions show standard deviation across 5 training runs.}
+    \label{fig:naive-approach}
+\end{figure}
+
+We train a causal decoder-only GPT-J transformer~\citep{gpt-j} with 80M parameters on 2M in-context learning sequence with $n=512$ and $\tilde{y}_i$ representing labels, constructed from the training set of \waterbirds{}.
+We use balanced sampling of classes and set the minority group proportion to 10\% within each class.
+We use the ADAM optimizer~\citep{kingma2014adam} ($\beta_1=0.9$ and $\beta_2=0.999$) with 32 batch size and no weight decay.
+The learning rate is selected from $\mathset{3 \cdot 10^{-5}, 6\cdot10^{-5}, 10^{-4}}$ based on average test performance over 5 runs.
+Concretely, we evaluate on 8192  sequences where the context part is $n$ training examples, while the query is a sampled from the test set with equal group distribution. Exact metric definitions and missing details are provided in \cref{app:exp-details}.
+Note that with 512 context length and 10\% minority group ratio within each class, the expected value of the number of context examples from each of the 2 minority groups is about 25.
+For reference, the smallest minority-group has only 56 examples in the \waterbirds{} training set.
+
+\cref{fig:naive-approach} plots majority-group and worst-group test accuracies as a function of context size $n$.
+We see that naive approach results in models that ignore context -- worst-group accuracy with 512 context examples is essentially the same as with 2 examples (see the \emph{naive} curve).
+This confirms the task memorization issue.
+\cref{fig:naive-approach} also shows that majority-group test accuracy of the naive approach is considerably higher compared to worst-group accuracy confirming the non-robustness issue.
+
+\subsection{The proposed approach of constructing ICL instances}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/mod_wb_issues_of_naive_val_train_test_accuracy_majority.pdf}
+    \end{subfigure}%
+    \hspace{2em}
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/mod_wb_issues_of_naive_val_train_test_worst_group_accuracy.pdf}
+    \end{subfigure}
+    \caption{Majority-group and worst-group test accuracies on \modwaterbirds{} as a function of context size for the naive and proposed approaches with or without permuting input dimensions.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+    \label{fig:naive-approach-mod}
+\end{figure}
+To address the task memorization issue, we propose to rotate image embeddings in each ICL instance independently, making it harder to memorize individual examples.
+We found that generating random rotation matrices on fly is computationally expensive and slows down training.
+We tried generating and storing 10K rotation matrices, but this resulted in less than 50M different training examples that were still possible to memorize to some extent.
+A more effective and efficient alternative is to apply random permutations to image embedding dimensions (for brevity, this technique is denoted with \emph{+P} in figures and tables).
+We found this approach to be very effective in terms of inducing in-context learning (see \emph{naive + P} in \cref{fig:naive-approach}).
+We also see that the difference between majority-group and worst-group accuracies decreases, although an approximately 5 p.p. gap remains.
+
+When training an ICL transformer, ideally, we would like to simulate the situation of making a test prediction based on a context of training examples.
+Importantly, we would like to simulate the case where test distribution has balanced groups (i.e., the spurious correlation does not hold).
+Given access to spurious feature annotations \emph{for the training set}, we can simulate this scenario using only training examples.
+In particular, we can form ICL instances of form $(x_1, \tilde{y}_1, \ldots, x_{n}, \tilde{y}_{n}, x_{n+1})$, where the context examples ($x_1,\ldots, x_{n}$) are sampled in a way that the spurious feature is correlated with the label, while the query $x_{n+1}$ is sampled to have a uniform group distribution.
+However, if we again optimize the loss of \eqref{eq:naive-loss}, for context lengths less than $n$, the network will be allowed to make predictions using the spurious feature, which is undesirable.
+Please refer to \cref{fig:v1-issue} of \cref{app:more-results} for evidence of this.
+Potential ways of addressing this issue is upweighting the final prediction loss in \cref{eq:naive-loss} or upweighting predictions on minority examples.
+In our preliminary experiments we found the former approach ineffective.
+We did not experiment with the latter approach.
+
+Instead, we propose a novel way of forming in-context learning instances and a modified transformer architecture that is suitable for such sequences.
+In particular, we form sequences of form $S=(x_1, \tilde{y}_1, q_1, x_2, \tilde{y}_2, q_2, \ldots, x_n, \tilde{y}_n, q_n)$, where $(x_i, \tilde{y}_i)$ are context examples, while $q_i$ are queries, sampled with replacement from $\DD_\mathrm{train}\setminus \{x_1,\ldots,x_n\}$. 
+Importantly, $q_i$ are sampled with a uniform group distribution.
+Redefining $S_i = (x_1, \tilde{y}_1, q_1, \ldots, x_i, \tilde{y}_i, q_i)$, we would like the prediction on $S_i$ to be the label of $q_i$.
+When making a prediction on $q_i$, we want $q_j\ (j < i)$ to have no effect.
+For this end we make two modifications.
+First, we modify the causal attention matrix to disallow attending to query tokens, unless a query token is attending to itself.
+Formally, if we enumerate tokens from $1$ to $3n$ and define $M_{i, j}$ to denote the attention mask for 
+token $i$ attending to token $j$, then we set
+\begin{equation}
+    M_{i,j} = \begin{cases}
+    0, & i < j, \\
+    0, & i > j \text{\ \ and\ \ } j\equiv 0\hspace{-0.5em} \mod 3,\\
+    1, & \text{otherwise.}
+  \end{cases}
+\end{equation}
+
+Second, we use modified token positions for computing positional encodings, in order to discount intermediate query tokens.
+Namely, for the sequence $(x_1, \tilde{y}_1, q_1, x_2, \tilde{y}_2, \ldots, x_n, \tilde{y}_n, q_n)$, position indices are set to $(0, 1, 2, 2, 3, 4, 4, \ldots, 2n-2, 2n-1, 2n)$.
+Formally, enumerating tokens from $1$ to $3n$, the position index of the $i$-th token is set to $2\left\lfloor \frac{i-1}{3} \right\rfloor + (i-1)\hspace{-0.5em}\mod 3$.
+Please refer to \cref{fig:icl-settings} for an illustration.
+Hereafter, we refer to this approach as simply ``proposed approach''.
+
+\cref{fig:naive-approach} compares the proposed and naive approaches with and without input dimension permutations.
+Without random permutations, the proposed approach outperforms the naive approach marginally.
+However, the same is not true with random permutations.
+We found that image embeddings of DINOv2 have a bias towards representing objects more than backgrounds, alleviating the challenge posed by the spuriously correlated background in \waterbirds{}.
+In fact, the linear probing accuracy of the spurious feature is just $\approx 82$\%.
+For this reason, we create a modified version of Waterbirds by adding a constant vector $\tilde{s}$ or $-\tilde{s}$ to image embeddings based on the spurious feature $s$.
+We scale $\tilde{s}$ to have its norm equal to the average norm of image embeddings and verify that the linear probing accuracy of the spurious feature becomes 100\%.
+On this modified \waterbirds{} dataset, which we name \modwaterbirds{}, we see a large separation between the naive and proposed approaches (see \cref{fig:naive-approach-mod}).
+We also see that without permutations, both naive and proposed approaches perform identically, indicating no robustness to the spurious correlation.
+This is expected, because in the absence of in-context learning, we can think of the naive and proposed approaches as standard and reweighted empirical risk minimization with a complex classification head, respectively.
+It has been observed that sample reweighting is not effective in overparameterized settings as all training examples will be perfectly fitted~\citep{byrd2019effect,menon2021overparameterisation}.
+\subsection{Comparison with conventional learning algorithms}
+
+Now that we have established the efficacy of the proposed technique, we compare it to a few established algorithms, such as 1-NN, ERM, and GroupDRO, that last of two have been historically hard to outperform~\citep{gulrajani2021in,koh2021wilds}.
+Comparing to more existing methods designed for robustness to spurious correlations is outside of the goal of this work, namely studying limits of in-context learning.
+In our comparisons, we follow the evaluation recipe used for the in-context learners.
+Namely, we evaluate each baseline on 8192 sequences by training on the context part of the sequence and making a prediction on the single query.
+More information about hyperparameters and model selection is presented in \cref{app:exp-details}.
+
+\cref{fig:wb-baseline-comparison,fig:mod-wb-baseline-comparison} compare the proposed and baseline approaches on \waterbirds{} and \modwaterbirds{} respectively.
+On \waterbirds{}, the proposed method outperforms ERM and GroupDRO on almost all context lengths, but is better than 1-NN only for short context lengths.
+The good performance of 1-NN is due to the bias in DINOv2 representations.
+On \modwaterbirds{}, the proposed method outperforms the baselines at all context lengths.
+From these results, we conclude that this in-context learner implements none of these algorithms.
+
+It is worth noting that baseline worst-group accuracies at $n=512$ are actually \emph{higher} than what we get when training on the entire dataset.
+For example, on \waterbirds{}, 1-NN gets only 90.03\ \% worst-group accuracy, while ERM gets 84.23 $\pm$ 0.17 \% and GroupDRO gets 92.43 $\pm$ 0.24 \%.
+This is due to balanced sampling of classes and setting the minority ratio to 10\% withing each class, which is higher than the minority ratio of $\approx 5\%$ in the original \waterbirds{} dataset.
+One can think of our resampling as a weaker form of down-sampling which has been found to be helpful in presence of spurious correlations~\citep{nagarajan2021understanding,menon2021overparameterisation,idrissi2022simple}.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.4\linewidth]{figures/celeba_baseline_comparison_val_train_test_worst_group_accuracy.pdf}
+    \caption{Worst-group test accuracies on \celeba{} for the proposed approach and conventional methods such as 1-NN, ERM, and GroupDRO.
+    Shaded regions show standard deviation across 5 training runs. The ``+G'' marker indicates setting $\tilde{y}_i$ to represent $g_i$, i.e., passing context examples groups as input. Please refer to \cref{sec:multiple-tasks} for more information on this.
+    }
+    \label{fig:celeba_256_wga}
+\end{figure}
+
+Additionally, we verify our findings on another popular dataset \celeba{}~\citep{liu2015faceattributes} designed for blond vs non-blond person classification, with sex being a spurious variable.
+Unlike, \waterbirds{}, the spurious feature is asymmetric in \celeba{}, as blond and non-blond women are equally represented, while blond men are significantly infrequent compared to non-blond men.
+In particular, we verify the two shortcomings of the conventional approach and demonstrate the efficacy of the proposed techniques compared to the baselines (please see \cref{tab:celeba-results} and \cref{fig:celeba_256_wga} of \cref{app:more-results}).
+\subsection{Generality of the learned algorithm}
+\begin{figure}[t]
+\centering
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/wb_baseline_comparison_val_train_test_worst_group_accuracy.pdf}
+        \caption{\waterbirds{}}
+        \label{fig:wb-baseline-comparison}
+    \end{subfigure}%
+    \hspace{2em}
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/mod_wb_baseline_comparison_val_train_test_worst_group_accuracy.pdf}
+        \caption{\modwaterbirds{}}
+        \label{fig:mod-wb-baseline-comparison}
+    \end{subfigure}
+    \caption{Worst-group test accuracies on \waterbirds{} and \modwaterbirds{} for the proposed approach and conventional methods such as 1-NN, ERM, and GroupDRO.
+    Majority-group accuracies are reported in \cref{fig:wb-and-mod-wb-maj-acc-baseline-comparison} of \cref{app:more-results}.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+\end{figure}
+
+Since we train in-context learners on ICL instances of a single task, a natural question arises whether the learned algorithm can generalize to unseen tasks.
+Without permuting input dimensions, the model does not learn to do in-context learning.
+Thus, we can not hope for any generality without permuting input dimensions.
+We take the model obtained with the ``Proposed + P'' technique
+and probe generality of its in-context learning by evaluating on various datasets.
+We start by swapping the labels of two classes in \waterbirds{} at evaluation and observe $\approx 2$ p.p. overall accuracy drop and $\approx 5$ p.p. worst-group accuracy drop.
+Despite the worsened performance, this indicates that the model treats class labels symbolically, which is remarkable given that the semantics of labels were constant during training.
+However, when we evaluate on \modwaterbirds{}, it gets 100\% accuracy on the majority groups and \emph{0\% accuracy on minority groups}.  Additionally, when we switch the task to predicting the background in the original \waterbirds{} dataset (now the class becomes a spurious feature), the overall test accuracy drops to 54.4\%, while the worst-group accuracy drops to 9.3\%.
+
+It is worth noting that the learned algorithm is not completely useless for other tasks and works well in absence of spurious features, even on unseen tasks.
+For example, evaluating on binary classification tasks derived from the \texttt{CUB-200}~\citep{cub_dataset} dataset, from where the bird images of \waterbirds{} were taken, we get 99.7\% accuracy at context size 100 (the accuracy is so high because most pairs of classes are easy to distinguish).
+We also test on binary classification tasks derived from classes belonging to \emph{Amphibia} and \emph{Mammalia} supercategories of the \inat{}~\citep{van2018inaturalist} dataset.
+At context length 512, the overall accuracy is 98.5\%.
+
+These OOD evaluation results indicate that the learned algorithm does something specific to the spurious feature of \waterbirds{}.
+We hypothesize that it learns to ignore this particular spurious feature.
+To test this, we evaluate on \emph{group-balanced} \waterbirds{} sequences, with the task set to predicting background, and get 58.5\% overall accuracy and 41.3\% worst-group accuracy.
+One potential way of improving generality and possibly also performance, is passing example groups as input, i.e., setting $\tilde{y}_i$ to represent $g_i$.
+We did not observe performance improvements and increase of generality of the learned algorithm when passing groups as input (see the complete results in \cref{tab:wb-results,tab:mod-wb-results} of \cref{app:more-results}).
+Thus, we conclude that when all ICL instances are derived from the task, the learned algorithm is inherently tied to the spurious feature of that task.
+
+
+\section{In-context learning based on a diverse set of tasks}
+
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.49\textwidth}
+        \includegraphics[width=0.8\textwidth]{figures/grafting_before.png} 
+        \caption{Before grafting}
+    \end{subfigure}%
+    \hspace{-3em}
+    \begin{subfigure}{0.49\textwidth}
+        \includegraphics[width=\textwidth]{figures/graftin_after.png}
+        \caption{After grafting}
+    \end{subfigure}
+    \caption{An illustration of the grafting operation for creating spurious features. The figure (a) depicts two classes of examples, each having 5 examples given by 12-dimensional embeddings. In this example, the grafting operation selects 3 embedding dimensions to become spurious features. For this end, these 3 features of examples 2 and 5 of class A are swapped with those of examples 2 and 4 of class B, respectively. Figure (b) depicts the embeddings after the grafting operation.}
+    \label{fig:grafting}
+\end{figure}
+In \cref{sec:single-task}, we showed that it is possible to obtain a good in-context learner for a given task, but it fails to generalize to tasks with different spurious features.
+A better in-context learner should detect spurious features from context and make predictions without employing them.
+In this section, we explore the possibility of obtaining such a learner by training on a diverse set of ICL tasks.
+Since there exist few suitable datasets, we synthesize binary classification tasks with a single binary spurious feature, aiming to capture ``structure'' present in existing datasets.
+In short, given a standard binary classification task, say cat vs dog classification, for a sampled minority of cats we overwrite some of their features with those of random dogs.
+Similarly, we do an analogous operation for a sampled minority of dogs.
+This way some cats share dog features and vice versa.
+To create a diverse pool of in-context learning instances, we vary the two classes and the subset of grafted features.
+Please refer to \cref{fig:grafting} for an illustration of this grafting operation.
+
+More concretely, we consider the \inat{} dataset~\citep{van2018inaturalist}, which contains images from 5,089 natural fine-grained categories and filter out categories that have less than 500 images.
+    For testing purposes, from remaining 239 categories we set apart categories that belong to the supercategories \emph{Amphibia} and \emph{Mammalia}, along with 10\% of random categories.
+    We denote the set of these 48 categories as $\CC_\mathrm{ood}$, and the set of remaining 191 categories as $\CC_\mathrm{id}$, which we use to create in-context learning instances for training.
+    For each category in $\CC_\mathrm{id}$, we hold out half of the examples as in-distribution validation set.
+To generate a single in-context learning instance, we sample two distinct classes from $\CC_\mathrm{id}$ randomly and sample $n/2$ images from the training split of each class uniformly at random without replacement.
+We then do the grafting operation, setting minority group ratio within each class to 10\%.
+We select the grafted features randomly, by first picking subset size $k$ uniformly at random from 0 to 199, and then sampling a random subset of embedding dimensions of size $k$.
+With this we get $n$ examples that form the context part of the instance.
+Abandoning the naive approach and focusing on the proposed one, for each class we sample $n/2$ queries from the remaining examples uniformly at random with replacement and do the grafting operation with 50\% minority group ratio.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/inat_swap_v2_erm_permute_induction_val_outer_accuracy_majority.pdf}
+    \end{subfigure}%
+    \hspace{2em}
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/inat_swap_v2_erm_permute_induction_val_outer_accuracy_minority.pdf}
+    \end{subfigure}
+    \caption{Majority-group and minority-group accuracies on the OOD test set of  \inat{} for the proposed approaches with or without permuting input dimensions and promoting induction heads.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+    \label{fig:inat-swap-v2-erm-permute-induction}
+\end{figure}
+
+Following the experiments in \cref{sec:single-task}, we train the same transformer with the proposed approach on 4M ICL instances with $n=400$ context examples.
+We use the same optimizer and sweep the learning rate in the same range, selecting the best value based on the average \emph{minority-group accuracy} (defined exactly in \cref{app:more-results}) on instances where both categories belong to $\CC_\mathrm{ood}$ and thus were not observed during training.
+The results presented in \cref{fig:inat-swap-v2-erm-permute-induction} indicate a major difference compared to the results in the single-task regime -- namely, the proposed approach learns to do in-context learning to some extent without permuting embedding dimensions.
+As expected, we see much better performance with permuted embedding dimensions.
+Notably, comparing majority-group and minority-group accuracies of the proposed approach with permutations, we see almost no sign of reliance on spurious features.
+
+\paragraph{Promoting emergence of induction heads.\quad}
+In-context learning ability has been linked to induction heads, which are specific type of circuits found within large language models that implement the operation of looking back over the sequence for finding previous instances of the current token and copying what comes after that~\citep{olsson2022context}.
+Inspired by this, we propose a data preparation technique that promotes learning of induction heads.
+With probability $p$, we replace each intermediate query independently with a random example from the proceeding part of the context.
+Note that this type of ``hinting'' is not possible in the naive approach and is enabled by the introduction of intermediate queries.
+In all experiments with this technique enabled, we just set $p=0.25$.
+We observed that training of typical runs escapes the initial loss plateau faster with this technique (in about 3k iterations compared instead of about 10k iterations).
+Moreover, we see modest performance gains in \inat{} experiments (see \cref{fig:inat-swap-v2-erm-permute-induction}, where \emph{+I} stands for this technique).
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/inat_swap_v2_erm_vs_dro_val_outer_accuracy_minority.pdf}
+    \caption{Minority-group accuracy on the OOD test set of  \inat{} for the best proposed approach with or without passing group information as input.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+     \label{fig:inat-swap-v2-erm-vs-dro}
+    \end{minipage}\hfill 
+    \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/inat_swap_baseline_comparison_val_outer_accuracy_minority.pdf}
+    \caption{Minority-group accuracy on the OOD test set of  \inat{} for the best variant of proposed approach and conventional methods such as 1-NN, ERM, and GroupDRO.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+     \label{fig:inat-swap-baseline-comparison}
+    \end{minipage}\hfill 
+\end{figure}
+
+\paragraph{Passing example groups as input.\quad}
+In contrast to the findings in the single-task setting of \cref{sec:single-task}, we observed that setting $\tilde{y}_i$ to represent group improves the proposed approach, even on top of permitting input dimensions and promoting induction heads.
+One case of this is presented in \cref{fig:inat-swap-v2-erm-vs-dro}, while more cases can be found in the complete results presented in \cref{app:more-results}.
+For brevity, we mark passing groups as inputs with \emph{+G} in figures and tables.
+\paragraph{Comparison with conventional learning algorithms.\quad}
+Similar to the experiments in \cref{sec:single-task}, we compare the best variant of the proposed approach (G + P + I) to 1-NN, ERM, and GroupDRO.
+Results presented in \cref{fig:inat-swap-baseline-comparison} show that the learned algorithm is on-par with or outperforms the baselines starting at context length 32.
+The results at context lengths below 20 are not as informative, because the way we implemented the grafting operation implies that no examples are grafted when there are less than 10 examples in a class.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/inat_swap_wb_eval_val_train_test_worst_group_accuracy.pdf}
+    \caption{Worst-group test accuracy on \waterbirds{} for the best variant of proposed approach trained on \inat{} and for methods such as 1-NN, ERM, and GroupDRO.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+     \label{fig:inat-swap-wb-eval}
+    \end{minipage}\hfill 
+    \begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/inat_swap_mod_wb_eval_val_train_test_worst_group_accuracy.pdf}
+    \caption{Worst-group test accuracy on \modwaterbirds{} for the best variant of proposed approach trained on \inat{} and for methods such as 1-NN, ERM, and GroupDRO.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+     \label{fig:inat-swap-mod-wb-eval}
+    \end{minipage}\hfill 
+\end{figure}
+
+\paragraph{Generality of the learned algorithm.\quad} To test the generality of the learned algorithm, we report evaluation results on \waterbirds{} (\cref{fig:inat-swap-wb-eval}) and \modwaterbirds{} (\cref{fig:inat-swap-mod-wb-eval}).
+We see that the learned algorithm outperforms baselines on \waterbirds{} and is as good as we got by training on \waterbirds{} itself.
+However, the learned algorithm fails completely on \modwaterbirds{}, while the baselines give meaningful results starting at context length 32.
+We hypothesize that the challenge posed by the spurious features in \modwaterbirds{} is significantly more severe compared to that in \inat{}.
+By varying the norm of the added background vector, we interpolate between \waterbirds{} and \modwaterbirds{}, and we see good generalization until the norm of the added vector is $\approx$40\% of the average embedding norm (see \cref{fig:inat-swap-mod-wb-interpolated-eval}).
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/inat_swap_mod_wb_interpolated_eval_val_train_test_accuracy_majority.pdf}
+    \end{subfigure}%
+    \hspace{2em}
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{figures/inat_swap_mod_wb_interpolated_eval_val_train_test_worst_group_accuracy.pdf}
+    \end{subfigure}
+    \caption{Majority-group and worst-group test accuracies of a proposed model (G + P + I) trained on \inat{}, but evaluated on a modified variants of \waterbirds{} where we add a vector representing the spurious feature (background). The x-axis is the relative norm of the added vector compared to the average \waterbirds{} image embedding norm. Relative norm of 0 corresponds to \waterbirds{}, while relative norm of 1 corresponds to \modwaterbirds{}.
+    Shaded regions show standard deviation across 5 training runs.
+    }
+    \label{fig:inat-swap-mod-wb-interpolated-eval}
+\end{figure}
+
+
+\section{Related work}
+
+In this section, we discuss more related work in addition to the ones discussed earlier.
+
+\paragraph{In-weights vs in-context learning.} We observe two modes of learner behavior in our experiments.
+In the first mode, the learner acts like a standard supervised classifier, ignoring context examples.
+This mode appears when training on ICL instance of a single task without permuting input embedding dimensions.
+In the second mode, the learner does proper in-context learning.
+Our experiments indicate that both permuting embedding dimensions and increasing the number of training tasks are reliable ways of steering the model towards the in-context learning mode.
+The former is akin to the method of randomly projecting inputs proposed by \citet{kirsch2022general} for obtaining general-purpose in-context classifiers.
+Prior work has made a distinction between these two models of learning, naming them in-weights and in-context learning.
+In particular, \citet{chan2022data} demonstrate that certain distributional properties of data, such as long-tail of class frequencies and bursty distribution of context example classes, can promote in-context learning when meta-training on few-shot classification instances.
+\citet{singh2024transient} show that in-context learning behavior is not persistent and decays away with overtraining, indicating a trade-off between in-weights and in-context learning mechanisms. 
+Moreover, they find that this in-context learning skill decay can be prevented by applying weight decay of embeddings and MLP layers, slowing down in-weight learning.
+\citet{anand2024dual} make similar observations about these two modes of learning and propose active forgetting of token embeddings as an effective way of steering towards the in-context learning mode.
+\paragraph{Many shot ICL.}
+One ancillary finding of this work is that transformers can be trained to do in-context learning of visual classification tasks when good image embeddings are provided.
+This is remarkable because the input dimensionality we considered is much higher than what was considered in the pioneering works of \citet{garg2022can} and \citet{akyurek2022learning} (784 vs 20).
+Furthermore, we observe predictable performance gains from longer context sizes.
+The number of ``shots'' we consider (up to 512 examples) is well beyond what is typically considered in ICL works (up to a few dozen of examples).
+Our findings are complementary to those of \citet{agarwal2024many},~\citet{jiang2024many}, and \citet{li2024long} who find that multimodal large language models, such as Gemini-1.5 Pro and GPT-4o, can benefit from large number of in-context demonstrations (up to 1000 demonstrations).
+
+\paragraph{In-context learning for out-of-distribution generalization.}
+Closest to our work are the works that propose to make use of in-context learning for out-of-distribution generalization.
+\citet{han2023well} test multimodal large language models (MLLMs) on a variety of visual classification tasks.
+They propose to leverage in-context learning abilities of MLLMs to improve performance on specialized domains and on tasks with significant corruptions.
+However, they only consider the case where both context examples and query are from the target domain.
+\citet{zhang2024out} make similar observations, but additionally study robustness of in-context learning to distribution shifts, such as domain shifts, label shifts, and spurious correlations.
+They find that in-context learning is highly susceptible to label shifts and presence of spurious correlations.
+Finally, \citet{gupta2024context} propose to address the problem of domain generalization~\citep{muandet2013domain} by training an in-context learner that can take examples from a domain/environment and adapt to that domain in-context.
+
+
+\section{Discussion and conclusion}
+
+Spurious correlations can appear in various domains, often in complex and unexpected ways.
+For example, a medical device might make a false positive or worse, a false negative prediction due to the specifics of the patient and training data.
+Given the increasing reliance on in-context classification, particularly with the advancements in large language models, understanding and mitigating the negative effects of spurious correlations is important for ensuring the reliability and safety of these models.
+
+We showed that it is possible to train an effective in-context learner tailored to a particular classification task with spurious features.
+We did this by introduce two key techniques: (a) permuting input embedding dimensions and (b) forming ICL sequences with intermediate queries simulating distribution shift.
+We provided evidence that the learned algorithm is highly competitive on the task it was trained on.
+However, we found that while it generalizes to other tasks without spurious features, it does not work for tasks with other spurious features.
+Understanding this failure mechanistically and exploring techniques for enabling better generalization are key future research directions.
+
+We next explored training on synthetic ICL instances of diverse tasks and showed that it is possible to obtain an in-context learner that generalizes to unseen tasks, even with different data generating processes.
+We established the usefulness of two more techniques: (c) passing example groups as input and (d) promoting learning of induction heads by occasionally querying past context examples.
+We believe there is a room for improving in-context learning via improved strategies of choosing intermediate queries and possibly optimizing worst-group loss.
+Understanding why the learned algorithm fails under extreme distribution shifts and why variants with permutations fail more (see \cref{fig:inat-swap-mod-wb-interpolated-eval}) is an interesting question to explore.
+Another interesting direction to explore is to find out what exact algorithm is learned in the process of training on diverse tasks.
+Based on the results presented in this work, we conclude that the learned algorithm is neither 1-NN, ERM, or GroupDRO.
+
+Our work has several limitations.
+First of all, training a transformer-based in-context learner with high-dimensional image embeddings is computationally costly (see \cref{app:exp-details} for information on compute resources), although it is faster than the baselines at inference.
+For this reason, we did not explore more datasets and pretrained image embeddings.
+We believe main conclusions of our work will be unchanged.
+Second, we experimented with only one model size, width, and depth.
+Larger models might behave differently~\citep{wei2023larger}.
+Third, in our \inat{} experiments, we considered only one ``type'' of spurious features.
+It is likely that this choice has significant effect on the learned algorithm and its generality.
+Future research should explore more ways of synthesizing spurious features and consider varying severity of the challenge posed by spurious features.
+The latter can be done by considering multiple spurious features, introducing label imbalance, varying magnitude of spurious correlations, and varying the margin spurious features provide.
+Finally, we acknowledge that the proposed approach requires spurious feature annotations, which is typically costly to obtain.
+However, they are required only at training time, \emph{not at inference},
+As we have shown, this limitation can be addressed by creating synthetic data, in which case spurious annotations are readily available.
+
+
+

@@ -1,0 +1,445 @@
+\title{Principled Architecture-aware Scaling of Hyperparameters}
+
+\begin{abstract}
+Training a high-quality deep neural network requires choosing suitable hyperparameters, which is a non-trivial and expensive process.
+Current works try to automatically optimize or design principles of hyperparameters, such that they can generalize to diverse unseen scenarios.
+However, most designs or optimization methods are agnostic to the choice of network structures, and thus largely ignore the impact of neural architectures on hyperparameters.
+In this work, we precisely characterize the dependence of initializations and maximal learning rates on the network architecture, which includes the network depth, width, convolutional kernel size, and connectivity patterns.
+By pursuing every parameter to be maximally updated with the same mean squared change in pre-activations, we can generalize our initialization and learning rates across MLPs (multi-layer perception) and CNNs (convolutional neural network) with sophisticated graph topologies.
+We verify our principles with comprehensive experiments.
+More importantly, our strategy further sheds light on advancing current benchmarks for architecture design.
+A fair comparison of AutoML algorithms requires accurate network rankings.
+However, we demonstrate that network rankings can be easily changed by better training networks in benchmarks with our architecture-aware learning rates and initialization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+An important theme in the success of modern deep learning is the development of novel neural network architectures: ConvNets~\citep{simonyan2014very}, ResNets~\citep{he2016deep}, Transformers~\citep{dosovitskiy2020image} to name a few.  Whether a given architecture works well in practice, however, depends crucially on having reliable principles for selecting training hyperparameters. Indeed, even using more or less standard architectures at scale often requires considerable hyperparameter tuning.
+Key examples of such hyperparameters are the \textbf{learning rate} and the network \textbf{initialization}, which play a crucial role in determining the quality of trained models. How to choose them in practice depends non-trivially on the interplay between data, architecture, and optimizer.
+
+\textbf{Principles} for matching deep networks to initialization and optimization schemes have been developed in several vibrant lines of work.
+This includes approaches — typically based on analysis in the infinite width limit — to developing initialization schemes suited to specific architectures, including fully connected architectures~\citep{jacot2018neural,perrone2018scalable}, ConvNets~\citep{ilievski2016hyperparameter,stoll2020hyperparameter}, ResNets~\citep{horvath2021hyperparameter,li2022transbo,li2022transfer}, and Transformers~\citep{zhu2021gradinit, dinan2023effective}. It also includes several approaches to zero-shot hyperparameter transfer, which seek to establish the functional relationships between a hyperparameter (such as a good learning rate) and the architecture characteristics, such as depth and width. This relation then allows for hyperparameter tuning on small, inexpensive models, to be transferred reliably to larger architectures~\citep{yang2022tensor,iyer2022maximal,yaida2022meta}.
+
+\textbf{Architectures} of deep networks, with complicated connectivity patterns and heterogeneous operations, are common in practice and especially important in neural architectures search~\citep{liu2018darts,dong2020bench}.
+This is important because long-range connections and heterogeneous layer types are common in advanced networks~\citep{he2016deep,huang2017densely,xie2019exploring}.
+However, very little prior work develops initialization and learning rate schemes adapted to complicated network architectures.
+Further, while automated methods for hyperparameter optimization~\citep{bergstra2013making} are largely model agnostic, they cannot discover generalizable principles. As a partial remedy, recent works \citep{zela2018towards,klein2019tabular,dong2020autohas} jointly design networks and hyperparameters, but still ignore the dependence of learning rates on the initialization scheme.
+Moreover, ad-hoc hyperparameters that are not tuned in an intelligent way will further jeopardize the design of novel architectures. Without a fair comparison and evaluation of different networks, benchmarks of network architectures may be misleading as they could be biased toward architectures on which ``standard'' initializations and learning rates we use happen to work out well.
+
+
+This article seeks to develop \textbf{principles} for both initialization schemes and zero-shot learning rate selection for general neural network \textbf{architectures}, specified by a directed acyclic graph (DAG).
+These architectures can be highly irregular (Figure~\ref{fig:dag_setting}), significantly complicating the development of simple intuitions for training hyperparameters based on experience with regular models (e.g. feedforward networks).
+At the beginning of gradient descent training, we first derive a simple initialization scheme that preserves
+the variance of pre-activations during the forward propagation of irregular architectures,
+and then derive architecture-aware learning rates by following the maximal update ($\mu$P) prescription from \citep{yang2022tensor}.
+We generalize our initialization and learning rate principles across MLPs (multi-layer perception) and CNNs (convolutional neural network) with arbitrary graph-based connectivity patterns.
+We experimentally verify our principles on a wide range of architecture configurations.
+More importantly, our strategy further sheds light on advancing current benchmarks for architecture design.
+We test our principles on benchmarks for neural architecture search, and we can immediately see the difference that our architecture-aware initializations and architecture-aware learning rates could make.
+Accurate network rankings are required such that different AutoML algorithms can be fairly compared by ordering their searched architectures.
+However, we demonstrate that network rankings can be easily changed by better training networks in benchmarks with our architecture-aware learning rates and initialization.
+Our main contributions are:
+\begin{itemize}[leftmargin=*]
+	\item We derive a simple modified fan-in initialization scheme that is architecture-aware and can provably preserve the
+    flow of information
+    through any architecture's graph topology (\S~\ref{lem:dag_init}).
+	\item Using this modified fan-in initialization scheme, we analytically compute the dependence on the graph topology for how to scale learning rates in order to achieve the \textit{maximal update} ($\mu$P) heuristic~\citep{yang2022tensor}, which asks that in the first step of optimization neuron pre-activations change as much as possible without diverging at large width. For example, we find that (\S~\ref{thm:lr_dag}) for a ReLU network of a graph topology
+    trained with $\MSE$ loss under gradient descent, the $\mu$P learning rate scales as
+    $\left(\sum_{p=1}^P L_p^3 \right)^{-1/2}$, where $P$ is the total number of end-to-end paths from the input to the output, $L_p$ is the depth of each path, $p = 1, \cdots, P$.
+	\item In experiments, we not only verify the superior performance of our prescriptions, but also further re-evaluate the quality of standard architecture benchmarks. By unleashing the potential of architectures (higher accuracy than the benchmark), we achieve largely different rankings of networks, which may lead to different evaluations of AutoML algorithms for neural architecture search (NAS). 
+\end{itemize}
+
+
+
+\section{Related Works}
+
+
+
+\subsection{Hyperparameter Optimization}
+
+The problem of hyperparameter optimization (HPO) has become increasingly relevant as machine learning models have become more ubiquitous~\citep{li2020system,chen2022towards,yang2022tensor}.
+Poorly chosen hyperparameters can result in suboptimal performance and training instability.
+Beyond the basic grid or random search, many works tried to speed up HPO.
+\citep{snoek2012practical} optimize HPO via Bayesian optimization by jointly formulating the performance of each hyperparameter configuration as a Gaussian process (GP), and further improved the time cost of HPO by replacing the GP with a neural network.
+Meanwhile, other efforts tried to leverage large-scale parallel infrastructure to speed up hyperparameter tuning~\citep{jamieson2016non,li2020system}.
+
+Our approach is different from the above since we do not directly work on hyperparameter optimization.
+Instead, we analyze the influence of network depth and architecture on the choice of hyperparameters.
+Meanwhile, our method is complementary to any HPO method.
+Given multiple models, typical methods optimize hyperparameters for each model separately. In contrast, with our method, one only needs to apply HPO \textbf{once} (to find the optimal learning rate for a small network), and then directly scale up to larger models with our principle (\S~\ref{sec:algorithm}).
+
+
+\subsection{Hyperparameter Transfer}
+
+Recent works also tried to propose principles of hyperparameter scaling
+and targeted on
+better stability for training deep neural networks~\citep{glorot2010understanding,schoenholz2016deep,yang2017mean,zhang2019residual,bachlechner2021rezero,huang2020improving,liu2020understanding}.
+Some even explored transfer learning of hyperparameters~\citep{yogatama2014efficient,perrone2018scalable,stoll2020hyperparameter,horvath2021hyperparameter}.
+\citep{smith2017don,hoffer2017train} proposed to scale the learning rate with batch size while fixing the total epochs of training.
+\citep{shallue2018measuring} demonstrated the failure of finding a universal scaling law of learning rate and batch size across a range of datasets and models.
+Assuming that the optimal learning rate should scale with batch size, \citep{park2019effect}
+empirically studied how the optimal ratio of learning rate over batch size scales for MLP and CNNs trained with SGD.
+
+More recently, \citet{yang2020feature} found that standard parameterization (SP) and NTK parameterization (NTP) lead to bad infinite-width limits and hence are suboptimal for wide neural networks.
+\citet{yang2022tensor} proposed $\mu$P initialization, which enabled
+the tuning of hyperparameters indirectly on a smaller model, and zero-shot transfer them to the full-sized model without any further tuning.
+In~\citep{iyer2022maximal}, an empirical observation was found that, for fully-connected deep ReLU networks, the maximal initial learning rate follows a power law of the product of width and depth.
+~\citet{jelassi2023learning} recently studied the depth dependence of $\mu$P learning rates vanilla ReLU-based MLP networks.
+Two core differences between $\mu$P and our method:
+1) $\mu$P mainly gives width-dependent learning rates in the first and last layer, and is width-independent in other layers (see Table 3 in~\citep{yang2022tensor}). However, there is a non-trivial dependence on both network depth and topologies;
+2) Architectures studied in $\mu$P mainly employ sequential structures without complicated graph topologies.
+
+
+\subsection{Bechmarking Neural Architecture Search}
+Neural architecture search (NAS), one research area under the broad topic of automated machine learning (AutoML), targets the automated design of network architecture without incurring too much human inductive bias. It is proven to be principled in optimizing architectures with superior accuracy and balanced computation budgets~\citep{zoph2016neural,tan2019mnasnet,tan2019efficientnet}.
+To fairly and efficiently compare different NAS methods, many benchmarks have been developed~\citep{ying2019bench,dong2020bench,dong2020nats}.
+Meanwhile, many works explained the difficulty of evaluating NAS. For example,~\citep{yang2019evaluation} emphasized the importance of tricks in the evaluation protocol and the inherently narrow accuracy range from the search space.
+However, rare works point out one obvious but largely ignored defect in each of these benchmarks and evaluations: \ul{diverse networks are blindly and equally trained under the same training protocol.} It is questionable if the diverse architectures in these benchmarks would share the same set of hyperparameters. As a result, to create a credible benchmark, it's necessary to find optimal hyperparameters for each network accurately and efficiently, which our method aims to solve. This also implied, NAS benchmarks that were previously regarded as ``gold standard'', could be no longer reliable and pose questions on existing NAS algorithms that evaluated upon it.
+
+
+
+\section{Methods}
+
+
+For general network architectures of \ul{d}irected \ul{a}cyclic computational \ul{g}raphs (DAGs),
+we propose topology-aware initialization
+and learning rate scaling.
+Our core advantage
+lies in that we \textbf{precisely characterize} the non-trivial dependence of learning rate scales on both networks’ depth, DAG topologies
+and CNN kernel sizes,
+beyond previous heuristics, with practical implications (\S~\ref{sec:practical}).
+\begin{enumerate}[leftmargin=*]
+    \item In a DAG architecture (\S~\ref{sec:def}), an initialization scheme that depends on a layer's in-degree is required to normalize inputs that flow into this layer (\S~\ref{lem:dag_init}).
+    \item Analyzing the initial step of SGD allows us to detail how changes in pre-activations depend on the network’s depth and learning rate (\S~\ref{lem:lemma_one}.
+    \item With our in-degree initialization, by ensuring the magnitude of pre-activation changes remains $\Theta(1)$, we deduce how the learning rate depends on the network topology (\S~\ref{thm:lr_dag}) and the CNN kernel size (\S~\ref{thm:lr_cnn}).
+\end{enumerate}
+
+\begin{wrapfigure}{r}{75mm}
+\centering
+\includegraphics[scale=0.35]{images/dag3.pdf}
+\captionsetup{font=small}
+\caption{A neural network's architecture can be represented by a direct acyclic graph (DAG). $x$ is the input, $z^{(1)}, z^{(2)}, \cdots, z^{(L)}$ are pre-activations (vertices), and $z^{(L+1)}$ is the output. $W$ is the layer operation (edge). Our DAG space includes architectures of different connections and layer types (``Linear + ReLU'', ``Skip-connect'', and ``Zero''). For example, by disabling some edges (\textcolor{gray}{gray}) or replacing with identity $\bm{I}$ (skip connection, dashed arrow), a DAG can represent practical networks such as MLP and ResNet~\citep{he2016deep}.}
+\label{fig:dag_setting}
+\end{wrapfigure}
+
+\subsection{Definition of DAG Networks}\label{sec:def}
+
+We first define the graph topology of complicated neural architectures. This formulation is inspired by network structures designed for practical applications~\citep{xie2019exploring,you2020graph,dong2020bench}.
+
+By definition, a directed acyclic graph is a directed graph $\mathcal G= (V,E)$ in which the edge set has no directed cycles (a sequence of edges that starts and ends in the same vertex). We will denote by $L+2:=\abs{V}$ the number of vertices (the input $x$ and pre-activations $z$) in $V$ and write:
+\[
+V = [0,L+1]:=\set{0,1,\ldots, L+1}.
+\]
+We will adopt the convention that edges terminating in vertex $\ell$ originate only in vertices $\ell'< \ell$. We define a DAG neural network (with computational graph $\mathcal G= (V,E)$, the number of vertices $\abs{V}=L+2$, hidden layer width $n$, output dimension $1$, and ReLU activations) to be a function $x\in \R^n\mapsto z^{(L+1)}(x)\in \R$  given by 
+{\footnotesize
+\begin{equation}\label{eq:forward_dag}
+z^{(\ell)}(x) =\begin{cases} x,&\quad \ell =0\\
+\sum_{(\ell',\ell)\in E} W^{(\ell^\prime,\ell)} \sigma(z^{(\ell^\prime)}(x)),& \quad \ell =1,\ldots, L+1
+    \end{cases},
+\end{equation}
+}
+$\sigma(t) = \mathrm{ReLU}(t)=\max\{0,t\}$.
+$W^{(\ell',\ell)}$ are $n\times n$ matrices of weights initialized as follows:
+{\footnotesize
+    \begin{equation}\label{eq:init}
+        W_{i j}^{(\ell',\ell)} \sim \begin{cases}\mathcal{N}(0, C^{(\ell',\ell)} / n), & \ell=1, \ldots, L \\ \mathcal{N}(0, C^{(\ell',\ell)} / n^2), & \ell=L+1\end{cases},
+    \end{equation}
+}
+where $C^{(\ell', \ell)}$ is a scaling variable that we will determine based on the network topology (\eqref{eq:dag_init}).
+We choose $1/n^2$ as the variance for the output layer mainly for aligning with $\mu$P's desiderata.
+
+
+\subsection{Topology-aware Initialization Scheme}
+A common way to combine features from multiple layers is to directly sum them up, often without normalization~\citep{he2016deep,dong2020bench} as we do in \eqref{eq:forward_dag}. This summation implies that the weight magnitude of each pre-activation layer should scale proportionally regarding the number of inputs (in-degree). However, most commonly used weight initialization schemes, such as He initialization~\citep{he2015delving} and Xavier initialization~\citep{glorot2010understanding}, only consider forward or backward propagation between \ul{consecutive layers, ignoring any high-level structures}, i.e. how layers are connected with each other (see also \citep{defazio2022scaling}).
+This strategy can be problematic in the presence of a bottleneck layer that has a large number of inputs.
+
+Motivated by this issue, we propose an architecture-aware initialization strategy. We target deriving the normalizing factor $C^{(\ell',\ell)}$ in the initialization (\eqref{eq:init}) adapted to potentially very different in-degrees of the target layer. Like many theoretical approaches to neural network initialization, we do this by seeking to preserve the ``flow of information'' through the network at initialization. While this dictum can take various guises, we interpret it by asking that
+the expected norm of changes in pre-activations between consecutive layer
+have the same typical scale:
+{\footnotesize
+\begin{equation}\label{eq:info-flow}
+\E \left[\norm{z^{(\ell)}}^2\right] = \E \left[\norm{z^{(\ell')}}^2\right] \quad \text{ for all }\ell,\ell',
+\end{equation}
+}
+
+where $\E\left[\cdot\right]$ denotes the average over initialization. 
+This condition essentially corresponds to asking for equal scales in any hidden layer representations.
+Our first result, which is closely related to the ideas developed for 
+MLPs (Theorem 2 in~\citep{defazio2022scaling}), gives a simple criterion for ensuring that \eqref{eq:info-flow} holds for a DAG-structured neural network with ReLU layers:
+\paragraph{Initialization scaling for DAG.}
+\label{lem:init} \label{lem:dag_init}
+    For a neural network with directed acyclic computational graph $\mathcal G = (V,E)$, $V = [0,L+1]$, width $n$, and ReLU activations, the information flow condition \eqref{eq:info-flow} is satisfied on average over a centred random input $x$ if
+    {\footnotesize
+    \begin{equation}
+        C^{(\ell',\ell)}=\frac{2}{d_{\text{in}}^{(\ell')}},
+        \label{eq:dag_init}
+    \end{equation}
+    }
+
+where for each vertex $\ell\in [0,L+1],$ we've written 
+$d_{\text{in}}^{(\ell)}$ for its in-degree in $\mathcal G$.
+This implies that, when we initialize a layer, we should consider how many features flow into it.
+
+
+\subsection{Topology-aware Learning Rates}
+The purpose of this section is to describe a specific method for choosing learning rates for DAG networks. Our approach follows the maximal update ($\mu$P) heuristic proposed in \citep{yang2022tensor}. Specifically, given a DAG network recall from \eqref{eq:forward_dag} that 
+{\footnotesize
+\[
+z^{(\ell)}(x)=\left(z_{i}^{(\ell)}(x), i=1, \ldots, n\right)
+\]
+}
+
+denotes the pre-activations at layer $\ell$ corresponding to a network input $x$. The key idea in \citep{yang2022tensor} is to consider the change $\Delta z_{i}^{(\ell)}$ of $ z_{i}^{(\ell)}$ from one gradient descent step on training loss $\mathcal{L}$:
+{\footnotesize
+\begin{equation}
+\Delta z_i^{(\ell)} = \sum_{\mu \leq \ell} \partial_\mu z_i^{(\ell)} \Delta \mu =-\eta\sum_{\mu \leq \ell} \partial_\mu z_i^{(\ell)} \partial_\mu \mathcal{L},
+\label{eq:change_preact}
+\end{equation}
+}
+
+where $\mu$ denotes a network weight, $\mu\leq \ell$ means that $\mu$ is a weight in $W^{(\ell',\ell)}$ for some $\ell'\leq \ell-1$, $\Delta \mu$ for the change in $\mu$ after one step of GD, $\eta$ is the learning rate.
+By symmetry, all weights in layer $\ell$ should have the same learning rate at initialization and we will take as an objective function the MSE loss:
+{\footnotesize
+\begin{equation}\label{eq:mse}
+\mathcal L(\theta) = \frac{1}{\abs{\mathcal B}}\sum_{(x,y)\in \mathcal B} \frac{1}{2}\norm{z^{(L+1)}(x;\theta)-y}^2    
+\end{equation}
+}
+
+over a batch $\mathcal B$ of training datapoints. The $\mu$P heuristic posited in \citep{yang2022tensor} states that the best learning rate is the largest one for which $\Delta z_{i}^{_{(\ell)}} \text { remains } O(1)$ for all $\ell=1,\ldots, L+1$ independent of the network width $n$. To make this precise, we will mainly focus on analyzing the average squared change (second moment) of $\Delta z_{i}^{_{(\ell)}}$ and ask to find learning rates such that 
+{\footnotesize
+\begin{equation}\label{eq:muP}
+    \mathbb{E}\left[\left(\Delta z_{i}^{(\ell)}\right)^2\right] = \Theta(1) \quad \text{ for all } \ell \in [1, L+1]
+\end{equation}
+}
+
+with mean-field initialization, which coincides with \eqref{eq:init} except that the final layer weights are initialized with variance $1/n^2$ instead of $1/n$. 
+Our next result provides a way to estimate how the $\mu$P learning rate (i.e. the one determined by \eqref{eq:muP}) depends on the graph topology. To state it, we need two definitions:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{DAG Width.} Given a DAG $\mathcal G = (V,E)$ with $V = \set{0,\ldots, L+1}$ we define its width $P$ to be the number of unique directed paths from the input vertex $0$ to output vertex $L+1$. \\
+    \item \textbf{Path Depth.} Given a DAG $\mathcal G = (V,E)$, the number of ReLU activations in a directed path $p$ from the input vertex $0$ to the output vertex $L+1$ is called its depth, denoted as $L_p$ $(p = 1, \cdots, P)$.
+\end{itemize}
+We are now ready to state the main result of this section:
+\paragraph{Learning rate scaling in DAG.}
+\label{thm:lr_dag}
+Consider a ReLU network with associated DAG $\mathcal G = (V,E)$, hidden layer width $n$, hidden layer weights initialized as in \S~\ref{lem:init} and the output weights initialized with mean-field scaling. Consider a batch with one training datapoint $(x,y)\in \R^{2n}$ sampled independently of network weights and satisfying
+{\footnotesize
+\[
+\Ee{\frac{1}{n}\norm{x}^2}=1,\quad \Ee{y}=0,\, \mathrm{Var}[y] = 1.
+\]
+}
+
+The $\mu$P learning rate ($\eta^*$) for hidden layer weights is independent of $n$ but has a non-trivial dependence of depth, scaling as
+{\footnotesize
+\begin{equation}
+    \eta^* \simeq c \cdot \left(\sum_{p=1}^P L_p^3 \right)^{-1/2},
+    \label{eq:lr_dag}
+\end{equation}
+}
+
+where the sum is over $P$ unique directed paths through $\mathcal G$, and the implicit constant $c$ is independent of the graph topology and of the hidden layer width $n$.
+
+This result indicates that, we should use smaller learning rates for networks with large depth and width (of its graph topology); and vice versa.
+
+
+\subsection{Learning Rates in DAG Network with Convolutional Layers}\label{sec:cnn}
+In this section, we further expand our scaling principles to convolutional neural networks, again, with arbitrary graph topologies as we discussed in \S~\ref{sec:def}.
+
+\paragraph{Setting.}
+Let $x \in \mathbb{R}^{n\times m}$ be the input, where $n$ is the number of input channels and $m$ is the number of pixels.
+Given $z^{(\ell)} \in \mathbb{R}^{n\times m}$ for $\ell \in [1, L+1]$,
+we first use an operator $\phi(\cdot)$ to divide $z^{(\ell)} $ into $m$ patches.
+Each patch has size $qn$ and this implies a mapping of $\phi(z^{(\ell)})\in\mathbb{R}^{qn\times m}$. 
+For example, when the stride is $1$ and $q=3$, we have:
+{\footnotesize
+\begin{align*}
+	\phi(z^{(\ell)}) 
+	=\begin{pmatrix}
+	\left(z^{(\ell)}_{1,0:2}\right)^\top, 
+	&\ldots &, \left(z^{(\ell)}_{1,m-1:m+1}\right)^\top\\
+	\ldots, 
+	& \ldots, & \ldots \\
+	\left(z^{(\ell)}_{n,0:2}\right)^\top, 
+	&\ldots, &  \left(z^{(\ell)}_{n,m-1:m+1}\right)^\top
+	\end{pmatrix},
+\end{align*}
+}
+where we let $z^{(\ell)}_{:,0}=z^{(\ell)}_{:,m+1}=0$, i.e., zero-padding.
+Let $W^{(\ell)} \in \mathbb{R}^{n \times qn}$.
+we have
+{\footnotesize
+$$
+z^{(\ell)}(x) =
+\begin{cases}
+x,&\quad \ell =0\\
+\sum_{(\ell',\ell)\in E} W^{(\ell^\prime,\ell)} \sigma(\phi(z^{(\ell^\prime)}(x))),& \quad \ell = 1,\ldots, L+1
+\end{cases}.
+$$
+}
+
+\paragraph{Learning rate scaling in CNNs.}
+\label{thm:lr_cnn}
+Consider a ReLU-CNN network with associated DAG $\mathcal G = (V,E)$, kernel size $q$, hidden layer width $n$, hidden layer weights initialized as in \S~\ref{lem:init}, and the output weights initialized with mean-field scaling.
+The $\mu$P learning rate $\eta^*$ for hidden layer weights is independent of $n$ but has a non-trivial dependence of depth, scaling as
+{\footnotesize
+\begin{equation}
+    \eta^* \simeq c \cdot \left(\sum_{p=1}^P L_p^3 \right)^{-1/2} \cdot q^{-1}.
+    \label{eq:lr_cnn}
+\end{equation}
+}
+
+This result implies that in addition to network depth and width, CNNs with a larger kernel size should use a smaller learning rate.
+
+
+
+
+
+\subsection{Implications on Architecture Design} \label{sec:practical}
+
+We would like to emphasize that, 
+beyond training deep networks to better performance, our work
+will imply a much broader impact in questioning the credibility of benchmarks and algorithms for automated machine learning (\textbf{AutoML}).
+
+Designing novel networks is vital to the development of deep learning and artificial intelligence.
+Specifically, Neural Architecture Search (NAS) dramatically speeds up the discovery of novel architectures in a principled way~\citep{zoph2016neural,pham2018efficient,liu2018darts},
+and meanwhile many of them archive state-of-the-art performance.
+The validation of NAS algorithms largely hinges on the quality of architecture benchmarks.
+However, in most literature, each NAS benchmark \ul{adapts the same set of training protocols when comparing diverse neural architectures}, largely due to the prohibitive cost of searching the optimal hyperparameter for each architecture.
+
+To our best knowledge, there exist very few in-depth studies of ``how to train'' architectures sampled from the NAS search space, thus we are motivated to examine the unexplored ``hidden gem'' question: \textit{how big a difference can be made if we specifically focus on improving the training hyperparameters?}
+We will answer this question in \S~\ref{sec:nas}.
+
+
+
+\section{Experiments}
+
+
+In our experiments, we will apply our learning rate scaling to weights and bias.
+We study our principles on MLPs, CNNs, and networks with advanced architectures from NAS-Bench-201~\citep{dong2020bench}.
+All our experiments are repeated for three random runs.
+
+\paragraph{We adapt our principles as follows:}\label{sec:algorithm}
+\begin{enumerate}[leftmargin=*]
+    \item Find the base maximal learning rate of the base architecture with the smallest depth ($L = 1$ in our case: ``input$\rightarrow$hidden$\rightarrow$output''): conduct a grid search over a range of learning rates, and find the maximal learning rate which achieves the smallest training loss at the end of one epoch\footnote{
+    Rationales for finding maximal learning rates for the 1st epoch:
+    1) Finding hyperparameters in early training is both practically effective and widely adopted (Tab. 1 and 4 of~\citep{bohdal2022pasha}, Fig. 2 and 3a of~\citep{egele2023one}. Analyzing subsequent training epochs will require more computations and careful design of HPO algorithms.
+    2) $\mu$P~\cite{yang2022tensor} finds optimal learning rates in early training (Fig. 4 and 19).
+    Exploiting more training epochs (for HPO purposes) is orthogonal to our method and is beyond the scope of our work.
+    }
+    \item Initialize the target network (of deeper layers or different topologies) according to \eqref{eq:dag_init}.
+    \item Train the target network by scaling the learning rate based on \eqref{eq:lr_dag} for MLPs or \eqref{eq:lr_cnn} for CNNs.
+\end{enumerate}
+The above steps are much cheaper than directly tuning hyperparameters for heavy networks, since the base network is much smaller.
+
+\subsection{MLPs with Topology Scaling}
+
+\begin{wrapfigure}{r}{61mm}
+\includegraphics[scale=0.42]{images/mlp_graph_corr_inD_may12.pdf}
+\centering
+\captionsetup{font=small}
+\caption{MLPs with different topologies (graph structures). X-axis: ``ground truth'' maximal learning rates found by grid search. Y-axis: estimated learning rates by our principle (\eqref{eq:lr_dag}). The red line indicates the identity. Based on the ``ground truth'' maximal learning rate of the basic MLP with $L=1$, we scale up both learning rates and initialization to diverse architectures. The radius of a dot indicates the variance over three random runs. Data: CIFAR-10.}
+\label{fig:mlps}
+\end{wrapfigure}
+We study MLP networks
+by scaling the learning rate to different graph structures based on \eqref{eq:lr_dag}.
+In addition to the learning rate, variances of initializations are also adjusted based on the in-degree of each layer in a network.
+To verify our scaling rule of both learning rates and initializations, we first find the ``ground truth'' maximal learning rates via grid search on MLPs with different graph structures, and then compare them with our scaled learning rates.
+As shown in Figure~\ref{fig:mlps}, our estimation strongly correlates with the ``ground truth'' maximal learning rates ($r=0.838$).
+This result demonstrates that our learning rate scaling principle can be generalized to complicated network architectures.
+
+\subsection{CNNs with Topology Scaling}
+
+
+We further extend our study to CNNs.
+Our base CNN is of $L = 1$ and kernel size $q=3$,
+and we scale the learning rate to CNNs of both different graph structures and kernel sizes, based on \eqref{eq:lr_cnn}.
+Both the learning rate and the variances of initializations are adjusted for each network.
+
+
+\begin{wrapfigure}{r}{60mm}
+\includegraphics[scale=0.42]{images/cnn_graph_corr_inD_may12.pdf}
+\centering
+\captionsetup{font=small}
+\caption{CNNs with different graph structures and kernel sizes. The x-axis shows the ``ground truth'' maximal learning rates found by grid search. The y-axis shows the estimated learning rates by our principle (\eqref{eq:lr_cnn}). The red line indicates the identity. Based on the ``ground truth'' maximal learning rate of the CNN with $L=1$ and kernel size as $3$, we scale up both learning rates and initialization to diverse architectures. The radius of a dot indicates the variance over three random runs. Data: CIFAR-10.}
+\label{fig:cnns}
+\end{wrapfigure}
+
+
+Again, we first collect the ``ground truth'' maximal learning rates by grid search on CNNs with different graph structures and kernel sizes, and compare them with our estimated ones.
+As shown in Figure~\ref{fig:cnns}, our estimation strongly correlates with the ``ground truth'' maximal learning rates of heterogeneous CNNs ($r=0.856$).
+This result demonstrates that our initialization and learning rate scaling principle can be further generalized to CNNs with sophisticated network architectures and different kernel sizes.
+
+
+
+\subsection{Breaking Network Rankings in NAS}\label{sec:nas}
+
+Networks' performance ranking is vital to the comparison of NAS algorithms~\citep{guo2020single,mellor2021neural,chu2021fairnas,chen2021neural}.
+If the ranking cannot faithfully reflect the true performance of networks, we cannot trust the quality of architecture benchmarks.
+Here we will show that: by simply better train networks, we can easily improve accuracies and break rankings of architectures (those in benchmarks or searched by AutoML algorithms).
+\begin{figure*}[t!]
+\includegraphics[scale=0.36]{images/cifar10_acc.pdf}
+\includegraphics[scale=0.36]{images/cifar10_ranking_kendaltau.pdf}
+\includegraphics[scale=0.36]{images/cifar10_pairwise_dist.pdf}
+\includegraphics[scale=0.36]{images/cifar100_acc.pdf}
+\includegraphics[scale=0.36]{images/cifar100_ranking_kendaltau.pdf}
+\includegraphics[scale=0.36]{images/cifar100_pairwise_dist.pdf}
+\includegraphics[scale=0.36]{images/ImageNet16-120_acc.pdf}
+\includegraphics[scale=0.36]{images/ImageNet16-120_ranking_kendaltau.pdf}
+\includegraphics[scale=0.36]{images/ImageNet16-120_pairwise_dist.pdf}
+\centering
+\captionsetup{font=small}
+\caption{We adopt our scaling principles to existing architecture benchmarks.
+\textbf{Left column}: \ul{better accuracy}.
+For different network architectures, we plot the accuracy trained with different scaling principles (y-axis ``Re-scaled'') against the accuracy trained with a fixed training recipe (x-axis ``NAS-Bench-201''). 
+Each dot represents a unique architecture with different layer types and topologies (Figure 1 in~\citep{dong2020bench}).
+Our principle (\textcolor{blue}{blue dots}) achieves better accuracy compared to the benchmark (\textcolor{red}{red line $y = x$}).
+\textbf{Middle column}: \ul{network rankings in benchmarks are fragile}. We compare networks' performance rankings at different top $K \%$ percentiles ($K = 100, 90, \cdots, 10, 5, 1$; bottom right dots represent networks on the top-right in the left column), trained by our method vs. benchmarks, and find better networks are ranked more differently from the benchmark.
+This indicates current network rankings in benchmarks
+(widely used to compare NAS algorithms)
+can be easily broken by simply better train networks.
+\textbf{Right column}: \ul{less distinguishable architectures}. We plot the pairwise performance gaps between different architectures, and find our principle makes networks similar and less distinguishable in terms of their accuracies.
+}
+\label{fig:201}
+\end{figure*}
+We will use NAS-Bench-201~\citep{dong2020bench} as the test bed.
+NAS-Bench-201 provides a cell-based search space NAS benchmark, the network's accuracy is directly available by querying the database, benefiting the study of NAS methods without network evaluation.
+It contains five heterogeneous operator types: \textit{none} (\textit{zero}), \textit{skip connection}, \textit{conv}$1\times 1$, \textit{conv}$3\times 3$ \textit{convolution}, and \textit{average pooling}$3\times 3$.
+Accuracies are provided for three datasets: CIFAR-10, CIFAR-100, ImageNet16-120.
+However, due to the prohibitive cost of finding the optimal hyperparameter set for each architecture, the performance of all 15,625 architectures in NAS-Bench-201 is obtained with the same protocol (learning rate, initialization, etc.).
+Sub-optimal hyperparameters may setback the maximally achievable performance of each architecture, and may lead to unreliable comparison between NAS methods.
+We randomly sample architectures from NAS-Bench-201, and adopt the same training protocol as~\citet{dong2020bench} (batch size, warm-up, learning rate decay, etc.).
+The only difference is that we use our principle (\S~\ref{thm:lr_cnn}) to re-scale learning rates and initializations for each architecture, and train networks till converge.
+Results are shown in Figure~\ref{fig:201}.
+We derive three interesting findings from our plots to contribute to the NAS community from novel perspectives:
+\begin{enumerate}[leftmargin=*]
+    \item Compared with the default training protocol on NAS-Bench-201, neural architectures can benefit from our scaled learning rates and initialization with much better performance improvements (left column in Figure~\ref{fig:201}). This is also a step further towards an improved ``gold standard'' NAS benchmark.
+    Specifically, on average we outperform the test accuracy in NAS-Bench-201 by 0.44 on CIFAR-10, 1.24 on CIFAR-100, and 2.09 on ImageNet16-120.
+
+    \item Most importantly, compared with the default training protocol on NAS-Bench-201, \textbf{architectures exhibit largely different performance rankings, especially for top-performing ones} (middle column in Figure~\ref{fig:201}). This implies:
+    \ul{with every architecture better-trained,
+    state-of-the-art NAS algorithms evaluated on benchmarks may also be re-ranked.}
+    This is because: many NAS methods (e.g. works summarized in~\citep{dong2021automated}) are agnostic to hyperparameters (i.e. search methods do not condition on training hyperparameters).
+    Changes in the benchmark's training settings will not affect architectures they searched, but instead will lead to different training performances and rankings of searched architectures.
+    \item By adopting our scaling method, the performance gap between architectures is mitigated (right column in Figure~\ref{fig:201}). In other words, our method enables all networks to be converged similarly well, thus less distinguishable in performance.
+\end{enumerate}
+
+
+
+
+
+\section{Conclusion}
+
+
+Training a high-quality deep neural network requires choosing suitable hyperparameters, which are non-trivial and expensive.
+However, most scaling or optimization methods are agnostic to the choice of networks, and thus largely ignore the impact of neural architectures on hyperparameters.
+In this work, by analyzing the dependence of pre-activations on network architectures, we propose a scaling principle for both the learning rate and initialization that can generalize across MLPs and CNNs, with different depths, connectivity patterns, and kernel sizes.
+Comprehensive experiments verify our principles.
+More importantly, our strategy further sheds light on potential improvements in current benchmarks for architecture design.
+We point out that by appropriately adjusting the learning rate and initializations per network, current rankings in these benchmarks can be easily broken.
+Our work contributes to both network training and model design for the Machine Learning community.
+Limitations of our work: 1) Principle of width-dependent scaling of the learning rate. 2) Characterization of depth-dependence of learning rates beyond the first step / early training of networks. 3) Depth-dependence of learning rates with the existence of normalization layers.
+
+
+
+

@@ -1,0 +1,437 @@
+\title{DeepLTL: Learning to Efficiently Satisfy Complex LTL Instructions}
+
+\begin{abstract}
+    Linear temporal logic (LTL) has recently been adopted as a powerful formalism for specifying complex, temporally extended tasks in reinforcement learning (RL). However, learning policies that efficiently satisfy arbitrary specifications not observed during training remains a challenging problem. Existing approaches suffer from several shortcomings: they are often only applicable to finite-horizon fragments of LTL, are restricted to suboptimal solutions, and do not adequately handle safety constraints. In this work, we propose a novel learning approach to address these concerns. Our method leverages the structure of B\"uchi automata, which explicitly represent the semantics of LTL specifications, to learn policies conditioned on sequences of truth assignments that lead to satisfying the desired formulae. Experiments in a variety of discrete and continuous domains demonstrate that our approach is able to zero-shot satisfy a wide range of finite- and infinite-horizon specifications, and outperforms existing methods in terms of both satisfaction probability and efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+One of the fundamental challenges in artificial intelligence (AI) is to create agents capable of following arbitrary instructions. While significant research efforts have been devoted to designing reinforcement learning (RL) agents that can complete tasks expressed in natural language~\citep{oh2017ZeroShot,goyal2019Using,luketina2019survey}, recent years have witnessed increased interest in \textit{formal} languages to specify tasks in RL~\citep{andreas2017Modular,camacho2019LTL,jothimurugan2021Compositional}. Formal specification languages offer several desirable properties over natural language, such as well-defined semantics and compositionality, allowing for the specification of unambiguous, structured tasks~\citep{vaezipoor2021LTL2Action,leon2022Nutshell}.
+Recent works have furthermore shown that it is possible to automatically translate many natural language instructions into a relevant specification language, providing interpretable yet precise representations of tasks, which is especially important in safety-critical domains~\citep{leon2021Systematic,pan2023DataEfficient,liu2023Grounding,cohen2024Survey}.
+
+\textit{Linear temporal logic} (LTL)~\citep{pnueli1977temporal} in particular has been adopted as a powerful formalism for instructing RL agents~\citep{hasanbeig2018LogicallyConstrained,araki2021Logical,voloshin2023Eventual}. LTL is an appealing specification language that allows for the definition of tasks in terms of high-level features of the environment. These tasks can utilise complex compositional structure, are inherently temporally extended (i.e.\ non-Markovian), and naturally incorporate safety constraints.
+While several approaches have been proposed to learning policies capable of satisfying arbitrary LTL specifications~\citep{kuo2020Encoding,vaezipoor2021LTL2Action,qiu2023Instructing,liu2024Skill}, they suffer from several limitations. First, most existing methods are limited to subsets of LTL and cannot handle infinite-horizon (i.e.\ $\omega$-regular) specifications, which form an important class of objectives including \textit{persistence} (eventually, a desired state needs to be reached forever), \textit{recurrence} (a set of states needs to be reached infinitely often), and \textit{response} (whenever a particular event happens, a task needs to be completed)~\citep{manna1990hierarchy}. Second, many current techniques are \textit{myopic}, that is, they solve tasks by independently completing individual subtasks, which can lead to inefficient, globally suboptimal solutions~\citep{vaezipoor2021LTL2Action}. Finally, existing approaches often do not adequately handle safety constraints of specifications, especially when tasks can be completed in multiple ways with different safety implications. For an illustration of these limitations, see \cref{fig:limitations}.
+
+In this paper, we develop a novel approach to learning policies for zero-shot execution of LTL specifications that addresses these shortcomings. Our method exploits the structure of B\"uchi automata to non-myopically reason about ways of completing a (possibly infinite-horizon) specification, and to ensure that safety constraints are satisfied. Our main contributions are as follows:
+    \item we develop (to the best of our knowledge) the \textit{first} non-myopic approach to learning policies for zero-shot execution of LTL specifications that is applicable to infinite-horizon tasks;
+    \item we propose a novel representation of LTL formulae based on reach-avoid sequences of truth assignments, which allows us to learn policies that intrinsically consider safety constraints;
+    \item we propose a novel neural network architecture that combines DeepSets and RNNs to condition the policy on the desired specification;
+    \item lastly, we empirically validate the effectiveness of our method on a range of environments and tasks, demonstrating that it outperforms existing approaches in terms of satisfaction probability and efficiency.
+\end{itemize}
+
+
+
+\section{Background}
+
+
+\paragraph{Reinforcement learning.}
+We model RL environments using the framework of \textit{Markov decision processes} (MDPs). An MDP is a tuple $\mathcal M = (\mathcal S, \mathcal A, \mathcal P, \mu, r, \gamma)$, where $\mathcal S$ is the state space, $\mathcal A$ is the set of actions, $\mathcal P\colon \mathcal S\times\mathcal A\to\Delta(\mathcal S)$ is the \textit{unknown} transition kernel, $\mu\in\Delta(\mathcal S)$ is the initial state distribution, $r\colon \mathcal S\times\mathcal A\times\mathcal S\to\mathbb R$ is the reward function, and $\gamma\in[0,1)$ is the discount factor.
+
+We denote the probability of transitioning from state $s$ to state $s'$ after taking action $a$ as $\mathcal P(s'\given s, a)$. A (memoryless) \textit{policy} $\pi\colon \mathcal S\to\Delta(\mathcal A)$ is a map from states to probability distributions over actions. Executing a policy $\pi$ in an MDP gives rise to a trajectory $\tau = (s_0, a_0, r_0, s_1, a_1, r_1, \dots)$, where $s_0\sim \mu$, $a_t\sim\pi(\,\cdot\given s_t),$ $s_{t+1}\sim \mathcal P(\,\cdot\given s_t, a_t)$, and $r_t = r(s_t, a_t, s_{t+1})$. The goal of RL is to find a policy $\pi^*$ that maximises the \textit{expected discounted return}
+$
+    J(\pi) = \E_{\tau\sim\pi}\left[\sum_{t=0}^\infty \gamma^t r_t\right],
+$
+where we write $\tau\sim\pi$ to indicate that the distribution over trajectories depends on the policy $\pi$. The \textit{value function} of a policy $V^\pi(s) = \E_{\tau\sim\pi}\left[\sum_{t=0}^\infty \gamma^t r_t \mid s_0 = s\right]$ is defined as the expected discounted return starting from state $s$ and following policy $\pi$ thereafter.
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.2\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/omega-regular.pdf}
+        \caption{$\omega$-regular tasks}
+    \end{subfigure}
+    \hspace{1cm}
+    \begin{subfigure}{0.2\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/optimality.pdf}
+        \caption{Optimality}
+        \label{fig:optimality}
+    \end{subfigure}
+    \hspace{1cm}
+    \begin{subfigure}{0.2\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/safety.pdf}
+        \caption{Safety}
+        \label{fig:safety}
+    \end{subfigure}
+    \caption{Limitations of existing methods, illustrated via trajectories in the \textit{ZoneEnv} environment. The initial agent position is denoted as an orange diamond. (a) Most existing approaches cannot handle infinite-horizon tasks, such as $\always\event\mathsf{blue}\land\always\event\mathsf{green}$. (b) Given the formula $\event (\mathsf{blue}\land \event \mathsf{green})$, a \textit{myopic} approach produces a suboptimal solution (orange line). We prefer the more efficient green trajectory. (b) Given the task $(\event\mathsf{green}\lor\event\mathsf{yellow})\land\always\neg\mathsf{blue}$, the agent should aim to reach the yellow region instead of the green region, since this is the safer option.
+    Many existing approaches are unable to perform this sort of planning.
+    }
+    \label{fig:limitations}
+\end{figure}
+
+\paragraph{Linear temporal logic.}
+Linear temporal logic (LTL)~\citep{pnueli1977temporal} provides a formalism to precisely specify properties of infinite trajectories. LTL formulae are defined over a set of atomic propositions $AP$, which describe high-level features of the environment.
+The syntax of LTL formulae is recursively defined as
+\begin{equation*}
+    \mathsf{true} \gror a \gror \varphi \land \psi \gror \neg \varphi \gror \nex\varphi \gror \varphi\;\mathsf{U}\;\psi
+\end{equation*}
+where $a\in AP$ and $\varphi$ and $\psi$ are themselves LTL formulae. $\land$ and $\neg$ are the Boolean operators conjunction and negation, which allow for the definition of all standard logical connectives. The temporal operators $\nex$ and $\until$ intuitively mean ``next'' and ``until''. We define the two temporal modalities $\event$~(``eventually'') and $\always$ (``always'') as $\event\varphi = \mathsf{true}\;\mathsf{U}\;\varphi$ and $\always\varphi = \neg\event\neg\varphi$.
+
+The semantics of LTL align with the intuitive meanings of its operators. For example, in the \textit{ZoneEnv} environment depicted in \cref{fig:limitations}, the atomic propositions $AP$ correspond to coloured regions. We can naturally express many desirable tasks as LTL specifications, such as reaching a blue region ($\event \mathsf{blue}$), avoiding blue until a yellow region is reached ($\neg \mathsf{blue} \until \mathsf{yellow}$), reaching and remaining in a green region ($\event \always \mathsf{green}$), or oscillating between blue and green regions while avoiding yellow ($\always \event \mathsf{green} \land \always \event \mathsf{blue} \land \always \neg \mathsf{yellow}$). The latter two examples represent \textit{infinite-horizon} specifications, which describe behaviour over an infinite time horizon.
+
+Formally, the satisfaction semantics of LTL are defined via a recursive satisfaction relation $w\models\varphi$ on infinite sequences $w$ of truth assignments\footnote{An \textit{assignment} $a$ is a subset of $AP$. Propositions $p\in a$ are assigned \textit{true}, whereas $p\not\in a$ are assigned \textit{false}.} over $AP$ (i.e.\ $\omega$-words over $2^{AP}$) (see \cref{app:ltl_semantics} for details). To ground LTL specifications in an MDP, we assume access to a \textit{labelling function} $L\colon \mathcal S\to 2^{AP}$, which returns the atomic propositions that are true in a given state. A trajectory $\tau$ is mapped to a sequence of assignments via its trace $\Tr(\tau) = L(s_0)L(s_1)\ldots\;$, and we write $\tau\models\varphi$ as shorthand for $\Tr(\tau)\models\varphi$. The \textit{satisfaction probability} of an LTL formula $\varphi$ under policy $\pi$ is then defined as
+$
+    \Pr(\pi\models\varphi) = \E_{\tau\sim\pi}\bigl[\mathbb 1[\tau\models\varphi]\bigr].
+$
+
+\paragraph{B\"uchi automata.}
+\label{sec:ldba}
+
+A more practical way of reasoning about the semantics of LTL formulae is via \textit{B\"uchi automata}~\citep{buchi1966Symposium}, which are specialised automata that can be constructed to keep track of the progress towards satisfying a specification. In particular, in this work we focus on \textit{limit-deterministic B\"uchi automata} (LDBAs)~\citep{sickert2016LimitDeterministic}, which are particularly amenable to be employed with MDPs. 
+An LDBA is a tuple $\mathcal B = (\mathcal Q, q_0, \Sigma, \delta, \mathcal F, \mathcal E)$, where $\mathcal Q$ is a finite set of states, $q_0\in\mathcal Q$ is the initial state, $\Sigma = 2^{AP}$ is a finite alphabet, $\delta\colon \mathcal Q\times(\Sigma\cup\mathcal E)\to \mathcal Q$ is the transition function, and $\mathcal F$ is the set of accepting states.
+Additionally, $\mathcal Q$ is composed of two disjoint subsets $\mathcal Q = \mathcal Q_N \uplus \mathcal Q_D$ such that $\mathcal F\subseteq \mathcal Q_D$ and $\delta(q,\alpha)\in\mathcal Q_D$ for all $q\in\mathcal Q_D$ and $\alpha\in \Sigma$. The set $\mathcal E$ is an indexed set of $\varepsilon$-transitions (a.k.a\ jump transitions), which transition from $\mathcal Q_N$ to $\mathcal Q_D$ without consuming any input, and there are no other transitions from $\mathcal Q_N$ to $\mathcal Q_D$.
+
+\begin{wrapstuff}[type=figure,width=.35\textwidth]
+  \centering
+    \resizebox{\textwidth}{!}{
+        \begin{tikzpicture}[->,>=stealth',shorten >=1pt,auto,semithick,]
+            \node[state,initial] (q0) {$q_0$};
+            \node[state,accepting] (q1) [above right=0.4cm and 1.4cm of q0] {$q_1$};
+            \node[state,accepting] (q2) [below right=0.4cm and 1.4cm of q0] {$q_2$};
+            \node[state] (q3) [right=1.2cm of q2] {$\bot$};
+            \path (q0) edge [loop above] node {$\neg b$} (q0)
+                  (q0) edge node {$b$} (q1)
+                  (q0) edge [below,pos=0.3] node {$\varepsilon_{q_2}$} (q2)
+                  (q1) edge [loop above] node {$\top$} (q1)
+                  (q2) edge [loop above] node {$a$} (q2)
+                  (q2) edge [above] node {$\neg a$} (q3)
+                  (q3) edge [loop above] node {$\top$} (q3);
+        \end{tikzpicture}
+    }
+    \caption{LDBA for the formula $(\event\always \mathsf a) \lor \event \mathsf b$.}
+    \label{fig:ldba}
+\end{wrapstuff}
+A \textit{run} $r$ of $\mathcal B$ on the $\omega$-word $w$ is an infinite sequence of states in $\mathcal Q$ respecting the transition function. An infinite word $w$ is \textit{accepted} by $\mathcal B$ if there exists a run $r$ of $\mathcal B$ on $w$ that visits an accepting state infinitely often. For every LTL formula $\varphi$, we can construct an LDBA $\mathcal B_\varphi$ that accepts exactly the words satisfying $\varphi$~\citep{sickert2016LimitDeterministic}.
+
+\begin{example}
+    \cref{fig:ldba} depicts an LDBA for the formula $(\event\always \mathsf a) \lor \event \mathsf b$. The automaton starts in state $q_0$ and transitions to the accepting state $q_1$ upon observing the proposition $b$. Once it has reached $q_1$, it stays there indefinitely. Alternatively, it can transition to the accepting state $q_2$ without consuming any input via the $\varepsilon$-transition. Once in $q_2$, the automaton accepts exactly the words where $a$ is true at every step. \qed
+\end{example}
+
+    
+
+
+
+\section{Problem setting}
+
+Our high-level goal is to find a specification-conditioned policy $\pi|\varphi$ that maximises the probability of satisfying arbitrary LTL formulae $\varphi$. Formally, we introduce an arbitrary distribution $\xi$ over LTL specifications $\varphi$, and aim to compute the optimal policy
+\begin{equation}\label{eq:max}
+    \pi^* = \argmax_{\pi}\E_{\substack{\varphi\sim\xi,\\\tau\sim\pi|\varphi}}\bigl[\mathbb 1[\tau\models\varphi]\bigr].
+\end{equation}
+
+We now introduce the necessary formalism to find solutions to \cref{eq:max} via reinforcement learning.
+
+\begin{definition}[Product MDP]
+    The \textit{product MDP} $\mathcal M^\varphi$ of an MDP $\mathcal M$ and an LDBA $\mathcal B_\varphi$ synchronises the execution of $\mathcal M$ and $\mathcal B_\varphi$. Formally, $\mathcal M^\varphi$ has the state space $\mathcal S^\varphi = \mathcal S\times\mathcal Q$, action space $\mathcal A^\varphi = \mathcal A\times \mathcal E$, initial state distribution $\mu^\varphi(s,q) = \mu(s)\cdot \mathbb 1[q = q_0]$, and transition function
+    \begin{equation*}
+        \mathcal P^\varphi\left((s',q')\given (s,q), a\right) = 
+        \begin{cases}
+            \mathcal P(s'\given s, a) &\text{ if } a\in\mathcal A\land q'= \delta(q, L(s)),\\
+            1 & \text{ if } a = \varepsilon_{q'}\land q'=\delta(q, a)\land s' = s,\\
+            0 & \text{ otherwise.}
+        \end{cases}
+    \end{equation*}
+\end{definition}
+
+The product MDP $\mathcal M^\varphi$ extends the state space of $\mathcal M$ in order to keep track of the current state of the LDBA\@. This allows us to consider only \textit{memoryless} policies that map tuples $(s,q)$ of MDP and LDBA states to actions, since the LDBA takes care of adding the memory necessary to satisfy $\varphi$~\citep{baier2008Principles}. Quite importantly, note that in practice we never build the product MDP explicitly, but instead simply update the current LDBA state $q$ with the propositions $L(s)$ observed at each time step. Also note that the action space in $\mathcal M^\varphi$ is extended with $\mathcal E$ to allow the policy to follow $\varepsilon$-transitions in $\mathcal B_\varphi$ without acting in the MDP\@. Trajectories in $\mathcal M^\varphi$ are sequences $\tau = \left((s_0,q_0),a_0,(s_1,q_1),a_1,\ldots\right)$, and we denote as $\tau_q$ the projection of $\tau$ onto the LDBA states $q_0,q_1,\ldots\;$. We can restate the satisfaction probability of formula $\varphi$ in $\mathcal M^\varphi$ as 
+\begin{equation*}
+    \Pr(\pi\models\varphi) = \E_{\tau\sim\pi}\bigl[\mathbb 1\left[\inf(\tau_q) \cap \mathcal F \neq \emptyset\right]\bigr],
+\end{equation*}
+where $\inf(\tau_q)$ denotes the set of states that occur infinitely often in $\tau_q$.
+
+We now introduce the following reinforcement learning problem to find solutions to \cref{eq:max}, employing the technique of \textit{eventual discounting}~\citep{voloshin2023Eventual}:
+
+\begin{problem}\label{prob:eventual}
+Given an unknown MDP $\mathcal M$, a distribution over LTL formulae $\xi$, and LDBAs $\mathcal B_\varphi$ for each $\varphi\in\supp(\xi)$, find the optimal policy
+\begin{equation*}
+    \pi^*_\Gamma = \argmax_{\pi}\E_{\substack{\varphi\sim\xi,\\\tau\sim\pi|\varphi}}\left[\sum_{t=0}^\infty \Gamma_t \mathbb 1[q_t\in\mathcal F_{\mathcal B_{\varphi}}]\right],
+    \quad
+    \Gamma_t = \gamma^{c_t},
+    \quad
+    c_t = \sum_{k=0}^t \mathbb 1[q_k\in\mathcal F_{\mathcal B_\varphi}],
+\end{equation*}
+where $c_t$ counts how often accepting states have been visited up to time step $t$.
+\end{problem}
+
+Intuitively, we seek the policy that maximises the expected number of visits to accepting states in $\mathcal B_\varphi$. We employ eventual discounting, that is, we only discount visits to accepting states in the automaton and not the steps between those visits, to ensure that $\pi_\Gamma^*$ is approximately probabilistically optimal (for a further discussion, see \cref{app:eventual_discounting}). In particular, we obtain the following bound on the performance of $\pi_\Gamma^*$, which is a corollary of \citep[Theorem 4.2]{voloshin2023Eventual}:
+
+\begin{restatable}{theorem}{maintheorem}\label{theo}
+    For any $\gamma\in (0, 1)$ we have
+    \begin{equation*}
+        \sup_\pi\E_{\varphi\sim\xi}\left[ \Pr(\pi\models\varphi) \right] - \E_{\varphi\sim\xi}\left[ \Pr(\pi_\Gamma^*\models\varphi) \right]
+        \leq
+        2\log(\frac{1}{\gamma})\sup_{\pi} O_\pi,
+    \end{equation*}
+    where
+    $
+        O_\pi = \E_{\varphi\sim\xi, \tau\sim\pi|\varphi}\bigl[ |\{q\in\tau_q : q\in\mathcal F_{\mathcal B_\varphi}\}|\,\big|\, \tau\not\models\varphi \bigr]
+    $
+    is the expected number of visits to accepting states for trajectories that do not satisfy a specification.
+\end{restatable}
+
+\begin{proof}
+    The proof follows from \citep[Theorem 4.2]{voloshin2023Eventual} by repeated application of the linearity of expectation and triangle inequality. A detailed proof is given in \cref{app:proof}.
+\end{proof}
+
+However, while the formulation in \cref{prob:eventual} provides desirable theoretical guarantees, it does not take into account any notion of \textit{efficiency} of formula satisfaction, which is an important practical concern. Consider for example the simple formula $\event \mathsf a$. Eventual discounting assigns the same return to all policies that eventually visit $s$ with $\mathsf a\in L(s)$, regardless of the number of steps required to materialise $\mathsf a$. In practice, we often prefer policies that are more efficient (require fewer steps to make progress towards satisfaction), even if their overall satisfaction probability might be slightly reduced. A natural way to formalise this tradeoff is as follows:
+
+\begin{problem}[Efficient LTL satisfaction]\label{prob:efficient}
+    Given an unknown MDP $\mathcal M$, a distribution over LTL formulae $\xi$, and LDBAs $\mathcal B_\varphi$ for each $\varphi\in\supp(\xi)$, find the optimal policy
+    \begin{equation}\label{eq:objective}
+        \pi_\gamma^* = \argmax_\pi \E_{\substack{\varphi\sim\xi,\\\tau\sim\pi|\varphi}}\left[
+        \sum_{t=0}^\infty \gamma^t \mathbb 1[q_t\in\mathcal F_{\mathcal B_{\varphi}}]
+        \right].
+    \end{equation}
+\end{problem}
+
+Here, we discount \textit{all} time steps, such that more efficient policies receive higher returns. While solutions to \cref{prob:efficient} are not guaranteed to be probability-optimal (as per \cref{prob:eventual}), they will generally still achieve a high probability of formula satisfaction, while also taking efficiency into account. We consider \cref{prob:efficient} for the rest of this paper, since we believe efficiency to be an important practical concern, but note that our approach is equally applicable to the eventual discounting setting (see \cref{app:deepltl_eventual_discounting}).
+
+
+
+\section{Method}
+
+Solving \cref{prob:efficient} requires us to train a policy conditioned on the current MDP state $s$ and the current state $q$ of an LDBA constructed from a given target specification $\varphi$. Our key insight is that we can extract a useful representation of $q$ directly from the structure of the LDBA, by reasoning about the possible ways of satisfying the given formula from the current LDBA state $q$. This representation is then used to condition the policy, and guide the agent towards satisfying a given specification.
+\subsection{Representing LTL specifications as sequences}
+
+\paragraph{Computing accepting cycles.}
+ An optimal policy for \cref{prob:efficient} must continuously visit accepting states in $\mathcal B_\varphi$. Since $\mathcal B_\varphi$ is finite, this means that the agent has to reach an \textit{accepting cycle} in the LDBA\@. Intuitively, the possible ways of reaching accepting cycles are an informative representation of the current LDBA state $q$, as they capture how to satisfy the given task. We compute all possible ways of reaching an accepting cycle using an algorithm based on  depth-first search (DFS) that explores all possible paths from $q$ to an accepting state $q_f\in\mathcal F$, and then back to a state already contained in the path (see \cref{app:accepting_cycles} for details). Let $P_q$ denote the resulting set of paths from $q$ to accepting cycles.
+
+ \begin{remark*}
+     In the case that $\varphi$ corresponds to a task that can be completed in finite time (e.g.\ $\event\mathsf a$), the accepting cycle in $\mathcal B_\varphi$ is trivial and consists of only a single looping state (see e.g.\ $q_1$ in \cref{fig:ldba}).  
+ \end{remark*}
+
+\paragraph{From paths to sequences.}
+A path $p \in P_q$ is an infinite sequence of states $(q_1, q_2, \ldots)$ in the LDBA\@. Let $A_i^+ = \{a : \delta(q_i, a) = q_{i+1}\}$ denote the set of assignments $a\in 2^{AP}$ that progress the LDBA from state $q_i$ to $q_{i+1}$.\footnote{For now, we assume that there are no $\varepsilon$-transitions in $p$. We revisit $\varepsilon$-transitions in \cref{sec:epsilon}.} We furthermore define the set of negative assignments $A_i^- = \{a : a\not\in A_i^+\land \delta(q_i, a)\neq q_i\}$  that lead from $q_i$ to a different state in the LDBA\@. In order to satisfy the LTL specification via $p$, the policy has to sequentially visit MDP states $s_t$ such that $L(s_{t_i}) \in A_i^+$ for some $t_i$, while avoiding assignments in $A_i^-$. We refer to the sequence
+\begin{equation*}
+    \sigma_p = \left( (A_1^+, A_1^-), (A_2^+, A_2^-), \ldots \right)
+\end{equation*}
+as the \textit{reach-avoid sequence} corresponding to $p$, and denote as $\zeta_q = \{\sigma_p : p\in P_q\}$ the set of all reach-avoid sequences for $q$.
+
+\begin{example}
+    The first two steps of $\sigma = \bigl( (\{\{\mathsf{a}\}\}, \{\{\mathsf{b,d}\}\}), (\{\{\mathsf{c}\},\{\mathsf{e}\}\},\emptyset), \ldots  \bigr)$ require the agent to achieve proposition $\mathsf{a}$ while avoiding states with both propositions $\mathsf{b}$ and $\mathsf{d}$, and subsequently achieve the propositions $\mathsf{c}$ or $\mathsf{e}$. \qed 
+\end{example}
+
+\begin{figure}
+    \centering
+    \includegraphics[height=2.6cm]{figures/overview.pdf}
+    \caption{High-level overview of our approach. (\textit{Left}) During training, we train a general sequence-conditioned policy with arbitrary reach-avoid sequences $\sigma$. (\textit{Right}) At test time, we first construct an LDBA from the given target specification $\varphi$. We then select the optimal reach-avoid sequence $\sigma^*$ for the current LDBA state $q$ according to the value function $V^\pi(s,\sigma)$, and produce an action $a$ from the policy conditioned on $\sigma^*$.
+    }
+    \label{fig:overview}
+\end{figure}
+
+\subsection{Overview of the approach}\label{sec:overview}
+See \cref{fig:overview} for an overview of our method. 
+Representing the current LDBA state $q$ as a set of reach-avoid sequences allows us to condition the policy on possible ways of achieving the given specification. On a high level, our approach works as follows: in the \textit{training stage}, we learn a general sequence-conditioned policy $\pi\colon \mathcal S\times\zeta\to\Delta(\mathcal A)$ together with its value function $V^\pi\colon \mathcal S\times\zeta\to\mathbb R$ to satisfy arbitrary reach-avoid sequences $\sigma\in\zeta$ over $AP$, following the standard framework of \textit{goal-conditioned} RL~\citep{liu2022GoalConditioned}.
+Note that we do not assume access to a distribution $\xi$ over formulae, since we are interested in satisfying arbitrary specifications. At \textit{test time}, we are now given a target specification $\varphi$ and construct its corresponding LDBA. We keep track of the current LDBA state $q$, and select the optimal reach-avoid sequence to follow in order to satisfy $\varphi$ according to the value function of $\pi$, i.e.\
+\begin{equation}\label{eq:sigmastar}
+    \sigma^* = \argmax_{\sigma\in\zeta_q} V^\pi(s,\sigma).
+\end{equation}
+We then execute actions $a\sim\pi(\cdot,\sigma^*)$ until the next LDBA state is reached. 
+
+The test-time execution of our approach can be equivalently thought of as executing a policy $\widetilde\pi$ in the product MDP $\mathcal M^\varphi$, where $\widetilde\pi(s,q) = \pi\left(s, \sigma^*\right)$. That is, $\widetilde\pi$ exploits $\pi$ to reach an accepting cycle in the LDBA of the target specification, and thus approximates \cref{prob:efficient}. Next, we describe the model architecture of the sequence-conditioned policy, and give a detailed description of the training procedure and test-time execution. 
+\subsection{Model architecture}
+We parameterise the sequence-conditioned policy $\pi$ using a modular neural network architecture. This consists of an \textit{observation module}, which processes observations from the environment, a \textit{sequence module}, which encodes the reach-avoid sequence, and an \textit{actor module}, which takes as input the features produced by the previous two modules and outputs a distribution over actions.
+
+The \emph{observation module} is implemented as either a fully-connected (for generic state features) or convolutional neural network (for image-like observations). The \emph{actor module} is another fully connected neural network that outputs the mean and standard deviation of a Gaussian distribution (for continuous action spaces) or the parameters of a categorical distribution (in the discrete setting). Finally, the \emph{sequence module} consists of a permutation-invariant neural network that encodes sets of assignments, and a recurrent neural network (RNN) that maps the resulting sequence to a final representation. We discuss these components in further detail below and provide an illustration of the sequence module in \cref{fig:seq}.
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=.95]{figures/seq_module.pdf}
+    \caption{Illustration of the \emph{sequence module}. The positive and negative assignments in the truncated reach-avoid sequence $\sigma$ are encoded using the \textit{DeepSets} architecture, which produces embeddings~$\bm e_A$. These are then concatenated and passed through an RNN, which yields the final sequence representation $\bm e_\sigma$.}
+    \label{fig:seq}
+\end{figure}
+
+\paragraph{Representing sets of assignments.}
+The first step of the sequence module consists in encoding the sets of assignments in a reach-avoid sequence. We employ the \textit{DeepSets} architecture~\citep{zaheer2017Deep} to obtain an encoding $\bm e_A$ of a set of assignments $A$. That is, we have 
+\begin{equation}\label{eq:deepset}
+\bm e_A = \rho\left(\sum_{a\in A}\phi(a) \right),
+\end{equation}
+where $\phi(a)$ is a learned embedding function, and $\rho$ is a learned non-linear transformation. Note that the resulting encoding $\bm e_A$ is \textit{permutation-invariant}, i.e.\ it does not depend on the order in which the elements in $A$ are processed, and \cref{eq:deepset} is thus a well-defined function on sets.
+
+\paragraph{Representing reach-avoid sequences.}
+Once we have obtained encodings of the sets $A_i^+$ and $A_i^-$ for each element in the reach-avoid sequence $\sigma$, we concatenate these embeddings and pass them through an RNN to yield the final representation of the sequence. Since $\sigma$ is an infinite sequence, we approximate it with a finite prefix by repeating its looping part $k$ times, such that the truncated sequence visits an accepting state exactly $k$ times. We apply the RNN backwards, that is, from the end of the truncated sequence to the beginning, since earlier elements in $\sigma$ are more important for the immediate actions of the policy. The particular model of RNN we employ is a \textit{gated recurrent unit} (GRU)~\citep{cho2014Properties}.
+\subsection{Training procedure}
+We train the policy $\pi$ and the value function $V^\pi$ using the general framework of \textit{goal-conditioned RL}~\citep{liu2022GoalConditioned}. That is, we generate a random reach-avoid sequence at the beginning of each training episode and reward the agent for successfully completing it. In particular, given a training sequence $\sigma = \left((A_1^+, A_1^-), \ldots, (A_{n}^+, A_{n}^-)\right)$, we keep track of the task satisfaction progress via an index $i\in[n]$ (where initially $i = 1$). We say the agent \textit{satisfies} a set of assignments $A$ at time step $t$ if $L(s_t)\in A$. Whenever the agent satisfies $A_i^+$, we increment $i$ by one. If $i = n + 1$, we give the agent a reward of $1$ and terminate the episode. If the agent at any point satisfies $A_i^-$, we also terminate the episode and give it a negative reward of $-1$. Otherwise, the agent receives zero reward. By maximising the expected discounted return, the policy learns to efficiently satisfy arbitrary reach-avoid sequences. In our experiments, we use \textit{proximal policy optimisation} (PPO)~\citep{schulman2017Proximal} to optimise the policy, but our approach can be combined with any RL algorithm.
+
+\paragraph{Curriculum learning.}
+To improve the training of $\pi$ in practice, we employ a simple form of \textit{curriculum learning}~\citep{narvekar2020Curriculum} in order to gradually expose the policy to more challenging tasks. A curriculum consists of multiple stages that correspond to training sequences of increasing length and complexity. For example, the first stage generally consists only of simple reach-tasks of the form $\sigma = \bigl((\{\{p\}\},\emptyset)\bigr)$ for $p\in AP$, while later stages involve longer sequences with avoidance conditions. Once the policy achieves satisfactory performance on the current tasks, we move on to the next stage. For details on the exact curricula we use in our experiments, see \cref{app:curricula}.
+\subsection{Test time policy execution}
+At test time, we execute the trained sequence-conditioned policy $\pi$ to complete an arbitrary task $\varphi$. As described in \cref{sec:overview}, we keep track of the current LDBA state $q$ in $\mathcal B_\varphi$, and use the learned value function $V^\pi$ to select the optimal reach-avoid sequence $\sigma^*$ to follow from $q$ in order to satisfy $\varphi$ (\cref{eq:sigmastar}). Note that it follows from the reward of our training procedure that
+\begin{equation*}
+    V^{\pi}(s, \sigma) \leq \E_{\tau\sim\pi|\sigma}\left[\sum_{t=0}^\infty \gamma^t \mathbb 1[i = n+1] \,\bigg|\, s_0 = s\right],
+\end{equation*}
+i.e.\ the value function is a lower bound of the discounted probability of reaching an accepting state $k$ times via $\sigma$ (where $k$ is the number of loops in the truncated sequence). As $k\to\infty$, the sequence $\sigma^*$ that maximises $V^\pi$ thus maximises a lower bound on \cref{prob:efficient} for the trained policy $\pi$. Once $\sigma^*$ has been selected, we execute actions $a\sim\pi(\cdot,\sigma^*)$ until the next LDBA state is reached.
+
+\paragraph{Strict negative assignments.}
+Recall that a negative assignment in a reach-avoid sequence $\sigma_p$ is any assignment that leads to an LDBA state other than the desired next state in $p$. In practice, we find that trying to avoid all other states in the LDBA can be too restrictive for the policy. We therefore only regard as negative those assignments that lead to a significant reduction in expected performance. In particular, given a threshold $\lambda$, we define the set of \textit{strict} negative assignments for state $q_i\in p$ as the assignments that lead to a state $q'$ where
+\begin{equation*}
+    V^\pi(s, \sigma_p[i\ldots]) - \max_{\sigma'\in\zeta_{q'}} V^\pi(s, \sigma') \geq \lambda.
+\end{equation*}
+We then set $A_i^-$ to be the set of \textit{strict} negative assignments for $q_i$. Reducing $\lambda$ leads to a policy that more closely follows the selected path $p$, whereas increasing $\lambda$ gives the policy more flexibility to deviate from the chosen path.
+
+\paragraph{Handling $\varepsilon$-transitions.}
+\label{sec:epsilon}
+We now discuss how to handle $\varepsilon$-transitions in the LDBA\@. As described in \cref{sec:ldba}, whenever the LDBA is in a state $q$ with an $\varepsilon$-transition to $q'$, the policy can choose to either stay in $q$ or transition to $q'$ without acting in the MDP\@. If the sequence $\sigma^*$ chosen at $q$ starts with an $\varepsilon$-transition (i.e.\ $A_1^+ = \{\varepsilon\}$), we extend the action space of $\pi$ to include the action $\varepsilon$. If $\mathcal A$ is discrete, we simply add an additional dimension to the action space. In the continuous case, we learn the probability $p$ of taking the $\varepsilon$-action and model $\pi(\cdot|s, \sigma^*)$ as a mixed continuous/discrete probability distribution (see e.g.~\cite[Ch.~3.6]{shynk2012Probability}). Whenever the policy executes the $\varepsilon$-action, we update the current LDBA state to the next state in the selected path. In practice, we additionally only allow $\varepsilon$-actions if $L(s)\not\in A_2^-$, since in that case taking the $\varepsilon$-transition would immediately lead to failure.
+
+\subsection{Discussion}
+We argue that our approach has several advantages over existing methods. Since we operate on accepting cycles of B\"uchi automata, our method is applicable to infinite-horizon (i.e.\ $\omega$-regular) tasks, contrary to most existing approaches. Our method is the \textit{first} approach that is also non-myopic, as it is able to reason about the entire structure of a specification via temporally extended reach-avoid sequences. This reasoning naturally considers safety constraints, which are represented through negative assignments and inform the policy about which propositions to avoid. Crucially, these safety constraints are considered during planning, i.e.\ when selecting the optimal sequence to execute, rather than only during execution. For a detailed comparison of our approach to related work, see \cref{sec:related}.
+
+
+
+\section{Experiments}
+
+We evaluate our approach, called \textit{DeepLTL}, in a variety of environments and on a range of LTL specifications of varying difficulty. We aim to answer the following questions: \textbf{(1)} Is DeepLTL able to learn policies that can zero-shot satisfy complex LTL specifications? \textbf{(2)} How does our method compare to relevant baselines in terms of both satisfaction probability and efficiency? \textbf{(3)} Can our approach successfully handle infinite-horizon specifications?
+
+\subsection{Experimental setup}
+\paragraph{Environments.}
+Our experiments involve different domains with varying state and action spaces. This includes the \textit{LetterWorld} environment~\citep{vaezipoor2021LTL2Action}, a $7\times 7$ discrete grid world in which letters corresponding to atomic propositions occupy randomly sampled positions in the grid. We also consider the high-dimensional \textit{ZoneEnv} environment from \citet{vaezipoor2021LTL2Action}, in which a robotic agent with a continuous action space has to navigate between different randomly placed coloured regions, which correspond to the atomic propositions. Finally, we evaluate our approach on the continuous \textit{FlatWorld} environment~\citep{voloshin2023Eventual}, in which multiple propositions can hold true at the same time. We provide further details and visualisations in \cref{app:environments}.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.28\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/curves_letters.pdf}
+        \caption{LetterWorld}
+        \label{fig:letters}
+    \end{subfigure}
+    \hspace{.2cm}
+    \begin{subfigure}{0.28\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/curves_zones.pdf}
+        \caption{ZoneEnv}
+        \label{fig:zones}
+    \end{subfigure}
+    \hspace{.2cm}
+    \begin{subfigure}{0.28\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/curves_flatworld.pdf}
+        \caption{FlatWorld}
+        \label{fig:flatworld}
+    \end{subfigure}
+    \caption{Evaluation curves on \textit{reach/avoid} specifications. Each datapoint is collected by averaging the discounted return of the policy across 50 episodes with randomly sampled tasks, and shaded areas indicate 90\% confidence intervals over 5 different random seeds.}
+    \label{fig:training_results}
+\end{figure}
+
+\paragraph{LTL specifications.}
+We consider a range of tasks of varying complexity. \textit{Reach/avoid} specifications are randomly sampled from a task space that encompasses both sequential reachability objectives of the form $\event (p_1 \land (\event p_2 \land (\event p_3))$ and reach-avoid tasks $\neg p_1\until (p_2\land (\neg p_3 \until p_4))$, where the $p_i$ are randomly sampled atomic propositions. \textit{Complex} specifications are given by more complicated, environment-specific LTL formulae, such as the specification $((\mathsf{a} \lor \mathsf{b} \lor \mathsf{c} \lor \mathsf{d}) \Rightarrow \event (\mathsf{e} \land (\event (\mathsf{f} \land \event \mathsf{g})))) \until (\mathsf{h} \land \event \mathsf{i})$ in \textit{LetterWorld}. We also separately investigate \textit{infinite-horizon} tasks such as $\always\event \mathsf a \land \always\event\mathsf b$ and $\event\always \mathsf a$. The specifications we consider cover a wide range of LTL objectives, including reachability, safety, recurrence, persistence, and combinations thereof. Details on the exact specifications we use in each environment are given in \cref{app:specifications}.
+
+\paragraph{Baselines.} We compare DeepLTL to two state-of-the-art approaches for learning general LTL-satisfying policies. LTL2Action~\citep{vaezipoor2021LTL2Action} encodes the syntax tree of a target formula via a graph neural network (GNN) and uses a procedure known as \textit{LTL progression} to progress through the specification based on the observed propositions. The second baseline, GCRL-LTL~\citep{qiu2023Instructing}, instead learns proposition-conditioned policies and combines them compositionally using a weighted graph search on the B\"uchi automaton of a target specification.
+
+\paragraph{Evaluation protocol.}
+In line with previous work, the methods are trained for 15M interaction steps on each environment with PPO~\citep{schulman2017Proximal}. Details about hyperparameters and neural network architectures can be found in \cref{app:hyperparameters}. We report the performance in terms of discounted return over the number of environment interactions (following \cref{eq:objective}) on randomly sampled \emph{reach/avoid} tasks, and provide tabular results detailing the success rate (SR) and average number of steps until completion ($\mu$) of trained policies on \emph{complex} tasks.
+All results are averaged across 5 different random seeds. Furthermore, we provide visualisations of trajectories of trained policies for various specifications in the \textit{ZoneEnv} and \textit{FlatWorld} environments in \cref{app:visualisations}.
+
+\subsection{Results}
+
+\begin{table}[]
+    \centering
+    \caption{Evaluation results of trained policies on \textit{complex} finite-horizon specifications. We report the \textit{success rate} (SR) and average number of steps to satisfy the task ($\mu$). Results are averaged over 5 seeds and 500 episodes per seed. ``$\pm$'' indicates the standard deviation over seeds.}
+    \label{tab:finite}
+    \resizebox{.85\textwidth}{!}{
+    \begin{tabular}{@{}llrrrrrrrr@{}}
+        \toprule
+        &  & \multicolumn{2}{c}{LTL2Action} &  & \multicolumn{2}{c}{GCRL-LTL} &  & \multicolumn{2}{c}{DeepLTL}  \\ \midrule
+        &  & \multicolumn{1}{c}{SR ($\uparrow$)}            & \multicolumn{1}{c}{$\mu$ ($\downarrow$)}          &  & \multicolumn{1}{c}{SR ($\uparrow$)}           & \multicolumn{1}{c}{$\mu$ ($\downarrow$)}         &  & \multicolumn{1}{c}{SR ($\uparrow$)}            & \multicolumn{1}{c}{$\mu$ ($\downarrow$)}        \\ \midrule
+\multirow{5}{*}{\rotatebox{90}{\textnormal{LetterWorld}}}& $\varphi_{1}$ & 0.75$_{\pm0.18 }$ & 29.48$_{\pm3.20 }$ & & 0.94$_{\pm0.05 }$ & 15.29$_{\pm0.70 }$ & & \textbf{1.00}$_{\pm0.00 }$ & \textbf{9.66}$_{\pm0.35 }$ \\
+& $\varphi_{2}$ & 0.79$_{\pm0.10 }$ & 19.04$_{\pm6.79 }$ & & 0.94$_{\pm0.03 }$ & 9.77$_{\pm1.16 }$ & & \textbf{0.98}$_{\pm0.00 }$ & \textbf{7.26}$_{\pm0.35 }$ \\
+& $\varphi_{3}$ & 0.41$_{\pm0.14 }$ & 40.31$_{\pm2.88 }$ & & \textbf{1.00}$_{\pm0.00 }$ & 20.72$_{\pm1.34 }$ & & \textbf{1.00}$_{\pm0.00 }$ & \textbf{12.23}$_{\pm0.58 }$ \\
+& $\varphi_{4}$ & 0.72$_{\pm0.17 }$ & 28.83$_{\pm4.47 }$ & & 0.82$_{\pm0.07 }$ & 14.60$_{\pm1.63 }$ & & \textbf{0.97}$_{\pm0.01 }$ & \textbf{12.13}$_{\pm0.58 }$ \\
+& $\varphi_{5}$ & 0.44$_{\pm0.26 }$ & 31.84$_{\pm9.06 }$ & & \textbf{1.00}$_{\pm0.00 }$ & 25.63$_{\pm0.55 }$ & & \textbf{1.00}$_{\pm0.00 }$ & \textbf{9.48}$_{\pm0.78 }$ \\
+\midrule
+\multirow{6}{*}{\rotatebox{90}{\textnormal{ZoneEnv}}}& $\varphi_{6}$ & 0.60$_{\pm0.20 }$ & 424.07$_{\pm14.95 }$ & & 0.85$_{\pm0.03 }$ & 452.19$_{\pm15.59 }$ & & \textbf{0.92}$_{\pm0.06 }$ & \textbf{303.38}$_{\pm19.43 }$ \\
+& $\varphi_{7}$ & 0.14$_{\pm0.18 }$ & 416.78$_{\pm66.38 }$ & & 0.85$_{\pm0.05 }$ & 451.18$_{\pm04.91 }$ & & \textbf{0.91}$_{\pm0.03 }$ & \textbf{299.95}$_{\pm09.47 }$ \\
+& $\varphi_{8}$ & 0.67$_{\pm0.26 }$ & 414.48$_{\pm68.52 }$ & & 0.89$_{\pm0.04 }$ & 449.70$_{\pm16.82 }$ & & \textbf{0.96}$_{\pm0.04 }$ & \textbf{259.75}$_{\pm08.07 }$ \\
+& $\varphi_{9}$ & 0.69$_{\pm0.22 }$ & 331.55$_{\pm41.40 }$ & & 0.87$_{\pm0.02 }$ & 303.13$_{\pm05.83 }$ & & \textbf{0.90}$_{\pm0.03 }$ & \textbf{203.36}$_{\pm14.97 }$ \\
+& $\varphi_{10}$ & 0.66$_{\pm0.19 }$ & 293.22$_{\pm63.94 }$ & & 0.85$_{\pm0.02 }$ & 290.73$_{\pm17.39 }$ & & \textbf{0.91}$_{\pm0.02 }$ & \textbf{187.13}$_{\pm10.61 }$ \\
+& $\varphi_{11}$ & 0.93$_{\pm0.07 }$ & 123.89$_{\pm07.30 }$ & & 0.89$_{\pm0.01 }$ & 137.42$_{\pm08.30 }$ & & \textbf{0.98}$_{\pm0.01 }$ & \textbf{106.21}$_{\pm07.88 }$ \\
+\midrule
+\multirow{5}{*}{\rotatebox{90}{\textnormal{FlatWorld}}}& $\varphi_{12}$ & \textbf{1.00}$_{\pm0.00 }$ & 83.32$_{\pm01.57 }$ & & 0.82$_{\pm0.41 }$ & \textbf{78.21}$_{\pm08.98 }$ & & \textbf{1.00}$_{\pm0.00 }$ & 79.69$_{\pm02.50 }$ \\
+& $\varphi_{13}$ & 0.63$_{\pm0.50 }$ & 94.43$_{\pm39.30 }$ & & 0.00$_{\pm0.00 }$ & 0.00$_{\pm00.00 }$ & & \textbf{1.00}$_{\pm0.00 }$ & \textbf{52.82}$_{\pm03.09 }$ \\
+& $\varphi_{14}$ & 0.71$_{\pm0.40 }$ & 96.16$_{\pm28.93 }$ & & 0.73$_{\pm0.41 }$ & 74.60$_{\pm01.86 }$ & & \textbf{0.98}$_{\pm0.01 }$ & \textbf{71.76}$_{\pm02.87 }$ \\
+& $\varphi_{15}$ & 0.07$_{\pm0.02 }$ & \textbf{32.37}$_{\pm01.63 }$ & & 0.73$_{\pm0.03 }$ & 41.30$_{\pm01.24 }$ & & \textbf{0.86}$_{\pm0.01 }$ & 43.87$_{\pm01.45 }$ \\
+& $\varphi_{16}$ & 0.56$_{\pm0.35 }$ & 48.85$_{\pm32.85 }$ & & 0.64$_{\pm0.08 }$ & \textbf{17.76}$_{\pm01.63 }$ & & \textbf{1.00}$_{\pm0.01 }$ & 37.04$_{\pm05.28 }$ \\
+\bottomrule
+                \end{tabular}
+}
+\end{table}
+
+\paragraph{Finite-horizon tasks.}
+\cref{fig:training_results} shows the discounted return achieved on \textit{reach/avoid} tasks across environment interactions. DeepLTL clearly outperforms the baselines, both in terms of sample efficiency and final performance. The results in \cref{tab:finite} further demonstrate that our method can efficiently zero-shot satisfy \emph{complex} specifications (see \cref{app:specifications} for details on the tasks), achieving higher success rates (SR) than existing approaches, while requiring significantly fewer steps ($\mu$).
+These results highlight the performance benefits of our representation based on reach-avoid sequences over existing encoding schemes, and show that our approach learns much more efficient policies than the myopic baseline GCRL-LTL\@. The higher success rates of our method furthermore indicate that it handles safety constraints better than the baselines.
+
+\paragraph{Infinite-horizon tasks.}
+\cref{fig:infinite_results} shows example trajectories of DeepLTL on infinite-horizon tasks in the \textit{ZoneEnv} environment. In \cref{tab:infinite} we furthermore compare the performance of our approach on recurrence, i.e.\ $\always\event$, tasks (see \cref{app:specifications} for details) to GCRL-LTL, the only previous approach that can handle infinite-horizon specifications. We report the average number of visits to accepting states per episode, which corresponds to the number of completed cycles of target propositions (e.g.\ the number of times both $\mathsf{blue}$ and $\mathsf{green}$ have been visited for the specification $\always\allowbreak\event\allowbreak\mathsf{blue}\allowbreak\land\allowbreak\always\allowbreak\event\allowbreak\mathsf{green}$). Additional results on $\event\always$ tasks can be found in \cref{app:event_always}. Our evaluation confirms that DeepLTL can successfully handle $\omega$-regular tasks, and significantly outperforms the only relevant baseline.
+
+\paragraph{Further experimental results.}
+We provide further experimental results in \cref{app:further_results}, investigating safety requirements, generalisation to longer sequences, and the impact of curriculum learning.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.44\textwidth}
+        \centering
+        \begin{subfigure}{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/trajectories/omega.pdf}
+            \caption{$\always\event\mathsf{blue}\land\always\event\mathsf{green}$}
+        \end{subfigure}
+        \begin{subfigure}{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/trajectories/reachstay.pdf}
+            \caption{$\event\always\mathsf{blue}$}
+        \end{subfigure}
+    \end{subfigure}
+    \hspace{.5cm}
+    \begin{subfigure}{0.4\textwidth}
+        \centering
+        \adjustbox{valign=b}{
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{@{}llrr@{}}
+        \toprule
+        &  & GCRL-LTL & DeepLTL  \\ \midrule
+        
+    \multirow{2}{*}{LetterWorld}& $\psi_{1}$ & 6.74$_{\pm1.96 }$ & \textbf{17.84}$_{\pm0.67 }$  \\
+    & $\psi_{2}$  & 1.49$_{\pm0.31 }$ & \textbf{3.05}$_{\pm0.47 }$\\
+    \midrule
+    \multirow{2}{*}{ZoneEnv}& $\psi_{3}$ & 3.14$_{\pm0.18 }$ & \textbf{4.16}$_{\pm0.61 }$ \\
+    & $\psi_{4}$ & 1.31$_{\pm0.05 }$ & \textbf{1.71}$_{\pm0.23 }$ \\\midrule
+    \multirow{2}{*}{FlatWorld}& $\psi_{5}$ & 7.20$_{\pm4.08 }$ & \textbf{12.12}$_{\pm0.80 }$ \\
+    & $\psi_{6}$ & 4.64$_{\pm0.25 }$ & \textbf{6.98}$_{\pm1.00 }$ \\ 
+    \bottomrule
+                    \end{tabular}
+                    }}
+    \caption{}
+    \label{tab:infinite}
+    \end{subfigure}
+    \caption{Results on infinite-horizon tasks. (a), (b) Example trajectories for infinite-horizon specifications. (c) Performance on various recurrence tasks. We report the average number of visits to accepting states over 500 episodes (i.e.\ completed cycles), with standard deviations over 5 seeds.}
+    \label{fig:infinite_results}
+\end{figure}
+    
+
+    
+
+
+
+\section{Related work}
+
+
+RL with tasks expressed in LTL has received significant attention in the last few years~\citep{sadigh2014learning,degiacomo2018Reinforcement,camacho2019LTL}. Our approach builds on previous works that use LDBAs to augment the state space of the MDP~\citep{hasanbeig2018LogicallyConstrained,cai2021Modular,voloshin2022Policy,  hasanbeig2023Certified,bagatella2024Directed,shah2024LTLConstrained}. However, these methods are limited to finding policies for a \textit{single} specification and cannot deal with multiple different tasks.
+Among the works that consider multiple, previously unseen specifications, many approaches decompose a given task into subtasks, which are then individually completed~\citep{araki2021Logical,leon2021Systematic,leon2022Nutshell,liu2024Skill}. However, as noted by \citet{vaezipoor2021LTL2Action} this results in \textit{myopic} behaviour and hence potentially suboptimal solutions. In contrast, our approach takes the entire specification into account by reasoning over temporally extended reach-avoid sequences. \citet{kuo2020Encoding} instead propose to compose RNNs in a way that mirrors formula structure, which however requires learning a non-stationary policy. This is addressed by LTL2Action~\citep{vaezipoor2021LTL2Action}, which encodes the syntax tree of a target specification using a GNN and uses \textit{LTL progression}~\citep{bacchus2000Using} to make the problem Markovian. We instead extract reach-avoid sequences from B\"uchi automata, which directly encode the possible ways of satisfying the given specification. Furthermore, due to its reliance on LTL progression, LTL2Action is restricted to the finite-horizon fragment of LTL, whereas our approach is able to handle infinite-horizon tasks.
+
+The only previous method we are aware of that can deal with infinite-horizon specifications is GCRL-LTL~\citep{qiu2023Instructing}. However, similar to other approaches, GCRL-LTL relies on composing policies for sub-tasks and therefore produces suboptimal behaviour. Furthermore, the approach only considers safety constraints during task execution and not during high-level planning. Recently, \citet{xu2024Generalizationa} proposed \textit{future dependent options} for satisfying arbitrary LTL tasks, which are option policies that depend on propositions to be achieved in the future. While sharing some similarities with our approach, their method is only applicable to a fragment of LTL that does not support conjunction nor infinite-horizon specifications, and does not consider safety constraints during planning.
+    
+
+
+
+\section{Conclusion}
+
+We have introduced \textit{DeepLTL}, a novel approach to the problem of learning policies that can zero-shot execute arbitrary LTL specifications. Our method represents a given specification as a set of reach-avoid sequences of truth assignments, and exploits a general sequence-conditioned policy to execute arbitrary LTL instructions at test time. In contrast to existing techniques, our method can handle infinite-horizon specifications, is non-myopic, and naturally considers safety constraints. Through extensive experiments, we have demonstrated the effectiveness of our approach in practice.
+
+In future work, we plan on improving sample efficiency by incorporating ideas such as counterfactual experience~\citep{toroicarte2022Reward,voloshin2023Eventual} and automated reward shaping~\citep{bagatella2024Directed,shah2024LTLConstrained}. We also plan on investigating more involved neural network architectures, e.g.\ based on attention, along the lines of \citet{leon2022Nutshell}.
+
+\newpage
+
+
+
+

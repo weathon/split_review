@@ -1,0 +1,334 @@
+\title{Coordinate In and Value Out: Training Flow Transformers in Ambient Space}
+
+\begin{abstract}
+Flow matching models have emerged as a powerful method for generative modeling on domains like images or videos, and even on unstructured data like 3D point clouds. These models are commonly trained in two stages: first, a data compressor (\ie a variational auto-encoder) is trained, and in a subsequent training stage a flow matching generative model is trained in the low-dimensional latent space of the data compressor. This two stage paradigm adds complexity to the overall training recipe and sets obstacles for unifying models across data domains, as specific data compressors are used for different data modalities. To this end, we introduce \textbf{Ambient Space Flow Transformers} (\model), a domain-agnostic approach to learn flow matching transformers in ambient space, sidestepping the requirement of training compressors and simplifying the training process. We introduce a conditionally independent point-wise training objective that enables {\model} to make predictions continuously in coordinate space. Our empirical results demonstrate that using general purpose transformer blocks, {\model} effectively handles different data modalities such as images and 3D point clouds, achieving strong performance in both domains and outperforming comparable approaches. {\model} is a promising step towards domain-agnostic flow matching generative models that can be trivially adopted in different data domains. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent advances in generative modeling have enabled learning complex data distributions by combining both powerful architectures and training objectives. In particular, state-of-the-art approaches for image ~\citep{sd3}, video \citep{emu} or 3D point cloud ~\citep{lion} generation are based on the concept of iteratively transforming data into Gaussian noise. Diffusion models were originally proposed following this idea and pushing the quality of generated samples in many different domains, including images \citep{emu,ldm}, 3D point clouds \citep{ddpm_pointcloud}, graphs \citep{molecules} and video \citep{ddpm_video}. More recently, flow matching \citep{lipman2023flow} and stochastic interpolants \citep{sit} have been proposed as generalized formulations of the noising process, moving from stochastic gaussian diffusion processes to general paths connecting a base (\eg Gaussian) and a target (\eg data) distribution. 
+
+In practice, these iterative refinement approaches are commonly applied in a low-dimensional \textit{latent space} obtained from a pre-trained compressor model. Therefore, the training process for these approaches is composed of two independent training stages: in the first stage, a compressor (\eg VAE \citep{lion}, VQVAE \citep{ramesh2022dalle2}, VQGAN \citep{ldm}) model is trained, using architectures that are specific to the data domain (\ie ConvNets for image data \citep{ldm}, PointNet for point clouds \citep{lion}, etc. ) enforcing a bottleneck on the data dimensionality, with the goal of reducing compute cost of training the subsequent stage. In the second stage, general purpose transformer architectures are used for the generative modeling step \citep{peebles2023scalable, sit, sd3}, where the distribution of latents is learnt. This type of generative modeling in latent space has become popular in the community due to its computational efficiency benefits obtained from compressed data dimensionality. 
+
+However, latent space generative modeling is not without drawbacks. An obvious shortcoming is that latent space generative models cannot benefit from end-to-end optimization, as data compressors and the downstream generative models are trained separately. In particular, two stage approaches are more complex to implement than single stage models and involve tuning several hyper-parameters that can have a big impact on final performance \citep{ldm}: spatial reduction ratio, adversarial loss weights or KL terms in VAEs \citep{ldm} . As an illustrative example, setting a high KL weight makes the problem of learning a distribution of latents trivial, yet results in very poor generation results. A very small KL weight on the other hand allows for great reconstruction performance for the first stage but fails to induce a suitable latent space for generative modeling (\eg a dirac delta for each training sample in latent space). Our goal in this paper is to provide a single training stage approach that is domain-agnostic and simple to implement in practice, thus dispensing with the complexities of two stage training recipes and enabling modeling of different data modalities in ambient (\ie data) space.
+
+It is worth noting that training diffusion or flow matching models in ambient space is indeed possible when using domain specific architecture designs and training recipes. In the image domain, approaches have exploited its dense nature and applied cascaded U-Nets \cite{ho2021cascaded, ho2022cascaded}, joint training of U-Nets at multiple resolutions \cite{gu2023matryoshka}, multi-scale losses \citep{hoogeboom2023simple} or U-Net transformer hybrids architectures \citep{hdit}, obtaining strong results. However, developing strong domain-agnostic models, using general purposes architectures that can be applied across different data domains remains an important open problem.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Fig_1_arxiv.png}
+    \caption{(a) High level overview of {\model} using the image domain as an example. Our model can be interpreted as an encoder-decoder model where the decoder makes predictions independently for each coordinate-value pair given $\vz_{f_t}$. For 3D point clouds, the coordinate and value are equivalent and their dimensions change, but the model is the same. (b) Images generated by {\model} trained on ImageNet-256 and (c) 3D point clouds ($32k$ points) generated by training {\model} on Objaverse.}
+    \label{fig:intro}
+\end{figure}
+In this paper, we answer a three part question: \textit{Can we learn flow matching models in \textbf{ambient space}, in a \textbf{single training stage} and using a \textbf{domain agnostic} architecture?} Our goal is to unify different data domains under the same training recipe. To achieve this, we introduce Ambient Space Flow Transformers {(\model)}, see Fig. \ref{fig:intro}(a). {\model} makes progress towards the goal of unifying flow matching generative modeling across data domains. The key component of our approach is a conditionally independent point-wise training objective that enables training in ambient space and can be densely (\eg continuously) evaluated during inference. In the image domain, this means that we model the probability of a pixel value given its coordinate, which provides granular and precise control over image synthesis, allowing to generate images at different resolution than the one used during training (see Fig. \ref{fig:super_res}(a)). We show ImageNet-256 generated samples from {\model} in Fig. \ref{fig:intro}(b) and 3D point clouds from Objaverse in Fig. \ref{fig:intro}(c) (see additional samples in Fig.~\ref{fig:imagenet_samples1}, \ref{fig:imagenet_samples2}, \ref{fig:app_shapenet_1}, \ref{fig:objaverse1}, \ref{fig:objaverse2}). Our contributions are summarized as follows:
+
+\begin{itemize}
+    \item We propose {\model}, a flow matching generative transformer that works on ambient space to enable single stage generative modeling on different data domains. 
+    \item Our results show that {\model}, though domain-agnostic, achieves competitive performance on image and 3D point cloud generation compared with strong domain-specific baselines. 
+    \item Our point-wise training objective allows for efficient training via sub-sampling dense domains like images while also enabling resolution changes at inference time.
+\end{itemize}
+
+
+\section{Related Work}
+
+
+
+Diffusion models have been the major catalyzer of progress in generative modeling, these approaches learn to reverse a forward process that gradually adds Gaussian noise to corrupt data samples \citep{ddpm}. Diffusion models are notable for their simple and robust training objective. Extensive research has explored various formulations of the forward and backward processes \citep{ddim, heat_ddpm, cold_diffusion}, particularly in the image domain. In addition, different denoising networks have been proposed for different data domains like images \citep{improved_ddpm}, videos \citep{ddpm_video}, and geometric data \citep{ddpm_pointcloud}.  More recently, flow matching \citep{liu2022flow, lipman2023flow} and stochastic interpolants \citep{sit} have emerged as flexible formulations that generalized Gaussian diffusion paths, allowing to define different paths to connect a base and a target distribution. These types of models have shown incredible results in the image domain \citep{sit, sd3} when coupled with transformer architectures \citep{transformers} to model distributions in latent space learnt by data compressors \citep{peebles2023scalable, sit, ldm, lion, maskdit, mdt}. Note that these approaches train two separate stages/models: first training the data compressor (\eg VAE \citep{lion}, VQVAE \citep{ramesh2022dalle2}, VQGAN \citep{ldm}) and then the generative model, requiring careful hyper-parameter tuning.
+In an attempt to unify generative modeling across various data domains, continuous data representations\footnote{These are also often referred to as \textit{implicit neural representation}, \textit{neural maps} or \textit{neural operators}} have shown potential in different approaches: From Data to Functa (Functa) \citep{functa}, Generative Manifold Learning (GEM) \citep{gem}, and Generative Adversarial Stochastic Process (GASP) \citep{gasp} have studied the problem of generating continuous representations of data. More recently Infinite Diffusion \citep{infdiff} and PolyINR \citep{polyinr} have shown great results in the image domain by modeling images as continuous functions. However, both of these approaches make strong assumptions about image data. In particular, \citep{infdiff} interpolates sparse pixels to an euclidean grid to then process it with a U-Net. On the other hand, \citep{polyinr} uses a patching and 2D convolution in the discriminator. Our approach also relates to DPF \cite{dpf}, a diffusion model that acts on function coordinates and can be applied in different data domains on a grid at low resolutions (\ie 64$\times$64). Our approach  is able to deal with higher resolution functions (\eg 256x256 vs. 64x64 resolution images) on large scale datasets like ImageNet, while also tackling unstructured data domains that do not live on an Euclidean grid (\eg like 3D point clouds).
+
+
+\section{Method}
+
+\label{sect:method}
+\subsection{Data as Coordinate $\rightarrow$ Value Maps}
+
+We interpret our empirical data distribution $q$ to be composed of maps $f \sim q(f)$. These maps take \textit{coordinates} $\vx$ as input  to \textit{values} $\vy$ as output. For images, maps are defined from 2D pixel coordinates $ \vx \in \mathbb{R}^2$ to corresponding RGB values $\vy \in \mathbb{R}^3$, thus $f: \mathbb{R}^2 \rightarrow \mathbb{R}^3$, where each image is a different map. For 3D point clouds, $f$ can be interpreted as a deformation that maps coordinates from a fixed base configuration in 3D space to a deformation value also in 3D space, $f: \mathbb{R}^3 \rightarrow \mathbb{R}^3$, as in the image case, each 3D point cloud corresponds to a different deformation map $f$. For ease of notation, we define coordinates $\vx$ and values $\vy$ of any given map $f$ as $\vx_f$ and $\vy_f$, respectively. Fig. \ref{fig:intro}(a) shows an example of such maps in the image domain.
+
+In practice, analytical forms for these maps $f$ are unknown. In addition, different from previous approaches \citep{functa, gem}, we do not assume that parametric forms of these maps can be obtained, since that would involve a separate training stage fitting an MLP to each map \citep{functa, spatialfuncta, gem}. As a result, we assume we are only given sets of corresponding \textit{coordinate} and \textit{value} pairs resulting from observing these maps at a particular sampling rate (\eg at a particular resolution in the image case). Therefore, we need a to develop an end-to-end approach that can take these collections of coordinate-value sets as training data.
+
+\subsection{Flow Matching and Stochastic Interpolants}
+We consider generative models that learn to reverse a time-dependent forward process that turns data samples (\ie maps $f$ in our case) $f \sim q(f)$ into noise $\epsilon \sim \mathcal{N}(0, \rmI)$. 
+
+\begin{equation}
+    \label{eq:time_depedent_process}
+    f_t = \alpha_t f + \sigma_t \epsilon
+\end{equation}
+
+Both flow matching \citep{lipman2023flow} and stochastic interpolant \citep{sit} formulations build this forward process in Eq. \ref{eq:time_depedent_process} so that it interpolates exactly between data samples $f$ at time $t=0$ and $\epsilon$ at time $t=1$, with $t \in [0, 1]$. In particular, $p_1(f) \sim \mathcal{N}(0, \rmI)$ and $p_0(f) \approx q(f)$. In this case, the marginal probability distribution $p_t(f)$ of $f$ is equivalent to the distribution of the probability flow ODE with the following velocity field \citep{sit}: 
+
+\begin{equation}
+    \label{eq:prob_flow}
+    d_t{f_t} = \vu_t(f_t) d_t
+\end{equation}
+
+where the velocity field is given by the following conditional expectation, 
+
+\begin{equation}
+    \vu_t(f) = \mathbb{E}[d_t{f_t} | f_t = f]= d_t \alpha_t \mathbb{E}[f_0 | f_t = f ] + d_t \sigma_t \mathbb{E}[\epsilon | f_t = f].
+\end{equation}
+
+Under this formulation, samples $f_0 \sim p_0(f)$ are generated by solving the probability flow ODE in Eq. \ref{eq:prob_flow} backwards in time (\eg. flowing from $t=1$ to $t=0$), where $p_0(f) \approx q(f)$. Note that both the flow matching \citep{lipman2023flow} and stochastic interpolant \citep{sit} formulations decouple the time-dependent process formulation from the specific choice of parameters $\alpha_t$ and $\sigma_t$, allowing for more flexibility. Throughout the presentation of our method we will assume a rectified flow \citep{liu2022flow,lipman2023flow} or linear interpolant path \citep{sit} between noise and data, which define a straight path to connect data and noise: $f_t =(1 - t) f_0 + t \epsilon$. Note that our framework for learning flow matching models for coordinate-value sets can be used with any path definition. Compared with diffusion models~\citep{ddpm}, linear flow matching objectives result in better training stability and more modeling flexibility~\citep{sit,sd3} which we observed in our early experiments. 
+
+\subsection{Flow Matching for Coordinate-Value Sets}
+We now turn to the task of formulating a flow matching training objective for data distributions of maps $f$. We recall that in practice we do not have access to an analytical or parametric form for these maps $f$, and we are only given sets of corresponding \textit{coordinate} $\vx_f$ and \textit{value} $\vy_f$ pairs resulting from observing the mapping at a particular rate. As a result, we need to formulate a training objective that can take these sets of coordinate-value as training data.
+
+In order to achieve this, we first observe that the target velocity field $\vu_t(f_t) d_t$ can be decomposed across both the domain and co-domain of $f_t$, resulting in  a \textit{point-wise velocity field} $\vu_t(\vx_{f_t}, \vy_{f_t}) d_t$, defined for corresponding coordinate and value pairs of $f_t$. As an illustrative example in the image domain, this means that the \textit{target velocity field can be independently evaluated} for any pixel coordinate $\vx_{f_t}$ with corresponding value $\vy_{f_t}$, so that $\vu_t(\vx_{f_t}, \vy_{f_t}) \in \mathbb{R}^3$. Note that one can always decompose target velocity fields in this way since the time-dependent forward process in Eq. \ref{eq:time_depedent_process} aggregates data and noise \textit{independently} (\eg point-wise) across the domain of $f$. Again, using the image domain as an example, the time-dependent forward process of a pixel at coordinate $\vx_f$ is not dependent on other pixel positions or values.
+
+Our goal now is to formulate a training objective to match this point-wise independent velocity field. We want our neural network $\vv_\theta$  parametrizing the velocity field to be able to independently predict a velocity for any given coordinate and value pair $\vx_{f_t}$ and $\vy_{f_t}$. However, this point-wise independent prediction is futile without access to additional contextual conditioning information about the underlying function $f_t$ at time $t$. This is because even if the forward process is point-wise independent, real data exhibits strong dependencies across the domain $f$ that need to be captured by the model. For example, in the image domain, pixels are not independent from each other and natural images show strong both short and long spatial dependencies across pixels. In order to solve this, we introduce a latent variable $\vz_{f_t}$ that encodes contextual information from a set of given coordinate and value pairs of $f_t$. This contextual latent variable allows us to formulate the learnt velocity field to be \textit{conditionally independent} for coordinate-value pairs given $\vz_{f_t}$. The final point-wise conditionally independent CFM loss, which we denote as CICFM loss is defined as:
+\begin{equation}
+L_{\text{CICFM}} = \mathbb{E}_{t \sim \mathcal{U}[0, 1], f \sim q(f), \epsilon \sim \mathcal{N}(0, \rmI)} || \vv_{\theta}(\vx_{f_t}, \vy_{f_t}, t | \vz_{f_t})  - \vu_t(\vx_f, \vy_f | \epsilon) ||_{2}^{2},
+\end{equation}
+
+where the target velocity field $\vu_t(\vx, \vy | \epsilon)$ is defined as a rectified flow \citep{liu2022flow,lipman2023flow} or linear interpolant path \citep{sit}:
+
+\begin{equation}
+    \vu_t(\vx_f, \vy_f | \epsilon)  = (1 - t) \epsilon + t \vy_f.
+\end{equation}
+
+One of the core challenges of learning this type of generative models is obtaining a latent variable $\vz_{f_t}$ that effectively captures intricate dependencies across the domain of the function, specially for high resolution stimuli like images. In particular, the architectural design decisions are extremely important to ensure that $\vz_{f_t}$ does not become a bottleneck during training. In the following we review our proposed architecture.  
+\subsection{Network Architecture}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Fig_2_pipeline_rebuttal.jpg}
+    \caption{Architecture of our proposed {\model} for different data domains including images and 3D point clouds. Note that models are trained for each data domain separately. Each spatial aware latent takes in a subset of neighboring context coordinate-value sets in coordinate space. The latents are then updated through self-attention. Decoded coordinate-value pairs cross attend to the updated latents $\vz_{f_t}$ to decode the corresponding velocity.}
+    \label{fig:pipeline}
+\end{figure}
+
+We base our model on the general PerceiverIO design \citep{perceiverio} which provides a flexible architecture to handle coordinate-value sets of large cardinality (\ie large number of pixels in an image). Fig.~\ref{fig:pipeline} illustrates the architectural pipeline of {\model}. At a high level, our encoder network takes a set of coordinate-value pairs and encodes them to learnable latents through cross-attention. These latents are then updated through several self-attention blocks to provide the final latents $\vz_{f_t} \in \mathbb{R}^{L \times D}$ . To decode the velocity field for a given coordinate-value pair we perform cross attention to $\vz_{f_t}$, generating the final point-wise prediction for the velocity field $\vv_{\theta}(\vx_{f_t}, \vy_{f_t}, t | \vz_{f_t})$.
+
+The encoder of a vanilla PerceiverIO relies solely on cross-attention to the latents {$z_{f_t} \in \mathbb{R}^{L \times D}$}  to learn spatial connectivity patterns between input and output elements, which we found to introduce a strong bottleneck during training. To ameliorate this, we make two key modifications to boost the performance. Firstly, our encoder utilizes spatial aware latents where each latent is assigned a ``pseudo'' coordinate. Coordinate-value pairs are assigned to different latents based on their distances on coordinate space. During encoding, coordinate-value pairs interact with their assigned latents through cross-attention. In particular, the learnable latent $z_{f_t}$ cross-attends to input coordinate-value pairs of noisy data at a given timestep $t$. Latent vectors are spatial-aware, this means that each of the $L$ latents only attends to a set of neighboring coordinate-value pairs. Latent vectors are then updated using several self-attention blocks. These changes in the encoder allow the model to effectively utilize spatial information while also saving compute when encoding large coordinate-value sets on ambient space.  In the decoder, a given coordinate-value pair cross attends to $\vz_{f_t}$ as in the original PerceiverIO. However, we found that a multi-level decoding strategy, which not only cross attends to the latents in the final layer but also the latent from the intermediate self-attentions layer is helpful. In particular, a given coordinate-value pair cross attends to latents from subsequent encoder layers sequentially to progressively refine the prediction. Finally, following previous work~\citep{peebles2023scalable, sit}, we apply AdaLN-Zero blocks for conditioning both on timestep $t$ and class labels whenever needed (\eg for ImageNet experiments). More architectural details can be found in App. \ref{app:config}.
+
+
+\section{Experiments}
+
+
+We evaluate {\model} on two challenging problems: image generation  (FFHQ-256 \citep{ffhq}, LSUN-Church-256 \citep{yu2015lsun}, ImageNet-128/256 \citep{russakovsky2015imagenet}) and 3D point cloud generation (ShapeNet \citep{shapenet} and Objaverse \citep{deitke2023objaverse}). Note that we use the same training recipe both tasks, adapted for changes in coordinate-value pair dimensions in different domains. See App. \ref{app:config} for more implementation details and training settings.
+
+
+{\model} enables practitioners to define the number of coordinate-value pairs to be decoded during training. In our experiments, we set the number of decoded coordinate-value pairs to 4096 for images with resolution 128$\times$128, 8192 for images with resolution 256$\times$256, and 2048 for point clouds unless mentioned otherwise. On image generation, we train models with small (S), base (B), large (L), and extra large (XL) sizes. For 3D point cloud generation we set the parameter count to match the model size in previous state-of-the-art approaches (\ie LION \citep{lion}). During inference, we adopt black-box numerical ODE solver with maximal NFE as 100 for image generation~\citep{song2020score} and an SDE sampler with 1000 steps for point cloud generation to match the settings in \citep{lion}. 
+
+\subsection{Image Generation in Function Space}
+Given that {\model} is a generative model for maps we compare it with other generative models of the same type, namely approaches that operate in function spaces. Tab.~\ref{tab:dataset-fids} shows a comparison of different image domain specific as well as function space models (\eg approaches that model infinite-dimensional signals). {\model} surpasses other generative models in function space on both FFHQ \citep{ffhq} and LSUN-Church \citep{yu2015lsun} at resolution $256 \times 256$. Compared with generative models designed specifically for images, {\model} also achieves comparable or better performance. When scaling up the model size, {\model}-L demonstrates better performance than all the baselines on FFHQ-256 and Church-256, indicating that {\model} can benefit from increasing model sizes.
+\begin{table}[t]
+\scriptsize
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+        Model   & \textbf{FFHQ-256} & \textbf{Church-256} \\
+        \midrule
+        \textit{Domain specific models} & \\ 
+        CIPS \citep{anokhin2021image} & 5.29 & 10.80 \\
+        StyleSwin \citep{zhang2022styleswin}  & 3.25 & 8.28 \\
+        UT \citep{bond2022unleashing}      & 3.05 & 5.52 \\
+        StyleGAN2 \citep{karras2020analyzing}  & 2.35 & 6.21 \\ 
+        \midrule
+        \textit{Function space models} & \\ 
+        GEM \citep{du2021learning}  & 35.62 & 87.57  \\ 
+        GASP \citep{dupont2022generative}    & 24.37 & 37.46 \\ 
+        $\infty$-Diff \citep{infdiff}   & 3.87 & 10.36 \\
+        \textbf{\model}-B (ours) & 2.46 & 7.11 \\
+        \textbf{\model}-L (ours) & \textbf{2.18} & \textbf{5.51} \\
+        \bottomrule
+    \end{tabular}
+    \caption{$\text{FID}_{\text{CLIP}}$ \citep{kynkaanniemi2023role} results for state-of-the-art function space approaches.}
+    \label{tab:dataset-fids}
+\end{table}
+\subsection{ImageNet}
+
+We also evaluate the performance of {\model} on large scale and challenging settings, we train {\model} on ImageNet at both 128$\times$128 and 256$\times$256 resolutions. On ImageNet-128, shown in Tab. \ref{tab:FID-imagenet128}, {\model} achieves an FID of $2.73$, which is a a competitive performance in comparison to diffusion or flow-based generative baselines including ADM~\citep{dhariwal2021diffusion}, CDM~\citep{ho2021cascaded}, and RIN~\citep{jabri2023scalable} which use domain-specific architectures for image generation. Besides, comparing to PolyINR~\citep{polyinr} which also operates on function space, {\model} achieves competitive FID, while obtaining better IS, precision and recall. The experimental results demonstrate the capabilities of  {\model} in generating realistic samples on large scale datasets.
+
+We report results of {\model} for ImageNet-256 on Tab. \ref{tab:FID-imagenet256}. Note that {\model} is slightly outperformed by latent space models like DiT \citep{peebles2023scalable} and SiT \citep{sit}. We highlight that these baselines rely on a pre-trained VAE compressor that was trained on datasets that are much larger than ImageNet, while {\model} was trained only with ImageNet data. In addition, {\model} achieves better performance than many of the baselines trained only with ImageNet data including  ADM \citep{dhariwal2021diffusion}, CDM \citep{ho2021cascaded} and Simple Diffusion (U-Net) \citep{hoogeboom2023simple} which all use CNN-based architectures specific for image generation. Note that this is consistent with the results show in Tab. \ref{tab:dataset-fids}, where {\model} outperforms all function space approaches. When comparing with approaches using transformers architectures we find that {\model} obtains performance comparable to RIN \citep{jabri2022scalable} and HDiT \citep{hdit}, with slightly worse FID and slightly better IS. However, {\model} is a domain-agnostic architecture that can be trivially applied to different data domains like 3D point clouds (see Sect. \ref{sect:shapenet_exp} and \ref{sect:objaverse_exp}). For completeness, we also include a comparison with very large U-Net transformer hybrid models, Simple Diffusion (U-ViT 2B) and VDM++ (U-ViT 2B) which both use approx. $\times 2.72$ more parameters than {\model}-XL, unsurprisingly, these much bigger capacity models outperform {\model} (see App. \ref{app:config} for a more detailed comparison including training settings).  We highlight that the simplicity of implementing and training {\model} models in practice, and the trivial extension to different data domains (as shown in Sect. \ref{sect:shapenet_exp}) are strong arguments favouring our model. Finally, comparing with \eg PolyINR~\citep{polyinr} which is also a function space generative model we also find comparable performance, with slight worse FID but better Precision and Recall. It is worth noting that \citep{polyinr} applies a pre-trained DeiT model as the discriminator \citep{polyinr}. Whereas our {\model} makes no such assumption about the function or pre-trained models, enabling to trivially apply {\model} to other domains like 3D point clouds (see Sect. \ref{sect:shapenet_exp}).
+
+To demonstrate the scalability of {\model} we train models of different sizes including small (S), base (B), large (L), and extra-large (XL) on ImageNet-256. We show the performance of different model sizes using FID-50K in Fig.~\ref{fig:fid_ablation}(a). We observe a clear improving trend when increasing the number of parameters as well as increasing training steps. This demonstrates that scaling the total training Gflops is important to improved generative results as in other ViT-based generative models~\citep{peebles2023scalable, sit}. Due to the flexibility of cross-attention decoder in {\model}, one can easily conduct random sub-sampling to reduce the number of decoded coordinate-value pairs during training which significantly saves computation. Fig.~\ref{fig:fid_ablation}(b) shows how number of decoded coordinate-value pairs affects the model performance as well as Gflops in training. An image of resolution 256$\times$256 contains 65536 pixels in total which is the maximal number of coordinate-value pairs during training. As see in Fig. \ref{fig:fid_ablation}(b), a model decoding 4096 coordinate-value pairs saves more than 20\% Gflops over one decoding 16384.  This provides us with an effective training recipe, which  saves computation by only decoding a subset of $12\%$ of the image pixels during training. Interestingly, we see a performance drop when densely decoding 16384 coordinate value pairs. We hypothesize this could be due to optimization challenges of decoding large numbers of pairs and leave further analysis for future work.
+
+\begin{table}[t]
+\scriptsize
+\begin{center}
+\resizebox{0.85\textwidth}{!}{
+\begin{tabular}{lcccc}
+    \toprule
+    \multicolumn{5}{l}{\textbf{Class-Conditional ImageNet 128x128}} \\
+    \toprule
+    Model  & FID$\downarrow$  & IS$\uparrow$ & Precision$\uparrow$ & Recall$\uparrow$ \\
+    \midrule
+    \textit{Adversarial models} & & & & \\
+    BigGAN-deep~\citep{brock2019large} & 6.02  & 145.8 & \textbf{0.86} & 0.35 \\
+    PolyINR~\citep{polyinr} & \textbf{2.08 } & 179.0 & 0.70 & 0.45 \\
+    \midrule
+    \textit{Diffusion models} & & & & \\
+    CDM (w/ cfg)~\citep{ho2021cascaded} & 3.52 & 128.0 & - & - \\
+    ADM (w/ cfg)~\citep{dhariwal2021diffusion} & 2.97  & 141.3 & 0.78 & \textbf{0.59 }\\
+    RIN~\citep{jabri2023scalable} & 2.75  & 144.0 & - & - \\
+    \midrule
+    \textbf{\model}-XL (ours) (cfg=1.5)  & 2.73  & \textbf{187.6} & 0.80 & 0.58 \\
+    \bottomrule
+    \end{tabular}
+}
+\end{center}
+\caption{Benchmarking class-conditional image generation on ImageNet 128x128.}
+\label{tab:FID-imagenet128}
+\end{table}
+
+\begin{table}[t]
+\scriptsize
+\begin{center}
+\resizebox{0.85\textwidth}{!}{
+\begin{tabular}{lcccc}
+    \toprule
+    \multicolumn{5}{l}{\textbf{Class-Conditional ImageNet 256x256}} \\
+    \midrule
+    Model & FID$\downarrow$  & IS$\uparrow$ & Precision$\uparrow$ & Recall$\uparrow$ \\
+    \midrule
+    \textit{Adversarial models} &  & & & \\
+    BigGAN-deep~\citep{brock2019large} & 6.95 & 171.4 & \textbf{0.87} & 0.28 \\
+    PolyINR~\citep{polyinr} & 2.86  &  241.4 & 0.71 & 0.39\\
+    \midrule
+    \textit{Latent space with pretrained VAE} & & & & \\
+    DiT-XL (cfg=1.5)~\citep{peebles2023scalable} & 2.27  & \textbf{278.2} & 0.83 & 0.57 \\
+    SiT-XL (cfg=1.5, SDE)~\citep{sit} & \textbf{2.06} &  270.2 & 0.82 & 0.59\\
+
+    \midrule
+    \textit{Ambient space} & & & & \\
+
+    ADM~\citep{dhariwal2021diffusion} & 10.94 & 100.9 & 0.69 & \textbf{0.63} \\
+    CDM~\citep{ho2021cascaded} & 4.88 & 158.7 & - & - \\
+    Simple Diff. (U-Net)~\citep{hoogeboom2023simple} & 3.76 & 171.6 & - & -\\
+    RIN~\citep{jabri2023scalable} & 3.42  & 182.0 & - & - \\
+    HDiT (cfg=1.3)~\citep{hdit} & 3.21  & 220.6 & - & - \\
+    Simple Diff. (U-ViT)~\cite{hoogeboom2023simple} & 2.77  & 211.8 & - & - \\
+    VDM++ (U-ViT)~~\citep{kingma2023understanding} & 2.12  & 267.7 & - & -\\
+
+    \midrule
+    \textbf{\model}-XL (ours) (cfg=1.5) & 3.74  & 228.8 & 0.82 & 0.52 \\
+    \bottomrule
+    \end{tabular}
+}
+\end{center}
+\caption{Top performing models for class-conditional image generation on ImageNet 256x256.}
+\label{tab:FID-imagenet256}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\setlength{\tabcolsep}{1pt}
+    \begin{tabular}{cc}
+    \centering
+    \includegraphics[width=0.47\textwidth]{figures/fid_vs_steps.png} & \includegraphics[width=0.47\textwidth]{figures/fid_vs_nquery.png} \\
+    (a) & (b)
+    \end{tabular}
+    \caption{(a) FID-50K over training iterations with different model sizes, where we see clear benefits of scaling up model sizes. (b) FID-50K over training iterations with different number of decoded coordinate-value pairs during training and the corresponding compute cost for a single forward pass. }
+    \label{fig:fid_ablation}
+\end{figure}
+
+\subsection{ShapeNet}
+\label{sect:shapenet_exp}
+
+To show the domain-agnostic prowess of {\model} we also tackle 3D point cloud generation on ShapeNet \citep{shapenet}. Note that our model does not require training separate VAEs for point clouds, tuning their corresponding hyper-parameters or designing domain specific networks. We simply adapt our architecture for the change in dimensionality of coordinate-value pairs (\eg $f: \mathbb{R}^2 \rightarrow \mathbb{R}^3$ for images to $f: \mathbb{R}^3 \rightarrow \mathbb{R}^3$ for 3D point clouds.). Note that for 3D point clouds, the coordinates and values are equivalent. In this setting, we compare baselines including LION \citep{lion} which is a recent state-of-the-art approach that models 3D point clouds using a latent diffusion type of approach. Following \cite{lion} we report MMD, COV and 1-NNA as metrics. To have a straightforward comparison with baselines, we train {\model}-B with to approximately match the number of parameters as LION~\citep{lion} (110M for LION vs 108M for {\model}) on the same datasets (using per sample normalization as in Tab. 17 in \cite{lion}). We show results for category specific models and for an unconditional model jointly trained on 55 ShapeNet categories in Tab.~\ref{tab:gen_v1_individual_norm_full}. {\model}-B obtains strong generation results on ShapeNet despite being a domain agnostic approach and outperforms LION in most datasets and metrics. Note that {\model}-B has comparable number of parameters and the same inference settings than LION so this is fair comparison. Finally, we also report results for a larger model {\model}-L (with $\times 2$ the parameter count as LION) to investigate how {\model} improves as with increasing model size. We observe that with increasing model size, {\model} typically achieves better performance than the base version. This further demonstrates scalability of our model on ambient space of different data domains. 
+
+\begin{table}[h]                                
+\centering  \scriptsize                            
+\setlength{\tabcolsep}{6pt}                     
+\begin{tabular}{cccccccc}                       
+                                                
+\toprule                                        
+                                                &                                                &\multicolumn{2}{c}{MMD$\downarrow$}&\multicolumn{2}{c}{COV$\uparrow$ (\%)}&\multicolumn{2}{c}{1-NNA$\downarrow$ (\%)}              \\  \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
+Category                                        &Model                                           &CD                  &EMD                 &CD                  &EMD                 &CD                  &EMD           \\  \midrule
+
+                                                &ShapeGF~\citep{cai2020eccv}                     &0.3130     &0.6365     & \textbf{45.19}      &40.25               &81.23               &80.86             \\             
+                                                &SP-GAN~\citep{li2021spgan}                       &0.4035              &0.7658              &26.42               &24.44               &94.69               &93.95             \\     
+Airplane                                               &GCA~\citep{zhang2021learning}  &0.3586 &0.7651 &38.02  &36.30   &88.15  &85.93  \\ 
+                                                &LION \citep{lion} (110M)                                          &0.3564              &0.5935              &42.96               &\textbf{47.90}      &76.30     &67.04            \\
+                                                & \textbf{\model}-B (ours) (108M) & \textbf{0.2861} & 0.5156 & 43.38 & 47.54 & 75.55 & 64.95 \\
+                                                & \textbf{\model}-L (ours)   & 0.2880 & \textbf{0.5052} & 44.44 & 47.16 & \textbf{62.20} & \textbf{62.96} \\
+
+                                                
+\midrule                                          
+                                                &ShapeGF~\citep{cai2020eccv}                     &3.7243     &2.3944              &48.34      &44.26               &58.01               &61.25             \\              
+                                                &SP-GAN~\citep{li2021spgan}                       &4.2084              &2.6202              &40.03               &32.93               &72.58               &83.69             \\           
+Chair                                             &GCA~\citep{zhang2021learning}  &4.4035 &2.5820  &45.92  &47.89  &64.27  &64.50 \\ 
+                                                &LION \citep{lion} (110M)                                         &3.8458              &2.3086     &46.37               &50.15     &56.50      &53.85            \\ 
+                                                & \textbf{\model}-B (ours) (108M)  & 3.6310 & \textbf{2.1725} & 46.67 & \textbf{53.31} & 55.43 & \textbf{51.13} \\
+                                                & \textbf{\model}-L (ours)  & \textbf{3.5145} & 2.1860 & \textbf{49.39} & 49.84 & \textbf{50.52} & 51.66 \\
+
+                                                
+\midrule                                          
+                                                &ShapeGF~\citep{cai2020eccv}                     &1.0200     &0.8239              &\textbf{44.03}      &47.16               &61.79               &57.24             \\        
+                                                &SP-GAN~\citep{li2021spgan}                       &1.1676              &1.0211              &34.94               &31.82               &87.36               &85.94             \\     
+Car                                               &GCA~\citep{zhang2021learning} &1.0744 &0.8666 &42.05  &48.58  &70.45  &64.20 \\ 
+                                                &LION \citep{lion}    (110M)                                   &1.0635              &0.8075     &42.90               &\textbf{50.85}      &59.52      &\textbf{49.29}            \\  
+                                                & \textbf{\model}-B (ours) (108M)   & 0.9923 & \textbf{0.7692} & 43.46 & 47.44 & 60.36 & 53.27 \\
+                                                & \textbf{\model}-L (ours) & \textbf{0.9660} & 0.7846 & \textbf{44.03} & 48.86 & \textbf{53.83} & 54.55 \\
+\midrule
+
+& LION \citep{lion} (110M)  &  3.4336     &      2.0953      &    48.00    &     52.20   &      58.25      &    57.75   \\ 
+
+All (55 cat) & \textbf{\model}-B (ours) (108M) &  3.2586   &      2.1328     &   49.00  &     50.40   &  54.65  &   55.70   \\ 
+
+& \textbf{\model}-L (ours)  &  \textbf{3.1775}    &      \textbf{1.9794 }     &    \textbf{49.80}  &     \textbf{52.39}   &      \textbf{51.80}      &    \textbf{53.90}   \\ 
+\bottomrule    
+          
+
+
+                                                
+\end{tabular}                                   
+\caption{Generation performance metrics on Airplane, Chair, Car and all 55 categories jointly. All models were trained on the ShapeNet dataset from PointFlow \citep{yang2019pointflow}. Both the training and testing data are normalized individually into range [-1, 1]. }
+\label{tab:gen_v1_individual_norm_full}                 
+\end{table}                                     
+
+                    
+                    
+                    
+
+                    
+
+\subsection{Objaverse}
+\label{sect:objaverse_exp}
+
+We also experiment {\model} on large-scale 3D point generation conditioned on images. To this end, we train an image-to-point-cloud generation model on Objaverse~\citep{deitke2023objaverse}, which contains 800k 3D objects of great variety. In particular, conditional information (i.e., an image) is integrated to our model through cross-attention. For each object in Objaverse, we sample point cloud with $16k$ points. To get images for conditioning, each object is rendered with 40 degrees field of view, $448 \times 448$ resolution, at 3.5 units on the opposite sides of $x$ and $z$ axes looking at the origin. We extract features via DINOv2~\citep{oquab2023dinov2} which is concatenated with Plucker ray embedding~\citep{plucker2018analytisch} of each patch in DINOv2 feature. In each block, the learnable latent vector $z_{f_t}$ cross attends to image feature. 
+
+Tab.~\ref{tb:objaverse} lists the performance of {\model} in comparison of recent baselines on Objaverse. We report ULIP-I~\citep{xue2024ulip} and P-FID~\citep{nichol2022point} following CLAY~\citep{zhang2024clay}. PointNet++~\citep{qi2017pointnet, qi2017pointnet++, nichol2022point} is employed to evaluate P-FID. ULIP-I is an analogy to CLIP for text-to-image generation. ULIP-I is measured as the cosine similarity between point-cloud features from ULIP-2 model~\citep{xue2024ulip} and image features from CLIP model~\citep{radford2021clip}. Numbers of baseline models are directly borrowed from CLAY~\citep{zhang2024clay}. We calculate the metrics of our {\model} on 10k sampled point clouds. In our case, P-FID is measured on point clouds with 4096 points following Shape-E~\citep{jun2023shap} while ULIP-I is measured on point clouds with 10k points following ULIP-2~\citep{xue2024ulip}. Note that since CLAY~\citep{zhang2024clay} is not open-source, we do not have the access to the exact evaluation setting or the conditional images rendered from Objaverse. But all evaluation settings of {\model} are provided for reproduction purpose. As shown in Tab.~\ref{tb:objaverse}, our {\model} achieves strong performance on large-scaled image-conditioned 3D generative tasks. Compared with CLAY~\citep{zhang2024clay}, which is a 2-stage latent diffusion model, {\model} demonstrates very strong performance on both ULIP-I and P-FID. Fig.~\ref{fig:objaverse1} and \ref{fig:objaverse2} show additional examples of sampled point clouds and corresponding conditional images. As shown, {\model} learns to generate 3D objects with rich details that match the conditional images ultimately being able to generate a continuous surface. 
+
+\begin{table}[tb!]
+	\label{table:objaverse}
+	\centering
+    \resizebox{0.5\textwidth}{!}{
+    \begin{tabular}{lccc}
+        \toprule
+        Model & ULIP-I $\uparrow$ & P-FID $\downarrow$ \\
+        \midrule
+        Shap-E \citep{jun2023shap} & 0.1307 & - \\
+        Michelangelo \citep{zhao2024michelangelo} & 0.1899 & - \\
+        CLAY \citep{zhang2024clay} & 0.2066 & 0.9946 \\
+        \midrule
+        {\model} (ours) & \textbf{0.2976} & \textbf{0.3638} \\
+        \bottomrule
+    \end{tabular}
+    }
+\caption{Image-conditioned 3D point cloud generation performance on Objaverse.}
+\label{tb:objaverse}
+\end{table}
+
+\subsection{Resolution Agnostic Generation}
+\label{sec:res_free}
+
+An interesting property of {\model} is that it decodes each coordinate-value pair independently, allowing resolution to change during inference. At inference the user can define as many coordinate-value pairs as desired where the initial value of each pair at $t=1$ is drawn from a Gaussian distribution. We show qualitative results of resolution agnostic generation for both images and point clouds. Fig.~\ref{fig:super_res}(a) show images sampled at resolution $512^2$, $1024^2$, and $2048^2$ (together with their $256^2$ resolution counterparts generated from the same seed) from {\model} trained on ImageNet-256. Even though the model has not been trained with any samples at higher resolutions, it can still generate realistic images with high-frequency details. Fig.~\ref{fig:super_res}(b) shows point cloud with $32k$ and $128k$ points from {\model} trained on Objaverse with only $16k$ points points per sample (we visualize the generated $16k$ point could generated from the same seed). Similarly, {\model} generates dense and realistic point cloud in 3D without actually being trained on such high density points. These results show that {\model} is not trivially overfitting to the training set of points but rather learning a continuous density field in 3D space from which an infinite number of points could be sampled. Generally speaking, this also provides the potential to efficiently train flow matching generative models without the need to use large amounts of expensive high resolution data, which can be hard to collect in data domains other than images.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{figures/superres_new.jpg}
+\caption{(a) Images generated at $256^2$, $512^2$, $1024^2$, and $2048^2$ resolution from an {\model} trained on ImageNet-256. (b) 3D point clouds generated by {\model} containing $16k$, $32k$, and $128k$ points from an {\model} trained on Objaverse with $16k$ points (conditioned image shown in bottom left).}
+\label{fig:super_res}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+We introduced Ambient Space Flow Transformers ({\model}), a flow matching generative model designed to operate directly in ambient space. Our approach dispenses with the practical complexities of training latent space generative models, such as the dependence on domain-specific compressors for different data domains or  tuning of hyper-parameters of the data compressor (\ie adversarial weight, KL term, etc.). We introduced a conditionally independent point-wise training objective that decomposes the target vector field and allows to continuously evaluate the generated samples, enabling resolution changes at inference time. This training objective also improves training efficiency since it allows us to sub-sample the target vector field during training. Our results on both image and 3D point cloud benchmarks show the strong performance of {\model} as well as its trivial adaption across modalities. In conclusion, {\model} represents a promising direction for flow matching generative models, offering a powerful and domain-agnostic framework. Future work could explore further improvements in training efficiency and investigate co-training of multiple data domains to enable multi-modality generation in an end-to-end learning paradigm. 
+
+
+

@@ -1,0 +1,341 @@
+\title{Finetuning CLIP to Reason about Pairwise Differences}
+
+\begin{abstract}
+
+Vision-language models (VLMs) such as CLIP are trained via contrastive learning between text and image pairs, resulting in aligned image and text embeddings that are useful for many downstream tasks. A notable drawback of CLIP, however, is that the resulting embedding space seems to lack some of the structure of their purely text-based alternatives. For instance, while text embeddings have been long noted to satisfy \emph{analogies} in embedding space using vector arithmetic, CLIP has no such property. In this paper, we propose an approach to natively train CLIP in a contrastive manner to reason about differences in embedding space. 
+We finetune CLIP so that the differences in image embedding space correspond to \emph{text descriptions of the image differences}, which we synthetically generate with large language models on image-caption paired datasets.  
+We first demonstrate that our approach yields significantly improved capabilities in ranking images by a certain attribute (e.g., elephants are larger than cats), which is useful in retrieval or constructing attribute-based classifiers, and improved zeroshot classification performance on many downstream image classification tasks.
+In addition, our approach enables a new mechanism for inference that we refer to as comparative prompting, where we leverage prior knowledge of text descriptions of differences between classes of interest, achieving even larger performance gains in classification. 
+Finally, we illustrate that the resulting embeddings obey a larger degree of geometric properties in embedding space, such as in text-to-image generation.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Vision-language models (VLMs) \citep{jia2021scaling, li2022blip}, and more specifically CLIP \citep{radford2021learning}, leverage paired instances of images and corresponding text descriptions to produce a general-purpose joint embedding between images and language. 
+These models have created a new paradigm of prompting \citep{radford2021learning, li2021prefix, bach2022promptsource}. 
+In this new paradigm, we can easily design image classifiers through text descriptions of classes and by selecting which of our class descriptions most closely aligns with an image (in terms of cosine similarity in the multimodal embedding space). 
+These models can also generate images corresponding to user-specified text prompts \citep{podell2023sdxl}.
+Ultimately, this paradigm \textit{fundamentally} relies on the accurate alignment of image and text modalities. 
+
+While contrastive-based pretraining on large datasets aims to achieve this embedding alignment, a notable drawback of CLIP models is that they do not exhibit the structure of purely language-based embeddings. For instance, text embeddings satisfy \textit{analogies} in embedding space using vector arithmetic, e.g., Text(``\textit{King}'') - Text(``\textit{Man}") + Text(``\textit{Woman}'') $\approx$ Text (``\textit{Queen}") \citep{mikolov2013efficient}, while CLIP has no such property.
+In addition to these shortcomings, previous works demonstrate that CLIP's embeddings lack geometric properties \citep{goel2022cyclip}, 
+exhibit large gaps between different modalities
+\citep{liang2022mind}, and struggle with handling more complex descriptions, such as connections between multiple attributes and objects \citep{Lewis2022DoesCB}. 
+As CLIP is commonly used as a backbone for a wide variety of tasks \citep{ramesh2022hierarchical, podell2023sdxl, bain2022clip},
+accurately encoding meaningful differences between images can lead to benefits in many downstream tasks, such as compositional text-to-image generation or retrieval.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{figs/comp_clocks_final.pdf}
+    \caption{Our approach (\textbf{PC-CLIP}) to improve CLIP's ability to reason about differences. We use LLMs to describe the visual difference between a pair of captions, and align the difference in CLIP's image embeddings with a text embedding of this synthetic difference via a contrastive loss.}
+    \label{fig:comp_visualization}
+\end{figure*}
+
+In this paper, we propose to align the difference between CLIP's image encodings with a semantically meaningful text description of their difference, to improve its ability to reason about differences.
+We show that these differences between images are poorly localized in CLIP's embedding space (see our experiments in \cref{sec:difference_classification}). 
+On the contrary, prior work has shown that large language models (LLMs) can generate meaningful differences between concepts \citep{howard2023neurocomparatives}.
+We thus use LLMs to generate a synthetic dataset of text descriptions of the differences between pairs of images from an image-caption paired dataset (e.g., COCO \citep{lin2014microsoft}). 
+We then finetune CLIP to align these comparisons with the differences in CLIP's image embeddings via a contrastive objective.
+This process, which we refer to as \textbf{PC-CLIP} (Pairwise Comparison CLIP) is visualized in \cref{fig:comp_visualization}. 
+
+Motivated by our pairwise comparison-based finetuning, we develop a new inference mechanism, which we refer to as \textit{comparative prompting}. This approach looks to improve downstream performance by incorporating prior knowledge in the form of text descriptions of the differences between classes. 
+For instance, for a classification task between images of a crab and lobster, one can describe (or ask an LLM to describe) the following difference: ``\textit{Crabs have a rounded, flat body, while lobsters have a long body, large claws, and a pronounced tail.}''
+Our approach uses this comparative prompt to update and further separate the class prompts for these similar classes (see \cref{fig:comp_prompt}).  
+
+We empirically demonstrate the many benefits of the improved reasoning ability from our finetuning approach on synthetic comparisons. 
+First, we observe that PC-CLIP has the new capability of performing \textit{difference-based classification}, or given a certain attribute (e.g., size and color) to correctly rank images of a pair by that attribute.
+In fact, PC-CLIP achieves significantly higher performance on this task (up to $\sim$14 points in absolute accuracy), while CLIP observes almost random performance.
+In addition, PC-CLIP has improved zeroshot classification performance, when using standard class prompts or more descriptive class descriptions, across a majority of downstream image classification tasks.
+These improvements hold even when compared to baselines of finetuning on the \textit{exact same data from COCO} and an approach that leverages \textit{non-comparison-based} synthetic data from a LLM, demonstrating that benefits come from finetuning on comparisons.
+These improvements are even furthered when leveraging our comparative prompting technique with PC-CLIP, while using comparative prompting with CLIP features can exhibit large drops in performance. 
+Finally, we demonstrate that PC-CLIP indeed satisfies a larger degree of geometric properties in embedding space. For instance, PC-CLIP can better manipulate embeddings for image generation \citep{podell2023sdxl}, where additive operations on text embeddings are better preserved in the generated images.
+
+
+
+
+\section{Related Works}
+
+\label{sec:related}
+
+\paragraph{VLMs and Prompting}
+With the advent of VLMs such as CLIP \citep{radford2021learning} and ALIGN \citep{jia2021scaling}, a large body of work has studied ways to use these models. A main class of methods is prompting, which is a parameter-efficient technique to define classifiers given informative natural language descriptions of the classes of interest \citep{zhou2022learning}. Some approaches leverage LLMs to extract additional information about classes instead of prompts that only use the class name, which achieves stronger performance and is perhaps more interpretable \citep{menon2022visual, esfandiarpoor:arxiv23}. Other approaches have learned these language descriptions both in continuous \citep{li2021prefix} and discrete settings \citep{wen2023hard, akinwande2023understanding}. Other recent work looks to extract particular concepts from pretrained models in a zeroshot fashion, with the goal of achieving more robust representations \citep{adila2023zero}. Some works attempts to use VLMs to generate captions for images \citep{mokady2021clipcap} or the difference between images \citep{yao2022image}. Finally, an alternative class of VLMs is built from LLMs that are endowed with visual reasoning abilities through visual instruction tuning \citep{liu2024visual}.
+Our work is fundamentally different as it uses the reasoning abilities of LLMs to improve the geometry of \textit{CLIP embeddings}, rather than build our VLM directly from a LLM. \\
+
+\paragraph{Finetuning} 
+With the advent of these VLMs, many works have studied how to finetune these models for downstream tasks, instead of simply using fixed versions of these pretrained models. Many approaches study better ways to achieve more robust models via finetuning \citep{kumar2022fine, wortsman2022robust}.
+Prior work \citep{fan2023improving, Doveh_2023_CVPR} demonstrates that LLMs can be used to improve or diversify captions in pretraining data, leading to performance benefits. 
+In addition, other work shows that given labeled downstream task data, a better way to perform finetuning is in line with the original pretraining objective \citep{goyal2023finetune}. Other work uses multiple LLM-generated class descriptions to improve few-shot finetuning \citep{feng2023leveraging}. 
+
+\paragraph{CLIP's Embedding Space} A large body of work has studied specific qualities of the learned embedding space of CLIP. 
+A related work looks to better induce geometric properties in the resulting embedding spaces \citep{goel2022cyclip} through pairwise distances, although this does not directly address (LLM-generated) semantically meaningful differences.
+Other work finds that the embedding space of CLIP behaves like a bag of words \citep{yuksekgonul2022and} and that the models lack the ability to bind particular attributes to instances \citep{Lewis2022DoesCB}.
+Other work generates large synthetic datasets (via viewpoint modification, manual text generation via metadata) to improve VLMs abilities to reason about visual concepts and not individual objects \citep{Cascante-Bonilla_2023_ICCV}. Our work is related in that we demonstrate a failure of CLIP's embeddings, and we propose a new finetuning approach to address these issues. \\
+
+\paragraph{Using Language to Improve Performance and Interpretability}
+A wide variety of works have studied the use of natural language as human-interpretable explanations of model decisions. This has been studied and shown to improve both LLMs \citep{zhou2020towards, lampinen2022can, howard2023neurocomparatives} and RL \citep{pmlr-v162-lampinen22a}. The most related setting is using these for VLMs, where prior work grounds explanations to modify the network's attention mechanisms \citep{petryk2022guiding} or provide textual descriptions for specific, fine-grained regions of the image \citep{li2022grounded}. Other work studies the setting of visual-textual entailment \citep{xie2019visual, do2020snli}, where the task is to determine whether the image entails the given textual description. On the contrary, we focus improving the embeddings of CLIP in terms of pairwise relationships between objects.
+
+
+
+\section{Methods}
+
+
+We now describe our approach to generate natural language descriptions of the difference between images with LLMs, and to finetune CLIP to better understand these meaningful differences. 
+We then propose a technique to use the resulting model for general difference-based classification (i.e., ranking images in a pair correctly by a certain attribute), and comparative prompting, to leverage relational information between classes for improved downstream performance.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\columnwidth]{figs/db_classification_final.pdf}
+    \caption{A visualization of difference-based classification. In this example, a VLM has a higher cosine similarity between $g(I_1) - g(I_2)$ and $f(T_{\text{diff}})$, which is represented by the blue oval. Thus, the model correctly predicts that image $I_1$ contains a larger animal (a lion) than image $I_2$ (a squirrel).}
+    \label{fig:db_classification}
+\end{figure*}
+\subsection{Generating Comparatives with LLMs}\label{sec:llm_generation}
+
+While CLIP models are trained via a contrastive learning objective, they perhaps surprisingly cannot perform analogies in their embedding space (\Cref{sec:difference_classification}).
+As such, we employ LLMs, which have been documented to exhibit an understanding of comparative information between different objects \citep{howard2023neurocomparatives}, to generate text supervision to explicitly encourage this behavior in VLMs and improve their ability to reason about differences in embedding space. We build off of image-caption datasets \citep{lin2014microsoft, WahCUB_200_2011}, which allow us to use LLMs to generate natural language descriptions of the difference between the images via the difference in their captions. This circumvents the requirement of acquiring costly human-labeled image differences \citep{yao2022image}.
+
+Given a dataset of paired images and captions $\{(I_1, T_1), \ldots, (I_n, T_n) \}$, we use an LLM to generate a description of the difference in meaning between the two captions. This provides us with a source of weak supervision to incorporate explicit differences into the learned embeddings of the VLM. 
+To generate these comparisons, we prompt an LLM with: ``\textit{What is the visual difference between an image with a description of \{$T_1$\} and an image with a description of \{$T_2$\}?}", along with a few prepended demonstrations of desired behavior.
+
+ 
+In paired image-caption datasets, the captions can be rather succinct and may not capture the richness of the full image. 
+Bridging the gap between the remaining information in the image and the caption, perhaps through using large multimodal models \citep{liu2024visual}, is room for future work. 
+
+\subsection{Incorporating Comparatives in VLMs}
+
+Now, we present our strategy to incorporate these LLM-generated pairwise comparisons into our VLMs through finetuning with a contrastive objective, as visualized in \cref{fig:comp_visualization}. Given a pair of image-captions, $(I_i, T_i), (I_j, T_j)$ and a corresponding text description of the difference between images $T_{i,j}$, we define our objective as follows
+\begin{align}
+    \min_{f, g} \ell\Big(g(I_1) - g(I_2), f(T_{1,2})\Big),
+\end{align}
+where $g, f$ represent our image and text encoders respectively. $\ell$ can represent any particular loss function. 
+In essence, this objective looks to align the difference between image embeddings to the corresponding embedding of the difference in captions produced by the LLM. As such, this better enforces geometric structure in CLIP's embedding space to reflect meaningful differences that are highlighted by an LLM. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.6\columnwidth]{figs/comparative_prompt_f.pdf}
+    \caption{A visualization of \textbf{comparative prompting}. Arrows represent text embeddings of class (or difference) prompts, while circles represent image embeddings (red: class A, blue: class B). In this example, we can improve the inaccurate class prompt embedding $f_A$ by averaging it with $f_{B} - f_{B - A}$, which is better aligned with the data.}
+    \label{fig:comp_prompt}
+\end{figure}
+
+\subsection{Difference-Based Classification}\label{sec:db_classification_description}
+
+PC-CLIP's improved ability to localize differences in its embedding space allows for the development of a more general classifier that reasons about differences, instead of particular class name descriptions. We refer to this task as \textit{difference-based classification}, or the ability to perform correctly determine an image in a pair of images that aligns with a certain attribute. For instance, if we are given an image of an elephant and a dog, we could reasonably ask and expect our model to know, ``Which animal contained in the pair of images is larger?" Our difference-based classification task encompasses this question and other more general differences, such as color. 
+This ranking capability can be used to build more general attribute-based classifiers, as in \citep{menon2022visual, mazzetto2021semi}, or for retrieval or data curation, where the goal is to find a subset of images that better captures certain relevant properties for downstream tasks.
+
+The loss of this task can be formally expressed on a pair of images $(I_i, I_j)$ and a corresponding text difference between the images $T_{i, j}$, such as the aforementioned question about size, as
+\begin{align}
+    & \ell(f, g, I_i, I_j, T_{i, j}) = 1 \Big\{ \Big( g(I_i) - g(I_j) \Big) \cdot f(T_{i, j}) \geq \Big( g(I_j) - g(I_i) \Big) \cdot f(T_{i, j})\Big\}.
+\end{align}
+In essence, this task evaluates whether the model can properly order unlabeled images in relation to a particular attribute by using their difference in embedding space; this captures whether the difference in embedding space corresponds to meaningful concepts, such as size and color. A visualization of this task is given in \cref{fig:db_classification}.
+We remark that some features such as size can be ambiguous, as it could refer to the inherent size of an object or the size of the object relative to the image; we focus on the former. We demonstrate in our experiments in \cref{sec:difference_classification} that CLIP performs poorly out-of-the-box on this task (achieving roughly random performance), reflecting that the contrastive objective does not suffice to successfully probe out relational information between images.
+
+\subsection{Comparative Prompting}\label{sec:comp_prompt}
+
+PC-CLIP's improved embedding space also allows for a new type of inference to incorporate relational information between classes, which we refer to as comparative prompting.
+Given a prompt-based classifier, we can incorporate prior knowledge in the form of text descriptions of class-level differences to update our class prompts. 
+As human-labeled image-level differences are expensive (and are potentially greater in cost to obtaining class labels), we focus on the setting where we have class-level differences, as we (or LLMs) can efficiently describe the differences between classes.
+
+Let $A$ and $B$ represent two classes of interest, with embeddings $f_A$ and $f_B$ respectively. Given a language description of the difference between class $B$ and class $A$ (and an embedding of $f_{B - A}$), we can generate an updated class prompt $f_A'$ as follows:
+\begin{align}
+    f_A' & \coloneqq \alpha \cdot f_A + (1 - \alpha) (f_B - f_{B - A}), \label{eq:comparative_prompt}
+\end{align}
+where $\alpha$ is a hyperparameter that captures how much we rely on the comparison-based prompt. This captures our prior knowledge about differences in class descriptions by averaging the embedding $f_A$ with the difference in text embeddings $f_B - f_{B - A}$). Thus, if our original embedding of $A$ is inaccurate, this can be corrected if our embeddings of $(B - A)$ and $B$ are correct. A visual interpretation of this is provided in \cref{fig:comp_prompt}. This exploits an asymmetry between the text representations of $f_{A - B}$ and $f_{B - A}$, which is perhaps lacking in CLIP as it has been shown to behave similarly to a bag-of-words \citep{yuksekgonul2022and}. 
+Thus, our finetuning provides a simple solution to enable incorporating relational information into classification with contrastive-based VLMs.
+
+
+
+\section{Experiments}
+
+
+In evaluating our approach, we explore the following questions to understand the impacts of our finetuning. First, can PC-CLIP successfully perform difference-based classification, on different data distributions than our comparison-based finetuning dataset? 
+Secondly, how does our finetuning impact our model's ability to perform zeroshot classification?
+Finally, does our finetuning generally improve the VLM's embedding space and its ability to perform arithmetic? 
+
+In our experiments, we first demonstrate that PC-CLIP can indeed perform difference-based classification on multiple downstream datasets with varying types of meaningful differences, while CLIP achieves almost random performance. 
+Furthermore, we demonstrate that our comparative-based finetuning does not degrade standard zeroshot classification; rather, it improves performance with both simple class prompts and longer, descriptive prompts on a majority of image classification tasks.
+To control for having finetuned our model on COCO with synthetic LLM generations, we compare against (and outperform) additional baselines of directly \textit{finetuning of CLIP on COCO} and finetuning on LLM-rewritten captions that have been \textit{generated by the same LLM that we use to generate our comparisons}. This controls for the additional information from an external LLM and directly studies the benefits of incorporating comparative information.
+Finally, we demonstrate that PC-CLIP's text encoder is improved, better localizing class names with respect to their differences, and with better image generations of arithmetic operations in the text embedding space. This also manifests itself in larger classification performance gains with comparative prompting.
+
+\subsection{Experiment Details}
+
+\paragraph{Generating Our Synthetic Dataset} 
+To generate our PC-CLIP finetuning dataset of pairwise comparisons, we use LLaMA2-13B-chat-hf \citep{touvron2023llama}. We find that this model gives more coherent descriptions of differences when compared to the base checkpoints that are not finetuned as chatbots. We generate comparatives on two datasets, COCO \citep{lin2014microsoft} and CUB-200-2011 \citep{reed2016learning}. 
+
+As the number of pairs scales quadratically in the dataset size, we create pairs (and their corresponding language differences) from 1000 randomly sampled images. \\
+
+\paragraph{Evaluation} 
+We evaluate our method on a variety of image classification tasks: CIFAR100 \citep{Krizhevsky2009LearningML}, Flowers102 \citep{Nilsback08}, SUN397 \citep{xiao2010sun}, EuroSAT \citep{helber2019eurosat}, and CUB-200-2011 \citep{WahCUB_200_2011}. 
+We perform our difference-based classification on multiple datasets: Animals with Attributes 2 (AwA2) \citep{xian2018zero}, CUB \citep{WahCUB_200_2011}, CIFAR100 \citep{Krizhevsky2009LearningML}, and Flowers102 \citep{Nilsback08}. 
+
+\begin{table*}[t]
+    \centering
+    \caption{Results on \textbf{difference-based classification} (e.g., binary classification among pairs of images determining which image is larger), which is described in detail in \cref{sec:db_classification_description}. Results are reported as mean $\pm$ standard error, when averaged over 5 seeds. We observe that CLIP and its finetuned version on COCO exhibit almost random performance, and PC-CLIP performs much better across all tasks.}
+    \renewcommand{\arraystretch}{1.1}{
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{l c c c c }\toprule
+        \textbf{Method} & \textbf{AwA2} & \textbf{CIFAR100} & \textbf{CUB} & \textbf{Flowers102}  \\ \midrule
+        CLIP & 51.74 $\pm$ 1.34 & 54.92 $\pm$ 1.11 & 53.32 $\pm$ 0.22 & 52.97 $\pm$ 2.12 \\
+        CLIP (COCO FT) & 50.93 $\pm$ 1.29 & 55.12 $\pm$ 1.27 & 55.62 $\pm$ 0.21  & 53.62 $\pm$ 2.02 \\
+        CLIP (Rewrite FT) & 50.49 $\pm$ 1.36 & 55.52 $\pm$ 1.37 & 55.11 $\pm$ 0.24 & 54.18 $\pm$ 2.01 \\
+        \textbf{PC-CLIP} & \textbf{58.52 $\pm$ 0.46} & \textbf{67.44 $\pm$ 1.29} & \textbf{67.55 $\pm$ 2.11} & \textbf{64.91 $\pm$ 0.21}  \\ \bottomrule
+    \end{tabular}}
+    \label{tab:db_experiments}
+\end{table*}
+
+For difference-based classification tasks, instead of standard classification, we generate pairs of instances from different classes and an attribute that reflects a difference in these classes (e.g., ``\textit{The first image is larger}''). For AwA2, we have access to class-level binary attributes (e.g., fur, color, habitat) describing each class. We generate a string from the difference in these binary vectors between any two images from different classes. 
+For CIFAR100, we use coarse-grained labels to infer information about relative \textit{size} for classes. CIFAR100 contains the coarse-grained labels of ``\textit{large carnivores}'', ``\textit{large omnivores and herbivores}'', and ''\textit{small mammals}''. Thus, we define a task of predicting which of the two images is larger, where one has a coarse-grained label containing ``\textit{large}'' and while the other contains ``\textit{small}''.
+On CUB, we have access to captions of each image, so we use LLaMA2 \citep{touvron2023llama} as before in generating differences. This most closely aligns with the same notion of differences as in pretraining, although there is a significant distribution shift as the images and captions are solely comprised of birds.
+Finally, on Flowers102, we can infer \textit{color}, we generate a task for differentiating color between a group of yellow flowers (``\textit{yellow iris}'', ``\textit{daffodil}'', ``\textit{sunflowers}'', and ``\textit{goldenrod}'') and a group of blue flowers (``\textit{blue poppy}'' and ''\textit{bluebells}''). \\
+
+\paragraph{VLM Finetuning}
+In our experiments, we use a ViT-L/14 \citep{dosovitskiy2020image} architecture with pretrained weights from OpenCLIP \citep{ilharco_gabriel_2021_5143773}, specifically those from Datacomp-1B \citep{gadre2023datacomp}. In our finetuning, we update only the parameters of the text encoder. This allows us to precompute the image embeddings, which is significantly more computationally efficient. 
+For our baseline of finetuning on COCO (and with LLM rewrites), we also update only the text encoder parameters, on the same 1000 examples from COCO used to generate our PC-CLIP dataset.
+
+\subsection{Difference-Based Classification Results}\label{sec:difference_classification}
+
+\paragraph{PC-CLIP can perform difference-based classification, while CLIP cannot}
+We report our results for our difference-based classification tasks in \cref{tab:db_experiments}. We observe that CLIP struggles with this task, achieving almost random performance ($\sim$50\%). Some intuition for this result is that CLIP has been primarily trained to align specific instances in its contrastive objective, and does not necessarily capture notions of semantic meaningful differences, leading to deficiencies on this and other related tasks. 
+On the contrary, our finetuning helps improve performance by a large margin across all tasks. 
+For instance, we see increases in performance by $\sim$14 points in terms of absolute accuracy.
+This supports that our finetuning leads to a better alignment of the difference between image embeddings with more interpretable concepts such as size (e.g., CIFAR100) and color (e.g., Flowers102).
+\subsection{Classification Results}
+
+\begin{table*}[t]
+    \centering
+    \caption{(Top 2 rows): Comparison of PC-CLIP against CLIP features in terms of accuracy, when using standard class prompts (e.g., ``\textit{This is a photo of \{class\_name\}}'') for zeroshot image classification. (Bottom 2 rows): Comparison of these models in terms of accuracy when using comparative prompting, which leverages text descriptions of the \textit{difference} between 3 pairs of highly confused classes. We bold the best-performing method when using standard or comparative prompting.}
+    \setlength{\tabcolsep}{2.5pt}
+    \renewcommand{\arraystretch}{1.1}{
+    \begin{tabular}{l c c c c c}\toprule
+        \textbf{Method} & \textbf{CIFAR100} & \textbf{CUB} & \textbf{EuroSAT} & \textbf{Flowers102} & \textbf{SUN397}  \\ \midrule
+        CLIP & 85.59 &  \textbf{81.72} & 54.96 & 81.51 & 72.46 \\
+        CLIP (COCO FT) & 85.36 & 81.41 & 54.63 & 81.33 & 70.98\\
+        CLIP (Rewrite FT) & 85.53 & 81.20 & 54.70 & 81.31 & 71.24 \\
+        \textbf{PC-CLIP } & \textbf{86.12} & 80.08 & \textbf{57.15} & \textbf{81.95} &\textbf{73.58}   \\ \midrule
+        CLIP + comp & 85.66 & \textbf{81.67} & 53.67 & 81.98 & 72.48 \\
+        CLIP (COCO FT) + comp & 85.34 & 81.27 & 56.78 & 81.92 & 70.98 \\
+        CLIP (Rewrite FT) + comp & 85.54 &	81.01 &	56.93 &	82.06 &	71.25 \\
+        \textbf{PC-CLIP + comp} & \textbf{86.08} & 80.01 & \textbf{60.30} & \textbf{82.78} & \textbf{73.64}   \\ \bottomrule
+    \end{tabular}
+    }
+    \label{tab:standard_prompt_experiments}
+\end{table*}
+
+\paragraph{PC-CLIP improves zeroshot classification performance on most downstream tasks}
+We evaluate the zeroshot classification performance of our methods using a class prompt (e.g., ``\textit{This is a photo of \{class\_name\}}'') for each of our target classes. As is done in standard practice, our classifier is defined by computing the cosine similarity between each text description of the target classes and making a prediction by taking the class with the largest cosine similarity. These experiments are primarily designed to assess whether our finetuning potentially degrades the original features learned during pretraining.
+We observe the \textit{contrary}; our finetuning generally improves performance in terms of zeroshot prompting with class names (see \cref{tab:standard_prompt_experiments}). We observe that pretraining on LLM-generated comparatives on COCO improves performance on 4 out of the 5 downstream tasks that we consider. This supports that PC-CLIP not only allows new techniques such as difference-based classification, but its objective contains a useful training signal for aligning its features with semantic classes. \\
+
+\begin{table}[t]
+    \centering
+    
+    \renewcommand{\arraystretch}{1.1}{
+        \setlength{\tabcolsep}{3pt}
+        \caption{Comparing performance increase/decrease when using comparative prompting with CLIP and PC-CLIP on the classes that are updated with comparative prompts (i.e., 3 pairs of classes that are most commonly confused in standard prompting). We denote performance increases in red and decreases in blue. We bold the method that achieves the largest gain in performance.}
+        \begin{tabular}{ l c c c c }\toprule
+            \textbf{Dataset} & \textbf{CLIP} & \textbf{(+ comp)} & \textbf{PC-CLIP} & \textbf{(+ comp)}  \\ \midrule
+            CIFAR100 & 68.33 & \red{+ 0.34} & 66.33 & \textbf{\red{+ 1.34}} \\
+            CUB & 59.43 & \blue{- 1.14} & 52.57 & \textbf{\red{+ 0.57}}\\
+            EuroSAT & 40.68 & \blue{- 3.40} & 44.75 & \textbf{\red{+ 7.00}} \\
+            Flowers102 & 44.07 & \red{+ 3.01} & 49.91 & \textbf{\red{+ 9.38}} \\
+            SUN397 & 74.73 & \red{+0.18} & 72.33 & \textbf{\red{+ 1.01}} \\ \bottomrule
+        \end{tabular}}
+    \label{tab:comp_prompt}
+\end{table}
+\paragraph{PC-CLIP observes larger and consistent performance gains with comparative prompting} 
+As mentioned in \cref{sec:comp_prompt}, we can leverage information about the differences between pairs of classes to improve our standard class prompts. On these tasks, we generate this knowledge for both CLIP and PC-CLIP by looking at the confusion matrix of the zeroshot prompt-based classifier and selecting the 3 most confused class pairs. We use these pairwise difference descriptions to update the class prompts, using the procedure in \cref{eq:comparative_prompt}. We remark that while this requires labeled data and thus is no longer truly zeroshot, this procedure does not require any training and is extremely easy to implement. In addition, our prior knowledge aligns with the pairs that are found in the confusion matrix; for instance, a confused pair of classes on the SUN dataset is ``\textit{kitchen}'' and ``\textit{kitchenette}'' and on the EuroSAT dataset is classes ``\textit{AnnualCrop}'' and ``\textit{PermanentCrop}''. Thus, we can instead generate pairs of confused classes through prior knowledge about semantically similar classes.
+
+We observe that using our comparative prompting with PC-CLIP boosts or maintains performance on a majority of tasks, which is not the case when using comparative prompting with CLIP features (see the bottom two rows in \cref{tab:standard_prompt_experiments}). 
+We remark that the gains in overall accuracy are not immediately apparent as we have only modified a small number of class prompts for tasks with large numbers of classes (e.g., SUN has 397 and CUB has 200). As such, we only observe slight gains as we have modified only a small fraction of the total classes.
+Thus, we also report the results for the accuracy on the subset of 6 classes (from 3 pairs) that are highly confused in \cref{tab:comp_prompt}. We remark that this subset of classes can be different for CLIP and PC-CLIP, although a majority are the same. 
+
+On this subset of highly confused tasks, the result is \textit{much clearer}. We primarily focus on the columns labeled with ($\pm$ comp), which denotes the change in performance when using comparative prompting. We observe that performing comparative prompting with CLIP helps performance on a few datasets, although it can also negatively impact performance (e.g., a large drop in accuracy on EuroSAT). However, comparative prompting more positively impacts performance for PC-CLIP, leading to a larger gain across all different tasks. Therefore, this supports that our finetuning enables the use of comparative prompting as a strategy to incorporate prior knowledge about class relations for downstream tasks. \\
+
+\begin{table*}[t]
+    \centering
+    \renewcommand{\arraystretch}{1.1}
+        \caption{Results when using LLM-extended class prompts for zeroshot image classification. We bold the best-performing method on each task. We observe that PC-CLIP achieves the highest performance on a majority of tasks.}
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{l c c c c c}\toprule
+        \textbf{Method}  & \textbf{CIFAR100} & \textbf{CUB} & \textbf{EuroSAT} & \textbf{Flowers102} & \textbf{SUN397}  \\ \midrule
+        CLIP & 84.32 & 81.41 & 59.04 & 81.23 & 69.98 \\
+        CLIP (COCO FT) & 84.30 & 81.79 & 57.81 & 81.30 & 69.57 \\
+        CLIP (Rewrite FT) & 84.4 &	\textbf{82.21} &	59.11 &	\textbf{81.48} &	68.77\\
+        \textbf{PC-CLIP} & \textbf{85.56} & 79.65 & \textbf{59.59} & 79.54 & \textbf{73.05} \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:extended_prompt_experiments}
+\end{table*}
+\paragraph{PC-CLIP shows similar gains with longer class prompts.}
+Prior work demonstrates that prompting VLMs improves when using longer or more varied descriptions of classes \citep{menon2022visual}. To evaluate how well our finetuning improves the performance of using longer and more descriptive prompts, we can swap standard class prompts for longer descriptions of the target classes.
+Here, we remark that we see better performance if we perform weight-ensembling of PC-CLIP weights or COCO finetuned CLIP weights with the original CLIP weights, which is similar to prior work \citep{wortsman2022robust}. 
+Overall, PC-CLIP has stronger performance across a majority of datasets when using lengthier class descriptions (see \cref{tab:extended_prompt_experiments}). 
+
+\begin{table}[t]
+    \centering
+    \renewcommand{\arraystretch}{1.1}{
+    \setlength{\tabcolsep}{3pt}
+    \caption{Average CLIP-Score between generations in text-to-image experiments from a sum of the embeddings of class names from CIFAR100 and attributes from AwA2, averaged over 8000 images. We observe that PC-CLIP (when used SD-XL) produces images that achieve a higher CLIPScore.}
+    \begin{tabular}{lcc}\toprule
+         & \textbf{CLIP} & \textbf{PC-CLIP}  \\\midrule
+            \textbf{CLIPScore} & 0.532 & \textbf{0.542} \\\bottomrule
+    \end{tabular}
+    }
+    \label{tab:clipscore}
+\end{table}
+
+\subsection{Evaluating the Quality of Learnt Embeddings}
+
+\paragraph{Embedding Arithmetic with Text-to-Image Generation} 
+One way that we can evaluate the quality of our text encoder is by performing arithmetic in the text embedding space and evaluating the results by visualizing the resulting embedding through existing text-to-image generation models, such as Stable Diffusion \citep{rombach2022high, podell2023sdxl}. Here, we can directly swap the text encoder in Stable Diffusion XL \citep{podell2023sdxl} with one that has been finetuned with our PC-CLIP objective. Specifics of the generation process are outlined in detail in \cref{appx:image_gen}. Note that we do not present this as a specific approach to perform compositional image generation \citep{liu2022compositional} (as we could easily lengthen the original prompt), but rather, we use this to evaluate PC-CLIP's improved ability to perform text embedding arithmetic. 
+
+To quantitatively evaluate how well the generated images match the sum of two text prompts, we can evaluate them using the CLIPScore \citep{hessel2021clipscore}, with a larger CLIP model architecture, although we do remark that finding a metric to evaluate text-image alignment is an open research question. We evaluate a set of images generated to represent CIFAR100 classes while adding in the text embedding of attributes from AwA2. We observe that PC-CLIP, when used with Stable Diffusion, produces images that achieve a higher CLIP score than the original CLIP embedding, reflecting better arithmetic properties in embedding space.
+
+We qualitatively observe that adding in the text embedding of (especially long) comparison-based descriptions to original text prompts leads to slightly more visually consistent generations with our text (see \cref{fig:image_gen}). In the provided examples, these comparison-based descriptions negatively impact the visual coherence of generations from CLIP + Stable diffusion (regions circled in red in \cref{fig:image_gen}), while PC-CLIP + Stable Diffusion much better captures the text from the comparison-based additions in the generated images. We provide more examples and a more in-depth discussion in \cref{appx:image_gen_examples}.\\
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{figs/image_gen_err.pdf}
+    \caption{Visualization of the text encoder of PC-CLIP as we add a descriptive statement through a text-to-image generation model (Stable Diffusion XL \citep{podell2023sdxl}).
+    Areas that are circled in light red denote visual inconsistencies in the generated images when using CLIP.
+    }
+    \label{fig:image_gen}
+\end{figure*}
+\begin{table}[t]
+    \centering
+    \caption{Comparing the text encoders of PC-CLIP and CLIP. (First two columns: Comparison) We report the cosine distance between the difference in class prompts embeddings and LLM-generated comparison embedding (i.e., $d(f_A - f_B, f_{A - B})$), averaged over the 3 most confused pairs of classes in classification. (Last two columns: Reverse Comparison) We report the cosine distance from the negative difference (e.g., $f_{B - A}$ instead of $f_{A - B}$) of class embeddings to the comparison embedding. ($\uparrow$) denotes larger is better, and ($\downarrow$) denotes that smaller is better.}
+    \renewcommand{\arraystretch}{1.1}{
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{ l cc cc }\toprule
+        & \multicolumn{2}{c}{Comparison ($\downarrow$)} & \multicolumn{2}{c}{Reverse Comparison ($\uparrow$)} \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+        & \textbf{CLIP} & \textbf{PC-CLIP} & \textbf{CLIP} & \textbf{PC-CLIP} \\ \midrule
+        CIFAR100 & 1.04 & \textbf{0.92} & 0.96 & \textbf{1.08}  \\
+        CUB & 1.19 & \textbf{1.07} & 0.81    & \textbf{0.93} \\
+        EuroSAT & 0.92 & \textbf{0.73} & 1.08 & \textbf{1.27} \\
+        Flowers102 & 1.08 & \textbf{0.99} & 0.92 & \textbf{1.01} \\
+        SUN397  & 1.06 & \textbf{0.90}  & 0.94 & \textbf{1.10} \\ \bottomrule
+    \end{tabular}
+    }
+    \label{tab:image_text_eval}
+\end{table}
+
+\paragraph{PC-CLIP better localizes classes and their differences} 
+We consider the same notion of language descriptions of pairwise class differences as in our comparative prompting. Here, we assess text encoder quality as $d(f_A - f_B, f_{A - B})$, which measures the distance between the difference in our model's embedding and our model's embedding of the semantic (LLM-generated) difference. We argue that this is a reasonable metric, as a desirable property of our model is to capture nice geometric properties, such as obeying arithmetic operations in the embedding space. In these experiments, we report the cosine distance as our distance function $d$.
+
+We report the distance for both our model and the standard CLIP features when averaged over the pairs of confused classes in each downstream task from our comparative prompting (see Table \ref{tab:image_text_eval}). We observe that the text encoder is significantly improved across all datasets.
+The first two columns illustrate that it better aligns the difference in text embeddings with the corresponding actual language description of the difference. The last two columns demonstrate that our finetuning does not simply collapse the representation space; the negative difference in class prompt embeddings is further away from the description of the difference. 
+This better localization provides a likely explanation for better performance in difference-based classification and from comparative prompting.
+
+
+
+\section{Discussion}
+
+
+We propose a method to improve CLIP's embedding space by generating language descriptions of the difference between images and using this dataset to improve the joint embedding space of CLIP to reflect more interpretable differences between classes, such as size and color. We demonstrate that our finetuning enables the ability to perform general difference-based classification while generally improving or maintaining standard zeroshot prompting performance with our updated VLM. With other simple metrics and text-to-image visualizations, we find that the embedding space of PC-CLIP indeed better captures meaningful notions of differences, which can later improve many downstream applications that build on top of CLIP embeddings.
+
+A fundamental limitation of our method is that we rely on the ability of LLMs to generate these image comparisons from imperfect information (i.e., only the text caption). These models can sometimes leverage general information that does not apply to particular images, as well as having poor responses due to issues such as hallucinations \citep{zhang2023siren}. This can likely be improved by the advent and usage of large multimodal models that exhibit both image and language understanding \citep{OpenAI2023GPT4TR, liu2024visual}. In addition, these models themselves are often prone to hallucination, which can lead to poor-quality synthetic data.
+
+
+
+
+
+

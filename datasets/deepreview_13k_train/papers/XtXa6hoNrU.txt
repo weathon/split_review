@@ -1,0 +1,641 @@
+\title{DFRot: Achieving Outlier-Free and Massive Activation-Free for Rotated LLMs with Refined Rotation}
+
+\begin{abstract}
+Rotating the activation and weight matrices to reduce the influence of outliers in large language models (LLMs) has recently attracted significant attention, particularly in the context of model quantization.
+Prior studies have shown that in low-precision quantization scenarios, such as 4-bit weights and 4-bit activations~(W4A4), randomized Hadamard transforms can achieve significantly higher accuracy than randomized orthogonal transforms.
+Notably, the reason behind this phenomena remains unknown.
+In this paper, we find that these transformations show substantial improvement in eliminating outliers for common tokens and achieve similar quantization error.
+The primary reason for the accuracy difference lies in the fact that randomized Hadamard transforms can slightly reduce the quantization error for tokens with massive activations while randomized orthogonal transforms increase the quantization error.
+Due to the extreme rarity of these tokens and their critical impact on model accuracy, we consider this a long-tail optimization problem,
+and therefore construct a simple yet effective method: a weighted loss function.
+Additionally, we propose an optimization strategy for the rotation matrix that involves alternating optimization of quantization parameters while employing orthogonal Procrustes transforms to refine the rotation matrix.
+This makes the distribution of the rotated activation values more conducive to quantization, especially for tokens with massive activations.
+Our method enhances the Rotated LLMs by achieving dual free, \textit{Outlier-Free} and \textit{Massive Activation-Free}, dubbed as DFRot.
+Extensive experiments demonstrate the effectiveness and efficiency of DFRot.
+By tuning the rotation matrix using just a single sample,
+DFRot achieves a perplexity improvement of 0.25 and 0.21 on W4A4KV4 and W4A4KV16, respectively, for LLaMA3-8B, a model known for its quantization challenges.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have shown exceptional abilities across numerous domains. Cutting-edge open-source models like LLaMA~\citep{touvron2023llama} and Mistral~\citep{jiang2023mistral}, along with proprietary LLMs such as GPT~\citep{achiam2023gpt} and Gemini~\citep{team2023gemini}, are now being applied in a wide range of applications,
+including natural language understanding~\citep{zellers2019hellaswag, hendrycks2020measuring}, machine translation~\citep{zhang2023prompting}, content generation~\citep{mo2024large}, and recommendation systems~\citep{llm4recsurvey}.
+
+However, the remarkable success of LLMs is largely reliant on significant computational resources.
+LLMs often consist of billions of parameters, making them not only resource-intensive to train but also challenging to deploy on devices with limited computational capacity, such as mobile phones and edge devices.
+Additionally, the high memory and processing demands not only drive up hardware costs but also significantly increase energy consumption, leading to serious deployment concerns.
+To address these challenges, researchers and engineers are actively exploring various model compression techniques~\citep{frantar2022gptq, xiao2023smoothquant, lin2024awq, yao2022zeroquant, frantar2023sparsegpt, ashkboos2024slicegpt}.
+These techniques aim to reduce the size of LLMs while maintaining their performance as effectively as possible, achieving a balance between efficiency and accuracy.
+Among the various methods, Post-Training Quantization (PTQ) provides a training-free approach, or one with minimal training cost for calibration purposes~\cite{nagel2019data, li2021brecq}, allowing for rapid and efficient quantization. Compared to Quantization-Aware Training (QAT), which requires multiple rounds of fine-tuning, PTQ incurs significantly lower computational costs. This makes it an appealing option for quantizing LLMs.
+Unfortunately, the presence of outliers in the activations~\citep{dettmers2022gpt3, zeng2022glm} often leads to a significant reduction in model accuracy when PTQ is applied directly.
+To address this problem, earlier approaches have either scaled weights and activations~\citep{xiao2023smoothquant, wei2023outlier, shao2023omniquant}, shifting the quantization challenges from activations to weights, or employed mixed-precision techniques to isolate outliers~\citep{dettmers2022gpt3}, thereby minimizing the LLM's quantization error.
+
+Recent research~\citep{ashkboos2024quarot} has demonstrated that rotating activations in LLMs can effectively eliminate most outliers while preserving computational invariance, ensuring that the LLM's output remains identical to its original results.
+Moreover, the rotation matrices can be merged into the weights, imposing no additional burden on network inference.
+This innovative computational invariance~\citep{ashkboos2024slicegpt} has garnered significant attention from researchers.
+
+Although rotation is widely recognized as an important method for the quantization of LLMs,
+there remain many unresolved issues.
+For example, as shown in Table~\ref{tab:random_vs_hadamard}, when activations are reduced to 4 bits,
+the reasons why randomized Hadamard transforms~($\mathrm{RH}$) often achieve significant improvement compared to randomized orthogonal transforms~($\mathrm{RO}$)~\citep{ashkboos2024quarot, liu2024spinquant} have not yet been fully understood.
+However, while directly training rotation matrices can yield good results~\citep{liu2024spinquant}, the training process will cause substantial computational resources and adds complexity to the quantization process.
+
+In this paper, we first investigate the underlying reasons why $\mathrm{RH}$ outperforms $\mathrm{RO}$.
+We find that for ordinary tokens consisting primarily of outliers~\citep{achiam2023gpt},
+both $\mathrm{RO}$ and $\mathrm{RH}$ transformations can equally reduce quantization error when applied to these tokens.
+In contrast, for special tokens with~\textit{massive activations}~\citep{sun2024massive}, using $\mathrm{RO}$ on these activations surprisingly leads to an increase in quantization error.
+Our experiments show that this inability to efficiently manage massive activations greatly restricts the accuracy of quantized LLMs.
+On the other hand, while $\mathrm{RH}$ performs better than $\mathrm{RO}$, it only manages to maintain or slightly reduce the quantization error for these large activations.
+This observation indicates that both transformation methods struggle to effectively manage massive activations in LLM quantization.
+
+Building on these insights, we propose a novel optimization method to enhance the performance of quantized LLMs,
+achieving both \textit{Outlier-Free} and \textit{Massive Activation-Free}, \emph{e.g.} dual free~(DFRot).
+By treating scarce tokens with massive activations as long-tail distributed data, we develop a simple yet effective weighted loss function. Additionally, we introduce an alternating optimization approach to refine the rotation matrices and quantization parameters, further minimizing quantization error. Extensive experiments demonstrate the effectiveness of our proposed method.
+Specifically, by tuning the rotation matrix with just a single sample and additional 8 minutes, DFRot achieves a PPL improvement of 0.25 and 0.21 on W4A4KV4 and W4A4KV16 for LLaMA3-8B, a model recognized for its quantization challenges~\citep{huang2024good}.
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+Reducing quantization error is essential for model quantization.
+However, as reported by LLM.int8()~\citep{dettmers2022gpt3}, simply quantizing LLM to INT8 results in significant accuracy degradation due to the presence of outliers.
+To handle emerging outliers, LLM.int8() introduces a mixed-precision decomposition scheme.
+Although it can preserve the model's accuracy, the complexity of fine-grained decomposition always leads to computational overhead and potential performance bottlenecks.
+Currently, research in LLM quantization predominantly focuses on eliminating outliers through scale invariance and rotation invariance.
+\subsection{Eliminating outliers via Scale Invariance}
+
+The initial idea behind suppressing outliers through scale invariance stems from the observation that weights are easier to quantize than activations, and outliers in activations often appear in a few fixed channels~\citealp{dettmers2022gpt3}.
+Based on this, SmoothQuant~\citep{xiao2023smoothquant} first proposes that we can offline migrate the quantization difficulty from activations to weights via scale invariance.
+SmoothQuant enables an INT8 quantization of both weights and activations for all the matrix multiplications in LLMs.
+Furthermore, Outlier Suppression+~\citep{wei2023outlier} proposes a fast and stable scheme to effectively calculate scaling values, achieving a better balance in quantization burden.
+To reduce manual design and further enhance quantization performance in extremely low-bit quantization,
+OmniQuant~\citep{shao2023omniquant} introduces Learnable Weight Clipping and Learnable Equivalent Transformation, efficiently optimizing the quantization process for both weight-only and weight-activation quantization.
+In the clipping W4A8 quantization,
+QQQ~\citep{zhang2024qqq} proposes to dynamically handle outliers through adaptive smoothing.
+QServe~\citep{lin2024qserve} proposes SmoothAttention to effectively mitigate the accuracy degradation caused by 4-bit KV quantization.
+Both QQQ and QServe have effectively enhanced the performance of LLMs in W4A8 quantization.
+\subsection{Eliminating outliers via Rotation Invariance}
+
+Although scale invariance can reduce outliers and improve quantization performance, it merely transfers the outliers from activations to weights and has not eliminated them fundamentally.
+When the magnitude of the outliers is large, scaling struggles to achieve an effective balance between weights and activations.
+Recently, researchers have found that applying rotation matrices to networks can effectively reduce outliers without increasing the complexity of LLMs.
+QuIP~\cite{chee2024quip} is the first to suggest that quantization can benefit from the incoherence between weight and Hessian matrices.
+It employed randomized orthogonal matrices generated by Kronecker product to enhance their incoherence.
+QuIP\#~\citep{tseng2024quip} replaces the randomized orthogonal matrices with randomized Hadamard matrices, which are faster and possess better theoretical properties.
+QuaRot~\citep{ashkboos2024quarot} is the first work to apply rotational invariance~\citep{ashkboos2024slicegpt} for model quantization.
+QuaRot finds that randomized Hadamard transformations yield better results compared to randomized orthogonal transformations.
+SpinQuant~\citep{liu2024spinquant} further extends the rotation matrices to a trainable space and applied Cayley optimization~\citep{li2020efficient} to refine them, achieving significant improvements across diverse datasets.
+
+
+\section{Methodology}
+
+\label{sec:method}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{Figs/rotate.pdf}
+\caption{
+An illustration of rotational invariance in the LLaMA architecture.
+The rotation matrix $\mR_1$ can be integrated into the residual connection, ensuring the network retains rotational invariance.
+The rotation inner the block can further reducing outliers in the block.
+Both of them make LLM  fewer outliers and be easier to quantize.
+The rotation matrix $\mR_1$, $\mR_1^T$, $\mR_2$, $\mR_2^T$ and $\mR_4^T$ can be integrated with the adjunct weights.
+$\mR_3$ and $\mR_4$ need to compute online.\label{fig:rotate}
+}
+\end{figure}
+\subsection{Preliminary}
+\label{sec:prelim}
+To remove outliers in the input activations $\mX_{1}$, a rotation matrix $\mR_{1}$ is applied to the input matrix $\mX^{1}$, resulting in a new input activation $\mX_{1}\mR_{1}$. $\mR_{1}$ satisfies $\mR_{1}\mR_{1}^T = \mR_{1}^T\mR_{1} = \mI$ and $|\mR_{1}| = 1$. Using the LLaMA architecture as an example, $\mX_{1}\mR_{1}$ is then passed to the RMSNorm, which satisfies the commutation property: $\text{RMSNorm}(\mX_{1}\mR_{1}) = \text{RMSNorm}(\mX_{1}) \mR_{1}$~\citep{ashkboos2024slicegpt}. Here, we assume that $\text{RMSNorm}$ operates on each row $i$ of the activations $\mX_{1}$ as $\mX_{1,i} \leftarrow \mX_{1,i} /\left|\mX_{1,i}\right|$. This commutation property implies that multiplying the input of RMSNorm by $\mR_{1}$ is equivalent to multiplying the RMSNorm output by $\mR_{1}$ as well.
+
+The output of LayerNorm is then passed into the subsequent linear blocks. With the introduction of $\mR_{1}$, the input to these linear layers is altered. To ensure that the output from the linear layers remains unchanged, $\mR_{1}^T$ is multiplied by the weight matrix $\mW$, resulting in a new weight matrix $\mR_{1}^T\mW$, which can be calculated offline. Since $\mR_{1}^T\mR_{1} = \mI$, the output from the linear layer remains unaffected. This~\textit{computational invariance} property of LLMs ensure the introduction of the rotation matrices without changing the original results.
+
+A similar approach can be applied to rest layers within an LLM block. As shown in Figure~\ref{fig:rotate}, by transforming the weight matrices in the Multi-Head Attention (MHA) as $\mR_{1}^{T}\mW_{q}$, $\mR_{1}^{T}\mW_{k}$, $\mR_{1}^{T}\mW_{v}$, and $\mW_{o}\mR_{1}$, and the weights in the Feed-Forward Network (FFN) as $\mR_{1}^{T}\mW_{up}$, $\mR_{1}^{T}\mW_{gate}$, and $\mW_{down}\mR_{1}$, the hidden features within both MHA and FFN remain unchanged. Consequently, the output feature $\mY_{1}$ is transformed into $\mY_{1}\mR_{1}$, which will sum with the residual input $\mX_{1}\mR_{1}$ satisfies $\mX_{1}\mR_{1} + \mY_{1}\mR_{1} = (\mX_{1} + \mY_{1})\mR_{1} = \mX_{2}\mR_{1}$. The output will serve as the input for the next LLM block. Similarly, by transforming $\mW_{lm\_head}$ to $\mR_{1}^{T}\mW_{lm\_head}$, the network output will remain unchanged.
+
+Moreover, we can introduce additional rotation matrices to further mitigate outliers between layers. As illustrated in Figure~\ref{fig:rotate}, head-wise rotation matrices $\mR_2$ and $\mR_2^T$ can be applied to $\mW_v$ and $\mW_o$, while $\mR_3$ can be inserted for \textbf{Query} and \textbf{Key} after RoPE. Additionally, $\mR_4$ and $\mR_4^T$ can be placed between the Swish activation and $\mW_{down}$. These strategies help further suppress outliers and reduce quantization error without affecting the block's output. In this paper, we focus exclusively on $\mR_1$. For $\mR_2$, $\mR_3$, and $\mR_4$, we adopt the settings from QuaRot~\citep{ashkboos2024quarot} by setting them to random Hadamard matrices.
+\begin{comment}
+First, we briefly introduce rotational invariance in LLMs, using the structure of LLaMA as an example.
+We have the commutation property
+$\text{RMSNorm}(\mX\mR_{1})=\text{RMSNorm}\left(\mX\right) \mR_{1}$~\citep{ashkboos2024slicegpt}, where $\mR_{1}$ is an rotation matrix
+and we assume here that
+$\text{RMSNorm}$ applies to each row of the activations $\mX$ as $\mX_{i,:} \leftarrow \mX_{i,:} /\left\|\mX_{i,:}\right\|$.
+The commutation property implies that multiplying the input of RMSNorm by $\mR_{1}$ is equivalent to multiplying the RMSNorm output by $\mR_{1}$ as well.
+This output of LayerNorm is then passed into the following linear blocks, a
+
+where the input weight matrix has now become $\mR_{1}^T\mW$.
+Consequently, the original activations will not be modified.
+As shown in Figure~\ref{fig:rotate}, once we transform $\mW_{q}$, $\mW_{k}$, $\mW_v$ and $\mW_{o}$ in the Multi-Head Attention~(MHA) to
+$\mR_{1}^{T}\mW_{q}$, $\mR_{1}^{T}\mW_{k}$, $\mR_{1}^{T}\mW_{v}$ and $\mW_{o}\mR_{1}$,
+and $\mW_{up}$, $\mW_{gate}$ and $\mW_{down}$ in the Feed-Forward Network~(FFN) to
+$\mR_{1}^{T}\mW_{up}$, $\mR_{1}^{T}\mW_{gate}$ and $\mW_{down}\mR_{1}$,
+the hidden feature within the MHA and FFN will remain unchanged, and the output feature $\mY$ will become $\mY\mR_{1}$.
+At this point, the residual connection satisfies $\mX_{n}\mR_{1} + \mY_{n}\mR_{1} = (\mX_{n} + \mY_{n})\mR_{1} = \mX_{n+1}\mR_{1}$ for the $n$-th module.
+Based on mathematical induction, we can conclude that by transforming $\mW_{lm\_head}$ into $\mR_{1}^{T}\mW_{lm\_head}$,
+the network output will remain unchanged.
+
+There is also rotational invariance within the block.
+We can insert head-wise rotation matrices $\mR_2$ and $\mR_2^T$ for $\mW_v$ and $\mW_o$
+and $\mR_3$ for \textbf{Query} and \textbf{Key} after RoPE, respectively.
+Additionally, we can insert $\mR_4$ and $\mR_4^T$ between Swish and $\mW_{down}$.
+These approaches can further eliminate outliers and reduce quantization error while keeping the block output unchanged.
+In this paper, we only discuss $\mR_1$.
+For $\mR_2$, $\mR_3$, and $\mR_4$, we follow the QuaRot~\citep{ashkboos2024quarot} settings and use Hadamard matrices.
+\end{comment}
+\begin{table}[t]
+\caption{WikiText-2 perplexity~($\downarrow$) results for $\mathrm{RO}$ and $\mathrm{RH}$ for LLaMA and Mistral models. The 4-4-4, 4-4-16, 4-8-16 represent W4A4KV4, W4A4KV16, W4A8KV16 respectively.  We show the failed GPTQ using NaN and the perplexity results$>$100 by Inf. QuaRot.FP16() denotes retaining tokens with massive activations as FP16.
+}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{0.72mm}
+\begin{tabular}{@{}l|ccc|ccc|ccc|ccc@{}}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{3}{c|}{LLaMA2-7B}         & \multicolumn{3}{c|}{LLaMA2-13B}        & \multicolumn{3}{c|}{LLaMA3-8B}         & \multicolumn{3}{c}{Mistral-7B-v0.3}    \\ \cmidrule(l){2-13} 
+                        & 4-4-4         & 4-4-16        & 4-8-16 & 4-4-4         & 4-4-16        & 4-8-16 & 4-4-4         & 4-4-16        & 4-8-16 & 4-4-4         & 4-4-16        & 4-8-16 \\ \midrule
+GPTQ                    & NaN           & NaN           & NaN    & Inf           & Inf           & 6.01   & Inf           & Inf           & 7.29   & Inf           & Inf           & 8.39   \\ \midrule
+(RO)~QuaRot                  & 7.96          & 7.71          & 5.61   & 6.00          & 5.92          & 4.99   & 10.54         & 10.15         & 6.52   & 6.05          & 5.98          & 5.40   \\
+(RO)~QuaRot.FP16()           & \textbf{6.17} & \textbf{6.10} & -      & \textbf{5.38} & \textbf{5.34} & -      & \textbf{7.83} & \textbf{7.68} & -      & \textbf{5.79} & \textbf{5.73} & -      \\ \midrule
+(RH)~QuaRot                  & 6.27          & 6.20          & 5.61   & 5.51          & 5.46          & 5.01   & 8.20          & 8.02          & 6.52   & 5.81          & 5.75          & 5.40   \\
+(RH)~QuaRot.FP16()           & \textbf{6.17} & \textbf{6.10} & -      & \textbf{5.40} & \textbf{5.37} & -      & \textbf{7.82} & \textbf{7.67} & -      & \textbf{5.78} & \textbf{5.73} & -      \\ \bottomrule
+\end{tabular}
+\label{tab:random_vs_hadamard}
+\end{table}
+
+\subsection{Why the Randomized Hadamard is better?}
+\label{sec:motivation_ccomparision}
+Based on the computational invariance described in Section~\ref{sec:prelim}, it is evident that the choice of rotation matrices is critical for ensuring the accuracy performance of the quantized model. Therefore, a natural question arises: \textit{What type of rotation matrix offers the most advantageous properties?} We begin by focusing on $\mathrm{RO}$ and $\mathrm{RH}$, as both QuaRot~\citep{ashkboos2024quarot} and SpinQuant~\citep{liu2024spinquant} have shown that the latter delivers substantial improvements over the former in LLMs. We conducted experiments by applying $\mathrm{RO}$ and $\mathrm{RH}$ to the LLaMA and Mistral models, followed by weight quantization using GPTQ under various settings. The results are shown in Table~\ref{tab:random_vs_hadamard}, benefiting from the outlier elimination through rotation, we find that for 8-bit activation quantization, both $\mathrm{RO}$ and $\mathrm{RH}$ lead to significant performance improvements compared to standard quantization. Additionally, no substantial difference is observed between the two methods. However, \textbf{under 4-bit token-wise activation quantization, {RH} significantly outperforms RO}.
+
+To investigate the performance differences between $\mathrm{RH}$ and $\mathrm{RO}$ under 4-bit activation setting, we plot the corresponding quantization error after applying 4-bit quantization to the multiple tokens. We also display the quantization error for the baseline setting where quantization is applied without rotating the activation to better understand the impact of using the rotation matrix. As shown in Figure~\ref{fig:quant_error}, compared to the no rotation~($\mathrm{NR}$), both $\mathrm{RO}$ and $\mathrm{RH}$ effectively reduce the quantization error for most tokens across different models. While $\mathrm{RH}$ slightly lowers the quantization error, the difference between the two methods is minimal for the majority of tokens. 
+This leads to the question: \textbf{What explains the significant difference in accuracy during quantization when their quantization errors are so similar?}
+
+To answer this question, we turn our attention to massive activation~\citep{sun2024massive}, a rare but significant feature in LLMs. Since each token has a fixed $L_2$ norm after RMSNorm processing, tokens with massive activation naturally exhibit smaller quantization errors when quantized to 4-bit. As shown in Figure~\ref{fig:quant_error}, the red points represent tokens with massive activation. While most tokens show large quantization errors under NR, these special tokens display significantly smaller errors, which can be observed from Figure~\ref{app:fig:2d_llama3-8b}.
+Figure~\ref{fig:quant_error_llama3_8b} presents the quantization error distribution for tokens with massive activation after applying $\mathrm{RO}$, $\mathrm{RH}$, and $\mathrm{NR}$. Surprisingly, the rotation operations do not significantly reduce quantization errors for these tokens. In fact, compared to NR, $\mathrm{RO}$ greatly increases their quantization error, while $\mathrm{RH}$ only marginally reduces it. This leads us to question whether tokens with massive activation are the primary cause of the significant accuracy discrepancies between $\mathrm{RH}$ and $\mathrm{RO}$.
+
+To investigate this further, we build upon QuaRot by retaining tokens with massive activations in FP16 format for both $\mathrm{RO}$ and $\mathrm{RH}$, while applying 4-bit quantization to the remaining input tokens. Therefore, we can conclude that the fundamental reason for the performance disparity between $\mathrm{RO}$ and $\mathrm{RH}$ is that \textbf{RH more effectively reduces the quantization error for tokens with massive activations in 4-bit activation quantization}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{Figs/quant_error_4.pdf}
+    \caption{Comparison of 4-bit activation quantization error $\text{E}(\cdot)$ for each token with $\mathrm{NR}$, $\mathrm{RO}$ and $\mathrm{RH}$ for (a)~LLaMA2-7B, (b)~LLaMA-2-13B, (c)~LLaMA3-8B and (d) Mistral-7B-v0.3. The tokens are from $\mathrm{model.layers.6.post\_attention\_layernorm}$. Best viewed in color.\label{fig:quant_error}}
+    \centering
+    \includegraphics[width=0.88\linewidth]{Figs/quant_error_2d/LLaMA3-8B_4.pdf}
+    \caption{Comparison of 2D 4-bit quantization errors for tokens with $\mathrm{NR}$, $\mathrm{RO}$ and $\mathrm{RH}$ for LLaMA3-8B from Figure~\ref{fig:quant_error}.\label{app:fig:2d_llama3-8b}}
+    \centering
+    \includegraphics[width=0.88\linewidth]{Figs/llama3_8B_vanilla_random_hadamard_4.pdf}
+    \caption{Comparison of 4-bit quantization error for the token with massive activation with $\mathrm{NR}$, $\mathrm{RO}$ and $\mathrm{RH}$ for LLaMA3-8B from Figure~\ref{fig:quant_error}.\label{fig:quant_error_llama3_8b}}
+\end{figure}
+
+\begin{comment}
+Based on the aforementioned computational invariance on the introduction of the rotation matrices,
+we can further conclude that selecting an appropriate rotation matrix for specific models and data is crucial for preserving model performance during the quantization process.
+Therefore, a natural question arises: \textit{What kind of rotation matrix exhibits the optimal performance?}
+We first pay our attention to $\mathrm{RO}$ and $\mathrm{RH}$,
+as both QuaRot~\citep{ashkboos2024quarot} and SpinQuant~\citep{liu2024spinquant} have demonstrated that the latter can achieve significant improvements over the former in LLMs.
+We conduct experiments by applying $\mathrm{RO}$ and $\mathrm{RH}$ to the LLaMA and Mistral models.
+and then performed weight quantization using GPTQ under different settings.
+As shown in Table~\ref{tab:random_vs_hadamard},
+benefiting from the elimination through rotation,
+we find that for 8-bit activation quantization, both $\mathrm{RO}$ and $\mathrm{RH}$ achieve significant performance improvements compared to vanilla quantization.
+Meanwhile, there is no noticeable difference between the two.% matrix types.
+However, \textit{when it comes to 4-bit activation quantization, Hadamard matrices significantly outperform random matrices}.
+To explore the reasons behind this phenomenon, we compared the 4-bit quantization error for a sample after applying these two types of rotations.
+As seen in Figure~\ref{fig:quant_error}, compared to the vanilla features, we find that both $\mathrm{RO}$ and $\mathrm{RH}$ have effectively reduce the quantization error for most tokens from different models.
+Moreover, even though $\mathrm{RH}$ has slightly reduced quantization error, the effects of both methods in reducing quantization error show no significant difference at most tokens.
+\textit{Therefore, what accounts for the substantial difference in accuracy during quantization when their quantization error are so similar?}
+
+To answer this question, we shift our attention to Massive Activation~\citep{sun2024massive}, a rare but crucial feature in the LLMs.
+Given that each token has a fixed $L_2$ norm after RMSNorm processing, tokens with Massive Activation will naturally exhibit smaller quantization error when quantized to 4-bit.
+As shown in Figure~\ref{fig:quant_error}, the red points correspond to tokens with Massive Activation.
+Although most tokens exhibit large quantization error when unprocessed, these special tokens show significantly smaller quantization error.
+Figure~\ref{fig:quant_error_llama3_8b} shows differences when these special tokens undergo $\mathrm{RO}$ and $\mathrm{RH}$: $\mathrm{RO}$ increases their quantization error, whereas $\mathrm{RH}$ does not.
+We then ask: \textit{Are these tokens with Massive Activation the primary culprits behind significant accuracy discrepancies?}
+We build upon QuaRot by retaining tokens with massive activations as FP16 in both $\mathrm{RO}$ and $\mathrm{RH}$.
+The results are shown in Table~\ref{tab:random_vs_hadamard}.
+We find that by simply retaining these extremely few tokens (often less than one-thousandth) as FP16, we can completely eliminate the performance difference between $\mathrm{RO}$ and $\mathrm{RH}$.
+Therefore, we can confirm the fundamental reason for the performance disparity between $\mathrm{RO}$ and $\mathrm{RH}$ is ----\textit{$\mathrm{RH}$ better reduce the quantization error for tokens with massive activations in 4-bit activation quantization}.
+
+\end{comment}
+
+\subsection{Optimization Objectives and Calibration Data Selection}
+\label{sec:calibration_training}
+The evaluation results in Section~\ref{sec:motivation_ccomparision} show that applying 4-bit quantization to activations leads to significant quantization errors due to the large volume of activations, ultimately causing accuracy degradation. While encoding these activations more precisely could alleviate the issue, it results in a mixed quantization approach that is not well-suited for current GPU platforms.
+A good rotation matrix $\mR_1$ should minimize the different between the original input $\vx$ and its quantized version, namely:
+\begin{equation}
+   \mathcal{L}(\mR_1, \vg)=\mathbb{E}_{\vx}\left[\left\|\vx\mR_1-\mathcal{Q}_{\vg}(\bm{x}\mR_1)\right\|_{2}^{2}\right],
+\end{equation}
+where $\vx\in \mathcal{R}^{C}$ is the token vector from a calibration dataset $\mX^{cal}$, $C$ is the number of channels. $\mR_1$ satisfies $\mR_1\mR_1^T=\mI$, $\vg$ is the quantization parameters and $\mathcal{Q}_{\vg}(\bm{x})$ is the quantization representation of the $\vx$. The size of $\mathcal{Q}_{g}(\bm{x})$ is the same to the $\vx$. The expectation $\mathbb{E}\left[\cdot\right]$ is taken over the token distribution. For simplicity in analysis, we utilize the mean squared error, denoted as $\|\cdot\|_2$.
+
+To better adapt $\mR_1$ to the massive activations, we adjust it by optimizing the following loss function:
+\begin{equation}
+    \label{eqn:weighted_loss}
+    \mathcal{L}(\mR_1,\vg)=\mathbb{E}_{\vx \in \mX^{cal}  \setminus \mX^{m}}\left[\left\|\vx\mR_1-\mathcal{Q}_{\vg}(\bm{x}\mR_1)\right\|_{2}^{2}\right]+\gamma \mathbb{E}_{\vx \in \mX^{m}}\left[\left\|\vx\mR_1-\mathcal{Q}_{\vg}(\bm{x}\mR_1)\right\|_{2}^{2}\right].
+\end{equation}
+where $\mX^{m} \subseteq \mX^{cal}$ denotes the subset of tokens with massive activations, while $\mX^{cal} \setminus \mX^m$ represents the remaining tokens. During calibration, we apply a weighted loss to prioritize the quantization error on tokens with massive activations, with $\gamma$ representing the weight.
+
+The motivation behind this principle stems from the observations in Table~\ref{tab:random_vs_hadamard}. Since $\mX^m$ is the key factor contributing to the performance gap between $\mathrm{RO}$ and $\mathrm{RH}$. Simply optimizing $\mR_1$ over the entire $\mX^{cal}$ fails to specifically target $\mX^m$. Additionally, compared to the $\mathrm{NR}$ approach in Table~\ref{tab:random_vs_hadamard}, $\mathrm{RO}$ also significantly improves performance, indicating that reducing the outliers on $\mX^{cal} \setminus \mX^m$ can enhance the performance of the quantization method. However, optimizing only for $\mX^m$ risks overfitting, which could increase the quantization error for $\mX \setminus \mX^m$, ultimately degrading the model's overall performance. Hence, it is crucial to optimize both $\mX^m$ and $\mX \setminus \mX^m$. Using a weighted approach to optimize the quantization loss is a straightforward yet highly effective method. Ablation studies in Section~\ref{sec:albation} further demonstrate the advantages of this strategy.
+\subsection{Solution Methods}
+Optimizing $\mR_1$ is a challenging task. Since $\mR_1$ influences every MHA and FFN in the network, adjusting the activation distribution in one layer impacts the quantization outcomes across all layers. This makes it difficult to optimize layer by layer or block by block~\citep{shao2023omniquant, wei2023outlier}. A straightforward approach is to use training methods for quantization-aware fine-tuning of the rotation matrix across the entire network~\citep{liu2024spinquant}. However, this approach necessitates fine-tuning the entire network. Although it does not require retaining the gradients of the weights or the corresponding states in the optimizer, it still demands substantial computational resources during the quantization process.
+
+In this paper, we focus on improving the effectiveness of rotation matrices in mitigating outliers in activation values.
+Intuitively, we hypothesize that a rotation matrix that minimizes quantization error will lead to fewer activation outliers and, consequently, better performance.
+Drawing inspiration from Simsiam~\citep{chen2021exploring}, we propose to regard quantization representation $\mathcal{Q}\bm{_{\vg}(x\mR_1)}$ as cluster centroids $\bm{\eta_x}$.
+In the context, optimizing $\mR_1$ and $\bm{g}$ is equivalent to optimizing $\mR_1$ and $\bm{\eta}$,
+which can be viewed as an implementation of an Expectation-Maximization (EM)-like algorithm, as shown in the following equation:
+\begin{equation}
+\label{eq:solve}
+\operatorname{min}_{\mR_1, \bm{\eta}}\mathcal{L}(\mR_1, \bm{\eta})=
+\mathbb{E}_{\vx \in \mX^{cal}  \setminus \mX^{m}}\left[\left\|\vx\mR_1-\bm{\eta_x}\right\|_{2}^{2}\right]+\gamma \mathbb{E}_{\vx \in \mX^{cal}}\left[\left\|\vx\mR_1-\bm{\eta_x}\right\|_{2}^{2}\right],
+\end{equation}
+\text{where}~$\bm{\eta_x}=\mathcal{Q}\bm{_{\vg}(\vx\mR_1)}$.
+This formulation is analogous to k-means clustering~\citep{macqueen1967some},
+and $\mR_1$ acts like the kernel function, representing the learnable rotation matrix.
+Similar to k-means clustering, the problem described in Eq~\ref{eq:solve} can be approached using an alternating algorithm, where one set of variables is fixed while solving for the other. Formally, we can alternate between solving these two subproblems:
+\begin{equation}
+\bm{\eta}^{t} \leftarrow  \arg \min\limits_{\bm{\eta}} \mathcal{L}\left(\mR_1^{t-1}, \bm{\eta} \right) \label{eq:solve_quantization}
+\end{equation}
+\begin{equation}
+\mR_1^{t} \leftarrow  \arg \min\limits_{\mR_1} \mathcal{L}\left(\mR_1, \bm{\eta}^{t}\right) \label{eq:solve_R}
+\end{equation}
+where $t$ represents the iteration index of the alternating rounds, and $\bm{\eta}^{t}$ and $\mR_1^{t}$ denote the values of $\bm{\eta}$ and $\mR_1$ at round $t$.
+
+\paragraph{Solving for the cluster centroids $\bm{\eta_x}$ }
+The set of quantization parameters $\bm{g}\{s, z\}$ further contains the quantization scale $s$ and zero point $z$. Assume we apply the static quantization, the $s^t, z^t$ and $\bm{\eta_x}$ can be solved by the following equations:
+\begin{equation}
+\label{eq:first}
+s^t, z^t \leftarrow \arg \operatorname{min}_{s,z}\mathbb{E}_{\vx}\left[\left\|\vx\mR_1^{t-1}-\mathcal{Q}_{s, z}(\vx\mR_1^{t-1})\right\|_{2}^{2}\right], \bm{\eta_x}^t \leftarrow \mathcal{Q}_{s^t, z^t}(\vx\mR_1^{t-1})
+\end{equation}
+
+In the case of dynamic asymmetric per-token quantization, we can independently determine the optimal quantization scheme for solving $s_\vx$ and $z_\vx$ for each $\vx\mR_1$:
+
+\begin{equation}
+\label{eqn:iterative_search}
+\begin{aligned}
+\bm{\eta_x}&=\mathcal{Q}_{\vg}(\vx\mR_1) = \text{clamp}\left(\left\lfloor \frac{\vx\mR_1}{s} \right\rceil + z, 0, 2^N - 1\right),
+\\
+\text{where} ~ s_{\vx} &= \frac{\alpha\max(\vx\mR_1) - \beta\min(\vx\mR_1)}{2^N - 1}, z_{\vx}=-\left\lfloor \frac{\beta\min(\vx\mR_1)}{s_{\vx}} \right\rceil 
+\end{aligned}
+\end{equation}
+where $\lfloor\cdot\rceil$ indicates round operation, 
+$N$ is the bitwidth,
+and $\alpha$ and $\beta$ is the clip ratio for upper bound and lower bound of quantization, respectively.
+
+\paragraph{Solving for $\mR_1$.}
+Eq~\ref{eq:solve_R} is well-known as Procrustes problem~\citep{mulaik2009foundations}.
+which involves finding the optimal rotation matrix $\mR_1$ that best aligns two sets of points, minimizing the Frobenius norm of their difference.
+The solution to this problem can be obtained through Singular Value Decomposition~(SVD).
+Specifically, given input matrices $\mX$ = $\{\bm{x}\}$ and its quantized version $\mathcal{Q}_{\vg}(\mX)$ = $\{\mathcal{Q}_{\vg}(\bm{x})\}$, the optimal $\mR_1$ can be found:
+\begin{equation}
+\mR_1 = \mU \mV^{T}, \text{where} ~ \mU, \bm{\Sigma}, \mV^{T} = \text{SVD}(\mX^{T}\mathcal{Q}_{\vg^{t}}(\mX)).
+\end{equation}
+where we treat the quantization parameters $\vg^{t}$ as a constant.
+
+\paragraph{One-step optimization.}
+To find an improved rotation matrix $\mR_1$ and quantization parameters $\bm{g}$, we perform the iterative process shown in Eq~\ref{eq:solve_quantization} and Eq~\ref{eq:solve_R} with just 100 rounds, which already yields significantly better performance, as demonstrated in the evaluation (Section~\ref{sec:exp}). Specifically, a calibration set $\mX^{cal}$ is randomly sampled from $\mX$, the iterative process can be specified as:
+\begin{equation}
+s^t, z^t \leftarrow \arg \operatorname{min}_{s,z} {\textstyle \sum_{\vx \in \mX^{cal}}}\left[\left\|\vx\mR_1^{t-1}-\mathcal{Q}_{s,z}(\vx\mR_1^{t-1}))\right\|_{2}^{2}\right], \bm{\eta_x}^t \leftarrow \mathcal{Q}_{s^t, z^t}(\vx\mR_1^{t-1}),
+\end{equation}
+then the resulting quantization parameters will be used to produce the rotation matrix:
+\begin{equation}
+\mR_1^{t} \leftarrow  \arg \min\limits_{\mR_1} {\textstyle \sum_{\vx \in \mX^{cal}}}\left[\left\|\vx\mR_1-\bm{\eta_x}^t\right\|_{2}^{2}\right]
+\end{equation}
+
+
+
+\begin{comment}
+
+As mentioned above, although retaining tokens with massive activations as high-precision floating-point numbers can significantly enhance model accuracy,
+this approach is akin to a token-level version of LLM.int8().
+It still requires fine-grained mixed-precision computations during the process,
+which will inevitably leads to performance degradation.
+Therefore, in this paper, we focus on W4A4 quantization to maintain simplicity and efficiency in the computation process.
+We consider a loss function of the following form:
+\begin{equation}
+\label{eq:optimization}
+\mathcal{L}(\mR_1, \bm{\eta} )=\mathbb{E}_{\vx}\left[\left\|\vx\mR_1-\bm{\eta_x}\right\|_{2}^{2}\right],
+\end{equation}
+where $\vx$ is a token, $\mR_1$ satisfies $\mR_1\mR_1^T=\mI$,
+$\bm{\eta_x}$ is the quantization representation of the $\vx$ and the subscript $_\vx$ means using the token index to access a sub-vector of $\vx$.
+The size of $\bm{\eta_x}$ is the same to the $\vx$.
+The expectation $\mathbb{E}\left[\cdot\right]$ is over the distribution of tokens.
+For the ease of analysis, here we use the mean squared error $\|\cdot\|_2$.
+
+Meanwhile, we introduce our data selection principle.
+We denote the calibration dataset as $\mX$, the tokens with massive activations as $\mX^m$, and the remaining tokens as $\mX \setminus \mX^m$.
+During the calibration process, we apply a weighted approach to optimize quantization error for $\mX^m$ and $\mX \setminus \mX^m$:
+\begin{equation}
+    \mathcal{L}(\mR_1, \bm{\eta} )=\mathbb{E}_{\vx \in \mX  \setminus \mX^m}\left[\left\|\vx\mR_1-\bm{\eta_x}\right\|_{2}^{2}\right]+\gamma \mathbb{E}_{\vx \in \mX^m}\left[\left\|\vx\mR_1-\bm{\eta_x}\right\|_{2}^{2}\right].
+\end{equation}
+
+The motivation behind designing this principle is based on the following:
+as mentioned above, from the comparison in Table~\ref{tab:random_vs_hadamard},
+$\mX^m$ is fundamental reason for the performance gap between $\mathrm{RO}$ and $\mathrm{RH}$
+and merely optimizing $\mR_1$ using the $\mX$ will result in the inability to specifically optimize for $\mX^m$.
+Meanwhile, compared to quantization without rotation~(Vanilla) in Table~\ref{tab:random_vs_hadamard}, $\mathrm{RO}$ also markedly improves performance,
+reducing the quantization error of $\mX  \setminus \mX^m$ can also enhance the quantization performance of GPTQ on the basis of Vanilla.
+Moreover, if we only optimize $\mX^m$, it may lead to overfitting and an increase in quantization error on $\mX  \setminus \mX^m$, conversely decreasing the model's performance.
+Therefore, $\mX  \setminus \mX^m$ should also be optimized.
+We can regard this a long-tail optimization problem, where $\mX^m$ represents the long-tail data. Using a weighted approach to optimize the quantization loss is a simple yet highly effective method.
+We conduct ablation studies in Section~\ref{sec:albation} to show its advantage.
+\subsection{Solution Methods}
+
+Optimizing $\mR_1$ is a challenging problem.
+As $\mR_1$ affects every MHA and FFN in the network,
+optimizing the activation distribution of the current layer impacts the quantization results of each layer.
+Therefore, it is difficult to optimize it layer by layer or block by block~\citep{shao2023omniquant, wei2023outlier}.
+Using training methods to perform quantization-aware fine-tuning for the rotation matrix across the entire network is a very straightforward approach~\citep{liu2024spinquant}. 
+However, it requires fine-tuning the entire network.
+Although this fine-tuning method does not require retaining the gradients of the weights and the corresponding states in the optimizer,
+it still consumes a significant amount of computational resources during the quantization process.
+
+In this paper, we focus on enhancing the ability of rotation matrices to eliminate outliers in activation values.
+Intuitively, we believe that a rotation matrix capable of achieving smaller quantization error
+will result in less outliers for activation and achieve better performance.
+Inspired by Simsiam~\citep{chen2021exploring}, we hypothesize that optimizing $\mR_1$ and the quantization parameter is also an implementation of an Expectation-Maximization~(EM) like algorithm.
+In Eq~\ref{eq:optimization}, we have introduced another set of variables which we denote as $\bm{\eta_x}$.
+With this formulation, we consider solving:
+\begin{equation}
+\label{eq:solve}
+\operatorname{min}_{\mR_1, \bm{\eta}}\mathcal{L}(\mR_1, \bm{\eta}).
+\end{equation}
+Here the problem w.r.t. both $\mR_1$ and $\bm{\eta}$.
+This formulation is analogous to k-means clustering~\citep{macqueen1967some}.
+The $\mR_1$ is analogous to the clustering centers: it is the learnable rotation matrix.
+The variable $\bm{\eta_x}$ is analogous to the assignment vector of the sample $\vx$: it is the quantization representation of $\vx$.
+Also analogous to k-means, the problem in Eq~\ref{eq:solve} can be solved by an alternating algorithm, fix one set of variables and solving for the other set.
+Formally, we can alternate between solving these two subproblems:
+\begin{eqnarray}
+\bm{\eta}^{t} &\leftarrow & \arg \min\limits_{\eta} \mathcal{L}\left(\mR_1^{t-1}, \bm{\eta} \right) \label{eq:solve_quantization} \\
+\mR_1^{t} &\leftarrow & \arg \min\limits_{\mR_1} \mathcal{L}\left(\mR_1, \bm{\eta}^{t}\right) \label{eq:solve_R}
+\end{eqnarray}
+Here $t$ is the index of alternation and $\leftarrow$ means assigning.
+\paragraph{Solving for $\bm{\eta}$.}
+Here we denote $\bm{\eta_x}$ as $\mathcal{Q}(\vx\mR_1, s, z)$,
+where $\mathcal{Q}(\cdot)$ is quantization function, ${s}$ is scale and ${z}$ is zero point.
+If we use static quantization, we can achieve this by solving:
+\begin{equation}
+\label{eq:first}
+s^t, z^t \leftarrow \arg \operatorname{min}_{s,z}\mathbb{E}_{\vx}\left[\left\|\vx\mR_1^{t-1}-\mathcal{Q}(\vx\mR_1^{t-1}, s, z)\right\|_{2}^{2}\right], \bm{\eta_x}^t \leftarrow \mathcal{Q}(\vx\mR_1^{t-1}, s^t, z^t)
+\end{equation}
+This indicates that $s$ and $z$ are assigned with the average distribution of $\vx$ over the $\mX$.
+
+If we use dynamic asymmetric per-token quantization,
+we can independently find best quantization scheme to solve $s_\vx$ and $z_\vx$ for each $\vx\mR_1$ independently via a grid-search method.
+\begin{equation}
+\begin{aligned}
+\bm{\eta_x} &= \mathcal{Q}(\vx\mR_1, s, z) = \text{clamp}\left(\left\lfloor \frac{\vx\mR_1}{s} \right\rceil + z, 0, 2^N - 1\right),
+\\
+\text{where} ~ s &= \frac{\alpha\max(\vx\mR_1) - \beta\min(\vx\mR_1)}{2^N - 1}, z=-\left\lfloor \frac{\beta\min(\vx\mR_1)}{s} \right\rceil 
+\end{aligned}
+\end{equation}
+where $\lfloor\cdot\rceil$ indicates round operation, 
+$N$ is the target bit number,
+and $\alpha$ and $\beta$ is the clip ratio for upper bound and lower bound respectively.
+In this paper, to simplify the problem, we apply dynamic asymmetric per-token quantization for activation values and do not perform a search for the clip\_ratio, setting $(\alpha, \beta) = (1.0, 1.0)$.
+
+\paragraph{Solving for $\mR_1$.}
+Eq~\ref{eq:solve_R} is well-known as Procrustes problem~\citep{mulaik2009foundations}.
+which involves finding the optimal rotation matrix $\mR_1$ that best aligns two sets of points, minimizing the Frobenius norm of their difference.
+The solution to this problem can be obtained through Singular Value Decomposition~(SVD).
+Specifically, given matrices $\bm{\eta}$ and $\mX$, the optimal $\mR_1$ can be found:
+\begin{equation}
+\mR_1 = \mU \mV^{T}, \text{where} ~ \mU, \bm{\Sigma}, \mV^{T} = \text{SVD}(\mX^{T}\bm{\eta_{\mX}}).
+\end{equation}
+In this subproblem, naturally, we treat $\bm{\eta}^{t}$ is a constant.
+
+\paragraph{One-step alternation.}
+Our method can be approximated by one-step alternation between Eq~\ref{eq:solve_quantization} and Eq~\ref{eq:solve_R}.
+First, we approximate Eq~\ref{eq:first} by sampling a calibration dataset from $\mX$, denoted as $\mX^{'}$,
+and ignoring $\mathbb{E}_{\vx}$:
+\begin{equation}
+s^t, z^t \leftarrow \arg \operatorname{min}_{s,z} {\textstyle \sum_{\vx \in \mX^{'}}}\left[\left\|\vx\mR_1^{t-1}-\mathcal{Q}(\vx\mR_1^{t-1}, s, z))\right\|_{2}^{2}\right], \bm{\eta_x}^t \leftarrow \mathcal{Q}(\vx\mR_1^{t-1}, s^t, z^t).
+\end{equation}
+By inserting it into the sub-problem Eq~\ref{eq:solve_R}, we have:
+\begin{equation}
+\mR_1^{t} \leftarrow  \arg \min\limits_{\mR_1} {\textstyle \sum_{\vx \in \mX^{'}}}\left[\left\|\vx\mR_1-\mathcal{Q}(\vx\mR_1^{t-1}, s^t, z^t))\right\|_{2}^{2}\right]
+\end{equation}
+\end{comment}
+
+
+
+\section{experiments}
+
+\label{sec:exp}
+
+\paragraph{Experiment settings.}
+
+In this paper, to simplify the problem, we apply dynamic asymmetric per-token quantization for activation values without searching for clip ratios, and we fix $(\alpha, \beta)$ to $(1.0, 1.0)$.
+The KV-cache is quantized using asymmetric quantization with a group size of 128 and a constant clipping ratio of 1.0.
+RTN and GPTQ~\citep{frantar2022gptq} are used for weight with per-channel symmetric quantization,
+where a linear search for the clipping ratio is applied to minimize squared error.
+We use 128 samples from the WikiText-2~\citep{wikitext} training set, each with a sequence length of 2048, as the calibration dataset for GPTQ quantization.
+We use a $\mathrm{RH}$ to initialize the rotation matrix and optimize it for 100 iterations.
+\begin{table}[t]
+\footnotesize
+\centering
+\caption{WikiText-2 perplexity~($\downarrow$) results for LLaMA and Mistral. The 4-4-4 and 4-4-16 represent W4A4KV4, W4A4KV16, respectively.  We show the failed GPTQ experiments using NaN and the perplexity results$>$100 by Inf.\label{tab:wiki}}
+\begin{tabular}{@{}l|cc|cc|cc|cc@{}}
+\toprule
+Method      & \multicolumn{2}{c|}{LLaMA2-7B} & \multicolumn{2}{c|}{LLaMA2-13B} & \multicolumn{2}{c|}{LLaMA3-8B} & \multicolumn{2}{c}{Mistral-7B-v0.3} \\ \midrule
+Baseline    & \multicolumn{2}{c|}{5.47}      & \multicolumn{2}{c|}{4.88}       & \multicolumn{2}{c|}{6.14}      & \multicolumn{2}{c}{5.32}       \\ \midrule
+Extra Time    & \multicolumn{2}{c|}{+8min}      & \multicolumn{2}{c|}{+20min}       & \multicolumn{2}{c|}{+8min}      & \multicolumn{2}{c}{+8min}       \\ \midrule
+            & 4-4-4         & 4-4-16         & 4-4-4          & 4-4-16         & 4-4-4         & 4-4-16         & 4-4-4         & 4-4-16         \\ \midrule
+RTN         & NaN           & NaN            & Inf            & Inf            & Inf           & Inf            & Inf           & Inf            \\
+QuaRot-RTN  & 9.04          & 8.69           & 6.31           & 6.23           & 11.06         & 10.47          & 6.38 & 6.29\\
+DFRot-RTN& 7.68          & 7.47           & 6.21           & 6.12           & 9.67          & 9.35           & 6.36& 6.27\\ \midrule
+GPTQ        & NaN           & NaN            & Inf            & Inf            & Inf           & Inf            & Inf           & Inf            \\
+QuaRot-GPTQ & 6.27          & 6.20           & 5.51           & 5.47           & 8.20          & 8.02           & 5.81& 5.75\\
+DFRot-GPTQ& 6.21          & 6.14           & 5.47           & 5.39           & 7.95          & 7.81           & 5.81& 5.76\\ \bottomrule
+\end{tabular}
+
+\footnotesize
+\centering
+\caption{Zero-shot accuracy~($\uparrow$) of LLaMA and Mistral with GPTQ on PIQA~(PQ), WinoGrande~(WG), HellaSwag~(HS), Arc-Easy~(A-e), Arc-Challenge~(A-c), and LAMBADA~(LA).\label{tab:zero_shot}}
+\begin{tabular}{@{}l|l|c|cccccc|c@{}}
+\toprule
+\multicolumn{1}{l|}{\textbf{Model}} & \multicolumn{1}{l|}{\textbf{Method}} & \textbf{W-A-KV} & \textbf{PQ} & \textbf{WG} & \textbf{HS} & \textbf{A-e} & \textbf{A-c} & \textbf{LA} & \textbf{Avg.} \\ \midrule
+\multirow{5}{*}{LLaMA2-7B} & FP16 & 16-16-16 & 79.11 & 68.98 & 75.99 & 74.54 & 46.42 & 73.88 & 69.82 \\ \cmidrule(l){2-10}
+ & \multirow{2}{*}{QuaRot} & 4-4-16 & 76.06 & 65.67 & 73.00 & 69.82 & 42.24 & 69.42 & 66.03 \\ 
+ & & 4-4-4 & 76.33 & 64.96 & 72.69 & 68.60 & 41.64 & 68.58 & 65.47 \\ \cmidrule(l){2-10}
+ & \multirow{2}{*}{DFRot} & 4-4-16 & 77.15 & 65.82 & 73.17 & 69.78 & 44.37 & 70.66 & 66.83 \\ 
+ & & 4-4-4 & 76.22 & 64.96 & 72.41 & 70.75 & 42.66 & 69.92 & 66.15 \\ \midrule
+\multirow{5}{*}{LLaMA2-13B} & FP16 & 16-16-16 & 80.52 & 72.22 & 79.39 & 77.48 & 49.15 & 76.75 & 72.58 \\ \cmidrule(l){2-10}
+ & \multirow{2}{*}{QuaRot} & 4-4-16 & 77.91 & 68.51 & 75.94 & 73.57 & 46.25 & 72.97 & 69.19 \\ 
+ & & 4-4-4 & 78.73 & 70.40 & 75.82 & 73.74 & 46.33 & 72.73 & 69.63 \\ \cmidrule(l){2-10}
+ & \multirow{2}{*}{DFRot} & 4-4-16 & 78.73 & 69.30 & 76.99 & 72.69 & 45.82 & 75.41 & 69.82 \\ 
+ & & 4-4-4 & 79.82 & 68.43 & 76.70 & 72.64 & 46.59 & 75.33 & 69.92 \\ \midrule
+\multirow{5}{*}{LLaMA3-8B} & FP16 & 16-16-16 & 80.79 & 72.85 & 79.16 & 77.78 & 53.33 & 76.03 & 73.32 \\ \cmidrule(l){2-10}
+ & \multirow{2}{*}{QuaRot} & 4-4-16 & 74.92 & 66.61 & 73.39 & 70.29 & 44.54 & 67.71 & 66.24 \\
+ & & 4-4-4 & 75.14 & 66.54 & 72.32 & 68.64 & 42.41 & 66.04 & 65.18 \\ \cmidrule(l){2-10}
+ & \multirow{2}{*}{DFRot} & 4-4-16 & 76.22 & 68.03 & 73.92 & 70.41 & 45.65 & 68.87 & 67.18 \\ 
+ & & 4-4-4 & 75.68 & 66.77 & 73.56 & 70.29 & 45.14 & 68.99 & 66.74 \\ \midrule
+\multirow{5}{*}{Mistral-7B-v0.3}& FP16 & 16-16-16 & 82.26 & 73.88 & 80.41 & 78.20 & 52.30 & 75.32 & 73.73 \\ \cmidrule(l){2-10} 
+ & \multirow{2}{*}{QuaRot} & 4-4-16 & 79.54& 69.30& 77.81& 75.51& 47.95& 73.76& 70.65\\
+ & & 4-4-4 & 79.38& 69.06& 77.36& 74.54& 48.29& 73.55& 70.36\\ \cmidrule(l){2-10} 
+ & \multirow{2}{*}{DFRot} & 4-4-16 & 79.87& 69.53& 78.24& 75.88& 48.46& 73.01& 70.83\\
+ & & 4-4-4 & 80.36& 69.61& 78.01& 75.55& 47.95& 72.39& 70.65\\
+\bottomrule 
+\end{tabular}
+\label{tab:zero_shot_gptq}
+\end{table}
+
+
+\subsection{Main results}
+
+\paragraph{Language Generation Task.}
+Firstly, we evaluate DFRot on a language generation task and compare it with QuaRot.
+We quantize the weights using both the RTN and GPTQ methods.
+Table~\ref{tab:wiki} shows the perplexity of LLaMA and Mistral models.
+As shown, compared to QuaRot, DFRot achieves improvements in most cases.
+Notably, DFRot achieves the most significant improvement on the LLaMA3-8B model with W4A4KV4 and W4A4KV16 using GPTQ, outperforming QuaRot by 0.25 and 0.21, respectively.
+Similar to QuaRot, DFRot does not require any retraining process and only needs an additional sample to optimize the rotation matrix.
+On a single NVIDIA A100 GPU, optimizing the rotation matrix takes an extra 8 minutes for embeddings of 4096~(LLaMA2-7B, LLaMA3-8B \& Mistral-7B-v0.3) and 20 minutes for 5120~(LLaMA2-13B), resulting in minimal overhead.
+It demonstrates that DFRot has wide applicability and can serve as a cost-effective method to enhance the quantization performance of rotated LLMs.
+\paragraph{Zero-Shot Tasks.}
+Following QuaRot, we also evaluate DFRot on the following six important zero-shot tasks:
+PIQA~\citep{bisk2020piqa}, WinoGrande~\citep{sakaguchi2021winogrande}, HellaSwag~\citep{zellers2019hellaswag}, Arc~(Easy and Challenge)~\citep{clark2018think} and LAMBADA~\citep{radford2019language}.
+We used lm\_eval==0.4.3~\citep{eval-harness} and GPTQ for our experiments, with default parameters and weight quantization, respectively.
+Table~\ref{tab:zero_shot} shows the accuracy of DFRot on the above tasks as well as the average score.
+As can be seen, DFRot consistently achieves improvements compared to QuaRot across all tasks.
+For example, DFRot achieves a 1.56\% accuracy improvement compared to QuaRot on the LLaMA3-8B model with W4A4KV4 quantization settings.
+
+\subsection{Ablation studies}
+\label{sec:albation}
+
+
+\begin{figure}[ht]
+\scriptsize
+\centering
+\subfigure[LLaMA2-7B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_Llama-2-7b_4-4-4.pdf}}
+\centering
+\subfigure[LLaMA2-13B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_Llama-2-13b_4-4-4.pdf}}
+\centering
+\subfigure[LLaMA3-8B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_LLaMA-3-8B_4-4-4.pdf}}
+\centering 
+\subfigure[Mistral-7B-v0.3]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_Mistral-7B_4-4-4.pdf}}
+\caption{
+($\mathrm{RH}$) Comparison of WikiText-2 perplexity results under different $\gamma$ for W4A4KV4.
+Weight is quantized via GPTQ.
+$\gamma \to \infty$ denotes we only optimize quantization error for $\mX^m$.
+\label{fig:gamma_ablation_w4a4kv4}
+}
+\centering
+\subfigure[LLaMA2-7B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_Llama-2-7b_4-4-16.pdf}}
+\centering
+\subfigure[LLaMA2-13B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_Llama-2-13b_4-4-16.pdf}}
+\centering
+\subfigure[LLaMA3-8B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_LLaMA-3-8B_4-4-16.pdf}}
+\centering 
+\subfigure[Mistral-7B-v0.3]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_Mistral-7B_4-4-16.pdf}}
+\caption{
+($\mathrm{RH}$) Comparison of WikiText-2 perplexity results under different $\gamma$ for W4A4KV16.
+Weight is quantized via GPTQ.
+$\gamma \to \infty$ denotes we only optimize quantization error for $\mX^m$.\label{fig:gamma_ablation_w4a4kv16}
+}
+
+\scriptsize
+\centering
+\subfigure[LLaMA2-7B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_Llama-2-7b_4-4-4.pdf}}
+\centering
+\subfigure[LLaMA2-13B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_Llama-2-13b_4-4-4.pdf}}
+\centering
+\subfigure[LLaMA3-8B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/hadamard_LLaMA-3-8B_4-4-4.pdf}}
+\centering 
+\subfigure[Mistral-7B-v0.3]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_Mistral-7B_4-4-4.pdf}}
+\caption{
+($\mathrm{RO}$)~Comparison of WikiText-2 perplexity results under different $\gamma$ for W4A4KV4.
+Weight is quantized via GPTQ.
+$\gamma \to \infty$ denotes we only optimize quantization error for $\mX^m$.\label{fig:random_ablation_w4a4kv4}
+}
+\centering
+\subfigure[LLaMA2-7B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_Llama-2-7b_4-4-16.pdf}}
+\centering
+\subfigure[LLaMA2-13B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_Llama-2-13b_4-4-16.pdf}}
+\centering
+\subfigure[LLaMA3-8B]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_LLaMA-3-8B_4-4-16.pdf}}
+\centering 
+\subfigure[Mistral-7B-v0.3]{\includegraphics[width=0.246\linewidth]{gamma_ablation/random_Mistral-7B_4-4-16.pdf}}
+\caption{
+($\mathrm{RO}$)~Comparison of WikiText-2 perplexity results under different $\gamma$ for W4A4KV16.
+Weight is quantized via GPTQ.
+$\gamma \to \infty$ denotes we only optimize quantization error for $\mX^m$.\label{fig:random_ablation_w4a4kv16}
+}
+\end{figure}
+\textbf{Choice of $\bm{\gamma}$.}
+To further understand the effect of hyperparameters in DFRot,
+we conducted an ablation study on Wikitext-2 PPL to investigate the impact of different $\gamma$ settings for W4A4KV4 and W4A4KV16.
+As seen in Figures~\ref{fig:gamma_ablation_w4a4kv4} and \ref{fig:gamma_ablation_w4a4kv16}, when $\gamma$ ranges between 50 and 200, DFRot achieves significant improvements across various LLaMA models using $\mathrm{RH}$. Notably, on the LLaMA3-8B model, known for its quantization challenges, we observed a PPL improvement of over 0.2.
+If we set $\gamma=1$ and treat $\mX^m$ and $\mX \setminus \mX^m$ equally to minimize their quantization errors, it may reduce the quantization loss of $\mX \setminus \mX^m$ but increase the quantization loss of $\mX^m$, ultimately resulting in a performance decline on the LLaMA2-13B.
+Conversely, if we set $\gamma \to \infty$ and only optimize the quantization error for $\mX^m$, it will increase the quantization error of $\mX \setminus \mX^m$, resulting in an accuracy drop across the LLaMA2-7B, LLaMA2-13B, and LLaMA3-8B.
+It is also worth mentioning that the trend observed in the Mistral-7B-v0.3 model significantly differs from that of the LLaMA models.
+We believe this is primarily because, compared to the LLaMA models, the $\mathrm{RH}$ has effective in reducing the quantization error on \(\mX^{m}\) as shown in Figure~\ref{fig:quant_error_mistral_7b}.
+Therefore, optimizing the quantization error of \(\mX^{m}\) does not have a noticeable impact on the Mistral-7B-v0.3.
+
+
+\paragraph{Initialize with Randomized Orthogonal.}
+We conducted an ablation study on the use of $\mathrm{RO}$ with varying $\gamma$ values.
+From Figure~\ref{fig:random_ablation_w4a4kv4} and Figure~\ref{fig:random_ablation_w4a4kv16}, it can be observed that, compared to using $\mathrm{RH}$ for initialization,
+our method achieved significant improvements in $\mathrm{RO}$ scenarios.
+However, due to the exceptional performance of $\mathrm{RH}$,
+initialization and optimization using $\mathrm{RH}$ often yield superior final results compared to those obtained with random initialization.
+
+\begin{figure}[h]
+\scriptsize
+\centering
+\subfigure[LLaMA2-7B]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Llama-2-7b-hf_W4A4KV4.pdf}}
+\centering
+\subfigure[LLaMA2-13B]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Llama-2-13b-hf_W4A4KV4.pdf}}
+\centering
+\subfigure[LLaMA3-8B]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Meta-Llama-3-8B_W4A4KV4.pdf}}
+\centering 
+\subfigure[Mistral-7B-v0.3]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Mistral-7B-v0.3_W4A4KV4.pdf}}
+\caption{
+Comparison of WikiText-2 perplexity results under different activation clip ratio for W4A4KV4.
+Weight is quantized via RTN.\label{fig:act_clip_ratio_w4a4kv4}
+}
+\scriptsize
+\centering
+\subfigure[LLaMA2-7B]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Llama-2-7b-hf_W4A4KV16.pdf}}
+\centering
+\subfigure[LLaMA2-13B]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Llama-2-13b-hf_W4A4KV16.pdf}}
+\centering
+\subfigure[LLaMA3-8B]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Meta-Llama-3-8B_W4A4KV16.pdf}}
+\centering 
+\subfigure[Mistral-7B-v0.3]{\includegraphics[width=0.246\linewidth]{a_clip_ratio/Mistral-7B-v0.3_W4A4KV16.pdf}}
+\caption{
+Comparison of WikiText-2 perplexity results under different activation clip ratio for W4A4KV16.
+Weight is quantized via RTN.\label{fig:act_clip_ratio_w4a4kv16}
+}
+\end{figure}
+
+\paragraph{Ablation studies for activation clip ratio for RTN.}
+Activation clipping is a widely used quantization optimization technique, particularly effective for RTN.
+As shown in Figures~\ref{fig:act_clip_ratio_w4a4kv4} and \ref{fig:act_clip_ratio_w4a4kv16},
+we conducted an experiment to investigate the effectiveness of DFRot for RTN quantization.
+The experimental results show DFRot always achieves better PPL at appropriate activation clip ratios.
+When the rotation matrix is initialized with $\mathrm{RH}$, DFRot also achieves better results compared to $\mathrm{RO}$.
+Additionally, we find that compared to GPTQ, which updates weights through compensation mechanisms,
+DFRot has a more pronounced effect on RTN quantization as it directly optimizes quantization errors.
+We believe that DFRot can further enhance the performance of methods like QServe, which do not incorporate GPTQ.
+
+
+
+\section{Conclusion}
+
+Eliminating outliers in LLMs through rotational invariance can significantly improve model quantization accuracy.
+In this paper, we find that in the context of 4-bit activation quantization,
+the fundamental reason for the difference in effectiveness between $\mathrm{RO}$ and $\mathrm{RH}$ is their performance on tokens with massive activations.
+Specifically, randomized Hadamard transformations perform better on these tokens.
+Based on this observation, we treat the problem as a long-tail optimization and construct a simple yet effective weighted quantization loss function to balance the importance of tokens.
+Furthermore, by alternately optimizing quantization parameters and employing orthogonal Procrustes transformations to refine the rotation matrix,
+our method, named DFRot, enhances the Rotated LLMs by achieving Dual Free, including \textit{Outlier-Free} and \textit{Massive Activation-Free}.
+DFRot significantly improves model accuracy in 4-bit activation quantization with just a single data sample and extra 8 minutes,
+achieving PPL improvements of 0.25 and 0.21 on W4A4KV4 and W4A4KV16, respectively,
+for the LLaMA3-8B, which is notable for its quantization challenges.
+
+
+
+
+
+
+
+

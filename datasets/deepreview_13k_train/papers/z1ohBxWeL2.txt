@@ -1,0 +1,454 @@
+\title{SwiftKV: Fast Prefill-Optimized Inference with Knowledge-Preserving Model Transformation}
+
+\begin{abstract}
+LLM inference for popular enterprise use cases, such as summarization, RAG, and code-generation, typically observes orders of magnitude longer prompt lengths than generation lengths. 
+This characteristic leads to high cost of prefill and increased response latency. 
+In this paper, we present \OURS, a novel model transformation and distillation procedure specifically designed to reduce the time and cost of processing prompt tokens while preserving high quality of generated tokens. 
+\OURS combines three key mechanisms: i) SingleInputKV, which prefills later layers' KV cache using a much earlier layer's output, allowing prompt tokens to skip much of the model computation, 
+ii) AcrossKV, which merges the KV caches of neighboring layers to reduce the memory footprint and support larger batch size for higher throughput, 
+and iii) a knowledge-preserving distillation procedure that can adapt existing LLMs for \OURS with minimal accuracy impact and low compute and data requirement. 
+For Llama-3.1-8B and 70B, \OURS reduces the compute requirement of prefill by 50\% and the memory requirement of the KV cache by 62.5\% while incurring minimum quality degradation across a wide range of tasks. 
+In the end-to-end inference serving using an optimized vLLM implementation, \OURS realizes up to \(2\times\) higher aggregate throughput and 60\% lower time per output token. 
+It can achieve a staggering 560 TFlops/GPU of normalized inference throughput, which translates to 16K tokens/s for Llama-3.1-70B in 16-bit precision on 4\(\times\) H100 GPUs. 
+Our training, inference, and model implementations are open-sourced and can be found through \url{https://huggingface.co/collections/Snowflake/swiftkv-models-674f7d7474eb789e185d31cb}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Large Language Models (LLMs) are quickly becoming an integral enabler of enterprise applications and offerings, including code and data co-pilots~\citep{chen2021evaluatinglargelanguagemodels,10.5555/3666122.3667699}, retrieval augmented generation (RAG)~\citep{10.5555/3495724.3496517,lin2024radit}, summarization~\citep{pu2023summarizationalmostdead,zhang-etal-2024-benchmarking}, and agentic workflows~\citep{wang2024mixtureofagentsenhanceslargelanguage,schick2023toolformerlanguagemodelsteach}.  While it is clear that LLMs can add value to these applications, the cost and speed of inference determine their practicality. Therefore, improving the aggregate throughput and reducing latency of LLM inference has become an increasingly important topic of interest, with various efforts (\Secref{sec:related_work}) tackling the problem from multiple angles. 
+   
+In this paper, we take a unique approach to improving LLM inference for enterprise applications based on the key observation that typical enterprise workloads process many more input tokens than output tokens. For example, tasks like code completion, text-to-SQL, summarization and RAG each submit long prompts but produce a small number of generated tokens, and a majority of enterprise LLM use cases in Snowflake incur a 10:1 ratio between prompt and generated tokens.%\footnote{Exact use cases hidden to preserve anonymity but will be included in final paper.} %{\color{blue}[YH: Will it be added at the final version? If so, mention that.]}\aurick{done}} In these scenarios, inference throughput and latency are often dominated by the cost of KV cache prefill, and reducing this cost is key to improving end-to-end LLM applications.
+
+Based on this observation, we designed \emph{\OURS}, which improves throughput and latency by: i) reducing the computation required to pre-fill the KV cache for input tokens, and ii) enabling memory savings to support larger batch sizes needed to serve LLMs more cost effectively~\citep{10.5555/3618408.3619696,pope2022efficientlyscalingtransformerinference,280922}. \OURS (\fref{fig:main-figure}) consists of four key components:
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth,trim={0 150 80 0},clip]{figures/main-figure.pdf}
+\caption{
+Illustration of \OURS with 50\% \singlekv and 2-way \acrosskv. After distillation, the KV cache of layers 5--8 can all be populated using the hidden state outputs of layer 4. For prefill tokens, the query, attention, and MLP operations of layers 5--8 may be skipped altogether, while decode tokens complete all layers. Existing models may be efficiently adapted for \OURS by distilling from the original unmodified model using a small dataset. Model knowledge is preserved by keeping the trainable parameters limited to the Q, K, and V projections of the layers affected by \singlekv.
+}
+\label{fig:main-figure}
+\end{figure}
+
+\textbf{SingleInputKV.} \singlekv rewires an existing model so that the pre-fill stage during inference can skip a number of later layers in the network, and their KV cache are computed by a single earlier layer. SingleInputKV is motivated by the observation that the output hidden states of the later transformer layers do not change significantly (see \sref{sec:single_layer_kv}, also independently discovered by \cite{liu2024foldgptsimpleeffectivelarge}). With \singlekv, the computation required for pre-fill is reduced by approximately the number of layers skipped. We found that it is possible to skip at least 50\% of the layers without significantly impacting the model quality (\sref{subsec:model-quality-vs-compression}), which translates to a 50\% reduction of the pre-fill computation in inference.
+
+\begin{comment}
+\aurick{
+Summarized above, suggest moving the rest into a later more detailed section
+
+SingleInputKV is a parameter-preserving architecture transformation designed to reduce the pre-fill computation. Note that the purpose of pre-fill stage of inference is to produce the KV-Cache needed for the decoding phases. 
+
+To reduce the pre-fill computation, SingleInputKV leverages the insight that the output activation of transformer layers on the deep end of the model do not change significantly  (see Sec XYZ, also independently discovered by \cite{XYZ}). Based on this insight, SingleInputKV uses the output activation of the $l^{th}$ layer to compute KV cache for $(l+i)^{th}$ using the KV projection matrices from the $(l+i)^{th}$ layer (Sec. XYZ) and does not require computing output activations beyond the $l^{th}$ layer, reducing the pre-fill computation to $l/n$ of the original as discussed below.
+ 
+
+For a vanilla transformer architecture \cite{vanilla-transformer} with an embedding size of $H$, the total amount of computation per token per layer is roughly given by $24H^2$, where $4H^2$ goes to KV projections, another $4H^2$ goes to Q projection and context GEMM, and the remaining $16H^2$ goes to MLP computation. For popular GQA \cite{GQA} based architectures like Llama, Mistral, Qwen, Arctic and many others, the KV projection is reduced to $4H^2/G$, where $G$ is the size of the group and is larger than $4$. As such, the compute cost of the KV projection is negligible ($\frac{4H^2/G}{20H^2+4H^2/G}$ which is less than 5\% when $G \geq 4$), compared to the rest of the computation.
+
+With SingleInputKV, pre-fill tokens only require computing this negligible KV projection for layers $ \geq l$. Therefore, it reduces the total pre-fill computation to $l/n$. For pre-fill dominant enterprise workloads, \OURS can reduce the total computation in inference to 50\% of the original using SingleInputKV with minimal loss to accuracy (\sref{subsec:model-quality-vs-compression}).
+}
+\end{comment}
+
+\textbf{\acrosskv.} While SingleInputKV reduces the pre-fill computation, it does not reduce the KV cache memory requirement. \acrosskv combines the KV projections from multiple adjacent layers into a single one, and share the KV cache across these layers to reduce its size in memory. \acrosskv allows significant memory savings, which unlocks higher throughput by enabling larger batches during inference. In \secref{sec:methodology}, we show that \acrosskv can reduce the KV cache size by 25\% with less than a 1\% quality gap. We also show in ablation studies (\Secref{sec:discussion}) that \acrosskv is compatible with existing KV cache quantization methods, which combine to unlock 62.5\% reduction in KV cache size.
+
+\textbf{Knowledge Recovery.} Although \singlekv and \acrosskv can be applied to existing LLMs with minimal changes to their architectures, we found that the resulting model parameters should still be adapted to the new architecture to recover their original prediction quality. This can be done via distillation from the original model. With \OURS, we found that a lightweight distillation is sufficient, with only a fraction of the model (Q, K, and V projections of the affected layers) trained on 680M tokens, which takes less than 3 hours on a single \(8\times\) H100 node for Llama-3.1-8B.
+
+
+\textbf{\OURS Optimized Inference.} To realize the computation and memory reductions of \singlekv and \acrosskv into end-to-end throughput and latency improvements, we implemented \OURS in vLLM~\citep{10.1145/3600006.3613165}. Our implementation includes several additional optimizations, including fusing all KV-projections beyond layer $l$ into a single GEMM operation, and integrated memory management needed to lower the KV cache memory footprint achievable via \acrosskv.
+
+\OURS increases the aggregate throughput of enterprise workloads by up to \( 2\times \), while reducing time-to-first-token (TTFT) and time-per-output-token (TPOT) by up to 50\% and 60\%, respectively. In fact, for Llama-3.1-70B, \OURS can achieve a normalized throughput of 560 TFLops/GPU\footnote{Normalized throughput and MFU is based on number of floating point operations in the baseline model.}. This is an unprecedented 56.6\% MFU utilization for inference (\secref{sec:inference-speedup}). We show that \OURS incurs minimal quality degradation averaged across a wide range of tasks (\secref{subsec:model-quality-vs-compression}), including ARC-Challenge~\citep{Clark2018ThinkYH}, Winogrande~\citep{sakaguchi2019winogrande}, HellaSwag~\citep{zellers2019hellaswag}, TruthfulQA~\citep{lin-etal-2022-truthfulqa}, MMLU~\citep{hendryckstest2021}, and GSM8K~\citep{cobbe2021training}.
+
+In addition to these main results, in \sref{sec:discussion} we discuss the impact of distillation, datasets, choice of trainable parameters for training \OURS. We also present our analysis of the hidden state similarities, and how \acrosskv can be extended and combined with other KV cache compression works. Additionally, we also discuss how \singlekv can enable compute savings not just during pre-fill but also during decoding phase.
+
+Lastly, we open-sourced the training and inference code for \OURS that can be used to fully reproduce our results, as well as several \OURS models that can be used directly by the community at \url{https://huggingface.co/collections/Snowflake/swiftkv-models-674f7d7474eb789e185d31cb}.
+
+
+
+ 
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\textbf{Hardware and System Optimizations.} Lower-precision quantization like FP8~\citep{10.5555/3600270.3601335} can enable the use of tensor-cores to accelerate inference~\citep{luo2024benchmarkingdissectingnvidiahopper}. System approaches like PagedAttention~\citep{10.1145/3600006.3613165}, Tensor-Parallelism\citep{shoeybi2020megatronlmtrainingmultibillionparameter}, Split-Fuse~\citep{holmes2024deepspeedfastgenhighthroughputtextgeneration,298679}, FlashAttention~\citep{10.5555/3600270.3601459}, and their optimized implementations in  TensorRT~\citep{TensorRT}, FasterTransformer~\citep{FasterTransformer}, vLLM~\citep{10.1145/3600006.3613165}, and DeepSpeed-Inference~\citep{aminabadi2022deepspeedinferenceenablingefficient} enable better parallelization, batching, and scheduling to eliminate performance overheads and achieve better hardware peak utilization without impacting model quality. In contrast, \OURS is a model architecture optimization and is complementary to these works.
+
+\textbf{Sparse attention optimizations.} Systems such as ALISA~\citep{zhao2024alisaacceleratinglargelanguage} and MInference~\citep{jiang2024minference10acceleratingprefilling} leverage naturally-occurring sparsity patterns in transformer models to reduce the computation of the quadratic attention operation. Particularly, like \OURS, MInference also targets the prefill phase of inference. Sparse attention can be particularly effective for very long sequence lengths (e.g. 100K - 1M tokens) when attention is the dominant operation.
+In comparison, \OURS reduces prefill computation by skipping not just the attention operation, but also the query/output projections and MLP of certain layers. This means that (1) \OURS can be more suited for inputs with more moderate lengths when MLP is the dominant operation, and (2) \OURS, which either runs attention as-is or skips attention entirely, is complementary to sparse attention methods which are more concerned with the implementation of attention itself.
+
+\textbf{Memory Compression.} A wide range of techniques have been developed to reduce the memory need of inference. Lower-precision quantization techniques like FP8/FP4 can reduce the memory for both KV cache and parameters~\citep{hooper2024kvquant10millioncontext}. Attention optimization techniques like MQA~\citep{shazeer2019fasttransformerdecodingwritehead}, GQA~\citep{ainslie2023gqatraininggeneralizedmultiquery}, low-rank attention~\citep{chang2024palucompressingkvcachelowrank} also reduce the KV Cache.
+These approaches are complementary to \OURS, which we demonstrate in \sref{subsec:model-quality-vs-compression} and \sref{subsec:kv-quantization}.
+Like \acrosskv, MiniCache~\citep{liu2024minicachekvcachecompression} also considers merging the \kv of consecutive layers. However, \acrosskv enables consolidating more than just two layers, allowing for higher level of compression, and does not require any token retention strategy where distinct KV caches are stored for special tokens, allowing for simpler implementation.
+
+Furthermore, while many of these approaches only focus on reducing the memory, \OURS can reduce both the prefill computation (via \singlekv) along with memory. As we show in \sref{sec:compute-vs-memory}, compute reduction rather than memory reduction is crucial for accelerating inference in compute-bound scenarios with sufficient memory, which is common in production with modern GPUs (H100, A100).
+
+
+
+
+
+\section{\OURS: Design and Implementation}
+
+\label{sec:methodology}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.51\linewidth]{figures/input_sim.pdf}
+\includegraphics[width=0.39\linewidth,trim={25 520 330 30},clip]{figures/forward_time.pdf}
+\caption{
+ RIGHT: The time per forward pass of Llama-3.1-8B. \singlekv effectively reduces the forward pass processing time across a range of batch sizes.
+}
+\label{fig:motivation}
+\end{figure}
+\subsection{Preliminaries}
+
+In transformer models~\citep{10.5555/3295222.3295349}, attention enables each token to focus on other tokens by comparing \emph{queries} (\(Q\)) with \emph{keys} (\(K\)) and using \emph{values} (\(V\)) to compute the final representation. For a sequence of input tokens \(x^{(1)}, \dots, x^{(n)}\), the projections are defined as follows: $Q = X W_Q, \quad K = X W_K, \quad V = X W_V$, where \(X \in \mathbb{R}^{n \times d}\) are the input embeddings, and \(W_Q \in \mathbb{R}^{d \times d_k}\) and \( W_K, W_V \in \mathbb{R}^{d \times d_g}\) are trained model parameters with \( d_g | d_k \). Hereafter, we may also refer to \( W_K \) and \( W_V \) as a single matrix \( W_{KV}\in \mathbb{R}^{d \times 2 d_k} \).
+
+During the \emph{prefill phase} of inference, the model processes the entire input sequence at once, computing \(K\) and \(V\) for all tokens in parallel (or in chunks in the case of Split-Fuse~\citep{holmes2024deepspeedfastgenhighthroughputtextgeneration,298679}). This typically occurs when the model handles an initial prompt or context.
+
+During the \emph{decoding phase} of inference, new tokens are generated one at a time. When predicting the next token, only the query (\(Q^{(t+1)}\)) for the new token needs to be computed, while the model must attend to the keys and values (\(K^{(1)}, \dots, K^{(t)}\), \(V^{(1)}, \dots, V^{(t)}\)) of all previously processed tokens.
+
+To optimize efficiency in the decoding phase, \emph{KV caching} is employed. After processing each token \(t\), the newly computed \(K^{(t)}\) and \(V^{(t)}\) are stored in a cache. For the next token \(t+1\), only the new query \(Q^{(t+1)}\), key \(K^{(t+1)}\), and value \(V^{(t+1)}\) are computed. The attention computation will then utilize the cached \(K\) and \(V\) from all prior tokens, allowing for reduced computational overhead during inference.
+
+\subsection{\singlekv: Project \kv from a single layer}
+\label{sec:single_layer_kv}
+Assume the input of $l$-th layer is $\x_l$, and its $i$-th token is $\x_{l}^{(i)}$.
+Prior studies~\citep{liu2024foldgptsimpleeffectivelarge,gromov2024unreasonableineffectivenessdeeperlayers} showed that $\x_l$ becomes more similar as the depth grows. 
+Here, we conduct a similar study.
+
+We compute the average input similarity between $l$-th layer's input and all remaining layers' input, i.e.,
+\begin{equation}
+    \mathrm{SimScore}(\x_l) = \frac{\sum_{j=l+1}^L\mathrm{Similarity}(\x_l, \x_j)}{L-l},
+\end{equation}
+where $L$ is the number of layers in the model and $\mathrm{Similarity(\x_l,\x_j)}$ is the average cosine similarity between all $\x_{l}^{(i)}$ and $\x_{j}^{(i)}$ tokens. 
+
+We use 50 random training examples from {\tt HuggingFaceH4/ultrachat\_200k} to estimate $\mathrm{SimScore}(\x_l)$, and
+the results of  \llamasmall, \mistral, and \qwen are shown in the left of~\fref{fig:motivation}.
+As the layers get deeper, $\mathrm{SimScore}(\x_l)$ gets higher. 
+Particularly, around half of the depth, the average similarity of $\x_l$ with $\x_{>l}$ is above \( 0.5 \) for all models, which shows that the difference of input hidden states are small in deeper layers.
+
+Based on this observation, the first key component of \OURS is to use $l$-th layer's output $\x_{l+1}$ to compute the \kv for all remaining layers. More specifically, \OURS retains the standard transformer architecture up to and including the $l$-th layer, but the \kv for all remaining layers are computed immediately using $\x_{l+1}$, i.e.
+\begin{equation}
+\label{eq:singlekv}
+    \rmKV_{j} = \rmW_{KV}^j\x_{l+1},~~~~\text{for all $j > l$,}
+\end{equation}
+where $\rmKV_j$ is the \kv for $j$-th layer and $\rmW_{KV}^j$ is its KV projection weight matrix.
+
+\textbf{Prefill Compute Reduction.} \singlekv can enable significant reduction in prefill compute during \llm inference. Originally, all input tokens must be processed by all transformer layers.
+With \singlekv, input tokens\footnote{The very last input token still needs to compute all layers to generate the first output token.} only need to compute \( \rmW_{KV}^j\x_{l+1} \) for layers $j > l$ to generate layer \( j \)'s \kv, and all other operations (i.e., QO projections, Attention, and MLP) of layers \( j > l \) can be skipped entirely. When prefill computation dominates generated token computation, this reduces the total inference computation to approximately $l/L$. \fref{fig:main-figure} illustrates the operations skipped by \singlekv, and \tref{tab:compute_breakdown} shows a more detailed example compute breakdown for Llama-3.1-70B.
+
+\begin{wraptable}{r}{0.55\linewidth}
+\caption{
+Breakdown of transformer operations for Llama-3.1-70B with \OURS (in GFlops per prefill token).
+}
+\label{tab:compute_breakdown}
+\begin{adjustbox}{width=\linewidth}
+\footnotesize
+\begin{tabular}{lccccccc}
+\toprule
+Model & Vocab & K,V & Q,O & MLP & Attn. & Total & Rel. \\
+\midrule
+50\% SingleInputKV & \multirow{2}{*}{4.3} & \multirow{2}{*}{1.7} & \multirow{2}{*}{11} & \multirow{2}{*}{56} & \multirow{2}{*}{80} & \multirow{2}{*}{153} & \multirow{2}{*}{50.7\%} \\
++ \(4\times\) AcrossKV & & & & & & & \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{wraptable}
+
+\subsection{\acrosskv: Sharing \kv for consecutive layers}
+GQA~\citep{ainslie-etal-2023-gqa}, one of the most widely adopted \kv compression methods, showed that the \kv can be easily shared within a transformer layer. Later, \cite{liu2024minicache} showed that the \kv can be merged for certain pairs of adjacent layers.
+\acrosskv extends the ideas to cross-layer \kv sharing. 
+
+Particularly, instead of computing \kv for all of the remaining layers as shown in~\eqref{eq:singlekv}, \acrosskv selectively chooses one layer to compute the \kv for several consecutive layers and share it within the small group. The key idea is shown in~\fref{fig:main-figure}. As \acrosskv can combine multiple layers' KV caches into a single one rather than just two adjacent layers, it offers higher potential reduction ratio compared to \cite{liu2024minicache} while simplifying the implementation to realize the benefits of the \kv reduction. (See Sec. ~\ref{sec:related_work} for more detailed comparison with \cite{liu2024minicache}).
+
+\subsection{Knowledge Recovery} 
+\label{sec:knowledge-recovery}
+While \singlekv preserves all the original parameters, it re-wires the architecture so that the \kv projections may receive different inputs. We found that this re-wiring (and \acrosskv) requires fine-tuning to recover the original capabilities from the modified model. As we only change the computation of the attention part for layer $> l$, this can be achieved by fine-tune just the \( \rmW_{QKV} \) weight matrices from the $(l+1)$-th layer onwards. However, instead of directly fine-tuning these parameters using standard LM loss, we find that distilling using the output logits of the original model allows for better knowledge recovery (see \sref{sec:discussion} for more details). 
+
+\textbf{Implementing the Distillation.} Since only a few \( \rmW_{QKV} \) parameters need fine-tuning, we are able to do a memory efficient parameter-sharing based distillation. More specifically, we keep a single copy of the original model weights in memory that are frozen during training, and add an extra trainable copy of the \( \rmW_{QKV} \) parameters for layers $> l$ initialized using the original model (See \fref{fig:main-figure}). 
+
+During the training, we create two forward modes for the later layers $> l$, one with original frozen parameters using original architecture, and another with the \OURS re-wiring using new QKV projections i.e.,
+\begin{equation}
+    \y_{teacher} = \rmM(\x, \OURS=False),~~\text{and}~~~\y_{student} = \rmM(\x, \OURS=True),
+\end{equation}
+where $\y_{\cdot}$ is the final logits, $\rmM$ is the model, and $\x$ is the input. Afterwards, we apply the standard distillation loss ($L$) upon the outputs with temperature ($\tau$) using~\citep{journals/corr/HintonVD15}. 
+After the distillation, the original KV projection layers $> l$ are discarded during inference.
+This method allows us to perform the distillation for Llama-3.1-8B-Instruct on 680M tokens of data in 3 hours using 8 H100 GPUs, and Llama-3.1-70B-Instruct in 5 hours using 32 H100 GPUs across 4 nodes.
+
+\subsection{Optimized Implementation for Inference}
+
+LLM serving systems can be complex and incorporate many simultaneous optimizations at multiple layers of the stack, such as PagedAttention~\citep{10.1145/3600006.3613165}, Speculative Decoding~\citep{10.5555/3618408.3619203}, SplitFuse~\citep{holmes2024deepspeedfastgenhighthroughputtextgeneration,298679}, and more. One benefit of \OURS is that it makes minimal changes to the model architecture, limited to only a few linear projection layers. This means that \OURS can easily be integrated into existing serving systems without implementing new kernels (e.g. for custom attention operations or sparse computation) or novel inference procedures.
+
+\textbf{Implementation in vLLM.} To realize the performance benefits of \OURS, we integrated it with vLLM~\cite{}. Our implementation is compatible with vLLM's chunked prefill, which processes prefill tokens in chunks and may mix prefills and decodes in each minibatch. During each forward pass, after completing layer \( l \), the KV-cache for the remaining layers (\( >l \)) are immediately computed, and only the decode tokens are propagated through the rest of the model layers.
+
+\textbf{GEMM and Memory Optimizations.} Upon this basic implementation, we implemented two additional optimizations. First, \emph{\singlekv fusion}: instead of computing the \kv \(\rmKV_j \) for each layer \( j>l \) one at a time, we fused all $\rmW_{KV}^j$ into one large weight matrix $\rmW_{KV}^{j>l}$ so that their \kv can be computed with a single efficient GEMM operation. Second, \emph{\acrosskv reduction}: we modified vLLM to only allocate one layer's KV-cache for each group of merged layers, which realizes the memory gains of \acrosskv. 
+
+
+\section{Main Results}
+
+\label{sec:main_results}
+\subsection{Setup}
+
+\textbf{Training and Evaluation.} We use \llamasmall and \llamalarge as our base models for \OURS.
+Our training datasets include a mixture of the full supervised training data from \texttt{HuggingFaceH4/ultrachat\_200k}~\citep{ding2023enhancing} and \texttt{teknium/OpenHermes-2.5} \citep{OpenHermes}.1_instruct}} due to its support for the custom prompt format of \llama, particularly for MMLU and MMLU-CoT~\citep{hendryckstest2021}, GSM8K~\citep{cobbe2021training}, and Arc-Challenge~\citep{Clark2018ThinkYH}. For more details, please see~\appref{sec:training_details}. %{\color{blue}[YH: what does it mean by high performance for Eval?]}\aurick{rewritten for clarity}
+
+\textbf{Compression Metrics.} For prefill computation, we report the approximate reduction as $(L-l) / L$  due to \singlekv, and for \kv, we report the exact memory reduction due to \acrosskv. For example, \OURS with \singlekv (\( l = L/2 \)) and 4-way \acrosskv is reported as 50\% prefill compute reduction and 37.5\% \kv memory reduction. We further study how these theoretical compute and memory reductions translate into end-to-end inference improvements in \sref{sec:inference-speedup}.
+
+\textbf{Inference Performance.} In our inference evaluation, we focus on two common scenarios: \emph{batch-inference} for cost sensitive scenarios and \emph{interactive-inference} for latency sensitive scenario.
+
+\emph{Batch-Inference} When processing text in bulk or when serving a model under high usage demand, it is important to achieve high \emph{combined throughput} in terms of input + output tokens processed per second. For bulk processing, the combined throughput determines the time it takes to finish the job. For interactive use, it determines the volume of concurrent users and requests that can be supported per unit of hardware. In both scenarios, the combined throughput is a key determinant of the cost of serving the model.
+
+\emph{Interactive-Inference} In interactive scenarios (e.g., chatbots, copilots), not only the combined throughput is important, but also metrics that define the end-user experience. Chief upon them are the time-to-first-token (TTFT) and time-per-output-token (TPOT). TTFT is the time between the user sending a message and receiving the first token in the response. TPOT is the time between each output token after the first token has been received. Low TTFT and TPOT are desirable by interactive applications to deliver smooth usage experiences.
+
+For all experiments on \llamasmall, we use 1 NVIDIA H100 GPU with 80GB of memory, and for all experiments on \llamalarge, we use 4 NVIDIA H100 GPUs running the model with 4-way tensor parallelism. We provide the full hardware and vLLM configurations in \appref{sec:speedup-details}
+
+\subsection{Model Quality with Prefill Compute Reduction}
+\label{subsec:model-quality-vs-compression}
+\textbf{\llamasmall.}
+The top rows of ~\tref{tab:8b_main_result} show that \OURS can preserve model quality well until 50\% prefill reduction using \singlekv. For 25\% prefill reduction, the accuracy degradation is only about 0.12 points and for 50\% reduction, the gap is about 1 point \footnote{Note that we did not try to find the best training recipe, regarding to either training data (e.g., we did not include any math or coding datasets) or training pipeline (e.g., we did not include reinforce-learning rated steps, like DPO/RLHF). Yet, the quality of \OURS is close to the original base \llamaboth models. In~\secref{sec:dataset_impact}, we show that better data recipe could boost the model performance and close the quality gap further.}. When we push to 62.5\% reduction (i.e. \singlekv with \( l = 12 \) and \( L = 32 \)), the accuracy drops to 66.09 points, which is significantly lower than the baseline. This can be explained by the drop in activation similarity from 0.61 to 0.51 between layer 16 to layer 12 (\fref{fig:motivation}).
+ 
+The bottom rows of \tref{tab:8b_main_result} show the model quality when adding \acrosskv to 50\% \singlekv. From pure \singlekv to 2-way \acrosskv, the accuracy drops about 0.9 points with 25\% KV cache reduction.  
+The accuracy drops by another 0.32, going from 2-way to 8-way sharing, and 0.62 when going all the way to 16-way sharing. 
+Particularly, for the extreme case, i.e., using a single \kv for all remaining layers, the accuracy is only about 2.5 points lower than pure \singlekv, and could be useful for more memory constrained cases, e.g., embedding and/or mobile devices. 
+
+Furthermore, the design of \acrosskv is complementary to many existing \kv compression methods. In \sref{subsec:kv-quantization}, we show that \acrosskv can be combined with quantization to achieve 62.5\% reduction in \kv memory with only a 1-point accuracy gap compared to \singlekv only.
+
+\begin{table}[t]
+\caption{
+\llamasmall
+}\centering
+\label{tab:8b_main_result}
+\begin{adjustbox}{width=0.9\linewidth}
+\centering
+\begin{tabular}{lcccccccccccccc }
+\toprule
+\multirow{2}{*}{Model} & \singlekv & \acrosskv  & Arc-Challenge  & Winogrande & HelloSwag & truthfulqa & MMLU     & MMLU-CoT & GSM-8K & \multirow{2}{*}{Avg.}\\
+      & (Prefill Reduction) & (Cache Reduction)            & 0-shot         & 5-shots    & 10-shots & 0-shot & 5-shots  & 0-shot   & 8-shots \\
+\midrule
+Baseline & N/A & N/A &82.00 &77.90 &80.40 &54.56 &67.90 &70.63 &82.56 &73.71 \\
+\midrule
+\OURS & \cmark (25\%) & \xmark &82.08 &77.98 &80.63 &54.59 &67.95 &70.45 &81.43 &73.59 \\
+\OURS & \cmark (50\%) & \xmark &80.38 &78.22 &79.30 &54.54 &67.30 &69.73 &79.45 &72.70 \\
+\OURS & \cmark (62.5\%) & \xmark &71.76 &75.77 &78.21 &52.73 &61.55 &53.68 &68.92 &66.09\\
+\midrule
+\OURS & \cmark (50\%) & 2-way (25\%)~~~~~~~ &80.29 &77.82 &79.03 &54.66 &66.96 &68.39 &75.59 &71.82 \\
+\OURS & \cmark (50\%) & 4-way (37.5\%)~~~~ &79.35 &77.51 &78.44 &54.96 &65.71 &67.75 &76.72 &71.49 \\
+\OURS & \cmark (50\%) & 8-way (43.75\%)~~ &79.18 &77.19 &77.38 &54.79 &65.73 &66.88 &72.33 &70.50\\
+\OURS & \cmark (50\%) & 16-way (46.875\%) &78.24 &76.80 &76.87 &56.86 &64.65 &65.86 &72.25 &70.22\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[t]
+\caption{
+\llamalarge
+}\centering
+\label{tab:80b_main_result}
+\begin{adjustbox}{width=0.9\linewidth}
+\centering
+\begin{tabular}{lcccccccccccccc }
+\toprule
+\multirow{2}{*}{Model} & \singlekv & \acrosskv  & Arc-Challenge  & Winogrande & HelloSwag & truthfulqa & MMLU     & MMLU-CoT & GSM-8K & \multirow{2}{*}{Avg.}\\
+      & Prefill Reduction & Cache Reduction            & 0-shot         & 5-shots    & 10-shots & 0-shot & 5-shots  & 0-shot   & 8-shots \\
+\midrule
+Baseline & N/A & N/A &93.34 &85.16 &86.42 &59.95 &83.97 &86.21 &95.15 &84.31 \\
+\midrule
+\OURS & \cmark (25\%) & \xmark &93.00 &84.69 &85.98 &59.43 &82.82 &85.81 &95.07 &83.83 \\
+\OURS & \cmark (50\%) & \xmark &93.09 &83.82 &84.45 &58.40 &82.51 &85.00 &93.56 &82.98 \\
+\midrule
+\OURS & \cmark (50\%) & 2-way (25\%) &92.92 &82.95 &84.10 &57.79 &82.66 &84.55 &93.48 &82.63 \\
+\OURS & \cmark (50\%) & 4-way (37.5\%) &92.92 &83.74 &84.72 &58.28 &82.60 &84.79 &93.71 &82.96\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\textbf{\llamalarge.}
+~\tref{tab:80b_main_result} shows that with 50\% prefill reduction using \singlekv, \llamalarge incurs a 1.3 point drop in accuracy which is slightly higher than the results of \llamasmall. However, \llamalarge is more resilient to \acrosskv, incurring less than a 0.35 point drop in accuracy even for 4-way sharing across layers. 
+
+\begin{table}[t]
+\caption{
+Summary of all other models we evaluated, only average scores shown.
+}\centering
+\label{tab:summary_all_models}
+\begin{adjustbox}{width=0.75\linewidth}
+\centering
+\begin{tabular}{lcc|cccccccccccc}
+\toprule
+\multirow{2}{*}{Model} & \singlekv & \acrosskv & Llama-3.2-3B- & Llama-3.1-405B- & Mistral-Small- & Deepseek-V2- \\
+      & Prefill Reduction & Cache Reduction    & Instruct      & Instruct (FP8)  & Instruct-2409  & Lite-Chat \\
+\midrule
+Baseline & N/A                           & N/A            & 66.47 & 86.6 & 78.2 & 64.12 \\
+\midrule
+\OURS    & \cmark (\textasciitilde 25\%) & \xmark         & 66.55 & --   & --   & 64.19 \\
+\OURS    & \cmark (40--50\%)             & \xmark         & 65.55 & 85.9 & 77.2 & 63.51 \\
+\midrule
+\OURS    & \cmark (40--50\%)             & 2-way (25\%)   & 65.13 & --   & --   & 63.07 \\
+\OURS    & \cmark (40--50\%)             & 4-way (37.5\%) & 65.19 & --   & 76.7 & 59.32 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\textbf{Other models and diverse architectures.} In addition to Llama-3.1-Instruct 8B and 70B, we integrated and evaluated four other models with \OURS, which span a more diverse spectrum of model architectures. Of particular note, Llama-3.1-405B-Instruct is run at 8-bit precision using W8A8 quantization, and Deepseek-V2-Lite-Chat is an mixture-of-experts model that also implements a novel attention mechanism that compresses its keys and values using a latent vector~\citep{deepseekai2024deepseekv2strongeconomicalefficient}.
+
+\tref{tab:summary_all_models} summarizes the results, and the full per-task evaluation scores can be found in \appref{sec:additional-models}. Overall, we find that \OURS generalizes well to all these models, with few minor exceptions. First, Llama-3.2-3B-Instruct experiences a steeper quality degradation at 50\% \singlekv, but performs well at 40\% \singlekv (detailed comparison in \appref{sec:additional-models}). Second, Deepseek-V2-Lite-Chat experiences a steeper quality degradation at 4-way \acrosskv, but performs well at 2-way \acrosskv.
+
+\subsection{Inference Performance }
+\label{sec:inference-speedup}
+
+\textbf{Batch Inference Performance.}
+\fref{fig:throughput} shows the results of Llama-3.1-8B and Llama-3.1-70B across several workloads with a range of input lengths. \OURS achieves higher combined throughput than the baseline model across all the workloads we evaluated. 
+
+For \llamasmall, with 2K input tokens per prompt, \OURS achieves \(1.2-1.3\times\) higher combined throughput than the baseline model, and our benefits increase further to \(1.8-1.9\times\) higher combined throughput with 128K inputs. Note that for an input length of 8K tokens, \OURS achieves a staggering 30K tokens/sec/GPU (480 TFLOPS/GPU). For Llama-3.1-70B with 2K input tokens per prompt, \OURS achieves \(1.4-1.5\times\) higher combined throughput than the baseline model, which improves to \(1.8-2.0\times\) better combined throughput for 128K inputs.\footnote{While the total compute savings is roughly \(2\times\), the end-to-end speedup is lower due to two main reasons: i) the performance improvement is limited to the decoding computation which needs the output activation of all the layers. Fig.~\ref{fig:motivation} (right) shows the  max possible speedup for \llamasmall during model forward pass despite the decoding overhead, and ii) due to additional vLLM overheads outside of the model forward pass, such as sampling, optimizing which is beyond the scope of the paper.} As expected, \OURS provides greater improvements when the inputs are long.
+
+We also observe \acrosskv can further improve the combined throughput due to its ability to reduce the memory usage for the KV-cache and supporting larger batch sizes. For sequence length of 8K, \llamalarge with \OURS achieves a combined throughput of over 16K toks/sec over 4xH100 GPUs which corresponds to 560 TFLOPS/GPU of bf16 performance when normalized to baseline. This is an unprecedented throughput for BF16 inference workloads. 
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth,trim={20 590 20 30},clip]{figures/throughput.pdf}
+\caption{
+Combined input and output throughput for Llama-3.1-8B (left) and Llama-3.1-70B (right) across a range of input lengths (bottom). For each experiment, a number of requests are sent to vLLM at once such that the total number of tokens is roughly 15M. Each request generates 256 output tokens.
+}
+\label{fig:throughput}
+\end{figure}
+\textbf{Interactive-Inference Performance.} 
+\fref{fig:latency-70b} shows the TTFT and TPOT of \llamalarge across a range of request arrival rates and input lengths. When the arrival rate is too high, the TTFT explodes due to the request queue accumulating faster than they can be processed by the system. However, \OURS can sustain \(1.5-2.0\times\) higher arrival rates before experiencing such TTFT explosion. When the arrival rate is low, \OURS can reduce the TTFT by up to 50\% for workloads with longer input lengths. In terms of TPOT, \OURS achieves significant reductions for all but the lowest arrival rates, up to 60\% for certain settings. A similar story unfolds for Llama-3.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth,trim={20 500 20 20},clip]{figures/latency-70b.pdf}
+\caption{
+Time to first token (TTFT, top) and time per output token (TPOT, bottom) for input lengths 2000 (left), 8000 (middle), and 32000 (right) for Llama-3.1-70B. For each experiment, a range of different request arrival rates is simulated. Each request generates 256 output tokens.
+}
+\label{fig:latency-70b}
+\end{figure}
+
+
+\section{Ablation and Discussion}
+
+\label{sec:discussion}
+
+\subsection{Compute Reduction vs Memory Compression}
+\label{sec:compute-vs-memory}
+
+A key aspect of SwiftKV is combining prefill compute reduction (SingleInputKV) and KV cache compression (AcrossKV). While many prior works address KV cache compression alone, they are only effective in scenarios with limited GPU memory, and can have limited impact on recent datacenter GPUs (e.g., A100 and H100) with sufficient memory and inference is compute-bound.
+
+To illustrate, we consider an “ideal” KV compression scheme, where every layer’s KV cache is merged into a single layer (Merge-all-Layers). We retain the computation for all KV operations (i.e., \(W_{kv}^TX\)) but eliminate the memory for all layers > 1, leading to a single layer of KV cache. Merge-all-Layers represents a “best case compression scenario” with (1) extreme compression ratio beyond any published technique, e.g. \(32\times\) and \(80\times\) for Llama-3.1 8B and 70B, respectively, and (2) zero overhead, while most techniques (e.g., quantization, low-rank decomposition) add extra computations or data conversions.
+
+\tref{tab:compute_vs_memory} shows the throughput attained by Merge-all-Layers compared with the baseline model and its SwiftKV variants under various memory constraints. As shown, Merge-all-Layers outperforms only in very low memory scenarios (e.g. 16GB and 20GB) when there is barely enough memory for just the model weights, and is only marginally (10\%) better than the baseline model when using all 80GB memory. On the other hand, SingleInputKV attains 35\% higher throughput than the baseline at 80GB even without any AcrossKV. When combined with \( 4\times \) AcrossKV using FP8-quantized KV cache, SwiftKV can approach the throughput of Merge-all-Layers even at a more limited 20GB of memory.
+
+\begin{table}[t]
+\centering
+\caption{
+Throughput of \llamasmall compared between Baseline, Merge-all-Layers, and SwiftKV variants. Run on a H100 GPU with varying memory limits.
+}
+\label{tab:compute_vs_memory}
+\begin{adjustbox}{width=0.77\linewidth}
+\footnotesize
+\begin{tabular}{lccccc}
+\toprule
+\multirow{2}{*}{Memory} & \multirow{2}{*}{Baseline} & Merge-all- & \multirow{2}{*}{50\% SingleInputKV} & 50\% SingleInputKV & 50\% SingleInputKV  \\
+ & & Layers & & + \(4\times\) AcrossKV & + \(4\times\) AcrossKV (FP8) \\
+\midrule
+80GB & 22.9K & 25.1K & 31.0K & 31.2K & 32.0K \\
+40GB & 20.6K & 25.2K & 27.3K & 28.4K & 28.9K \\
+20GB & 10.8K & 25.2K & 12.2K & 18.0K & 23.2K \\
+16GB & OOM & 24.8K & OOM & 4.22K & 7.28K \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[t]
+\caption{
+Impact of Distillation and Full/Partial Model Finetuning on \llamasmall
+}\centering
+\label{tab:distillation_and_part_model}
+\begin{adjustbox}{width=0.9\linewidth}
+\centering
+\begin{tabular}{lcccccccccccccc }
+\toprule
+\multirow{2}{*}{Setting}  & Arc-Challenge  & Winogrande & Hellaswag & TruthfulQA & MMLU     & MMLU-CoT & GSM-8K & \multirow{2}{*}{Avg.}\\
+              & 0-shot         & 5-shots    & 10-shots & 0-shot & 5-shots  & 0-shot   & 8-shots \\
+\midrule
+\multicolumn{9}{c}{(a) The effect of distillation}  \\
+W/o Distillation &79.44 &77.27 &78.71 &51.14 &65.55 &65.60 &72.71 &70.06 \\
+W Distillation&80.38 &78.22 &79.30 &54.54 &67.30 &69.73 &79.45 &72.70 \\
+\midrule
+\multicolumn{9}{c}{(b) Full model finetuning vs. part model finetuning} \\
+\midrule
+Full Model &76.79 &74.82 &76.42 &53.08 &62.94 &64.20 &69.37 &68.23 \\
+Part Model &80.38 &78.22 &79.30 &54.54 &67.30 &69.73 &79.45 &72.70 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{The impact of distillation}
+
+To demonstrate the effectiveness of our distillation, we train \llamasmall with 50\% \singlekv and no \acrosskv using the standard language model loss, and compare it with our distillation based approach discussed in ~\sref{sec:knowledge-recovery}. 
+The results are shown in~\tref{tab:distillation_and_part_model} (a).
+As we can see, the model trained with distillation has a 2.64 point higher average. 
+Particularly, for generative tasks, i.e., MMLU-Cot and GSM-8K, the performance improvement is 4.13 and 6.74, respectively.
+
+\paragraph{Full model training vs. partial model training.} Our distillation method only fine-tuned the \( \rmW_{QKV} \) parameters, as discussed in~\sref{sec:knowledge-recovery}, with the hypothesis that it preserves the knowledge from the original models compared to fine-tuning the entire model. This hypothesis aligns with \cite{10.5555/3600270.3601532}, \cite{geva-etal-2021-transformer}, and \cite{elhage2021mathematical}, which suggest that MLP layers player a more prominent role in storing knowledge.
+
+To validate this, we fine-tuned a model with 50\% \singlekv on \llamasmall where all parameters in the latter 50\% of layers are trained. 
+The results are shown in~\tref{tab:distillation_and_part_model} (b). 
+The model quality of full model distillation is about 4.5 points lower than our proposed partial model distillation. 
+
+
+
+
+
+\subsection{Combining with other \kv compression methods}
+\label{subsec:kv-quantization}
+
+\OURS explores an orthogonal design space from many \kv compression methods, which means that it can be easily combined with them, e.g., sliding window~\citep{jiang2023mistral7b}, token-level pruning~\citep{10.5555/3666122.3668401}, quantization~\citep{hooper2024kvquant10millioncontext} etc. 
+In this section, we show the combined effect of \OURS with per-token \kv FP8 quantization ~\citep{yao2022zeroquantefficientaffordableposttraining} using PyTorch's natively supported \texttt{float8\_e4m3fn}.  ~\tref{tab:combine_with_quantization} shows the accuracy degradation is within 0.4 points for all cases, even though we applied post-training quantization with no quantization-aware finetuning.
+
+\appref{sec:different-kv-reduction} explores a second, potentially interesting, trade-off between \acrosskv (inter-layer) vs \gqa (intra-layer) \kv sharing.
+
+\begin{table}[t]
+\caption{
+\llamasmall \kv quantization results.
+}\centering
+\label{tab:combine_with_quantization}
+\begin{adjustbox}{width=0.9\linewidth}
+\centering
+\begin{tabular}{lcccccccccccccc }
+\toprule
+\multirow{2}{*}{Model} & \acrosskv & \multirow{2}{*}{KV Quantization} & Arc-Challenge  & Winogrande & Hellaswag & TruthfulQA & MMLU     & MMLU-CoT & GSM-8K & \multirow{2}{*}{Avg.}\\
+       & (Cache Reduction)    &        & 0-shot         & 5-shots    & 10-shots & 0-shot & 5-shots  & 0-shot   & 8-shots \\
+\midrule
+\OURS & \xmark & \xmark  &80.38 &78.22 &79.30 &54.54 &67.30 &69.73 &79.45 &72.70 \\
+\OURS & \xmark & \cmark &80.29 &77.66 &79.23 &54.40 &67.10 &69.51 &77.94 &72.30\\
+\OURS & 2-way (25\%)~~~~~~~ & \xmark &80.29 &77.82 &79.03 &54.66 &66.96 &68.39 &75.59 &71.82 \\
+\OURS & 2-way (62.5\%)~~~~~~~ & \cmark &80.03 &77.35 &78.86 &54.44 &66.89 &68.27 &75.97 &71.69 \\
+\OURS & 4-way (37.5\%)~~~~ & \xmark &79.35 &77.51 &78.44 &54.96 &65.71 &67.75 &76.72 &71.49 \\
+\OURS & 4-way (68.75\%)~~~~ & \cmark  &79.27 &77.43 &78.38 &54.76 &65.62 &68.00 &75.97 &71.35 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{Other Ablation Studies}
+
+We show additional ablations that explore the impact of the distillation dataset in \appref{sec:dataset_impact}, and how \OURS can enable simple early-exiting for decode tokens in \appref{sec:decode-early-exit}.
+
+
+
+
+
+
+\section{Conclusions}
+
+\label{sec:conclusions}
+In this paper, we presented \OURS, a novel model transformation for reducing inference cost for prompt-dominant workloads, combined with a KV cache reduction strategy to reduce memory footprint, and a light-weight distillation procedure to preserve model accuracy. While we presented strong results on the effectiveness of \OURS, exploration of parameter-preserving model transformations for inference optimization is still in its early stages. We have identified both limitations as well as areas of improvement. Given the simplicity and effectiveness of \OURS, we hope that this will spark further exploration which we hope will continue to lower the latency and cost of inference.
+
+
+

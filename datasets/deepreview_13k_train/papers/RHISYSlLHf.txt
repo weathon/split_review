@@ -1,0 +1,422 @@
+\title{Upcycling Instruction Tuning from Dense to Mixture-of-Experts via Parameter Merging}
+
+\begin{abstract}
+
+Mixture-of-Experts (MoE) shines brightly in large language models (LLMs) and demonstrates outstanding performance in plentiful natural language processing tasks. However, existing methods transforming LLMs from dense to MoE face significant data requirements and typically rely on large-scale post-training.
+In this paper, we propose Upcycling Instruction Tuning (UpIT), a data-efficient approach for tuning a dense pre-trained model into a MoE instruction model.
+Specifically, we first point out that intermediate checkpoints during instruction tuning of the dense model are naturally suitable for specialized experts, and then propose an expert expansion stage to flexibly achieve models with flexible numbers of experts, where genetic algorithm and parameter merging are introduced to ensure sufficient diversity of new extended experts.
+To ensure that each specialized expert in the MoE model works as expected, we select a small amount of seed data that each expert excels to pre-optimize the router.
+Extensive experiments with various data scales and upcycling settings demonstrate the outstanding performance and data efficiency of UpIT, as well as stable improvement in expert or data scaling. Further analysis reveals the importance of ensuring expert diversity in upcycling.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:introduction}
+Large Language Models (LLMs) have demonstrated remarkable performance on various NLP tasks and are gradually becoming part of our daily lives through chatbot applications such as ChatGPT, Copilot, etc~\citep{ouyang2022traininglanguagemodelsfollow, touvron2023llama2openfoundation,openai2024gpt4technicalreport}. 
+As LLMs become increasingly prevalent, the high computational of traditional dense architecture with high computational costs in the inference phase poses significant obstacles to downstream deployment. How to improve the model performance without proportionally increasing computing resources become a hot topic in the field~\citep{muennighoff2024olmoe,xue2024openmoeearlyeffortopen}.
+In response to this challenge, Mixture-of-Experts (MoE) receives extensive attention due to its excellent scalability, which expands model capacity with almost no extra inference overhead~\citep{fedus2022switchtransformersscalingtrillion,zoph2022stmoedesigningstabletransferable}. Recently, many MoE-based LLMs have emerged in various scenarios with outstanding effectiveness and efficiency~\citep{dai2024deepseekmoeultimateexpertspecialization,jiang2024mixtralexperts,zhu2024llamamoebuildingmixtureofexpertsllama}.
+
+Upcycling is garnering increasing attention for converting dense LLMs through a series of processes, including expanding experts, integrating routers, and subsequent post-training, ultimately yielding MoE-style models. 
+As depicted in Figure~\ref{fig:intro}, current solutions are broadly classified into two categories: 
+(a) \textbf{Vanilla Upcycling}, which directly upcycle a dense model to a MoE model by replicating FFN layers, followed by a large-scale post-training to optimize the additional experts and corresponding routers~\citep{komatsuzaki2023sparseupcyclingtrainingmixtureofexperts}. Due to the homogeneity of experts in the initial stage, a large amount of post-training data is usually necessary, such as \textasciitilde 1T tokens for full parameter training or \textasciitilde 5M instruction data for parameter efficient fine-tuning~\citep{dou2024loramoealleviateworldknowledge,zhu2024llamamoebuildingmixtureofexpertsllama}.
+(b) \textbf{Specialized Upcycling}, which first trains specialized experts based on meticulously designed domain-specific datasets and then proceeds with upcycling and post-training~\citep{sukhbaatar2024branchtrainmixmixingexpertllms}. 
+Despite having superior performance, it still requires hundreds of billions of elaborately constructed domain data and lacks flexibility in scaling the number of domain-specific experts.
+To sum up, although expert specialization slightly reduces data requirements, the current approach to upcycling from dense to MoE heavily relies on a large amount of training data, \emph{how to efficiently and flexibly train a MoE instruction model based on a dense pre-trained model is still an open problem}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/intro.pdf}
+    \caption{Workflow of vanilla upcycling, specialized upcycling, and the proposed upcycling instruction tuning~(UpIT) solutions. UpIT achieves specialized experts with various checkpoints, increases the expert number during the expert expansion stage, and maintains discrepancy among experts through router initialization, thereby achieving efficient and flexible upcycling.}
+    \label{fig:intro}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/scalability.pdf}
+    \caption{The performance of various checkpoints saved during an instruction tuning process, with a red star indicating the best performance on each benchmark. Checkpoints saved at different epochs excel in different benchmarks, demonstrating the potential as specialized experts.}
+    \label{fig:scalability}
+\end{figure}
+
+To answer this question, we first conduct a pilot experiment on dense models to observe the characteristics of models at different epochs during standard instruction tuning.
+Figure~\ref{fig:scalability} shows checkpoints saved at different epochs exhibit interleaved performance across benchmarks in various domains. 
+In practical terms, we categorize nine benchmarks into four domains: factual knowledge, reasoning, coding, and world knowledge, where the performance on each benchmark generally shows an upward trend followed by a downward trend, but the position of the maximum value varies.
+For example, the model trained at epoch 2 demonstrates superior performance on HellaSwag and Natual Question, whereas the model trained at epoch 0.25 performs best on MMLU. 
+In other words, models with different training steps demonstrate varying expertise in handling distinct domains. This phenomenon inspires us to consider that \emph{different checkpoints during instruction tuning are inherently suitable for constructing specialized experts}.
+
+In light of the above findings, we propose \underline{Up}cycling \underline{I}nstruction \underline{T}uning (UpIT), which starts from a dense pre-trained model and trains a MoE instruction model with a flexible number of experts, following the basic thought of specialized upcycling.
+Figure~\ref{fig:intro} illustrates the four stages of UpIT. Specifically,
+\textit{(1)~Expert Preparation.} 
+Considering the differences among checkpoints in the pilot experiment, it is sufficient to fine-tune the dense pre-trained model and save checkpoints at fixed intervals to prepare for specialized experts, without undertaking meticulous checkpoint selection.
+\textit{(2)~Expert Expansion.} 
+Given the fixed checkpoints, we extend a flexible number of new experts based on genetic algorithms.
+In each iteration, we select two experts with the greatest differences, merge their parameters and obtain a new expert. We also perform parameter scaling and dropping before merging to simulate the mutation and further promote the discrepancy of experts.
+\textit{(3)~Router Initialization.} 
+Traditional routers are randomly initialized and insensitive to expert capabilities. Here, we assign each expert their skilled data and introduce an auxiliary binary classification loss to pre-optimize the corresponding routing vector, ensuring that all experts are capable of fully exhibiting their strengths in the MoE model.
+\textit{(4)~Model Upcycling.} 
+Before post-training, we merge the parameters of multiple dense models into a MoE model. Unlike existing methods, the pre-optimized routing vectors are merged into a routing matrix, serving as the final router.
+
+Overall, by leveraging the differences in existing dense checkpoints and introducing the expert expansion stage, UpIT comprehensively reduces the cost of acquiring specialized experts and improves the flexibility of expert numbers. Router initialization further maintains expert diversity, thereby encouraging more effective utilization of data characteristics during the post-training of the MoE model.
+From an implementation perspective, UpIT divides standard instruction tuning into two parts, where the first part is responsible for expert preparation, and the second is post-training after upcycling. Between these two stages, we find that only 1\% of the training data (approximately 500 to 5,000 samples) is enough to pre-optimize the routing vectors, which means that UpIT efficiently upcycles from dense to MoE without significantly increasing the overall data requirements.
+We conduct extensive experiments under LoRA-based and FFN-based upcycling settings, with LoRA and FFN as experts.
+For a fair comparison, we train all models on IDEA dataset~\citep{wu2024parameterefficientsparsitycraftingdense}, considering data sizes ranging from 50K to 500K, and evaluate the performance of nine benchmarks.
+Experimental results show that UpIT is consistently better under both settings than dense instruction tuning and other upcycling baselines. Especially in situations with small amounts of training data, existing upcycling methods often can not work well, while UpIT utilizes the discrepancy of experts and achieves better results than dense baselines.
+Moreover, UpIT exhibits excellent scalability, with expected performance improvements when increasing training data, total expert number, or activated expert number. The router visualization and ablation study also verify the overall promoting effect of expert diversity on upcycled MoE models.
+
+In summary, the main contributions of this paper are as follows:
+\begin{itemize}
+    \item We propose UpIT, an efficient specialized upcycling method via parameter merging, which can achieve an instruction model with a flexible number of experts. To best of our knowledge, it is the first attempt to utilize intermediate dense checkpoints for model upcycling.
+    \item We emphasize the importance of expert discrepancy in upcycling and incorporate the idea into the entire design of UpIT. The innovative router initialization stage ensures that all specialized experts play to their strengths in the final MoE model.
+    \item Extensive experiments under LoRA and FFN-based settings demonstrate that UpIT significantly outperforms existing methods, whether in scenarios with sufficient or insufficient data, exhibiting outstanding flexibility, scalability, and performance upper bound.
+\end{itemize}
+
+
+
+\section{Methodology}
+
+\label{sec:method}
+
+In this section, we provide a detailed exposition of UpIT. Generally speaking, UpIT perpetuates the concept of specialized upcycling, further using intermediate checkpoints to reduce data requirements, expanding experts to fit the flexible number of experts, and pre-optimizing routing vectors to ensure that each expert in the instruct MoE model leverages their strengths.
+\subsection{Preliminaries}
+Before introducing UpIT, here we first briefly review some basic concepts of MoE.
+
+\textbf{Mixture-of-Experts (MoE).} 
+MoE significantly scale up the total parameter number and increases the knowledge capacity of language models, by selectively activating some of the parameters during inference, it does not proportionally increase the computational workload.
+In transformers-based models, the feed-forward neural network (FFN) layer in each transformer block is typically replaced with a MoE layer, which comprises $N$ identical and independent experts $\{E_{i}\}_{i=1}^{N}$, along with a router $R(\cdot)$ for assigning experts, where each expert generally corresponds to an FFN layer, and in the scenario of parameter-efficient fine-tuning (PEFT), the expert may also be LoRA matrices.
+Formally, for the hidden states $\mathbf{h}$ of the attention layer, the output $\mathbf{o}$ of the MoE layer is represented as $\mathbf{o}=\sum_{i=1}^{N}R(\mathbf{h})E_{i}(\mathbf{h})$.
+Here, $E_{i}(\mathbf{h})$ is the output of the $i$-th expert, $R(\mathbf{h})$ denotes the score for all experts, where experts with the highest scores are usually selected to calculate the final output.
+\textbf{Upcycling.} 
+Upcycling seeks to avoid training MoE models from scratch by transforming an existing dense model into a MoE model, followed by a post-training stage to integrate all the parameters into an organic whole. It starts with dense models, forming experts by expanding the FFN layer or creating new LoRA branches, and then adding routers to control the dispatch of input tokens. In this process, the remaining embedding layers, attention blocks, normalization modules, and output layers are directly transferred from the initial dense model to the ultimate MoE model, and the router is randomly initialized and optimized in the post-training stage.
+\begin{algorithm}[t]
+    \small
+    \caption{Workflow of UpIT}
+    \label{algo:workflow}
+    \KwIn{Dense pre-trained model $\Theta_{d}$, training dataset $\mathcal{D}$, target number of experts $n$.}
+    \BlankLine
+    \textit{// Expert Preparation} \\
+    Fine-tune the dense model $\Theta_{d}$ on $\mathcal{D}$ and obtain a series of checkpoints $\mathcal{C}=\{\Theta_d^{1}, 
+    \ldots, \Theta_d^{m}\}$. \\
+    Initialize expert models $\mathcal{E}=\{\mathbf{E}_{1}, \ldots, \mathbf{E}_{m}\}$ from checkpoints $\mathcal{C}$. \\
+    \textit{// Expert Expansion} \\
+    Merge new expert model with Algorithm~\ref{algo:expansion} and put them into the set $\mathcal{E}=\{\mathbf{E}_{1}, \ldots, \mathbf{E}_{m}, \ldots, \mathbf{E}_{n}\}$. \\
+    \textit{// Router Initialization} \\
+    Initialize routing vectors $\mathcal{R}=\{\mathbf{r}_{1}, \ldots, \mathbf{r}_{n}\}$ for expert models $\mathcal{E}$. \\
+    Construct expert-specific data $\mathcal{D}_s=\{\mathcal{D}_s^{1}, \ldots, \mathcal{D}_s^{n}\}$ with Algorithm~\ref{algo:selection}. \\
+    \For{$i=1$ \KwTo $n$}{
+        Fine-tune expert layer $\mathbf{e}_{i}$ in $\mathbf{E}_{i}$ and corresponding routing vector $\mathbf{r}_{i}$ on $\mathcal{D}_s^{i}$ with Equation~\ref{equ:loss}. \\
+    }
+    \textit{// Model Upcycling} \\
+    Initialize router $\mathbf{R}$ by concatenating all routing vectors $\mathcal{R}$. \\
+    Initialize the MoE model $\Theta_{m}$ with expert models $\mathcal{E}$ and router $\mathbf{R}$. \\
+    Fine-tune the MoE model $\Theta_{m}$ on $\mathcal{D}$.
+    \BlankLine
+    \KwOut{MoE Instruction model $\Theta_{m}$.}
+\end{algorithm}
+\subsection{Workflow of UpIT}
+Starting from the dense pre-trained model, UpIT achieves a MoE instruction model. Algorithm~\ref{algo:workflow} provides the working sketch. In this section, we provide a detailed explanation of each process.
+
+\textbf{Expert Preparation.} 
+In the instruction tuning of LLMs, as shown in Figure~\ref{fig:scalability}, the performance of intermediate checkpoints varies across different benchmarks, and different checkpoints exhibit unique strengths in different domains, highlighting the potential to serve as specialized experts. Compared to the labour-intensive method of training diverse expert models with massive domain-specific data~\citep{sukhbaatar2024branchtrainmixmixingexpertllms}, we believe that the natural variations among checkpoints provide a more efficient pathway to developing specialized expert models. By training dense models to generate multiple checkpoints and saving them at regular intervals during training, we can easily obtain a series of expert models proficient in different domains, resulting in a more cost-effective method for preparing specialized expert models.
+
+\textbf{Expert Expansion.} 
+Given that the fixed number of checkpoints only sometimes corresponds with the flexible requirements of expert number, acquiring additional checkpoints entails redundant training if the number of experts exceeds the saved checkpoints.
+Here, we propose to address these challenges by generating distinct experts from existing ones without extensive retraining (see also Algorithm~\ref{algo:expansion}). 
+Specifically, we draw inspiration from genetic algorithms, where two experts with the greatest differences are selected as parents in each iteration. We simulate the mutation process by randomly assigning weights to the parents and apply DARE~\citep{yu2024languagemodelssupermario} to introduce mutations into the newly created expert further, enhancing its discrepancy and adaptability.
+Such an expansion process not only eliminates the need for additional retraining but also facilitates the flexible expansion of the number of experts, ultimately improving the scalability of UpIT.
+\textbf{Router Initialization.} 
+Since routers remain randomly initialized after upcycling, which leads to the misallocation of tokens in the early post-training stages, in UpIT, such misallocation will weaken the expert differences in the previous stage and impact the learning efficiency of MoE models.
+To solve this problem, we propose a data selection approach to curate expert-specific data tailored to each expert model and pre-optimize additional routing vectors to ensure the discrepancy among experts (see also Algorithm~\ref{algo:selection}). 
+Specifically, we initially embed one-dimensional routing vectors $\mathcal{R}$ before the MoE layer in each transformer block and participate in the training process as expert-specific routers. 
+Next, we introduce an auxiliary loss $\gL_{aux}$  intending to maximize the output probability of corresponding routing vectors. This ensures that the likelihood of tokens being assigned to appropriate experts increases when they pass through the router. The pre-optimizing objective of $i$-th expert model is formulated as follows,
+\begin{equation}
+    \small
+    \label{equ:loss}
+    \gO_i=\min_{\mathbf{E}_i} (\alpha \gL_{lm}(\mathbf{E}_i) + (1-\alpha) \gL_{aux}(\mathbf{E}_i))
+\end{equation}
+where $\alpha$ is the balance coefficient, which we set to 0.5 in our experiments, and $\gL_{lm}(\cdot)$ is the causal language model loss. The auxiliary loss $\gL_{aux}(\cdot)$ is defined as follows,
+\begin{equation}
+    \small
+    \gL_{aux}(\mathbf{E}_i)=\textrm{CrossEntropy}(\textrm{Sigmoid}(\mathbf{h}_{\mathbf{r}_i}),\mathbf{I})
+\end{equation}
+where $\mathbf{h}_{\mathbf{r}_i}$ is the output of routing vector and $\mathbf{I}$ is the unit matrix. We use $\text{Sigmoid}$ function to scale the output to $(0,1)$ and minimize its difference from $\mathbf{I}$, which is equivalent to maximizing the output probability of the routing vector on the data that current expert model excels at.
+
+\textbf{Model Upcycling.} 
+Finally, we upcycle the dense model $\Theta_{d}$ to MoE model $\Theta_{m}$ by merging all the expert models $\mathcal{E}$ and routing vectors $\mathcal{R}$. Specifically, for the initialization of experts, we utilize pre-optimized expert models from $\mathcal{E}$. 
+In terms of router initialization, we concatenate all routing vectors from $\mathcal{R}$ to form a complete router $\mathbf{R}\in \mathbb{R}^{d_{h}, n}$, where $d_{h}$ is the dimension of hidden states, 
+This way, the obtained MoE block could allocate different tokens to experts skilled in processing them.
+Finally, we continue to utilize $\mathcal{D}$ for post-training to achieve the final MoE model.
+\begin{algorithm}[t]
+    \small
+    \caption{Genetic Algorithm-Based Expert Expansion}
+    \label{algo:expansion}
+    \KwIn{Existing $m$ expert models $\mathcal{E}=\{\mathbf{E}_1, \cdots, \mathbf{E}_m\}$, target number of experts $n$.}
+    \BlankLine
+    \For{$i=1$ \KwTo $n-m$}{
+        \For{$j=1$ \KwTo $len(\mathcal{E})$}{
+            \For{$k=j+1$ \KwTo $len(\mathcal{E})$}{
+                Find two expert models $\mathbf{E}_{j^*}$, $\mathbf{E}_{k^*}$ with the smallest similarity.
+            }
+        }
+        Setting weights $\alpha$ and $\beta$ randomly, s.t., $\alpha + \beta = 1$. \\
+        Merge new expert model via $\mathbf{E}_{m+i}=\text{DARE}(\alpha \mathbf{E}_{j^*}, \beta \mathbf{E}_{k^*})$ and put $\mathbf{E}_{m+i}$ into $\mathcal{E}$.
+    }
+    \BlankLine
+    \KwOut{Expanded expert models $\mathcal{E}=\{\mathbf{E}_1, \cdots, \mathbf{E}_m, \cdots, \mathbf{E}_n\}$.}
+\end{algorithm}
+
+\begin{algorithm}[t]
+    \small
+    \caption{Expert-Specific Data Selection for Router Initialization}
+    \label{algo:selection}
+    \KwIn{Training dataset $\mathcal{D}$, Expert models $\mathcal{E}=\{\mathbf{E}_1, \cdots, \mathbf{E}_n\}$, and data capacity for each expert $C$.}
+    \BlankLine
+    Initialize $n$ empty expert-specific data buckets $\{\mathcal{D}_s^1, \ldots, \mathcal{D}_s^n\}$. \\
+    Construct seed dataset $\mathcal{D}_{s}$ by randomly selecting 1\% of the data in $\mathcal{D}$. \\
+    \ForEach{{\rm data} $d_i$ {\rm in} $\mathcal{D}_{s}$}{
+        Calculate the perplexity list $\mathcal{P}_i=[p_i^{1}, \cdots, p_i^{n}]$ of each expert on $d_i$.\\
+        Sort $\mathcal{P}_i$ in order (with small perplexity at the beginning), denoted as $\mathcal{P}_i'$. \\
+        \ForEach{$p_i^{j}$ in $\mathcal{P}_i'$}{
+            Get the expert index $j$. \\
+            \If{$len(\mathcal{D}_{e}^j) < C$}{
+                Append data $d_i$ to bucket $\mathcal{D}_{e}^j$. \\
+                Break.
+            }
+        }
+    }
+    \BlankLine
+    \KwOut{Expert-specific data buckets $\{\mathcal{D}_s^1, \ldots, \mathcal{D}_s^n\}$.}
+\end{algorithm}
+
+\subsection{Training Details}
+To comprehensively evaluate the effectiveness of UpIT, we utilize two types of upcycling settings: 
+
+(1) \textbf{FFN-based Upcycling:} 
+Initially, we fully fine-tune all parameters of the dense pre-trained model to accumulate several expert models. In the expert expansion stage, we apply the genetic algorithm to construct expert modules (i.e. FFN layers), average the parameters of backbone modules (i.e. all layers except FFN) in candidate expert models, and result in new diverse expert models. We select expert-specific data to pre-optimize the FFN layers and routing vectors during the router initialisation stage. Finally, in the model upcycling stage, we average the backbone parameters of all expert models and concatenate the routing vectors, integrating FFN layers to produce the final MoE models.
+
+(2) \textbf{LoRA-based Upcycling:} 
+The key difference from FFN-based upcycling is that in parameter-efficient fine-tuning, parameters of backbone modules remain unchanged. Instead, we augment FFN layers with LoRA matrices, and operate on the values of LoRA matrices during expert expansion.
+Following previous work~\citep{fedus2022switchtransformersscalingtrillion}, during post-training, we also use load balancing loss, $\mathcal{L}_{\text{load}}=n \cdot \sum_{i=1}^{n}f_{i}\cdot P_{i}$, where $n$ is the expert number, $f_{i}$ is the fraction of tokens dispatched to expert $E_i$, $P_{i}$ is the average fraction of the router probability allocated for expert $E_i$.
+\begin{table}[t]
+    \centering
+    \caption{Performance comparison under Lora-based and FFN-based upcycling settings, where \texttt{(xE,Ay)} indicates that \texttt{y} out of \texttt{x} experts are activated, Lora-based UpIT\texttt{(16E,A2)}and FFN-based UpIT\texttt{(8E,A2)}are expanded from Lora-based UpIT\texttt{(8E,A2)}and FFN-based UpIT\texttt{(4E,A2)}, respectively. Bold text and underlined text denote the best and second-best results in each group.}
+    \resizebox{\textwidth}{!}{
+        \begin{tabular}{lcccccccccc}
+            \toprule
+             & \textbf{HumanE.} & \textbf{GSM8K} & \textbf{HellaS.} & \textbf{BBH} & \textbf{MMLU} & \textbf{NQ} & \textbf{Tri.QA} & \textbf{ARC-c} & \textbf{ARC-e} & \textbf{Avg.} \\
+            \midrule
+            \midrule
+            \multicolumn{11}{l}{\textit{LoRA-based Models}} \\
+            Llama 2 7B & 14.63 & 13.95 & 26.58 & 34.73 & 39.84 & 10.06 & 62.06 & 37.29 & 50.26 & 32.16 \\
+            LoRA & 22.56 & 45.72 & 65.36 & 37.14 & 49.33 & 14.99 & 50.15 & 61.36 & 81.13 & 47.53 \\
+            \midrule
+            Self-MoE\texttt{(8E,A2)} & 28.05 & 46.70 & 64.27 & 38.67 & 49.63 & \underline{21.11} & 48.67 & 64.41 & \underline{82.19} & 49.30 \\
+            PESC\texttt{(8E,A2)} & 28.05 & 46.55 & 63.14 & 37.59 & 46.12 & 16.68 & 49.58 & 61.36 & 74.60 & 47.07 \\
+            LoRAMoE$_{\rm PT}$\texttt{(8E,A2)} & \underline{34.15} & 47.61 & 60.89 & 37.40 & 46.61 & 17.62 & 46.33 & 60.68 & 74.60 & 47.32 \\
+            LoRAMoE$_{\rm SFT}$\texttt{(8E,A2)} & 28.66 & \textbf{49.81} & \textbf{67.62} & \underline{38.88} & \textbf{50.54} & 20.55 & \underline{50.16} & \underline{62.37} & 81.31 & \underline{49.99} \\
+            UpIT\texttt{(8E,A2)} & \textbf{35.37} & \underline{49.51} & \underline{66.00} & \textbf{40.27} & \underline{50.31} & \textbf{24.52} & \textbf{55.27} & \textbf{65.08} & \textbf{83.60} & \textbf{52.21} \\
+            \midrule
+            Self-MoE\texttt{(16E,A2)} & 30.20 & 47.61 & 65.36 & 37.14 & 49.33 & \underline{24.52} & 51.11 & 62.71 & \underline{82.19} & 50.02 \\
+            PESC\texttt{(16E,A2)} & 31.10 & 47.62 & 63.14 & 37.59 & 49.08 & 20.83 & 49.58 & 63.05 & 77.62 & 48.85 \\
+            LoRAMoE$_{\rm PT}$\texttt{(16E,A2)} & \underline{40.24} & 46.55 & 65.89 & 36.39 & 48.53 & 19.36 & 46.19 & 61.69 & 76.01 & 48.98 \\
+            LoRAMoE$_{\rm SFT}$\texttt{(16E,A2)} & 30.12 & \textbf{49.62} & \textbf{66.77} & \textbf{40.21} & \textbf{50.96} & 20.83 & \underline{52.63} & \underline{63.41} & 80.67 & \underline{50.58} \\
+            UpIT\texttt{(16E,A2)} & \textbf{40.62} & \underline{48.37} & \underline{66.62} & \underline{39.43} & \underline{50.70} & \textbf{25.62} & \textbf{56.61} & \textbf{67.46} & \textbf{84.66} & \textbf{53.34} \\
+            \midrule
+            \midrule
+            \multicolumn{11}{l}{\textit{FFN-based Models}} \\
+            Sheared Llama 2.7B & 5.49 & 1.74 & 25.09 & 26.62 & 26.98 & 6.43 & 38.89 & 22.37 & 24.69 & 19.81 \\
+            SFT & 26.22 & 29.19 & 38.01 & 26.46 & 33.93 & 8.42 & 18.61 & 42.37 & 58.55 & 31.31 \\
+            \midrule
+            Self-MoE\texttt{(4E,A2)} & 6.71 & 8.87 & 32.11 & 27.65 & 28.81 & \textbf{18.45} & \textbf{42.27} & 33.22 & 47.44 & 27.28 \\
+            Upcycle$_{\rm PT}$\texttt{(4E,A2)} & \textbf{31.71} & \textbf{35.10} & 43.40 & \textbf{30.23} & 37.93 & 13.74 & 34.72 & 45.08 & 58.73 & 36.74 \\ 
+            Upcycle$_{\rm SFT}$\texttt{(4E,A2)} & 23.17 & \underline{33.97} & \textbf{50.27} & 29.50 & \underline{38.90} & \underline{15.18} & 34.20 & \textbf{48.14} & \underline{65.08} & \underline{37.60} \\
+            UpIT\texttt{(4E,A2)} & \underline{31.34} & 33.81 & \underline{48.97} & \underline{29.53} & \textbf{40.84} & 14.71 & \underline{36.99} & \underline{47.80} & \textbf{65.96} & \textbf{38.88} \\
+            \midrule
+            Self-MoE\texttt{(8E,A2)} & 10.62 & 22.73 & 34.69 & 28.95 & 30.10 & \textbf{15.68} & \underline{37.68} & 40.00 & 50.37 & 30.09 \\
+            Upcycle$_{\rm PT}$\texttt{(8E,A2)} & \underline{26.22} & \underline{34.04} & \textbf{51.57} & 28.95 & \underline{39.84} & 13.57 & 33.86 & 53.22 & 66.49 & \underline{38.64} \\ 
+            Upcycle$_{\rm SFT}$\texttt{(8E,A2)} & 22.56 & 33.66 & 46.26 & \underline{29.25} & 39.19 & \underline{14.76} & 35.18 & \textbf{49.15} & \underline{67.72} & 37.53 \\
+            UpIT\texttt{(8E,A2)} & \textbf{32.19} & \textbf{35.64} & \underline{49.15} & \textbf{30.23} & \textbf{40.38} & 14.57 & \textbf{37.93} & \underline{49.10} & \textbf{68.43} & \textbf{39.74} \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:main_result}
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+\textbf{Baselines.} 
+To assess the effectiveness of UpIT, we compare its performance against several baselines. For LoRA-based settings, we consider the following baselines. (1) LoRA~\citep{hu2021loralowrankadaptationlarge}, (2) Self-MoE~\citep{kang2024selfmoecompositionallargelanguage}, (3) PESC~\citep{wu2024parameterefficientsparsitycraftingdense}, (4) $\text{LoRAMoE}_{\text{PT}}$~\citep{dou2024loramoealleviateworldknowledge}, and (5) $\text{LoRAMoE}_{\text{SFT}}$. 
+For FFN-based settings, we compare UpIT with (1) SFT, (2) Self-MoE~\citep{kang2024selfmoecompositionallargelanguage}, (3) $\text{Upcycle}_{\text{PT}}$~\citep{komatsuzaki2023sparseupcyclingtrainingmixtureofexperts}, and (4) $\text{Upcycle}_{\text{SFT}}$. 
+\textbf{Dataset.} 
+Following \citep{wu2024parameterefficientsparsitycraftingdense}, we simultaneously train UpIT and compared baselines on a diverse set of datasets, encompassing Magicoder~\citep{wei2023magicoder} for coding, MetaMathQA~\citep{yu2023metamath} for mathematical and SlimORCA~\citep{SlimOrca} for other general abilities from various subjects. We do not perform quality filtering or other operations on the three datasets. We randomly sample data in a 1:1:3 ratio to create the final training dataset with 500K samples.
+
+\textbf{Implementation Details.} 
+We utilize Llama 2 7B and Sheared Llama 2.7B to train LoRA-based and FFN-based models. We adopt a constant learning rate of 2e-4 and 2e-5 for LoRA-based and FFN-based settings, respectively. All models are trained for 4 epochs in total. For UpIT, we first train the dense model for 2 epochs and prepare specialized expert models using intermediate checkpoints saved between epochs 1 and 2. In router initialization, we randomly select 1\% of the training data and train for 4 epochs to pre-optimize routing vectors. In model upcycling, UpIT does not introduce additional training by training the upcycling MoE models for 2 epochs.
+Therefore, the total training duration also amounts to 4 epochs, including 2 epochs for expert preparation and 2 for post-training. All experiments are conducted using a global batch size of 128 and a context length of 2048, running on 8 NVIDIA A800 GPUs. For evaluation, we use various benchmarks to validate comprehensively our method. 
+\subsection{Main Results}
+Table~\ref{tab:main_result} showcases a comparative analysis of benchmark results for LoRA-based and FFN-based models across diverse domains, revealing the following key insights. 
+
+(1) The proposed UpIT framework demonstrates remarkable performance across various benchmarks, highlighting its effectiveness compared to existing upcycle solutions. Specifically, when compared with $\text{LoRAMoE}_\text{SFT}$\texttt{(8E,A2)}, the LoRA-based UpIT\texttt{(8E,A2)} achieves an average performance improvement of 2.22\%. When the number of experts is expanded to 16, UpIT\texttt{(16E,A2)} sustains a competitive edge over $\text{LoRAMoE}_\text{SFT}$\texttt{(16E,A2)}, exhibiting a lead of 2.76\%. Similar trends are observed in FFN-based scenarios, where UpIT\texttt{(4E,A2)}and UpIT\texttt{(8E,A2)} outperform $\text{Upcycle}_\text{SFT}$\texttt{(4E,A2)} and $\text{Upcycle}_\text{SFT}$\texttt{(8E,A2)} by 1.28\% and 2.21\%, respectively. This comprehensive analysis further corroborates the applicability of UpIT across diverse MoE architectures, consistently yielding optimal performance.
+
+(2) In comparisons with PESC\texttt{(8E,A2)}and PESC\texttt{(16E,A2)}, which take adapter structure as experts, $\text{LoRAMoE}_\text{PT}$\texttt{(8E,A2)} and $\text{LoRAMoE}_\text{PT}$\texttt{(16E,A2)} display respective advantages of 0.25\% and 0.13\%, thereby underscoring a slightly superiority of LoRA-based MoE models over adapter-based counterparts. 
+More than that, in FFN-based upcycling, two Self-MoE models experience a collapse in performance, a phenomenon not observed in LoRA-based settings. We posit that this is due to the excessive number of expert parameters introduced in FFN-based upcycling, and the small data in instruction tuning is insufficient to differentiate the experts sufficiently, which hinders the ability of only training routers to fit the diverse data effectively. 
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/scale_data_lora.pdf}
+    \end{subfigure}
+    \hspace{5mm}
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/scale_data_ffn.pdf}
+    \end{subfigure}
+  \caption{Performance comparison of UpIT and vanilla upcycling methods under different size of training data. Detailed results in Section~\ref{sec:detail_scaling_data}}
+  \label{fig:paramerters_quantity}
+\end{figure}
+\subsection{Scaling the Training Dataset}
+\label{sec:scaling_data}
+To assess the data-efficient nature of UpIT, we validate UpIT and vanilla upcycling approaches by randomly sampling 50K, 100K, and 200K samples from the full 500K dataset, enabling experiments across four data sizes. As illustrated in Figure~\ref{fig:paramerters_quantity}, we have several intriguing findings.
+
+(1) In the context of LoRA-based scenarios, UpIT\texttt{(8E,A2)} demonstrates comparable performance to LoRAMoE\texttt{(8E,A2)}trained on 500K samples, with only 50K training samples. When scaling up to 16 experts, UpIT\texttt{(16E,A2)}outperforms LoRAMoE\texttt{(16E,A2)}trained on the full 500K dataset again with 100K training samples. These findings extend to FFN-based settings, underscoring the data-efficient essence of UpIT and the ability to diminish the data demands of upcycling notably.
+
+(2) Both existing LoRA-based and FFN-based models face performance growth saturation issues with traditional SFT (LoRA) and vanilla upcycling strategies. Specifically, while a noticeable performance increase occurs as the dataset scales from 50K to 200K, the performance growth stabilizes as it continues to expand from 200K to 500K, with the average performance exhibiting a log-like curve. In contrast, UpIT demonstrates nearly linear growth trends in FFN-based models and even exhibits accelerated performance gains as the dataset size increases in LoRA-based models. This strongly indicates that MoE models trained using UpIT could efficiently capture the principles of token dispatch more and possess a higher performance upper bound. 
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/scale_expert_lora.pdf}
+    \end{subfigure}
+    \hspace{5mm}
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/scale_expert_ffn.pdf}
+    \end{subfigure}
+  \caption{Performance comparison of UpIT and vanilla upcycling methods under different total and activated experts. Detailed results in Section~\ref{sec:detail_scaling_expert}.}
+  \label{fig:expert_scaling}
+\end{figure}
+\subsection{Scaling the Number of Experts}
+To examine the impact of scaling the number of total experts and activated experts on MoE models, we investigate the effects of UpIT and vanilla upcycling methods with different expert numbers.
+The first conclusion drawn from Figure~\ref{fig:expert_scaling} is that UpIT demonstrates superior performance across all configurations. Furthermore, as the number of activated experts increases, the growth trend of average performance gradually slows down, which is attributed to the fact that the evaluation benchmark is domain-specific, and simply increasing the number of activated parameters does not consistently yield substantial improvements. 
+We also find that under the same activated parameters, as the number of experts increases, vanilla upcycling even experiences several performance drops, whereas UpIT consistently shows improvements in performance as the number of experts grows. 
+Due to the inefficiency of data utilization in vanilla upcycling, increasing the number of experts during training leads to a reduction in data allocation for each expert, and the router fails to dispatch tokens to experts appropriately, results in unpredictable model performance.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/router_analysis.pdf}
+    \caption{Proportion of tokens dispatched to each expert on different benchmarks, where experts in UpIT exhibit stronger diversity than LoRAMoE.}
+    \label{fig:router}
+\end{figure}
+\subsection{Router Analysis}
+To assess the efficiency and interoperability of UpIT, understanding its token dispatch mechanism is essential. We comprehensively analyze the distribution patterns of designated experts across four representative benchmarks: HumanEval, GSM8K, NQ, and MMLU. The results of this examination are illustrated in Figure~\ref{fig:router}, focusing specifically on the 15th layer of LoRAMoE and UpIT with 8 total experts and 2 activated experts. Significantly, Expert 4 exhibits significantly higher activation within the HumanEval benchmark compared to the other datasets, while Expert 3 demonstrates a substantial activation rate in MMLU compared to other experts. The analysis reveals that, aside from exhibiting slight routing preferences in GSM8K, LoRAMoE dispatches tokens evenly among the experts across the other three benchmarks. 
+In contrast, UpIT accurately allocates tokens from different domains to specific experts, highlighting the significant differentiation among routers and experts, resulting in a more data-efficient model upcycling routine.
+\subsection{Explore the Upper Bound of UpIT}
+\label{sec:upper_bound}
+In the main experiment, we aligned total training amounts fairly to compare UpIT with baseline methods. 
+Here, we extend the training epochs to better understand the performance upper bound of UpIT.
+For the baselines, we continue training for an additional 4 epochs, but they do not show significant performance gains. Instead, we expand the training for UpIT in two ways: UpIT\texttt{(2,6)} includes 2 epochs for expert preparation followed by 6 epochs for post-training, while UpIT\texttt{(4,4)} comprises 4 epochs for expert preparation followed by 4 epochs for post-training. Figure~\ref{fig:capacity} shows that UpIT demonstrates continuous performance improvement with more training epochs, indicating greater potential than the baselines.
+Besides, it is interesting that UpIT\texttt{(4,4)} experiences longer iteration epochs during expert preparation, with greater divergences between expert models, leading to a more rapid upward trend. In the post-training stage, after only 4 epochs, it achieves comparable results to UpIT\texttt{(2,6)} and is expected to reach higher performance in the upper bound.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/capacity_lora.pdf}
+    \end{subfigure}
+    \hspace{5mm}
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/capacity_ffn.pdf}
+    \end{subfigure}
+  \caption{Performance comparison of UpIT and vanilla upcycling methods with different training epochs where \texttt{x} represent training epochs. For UpIT, we consider different allocations of the training epochs between expert preparation and model upcycling. Detailed results are shown in Section~\ref{sec:detail_upper_bound}}
+  \label{fig:capacity}
+\end{figure}
+\subsection{Further Analysis}
+\label{sec:further}
+
+\begin{table}[t]
+    \centering
+    \resizebox{\textwidth}{!}{%
+        \centering
+        \begin{subtable}[b]{0.3\textwidth}
+            \centering
+            \small
+            \begin{tabular}{lc}
+                \toprule
+                 & \textbf{Avg.} \\
+                \midrule
+                UpIT\texttt{(Front.Half)} & 51.37 \\
+                UpIT\texttt{(Uniform)} & \underline{51.71} \\
+                UpIT\texttt{(Back.Half)} & \textbf{52.21} \\
+                \bottomrule
+            \end{tabular}
+        \end{subtable}
+        \hspace{8mm}
+        \begin{subtable}[b]{0.3\textwidth}
+            \centering
+            \small
+            \begin{tabular}{lc}
+                \toprule
+                 & \textbf{Avg.} \\
+                \midrule
+                UpIT\texttt{(w/o EE)} & \underline{53.31} \\
+                UpIT\texttt{(Random)} & 52.41 \\
+                UpIT\texttt{(Genetic)} & \textbf{53.34} \\
+                \bottomrule
+            \end{tabular}
+        \end{subtable}
+        \hspace{4mm}
+        \begin{subtable}[b]{0.3\textwidth}
+            \centering
+            \small
+            \begin{tabular}{lc}
+                \toprule
+                 & \textbf{Avg.} \\
+                \midrule
+                UpIT\texttt{(w/o Init)} & \underline{49.96} \\
+                UpIT\texttt{(Random)} & 49.30 \\
+                UpIT\texttt{(Skilled)} & \textbf{52.21} \\
+                \bottomrule
+            \end{tabular}
+        \end{subtable}
+    }
+    \caption{Further analysis containing different checkpoint selection approaches (left), different expert expansion methods (middle), and different router initialization strategies (right). Detailed results are shown in Section~\ref{sec:detail_expert_preparation}, ~\ref{sec:detail_expert_expansion}, and ~\ref{sec:detail_router_init}}
+    \label{tab:further_analysis}
+\end{table}
+
+\textbf{Different Checkpoint Selection Strategies during Expert Preparation.}
+In this section, we would like to answer the question of how to select checkpoints if the number of saved checkpoints exceeds the required number of experts.
+As shown in Table~\ref{tab:further_analysis} (left), the latter-half selection performs better. Detailed results in Table~\ref{tab:checkpoint_selection} indicate that the primary performance differences stem from improvements in mathematical reasoning and coding abilities as training progresses, and selecting later checkpoints might enhance these capabilities.
+
+\textbf{Different Parameter Merging Strategies during Expert Expansion.}
+Next, we investigate various expert merging strategies. Table~\ref{tab:further_analysis} (middle) reveals that the genetic algorithm-based expert expansion achieves performance comparable to the method of constructing experts with more checkpoints, highlighting the effectiveness of our merging strategy in generating diverse experts. Additionally, merging two randomly selected expert models in each round results in a performance decline, again validating the importance of maintaining expert diversity.
+
+\textbf{Different Data Selection Strategies during Router Initialization.}
+We compare the expert-specific data selection approach with two alternatives: without the router initialization stage and randomly selecting data to pre-optimize routing vectors. Table~\ref{tab:further_analysis} (right) illustrates a significant performance decline that occurs without router initialization, underscoring the importance of this stage and the effectiveness of utilizing checkpoints as experts. Furthermore, performance diminishes when the training data is randomly selected, due to the loss of inherent diversity among checkpoints when using similar data in pre-optimizing different expert models.
+Overall, the phenomenon in this paper is similar to the findings of discussing expert diversity in existing work~\citep{lo2024closer}
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\textbf{Mixture of Experts.} Mixture of Experts (MoE)~\citep{6797059} modifies the FFN layers or inserts additional branches to construct experts and activates them sparsely, thereby significantly enlarging the model capacity without noticeably increasing computational costs. The exploration of MoE has increasingly captured attention in recent years. Vanilla upcycling~\citep{komatsuzaki2023sparseupcyclingtrainingmixtureofexperts} copies FFN layers, followed by post-training, have achieved a more convenient MoE training strategy. LoRAMoE~\citep{dou2024loramoealleviateworldknowledge}, MoELoRA~\citep{luo2024moeloracontrastivelearningguided}, MixLoRA~\citep{li2024mixloraenhancinglargelanguage} and MoLE~\citep{wu2024mixtureloraexperts} develop an MoE model by incorporating several LoRA branches as experts, utilizing sparse activation or linear weighting for model construction. PESC~\citep{wu2024parameterefficientsparsitycraftingdense} introduces adapter-based structures after the FFN layers, exploring a parameter-efficient MoE model that diverges from the LoRA paradigm. MoExtend~\citep{zhong2024moextendtuningnewexperts} adapt to new tasks by expanding the MoE layer during the training process, mitigating catastrophic forgetting. MoE Jetpack~\citep{zhu2024moejetpackdensecheckpoints} introduces checkpoint recycling, which leverages checkpoints to enhance the flexibility and diversity of expert initialization. In contrast, Branch-Train-MiX~\citep{sukhbaatar2024branchtrainmixmixingexpertllms} and Self-MoE~\citep{kang2024selfmoecompositionallargelanguage} explore a Specialized Upcycling method by introducing specialized experts. Despite superior performance, they still require considerable domain data to acquire specialized experts. 
+In this paper, we integrate the advantages of the work above and utilize intermediate checkpoints for expert preparation, innovatively propose an expert expansion strategy and an stage of pre-optimizing routing vectors to enhance flexibility, scalability and data efficiency.
+
+\textbf{Model Merging.} Model merging has emerged as a prominent research direction in recent years, focusing on consolidating multiple task-specific models into a unified model with diverse capabilities~\citep{wortsman2022modelsoupsaveragingweights, ilharco2023editingmodelstaskarithmetic}. Model merging usually considers the combination of model parameters without accessing the original training data. Average Merging~\citep{wortsman2022modelsoupsaveragingweights} is one typical model merging approach, which utilizes averaged parameters to construct the merged model. Task Arithmetic~\citep{zhang2023composingparameterefficientmodulesarithmetic} employs a pre-defined scaling term to distinguish the importance of various models. Fisher Merging~\citep{matena2022mergingmodelsfisherweightedaveraging} performs automatic weighted merging of parameters, where the Fisher information matrix calculates the weights. TIES-Merging~\citep{yadav2023tiesmergingresolvinginterferencemerging} tackles the task conflicts in ~\citep{zhang2023composingparameterefficientmodulesarithmetic} by trimming low-magnitude parameters, resolving sign disagreements, and disjointly merging parameters with consistent signs. DARE~\citep{yu2024languagemodelssupermario} first sparsifies delta parameters of several SFT homologous models and then merges them into a single model. We innovatively integrate the model merging concept into the MoE model, leveraging genetic algorithms and DARE to expand and evolve new experts. This approach enhances the scalability of our framework.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, we present a novel, flexible, scalable, and data-efficient approach, Upcycling Instruction Tuning (UpIT), for transforming dense pre-trained models into MoE instruction models. 
+By leveraging intermediate checkpoints as specialized experts and implementing an expert expansion stage with genetic algorithms and parameter merging, UpIT successfully enhances expert diversity while allowing for a flexible number of experts. The strategic selection of seed data ensures that each expert and router performs optimally within the MoE framework. Our extensive experiments demonstrate that UpIT not only achieves superior performance across various benchmarks but also maintains stability in expert and data scaling. Further analysis emphasizes the critical importance of expert diversity in the upcycling process. Overall, UpIT offers a promising pathway for enhancing the efficiency and effectiveness of MoE models, paving the way for future advancements in the field.
+
+
+

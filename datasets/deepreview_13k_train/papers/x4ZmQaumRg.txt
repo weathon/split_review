@@ -1,0 +1,253 @@
+\title{Active Learning for Neural PDE Solvers}
+
+\begin{abstract}
+        Solving partial differential equations (PDEs) is a fundamental problem in engineering and science.  While neural PDE solvers can be more efficient than established numerical solvers, they often require large amounts of training data that is costly to obtain. Active Learning (AL) could help surrogate models reach the same accuracy with smaller training sets by querying classical solvers with more informative initial conditions and PDE parameters. While AL is more common in other domains, it has yet to be studied extensively for neural PDE solvers. To bridge this gap, we introduce \alforpde{}, a modular and extensible active learning benchmark. It provides multiple parametric PDEs and state-of-the-art surrogate models for the solver-in-the-loop setting, enabling the evaluation of existing and the development of new AL methods for PDE solving. We use the benchmark to evaluate batch active learning algorithms such as uncertainty- and feature-based methods. We show that AL reduces the average error by up to 71\% compared to random sampling and significantly reduces worst-case errors. Moreover, AL generates similar datasets across repeated runs, with consistent distributions over the PDE parameters and initial conditions. The acquired datasets are reusable, providing benefits for surrogate models not involved in the data generation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Partial differential equations describe numerous physical phenomena such as fluid dynamics, heat flow, and cell growth. %
+Because of the difficulty of obtaining exact solutions for PDEs, it is common to utilize numerical schemes to obtain approximate solutions. However, numerical solvers require a high temporal and spatial resolution to obtain sufficiently accurate numerical solutions, leading to high computational costs. This issue is further exacerbated in settings like parameter studies, inverse problems, or design optimization, where many iterations of simulations must be conducted. Thus, it can be beneficial to replace the numerical simulator with a surrogate model by training a neural network to predict the simulator outputs~\citep{pdebench-takamoto:2022,pde-refiner-long-rollouts-lippe:2023, brandstetter2021message, gupta2023towards, li2020fourier}. In addition to being more efficient, neural surrogate models have other advantages, such as being end-to-end differentiable.
+
+One of the main challenges of neural PDE surrogates is that their training data is often obtained from the same expensive simulators they are intended to ultimately replace. Hence, training a surrogate provides a computational advantage only if the generation of the training data set requires fewer simulations than will be saved during inference.
+Moreover, it is non-trivial to obtain training data for a diverse set of initial conditions and PDE parameters required to train a surrogate model with sufficient generalizability. For instance, contrary to training foundation models for text and images, foundation models for solving PDEs require targeted and expensive data generation to generalize well.  
+
+Active learning is a possible solution to these challenges as it might help to iteratively select a smaller number of the most informative and diverse training trajectories, thereby reducing the total number of simulations required to reach the same level of accuracy. Furthermore, AL may also improve the reliability of the surrogate models by covering challenging dynamical regimes with enough training data, which may otherwise be hard to find through hand-tuned input distributions. 
+However, developing neural PDE solvers is a challenging problem for AL due to the complex regression tasks characterized by high-dimensional input and output spaces and time series data. 
+While AL has been used extensively for other scientific ML domains such as material science~\citep{lookman2019active,wang2022benchmarking,zaverkin-dbal,zaverkin2024uncertainty}, it has only been recently applied to PDEs in the context of physics-informed neural networks (PINNs;~\citealt{wu2023comprehensive,sahli2020physics,YuriAIKAWA2023}), specific PDE domains~\citep{pestourie2021data, physics-enhanced-deep-surrogated-pestourie:2023}, or direct prediction models~\citep{li2023multi,li2020fourier}. Hence, AL is still unexplored for a broader class of neural PDE solvers, which currently rely on extensive, brute-force numerical simulations to generate a sufficient amount of training data.
+\begin{figure}[t]
+    \begin{center}
+        \includegraphics[width=0.94\textwidth]{figures/active-learning-pipeline.pdf}
+        \caption{\label{fig:architecture}An extensible benchmark framework for pool-based active learning for neural PDE solvers.}
+    \end{center}
+\end{figure}
+\paragraph{Contributions.}
+This paper presents \alforpde, the first AL framework for neural PDE solvers. 
+The benchmark supports the study of existing AL algorithms in scientific ML applications and facilitates the development of novel PDE-specific AL methods. 
+In addition to various AL algorithms, the benchmark provides differentiable numerical simulators for multiple PDEs, such as compressible Navier-Stokes, and neural surrogate models, such as the U-Net~\citep{ronneberger2015u, gupta2023towards}. %
+The benchmark is extensible, allowing new algorithms, models, and tasks to be added. Using the benchmark, we conducted several experiments exploring the behavior of AL algorithms for PDE solving. 
+These experiments show that AL can increase data efficiency and especially reduce worst-case errors. Among the methods, the largest cluster maximum distance (LCMD) and stochastic batch active learning (SBAL) are consistently the two best-performing algorithms. We demonstrate that using AL can result in more accurate surrogate models trained in less time. Additionally, the generated data distribution is consistent between random repetitions, initial datasets, and models, showing that AL can reliably generate reusable datasets for neural PDE solvers that were not used to gather the data.
+
+
+
+\section{Background}
+
+
+We seek the solution 
+$\sol: [0, T] \times \mathcal{X} \rightarrow \mathbb{R}^ {N_c}$ of a PDE with a $D$-dimensional spatial domain $\mathcal{X}$, $\bfx = [x_1, x_2, \ldots, x_D]^{\top} \in \mathcal{X}$,  temporal domain $t \in [0, T]$, and ${N_c}$ field variables or channels $c$ ~\citep{brandstetter2021message}:  %
+\begin{align}
+&\partial_t \sol = F\left(\pdep, t, \bfx, \sol,  \partial_{\bfx} \sol, \partial_{\bfx\bfx} \sol, \ldots \right), \quad\quad\quad\quad\quad\quad\quad (t, \bfx) \in [0, T] \times \mathcal{X}\\
+&\sol(0, \bfx) = \sol^0(\bfx), \quad \bfx \in \mathcal{X};  \quad\quad \mathcal{B}[\sol](t, \bfx) = 0, \quad (t, \bfx) \in [0, T] \times \partial\mathcal{X} \label{eq:bound}
+\end{align}
+Here, the boundary condition $\mathcal{B}$ (Eq.~\ref{eq:bound}) determines the behavior of the solution at the boundaries $\partial\mathcal{X}$ of the spatial domain $\mathcal{X}$, and the initial condition (IC) $\sol^0$ defines the initial state of the system (Eq. \ref{eq:bound}). 
+The vector $\pdep = (\pdepi_1, ..., \pdepi_l)^{\top} \in \mathbb{R}^l$ with $\pdepi_i \in [a_i, b_i]$ denotes the PDE parameters which influence the dynamics of the physical system governed by the PDE such as the diffusion coefficient in Burgers' equation. 
+In the following, we only consider a single boundary condition (periodic) for simplicity, and thus a single initial value problem can be identified by the tuple $\pde = (\sol^0, \pdep)$.  %
+The inputs to the initial value problem are drawn from the test input distribution $p_T$, $\pde \sim p_T(\pde) = p_T(\sol^0) p_T(\pdep)$. The distributions are typically only given implicitly, i.e., we are given an IC generator $p_T(\sol^0) $ and a PDE parameter generator $p_T(\pdep)$, from which we can draw samples. For instance, the ICs may be drawn from a superposition of sinusoidal functions with random amplitudes and phases~\citep{pdebench-takamoto:2022}, while the PDE parameters ($\lambda_i$) are typically drawn uniformly from their interval $[a_i, b_i]$.
+
+
+
+The ground truth data is generated using a numerical solver, which can be defined as a forward operator $\mathcal{G}: \mathcal{U} \times \mathbb{R}^l \rightarrow \mathcal{U}$, mapping the solution at the current timestep to the one at the next timestep~\citep{li2020fourier, pdebench-takamoto:2022}, $\sol(t + \Delta t, \cdot) = \mathcal{G}(\sol(t, \cdot), \pdep) $ with timestep size $\Delta t$. Here, $\mathcal{U}$ is a suitable space of functions $\sol(t, \cdot)$.
+The solution $\sol$ is uniformly discretized across the spatial dimensions, yielding $N_{\bfx}$ spatial points in total and the temporal dimension into $N_t$ timesteps. %
+The forward operator is applied autoregressively, i.e., feeding the output state back into $\mathcal{G}$ (also called rollout), to obtain a full trajectory $\sol = (\sol^{0}, \sol^{1},  ..., \sol^{N_t})$. We aim to replace the numerical solver with a neural PDE solver. While there are also other paradigms such as PINNs~\citep{raissi2019physics}, we restrict ourselves to autoregressive solvers  $\mathcal{G}_{\theta}$ with $\hat{\sol}(t+\Delta t, \cdot) = \mathcal{G}_{\theta}(\hat{\sol}(t, \cdot), \pdep)$ \citep{pde-refiner-long-rollouts-lippe:2023}. The training set for the said $\mathcal{G}_{\theta}(\sol(t, \cdot), \pdep)$ consists of aligned pairs of $\pde$ and the corresponding solutions obtained from the numerical solver, i.e., $\train = \{(\pde_1, \sol_1), \ldots, (\pde_{N_{\text{train}}}, \sol_{N_{\text{train}}})\}$. 
+The neural network parameters $\theta$ are minimized using the root mean squared error (RMSE) on the training samples, 
+\begin{equation} \label{eq:loss}
+    \mathcal{L}_{\text{RMSE}}(\sol, \hat{\sol}) = \sqrt{\frac{1}{N_t N_{\bfx} N_c}\sum_{i=1}^{N_t} \sum_{j=1}^ {N_{\bfx}} 
+    \Vert{\sol(t_i, \bfx_j) - \hat{\sol}(t_i, \bfx_j)\Vert}_2^2}
+\end{equation}
+where $\hat{\sol}$ denotes the estimated solutions of the neural surrogate models. 
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+Neural surrogate models for solving parametric PDEs is a popular area of research~\citep{cape-neural-pde-takamoto:2023,neural-oscillators-pde-param-generalization-kapoor:2023,pde-refiner-long-rollouts-lippe:2023,vcnef-hagnberger:2024,parametric-pinns-pde-param-generalization-cho:2024}. Most existing works, however, often focus on single or uniformly sampled parameter values for the PDE coefficients and improving the neural architectures to boost the accuracy. %
+In the context of neural PDE solvers, AL has primarily been applied to select the collocation points of PINNs. %
+A typical approach is to sample the collocation points based on the residual error directly \citep{active-learning-pinns-incomp-ns-arthurs:2021, gao2023active, mao2023physics, wu2023comprehensive}. While this strategy can be effective, it differs from standard AL since it uses the ``label'', i.e., the residual loss, when selecting data points. \citet{YuriAIKAWA2023} use a Bayesian PINN to select points based on uncertainty, whereas \citet{sahli2020physics} employ a PINN ensemble for AL of cardiac activation mapping.
+
+\citet{pde-active-learn-pestourie:2020} use AL to approximate Maxwell equations using ensemble-based uncertainty quantification for metamaterial design. Uncertainty-based AL was also employed for diffusion, reaction-diffusion, and electromagnetic scattering~\citep{physics-enhanced-deep-surrogated-pestourie:2023}. In multi-fidelity AL, the  optimal spatial resolution of the simulation is chosen~\citep{li2020multi, li2021batch, wu2023disentangled}. For instance, \citet{li2023multi} use an ensemble of FNOs in the single prediction setting. \citet{wu2023deep} apply AL to stochastic simulations using a spatio-temporal neural  process. 
+\citet{bajracharya2024feasibility} investigate AL to predict the stationary solution of a diffusion problem. They consider AL using two different uncertainty estimation techniques and selecting based on the diversity in the input space. \citet{pickering2022discovering} use AL to find extreme events using ensembles of DeepONets~\citep{lu2019deeponet}. %
+Next to using AL, it is also possible to reduce the data generation time using Krylov Subspace Recycling \citep{wang2023accelerating} or by applying data augmentation techniques such as Lie-point symmetries \citep{brandstetter2022lie}. Such symmetries could also be combined with AL using LADA \citep{kim2021lada}. 
+In recent years, several benchmarks for neural PDE solvers have been published~\citep{pdebench-takamoto:2022,gupta2023towards, pinnacle-pinns-benchmark-hao:2024,cfdbench-machine-learning-fluid-dynamics-luo:2024,wavebench-wave-pdes-liu:2024}. For instance, PDEBench~\citep{pdebench-takamoto:2022} and PDEArena~\citep{gupta2023towards} provide efficient implementations of numerical solvers for multiple hydrodynamic PDEs such as Advection, Navier-Stokes, as well as recent implementations of neural PDE solvers (e.g., DilResNet, U-Net, FNO) for standard and conditioned PDE solving. Similarly, CODBench \citep{codbench-continuous-dynamical-systems-burark:2024} compares the performance of different neural operators. WaveBench~\citep{wavebench-wave-pdes-liu:2024} is a benchmark specifically aimed at wave propagation PDEs that are categorized into time-harmonic and time-varying problems. Contrary to prior work, AL4PDE is the first framework for evaluating and developing AL methods for neural PDE solvers.
+
+
+
+\section{\alforpde: An AL Framework for Neural PDE Solvers}
+
+
+The \alforpde benchmark consists of three major parts: (1) AL algorithms, (2)  surrogate models, and (3) PDEs and the corresponding simulators. It follows a modular design to make the addition of new approaches or problems as easy as possible (\cref{fig:structure}). The following sections describe the  AL approaches, including the general problem setup, acquisition and similarity functions, and batch selection strategies. Moreover, we describe the included PDEs and surrogate models. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.94\linewidth]{arch/ClassDiagramAL4pde.pdf}
+    \caption{Structural overview of the \alforpde benchmark. }
+    \label{fig:structure}
+\end{figure}
+
+\subsection{Problem Definition and Setup}
+AL aims to select the most informative training samples so that the model can reach the same generalization error with fewer calls to the numerical solver. We measure the error using test trajectories on random samples from an input distribution $p_T$.
+\cref{fig:architecture} shows the full AL cycle. Since it requires retraining the NN(s) after each round, we use batch AL with sufficiently large batches. Specifically, in each round, a batch of simulator inputs $\batch = \{ \inp{1}, ..., \inp{N_{\text{batch}}}\} $ is selected. It is then passed to the numerical solver, which computes the output trajectories using numerical approximation schemes. The new trajectories are then added to the training set, and the cycle is repeated. 
+
+We implement \emph{pool-based} active learning methods, which select from a  set of possible inputs $\pool = \{ \inp{1}, ..., \inp{N_{\text{pool}}}\}$ called ``pool''. The selected batch is then removed from the pool, simulated, and added to the training set $\train$:
+\begin{align}
+    \pool  \leftarrow \pool \setminus \batch, \quad \quad \ \train  \leftarrow \train \cup \  \mathrm{solve}(\batch).
+\end{align}
+We sample the pool set randomly from a proposal distribution $\pi$. In our experiments, we sample pool and test set from the same input distribution $\pi = p_T$, although $p_T$ might not always be known in practice. 
+Following common practice, the initial batch is selected randomly.
+Besides pool-based methods, our framework is also compatible with query-synthesis AL methods that are not restricted to a finite pool set.
+Several principles are useful for the design of AL methods \citep{wu2018pool}: First, they should select highly \emph{informative} samples that allow the model to reduce its uncertainty. Second, selecting inputs that are \emph{representative} of the test input distribution at test time is often desirable. Third, the batch should be \emph{diverse}, i.e., the individual samples should provide non-redundant information. 
+The last point is particular to the batch setting, which is essential to maintain acceptable runtimes.
+In the following, we will investigate batch AL methods that first extract latent features or direct uncertainty estimates from the neural surrogate model for each sample in the pool and subsequently apply a selection method to construct the batch.
+
+
+\subsection{Uncertainties and Features} \label{sec:almethods}
+
+Since neural PDE solvers provide high-dimensional autoregressive rollouts without direct uncertainty predictions, many AL methods cannot be applied straightforwardly. 
+In the AL4PDE framework, we select the following two different classes of methods: the uncertainty-based approach, which directly assigns an uncertainty score to each candidate, and the feature-based framework of \citet{deep-batch-active-learning-holzmueller:2023}, which uses features (or kernels) to evaluate the similarity between inputs.
+
+\paragraph{Uncertainties.}
+Epistemic uncertainty is often used as a measure of sample informativeness. 
+While a more costly Bayesian approach is possible, we adopt the query-by-committee~(QbC) approach \citep{seung1992query}, a simple but effective method that utilizes the variance between the ensemble members' outputs as an uncertainty estimate:
+\begin{equation}
+a_{\text{QbC}}(\pde_i) :=  \frac{1}{N_t N_{\bfx} N_c}\sum_{j=1}^{N_t} \sum_{k=1}^ {N_{\bfx}} \frac{1}{N_m}\sum_{m=1}^{N_m} \Vert{\hat{\sol}_{i,m}(t_j, \bfx_k) - \overline{\hat{\sol}_i}(t_j, \bfx_k)}\Vert_2^2~.
+\end{equation}
+Here, $\overline{\hat{\sol}_i}$  is the mean prediction of all $N_m$ models with $ \overline{\hat{\sol}_i}(t, \bfx) = \sum_{m} \hat{\sol}_{i,m}(t, \bfx) /N_m$. 
+The ensemble members produce different outputs $\hat{\sol}_i$ due to the inherent randomness resulting from the weight initialization and stochastic gradient descent. The assumption of QbC is that the variance of the ensemble member predictions correlates positively with the error. A high variance, therefore, points to a region of the input space where we need more data. 
+Using the variance of the model outputs directly corresponds to minimizing the expected MSE. Note that many more error metrics can be considered for PDEs \citep{pdebench-takamoto:2022}, for which measures other than the variance may be more appropriate.
+
+\paragraph{Features.}
+Many deep batch AL methods rely on some feature representation $\phi(\inp{}) \in \mathbb{R}^p$ of inputs and utilize a distance metric in the feature space as a proxy for the similarity between inputs, which can help to ensure diversity of the selected batch.
+A typical representation is the inputs to the last neural network layer, but other representations are possible \citep{deep-batch-active-learning-holzmueller:2023}. %
+For neural PDE solvers, we compute the trajectory and concatenate the latent features at each timestep. Since this can result in very high-dimensional feature vectors, we follow \citet{deep-batch-active-learning-holzmueller:2023} and apply Gaussian sketching. Specifically, we use $\phi_{\text{sketch}}(\pde) := \mathbf{U} \phi(\pde) / \sqrt{p'} \in \mathbb{R}^{p'}$, to reduce the feature space to a fixed dimension $p'$ using a random matrix $\mathbf{U} \in \mathbb{R}^{p'\times p}$ with i.i.d. standard Gaussian entries.%
+
+While ensemble-based AL methods can also be formulated in terms of feature maps \citep{kirsch2023black}, the use of latent features allows AL methods to work with a single model. Moreover, methods based on distances of latent features can naturally incorporate diversity into batch AL by avoiding the selection of highly similar examples. Feature-based AL methods are, however, not translation equivariant. In settings with periodic boundary conditions, an IC translated along the spatial axis will produce a trajectory shifted by the same amount. By using periodic padding within the convolutional layers of U-Net, the network is equivariant w.r.t.\ translations; hence, adding a translated version of the same IC is redundant. Uncertainty-based approaches based on ensembles are translation-invariant since all ensemble model outputs are shifted by the same amount and produce the same outputs. To make feature-based AL translation invariant, we take the spatial average over the features. %
+
+
+\subsection{Batch Selection Strategies}
+
+Given uncertainties or features, we need to define a method to select a batch of pool samples.  As a generic baseline, we compare to the selection of a (uniformly) \textbf{random}  sampling of the inputs according to the input distribution,
+$\inp{} \sim p_T(\pde)$.
+
+\paragraph{Uncertainty-based selection strategies.} 
+When given a single-sample acquisition function $a$ such as the ensemble uncertainty, a simple and common approach to selecting a batch of $k$ samples is \textbf{Top-K}, taking the $k$ most uncertain samples. However, this does not ensure that the selected batch is diverse.
+To improve diversity, \citet{kirsch2023stochastic} proposed stochastic batch active learning (\textbf{SBAL}). SBAL samples inputs $\pde$ from the remaining pool set $\pool$ without replacement according to the probability distribution
+$p_{\text{power}}(\pde) \propto a(\pde)^m$, where $m$ is a hyperparameter controlling the sharpness of the distribution. Random sampling corresponds to $m=0$ and Top-K to $m=\infty$.
+The advantage of SBAL is that it selects samples from input regions that are not from the highest mode of the uncertainty distribution and encourages diversity.
+
+\paragraph{Feature-based selection strategies.} In the simpler version of their \textbf{Core-Set} algorithm, \citet{sener2018active} iteratively select the input from the remaining pool with the highest distance to the closest selected or labeled point. While Core-Set produces batches of diverse and informative samples, its objective aims at covering the feature space uniformly. Hence, Core-Set in general does not select samples that are representative for the proposal distribution. To alleviate this issue, \citet{deep-batch-active-learning-holzmueller:2023} propose to replace the greedy Core-Set with \textbf{LCMD}, a similarly efficient method inspired by k-medoids clustering. LCMD interprets previously selected inputs as cluster centers, assigns all remaining pool points to their closest center, selects the cluster with the largest sum of squared distances to the center, and from this cluster selects the point that is furthest away from the center. The newly selected point then becomes a new center and the process is repeated until a batch of the desired size is obtained.
+
+\subsection{PDEs}
+\begin{minipage}[h]{\textwidth}
+  \begin{minipage}[b]{0.52\textwidth}
+    \includegraphics[width=1\linewidth]{img/example_traj_main.pdf}
+    
+    \captionof{figure}{\label{fig:ex_traj_main}Example trajectories of the  PDEs.}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[b]{0.47\textwidth}
+    \resizebox{\textwidth}{!}{%
+    
+      \begin{tabular}{llll}
+        \toprule
+        \multirow{2}{*}{PDE} & \multirow{2}{*}{T in s} & Sim. Res. & Train. Res. \\
+         &  & \scriptsize($N_t, N_{\bfx}, [N_{\bfy}]$) & \scriptsize($N_t, N_{\bfx}, [N_{\bfy}]$) \\
+        \cmidrule(r){1-4}
+        Burgers & 2  & (201, 1024) &   (41, 256) \\
+        KS &  40 & (801, 512)  &  (41, 256) \\
+        CE & 4  & (501, 64)  &  (51, 64) \\
+        CNS & 1 & (21, 128, 128) &  (21, 64, 64)\\
+        \bottomrule \\
+      \end{tabular}}
+      \captionof{table}{ \label{tab:taskparameter}Discretizations of the PDEs.}
+    \end{minipage}
+\end{minipage}
+
+We consider 1D and 2D parametric PDEs, all with periodic boundary conditions. The first 1D PDE is the \textbf{Burgers}' equation from PDEBench~\citep{pdebench-takamoto:2022} with kinematic viscosity $\nu$:  $\tcbhighmath{\partial_t u + u \partial_x u = (\nu/\pi) \partial_{xx} u}$. Secondly, the Kuramoto–Sivashinsky (\textbf{KS}) equation, $\tcbhighmath{\partial_t u + u \partial_x u + \partial_{xx} u + \nu \partial_{xxxx} u= 0}$, from \citet{pde-refiner-long-rollouts-lippe:2023} demonstrates diverse dynamical behaviors, from fixed points and periodic limit cycles to chaos~\citep{hyman1986kuramoto}. Next to the viscosity $\nu$, the domain length L is also varied.
+Thirdly, to test a multiphysics problem with more parameters, we include the so-called combined equation (\textbf{CE}) from \citet{brandstetter2021message} where we set the forcing term $\delta=0$: $\tcbhighmath{\partial_t u + \partial_x\left(\alpha u^2 - \beta \partial_x u + \gamma \partial_{xx} u \right) = 0}$.
+Depending on the value of the PDE coefficients ($\alpha, \beta, \gamma$), this equation recovers the Heat, Burgers, or the Korteweg-de-Vries PDE. For 2D, we use the compressible Navier-Stokes (\textbf{CNS}) %
+equations from PDEBench~\citep{pdebench-takamoto:2022}, $ \tcbhighmath{\partial_t \rho + \nabla \cdot (\rho \textbf{v}) = 0}, 
+    ~~~ \tcbhighmath{\rho (\partial_t \textbf{v} + \textbf{v} \cdot \nabla \textbf{v}) =~ - \nabla p + \eta \triangle \textbf{v} + (\zeta + {\large\nicefrac{\eta}{3}}) \nabla (\nabla \cdot \textbf{v})}$,
+    $\tcbhighmath{\partial_t (\epsilon + {\large\nicefrac{\rho v^2}{2}}) + \nabla \cdot [( p + \epsilon + {\large\nicefrac{\rho v^2}{2}} ) \bf{v} - \bf{v} \cdot \sigma' ] = 0}$. The ICs are generated from random initial fields. Full details on PDEs, ICs, and the PDE parameter distributions can be found in \cref{sec:task_detail}.
+
+\subsection{Neural Surrogate Models}
+Currently, the benchmark includes the following neural PDE solvers: (i) a recent version of U-Net~\citep{ronneberger2015u} from~\citet{gupta2023towards}, (ii) SineNet~\citep{sinenet-time-dependent-pde-zhang:2024}, which is an enhancement of the U-Net model that corrects the feature misalignment issue in the residual connections of modern U-Nets and can be considered a model with state of the art accuracy, specifically for advection-type equations, and (iii) the Fourier neural operator ~\citep[FNO,][]{li2020fourier}.
+
+
+\section{Selection of Experiments}
+
+
+We investigate (i) the impact of AL methods on the average error, (ii) the error distribution, (iii) the variance and reusability of the generated data,  (iv) the temporal advantage of AL, and  (v) conduct an ablation study concerning the different design choices of SBAL and LCMD. We use a smaller version of the modern U-Net from \citet{gupta2023towards}. We train the model on sub-trajectories (two steps) to strike a balance between learning auto-regressive rollouts and fast training. The training is performed with a cosine schedule, which reduces the learning rate from $10^{-3}$ to $10^{-5}$. The batch size is set to 512 (CNS: 64).   We use an exponential data schedule, i.e., in each AL iteration, the amount of data added is equal to the current training set size~\citep{kirsch2023stochastic}. For 1D equations, we start with 256 trajectories (2D: 128). The pool size is fixed to 100,000 candidates. For Burgers, we choose the parameter space $\nu\in[0.001, 1)$ and sample values uniformly at random but on a logarithmic scale. For the KS equation, besides the viscosity $\nu\in [0.5, 4)$, we vary the domain length $L \in [0.1, 100)$ as the second parameter. For CE, the parameter space is defined to be $\alpha \in [0, 3)$,  $\beta \in [0, 0.4)$, $\gamma \in [0, 1)$. For the CNS equations, we set $\eta, \zeta \in [10^{-4}, 10^{-1})$ and draw values on a logarithmic scale as with Burgers' PDE. Additionally, we use random Mach numbers $m \in[0.1, 1)$  for the IC generator. We repeat all experiments with five random seeds (Burgers: ten) and report the 95\% confidence interval of the mean unless stated otherwise. 
+\paragraph{Comparison of AL methods.}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics{img/loss_over_data.pdf}
+    \caption{Error over the number of trajectories in the training set (N). The shaded area represents the $95 \%$ confidence interval of the mean calculated over ten seeds for Burgers and and five for the rest. AL can reduce the error relative to random sampling of the inputs on all tested PDEs but CNS, where the difference was not significant.  }
+    \label{fig:loss_over_data}
+\end{figure} 
+\cref{fig:loss_over_data} shows the RMSE for the various AL methods and PDEs. AL often reduces the error compared to sampling uniformly at random for the same amount of data. The advantage of AL is especially large for CE, which is likely due to the diverse dynamic regimes found in the PDE. SBAL and LCMD achieve similar errors on all PDEs with the exception of KS, where only SBAL can improve over random sampling. SBAL and LCMD can reach lower error values with only a quarter of the data points in the case of CE and Burgers. However, the greedy methods Top-K and Core-Set even increase the error for some PDEs. The difference on the CNS task was not significant, likely due to the performance of the base model training (see \cref{fig:abl_sbal}a) for a stronger model). 
+Worst-case errors are of special interest when solving PDEs. Since we found the absolute maximum error to be unstable, we show the RMSE quantiles in \cref{fig:quant_over_data}. Notably, all AL algorithms reduce the higher quantiles while the 50 \% percentile error is increased in some cases.
+\begin{figure}[t!]
+    \centering
+    \includegraphics{img/all_cq_over_data.pdf}
+    \caption{Error quantiles over the number of trajectories in the training set (N). The  50\%, 95\%, and 99\% quantiles are displayed using full, dashed, and dotted lines, respectively. AL especially improves the higher error quantiles, making the trained model more reliable.}
+    \label{fig:quant_over_data}
+\end{figure}
+
+\paragraph{Different Error Functions.} It is important to consider error metrics for surrogate model training besides the  RMSE~\citep{pdebench-takamoto:2022}. Thus, we explore the impact of AL on the mean absolute error (MAE) as an example of an alternative metric. As depicted in \cref{fig:losstime}b), SBAL, when using the absolute difference between the models as the uncertainty, can also successfully reduce the MAE. However, the MAE does not improve greatly relative to random sampling when the standard variance between the models is used. Hence, it is crucial to tailor the AL method to the relevant metric.%
+\paragraph{Generated Datasets.} The marginal distributions of the PDE and the IC generator parameters implicitly sampled from by AL are shown in \cref{fig:param_dist} for CE. These distributions are highly similar for different random seeds, and thus, AL reliably selects similar training datasets.  The various AL methods generally sample similar parameter values but can differ substantially in certain regions of the parameter space (\cref{sec:pde_dist_full}). In general, the methods appear to sample more in the region of the chaotic KdV equation $(\alpha=3, \beta=0, \gamma=1)$. For $\alpha$ and $\gamma$, a difference between the two QbC methods Top-K and SBAL to the feature-based ones LCMD and Core-Set is observable. \cref{sec:generated_data} provides the distributions for all PDEs and visual examples. To investigate the effect of the generated data on other models, we use an FNO ensemble to select the data that we use to train the standard U-Net.  \cref{fig:losstime}b) depicts the error of the U-Net over the number of samples selected using the FNO ensemble, showing the selected data is beneficial for models not used for the AL-based data selection. The reusability of the data is especially important, since otherwise the whole AL procedure would have to be repeated every time a new model is developed.
+\begin{figure}
+    \centering
+    \includegraphics{img/main_distCE.pdf}  
+    \caption{Marginal distribution of the PDE parameters and the amplitudes of the IC in the training set generated by AL for CE (relative to the uniform distribution). The shaded area represents the standard deviation between the random seeds. All AL methods exhibit a small standard deviation, indicating that they reliably generate similar datasets between independent runs.}
+    \label{fig:param_dist}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{img/loss_over_time.pdf}
+    \caption{ (a) AL with the MAE as the objective on Burgers, compared to the MAE of the same setup trained with the RMSE (dashed). Considering the desired error metric in the uncertainty estimate and training loss is essential.
+    (b) Error of the standard U-Net on Burgers, with data generated using FNO or U-Net with SBAL. The selected data is also helpful for a model not used during AL. 
+    (c) Error of the standard U-Net on Burgers over the required total time. Using smaller FNOs to select the data, SBAL can provide smaller errors in the same amount of time.
+    }
+    \label{fig:losstime}
+\end{figure}
+
+\paragraph{Temporal Behavior.} 
+The main experiments only provide the error over the number of data points since we use problems with rather fast solvers to accelerate the benchmarking of the AL methods. Second, a more lightweight model, trained for a shorter time, might be enough for data selection even if it does not reach the best possible accuracy. 
+To investigate AL in terms of time efficiency gains, we perform one experiment on the Burgers' PDE, for which the numerical solver is the most expensive among all 1D PDEs due to its higher resolution. We use  SBAL  with an ensemble of smaller FNOs (See \cref{sec:time_exp_details} for more details). We train a regular U-Net on the AL collected data, which allows us to use a small, lightweight model for data selection only and an expensive one to evaluate the data selected.  \cref{fig:losstime}c) shows the accuracy of the evaluation U-Net over the cumulative time consumed for training the selection model, selecting the inputs, and simulation. For the random baseline, only the simulation time is considered. On Burgers, AL provides better accuracy for the same time budget. 
+\paragraph{Ablations.}
+We ablate different design choices for the considered AL algorithms. For the SBAL algorithm, we investigate the base model architecture (\cref{fig:abl_sbal}a) and the ensemble size (\cref{fig:abl_sbal}b). 
+On CNS, the accuracy of both SineNet and FNO can be significantly improved using SBAL, showing that AL is also helpful for other architectures. The improvement is even clearer than with the U-Net which did not show a statistically significant advantage. Consistent with prior work \citep{pickering2022discovering}, choosing an ensemble size of two models is already sufficient (\cref{fig:abl_sbal}b). In general, the average uncertainty and error of a trajectory with two ensemble members are correlated with a Pearson coefficient of 0.41  on CE in the worst case up to 0.94 on CNS (\cref{tab:corr}).  \cref{fig:abl_sbal}c) compares different feature choices for the LCMD algorithm, which are used to calculate the distances. Using the spatial average of the last layer features produces higher accuracy than using the full feature vector or the features from the bottleneck step in the middle of the U-Net. Thus, it is indeed important for distance-based selection to consider the equivariances of the problem in the distance function.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics{img/sbal_abl.pdf}
+    \caption{(a) Different base models on CNS using SBAL (solid) and random sampling (dashed). SBAL can also improve the accuracy of other models besides the U-Net. (b) Number of models $M$ in the ensemble on Burgers. SBAL works reliably with only two models.  (c) Comparison of different feature vectors LCMD on CE. Shown are the last layer feature map ($\text{LL}$), its spatial average ($\overline{\text{LL}}$), as well as the features of the mid layer ($\text{ML}$) and its spatial average ($\overline{\text{ML}}$). %
+    Averaging the feature maps improves the error, indicating the importance of considering the model invariances. } \label{fig:abl_sbal}
+\end{figure}
+
+
+
+
+
+\section{Conclusion}
+
+This paper introduces AL4PDE, an extensible framework to develop and evaluate AL algorithms for neural PDE solvers. \alforpde includes four PDEs, surrogate models including U-Net, FNO, and SineNet, and AL algorithms such as SBAL and LCMD. An initial study shows that existing AL algorithms can already be advantageous for neural PDE solvers and can allow a model to reach the same accuracy with up to four times fewer data points. Thus, our work shows the potential of AL for making neural PDE solvers more data-efficient and reliable for future application cases. However, the experiments also showed that stable model training can be difficult depending on the base architecture (CNS). AL is especially impacted by such issues, since the model is trained repeatedly with different data sets and the data selection relies on the model. Hence, more work on the reliability of the surrogate model training is necessary. Another general open issue of AL is the question of how to select hyperparameters which work sufficiently well on the growing, unseen datasets during AL. To be closer to realistic engineering applications, future work should also consider more complex geometries and non-periodic boundary conditions, as well as irregular grids. AL could be especially helpful in such settings due to the inherently more complex input space to select from.
+
+
+
+
+
+
+
+
+
+
+
+

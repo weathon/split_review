@@ -1,0 +1,379 @@
+\title{Enhancing Zeroth-order Fine-tuning for Language Models with Low-rank Structures}
+
+\begin{abstract}
+	Parameter-efficient fine-tuning (PEFT) significantly reduces memory costs when adapting large language models (LLMs) for downstream applications. However, traditional first-order (FO) fine-tuning algorithms incur substantial memory overhead due to the need to store activation values for back-propagation during gradient computation, particularly in long-context fine-tuning tasks. Zeroth-order (ZO) algorithms offer a promising alternative by approximating gradients using finite differences of function values, thus eliminating the need for activation storage. Nevertheless, existing ZO methods struggle to capture the low-rank gradient structure common in LLM fine-tuning, leading to suboptimal performance. This paper proposes a low-rank ZO gradient estimator and introduces a novel \underline{\textbf{lo}}w-rank \underline{\textbf{ZO}} algorithm (LOZO) that effectively captures this structure in LLMs. We provide convergence guarantees for LOZO by framing it as a subspace optimization method. Additionally, its low-rank nature enables LOZO to integrate with momentum techniques while incurring negligible extra memory costs. Extensive experiments across various model sizes and downstream tasks demonstrate that LOZO and its momentum-based variant outperform existing ZO methods and closely approach the performance of FO algorithms.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large language models (LLMs) have demonstrated exceptional performance across a wide range of domains \citep{solaiman2019release, brown2020language, achiam2023gpt}. To adapt LLMs for specific downstream applications, fine-tuning pre-trained models has become the \emph{de facto} approach \citep{gururangan2020don, sanh2021multitask}. Parameter-efficient fine-tuning (PEFT) methods, such as those proposed by \citep{hu2021lora, lester2021power}, aim to reduce memory consumption by freezing most pre-trained weights and updating only a subset of parameters. However, even with these approaches, first-order (FO) optimization algorithms like stochastic gradient descent (SGD) \citep{amari1993backpropagation} and Adam \citep{kingma2014adam} still encounter substantial memory overhead due to the need to store activation values for back-propagation during gradient computation. This issue becomes even more pronounced in applications involving long contexts, where activations account for the majority of memory usage.
+
+To enhance memory efficiency, a promising alternative is the use of zeroth-order (ZO) algorithms \citep{spall1992multivariate}. Unlike FO methods, ZO algorithms do not require direct gradient computation. Instead, they approximate gradients using finite differences of function values, eliminating the need for back-propagation and the storage of activation values, which leads to substantial memory savings. ZO algorithms have been extensively studied over the past few decades \citep{duchi2015optimal, nesterov2017random, berahas2022theoretical} and were recently applied to fine-tuning LLMs for the first time in \citep{malladi2023fine}, where the authors adapt the classical ZO stochastic gradient descent (ZO-SGD) algorithm \citep{ghadimi2013stochastic} to a memory-efficient variant known as the MeZO algorithm. As demonstrated in \citep{malladi2023fine}, the MeZO algorithm can reduce memory costs to a quarter of those incurred by standard SGD.
+
+However, ZO algorithms still face several challenges when fine-tuning LLMs. A primary concern is the substantial discrepancy in the matrix rank between estimated ZO gradients and true FO gradients. Extensive literature reports that FO gradients generated during backpropagation in LLM fine-tuning exhibit a \textit{low-rank} structure \citep{malladi2023fine,zhao2024galore,hao2024flora}. In contrast, the ZO gradients in MeZO are derived from a perturbation matrix sampled from a Gaussian distribution, which is nearly \textit{full-rank}. This discrepancy can result in a performance gap between ZO and FO algorithms.
+Another challenge is constructing momentum algorithms using ZO gradients. Since ZO gradients are typically full-rank, the resulting momentum variable also becomes full-rank, leading to significant overhead in storing the momentum \citep{malladi2023fine,zhang2024revisiting,chen2019zo}. This overhead offsets the memory efficiency gained through ZO algorithms.
+
+It is evident that the above challenges arise from the full-rank structure of ZO gradient estimates. To address these issues, this work presents a novel strategy for the gradient approximation based on finite differences of function values. Specifically, we propose a \underline{\textbf{l}}ow-rank matrix-wise \underline{\textbf{g}}radient \underline{\textbf{e}}stimator (LGE) scheme and a new variant of the ZO-SGD algorithm that capitalizes on this approach. This ensures that our ZO gradient estimator consistently retains a low-rank structure, fluctuating within a low-dimensional subspace across iterations. As a result, our estimator more accurately approximates the low-rank FO gradient employed in LLM fine-tuning, leading to improved empirical performance. Moreover, the low-rank ZO gradient facilitates the use of low-rank momentum variables, significantly reducing memory usage compared to conventional ZO momentum algorithms. Our contributions can be summarized as follows: 
+\begin{itemize}
+    \item We propose a low-rank ZO gradient estimator. Unlike traditional coordinate-wise or randomized approaches, our approach derives the ZO gradient using a low-rank perturbation matrix, ensuring that the approximated gradient retains a low-rank structure. Our derived ZO gradient closely resembles  the FO gradient structure in LLM fine-tuning. 
+
+    \item We develop two novel low-rank ZO algorithms for LLM fine-tuning: \underline{\textbf{Lo}}w-rank \underline{\textbf{ZO}}-SGD (LOZO) and its \underline{\textbf{m}}omentum-based variant LOZO-M. A critical component in these algorithms is the
+    \textit{lazy sampling strategy}, where the low-rank random perturbation matrix is sampled over multiple steps, rather than at each iteration. This allows the ZO algorithm to sufficiently explore a low-rank subspace over a longer period, preventing per-iteration abrupt changes to model parameters and enhancing fine-tuning performance. Moreover, LOZO-M incurs negligible additional memory overhead for storing momentum.
+
+    \item We establish convergence guarantees for LOZO under {common} assumptions in stochastic ZO optimization. A key insight from our convergence analysis is that LOZO can be viewed as a subspace optimization method employing a {standard} ZO gradient estimator. This method iteratively solve the fine-tuning problem by alternating between different low-rank subspaces to progressively improve the overall solution.
+
+    \item We conduct extensive experiments across various model scales (ranging from 350M to 66B) and downstream tasks, including classification, multiple-choice, and generation. LOZO and LOZO-M outperform zero-shot, ICL, MeZO, and MeZO-LoRA in most tasks, while maintaining the same storage overhead as MeZO. 
+\end{itemize}
+
+\subsection{Related Work}
+\textbf{Zeroth-order optimization.} Zeroth-order (ZO) optimization typically employs finite difference of function values to approximate gradients. Since it does not require  gradient computation, ZO methods have been widely applied in various machine learning (ML) domains, including adversarial attack and defense \citep{ilyas2018black, zhao2019design, tu2019autozoom, zhang2022robustify}, model-agnostic contrastive explanations \citep{dhurandhar2019model}, and AutoML \citep{wang2022zarts}. ZO algorithms have been derived from FO methods in numerous studies, such as ZO-SGD \citep{ghadimi2013stochastic, liu2019signsgd}, ZO-Adam \citep{chen2019zo}, and ZO-SVRG \citep{liu2018zeroth, ji2019improved}, among others \citep{lian2016comprehensive, liu2020primer}. Although straightforward, these adaptations often exhibit high variance and slow convergence because of the dimensionality of the model. To address this, techniques such as sparse gradient exploitation \citep{balasubramanian2018zeroth, cai2022zeroth} and feature reuse in deep neural networks \citep{chen2023deepzero} have been proposed, highlighting the potential of ZO optimization in large-scale ML problems. 
+
+\textbf{Memory-efficient fine-tuning}. A range of memory-efficient methods have been proposed to enhance the accessibility of LLM fine-tuning. For instance, LoRA \citep{hu2021lora} introduces low-rank perturbations to pre-trained model weights, utilizing only a few trainable parameters while achieving performance comparable to full fine-tuning. Other approaches \citep{zhao2024galore, hao2024flora, muhamed2024grass} compress gradients by projecting them into subspaces, thereby reducing the memory required for storing optimizer states.
+In contrast to first-order (FO) algorithms, zeroth-order (ZO) algorithms \citep{malladi2023fine} have gained considerable attention for their efficiency, as they avoid storing activation values. To accelerate ZO fine-tuning, \citet{gautam2024variance} introduced ZO-SVRG for LLM fine-tuning, while \citet{zhao2024second} employed ZO methods to approximate a natural gradient algorithm. Although these approaches improve convergence, they often incur increased memory costs.
+To address this trade-off, \citet{liu2024sparse} proposed incorporating a sparse mask into ZO iterations to reduce dimensionality and expedite fine-tuning, albeit at the cost of some accuracy. \citet{liaddax} explored a hybrid approach, combining FO gradients with ZO estimators in each iteration. Complementing these efforts, \citet{zhang2024revisiting} provide a comprehensive benchmark of various ZO-based algorithms for LLM fine-tuning.
+
+
+
+\section{Preliminaries}
+
+
+This section provides an overview of ZO optimization and the commonly used ZO gradient estimators. We also introduce the MeZO algorithm \citep{malladi2023fine} used in LLM fine-tuning. 
+
+\subsection{Zeroth-Order (ZO) Optimization}
+
+We consider the following optimization problem:
+\begin{equation}\label{prob-opt}
+    \min_{\bX} f(\bX) := \mathbb{E}_{\xi} [F(\bX; \xi)],
+\end{equation}
+where \( \bX \) represents the set of trainable parameters with dimension \(d\). For example, in the LLM fine-tuning process, we can express \(\bX = \{X_\ell\}_{\ell=1}^\cL\), where \(X_\ell \in \mathbb{R}^{m_\ell \times n_\ell}\) denotes the \(\ell\)-th weight matrix and $\cL$ is the number of layers. The function \( F(\bX; \xi) \) is the loss function that depends on a random variable \( \xi \).
+
+The ZO method estimates gradients using only function evaluations, without requiring direct access to gradient information. Two commonly employed gradient estimation schemes are the deterministic \underline{\textbf{C}}oordinate-wise \underline{\textbf{G}}radient \underline{\textbf{E}}stimation (CGE) \citep{lian2016comprehensive, chen2023deepzero} and the \underline{\textbf{R}}andomized vector-wise \underline{\textbf{G}}radient \underline{\textbf{E}}stimation (RGE) \citep{spall1992multivariate, duchi2015optimal, nesterov2017random}. These are formally defined as:
+\begin{align}
+\text{(CGE)}\quad \hat{\nabla} F(\bX; \xi) &:= \sum\limits_{i=1}^d\frac{F(\bX + \epsilon \bE_i; \xi) - F(\bX - \epsilon \bE_i; \xi)}{2\epsilon} \bE_i, \label{eq:CGE} \\
+\text{(RGE)}\quad \hat{\nabla} F(\bX; \xi) &:= \frac{F(\bX + \epsilon \bZ; \xi) - F(\bX - \epsilon \bZ; \xi)}{2\epsilon} \bZ.  \label{eq:RGE}
+\end{align}
+The scalar \(\epsilon\) denotes the perturbation magnitude, which influences the accuracy of the gradient approximation. Both $\bE_i$ and $\bZ$ are of the same dimensions as \(\bX\). The quantity $\bE_i$ is a basis vector/matrix with its $i$-th element set to one and all other elements set to zero, whereas the elements of $\bZ$ are randomly generated, typically sampled independently from a standard normal distribution. An extension of the RGE method is the \(q\)-RGE approach. Here, the RGE is computed \(q\) times independently, and the final gradient estimate is obtained by averaging these estimations. 
+
+Utilizing these gradient estimators, the ZO-SGD method is implemented through the following iterative scheme:
+\begin{equation}\label{eqa-zo-sgd}
+    \bX^{t+1} = \bX^t - \alpha \hat{\nabla} F(\bX^t; \xi^t),
+\end{equation}
+where \( \alpha \) denotes the step size, also termed the learning rate, and \( \hat{\nabla} F \) represents the gradient estimated with ZO information.
+
+\subsection{Memory-efficient ZO-SGD (MeZO)}
+
+{The standard implementation of ZO-SGD incurs substantial memory costs. For example, when constructing the gradient estimator using the RGE scheme, the traditional ZO-SGD method requires memory to store the perturbation matrix \(\bZ\). To mitigate this memory overhead, the MeZO method \citep{malladi2023fine} was introduced as a memory-efficient variant of ZO-SGD. Unlike the standard approach, MeZO avoids storing the entire perturbation matrix \(\bZ\). Instead, the algorithm performs both the perturbation and ZO-SGD updates in place and employs a technique of saving the random seed used to generate \(\bZ\), allowing it to be regenerated when necessary. While this introduces additional computational costs, it significantly reduces memory usage.} 
+
+
+
+\section{Low-rank Zeroth-order Gradient Estimator}
+
+\textbf{LLM gradients exhibit low-rank structures.} The low-rank structure of neural networks has been extensively investigated in previous literature \citep{li2018measuring, larsen2021many}. These studies suggest that loss landscapes exist within an \textit{intrinsic dimension}, implying that model weights can be optimized within a low-rank subspace. Furthermore, additional researches \citep{sagun2017empirical, gur2018gradient} have demonstrated that stochastic gradients dynamically converge to a remarkably small subspace, especially when fine-tuning LLMs \citep{zhang2023fine}. Recent work \citep{zhao2024galore} also provides theoretical evidence that the gradient matrix becomes low-rank during LLM training and fine-tuning. Figure \ref{lowrank-gradient} investigates the rank of the gradient matrix during LLM fine-tuning. {The left plot demonstrates that the gradient matrix remains low-rank across training steps, while the right plot shows that this low-rank property persists across different layers.}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.4\linewidth]{figures/gradient_rank_over_steps.pdf}
+    \hspace{1cm}
+    \includegraphics[width=0.4\linewidth]{figures/gradient_rank_over_layers.pdf}
+    \caption{\small The low-rank structure of the gradients encountered in the fine-tuning of LLMs, demoenstrated using the OPT-1.3B model with the COPA dataset, where the gradient matrices have dimensions of $2048 \times 2048$. For both two figures, we report only the 100 largest singular values. \textit{Left}: Singular value distribution of the gradient of the attention $Q$ matrix in layer 10 across different training steps. \textit{Right}: Singular value distribution of the gradient of the attention $V$ matrix across different layers at training step 50.}
+    \label{lowrank-gradient}
+\end{figure}
+
+\textbf{Existing ZO methods are ineffective at capturing low-rank structures.} Commonly used ZO gradient estimators like CGE and RGE cannot capture {the low-rank structure of the true gradients} during LLM fine-tuning. The RGE scheme produces an estimated gradient that is essentially a projection of the true gradient onto a standard normal random matrix \(\bZ\), which is almost always full rank. On the other hand, although the CGE scheme can approximate the full true gradient, it requires evaluating the loss function \(d\) times per iteration, making it impractical for large-scale problems. As a result, existing ZO algorithms \citep{ghadimi2013stochastic,liu2019signsgd,chen2019zo,liu2018zeroth,ji2019improved,balasubramanian2018zeroth,cai2022zeroth,chen2023deepzero,malladi2023fine,zhang2024revisiting}, which rely on either CGE or RGE, fail to effectively account for the low-rank structure inherent in the gradient matrix during LLM fine-tuning.
+
+\textbf{Low-rank ZO gradient estimator (LGE).}
+To bridge this gap, we propose a matrix-wise ZO gradient estimator, LGE, that preserves the low-rank structure in gradients. In LLM fine-tuning, let \(\bX = \{X_\ell\}_{\ell=1}^\cL\) represent the model's weights, where \(X_\ell \in \mathbb{R}^{m_\ell \times n_\ell}\) is the weight matrix of the \(\ell\)-th layer. 
+We sample two matrices, \(U_\ell \in \mathbb{R}^{m_\ell \times r_\ell}\) and \(V_\ell \in \mathbb{R}^{n_\ell \times r_\ell}\), from standard normal distributions, where \(r_\ell \ll \min\{m_\ell, n_\ell\}\). The LGE for partial gradient of the \( \ell \)-th weight matrix is defined as
+\begin{equation}\label{eqa-grad-approx-part-lowrank}
+   \hat{\nabla}_{X_\ell} F(\bX; \xi) := \frac{F(\{X_\ell + \eps U_\ell V_\ell^T\}_{\ell=1}^\cL; \xi) - F(\{X_\ell - \eps U_\ell V_\ell^T\}_{\ell=1}^\cL; \xi)}{2\epsilon} (U_\ell V_\ell^T/r_\ell).
+\end{equation}
+
+The scaling factor \( 1/r_\ell \) is introduced to ensure that LGE is an unbiased estimator of the true gradient as \( \epsilon \to 0 \) (see Proposition \ref{prop:unbiased}).  Defining \(\bU := \{U_\ell\}_{\ell=1}^\cL\), \(\bV := \{V_\ell\}_{\ell=1}^\cL\), $\br := \{r_\ell\}_{\ell=1}^\cL$, and $\hat{\nabla} F(\bX; \xi) := \{\hat{\nabla}_{X_\ell} F(\bX; \xi)\}_{\ell=1}^\cL$, we express \(\bX \pm \epsilon \bU \bV^T := \{X_\ell \pm \epsilon U_\ell V_\ell^T\}_{\ell=1}^\cL\) and $\bU \bV^T/\br := \{U_\ell V_\ell^T/r_\ell\}_{\ell=1}^\cL$. Using these notations,  LGE can be written into a more compact form:
+\begin{align}\label{LGE-compact}
+\text{(LGE)}\quad\quad \hat{\nabla} F(\bX; \xi) &:= \frac{F(\bX + \epsilon \bU \bV^T; \xi) - F(\bX - \epsilon \bU \bV^T; \xi)}{2\epsilon} (\bU \bV^T/\br).
+\end{align}
+Using the definition in (\ref{eqa-grad-approx-part-lowrank}), we observe that the gradient matrix \(\hat{\nabla}_{X_\ell} F(\bX; \xi)\) has a rank of at most \(r_\ell\), effectively capturing the low-rank structure of the FO gradient in LLM fine-tuning.
+
+
+
+\section{Low-rank Zeroth-order SGD}
+
+This section introduces LOZO, a novel low-rank ZO algorithm for LLM fine-tuning. LOZO can be interpreted as a ZO subspace optimization method that leverages a standard gradient estimator. Based on this key insight, we establish convergence guarantees for LOZO.
+
+\subsection{Algorithm Development}
+\textbf{Vanilla recursion.} Following the LGE definition (\ref{LGE-compact}), we introduce the  LGE operator
+\begin{align}
+    \text{LGE}(\bX,\bU, \bV, \br,\epsilon, \xi) := \frac{F(\bX + \epsilon \bU \bV^T; \xi) - F(\bX - \epsilon \bU \bV^T; \xi)}{2\epsilon} (\bU \bV^T/\br).
+\end{align}
+To solve problem (\ref{prob-opt}), the vanilla recursion with the LGE scheme is as follows. For any $t \ge 0$,
+\begin{align}\label{Lozo-main}
+\bX^{t+1} = \bX^t - \alpha \hat{\nabla} F(\bX^t; \xi^t) \quad \mbox{where} \quad \hat{\nabla} F(\bX^t; \xi^t) = \text{LGE}(\bX^t,\bU^t, \bV^t, \br,\epsilon, \xi^t).
+\end{align}
+In practice, we only need to store \( U_\ell \) and \( V_\ell \) for each layer \( \ell \), and we apply the perturbation (\ref{LGE-compact}) and the update (\ref{Lozo-main}) layer by layer, eliminating the need to retain the full gradient estimator \( U_\ell V_\ell^T \). Since \( r_\ell \ll \min\{m_\ell, n_\ell\} \), the additional memory required for storing \( U_\ell \) and \( V_\ell \) is negligible. Moreover, memory costs can be further reduced using the random seed technique \citep{malladi2023fine}. Instead of storing \( U_\ell \) and \( V_\ell \) directly, only the random seeds \( s_\ell^U \) and \( s_\ell^V \) used to generate them are saved. Whenever \( U_\ell \) and \( V_\ell \) are needed, the seeds \( s_\ell^U \) and \( s_\ell^V \) are used to regenerate these matrices, thereby eliminating the need for their storage. While this approach reduces memory usage, it introduces additional floating-point operations (flops) due to the regeneration process.
+
+\begin{algorithm}[!htbp]
+\caption{Low-rank ZO-SGD (LOZO)}
+\label{alg-lowrank-zo}
+\KwIn{parameters $\bX$, loss function $F(\bX;\xi)$, step budget $T$, perturbation scale $\epsilon$, learning rate $\alpha$, sample interval $\nu$ and rank $\{r_\ell\}$.}
+
+\For{$t = 0, \ldots, T-1$}{
+    \ForEach{$X_\ell \in \bX$}{
+        Sample $U_\ell \in \mathbb{R}^{m_\ell \times r_\ell}$ from the standard normal distribution \;
+        \If{$t \bmod \nu = 0$}{
+            Sample $V_\ell \in \mathbb{R}^{n_\ell \times r_\ell}$ from the standard normal distribution \tcp*{Resample $V_\ell$} 
+        }
+    }
+    $\bX \gets \text{Perturbation}(\bX, \epsilon, \{U_\ell, V_\ell\})$ \;
+    $F_+ \gets F(\bX; \xi)$ \;
+    $\bX \gets \text{Perturbation}(\bX, -2\epsilon, \{U_\ell, V_\ell\})$ \;
+    $F_- \gets F(\bX; \xi)$ \;
+    $\bX \gets \text{Perturbation}(\bX, \epsilon, \{U_\ell, V_\ell\})$\tcp*{Reset parameters}
+    $c \gets (F_+ - F_-) / 2\epsilon$ \tcp*{Calculate finite difference}
+    \ForEach{$X_l \in \bX$}{
+        $X_\ell \gets X_\ell - \alpha \cdot c(U_\ell V_\ell^T/r_l)$ \tcp*{Update parameters in place}
+    }
+}
+\SetKwFunction{Perturb}{Perturbation}
+\SetKwProg{Fn}{Function}{:}{}
+\Fn{\Perturb{$\bX, \epsilon, \{U_\ell, V_\ell\}$}}{
+    \ForEach{$X_\ell \in \bX$}{
+        $X_\ell \gets X_\ell + \epsilon U_\ell V_\ell^T$ \tcp*{Modify parameters in place}
+    }
+    \Return{$\bX$} \;
+}
+\end{algorithm}
+
+{\textbf{Lazy sampling strategy.} In the main recursion (\ref{Lozo-main}), the variable \(\bX^t\) is updated within the subspace spanned by \(\bU^t\) and \(\bV^t\) at each iteration \(t\). However, if \(\bU^t\) and \(\bV^t\) are resampled at every iteration, the subspace will shift too frequently. This limits the algorithm's ability to adequately explore one low-rank subspace over a longer period, potentially causing abrupt changes in the model parameters \(\bX\) at each iteration and degrading fine-tuning performance. }
+
+Additionally, ZO methods capture less information about the true gradient compared to FO algorithms, necessitating more iterations to achieve similar performance. In other words, multiple ZO steps may be required to match the progress of a single FO step. This suggests that maintaining a low-rank structure in the gradient estimator at each step is insufficient; instead, the cumulative sum of gradient estimators over several consecutive iterations must also preserve a low-rank structure.
+The motivations outlined above lead us to propose a lazy sampling strategy. While \( \bU \) is sampled at every iteration \( t \), we only sample \( \bV \) every \( \nu \) iterations, where \( \nu > 0 \) represents the chosen period duration. During the iterations \( t \in \{k\nu, \dots, (k+1)\nu - 1\} \) for each period \( k \), the matrix \( \bV^{(k)} \) remains fixed, thus restricting the model update to the subspace spanned by \( \bV^{(k)} \). This leads to our proposed LOZO algorithm, whose update rule for any $t\ge 0$ is defined as: 
+\begin{align}\label{Lozo-main-lazy}
+\bX^{t+1} = \bX^t - \alpha \hat{\nabla} F(\bX^t; \xi^t), \quad \text{where} \quad \hat{\nabla} F(\bX^t; \xi^t) = \text{LGE}(\bX^t,\bU^t, \bV^{(k)}, \br,\epsilon, \xi^t).
+\end{align}
+With the lazy sampling strategy, \( \hat{\nabla} F(\bX^t; \xi^t) \) consistently lies within the subspace determined by \( \bV^{(k)} \) for any \( t \in \{k\nu, \dots, (k+1)\nu - 1\} \).
+Therefore, the accumulation of the estimated gradients over these consecutive \( \nu \) steps, which can be viewed as a more accurate approximation of the true gradient in a single FO step, has a rank that does not exceed \( \br \). When \( \nu = 1 \),  the LOZO update rule (\ref{Lozo-main-lazy}) reduces to the standard recursion (\ref{Lozo-main}). LOZO (\ref{Lozo-main-lazy}) can be implemented in Algorithm \ref{alg-lowrank-zo} with memory efficiency.
+\textbf{Hyperparameter tuning.} The parameter \(\nu\), which defines the number of steps over which \(\bX^t\) is updated within the same subspace, is critical for performance and should be set to a moderate value. If \(\nu\) is too small, frequent subspace shifts may lead to abrupt model changes, while a \(\nu\) that is too large limits the algorithm to focus on only a few subspaces, potentially reducing generalization. The parameter \( \br \) defines the rank of the gradient estimator. Since the true gradient rank is unknown, we typically set \(\br\) as a small constant that is significantly less than both \(m_\ell\) and \(n_\ell\) to avoid additional memory overhead. {In our experiments, we set $r_\ell = r$ through all layers. The typical choices for the parameters are \( r = 2, 4, 8 \) and \( \nu = 50, 100 \).}
+\subsection{LOZO is Essentially a Zeroth-order Subspace Optimization Method}
+\label{sec-illustration}
+
+This section offers an in-depth understanding on LOZO, showing that it can be interpreted as a ZO subspace optimization method. This interpretation provides an insight into why LOZO can effectively solve problem (\ref{prob-opt}) even with low-rank gradient estimates and a lazy sampling strategy.
+
+\textbf{Random coordinate minimization.} We begin by revisiting the classical coordinate minimization algorithm for high-dimensional optimization problems. Consider the unconstrained minimization problem \(\min_{x \in \mathbb{R}^d} \{f(x)\}\), where the dimension \(d\) is exceedingly large. A commonly used and efficient method to tackle this problem is the coordinate minimization algorithm. Let \(I := [e_1; \cdots; e_d]\) be the \(d\)-dimensional identity matrix, where \(e_i\) represents the \(i\)-th basis vector. The random coordinate minimization algorithm then iterates as follows:
+\begin{align}
+    b_k^\star &= \argmin_{b \in \mathbb{R}} \{f(x^k + b \cdot  e_{i_k})\}, \ \mbox{where $i_k \sim \mathcal{U}\{1,\dots, d\}$}, \\
+    x^{k+1} &= x^k + b_k^\star \cdot  e_{i_k},
+\end{align}
+where $x^0$ is the initialized variable. The coordinate minimization algorithm has strong convergence guarantees, as demonstrated in studies such as \citep{hong2017iteration, tseng2001convergence, wright2015coordinate}.
+
+\textbf{Random subspace minimization.} Analogous to random coordinate minimization, the random subspace minimization approach is to solve optimization problems involving large matrix variables. To solve problem (\ref{prob-opt}), i.e., $\min_{\bX} f(\bX) = \mathbb{E}_{\xi} [F(\bX; \xi)]$, we can employ the following recursions
+\begin{align}
+    \bB_k^\star &= \argmin_{\bB} \{f(\bX^{(k)} + \bB (\bV^{(k)})^T)\}, \ \text{where } \bV^{(k)} \text{ follows a normal distribution}, \label{subspace-B} \\
+    \bX^{(k+1)} &=  \bX^{(k)} + \bB_k^\star (\bV^{(k)})^T. \label{subspace-B-2}
+\end{align}
+Here, $\bV$ is a low-rank matrix and $\bB$ is a matrix variable with much smaller size than $\bX$. For example, in the \( \ell \)-th layer, the matrix variable \( B_\ell \) has dimensions \( m_\ell \times r_\ell \), while \( X_\ell \) has dimensions \( m_\ell \times n_\ell \).
+The random subspace optimization approach addresses the original problem (\ref{prob-opt}) by solving a series of subproblems that involve significantly smaller matrix variables, as shown in (\ref{subspace-B}). 
+
+\textbf{ZO subspace optimization method.} To solve the \( k \)-th subproblem in (\ref{subspace-B}), we apply the standard ZO-SGD and iterate for \( \nu \) steps. The result is then used as an inexact solution to (\ref{subspace-B}), followed by the update step in (\ref{subspace-B-2}). Specifically, the update rule for the ZO subspace method is given by:
+\begin{subequations}\label{eqa-zo-subspace}
+\begin{align}
+\bB^{(k,s+1)} &= \bB^{(k,s)} - \boldsymbol{\gamma} \hat{\nabla}_{\bB} F(\tilde\bX^{(k)} + \bB^{(k,s)} (\bV^{(k)})^T; \xi^{(k,s)}), \quad s=0,\cdots, \nu-1, \label{eqa-zo-subspace-inner} \\
+\tilde{\bX}^{(k+1)} &= \tilde{\bX}^{(k)} + \bB^{(k,\nu)} (\bV^{(k)})^T. \label{eqa-zo-subspace-outer}
+\end{align}
+\end{subequations}
+ Here, we initialize $\bB^{(k,0)} = \mathbf{0}$, the superscript \( k \) indicates that the recursion is solving the \( k \)-th subproblem in (\ref{subspace-B}), \( \boldsymbol{\gamma}\) is the step size, and \( \hat{\nabla}_{\bB} F(\tilde\bX^{(k)} + \bB^{(k,s)} (\bV^{(k)})^T; \xi^{(k,s)}) \) is computed using the RGE scheme. Specifically, we sample \( \bU^{(k,s)} \) from a normal distribution and compute:
+\begin{align}\label{eqa-RGE-B}
+&\ \hat{\nabla}_{\bB}F(\tilde\bX^{(k)} + \bB^{(k,s)} (\bV^{(k)})^T;\xi^{(k,s)})  \\
+=&\ \frac{F\hspace{-0.1mm}(\tilde\bX^{(k)} \hspace{-1mm}+\hspace{-1mm} \hspace{-0.1mm}(\bB^{(k,s)} \hspace{-1mm}+\hspace{-1mm} \epsilon \bU^{(k,s)}) \hspace{-0.1mm}(\bV^{(k)})^T;\xi^{(k,s)}) \hspace{-1mm}-\hspace{-1mm} F(\hspace{-0.2mm}\tilde\bX^{(k)} \hspace{-1mm}+\hspace{-1mm} (\bB^{(k,s)} \hspace{-1mm}-\hspace{-1mm} \epsilon \bU^{(k,s)}) \hspace{-0.1mm}(\hspace{-0.2mm}\bV^{(k)}\hspace{-0.2mm})^T;\xi^{(k,s)}\hspace{-0.2mm})}{2\epsilon} \bU^{(k,s)}. \nonumber 
+\end{align}
+
+\textbf{Equivalence between ZO subspace method and LOZO algorithm.} The ZO subspace method (\ref{eqa-zo-subspace}) is equivalent to the LOZO algorithm (\ref{Lozo-main-lazy}) when the step size \( \boldsymbol{\gamma} = \alpha/\br \), as will be shown below. If both algorithms are initialized identically, i.e. Thus, we have \( \bX^{k\nu} = \tilde{\bX}^{(k)} \) for any \( k \), which implies the equivalence between these two methods. 
+
+\subsection{Convergence Analysis}
+Based on the aforementioned interpretation, we can establish convergence guarantees for the LOZO algorithm. We adopt the following assumptions, which are standard in stochastic optimization.
+\begin{assumption}\label{ass-smooth}
+    \begin{itemize}
+        \item The gradient $\nabla F(\bX;\xi)$ is uniformly $L$-Lipschitz continuous, i.e., $\forall \bX,\bY$,
+        \begin{equation}
+        \|\nabla F(\bX;\xi) - \nabla F(\bY;\xi)\| \le L\|\bX-\bY\|, \quad \forall \xi, 
+        \end{equation}
+        \item The stochastic gradient is unbiased and has bounded variance, i.e., $\forall \bX$,
+        \begin{equation}
+            \mathbb{E}[\nabla F(\bX;\xi)] = \nabla f(\bX) \quad  
+            \text{ and }  \quad 
+            \mathbb{E}\|\nabla F(\bX;\xi) - \nabla f(\bX)\|^2 \le \sigma^2. 
+        \end{equation}
+    \end{itemize}
+\end{assumption} 
+
+\begin{assumption}\label{ass-orthogonal}
+The random matrix \( \bV = \{V_\ell\}_{\ell=1}^\cL \) is drawn from a distribution such that \( V_\ell^T V_\ell = n_\ell I \) and \( \mathbb{E}[V_\ell V_\ell^T] = r_\ell I \) for each \( \ell \).
+\end{assumption}
+\begin{remark}\label{rem-orthogonal}
+Given that \( n_\ell \gg r_\ell \) in practice, when each \( V_\ell \) is drawn from a standard normal distribution, it typically holds that \( V_\ell^T V_\ell \approx n_\ell I \). However, to rigorously satisfy Assumption \ref{ass-orthogonal}, each \( V_\ell \) should be drawn from a Haar distribution or as a random coordinate matrix (see \citep{kozak2023zeroth}, Examples 1 and 2 for more details).
+\end{remark}
+
+\begin{theorem}\label{thm-zo-lo}
+Under Assumptions \ref{ass-smooth} and \ref{ass-orthogonal}, and letting \( T = K\nu \), with suitable choices of \( \alpha \) and \( \epsilon \), the sequence of the $k\nu$-th variables $\{\bX^{k\nu}\}$ generated by LOZO converges at the following rate:
+\begin{equation}
+    \frac{1}{K}\sum_{k=0}^{K-1} \mathbb{E}\|\nabla f(\bX^{k\nu})\|^2 \le O\left(\sqrt{\frac{\Delta_0 L\tilde d\sigma^2}{T}} + \frac{\Delta_0 Ld \nu}{T}\right),
+\end{equation}
+where \( \Delta_0 := f(\bX^0) - f^* \), $\tilde d =\sum_{\ell=1}^\cL (m_\ell n_\ell^2/r_\ell)$ and $d = \sum_{\ell=1}^\cL m_\ell n_\ell$.
+\end{theorem}
+
+\textbf{Difference between LOZO and MeZO-LoRA.} Theorem \ref{thm-zo-lo} implies LOZO solves $\min_{\bX} f(\bX):= \mathbb{E}_{\xi}[F(\bX;\xi)]$ directly even when using low-rank gradient estimates. In contrast, the MeZO-LoRA approach, which combines MeZO \citep{malladi2023fine} and LoRA \citep{hu2021lora}, solves $\min_{\bA,\bB} f(\bX+\bA\bB):= \mathbb{E}_{\xi}[F(\bX+\bA\bB;\xi)]$. Notably, MeZO-LoRA can only optimize the low-rank adapters \(\bA\) and \(\bB\), without the capability to optimize the full parameter \(\bX\). This distinction explains why LOZO outperforms MeZO-LoRA in most of our empirical studies.
+\subsection{LOZO with Momentum}
+
+\textbf{Momentum technique requires additional memory overhead.} The momentum technique is widely used in modern deep learning to reduce gradient variance and accelerate the convergence of training. The ZO-SGD with momentum (ZO-SGD-M) iteration can be expressed as follows:
+\begin{equation}\label{eqa-zo-update-momentum}
+\begin{aligned}
+\bM^{t} = \beta \bM^{t-1} + (1-\beta) \hat{\nabla} F(\bX^t; \xi^t), \quad \bX^{t+1} = \bX^t - \alpha \bM^{t},
+\end{aligned}
+\end{equation}
+where \( \bM^t:=\{M_l^t\}_{\ell=1}^\cL \) is the momentum term, \( \beta \) is the momentum coefficient, and \( \hat{\nabla} F(\bX^t; \xi^t) \) denotes the ZO estimated gradient at iteration \( t \). Compared with the vanilla ZO-SGD, ZO-SGD-M introduces additional memory overhead since it requires storing the momentum term, which is proportional to the size of the model. 
+\textbf{The LOZO-M algorithm introduces negligible memory overhead.} We can integrate the proposed LOZO algorithm with the momentum technique (LOZO-M) without the memory overhead issue.
+To simplify the formulation, we denote the finite difference of function values at iteration \( t \), where \( t \in \{k\nu, \dots, (k+1)\nu - 1\} \), as \( c^t \). The gradient estimator for the LOZO algorithm, as introduced in (\ref{Lozo-main-lazy}), can then be represented as \(
+\hat{\nabla} F(\bX^t; \xi^t) = c^t \bU^t (\bV^{(k)}/\br)^T\).
+
+We now introduce LOZO-M, the memory-efficient version of ZO-SGD with momentum. The key observation is that \( \bV^{(k)} \) remains fixed for \( t \in \{k\nu, \ldots, (k+1)\nu - 1\} \). Consequently, it suffices to accumulate \( c^t \bU^t \) instead of the full gradient estimator \( \hat{\nabla} F(\bX^t; \xi^t) \) for updating the momentum, thereby significantly reducing memory overhead. The update rule is expressed as follows:
+\begin{equation}\label{eqa-zo-update-momentum-low-rank}
+\begin{aligned}
+\bN^{t} = \beta \bN^{t-1} + (1-\beta) c^t \bU^t,  \quad \bX^{t+1} = \bX^t - \alpha \bN^t(\bV^{(k)}/\br)^T,
+\end{aligned}
+\end{equation}
+where \( \bN^t (\bV^{(k)}/\br)^T \) corresponds to the original momentum. When updating \( \bX^t \), we compute \( \bN^t (\bV^{(k)}/\br)^T \) layer by layer and discard the result immediately after updating the weights of each layer. Consequently, compared with the vanilla ZO-SGD-M (\ref{eqa-zo-update-momentum}), LOZO-M (\ref{eqa-zo-update-momentum-low-rank}) only requires storing \( \bN^t := \{ N_\ell^t \}_{\ell=1}^\mathcal{L} \). Since \( r_\ell \ll \min(m_\ell, n_\ell) \), the additional memory overhead is negligible.
+
+\textbf{Momentum projection.} When \( \bV^{(k)} \) is updated, an additional step is required. Specifically, at \( t = (k+1)\nu \), the gradient estimator \( \hat{\nabla} F(\bX^t; \xi^t) \) takes the form \( c^t \bU^t (\bV^{(k+1)}/\br)^T \) due to resampling, while the momentum from the previous step is \( \bN^{t-1} (\bV^{(k)}/\br)^T \). Thus, we cannot update the momentum by simply combining \( c^t \bU^t \) and \( \bN^{t-1} \) as per (\ref{eqa-zo-update-momentum-low-rank}). To address this, we project the old momentum onto the new subspace spanned by \( \bV^{(k+1)} \) before updating \( \bN^t \). We compute:
+\[
+\tilde{\bN}^{t-1} = \arg\min_{\bN} \|\bN^{t-1} (\bV^{(k)})^T - \bN (\bV^{(k+1)})^T\|.
+\]
+By doing this, the projected momentum \( \tilde{\bN}^{t-1} (\bV^{(k+1)}/\br)^T \) becomes a good approximation of the momentum from the previous step, taking the same form as the gradient estimator \( \hat{\nabla} F(\bX^t; \xi^t) \). Therefore, we use \( \tilde{\bN}^{t-1} \) to replace \( \bN^{t-1} \) in the momentum update (\ref{eqa-zo-update-momentum-low-rank}) at \( t = (k+1)\nu \). Given that \( V_\ell^T V_\ell \approx n_\ell I \) for any \( \ell \) (see Remark \ref{rem-orthogonal}), the solution is \( \tilde{\bN}^{t-1} = \bN^{t-1} (\bV^{(k)})^T (\bV^{(k+1)}/\boldsymbol{n}) \), where \( \boldsymbol{n}:=\{n_\ell\}_{\ell=1}^\cL \).
+
+
+\section{Experiments}
+
+\label{exp}
+This section presents the performance of our algorithm on the SuperGLUE \citep{wang2019superglue} benchmark. We compare our proposed LOZO and LOZO-M algorithms with MeZO \citep{malladi2023fine} as well as its variants, and other baselines including zero-shot and in-context learning (ICL) approaches. We also test full fine-tuning and LoRA using the gradient-based Adam method \citep{kingma2014adam}, referred to as FT and FT-LoRA, respectively.
+
+Our experiments evaluate the algorithms on language models (LMs) of various scales, including RoBERTa-large \citep{liu2019roberta} and large autoregressive LMs (OPT-13B, 30B, 66B \citep{zhang2022opt}). For a fair comparison, we conduct a full grid search of the parameters provided in \citep{malladi2023fine} and select the best results for MeZO and its variants.
+
+\subsection{Medium-sized Masked Language Models}
+\label{exp-medium}
+We conduct experiments employing RoBERTa-large on tasks including sentiment classification, natural language inference and topic classification. To mitigate the effects of random variability, all experimental results reported in this subsection are the means of the outcomes resulted from five different random seeds. 
+
+\begin{table}[!htbp]
+\centering
+\begin{tabular}{lcccc}
+    \toprule
+    Algorithm & \multicolumn{2}{c}{MNLI} & \multicolumn{2}{c}{SNLI} \\
+     \cmidrule(lr){2-3}  \cmidrule(lr){4-5}
+    & Accuracy ($\%$) & Memory Usage (GB) & Accuracy ($\%$) & Memory Usage (GB) \\
+    \midrule
+    LOZO        & 61.6 & 2.83 & 73.4 & 2.83\\ 
+    LOZO-M      & \textbf{62.7} & 2.84 & \textbf{74.0} & 2.84 \\ 
+    MeZO        & 56.7 & 3.00 & 68.5 & 3.00\\ 
+    MeZO-M      & 58.9 & 5.89 & 69.6 & 5.89 \\ 
+    MeZO-Adam   & 62.6 & 7.42 & 72.7 & 7.42\\ 
+    \bottomrule
+\end{tabular}
+\caption{\small Accuracy and Memory Consumption of LOZO and MeZO with their respective variants.}
+\label{tab:performance-memory}
+\end{table}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/k512_and_k16_filtered2.pdf}
+    \caption{\small The figures illustrate the performance of different algorithms on RoBERTa-large across three tasks (SNLI, MNLI, and RTE), with the left panel corresponding to \(k=512\) and the right panel corresponding to \(k=16\). Detailed numerical results are provided in Table \ref{appen-tab-roberta}.}
+    \label{fig:roberta-per}
+\end{figure}
+
+\begin{table*}[!htbp]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lccccccccccc}
+\toprule
+\textbf{Task} & \textbf{SST-2} & \textbf{RTE} & \textbf{CB} & \textbf{BoolQ} & \textbf{WSC} & \textbf{WiC} & \textbf{MultiRC} & \textbf{COPA} & \textbf{ReCoRD} & \textbf{SQuAD} & \textbf{DROP} \\
+\midrule
+Zero-shot & 58.8 & 59.6 & 46.4 & 59.0 & 38.5 & 55.0 & 46.9 & 80.0 & 81.0 & 46.2 & 14.6 \\
+ICL & 87.0 & 62.1 & 57.1 & 66.9 & 39.4 & 50.5 & 53.1 & 87.0 & \textbf{82.3} & 75.9 & 29.5 \\
+
+\midrule
+MeZO & 91.3 & 68.2 & 66.1 & 68.1 & 61.5 & 59.4 & 59.4 & 88.0 & 81.3 & 81.8 & \textbf{31.3} \\
+MeZO-LoRA & 89.6 & 67.9 & 67.8 & \textbf{73.5} & \textbf{63.5} & 60.2 & 61.3 & 84.1 & 81.5 & 82.1 & \textbf{31.3} \\
+\midrule
+LOZO & \textbf{91.7} & \textbf{70.4} & \textbf{69.6} & 71.9 & \textbf{63.5} & \textbf{60.8} & \textbf{63} & \textbf{89.0} & 81.3 & \textbf{84.9} & 30.7 \\
+\midrule
+FT & 91.8 & 70.9 & 84.1 & 76.9 & 63.5 & 70.1 & 71.1 & 79.0 & 74.1 & 84.9 & 31.3 \\
+\bottomrule
+\end{tabular}
+}
+\caption{\small Experiments on OPT-13B (with 1000 examples). ICL: in-context learning; FT: full fine-tuning with Adam. The best results are shown in \textbf{bold} except for FT.}
+\label{tab:opt-13}
+\end{table*}
+\textbf{LOZO outperforms MeZO and MeZO-LoRA on the majority of datasets and achieves performance comparable to FT.} As shown in Figure \ref{fig:roberta-per}, our algorithm demonstrates a performance gain on the three listed datasets, with a particularly significant improvement on the MNLI dataset, surpassing both MeZO and MeZO-LoRA. The performance gap between LOZO and FT is generally less than 1\%, and with a larger \( k \), LOZO can further narrow this gap and even exceed its performance.
+\textbf{LOZO-M consumes similar memory usage to LOZO while delivering superior performance compared to MeZO and MeZO-Adam.} We measure the actual memory consumption during the training of RoBERTa-large using LOZO, MeZO, and their respective variants to evaluate the memory efficiency of our methods. As shown in Table \ref{tab:performance-memory}, the additional memory overhead introduced by the momentum technique in LOZO is negligible. In contrast, MeZO fails to achieve this efficiency.
+
+\subsection{Large Autoregressive Language Models}
+
+To further evaluate the effectiveness of LOZO on large language models, we extend our study to the OPT models \citep{zhang2022opt} with billions of parameters (13B, 30B and 66B). The results are presented in Table \ref{tab:opt-13} and Table \ref{tab:opt-30}. 
+
+\textbf{Compared to MeZO and MeZO-LoRA, LOZO demonstrates a clear improvement across the majority of datasets.} For instance, LOZO achieves notable performance gains on OPT-30B and OPT-66B, as presented in Table \ref{tab:opt-30}, outperforming MeZO and other baselines in most tasks. Furthermore, the results in Table \ref{tab:opt-13} indicate that LOZO not only surpasses MeZO and MeZO-LoRA but also approaches the performance exhibited by FT on most cases.
+
+\textbf{LOZO yields faster convergence rates across different model scales, including 13B, 30B and 66B.} As illustrated in Figure \ref{fig:opt-loss}, the proposed method consistently achieves faster convergence across various datasets and model scales. For example, in the WIC dataset with the OPT-66B configuration, the LOZO algorithm requires only half the number of training epochs to achieve the same training loss as that of the MeZO method, while simultaneously exhibiting smaller loss oscillations. 
+
+\begin{table*}[!htbp]
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Task} & \textbf{SST-2} & \textbf{RTE} & \textbf{BoolQ} & \textbf{WSC} & \textbf{WiC} & \textbf{SQuAD} \\
+\midrule
+30B zero-shot & 56.7 & 52.0 & 39.1 & 38.5 & 50.2 & 46.5 \\
+30B ICL & 81.9 & \textbf{66.8} & 66.2 & 56.7 & 51.3 & 78.0 \\
+30B MeZO & 90.7 & 64.3 & 68.2 & 63.5 & 56.3 & \textbf{86.1} \\
+
+30B LOZO & \textbf{92.8} & 65.3 & \textbf{72.3} & \textbf{64.4} & \textbf{57.2} & 85.6 \\
+\midrule
+66B zero-shot & 57.5 & 67.2 & 66.8 & 43.3 & 50.6 & 48.1 \\
+66B ICL & 89.3 & 65.3 & 62.8 & 52.9 & 54.9 & 81.3 \\
+66B MeZO & 92.0 & 71.5 & 73.8 & \textbf{64.4} & 57.8 & 84.0 \\
+66B LOZO & \textbf{92.5} & \textbf{74.0} & \textbf{74.5} & 63.5 & \textbf{59.4} & \textbf{85.8} \\
+\bottomrule
+\end{tabular}
+\caption{\small Experiments on OPT-30B and OPT-66B on SuperGLUE benchmark. Our results show that LOZO is superior on most tasks compared to the other baselines. The best results are shown in \textbf{bold}.}
+\label{tab:opt-30}
+\end{table*}
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{minipage}{0.32\textwidth}
+        \includegraphics[width=\linewidth]{figures/loss_vs_epochs_SQuAD_opt-13b.pdf}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/loss_vs_epochs_SST-2_opt-30b.pdf}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/loss_vs_epochs_WIC_opt-66b.pdf}
+    \end{minipage}
+\caption{\small \textit{Left:} Loss curves of OPT-13B on SQuAD dataset. \textit{Middle:} Loss curves of OPT-30B on SST-2 dataset. \textit{Right:} Loss curves of OPT-66B on WIC dataset.}
+\label{fig:opt-loss}
+\end{figure} 
+
+
+
+\section{Conclusion and Limitations}
+
+This paper introduces the LOZO and LOZO-M algorithms, which are novel zeroth-order (ZO) methods for fine-tuning language models. Specifically, the LOZO algorithm employs a gradient estimator with a low-rank structure, closely mirroring the true gradient in first-order (FO) methods. We further demonstrate that the LOZO algorithm is equivalent to a ZO subspace method, forming the basis for our convergence results. By combining LOZO with the commonly used momentum technique, we develop the LOZO-M algorithm, which incurs almost no additional memory overhead. Both LOZO and LOZO-M achieve improved performance compared to the vanilla ZO-SGD method. 
+
+One limitation of our work is the challenge of designing a method that integrates LOZO with the Adam optimizer without incurring additional memory costs. Additionally, minor fluctuations in the loss are observed towards the end of the training process, potentially due to the lazy sampling strategy. Addressing these issues is left for future work.
+
+
+
+
+

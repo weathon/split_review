@@ -1,0 +1,337 @@
+\title{Large Language Models can Learn Rules}
+
+\begin{abstract}
+
+When prompted with a few examples and intermediate steps, large language models (LLMs) have demonstrated impressive performance in various reasoning tasks. However, prompting methods that rely on implicit knowledge in an LLM often generate incorrect answers when the implicit knowledge is wrong or inconsistent with the task. To tackle this problem, we present Hypotheses-to-Theories (\method), a framework that learns a rule library for reasoning with LLMs. \method contains two stages, an induction stage and a deduction stage. In the induction stage, an LLM is first asked to generate and verify rules over a set of training examples. Rules that appear and lead to correct answers sufficiently often are collected to form a rule library. In the deduction stage, the LLM is then prompted to employ the learned rule library to perform reasoning to answer test questions. Experiments on relational reasoning, numerical reasoning and concept learning problems show that \method improves existing prompting methods, with an absolute gain of 10-30\% in accuracy. The learned rules are also transferable to different models and to different forms of the same problem.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[!h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/method.pdf}
+    \caption{An example of Hypotheses-to-Theories applied to chain-of-thought for the relational reasoning problem. Few-shot examples are omitted for brevity. The induction stage uses CoT to generate rules and verify them on the training samples. Rules are then collected and filtered to form the rule library. The deduction stage augments CoT with knowledge from the rule library. Correct and incorrect rules are marked with green and red respectively.}
+    \label{fig:prompt}
+\end{figure*}
+Coinciding with their tremendous growth in scale, large language models (LLMs)~\citep[][\textit{inter alia}]{brown2020language, chowdhery2022palm, openai2023gpt4, anil2023palm, team2023gemini} have demonstrated emergent capabilities across a wide range of reasoning tasks~\citep{wei2022emergent, bubeck2023sparks}, including program synthesis, arithmetic reasoning, symbolic reasoning and commonsense reasoning. Importantly, these abilities are commonly elicited by advanced prompting techniques~\citep{wei2022chain, zhou2023least, khot2023decomposed} that teach an LLM to decompose a complex problem into simple steps and perform reasoning step by step based on a small set of in-context examples.
+
+For many reasoning problems, decomposing and conducting reasoning steps are not sufficient to solve the problem, since one needs domain-specific knowledge to generate correct steps. For instance, when inferring the relationship between two people in a family tree (Figure~\ref{fig:prompt}), an LLM should know the basic rules\footnote{In this paper, rules to refer to intermediate steps that are reusable across different samples. This is slightly different from the definition of rules in formal logic.} to merge family relations. However, LLMs are often prone to errors in generating such rules~\citep{zheng2023does, zhang2023language}, especially when the task deviates from requiring conventional knowledge (e.g.\ arithmetic in a non-decimal system)~\citep{tang2023large, wu2023reasoning}. To solve this challenge, one should find a way to equip LLMs with those domain-specific rules. While it is always possible to curate a dataset and inject required rules into an LLM via supervised finetuning~\citep{wang2021kepler, talmor2020leap, nye2021show}, we are interested in a generic solution that enables LLMs to automatically discover rules from standard datasets without rule annotation.
+
+This paper proposes such a solution for LLMs to learn a library of textual rules and apply the rule library to solve new samples. Our framework, dubbed Hypotheses-to-Theories (\method), consists of an induction stage and a deduction stage, akin to training and test stages of neural networks respectively. In the induction stage, an LLM is asked to generate rules for each example in the training set. The rules are verified by comparing the prediction of the LLM with the ground truth answer. We then filter the rules based on their number of occurrence and frequency of association with correct answers to construct the rule library for the deduction stage. In the deduction stage, the LLM is then asked to apply the learned rules to solve the reasoning problem, thereby reducing the chance of generating incorrect rules. To reduce the effort required for prompt engineering, we propose a technique called \emph{induction from deduction}, which fuses the rule generation and verification steps into a single deduction-like step. In this way, the prompts for both stages can be easily derived from existing few-shot prompting methods, such as chain-of-thought or least-to-most prompting.
+
+Empirically, we verify the effectiveness of \method with GPT-3.5 and GPT-4~\citep{openai2023gpt4} on the CLUTRR~\citep{sinha2019clutrr}, Arithmetic~\cite{wu2023reasoning} and List Functions~\citep{rule2020child} datasets, which correspond to relational reasoning, numerical reasoning and concept learning respectively. Experiments show that \method consistently improves over baseline prompting methods across the models and datasets considered, with an absolute gain of 10-30\% in most cases. Moreover, the learned rules can be directly transferred to the textual version of CLUTRR, providing a practical advantage over previous reasoning approaches. Besides, We conduct extensive ablation studies to understand the properties of \method, finding that the performance gain arises primarily from a reduction in the number of incorrect rules due to the use of the learned rules. We also observe a log-linear scaling law between accuracy and the number of training examples on all three datasets.
+
+
+\section{Preliminaries}
+
+
+Intuitively, reasoning is the process of applying sound logical steps to draw conclusions from existing information. At the core of reasoning are facts and rules. Facts are pieces of information that describe the current state, while rules are functions that transform facts into new facts under certain conditions. Take the famous syllogism as an example.
+\begin{quote}
+    \centering
+    \emph{Socrates is a man. \quad All men are mortal. \quad Therefore, Socrates is mortal.}
+\end{quote}
+Here both \emph{``Socrates is mortal''} and \emph{``Socrates is a man''} are facts. \emph{``All men are mortal''} could be thought of as a rule, with the understanding that facts and rules are relative concepts intuitively.  That is, a rule can also be viewed as a fact when coupled with a high-order rule, e.g.\ \emph{``All men are mortal''} is a fact w.r.t. the rule \emph{``If all men are animals, then all men are mortal''}.
+
+\textbf{Deductive Reasoning.}
+Deductive reasoning aims to derive new facts based on known facts and rules. The above syllogism is a basic deductive step. When there are multiple facts and rules, one needs to match rules against facts, which is known as \emph{unification}. Generally, there are many ways to apply unification at each step, and a planning algorithm is required to find the optimal ordering of steps, e.g.\ forward or backward chaining~\citep{stuart2016artificial}.
+
+For LLMs, most prompting techniques are designed to elicit deductive reasoning under the assumption of a greedy plan, such as chain-of-thought~\citep{wei2022chain} and least-to-most~\citep{zhou2023least} prompting. We categorize these as implicit reasoning methods since they rely on implicit rules stored in the LLM. By contrast, explicit reasoning methods such as Selection-Inference~\citep{creswell2023selection} and LAMBADA~\citep{kazemi2023lambada} operate on given facts and rules, focusing on searching an optimal deduction order.
+
+\textbf{Inductive Reasoning.}
+Inductive reasoning focuses on deriving general rules from observed facts. For example, if we know \emph{``Scorates is a man''} and \emph{``Socrates is mortal''} and the same facts hold for \emph{Aristotle}, we might hypothesize a rule \emph{``All men are mortal''}. While many rules can be induced from given facts, some rules are overly specific to the given facts, e.g.\ \emph{``If Scorates is a man, Socrates is mortal''} can only be applied to \emph{Scorates}. To make rules useful for future prediction, they should have a large set of supporting examples (i.e.\ coverage) while also predicting new facts correctly (i.e.\ confidence)~\citep{agrawal1994fast, galarraga2013amie}.
+
+In machine learning, inductive reasoning is usually not a standalone task, since it is challenging to annotate and evaluate rules. Instead, inductiveness is studied as a desired property for deductive reasoning models to generalize to new facts. Examples include inductive logic programming (ILP)~\citep{muggleton1994inductive} that requires models to generalize to new combinations of elements, and knowledge graph reasoning~\citep{teru2020inductive, galkin2024towards} that requires models to generalize to graphs of new entities and relations.
+
+
+\section{Hypotheses-to-Theories: Learning a Rule Library for Reasoning}
+
+
+For many reasoning problems, the problem statements only contain the necessary facts within the context, but the rules are not explicitly stated. For instance, when an LLM is asked infer the relationship between two people, it is not given any kinship rules. An LLM pretrained on a massive corpus is able to recall certain commonsense rules from its parameters~\citep{petroni2019language, roberts2020much}, but due to the implicit nature of this process, it may often generate incorrect rules when solving reasoning problems. Our manual analysis indicates that such incorrect rules constitute 65\% and 81\% of the errors made by CoT on CLUTRR and base-16 Arithmetic respectively (Figure~\ref{fig:error_case}).
+
+To solve the above challenge, we propose Hypotheses-to-Theories (\method), a framework that learns a textual rule library from training examples and explicitly uses the rule library to solve test samples. \method consists of an induction stage and a deduction stage, both implemented by few-shot prompting. In the induction stage, rules are generated and verified on a set of question-answer examples. The rules are then collected and filtered to form a library. In the deduction stage, we prompt the model to explicitly retrieve rules from the rule library to answer test questions. The two stages are similar to training and test stages of neural networks, except that we learn textual rules instead of model parameters.
+
+\subsection{Induction Stage: Learning A Rule Library By Generation and Verification}
+
+The induction stage aims to learn rules from training examples without rule annotation. For each training example (a question-answer pair), we ask an LLM to generate rules for answering the question. We extract rules from the output of the LLM with regular expressions, assuming the LLM follows the template of few-shot exemplars. Note that these rules can be either correct or incorrect. While we cannot judge these rules without golden rules, we can verify them by comparing the prediction of these rules against the ground truth answer. The insight is that if the model predicts the correct answer, it is very likely that all these rules are correct. Conversely, if the model predicts a wrong answer, it is very likely that at least one of the rules is incorrect. Due to the noisy nature of LLM reasoning, we collect rules and accuracy metrics from a reasonable number of training examples.
+
+To filter the rules for the rule library, we follow the principles of rule mining~\citep{galarraga2013amie} and consider both coverage and confidence as criteria. The coverage of a rule tells how likely it will be reused, and the confidence of a rule indicates how likely it is correct. Specifically, we measure coverage based on the number of occurrence of each rule in the training set. Confidence is measured by the average accuracy of examples where a rule occurs. In practice, for each generated rule, we maintain two counters, number of occurrence and number of correct answers (Figure~\ref{fig:prompt} bottom). The confidence of each rule can be computed by dividing its number of correct answers by its number of occurrence. We fill the library with good rules exceeding a minimal coverage $k$ and a minimal confidence $p$.
+
+\textbf{Induction from Deduction.}
+The induction stage introduces two sub-problems, rule generation and verification. Recent works on induction~\citep{yang2024language, qiu2024phenomenal} use two separate prompts for generation and verification, i.e.\ a prompt for generating rules based on the question and a prompt for applying the rules to deduce the answer. While it is possible to use two prompts here as well, this doubles the prompt engineering effort and complicates comparisons with other methods. Moreover, the multi-step nature of reasoning problems makes it challenging to generate rules for later steps at the beginning. Hence we propose induction from deduction, which adapts a deductive reasoning prompt (e.g.\ CoT, LtM) for both rule generation and verification (Figure~\ref{fig:prompt} left). The key idea is to explicitly declare a rule whenever a deduction is performed. In this way, both induction and deduction stages use the same base prompt, which is directly comparable to the base prompting method.
+
+\subsection{Deduction Stage: Explicit Reasoning with the Rule Library}
+\label{sec:deduction}
+
+In the deduction stage, we apply the rule library from the induction stage to solve test questions. Specifically, we prepend the rule library to a deductive reasoning prompt (e.g.\ CoT, LtM), and modify the exemplars to teach the LLM to retrieve rules from the library whenever it needs to generate a rule (Figure~\ref{fig:prompt} right). If all the rules required by a question are present in the library, the LLM should generate correct rules for each step without errors.
+
+In practice, we find that even a strong LLM (e.g. GPT-4) somehow struggles to perform retrieval, especially when the library contains a large number of rules in an unstructured way. One workaround is to employ a pretrained passage retriever~\citep{karpukhin2020dense} and interleave retriever calls with LLM decoding~\citep{trivedi2023interleaving}. However, this introduces additional modules and makes the comparison against the base prompting method unfair. Here we develop a pure prompting solution: we organize the rule library into a hierarchy and use XML tags to explicitly refer to the clusters we want to retrieve from the hierarchy.
+
+\subsection{Discussion: Why Does \method Work? What Kind of Tasks Can It Solve?}
+
+It might look surprising that simply prompting the LLM and verifying the predictions on sufficient training examples can give us a library of good rules. Here we discuss the key insights behind \method. While LLMs may occasionally generate incorrect rules, we conjecture they are able to produce correct rules on some examples with a non-trivial probability, similar to the assumption in \cite{wang2024chain}. With a sufficient set of training examples, we can extract most of the necessary rules for a problem class based on the coverage and confidence criteria. Since retrieving a rule is usually easier than generating the correct rule for an LLM, it will perform better on deductive reasoning when primed with a rule library.
+
+Generally, \method has a similar scope of tasks to its base few-shot prompting method. To achieve substantial performance gain with \method, two constraints apply: (1) To fit the library into the prompt, the number of rules required to solve most problems of the task should be moderately small ($\leq$500 in our experiments), excluding tasks that cannot be efficiently described by rules (e.g.\ natural language entailment). (2) To successfully induce most rules, the base prompting method should have a reasonable performance on the training examples ($\geq$20\% accuracy in our experiments), excluding tasks that are difficult for existing few-shot prompting methods, such as tasks requiring planning abilities~\citep{saparov2023language}. \method does not impose constraints on the type of rules it learns. Our experiments show that \method can learn kinship rules, numerical rules or even free-form rules that transform a list.
+
+
+\section{Experimental Evaluation}
+
+\label{sec:experiment}
+
+To evaluate \method, we apply it as an augmentation to existing few-shot prompting methods. We benchmark the performance of \method on relational reasoning and numerical reasoning that require multi-step reasoning and multiple rules, as well as concept learning that require a single complex rule. We also conduct ablation studies to thoroughly understand \method.
+
+\subsection{Implementation Details}
+\label{sec:implementation}
+
+We evaluate \method and the baselines using two different LLMs, \texttt{gpt-3.5-turbo-0613} and \texttt{gpt-4-0613}. When the prompts exceed the 4k context length of \texttt{gpt-3.5-turbo-0613}, we use \texttt{gpt-3.5-turbo-16k-0613} instead. We use the default temperature of 1 for these models. Throughout the following, we will denote the two LLMs as GPT-3.5 and GPT-4 respectively. We further evaluate \method with \texttt{gemini-1.
+
+On CLUTRR and Arithmetic, we perform the induction stage on 2,000 training examples for the proposed \method. When the training set contains fewer than 2,000 examples, we resample the training examples. For each task in List Functions, we perform the induction stage on 20 training-validation splits sampled from the original data. We search the hyperparameters of \method within the following grid: minimal coverage $k \in \{1, 2, 3\}$, minimal confidence $p \in \{0.1, 0.3, 0.5, 0.7, 0.9\}$. Due to the cost of LtM (3-5$\times$ compared to CoT), we induce rules and select the best hyperparameters based on CoT prompting, and only use LtM prompting for the deduction stage. This might slightly underestimate the performance of \method for LtM prompting.
+
+\subsection{Relational Reasoning}
+
+We evaluate \method on CLUTRR~\citep{sinha2019clutrr}, a relational reasoning dataset that queries the relationship between two family members in a family tree. CLUTRR comes in two forms: a symbolic version that only contains entities and their relationships, and a textual version that describes the relationships in a story. We evaluate \method on both versions. We generate dataset splits by uniformly sampling the standard splits from \cite{sinha2019clutrr}. We use 2,000 samples of 2 and 3 hop examples for training, and 200 samples of 2 to 10 hop examples for both validation and test. For reference, we reproduce EdgeTransformer~\citep{bergen2021systematic}, one of the best domain-specific models on CLUTRR, in the same setting.
+
+Table~\ref{tab:clutrr} shows the results on CLUTRR. Here \method consistently improves both CoT and LtM prompting with both models by a margin of 11.1-16.4\% in average accuracy. Since induction is more challenging than deduction, we further evaluate GPT-3.5 with rules induced by GPT-4. Surprisingly, with rules from GPT-4, \method increases the performance of CoT on GPT-3.5 by 27.2\%, doubling the performance of CoT. Compared to the supervised baseline EdgeTransformer, the performance of 5-shot CoT + \method with GPT-4 is 7.5\% lower, which is reasonable since EdgeTransformer leverages forward chaining as a strong inductive bias and is specific to this problem. \method has two advantages over such domain-specific models: (1) \method does not require a predefined relation vocabulary. (2) The rules learned by \method can directly transfer to textual inputs. As shown in Table~\ref{tab:clutrr_text}, rules learned from the symbolic version can also improve the performance of GPT-4 on the textual version. The improvement is not significant for GPT-3.5, since it often produces errors other than incorrect rules.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \caption{Results on the symbolic version of CLUTRR.}
+    \label{tab:clutrr}
+    \begin{adjustbox}{max width=\textwidth}
+        \begin{tabular}{llcccccccccc}
+            \toprule
+            \bf{Model} & \bf{Prompt} & \bf{2 hops} & \bf{3 hops} & \bf{4 hops} & \bf{5 hops} & \bf{6 hops} & \bf{7 hops} & \bf{8 hops} & \bf{9 hops} & \bf{10 hops} & \bf{Average} \\
+            \midrule
+            \multicolumn{2}{l}{EdgeTransformer} & 100.0 & 94.4 & 96.8 & 88.0 & 68.8 & 61.9 & 50.0 & 50.0 & 36.0 & 71.8 \\
+            \midrule
+            & 0-shot CoT & 50.0 & 22.2 & 12.9 & 8.0 & 12.5 & 9.5 & 10.0 & 3.8 & 4.0 & 14.8 \\
+            \cmidrule{2-12}
+            & 5-shot CoT & 0.0  & 27.8 & 45.2 & 36.0 & 18.8 & 19.0 & 16.7 & 11.5 & 16.0 & 21.2 \\
+            & + HtT & 87.5 & 38.9 & 35.5 & 44.0 & 37.5 & 14.3 & 33.3 & 11.5 & 36.0 & \bf{37.6 (+16.4)} \\
+            GPT-3.5 & + HtT (GPT-4) & 100.0 & 55.6 & 32.3 & 60.0 & 50.0 & 47.6 & 43.3 & 19.2 & 28.0 & \bf{48.4 (+27.2)} \\
+            \cmidrule{2-12}
+            & 5-shot LtM & 37.5 & 22.2 & 29.0 & 36.0 & 25.0 & 14.3 & 10.0 & 23.1 & 20.0 & 24.1 \\
+            & + HtT & 100.0 & 33.3 & 32.3 & 48.0 & 31.3 & 33.3 & 23.3 & 34.6 & 28.0 & \bf{40.5 (+16.4)} \\
+            & + HtT (GPT-4) & 75 & 44.4 & 41.9 & 52.0 & 37.5 & 33.3 & 23.3 & 19.2 & 16.0 & \bf{38.1 (+14.0)} \\
+            \midrule
+            & 0-shot CoT & 50.0 & 22.2 & 22.6 & 32.0 & 37.5 &38.1 & 33.3 & 46.2 & 16.0 & 33.1 \\
+            \cmidrule{2-12}
+            & 5-shot CoT & 50.0 & 55.6 & 71.0 & 80.0 & 50.0 & 52.4 & 30.0 & 46.2 & 20.0 & 50.6 \\
+            GPT-4 & + HtT & 100.0 & 61.1 & 74.2 & 84.0 & 75.0 & 38.1 & 56.7 & 53.8 & 36.0 & \bf{64.3 (+13.7)} \\
+            \cmidrule{2-12}
+            & 5-shot LtM & 62.5 & 38.9 & 58.1 & 68.0 & 50.0 & 38.1 & 43.3 & 34.6 & 28.0 & 46.8 \\
+            & + HtT & 100.0 & 55.6 & 77.4 & 80.0 & 75.0 & 38.1 & 36.7 & 38.5 & 20.0 & \bf{57.9 (+11.1)} \\
+            \bottomrule
+        \end{tabular}
+    \end{adjustbox}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \caption{Results on Arithmetic. Note that GPT-4 (5-shot CoT) has 99.1\% accuracy on base-10.}
+    \label{tab:arithmetic}
+    \begin{adjustbox}{max width=\textwidth}
+        \begin{tabular}{llcccccccccc}
+            \toprule
+            \multirow{2}{*}{\bf{Model}} & \multirow{2}{*}{\bf{Prompt}} & \multicolumn{3}{c}{\bf{Base-16}} & \multicolumn{3}{c}{\bf{Base-11}} & \multicolumn{3}{c}{\bf{Base-9}} & \multirow{2}{*}{\bf{Average}}\\
+            & & \bf{2 digits} & \bf{3 digits} & \bf{4 digits} & \bf{2 digits} & \bf{3 digits} & \bf{4 digits} & \bf{2 digits} & \bf{3 digits} & \bf{4 digits} \\
+            \midrule
+            & 0-shot CoT & 30.6 & 10.5 & 0.0 & 5.6 & 5.3 & 0.0 & 11.1 & 10.5 & 0.0 & 8.2 \\
+            \cmidrule{2-12}
+            & 5-shot CoT & 83.3 & 34.2 & 11.5 & 5.6 & 2.6 & 0.0 & 25.0 & 13.2 & 11.5 & 20.8 \\
+            & + HtT & 77.8 & 52.6 & 23.1 & 25.0 & 13.2 & 0.0 & 8.3 & 5.3 & 11.5 & \bf{24.1 (+3.3)} \\
+            GPT-3.5 & + HtT (GPT-4) & 63.9 & 44.7 & 34.6 & 13.9 & 7.9 & 3.8 & 25.0 & 7.9 & 11.5 & \bf{23.7 (+2.9)} \\
+            \cmidrule{2-12}
+            & 5-shot LtM & 83.3 & 34.2 & 15.4 & 16.7 & 5.3 & 0.0 & 13.9 & 7.9 & 7.7 & 20.5 \\
+            & + HtT & 80.6 & 39.5 & 26.9 & 16.7 & 2.6 & 3.8 & 19.4 & 5.3 & 3.8 & \bf{22.1 (+1.6)} \\
+            & + HtT (GPT-4) & 72.2 & 31.6 & 30.8 & 47.2 & 15.8 & 11.5 & 44.4 & 21.1 & 15.4 & \bf{32.2 (+11.7)} \\
+            \midrule
+            & 0-shot CoT & 72.2 & 26.3 & 7.7 & 22.2 & 10.5 & 3.8 & 30.6 & 34.2 & 23.1 & 25.6 \\
+            \cmidrule{2-12}
+            & 5-shot CoT & 83.3 & 71.1 & 61.5 & 52.8 & 47.4 & 46.2 & 75.0 & 36.8 & 42.3 & 57.4 \\
+            GPT-4 & + HtT & 100.0 & 94.7 & 84.6 & 88.9 & 71.1 & 46.2 & 86.1 & 68.4 & 65.4 & \bf{78.4 (+21.0)} \\
+            \cmidrule{2-12}
+            & 5-shot LtM & 88.9 & 81.6 & 61.5 & 52.8 & 47.4 & 30.8 & 52.8 & 31.6 & 11.5 & 51.0 \\
+            & + HtT & 100.0 & 86.8 & 76.9 & 72.2 & 52.6 & 46.2 & 61.1 & 23.7 & 38.5 & \bf{62.0 (+11.0)} \\
+            \bottomrule
+        \end{tabular}
+    \end{adjustbox}
+\end{table}
+
+\subsection{Numerical Reasoning}
+
+We use the Arithmetic dataset~\citep{wu2023reasoning} to evaluate the LLMs on numerical reasoning in non-decimal systems. This dataset contains summation problems over 2 to 4 digits in several base systems. Since the rules in a non-decimal system are mostly different from those in the decimal system, arithmetic is considered to be a counterfactual setting that requires an LLM to perform reasoning rather than reciting. To prepare the dataset for \method, we split it into training, validation and test. The training set contains 900 examples of 2 digit addition. Both the validation and test sets contain 100 examples of 2, 3 and 4 digit addition.
+
+Table~\ref{tab:arithmetic} shows the results on Arithmetic. 0-shot CoT performs worst for both models in all base systems, because the LLMs with 0-shot CoT tend to convert non-decimal inputs to decimal, perform calculations, then revert to non-decimal, which is error prone due to the extra multiplications and divisions. For both CoT and LtM, \method consistently improves the accuracy of two models by a large margin. The performance gain is less significant for GPT-3.5, since it is worse at inducing correct rules and retrieving rules from the library. This can be fixed by using a stronger model to induce the rules and offloading the retrieval steps to a separate prompt like in LtM. We observe a large improvement of LtM + \method on GPT-3.5 with better rules from GPT-4, especially on base-11 and base-9 where GPT-3.5 struggles to induce correct rules. By contrast, there is no improvement for CoT + \method with the better rules, because GPT-3.5 has a strong tendency to rely on its own beliefs (i.e.\ mostly decimal rules) when prompted with CoT, similar to the observation in \cite{longpre2021entity}.
+
+\subsection{Concept Learning}
+
+To assess the potential of \method in learning complex rules, we further evaluate \method on the concept learning problem using List Functions~\citep{rule2020child}. This dataset aims to identify a function that maps each input list to its corresponding output list, with 250 tasks grouped into 3 subsets: simple operations over numbers between 0 and 9 (P1), simple operations over numbers between 0 and 99 (P2), difficult operations over numbers between 0 and 99 (P3). For each task, we split 32 input-output pairs into 16 training samples and 16 test samples. For \method, we further split the 16 training samples into 8 training samples and 8 validation samples to verify the rules based on the validation performance.
+
+Table~\ref{tab:list_functions} shows the results on List Functions. Following \cite{qiu2024phenomenal}, we report both raw accuracy and task accuracy. Raw accuracy is the accuracy on test input-output pairs, while task accuracy is the ratio of tasks with all test input-output pairs correctly solved. \method consistently improves 4-shot CoT on both models, with a gain of 18.5-18.7\% in raw accuracy and 10.2-14.5\% in task accuracy. Surprisingly, GPT-4 can discover some very complex rules in List Functions, as shown in Table~\ref{tab:learned_rules}. With rules learned by GPT-4, the task accuracy of GPT-3.5 can be boosted to 34.4\%, doubling the performance of GPT-3.5 with 4-shot CoT. This suggests that GPT-3.5 can understand most rules learned by GPT-4, and the challenge of concept learning lies more in induction than deduction. We also observe that the performance of GPT-3.5 decreases drastically on tasks involving large numbers (P2) or difficult operations (P3). By contrast, the decrease in performance is less significant for GPT-4, indicating that GPT-4 is more robust across various levels of difficulty.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \caption{Results on List Functions.}
+    \label{tab:list_functions}
+    \begin{adjustbox}{max width=\textwidth}
+        \begin{tabular}{llcccccccc}
+            \toprule
+            \multirow{2}{*}{\bf{Model}} & \multirow{2}{*}{\bf{Prompt}} & \multicolumn{4}{c}{\bf{Raw Accuracy}} & \multicolumn{4}{c}{\bf{Task Accuracy}} \\
+            & & \bf{P1} & \bf{P2} & \bf{P3} & \bf{Average} & \bf{P1} & \bf{P2} & \bf{P3} & \bf{Average} \\
+            \midrule
+            & 0-shot CoT & 44.1 & 38.4 & 28.9 & 37.1 & 30.0 & 25.0 & 12.7 & 22.6 \\
+            \cmidrule{2-10}
+            \multirow{2}{*}{GPT-3.5} & 4-shot CoT & 32.8 & 32.2 & 19.3 & 28.1 & 22.5 & 15.0 & 8.0 & 15.2 \\
+            & + HtT & 58.4 & 50.9 & 30.5 & \bf{46.6 (+18.5)} & 40.0 & 35.0 & 14.0 & \bf{29.7 (+14.5)} \\
+            & + HtT (GPT-4) & 69.2 & 66.3 & 38.4 & \bf{58.0 (+29.9)} & 50.0 & 40.0 & 13.3 & \bf{34.4 (+19.2)} \\
+            \midrule
+            & 0-shot CoT & 69.3 & 56.6 & 48.3 & 58.1 & 51.3 & 45.0 & 26.0 & 40.8 \\
+            \cmidrule{2-10}
+            GPT-4 & 4-shot CoT & 67.3 & 60.9 & 43.9 & 57.4 & 53.8 & 55.0 & 29.3 & 46.0 \\
+            & + HtT & 82.3 & 84.4 & 61.5 & \bf{76.1 (+18.7)} & 61.3 & 70.0 & 37.3 & \bf{56.2 (+10.2)} \\
+            \bottomrule
+        \end{tabular}
+    \end{adjustbox}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \caption{Examples of complex rules learned by GPT-4 on List Functions.}
+    \label{tab:learned_rules}
+    \begin{adjustbox}{max width=\textwidth}
+        \begin{tabular}{lp{17em}p{18em}}
+            \toprule
+            \bf{Task ID} & \bf{Ground Truth} & \bf{Top Learned Rule} \\
+            \midrule
+            c085 & remove all but element N + 1, N = element 1. & return a list with the element that corresponds to the first number in the list, where indexing starts at 1. \\
+            \midrule
+            c191 & repeat each element N times, where N is its tens digit, in order of appearance. & list each element as many times as its tens digit. \\
+            \bottomrule
+        \end{tabular}
+    \end{adjustbox}
+\end{table}
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+We conduct ablation studies with GPT-4, since GPT-3.5 sometimes struggles to induce and retrieve rules.
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \caption{Results on the textual CLUTRR with rules learned on the symbolic CLUTRR.}
+        \begin{tabular}{llc}
+            \toprule
+            \bf{Model} & \bf{Prompt} & \bf{Accuracy} \\
+            \midrule 
+            \multirow{2}{*}{GPT-3.5}
+            & 5-shot CoT & 16.0 \\
+            & + \method & 16.3 (+0.3) \\
+            \midrule
+            \multirow{2}{*}{GPT-4}
+            & 5-shot CoT & 48.7 \\
+            & + \method & \bf{59.1 (+10.4)} \\
+            \bottomrule
+        \end{tabular}
+        \label{tab:clutrr_text}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.5\textwidth}
+        \centering
+        \caption{Comparison of random rules and learned rules on CLUTRR and Arithmetic.}
+        \begin{adjustbox}{max width=\textwidth}
+            \begin{tabular}{lcc}
+                \toprule
+                \bf{Prompt} & \bf{CLUTRR} & \bf{Arithmetic} \\
+                \midrule
+                5-shot CoT & 50.6 & 57.4 \\
+                \midrule
+                + random rules & 9.9 (-40.7) & 23.7 (-33.7)\\
+                + \method & \bf{64.3} (+13.7) & \bf{78.4} (+21.0) \\
+                \bottomrule
+            \end{tabular}
+        \end{adjustbox}
+        \label{tab:ablation}
+    \end{minipage}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/error_cases.pdf}
+    \caption{Statistics of different error cases on CLUTRR and Arithmetic (base-16).}
+    \label{fig:error_case}
+\end{figure}
+
+\textbf{Does \method reduce the occurrence of incorrect rules?}
+Since an LLM generates free-form text to solve a problem, there can be multiple reasons for failure~\citep{zheng2023does}. While \method boosts the overall performance on reasoning problems, it is not clear if the gain comes from less incorrect rules. Here we manually analyze the predictions of CoT and CoT + \method on 100 test examples from CLUTRR and Arithmetic (base-16), and classify the predictions into 3 categories: correct, incorrect rules and other. Figure~\ref{fig:error_case} plots the distribution of error cases. We can see that most performance gain of \method comes from reduction in incorrect rules.
+
+\textbf{Do the learned rules just hint the model about the rule space?}
+A previous study~\citep{min2022rethinking} found that random labels perform similarly to gold labels in in-context learning. If that was the case for our problems, we could just generate random rules and do not have to learn the rule library. To answer this question, we replace the conclusions in the learned rules with random answers, e.g.\ changing 5 + A = E to 5 + A = 7 in base-16. Table~\ref{tab:ablation} shows that random rules significantly hurt performance, indicating the necessity of learned rules in \method. We conjecture that the contrary observation is because \cite{min2022rethinking} studied simple classification problems, whereas we are dealing with multi-step reasoning problems.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/training_samples.pdf}
+    \caption{Performance of \method w.r.t. the number of samples in the induction stage.}
+    \label{fig:training_samples}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.66\textwidth]{figures/number_of_rules.pdf}
+    \caption{Number of rules discovered by \method in the induction stage.}
+    \label{fig:number_of_rules}
+\end{figure}
+
+\textbf{How many samples does \method need for the induction stage?}
+One may be curious about how \method scales with the number of samples and what is the minimal number of examples required. Here we conduct experiments with different numbers of examples for the induction stage. As shown in Figure~\ref{fig:training_samples}, there is a log-linear trend between performance and the number of examples, consistent with the scaling law for supervised learning~\citep{kaplan2020scaling}. The minimal number of examples varies across datasets. CLUTRR and base-11 require 500 examples to obtain a significant gain, while base-16 and base-9 only require 100 examples. On List Functions, 1 sample per task is enough to obtain some gain.
+
+\textbf{What proportion of rules are discovered by \method?}
+To investigate this question, we compare \method with an oracle that always induces all necessary rules from an example. Note this comparison can only be made on Arithmetic, since rules in CLUTRR are not deterministic, e.g.\ a grandmother's daughter can be either a mother or an aunt. Figure~\ref{fig:number_of_rules} shows the number of rules induced by the oracle and \method, as well as the number of true positive rules in \method. We can see that \method discovers more than 85\% of the rules in all datasets.
+
+
+\section{Related Work}
+
+
+\textbf{Reasoning over Natural Language.}
+Solving reasoning problems in natural language can be traced back to bAbI~\citep{weston2016towards}, which consists of many proxy tasks that evaluate inductive, deductive and other forms of reasoning. Early attempts designed models with memory components to scan the input and generate the answer~\citep{weston2015memory, kumar2016ask}. With the rise of Transformers~\citep{vaswani2017attention} and pretrained language models~\citep{radford2018improving, devlin2018bert, raffel2020exploring}, several works have demonstrated that transformers can be finetuned on specific datasets to acquire various abilities, including deductive reasoning~\citep{clark2020transformers}, reasoning with implicit knowledge~\citep{talmor2020leap}, and program execution~\citep{nye2021show}.
+
+The success of in-context learning~\citep{brown2020language} and instruction tuning~\citep{wei2022finetuned, sanh2022multitask} has motivated significant work on prompting LLMs to solve reasoning problems. Some notable achievements include chain-of-thought (CoT) prompting~\citep{wei2022chain} that elicits reasoning with intermediate steps in few-shot exemplars, least-to-most (LtM) prompting~\citep{zhou2023least} and decomposed prompting~\citep{khot2023decomposed} that decompose multi-step reasoning into sub tasks and invoke separate prompts for each sub task. Recent works have extended CoT with planning~\citep{yao2023tree, hao2023reasoning}, multi-agent debate~\citep{wang2024unleashing}, and verifiers~\citep{lightman2023let}. All these works rely on parameteric knowledge stored in the LLM's weights~\citep{petroni2019language} and do not explicitly extract rules.
+Another line of work~\citep{creswell2023selection, kazemi2023lambada} considers taking explicit facts and rules as input, and searching possible proof traces that lead to the answer. Compared to existing works, \method is the first to induce rules from examples and apply them deductively to solve reasoning problems.
+
+\textbf{Program Synthesis and Neural-Symbolic Reasoning.}
+Prior to the era of LLMs, neural-symbolic techniques have demonstrated significant performance gains in symbolic problems such as arithmetic~\citep{reed2016neural, cai2017making} and grammar learning~\citep{chen2018towards, chen2020neuralsymbolic, nye2020learning}.
+With LLMs, some recent work has investigated in-context learning to simulate multi-step computation for arithmetic reasoning~\citep{zhou2022teaching}.
+Tool-augmented language models~\citep{parisi2022talm, schick2023toolformer} teach LLMs to generate API calls to external tools (e.g. calculator, search engine), which has been extended to the composition of tools~\citep{gupta2023visual, lu2023chameleon} for reasoning problems. The most related work in the area of program synthesis is library learning~\citep{ellis2021dreamcoder}, which aims to learn a set of reusable functions that generalize to new examples. Recent works have applied library learning to LLMs to solve reasoning problems~\citep{cai2023large} and play Minecraft~\citep{wang2023voyager}. \method shares a similar spirit to these works. However, \method learns rules in natural language and does not require a symbolic program executor, increasing applicability compared to program synthesis methods.
+
+\textbf{Rule Learning.}
+The proposed method is also related to rule learning techniques. Classical rule mining algorithms~\citep{agrawal1994fast, galarraga2013amie} extract rules that have a large support set and high confidence. \method follows the same spirit and filters rules based on their frequency and accuracy. In recent years, rule learning methods have mostly been studied in knowledge graphs~\citep{yang2017differentiable, qu2021rnnlogic, lu2022r5} or theorem proving~\citep{rocktaschel2017end, minervini2020learning}. These methods start from predefined rule templates and learn rules that best fit the observations, with an emphasis on scalability and compositionality in knowledge graphs and theorem proving respectively. However, none of these methods can directly perform reasoning in natural language. While some works~\citep{yang2021learning, zhang2023improved} can be applied to natural language, they need dedicated solvers for the learning and inference of rules. By contrast, \method induces and applies rules by prompting an LLM, and is applicable to any generative LLM.
+
+
+\section{Discussion and Conclusion}
+
+
+\textbf{Limitations.} One limitation of \method is that it requires the base model to have reasonably strong knowledge and retrieval ability. As shown in Table~\ref{tab:arithmetic}, the gain of \method for GPT-3.5 is very marginal due to weak knowledge of non-decimal systems. Even with a rule library induced by GPT-4, GPT-3.5 has issues in retrieving correct rules, especially in very counterfactual settings like base-11 and base-9. Another limitation is that the number of rules is limited by the LLM's context length. It remains an open problem to scale up deductive reasoning when the rule library cannot fit into the LLM's input context.
+
+\textbf{Conclusion.}
+In this paper, we introduce Hypotheses-to-Theories (HtT) to learn explicit rules and apply them in reasoning problems. \method consists of two stages: an induction stage that generates rules and verifies them to construct a library, and a deduction stage that applies rules from the learned rule library to solve a reasoning problem. Our empirical analysis shows that \method significantly boosts the performance of baseline prompting methods on relational reasoning, numerical reasoning and concept learning roblems. The proposed method opens up a new direction of learning textual knowledge with LLMs. We expect \method to facilitate various applications and future research of LLMs.
+\subsubsection*{Ethics Statement}
+The goal of this paper is to learn rules from training samples and apply them to solve reasoning problems with LLMs. Despite the strong abilities presented in this paper, we should be aware that such abilities can also be potentially harmful. First, some malicious uses of LLMs may be augmented by \method. Examples include collecting personal data, social engineering and abuse of legal process. Second, since \method uses LLMs to generate knowledge, it is inevitable that the knowledge may be permeated by biases in existing models, such as genders, races or religions. Regarding these ethical problems, future works may better align LLMs with human values and reduce biases in their parametric knowledge. 
+
+\subsubsection*{Reproducibility Statement}
+
+All the experiments are based on publicly available datasets. Due to the frequent updates of GPT-3.5 and GPT-4, we cannot guarantee the exact numbers can be reproduced with future models, but one should be able to observe the performance gain of \method over base prompting methods.
+
+
+
+
+

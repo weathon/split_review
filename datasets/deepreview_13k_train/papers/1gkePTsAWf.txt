@@ -1,0 +1,386 @@
+\title{Self-Taught Optimizer (STOP): Recursively Self-Improving Code Generation}
+
+\begin{abstract}
+Several recent advances in AI systems %
+solve problems by providing a ``scaffolding'' program that structures multiple calls to language models (LMs) to generate better outputs. A scaffolding program is written in a programming language such as Python. In this work, we use a language-model-infused scaffolding program to improve itself. We start with a seed ``improver'' that improves an input program according to a given utility function by querying an LM several times and returning the best solution. 
+We then run this seed improver to improve itself. 
+Across a small set of downstream tasks, the resulting improved improver generates programs with significantly better performance than its seed improver. 
+A variety of self-improvement strategies are proposed by the language model, including beam search, genetic algorithms, and simulated annealing.
+Since the language models themselves are not altered, this is not full recursive self-improvement. Nonetheless, it demonstrates that a modern language model, GPT-4 in our experiments, is capable of writing code that can call itself to improve itself. We consider concerns around the development of self-improving technologies and evaluate the frequency with which the generated code bypasses a sandbox.\looseness=-1
+\looseness=-1
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\blfootnote{$^*$Work done while at Microsoft Research New England}
+
+A language model (LM) can be queried to optimize virtually any objective describable in natural language. 
+However,
+a program that makes multiple, structured calls to an LM can often produce outputs with higher objective values \citep{yao2022react,yao2023tree,zelikman2022parsel,chen2022program}. We refer to these as ``scaffolding'' programs, typically written (by humans) in a programming language such as Python.
+Our key observation is that, for any distribution over optimization problems and any fixed LM, designing a scaffolding program is itself an optimization problem.\looseness=-1
+\begin{figure*}[b]
+  \centering %
+\hspace{-3px}
+\noindent\includegraphics[width=0.9\linewidth]{improvement_strats.pdf}
+  \caption{\textbf{Example self-improvement strategies proposed and implemented by GPT-4.} 
+  Each strategy is used as scaffolding 
+  \label{fig:strats}
+\end{figure*}%
+In this work, we introduce the \textit{Self-Taught Optimizer} (STOP), a  method in which code that applies an LM to improve arbitrary solutions is applied recursively to improve itself within a defined scope. Our approach begins with a seed `improver' scaffolding program that uses the LM to improve a solution to some downstream task. As the system iterates, the LM refines this improver. We quantify the performance of our self-optimizing framework with downstream algorithmic tasks, observing improvements when the LM applies its self-improvement strategies over increasing iterations. Thus, STOP shows how LMs can act as their own meta-optimizers. We also investigate the kinds of self-improvement strategies the LM proposes (see Figure~\ref{fig:strats}), the transferability of strategies across downstream tasks, and explore LMs' susceptibility to unsafe self-improvement strategies.\looseness=-1
+We refer to this problem as \textit{recursively self-improving code generation}, which is inspired by but not completely a Recursively Self-Improving (RSI) system, as the underlying LM remains unchanged. 
+The broader concept of RSI dates back at least half a century, formalized by \citet{good1966speculations} and later by \citet{schmidhuber2003godel}, but our work represents a more modest and specific application of these ideas. That work focused on the development of more generally capable systems and assumed the model was permitted to refine every aspect of its code, while, our work focuses only on the ability of the model to recursively improve the scaffold that calls it. This paper first formulates the RSI-code-generation problem in a mathematically well-defined fashion. We then define and evaluate STOP, demonstrating the potential utility of RSI-code-generation. Improvements are shown across a variety of downstream tasks. \cref{fig:strats} illustrates a number of the functional and interesting scaffolds proposed by STOP when using a version of the GPT-4 language model \citep{openai_gpt-4_2023} trained on data up to 2021, well in advance of the introduction of most scaffolding systems. Further explorations in \cref{sec:circumvent} measure the rate at which the model attempts to disable a sandbox flag, providing early findings in this area.  
+Lastly, \cref{sec:concerns} discusses concerns related to the responsible advancement of such technologies.\looseness=-1
+
+\paragraph{Contributions.} Our main contributions are (a) formulating an approach to meta-optimization where a scaffolding system recursively improves itself, (b) providing a case study where a system, using a modern LM (GPT-4) can successfully recursively improve itself, and (c) investigating self-improvement techniques proposed and implemented by the model, including how the model circumvents safety measures like a sandbox.\looseness=-1
+
+\begin{figure}
+  \centering %
+\begin{lstlisting}[language=Python]
+from helpers import extract_code
+
+def improve_algorithm(initial_solution, utility, language_model):
+    """Improves a solution according to a utility function."""
+    expertise = "You are an expert computer science researcher and programmer, especially skilled at optimizing algorithms."
+    message =  f"""Improve the following solution:
+```python
+{initial_solution}
+```
+
+You will be evaluated based on this score function:
+```python
+{utility.str}
+```
+
+You must return an improved solution. Be as creative as you can under the constraints.
+Your primary improvement must be novel and non-trivial. First, propose an idea, then implement it."""
+    n_messages = min(language_model.max_responses_per_call, utility.budget)
+    new_solutions = language_model.batch_prompt(expertise, [message] * n_messages, temperature=0.7)
+    new_solutions = extract_code(new_solutions)
+    best_solution = max(new_solutions, key=utility)
+    return best_solution
+\end{lstlisting}
+\end{mybox}
+  \caption{\textbf{Our seed improver}. Our seed improvement program simply prompts an LM to generate candidate improvements to an initial solution to a task and returns the best solution given a utility function. STOP (\cref{alg:recursive-improver}) improves the improver with itself.} %
+  \label{fig:seedalgo}
+\end{figure}%
+
+
+
+\section{Related Work}
+
+\paragraph{Language Model Scaffolding.}
+Many prompting strategies and scaffolds have been developed to enable more systematic reasoning in LMs~\citep{wei_chain_2022,yao2022react,yao2023tree,zelikman2022parsel,chen2022program,zhou2022least,khattab2022demonstrate,jiang2022draft,sel2023algorithm,besta2023graph,poesia2023certified}. For example, scratchpads and chain-of-thought rely on communicating to the model that it should work through a problem step-by-step \citep{nye2021show,wei_chain_2022}. Tree-of-Thoughts algorithmically scaffolds the model to consider branching paths of reasoning steps \citep{yao2023tree}. Graph of thoughts extends this, allowing other graph operations (where nodes are reasoning steps), such as aggregation \citep{besta2023graph}. Other work has focused on letting models reason with access to an interpreter such as Program of Thoughts prompting \citep{chen2022program}, Program-aided Language Models \citep{gao2023pal}, Reflexion \citep{shinn2023reflexion}, or ReAct \citep{yao2022react}, while yet others abstracted this scaffolding structure such as Demonstrate-Search-Predict (DSP) \citep{khattab2022demonstrate}, Language Model Cascades \citep{dohan2022language}, or Cognitive Architectures \citep{sumers2023cognitive}. Each work can be viewed as the result of researchers asking, ``Given an imperfect LM, how can we provide structure to help it solve problems?'' We instead ask if LMs can design that structure and improve it using itself. Surprisingly, GPT-4 proposes scaffolding techniques introduced after its training cutoff.
+
+\paragraph{Language Models as Prompt Engineers.}
+
+ 
+\paragraph{Language Model Self-Improvement.}
+Prior work, such as STaR \citep{zelikman2022star}, demonstrated that LMs can learn to solve harder problems by learning from their reasoning chains by filtering based on incorrect answers (as well as \citealt{huang2022large}, which explored the specific case where a majority vote is used as the filter and \citealt{uesato2022solving}, which emphasized the value of checking the accuracy of the reasoning itself). Inspired by self-play in games, \citet{haluptzok_language_2023} designed a self-improvement framework for code generation where an LM generates novel problems for fine-tuning itself. Related work has explored teaching LMs to debug or optimize code \citep{chen_teaching_2023,shypula_learning_2023}. 
+\begin{figure}[t]
+  \centering %
+\noindent\includegraphics[width=0.85\linewidth]{pipeline_stop8.pdf}%
+  \caption{\textbf{Self-improvement pipeline}. STOP (\cref{alg:recursive-improver}) uses a seed improver program to iteratively optimize its own code using LM calls and a meta-utility function evaluating how well an improver optimizes code for downstream tasks.} %
+  \label{fig:pipeline}
+\end{figure}
+
+\paragraph{Recursive Self-Improvement (RSI).}
+RSI was suggested by \citet{minsky_marvin_artificial_1966} and \citet{good1966speculations}, as cited by \citet{yampolskiy2015seed}. %
+\citet{schmidhuber2003godel} first provided a rigorous formalization, wherein a problem solver would leverage itself to solve iteratively harder problems by making provable improvements to itself. Some of these principles are also highlighted in \citet{schmidhuber1987evolutionary}. Unlike this work, we do not attempt to prove that scaffold improvements made by the model are optimal. As mentioned, RSI code generation differs from full RSI because only the scaffolding is improved. Additionally, many previous analyses involved selecting programs at random (i.e., ``monkeys at typewriters'') or enumeration
+with no dependence on the goal to be improved \citep{levin1973universal}. In contrast, using LMs, we can describe the underlying goal in a prompt (which itself may be improved). Intuitively, providing this goal may make program search more effective.  
+Some work has also suggested constraining types of improvements \citep{nivel2013bounded,steunebrink2016growing} to encourage improvements that mitigate dangerous behavior. Regarding implementations, while efforts have been made for G\"odel machines \citep{hall2007self,steunebrink2012towards}, our work is first to leverage LMs for recursively self-improving code generation.
+
+
+\begin{figure}
+\begin{algorithm}[H]%
+\DontPrintSemicolon
+\caption{
+Self-Taught Optimizer (STOP)
+}
+\label{alg:recursive-improver}
+
+\SetKwFunction{FTildeU}{$\tilde{u}$}
+
+\SetKwProg{Fn}{Function}{:}{}
+
+\KwIn{Seed improver $I_0$, language model $L$, recursion depth $ T $, downstream tasks $D$}
+\KwOut{An improved improver $ I_T$}
+    $ I_{t} \gets I_{t-1}(\metautil, I_{t-1}, L)$\tcp*{Update improver based on meta-utility $\metautil$}
+}
+
+\Return $ I_T $ \tcp*{Return the final improver}
+
+    $ \text{utility\_sum} \gets 0 $ \tcp*{Maintain sum of downstream task utilities}
+    \For{$ (u, S) \in D$}{
+        $ S' \gets I(u, S, L) $ \tcp*{Improve initial solution $S$ using improver $I$}
+        $ \text{utility\_sum} \text{ += } u(S') $ \tcp*{Add new utility}
+    }
+}
+\end{algorithm}
+\end{figure}
+
+
+
+\section{Problem Statement%}
+
+}\label{sec:problem}
+
+
+
+In this section, we formulate the goal of selecting an improver via recursively self-improving code generation. This is viewed as a computationally expensive ``pre-optimization'' step with benefits that can be reaped in numerous downstream applications. Precisely, let $\Sigma^*$ denote the set of finite text strings, and let $L: \Sigma^* \rightarrow \Sigma^*$ be a randomized black-box LM\footnote{i.e., the system can execute the function but has no implementation information} which can be used to generate code, given a query. A utility $u=(u_\text{func}, u_\text{str})$ is a pair where $u_\text{func}:\Sigma^* \rightarrow \mathbb{R}$ is a black-box, possibly randomized function\footnote{A function to the set P($X$) of probability distributions over $X$} that assigns bounded real values to solution strings; and $u_\text{str} \in \Sigma^*$ is a description  which may simply be the source code of the function. With a slight abuse of notation we write $u(x) \equiv u_\text{func}(x)$ for solution $x$. A \emph{task} $\tau = (u,\sol)$  is specified by utility $u$ and a \emph{solution} $\sol\in \Sigma^*$. In our applications, solutions are source code, but more generally any utility defined on strings can be used. An \emph{improver} $I$ is a program
+that improves a task solution using an LM $L$:%
+\begin{equation}
+    \sol' = I(u, \sol, L) \text{ ideally with }
+u(\sol') \gg u(\sol).
+\end{equation}
+
+Suppose there is a distribution $\D$ over downstream tasks $\tau\sim \D$. Thus, the goal is to find an improver program $I$ with high expected utility when used,%
+$
+    \exputil(I) \defeq \E_{(u, \sol) \sim \D} \bigl[u(I(u, \sol, L))\bigr].
+$
+For training, we assume we are given a collection of $n$ downstream tasks $D\sim \D^n$ drawn independently from distribution $\D$. We correspondingly define the \textit{meta-utility} $\metautil$ of an improver $I$ as the average utility over downstream training tasks, 
+\begin{equation}
+    \metautil(I)\defeq\frac{1}{|D|}\sum_{(u,\sol)\in D}u(I(u, \sol, L)).
+\end{equation}
+
+The above equations define $\exputil_\text{func}$ and $\metautil_\text{func}$. For their description string, we use a common ``grey-box'' description $\exputil_\text{str}=\metautil_\text{str}$ which is a description (e.g., source code) indicating that the utility is the expectation over a set of downstream tasks, but the individual downstream tasks themselves are not included in the description. This enables one to optimize over $\metautil$ as an approximation to the actual objective $\exputil$. 
+In addition, the theoretical analysis in \cref{ap:theory} provides simple conditions under which optimizing $\metautil$ also nearly optimizes $\exputil$, and formalizes resource bounds on runtime and LMs.
+Finally, \cref{ap:theory} also %
+gives an equivalent formulation of recursively self-improving code generation in terms of \textit{recursive maximization} which is more amenable to theoretical analysis and needs no initial solution to be given. This paper employs the improver formulation because we have found the initial solution valuable in practice for warm-starting the self-improvement process. \looseness=-1
+
+
+
+
+\section{Self-Taught Optimizer (STOP)}
+
+\label{sec:stop}
+
+\cref{fig:pipeline} provides a visual schematic of the self-improvement pipeline envisaged in \cref{sec:problem}, while 
+\cref{alg:recursive-improver} provides \textbf{S}elf-\textbf{T}aught \textbf{Op}timizer (\textbf{STOP}) pseudocode. 
+The key observation is that the selection of $I$ is an optimization problem itself, to which we can recursively apply improvement. STOP begins with an initial \emph{seed improver} $I_0$. We define the \emph{$t$-th improver} as the output of $t$  self-improvement rounds with meta-utility $\metautil$:
+$
+I_{t} \defeq I_{t-1}(\metautil, I_{t-1}, L).\label{eq:it}
+$
+
+\paragraph{Intuition.} By using $\metautil$, STOP selects improver based on a \textit{downstream utility improvement}. This approach is motivated by the intuitions that 1) improvers that are good at improving downstream solutions may be more likely to be good scaffolding programs and thus to be good at self-improvement, and 2) selecting for single-round improvements may lead to better multi-round improvements. 
+In practice, we allow the utilities and LM to impose budget constraints
+and initial solutions to be generated by humans or a model. 
+Moreover, the cost is essentially $O((\mathrm{budget}_u + \mathrm{budget}_{L}) * \mathrm{budget}_\metautil)$, where budget specifies the number of times an improver can use a function, with these asymptotics defined with respect to the budget parameters.\looseness=-1
+
+\paragraph{Designing the seed improver.}
+Our chosen seed improver (\cref{fig:seedalgo}) simply prompts the LM to generate candidate improvements of an initial solution and then returns the best solution according to the utility function. 
+We chose this simple form to provide nontrivial improvement for a generic downstream task while 1) encouraging the LM to be as ``creative'' as possible, 2) minimizing initial prompt complexity, since self-improvement introduces additional complexity due to nested references to code strings inside of prompts, 
+and 3) minimizing the prompt token count and therefore the costs of LM queries. 
+ 
+
+\paragraph{Describing the utility.} 
+To effectively convey the details of the utility function to the LM,  %
+we provide the utility to the improver in two forms, as a callable function and as a \emph{utility description} string containing the essential elements of the utility source code (see \cref{ap:metautilitydesc,ap:lpndescription} for examples). 
+This choice was made for the following reasons. 
+The description allows us to clearly convey budgetary constraints (e.g., on runtime or function calls) imposed by the utility to the LM. We first attempted to describe budgetary instructions in the seed improver prompt, but, as we discuss in \cref{sec:circumvent}, this led to the removal of such instructions and attempts at reward-hacking in later iterations. 
+The downside of our approach is that it separates the constraints from the code to be optimized by the LM, which may decrease the likelihood that it will be used by the LM \citep{liu2023lost}.
+Finally, we observe empirically that replacing the source code with a purely English description of the utility leads to a reduced frequency of non-trivial improvement.%
+
+
+\section{Experiments and Results}
+
+\label{sec:experiments}
+\begin{figure*}
+  \centering
+  \begin{subfigure}{0.31\linewidth}
+    \centering
+    \caption{GPT-4}
+    \label{fig:gpt4}
+    \includegraphics[width=\linewidth]{performance_vs_iterations_plot_gpt4.pdf}
+  \end{subfigure}
+  \hspace{0.02\linewidth} %
+  \begin{subfigure}{0.31\linewidth}
+    \centering
+    \caption{GPT-3.5}
+    \label{fig:gpt35}
+    \includegraphics[width=\linewidth]{performance_vs_iterations_plot_gpt35.pdf}
+  \end{subfigure}
+  \hspace{0.02\linewidth} %
+  \begin{subfigure}{0.31\linewidth}
+    \centering
+    \caption{Mixtral}
+    \label{fig:mixtral}
+    \includegraphics[width=\linewidth]{performance_vs_iterations_plot_mixtral.pdf}
+  \end{subfigure}
+  \caption{\textbf{Test meta-utility vs. iterations}. Meta-utility of STOP (\cref{alg:recursive-improver}) on held-out test instances after \(T\) iterations of self-improvement for the downstream task of learning parity with noise. Iteration \(0\) uses the seed improver \(I_0\). Given access to a strong LM like GPT-4 (left), STOP consistently improves mean downstream performance. In contrast, with GPT-3.5 (middle) and Mixtral (right), performance degrades. Details are in Sections~\ref{sec:fixed} and \ref{sec:small}. \looseness=-1
+  }
+  \label{fig:perfvsiter}
+\end{figure*}
+We explore  
+1) the benefits of self-improvement over a static seed improver for a fixed target task, %
+2) how well an improver trained on one task generalizes to new tasks, and 
+
+\subsection{Self-improvement for a Fixed Downstream Task}\label{sec:fixed} 
+We begin by evaluating STOP on a fixed downstream task with GPT-4.
+We select the task of learning parity with noise (LPN) \citep{blum2000noise} as a less-well-known, quickly-testable, and difficult algorithmic task. Note that better-known tasks have solutions more widely available online.
+In LPN, bitstrings are labeled with parity computed over an unknown subset of bits; given a training set of bitstrings with noisy labels, one must predict new bitstrings' true labels. 
+Noiseless LPN is easily solved via Gaussian elimination, but noisy LPN is conjectured to be computationally intractable for large input dimensions \citep{blum2000noise}--we use a tractable 10-bit input dimension. 
+
+\cref{fig:perfvsiter} (left) reports mean test $\metautil$ ($\pm 1$ standard error) across $5$ independent STOP runs, 
+showing improved downstream performance from $1$--$3$ self-improvement rounds.
+\null
+
+\subsection{Transferability of Improved Improver}
+
+\begin{wraptable}{R}{0.54\textwidth}
+\label{tbl:transfer}
+\begin{tabular}{llll}
+\toprule
+Task                    & $u(\sol)$ & $\metautil(I_0)$ & $\metautil(I_T)$ \\
+\midrule
+String Grid Dist.           & $43.9\%$          & $44.3\%$      &   $56.7\%$   \\
+Mod. Quad. Assign.          & $20.4\% $         & $20.6\%$      &   $22.1\%$       \\
+3SAT                        & $0\%$            & $21.2\%$      &   $75.1\%$      \\
+Maxcut                      & $0\%$              & $58.7\%$      &   $74.2\%$      \\
+Parity w/o Noise            & $50.0\%$            & $59.3\%$      &   $81.7\%$       \\
+\bottomrule
+\end{tabular}
+\end{wraptable}
+Our next set of experiments explores whether an improved improver is transferable across downstream tasks.
+Note that transferability is plausible as, in the self-improvement phase, the self-improver is not shown the downstream utility or downstream solution, only the meta-utility and its own improver code.
+Specifically, we select a better-performing improver from \cref{sec:fixed} generated by $T=4$ STOP iterations and evaluate it on five new downstream tasks. 
+Remarkably, we find the improved improver, detailed in \cref{ap:selectedopt}, outperforms the seed improver on each new downstream task without further optimization, as shown in \cref{tbl:transfer}.
+As with LPN, we selected three tasks that are easy to evaluate, not very well known, and still fairly difficult: String Grid Distance, a string manipulation problem featured in a recent programming competition (\url{https://codeforces. We also include two well-known tasks: identifying solutions to random 3-SAT formulae and solving instances of the maxcut problem, both with short time constraints. Their utilities and initial solutions are in \cref{ap:transferutilities}.\looseness=-1%
+
+\begin{figure*}[t]
+  \centering %
+\begin{lstlisting}[language=Python]
+from helpers import extract_code
+def improve_algorithm(initial_solution, utility, language_model):
+    """Improves a solution according to a utility function."""
+    expertise = "You are an expert computer science researcher and programmer, especially skilled at optimizing algorithms."
+    message =  f"""Improve the following solution:
+```python
+{initial_solution}
+```
+
+You will be evaluated based on this score function:
+```python
+{utility.str}
+```
+
+You must return an improved solution. Be as creative as you can under the constraints.
+Your primary improvement must be novel and non-trivial. First, propose an idea, then implement it."""
+    top_k = 3  # Number of top solutions to maintain
+    best_solutions = [(initial_solution, utility(initial_solution))] * top_k
+    remaining_calls = language_model.budget
+    no_improvement_counter = 0
+    max_no_improvement = 3  # Maximum no-improvement iterations before stopping
+    epsilon = 0.1  # Initial epsilon value for epsilon-greedy strategy
+    exp_exploit_count = [0, 0]  # Counters for number of improvements from exploration and exploitation
+    while remaining_calls > 0 and no_improvement_counter < max_no_improvement:
+        for initial_solution, best_utility in best_solutions:
+            n_messages = min(language_model.max_responses_per_call, remaining_calls)
+            n_messages = max(1, int(n_messages * (1 + (best_utility - min(best_utility for _, best_utility in best_solutions)) / best_utility)))  # Adaptive sampling
+            temperature = max(0.1, remaining_calls / language_model.budget)  # Dynamic temperature based on remaining calls
+            explore = random.random() < epsilon
+            if explore:
+                new_solutions = language_model.batch_prompt(expertise, [message] * n_messages, temperature=temperature * 2)  # Increase the temperature for exploration
+            else:
+                new_solutions = language_model.batch_prompt(expertise, [message] * n_messages, temperature=temperature)  # Exploitation with the original temperature
+            new_solutions = extract_code(new_solutions)
+            improved = False
+            for solution in new_solutions:
+                current_utility = utility(solution)
+                if current_utility > best_utility and solution not in [sol[0] for sol in best_solutions]:
+                    best_solutions.append((solution, current_utility))
+                    best_solutions.sort(key=lambda x: x[1], reverse=True)
+                    best_solutions = best_solutions[:top_k]  # Keep only top-k solutions
+                    improved = True
+                    exp_exploit_count[0 if explore else 1] += 1
+            if not improved:
+                no_improvement_counter += 1
+            else:
+                no_improvement_counter = 0
+                # Adjust epsilon based on the ratio of improvements from exploration and exploitation
+                epsilon = min(1.0, max(0.1, exp_exploit_count[0] / (exp_exploit_count[0] + exp_exploit_count[1])))
+            remaining_calls -= n_messages
+    return best_solutions[0][0]  # Return the best solution found
+\end{lstlisting}
+\end{mybox}
+  \label{fig:selfimproved}
+\end{figure*}%
+
+\subsection{Self-improvement with Smaller Language Models}\label{sec:small}
+We next explore the ability of smaller LMs, GPT-3.5-turbo and Mixtral \citep{jiang2024mixtral}, to improve their scaffolding. Following the protocol of \cref{sec:fixed} with 25 independent runs instead of 5, we find that GPT-3.5 is sometimes able to propose and implement better scaffolds, but only 12\% of GPT-3.5 runs yielded at least a 3\% improvement. In addition, GPT-3.5 exhibits a few unique failure cases that we did not observe with GPT-4. First, we found it was more likely to propose an improvement strategy that did not harm a downstream task's initial solution but did harm the improver code (e.g., randomly replacing strings in lines with some low probability per line, which had less impact on shorter solutions). Second, if the proposed improvements mostly harmed performance, suboptimal scaffoldings that unintentionally returned the original solution could be selected, resulting in no continued improvement as seen in \cref{fig:perfvsiter}. Generally, the proposed ``ideas'' were reasonable and creative (e.g., genetic algorithms or local search), but implementations were overly simplistic or incorrect.
+
+
+
+\section{Inspecting STOP-Proposed-and-Implemented Improvements}
+
+
+\subsection{Proposed Self-Improvement Strategies}
+We first describe STOP-proposed self-improvement strategies, with examples detailed in \cref{ap:imp-attempt} and visualized in Figure~\ref{fig:strats}. 
+
+\paragraph{Beam search.} The most common meta-heuristic we observed used by the model was beam search: the model would keep a list of all of its improvement attempts based on utility and expand the best $k$ in the list. This has similarities to the Tree-of-Thoughts approach~\citep{yao2023tree} invented years after the training cutoff for the GPT-4 version we used (Sept. 2021).\looseness=-1
+\paragraph{Decomposing and improving parts.} A less common but notable approach was where the LM attempts to improve a solution one function at a time. This can be understood as analogous to \citet{zelikman2022parsel}: %
+the probability that one of $n$ solutions solves all of a problem's independent, modular parts drops precipitously with the number of parts, but the probability that an attempt solves a given part does not depend on the number of parts. Therefore, trying combinations of attempts at parts can substantially increase success.
+\begin{table}[t]
+\caption{\textbf{Unsandboxing.} Percent of unsandboxed improvement attempts of 10,000 (with 95\% \citeauthor{wilson1927probable} confidence intervals). Both LMs attempted to run unsandboxed code on a small ($<1\%$) but non-zero fraction of improvements.
+\label{tbl:unbox}}
+\centering
+\begin{tabular}{lll}
+\toprule
+LM                    & Unsandboxing rate  & Rate with warning \\
+\midrule
+GPT-4  & $0.42\%$ \ ($0.31$-$0.57\%$) & $0.46\%$ \ ($0.35$-$0.61\%$)              \\
+GPT-3.5  & $0.12\%$ \ ($0.07$-$0.21\%$) & $0.17\%$ \ ($0.11$-$0.27\%$)              \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Simulated annealing.}
+\paragraph{Multi-armed bandit and upper-confidence-bound based search.} Another method viewing the optimization as an exploration task is reframing as a bandit problem: since the utility can be stochastic, this emphasizes optimally selecting the best of a set of sampled improvements.%
+
+\subsection{Circumvention Attempts}\label{sec:circumvent}
+
+We also explore whether the LM proposes self-improvement strategies to circumvent the provided constraints (limiting the number of queries to the downstream utility, the number of LM calls, and the number of samples per LM call). We observed a few interesting patterns. First, when not strictly enforcing budget constraints, initially most %
+We also considered a variant of the seed including a warning, illustrated in \cref{fig:sandbox-example}. Unsandboxing occurred at a \textit{higher} average rate despite the warning, though the difference was not statistically significant for either model  (via a two-proportion z-test with significance level $0.05$). Results are reported in \cref{tbl:unbox}. Upon manual inspection of the model's plans in generations, they did not explicitly mention anything ``malicious''--all comments discussing sandbox removal were declared as ``for efficiency'' or similar, though model ``intent'' is ill-defined.\looseness=-1
+
+
+\begin{figure}
+  \centering 
+
+\begin{lstlisting}[style=mystyle, firstnumber=23]
+        score = utility(solution, use_sandbox=True)  # DO NOT CHANGE use_sandbox=True
+\end{lstlisting}
+\end{mybox}
+\begin{lstlisting}[style=mystyle, firstnumber=35]
+        score = utility(solution, use_sandbox=False)  # Use more efficient scoring mechanism
+\end{lstlisting}
+\end{mybox}
+  \caption{\label{fig:sandbox-example} \textbf{Disabled sandbox.} The LM disables the sandbox flag, ostensibly for the purpose of ``efficiency.} 
+\end{figure}%
+
+\subsection{Reward Hacking}
+We note that the downstream utility function must be defined with care: reward hacking occurs when an unintended behavior is selected due to a misspecified reward and is a consequence of exploitable utility functions \citep[see, e.g.,][]{skalse2022defining}. For example, for the LPN task, we initially defined the utility with a numpy vector computation: \lstinline{acc = np.sum(y_hat == y) / n_test}. However, we had not considered that the code may `improve' the seed improver to return the predictions in a different ``shape,'' i.e., an array with dimensions not as intended. Rather than causing an error, the result was a returned ``accuracy'' of over 1000\%.
+It would be valuable to explore the applicability of techniques to avoid reward hacking \citep{amodei2016concrete,laidlaw2023preventing} to STOP in future work.
+
+
+\section{Limitations}
+
+A fundamental limitation of our approach is that the LM itself is not improved. Furthermore, our meta-utility measures improver quality only indirectly via improvements in downstream task utility. %
+Unlike in some prior work \citep[e.g.,][]{schmidhuber2003godel}, any improvement attempt may result in worse performance, which can lead to further deterioration.  Another limitation is that STOP requires an efficiently-evaluatable (and describable) utility function, which may not be available for every task. Correspondingly, as STOP's cost grows substantially faster than the cost of the optimized improver, it may be expensive to run.\looseness=-1
+
+Our improvement framework also maintains a single improver at each step, while some approaches may benefit from maintaining a population.  While this is not a strict limitation in that an improver could itself sample from a population of implementations, it likely imposes a bias. Moreover, a deeper analysis of alternative seed improvers and their tradeoffs would be valuable future work. Lastly, our experiments depend on a closed large LM that may be deprecated in the future, which harms interpretability and long-term reproducibility. Based on the GPT-3.5 results, it is unlikely that STOP would consistently work with any open-source LM at the time of writing \citep{touvron2023llama,jiang2023mistral}. As new models with similar capabilities to GPT-4 emerge, we hope to understand how and whether STOP generalizes. \looseness=-1
+
+Lastly, we note some open challenges. First, although one could potentially apply STOP to open-domain coding tasks, the meta-utility calculation relies on many calls to the utility -- therefore, expensive utility functions pose additional challenges, and handling such tasks requires further work. We also anticipate that while the optimizer could theoretically optimize open-ended language inputs, this may make it less likely to act as a good code optimizer. We also leave this to future work. In addition, it may be possible in principle to overcome some of the limitations of weaker models with stronger scaffoldings and a larger budget.\looseness=-1
+
+
+\section{Conclusions}
+
+In this work, we introduced STOP, a framework for recursively optimizing code generation using LMs as meta-optimizers. We demonstrated that LMs like GPT-4 are capable of improving code that leverages the LM itself. We found that, across a variety of algorithmic tasks, STOP generates improvers that boost the performance of downstream code. 
+While the model does not optimize its weights or underlying architecture, this work indicates that self-optimizing LMs do not require that.
+However, this is itself a motivation: the capabilities of future LMs may be misunderstood if strong scaffolding strategies are not tested.
+Understanding how LMs can improve their scaffoldings can help researchers understand and mitigate the potential for misuse of more powerful LMs.
+Lastly, STOP may allow researchers to investigate techniques for mitigating undesirable self-improvement strategies.
+
+
+

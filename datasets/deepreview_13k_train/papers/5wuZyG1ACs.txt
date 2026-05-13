@@ -1,0 +1,543 @@
+\title{Archon: An Architecture Search Framework for Inference-Time Techniques}
+
+\begin{abstract}
+Inference-time techniques are emerging as highly effective tools to enhance large language model (LLM) capabilities. However, best practices for developing systems that combine these techniques remain underdeveloped due to our limited understanding of the utility of individual inference-time techniques and the interactions between them. Additionally, efficiently and automatically searching the space of model choices, inference-time techniques, and their compositions is challenging due to the large design space.
+To address these challenges, we introduce \archon{}, a modular framework for selecting, combining, and stacking layers of inference-time techniques to construct optimized LLM systems for target benchmarks.
+Rather than relying on a single LLM called once, we leverage a diverse set of LLMs and inference-time techniques, creating \textit{LLM systems greater than the sum of their parts}. \archon{} defines an extensible design space, encompassing techniques such as generation ensembling, repeated sampling, ranking, fusion, critiquing, verification, and unit testing. It transforms the problem of building LLM systems into a hyperparameter optimization objective. 
+Given the available LLMs, inference-time techniques, and compute budget, \archon{} utilizes hyperparameter search techniques to discover optimized architectures for target benchmark(s). 
+We evaluate \archon{} architectures across a range of instruction-following, reasoning, and coding benchmarks, including MT-Bench, Arena-Hard-Auto, AlpacaEval 2.0, MixEval, MixEval Hard, MATH, and CodeContests. 
+\archon{} architectures outperform frontier models, such as GPT-4o and Claude 3.5 Sonnet, on these benchmarks, achieving an average accuracy increase of 15.1 percentage points by using all available LLMs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Inference-time techniques are gaining traction as effective methods for improving model capabilities.
+Examples include generation ensembling, ranking, and fusion, where models in the ensemble are queried in parallel, their responses are ranked, and the best ones are fused into a single, higher quality output, respectively \citep{llm-blender-2023,wang2024mixtureofagentsenhanceslargelanguage}.
+Other types of inference-time techniques are based on querying a single LLM successively (via repeated sampling) and using a voting strategy or unit tests to select the top generation \citep{brown2024largelanguagemonkeysscaling, chen2024llmcallsneedscaling, li2024agentsneed}.
+We divide these existing inference-time techniques into three categories: \textit{generative}, meaning that new candidate responses are drawn from the models (e.g. generation ensembling and repeated sampling), \textit{reductive}, meaning that the existing responses are aggregated or filtered to keep the top responses (e.g. fusion and ranking), or \textit{comparative}, meaning they provide analysis of candidate responses (e.g. critiquing and unit testing),
+as shown in \autoref{tab:archon_layers_outputs_figure}.
+
+Recent work has made progress towards building robust \textit{inference-time architectures}, which are systems composed of one or more large language models (LLMs) and inference-time techniques. 
+Examples include Mixture-of-Agents (MoA)  \citep{wang2024mixtureofagentsenhanceslargelanguage} and LLM-Blender \citep{llm-blender-2023}, as well as single-model systems like LeanStar \citep{lin2024leanstarlearninginterleavethinking} and rStar \citep{deng2024rephraserespondletlarge}.
+However, our experiments show that existing architectures, such as MoA, still suffer from lack of generalization and become significantly less effective beyond the task(s) they were developed on (see Section \ref{sec:archon_results}).
+We argue that designing effective and generalizable inference-time architectures requires:
+\input{figures/main_figure}
+\begin{itemize}
+\item \textbf{Understanding the Utilities of Inference-Time Techniques}:
+Inference-time architectures typically delegate their additional inference budget towards more model sampling calls \citep{chen2024llmcallsneedscaling, brown2024largelanguagemonkeysscaling}, which can be effective for math and coding tasks.
+Other tasks such as instruction-following and reasoning are shown to benefit from additional techniques, including ranking and fusion \citep{wang2024mixtureofagentsenhanceslargelanguage, llm-blender-2023}.
+While all of these methods are valuable, \textit{it is essential to identify which inference-time techniques are most effective for different task categories.}
+\item \textbf{Understanding the Interactions Between Inference-Time Techniques}: 
+While previous studies analyzed these techniques individually (e.g. generation sampling in \cite{chen2024llmcallsneedscaling}), \textit{we need a more comprehensive understanding of the relationships between different inference-time techniques} across different tasks (e.g. is it better to use more models or generate more samples per model?).
+
+\item \textbf{Efficiently and Automatically Searching the Large Design Space of Inference-Time Architectures}: Given a set of available LLMs and target tasks, there is currently no single prevailing inference-time architecture for maximizing downstream accuracy across all tasks (\autoref{tab:archon_main_results}). The search space of inference-time architectures is expansive, requiring practitioners to make several key configuration decisions: \textit{which LLMs to use, how many times to sample them, how to combine the candidate generations, what inference-time techniques to perform on the candidates, and more}. These motivate the need for adaptive and automated architecture search approaches.  
+
+\end{itemize}
+
+In our work, we address each of these challenges.
+Firstly, we \textbf{evaluate the utilities of
+a comprehensive set of existing and proposed inference-time techniques} across instruction-following, reasoning, and coding tasks. 
+Using both open-source and closed-source models, we examine a range of techniques such as \textit{ensembling, fusion, ranking, critiquing, and verification} and introduce new methods such as \textit{model-based unit test generation and evaluation} (Sections \ref{sec:compound_lm_modules} and \ref{sec:combining_compound_lm_components}).
+
+Secondly, we \textbf{analyze the interactions between inference-time techniques}, and explore the benefits of adding new models and new techniques individually.
+We find that candidate fusion substantially improves the quality of the final response generation, and when combined with additional techniques like critiquing, verifying, and ranking, can improve generation quality beyond the oracle best candidate from individual (non-fused) responses (\autoref{fig:compound_LM_ablations}; \autoref{fig:ensembling_graphs}).
+Additionally, we find that candidate verification, unit test generation, and unit test evaluation are most effective for reasoning tasks, whereas critiquing and ranking are effective across instruction-following and reasoning tasks (Section \ref{sec:compound_lm_modules}; \autoref{tab:archon_component_ablations}).
+
+Thirdly, drawing upon our analysis of inference-time techniques, we present \textbf{\archon{}}, a framework for building inference-time architectures.  
+\archon{} utilizes automatic \textbf{inference-time architecture search (ITAS)} algorithms to maximize generation quality for a wide range of tasks, including instruction-following, reasoning, and coding.
+Our \archon{} framework and ITAS algorithms draw inspiration from neural architectures and neural architecture search (NAS) \citep{zoph2017neuralarchitecturesearchreinforcement, ren2021comprehensive, liu2018progressive, liu2021survey}, respectively.
+\archon{} is constructed of \textit{layers of LLMs}, in which LLMs within the same layer run in parallel, but each layer runs sequentially.
+The layers perform different inference-time techniques, either transforming the number of candidate responses through generation and fusion (analogous to linear transformations) or reducing the number of candidate responses to improve quality (akin to non-linearities) (Section \ref{sec:compound_lm_modules}).
+The number of generators, samples per model, fusion layers, fusion models per layer, and more, are all treated as hyperparameters for optimization in our ITAS algorithms (Section \ref{sec:search_algorithms}).
+
+Overall, our work makes the following contributions:
+\textbf{(1)} We develop \archon{}, an open-source modular framework for designing LLM systems that combine inference-time techniques (Section \ref{sec:compound_lm_modules}). 
+We utilize ITAS as the optimizer engine for \archon{}, which enables automated inference-time architecture search for target benchmarks, leveraging Bayesian optimization \citep{snoek2012practicalbayesianoptimizationmachine, 9124618} (Section \ref{sec:search_algorithms}).
+\archon{} is plug-and-play, allowing users to select from existing inference-time techniques (or add new ones) and specify their desired objective functions to optimize for accuracy, latency, and cost.
+\textbf{(2)} We demonstrate increased performance as we scale up the layers of inference-time techniques and combine multiple approaches together, allowing us to discover effective new combinations of inference-time techniques (Sections \ref{sec:combining_compound_lm_components}, \ref{sec:archon_results}, \ref{sec:tradeoffs}). 
+We find that sequentially applying critique, ranking, top-k selection, and then fusion is a highly effective composition (\autoref{fig:compound_LM_ablations}; \autoref{tab:archon_component_ablations}), and we demonstrate the effectiveness of model-based unit test generation and evaluation for improving coding capability (\autoref{tab:archon_main_results}).
+\textbf{(3)} Our best \archon{} architectures surpass both single-call LLMs 
+(e.g. GPT-4o and Claude-3.5 Sonnet)
+and prior top-performing inference-time architectures 
+(e.g. Mixture-of-Agents \citep{wang2024mixtureofagentsenhanceslargelanguage}), 
+boosting state-of-the-art performance by 15.1 percentage points, on average, across a diverse set of instruction-following, reasoning, and coding benchmarks (\autoref{tab:archon_main_results}): MT-Bench, Arena-Hard-Auto, Alpaca-2.0 Eval, MixEval, MixEval Hard, MATH, and CodeContests \citep{zheng2023judging, arenahard2024, alpaca_eval, ni2024mixevalderivingwisdomcrowd, hendrycks2021measuring, li2022competition}. Even when just using open-source LLMs, \archon{} architectures on average surpass single-call state-of-the-art (SOTA) LLMs by 11.2 percentage points.
+
+
+
+\section{Related Work}
+
+
+\subsection{Scaling Laws of Language Models}
+
+Language models \citep{touvron2023llamaopenefficientfoundation, jiang2023mistral, geminiteam2024geminifamilyhighlycapable, openai2024gpt4technicalreport} have transformed the field of artificial intelligence across a vast number of domains and tasks.
+LLMs are pretrained on substantial amounts of textual data before being further aligned with human preferences through 
+instruction fine-tuning \citep{wei2022finetunedlanguagemodelszeroshot, chung2022scalinginstructionfinetunedlanguagemodels},
+direct policy optimization (DPO) \citep{rafailov2023direct},
+Kahneman-Tversky optimization (KTO) \citep{ethayarajh2024ktomodelalignmentprospect},
+reinforcement learning from AI feedback (RLAIF) \citep{bai2022constitutional},
+and other techniques.
+As language models continue to gain improved abilities with further scaling of data, parameters, and compute \citep{kaplan2020scalinglawsneurallanguage, gadre2024language}, the cost of developing new LLMs is ever increasing, requiring the curation of trillions of new tokens as well as substantial GPU-hours for pretraining.
+Furthermore, as the current state-of-the-art in LLMs are primarily closed-source APIs, such as OpenAI's GPT-4o \citep{openai2024gpt4technicalreport}, Google's Gemini \citep{gemmateam2024gemmaopenmodelsbased} and Anthropic's Claude \citep{claude3}, it is difficult to effectively explore and push the frontier of existing LLMs without being able to manipulate the parameters of these closed-source models and employing techniques such as continual pretraining \citep{jin2021lifelong}, instruction fine-tuning \citep{wei2022finetunedlanguagemodelszeroshot}, data mixing \citep{ye2024datamixinglawsoptimizing}, chain-of-thought \citep{wei2023chainofthoughtpromptingelicitsreasoning}, among others.
+A number of recent works show the effectiveness of scaling compute at test time \citep{brown2024largelanguagemonkeysscaling, snell2024scalingllmtesttimecompute,llm-blender-2023, chen2024llmcallsneedscaling}. 
+In particular, Large Language Monkeys \citep{brown2024largelanguagemonkeysscaling} characterizes inference-time scaling laws, showing a log-linear relationship between coverage--the fraction of problems solved by at least one attempt--and the number of samples drawn from the model across a broad range of reasoning tasks and LLMs. 
+We build on the inference-time compute scaling approaches and propose \archon{}, a formal framework for applying inference-time techniques, combining the strengths of multiple pretrained LLMs (Section \ref{sec:combining_compound_lm_components}), and exploring different inference-time architectures with ITAS (Section \ref{sec:search_algorithms}).
+
+\subsection{Inference-Time Techniques}
+
+By utilizing a single LLM or multiple LLMs, inference-time architectures allow us to combine multiple inference-time techniques (e.g. generation ensembling, sampling, ranking, and fusion), achieving superior performance compared to individual models. 
+Notable works in this domain include the Mixture-of-Agents (MoA) \citep{wang2024mixtureofagentsenhanceslargelanguage}, LLM Blender \citep{llm-blender-2023}, and RouteLM \citep{ong2024routellmlearningroutellms, li2024agentsneed}, which have demonstrated the efficacy of these techniques in improving generation quality, limiting API costs, and reducing query latency.
+LM frameworks, such as DSPy \citep{khattab2023dspy} and TextGrad \citep{yuksekgonul2024textgrad}, have even emerged for orchestrating LMs and other tool components (e.g. retrievers, search engines, calculators, compilers, etc.), optimizing prompt engineering for integrating these components.
+Even with a single LLM, various inference-time techniques can bolster downstream performance by building better reasoning strategies. 
+These techniques include OpenAI's o1, Chain of Thought, Branch-Solve-Merge, Rephrase and Respond, Lean-STaR, rStar, REBASE, and more \citep{openai2024reasoning, wei2023chainofthoughtpromptingelicitsreasoning, saha2024branchsolvemergeimproveslargelanguage,lin2024leanstarlearninginterleavethinking,deng2024rephraserespondletlarge, qi2024mutual, wu2024empiricalanalysiscomputeoptimalinference}.
+Despite these advancements, several challenges remain for the development of inference-time architectures.
+Firstly, many inference-time architectures today delegate the vast majority of their inference calls towards additional generations \citep{llm-blender-2023, chen2024llmcallsneedscaling, davis2024networksnetworkscomplexityclass}.
+For reasoning domains like coding and mathematics, additional repeated inference calls are shown to be effective in improving benchmark performance \citep{brown2024largelanguagemonkeysscaling}.
+However, for other tasks such as chat and instruction-following, additional inference-time techniques such as generation fusion and ranking are shown to be useful \cite{wang2024mixtureofagentsenhanceslargelanguage,llm-blender-2023}.
+Additionally, for tasks without built-in verification (e.g. unit tests), it can be important to delegate additional compute towards reasoning generation and verification to improve downstream accuracy \citep{davis2024networksnetworkscomplexityclass}.
+Within the set of inference-time architectures, we still do not understand the trade-offs between different inference-time techniques in these systems. 
+Prior studies have only explored limited aspects of inference-time architecture configurations, often focusing on specific benchmarks without generalizing the findings to broader datasets \citep{llm-blender-2023, wang2024mixtureofagentsenhanceslargelanguage}.
+For example, both \cite{chen2024llmcallsneedscaling} and \cite{li2024agentsneed} explored the impact of LLM calls on downstream performance but they did not examine how other inference-time techniques, such as generation ensembling and fusion, might impact the trends found for LLM sampling.
+Beyond analysis of inference-time techniques, it is also crucial to thoroughly and efficiently develop inference-time architectures since the optimal configuration can differ widely based on the benchmark, the models available, and the maximum number of inference calls allowed (Section \ref{sec:archon_results}).
+To address these challenges, we analyzed multiple inference-time techniques (Section \ref{sec:compound_lm_modules}) and developed the \archon{} framework for automating the development of inference-time architectures with ITAS (Section \ref{sec:search_algorithms}). 
+
+
+
+
+\section{Inference-Time Techniques for \archon{}
+
+
+
+To better understand what inference-time techniques could be most effective for \archon{}, 
+we test an array of different techniques, incorporating existing approaches for generating, ranking, and fusing candidates \citep{wang2024mixtureofagentsenhanceslargelanguage, llm-blender-2023} as well as constructing new approaches for critiquing, verifying, and unit testing candidates, inspired by a host of recent work \citep{davis2024networksnetworkscomplexityclass, brown2024largelanguagemonkeysscaling}.
+Below, we elaborate on the structure, inputs, and outputs of each of the inference-time techniques, which we also include in \autoref{tab:archon_layers_outputs_figure}.
+Then, we discuss how to combine the different techniques into an inference-time architecture (Section \ref{sec:combining_compound_lm_components}) and the relationships between the different inference-time techniques (Section \ref{sec:tradeoffs}) before finally exploring automatic approaches for constructing inference-time architectures (Section \ref{sec:search_algorithms}).
+\subsection{LLM Components of \archon}
+\label{sec:compound_lm_modules}
+In this section, we discuss the \textit{LLM components} of \archon{}, which are LLMs that perform a specific inference-time technique. The components are summarized in \autoref{tab:archon_layers_outputs_figure}.
+
+\input{tables/archon_components_overview}
+
+\textbf{Generator}: The \textit{Generator} module of \archon{} is a LLM that creates candidate responses  
+As input, the generator takes in the instruction prompt and outputs candidate responses.  Generators can be called in parallel to perform \textit{generation ensembling} \cite{wang2024mixtureofagentsenhanceslargelanguage,llm-blender-2023}, or sampled multiple times \cite{chen2024llmcallsneedscaling,brown2024largelanguagemonkeysscaling}.
+When calling the Generators in parallel, you can sample one or more LLMs one or more times.
+The exact number of models, samples, and temperature for generation can be varied based on model configuration.
+We provide the exact prompt used in the \archon{} generator in \autoref{tab:generator_prompt}.
+
+\textbf{Fuser}: The \textit{Fuser} module of \archon{} is a LLM that combines multiple candidate responses to create one or more higher-quality responses. As input, the fuser takes in the instruction prompt and the set of proposed responses.
+As output, the fuser generates a fused response that combines the proposed responses into a higher-quality generation for addressing the instruction prompt.
+We provide the exact prompt used in the \archon{} fuser in \autoref{tab:fuser_prompt}. 
+
+\textbf{Ranker}: The \textit{Ranker} module of \archon{} is a language model that ranks the current list of candidate generations based on their quality and the instruction prompt.
+As input, the ranker takes in the instruction prompt and the set of proposed responses.
+As output, the ranker produces a ranked list of the proposed responses.
+We provide the exact prompt used in the \archon{} ranker in \autoref{tab:decoder_ranker_prompt}. 
+
+\textbf{Critic}: The \textit{Critic} module of \archon{} is a LLM that produces a list of strengths and weaknesses for each candidate response in a provided set.  
+As input, the critic takes in the instruction prompt and the set of proposed responses.
+As output, the critic produces a list of strengths and weaknesses for each respective candidate response.
+We use the strengths and weaknesses to improve the quality of the final response (Section \ref{sec:combining_compound_lm_components}; \autoref{fig:compound_LM_ablations}).
+We provide the exact prompt used in the \archon{} critic in \autoref{tab:critic_prompt}. 
+
+\textbf{Verifier}: The \textit{Verifier} module of \archon{} is a LLM that verifies whether a provided candidate response has appropriate reasoning for a given instruction prompt.
+It proceeds in two stages: \textbf{Stage \#1} takes in the instruction prompt and a candidate response as input and outputs reasoning for why the candidate response is correct; \textbf{Stage \#2} takes in the instruction prompt, candidate response, and produced reasoning before outputting reasoning and a verdict (i.e. binary [Correct] or [Incorrect]) for whether or not the candidate response is correct according to the provided instruction prompt and reasoning.
+We provide the exact prompt used in the \archon{} verifier in \autoref{tab:verifier_prompt}. 
+
+\textbf{Unit Test Generator}: The \textit{Unit Test Generator} module of \archon{} is a LLM that generates a set of unit tests for a given instruction prompt.
+As input, the unit test generator solely takes in an instruction prompt.
+As output, the unit test generator produces a list of unit tests that are consequential for the accuracy and relevance of a candidate response.
+These generated unit tests are verified by the Unit Test Evaluator, allowing us to rank different candidate responses. 
+Each unit test is formatted as a concise declarative statement that can either be passed or failed.
+We make the number of unit tests generated a configurable choice for the unit test generator but we find 5-10 generated unit tests to be most effective with our set of LM prompts (Section \ref{sec:archon_results}; \autoref{fig:math_and_code_contests_curves}).
+We include examples of unit tests for an instruction-following query and a reasoning query in \autoref{tab:unit_test_examples}.
+We provide the exact prompt used in the \archon{} unit test generator in \autoref{tab:unit_test_generator_prompt}.
+
+\textbf{Unit Test Evaluator}: The \textit{Unit Test Evaluator} module of \archon{} is a language model that evaluates each candidate generation against a generated set of unit tests.
+As input, the unit test evaluator takes in the instruction prompt, candidate response(s), and set of unit tests.
+As output, the unit test evaluator outputs the candidate response(s), ranked in descending order by how many unit tests they pass.
+We use model-based unit test evaluation by prompting the LLM to provide reasoning and verdicts for each unit test across each of the candidate responses.
+By aggregating the unit test verdicts for each candidate response, the unit test evaluator ranks the candidate responses.
+For reasoning tasks, particularly coding tasks, it can be useful to compare different candidate responses by the number of unit tests they pass to gauge for quality.
+Additionally, by generating many candidate responses and evaluating each one against the unit tests, we can better leverage increased inference time compute budgets while improving the quality of the final returned response (\autoref{fig:math_and_code_contests_curves}).
+We provide the exact prompt used in the \archon{} unit test evaluator in \autoref{tab:unit_test_evaluator_prompt}.
+
+\subsection{Combining the LLM Components}
+\label{sec:combining_compound_lm_components}
+\textbf{Overview}: Inspired by the structure of neural networks \citep{hinton1992neural}, \archon{} is constructed of layers of LLM components (\autoref{fig:main_figure}; Section \ref{sec:compound_lm_modules}).
+Each layer is composed of sets of these LLM components that are called in parallel, performing a text-to-text operation to the instruction prompt and the subsequently generated candidate responses.
+Furthermore, like a neural network, some layers perform \textit{transformations} of the provided list of strings (e.g. the Generator and Fuser components), converting a list of strings into a different list of strings (the numbers of candidates can vary from the original number of candidates).
+Other components introduce non-linearities into the \archon{} structure, performing filtering of the list of strings (e.g. Ranker and Verifier).
+Ultimately, the inputs and outputs for each layer is always a list of strings, whether that is the instruction prompt (e.g. a list with a single string) or a list of candidate responses (e.g. a list of many strings).
+If a list of strings are outputted at the last layer of the \archon{} structure, the first string in the list is returned.
+
+Unlike a classical neural network, no weights are learned between the LLM components and the layers; in turn the  \archon{} architecture can be deployed off-the-shelf without any tuning.
+This distinction makes architecture search much cheaper and more efficient since a new configuration is tested without an inner optimization of the architecture's weights, which we discuss in Section \ref{sec:search_algorithms}.
+Additionally, a single state is transformed sequentially from the input layer to the final output; this single state is the initial instruction prompt and the current candidate responses.
+In \autoref{fig:example_archon_architecture}, we provide an example \archon{} architecture composed of six layers: an ensemble layer of generators, an intermediate critic layer, an intermediate ranker layer, an intermediate layer of fusers, an intermediate verifier layer, and a final fuser layer..
+
+\input{figures/example_archon_architecture_text}
+
+\noindent \textbf{Rules for Construction}: While \archon{} is a modular framework, the LLM components in Section \ref{sec:compound_lm_modules} can only be placed in specific orders.
+
+\begin{enumerate}
+\item Only one type of module can be present in any given layer.
+\item Generator components must and can only be placed in the first layer of \archon{}; you can put multiple Generators or a single Generator in the layer.
+\item The Critic component must come before a Ranker or a Fuser, otherwise the generated strengths and weaknesses cannot be incorporated into generation ranking or fusion, respectively.
+\item Ranker, Critic, Verifier, and Unit Test Generator/Evaluator layers can go anywhere in the \archon{} structure (besides the first layer); for each of these components (as well as the Unit Test Generator), it must be the one and only module in its layer.
+\item Fuser components can also be placed anywhere in the \archon{} structure (besides the first layer); you can put multiple Fusers or a single Fuser in the layer.
+\item Unit Test Generators and Evaluators are placed in layers next to each other: generator first, then evaluator.
+\end{enumerate}
+
+\noindent We provide an overview of the available placements and configurations for each LLM module in Table \ref{tab:rules_of_construction}.
+
+\subsection{Utilities and Interactions of LLM Components}
+\label{sec:tradeoffs}
+
+\input{figures/sampling_graphs}
+
+In this subsection, we present our analysis of the effectiveness of each LLM component (i.e. the \textit{Utility}) and the relationships between each component (i.e. the \textit{Component Interactions}) by evaluating on \textit{instruction-following tasks} (MT Bench, AlpacaEval 2.0, Arena-Hard-Auto), \textit{reasoning tasks} (MixEval, MixEval-Hard, MATH) and \textit{coding tasks} (CodeContests) (Section \ref{sec:benchmarks_and_models}).
+For our \archon{} models, we utilize a host of 70B+ open-source models (Section \ref{sec:benchmarks_and_models}; \autoref{tab:models_overview}).
+\subsubsection{Generator}
+\textbf{Utility}: 
+For our Generator module, we find additional model sampling to significantly boost performance (\autoref{fig:sampling_graphs}), particularly for coding tasks (\autoref{fig:math_and_code_contests_curves}).
+In settings with a limited inference call budget, additional model samples lead to the largest marginal benefit.
+We see a similar pattern for model ensembling, where sampling from additional models leads to continual performance increases (assuming the models are ordered from best to worst for the given task) (\autoref{fig:ensembling_graphs}).
+
+\subsubsection{Fuser} 
+\label{sec:fuser_analysis}
+\textbf{Utility}: For every benchmark explored, we found that the Fuser module substantially improved performance (\autoref{fig:sampling_graphs}; \autoref{fig:ensembling_graphs}; \autoref{fig:compound_LM_ablations}).
+For the single-generation 10-model ensemble of 70B+ models, the Fuser module improved downstream accuracy by 5.2 points, on average, compared to the single-generation best model (\autoref{fig:ensembling_graphs}).
+When combined with the Ranker module for ranking the top-5 candidate responses, the Fuser improved downstream accuracy by 7.3 points and 3.6 points, on average, compared to the single-sample best model and the oracle best candidate response, respectively (\autoref{fig:ensembling_graphs}). 
+Overall, we found that Fuser efficacy increased as more candidate responses were provided, demonstrating that additional candidate generations can continue to bolster inference-time architecture performance when combined with a Fuser.
+
+In previous work like Mixture-of-Agents (MoA) \citep{wang2024mixtureofagentsenhanceslargelanguage}, multiple layers of Fusers was found to boost performance on some instruction-following tasks (i.e. MT Bench and Alpaca Eval 2.0).
+Across all the benchmarks explored, we observed similar benefits in the \archon{} framework when adding multiple layers of Fusers (\autoref{fig:compound_LM_ablations}).
+However, based on our results in \autoref{fig:fusion_layer_analysis}, the number of Fuser layers needed to improve performance varied by task, with some tasks receiving limited benefits from added layers (1-2 point increase in accuracy for MixEval) while others experienced significant benefits with 3-4 fusion layers and more (2 to 5 point increase in win rate for MT Bench and Alpaca Eval 2.0).
+We attribute this distinction to the difference in task requirements, with chat and instruction following tasks benefiting more from multiple iterations of revisions through the multiple Fuser layers, leading to greater diversity in the final generation (\autoref{tab:jaccard_similarities}).
+
+\input{figures/ensembling_graphs}
+
+\noindent \textbf{Component Interactions}: To better understand how the Fuser module works with the other LLM components, we took the single-sample 10-model ensemble of Generators with a Fuser and tried adding each of these components individually: a Critic, a Ranker, a Verifier, and a Unit Test Generator/Evaluator.
+Across all of the benchmarks, the added candidate response analyses from the Critic improved the Fuser's ability to effectively merge the different candidate responses, increasing performance by an average of 3.1 percentage points (\autoref{fig:compound_LM_ablations}).
+With the added Ranker, the \archon{} architecture improved the combined Ensemble + Critic + Fuser performance across all the benchmarks by 4.8 percentage points, on average (\autoref{fig:compound_LM_ablations}). 
+The Ranker proved most effective for style-oriented tasks (e.g. MT Bench and AlpacaEval 2.0) since the examples mostly focus on improving the instruction-guidance towards the provided prompt.
+With the added Verifier module (\autoref{fig:compound_LM_ablations}), the performance of the Ensemble + Critic + Fuser configuration improved marginally for the instruction-following tasks (1.2 percentage points, on average, for MT Bench, AlpacaEval 2.0, and Arena-Hard-Auto).
+However, this configuration improved performance more on reasoning tasks (3.2 percentage points for MixEval and MixEval-Hard, on average), assisting generation by filtering out irrelevant or flawed answers before the final fusion step (\autoref{fig:compound_LM_ablations}).
+The added Unit Test Generator and Evaluator was less effective for the instruction-following and reasoning tasks, only providing a 1.5 percentage points increase, on average, when added to the Ensemble + Critic + Fuser configuration (\autoref{tab:archon_component_ablations}).
+However, for coding tasks, we found unit test generation and evaluation significantly improved performance, leading to a 10.7 percentage point increase (56\% performance increase comparatively) as we scale model sampling (\autoref{fig:math_and_code_contests_curves}).
+
+\input{figures/compound_LM_ablations_figure}
+
+\subsubsection{Critic}
+
+\textbf{Utility}: The Critic module proved effective for every task we explored in \autoref{fig:compound_LM_ablations} and \autoref{tab:archon_component_ablations}.
+With our 10-model 70B+ Generator ensemble and Fuser configuration of \archon{}, the added Critic improved performance on average by 3.1 percentage points across the benchmarks explored.
+
+\noindent \textbf{Component Interactions}: While useful for most \archon{} architectures, the added strengths and weaknesses from the Critic module are particularly useful when combined with the Fuser module, helping guide generation fusion for a single layer and even useful when placed between multiple fusion layers (on average 3.2 percentage point boost across benchmarks in \autoref{fig:compound_LM_ablations}).
+The Critic module was also effective with the Ranker module, providing additional information for comparing candidate responses (\autoref{fig:sampling_graphs}) and leading to a 5.9 percentage point increase, on average (\autoref{tab:archon_component_ablations}).
+\subsubsection{Ranker} 
+
+\textbf{Utility}: From our results in \autoref{tab:archon_component_ablations}, \autoref{fig:sampling_graphs}, and \autoref{fig:ensembling_graphs}, we found the Ranker to be most effective for instruction-following tasks, where pair-wise comparisons of answers focus on style and adherence to the prompt.
+To examine the candidate selection improvement provided by candidate ranking, we compare three approaches to the Ranker: \textbf{(1)} random selection of candidate generation, \textbf{(2)} oracle selection of candidate generation, and \textbf{(3)} the top-ranked candidate selected by our Ranker.
+For MT Bench and Arena-Hard-Auto, we find that the ranker improves generation output quality by 3.8\% compared to random candidate selection and performs within 2.7\% of oracle selection (\autoref{fig:sampling_graphs}).
+
+\noindent \textbf{Component Interactions}: Based on our benchmark results in \autoref{tab:archon_component_ablations}, the Ranker pairs well with the Critic module; the provided strengths and weaknesses helps guide ranking, particularly for instruction-following tasks, improving performance by 5.9 percentage points, on average.
+Furthermore, the Ranker was also effective when paired with the Fuser; the filtered list of candidate responses helped improve the final condensed response produced by the Fuser by 3.8 percentage points, on average (\autoref{fig:ensembling_graphs}).
+When paired with the Verifier and Unit Test Generator, the Ranker had neutral effects; performances changed marginally, either positively or negatively by 1-2 percentage points (\autoref{tab:archon_component_ablations}).
+
+Overall, our findings demonstrate the value of added Rankers for instruction-following and reasoning tasks when paired with Fusers. 
+We find that when Rankers are used alone with an ensemble of Generators, their performance lags behind the 10-sample best single model configuration by 3.0 percentage points, on average (\autoref{tab:archon_component_ablations}).
+Additionally, our findings show the importance of building better rankers for more complex reasoning tasks, such as math and coding, which is a challenge also raised by \cite{brown2024largelanguagemonkeysscaling}.
+
+\input{tables/archon_component_ablations}
+
+\subsubsection{Verifier} 
+
+\textbf{Utility}: The Verifier was most effective for the reasoning benchmarks explored in \autoref{tab:archon_component_ablations}.
+When just using a 70B+ Generator ensemble with Verifier module after generation, the \archon{} configuration lagged behind the \archon{} ensemble and fuser configuration by 1.5 percentage points, on average, across all benchmarks explored.
+This suggests that the Verifier is most effective when combined with other inference-time techniques.
+\noindent \textbf{Component Interactions}: 
+As noted in Section \ref{sec:fuser_analysis}, the Verifier augmented the performance of the Critic and Fuser on reasoning tasks (e.g. Arena-Hard-Auto, MixEval, MixEval-Hard), boosting performance by 3.7 percentage points, on average, when combined together with these modules.
+Overall, the Verifier is most powerful when augmenting additional components for tasks requiring verification of intermediate steps and the final response (\autoref{tab:archon_component_ablations}).
+Therefore, the Verifier was less helpful for instruction-following tasks (e.g. MT Bench and AlpacaEval) but more effective for reasoning tasks (e.g. Arena-Hard-Auto and MixEval).
+
+\subsubsection{Unit Test Generator and Evaluator}
+
+\textbf{Utility}: 
+The Unit Test Generator and Evaluator were most effective on reasoning and coding tasks, improving performance on benchmarks that required more verification steps, such as Arena-Hard-Auto, MixEval, MixEval-Hard, MATH, and CodeContests (\autoref{tab:archon_component_ablations}). 
+For the reasoning tasks, we found the unit test generator and evaluator to be most effective when combined with other components. 
+When the 70B+ ensemble of Generators was only combined with unit tests, it was less effective for reasoning tasks like Arena-Hard-Auto and MixEval, lagging behind the ensemble and fuser configuration by 3.1 percentage points.
+This inspired us to look into other inference-time techniques combinations for unit test generation, such as increased sampling and fusion.
+When we increased generation sampling and added unit test generation/evaluation for CodeContests, we see a 56\% boost in Pass@1 performance (\autoref{fig:math_and_code_contests_curves}), increasing from 17.9 to 29.3 Pass@1.
+
+\noindent \textbf{Component Interactions}: 
+When combined with the Fuser module, the Unit Test Generator and Evaluator improved performance by 2.1 percentage points across the benchmarks explored (\autoref{tab:archon_component_ablations}).
+The combined ensemble, Unit Test Generator/Evaluator, and Fuser \archon{} configuration was most effective on the reasoning benchmarks, leading to a 2.5 percentage point boost, on average.
+For coding, the unit test generator and evaluator was most effective when combined with the best performing Generator (using large sample counts) and a final Fuser (\autoref{sec:archon_results}).
+
+\subsection{Inference-Time Architecture Search (ITAS)}
+\label{sec:search_algorithms}
+
+In this section, we explore different approaches for finding the best inference-time architecture (for a given task) through \textit{inference-time architecture search} (ITAS). 
+Due to compute resources, we pre-filtered certain ways of combining LLM components to reduce the search space while still building effective inference-time architectures. 
+While it is possible to expand the search space of potential \archon{} architectures (e.g. different temperatures for generative LLM components, alternative prompts for each LLM component, multiple layers of Generator modules, additional LLM components for \archon{}, etc.), 
+we use our analysis from Section \ref{sec:combining_compound_lm_components} to selectively limit our search space to configurations that fit our rules for \archon{}: starts with a layer of Generator modules, followed by layers performing fusing, ranking, critiquing, verifying, and unit testing.
+
+\noindent \textbf{Search Hyperparameters}: With the studied LLM modules and their relationships within the \archon{} architecture, we selected five main axes for the hyperparameters in our search:
+
+\begin{enumerate}
+    \item \textbf{Top-$K$ Generators for Ensemble}: The top-$K$ models to be used for the initial Generator ensemble, ranges from 1 to 10. 
+    The top-$K$ models are the best-$K$ LLMs for the given task, based on their individual performances (\autoref{tab:generator_and_fusion_rankings}). 
+    \item \textbf{Top-$K$ Generator Samples}: The number of samples gathered from each Generator in the ensemble (it is the same for all the models), ranges from 1 to 5.
+    For MATH and Code-Contests, we also explore high sample settings over the following set of samples: [1, 10, 100, 500, 1000]. 
+    \item \textbf{Number of Fusion Layers}: The number of layers of Fusers, ranges from 1 to 4. 
+    The last fusion layer will always have a single Fuser.
+    \item \textbf{Top-$K$ Fusers for Fusion Layers}: The top-K models used for each fusion layer, ranges from 2 to 10 and increases by 2 each time. 
+\end{enumerate}
+
+By combining all the hyperparameters, we create a search space of 6,250 configurations by multiplying each of the configuration option counts together ($10 * 5 * 5^{(4 - 1)} = 6250$). 
+However, we remove configurations that are not viable: configurations in which the number of initial generations exceeds the context window of the fusers (i.e. 24 candidate generations) and configurations with only one fuser layer but multiple fusers declared.
+This reduces our search space to 3192 configurations.
+For these configurations, we add critic and ranker layers before each fuser layer since they've been shown to have added benefits across the benchmarks explored (\autoref{fig:ensembling_graphs}; \autoref{fig:compound_LM_ablations}).
+The ranker selects the top-5 candidate generations to send to the next layer.
+Additionally, for our coding tasks (i.e. CodeContests), we use unit test generators and evaluators after our initial generation layer, with a default setting of 10 unit tests generated.
+On our instruction-following and reasoning tasks (i.e. MT-Bench, AlpacaEval 2.0, Arena-Hard-Auto, MixEval, MixEval-Hard, and MATH), we also ablate adding a verifier before the final fuser layer (\autoref{tab:archon_component_ablations}).
+Ultimately, we could increase the search space substantially more along various other axes, such as additional combinations of verifier, unit test generation, and fuser layers, but given our compute resource limitations, we did not scale further.
+
+\noindent \textbf{Search Techniques}: Within the hyperparameter space, we explored four search algorithms for automating the development of inference-time architectures:
+\begin{enumerate}
+    \item \textbf{Random Search}: Randomly selects a combination of hyperparameters for our \archon{} architecture.
+    \item \textbf{Greedy Search}: Starting with a base \archon{} configuration, marginally changes each hyperparameter and test if it improves performance or not. If it does, incorporate the change. If not, move on to the next hyperparameter.
+    \item \textbf{Bayesian Optimization}: Efficiently selects the most promising hyperparameter configurations for \archon{} by building a probabilistic surrogate model and leveraging an acquisition function for hyperparameter selection \citep{snoek2012practicalbayesianoptimizationmachine, 9124618} (Section \ref{sec:bayesian_optimization}).
+\end{enumerate}
+
+To get our model ranking for the benchmark, we calculate the model ranking by testing each model individually on the entire benchmark ($K$ = 1) in the first stage of the search.
+To get our fusion model ranking for the benchmark, we use the same approach, testing each model's fusion performance with an ensemble of 10 randomly selected models from the available set. 
+From our experiments, we found that the best generator and fusion models could vary widely dataset to dataset, making it beneficial to perform these rankings for new datasets (\autoref{tab:generator_and_fusion_rankings}).
+For search, we use a 20\% sample of each dataset for guiding architecture search to improve the evaluation speed while getting meaningful development signal.
+
+\input{figures/search_algorithms_comparison}
+
+\noindent \textbf{Comparing Search Algorithms}: In \autoref{fig:search_algorithms_comparison}, we compare the effectiveness of each search algorithm on our explored benchmarks.
+While random search guarantees the optimal \archon{} configuration, we found Bayesian optimization to be most effective in terms of tradeoff between finding the optimal configurations and minimizing the number of configurations tested.
+For 95.2\% percent of the search iterations tested in \autoref{fig:search_algorithms_comparison}, we found that Bayesian optimization had the optimal configuration amongst the four explored search algorithms. 
+We use 80 initial samples for our Bayes optimization architecture search (Section \ref{sec:bayesian_optimization}).
+Bayesian optimization also found the best architecture configuration in 80.4\% less evaluations than greedy search and 87.1\% less evaluations than random search.
+
+\noindent \textbf{Bayesian Optimization Analysis}: 
+In \autoref{tab:bayesian_optimization_comparisons}, we explore how the number of initial testing points, the number of exploration iterations, and the \archon{} inference call budget impacts the effectiveness of Bayesian optimization.
+Additional initial testing points continue improving search efficacy up until 80-90 samples, where testing would be better delegated towards configuration search.
+For lower inference call budgets with \archon{} (e.g. <20 inference calls), Bayesian optimization proved less effective, performing more similarly to greedy search or random search given the limited search space (\autoref{tab:search_algorithms_by_inference_call_budget}.
+Therefore, Bayesian optimization is more effective for more open-ended ITAS with larger inference call budgets (e.g. >20 inference calls) whereas traditional component engineering might be better for more limited inference call budgets.
+
+
+
+\section{Experiments}
+
+
+
+In our experimental evaluations, we focus on four questions: 
+\textbf{(1)} how do \archon{} architectures compare to existing SOTA closed-source LLMs and other inference-time architectures?
+\textbf{(2)} how does \archon{} performance compare across tasks?
+\textbf{(3)} how does \archon{} performance compare when optimized for a set of tasks vs. an individual task? 
+\textbf{(4)} what are the current limitations of \archon{} and plans for future work?
+\subsection{Benchmarks and Models}
+
+\label{sec:benchmarks_and_models}
+
+In this section, we discuss the benchmarks and models used in our LLM component analysis and development of \archon{}.
+
+\textbf{Benchmarks}: We evaluate our models with several benchmarks for instruction-following, reasoning, and coding: MT-Bench \citep{zheng2023judging}, AlpacaEval 2.0 \citep{alpaca_eval}, Arena Hard Auto \citep{arenahard2024}, MixEval \citep{ni2024mixevalderivingwisdomcrowd}, MixEval-Hard, MATH \citep{hendrycks2021measuring}, and CodeContests \citep{li2022competition}. 
+We provide an overview of each dataset in \autoref{tab:benchmarks_overview}, where we compare their query counts, scoring type, evaluation metrics, baseline models, and judge models. 
+Since we perform ITAS on a randomly sampled 20\% subset of each benchmark, we evaluate on the remaining held-out 80\% subset of the benchmark (\autoref{tab:archon_main_results}) (for \archon{} performances on the entire benchmarks, please see \autoref{tab:archon_full_dataset_results}).  
+For MixEval and MixEval Hard, we use the 2024-06-01 dataset release.
+For MT Bench and Arena-Hard-Auto, we also include a configuration with Claude-3.5-Sonnet as the baseline model (in addition to the original setting with GPT-4-0314) to have a stronger model for comparing against \archon{} architecture performances (\autoref{tab:archon_main_results}) and mitigate the GPT-4-Turbo judge bias towards GPT responses.
+Additionally, we chose not to use the single-scoring configuration for MT Bench due to the inconsistencies in LLM judge scoring on 1-10 scales \citep{thakur2024judgingjudgesevaluatingalignment, stureborg2024largelanguagemodelsinconsistent}. 
+For MATH, we evaluate a random sample of 200 problems from the dataset's test set.
+For CodeContests, we evaluate on the 140 test set questions that do not include image tags in the problem description.
+\textbf{Models}: For \archon, we test across three model categories: 8B or less parameter models, 70B or more parameter models, and closed-source model APIs.
+For our 8B and 70B+ models, we selected the top-10 performing chat models for each parameter range on the Chatbot Arena Leaderboard \citep{chiang2024chatbot} as of July 2024. 
+For our closed-source model APIs, we include GPT-4o, GPT-4-Turbo, Claude Opus 3.0, Claude Haiku 3.0, and Claude Sonnet 3.5.
+We list and compare all of the models tested in the \archon{} framework in \autoref{tab:models_overview} and \autoref{tab:generator_and_fusion_rankings}.
+
+\subsection{\archon{} vs. Closed-Source LLMs and Other Inference-Time Architectures}
+\label{sec:archon_results}
+
+\input{tables/archon_held_out_dataset_results}
+
+We start by comparing \archon{} architectures to existing SOTA closed-source LLMs and inference-time architectures across a set of instruction-following, reasoning, and coding tasks with either pairwise ranking or accuracy metrics, as described in Section \ref{sec:benchmarks_and_models}.
+Since we perform ITAS on a randomly sampled 20\% subset of each benchmark, we evaluate on the remaining held-out 80\% subset of the benchmark (\autoref{tab:archon_main_results}) (for \archon{} performances on the entire benchmarks, please see \autoref{tab:archon_full_dataset_results}). 
+Based on our results in \autoref{tab:archon_main_results}, we find that \archon{} architectures consistently match or surpass existing SOTA approaches across all the benchmarks explored.
+On the evaluation suite, our \archon{} architectures with open-source models experience a 11.2 point increase, on average, above SOTA open-source approaches;
+for its worst performance, our open-source \archon{} architectures are only 3.6\% above SOTA open-source approaches on AlpacaEval 2.0.
+For our \archon{} architectures with closed-source models, we set SOTA performance across MT Bench, Arena-Hard-Auto, MixEval, and MixEval-Hard, leading to a 15.8 percentage point increase, on average, compared to closed-source approaches.
+Lastly, for approaches that use all-source models available, both open and closed-source, \archon{} achieves an increase of 10.9 points, on average, over existing SOTA single-call LLMs. 
+\subsection{\archon{} by Task} 
+We analyze \archon{} performance by task style: instruction-following tasks that use pairwise ranking for scoring, reasoning tasks that use accuracy-based metrics for scoring, and coding tasks that use Pass@1.
+On instruction-following tasks like MT Bench, AlpacaEval 2.0, and Arena-Hard-Auto, open-source \archon{} architectures outperform current open-source baselines by 10.0 percentage points, on average, while closed-source \archon{} outperforms current closed-source baselines by 20.1 percentage points (\autoref{tab:archon_main_results}).
+On reasoning tasks like MixEval, MixEval-Hard, and MATH, open-source \archon{} architectures outperform existing open-source baselines by 2.9 percentage points while closed-source \archon{} architectures outperform current closed-baselines by 4.2 percentage points (\autoref{tab:archon_main_results}). 
+On coding tasks (i.e. CodeContests), open-source \archon{} architectures match existing open-source baselines (0.2 percentage points difference) and all-source \archon{} architectures outperform all-source baselines by 2.5 percentage points (\autoref{fig:math_and_code_contests_curves}).
+All-source architectures of \archon{} outperforms existing all-source baselines by 16.1 and 3.8 percentage points, on average, for instruction-following tasks and for reasoning tasks, respectively (\autoref{tab:archon_main_results}).
+
+\noindent \textbf{Instruction-Following and Reasoning}: 
+With \archon{}, multiple models used for Generators and the depth of fusion layers lead to performance boosts on instruction-following tasks, increasing the richness of responses and allowing multiple iterations for step-by-step instruction-following (\autoref{tab:jaccard_similarities}).
+For reasoning, while the performance boost from \archon{} is smaller when we consider the \textit{aggregate} scores for MixEval and MixEval-Hard, we do see meaningful increases in performance when we create inference-time architectures for each individual task under MixEval and MixEval-Hard (\autoref{tab:mixeval_subdataset_results}; \autoref{tab:mixeval_hard_subdataset_results}).
+When we create individual \archon{} architectures for each subtask, we see 3.7 and 8.9 percentage point increases in accuracy, on average, for MixEval and MixEval-Hard, respectively.
+This finding suggests that reasoning tasks (e.g. mathematics, sciences, logic) require more individualized inference-time architectures for their particular queries.
+
+\noindent \textbf{Coding}: 
+We have observed that ensembling, fusion, and ranking techniques have limited impact on CodeContests (\autoref{tab:archon_component_ablations}).
+For example, when we apply the general all-source architecture from \autoref{tab:benchmarks_overview} to CodeContests problems, we achieve small gains from \archon{} (see \autoref{fig:math_and_code_contests_curves}). 
+One contributing factor is that, unlike the distribution of instruction-following/reasoning tasks, coding tasks tend to have one or two LLMs that perform substantially better than the rest of models (\autoref{tab:generator_and_fusion_rankings}).
+However, when we add unit test generation/evaluation, and increase the number of samples,  
+\archon{}'s performance on CodeContests improves significantly (\autoref{fig:math_and_code_contests_curves}), allowing us to boost GPT-4o Pass@1 performance by 56\% for Pass@1 (from 25 to 41 out of 140 questions).
+Future work should focus on developing better \archon{} modules for handling the multi-step reasoning that is implemented in various code agents \citep{qi2024mutualreasoningmakessmaller, zhang2024generativeverifiersrewardmodeling}.
+For model-based unit test generation/evaluation, we generate 5 unit tests and use the LM to evaluate each candidate response against the generated unit tests, allowing us to rank the different candidate responses.
+Lastly, we explored several additional benchmarks for math and code (GSM8K \citep{cobbe2021training}, MMLU Math \citep{hendrycks2021measuring}, HumanEval \citep{chen2021evaluating}, and MBPP \citep{austin2021program}) but existing approaches already reach fairly high performances (>90\% Pass@1)(\autoref{tab:additional_code_benchmark_options}).
+
+\input{figures/MATH_and_CodeContests_Sampling_Curves}
+
+\subsection{Task-Specific and General-Purpose \archon{} Architectures} 
+\label{sec:generalized_v_targeted_architectures}
+\noindent \textbf{Task-Specific vs. General-Purpose}: We also compare custom \archon{} architectures, specifically configured to a single evaluation dataset ("Task-specific \archon{} Architectures"), and a generalized \archon{} architecture configured to handle all the evaluation datasets ("General-purpose \archon{} Architectures") (\autoref{tab:archon_main_results}).
+We utilize ITAS to find the generalized \archon{} architectures in \autoref{tab:archon_main_results} (\autoref{sec:search_algorithms}), maximizing performance over all of the benchmarks explored except CodeContests.
+We exclude CodeContests from the generalized \archon{} architecture search since we found that \archon{} architectures for coding tasks are most effective with a different set of inference-time techniques compared to instruction-following and reasoning tasks (i.e. increased model sampling combined with model-based unit test generation/evaluation) (Section \ref{sec:combining_compound_lm_components}; \autoref{tab:archon_component_ablations}).
+For open-source models, we find that our generalized \archon{} architecture only lags behind the specialized \archon{} architectures by 3.4 percentage points, on average, across all the benchmarks, demonstrating the robustness of the \archon{} architecture found by the ITAS algorithms (\autoref{tab:archon_main_results}).
+We see similar gaps between the generalized and specialized \archon{} architectures for closed-source models (4.0 percentage points) as well as the all-source models (3.3 percentage points) (\autoref{tab:archon_main_results}).
+
+\noindent \textbf{Insights from Architecture Construction}: We include examples of our learned effective generalized \archon{} architectures constructed by ITAS in Section \ref{sec:archon_architectures}, where we breakdown the exact LM components used for constructing each architecture.
+For instruction-following and reasoning tasks, we found a generalizable \archon{} architecture to be most effective with multiple layers of critic-ranker-fuser, chained sequentially to improve candidate generation (\autoref{fig:funneling_architecture}). 
+However, the specific models chosen for these LLM components could change task by task, with some tasks benefiting from using a single SOTA closed-source LLM for all the components (e.g. Arena-Hard-Auto and MixEval) (\autoref{fig:claude_only}) whereas others benefited from a diversity of LLMs in their ensemble (e.g. MT Bench and MixEval-Hard) (\autoref{fig:funneling_architecture}; \autoref{fig:funneling_architecture_open-source}).
+Regardless of models used, we found that scaling inference layers including critics, rankers, and fusers improved performance on instruction-following and reasoning tasks (\autoref{fig:compound_LM_ablations}; Section \ref{sec:archon_architectures}).
+For instruction-following and reasoning tasks, the verifier module is more effective than the unit test generation/evaluation module for task-specific \archon{} architectures (Section \ref{sec:combining_compound_lm_components}; \autoref{tab:archon_component_ablations}).
+For coding tasks, we found a high-sample setting to be the most effective, with added layers of unit test generation and evaluation to boost the quality of the final candidate generation (\autoref{fig:llama_only}; \autoref{fig:math_and_code_contests_curves}).
+Overall, our findings demonstrate the benefits of scaling inference-time compute through layering of techniques, showing the importance of effectively and efficiently constructing inference-time architectures.
+
+\subsection{\archon{} by Inference Budget} 
+
+Finally, we compare different \archon{} architectures across inference budgets for both open-source models and closed-source models (\autoref{tab:archon_performance_vs_inference_budget}).
+For instruction-following and reasoning tasks, we find consistent improvements in downstream performance as we scale from 1 to 50 inference calls, increasing by 14.3 percentage points, on average, across our selected evaluation benchmarks (\autoref{tab:archon_performance_vs_inference_budget}).
+However, after roughly 50 inference calls, performance gains plateau. The results suggest that the early addition of LLM components in \archon{} (e.g. critic, ranker, layers of fusers) led to the most substantial gains in performance and after that, additional LLM components did not ultimately enhance the final generated response.
+We see the trend most apparent for the MixEval and MixEval-Hard benchmarks, where additional layers of Critic, Rankers, and Fusers do not benefit performance beyond a 30 inference call budget (\autoref{tab:archon_performance_vs_inference_budget}).
+Notably, for math and coding tasks, we see continued improvements with additional inference calls by using generated unit tests to evaluate candidate responses, leading to a 56\% increase in Pass@1 (\autoref{fig:math_and_code_contests_curves}). 
+
+\subsection{Limitations and Future Work of \archon{}} 
+\textbf{Parameter Count}: The \archon{} framework is most effective with LLM with about 70B parameters or more.
+When we utilize the \archon{} architecture with only 7B open-source models, we get a notable decrease in performance (\autoref{tab:archon_with_7b}). 
+The best 7B \archon{} configurations lag behind single SOTA (and much larger) models by 15.7\% on across all the benchmarks, on average; 
+7B models work well for ranking  but are less effective for critic and fusion. While this is expected, as small models generally exhibit lower performance, their weaker instruction following ability is a compounding factor.
+
+\noindent \textbf{Latency and Costs}: \archon{} is not ideal for tasks that prefer the latency of a single LLM call, such as certain consumer chatbots.
+Since \archon{} architectures often make multiple LLM calls successively for different operations (e.g. ensembling, critiquing, ranking, fusion, etc.), it can often take 5+ more time than a single LLM call (Section \ref{sec:archon_architectures}).
+Furthermore, it can require calling multiple API endpoints for a single query, leading to increased expenditures compared to single-call LLMs (\autoref{tab:model_costs}; \autoref{tab:archon_costs}). 
+Note that these increases in compute costs and latency translate to higher quality responses, and can be justified in many application domains, such as science, math, and programming, or for addressing complex customer service issues. 
+
+\noindent \textbf{\archon{} Components}: While \archon{} is a modular framework, allowing the easy incorporation of new LLMs, new inference-time techniques, and even tool use, we only explore seven LLM inference time techniques in our work (Section \ref{sec:compound_lm_modules}).
+The addition of new techniques is a promising avenue for future research. 
+Furthermore, while different queries can be best suited by different \archon{} architectures (\autoref{tab:mixeval_subdataset_results}; \autoref{tab:mixeval_hard_subdataset_results}), the ITAS algorithm selects the best single architecture for the evaluation set queries combined.
+Future architecture search could focus on dynamic selection of components on a query-by-query basis.
+
+
+
+
+
+\section{Conclusion}
+
+
+This paper presents \archon{}, a modular framework for optimizing inference-time architectures by integrating multiple inference-time techniques, such as ensembling, ranking, fusion, critique, verification, and unit test generation. 
+Extensive experiments demonstrate that \archon{} consistently matches or exceeds the performance of leading closed-source LLMs, such as GPT-4 and Claude-3.5-Sonnet, while only using open-source models across diverse benchmarks, including MT-Bench, AlpacaEval 2.0, Arena-Hard-Auto, MixEval, MixEval-Hard, MATH, and CodeContests. 
+We attribute \archon{}'s boost in benchmark performance to two main factors. 
+The first factor is the ability to leverage inference-time compute towards utilizing multiple LLMs and additional operations (e.g. fusing, ranking, critiquing, verification, unit testing), leading to amplified benefits that scale with additional inference calls (Sections \ref{sec:compound_lm_modules} and \ref{sec:tradeoffs}).
+The second factor is the automatic approach for iteratively testing different \archon{} architectures with ITAS, guaranteeing the optimal configuration given enough exploration steps (Section \ref{sec:search_algorithms}).
+These results underscore the potential of \archon{} and ITAS algorithms in advancing the development of high-performing and generally capable inference-time architectures. 
+
+
+
+
+
+\section{Acknowledgements}
+
+
+We thank Simran Arora, Bradley Brown, Ryan Ehrlich, Sabri Eyuboglu, Jordan Juravsky, Jerry Liu, Benjamin Spector, Alyssa Unell, Benjamin Viggiano, and Michael Zhang for their constructive feedback during the composition of the paper.
+We would also like to thank our collaborators at the Stanford Artificial Intelligence Laboratory
+(SAIL) and TogetherAI.
+
+We gratefully acknowledge the support of NIH under No. U54EB020405 (Mobilize), NSF under
+Nos. CCF2247015 (Hardware-Aware), CCF1763315 (Beyond Sparsity), CCF1563078 (Volume to
+Velocity), and 1937301 (RTML); US DEVCOM ARL under Nos. W911NF-23-2-0184 (Long-context)
+and W911NF-21-2-0251 (Interactive Human-AI Teaming); ONR under Nos. N000142312633 (Deep
+Signal Processing); Stanford HAI under No. 247183; NXP, Xilinx, LETI-CEA, Intel, IBM, Microsoft,
+NEC, Toshiba, TSMC, ARM, Hitachi, BASF, Accenture, Ericsson, Qualcomm, Analog Devices,
+Google Cloud, Salesforce, Total, the HAI-GCP Cloud Credits for Research program, the Stanford
+Data Science Initiative (SDSI), and members of the Stanford DAWN project: Meta, Google, and
+VMWare. The U.S. Government is authorized to reproduce and distribute reprints for Governmental
+purposes notwithstanding any copyright notation thereon. Any opinions, findings, and conclusions
+or recommendations expressed in this material are those of the authors and do not necessarily
+reflect the views, policies, or endorsements, either expressed or implied, of NIH, ONR, or the U.S.
+Government.
+
+
+
+
+\section{Appendix}
+
+
+\subsection{\archon{} LLM Components}
+
+\input{tables/rules_of_construction}
+
+\input{tables/generator_prompt}
+\input{tables/fuser_prompt}
+\input{tables/decoder_ranker_prompt}
+\input{tables/critic_prompt}
+\input{tables/verifier_prompt}
+\input{tables/unit_test_generator_prompt}
+\input{tables/unit_test_examples}
+\input{tables/unit_test_evaluator_prompt}
+\clearpage
+
+\subsection{\archon{} LLM Analysis}
+\input{tables/models_overview}
+\input{tables/archon_single_model_performances}
+\input{tables/jaccard_similarities}
+\input{figures/fusion_layer_analysis}
+\clearpage
+
+\subsection{\archon{} Architectures}
+\label{sec:archon_architectures}
+\input{figures/funneling_example}
+\input{figures/funneling_example_open_source}
+\input{figures/claude_only}
+\input{figures/llama_only}
+\clearpage
+
+\subsection{\archon{} by Inference Compute Budget, Model Size, and Cost}
+\input{tables/archon_vs_inference_calls}
+\input{tables/archon_7b_models}
+\input{tables/model_costs}
+\input{tables/archon_costs}
+\clearpage
+
+\input{sections/bayes_optimization}
+\subsection{ITAS Algorithms Comparisons}
+\input{tables/bayesian_optimization_ablations}
+\input{tables/search_algorithms_by_inference_call_budget}
+
+\subsection{\archon{} Benchmarks and Results}
+\input{tables/archon_full_dataset_results}
+\input{tables/benchmarks_overview}
+\input{tables/mixeval_subdataset_results}
+\input{tables/mixeval_hard_subdataset_results}
+\input{tables/additional_code_benchmark_options}
+
+
+
+
+
+
+
+
+

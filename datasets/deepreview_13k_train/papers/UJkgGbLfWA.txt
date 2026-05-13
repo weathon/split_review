@@ -1,0 +1,317 @@
+\title{Guiding Language Models Reasoning with Planning Tokens}
+
+\begin{abstract}
+Large language models (LLMs) have recently attracted considerable interest for their ability to perform complex reasoning tasks, such as chain-of-thought (CoT) reasoning. However, most of the existing approaches to enhance this ability rely heavily on data-driven methods, while neglecting the structural aspects of the model’s reasoning capacity. To encourage a more structural generation of CoT steps, we propose a hierarchical generation scheme: we let the LM generate a \emph{planning token} at the start of each reasoning step, intuitively serving as a high-level plan of the current step, and add their embeddings to the model parameters. Our approach requires a negligible increase in trainable parameters (0.001\%) and can be applied through either full fine-tuning or a more parameter-efficient scheme. We demonstrate our method's effectiveness by applying it to three different LLMs, showing notable accuracy improvements across three math word problem datasets and one multihop QA dataset with respect to standard fine-tuning baselines.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The great potential of solving complex reasoning problems, including world knowledge reasoning \citep{hendrycks2020measuring, suzgun2022challenging}, logical reasoning \citep{pan-etal-2023-logic}, and math reasoning \citep{cobbe2021training, hendrycks2021measuring}, using pre-trained large language models (LLMs) \citep{touvron2023llama,touvron2023llama2,brown2020language} has drawn much attention recently.
+A popular and effective paradigm of reasoning with LMs is chain-of-thought (CoT) reasoning \citep{wei2022chain,wang2022self}. In CoT the LMs are required to generate both the reasoning steps and answer for a given problem. Recent research has recognized the importance of CoTs for complex reasoning problems. Multiple works focus on augmenting high-quality alternative CoTs in training data. For example,~\citet{yue2023mammoth} fine-tune LLMs on multiple math datasets with CoT and program-of-thought (PoT) solutions. ~\citet{Yuan2023} applies rejection sampling on the LLM samples. Other works elicit reasonings from exogenous resources, such as more capable LLMs,~i.e. GPT-4~\citep{mukherjee2023orca,luo2023wizardmath}. Although these methods are shown to be highly effective, the fundamental problem of how to effectively guide an LM to generate more useful CoT is not directly tackled by these data-augmentation-based methods.
+
+We aim to propose a lightweight training method to fundamentally improve the effectiveness of the generated CoTs. While current methods usually directly generate the complete CoT solution, we hypothesize that a hierarchical generation of the CoT steps will benefit the overall quality of the solution.
+More specifically, we introduce \emph{planning tokens} at the beginning of each CoT step, which are special tokens that encode a high-level solution plan of the current CoT step. 
+We consider three ways of inferring the \emph{planning tokens}: heuristic assignment, clustering reasoning states, and latent variable learning with VAE \citep{kingma2013auto}. At training time, we first assign \emph{planning tokens} to each CoT step and then do regular supervised fine-tuning. At inference time, the LM will be able to generate the corresponding \emph{planning tokens} first, before generating each CoT step. In practice, the planning tokens' embeddings add negligible additional learnable parameters to the LLMs ($<$ 0.001\%). This makes our method integrate well with parameter-efficient fine-tuning methods like LoRA~\citep{Hu2021}. 
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.8\textwidth]{img/overview.png}
+    \caption{An overview of our method: Given an input question $x$ and its CoT steps $r^1,...,r^i$, we train a planning token inference model to infer the planning tokens $t^{i}$. Subsequently, we fine-tune an LM on data augmented with the inferred planning tokens. 
+    Given a new question $x'$, the trained LM can infer planning tokens $t'^{i}$, CoT steps $r'^{i}$, and final answer $y'$.
+    Fire and snowflake denote trainable and frozen models, respectively.
+    Note that $x$, $r^i$, $t^i$, $y$ can all include \textbf{multiple tokens}, we depict them as single blocks/variables for simplicity.}
+    \label{fig:overview}
+\end{figure*}
+
+While the idea of adding new tokens to the generative LM's vocabulary and then training the associated embeddings has been explored before \citep{li-liang-2021-prefix,lester-etal-2021-power}, the function and effect of our proposed planning tokens are significantly different from the previous works. Our \emph{planning tokens} are designed to increase and guide the reasoning ability of LM fine-tuned with other supervised fine-tuning methods, instead of acting as a parameter-efficient fine-tuning method \citep{li-liang-2021-prefix,lester-etal-2021-power} on its own. The fact that \emph{planning tokens} are specialized within one task and can be generated and inferred by LMs like regular tokens also sets us apart from the previous soft token tuning based methods. For example, \citet{qin-eisner-2021-learning} treat the soft tokens as special indicators for specific relations, and \citet{goyal2023think} fixed the position of the pause token to right after the prompt and serves only as extended computation before generation.
+
+We perform experiments on three math word problem (MWP) datasets (GSM8K \citep{cobbe2021training}, AQUA \citep{ling-etal-2017-program}, and MATH \citep{DBLP:journals/corr/abs-2103-03874}), and one multihop QA dataset (StrategyQA \citep{geva2021did}). The experiment results in \cref{sec:results} show that by adding planning tokens at training time, we are able to improve upon the baseline without planning tokens by 3.3\% accuracy points on average over three pre-trained language models (Phi 1.5 \citep{gunasekar2023textbooks}, 7B Llama 2 \citep{touvron2023llama2}, and 13B Llama 2) and three MWP datasets. We also show that the gains of our method do not solely come from the augmented computational space induced by increasing the length of the reasoning with planning tokens but also from the specialization induced by the planning tokens. In \cref{sec:analysis}, from a detailed error analysis of the generated CoT solutions, we found that our method performs notably better on longer CoT solutions. The error type analysis also suggests that our method can better refer to the previous information and increase the computing capacity of the model. We also investigate how LLMs utilize the planning tokens by looking into the attention weights, which suggest that planning tokens can carry information throughout the whole sequence.
+
+
+
+\section{Method}
+
+
+\textbf{Setup} We assume that we have a dataset $\mathcal{D}$ composed of triples $\{(x, r, y)\}$, where $x$ is a problem to solve, $r$ is the ground-truth reasoning associated with the problem and $y$ is the final answer. 
+The assumption that the ground-truth reasoning is included in the dataset might be circumvented by either generating CoTs with rejection sampling from a base LM~\citep{Yuan2023} or by creating reasoning paths from a larger model~\citep{luo2023wizardmath,mukherjee2023orca}. 
+We fine-tune a base LLM to predict the concatenation of reasoning and answers given the inputs, i.e.:
+\begin{equation*}
+\arg \max_{\theta} \sum_\mathcal{D} \log p(r, y | x; \theta),
+\end{equation*}
+where we assume that $x, r, y$ are properly tokenized and $\theta$ is the trainable parameter of the pre-trained LLM.
+To provide more high-level guidance to the LLM at fine-tuning time with reasoning data, we assume that each reasoning $r$ is the realization of some higher-level planning process, which is \emph{latent}, thus unobserved in the dataset. To model this assumption, we define by \emph{reasoning step} a sub-sequence of tokens appearing in the reasoning. We create reasoning steps by splitting the reasoning with a delimiter token, which might be dataset-specific, but for simplicity, we fix it to be \texttt{\textbackslash n} for all datasets. 
+
+Let $r = r^1, \ldots, r^S$, where $S$ is the number of steps in the reasoning. We assume that each reasoning step $r^i$ is generated conditional on the previous reasoning steps and a discrete latent planning variable $t^i$ taking values into $1 \ldots P$.
+Given that the planning variables value between $1$ and $P$, they can be considered as condensed summaries of each reasoning step and can therefore provide useful guidance while producing the reasoning $r$. We also assume the answer $y$ is generated with a special planning variable $t^y$ which has always a value equal to $P$ for each example. Without loss of generality, we assume that only $t^y$ can take value $P$,~i.e. $p(t^i = P) = 0$ for each $t^i, i \ne y$.
+
+If the planning variables were indeed observed, the complete data $\mathcal{D}^c$ would be composed of tuples $(x, t^1, r^1, \ldots, t^S, r^S, t^y, y)$. Let us assume for the moment that the complete dataset is available to us. In order for the dataset to be processed by an LLM, we verbalize each planning variable $t^i$ with a (or possibly multiple) \emph{planning token}(s). Here we abuse the notation $t^i$ for this (set of) \emph{planning token}(s) for simplicity. In practice, this means that we extend the vocabulary of the LLM tokenizer with $P$ (or more) new tokens of our choice, and modify accordingly the input and output embedding matrix of the LLM. The embeddings of the new tokens will be additional training parameters for the LLM, which add a negligible parameter overhead over the base model.
+
+With this modification in mind, the complete data $\mathcal{D}^c$ can be readily used to train an LLM by maximizing the complete data log-likelihood:
+\begin{equation*}
+\arg \max_{\theta^+} \sum_{\mathcal{D}^c} \log p(t^1, r^1, \ldots, t^S, r^S, t^y, y | x; \theta^+),
+\label{eq:objective}
+\end{equation*}
+by $\theta^+$ we denote the original LLM parameters comprising the embeddings of the planning tokens.
+From the equation above, we can see that the LLM will be trained to first generate the high-level planning token for each reasoning step, and then generate the detailed reasoning step. This can help LLMs to generate more consistent and controlled reasoning chains.
+
+\subsection{Planning Tokens Inference}
+\label{section:inferring_planning_token}
+
+We consider three different ways of inferring the planning variable from the given CoT training data: \textbf{Arithmetic}, \textbf{K-Means}, and \textbf{SQ-VAE}. In practice, this inference step corresponds to assigning the instantiated planing tokens to the reasoning steps prior to fine-tuning the LM and learning the embeddings of the planing tokens.
+
+\paragraph{Arithmetic} For math word problems, it is natural to consider the basic arithmetic operation contained in each reasoning step $r^i$ as the plan token $t^i$ similar to ~\citet{Zhang2023,qin-eisner-2021-learning}. This yields four planning tokens ($\texttt{+,-},\times,\div$), which can be easily extracted from each $r^i$. 
+If more than one operator is found, then we use as many planning tokens as the number of operations found,~e.g. $\texttt{<+><*>}$.
+
+This approach has several drawbacks. First, some operations, such as doubling a quantity, can be implemented with more than one operator (e.g. $\texttt{+}$ and $\times$). Thus, this arithmetic partitioning can fail to capture the similarity between these reasoning steps. Second, for some more complex datasets such as MATH, where the reasoning goes beyond basic operators, such heuristics might not be simple to design if not provided by the dataset. Finally and most importantly, such a heuristic does not apply to non-math datasets like multihop QA datasets.
+To relax these shortcomings, we turn to inference planning tokens from the embeddings of CoT steps.
+
+We first gather reasoning steps $r^i$ for all examples in our dataset, then apply an inference algorithm on the representations $\phi(r^i), \forall r^i \in \mathcal{D}$. We obtain $\phi(r^i)$ by using an LLM to encode the whole text sequence of an example $(x,y)$, and then averaging the last hidden layer outputs of the corresponding tokens in $r^i$. In this way, we aggregate both the question and previous steps' information in the contextualized representation $\phi(r^i)$. 
+
+\paragraph{K-Means} We run an off-the-shelf K-Means implementations on the set of representations $\phi(r^i)$ for all reasoning steps in the dataset $\mathcal{D}$. Each planning variable $t^i$ is then assigned the index of the centroid closest to $r^i$. 
+
+\paragraph{SQ-VAE}
+In this approach, our aim is to learn a non-linear transformation of each representation $\phi(r^i)$ that better captures the meaningful directions of variation of the representations for the dataset $\mathcal{D}$ under consideration. Variational Autoencoders (VAEs)~\citep{Kingma2014} offer a probabilistic approach to learning such non-linear latent representations of data. In their original formulations, VAEs learn a Gaussian-distributed latent space of representations. To induce a discrete structure in the latent space, we follow \cite{miao2017discovering}, and use a ``Gaussian-softmax'' parameterization, which soft-quantizes the latent representations before reconstructing the input data. In particular, our VAE maximizes the following objective:
+\begin{equation*}
+\begin{split}
+\mathcal{L}(\emph{enc}, \emph{dec}, \Phi) = \mathbb{E}_{\emph{enc}(z^i|\phi(r^i))}&[||\emph{dec}(\phi(r^i)|\bar z) - \phi(r^i)||_2] - \text{KL}(\emph{enc}(z^i|\phi(r^i)),\,\mathcal{N}(0, I)), \\ 
+& \bar z = \Phi q,\;\; q = \emph{softmax}(z^i)
+\end{split}
+\end{equation*}
+where $\emph{enc}$ and $\emph{dec}$ are the encoder and the decoder neural networks that transform the steps representation into the non-linear manifold and back into the original representation space respectively (the encoder parameterizes mean and log-variance of a Gaussian distribution); $q$ is the soft-quantization of the Gaussian-distributed representation $z^i$, which corresponds to the distribution over clusters. $\Phi$ is a learnable matrix with $P - 1$ rows (the last value is reserved for the answer planning variable) representing the cluster centroids. Therefore the model tries to reconstruct the input representation given a soft-combination of cluster centroids.
+With this model, after training, we obtain the assignment for the planning variables as $t^i = \text{arg}\,\text{max} \; \emph{softmax}(\emph{enc}(\phi(r^i)))$, where $\emph{enc}(\phi(r^i))$ denotes the mean of the Gaussian distribution parameterized by $\emph{enc}$.
+\subsection{Planning Tokens Parametrization}
+\label{sec:planning_tokens_parameterization}
+Each planning variable may be verbalized by one or more planning tokens. Moreover, we discussed two orthogonal intuitive effects that might be achieved by augmenting the dataset with planning tokens. The first is to augment the computational capacity of the model by providing additional ``scratch'' space to predict the next reasoning step; the second is the specialization induced by information-bearing planning tokens. To be able to disentangle both effects in our model, we introduce two hyper-parameters in our approach: \emph{n\_prefix} and \emph{n\_special}. Each planning variable can be verbalized using a variable number of both generic \emph{prefix} planning tokens and \emph{special} planning tokens. A planning token annotated example with \emph{n\_prefix} = \emph{n\_special} = 3 is shown below:
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{img/example.png}
+    \label{fig:example}
+\end{figure}
+
+Here \texttt{<kmeans1\_0>}, \texttt{<kmeans1\_1>}, and \texttt{<kmeans1\_2>} are the three planning tokens induced by the first K-Means cluster.
+\begin{table*}[tb]
+    \centering
+    \small
+    \begin{tabular}{ccccccccc}
+    \toprule
+    Model & Method & \#clusters & \#trainable & GSM8K & MATH & AQUA & S-QA & Avg \\
+    \midrule
+    Phi 1.5 & Full-FT & 0 & 100\% & 12.5 & 1.3 & 27.2 & - & 13.5\\
+    (1.3B) & + General & 1 & 100\% & 15.4 & 2.0 & 35.4 & - & 17.6\\
+    & + \textbf{Arithmetic} & 4 & 100\% & 15.0 & 2.3 & 33.1 & - & 16.8\\
+    & + \textbf{K-Means} & 5 & 100\% & 14.5 & 2.7 & \textbf{36.5} & - & 17.7\\
+    & + \textbf{SQ-VAE} & 5 & 100\% & \textbf{15.8} & \textbf{3.3} & 34.3 & - & \textbf{17.8}\\
+    \midrule
+    Llama2 & LoRA & 0 & 0.343\% & 38.2 & 6.5 & 36.6 & 58.4 & 34.9\\
+    (7B) & + Pause & 1 & 0.344\% & 37.2 & 6.7 & 36.2 & 58.0 & 34.5\\
+    & + General & 1 & 0.344\% & 38.5 & 6.7 & 37.8 & 59.1 & 35.5\\
+    & + \textbf{Arithmetic} & 4 & 0.344\% & 39.5 & 5.6 & 38.2 & - & -\\
+    & + \textbf{K-Means} & 5 & 0.344\% & 39.1 & 6.7 & 40.5 & 62.2 & 37.1 \\
+    & + \textbf{SQ-VAE} & 5 & 0.344\% & \textbf{40.0} & \textbf{7.0} & \textbf{41.3} & \textbf{62.8} & \textbf{37.8} \\
+    \midrule
+    Llama2 & LoRA & 0 & 0.279\% & 44.6 & 7.2 & 41.3 & 69.5 & 40.7\\
+    (13B) & + General & 1 & 0.280\% & 47.9 & 7.9 & 42.5 & 70.3 & 42.2\\
+    & + \textbf{Arithmetic} & 4 & 0.280\% & 41.9 & 4.6 & 35.8 & - & -\\
+    & + \textbf{K-Means} & 5 & 0.280\% & 49.6 & 8.4 & \textbf{44.1} & 71.5 & 43.4\\
+    & + \textbf{SQ-VAE} & 5 & 0.280\% & \textbf{50.6} & \textbf{8.5} & 43.9 & \textbf{72.4} & \textbf{43.9}\\
+    \bottomrule
+    \end{tabular}
+    \caption{Testing accuracy of fine-tuned language models on different math word datasets. We set the number of planning tokens (\emph{n\_prefix+n\_special}) to 6.}
+    \label{tab:main}
+\end{table*}
+
+
+
+\section{Experiments}
+
+
+
+\textbf{Datasets} We conduct experiments on four datasets. The Grade School Math dataset (\textbf{GSM8K})~\citep{cobbe2021training} contains 8.5K examples of linguistically diverse grade school math world problems. The \textbf{MATH} dataset~\citep{DBLP:journals/corr/abs-2103-03874} is a collection of 12.5K challenging competition mathematics problems formatted in latex notation. %Examples have a level of difficulty, as well as a label identifying to which mathematical discipline they belong. In our experiments, we do not leverage this additional information.
+The \textbf{AQUA}-RAT dataset~\citep{ling-etal-2017-program} contains 100K samples of mathematical problems, along with sequences of human-readable mathematical expressions in natural language. 
+\textbf{StrategyQA} contains 3K multi-hop questions annotated with decomposed single-hop questions, which we used as the Chain-of-thought (CoT) path of the question.
+
+\textbf{Base LLMs} Our empirical analysis uses several decoder-only architectures of varying sizes. We use the 7B and 13B variants of Llama2 \citep{touvron2023llama2}, both trained over 2 trillion tokens from publicly accessible data sources. We also experiment with Phi-1.5 \citep{gunasekar2023textbooks}, a 1.3B parameter model trained on a mixture of textbook-quality code data, and additional synthetically generated textbook and exercise data. 
+
+\textbf{Baselines} %We compare our method to several baselines. 
+First, we compare against the vanilla baselines of full-fine-tuning (\textbf{Full-FT}) for Phi-1.5 and \textbf{LoRA} fine-tuning for Llama-2. Then, we compare to a baseline that combines plain soft token tuning (\textbf{General}) with the base fine-tuning method (\textbf{Full-FT}/\textbf{LoRA}). For this baseline, we prepend the same prefix tokens to each CoT step. i.e. $P = 1$. 
+
+Note that the \textbf{General} baseline can be viewed as prompt-tuning \citep{lester-etal-2021-power} + the base fine-tuning method, when the prefix tokens are only prepended to the first CoT step. To make prompt-tuning more comparable to our planning token methods, we enhance the original prompt-tuning by also prepending prefix tokens to other CoT steps.
+
+We also tried the prompt-tuning \citep{lester-etal-2021-power} and prefix-tuning \citep{li-liang-2021-prefix} only parameter efficient tuning baseline. We found that they are not suitable for complex CoT reasoning tasks in our setting, as their capacity is limited when using a reasonable number (similar to our method) of tunable tokens. The inference time and memory complexity become unreasonable when we try to scale the trainable parameters to be similar to LoRA (3k tunable tokens). 
+
+\textbf{Our Methods} Our methods are denoted with the three different planning types: \textbf{Arithmetic}, \textbf{K-Means} and \textbf{SQ-VAE}. 
+
+\begin{table}[tb]
+    \small
+    \begin{subtable}
+        \centering
+        \small
+        \begin{tabular}{cccccc}
+        \toprule
+        Plan Type & \multicolumn{5}{c}{Number of Clusters $P$} \\
+        & 1 & 3 & 5 & 7 & 10 \\
+        \midrule
+        General & 38.5 & - & - & - & -\\
+        K-Means & - & 37.9 & 39.1 & 39.9 & 36.7\\
+        SQ-VAE & - & 39.6 & 40.0 & 39.4 & 38.9 \\
+        \bottomrule
+        \end{tabular}
+    \end{subtable}
+    \hfill
+    \begin{subtable}
+        \centering
+        \small
+        \begin{tabular}{cccc}
+        \toprule
+        Plan Type & \multicolumn{3}{c}{Number of Plan Tokens} \\
+        & 2 & 6 & 10 \\
+        \midrule
+        General & 37.9 & 38.5 & 38.3 \\
+        Arithmetic & 39.5 & 38.9 & 38.5\\
+        K-Means & 38.9 & 39.1 & 38.1 \\
+        SQ-VAE & 40.0 & 38.8 & 38.2 \\
+        \bottomrule
+        \end{tabular}
+     \end{subtable}
+     \caption{Impact of varying the number of clusters (left) and varying the number of planning tokens (right) (\emph{n\_prefix+n\_special}). We set \emph{n\_prefix} = \emph{n\_special}. For general, we match computation by adding prefix tokens. }
+     \label{tab:ablation}
+\end{table}
+
+\subsection{Results}
+\label{sec:results}
+
+We present our main results in Table \ref{tab:main}. Generally, we observe that for all three datasets considered and all the model sizes, the best-performing approach leverages planning tokens. We note that, across scales, \textbf{Full-FT + General} and \textbf{LoRA + General} improves over vanilla fine-tuning (\textbf{Full-FT} or \textbf{LoRA}), echoing our understanding from \citet{chi2023transformer} and \citet{feng2023towards} that adding additional tokens before each reasoning step increase the compute capacity of the LM and results in better performance.
+For the three datasets, \textbf{Arithmetic} does not consistently outperform \textbf{General} pointing to the fact that hand-designed heuristics might not be optimal and the gain observed over \textbf{Full-FT}/\textbf{LoRA} may due to additional allowed computation space. 
+However, the other two embedding-based planning type inference methods, \textbf{K-Means} and \textbf{SQ-VAE}, consistently outperform both \textbf{General} and \textbf{Arithmetic}, pointing to the importance of using machine-learned planning tokens specialization. Over the 7B version of Llama2, all methods with planning tokens provide consistent gains over the baselines of up to 1.7 points, a relative increase of 6\%. Our results over the Llama2 13B tell a similar story, where again the best-performing method across all datasets uses planning tokens. We show a 1.5 gain in average accuracy (4.5 \% relative gain). Among these two approaches, SQ-VAE seems to be a more reliable approach, as is it always the best-performing method on average. This can be understood as the non-linear latent inference method works slightly better than the linear one. More expressive latent inference methods might be needed to obtain a larger performance improvement.
+
+\paragraph{Ablation}
+We show ablation studies with respect to the number of clusters $P$ and the number of planning tokens used in total. A larger $P$ means we classify reasoning steps into more fine-grained planning types. Note that $P=1$ means we always use the same planning tokens for all steps which is the same as the \textbf{General} baseline. From \cref{tab:ablation} (left), We observe that the performance of both \textbf{K-Means} and \textbf{SQ-VAE} first goes up and then goes down when the number of clusters increases. This likely reflects that our planning token inference models are not able to produce too fine-grained reasoning type. From \cref{tab:ablation} (right), we observe that it is not necessary to assign too many tokens to a planning type. We suspect that too many planning tokens will result in a longer sequence which negatively affects the language model's reasoning ability. 
+
+\subsection{Analysis}
+\label{sec:analysis}
+
+\textbf{Errors by Reasoning Length} In Figure~\ref{fig:len}, we show the accuracy by the complexity of the test example as measured by reasoning length on AQUA and GSM8K. For the two datasets, the introduction of planning tokens improves long reasoning performance, thus hinting that the planning tokens provide better control over long reasoning chains. For GSM8K, planning tokens seem to underperform the baseline for short reasoning chains. While both \textbf{Arithmetic} and \textbf{SQ-VAE} improve on long reasonings, \textbf{SQ-VAE} improves more on average.
+In future work, we can assign position-aware planning tokens for different steps, to enhance the long reasoning improvement.
+
+\textbf{Error Taxonomy}
+After inspecting the generated chain-of-thoughts solutions from all three datasets, we propose to classify the errors into the following five categories: 
+\begin{itemize}[left=0pt,itemsep=1pt,topsep=1pt]
+    \item \textbf{Misunderstanding of question}: generated solution does not answer the given question.
+    \item \textbf{Computation errors}: errors in evaluating equations.
+    \item \textbf{Inaccurate extraction of question information}: inaccurate references to the information provided in the question.
+    \item \textbf{Wrong application of math knowledge}: equations, concepts, or theorems used in the generated solution are not suitable for the question.
+    \item \textbf{Wrong logic/unreasonable step}: generation does not follow common logic.
+\end{itemize}
+
+\begin{figure*}[tb]
+     \centering
+     \small
+     \begin{subfigure}
+         \centering
+         \includegraphics[width=0.4\linewidth]{img/gsm8k.pdf}
+     \end{subfigure}
+     \begin{subfigure}
+         \centering
+         \includegraphics[width=0.4\linewidth]{img/aqua.pdf}
+     \end{subfigure}
+\caption{Accuracy on GSM8K (\textbf{left}) and Aqua (\textbf{right}) on test examples by their number of ground-truth reasoning steps. SQ-VAE consistently increases performance for test examples that require more steps of reasoning to be solved.\label{fig:len}}
+\end{figure*}
+
+\begin{figure*}[tb]
+    \centering
+    \small
+    \includegraphics[width=\textwidth]{img/error.png}
+    \caption{Examples of different error types generated by 7B Llama 2. The frequency of each error type generated by the \textbf{LoRA} baseline and our LoRA + \textbf{SQ-VAE} planning method on test sets are predicted by GPT4 and then manually verified.}
+    \label{fig:error_types}
+\end{figure*}
+We prompt GPT4 to obtain the error type of each generated example, and then manually verify whether the predicted error type matches the explanation. In \cref{fig:error_types}, the \textbf{SQ-VAE} error frequencies significantly lower than the \textbf{N/A} baseline are in bold font. As we can see, across three datasets, our method consistently improves on the computation errors and the inaccurate extraction of question information. The lower computation errors indicate that our inferred planning tokens either increase the computation capacity of the model or contain compute-related information. Our method being able to make more faithful reference to the information in the questions indicates planning tokens are helpful for long-range control of generations, which echoes the observation and assumptions in the previous sections. The differences in other error categories are either insignificant or inconsistent over datasets. Note that GSM8K and AQUA have a similar distribution over the error types, while MATH has significantly more misunderstanding of questions and wrong application of math knowledge. This is understandable as MATH is significantly more difficult as it is from American Mathematics Competitions (AMC). These questions are less obvious to approach and require applications of non-trivial math theorems.
+
+\textbf{Attention on planning tokens} 
+To better understand how LLMs make use of the planning tokens, we inspect the attention by first computing an overall average of the attention weights assigned to the planning tokens versus the normal tokens. As shown in \cref{tab:attention}, we found that \textbf{K-Means} and \textbf{SQ-VAE} planning tokens are assigned much higher attention weights than \textbf{General} and \textbf{Arithmetic} planning tokens, when comparing to normal tokens. This implies that the inferred planning tokens might be more helpful for the generation, which is consistent with the main results performance in \cref{tab:main}.
+
+While the raw attention weight itself might be a debatable way of understanding the token importance, the attention pattern still serves as a valid way of understanding how the Transformer works. Similar to \cite{olsson2022context}, we identify attention heads that have strong patterns corresponding to the planning tokens as shown in \cref{fig:attention}, and deduct how language models make use of the planning tokens from the patterns.
+
+More specifically, we compute the average attention weight difference between planning tokens and normal tokens from different attention heads, and visualize the attention heads with the largest difference, as they are likely to strongly correspond to the utilization of planning tokens. We visualize two such attention heads on a CoT generated with \textbf{SQ-VAE} planning tokens in \cref{fig:attention}. The attention head shown on the left strongly attend to the specialized planning tokens throughout the CoT sequence. The attention head shown on the right shows that the general planning tokens are only attended by themselves, which might imply that the general planning tokens only serve as indicators of the beginning of a CoT step, instead of carrying information to the whole sequence.
+
+\begin{table}[tb]
+    \centering
+    \small
+    \begin{tabular}{ccccc}
+        \toprule
+         & General & Arithmetic & K-means & SQ-VAE\\
+        \hline
+        Normal token & 0.0045 & 0.0039 & 0.0039 & 0.0043\\
+        Planning token & 0.0009 & 0.0012 & \textbf{0.0071} & \textbf{0.0070}\\
+        \bottomrule
+    \end{tabular}
+    \caption{Averaged attention on planning tokens v.s. normal tokens across all layers, heads, and previous tokens on the test set of GSM8K, with Llama 2 (7B) model.}
+    \label{tab:attention}
+\end{table}
+
+\begin{figure}
+    \centering
+    \small
+    \includegraphics[width=\textwidth]{img/attention.png}
+    \caption{Two attention heads activated by planning tokens, with a test example generated by Llama 2 (7B) LoRA fine-tuned with \textbf{SQ-VAE} planning tokens. Question tokens are omitted in the attention heat map but included in attention computation. A lighter color means a larger attention weight. Best viewed zoomed in.}
+    \label{fig:attention}
+\end{figure}
+
+\textbf{Distinguishability of the Induced Clusterings} We investigate whether \textbf{SQ-VAE} learns better planning types than \textbf{K-Means} via a probing task \citep{Alain2017UnderstandingIL}.
+Concretely, we collect a dataset consisting of CoT steps and their planning token labels obtained from \textbf{K-Means} and \textbf{SQ-VAE}.
+We train a simple model (either a logistic regression or a shallow neural network) to learn the mapping from a sentence to its planning token label.
+We hypothesize that the better planning type should facilitate easier learning dynamics for simple models because the class boundaries should be easily accessible from the data. 
+
+\begin{wrapfigure}{l}{0.4\textwidth}
+\small
+\includegraphics[width=0.9\linewidth]{img/probe_sep27_white_acc.pdf} 
+\caption{Testing accuracy of the probes on the sentence classification task.}
+\label{fig:probing}
+\end{wrapfigure}
+
+As a case study, we study the 5-cluster setting on the GSM8K dataset.
+Given a planning type, we randomly sample 2000 sentences from each of the five categories.
+We leverage a pre-trained text encoder\footnote{We use \textbf{mpnet-base} \cite{song2020mpnet}, a default model in Sentence-Transformers \cite{reimers2019sentencebert}.} to convert sentences into vector representations.
+Taking the text encodings as input, the probe network (logistic regression, 2-layer MLP, or 6-layer MLP) performs a 5-way classification.
+
+We show test accuracy curves in Figure~\ref{fig:probing}. 
+We observe a clear gap between \textbf{SQ-VAE} (solid lines) and \textbf{K-Means} (dashed lines) in the curves. 
+This reflects our main results reported above, where \textbf{SQ-VAE} produces a better overall downstream task performance. 
+
+
+\section{Related Work}
+
+\label{section:related} 
+
+\textbf{Trainable new tokens} The idea of adding new tokens with trainable embeddings on the input side of a generative LM has been proposed before \citep{li-liang-2021-prefix,lester-etal-2021-power}. The most common way of adding new tokens is to insert them at a fix position in the prompt given to LMs. By only training the embeddings of these new tokens, these methods act as parameter-efficient fine-tuning techniques to adapt LMs to specific task \citep{qin-eisner-2021-learning,li-liang-2021-prefix,lester-etal-2021-power}. Our planning tokens are not intended to serve as a parameter-efficient fine-tuning method. Instead, our method creates a small parameter overhead to the base fine-tuning method and serves as guidance to LM's reasoning process. \citet{qin-eisner-2021-learning} uses a mixture of soft tokens to model a relation, which tries to specialize within the relation extraction task. However, we do not explicitly compute the mixture probability across all token types as in \citet{qin-eisner-2021-learning}, which can be untractable for CoT generation. Instead, at each step, we let the LM choose one planning token type.
+
+Another line of work prepend newly added tokens as memory to transformers \cite{burtsev2020memory,bulatov2022recurrent,darcet2023vision}, which echos our understanding that increasing sequence length can increase the capacity of the Transformer. \citet{goyal2023think} proposes to append a new pause token after the prompt so that the LM can have more computation budget before starting the actual generation. This shares the same idea with the token as a memory line of work. On the contrary, \citet{mu2023learning} proposes to append a new gist token after the prompt so that the following generation will only attend to this gist token for compression purposes.
+Our \textbf{General} baseline can be viewed as an enhanced version of \citet{goyal2023think}. Instead of only adding new tokens after the prompt, we also add new tokens before each CoT step, which further increases the computation capacity. To the best of our knowledge, no existing work proposes to add new tokens that can be generated by the LMs at inference time. The learned specialization of planning tokens within one task, instead of assigning a token for each specific task, is also novel.
+
+\textbf{Math Reasoning} Recently, LM-based math reasoning models have shown to be highly effective \citep{azerbayev2023llemma, yang2023leandojo}. Recent studies on complex math reasoning problems usually adopt a CoT-based approach~\citep {Zhang2023,li2023making} that fine-tunes/prompts LLMs to generate reasoning steps before giving the final answer. Most fine-tuning works are highly dependent on the augmented CoT solutions generated by a strong pre-trained LM \citep{yue2023mammoth, Yuan2023, mukherjee2023orca, luo2023wizardmath}. Our planning token method can 
+fundamentally improve the fine-tuning performance regardless of the present of augmented CoT data. A possible extension of our work is to combine our method with the CoT data augmentation method to boost the performance even more. Our method is especially related to \citet{Zhang2023}. They perform CoT fine-tuning of GPT2 by first predicting the math operation of each reasoning step at generation time, which is less efficient than our end-to-end method.
+
+
+
+\section{Conclusion}
+
+We proposed using planning tokens to gain better control over reasoning with LLMs. Our planning tokens increase the performance over baselines at a minimal parameter cost. We studied our method's efficacy across three different base models and multiple datasets.
+First, we see a straightforward extension of our framework which could use multiple planning variables at every reasoning step, each planning variable is responsible for deliberating in a different ``view'' of that particular reasoning step \citep{wang2023unleashing}.
+Second, future work should go beyond our heuristic inference procedures and learn the inference network, such as to maximize the marginal log-likelihood of the observed data: we could then interpret the overall model as a Sequential VAE~\citep{goyal2017zforcing}.
+Finally, it is meaningful to continue the exploration towards interpretability and explainability of the planning tokens \citep{khashabi2021prompt}.
+We believe such research could shed light on prompt searching/optimization studies performed both by humans \citep{zamfirescu2023johnny} and machines \citep{shin2020autoprompt,sordoni2023deep}. 
+
+
+
+\section{Ethics Statement}
+
+We do not foresee a significant societal impact resulting from our proposed method. 
+In this work, we propose to equip LLMs with planning tokens to obtain better reasoning capabilities. 
+We find that the planning tokens discovered by embedding-based methods (less interpretable, e.g., K-Means and SQ-VAE) consistently outperform those from heuristics-based methods (more interpretable, e.g., Arithmetic). Therefore, an obvious direction for future work is to improve the interpretability of such methods. 
+In addition, while we aim to improve an LLM's reasoning ability, it is possible that the training of the planning tokens could be affected by misinformation and hallucinations introduced by the base LLM. Therefore, we believe that caution needs to be exercised if one extends our work to a setting where humans are directly involved, e.g., in an educational setting.  
+
+
+
+
+

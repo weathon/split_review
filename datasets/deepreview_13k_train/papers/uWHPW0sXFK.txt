@@ -1,0 +1,430 @@
+\title{PINF: Continuous Normalizing Flows for Physics-Constrained Deep Learning}
+
+\begin{abstract}
+The normalization constraint on probability density poses a significant challenge for solving the Fokker-Planck equation. Normalizing Flow, an invertible generative model leverages the change of variables formula to ensure probability density conservation and enable the learning of complex data distributions. In this paper, we introduce Physics-Informed Normalizing Flows (PINF), a novel extension of continuous normalizing flows, incorporating diffusion through the method of characteristics. Our method, which is mesh-free and causality-free, can efficiently solve high dimensional time-dependent and steady-state Fokker-Planck equations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The Fokker-Planck (FP) equation~\citep{risken1996fokker} is a well-known partial differential equation that describes the evolution of a stochastic system's probability density function (PDF) over time. Due to the high-dimensional variable and unbounded domain, traditional numerical methods, such as the finite difference methods (FDM)~\citep{kumar2006solution}, the finite element methods (FEM)~\citep{deng2009finite}, and the path integral methods~\citep{wehner1983numerical} prove to be computationally daunting in tackling the FP equations. By contrast, deep learning algorithms~\citep{sirignano2018dgm, raissi2019physics, weinan2018deep}, without a specific network structure, violate the normalization constraint on PDF, resulting in reduced accuracy and prevalent errors.
+
+Recently, researchers have recognized the potential of flow-based generative models in learning complicated probability distributions~\citep{kingma2018glow, ho2019flow++, albergo2019flow}, alongside the connection to optimal transport (OT) theory~\citep{finlay2020train, yang2020potential, zhang2018monge}. \citet{tang2022adaptive} employed normalizing flows as 
+alternative solutions and proposed the KRnet for solving the steady-state Fokker-Planck (SFP) equations. However, the discrete normalizing flow remains circumscribed to model a single target distribution at a time, typically the final or steady-state distribution, thus constraining its utility in the time-dependent Fokker-Planck (TFP) equations. Consequently, \citet{feng2022solving} introduced the temporal normalizing flow (TNF) to estimate time-dependent distributions for TFP equations, albeit without encapsulating the inherent physical laws of FP equations in structure.
+
+More naturally, we generalize the continuous normalizing flow (CNF)~\citep{chen2018neural} with diffusion and propose a novel intelligent architecture: Physics-Informed Normalizing Flows (PINF) for solving FP equations. We encode the physical constraints into ordinary differential equations (ODEs) using the method of characteristics and train the model in a self-supervised way. Numerical experiments demonstrate both accuracy and efficiency in solving high-dimensional TFP and SFP equations, even without the need for meticulous hyperparameter tuning.
+
+
+
+\section{Problem definition}
+
+Here we first give a brief introduction to the FP equation. Consider the state variable $\bX_t \in \mathbb{R}^{d}$ described by the stochastic differential equation (SDE)~\citep{oksendal2013stochastic}:
+\begin{equation} \label{sde}
+d\bX_t = \bmu(\bX_t,t) dt + \bsigma(\bX_t,t) d \mW_t,
+\end{equation}
+where the drift coefficient $\bmu(\bX_t,t) \in \mathbb{R}^{d}$ is a vector field, 
+$\bsigma(\bX_t, t) \in \mathbb{R}^{d \times M}$ is a matrix-valued function and $\mW_t$ is an $M$-dimensional standard Wiener process. The probability density function $p(\vx,t)$ of $\bX_t$ satisfies the following Fokker-Planck equation:
+\begin{equation} \label{fp}
+\begin{aligned}
+\frac{\partial p(\vx,t)}{\partial t} = - \nabla \cdot \left [p(\vx,t) \bmu(\vx,t) \right ] &+ \nabla \cdot [\nabla \cdot (p(\vx,t) \mD(\vx, t))], \qquad \forall (\vx, t) \in \R^d \times \R^{+}, \\
+p(\vx, 0) &= p_0(\vx) , \\
+p(\vx) \rightarrow 0 \quad &\text{as} \quad || \vx || \rightarrow \infty,
+\end{aligned}
+\end{equation}
+where $(\vx,t) \in \mathbb{R}^{d+1}$ denote the spatial-temporal variables, $\mD(\vx,t) = \frac{1}{2} \bsigma(\vx,t) \bsigma(\vx,t)^T$ is the diffusion matrix, $p_0(\vx)$ is the initial PDF of $\bX_t$, $p(\vx,t)$ is defined with the unbounded boundary condition, $\nabla$ is an operator for spatial variables and $|| \vx ||$ indicates the $\ell_2$ norm of $\vx$. 
+
+The stationary solution of Eq.(\ref{fp}) means the invariant measure independent of time, satisfying
+\begin{equation} \label{sfp}
+- \nabla \cdot \left [p(\vx,t) \bmu(\vx,t) \right ] + \nabla \cdot [\nabla \cdot (p(\vx,t) \mD(\vx, t))] = 0, \qquad \forall (\vx, t) \in \R^d \times \R^{+}
+\end{equation}
+More specifically, i.e.,
+\begin{equation} \label{sfp2}
+-\sum_{i=1}^{d}\frac{\partial}{\partial x_{i}}\left[p({\vx},t)\mu_{i}({\vx},t)\right]+\sum_{i=1}^{d}\sum_{j=1}^{d}\frac{\partial^{2}}{\partial x_{i}\,\partial x_{j}}\left[p({\vx},t)D_{i j}({\vx},t)\right] = 0, \qquad \forall (\vx, t) \in \R^d \times \R^{+}
+\end{equation}
+For the physical background of the FP equation, there are some extra constraints on its solution $p(\vx,t)$:
+\begin{equation} \label{norm}
+\begin{aligned}
+\int_{\R^d } p(\vx,t) d \vx = 1, &\qquad \forall t \in \R^{+} \\
+p(\vx,t) \geq 0, &\qquad \forall (\vx, t) \in \R^d \times \R^{+}, 
+\end{aligned}
+\end{equation}
+which are called normalization and nonnegativity constraints.
+
+
+
+\section{Related work}
+
+To better describe our algorithm and its connections with flow-based models, it is worthwhile to review prior research on normalizing flows.
+\subsection{Normalizing flows and change of variables}\label{section_nf}
+Given a latent variable $\vz \in \sZ \subset \mathbb{R}^{d}$ drawn from a simple prior probability distribution $p_Z$. When normalizing flows transform $\vz$ into $\vx = f(\vz) \in \sX \subset \mathbb{R}^{d}$ using a bijection $f: \sZ \rightarrow \sX$, the probability density function of $\vx$ follows the change of variables formula:
+\begin{equation}\label{eq_nf}
+    p_Z(\vz) = p_X(\vx) \left|\det \left( \frac{\partial f(\vz)}{\partial \vz^T} \right)\right|,
+\end{equation}
+where $\frac{\partial f(\vz)}{\partial \vz^T}$ is the Jacobian of $f$ at $\vz$.
+
+To describe a complex target distribution, a sequence of invertible and learnable mappings represented as $f_\theta = f_K \circ \cdots \circ f_2 \circ f_1$ are constructed and $\theta$ denotes the trainable parameter of the neural network. Let $\vz_1 = \vz, \vz_{k+1} = f_k(\vz_{k}) (k=1,\cdots,K)$, then the $\log$ density of $\vx = f_\theta(\vz)$ is computed by
+\begin{equation}\label{eq_nf2}
+    \log p_X(\vx) = \log p_Z(\vz) - \sum_{k=1}^{K} \log \left|\det \left( \frac{\partial f_{k}(\vz_k)}{\partial \vz_k^T} \right)\right|.
+\end{equation}
+There are some simple optional structures, such as planar flows and radial flows~\citep{rezende2015variational}. A key challenge is to increase the representative power of normalizing flows while simplifying the computation of the associated Jacobian determinant. NICE~\citep{dinh2015nice} employed affine coupling layers, duplicating a portion of the input while transforming the remaining part, thereby maintaining reversibility. Real NVP~\citep{dinh2016density} introduced scale and translation parameters, further improving the performance of the flow. Additionally, the Jacobian of Real NVP transformations has a specific lower triangular structure, ensuring efficient computations with linear time complexity $\mathcal{O}(d)$ for the logdet-Jacobian term. 
+
+It is important to note that the resulting target distribution adheres to the probability normalization constraint, as guaranteed by the change of variables formula.
+\begin{equation}\label{eq_nc}
+    1=\int_{\Omega_{\sZ}}p_{Z}(\vz)d \vz=\int p_X(\vx) \left|\det \left( \frac{\partial f_\theta(\vz)}{\partial \vz^T} \right)\right|d \vz=\int_{\Omega_{\sX}}p_{X}(\vx)d \vx
+\end{equation}
+
+\subsection{Continuous normalizing flows and instantaneous change of variables}\label{section_cnf}
+\citet{chen2018neural} proposed the Neural ODE framework and derived the finite normalizing flows to a continuous limit scheme, effectively expressing the invertible mappings using ODEs. The latent variable $\vz$ and its log probability change according to the instantaneous change of variables theorem~\citep{villani2003topics}:
+\begin{equation}\label{eq_cnf}
+\left\{\begin{array}{l l}
+    {\displaystyle{\frac{d \vz(t)}{d t}}=f_\theta(\vz,t)}\\[8pt]
+    {\displaystyle{\frac{d \log p\left(\vz(t), t\right)}{d t}}=-tr\left({\frac{\partial f_\theta}{\partial z}}\right) = -\nabla \cdot f_\theta}
+\end{array}\right. 
+\end{equation}
+By leveraging the adjoint sensitivity method to resolve augmented ODEs in reverse time, CNF computes gradients with respect to $\theta$ and is trained directly using maximum likelihood. An unexpected side-benefit is that the likelihood can be calculated using relatively cheap trace operations instead of the Jacobian determinant. Moreover, the entire transformation is automatically bijective when Eq.(\ref{eq_cnf}) has a unique solution. Therefore, the mapping $f_\theta$ does not need to be bijective.
+
+\subsection{Relationship between continuous normalizing flows and Fokker-Planck equations}
+Continuous normalizing flows can be related to the special case of the FP equation with zero diffusion, known as the Liouville equation. Let $\vz(t) \in \mathbb{R}^{d}$ evolve through time according to the degenerate Eq.(\ref{sde}): $\frac{d \vz(t)}{d t} = f(\vz(t), t)$. As shown in Eq.(\ref{fp}), the probability density function $p(\vz, t)$ satisfies the FP equation represented as:
+\begin{equation} \label{fp_zero_diffusion}
+    \frac{\partial p(\vz,t)}{\partial t} = - \nabla \cdot \left [p(\vz,t) f(\vz,t) \right ].
+\end{equation}
+To compute the value of $p(\vz, t)$, the characteristics method tracks the trajectory of a particle $\vz(t)$. The total derivative of $p(\vz(t), t)$ is given by 
+\begin{equation} \label{cnf_zero_diffusion}
+    \frac{d p(\vz(t), t)}{d t} = \frac{\partial p(\vz,t)}{\partial t} + \frac{\partial p(\vz,t)}{\partial \vz} \cdot \frac{d \vz}{d t} =- \nabla \cdot \left ( p f \right ) + \nabla p \cdot f = - p (\nabla \cdot f).
+\end{equation}
+By dividing $p$ on both sides, we obtain the same result as Eq.(\ref{eq_cnf}).2 in \citet{chen2018neural} for more details).
+
+
+
+\section{PINF: Physics-Informed Normalizing Flows}
+
+Let us begin by introducing the PINF algorithm for time-dependent FP equations, categorizing them into two scenarios based on whether the diffusion term is zero. Subsequently, we will present the special design of the algorithm for solving the steady-state FP equation.
+
+\subsection{Time-dependent Fokker-Planck equations}
+The TFP equation is essentially an initial value problem (\ref{fp}), where the initial density function is known.
+
+\subsubsection{TFP equation with zero diffusion}
+\textbf{Problem Setup:}
+\begin{equation} \label{eq_tfp_zero}
+\begin{aligned}
+    \frac{\partial p(\vx,t)}{\partial t} &= - \nabla \cdot \left [p(\vx,t) \bmu(\vx,t) \right ] \\
+    p(\vx, 0) &= p_0(\vx)
+\end{aligned}
+\end{equation}
+The objective of solving the TFP equation is to compute the density $p$ at any given point $(\vx', t')$. Following the derivation in Eq.(\ref{cnf_zero_diffusion}), the TFP equation can be reformulated as an initial value problem of ODEs.
+\begin{equation}\label{eq_pinf_zero_diffusion}
+\left\{\begin{array}{l l}
+    {\displaystyle{\frac{d \vx(t)}{d t}}=\bmu(\vx,t)}, \quad \vx(t')=\vx'\\[8pt]
+    {\displaystyle{\frac{d \log p\left(\vx(t), t\right)}{d t}}=- \nabla \cdot \bmu(\vx, t)}
+\end{array}\right. 
+\end{equation}
+Notably, the increment in $\log p$ is independent of its value and solely depends on the start time $t'$, the stop time $t_0=0$, and the value of $\vx$. Therefore, the initial states for $(\vx, \log p)$ can be set as $(\vx', 0)$, and the solution is obtained by using the corresponding output of ODE solvers, yielding $(\vx_0, \Delta \log p)$. The specific algorithm is outlined as follows:
+
+\begin{algorithm}
+\caption{PINF algorithm for TFP equations with zero diffusion}
+\label{alg_TFP_zero_diffusion}
+\begin{algorithmic}
+\Require drift term $\bmu(\vx, t)$, samples $\vx'$, time $t'$, initial PDF $p_0(\vx)$.
+\State \textbf{def \,}$f_{aug}([\vx_t, \log p_t], t)$: \Comment{ODEs dynamics}
+\State \indent \textbf{return} $[\bmu, - \nabla \cdot \bmu]$ \Comment{Concatenate dynamics of state and log-density}
+\State $[\vx_0, \Delta \log p] \leftarrow$ \textnormal{ODESolve}($f_{aug}$, $[\vx', 0]$, $t'$, $0$) 
+\Comment{Calculate $\int_{t'}^{0} f_{aug}([\vx(t), \log p(\vx(t), t)], t)\;dt$}
+\State $\log \hat{p} \leftarrow \log p_0(\vx_0)$ -- $\Delta \log p$ 
+\Comment{Add change in log-density}
+\State $\hat{p}(\vx', t') = e^{\log \hat{p}}$
+\Ensure $\hat{p}(\vx', t')$
+\end{algorithmic}
+\end{algorithm}
+The key distinction between PINF and CNF lies in the fact that the drift $\bmu(\vx, t)$ is known in the TFP equation. In this context, there is no need to train $f_\theta$ from the real data samples and we can simply use ODE solvers once to obtain the outcomes.
+
+\subsubsection{TFP equation with diffusion}
+\textbf{Problem Setup:}
+\begin{equation} \label{eq_tfp_diffusion}
+\begin{aligned}
+    \frac{\partial p(\vx,t)}{\partial t} &= - \nabla \cdot \left [p(\vx,t) \bmu(\vx,t) \right ] + \nabla \cdot [\nabla \cdot (p(\vx,t) \mD(\vx, t))] \\
+    p(\vx, 0) &= p_0(\vx)
+\end{aligned}
+\end{equation}
+We first perform some necessary transformations of the equation.
+\begin{equation} \label{eq_tfp_pinf}
+\begin{aligned}
+    \frac{\partial p(\vx,t)}{\partial t} &= - \nabla \cdot \left (p \bmu \right ) + \nabla \cdot [\nabla \cdot (p \mD)] \\ 
+    &= - \nabla \cdot \left [p \bmu - \nabla \cdot (p \mD) \right ] \\ 
+    &= - \nabla \cdot \left [p \bmu - (\nabla p) \mD - p (\nabla \cdot \mD) \right ] \\ 
+    &= - \nabla \cdot \left [ p (\bmu - (\nabla \log p) \mD - \nabla \cdot \mD) \right ] \\ 
+    &= - \nabla \cdot \left (p \bmu^* \right ) \\
+\end{aligned}
+\end{equation}
+Let us define $\bmu^*(\vx, t) \coloneqq \bmu - (\nabla \log p)\mD - \nabla \cdot \mD$. We force $\vx$ to evolve through time following $\frac{d \vx}{d t} = \bmu^*(\vx, t)$ and get the associated ODEs by Eq.(\ref{cnf_zero_diffusion}).
+\begin{equation}\label{eq_pinf_diffusion}
+\left\{\begin{array}{l l}
+    {\displaystyle{\frac{d \vx(t)}{d t}}=\bmu^*(\vx, t)} \\[8pt]
+    {\displaystyle{\frac{d \log p\left(\vx(t), t\right)}{d t}}=- \nabla \cdot \bmu^*(\vx, t)}
+\end{array}\right. 
+\end{equation}
+In particular, unlike the zero diffusion case, the ODE dynamics depend on the unknown function $\log p$ and its gradient will not be evaluated during the forward calculation. For this reason, we parameterize $\log p(\vx, t)$ as a neural network $\phi_\theta$.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/structure.png}
+    \caption{An illustration of the PINF algorithm for TFP equations (left) and SFP equations (right).}
+    \label{PINF}
+\end{figure}
+
+\textbf{Neural network architecture.} The network structure is inspired by the value function representations used for stochastic optimal control~\citep{li2022neural}, multi-agent optimal control~\citep{onken2021neural}, and high-dimensional optimal control~\citep{onken2022neural}. The network is given by
+\begin{equation}\label{u_net}
+    u(\vs; \theta)=\vw^{\top}\mathcal{N}(\vs;\theta_\mathcal{N})+{\frac{1}{2}}\vs^{\top}(\mA^{\top}\mA)\vs+\vb^{\top}\vs+c,
+\end{equation}
+where $\theta=\left( \vw, \theta_\mathcal{N}, \mA, \vb, c \right)$ are the trainable weights of $u_\theta$. The shapes of those parameters are listed as follows: the inputs $\vs = (\vx, t) \in \mathbb{R}^{d+1}$ corresponding to space–time, $\mathcal{N}(\vs;\theta_\mathcal{N}): \mathbb{R}^{d+1} \rightarrow \mathbb{R}^{m}$, $\vw \in \mathbb{R}^{m}$, $\mA \in \mathbb{R}^{r \times (d+1)}$, $\vb \in \mathbb{R}^{d+1}$, and $c \in \mathbb{R}$. The rank $r=\min (10, d+1)$ is set to limit the number of parameters in $\mA^{\top}\mA$. Here, $\mA$, $\vb$, and $c$ model quadratic potentials, i.e., linear dynamics; $\mathcal{N}$ models nonlinear dynamics.
+
+In our implementation, for $\mathcal{N}$, we use a residual neural network (ResNet)~\citep{he2016deep} with $(L+1)$ layers and obtain $\mathcal{N}(\vs;\theta_\mathcal{N})=\va_L$ as the final step of the forward propagation
+\begin{equation} \label{resnet}
+\begin{aligned}
+    \va_0 &= \sigma (\mK_0 \vs + \vb_0),\\
+    \va_k &= \va_{k-1} + h \sigma (\mK_k \va_{k-1} + \vb_k), \quad (1\leq k \leq L)
+\end{aligned}
+\end{equation}
+where the trainable weights are $\mK_0\in \mathbb{R}^{m\times (d+1)}, \mK_k\in \mathbb{R}^{m\times m}(1\leq k \leq L), \vb_k\in \mathbb{R}^{m}(0\leq k \leq L)$, and $\theta_\mathcal{N}=\{(K_k,b_k)\}_{k=0}^{L}$. We select the step size $h=1/L$ and the element-wise activation function $\sigma (x) = \log (\exp (x) + \exp (-x))$~\citep{onken2021ot}, which is the antiderivative of the hyperbolic tangent, i.e., $\sigma'(x) = \tanh(x)$. It can also be seen as a smoothed absolute value function~\citep{ruthotto2020machine}.
+
+To satisfy the initial value condition $p(\vx, 0)=p_0(\vx)$, the network $\phi_\theta$ is cast as 
+\begin{equation}\label{p_net}
+    \phi_\theta(\vx, t) = \log p_0(\vx) + t u(\vx, t;\theta),
+\end{equation}
+to represent $\log p(\vx, t)$~\citep{lagaris1998artificial}. This structured design can impose hard constraints that are strictly enforced, rather than soft constraints~\citep{wang2021physics}.
+
+\textbf{Self-supervised training method.} Distinct from normalizing flows that minimize the Kullback-Leibler divergence, we employ a self-supervised training method. Our approach eliminates the need for labeled data or real data samples from the target distribution, which are sometimes challenging or costly to acquire. Training data is adaptively generated based on the initial PDF. 
+
+For training $\phi_\theta$, we solve the ODEs~(\ref{eq_pinf_diffusion}) related to the network $\phi_\theta$, obtaining predictions in the form of $\log p_\text{ode}$. Moreover, the network can also output the prediction $\log p_\text{net}$ directly. We calculate the Mean Squared Error (MSE) between $\log p_\text{ode}$ and $\log p_\text{net}$ and use the Adam optimizer~\citep{kingma2014adam}.
+\begin{equation}\label{loss}
+    \mathcal{L}=\frac{1}{N}\sum_{k=1}^{N}\|\log p_\text{ode}(\vx_k, t_k)-\log p_\text{net}(\vx_k, t_k)\|^2
+\end{equation}
+To address issues such as small gradients and optimization difficulties in high-dimensional scenarios, we avoid comparing $p_\text{pred}$ directly in the loss function: $\mathcal{L}=\text{MSE}(p_\text{ode}, p_\text{net})$. Experimental results also demonstrate that applying the logarithm function accelerates the training process.
+
+\textbf{Flexible prediction modes.} With the trained $\phi_\theta$, we provide two flexible prediction modes: numerical solutions solved by ODE solvers and continuous solutions predicted by neural networks. This flexibility enables a trade-off between efficiency and accuracy, maintaining advantages such as memory efficiency, adaptive solvers, and parallel computation~\citep{kang2021algorithms}. When using neural networks for prediction, our approach is mesh-free and causality-free~\citep{nakamura2020causality}, similar to PINNs. Data at different time steps can be computed rapidly and in parallel, allowing for real-time or low-power applications. Alternatively, when using ODE solvers for prediction, we can freely choose from modern ODE solvers for adaptive computation~\citep{runge1895numerische, wanner1996solving}. See Alg.(\ref{alg_TFP_diffusion}) for the complete algorithm.
+
+\begin{algorithm}
+\caption{PINF algorithm for TFP equations with diffusion}
+\label{alg_TFP_diffusion}
+\begin{algorithmic}
+\Require drift term $\bmu(\vx, t)$, diffusion matrix $\mD(\vx, t)$, samples $\vx$, time $t$, initial PDF $p_0(\vx)$, stop time $T$, maximum iteration number $M$, learning rate $\eta$.
+
+\State \textbf{def \,}$f_{aug}([\vx_t, \log p_t], t)$: \Comment{ODEs dynamics}
+\State \indent $\bmu^* \leftarrow \bmu - (\nabla \phi_\theta)\mD - \nabla \cdot \mD$ \Comment{Characteristic curves $\frac{d\vx(t)}{dt}$}
+\State \indent \textbf{return} $[\bmu^*, - \nabla \cdot \bmu^*]$ \Comment{Concatenate dynamics of state and log-density}
+
+\State \textbf{Train $\phi_\theta$:}\\
+\textbf{for} $k=0,\cdots,M$:
+\State \indent Uniformly sample $t_k\in[0, T]$ \Comment{Sample training data}
+\State \indent Sample mini-batch ${\vx_{0}^{k}}\sim p_0(\vx)$
+\State \indent $[\vx^{k}, \log p(\vx^{k}, t_k)] \leftarrow$ \textnormal{ODESolve}($f_{aug}$, $[\vx_{0}^{k}, \log p_0(\vx_{0}^{k})]$, $0$, $t_k$) 
+\State \Comment{Calculate $[\vx_{0}^{k}, \log p_0(\vx_{0}^{k})] + \int_{0}^{t_k} f_{aug}([\vx(t), \log p(\vx(t), t)], t)\;dt$}
+\State \indent ODEs prediction: $\log p_\text{ode} \leftarrow \log p(\vx^{k}, t_k)$ \Comment{Two prediction modes}
+\State \indent $\phi_\theta$ prediction: $\log p_\text{net} \leftarrow \phi_\theta(\vx^{k}, t_k)$ 
+\State \indent Compute the MSE loss: $\mathcal{L}=\text{MSE}(\log p_\text{ode}, \log p_\text{net})$ \Comment{Calculate loss on mini-batch $\vx^{k}$}
+\State \indent Update the parameters $\theta$ using the Adam optimizer with learning rate $\eta$. \Comment{Train $\phi_\theta$ once}
+
+\State \textbf{Predict $\hat{p}$:}
+\State $\phi_\theta$ mode: $\hat{p}_\text{net}(\vx, t)=e^{\phi_\theta(\vx, t)}$
+\State ODEs mode: $[\vx_0, \Delta \log p] \leftarrow$ \textnormal{ODESolve}($f_{aug}$, $[\vx, 0]$, $t$, $0$) 
+\State \indent $\log \hat{p}_\text{ode} \leftarrow \log p_0(\vx_0)$ -- $\Delta \log p$ 
+\Comment{Add change in log-density}
+\State \indent $\hat{p}_\text{ode}(\vx, t) = e^{\log \hat{p}_\text{ode}}$
+\Ensure $\hat{p}_\text{net}(\vx, t), \hat{p}_\text{ode}(\vx, t)$
+\end{algorithmic}
+\end{algorithm}
+\subsection{Steady-state Fokker-Planck equations}
+\textbf{Problem Setup:}
+\begin{equation} \label{eq_sfp_diffusion}
+\begin{aligned}
+    \frac{\partial p(\vx,t)}{\partial t} &= - \nabla \cdot \left [p(\vx,t) \bmu(\vx,t) \right ] + \nabla \cdot [\nabla \cdot (p(\vx,t) \mD(\vx, t))] \\
+    \frac{\partial p(\vx,t)}{\partial t} &= 0
+\end{aligned}
+\end{equation}
+The SFP equation replaces the initial value condition with an equation constraint (\ref{sfp}), ensuring that its solution remains invariant over time. Therefore, the steady-state PDF only depends on spatial variables $\vx$ and we derive another form of our problem:
+\begin{equation} \label{eq_sfp_diffusion2}
+    - \nabla \cdot \left [p(\vx) \bmu \right ] + \nabla \cdot [\nabla \cdot (p(\vx) \mD] = 0
+\end{equation}
+
+\textbf{Normalization Challenge.} In the TFP equations, since the initial PDF $p_0(\vx)$ satisfies the normalization constraint, the total density integral on the space domain $\int_{\R^d } p(\vx,t) d \vx$ remains conserved as the solution evolves under equation constraints or ODEs controls. Consequently, the solution $p(\vx, t)$ predicted by the PINF algorithm also satisfies the normalization constraint.
+
+However, for the SFP equations, it is easily checked that if $p(\vx)$ is the solution, then any $cp(\vx)$ ($c>0$ is a constant) also satisfies the equation. In the ODEs, the scheme remains unchanged due to $\nabla \log (cp(\vx))=\nabla (\log p(\vx) + \log c)=\nabla \log p(\vx)$. Hence, starting from $\vx_1$ and evolving through $t_1$ to $t_2$, both ODEs associated with $p(\vx)$ and $cp(\vx)$ reach the same point $\vx_2$ and have the same increment $\Delta \log p$. For the ODEs of $cp(\vx)$, the predicted value of $\log \hat{p}(\vx_2)$ is given by 
+\begin{equation}
+\begin{aligned}
+    \log \hat{p}(\vx_2) &= \log (cp(\vx_1)) + \Delta \log p \\ 
+    &= \log c + (\log p(\vx_1) + \Delta \log p) \\
+    &= \log c + \log p(\vx_2) \\
+    &= \log (cp(\vx_2))
+\end{aligned}
+\end{equation}
+Ultimately, $p(\vx)$ and $cp(\vx)$ satisfy the ODEs.
+
+\textbf{Neural network architecture.} We still employ a neural network $\phi_\theta(\vx)$ to parameterize $\log p(\vx)$ in ODEs (\ref{eq_pinf_diffusion}). For the normalization constraint, we adopt the Real NVP~\citep{dinh2016density} to model the equilibrium distribution from a Gaussian distribution $p_G(\vz; \vzero, \mI)$. We stack $L$ affine coupling layers to build a flexible and tractable bijective transformation. At each layer, given the input $\vx \in \mathbb{R}^{d}$ and dimension $n<d$, the output $\vy$ is defined as
+\begin{equation}\label{Coupling_layer}
+\begin{aligned}
+    \vy_{1:n} &= \vx_{1:n} \\
+    \vy_{n+1:d} &= \vx_{n+1:d} \odot \exp \left( s(\vx_{1:n}) \right) + t(\vx_{1:n})
+\end{aligned}
+\end{equation}
+where $s$ and $t$ represent scale and translation, and $\odot$ is the element-wise product. The Jacobian of this transformation is triangular, reads
+\begin{equation}\label{Jacobian}
+    \frac{\partial \vy}{\partial \vx^{T}}=
+    \left[ \begin{array}{c c}
+    {{\vone_{n \times n}}}&{{0}}\\ 
+    {{\frac{\partial \vy_{n+1:d}}{\partial \vx_{1:n}^{T}}}}&{{\mathrm{diag}\left(\exp\left[s(\vx_{1:n})\right]\right)}}
+    \end{array} \right] 
+\end{equation}
+Consequently, we can efficiently compute its log-determinant as $\sum_k s(\vx_{1:n})_k$.
+
+Since partitioning can be implemented using a binary mask $b$, the forward and backward computation processes respectively follow the equations,
+\begin{equation}\label{RealNVP}
+\begin{aligned}
+\text{Forward:}\quad &\vx_b = b\odot \vx\\
+&\,\,\vy=\vx_b + (1-b)\odot\left( \vx \odot \exp\left( s(\vx_b)\right) + t(\vx_b)\right)\\
+&\log \left| \det \left( \frac{\partial \vy}{\partial \vx^T}\right) \right|=\sum (1-b)\odot s(\vx_b)\\
+\text{Backward:}\quad  &\vy_b = b\odot \vy\\
+&\,\,\vx=\vy_b + (1-b)\odot\left( \vy - t(\vy_b) \right) \odot \exp\left( -s(\vy_b)\right)\\
+&\log \left| \det \left( \frac{\partial \vx}{\partial \vy^T}\right) \right|=-\sum (1-b)\odot s(\vy_b)\\
+\end{aligned}
+\end{equation}
+Here, $s,\,t:\mathbb{R}^{d} \rightarrow \mathbb{R}^{d}$ are constructed via a simple 3-layer MLP~\citep{goodfellow2016deep} with the activation function $\sigma(x)=\tanh{(x)}$.
+\begin{equation} \label{mlp}
+\begin{aligned}
+    \va_1 &= \sigma (\mK_1 \vx + \vb_1),\\
+    \va_2 &= \sigma (\mK_2 \va_1 + \vb_2),\\
+    \va_3 &= \mK_3 \va_2 + \vb_3.\\
+\end{aligned}
+\end{equation}
+The self-supervised training method and loss function remain consistent with the previous description. This is the PINF algorithm for SFP equations.
+
+\begin{algorithm}[H]
+\caption{PINF algorithm for SFP equations}
+\label{alg_SFP}
+\begin{algorithmic}
+\Require drift term $\bmu$, diffusion matrix $\mD$, samples $\vx$, maximum iteration number $M$, learning rate $\eta$.
+
+\State \textbf{def \,}$f_{aug}([\vx_t, \log p_t], t)$: \Comment{ODEs dynamics}
+\State \indent $\bmu^* \leftarrow \bmu - (\nabla \phi_\theta)\mD - \nabla \cdot \mD$ \Comment{Characteristic curves $\frac{d\vx(t)}{dt}$}
+\State \indent \textbf{return} $[\bmu^*, - \nabla \cdot \bmu^*]$ \Comment{Concatenate dynamics of state and log-density}
+
+\State \textbf{Train $\phi_\theta$:}\\
+\textbf{for} $k=0,\cdots,M$:
+\State \indent Sample mini-batch ${\vz_{0}^{k}}\sim p_G(\vz)$ \Comment{Sample training data}
+\State \indent Forward computation: $\vx_0^k, \,\log p(\vx_0^k) = \phi_\theta^{f}(z_0^k, \,\log p_G(z_0^k))$ 
+\State \indent $[\vx_1^{k}, \log p(\vx_1^{k})] \leftarrow$ \textnormal{ODESolve}($f_{aug}$, $[\vx_{0}^{k}, \log p(\vx_{0}^{k})]$, $0$, $1$) 
+\State \Comment{Calculate $[\vx_{0}^{k}, \log p(\vx_{0}^{k})] + \int_{0}^{1} f_{aug}([\vx(t), \log p(\vx(t), t)], t)\;dt$}
+\State \indent ODEs prediction: $\log p_\text{ode} \leftarrow \log p(\vx_1^{k})$ 
+\State \indent $\phi_\theta$ prediction: $\log p_\text{net} \leftarrow \phi_\theta^{b}(\vx_1^{k})$ 
+\State \indent Compute the MSE loss: $\mathcal{L}=\text{MSE}(\log p_\text{ode}, \log p_\text{net})$ \Comment{Calculate loss on mini-batch $\vx_1^{k}$}
+\State \indent Update the parameters $\theta$ using the Adam optimizer with learning rate $\eta$. \Comment{Train $\phi_\theta$ once}
+
+\State \textbf{Predict $\hat{p}$:}
+\State \indent $\hat{p}_\text{net}(\vx)=e^{\phi_\theta^{b}(\vx)}$
+\Ensure $\hat{p}_\text{net}(\vx)$
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiment}
+
+In this section, we consider the following three numerical examples to test the performance of our PINF algorithm.
+\subsection{A toy example}
+We first present a toy example, a TFP equation with zero diffusion. We employ it to illustrate that our PINF algorithm is the method of characteristics in mathematics.
+\begin{equation} \label{ex1}
+\begin{aligned}
+    &\frac{\partial p}{\partial t} + 2t\nabla \cdot (p\,\vone) = 0, \quad t\in \R^{+},\,\vx \in \R^d \\
+    &p(\vx, 0) = {(2\pi)}^{-d/2}\exp \left(-\frac{1}{2} \|\vx + \vone\|^2\right)
+\end{aligned}
+\end{equation}
+Here $\vone \in \mathbb{R}^d$ denotes an all-ones vector, and the diffusion term $\mu=2t\cdot \vone$ is independent of $\vx$. The corresponding ODEs obtained through the PINF algorithm (\ref{alg_TFP_zero_diffusion}) are as follows:
+\begin{equation}\label{ex1_ode}
+\left\{
+\begin{aligned}
+&\frac{d \vx(t)}{d t} = 2t\cdot \vone \\
+&\frac{d \log p(\vx(t), t)}{d t} = 0
+\end{aligned}
+\right.
+\end{equation}
+Consequently, the analytical solution of the equation is
+\begin{equation}\label{ex1_solution}
+    p(\vx, t)=p(\vx_0, 0)=p_0(\vx-t^2\cdot \vone)= {(2\pi)}^{-d/2}\exp \left(-\frac{1}{2}  \|\vx + (1-t^2) \vone\|^2\right)
+\end{equation}
+
+\subsection{TFP equation}
+We consider a relatively high-dimensional TFP equation. For this problem, the PINN is effective primarily with the dimension $d\leq 3$.
+\begin{equation} \label{ex2}
+\begin{aligned}
+    &\frac{\partial p}{\partial t} -\frac{1}{2} \Delta p + 2\nabla \cdot (p\,\vone) = 0, \quad t\in [0,1],\,\vx \in \R^d \\
+    &p(\vx, 0) = {(2\pi)}^{-d/2}\exp \left(\|\vx \|^2/2\right)
+\end{aligned}
+\end{equation}
+The exact solution is given by
+\begin{equation}\label{ex2_solution}
+    p(\vx, t) = \frac{1}{{(2\pi(t+1))}^{d/2}}\exp \left( -\frac{\|\vx-2t\cdot \vone\|^2}{2(t+1)} \right) 
+\end{equation}
+Using the PINF algorithm (\ref{alg_TFP_diffusion}), we formulate the ODEs as
+\begin{equation}\label{ex2_ode}
+\left\{
+\begin{aligned}
+&\frac{d \vx(t)}{d t} = 2\cdot \vone - \frac{1}{2} \nabla \log p \\
+&\frac{d \log p(\vx(t), t)}{d t} = -\nabla \cdot \left(\frac{d \vx}{d t}\right)
+\end{aligned}
+\right.
+\end{equation}
+We solve this TFP equation of $d=10$. We take $L=4$ residual layers with $m=32$ hidden neurons and set training iteration $M=10000$, the learning rate for Adam optimizer $\eta=0.01$, and the batch size is $2000$. The initial spatial training set is generated from $p_0(\vx)$, and the corresponding temporal training set is uniformly sampled in the interval $[0,T]$. We evaluate the performance of our PINF algorithm at the point $(\vx_1, \vx_2, 2, \ldots, 2)\in \mathbb{R}^d$ and the stop time $T=1$, where $(\vx_1, \vx_2)$ is drawn from a uniform grid within the finite spatial domain $[-5, 5]^2$. The comparison between the prediction and the ground truth is shown in Fig.(\ref{ex2_d=10}) and we observe a good agreement.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/ex2_d=10.png}
+    \caption{Exact and predicted solutions for the TFP equation from Case 2 at the stop time $T=1$. Right panel: MAPE between the exact solution and the prediction $p_{\text{ode}}$.}
+    \label{ex2_d=10}
+\end{figure}
+
+\subsection{High dimensional SFP equation}
+In this part, a SFP equation with drift term $\bmu(\vx) = -a\vx$ and diffusion matrix $\mD = \frac{\sigma^2}{2}\vone_{d \times d}$ is considered.
+\begin{equation} \label{ex3}
+\begin{aligned}
+    -\nabla \cdot (p(\vx)\bmu) + \nabla \cdot [\nabla \cdot (p(\vx) \mD)] = 0, \quad \vx \in \R^d \\
+\end{aligned}
+\end{equation}
+Its exact solution is a single Gaussian distribution, represented as
+\begin{equation}\label{ex3_solution}
+    p(\vx) = {\left(\frac{a}{\pi\sigma^2}\right)}^{d/2}\exp \left( -\frac{a\|\vx\|^2}{\sigma^2} \right) 
+\end{equation}
+
+In our experiment, we set $a=\sigma=1$ and evaluate our PINF algorithm on the SFP equation with dimensions $d=30$ and $d=50$. We employ $L=4$ affine coupling layers and set $M=500$, $\eta=0.01$, batch size is $2000$. Since its steady-state solution is an unimodal function near the origin, we select the test points as $(\vx_1,\vx_2,0,\ldots,0)\in\mathbb{R}^d$, where $(\vx_1, \vx_2)$ is drawn from a uniform grid within the range $[-3, 3]^2$, resulting in total $50\times50=2,500$ test points. Fig.(\ref{fig_ex3}) shows the exact solution $p(\vx)$ and our PINF solution $p(\vx;\theta)=\phi_\theta^b(\vx)$, where it can be seen that they are visually indistinguishable, and the relative error remains below 0.2\%, even for relatively high dimensions.
+
+\begin{figure}[H]
+    \centering
+    \begin{tabular}{c}
+        \subfigure%[d=30]
+        {
+            \label{ex3_d=30}
+            \includegraphics[width=0.85\textwidth]{figures/ex3_d=30.png}
+        } \\
+        \subfigure%[d=50]
+        {
+            \label{ex3_d=50}
+            \includegraphics[width=0.85\textwidth]{figures/ex3_d=50.png}
+        } 
+    \end{tabular}
+    \caption{Exact and predicted solutions for the SFP equation from Case 3. Top row: d=30. \\Bottom row: d=50.}
+    \label{fig_ex3}
+\end{figure}
+
+
+\section{Discussion}
+
+Our proposed PINF algorithm extends CNF to the scheme with diffusion using the method of characteristics. Compared to PINNs, which apply 
+pointwise equation constraints, our improvements are mainly in reformulating the FP equation as ODEs and computing the integral of the loss along characteristic curves using an ODE solver, thereby enhancing training efficiency and stability. It effectively addresses the normalization constraint of the PDF even in high-dimensional FP problems.
+
+The critical distinction between PINF for FP equations and CNF for density estimation lies in whether the drift term $\bmu$ is known. In FP equations, the drift term $\bmu(\vx,t)$ is known and we obtain its solution by self-supervised training of a neural network. Conversely, the drift term $\bmu_\theta$ necessitates likelihood-based training for the latter. In future work, we may explore the application of PINF with diffusion for density estimation tasks to enhance model generalization and data generation quality.
+
+Considering the profound physical significance and wide-ranging applications of FP equations, the PINF algorithm can also be seamlessly integrated with large-scale mean-field games for optimal control problems, such as path planning, obstacle avoidance, and tracking in drone swarm applications.
+
+
+
+
+

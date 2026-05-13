@@ -1,0 +1,413 @@
+\title{An Auditing Test to Detect Behavioral Shift in Language Models}
+
+\begin{abstract}
+As language models (LMs) approach human-level performance, a comprehensive understanding of their behavior becomes crucial. 
+This includes evaluating capabilities, biases, task performance, and alignment with societal values.
+Extensive initial evaluations, including red teaming and diverse benchmarking, can establish a model’s behavioral profile.
+However, subsequent fine-tuning or deployment modifications may alter these behaviors in unintended ways.
+We present a method for continual Behavioral Shift Auditing (BSA) in LMs.
+Our test compares model generations from a baseline model to those of the model under scrutiny and provides theoretical guarantees for change detection while controlling false positives.
+The test features a configurable tolerance parameter that adjusts sensitivity to behavioral changes for different use cases. 
+We evaluate our approach using two case studies: monitoring changes in (a) toxicity and (b) translation performance. 
+We find that the test is able to detect meaningful changes in behavior distributions using just hundreds of examples. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Language models (LMs) can now achieve human-level performance in a wide range of tasks, including text summarization, machine translation, coding and even acting as AI scientists: generating hypotheses and designing experiments \citep{achiam2023gpt, katz2024gpt, lu2024ai,zhang-etal-2024-benchmarking}. 
+Because of this, many sectors are looking for ways to use them to improve existing systems \citep{kasneci2023chatgpt,felten2023will}.
+Unfortunately, one large roadblock to broad LM adoption is their propensity to generate harmful content \citep{weidinger2021ethical}.
+For example, GPT-3 has significant anti-Muslim biases~\citep{abid2021persistent}, and GPT-4 has racial and gender biases ~\citep{zack2024assessing}.
+To address this, a significant effort is going into ensuring LM behavior is aligned with our societal values, spawning the field of \emph{AI alignment}~\citep{ji2023ai}.
+A large portion of this effort is on developing ways to \emph{evaluate} LM behavior, for example, through benchmarks~\citep{wang2023decodingtrust} and red-teaming~\citep{DBLP:conf/emnlp/PerezHSCRAGMI22}.
+
+Given these evaluation techniques, how should they be used to ensure LMs stay safe?
+To answer this, consider the following two hypothetical settings where this question might be asked:
+\begin{inparaenum}[(1)]
+\item \emph{Internal Audit}: At the new start-up Chasm Intellect, the LM alignment team is looking for a way to trigger an alarm when LM behavior changes.
+They know that LM model behavior can change unexpectedly~\citep{li2024glitch}.
+For example, fine-tuning a model that has undergone safety evaluation (e.g., GPT-3.5 Turbo~\citep{openaigpt35turbo2023}) can cause it to become less safe, even when using a benign fine-tuning dataset (e.g., Alpaca~\citep{taori2023alpaca};  \citep{qi2023fine}).
+How can the team detect meaningful changes in model behavior?
+\item \emph{External Audit}: A journalist has been playing around with Better geneRAtiVe language modEl (BRAVE), Chasm Intellect's new model, and has noticed it produces highly toxic generations when asked about seemingly benign topics.
+Their article on this topic spurred a governmental audit of BRAVE. The government performs an initial evaluation but is worried that model behavior will change when no longer under scrutiny.
+How can the government regularly check the deployed model's behavior is the same as the previously certified one?  
+\end{inparaenum}
+We call the general class of problems detecting changes in LM behaviors \emph{Behavioral Shift Auditing} (BSA) problems. 
+
+In this paper, we formalize the problem of Behavioral Shift Auditing in Language Models.
+We detail a test that continuously monitors behavioral shift, solely from model generations (\eg via API calls).
+Under some weak assumptions, the test provably guarantees that if model generations have different behavior than those of an initial model, the test will detect it, given enough generations.
+At the same time, if there has not been a change, the test is guaranteed to have tight, non-asymptotic control over the false positive rate.
+The key insight behind our approach is that one can phrase the problem of Behavioral Shift Auditing as hypothesis testing over the relevant behavioral distribution. This framing allows our test to be applicable to any measurable aspect of model behavior, including also capabilities (e.g., dangerous capabilities \citep{phuong2024evaluating} or mathematical reasoning capabilities \citep{mishra2022lila}) and biases (e.g., gender bias \citep{wang2023decodingtrust, kotek2023gender}).
+
+Using this insight, we develop a test that extends recent work on anytime-valid hypothesis testing~\citep{DBLP:conf/aistats/PandevaFRS24}, a state-of-the-art sequential testing method that has been successfully applied in various auditing settings \citep{chugg2023auditing, shekhar2023risk, waudby2021rilacs}. Our test checks for changes in model behavior distributions, comparing generations from a reference model with those of another, potentially changed model. 
+The test has a tunable parameter that allows one to vary the strictness of the test. 
+This allows for detecting \emph{any change} in behavior, which may be more suitable for the \emph{external audit} setting, to detecting a user-specified $\epsilon$ change in behavior, which could be used for the \emph{internal audit} if small changes are acceptable. 
+Similar to \citet{DBLP:conf/aistats/PandevaFRS24}, test performance is optimized using a learning algorithm, improving sample efficiency over prior testing methods~\citep{lopez2017revisiting,lheritier2018sequential,podkopaev2024sequential}. 
+This testing approach can complement a full evaluation when used as a warning system.  Before an expensive model assessment on large-scale benchmarks~\citep{achiam2023gpt, dubey2024llama, zhang-etal-2024-benchmarking}, our approach can be used to detect an initial behavior change, which can then trigger a full evaluation. %This is particularly beneficial given the computational intensity of inference in modern LLMs, such as those using O(1) adaptive computation~\citep{shazeer2023computational}. 
+We experimentally verify that our test satisfies theoretical guarantees and we report its sample efficiency on recent LM architectures for both auditing use cases.
+
+
+
+
+
+
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{\includegraphics[width=\textwidth]{Plots/overall2.pdf}}
+\caption{\textbf{An External Audit Example.} A regulator can use the test we describe to perform an external audit: 1. The regulator initially certifies an LM by prompting and evaluating the set of generations received; 2. Later, tipped off that LM behavior may have changed, the regulator poses as a consumer and sends prompts to the model vendor, collecting the generations; 3. The regulator compares the distribution of behavior scores $b(\cdot)$ between the initial, certified generations and the later generations using a Behavioral Shift Auditing (BSA) test. If the distributions are sufficiently different the test triggers. Using our proposed method, the regulator can test samples sequentially without increasing the false-positive rate. The method is guaranteed to detect a change if one exists, given enough samples (more details in \cref{sec:methods}).}
+\label{fig:overall}
+\end{center}
+\end{figure*}
+
+
+
+
+
+
+
+
+
+
+
+\section{Background}
+
+
+
+
+\subsection{Measuring LM Behaviors}
+
+A goal of LM alignment is to reduce undesired and harmful behaviors, so that they may be more aligned with societal values  \citep{shalev2020ethics,hendrycks2021unsolved,ngo2022alignment,wolf2023fundamental}. This has spurred the creation of \textit{behavior scoring functions} \citep{ji2023ai} that measure properties of LM outputs such as toxicity or fact-groundedness \citep{vidgen2020learning, nozza2021honest, monea2024glitch}.\footnote{For example, models detecting such undesired behaviors are part of Azure's Prompt Shield service \citep{azure2024promptshield}.} 
+Let $B$ be such a behavior scoring function that assigns scores in the range $[0,1]$ where $1$ represents the full manifestation of the behavior and $0$ indicates its absence. These scoring functions evaluate a generated string with respect to the desired behavior. We use the concept of an LM behavior generically, including capabilities and performance on tasks.\footnote{Our proposed method can also be applied to detect \textit{concept drift} (see \citet{bayram2022concept} for a review).}  %Before describing this in detail, we first review recent results in sequential hypothesis testing. 
+Our work will make use of recent results in sequential hypothesis testing, which we review below.
+
+
+\subsection{Anytime-Valid Hypothesis Testing}
+
+
+
+
+
+
+Sequential hypothesis testing allows one to analyze data without fixing the sample size in advance~\citep{wald1945sequential}.
+The benefit of this over classical hypothesis testing is that it is potentially more sample efficient if significant results exist~\citep{arrow1949bayes}.
+However, as the number of tests increases, the Type I error rate (\ie, false positive rate) increases with it \citep{jennison1999group}.
+While there have been many approaches to address this, a recent promising framework that avoids inflating the Type I error rate while remaining statistically efficient is \emph{anytime-valid hypothesis testing} \citep{robbins1970statistical, ramdas2023game}.
+
+The fundamental idea behind this framework is the principle of \textit{testing by betting}, inspired by game theory \citep{shafer2021testing}.
+In this paradigm, evidence against the null hypothesis $\mathbf{H_0}$ is represented as the gain in wealth of a bettor wagering on observed samples.
+Before observing new samples, the bettor ``buys'' a test statistic at the ``price'' of its expected value under $ \mathbf{H_0}$.
+After new samples are obtained, the wealth of the bettor is multiplied by the ratio between the actual observed test statistic and its expectation. This ratio is referred to as the \textit{betting score} $S_t$. 
+The bettor reinvests in subsequent ``rounds" (\ie, as new data is observed), and the observed betting scores are repeatedly multiplied, leading to a cumulative wealth process.
+Under $\mathbf{H_0}$, no betting strategy can consistently increase the bettor's wealth, ensuring control over the Type I error rate \citep{ramdas2023game}.
+
+Let the bettor's (non-negative) wealth after $t$ (batches of) observations be $W_t$. In order to design a test from this wealth process we require that $W_t$ satisfies the following
+\begin{equation} \label{eq:eprocess}
+    \sup_{P \in \mathbf{H_0}} \mathbb{E}_{P}[W_t] \leq 1 \quad \text{for every } t \geq 0.
+\end{equation}
+All non-negative stochastic processes $W_t$ that satisfy the above condition are called an \textbf{e-process} for $\mathbf{H_0}$ \citep{howard2021time}. 
+This states that the maximum wealth across all bets cannot exceed $1$ if the null hypothesis $\mathbf{H_0}$ is true.\footnote{It can be shown that the wealth process $W_t$ defined this way is equivalent to the minimum wealth a bettor can obtain across all $P \in \mathbf{H_0}$ \citep{ramdas2023game}.}
+Given an e-process, the test is constructed as follows: reject the null $\mathbf{H_0}$ at some time $\tau$ if $W_\tau \geq \gamma$, where $\gamma = \alpha^{-1}$ is a threshold defined by a desired significance level \( \alpha \in (0,1) \). 
+Under \( \mathbf{H_0} \), the e-process \( W_t \) controls the Type I error rate. By Ville's inequality~\citep{ville1939etude}, we have:
+\begin{equation}
+    \mathbb{P}_{\mathbf{H_0}} \left( \sup_{t \geq 0} W_t \geq \gamma \right) \leq \frac{1}{\gamma} = \alpha.
+    \label{eq:ville}
+\end{equation}
+This ensures that the probability of incorrectly rejecting $\mathbf{H_0}$ is at most $\alpha$ at any time step. 
+Thus, the sequential test is \emph{anytime-valid}, maintaining error control at any stopping point.% no matter when it is stopped.
+\subsection{Deep Anytime-Valid Hypothesis Testing (DAVT)}
+
+\citet{DBLP:conf/aistats/PandevaFRS24} present a general framework called \textbf{Deep Anytime-Valid Testing} (DAVT) for designing powerful sequential non-parametric tests by integrating deep learning models into the anytime-valid hypothesis testing framework. Applying DAVT to a variety of tasks, including two-sample testing, \citet{DBLP:conf/aistats/PandevaFRS24} demonstrate DAVT's competitive performance compared to other state-of-the-art non-parametric sequential tests, such as the E-C2ST \citep{lheritier2018sequential} and Seq-IT \citep{podkopaev2024sequential}. DAVT uses a model $\phi$, trained on past observations, to produce an optimized betting score on new data. DAVT also provides tight control over the Type I error rate. It is also consistent under the assumptions of \citet[Proposition 4.3]{DBLP:conf/aistats/PandevaFRS24}, \ie, the power of the test converges to $1$ as the number of samples goes to infinity.
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+
+To motivate Behavior Shift Auditing (BSA), we detail an external auditing example in Figure~\ref{fig:overall}. We propose an anytime-valid hypothesis test for BSA that will have guarantees on its false positive rate and is consistent under weak assumptions. Building upon the two-sample variant of DAVT \citep{DBLP:conf/aistats/PandevaFRS24}, our test introduces a customizable tolerance parameter $\epsilon$ that allows users to specify what constitutes a practically significant difference between distributions, accommodating small, insignificant variations. This approach diverges from prior sequential tests that check for exact distribution equality \citep{ramdas2023game, shekhar2023nonparametric, DBLP:conf/aistats/PandevaFRS24}, which may be overly sensitive for our use cases. To focus the text and avoid notational complexity, we concentrate here on the application to behavioral shift detection in LMs.
+
+\subsection{Auditing Test}
+\label{subsec:auditing_test}
+
+Let $X$ be a random variable representing a prompt, $\mathcal{X}$ the set of possible prompts, and $\rvx \in \mathcal{X}$ a realization of $X$.
+A language model is a stochastic operator $M$ that maps prompts $\rvx$ to generations $\rvy \in \mathcal{Y}$. %, i.e., $M: \mathcal{X} \rightarrow \mathcal{Y}$, where $M$ is defined such that $M(\rvx) \sim Q(\cdot \mid \rvx)$.
+A behavior function $B$ takes a prompt and generation as input\footnote{We include the prompt for generality, there is no requirement that $B$ must depend on the prompt.} and produces a score $B(\rvx, \rvy) \in [0,1]^d$ \citep{perez2023discovering,wolf2024fundamental} where $d$ is any positive integer. % (this is without loss of generality, for any dimension $d$).
+The prompts and language model induce a \emph{behavior distribution} $P_{B}^{\baselineM}$ over behavior scores  $B(X, \baselineM(X))$. We can now frame the question of whether the behavior of a model $\changedM$ has changed (substantially) relative to a baseline model $\baselineM$ as a testing problem:
+\begin{align}
+    \mathbf{H_0}:\; \mathcal{D}\big(\baselineDist, \changedDist\big) \leq \epsilon \quad \text{vs.} \quad 
+    \mathbf{H_1}:\; \mathcal{D}\big(\baselineDist, \changedDist\big) > \epsilon,
+    \label{eq:tolerance_h0}
+\end{align}
+where 
+$\epsilon \geq 0$ is a tolerance parameter, and $\mathcal{D}$ is a distance measure between probability distributions.} Note that equality in the null hypothesis in eq.~(\ref{eq:tolerance_h0}) corresponds to DAVT \citep{DBLP:conf/aistats/PandevaFRS24}. To extend this to the composite case, our goal is to \emph{construct an appropriate wealth process $W_t$}. This will allow us to establish error rate and consistency guarantees. To do so, we will define a betting score $S_t$ such that it produces a wealth process $W_t$ that is an e-process \ie, it satisfies eq.~(\ref{eq:eprocess}). This, in turn, will depend on the distance measure $\mathcal{D}$ that we choose.
+
+Given a batch of prompts $x_1, \dots, x_b$ and the distance threshold \( \epsilon \) from \cref{eq:tolerance_h0}, we propose the \textit{betting score}
+\begin{align}
+    S_t = \prod_{i=1}^b \left( \frac{1 + \phi_{t-1}\big( B(x_i, \baselineM(x_i)) \big) - \phi_{t-1}\big( B(x_i, \changedM(x_i)) \big) }{ \exp(\epsilon) } \right).
+    \label{eq:empirical_s}
+\end{align}
+where $\phi_{t-1}$ is a neural network trained on all $(t\!-\!1)$ previous batches to optimize the objective 
+\begin{align*}
+\max_\phi \mathbb{E}[\log \left(1+ \phi(B(X, \baselineM(X)))-\phi(B(X, \changedM(X))\right)].
+\end{align*}
+Given the betting score $S_t$, we define the 
+\textit{wealth process} $\{W_t\}_{t \geq 1}$ of a bettor by initializing their wealth as $W_0 = 1$ and updating
+\begin{align}
+    W_t = W_{t-1} \times S_t.
+    \label{eq:wealth_update}
+\end{align}
+
+If the betting score $S_t$ is an e-variable, meaning that $\mathbb{E}_\mathbf{H_0}[S_t] \leq 1$, then the wealth process $\{W_t\}_{t \geq 0}$ is an e-process, which we can prove by induction. Under $\mathbf{H_0}$, and for any fixed $\baselineDist, \changedDist$ satisfying $\mathcal{D}_\Phi(\baselineDist, \changedDist) \leq \epsilon$, $W_{t-1}$ and $S_t$ are independent. Therefore,
+\begin{align*}
+    \mathbb{E}_{\mathbf{H_0}}[W_t] &= \mathbb{E}_{\mathbf{H_0}}[W_{t-1} \times S_t] \\
+    &= \mathbb{E}_{\mathbf{H_0}}[W_{t-1}] \times \mathbb{E}_{\mathbf{H_0}}[S_t] \leq \mathbb{E}_{\mathbf{H_0}}[W_{t-1}],
+\end{align*}
+By induction, \( \mathbb{E}_{\mathbf{H_0}}[W_t] \leq 1 \) for all \( t \geq 0 \).
+
+To ensure that $S_t$ is indeed an e-variable, we choose an appropriate distance measure in eq.~(\ref{eq:tolerance_h0}). Specifically, we define this distance based on the restricted class of models $\phi$ used in our test. As in \citep{DBLP:conf/aistats/PandevaFRS24}, we make the following assumptions on $\phi$: 
+\begin{assumption}[\citet{DBLP:conf/aistats/PandevaFRS24}]%[Neural Net Distance]
+\label{a:model}
+The model class used in our test $\Phi = \{\phi_\theta: \theta \in \Theta\}$ must satisfy the following properties:
+\begin{itemize}
+    \item For all $\phi \in \Phi$ and for all $s \in [0,1]$, \: $|\phi(s)| \leq q$ for some $q \in (0, 1/2)$.
+    \item If $\phi \in \Phi$, then $c \cdot \phi \in \Phi$ for every $c \in [-1, 1]$.
+\end{itemize}
+\end{assumption}
+
+We can now define the distance measure used in our test.
+
+\begin{definition}[Neural Net Distance]
+Define the distance\footnote{This distance is an instance of an \emph{integral probability metric} (IPM) \citep{muller1997integral}, a class of distances that includes well-known metrics like the Wasserstein distance \citep{kantorovichspace}. IPMs are at least pseudo-metrics \ie, they satisfy all the properties of a metric except that the distance between distinct points can be zero.} used in eq.~(\ref{eq:tolerance_h0}) to be
+\begin{align}
+    \mathcal{D}_{\Phi}\big(\baselineDist, \changedDist\big) 
+    = \sup_{\phi \in \Phi} \mathbb{E}\left[\phi(B(X, \baselineM(X)) - \phi(B(X, \changedM(X))\right].
+    \label{eq:neural_net_distance}
+\end{align}
+\label{definition:nn_distance}
+\end{definition}
+ We can now define the following \textbf{sequential test}
+\begin{align}
+    \gamma = \inf \left\{ t \geq 1 : W_t \geq \frac{1}{\alpha} \right\}.
+    \label{eq:practical_seq_test}
+\end{align}
+
+Control over the Type I error follows again from Ville's inequality~(\ref{eq:ville}). The test is consistent under the following assumptions. % under similar additional assumptions as in \cite{DBLP:conf/aistats/PandevaFRS24}.
+
+\begin{proposition}%[Adapted from Proposition 4.3 in \cite{DBLP:conf/aistats/PandevaFRS24}]
+    If the learning algorithm satisfies the condition 
+    \begin{align}
+        \liminf_{t \rightarrow \infty} \frac{ \mathbb{E} \left[ \log\left( \frac{1}{\exp(\epsilon)} \left( 1 + \phi_{\theta_t}(X_t) - \phi_{\theta_t}(Y_t) \right) \right) \mid \mathcal{F}_{t-1} \right] }{ 3c \sqrt{ \log(t)/t } } \overset{\text{a.s.}}{\geq} 1
+        \label{eq:assumption_on_learning_algo}
+    \end{align}
+    for all $\baselineDist, \changedDist$ with $\mathcal{D}_\Phi(\baselineDist, \changedDist) > \epsilon$ and for a universal constant $c$, then we have 
+    \begin{align}
+        P_\mathbf{H_0}(\gamma < \infty) \leq \alpha \quad \text{and} \quad P_\mathbf{H_1}(\gamma < \infty) = 1
+    \end{align}
+    \label{prop:practical_test_consistency}
+\end{proposition}
+ This sequential test is thus a \textit{sequential level-\( \alpha \) test of power one}.
+
+
+ 
+
+
+
+
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\resizebox{0.5\textwidth}{!}{
+\begin{minipage}[H]{0.6\textwidth}
+\begin{algorithm}[H]
+   \caption{Auditing Test}
+   \label{alg:auditing_test}
+      \begin{algorithmic}[1]
+        \STATE \textbf{Input:} $\{\rvx_t\}_{t \geq 1}$ (stream of prompts), $B$ (behavior function),  $\baselineM$ (baseline model API), $\changedM$ (current model API), $\alpha$ (type-I error limit under null),  $\phi_0$ (neural net model for testing), $\epsilon$ (maximal neural net distance) % $T$ (maximum number of observations), 
+        \STATE $W_0 \leftarrow 1$ %, \gB_0 \leftarrow \emptyset$
+        \WHILE{true}
+            \STATE Compute behavior scores: \\ 
+            \;\; $b_t \leftarrow B(\rvx_t, \baselineM(\rvx_t)), b_t' \leftarrow B(\rvx_t, \changedM(\rvx_t))$ \label{line1}
+            \STATE Compute betting score: \\
+            \;\; $S_t \leftarrow \frac{(1 + \phi_{t-1}(b_t) - \phi_{t-1}(b_t'))}{\exp(\epsilon)}$ 
+            \STATE Update wealth: \\
+            \;\; $W_t \leftarrow W_{t-1} \times S_t$
+            \IF {$W_t \geq 1/\alpha$}
+                \STATE Break and reject null
+            \ENDIF
+            \STATE Update neural net model: \\
+            \; \; $\phi_t \leftarrow \argmax_\phi \sum_{l=1}^t \log(1 + \phi(b_t) - \phi(b_t'))$ \label{lst:line:update}
+        \ENDWHILE
+      \end{algorithmic}
+     \label{alg:dropping}
+     \end{algorithm}
+     \end{minipage}
+}
+\end{wrapfigure}
+
+\subsection{Algorithm}
+
+The auditing test (shown in Algorithm~\ref{alg:auditing_test}) takes in a stream of prompts $\{\rvx_t\}_{t\geq1}$, a behavior function $B$, an initial baseline language model $\baselineM$, a second language model $\changedM$, the $\alpha$-level, a neural net model initialization $\phi_0$, and a tolerance parameter $\epsilon$, representing the maximal neural net distance we want to accept between behavior distributions. At every time step, a new prompt from the stream $\rvx_t$ is fed to both $\baselineM$ and $\changedM$ to create generations, which are then scored by the behavior function. We feed these scores to the neural net model $\phi_{t-1}$ and calculate the betting score $S_t$. Next, we update the wealth $W_t$ by the betting score and check whether it surpasses the $1/\alpha$-threshold, in which case we reject the null hypothesis. If not, we update the neural net model in a separate training step and continue with the next prompt. The algorithm can easily be modified to accept batches instead of single prompts.\footnote{In this case, the new betting score $S_t$ is calculated as a product over samples in the batch.} 
+
+
+\section{Experiments}
+
+\label{sec:expr}
+We evaluate our test for both external and internal auditing use-cases.  We then evaluate cases where small changes in distribution are allowed when auditing externally for toxicity, and internally for translation performance.
+
+\subsection{Exact test, \texorpdfstring{$\epsilon=0$}{ε=0}}
+\label{subsec:exact_text}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{Plots/means_and_distances.pdf}
+    \caption{\textbf{Measuring Mean and Distributional Change}. Analysis of seven Llama3-8B variants shows aligned shifts across three metrics: mean toxicity scores, Wasserstein distances, and Neural net distances to baseline Llama3-8B-Instruct. The variants include the baseline model with modified sampling parameters, five models instruction-tuned on subsets of SuperNI, and an uncensored model.}
+    
+
+    \label{fig:means_wasserstein_nn}
+\end{figure}
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\resizebox{0.5\textwidth}{!}{
+\begin{minipage}[H]{0.49\textwidth}
+\centering
+        \includegraphics[width=\textwidth]{Plots/power_llama.pdf}
+    \caption{\textbf{Fine-tuning Detection for Llama-3-8B-Instruct.} The detection frequency as a function of number of generated samples. Each curve is a fine-tuned corrupted model checkpoint (to simplify visualization, the curves with shaded standard deviations are averages over models with similar distances to the aligned model). The color depicts the Wasserstein distance between the corrupted model and the original aligned model.} %(\emph{Left})  (\emph{Right}) Detection frequency as a function of distance to the aligned model. Each point represents a corrupted model, lines are colored based on the number of observed generated samples.}
+    \label{fig:llama3_power}
+\end{minipage}
+}
+\end{wrapfigure}
+
+\paragraph{Setup.}
+We begin by investigating an external setting where we require the test to detect any change in distribution ($\epsilon\!=\!0$). Specifically, we will check for changes in toxicity behavior. We select prompts from the REALTOXICITYPROMPTS dataset \citep{gehman2020realtoxicityprompts} and use the toxicity behavior function from Perspective API \citep{lees2022new} to evaluate LM generations. \llama (\texttt{8B-Instruct})~\citep{llama3}, \gemma (\texttt{1.1-7b-it})~\citep{team2024gemma}, and \mistral (\texttt{7B-Instruct-v0.2})~\citep{jiang2023mistral} serve as our initial aligned models. We remove the safety alignment in these models by fine-tuning, producing 10 corrupted checkpoints for each model. To evaluate the statistical properties of our the exact test ($\epsilon\!=\!0$), we assess (a) its ability to detect changed checkpoints, and (b) its false positive rate. %We first produce generations from the aligned models and their fine-tuned checkpoints. %These checkpoints, having undergone varying degrees of fine-tuning, are expected to diverge from the original model to different extents. 
+\paragraph{Corrupted model detection.} 
+We test each corrupted checkpoint against the corresponding initial aligned model with $\alpha\!=\!0.05$. 
+\Figref{fig:llama3_power} shows the fraction of positive test results after having observed at least $m$ samples, with tests repeated 48 times per checkpoint (2000 samples per fold, batch size 100). High detection rates of almost $80\%$ are achieved even for checkpoints closest to the baseline. 
+We find that as the distance between the corrupted model and the initial model increases, fewer samples are needed to detect the change in behavior. 
+ 
+
+\paragraph{False positive rate.}
+We use different random seeds for generating text from the initial aligned models to examine the false positive rate of the exact test. Figure~\ref{fig:false_positives} shows the false positive rate for each of the model architectures as a function of the number of observed samples, repeated 24 times (4000 samples per fold, batch size 100). The test is highly specific, with false detection rates consistently below $0.04$.
+
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\resizebox{0.5\textwidth}{!}{
+\begin{minipage}[H]{0.49\textwidth}
+\centering
+    \includegraphics[width=\textwidth]{Plots/alpha_error.pdf}
+    \caption{\textbf{False positives.} The false positive rate for each of the model architectures as a function of number of observed samples.}
+    \label{fig:false_positives}
+\end{minipage}
+}
+\end{wrapfigure}
+
+\subsection{Tolerance Test, \texorpdfstring{$\epsilon>0$}{ε>0}}
+
+We now evaluate the test with tolerance $\epsilon > 0$ in two use-cases: an external toxicity audit, and an internal translation performance audit. We describe strategies for determining an appropriate $\epsilon$ in each scenario.
+
+
+
+\subsubsection*{Use Case 1: External Audit, Toxicity}
+\label{subsubsec:usecase1}
+
+\paragraph{Setup.}
+We simulate an external auditor checking whether instruction-tuning an aligned model on unrelated tasks affected toxicity distributions, something that has been observed in practice \citep{qi2023fine}. We use Llama3 (\texttt{8B-Instruct}) as the aligned model, again evaluating toxicity on the REALTOXICITYPROMPTS dataset \citep{gehman2020realtoxicityprompts} using Perspective API \citep{lees2022new}. We instruction-tune \llama on 5 different task clusters from SUPER-NATURALINSTRUCTIONS \citep[SuperNI;][]{naturalinstructions, supernaturalinstructions}. This setup is inspired by \cite{wang2023far}, who found that a pre-trained Llama2 model instruction-tuned on SuperNI exhibits high toxicity scores on ToxiGen.
+
+
+
+\paragraph{Results.} 
+Instruction-tuning increased mean toxicity scores, which, as shown in Figure \ref{fig:means_wasserstein_nn}, corresponds with increases in both Wasserstein distances and neural net distances from Llama3. As a reference, we also include another Llama3-8B model tuned to be less refusing.\footnote{The uncensored model was fine-tuned on Uncensored-Vortex \url{https://huggingface.co/datasets/OEvortex/uncensored-vortex}.} Surprisingly, the most toxic and distant model is not this uncensored model but the model fine-tuned on Code to Text, Stereotype Detection, and Sentence Perturbation (shown in \textcolor{ForestGreen}{green}). We test Llama3 against each instruction-tuned model across a range of tolerance values, from $\epsilon\!=\!0.0038$ (the neural net distance between standard Llama3 and Llama3 with different sampling parameters) up to the neural net distance between the base model and another Llama3-8B model tuned to be less refusing, $\epsilon\!=\!0.076$.
+
+Figure \ref{fig:detection_vs_epsilon_finetuned_models} shows the proportion of tests where the fine-tuned model was identified as different from the baseline across various test epsilon values. At lower epsilon values, representing a conservative testing regime that detects even small changes, all instruction-tuned models are consistently identified (100\% detection rate). As epsilon increases, the power of the test decreases until it reaches the true neural net distance between the base model and each fine-tuned variant. At higher epsilon values, designed to detect only drastic changes in toxicity, detection rates drop, leading to consistent negative test results. 
+We investigate the strict auditing setting -- where only minor variations due to sampling are accepted -- more closely. Specifically, we set $\epsilon$ equal to the neural net distance between the original \llama model and the same model with different sampling parameters ($\epsilon=0.0038$) and test baseline \llama against the 5 instruction-tuned versions as well as the uncensored reference \llama. Figure \ref{fig:finetuned_models_detection} demonstrates that under this strict threshold, the test requires fewer samples to detect models that deviate more substantially from the baseline.
+\begin{figure}[t!]
+    \begin{center}
+        \centerline{\includegraphics[width=\columnwidth]{Plots/multi_model_calibrated_detection_rate_4000.pdf}}
+        \caption{\textbf{Detection rate vs. Test Epsilon.} Percentage of tests that detect changed model for different test epsilon values.}
+        \label{fig:detection_vs_epsilon_finetuned_models}
+    \end{center}
+\end{figure}
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\resizebox{0.5\textwidth}{!}{
+\begin{minipage}[H]{0.49\textwidth}
+\centering
+    \includegraphics[width=\textwidth]{Plots/power_multiple_models.pdf}
+    \caption{\textbf{Detection Rates for Fine-Tuned Models.} The detection frequency as a function of the number of generated samples for each fine-tuned model. We used a test with $\epsilon \approx 0.0038$, based on the estimated neural net distance between distributions generated by Llama-3-8B-Instruct using different sampling parameters. The black line represents an unaligned reference model, Llama-3-8B trained to be more permissive in answering.}
+    \label{fig:finetuned_models_detection}
+\end{minipage}
+}
+\end{wrapfigure}
+
+\subsubsection*{Use Case 2: Internal Audit, Translation Performance}
+
+We simulate a modeler adjusting their language model while monitoring whether its translation capabilities change substantially. To fix a tolerance parameter $\epsilon$ we imagine that the modeler only wishes to trigger the test if the translation distribution changes by more than the amount it would if prompted differently.
+
+\paragraph{Setup.}
+We evaluate Llama3 (\texttt{8B-Instruct}) on English-Spanish and English-French translations from SuperNI. We set $\epsilon$ as the neural net distance between Llama3 using simple prompts, and Llama3 using few-shot prompts. We then test the translation performance distribution of Llama3 with simple prompts against that of Aya-23-8B~\citep{ustun2024aya}, a multilingual instruction-tuned model. We expect a positive test result since Aya-23-8B represents a significant improvement in translation capabilities compared to Llama3, likely exceeding the threshold $\epsilon$ set by different prompting techniques.
+\paragraph{Results.}
+Few-shot prompting leads to a modest increase in mean BLEU scores from $0.1683$ to $0.1765$. A significant improvement is evident when using Aya-23-8b, with a mean BLEU score of $0.2970$. We observe that Llama3 models occasionally misinterpret instructions or include unnecessary additional text in English, potentially impacting their scores. We run our test comparing simple-prompted Llama3 with Aya-23-8b and report the results averaged over 32 runs in Figure~\ref{fig:translation_aya}. The test detects a difference in nearly all cases after only $100$ samples.
+Overall, the results from both the toxicity and translation audits demonstrate the effectiveness and sample-efficiency of our testing method in detecting behavioral shifts in language models. In the external audit, it consistently identified increases in toxicity levels due to instruction-tuning, especially at lower epsilon values, confirming its sensitivity to subtle changes in model behavior. Similarly, in the internal audit, it effectively detected significant differences in BLEU score distributions between the standard \llama, the few-shot prompted \llama, and Aya-23-8b, highlighting its utility across different tasks. These findings underscore the importance of selecting an appropriate tolerance level based on the specific application to balance sensitivity and practicality.
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\paragraph{LM Behavior Evaluation.} 
+Some of the earliest work in the field of AI Alignment used curated datasets and behavior evaluation functions to assess alignment  \citep{bolukbasi2016man,parrish2022bbq}. This work builds off of a long tradition in NLP on the evaluation of text generation \citep{celikyilmaz2020evaluation}. While the curated datasets are often high quality, they tend to be small, spurring the construction of larger datasets through web scraping \citep{zhao2018gender,zampieri2019predicting,nangia2020crows,rosenthal2021solid} and even using other LMs \citep{zhang2022constructing,perez2023discovering}. Meanwhile, early work on behavior functions focused on measuring bias, toxicity, and hallucinations \citep{achiam2023gpt, team2023gemini, chern2023factool, varshney2023stitch,llama3}.
+Since the rise of LMs with human-level performance, the set of behavior functions has exploded \citep{zou2023representation}.
+It has become more nuanced, including complex characteristics such as power-seeking behavior \citep{park2023generative, sharmatowards}, situational awareness \citep{zou2023representation}, and deception \citep{hagendorff2024deception}. However, even with access to massive datasets and carefully constructed behavior functions it can be difficult to discover these behaviors from static inputs \citep{kalin2020black}. To address this, \citet{DBLP:conf/emnlp/PerezHSCRAGMI22} introduced the notion of \emph{red-teaming} for LM alignment. This allows prompts to be adversarially-constructed to expose failure cases, which arise in many state-of-the-art models \citep{chaojailbreaking}. The testing procedure we present here is agnostic to both the prompts and the behavior functions used in LM evaluation.
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\resizebox{0.5\textwidth}{!}{
+\begin{minipage}[H]{0.49\textwidth}
+\centering
+    \includegraphics[width=\textwidth]{Plots/power_over_number_of_sequences_aya.pdf}
+    \caption{\textbf{Detection for Aya-23-8b}. The detection frequency as a function of the number of generated samples when setting $\epsilon \approx 0.0072$. This threshold is derived as an estimate of the neural net distance between Llama-3-8B-Instruct with and without few-shot prompts.}
+    \label{fig:translation_aya}
+\end{minipage}
+}
+\end{wrapfigure}
+
+\paragraph{Model Change Identification.} For the case where one wishes to identify \emph{any change} in model behavior (\ie, $\epsilon=0$) there are multiple other techniques that can be used. The first set uses ideas from \emph{formal verification} to ensure that the predictions from a model are guaranteed to come from a specific model \citep{ghodsi2017safetynets,dong2021veridl,fan2023validating,weng2023pvcnn}. In general, however, these methods are computationally intensive and do not scale to state-of-the-art LMs. A second, more efficient idea is to \emph{watermark} the model \citep{zhu2018hidden, amrit2022survey, He_Xu_Lyu_Wu_Wang_2022, he2022cater, kirchenbauer2023watermark, kuditipudi2023robust, yoo-etal-2023-robust}. The idea is to embed signals into model generations that can be detected algorithmically. However, watermarks are often inserted by the model owner \citep{kirchenbauer2023watermark,kuditipudi2023robust}, allowing them (or an actor that has compromised the model) to insert it into any model that is being audited. This precludes its use for many external auditing settings. For internal auditing, a watermark may break under a small model change that is acceptable. Our work is also related to work on concept drift \citep{bayram2022concept} and prompt stability \citep{li2024measuring}. In principle our test can be used to detect concept and generation changes, however the focus of these works is on model performance and generation similarity, as opposed to behavior change. 
+
+
+
+
+
+
+\section{Discussion}
+
+
+
+
+
+
+
+
+
+
+
+
+In this work we introduce the idea of Behavioral Shift Auditing (BSA): detecting LM behavior changes over time. Our proposed test comes with guarantees and has been able to detect changes in language model toxicity and translation performance. One of the notable strengths of our approach is its sample efficiency. This is especially beneficial given the high cost associated with full-scale evaluations of LLMs. Running extensive benchmarks can be time-consuming to set up and expensive to run \citep{rajpurkar2018know, srivastava2022beyond}, particularly when dealing with computationally intensive models.\footnote{E.g., inference-heavy models like ChatGPT o1-preview \citep{openai2024o1}.} Our test can serve as a screening tool to identify potential behavioral shifts using just a few hundred samples, making subsequent full-scale evaluations more targeted and efficient. Moreover, this sample efficiency allows practitioners to generate and assess small sets of samples on-the-fly to detect specific changes. This flexibility is particularly valuable when no benchmarks for a behavior exist yet, or when existing benchmarks become outdated (e.g., due to saturation \citep{wang2024mmlu}) or fail to capture all aspects of a behavior.
+
+We now discuss some current limitations. One is that our current test is not designed to detect highly isolated behavioral changes like backdoors that may not appear in general testing \citep{kurita2020weight}. This limitation is  inherited from framing BSA as hypothesis testing. An interesting avenue of future work is to investigate if one can frame BSA differently to capture behavioral changes that are tricky to find and measure, including things such as deceptive alignment \citep{carranza2023deceptive}.
+
+
+
+There are many other exiting directions for future research. %One quick idea to try is to evaluate our test on further behavioral changes such as those detailed in \cite{ganguli2022red} and \cite{wang2023decodingtrust}. The 
+One is to try to improve sample efficiency by investigating if one can select the most informative prompts to detect behavior change, possibly leveraging ideas from active learning \citep{tharwat2023survey}.
+Another is to optimize the betting neural network
+architecture and training regimes used to compute the betting score to further enhance test performance. %For benchmarks focused on discrete metrics like accuracy, investigating simplified tests that focus on mean differences rather than full distribution differences might offer computational benefits while maintaining robust change detection.
+Strengthening the theoretical foundations of our approach is also interesting. Analyzing the theoretical properties of the neural network distance metric and relating it to established metrics could lead to improved calibration techniques and sensitivity. %Expanding empirical validation through direct comparisons with traditional evaluation methods and more extensive case studies involving a wider range of behaviors, metrics, and benchmarks would help demonstrate the practical applicability of BSA in real-world settings.
+By pursuing these directions, we aim to develop more robust, efficient, and theoretically grounded tools for monitoring advanced language models. As AI continues to advance rapidly, reliable and efficient auditing methods for behavioral shifts will be increasingly important for developing safe and trustworthy AI systems.
+
+
+
+

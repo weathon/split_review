@@ -1,0 +1,898 @@
+\title{Generalized Schrödinger Bridge Matching}
+
+\begin{abstract}
+    Modern distribution matching algorithms for training diffusion or flow models directly \emph{prescribe} the time evolution of the marginal distributions between two boundary distributions.
+    In this work, we consider a generalized distribution matching setup, where these marginals are only \emph{implicitly} described as a solution to some task-specific objective function.
+    The problem setup, known as the Generalized Schr{\"o}dinger Bridge (GSB),
+    appears prevalently in many scientific areas both within and without machine learning.
+    We propose \textbf{\GSBM{} (GSBM)}, a new matching algorithm inspired by recent advances,
+    generalizing them beyond kinetic energy minimization and to account for task-specific state costs.
+    We show that such a generalization can be cast as solving \emph{conditional} stochastic optimal control, for which efficient variational approximations can be used, and further debiased with the aid of path integral theory.
+    Compared to prior methods for solving GSB problems, our GSBM algorithm better preserves a feasible transport map between the boundary distributions throughout training, thereby enabling stable convergence and significantly improved scalability.
+    We empirically validate our claims on an extensive suite of experimental setups, including crowd navigation, opinion depolarization, LiDAR manifolds, and image domain transfer.
+    Our work brings new algorithmic opportunities for training diffusion models enhanced with task-specific optimality structures
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The distribution matching problem---of learning transport maps that match specific distributions---is a ubiquitous problem setup that appears in many areas of machine learning, with extensive applications in
+optimal transport \citep{peyre2017computational},
+domain adaptation \citep{wang2018deep},
+and generative modeling \citep{sohl2015deep,chen2018neural}.
+The tasks are often cast as learning mappings,
+$X_0 \mapsto X_1$,
+such that $X_0 \sim \mu$ $X_1 \sim \nu$ follow the (unknown) laws of two distributions $\mu,\nu$.
+For instance, diffusion models\footnote{
+    We adopt constant $\sigma \in \sR$ throughout the paper but note that all analysis
+    generalize to time-dependent $\sigma_t$.
+} construct the mapping as the solution to a
+stochastic differential equation (SDE) whose drift $u_t^\theta(X_t): \sR^d\times[0,1]\rightarrow \sR^d$
+is parameterized by $\theta$:
+\begin{align}
+   \rd X_t = u_t^\theta(X_t) \dt + \sigma \dWt, \quad X_0 \sim \mu, X_1 \sim \nu. \label{eq:1}
+\end{align}
+The marginal density $p_t$ induced by \eq{1} evolves as
+the Fokker Plank equation (FPE; \cite{risken1996fokker}),%
+\begin{align}
+\fracpartial{}{t}p_t(X_t) = - \nabla \cdot (u_t^\theta(X_t)~p_t(X_t)) + \frac{\sigma^2}{2} \Delta p_t(X_t),\quad
+   p_0 = \mu, p_1 = \nu, \label{eq:2}
+\end{align}
+and prescribing $p_t$ with fixed $\sigma$ uniquely determines a family of parametric SDEs in \eq{1}.
+Indeed, modern successes of diffusion models in synthesizing high-fidelity data
+\citep{song2021score,dhariwal2021diffusion}
+are attributed, partly, to constructing $p_t$ as a mixture of tractable conditional probability paths~\citep{liu2023flow,albergo2023stochastic,tong2023improving}.
+These tractabilities enable scalable algorithms that ``\emph{match $u_t^\theta$ given $p_t$}'',
+hereafter referred to as \emph{matching algorithms}.\looseness=-1
+
+Alternatively, one may also specify $p_t$ implicitly as the optimal solution to some objective function, with examples such as optimal transport~(OT; \cite{villani2009optimal}), or the \SB{} problem (SB; \cite{schr1931uber,fortet1940resolution,de2021diffusion}).
+SB generalizes standard diffusion models to arbitrary $\mu$ and $\nu$ with fully nonlinear stochastic processes and, among all possible SDEs that match between $\mu$ and $\nu$,
+seeks the \emph{unique} $u_t$ that minimizes the kinetic energy.
+
+While finding the transport with minimal kinetic energy can be motivated from statistical physics or
+entropic optimal transport \citep{peyre2019computational,vargas2021solving}, %
+with kinetic energy often being correlated with sampling efficiency in generative modeling~\citep{chen2022likelihood,shaul2023kinetic},
+it nevertheless limits the flexibility in the {design} of ``optimality''.
+Indeed, kinetic energy corresponds to the squared-Euclidean cost in OT, which, despite its popularity, is merely one among numerous alternatives available for deployment \citep{di2017optimal}.
+On one hand, it remains debatable whether the $\ell_2$ distance defined in the original data space
+(\eg pixel space for images), as opposed to other metrics,
+are best suited for quantifying the optimality of transport maps.
+On the other hand, distribution matching in general scientific domains,
+such as population modeling \citep{ruthotto2020machine}, robot navigation \citep{liu2018mean},
+or molecule simulation \citep{noe2020machine}, often involves more complex optimality conditions that require more general algorithms to handle.
+
+To this end, we advocate a generalized setup for distribution matching,
+previously introduced as the \GSB{} problem
+(GSB; \cite{chen2015optimal,chen2023density,liu2022deep}):
+\begin{align}
+   \cgreenblue{\min_\theta \int_0^1\E_{p_t}\br{\frac{1}{2}\norm{u_t^\theta(X_t)}^2 + V_t(X_t)}\dt }
+   \quad \text{\cyellow{subject to \eq{1} or, equivalently, \eq{2}}}.
+   \label{eq:3}
+\end{align}
+GSB is a distribution matching problem---as it still seeks a
+diffusion model \eq{1} that transports $\mu$ to $\nu$. Yet, in contrast to standard SB,
+the objective of GSB involves an additional state cost $V_t$ which
+affects the solution by quantifying a penalty---or equivalently a reward---similar to general decision-making problems. This state cost can also include distributional properties of the random variable $X_t$.
+Examples of $V_t$ include, \eg the mean-field interaction in opinion propagation \citep{gaitonde2021polarization},
+quantum potential \citep{philippidis1979quantum}, or a geometric prior.
+Solving GSB problems involves addressing two distinct aspects:
+\cgreenblue{\textbf{optimality}} \eq{3} and \cyellow{\textbf{feasibility}} \eq{2}.
+Within the set of feasible solutions that satisfy \eq{2},
+GSB considers the one with the lowest objective in \eq{3} to be optimal.
+Therefore, it is essential to develop algorithms that
+search \emph{within} the feasible set for the optimal solution.
+Unfortunately, existing methods that approximate solutions to \eq{3}
+either require relaxing feasibility \citep{koshizuka2023neural}, or,
+following the design of Sinkhorn algorithms \citep{cuturi2013sinkhorn},
+prioritize optimality over feasibility.
+While an exciting line of new matching algorithms \citep{peluchetti2023diffusion,shi2023diffusion}
+has been developed for SB, \ie when $V_t := 0$, to ensure that the solutions are proximity to the feasible set throughout training,
+it remains unclear whether, or how, these ``\textit{SB Matching}'' (SBM) algorithms can be extended
+to handle nontrivial $V_t$.
+
+We propose \textbf{{Generalized Schr{\"o}dinger Bridge Matching (GSBM)}},
+a new matching algorithm that generalizes SBM to nontrivial $V_t$.
+We discuss how such a generalization can be tied to a
+\emph{conditional stochastic optimal control} (CondSOC) problem,
+from which existing SBM algorithms can be derived as special cases.
+We develop scalable solvers to the CondSOC using Gaussian path approximation, further debiased with path integral theory \citep{kappen2005path}.
+GSBM inherits a similar algorithmic characterization to its ancestors~\citep{liu2023flow,shi2023diffusion},
+in that, during the optimization process, the learned $p_0^\theta$ and $p_1^\theta$ induced by the subsequent solutions of $\ut$ remain close to the boundary marginals $(\mu,\nu)$ and preserve them exactly under stricter theoretical conditions; see Sec.~\ref{sec:3.1} for details.
+This distinguishes GSBM from prior methods (\eg \citet{liu2022deep}) that learn approximate solutions to the same problem \eq{3} but whose subsequent solutions only approach $(\mu,\nu)$ after final convergence.
+This further results in a framework that relies solely on samples from $\mu,\nu$---without knowing their densities---and enjoys stable convergence,
+making it suitable for high dimensional applications.
+A note on the connection to stochastic optimal control and related works \citep{liu2022deep} can be found in \Cref{app:review}.
+Summarizing, we present the following contributions:\looseness=-1
+\begin{itemize}[leftmargin=10pt]
+   \item
+    We propose GSBM, a new matching algorithm for learning diffusion models between two distributions that also respect some task-specific optimality structures in \eq{3} via specifying $V_t$.
+   \item
+    GSBM casts recent matching methods as conditional stochastic optimal control problems, from which nontrivial $V_t$ can be incorporated and solved at scale via Gaussian path approximation.
+   \item
+    Compared to prior methods, \eg \citet{liu2022deep}, that also provide approximate solutions to \eq{3},
+    GSBM enjoys stable convergence, improved scalability, and,
+    crucially, maintains a transport map that remains \emph{much} closer to the distribution boundaries throughout the entire training.
+   \item
+   Through extensive experiments, we showcase GSBM's remarkable capabilities across a variety of distribution matching problems, ranging from standard crowd navigation and 3D navigation over LiDAR manifolds, to high-dimensional opinion modeling and unpaired image translation.
+\end{itemize}
+
+
+
+\section{Preliminaries: Matching Diffusion Models given Prob. Paths}
+
+
+\begin{figure}[t]
+    \vskip -0.05in
+    \begin{minipage}[t]{0.46\textwidth} %
+       \begin{algorithm}[H]
+          \caption{\texttt{match} (implicit)}
+          \label{alg:iml}
+          \begin{algorithmic}
+          \Require $p_t$ s.t. $p_0 = \mu$, $p_1 = \nu$
+          \vphantom{$p_t := \E_{p_{0,1}}[p_{t|0,1}]$ s.t. $p_0 {=} \mu$, $p_1 {=} \nu$,}
+          \Repeat
+             \State Sample $X_0\sim p_0$, $X_t \sim p_t$, $X_1 \sim p_1$
+             \vphantom{Sample $X_0, X_1\sim p_{0,1}$, $X_t \sim p_{t|0,1}$}
+             \State \vphantom{Compute $u_{t|0,1}$ given $(X_0,X_t,X_1)$}
+             \State Take gradient step w.r.t. $\Limp(\theta)$
+          \Until{converges}
+          \State \Return{$\nabla s_t^{\theta^\star}$}
+          \end{algorithmic}
+       \end{algorithm}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.53\textwidth}
+       \begin{algorithm}[H]
+          \caption{\texttt{match} (explicit)}
+          \label{alg:exp}
+          \begin{algorithmic}
+          \Require $p_t := \E_{p_{0,1}}[p_{t|0,1}]$ s.t. $p_0 {=} \mu$, $p_1 {=} \nu$, \cgreen{$u_{t|0,1}$}
+          \Repeat
+             \State Sample $X_0, X_1\sim p_{0,1}$, $X_t \sim p_{t|0,1}$
+             \State \cgreen{Compute $u_{t|0,1}$ given $(X_0,X_t,X_1)$}
+             \State Take gradient step w.r.t. $\Lexp(\theta)$
+          \Until{converges}
+          \State \Return{$u_t^{\theta^\star}$}
+          \end{algorithmic}
+       \end{algorithm}
+    \end{minipage}
+    \vskip -0.05in
+\end{figure}
+
+As mentioned in Sec.~\ref{sec:1}, the goal of matching algorithms
+is to learn a SDE parametrized with $u_t^\theta$ such that
+its FPE \eq{2} matches some prescribed marginal $p_t$ for all $t\in[0,1]$.
+In this section, we review two classes of matching algorithms
+that will play crucial roles in the development of our GSBM.
+
+\textbf{Entropic Action Matching (implicit).$\quad$}
+This is a recently proposed matching method \citep{neklyudov2023action} that learns the unique gradient field
+governing an FPE prescribed by $p_t$.
+Specifically, let $s_t^\theta(X_t): \sR^d \times [0,1] \rightarrow \sR$ be a parametrized function,
+then the unique gradient field $\nabla s_t^\theta(X_t)$
+---by which the probability density of the pushforward from $\mu$ at time $0$ to $t$ \text{matches} $p_t$---minimizes
+\begin{align}
+   \Limp(\theta) := \E_\mu\br{s_0^\theta(X_0)} - \E_\nu\br{s_1^\theta(X_1)}
+    + \int_0^1 \E_{p_t}\br{
+        \fracpartial{s_t^\theta}{t} + \frac{1}{2}\norm{\nabla s_t^\theta}^2 + \frac{\sigma^2}{2}\Delta s_t^\theta
+    } \dt.
+      \label{eq:4}
+\end{align}
+\citet{neklyudov2023action} showed that $\Limp(\theta)$ \emph{implicitly matches} a unique gradient field $\nabla s_t^\star$
+with least kinetic energy, \ie
+it is equivalent to minimizing $\int_0^1 \E_{p_t}\br{\frac{1}{2}\norm{\nabla s_t^\theta - \nabla s_t^\star}^2} \dt$,
+where
+\begin{align*}
+    \nabla s_t^\star {=} \argmin_{u_t}
+    \int_0^1\E_{p_t}\br{\frac{1}{2}\norm{u_t(X_t)}^2 }\dt \text{~ subject to \eq{2}}.
+\end{align*}
+
+\textbf{Bridge \& Flow Matching (explicit).$\quad$}
+If the $p_t$ can be factorized into $p_t := \E_{p_{0,1}}[p_t(X_t|x_0, x_1)]$,
+where the conditional density $p_t(X_t|x_0, x_1)$---denoted with the shorthand $p_{t | 0, 1}$---is associated with an SDE,
+$\rd X_t = u_t(X_t|x_0,x_1) \dt + \sigma \dWt$,
+then it can be shown \citep{lipman2023flow,albergo2023building,liu2023i2sb} that the minimizer of (see \Cref{app:bm} for the derivation)
+\begin{align}
+   \Lexp(\theta)
+      := \int_0^1 \E_{p_{0,1}} {  \E_{p_{t|0,1}}\br{\frac{1}{2}\norm{u^\theta_t(X_t) - u_t(X_t|x_0,x_1)}^2} \dt},
+    \label{eq:5}
+\end{align}
+similar to $\nabla s_t^{\theta^\star}$,
+also satisfies the FPE prescribed by $p_t$.
+In other words, $u^{\theta^\star}_t$ preserves $p_t$ for all $t$.
+
+\textbf{Implicit \textit{vs.} explicit matching losses.$\quad$}
+While Entropic Action Matching presents a general matching method with the least assumptions,
+its implicit matching loss $\Limp$ \eq{4} scales unfavorably to high-dimensional applications,
+due to the need to approximate the Laplacian (using \eg \citet{hutchinson1989stochastic}), and also introduces unquantifiable bias when optimizing over a restricted family of functions such as deep neural networks.
+The explicit matching loss $\Lexp$ \eq{5} offers a computationally efficient alternative but requires additional information, namely $u_t(X_t|x_0,x_1) \equiv u_{t|0,1}$.
+Remarkably, in both cases, the minimizers preserve the prescribed marginal $p_t$.
+Hence, if $p_0 = \mu$ and $p_1 = \nu$, these matching algorithms shall \emph{always} return
+a feasible solution---a diffusion model that matches between $\mu$ and $\nu$.
+We summarize the aforementioned two methods in Alg.~\ref{alg:iml} and \ref{alg:exp}.
+
+
+
+
+\section{\GSBM{}
+
+
+We propose \textbf{\GSBM{} (GSBM)}, a novel matching algorithm that,
+in contrast to those in Sec.~\ref{sec:2} assuming prescribed $p_t$, concurrently optimizes $p_t$ to minimize \eq{3} subject to the feasibility constraint \eq{2}.
+All proofs can be found in \Cref{app:proof}.
+
+\subsection{Alternating optimization scheme} \label{sec:3.1}
+
+Let us revisit the GSB problem \eq{3}, particularly its FPE constraint in \eq{2}.
+Recent advances in dynamic optimal transport \citep{liu2023flow} and SB \citep{peluchetti2023diffusion}
+propose a decomposition of this dynamical constraint into two components:
+the marginal $p_{t}$, $t\in(0,1)$, and the joint coupling between boundaries $p_{0,1}$,
+and employ alternating optimization between $\ut$ and $p_t$.
+Specifically, these optimization methods,
+which largely inspired recent variants of SB Matching \citep{shi2023diffusion} and our GSBM,
+generally obey the following recipe, \emph{alternating} between two stages:
+\vspace*{-3pt}
+\begin{enumerate}[leftmargin=1.7cm]
+   \item[Stage 1:] Optimize the objective, in our case, \eq{3} w.r.t. the drift $u_t^\theta$ given fixed $p_{t\in[0,1]}$.
+   \item[Stage 2:] Optimize \eq{3} w.r.t. the marginals $p_{t\in(0,1)}$ given the coupling $p^\theta_{0,1}$ defined by $u_t^\theta$. \label{i1}
+\end{enumerate}
+\vspace*{-3pt}
+
+Notice particularly that the optimization posed in Stage 1 resembles the matching algorithms in \Secref{2}.
+We make the connection concrete in the following proposition:
+\vspace*{2pt}
+\begin{restatable}[Stage 1]{prop}{propone}\label{prop:1}
+   The unique minimizer to Stage 1 coincides with $\nabla s_t^\star(X_t)$.
+\end{restatable}
+\vspace*{-2pt}
+This may seem counter-intuitive at first glance, both the kinetic energy and $V_t$ show up in \eq{3}.
+This is due to the fact that $\ut$ no longer affects the value of $\E_{p_t}[V_t(X_t)]$ once $p_t$ is fixed, and out of all $\ut$ whose probability density matches $p_t$, the gradient field is the unique minimizer of kinetic energy.\footnote{
+    Notably, the absence of $V_t$ in optimization was previously viewed as an issue for Sinkhorn methods aimed at solving \eq{3} \citep{liu2022deep}. Yet, in GSBM, it appears naturally from how the optimization is decomposed.
+}
+We emphasize that the role of Stage~1 is to learn a $\ut$ given the prescribed $p_t$ and provides a better coupling $p_{0,1}^\theta$ which is then used to refine $p_t$ in Stage~2. Therefore, the explicit matching loss \eq{5} provides just the same algorithmic purpose.
+Though it only upper-bounds the objective of Stage~1,
+its solution often converges stably from a measure-theoretic perspective (see \Cref{app:bm} for more explanations).
+In practice, we find that $\Lexp$ performs as effectively as $\Limp$, while exhibiting significantly improved scalability, hence better suited for high-dimensional applications.
+
+\newcommand{\annoCell}[2]{{\specialcell{#1 \\[-3pt] {\scriptsize (#2)} }}}
+\newcommand{\annoCellr}[2]{{\specialcellr{#1 \\[-3pt] {\scriptsize (#2)} }}}
+
+We now present our main result, which shows that Stage 2 of GSBM can be cast as a variational problem,
+where $V_t$ appears through optimizing a conditional controlled process.
+\begin{restatable}[{Stage 2}; Conditional stochastic optimal control; CondSOC]{prop}{proptwo}\label{prop:2}
+    Let the minimizer to Stage~2 be factorized by
+    $p_t(X_t) = \int p_t(X_t|x_0, x_1) p^\theta_{0,1}(x_0,x_1) \rd x_0 \rd x_1$
+    where $p_{0,1}^\theta$
+    is the boundary coupling induced by solving \eq{1} with $\ut$.
+    Then, $p_t(X_t|x_0, x_1) \equiv p_{t|0,1}$ solves %
+    :
+    \begin{subequations}
+        \label{eq:6}
+        \begin{align}
+        \min_{u_{t|0,1}} \calJ := \int_0^1\E_{p_t(X_t | x_0, x_1)} \br{\frac{1}{2}\norm{u_t(X_t|x_0, x_1)}^2 + V_t(X_t)}\dt \label{eq:6a} \\
+        \text{s.t. }  \rd X_t = u_t(X_t|x_0, x_1)\dt + \sigma \dWt, \quad {X_0 = x_0,~~X_1 = x_1}
+        \label{eq:6b}
+        \end{align}
+    \end{subequations}
+\end{restatable}
+\begin{wrapfigure}[13]{r}{0.47\textwidth} %
+    \vskip -0.17in
+    \captionsetup{type=table}
+    \caption{
+        Solutions to \eq{6} w.r.t. different $V_t$,
+        and how they link to different methods, including
+        Rectified flow \citep{liu2023flow}, DSBM \citep{shi2023diffusion},
+        and our GSBM.
+    }
+    \vskip -0.1in
+    \label{tb:V}
+    \centering
+        \setlength{\tabcolsep}{5pt}
+        \begin{tabular}{rccc}
+            \toprule
+            Method & $V_t(x)$ & $p_t(X_t|x_0,x_1)$ \\
+            \midrule
+            \annoCellr{RecFlow}{$\sigma{=}0$}
+            & 0 &
+            \annoCell{straight line}{\Lemmaref{3} with $\alpha,\sigma{\rightarrow}0$}
+            \\
+            \annoCellr{DSBM}{$\sigma{>}0$}
+            & 0 &
+            \annoCell{Brownian bridge}{\Lemmaref{3} with $\alpha{\rightarrow}0$}
+            \\
+            \midrule
+            \multirow{2}{*}{\annoCellr{\textbf{GSBM}}{$\sigma{\ge}0$}}
+             & quadratic & \Lemmaref{3} \\[1pt]
+             & arbitrary & \Secref{3.2} \\
+            \bottomrule
+          \end{tabular}
+\end{wrapfigure}
+Note that \eq{6} differs from \eq{3} only in the boundary conditions,
+where the original distributions $\mu,\nu$ are replaced by the two end-points
+$(x_0,x_1)$ drawn from the coupling induced by $\ut$.
+Generally, the solution to \eq{6} is not known in closed form, except in special cases.
+In \Lemmaref{3}, we show such a case when $V(x)$ is quadratic and $\sigma {>} 0$.
+Note that as $V(x)$ vanishes,
+$p_{t|0,1}$ in \Lemmaref{3} collapses to the Brownian bridge and
+GSBM recovers the matching algorithm appearing in prior works~\citep{liu2022rectified,shi2023diffusion} that approximate OT/SB, as summarized in \Cref{tb:V}.
+This suggests that our \Propref{2} directly generalizes them to nontrivial $V_t$.
+\begin{restatable}[Analytic solution to \eq{6} for quadratic $V$ and $\sigma>0$]{lm}{lmthree}\label{lm:3}
+    Let $V(x) := \alpha \|\sigma x\|^2$, $\alpha,\sigma > 0$, then the optimal solution to \eq{6} follows a Gaussian path
+    $X_t^\star \sim \calN(c_t x_0 + e_t x_1, \gamma_t^2\mI_d)$, where
+    \vspace*{-2pt}
+    \begin{align*}
+        c_t = \frac{\sinh(\eta (1{-}t))}{\sinh \eta},~~~
+        e_t = \cosh(\eta (1{-}t)) - c_t \cosh\eta,~~~
+        \gamma_t = \sigma \sqrt{\frac{\sinh(\eta (1{-}t))}{\eta} e_t},~~~
+        \eta = \sigma \sqrt{2\alpha}.
+    \end{align*}
+    These coefficients
+    recover Brownian bridges as $\alpha \rightarrow 0$ and,
+    if further $\sigma \rightarrow 0$, straight lines.
+\end{restatable}
+\subsection{Approximate solutions to CondSOC for general nonlinear state cost} \label{sec:3.2}
+
+We develop methods for searching the approximate solutions to CondSOC in \eq{6},
+when $V_t$ is neither quadratic nor degenerate.
+As we need to search for every pair $(x_0, x_1)$ drawn from $p_{0,1}^\theta$,
+we seek efficient methods that are parallizable and {simulation-free}---outside of sampling from $p_{0,1}^\theta$.
+
+\begin{figure}[t]
+  \centering
+  \begin{minipage}{0.43\textwidth}
+      \centering
+      \includegraphics[width=0.95\textwidth]{fig/compressed/fig1.png}
+      \vskip -0.1in
+      \caption{
+        Example of spline optimization (Alg.~\ref{alg:spline}) for $\mu_t\in\sR^2, \gamma_t\in\sR$,
+        and the resulting CondSOC \eq{6} solution.
+      }
+      \label{fig:spline-opt}
+  \end{minipage}
+  \hfill
+    \begin{minipage}{0.55\textwidth}
+      \begin{algorithm}[H]
+         \caption{\texttt{SplineOpt}}
+         \label{alg:spline}
+         \begin{algorithmic}
+         \Require $x_0, x_1, \{X_{t_k}\}$ where $0 {<} t_1 {<} \cdots {<} t_K {<} 1$
+         \State Initialize $\mu_t$, $\gamma_t$ with \eq{9}
+         \For{$m = 0$ \textbf{to} $M$}
+            \State Sample $X_t^i \sim \calN(\mu_t, \gamma_t^2\mI_d)$ with \eq{7}
+            \State Compute $V_t(X_t^i)$ and $u_t(X_t^i|x_0,x_1)$ with \eq{8}
+            \State Estimate the objective $\calJ$ in \eq{6a}
+            \State Take gradient step w.r.t control pts. $\{X_{t_k},\gamma_{t_k}\}$
+         \EndFor
+         \State \Return $p_{t|0,1}$ parametrized by optimized $\mu_t$, $\gamma_t$
+         \end{algorithmic}
+      \end{algorithm}
+  \end{minipage}
+  \vskip -0.1in
+\end{figure}
+
+\textbf{Gaussian path approximation.}
+Drawing inspirations from \Lemmaref{3}, and since the boundary conditions of \eq{6} are simply two fixed points,
+we propose to approximate the solution to \eq{6} as a Gaussian probability path pinned at $x_0, x_1$:
+\begin{align}
+   p_t(X_t|x_0,x_1) \approx \calN(\mu_t, \gamma_t^2\mI_d),
+   \quad\text{s.t.}\quad \mu_0 = x_0,~~\mu_1 = x_1,~~\gamma_0 = \gamma_1 = 0,
+   \label{eq:7}
+\end{align}
+where $\mu_t \in \sR^d$ and $\gamma_t \in \sR$
+are respectively the time-varying mean and standard deviation.
+An immediate result following from \eq{7} is
+a closed-form conditional drift \citep{sarkka2019applied} (see \Cref{app:gpath} for the derivation):
+\begin{align}
+   u_t(X_t|x_0, x_1) = \partial_t \mu_t + a_t (X_t - \mu_t), \quad \text{where }
+   a_t := \frac{1}{\gamma_t}\pr{\partial_t \gamma_t - \frac{\sigma^2}{2\gamma_t}}.
+   \label{eq:8}
+\end{align}
+Notice that $a_t \in \sR$ is a time-varying scalar.
+Hence, however complex $\mu_t,\sigma_t$ may be, the underlying SDE
+(with the conditional drift $u_t(X_t|x_0, x_1)$ in \eq{8}) remains linear.
+Also note that this drift, since it is a gradient field, is the kinetic optimal choice out of all drifts that generate $p_t(X_t|x_0,x_1)$.
+
+\textbf{Spline optimization.}
+To facilitate efficient optimization,
+we parametrize $\mu_t,\sigma_t$ respectively as $d$- and $1$-D splines with
+some control points $X_{t_k} \in \sR^d$ and $\gamma_{t_k} \in \sR$ sampled sparsely and uniformly
+along the time steps $0 < t_1 < ... < t_K < 1$:
+\begin{align}
+   \mu_t := \mathrm{Spline}(t;~x_0, \{X_{t_k}\}, x_1) \qquad
+   \gamma_t := \mathrm{Spline}(t;~\gamma_0{=}0, \{\gamma_{t_k}\}, \gamma_1{=}0).
+   \label{eq:9}
+\end{align}
+Notice that the parameterization in \eq{9} satisfy the boundary in \eq{7},
+hence remains as a feasible solution to \eq{6b} however $\{X_{t_k},\gamma_{t_k}\}$ change.
+The number of control points $K$ is much smaller than discretization steps ($K{\le}$30 for all experiments).
+This significantly reduces the memory complexity compared to prior works \citep{liu2022deep},
+which require caching entire discretized SDEs.
+Alg.~\ref{alg:spline} summarizes the spline optimization,
+which, crucially, involves no simulation of an SDE~\eq{6b}.
+This is because we optimize using just independent samples from $p_{t|0,1}$, which are known in closed form. Since the CondSOC problem relaxes distributional boundary constraints to just two end-points, our computationally efficient variational approximation holds out very well in practice. Furthermore, since we only need to optimize very few spline parameters, we did not find the need to consider amortized variational inference~\citep{kingma2014auto}. Finally, note that since we solve CondSOC for each pair $(x_0, x_1) \sim p_{0,1}^\theta$ and later marginalize to construct $p_t$, we need not explicitly consider mixture solutions for $p_{t|0,1}$, as long as we sample sufficiently many pairs of $(x_0, x_1)$.
+In practice, we initialize $\{X_{t_k}\}$ from $\ut$,%
+\footnote{This induces no computational overhead, as $\{X_{t_k}\}$ are intermediate steps when simulating $x_0,x_1 \sim p_{0,1}^\theta$.}
+and $\gamma_{t_k} := \sigma \sqrt{t_k(1-t_k)}$ from the standard deviation of the Brownian bridge.
+\Cref{fig:spline-opt} demonstrates a 2D example.
+\textbf{Resampling using path integral theory.}
+In cases where the family of Gaussian probability paths is not sufficient for modeling solutions of \eq{6},
+a more rigorous approach involves the path integral theory \citep{kappen2005path},
+which provides analytic expression to the optimal density of \eq{6} given any sampling distribution with sufficient support.
+We discuss this in the following proposition.
+\begin{restatable}[Path integral solution to \eq{6}]{prop}{propfour}\label{prop:4}
+   Let $r(\bar X|x_0, x_1)$ be a distribution
+   absolutely continuous w.r.t. the Brownian motion, denoted $q(\bar X|x_0)$,
+   where we shorthand $\bar X \equiv X_{t\in[0,1]}$.
+    Suppose $r$ is associated with an SDE
+   $\rd X_t = v_t(X_t) \dt + \sigma \dWt$, $X_0 {=} x_0$, $X_1 {=} x_1$, $\sigma{>}0$.
+   Then, the optimal, path-integral solution to~\eq{6} can be obtained via
+   \begin{align}\label{eq:pi_weight}
+        p^\star(\bar X|x_0, x_1) = \textstyle \frac{1}{Z} \omega(\bar X|x_0, x_1)r(\bar X|x_0, x_1),
+   \end{align}
+   where $Z$ is the normalization constant and $\omega$ is the importance weight:
+   \begin{align}\label{eq:impt-w}
+        \omega(\bar X|x_0, x_1) :=
+         \exp\pr{-\int_0^1 \frac{1}{\sigma^2}\pr{V_t(X_t) + \frac{1}{2}\|v_t(X_t)\|^2} \dt - \int_0^1 \frac{1}{\sigma} v_t(X_t)^\top\dWt}.
+   \end{align}
+\end{restatable}
+\begin{wrapfigure}[7]{r}{0.44\textwidth}
+   \begin{minipage}[t]{0.44\textwidth}
+      \begin{algorithm}[H]
+         \caption{\texttt{ImptSample}}
+         \label{alg:pi}
+         \begin{algorithmic}
+         \Require $p_{t|0,1},\mu_t, \gamma_t$, $\sigma > 0$
+         \State Sample $X_{t\in[0,1]}^i$ from \eq{6b} given \eq{8}
+         \State Compute $\omega^i$ with \eq{impt-w} and $Z = \sum_i \omega^i$
+         \State \Return Resample $p_{t|0,1}$ with \eq{pi_weight}.
+         \end{algorithmic}
+      \end{algorithm}
+   \end{minipage}
+\end{wrapfigure}
+In practice,
+$r(\bar X|x_0, x_1)$ can be any distribution,
+but the closer it is to the optimal $p^\star$,
+the lower the variance of the importance weights $\omega$ \citep{kappen2016adaptive}.
+It is therefore natural to consider using the aforementioned Gaussian probability paths as $r(\bar X|x_0, x_1)$, properly optimized with Alg.~\ref{alg:spline}, then resampled following proportional to \eq{pi_weight}---this is equivalent in expectation to performing self-normalized importance sampling but algorithmically simpler and helps reduce variance when many samples have low weight values.
+While path integral resampling may make $\Lexp$ less suitable
+due to the change in the conditional drift governing $p^\star(\bar X|x_0, x_1)$
+from \eq{8}, we still observe empirical, sometimes significant, improvement (see Sec.~\ref{sec:ablation}).
+Overall, we propose path integral resampling as an optional step in our GSBM algorithm, as it requires sequential simulation.%
+\footnote{
+   We note that simulation of trajectories $\bar X {\equiv} X_{t\in[0,1]}$ from (\ref{eq:6a},\ref{eq:8})
+   can be done efficiently by computing the covariance function,
+   which requires merely solving an 1D ODE; see \Cref{app:gpath} for a detailed explanation. \label{ft:4}
+}
+In practice, we also find empirically that the Gaussian probability paths alone perform sufficiently well and is easy to use at scale.
+
+\subsection{Algorithm outline \& convergence analysis} \label{sec:3.3}
+
+\begin{algorithm}[t]
+    \vskip -0.05in
+   \caption{\GSBM{} (GSBM)}
+   \label{alg:gsbm}
+   \begin{algorithmic}[1]
+   \State Initialize $u_t^\theta$
+         and set $p_t$ as the solution to \eq{6} with
+         independent coupling $p_{0,1} := \mu \otimes \nu$
+   \Repeat
+      \State $u_t^\theta \leftarrow$ \texttt{match(}$p_t$\texttt{)} or \texttt{match(}$p_t, u_{t|0,1}$\texttt{)}
+         \Comment{Alg.~\ref{alg:iml} or \ref{alg:exp}}
+      \State Sample $X_0, X_1, X_{t_k}$ from $u_t^\theta$ on timesteps $0{<}t_1 < {\cdots} < t_K{<}1$
+      \State Optimize $p_{t|0,1},\mu_t, \gamma_t \leftarrow$ \texttt{SplineOpt(}$X_0, X_1, \{X_{t_k}\}$\texttt{)}
+      \Comment{Alg.~\ref{alg:spline}}
+      \State Determine $u_{t|0,1}$ from $\mu_t, \gamma_t$ using \eq{8}
+      \If{apply path integral resampling} \Comment{optional step}
+         \State $p_{t|0,1} \leftarrow$ \texttt{ImptSample(}$p_{t|0,1}$\texttt{)}
+         \Comment{Alg.~\ref{alg:pi}}
+      \EndIf
+   \Until{converges}
+   \end{algorithmic}
+   \vskip -0.05in
+\end{algorithm}
+
+We summarize our GSBM in Alg.~\ref{alg:gsbm},
+which, as previously sketched in \Secref{3.1}, alternates between Stage 1 (line 3) and Stage 2 (lines 4-9).
+In contrast to DSBM \citep{shi2023diffusion}, which constructs analytic $p_{t|0,1}$ and $u_{t|0,1}$ when $V_t=0$,
+our GSBM solves the underlying CondSOC \eq{6} with nontrivial $V_t$.
+We stress that these computations are easily parallizable
+and admit fast converge due to our efficient parameterization,
+hence inducing little computational overhead (see \Secref{ablation}).
+
+We note that \textbf{GSBM (Alg.~\ref{alg:gsbm}) remains functional even when $\sigma{=}0$},
+although the GSB problem~\eq{3} was originally stated with $\sigma{>}0$ \citep{chen2015optimal}.
+In such cases, the implicit and explicit matching still preserve $p_t$ and
+correspond, respectively, to action \citep{neklyudov2023action} and flow matching \citep{lipman2023flow},
+and CondSOC corresponds to
+a generalized geodesic path accounting for $V_t$.
+
+Finally, we provide convergence analysis in the following theorems.
+\begin{restatable}[Local convergence]{thm}{thmfive}\label{thm:5}
+   Let the intermediate result of Stage 1 and 2,
+   after repeating $n$ times, be $\theta^{n}$.
+   Then, its objective value in \eq{3}, $\calL(\theta^{n})$,
+   is monotonically non-increasing as $n$ grows:
+   \begin{align*}
+      \calL({\theta^{n}}) \ge \calL({\theta^{n+1}}). %
+   \end{align*}
+\end{restatable}
+\begin{restatable}{thm}{thmsix}\label{thm:6}
+   The optimal solution to GSB problem \eq{3} is a fixed point of GSBM, Alg.~\ref{alg:gsbm}.
+\end{restatable}
+
+
+
+
+\section{Experiment}
+
+\vspace*{-2pt}
+
+We test out GSBM on a variety of distribution matching tasks, each entailing its own state cost $V_t(x)$.
+By default, we use the explicit matching loss (\ref{eq:5}) without path integral resampling, mainly due to its scalability, but ablate their relative performances in Sec.~\ref{sec:ablation}.
+Our GSBM is compared primarily to DeepGSB \citep{liu2022deep}, a Sinkhorn-inspired machine learning method that outperforms existing deep methods \citep{ruthotto2020machine,lin2021alternating}.
+Other details are in \Cref{app:exp}.
+\begin{figure}[t]
+    \vskip -0.05in
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=0.95\linewidth]{fig/compressed/f_vs_o.png}
+        \vskip -0.12in
+        \caption{
+            Feasibility \textit{vs.} optimality
+            on three crowd navigation tasks with mean-field cost.
+        }
+        \label{fig:2d-fvso}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.535\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{fig/compressed/diverge.png}
+        \vskip -0.1in
+        \caption{
+            Simulation of SDEs with the $\ut$ after long training.
+            Notice how DeepGSB diverges drastically from our GSBM,
+            which satisfies feasibility at all time.
+        }
+        \label{fig:diverge}
+    \end{minipage}
+    \vskip -0.05in
+\end{figure}
+
+\begin{figure}[t]
+    \vskip -0.1in
+    \centering
+    \captionsetup{justification=centering}
+    \begin{subfigure}[t]{0.2\linewidth}
+        \includegraphics[width=\linewidth, trim={50px 0 50px 0}, clip]{fig/compressed/lidar_tangent_plane.png}
+        \caption*{LiDAR surface \\ \& a tangent plane}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.4\linewidth}
+        \includegraphics[width=0.5\linewidth, trim={50px 0 50px 0}, clip]{fig/compressed/lidar_trajs3d.png}
+        \includegraphics[width=0.45\linewidth]{fig/compressed/lidar_trajs2d.png}
+        \caption*{
+            GSBM; objective value \eq{3} $=$ 6209 \\
+            (\textit{left}: 3D view, \textit{right}: 2D view)
+        }
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.2\linewidth}
+        \includegraphics[width=0.9\linewidth]{fig/compressed/lidar-deepgsb-2d.png}
+        \caption*{DeepGSB; obj.=7747 \\ (2D view)}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.2\linewidth}
+        \includegraphics[width=0.9\linewidth]{fig/compressed/lidar_trajs2d_p0p1.png}
+        \caption*{{\color{bostonred}$p_0$} and {\color{amethyst}$p_1$} \\ (2D view)}
+    \end{subfigure}
+    \vskip -0.05in
+    \caption{Crowd navigation over a LiDAR surface. Height is denoted by the grayscale color.}
+    \label{fig:lidar_rainier}
+\end{figure}
+
+\subsection{Crowd navigation with mean-field and geometric state costs} \label{sec:crowd-nav}
+
+We first validate our GSBM in solving crowd navigation, a canonical example for the GSB problem~\eq{3}.
+Specifically, we consider the following two classes of tasks
+(see \Cref{app:setup} for details):
+
+\textbf{Mean-field interactions.$\quad$}
+These are synthetic dataset in $\R^2$ introduced in DeepGSB,
+where the state cost
+$V_t$ consists of two components: an obstacle cost that assesses the physical constraints, and an ``mean-field'' interaction cost between individual agents and the population density $p_t$:
+\begin{align}
+    V_t(x) = L_{\text{obstacle}}(x) + L_{\text{interact}}(x; p_t),
+    ~~L_{\text{interact}}(x; p_t) =
+    \begin{cases}
+        \log p_t(x)  & \text{(entropy)} \\
+        \E_{y\sim p_t}[\frac{2}{\norm{x-y}^2 + 1}] & \text{(congestion)}
+    \end{cases}.
+    \label{eq:V-mf}
+\end{align}
+Both entropy and congestion costs are fundamental elements of mean-field games.
+They measure the costs incurred for individuals to stay in densely crowded regions with high population density.
+
+\textbf{Geometric surfaces defined by LiDAR.}~~~
+A more realistic scenario involves navigation through a complex geometric surface.
+In particular, we consider surfaces observed through LiDAR scans of Mt. Rainier~\citep{lidar_rainier}, thinned to 34,183 points (see Fig.~\ref{fig:lidar_rainier}).
+We adopt the state cost
+\begin{equation}\label{eq:V-lidar}
+    V(x) = L_\text{manifold}(x) + L_\text{height}(x),~~L_\text{manifold}(x) = \norm{\pi(x) - x}^2,~~L_\text{height}(x) = \exp\left({\pi^{(z)}(x)}\right),
+\end{equation}
+where $\pi(x)$ projects $x$ to an approximate tangent plane fitted by a $k$-nearest neighbors (see Fig.~\ref{fig:lidar_rainier} and \Cref{app:lidar_details})
+and $\pi^{(z)}(x)$ refers to the $z$-coordinate of $\pi(x)$, \ie its height.
+\Cref{fig:2d-fvso} tracks the feasibility and optimality, measured by $\calW_2(p_1^\theta,\nu)$ and \eq{3}, of three mean-field tasks (Stunnel, Vneck, GMM).
+On all tasks, our GSBM maintains feasible solutions throughout training while gradually improving optimality.
+In contrast, due to the lack of convergence analysis,
+training DeepGSB exhibits relative instability and occasional divergence (see Fig.~\ref{fig:diverge}).
+As for the geometric state costs, Fig.~\ref{fig:lidar_rainier} demonstrates how our GSBM faithfully recovers the desired multi-modal distribution: It successfully identify two viable pathways with low state cost, one of which bypasses the saddle point.
+In constrast, DeepGSB generates only uni-modal distributions with samples scattered over tall mountain regions with high state cost,
+yielding a higher objective value \eq{3}.
+
+
+\begin{figure}[t]
+    \vskip -0.05in
+    \centering
+    \includegraphics[width=0.495\textwidth]{fig/compressed/afhq_result_bm.png}
+    \includegraphics[width=0.495\textwidth]{fig/compressed/afhq_result_gbm.png}
+    \vskip -0.1in
+    \caption{
+        Comparison between DSBM \citep{shi2023diffusion}
+        and our GSBM on:
+        (\textit{leftmost 5 columns}) the {generation processes} and
+        (\textit{rightmost 3 columns}) their couplings $p^\theta(X_1|X_0)$ during training.
+        By constructing $V_t$ via a latent space,
+        GSBM exhibits \textbf{faster convergence} and \textbf{yields better couplings}.
+    }
+    \label{fig:afhq-result}
+    \vskip -0.05in
+\end{figure}
+
+\begin{figure}[t]
+    \begin{minipage}{0.75\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{fig/compressed/afhq_rstep.png}
+        \vskip -0.1in
+        \caption{
+            Mean of $p_t(X_t|x_0, x_1)$.
+            Instead of using linear interpolation as in DSBM, GSBM \emph{optimizes} $p_{t|0,1}$ w.r.t. \eq{6} where $V_t$ is defined via a latent space, thereby exhibiting \textbf{more semantically meaningful interpolations}.\looseness=-1
+        }
+        \label{fig:afhq-rstep}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.23\textwidth}
+        \captionsetup{type=table}
+        \caption{
+            FID values of dog$\rightarrow$cat
+            for DSBM and our GSBM.
+        }
+        \vskip -0.13in
+        \label{tb:fid}
+        \centering
+        \setlength{\tabcolsep}{8pt}
+        \begin{tabular}{cc}
+            \toprule
+            DSBM & GSBM \\
+            \midrule
+            14.16 & \textbf{12.39} \\
+            \bottomrule
+        \end{tabular}
+    \end{minipage}
+    \vskip -0.05in
+\end{figure}
+
+\subsection{Image domain interpolation and unpaired translation} \label{sec:afhq}
+
+Next, we consider unpaired translation between dogs and cats from AFHQ~\citep{choi2020stargan}.
+We aim to explore how appropriate choices of state cost $V_t$ can help encourage more natural interpolations and more semantically meaningful couplings.
+While the design of $V_t$ itself is an interesting open question, here we exploit the geometry of a learned latent space.
+To this end, we use a pretrained variational autoencoder~\citep{kingma2014auto}, then
+define $V_t$ conditioned on an interpolation of two end points
+(notice that $x$ and $z$ respectively belong to image and latent spaces):
+\begin{align}
+    V_t(x|x_0,x_1) = \norm{x - \mathrm{Decoder}(z_t) }^2, \quad
+    z_t := I(t, \mathrm{Encoder}(x_0), \mathrm{Encoder}(x_1)).
+\end{align}
+Though $I(t,z_0,z_1)$ can be any appropriate interpolation,
+we find the spherical linear interpolation \citep{shoemake1985animating} to be particularly effective, due to the Gaussian geometry in latent space.
+As the high dimensionality greatly impedes DeepGSB,
+we mainly compare with DSBM \citep{shi2023diffusion},
+the special case of our GSBM when $V_t$ is degenerate.
+As in DSBM, we resize images to 64$\times$64.
+
+\Cref{fig:afhq-result} reports the qualitative comparison between the generation
+processes of DSBM and our GSBM, along with their coupling during training.
+It is clear that, with the aid of a semantically meaningful $V_t$,
+GSBM typically converges to near-optimal coupling early in training,
+and, as expected, yields more interpretable generation processes.
+Interestingly,
+despite being subject to the same noise level ($\sigma{=}0.5$ in this case),
+the GSBM's generation processes are generally less noisy than DSBM.
+This is due to the optimization of the CondSOC problem \eq{6} with our specific choice of $V_t$.
+As shown in Fig.~\ref{fig:afhq-rstep}, the conditional density $p_t(X_t|x_0,x_1)$ used in GSBM
+appears to eliminate unnatural artifacts observed in Brownian bridges, which rely on simple linear interpolation in pixel space.
+Quantitatively, our GSBM also achieves lower FID value
+as a measure of feasibility, as shown in \Cref{tb:fid}.
+Finally, we note that the inclusion of $V_t$ and the solving of CondSOC increase wallclock time by \emph{a mere 0.5\%} compared to DSBM (see \Cref{tb:runtime_perc}).
+\subsection{High-dimensional opinion depolarization} \label{sec:opinion}
+
+\begin{wrapfigure}[7]{r}{0.41\textwidth}
+    \vspace*{-44pt}
+    \centering
+    \includegraphics[width=0.41\textwidth]{fig/compressed/opinion.png}
+    \vskip -0.1in
+    \caption{
+        Distribution of terminal opinion $X_1 \in \sR^{1000}$
+        and their directional similarities (DS; see \Cref{app:opinion}).
+    }
+    \label{fig:opinion}
+\end{wrapfigure}
+Finally, we consider high-dimensional opinion depolarization,
+initially introduced in DeepGSB,
+where an opinion $X_t~{\in}~\R^{1000}$
+is influenced by a polarizing effect \citep{schweighofer2020agent}
+when evolving through interactions with the population (see \Cref{app:opinion}):
+\begin{align}\label{eq:polarize_sde}
+    \rd X_t = f_{\text{polarize}}(X_t; p_t) \dt + \sigma \dWt
+\end{align}
+Without any intervention, the opinion dynamics in \eq{polarize_sde} tend to segregate into groups with diametrically opposed views (first column of Fig.~\ref{fig:opinion}), as opposed to the desired unimodal distribution $p_1$ (second column of Fig.~\ref{fig:opinion}).
+To adapt our GSBM for this task, we treat \eq{polarize_sde} as a base drift, specifically defining
+$\ut(X_t) := f_{\text{polarize}}(X_t; p_t) + v_t^\theta(X_t)$,
+and then solving the CondSOC \eq{6} by replacing the kinetic energy with $\int\norm{v_t^\theta}^2\dt$.
+Similar to DeepGSB, we consider the same congestion cost $V_t$ defined in \eq{V-mf}.
+As shown in Fig.~\ref{fig:opinion},
+both DeepGSB and our GSBM demonstrate the capability to mitigate opinion segregation.
+However, our GSBM achieves closer proximity to the target $p_1$, indicating stronger feasibility,
+and achieve almost half the objective value \eq{3} relative to DeepGSB.
+
+
+
+\vspace*{-2pt}
+\subsection{Discussions}\label{sec:ablation}
+\vspace*{-2pt}
+
+\textbf{Effect of noise ($\sigma$).$\quad$}
+In the stochastic control setting \citep{theodorou2010generalized},
+the task-specific value of $\sigma$ plays a crucial role in
+representing the uncertainty from environment or the error in executing control.
+The optimal control thus changes drastically depending on $\sigma$.
+\Cref{fig:drunkenspider} demonstrates how our GSBM correctly resolves this phenomenon,
+on an example of the famous ``drunken spider'' problem discussed in \citet{kappen2005path}.
+In the absence of noise ($\sigma{=}0$), it is very easy to steer through the narrow passage. When large amounts of noise is present ($\sigma{=}1.0$), there is a high chance of colliding with the obstacles, so the optimal solution is to completely steer around the obstacles.\looseness=-1
+
+\textbf{Ablation study on path integral (PI) resampling.$\quad$}
+In \Cref{tb:aba-pi},
+we ablate how the objective value changes when enabling PI resampling on
+different matching losses and noise $\sigma$
+and report their performance (averaged over 5 independent trails) on the Stunnel task.
+We observe that PI resampling tends to enhance overall performance, particularly in low noise conditions, at the expense of a slightly increased runtime of 8\%.
+Meanwhile, as shown in \Cref{tb:aba-runtime}, implicit matching \eq{4} typically requires longer time overall ($\times$2.7 even in two dimensions), compared to its explicit counterpart.
+
+\textbf{Profiling GSBM.$\quad$}
+The primary algorithmic distinction between our GSBM and previous SB matching methods \citep{shi2023diffusion,peluchetti2023diffusion}
+lies in how $p_{t|0,1}$ and $u_{t|0,1}$ are computed (see \Lemmaref{3}),
+where GSBM involves solving an additional CondSOC problem, \ie lines 5-6 in Alg.~\ref{alg:gsbm}.
+\Cref{tb:runtime_perc} suggests that these computations, uniquely attached to GSBM,
+induce little computational overhead compared to other components in Alg.~\ref{alg:gsbm}.
+This computational efficiency is due to our efficient variational approximation admitting simulation-free, parallelizable optimization.
+\begin{figure}[t]
+    \vskip -0.05in
+    \centering
+      \begin{minipage}{0.65\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{fig/compressed/drunken_spider.png}
+        \vskip -0.1in
+        \caption{
+            Our GSBM reveals how the optimal solution drastically changes w.r.t. the levels of noise ($\sigma$) when navigating through a narrow passway surrounded by the obstacles (shown in gray).
+        }
+        \label{fig:drunkenspider}
+    \end{minipage}
+    $\text{ }$
+    \begin{minipage}{0.33\textwidth}
+      \captionsetup{type=table}
+      \caption{
+          Relative runtime between combination of matching losses and PI resampling
+          on solving Stunnel, relative to $\Lexp$.
+      }
+      \centering
+      \vskip -0.1in
+      \label{tb:aba-runtime}
+      \setlength{\tabcolsep}{5pt}
+      \begin{tabular}{rcc}
+          \toprule
+              &  $\Lexp$ & $\Limp$ \\
+          \midrule
+            without PI  & 100\% & 276\% \\
+            with PI   & 108\% & 284\% \\
+        \bottomrule
+      \end{tabular}
+    \end{minipage}
+    \vskip -0.05in
+\end{figure}
+
+\newcommand{\stdresult}[2]{{{#1}{\footnotesize~$\pm$~#2}}}
+
+\begin{figure}[t]
+    \centering
+      \begin{minipage}{0.6\textwidth}
+          \captionsetup{type=table}
+          \caption{
+              How the objective value \eq{3} changes when enabling PI resampling
+              on each matching loss and $\sigma$ in Stunnel.
+              Performance is improved by deceasing ($-$) the objective values.
+          }
+          \centering
+          \vskip -0.1in
+          \label{tb:aba-pi}
+          \begin{tabular}{rrrr}
+              \toprule
+              & $\sigma=0.5$ & $1.0$ & $2.0$ \\
+              \midrule
+              $\Lexp$ &
+              \stdresult{$-$44.6}{5.9} &
+              \stdresult{$-$5.2}{2.6} &
+              \stdresult{1.5}{3.5}\\[2pt]
+              $\Limp$ &
+              \stdresult{$-$112.4}{53.7} &
+              \stdresult{$-$2.0}{8.0} &
+              \stdresult{$-$0.7}{6.0} \\
+            \bottomrule
+          \end{tabular}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.38\textwidth}
+      \captionsetup{type=table}
+      \caption{
+          Percentage of time spent in different stages
+          of Alg.~\ref{alg:gsbm}, measured on the AFHQ task.
+      }
+      \vskip -0.1in
+      \label{tb:runtime_perc}
+      \centering
+      \setlength{\tabcolsep}{4.5pt}
+      \begin{tabular}{ccc}
+          \toprule
+              \texttt{match}  & Simulate $\ut$  & Solve \eq{6}  \\
+              (line 3) & (line 4) & (lines 5-6) \\
+          \midrule
+              64.3\% & 35.2\% & 0.5\% \\
+        \bottomrule
+      \end{tabular}
+    \end{minipage}
+    \vskip -0.1in
+  \end{figure}
+
+
+\vspace*{-2pt}
+
+
+\section{Conclusion and limitation}
+
+\vspace*{-2pt}
+We developed GSBM, a new matching algorithm that provides approximate solutions to the \GSB{} (GSB) problems.
+We demonstrated strong capabilities of GSBM over prior methods in solving
+crowd navigation, opinion modeling, and interpretable domain transfer.
+It should be noticed that GSBM requires differentiability of $V_t$
+and relies on the quadratic control cost to establish its convergence analysis,
+which, despite notably improving over prior methods, remains as necessary conditions.
+We acknowledge these limitations and leave them for future works.
+
+
+
+\subsubsection*{Acknowledgements}
+We acknowledge the Python community
+\citep{van1995python,oliphant2007python}
+and the core set of tools that enabled this work, including
+PyTorch \citep{paszke2019pytorch},
+functorch \citep{functorch2021},
+torchdiffeq \citep{torchdiffeq},
+
+
+Hydra \citep{Yadan2019Hydra},
+Jupyter \citep{kluyver2016jupyter},
+Matplotlib \citep{hunter2007matplotlib},
+numpy \citep{oliphant2006guide,van2011numpy}, and
+SciPy \citep{jones2014scipy}.
+
+
+
+
+

@@ -1,0 +1,193 @@
+\title{ALAM: Averaged Low-Precision Activation for Memory-Efficient Training of Transformer Models}
+
+\begin{abstract}
+One of the key challenges in deep neural network training is the substantial amount of GPU memory required to store activations obtained in the forward pass. Various Activation-Compressed Training (ACT) schemes have been proposed to mitigate this issue; however, it is challenging to adopt those approaches in recent transformer-based large language models (LLMs), which experience significant performance drops when the activations are deeply compressed during training. In this paper, we introduce ALAM, a novel ACT framework that utilizes average quantization and a lightweight sensitivity calculation scheme, enabling large memory saving in LLMs while maintaining training performance. We first demonstrate that compressing activations into their group average values minimizes the gradient variance. Employing this property, we propose Average Quantization which provides high-quality deeply compressed activations with an effective precision of less than 1 bit and improved flexibility of precision allocation. In addition, we present a cost-effective yet accurate sensitivity calculation algorithm that solely relies on the L2 norm of parameter gradients, substantially reducing memory overhead due to sensitivity calculation. In experiments, the ALAM framework significantly reduces activation memory without compromising accuracy, achieving up to a 10$\times$ compression rate in LLMs.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+In recent years, deep learning has demonstrated human-like or even better performance on languagerelated tasks using large language models (LLMs) (Chen et al., 2023; Smith et al., 2022; OpenAI, 2023; Touvron et al., 2023a;b). Behind this success lies various efforts to increase the model size since it directly improves model performance due to scaling laws Kaplan et al. (2020); Sorscher et al. (2022a;b). However, the amount of memory required for training also increases proportionally, hindering their practical implementation. One of the reasons behind the memory bottleneck during training is that the backpropagation algorithm (Kelley, 1960) needs to store all intermediate activations generated during the forward pass in memory for later use in the backward pass for calculating parameter gradients, which leads to extensive memory requirements. For instance, as shown in Fig. 1, GPT-3 (Chen et al., 2023) with 175B parameters and MT-LNG (Smith et al., 2022) with 1T parameters require $67.3\;\mathrm{GB}$ and 132.7GB activation memory, respectively, exceeding the memory occupied by the parameters and optimizer state (Korthikanti et al., 2022). This issue even worsens with larger micro-batch size or sequence length because the activation memory also increases proportionally whereas the memory occupied by the parameters and optimizer state remains unchanged. Therefore, it is crucial to reduce activation memory when it comes to training LLMs.  
+
+Activation rematerialization (Chen et al., 2016; Jain et al., 2019; Feng & Huang, 2021) and reversible networks (Gomez et al., 2017; Kitaev et al., 2020; Sander et al., 2021; Cai et al., 2023) store only part of the activations, recomputing the rest during the backward pass. These methods demand extra computation in the backward pass and reduce training speed. Reduced-precision training (Micikevicius et al., 2018; Wang et al., 2018; Chen et al., 2020; Sun et al., 2020) aims at reducing computation precision and training memory by representing each variable in training (e.g., weight, error, activation, and gradient) with low-precision data formats such as FP8. However, training accuracy drops quickly with lower precision, and optimized kernels for low-precision operations are required to fully utilize its advantage in training speed. On the other hand, Activation-Compressed Training (ACT) (Chakrabarti & Moseley, 2019; Chen et al., 2021; Liu et al., 2022b; Pan et al., 2021; Liu et al., 2022a) solely aims to reduce activation memory usage by compressing the activations before storing them in the forward pass. Conventional ACT methods, however, exhibit large performance drops for high compression rates when applied to LLMs. For example, MESA (Pan et al., 2021) compresses all layers uniformly with an identical compression rate, noticeably undermining training performance for activation precision under 8 bits. GACT (Liu et al., 2022a) determines compression rates (i.e., allocated bit precision) of each layer based on its sensitivity, achieving a state-of-the-art compression rate of 4 bits in transformer models. However, deeply quantized activations noticeably affect training performance, and the lowest bit precision it can allocate to less-sensitive layers is 1 bit, which limits the flexibility of bit precision allocation and hinders further compression.  
+
+![](images/d678ae875b19620d7dbebd108db1798572d8e425be9aecbe73fdaaee6ec40ac2.jpg)  
+Figure 1: Memory usage breakdown of GPT-3 (22B/175B) and MT-LNG (530B/1T) with data and model parallelism. The dashed red line denotes the 80GB capacity of the NVIDIA A100 GPU.  
+
+![](images/ef0a0245ef1cb89ed9bd97032a37b7ab16651a3b0b393f5cca46f47bf076faa3.jpg)  
+Figure 2: ALAM training framework.  
+
+In this work, we propose a new ACT framework, ALAM, which greatly improves compression rates while maintaining training performance. We first propose to represent a group of activations with their group average value as a means to compress them deeply and mathematically show that this scheme minimizes gradient variance due to activation compression. Based on this observation, we propose Average Quantization (AQ), which replaces a group of activations with their group average to realize sub-1b precision effectively. We experimentally demonstrate that the sub-1b activations obtained by AQ maintain high quality, even surpassing that of conventional 1-bit quantized activations. Moreover, by assigning sub-1b precision to the layers with very low sensitivity, we can further enhance the overall compression rates. We also introduce the GradNormVar algorithm that determines the sensitivity of a layer based on the variance of the L2 norm of parameter gradients. This approach significantly reduces the memory required for sensitivity calculation, when compared to GACT (Liu et al., 2022a) which requires the variance of parameter gradients from multiple seeds. Experimental results confirm that our ALAM outperforms the state-of-the-art method in various transformer models including LLaMA2-7B/13B, and LLaMA-30B. In summary, the main contributions of our paper are:  
+
+• We propose Average Quantization, which generates high-quality sub-1b activations, enabling further compression without sacrificing accuracy. To the best of our knowledge, this is the first attempt to compress activations through simple averaging. • We propose GradNormVar, a lightweight sensitivity calculation algorithm that employs the variance of the L2 norm of parameter gradients, eliminating the need to retain all parameter gradients and substantially reducing memory usage.  
+
+• The proposed ALAM framework is demonstrated to successfully compress activations in various transformer models, achieving a $9.9\times$ compression rate in LLaMA-30B.  
+
+
+
+\section{2 ACTIVATION-COMPRESSED TRAINING  }
+
+
+
+
+\section{2.1 FORMULATION  }
+
+
+We represent the loss function of forward propagation in a neural network as ${\mathcal{L}}(\theta,X_{0})$ , given input $X_{0}$ and parameters $\theta$ . When the stochastic gradient descent (Ruder, 2016) is applied, the parameters are updated as $\theta^{t+1}\,=\,\theta^{t}\,-\,\eta\nabla_{\theta^{t}}\mathcal{L}(\theta^{t},{\boldsymbol{\bar{X}}}_{0})$ , where $t$ denotes the iteration number and $\eta$ is the learning rate. Then, the gradients are calculated as follows:  
+
+$$
+\nabla_{X_{l-1}}\mathcal{L},\;\;\nabla_{\theta_{l}}\mathcal{L}=G_{l}(\nabla_{X_{l}}\mathcal{L},\,\theta_{l},\,X_{l-1})
+$$  
+
+Here, $X_{l}$ and $\theta_{l}$ denote the activation and parameter of the $l$ -th layer, respectively. $G_{l}$ denotes the gradient function of the $l$ -th layer, generating the input gradients $\nabla_{X_{l-1}}\mathcal{L}$ and parameter gradients $\nabla_{\boldsymbol{\theta}_{l}}\mathcal{L}$ from the output gradient $\nabla_{X_{l}}\mathcal{L}$ , parameters $\theta_{l}$ , and activations $X_{l-1}$ . For the sake of simplicity, we denote ${\mathcal{L}}(\theta,X_{0})$ as $\mathcal{L}$ . Given Eq. 1, all layer activations $X_{l-1}$ must be stored in memory during the forward pass to compute gradients, leading to substantial memory use. The ACT frameworks are designed to tackle this memory consumption issue by compressing activations as follows:  
+
+$$
+\hat{\nabla}_{X_{l-1}}\mathcal{L},\enspace\hat{\nabla}_{\theta_{l}}\mathcal{L}=G_{l}(\hat{\nabla}_{X_{l}}\mathcal{L},\theta_{l},\,\hat{X}_{l-1})
+$$  
+
+where $\hat{X}$ represents the compressed activation, and $\hat{\nabla}$ represents the gradients obtained by ACT. For instance, if we compress activations from FP32 to INT1, a $32\times$ reduction in activation memory usage can be achieved.  
+
+
+
+\section{2.2 CONVERGENCE OF ACTIVATION-COMPRESSED TRAINING  }
+
+
+If $\mathcal{L}$ is continuously differentiable, $\nabla{\mathcal{L}}_{\theta}$ is $L$ -Lipschitz for some constant $L,\,\mathcal{L}$ is bounded below by $\mathcal{L}_{i n f}$ , and there exists $\sigma^{2}\geq0$ satisfying $\lceil\mathbf{\hat{V}}_{\theta}\mathcal L\]\leq\sigma^{2}$ for all parameters, then we have the following convergence theorem (Chen et al., 2021):  
+
+$$
+\mathbb{E}\big[\hat{\nabla}_{\theta}\mathcal{L}\big]\leq\frac{2(L-\mathcal{L}_{i n f})}{\alpha t}+\alpha L\sigma^{2}
+$$  
+
+As the iteration $t$ increases, the first term of the bound in Eq. 3 decreases to zero. Therefore, minimizing the gradient variance $\mathrm{Var}\big[\hat{\nabla}_{\theta}\mathcal{L}\big]$ is critical for the convergence of ACT. For a stochastic quantizer, Liu et al. (2022a) demonstrated that the gradient variance can be expressed as:  
+
+$$
+\mathrm{Var}\left[\hat{\nabla}_{\theta}\mathcal{L}\right]\leq\sum_{l=1}^{L}c_{l}(2^{b_{l}}-1)^{-2}
+$$  
+
+where $b_{l}$ denotes the bit precision (i.e., the number of bits to present activation) of the $l$ -th layer. The sensitivity $c_{l}$ is defined as how sensitive it is to activation compression. If the sensitivity is high, the gradient variance is larger at the identical bit precision, undermining training performance and requiring higher bit precision to mitigate it. Therefore, we can determine the optimal bit precision of each layer based on its sensitivity to maximize memory savings with minimal training performance degradation by reducing gradient variance in Eq. 4 using a greedy algorithm.  
+
+GACT (Liu et al., 2022a) calculates sensitivity $c_{l}$ by observing the variance of parameter gradients from multiple runs of actual training using different seeds for stochastic rounding. More specifically, it initially compresses activations using a specific seed and calculates parameter gradients. Then, the algorithm changes only the seed for compressing the $l$ -th layer’s activations and recalculates parameter gradients. Finally, it treats the variance of all parameter gradients between these seeds as the sensitivity of the $l$ -th layer, indicating how changes in the $l$ -th layer’s activation impact gradient variance. This process is detailed in Algorithm 1.  
+
+Algorithm 1 Sensitivity calculation in GACT  
+
+![](images/84b4e5dcfc5b3c9b3dcf371231ffd5224ab6127e834e0d0d40de58c2c437bf49.jpg)  
+
+
+
+\section{3 AVERAGE QUANTIZATION  }
+
+
+
+
+\section{3.1 MINIMIZING GRADIENT VARIANCE  }
+
+
+In this section, we propose a new approach to activation compression and show that it minimizes the gradient variance in ACT. Chen et al. (2021) proved that the gradient obtained by ACT is unbiased (i.e., $\mathbb{E}\big[\hat{\nabla}_{\theta}\big]=\mathbb{E}\big[\nabla_{\theta}\big])$ . Following this property, the gradient variance of ACT can be expressed as:  
+
+$$
+\mathrm{Var}\big[\hat{\nabla}_{\boldsymbol{\theta}}\mathcal{L}\big]=\mathrm{Var}\big[\nabla_{\boldsymbol{\theta}}\mathcal{L}\big]+\mathbb{E}\big[\|\Delta\nabla_{\boldsymbol{\theta}}\mathcal{L}\|^{2}\big]
+$$  
+
+where $\Delta\nabla_{\theta}\mathcal{L}=\hat{\nabla}_{\theta}\mathcal{L}-\nabla_{\theta}\mathcal{L}$ . On the right-hand side of Eq. 5, the first term is the gradient variance of SGD, which is not related to activation compression. Consequently, the second term, representing the gradient difference caused by activation compression, plays an important role in minimizing the gradient variance in ACT. Evans & Aamodt (2021) derived boundary functions for gradient differences in commonly used layers in neural networks, such as fully-connected, convolution, batch normalization, and layer normalization layers
+
+$$
+\|\Delta\nabla_{\theta}f(\theta,X)\|^{2}\le d\|\Delta X\|^{2}
+$$  
+
+where $\Delta X={\hat{X}}-X$ , and $d$ is a positive constant. Now suppose we divide activations into several groups and represent each group using a single representative value, where its optimal value can be determined using the theorem below.  
+
+Theorem 1. The value of the boundary function of gradient difference is minimized when each group of activations is approximately represented using its group average value.  
+
+Theorem 1 can be proven by showing that the derivative of $d\|\Delta X\|^{2}$ with respect to an approximate value is equal to 0 when using average as the approximate value because $D(\Delta X)$ is a convex function with respect to the approximate value. Furthermore, we experimentally demonstrate this property by training a 512-512-10 MLP (Haykin, 1994) model on MNIST (Deng, 2012). We approximate each group of activations using various values: average, median, minimum, maximum, and randomly selected activation in a group, where we group adjacent elements in the flattened activation vector, and the group size is set to 32. Experimental results in Table 1 confirm that averaging is the most effective compression method, which achieves high training accuracy close to full-precision training.  
+
+Table 1: Test accuracy of MLP trained on MNIST with different activation approximation methods.  
+
+![](images/7ce3fa8b9afd7528dccaa5057de724ed9c979eacb28288f095cd76f892a3f21a.jpg)  
+
+![](images/b8db6fe6c5df7b3af4e9e44f8c31638ed7f5f4389c44e129d856643ea3355d02.jpg)  
+Figure 3: Average Quantization for high-quality sub-1b precision.  
+
+In Section 3.1, we show that averaging is an effective method to compress activation with minimal impact on training performance. By adopting this property, we propose Average Quantization, which generates high-quality compressed activation with sub-1b precision. We split activations into multiple groups and only store a single activation for each group, which is an average value of all the elements in the group. For instance, if we take an average for a group of four activations and quantize it to 2 bits, we only need to store 2 bits for a group. This achieves an identical compression rate to when we compress all of four activations separately to 0.5-bit precision in conventional activation compression, and hence we denote this as AQ 0.5-bit. Note that our Average Quantization flattens and groups adjacent activation elements during the forward pass, and then recovers them by repeating the group average in the backward pass without requiring an additional mask or spatial index for recovery.  
+
+We experimentally show that our approach produces high-quality compressed activation. In experiments, we train VGG-11 (Simonyan & Zisserman, 2015) on CIFAR-100 (Krizhevsky et al., 2009) using various types of compressed activations and compare test accuracy and validation loss. Fig. 4 displays the results for 2-bit uniform quantization, 1-bit uniform quantization, AQ 1-bit, and AQ 0.5-bit. Here AQ 1-bit and AQ 0.5-bit activations are obtained by averaging a group of two and four activations, respectively, and then quantizing the average value into 2 bits. 1-bit uniform quantization fails to train the network, but AQ 1-bit succeeds in training, closely matching 2-bit uniform quantization. Even AQ 0.5-bit successfully trains the network without divergence, outperforming 1-bit uniform quantization. Therefore, we expect to replace 1-bit quantization with $\mathrm{AQ}\,0.5.$ -bit without sacrificing accuracy and allocate more bits to highsensitivity activations for a given memory budget to improve training performance.  
+
+![](images/7aa3b6dda25521fb284ac6aef93b1ab396548efc7932976c2ce6b026cd16d7eb.jpg)  
+Figure 4: Comparisons of various compressed activations in VGG-11 training on CIFAR-100. For a fair comparison, activations of linear, convolutional, and batch normalization layers in VGG-11 are uniformly compressed in all experiments.  
+
+
+
+\section{4 EFFICIENT SENSITIVITY CALCULATION  }
+
+
+In ACT frameworks, it is crucial to accurately determine the sensitivity of a layer, as it greatly affects training performance. As discussed in Section 2.2 and Algorithm 1, GACT (Liu et al., 2022a) determines sensitivity by calculating the gradient variance from multiple runs of actual training with compressed activations using different seeds, and hence it must temporarily store all parameter gradients for each seed. Consequently, the peak memory usage substantially increases when calculating the sensitivity in models with a large number of parameters. For instance, GACT requires $700\;\mathrm{GB}$ memory for calculating sensitivity from two seeds when training GPT-3 with 175B parameters. To alleviate this issue, we propose the GradNormVar algorithm, which determines the sensitivity of layers as the variance of L2 norm of parameter gradients obtained from multiple seeds, as detailed in Algorithm 2. More specifically, our algorithm starts by compressing activations using a random seed. Instead of storing all parameter gradients, the algorithm calculates and retains only the L2 norm of parameter gradients for each layer. Subsequently, a different seed is used for compressing the $l$ -th layer’s activations, and the L2 norm of parameter gradients is recalculated. Finally, the algorithm employs the variance in the L2 norm of parameter gradients between these seeds as sensitivity of the $l$ -th layer. Since GradNormVar only stores the L2 norm of parameter gradients for each layer, rather than all parameter gradients from multiple seeds, it can significantly reduce the amount of memory required for calculating sensitivity.  
+
+
+
+\section{5 ALAM: AVERAGED LOW-PRECISION ACTIVATION FOR MEMORY-EFFICIENT TRAINING  }
+
+
+Combining the proposed techniques, we introduce ALAM, a new ACT framework that achieves a significant amount of memory saving while maintaining training accuracy. When the user specifies the target average precision, which represents the average precision of activations across all layers, the proposed ALAM framework automatically carries out ACT using the Average Quantization and GradNormVar algorithms. The detailed process is as follows:  
+
+1. (Calculate sensitivity) The sensitivity of each layer is calculated using the GradNormVar algorithm.  
+
+2. (Allocate bit precision) The bits are allocated to layers based on their sensitivity in a way that it minimizes the gradient variance in Eq. 4 using a greedy algorithm. AQ 0.5-bit is employed in low-sensitivity layers instead of conventional 1-bit quantization.  
+
+3. (Training) During the forward pass, activations are compressed based on the allocated bit precision, and then decompressed in the backward pass to update parameters.  
+
+Note that calculating sensitivity and allocating bit precision occur only before training and after $10\%$ of total training epochs because activation sensitivity saturates early (Liu et al., 2022a).  
+
+
+
+\section{6 RESULTS  }
+
+
+In this section, we evaluate our ALAM framework by training diverse transformer models on various tasks.  
+
+Text Classification We fine-tuned BERT models with different sizes, including DistilBERT-Base (Sanh et al., 2019), BERT-Base, and BERT-Large (Devlin et al., 2019), on the datasets in the GLUE benchmark (Wang et al., 2019) using three approaches: without activation compression (baseline), with GACT, and with ALAM. We evaluate test accuracy, activation memory, and the memory required for calculating sensitivity at various target average precisions for activations. Note that GACT and ALAM only compress float tensors, while they do not compress the other values such as masks and indices. Therefore, reducing the target average precision from 32 bits to 2 bits does not always result in a $16\times$ compression of activation memory, and the actual compression rate can vary by model. Table 2 shows that our ALAM achieves a significantly better trade-off between accuracy and memory savings compared to GACT in all cases. In DistilBERT-Base, ALAM achieves a compression rate of up to $16.4\times$ with $_{<0.5}$ accuracy degradation in the WNLI dataset. Improvements from GACT expand further when fine-tuning BERT-Base on more challenging datasets such as CoLA, closely matching the uncompressed baseline in terms of accuracy. In BERT-Large, ALAM achieves activation memory savings of up to $22.5\times$ with accuracy comparable to the baseline. This improvement stems from the enhanced compression capability of ALAM at low-sensitivity activations.  
+
+Fig. 6 compares the sensitivity and bit precision allocation obtained by GACT and ALAM for BERTBase on the MPRC dataset when the target average precision is set to 1 bit. GACT uniformly assigns 1-bit precision to all layers regardless of their sensitivity as the lowest precision supported in GACT is 1 bit, resulting in training failure. In contrast, ALAM allocates bit precision to layers differently based on their sensitivity, successfully training the model with $84.8\%$ accuracy. Furthermore, while  
+
+Table 2: Test accuracy, activation memory (Act mem) with compression rate, and memory for calculating sensitivity (sens mem) in fine-tuning diverse language models on the datasets in the GLUE benchmark. The bolded text represents the test cases with $<\,0.5$ score degradation compared to the non-compressed baseline, as well as the largest memory saving among the candidate algorithms with $<0.5$ score degradation.  
+
+![](images/3a836344d3e7577229288a6086f14cdf4919901173173c5c015eaf61d1dcb030.jpg)  
+
+![](images/77e6d4328b521f9ccc5ce702a1984c2fe434ff2428df25020090d374e24da9cb.jpg)  
+Figure 6: Sensitivity and bit precision allocation of GACT and ALAM when target average precision is 1 bit in BERT-Base fine-tuning on the MRPC dataset.  
+
+GACT requires a substantial amount of memory for calculating sensitivity (e.g., 3817 MB on BERTLarge), ALAM consumes only a negligible amount of memory, less than $4.6\,\mathrm{kB}$ in all experiments.  
+
+Large Language Models For evaluations using LLMs, we fine-tuned LLaMA2-7B (Touvron et al., 2023b) on the Alpaca dataset (Taori et al., 2023), and LLaMA2-13B (Touvron et al., 2023b) and LLaMA30B (Touvron et al., 2023a) on the LIMA dataset (Zhou et al., 2023). Then, we observed 5-shot accuracy for MMLU (Hendrycks et al., 2021) and 0-shot accuracy for common sense reasoning (Bhakthavatsalam et al., 2021; Bisk et al., 2020; Zellers et al., 2019; Win, 2019), reading comprehension (Clark et al., 2019), and truthfulness tasks (Lin et al., 2021). In experiments, we applied parameter-efficient finetuning (PEFT) such as LoRA (Hu et al., 2022) and QLoRA (Dettmers et al., 2023). Table 3 shows ALAM achieves a similar accuracy to the baseline at 1-bit precision and provides up to $10.6\times$ compression rate, while GACT diverges even at 3-bit precision. Our ALAM (1-bit) compresses activation by $10.3\times$ in LLaMA2-13B and $9.9\times$ in LLaMA-30B while closely matching the baseline in accuracy for all tasks. ALAM also significantly reduces memory for sensitivity calculations; however, the savings are not substantial because PEFT requires only a small number of parameter gradients. Fig. 7 displays learning curves obtained during the finetuning of LLaMA2-7B, demonstrating that our ALAM closely matches the baseline even at 1-bit precision while 4-bit GACT does not converge to the loss as rapidly as the baseline.  
+
+![](images/75897d8a4f1b2a44e667816ecef068d36f490e1886068a3155a091041b1165b7.jpg)  
+Figure 7: Learning curves when fine-tuning LLaMA2-7B on the Alpaca dataset.  
+
+Table 3: Test accuracy, activation memory (Act mem) with compression rate, and memory for calculating sensitivity (sens mem) in fine-tuning LLMs. The bolded text represents the highest score and smallest activation memory while successfully training without divergence. The micro-batch size is set to 8 for LLaMA2-7B and 2 for LLaMA2-13B and LLaMA-30B.  
+
+![](images/62a298718359b0be7e9b0632b73f8efbe71aa06f256f41fc0105d08e88668e54.jpg)  
+
+Table 4: Comparisons with model compression techniques in fine-tuning LLMs using a single NVIDIA A6000 GPU. The micro-batch size is set to 8.  
+
+![](images/b8dbc476a9f5976442d06c2fcf7f1375901e8f2cded638dc555f6adcfd8c830b.jpg)  
+
+We also compared the training memory usage of the model compression techniques and ALAM in Table 4. The results shows that LoRA and QLoRA only reduce the model state memory which includes parameters, gradients, and optimizer states compared to baseline. ALAM, on the other hand, compresses activation memory, achieving $10.6\times$ and $10.3\times$ compression rates on LLaMA2- 7B and 13B, respectively. By applying ALAM to LoRA and QLoRA, we can reduce total memory by $56\%$ and $75\%$ , while maintaining comparable accuracy for LLaMA2-7B and 13B, respectively.  
+
+Usability To demonstrate the utility of ALAM, we first observed how much our ALAM could increase the microbatch size in a single NVIDIA RTX-3090 Ti GPU when fine-tuning LLaMA2-7B using LoRA. Fig. 8 shows that ALAM allows for using the micro-batch size of 16, improving the baseline and GACT by $8\times$ and $2\times$ , respectively. We also simulated how much memory could be reduced for fixed micro-batch sizes when fine-tuning LLaMA2-7B using LoRA, as shown in Table 5. The size of activation memory increases with the micro-batch size and sequence length, whereas the model state memory storing parameters, gradients, and optimizer state remains unchanged. Consequently, the memory savings of ALAM is more noticeable with larger micro-batch sizes, as demonstrated in Table 5. For instance, when a microbatch size is 8, ALAM reduces the total memory by $56\%$ and $21\%$ compared to the baseline and GACT, respectively, but the saving increases to $84\%$ and $52\%$ when the micro-batch size is 64.  
+
+![](images/934fa2748504b424d948e2f60929b98e620a826da239d33f6719e1d4a70f4f05.jpg)  
+Figure 8: The maximum micro-batch size of different training schemes for fine-tuning LLaMA2-7B.  
+
+Table 5: Activation memory and total memory required for fine-tuning LLaMA2-7B using LoRA with different training schemes.  
+
+![](images/146ceb822881ba62aea96cd6c8314032df2e40eb47ad138fd4c771cc520d4ac7.jpg)  
+
+
+
+\section{7 DISCUSSION  }
+
+
+In this paper, we introduce ALAM, a new activation-compressed training framework for transformer models. Our ALAM enables deeper compression of activations with low sensitivity through Average Quantization and drastically reduces the memory required for sensitivity calculations using the GradNormVar algorithms. As a result, ALAM reduced the activation memory of LLaMA-30B by $9.9\times$ while outperforming GACT, the state-of-the-art ACT framework, with comparable accuracy. We hope that our ALAM will boost the training of LLMs, overcoming the challenges of limited GPU resources.  
+
+Limitations ACT frameworks require additional computation to compress and decompress activations. In our next study, we will address these challenges for efficient training.  
+
+
+

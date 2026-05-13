@@ -1,0 +1,288 @@
+\title{How do Language Models Bind Entities in Context?}
+
+\begin{abstract}
+To correctly use in-context information, language models (LMs) must bind entities to their attributes. For example, given a context describing a ``green square'' and a ``blue circle'', LMs must bind the shapes to their respective colors. We analyze LM representations and identify the \textit{binding ID mechanism}: a general mechanism for solving the binding problem, which we observe in every sufficiently large model from the Pythia and LLaMA families. Using causal interventions, we show that LMs' internal activations represent binding information by attaching \textit{binding ID vectors} to corresponding entities and attributes.  We further show that binding ID vectors form a continuous subspace, in which distances between binding ID vectors reflect their discernability. Overall, our results uncover interpretable strategies in LMs for representing symbolic knowledge in-context, providing a step towards understanding general in-context reasoning in large-scale LMs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+Modern language models (LMs) excel at many reasoning benchmarks, suggesting that they can perform general purpose reasoning across many domains. However, the mechanisms that underlie LM reasoning remain largely unknown \citep{rauker2023toward}. The deployment of LMs in society has led to calls to better understand these mechanisms \citep{hendrycks2021unsolved}, so as to know why they work and when they fail \citep{mu2020compositionalExplanations,hernandez2021natural,vig2020investigating}. 
+
+In this work, we seek to understand \emph{binding}, a foundational skill that underlies many compositional reasoning capabilities \citep{fodor1988connectionism} such as entity tracking \citep{kim2023entity}. How humans solve binding, i.e. recognize features of an object as bound to that object and not to others, is a fundamental problem in psychology~\citep{treisman1996binding}. Here, we study binding in LMs.
+
+Binding arises any time the LM has to reason about two or more objects of the same kind. For example, consider the following passage involving two people and two countries:
+
+\begin{lquote}
+Context: Alice lives in the capital city of France. Bob lives in the capital city of Thailand.
+
+Question: Which city does Bob live in?
+  \label{quote:one}
+\end{lquote}
+In this example the LM has to represent the associations \textit{lives(Alice, Paris)} and \textit{lives(Bob, Bangkok)}. We call this the \emph{binding problem}---for the predicate \textit{lives}, \textit{Alice} is bound to \textit{Paris} and \textit{Bob} to \textit{Bangkok}. Since predicates are bound in-context, binding must occur in the activations, rather than in the weights as with factual recall \citep{rome}. This raises the question: how do LMs represent binding information in the context such that they can be later recalled?
+
+Overall, our key technical contribution is the identification of a robust general mechanism in LMs for solving the binding problem. The mechanism relies on \emph{binding IDs}, which are abstract concepts that LMs use internally to mark variables in the same predicate apart from variables in other predicates (Fig. \ref{fig:binding-illustration}). Using causal mediation analysis we empirically verify two key properties of the binding ID mechanism (\cref{sec: existence}): factorizability and position independence.
+
+Turning to the structure of binding IDs, we find that binding IDs are represented as vectors which are bound to variables by simple addition (\cref{sec: structure}) in the activation space. Further, we show that binding IDs occupy a subspace, in the sense that linear combinations 
+of binding IDs are still valid binding IDs, even though random vectors are not.
+
+Lastly, we find that binding IDs are ubiquitous and transferable (\cref{sec: generality}). They are used by every sufficiently large model in the LLaMA \citep{llama} and Pythia \citep{Pythia} families, and their fidelity increases with scale. They are used for a variety of synthetic binding tasks with different surface forms, and binding vectors from one task transfer to other tasks. Finally, we qualify our findings by showing that despite their ubiquity, binding IDs are not universal: we exhibit a question-answering task where an alternate mechanism, ``direct binding'', is used instead (\cref{apx: mcq}). %in the multiple choice question (MCQ) binding task, showing that LMs learn at least two distinct strategies to represent binding.
+
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/Binding-paper-diagrams-larger-2-cropped.pdf}
+    \caption{The Binding ID mechanism. The LM learns abstract binding IDs (drawn as triangles or squares) which distinguish between entity-attribute pairs. Binding functions $\Gamma_E$ and $\Gamma_A$ bind entities and attributes to their abstract binding ID, and store the results in the activations. To answer queries, the LM identifies the attribute that shares the same binding ID as the queried entity.}
+    \label{fig:binding-illustration}
+\end{figure}
+
+
+\section{Preliminaries}
+
+In this section we define the \textit{binding task} and explain causal mediation analysis, our main experimental technique.
+
+\textbf{Binding task.} Formally, the binding task consists of a set of entities $\mathcal E$ and a set of attributes $\mathcal A$. An $n$-entity instance of the binding task consists of a context that is constructed from $n$ entities $e_0, \dots, e_{n-1} \in \mathcal E$ and $n$ attributes $a_0, \dots, a_{n-1} \in \mathcal A$, and we denote the corresponding context as $\mathbf c = \ctxt(e_0\leftrightarrow a_0, \dots, e_{n-1} \leftrightarrow a_{n-1})$. For a context $\mathbf c$, we use $E_k(\mathbf c)$ and $A_k(\mathbf c)$ to denote the $k$-th entity and the $k$-th attribute of the context $\mathbf c$, for $k \in [0, n-1]$. We will drop the dependence on $\mathbf c$ for brevity when the choice of $\mathbf c$ is clear from context.
+
+In the \textsc{capitals} task, which is the main task we study for most of the paper, $\mathcal E$ is a set of single-token names, and $\mathcal A$ is a set of single-token countries. Quote~\ref{quote:one} is an example instance of the \textsc{capitals} task with context $\mathbf c = \ctxt(Alice \leftrightarrow France, Bob \leftrightarrow Thailand)$. In this context, $E_0$ is $Alice$, $A_0$ is $France$, etc.
+
+Given a context $\mathbf c$, we are interested in the model's behavior when queried with each of the $n$ entities present in $\mathbf c$. For any $k \in [0, n-1]$, when queried with the entity $E_k$ the model should place high probability on the answer matching $A_k$. In our running example, the model should predict ``Paris'' when queried with ``Alice'', and ``Bangkok'' when queried with ``Bob''. 
+
+To evaluate a model's behavior on a binding task, we sample $N=100$ contexts. For each context $\mathbf c$, we query the LM with every entity mentioned in the context, which returns a vector of log probabilities over every token in the vocabulary. The \textit{mean log prob} metric measures the mean of the log probability assigned to the correct attribute token. Top-1 accuracy measures the proportion of queries where the correct attribute token has the highest log probability out of all attribute tokens. However, we will instead use the \textit{median-calibrated accuracy} \citep{calibrate}, which calibrates the log probabilities with the median log probability before taking the top-1 accuracy. We discuss this choice in \cref{apx: calibrated accuracy}. 
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figures/Binding-paper-diagrams-larger-1-cropped.pdf}
+\end{center}
+\caption{ \textbf{a)} Causal diagram for autoregressive LMs. From input context $\ctxt(e_0\leftrightarrow a_0, e_1\leftrightarrow a_1)$, the LM constructs internal representations $\zcontext$. We will mainly study the components of $\zcontext$ boxed in blue.  \textbf{b)} A secondary run of the LM on context $\ctxt(e_2\leftrightarrow a_2, e_3\leftrightarrow a_3)$ to produce $\zcontext'$.  \textbf{c)} An example intervention where $\zcontext$ is modified by replacing $Z_{A_0} \rightarrow Z_{A_0}'$ from $\zcontext'$.}
+\label{fig:causalflow}
+\end{figure}
+
+\textbf{Causality in autoregressive LMs.} We utilize inherent causal structure in autoregressive LMs. Let an LM have $n_{\text{layers}}$ transformer layers and a $d_{\text{model}}$-dimensional activation space. For every token position $p$, we use $Z_p \in \mathbb{R}^{n_{\text{layers}}\times d_{\text{model}}}$ to denote the stacked set of internal activations\footnote{These are the pre-transformer layer activations, sometimes referred to as the \textit{residual stream}.} at token $p$ (see Fig. \ref{fig:causalflow}a). We refer to the collective internal activations of the context as $\zcontext$. In addition, we denote the activations at the token for the $k$-th entity as $Z_{E_k}$, and the $k$-th attribute as $Z_{A_k}$. We sometimes write $Z_{A_k}(\mathbf c), \zcontext(\mathbf c)$, etc.~to make clear the dependence on the context $\mathbf c$.
+
+
+Fig. \ref{fig:causalflow}a shows that $\zcontext$ contains all the information about the context that the LM uses. We thus study the structure of $\zcontext$ using \textit{causal mediation analysis}, a widely used tool for understanding neural networks \citep{causalmediation, causalabstractions, rome}. Causal mediation analysis involves substituting one set of activations in a network for another, and we adopt the $/.$ notation (from Mathematica) to denote this. For example, for activations $Z_* \in \mathbb{R}^{n_{\text{layers}}\times d_{\text{model}}}$, and a token position $p$ in the context, $\zcontext /.\{Z_p \rightarrow Z_*\} = [Z_0, \dots, Z_{p-1}, Z_*, Z_{p+1}, \dots]$. Similarly, for a context $\mathbf c = \ctxt(e_0 \leftrightarrow a_0, \dots, e_{n-1} \leftrightarrow a_{n-1})$, we have $\mathbf c /. \{E_k \rightarrow e_*\} = \ctxt(e_0 \leftrightarrow a_0, \dots, e_*\leftrightarrow a_k, \dots, e_{n-1} \leftrightarrow a_{n-1})$.
+
+Given a causal graph, causal mediation analysis determines the role of an intermediate node by experimentally intervening on the value of the node and measuring the model's output on various queries. For convenience, when the model answers queries in accordance to a context $\mathbf c$, we say that the model \textit{believes}\footnote{We do not claim or assume that LMs actually have beliefs in the sense that humans do. This is a purely notational choice to reduce verbosity.} $\mathbf c$. If there is no context consistent with the language model's behavior, then we say that the LM is \textit{confused}.
+
+As an example, suppose we are interested in the role of the activations $Z_{A_0}$ in Fig. \ref{fig:causalflow}a. To apply causal mediation analysis, we would:
+
+\begin{enumerate}[parsep=0pt]
+    \item Obtain $\zcontext$ by running the model on the original context $\mathbf c$ (which we also refer to as the \emph{target} context) (Fig. \ref{fig:causalflow}a)
+    \item Obtain $\zcontext'$ by running the model on a different context $\mathbf c'$ (i.e.~\emph{source} context) (Fig. \ref{fig:causalflow}b)
+    \item Modify $\zcontext$ by replacing $Z_{A_0}$ from the target context with $Z_{A_0}'$ from the source context (Fig. \ref{fig:causalflow}c), while keeping all other aspects of $\zcontext$ the same, resulting in $\zcontext^{\text{intervened}} = \zcontext /. \{Z_{A_0} \rightarrow Z_{A_0}'\}$
+    \item Evaluate the model's beliefs based on the new $\zcontext^{\text{intervened}}$ 
+\end{enumerate}
+
+We can infer the causal role of $Z_{A_0}$ from how the intervention $\zcontext /. \{Z_{A_0} \rightarrow Z_{A_0}'\}$ changes the model's beliefs. Intuitively, if the model retains its original beliefs $\mathbf c$, then $Z_{A_0}$ has no causal role in the model's behavior on the binding task. On the other hand, if the model now believes the source context $\mathbf c'$, then $Z_{A_0}$ contains all the information in the context. In reality both hypothetical extremes are implausible, and in \cref{sec: existence} we discuss a more realistic hypothesis.
+
+A subtle point is that we study how different components of $\zcontext$ store information about the context (and thus influence behavior), and not how $\zcontext$ itself is constructed. We thus suppress the causal influence that $Z_{A_0}$ has on downstream parts of $\zcontext$ (such as $Z_{E_1}$ and $Z_{A_1}$) by freezing the values of $Z_{E_1}$ and $Z_{A_1}$ in $\zcontext^{\text{intervened}}$ instead of recomputing them based on $Z_{A_0}'$. 
+
+
+
+\section{Existence of Binding IDs}
+
+In this section, we first describe our hypothesized binding ID mechanism. Then, we identify two key predictions of the mechanism, factorizability and position independence, and verify them experimentally. We provide an informal argument in \cref{apx: necessity binding ID} for why this binding ID mechanism is the only mechanism consistent with factorizability and position independence.
+\textbf{Binding ID mechanism. }We claim that to bind attributes to entities, the LM learns abstract binding IDs that it assigns to entities and attributes, so that entities and attributes bound together have the same binding ID (Fig. \ref{fig:binding-illustration}). In more detail, our informal description of the binding ID mechanism is:
+\begin{enumerate}
+    \item For the $k$-th entity-attribute pair construct an abstract binding ID that is independent of the entity/attribute values. Thus, for a fixed $n$-entity binding task (e.g. \textsc{capitals} task) we can identify the $k$-th abstract binding ID with the integer $k\in\{0,\dots,n-1\}$.
+    \item For entity $E_k$, encode both the entity $E_k$ and the binding ID $k$ in the activations $Z_{E_k}$. 
+    \item For attribute $A_k$, encode both the attribute $A_k$ and the binding ID $k$ in the activations $Z_{A_k}$.
+    \item To answer a query for entity $E_k$, retrieve from $\zcontext$ the attribute that shares the same binding ID as $E_k$.
+\end{enumerate}
+Further, for activations $Z_{E_k}$ and $Z_{A_k}$, the binding ID and the entity/attribute are the only information they contain that affects the query behavior. 
+
+More formally, there are \textit{binding functions} $\Gamma_E(e, k)$ and $\Gamma_A(a, k)$ that fully specify how $Z_E$ and $Z_A$ bind entities/attributes with binding IDs. Specifically, if $E_k = e \in \mathcal E$, then we can replace $Z_{E_k}$ with $\Gamma_E(e, k)$ without changing the query behavior, and likewise for $Z_A$.
+
+More generally, given ${Z}_{\text{context}}$ with entity representations $\Gamma_E(e_0, 0), \ldots, \Gamma_E(e_{n-1}, n-1)$ and attribute representations $\Gamma_A(a_0, \pi(0)), \ldots, \Gamma_A(a_{n-1}, \pi(n-1))$ for a permutation $\pi$, the LM should answer queries according to the context $\mathbf {c} = \ctxt(e_0 \leftrightarrow a_{\pi^{-1}(0)}, \ldots, e_{n-1} \leftrightarrow a_{\pi^{-1}(n-1)})$.
+This implies two properties in particular, which we will test in the following subsections:
+\begin{itemize}[parsep=0pt, leftmargin=*]
+\item {\bf Factorizability:} if we replace $Z_{A_k}$ with $Z_{A_k'}$, then the model will bind $E_k$ to $A_k'$ instead of $A_k$, i.e.~it will believe $\mathbf{c}./\{A_k \rightarrow A_k'\}$. This is because $Z_{A_k}'$ encodes $\Gamma_A(A_k', k)$ and $Z_{A_k}$ encodes $\Gamma_A(A_k, k)$. Substituting $Z_{A_k} \rightarrow Z_{A_k'}$ will overwrite $\Gamma_A(A_k, k)$ with $\Gamma_A(A_k', k)$, causing the model to bind $E_k$ to $A_{k}'$.
+\item {\bf Position independence:} if we e.g.~swap $Z_{A_0}$ and $Z_{A_1}$, the model still binds $A_0 \leftrightarrow E_0$ and $A_1 \leftrightarrow E_1$, because it looks up attributes based on binding ID and not position in the context.
+\end{itemize}
+
+
+In \cref{sec: structure}, we construct fine-grained modifications to the activation $Z$ that modify the binding ID but not the attributes, allowing us to test the binding hypothesis more directly. In \cref{sec: generality} we extend this further by showing that binding IDs can be transplanted from entirely different tasks.
+
+
+\begin{figure}
+ \centering
+ \begin{subfigure}[b]{0.45\textwidth}
+     \centering
+     \includegraphics[width=0.75\textwidth]{figures/factorization_side0.pdf}
+     \caption{Swapping entity/attribute for $(E_0, A_0)$}
+     \label{fig:fac 0}
+ \end{subfigure}
+ \begin{subfigure}[b]{0.45\textwidth}
+     \centering
+     \includegraphics[width=0.75\textwidth]{figures/factorization_side1.pdf}
+     \caption{Swapping entity/attribute for $(E_1, A_1)$}
+     \label{fig:fac 1}
+ \end{subfigure}
+    \caption{Factorizability results. Each row corresponds to querying for a particular entity. Plotted are the mean log prob for all four attributes. Highlighted squares are predicted by factorizability.}
+    \label{fig:fac results}
+\end{figure}
+\subsection{Factorizability of activations}\label{sec: factorizability}
+The first property of $\zcontext$ we test is \textit{factorizability}. In our claimed mechanism, information is highly localized---$Z_{A_k}$ contains all relevant information about $A_k$, and likewise for $Z_{E_k}$. Therefore, we expect LMs that implement this mechanism to have factorizable activations: for any contexts $\mathbf c, \mathbf c'$, substituting $Z_{E_k} \rightarrow Z_{E_k}(\mathbf c')$ into $\zcontext(\mathbf c)$ will cause the model to believe $\mathbf c /. \{E_k \rightarrow E_k'\}$, and substituting $Z_{A_k} \rightarrow Z_{A_k}(\mathbf c')$ cause the model to believe $\mathbf c /. \{A_k\rightarrow A_k'\}$. 
+
+To test this concretely, we considered the \textsc{capitals} task from \cref{sec: preliminaries} with $n=2$ entity-attribute pairs. We computed representations for two contexts $\mathbf c = \ctxt(e_0\leftrightarrow a_0, e_1 \leftrightarrow a_1)$  and $\mathbf c' = \ctxt(e_0' \leftrightarrow a_0', e_1' \leftrightarrow a_1')$, and used causal mediation analysis (\cref{sec: preliminaries}) to swap representations from the source context $\mathbf c'$ into the target context $\mathbf c$. Specifically, we fix $k \in \{0,1 \}$ and intervene on either just the entity ($Z_{E_K} \rightarrow Z_{E_k}'$), just the attribute, neither, or both. We then measure the mean log probs for all possible queries ($E_0, E_1, E_0', E_1')$. For instance, swapping $A_k$ with $A_k'$ in $\zcontext$ should lead $A_k'$ (and not $A_k$) to have high log-probability when $E_k$ is queried.
+
+Results are shown in Fig.~\ref{fig:fac results} and support the factorizability hypothesis. 
+As an example, consider Fig.~\ref{fig:fac 0}. In the None setting (no intervention), we see high log probs for $A_0$ when queried for $E_0$, and for $A_1$ when queried for $E_1$. This indicates that the LM is able to solve this task. Next, consider the Attribute intervention setting ($A_0 \to A_0'$): querying for $E_0$ now gives high log probs for $A_0'$, and querying for $E_1$ gives $A_1$ as usual. Finally, in the Both setting (where both entity and attribute are swapped), querying $E_0'$ returns $A_0'$ while querying $E_0$ leads to approximately uniform predictions. 
+
+\textbf{Experiment details.}  %We compute representations on the \textsc{capitals} task with $n=2$ entity-attribute pairs. Consider two sets of contexts, the target context $\mathbf c = \ctxt(e_0\leftrightarrow a_0, e_1 \leftrightarrow a_1)$  and the source context $\mathbf c' = \ctxt(e_2 \leftrightarrow a_2, e_3 \leftrightarrow a_3)$. We choose either $(E_0, A_0)$ (Fig. \ref{fig:fac 0}) or $(E_1, A_1)$ (Fig. \ref{fig:fac 1}) to intervene on. We will intervene on either just the entity ($Z_{E_K} \rightarrow Z_{E_k}'$), just the attribute, neither, or both. %For each entity-attribute pair $(E_k, A_k)$, let $x_E$ be the indicator variable for whether or not we perform the intervention $Z_{E_k} \rightarrow Z_{E_k}'$, and $x_A$ be defined analogously. We then have four test conditions corresponding to the four settings of the indicator variables. 
+We use LLaMA 30-b here and elsewhere unless otherwise stated. In practice, we found that activations for both the entity token and the subsequent token encode the entity binding information. Thus for all experiments in this paper, we expand the definition of $Z_{E_k}$ to include the token activations immediately after $E_k$.
+
+\subsection{Position independence}\label{sec: position independence}
+
+\begin{figure}
+ \centering
+    \includegraphics[width=\textwidth]{figures/combined_position.pdf}
+    \caption{Top: Mean log probs for entity interventions. Bottom: Mean log probs for attributes. For brevity, let $Z_k$ refer to $Z_{E_k}$ or $Z_{A_k}$. The grey and green vertical lines indicate the original positions for $Z_0$ and $Z_1$ respectively. The x-axis marks $x$, $Z_0$'s new position. Under the position interventions $\{X_{0} \rightarrow x, X_1 \rightarrow X_1 - (x - X_{0})\}$, the grey line is the \textit{control condition} with no interventions, and the green line is the \textit{swapped condition} where $Z_0$ and $Z_1$ have swapped positions.}
+    \label{fig:all pos}
+\end{figure}
+
+We next turn to position independence, which is the other property we expect LMs implementing the binding ID mechanism to have. This says that permuting the order of the $Z_{E_k}$ and $Z_{A_k}$ should have no effect on the output, because the LM looks only at the binding IDs and not the positions of entities or attributes activations.
+
+To apply causal interventions to the positions, we use the fact that transformers use positional embeddings to encode the (relative) position of each token in the input. We can thus intervene on these embeddings to ``move'' one of the $Z_k$'s to another location $k'$. Formally, we let $X_k$ describe the position embedding for $Z_k$, and denote the position intervention as $\{X_k \rightarrow k'\}$. In \cref{apx: position dependent bias} we describe how to do this for rotary position embeddings (RoPE), which underlie all the models we study. For now, we will assume this intervention as a primitive and discuss experimental results.
+
+
+For our experiments, we again consider the \textsc{capitals} task with $n = 2$. Let $X_{E_0}$ and $X_{E_1}$ denote the positions of the two entities. We apply interventions of the form  $\{X_{E_0} \rightarrow x, X_{E_1} \rightarrow X_{E_1} - (x - X_{E_0})\}$, for $x \in \{X_{E_0}, X_{E_0} + 1, \ldots, X_{E_1}\}$. This measures the effect of gradually moving the two entity positions past each other: when $x = X_{E_0}$, no intervention is performed (\textit{control condition}), and when $x = X_{E_1}$ the entity positions are swapped (\textit{swapped condition}). We repeat the same experiment with attribute activations and measure the mean log probs in both cases. % ranges from We then query the model with $E_0$ and $E_1$ and measure the mean log prob over the two attributes $A_0$ and $A_1$. 
+
+Results are shown in Fig. \ref{fig:all pos}. As predicted under position independence, position interventions result in little change in model behavior. Consider the \textit{swapped condition} at the green line. Had the binding information been entirely encoded in position, we expect a complete switch in beliefs compared to the \textit{control condition}. In reality, we observe almost no change in mean log probs for entities and a small change in mean log probs for attributes that seems to be part of an overall gradual trend.
+
+We interpret this gradual trend as an artifact of \textit{position-dependent bias}, and not as evidence against position independence. We view it as a bias because it affects all attributes regardless of how they are bound---attributes that are shifted to later positions always have higher log probs. We provide further discussion of this bias, as well as other experimental details, in \cref{apx: position dependent bias}.
+
+
+
+\section{Structure of Binding ID}
+
+The earlier section shows evidence for the binding ID mechanism. Here, we investigate two hypotheses on the structure of binding IDs and binding functions. The first is that the binding functions $\Gamma_A$ and $\Gamma_E$ are additive, which lets us think of binding IDs as \textit{binding vectors}. The second is contingent on the first, and asks if binding vectors have a geometric relationship between each other.
+
+\subsection{Additivity of Binding Functions}
+\label{sec: additive}
+Prior interpretability research has proposed that transformers represent features linearly \citep{elhagemathematical}. Therefore a natural hypothesis is that both entity/attribute representations and abstract binding IDs are vectors in activation space, and that the binding function (\cref{sec: existence}) simply adds the vectors for entity/attribute and binding ID. We let the binding ID $k$ be represented by the pair of vectors $[b_E(k), b_A(k)]$, and the representations of entity $e$ and attribute $a$ be $f_E(e)$ and $f_A(a)$ respectively. Then, we hypothesize that the binding functions can be linearly decomposed as:
+\begin{equation}\label{eq: vector}
+    \Gamma_A(a, k) = f_A(a) + b_A(k) , \quad \Gamma_E(e, k) = f_E(e) + b_E(k).
+\end{equation} 
+Binding ID vectors seem intuitive and plausibly implementable by transformer circuits. To experimentally test this, we seek to extract $b_A(k)$ and $b_E(k)$ in order to perform vector arithmetic on them. % have to solve the issue that we do not have access to the binding vectors $b_A(k), b_E(k)$. 
+We use (\ref{eq: vector}) to extract the \textit{differences} $\Delta_E(k) := b_E(k) - b_E(0)$, $\Delta_A(k) := b_A(k) - b_A(0)$. Rearranging (\ref{eq: vector}), we obtain 
+\begin{equation} \label{eq: vector reformed}
+\Delta_A(k) = \Gamma_A(a, k) - \Gamma_A(a, 0), \quad \Delta_E(k) = \Gamma_E(e, k) - \Gamma_E(e, 0).
+\end{equation}
+We estimate $\Delta_A(k)$ by sampling $\mathbb E_{\mathbf c, \mathbf c'}[Z_{A_k}(\mathbf c) - Z_{A_0}(\mathbf c')]$, and likewise for $\Delta_E(k)$.
+
+\begin{table}[t]
+\centering
+\small 
+\begin{tabular}{r || c | c | c | c !{\vrule width 2pt} c|c|c}
+Test condition & Control & Attribute & Entity & Both &Attribute&Entity&Both  \\
+\hline
+Querying $E_0$ & 0.99 & 0.00 & 0.00 & 0.97 & 0.98 & 0.98 & 0.97\\
+Querying $E_1$ & 1.00 & 0.03 & 0.01 & 0.99 & 1.00 & 1.00 & 1.00
+
+\end{tabular}
+\caption{Left: Mean calibrated accuracies for mean interventions on four test conditions. Columns are the test conditions, and rows are queries. Right: Mean interventions with random vectors.}
+\label{tab:mean interventions}
+\end{table}
+
+\textbf{Mean interventions.} With the difference vectors, we can modify binding IDs by performing \emph{mean interventions}, and observe how model behavior changes. The attribute mean intervention switches the binding ID vectors in $Z_{A_0}$ and $Z_{A_1}$ with the interventions $Z_{A_0} \rightarrow Z_{A_0} + \Delta_A(1), Z_{A_1} \rightarrow Z_{A_1} - \Delta_A(1)$. The entity mean intervention similarly switches the binding ID vectors in $Z_{E_0}$ and $Z_{E_1}$. Additivity predicts that performing either mean intervention will reverse the model behavior: $E_0$ will be associated with $A_1$, and $E_1$ with $A_0$.
+
+\textbf{Experiments.} In our experiments, we fix $n=2$ and use 500 samples to estimate $\Delta_E(1)$ and $\Delta_A(1)$. We then perform four tests, and evaluate the model accuracy under the original belief. The Control test has no interventions, and the accuracy reflects model's base performance. The Attribute and Entity tests perform the attribute and entity mean interventions, which should lead to a complete switch in model beliefs so that the accuracy is near 0. Table~\ref{tab:mean interventions} shows agreement with additivity: the accuracies are above $99\%$ for Control, and below $3\%$ for Attribute and Entity.
+
+As a further check, we perform both attribute and entity mean interventions simultaneously, which should cancel out and thus restore accuracy. Indeed, Table~\ref{tab:mean interventions} shows that accuracy for Both is above $97\%$. Finally, to show that the \emph{specific} directions obtained by the difference vectors matter, we sample random vectors with the same magnitude but random directions, and perform the same mean interventions with the random vectors. These random vectors have no effect on the model behavior.
+
+\subsection{The Geometry of Binding ID Vectors}
+\label{sec:geometry}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/subspace_uncrossed.pdf}
+    \caption{The plots show the mean median-calibrated accuracy when one pair of binding ID, $v_0$, is fixed at the green circle, and the other, $v_1$, is varied across the grid. The binding IDs $b(0)$, $b(1)$, and $b(2)$ are shown as the origin of the arrows, the end of the horizontal arrow, and the end of the diagonal arrow respectively. We use LLaMA-13b for computational reasons.}
+    \label{fig:subspace-uncrossed}
+\end{figure}
+\cref{sec: additive} shows that we can think of binding IDs as pairs of ID vectors, and that randomly chosen vectors do not function as binding IDs. 
+We next investigate the geometric structure of valid binding vectors and find that linear interpolations or extrapolations of binding vectors are often also valid binding vectors.  This suggests that binding vectors occupy a continuous \textit{binding subspace}.  We find evidence of a metric structure in this space, such that nearby binding vectors are hard for the model to distinguish, but far-away vectors can be reliably distinguished and thus used for the binding task. %This means that the LM can assign binding IDs to entity-attribute pairs as long as they are in this subspace and sufficiently far apart.
+
+To perform our investigation, we apply variants of the mean interventions in \cref{sec: additive}. As before, we start with an $n=2$ context, thus obtaining representations $Z_0 = (Z_{E_0}, Z_{A_0})$ and $Z_1 = (Z_{E_1}, Z_{A_1})$. We first erase the binding information by subtracting $(\Delta_E(1), \Delta_A(1))$ from $Z_1$, which reduces accuracy to chance. Next, we will add vectors $v_0 = (v_{E_0}, v_{A_0})$ and $v_1 = (v_{E_1}, v_{A_1})$ to the representations $Z$; if doing so restores accuracy, then we view $(v_{E_0}, v_{A_0})$ and $(v_{E_1}, v_{A_1})$ as valid binding pairs.
+
+To generate different choices of $v$, we take linear combinations across a two-dimensional space. The basis vectors for this space are $(\Delta_E(1), \Delta_A(1))$ and $(\Delta_E(2), \Delta_A(2))$ obtained by averaging across an $n = 3$ context. Fig.~\ref{fig:subspace-uncrossed} shows the result for several different combinations, where the coordinates of $v_0$ are fixed and shown in green while the coordinates of $v_1$ vary. When $v_1$ is close to $v_0$, the LM gets close to 50\% accuracy, which indicates confusion. Far away from $v_1$, the network consistently achieves high accuracy, demonstrating that linear combinations of binding IDs (even with negative coefficients) are themselves valid binding IDs. See \cref{apx: geometry details} for details.
+
+The geometry of the binding subspace hints at circuits \citep{elhagemathematical} in LMs that process binding vectors. For example, we speculate that certain attention heads might be responsible for comparing binding ID vectors, since the attention mechanism computes attention scores using a quadratic form which could provide the metric over the binding subspace.
+
+
+
+\section{Generality and Limitations of Binding ID}
+
+The earlier sections investigate binding IDs for one particular task: the \textsc{capitals} task. In this section, we evaluate their generality. We first show that binding vectors are used for a variety of tasks and models. We then show evidence that the binding vectors are task-agnostic: vectors from one task transfer across many different tasks. However, our mechanism is not fully universal. \cref{apx: mcq} describes a question-answering task that uses an alternative binding mechanism. 
+
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/combined_model_task.pdf}
+    \caption{Left: models in Pythia and LLaMA on \textsc{capitals}. LLaMA-65b not present for computational reasons. Right: LLaMA-30b on binding tasks. Unlike others, the \textsc{bios} task has attributes that are several tokens long.}
+    \label{fig:all-model-task}
+  \end{figure}
+
+\textbf{Generality of binding ID vectors.} We evaluate the generality of binding vectors across models and tasks. For a (model, task) pair, we compute the median-calibrated accuracy on the $n=3$ context under three conditions: (1) the control condition in which no interventions are performed, and the (2) entity and (3) attribute conditions in which entity or attribute mean interventions (\cref{sec: additive}) are performed. We use the mean interventions to permute binding pairs by a cyclic shift and measure accuracy according to this shift (see \cref{apx: all model task}). As shown in Figure~\ref{fig:all-model-task}, the interventions induce the expected behavior on most tasks; moreover, their effectiveness increases with model scale, suggesting that larger models have more robust structured representations.
+\begin{table}
+\centering
+\begin{tabular}{r || c | c | c | c | c | c | c}
+\small
+Task & \textsc{capitals} & \textsc{parallel} & \textsc{shapes} & \textsc{fruits} & \textsc{bios} & Zeros & Random\\
+\hline
+Mean accuracy & 0.88 & 0.87 & 0.71 & 0.80 & 0.47 & 0.30 & 0.31 \\
+Mean log prob & -1.01 & -1.07 & -1.18 & -1.21 & -1.64 & -1.86 & -2.15
+\end{tabular}
+\caption{The mean median-calibrated accuracy and mean log prob for mean interventions on $n=3$ \textsc{capitals} using binding ID estimates from other tasks. Random chance has $0.33$ mean accuracy.}
+\label{tab:cross tasks}
+\end{table}
+
+\textbf{Transfer across tasks.} We next show that binding vectors often transfer across tasks. 
+Without access to the binding vectors $[b_E(k), b_A(k)]$, we instead test if the difference vectors $[\Delta^{\mathrm{src}}_E(k), \Delta^{\mathrm{src}}_A(k)]$ from a source task, when applied to a target task, result in valid binding IDs. To do so, we follow a similar procedure to \cref{sec:geometry}: First, we erase binding information by subtracting $[\Delta^{\mathrm{tar}}_E(k), \Delta^{\mathrm{tar}}_A(k)]$ from each target-task representation $[Z_{E_k}, Z_{A_k}]$, resulting in near-chance accuracy. Then, we add back in $[\Delta^{\mathrm{src}}_E(k), \Delta^{\mathrm{src}}_A(k)]$ computed from the \emph{source} task with the hope of restoring performance.
+
+Table \ref{tab:cross tasks} shows results for a variety of source tasks when using \textsc{capitals} as the target task. Accuracy is consistently high, even when the target task has limited surface similarity to the target task. For example, the \textsc{shapes} task asks questions about colored shapes, and \textsc{parallel} lists all entities before any attributes instead of interleaving them as in \textsc{capitals}. We include two baselines for comparison: replacing $\Delta^{\mathrm{src}}(k)$ with the zero vector (``Zeros"), or picking a randomly oriented difference vector as in Table~\ref{tab:mean interventions} (``Random"). Both lead to chance accuracy. See \cref{apx: binding task} for tasks details.
+
+The fact that binding vectors transfer across tasks, together with the results from \cref{sec: structure}, suggests that there could be a task-agnostic subspace in the model's activations reserved for binding vectors.
+
+
+
+\section{Related work}
+
+
+\textbf{Causal mediation analysis.} In recent years, causal methods have gained popularity in post hoc interpretability \citep{rome, causalabstractions}. Instead of relying on correlations, which could lead to spurious features \citep{hewitt2019designing}, causal mediation analysis \citep{causalmediation} performs causal interventions on internal states of LMs to understand their causal role on LM behavior. Our work shares the same causal perspective adopted by many in this field.
+\textbf{Knowledge recall.} A line of work studies recalling factual associations that LMs learn from pretraining \citep{gevakeyvalue,daiknowledgeneurons,rome,gevarecall,lre}. This is spiritually related to binding, as entities must be associated to facts about them. However, this work studies factual relations learned from \textit{pretraining} and how they are recalled from model \textit{weights}. In contrast, we study representations of relations learned from \textit{context}, and how they are recalled from model \textit{activations}.
+More recently, \citet{remedi} found a method to construct bound representations by directly binding attribute representations to entity representations. In contrast, our work investigates bound representations constructed by the LM itself, and identifies that the binding ID mechanism (and not direct binding) is the mechanism that LM representations predominantly uses. An avenue for future work is to study how bound representations constructed by \citet{remedi} relates to the direct binding mechanism we identified in \cref{apx: mcq}.
+
+
+\textbf{Symbolic representations in connectionist systems.} Many works have studied how neural networks represent symbolic concepts in activation space~\citep{kingqueen, bertpipeline,belinkovanlaysis,bertology, patel2021mapping}. To gain deeper insights into how these representations are used for reasoning, recent works have studied representations used for specialized reasoning tasks~\citep{grokkingaddition, othello, belinda-alchemy}. Our work shares the motivation of uncovering how neural networks implement structured representations that enable reasoning.
+
+\textbf{Mechanistic Interpretability.}
+Mechanistic interpretability aims to uncover circuits \citep{elhagemathematical, ioi, wu2023interpretability}, often composed of attention heads, embedded in language models. In our work, we study language model internals on a more coarse-grained level by identifying structures in representations that have causal influences on model behavior. Concurrent work by \citet{prakash2024fine} complements ours by analyzing the circuits involved in the binding problem.
+
+
+
+\section{Conclusion}
+
+In this paper we identify and study the binding problem, a common and fundamental reasoning subproblem. We find that pretrained LMs can solve the binding task by binding entities and attributes to abstract binding IDs. Then, we identify that the binding IDs are vectors from a binding subspace with a notion of distance. Lastly, we find that the binding IDs are used broadly for a variety of binding tasks and are present in all sufficiently large models that we studied. 
+
+Taking a broader view, we see our work as a part of the endeavor to interpret LM reasoning by decomposing it into primitive skills. In this work we identified the binding skill, which is used in several settings and has a simple and robust representation structure. An interesting direction of future work would be to identify other primitive skills that support general purpose reasoning and have similarly interpretable mechanisms.
+
+Our work also suggests that ever-larger LMs may still have interpretable representations. A common intuition is that larger models are more complex, and hence more challenging to interpret. Our work provides a counterexample: as LMs become larger, their representations can become \emph{more} structured and interpretable, since only the larger models exhibited binding IDs (Fig. \ref{fig:all-model-task}). 
+
+Speculating further, the fact that large enough models in two unrelated LM families learn the same structured representation strategy points to a convergence in representations with scale. Could there be an ultimate representation that these LMs are converging towards? Perhaps the properties of natural language corpora and LM inductive biases lead to certain core representation strategies that are invariant to changes in model hyperparameters or exact dataset composition. This would encouragingly imply that interpretability results can transfer across models---studying the core representations of any sufficiently large model would yield insights into other similarly large models.
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,334 @@
+\title{Graph Metanetworks for Processing Diverse Neural Architectures}
+
+\begin{abstract}
+Neural networks efficiently encode learned information within their parameters. Consequently,
+many tasks can be unified by treating neural networks themselves as input data.
+When doing so, recent studies demonstrated the importance of accounting for the symmetries and geometry of parameter spaces. However, those works developed architectures tailored to specific networks such as MLPs and CNNs without normalization layers, and generalizing such architectures to other types of networks can be challenging.
+In this work, we overcome these challenges by building new metanetworks --- neural networks that take weights from other neural networks as input. Put simply, we carefully build graphs representing the input neural networks and process the graphs using graph neural networks. Our approach, Graph Metanetworks (GMNs), generalizes to neural architectures where competing methods struggle, such as multi-head attention layers, normalization layers, convolutional layers, ResNet blocks, and group-equivariant linear layers. We prove that GMNs are expressive and equivariant to parameter permutation symmetries that leave the input neural network functions unchanged. We validate the effectiveness of our method on several metanetwork tasks over diverse neural network architectures.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Neural networks are well-established for predicting, generating, and transforming data. A newer paradigm is to treat the parameters of neural networks themselves as data. This insight inspired researchers to suggest neural architectures that can predict properties of trained neural networks~\citep{eilertsen2020classifying}, generate new networks~\citep{erkocc2023hyperdiffusion}, optimize networks~\citep{metz2022velo}, or otherwise transform them~\citep{navon2023equivariant,zhou2023permutation}. We refer to these neural networks that process other neural networks as \emph{metanetworks}, or \emph{\mNNs} for short.
+
+\MNNs{} enable new applications, but designing them is nontrivial. A common approach is to flatten the network parameters into a vector representation, neglecting the input network structure. More generally, a prominent challenge in \mNN{} design is that the space of neural network parameters exhibits symmetries. For example, permuting the neurons in the hidden layers of a Multilayer Perceptron (MLP) leaves the network output unchanged~\citep{hecht1990algebraic}. Ignoring these symmetries greatly degrades the \mNN{} performance~\citep{peebles2022learning, navon2023equivariant}. Instead, equivariant \mNNs{} respect these symmetries, so that if the input network is permuted then the \mNN{} output is permuted in the same way.
+Recently, several works have proposed equivariant \mNNs{}  that have shown significantly improved performance \citep{navon2023equivariant, zhou2023permutation,zhou2023neural}. However, these networks typically require highly specialized, hand-designed layers that can be difficult to devise.
+A careful analysis of its symmetries is necessary for any input architecture, followed by the design of corresponding equivariant \mNN{} layers. 
+Generalizing this procedure to more complicated network architectures is time-consuming and nontrivial, so existing methods can only process simple input networks with linear and convolutional layers, and cannot process standard modules such as normalization layers or residual connections --- let alone more complicated modules such as attention blocks.
+Moreover, these architectures cannot directly process input neural networks with varying architectures, such as those with different numbers of layers or hidden units.
+
+This work offers a simple and elegant solution to \mNN{} design that respects neural network parameter symmetries. As in the concurrent work of \cite{zhang2023neural}, our technique's crux is representing an input neural network as a graph (see Figure~\ref{fig:method_diagram}). We show how to efficiently transform a neural network into a graph such that standard techniques for learning on graphs -- \eg Message Passing Neural Networks \cite{gilmer2017neural,battaglia2018relational} or Graph Transformers~\citep{rampavsek2022recipe}  -- will be equivariant to the parameter symmetries. One of our key contributions is in developing a compact \emph{parameter graph} representation, which in contrast to established computation graphs allows us to handle parameter-sharing layers like convolutions and attention layers without scaling with the activation count. While past work is typically restricted to processing MLPs and simple Convolutional Neural Networks (CNNs) \citep{NIPS1989_53c3bce6}, we validate experimentally that our graph \mNNs{} (\GMNs) generalize to more complicated networks such as Transformers~\citep{vaswani2017attention}, residual networks~\citep{he2016deep}, normalization layers~\citep{ioffe2015batch, ba2016layer, wu2018group}, general group-equivariant architectures \citep{ravanbakhsh2017equivariance} like Deep Sets~\citep{zaheer2017deep}, and more.
+
+We prove theoretically that our \mNNs{} are equivariant to permutation symmetries in the input network, which we formulate via neural graph automorphisms (Section~\ref{sec:theory_equivariance}). This generalizes the hidden neuron permutations in MLPs and channel permutations of CNNs covered in prior work to arbitrary feedforward neural architectures. We further prove that our \mNNs{} operating on computation graphs are at least as expressive as prior methods --- meaning they can approximate them to arbitrary accuracy --- and can express the forward pass of any input feedforward neural network, generalizing a result of \cite{navon2023equivariant} (Section~\ref{sec:theory_expressive}). 
+
+Empirical evaluations show that our approach solves a variety of \mNN{} tasks with diverse neural architectures. As part of this effort, we trained new datasets of diverse image classifiers, including 2D CNNs, 1D CNNs, DeepSets, ResNets, and Vision Transformers. Our method is easier to implement than past equivariant \mNNs{} while being at least as expressive, and it is applicable to more general input architectures. Crucially, our \GMNs{} achieve strong quantitative performance across all tasks we explored.
+
+
+
+
+\section{Graph Automorphism-based \MNNs{}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/gmn_fig1.png}
+    \caption{\textbf{Overview of Graph Metanetworks (\GMNs{})} Our method converts neural network architectures into a parameter graph where edges correspond to network parameters. The bias ($b$) and batch-normalization parameters are incorporated via additional nodes with edges to the relevant layer's neurons. The graph is processed by a graph neural network operating on edge attributes. Fixed-length (invariant) predictions can be extracted by pooling the output graph features.}
+    \label{fig:method_diagram}
+\end{figure}
+
+We first explain how neural networks can be encoded as Directed Acyclic Graphs (DAGs). This work introduces a more compact representation, referred to as \emph{parameter graphs}.
+
+We then introduce one of the paper's main concepts --- \emph{Neural DAG Automorphisms}. This concept generalizes previously studied symmetry groups for MLPs and CNNs to arbitrary feedforward architectures represented as DAGs. To conclude this section, we describe our GNN-based \mNN{} that operates over these graphs and is equivariant to Neural DAG Automorphisms.
+\textbf{Motivation.}
+Certain permutations of parameters in neural networks do not change the function they parameterize. 
+For example, consider a simple MLP defined such that 
+$\nnFunc_\nnParam(\nnInput) \defeq \boldsymbol{W}_2 \sigma(\boldsymbol{W}_1 \nnInput)$ with one hidden layer, where $\nnParam \defeq (\boldsymbol{W}_2, \boldsymbol{W}_1)$ are the parameters of the network, and $\sigma$ is a nonlinear element-wise activation function. 
+For any permutation matrix $\boldsymbol{P}$, if we define $\tilde \nnParam \defeq (\boldsymbol{W}_2 \boldsymbol{P}^\top, \boldsymbol{P} \boldsymbol{W}_1)$, then for all inputs $\nnInput$, we have $\nnFunc_\nnParam(\nnInput) = \nnFunc_{\tilde \nnParam}(\nnInput)$. 
+This $\boldsymbol{P}$ corresponds to a permutation of the order of the hidden neurons, which is well-known not to affect the network function \citep{hecht1990algebraic}. Likewise, permuting the hidden channels of a CNN does not affect the network function~\citep{navon2023equivariant, entezari2022the, ainsworth2023git}.
+
+While these permutation symmetries for MLPs and simple CNNs are easy to determine by manual inspection, it is more difficult to determine the symmetries of general architectures. For example, simple residual connections introduce additional neuron dependencies across layers. 
+Instead of manual inspection, we show that graph automorphisms (i.e. graph isomorphisms from a graph to itself) on DAGs representing feedforward networks correspond to permutation parameter symmetries.
+From this observation, it can be shown that GNNs acting on these DAGs are equivariant to their permutation symmetries.
+
+
+\textbf{Overview of our approach.} See Figure~\ref{fig:method_diagram} for an illustration.
+Given a general input feedforward neural network, we first encode it as a graph in which each parameter is associated with an edge and then process this graph with a GNN. The GNN outputs a single fixed-length vector or predictions for each node or edge depending on the learning task. 
+For instance, one graph-level task is to predict the scalar accuracy of an input neural network on some task. An edge-level task is to predict new weights for an input neural network to change its functionality somehow.
+
+We now discuss the graph construction, the symmetries of these graphs, and the GNN we use. 
+
+\subsection{Graph construction for general feedforward architectures}
+\label{sec:graph_constructions}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+    \includegraphics[width=0.48\textwidth]{figures/gmn_conv_compute_graph.png}
+  \end{center}
+  \caption{An example computation graph for a network with a single convolutional layer. The layer has a $\num{2}\times\num{2}$ filter kernel, a single input and output channel, and applies the filter with a stride of 2. Even in this small case of a $\num{4} \times \num{4}$ input image, the graph has $\num{16}$ edges for only $\num{4}$ parameters.}
+  \label{fig:conv_compute_graph} 
+\end{wrapfigure}
+
+\subsubsection{Computation graphs} Every feedforward neural network defines a computation graph as a DAG~\citep{zhang2023neural}, where nodes are neurons and edges hold neural network parameter weight values (see Fig.~\ref{fig:method_diagram} and Fig.~\ref{fig:conv_compute_graph}). Thus, this gives a method to construct a weighted graph. 
+However, the computation graph approach has some downsides. For one, it may be expensive due to weight-sharing: for instance, a $1$-input-and-output-channel 2D-convolution layer with a kernel size of $2$ has $4$ parameters, but the $4$ parameters are used in the computation of many activations (e.g. $1024$ activations for a $32 \times 32$ input grid).
+Further, we may want to add input node and edge features -- such as layer number -- to help performance and expressive power\footnote{In Section~\ref{sec:theory_expressive}, our proofs rely on these features to show graph \mNNs{} can express existing \mNNs{}.}. Figure~\ref{fig:conv_compute_graph} illustrates an example of a (small) computation graph for convolutions (for visual clarity, we exclude bias terms).
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/gmn_main_paper_layers.png}
+    \caption{Parameter subgraph constructions for assorted layers that we implemented in our empirical evaluation. Their descriptions are given in Section~\ref{sec:param_graph_construction}.}
+    \label{fig:layer_subgraphs}
+\end{figure}
+
+\subsubsection{Parameter graphs}\label{sec:param_graph_construction} To deal with the challenges of computation graphs, we propose alternate neural network graph constructions --- some examples of which are shown in Figure~\ref{fig:layer_subgraphs} --- that are (a) efficient and (b) allow expressive \mNNs{}. We call these graphs \textit{parameter graphs} because we design the graphs so that each parameter is associated with a single edge of the graph (whereas a parameter may be associated to many edges in a computation graph). 
+
+We design modular subgraphs that can be created for each layer and then stitched together. Our goal is to design parameter graphs with at most one edge for each parameter in the neural network. Additionally, they should capture the correct set of parameter permutation symmetries.
+
+\textbf{Linear layers.} Figure~\ref{fig:method_diagram} depicts three linear layers in sequence. Each linear layer's parameter subgraph coincides with its computation graph, but even so, there are important design choices to be made. Bias parameters could be encoded as node features as done by \citet{zhang2023neural} or as self-loop edges on each neuron. Instead, we include a bias node for each layer and encode the bias parameters as edges from that node to the corresponding neurons in the layer.
+
+The bias node approach is preferable because the self-loop or node feature approaches to encoding biases can hinder the expressive power of the \mNN{}. In particular, the results of \citet{navon2023equivariant} and \citet{zhou2023permutation} show that the permutation equivariant linear \mNN{} maps for MLP inputs include message-passing-like operations where the representation of a bias parameter is updated via the representations of other bias parameters in the same layer.
+
+\textbf{Convolution layers.} Convolutions and other group equivariant linear layers leverage parameter sharing, where the same parameter is used to compute many activations~\citep{ravanbakhsh2017equivariance}. Therefore, representing convolutions as a computation graph introduces scaling issues and binds the network graph to a choice of input size. To avoid this, we develop a succinct and expressive parameter graph representation of convolutions. This is depicted in the left of Figure~\ref{fig:layer_subgraphs} for a convolution layer with a $2 \times 2$ filter, one input channel, and two output channels. Note that we have two output channels here, unlike the computation graph in Figure~\ref{fig:conv_compute_graph}, where there is only one.
+
+Our subgraph construction allocates a node for each input and output channel. We then have parallel edges between each input and output node for each spatial location in the filter kernel --- making this a multigraph. Bias nodes are added as in the linear layers. This subgraph contains exactly one edge for each parameter in the convolution layer while capturing the parameter permutation symmetries as graph automorphisms. The spatial position of each weight within the kernel is included by a positional encoding in the corresponding edge feature.
+
+In Section~\ref{sec:pred_acc}, we use our graph \mNNs{} to process 1D and 2D convolutional networks, as well as DeepSets networks that consist of permutation equivariant linear layers~\citep{zaheer2017deep}.
+
+\textbf{Multi-head attention layers.} Attention layers~\citep{vaswani2017attention} also exhibit parameter sharing across sequence length. As with convolutions, we design an efficient subgraph representation where each parameter appears as a single edge. There is one node for each feature dimension of the input, vectors used in attention computation, and output. There are two sets of edges: a set that corresponds to the query, key, and value maps, and a second set corresponding to the final output mapping.
+
+In the middle of Figure~\ref{fig:layer_subgraphs} we show a single-headed self attention layer, with bias nodes excluded for visual clarity. Generalizing this to multi-head attention simply requires adding additional node features to the middle layer that indicate which head each node belongs to.
+
+\textbf{Residual layers.} A residual connection does not introduce any additional parameters, but it does affect the permutation symmetries in the parameter space of the network. Therefore, it is crucial to represent residual connections as additional parameter-free edges within the parameter graph. The top-right of Figure~\ref{fig:layer_subgraphs} shows a residual connection bypassing a linear layer. The edges are drawn as dashed lines to emphasize that there are no associated parameters. As is natural in the computation graph, we fix the weight of the residual edge to be 1.
+
+\subsection{Neural DAG automorphisms}
+\label{sec:theory_equivariance}
+The prior section describes how to represent (feedforward) neural networks as DAGs. A natural question from an equivariant learning perspective is: what are the symmetries of this DAG representation?
+Specifically, we consider graph automorphisms, which are structure-preserving transformations of a graph unto itself. A neural DAG automorphism of a DAG $(\vertexSet, \edgeSet)$ associated with a neural network is a permutation of nodes $\perm: \vertexSet \to \vertexSet$ that preserves adjacency, preserves types of nodes (e.g. $\perm$ cannot map hidden neurons to input neurons), and preserves weight-sharing constraints (i.e. Every automorphism $\perm$ also induces a permutation of edges $\perm^\edge: \edgeSet \to \edgeSet$, where edge $\edgeTuple{i}{j}$ is mapped to $\perm^\edge(\edgeTuple{i}{j}) = (\perm(i), \perm(j))$. %
+
+\begin{figure}
+    \centering    \includegraphics[width=\linewidth]{figures/automorphisms.png}
+    \caption{Examples of neural DAG automorphisms for linear layers, convolutional layers, and residual layers. Possible node permutations are illustrated using red and purple dashed arrows, the same color represents an identical transformation.}
+    \label{fig:automorphisms}
+\end{figure}
+Intuitively, a neural DAG automorphism represents a permutation of the neural network parameters via the induced edge permutation, $\perm^{\edge}$. We write $\Bigperm(\nnParam)$ to represent this permutation on the parameters themselves, meaning $\Bigperm(\nnParam)_{(\phi(i), \phi(j))} = \nnParam_{(i, j)}$.  To formalize these notions, we show that every neural DAG automorphism $\perm$ of a computation graph is a permutation parameter symmetry, in the sense that the induced parameter permutation $\Bigperm$ does not change the neural network function. Figure  \ref{fig:automorphisms} illustrates several neural DAG automorphisms.
+
+\begin{proposition}
+\label{proposition:dag_automorphism}
+    For any neural DAG automorphism $\perm$ of a computation graph, the neural network function is left unchanged: $\forall \nnInput \in \inputspace, \nnFunc_{\nnParam}(\nnInput) = \nnFunc_{\Bigperm(\nnParam)}(\nnInput)$.
+\end{proposition}
+
+ Recall that our goal is to design \mNNs{} equivariant to parameter permutation symmetries. Proposition~\ref{proposition:dag_automorphism} shows to achieve this it is necessary to design \mNNs{} that are equivariant to neural DAG automorphisms.
+Graph \mNNs{} achieve this exactly since GNNs are equivariant to permutation symmetries of graphs~\citep{maron2019invariant}.
+\begin{proposition}
+    Graph \mNNs{} are equivariant to parameter permutations induced by neural DAG automorphisms.
+\end{proposition}
+These results formally justify using graph \mNNs{} on computation graphs for equivariance to parameter permutation symmetries. Now, noting the parameters are stored as edge features in our computation and parameter graphs, we design graph neural networks that operate on these DAGs.
+
+\subsection{Formulating \MNNs{} as GNNs}\label{sec:gnn}
+After constructing the input graphs, we use a GNN as our \mNN{} to learn representations and perform downstream tasks. We desire GNNs that learn edge representations since the input neural network parameters are placed on the edges of the constructed graph. While countless GNN variants have been developed in the last several years~\citep{hamilton2020graph}, most learn node representations.
+
+For simplicity, we mostly loosely follow the general framework of \citet{battaglia2018relational}, which defines general message-passing GNNs that update node, edge, and global features. For a graph, let $\graphNode_i \in \RR^\nodeDim$ be the feature of node $i$, $\edge_{\edgeTuple{i}{j}} \in \RR^\edgeDim$ a feature of the directed edge $\edgeTuple{i}{j}$, $\globalFeat \in \RR^\globalDim$ be a global feature associated to the entire graph, and let $\edgeSet$ be the set of edges in the graph. The directed edge $\edgeTuple{i}{j}$ represents an edge starting from $j$ and ending at $i$. We allow multigraphs, where there can be several edges (and hence several edge features) between a pair of nodes $(i,j)$; thus, we let $\edgeSet_{(i,j)}$ denote the set of edge features associated with $(i,j)$. Then, a general GNN layer updating these features can be written as:
+\begin{align}
+    \graphNode_i & \gets \MLP_2^\graphNode\left(\graphNode_i, \sum_{j, \edge_{\edgeTuple{i}{j}} \in \edgeSet_{(i,j)}} \MLP_1^\graphNode(\graphNode_i, \graphNode_j, \edge_{\edgeTuple{i}{j}}, \globalFeat), \globalFeat \right) \label{eq:node_features} \\
+    \edge_{\edgeTuple{i}{j}} & \gets \MLP^\edge(\graphNode_i, \graphNode_j, \edge_{\edgeTuple{i}{j}}, \globalFeat) \label{eq:edge_features} \\
+    \globalFeat & \gets \MLP^\globalFeat\left(\sum_i \graphNode_i, \sum_{\edge \in E} \edge, \globalFeat\right) \label{eq:global_features}
+\end{align}
+Intuitively, node features are updated by message passing along neighbors (\Eqref{eq:node_features}), the features of adjacent nodes update the features of the edges connecting them (\Eqref{eq:edge_features}), and the global feature $\globalFeat$ is updated with aggregations of all features (\Eqref{eq:global_features}). While our graphs are DAGs, we are free to use undirected edges by ensuring that $\edgeTuple{i}{j}~\in~\edgeSet$ implies $\edgeTuple{j}{i}~\in~\edgeSet$ with $\edge_{\edgeTuple{i}{j}} = \edge_{\edgeTuple{j}{i}}$. We often choose to allow message passing between layers in both directions.
+
+For parameter-level \mNN{} tasks with per-parameter predictions, we let the prediction be the final feature $\edge_{\edgeTuple{i}{j}}$ of the parameter's corresponding edge. We pool edge features for network-level \mNN{} tasks where a fixed-length vector is the final prediction for each graph. We can pool node features but found pooling edge features sufficient. We do not use global features for empirical results, but we find them crucial for the expressive power results of Proposition~\ref{prop:express_metanets}.
+
+
+
+\section{Expressive Power of Graph \MNNs{}
+
+
+Ideally, one does not sacrifice expressive power when restricting a neural architecture to satisfy group equivariance constraints. We want our \mNN{} architecture to be powerful enough to learn useful functions of network parameters. To this end, we first show that \GMNs{} can express two existing equivariant \mNNs{} on MLP inputs. Consequently, \GMNs{} are at least as expressive as these approaches.
+\begin{proposition}\label{prop:express_metanets}
+    On MLP inputs (where parameter graphs and computation graphs coincide), graph \mNNs{} can express StatNN~\citep{unterthiner2020predicting} and NP-NFN~\citep{zhou2023permutation}. 
+\end{proposition}
+ StatNN is based on permutation-invariant statistics of each weight or bias, which graph metanetworks can easily compute. The linear layers of NP-NFN consist of local message-passing-like operations and global operations that the global feature can capture. 
+
+ This substantially generalizes a result of~\citet{navon2023equivariant}, who show that their DWSNets can simulate the forward pass of MLPs.
+\begin{proposition}
+
+\end{proposition}
+The above result applies only to \GMNs{} operating on computation graphs. This makes it directly applicable to the parameter graphs for MLPs as they coincide with the computation graph. However, we expect that a similar result is possible for more general parameter graphs.
+We leave formal proof of this to future work.
+
+
+
+\section{Related Work}
+
+
+
+\textbf{Metanetworks.} Recently, several works developed \mNNs{} equivariant to permutation parameter symmetries of simple networks. DWSNets \citep{navon2023equivariant} and NFN \citep{zhou2023permutation} derive the form of linear layers that are group-equivariant to permutation parameter symmetries of simple MLPs (and NFN also handles CNNs). NFTs \citep{zhou2023neural} use special parameter-permutation-equivariant attention layers and layer-number features to build Transformer-like \mNNs{}.
+
+Other types of \mNNs{} have been developed, including those based on statistics such as weight mean and standard deviation~\citep{unterthiner2020predicting}, 1D convolutional models on the flattened weight vector~\citep{eilertsen2020classifying}, hierarchical LSTMs and per-parameter MLPs~\citep{metz2022velo}, and set functions applied to chunked parameter sets~\citep{andreis2023set}.
+
+Special \mNNs{} have also been developed to process implicit neural representations (INRs) representing shapes, images, or other types of continuous data~\citep{dupont2022data, luigi2023deep, bauer2023spatial}. However, these approaches require special training procedures for the input neural networks and/or access to forward passes of the input network. In contrast, graph \mNNs{} can process datasets of independently trained neural networks of diverse architectures without modifying the inputs or requiring forward passes through the inputs, as we demonstrate in our experiments.
+
+The recent work of \citet{zhang2023neural} also proposes graph neural networks as \mNNs{}. They use the computation graph construction of MLPs  -- not our general parameter graphs -- which allows us to scale efficiently for models with parameter sharing (like CNNs). Moreover, they adopt a different graph construction for bias nodes, where our approach is inspired by expressive power considerations from the form of the parameter-permutation-equivariant linear maps~\citep{navon2023equivariant, zhou2023permutation}. Finally, \citet{zhang2023neural} evaluate their method empirically but do not provide theoretical guarantees. In contrast, we develop theoretical guarantees for our method that extend beyond the results presented in prior work.
+
+
+
+\textbf{NNs as Graphs.} Many works consider neural networks as graphs, including early works that aimed at developing unified frameworks for neural networks~\citep{bottou1990framework, gegout1995mathematical}. The graph perspective has been used in several application areas, including: neural architecture search~\citep{liu2019darts, xie2019exploring}, analyzing relationships between graph structure and performance~\citep{you2020graph}, and federated learning with differing neural architectures~\citep{litany2022federated}.
+Several works process neural networks in some graph representation~\citep{zhang2019d, thost2021directed, knyazev2021parameter, litany2022federated}, but these works generally operate on a much coarser network representation (e.g. where a node can correspond to a whole convolutional layer), whereas in our approach we desire each parameter to correspond to an edge.
+\textbf{GNNs and Edge Representations.} There has been much work on graph neural networks (GNNs) in recent years, leading to many variants that can be used in our framework~\citep{hamilton2020graph}. GNNs learning edge representations instead of just node or whole-graph representations are particularly relevant. These include message-passing-like architectures, architectures based on graph-permutation-equivariant linear layers, and Transformers for graph data~\citep{battaglia2018relational, maron2019invariant, kim2021transformers, kim2022pure, kim2022equivariant, diao2023relational, vignac2023digress, ma2023graph}.
+
+
+
+\section{Experiments}
+
+
+\subsection{Predicting Accuracy for Varying Architectures}\label{sec:pred_acc}
+\begin{table}[!t]
+    \centering
+    \caption{Results for predicting the test accuracy of input neural networks trained on CIFAR-10. The top results use a training set of $\num{15000}$ uniformly selected input networks, the middle results use 10\% of this training set, and the bottom results only train on input networks of low hidden dimension (while testing on networks with strictly higher hidden dimension). Our method performs best in all setups, with increasing benefits in the low-data and OOD regimes.}
+    {\small
+    \begin{tabular}{clccccc}
+    \toprule
+        & &  \multicolumn{2}{c}{Varying CNNs} && \multicolumn{2}{c}{Diverse Architectures} \\
+        \cmidrule(lr){3-4}  \cmidrule(lr){6-7}
+         &  \MNN{} & $R^2$ & $\tau$ && $R^2$ & $\tau$  \\
+         \midrule
+         \multirow{3}{*}{\rotatebox[origin=c]{90}{$50\%$}}   & DeepSets~\citep{zaheer2017deep} & .778$\pm.002$ & .697$\pm.002$ && .562$\pm.020$ & .559$\pm.011$  \\
+          &DMC~\citep{eilertsen2020classifying} & .948$\pm.009$ & .876$\pm .003$ && .957$\pm.009$ & .883$\pm.007$ \\
+          & \GMN{} (Ours) & \bf .978$\pm.002$ & \bf .915$\pm.006$ && \bf  .975$\pm .002$ & \bf .908$\pm .004$   \\
+         \midrule         
+         \multirow{3}{*}{\rotatebox[origin=c]{90}{$5\%$}}   & 
+         DeepSets~\citep{zaheer2017deep} & .692$\pm.006$ & .648$\pm .002$  && .126$\pm.015$ & .290$\pm.010$  \\
+         & DMC~\citep{eilertsen2020classifying} & .816$\pm.038$ & .762$\pm.014$ && .810$\pm.046$ & .758$\pm.013$  \\
+         & \GMN{} (Ours) & \bf .876$\pm.010$ & \bf .797$\pm.005$ && \bf .918$\pm.002$ & \bf .828$\pm.005$ \\
+         \midrule
+        \multirow{3}{*}{\rotatebox[origin=c]{90}{OOD}}   & 
+         DeepSets~\citep{zaheer2017deep} & .741$\pm.015$ & .683$\pm.005$ && .128$\pm.071$ & .380$\pm.014$ \\
+         & DMC~\citep{eilertsen2020classifying} & .387$\pm.229$ & .760$\pm.024$ && $-.134\pm.147$ & .566$\pm.055$ \\
+         & \GMN{} (Ours) & \bf .891$\pm.037$ & \bf .870$\pm.010$ && \bf .768$\pm.063$ & \bf .780$\pm.030$ \\
+         \bottomrule
+    \end{tabular}
+    }
+    \label{tab:pred_acc}
+\end{table}
+
+\textbf{Task.} As in prior works~\citep{unterthiner2020predicting, zhou2023permutation}, we train \mNNs{} to predict the test accuracy of input neural networks. We consider image classification neural networks trained on the CIFAR-10 dataset~\citep{krizhevsky2009learning}, and the \mNN{} task is to take the parameters of an input network and predict the network's image classification accuracy on the CIFAR-10 test set.
+
+\textbf{Datasets.} To demonstrate the flexibility of our graph \mNNs{}, we train image classifiers that significantly vary in size and architecture.
+For our ``Varying CNNs'' dataset, we train about $\num{30000}$ 
+basic 2D CNNs varying in common architectural design choices like hidden dimension, number of convolution layers, number of fully connected layers, and type of normalization layers (BatchNorm~\citep{ioffe2015batch} or GroupNorm~\citep{wu2018group}). 
+
+For our ``Diverse Architectures'' dataset, we also train four other diverse image classifiers to test our model's generalization with multiple architectures: (i) basic 1D CNNs treating images as raster ordered sequences of pixels, (ii) DeepSets treating images as pixel sets, which maintains pixel position information with positional encodings~\citep{zaheer2017deep}, (iii) ResNets~\citep{he2016deep}, and (iv) Vision Transformers~\citep{dosovitskiy2021an}. This dataset also totals about $\num{30000}$ networks. The Vision Transformers' patch embedding module can be viewed as a convolution, which is how we encode this module as a graph (the Transformer layer graph encodings are described in Figure~\ref{fig:additional_param_graphs}).
+
+Figure~\ref{fig:acc_hists} shows these trained networks span a wide range of accuracies, between 10\% and 77.5\% for Varying CNNs and between 7.5\% and 87.8\% for Diverse Architectures. Also, the number of parameters in these networks ranges from $\num{970}$ to $\num{21165}$ in Varying CNNs and from $\num{970}$ to $\num{87658}$ for Diverse Architectures. These networks are significantly more diverse and achieve higher accuracy than the dataset of \citet{unterthiner2020predicting}, who train small CNNs of a fixed architecture that obtain at most 56\% test accuracy on CIFAR-10. Also, our Diverse Architectures dataset contains many more network types and modules than the datasets of \citet{eilertsen2020classifying} and \citet{schurholt2022model}, which are limited to CNNs.
+\begin{figure}[!t]
+    \centering
+    \begin{tikzpicture}
+        \centering
+        \node (img11){\includegraphics[trim={.82cm .85cm .0cm .82cm},clip,width=.31\linewidth]{figures/vary_dim_acc_hist.pdf}};
+
+        \node[left=of img11, node distance=0cm, rotate=90, xshift=.9cm, yshift=-.9cm, font=\color{black}] {Density};
+        
+        \node[above=of img11, node distance=0cm, xshift=-.1cm, yshift=-1.23cm,font=\color{black}]{Varying CNNs};
+
+        \node [right=of img11, xshift=-1.2cm](img12){\includegraphics[trim={.82cm .85cm .0cm .8cm},clip,width=.31\linewidth]{figures/diverse_acc_hist.pdf}};
+        \node[above=of img12, node distance=0cm, xshift=.2cm, yshift=-1.2cm,font=\color{black}]{Diverse Architectures};
+
+        \node[below=of img12, node distance=0cm, xshift=-.1cm, yshift=1.2cm,font=\color{black}]{CIFAR-10 Accuracy};
+        
+        \node [right=of img12, xshift=-1.2cm](img13){\includegraphics[trim={.82cm .85cm .0cm .8cm},clip,width=.31\linewidth]{figures/diverse_acc_hist_bymodel.pdf}};
+        \node[above=of img13, node distance=0cm, xshift=.0cm, yshift=-1.2cm,font=\color{black}]{Diverse Architectures, Test};
+    \end{tikzpicture}
+    \caption{Histograms of CIFAR-10 accuracies for our Varying CNNs and Diverse Architectures datasets. Left and middle show train and test accuracy for the two datasets. Right shows test accuracy of Diverse Architectures split by model type.}
+    \label{fig:acc_hists}
+\end{figure}
+
+
+\textbf{Metanetworks.} For our graph \mNN{}, we consider a simple message passing GNN as in Section~\ref{sec:gnn} that does not use a global graph feature. To obtain an invariant prediction, we mean-pool over edge representations.
+
+We cannot apply competing permutation equivariant methods like DWSNet~\citep{navon2023equivariant} or NFN~\citep{zhou2023permutation}, because they cannot process normalization layers, input neural networks of different sizes, or modules like self-attention.  Instead, as a baseline, we consider the Deep Meta Classifier (DMC) from \citet{eilertsen2020classifying}, which vectorizes an input network's parameters and processes it with a 1D CNN, allowing the use of differently sized networks. We also consider a baseline that treats the parameters as a set and applies a DeepSets network~\citep{zaheer2017deep} to output a scalar prediction. Note that the DeepSets baseline is invariant to permutation parameter symmetries, but it is also invariant to permutations that do not correspond to parameter symmetries (which significantly outnumber permutation parameter symmetries), so it has low expressive power.
+We evaluate our method and the two baselines across six different data settings. Using both the Varying CNN dataset and the Diverse Architectures dataset. We explore training on about half of the input networks, training on only 10\% of this previous split, and an out-of-distribution (OOD) generalization setting where we train on a reduced set of architectures that have smaller hidden dimension than the held-out architectures.
+
+\textbf{Results. We report the R-Squared value and the Kendall $\tau$ coefficient of the predicted generalization against the true generalization. Our \GMNs{} outperform both baselines in predicting accuracy for input networks across all six data settings. When we restrict to 10\% of the full training set size, we see that \GMNs{} generalize substantially better than the baselines. This performance gap is maintained in the more challenging OOD generalization setting, where the non-equivariant DMC performs very poorly in $R^2$. The improved \GMN{} performance could be from high expressive power (which the DeepSets baseline lacks), with better generalization due to equivariance to parameter permutation symmetries (which DMC lacks).
+
+
+
+\subsection{\rebut{Editing 2D INRs}}\label{sec:edit_2d}
+
+\begin{table}[ht]
+    \parbox{.46\linewidth}{
+    \centering
+    \rebut{
+    \caption{Test MSE (lower is better) for editing 2D INRs, following the methodology of \citep{zhou2023permutation}. Results of baselines are from \citep{zhou2023permutation, zhou2023neural}.}
+    {\small
+    \begin{tabular}{lll}
+    \toprule
+         Metanetwork & Contrast & Dilate  \\
+         \midrule
+         MLP & .031 & .306 \\
+         MLP-Aug & .029 & .307 \\
+         NFN-PT & .029 & .197 \\
+         NFN-HNP & .0204 $\pm.0000$ & .0706 $\pm.0005$ \\
+         NFN-NP & .0203 $\pm.0000$ & .0693 $\pm.0009$ \\
+         NFT & .0200 $\pm.0002$ & \bf .0510 $\pm.0004$ \\
+         \midrule
+         \GMN{} (ours) & \bf .0197 $\pm.0000$ & .0603 $\pm.0010$ \\
+         \bottomrule
+    \end{tabular}
+    }
+    \label{tab:edit_2d_inr}
+    }
+    }
+    \hfill
+    \parbox{.49\linewidth}{\centering
+    \caption{Results for self-supervised learning of neural net representations, in test MSE of a linear regressor on the learned representations. Numbers besides \GMN{} from \citet{navon2023equivariant}.}
+    {\small
+    \begin{tabular}{lc}
+    \toprule
+         Metanetwork & Test MSE \\
+         \midrule
+         MLP & 7.39 $\pm .19$  \\
+         MLP + Perm. aug & 5.65 $\pm .01$  \\
+         MLP + Alignment & 4.47 $\pm .15$ \\
+         INR2Vec (Arch.) & 3.86 $\pm .32$ \\
+         Transformer & 5.11 $\pm.12$ \\
+         DWSNets & 1.39 $\pm .06$ \\
+         \midrule
+         \GMN{} (ours) &  \bf  1.13 $\pm.08$ \\
+         \bottomrule
+    \end{tabular} 
+    }
+    \label{tab:ssl}
+    }
+\end{table}
+
+\rebut{Next, we empirically test the ability of \GMNs{} to process simple MLP inputs to compare against less-flexible permutation equivariant \mNNs{} such as NFN~\citep{zhou2023permutation} and NFT~\citep{zhou2023neural}. For this, we train metanetworks on the 2D INR editing tasks of \citep{zhou2023permutation}, where the inputs are weights of an INR representing an image, and the outputs are weights of an INR representing the image with some transformation applied to it.
+}
+
+\rebut{
+Table~\ref{tab:edit_2d_inr} shows our results. We see that our \GMNs{} outperform most metanetworks on these simple input networks. In particular, \GMN{} outperforms all methods on the Contrast task, and is only beat by NFT on the Dilate task.
+}
+\subsection{Self-Supervised Learning with INRs}
+
+We also compare \GMNs{} against another less-flexible permutation equivariant \mNN{}, DWSNets~\citep{navon2023equivariant}, in the self-supervised learning experiments of \citet{navon2023equivariant}. Here, the input data are MLPs fit to sinusoidal functions of the form $x \mapsto a\sin(bx)$, where $a, b \in \RR$ are varying parameters. The goal is to learn a \mNN{} encoder that gives strong representations of input networks, using a contrastive-learning framework similar to SimCLR~\citep{chen2020simple}. \rebut{Our \GMNs{} learn edge representations, which are then mean-pooled to get a vector representation of each input network.} The downstream task for evaluating these representations is fitting a linear model on the \mNN{} representations to predict the coefficients $a$ and $b$ of the sinusoid that the input MLP represents.
+
+Table~\ref{tab:ssl} shows the results. \GMNs{} outperform all baselines in this task. Thus, even in the most advantageous setting for competitors, which they are restricted to, \GMNs{} are empirically successful at \mNN{} tasks. 
+
+
+
+\section{Conclusion}
+
+
+In this work, we proposed Graph Metanetworks, an approach to processing neural networks with theoretical and empirical benefits. Theoretically, our approach satisfies permutation parameter symmetry equivariance while having provably high expressive power. Empirically, we can process diverse neural architectures, including layers that appear in state-of-the-art models, and we outperform existing metanetwork baselines across all tasks that we evaluated.
+
+\paragraph{Limitations} We make substantial progress towards improving the scalability of \GMNs{} by introducing parameter graphs. However, large neural networks can have billions of parameters and processing them may be more difficult.
+We believe that standard scalable GNN methods can be used to scale to the billion parameter regime (as existing GNNs are capable of processing graphs with billions of edges~\citep{hu2021ogb} using modest computing resources), but we have not yet tried to use Graph \MNNs{} at such a scale.
+Additionally, we argue that parameter graphs are easier to design than specialized architectures of prior work, but we do not give formal constraints on their design. Further work investigating parameter graphs is promising; for instance, our theory of neural DAG automorphisms depends on the more expensive computation graphs, but it could possibly be extended to parameter graphs. Moreover, our approach only accounts for permutation-based parameter symmetries and does not account for e.g. symmetries induced by scaling weights in ReLU networks~\citep{dinh2017sharp, godfrey2022on}.
+
+\paragraph{Future work} Our graph-based approach to \mNNs{} is promising for future development. This paper mostly uses a basic message-passing GNN architecture, which can be further improved using the many GNN improvements in the literature. Furthermore, our theoretical developments largely apply to computation graphs and we expect future work can extend these results to the more practical parameter graphs. 
+Since graph \mNNs{} can process modern neural network layers like self-attention and spatial INR feature grids, they can be used to process and analyze state-of-the-art neural networks. Further, future work could try applying graph \mNNs{} to difficult yet impactful \mNNs{} tasks such as pruning, learned optimization, and finetuning pretrained models.
+
+
+
+
+
+

@@ -1,0 +1,562 @@
+\title{Scalable Influence and Fact Tracing for Large Language Model Pretraining}
+
+\begin{abstract}
+Training data attribution (TDA) methods aim to attribute model outputs back to specific training examples, and the application of these methods to large language model (LLM) outputs could significantly advance model transparency and data curation. However, it has been challenging to date to apply these methods to the full scale of LLM pretraining.
+In this paper, we refine existing gradient-based methods to work effectively at scale, allowing us to retrieve influential examples for an 8B-parameter language model from a pretraining corpus of over 160B tokens with no need for subsampling or pre-filtering.
+Our method combines several techniques, including optimizer state correction, a task-specific Hessian approximation, and normalized encodings, which we find to be critical for performance at scale.
+In quantitative evaluations on a fact tracing task, our method performs best at identifying examples that \textit{influence} model predictions, but classical, model-agnostic retrieval methods such as BM25 still perform better at finding passages which explicitly contain relevant facts.
+These results demonstrate a misalignment between factual \textit{attribution} and causal \textit{influence}.
+With increasing model size and training tokens, we find that influence more closely aligns with factual attribution. Finally, we examine different types of examples identified as influential by our method, finding that while many directly entail a particular fact, others support the same output by reinforcing priors on relation types, common entities, and names.
+We release our prompt set and model outputs, along with a web-based visualization tool to explore influential examples for factual predictions, commonsense reasoning, arithmetic, and open-ended generation for an 8B-parameter LLM.\footnote{\demourl{}}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\maketitle
+
+Modern large language models (LLMs) perform extraordinarily well at a wide variety of natural language tasks, but exactly how they leverage training data to achieve such capabilities is not well understood.
+One promising avenue of research to study this is \textit{training data attribution} (TDA), which aims to identify influential training examples for given model predictions.
+When successful, TDA can serve as a method to both inspect and intervene on the training process.
+For example, it can enable training data curation targeted at specific tasks \citep{dsdm-paper-2024}, reduction of data contamination \citep{mozes2023gradientbasedautomatediterativerecovery}, and better transparency into model predictions \citep{grosse2023studyinglargelanguagemodel,choe-etal-2024-what-data}.
+
+However, the steep computational cost of applying TDA approaches to LLMs has limited work in this area.
+TDA approaches have achieved promising results identifying examples that influence LLM behavior during fine-tuning \citep{akyurek-etal-2022-towards,trak-paper,xia2024less}, but there is significant evidence that much of an LLM's knowledge and capabilities originates from pretraining \citep{hoffmann2022training,chang-bergen-2024-language}.
+Previous work applying TDA to pretraining has either focused on small models (\citealp{dsdm-paper-2024}) or extremely few target queries, e.g. retrieving influential examples from a significantly subsampled corpus for less than 100 model predictions (\citealp{grosse2023studyinglargelanguagemodel,choe-etal-2024-what-data,ruis2024proceduralknowledgepretrainingdrives}).
+In our work, we scale TDA experiments to LLMs up to 8B parameters, thousands of model predictions, and corpora up to 160B tokens.
+
+\setlength{\belowcaptionskip}{-0.4cm}
+\begin{figure}
+    \centering
+    \includegraphics[width=13cm]{figures/introduction_overview.pdf}
+    \caption{Top proponents from C4 using \ourmethod{} given a factual query and model prediction. \ourmethod{} is a gradient-based method that approximates \textit{influence} on the model, which we show may not always be optimal for \textit{attribution}, which involves finding examples which directly entail the target factual prediction.}
+    \label{fig:intro_overview}
+\end{figure}
+\setlength{\belowcaptionskip}{-0.0cm} %
+Specifically we propose \ourmethod{}, a gradient-based influence method that combines innovations from previous work and scales to large setups (\S\ref{sec:method}), while still supporting efficient retrieval of influential examples and quantitative evaluation.
+At scale, our method significantly outperforms previous influence methods at retrieving pretraining examples that entail a fact (\textit{attribution}) and examples that influence specific factual predictions (\textit{influence}) (\S\ref{sec:trex-closed}, \S\ref{sec:c4-eval}).
+Importantly, we demonstrate a misalignment between attribution and influence; classical methods such as BM25 are better at retrieving examples that entail factual predictions, but those examples are not necessarily those that most affect model predictions (\S\ref{sec:trex-results}).
+We show that influence grows closer to attribution as models scale, both in parameters and training tokens (\S\ref{sec:infapproachesatt}).
+
+To provide insights into where attribution and influence misalign, we include analyses of examples that have high influence for factual predictions in LLMs (\S\ref{sec:analyses}).
+For example, rather than containing a full statement of a fact of interest, many examples appear to support priors on relation types, common entities, or names.
+
+
+
+\section{Background: Training Data Attribution}
+
+\label{sec:related-work}
+
+Researchers have proposed a variety of methods to measure the influence of individual training examples on output model metrics (e.g. loss on target datasets).
+Some of the best results come from simulation-based methods such as Datamodels \citep{ilyas2022datamodels} and Simfluence \citep{guu2023simfluence}, which estimate contributions based on multiple training runs with different data subsets. However, this is not tractable for  LLM pretraining, which is expensive to perform even once. For computational tractability, we focus on \textit{gradient-based methods} that use parametric approximations, based on a single model, to predict how a model's behavior would change under the removal (or addition) of specific training examples.
+
+To quantify the influence from a training example $z_m$ to an evaluation (query) example $z_q$, most gradient-based influence methods compute some version of a Hessian-corrected dot product $-\nabla L(z_q) H^{-1} \nabla L(z_m)$ of model gradients for $z_m$ and $z_q$ loss \citep{koh-liang-2017,arnoldi,trak-paper,grosse2023studyinglargelanguagemodel}.
+Here, $H^{-1}$ is the inverse Hessian matrix of the loss with respect to model parameters.
+The resulting dot product approximates changes in $z_q$ loss from adding example $z_m$ during training.
+In practice, existing methods use a variety of methods to approximate the Hessian $H$, notably the autocorrelation matrix $\tilde{\Phi}^T \tilde{\Phi} \in \R^{|\theta| \times |\theta|}$ of per-example gradients in TRAK \citep{trak-paper,sagun-etal-2018-empirical} or the closely-related approximate curvature matrix $G$ of EK-FAC \citep{grosse2023studyinglargelanguagemodel}.
+These methods also tie closely back to TracIn \citep{pruthi-etal-2020-estimating}, which computes gradient dot products aggregated over model checkpoints; recent work using TracIn has included gradient second moment correction \citep{akyurek-etal-2022-towards,xia2024less}, equivalent to a diagonal Hessian approximation (\S\ref{sec:method}).
+
+
+However, when applying influence methods to LLM pretraining, an additional bottleneck is the scale of model parameters and pretraining data.
+Given $|\theta|$ model parameters (on the order of billions), we have loss gradients $\nabla L(z) \in \R^{|\theta|}$ and inverse Hessian $H^{-1} \in \R^{|\theta| \times |\theta|}$.
+To rank pretraining examples, the gradient dot product must be computed between every pretraining example $z_m$ (on the order of millions to billions) and the target query $z_q$.
+For this reason, previous work has focused on identifying influential examples during fine-tuning \citep{akyurek-etal-2022-towards,trak-paper,xia2024less} or during pretraining for smaller models \citep{dsdm-paper-2024}.
+Closest to our work has been that of \citet{grosse2023studyinglargelanguagemodel}, \citet{choe-etal-2024-what-data}, and \citet{ruis2024proceduralknowledgepretrainingdrives}, who look at LLMs with billions of parameters; however, they perform retrieval on a small subset of the pretraining corpus and report evaluation on only a small number of queries.
+
+
+
+\section{Method: \ourmethod}
+
+\label{sec:method}
+Here, we introduce \ourmethod{}, a gradient-based influence method that combines innovations from previous work that scales effectively to large settings.
+Following the gradient-based methods in \S\ref{sec:related-work}, we compute the influence between two examples as the dot product between the projected and corrected model gradients for those examples.
+Because correction terms vary substantially  in previous work, here we describe the motivation behind our specific approach, with ablation experiments in \S\ref{sec:ablations}. 
+Specifically, given a query $z_q$ (an input prompt with corresponding model completion or desired completion) and a training example $z_m$, we compute the influence from $z_m$ to $z_q$ as:
+\begin{equation}
+\label{eq:tracin-full}
+\mathcal{I}_{\theta}(z_m, z_q) = \bar{G}_{\theta}(z_m) \cdot \bar{G}_{\theta}(z_q)
+\end{equation}
+where $\bar{G}_{\theta}(z)$ is the projected, Hessian-corrected, and unit normalized gradient for example $z$ given model parameters $\theta$:
+\begin{equation}
+\label{eq:normterms}
+\bar{G}_{\theta}(z) = \frac{G_{\theta}(z)}{||G_{\theta}(z)||_2} \quad\quad G_{\theta}(z) = R^{-\frac{1}{2}} P_d \frac{\nabla_{\theta} \textrm{Loss}(z, \theta)}{\sqrt{V}}
+\end{equation}
+In turn, we define:
+\begin{itemize}[label=\tiny{$\bullet$},leftmargin=0.5cm,itemsep=0.05cm,topsep=0.05cm]
+\item \textbf{Loss gradient} : $\nabla_{\theta} \textrm{Loss}(z, \theta) \in \R^{|\theta|}$:
+As in previous work, we compute the loss gradient for each example $z$ with respect to model parameters $\theta$ \citep{pruthi-etal-2020-estimating,akyurek-etal-2022-towards,han2022orcainterpretingpromptedlanguage,grosse2023studyinglargelanguagemodel,xia2024less}.
+The original TRAK method uses the multi-class margin function gradient; we evaluate different output functions in \S\ref{app:output-functions}, but we find that loss gradients perform best empirically.
+For each example $z$, we sum gradients over target tokens; for training examples, this comprises all tokens in the example.
+If an input prompt is given, we only include tokens in the model completion. In contrast to previous work that selects only a subset of layers \citep{akyurek-etal-2022-towards, yeh2022firstisbetter,grosse2023studyinglargelanguagemodel}, we compute gradients with respect to all model parameters $\theta$ except the token embedding layer, pooled into layer blocks (\S\ref{app:random-projection}) before dimensionality reduction with random projection.
+
+\item \textbf{Second moment estimate} : $V \in \R^{|\theta|}$: To account for high-magnitude gradient components that might dominate gradient dot products (e.g. for outlier model components; \citealp{timkey-van-schijndel-2021-bark,puccetti-etal-2022-outlier}), we correct by an estimate of the expected magnitude of the loss gradient with respect to each model parameter. %
+Formally, for each parameter $x \in \theta$, this is an estimate of the second moment $\mathbb{E}_z((\nabla_x \textrm{Loss}(z, \theta))^2)$ of the gradient with respect to $x$.
+These estimates are used by common optimizers such as Adafactor \citep{adafactor-paper} and Adam \citep{kingma-ba-2017-adam}, and as such the gradients corrected by $V$ can be seen also as more faithful to the model's training process \citep{pruthi-etal-2020-estimating}. We use the estimates of $V$ computed by Adafactor, which can be efficiently applied by element-wise multiplication.
+Notably, dividing by the square root second moment $\sqrt{V}$ is equivalent to using only the diagonal of the Gauss-Newton Hessian approximation (gradient autocorrelation matrix \hessianapprox{} around zero; \citealp{sagun-etal-2018-empirical}) from previous work (\S\ref{sec:related-work}).
+Unlike TRAK \citep{trak-paper,dsdm-paper-2024}, which corrects gradients by the autocorrelation after random projection, the optimizer second moment estimates allow us to apply the correction per parameter before random projection, enabling more granular correction of individual outlier components.
+
+\item \textbf{Random projection} : $P_d \in \R^{d \times |\theta|}$: As in TRAK \citep{trak-paper,dsdm-paper-2024} and as described in the original TracIn paper \citep{pruthi-etal-2020-estimating}, we use Gaussian random projection to reduce the dimensionality of the full model gradients.
+To improve projection efficiency, we use the two-sided projection from \citet{pruthi-etal-2020-estimating}, which is equivalent to the recently proposed LoGra method of dimensionality reduction (\citealp{choe-etal-2024-what-data}; \S\ref{app:random-projection}).
+This approach contrasts with \citet{grosse2023studyinglargelanguagemodel}, who use either un-projected model gradients or query-specific low-rank reductions.
+Un-projected model gradients are too large to store for all pretraining examples, and query-specific approximations require that all pretraining example gradients be re-computed if a new query is considered.
+Random projections allow the projected gradient to be computed and saved exactly once per pretraining example, usable for all future retrievals.
+We use projection dimensionality $d=2^{16}$, but we experiment with lower dimensionalities in \S\ref{sec:ablations}.
+
+\item \textbf{Hessian approximation} : $R \in \R^{d \times d}$: We follow \citet{trak-paper} and \citet{dsdm-paper-2024} in using the autocorrelation matrix $R = \tilde{\Phi}^T \tilde{\Phi}$ of per-example gradients as a Gauss-Newton approximation to the loss Hessian. We compute and apply this after optimizer state correction and random projection. For efficiency, we enforce a block-diagonal
+structure (\S\ref{app:hessian}) which allows us to efficiently compute \splitmetric{} (Eq.~\ref{eq:normterms}).
+However, using this method, we still find that retrievals suffer from common proponents that largely mimic the task template. Thus, departing from previous work, we consider a mixing approach where the matrix $R_{\textrm{train}}$ estimated from pretraining example gradients is mixed with $R_{\textrm{eval}}$ derived from evaluation example gradients:
+\begin{equation}
+\label{eq:task-hessian}
+R = \lambda R_{\textrm{eval}} + (1-\lambda) R_{\textrm{train}}
+\end{equation}
+This mixture allows \splitmetric{} to downweight high-magnitude components that are common for evaluation examples in a task, such as components corresponding to the task template.
+We select the mixing parameter $\lambda$ such that the top $\sim$1000 task-specific gradient components (out of 65K) are downweighted (details in \S\ref{app:hessian}).
+For T-REx closed set experiments (\S\ref{sec:trex-closed}), we use $\lambda = 0.90$; for C4 open set experiments (\S\ref{sec:c4-eval}), we use $\lambda = 0.99$.\footnote{Described in \S\ref{app:hessian}, C4 requires larger $\lambda$ because the pretraining example gradients tend to be larger than those for T-REx sentences, due to longer sequence lengths.}
+
+\item \textbf{Unit normalization}: To compute cosine similarity, we unit normalize both input vectors in Equation \ref{eq:tracin-full}, as in \citet{akyurek-etal-2022-towards}, \citet{han2022orcainterpretingpromptedlanguage}, \citet{choe-etal-2024-what-data}, and \citet{xia2024less}.
+This reduces the effect of outlier training examples that have high overall gradient magnitudes \citep{barshan-etal-2020-relatif,han-tsvetkov-2021-influence-tuning} and thus appear as common proponents before unit normalization.
+Unit norming is equivalent to $\ell$-relative influence (\citealp{barshan-etal-2020-relatif}), which identifies training examples that maximize the query example loss change while constraining the overall loss change. 
+\end{itemize}
+Using the dot product of unit normed vectors $\bar{G}_{\theta}(z)$ (Eq.~\ref{eq:normterms}) to quantify the influence $\mathcal{I}_{\theta}(z_m, z_q)$ of each training example $z_m$ on query $z_q$, we are able to retrieve the top $k$ training examples for $z_q$.
+We refer to these top-ranking examples as proponents of $z_q$ \citep{pruthi-etal-2020-estimating}.
+In the spirit of TracIn and TRAK, we refer to our proponent ranking method as Trac*, or ``\ourmethod{}''.
+
+
+
+\section{Models, Datasets, and Metrics}
+
+We apply \ourmethod{} to identify proponent examples for factual predictions in LLMs up to 8B parameters.
+Unless otherwise specified, we first build an index of the projected gradients for all candidate examples of interest (e.g. the pretraining set), then compute the Hessian approximation \hessianapprox{} using a single pass over the data. For gradient-based methods, we perform exact scoring between each query and all candidate examples,
+with no need for lexical pre-filtering (c.f. \citealp{akyurek-etal-2022-towards,trak-paper,grosse2023studyinglargelanguagemodel}). All elements of this approach have compute cost linear in model and dataset size (\S\ref{sec:related-work}).
+
+\subsection{Models}
+\label{sec:models}
+We pretrain a decoder-only language model on two epochs of English C4 \citep{raffel-etal-2020-exploring} for three model sizes: 154M, 1B, and 8B parameters, using the architecture described in \citet{chowdhery-etal-2022-palm}.
+Using our tokenizer, English C4 consists of 160B tokens across 365M examples (short passages and documents).
+Model details are in \S\ref{app:model-details}.
+We focus primarily on the 8B model, but we study the smaller models for dimensionality ablations (\S\ref{sec:ablations}) and scaling (\S\ref{sec:infapproachesatt}).
+
+\subsection{Fact Tracing Dataset}
+\label{sec:dataset}
+We focus on identifying proponent examples for factual predictions in LLMs.
+For factual recall prompts, we use the filtered T-REx dataset from KILT \citep{petroni-etal-2021-kilt}, which consists of entity-relation-entity triples such as (\textit{Carleton College}, \textit{country}, \textit{USA}).
+We merge the KILT dataset back into the original T-REx dataset \citep{elsahar-etal-2018-rex}, obtaining a dataset of facts with corresponding entity IDs, surface form aliases, and Wikipedia abstract sentences containing each fact.\footnote{Because T-REx is automatically scraped, there is some inherent noise in the ``ground truth'' labels.} For each fact, there are an average of 2.5 ``ground-truth'' entailing sentences out of 19.6M sentences total.
+After filtering out ambiguous prompts (e.g. multiple correct target entity IDs), we have a total of 1.2M fact triples covering 97 relation types.
+Following \citet{kandpal-etal-2023-large}, we also annotate facts with the count (fact frequency) of pretraining examples from C4 that mention both entities.
+
+We manually write natural language templates for all 97 relation types, so that a left-to-right LLM can predict the target fact as a completion, e.g. ``\textit{Carleton College is located in the following country: \underline{USA}}''.
+We mark predictions as correct using string matching after lowercasing and stopword removal, considering multiple possible correct surface form aliases as provided by KILT. Random chance accuracy on this task is close to 0\% due to the large number of possible completions; our 154M, 1B, and 8B models achieve $16.3\%$, $28.0\%$, and $32.4\%$, respectively.
+For factual queries in all following evaluations, we use a fixed sample of 5415 facts drawn randomly from this set but balanced for fact frequency and down-sampling common target entities (such as \exampletext{USA} or \exampletext{English}), and limiting facts that are incorrectly predicted by all models.
+Each query contains an input prompt and ground truth target text.
+Dataset details and pre-processing are described in \S\ref{app:dataset-details}.
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+After retrieving proponents for a given query, we consider traditional fact tracing metrics (MRR and recall, \textit{attribution}; \citealp{akyurek-etal-2022-towards}) and a tail-patch metric that quantifies the effect of proponents on the model itself (\textit{influence}).
+
+\textbf{Attribution metrics: MRR and Recall@10.} These measure whether we retrieve examples that logically support (entail) a fact.
+For T-REx evaluations (\S\ref{sec:trex-closed}), entailing Wikipedia abstract sentences are annotated in the dataset (\S\ref{sec:dataset}).
+For C4 evaluations (\S\ref{sec:c4-eval}), because passages are not annotated, we use an entailment model to score whether a candidate passage contains factual information supporting the query. 
+Specifically, we use a fine-tuned T5 11B \citep{raffel-etal-2020-exploring} model trained on ANLI \citep{nie-etal-2020-adversarial} and synthetic data as described in \citet{gekhman-etal-2023-trueteacher}.
+Because C4 passages can be up to 2048 tokens, we split the input C4 passages by sentences using regex matching, and we take the maximum entailment score using a sliding window of three sentences as the input premise and the factual query as the hypothesis.
+We mark a proponent as entailing when this entailment score $\ge$ 0.50.\footnote{Based on blinded manual annotation of 100 C4 passages marked as entailing and non-entailing respectively, we find a false positive rate of 13\% and a false negative rate of 11\%. Of the incorrect annotations, most (54\%) are fuzzy entailments where a passage implies but technically may not entail a fact.}
+For MRR, we compute the mean reciprocal rank of the top-ranked ``entailing'' proponent for each fact.
+For recall@10, we compute the proportion of facts for which an entailing proponent appears in the top 10 proponent retrievals.
+
+\textbf{Influence metric: incremental training probability increase (tail-patch).} Both of the previous metrics assume that the top-ranked proponents should be those that \textit{entail} the target fact. However, these proponents are not necessarily the examples that would most influence the model to make that prediction. Following \citet{koh-liang-2017}, most work on influence methods derives metrics from leave-one-out or other ablate-and-retrain experiments such as linear datamodeling score \citep{ilyas2022datamodels}. However, this is not tractable for full-scale LLM pretraining, so we instead estimate the \textit{additive} contribution from incremental training. Starting from the final model checkpoint and maintaining all pretraining hyperparameters, we take a single training step---which we call a \textit{tail-patch} step---on a single retrieved proponent and measure the change in probability of the target sequence. We then average this change across the top $k=10$ proponents for each query, and across all queries in the evaluation set. Results for different $k$ are reported in \S\ref{app:tailpatch-k}.
+
+\subsection{Baseline Methods}
+\label{sec:baselines}
+We compare four ranking methods to retrieve proponent examples: \textbf{BM25} \citep{bm25}, \textbf{Gecko} embeddings \citep{gecko}, \textbf{TRAK} \citep{trak-paper,dsdm-paper-2024}, and our method, \textbf{\ourmethod}.
+As described in \S\ref{sec:ablations}, we also implicitly compare to methods from several previous studies by ablating different correction terms from \ourmethod{}.
+As a classical retrieval baseline, BM25 is a bag-of-words method that ranks candidates according to query terms appearing in each document, with TF-IDF weighting (``Lucene accurate'' version; \citealp{bm25}).
+Gecko is a text embedding model trained with a two-step distillation procedure and contrastive loss \citep{gecko}.\footnote{We use the $d=768$ embedding model \texttt{textembedding-gecko@003} available on Google Cloud.
+}
+TRAK is a gradient-based influence method that has been shown to perform well in previous work; the recommended version of TRAK in \citet{trak-paper} and \citet{dsdm-paper-2024} is similar to \ourmethod{} but uses the multi-class margin gradient and a non-task-specific Hessian approximation, with no optimizer second moment correction or unit norm.\footnote{TRAK has one additional difference, in that it multiplies scores by $Q=1-\bar{p}$, where $\bar{p}$ is the probability of the candidate sequence, averaged over tokens. We find $Q$ ranges from $0.6$ to $1.0$ across candidate sequences, and it has little effect on MRR, recall, and tail-patch scores. Theoretical motivations are described in \S\ref{app:output-functions}.}
+
+
+\section{T-REx Closed Set Evaluation}
+
+\label{sec:trex-closed}
+
+We first evaluate \ourmethod{} at fact tracing and influence on the T-REx dataset (\S\ref{sec:trex-results}), and we find that it outperforms prior gradient-based TDA methods (\S\ref{sec:ablations}).
+For each query we retrieve the top 10 highest scoring candidate sentences from the set of 19.6M Wikipedia abstract sentences in T-REx.
+
+\subsection{T-REx Closed Set Results}
+\label{sec:trex-results}
+In Table \ref{tab:ablations}, our results show that \ourmethod{} outperforms other variants  at identifying proponent examples for both attribution (identifying fact-entailing proponents) and influence (tail-patching scores) in the 8B model.
+Notably, previous work \citep{akyurek-etal-2022-towards,trak-paper} on this task considers only small candidate sets of 300 ``distractors'' per query, but we retrieve from the entire set of 19.6M sentences. We observe that this makes a significant difference in performance: while our TRAK replication achieves an MRR of $0.401$ when replicating the smaller setting (similar to as reported by \citealp{trak-paper}), it only achieves an MRR of $0.001$ (and \textit{negative} tail patch scores) in the full setting evaluated here.
+We find that this poor performance is largely due to the use of multi-class margin function gradients with correction applied per example rather than per token (\S\ref{app:output-functions}), along with the lack of unit normalization (Table \ref{tab:ablations}, Experiment 1 vs. Experiment 2).
+This result highlights that methods that perform well in small settings and classification tasks may be susceptible to noise in larger settings with LLMs.
+
+We also find that classical, model-agnostic retrieval approaches (BM25 and Gecko) are significantly better than gradient-based influence methods at attribution (i.e. retrieving proponents that entail a given fact; MRR and recall; Table \ref{tab:ablations}).
+Despite this, proponents from these classical methods still have \textit{much less influence} on model predictions than proponents from influence methods.
+Tail-patching on proponents from BM25 (tail-patch score $+0.41\%$) increase target fact probabilities by 2.2$\times$ less than proponents from \ourmethod (tail-patch score $+0.90\%$).
+Even tail-patching on ``ground truth'' entailing sentences from T-REx (tail-patch score $+0.52\%$) results in much smaller probability changes than proponents from \ourmethod.\footnote{This echoes results from \citet{trak-paper} for fact fine-tuning.}
+This result suggests a distinction between \textit{attribution} and \textit{influence}; while classical, model-agnostic retrieval methods perform well at attribution (which we note is highly lexical and well-suited for string matching methods such as BM25; \citealp{wang-etal-2021-bert}), influence methods better predict how a proponent might affect the model and may better reflect the model's reasoning (\S\ref{sec:analyses}).
+\setlength{\belowcaptionskip}{-0.1cm}
+\begin{table}[tb]
+	\centering
+	\begin{tabular}{lccc|rrr}
+		\hline
+		Exp. \# & Optim. & \hessianapprox{} & Unit norm & MRR & Recall@10 & Tail-patch \\
+		\hline \hline
+		T-REx gold  & -- & -- & -- & Gold & Gold & \textbf{+0.52}\% \\
+		BM25 & -- & -- & -- & 0.592 & 0.773 & +0.41\% \\
+		Gecko & -- & -- & \checkmark & \textbf{0.620} & \textbf{0.794} & +0.31\% \\
+		\hline
+		TRAK & & \checkmark$^*$ & & 0.001 & 0.001 & --0.02\% \\
+		1 & & & & 0.064 & 0.114 & +0.35\% \\
+		2 & & & \checkmark & 0.266 & 0.358 & +0.65\% \\
+		3 & & \checkmark & \checkmark & 0.290 & 0.399 & +0.85\% \\
+		4 & \checkmark & & \checkmark & 0.300 & 0.413 & +0.71\% \\
+		5 & \checkmark & \checkmark & \checkmark & 0.295 & 0.406 & +0.87\% \\
+		\ourmethod & \checkmark & Mixed & \checkmark & \textbf{0.365} & \textbf{0.496} & \textbf{+0.90}\% \\
+		\hline
+	\end{tabular}
+	\caption{Results on T-REx closed set evaluation for the 8B-model (\S\ref{sec:trex-closed}). Our setup is significantly more difficult than prior work, retrieving from all 20M T-REx abstract sentences rather than 300 ``distractors'' per fact. Classical retrieval results are reported in the top section for comparison. We note TRAK uses multi-class margin function gradients rather than loss gradients; details in \S\ref{app:output-functions}.
+}
+	\label{tab:ablations}
+\end{table}
+\setlength{\belowcaptionskip}{-0.0cm} %
+
+\subsection{Ablation Experiments}
+\label{sec:ablations}
+\textbf{Correction terms}:
+In Table \ref{tab:ablations}, we conduct ablations (labeled by experiment numbers) to determine the source of improvements for \ourmethod over other gradient-based influence methods.
+Many of these ablations are close or equivalent to methods from previous work.
+For example, Experiment 1 corresponds closely to \citet{pruthi-etal-2020-estimating}, without the use of multiple checkpoints, while Experiment 2 corresponds to \citet{han2022orcainterpretingpromptedlanguage} and \citet{han-etal-2023-understanding}. Experiment 3 is the method of \citet{choe-etal-2024-what-data}, and Experiment 4 corresponds to \citet{akyurek-etal-2022-towards} and \citet{xia2024less}.\footnote{\citet{xia2024less} also normalize by Adam first moment estimates, but these are not available in Adafactor.}
+
+First, we find that unit normalization is key to good MRR, recall, and tail-patch scores (Experiments 1--2; also verified by ablating unit normalization from other experiments).
+Optimizer second moment correction provides additional improvement, similar to including the Hessian approximation \hessianapprox{} (Experiments 3--4); intuitively, both methods perform Hessian correction by approximating the Hessian with gradient variance terms (\S\ref{sec:method}).
+Using optimizer correction and \hessianapprox{} together produces fairly similar results to either optimizer correction or \hessianapprox{} alone (Experiments 3--5).
+In any case, the mixed task-specific Hessian approximation \hessianapprox{} (downweighting common gradient components for the fact completion task; \S\ref{sec:method}) provides substantial improvements, particularly for MRR and recall.
+
+In fact, on a theoretical basis, it may be somewhat surprising that unit normalization and task-specific Hessian approximation improve tail-patch scores at all.
+These two normalizations encourage the scoring method to focus on proponents specific to the target fact by downweighting proponents that affect loss overall (or loss for the overall task). 
+These downweighted proponents might still be expected to have high tail-patch scores (large effects on target fact probability), despite their significant effect on loss overall, because tail-patch scores do not constrain the overall loss change induced by a proponent.
+The fact that these downweighted proponents actually have lower tail-patch scores (i.e. lower tail-patch scores for proponents before unit normalization and task-specific Hessian correction) indicates that these corrections actually have an overall denoising effect.
+Despite their motivation based on maximizing target influence under overall loss change constraints, these corrections actually find proponents that maximize target influence even without such constraints.
+
+\setlength{\belowcaptionskip}{-0.3cm}
+\begin{figure}
+    \centering
+    \includegraphics[width=4.5cm]{figures/mrr_dims.pdf}
+    \includegraphics[width=4.5cm]{figures/tailpatch_dims.pdf}
+    \includegraphics[width=4.5cm]{figures/mrr_epochs.pdf}
+    \caption{
+    Left, center: attribution (MRR) and influence (tail-patch) scores as a function of gradient projection dimensionality $d$ for different model sizes (\S\ref{sec:ablations}). Right: attribution (MRR) scores throughout pretraining for different model sizes. As models improve, \ourmethod influence becomes more similar to attribution (higher MRR; \S\ref{sec:infapproachesatt}).
+    }
+    \label{fig:scaling}
+\end{figure}
+\setlength{\belowcaptionskip}{-0.0cm} %
+
+\textbf{Projection dimensionality}:
+Higher gradient projection dimensionality $d$ results in higher fidelity representations, but both the memory required to store projected gradients and the retrieval cost to compute dot products increase (linearly) with $d$.
+To balance these considerations, in Figure \ref{fig:scaling} (left, center), we plot how attribution (MRR) and influence (tail-patch) scores improve with projection dimensionality for \ourmethod{}.\footnote{\citet{trak-paper} find that performance may decrease if projection dimensionality is too large, but our experiments do not appear to be close to that limit, likely due to the high dimensionality $|\theta|$ of LLM gradients.}
+For smaller models (154M and 1B parameters), scores have begun to plateau around $d=2^{16}$.
+Although the 8B-parameter model has not yet plateaued, we restrict our experiments to $d=2^{16}$ due to memory limitations, as the index of 365M C4 examples at $d = 2^{16}$ is already 87TB in size (\S\ref{sec:c4-eval}).
+Furthermore, we note that our factual knowledge task likely requires a large number of dimensions due to the inherent difficulty of compressing individual facts about a large number of entities; fewer dimensions may be sufficient for other tasks.
+
+\subsection{Influence Approaches Attribution}
+\label{sec:infapproachesatt}
+
+In \S\ref{sec:trex-results}, we demonstrated a distinction between \textit{attribution} (identifying proponents that entail a fact, quantified by MRR and recall) and \textit{influence} (identifying proponents that influence the model prediction, quantified by tail-patch scores).
+We find that \ourmethod attribution scores improve as models increase in both parameters and training tokens (Figure \ref{fig:scaling}, right).
+This indicates that as models improve, the influential examples that \ourmethod identifies align more with attribution, suggesting that more capable models rely more on examples that actually entail facts for factual predictions.
+Of course, it does not appear that these measures converge entirely; even for our largest model, tail-patching on ground truth entailing proponents results in much smaller target probability changes than \ourmethod proponents (\S\ref{sec:trex-results}).
+Thus it appears that as models improve, they are more likely to use entailing examples to learn facts, but there are still many proponents that have large effects on the model despite non-entailment. We present a deeper analysis of these types of proponents in \S\ref{sec:analyses}.
+
+
+\section{C4 Open Set Evaluation}
+
+\label{sec:c4-eval}
+
+While the T-REx setting is useful for controlled experiments, in practical use LLMs are trained from large, unsupervised corpora containing a wide variety of passages that the model may learn from. To extend TDA to this setting, we apply \ourmethod{} to identify influential examples for our 8B-parameter model from all 365M passages in the C4 corpus.
+In this scenario, our candidate set (C4) consists of all training examples that the LLM has ever seen.
+These candidate sequences are often much longer than T-REx sentences (up to 2048 tokens), and they cover many domains rather than just Wikipedia.
+
+For the same set of 5.4K factual queries with ground truth targets as \S\ref{sec:trex-closed}, we retrieve proponents using \ourmethod, BM25, and Gecko.
+As C4 is a much larger corpus and is proportionally more expensive to compute gradients over, we perform a more limited set of ablations as shown in Table~\ref{tab:c4-results}.
+We focus on the two corrections that had the largest effects in \S\ref{sec:ablations}: mixed task-specific Hessian approximation \hessianapprox{} (ablated in \textsc{Gradient cosine} in Table \ref{tab:c4-results}) and unit normalization (further ablated in \textsc{Gradient dot product} in Table \ref{tab:c4-results}).\footnote{\textsc{Gradient cosine} is equivalent to Experiment 4 in Table~\ref{tab:ablations}, and \textsc{Gradient dot product} is equivalent to Experiment 1 with optimizer second moment correction.}
+Both of these ablated methods still significantly outperform original TRAK in \S\ref{sec:trex-closed}.
+As before, we quantify performance using MRR, recall, and tail-patch scores.
+
+
+\setlength{\belowcaptionskip}{-0.3cm}
+\begin{table}[tb]
+	\centering
+	\begin{tabular}{l|rrr}
+		\hline
+		Method & MRR & Recall@10 & Tail-patch \\
+		\hline \hline
+		BM25 & \textbf{0.687} & \textbf{0.845} & +0.83\% \\
+		Gecko & 0.636 & 0.826 & +0.54\% \\
+		\hline
+		\textsc{Gradient dot product} & 0.003 & 0.015 & +0.04\% \\
+		\textsc{Gradient cosine} & 0.252 & 0.393 & +1.95\% \\
+		\ourmethod & 0.338 & 0.515 & \textbf{+2.11}\% \\
+		\hline
+	\end{tabular}
+	\caption{Results retrieving proponents from all of C4 (\S\ref{sec:c4-eval}). \textsc{Gradient cosine} ablates the Hessian approximation \hessianapprox{} from \ourmethod, and \textsc{Gradient dot product} further ablates unit normalization.
+	}
+	\label{tab:c4-results}
+\end{table}
+\setlength{\belowcaptionskip}{-0.0cm} %
+\subsection{C4 Open Set Results}
+In line with \S\ref{sec:trex-results}, \ourmethod{} has better tail-patch (\textit{influence}) scores than all other methods, and better MRR and recall (\textit{attribution}) than other gradient methods (Table \ref{tab:c4-results}).
+Again, we find that unit normalization (cosine) is critical to performance, and the addition of task-specific Hessian approximation \hessianapprox{} in \ourmethod{} further improves results.
+In particular, lack of unit normalization often leads to retrieval of long irrelevant examples, as these tend to have large gradient magnitudes.
+
+Also in line with \S\ref{sec:trex-closed}, BM25 and Gecko perform much better than \ourmethod{} for attribution (MRR 0.687 and 0.636 vs. 0.338).
+Still, we note overall high MRR and recall scores given the difficulty of the task: for 51.5\% of facts, \ourmethod{} retrieves an entailing example in the top 10 out of 365M C4 examples.
+Additionally, \ourmethod{} performs over 2.5$\times$ better than BM25 and Gecko at retrieving examples that influence model predictions (tail-patch score $+2.11\%$ vs. $+0.83\%$ and $+0.54\%$).
+This reinforces the distinction between attribution and influence: examples that entail facts---such as proponents retrieved by BM25---are often not the examples that most affect a model's predictions.
+
+
+
+\section{Headroom Analysis}
+
+\label{sec:analyses}
+\setlength{\belowcaptionskip}{-0.3cm}
+\begin{figure}
+    \centering
+    \includegraphics[height=4cm]{figures/stratified_correctandclamped.pdf}
+    \includegraphics[height=4cm]{figures/stratified_incorrect.pdf}
+    \caption{Proportions of \ourmethod{} proponents (top 10 per query) retrieved from C4 that entail a prediction, contain both entities, or contain only one entity for a model prediction.
+    }
+    \label{fig:stratified}
+\end{figure}
+\setlength{\belowcaptionskip}{-0.0cm} %
+
+In \S\ref{sec:trex-closed} and \S\ref{sec:c4-eval} we showed that \ourmethod{} makes significant progress towards attribution for LLM pretraining, outperforming other methods at retrieving \textit{influential} pretraining examples, but it still falls short of classical baselines on the fact tracing task (\textit{attribution}). To better understand why, we look in more detail at the types of proponents retrieved by our method. We find that much of the headroom can be explained by proponents which reflect priors or partial matches, multi-hop reasoning, or idiosyncrasies of the fact tracing task such as ambiguous entities or alternative correct answers. Examples of these proponents are included in Table~\ref{tab:qualitative} and Table~\ref{tab:qualitative-random}. The full set of proponents can be viewed at \demourl{}, including proponents for additional evaluation tasks as described in \S\ref{app:additional-tasks}.
+
+\textbf{Priors and partial matches}: 
+In an ideal world, model predictions would be informed by examples that fully describe (entail) that fact \citep{chang2024largelanguagemodelsacquire}, and these would appear as the top proponents. However, the model's output can also be informed by priors, such as the probability that the answer to any question about language being ``\textit{English}'' or a city being ``\textit{New York}''. In Figure \ref{fig:stratified} (left), we examine the distribution of proponents (top 10 per query) from \ourmethod{} based on their relation to the query: (1) a full entailment (as in \S\ref{sec:c4-eval}), (2) containing the input and target entity but without entailing the fact, (3) containing only one of the entities, or (4) containing neither entity. The latter three categories are estimated by string-matching, and we also consider partial-matches where the proponent matches at least one non-stopword of an entity (e.g. a last name). Additionally, we stratify these categories by how frequently the fact appears in the pretraining corpus.
+
+We find that a majority of proponents fall into one of the full- or partial-match categories, with close to 40\% of proponents entailing the query on moderate-frequency ($10^2$ to $10^3$ occurrences in C4) facts and 40\% more with at least a partial match to one of the entities. While it is not clear why partial matches sometimes score more highly than entailing examples, it is plausible that especially when the target entity is mentioned, these examples would contribute to the model's prior $P(y)$ of generating the target string; 62\% of proponents contain at least a partial match to the target entity.
+For less common entities (e.g. less frequent facts), partial matches appear more frequently, such as matching the first name in \exampletext{Alemayehu Shumye} in Table~\ref{tab:qualitative}. These may represent fallback reasoning, where the model does not know about the specific entity but makes a guess based on statistical associations, such as between names and nationalities.
+
+Interestingly, we observe a drop in entailing and entity-matching proponents for the highest frequency facts ($\geq10^4$ occurrences). In part, this appears due to data artifacts, as some examples in T-REx are string matches for common nouns, such as \exampletext{City is located in the following country: United States}, and it is unclear how a model \textit{should} interpret these queries. Additionally, there may be saturation effects \citep{pruthi-etal-2020-estimating}, where these common facts (such as that Munich is a city in Germany in the \exampletext{Munich Symphony Orchestra} example in Table~\ref{tab:qualitative}) are learned early in training, and gradients at the final checkpoint are diminished.
+\textbf{Multi-hop reasoning}:
+We also observe some cases where there is a multi-step reasoning path between a proponent text and the query. For example in the \exampletext{Carel Steven Adama van Sheltema} example in Table~\ref{tab:qualitative}, a prompt asks about a person's native language, and the first proponent passage states that they were born in Amsterdam.
+While not strictly entailing, this does provide support for the model to plausibly guess that the language is \exampletext{Dutch}.
+\textbf{Noisy proponents}: 
+However, some retrieved proponents are simply noisy. In a relatively small number of cases, examples are entirely irrelevant (e.g. \exampletext{Cadillac} in Table~\ref{tab:qualitative}). In these cases, we often find that \ourmethod{} and other gradient-based methods retrieve long or repetitive passages which bear minimal relation to the query, or which repeat the target string many times (e.g. \exampletext{Présent} example in Table~\ref{tab:qualitative}; this may also reflect priors as discussed above).
+We suspect that this may be because training examples have gradients aggregated across an entire passage.
+Repeating statements that are tangentially relevant can add up to a substantial similarity score, and if better examples receive lower scores due to saturation or other effects, these distractors may rank as top proponents.
+\subsection{Debugging Incorrect Predictions}
+Above, we examined proponent retrievals only for ground truth targets, even when the actual model prediction would have been incorrect.
+In a model-debugging scenario, however, it may be useful to attribute the \textit{incorrect} predictions of the model so as to understand where this behavior was learned \citep{grosse2023studyinglargelanguagemodel,nguyen2024towards} and uncover mislabeled examples or other issues with the training corpus. In Figure~\ref{fig:stratified} (right) we consider the subset of 1592 queries from our evaluation set that the 8B model gets wrong, we retrieve proponents from C4 using \ourmethod{} for the (incorrect) model prediction, and we categorize the proponents using the same scheme as \S\ref{sec:analyses}.
+
+We observe that a substantial fraction (28.5\%) of these answers actually do have entailing passages (7.1\% of all proponents in Figure \ref{fig:stratified} right), and on closer inspection, we find that many of these correspond to alternative correct answers. For example, for \exampletext{Ricky Gervais works as: comedian} the model predicts \exampletext{actor} (he is both), and for \exampletext{Victoria Park is located in the following country: Australia} the model predicts \exampletext{United Kingdom} (there is a Victoria Park in both). However, a much larger fraction of proponents consist of partial matches, suggesting that when the model is wrong, it is often making a guess based on partial information, e.g. using one of the reasoning strategies or priors described in \S\ref{sec:analyses}.
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+In this paper, we explore data attribution (\textit{influence}) methods at the scale of C4 pretraining for an 8B-parameter LLM, pushing the frontier of TDA capabilities closer to full pretraining attribution for modern LLMs. Our best method, \ourmethod{}, outperforms previous gradient-based methods both at retrieving examples that entail a fact (\textit{attribution}) as well as examples that influence model predictions (\textit{influence}).
+Despite this, we find that classical, model-agnostic retrieval methods such as BM25 still perform better on attribution metrics. While this may be partially due to the highly lexical nature of the fact tracing task \citep{wang-etal-2021-bert,akyurek-etal-2022-towards},
+it also demonstrates that attribution and influence may not always be fully aligned, both due to headroom in the method and the fact that different types of non-entailing examples can be influential on a model's prediction. 
+We do find, however, that influence and attribution are more closely aligned as models improve. This suggests that TDA results may even align further with human intuition for newer generations of LLMs, potentially enabling practical usage of this technique to debug model predictions and better understand the connection between training data and model behavior.
+
+
+
+
+
+\begin{table*}[ht!]
+\centering
+\small
+\begin{tabular}{l}
+\hspace{-0.2cm} \normalsize{\textbf{Example proponents from \ourmethod{}:}} \\
+\hline \\
+\textbf{\textcolor{blue}{
+Présent is in the following language: $\to$ English } (incorrect, groundtruth: French)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#3} (non-entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Sorry, this entry is only available in Deutsch, English and All Languages.
+Sorry, this entry is only available in Nederlands, Slovenina, Franais, Polski, English and All Languages.
+Sorry, this entry is only available in English and All Languages.
+Sorry, this entry is only available in English and All Languages.
+Sorry, this entry is only available in English and All Languages.
+Sorry, this entry is only available in Polski, English and 
+...
+}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Victoria Park is located in the following country: $\to$ United Kingdom }} \\ \textbf{(incorrect*, groundtruth: Australia)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Victoria Park in the northern part of Londons East end is 86 hectares of meadows, trees and formal gardens set around two lakes. The Regents Canal runs along the south and west sides of the park and is pleasant to walk along especially on a summer day. The park was donated to the people by Queen Victoria, it was the first public park and opened to the public in 1845. There are a number of good bars and restaurants on the northern edge of the park on Grove Road.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Ricky Gervais works as: $\to$ actor } (incorrect*, groundtruth: comedian)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Going to see Ricky in Toronto tomorrow night, a re-blog felt appropriate.
+For those not familiar with him, Ricky Gervais is a brilliant British actor, director and writer, best known for portraying David Brent in his original BBC series The Office. A past host of the Golden Globes, the often controversial comedian is known for raising the ire of Hollywood A-listers with his blunt zingers and one-liners. I first noticed him as the museum director Dr. McPhee in A Night at the Museum with Ben Stiller, and later stumbled upon him in The Office on Netflix. I quickly became a fan and adored all his subsequent projects, including; Derek, An Idiot Abroad and Lifes too Short, all hilarious and poignant. As I write this, Gervais new movie Special Correspondents is currently playing on Netflix, and his feature film David Brent  Life on the Road will be released in theaters this coming August.
+Im jealous!  I love Ricky. I discovered him in The Office, and I like all his TV shows, while Im still catching up with his movies. Besides his animal rights activism, I love his outspokenness about atheism and in the film The Invention of Lying, he cleverly made fun of the origins of religion.
+Have a good time tomorrow!
+Thank you, looking forward to it!}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+City is located in the following country: $\to$ United States }} \\ \textbf{(incorrect*, groundtruth: Finland)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Many city is located in Louisiana State, Sabine County and has a unique zip code assigned by the US Postal Service Office.
+Many Area Code is 318 and Time Zone is Central (GMT -06:00).
+The US ZIP Code basic format consists of five decimal numerical digits assigned to the Many City. An extended ZIP+4 code, introduced in the 1980s, includes the five digits of the Many ZIP code, a hyphen, and four more digits that determine a more specific location within a given ZIP code in Many, Louisiana. The Many Zip Code is 71449.
+If you want to send a mail to Many City, you should ...
+}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Munich Symphony Orchestra originated in the following country: $\to$ Germany }} \\ \textbf{(correct, groundtruth: Germany)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (non-entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Amsterdam Baroque Orchestra, conductor Ton Koopman. Label: Challenge Classics. Recording Date: September, 2009.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Cadillac was formed in the city of: $\to$ Detroit } (correct, groundtruth: Detroit) }  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (non-entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ RBG: Real Bar Gaming Nerd Jabber Loves... Comics! What did Happy Gilmore do next? 90s nostalgia and ridiculous theories with host Claire Lim, guest host Paul McCallum and special guest Josh Macuga. The podcast is available on iTunes, Spotify or via the embed below.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Alemayehu Shumye died in the city of: $\to$ Addis Ababa }} \\
+\textbf{(correct, groundtruth: Addis Ababa)} \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (non-entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Dr. Alemayehu G. Mariam (Al Mariam) is a professor of political science at California State University, San Bernardino (CSUSB). He received his Ph.D. from the University of Minnesota in 1984, and his J.D. from the University of Maryland in 1988. He serves on the board of the Center for the Study of Hate and Extremism at CSUSB. He has given human rights lectures at the Carr Center, Harvard University, and various law schools including the University of Minnesota, American University and UCLA. He also played a central advocacy role in the passage of H.R. 2003 (Ethiopia Democracy and Human Rights Act) in the House of Representatives in 2007. For the last several years, he has written a weekly web commentary on Ethiopian human rights and African issues. Currently, he has a weekly blog at the Huffington Post and his articles are featured on Pambazuka News, New American Media, Ethiopian Review and Ethio-Media. He has published two volumes on American constitutional law, including American Constitutional Law: Structures and Process (1994) and American Constitutional Law: Civil Liberties and Civil Rights (1998). He is also a Senior Editor of the International Journal of Ethiopian Studies, a leading scholarly journal on Ethiopia.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Alemayehu Shumye died in the city of: $\to$ Addis Ababa }} \\
+\textbf{(correct, groundtruth: Addis Ababa)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#2} (non-entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ 1 Response to "Addis Ababa Bete  Alemayehu Eshete" I love this song. Thanks for posting it!!}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Carel Steven Adama van Scheltema had the following native language: $\to$ Dutch }} \\ \textbf{(correct, groundtruth: Dutch)}  \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1} (non-entailing): \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Carel Steven Adama van Scheltema was born 26 February 1877 in Amsterdam, North Holland, Netherlands to Frederik Adama van Scheltema (1846-1899) and Hendrika Lulofs (1850-1927) and died 6 May 1924 in Bergen, North Holland, Netherlands of unspecified causes. He married Anna Catharina Kleefstra (1884-1977) 24 October 1907 . Ancestors are from the Netherlands.}
+\end{minipage} \\
+\\
+\hline
+\end{tabular}
+\caption{Example passage retrievals from \ourmethod{}, from the 8B model over the full C4 corpus. Some model predictions are marked as incorrect* because they do not match the ``ground truth'' from the T-REx dataset, but they are still plausibly correct due to either an ambiguous prompt or an alternative correct answer (for example, Ricky Gervais is both an actor and a comedian).}
+\label{tab:qualitative}
+\end{table*}
+
+\clearpage
+
+\begin{table*}[tb]
+\centering
+\small
+\begin{tabular}{l}
+\hspace{-0.2cm} \normalsize{\textbf{Top proponent from \ourmethod{} for randomly-sampled queries:}} \\
+\hline \\
+\textbf{\textcolor{blue}{
+Thompson River is located in the following country: $\to$ Canada} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Blue Moon. Original Painting by Thompson River artist Carl Stromquist. Carl is deliberate and focused: Deliberate in his desire to paint with excellence, in his quest to earn visions that will generate artwork which honors his Gift of Life and the richness, depth and teachings of the Canadian First Nations. Being Self taught, Carl has spent much time studying the works of renowned Native artisans as well as the timeless truths embodied in the elders' stories and legends. From this journey for truth has come his desire to portray the balance and harmony that exists in the Circle of Life. Carl's art is influenced by his profound love and respect for nature.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Rachael Ray is a citizen of the following country: $\to$ United States} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ The Rachael Ray Show - Snack of the Day!!!! The Rachael Ray Show - Snack of the Day!!!! Copyright  2014 KK's Gourmet. All Rights Reserved.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Lars Johansson speaks the following language: $\to$ Swedish} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Lars Johan Larsson was born on February 15, 1849. He married Sofia Johansdotter. She was born on March 15, 1847 in Fogels.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Jean-Baptiste Forest was born in the city of: $\to$ Paris} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Creative Jean-Baptiste Le Divelec had fun turning the entire movie by Stanley Kubrick, 2001: A Space Odyssey, into animated GIFs. It gives 569 GIFs he published on the platform Giphy, through which we can discover the movie second by second, for free. Although the images are mute, he took care of integrating the subtitles in each GIF.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Disneyland is named after: $\to$ Walt Disney} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Gerlaw City is named after Robert Gerlaw. Gerlaw City is named after Robert Gerlaw, who was born in 1817 and died in 1911. In the early 1850s, Gerlaw came to Warren County and married Marry Black. They moved to Sec. 34 Spring Grove, which became a township in 1854.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Michel Sardou works as: $\to$ actor} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ In late 2012, Michel Sardou began a four-month "Les Grands Moments" tour across France, revisiting his biggest hits in a truly energetic show. Lighting designer Jacques Rouveyrollis used just one type of spotlight on stage throughout the tour - the MAC Viper Profile  a somewhat bold choice given it was the lighting fixtures French dbut, but one that delivered on all its promises. A total of 93 MAC Viper Profiles, supplied by the Dushow Group (who currently have 160 in total), were installed, 56 equally spaced over three gantries and 37 on the floor spread across four levels. No traditional spotlights were used  a rare occurrence for such a show. The simple lighting plan acted as the sole stage design element and provided the performance area with structure by offering a wide variety of effects. At front of house, 6 MAC III Performances were installed behind the control desk for extra punch. The MAC Vipers enabled Jacques Rouveyrollis to design several different lighting scenarios to accompany the various songs. Using a single type of light source
+...
+}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Ryan Miller is a citizen of the following country: $\to$ United States} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Posted on Tuesday, January 22nd, 2019 at 8:50 pm. Ryan Miller won the Vezina last year and therefor is the top ranked goalie. He also lost in the gold medal game on a questionable shot and got bounced in the first round by the Bruins who then went on to perform one of the most epic collapses in sports history. I not saying he shouldn be number one, I just saying those are things to think about come draft day.. About a year ago, I https://www.nfljerseyscheapcollection. Amid the serene grace of Myerss Modernist outpost and its surrounding Mediterranean landscape with fruit trees and oaks, I forgot all about the parade. Nobody was visible, and there was nothing to knock on besides girders.. Some of the first moves learned by martial arts students is how to punch and block with the arms. Injuries often occur when a kick is not blocked properly, including bruises, hairline fractures, and even broken bones. To reduce the risk of these types of injuries, a student will wear sparring gear on her arms for her partner and to protect herself as well.. He keeps his office in wholesale jerseys his house, and almost never leaves home, even to pursue the detective work that allows for his expensive lifestyle. Instead, 
+...
+}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+My Bloody Valentine 3D originated in the following country: $\to$ United States} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ No reviews for My Bloody Valentine Complete Edition [Limited Edition] yet. there is a new movie directed by Patrick Lussier. the price for My Bloody Valentine Complete Edition [Limited Edition] drops. there are new images or links available for My Bloody Valentine Complete Edition [Limited Edition].}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Happily Divorced had cast members named: $\to$ Fran Drescher} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Happily Divorced star Fran Drescher is now happily married! The 56-year-old actress said "I do" to Dr. Shiva Ayyadurai, 50, at their beach home in front of a small group of friends and family, People confirms. Drescher shared the news on Twitter on Sunday with a sweet selfie. Ayyadurai, who holds the patent for inventing email, met Drescher a year ago at an event hosted by Deepak Chopra. "Fran heard my talk and we fell in love, and we've been together since that talk," he told the Huffington Post. "Every day is a celebration with Fran. Every day is almost a romantic hangout with her. We're always laughing, always enjoying ourselves." This is the second marriage for The Nanny actress. She was married to Peter Marc Jacobson for 21 years, but divorced him in 1999. Jacobson, who is also Drescher's producing partner, later came out as gay.}
+\end{minipage} \\
+\\
+\textbf{\textcolor{blue}{
+Stadium Beyond the Stars is of the following genre: $\to$ science fiction} } \\
+\hspace{0.4cm} \textbf{Proponent retrieval \#1}: \\
+\hspace{0.4cm} \begin{minipage}{0.90\textwidth}
+\tiny{ Beyond The Stars: Blade Runner Overview (4 of 4): Do Androids Dream of Electric Sheep? Beyond the Stars is a series of Science Fiction related posts where I discuss different aspects of the genre and the many tropes and plot lines associated with it. Today, I talk about Blade Runners source material, Do Androids Dream of Electric Sheep? in a series of posts focused on the Blade Runner Universe. Beyond  Continue reading Beyond The Stars: Blade Runner Overview (4 of 4): Do Androids Dream of Electric Sheep?}
+\end{minipage} \\
+\\
+\hline
+\end{tabular}
+\caption{Top passage retrieval from \ourmethod{} for randomly-sampled queries with ground truth targets, from the 8B model over the full C4 corpus.}
+\label{tab:qualitative-random}
+\end{table*}
+
+\clearpage
+
+
+
+
+

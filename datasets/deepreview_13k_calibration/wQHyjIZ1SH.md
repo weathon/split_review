@@ -1,8 +1,8 @@
 # NRGBoost: Energy-Based Generative Boosted Trees
 
 - Decision: Accept
-- Avg Score: 3.80
-- Scores: 6, 6, 6, 1, 0
+- Avg Score: 7.00
+- Scores: 6, 6, 6, 10
 
 ## Abstract
 Despite the rise to dominance of deep learning in unstructured data domains, tree-based methods such as Random Forests (RF) and Gradient Boosted Decision Trees (GBDT) are still the workhorses for handling discriminative tasks on tabular data. We explore generative extensions of these popular algorithms with a focus on explicitly modeling the data density (up to a normalization constant), thus enabling other applications besides sampling. 

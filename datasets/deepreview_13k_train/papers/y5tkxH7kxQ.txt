@@ -1,0 +1,359 @@
+\title{Towards Efficient LLM Grounding for Embodied Multi-Agent Collaboration}
+
+\begin{abstract}
+Grounding the reasoning ability of large language models (LLMs) for embodied tasks is challenging due to the complexity of the physical world. Especially, LLM planning for multi-agent collaboration requires communication of agents or credit assignment as the feedback to re-adjust the proposed plans and achieve effective coordination. However, existing methods that overly rely on physical verification or self-reflection suffer from excessive and inefficient querying of LLMs. In this paper, we propose a novel framework for multi-agent collaboration that introduces Reinforced Advantage feedback (ReAd) for efficient self-refinement of plans. Specifically, we perform critic regression to learn a sequential advantage function from LLM-planned data, and then treat the LLM planner as an optimizer to generate actions that maximize the advantage function. It endows the LLM with the foresight to discern whether the action contributes to accomplishing the final task. We provide theoretical analysis by extending advantage-weighted regression in reinforcement learning to multi-agent systems.
+Experiments on Overcooked-AI and a difficult variant of RoCoBench show that ReAd surpasses baselines in success rate, and also significantly decreases the interaction steps of agents and query rounds of LLMs, demonstrating its high efficiency for grounding LLMs. More results are given at \url{https://read-llm.io/}.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have exhibited remarkable capabilities across various domains, including long-text understanding, reasoning, and text generation \cite{devlin2019bert, radford2019language, brown2020language, raffel2023exploring}. Benefiting from large-scale text corpora mined from the web, LLMs can absorb and capture vast quantities of knowledge about the world for decision-making. Recent research has shown that LLMs can interactively make decisions through zero-shot or few-shot example prompting to solve embodied tasks \cite{Firoozi2023FoundationMI} via chain-of-thought (CoT) \cite{wei2023chainofthought} or tree-of-thought \cite{yao2023tree} planning. 
+However, LLMs perform planning only using their internal knowledge, which is often not grounded in the physical world due to the lack of task-specific knowledge of complex embodied agents. 
+Such a problem can lead to fact hallucination and nonsensical instruction interpretation issues in reasoning \cite{ahn2022i}. 
+To prevent LLMs from outputting infeasible plans in embodied tasks, existing methods mostly design a closed-loop framework for the interaction process with feedback. Specifically, one line of research adopts \emph{self-reflection} by performing self-evaluation by LLMs to improve the plan generation of LLM planner \cite{shinn2023reflexion, yao2023react,hao2023reasoning,liu2023RAFA}; and the other works perform \emph{physical verification} by using feedback of the external environment 
+to dynamically replan depending on unexpected feedback \cite{huang2022Monologue,song2023llmplanner}. Nevertheless, these feedback is often sparse or designed heuristically, a more principled feedback mechanism for LLM-based embodied task planning is still lacking.
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{
+\includegraphics[width=1.05\columnwidth]{FIG/Intro-fig.pdf}}
+\caption{An illustration of the negotiation process of RoCo and our method. RoCo interacts with the environment for each plan and takes the environment's feedback as prompts. In contrast, our method takes the advantage function (Adv.) evaluated by a critic as feedback, and revises the plan if the advantage value is lower than the threshold, which significantly reduces the interaction rounds to the environment.
+}
+\label{fig:intro-fig}
+\end{center}
+\end{figure*}
+
+Considering more challenging planning problems in multi-agent settings, an LLM-based agent needs to cooperate with other agents through communication and negotiation, which causes more difficulties in effective feedback. Specifically, it is hard for both self-reflection and physical verification to evaluate the effects of individual action in a team outcome of multi-agents.
+Consequently, the feedback mechanisms suffer from either excessive queries of LLMs or frequent interactions with the physical environment.
+For instance, RoCo \cite{mandi2023roco} introduces physical verification as feedback to refine the LLM-generated actions in multi-agent cooperative settings, but faces the difficulty of poor efficiency. As we illustrated in Figure~\ref{fig:intro-fig}, RoCo requires excessive interaction to obtain physical feedback and queries to LLMs to get feasible joint-action plans, which can be heavily inefficient for embodied tasks. % which can also be inefficient for embodied tasks. 
+In contrast, various methods in Multi-Agent Reinforcement Learning (MARL) \cite{MAsurvey} have developed value or advantage decomposition theories for credit assignment of multiple agents \cite{QMIX,kuba2022happo}, which provide effective mechanisms to evaluate the contribution of individual actions in accomplishing final tasks and can generate actions for monotonic policy improvement \cite{Mirror}. Inspired by these principles, we ask "\emph{How to enhance the reasoning ability of LLMs for embodied multi-agent collaboration} with theoretical supports of MARL?".
+Our objective is to build an efficient feedback and refinement algorithm with utilizing multi-agent advantage functions, for multi-agent planning assisted by LLMs.
+
+In this paper, we propose Reinforced Advantage (\emph{ReAd}) as a closed-loop feedback for LLMs in multi-agent collaboration. We provide two optional LLM-generated plan refinement scheme, including Sequential Individual Plan Refinement with the local advantage (named \emph{ReAd-S}) and Joint Plan Refinement with the joint advantage (named \emph{ReAd-J}).
+Among them, (\romannumeral1) \emph{ReAd-J} evaluates the advantage function of joint actions, which requires LLMs to generate the joint planning of all agents at once. In contrast, (\romannumeral2) \emph{ReAd-S} evaluates the local advantages of each agent’s action by following the principle of multi-agent advantage decomposition \cite{kuba2022happo} in MARL, which allows LLMs to generate actions for each agent sequentially. Both advantage functions are estimated by a critic network that regresses LLM-planned data. Based on the advantage function, an LLM planner is used as an optimizer by prompting to generate actions that maximize the advantage value. Otherwise, the LLM planner is required to re-plan if the advantage value is small. We provide a theoretical motivation for such a process by extending advantage-weighted regression \cite{peng2019advantageweighted} to multi-agent settings.
+In experiments, we extend RoCoBench \cite{mandi2023roco} to a difficult variant, which we term \emph{DV-RoCoBench}.
+The results on \emph{DV-RoCoBench} and \emph{Overcooked-AI} show that \emph{ReAd} significantly decreases the interaction and query rounds, and also surpasses baselines in success rate, highlighting its effectiveness for grounding LLMs in embodied multi-agent collaboration tasks. 
+
+
+
+\section{Preliminaries}
+
+We consider a Markov game, which is defined by a tuple $\langle \mathcal{N},\mathcal{S}, \boldsymbol{\mathcal{A}}, P, r, \gamma \rangle$, in which $\mathcal{N}$ denotes the set of agents, $\mathcal{S}$ denotes state space, $\boldsymbol{\mathcal{A}}=\prod_{i=1}^{n}\mathcal{A}^i$ denotes the product of finite action spaces of all agents (i.e., joint action space), $P: \mathcal{S}\times\boldsymbol{\mathcal{A}}\times\mathcal{S} \rightarrow [0,1]$ denotes the transition probability function, $r: \mathcal{S}\times\boldsymbol{\mathcal{A}}\rightarrow\mathbb{R}$ denotes the reward function, and $\gamma \in [0,1)$ denotes the discount factor. In the Markov game, every agent at time step $t \in \mathbb{N}$ observes the state of environment $s_t \in \mathcal{S}$ and takes an action $a_{t}^{i}\in \mathcal{A}^{i}$ from its corresponding policy $\pi^{i}(\cdot|s_t)$, which together with other agents' actions forms a joint action $\boldsymbol{a}_{t} = (a_{t}^{1}, a_{t}^{2}, ..., a_{t}^{n}) \in \boldsymbol{\mathcal{A}}$ drawn from the joint policy $\boldsymbol{\pi}(\cdot|s_t)=\prod_{i=1}^{n}\pi^{i}(\cdot|s_t)$. Then agents receive a shared reward $r_t=r(s_t,\boldsymbol{a}_t)$ and observe a new state $s_{t+1}$ with probability $P(s_{t+1}|s_t,\boldsymbol{a}_t)$. With the joint policy $\boldsymbol{\pi}$ and the transition probability function $P$, the state value function is defined as $V_{\boldsymbol{\pi}}(s) \triangleq \mathbb{E}_{s_{1:\infty}\sim P, \boldsymbol{a}_{0:\infty}\sim \boldsymbol{\pi}} [\sum_{i=0}^{\infty}\gamma^{i}r_i | s_0=s ]$. And the state-action value function is defined as $Q_{\boldsymbol{\pi}}(s, \boldsymbol{a})\triangleq\mathbb{E}_{s_{1:\infty}\sim P, \boldsymbol{a}_{1:\infty}\sim \boldsymbol{\pi}} [\sum_{i=0}^{\infty}\gamma^{i}r_i | s_0=s, \boldsymbol{a}_0=\boldsymbol{a}]$. We aim at finding a joint policy to maximize the expected return $J(\boldsymbol{\pi}) \triangleq \mathbb{E}_{s_{0:\infty} \sim P, \boldsymbol{a}_{0:\infty} \sim \boldsymbol{\pi}}\left[\sum_{t=0}^{\infty}\gamma^{t}r_t\right]$.
+In the following, we consider the LLM planner as a special RL policy, which can be evaluated by a value function.
+
+
+
+\section{Methodology}
+
+We first give definitions and learning algorithms for the two kinds of advantage functions in \S\ref{section:3-1}. Then, we provide theoretical motivation for grounding LLMs by extending advantage-weighted regression in multi-agent settings in \S\ref{section:3-2}.
+Finally, we describe how to derive Reinforced Advantage (\emph{ReAd}) feedback from the theoretical motivation and use an LLM planner as an optimizer and refine the plan in \S\ref{section:3-3}.
+
+\subsection{Learning of Advantage Functions} \label{section:3-1}
+We first introduce the estimation of \emph{joint} advantage function. Then the \emph{local} advantage is obtained via advantage decomposition by following theories from MARL.
+
+\textbf{Joint Advantage Function.} Based on joint value functions $Q_{\boldsymbol{\pi}}(s, \boldsymbol{a})$ and $V_{\boldsymbol{\pi}}(s)$, we define the \emph{joint} advantage function as
+\begin{equation*}
+A_{\boldsymbol{\pi}}(s, \boldsymbol{a}) \triangleq Q_{\boldsymbol{\pi}}(s, \boldsymbol{a}) - V_{\boldsymbol{\pi}}(s),
+\end{equation*}
+which evaluates the advantage value of joint actions $\boldsymbol{a}_{t} = (a_{t}^{1}, a_{t}^{2}, ..., a_{t}^{n})$ from all agents. $A_{\boldsymbol{\pi}}(s, \boldsymbol{a})$ will be used for \emph{ReAd-J} to evaluate the joint planning of all agents as feedback.
+Here, we assume the option of taking no actions is available to each agent, which is reasonable and common in embodied tasks.
+With this special action that we term WAIT, we can estimate the joint advantage using only $Q_{\boldsymbol{\pi}}(s, \boldsymbol{a})$.
+
+When taking WAIT action $a = w$, the agent will keep dormant at the current time step. The joint WAIT action is denoted as $\boldsymbol{w} = (w, w, ..., w) $. Choosing $\boldsymbol{w}$ at the current state $s$ signifies all agents take no actions, then the next state $s'=s$ and the agents receive shared reward $r(s, \boldsymbol{w})=0$ since $\boldsymbol{w}$ bring no changes to the environment. Further, we can derive the relationship between $Q_{\boldsymbol{\pi}}(s, \boldsymbol{w})$ and $V_{\boldsymbol{\pi}}(s)$, as
+\begin{equation}\nonumber
+\begin{split}
+Q_{\boldsymbol{\pi}}(s, \boldsymbol{w})
+    &=\mathbb{E}_{s_{1:\infty} \sim P, \boldsymbol{a}_{1:\infty}\sim \boldsymbol{\pi}}\left[\sum\nolimits_{i=0}^{\infty}\gamma^{i}r_i \big| s_0=s, \boldsymbol{a}_0=\boldsymbol{w}\right]\\
+    &=\gamma\mathbb{E}_{s_{2:\infty} \sim P, \boldsymbol{a}_{1:\infty}\sim \boldsymbol{\pi}}\left[\sum\nolimits_{i=0}^{\infty}\gamma^{i}r_{i+1} \big| s_1=s\right]
+    =\gamma V_{\boldsymbol{\pi}}(s).
+\end{split}
+\end{equation}
+Therefore, the \emph{joint} advantage function can be derived by using only the $Q_{\boldsymbol{\pi}}$ function, as
+\begin{equation}
+\label{equ:joint_adv}
+A_{\boldsymbol{\pi}}(s, \boldsymbol{a})=Q_{\boldsymbol{\pi}}(s, \boldsymbol{a}) - \frac{1}{\gamma}Q_{\boldsymbol{\pi}}(s, \boldsymbol{w}).
+\end{equation}
+\textbf{Local Advantage Function.} In cooperative multi-agent settings, we can further consider the contribution to performance in different subsets of agents' views. We adopt the standard definition in MARL to measure the local advantages.
+
+\begin{definition} {\rm \cite{kuba2022happo}}
+\label{def:local_adv}
+Let $i_{1:m}$ denote an ordered subset $\{i_1, ..., i_m\}$ of $\mathcal{N}$, and let $-i_{1:m}$ refer to its complement. We mark $i_k$ when we refer to the $k^{th}$ agent in the ordered subset. Correspondingly, the multi-agent local state-action value function is defined as
+\begin{equation}
+\label{equ:local_q}
+Q_{\boldsymbol{\pi}}^{i_{1:m}}(s, \boldsymbol{a}^{i_{1:m}}) \triangleq \mathbb{E}_{a^{-i_{1:m}} \sim \boldsymbol{\pi}^{-i_{1:m}}}\left[Q_{\boldsymbol{\pi}}(s, \boldsymbol{a}^{i_{1:m}}, \boldsymbol{a}^{-i_{1:m}})\right]
+\end{equation}
+and for disjoint sets $j_{1:k}$ and $i_{1:m}$, the multi-agent local advantage function is
+\begin{equation}
+\label{equ:local_adv}
+\begin{split}
+A_{\boldsymbol{\pi}}^{i_{1:m}}(s, \boldsymbol{a}^{j_{1:k}}, \boldsymbol{a}^{i_{1:m}}) \triangleq \ & Q_{\boldsymbol{\pi}}^{j_{1:k},i_{1:m}}(s, \boldsymbol{a}^{j_{1:k}}, \boldsymbol{a}^{i_{1:m}}) - Q_{\boldsymbol{\pi}}^{j_{1:k}}(s, \boldsymbol{a}^{j_{1:k}})
+\end{split}
+\end{equation}
+\end{definition}
+
+\textbf{Monte Carlo Estimation.}
+Both Eqs.~\eqref{equ:joint_adv} and \eqref{equ:local_adv} can be estimated via the local value function $Q_{\boldsymbol{\pi}}^{i_{1:u}}(s,\boldsymbol{a}^{i_{1:u}})$ with arbitrary action subset $\boldsymbol{a}^{i_{1:u}}$. More precisely, the local advantages can be estimated by changing $\boldsymbol{a}^{i_{1:u}}$ to disjoint action sets or subsets, and the joint advantages can be obtained by changing $\boldsymbol{a}^{i_{1:u}}$ to $\boldsymbol{a}^{1:n}$ that contains the joint actions or the joint WAIT action.
+In the following, we denote the underlying policy of the LLM planner as $\boldsymbol{\mu}=\boldsymbol{\pi}_{\rm llm}(\boldsymbol{a}|s)$. To estimate $Q_{\boldsymbol{\mu}}^{i_{1:u}}$, we collect a dataset $\mathcal{D}$ by following the behavior policy $\boldsymbol{\mu}$, and further augment it with enhanced trajectories to overcome the out-of-distribution (OOD) problem of action estimation \cite{levine2020offline}.
+Then we estimate $Q_{\boldsymbol{\mu}}^{i_{1:u}}(s,\boldsymbol{a}^{i_{1:u}})$ via Monte Carlo estimation by following $\mathcal{R}_{s, \boldsymbol{a}^{i_{1:u}}} = \sum_{\boldsymbol{a}^{-i_{1:u}} \in \mathcal{D}}\sum_{t=0}^{T}\gamma^t r_t$, where the complement sets is sampled from the dataset. Then the value function is learned by a regression loss as 
+\begin{equation*}
+\mathbb{E}_{s, \boldsymbol{a}^{i_{1:u}} \sim \mathcal{D}} \Big[\left\| \mathcal{R}_{s, \boldsymbol{a}^{i_{1:u}}} - Q_{\boldsymbol{\mu}}^{i_{1:u}} \right\|^{2} \Big].
+\end{equation*}
+We refer to Alg. The setting of reward $r_t$ depends on the specific task, e.g., for sweeping cubes in Figure~\ref{fig:intro-fig}, $r_t=1$ if a correct cube is swept and $r_t=0$ otherwise. The details of data collection are given in \S\ref{app:ablation}.
+
+\textbf{Advantage Decomposition.} Based on Eq.~\eqref{equ:local_q}, we can express the state value function $V_{\boldsymbol{\pi}}(s)$ in a new form. Given the whole set of agents $\mathcal{N}=\{1, .., n\}$,
+\begin{equation*}
+V_{\boldsymbol{\pi}}(s) = \mathbb{E}_{a^{1:n} \sim \boldsymbol{\pi}^{1:n}}\left[Q_{\boldsymbol{\pi}}(s, \boldsymbol{a}^{1:n})\right].
+\end{equation*}
+Based on Definition \ref{def:local_adv}, we can introduce a pivotal lemma, which reveals that joint advantage function can be decomposed into the summation of local advantages of each agent. 
+\begin{lemma}
+\label{lemma:adv_decomposition}
+(Multi-Agent Advantage Decomposition). In any cooperative Markov games, given a joint policy $\boldsymbol{\pi}$ and the whole set of agents $\mathcal{N}=\{1, .., n\}$, for any state $s$, and any ordered set $i_{1:n}$ of all agents, we have
+\begin{equation}
+A_{\boldsymbol{\pi}}(s, \boldsymbol{a}) = \sum_{k=1}^{n}A_{\boldsymbol{\pi}}^{i_{k}}(s, \boldsymbol{a}^{i_{1:k-1}}, a^{i_k}),
+\end{equation}
+where $\boldsymbol{a} = (a^1, a^2, ..., a^n)$.
+\end{lemma}
+ Lemma \ref{lemma:adv_decomposition} will be used for derivation in \S\ref{section:3-2}.
+
+\subsection{Theoretical Motivation for Grounding LLM} \label{section:3-2}
+In this section, we give a theoretical motivation that closely resembles advantage-weighted regression \cite{peng2019advantageweighted} in single-agent RL, while we extend it for multi-agents via advantage decomposition in Lemma \ref{lemma:adv_decomposition}.
+To achieve efficient LLM grounding, i.e., to obtain a superior policy to the LLM planner, one option is adopting LLM as a basic policy and searching for a stronger policy than it. % 稍微润色了一下，重新思考一下optimal这里用superior刚好合适
+Therefore, we derive our objective as an approximate optimization of a constrained policy search problem. Specifically, we denote the policy of LLM planners as $\boldsymbol{\mu}=\boldsymbol{\pi}_{\rm llm}(\boldsymbol{a}|s)$, and our goal is to find a policy $\boldsymbol{\pi}$ that maximizes the expected improvement $\eta(\boldsymbol{\pi})=J(\boldsymbol{\pi}) - J(\boldsymbol{\mu})$ over the basic policy $\boldsymbol{\mu}$. % that interacts with the environment to collect data.
+Following the performance difference lemma~\cite{Langford02icml, pmlr-v37-schulman15ppo}, we show the expected improvement $\eta(\boldsymbol{\pi})$ can be expressed in terms of the advantage over $\boldsymbol{\mu}(\boldsymbol{a}|s)$, as
+\begin{equation}
+\label{equ:ex_improvement}
+\begin{split}
+\eta(\boldsymbol{\pi})=\mathbb{E}_{s \sim \rho_{\boldsymbol{\pi}}(s), \boldsymbol{a} \sim \boldsymbol{\pi}(\boldsymbol{a}|s)}\left[A_{\boldsymbol{\mu}}(s, \boldsymbol{a})\right],
+\end{split}
+\end{equation}
+where $\rho_{\boldsymbol{\pi}}(s) = \sum_{i=0}^{\infty}\gamma^{i}P(s_i=s)$ is the (unnormalized) discounted visitation frequencies over policy $\boldsymbol{\pi}$. Since the objective in Eq.~\eqref{equ:ex_improvement} is difficult to optimize due to the dependency on $\rho_{\boldsymbol{\pi}}(s)$ and $\boldsymbol{\pi}$, we introduce an objective $\hat{\eta}(\boldsymbol{\pi})$ to approximate $\eta(\boldsymbol{\pi})$, instructed by \cite{pmlr-v37-schulman15ppo}, as 
+\begin{equation}
+\label{equ:approximate_improvement}
+    \hat{\eta}(\boldsymbol{\pi}) = \mathbb{E}_{s \sim \rho_{\boldsymbol{\mu}}(s), \boldsymbol{a} \sim \boldsymbol{\pi}(\boldsymbol{a}|s)}\left[A_{\boldsymbol{\mu}}(s, \boldsymbol{a})\right].
+\end{equation}
+By replacing the original objective with the surrogate objective, we can formulate the following constrained policy search problem as
+\begin{equation*}
+\begin{split}
+    \mathop{\arg\max}\limits_{\boldsymbol{\pi}} \int_{s}\rho_{\boldsymbol{\mu}}(s)\int_{\boldsymbol{a}}\boldsymbol{\pi}(\boldsymbol{a}|s)A_{\boldsymbol{\mu}}(s,\boldsymbol{a})\,d\boldsymbol{a} \,ds, \quad
+    {\rm s.t.}  \int_{s}\rho_{\boldsymbol{\mu}}(s) {\rm D}_{KL}\left(\boldsymbol{\pi}(\cdot|s) \| \boldsymbol{\mu}(\cdot|s)\right)\,ds \leq \epsilon.
+\end{split}
+\end{equation*}
+The constraint asserts that when the new policy $\boldsymbol{\pi}$ is close to the basic policy $\boldsymbol{\mu}$, the surrogate objective $\hat{\eta}(\boldsymbol{\pi})$ becomes a precise approximation to $\eta(\boldsymbol{\pi})$\footnote{We refer to \cite{pmlr-v37-schulman15ppo} for a detailed derivation.}. To get the solution to this constrained optimization, we form the Lagrangian of the primal problem presented above,
+\begin{equation}
+\label{eq:consLag}
+\begin{split}
+    \mathcal{L}(\boldsymbol{\pi},\beta)=\,\int_{s}\rho_{\boldsymbol{\mu}}(s)\int_{\boldsymbol{a}}\boldsymbol{\pi}(\boldsymbol{a}|s)A_{\boldsymbol{\mu}}(s, \boldsymbol{a})\,d\boldsymbol{a}\,ds + \beta\left(\epsilon - \int_{s}\rho_{\boldsymbol{\mu}}(s) {\rm D}_{\rm KL}\left(\boldsymbol{\pi}(\cdot|s) \| \boldsymbol{\mu}(\cdot|s)\right)\,ds\right)
+\end{split}
+\end{equation}
+where $\beta > 0$ is a Lagrange multiplier. 
+
+\textbf{Optimal Joint Policy.} According to KKT conditions \cite{kkt}, the optimal policy $\boldsymbol{\pi}^{*}$ for the constrained optimization problem in Eq.~\eqref{eq:consLag} is expressed by
+\begin{equation}
+\label{equ:optimal_1}
+\boldsymbol{\pi}^{*}(\boldsymbol{a}|s) = \frac{1}{Z(s)}\boldsymbol{\mu}(\boldsymbol{a}|s)\exp\left(\frac{1}{\beta}A_{\boldsymbol{\mu}}(s, \boldsymbol{a})\right),
+\end{equation}
+where $Z(s)$ is the partition function.
+
+\textbf{Optimal Individual Policy.} Following advantage decomposition in Lemma \ref{lemma:adv_decomposition}, we can decompose optimal joint policy $\boldsymbol{\pi}^{*}(\boldsymbol{a}|s)$ to optimal individual policies by assuming the agents choose actions sequentially in the order of $1, 2, ..., n$, as
+\begin{equation}
+\label{equ:individual_optimal}
+    \pi^{*}(a^i|s, \boldsymbol{a}^{1:i-1}) \!=\! \frac{\mu^i(a^i|s,\boldsymbol{a}^{1:i-1})}{Z^{i}(s)}\exp\left(\frac{1}{\beta}A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^i)\right)
+\end{equation}
+where $Z^i(s)$ is the partition function.~\eqref{equ:optimal_1} and \eqref{equ:individual_optimal}.
+
+By maximizing the expected policy improvement $\eta(\boldsymbol{\pi})=J(\boldsymbol{\pi})-J(\boldsymbol{\mu})$, we obtain stronger joint and individual policies (i.e., $\boldsymbol{\pi}^{*}(\boldsymbol{a}|s)$ and $\pi^{*}(a^i|s, \boldsymbol{a}^{1:i-1})$) over the basic policy $\boldsymbol{\mu}=\boldsymbol{\pi}_{\rm llm}$.
+The key insight behind the policy improvement is to re-weight the LLM policy with exponential weights defined in terms of advantages.
+The advantage function is estimated by local value function $Q_{\boldsymbol{\mu}}^{i_{1:u}}(s, \boldsymbol{a}^{i_{1:u}})$, where we calculate it via Monte-Carlo estimation from a collected dataset $\mathcal{D}$, as we discussed in \S\ref{section:3-1}. 
+
+\subsection{Prompting by Reinforced Advantage Feedback} \label{section:3-3}
+Upon the basic policy $\boldsymbol{\mu} = \boldsymbol{\pi}_{\rm llm}$, the advantage-weighted solution in Eq.~\eqref{equ:individual_optimal} offers a crucial intuition that
+(\romannumeral1) by increasing the probability of $\mu^{i}(a^{i}_{\rm pos}|s,\boldsymbol{a}^{1:i-1})$ for those actions $a^{i}_{\rm pos}$ with positive advantages, i.e., $A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^{i}_{\rm pos}) > 0$, and (\romannumeral2) decreasing the probability of $\mu^{i}(a^{i}_{\rm neg}|s,\boldsymbol{a}^{1:i-1})$ for those actions $a^{i}_{\rm neg}$ with negative advantages, i.e., $A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^{i}_{\rm neg}) < 0$, we can ensure an expected performance improvement over $J(\boldsymbol{\mu})$.
+Therefore, Eq.~\eqref{equ:individual_optimal} can be equivalently viewed as behavior cloning (BC) on the \emph{exponential weighting} dataset $\bar{\mathcal{D}}$ where the better actions are given by higher weights $e^ {A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^{i}) / \beta}$.
+When $\beta$ is sufficiently small, it becomes BC on a dataset processed by \emph{binary filtering} $\mathds{1}[A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^{i}) > 0]$ where $\mathds{1}$ is the indicator function.
+This provides an ideal alternative for improving $\boldsymbol{\mu}$ without access to the exact probability of the sampled action $a^i\sim \mu^i(\cdot|s,\boldsymbol{a}^{1:i-1})$, there being convenient for grounding close-sourced LLMs.
+Inspired by the \emph{binary filtering}, we develop a novel feedback mechanism, wherein the main idea is to convert the filter $\mathds{1}[A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^{i}) > \epsilon \geq 0]$ into the feedback of LLM-proposed plans with their corresponding scores $A_{\boldsymbol{\mu}}^{i}(s, \boldsymbol{a}^{1:i-1}, a^{i})$ for refining the plans. Based on different types of advantages, we design two algorithms for plan refinement: \emph{ReAd-S} and \emph{ReAd-J}.
+The process of prompting and refinement is depicted in Figure \ref{fig:refine}.
+
+\begin{figure*}[t]
+\vskip -0.05in
+\begin{center}
+\centerline{
+\includegraphics[width=1.05\columnwidth]{FIG/refining-process-3.pdf}}
+\caption{An overview of prompting and refinement. For each timestep $t$, the LLM planner is given the history, which contains states, actions, and advantages, and is prompted to generate a plan with the highest advantage. The pre-trained critic is used to evaluate the score of the generated action $\mathbb{S}_{\rm ReAd}(a_t^i)$. If $\mathbb{S}_{\rm ReAd}(a_t^i)<\epsilon$, the failed plan is used as a prompt, and the LLM planer is asked to refine the policy until the $\mathbb{S}_{\rm ReAd}(a_t^i) > \epsilon$. The (refined) action is used to interact with the environment, and the LLM planner is processed in the next step.}
+\label{fig:refine}
+\end{center}
+\end{figure*}
+
+\textbf{Prompting and Refinement for \emph{ReAd-S}.}
+For each time step, we initialize an empty action-set $\boldsymbol{a}_t = \{\}$ and follow the order of $[1,\ldots,n]$ for agents in planning.
+For planning action $a^i_t$ of agent $i$ at state $s_t$, 
+the process of \emph{ReAd-S} contains two parts. (\romannumeral1) \textbf{Prompting as Optimizing.} An LLM planner is given the history of advantages of previous state-action pairs, i.e., $\mathcal{H}=\{(s,(\boldsymbol{a}^{1:i-1},a^i),A_{\boldsymbol{\mu}}^{i}(s,\boldsymbol{a}^{1:i-1}, a^i))\}$, and is prompted to \emph{choose an action with the highest advantage} for agent $i$, which recovers the principle of advantage-weighted regression. Leveraging the in-context learning ability, we hope the LLM planner can induce the advantage values of available actions 
+implicitly and choose the action $a^i_t$ with the highest advantage. Such a process is inspired by recent works for LLM as optimizer \cite{yang2023OPRO}, where the agent is prompted to give a plan that optimizes a score function. 
+(\romannumeral2) \textbf{Feedback for Refinement.} Nevertheless, the implicit advantage maximizing can be hard since the number of available actions can be large. Thus, we introduce a refinement process to allow the LLM to refine the policy if an unsatisfactory action 
+is generated. We use the pre-trained critic network $Q_{\theta}^{i_{1:u}}(s, \boldsymbol{a}^{i_{1:u}})$ with parameter $\theta$ to estimate the advantage score of a generated action, as
+\begin{equation*}
+\mathbb{S}_{\rm ReAd-S}(a^i_t) = A_{\theta}^{i}(s_t, \boldsymbol{a}_t^{1:i-1}, a_{t}^{i}) = Q_{\theta}^{1:i}(s_t, \boldsymbol{a}^{1:i-1}_t, a_{t}^{i}) - Q_{\theta}^{1:i-1}(s_t, \boldsymbol{a}^{1:i-1}_t).
+\end{equation*}
+Given a threshold $\epsilon \geq 0$, if the score function is less than the threshold (i.e., $\mathbb{S}_{\rm ReAd-S}(a^i_t)<\epsilon$), we add this failed action to the history $\mathcal{H}$ and prompt the agent to re-plan.
+Such a refinement guarantees embodied agents always take the actions with $A_{\theta}^{i}(s_t, \boldsymbol{a}_t^{1:i-1}, a_{t}^{i}) > \epsilon$, further ensuring monotonic improvements over $\boldsymbol{\pi}_{\rm llm}$.
+It significantly decreases the interaction rounds of agents since the action $a^i_t$ has been evaluated and refined via advantage feedback before execution. In contrast, previous methods like RoCo need to interact with the environment to get physical feedback regardless of the quality of the generated actions. The refined action is added into the action-set $\boldsymbol{a}_t \leftarrow \boldsymbol{a}_t \cup \{a_t^{i}\}$ and we then perform sequential decision for agent $i+1$.
+
+\textbf{Prompting and Refinement for \emph{ReAd-J}.} The planning process of the LLM planner for \emph{ReAd-J} is similar to that of \emph{ReAd-S}. The main difference is the LLM planner for \emph{ReAd-J} is required to give a joint action $\boldsymbol{a}_t$ for all agents at once. Meanwhile, we use the joint advantage function for history prompting with $\mathcal{H}=\{(s,\boldsymbol{a}_t,A_{\boldsymbol{\mu}}(s_t,\boldsymbol{a}_t))\}$ rather than considering the local advantages. The score function is 
+\begin{equation*}
+\mathbb{S}_{\rm ReAd-J}(\boldsymbol{a}_t)
+    = A_\theta(s_t, \boldsymbol{a}_t)= Q_\theta(s_t, \boldsymbol{a}_t) - \nicefrac{1}{\gamma} \:\:Q_\theta(s_t, \boldsymbol{w})
+\end{equation*}
+based on Eq.~\eqref{equ:optimal_1}. The joint plan $\boldsymbol{a}_t$ is refined if it is less than a threshold (i.e., $\mathbb{S}_{\rm ReAd-J}(\boldsymbol{a}_t)<\epsilon$).
+
+
+\section{Related Works}
+
+\textbf{Task Planning with LLMs.} LLMs \cite{chowdhery2023palm,openAI2023GPT,touvron2023llama1,touvron2023llama2} trained on a large-scale corpus exhibits notable reasoning abilities via in-context learning \cite{dong2022survey,abernethy2023mechanism,akyurek2023what}. However, LLMs can also give infeasible plans for embodied agents due to the lack of real-world knowledge. A line of research modifies the open-loop planning framework to a closed-loop one via self-evaluation and reflection. For example, ReAct \cite{yao2023react}, Reflexion \cite{shinn2023reflexion}, and BeamSearch~\cite{xie2023beam} incorporate feedback from an LLM evaluator into prompts after the previous plan is finished. Other works integrate domain knowledge of embodied agents in feedback. For example, RoCo \cite{mandi2023roco} and Inner Monologue \cite{huang2022Monologue} design physical verification such as collision checking, object recognition, and scene description for feedback. DoReMi \cite{guo2023DoReMi} leverages LLM to generate physical constraints, and ViLA \cite{hu2023look} adopts Vision-Language-Model (VLM) as a constraint detector for verification. Another line of research develops advanced reasoning frameworks, including chain-of-thought \cite{wei2023chainofthought,mu2023embodiedgpt} and tree-of-thought \cite{yao2023tree}.
+Works like \cite{zhao2023large,hao2023reasoning} consider LLMs as a world model \cite{ano2023learning} and adopt tree search in planning \cite{hu2023tree}. 
+Other works adopt planning domain definition language (PDDL) for searching in long-horizon problems \cite{silver2023PDDL,liu2023llm+p,zhou2023isr}. 
+Our work lies in closed-loop frameworks but has a novel advantage function in feedback, which is different from self-reflection or physical feedback and does not rely on advanced searching algorithms. 
+
+\textbf{Grounding LLM with RL.} RL with Human Feedback (RLHF) has been used for aligning LLMs with human preference via parameter tuning \cite{dai2023safe,fernandes2023bridging,song2023preference}. In contrast, our work focuses on grounding closed-source LLM with RL via few-shot prompting and closed-loop feedback \cite{zeng2023socratic,wu2023embodied,huang2022zero,lin2023grounded}. Previous works try to integrate RL into LLM planning under the framework tree search \cite{browne2012survey}. For example, FAFA \cite{liu2023RAFA} and TS-LLM \cite{feng2023alphazero} learn an environment model and value function to plan subroutine in MCTS. REX \cite{murthy2023rex} proposes to balance exploration and exploitation in LLM-based MCTS. Other works like SayCan \cite{ahn2022i} and Text2Motion \cite{Kevin2023Motion} adopt a model-free manner by learning value functions to connect LLM knowledge to physical environments. SwiftSage \cite{lin2023swiftsage} performs imitation learning for rapid thinking and LLM for methodical training. Remember~\cite{zhang2023large} learns value functions for LLM to predict $Q$-value via exemplars in prompts and select actions based on $Q$-values. Different from the Remember framework that retrieves similar states from a buffer, we evaluate the advantage function of planned actions via a neural network and follow advantage-weighted regression in prompting. We employ the advantage function in a multi-agent setting, while previous methods focus on single-agent planning. Compared to previous LLM-based multi-agent works that manually design communication, reflection, and reasoning modules \cite{zhang2023proagent,zhang2023building,Shyam2023MA,chen2023MA}, we propose a more principled way by using the sequential advantage function from multi-agent RL for cooperation. 
+
+
+
+\section{Experiments}
+
+We first introduce two multi-agent collaboration environment in \S\ref{section:5-1}. Then we design a series of experiments to compare our approach with baselines in \S\ref{section:5-2}. Finally, we conduct ablation studies and analyze the impact of modules in \S\ref{section:5-3}.
+
+\subsection{Experimental Setup}\label{section:5-1}
+\textbf{DV-RoCoBench.} 
+We present \emph{Difficult Variants of RoCoBench (DV-RoCoBench)} for embodied multi-robot collaboration, which is derived from RoCoBench \cite{mandi2023roco}.
+RoCoBench consists of 6 multi-robot collaboration tasks in a tabletop manipulation environment, typically involving interactive objects that are semantically straightforward to comprehend and reason about for LLMs.
+The tasks encompass a range of collaboration scenarios that necessitate robots' communication and coordination behaviors. Robots receive their observation and select one action from the high-level actions set, which includes diverse functionalities such as WAIT, moving, sweeping, grasping, and dropping, across multiple tasks. The execution of high-level actions is subsequently translated into low-level actions for manipulation. In contrast to RoCoBench, which primarily focuses on tasks with a fixed difficulty level, we select three tasks to enrich the complexity of the benchmark and create the new \emph{DV-RoCoBench}, where each task is tailored to have 4-5 difficulty levels for experiments. 
+
+In the following, we give a brief description of tasks and settings. See \S\ref{env-detail} for details.
+\begin{itemize}[nosep,leftmargin=1em,labelwidth=*,align=left]
+    \item[-] \textbf{Sweep Floor.} Two robot arms need to work together to sweep all the cubes on the table into the bin. The aim is to sweep away the cubes with given colors. We establish 5 difficulty levels based on the number of overall cubes and the target cubes. An LLM planner is more likely to produce fact hallucinations in more difficult settings.
+    \item[-] \textbf{Make Sandwich.} Two robot arms need to stack the ingredients to make a sandwich according to the recipe. Each arm is limited in operating range and cooperation between agents is required. We establish 4 difficulty levels depending on the length of the recipe.
+    \item[-] \textbf{Sort Cubes.} Three robot arms within their operating ranges are required to coordinate and place cubes on the table to their target positions. We establish 5 different difficulty levels based on the distance between the cubes and their target locations.
+\end{itemize}
+
+\textbf{Overcooked-AI.} \emph{Overcooked-AI} \cite{micah2019overcooked_ai} is a fully cooperative multi-agent benchmark environment based on the wildly popular video game Overcooked. In this environment, agents need to deliver soups as fast as possible. Each soup requires placing up to 3 ingredients in a pot, waiting for the soup to cook, and having an agent pick up the soup and deliver it. The environment consists of 5 different kitchen scenarios, covering from low-level motion coordination challenges to high-level strategy coordination challenges. In our experiment, we chose two representative scenarios: \textbf{Cramped Room} and \textbf{Forced Coordination},and set the number of ingredients for making soups as 2 and the timesteps for cooking as 2.
+To enable the computation of the success rate, we modify the task to cook and deliver a soup within a specified number of timesteps.
+Details of the environment are given in \S\ref{overcooked-detail}.
+For quantitative comparisons, we impose the maximum number of environment steps per episode to 15 in \emph{DV-RoCoBench}, 20 in Cramped Room, and 25 in Forced Coordination. And the maximum rounds of re-planning per step is set to 15 for all tasks except for Sort Cubes where it is set to 10.
+
+\textbf{Baseline Methods.} We use GPT-4-Turbo \cite{openAI2023GPT} as the basic LLM policy for all experiments. On both benchmarks, we compare \emph{ReAd-J} with three strong close-loop baselines -- ReAct~\cite{yao2023react}, Reflexion~\cite{shinn2023reflexion} and MindAgent~\cite{gong2023mindagent}, and a planner named Central Plan which instructs the LLM to generate actions for all robots based on the history of all agents. These five methods output agents' plans in a parallel manner.
+In \emph{DV-RoCoBench}, we particularly add one more baseline RoCo \cite{mandi2023roco} which achieves the state-of-the-art performance in RoCoBench \cite{mandi2023roco}, for comparisons with \emph{ReAd-S}. Both of them generate joint plans in a sequential manner.
+Due to the expensive cost of sequential planning with more environment steps in \emph{Overcooked-AI}, we only evaluate the performance of methods that generate joint plans in a parallel manner.
+We provide a detailed comparison with baselines in Table~\ref{prompt-compose} of \S\ref{app:baseline}.
+\textbf{Evaluation Metrics.} We evaluate the performance of algorithms on three metrics that closely resemble that in RoCoBench: (\romannumeral1) \textbf{SR}: the success rate of completing tasks within the limited interaction rounds; (\romannumeral2) \textbf{ES}: the number of interaction steps to the environment taken by the robots to complete the task; (\romannumeral3) \textbf{NQ}: the number of queries to LLMs in completing the task, which measures the efficiency in enquiring LLMs to obtain a feasible plan. An algorithm is better if it has \emph{higher SR, fewer ES, and fewer NQ}. Among these metrics, SR and ES directly reflect the effectiveness of a planner in completing tasks, while NQ can be somewhat trivial since a planner can have much fewer queries to LLM but has a low SR. In contrast, methods that require policy refinement often require more queries to lead to a high SR.
+
+\begin{figure*}[t]
+\vskip -0.6in
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]{FIG/Figure_all.pdf}}
+\caption{
+We report mean SR ($\boldsymbol{\uparrow}$), ES ($\boldsymbol{\downarrow}$), and NQ ($\boldsymbol{\downarrow}$) in 3 tasks with various difficulty levels averaged over 10 random seeds. The detailed score is given in Table \ref{main-result-table-1} of \S\ref{app:main-result}. 
+}
+\label{main-result-figure-1}
+\end{center}
+\end{figure*}
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]{FIG/Figure_all_2.pdf}}
+\caption{
+We report mean SR ($\boldsymbol{\uparrow}$), ES ($\boldsymbol{\downarrow}$), and NQ ($\boldsymbol{\downarrow}$) in two scenarios of \emph{Overcooked-AI} averaged over 10 random seeds. The detailed score is given in Table \ref{main-result-table-2} of \S\ref{app:main-result}.
+}
+\label{main-result-figure-2}
+\end{center}
+\end{figure*}
+
+\subsection{Results} \label{section:5-2}
+\textbf{\emph{ReAd-S} and \emph{ReAd-J} outperform their corresponding strong baselines on all metrics and achieve more efficient LLM grounding.}
+As shown in Figure~\ref{main-result-figure-1}, with the increase of difficulty levels in \emph{DV-RoCoBench}, the performance contrast in SR becomes pronounced gradually. In more difficult settings (e.g., level 4 or 5 in tasks), our approach obtains higher success rates while baseline methods fail to make progress. Meanwhile, \emph{ReAd-S} and \emph{ReAd-J} present lower ES and comparable or even lower NQ on most tasks in \emph{DV-RoCoBench} when compared to their corresponding baselines.
+A lower ES suggests that prompting LLMs to generate actions maximizing the advantages can improve the optimality of the proposed plans because a higher advantage implies the generated action contributes more to accomplishing the task.
+Furthermore, as shown in Figure~\ref{main-result-figure-2}, our methods achieve a significantly higher SR compared with the methods relying on \emph{physical verification} as feedback in \emph{Overcooked-AI}. Due to the heavy coordination challenges inherent to \emph{Overcooked-AI}, LLM-based agents cannot advance toward task completion unless the LLM planner generates highly collaborative plans.
+By replacing the \emph{physical verification} feedback with \emph{advantage function}, we implicitly transfer the understanding and reasoning of the LLMs from semantic comprehension towards the current state of the environment to digesting the numerical relationship.
+As the scenario becomes more challenging for multi-agent collaboration, it is inevitable to involve more redundant information and disturbing components in the environment, which poses a challenge for the LLM planner to capture and reason about the essential part inside the state and physical feedback. In contrast, benefiting from \emph{ReAd} feedback, the LLM planner only needs to concentrate on how to maximize the advantage score no matter how challenging the scenario is. Hence, our approach exhibits superior planning capabilities and better LLM grounding results for embodied tasks.
+
+\textbf{With sudden disturbances towards the environments, the LLM-planner can re-adjust plans rapidly to accomplish the task via \emph{ReAd} feedback.} Since the critic takes both the current state and the proposed actions as input, it endows the LLM planner with not only the foresight to discern whether the action contributes to realizing the goal but also the ability to reschedule the planning quickly when encountering sudden disturbances to the advancement of the task. To evaluate 
+\begin{wraptable}{r}{0.5\columnwidth}
+\vskip -0.15in
+\centering
+\caption{Evaluation results over 10 runs of \emph{ReAd-S} and RoCo and its modified versions on disturbances at timestep $n$. We present the disturbance as resetting the environment. $n = 0$: no resetting.}
+{\scriptsize
+\begin{tabular}{ccccc}
+\toprule
+\multicolumn{1}{l}{}       & Method       & NQ        &  ES      & SR   \\ \midrule
+                           & ReAd-S       & 22.1±1.65    & 8.9±0.28  & 1.0±0.00 
+\\ 
+recipe3                    & RoCo-L       & 44.7±4.90    & 12.0±0.54 & 0.9±0.10 \\
+ $(n = 0)$                 & RoCo-P       & 33.7±3.16    & 11.5±0.95 & 0.8±0.13 \\
+                           & RoCo         & 33.7±3.16    & 11.5±0.95 & 0.8±0.13 
+\\ \midrule
+                           & ReAd-S       & 39.7±5.30   & 10.4±0.34  & 1.0±0.00 
+\\ 
+recipe3                    & RoCo-L       & 55.3±2.63   & 14.1±0.28  & 0.8±0.13 \\
+$(n = 1)$                  & RoCo-P       & 33.6±2.03   & 12.5±0.73  & 0.9±0.10
+\\
+                           & RoCo         & 46.3±3.60   & 13.9±0.43 & 0.7±0.15 
+\\ \midrule
+                           & ReAd-S       & 44.9±4.34   & 12.5±0.34 & 1.0±0.00 
+\\ 
+recipe3                    & RoCo-L       & 53.4±2.28   & 14.8±0.20 & 0.3±0.15  
+\\
+$(n = 2)$                  & RoCo-P       & 35.2±0.98   & 14.3±0.26 & 0.8±0.13
+\\
+                           & RoCo         & 61.2±11.95 & 14.2±0.44 & 0.5±0.16   
+\\ \midrule
+                           & ReAd-S       & 49.1±4.53  & 13.4±0.54  & 1.0±0.0 
+\\ 
+recipe3                    & RoCo-L       & 75.9±6.91  & 15.0±0.00  & 0.0±0.00  \\
+$(n = 3)$                  & RoCo-P       & 40.0±2.94    & 14.3±0.26  & 0.5±0.17
+\\
+                           & RoCo         & 74.8±10.79  & 15.0±0.00 & 0.0±0.00 \\ \bottomrule
+\end{tabular}
+}
+\label{disruption_results}
+\end{wraptable}
+the robustness of the LLM planner, we compare \emph{ReAd-S} and RoCo in extra extended scenarios with unexpected disruptions.
+We select \emph{`recipe3'} (3rd difficulty level in Make Sandwich) that takes a minimum environment step of 8 to accomplish the task. When a disruption occurs at timestep $n \ (0 \leq n < 8, n \in \mathbb{N})$, we reset the task and reinitialize the state without giving any hints about resetting in the prompt and clearing previous history information contained in the prompt. It raises an intractable challenge as the remaining historical information becomes misaligned with the actual situation. The lack of a complete description of the sudden disruption significantly increases the likelihood of the LLM planner proposing erroneous actions.
+To eliminate the influence induced by the different history information utilized between \emph{ReAd-S} and RoCo, we provide two more variants of RoCo as baselines. One uses only the history of the previous round, which we name RoCo-L, while the other is informed with descriptions of the sudden disturbance, which we name RoCo-P.
+The evaluation results are shown in Table \ref{disruption_results}. A larger step $n$ signifies a more severe influence of disturbance. As $n$ increases from 0 to 3, \emph{ReAd-S} consistently outperforms RoCo and its variants on SR and ES. Although RoCo retains a high SR under $n = 1, 2$, it fails to recalibrate the misalignment between the remaining history information and the actual status of the environment, leading to a significant drop in SR when $n = 3$.
+Regardless of what kind of history information RoCo relies on, consistent superior performance demonstrates that \emph{ReAd} feedback alleviates the potentially severe hallucination issue and brings reliable robustness.
+
+\subsection{Ablation Studies}\label{section:5-3}
+\begin{wraptable}{r}{0.45\columnwidth}
+\vskip -0.15in  % -0.15in 不会超出subsection的位置
+\centering
+\captionof{table}{The performance of the multi-step and single-step version of \emph{ReAd-S} and \emph{ReAd-J} on the `Y3\_G3' task. 
+}
+{\scriptsize
+\begin{tabular}{@{}cccc@{}}
+\toprule
+                      & NQ             & ES             & SR          \\ \midrule
+ReAd-J(Multi-Step)    & 16.4±0.54         & 13.4±0.27           & 0.8±0.13       \\
+ReAd-J(Single-Step)   & 19.1±1.25        & 14.1±0.28         & 0.6±0.16        \\ \midrule
+ReAd-S(Multi-Step)    & 31.4±1.11       & 14.0±0.26       & 0.8±0.13     \\
+ReAd-S(Single-Step)   & 35.1±1.16       & 14.5±0.17       & 0.6±0.16      \\ \bottomrule
+\end{tabular}
+}
+\label{open_loop_results}
+\end{wraptable}
+
+\textbf{Plan refinement has a remarkable impact on grounding LLM.}
+The advantage score plays two roles in ReAd: (\romannumeral1) \emph{prompting as optimizing} for generating actions with the highest score, and (\romannumeral2) \emph{feedback as refinement} for re-plan if the score is less than a threshold. The policy refinement makes our method a \emph{multi-step} process since the action can be refined for multi-rounds. To investigate the role of plan refinement, we adopt a \emph{single-step} version by removing the second role, which forms an open-loop plan generation without refinement. In Table \ref{open_loop_results}, we denote the original version as \emph{Multi-Step} and the open-loop version as \emph{Single-Step}. We pick the most difficult variant \emph{`Y3\_G3'} in Sweep Floor and observe a marginal decline in both efficiency and success rates in \emph{Single-Step}.
+It suggests that plan refinement that ensures monotonic policy improvement is crucial for performance. 
+Interestingly, \emph{ReAd-J(Single-Step)} can also achieve a considerable success rate of 60\%, which is dramatically comparable or superior to the baselines with \emph{physical verification} as feedback.
+
+
+
+\section{Conclusion}
+
+
+We have presented \emph{ReAd} as a novel LLM feedback for closed-loop planning in multi-agent collaboration. We provide theoretical motivation based on multi-agent advantage-weighted regression. The LLM is prompted to generate plans with high advantages and perform policy refinement. The experiments show that our method outperforms physical feedback with improved efficiency. The advantage feedback can handle sudden disturbances and is crucial for refinement. Future works include extending the advantage feedback to multi-objective and safe planning scenarios.
+
+
+

@@ -1,0 +1,355 @@
+\title{Arithmetic Transformers Can Length-Generalize in Both Operand Length and Count}
+
+\begin{abstract}
+\makeatletter\phantomsection\def\@currentlabel{abstract}\makeatother % without this line, the result of backref is "(document)"
+Transformers often struggle with \emph{length generalization}, meaning they fail to generalize to sequences longer than those encountered during training.
+While arithmetic tasks are commonly used to study length generalization, certain tasks are considered notoriously difficult, e.g., multi-operand addition (requiring generalization over both the number of operands and their lengths) and multiplication (requiring generalization over both operand lengths). 
+In this work, we achieve approximately 2--3$\times$ length generalization on both tasks, which is the first such achievement in arithmetic Transformers.
+We design task-specific scratchpads enabling the model to focus on a fixed number of tokens per each next-token prediction step, and apply multi-level versions of \emph{Position Coupling}~\citep{cho2024position,mcleish2024transformers} to let Transformers know the right position to attend to.
+On the theory side, we prove that a 1-layer Transformer using our method can solve multi-operand addition, up to operand length and operand count that are exponential in embedding dimension.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\allowdisplaybreaks
+
+\input{Figure/code/addition_method_compare_main}
+Transformer-based language models \citep{vaswani2017attention} have become a cornerstone of modern deep learning in recent years \citep{thoppilan2022lamda,chowdhery2023palm,gemini2023gemini,openai2023gpt}. 
+Despite their seemingly limitless capabilities, they often struggle with a critical limitation known as the \emph{length generalization} problem, meaning that the model does not perform well on input sequences longer than those encountered during training \citep{anil2022exploring,deletang2023neural,zhang2023unveiling,press2022train,wu2023reasoning}.
+Length generalization has recently dragged the attention of many researchers because of the following two aspects: (1) the failure in length generalization corroborates the models' fundamental limitation that they may not genuinely understand the task-solving algorithm but may rely on short-cut learning that is only applicable to sequences of trained lengths; (2) improving length generalization can automatically extend the applicability of the models in both memory-efficient and computation-efficient way.
+
+As manageable and intriguing test beds, arithmetic and algorithmic tasks are commonly used to study the capabilities (including length generalization) of Transformers \citep{kim2021have,nogueira2021investigating,kazemnejad2023impact,zhou2024what,lee2024teaching,zhou2024transformers,cho2024position,mcleish2024transformers,fan2024looped}.
+In this paper, we mainly focus on arithmetic tasks, specifically integer addition and multiplication.
+While humans can easily generalize to longer examples of these tasks, recent works have shown that Transformers often struggle in length generalization, and various approaches have been proposed to help Transformers learn the true underlying mechanisms that solve addition and multiplication \citep{zhou2024what,cho2024position,mcleish2024transformers}. As a noteworthy recent achievement, independent works by \citet{cho2024position} and \citet{mcleish2024transformers} propose \emph{Position Coupling}, which is a modification of the standard absolute position encoding (APE) that assigns the same position ID to digits of the same significance. Position Coupling demonstrates a remarkable length generalization performance on two-operand addition and $N$-digit $\times$ $2$-digit multiplication (i.e., the length of the second operand is fixed).
+
+While recent work has made significant progress on the addition task, the scope has largely been limited to cases where there are only two operands. Similarly, studies on multiplication have achieved length generalization for just one operand, while the other is kept fixed at a small length.
+Notably, for addition, no research has demonstrated significant generalization in terms of the \emph{number of operands}---such as training on problems with up to four operands (e.g., $A + B + C + D$) and successfully extending to problems with more than four. 
+Likewise, for multiplication, none has achieved length generalization for \emph{both operands} simultaneously (see e.g., Figure~5 of \citet{mcleish2024transformers}).
+
+In this paper, we address these challenges by proposing a combination of two techniques: scratchpad~\citep{nye2021show} and Position Coupling~\citep{cho2024position,mcleish2024transformers}.
+By equipping decoder-only Transformers with a scratchpad (an appended sequence that contains multi-step reasoning) and integrating a bi-level extension of Position Coupling, we demonstrate that Transformers can learn to solve multi-operand addition, generalizing in terms of both the number of operands and their lengths. Similarly, for multiplication, we employ a scratchpad and a tri-level Position Coupling to train Transformers that length-generalize in terms of both operand lengths.
+
+Admittedly, the two key components---scratchpads and Position Coupling---are not entirely new, and they have been adopted in existing approaches to improve length generalization in arithmetic tasks. Here, our key contribution is to combine them in a complementary way that empowers Transformers to achieve tasks that were previously considered very challenging.
+We use scratchpads to eliminate the need to attend to an increasing number of positions as the number of operands increases. By spelling out the intermediate outcomes on scratchpads, it now suffices for the model to attend to only a constant number of tokens at each inference step. Position Coupling then offers the model information about the ``right'' position to attend to, thereby assisting the model to quickly learn the correct inference mechanism from data.
+
+\subsection{Summary of Contributions}
+
+\begin{itemize}[leftmargin=20pt]
+    \item We first tackle multi-operand addition (\cref{sec:multi_operand_addition}).
+    By employing a scratchpad with bi-level Position Coupling, we achieve length generalization not only with respect to the length of each operand but also extrapolate to greater numbers of operands.
+    Our trained model substantially improves the generalization performance (with median exact-match accuracy $\ge$ 90.0\%) for addition tasks involving up to 30 operands of lengths up to 30, even though it was trained on samples with a maximum of 10 digits and 10 operands.
+    In contrast, models trained with either NoPE~\citep{kazemnejad2023impact} or FIRE~\citep{li2024functional} completely fail to solve for 13 operands of length 13, even with the help of the scratchpad (\cref{fig:addition_method_compare_main}).
+    \item By refining the scratchpad and employing tri-level Position Coupling, we achieve length generalization for multiplication tasks where both operands can vary in length (\cref{sec:multiplication}).
+    The trained models are capable of multiplying (up to) 20-digit integers times (up to) 15-digit integers with median exact-match accuracy $\geq$ 78.55\%, even though it was trained on samples with a maximum of 10 digits for each operand (\cref{fig:multiplication_method_compare}).
+    \item We develop a theoretical construction of a small (1-layer, 4-head) Transformer model, equipped with a scratchpad and bi-level Position Coupling, capable of solving multi-operand addition (\cref{thm:addition}).
+    Our construction can handle problems involving both exponentially long operands and exponentially many operands.
+    The use of a scratchpad is crucial, as it enables this shallow architecture to accurately predict the next tokens by ensuring that the model only needs to attend to two number tokens at each inference step, which we also verify in trained Transformers (\cref{fig:attention_pattern_addition}).
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+
+Throughout the paper, we use next-token prediction (NTP) with decoder-only Transformers to solve every task. 
+Each task can be represented as a set of sequences of the form ``[query]=[response]'', where the goal of the model is to correctly infer the \emph{response} from a given \emph{query} via NTP, starting from a sequence ``[query]=''.
+Since we are studying arithmetic tasks, we treat a single digit (between 0--9) as a single token, but there are other non-digit tokens such as `+', `$\times$' (or interchangeably `\texttt{*}'), `=', `$\rightarrow$' (or interchangeably `\texttt{>}'), and special tokens like beginning-/end-of-sequence (BOS/EOS) and padding (PAD) tokens.\footnote{If possible, we ignore the details about the BOS/EOS/PAD tokens for simple representations.}
+Moreover, because of the deterministic nature of arithmetic/algorithmic tasks, we only use greedy decoding for every NTP step.
+In the following subsections, we provide an explanation of the background underlying our approach.
+For a detailed discussion of related works, we refer the reader to \cref{sec:relatedworks}.
+
+\subsection{Scratchpad}
+
+To enhance the advanced reasoning abilities of Transformer models, several heuristic-driven methods for data formatting have been introduced.
+One such technique is \emph{scratchpad}~\citep{nye2021show}, an auxiliary intermediate sequence of tokens before arriving at the final answer.
+Training the model with a scratchpad allows the model to store and reference intermediate states when predicting subsequent tokens.
+This approach has been shown to enhance both in-distribution and out-of-distribution performance in tasks such as integer addition and code execution.
+\citet{zhou2024what} further validate these findings in the parity task, explaining that the effectiveness of the scratchpad lies in its ability to simplify next-token prediction.
+\subsection{Position Embedding for Length Generalization}
+\paragraph{Length Generalization for Arithmetic and PE.}
+Various position embedding methods have been explored to enhance the Transformer models' length generalization capability.
+\citet{kazemnejad2023impact} claim that NoPE can achieve better length generalization in downstream tasks than widely-used position embedding (PE) techniques, including ALiBi \citep{press2022train}, Rotary \citep{su2024roformer}, APE \citep{vaswani2017attention}, and T5's Relative PE \citep{raffel2020exploring}.
+However, recent progress in the literature has introduced novel PE methods \citep{ruoss2023randomized,cho2024position,mcleish2024transformers} or suggested the use of existing ones \citep{jelassi2023length,zhou2024transformers}. 
+
+\paragraph{Position Coupling.}
+A recent line of research \citep{cho2024position,mcleish2024transformers} proposes Position Coupling (also called ``Abacus'' Embedding), a learned APE by assigning the position ID to each token in a structured manner that captures the inherent symmetry of the target task.
+In this approach, tokens in the input sequence are grouped, and each group of tokens is assigned a sequence of consecutive numbers as position IDs.
+For example, in the integer addition task, identical position IDs are assigned to the tokens that represent the same digit place across numbers in both the query and the response.
+
+
+
+\section{Warm-up: Length Generalization on Parity Task}
+
+
+Before moving on to our findings about addition and multiplication tasks, we begin with a warm-up example: the \emph{parity} task.
+Given a binary sequence as a query, the goal of the parity task is to output $1$ if the query contains an odd number of $1$'s, and $0$ otherwise.
+Despite its simple description, it is well known that Transformers struggle with achieving length generalization for the parity task \citep{anil2022exploring,deletang2023neural,kazemnejad2023impact,zhou2024what,hahn2024why}.
+In this section, we will demonstrate an enhanced length generalization performance on the parity task by applying Position Coupling on top of the input sequence with a properly designed scratchpad.
+
+\subsection{Method: Scratchpad \& Position Coupling}
+
+\input{Figure/code/parity_scratchpad_example}
+We follow the scratchpad format proposed by \citet{anil2022exploring}.
+\cref{fig:parity_scratchpad_example} illustrates an example of an input sequence consisting of a 4-bit parity problem (with query \texttt{0101}) and its scratchpad (\texttt{0110}).
+The idea of this scratchpad is to record every intermediate parity state as a given binary query is processed starting from the leftmost token.
+That is, the $k$-th bit in the scratchpad is the parity of the subsequence containing the first $k$ bits of the query.
+Then, the final rightmost token of the scratchpad is the desired answer for the parity task.
+Recording the process of solving the parity task is beneficial in the following two points:
+
+\begin{enumerate}[leftmargin=15pt]
+    \item \emph{It makes the task-solving algorithm simpler.} The first token the scratchpad is just a copy of the first token in the query sequence. Also, we do not need to directly solve the intermediate parity task at once in order to infer the $k$-th ($k>1$) intermediate token in the scratchpad; instead, it is enough to focus on the $k$-th token of the query and the $(k-1)$-th token in the scratchpad and then sum them up modulo 2 (see \cref{fig:parity_scratchpad_example}).
+    \item \emph{It is straightforward to apply Position Coupling onto the input sequence with the scratchpad.} The scratchpad generates a natural positional correspondence between the query and the response. Thus, we can assign the same position ID to the $k$-th query token and $k$-th scratchpad token, for example, \texttt{234512345} in the example depicted in \cref{fig:parity_scratchpad_example}.
+\end{enumerate}
+
+To sum up, such a scratchpad simplifies the task by allowing the model to perform step-by-step reasoning without having to attend to an \emph{increasing} number of query tokens until it solves the full task, while Position Coupling (applied on top of the scratchpad) can explicitly let the model know ``where it should focus on'' to perform every step of the reasoning.
+We thus can expect a synergy effect when we combine these two methods, and our experiments do align with this expectation.
+
+\subsection{Experiments \& Discussion}
+
+\input{Figure/code/parity_experiment}
+To test the efficacy of the combination of scratchpad and Position Coupling, we compare its performance against two other configurations: a model trained without positional embedding and without any scratchpad (NoPE), and a model trained without positional embedding but with a scratchpad (NoPE + scratchpad).
+The result is presented in \cref{fig:parity_experiment}.
+Please refer to \cref{tab:hyperparam_parity} for detailed experimental details.
+
+We observe that NoPE exhibits poor performance without a scratchpad: even for in-distribution test samples, the results are no better than random guessing.
+However, when the scratchpad is employed, the model perfectly solves the in-distribution samples and achieves perfect length generalization up to 30-bit queries.
+Notably, when Position Coupling is applied alongside the scratchpad, the model perfectly generalizes up to 100-bit queries.
+From these observations, we conclude that for the parity task, (1)~the scratchpad helps length generalization, albeit not significantly, and (2)~the combination of the scratchpad with Position Coupling substantially boosts the model's length extrapolation capability.
+
+
+\section{Length Generalization on Multi-Operand Addition Task}
+
+\label{sec:multi_operand_addition}
+
+In the previous section, we demonstrated the potential of integrating the scratchpad with Position Coupling for better length generalization.
+We now aim to evaluate the effectiveness of this approach on a more challenging task.
+Specifically, we address the problem of achieving length generalization in integer addition tasks, where \emph{operand length and count can both get longer at test time}.
+Indeed, there already is a length extrapolation result on additions with more than two operands: the ``triple addition'' task presented by \citet{cho2024position}.
+However, their approach still requires the number of operands to be fixed (e.g., 3), leaving the challenge of generalizing to varying operand counts an open question.
+In this section, we demonstrate that this challenge can be overcome by employing a scratchpad in conjunction with a carefully designed multi-level Position Coupling.
+
+\subsection{Method: Scratchpad \& Bi-level Position Coupling}
+\label{sec:multi_operand_addition_method}
+
+\input{Figure/code/scratchpad_coupling_example_multiadd}
+
+\paragraph{Scratchpad for Multi-operand Addition.} Similar to the parity task, we store the intermediate cumulative sums in the scratchpad, as in \cref{fig:multiadd_example}.
+It makes the algorithm of solving the multi-operand addition task easier.
+This is because a model can obtain the $k$-th intermediate cumulative sum by adding exactly \emph{two} numbers: the most recently generated ($(k-1)$-th) intermediate sum and the $k$-th number/operand in the query.
+As a minor detail, we start the scratchpad with zeros in order to make the task-solving rule more clear and consistent.%
+\footnote{This is not a must. We empirically observed that directly starting the scratchpad with the (zero-padded, reversed) first operand does not hurt the performance of moderate-sized models. We choose to start the scratchpads with all zeros for the sake of simplicity in our theoretical construction, later presented in \cref{sec:multi_operand_addition_theory}.
+In fact, for multiplication (\cref{sec:multiplication}) we adopt a scratchpad that does not start with all zeros.} 
+
+\paragraph{Bi-level Position coupling.} Now we motivate the usage of the bi-level Position Coupling: each token has two levels of position IDs, whose couplings happen only in each level.%
+\footnote{It means that even if a token has a position ID $p$ at level 1 and another token has the same position ID $p$ at level 2, these two tokens are not necessarily coupled by these position IDs.}
+As observed in prior works, adding two numbers can be successfully done by coupling the digits of the same significance in every number by assigning the identical position ID.
+The resulting position IDs (level 1) are as in \texttt{PosID1} in \cref{fig:multiadd_example}.
+However, this is not enough because we want to know which specific numbers we should add together, while the numbers are not very distinguishable solely with level-1 position IDs.
+Our mitigation is to add another level of position IDs%
+\footnote{It is worth mentioning that multi-level position ID has already been studied \citep{he2024two,zhang2024hirope}. The implementation detail is very different because their approaches involve relative PEs.}
+that can distinguish properly between numbers.
+Combining the idea of Position Coupling again, we naturally couple two numbers of the same \emph{order} in query and response: the resulting position IDs (level 2) is as in \texttt{PosID2} in \cref{fig:multiadd_example}.
+In short, the model will choose which numbers it should add based on level-2 position IDs, and perform two-operand addition with the help of level-1 position IDs.
+Lastly, when we implement multi-level position IDs for each token, we use separate PE modules for different levels of position IDs to map them to PE vectors, and then add them all to the token embedding vector.
+
+\paragraph{Input formats.} There are additional design choices regarding the input sequence format: \emph{zero-padding} and \emph{number reversing}.
+We apply zero-padding to every number in both query and response to ensure that the length of every number is identical to the maximum possible length of the final answer, depending on the operand count.
+For example, if we add 11 operands of length at most $n\ge 2$, the final answer can have a length $n+2$ (because $99\times11=1089$), so we match the length of the numbers to be $n+2$ with zero-padding.
+In addition, we reverse all numbers in the scratchpad (i.e., intermediate cumulative sums). This is a quite natural choice since even humans do additions starting from the least significant digit \citep{nogueira2021investigating,lee2024teaching}.
+
+\subsection{Experimental Setup}
+
+Given two integers $a\le b$, we denote by $[a:b]:=\{a, a+1, \cdots, b\}$ a set of consecutive integers.
+
+\paragraph{Data Sampling.}
+For the sake of simplicity of notation, we denote a training set by $\gS_A(n,m)$, consisting of addition problems where each operand can have at most $n$ digits and the operand count can range from $2$ to $m$. 
+The dataset consists of two equally sized chunks. 
+In the first chunk, for each sample, the number of operands is uniformly sampled from $[2:m]$, and the length of each operand is independently sampled from $[1:n]$; this means that the operands can differ in length. Based on the chosen length (e.g., 4), each operand is then randomly generated (e.g., from $[1000:9999])$. 
+In the second chunk, for each sample, the number of operands is still uniformly sampled from $[2:m]$, but this time, the lengths of all operands are identical. The operand length is sampled from $[1:n]$, and all operands are randomly chosen to be of the chosen length.
+We use $\gS_A(10, 10)$ with size 500,000 as the baseline training set.
+
+We also denote a test set by $\gT_A(n,m)$, consisting of a single component.
+In each sample, both the number of operands and the length of each operand are \emph{fixed} specifically at $m$ and $n$, respectively.
+For model evaluation, we draw a $30 \times 29$ grid heatmap and assess the performance of the model on the test set $\gT_A(i, j)$ of size 1,000 for every entry $(i, j) \in [1:30]\times[2:30]$.
+
+\paragraph{Model and Training.}
+Our baseline model is a 6-layer 8-head decoder-only Transformers with embedding dimension 1024 (with approximately 63M parameters), trained from scratch.
+We do not incorporate weight decay or dropout.
+Further details can be found in \cref{tab:hyperparam_addition}.
+
+\paragraph{Random Offset of Position IDs During Training.}
+An important detail about the training procedure is that we randomly choose offsets (for each level of position IDs) and add them to every position ID in each training sample.
+This is to promote learning all the position embedding vectors as evenly as possible, and this training-time random assignment of position IDs is already used in prior works for similar reasons \citep{cho2024position,ruoss2023randomized,mcleish2024transformers}.
+As \citet{cho2024position} and \citet{mcleish2024transformers} did, we pre-define the maximum position IDs (for each level) as hyperparameters, which naturally determines a maximum testable range of operand lengths and count.
+See \cref{tab:hyperparam_addition} for our choice of the maximum position IDs.
+
+\subsection{Experimental Results}
+
+\paragraph{Position Coupling and Scratchpad Together Enable Powerful Length Generalization.}
+We trained models using 3 different position embedding methods---Position Coupling, NoPE, and FIRE---both with and without the scratchpad.
+The implementation details of Position Coupling differ by the presence/absence of scratchpad: if we use scratchpads, we apply the bi-level Position Coupling explained in \cref{sec:multi_operand_addition_method}; if not, we use a simple single-level Position Coupling that matches the position IDs for digits at the same significance in all numbers, which is also used for ``triple addition'' task in \citet{cho2024position}.
+The results are showcased in \cref{fig:addition_method_compare_main}.
+We measure the exact-match accuracy for correct inference of the whole response, including scratchpad if it is used.
+The top 3 heatmaps in the figure, which are the results without scratchpads, indicate that these models can only generalize to in-distribution samples and exhibit near-zero exact-match accuracy on out-of-distribution samples.
+Next, when either NoPE or FIRE is combined with the scratchpad, the models show a slight improvement in terms of generalizable operand lengths and counts.
+They barely solve problems involving 13 numbers, each 12 digits long.
+In contrast, the combination of the scratchpad and Position Coupling enables much stronger length generalization, achieving non-trivial accuracy even on test samples involving 30 numbers, each with 30 digits.
+We emphasize that such problems are extremely difficult, as the model must accurately predict a total of 1023 consecutive tokens to solve the problem.
+
+\input{Figure/code/addition_inputformat}
+
+\paragraph{Effect of Zero-padding.}
+\cref{fig:addition_inputformat} exhibits the exact-match accuracies for models trained on input sequences with scratchpad but \emph{without zero-padding} in both the query and the response.
+Although there is a moderate degradation in overall performance, the models still generalize well with respect to an increased number of operands.
+Also, they maintain reasonable accuracy for operand lengths below 25 digits.
+It implies that, although zero-padding aids in enhancing length extrapolation capability, it is not an absolute necessity.
+
+\paragraph{Effect of Trained Length.}
+We compare the models trained on different lengths: $\gS_A(7,7)$, $\gS_A(10,10)$, and $\gS_A(13,13)$.
+The results are presented in \cref{fig:addition_distribution}.
+As expected, the model's ability to generalize to longer sequences improves as the training data covers a wider range of lengths.
+
+\input{Figure/code/addition_distribution}
+
+\paragraph{Effect of Architecture.}
+To study whether our approach can be applied across various depth/width configurations, we explore the performance as we vary the number of layers and heads.
+Specifically, we tested configurations with 1, 2, 4, and 6 layers, and 2, 4, and 8 heads, resulting in 12 distinct configurations.
+The results are illustrated in \cref{fig:addition_architecture} (see \cref{sec:additionalexperiments}).
+
+It turns out that 1-layer 2-head models perform the worst.
+While they could generalize across operand counts, they immediately fail for longer digits.
+The remaining 11 configurations exhibit significantly better performance than the 1-layer 2-head models.
+It is noteworthy that networks with only four heads in total (1-layer 4-head or 2-layer 2-head) show surprisingly high accuracy, even outperforming our baseline (6-layer 8-head).
+In particular, the 2-layer 2-head models achieve at least 90.0\% exact-match accuracy (median over 6 trials) across every combination $(n,m)\in [1\!:\!30]\times [2\!:\!30]$, whereas the 6-layer 8-head models achieve 67.8\% or above.
+This remarkable performance of small models is also aligned with our theoretical construction, later elaborated in \cref{sec:multi_operand_addition_theory}.
+However, we do not observe an overall trend between the accuracy and the number of layers/heads, as the optimal number of heads varied depending on the number of layers, and vice versa. We suspect that this is due to the stochasticity of the training process.
+
+\subsection{Theoretical Analysis on 1-Layer Transformer}
+\label{sec:multi_operand_addition_theory}
+
+In this section, we explain the success of our approach by providing a theoretical analysis in \cref{thm:addition}.
+Specifically, we construct a Transformer model (whose normalization layer is omitted for simplicity) that is capable of solving the addition task involving both exponentially long operands and exponentially large number of operands when our approach is applied.
+Furthermore, the constructed model is a 1-layer 4-head Transformer, which supports the experimental results presented in \cref{fig:addition_architecture}: the 1-layer 4-head model succeeds, but the 1-layer 2-head model fails.
+\begin{restatable}{theorem}{thmaddition}
+\label{thm:addition}
+    With a proper input format, scratchpad, and Position Coupling, there exists a 1-layer 4-head decoder-only Transformer that solves the multi-operand integer addition task involving up to $m$ operands each with up to $n$ digits.
+    Here, a sufficient choice of the embedding dimension is $d = \gO(\log_2(m+1)+\log_2(n+1))$.
+\end{restatable}
+
+\cref{thm:addition} above states that a 1-layer 4-head model is \emph{enough} to solve multi-operand additions involving exponentially many and exponentially long operands (in terms of the embedding dimensions), especially when a proper scratchpad and Position Coupling are both applied.
+Since it is a sufficiency result, it implies that larger architectures (with more layers and attention heads) are capable of solving the same task as well.
+Its detailed constructive proof is provided in \cref{sec:construction}.
+We also remark that our theorem extends Theorem 5.1 of \citet{cho2024position}, which can only handle addition problems with a fixed number of operands.
+
+To illustrate our key idea, consider an example problem $057+048+096=000\rightarrow 750 \rightarrow 501 \rightarrow 102$ (with the output reversed).
+First, consider the case without a scratchpad: $057+048+096=102$.
+To predict the least significant digit of the final answer, $1$, the model must attend to the least significant digits of all the operands, which are $7$, $8$, and $6$, in the query sequence.
+In a scenario with $m$ operands, the model would need to attend to $m$ digits.
+This property---the number of tokens the model has to attend to increases with the number of operands---makes the construction difficult.
+
+With a scratchpad, the process becomes a lot simpler.
+Instead of attending to every least significant digit of all operands, the model only needs to attend to two tokens: e.g., $6$ from $096$ and $5$ from $501$.
+Importantly, by utilizing the intermediate states stored in the scratchpad, the number of tokens the model needs to attend to remains fixed, even if the number of operands gets larger.
+
+\paragraph{Scrutinizing the Attention Patterns of Trained Transformer.}
+Surprisingly, our insight into the advantage of our scratchpad and its synergy with Position Coupling can be visually verified, supporting the significance of our method and theoretical finding. 
+We probe the attention matrices of Transformer models trained with a practical Adam optimizer.
+We visualize the lower-triangular row-stochastic matrix $\softmax(\mQ\mK^\top)$ as a heatmap in \cref{fig:attention_pattern_addition}. 
+Thus, if you want to know the distribution of softmax logits over key tokens for an NTP at the $q$-th query token, you should look at $q$-th \emph{row} of the heatmap; the brighter the point, the more the model attends to that key token position.
+
+\input{Figure/code/attention_pattern_addition}
+
+Now first look at the attention pattern extracted from a model trained with our scratchpad and bi-level Position Coupling (\cref{fig:attn_scratchpad_coupling}).
+Since the scratchpad takes up about half of the total input sequence length, we may focus on the bottom half of the heatmap.
+The attention pattern tells us that, for most of the NTP step, the model focuses on at most a fixed number of (say two) previous tokens: one on the short anti-diagonal line (corresponding to the token in the query sequence) and one on the long diagonal line (corresponding to the token in scratchpad).
+This property is strikingly similar to our theoretical construction of the attention pattern.
+
+On the other hand, let us move on to the attention pattern extracted from a model trained with FIRE but without scratchpad (\cref{fig:attn_noscratchpad_fire}).
+In this case, the length of the response is of the same scale as a single operand,
+so you may focus on the last few rows of the heatmap.
+Contrarily from the previous case, and as we expected, the eleven anti-diagonal lines in the attention pattern reveal that the model actually focuses on as many previous token positions as the number of operands every time it performs NTP!
+
+
+
+\section{Length Generalization on Integer Multiplication Task}
+
+\label{sec:multiplication}
+
+Achieving length generalization for multiplication when both multiplier and multiplicand can vary in length has long been recognized as a challenging problem.
+To our knowledge, prior works on the multiplication task \citep{jelassi2023length,duan2023interpolation,mcleish2024transformers,fan2024looped} have never successfully addressed this issue.
+In this section, we demonstrate the combination of Position Coupling and the scratchpad can serve as a powerful solution to this obstacle.
+
+\subsection{Method: Two-stage Scratchpad \& Tri-level Position Coupling}
+
+\input{Figure/code/scratchpad_coupling_example_multiplication}
+
+Different from the addition tasks, every digit of the first operand interacts with every digit of the second operand. This makes it difficult to come up with a single-stage cumulative scratchpad.
+To achieve strong length generalization in multiplication, we take a step beyond the simple cumulative scratchpads.
+We propose a \emph{two-stage scratchpad}, motivated by an observation that the usual (human) computation of integer multiplication can be decomposed into two stages: (i) a series of $M$-digit $\times$ $1$-digit multiplications and (ii) a (linearly shifted variant of) multi-operand addition.
+\cref{fig:multiplication_example_inputformat} illustrates a concrete example of our two-stage scratchpad and tri-level position ID assignment rule, and
+\cref{fig:multiplication_example_usualcalculation} explains the intuitive motivation of the scratchpad. 
+Note that we concatenate two stages of scratchpad with a `=' token, which the model is required to infer as well as other digit/symbol tokens. 
+To elaborate, let us write two operands as $A$ (with $M$ digits) and $B$ (with $N$ digits).
+
+\paragraph{Stage 1: $M$-digit$\times$1-digit Multiplications.}
+The first stage of the scratchpad consists of $N$ numbers: the first number is the product between $A$ and the least significant digit (LSD) of $B$, the second number is the product between $A$ and the second LSD of $B$, and so on. We reverse all the $N$ numbers, zero-pad them to match the length, and concatenate them in order with `+' tokens in between.
+Regarding the position ID assignment, observe that it is natural to (i) couple a $k$-th LSD of $A$ with $k$-th LSDs in every number of the scratchpad stage 1 and to (ii) couple the $k$-th LSD in $B$ with every digit in the $k$-th number of the scratchpad stage 1.
+This is reflected to \texttt{PosID1} and \texttt{PosID2} in \cref{fig:multiplication_example_inputformat}, until the second `$=$' token.
+
+\paragraph{Stage 2: (Modified) Multi-Operand Addition.}
+The second stage is basically the same as a familiar multi-operand addition, with a slight difference in that we shift the operands to the left one by one as we add them sequentially.
+It can be done by viewing the LSD of the $k$-th number in stage 1 (i.e., the leftmost digit, as it is already reversed) as the $k$-th LSD when solving stage 2. This is semantically equivalent to converting ``\texttt{581+470+333}'' in the stage 1 into ``\texttt{58100+04700+00333}''.
+Because of this, we introduce a totally new level of position ID (level-3) that reflects this change of viewpoint on digit significance.
+Luckily, we can reuse the level-2 position IDs since they only distinguish the numbers.
+As a result, we expect the model to utilize level-3 and 2 of position IDs to solve the second stage.
+In this spirit, the position ID assignment rule is similar to that introduced in \cref{sec:multi_operand_addition_method}, reflected to \texttt{PosID2} and \texttt{PosID3} in \cref{fig:multiplication_example_inputformat}. Lastly, we fill in unnecessary slots with 0's.
+
+\subsection{Experimental Setup}
+
+\paragraph{Data Sampling.}
+We denote the training set by $\gS_M(n, m)$, consisting of multiplication problems where the first operand can have up to $n$ digits and the second operand can have up to $m$ digits. 
+Specifically, the length of the first operand is uniformly selected from $[1:n]$.
+The first operand is then randomly generated based on the chosen length.
+The second operand is chosen similarly, but its length is selected from $[1:m]$.
+We use $\gS_M(10,10)$ as the baseline training set.
+
+The test set $\gT_M(n,m)$ is constructed similarly, with the primary difference being that the lengths of both operands are strictly fixed at $n$ and $m$.
+For evaluation, we create a $30 \times 30$ grid heatmap and assess the performance of the model on the test set $\gT_M(i,j)$ for every entry $(i,j) \in [1:30] \times [1:30]$.
+
+\paragraph{Model and Training.}
+We employ the same baseline architecture as in the addition task
+(See \cref{tab:hyperparam_multiplication}). 
+
+\subsection{Experimental Results}
+
+We evaluate models trained with 3 different position embedding methods, both with and without the scratchpad, and present the results in \cref{fig:multiplication_method_compare}.
+For models using Position Coupling without the scratchpad, we adopted a similar position ID assignment scheme proposed for solving $N$-digit $\times$ $2$-digit multiplication in \citet{cho2024position}.
+When the scratchpad is not applied, which corresponds to the top 3 plots, none of the models manage to generalize, even on in-distribution samples.
+When NoPE or FIRE is employed in conjunction with the scratchpad, the models show limited length generalization, achieving non-trivial accuracy on multiplication between two 12-digit integers.
+However, the combination of Position Coupling and the scratchpad again dominates others.
+
+Interestingly, Position Coupling without the scratchpad shows weak length generalization when one of the operands is short.
+This should not come as a surprise, as \citet{cho2024position} already demonstrate that a model trained with Position Coupling alone can generalize to $N$-digit $\times$ $2$-digit multiplication task: models trained on $N \le 40$ can generalize to $N \ge 100$.
+\input{Figure/code/multiplication_method_compare}
+
+
+\section{Conclusion}
+
+
+While length generalization in arithmetic Transformers has drawn a lot of attention, especially on operand length for the addition, the ability to generalize on operand counts is considered a difficult challenge and has not been explored yet.
+To address this challenge, we propose a combination of two techniques: scratchpad and Position Coupling.
+We show that a Transformer trained on problems involving 1--10 digit integers with 1--10 operands can solve addition tasks with up to 30 operands, each being as long as 30 digits.
+We also theoretically construct a 1-layer Transformer model capable of adding exponentially many operands with exponentially long integers when our approach is applied.
+Finally, we demonstrate the effectiveness of our approach for length generalization in the multiplication task, where both operand lengths can vary.
+
+\paragraph{Limitation.}
+One limitation of our approach is that it is only applicable to tasks whose structure is well-defined and can be effectively encoded by scratchpad and Position Coupling.
+This leaves us with two directions for future work.
+The first direction is to establish a clear principle for employing scratchpad and Position Coupling when the task structure is known, as the current design choice heavily relies on intuition.
+The second is to extend our method to the cases where the task structure is implicit or even entirely unknown.
+
+
+

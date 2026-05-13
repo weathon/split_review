@@ -1,8 +1,8 @@
 # MMTryon: Multi-Modal Multi-Reference Control for High-Quality Fashion Generation
 
 - Decision: Reject
-- Avg Score: 3.00
-- Scores: 8, 1, 0, 3
+- Avg Score: 7.00
+- Scores: 8, 10, 3
 
 ## Abstract
 This paper introduces MMTryon, a multi-modal multi-reference VIrtual Try-ON (VITON) framework, which can generate high-quality compositional try-on results by taking a text instruction and multiple garment images as inputs. Our MMTryon addresses three problems overlooked in prior literature: 1) \textbf{Support of multiple try-on items.} Existing methods are commonly designed for single-item try-on tasks (e.g., upper/lower garments, dresses).

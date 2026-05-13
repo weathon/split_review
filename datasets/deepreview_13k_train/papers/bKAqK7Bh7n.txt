@@ -1,0 +1,292 @@
+\title{MF-LAL: Drug Compound Generation Using Multi-Fidelity Latent Space Active Learning}
+
+\begin{abstract}
+
+Current generative models for drug discovery primarily use molecular docking as an oracle to guide the generation of active compounds. However, such models are often not useful in practice because even compounds with high docking scores do not consistently show experimental activity. More accurate methods for activity prediction exist, such as molecular dynamics based binding free energy calculations, but they are too computationally expensive to use in a generative model. To address this challenge, we propose Multi-Fidelity Latent space Active Learning (MF-LAL), a generative modeling framework that integrates a set of oracles with varying cost-accuracy tradeoffs. Unlike previous approaches that separately learn the surrogate model and generative model, MF-LAL combines the generative and multi-fidelity surrogate models into a single framework, allowing for more accurate activity prediction and higher quality samples. We train MF-LAL with a novel active learning algorithm to further reduce computational cost. Our experiments on two disease-relevant proteins show that MF-LAL produces compounds with significantly better binding free energy scores than other single and multi-fidelity approaches.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Generative models for \textit{de novo} drug design have gained significant interest in machine learning for their promised ability to quickly generate new compounds for specific applications. However, generating compounds with real-world biological activity remains a fundamental challenge \citep{handa2023difficulty, coley2020autonomous}. One of the main difficulties is the computational evaluation of compound-protein binding affinities. The generated compounds are often highly novel, so an activity predictor trained with existing experimental data is insufficient due to poor out-of-distribution generalization \citep{chatterjee2023improving, ji2022drugood}. Instead, physics-based methods that model  3D interactions between compound and target are commonly used.
+
+Due to its speed, molecular docking is the prevalent physics-based method to evaluate novel compounds by generative models \citep{eckmann2022limo, jeon2020autonomous, lee2023exploring, noh2022path, fu2022reinforced, peng2022pocket2mol, guan20233d, guan2023decompdiff}. However, docking is a relatively poor predictor of activity \citep{pinzi2019molecular, handa2023difficulty, coley2020autonomous, feng2022absolute}, so it would be desirable to apply more accurate binding free energy calculation techniques \citep{pinzi2019molecular, feng2022absolute}. These techniques, based on molecular dynamics simulations, are currently considered the most reliable approach to predict affinity \citep{moore2023automated, cournia2021free}. However, they have not been used by generative models due to their high computational cost \citep{thomas2023integrating}, with a single compound-protein pair taking hours to days to simulate on a powerful computer \citep{wan2020hit}. Thus, neither docking nor binding free energy techniques alone can guide the real-world application of generative models.
+
+Multi-fidelity surrogate models aim to fuse multiple data sources as oracles spanning a range of accuracy and cost \citep{fernandez2016review}.%, and are widely used in scientific fields for surrogate modeling and uncertainty quantification \citep{brevault2020overview}. 
+They are frequently learned using an active learning approach, where a model selects or generates queries that it is most uncertain about to send to a chosen oracle \citep{ren2021survey}. The results from the oracle are then added to the training data of the model. We will focus on ``query synthesis'' approaches \citep{angluin1988queries}, where the model generates its own queries to send to the oracles, speeding up learning compared to approaches that query oracles with samples from a fixed candidate set.
+
+Combining docking (low fidelity) and binding free energy (high fidelity) using multi-fidelity surrogate models holds promise to make generative models more practical. Yet, the use of multi-fidelity methods in drug discovery has been limited. Prior work from \cite{hernandez2023multi} uses a generative model to generate query compounds with high acquisition function values computed by a \textit{separate} multi-fidelity surrogate model. However, since we want to generate query compounds to send to oracles at multiple fidelity levels, the distribution of optimal query compounds may differ across fidelities. A separate generative model is not aware of such differences across fidelity levels, hence it cannot send queries to the multi-fidelity oracles efficiently.
+
+We aim to address the problem of multi-fidelity generation with Multi-Fidelity Latent space Active Learning (MF-LAL), an integrated framework for compound generation using multi-fidelity active learning. Instead of separating the generative model and surrogate model, we perform surrogate modeling and generation together at each fidelity level using a sequence of hierarchical latent spaces. This improves the quality of generated queries because there is a separate latent space and decoder specialized for each fidelity, and improves surrogate modeling and inter-fidelity information passing because each latent space can be organized for predicting at just that level. We use both docking and binding free energy methods as oracles in our multi-fidelity environment to achieve a favorable trade-off between cost and accuracy. In summary,
+
+\begin{itemize}
+    \item we introduce a novel multi-fidelity surrogate and generative modeling framework, \textbf{MF-LAL}, which integrates data from multiple fidelity levels to generate high-quality samples at the highest fidelity (binding free energy).
+    \item we employ an active learning approach with a novel query generation technique that ensures compounds generated at higher fidelities also scored well at lower fidelities, improving the quality of generated samples.
+    \item we evaluate MF-LAL and baseline methods on a real-world problem setting involving optimizing the binding free energy of compounds against two disease-relevant human proteins, and find that MF-LAL generates compounds with significantly better scores than baselines.
+\end{itemize}
+
+
+\section{Related Work}
+
+\subsection{Molecular generative models}
+Generative models in drug discovery have gained much interest for their ability to quickly generate compounds with desired properties \citep{paul2021artificial}. Early works \citep{jin2018junction, gomez2018automatic, you2018graph} focus on properties such as the octanol-water partition coefficient (logP) or quantitative estimate of drug-likeness (QED), which are of very limited practical utility \citep{coley2020autonomous, xie2021mars}. More recently, there has been an understanding that the binding affinity to a targeted protein is much more relevant for practical drug discovery \citep{xie2021mars, eckmann2022limo, fu2022reinforced}.
+
+One approach to guide generative models in optimizing compound binding affinity is to use an oracle for compound evaluation. This oracle can be applied to reinforcement learning \citep{jeon2020autonomous, fu2022reinforced, mazuz2023molecule}, VAEs \citep{eckmann2022limo, noh2022path}, genetic algorithms \citep{spiegel2020autogrow4, fu2022reinforced}, diffusion models \citep{lee2023exploring, hoogeboom2022equivariant, wu2024diff}, or other generative frameworks \cite{zhu2024sample}. All of them use docking software, such as AutoDock \citep{morris2009autodock4}, as the oracle, because it is the only reasonably fast option. However, docking is known to be inaccurate \citep{pinzi2019molecular}, and compounds with high docking scores do not consistently show experimental activity \citep{handa2023difficulty, coley2020autonomous, feng2022absolute}. 
+
+Molecular dynamics-based binding free energy calculations are much more accurate than docking \citep{moore2023automated, cournia2021free}, but have not yet been applied to \textit{de novo} generative drug design due to their high computational cost \citep{thomas2023integrating}. While \citet{ghanakota2020combining} use binding free energy calculations in combination with a molecular generative model, they focus on the optimization of an existing known lead compound. This allows them to rely on much cheaper relative binding free energy calculations, as opposed to the absolute binding free energy (ABFE) calculations needed for \textit{de novo} design \citep{cournia2017relative}.
+
+Structure-based generative models are trained on 3D structures of protein-ligand pairs, and aim to predict a 3D ligand that fits in a given protein pocket with high binding affinity. Techniques include autoregressive generation \citep{peng2022pocket2mol} and diffusion modeling \citep{guan20233d, guan2023decompdiff}. Despite not needing an oracle like docking during the generation process, the generated compounds are still evaluated with docking as a post-processing step. This means structure-based generative models do not avoid the issue of inaccurate binding affinity prediction.
+\subsection{Multi-fidelity surrogate modeling}
+Multi-fidelity modeling methods aim to fuse multiple data sources of variable accuracy and cost \citep{fernandez2016review}, and are widely used in scientific fields for surrogate modeling and uncertainty quantification \citep{brevault2020overview}. A popular choice of surrogate model is a Gaussian process (GP), which performs well in low data settings and produces well-calibrated uncertainty estimates \citep{brevault2020overview}. One such technique to apply GPs to multi-fidelity modeling is described by \citet{wu2020practical}, where a downsampling kernel is used to output predictions at each fidelity level. Other multi-fidelity surrogate modeling approaches utilize neural processes \citep{wang2020mfpc, wu2022multi, wu2023disentangled, niu2024multi} and ordinary differential equations \citep{li2022infinite} as an alternative to GPs.
+
+Multi-fidelity models are frequently trained in an active learning fashion, where one uses an estimate of a model's uncertainty to most efficiently acquire more datapoints from an oracle \citep{ren2021survey}. In the multi-fidelity setting, this means iteratively querying across both the sampling space and each different fidelity oracle \citep{li2020deep, hernandez2023multi}. Traditional active learning involves selecting from a fixed candidate set with the highest acquisition function value to query oracles with, which limits the training set to only existing samples. It also limits how much the model can learn with each query, since the maximally informative sample may not be present in the candidate set. Query synthesis approaches \citep{angluin1988queries} have been proposed to avoid this problem by using a generative model to generate new queries. \citet{hernandez2023multi} have applied these ideas to drug discovery problems by training a generative model to optimize the acquisition function computed by a separate multi-fidelity surrogate model, which does not take into account the different distributions of optimal query compounds at each fidelity.
+
+
+\section{MF-LAL}
+
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/mflal.pdf}
+    \caption{\textbf{Overview of Multi-Fidelity Latent space Active Learning (MF-LAL).}}
+    \label{fig-overview}
+\end{figure*}
+
+We introduce Multi-Fidelity Latent space Active Learning (MF-LAL), an integrated framework for compound generation using multi-fidelity Bayesian active learning. An overview of our framework is shown in Figure \ref{fig-overview}. We encode molecules into a hierarchy of latent spaces (left panel), one for each fidelity, and learn surrogates that predict the oracle output based on the latent vectors (middle panel). These oracles are used to reverse optimize in the latent spaces to generate new compounds with high predicted scores. The generated molecules are fed to an oracle at a chosen fidelity in an active learning loop, the output of which is used to re-train the latent representation and surrogate models (right panel). After training, we use the surrogates to reverse optimize in the highest fidelity latent space and generate compounds with high property scores at the highest fidelity.
+
+\subsection{Learning multi-fidelity latent representations}
+\paragraph{Problem setup.} 
+A multi-fidelity environment consists of a set of oracles $\{f_1, \dots, f_k, \dots, f_K\}$ that predict a property of interest, where the accuracy and cost of the predictions increase with the fidelity level $k$. We have a multi-fidelity dataset $\mathcal{D}$ consisting of $K$ distinct sets of molecules, one for each fidelity, $\mathcal{D} = \{ \{x_1^{(i)}, y_1^{(i)}\}_{i=1}^{N_1}, \dots, %\{x_k^{(i)}, y_k^{(i)}\}_{i=1}^{N_k},\dots, 
+\{x_K^{(i)}, y_K^{(i)}\}_{i=1}^{N_K} \}$. Each $y_k^{(i)} = f_k(x_k^{(i)})$ is the result from querying oracle $k$ with molecule $x_k^{(i)}$. The molecules are drawn from unknown distributions $p^*_1, \dots, p^*_K$. We aim to approximate these distributions using generative models $p_{\theta_1}, \dots, p_{\theta_K}$ with parameters $\theta_1, \dots, \theta_K$. Note that $p_1^* \neq \dots \neq p_K^*$, meaning we must learn separate generative models for each fidelity level, as opposed to previous approaches that learn a single generative model for all fidelities.
+
+\paragraph{Latent representation.}
+To learn the generative models, we first learn an encoding of the input molecule to the lowest fidelity latent space. Specifically, we use a single probabilistic encoder $q_\phi$ parameterized by $\phi$ that encodes a molecule $x$ into mean and variance vectors $\mu_1$ and $\sigma_1$. The latent vector $\mathbf{z}_1 \sim \mathcal{N}(\mu_1, \sigma_1)$, corresponding to the first (lowest) fidelity, is sampled from the resulting distribution. Since we want a separate latent space at each fidelity level, we define a set of probabilistic networks $h_{\xi_1}(\mathbf{z}_1), \dots, h_{\xi_{K-1}}(\mathbf{z}_{K-1})$ with parameters $\xi_1, \dots, \xi_{K-1}$ that pass information between latent spaces. Specifically, $h_{\xi_k}$ takes the vector $\mathbf{z}_k$ as input and outputs a mean and variance vector in the subsequent latent space, $\mu_{k+1}, \sigma_{k+1}$. We sample from this distribution to obtain latent vector $\mathbf{z}_{k+1}$, i.e. $ \mathbf{z}_{k+1} \sim \mathcal{N}(\mu_{k+1}, \sigma_{k+1})$. We also define a set of probabilistic decoder networks $p_{\theta_1}(\cdot | \mathbf{z}_1), \dots, p_{\theta_K}(\cdot | \mathbf{z}_K)$ to reconstruct the original molecule $x$ from the latent vectors. %, i.e. $\forall k \in \{1..K\} p_{\theta_k}(\cdot | \mathbf{z}_k) \approx x$. 
+The use of a specialized decoder for each fidelity level improves reconstruction quality compared to previous methods that only use one, thus making the generated samples more tailored for their fidelity level.
+
+We represent molecules using SELFIES strings \citep{krenn2020self}. The encoder and decoder of MF-LAL are fully-connected neural networks that use a flattened, one-hot encoded SELFIES string. See Table \ref{ablation-table} for comparison with other encoder and decoder designs.
+
+\paragraph{Surrogate modeling.}
+In order to generate molecules with high property scores, we aim to learn differentiable surrogates $\hat{f}_1, \dots, \hat{f}_{K}$ that approximate the oracles and use them for reverse optimization in the latent spaces. Each surrogate $\hat{f}_k$ maps from its corresponding latent vector $\mathbf{z}_k$ to an estimate of $f_k$. We use gradient-based optimization to find a point in a given latent space that has a high property score predicted by the surrogate, which can then be decoded to a molecule \citep{gomez2018automatic}. The $h_{\xi_k}$ networks, which pass information between latent spaces, allow us to re-use information learned about the molecule's binding properties at lower fidelities to aid in prediction at the higher fidelities without having to re-learn it using large amounts of high-fidelity data. This is because training the surrogate models organize each latent space \citep{tevosyan2022improving} for property prediction at that level, and so the latent vectors contain information about the binding properties useful for predicting the oracle output that can then be passed to higher fidelities. Additionally, the use of separate latent spaces for each fidelity level, as opposed to previous approaches that use only a single latent space shared across all levels, improves surrogate modeling performance because each latent space can be organized for prediction at just that level.
+
+We use stochastic variational Gaussian process models (SVGPs, \citep{hensman2015scalable}) with parameters $\lambda_1, \dots, \lambda_K$ for the surrogates. We chose SVGPs for their speed of training and ability to train with minibatches. Specifically, $\hat{f}_k$ is given by $\hat{f}_k \sim \mathcal{GP}(m_{\lambda_k}(x), \Sigma_{\lambda_k}(x,x'))$ where $m(x)$ and $\Sigma(x,x')$ are the mean and covariance kernels of the SVGP. To train the model, we jointly minimize the evidence lower bound (ELBO) \citep{kingma2013auto} of the latent encodings and marginal log likelihood (MLL) of the GP models. Given a training molecule $x$ and associated oracle output $y$ at fidelity $k$, we minimize
+
+\begin{equation}
+    \label{eq-loss}
+    \begin{split}
+        L(\phi, \xi_{k-1}, \theta_k, \lambda_k; k, x, y) &= \mathbb{E}_{\mathbf{z}_k \sim g(\cdot | x)} \log \frac{p_{\theta_k}(x | \mathbf{z}_k)}{g(\mathbf{z}_k | x)} + \int p(y | \hat{f}_k(x)) p(\hat{f}_k(x) | x) d\hat{f}_k,\\
+        &\text{where } g(\mathbf{z}_k | x) = 
+\begin{cases} 
+q_\phi(\mathbf{z}_k | x) & \text{if } k=1\\
+h_{\xi_{k-1}}(\mathbf{z}_{k-1}) & \text{else}\\
+\end{cases}\\
+    \end{split}
+\end{equation}
+where the first term is the ELBO and the second is the MLL of the GP. While the loss is only evaluated at fidelity $k$, it is backpropagated through to all lower fidelities. Additionally, in our implementation, we approximate the MLL GP loss using the ELBO \citep{hensman2015scalable} for improved scalability.
+\subsection{Bayesian active learning for sample-efficient training} 
+\label{sec-al}
+
+\begin{algorithm}
+\caption{Active learning for MF-LAL}
+\label{al-algorithm}
+\begin{algorithmic}[1]
+
+\Require a multi-fidelity dataset $\mathcal{D}$ consisting of a set of initial training examples, number of compounds to generate to generate at lower fidelities $M$
+
+\State $k \gets 1$
+\While{computational budget is not exceeded}
+\State train model on data $\mathcal{D}$ (Eq. \ref{eq-loss})
+\State $x \gets$ generateHighScoringCompounds($k$, $M$, 1) (Algorithm \ref{gen-algorithm})
+\State query $f_k(x)$ and save result in $y$ %$y \gets f_k(x)$
+\State $\mathcal{D}_k \gets \mathcal{D}_k \cup \{(x, y)\}$
+\If{$k < K$ \textbf{and} $\Sigma_{\lambda_k}(q_\phi(x)) < \gamma_k$}
+\State $k \gets k+1$
+\EndIf
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+Training a multi-fidelity surrogate model requires significant computational resources, especially to gather data at the highest fidelity level. Instead of passively collecting training data, we develop a Bayesian active learning approach to efficiently query the oracles, allowing us to make fewer queries to the most expensive oracles. As show in Algorithm \ref{al-algorithm}, our active learning cycle consists of  first generating a molecule to query at a chosen fidelity, querying the oracle to obtain the property score, appending the result to the dataset, and then retraining the model. We repeat the process until some computational budget is reached. 
+
+Similar to \cite{kandasamy2016multi}, we start with only querying the oracle at the lowest fidelity level $k=1$ and increase to higher fidelities when the model's uncertainty falls below certain thresholds. We use the posterior variance of the GP surrogate $\Sigma_{\lambda_k}$ to measure the model's uncertainty. Specifically, during active learning, we repeatedly generate a latent vector $\mathbf{z}_k$ at fidelity $k$ that decodes to a query compound. If $\Sigma_{\lambda_k}(\mathbf{z}_k) < \gamma_k$, where $\gamma_k$ is the uncertainty threshold, then we permanently increment $k$ by one for all subsequent queries. Otherwise, $k$ remains the same. Once at the highest fidelity, we keep running active learning until some computational budget is reached. We use this stepwise approach to ensure all surrogates have enough training data to make accurate predictions in high property areas of the latent spaces, thus leading to high property compounds being generated.
+
+We generate query molecules from the latent space using the upper confidence bound \citep{auer2002using} as the acquisition function. The method we use to generate molecules is described later in Section \ref{sec-generation}. To ensure that generated compounds remain similar to the training set of drug-like molecules, we also add an L2 regularization term on the latent vector. The acquisition function is thus given by
+
+\begin{equation}
+    \label{eq-ucb}
+    a(\mathbf{z}^{(i)}_k, k) = m_{\lambda_k}(\mathbf{z}^{(i)}_k) + \beta \Sigma_{\lambda_k}(\mathbf{z}^{(i)}_k) - ||\mathbf{z}^{(i)}_k||^2_2
+\end{equation}
+
+where $\mathbf{z}^{(i)}_k$ is a point in latent space $k$ and $\beta$ is an exploration hyperparameter. $m$ and $\Sigma$ are the mean and covariance kernels of the GP surrogate. We set $\beta=1$ during active learning, and $\beta=0$ after during inference to only focus on the most promising compounds.
+\subsection{Generating molecules with high property scores}
+\label{sec-generation}
+
+\begin{algorithm}
+\caption{MF-LAL molecule generation procedure}
+\label{gen-algorithm}
+\begin{algorithmic}[1]
+
+\Require fidelity $k$ to optimize compounds for, exploration/exploitation hyperparameter $\beta$, number of compounds to generate at lower fidelities $M$
+
+\Procedure{generateHighScoringCompounds}{$k$, $M$, $\beta$}
+
+\Procedure{getTopLatentPoints}{$k$, $M$, $\beta$}
+\For{$i$ in $1..M$}
+\State initialize $\mathbf{z}^{(i)}_k \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+\If{k == 1}
+\State find $\mathbf{z}^{(i)}_k$ that maximizes Eq. \ref{eq-ucb} via gradient descent
+\Else
+\State $\mathbf{z}^{(1)}_{k-1}, \dots, \mathbf{z}^{(M)}_{k-1} \gets \text{getTopLatentPoints}(k-1, M, \beta)$
+\For{$j$ in $1..M$}
+\State $\mu^{(j)}_k, \sigma^{(j)}_k \gets h_{\xi_{k-1}}(\mathbf{z}^{(j)}_{k-1})$
+\EndFor
+\State find $\mathbf{z}^{(i)}_k$ that maximizes Eq. \ref{eq-ucb} + Eq. \ref{eq-likelihood} via gradient descent
+\EndIf
+\EndFor
+\State \textbf{return} $\mathbf{z}^{(1)}_k, \dots, \mathbf{z}^{(M)}_k$
+\EndProcedure
+\State $\mathbf{z}^{(1)}_k, \dots, \mathbf{z}^{(M)}_k \gets \text{getTopLatentPoints}(k, M, \beta)$
+\For{$i$ in $1..M$}
+\State $x^{(i)} \sim p_{\theta_k}(\cdot | \mathbf{z}^{(i)}_k)$
+\EndFor
+\State \textbf{return} $x^{(1)}, \dots, x^{(M)} \textbf{ if } k < K \textbf{ else } x^{(1)}$ \Comment{only need one compound at highest fidelity}
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+Our goal is to generate compounds at fidelity $k$ that maximize some generation objective. To accomplish this, we perform gradient-based optimization to find a point $\mathbf{z}_k$ in the $k$th latent space that maximizes the generation objective, and then decode $\mathbf{z}_k$ into a molecule using $p_{\theta_k}$. For our generation objective, we do not want to simply maximize $\hat{f}_k$, but instead the upper confidence bound (Eq. \ref{eq-ucb}) to ensure exploration during active learning. In addition, we also introduce a novel likelihood-based term to the generation objective that encourages the model to only sample compounds at higher fidelities that also scored well at the lower fidelities. Specifically, when generating a molecule at fidelity $k$, we maximize the likelihood that the molecule would also be generated at fidelity $k-1$ with a high property score. This additional term greatly restricts the area of the chemical space explored by the high fidelity oracles, reducing the computational cost wasted on non-promising areas and making the use of high-cost oracles feasible. It also means the higher fidelity latent spaces encode a more limited distribution of compounds, improving the quality of samples generated from those latent spaces. Indeed, we show that the likelihood term is critical for strong performance (Table \ref{ablation-table}).
+
+To compute the likelihood of a point $\mathbf{z}_k$ at fidelity $k$, we first generate a set of $M$ high-scoring compounds at fidelity $k-1$. Next, we map those points to a sum of Gaussians in the $k$th latent space using $h_{\xi_{k-1}}$, giving us a set of $M$ parameters $\{(\mu^{(j)}_k, \sigma^{(j)}_k)\}_{j=1}^M$. We then measure the likelihood of point $\mathbf{z}_k$ in the generated sum of Gaussians distribution. This guarantees that the compounds generated in latent space $k$ are also likely to have been generated in $k-1$ with high scores. Thus, we effectively reduce the size of the chemical space that must be explored at fidelity $k$ to only compounds that have already shown promise at the lower fidelities. Mathematically, maximizing the likelihood of a point $\mathbf{z}^{(i)}_k$ in latent space $k$ is equivalent to maximizing the probability density function evaluated at that point:
+\begin{equation}
+    \label{eq-likelihood}
+    P \left(\mathbf{z}^{(i)}_k | \{(\mu^{(j)}_k, \sigma^{(j)}_k)\}_{j=1}^M \right) = \sum_{j=1}^M \frac{1}{\sqrt{2 \pi (\sigma^{(j)}_k)^2}} \exp \left( -\frac{(\mathbf{z}^{(i)}_k - \mu^{(j)}_k)^2}{2(\sigma^{(j)}_k)^2} \right)
+\end{equation}
+
+The full generation algorithm is detailed in Algorithm \ref{gen-algorithm}. In our implementation, we vectorize optimization across all $M$ latent space points simultaneously. In order to encourage diversity in generated compounds, we also add a term to the generation objective that measures the average pairwise cosine similarity between the $M$ points, and aim to minimize it:
+
+\begin{equation}
+    \frac{1}{M^2} \sum_{i=1}^M \sum_{j=1}^M s(\mathbf{z}^{(i)}_k, \mathbf{z}^{(j)}_k)
+\end{equation}
+where $s(A,B)$ is the cosine similarity between vectors $A$ and $B$.
+
+
+\section{Experiments}
+
+\label{sec-experiment}
+
+\subsection{Experimental setup}
+We define a multi-fidelity environment for binding affinity which uses four oracles, each of which takes a molecule as input and outputs an estimate of its binding affinity with increasing accuracy:
+\begin{enumerate}
+    \item \textbf{Linear regression} ($f_1$). Simple linear regression model trained on experimental data from the BRD4(2)/c-MET target from BindingDB \citep{liu2007bindingdb} to predict the $K_i$, a measure of binding affinity. Morgan fingerprints are used to represent the molecule.
+    \item \textbf{AutoDock4} ($f_2$) \citep{morris2009autodock4}. Uses 3D geometric and charge information from the protein and compound to estimate the binding energy.
+    \item \textbf{Ensembled AutoDock4} ($f_3$) \citep{morris2009autodock4}. Same as above, except we dock the compound into the binding pockets of eight BRD4/five c-MET cocrystal structures that were solved with different known ligands, and then take the minimum predicted energy. This ensemble approach is generally more accurate than using a single protein structure \citep{amaro2018ensemble}.
+    \item \textbf{Absolute binding free energy (ABFE)} ($f_4$) \citep{heinzelmann2021automation}. A binding free energy method applicable to \textit{de novo} drug discovery that uses molecular dynamics simulations to accurately predict the binding energy.
+\end{enumerate}
+
+We target the BRD4(2) and c-MET proteins (PDB 5UF0 and 5EOB), both of which are implicated in human cancer development, although through different biological mechanisms. We chose these targets because ABFE is already well-validated on them and known to have good agreement with experimental data \citep{heinzelmann2021automation}.
+
+ To compare models, we run each in an active learning loop using a fixed computational budget of 7 days, and then generate 15 unique compounds at the highest fidelity predicted to have the best scores. We then run these compounds through ABFE and compare their scores.
+
+\subsection{Baselines}
+We compare MF-LAL with the following baselines:
+
+\begin{itemize}
+    \item \textbf{SF-VAE (only ABFE / only docking)} \citep{gomez2018automatic}. Uses a simple single-fidelity GP as a surrogate model that is used to guide optimization in the latent space of a vanilla VAE, representing a simple single-fidelity approach. This consists of two separate baselines, one where the GP is trained only on ABFE data and one where it is trained on only docking data.
+    \item \textbf{REINVENT (only ABFE / only docking)} \citep{olivecrona2017molecular}. An RL-based molecular generation technique which we use to optimize ABFE, and separately, docking score. Represents a simple single-fidelity approach using a modern generative model.
+    \item \textbf{VAE + 4x SF-GP}. Uses a vanilla VAE model except with four independent GP surrogates, one for each fidelity, all using the single latent space as input. To be contrasted with MF-LAL, which uses multiple connected latent spaces instead of a single one. 
+    \item \textbf{VAE + MF-GP}. Similar to above, except using a single multi-fidelity GP model \citep{wu2020practical} instead of four independent single-fidelity GP models.
+    \item \textbf{MF-AL-GFN} \citep{hernandez2023multi} GFlowNet generative model used to optimize the predicted score from a multi-fidelity GP model. This baseline represents the state of the art in multi-fidelity generation, where generative and surrogate models are separated.
+    \item \textbf{MF-AL-PPO} \citep{hernandez2023multi}. Same as above except using the PPO RL algorithm instead of a GFlowNet as the generative model.
+    \item \textbf{Pocket2Mol} \citep{peng2022pocket2mol}. 3D structure-based drug design model that takes a protein pocket as input and outputs a 3D molecule via diffusion. Unlike the other methods, does not use any binding affinity oracle during generation.
+\end{itemize}
+
+The first two baselines are single-fidelity methods, where we use both only ABFE and only docking as the single fidelity. The next four baselines, as well as MF-LAL, are multi-fidelity. Pocket2Mol does not utilize any oracle during generation. Evaluation of generated compounds from all baselines is done with ABFE.
+
+\subsection{Results}
+
+\begin{table*}
+\vskip-0.2in
+\setlength{\tabcolsep}{3pt}
+\caption{\textbf{Evaluation of generated compounds at highest fidelity.} The mean and top 3 ABFE values are shown for 15 compounds sampled from each method after active learning for 7 days.}
+\label{table-gen-compounds}
+\begin{center}
+\begin{small}
+\begin{sc}
+\begin{tabular}{l|cccc|cccc}
+\toprule
+Method & \multicolumn{4}{c}{BRD4(2) ABFE (kcal/mol)} &\multicolumn{4}{c}{c-MET ABFE (kcal/mol)}\\
+& Mean $\pm$ s.d. & 1st & 2nd & 3rd & Mean $\pm$ s.d. & 1st & 2nd & 3rd\\
+\midrule
+SF-VAE (only ABFE) & -0.9 $\pm$ 2.7 & -5.7 & -2.9 & -2.9 & -1.2 $\pm$ 3.0 & -4.4 & -3.9 & -3.1\\
+SF-VAE (only docking) & -3.1 $\pm$ 2.8 & -6.1 & -5.3 & -4.8 & -2.8 $\pm$ 3.4 & -5.9 & -5.8 & -5.1\\
+REINVENT (only ABFE) & -3.9 $\pm$ 3.4 & -8.7 & -8.3 & -8.2 & -2.9 $\pm$ 3.7 & -6.5 & -5.8 & -5.1\\
+REINVENT (only docking) & -3.1 $\pm$ 4.9 & -11.0 & -6.2 & -5.7 & -2.6 $\pm$ 5.0 & -8.0 & -6.8 & -5.9\\
+VAE + 4x SF-GP & -2.3 $\pm$ 3.1 & -8.0 & -5.5 & -5.3 & -1.8 $\pm$ 2.5 & -6.3 & -5.9 & -5.1\\
+VAE + MF-GP & -1.3 $\pm$ 3.3 & -4.9 & -3.1 & -2.0 & -3.3 $\pm$ 2.9 & -9.7 & \textbf{-7.7} & -4.2\\
+MF-AL-GFN & -2.5 $\pm$ 2.2 & -6.5 & -5.8 & -5.1 & -3.1 $\pm$ 1.8 & -5.5 & -4.5 & -4.1\\
+MF-AL-PPO & -2.8 $\pm$ 2.5 & -9.2 & -6.5 & -5.2 & -4.0 $\pm$ 2.4 & -7.0 & -6.6 & -5.8\\
+Pocket2Mol & -4.8 $\pm$ 4.6 & -9.8 & -9.8 & -9.0 & -2.2 $\pm$ 4.2 & -4.5 & -3.9 & -3.2\\
+\midrule
+MF-LAL (ours) & \textbf{-6.3} $\pm$ 4.0 & \textbf{-12.0} & \textbf{-11.3} & \textbf{-10.2} & \textbf{-6.5} $\pm$ 3.2 & \textbf{-12.9} & \textbf{-7.7} & \textbf{-6.5}\\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\end{table*}
+
+\begin{figure}
+\begin{center}
+\centerline{\includegraphics[width=0.8\textwidth]{fig/mols.pdf}}
+\caption{\textbf{Visualization of MF-LAL generated molecules.} The top 3 molecules and associated ABFE scores are shown for both the BRD4(2) (top row) and c-MET (bottom row) targets.
+}
+\label{gen-mols}
+\end{center}
+\end{figure}
+Table \ref{table-gen-compounds} reports the average and top 3 ABFE scores of 15 compounds generated by MF-LAL, as well as those generated by the baseline methods, following active learning for 7 days. We ran each method separately for two targets, BRD4(2) and c-MET. We filtered generated compounds such that all had QED \citep{bickerton2012quantifying} $>0.4$, SAscore \citep{ertl2009estimation} $<4$, and no rings with $\geq 7$ atoms. We also only allowed compounds that fit these criteria to be queried during active learning. We filtered compounds that did not meet the criteria after generation, instead of performing multi-objective optimization, because most generated compounds from single-objective optimization already had a QED/SAscore in the range of typical drug compounds \citep{bickerton2012quantifying, ertl2009estimation}.
+
+We find that the average ABFE scores of the compounds generated by MF-LAL, as well as those of the top three compounds, are significantly better (lower kcal/mol) than the corresponding scores of compounds generated by the baseline methods for both targets. The difference in average ABFE score (predicted binding free energy) between MF-LAL and the top baseline is -1.5 kcal/mol for BRD4(2) and -2.5 kcal/mol for c-MET, which are significant margins. Thus, our method outperforms both single and multi-fidelity techniques, as well as a 3D structure-based method (Pocket2Mol, \cite{peng2022pocket2mol}) that does not use any binding affinity oracle. This suggests MF-LAL is most capable at generating compounds with real-world activity, since binding free energies computed with ABFE are the gold standard prediction method. Note, too, that the multi-fidelity techniques other than MF-LAL performed mostly similarly to the single-fidelity methods. This suggests that successfully taking advantage of multiple fidelities requires an architecture which, like that used in MF-LAL, is tailored to generating compounds for multiple fidelity oracles.
+
+The molecular structures of the top 3 compounds generated by MF-LAL for both targets are shown in Figure \ref{gen-mols}. The compounds are structurally diverse, and none of them have close similars in the training set or in large datasets like PubChem \citep{kim2023pubchem}. This shows the ability of MF-LAL to generate promising and novel structures. There is a small shared scaffold across 2 of the generated c-MET compounds consisting of a pyridazine, but this is not necessarily undesirable as it shows the model has found a high-property region of chemical space. The scaffold may be a promising starting point for development of empirical structure-activity relationships and lead optimization by medicinal chemists. Additionally, the pairwise Tanimoto similarity among the 15 compounds generated by MF-LAL is less than 0.2 for both targets, further indicating that our method generates a structurally diverse set.
+
+\begin{table*}
+\setlength{\tabcolsep}{3pt}
+\vskip-0.2in
+\caption{\textbf{Ablations.} The mean and top 3 ABFE-computed energies are shown for 15 compounds sampled from each method after active learning for 7 days.}
+\label{ablation-table}
+\begin{center}
+\begin{small}
+\begin{sc}
+\begin{tabular}{l|cccc|cccc}
+\toprule
+Method & \multicolumn{4}{c}{BRD4(2) ABFE (kcal/mol)} &\multicolumn{4}{c}{c-MET ABFE (kcal/mol)}\\
+& Mean $\pm$ s.d. & 1st & 2nd & 3rd & Mean $\pm$ s.d. & 1st & 2nd & 3rd\\
+\midrule
+MF-LAL & \textbf{-6.3} $\pm$ 4.0 & \textbf{-12.0} & \textbf{-11.3} & \textbf{-10.2} & \textbf{-6.5} $\pm$ 3.2 & \textbf{-12.9} & \textbf{-7.7} & \textbf{-6.5}\\
+-fid. 1 & -6.1 $\pm$ 0.7 & -7.7 & -7.6 & -7.4 & -6.0 $\pm$ 1.1 & -8.8 & -7.0 & -6.0\\
+-fid. 2 & -5.1 $\pm$ 2.0 & -8.5 & -6.5 & -6.0 & -5.2 $\pm$ 2.5 & -8.0 & -7.3 & -6.1\\
+-fid. 3 & -4.2 $\pm$ 3.1 & -9.2 & -5.9 & -5.7 & -4.2 $\pm$ 3.5 & -9.8 & -7.1 & -6.1\\
+-fid. 4 & -2.4 $\pm$ 3.2 & -8.6 & -4.3 & -3.4 & -3.1 $\pm$ 3.0 & -7.6 & -6.7 & -5.1\\
+w/o likelihood term & -3.6 $\pm$ 4.4 & -11.9 & -10.7 & -10.0 & -3.8 $\pm$ 3.7 & -10.9 & \textbf{-7.7} & -6.3\\
+Transformer enc/dec & -6.2 $\pm$ 4.0 & -11.5 & \textbf{-11.3} & -9.8 & \textbf{-6.5} $\pm$ 2.9 & -11.6 & -7.6 & \textbf{-6.5}\\
+GCN enc/dec & -5.9 $\pm$ 3.0 & -10.9 & -10.1 & -9.3 & -6.1 $\pm$ 4.6 & -11.1 & -7.5 & \textbf{-6.5}\\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\vskip-0.2in
+\end{table*}
+
+Table \ref{ablation-table} reports results from various ablations of the MF-LAL architecture. We experimented with removing each fidelity level individually, removing the likelihood term from the generation objective, and replacing the fully-connected encoder/decoder networks with a Transformer \citep{vaswani2017attention} and graph convolutional network (GCN, \cite{kipf2016variational}). The results show that all fidelities contribute to some degree to performance, although $f_1$ (the linear regression model) seems to add very little. Removing the likelihood term greatly reduced the performance of our method, showing that the approach of only querying compounds at higher fidelities that also scored well at lower fidelities is critical for strong performance. Replacing the fully-connected encoder/decoder with a Transformer had little effect on performance, so we used the simpler fully-connected version. Finally, changing the molecular representation to a graph and replacing the fully-connected encoder/decoder with GCNs \citep{kipf2016variational} resulted in slightly worse performance.
+
+
+\section{Discussion and Conclusion}
+
+
+We present Multi-Fidelity Latent space Active Learning (MF-LAL), an integrated framework for generative and multi-fidelity surrogate modeling. Our experiments show that MF-LAL generates compounds with significantly higher activity, as predicted by a gold-standard binding free energy oracle, than other single and multi-fidelity approaches. Thus, MF-LAL shows promise as a way to generate compounds with real-world binding while incurring a reasonable computational cost.
+
+Limitations of our approach include a limited set of oracles and a potential lack of synthesizability of the generated compounds, since SAscore is known to be imperfect \citep{skoraczynski2023critical}. Future work could include using a reaction-aware generative model that generates more synthesizable molecules \citep{horwood2020molecular}. 
+
+
+

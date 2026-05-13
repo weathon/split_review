@@ -1,0 +1,355 @@
+\title{LANTERN: Accelerating Visual Autoregressive Models with Relaxed Speculative Decoding}
+
+\begin{abstract}
+    Auto-Regressive (AR) models have recently gained prominence in image generation, often matching or even surpassing the performance of diffusion models. However, one major limitation of AR models is their sequential nature, which processes tokens one at a time, slowing down generation compared to models like GANs or diffusion-based methods that operate more efficiently. While speculative decoding has proven effective for accelerating LLMs by generating multiple tokens in a single forward, its application in visual AR models remains largely unexplored. In this work, we identify a challenge in this setting, which we term \textit{token selection ambiguity}, wherein visual AR models frequently assign uniformly low probabilities to tokens, hampering the performance of speculative decoding. To overcome this challenge, we propose a relaxed acceptance condition referred to as LANTERN that leverages the interchangeability of tokens in latent space. This relaxation restores the effectiveness of speculative decoding in visual AR models by enabling more flexible use of candidate tokens that would otherwise be prematurely rejected. Furthermore, by incorporating a total variation distance bound, we ensure that these speed gains are achieved without significantly compromising image quality or semantic coherence. Experimental results demonstrate the efficacy of our method in providing a substantial speed-up over speculative decoding. In specific, compared to a na\"ive application of the state-of-the-art speculative decoding, LANTERN increases speed-ups by $\mathbf{1.75}\times$ and $\mathbf{1.76}\times$, as compared to greedy decoding and random sampling, respectively, when applied to LlamaGen, a contemporary visual AR model. %in greedy decoding and from $0.93\times$ to $1.64\times$ in random sampling, 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Auto-Regressive (AR) models have recently gained significant traction in image generation~\citep{dall-e, imagegpt, var, llama-gen} due to their competitive performance, often matching or even surpassing diffusion models~\citep{ddpm, ldm}. Notable examples include iGPT~\citep{imagegpt}, DALL-E~\citep{dall-e}, VAR~\citep{var}, and LlamaGen~\citep{llama-gen}, which showcase the potential of AR models in image generation. Moreover, recent studies like \citet{chameleon, uio2} have demonstrated that AR modeling can handle multi-modal data, including language and images, within a single unified framework. Given the remarkable success of AR models in language modeling, leading to the era of large language models (LLMs)~\citep{gpt3, touvron2023llamaopenefficientfoundation, jiang2023mistral7b}, it is anticipated that AR modeling will emerge as a dominant paradigm for unifying multiple modalities into a single model in the near future.
+
+Despite the promising potential of AR models, their sequential nature poses a significant bottleneck for both efficiency and scalability since they generate a single token per forward pass. In contrast, GANs~\citep{goodfellow2014generative, stylegan}, which generate images in a single forward pass, naturally avoid this issue, and diffusion models have benefited from extensive research aimed at improving their speed ~\citep{ddim, sauer2023adversarialdiffusiondistillation, heek2024multistepconsistencymodels}. However, transferring these acceleration techniques to visual AR models is far from straightforward due to fundamental differences in the underlying mechanisms of these models.
+
+One notable acceleration technique for AR models is speculative decoding~\citep{leviathan2023fast, SpS, medusa, eagle1}, which has demonstrated its effectiveness in LLMs. Initially introduced by~\citet{leviathan2023fast}, speculative decoding addresses the sequential bottleneck of AR models by introducing a \textit{draft and verify} mechanism. In this framework, a smaller model (the \textit{drafter}) predicts the next few tokens, which are then verified by the larger target model. If the drafter's predictions are accurate, multiple tokens can be generated from a single forward pass, resulting in a substantial inference speed-up. This method has proven highly effective in accelerating LLM inference, making it a leading option for reducing the latency associated with AR models.
+
+While speculative decoding shows great promise for accelerating AR models, its application to visual AR models remains largely unexplored. Therefore, in this paper, we take the first step toward addressing this gap by migrating speculative decoding to visual AR models. Interestingly, our findings reveal that the na\"ive application of existing speculative decoding methods falls short in visual AR models. Specifically, we identify a key problem, namely the \textit{\textbf{token selection ambiguity}}, that hampers the effective migration of speculative decoding to visual AR models. 
+
+To mitigate such an obstacle in speculative decoding, we propose a solution dubbed as \textit{LANTERN} (\textbf{La}tent \textbf{N}eighbor \textbf{T}oken Acc\textbf{e}ptance \textbf{R}elaxatio\textbf{n}) that leverages the interchangeability of image tokens in latent space for the relaxation of acceptance condition. By relaxing the acceptance in speculative decoding, we allow for more effective utilization of draft (candidate) tokens that would otherwise be frequently rejected despite their potential usefulness. However, our relaxation introduces some distortion to the target model's distribution, which may cause the generated images to deviate from the original target output. To mitigate this, we further incorporate a total variation distance bound which ensures that the deviation remains controlled.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/showcase.pdf}
+    \vskip -3pt
+    \caption{Images generated by vanilla decoding \textit{(top)} and lossy speculative decoding with our relaxed acceptance condition (with mean accepted length \textbf{2.40}) \textit{(bottom)} on the text-conditioned LlamaGen Stage II~\citep{llama-gen}.}
+    \label{fig:ours_showcase}
+    \vskip -15pt
+\end{figure}
+
+Our main contributions are summarized as below:
+\begin{itemize}
+    \item To the best of our knowledge, we are the first to thoroughly investigate speculative decoding in visual AR models, identifying the \textit{token selection ambiguity} problem, where near-uniform token probability distributions hinder token prioritization, causing existing methods to fail in improving speed.
+    \item Based on our insights, we then propose LANTERN, a novel relaxation of acceptance condition for the speculative decoding that addresses the token selection ambiguity problem, successfully enabling the effective application of speculative decoding to visual AR models.
+    \item Our experiments using LlamaGen~\citep{llama-gen} as the target and EAGLE-2~\citep{eagle} as the drafter demonstrate significant speed-ups, improving from $1.28\times$ to $\mathbf{2.25}\times$ in greedy decoding and from $0.93\times$ to $\mathbf{1.64}\times$ in random sampling, compared to the naive application of EAGLE-2, without substantial performance drop in terms of image quality.
+\end{itemize}
+
+
+
+
+\section{Token Selection Ambiguity in Visual Autoregressive Models}
+
+
+In this section, we introduce a novel problem, termed \textbf{\textit{token selection ambiguity}}, which imposes a major challenge for applying speculative decoding into visual AR models. In Section~\ref{sec:3.1}, we provide empirical results on na\"ive application of existing speculative decoding methods into visual AR models. Section~\ref{sec:3.2} presents the token selection ambiguity problem and how this problem causes the failure of speculative decoding in visual AR models.
+
+\subsection{Na\"ive Speculative Decoding Fails in Visual AR Models}\label{sec:3.1}
+
+\begin{table}[t]
+    \setlength{\tabcolsep}{10pt}
+    \centering
+    \renewcommand{\arraystretch}{1.2}
+    \caption{Mean accepted length of na\"ive application of existing speculative decoding methods on the greedy decoding regime. LlamaGen-L is used as a drafter for Speculative Decoding~\citep{leviathan2023fast}. Numbers in parentheses present the mean accepted length on MT-Bench~\citep{zheng2023judging} with Vicuna-7B~\citep{zheng2023judging}. Results on Vicuna-7B are taken from EAGLE-2~\citep{eagle}.} 
+    \label{tab:naive_app}
+    \resizebox{0.9\textwidth}{!}{
+        \centering
+        \begin{tabular}{l|cc}
+        \toprule
+        \multirow{3}{*}{\textbf{Methods}} & \multicolumn{2}{c}{\textbf{Mean Accepted Length}} \\
+        \cmidrule{2-3}
+        & \textbf{LlamaGen-3B} & \textbf{Vicuna-7B} \\
+         & \citep{llama-gen} & \citep{zheng2023judging} \\
+        \midrule
+        Speculative Decoding~\citep{leviathan2023fast} & 1.40 \textcolor{purple}{(-40.6\%)} & 2.36 \\
+        Medusa~\citep{medusa} & 1.38 \textcolor{purple}{(-45.2\%)} & 2.52 \\
+        EAGLE-2~\citep{eagle} & 2.11 \textcolor{purple}{(-57.6\%)} & 4.98 \\
+        \bottomrule
+        \end{tabular}
+    }
+    \vskip -5pt
+\end{table}
+
+While speculative decoding has been successful in LLMs~\citep{leviathan2023fast, medusa, eagle}, we observe that its na\"ive application to visual AR models fails to provide noticeable speed-up. As shown in Table~\ref{tab:naive_app}, the na\"ive application results in limited efficacy compared to its performance in LLMs, with a significant reduction in the mean accepted length, dropping between 41\% to 58\% across methods. To better understand this limitation, we conduct a comparative analysis of the next-token probability distributions in both LLMs and vision AR models, using Vicuna-7B~\citep{zheng2023judging} on the MT-Bench dataset~\citep{zheng2023judging} and LlamaGen models~\citep{llama-gen} on MS-COCO captions~\citep{lin2014microsoft}, respectively.
+
+Our analysis reveals that the drafter in the visual AR models often struggles to accurately predict the target model's output, leading to frequent misalignment between token predictions from the drafter and target model. Specifically, Figure~\ref{fig:drafter_acc} demonstrates that the drafter model fails to achieve high accuracy in predicting the target model's output even in top-3 predictions, whereas its LLM counterpart shows considerably higher accuracy. Consequently, Figure~\ref{fig:drafter_misalign} clearly illustrates the significant misalignment in token prediction distributions between the drafter and target model in visual AR models.
+
+\subsection{Token Selection Ambiguity Problem}\label{sec:3.2}
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Drafter Test Accuracy]{
+        \includegraphics[width=0.31\textwidth]{figures/drafter_accuracy.pdf}
+        \label{fig:drafter_acc}
+    }
+    \subfigure[Target - Drafter Alignment]{
+        \includegraphics[width=0.31\textwidth]{figures/target_drafter_misalignment.pdf}
+        \label{fig:drafter_misalign}
+    }
+    \subfigure[Average Top-1,10 probabilities]{
+        \includegraphics[width=0.31\textwidth]{figures/top_probs.pdf}
+        \label{fig:top_probs}
+    }
+    \vskip -5pt
+    \caption{(a) Top-1 and top-3 accuracy of learned drafter model on Vicuna-13B, LlamaGen-XL (text-conditioned, stage I), and LlamaGen-3B (class-conditioned) for predicting the target model's outputs. (b) Heat map of the drafter and target model's probability distribution during inference on text-conditioned LlamaGen-XL Stage I model. For simplicity, we only visualize the union of the top-20 probable tokens for each model. (c) An average top-1 and top-10 probabilities on Vicuna-7B and LlamaGen-XL (text-conditioned, stage I)}
+    \label{fig:fail_of_spec_dec}
+    \vskip -10pt
+\end{figure}
+
+To understand the reason for the failure of speculative decoding in visual AR models, we identify a unique problem that we term as the \textit{token selection ambiguity}. This problem stems from the fundamental differences between language and image data, as well as the distinct tokenization strategies employed in their respective AR models.
+
+In language models, tokens represent discrete units such as words or subwords, which follow structured and predictable sequences governed by grammar and syntax~\citep{zipf1935psycho}. This results in a concentrated next token probability distribution, where the model assigns high confidence to the most likely token. In contrast, visual AR models process pixels or patches as tokens, leading to spatially continuous and highly complex sequences. Consequently, these models often exhibit broad and dispersed next-token probability distributions, reflecting greater uncertainty and ambiguity in predicting the next token. We define this phenomenon as the {token selection ambiguity} problem.
+
+To empirically validate this, we compare the next token probability distributions of Vicuna-7B, a language model, and text-conditioned LlamaGen, a visual AR model. Using 80 responses from Vicuna-7B on the MT-Bench dataset and 1,000 images from LlamaGen based on MS-COCO validation captions, we observe a stark contrast in how the models assign probabilities. As shown in Figure~\ref{fig:top_probs}, LlamaGen has significantly lower top-1 and top-10 probabilities on average compared to Vicuna-7B. This highlights the greater ambiguity in selecting the next token in visual AR models, where the model struggles to confidently prioritize one token over others.
+
+The implication of this problem is critical for speculative decoding since speculative decoding relies on concentrated next-token distributions which enables a simpler drafter to predict and align with the target model. Therefore, the dispersed token distributions in visual AR models make it difficult for the drafter to accurately approximate the target model's token probabilities. This misalignment leads to a lower acceptance rate of drafter tokens during speculative decoding, ultimately reducing its effectiveness.
+
+
+
+\section{Detouring Token Selection Ambiguity Through Latent Space}
+
+
+In this section, we propose LANTERN, a simple yet effective method that permits detouring the failure of speculative decoding caused by the token selection ambiguity problem by relaxing acceptance condition in Speculative Decoding~\citep{leviathan2023fast}. In Section~\ref{sec:4.1}, we introduce a concept of latent proximity which asserts close image tokens in the latent space are interchangeable and examines its validity on the generated images. Section~\ref{sec:4.2} describes how we relax the acceptance condition based on the interchangeability. In Section~\ref{sec:4.3}, we present another component to ensure that the distribution of generated images does not catastrophically deviate from the original distribution.
+
+\subsection{Latent Proximity Permits Token Interchangeability}\label{sec:4.1}
+
+We introduce \textit{latent proximity}, a property in visual AR models that asserts tokens close to one another in latent space are \textit{interchangeable} without significantly affecting the visual semantics or overall image quality. This means that replacing a token with another nearby token in latent space results in minimal changes to the generated image.
+
+This property arises from the tokenization process unique to visual AR models. Unlike text tokenization, which is straightforward due to its discrete nature, images are spatially continuous, making tokenization more complex~\citep{AR_taming}. To handle this, models like vector-quantized variational auto-encoders (VQVAE)~\citep{van2017neural} and vector-quantized generative adversarial networks (VQGAN)~\citep{AR_taming} are used to discretize the latent embeddings of images. These embeddings maintain a continuous mapping between changes in latent space and the visual semantics of the generated images~\citep{vae,goodfellow2014generative, stylegan}. As a result, small shifts in latent space lead to minor shifts in the image, supporting the idea that tokens close in the latent space are effectively interchangeable.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/replacement.pdf}
+    \vskip -2pt
+    \caption{Image generated by text-conditioned LlamaGen Stage II model~\citep{llama-gen} with five captions from MS-COCO~\citep{lin2014microsoft} validation set. The images are generated by either standard sampling method \textit{(top)} or sampling with random replacement within 100-closest tokens in the latent space \textit{(bottom)}.}
+    \vskip -10pt
+    \label{fig:replacement}
+\end{figure}
+
+To demonstrate this concept empirically, we perform an experiment in which, after each token is sampled, it is re-sampled uniformly from the 100 closest tokens in latent space. Figure~\ref{fig:replacement} reveals that the images generated by this procedure closely resemble those produced using the original sampling method. This confirms that tokens close in latent space can be treated as interchangeable, allowing for flexible token replacement without significantly compromising the visual semantics or overall image quality.
+
+\subsection{LANTERN: Relaxation of Acceptance Condition}\label{sec:4.2}
+
+Building on our findings about latent proximity, we introduce LANTERN, a simple yet effective solution that leverages the interchangeability of proximate tokens in latent space. By treating neighboring tokens as commutable, LANTERN effectively resolves the token selection ambiguity problem, significantly boosting the acceptance probability of candidate tokens and enabling the successful application of speculative decoding.
+
+We start with revisiting the original acceptance condition from~\citet{leviathan2023fast}. The drafter model with distribution $p(x)$ samples a candidate token $\widetilde{x}\sim p(x|s)$ given a preceding sequence $s=(x_1,\ldots,x_n)$. The candidate is accepted with probability
+\begin{align}\label{eq:org_accept_prob}
+    \min\left(1,\frac{q(\widetilde{x}|s)}{p(\widetilde{x}|s)}\right)
+\end{align}
+where $q(x)$ is the target model's distribution. If rejected, the next token is re-sampled from $[q(\cdot|s)-p(\cdot|s)]_+$ where $[\cdot]_+$ denotes normalization. Acceptance depends on the alignment of probabilities between the drafter and target models.
+
+However, this acceptance condition results in a sharp decline in accept probability when encountering the token selection ambiguity problem. As mentioned in Table~\ref{tab:accept_prob}, the EAGLE-2 drafter exhibits an average accept probability of 0.0402, meaning \textit{only 4\% of drafts are accepted} when applied to visual AR models. This issue arises because the target model assigns low probabilities to individual tokens and frequently misaligns with the drafter’s distribution, leading to frequent rejections of candidate tokens and reducing the overall effectiveness of speculative decoding.
+
+To alleviate this problem, we exploit the latent proximity by aggregating the probabilities of a candidate token's nearest neighbors, treating them as proxies. This approach effectively increases the acceptance probability by utilizing the combined likelihood of similar tokens, mitigating the impact of the token selection ambiguity problem and reducing unnecessary rejections.
+
+Specifically, we define the neighborhood $B_k(\widetilde{x})$ as the set of $k$-nearest tokens to $\widetilde{x}$ in latent space, including $\widetilde{x}$ itself. The accept probability is then adjusted to
+\begin{align}\label{eq:accept_prob}
+    \min\left(1, \frac{\sum_{x\in B_k(\widetilde{x})}q(x|s)}{p(\widetilde{x}|s)}\right).
+\end{align}
+Because $\widetilde{x}$ is always included in $B_k(\widetilde{x})$, this new accept probability is guaranteed to be equal to or higher than the original acceptance condition~(\ref{eq:org_accept_prob}). As demonstrated in Table~\ref{tab:accept_prob}, applying LANTERN significantly increases the average acceptance probability, reaching values as high as 0.37. This improvement allows us to recover candidate tokens that would have otherwise been unjustifiably rejected.
+
+\subsection{With Limited Distributional Divergence}\label{sec:4.3}
+
+\begin{table}[t]
+    \caption{Average accept probabilities of LANTERN. The accept probabilities are averaged on 100 image generations using text-conditioned LlamaGen Stage I model~\citep{llama-gen} and MS-COCO validation captions~\citep{coco}. We only use accept probability of the first draft token. An average accept probability of EAGLE-2~\citep{eagle} is \textbf{0.0402}.}
+    \centering
+    \vskip -3pt
+    \begin{tabular}{l|cccc}
+    \toprule
+    \multicolumn{5}{c}{\textbf{Average Accept Probability}} \\
+    \midrule
+    $k$ & \textbf{\(\delta = 0.05\)} & \textbf{\(\delta = 0.1\)} & \textbf{\(\delta = 0.2\)} & \textbf{\(\delta = 0.4\)} \\
+    \midrule
+        100  & 0.0725 & 0.1096 & 0.1703 & 0.2595 \\
+        300  & 0.0759 & 0.1166 & 0.1892 & 0.3267 \\
+        1000 & 0.0786 & 0.1186 & 0.2000 & 0.3657 \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:accept_prob}
+    \vskip -5pt
+\end{table}
+
+Although the relaxed acceptance condition~(\ref{eq:accept_prob}) effectively permits speculative decoding in visual AR models by significantly raising the accept probability, it inevitably distorts the target distribution. In particular, when we condition the target distribution on the candidate token $\widetilde{x}$, it becomes:
+\begin{align*} 
+    q_k(x|s, D=\widetilde{x})=
+        \begin{cases} 
+            \sum_{x\in B_k(\widetilde{x})}q(x|s) &\text{if $x=\widetilde{x}$}\\
+            0 & \text{if $x\in B_k(\widetilde{x}), x\neq\widetilde{x}$}\\
+            q(x|s) & \text{otherwise}
+        \end{cases}
+\end{align*} where $D$ is a random variable representing the candidate token and $q_k$ denotes the distorted target distribution. In contrast, under the original acceptance condition, the target distribution remains unchanged regardless of the candidate token. For this reason, (\ref{eq:accept_prob}) may excessively distort the target distribution, leading to generating images that diverge significantly from those generated by the target model.
+
+To mitigate this distortion, we impose an upper bound on the distributional divergence using total variation distance (TVD). Since the distortion results from redistributing probability mass, TVD effectively measures the extent of this shift, allowing us to control the magnitude of the divergence. This can be achieved by adjusting the neighborhood $B_k(\widetilde{x})$ used in the relaxation as follows.
+
+Since the relaxation can be analogously derived using any neighborhood of $\widetilde{x}$, we can find a neighborhood that ensures the TVD between the target distribution and the distorted target distribution induced by the neighborhood is below a specific threshold. To formulate this approach, we define the neighborhood $A_{k, \delta}(\widetilde{x})$ of $\widetilde{x}$ for a given TVD bound $\delta > 0$ and $k\in \mathbb{Z}^+$ as $A_{k, \delta}(\widetilde{x})$ is the largest subset of $B_k(\widetilde{x})$ such that for the total variation distance $D_{TV}$,
+\begin{equation*}
+    D_{TV}\left(q_{k,\delta}(x|s,D=\widetilde{x}\right),q(x|s,D=\widetilde{x}))=D_{TV}(q_{k,\delta}(x|s,D=\widetilde{x}),q(x|s))<\delta   
+\end{equation*}
+where $q_{k,\delta}$ denotes the distorted target distribution induced by $A_{k,\delta}(\widetilde{x})$.
+
+We construct $A_{k, \delta}(\widetilde{x})$ by incrementally adding tokens from $B_k(\widetilde{x})$ to $A_{k, \delta}(\widetilde{x})$, starting with the closest ones to $\widetilde{x}$, and stopping when adding another token would exceed the TVD threshold $\delta$. This procedure allows us to relax the acceptance condition by incorporating probabilities of similar tokens while keeping the divergence within a predefined boundary.
+
+By integrating the TVD constraint into the acceptance condition~(\ref{eq:accept_prob}), we arrive at the final relaxed acceptance condition of LANTERN:
+\begin{align*}
+    \textbf{Accept } &\widetilde{x} \text{ with probability } \min\left(1, \frac{\sum_{x\in A_{k, \delta}(\widetilde{x})}q(x|s)}{p(\widetilde{x}|s)}\right)\\
+    \textbf{Else }& \text{re-sample } x\sim [q_{k,\delta}(x|s, D=\widetilde{x})-p(x|s)]_+
+\end{align*}
+For greedy decoding, LANTERN can be simply reduced to accept $\widetilde{x}$ if $\widetilde{x} = \argmax_x q_{k,\delta}(x|s, D=\widetilde{x})$.
+
+
+\section{Experiments}
+
+
+In this section, we evaluate the performance of our method, LANTERN. In section~\ref{sec:setup}, we report the experimental setup for our experiments. Section~\ref{sec:main_result} evaluates LANTERN with other baselines in perspective of image quality and acceleration. In Section~\ref{sec:abl}, we conduct an ablation study to clarify the effectiveness of each component in our method. 
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+To validate our method LANTERN, 
+we conduct experiments on LlamaGen-XL~\citep{llama-gen} for the text-conditional image generation as target model that demonstrate the best performance among autoregressive models without vision-specific modifications. We utilize the MS-COCO validation captions~\citep{coco} to generate images and evaluate the image quality with the ground-truth images. For the drafter model, we employ EAGLE-2~\citep{eagle}, which has demonstrated state-of-the-art performance in speculative decoding in the language domain. We employ the $\ell_2$ distance to quantify latent proximity, and utilize the TVD as a metric for divergence bound.
+To assess the improvement of speed, we use $100$ MS-COCO validation captions to evaluate actual speedup and mean accepted length. Since measuring speedup with more than $100$ samples shows no significant difference, we use $100$ captions for efficiency. Actual speedup is measured by the inference time ratio between each method and vanilla auto-regressive decoding. Mean accepted length is determined by the average number of tokens accepted in each forward step of the target model. We evaluate each method in both the greedy decoding setting with $\tau=0$ and the sampling with $\tau=1$. 
+
+Since LANTERN can impact the quality of generated images, we evaluate image quality with FID \citep{fid} and CLIP score \citep{clipscore} with 30k samples. For each evaluation, Note that existing speculative decoding theoretically guarantees exact distribution matching with the target model, we do not evaluate image quality on EAGLE-2.
+\subsection{Main Results}\label{sec:main_result}
+
+In this section, we demonstrate qualitative and quantitative results of speculative decoding with our relaxed acceptance condition. First of all, Section~\ref{sec:speedup} demonstrates how much speed-up can be achieved through our method. Next, Section~\ref{sec:qual} showcases that our method retains image quality within a similar level by showing qualitative samples. Afterward, Section~\ref{sec:tradeoff} presents the trade-off between performance and efficiency in our method. 
+
+\renewcommand{\arraystretch}{0.85}
+\begin{table}[t]
+    \centering
+    \caption{Actual speed-up, mean accepted length, FID, and CLIP score for each method. $\tau$ refers to the temperature for a generation. The actual speed-up is measured on a single A100 80GB SXM.}
+    \vskip -2pt
+    \resizebox{0.9\textwidth}{!}{
+        \begin{tabular}{l|cccc}
+        \toprule
+        \multirow{2}{*}{\textbf{Method}} & \multicolumn{4}{c}{$\tau=0$} \\
+        \cmidrule{2-5}
+        & Speedup & Mean Accepted Length & FID & CLIP score \\
+        \midrule
+        Vanilla AR~\citep{llama-gen} & 1.00$\times$ & 1.00 & 28.63 & 0.3169 \\
+        EAGLE-2~\citep{eagle} & 1.28$\times$ & 1.60 & - & - \\
+        LANTERN ($\delta=0.05$, $k=1000$) & 1.68$\times$ & 2.02 & 29.77 & 0.3164 \\
+        LANTERN ($\delta=0.20$, $k=1000$) & \textbf{2.25$\times$} & \textbf{2.89} & 30.78 & 0.3154 \\
+        \midrule
+        \multirow{2}{*}{\textbf{Method}} & \multicolumn{4}{c}{$\tau=1$} \\
+        \cmidrule{2-5}
+        & Speedup & Mean Accepted Length & FID & CLIP score \\
+        \midrule
+        Vanilla AR~\citep{llama-gen} & 1.00$\times$ & 1.00 & 15.22 & 0.3203 \\
+        EAGLE-2~\citep{eagle} & 0.93$\times$ & 1.20 & - & - \\
+        LANTERN ($\delta=0.10$, $k=1000$) & 1.17$\times$ & 1.75 & 16.17 & 0.3208 \\
+        LANTERN ($\delta=0.40$, $k=1000$) & \textbf{1.65$\times$} & \textbf{2.40} & 18.76 & 0.3206 \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:speedup}
+    \vskip -10pt
+\end{table}
+
+\begin{figure}
+    \vskip -10pt
+    \centering
+    \includegraphics[width=1\linewidth]{figures/examples.pdf}
+    \caption{Qualitative samples for LANTERN and vanilla autoregressive decoding. From top to bottom, the images are generated by vanilla, LANTERN ($\delta=0.05$, $\delta=0.1$, $\delta=0.2$, $\delta=0.4$) where $k$ is fixed at 1000, and images in the same column are generated using the same text prompt.}
+    \label{fig:qual_res}
+    \vskip -10pt
+\end{figure}
+
+\subsubsection{Speed Up Comparison}\label{sec:speedup}
+
+To confirm that LANTERN provides notable speed improvements over the baseline while maintaining image quality, we compare our method with baselines under both greedy decoding and random sampling situations.
+Table~\ref{tab:speedup} demonstrates the speedup and image quality across different methods. LANTERN shows a significant acceleration, even with some degradation in image quality, when compared to vanilla autoregressive decoding and EAGLE-2~\citep{eagle}.
+
+For $\tau=0$, LANTERN achieves a $2.25\times$ actual speedup with a slight quality cost, as reflected in a 2.16 increase in FID. In contrast, EAGLE-2 only achieves $1.28\times$ speedup, which is far less than ours. LANTERN demonstrates that by slightly relaxing the (i.e. $\delta=0.2$), we can achieve higher speedup compared to other baselines while maintaining the acceptable quality loss, with an FID of 30.78, which is close to the vanilla AR decoding. 
+
+For $\tau=1$, while EAGLE-2 fails to achieve actual speedup, our approach accomplishes $1.65\times$ speedup by relaxing the acceptance condition, with a cost of a 3.53 increase in FID. Nevertheless, a more conservative setting of $\delta=0.1$ yields a balanced compromise, which obtains $1.17\times$ speedup with only a 6\% increase in FID compared to the vanilla AR, making it a suitable choice when quality preservation is critical. CLIP score is maintained within a similar level, regardless of $k$ and $\delta$, which indicates that LANTERN does not alter alignment between input text and generated images.
+
+Similar to the other speculative decoding methods in LLMs, we can achieve greater speedup with greedy decoding compared to the sampling. However, vision autoregressive models often fail to generate high quality images with greedy decoding, which leads to the inferior FID score. As a result, by allowing a degree of flexibility in token selection, our method strikes a favorable balance between speed and quality, outperforming both vanilla AR and EAGLE-2 in terms of practical efficiency.
+
+\subsubsection{Qualitative Results}\label{sec:qual}
+
+To confirm that image quality is preserved with LANTERN, as indicated by the FID score, we conduct qualitative analysis.
+Figure~\ref{fig:qual_res} demonstrates that, despite the modification of the target model's probability distribution to achieve acceleration, our method effectively preserves image quality.  
+Notably, even under the setting of $\delta=0.4$ and $k=1000$, which achieve about $1.6\times$ speedup compared to the vanilla decoding, generated images retain both content and style at a level comparable to standard autoregressive decoding. These qualitative results, along with the fact that LANTERN avoids significant degradation in FID score as shown in the previous section, demonstrate that it effectively preserves image quality while increasing efficiency.
+\subsubsection{Trade-off Between Performance and Efficiency}\label{sec:tradeoff}
+
+\begin{figure}[t]
+    \vskip -20pt
+    \centering
+    \subfigure[Trade-off curve with $\tau=1$ (sampling)]{\includegraphics[width=0.49\linewidth]{figures/tradeoff_sampling.pdf}}\label{fig:tradeoff_sampling}
+    \subfigure[Trade-off curve with $\tau=0$ (greedy)]{\includegraphics[width=0.49\linewidth]{figures/tradeoff_greedy.pdf}}\label{fig:tradeoff_greedy}
+    \vskip -5pt
+    \caption{Trade-off curves show the relationship between performance (FID) and acceleration (mean accepted length). The results with the same $k$ are annotated with the same color, while the same $\delta$ values are marked with identical symbols. In the legend, the values are separated by commas, indicating $k$ and $\delta$, respectively. }
+    \label{fig:trade-off}
+    \vskip -10pt 
+\end{figure}
+
+LANTERN provides various options between quality and efficiency to the end users. Therefore, we explore this trade-off by adjusting $k$ and $\delta$ across different settings.
+Figure~\ref{fig:trade-off} illustrates the relationship between image quality, which is measured by FID, and speedup, which is assessed with mean accepted length for various settings of $\delta$ and $k$, under both sampling ($\tau=1$) and greedy decoding ($\tau=0$). The trade-off curves highlight that increasing $\delta$ and $k$ generally improves speedup, but at the expense of image quality.
+
+In the case of greedy decoding, we observe that while larger $\delta$ tends to increase the speedup, it may not always result in substantial acceleration when $k$ is small. This could be attributed to the inherent nature of greedy decoding, which only accepts the token with the top-1 probability. If $k$ is not large enough, the increase in acceptance probability is insufficient to surpass the top-1 threshold, thus limiting the speedup gains.
+
+For sampling, note that we observe different behaviors. When $\delta$ is small such as 0.05 and 0.1, increasing $k$ maintains image quality while still achieving better acceleration. This suggests that by tuning $\delta$ and selecting an appropriate $k$, we can find an optimal trade-off where the speedup is improved without significantly compromising image quality. Specifically, larger $k$ values allow for faster generation without disproportionately degrading FID, particularly at lower $\delta$ values.
+
+These findings confirm that LANTERN allows flexible tuning of performance versus efficiency, where careful adjustment of $\delta$ and $k$ can yield substantial acceleration with minimal quality loss. By setting appropriate hyperparameters, particularly under sampling, we can achieve significant speedups while preserving the quality of images, offering a better balance compared to the original speculative decoding method.
+
+\subsection{Ablation Study}\label{sec:abl}
+
+In this section, we conduct ablation studies for LANTERN. In Section~\ref{sec:abl_latent}, we assess the impact of the metric used to measure latent proximity on performance. Then, in Section~\ref{sec:abl_prob}, we provide an ablation study on the effect of the metric for measuring distance from the modified probability distribution.
+
+\subsubsection{Nearest Latent Selection}\label{sec:abl_latent}
+
+\renewcommand{\arraystretch}{0.9}
+\begin{table}[t]
+    \small
+    \centering
+    \caption{Ablation study for latent proximity measure and probability distribution distance metrics. Best performing method annotated with \textbf{bold}, and second best is marked with \underline{underline}.}
+    \vskip -2pt
+    \begin{tabular}{l|ccc}
+        \toprule
+        \multirow{2}{*}{\textbf{Distance Metric}} & \multicolumn{3}{c}{\textbf{Latent Proximity Measure}} \\
+        \cmidrule{2-4}
+        & Mean Accepted Length & FID & CLIP score \\
+        \midrule
+        $\ell_2$ distance ($\delta=0.2$) & \underline{2.09} & 17.43 & \textbf{0.3208} \\
+        $\ell_2$ distance ($\delta=0.05$) & 1.50 & \underline{15.71} & 0.3203 \\
+        Cosine similarity ($\delta=0.2$) & \textbf{2.09} & 17.46 & \underline{0.3206}  \\
+        Random ($\delta=0.2$) & 1.26 & \textbf{15.62} & 0.3203 \\
+        \midrule
+        \multirow{2}{*}{\textbf{Distance Metric}} & \multicolumn{3}{c}{\textbf{Probability Distribution Distance}} \\
+        \cmidrule{2-4}
+        & Mean Accepted Length & FID & CLIP score \\
+        \midrule
+        JSD ($\delta=0.2$) & \underline{2.29} & \underline{18.21} & \underline{0.3206} \\
+        TVD ($\delta=0.2$) & 2.09 & \textbf{17.43} & \textbf{0.3208} \\
+        TVD ($\delta=0.4$) & \textbf{2.40} & 18.76 & \underline{0.3206} \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:abl_study}
+    \vskip -10pt
+\end{table}
+
+To explore the impact of various metrics for measuring latent proximity, we conduct an ablation study using representative distance metrics commonly used to measure latent proximity. Table~\ref{tab:abl_study} summarizes the comparisons among different strategies for selecting the nearest latent tokens, including $\ell_2$ distance, cosine similarity, and random selection. This experiment aims to assess the role of proximity-based selection in token aggregation, with $k=1000$ used across all methods.
+
+As shown in Table~\ref{tab:abl_study}, the random selection significantly underperforms in terms of acceleration, achieving only a $1.26$ mean accepted length, which is notably lower than both $\ell_2$ distance and cosine similarity. Additionally, the random selection shows inferior acceleration compared to the $\ell_2$ distance with $\delta=0.05$, while maintaining a similar FID, which highlights the importance of token selection based on latent proximity.
+
+Comparing $\ell_2$ distance and cosine similarity, both methods demonstrate comparable performance, suggesting robustness in our approach to proximity measurement. Mean accepted length is almost identical between these two, and FID/CLIP score also have a marginal gap. This suggests that our method is effective regardless of the specific proximity metric considered, offering flexibility without significant trade-offs in performance. These results confirm that selecting tokens based on latent proximity plays a crucial role in both acceleration and image quality, with proximity-based metrics like $\ell_2$ distance and cosine similarity, providing a clear advantage over random selection.
+
+\subsubsection{Distance Between Probability Distribution}
+\label{sec:abl_prob}
+
+To ensure that the modified target distribution remains within an acceptable range of divergence from the original, we introduce $\delta$ as an upper bound for distributional divergence. To validate the impact of the divergence metric, we evaluate two different metrics to measure this divergence: Total Variation Distance (TVD) and Jensen-Shannon Divergence (JSD). Kullback-Leibler Divergence (KLD) is not used as it is asymmetric and not a valid metric for a distance in mathematical sense.
+
+To compare the effectiveness of these distance metrics, we fix $k$ as 1000 and adjust $\delta$ to achieve similar mean accepted lengths across the different methods. The results, shown in Table~\ref{tab:abl_study}, demonstrate that JSD with $\delta=0.2$ results in a performance that achieves between TVD with $\delta=0.2$ and with $\delta=0.4$. Specifically, JSD yields 2.29 mean accepted length with 18.21 FID, positioning it between two TVD configurations in terms of both speed and image quality.
+
+These results confirm that our method consistently functions as a robust trade-off controller regardless of the chosen distance metric. Since the difference in performance between two metrics is marginal, we opt to use TVD, as it is computationally lighter and thus more efficient for large-scale implementations. 
+
+
+
+\section{Conclusions}
+
+
+In this paper, we explored the application of speculative decoding to visual AR models for the first time. We revealed that the na\"ive application of existing methods fails due to the token selection ambiguity problem. To address this, we proposed LANTERN, a novel relaxed acceptance condition that effectively resolves this problem. Our experiments using the state-of-the-art visual AR model and speculative decoding method demonstrated that LANTERN successfully enables speculative decoding in visual AR models, achieving substantial speed-ups with minimal compromise in image generation performance. For future work, we plan to design a drafter specifically tailored to visual AR models, aiming to achieve acceleration without sacrificing the generation performance.
+
+
+
+
+

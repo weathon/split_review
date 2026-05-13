@@ -1,0 +1,275 @@
+\title{Magnushammer: A Transformer-Based Approach to Premise Selection}
+
+\begin{abstract}
+
+   This paper presents a novel approach to premise selection, a crucial reasoning task in automated theorem proving. Traditionally, symbolic methods that rely on extensive domain knowledge and engineering effort are applied to this task. In contrast, this work demonstrates that contrastive training with the transformer architecture can achieve higher-quality retrieval of relevant premises, without the engineering overhead. Our method, \method, outperforms the most advanced and widely used automation tool in interactive theorem proving called Sledgehammer. On the PISA and \minif2f benchmarks \method achieves $59.5\%$ (against $38.3\%$) and $34.0\%$ (against $20.9\%$) success rates, respectively. By combining \method with a language-model-based automated theorem prover, we further improve the state-of-the-art proof success rate from $57.0\%$ to $71.0\%$ on the PISA benchmark using $4$x fewer parameters. Moreover, we develop and open source a novel dataset for premise selection,
+   containing textual representations of (\textit{proof state}, \textit{relevant premise}) pairs. To the best of our knowledge, this is the largest available premise selection dataset, and the first one for the Isabelle proof assistant.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\begin{wrapfigure}{r}{0.49\textwidth}
+
+    \begin{center}
+    \includegraphics[width=\linewidth]{images/compute_cost_ablation.pdf}
+    \end{center}
+    \vskip -15pt
+    \caption{
+    Proof success rate for varying computational budget for \method, Sledgehammer, and BM25.
+    \method shows remarkable scalability. See Sections \ref{sec:compute_budget_definition} for the definition of computational budget and Section \ref{sec:budget_experiments} for configurations depicted in this figure.}
+    \label{fig:compute_cost_ablation}
+    \vskip -0.2in
+\end{wrapfigure}
+Automating mathematical reasoning has been a central theme of artificial intelligence since its earliest days~\citep{de1970mathematical}.
+Recently, machine learning has led to significant advancements in both informal ~\citep{lewkowycz2022solving} and formal mathematical reasoning~\citep{kaliszyk2015mizar,alemi2016deepmath, polu2020generative, han2021proof}.
+The latter approach, adopted in this paper, allows mechanical verification of proofs by proof assistants.%~\citep{paulson2000isabelle, moura2015lean}.
+
+Modern mathematics development is gradual:
+it feeds upon a huge body of already established knowledge and constantly adds to it.
+Proving a mathematical statement requires retrieval of facts from the knowledge base that can advance the proof. In automated reasoning literature, this retrieval process is known as \textit{premise selection}.
+
+Many tools have been developed to tackle premise selection~\citep{alama2011premise, kuhlwein2012overview, kaliszyk2017holstep, bansal2019holist}, including a broad class known as ``hammers,'' which {leverage} powerful automated theorem provers (ATPs) to {determine useful premises}~\citep{Paulson2012ThreeYO, hol4hammer, holyhammer, coqhammer}. One such tool, Sledgehammer~(SH)~\citep{Paulson2012ThreeYO}, has gained prominence with Isabelle \citep{paulson2000isabelle}, where it helped to create a significant portion of Isabelle's proof corpus.
+Hammers are not yet available in all proof assistants~\citep{ebner2020integration}: implementing them is challenging due to
+the complex techniques required for different logics and type systems.
+There is a need for an effective premise selection tool that requires less adaptation to work for different proof assistants.
+
+In this study, we provide a generic, data-driven, transformer-based \citep{vaswani2017attention} premise selection tool: \method. It constitutes a novel way to tackle the premise selection task, effective while requiring little domain-specific knowledge. \method is trained contrastively to perform premise retrieval in two stages: in the \methods stage, it retrieves the most relevant $1024$ premises (measured by the cosine similarity of their embeddings to that of the current proof state) from tens of thousands {(the database contains 433K premises in total and typically 30K--50K are available in each proof state)};
+in the \methode stage, the retrieved premises are re-ranked with proof-state-aware scores:
+tokens of the proof state directly attend to tokens of the premise, giving a more contextualized relevance score. An overview of \method's architecture is shown in Figure~\ref{fig:select_expand_overview}.
+
+\method can prove $59.5\%$ of the theorems on the PISA benchmark \citep{jiang2021lisa}, a substantial improvement over Sledgehammer’s $38.3\%$. We demonstrate that this dominance is consistent with varying controlled compute budgets, shown in Figure~\ref{fig:compute_cost_ablation}.
+Furthermore, we replace the premise selection component~(Sledgehammer) in a neural-symbolic model Thor~\citep{jiang2022thor} with \method and improve the state-of-the-art proof success rate on PISA from $57\%$ to $71\%$.
+
+To train \method, we extracted a premise selection dataset from the Isabelle theorem prover and its human proof libraries.
+The dataset consists of $4.4$M premise selection instances, with $433$K unique premises.
+To the best of our knowledge, this is the largest open-sourced premise selection dataset, and the first one of this kind for Isabelle. We find \method to be data efficient, outperforming Sledgehammer with only $4$K training examples ($0.1\%$ of the training data available).
+\paragraph{Contributions}
+\begin{itemize}
+
+    \item We propose the use of transformers trained contrastively as a novel way of addressing the premise selection problem. Our method, \method, achieves a $59.5\%$ proof rate on the PISA benchmark, significantly improving the $38.3\%$ proof rate of Sledgehammer,
+    the most powerful general-purpose automation tool for Isabelle.
+    \item We extract and open source the largest, to the best of our knowledge, premise selection dataset. It consists of $4.4$M premise selection examples and $433$K unique premises.
+
+    \item We analyze how \method's performance depends on the model size, dataset size, and the inference-time compute budget. We show its superiority with moderate resources.% and scalability.
+\end{itemize}
+
+
+
+
+\section{Background: proof assistants, Isabelle, and Sledgehammer}
+
+
+\label{sec:sledgehammer}
+Proof assistants (aka interactive theorem provers, or ITPs)
+such as
+Isabelle \citep{paulson2000isabelle},
+Lean \citep{moura2015lean},
+Coq \citep{coq},
+HOL Light \citep{hollight},
+or Mizar \citep{mizar},
+are software tools designed to assist the development of formal proofs.
+They provide expressive language for the formalization of mathematical statements and proofs while verifying them formally.
+In Isabelle, theorems are proved sequentially:
+an initial \textit{proof state} is obtained after the theorem is stated, and the proof state changes when
+
+Proof states contain information about the already established facts and the remaining goals to prove. Proof steps consist of \textit{tactics}, which are optionally parametrized by \textit{premises}.
+Tactics are theorem-proving procedures and can complete some proofs in one step
+provided with relevant premises. However, finding these premises is difficult:
+one needs to select a handful of relevant facts from the current proof context,
+which typically contains tens of thousands of them.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{.47\textwidth}
+    \includegraphics[width=\linewidth,trim=4 4 4 4,clip]{images/sh-2.pdf}
+    \caption{\small A call to Sledgehammer triggers the following sequence of steps: First, available facts are filtered based on their similarity to the conjecture. Then, the conjecture together with the selected facts (usually a few hundred in number) are translated to simpler logic used by the external provers (E, SPASS, etc.). Then, such problems are fed into each ATP separately.
+    Finally, the premises used in the successful ATP proofs are used
+    to reconstruct a proof inside Isabelle using its native methods.
+    }
+    \label{fig:secSH}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{.47\textwidth}
+    \centering
+    \includegraphics[width=\linewidth,trim=4 4 4 4,clip]{images/select-expand-inference.pdf}
+    \caption{\small Given a proof state, we first retrieve the most relevant premises according to the cosine similarity of their embeddings with the proof state embedding~(\methods). We then re-rank these with a model that encodes each proof state and premise pair, outputting a relevance score (\methode). The bulk of the architecture is a shared transformer model, in orange.}
+    \label{fig:select_expand_overview}
+    \end{subfigure}
+
+    \caption{
+    Overview of Sledgehammer (a) and \method (b).
+    }
+\end{figure}
+
+Sledgehammer~\citep{Paulson2012ThreeYO, smt_solvers_blanchette} is a powerful automated reasoning tool for Isabelle. It belongs to a broader class of tools known as ``hammers,'' which integrate automated theorem provers (ATPs) into proof assistants. The goal of these tools is to support the process of finding and applying proof methods. Sledgehammer has become an indispensable tool for Isabelle practitioners~\citep{Paulson2012ThreeYO}. It allows for closing low-level gaps between subsequent high-level steps of proof without the need to memorize entire lemma libraries. %or perform a manual search.
+
+Sledgehammer is designed to first pre-select a number of relevant facts heuristically, translate them together with a conjecture to simpler logic, and try to prove the conjecture using strong, external ATPs like E~\citep{48}, SPASS~\citep{56}, Vampire~\citep{44},
+Z3~\citep{33}, or cvc5~\citep{cvc5}. If successful, these provers generate complete proofs. They are, however, not trusted by Isabelle. Instead, the facts used in the external proofs are extracted and used to produce a proof \textit{inside} Isabelle using its native methods. Up to this last step, known as \textit{proof reconstruction}, Sledgehammer is essentially used as a precise premise selection tool.
+See Figure \ref{fig:secSH} depicting the whole process.
+
+While immensely useful, Sledgehammer comes with several limitations. First, increasing computational power for Sledgehammer brings quickly diminishing returns~\citep{judgement_day}.
+Second, the logic projection and proof reconstruction in a hammer are not straightforward for type systems other than higher-order logic~\citep{coqhammer}. Finally, Sledgehammer's performance hinges on the relevance filtering scheme, a suite of methods based on handcrafted heuristics~\citep{meng2009lightweight} or classical machine learning~\citep{kuhlwein2013mash}. Such approaches are unlikely to efficiently utilize the constantly growing body of proof data.
+
+We argue that all these limitations can be overcome with deep-learning-based approaches. Neural networks have shown remarkable effectiveness in end-to-end problem solving with little or no feature engineering~\citep{krizhevsky2012imagenet, gpt3}. Adopting textual representations with generic neural solutions removes the need for logic projection, ATP solving, and proof reconstruction.
+Moreover, large language models have recently displayed impressive scaling properties with respect to both model size~\citep{kaplan2020scaling} and data~\citep{chinchilla}.
+
+
+\section{\method}
+
+
+
+The goal of premise selection is to find relevant mathematical facts for a given proof state. We focus on selecting premises with a neural model informed by their textual representations instead of relying on fact structures like Sledgehammer~(see Section \ref{sec:sledgehammer}). The core idea of \method is to combine fast retrieval based on representational similarity (\methods) with a more accurate re-ranking (\methode), as outlined in Algorithm \ref{alg:selectAndExpand}. Our method closely follows those of~\citet{nogueira2019passage} and~\citet{contriver}. This hierarchical approach is scalable to large formal libraries containing hundreds of thousands of facts. Below we describe the two-stage \method approach.
+\methods leverages \textit{representation similarity} and is based on batch-contrastive learning similar to the methods of \citet{alemi2016deepmath}, \citet{bansal2019holist}, \citet{han_informal_premise_selection}, or \citet{radford2021learning}. \textsc{Select} embeds premises and proof states into a common latent space and uses cosine similarity to determine their relevance. During inference, it requires only one pass of a neural network to compute the proof state embedding and dot product with cached premise embeddings. \textsc{Select} is hence fast and scalable to large sets of premises. In our experiments, there are between $30$K and $50$K premises in a typical proof state context, from which we select $K_{S} = 1024$ most relevant ones.
+
+\methode scores the relevance of the $K_{S}$ selected premises for the current proof state by analyzing the $(\mathtt{proof\_state}, \mathtt{premise})$ pairs.
+\methode is trained to output the probability of the $\mathtt{premise}$ being relevant to the $\mathtt{proof\_state}$. The $K_S$ premises retrieved by \methods are re-ranked with respect to these probabilities, and the final list comprises of the top $K_{R}$ premises (we set $K_R = K_S$). Having both the premise and the proof state in a single input allows \methode to be more accurate. However, at the same time, it is much slower, as each pair must be scored individually.
+\begin{algorithm}[H]
+   \caption{Premise selection with \method.}
+   \label{alg:selectAndExpand}
+\begin{small}
+\begin{algorithmic}[1]
+\Require
+\Statex $\mathtt{proof\_state}, \mathtt{premises}$ \Comment{proof state to retrieve premises for and database of available premises}
+\Statex $K_{S}, K_{R}$
+\Comment{number of premises to retrieve with \methods and \methode, respectively}
+\State $\mathtt{state\_embedding} \gets  \mathtt{get\_embeddings}(\mathtt{proof\_state})$
+\Comment{\methods stage starts}
+\State $\mathtt{premises\_embeddings} \gets  \mathtt{get\_embeddings}(\mathtt{premises})$
+\State $\mathtt{Cache}(\mathtt{premises\_embeddings})$
+\State $\mathtt{sim\_scores} = \mathtt{state\_embedding} \cdot \mathtt{premises\_embeddings}$
+\State $\mathtt{selected} = \mathtt{premises}[\mathtt{argsort(-sim\_scores)}[:K_{S}]]$
+\State $\mathtt{batch} = []$
+\Comment{\methode stage starts}
+\For{$\mathtt{premise}$ in $\mathtt{selected}$}
+\State $\mathtt{batch.append}((\mathtt{proof\_state}, \mathtt{premise}))$
+\EndFor
+\State $\mathtt{rerank\_scores} \gets \mathtt{get\_rerank\_scores}(\mathtt{batch})$
+\State $\mathtt{top\_premises} = \mathtt{selected}[\mathtt{argsort(-rerank\_scores)}[:K_{R}]]$
+\State \textbf{return} $\mathtt{top\_premises}$
+\end{algorithmic}
+\end{small}
+\end{algorithm}
+\paragraph{Training} We train \method using two alternating tasks: \methods is trained with a modified InfoNCE loss \citep{oord2018representation}, and \methode is trained with the standard binary cross-entropy loss.
+The architecture of \method shares a transformer backbone with specialized linear projections on top (see Figure \ref{fig:select_expand_overview}). For training, we use datasets consisting of $(\mathtt{proof\_state}, \mathtt{premise})$ pairs extracted with a procedure described in Section \ref{sec:datasets}.
+
+During \methods's training, each batch consists of $N$ proof states, $N$ positive premises (one for each proof state), and additional $M$ negative premises sampled from available facts that are not ground truth premises for any of the selected proof states. This gives $N - 1 + M$ negatives per proof state in one batch. We typically use $M=3N$, which differs from standard batch-contrastive learning \citep{radford2021learning}, in which $M = 0$ and negatives are only the other $N-1$ premises in the batch
+\methode is trained using a binary classification objective. For each positive $(\mathtt{proof\_state}, \mathtt{premise})$ pair in the dataset, we construct $15$ negatives from the most likely false positives returned by \methods. Specifically, all the premises $\mathcal{M}$ that are facts that were never used as a premise for $\mathtt{proof\_state}$, are first chosen. Then, the top $1024$ of $\mathcal{M}$ according to \methods are selected, and $15$ are sampled from them to construct negative training pairs.
+
+\paragraph{Evaluation in Isabelle}\label{sec:psm_eval_in_isabelle}
+We outline how premises chosen by \method are used to prove theorems in
+Isabelle. Given a proof state, a list of the $k$ most relevant
+premises $P$ is retrieved. We construct proof steps consisting of a tactic $t$ and a subset
+of premises $S\subseteq P$. Such proof steps are executed in parallel, with a
+timeout of $2$ seconds. The evaluation is successful if any of these proof
+steps completes the proof. For $S$, we pick the top $i$ of $P$, where $i$'s are
+consecutive powers of $2$ up to $2^{10}$, or $0$ for tactics that do not accept
+premises.
+Note that the procedure of trying multiple different subsets of premises is commonly applied in the context of automated theorem proving \citep{malaria2008,kuhlwein2012overview} and similar to the technique implemented in Sledgehammer~\citep{Paulson2012ThreeYO}. The rationale behind this is that the proof procedures implemented in ATPs and high-level ITPs' tactics perform combinatorial search, and providing them with fewer premises to restrict their search space is beneficial.
+
+\subfile{sections/datasets}
+\subfile{sections/experiments}
+
+
+
+\section{Related work}
+
+
+
+Premise selection becomes a crucial task whenever proving theorems
+automatically within a large formal library. Moreover, this task has several
+unique aspects that are challenging from the perspective of learning-based
+approaches. Therefore, there exist multiple works that tackle learning premise
+selection (either explicitly or implicitly) applying various methods focusing
+on different aspects.
+
+Many works employ classical machine learning like Bayesian and kernel
+methods~\citep{kuhlwein2012overview, alama},
+$k$-NN~\citep{fact-selector-isabelle}, or decision trees
+\citep{atpboost,pamper,lean-premsel}. The common weakness of these approaches is
+the necessity of using hand-engineered features, whereas faster, simpler training is an advantage.
+
+\citet{alemi2016deepmath} were the first to apply deep learning to premise selection,
+thus dispensing with the hand-designed features completely. Their approach was evaluated
+in an automated theorem proving setting and not in a proof assistant, as is Magnushammer.
+They also implicitly learn embeddings of conjectures and premises, which are concatenated and
+passed through a shallow network, whereas the training signal comes from the logistic loss.
+In contrast, Magnushammer demonstrated the strength of training with the
+contrastive loss, where the obtained embeddings just need to be passed through a
+simple cosine similarity measure to provide high-quality rankings.
+
+Most of the methods explicitly targeting the premise selection problem
+(including this work) retrieve a \textit{ranking} of independently treated premises.
+In contrast, \citet{piotrowski2020stateful} aimed at modelling the implicit
+dependencies \textit{between} the premises and used LSTM-based language models
+to produce structured sequences of premises. However, the premises were treated
+there as opaque tokens, not giving the neural model the ability to inspect the
+statements of the premises.
+
+Effective deep learning approaches often leverage the explicit structure of
+mathematical expressions using graph neural networks~\citep{wang2017premise,
+paliwal2019graph, goertzel2022isabelle}.
+Our work uses the transformer architecture \citep{vaswani2017attention}, which
+is highly scalable and capable of producing powerful representations of raw text
+data.
+
+Pre-trained transformer language models have been applied to various aspects of
+theorem proving, including autoformalization~\citep{autoform_wu,
+jiang2022draft}, conjecturing~\citep{conj}, and tactic prediction / proof step
+search~\citep{yang2019learning, polu2020generative, han2021proof,
+lample2022hyper, curr}. The works from the last category often implicitly deal with
+premise selection by treating premises as names / tokens to be generated and not
+inspecting their statements. The application of generative language models to
+statement-aware premise selection has been limited, as the length of the
+possible premises often greatly exceeds the context of several thousand tokens
+that the models are designed to handle. Thor~\citep{jiang2022thor} circumvents
+the difficulty of premise selection by invoking Sledgehammer.  In contrast,
+\method \textit{retrieves} rather than \textit{generates} to overcome the context length
+limitation.  Therefore it can be used in tandem with other models~(its
+combination with Thor is demonstrated in Section~\ref{sec:experiments}).
+
+Batch-contrastive learning is widely used in speech
+\citep{oord2018representation}, text \citep{contriver}, image \citep{simclr}
+and image-text \citep{radford2021learning} representation learning. These
+methods have proven effective despite the possibility of false negatives
+occurring in contrastive batches~\citep{robinson2021contrastive}. The \methods
+phase of our premise selection model relies on in-batch negative examples to
+train the retriever, similar to HOList~\citep{bansal2019holist} and
+Contriever~\citep{contriver}. Like HOList, we mine additional negatives, which
+we found crucial for performance. The \methode stage closely resembles
+\citep{nogueira2019passage}, but instead of using BM25, we jointly train
+retrieval and re-ranking, utilizing premises retrieved by \methods as hard
+negatives for \methode training.
+\citet{han_informal_premise_selection} use contrastive learning in informal
+premise selection.
+Concurrently to our work, \citet{yang2023leandojo} develop a premise selection
+method for Lean also using contrastive learning in a way similar to our \methods
+method, but without the \methode stage.
+
+There are multiple lines of work considering datasets based on formal theorem proving.
+These include benchmarks like ProofNet~\citep{azerbayev2022proofnet} for Lean, and miniF2F~\citep{zheng2021minif2f} that supports multiple ITPs.
+These datasets only focus on evaluation, not providing data for training the models. Another line of research focuses on benchmarking machine learning models' reasoning capabilities while also providing training data \citep{bansal2019holist, li2020isarstep, han2021proof}. Existing public datasets for premise selection include the ones introduced in \citep{alama,piotrowski2020stateful}. In comparison to these works, we publish the data in high-level, textual format, as seen in Isabelle, instead of low-level, structured languages such as TPTP \citep{tptp}. %On top of that, we contribute additional proofs generated with Sledgehammer, which increase both the size and the diversity of the data.
+
+There exists a rich body of work developing complex hammers systems for
+different proof assistants
+\citep{Paulson2012ThreeYO, holyhammer, hol4hammer, coqhammer}. Unlike the
+traditional hammers, our method does not depend on external ATPs and requires
+little domain-specific knowledge.
+
+
+
+\section{Limitations and future work}
+
+\paragraph{Other proof assistants} \method treats proof states and premises as text and makes no assumptions about their structure. As such, no feature engineering is needed to apply it to other proof assistants. We conjecture that \method can prove effective in other environments because it is agnostic to the logic or type system used.
+We plan to evaluate Magnushammer in Lean proof assistant on ProofNet~\citep{azerbayev2022proofnet} and miniF2F~\citep{zheng2021minif2f}  benchmarks, using the recently published LeanDojo toolkit~\citep{yang2023leandojo} that also provides baselines for comparison.
+
+\paragraph{Richer proof and premise representations}  \method utilizes the textual representation of the proof state given by Isabelle. This representation, however, does not provide complete semantic information about the referenced objects. Including function definitions and object types in the proof state representation might further improve performance.
+
+\paragraph{Modelling full proof steps} Combining language models with external premise selection tools significantly improves their theorem-proving performance, as demonstrated by \citet{jiang2022thor} and our work. A natural step would be to further integrate premise selection with language models into a single model capable of generating proof steps containing relevant retrieved premises. A proof of concept of this idea was explored by \citet{fps_with_lms}. This would also allow to model existing implicit dependencies between returned premises, which was shown beneficial by \citet{piotrowski2020stateful}.
+We believe that recent advances in retrieval-augmented language models \citep{wu2022memorizing, borgeaud2022improving} could facilitate progress in this direction.
+
+
+
+

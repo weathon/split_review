@@ -1,8 +1,8 @@
 # The Superposition of Diffusion Models
 
 - Decision: Accept
-- Avg Score: 3.25
-- Scores: 6, 6, 1, 0
+- Avg Score: 7.33
+- Scores: 6, 6, 10
 
 ## Abstract
 The Cambrian explosion of easily accessible pre-trained diffusion models suggests a demand for methods that combine multiple different pre-trained diffusion models without incurring the significant computational burden of re-training a larger combined model. In this paper, we cast the problem of combining multiple pre-trained diffusion models at the generation stage under a novel proposed framework termed superposition. Theoretically, we derive superposition from rigorous first principles stemming from the celebrated continuity equation and design two novel algorithms tailor-made for combining diffusion models in SuperDiff.  We demonstrate that SuperDiff is scalable to large pre-trained diffusion models as superposition is performed *solely through composition during inference*, and also enjoys painless implementation as it combines different pre-trained vector fields through an automated re-weighting scheme. Notably, we show that SuperDiff is efficient during inference time, and mimics traditional composition operators such as the logical $\texttt{OR}$ and the logical $\texttt{AND}$. We empirically demonstrate the utility of using SuperDiff for generating more diverse images on CIFAR-10, more faithful prompt conditioned image editing using Stable Diffusion, and improved unconditional *de novo* structure design of proteins.

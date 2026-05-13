@@ -1,0 +1,573 @@
+\title{Combining Induction and Transduction for Abstract Reasoning}
+
+\begin{abstract}
+When learning an input-output mapping from very few examples, is it better to first infer a latent function that explains the examples, or is it better to directly predict new test outputs, e.g. using a neural network?
+We study this question on ARC by training neural models for \emph{induction} (inferring latent functions) and \emph{transduction} (directly predicting the test output for a given test input).
+We train 
+on synthetically generated variations of Python programs that solve ARC training tasks.
+We find inductive and transductive models solve different kinds of test problems, despite having the same training problems and sharing the same neural architecture:
+Inductive program synthesis excels at precise computations, and at composing multiple concepts, while transduction succeeds on fuzzier perceptual concepts.
+Ensembling them approaches human-level performance on ARC.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Robust generalization from few examples remains one of the most important ways in which human intelligence surpasses AI.
+Much recent work views this generalization as a form of abstract reasoning: Given just a few training input-outputs $\vx_\text{train},\vy_\text{train}$, together with a test input $x_\text{test}$, the idea is to predict the corresponding test output $y_\text{test}$ using reasoning strategies such as analogical reasoning, chain-of-thought, inductive program synthesis, or transductive prediction~\citep{Thoms2023SolvingAV,wang2023hypothesis,witt2023dividealignconquerstrategyprogramsynthesis,lee2024reasoningabilitieslargelanguage,rex,hocquette2024relational,codeit}.
+The Abstraction and Reasoning Corpus~(\cite{chollet2019measure}, henceforth ``ARC'') is a few-shot learning benchmark that tests the ability to rapidly learn a diverse range of new skills, and apply them to new situations.
+Each ARC task is presented as input-outputs over colored grids, but can engage  concepts such as occlusion, pathfinding, collision, symmetry, gravity, bouncing, counting, etc., making ARC  essentially a composite of many reasoning datasets, and one of the more interesting unsolved benchmarks that stresses broad-coverage few-shot learning (\Cref{fig:arc_tasks}).
+\begin{figure}[h]
+    \centering
+\includegraphics[width = \textwidth]{figures/arc_examples.pdf}
+\caption{Few-shot learning tasks from the Abstraction and Reasoning Corpus (ARC).
+Each task typically has 2-5 input-output examples.
+Here we show just one input-output example per task.}
+\label{fig:arc_tasks}
+\end{figure}
+Here we study neural methods for induction and transduction, using few-shot learning problems from ARC  as our testbed.
+\emph{Induction} means first finding a function $f$ where $f(\vx_\text{train})\approx \vy_\text{train}$, and then predicting $y_\text{test}=f(x_\text{test})$.
+\emph{Transduction} instead outputs $y_\text{test}$ without explicit construction of an intermediate function $f$.
+Intuitively, induction captures the notion that a learner should first explain the training data, then use that explanation to make predictions.
+Inductive learners can perform better by spending more time optimizing or searching for better explanations, using the training examples $\vx_\text{train},\vy_\text{train}$ to score candidate functions.
+Transduction instead captures the intuition that the training examples themselves should play a direct role in generating new predictions, and that successful prediction need not require an explicit explanation.
+See~\Cref{fig:induction_and_transduction}.
+
+\begin{figure}[h]
+\includegraphics[width = \textwidth]{figures/induction_and_transduction.pdf}
+\caption{Induction generates an intermediate function $f$ to explain training input-outputs.
+Transduction directly predicts the test output, for example using a neural network.}\label{fig:induction_and_transduction}
+\end{figure}
+
+We train neural networks for both induction and transduction by generating a large corpus of synthetic  problems.
+We discover that neural models for induction and transduction are strongly complementary.
+We believe this is surprising:
+Although any pair of models would generally solve somewhat different problems, usually this can be attributed to different priors, data, or architecture.
+Instead, we find that, \emph{even controlling for priors, data, and architecture, 
+most problems solved by induction were not solved by transduction, and vice versa.}
+Moreover, induction and transduction can be trivially ensembled by using induction to generate candidate functions $f$ until either a satisfactory function is found (e.g. $f(\vx_\text{train})=\vy_\text{train}$) or until a test-time compute budget is reached, at which point, transduction kicks in as a fallback:
+That they are complementary has practical implications.
+
+Our study is tightly linked to program synthesis.
+We represent functions $f$ as Python code, meaning that induction synthesizes programs.
+We train transduction models on LLM-produced Python scripts, meaning that transduction is trained on the input-outputs of symbolic code.
+Although program learning has long been a popular vision of how general AI could work~\citep{solomonoff1964formal, schmidhuber2004optimal,hutter2004universal}, the dominant theory has always been one of explicit code generation (induction), rather than implicitly teaching neural networks to imitate code (transduction).
+Our work puts this assumption to the test.
+
+Testing these neural methods requires a large dataset of function-learning problems, which is challenging to generate because not only must we make novel functions, but we must also make good inputs to those functions.
+Consider the range of transformations in \Cref{fig:arc_tasks}:
+What counts as a good input for one function is unlikely to work for another.
+To address this challenge, our data generator first %
+produces
+a deterministic Python function for $f$, and then a probabilistic program for sampling inputs to $f$,  finally executing those programs to produce input-outputs.
+This helps  generate function inputs that are appropriate for the underlying transformation, and constrains $\vx_\text{train},\vy_\text{test}$ to be explainable by a deterministic mapping.
+
+
+
+
+
+We contribute the following:
+\begin{enumerate}[leftmargin=*]
+    \item A study finding that neural models for induction and transduction are strongly complementary, even when trained on the same problems.
+    This contradicts seminal neural program synthesis work (\cite{devlin2017robustfill}, which found induction superior), and contradicts the findings of the leading ARC team (\cite{mindsai}, which advocates transduction with test-time training).
+    \item An automated data generation methodology that starts with 100-160  program solutions for ARC training tasks, and expands them to make 400k new problems paired with Python solutions.
+    \item A study of how these methods scale.
+    We find performance saturates quickly when increasing manually-labelled data, but scales with compute, both at training and testing time.
+    \item 
+    Analysis of families of problems solved by each approach, and how they compare to humans.
+    
+\end{enumerate}
+
+
+
+
+
+\section{Neural Models for Induction and Transduction}
+
+We consider few-shot supervised learning problems where the learner is trained to map members of an input space $\mathcal{X}$ to output space $\mathcal{Y}$.
+For $K$-shot learning, we receive $K$ training input-outputs $(\vx_\text{train},\vy_\text{train})\in\mathcal{X}^K\times \mathcal{Y}^K$,  together with a single test input $x_\text{test}\in\mathcal{X}$, and predict $y_\text{test}\in\mathcal{Y}$.
+Our neural models for $K$-shot learning are meta-learned~\cite[\emph{inter alia.}]{mishra2017simple} using meta-learning data further annotated with a ground-truth function $f:\mathcal{X}\to \mathcal{Y}$, which supervises the induction model.
+Below we define the training and use of these models.
+
+\textbf{Definition: Neural networks for induction and transduction.} 
+A neural network for transduction is a  function $\texttt{t}$ that maps $(\vx_\text{train},\vy_\text{train}, x_\text{test})$
+to a distribution over $y_\text{test}$, and which has learnable parameters $\theta$.
+In other words, $\texttt{t}_\theta:\mathcal{X}^K\times \mathcal{Y}^K\times\mathcal{X}\to \Delta(\mathcal{Y})$, 
+where the notation $\Delta(S)$ means the set of distributions over $S$.
+We can also write this as a conditional distribution, 
+$\texttt{t}_\theta(y_\text{test}|\vx_\text{train},\vy_\text{train}, x_\text{test})$.
+A neural network for induction is a  function $\texttt{i}$ that maps $(\vx_\text{train},\vy_\text{train}, x_\text{test})$
+to a distribution over functions $f$ that map $\mathcal{X}$ to $\mathcal{Y}$, with learnable parameters $\theta$.
+In other words, $\texttt{i}_\theta:\mathcal{X}^K\times \mathcal{Y}^K\times\mathcal{X}\to \Delta(\mathcal{X}\to \mathcal{Y})$, which we can write as a conditional distribution $\texttt{i}_\theta(f|\vx_\text{train},\vy_\text{train}, x_\text{test})$.
+
+\textbf{Training induction and transduction.}
+Both types of models are trained via meta-learning.
+We assume a meta-learning dataset $\mathcal{D}$ of few-shot learning problems, each equipped with a ground-truth function $f$ such that $f(x)=y$ for every $x,y$ in $(\vx_\text{train},\vy_\text{train})$ and $(x_\text{test}, y_\text{test})$.
+Inductive and transductive models are meta-trained to minimize the following losses:
+\begin{align}
+\textsc{Transduction Loss}&=\E_{(\vx_\text{train},\vy_\text{train}, x_\text{test}, y_\text{test}, f)\sim\mathcal{D}}\left[ -\log \texttt{t}_\theta(y_\text{test}|\vx_\text{train},\vy_\text{train}, x_\text{test}) \right]\\
+\textsc{Induction Loss}&=\E_{(\vx_\text{train},\vy_\text{train}, x_\text{test}, y_\text{test}, f)\sim\mathcal{D}}\left[ -\log \texttt{i}_\theta(f|\vx_\text{train},\vy_\text{train}, x_\text{test}) \right]
+\end{align}
+
+\paragraph{Testing induction and transduction.}
+After meta-learning the models encounter a test-time few-shot learning task $(\vx_\text{train},\vy_\text{train}, x_\text{test})$.
+Transductive models predict their most likely output for $y_\text{test}$ (approximated via beam search).
+Inductive models sample a test-time budget of $B$ functions $f_1\cdots f_B$, which are filtered by $(\vx_\text{train},\vy_\text{train})$, and  finally used to predict $y_\text{test}=f(x_\text{test})$.
+Writing $\hat{y}_\text{test}$ for the predicted test 
+output:
+\begin{align}
+\textsc{Transduction: } &\hat{y}_\text{test}=\argmax_{y\in \mathcal{Y}} \texttt{t}_\theta(y|\vx_\text{train},\vy_\text{train}, x_\text{test})\\
+\textsc{Induction: } &\hat{y}_\text{test}\sim\text{Uniform}\left( \mathcal{F} \right)\\
+&\phantom{tetestttst}\text{where }\mathcal{F}=\left\{ f_b(x_\text{test}) \;:\; \text{for } 1\leq b\leq B\text{ if }f_b(\vx_\text{train})=\vy_\text{train}   \right\}\nonumber\\
+&\phantom{tetestttst}\text{\phantom{where }}f_b\sim \texttt{i}_\theta(f|\vx_\text{train},\vy_\text{train}, x_\text{test})\nonumber
+\end{align}
+
+\textbf{Combining induction and transduction.}
+Induction allows checking candidate hypotheses against the training examples. Therefore, we know when induction has found a plausible solution--but sometimes it fails to find any solution.
+Transduction has the opposite property: We can't check if its predictions match the training examples, but it always offers a candidate answer. Therefore we ensemble by attempting induction first, then transduction if none of the candidate hypotheses explained the examples:
+\begin{align}
+    \textsc{Ensemble: } &\hat{y}_\text{test}\sim \text{Uniform}\left( \mathcal{F} \right)\text{ if }\mathcal{F}\not=\varnothing\nonumber\\
+&\hat{y}_\text{test}=\argmax_{y\in \mathcal{Y}} \texttt{t}_\theta(y|\vx_\text{train},\vy_\text{train}, x_\text{test})\text{ if }\mathcal{F}=\varnothing
+\end{align}
+
+\paragraph{Instantiating the framework for ARC.}
+Every input from $\mathcal{X}$ and output from $\mathcal{Y}$ is a 2D grid ranging from 1--30 pixels per side, with each pixel containing one of ten colors.
+Because ARC  tasks are highly diverse yet typically have an abstract program-like structure, we represent the underlying function $f$  as Python code, which is computationally universal, and so possible in principle of solving any ARC  task.
+Therefore the induction model must generate Python code, so we initialize our models with Llama3.1-8B-instruct~\citep{dubey2024llama3herdmodels} because it was pretrained on source code.\footnote{Our preliminary experiments suggested Llama3.1-8B-instruct was better than Mistral-7B-v0.3,
+Qwen2-7B-Instruct, and
+deepseek-coder-6.7b-instruct}
+We encode 2D colored grids as strings using 1 token per pixel, and use newlines to delimit rows (\Cref{app:inputencoding}).
+We then meta-learn by further fine-tuning Llama3.1-8B-instruct for induction or transduction using a synthetically-generated corpus of  problems, described next.
+
+
+
+
+\section{Generating Datasets for Induction and Transduction}
+
+
+Generating ARC-style tasks is challenging because of the diversity of  concepts that can occur in ARC.
+It is also challenging because we need to generate not just a function, and also inputs that serve as good  examples for that function.
+
+At a high level, our dataset grows out of 100 manually-written Python programs, each of which both solves a given task (function $f$), and also randomly generates new input grids.
+We call these 100 manually-written programs \textbf{seeds.}
+Each seed %
+is commented with natural language describing the core intuitions behind the problem.
+We then use a large language model to mutate and recombine the seeds, producing many thousands of programs (\Cref{fig:problemgeneration}).
+
+\begin{figure}[h]
+\includegraphics[width = \textwidth]{figures/problemgeneration.pdf}
+\caption{Synthetic data generation pipeline, starting with human-written programs (seeds).}\label{fig:problemgeneration}
+\end{figure}
+
+\paragraph{The structure of seeds.}
+Each seed consists of three parts:
+\begin{enumerate}
+    \item  A \textbf{natural language description} of its specific ARC task---including how to solve that task---represented as a Python comment at the top of the seed.
+    \item A Python function \texttt{transform\_grid} corresponding to the function $f$ in the manuscript, which maps each input grid of a specific ARC task to its corresponding output grid.
+    \item A Python function   \texttt{generate\_input}, which takes no arguments, and which randomly generates new inputs to $f$ (new inputs to \texttt{transform\_grid}).
+\end{enumerate}
+
+\paragraph{Prior knowledge.} The seeds impart a prior upon the system by demonstrating good programs for solving training tasks.
+We further codified much of this prior into a  Python library containing code that we found useful across many seeds, such as subroutines for generating random sprites, detecting symmetries, or extracting objects (\Cref{sec:common}).
+Synthetic problems can use that same library.
+
+However, this prior knowledge is different from previous \emph{Domain Specific Languages} for ARC~\citep{codeit, icecuber, ainooson2023neurodiversityinspiredsolverabstraction}.
+Domain Specific Languages restrict the class of allowed programs by only allowing stereotyped combinations of domain-specific primitives.
+We still allow arbitrary Python code, which helps cover the long tail of diverse tasks.
+\paragraph{Remixing the seeds.}
+To generate a larger synthetic dataset we ``remix'' the seeds using LLMs.
+Each new  synthetic ARC problem is generated by a three stage pipeline (\Cref{fig:rag}):
+\begin{enumerate}
+    \item  A new natural language description is sampled by prompting an LLM with seed natural language descriptions, effectively using in-context learning to recombine and mutate elements of different problems, in the spirit of self-instruct~\citep{wang2023self}.
+    \item Code is generated for that new description via Retrieval Augmented Generation (RAG:~\cite{lewis2020retrieval}).
+    Our RAG pipeline retrieves seeds with similar descriptions, and prompts an LLM to generate code for the new description, given the retrieved seeds.%
+    
+    \item The newly created   \texttt{generate\_input} is executed to make inputs, which are passed to \texttt{transform\_grid} to produce input-output grids.
+\end{enumerate}
+\Cref{fig:synthetic-example} illustrates example problems generated by our pipeline, with further examples \href{https://www.basis.ai/arc_interface/arc}{\color{blue}\textbf{visualized at this link.}}
+Unless otherwise mentioned, we create synthetic datasets with GPT4o-mini and ada-002.
+
+\begin{figure}[h]
+\includegraphics[width = 0.95\textwidth]{figures/arc_synthetic2.pdf}
+\caption{Example synthetic ARC problems generated by our pipeline.
+Concepts are generated in a comment near the top of the Python script as part of the natural language description of the seed.}\label{fig:synthetic-example}
+\end{figure}
+
+
+
+
+\section{Empirical Study of Induction and Transduction}
+
+
+We train inductive and transductive models %
+with the goal of understanding (1) how the methods compare; (2) how performance scales with train-time effort; and (3) how performance scales with test-time compute (for induction only, as it allows drawing more samples at test time to improve performance).
+We report performance on the 400-problem public validation split of ARC, which is harder than the training split.
+The systems described in this section learn from a 100-problem subset of the training split, specifically problems for which we created seeds.
+
+\paragraph{Induction and Transduction are strongly complementary.}
+Despite training on the exact same problems, inductive and transductive models solve  different tasks, and neither approach is dramatically more effective than the other.
+And although these methods have a similar overall solve rate, \emph{most problems solved by induction are not solved by transduction, and vice versa} (\Cref{fig:complementary}A).
+
+An alternative explanation is that induction and transduction are not actually complementary, but instead that, having trained two neural networks with different random initializations, they simply solved different problems due to randomness at train or test time.
+To test this alternative explanation, we trained many models with different random initializations.
+We find that the problems solved by induction/transduction are surprisingly stable across these different runs (\Cref{fig:complementary}B).
+In other words, some problems are friendlier to induction, and others friendlier to transduction (\Cref{fig:induction_and_transduction_interesting}).
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{figures/science.pdf}
+    \caption{(A) Induction and transduction solve different problems, where solve means predicting the right output given 2 tries.
+    Venn diagram for models trained on 100k synthetic problems generated using gpt4o-mini.
+    (B) Training many models with different random seeds, and then measuring the correlation between solved tasks by different models.
+    Solved tasks strongly correlates with other models of the same class but not the other class.
+    (C) Statistical significance test evaluating  the null hypothesis that correlation is independent of whether a model is inductive/transductive.   }
+    \label{fig:complementary}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/arc_solved.pdf}
+    \caption{Example tasks solved by induction/transduction/both.
+}    \label{fig:induction_and_transduction_interesting}
+\end{figure}
+
+\paragraph{Performance scales with dataset size, but quickly saturates with increasing number of seeds.}
+We trained models while systematically varying the number of human-created seeds we use, and varying the amount of synthetic data generated from those seeds (\Cref{fig:scaling}).
+Performance improves with increasing training data for fine-tuning (increasing synthetic data), but saturates for increasing quantity of human-created seeds.
+We conjecture that this saturation occurs because each seed serves to introduce a few core concepts, and that after enough seeds, essentially all of the important concepts have been demonstrated.
+This suggests that, beyond a critical threshold number of seeds, the method can scale with increasing amounts of compute without demanding further human data labeling.
+Looking beyond ARC, this means that our methodology could probably be applied to other few-shot function-learning problems using a modest amount of manual data labeling.
+
+\begin{figure}[H]
+    \centering  \includegraphics[width=\linewidth]{figures/scalinglaw.pdf}
+        \caption{Increased manual human effort (\# seeds) does not significantly increase performance, but increasing compute spent generating synthetic data increases performance of the final model.}
+    \label{fig:scaling}
+\end{figure}
+\paragraph{Induction performance scales with test-time compute.}
+We vary the test-time sampling budget for induction, finding an almost monotonic increase in solve rate (\Cref{fig:induction_scaling}, left).
+In principle, drawing additional samples runs the risk of discovering solutions that are ``false-positives,'' meaning they fit the training examples without correctly predicting the test output. %
+In practice, about 9\% of samples that fit the training examples  are false-positives.
+\Cref{fig:induction_scaling} (right) shows that about half of this 9\% corresponds to problems where the majority of the probability mass is still placed on the correct output, meaning that a simple majority vote scheme would squash any false positives (e.g. clustering in AlphaCode~\cite{li2022competition}).
+
+
+\begin{figure}[h]
+    \centering
+    \begin{tabular}{cc}    
+    \includegraphics[width=0.45\linewidth]{figures/induction_pass_at_k_oracle_with_codeit.pdf}
+         & 
+         \includegraphics[width=0.4\linewidth]{figures/induction_false_positive_rate.pdf}
+    \end{tabular}
+    \caption{Left: Sample+Oracle assumes an oracle that selects one of the sampled programs.
+    It upper-bounds the accuracy of  randomly selecting one program consistent with the training examples (Sample+Filter). Induction model trained with 100k gpt4-description-gpt4omini-codegen data.
+    CodeIt~\citep{codeit} is a recent neural program induction model for ARC.
+    Right: Histogram of false positive rate.
+    Of the problems that have false positives, about half have a false positive rate less than 0.5, meaning that most (filtered) samples predict the right test output. }
+    \label{fig:induction_scaling}
+\end{figure}
+
+\textbf{Stronger LLMs make better synthetic data, and induction is more sensitive to data quality.}
+To save costs, the previous results all used GPT4o-mini to generate synthetic data.
+To understand the value of stronger models we generated 100k synthetic problems using GPT4 to generate natural language problem descriptions (but GPT4o-mini still generated the code).
+The richer and more diverse synthetic problems elicited from GPT4 significantly improved performance, but primarily for induction, while transduction was less sensitive to data quality (\Cref{tab:single_data}).
+
+\begin{table}[H]
+\centering
+\caption{Val Acc: \% validation tasks that are correctly solved in 2 tries.} %
+\label{tab:single_data}
+\begin{tabular}{rcl}
+\toprule
+System            & Val Acc. & Finetuning Data                        \\\midrule
+Ensemble          & 26.50\%  & \multirow{3}{*}{GPT-4  for generating descriptions, GPT-4o-mini for code} \\
+Induction, 2048 samples    & 18.78\%  &                                      \\
+Transduction, beam size 20 & 15.25\%  &                                      \\ \midrule
+Ensemble          & 19.50\%  & \multirow{3}{*}{GPT-4o-mini for generating descriptions and code} \\
+Induction, 2048 samples    & 11.07\%  &                                      \\
+Transduction, beam size 20 & 13.50\%  &                                      \\ \bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Scaling our method}
+
+Motivated by our findings so far, we scaled up our method by producing two larger datasets:
+
+\textbf{ARC-Heavy: 200k problems from 160 seeds.}
+The purpose of ARC-Heavy is to scale our method in an easily reproducible way, while also filling any gaps in its mastery of the training split.
+We first ran models from \Cref{sec:science}
+on the training split to identify 60 problems that they still struggled with, for which we produced 60 new seeds, giving 160 seeds in total.
+From those seeds we produced 200k synthetic problems, with GPT4 generating natural language descriptions and GPT4o-mini generating the corresponding Python code.
+
+\textbf{ARC-Potpourri: 400k problems from heterogeneous sources.}
+The purpose of ARC-Potpourri is to assemble the biggest dataset that we could, even if it comes from a messy mixture of sources.
+Starting with ARC-Heavy we added all synthetic data from \Cref{sec:science}.
+We further added 100k transduction-only training examples from  ReARC~\citep{rearc}.
+
+\textbf{Test-time improvements.}
+We improve transduction with test-time training (abbreviated TTT; \cite{sun2020test}) and a reranking scheme that  augments each problem and predicts the most likely output under multiple augmentations 
+
+\ref{app:ttft}).
+We expand our sampling budget to 20k programs. 
+
+We call our resulting systems BARC.
+\Cref{tab:validationcomparison} shows the performance of various BARC models.
+Both transduction and induction are effective, with induction solving slightly more problems, until adding test-time training/reranking
+, after which transduction does slightly better.  
+An ensemble scores 56.75\%, 
+surpassing previously published methods.
+Releasing this work later allowed \cite{ttt} to improve that score to 61.9\% via better test time training of our transduction model, while using our induction model as-is.
+But absent our models---including the program synthesizer---they instead score lower, suggesting that sophisticated test time training does not fully substitute for program synthesis.
+Our best model performs nearly as well as the average human (56.75\% vs. 
+60.2\%) but much worse than the best humans (98\%).
+Model outputs \href{https://www.basis.ai/arc_interface/arc}{\color{blue}\textbf{visualized here.}}
+\begin{table}[h]
+    \centering
+    \caption{\% validation tasks correctly solved in 2 tries.
+    Human results from~\cite{legris2024harcrobustestimatehuman}.    
+    }
+{\setlength{\tabcolsep}{0.4em}
+\centering
+\begin{tabular}{rcl}
+\toprule 
+System&Val Acc.&Fair comparison?\\\midrule
+\multicolumn{1}{l}{\textbf{ARC-Heavy: BARC models}}& & \\
+Induction, 10k samples, majority vote & 30.50\%& --- \\
+Transduction (no TTT)& 19.25\%& --- \\
+Ensemble (no TTT)& 37.50\%&---\\
+Transduction (TTT) & 29.75\%& --- \\
+Ensemble (TTT)& 43.25\%&---\\
+\midrule
+\multicolumn{1}{l}{\textbf{ARC-Potpourri: BARC models}}& & \\
+Induction, 20k samples, majority vote & 38.00\%& --- \\
+Transduction (no TTT, no reranking)& 29.125\%& --- \\
+Transduction (reranking, no TTT)& 35.25\%& --- \\
+Transduction (TTT, no reranking
+)& 39.25\%& --- \\
+Transduction (TTT + reranking)& 43.00\%& --- \\
+Ensemble (TTT + reranking)& 56.75\%&---\\
+\midrule
+\midrule
+CodeIt~\citep{codeit}&15\%&Yes, only trains on training set\\\midrule
+Claude-3.5 / \cite{drawmoresamples} & 21\% / 42\%&\multirow{1}{*}{Yes, but closed LLMs at test time}\\\midrule
+\cite{icecuber}&39\%&No, designed by looking at val set\\\hline
+\cite{ttt}, w/o our models&47.1\%&Yes\\
++ensembled with \& using both our models&61.9\%&No, builds on our models\\
+\midrule
+Avg/Best Human&60.2\% / 97.8\%& \multirow{1}{*}{Yes}\\\bottomrule
+\end{tabular}
+}
+    \label{tab:validationcomparison}
+\end{table}
+
+\textbf{Scaling down our method.}
+Our flagship model is too expensive to run on the private test set hosted by Kaggle.
+We scale down by omitting test-time training, only sampling 336 programs, and reducing the transduction beam size to 3.
+This scores 19\% on Kaggle and 36.5\% on validation.
+\Cref{tbl:kaggle} shows that program synthesis is less effective given this smaller search budget.
+Given the large-compute effectiveness of program synthesis, this suggests a strong payoff for  smarter neural program search.
+\begin{table}[h]
+    \centering
+        \caption{Smaller version of our model evaluated on the private test and public validation splits}
+    \label{tbl:kaggle}
+    \begin{tabular}{rcc}\toprule
+    &Private Test Set&Public Validation Set\\\midrule
+    Transduction (no TTT, beam size 3)  & 18\%& 32.25\% \\
+    Induction, 384 samples&4\% & 14\%\\
+      Ensemble   & 19\%&36.5\%\\\bottomrule
+    \end{tabular}
+\end{table}
+
+
+\section{Which problems are easier for the models, and for humans?}
+
+
+\paragraph{Do problems that challenge humans also challenge the model, and vice-versa?}
+\begin{wrapfigure}{r}{0.5\textwidth}     
+\includegraphics[width = 0.5\textwidth]{figures/human_analysis.pdf}
+\caption{Human vs model performance across 5 difficulty levels.
+\end{wrapfigure}We sort ARC validation problems into 5 equally-sized difficulty classes using data from~\cite{legris2024harcrobustestimatehuman}.
+\Cref{fig:human} illustrates a peculiar relationship between human and model accuracy:
+All models surpass human performance
+on the hardest problems, but underperform on the easiest problems.
+Because our models train on simple Python programs, this suggests some problems are simple in code and learnable by transformers, but very hard for people---and
+conversely that people possess priors allowing effortless solution of problems beyond what our Python program generator produces.
+For problems of typical difficulty, the model roughly tracks human performance, and across all difficulty levels, transduction and induction serve complementary roles, even when augmented with test time training.
+\paragraph{Which concepts are easier for the models?} We test on ConceptARC~\citep{moskvichev2023the}, an alternative ARC-style test-set which classifies its tasks into %
+``concept groups'' each exemplifying a single isolated high-level concept such as ``sameness'' or ``above vs below.''
+We use models trained on ARC-Potpourri, finding that specific concept categories are easier for induction or transduction (\Cref{fig:conceptarc}).
+We find an intuitive division of labor between the two approaches:
+Concept groups such as counting are best solved with symbolic code, while transduction better handles perceptual processes such as judging whether a shape is more horizontal or more vertical, or more top/bottom.
+
+ConceptARC reveals another dimension along which transduction and induction differ: 
+Because ConceptARC illustrates one concept per problem, there is no need to compose many concepts together.
+Therefore the induction model, which is uniquely equipped for symbolic composition, loses a key advantage.
+Transduction has more limited composition capabilities but can instantiate individual concepts in flexible subsymbolic ways, which could explain why it excels on ConceptARC.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/conceptarc2.pdf}
+    \caption{ConceptARC accuracy by concept group. Concept groups sorted left-to-right by ratio of inductive to transductive performance. IceCube is the original ARC Kaggle winner~\citep{icecuber}.
+    We report pass@3 because \cite{moskvichev2023the} report accuracy given 3 attempts.}
+    \label{fig:conceptarc}
+\end{figure}
+
+
+
+
+\section{Related Work}
+
+
+\textbf{ARC } was originally designed to challenge conventional deep learning and spur progress on alternative paradigms~\citep{chollet2019measure}.
+The first wave of successful approaches used discrete program search over domain-specific programming languages, including the original Kaggle winner~\citep{icecuber}.
+These symbolic approaches held their own against GPT-4~\citep{wang2023hypothesis},
+but have recently been surpassed by transductive architectures using test-time training~\citep{mindsai}, and by LLM-guided program generation~\citep{drawmoresamples}.
+ARC has so far resisted conventional neural and symbolic approaches, but is solvable for adult humans, and to some extent, children~\citep{legris2024harcrobustestimatehuman,opielka2024largelanguagemodelssolve}. %
+
+\textbf{Code generation via LLMs} is done  in many recent works~\citep{li2022competition,gao2023pal,chen2021evaluating,austin2021program}.
+We most directly build on~\cite{li2024programmingexamplesolvedllms} and \cite{drawmoresamples}.
+The former fine-tunes LLMs for inductive program synthesis using LLM-generated variations of human-written programs.
+While there are many technical differences, a key factor is that
+we generate function inputs by synthesizing an \texttt{input\_generator} function, rather than have an LLM directly generate possible inputs.
+This matters because an LLM alone could not generate complex, precisely-correct inputs such as ARC grids.
+This potentially makes our work applicable to other few-shot generalization problems with complex input-spaces such as webpages, robot planning, etc.
+\cite{drawmoresamples} samples many Python programs from GPT4o: Comparable to our induction model, but instead of fine-tuning, it uses prompting.
+Fine-tuning forced us to create a dataset of new problems, which created the opportunity for exploring transductive models.
+Classic work in neural program synthesis has previously compared induction and transduction (RobustFill:~\cite{devlin2017robustfill}).
+We explore here a richer space of functions, reaching a qualitatively different conclusion than RobustFill: Instead of finding transduction inferior to induction, we find them complementary.
+More broadly, the transductive-inductive divide lies near the heart of supervised learning.
+Inductive approaches, such as linear regression, first construct a function $f$ where $f(\vx_\text{train})\approx \vy_\text{train}$, and then predict $y_\text{test}=f(x_\text{test})$.
+Transductive approaches, such as Support Vector Machines and In-Context Learning, instead output their predictions by performing direct comparisons with the training data.
+We use the same neural network architecture and dataset to perform both tasks, allowing a controlled comparison between these paradigms.
+\textbf{Datasets for ARC.}
+ReARC~\citep{rearc} is a dataset of handwritten programs that solve all ARC-AGI training tasks, and which generates new inputs for them.
+ReARC is implemented in a domain-specific language, and lacks natural language annotations, making it difficult to remix with LLMs.
+Other works annotate ARC using either natural language \citep{larc} or Python programs \citep{huang2024anpl}, which could potentially serve as seed programs for our work. \citet{larc} inspired our natural-language descriptions and \citet{huang2024anpl} influenced our seed program format.
+Our new seeds were a better fit for this approach because they encode shared priors in a Python library (\Cref{sec:common}), and have an explicit \texttt{input\_generator} describing a precisely-structured infinite space of valid inputs.
+
+
+
+
+
+
+\section{Discussion}
+
+
+
+
+\paragraph{What we learn about robust sample-efficient generalization.}%
+Neither explicit symbolic  hypotheses nor implicit neural representations suffice to solve all problems: each has their own domain of applicability, and simply ensembling models specialized in each does not cover all cases.
+Engineering a more clever neural program search, or training transductive predictors on more data, is unlikely to be fruitful.
+Instead we need representations irreducible to a purely neural or symbolic form, which intertwine inductive and transductive reasoning.
+One way of implementing this idea is to do program synthesis within 
+a language whose
+atomic primitives are non-symbolic, and to pretrain those primitives to encapsulate the basic atoms of core knowledge.
+While work has taken steps in related directions~\citep{reed2015neural,alet2018modular,pmlr-v202-tang23c,pmlr-v235-li24ar}, how to engineer and scale this idea remains open.
+
+\paragraph{To what extent is  this methodology applicable  beyond ARC?}
+Few-shot function learning is a very flexible framework, but our particular method is most applicable when the target generalization can be described in symbolic code.
+As an immediately tangible example, web scraping  and other forms of data-munging could fit within our framework.
+As a more ambitious goal, symbolic code is an especially good medium for defining precise models of how the world works.
+This is true both within the natural sciences~\citep{schmidt2009distilling} and also within AI, with examples such as
+robotic policies~\citep{liang2023code}, planners~\citep{wong2023learning}, and world models more broadly~\citep{das2023combining,tang2024worldcodermodelbasedllmagent,EVANS2021103521,liang2024visualpredicatorlearningabstractworld}.
+These are not the kinds of programs that occur often in LLM pretraining data---so merely prompting is unlikely to perform well---but it is nonetheless feasible to curate around 100 seeds demonstrating what the system should learn.
+
+\paragraph{Theoretically, induction and transduction should not be so complementary.}
+Equivalences between induction and transduction are well-know, such as the `kernel trick' which allows translating parametric function fitting into a transductive problem.
+Our metalearning models, 
+given infinite metatraining data, should similarly converge because transformers are universal function approximators.
+That there remains a difference is interesting precisely because it deviates from what one would expect theoretically.
+
+
+
+
+
+\paragraph{Are we cheating by training on 400k synthetic problems?}
+The spirit of ARC is to generalize from few examples.
+Yet we fine-tune on many examples.
+In our view, the true training data is 160 seeds, not the 400k `remixes,' which are instead analogous to `dream data' in amortized inference or wake-sleep~\citep{pmlr-v54-le17a,ritchie2016deep,hinton1995wake}.
+In other words,
+our system inputs 160 annotated solutions to training set problems, and does up-front computation to convert that data into a neural network capable of solving new problems.
+From that perspective, it is a sample efficient way of learning to solve ARC---although it is not compute efficient.
+
+\paragraph{Impact on ARC efforts.}
+Releasing our code and data helped \cite{ttt} achieve the first open-source system that performs at the level of an average human.
+The 2nd place ARC '24 team~\citep{franzen2024llm} also benefited from our data.
+We hope others will continue building on our work.
+We also intend our findings to encourage research on discrete program search as an alternative to the test-time training currently dominating in the community, and have geared our experiments toward showing the value in this other pathway.
+
+
+
+
+
+\paragraph{From domain-specific languages to domain-specific libraries.}
+Many  works that perform program search rely on carefully tuned domain-specific languages instead of using a general purpose language such as Python~\citep{codeit,icecuber,alford2022neural,ainooson2023neurodiversityinspiredsolverabstraction}.
+However, we believe general-purpose programming languages can give much broader coverage, and that attempts to engineer restricted languages inevitably sacrifice regions of program-space which could plausibly occur in open-ended learning domains such as ARC.
+Instead we advocate here for domain-specific \emph{libraries}, which equip a general-purpose language with extra priors, but do not restrict it to using only those priors.
+
+\paragraph{How to represent input-output mappings.}
+Our seeds include: (1) a grid transformation program, (2) an input generator, and (3) natural language descriptions for both (1) and (2). Practically, this representation allows us to sample consistent input-output example pairs for training, while the natural language descriptions help LLMs to remix seeds into novel problems.
+This further captures a latent natural language description of both inputs and outputs, from which the function and its preimage are derived.
+
+
+\paragraph{Next steps suggested by biological intelligence \& wake-sleep.}
+Our work has a straightforward analogy to dual-process models in psychology, which categorizes human thinking according to whether it relies on fast nonverbal intuitions or deliberative conscious thought~\citep{smith2000dual,kahneman2011thinking}.
+Although preliminary, our results could suggest that this partitioning is actually normative, and emerges from properties of the problems being solved, not properties of the solver itself.
+Human thinking is however more sophisticated in how it combines these modes:
+Fast intuitions can be further reprocessed by deliberative symbolic processing, which can trigger further intuitions, and so on.
+Our method has no analogous way of interleaving these two strategies, but more deeply integrating induction and transduction is a natural next step.
+
+Our approach can also be seen as a form of wake-sleep or dream learning~\citep{hinton1995wake,fosse2003dreaming,rasch2013sleep} where samples from a generative model train an inference network.
+Here the generative model is a prompt with the seeds, and  
+the inference network is our fine-tuned models.
+Drawing the analogy to wake-sleep suggests two directions.
+First, we could learn from recently-solved test problems (during `waking') by generating fresh synthetic data using those problems as seeds (during `dreaming/sleeping').
+Second, we could also implement a form of abstraction learning that automatically expands our custom ARC library (\Cref{sec:common}), or adds new neural primitives to that library, in the spirit of library learning and modular metalearning~\citep{10.1145/3571234,10.1145/3453483.3454080,alet2018modular}.
+
+\paragraph{Limitations.} Our system does not grow more competent at few-shot learning by solving new problems:
+Instead, it bootstraps from manually encoded knowledge in the seeds, which is transformed into a few-shot learner via an LLM training/inference pipeline.
+A more compelling approach would be to have the system discover for itself the knowledge that we compiled for it within the seeds, for instance by practicing on  training tasks, without supervising on ground truth solutions.
+
+Our work is only evaluated on ARC. However, ARC is designed to contain many concepts and problems embedded within it, so can be viewed as an open-ended composite of different learning problems. Owing to this diversity, it is also notoriously challenging, and has resisted solution despite a series of high-profile competitions. %
+We therefore believe that although evaluating on multiple benchmarks is desirable, ARC is an  appropriate benchmark to use as the centerpiece of an experimental evaluation.
+
+
+
+
+\phantom{t}
+
+
+
+\textbf{Code \& Data Availability.}
+
+Interactive visualizations of our dataset and model outputs are \href{https://www.basis.ai/arc_interface/arc}{\color{blue}\textbf{available at this link.}}
+
+
+
+
+
+
+
+\textbf{Author Contributions.} 
+Neural network experiments were engineered by Wen-Ding Li and Keya Hu.
+Data generation was engineered by Carter Larsen, Wen-Ding Li, Keya Hu, and Kevin Ellis.
+Kevin Ellis, Yewen Pu, Zenna Tavares, Wei-Long Zheng, and Hao Tang provided high-level advisory guidance.
+Zenna Tavares, Michelangelo Naim, Dat Nguyen, and Keya Hu analyzed the transduction model.
+Seeds were written by Keya Hu, Kevin Ellis, Carter Larsen, Yuqing Wu, Simon Alford, Caleb Woo, Spencer M. Dunn, and Yewen Pu.
+The paper was written by Yewen Pu, Keya Hu, Zenna Tavares, Wen-Ding Li, and Kevin Ellis.
+
+\textbf{Acknowledgements.} We are grateful for advice from Robert Hawkins regarding the statistical analysis in Figure 5C and for discussions with Weinan Sun about biological learning.
+This work was partly supported by an NSF CAREER award to K.E.
+
+
+
+
+
+
+
+
+
+
+

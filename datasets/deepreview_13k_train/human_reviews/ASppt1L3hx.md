@@ -1,0 +1,152 @@
+# Cooperative Minibatching in Graph Neural Networks
+
+- Decision: Reject
+- Scores: 6, 6, 1
+
+## Abstract
+Training large scale Graph Neural Networks (GNNs) requires significant computational resources,
+and the process is highly data-intensive.
+One of the most effective ways to reduce resource requirements is minibatch training 
+coupled with graph sampling.
+GNNs have the unique property that items in a minibatch have overlapping data. 
+However, the commonly implemented Independent Minibatching approach assigns each Processing 
+Element (PE, i.e., cores and/or GPUs) its own minibatch to process, leading to duplicated computations and input data access across PEs. 
+This amplifies the Neighborhood Explosion Phenomenon (NEP), which is the main bottleneck limiting scaling. 
+To reduce the effects of NEP in the multi-PE setting,
+we propose a new approach called Cooperative Minibatching. 
+Our approach capitalizes on the fact that the size of the sampled subgraph is a concave function of the batch size, leading to 
+significant reductions in the amount of work as batch sizes increase. Hence, it is favorable for 
+processors equipped with a fast interconnect to work on a large minibatch together as a single larger processor, instead of working on separate smaller 
+minibatches, even though global batch size is identical.
+We also show how to take advantage of the same phenomenon in serial execution by generating dependent consecutive minibatches. 
+Our experimental evaluations show up to 4x bandwidth savings for fetching vertex embeddings, by simply increasing 
+this dependency without harming model convergence. Combining our proposed approaches, we achieve up to 64\% 
+speedup over Independent Minibatching on single-node multi-GPU systems, using same resources.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper identifies an issue with standard mini-batching approaches for training graph neural networks: that redundant computations are performed by processors due to them sharing edges and vertices. A new method, cooperative mini-batching, is proposed, in which processors jointly process a single global mini-batch, exchanging information as needed to avoid redundant computation. Independent versus cooperative mini-batching is then compared experimentally.
+
+### Strengths
+1. The paper identifies an important difference between mini-batching in standard DNN training and in GNNs, which I had not before observed, and proposes a method to avoid inefficiencies in independent mini-batch training in GNNs. This has the potential to positively impact the training of GNNs.
+2. There is both theoretical and experimental justification for this method.
+3. The paper includes extensive experiments to support its points.
+
+### Weaknesses
+1. The paper seems to be missing a discussion of the communication costs of its method, which seem like they could be significant, especially in a multi-node setup.. This is in contrast to independent mini-batching, which has the nice property of avoiding communication. The appendix (A3) notes communication overhead is not an issue, but this could be measured in detail, and in any case only considers a small-scale, on-node scenario.
+2. How is the 1D partitioning done, in detail? Appendix A3 notes that using METIS was beneficial, so why not always use this (or a similar graph partitioning algorithm)?
+3. The paper does not discuss the memory overhead of cooperative mini-batching. It seems to me that all samples in a K-hop neighborhood of each vertex need to be present for the method, which seems like it would result in significant memory overheads, especially as the number of layers increases (the paper only considers a network with three layers).
+4. The paper seems to be only considering neighborhood sampling as a way of performing independent mini-batching. However, there are other ways to do this, e.g., graph cut algorithms. (See, for example, Rozemberczki et al., "Little Ball of Fur: A Python Library for Graph Sampling", CIKM 2020.)
+
+### Questions
+1. What are the communication costs of cooperative mini-batching? How does the method perform in cross-node scenarios?
+2. How is partitioning done? Why not always use a method that reduces cross-device edges?
+3. How does cooperative mini-batching scale with the depth of the network?
+
+-----
+
+I thank the authors for their clarifications, and have slightly raised my score accordingly. I would, however, echo the concerns of reviewer LvyT regarding the text.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper addresses the issue of redundant data access and computation across processing elements (PEs) in the context of independent minibatch Graph Neural Network (GNN) training. The authors conduct both empirical and theoretical investigation for the monotonicity of work size and the concavity of the expected subgraph size needed for GNN training, with respect to the batch size. Based on these two properties, the author introduces cooperative and dependent mini-batching methodologies. These strategies are designed to minimize computational redundancy and optimize temporal locality for data access. The evaluations on several datasets with different system setups show that the proposed techniques can speedup multi-GPU GNN training by up to 64%.
+
+### Strengths
++ The paper is well-written and addresses a practical issue in minibatch GNN training.
++ The proposed methodologies are strongly motivated from both empirical and theoretical perspectives.
++ The paper demonstrates significant performance improvement with minimal overhead. The appendix serves as a good supplement to the main content.
+
+### Weaknesses
+ - The paper lacks sufficient evaluation to demonstrate the generalizabiliy and scalability of the proposed technique.
+- The paper omits some relevant citations for related work that should be discussed and compared.
+- There are some points need further clarifications.
+
+### Questions
+1. The paper only evaluates the proposed method on one GNN model. How generalizable is this method to other types of GNNs, especially those deep GNNs with tens of layers?
+2. The parameter (\kappa) for batch dependency is set as 256, however, Figure 4 indicates minimal difference between 64, 256, and even infinity. Furthermore, Figure 3 shows that the GNN model validation F1-score drops when \kappa is 256 (or larger). Given these observations, how do you justify the choice of \kappa as 256 for the evaluation instead of 64?
+3. Could you clarify the unit of measurement for the cache size? Is it quantified in bytes or in terms of the number of vertices/features? What are the key factors for determining the optimal cache size for different datasets, GNN models, and the hardware platforms?
+4. What are the communication cost with and without applying the proposed technique?
+5. The work in [1] also solves the redundancy issue across the PEs using cooperative training. However, this related work is not cited or compared in this paper.
+6. It might be beneficial to include more illustrative figures, especially, for the algorithm 1. This would help readers to follow the steps of the proposed method more easily.
+
+[1]. GSplit: Scaling Graph Neural Network Training on Large Graphs via Split-Parallelism
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+In this paper, the authors propose a cooperative mini-batching design that utilizes the overlap of sampled subgraphs. The propose approach claims to optimize the communication during GNN training.
+
+### Strengths
+Optimizing the communication during GNN training is an important topic.
+
+### Weaknesses
+—The writing is informal and not well organized, which is reflected but not limited to the following aspects: 1) ambiguous terminology and inconsistent word choice, e.g., "work" (not clear what this really means); 2) overly extensive background (not sure how most content in the background is related to the target problem); 3) causal usage of theorem.
+
+—The theoretical result states that the expected work increases as batch size increases, which clearly depends on the setting. For example, what if, in the extreme case,  the communication speed is infinite? What if I am using different GNN models? The theoretical result does not provide any specification with this regard and it is not clear how one can prove such a result.  In addition, it is not clear how the theoretical results motivate or connect with the proposed approach.
+
+—No discussion on related works, despite there exists an extensive line of research from both algorithm and system communities that try to optimize distributed/large-scale GNN training. For example, I found the idea is closely related to layer sampling that is commonly used in GNN, and the communication optimization proposed in [1].
+
+### Questions
+The theoretical result states that the expected work increases as batch size increases, which clearly depends on the setting. For example, what if, in the extreme case,  the communication speed is infinite? What if I am using different GNN models? The theoretical result does not provide any specification with this regard and it is not clear how one can prove such a result.  In addition, it is not clear how the theoretical results motivate or connect with the proposed approach.
+
+### Soundness
+1 poor
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor

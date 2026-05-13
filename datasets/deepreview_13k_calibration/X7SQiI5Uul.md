@@ -1,8 +1,8 @@
 # STELLA: Leveraging Structural Representations to Enhance Protein Understanding with Multimodal LLMs
 
 - Decision: Reject
-- Avg Score: 3.71
-- Scores: 3, 5, 1, 0, 3, 8, 6
+- Avg Score: 5.83
+- Scores: 3, 5, 10, 3, 8, 6
 
 ## Abstract
 Protein biology centers on the intricate relationships among sequence, structure, and function (text), with structure understanding being a crucial aspect for uncovering protein biological functions. Traditional methods based on protein language models (pLMs) often focus on specific aspects of biological function prediction but do not account for the broader, dynamic context of protein research—an important component for addressing the complexity of protein biology. Modern large language models (LLMs) excel in human-machine interaction, language understanding and generation, at a human-like level. By bridging structural representations with the contextual knowledge encoded within LLMs, STELLA leverages the strengths of LLMs to enable versatile and accurate predictions in protein-related tasks. It showcases the transformative potential of multimodal LLMs as a novel paradigm besides pLMs in advancing protein biology research by achieving state-of-the-art performance in both functional description and enzyme-catalyzed reaction prediction tasks. This study not only establishes an innovative LLM-based paradigm to understand proteins, but also expands the boundaries of LLM capabilities in protein biology. To foster collaboration and inspire further innovation, the codes, datasets, and pre-trained models are made publicly available at the anonymous GitHub repository https://anonymous.4open.science/r/STELLA-DF00.

@@ -1,8 +1,8 @@
 # Simplifying, Stabilizing and Scaling Continuous-time Consistency Models
 
 - Decision: Accept
-- Avg Score: 2.38
-- Scores: 1, 0, 1, 0, 8, 1, 0, 8
+- Avg Score: 9.20
+- Scores: 10, 10, 8, 10, 8
 
 ## Abstract
 Consistency models (CMs) are a powerful class of diffusion-based generative models optimized for fast sampling. Most existing CMs are trained using discretized timesteps, which introduce additional hyperparameters and are prone to discretization errors. While continuous-time formulations can mitigate these issues, their success has been limited by training instability. To address this, we propose a simplified theoretical framework that unifies previous parameterizations of diffusion models and CMs, identifying the root causes of instability. Based on this analysis, we introduce key improvements in diffusion process parameterization, network architecture, and training objectives. These changes enable us to train continuous-time CMs at an unprecedented scale, reaching 1.5B parameters on ImageNet 512×512. Our proposed training algorithm, using only two sampling steps, achieves FID scores of 2.06 on CIFAR-10, 1.48 on ImageNet 64×64, and 1.88 on ImageNet 512×512, narrowing the gap in FID scores with the best existing diffusion models to within 10\%.

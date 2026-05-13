@@ -1,0 +1,296 @@
+\title{Towards Seamless Adaptation of Pre-trained Models for Visual Place Recognition}
+
+\begin{abstract}
+Recent studies show that vision models pre-trained in generic visual learning tasks with large-scale data can provide useful feature representations for a wide range of visual perception problems. However, few attempts have been made to exploit pre-trained foundation models in visual place recognition (VPR). Due to the inherent difference in training objectives and data between the tasks of model pre-training and VPR, how to bridge the gap and fully unleash the capability of pre-trained models for VPR is still a key issue to address. To this end, we propose a novel method to realize seamless adaptation of pre-trained models for VPR. Specifically, to obtain both global and local features that focus on salient landmarks for discriminating places, we design a hybrid adaptation method to achieve both global and local adaptation efficiently, in which only lightweight adapters are tuned without adjusting the pre-trained model. Besides, to guide effective adaptation, we propose a mutual nearest neighbor local feature loss, which ensures proper dense local features are produced for local matching and avoids time-consuming spatial verification in re-ranking. Experimental results show that our method outperforms the state-of-the-art methods with less training data and training time, and uses about only 3\% retrieval runtime of the two-stage VPR methods with RANSAC-based spatial verification. It ranks 1st on the MSLS challenge leaderboard (at the time of submission).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Visual place recognition (VPR), also known as image localization \citep{liu2019} or visual geo-localization \citep{benchmark}, aims at coarsely estimating the location of a query place image by searching for its best match from a database of geo-tagged images. VPR has long been studied in robotics and computer vision communities, motivated by its wide applications in mobile robot localization \citep{robotloc} and augmented reality \citep{arloc}, etc. The main challenges of the VPR task include condition (e.g., illumination and weather) changes, viewpoint changes, and perceptual aliasing \citep{survey} (hard to differentiate similar images from different places).
+
+The VPR task is typically addressed by using image retrieval and matching approaches \citep{netvlad,delg} with global or/and local descriptors to represent images. The aggregation algorithms like VLAD \citep{vlad2010,VLAD1,VLAD2} are usually used to aggregate/pool local features into a vector as the global feature. Such compact global features facilitate fast place retrieval and are robust against viewpoint variations. However, these global features neglect spatial information, making VPR methods based on them prone to perceptual aliasing. A promising solution \citep{delg,patchvlad,transvpr}, i.e., two-stage VPR, is to retrieve top-k candidate results in the database using global features, then re-rank these candidates by matching local features. Moreover, VPR model training follows the ``pre-training then finetuning" paradigm. Most VPR models are initialized using model parameters pre-trained on ImageNet \citep{ImageNet} and fine-tuned on the VPR datasets, such as MSLS \citep{msls}. As models and training datasets continue to expand, the training becomes more costly in both computation and memory footprint.
+
+Recently, foundation models \citep{clip,florence,dinov2} achieved remarkable performance on many computer vision tasks given their ability to produce well-generalized representations. However, the image representation produced by the pre-trained model is susceptible to useless (even harmful) dynamic objects (e.g. pedestrians and vehicles), and tends to ignore some static discriminative backgrounds (e.g. buildings and vegetation), as shown in Fig. \ref{intro_fig} (b). A robust VPR model should focus on the static discriminative landmarks \citep{landmarks2} rather than the dynamic foreground. This results in a gap between pre-training and VPR tasks. Meanwhile, full fine-tuning the foundation model on downstream datasets might forget previously learned knowledge and damage the excellent transferability, i.e., catastrophic forgetting. An effective method to address this issue is parameter-efficient transfer learning \citep{adapter,prompttuning}, which has not been studied in the VPR area. Besides, most foundation models do not directly produce (dense) local features, which is typically required in the re-ranking of two-stage VPR methods.
+
+In this paper, we propose a novel method to realize \textbf{Se}am\textbf{l}ess \textbf{a}daptation of pre-trained foundation models for the VPR task, named \textbf{SelaVPR}. By adding a few tunable lightweight adapters to the frozen pre-trained model, we achieve an efficient hybrid global-local adaptation to get both global features for retrieving candidate places and local features for re-ranking. Specifically, the global adaptation is achieved by adding adapters after the multi-head attention layer and in parallel to the MLP layer in each transformer block. The local adaptation is implemented by adding up-convolutional layers after the entire transformer backbone to upsample the feature map. Additionally, we propose a mutual nearest neighbor local feature loss, which can be combined with the commonly used triplet loss to optimize the network. The proposed SelaVPR feature representation focuses on the discriminative landmarks, which is critical to identifying places. Furthermore, we can directly match the local features without spatial verification, making the re-ranking much faster than mainstream two-stage VPR methods. Our main \textbf{contributions} are highlighted as follows:
+
+\textbf{1)} We propose a hybrid global-local adaptation method to seamlessly adapt pre-trained foundation models to produce both global and local features for the VPR task. The proposed SelaVPR feature representation can focus on discriminative landmarks and ignore the regions irrelevant to distinguishing places, thus closing the gap between the pre-training and VPR tasks.
+
+\textbf{2)} We also propose a mutual nearest neighbor local feature loss to train the local adaptation module, which is combined with global feature loss for fine-tuning. The obtained local features can be directly used in cross-matching for re-ranking, without time-consuming geometric verification.
+
+\textbf{3)} Our method outperforms state-of-the-art methods on several VPR benchmarks (ranks 1st on MSLS challenge leaderboard) using less training data and training time. And it only consumes 3\%  retrieval runtime of the mainstream two-stage methods with RANSAC-based geometric verification.
+\begin{figure*}[!t]
+	\centering
+	\includegraphics[width=0.88\linewidth]{figures/intro.pdf}
+	\caption{
+		Attention map visualizations of the pre-trained foundation model (DINOv2) and our model. The pre-trained model pays attention to some regions (e.g. dynamic riders) that are useless to identify places. Our method focuses on discriminative regions (buildings and trees).
+	}
+	\label{intro_fig}
+\end{figure*}
+
+
+
+\section{Related Work}
+
+\textbf{Visual Place Recognition:}
+The traditional VPR approaches perform nearest neighbor search using global features to find the most similar place. The global features are commonly produced using aggregation algorithms, such as Bag of Words \citep{BoW} and VLAD \citep{vlad2010}, to process the hand-crafted features like SURF \citep{SURF}. With the advancement of deep learning techniques, many works \citep{sunderhaufIROS2015, crn, SPED, landmarks2, semantic,categorization1, categorization2, landmarks3, yin2019, sta-vpr, gcl, gcl2, mixvpr} have employed a variety of deep features for the VPR task. Some works integrated the aggregation methods into neural networks \citep{netvlad,speNetvlad,attentionVLAD}, and improved training strategies \citep{sfrs,cosplace,gsv}, to achieve better performance. Nevertheless, most one-stage (i.e. global retrieval) VPR approaches are prone to perceptual aliasing due to the use of aggregated features while neglecting spatial information. One recent work \citep{anyloc} also used pre-trained foundation models for the VPR task. However, this work did not perform any fine-tuning, making it difficult to fully unleash the capability of these models for VPR.
+
+Recently, the two-stage (i.e. hierarchical) VPR methods \citep{hvpr,seqnet,patchvlad,geowarp,tcl,transvpr,aanet,structvpr,r2former} have become popular. These approaches typically retrieved top-k candidate images over the whole database using compact global feature representation, such as NetVLAD \citep{netvlad} or Generalized Mean (GeM) pooling \citep{gem}, then re-ranked candidates by performing local matching between the query image and each candidate using local descriptors. However, most of these methods required geometric consistency verification after local matching \citep{delg,patchvlad,transvpr} or taking into account spatial constraints during matching \citep{geowarp,aanet,r2former}, which greatly increases the runtime burden. The recent visual foundation model \citep{dinov2} has shown an excellent ability to match similar semantic patch-level features across domains. In this work, we attempt to match local features produced by the foundation model for re-ranking without spatial verification, thereby significantly speeding up the retrieval process in VPR.
+
+\textbf{Parameter-efficient Transfer Learning:} Recent work \citep{clip,dino,wang2022image,dinov2} demonstrated the visual foundation model can produce powerful feature representation and achieve excellent performance on multiple tasks. These works commonly trained the ViT \citep{vit} model or its variants with large quantities of parameters on huge amounts of data. The parameter-efficient transfer learning (PETL) \citep{adapter}, first proposed in natural language processing, is an effective way to adapt foundation models to various downstream tasks, which can reduce training computation costs and avoid catastrophic forgetting. The main PETL methods fall broadly into three categories: adding task-specific adapters \citep{adapter}, prompt tuning \citep{prompttuning}, and Low-Rank Adaptation (LoRA) \citep{lora}. We follow the first in this work. Although several adapter-based approaches \citep{convpass,adaptformer,Stadapter,aim,contrastAlign,sideadapter,dualadapt} have been proposed to perform various computer vision tasks, to the best of our knowledge, this work is among the first to use the hybrid global-local adaptation to produce both global features and local features, and apply them to address the challenges in VPR.
+
+
+
+\section{Proposed Method}
+
+This section describes the proposed SelaVPR for two-stage VPR. We first introduce ViT and its use to produce place image representation. Then, we propose the global adaptation, local adaptation, and local matching re-ranking to achieve two-stage VPR. Finally, we present the loss for fine-tuning.
+\begin{figure*}[!t]
+	\centering
+	\includegraphics[width=0.85\linewidth]{figures/adapter.pdf}
+	\caption{
+		Illustration of the global adaptation. We add a serial adapter (b) after the MHA layer and a parallel adapter (c) in parallel to the MLP layer in each standard transformer block (a) to achieve global adaptation.
+	}
+	\label{adapter}
+\end{figure*}
+
+\subsection{Preliminary}
+The Vision Transformer (ViT) and its variants have proven to be powerful for a variety of computer vision tasks including VPR. In this work, we adapt the ViT-based pre-trained foundation model DINOv2 \citep{dinov2} for VPR, so here we give a brief overview of ViT.
+
+Given an input image, ViT first slices it into $N$ patches and linearly projects them to $D$-dim patch embeddings $x_p\in \mathcal{R}^{N \times D}$, then prepends a learnable \verb|[class]| token to $x_p$ as $x_0=[x_{class};x_p]\in \mathcal{R}^{(N+1) \times D}$. After adding positional embeddings to preserve the positional information, $x_0$ is fed into a series of transformer blocks to produce the feature representation.
+A standard transformer block mainly includes multi-head attention (MHA), multi-layer perceptron ( MLP), and LayerNormalization (LN) layers, as shown in Fig. \ref{adapter} (a). For the input token sequence, its change process passing through a transformer block is: The MHA is first applied to compute attentional features, then MLP is utilized to realize the feature nonlinearization and dimension transformation. It is formulated as:
+\begin{equation}
+    x^{\prime}_{l}=\text{MHA}(\text{LN}(x_{l-1}))+x_{l-1}
+\end{equation}
+\begin{equation}
+		x_{l}=\text{MLP}(\text{LN}(x^{\prime}_l))+x^{\prime}_l,
+\end{equation}
+where $x_{l-1}$ and $x_{l}$ are the output of the $(l-1)$-th and $l$-th transformer block.
+
+For the feature map output by CNN models, a common practice of the two-stage VPR method is to use NetVLAD or GeM to aggregate it into a global feature for candidate retrieval and also treat it as dense local (patch) features for re-ranking. For the ViT model, the output consists of one class token and $N$ patch tokens, where the class token can be directly used as the global feature to represent places. Meanwhile, $N$ patch tokens can also be reshaped as a feature map (similar to CNN) to restore spatial position. In this work, instead of using the class token as the global feature, we use GeM to pool the feature map into the global feature.
+
+\subsection{Global Adaptation}
+Although pre-trained foundation models are capable of powerful feature representation, direct use of them in VPR cannot fully unleash their capability due to the gap between the pre-training and VPR tasks. To address it, we introduce the global adaptation to adapt the pre-trained model so that the feature representation can focus on the static discriminative regions that are beneficial to VPR. 
+
+Inspired by previous adapter-based parameter-efficient fine-tuning works \citep{adapter,adaptformer,aim}, we design our global adaptation as shown in Fig. \ref{adapter} (d). Specifically, we add two adapters in each transformer block. Each adapter is a bottleneck module, which first uses the fully connected layer to down-project the input to a smaller dimension, then applies a ReLU activation and up-projects it back to the original dimension. The first adapter is a serial adapter that is added after the MHA layer and has a skip-connection internally. The second adapter is a parallel adapter that is connected in parallel to the MLP layer multiplied by a scaling factor $s$. The computation of each global adapted transformer block can be denoted as
+\begin{equation}
+            x^{\prime}_{l}=\text{Adapter1}(\text{MHA}(\text{LN}(x_{l-1})))+x_{l-1}
+\end{equation}
+\begin{equation}
+		x_{l}=\text{MLP}(\text{LN}(x^{\prime}_l))+s\cdot \text{Adapter2}(\text{LN}(x^{\prime}_l))+x^{\prime}_l.
+\label{eq:adapter}
+\end{equation}
+The output of the last transformer block is fed into an LN layer as the final output of the entire global adapted ViT backbone. We discard the class token and reshape patch tokens as the produced feature map $fm$. The L2-normalized GeM global feature used to retrieve candidates can be written as
+\begin{equation}
+\boldsymbol{f}^g = \text{L2}(\text{GeM}(fm)).
+\end{equation}
+
+The global adapted foundation model can produce feature representations that focus on discriminative landmarks and ignore dynamic interference. This bridges the gap between the model pre-training and VPR tasks, and greatly boosts the performance of foundation models in the VPR task.
+
+\subsection{Local Adaptation}
+\begin{figure*}[!t]
+	\centering
+	\includegraphics[width=0.95\linewidth]{figures/archit.pdf}
+	\caption{
+		Illustration of the local adaptation and our two-stage VPR pipeline. The global adapted ViT backbone is applied to extract the feature map. We first use GeM to pool the feature map into the global feature for candidate retrieval. The local adaptation module after the backbone is achieved using up-conv layers, which upsample the feature map to yield dense local features. Then we cross-match the local features between the query image and each candidate for re-ranking.
+	}
+	\label{archit}
+\end{figure*}
+Two-stage VPR methods typically match dense local features to re-rank candidate places for boosting performance. In the above introduction, we have obtained the feature map output by the global adapted ViT backbone, which can also be regarded as coarse-grained patch-level features. However, in order to achieve promising performance improvements through (local matching) re-ranking, more fine-grained dense local features are required. To achieve this, we propose the local adaptation, which is achieved by an up-sampling module after the ViT backbone, as shown in Fig. \ref{archit}. To be specific, this module consists of two up-convolutional (up-conv) layers and a ReLU layer in the middle. The height and width of the feature map will approximately double after passing through each up-conv layer, while the channel dimension will be reduced. Finally, for the input image of size 224$\times$224 pixels, this module adjusts the 16$\times$16$\times$1024-dim feature map output by ViT-L/14 backbone to 61$\times$61$\times$128-dim, and performs L2 normalization in the channel dimension (intraL2) to yield dense local features, i.e., a dense 61$\times$61 grid of 128-dim local features $\boldsymbol{f}^l$. Formally, it can be represented as
+\begin{equation}
+\boldsymbol{f}^l = \text{LocalAdaptation}(fm)=\text{intraL2}(\text{up-conv2}(\text{ReLU}(\text{up-conv1}(fm)))).
+\end{equation}
+
+\subsection{Local Matching for Re-ranking}
+Our two-stage place retrieval pipeline is shown in Fig. \ref{archit}. After obtaining the global features and local features, we first compute L2 distance to perform the similarity search in the global feature space over the database to get the top-k most similar candidate images.
+For the local features matching between the query image $q$ and a candidate image $c$, we search for mutual nearest neighbor matches by cross-matching. Since local features are L2 normalized, the inner product equivalent to cosine similarity is used to measure local feature similarity. That is 
+\begin{equation}
+   \boldsymbol{s}_{qc}(i,j) = \boldsymbol{f}^l_q(i) \cdot \boldsymbol{f}^l_c(j)  \quad i,j \in \{1,2,...,N'\} \quad (N'=61\times61),
+\end{equation}
+where $\boldsymbol{f}^l_q(i)$ is the $i$-th local feature in query image $q$, $\boldsymbol{f}^l_c(j)$ is the $j$-th local feature in candidate image $c$, and $\boldsymbol{s}_{qc}(i,j)$ is the local feature similarity between them. The mutual nearest neighbor matches set $\mathcal{M}$ is defined as
+\begin{equation}
+\label{eq::mn}
+        \mathcal{M} = \{\left(u, v\right): \; 
+        u  = \mathop{\arg\max}_{i}\boldsymbol{s}_{qc}(i,v), \; 
+        v  = \mathop{\arg\max}_{j}\boldsymbol{s}_{qc}(u,j)\}.
+\end{equation}
+That is, the $u$-th feature in image $q$ and the $v$-th feature in image $c$ are the best matches for each other.
+The obtained nearest neighbor matches set in previous VPR work \citep{patchvlad,transvpr} exists a large number of false matches. So they apply geometric verification (e.g. RANSAC \citep{ransac}) to remove outliers (i.e. false matches) and use the number of inliers as the image similarity score, which is time-consuming. Due to the powerful representation ability of the foundation model and the superiority of the ViT in capturing long-distance feature dependencies, the number of false matches in this work is actually not enough to affect the performance of re-ranking. So we directly use the number of matches (i.e., $|\mathcal{M}|$) as the image similarity score for re-ranking.
+
+\subsection{Loss}
+For the loss designed to optimize the model to produce global features (denoted as global loss $L_g$), we follow the triplet loss used in the previous works \citep{netvlad,transvpr}:
+\begin{equation}
+L_g=\sum_{j} l(\Vert\boldsymbol{f}^g_q - \boldsymbol{f}^g_p\Vert+m-\Vert\boldsymbol{f}^g_q - \boldsymbol{f}^g_{n_j}\Vert),
+\label{eq:lg}
+\end{equation}
+where $l(x) = \max(x, 0)$, i.e. hinge loss. $m$ is the margin. $\boldsymbol{f}^g_q$, $\boldsymbol{f}^g_p$, and $\boldsymbol{f}^g_{n_j}$ are the global features of query, positive, and hard negative samples, respectively.
+
+However, what we use to measure image similarity in local matching re-ranking is the number of mutual matches, which is a discrete integer. It is intractable to directly optimize a loss function of discrete integer variables within a deep learning model because of its non-differentiability. So we compromise to optimize the network so that the resulting mutual matching local features are more similar, and design a mutual nearest neighbor local feature loss $L_l$ as
+\begin{equation}
+L_l=\sum_{j} l(-\frac{\sum_{(u,v) \in \mathcal{M}}\boldsymbol{s}_{qp}(u,v)}{|\mathcal{M}|} + \frac{\sum_{(u',v') \in \mathcal{M'}}\boldsymbol{s}_{qn_j}(u',v')}{|\mathcal{M'}|}).
+\label{eq:ll}
+\end{equation}
+This local loss maximizes the average local feature similarity in the mutual matches set $\mathcal{M}$ of the query image and positive image, and minimizes that in the matches set $\mathcal{M'}$ of the query and negative images. It makes the produced local features more suitable for local matching. We obtain the final loss $L$ through combining the global loss $L_g$ and local loss $L_l$ by weight $\lambda$ as
+\begin{equation}
+L=L_g+\lambda L_l.
+\label{eq:l}
+\end{equation}
+
+
+\section{Experiments}
+
+\subsection{Datasets and Performance Evaluation}
+\begin{wraptable}{r}{0.4\textwidth}
+\caption{Summary of the main evaluation datasets.}
+  \label{tableDataset}
+  \begin{center}
+  \scriptsize
+  \setlength{\tabcolsep}{0.7mm}{
+  \begin{tabular}{cccc}
+    \toprule
+    \multirow{2}{*}{Dataset} & \multicolumn{1}{c}{\multirow{2}{*}{Description}} & \multicolumn{2}{c}{Number}  \\ \cline{3-4} 
+     \multicolumn{1}{c}{}& & Database & Queries \\ \cline{1-4}
+    Tokyo24/7 & urban, day/night & 76k &  315 \\ \cline{1-4}
+    MSLS-val &  urban, suburban & 19k & 740  \\
+    MSLS-challenge & long-term & 39k & 27092  \\ \cline{1-4}
+    Pitts30k-test & urban, panorama & 10k & 6816  \\ 
+    \bottomrule
+  \end{tabular}}
+\end{center}
+\label{tab:datasets}
+\end{wraptable}
+Several VPR benchmark datasets mainly including Tokyo24/7, MSLS, and Pitts30k are used in our experiments. Table \ref{tab:datasets} summarizes their main information. 
+\textbf{Tokyo24/7} \citep{densevlad} includes about 76k database images and 315 query images captured from urban scenes with drastic illumination changes.
+\textbf{Mapillary Street-Level Sequences (MSLS)} \citep{msls} consists of more than 1.6 million images collected in urban, suburban and natural scenes over 7 years. We assess models on both MSLS-val and MSLS-challenge (an online test set without released labels) sets.
+\textbf{Pittsburgh (Pitts30k)} \citep{pitts} contains 30k reference images and 24k query images in the train, val and test sets, and exhibits severe viewpoint changes.
+
+We evaluate the recognition performance using Recall@N (R@N), which is the percentage of queries for which at least one of the N retrieved images is the right result. The threshold is set to 25 meters and 40$^{\circ}$ for MSLS, 25 meters for Tokyo24/7 and Pitts30k, following standard evaluation procedure \citep{msls,netvlad}.
+ 
+\subsection{Implementation Details}
+We use the DINOv2 based on ViT-L/14 as the foundation model and conduct all experiments on an NVIDIA GeForce RTX 3090 GPU using PyTorch. Fed a 224×224 image, the model produces a 1024-dim global feature and a dense grid of 128-dim local features. The bottleneck ratio of the adapters in ViT blocks is 0.5 and the scaling factor $s$ in Eq. \ref{eq:adapter} is set to 0.2. We use 3×3 up-conv with stride=2 and padding=1 in the local adaptation module. The output channels of the first and second up-conv layers are 256 and 128, respectively. Following other two-stage methods, we re-rank the top-100 candidates to yield final results. We train our models using the Adam optimizer with the learning rate set as 0.00001 and batch size set as 4. When the R@5 on the validation set does not have improvement within 3 epochs, the training is terminated. For MSLS, we set an epoch as passing 30k queries, whereas Pitts30k is passing 5k queries. In model training, we define the potential positive images as the reference images that are within 10 meters from the query image, while the definite negative images are those further than 25 meters. Two hard negative images from 1000 randomly chosen definite negatives are used in the triplet loss. We empirically set the margin $m=0.1$ in Eq. \ref{eq:lg}, the weight $\lambda=1$ in Eq. \ref{eq:l}. For the experiments in Section \ref{sec:comparesota} (i.e. comparisons with other methods), we fine-tune our model on MSLS-train to test on MSLS-val/challenge, and further fine-tune it on Pitts30k-train to test on Pitts30k-test and Tokyo24/7 (as in $R^2$Former \citep{r2former}). 
+For the ablation experiments in other sections, the models tested on Pitts30k-test and Tokyo24/7 are directly fine-tuned on Pitts30k-train by default.
+
+\subsection{Comparisons with State-of-the-Art Methods}
+\label{sec:comparesota}
+\begin{table*}
+  \caption{Comparison to state-of-the-art methods on benchmark datasets. The best is highlighted in \textbf{bold} and the second is \underline{underlined}.}
+  \centering
+  \small
+  \setlength{\tabcolsep}{1.05mm}{
+  \renewcommand{\arraystretch}{1.0}
+  \begin{tabular}{@{}l||ccc||ccc||ccc||ccc}
+  \toprule
+\multirow{2}{*}{Method}   & \multicolumn{3}{c||}{Tokyo24/7} & \multicolumn{3}{c||}{MSLS-val} & \multicolumn{3}{c||}{MSLS-challenge} & \multicolumn{3}{c}{Pitts30k-test} \\
+\cline{2-13}
+& R@1 & R@5 & R@10 & R@1 & R@5 & R@10 & R@1 & R@5 & R@10  & R@1 & R@5 & R@10 \\
+\hline
+NetVLAD & 60.6 & 68.9 & 74.6 & 53.1 &66.5 &71.1 &35.1 & 47.4 & 51.7 & 81.9 &91.2 &93.7  \\
+SFRS & 81.0 & 88.3 & 92.4 & 69.2 & 80.3 & 83.1 & 41.6 & 52.0 &56.3  & 89.4 & 94.7 & 95.9 \\
+CosPlace & 81.9 & 90.2 & 92.7 & 82.8 & 89.7 & 92.0  & 61.4 & 72.0 & 76.6 & 88.4 & 94.5 & 95.7 \\
+MixVPR & 85.1 & 91.7 & 94.3 & 88.0 & 92.7 & 94.6 & 64.0 & 75.9 & 80.6 & \underline{91.5} & 95.5 & 96.3 \\
+SelaVPR(global)  & 81.9 & \underline{94.9} &\underline{96.5} & 87.7 & \underline{95.8} & \underline{96.6} & 69.6 & \underline{86.9} & \underline{90.1} &90.2 & \underline{96.1} & 97.1 \\
+\hline
+SP-SuperGlue & 88.2 & 90.2 & 90.2  & 78.1 & 81.9 & 84.3 & 50.6 &56.9  &58.3  &  87.2 & 94.8 & 96.4   \\
+Patch-NetVLAD-s & 78.1 & 83.8 & 87.0 & 77.8 & 84.3 & 86.5 &48.1 &59.4  & 62.3  & 87.5 & 94.5 & 96.0\\
+Patch-NetVLAD-p & 86.0 & 88.6 & 90.5 & 79.5 & 86.2 & 87.7 & 48.1 &57.6 & 60.5 & 88.7 & 94.5 & 95.9 \\
+TransVPR & 79.0 &  82.2 & 85.1 & 86.8 & 91.2 & 92.4 & 63.9 & 74.0  & 77.5  &  89.0 &  94.9 &  96.2 \\
+StructVPR & - &  - & - & 88.4 & 94.3 & 95.0 & 69.4 & 81.5 & 85.6 &  90.3 & 96.0 &  \underline{97.3} \\
+$R^2$Former & \underline{88.6} &  91.4 & 91.7 & \underline{89.7} & 95.0  & 96.2 & \underline{73.0} & 85.9  & 88.8  & 91.1 &  95.2  &  96.3  \\
+\hline
+SelaVPR (ours) & \textbf{94.0} & \textbf{96.8} & \textbf{97.5} &  \textbf{90.8} &  \textbf{96.4} & \textbf{97.2} &  \textbf{73.5} &  \textbf{87.5} &  \textbf{90.6} & \textbf{92.8} & \textbf{96.8} & \textbf{97.7} \\
+\bottomrule
+\end{tabular}}
+\label{tab:compare_SOTA}
+\end{table*}
+
+In this section, we compare the proposed SelaVPR method with several state-of-the-art (SOTA) VPR methods, including four one-stage methods using global feature retrieval: NetVLAD \citep{netvlad}, SFRS \citep{sfrs}, CosPlace \citep{cosplace} and MixVPR \citep{mixvpr}, as well as five two-stage methods with re-ranking: SP-SuperGlue \citep{sp,sg}, Patch-NetVLAD \citep{patchvlad}, TransVPR \citep{transvpr}, StructVPR \citep{structvpr} and $R^2$Former \citep{r2former}. Note that CosPlace and MixVPR are trained on individually constructed large-scale datasets. TransVPR and $R^2$Former are transformer-based methods. $R^2$Former ranked first in the leaderboard of the MSLS place recognition challenge before our method was proposed. We also show the global retrieval result without re-ranking using the proposed SelaVPR, and denote it as SelaVPR(global). The quantitative results are shown in Table \ref{tab:compare_SOTA}. Since the code for StructVPR has not yet been released, we use the results reported in the paper \citep{structvpr}. The proposed method achieves the best R@1/R@5/R@10 on all datasets.
+ 
+When using only global features for direct retrieval, SelaVPR(global) significantly outperforms other one-stage methods on all datasets for R@5 and R@10, including SFRS using complex training strategies and CosPlace/MixVPR trained on purpose-built large-scale datasets. SelaVPR(global) also outperforms all other two-stage methods on Tokyo24/7, MSLS-val, and MSLS-challenge for R@5 and R@10. This fully demonstrates that adapting the foundation model can provide powerful feature representation, which is a novel way to achieve SOTA one-stage VPR. Although SelaVPR(global) does not achieve very good R@1 on Tokyo24/7 where the lighting changes drastically, the complete SelaVPR method outperforms other methods by a large margin after local feature re-ranking. This illustrates the necessity of using local matching (local adaptation) for VPR in extreme environments. The complete SelaVPR method significantly outperforms SOTA methods on Tokyo24/7 and Pitts30k with absolute R@1 improvement of 5.4\% and 1.3\% respectively. Lucia). Fig. \ref{fig:result} qualitatively demonstrates that our approach is highly robust in challenging scenes. Benefiting from the visual foundation model and sensible adaptation, SelaVPR achieves absolute performance advantages on a variety of datasets without complex training strategies or purpose-built large-scale training datasets.
+\begin{figure*}[!t]
+	\centering
+	\includegraphics[width=0.96\linewidth]{figures/resultfig.pdf}
+	\caption{
+		Qualitative results. In these challenging examples (containing condition changes, viewpoint changes, dynamic objects, etc.), the proposed SelaVPR successfully returns the right database images, while all other methods produce incorrect results.
+	}
+	\label{fig:result}
+\end{figure*}
+
+\begin{table}
+	\begin{minipage}{0.56\linewidth}
+        \caption{The single query runtime comparison of two-stage methods on Pitts30k-test.}
+        \centering
+        \setlength{\tabcolsep}{1.1mm}{
+        \begin{tabular}{lccc}
+        \toprule
+        Method & \begin{tabular}[c]{@{}c@{}}Extraction\\ Time (s)\end{tabular} &         \begin{tabular}[c]{@{}c@{}}Matching\\ Time (s)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Total \\ Time (s)\end{tabular} \\
+        \midrule
+        SP-SuperGlue & 0.042 & 6.639 & 6.681 \\
+        \small{Patch-NetVLAD-s} & 0.186 & 0.551 & 0.737 \\
+        \small{Patch-NetVLAD-p} & 0.412 & 10.732 & 11.144 \\
+        TransVPR & \textbf{0.008} & 3.010 & 3.018 \\
+        \midrule
+        SelaVPR (ours) & 0.027 & \textbf{0.085} & \textbf{0.112} \\
+        \bottomrule
+        \end{tabular}}
+        \label{tab:time}
+	\end{minipage}\hfill
+	\begin{minipage}{0.4\linewidth}
+		\centering
+		\includegraphics[width=0.85\linewidth]{figures/runtime.pdf}
+		\captionof{figure}{R@1-runtime comparison.}
+		\label{fig:runtime}	
+	\end{minipage}
+\end{table}
+
+Efficiency is another metric for evaluating the VPR methods. In Table \ref{tab:time}, we compare the runtime (feature extraction time and matching/retrieval time) of our method with other two-stage methods on Pitts30k-test. Patch-NetVLAD-p and TransVPR are representative two-stage methods using RANSAC for spatial verification in re-ranking. SP-SuperGlue uses neural networks to match local features. TransVPR is fast at extracting features, while SelaVPR is slower (but faster than other methods) due to the use of the ViT/L backbone. However, for matching/retrieval, since our method does not require time-consuming spatial verification in re-ranking, its runtime is less than 3\% of TransVPR and only about 1\% of SP-SuperGlue and Patch-NetVLAD-p. The total runtime of our method is less than 4\% of TransVPR. Although Patch-NetVLAD-s uses a Rapid Spatial Scoring method for fast verification, it is still significantly slower than ours. Fig. \ref{fig:runtime} simultaneously shows the total runtime and R@1 on Pitts30k. Due to the absolute advantages in both performance and efficiency, our SelaVPR method is able to pave the way for real-world large-scale VPR applications.
+
+\subsection{Ablation Study}
+In this section, we perform a series of ablation experiments to demonstrate the necessity of fine-tuning and verify the effectiveness of the proposed global adaptation and local adaptation:
+\begin{itemize}
+\item\textbf {DINOv2-GeM:} Using the pre-trained DINOv2 backbone (freeze parameter) and GeM pooling, i.e., baseline.
+\item\textbf {Tuned-DINOv2-GeM:} full fine-tuned DINOv2-GeM.
+\item\textbf {Global-Adaptation:} Global adapted DINOv2-GeM with our global adapation.
+\item\textbf {Local-Adaptation:} Using the DINOv2-GeM (freeze parameter) to retrieve candidates, and adding the local adaptation module after it to produce local features for re-ranking.
+\item\textbf {SelaVPR:} The complete (hybrid global-local adaptation) method.
+\end{itemize}
+
+\begin{table*}
+  \caption{Comparison of different ablated versions.}
+  \centering
+  \setlength{\tabcolsep}{1.2mm}{
+  \begin{tabular}{@{}l||ccc||ccc||ccc}
+  \toprule
+\multirow{2}{*}{Ablated version}   & \multicolumn{3}{c||}{Pitts30k-test} & \multicolumn{3}{c||}{Tokyo24/7} & \multicolumn{3}{c}{MSLS-val} \\
+\cline{2-10}
+& R@1 & R@5 & R@10 & R@1 & R@5 & R@10 & R@1 & R@5 & R@10  \\
+\hline
+DINOv2-GeM & 81.3 & 91.0 & 93.8  & 67.3 & 85.1 & 89.8 & 44.7 & 55.9 & 59.3  \\
+Tuned-DINOv2-GeM & 85.3 & 92.7 & 94.7 & 65.7 & 78.1 & 83.8 & 79.7 & 90.3 & 92.2  \\
+Global-Adaptation & 87.3 & 94.6 & 96.6  & 77.8 & 87.6 & 91.7 & 87.4 & 95.9 & 96.9 \\
+Local-Adaptation & 87.2 & 93.9 & 96.1  & 87.6 & 94.6 & \textbf{95.9} & 67.2 & 75.0 & 76.6 \\
+SelaVPR  & \textbf{91.4} & \textbf{96.5} & \textbf{97.8} & \textbf{93.3} & \textbf{95.2} & 95.6 & \textbf{90.8} &  \textbf{96.4} & \textbf{97.2} \\
+\bottomrule
+\end{tabular}}
+\label{tab:ablation}
+\end{table*}
+
+The results are shown in Table \ref{tab:ablation}. Note that we directly use the model fine-tuned on Pitts30k-train to test on Pitts30k and Tokyo24/7 in this section. The results are slightly lower than that in Table \ref{tab:compare_SOTA} (but still SOTA).
+
+The pre-trained DINOv2-GeM achieves decent results on Pitts30k, which has few dynamic objects on the place image. The performance is improved after full fine-tuning (i.e. Tuned-DINOv2-GeM), indicating that fine-tuning is necessary to make the produced feature representation more suitable for the VPR task even without dynamic interference. However, Tuned-DINOv2-GeM performs worse than DINOv2-GeM on Tokyo24/7. It is because there is a generalization gap between Tokyo24/7 and Pitts30k-train, and full fine-tuning damages the excellent transferability of the pre-trained foundation model. Compared with Tuned-DINOv2-GeM, Global-Adaptation only tunes a few newly added adapters (with backbone frozen), which reduces the training consumption and always improves performance (retaining the generalization ability of the foundation model). Global-Adaptation achieves absolute R@1 improvement of 10.5\% on Tokyo24/7. Besides, Local-Adaptation only adds a local adaptation module (with the proposed local loss for training) after the frozen DINOv2 to produce local features for re-ranking. It can also obviously improve performance, especially on Tokyo24/7 (20.3\% absolute R@1 improvement), which shows day-night changes. The complete SelaVPR method combines the advantages of Glocal-Adaptation and Local-Adaptation, and achieves absolute R@1 improvement of 10.1\% on Pitts30k and 26.0\% on Tokyo24/7.
+
+MSLS is a dataset with many dynamic objects (e.g. vehicles and pedestrians), on which the pre-trained DINOv2-GeM gets terrible results. By adding a local adaptation module after DINOv2 (Local-Adaptation) to get dense local features for re-ranking, we can get 22.5\% absolute performance improvement for R@1, which is still not ideal. Using full fine-tuning can even bring significant performance improvement (35.0\% for R@1), and the improvement yielded by Global-Adaptation is more obvious (42.7\% for R@1). More importantly, the complete SelaVPR method achieves 2 × higher R@1.
+
+Overall, full fine-tuning the pre-trained foundation model on these datasets usually results in better performance (unless there is a domain gap between the training and test set), indicating that the first problem should be solved when applying a foundation model to the VPR task is to make the output feature representation suitable for VPR (focusing on regions that help differentiate places), i.e. bridge the gap between pre-training and VPR tasks. The second is the catastrophic forgetting that will be encountered in fine-tuning the pre-trained models, which can be addressed by parameter-efficient fine-tuning instead of full fine-tuning. Additionally, the local matching for re-ranking is also necessary, especially on datasets that show drastic condition variations (e.g. Tokyo24/7). The proposed global adaptation and local adaptation can work together to solve these problems well. 
+
+g., the comparisons of tunable parameters, data efficiency, and training time.
+
+
+
+\section{Conclusions}
+
+In this paper, we introduced a novel hybrid adaptation method to seamlessly adapt pre-trained foundation models for the VPR task, which is composed of the global adaptation and local adaptation. The feature representation produced by the adapted foundation model is more focused on discriminative landmarks to differentiate places, thus bridging the gap between the pre-training and VPR tasks. The local adaptation enables the model to output proper dense local features, which can be used for local matching re-ranking in two-stage VPR to greatly boost performance. The experimental results demonstrated that the proposed SelaVPR method outperforms previous SOTA methods on VPR benchmark datasets (with a large margin on Tokyo24/7 and Pitts30k). Meanwhile, since our approach eliminates the reliance on time-consuming spatial validation in re-ranking, it costs only 3\% retrieval time of RANSAC-based two-stage methods. We believe that the proposed SelaVPR method provides a promising way to address the VPR task in real-world large-scale applications.
+
+
+

@@ -1,0 +1,429 @@
+\title{RFWave: Multi-band Rectified Flow for Audio Waveform Reconstruction}
+
+\begin{abstract}
+Recent advancements in generative modeling have significantly enhanced the reconstruction of audio waveforms from various representations. While diffusion models are adept at this task, they are hindered by latency issues due to their operation at the individual sample point level and the need for numerous sampling steps. In this study, we introduce RFWave, a cutting-edge multi-band Rectified Flow approach designed to reconstruct high-fidelity audio waveforms from Mel-spectrograms or discrete acoustic tokens. RFWave uniquely generates complex spectrograms and operates at the frame level, processing all subbands simultaneously to boost efficiency. Leveraging Rectified Flow, which targets a straight transport trajectory, RFWave achieves reconstruction with just 10 sampling steps. Our empirical evaluations show that RFWave not only provides outstanding reconstruction quality but also offers vastly superior computational efficiency, enabling audio generation at speeds up to 160 times faster than real-time on a GPU. An online demonstration is available at: \url{https://rfwave-demo.io/rfwave/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Audio waveform reconstruction significantly enhances the digital interactions by enabling realistic voice and sound generation for diverse applications. This technology transforms low-dimensional features, derived from raw audio data, into perceptible sounds, improving the audio experience on various platforms such as virtual assistants and entertainment systems. 
+Autoregressive models and Generative Adversarial Networks (GANs) \citep{GAN} have been applied to this task, greatly advancing audio quality beyond traditional signal processing methods \citep{kawahara1999restructuring, morise2016world}. Autoregressive methods, while effective, are hindered by slow generation speeds due to their sequential prediction of sample points \citep{oord2016wavenet, kalchbrenner2018efficient, valin2019lpcnet}. In contrast, GANs predict sample points in parallel, resulting in faster generation speeds and maintaining high-quality output \citep{kumar2019melgan, yamamoto2020parallel, kong2020hifi, vocos, du2023apnet2}. Consequently, GAN-based methods deliver impressive performance and are extensively utilized in real-world audio generation applications.
+
+Despite the advancements, GAN-based waveform reconstruction models face challenges such as the necessity for complex discriminator designs and issues like instability or mode collapse \citep{tung2018mode}. In response, diffusion models for waveform reconstruction have been explored, offering stability during training and the ability to reconstruct high-quality waveforms \citep{chen2020wavegrad, kong2020diffwave, priorgrad, nguyen2024fregrad, Huang2022FastDiffAF, Koizumi2022specgrad}. However, these models are at least an order of magnitude slower compared to GANs. The slow generation speed in these diffusion-based waveform reconstruction models is primarily due to two factors: (1) the requirement of numerous sampling steps to achieve high-quality samples, and (2) the operation at the waveform sample point level. The latter often involves multiple upsampling operations to transition from frame rate resolution to sample rate resolution, increasing the sequence length and consequently leading to higher GPU memory usage and computational demands.
+
+In this paper, we propose RFWave, a diffusion-type waveform reconstruction method designed to match the speed of GAN-based methods while maintaining the training stability and high sample quality of diffusion models. To overcome the challenge of slow sampling, we employ Rectified Flow \citep{rectifiedflow, flowmatching, albergo2023building}, which connects data and noise along a straight line, thereby enhancing sampling efficiency.  To address the GPU memory and computational demands of sample point-level modeling, our model operates at the level of Short-Time Fourier Transform (STFT) frames, enabling more efficient processing and reducing GPU memory usage.
+RFWave with only 10 sampling steps can generate high-quality audio, achieving an inference speed of up to 160 times real-time on an NVIDIA GeForce RTX 4090 GPU. Additionally, the incorporation of three enhanced loss functions and an optimized sampling strategy further elevates the overall quality of the reconstructed waveforms. To our knowledge, RFWave stands as the fastest diffusion-based audio waveform reconstruction model, and it delivers superior audio quality. Furthermore, it can reconstruct waveforms from Mel-spectrograms and discrete acoustic tokens, enhancing its versatility and applicability in various audio generation tasks. Our main contributions are as follows:
+\begin{enumerate}
+\item By integrating the Rectified Flow and 3 enhanced loss functions – energy-balanced loss, overlap loss, and STFT loss – our model can reconstruct high-quality waveforms with a drastically reduced number of sampling steps.
+\item We utilize a multi-band strategy, coupled with the high-efficiency ConvNeXtV2 \citep{convnextv2} backbone, to generate different subbands concurrently. This not only assures audio quality by circumventing cumulative errors, but also boosts the synthesis speed.
+\item Our model operates at the level of STFT frames, not individual waveform sample points. This approach significantly accelerates processing and reduces GPU memory usage.
+\item We propose a technique for selecting sampling time points based on the straightness of the Rectified Flow transport trajectories, which enhances sample quality for free.
+\end{enumerate}
+
+
+
+
+
+\section{Background}
+
+In this section, we describe the basic formulation of the Rectified Flow and present releated works, while also detailing our correlation and distinction.
+\paragraph{Rectified Flow}
+Rectified Flow \citep{rectifiedflow} presents an innovative Ordinary Differential Equation (ODE)-based 
+framework for generative modeling and domain transfer. 
+It introduces a method to learn a mapping that connects two distributions,
+$\pi_0$ and $\pi_1$ on $\RR^d$, based on empirical observations:
+\begin{equation}
+\label{eq:ode}
+    \frac{\d Z_t}{\d t} = v (Z_t, t), ~~~\text{initialized from $Z_0 \sim \pi_0$, such that   $Z_1 \sim \pi_1$},
+\end{equation}
+where $v\colon\RR^d\times[0,1]\to \RR^d$ represents a velocity field. The learning of this field involves minimizing a mean square objective function, 
+\begin{equation}
+\label{eq:rect_flow_obj}
+    \min_{v} \E_{(X_0, X_1)\sim \gamma}\left [  \int_0^1 \mid \mid \frac{\d}{\d t} X_t  - v(X_t, t) \mid \mid^2 \d t \right ] ,~~~~\text{with}~~~~ X_t = \phi(X_0,X_1,t), 
+\end{equation} 
+where $X_t = \phi(X_0,X_1,t)$ represents a time-differentiable interpolation between $X_0$ and $X_1$,
+with $\frac{\d}{\d t} X_t  = \partial_t \phi(X_0,X_1,t)$. 
+The $\gamma$ represents any coupling of $(\pi_0,\pi_1)$. 
+An illustrative instance of $\gamma$ is the independent coupling $\gamma = \pi_0\times \pi_1$, 
+which allows for empirical sampling based on separately observed data from $\pi_0$ and $\pi_1$.  
+\citet{rectifiedflow} recommended a simple choice of
+\begin{equation}
+ \label{eq:linearint}
+X_t = (1-t) X_0 + t X_1  \implies \ddt X_t = X_1 - X_0.
+\end{equation}
+This simplification results in linear trajectories, which are critical for accelerating the inference process.
+Typically, the velocity field $v$ is represented using a deep neural network. The solution to \eqref{eq:rect_flow_obj} is approximated through stochastic gradient methods.
+To approximate the ODE presented in \eqref{eq:ode}, numerical solvers are commonly employed. 
+A prevalent technique is the forward Euler method. This approach computes values using the formula 
+\begin{equation}
+\label{eq:euler}
+    Z_{t+ \frac{1}{n}} = Z_t + \frac{1}{n} v(Z_t, t),  ~~~~~~~~~~\forall  t \in \{0,\ldots, n-1\}/n, 
+\end{equation}
+where the simulation is executed with a step interval of  $\epsilon = 1/n$ over $n$ steps.
+
+The velocity field has the capacity to incorporate conditional information, which is particularly essential in applications such as text-to-image generation and waveform reconstruction from compressed acoustic representation.
+Consequently, in such contexts,  $v (Z_t, t)$ in \eqref{eq:rect_flow_obj} is modified to  $v (Z_t, t \mid \mathcal C)$, where $\mathcal C$ represents the conditional information pertinent to the corresponding $X_1$.
+
+\paragraph{Diffusion Models for Audio Waveform Reconstruction}
+Diffusion models \citep{Song2020ScoreBasedGM, ho2020denoising} have become the de-facto choice for high-quality generation in the realm of generative models. Diffwave \citep{kong2020diffwave} and WaveGrad \citep{chen2020wavegrad} were pioneering efforts to reconstruct waveforms using diffusion models, achieving performance comparable to autoregressive models and GANs. PriorGrad \citep{priorgrad} enhances both speech quality and inference speed by employing a data-dependent prior distribution. Meanwhile, FreGrad \citep{nguyen2024fregrad} simplifies the model and reduces denoising time through the use of Discrete Wavelet Transform (DWT). Multi-Band Diffusion (MBD) \citep{multibanddiffusion} leverages a diffusion model to reconstruct waveforms from discrete EnCodec \citep{encodec} tokens. Despite these advancements, the current fastest generation speed of these methods is only about 10 to 20 times faster than real-time, which limits their application for real-time use, especially when combined with large-scale Transformer-based acoustic models \citep{wang2023neural, cosyvoice}. In contrast, our method achieves speeds up to 160 times faster than real-time, significantly enhancing real-time applicability.
+
+\paragraph{Estimating Complex Spectrograms}
+Waveform reconstruction from complex spectrograms can be effectively achieved using the ISTFT. Notably, Vocos \citep{vocos} and APNet2 \citep{du2023apnet2}, utilizing GANs as their model framework, estimate magnitude and phase spectrograms from the input Mel-spectrograms,
+which can be transformed to complex spectrograms effortlessly.
+Both models operate at the frame level, enabling them to achieve significantly faster inference speeds compared to HiFi-GAN \citep{kong2020hifi}, which uses multiple upsampling layers and operates at the level of waveform sample points. Morever, these models preserve the quality of the synthesized waveform, demonstrating their superiority in both speed and fidelity without a trade-off.
+In this paper, we directly estimate complex spectrograms using Rectified Flow and focus on frame-level operations, aiming to enhance both the efficiency and quality of our waveform synthesis process. Notably, the distributions of real and imaginary parts of the complex spectrograms appear more homogeneous in comparison to the distributions magnitude and phase.
+
+\paragraph{Multi-band Audio Waveform Reconstruction}
+Both Multi-band MelGAN \citep{multibandmelgan} and Multi-band Diffusion \citep{multibanddiffusion} employ multi-band strategies, albeit for different purposes within their respective frameworks. Multi-band MelGAN, specifically, uses Pseudo-Quadrature Mirror Filters (PQMF) \citep{pqmf} to divide frequency bands. This division results in each subband's waveform being a fraction of the original waveform's length, based on the number of subbands.
+By reshaping these subbands into feature dimensions and utilizing a unified backbone for modeling, Multi-band MelGAN is able to operate on considerably shorter signals. This strategy significantly enhances the efficiency of the model, leading to accelerated training and inference processes.
+Multi-band Diffusion utilizes an array of band-pass filters to separate the frequency bands and models each subband with a distinct model. This approach ensures that errors in one band do not negatively impact the others.
+In our research, we simplify the process of frequency band division by directly choosing the appropriate dimensions from the complex spectrograms. Furthermore, we enhance efficiency by modeling all subbands together in parallel with a single, unified model. This strategy improves the processing speed and  also helps in reducing error accumulation across different subbands.
+
+
+\section{Method}
+
+\label{sec:method}
+Our model utilizes a multi-band Rectified Flow to directly predict the complex spectrogram. 
+It operates at the STFT frame level and incorporates a highly efficient ConvNeXtV2 \citep{convnextv2} 
+backbone. With only 10 steps of sampling, the model is capable of producing high-quality waveforms. 
+In this section, we present the structure of the multi-band Rectified Flow model, which can operate in either the time or frequency domain. Additionally, we describe the corresponding normalization techniques, three enhanced loss functions, and the strategy for selecting sampling time points.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.6\textwidth]{model_structure.pdf}
+  \caption{The overall structure for RFWave. $i_{sb}$ is the subband index, \textit{C} is the conditional input, which can be Encodec token or Mel-spectrogram, and $i_{bw}$ is the EnCodec bandwidth index. Modules enclosed in a dashed box, as well as dashed arrows, are considered optional.}
+  \label{fig:main}
+\end{figure}
+\subsection{Multi-band Rectified Flow}
+\label{subsec:multiband}
+\paragraph{Model Structure}
+The model structure is depicted in Figure \ref{fig:main}. 
+All frequency bands, each distinguished by a unique subband index, share the same model. The subbands of a given sample are grouped together into a single batch for processing, which facilitates simultaneous training or inference. This significantly reduces inference latency. 
+Moreover, independently modeling the subbands reduces error accumulation. As discussed in \citep{multibanddiffusion}, conditioning higher bands on lower ones can lead to an error accumulation, which means inaccuracies in the lower bands can adversely affect the higher bands during inference.
+
+For each subband, the corresponding noisy sample ($X_t$) is fed into the ConvNeXtV2 backbone 
+to predict the velocity ($v_t$) conditioned on time $t$, the subband index ($i_{sb}$), 
+conditional input ($C$, the Mel-spectrogram or the EnCodec \citep{encodec} tokens), 
+and an optional EnCodec bandwidth index ($i_{bw}$).
+The detailed structure of the ConvNeXtV2 backbone is shown in Figure \ref{fig:main}.
+We employ Fourier features as described in \citep{vdm}. 
+The noisy sample, Fourier features, and conditional inputs are concatenated and 
+then passed through a linear layer, forming the input that is fed into a series of ConvNeXtV2 blocks.
+The sinusoidal time embedding, along with the optional EnCodec bandwidth index embedding, 
+are element-wise added to the input of each ConvNeXtV2 block. 
+Furthermore, the subband index is incorporated via an adaptive layer normalization module, 
+which utilizes learnable embeddings as described in \citep{vocos, adanorm}.
+The other components are identical to those within the ConvNeXtV2 architecture, 
+details can be found in \citep{convnextv2}.
+
+Our model, utilizing frame-level features, demonstrates greater memory efficiency compared to diffusion vocoders like PriorGrad that operate on waveform sample points. While PriorGrad \citep{priorgrad} can train on 6-second\footnote{The duration of an audio clip is calculated as the batch size multiplied by the number of segment frames and hop length, divided by the sampling rate.} audio clips at 44.1 kHz within 30 GB of GPU memory, our model is capable of handling 177-second clips with the same memory resources.
+
+\paragraph{Operating in Time Domain and Waveform Equalization}
+Our model is designed to function at the STFT frame level and possesses the capability to operate in the time domain. Assuming that the noisy sample and velocity reside in the time domain, the use of STFT and ISTFT, as illustrated in Figure \ref{fig:main}, becomes necessary. The dimensions of noise and velocity adhere to $[1, T]$, where $T$ represents the waveform length in sample points\footnote{For simplicity, the batch dimension is not included in the discussion.}.
+After the STFT operation, we extract the subbands by equally dividing the full-band complex spectrogram. Each subband $i$ is then processed by the backbone as an independent sample. Subsequently, these processed subbands are merged back together before the ISTFT operation. 
+The feature processed by the backbone thus has dimensions of $[d_s, F]$, 
+where $d_s$ denotes the dimension of a subband's complex spectrum and $F$ the number of frames. 
+The real and imaginary parts of each subband are interleaved to form a $d_s$-dimensional feature.
+
+White Gaussian noise has uniform energy across frequency bands, but waveform energy profiles vary significantly. For example, speech energy decays exponentially with frequency, while music maintains a consistent distribution. These differences challenge diffusion model training, making energy equalization across bands beneficial \citep{multibanddiffusion}. 
+In the time-domain model, a bank of Pseudo-Quadrature Mirror Filters (PQMF) is employed to decompose the 
+input waveform into subbands. Subsequently, these subbands are equalized and then recombined to 
+form the equalized waveform. 
+The performance of the PQMF bank exhibits a modest enhancement compared to 
+the array of band-pass filters employed in \citep{multibanddiffusion}.
+It's important to note that the PQMF is solely utilized for waveform equalization and holds no association with the division of the complex spectrogram into subbands.
+For waveform equalization, mean-variance normalization is employed, utilizing the exponential moving average of mean and variance of each waveform subband computed during training.
+This approach ensures that the transformation can be effectively inverted 
+using the same statistics.
+
+\paragraph{Alternative Approach: Operating in  Frequency Domain and STFT Normalization}
+Assuming that noisy sample and velocity reside in the frequency domain, the use of STFT and ISTFT, as depicted in Figure \ref{fig:main}, becomes unnecessary. The subbands of noisy sample and velocity are then directly extracted from their full-band feature by selecting the corresponding dimensions, resulting in a shape of $[d_s, F]$.
+In the frequency-domain model, the waveform is transformed to a complex spectrogram without equalization. 
+Subsequent processing involves the dimension-wise mean-variance normalization of the complex spectrogram.
+
+During the inference stage, the model operating in the time domain requires two additional operations—STFT and ISTFT—at each sampling step. In contrast, the model operating in the frequency domain requires only a single ISTFT operation after sampling.
+However, despite the additional operations, the time-domain model demonstrates slightly superior performance, particularly in capturing high-frequency details according to our experiment results.
+ 
+
+\subsection{Loss functions}
+\paragraph{Energy-balanced Loss}
+In preliminary experiments, we noticed low-volume noise in expected silent regions.
+We attribute this to the property of Mean Square Error (MSE) used in \eqref{eq:rect_flow_obj}. 
+The MSE measures the absolute distortion between the predicted values and the ground truth. 
+Since the values in silent regions are close to zero, 
+even a minor absolute distortion in predictions can lead to a significant relative error. 
+Consequently, models trained with the MSE produce small absolute distortions in silent regions, which are then perceived as noise.
+
+We propose energy-balanced loss to mitigate this problem. 
+Our energy-balanced loss is designed to weight errors differently 
+depending on the region's volume (or energy) accross the time-axis.
+Specifically, for each frequency subband, 
+we compute the standard deviation along the feature dimension of the ground truth velocity to construct a weighting coefficient of size $[1, F]$.
+This vector is reflective of the frame-level energy of the respective subband, as depicted in Figure \ref{fig:volume}.
+Subsequently, both the ground truth and predicted velocity are divided 
+by this vector before proceeding to the subsequent steps.
+For the frequency domain model, the training objective defined in \eqref{eq:rect_flow_obj} is adjusted as follows:
+\begin{equation}
+\label{eq:time_balanced_loss}
+\begin{aligned}
+    \min_{v} &\E_{X_0\sim \pi_0, (X_1, \mathcal{C}) \sim D} \left [  \int_0^1 \mid \mid (X_1 - X_0) / \sigma - v(X_t, t \mid \mathcal{C}) / \sigma \mid \mid^2 \d t \right ], \\
+     ~~~& \text{with}~~ \sigma = \sqrt{\text{Var}_{1}(X_1 - X_0)}~~~\text{and}~~~X_t = t X_1 + (1-t) X_0,
+\end{aligned}
+\end{equation}
+where $D$ represents the dataset with paired $X_1$ and $\mathcal C$, and $\text{Var}_{1}$ calculates the variance along the feature dimension. For the time domain model, this energy balancing operation precedes the ISTFT process.
+This approach helps to minimize the relative error in low-volume regions. 
+Our experimental results demonstrate that this method enhances overall performance, 
+benefiting not just the silent parts.
+
+Energy-balanced loss is related to PriorGrad \citep{priorgrad}, yet they are fundamentally different. PriorGrad uses a data-dependent diffusion prior to narrow the gap between the prior and data distribution, thereby reducing sampling steps. This prior is manually chosen based on specific datasets and tasks. In contrast, our method employs standard Gaussian noise as the diffusion prior and adjusts the loss function according to the target's standard deviation. Importantly, our approach requires no manual selection.
+
+\paragraph{Overlap Loss}
+Within the multi-band structure, each subband is predicted independently, potentially resulting in inconsistencies among them. 
+To mitigate these inconsistencies, we introduce an overlap loss. 
+This involves maintaining overlaps between the subbands when dividing the full-band complex spectrograms.
+In this paper, we employ an 8-dimensional overlap.
+During the training phase, the MSEs of the overlapped predictions is minimized. 
+In the inference phase, the overlaps are removed, and all subbands are merged to recreate the full-band complex spectrograms.
+
+As each subband is predicted, the model internally maintains consistency between its overlap section and the main section. 
+The overlap serves as an anchor to maintain consistency among the subbands.
+Modeling higher bands based on lower bands rather than predicting all subbands in parallel can increase consistency between subbands. However, at the inference stage, if the lower bands are incorrectly predicted, the higher bands conditioned on them would also be inaccurate \citep{multibanddiffusion}. RFWave addresses this by using overlap loss to maintain consistency between subbands during training. At the inference stage, subbands are predicted independently, so any error occurring in one subband does not negatively affect the others.
+\begin{figure}[t]
+  \centering
+  \includegraphics[scale=0.7]{subband2.pdf}
+  \caption{An illustration of dividing complex spectrograms into subbands. The area highlighted in pink represents a subband, while the section enclosed by the two dashed vertical lines indicates the main section.}
+  \label{fig:subband}
+\end{figure} 
+\paragraph{STFT Loss}
+\label{subsec:overlap_loss}
+The magnitude spectrogram derived loss \citep{stftloss} is extensively utilized in GAN-based vocoders, such as HiFi-GAN \citep{kong2020hifi} and Vocos \citep{vocos}, both of which leverage a Mel-spectrogram loss. Nevertheless, its use in diffusion-based vocoders is relatively rare. This might stem from its lack of direct compatibility with the formalization of a noise prediction diffusion model. 
+Here we adopt STFT loss for RFWave. According to (\ref{eq:time_balanced_loss}), 
+ the model's output serves as an approximation for velocity:
+\begin{equation}
+    v(X_t, t \mid \mathcal{C}) \approx \ddt X_t = X_1 - X_0.
+\end{equation}
+Hence, at time $t$, an approximation for $X_1$ is:
+\begin{equation}
+\label{eq:estimated_x1}
+    \overset{\sim}{X_1} \approx X_0 + v(X_t, t \mid \mathcal{C}).
+\end{equation}
+The STFT loss can be applied on the approximation $\overset{\sim}{X_1}$, 
+
+According to our experimental findings, the STFT loss effectively reduces artifacts in the presence of background noise.
+
+\subsection{Selecting Time Points for Euler Method}
+\label{subsec:equal_straightness}
+\citet{rectifiedflow} employ equal step intervals for the Euler method, as illustrated in (\ref{eq:euler}) . Here, we propose selecting time points for sampling based on the straightness of transport trajectories. The time points are chosen such that the increase in straightness is equal across each step. The straightness of a learned velocity filed $v$ is defined as
+$
+    S(v) =  \int_0^1 E\mid \mid (X_1 - X_0) - v(X_t, t \mid \mathcal{C}) \mid \mid^2 \d t 
+$, which describes the deviation of the velocity along
+the trajectory. A smaller
+$S(v)$ means straighter trajectories.
+This approach ensures that the difficulty of each Euler step remains consistent, allowing the model to take more  steps in more challenging regions. Using the same number of sampling steps, this method outperforms the equal interval approach. We refer to this approach as \textbf{equal straightness}.
+
+
+
+\section{Experiments and Analysis}
+
+\label{sec:exp}
+\subsection{Experimental Setup}
+\paragraph{Overview} We evaluate RFWave using both Mel-spectrograms and discrete EnCodec tokens as inputs. For Mel-spectrogram inputs, we first benchmark RFWave against existing diffusion vocoders to demonstrate its superiority. We then compare it with widely-used GAN models to highlight its practical applicability and advantages. For discrete EnCodec tokens, we evaluate RFWave's efficiency in reconstructing high-quality audio from compressed representations across diverse domains. 
+Finally, we conduct ablation studies and further analysis to examine the effects of the individual components of RFWave. 
+
+\paragraph{Data} 
+For Mel-spectrogram inputs, we conduct two evaluations. When benchmarking against diffusion vocoders, we train and test on LibriTTS \citep{zen2019libritts} (speech), MTG-Jamendo \citep{jamendo} (music), and Opencpop \citep{opencpop} (vocal) datasets to ensure comprehensive comparison across various audio categories. When comparing %RFWave 
+to widely used GAN-based models, we train on LibriTTS and test on both LibriTTS and MUSDB18 \citep{rafii2017musdb18} test subset, evaluating in-domain performance and out-of-domain generalization ability respectively.
+
+For discrete EnCodec token inputs, we follow convention by training a universal model on a large-scale dataset. This dataset combines Common Voice 7.0 \citep{ardila2019commonvoice} and clean data from DNS Challenge 4 \citep{dubey2022icasspdns}  for speech, MTG-Jamendo \citep{jamendo} for music, and FSD50K \citep{fonseca2021fsd50k} and AudioSet \citep{gemmeke2017audio} for environmental sounds. Recognizing the lack of a comprehensive test set for universal audio codec models, we constructed a unified evaluation dataset comprising 900 test audio samples from 15 external datasets, covering speech, vocals, and sound effects. Detailed information about this test set is provided in Table \ref{tab:Encodec_testset}.
+\paragraph{Baseline and Evaluation Metrics}
+We conducted a comprehensive benchmark comparison of RFWave against a series of state-of-the-art models. For Mel-spectrogram inputs, we utilized PriorGrad \citep{priorgrad} and FreGrad \citep{nguyen2024fregrad} as baselines for diffusion-based models. Vocos \citep{vocos} and BigVGAN \citep{lee2023bigvgan} served as baselines for GAN-based methods, reflecting their widespread use in real-world applications. For discrete EnCodec token inputs, we compared with EnCodec \citep{encodec} and MBD \citep{multibanddiffusion}. %, ensuring all models used identical token representations for fair comparison.
+
+We trained PriorGrad and FreGrad on LibriTTS, Opencpop, and MTG-Jamendo using their open-source details. For Vocos, BigVGAN, EnCodec, and MBD, we used public pre-trained models. We followed the authors' recommended sampling steps: 6 for PriorGrad, 50 for FreGrad, and 20 for MBD. Model sources are in Table \ref{tab:repo}.
+
+For objective evaluation, we use ViSQOL \citep{visqol} to assess perceptual quality, employing speech-mode for 22.05/24 kHz waveforms and audio-mode for 44.1 kHz waveforms. Additional metrics include the Perceptual Evaluation of Speech Quality (PESQ) \citep{pesq}, the F1 score for voiced/unvoiced classification (V/UV F1), and the periodicity error (Periodicity)  \citep{morrison2022chunked}. 
+For subjective evaluation, we conduct crowd-sourced assessments, employing a 5-point Mean Opinion Score (MOS) to determine the audio naturalness, ranging from 1 (`poor/unnatural') to 5 (`excellent/natural').
+
+\paragraph{Implementation}
+We use the time-domain model with three enhanced loss functions as the default.
+The RFWave backbone contains 8 ConvNeXtV2 blocks, and the complex spectrogram is divided into 8 equally spanned subbands. 
+For evaluation, we use 10 sampling steps.
+Table \ref{tab:mel_parameters} lists the parameters used for extracting Mel-spectrograms and complex spectrograms from datasets with different sample rates. 
+
+\subsection{Experimental Results on Mel-spectrograms Input}
+
+ 
+\paragraph{Comparasion with Diffusion-based Method} In this portion, we compare RFWave\footnote{This evaluation used an earlier RFWave version without the optimized sampling method (equal straightness) from Section \ref{subsec:equal_straightness}. Despite this, the results convincingly demonstrate RFWave's superiority over other diffusion vocoders.} with PriorGrad and FreGrad on LibriTTS, MTG-Jamendo, and Opencpop datasets.  Table \ref{tab:benchmark_vag} presents overall results, while Table \ref{tab:benchmark} provides detailed metrics for each audio category.
+RFWave consistently outperforms PriorGrad and FreGrad in both objective and subjective metrics. The superior MOS score achieved by RFWave is likely due to its ability to produce clearer and more consistent harmonics, particularly in high-frequency ranges, which contributes to better overall audio quality. 
+ 
+\paragraph{Comparasion with GAN-based Method} When comparing RFWave to widely used state-of-the-art GAN-based models (BigVGAN, Vocos), we used models trained on LibriTTS. Besides evaluating on the LibriTTS testset, to assess the models' robustness and extrapolation capabilities, following the methodology in \citep{lee2023bigvgan}, we also evaluated these models' performance on the MUSDB18 dataset. It can be observed in Tables \ref{tab:comparasion_gan} that on the in-domain test set (LibriTTS), RFWave is generally on par with state-of-the-art GAN-based models. However, on the out-of-domain test set (MUSDB18), according to the results in Table \ref{tab:comparasion_out_domain}, RFWave shows significant advantages over BigVGAN and Vocos, even though BigVGAN employed Snake activation \citep{snake} to enhance its out-of-domain data generation capabilities. This demonstrates that RFWave, as a diffusion-type model, offers clear advantages in generalization and robustness compared to GAN-based models. For detail, we observe that GAN-based methods tend to generate horizontal lines in the high-frequency regions of the spectrograms, as exemplified in Figure \ref{fig:spec_gan_musdb}. In contrast, RFWave consistently produces clear high-frequency harmonics, even when applied to out-of-domain data.
+
+\begin{table}[ht]
+\caption{Average Mean Opinion Score (MOS) and objective evaluation metrics for RFWave, PriorGrad and FreGrad across various test sets. MOS is provided with 95\% confidence interval. }
+\label{tab:benchmark_vag}
+\centering
+\begin{tabular}{llllll}
+\toprule
+Model     & MOS ↑ & PESQ ↑ & ViSQOL ↑ & V/UV F1 ↑ & Periodicity ↓ \\
+\midrule
+RFWave    & \textbf{3.95}\pmr{0.09} & \textbf{4.202} & \textbf{4.456} & \textbf{0.979} & \textbf{0.070}         \\
+PriorGrad & \uline{3.75}\pmr{0.09}& 3.612 & \uline{4.347} & \uline{0.974} & \uline{0.082}         \\
+FreGrad   & 2.99\pmr{0.14}& \uline{3.640} & 4.179 & 0.973 & 0.087         \\
+\midrule
+Ground truth & 4.00\pmr{0.09}& - & - & - & -        \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\caption{MOS and objective evaluation metrics for RFWave, BigVGAN and Vocos on LibriTTS.}
+\label{tab:comparasion_gan}
+\centering
+\begin{tabular}{llllll}
+\toprule
+Model & MOS ↑ & PESQ ↑ & ViSQOL ↑ & V/UV F1 ↑ & Periodicity ↓  \\
+\midrule
+RFWave & \textbf{3.82}\pmr{0.12} & \textbf{4.304} & 4.579 &  \uline{0.967} & \uline{0.091} \\
+BigVGAN & \uline{3.78}\pmr{0.11} & \uline{4.240} & \textbf{4.712} &  \textbf{0.978}  & \textbf{0.067} \\
+Vocos & 3.74\pmr{0.10}  & 3.660  & \uline{4.696}    & 0.958     & 0.104 \\
+\midrule
+Ground truth & 3.91\pmr{0.10} & - & - & - & -\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\caption{MOS for RFWave, BigVGAN and Vocos on MUSDB18.}
+\label{tab:comparasion_out_domain}
+\centering
+\begin{tabular}{lllllll}
+\toprule
+Model & Vocals & Drums & Bass & Others & Mixture & Average \\
+\midrule
+RFWave & \textbf{3.46}\pmr{0.14} & \uline{3.65}\pmr{0.10} & \textbf{3.62}\pmr{0.10} & \textbf{3.54}\pmr{0.11} & \textbf{4.04}\pmr{0.11} & \textbf{3.67}\pmr{0.05} \\
+BigVGAN & \uline{3.42}\pmr{0.13} & \textbf{3.68}\pmr{0.09} & \uline{3.50}\pmr{0.12} & \uline{3.33}\pmr{0.13} & \uline{3.58}\pmr{0.10} & \uline{3.51}\pmr{0.05} \\
+Vocos & 3.04\pmr{0.15} & 3.54\pmr{0.11} & 2.96\pmr{0.12} & 2.88\pmr{0.15} & 3.08\pmr{0.14} & 3.10\pmr{0.06} \\
+\midrule
+Ground truth & 3.62\pmr{0.14} & 3.71\pmr{0.14} & 3.75\pmr{0.12} & 3.79\pmr{0.12} & 4.17\pmr{0.10} & 3.80\pmr{0.05} \\
+
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experimental Results on Discrete Encodec Tokens Input}
+We evaluated RFWave against EnCodec and MBD across various bandwidths for discrete EnCodec tokens inputs. For RFWave, we used Classifier-Free Guidance (CFG) \citep{ho2021classifierfree} with a 2.0 coefficient. CFG showed little improvement for Mel-spectrogram inputs, but effective for EnCodec tokens, likely due to CFG tending to be more impactful when the input is more compressed.
+
+Table \ref{tab:encodec} displays the average MOS and objective metrics for EnCodec tokens with varying bandwidths across different auditory contexts. Meanwhile, Table \ref{tab:EnCodec_full} offers the detailed results for each category. RFWave excels in all metrics, achieving optimal scores, except for ViSQOL. While using a larger bandwidth generally improves performance, for RFWave, an increase in bandwidth from 6.0 kbps to 12.0 kbps results in only a slight enhancement in MOS. EnCodec's GAN-based decoder attains the highest ViSQOL. Different model families may produce distinct waveform footprints, with ViSQOL showing a subtle bias for GAN-based models. % MBD outperforms the original EnCodec decoder in subjective evaluations, aligning with the findings reported in \citep{multibanddiffusion}. In Table \ref{tab:EnCodec_full}, it is evident that MBD performs particularly well in the sound effect dataset. This could be attributed to it having more parameters and being specifically designed for music generation.
+
+\begin{table}[ht]
+\caption{Average MOS and objective evaluation metrics for RFWave, EnCodec and MBD across various test sets.}
+\label{tab:encodec}
+\centering
+\begin{tabular}{lllllll}
+\toprule
+Bandwidth                  & Model    & MOS ↑  & PESQ ↑ & ViSQOL ↑ & V/UV F1 ↑ & Periodicity↓ \\
+\midrule
+\multirow{3}{*}{1.5 kbps}  & RFWave\textsubscript{(CFG2)} & \textbf{3.17}\pmr{0.22} & \textbf{1.797}  & \uline{3.108}    & \textbf{0.914}     & \textbf{0.193}        \\
+                           & EnCodec     & 		2.23\pmr{0.23} & \uline{1.708} & \textbf{3.518}    & \uline{0.906}     & \uline{0.199}        \\
+                           & MBD       &  	\uline{3.01}\pmr{0.19}  & 1.699  & 2.982    & 0.901     & 0.212        \\
+\midrule                           
+\multirow{3}{*}{3.0 kbps}  & RFWave\textsubscript{(CFG2)}  & 	\textbf{3.52}\pmr{0.25}  & \textbf{2.444}  & \uline{3.570}    & \textbf{0.939}     & \textbf{0.145}        \\
+                           & EnCodec    & 2.79\pmr{0.25} & 1.934  & \textbf{3.793}    & \uline{0.930}     & \uline{0.166}        \\
+                           & MBD        & \uline{3.06}\pmr{0.23} & \uline{2.310}  & 3.402    & 0.922     & 0.171        \\
+\midrule                           
+\multirow{3}{*}{6.0 kbps}  & RFWave\textsubscript{(CFG2)} & \textbf{3.69}\pmr{0.16} 	& \textbf{2.936}  & \uline{3.892}    & \textbf{0.954}     & \textbf{0.117}        \\
+                           & EnCodec   & 3.10\pmr{0.15} & 2.432  & \textbf{4.091}    & \uline{0.951}     & \uline{0.126}        \\
+                           & MBD       & 	\uline{3.43}\pmr{0.15} & \uline{2.488}  & 3.582    & 0.929     & 0.168        \\
+\midrule                           
+\multirow{3}{*}{12.0 kbps} & RFWave\textsubscript{(CFG2)} & \textbf{3.73}\pmr{0.16} & \textbf{3.270}  & \uline{4.124}    & \textbf{0.965}     & \textbf{0.099}        \\
+                           & EnCodec    & \uline{3.55}\pmr{0.15} & \uline{2.892}  & \textbf{4.291}    & \uline{0.963}     & \uline{0.105}        \\
+                           & MBD        & - &   -    &   -      &   -       &   -          \\
+\midrule   
+\multicolumn{2}{l}{Ground truth}         & 	4.07\pmr{0.14} &   -    &   -      &   -       &   -         \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Analysis}
+\label{subsec:analysis}
+\paragraph{Ablations} 
+We evaluate the model's performance in both frequency and time domains, then incrementally add the three loss functions and equal straightness to the better-performing model for further analysis. We conduct ablation studies on LJSpeech \citep{ljspeech17}, using 250 test sentences for Mel-spectrogram-based waveform reconstruction, summarized in Table \ref{tab:ablation}. Despite the metrics not consistently correlating with human evaluations, they accurately captured the quality improvements brought about by design modifications \citep{multibanddiffusion}. The model operating in the time domain outperforms its frequency domain counterpart, as the ISTFT operation in the former (Figure \ref{fig:main}) introduces periodic signals. The inverse Discrete Fourier Transform (IDFT) matrix comprises sinusoidal functions of frequencies $[0, 1/N, ..., (N-1)/N]$, where $N$ is the number of FFT points \citep{oppenheim1975digital}. This mechanism is similar to the Snake activation \citep{snake} in BigVGAN \citep{lee2023bigvgan}, which also introduces periodic signals into the generator. 
+Energy-balanced loss and equal straightness improves the overall performance.
+The STFT loss enhances PESQ scores but adversely affects ViSQOL and periodicity error. This occurs because the model tends to prioritize magnitude over phase when applying STFT loss. This trade-off is essential for effectively eliminating artifacts, especially in the presence of background noise. Although overlap loss slightly decreases PESQ, omitting it results in a noticeable transition between subbands. Example spectrograms illustrating the effects of omitting STFT loss and overlap loss are provided in Figures \ref{fig:stft_loss} and \ref{fig:overlap_loss}, respectively.
+
+\begin{table}[ht]
+\caption{Objective metrics assess the model's performance in the frequency domain and the time domain, where three loss functions and equal straightness are applied incrementally.} %classifier-free guidance with a guidance coefficient of 2.0 (CFG2).}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lllll}
+\toprule
+Setting                           & PESQ ↑ & ViSQOL ↑ & V/UV F1 ↑ & Periodicity ↓ \\
+\midrule
+frequency  & 3.872  & 4.430    & 0.948     & 0.144         \\
+time  & 4.127  & 4.551    & 0.957     & 0.124         \\
+{\small \hspace{1em} + energy-balanced loss}   & 4.181  & 4.598    & 0.965     & 0.110         \\
+{\small \hspace{1em} + overlap loss}  & 4.158  & 4.599    & 0.959     & 0.122         \\
+{\small \hspace{1em} + STFT loss} & 4.211 & 4.578 & 0.961 & 0.119         \\
+{\small \hspace{1em} + equal straightness} & 4.275 & 4.654 & 0.966 & 0.100         \\
+\bottomrule
+\end{tabular}
+\end{table}
+\paragraph{Futher Analysis} Using the model with an 8-layer ConvNeXtV2 backbone, time domain, and three loss functions as the baseline, we first experimented with the DDPM \citep{ho2020denoising} approach. Utilizing the noise schedule from DiffWave and PriorGrad, the performance with 50 sampling steps fell short of the baseline, as demonstrated in Table \ref{tab:futher_analysis}. This highlights that \textbf{Rectified Flow is critical for our model to efficiently generate high-quality audio samples}.
+Next, we experimented with a ResNet \citep{resnet} backbone with a similar number of parameters. This configuration slightly reduced efficiency and performance in objective metrics (Table \ref{tab:futher_analysis}), indicating that the \textbf{ConvNeXtV2 backbone enhances both efficiency and audio quality}.
+Finally, we experimented with models of different sizes. Specifically, we tested ConvNextV2 backbones of half and double sizes, with detailed configurations provided in \ref{subsec:implementation}. \textbf{Increasing the backbone size improves performance but decreases efficiency} (Table \ref{tab:futher_analysis}).
+
+\begin{table}[ht]
+\caption{Objective metrics for further analysis. xRT stands for the speed at which the model can generate speech in comparison to real-time.} 
+\label{tab:futher_analysis}
+\centering
+\begin{tabular}{llllll}
+\toprule
+Setting & GPU xRT ↑ & PESQ ↑ & ViSQOL ↑ & V/UV F1 ↑ & Periodicity ↓ \\
+\midrule
+baseline & 162.59 & 4.211 & 4.578 & 0.961 & 0.119 \\
+DDPM, 50 steps & 34.40 & 2.790 & 4.499 & 0.939 & 0.174 \\
+ResNet & 150.95 & 3.865 &	4.509 &	0.955 &	0.128 \\
+half size & 228.70 &4.128 &	4.553 &	0.959 &	0.120 \\
+double size & 111.62 &4.285	& 4.636	& 0.968	& 0.100 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Inference Speed}
+We perform inference speed benchmark tests using an NVIDIA GeForce RTX 4090 GPU. The implementation was done in PyTorch \citep{pytorch}, and no specific hardware optimizations were applied. The inference was carried out with a batch size of 1 sample, utilizing the LJSpeech test set, resampled to model's sampling rate. Table \ref{tab:param_speed} displays the model size, synthesis speed and GPU memory consumption of the models.
+RFWave is more than twice as fast as BigVGAN and consumes less GPU memory, thereby eliminating latency as a barrier for practical applications. This speed advantage becomes even more pronounced when synthesizing high-resolution audio (44.1/48 kHz). Frame-level models like RFWave significantly outperform sample-point-based models in high-resolution audio synthesis in terms of speed.
+RFWave can easily adjust the complex spectrogram's window lenght and hop length for 44.1 kHz sampling, maintaining low computational complexity, whereas BigVGAN requires additional upsampling blocks.
+Vocos serves as a strong baseline, given its efficiency in requiring only a single forward pass and operating at the frame level. 
+ \begin{table}[ht]
+    \caption{Model footprint and synthesis speed. xRT stands for the speed at which the model can generate speech in comparison to real-time.}
+    \label{tab:param_speed}
+    \centering
+    \begin{tabular}{lllll}
+    \toprule
+    Model & Parameters (M) & GPU xRT $\uparrow$ & GPU Memory (MB) & Sampling steps \\
+    \midrule
+    RFWave & 18.1  & 162.59 & 780 & 10\\
+    BigVGAN & 107.7 & 72.68 & 1436 & 1 \\
+    Vocos\textsubscript{(ISTFT)} & 13.5  & \textbf{2078.20} & \textbf{590} & 1  \\
+    PriorGrad & 2.6  & 16.67 & 4976 & 6 \\
+    FreGrad & \textbf{1.7 } & 7.50 & 2720 & 50 \\ %\hline
+    MBD & 411.0  & 4.82 & 5480 &20 \\
+    \midrule
+    RFWave\textsubscript{(44.1KHz)} & 20.5  &  152.58 & 902 & 10 \\
+    BigVGAN\textsubscript{(44.1KHz)} & 116.5 & 39.03 & 1740 & 1 \\
+    \bottomrule
+    \end{tabular}
+ \end{table}
+
+
+
+\section{Conclusion}
+
+In this study, we propose RFWave, a multi-band Rectified Flow approach for audio waveform reconstruction.
+The model has been carefully designed to overcome the latency issues associated with diffusion models.
+RFWave stands out for its ability to generate complex spectrograms by operating at the frame level, processing all subbands concurrently. This concurrent processing significantly enhances the efficiency of the waveform reconstruction process. 
+The empirical evaluations conducted in this research have demonstrated that RFWave achieves exceptional reconstruction quality. Moreover, it has shown superior computational efficiency by generating audio at a speed that is 160 times faster than real-time, comparable to GAN-based methods, making it practical for real-world applications. 
+
+
+
+
+

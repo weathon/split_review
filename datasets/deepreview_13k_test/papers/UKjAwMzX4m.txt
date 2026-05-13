@@ -1,0 +1,361 @@
+\title{BCQ: Block Clustered Quantization for 4-bit (W4A4) LLM inference}
+
+\begin{abstract}
+Post-training quantization (PTQ) is a promising approach to reducing the storage and computational requirements of large language models (LLMs) without additional training cost. Recent PTQ studies have primarily focused on quantizing only weights to sub-8-bits while maintaining activations at 8-bits or higher. Accurate sub-8-bit quantization for both weights and activations without relying on quantization-aware training remains a significant challenge. In this work, we introduce a novel quantization method called block clustered quantization (BCQ) wherein each operand tensor is decomposed into blocks (a block is a group of contiguous scalars), blocks are clustered based on their statistics, and a dedicated optimal quantization codebook is designed for each cluster. We propose a PTQ algorithm called Locally-Optimal BCQ (LO-BCQ) that iterates between the steps of block clustering and codebook design to greedily minimize the quantization mean squared error. When weight and activation scalars are encoded to W4A4 format (with 0.5-bits of overhead for storing scaling factors and codebook selectors), we advance the current state-of-the-art by demonstrating <1% loss in inference accuracy across several LLMs and downstream tasks.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Quantization is a highly effective and widely adopted technique for reducing the computational and storage demands of Large Language Model (LLM) inference. While recent efforts (Wang et al., 2023; Tseng et al., 2024; Egiazarian et al., 2024; Frantar et al., 2023; Lin et al., 2023) have largely focused on weight-only quantization targeting single-batch inference, activation quantization becomes critical for improving throughput during multi-batch inference scenarios such as cloud-scale deployments serving multiple users. Previous works (Yao et al., 2023; Dai et al., 2021) on sub-8-bit quantization of both weights and activations have relied on quantization-aware training (QAT) to recover accuracy loss during inference. However, the prohibitive cost of training and unavailability of training data in recent LLMs has made QAT increasingly difficult and motivated recent post-training quantization (PTQ) efforts (Xiao et al., 2023; Rouhani et al., 2023a; Wu et al., 2023).  
+
+Block quantization techniques where each block, typically consisting of 16-to-32-scalar elements, has its own scaling factor (Rouhani et al., 2023a; Dai et al., 2021) achieve the current state-of-the-art accuracy for sub-8-bit quantization of both weights and activations. While these works deploy the same quantizer (number-format) across blocks, we hypothesize that one way to achieve lower quantization mean squared error (MSE) would be to design a dedicated codebook for each block through an MSE-optimal algorithm such as Lloyd (1982). However, such a design would be expensive in terms of computational effort and memory footprint. Therefore, we propose to amortize this cost via codebook sharing among clusters of blocks. Our method is called block clustered quantization (BCQ) and is comprised of two steps: (1) a clustering step applied to operand blocks, and (2) a quantization step individually applied to operand scalars based on their cluster membership.  
+
+We propose an iterative PTQ algorithm called LO-BCQ (locally optimal block clustered quantization) that jointly optimizes the block clustering and the per-cluster codebook. We prove that LOBCQ greedily minimizes quantization MSE across iterations by performing locally optimal steps at each iteration. With the optimal codebooks derived through LO-BCQ, we demonstrate state-of-theart bitwidth-vs-accuracy across a suite of GPT3, Llama2 and Nemotron-4 models on a wide range of downstream tasks. For all our results, we employ PTQ on frozen model parameters.  
+
+1.1 RELATED WORK  
+
+
+
+\section{1.2 CONTRIBUTIONS  }
+
+
+The main contributions of this work are as follows:  
+
+• We propose BCQ, a block clustered quantization framework that performs per-block quantization by first clustering operand blocks and then quantizing each block cluster using a dedicated codebook.   
+• We derive a locally optimal version of BCQ called LO-BCQ that iteratively optimizes block clustering and per-cluster quantization to provably minimize quantization MSE for any value distribution. We demonstrate that LO-BCQ is applicable to quantization of both weights and activations of LLMs.   
+• We propose block formats for LO-BCQ where each operand block is associated with an index that maps it to one of a set of codebooks, and a group of blocks (called a block array) share a quantization scale-factor. We vary the length of blocks, block arrays and the number of codebooks to study different configurations of LO-BCQ.   
+• When each of the weight and activation scalars are quantized to 4-bits (effective bitwidth including per-block scale-factors etc. is 4.5 to 4.625 bits), we achieve $<0.1$ loss in perplexity across GPT3 (1.3B, 8B and 22B) and Llama2 (7B and 70B) models and $<0.2$ loss in the Nemotron4- 15B model, respectively, on the Wikitext-103 dataset. Further, we achieve $<1\%$ loss in average accuracy across downstream tasks such as MMLU and LM evaluation harness.   
+To the best of our knowledge, we are the first to achieve $<1\%$ loss in downstream task accuracy   
+when both LLM activations and weights are quantized to 4-bits during PTQ ( no finetuning).   
+2 BLOCK CLUSTERED QUANTIAZTION (BCQ)   
+In this section, we introduce the concept of block clustered quantization (BCQ) and present the   
+locally optimal block clustered quantization (LO-BCQ) algorithm that minimizes quantization MSE   
+for any operand. We also introduce block formats to support various LO-BCQ configurations.   
+2.1 MATHEMATICAL DEFINITION   
+Given a tensor $\mathbf{\deltaX}$ composed of $L_{X}$ scalar elements, we denote its blockwise decomposition as   
+$\{b_{i}\}_{i=1}^{N_{b}}$ , where $b_{i}$ ’s are blocks of $L_{b}$ consecutive elements in $\mathbf{\deltaX}$ , and the number of blocks is   
+given by $N_{b}=L_{X}/L_{b}$ . Block clustered quantization (see Figure 2) uses a family of $N_{c}$ codebooks   
+$\mathcal{C}=\{C_{i}\}_{i=1}^{N_{c}}$ , where $N_{c}<<N_{b}$ , and clusters the blocks into $N_{c}$ clusters such that each is associated   
+with one of the $N_{c}$ codebooks. This procedure is equivalent to creating a mapping function $f$ from   
+a block $b$ to a cluster index in $\{1,\bar{\dots}.\,,N_{c}\}$ . Quantization (or encoding) proceeds in a two-step   
+process: (i) mapping to assign a cluster index to a given block, and (ii) quantization of its scalars   
+using the codebook corresponding to that index. Formally, denoting ˆb as the result of block clustered   
+quantization of a given block $^{b}$ in $\mathbf{\deltaX}$ , this procedure is described as: $\hat{\pmb{b}}=C_{f(\pmb{b})}(\pmb{b})$ (1)   
+where $C$ is a $2^{B}$ -entry codebook that maps each scalar in $^{b}$ to a $B$ -bit index to the closest represen  
+tation. Each quantized scalar of block $^{b}$ is obtained as:  
+
+$$
+\hat{\pmb{b}}[l]=\arg\operatorname*{min}_{k=1\ldots2^{B}}|\pmb{b}[l]-C_{f(\pmb{b})}[k]|^{2}
+$$  
+
+where the notation $x[y]$ is used to describe the $y^{\mathrm{th}}$ element in an arbitrary block $\textbf{\em x}$ . That is, each scalar in ˆb is an index to the closest entry by value in Cf(b).  
+
+Once mapped by invoking $f$ , we store the $l o g2(N_{c})$ -bit codebook selector for each block. Therefore, the effective bit-width of each quantized scalar is given by:  
+
+$$
+\mathrm{Bitwidth}_{\mathrm{BCQ}}=B+l o g2(N_{c})/L_{b}
+$$  
+
+2.2 LOCALLY OPTIMAL BLOCK CLUSTERED QUANTIZATION (LO-BCQ)  
+
+Our goal is to construct a family of codebooks $\mathcal{C}$ resulting in minimal quantization MSE during block clustered quantization. Figure 3 presents an algorithm called Locally Optimal BCQ (LO-BCQ) to achieve this goal. LO-BCQ consists of two main steps: (i) updating block clusters with fixed percbleugsitnesr  cato diteebroatoikosn,  a0n d(i (niiit)i aulp cdoatnidnigti poenr)- cwluitsht era  csoedt eobfo $N_{c}$ iwniittiha lf eodd eblboocokk sc $\{C_{1}^{(0)},\ldots,C_{N_{c}}^{(0)}\}$ i tahnmd unquantized operand blocks as inputs. During step 1 of iteration $n$ , with the per-cluster codebooks  
+
+![](images/f1f6dff84b2fbed4602a2b35fce4543db3a4f699acba445270122e6c77908088.jpg)  
+Figure 2: Block clustered quantization: Each operand block is first mapped to a cluster based on a mapping function and then each scalar of that block is encoded as a $B$ -bit index to the closest entry in the $2^{B}$ -entry codebook associated with that cluster.  
+
+![](images/539cc76109127b2e08a5a2409ddee6535c33bda488ab48aa1203b138f2b6f4e8.jpg)  
+
+Figure 3: Overview of LO-BCQ algorithm: The algorithm starts with a set of initial per-cluster codebooks, and then iteratively performs two steps (i) fix per-cluster codebooks and update block clusters and (ii) fix block clusters and update per-cluster codebooks.  
+
+from the previous iteration $\{C_{1}^{(n-1)},\ldots C_{N_{c}}^{(n-1)}\}$ , we perform block clustering by mapping each block to the codebook that achieves minimum quantization MSE. That is, we use the following mapping function:  
+
+$$
+f^{(n)}(\pmb{b})=\arg\operatorname*{min}_{i=1\ldots N_{c}}\|\pmb{b}-C_{i}^{(n-1)}(\pmb{b})\|_{2}^{2}
+$$  
+
+Since each codebook $C_{i}$ is associated with a cluster $i$ , mapping to $C_{i}$ is equivalent to mapping to cclluusstteerr $i$ .s  dSepfeicniefdic aalsl:y, at iteration $n$ , we construct $N_{c}$ block clusters $\pmb{\mathscr{B}}^{(n)}=\bar{\{\mathscr{B}_{i}^{(n)}\}}_{i=1}^{N_{c}}$ , where each  
+
+$$
+{\mathcal{B}}_{i}^{(n)}=\left\{b_{j}\big|{f}^{(n)}(b_{j})=i\;{\mathrm{for}}\;j\in\left\{1\ldots N_{b}\right\}\right\}
+$$  
+
+In step 2, given the updated block clusters from step 1 and quantization bitwidth $B$ , we apply the Lloyd-Max algorithm on each block cluster to derive optimal $2^{B}$ -entry per-cluster codebooks $\{C_{1}^{(n)},...\,C_{N_{c}}^{(n)}\}$ :  
+
+$$
+C_{i}^{(n)}\gets\mathrm{LloydMax}(\mathcal{B}_{i}^{(n)},B)
+$$  
+
+where the Lloyd-Max algorithm (see A.1, Lloyd-Max is equivalent to $\mathbf{K}$ -means clustering on 1- dimensional data) is invoked on the data of the corresponding cluster $B_{i}^{(n)}$ .  
+
+We iterate steps 1 and 2 until convergence or a pre-determined number of iterations $M$ . Empirically, we find that LO-BCQ converges at $M<=100$ . Since each of these steps are locally optimal, we find that the quantization MSE is non-increasing for each iteration. As a result, for any given value distribution, our LO-BCQ algorithm greedily minimizes quantization MSE. A theoretical proof of this claim is provided in section A.2.  
+
+
+
+\section{2.3 CONVERGENCE AND INITIALIZATION  }
+
+
+Prior to clustering, we find that normalizing the operand blocks improves convergence. However, a block-wise normalization factor (or scaling factor) induces computational and memory overheads. Therefore, we perform a second-level quantization of this scaling factor to $B_{s}$ -bits and share it across an array of blocks of length $L_{A}$ . Furthermore, better convergence is observed for larger number of codebooks $(N_{c})$ and for a smaller block length $(L_{b})$ . Such trends increase the bitwidth of BCQ in equation 3, meaning that LO-BCQ has an inherent trade-off between accuracy and complexity.  
+
+![](images/4de1c5e2efb1ab902ac2527d8d79d23921880d9f63cc5a4ac3d4c30cadbf9610.jpg)  
+Figure 4: Block format for LO-BCQ. Each operand block is associated with a $l o g2(N_{c})$ -bit selector that selects the best codebook and each scalar is a $B$ -bit index that represents the closest value in the selected codebook. Each block array $\pmb{A}$ is associated with a $B_{s}$ -bit scale factor.  
+
+riWteh imn iwtihailiczhe  mthaex ipmeir-zcelsu sptaeirr wciosdee ebuocolkids $\{C_{1_{\ldots}}^{(0)},\ldots,C_{{\cal N}_{\!c}}^{(0)}\}$ C(N0c) } ++ ubra seexdp eorni mKe-nmtse, awnse uinnidt isauliczha tiinoitni aalligzoa-- tion to lead to significantly better convergence than a random one. Further, in step 2 of each iteration, when Lloyd-Max algorithm is invoked in equation 6, we set the initial centroids corresponding to the codebooks identified in the previous iteration.  
+
+2.4 BLOCK FORMATS FOR LO-BCQ  
+
+Figure 4 illustrates the LO-BCQ block format where each operand block of length $L_{b}$ is associated with a $l o g2(N_{c})$ -bit index (result of the mapping function $f$ in 4) that selects the best codebook for that block. Each codebook is composed of $\dot{2}^{\dot{B}}$ entries and each scalar in the operand block is a $B$ -bit index that represents the closest value in the selected codebook. Each entry in the codebook is a $B_{c}$ -bit integer $(B_{c}\,>\,B)$ ). Finally, each block array $\pmb{A}$ is associated with a scale-factor $s_{A}$ . This scale-factor and its quantization ${\hat{s}}_{A}$ to $B_{s}$ -bits are computed as:  
+
+$$
+s_{A}=\left(2^{B_{c}-1}-1\right)/\mathrm{max}(\mathbf{abs}(A));\quad\hat{s}_{A}=Q_{F}\left\{s_{A}/s_{X},B_{s}\right\}
+$$  
+
+where $s_{X}$ is a per-tensor scale-factor that is shared by the entire operand tensor $\mathbf{\deltaX}$ and $Q_{F}$ denotes a quantizer that quantizes a given operand to format $F$ (see section A.4 for more details on number formats and quantization method).  
+
+The bitwidth of LO-BCQ is computed as:  
+
+$$
+\mathrm{Bitwidth}_{\mathrm{LO-BCQ}}=B+l o g2(N_{c})/L_{b}+B_{s}/L_{A}+N_{c}*2^{B}*B_{c}/L_{X}
+$$  
+
+where the term $N_{c}*2^{B}*B_{c}/L_{X}$ is usually negligible since the memory footprint of codebooks (numerator) is negligible compared to the size of the operand tensor (denominator). Indeed, we emphasize that LO-BCQ shares a set of $N_{c}<=16$ codebooks among the scalars of the entire tensor, resulting in negligible memory overhead for storing the codebooks.  
+
+Table 1: Various LO-BCQ configurations and their bitwidths.   
+
+![](images/973817a89a1e3485813b7513f9af6f36482507be0e3ffacfdc14f70489ce72e6.jpg)  
+
+In this paper, we assume $B_{s}=8$ and the data format $F$ is floating point E4M3. Further, each codebook entry is a 6-bit integer (i.e, $B_{c}=6$ ) and we vary $N_{c}$ between 2 and 16, $L_{b}$ between 2 and 8, and $L_{A}$ between 16 and 64 to obtain various LO-BCQ configurations. We list the configurations and their corresponding bitwidths in Table 1.  
+
+Figure 5 compares our 4-bit LO-BCQ block format to MX (Rouhani et al., 2023a). As shown, both LO-BCQ and MX decompose a given operand tensor into block arrays and each block array into blocks. Similar to MX, we find that per-block quantization $(L_{b}<L_{A})$ ) leads to better accuracy due to increased flexibility. While MX achieves this through per-block 1-bit micro-scales, we associate a dedicated codebook to each block through a per-block codebook selector. Further, MX quantizes the per-block array scale-factor to E8M0 format without per-tensor scaling. In contrast during LOBCQ, we find that per-tensor scaling combined with quantization of per-block array scale-factor to E4M3 format results in superior inference accuracy across models.  
+
+![](images/053f1a660b3de74051f429d67f1d701d1c639425c4ae974cac5e3d62811c33f0.jpg)  
+
+Figure 6: LO-VCQ codebooks compared to 4-bit floating point formats and layerwise normalized MSE (NMSE). We compute NMSE for the weights of first 20 GEMM layers (QKV, projection and fully-connected) of Llama2-7B model. Note that we use the NMSE for better visualization across varying layer data.  
+
+
+
+\section{3 PRACTICAL IMPLEMENTATION OF LO-BCQ FOR LLM INFERENCE  }
+
+
+In this section, we discuss specifics of a practical implementation of LO-BCQ for inference. Specifically, we first describe the codebook design process, followed by the practical mechanism for activation quantization on-thefly.  
+
+We pre-calibrate the LO-BCQ codebooks for both weights and activations offline (prior to inference). Since weights are known, their own data can be used as calibration set. On the other hand, activations are dynamic and vary for every input; thus, as per common quantization strategies (Wu et al., 2020a; Sakr et al., 2022), we employ a randomly sampled calibration set from training data in order to build activation codebooks. Once codebooks are calibrated, we also quantize the codewords to 6-bit integers to further improve the energy efficiency of GEMM hardware. The choice of 6-bit was based on empirical observations of accuracy being maintained with $L_{A}<=64$ .  
+
+![](images/be324d97f3f65712a5b53775e88acda7469cdbd5e40fe05eafc56871995a038d.jpg)  
+Figure 7: Quantization NMSE acheived by universally calibrated codebooks compared to that calibrated layerwise in Llama2-7B inputs of first 30 GEMM (QKV, projection and fully-connected) layers.  
+
+Figure 6 compares the codebooks identified by the LO  
+BCQ algorithm in a GEMM layer of a GPT3-126M   
+model to 4-bit floating point formats such as E1M2,   
+E2M1 and E3M0. As shown, the LO-BCQ codebooks outperform other block formats by capturing the arbitrary and non-uniform patterns in the value distributions of LLM operands and allowing each block to map to the codebook that best represents it. The mapping of operand blocks to the best of available codebooks can be conceptually compared to prior works that have explored mixed-format quantization such as (Tambe et al., 2020; Zadeh et al., 2022).  
+
+LO-BCQ provides the quantization operation the flexibility to assign data to any of the sign posts (codewords) in Figure 6. The union of these sign posts covers the real line with a resolution that is clearly superior to that of a 4-bit quantizer. Therefore, we hypothesized that these codebooks need not be calibrated on a per-tensor (layerwise) basis, but rather, it is likely that they would be universally appropriate to quantize any tensor, at any layer, for any model. To verify this hypothesis, we calibrated a set of codebooks on data sampled from GPT3 models on Wikitext-103 dataset and froze it. We find that these codebooks achieve comparable quantization MSE compared to those calibrated individually on each operand as shown in Figure 7 which verifies our hypothesis. In our subsequent results, we always employ universally calibrated codebooks.  
+
+Finally, we note that in a real implementation, activations can be efficiently quantized on the fly. Indeed, LO-BCQ involves computing the following values – per-block array scale-factor $s_{A}$ , perblock codebook selector $s_{b}$ which is the result of the mapping function $f$ (Eq. 4), and the index to closest representation bˆ in the selected codebook (Eq. 2). Note that the computation of $s_{A}$ simply corresponds to a max-reduction (followed by quantization) over the block array, whose size is small $z=64$ ). Importantly, with LO-BCQ, the size of codebooks $(<=0.19K B)$ is small enough such that it easily fits within the shared memory of modern GPUs. This is an important distinction with other works on codebook quantization (Tseng et al., 2024; Egiazarian et al., 2024). As such, $s_{b}$ and $\hat{b}$ can be concurrently computed in a thread-local sub-routine within a custom CUDA kernel. The locality of computation circumvents the need for any synchronization of streaming multiprocessors.  
+
+
+
+\section{4 EXPERIMENTAL EVALUATION OF LO-BCQ  }
+
+
+In this section, we present our accuracy studies on downstream tasks comparing LO-BCQ to various other block quantization proposals. Next, we present ablation studies on varying LO-BCQ configurations and our calibration methodology, namely universal vs local.  
+
+
+
+\section{4.1 EXPERIMENTAL SETUP  }
+
+
+We perform accuracy studies on GPT3 (Shoeybi et al., 2020) (1.3B, 8B and 22B), Llama2 (Touvron et al., 2023) (7B and 70B) and Nemotron4-15B (Parmar et al., 2024) models. We evaluate PTQ inference accuracy on several downstream tasks including Wikitext-103 (Merity et al., 2016), MMLU (Hendrycks et al., 2021) and Eleuther AI’s LM evaluation harness (Gao et al., 2024). In LM evaluation harness, we infer on Race (RA), Boolq (BQ), Hellaswag (HS), Piqa (PQ) and Winogrande (WG) tasks and in the MMLU dataset we evaluate all tasks. In all these models, we quantize GEMM layers including Query, Key and Value computations, Projection layer after self attention and the fully-connected layers.  
+
+We apply the LO-BCQ algorithm to the operands before inference and pre-calibrate the optimal codebooks. In our experiments, we perform this calibration on one batch of activations from the training data of the GPT3-126M model and the Wikitext-103 dataset. We freeze these optimal codebooks across operands and models during all of our accuracy evaluations. Further, we represent each entry of the codebooks as a 6-bit integer. That is, once decoded, the inner product computations with a block array during inference can be performed at 6-bit precision3. Furthermore, we perform ablation studies on the LO-BCQ configurations listed in Table1 with quantization bitwidth ranging from 4.25-bits to 5-bits. We denote the LO-BCQ configurations by the tuple $\{L_{A},L_{b},N_{c}\}$ .  
+
+We compare LO-BCQ against previous block quantization works that have explored PTQ of both weights and activations such as VSQ (Dai et al., 2021), MX (Rouhani et al., 2023a) and MXFP (Rouhani et al., 2023b). VSQ and MX perform per-block quantization of 16-element blocks with an 8-bit scale-factor per-block resulting in an effective bit-width of 4.5 bits. VSQ quantizes each scalar to INT4 format and per-block scale-factor to INT8 format. MX performs micro-scaling at per-block level with a 1-bit exponent shared by 2-element blocks. Each scalar is quantized to INT3. In this paper, we overestimate accuracy of MX by allowing each scalar to have its own exponent, resulting in INT4 precision. The per-block array scale factors of MX are quantized to E8M0 format. Therefore, our evaluation results in a bitwidth of 4.5 bits. Further, MXFP explores 32-element blocks with 8-bit scale-factor per block resulting in an effective bitwidth of 4.25 bits. The number format of scalars and per-block scale factors are E2M1 and E8M0, respectively. The quantization methodology with these block formats is detailed in A.4.4.  
+
+
+
+\section{4.2 ACCURACY STUDIES ON DOWNSTREAM TASKS  }
+
+
+Table 2 presents our comprehensive accuracy evaluations across the Llama2 and GPT3 models, on the Wikitext-103, LM evaluation harness and MMLU datasets. For convenience, we present select LO-BCQ configurations in this table. See A for accuracy studies on other configurations.  
+
+
+
+\section{4.2.1 PERPLEXITY ON WIKITEXT-103  }
+
+
+Across large models such as Llama2-70B and GPT3-22B, 4.5-bit LO-BCQ achieves $<0.1$ loss in perplexity compared to the unquantized baseline on the Wikitext-103 dataset. Further, LO-BCQ achieves significant benefits compared to the baselines of equivalent bit-widths. When the quantization bitwidth is 4.5-bits, LO-BCQ achieves an average improvement of 0.9 and 0.76 in perplexity compared to VSQ and MX, respectively, and 1.19 average improvement with 4.25-bits compared to MXFP across models. We achieve these improvements during PTQ, i.e., without any additional training or finetuning.  
+
+MX, MXFP and VSQ perform per-block quantization by associating a scale-factor to each block (or a block array) and with a single number format (quantizer) across blocks. On the other hand, in addition to per-block array scaling, LO-BCQ allows a block to flexibly map to a codebook that best represents it from a set of codebooks. This flexibility allows LO-BCQ to achieve better perplexity. Furthermore, we find that with a larger quantization bitwidth, LO-BCQ achieves better perplexity across models as expected.  
+
+Further, the number format of per-block (or block array) scale-factor has a significant impact on accuracy. VSQ is unable to sufficiently capture the range of activations with its INT8 scale-factors as observed in Llama2-7B, while it outperforms the E8M0 scale-factors of MX in GPT3-22B due to better resolution when representing large values. Across various models, we find that the E4M3 format of LO-BCQ provides sufficient range and resolution to represent the scale-factors.  
+
+
+
+\section{4.2.2 ACCURACY ON LM EVALUATION HARNESS TASKS  }
+
+
+Across 0-shot LM evaluation harness tasks LO-BCQ shows significant improvement in average accuracy compared to MX, MXFP and VSQ at equivalent bitwidth. Further, across models during 4.5-bit quantization, LO-BCQ achieves $<1\%$ loss in average accuracy compared to the respective unquantized baselines. When the bitwidth of LO-BCQ is increased by varying its configuration, we find that the average accuracy generally increases albeit with a few exceptions. Although these variations are small $(<0.5\%)$ , we believe that they arise due to the universal calibration of codebooks. Our codebooks are calibrated on a batch of training data from the Wikitext-103 dataset and the GPT3-126M model and remain frozen across all datasets and models.  
+
+
+
+\section{4.2.3 ACCURACY ON MMLU TASKS  }
+
+
+Similarly, in 5-shot MMLU tasks LO-BCQ achieves $<1\%$ loss in average accuracy with 4.5-bits per scalar compared to respective unquantized baselines across GPT3-22B and Llama2-70B models. Further, LO-BCQ achieves a significantly better accuracy compared to all of our block quantization baselines such as VSQ, MX and MXFP4 at equivalent bitwidth. Across Llama2 models, LO-BCQ with a smaller bitwidth (4.25-bits) outperforms VSQ and MX4 with a comparatively larger bitwidth (4.5-bits). While the 0.5-bit overhead in VSQ and MX4 are used on per-block array scale-factors, the 0.25-bit overhead of LO-BCQ is shared between scale-factors and codebook selectors. Therefore, the superior accuracy of LO-BCQ can be attributed to the better representation by selecting the best codebook for each block.  
+
+
+
+\section{4.2.4 ACCURACY STUDIES ON NEMOTRON4-15B  }
+
+
+Table 3a lists the perplexity achieved by the Nemotron4-15B model quantized by LO-BCQ on Wikitext-103 dataset and compares it to various baselines. When both weights and activations are quantized to 4.75-bits, LO-BCQ achieves 0.16 loss in perplexity compared to unquantized baseline.  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/252e351d8608bbb1a81833e45a5914820d743ed1e6df0832cbc6f19dd33f1d8c.jpg)  
+
+Table 2: PTQ Perplexity (lower is better) on Wikitext-103 dataset and downstream task accuracy (higher is better) with Llama2 and GPT3 models. We denote the LO-BCQ configurations by the tuple $\left\{L_{A},L_{b},\bar{N}_{c}\right\}=$ {Length of block array, Length of block, Number of codebooks}.  
+
+Compared to GPT3 and Llama2 models, LO-BCQ suffers a larger perplexity degradation in this model. A similar trend is observed for our block quantization baselines VSQ, MX and MXFP. At equivalent bitwidth LO-BCQ achieves 1.45, 2.75 and 1.94 improvement in perplexity over VSQ, MX and MXFP, respectively.  
+
+Across MMLU tasks, LO-BCQ achieves $<1\%$ loss in average accuracy compared to unquantized baseline with $>=4.5$ -bits per scalar. Further, we achieve $5.57\%$ , $6.34\%$ and $4.89\%$ improvement over MX4, VSQ and MXFP4, respectively, at equivalent bitwidth.  
+
+Table 3b compares weight-only (W4A8) LO-BCQ with a block array size of 128 to other weightonly quantization proposals of comparable block array size and effective bit-width. As shown, LOBCQ with 2, 4, 8 and 16 codebooks with effective bitwidth of 4.19, 4.31, 4.44 and 4.56, respectively, achieves significantly lower perplexity loss. It is worth noting that we evaluate this loss on Wikitext103 dataset, which is a much larger dataset compared to Wikitext2 used by other works.  
+
+4.3 ABLATION STUDIES  
+
+Table 4a shows the perplexity of LO-BCQ on Wikitext-103 dataset and across Llama2-70B and GPT3-22B models when its configuration is varied. For a given $L_{b}$ (block length), larger number of codebooks results in better perplexity. This is intuitive since larger number of codebooks leads to better representation of the values in each block since LO-BCQ allows it to map to the codebook  
+
+Table 3: (a) PTQ Perplexity (lower is better) on Wikitext-103 dataset and MMLU accuracy (higher is better) with Nemotron4-15B model, and (b) Comparing perplexity loss of weight-only (W4A8) LO-BCQ to other weight-only quantization works such as GPTQ, AWQ, OmniQ and QuiP#. Here, the LO-BCQ configuration is denoted by tuple $\left\{L_{A},L_{b},N_{c}\right\}=\left\{\begin{array}{r l}\end{array}\right.$ {Length of block array, Length of block, Number of codebooks}.  
+
+![](images/7661fb9d41b3c3c0252d74c751aa8935764990ce86549f10e67ab36035659800.jpg)  
+
+(b)   
+
+![](images/78c7a6a8505c8261b8703eabdec458226dac630746590939a072b2e4ec0fcdcc.jpg)  
+
+Table 4: Ablation studies: (a) Perplexity on Wikitext-103 dataset across various LO-BCQ configurations, and (b) Perplexity on Wikitext-103 dataset with universally calibrated vs locally calibrated codebooks   
+
+![](images/daebeccaa43cc289ddb527153313414710eceaff6e63f5f47596e8264a8ea4c1.jpg)  
+
+![](images/90dbf192705ef9fc4a0e9e050fdcf288632100022b9bdc67d62543c2808b4b9a.jpg)  
+
+486   
+487   
+488   
+489   
+490   
+491   
+492   
+493   
+494   
+495   
+496   
+497   
+498   
+499   
+500   
+501   
+502   
+503   
+504   
+505   
+506   
+507   
+508   
+509   
+510   
+511   
+512   
+513   
+514   
+515   
+516   
+517   
+518   
+519   
+520   
+521   
+522   
+523   
+524   
+525   
+526   
+527   
+528   
+529   
+530   
+531   
+532   
+533   
+534   
+535   
+536   
+537   
+538   
+539  
+
+with best representation. Further, when the block array size is reduced, we achieve better perplexity. The block array corresponds to the granularity of normalization. As discussed in section 2.3, normalization improves convergence of LO-BCQ and results in better perplexity. Further, when comparing configurations with same bitwidth (see Table 1), we find that the configuration with larger number of codebooks is better than smaller block array. This shows that the per-block metadata is better utilized for codebook selectors than scale factors.  
+
+Furthermore, we find that reducing the block length $(L_{b})$ below 8 results in diminishing returns. This is because, the overhead of storing codebook selectors is larger for a smaller block. For a given bitwidth, configuration with smaller $L_{b}$ has fewer codebooks. Therefore, these configurations result in larger loss in perplexity.  
+
+Table 4b compares the perplexity with universally calibrated codebooks to codebooks calibrated layerwise (per-tensor) in Llama2-7B model. The layerwise calibrated codebooks achieve slightly better perplexity when the number of codebooks are small (e.g. $N_{c}=2$ ). However, they do not provide significant benefits when ${N_{c}}>4$ despite the comparatively larger calibration effort. Therefore, in our experiments in this paper, we have largely explored universally calibrated codebooks.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+The inference accuracy of LLMs during per-block (fine-grained) quantization is significantly influenced by the number format of the operands and per-block scale factors. Several previous works have explored novel number formats to improve accuracy. However, none have explored per-block quantization methods involving clustering that minimize quantization MSE. In this work, we propose LO-BCQ, an iterative block clustering and quantization algorithm that greedily minimizes quantization MSE for any operand (weights and activations) through locally optimal steps at each step of the iteration. We demonstrate that LO-BCQ achieves state-of-the-art perplexity across a suite of GPT3, LLama2 and Nemotron4 models on various downstream tasks such Wikitext-103, LM evaluation harness and MMLU.  
+
+Haoli Bai, Lu Hou, Lifeng Shang, Xin Jiang, Irwin King, and Michael R. Lyu. Towards efficient post-training quantization of pre-trained language models, 2021.   
+Minsik Cho, Keivan Alizadeh-Vahid, Saurabh N. Adya, and Mohammad Rastegari. Dkm: Differentiable $\boldsymbol{\mathrm{k}}$ -means clustering layer for neural network compression. ArXiv, abs/2108.12659, 2021. URL https://api.semanticscholar.org/CorpusID:237353080.   
+Minsik Cho, Keivan A. Vahid, Qichen Fu, Saurabh Adya, Carlo C Del Mundo, Mohammad Rastegari, Devang Naik, and Peter Zatloukal. edkm: An efficient and accurate train-time weight clustering for large language models, 2023.   
+Steve Dai, Rangha Venkatesan, Mark Ren, Brian Zimmer, William Dally, and Brucek Khailany. Vs-quant: Per-vector scaled quantization for accurate low-precision neural network inference. In A. Smola, A. Dimakis, and I. Stoica (eds.), Proceedings of Machine Learning and Systems, volume 3, pp. 873–884, 2021. URL https://proceedings.mlsys.org/paper_files/ paper/2021/file/48a6431f04545e11919887748ec5cb52-Paper.pdf.   
+Vage Egiazarian, Andrei Panferov, Denis Kuznedelev, Elias Frantar, Artem Babenko, and Dan Alistarh. Extreme compression of large language models via additive quantization, 2024. URL https://arxiv.org/abs/2401.06118.   
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. OPTQ: Accurate quantization for generative pre-trained transformers. In The Eleventh International Conference on Learning Representations, 2023. URL https://openreview.net/forum?id $\equiv$ tcbBPnfwxS.   
+Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPof,i Charles Foster, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muennighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-shot language model evaluation, 07 2024. URL https://zenodo.org/records/ 12608602.   
+Cong Guo, Jiaming Tang, Weiming Hu, Jingwen Leng, Chen Zhang, Fan Yang, Yunxin Liu, Minyi Guo, and Yuhao Zhu. Olive: Accelerating large language models via hardware-friendly outliervictim pair quantization. ISCA ’23, New York, NY, USA, 2023. Association for Computing Machinery. ISBN 9798400700958. doi: 10.1145/3579371.3589038. URL https://doi. org/10.1145/3579371.3589038.   
+Song Han, Huizi Mao, and William J. Dally. Deep compression: Compressing deep neural network with pruning, trained quantization and huffman coding. In Yoshua Bengio and Yann LeCun (eds.), 4th International Conference on Learning Representations, ICLR 2016, San Juan, Puerto Rico, May 2-4, 2016, Conference Track Proceedings, 2016. URL http://arxiv.org/abs/ 1510.00149.   
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding, 2021. URL https: //arxiv.org/abs/2009.03300.   
+Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W. Mahoney, and Kurt Keutzer. Squeezellm: Dense-and-sparse quantization, 2023a.   
+Young Jin Kim, Rawn Henry, Raffy Fahim, and Hany Hassan Awadalla. Finequant: Unlocking efficiency with fine-grained weight-only quantization for llms, 2023b.   
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Xingyu Dang, and Song Han. Awq: Activationaware weight quantization for llm compression and acceleration, 2023.   
+S. Lloyd. Least squares quantization in pcm. IEEE Transactions on Information Theory, 28(2): 129–137, 1982. doi: 10.1109/TIT.1982.1056489.   
+Yun-Chen Lo, Tse-Kuang Lee, and Ren-Shuo Liu. Block and subword-scaling floating-point (BSFP) : An efficient non-uniform quantization for low precision inference. In The Eleventh International Conference on Learning Representations, 2023. URL https://openreview.net/forum? id=VWm4o4l3V9e.   
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models, 2016.   
+Jupinder Parmar, Shrimai Prabhumoye, Joseph Jennings, Mostofa Patwary, Sandeep Subramanian, Dan Su, Chen Zhu, Deepak Narayanan, Aastha Jhunjhunwala, Ayush Dattagupta, et al. Nemotron-4 15b technical report. arXiv preprint arXiv:2402.16819, 2024.   
+Bitrao sRhoauhih,a nAi, nRkiitt chMieo rZe,h aLo,e vVie nMmeulngiilc kE,l anMgaox,i Rmailsioaunl  SGhoalufibp,o uGr,i riMsaht hVeawr aHtkaallr,,  MLaair alS hMaeos, mGaakuhroasvKolhe, Dimitry Melts, Jasmine Klar, Renee L’Heureux, Matt Perry, Doug Burger, Eric Chung, Zhaoxia (Summer) Deng, Sam Naghshineh, Jongsoo Park, and Maxim Naumov. With shared microexponents, a little shifting goes a long way. In Proceedings of the 50th Annual International Symposium on Computer Architecture, ISCA ’23, New York, NY, USA, 2023a. Association for Computing Machinery. ISBN 9798400700958. doi: 10.1145/3579371.3589351. URL https://doi.org/10.1145/3579371.3589351.   
+Bita Rouhani, Ritchie Zhao, Ankit More, Mathew Hall, Alireza Khodamoradi, Summer Deng, Dhruv Choudhary, Marius Cornea, Eric Dellinger, Kristof Denolf, Stosic Dusan, Venmugil Elango, Maximilian Golub, Alexander Heinecke, Phil James-Roxby, Dharmesh Jani, Gaurav Kolhe, Martin Langhammer, Ada Li, Levi Melnick, Maral Mesmakhosroshahi, Andres Rodriguez, Michael Schulte, Rasoul Shafipour, Lei Shao, Michael Siu, Pradeep Dubey, Paulius Micikevicius, Maxim Naumov, Colin Verrilli, Ralph Wittig, Doug Burger, and Eric Chung. Microscaling data formats for deep learning, 2023b.   
+Charbel Sakr, Yongjune Kim, and Naresh Shanbhag. Analytical guarantees on numerical precision of deep neural networks. In Proceedings of the 34th International Conference on Machine Learning - Volume 70, ICML’17, pp. 3007–3016. JMLR.org, 2017.   
+Charbel Sakr, Steve Dai, Rangharajan Venkatesan, Brian Zimmer, William J. Dally, and Brucek Khailany. Optimal clipping and magnitude-aware differentiation for improved quantization-aware training, 2022.   
+Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quantization for large language models, 2024. URL https://arxiv.org/abs/2308.13137.   
+Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: Training multi-billion parameter language models using model parallelism, 2020.   
+fcDeoradevinindcg es B (frDooroA krCes),s,  ialpinped.n  t1 G–du6e-,e Yp2e 0loe2na0 r. nWdienoiig.:   i1nA0fl.eg1roe1rni0tc9he/.mD -IAhn aC2r1d082w00a7 r25e. 72ct0ho 2-Ad0.eC9si2Mg1/nI8 E5oE1f 6Ea. dDaepstiivgen  fAlouattoinmga-tipooni ntC oenn--   
+Hugo Touvron et al. Llama 2: Open foundation and fine-tuned chat models, 2023. URL https: //arxiv.org/abs/2307.09288.   
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. Quip#: Even better llm quantization with hadamard incoherence and lattice codebooks, 2024. URL https: //arxiv.org/abs/2402.04396.   
+Mart van Baalen, Andrey Kuzmin, Markus Nagel, Peter Couperus, Cedric Bastoul, Eric Mahurin, Tijmen Blankevoort, and Paul Whatmough. Gptvq: The blessing of dimensionality for llm quantization, 2024. URL https://arxiv.org/abs/2402.15319.   
+Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Huaijie Wang, Lingxiao Ma, Fan Yang, Ruiping Wang, Yi Wu, and Furu Wei. Bitnet: Scaling 1-bit transformers for large language models, 2023. URL https://arxiv.org/abs/2310.11453.  
+
+Xiuying Wei, Yunchen Zhang, Xiangguo Zhang, Ruihao Gong, Shanghang Zhang, Qi Zhang, Fengwei Yu, and Xianglong Liu. Outlier suppression: Pushing the limit of low-bit transformer language models, 2023.  
+
+Hao Wu, Patrick Judd, Xiaojie Zhang, Mikhail Isaev, and Paulius Micikevicius. Integer quantization for deep learning inference: Principles and empirical evaluation. CoRR, abs/2004.09602, 2020a. URL https://arxiv.org/abs/2004.09602.  
+
+Hao Wu, Patrick Judd, Xiaojie Zhang, Mikhail Isaev, and Paulius Micikevicius. Integer quantization for deep learning inference: Principles and empirical evaluation, 2020b.  
+
+Xiaoxia Wu, Zhewei Yao, and Yuxiong He. Zeroquant-fp: A leap forward in llms post-training w4a8 quantization using floating-point formats, 2023.  
+
+Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models, 2023.  
+
+Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xiaoxia Wu, Conglong Li, and Yuxiong He. Zeroquant: Efficient and affordable post-training quantization for large-scale transformers. In Alice H. Oh, Alekh Agarwal, Danielle Belgrave, and Kyunghyun Cho (eds.), Advances in Neural Information Processing Systems, 2022. URL https://openreview.net/forum? id=f-fVCElZ-G1.  
+
+Zhewei Yao, Xiaoxia Wu, Cheng Li, Stephen Youn, and Yuxiong He. Zeroquant-v2: Exploring post-training quantization in llms from comprehensive study to low rank compensation, 2023.  
+
+Ali Hadi Zadeh, Mostafa Mahmoud, Ameer Abdelhadi, and Andreas Moshovos. Mokey: Enabling narrow fixed-point inference for out-of-the-box floating-point transformer models. In Proceedings of the 49th Annual International Symposium on Computer Architecture, ISCA ’22, pp. 888–901, New York, NY, USA, 2022. Association for Computing Machinery. ISBN 9781450386104. doi: 10.1145/3470496.3527438. URL https://doi.org/10.1145/3470496.3527438.  
+
+Yijia Zhang, Lingran Zhao, Shijie Cao, Wenqiang Wang, Ting Cao, Fan Yang, Mao Yang, Shanghang Zhang, and Ningyi Xu. Integer or floating point? new outlooks for low-bit quantization on large language models, 2023.  
+
+Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Size Zheng, Luis Ceze, Arvind Krishnamurthy, Tianqi Chen, and Baris Kasikci. Atom: Low-bit quantization for efficient and accurate llm serving, 2024. URL https://arxiv.org/abs/2310.19102.  
+
+
+

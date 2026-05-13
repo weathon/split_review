@@ -1,0 +1,505 @@
+\title{Lookbehind Optimizer: k steps back, 1 step forward}
+
+\begin{abstract}
+Sharpness-aware minimization (SAM) methods have gained increasing popularity by formulating the problem of minimizing both loss value and loss sharpness as a minimax objective. 
+In this work, we increase the efficiency of the maximization and minimization parts of SAM's objective to achieve a better loss-sharpness trade-off.
+By taking inspiration from the Lookahead optimizer, which uses multiple descent steps ahead, we propose Lookbehind, which performs multiple ascent steps behind to enhance the maximization step of SAM and find a worst-case perturbation with higher loss. Then, to mitigate the variance in the descent step arising from the gathered gradients across the multiple ascent steps, we employ linear interpolation to refine the minimization step. 
+Lookbehind leads to a myriad of benefits across a variety of tasks. Particularly, we show increased generalization performance, greater robustness against noisy weights, as well as improved learning and less catastrophic forgetting in lifelong learning settings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Improving the optimization methods used in deep learning is a crucial step to enhance the performance of current models.
+Notably, building upon the long-recognized connection between the flatness of the loss landscape and generalization \citep{hochreiter1994simplifying,keskar2016large,DR17,neyshabur2017exploring,DBLP:conf/uai/IzmailovPGVW18}, sharpness-aware training methods have gained recent popularity due to their ability to significantly improve generalization performance compared to minimizing the empirical risk using stochastic gradient descent (SGD). Particularly, sharpness-aware minimization (SAM) \citep{foret2021sharpnessaware} was recently proposed as an effective means to simultaneously minimize both loss value and loss sharpness during training. Given a neural network with parameters $\phi$, some loss function $L(\phi)$, SAM seeks parameters in flat regions using a minimax optimization: 
+\begin{equation} 
+\min_{\phi} \max_{\|\epsilon\|_2 \leq \rho} L(\phi + \epsilon) \, ,
+\label{eq:sam}
+\end{equation} 
+where worst-case perturbations $\epsilon$ are applied to parameters $\phi$, with the distance between original and perturbed parameters being controlled by $\rho$. SAM approximates the maximization step by first performing a single gradient ascent step and then using the gradient of the loss to do a single descent step from the original solution. 
+This leads to finding a low-loss parameter configuration $\phi$ such that the loss is also low in the neighborhood $\rho$ which will lead to flatter solutions.
+Several follow-up methods have emerged to further enhance its performance \citep{kwon2021asam, zhuang2022surrogate, kim2022fisher}  and reduce its computation overhead \citep{du2022sharpnessaware, du2022efficient, liu2022towards}.
+
+Despite the recent success, improving upon SAM requires a delicate balance between loss value and sharpness. 
+Ideally, the optimization process would converge towards minima that offer a favorable compromise between these two aspects,  thereby leading to high generalization performance. However, naively increasing the neighborhood size $\rho$ used to find the perturbed solutions in SAM leads to a considerable increase in training loss, despite improving sharpness (Figure \ref{fig:loss_sharpness_trade_off}, full circles). In other words, putting too much emphasis on finding the worst-case perturbation is expected to bias convergence to flat but high-loss regions and negatively impact generalization performance. 
+
+Instead of performing a single ascent step akin to SAM, performing multiple ascent steps is a promising way of increasing the neighborhood region to find perturbed solutions, further reducing sharpness. However, this is not what is observed empirically (Figure \ref{fig:loss_sharpness_trade_off}, empty circles). In fact, previous works \citep{foret2021sharpnessaware,andriushchenko2022towards} have shown that such a multistep variant may hurt performance. 
+A possible cause is the increased gradient instability originating from moving farther away from our original solution \citep{liu2022random}. 
+Note that such instability may also be present when using a high $\rho$, even in single-ascent step SAM. In this case,  applying a variance reduction technique such as Lookahead \citep{zhang2019lookahead} with SAM as inner optimizer may help mitigate the performance loss when using larger $\rho$. However, as we demonstrate in our experiments, this is also not helpful (Figure \ref{fig:loss_sharpness_trade_off}, empty triangles).
+
+\begin{figure}
+  \begin{center}
+    \includegraphics[width=0.4\textwidth]{{Figures/sharpness_train_loss_resnet34_sam.pdf}}
+  \end{center}
+  \begin{center}
+    \includegraphics[width=0.41\textwidth]{{Figures/sharpness_train_loss_resnet34_sam_legend.pdf}}
+  \end{center}
+  \caption{Loss and sharpness trade-off using ResNet-34 trained on CIFAR-10. Darker shades indicate training with higher neighborhood sizes $\rho \in \{0.05, 0.1, 0.2\}$.}
+  \label{fig:loss_sharpness_trade_off}
+\end{figure}
+
+In this work, we present a novel optimization method, Lookbehind, that leverages the benefits of multiple ascent steps and variance reduction to improve the efficiency of the maximization and
+minimization parts of \eqref{eq:sam}.
+By successfully reducing both loss and sharpness across small and large neighborhood sizes (Figure \ref{fig:loss_sharpness_trade_off}, full triangles), Lookbehind achieves the best loss-sharpness trade-off.
+
+In practice, improving the loss and sharpness trade-off results in a myriad of benefits across several training regimes. Particularly, when applying Lookbehind to SAM and ASAM, we show an improvement in terms of generalization performance across several models and datasets. 
+Moreover, models trained with Lookbehind have increased robustness against noisy weights at inference time. 
+Lastly, we evaluate Lookbehind in the context of lifelong learning and show an improvement both in terms of learning and catastrophic forgetting on multiple models and datasets.
+
+
+
+\section{Sharpness-aware minimization}
+
+
+Our method, Lookbehind, builds upon sharpness-aware minimization (SAM) methods with the goal of solving the inner maximization problem of SAM more accurately while stabilizing the outer minimization part of SAM's objective. We will start by briefly introducing the sharpness-aware minimization methods used throughout the paper.
+
+To solve the problem in \eqref{eq:sam} using standard stochastic gradient methods, SAM \citep{foret2021sharpnessaware} proposes to estimate the gradient of the minimax objective in two steps. The first step is to approximate the inner maximization $\epsilon(\phi)$ using one step of gradient ascent; the second is to compute the loss gradient at the perturbed parameter $\phi+\epsilon(\phi)$. This leads to the following parameter update:
+\begin{align}
+\phi_t = \phi_{t-1} - \eta \nabla_{\phi} L(\phi_{t-1}+\epsilon(\phi_{t-1})) \, , \\  \epsilon(\phi) := \rho\frac{\nabla L(\phi)}{||\nabla L(\phi)||_2} \, .
+\end{align}
+
+Several follow-up sharpness-aware methods have been proposed to further improve upon the original formulation. Notably, a conceptual drawback of SAM is the use of a fixed-radius Euclidean ball as maximization neighborhood, which is sensitive to re-parametrizations such as weight re-scaling \citep{dinh2017sharp,Stutz_2021_ICCV}. To address this problem, ASAM \citep{kwon2021asam} was proposed as an adaptive version of SAM, which redefines the maximization neighborhood in \eqref{eq:sam}  as component-wise normalized balls $\|\epsilon / |\phi|\|_2 \leq \rho$. This leads to the following component-wise rescaling:
+\begin{align}
+\epsilon(\phi) := \rho \: \frac{T_\phi^2(\nabla L(\phi))}{||T_\phi (\nabla L(\phi))||_2} \, ,
+\label{eq:ASAM}
+\end{align}
+where $T_\phi(v) := \phi \odot v $ denotes the component-wise multiplication operator associated to $\phi$. In what follows, we use both SAM and ASAM as our baseline sharpness-based learning methods. 
+
+
+\section{Lookbehind optimizer}
+
+\label{sec:LB+SAM}
+
+\begin{figure*}[h]
+     \centering
+     \begin{subfigure}[b]{0.44\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/Multistep-SAM.png}
+         \caption{Multistep-SAM.}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.54\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/lookbehind.pdf}
+         \caption{Lookbehind-SAM (ours).}
+     \end{subfigure}
+        \caption{Illustration of Multistep-SAM (a) and Lookbehind-SAM (b) using $k=2$.}
+        \label{fig:sams}
+\end{figure*}
+
+Our algorithm, Lookbehind (-SAM), presents a novel way to improve the solution found by SAM's objective \eqref{eq:sam}. 
+The intuition of Lookbehind is two-fold. First, we improve the maximization part of SAM’s objective by performing multiple ascent steps to find a worst-case weight perturbation that has a higher loss than the original, single-step SAM within a given neighborhood of the original point. We refer to such maximization of the loss as we perform multiple ascent steps in SAM as looking behind. In other words, we are looking behind in the sense that we are climbing the loss landscape. (This term is inspired by the Lookahead optimizer \citep{zhang2019lookahead}, where looking ahead refers to the minimization of the loss as they perform multiple descent steps.)
+
+Second, to improve the minimization part of SAM’s objective, we reduce the variance derived from the multiple ascent steps by aggregating the gradients along the way for the descent step and performing linear interpolation in the parameter space. 
+This results in an alleviation of the instability that arises from (i) performing multiple ascent steps due to the various gradients gathered in the ascent phase not being aligned with each other and (ii) the substantial departure away from the original point as performing ascent steps, which negatively impacts SAM's minimization objective and consequent loss-sharpness trade-off (Figure \ref{fig:loss_sharpness_trade_off}). Lookbehind combines instead the gradients computed at intermediate distances, improving upon the multiple ascent step variant of SAM (Multistep-SAM). A visual comparison between Multistep-SAM and Lookbehind is illustrated in Figure \ref{fig:sams}.
+
+While Multistep-SAM performs $k$ ascent steps ($\phi'_{t, 1}$, $\cdots$, $\phi'_{t, k}$) and uses the gradient from the last step ($\phi'_{t,k}$) for the final update, 
+Lookbehind uses slow weights ($\phi_{t}$, $\phi_{t+1}, \cdots$) and fast weights 
+\begin{figure}%{0.51\textwidth}
+\begin{minipage}{0.51\textwidth}
+\begin{algorithm}[H]
+\caption{Lookbehind-SAM}
+\begin{algorithmic}[1]
+\REQUIRE Parameters $\phi_0$, loss $L$, inner steps $k$, slow and fast weights step
+sizes $\alpha$ and $\eta$, neighborhood size $\rho$, training set $D$
+\FOR{$t = 1, 2, \ldots$}
+\STATE $\phi_{t,0} \gets \phi_{t-1}$
+\STATE $\phi_{t,0}' \gets \phi_{t-1}$
+\STATE Sample mini-batch $d \sim D$
+\FOR{$i = 1, 2, \ldots, k$}
+\STATE $\epsilon \gets \rho \dfrac{\nabla L_d(\phi_{t,i-1}')}{\|\nabla L_d(\phi_{t,i-1}')\|_2}$
+\STATE $\phi_{t,i}' \gets \phi_{t,i-1}' + \epsilon$
+\STATE $\phi_{t,i} \gets \phi_{t,i-1} - \eta \nabla_{L_{d}} (\phi_{t,i}')$
+\ENDFOR
+\STATE $\phi_{t} \gets \phi_{t-1} + \alpha(\phi_{t,k} - \phi_{t-1})$
+\ENDFOR
+\STATE {\bfseries return} $\phi$
+\end{algorithmic}
+\label{alg:lookbehind}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+($\phi_{t, 1}$, $\cdots$, $\phi_{t, k}$), where fast weights are updated using the gradients from $k$ ascent SAM steps.
+Then, the slow weights are updated toward the fast weights through linear interpolation. Even though both methods entail the same number of gradient computations, Lookbehind has a stabilizing effect over Multistep-SAM by combining the gradient information.
+
+The pseudo-code for Lookbehind is in Algorithm \ref{alg:lookbehind}. After synchronizing the fast weights (line 2) and the perturbed weights (line 3), we sample a minibatch (line 4) and perform $k$ ascent steps of SAM by preserving the previously perturbed slow weights (line 7) and introducing further perturbations in the subsequent inner step (line 6); corresponding descent steps are tracked and the fast weights are updated accordingly (line 8). After $k$ steps, a linear interpolation of the fast and slow weights is conducted (line 10). We note that the slow weight step size, $\alpha$, can be set in an adaptive manner during training, without requiring hyperparameter tuning (see \cref{sec:adaptive_alpha}).
+
+\begin{table*}[t]
+\caption{Generalization performance (validation acc. \%) of the different methods on several models and datasets.
+}
+\begin{center}
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{|l|c|c||c|c||c|}
+\hline
+Dataset & \multicolumn{2}{c||}{CIFAR-10} & \multicolumn{2}{c||}{CIFAR-100} & ImageNet\\
+Model & ResNet-34 & WRN-28-2 & ResNet-50 & WRN-28-10 & ResNet-18\\
+\hline\hline
+SGD & $95.84_{\pm .13}$ & $93.58_{\pm .11}$ & $74.35_{\pm 1.23}$ & $78.80_{\pm .08}$ & $69.91_{\pm .04}$\\
+Lookahead-SGD & $95.59_{\pm .21}$ & $94.01_{\pm .02}$  & $75.96_{\pm .12}$ & $78.53_{\pm .18}$ & $69.63_{\pm .12}$\\
+\hline
+SAM & $95.80_{\pm .07}$ & $93.97_{\pm .20}$ & $76.57_{\pm .59}$ & $80.50_{\pm .06}$ & $70.01_{\pm .06}$\\
+Multistep-SAM & $95.72_{\pm .15}$ & $94.39_{\pm .09}$ & $77.03_{\pm .65}$ & $80.55_{\pm .06}$ & $69.92_{\pm .07}$\\
+\quad + average grads & $95.74_{\pm .25}$ & $94.55_{\pm .22}$ & $76.97_{\pm .57}$ & $80.58_{\pm .21}$ & $70.01_{\pm .07}$\\
+Lookahead-SAM & $95.80_{\pm .11}$ & $93.97_{\pm .17}$ & $76.16_{\pm .98}$ & $80.09_{\pm .10}$ & $69.99_{\pm .07}$\\
+\textbf{Lookbehind-SAM} & $\pmb{96.27_{\pm .07}}$  & $\pmb{94.81_{\pm .22}}$  & $\pmb{78.62_{\pm .48}}$ & $\pmb{80.99_{\pm .02}}$ & $\pmb{70.16_{\pm .08}}$\\
+\hline
+ASAM & $96.32_{\pm .02}$ & $94.41_{\pm .09}$  & $78.62_{\pm .67}$ & $81.67_{\pm .28}$ & $70.15_{\pm .06}$\\
+Multistep-ASAM & $95.91_{\pm .14}$ & $95.06_{\pm .15}$ & $77.81_{\pm .52}$ & $81.67_{\pm .06}$ & $70.06_{\pm .01}$\\
+\quad + average grads & $95.91_{\pm .24}$ & $94.92_{\pm .09}$ & $78.39_{\pm .52}$ & $81.35_{\pm .36}$ & $70.11_{\pm .03}$\\
+Lookahead-ASAM & $96.01_{\pm .15}$  & $94.28_{\pm .04}$  & $77.55_{\pm 1.10}$  & $80.97_{\pm .17}$ & $70.00_{\pm .11}$\\
+\textbf{Lookbehind-ASAM} & $\pmb{96.54_{\pm .21}}$  & $\pmb{95.23_{\pm .01}}$  & $\pmb{78.86_{\pm .29}}$ & $\pmb{82.16_{\pm .09}}$ & $\pmb{70.23_{\pm .22}}$\\
+\hline
+\end{tabular}}
+\end{center}
+\label{tab:generalization}
+\end{table*}
+
+
+
+\section{Experimental results}
+
+
+In this section, we start by introducing our baselines (Section \ref{sec:baselines}), and then we conduct several experiments to showcase the benefits of achieving a better sharpness-loss trade-off in SAM methods.
+Particularly, we test the generalization performance on several models and datasets (Section \ref{sec:generalization_performance}) and analyze the loss landscapes at the end of training in terms of sharpness (Section \ref{sec:sharpness}). Then, we study the robustness provided by the different methods in noisy weight settings (Section \ref{sec:robustness}). Lastly, we assess continual learning in sequential training settings (Section \ref{sec:lifelong_learning}).
+
+For the following experiments, we use residual networks (ResNets) \citep{he2016deep} and wide residual networks (WRN) \citep{zagoruyko2016wide} models trained from scratch on CIFAR-10, CIFAR-100 \citep{krizhevsky2009learning}, and ImageNet \citep{deng2009imagenet}. 
+ We report the mean and standard deviation over 3 different seeds throughout the paper unless noted otherwise. Additional training and hyperparameter search details are provided in Appendices \ref{sec:app_training_details} and \ref{sec:hyperparameter_tuning}.
+
+\subsection{Baselines}
+\label{sec:baselines}
+
+On top of the previously discussed Lookbehind-SAM, our algorithm can be easily combined with ASAM by using the component-wise rescaling \eqref{eq:ASAM} in the inner loop updates. We call this variant Lookbehind-ASAM. Additionally to SGD and vanilla SAM/ASAM, we compare Lookbehind-SAM/ASAM to the following methods:
+\begin{enumerate*}[label=(\roman*)]
+    \item \emph{Multistep-SAM/ASAM}, which performs multiple ascent steps to SAM/ASAM with the final update using the gradient from the last step,
+    \item \emph{Multistep-SAM/ASAM with gradient averaging}, which applies the average of the accumulated gradients for the final update \citep{kim2023exploring},
+
+    \item \emph{Lookahead-SGD}, which applies the Lookahead optimizer to SGD, as originally proposed by \citet{zhang2019lookahead}.
+\end{enumerate*}
+
+\subsection{Generalization performance}
+\label{sec:generalization_performance}
+
+We start by reporting the generalization performance on several models and datasets in Table \ref{tab:generalization}. We observe that models trained with Lookbehind achieve the best generalization performance across all architectures and datasets. This is observed for both SAM and ASAM. Moreover, we see the Lookbehind-SAM/ASAM variants always outperform Lookahead-SGD, which further validates applying Lookbehind to sharpness-aware minimization methods. Importantly, we note that Lookbehind is the only method to outperform vanilla SAM and ASAM on ImageNet. The improvement of the loss-sharpness trade-off by Lookbehind leads to a myriad of additional benefits, as shown next.
+
+\subsection{Sharpness across large neighborhood regions}
+\label{sec:sharpness}
+
+We move on to analyzing the sharpness of the minima found at the end of training for each method. To do this, we measure the sharpness of the trained models using SAM's $m$-sharpness \citep{foret2021sharpnessaware} by computing 
+\begin{equation}
+    \dfrac{1}{n} \sum_{M \in D} \max_{\|\epsilon\|_2 \leq r} \dfrac{1}{m} \sum_{s \in M} L_s(\phi + \epsilon) - L_s(\phi) \, ,
+    \label{eq:m_sharpness_sam}
+ \end{equation}
+where $D$ represents the training dataset, which is composed of $n$ minibatches $M$ of size $m$. Note that $m$-sharpness can also derived from ASAM's objective by computing
+\begin{equation}
+    \dfrac{1}{n} \sum_{M \in D} \max_{\|\epsilon / |\phi| \|_2 \leq r} \dfrac{1}{m} \sum_{s \in M} L_s(\phi + \epsilon) - L_s(\phi) \, .
+    \label{eq:m_sharpness_asam}
+\end{equation}
+To avoid ambiguity, we denote the radius used by $m$-sharpness as $r$. Instead of only measuring sharpness in close vicinity to the found solutions, \textit{i.e.} using $r=0.05$ as in Figure \ref{fig:loss_sharpness_trade_off}, we vary the radius $r$ over which $m$-sharpness is calculated. Particularly, we iterate over $r \in \{0.05, 0.5, 1.0, \ldots, 5.0\}$ for SAM and $r \in \{0.5, 1.0, \ldots, 5.0\}$ for ASAM.)
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/sharpness_rho_resnet34_sam.pdf}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/sharpness_rho_resnet34_asam.pdf}
+     \end{subfigure}
+     \hfill
+        \caption{$m$-sharpness over multiple radius $r$ using ResNet-34 trained on CIFAR-10. Darker shades indicate training with higher neighborhood sizes $\rho \in \{0.05, 0.1, 0.2\}$ for SAM and $\rho \in \{0.5, 1.0, 2.0\}$ for ASAM. Lower sharpness is better.
+        }
+        \label{fig:sharpness_rho}
+\end{figure*}
+
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/conductance_variation_resnet34_AdaBS.pdf}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/conductance_variation_resnet50_AdaBS.pdf}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/conductance_variation_resnet18_AdaBS.pdf}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.6\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/conductance_variation_resnet34_AdaBS_legend.pdf}
+     \end{subfigure}
+     \hfill
+        \caption{Robustness against noisy weights at inference time. We plot the mean and standard deviation over 10 and 3 inference runs for CIFAR-10/100 and ImageNet, respectively. Higher accuracy is better.
+        }
+        \label{fig:noisy_weights}
+\end{figure*}
+
+The sharpness over different radii of the different methods, when also trained with different $\rho$, are shown in Figure \ref{fig:sharpness_rho}. We observe that on top of Lookbehind improving sharpness at the nearby neighborhoods (as previously shown in Figure \ref{fig:loss_sharpness_trade_off}), models trained with Lookbehind also converge to flatter minima at the end of training, as measured on an extensive range of tested radii. This is consistent across training with different $\rho$ for both SAM and ASAM. Even though the minima found by the Lookahead and Multistep variants tend to have low sharpness with default $\rho$, such benefits diminish at higher $\rho$. %Similar conclusions are observed for ASAM (Figure \ref{fig:sharpness_rho_asam}).
+
+\subsection{Model robustness}
+\label{sec:robustness}
+
+We now assess model robustness against noisy weights. This is a particularly important use case when deployment models in highly energy-efficient hardware implementations that are prone to variabilities and noise \citep{10.1145/2463209.2488867,kern2022memse,10.3389/fncom.2021.675741}. Similar to previous works \citep{joshi2020accurate,mordido2022sharpness}, we apply a multiplicative Gaussian noise to the model parameters $\phi$ after training in the form of $\phi \times \delta$, with $\delta \sim \mathcal{N}(1,\sigma^2)$ and update the
+batch normalization statistics after the noise perturbations. Robustness results are presented in Figure \ref{fig:noisy_weights}. 
+
+We see that Lookbehind shows the highest robustness observed by preserving the most amount of validation accuracy across the tested noise levels. This is observed for both SAM and ASAM on all models and datasets. We note that the benefits of using sharpness-aware minimization methods to increase model robustness to noisy weights were shown by previous works \citep{mordido2022sharpness}. Our results share these findings and further show that Lookbehind considerably boosts the robustness benefits of training with SAM and ASAM across several models and datasets.
+
+\begin{table*}[t]
+\caption{Lifelong learning performance in terms of average accuracy (higher is better) and forgetting (lower is better) on Split-CIFAR100 and Split-TinyImageNet.}
+\begin{center}
+\resizebox{0.8\textwidth}{!}{\begin{tabular}
+{|l|cc|cc|}
+\hline
+Dataset & \multicolumn{2}{c|}{Split-CIFAR100}& \multicolumn{2}{c|}{Split-TinyImagenet}\\
+Metric & Avg. accuracy $\uparrow$ & Forgetting $\downarrow$ & Avg. accuracy $\uparrow$ & Forgetting $\downarrow$\\
+\hline\hline
+SGD & $58.41_{\pm 4.95}$ & $22.74_{\pm 4.85}$ & $43.48_{\pm 0.80}$ & $26.51_{\pm 0.71}$\\
+SAM & $57.81_{\pm 1.05}$ & $23.27_{\pm 0.57}$ & $56.34_{\pm 1.72}$ & $20.39_{\pm 1.83}$\\
+{Multistep-SAM} & ${59.58_{\pm 0.34}}$ & ${15.09_{\pm 0.48}}$ & ${56.09_{\pm 1.17}}$ & ${20.70_{\pm 1.05}}$\\
+\textbf{Lookbehind-SAM} & $\pmb{59.93_{\pm 1.54}}$ & $\pmb{14.10_{\pm 0.98}}$ & $\pmb{56.60_{\pm 0.68}}$ & $\pmb{18.99_{\pm 0.62}}$\\
+\hline
+ER + SGD & $64.84_{\pm 1.29}$ & $12.96_{\pm 0.23}$ & $49.19_{\pm 0.93}$ & $19.06_{\pm 0.26}$\\
+ER + SAM & $68.28_{\pm 1.30}$ & $13.98_{\pm 0.42}$ & $65.59_{\pm 0.19}$ & $9.89_{\pm 0.14}$\\
+ER + {Multistep-SAM} & ${65.49_{\pm 4.10}}$ & ${15.20_{\pm 2.53}}$ & ${65.75_{\pm 0.16}}$ & ${9.90_{\pm 0.09}}$\\
+\textbf{ER + Lookbehind-SAM} & $\pmb{68.87_{\pm 0.79}}$ & $\pmb{12.37_{\pm 0.11}}$ & $\pmb{65.91_{\pm 0.27}}$ & $\pmb{9.11_{\pm 0.63}}$\\
+\hline
+Lookahead-C-MAML & $65.44_{\pm 0.99}$ & $13.96_{\pm 0.86}$ & $61.93_{\pm 1.55}$ & $11.53_{\pm 1.11}$\\
+\textbf{Lookbehind-C-MAML} & ${\pmb{67.15_{\pm 0.74}}}$ & ${\pmb{12.40_{\pm 0.49}}}$ & ${\pmb{62.16_{\pm 0.86}}}$ & ${\pmb{11.21_{\pm 0.44}}}$\\
+\hline
+\end{tabular}}
+\end{center}
+\label{tab:lll}
+\end{table*}
+
+\begin{figure*}[h]
+    \centering
+    \begin{subfigure}[b]{1.\textwidth}
+        \centering
+        \includegraphics[width=1.\linewidth]{Figures/bar_plot_legend.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=0.475\linewidth]{Figures/ablation_cifar10_sam.pdf}
+        \hfill
+        \includegraphics[width=0.475\linewidth]{Figures/ablation_cifar10_asam.pdf}
+        \caption{ResNet-34 on CIFAR-10.}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=0.475\linewidth]{Figures/ablation_cifar100_sam.pdf}
+        \hfill
+        \includegraphics[width=0.475\linewidth]{Figures/ablation_cifar100_asam.pdf}
+        \caption{ResNet-50 on CIFAR-100.}
+    \end{subfigure}
+    \caption{Generalization performance (validation acc. \%) between Multistep-SAM/SAM, Lookahead-SAM/ASAM, and Lookbehind-SAM/ASAM. Vanilla SAM and ASAM baselines with default $\rho$ are represented by the horizontal line.
+    }
+    \label{fig:ablation}
+\end{figure*}
+
+\subsection{Lifelong learning}
+\label{sec:lifelong_learning}
+
+Lastly, we evaluate the methods in lifelong learning where a model with a limited capacity is trained on a stream of tasks. The goal is then to maximize performance across tasks without having access to previous data.  
+In our experiments, we replicate the same setup used in Lookahead-MAML \citep{gupta2020look}, which is a lifelong learning method that combines the concept of slow and fast weights of Lookahead with meta-learning principles \citep{finn2017model}. Moreover, we replace Lookahead with Lookbehind, creating a novel algorithm: Lookbehind-MAML. Since meta-learning is out of the scope of this work, we implemented only the constant learning rate setting for simplicity, \textit{i.e.} the C-MAML variant \citep{gupta2020look}. 
+
+We train a 3- and a 4-layer convolutional network on Split-CIFAR100 and Split-TinyImageNet, respectively. We report the following metrics by evaluating the model on the held-out data set: average accuracy (higher is better) and forgetting (lower is better).
+ 
+The results are presented in Table \ref{tab:lll}. In the first setting, we do not use ER and directly compare our method with SGD, SAM, and Multistep-SAM. We observe that Lookbehind achieves the best performance both in terms of average accuracy and forgetting. In the second setting, we apply ER to the previous methods. Once again, we see an improvement when using our variant. Finally, when comparing Lookahead-C-MAML with Lookbehind-C-MAML, we also notice an overall performance improvement.
+
+
+
+\section{Sensitivity analysis}
+
+
+In this section, we analyze the sensitivity of Lookbehind to different hyper-parameter settings in terms of generalization performance (Sections \ref{sec:ablations}, \ref{sec:sensitivity_rho}, and \ref{sec:sensitivity_alpha}) and its benefits at different training stages (Section \ref{sec:training_stages}). 
+For the following experiments, we used ResNet-34 and ResNet-50 models trained from scratch on CIFAR-10 and CIFAR-100, respectively. Training and hyperparameter search details are provided in Appendices \ref{sec:app_training_details} and \ref{sec:hyperparameter_tuning}.
+
+\subsection{Sensitivity to the inner step $k$}
+\label{sec:ablations}
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/rho_test_accuracies_resnet34_sam_best.pdf}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{Figures/rho_test_accuracies_resnet34_asam_best.pdf}
+     \end{subfigure}
+     \hfill
+        \caption{Validation accuracies with different trained $\rho$ for the different methods using ResNet-34 trained on CIFAR-10. Darker shades represent larger inner steps $k$, ranging from $k \in \{2, 5, 10\}$. Higher accuracy is better.}
+        \label{fig:rho_test_accuracies}
+\end{figure*}
+
+Validation accuracies of the different methods when using different $k$ are presented in Figure \ref{fig:ablation}. We observe that Lookbehind is the only method that consistently outperforms the SAM and ASAM baselines on both CIFAR-10 and CIFAR-100, across all the tested inner steps $k$. Interestingly, our method tends to keep improving when increasing $k$, while this trend is not observed for either the Lookahead or the Multistep variants.
+Moreover, we see that Multistep-SAM/ASAM does not provide a clear improvement over the respective SAM and ASAM baselines, as previously discussed in prior work \citep{foret2021sharpnessaware,andriushchenko2022towards}.
+On the other hand, the Lookahead variants show a slight improvement over Multistep, particularly when combining Lookahead with SAM and ASAM on CIFAR-10 and SAM on CIFAR-100. Overall, we see that Lookbehind is the highest-performing method on all models and datasets when combined with SAM/ASAM.
+\subsection{Sensitivity to the neighborhood size $\rho$}
+\label{sec:sensitivity_rho}
+
+We now analyze the effects of training with increasing $\rho$ with the different methods using SAM and ASAM.)
+Results are presented in Figure \ref{fig:rho_test_accuracies}. We see that our method is the only one that consistently outperforms SAM and ASAM across all the tested $\rho$. As previously suggested, significantly increasing $\rho$ in SAM, \textit{e.g.} $\rho = 0.5$, decreases performance relative to the default $\rho$, \textit{i.e.} $\rho = 0.05$. Similarly, increasing $\rho$ in ASAM also decreases performance relative to its default $\rho$ of $0.5$. Notwithstanding, we note that ASAM shows higher relative robustness to higher $\rho$ than SAM, indicated by ASAM's ability to continue increasing performance on up to 4$\times$ the default neighborhood size, \textit{i.e.} from $\rho=0.5$ to $\rho=2.0$. Overall, we observe that Lookbehind is more robust to the choice of $\rho$ compared to the other methods, with Lookbehind and Multistep variants showing similar trends as the SAM and ASAM baselines. %Similar conclusions are observed for ASAM (Figure \ref{fig:rho_test_accuracies_asam}). 
+
+\subsection{Sensitivity to the outer step size $\alpha$}
+\label{sec:sensitivity_alpha}
+
+The validation accuracies of Lookbehind across different $\alpha$ and $k$ are presented in Figure \ref{fig:lookafar_alpha}. All models were trained with the default $\rho$, with blue representing an improvement over SAM/ASAM and red a degradation. We see that Lookbehind improves over the baselines in all $k$, except $k=2$ on SAM and CIFAR-10. 
+We notice a diagonal trend, suggesting there is a relation between $\alpha$ and $k$, with a larger $\alpha$ being often better with smaller $k$ and a mid to high range $\alpha$ working well with higher $k$. 
+\begin{figure}[t]
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \includegraphics[trim=0 260.0pt 0 0, clip, width=0.49\textwidth]{Figures/test_accuracies_resnet34.pdf}
+         \hfill
+         \includegraphics[trim=0 15pt 0 260.0pt, clip, width=0.49\textwidth]{Figures/test_accuracies_resnet34.pdf}
+      \end{subfigure}
+        \caption{Sensitivity of Lookbehind to $\alpha$ and $k$ using ResNet-34 on CIFAR-10 in terms of validation accuracy (\%). The vanilla SAM/ASAM performances are in white.
+        }
+        \label{fig:lookafar_alpha}
+\end{figure}
+
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \includegraphics[width=0.49\textwidth]{Figures/switch_test_accuracies_resnet34_sam_to_lookafar.pdf}
+         \hfill
+         \includegraphics[width=0.49\textwidth]{Figures/switch_test_accuracies_resnet34_asam_to_lookafar.pdf}
+         \caption{SAM/ASAM $\rightarrow$ Lookbehind-SAM/ASAM}
+         \label{fig:sam_lookbehind}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \includegraphics[width=0.49\textwidth]{Figures/switch_test_accuracies_resnet34_lookafar_to_sam.pdf}
+         \hfill
+         \includegraphics[width=0.49\textwidth]{Figures/switch_test_accuracies_resnet34_lookafar_to_asam.pdf}
+         \caption{Lookbehind-SAM/ASAM $\rightarrow$ SAM/ASAM}
+         \label{fig:lookbehind_sam}
+     \end{subfigure}
+        \caption{Impact of switching from SAM/ASAM to Lookbehind-SAM/ASAM (a), and vice-versa (b), at different epochs throughout training in terms of validation accuracy using ResNet-34 trained on CIFAR-10. Darker shades represent larger inner steps $k$, ranging from $k \in \{2, 5, 10\}$. For Lookbehind, we pick the best $\alpha$ configuration for each $k \in \{2, 5, 10\}$ using the default $\rho$, which is also used for the SAM/ASAM baselines.
+        }
+        \label{fig:switch_test_accuracies}
+\end{figure*}
+
+\begin{table*}[t]
+\caption{Generalization performance (validation acc. \%) of Lookbehind with static and adaptive $\alpha$.}
+\begin{center}
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{|l|c|c||c|c||c|}
+\hline
+Dataset & \multicolumn{2}{c||}{CIFAR-10} & \multicolumn{2}{c||}{CIFAR-100} & ImageNet\\
+Model & ResNet-34 & WRN-28-2 & ResNet-50 & WRN-28-10 & ResNet-18\\
+\hline\hline
+Lookbehind-SAM & $96.27_{\pm .07}$  & $94.81_{\pm .22}$  & $\pmb{78.62_{\pm .48}}$ & $\pmb{80.99_{\pm .02}}$ & $\pmb{70.16_{\pm .08}}$\\
+\quad + adaptive $\alpha$ & $\pmb{96.33_{\pm .04}}$  & $\pmb{94.88_{\pm .12}}$  & $78.33_{\pm .36}$ & $80.86_{\pm .13}$ & $70.07_{\pm .12}$\\
+\hline
+Lookbehind-ASAM & $96.54_{\pm .21}$  & $\pmb{95.23_{\pm .01}}$  & $78.86_{\pm .29}$ & $\pmb{82.16_{\pm .09}}$ & $\pmb{70.23_{\pm .22}}$\\
+\quad + adaptive $\alpha$ & $\pmb{96.57_{\pm .03}}$ & $95.08_{\pm .15}$  & $\pmb{78.89_{\pm .45}}$ & $81.86_{\pm .22}$& $70.16_{\pm .08}$\\
+\hline
+\end{tabular}}
+\end{center}
+\label{tab:adaptive_alpha}
+\end{table*}
+
+\subsection{Benefits of Lookbehind at different training stages}
+\label{sec:training_stages}
+
+SAM has been shown to find better generalizable minima within the same basin as SGD.
+In other words, SAM's implicit bias mostly improves the generalization of SGD when switching from SGD to SAM toward the end of training \citep{andriushchenko2022towards}.
+Interestingly, the aforementioned results also suggest that SAM and SGD do not guide optimization toward different basins from early on in training. Here, we conduct a similar study by analyzing how switching from SAM/ASAM to Lookbehind-SAM/ASAM, and vice-versa, impacts generalization performance at different stages during training.
+
+The generalization performances of starting training with SAM/ASAM and switching to Lookbehind at different training stages are shown in Figure \ref{fig:sam_lookbehind}. We observe that Lookbehind's benefits are mostly achieved early on in training, suggesting that Lookbehind guides the optimization to converge to a different basin of the loss landscape than SAM. Such findings are confirmed by also switching from Lookbehind to SAM/ASAM (Figure \ref{fig:lookbehind_sam}).
+
+
+
+\section{Discussions and limitations}
+
+
+One limitation of Lookbehind is that it adds two additional hyperparameters to SAM/ASAM – just as the Lookahead optimizer adds two hyperparameters to SGD. This introduces additional hyperparameter tuning on top of $\rho$ and $\eta$. To alleviate this concern in settings where computational resources are scarce, we experiment with removing the need to tune $\alpha$ by computing it analytically during training (Section \ref{sec:adaptive_alpha}).
+
+Another important limitation inherent to any multiple ascent step SAM method is the computational overhead which increases training time by a factor $k$. Even though the goal of this work is to tackle the lack of performance due to a poor sharpness-loss trade-off, this limitation may prevent training with Lookbehind on larger models. To address this issue, we explore improving the efficiency of multiple ascent steps by switching the minibatch at each inner step of Lookbehind (Section \ref{sec:switch_minibatch}).
+
+\subsection{Adaptive $\alpha$}
+\label{sec:adaptive_alpha}
+
+Here, we propose an adaptive formulation of $\alpha$, defined as $\alpha^*$, by setting it proportionally to the alignment of the gradients obtained during the multiple ascent steps:
+\begin{equation}
+    \alpha^* = (\cos{(\theta)}+1)/2 \,,
+\end{equation}
+where $\theta$ is defined by the angle between the first gathered gradient and the final update direction:
+\begin{equation}
+    \theta = \dfrac{(\phi_{t,1}-\phi_t) \cdot (\phi_{t,k}-\phi_t)}{\|\phi_{t,1}-\phi_t\|_2 \cdot \|\phi_{t,k}-\phi_t\|_2} \,.
+\end{equation}
+If the gradients are completely aligned, then $\alpha^* = 1$. Alternatively, if the gradients are not aligned, then $0 {\,\,\leq \,\,} \alpha^* < 1$, with lower values representing lower alignment.
+
+Results when using Lookbehind with a static $\alpha$ and a dynamic $\alpha^*$ are presented in Table \ref{tab:adaptive_alpha}. Overall, we observe that using an adaptive $\alpha$ is a viable alternative to tuning a static $\alpha$ in instances where compute is scarce. Note that our goal with adaptive $\alpha$ is not necessarily to outperform static $\alpha$ but instead to achieve competitive performance while having one less hyperparameter. Importantly, we emphasize that Lookbehind with adaptive $\alpha$ consistently outperforms all the compared methods presented in Table \ref{tab:generalization}, similarly to static $\alpha$.
+
+\subsection{Switching minibatch}
+\label{sec:switch_minibatch}
+
+Performing multiple ascent steps with the same minibatch reduces the variance of the aggregated gradients. However, this also increases training time due to redundant gradient computations. In time-sensitive scenarios like training Transformers, switching the minibatch during ascent steps might be the only viable option. This simple modification involves moving minibatch sampling (line 4, Algorithm \ref{alg:lookbehind}) inside the inner loop in our method.
+
+We consider machine translation by replicating the setup in \citet{kwon2021asam} and using a 12-layer Transformer \cite{vaswani2017attention} (39.4M parameters) trained from scratch on IWSLT’14 (DE-EN) with Adam. We also perform image classification by finetuning a ViT-Base model \citep{dosovitskiy2021an} (86.6M parameters) for 15 epochs with SGD. The model was previously pre-trained on ImageNet-21K and finetuned with SGD on ImageNet-1K. Appendices \ref{sec:app_training_details} and \ref{sec:hyperparameter_tuning} provide more details.
+
+Results under a similar training budget as SAM/ASAM by switching the minibatch in Lookbehind are presented in Table \ref{tab:transformers}. We observe that at least one Lookbehind variant (with a static or dynamic $\alpha$) improves the performance of SAM/ASAM. We note that in the two instances where a specific Lookbehind variant was unable to outperform the ASAM baseline, their performance was almost identical.
+We highlight that these settings showcase the applicability of Lookbehind to additional optimizers (\textit{i.e.} Adam) and settings (\textit{i.e.} fine-tuning of large models).
+
+\begin{table}[h]
+\caption{Generalization performance with Transformers on machine translation (test BLEU score) and image classification (validation acc. \%). We switch the minibatch for Lookbehind and use $k=2$ with $\alpha=0.8$ or adaptive $\alpha$.
+}
+\begin{center}
+\resizebox{0.9\linewidth}{!}{
+\begin{tabular}{|l|c||c|}
+\hline
+Dataset & IWSLT’14 & ImageNet\\
+Model & Transformer & ViT-Base\\
+\hline\hline
+Adam/SGD & $34.86_{\pm .01}$ & $81.79$\\
+\hline
+SAM & $34.78_{\pm .01}$ & $81.80$\\
+Lookbehind-SAM & $\pmb{35.10_{\pm .01}}$ & $\pmb{81.84}$\\
+\quad + adaptive $\alpha$ & $\pmb{35.22_{\pm .01}}$  & $\pmb{81.85}$\\
+\hline
+ASAM & $35.02_{\pm .01}$  & $\pmb{81.89}$\\
+Lookbehind-ASAM & $\pmb{35.40_{\pm .01}}$  & $81.87$\\
+\quad + adaptive $\alpha$ & $35.00_{\pm .01}$ & $\pmb{81.89}$\\
+\hline
+\end{tabular}}
+\end{center}
+\label{tab:transformers}
+\end{table}
+
+
+
+\section{Related work}
+
+
+Sharpness-aware minimization (SAM) \citep{foret2021sharpnessaware} is an attempt to improve generalization by finding solutions with both low loss value and low loss sharpness. 
+This is achieved by minimizing an estimation of the maximum loss over 
+a neighborhood region around the parameters. 
+There is currently a lot of active work that focuses on improving SAM. More specifically, modifications of the original SAM algorithm were proposed to further improve generalization performance \citep{zhuang2022surrogate,kim2022fisher,kwon2021asam,liu2022random} and efficiency \citep{du2022sharpnessaware,zhou2021delta,liu2022towards}. Performing multiple ascent steps was present in \citet{foret2021sharpnessaware}, however, the improvements over single ascent step SAM were either insignificant or shown to degrade performance in some settings \citep{andriushchenko2022towards}.
+
+SAM's benefits have transcended improving generalization performance, ranging from higher robustness to label noise \citep{foret2021sharpnessaware,kwon2021asam,baek2024why}, lower quantization error
+\citep{liu2021sharpness}, and less sensitivity to data imbalance \citep{liu2021selfsupervised}. Here, on top of analyzing the benefits of Lookbehind in terms of generalization, we build on the recently observed benefits of SAM on improving robustness against noisy weights \citep{kim2022fisher,mordido2022sharpness} and reducing catastrophic forgetting in lifelong learning \citep{mehta2021empirical}.
+
+Closest to our work, \citet{kim2023exploring} concurrently conducted a similar study by averaging the gradients obtained during multiple SAM ascent steps.
+One of the differences is the decoupling of the inner step $k$ and the outer step size $\alpha$ in our approach, which allows us to seek optimal combinations between these two hyperparameters. As depicted in Figures \ref{fig:lookafar_alpha} and \ref{fig:lookbehind_app}, $\alpha = 1/k$ is generally not the best overall $\alpha$ to use, including when determining $\alpha^*$ (Figure \ref{fig:adaptive_alpha_evolution}).
+We also extend the empirical discussions by applying our method with ASAM, which often outperforms SAM.
+
+
+
+\section{Conclusion}
+
+
+In this work, we proposed Lookbehind, which can be plugged on top of existing sharpness-aware training methods to improve model performance across a variety of tasks and benchmarks. More specifically, we show an improvement in generalization performance on multiple models and datasets, model robustness, and continuous learning ability. Moreover, we propose two simple method modifications to address limitations that may arise in large-scale settings, broadening the applicability of our approach. 
+In the future, exploring novel approaches or combining Lookbehind with more efficient SAM variants to mitigate the computational overhead of multiple ascent step SAM is worth pursuing.
+
+
+

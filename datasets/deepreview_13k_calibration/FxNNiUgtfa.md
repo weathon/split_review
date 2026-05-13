@@ -1,8 +1,8 @@
 # Knowledge Capacity Scaling Laws for Language Models
 
 - Decision: Accept
-- Avg Score: 4.00
-- Scores: 5, 6, 8, 1, 0
+- Avg Score: 7.25
+- Scores: 5, 6, 8, 10
 
 ## Abstract
 Scaling laws describe the relationship between the size of language models and their capabilities. Unlike prior studies that evaluate a model's capability via loss or benchmarks, we estimate information-theoretically the number of knowledge \emph{bits} a model stores. We focus on factual knowledge represented as tuples, such as (USA, capital, Washington D.C.) from a Wikipedia page. Through multiple controlled datasets, we establish that language models can and only can store \emph{2 bits of knowledge per parameter, even when quantized to int8}, and such knowledge can be flexibly extracted for downstream applications. 

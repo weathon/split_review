@@ -1,0 +1,435 @@
+\title{OmniQuant: Omnidirectionally Calibrated Quantization for Large Language Models}
+
+\begin{abstract}
+Large language models (LLMs) have revolutionized natural language processing tasks. However, their practical deployment is hindered by their immense memory and computation requirements.
+Although recent post-training quantization (PTQ) methods are effective in reducing memory footprint and improving the computational efficiency of LLM, they hand-craft quantization parameters, leading to low performance, especially in extremely low-bit quantization.
+To tackle this issue, we introduce an Omnidirectionally calibrated Quantization (\textbf{OmniQuant}) technique for LLMs, which achieves good performance in diverse quantization settings while maintaining the computational efficiency of PTQ by efficiently optimizing various quantization parameters.
+OmniQuant comprises two innovative components including Learnable Weight Clipping (LWC) and Learnable Equivalent Transformation (LET). LWC modulates the extreme values of weights by optimizing the clipping threshold. Meanwhile, LET tackles activation outliers by shifting the challenge of quantization from activations to weights.
+Operating within a differentiable framework using block-wise error minimization, OmniQuant can optimize the quantization process efficiently for both weight-only and weight-activation quantization.
+For instance, the LLaMA-2 model family size 7-70B can be processed with OmniQuant on a single A100-40G GPU within 1-16 hours using 128 samples.
+Extensive experiments validate OmniQuant's superior performance across diverse quantization configurations such as W4A4 (4-bit weight, 4-bit activation), W6A6, W4A16, W3A16, and W2A16. Additionally, OmniQuant demonstrates effectiveness in instruction-tuned models and delivers notable improvements in inference speed and memory reduction on real devices.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) such as GPT-4~\citep{gpt4} and LLaMA~\citep{llama}, have demonstrated impressive performance across various natural language benchmarks~\citep{mmlu,hellaswag}.
+Furthermore, the language understanding capabilities inherent in LLMs can be successfully transferred into multimodal models~\citep{embodiedgpt,lvlm-ehub,meta-transformer,huang2024leveraging,huang2023geometric}. Thereby, LLMs can be regarded as precursors to artificial general intelligence~\citep{gpt4}.
+However, the considerable computational and memory requirements of LLMs pose substantial challenges~\citep{dsnt,hu2023you}. For instance, the GPT-3 model~\citep{gpt3} requires 350G of memory to load its parameters in FP16 format, which corresponds to the requirement of at least five A100-80G GPUs for inference.
+This significant demand for computational resources and associated communication overheads impedes the practical deployment of LLMs in real-world applications.
+
+Quantization has shown to be promising to mitigate both computational and memory overhead in LLMs. In general, it comes in two types including post-training quantization (PTQ) and quantization-aware training (QAT).
+Although QAT can lead to more competitive accuracy than PTQ, it is not practical due to the high training cost because the whole model is trained with the awareness of the quantization process. 
+As a result, PTQ is commonly utilized in existing quantization methods on LLMs. 
+For example, lots of PTQ methods~\citep{gptq,awq,spqr} reduce memory consumption by weight-only quantization which quantizes the weights while maintaining full-precision activation. To further reduce the computational overhead, another line of work \citep{smoothquant,outlier,rptq,outlier-plus,qllm} employs weight-activation quantization which quantizes both weight and activation into low-bit values for the execution of low-bit matrix multiplication.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.85\textwidth]{teaser.pdf}
+    \caption{(a) provides an overview of LLaMA-7B with W4A4 quantization, highlighting OmniQuant's ability to achieve quantization-aware training (QAT) performance with post-training quantization (PTQ) time and data efficiency.  (b) and (c) showcase the perplexity (low is better) of quantized LLaMA-13B across different bit-widths on WikiText2.}
+    \label{fig:teaser}
+\end{figure}
+
+Existing quantization methods have demonstrated significant achievements in various scenarios, including W4A16 (\emph{i.e.} 4-bit weight and 16-bit activation) weight-only quantization such as ~\citep{awq, spqr, owq}, as well as W8A8 weight-activation quantization~\citep{outlier-plus}.
+However, they usually exhibit significant performance degradation when confronted with low-bit quantization, such as W2A16 and W4A4, as illustrated in Figure~\ref{fig:teaser} (b \& c).
+This performance shortfall in low-bit quantization can be attributed to the fact that these methods~\citep{gptq,awq,outlier-plus} primarily rely on handcrafted quantization parameters such as migration strength \citep{smoothquant} and scaling parameters \citep{outlier-plus}, which often leads to lower performance.
+Although Quantization-Aware Training (QAT) \citep{llmqat} is effective in determining the optimal quantization configurations, it introduces substantial training overhead in both training and data efficiency. It is thus hard to quantize LLMs with QAT-based techniques efficiently such as LLMQAT \citep{llmqat}. For instance, GPTQ~\citep{gptq}, a PTQ approach, can complete the quantization of LLaMA-13B in an hour using 128 samples on a single A100 GPU, while LLM-QAT~\citep{llmqat} requires 100k samples and hundreds of GPU hours.
+This leads us to a central question: \emph{can we attain the performance of QAT, while maintaining the time and data efficiency of PTQ?}
+
+
+
+This paper introduces a novel quantization technique, OmniQuant, which effectively addresses the above question. OmniQuant achieves state-of-the-art performance across various quantization scenarios, particularly in low-bit settings, while preserving the time and data efficiency of PTQ, as illustrated in Figure \ref{fig:teaser}.
+Unlike Quantization-Aware Training (QAT)~\citep{llmqat} which involves cumbersome weight optimization, OmniQuant freezes the original full-precision weight and only incorporates a few learnable quantization parameters. 
+As shown in Figure \ref{fig:teaser_method},
+OmniQuant consists of two key components that incorporate different types of learnable quantization parameters, including Learnable Weight Clipping (LWC) and Learnable Equivalent Transformation (LET). Specifically, LWC modulates the extreme values of weights by optimizing the clipping threshold. In the meanwhile, LET tackles activation outliers by learning mathematically equivalent transformations in a transformer encoder.
+
+Instead of jointly optimizing all parameters across the LLM, OmniQuant sequentially quantizes the parameters of one layer before moving on to the next under a block-wise quantization error minimization framework. 
+In this way, 
+OminiQuant can be optimized efficiently using a simple Stochastic Gradient Descent (SGD) algorithm. 
+Thanks to the differentiable optimization, LWC and LET can be seamlessly integrated into the quantization.
+We find that LWC can mitigate the difficulty in quantizing weights and LET further shifts the challenge of quantization from activations to weights, facilitating OmniQuant a versatile quantization framework for both weight-only and weight-activation quantization.
+Notably, OmniQuant introduces no extra computation or parameters for the quantized model because the clipping threshold in LWC and equivalent factors in LET can be fused into quantized weights.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{center}
+\includegraphics[width=0.45\textwidth]{teaser_method.pdf}
+\caption{Characteristics of OmniQuant on LLaMA family.}\label{fig:teaser_method}
+\end{center}
+\end{wrapfigure}
+As depicted in Figure~\ref{fig:teaser_method}, OmniQuant is easy to implement even with limited resources. Especially, taking the LLaMA-2 model family (7B-70B) as an example, all models can be quantized on a single A100-40G GPU utilizing only 128 training samples. The training time ranges from 1 to 16 hours, depending on the size of the quantized model, which ranges from 7B to 70B. 
+Owing to the seamless integration of LWC and LET achieved by differentiable optimization, OmniQuant exhibits superior performance compared to prior PTQ-based methods in various quantization settings.  For example, when LLaMA-13B is quantized into W2A16, OmniQuant achieves a perplexity of $13.21$, while GPTQ incurs a significant increase in perplexity to $3832$, as demonstrated in Figure~\ref{fig:teaser}. A similar performance advancement is also observed in the W4A4 quantization.
+
+The contributions of \textbf{OmniQuant} are summarized as follows. 1) We formulate a novel quantization pipeline for LLM, OmniQuant, which freezes original full-precision weights while incorporating a restrained set of learnable parameters. OmniQuant imbues quantization with gradient updates while preserving the time and data efficiency of PTQ methods. 2) OmniQuant consists of Learnable Weight Clipping (LWC) and Learnable Equivalent Transformation (LET). These strategies make full-precision weights and activations more amenable to quantization.
+3) Through extensive experiments, we demonstrate that OmniQuant outperforms previous methods across a spectrum of quantization settings (W416, W3A16, W2A16, W6A6, W4A4), various model families (OPT, LLaMA, LLaMA-2, LLaMA-2-chat, Falcon), and a range of model sizes (125M-180B). The computation speedup and memory reduction of OmniQuant are also demonstrated on real devices.
+
+
+
+
+
+
+\section{Related Work}
+
+
+\subsection{Quantization Methods.}
+Quantization reduces neural network bit-precision, leading to smaller models and faster inference. Current methods are largely divided into Quantization Aware Training (QAT)\citep{llmqat} and Post-training Quantization (PTQ)\citep{smoothquant,gptq}. While QAT maintains performance by simulating quantization during training, its training cost makes it unsuitable for LLM. PTQ techniques like AdaRound~\citep{adaround} and BRECQ~\citep{brecq} use gradient optimization to determine optimal rounding, but tuning all weights is time-intensive for larger models. Thus, most LLM quantization methods~\citep{smoothquant,gptq,spqr,owq,outlier-plus} prioritize training-free PTQ, which limit performance in lower-bit situations. Our goal is to integrate gradient updates in LLM quantization, mirroring QAT's approach, while retaining PTQ's efficiency.
+
+
+\subsection{Quantization of LLM.}
+Considering the quantized object, exiting LLM quantization can be classified into two fields: weight-only quantization and weight-activation quantization. 
+
+\textbf{Weight-only quantization.} Weight-only quantization focuses on converting weights to low-bit values. For instance, GPTQ~\citep{gptq} uses block-wise reconstruction for 3/4-bit quantization. SpQR~\citep{spqr}, OWQ~\citep{owq}, and AWQ~\citep{awq} emphasize the significance of weights tied to higher-magnitude activations.  Therefore, SpQR and OWQ employ mixed-precision quantization to safeguard vital weights, while AWQ opts for channel-wise scaling to avoid mixed-precision's hardware inefficiency. 
+Qlora~\citep{qlora} and INT2.1~\citep{quip} restore the capabilities of the quantized model through parameter-efficient fine-tuning. Our method, in contrast, enhances the quantization process directly, making OmniQuant complementary to Qlora and INT2.1.
+
+\textbf{Weight-activation quantization.} Weight-activation quantization compresses both weights and activations. SmoothQuant~\citep{smoothquant}, LLM.int8()~\citep{llmint8}, and Outlier Suppression~\citep{outlier} achieve W8A8 quantization by managing activation outliers. LLM.int8() uses mixed-precision decomposition, while the other two employ channel-wise scaling. Furthermore, Outlier Suppression+\citep{outlier-plus} adds channel-wise shifting to drive W6A6 quantization. Unlike previous heuristic designs, we use gradient optimization and expand equivalent transformations to attention mechanisms, further boosting the K/V cache quantization.
+Recently, RPTQ~\citep{rptq} and LLM-QAT~\citep{llmqat} have achieved W4A4 quantization. However, RPTQ adopts deployment-unfriendly group-wise activation quantization, and LLM-QAT employs time-consuming QAT. In distinction from RPTQ and LLM-QAT, we achieve W4A4 quantization through deployment-friendly per-token quantization and maintain the PTQ efficiency.
+
+
+\iffalse
+
+
+\section{Preliminaries}
+
+Let us begin with briefly introducing several representative quantization schemes for LLMs.
+
+\textbf{Post-Training Quantization (PTQ).} Due to the high computation and data efficiency, PTQ-based methods are widely used to compress LLMs. Considering the fact that there are a few outlier channels in the original activation map while the original weight distribution is flat and uniform, SmoothQuant \citep{smoothquant} and Outlier Suppression+ \citep{outlier-plus} conduct weight-activation quantization by migrating the quantization difficulty from activations to weights with a pre-defined migration strength. In addition, another line of work finds that the quantization error of weights also plays a pivotal role in the final performance due to the importance of weights corresponding to activations. To overcome this, SqQR \citep{spqr} and OWQ \citep{owq} retain crucial weights in full-precision, while AWQ \citep{awq} safeguards these weights using grid-searched channel-wise scaling.
+
+\textbf{Challenge of LLM quantization.} Although these methods have achieved certain success in compressing various LLMs, they often lead to suboptimal performance and fail to deal with extremely low-bit quantization due to the crude design of quantization parameters.
+
+
+
+\textbf{Technical Challenges.}
+Quantization maps float-point values into low-bit values, resulting in significant memory save and inference speedup.
+In this work, we study linear quantization because of its deploy-friendly properties. Also, we investigate block-wise optimization to minimize the quantization error.
+
+\textbf{Linear quantization}, \emph{i.e.}, uniform quantization, can be formulated as:
+\begin{equation}\label{eq:quantization}
+    \mathbf{X_q} = \mathrm{clamp}(\lfloor \frac{\mathbf{X}}{s} \rceil + z, 0, 2^{N}-1),
+\end{equation}
+where $\lfloor \cdot \rceil$ indicates round operation. $N$ is the target bit number. $\mathbf{X}_q$ and $\mathbf{X}$ denote the quantized and full-precision items, respectively. $s$ is the scaling factor and $z$ is the zero-point value. The clamp operation constrains the value within the range of $N$-bit integer, specifically $[0, 2^{N}-1]$.
+For instance, MinMax quantization~\citep{smoothquant} is a widely-used linear quantization scheme, which restrains quantized weights within the minimum and the maximum of full-precision weights. To this end, MinMax quantization typically sets $s={\max(\lvert \mathbf{X} \rvert)}/{(2^{N-1}-1)}, z=2^{N-1}-1$ for symmetric quantization and sets $s=[\max(\mathbf{X})-\min(\mathbf{X} )]/{(2^{N}-1)}, z=-\lfloor {\min(\mathbf{X})}/{s} \rceil$ for asymmetric quantization.
+
+\textbf{Post-Training Quantization (PTQ).} 
+
+The traditional PTQ methods~\citep{gptq,adaround,brecq,qdrop} tune the full weights with minor modifications by block-wise quantization error minimization, which can be formulated as:
+\begin{equation}\label{eq:deltaW-PTQ}
+    \arg\min_{\Delta\mathbf{{W}}} \lvert\lvert \mathbf{F}(\mathbf{W},\mathbf{X}) - \mathbf{F}\big(Q_w(\mathbf{W}+\Delta\mathbf{{W}}),Q_a(\mathbf{X})\big) \rvert\rvert,
+\end{equation}
+where $\mathbf{F}$ represents the function of a layer~\citep{gptq,adaround} or a block~\citep{brecq,qdrop}. $\mathbf{W},\Delta\mathbf{{W}}$ denote the original weights and minor weights modification, respectively. $\mathbf{X}$ denotes the input activation corresponding to a small calibration dataset. $Q_w(\cdot)$ and $Q_a(\cdot)$ represent weight and activation quantizer, respectively. 
+Despite the fact that block-wise minimization reduces the memory footprint, the traditional PTQ methods cannot be directly used to quantize LLM due to the heavy computational overhead of updating billions of parameters.
+\fi
+
+
+
+\begin{figure}[!t]
+    \centering
+\includegraphics[width=0.7\textwidth]{framework.pdf}
+    \caption{\textbf{Details of OmniQuant} in a transformer block. Note that all learnable parameters can be eliminated after quantization.}\label{fig:framework}
+\end{figure}
+
+
+
+\section{OmniQuant}
+
+
+\textbf{Challenge of LLM quantization.} Two main difficulties lie in quantizing an LLM. First, the activation is hard to quantize due to the existence of outlier channels.  Considering that weight distribution is flat and uniform, SmoothQuant \citep{smoothquant} and Outlier Suppression+ \citep{outlier-plus} tackle this issue by migrating the quantization difficulty from activations to weights with a pre-defined migration strength or grid-searching based optimization. Second, the quantization error of weights also plays a pivotal role in the final performance due to the importance of weights corresponding to activations. SqQR \citep{spqr} and OWQ \citep{owq} propose to retain crucial weights in full-precision, while AWQ \citep{awq} safeguards these weights using grid-searched channel-wise scaling.  Although these methods have achieved certain success in compressing various LLMs, they often lead to suboptimal performance and fail to deal with extremely low-bit quantization due to the crude design of hand-crafted quantization parameters such as migration strength and scaling factors.
+
+In this section, we introduce a differentiable quantization technique for LLM called \textbf{OmniQuant} where quantization parameters are learned with better flexibility. Towards this goal, OmniQuant is implemented with a block-wise quantization error minimization framework as presented in Sec.\ref{sec:method-blockwise-minimization}. To tackle the aforementioned challenges of LLM quantization, we devise two novel strategies for additional learnable quantization parameters including a learnable weight clipping (LWC) to mitigate the difficulty in quantizing weights and a learnable equivalent transformation (LET) to further shift the challenge of quantization from activations to weights. We introduce LWC and LCT in Sec. \ref{sec:LWC} and Sec. \ref{sec:LET}, respectively.
+
+\iffalse
+we introduce a novel optimization pipeline, which freezes the original full-precision weight parameters but optimizes a few quantization parameters within the block-wise quantization error minimization framework.
+To tackle this, we first introduce a novel optimization pipeline, which freezes the original full-precision weight parameters but introduces a limited set of learnable parameters.
+The learnable parameters can be used to translate the quantized model, leading to more quantization-friendly weights and activations.
+Specifically, we devise two novel strategies for additional learnable parameters: learnable weight clipping (LCT) and learnable equivalent transformation (LET).
+The former LCT facilitates weight quantization by adaptively clipping each quantization group, achieving appropriate quantization precision trade-off between outlier and regular weights.
+The later LET alleviates the quantization challenges posed by outlier activation through learnable channel-wise scaling and shifting.
+With the cooperation of LCT and LET, the proposed OmniQuant can realize Omni-bearing quantization, encompassing both weight-only quantization and weight-activation quantization.
+The details of OmniQuant are illustrated in Figure~\ref{fig:framework}.
+\fi
+
+\subsection{Block-wise Quantization Error Minimization}\label{sec:method-blockwise-minimization}
+Previous PTQ methods with gradient optimization, such as AdaRound~\citep{adaround}, BRECQ~\citep{brecq} cannot be applied in models with billions of parameters because they are hard to optimize due to the huge solution space. 
+Instead of turning the whole model, we propose a new optimization pipeline with block-wise quantization error minimization where the additional quantization parameters can be optimized in a differentiable manner. We formulate the optimization goal as follows:
+\begin{align}
+\arg \min_{\Theta_1, \Theta_2} \lvert\lvert \mathcal{F}(\mathbf{W},\mathbf{X}) - \mathcal{F}\big(Q_w(\mathbf{\mathbf{W}}; \Theta_1,\Theta_2),Q_a(\mathbf{X}, \Theta_2)\big) \rvert\rvert, 
+\label{eq:objective}
+\end{align}
+where $\mathcal{F}$ represents the mapping function for a transformer block in the LLM, $\mathbf{W}$ and $\mathbf{X}$ are full-precision weight and activation, $Q_w(\cdot)$ and $Q_a(\cdot)$ represent weight and activation quantizer, respectively, $\Theta_1$ and $\Theta_2$ are quantization parameters in learnable weight clipping (LWC) and learnable equivalent transformation (LET), respectively. The Block-wise quantization in Eqn.(\ref{eq:objective}) sequentially quantizes the parameters of one transformer block before moving on to the next.
+
+Block-wise minimization in Eqn.(\ref{eq:objective}) has two advantages. First, equipped with block-wise minimization in Eqn.(\ref{eq:objective}), OmniQuant can optimize quantization parameters in LWC and LET jointly, making it capable enough to encompass both weight-only and weight-activation quantization. Second, block-wise minimization is easy to optimize with minimal resource requirements. OmniQuant only determines a few quantization parameters with optimality, which is easier than optimizing the whole weights in previous PTQ-based methods \citep{adaround, brecq}. Empirically, we find that all models from the LLaMA-2 family \citep{llama2} can be quantized on a single A100-40G GPU utilizing only 128 training samples.
+
+
+\subsection{Learnable Weight Clipping}\label{sec:LWC}
+OmniQuant employs a module of learnable weight clipping (LWC) to reduce the difficulty of quantizing the weights in an LLM. Similar to previous methods with learnable clipping threshold~\citep{lsq,statsq,pact}, LWC also determines the optimal dynamic range of the weights by optimizing a clipping threshold.
+Instead of directly learning a clipping threshold as in previous methods \citep{lsq,pact}, LWC optimizes a clipping strength as formulated by
+\begin{equation}\label{eq:LWC}
+    \mathbf{W_q} = \mathrm{clamp}(\lfloor \frac{\mathbf{W}}{h} \rceil + z, 0, 2^{N}-1), \mathrm{where}\,\, h=\frac{\gamma\max(\mathbf{W})-\beta\min(\mathbf{W} )}{2^{N}-1}, z=-\lfloor \frac{\beta\min(\mathbf{W})}{h} \rceil
+\end{equation}
+where $\lfloor \cdot \rceil$ indicates round operation. $N$ is the target bit number. $\mathbf{W}_q$ and $\mathbf{W}$ denote the quantized and full-precision weights, respectively. $h$ is the normalization factor for weights and $z$ is the zero-point value. The clamp operation constrains the value within the range of $N$-bit integer, specifically $[0, 2^{N}-1]$. In Eqn.(\ref{eq:LWC}), $\gamma\in[0,1]$ and $\beta\in[0,1]$ are learnable clipping strengths for the upper and the lower bound of weights, respectively. We instantiate $\gamma$ and $\beta$ by the sigmoid function\footnote{$\mathrm{Sigmoid}(t)=1/(1+\exp^{-t})$}. Hence, $\Theta_1=\{\gamma,\beta\}$ in Eqn.(\ref{eq:objective}).
+
+Note that LWC degrades into a vanilla MinMax quantization scheme used in existing works \citep{smoothquant},\cite{gptq} when $\gamma=1$ and $\beta=1$. 
+By inheriting the benefits of MinMax quantization, LWC only needs to adjust the clipping strengths to determine an optimal clipping threshold, which would reduce the optimization difficulty.
+Clipped by an optimal threshold, the original weights would be easy to quantize.
+As indicated by the experiments in Table\,\ref{tab:llama_weight_only}, our proposed learnable weight clipping method significantly outperforms previous weight-only quantization techniques~\citep{gptq,awq}).
+\iffalse
+However, the direct application of the previous methods~\citep{lsq,statsq,pact} into LLMs produces worse performance than Min-Max quantization, as demonstrated in  LLM-QAT~\citep{llmqat}.
+
+The failure of previous methods in LLM can be attributed to two main factors. First, these methods directly learn the clipping threshold or step size, which creates a vast solution space and poses a significant convergence challenge. Second, outliers~\citep{llmint8} in activation significantly affect the final output, rendering the activation unsuitable for clipping operations.
+
+To address these issues, we focus on weight clipping and propose a novel learnable weight clipping method, which obtains the clipping threshold by scaling the original minimum and maximum values. 
+Specifically, for each quantization group, we introduce two learnable parameters, $\gamma_{max}$ and $\gamma_{min}$, representing the maximum and minimum clipping scales, respectively. Additionally, a sigmoid function is employed to limit the clipping scale within the meaningful range $[0,1]$. This process can be formulated as follows:
+\begin{equation}
+    \hat{\alpha}_{max} = \mathrm{Sigmoid}(\gamma_{max}) \cdot \alpha_{max}, \hat{\alpha}_{min} = \mathrm{Sigmoid}(\gamma_{min}) \cdot \alpha_{min},\label{eq:clipping_scale}
+\end{equation}
+where $\alpha_{max} = max(\mathbf{W}), \alpha_{min} = min(\mathbf{W})$ represents the original maximum and minimum values within the quantization group, while $\hat{\alpha}_{max}$ and $\hat{\alpha}_{min}$ denote the upper bound and lower bound for clipping operation.
+In our experiments, we init $\gamma_{max}=\gamma_{min}=4$, resulting $0.98$ after $\mathrm{Sigmoid}$. Such initialization can ensure that most information is preserved at the learning start point and avoid the gradient disappearance problem when $\mathrm{Sigmoid}$ meets the saturated zone.
+After weight clipping with clipping threshold $\hat{\alpha}_{max}$ and $\hat{\alpha}_{min}$ in Eq.(\ref{eq:clipping_scale}), the scaling factor $s$ and zero-point value $z$ for quantization are calculated similarly as in MinMax quantization, based on the clipped weights:
+\begin{equation}
+    s = \frac{\hat{\alpha}_{max}- \hat{\alpha}_{min}}{2^N - 1}, z=\frac{\hat{\alpha}_{min}}{s}.\label{eq:clipping_sz}
+\end{equation}
+Both $s$ and $z$ influence all weights, thereby enabling the gradient of all weights to propagate to the learnable $\gamma_{max}$ and $\gamma_{min}$.  
+
+Our proposed learnable clipping has two key advantages. First, it can be seen as constructing clipping-based quantization by using MaxMin quantization as a proxy, thereby limiting the solution space to meaningful domains.
+Second, as indicated by the experiments in Table\,\ref{tab:llama_weight_only}, our proposed learnable weight clipping method significantly outperforms previous weight-only quantization techniques~\citep{gptq,awq}.
+\fi
+
+\subsection{Learnable Equivalent Transformation}\label{sec:LET}
+Other than LWC which enables quantization-friendly weights by optimizing the clipping threshold, we further reduce the difficulty of weight-activation quantization by a learnable equivalent transformation (LET). 
+Considering that outliers in the activation map are systematic and unique to specific channels, previous methods such as SmoothQuant \citep{smoothquant} migrate the difficulty of quantization from activations to weights with a mathematically equivalent transformation. However, they hand-craft the equivalent parameters, leading to suboptimal results.
+
+Thanks to the inclusion of block-wise quantization error minimization, our LET can determine the optimal equivalent parameters in a differentiable way. 
+Inspired by SmoothQuant~\citep{smoothquant} and Outlier Suppression+~\citep{outlier-plus}, we adopt channel-wise scaling and channel-wise shifting to manipulate the activation distribution, providing an effective solution for the outlier issue.
+Specifically, we investigate the equivalent transformation across both the linear layer and attention operation, as illustrated in Figure\ref{fig:framework}.
+
+\textbf{Linear layer.} The linear layer takes an input token sequence $\mathbf{X} \in \mathbb{R}^{T\times C_{in}}$ where $T$ is the token length and is the multiplication of the weight matrix $\mathbf{W} \in \mathbb{R}^{C_{in} \times C_{out}}$ and bias vector $\mathbf{B}\in\mathbb{R}^{1 \times C_{out}}$. A mathematically equivalent linear layer is expressed as:
+\begin{equation}\label{eq:original_linear}
+    \mathbf{Y} = \mathbf{X}\mathbf{W} + \mathbf{B} = [\underbrace{(\mathbf{X}-\delta)\oslash s}_{\tilde{\mathbf{X}}}]\cdot[\underbrace{s\odot \mathbf{W}}_{\tilde{\mathbf{W}}}] + [\underbrace{\mathbf{B} + \delta\mathbf{W}}_{\tilde{\mathbf{B}}}]
+\end{equation}
+where $\mathbf{Y}$ represents the output,  $\mathbf{s} \in \mathbb{R} ^{1\times C_{in}}$ and $\mathbf{\delta} \in \mathbb{R}^{1\times C_{in}}$ are channel-wise scaling and shifting parameters, respectively, $\tilde{\mathbf{X}}, \tilde{\mathbf{W}}$ and $\tilde{\mathbf{B}}$ are equivalent activation, weight and bias, respectively, `$\oslash$' and `$\odot$' are elementwise division and multiplication. By Eqn.(\ref{eq:original_linear}), the activations are transformed to be quantization-friendly at a cost of increased quantization difficulty in weights. In this sense, LWC in Sec. \ref{sec:LWC} can improve the performance of weight-activation quantization achieved by LET because it renders weights quantization-friendly. Finally, we perform quantization on transformed activations and weights, as given by
+\begin{equation}\label{eq:LET-linear}
+    \mathbf{Y} = Q_a(\tilde{\mathbf{X}}) Q_w(\tilde{\mathbf{W}}) + \widetilde{\mathbf{B}},
+\end{equation}
+where $Q_a$ is the vanilla MinMax quantizer and $Q_w$ is the MinMax quantizer with learnable weight clipping (i.e. our LWC).
+
+Note that the scaling and shifting parameters in $\tilde{\mathbf{X}}$ can be absorbed into the previous normalization or linear layer and the the scaling factors in $\tilde{\mathbf{W}}$ can be fused into the original linear weight $\mathbf{W}$. Therefore, the equivalent transformation in Eqn.(\ref{eq:original_linear}) can effectively reduce quantization errors without introducing additional parameters or costs. We employ this equivalent transformation in all linear layers of the LLM except for the second linear layer of FFN as shown in Figure\ref{fig:framework}. This may be because the high sparsity of features after the non-linear layer~\citep{dejavu} leads to unstable gradients when applying learnable equivalent transformations.
+
+\textbf{Attention operation.} Beyond the linear layer, the attention operation also accounts for a significant proportion of the computation. Additionally, the auto-regressive pattern of LLM necessitates storing the key-value(KV) cache for each token, which results in substantial memory demands for long sequences. Therefore, we also quantize $\mathbf{Q}/\mathbf{K}/\mathbf{V}$ matrixes into low-bit in the weight-activation quantization setting. Specifically, the learnable equivalent transform of the self-attention affinity matrix can be written as:
+\begin{equation}\label{eq:LET-attn}
+    \mathbf{P} =\mathrm{Softmax} (\mathbf{Q} \mathbf{K} ^{T})=\mathrm{Softmax} ((\underbrace{\mathbf{Q}\oslash s_a}_{\tilde{\mathbf{Q}}}) (\underbrace{s_a\odot\mathbf{K} ^{T}}_{\tilde{\mathbf{K}}^T})).
+\end{equation}
+where $s_a\in \mathbb{R}^{1\times C_{out}}$ is the scaling factor in the affinity matrix. Similar to Eqn.(\ref{eq:LET-linear}), the quantized affinity matrix calculation is expressed as $\mathbf{P} = \mathrm{Softmax} (Q_a (\widetilde{\mathbf{Q}}) Q_a (\widetilde{\mathbf{K}}^{T}))$. Here we also use MinMax quantization scheme as $Q_a$ to quantize $\tilde{\mathbf{Q}}/\tilde{\mathbf{K}}$ matrixes. From Eqn.(\ref{eq:LET-linear}) and Eqn.(\ref{eq:LET-attn}) we know that $\Theta_2=\{\delta,s,s_a\}$ in Eqn.(\ref{eq:objective}).
+\iffalse
+To enhance their quantization compatibility, we introduce a channel-wise scaling equivalent transformation for $\mathbf{Q}$ and $\mathbf{K}$, defined as:
+\begin{equation}\label{eq:qk_transformantion}
+    \widetilde{\mathbf{Q}} =  \mathbf{Q} \oslash \beta, \widetilde{\mathbf{K}}  =\mathbf{K} \odot \beta.
+\end{equation}
+Thus, the revised computation between $\mathbf{Q}$ and $\mathbf{K}$ becomes:
+\begin{equation}
+    p = \mathrm{Softmax} (Q_x (\widetilde{\mathbf{Q}}) Q_x (\widetilde{\mathbf{K}}^{T})).
+\end{equation}
+\fi
+
+The channel-wise scaling factors in $\tilde{\mathbf{Q}}$ and $\tilde{\mathbf{K}}$, as seen in Eq.(\ref{eq:LET-attn}), can be absorbed into linear weights of the query and key projection, respectively. 
+It is worth mentioning that the explicit transformation of $\mathbf{V}$ is omitted as its distribution has already been channel-wise altered by the inverse transformation associated with the output projection linear layer.
+
+
+\begin{table}[t]
+    \setlength{\tabcolsep}{8pt}
+    \small
+    \centering
+    \caption{\textbf{Weight-only quantization Results of LLaMA-1 and LLaMA-2 Models}.}
+    \renewcommand{\arraystretch}{0.7}
+    \begin{tabular}{llccccccc}
+        \hline
+          \multicolumn{2}{l}{\textbf{LLaMA1\&2 / PPL}$\downarrow$} & 1-7B & 1-13B & 1-30B & 1-65B & 2-7B & 2-13B &2-70B \\  \hline
+        FP16 & - & 5.68 & 5.09 & 4.10 & 3.53 & 5.47 & 4.88 & 3.31 \\ 
+        \hline
+        \multirow{3}{*}{\shortstack{W2A16}} & RTN & 1.1e5 & 6.8e4 & 2.4e4 & 2.2e4  & 3.8e4 & 5.6e4 & 2.0e4 \\
+         & GPTQ & 2.1e3   &  5.5e3 & 499.75 & 55.91 & 7.7e3 & 2.1e3 & 77.95   \\
+         & \cellcolor{Gray}\textbf{OmniQuant}  & \cellcolor{Gray}\textbf{15.47} & \cellcolor{Gray}\textbf{13.21} & \cellcolor{Gray}\textbf{8.71} &  \cellcolor{Gray}\textbf{7.58} & \cellcolor{Gray}\textbf{37.37} & \cellcolor{Gray}\textbf{17.21} & \cellcolor{Gray}\textbf{7.81}   \\
+        \hline
+        \multirow{4}{*}{\shortstack{W2A16\\g128}} & RTN &  1.9e3  & 781.20 & 68.04 & 15.08 & 4.2e3 & 122.08 & 27.27  \\
+         & GPTQ &  44.01 & 15.60 & 10.92 & 9.51 & 36.77 & 28.14 & NAN  \\
+         & AWQ &  2.6e5 & 2.8e5 & 2.4e5 & 7.4e4 & 2.2e5 & 1.2e5 & -  \\
+         & \cellcolor{Gray}\textbf{OmniQuant}  & \cellcolor{Gray}\textbf{9.72} & \cellcolor{Gray}\textbf{7.93} & \cellcolor{Gray}\textbf{7.12} & \cellcolor{Gray}\textbf{5.95} & \cellcolor{Gray}\textbf{11.06} & \cellcolor{Gray}\textbf{8.26} & \cellcolor{Gray}\textbf{6.55}  \\
+        \hline
+        \multirow{4}{*}{\shortstack{W2A16\\g64}} & RTN &  188.32 & 101.87 & 19.20 & 9.39  & 431.97 & 26.22 & 10.31 \\
+         & GPTQ & 22.10 & 10.06 &  8.54 & 8.31 & 20.85 & 22.44 & NAN \\
+         & AWQ &  2.5e5 & 2.7e5 & 2.3e5 & 7.4e4  & 2.1e5 & 1.2e5 & - \\
+         & \cellcolor{Gray}\textbf{OmniQuant}  & \cellcolor{Gray}\textbf{8.90}  & \cellcolor{Gray}\textbf{7.34} & \cellcolor{Gray}\textbf{6.59} & \cellcolor{Gray}\textbf{5.65}   & \cellcolor{Gray}\textbf{9.62} & \cellcolor{Gray}\textbf{7.56} & \cellcolor{Gray}\textbf{6.11} \\ \hline
+        \multirow{4}{*}{\shortstack{W3A16}} & RTN & 25.73 & 11.39 & 14.95 & 10.68 & 539.48 & 10.68 & 7.52  \\
+         & GPTQ &  8.06 & 6.76 & 5.84 & 5.06 & 8.37 & 6.44 & 4.82 \\
+         & AWQ & 11.88 & 7.45 & 10.07 & 5.21  & 24.00 & 10.45 & - \\
+         & \cellcolor{Gray}\textbf{OmniQuant}  & \cellcolor{Gray}\textbf{6.49} & \cellcolor{Gray}\textbf{5.68} & \cellcolor{Gray}\textbf{4.74} & \cellcolor{Gray}\textbf{4.04}  & \cellcolor{Gray}\textbf{6.58} & \cellcolor{Gray}\textbf{5.58} & \cellcolor{Gray}\textbf{3.92} \\ \hline
+        \multirow{4}{*}{\shortstack{W3A16\\g128}} & RTN & 7.01 & 5.88 & 4.87 & 4.24  & 6.66 & 5.51 & 3.97 \\
+         & GPTQ &  6.55 & 5.62 & 4.80 & 4.17 & 6.29 & 5.42 & 3.85 \\
+         & AWQ &  6.46 & 5.51 & 4.63 & 3.99 & 6.24 & 5.32 & -  \\
+         & \cellcolor{Gray}\textbf{OmniQuant}  & \cellcolor{Gray}\textbf{6.15} & \cellcolor{Gray}\textbf{5.44} & \cellcolor{Gray}\textbf{4.56} & \cellcolor{Gray}\textbf{3.94} & \cellcolor{Gray}\textbf{6.03} & \cellcolor{Gray}\textbf{5.28} & \cellcolor{Gray}\textbf{3.78} \\ \hline
+         \multirow{4}{*}{\shortstack{W4A16}} & RTN & 6.43 & 5.55 & 4.57 & 3.87 & 6.11 & 5.20 & 3.67 \\
+         & GPTQ & 6.13 & 5.40 & 4.48 & 3.83 & 5.83 & 5.13 & 3.58 \\
+         & AWQ &  6.08 & 5.34 & 4.39 & 3.76  & 6.15 & 5.12 & - \\
+         & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}\textbf{5.86} & \cellcolor{Gray}\textbf{5.21} & \cellcolor{Gray}\textbf{4.25} & \cellcolor{Gray}\textbf{3.71} & \cellcolor{Gray}\textbf{5.74}  & \cellcolor{Gray}\textbf{5.02} & \cellcolor{Gray}\textbf{3.47}  \\ 
+         \hline
+         \multirow{4}{*}{\shortstack{W4A16\\g128}} & RTN & 5.96 & 5.25 & 4.23 & 3.67 & 5.72 & 4.98 & 3.46 \\
+         & GPTQ & 5.85 & 5.20 & 4.23 & 3.65 & 5.61 & 4.98 & 3.42 \\
+         & AWQ & 5.81 & 5.20 & 4.21 & 3.62 & 5.62 & 4.97 & - \\
+         & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}\textbf{5.77} & \cellcolor{Gray}\textbf{5.17} & \cellcolor{Gray}\textbf{4.19} & \cellcolor{Gray}\textbf{3.62}& \cellcolor{Gray}\textbf{5.58} & \cellcolor{Gray}\textbf{4.95} & \cellcolor{Gray}\textbf{3.40}\\
+        \hline
+    \end{tabular}
+    \label{tab:llama_weight_only}
+\end{table}
+
+
+\section{Experiments}
+
+
+\subsection{Settings}
+
+\textbf{Quantization.}
+We experiment with both weight-only and weight-activation quantization. For the former, default settings are INT4/INT3/INT2 per-channel weight quantization. Group-wise weight quantization is represented by `g', e.g., W3A16g128 means 3-bit weight-only quantization with a 128-group size. In weight-activation quantization, defaults are INT6/INT4 per-channel weight and per-token activation quantization~\citep{llmint8}. All intermediate activations are quantized into low-bit, excluding the SoftMax output, kept at full precision due to its long-tail distribution making it unsuitable for uniform quantization.
+
+\textbf{Training} The channel-wise scaling factor is initialized with SmoothQuant~\citep{smoothquant}, and the channel-wise shifting factor is initialized using Outlier Suppression+~\citep{outlier-plus}.  To optimize the learnable parameters, we utilize the AdamW optimizer with zero weight decay. The learning rate for learnable weight clipping and equivalent transformation is set as $5e-3$ and $1e-2$, respectively. We employ a calibration dataset consisting of 128 randomly selected 2048-token segments from WikiText2~\citep{wikitext2}. The entire training process is facilitated on a single Nvidia A100 GPU, using a batch size of 1 over 20 epochs, except for W2A16 quantization that leverages 40 epochs. 
+For weight-activation quantization, both learnable weight clipping and equivalent transformation are activated. For weight-only, both are used for OPT, but only the clipping is for LLaMA, as Table~\ref{tab:ablation} shows negligible benefits from the equivalent transformation for LLaMA.
+
+\textbf{Models.} We test on OPT(125M-66B)\citep{opt}), LLaMA(7B-65B)~\citep{llama}, LLaMA-2(7B-70B)~\citep{llama2}, Falcon-180B~\citep{falcon}, and instruction-tuned LLaMA-2-chat~\citep{llama2} for generalizability. While the main paper highlights the LLaMA results, comprehensive details for other models are available in Sec.
+
+
+\textbf{Evaluation.} Following the previous work~\citep{awq,gptq}, we evaluate quantized models by reporting the perplexity of language generation experiments, specifically on WikiText2~\citep{wikitext2}, PTB~\citep{ptb}), C4~\citep{c4}. %Note that perplexity serves as an indicator of the generative performance of models and has a high coefficient with zero-shot performance~\citep{scaline-law}. 
+Moreover, accuracy is evaluated in zero-shot tasks including PIQA~\citep{piqa}, ARC~\citep{arc}, BoolQ~\citep{boolq}, and HellaSwag~\citep{arc}. We adhere to the GPTQ~\citep{gptq} settings for language generation experiments, and implement the lm-eval-harness~\citep{evaluation} for the execution of all zero-shot tasks.
+
+\textbf{Baselines.} For weight-only quantization, we compare  with vanilla round-to-nearest quantization (RTN), GPTQ~\citep{gptq}, and AWQ~\citep{awq}. For weight-activation quantization, we compare our method with SmoothQuant~\citep{smoothquant}, Outlier Supression + ~\citep{outlier-plus}, RPTQ~\citep{rptq}, and the recent QAT method LLM-QAT~\citep{llmqat}. 
+Note that we reproduce SmoothQuant and Outlier Suppression+ with per-channel weight quantization and per-token activation quantization for fair comparisons.
+
+
+
+\subsection{Weight-only Quantization Results}
+The results of the LLaMA family can be found in Table~\ref{tab:llama_weight_only}, while the results for OPT are presented in the Sec. 
+As illustrated by the tables, OmniQuant consistently outperforms the prior LLM weight-only quantization method across various LLM families (OPT, LLaMA-1, LLaMA-2) and diverse quantization configurations, including W2A16, W2A16g128, W2A16g64, W3A16, W3A16g128, W4A16, and W4A16g128.
+These findings suggest OmniQuant's versatility, being adaptable to a multitude of quantization configurations. For instance, while AWQ~\citep{awq} is particularly effective with group-wise quantization, OmniQuant demonstrates superior performance across both channel-wise and group-wise quantization.
+Furthermore, the performance benefits of OmniQuant become more pronounced as the quantization bit size decreases. 
+
+\begin{table}[t]
+    \setlength{\tabcolsep}{3pt}
+    \small
+    \centering
+    \renewcommand{\arraystretch}{0.7}
+    \caption{\textbf{Weight-activation quantization results of LLaMA Models.} This table reports the accuracy of 6 zero-shot tasks.}
+    \begin{tabular}{lllccccccc}
+        \hline
+          \multicolumn{1}{l}{\textbf{LLaMA / Acc}$\uparrow$} & \#Bits & Method  & PIQA  & ARC-e & Arc-c & BoolQ & HellaSwag & Winogrande & \textbf{Avg.} \\  \hline
+        \multirow{7}{*}{LLaMA-1-7B} &
+        FP16 & - & 77.47  & 52.48 & 41.46 & 73.08 & 73.00 & 67.07 & 64.09  \\
+        & W6A6 & SmoothQuant & 76.75 & 51.64 & 39.88 & 71.75 & 71.67 & 65.03 & 62.81 \\
+         & W6A6 & OS+ & 76.82 & 51.35 & 41.13 & 72.08 & 71.42 & 65.98 & 61.13 \\
+        & \cellcolor{Gray}W6A6 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}77.09 & \cellcolor{Gray}51.89 & \cellcolor{Gray}40.87 & \cellcolor{Gray}72.53 & \cellcolor{Gray}71.61 & \cellcolor{Gray}65.03 & \cellcolor{Gray}\textbf{63.17} \\
+        & W4A4 & SmoothQuant & 49.80 & 30.40  & 25.80 & 49.10 & 27.40 & 48.00 & 38.41 \\
+        & W4A4 & LLM-QAT & 51.50 & 27.90 & 23.90 & 61.30 & 31.10 & 51.90 & 41.27 \\
+        & W4A4 & LLM-QAT+SQ & 55.90 & 35.50 & 26.40 & 62.40 & 47.80 & 50.60 & 46.43 \\
+        & W4A4 & OS+ & 62.73 & 39.98 & 30.29 & 60.21 & 44.39 & 52.96 & 48.43 \\
+        & \cellcolor{Gray}W4A4 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}66.15 & \cellcolor{Gray}45.20 & \cellcolor{Gray}31.14 & \cellcolor{Gray}63.51 & \cellcolor{Gray}56.44 & \cellcolor{Gray}53.43 & \cellcolor{Gray}\textbf{52.65} \\
+        \hline
+        \multirow{5}{*}{LLaMA-1-13B} &
+        FP16 & - & 79.10  & 59.89 & 44.45 & 68.01 & 76.21 & 70.31 & 66.33  \\
+        & W6A6 & SmoothQuant & 77.91 & 56.60 & 42.40 & 64.95 & 75.36 & 69.36 & 64.43 \\
+        & W6A6 & OS+ & 78.29 & 56.90 & 43.09 & 66.98 & 75.09 & 69.22 & 64.92 \\
+        & \cellcolor{Gray}W6A6 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}78.40 & \cellcolor{Gray}57.28 & \cellcolor{Gray}42.91 & \cellcolor{Gray}67.00 & \cellcolor{Gray}75.82 & \cellcolor{Gray}68.27 & \cellcolor{Gray}\textbf{64.95} \\
+        & W4A4 & SmoothQuant & 61.04 & 39.18 & 30.80 & 61.80 & 52.29 & 51.06 & 49.36 \\
+        & W4A4 & OS+ & 63.00 & 40.32 & 30.38 & 60.34 & 53.61 & 51.54 & 49.86 \\
+        &\cellcolor{Gray} W4A4 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}69.69 & \cellcolor{Gray}47.39 & \cellcolor{Gray}33.10 & \cellcolor{Gray}62.84 & \cellcolor{Gray}58.96 & \cellcolor{Gray}55.80 & \cellcolor{Gray}\textbf{54.37} \\
+        \hline
+        \multirow{5}{*}{LLaMA-1-30B} &
+        FP16 & - & 80.08  & 58.92 & 45.47 & 68.44 & 79.21 & 72.53 & 67.44 \\
+        & W6A6 & SmoothQuant & 77.14 & 57.61 & 42.91 & 65.56 & 78.07 & 69.92 & 65.20 \\
+        & W6A6 & OS+ & 80.14 & 58.92 & 45.05 & 68.02 & 77.96 & 71.98 & 67.01 \\
+        & \cellcolor{Gray}W6A6 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}79.81 & \cellcolor{Gray}58.79 & \cellcolor{Gray}45.22 & \cellcolor{Gray}68.38 & \cellcolor{Gray}78.95 & \cellcolor{Gray}72.21 & \cellcolor{Gray}\textbf{67.23} \\
+        & W4A4 & SmoothQuant & 58.65 & 35.53 & 27.73 & 60.42 & 35.56 & 48.06 & 44.83 \\
+        & W4A4 & OS+ & 67.63 & 46.17 & 34.40 & 60.70 & 54.32 & 52.64 & 52.62 \\
+        & \cellcolor{Gray}W4A4 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}71.21 & \cellcolor{Gray}49.45 & \cellcolor{Gray}34.47 & \cellcolor{Gray}65.33 & \cellcolor{Gray}64.65 & \cellcolor{Gray}59.19 & \cellcolor{Gray}\textbf{56.63} \\
+        \hline
+        \multirow{5}{*}{LLaMA-1-65B} &
+        FP16 & - & 80.79  & 58.71 & 46.24 & 82.29 & 80.72 & 77.50 & 71.04 \\
+        & W6A6 & SmoothQuant & 80.25 & 57.92 & 45.50 & 80.22 & 80.18 & 74.76 & 69.80 \\
+        & W6A6 & OS+ & 79.67 & 55.68 & 45.22 & 80.02 & 78.03 & 73.95 & 68.76 \\
+        & \cellcolor{Gray}W6A6 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}81.01 & \cellcolor{Gray}58.12 & \cellcolor{Gray}46.33 & \cellcolor{Gray}80.64 & \cellcolor{Gray}79.91 & \cellcolor{Gray}75.69 & \cellcolor{Gray}\textbf{70.28} \\
+        & W4A4 & SmoothQuant & 64.47 & 40.44 & 29.82 & 59.38 & 39.90 & 52.24 & 47.71 \\
+        & W4A4 & OS+ & 68.06 & 43.98 & 35.32 & 62.75 & 50.73 & 54.30 & 52.52 \\
+        & \cellcolor{Gray}W4A4 & \cellcolor{Gray}\textbf{OmniQuant} & \cellcolor{Gray}71.81 & \cellcolor{Gray}48.02 & \cellcolor{Gray}35.92 & \cellcolor{Gray}73.27 & \cellcolor{Gray}66.81 & \cellcolor{Gray}59.51 & \cellcolor{Gray}\textbf{59.22} \\
+        \hline
+    \end{tabular}
+    \label{tab:llama_weight_activation}
+\end{table}
+
+\subsection{Weight-Activation Quantization Results}
+In weight-activation quantization, our main focus lies on W6A6 and W4A4 quantization. We exclude W8A8 quantization as SmoothQuant can nearly achieve lossless W8A8 quantized models when compared with full-precision counterparts.
+ 
+Table~\ref{tab:llama_weight_activation} illustrates the zero-shot task accuracy of LLaMA weight-activation quantization. Notably, OmniQuant markedly enhances the average accuracy by +4.99\% $ \sim $  +11.80\% across various models at W4A4 quantization.
+Remarkably, in the  LLaMA-7B, OmniQuant even surpasses the recent QAT method, LLM-QAT~\citep{llmqat}, by an impressive margin of +6.22\%. This improvement demonstrates the efficacy of incorporating additional learnable parameters, which proves to be more beneficial than the global weight tuning utilized by QAT.
+
+
+
+
+
+
+
+
+
+
+\subsection{Quantization of instruction-tuned models}
+
+To validate the generalization capability of our method, we test the quantization on LLaMA-2-chat~\citep{llama2}, an instruction-tuned model for chatbots. Using the GPT-4 evaluation protocol~\citep{vicuna}, performance is assessed on the Vicuna benchmark~\citep{vicuna} comprising 80 questions. To negate position bias~\citep{judging}, each pair is compared in both sequences, totaling 160 trials per comparison.
+Figure~\ref{fig:gpt4_evaluation} compares RTN, AWQ~\citep{awq}, and OmniQuant. In LLaMA-2-7b-chat, OmniQuant matches AWQ with a 50\% win rate but surpasses RTN more (80.3\% vs. 69.4\%). In LLaMA-2-13b-chat, while AWQ lags behind RTN, OmniQuant consistently improves quantization model performance.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{gpt4_evaluation.pdf}
+    \caption{Comparing W3A16g128 quantization among RTN, AWQ~\citep{awq}, and OmniQuant under Vicuna-Bench~\citep{vicuna}. Win rates are calculated without considering tie samples. A higher win rate indicates the better performance of the former of \emph{vs.} pairs.}
+    \label{fig:gpt4_evaluation}
+\end{figure}
+
+
+\subsection{Acceleration on Real Device}\label{sec:deployment}
+ It particularly excels in deploying quantized models on CUDA.
+One of OmniQuant's strengths lies in its ability to avoid extra operations for quantized models, allowing MLC-LLM to seamlessly run models created with OmniQuant.
+Table,\ref{tab:speed} shows memory requirements and inference speeds of the LLaMA family on an NVIDIA A100-80G. 'Weights Memory (WM)' represents quantized weight storage, and 'Running Memory (RM)' indicates the memory for inference, with the latter being higher due to certain retained activations. Inference speed is gauged by generating 512 tokens.
+It is evident that quantized models significantly reduce memory usage compared to 16-bit full-precision models. For instance, models with W4A16g128 and W2A16g128 quantization almost double the inference speed. However, MLC-LLM's support for INT3/INT2 is currently suboptimal, particularly for INT3. Enhancements to INT3/INT2 quantization speed are in our future roadmap.
+Additionally, we only explore the deployment of weight-only quantization in this study due to that W4A4 and W6A6 quantization methods lack out-of-the-box hardware support.
+\begin{table}[!t]
+    \centering
+    \renewcommand{\arraystretch}{0.7}
+    \setlength{\tabcolsep}{1pt}
+    \caption{Deployment of weight-only quantization through MLC-LLM. We report the memory size of quantized weights (denoted as `WM') and the running memory (denoted as `RM') and speed in NVIDIA A100-80G. }
+    \begin{tabular}{ccccccccccccc}
+    \hline
+    \textbf{LLaMA} & \multicolumn{3}{c}{\textbf{7B}} & \multicolumn{3}{c}{\textbf{13B}} & \multicolumn{3}{c}{\textbf{30B}} & \multicolumn{3}{c}{\textbf{65B}} \\
+    \cmidrule(l{2pt}r{2pt}){2-4}
+    \cmidrule(l{2pt}r{2pt}){5-7}
+    \cmidrule(l{2pt}r{2pt}){8-10}
+    \cmidrule(l{2pt}r{2pt}){11-13}
+     & WM & RM &  token/s & WM & RM &  token/s  & WM & RM &  token/s  & WM & RM &  token/s \\
+     \hline
+    FP & 12.6G &	14.4G&	69.2&	24.3G &	27.1G &	52.5 &	60.6G&	66.1G	&23.9	&OOM&	-&	-\\
+    W4A16g128 & 3.8G&	5.7G&	134.2&	7.0G&	10.0G&	91.3&	16.7G&	21.7G&	43.6&	33.0G&	41.0G&	24.3\\
+    W3A16g128 &3.2G	&5.1G&	83.4&	5.8G&	8.7G&	57.6&	13.7G&	18.7G&	29.0&	27.0G&	35.1G&	15.2\\
+    W2A16g128& 2.2G&	4.1G&	83.9&	4.0G&	7.5G&	92.6&	9.2G&	14.1G&	36.7&	18.0G&	25.6G&	24.8\\
+    \hline
+    \end{tabular}
+    \label{tab:speed}
+\end{table}
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+We present OmniQuant, a method advancing weight-only and weight-activation quantization to low-bit formats. OmniQuant's core principle is to retain original full-precision weights while adding learnable parameters. It uses learnable weight clipping and learnable equivalent transformation to optimize weight and activation for quantization. While incorporating gradient updates, OmniQuant maintains training efficiency comparable to existing PTQ methods. It outperforms current methods in language generation and zero-shot tasks and is suited for instruction-tuned LLMs. In addition, OmniQuant also ensures hardware compatibility as its added parameters can be absorbed.
+
+
+
+
+

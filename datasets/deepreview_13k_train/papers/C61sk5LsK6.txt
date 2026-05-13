@@ -1,0 +1,373 @@
+\title{InfoBatch: Lossless Training Speed Up by Unbiased Dynamic Data Pruning}
+
+\begin{abstract}
+
+
+Data pruning aims to obtain lossless performances with less overall cost. A common approach is to filter out samples that make less contribution to the training. This could lead to gradient expectation bias compared to the original data. 
+To solve this problem, we propose \textbf{InfoBatch}, a novel framework aiming to achieve lossless training acceleration by unbiased dynamic data pruning. Specifically, InfoBatch randomly prunes a portion of less informative samples based on the loss distribution and rescales the gradients of the remaining samples to approximate the original gradient.
+As a plug-and-play and architecture-agnostic framework, InfoBatch consistently obtains lossless training results on classification, semantic segmentation, vision pertaining, and instruction fine-tuning tasks. On CIFAR10/100, ImageNet-1K, and ADE20K, InfoBatch losslessly saves 40\% overall cost. For pertaining MAE and diffusion model, InfoBatch can respectively save 24.8\% and 27\% cost. For LLaMA instruction fine-tuning, InfoBatch is also able to save 20\% cost and is compatible with coreset selection methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In the past decade, deep learning has achieved remarkable progress in the computer vision area~\citep{ren2015faster, he2016deep,vit2020,deit2020}. 
+Most state-of-the-art methods \citep{Le2015TinyIV,vit2020,deit2020} are trained on ultra-large-scale datasets, but the heavy training cost is hardly affordable for researchers with limited computation resources.
+Reducing the training effort for large-scale datasets has become urgent for broader computer vision and other deep-learning applications.
+
+An intuitive solution is to reduce the training sample amount.
+Dataset distillation~\citep{zhaodm, wang2022cafe, cazenavette2022distillation, nguyen2020dataset, nguyen2021dataset} and coreset selection~\citep{har2004coresets,chen2009coresets,tukan2020coresets, shim2021core} respectively synthesize or choose a small but informative dataset from the original large one.
+Although the sample amount is reduced, the distillation and selection algorithms lead to extra costs. Besides, these two methods are also hard to achieve lossless performance. %
+
+The other solution is weighted sampling methods~\citep{peilin2014sgdimportance, csiba2016importance, Johnson2018importance} that aim to improve the sampling frequency of certain samples. It improves the convergence speed,
+but their accelerations are sensitive to models and datasets~\citep{peilin2014sgdimportance}.
+In another way, LARS~\citep{you2017lars} and LAMB~\citep{you2019lamb} enable a super large batch size to improve data parallelism during training to reduce the overall training time. However, more computation units are required and the total training cost is not reduced, which limits the effect under constraint computation resources.
+Most recently, a series of works propose to accelerate training by reducing the total training iterations.
+~\cite{toneva2018empirical,paul2021deep} estimate a score for each sample and accordingly prune less informative 
+samples. Since those pruned samples are never added back during training, we refer to these methods as static pruning methods. However, these methods usually need several trials to estimate more accurate scores, which requires extra $O(MNT)$ overhead ($M$ is the model size, $N$ is the dataset size, and $T$ is the trial number), sometimes even longer than the training time on large-scale datasets (\textit{e.g.} ImageNet-1K as in Tab.~\ref{tab:efficiency_comparison}). Therefore, it is cubersome to apply those static pruning methods~\citep{toneva2018empirical,paul2021deep} on large-scale datasets.
+
+To reduce this heavy overhead, ~\cite{raju2021ddp} dynamically prunes the samples based on easily attainable scores, \eg, loss values, during the training without trials.
+This work sorts the whole dataset by the score in each pruning cycle, which leads to $O(logN)$ per sample time complexity on sorting. It would cost much less on ImageNet-1k than static pruning, while the overhead would still be non-negligible on larger datasets. Meanwhile, directly pruning data may lead to a biased gradient estimation as illustrated in Fig. \ref{fig:1a}, which affects the convergence result. This is a crucial factor that limits their performance, especially under a high pruning ratio (corresponding results in Tab.~\ref{tab:compare_sota}).
+
+\begin{wrapfigure}{t}{0.65\textwidth}
+\centering
+\subfloat[Previous methods~\citep{toneva2018empirical,paul2021deep,raju2021ddp} prune samples via setting some heuristic metrics (\eg EL2N score). 
+The hard pruning operation results in biased gradient expectation (green lines) and sub-optimal training results.
+]{\includegraphics[width = \linewidth]{figures/previous_fig1.pdf}\label{fig:1a}}\hfill
+\subfloat[InfoBatch soft prunes samples with small loss values and rescales the updates. Thereby InfoBatch maintains approximately the same gradient expectation direction (blue lines) as training on the original dataset.]{\includegraphics[width = \linewidth]{figures/infobatch_fig1.pdf}\label{fig:1b}}\hfill
+\caption{Visualization of difference between InfoBatch and EL2N~\citep{paul2021deep}(a static pruning method). 
+InfoBatch achieves lossless acceleration performance, while EL2N encounters a performance drop of 7.2\%. Experiments are conducted with ResNet-18 under the same pruning ratio of 50\% on the CIFAR-100 dataset.
+The semi-transparent triangles represent the variance range of gradient estimation. }\label{fig:motivation}
+\end{wrapfigure}
+
+To tackle these issues, we propose InfoBatch, a novel unbiased dynamic data pruning framework based on the idea of maintaining the same expected total update between training on the pruned and original datasets. We refer to this idea as expectation rescaling for simplicity.
+Specifically, given a dataset, we maintain a score of each sample with its loss value during forward propagation.
+We randomly prune a certain portion of small-score (\textit{i.e.} well-learned) samples in each epoch.
+Different from previous methods where well-learned samples are dropped directly, 
+as shown in Fig.~\ref{fig:1b}, we scale up the gradient of those remaining small-score samples to keep an approximately same gradient expectation as the original dataset. 
+Compared to previous works~\citep{toneva2018empirical,paul2021deep,raju2021ddp}, the gradient expectation bias in optimization between InfoBatch and standard training is reduced, as illustrated in Fig.~\ref{fig:1a} and ~\ref{fig:1b}.
+In order to further improve the performance stability and reduce the variance during convergence, full dataset is used for training in the last few epochs.
+
+InfoBatch is compatible with various deep-learning tasks. 
+In this work, we investigate its effect on classification, semantic segmentation, vision pertaining, and language model instruction finetuning.
+With the same hyperparameters in most cases, InfoBatch achieves lossless training performances with 20\% $\sim$ 40\% less overall cost across various tasks and architectures. 
+It helps mitigate the heavy computation cost for training on ultra-large-scale datasets.
+The time complexity of InfoBatch is $O(1)$ per sample, which further accelerates from previous $O(logN)$ dynamic pruning methods, costing only seconds to reduce hours of training on datasets like ImageNet-1K. 
+    
+
+
+
+    
+
+    
+    
+
+
+\section{How We Can Achieve Lossless Result}
+
+
+
+\subsection{Preliminaries}
+\textbf{Static Pruning.} Given a dataset $\mathcal{D} = \{z_i\}|_{i=1}^{|\mathcal{D}|} = \{(x_i, y_i)\}|_{i=1}^{|\mathcal{D}|}$, a score $\mathcal{H}(z)$ can be defined for each sample. For the pruning process, samples are discarded by a pruning probability $\mathcal{P}$ defined on top of $\mathcal{H}$. Static pruning directly discards all samples satisfying a certain condition before training, resulting in $\mathcal{P}(z;\mathcal{H})\in\{0,1\}$. For examples, \cite{toneva2018empirical} defines:
+\begin{equation}
+    \mathcal{P}(z;\mathcal{H})=\mathds{1}(\mathcal{H}(z)<\bar{\mathcal{H}}),
+\end{equation}
+where $\bar{\mathcal{H}}$ is a threshold and $\mathds{1}(\cdot)$ is indicator function. A subset $\mathcal{S}$ is formed by pruning samples with $\mathcal{P}(z;\mathcal{H})=1$.
+Fig.~\ref{fig:1a} briefly illustrates the whole process of static pruning.
+
+\textbf{Dynamic Pruning.} For dynamic pruning, pruning is done across training, and the score $\mathcal{H}_t$ can change along training steps, where $t$ denotes the temporal status. The probability is step-dependent:
+\begin{equation}
+    \mathcal{P}_t(z) = \mathcal{P}(z;\mathcal{H}_t), \label{eq:dyna}
+\end{equation}
+and forms a dynamically pruned dataset $\mathcal{S}_{t}$. Compared to static pruning, dynamic pruning has access to all the original data during training. Thus the gradient expectation bias should be much smaller than static pruning. 
+However, such a scheme still has the following limitations: i). As claimed in~\cite{raju2021ddp}, low-score samples of different $t$ during the training could easily overlap. Directly pruning them every time may still lead to a bias (see in Fig.~\ref{fig:1a}). ii). Pruning samples leads to reduced number of gradient updates. Under the premise of saving training cost, existing dynamic pruning methods~\cite{raju2021ddp} hardly achieve lossless results compared to training on the original dataset.
+iii). Scoring and sorting operations in dynamic pruning are conducted repeatedly, the overhead of which is still non-negligible on large-scale datasets.
+
+
+\begin{figure*}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/pipeline.pdf}
+\caption{Illustration of the proposed \textit{InfoBatch} framework. InfoBatch mainly consists of two operations, named soft pruning and expectation rescaling. $\bar{\mathcal{H}}_{t}$ denotes the adaptive thresholds of scores of samples. Soft pruning randomly prunes some samples from $\mathcal{D}_1$ with relatively small scores. For remaining samples from $\mathcal{D}_1$, expectation rescaling scales up the losses to keep the approximately same gradient expectation as the original dataset.} 
+\label{fig:pipeline}
+\end{figure*}
+\subsection{Overview of InfoBatch}
+Based on the above observation and analysis, we propose InfoBatch, a novel framework for achieving lossless training acceleration based on unbiased dynamic data pruning. 
+As illustrated in Fig.~\ref{fig:pipeline}, a score is maintained for each sample with its loss value during forward propagation. The mean of these values are set as the pruning threshold. 
+A certain portion of small-score samples is accordingly pruned in each epoch. 
+Then, to obtain the same expectation of gradient as the original dataset in each epoch, the gradients of the remaining small-score samples are scaled up. 
+By doing this, compared to previous static and dynamic pruning methods,
+ InfoBatch mitigates the performance differences between training on the pruned dataset and the original dataset. 
+In order to further reduce the performance variance, we train with the full dataset in the last few epochs.
+\subsection{Unbiased Prune and Rescale}
+\label{theoritical_analysis}
+InfoBatch adopts the dynamic pruning process as in Eqn.~\ref{eq:dyna}.
+We first define its pruning policy $\mathcal{P}_t$. 
+Previous methods using a deterministic pruning operation could cause bias as discussed above. In contrast, InfoBatch introduces randomness into the pruning process to solve this.
+Given a dataset $\mathcal{D}$, in $t$-th epoch, a pruning probability is assigned to each sample based on its score. Such a soft pruning policy is formulated as:
+\begin{equation}
+    \mathcal{P}_{t}(z)= \begin{cases}
+        r,\quad &\mathcal{H}_{t}(z) < \bar{\mathcal{H}_{t}} \\
+        0,\quad &\mathcal{H}_{t}(z) \geq \bar{\mathcal{H}_{t}}
+        \end{cases},
+\end{equation}
+where $\bar{\mathcal{H}_{t}}$ is the mean value of all the scores $\mathcal{H}_{t}$ and $r \in (0,1)$ is a predefined hyper-parameter as the pruning probability. This new prune policy has the following benefits: i). Soft pruning allows each small-score sample to be utilized for training, which reduces the bias caused by hard pruning in previous dynamic pruning methods.  
+ii). The proposed strategy is based on the comparison with $\bar{\mathcal{H}_{t}}$, with no requirement to sort the whole training samples, which reduces the time complexity from $O(logN)$ to $O(1)$. It indicates that InfoBatch could be more efficient on large-scale datasets.
+
+Then, we utilize loss values $\mathcal{L}(z)$ of each sample as the corresponding score based on the following two reasons: i). loss values can be obtained without extra cost, ii). loss values reflect the learning status of samples~\citep{cilimkovic2015neural}. Specifically, before the $t$-th ($t>0$) epoch, we utilize the soft pruning policy to prune samples based on their scores. 
+Then for the pruned samples, their scores remain unmodified as previous. For the remaining samples, their scores are updated by the losses in the current epoch. Mathematically, $\mathcal{H}_{t}(z)$ would be updated by the latest losses to $\mathcal{H}_{t+1}(z)$ by:
+\begin{equation}
+    \mathcal{H}_{t+1}(z)= \begin{cases}
+        \mathcal{H}_{t}(z),\quad & z \in \mathcal{D}\backslash \mathcal{S}_{t} \\
+        \mathcal{L}(z),\quad & z \in \mathcal{S}_{t}
+        \end{cases}.
+\end{equation}
+Note that, for the first epoch, we initialize the scores with $\{1\}$ provided no previous loss. 
+
+There are several benefits of the soft pruning policy, yet it still cannot avoid the influence caused by the reduced number of gradient updates. To address this issue, we scale up the gradients of the remaining samples. Specifically, given a remaining sample with score $\mathcal{H}(z)<\bar{\mathcal{H}}_{t}$, whose corresponding pruning probability is $r$, its gradient is scaled to $1/(1-r)$ times of original. 
+For the samples with scores no less than $\bar{\mathcal{H}}_{t}$, the loss is not modified. 
+Thereby the gradient update expectation is approximately equal to training on the original dataset.
+Besides, as the rescaling is operated on small-score samples, it further refines the direction of gradient update expectation. 
+We provide the following theoretical analysis to demonstrate the necessity and advantages of expectation rescaling. 
+
+\textbf{Theoretical Analysis.} 
+We can interpret the training objective as minimizing empirical risk $\mathcal{L}$. Assuming all samples $z$ from $\mathcal{D}$ are drawn from continuous
+distribution $\rho(z)$, we can establish the training objective as:
+\begin{equation}
+\begin{split}
+    \argmin_{\theta \in \Theta}  \mathop{\mathbb{E}}_{z\in \mathcal{D}}[\mathcal{L}(z,\theta)] 
+    &= \int_z\mathcal{L}(z,\theta)\rho(z)dz.
+\label{eq:original_obj}
+\end{split}
+\end{equation}
+After applying proposed pruning, we sample $z$ according to normalized $(1-\mathcal{P}_t(z))\rho(z)$. In backpropagation, rescaling loss is equivalent to rescaling the gradient.
+By rescaling the loss of each sample $z$ with a factor $\gamma_t(z)$ ( $\forall z \in \mathcal{D}, \mathcal{P}_t(z)=0\Rightarrow\gamma_t(z)=1$), the training objective on $\mathcal{S}_{t}$ becomes:
+\begin{equation}
+\begin{split}
+    &\argmin_{\theta \in \Theta} \mathop{\mathbb{E}}_{z \in \mathcal{S}_{t}}[\gamma_t(z)\mathcal{L}(z,\theta)] \\
+    = &\argmin_{\theta \in \Theta} 
+    \frac{\int_z(1-\mathcal{P}_{t}(z)){\gamma_t(z)}\mathcal{L}(z,\theta)\rho(z)dz}{\int_z(1-\mathcal{P}_{t}(z))\rho(z)dz}.
+\end{split}
+\label{eq:rescaled_obj}
+\end{equation}
+By setting $\gamma_t(z)=1/(1-\mathcal{P}_{t}(z))$, Eqn.~\ref{eq:rescaled_obj} becomes
+\begin{equation}
+    \argmin_{\theta \in \Theta} \frac{1}{c_t}\int_{z}\mathcal{L}(z,\theta)\rho(z)dz,
+\label{Eqn:simplifed_rescaled}
+\end{equation}
+where $c_t = \mathop{\mathbb{E}}_{z\sim\rho}[1-\mathcal{P}_{t}(z)]=\int_{z}\rho(z)(1-\mathcal{P}_{t}(z))dz$, $c_t \in (0,1)$ is a constant for temporal status $t$. 
+Then the objective in Eqn.~\ref{Eqn:simplifed_rescaled} is a constant-rescaled version of the original objective in Eqn.~\ref{eq:original_obj}.
+Therefore, training on $\mathcal{S}_{t}$ with rescaled factor 
+$\gamma_t(z)$  
+could achieve a similar result as training on the original dataset.
+Furthermore, these operations also leverage the problem of reduced iterations. In real-world applications, considering the dataset as discrete ones, we provide the following analysis:
+\begin{equation}
+    \mathop{\mathbb{E}}\left[\frac{1}{c_t} \right] = \frac{|\mathcal{D}|}{\sum_{z \in \mathcal{D}}(1-\mathcal{P}_t(z))}\simeq\frac{|\mathcal{D}|}{|\mathcal{S}_{t}|}.
+\label{eq:c_value}
+\end{equation}
+In implementation we force a deterministic result of $\frac{1}{c_t}=\frac{|\mathcal{D}|}{|\mathcal{S}_{t}|}$, so that we can substitute Eqn.~\ref{eq:c_value} into Eqn.~\ref{Eqn:simplifed_rescaled}, and do a differentiation of loss $\mathcal{L}$ over $\theta$ as follows:
+\begin{equation}
+    \mathop{\mathbb{E}}[\nabla_\theta \mathcal{L}(\mathcal{S}_{t})] \simeq \frac{|\mathcal{D}|}{|\mathcal{S}_{t}|}\mathop{\mathbb{E}}[\nabla_\theta \mathcal{L}(\mathcal{D})].
+\end{equation}
+For each epoch, the iteration number, \textit{i.e.} gradient update number becomes $|\mathcal{S}_{t}|/|\mathcal{D}|$ of the original one, while our method scale the expected gradient to $|\mathcal{D}|/|\mathcal{S}_{t}|$. As a result, this would leverage the influence of reduced gradient update number. The approximation will hold when the pruning ratio is not too high and the learning rate is not too big.
+
+\subsection{Annealing}
+Based on the theoretical analysis above, the objectives and updating expectations between InfoBatch and training on the original dataset are approximately the same. However, there still exist minor differences between the optimization on $\mathcal{D}$ and $\mathcal{S}_{t}$. 
+During training, if a sample is pruned in the middle stage, it is still likely to be revisited afterward.
+However, in the last few epochs, the revisiting probability drastically drops, resulting in remaining gradient expectation bias. 
+Therefore, given training epoch $C$, we define a ratio hyper-parameter $\delta\in(0,1)$. 
+The pruning is only conducted in the first $\delta\cdot C$ epochs (in practice, $\delta$ is close to 1 so InfoBatch saves at a reasonable ratio). 
+After that, we train on the full dataset till the end. 
+The corresponding operation can be interpreted as
+\begin{equation}
+    \mathcal{P}_{t}(z)= \begin{cases}
+        r,\quad &\mathcal{H}_{t}(z) < \bar{\mathcal{H}_{t}} 
+        \land t < \delta\cdot C \\
+        0,\quad &\mathcal{H}_{t}(z) \geq \bar{\mathcal{H}}_{t} 
+        \lor t \geq \delta\cdot C
+        \end{cases}.
+\end{equation}
+Combining the above components, InfoBatch achieves lossless training performance with fewer iterations compared with training on the original dataset.
+
+
+
+\section{Experiments}
+
+\subsection{Datasets and Implementation Details}
+We verify the effectiveness of our method on multiple popular datasets, including CIFAR-10/100 \citep{cifar10,cifar100}, ImageNet-1K \citep{deng2009imagenet}, ADE20K \citep{zhou2017scene} and FFHQ~\citep{karras2019stylebased}. 
+\textbf{CIFAR-10/100}. Two CIFAR datasets consist of $32\times 32$ size colored natural images divided into 10 and 100 categories, respectively. Both use 50,000 images for training and 10,000 images for testing.
+
+\textbf{ImageNet-1K} is the subset of the ImageNet-21k dataset with 1,000 categories. It contains 1,281,167 training images and 50,000 validation images. 
+
+\textbf{ADE20K} is a popular semantic segmentation benchmark. It contains more than 20,000 images with pixel-level annotations of 150 semantic categories. 
+
+\textbf{FFHQ} is a high-quality image dataset of human faces, contains 70,000 images.
+
+\textbf{Implementation Details.} 
+For InfoBatch, default value $r=0.5$ and $\delta=0.875$ are used if not specified. 
+For classification tasks, we train ResNet18 and ResNet-50\citep{he2016deep}, ViT-Base(MAE)~\citep{he2021masked} and Swin-Tiny~\citep{liu2021Swin} for evaluation. On CIFAR-10/100 and ImageNet-1K, all models are trained with OneCycle scheduler (cosine annealing) \citep{smith2017onecycle, lo2016cosine} using default setting and SGD/LARS optimizer \citep{you2017lars} with momentum 0.9, weight decay 5e-4.
+All images are augmented with commonly adopted transformations, \textit{i.e.} normalization, random crop, and horizontal flop if not stated otherwise. The implementation is based on PyTorch \citep{NEURIPS2019_9015} and Timm~\citep{wightman2021timm}. On CIFAR100, ImageNet-1K and ADE20K, a more aggressive r (0.75) is utilized for smaller loss samples (20\%).
+For the semantic segmentation task, we conduct experiments on ADE20K~\citep{zhou2017scene}. The chosen network is UperNet~\citep{xiao2018upernet} with backbone ResNet-50. We follow the default configuration of the mmsegmentation~\citep{mmseg2020}. 
+
+\subsection{Comparisons with SOTA methods}
+\input{tables/comparisonsota}
+\textbf{Performance Comparisons.}
+We compare our proposed InfoBatch with static and dynamic data pruning methods in Tab.~\ref{tab:compare_sota} on CIFAR-10, CIFAR-100. 
+In the first part, we introduce static pruning methods, whose simplest baseline is random selection before training.
+Influence~\citep{koh2017understanding} and EL2N~\citep{paul2021deep} are two classical static pruning methods that prune samples based on Influence-score and EL2N-score.
+DP~\citep{yang2023dataset} conducts pruning with consideration of generalization.
+To make a wider comparison, we include 10 coreset selection methods. These methods
+select a coreset of data via their predefined score function or heuristic knowledge.
+Then, we introduce 3 dynamic pruning methods in the second part. Following~\citep{raju2021ddp}, we also construct a dynamic pruning baseline, termed as Random$^*$, which conducts random selection in each epoch. 
+Compared to Random operation in Tab.~\ref{tab:compare_sota}, the diversity of training samples in Random$^*$ is much better than Random. Therefore, as shown in Tab.~\ref{tab:compare_sota}, Random$^*$ usually performs better than Random and many static methods. $\epsilon$-greedy~\citep{raju2021ddp} is inspired by reinforcement learning.
+UCB~\citep{raju2021ddp} proposes to prune samples using the upper confidence bound of loss.
+
+
+Based on the comparisons in Tab.~\ref{tab:compare_sota}, we have the following observations: 1). At 30\% pruning ratio, only InfoBatch achieves lossless performances on both datasets. Other methods only obtain near-lossless results on CIFAR-10 dataset while encountering large performance drops on CIFAR-100. 2). As the pruning ratio increases, InfoBatch continuously outperforms other methods by an even larger accuracy margin.
+It validates the effectiveness of the proposed unbiased dynamic pruning strategy. 
+
+\textbf{Efficiency Comparisons.}
+In addition to the performance comparison, we compare the efficiency between Infobatch and other methods. Although the motivations of these methods are diverse, their main goal is to save training costs. Thus, we report training time, extra cost, and total GPU hours of these methods in Tab.~\ref{tab:efficiency_comparison}.
+Under the same computational condition, static pruning methods GC and EL2N require extra preprocessing time even longer than the actual training run to process the pruning. Previous state-of-the-art dynamic data pruning method UCB~\citep{raju2021ddp} shows far better efficiency in the pruning process, while still not comparable to InfoBatch.
+InfoBatch further reduces the extra time cost to $1/10$ of UCB, taking only 10 seconds for 90 epochs of pruning. 
+More importantly, InfoBatch achieves lossless performance on ImageNet-1K at the pruning ratio of 40\%.
+
+\input{tables/comparison_process_storage}
+\subsection{ImageNet-1K Results}
+As InfoBatch is proposed to scale data pruning to large-scale datasets, we train ResNet-50, ViT-Base(MAE)~\citep{he2021masked}, Swin-Tiny~\citep{liu2021Swin} on ImageNet-1K. The results are shown in Table~\ref{tab:IN1K_more}. Evidently, InfoBatch is able to achieve lossless performance on both CNN-based networks and Transformer-based networks with substantial cost savings. The experimental result with Timm~\citep{wightman2021timm} indicates that InfoBatch is compatible with existing acceleration methods like mixed-precision training and augmentation/regularization methods including Random Erase, MixUp, CutMix~\citep{zhong2017random,zhang2018mixup,yun2019cutmix} etc. 
+
+The overhead of InfoBatch is visualized in Fig.~\ref{fig:overhead_in1k}. Results are suggesting that InfoBatch can greatly improve training costs on various computer vision tasks using large-scale datasets like ImageNet-1K, with a negligible overhead compared to its acceleration.
+
+\input{tables/imagenet-1k-results}
+\subsection{Ablation Experiments}
+We perform extensive ablation experiments to illustrate the characteristics of InfoBatch. If not stated, the experiments are conducted on CIFAR-100 by default.
+
+\textbf{Evaluating the components of InfoBatch. }
+We design an ablation study to investigate the soft pruning policy, expectation rescaling, and annealing operations in Tab.~\ref{tab:abl_res_anneal}. 
+Dynamic random pruning, serving as the baseline method, fails to achieve lossless performance on all the architectures. 
+It can be explained that due to pruning, the gradient update number is reduced compared to training on the original dataset.
+Similarly, only applying soft pruning obtains marginally better results than dynamic random pruning as expected.
+In contrast, the proposed rescale and anneal operations are consistently complementary and achieve lossless performances in both settings, which aligns with our theoretical analysis.
+Moreover, rescaling obtains better correction to the gradient expectation bias on these two tasks than annealing. Using rescaling alone may sometimes achieve lossless results but with higher performance variance and lower mean performance; annealing improves the stability of rescaling. Annealing alone doesn't improve performance significantly.
+\textbf{Exploring where to prune.}
+In default setting, samples with $\mathcal{H}_t(z)<\Bar{\mathcal{H}_t}$ are pruned. Other possible rules are to prune samples with $\mathcal{H}_t(z)>\Bar{\mathcal{H}_t}$ or totally random. We compare the performance and cost of these different prune strategies in Tab.~\ref{tab:abl_prune_where}. 
+Compared to training on the original dataset, the two other strategies also achieve near-lossless performance, while the default pruning condition is better. 
+The ablation results align with the theoretical analysis that 1. rescaling and annealing can contribute to keeping the performance; 2. pruning low-loss samples is better because it risks less of potential scaling limit.
+
+\textbf{Evaluation of ratio $r$.}
+We define $r$ as the probability to prune a sample $x$ when $\mathcal{H}_t(z)<\Bar{\mathcal{H}}_t$. In Fig.~\ref{fig:sensitive_of_r}, we evaluate different pruning ratios for ResNet-18 (R-18) and ResNet-50 (R-50) on CIFAR-100. 
+Setting $r\leq 0.5$ obtains lossless performance on both architectures, which indicates InfoBatch is relatively robust on hyper-parameter $r$. 
+Another finding is that further increase $r(\geq 0.6)$ leads to degraded performances. This can primarily be attributed to the increased variance and reduced steps when too many samples are pruned.
+Considering the efficiency and performance, we set $r=0.5$ by default. Another benefit is that this would not affect float number precision.
+\begin{wrapfigure}[13]{r}{0.5\textwidth}
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+      {\includegraphics[width=1\linewidth,height=0.82\linewidth]{figures/r_ratio.pdf}}
+      \caption{Evaluation of $r$.}
+      \label{fig:sensitive_of_r}
+    \end{subfigure}
+\begin{subfigure}{0.48\linewidth}
+    \includegraphics[width=1\linewidth,height=0.82\linewidth]{figures/anneal_ratio.pdf}
+    \caption{Evaluation of $\delta$.}
+    \label{fig:sensitive_of_delta}
+    \end{subfigure}
+\caption{Evaluation curves of hyper-parameter $r$ and $\delta$ on R-18 and R-50. Best viewed in color.}
+\end{wrapfigure}
+
+\textbf{Evaluation of $\delta$.} To further reduce the performance variance, we introduced an annealing operation in the last few epochs. $\delta$ is defined as a quantile of given training epoch number $C$. We evaluate it from 0.75 to 0.95 and report the performances in Fig.~\ref{fig:sensitive_of_delta}. A larger $\delta$ means fewer annealing epochs, leaving more performance variance, which may result in degraded average performance.
+When $\delta \leq 0.875$, lossless performance can be achieved with the largest overall cost saving. Limited tuning effort is required to obtain lossless results.
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+\begin{subfigure}{0.245\textwidth}
+    \includegraphics[width=1\linewidth,height=0.77\linewidth]{figures/ade20k_miou_new.pdf}
+    \caption{mIoU on ADE20K.}
+    \label{fig:seg_acc}
+    \end{subfigure}
+    \begin{subfigure}{0.245\textwidth}
+      {\includegraphics[width=1\linewidth,height=0.76\linewidth]{figures/infobatch_iamgenet_barplot_cropped.pdf}}
+      \caption{Overhead and savings.}
+      \label{fig:overhead_in1k}
+    \end{subfigure}
+\caption{
+(a)With 60\% iteration and overall cost, InfoBatch achieves lossless performance on ADE20K semantic segmentation.
+(b) InfoBatch saves the overall cost by more than 25\% on ImageNet-1K.}
+\end{wrapfigure}
+\subsection{Generalization Evaluation}
+\input{tables/cross_arch_optimizer}
+\textbf{Cross-architecture robustness evaluation.} 
+InfoBatch is not correlated to specific model architectures, thereby it is a model-agnostic framework.
+Beyond reported ViT-based results in Tab.~\ref{tab:IN1K_more}, we train R-18 and R-50 on CIFAR-10, CIFAR-100, and ImageNet-1K. As illustrated in Tab.~\ref{tab:cross_arch}, we achieve lossless training performances under all settings, which indicates strong generality of InfoBatch. We also report the overall cost saving in Tab.~\ref{tab:cross_arch}. One can observe that InfoBatch can save 26\%$~\sim$40\% overall cost on training these datasets. 
+
+    
+
+
+\textbf{Cross-optimizer robustness evaluation.} 
+In the deep-learning area, there are various optimizers ~\citep{bottou1991stochastic,kingma2014adam,loshchilov2019decoupled,you2017lars,you2019lamb} that are broadly adopted. 
+We verify InfoBatch's robustness across these optimizers. As shown in Tab.~\ref{tab:optimizer_robust}, InfoBatch achieves lossless performance with four popular optimizers, and the overall cost saving is stable across optimizers. Specifically, we apply InfoBatch to large-batch training optimizers LARS and LAMB. As InfoBatch accelerates in the data dimension, InfoBatch further speeds up training by 1.67 times without extra cost or performance drop. It shows that InfoBatch has the potential to be combined with acceleration methods in other dimensions.
+
+\begin{wraptable}[5]{r}{0.22\textwidth}
+\parbox{.22\textwidth}{
+    \centering
+    \caption{Diffusion.}
+    \tiny
+    \begin{adjustbox}{max width=\linewidth}
+     \begin{tabular}{c c}
+     \toprule
+         Method  & FID \\
+         \midrule 
+         Original & 7.83 \\
+        InfoBatch & 7.70 \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \label{tab:diffusion}
+    }
+\end{wraptable}
+\textbf{Cross-task robustness evaluation.} To verify the generality of InfoBatch on different tasks other than classification, we apply InfoBatch to the semantic segmentation task. We train UperNet on ADE20K and report the mIoU curves in Fig.~\ref{fig:seg_acc}.  Our implementation is based on mmsegmentation~\citep{mmseg2020}. 
+InfoBatch uses 60\% of original iterations to achieve lossless performance (mIoU: InfoBatch 41.12\%, original 40.7\%). We further apply InfoBatch in the training of Latent Diffusion~\citep{rombach2021highresolution} on FFHQ as demonstrated in Tab.
+It saves the pretraining cost of Latent Diffusion by $\sim$27\%, and the image quality is not affected. The result indicates InfoBatch's generality across segmentation and generation tasks.
+
+\input{tables/instruction}
+Beyond computer vision tasks, InfoBatch can also be applied to instruction fine-tuning. We utilize InfoBatch to accelerate LLaMA~\citep{touvron2023llama} instruction fine-tuning with Alpaca~\citep{alpaca}. To further save training costs, we utilize dataset quantization~\citep{zhou2023dataset} to select a subset of instructions. The results are demonstrated in Tab.~\ref{tab:instruct}. It is shown that InfoBatch is able to accelerate NLP instruction finetuning tasks and is compatible with static dataset compression methods.
+
+
+
+
+
+    
+
+
+
+\section{Related Works}
+
+\textbf{Static Data Pruning.} The motivation for static data pruning methods
+is to utilize fewer samples while achieving comparable results as the original dataset. Almost all the methods are based on predefined or heuristic metrics. These metrics can be roughly divided into the following categories: geometry-based~\citep{agarwal2020contextual, sener2018active}, uncertainty-based~\citep{coleman2019selection}, error-based~\citep{toneva2018empirical, paul2021deep}, decision-boundary-based~\citep{ducoffe2018adversarial},  gradient-matching~\citep{mirzasoleiman2020coresets, pmlr-v139-killamsetty21a}, bilevel optimization~\citep{killamsetty2021glister} and submodularity-based methods~\citep{iyer2021submodular}.
+Contextual Diversity (CD)~\citep{agarwal2020contextual}, Herding~\citep{welling2009herding}, and k-Center remove the redundant samples based on their similarity to the rest of the data. 
+Cal~\citep{DBLP:journals/corr/abs-2109-03764} and Deepfool~\citep{ducoffe2018adversarial} select samples based on their difficulties for learning.
+FL~\citep{iyer2021submodular} and Graph Cut (GC)~\citep{iyer2021submodular} consider the diversity and information simultaneously by maximizing the submodular function. Recently GraNd and EL2N~\citep{paul2021deep} propose to estimate sample importance with gradient norm and error-L2-norm.
+The main limitation of these works can be summarized as 1). The predefined or heuristic metrics hardly work well across architectures or datasets. 2). The extra cost of these methods is not negligible. As illustrated in Tab.~\ref{tab:efficiency_comparison}, the overhead of EL2N is even longer than training time on ImageNet-1K.
+
+ \textbf{Dynamic data pruning. }
+ Dynamic data pruning aims to save the training cost by reducing the number of iterations for training. The pruning process is conducted during training and sample information can be obtained from current training. ~\citep{raju2021ddp} proposes two dynamic pruning methods called UCB and $\epsilon$-greedy. An uncertainty value is defined and the estimated moving average is calculated. Once for every pruning period, $\epsilon$-greedy/UCB is used to select a given fraction of the samples with the highest scores and then trains on these samples during the period. Under this dynamic pruning setting, it achieves a favorable performance compared to static pruning methods on CIFAR-10/100\citep{cifar10,cifar100}, while saving the overhead of assessing samples and pruning before training. \cite{he2023largescale} share a similar framework, while taking the dynamic uncertainty as score.
+ Yet the lossless pruning ratio of a new dataset is still unknown in advance.
+ Both the two works adopt sorting operation (cost $O(logN)$ per sample on dataset size N) for obtaining samples with the highest scores, which could be a non-negligible overhead for extra-large datasets (e.g. ImageNet-1K has 1.28 million pictures) as it is called multiple times. 
+ 
+
+ 
+ 
+
+
+\section{Conclusion}
+
+We present $\textbf{\textit{InfoBatch}}$, a novel framework for lossless training acceleration by unbiased dynamic data pruning. InfoBatch shows its strong robustness on various tasks and datasets, achieving lossless training acceleration on classification, segmentation, vision pertaining, and instruction finetuning. 
+InfoBatch reduces the extra overhead by at least 10 times compared to previous state-of-the-art methods, thus being practical for real-world applications. 
+We provide extensive experiments and theoretical analysis in this paper and hope it can help the following research in this area.
+
+\textbf{Limitations and future works.} The current version of InfoBatch relies on multi-epoch training schemes. However, GPT-3~\citep{brown2020language} and ViT-22B~\citep{dehghani2023scaling} usually train with limited epochs to avoid remembering the knowledge from the training dataset. InfoBatch may need further adaptation on these tasks. We are going to explore new strategies for training with ~\citep{brown2020language,dehghani2023scaling} in the future.
+
+\clearpage
+
+
+
+

@@ -1,0 +1,248 @@
+\title{Demystifying Embedding Spaces using Large Language Models}
+
+\begin{abstract}
+Embeddings have become a pivotal means to represent complex, multi-faceted information about entities, concepts, and relationships in a condensed and useful format. Nevertheless, they often preclude direct interpretation. While downstream tasks make use of these compressed representations, meaningful interpretation usually requires visualization using dimensionality reduction or specialized machine learning interpretability methods. This paper addresses the challenge of making such embeddings more interpretable and broadly useful, by employing \acp{LLM} to directly interact with embeddings -- transforming abstract vectors into understandable narratives. By injecting embeddings into \acp{LLM}, we enable querying and exploration of complex embedding data. We demonstrate our approach on a variety of diverse tasks, including: enhancing concept activation vectors (CAVs), communicating novel embedded entities, and decoding user preferences in recommender systems. Our work couples the immense information potential of embeddings with the interpretative power of \acp{LLM}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The success of deep learning has brought forth a paradigm shift in knowledge representation through the concept of \emph{embeddings}---dense vector representations that capture high-dimensional information about entities, concepts, or relationships in a compact and useful format. Embeddings are ubiquitous, finding application in natural language processing \citep{mikolov2013distributed,devlin2018bert}, recommender systems \citep{rendle2010factorization}, 
+protein sequence modeling \citep{rives2021biological}, and more. These embeddings are invaluable, capturing nuanced relationships and semantic structure in data which traditional \ac{ML} approaches often miss. Nevertheless, understanding these abstract representations remains challenging. 
+
+By design, the structure and underlying information carried by an embedding is heavily adapted to the
+idiosyncrasies of the downstream task, posing a substantial challenge to its interpretation and manipulation. Previous work on \ac{ML} interpretability offers various task-independent means to interpret embeddings, including dimensionality reduction techniques (e.g., \mbox{\emph{t-SNE}} \citep{van2008visualizing}, \emph{UMAP} \citep{mcinnes2018umap}) or \emph{concept activation vectors (CAVs)} \citep{kimTCAV:icml18}. While very useful, these techniques are fairly narrow in scope.
+
+As an alternative to such interpretability methods, suppose one could engage with embeddings using natural language to query information not directly expressed by the name or description of the underlying entity/concept. Perhaps one could even extract information from the embedding representations of \emph{non-existent or hypothetical} entities. Consider, for instance, an embedding space representing items from an online commerce site, trained using a large corpus of user ratings or purchases, reviews, and other multi-faceted data sources. The embedding representation of an item may \emph{implicitly} embody intricate details about its quality, usability, design, customer satisfaction, etc. Moreover, suppose one wanted to understand the properties of a \emph{hypothetical} item at a specific point in the embedding space, say, if we predicted a potential market for such an item. Since no such item (or description) exists, asking a conventional language model to describe this embedding point would be futile. However, a \acf{LLM} trained to \emph{interpret the embedding representation itself} could handle such a task (see \Cref{fig: interpolations} for an illustration).
+This paper introduces a novel framework to interpret \emph{domain embeddings}\footnote{We use the term ``domain embedding" to differentiate the external embeddings to be interpreted from those captured by an \ac{LLM} at various layers of the network.}
+by leveraging the power of \acp{LLM} \citep{devlin2018bert,liu2021gpt,anil2023PaLM}. Our method seamlessly introduces embeddings into \acp{LLM} by training \emph{adapter layers} to map domain embedding vectors into the token-level embedding space of an \ac{LLM}, which in turn allows one to treat these vectors as token-level encodings of the entities or concepts they represent. We train an \ac{LLM} on a collection of tasks designed to facilitate the robust, generalizable interpretation of vectors in the domain embedding space. Our approach allows us to engage in a direct ``dialogue'' about these vectors, to query the \ac{LLM} with intricate embedding data, and tease out narratives and insights from these dense vectors. 
+Our contributions are as follows. First, we formulate the problem of interpreting embeddings using \acp{LLM}. We then propose the \emph{\ac{ELM}}, a novel language model framework which, using trained adapters, can accept domain embedding vectors as parts of its textual input sequence to allow interpretation of continuous domain embeddings using natural language. We also develop a training methodology to fine-tune pretrained \acp{LLM} for domain-embedding interpretation. Finally, we test \ac{ELM} by constructing 25 training tasks to allow interpretation of movie and user embeddings derived from the MovieLens 25M dataset \citep{harper2015MovieLens}. We demonstrate our trained \ac{ELM} on a variety of problems, including: generalizing CAVs as an interpretability method, describing hypothetical embedded entities, and interpreting user embeddings in a recommender systems by generating preference profiles. Our work bridges the gap between the rich data representations of domain embeddings and the expressive capabilities of \acp{LLM}. 
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.91\linewidth]{figures/interpolations.pdf}
+    \caption{\footnotesize Decoded outputs of our model, \ac{ELM}, for hypothetical movie embeddings. \color{black} Text in blue and red correspond to the textual and domain embedding portions of the prompt to ELM. Text in black corresponds to the output of ELM. }
+    \label{fig: interpolations}
+\end{figure}
+
+
+
+
+
+\section{Integrating Domain Embeddings with Large Language Models}
+
+\label{section: embd LLM}
+We assume a \emph{domain embedding} $E_D: \sV \rightarrow \gW$ which maps entities in some vocabulary $\sV$ (e.g., a set of known users and items) into a latent space $\gW \subseteq \sR^n$, equipped with a distance metric $d: \gW\times \gW \mapsto \sR_+$. The embedding vector $E_D(v)$ of any $v\in \sV$ is typically a representation used in some downstream task, and is trained to encompass the latent features of $v$ necessary for this task. For example, in a recommender system, \ac{CF} \citep{salakhutdinov-mnih:nips07,koren_advances_CF:recsys_handbook2011} is often used to generate embedding vectors of users and items s.t.\ the dot product (or cosine similarity) of $E_D(u)$ and $E_D(i)$ is predictive of user $u$'s affinity for item $i$. In image classification, $E_D$ might generate embedding representations useful for object detection \citep{zou2023object}, while in search/information retrieval, $E_D$ might embed both queries and documents in $\gW$ to measure a document's relevance to a query \citep{zuccon2015integrating,luan21}. 
+
+We assume a pretrained LLM, $\gM: \gX^H \mapsto \gX^H$, which maps (length $H$) sequences of language tokens $x \in \gX$ into another. Modern LLMs are composed of two parts,
+$\gM = (E_0^H, M_0)$. The first part is \emph{an embedding layer}, $E_0: \gX \mapsto \gZ$ (not to be confused with the domain embeddings $E_D$), which maps tokens $x \in \gX$ to their respective \emph{token embedding} representations $z \in \gZ$ (as distinct from the domain embedding). The second part is the \emph{the dense model}, $M_0: \gZ^H \mapsto \gX^H$, which maps a sequence of token embeddings to a sequence of tokens \footnote{In practice, the dense model outputs logits over tokens, which are sampled by a decoding procedure.} (e.g., transformer, \citet{vaswani2017attention}).
+
+
+
+We now define the \emph{\acf{ELM}}, a framework which allows one to train a model using textual prompts mixed with continuous domain embedding vectors (see \Cref{fig: embd LLM} for an illustration). \ac{ELM} incorporates domain embedding vectors using \emph{adapter layers} to interface with a text-only \ac{LLM}. We note that we are not learning $E_D$ itself, but rather wish to interpret it. In other words, given an embedding vector $E_D(v)$, we wish to train an \ac{LLM} to meaningfully engage in discourse about the entity represented by $E_D(v)$ -- even for a hypothetical entity $v$.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/elm_framework.pdf}
+    \caption{\footnotesize \color{black}{We train ELM using $n$ tasks that incorporate embeddings as tokens in language. Specifically, to incorporate the domain embedding space $\gW$, we enhance the pretrained LLM $\gM$ with an adapter model $E_A: \gW \mapsto \gZ$ to create a new language model $\gM_{\text{ELM}}$, ensuring tokens and embeddings are mapped to a shared space. }\color{black} While $E_0$ projects language tokens to $\gZ$, the adapter $E_A$ learns to project domain embedding vectors $E_D$ from embedding space $\gW$ to the same space, $\gZ$. The resulting sequence is input to a pretrained language model $M_0$, which can be further fine-tuned (see \Cref{section: embd LLM}).}
+    \label{fig: embd LLM}
+\end{figure}
+\begin{table}[t!]
+\centering
+\color{black}
+\caption{\footnotesize Glossary}
+\label{table: test results}
+\scriptsize
+\begin{tabular}{l|l|l|l}
+\toprule
+$\gW$ & Domain embedding space & $d$ & Domain space metric \\
+$\gZ$ & Token (language) embedding space  & $\gX$ & Token space \\
+$E_0$ & LLM embedding  & $\gM$ & Pretrained LLM \\
+$E_A$ & Adapter ($\gW \mapsto \gZ$)  & $\gM_{\text{ELM}}$ & Embedding Language Model \\
+$E_D$ & Domain embedding  & $M_0$ & LLM excluding input embedding layer \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Problem Formulation.}
+We assume access to a domain embedding space $(\gW, d)$, and to pairs $(v, E_D(v))$ for training as explained below. Note that we do not assume access to the mapping $E_D$ (except for empirical evaluation). Furthermore, our technique is agnostic to the type and source of~$(\gW, d)$.
+Finally, we assume access to a pretrained text-only \ac{LLM} $\gM$.
+
+To interpret embedding vectors, we require some semantic information about the entities to which they correspond. To this end, let $\gT$ be a set of \emph{tasks}, where each task $t \in \gT$ is specified by some mapping from joint input sequences $s \in \brk*{\gX \cup \gW}^H$ to distributions over output sequences $o \in \gX^H$.\footnote{More generally, we can define output sequences in $\brk*{\gX \cup \gW}^H$ as well; we leave this for future work.} Intuitively, a task $t$ captures some form of semantic information about the entity represented by $w\in\gW$, e.g., the plot of a movie, the preferences of a user, etc. The set of tasks $\gT$ should be diverse enough to allow the \ac{ELM} to extract semantic information from $\gW$ to support interpretation, and ideally support generalization to related tasks.
+For any $t\in\gT$, we assume access to a set of training instances $(s,o)$ drawn from some distribution $P_t$ ($t$ itself may be drawn from $P_{\gT}$). For example, a task to compare two movies might use token/domain-embedding input sequences as shown in \Cref{fig: embd LLM}, and output a textual comparison of the two movies represented by the input embeddings. In general, this does not require knowledge of the item $v$ which corresponds to the input embedding vector $E_D(v)$, but in practice, one will use $v$ to form target output training sequences.
+\textbf{Architecture.}
+To account for the embedding space $\gW$, we augment the pretrained $\gM = (E_0^H, M_0)$ with an adapter model $E_A: \gW \mapsto \gZ$ to create a new language model $\gM_{\text{ELM}} = ((E_0 \times E_A)^H, M_0)$. Here, $E_0$ is the usual embedding layer, which maps tokens representing textual inputs to $\gZ$, whereas $E_A$ maps embeddings from the latent metric space $(\gW, d)$ to $\gZ$. Importantly, $E_0$ and $E_A$ map tokens and embeddings (respectively) to a common space\footnote{More expressive
+adapters that map vectors in $\gW$ to length $\ell \geq 1$ sequences
+are left for future work.} (see \Cref{fig: embd LLM}).
+
+\textbf{Training Procedure.}
+Given a downstream loss function $\gL$, we can differentially optimize the model $\gM_{\text{ELM}}^\theta$ with parameters $\theta$ over the tasks in $\gT$ by solving  $\arg\min_{\theta} \expect*{s, o \sim P_t; t\sim P_{\gT}}{\gL_\theta \brk*{\gM_{\text{ELM}}\brk*{s, o}}}$.
+
+Training continuous prompts poses challenges due to constraints over the pretrained token embeddings, which may result in convergence to local minima \citep{liu2021gpt}. Intuitively, as the pretrained embedding layer $E_0$ readily maps to language space, the newly initialized embedding layer $E_A$ may require numerous updates to map to a similar space. To overcome this, we divide training into two stages. In the first stage, we train the adapter $E_A$ on tasks in $\gT$ by keeping all other parameters~($E_0$, $M_0$) frozen. Since $M_0$ is pretrained, the learned first-stage mapping from $\gW$ to $\gZ$ improves convergence in the next stage. 
+In the second stage, we fine-tune the full model by training all parameters ($E_0$, $M_0$, $E_A$). To increase efficiency, we can update a smaller number of parameters in alternating fashion \citep{hu2021lora}.
+
+
+
+\section{Experiment Design}
+
+\label{section: experimental design}
+
+In this section, we describe the datasets, tasks, and evaluation methods used to train and validate \ac{ELM}. We use the MovieLens 25M dataset \citep{harper2015MovieLens}, which we enrich with textual descriptions by generating a large corpus of text using a PaLM~2-L (Unicorn) \ac{LLM} \citep{anil2023PaLM}. We use two different forms of embeddings: \emph{behavioral embeddings} and \emph{semantic embeddings}, which we describe below. We also adopt various evaluation techniques for assessing the quality of \ac{ELM}'s outputs on test data, including qualitative human evaluations and specific consistency metrics.
+
+\subsection{Data}
+\label{section: data}
+
+The MovieLens 25M dataset contains 25 million ratings (1 to 5) of 62,423 movies and 162,541 users.
+
+\textbf{Domain Embeddings.} We create embeddings for both users and movies in the MovieLens dataset. We consider two types of embeddings. The first are \emph{behavioral embeddings}, trained based solely on user ratings of movies. More generally such models can reflect any behavioral interaction between users and items, but use no direct semantic information. To train behavioral embeddings, we use \emph{matrix factorization (MF)} computed using \emph{weighted alternating least squares (WALS)} \citep{wals:icdm08}, such that the dot product $\hat{r} = \inner{w^b_u, w^b_m}$ of the embeddings of user $u$ and movie $m$ is predictive of user $u$'s rating for movie $m$.\footnote{Other \ac{CF} methods could be used, e.g., dual encoders \citep{yiEtAl:recsys19,yangEtAl:www20}, but our approach is agnostic to the precise method used to generate behavioral or semantic embeddings.}
+We train MF using movies that have at least five ratings. 
+
+\emph{Semantic embeddings} are the second type, and are generated using textual descriptions of movies. 
+Specifically, we use a pretrained dual-encoder language model (DLM) similar to \emph{Sentence-T5} \citep{sentence_t5} and \emph{generalizable T5-based dense retrievers} \citep{GTR}. More specifically, we concatenate plot descriptions and reviews for each movie, and input these to the DLM. We then average the resulting output vectors to generate the semantic embeddings. We denote movie $m$'s semantic embedding by $w^s_m$.
+
+\textbf{Training Data and Tasks.} 
+We test two versions of \ac{ELM}, one that interprets semantic embeddings of movies, and a second which interprets behavioral embeddings of users. For the first model,
+we use a variety of tasks to test the model's ability to extract reasonable semantic information from the domain embeddings. More specifically, we construct 24 movie-focused tasks using
+a pretrained PaLM~2-L model. For each task, we generate training data by prompting the PaLM~2-L with a movie's title and additional task-specific information (e.g., writing review, listing characteristics, comparing movies, see details below). We then use PaLM~2-L's generated output as training targets for \ac{ELM}. As for training inputs, we provide \ac{ELM} with the same prompts used in PaLM~2-L, where the title of the movie $m$ is replaced by its semantic embedding $w^s_m$.
+We emphasize that \ac{ELM} does not receive any information about the movie (including its title), apart from its semantic embedding vector. 
+
+Our 24 movie tasks include single movie semantic tasks, such as describing a movie plot or summarizing a movie; single movie subjective tasks, such as writing positive or negative reviews for a movie; and movie pair subjective tasks, such as comparing characteristics of movies.
+
+Finally, we train an additional model to interpret user behavioral embeddings, by generating \emph{user preference profiles}. For this task, we generate a textual summary of a user's preferences as follows: (a) we sample five positively rated and five negatively rated movies for each user in MovieLens 25M; (b) we then prompt PaLM~2-L to describe (in ten bullet points) characteristics  of a person who likes the first five movies, but dislikes the second five. This resulting summary is used as training output for \ac{ELM} on the \emph{user-profile generation task}. The resulting task is to generate such a user profile from a user's behavioral embedding $w_u^b$ (i.e., interpret the domain embedding). Similar to the movie tasks, no other information about the user, apart from its embedding, is provided to \ac{ELM}.
+\subsection{Evaluation Metrics}
+\label{section: evaluation metrics}
+
+We employ several forms of evaluation for \ac{ELM}. First, given the inherent subjectivity of some tasks (e.g., movie reviews), human raters play a key role in gauging output quality. We ask raters to assess \ac{ELM}'s output w.r.t. its consistency with a movie's plot, its linguistic coherence, and overall task quality. Each output is rated on a scale from 0 (completely irrelevant/incoherent) to 1 (highly relevant/coherent). The average rater's score provides a holistic assessment of \ac{ELM}'s performance.
+
+Second, since our goal is interpretation of embeddings spaces, and should allow the generation of descriptions of domain embedding vectors for which no entity exists in the domain vocabulary (e.g., hypothetical movies), we evaluate the \emph{consistency} of \ac{ELM}'s generated text with the underlying domain embedding, as well as ground-truth data used to train the domain embedding. To achieve this, we introduce two consistency metrics; namely, semantic and behavioral consistency.
+
+\emph{Semantic consistency} (SC) compares the semantic embedding of generated text with the original embedding that produced that text. In our movie tasks, this metric is computed by \emph{re-embedding} \ac{ELM}'s output into the same semantic space used to embed the original movies.
+Formally, we define the semantic consistency of an output $o$ generated by an embedding $w^s \in \gW$ by
+\begin{align*}
+    \text{SC}(o, w^s) = d(P(o), w^s),
+\end{align*}
+\footnote{In our experiments we use the same DLM to serve as $P$, i.e., to re-embed output text into semantic space.}
+The utility of SC is grounded in the expectation that if the generated output $o$ holds true to its source $w^s$, then its embedded representation should not deviate substantially from its generating embedding vector. Hence, high SC suggests \ac{ELM} has well-aligned domain embedding vectors with their (task-specific) descriptions. Importantly, this approach is not tied to examples in the data, providing the flexibility to measure the semantic consistency of \emph{hypothetical entities}.
+ 
+\begin{table}[t!]
+\centering
+\caption{\footnotesize Test Scores for 24 movie tasks. We use cosine similarity as our metric for SC, and Spearman rank correlation coeff.\ for BC. For human evaluation, we show normalized scores between 0 \color{black}(strongly disagree) \color{black} and~1 \color{black}(strongly agree)\color{black}. Table is divided into two sections: single movie tasks and two movie tasks. Tasks with nn abbreviation use nearest neighbor movies in semantic embedding space. \color{black} A comparison of semantic and behavioral consistency metrics is demonstrated in \Cref{fig: interpolation results movies}.}
+\label{table: test results}
+\footnotesize
+\begin{tabular}{l|cc|ccc}
+\toprule
+\multirow{3}{*}{\parbox{1
+\multicolumn{2}{c|}{Consistency Metrics} & \multicolumn{3}{c}{Human Evaluation (100 raters)} \\
+\addlinespace[0.5ex] \cline{2-6} \addlinespace[0.5ex]
+& \multirow{2}{*}{\parbox{1.6cm}{\centering \small Semantic \\ (Cosine)}}  & \multirow{2}{*}{\parbox{1.6cm}{\centering \small Behavioral \\ (Rank Corr.)}}  & \multirow{2}{*}{\parbox{1.6cm}{\centering \small Consistency \\ with Plot }} & \multirow{2}{*}{\parbox{1.6cm}{\centering \small Language \\ Comprehensiveness}}  & \multirow{2}{*}{\parbox{1.6cm}{\centering \small Task \\ Quality}} \\ 
+& & & & \qquad \qquad \qquad \qquad \qquad & \\
+\midrule
+summary & 0.91 & 0.94 & 0.87 & 0.87 & 0.85\\
+positive review  & 0.94 & 0.81 & 0.9 & 0.9 & 0.89 \\
+negative review  & 0.93 & 0.79 & 0.93 & 0.96 & 0.96  \\
+neutral review  & 0.92 & 0.76 & 1 & 1 & 0.56 \\
+five pos char.  & 0.91 & 0.8 & 0.84 & 0.92 & 0.95 \\
+five neg char.  & 0.89 & 0.8 & 0.81 & 0.92 & 0.89  \\
+long description  & 0.91 & 0.8 & 0.89 & 0.86 & 0.89  \\
+funnier  & 0.88 & 0.81 & 0.75 & 0.78 & 0.68 \\
+sadder  & 0.91 & 0.82 & 0.59 & 0.83 & 0.81 \\
+scarier  & 0.9 & 0.84 & 0.69 & 0.74 & 0.95  \\
+improve  & 0.91 & 0.82 & 0.85 & 0.89 & 0.87  \\
+movie to viewer  & 0.89 & 0.8 & 0.89 & 0.83 & 0.86  \\
+pitch  & 0.96 & 0.8 & 0.96 & 0.95 & 0.94  \\
+criticize  & 0.89 & 0.77 & 0.88 & 0.7 & 0.79  \\
+convince1  & 0.92 & 0.96 & 0.98 & 0.93 & 0.77 \\
+convince2  & 0.9 & 0.88 & 0.89 & 0.86 & 0.87  \\
+convince3  & 0.88 & 0.86 & 0.7 & 0.67 & 0.74  \\
+dissuade1  & 0.88 & 0.85 & 0.88 & 0.89 & 0.87 \\
+dissuade2  & 0.88 & 0.87 & 0.79 & 0.8 & 0.79  \\
+\midrule
+similarities  & 0.86 & 0.83 & 0.37 & 0.4 & 0.38  \\
+interpolation  & 0.89 & 0.8 & 0.85 & 0.82 & 0.84  \\
+why like nn  & 0.83 & 0.48  & 0.84 & 0.84 & 0.91 \\
+diff than nn  & 0.82 & 0.48 & 0.61 & 0.79 & 0.64   \\
+common with nn  & 0.77 & 0.46 & 0.91 & 0.86 & 0.93  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A second form of consistency, which we term \emph{behavioral consistency} (BC), measures the ability to use \ac{ELM}'s output text to make \emph{good behavioral predictions}. For example, in our user-profile task, we can test the ability of \ac{ELM}'s generated user profile to predict the movie preferences of a user corresponding to the input behavioral embedding. This in turn would suggest the extent to which the user profile captures the information implicit in that domain vector (i.e., the latent user preferences). To achieve this, we assume access to some ``off-the-shelf'' language-based retriever/ranker $\rho$ which, given a user profile, can rank a set of candidate movies. Then, given a fixed set of target movies, $\gI$, and letting $o_u$ be the \ac{ELM}-generated user profile given domain embedding $w_u^b$, we define
+\begin{align*}
+    \text{BC}(o_u, u) = \text{RankingScore}\brk*{R_u , \rho(o_u)},
+\end{align*}
+\footnote{In our experiments we use the dual-encoder DLM to serve as $\rho$, by embedding test movies and user profiles and using their similarity for scoring/ranking.} Here, \emph{RankingScore} is any rank-comparison metric which compares $\rho(o_u)$ to the ground-truth ranking $R_u$. Examples include \emph{NDCG} \citep{burges2005learning} and the \emph{Spearman rank-correlation coefficient}.
+
+
+
+
+\section{Empirical Analysis}
+
+
+We evaluate \ac{ELM} on our 24 movie tasks and the user profile task, described in \Cref{section: data}, using human raters, and semantic and behavioral consistency to measure performance. We analyze test results on both real entities (i.e., held-out movies) and hypothetical embedding vectors not in the data, to test \ac{ELM}'s ability to interpolate between movies or users, as well as extrapolate movie or user attributes.
+
+We train two models: one (joint) model for the 24 movie tasks, and another for user profiles. For the movie tasks, we use 1000 randomly sampled examples for test and the rest for training. For the user profile task we use an 80/20 training/test split. Both models are fine-tuned using a pretrained PaLM~2-XS (Otter). We use a two-layer MLP for the domain-embedding adapter layer $E_A$, and two-stage training, as described in \Cref{section: embd LLM}. Particularly, for movie tasks, we run the first stage of training for 20k iterations, and then the second stage for another 300k iterations, using a batch size of~32 (i.e., roughly seven epochs). We use a similar procedure for user profiles.
+
+\textbf{Test-item Evaluation.} \Cref{table: test results} shows consistency (SC and BC) and human rater results for all movie tasks on the test set. For each task, we ask 100 human raters\footnote{Raters were paid contractors. They received their standard contracted wage, which is above the living wage in their country of employment.} to rate the consistency and comprehensiveness of our results w.r.t.\ the ground-truth data. Rater evaluations show that \ac{ELM} is able to generalize well across most tasks. Moreover \ac{ELM} maintains high semantic consistency across all tasks and good behavioral consistency for most.
+We note that performance tends to be worse on two-movie tasks, due to the additional challenge of ``conversing'' about similarities and differences between two distinct embedding representations. We emphasize the importance of our consistency metrics, as they reflect how well \ac{ELM} adapts to the domain embedding space $\gW$.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/gpt_interpolations.png}
+    \caption{\footnotesize Results show consistency results for movie and user interpolations using \ac{ELM}, compared to one-shot decoded results of text only \acp{LLM}. We show semantic consistency (cosine) scores for movies and behavioral consistency (NDCG) scores for user profiles.}
+    \label{fig: text-only llm comparisons}
+\end{figure}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[trim=0 0 188pt 0, clip, width=0.402\linewidth]{figures/five_pos_char_cavs.png}
+    \includegraphics[width=0.588\linewidth]{figures/long_desc_cavs.png}
+    \caption{\footnotesize Plot depicts SC scores (using cosine similarity) for interpolations of movies with the movie ``Forrest Gump", as well as extrapolation of CAV attributes in semantic space.}
+    \label{fig: interpolation results movies}
+\end{figure}
+\textbf{Communicating Novel Entities.} We next test \ac{ELM}'s capability to meaningfully extrapolate from existing movies or users to interpret ``gaps'' in embedding space (e.g., embedding vectors of hypothetical movies for which we predict a large audience). Note that such hypothetical vectors have no ground-truth data for evaluation; nor is it clear how to evaluate hypothetical embeddings using text-only \acp{LLM} (e.g., \citet{anil2023PaLM,openai2023gpt4}). For instance, there is no obvious way to instruct a text-only \ac{LLM} to describe an arbitrary vector in $\gW$. Even if we were to ask a text-only \ac{LLM} to interpolate two existing entities (e.g., movies), the result will not necessarily be consistent with the domain embedding space we wish to interpret, nor can one in general direct a text-only \ac{LLM} to an arbitrary point using interpolation between a small number of existing entities. Behavioral embeddings of, say, users are even more challenging for text-only \acp{LLM}. This puts additional emphasis on the need to evaluate such \acp{LLM} using embedding consistency metrics like SC and BC.
+That  said, to ground our results, we do not consider arbitrary hypothetical points in embedding space. Instead, we evaluate our model using interpolation of \emph{existing entities}, as well shifts of such entities in specific directions (see \textbf{Generalizing CAVs} below). Nevertheless, \ac{ELM}'s ability to interpret hypothetical embedding vectors is not constrained to these choices.
+We first assess consistency metrics on interpolations of two movies or users.
+\Cref{fig: text-only llm comparisons} compares the performance of \ac{ELM} with state-of-the-art text-only \acp{LLM}; namely, PaLM~2-L and GPT~4. For movies, we linearly interpolate (with mixture coefficient $\alpha= 0.5$) embedding vectors of movies in the training set with the classic movie ``Forrest Gump (1994)", and provide the \emph{interpolated embedding} to \ac{ELM}. For users, we interpolate random pairs of user embedding vectors from the training set. For a fairer comparison, we provide the text-only \acp{LLM} with a ground-truth examples of each task's output, and prompt them to generate the task output. We measure semantic consistency for movie tasks and behavioral consistency for the user profile task. We found that text-only \acp{LLM} are significantly less consistent than \ac{ELM}. This is not surprising, as describing a domain embedding space manifold to a text-only \ac{LLM} is especially challenging. Moreover, \ac{ELM} is able to generate high-quality, consistent responses to our tasks.
+
+We next test \ac{ELM}'s consistency as we vary the degree of interpolation between movies, by varying the mixture weight $\alpha$. \Cref{fig: interpolation results movies} shows semantic consistency (magenta line) for two of our movie tasks. We find that outputs are highly consistent across all degrees of interpolation values, with a tendency for lower consistency scores for embeddings that are farther away from the two movies. This result is unsurprising, as we expect performance to degrade as it moves away from ``real" data points. Also note these are linear interpolations, though the true embedding manifold may be highly non-linear.
+ 
+ 
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.69\linewidth]{figures/user_cav_ndcg.png}
+    \caption{\footnotesize Plot depicts BC scores (using NDCG with the predicted CF model ratings) for user profile decoded outputs, where user embeddings are extrapolated in different CAV directions. Dotted lines show two baselines (for $\alpha = 0$): the random baseline, which rates movies randomly, and the ground-truth baseline, which uses the ground-truth user profile data to compute BC (i.e., BC of the ground-truth training data).}
+    \label{fig: extrapolation results}
+\end{figure}
+\textbf{Generalizing Concept Activation Vectors (CAVs).} Finally, we test  the interpretation of vectors in domain embedding space by extrapolating existing entity embeddings in specific directions. To accomplish this, we train CAVs \footnote{We train CAVs using the procedure of \citet{gopfert2022discovering} and the dataset of \citet{sigir21:filipandkristian}, to which we refer for details. Specifically, we use linear, objective rather than non-linear and/or subjective CAVs.} \citep{kimTCAV:icml18} using attribute tags in MovieLens 25M, provided by movie raters. These CAVs can be treated as noisy, ``soft'' movie attributes, such as `funny,' `terrifying,' `thought-provoking,' etc. The CAV corresponding to a specific attribute provides a \emph{direction} in domain embedding space that represents an increase in that attribute's value. We use these to \emph{extrapolate} movies and users in specific CAV directions (e.g., make an existing movie funnier, or tweak a user profile to prefer more cartoonish movies).
+In \Cref{fig: interpolation results movies}, we see that semantic consistency of movie extrapolations generally decreased as we extrapolated further in CAV directions. This is expected as extrapolations outside the data manifold should induce higher error. Similarly, \Cref{fig: extrapolation results} shows behavioral consistency results for CAV extrapolations of user profiles. These results show attribute extrapolations to be behaviorally consistent for different $\alpha$ values. Perhaps surprisingly, user profiles show \emph{greater} behavior consistency as we increase the degree to which they move in a CAV direction. We hypothesize this is due to user profiles becoming ``more predictable" in our CF model by making user preferences more extreme. For instance, as we make a user profile gravitate to funnier movies, preferences tend to degenerate with a near-exclusive focus on funny movies (thus rendering rating prediction -- and especially relative rating prediction -- more accurate). This in turn increases BC. We provide further qualitative results for interpolations and CAV-based extrapolations in \Cref{fig: interpolations}. We refer to
+
+
+
+\section{Related Work}
+
+
+
+We review a selection of related work. The use of embeddings in NLP is well-established, with seminal work like \textit{Word2Vec} \citep{mikolov2013distributed} and \textit{GloVe} \citep{pennington2014glove} using dense vectors to represent words in a way that captures semantics. These approaches serve as the foundation for many models in NLP, e.g., contextual \citep{bengio2000neural,collobert2008unified,radford2018improving} and deep-averaging networks \citep{iyyer2015deep}. \citet{bowman2015generating} show that interpolating sentences in embedding space can generate novel sentences that smoothly blend the ``ideas'' in the original sentences. Such NLP models provide some ``immediate'' interpretability.
+
+Our \ac{ELM} approach supports interpretation of \emph{arbitrary} embedding spaces using natural language. In this sense, \ac{ELM} can be seen as learning an encoder-decoder model \citep{raffel2020exploring}, for which the encoder adapts the domain-embedding to the token-embedding space, and the \ac{LLM} acts as decoder from the ``semantics'' latent in the domain embedding to natrual language. As such, our work is closely related to research on translation \citep{vaswani2017attention} and multi-modality \citep{pmlr-v139-cho21a, yu2022scaling} that rely on encoder-decoder architectures. A key difference with \ac{ELM} lies in the fact that encoder inputs (domain embeddings) are not igenerally interpretable; by contrast, in translation and multi-modal tasks, labeled data can be explicitly
+acquired from humans. 
+
+The use of continuous vectors as prompts for language models can provide flexibility in controlling outputs, improving performance on downstream tasks. Examples include: prefix tuning \citep{li2021prefix,lester2021power,tsimpoukelli2021multimodal}, which prepends a sequence of task-specific vectors to the input, while keeping \ac{LLM} parameters frozen; and hard-soft prompt hybrid tuning \citep{liu2021gpt,han2022ptr}, which inserts tunable embeddings into a hard prompt template. These methods primarily guide model behavior for downstream tasks, rather than \emph{interpreting} embeddings, especially those derived from different data sources (which we want to understand, not create).
+
+CAVs \citep{kimTCAV:icml18} and visual techniques such as t-SNE \citep{van2008visualizing} or UMAP \citep{mcinnes2018umap} have been used for visualizing and interpreting embeddings. Nevertheless, these methods often provide static insights or visual interpretations, and are often hard or even impossible to capture in a low dimension \citep{chari2023specious,seshadhri2020impossibility}. \ac{ELM}, by contrast, seeks to enable dynamic, language-based exploration of the embedding space, ``visualizing'' it by narrating embeddings with language.
+Other work has focused on interpretability analysis and toolkits for language and sequence models \citep{belinkov2020interpretability,sarti-etal-2023-inseq,bills2023language,rauker2023toward}, but these methods are largely orthogonal to our work.
+
+
+
+\section{Conclusion}
+
+
+We have presented \ac{ELM}, a novel language-model framework for interpreting domain-embedding spaces. We assessed \ac{ELM}'s capabilities on a range of movie tasks and a user-profile task, benchmarking with both human evaluations as well as two novel quantitative metrics; namely, semantic and behavioral consistency. Our results show that \ac{ELM} generalizes well to embedding vectors in a test set, and aligns well with human-rater expectations. We also find that \ac{ELM} is adept at handling the nuanced challenge of describing novel entities, with better semantic and behavioral in tasks that interpolate between entities, compared to state-of-the-art text-only \ac{LLM}s. We also demonstrated \ac{ELM}'s proficiency in generalizing CAVs, underscoring its ability to meaningfully manipulate and interpret domain attributes of movies and user profiles.
+Taken together, our results suggest that \ac{ELM} offers a powerful, flexible mechanism for understanding, navigating and manipulating complex embedding representations.
+
+
+
+
+
+
+

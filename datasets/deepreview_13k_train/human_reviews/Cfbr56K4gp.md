@@ -1,0 +1,160 @@
+# Robust RLHF with Noisy Rewards
+
+- Decision: Reject
+- Scores: 8, 1, 6, 3
+
+## Abstract
+Reinforcement learning from human feedback (RLHF) is the mainstream paradigm to align large language models (LLMs) with human preferences. Yet existing RLHF heavily relies on accurate and informative reward models, which are vulnerable and sensitive to noise from various sources, e.g. human labeling errors, making the pipeline fragile. In this work, we formulate the problem of performing robust RLHF with noisy reward models. Our goal is to design robust RLHF algorithms that explicitly acknowledge the potential noise in a reward model. Our first contribution is an analysis that revealed a certain transformation of the preference function improves its robustness to noise in the reward function. This observation leads to a new reward function design that involves two steps: (1) an offline sampling step to obtain responses to prompts that serve as baseline calculation and (2) a contrastive reward calculated using the baseline responses in Proximal Policy Optimization (PPO). We show that our suggested rewards enable the LLM to penalize reward uncertainty, improve robustness, encourage improvement over baselines, calibrate according to task difficulty, and reduce variance in PPO. We also empirically demonstrate contrastive reward can improve RLHF substantially, evaluated by both GPTs and humans, and it consistently outperforms strong baselines.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3
+
+### Summary
+This paper, titled "Robust RLHF with Noisy Rewards," addresses a critical challenge in reinforcement learning from human feedback (RLHF): the vulnerability of reward models to noise. The authors propose a novel approach using contrastive rewards to enhance RLHF robustness by penalizing uncertainty, promoting stability, and improving learning focus. The paper includes theoretical justifications, as well as extensive empirical results that demonstrate the effectiveness of the proposed method, showing consistent improvements over established baselines. This paper’s contribution could have a meaningful impact on real-world RLHF applications where noisy feedback is prevalent.
+
+### Strengths
+1. Clear motivation: The paper emphasizes a common issue (noisy reward signals) in RLHF and offers a practical solution.
+2. Theoretical backing: The authors justify the contrastive reward mechanism with robust mathematical grounding.
+3. Empirical support: Extensive experiments with both human and automated evaluation show meaningful performance gains.
+
+### Weaknesses
+1. Limited baseline comparisons: The paper benchmarks against some strong baselines but lacks comparisons to more recent methods that handle reward noise differently. Specifically, the paper does not compare against methods that explicitly model or filter noise during the RL training process, which could provide a more direct comparison to the proposed contrastive reward approach.
+
+2. Applicability to real-world scenarios: The method assumes a binary reward noise model, which may oversimplify complex noise distributions in actual data. Real-world reward signals often exhibit more nuanced and continuous noise patterns, which may not be adequately captured by a simple binary model. This could limit the practical applicability of the proposed method in scenarios where noise is not easily categorized into two distinct levels.
+
+### Questions
+1. Could the approach be combined with other regularization techniques to further enhance stability?
+2. Are there plans to address other types of noise beyond reward model noise to make the framework more comprehensive?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 2
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4
+
+### Summary
+The paper proposes to use offline generated rewards to calibrate the reward at training time in the RLHF pipeline.
+
+### Strengths
+The paper rediscovers the use of a baseline in policy gradient methods.
+
+### Weaknesses
+This method is similar to RLOO or VinePPO in the one turn case. The only slight difference is that the calibrated reward is produced offline.
+However, it seems that this offline calibration has already been published in this study:
+https://arxiv.org/pdf/2410.01679 (see section 4.1.1 called Calibrated Regularized Policy Gradient)
+I think the work has been produced concurrently and therefore there is no added scientific contribution.
+
+### Questions
+How different is your method from existing methods that subtract the average reward to the reward?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+1
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3
+
+### Summary
+The authors address the noise in the reward model by introducing a contrastive reward function that compares the reward of a generated response to the average reward of baseline responses generated by a previously trained model. They show this simple modification outperforms the vanilla PPO algorithm by 20%.
+
+### Strengths
+The paper is well-written and easy to follow. The experimental methodology is rigorous, with many ablation studies, and the authors even employed human annotators. The method is intuitive and easy to implement.
+
+### Weaknesses
+The idea of subtracting the value of a reference answer to reduce reward model variance between various prompts [has been there at least since January 2023.](https://wandb.ai/carperai/summarize_RLHF/reports/Implementing-RLHF-Learning-to-Summarize-with-trlX--VmlldzozMzAwODM2#gotcha-1:-normalization) I am not aware of any research papers on this topic, but it makes me question the impact of this paper if the practitioners already use this method.
+
+### Questions
+I like the paper, and I think it is quite complete; I am only a bit sceptical about the novelty of this work, hence a lower score. As pointed out by the authors, it would be interesting to see how well the method performs over multiple rounds, recalibrating the base rewards after each iteration.
+
+### Soundness
+4
+
+### Presentation
+4
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+The paper proposed a contrastive reward method that intends to address possible noisy rewards from inaccurate reward models. The authors justify the effectiveness of their methods by empirical results on models alignment.
+
+### Strengths
+The paper paid attention to a direction of the existing alignment research which is less explored, however quite natural: the reward model can be (actually indeed) inaccurate. The authors thus proposed subtracting the baseline reward function from usual reward utilized in PPO algorithm for RLHF.
+
+### Weaknesses
+ **Writing**: The overall writing has a significant space to improve. There are confusing descriptions and notations, making some parts of the paper hard to follow and understand. For example, Section 2.1, which should be the most important section to introduce the notion of Robust RLHF, is very short and not elaborated enough to clearly explain the motivations and formulation details of this paper. In addition:
+* Table 1 is rather confusing. Is this error rate the dataset’s error rate or the error rate of the reward model?
+* In Equation (4) and (5), there are many new pop-up elements: what is the second expectation for in (4) and (5)? I think in (4) the second expectation should be $\Psi$ right? What is $\mathcal{D}_{RL}$ in (5)? Also, are there any reasons why authors do not consider any type of regularization, like KL regularization in RLHF, but include this regularization back in the practical algorithm design?
+* On line 123-125: The confusion function needs to be formally defined. The results for analysis are also limited to the discrete-value setting which seems to be rather restricted and undermine the generalizability of the theorem results.
+* Robustness in 129-131: Here the definition of such robustness is unclear and confusing to me. Since the paper is developing around robustness, a readily defined definition shall be necessary. 
+
+**Novelty**: I am also confused about the novelty of this paper, as the proposed mechanism for increasing robustness and its relation to resulting algorithms is still unclear after my reading. The final proposed improvement over PPO baseline looks to be subtracting a baseline function from reward, and this is a standard practice even in RLHF original paper, like normalization to mean 0 for reward models. It is also a widely adopted technique for variance reduction, as the author also mentioned on line 196-198. It will be beneficial to further explain the version and details of PPO the paper utilized for baseline comparison. Any further evidence of noisy reward and how algorithms behave with respect to the noisy level of the reward models shall be a better way to showcase the effectiveness.
+
+**Possible missing references**: are there any connections between the approach in this paper and other papers like MaxMinRLHF[1] or other robust preference optimization papers? There lacks a discussion of existing literature on this line.
+
+### Questions
+* Please see questions in weakness
+* Have the authors tried aligning models with proposed algorithms and test the resulting models’ performance on benchmarks like AlpacaEval?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2

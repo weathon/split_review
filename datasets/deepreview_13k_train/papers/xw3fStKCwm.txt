@@ -1,0 +1,295 @@
+\title{Tensor-Train Point Cloud Compression and Efficient Approximate Nearest Neighbor Search}
+
+\begin{abstract}
+    Nearest-neighbor search in large vector databases is crucial for various machine learning applications.
+    This paper introduces a novel method using \textbf{tensor-train} (TT) low-rank tensor decomposition to efficiently represent point clouds and enable fast approximate nearest-neighbor searches.
+    We propose a probabilistic interpretation and utilize density estimation losses like Sliced Wasserstein to train TT decompositions, resulting in robust point cloud compression.
+    We reveal an inherent hierarchical structure within TT point clouds, facilitating efficient approximate nearest-neighbor searches.
+    In our paper, we provide detailed insights into the methodology and conduct comprehensive comparisons with existing methods.
+    We demonstrate its effectiveness in various scenarios, including out-of-distribution (OOD) detection problems and approximate nearest-neighbor (ANN) search tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+    Nearest-neighbor search in large vector databases (clouds of high-dimensional points) constitutes a fundamental component in numerous computer science applications, like local or global image matching, semantic search, out-of-distribution and anomaly detection, among others.
+    
+    In this paper, we propose to use \emph{tensor-train} (TT)~\cite{Oseledets11} low-rank tensor decomposition to represent point clouds and to facilitate fast approximate nearest-neighbor search.
+    The TT decomposition method has gained prominence in deep learning, primarily to compress large tensors of neural network parameters.
+    When representing point clouds as matrices, we artificially order vectors and thus direct application of TT to compress this matrix with standard tensor approximation algorithms (such as TT-SVD~\cite{Oseledets11,CichockiLOPZM16}, TT-cross approximation~\cite{oseledets_tt-cross_2010} or ALS~\cite{HoltzRS12}) would result in very poor quality.
+    To address this issue, we propose probabilistic interpretation of the point cloud.
+    Specifically, we suggest training TT to compress a point cloud using loss functions from density estimation, notably Sliced Wasserstein loss, through standard gradient descent method:~\cref{sec:method}.
+
+    Moreover, we observe the ability of the TT point cloud to implicitly contain inner hierarchical structure of points: we can consider it as a hierarchical KMeans clustering and TT format allows fast computation of centroids of different levels.
+    This observation allows us to build a highly efficient approximate nearest-neighbors search algorithm on top of the compressed TT point cloud:~\cref{sec:hierarchical-structure}.
+
+    Due to the nature of the proposed method, points inside the compressed TT point cloud do not have a direct correspondence with points in original point cloud.
+    However, in out-of-distribution (OOD) detection methods that use distance to the normal point cloud as a score, this is not a problem.
+    The state-of-the-art method that builds upon this methodology is PatchCore~\cite{roth_towards_2022}.
+    Patchcore utilizes greedy coreset subsampling to reduce redundancy in the point cloud and required storage memory.
+    We demonstrate how to use TT point cloud compression in this setting in~\cref{sec:how_to_ood} and show that our method can significantly outperform coreset-based point cloud subsampling in~\cref{sec:how_to_ood,sec:experiments:mvtec}.
+
+    For the case of nearest-neighbor search, where the output of the search should be from the original point cloud we suggest to use TT as a search index structure as a replacement for indexes like FAISS~\cite{johnson_billion-scale_2017}, IMI~\cite{BabenkoL15}, (G)NO-IMI~\cite{babenko_efficient_2016}, as detailed in~\cref{sec:how_to_ann,sec:experiments:ann}.
+
+
+
+\section{Method}
+
+    \paragraph{Point Cloud Tensorization.}
+        In the context of the OOD detection based on normal (in-distribution) points or ANN problems requiring k-nearest-neighbor search, we begin by considering a set of $D$-dimensional vectors $\sY = \set{\vy_i \in \R^D}_{i=1}^{N}$.
+        It is a natural approach to store this set as a matrix $\mY \in \R^{N \times D}$, such that $\vy_i$ corresponds to the $i$-th row of matrix $\mY$.
+
+        Low-rank tensor methods are widely popular in tensor compression and representation.
+        We chose \emph{tensor-train} (TT) decomposition due to its efficiency and computational synergies with our method.
+        TT decomposition of a matrix $\mY$ starts with matrix tensorization, which involves reshaping the matrix into a high-dimensional tensor.
+        In our specific case, we factorize rows dimension (samples dimension) of matrix $\mY$: $N = N_1 \times N_2 \times \cdots \times N_k$ while leaving the columns dimension (features dimension) $D$ unchanged:
+        \begin{equation}
+            \tY_{\textrm{reshaped}} = \textrm{reshape}(\mY, [N_1, \cdots, N_k, D])
+        \end{equation}
+
+        Low-rank decomposition of tensor $\tY_{\textrm{reshaped}}$ is parameterized by $k$ 3-dimensional tensors, referred to as tensor-train cores.
+        The first core, $\tG_1 \in \R^{D \times N_1 \times r_1}$, factorizes out feature dimension $D$ and the first sample dimension $N_1$.
+        The remaining $k - 1$ cores, $\tG_i \in \R^{r_{i - 1} \times N_i \times r_{i}}$, separate all remaining sample dimensions $N_2, \cdots, N_k$:
+        \begin{equation}
+            \tY_{\textrm{reshaped}}[i_1, \cdots, i_k, d] = \tG_1[d, i_1, :] \tG_2[:, i_2, :] \cdots \tG_k[:, i_k, :].
+        \end{equation}
+        Here, $(i_1, \cdots, i_k)$ represents a multi-index of a sample, which replaces the standard index $i$ after reshape.
+        The dimensions $r_1, \cdots, r_{k}$ are known as \emph{tensor-train ranks} (TT-ranks) and are subject to the constraint that $r_k = 1$.
+        While TT-ranks are hyperparameters and in general can be different, in our work, we take $r_1 = \cdots = r_{k - 1} = r$.
+        The entire TT construction is depicted in~\cref{fig:TT-diagram} using Penrose notation.
+        In the subsequent sections, we denote the matrix obtained as TT with cores $\tG = (\tG_1, \cdots, \tG_k)$ as $\mYttm(\tG)$ or simply $\mYttm$.
+
+        \input{figures/ttm-diagram}
+
+        Utilizing the TT point cloud representation allows for a substantial reduction in memory consumption, shifting from $\bigO(N D)$ to $\bigO(D N_1 r_1 + \sum_i r_{i - 1} N_i r_i)$. 
+        By defining $N_{\mathrm{max}}$ as $N_{\mathrm{max}} = \max_i N_i$ this can be expressed as $\bigO(D N_1 r + k r^2 N_{\mathrm{max}})$, showcasing a potential exponential memory advantage depending on the hyperparameters $\set{N_i}_{i=1}^k$ and $r$.
+        Achieving accurate training for such point cloud compression poses a significant challenge:
+        there exist efficient methods to obtain a TT approximation with a given rank for a given matrix (such as SVD-based methods~\cite{Oseledets11} and optimization-based methods~\cite{oseledets_tt-cross_2010,HoltzRS12}), the immediate application of such methods to the matrix $\mY$ can yield variable results.
+        This is because rearranging the rows of matrix $\mY$ can influence its TT-rank.
+        This implies that for some row orders (enumerations of vectors in the set $\sY$), a more accurate compression of the matrix $\mY$ into TT format with a low rank may be achieved, while for other row orders, compression can be highly inaccurate.
+
+        To address the sensitivity of TT approximation to row ordering in the matrix $\mY$, we propose a new, probabilistic interpretation of the point cloud compression.
+        We consider matrix $\mY$ (set $\sY$) as the first point cloud, with elements drawn from a probability distribution $p_{\mY}$.
+        The vectors, encoded in TT format within the matrix $\mYttm$, represent the second point cloud, defining a discrete finite distribution $p_{\mYttm}$.
+        Now, we interpret compression of original point cloud $\sY$ as approximation of distribution $p_{\mY}$ with distribution $p_{\mYttm}$, where the latter depends on parameters of TT decomposition -- cores $(\tG_1, \cdots, \tG_k)$.
+        This way thus, approximation no longer depend on the particular numbering order of the points in the original cloud when structuring it as a matrix. 
+        To closely approximate the distribution $p_{\mY}$, we adapt density estimation losses and optimize them using standard SGD methods.
+        In our work, we employ a combination of Sliced Wasserstein Loss~\cite{DeshpandeZS18} and Nearest-Neighbor Distance Loss~\cite{HennigL03}.
+
+    \paragraph{Sliced Wasserstein Loss.}
+        In our work, we utilize the Sliced Wasserstein Loss to train TT parameters.
+        The Wasserstein Distance, defined between two probability distributions, exhibits many appealing properties, making it suitable for scenarios involving discrete distributions and distributions with different supports, which is particularly important in our case.
+        However, for the general $D$-dimensional case, analytical computation of Wasserstein Distance becomes intractable.
+        In the one-dimensional case, Wasserstein Distance has a simple closed-form solution and can be easily calculated for distributions defined by samples:
+        \begin{equation} \label{eq:1d-wasserstein-samples}
+            W_1(\{x_i\}_{i=1}^{N}, \{y_j\}_{j=1}^{N}) = \sum_k |x_{i_k} - y_{j_k}|,
+        \end{equation}
+        where $i_k$ and $j_k$ are the indices that sort the sequences $x_i$ and $y_j$, correspondingly:
+        \begin{align}
+            x_{i_k} < x_{i_{k + 1}}; \;\;\; y_{j_k} < y_{j_{k + 1}}.
+        \end{align}
+
+        The Sliced Wasserstein Loss is Wasserstein Distance calculated for random one-dimensional projection of the data.
+        This approach combines the best from both worlds by providing a tractable distance measure for high-dimensional distributions.
+        \begin{gather} \label{eq:sliced-wasserstein-loss}
+            \LSW(\{\vx_i\}_{i=1}^{N}, \{\vy_i\}_{j=1}^{N}) = \\
+            \E_{\vu \in U[S^{D - 1}]} W_1(\{\vu^T \vx_i\}_{i=1}^N, \{\vu^T \vy_j\}_{j=1}^N).
+        \end{gather}
+        Here, $\set{\vx_i}_{i=1}^{N}$ and $\set{\vy_j}_{j=1}^{N}$ are samples from two distributions.
+        $S^{D - 1}$ denotes a unit sphere in the D-dimensional space, and $U[S^{D - 1}]$ is a uniform distribution on this unit sphere.
+        During training, we estimate the expectation on the right-hand side of~\cref{eq:sliced-wasserstein-loss} using Monte Carlo estimation.
+
+        SW loss works very effectively in the initial optimization stages, capturing the overall similarity in the shapes of two point clouds and achieving strong alignment at a macroscopic level.
+        However, it may struggle to establish precise point-to-point correspondence between the two point clouds at smaller scales.
+        For this reason, we use it in combination with another loss: Nearest-Neighbor Distance loss.
+
+    \paragraph{Nearest-Neighbor Distance}
+        loss is a classical loss commonly used in applications like KMeans clustering.
+        In this loss, for each point in the first cloud, we find its nearest neighbor in the second cloud and then summat such distances:
+        \begin{equation} \label{eq:nn-loss}
+            \LNNN = \sum_{i=1}^{N} \min_j \norm{\mY[i] - \mYttm[j]}^2.
+        \end{equation}
+        In this way, each point in $\mYttm$ moves towards the centroid of its nearest neighbors in $\mY$.
+        Since the point cloud $\mY$ can be very large, making the computation of $L_{NN}$ computationally intensive, we use an unbiased estimation of it by considering only a random subset of $\mY$ (indexed as $i$ in~\cref{eq:nn-loss}).
+        We do not subsample $\mYttm$ (indexed as $j$ in~\cref{eq:nn-loss}).
+
+        Points in $\mYttm$ that do not have any assigned nearest neighbors (corresponding clusters are empty) are not be affected by the loss.
+        While these points are covered by the Sliced Wasserstein loss, we can consider the inverse situation: for each point in $\mYttm$, we find its nearest neighbor among $\mY$ and calculate the average of such distances:
+        \begin{equation} \label{eq:nn-loss-inv}
+            \LNNN^\mathrm{inv} = \sum_{j=1}^{N} \min_i \norm{\mY[i] - \mYttm[j]}^2
+        \end{equation}
+        and take linear combination of this two losses with some coefficient $\alpha$:
+        \begin{equation} \label{eq:nn-loss-total}
+            \LNNN^{\mathrm{total}} = \alpha \LNNN + (1 - \alpha) \LNNN^{\mathrm{inv}}.
+        \end{equation}
+
+    \paragraph{OOD Detection with TT Point Cloud.} \label{sec:how_to_ood}
+        TT point cloud compression is well-suited for OOD detection methods that determine the in-distribution or out-of-distribution status of a query point based on its distance to the nearest neighbor in the normal point cloud (a databank of in-distribution samples).
+        That means, that if the normal point cloud originates from some unknown probability distribution $p_{\textrm{true}}$, then replacing it with another point cloud that comes from the same (or very close) distribution will not degrade the quality of OOD detection.
+        Therefore, replacing the normal point cloud with TT-compressed point cloud in this setting is straightforward.
+        In comparison to standard techniques where the normal cloud is simply subsampled, either randomly or using methods like coresets, memory gain is achieved due to a more parameter-efficient point cloud representation.
+
+    \paragraph{Approximate Nearest-Neighbor Search.} \label{sec:how_to_ann}
+        TT-point clouds cannot be directly applied to the approximate nearest-neighbor search (ANN) problem, as the points contained within them do not have a direct correspondence with the original vectors.
+        Instead, they are ``resampled`` from an approximation of the unknown underlying distribution $p_{\textrm{true}}$.
+        To efficiently address the ANN problem, many approaches first construct an \emph{index} structure on top of the vector database.
+        These index structures serve as sparsifications with a significantly lower number of vectors.
+        All vectors from the database are organized into buckets corresponding to the nearest point from the index structure.
+        For each query vector, one must first find the $K$ nearest neighbors from the index structure and then perform an exhaustive search within their respective buckets.
+
+        We propose adapting this approach and using TT-compressed point clouds as an index structure.
+        This approach allows for a much larger in-memory index with better coverage of the vector database.
+        Consequently, this results in more evenly distributed bucket sizes, fewer empty buckets, and overall improved search performance.
+    \paragraph{Hierarchical Structure.} \label{sec:hierarchical-structure}
+        The TT format of point cloud representation allows rapid computation of mean vectors along any suffix of indices, forming a hierarchical clustering structure. 
+        This hierarchical structure can be represented as a tree of depth $k$ with $N_1 \times \dots \times N_i$ vertices at level $i$. 
+        All $N_1 \times \dots \times N_k$ leaves in that tree are points from the TT point cloud, and non-leaf vertices are centroids (mean vectors) of the corresponding subtrees. 
+        This allows for a beam search-like greedy approach to ANN, where we iteratively select the top $K$ nearest neighbors from cluster centroids at each level, progressively refining the search candidates. 
+
+
+
+\section{Experiments}
+
+\subsection{Toy Examples}
+    To provide some intuition about TT point clouds, consider the toy examples shown in~\cref{fig:toy examples}.
+    Each toy point cloud consists of 8192 vectors, and we compress it with a TT representation consisting of two cores with sample dimensions 64 and 128 and a TT-rank of 8.
+    For each toy point cloud, you can observe the centroids of the first and second levels (see~\cref{eq:ttm-centroids}) in the first and second columns, respectively.
+    In the third column of~\cref{fig:toy examples}, you can see the probability density of the original point cloud, and in the fourth column, the probability density of the TT point cloud.
+    The trained vectors reconstruct the original point clouds very well, capturing all important details.
+    \input{figures/toy-examples}
+
+\subsection{MVTec Dataset} \label{sec:experiments:mvtec}
+    MVTec AD~\cite{BergmannFSS19} is an anomaly detection benchmark that contains 15 different datasets.
+    Each contains training set of anomaly-free images and a test set that contains both images with and without anomalies.
+    Each anomaly has a mask, so per-pixel metrics can be evaluated.
+
+    To reduce the memory consumption of the feature databank, the PatchCore method employs coreset subsampling, which greedily solves the following optimization problem over subsampled indices $\sI = \set{i_k}_{k=1}^{N'}$ for databank $\sY = \set{ \vy_i }$:
+    \begin{equation*}
+        \argmin_{\sI} \set{ \max_{\vy \in \sY} \min_{i \in \sI} \norm{\vy - \vy_{i}} }.
+    \end{equation*}
+    Here, $N' = cN$, where $N$ is the size of the original feature databank, and $c$ is a subsampling factor.
+    Instead of using coreset subsampling, we compress the point cloud $\sY$ into a TT Point Cloud $\mYttm$.
+    We use TT representation with two cores: the first one of size $1024 \times N_1 \times r$ and the second of size $r \times N_2$.
+    In all our experiments, for a given subsample factor $c$, we choose hyperparameters for the TT point cloud, namely the number of sample factors $N_1$ and $N_2$ and the rank $r$, so that the total number of parameters in the TT $(1024 N_1 r + N_2 r)$ equals to the total parameters in the coreset-subsampled feature databank $(1024 cN)$.
+    We choose the same hyperparameters for all MVTec datasets to avoid possible hyperparameter overfitting and to demonstrate the stability of our method, which can be highly desirable in real-world use cases where the method may be applied to related but previously unseen domains.
+
+    The standard comparison metrics include pixel-level and image-level AUROC.
+    While we report these values, we found that they are not sufficiently representative.
+    For most of the subdatasets in the MVTec benchmark, the AUROC values are extremely close to 1, often exceeding 0.99.
+    Instead, we also report the area under the precision-recall curve and a specific value, $P@R90$, which represents precision when recall is 90\%.
+    This metric is much more challenging for the MVTec benchmark, as some datasets show $P@R90$ values as low as 0.19 for the full (not subsampled) PatchCore feature databank.
+
+    In~\cref{tab:mvtec}, we present results for 1\% subsampling (corresponding to a 100x compression ratio) and 0.1\% subsampling (corresponding to a 1000x compression ratio).
+    All pixel-level metrics heavily favor TT Point Cloud, and as the compression ratio increases, the gap only widens.
+    Image-level metrics are quite competitive with coreset subsampling, with TT Point Cloud showing a slight advantage.
+\subsection{Approximate Nearest Neighbors} \label{sec:experiments:ann}
+    ANN is a very well-developed and competitive field, with highly optimized solutions, both algorithmically and in terms of implementation.
+
+    We acknowledge that it is challenging to compete with such high-end solutions.
+    Instead, we propose a proof-of-concept solution for using TT point cloud as an index structure.
+    In our evaluation, we focus on indirect characteristics such as the quality of dataset coverage, rather than providing actual queries-per-second values.
+
+    We conduct our experiments on the Deep1B~\cite{babenko_efficient_2016} -- dataset, that contains one billion 96-dimensional vectors, that was produced as an outputs from last fully-connected layer of ImageNet-pretrained GoogLeNet~\cite{SzegedyLJSRAEVR15} model, then compressed by PCA to 96 dimensions and $l_2$-normalized.
+    In our experiments we use only subset of size $10M$ vectors.
+
+    We build proof-of-concept ANN system based on TT point cloud, where we use TT point cloud as an indexing tree structure, which plays a role of first-stage database filtration.
+    During training step, each vector in the database is distributed to the bucket of the closest to it point from TT point cloud.
+    During inference, for the query vector $\vq$ we first search for $K$ nearest points from TT point cloud, using efficient hierarchical search technique, described in~\cref{sec:hierarchical-structure}.
+    Then look for nearest neighbor only inside short-list, that consists of the corresponding buckets.
+
+    We compare with similar technique (G)NO-IMI~\cite{babenko_efficient_2016}.
+    It uses the same idea with two-level indexing tree structure of the form
+    \begin{equation}
+        \set{\vS_i + \alpha_{i, j} \vT_j},
+    \end{equation}
+    where $\vS_i$ and $\vT_j$ represent two sets of vectors, first and second-level, respectively.
+    $\alpha$ is an additional weight matrix that is used only in GNO-IMI modification (for NO-IMI $\alpha_{i, j} = 1 \forall i, j$), that adds more flexibility for the construction with the cost of more memory.
+    In the greedy search approach of GNO-IMI, the algorithm initially seeks the top $K$ candidates among $\vS_i$ and subsequently explores the best $K$ candidates among $\mathbf{S}_i + \alpha_{i, j} \mathbf{T}_j$ for the indices $i$ determined in the preceding step.
+    In their work~\cite{babenko_efficient_2016}, it is suggested to utilize sets $\set{\vS_i}$ and $\set{\vT_j}$ of equal size $2^{14}$.
+    However, given that we are working with a subset of the Deep1B dataset, we have adjusted this quantity to $2^{10}$.
+    This adaptation results in a total of $2^{20}$ vectors in the index structure, encompassing $2 \cdot 96 \cdot 2^{10} + 2^{20} = 1.2$ million parameters.
+
+    We compare this structure with a TT point cloud containing three cores, with sample dimensions of 64, 64, and 256, resulting in the same number of buckets.
+    To match the memory consumption of the TT point cloud and GNO-IMI, we can use a TT-rank as large as 96.
+
+    The complexity of ANN search with an indexing structure consists of two factors.
+    First, how fast and efficiently we can search for bucket candidates, and second, how good these buckets are.
+    Even if the indexing structure somehow manages to store many vectors using a small amount of memory, if most of the corresponding buckets are empty and only a few of them contain the full vector database, then the second stage of the search will still be required to exhaustively search through a large proportion of the database.
+    If the indexing structure has $M$ buckets, with $i$-th bucket of size $N_i$, then the minimum number of points that need to be searched to find the nearest neighbor of vector $\vq$ is given by:
+    \begin{equation}
+        \sum_{i=1}^M p_i N_i,
+    \end{equation}
+    where $p_i$ is the probability that the nearest neighbor of $\vq$ is among the $i$-th bucket.
+    We can estimate $p_i$ based on the size of the $i$-th bucket itself as $\frac{N_i}{N}$, where $N = \sum_{i=1}^M N_i$ is the total number of vectors in the database.
+    Then, the expected number of points to be searched through is:
+    \begin{equation} \label{eq:expected-bucket-size}
+        \sum_{i=1}^M p_i N_i = \sum_{i=1}^M \frac{N_i}{N} N_i \propto \sum_{i=1}^M N_i^2
+    \end{equation}
+
+    On~\cref{fig:original-point-cloud,fig:tt-point-cloud} you can see two-dimensional PCA projections of the original point cloud (which has shape $10\mathrm{M} \times 96$) and TT-compressed point cloud (representing point cloud of size $1M \times 96$ but taking only 671K parameters).
+
+    \cref{fig:expected-bucket-sizes} compares dependence of~\cref{eq:expected-bucket-size} and~\cref{fig:empty-buckets} compares number of empty buckets for GNO-IMI and TT with different ranks.
+    TT point cloud has significantly less empty buckets: almost $\times6$ less for all ranks.
+    Expected bucket size~\cref{eq:expected-bucket-size} is lower already with TT-rank $= 32$ (only 21\% of GNO-IMI size).
+
+    \cref{fig:recall-curve} illustrates $Recall@R$ for different values of $R$ -- rate of queries for which true nearest neighbor is present in a short-list of length $R$.
+    As the curves are quite similar, we built a plot of curve difference with GNO-IMI as a baseline: we plot original $Recall@R$ curve minus GNO-IMI $Recall@R$ curve on~\cref{fig:delta-recall-curve}.
+    All TT-ranks starts with quite high advantage over GNO-IMI and the larger the rank -- the longer and bigger this advantage continues.
+    Although at the end for recalls very close to one there is a small period of time when GNO-IMI is better.
+
+    \input{figures/ann_mvtec_joined_figure.tex}
+
+
+
+\section{Related Work}
+
+    TT Point Cloud is built upon tensor-train low-rank decomposition, which has a rich history of applications in Machine Learning and Deep Learning.
+    Tensor-Train Matrix decomposition, a specialized form of TT decomposition, shares common principles with our decomposition approach.
+    It has been employed to compress large weight matrices of linear classification layers in fully-convolutional networks~\cite{NovikovPOV15}, vocabulary embedding layers in language models~\cite{HrinchukKMOO20}, and linear layers in transformer-based networks~\cite{abs-2306-02697} and others~\cite{PhanSSEGTGOC20}.
+    TT decomposition has demonstrated its efficiency in parameterizing high-dimensional distributions~\cite{NovikovPO21,KuznetsovPVZ19}.
+
+    Coreset subsampling~\cite{agarwal_geometric_nodate} is a well-established technique with applications in various contexts.
+    In essence, a coreset is a subset $\mathcal{S} \subset \mathcal{A}$ that allows for a good approximation of the solution to a problem over the entire set $\mathcal{A}$.
+
+    Patchcore~\cite{roth_towards_2022} extracts pixel-level features from a set of normal images and make a decision whether a query point belongs to the in-distribution or out-of-distribution class based on the distance to the nearest neighbor among this databank.
+    To reduce memory consumption of the databank and speed up NN search, Patchcore utilizes a specific type of coreset that is particularly well-suited for optimizing nearest-neighbor search performance~\cite{SenerS18}.
+    Other methods that use pixel-level feature databank are SPADE~\cite{cohen_sub-image_2021} and PaDiM~\cite{defard_padim_2020}.
+    But they do not use the full set of vectors during inference, as SPADE incorporates a distinct initial image-level filtering procedure to operate with relatively small sets of feature vectors, and PaDiM learns a parametric probabilistic representation of the normal class.
+    Notably, Patchcore exhibits significant improvements over similar methods, underscoring the effectiveness of using the full feature databank and the importance of its efficient representation.
+
+    ANN search is a crucial problem with various solutions, employing different techniques, including locally-sensitive hashing~\cite{abs-2102-08942}, graph-based approaches~\cite{WangXY021}.
+    IVFADC~\cite{JegouTDA11} constructs a one-level indexing tree structure, effectively performing k-means clustering.
+    IMI~\cite{BabenkoL15} utilizes product quantization with two components instead of vector quantization for the bucket centroids, resulting in an index of quadratic size when compared to the IVFADC approach.
+    (G)NO-IMI~\cite{babenko_efficient_2016} builds upon this concept and develops a two-level indexing structure with the capability of approximate nearest neighbor search within it, achieving a significantly better balance between retrieval speed and recall.
+
+
+
+
+
+\section{Limitations}
+
+    While TT Point Cloud demonstrates an exellent ability to represent point clouds, one notable limitation of this approach is its inability to establish a direct one-to-one correspondence between points from the original point cloud and points from the TT point cloud.
+    This constraint restricts its applicability to situations where the primary focus is on the underlying distribution rather than the original point cloud itself.
+    For instance, TT Point Cloud is highly suitable for solving out-of-distribution (OOD) detection problems based on feature databanks and cannot be employed directly for nearest-neighbor search tasks.
+    Nevertheless, we have shown how TT Point Cloud can still be utilized effectively in such scenarios as a first-stage search index structure.
+
+
+
+\section{Conclusion}
+
+
+    The use of large vector databases in modern machine learning raises the question of their efficient storage and fast vector retrieval.
+    We propose using tensor-train low-rank tensor decomposition to represent large point clouds with a small number of parameters.
+    We introduce a probabilistic interpretation of point cloud approximation to achieve a compression method that is invariant to vector reordering in point cloud.
+    Minimization of Sliced Wasserstein~\cref{eq:sliced-wasserstein-loss} and Nearest-Neighbor Distance Loss~\cref{eq:nn-loss-total} allows to interpret points from TT point cloud as a newly generated points, sampled from the same distribution as points in the original point cloud.
+    TT point clouds are particularly suitable for methods interested in the underlying distribution rather than the vectors themselves, such as out-of-distribution detection based on feature databanks.
+    We tested the proposed OOD feature databank compression method and compared it to coreset subsampling on  MVTec AD benchmark.
+    In the crucial area of approximate nearest-neighbor search, where TT point clouds cannot be directly applied, we proposed a proof-of-concept solution: using TT Point Cloud as an indexing structure for the initial filtering of a small number of vectors, in which the nearest neighbors can then be searched through by exhaustive search.
+    We demonstrated the advantages of this approach on the Deep1B dataset in comparison to another indexing method, GNO-IMI.
+
+
+
+
+
+

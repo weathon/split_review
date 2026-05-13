@@ -1,0 +1,346 @@
+\title{Prioritized Generative Replay}
+
+\begin{abstract}
+Sample-efficient online reinforcement learning often uses replay buffers to store experience for reuse when updating the value function. 
+However, uniform replay is inefficient, since certain classes of transitions can be more relevant to learning. While prioritization of more useful samples is helpful, this strategy can also lead to overfitting, as useful samples are likely to be more rare. 
+In this work, we instead propose a prioritized, parametric version of an agent's memory, using generative models to capture online experience. This paradigm enables (1) \textit{densification} of past experience, with new generations that benefit from the generative model's generalization capacity and (2) \textit{guidance} via a family of ``relevance functions'' that push these generations towards more useful parts of an agent's acquired history. We show this recipe can be instantiated using conditional diffusion models and simple relevance functions such as curiosity- or value-based metrics. 
+Our approach consistently improves performance and sample efficiency in both state- and pixel-based domains. We expose the mechanisms underlying these gains, showing how guidance promotes diversity in our generated transitions and reduces overfitting. We also showcase how our approach can train policies with even higher update-to-data ratios than before, opening up avenues to better scale online RL agents.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+One central problem of online reinforcement learning (RL) lies in extracting signal from a continuous stream of experience. Not only does the non-i.i.d. form of this data induce learning instabilities, but agents may lose out on near-term experience that is not immediately useful, but becomes important much later. The standard solution to these problems is to use a replay buffer~\cite{lin1992self, mnih2015human} as a form of memory. By storing a dataset of transitions to enable batch-wise sampling, the algorithm can decorrelate online observations and revisit past experience later in training.
+
+However, the idea that an agent's memory must identically reproduce past transitions, and at uniform frequency, is limiting. In general, the distribution of states an agent \emph{visits} is different from the optimal distribution of states the agent should \emph{train on}. Certain classes of transitions are more relevant to learning, \ie data at critical decision boundaries or data that the agent has seen less frequently. Locating such long-tailed data is tricky, yet clearly important for efficient learning.
+The challenge is thus to design a scalable memory system that replays \emph{relevant} data, and at large quantities.
+
+In this work, we propose a simple, plug-and-play formulation of an agent's online memory that can be constructed using a generative model. We train a conditional generative model in an end-to-end manner to faithfully capture online transitions from the agent. This paradigm grants two key benefits, enabling 1) the \textit{densification} of past experience, allowing us to create new training data that goes beyond the data distribution observed online, and 2) \textit{guidance} via a family of ``relevance functions`` $\mathcal{F}$ that push these generations towards more useful parts of an agent's acquired experience. 
+
+An ideal relevance function $\mathcal{F}$ should be easy to compute, and naturally identify the most relevant experience. Intuitively, we should generate transitions at the ``frontier'' of the agent's experience. These are regions of transition space that our generative model can accurately capture from the agent's memory, but our policy has not yet completely mastered. We investigate a series of possible functions, concluding that \emph{intrinsic curiosity} reliably approximates this distribution.
+\begin{figure}[tp!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/teaser.pdf}
+    \caption{\textbf{ 
+    We model an agent's online memory using a conditional diffusion model.} By conditioning on measures of data relevance, we can generate samples more useful for policy learning.
+    }
+    \label{fig:teaser}
+\end{figure}
+
+Our main contribution is this framework for a scalable, guidable generative replay, which we term ``Prioritized Generative Replay'' (\ours). We instantiate this framework by making use of strong diffusion model architectures. Experiments on both state-based and pixel-based RL tasks show \ours is consistently more sample-efficient than both model-free RL algorithms and generative approaches that do not use any guidance. In fact, by densifying the more relevant transitions, \ours is able to succeed in cases where unconditional generation struggles significantly. Moreover, we empirically demonstrate that \ours goes beyond simple prioritized experience replay; in particular, we show that conditioning on curiosity leads to more diverse and more learning-relevant generations.
+Finally, we show how \ours improves with larger policy networks, and continues learning reliably with higher synthetic-to-real data ratios, setting up a promising recipe for data-efficient scaling.
+
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+\xhdr{Model-based RL.} Model-based reinforcement learning involves interacting with a predictive model of the environment, sometimes referred to as a world model~\citep{ha2018world}, to learn a policy~\citep{sutton1991dyna}. Two classes of approaches dominate: planning with the learned world model directly~\citep{hafner2019learning, schrittwieser2020mastering, ye2021mastering, chua2018deep, ebert2018visual}, or optimizing a policy by unrolling trajectories ``in the imagination'' of the world model~\citep{janner2019trust, janner2020gamma, hafner2019dream, oh2017value, feinberg2018model}. This latter approach is most relevant to our problem setting. One distinction is we do not backprop or plan actions through a model directly, but rather wholly synthesize additional, high-relevance transitions. Closely related is PolyGRAD~\citep{rigter2023world} which generates entire on-policy trajectories. However, by generating \emph{independent off-policy transitions} rather than attempting to approximate trajectories from the current policy, we avoid the issue of compounding errors in our model~\citep{gu2016continuous}, and also enable easier plug-and-play with popular existing online RL methods.
+\xhdr{Prioritized replay.} Agents often benefit significantly more by learning from important experiences~\citep{moore1993prioritized, andre1997generalized}. One of the most well-known strategies which leverages this insight is prioritized experience replay (PER), which uses temporal difference (TD) error as a priority criterion to determine the relative importance between transitions~\citep{schaul2015prioritized}. Since then, a number of works have proposed many different criteria to determine transition importance, including state entropy~\citep{ramicic2017entropy}, learnability~\citep{sujit2023prioritizing}, or some combination of value/reward and TD-error~\citep{cao2019high, gao2021prioritized}. To alleviate the computational cost associated with evaluating the priority of all experiences in the replay buffer, different flavors of algorithmic improvements~\citep{kapturowski2018recurrent, schaul2015prioritized} or approximate parametric models of prior experience~\citep{shin2017continual, novati2019remember} have been proposed. Our proposal to model the replay buffer as a parametric generative model is closer to this second class of works.
+However, distinct from these methods which seek to relabel \emph{existing} data, our method uses priority to generate entirely \emph{new} data for more generalizable learning.
+\xhdr{RL from synthetic data.} The use of generative training data has a long history in reinforcement learning~\citep{shin2017continual, raghavan2019generative, imre2021investigation, hafner2019dream}. But only with the recent advent of powerful diffusion models have such methods achieved parity with methods trained on real data~\citep{janner2022planning, ajay2022conditional, zhu2023diffusion}. The use of diffusion for RL was first introduced by Diffuser~\citep{janner2022planning}. The authors propose an offline diffusion model for generating trajectories of states and actions, and directly generate plans which reach goal states or achieve high rewards. Decision Diffuser~\citep{ajay2022conditional} generates state-only trajectories, and employs an inverse kinematics model to generate corresponding actions. More recently, works like~\citep{ding2024diffusion, he2024diffusion} leverage diffusion models to augment datasets for offline RL, improving training stability. Most similar to our approach is \synther~\citep{lu2024synthetic}, which augments the replay buffer online and can be seen as an unguided form of our framework. In contrast to these previous works, we posit that the strength of synthetic data models is that they can be \textit{guided} towards novel transitions that are off-policy yet more relevant for learning.
+
+
+\section{Background}
+
+\label{sec:background}
+This section offers a primer on online reinforcement learning and diffusion models. Here, details on conditional generation via guidance are especially important to our method exposition in~\cref{sec:method}.
+
+\xhdr{Reinforcement learning.}
+We model the environment as a fully-observable, infinite-horizon Markov Decision Process (MDP)~\citep{sutton2018reinforcement} defined by the tuple $\mathcal{M} = (\mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, p_0, \gamma)$. Here, $\mathcal{S}, \mathcal{A}$ denote the state and action spaces, respectively. $\mathcal{P} (s' \mid s, a)$ for $s, s' \in \mathcal{S}$ and $a \in \mathcal{A}$ describes the transition dynamics, which are generally not known. $\mathcal{R} (s, a)$ is a reward function, $p_0$ is the initial distribution over states $s_0$, and $\gamma$ is the discount function. In online RL, a policy $\pi : \mathcal{S} \rightarrow \mathcal{A}$ interacts with the environment $\mathcal{M}$ and observes tuples $\tau = (s, a, s', r)$ (\ie transitions), which are stored in a replay buffer $\mathcal{D}$. The \emph{action-value}, or $\mathcal{Q}$, function is given by: 
+\begin{center}
+\begin{equation}
+\label{eqn:q_function}
+Q_\pi(s, a) = \mathbb{E}_{a_t \sim \pi(\cdot \mid s_t), s_{t+1} \sim \mathcal{P}(\cdot \mid s_t, a_t)} \left[ \sum \limits_{t = 0}^\infty \gamma^t \mathcal{R}(s_t, a_t \mid s_0 = s, a_0 = a) \right].
+\end{equation}
+\end{center}
+
+The $\mathcal{Q}$-function describes the expected \emph{return} after taking action $a$ in state $s$, under the policy $\pi$. Then our goal is to learn the optimal policy $\pi^*$ such that $\pi^*(a \mid s) = \argmax_\pi Q_\pi (s, a)$. 
+
+\xhdr{Conditional diffusion models.}
+Diffusion models are a powerful class of generative models which employ an iterative denoising procedure for generation~\citep{sohl2015deep, ho2020denoising}. Diffusion first involves a \emph{forward process} $q(x^{n + 1} \mid x^n)$ iteratively adding Gaussian noise to $x^n$ starting from some initial data point $x^0$. A \emph{reverse process} $p_\theta(x^{n - 1} \mid x^n)$ then transforms random Gaussian noise into a sample from the original distribution. In particular, we learn a neural network $\epsilon_\theta$ which predicts the amount of noise $\epsilon \sim \mathcal{N}(0, \mathbf{I})$ injected for some particular forward step $x_n$. 
+
+For additional controllability, diffusion models naturally enable conditioning on some signal $y$, simply by formulating the forward and reverse processes as $q(x^{n + 1} \mid x^n, y)$ and $p_\theta(x^{n - 1} \mid x^n, y)$, respectively. Classifier-free guidance (CFG) is a common post-training technique which further promotes sample fidelity to the condition $y$ in exchange for more complete mode coverage~\citep{ho2022classifier}. To facilitate CFG at sampling-time, during training, we optimize $\epsilon_\theta$ with the following objective:
+
+\begin{center}
+\begin{equation}
+\label{eqn:cfg_loss}
+\mathbb{E}_{x^0 \sim \mathcal{D}, \epsilon \sim \mathcal{N}(0, \mathbf{I}), y, n \sim \textrm{Unif}(1, N), p \sim \textrm{Bernoulli} \left(p_{\textrm{uncond}} \right)} \norm{\epsilon_\theta \left(x^n, n, (1 - p) \cdot y + p \cdot \emptyset \right)}^2_2,
+\end{equation}
+\end{center}
+
+where $p_{\textrm{uncond}}$ is the probability of dropping condition $y$ in favor of a null condition $\emptyset$. During sampling, we take a convex combination of the conditional and unconditional predictions, \ie $\omega \cdot \epsilon_\theta(x^n, n, y) + (1 - \omega) \cdot \epsilon_\theta(x^n, n, \emptyset)$, where $\omega$ is a hyperparameter called the \emph{guidance scale}.
+
+
+
+\section{Prioritized Generative Replay}
+
+\label{sec:method}
+In this section, we introduce Prioritized Generative Replay (\ours). At its core, \ours involves a parametric generative replay buffer that can be guided by a variety of relevance criteria. We first provide intuition and motivation for such a framework, and concretize how it can be instantiated. Next, we compare and contrast between various instantiations of relevance functions. We argue that we should use functions which promote generating higher-novelty states as they implicitly increase the diversity of relevant transitions our replay buffer, leading to more sample-efficient learning.
+\subsection{Motivation}
+
+Consider an agent with policy $\pi$ interacting online with some environment $\mathcal{M}$. The agent observes and stores transitions $\tau = (s, a, s', r)$ in some finite replay buffer $\mathcal{D}$. Two main issues arise:
+
+\squishlist
+    \item 
+    1. $|\mathcal{D}|$ must be sufficiently large and diverse to prevent overfitting (hard to guarantee online)
+    
+    \item
+    2. Transitions more relevant for updating $\pi$ might be rare (and thus heavily undersampled)
+\squishend
+
+To address the first problem, we can \emph{densify} the replay distribution $p_\mathcal{D} (\tau)$ by learning a generative world model using the buffer. This effectively trades in our finitely-sized, non-parametric replay buffer for an infinitely-sized, parametric one. By leveraging the generalization capabilities of, \eg, diffusion models, we can interpolate the replay distribution to more impoverished regions of data.
+
+However, uniformly sampling from this parametric buffer, in expectation, implies simply replaying past transitions at the same frequency at which they were observed. In more challenging environments, there may only a small fraction of data which is most relevant to updating the current policy $\pi$. Thus, to address the second problem and enable sample-efficient learning, we need some mechanism to not only \emph{densify} $p_\mathcal{D} (\tau)$, but actually \emph{guide} it towards the more immediately useful set of transitions.
+
+Our key insight is to frame this problem via the lens of conditional generation. Specifically, we seek to model $p_\mathcal{D} (\tau \mid c)$, for some condition $c$. 
+By choosing the right $c$, we ``marginalize out'' parts of the unconditional distribution $p_\mathcal{D} (\tau)$ which are less relevant under $c$ (see \cref{fig:tsne}.) More concretely, we propose to learn a \emph{relevance function} $\mathcal{F}(\tau) = c$ jointly with the policy $\pi$. 
+Intuitively, this relevance function measures the ``priority'' $c$ of $\tau$.
+Overall, we can achieve both more \emph{complete} as well as more \emph{relevant} coverage of $p_D(\tau)$.
+Clearly, the choice of $\mathcal{F}$ in our framework is critical. We now explore a number of instantiations for $\mathcal{F}$, 
+and perform an analysis on their strengths and weaknesses.
+
+\begin{figure}[tp!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/tsne.pdf}
+    \caption{
+    \textbf{\ours improves performance by \emph{densifying} subspaces of data where transitions more relevant for learning reside.
+    } We project 10K generations for both our \textcolor{blue}{\ours} and the unconditional baseline \textcolor{red}{\synther} to the same tSNE plot.
+    \textbf{A:} At epoch 1, the distribution of data generated by \ours and \synther are similar. \textbf{B:} At the inflection point of performance near epoch 130, \ours generates a distinct sub-portion of the data space from \synther (\ie red and blue dots are largely separate.) \,\,\,\, \textbf{C:} At the end of learning, \ours still densely covers a distinct subspace of the \synther transitions.
+    }
+    \label{fig:tsne}
+\end{figure}
+
+\subsection{Relevance Functions}
+\label{subsec:relevance_funcs}
+
+We begin by outlining two desiderata for our relevance functions. First, given our online setting, these functions should incur minimal computation cost. This removes conditioning on strong priors which demand extensive pretraining (\eg prior works in offline RL~\citep{du2019task, schwarzer2021pretraining}). Second, we want a guidance signal that will not overfit easily, thereby collapsing generation to stale or low-quality transitions even as the agent's experience evolves over time. 
+
+\xhdr{Return.}
+Our first proposal is one of the most natural: we consider a relevance function based on episodic return. 
+Concretely, we use the value estimate of the learned $Q$-function and current policy $\pi$:
+
+\begin{center}
+\begin{equation}
+\label{eqn:return_f}
+\mathcal{F}(s, a, s', r) =  Q(s, \pi(s)).
+\end{equation}
+\end{center}
+
+Return-as-relevance sensibly pushes generations to be more on-policy, since $\pi$ by construction seeks out high $Q$-estimates states. Also, many online RL algorithms already learn a $Q$-function, and so we readily satisfy the first condition~\citep{mnih2015human}. However, the second condition is not adequately addressed by this choice of $\mathcal{F}$. In particular, the diversity of high-return transitions might in practice be quite low, making overfitting to the conditional generations more likely.
+
+\xhdr{Temporal difference (TD) error.}
+Another possible choice for our relevance function is TD-error, first proposed for replay prioritization by~\citet{schaul2015prioritized}.
+Our relevance function in this case is given by the difference between the current Q-value estimate and the bootstrapped next-step estimate:
+
+\begin{center}
+\begin{equation}
+\label{eqn:td_f}
+\mathcal{F}(s, a, s', r) = r + \gamma Q_{\textrm{target}} \left(s', \argmax\limits_{a'} Q(s', a') \right) - Q(s, a),
+\end{equation}
+\end{center}
+
+One immediate shortcoming is that in practice we have no guarantees on the $Q$-estimates for rarer, out-of-distribution transitions. In fact, overly greedy prioritization of high TD-error transitions can lead to low-quality, myopic $Q$-estimates~\citep{schaul2015prioritized}. 
+
+\xhdr{Curiosity.}
+A glaring problem with both return-based and TD error-based relevance functions is their reliance on high-quality $Q$-functions. Estimation errors can thus lead to $\mathcal{F}$ providing a poor conditioning signal. Moreover, online RL agents tend to overfit $Q$-functions to early experience~\citep{nikishin2022primacy}, which will in turn lead to a rapidly overfitted $\mathcal{F}$ under these two choices.
+
+We argue that a natural way to reduce overfitting is via some relevance function which promotes generation \emph{diversity}.
+As prior work has shown, an effective way to decrease overfitting to early, noisy signal in online RL is to leverage diverse experience~\citep{zhang2018study}. To achieve this diversity, we model $\mathcal{F}$ after exploration objectives which promote engaging with ``higher-novelty'' transitions that are more rarely seen~\citep{strehl2008analysis}. Moreover, by learning a separate function entirely, we decorrelate our relevance function from the $Q$-function, making overfitting less likely.
+
+We thus turn to prior work on intrinsic motivation~\citep{schmidhuber1991possibility, oudeyer2007intrinsic} to operationalize these insights. 
+Concretely, we take inspiration from the intrinsic curiosity module~\citep{pathak2017curiosity} to parameterize $\mathcal{F}$. Given a feature encoder $h$, we learn a forward dynamics model $g$ which models the environment transition function $\mathcal{P}(s' \mid s, a)$, in the latent space of $h$. Then $\mathcal{F}$ is given by the \emph{error} of this forward dynamics model:
+
+\begin{center}
+\begin{equation}
+\label{eqn:curiosity_f}
+\mathcal{F}(s, a, s', r) = \frac{1}{2}||g(h(s), a)- h(s')||^2.
+\end{equation}
+\end{center}
+
+\begin{figure}[!tp]
+\begin{algorithm}[H]
+\footnotesize
+\caption{Overview of our outer loop + inner loop framework.}
+\label{alg:main_alg}
+\begin{algorithmic}[1]
+\Statex \textbf{Input:} synthetic data ratio $r\in[0, 1]$, conditional guidance scale $\omega$
+\Statex \textbf{Initialize:} $\mathcal{D}_{\textrm{real}}=\emptyset$ real replay buffer, $\pi$ agent, $\mathcal{D}_{\textrm{syn}}=\emptyset$ synthetic replay buffer, $G$ generative model, ``relevance function'' $\mathcal{F}$
+\While {forever}\Comment{perpetual outer loop}
+    \State Collect transitions $\tau_{\textrm{real}}$ with $\pi$ in the environment and add to $\mathcal{D}_{\textrm{real}}$
+    \State Update $\mathcal{F}$ using $\mathcal{D}_{\textrm{real}}$ and \cref{eqn:return_f,eqn:td_f,eqn:curiosity_f}
+        \For{1, ..., T}\Comment{periodic inner loop}
+            \State Sample $\tau_{\textrm{real}}$ from $\mathcal{D}_{\textrm{real}}$ and optimize $G\left(\tau \mid \mathcal{F}(\tau) \right)$ using \cref{eqn:cfg_loss}
+            \State Conditionally generate $\tau_{\textrm{syn}}$ from $G$ with guidance scale $\omega$ and add to $\mathcal{D}_{\textrm{syn}}$
+            \State Train $\pi$ on samples from $\mathcal{D}_{\textrm{real}}$ $\cup~\mathcal{D}_{\textrm{syn}}$ mixed with ratio $r$
+        \EndFor
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+\end{figure}
+
+\subsection{\oursplain Framework Summary}
+\label{subsec:pgr_summary}
+Finally, we provide a concrete overview of our framework in~\cref{alg:main_alg}. In the outer loop, the agent interacts with the environment, receiving a stream of real data and building a replay buffer $\mathcal{D}_{\textrm{real}}$, as in regular online RL. In the event that we are using a curiosity-based relevance function, we also perform an appropriate gradient update for $\mathcal{F}$ using samples from $\mathcal{D}_{\textrm{real}}$, via the loss function given by~\cref{eqn:curiosity_f}. Then periodically in the inner loop, we learn a conditional generative model $G$ of $\mathcal{D}_{\textrm{real}}$ and generatively densify these transitions to obtain our synthetic replay buffer $\mathcal{D}_{\textrm{syn}}$. Concretely, we take $G$ to be a conditional diffusion model. To leverage the conditioning signal given by $\mathcal{F}$, we use CFG and a ``prompting'' strategy inspired by~\citet{peebles2022learning}. We choose some ratio $k$ of the transitions in the real replay buffer $\mathcal{D}_{\textrm{real}}$ with the highest values for $\mathcal{F} (s, a, s', r)$, and sample their conditioning values randomly to pass to $G$. Implementation-wise, we keep both $\mathcal{D}_{\textrm{real}}$ and $\mathcal{D}_{\textrm{syn}}$ at 1M transitions, and randomly sample synthetic and real data mixed according to some ratio $r$ to train our policy $\pi$. Here, any off-policy RL algorithm can be used to learn $\pi$. For fair comparison to prior art, we instantiate our framework with both \sac~\citep{haarnoja2018soft} and \redq~\citep{chen2021randomized}. 
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+In this section, we answer three main questions. (1) First, to what extent does our \ours improve performance and sample efficiency in online RL settings? (2) Second, what are the underlying mechanisms by which \ours brings about performance gains? (3) Third, what kind of scaling behavior does \ours exhibit, if indeed conditionally-generated synthetic data under \ours is better? 
+
+\xhdr{Environment and tasks.}
+Our results span a range of state-based and pixel-based tasks in the DeepMind Control Suite (DMC)~\citep{tunyasuvunakool2020dm_control} and OpenAI Gym~\citep{brockman2016openai} environments. 
+In particular, our benchmark follows exactly the online RL evaluation suite of prior work in generative RL by~\citet{lu2024synthetic}, facilitating direct comparison. In all tasks, we allow 100K environment interactions, a standard choice in online RL~\citep{li2023efficient, kostrikov2020image}.
+
+\xhdr{Model details, training and evaluation.}
+For state-based tasks, 
+in additional to the \sac and \redq model-free baselines, we also include two strong model-based online RL baselines in \mbpo~\citep{janner2019trust} and \dreamer~\citep{hafner2023mastering}. We also compare against \synther~\citep{lu2024synthetic}, a recent work which learns an unconditional generative replay model, allowing \sac to be trained with an update-to-data (UTD) ratio of 20. To facilitate conditional sampling, during training we randomly discard the scalar given by our relevance function $\mathcal{F}$ with probability 0.25.
+
+For pixel-based tasks, our policy is based on \drq~\citep{yarats2021mastering} as in~\citet{lu2022challenges}. To maintain the same approach and architecture for our generative model, we follow~\citet{lu2024synthetic, esser2021taming} and generate data in the latent space of the policy's CNN visual encoder. That is, given a visual encoder $f_\theta$, and a transition $(s, a, s', r)$ for pixel observations $s, s' \in \mathbb{R}^{3 \times h \times w}$ of height $h$ and width $w$, we learn to (conditionally) generate transitions $(f_\theta(s), a, f_\theta(s'), r)$. 
+
+\input{tables/all_envs.tex}
+
+In the interest of fair comparison, our diffusion and policy architectures mirror \synther exactly. Thus, training FLOPs, parameter count and generation time as presented in~\cref{tab:latency} are all directly comparable to \synther. Our only additional parameters lie in a lightweight curiosity head, which is updated for only $5\%$ of all policy gradient steps. \ours thus incurs minimal additional overhead. 
+\subsection{Results}
+
+As shown in~\cref{tab:main_results} and~\cref{tab:openai}, all variants of \ours successfully solve the tasks, with curiosity guidance consistently outperforming both 
+model-free (\sac, \redq and \drq), and model-based (\mbpo and \dreamer) algorithms, as well as the unconditional generation baseline (\synther).
+
+\xhdr{Comparison to prioritized experience replay (PER).}
+We also compare \ours to PER baselines that use different measures of priority. In particular, we train \redq with a prioritized replay buffer, using 
+the classic TD-error~\citep{schaul2015prioritized}, or a priority function based on~\cref{eqn:curiosity_f}. The former is comparable to our \ours approach using~\cref{eqn:td_f} as relevance, and the latter to using~\cref{eqn:curiosity_f}. As shown in ~\cref{fig:baselines}a, \ours demonstrates superior performance in both cases. This emphasizes the importance of \emph{densifying} the replay distribution with generations, and not simply reweighting past experience.
+
+\begin{figure}[tp!]
+    \centering
+    \scalebox{1.0}{
+        \includegraphics[width=\linewidth]{figures/baselines.pdf}
+    }
+    \caption{\textbf{Comparison to baselines that use (a) prioritized experience replay (PER) and (b) exploration reward bonuses.} \redq using PER, with priority determined by curiosity~\cref{eqn:curiosity_f} or TD-error~\cref{eqn:td_f}, still underperform their \ours counterparts. \ours also remains superior after directly adding an exploration bonus in the form of curiosity to either \synther or \redq.
+    }
+    \label{fig:baselines}
+\end{figure}
+
+\begin{figure}[tp!]
+    \centering
+    \scalebox{1.0}{
+        \includegraphics[width=\linewidth]{figures/sample_efficiency.pdf}
+    }
+    \caption{\textbf{Sample efficiency on DMC (a) state-based and (b) pixel-based tasks.} We show mean and standard deviation over five seeds. Curiosity-\ours consistently demonstrates the best sample efficiency. \synther, which uses unconditional generation to augment replay, underperforms model-free algorithms like \sac and \redq on harder sparse-reward tasks, like finger-turn-hard.
+    }
+    \label{fig:sample_efficiency}
+\end{figure}
+
+\xhdr{Comparison to exploration bonuses.}
+We examine how baselines improve when given a bonus in the form of an intrinsic curiosity reward (\cf~\cref{eqn:curiosity_f}). In~\cref{fig:baselines}b, we see that curiosity-\ours continues to outperform \synther or \redq when either is augmented this way. This suggests \ours goes beyond just improving exploration. 
+We propose our gains are a result of generating higher novelty transitions from the replay buffer with higher diversity. This additional diversity thereby reduces overfitting of the $Q$-function to synthetic transitions. We provide further evidence for this idea in~\cref{subsec:sample_efficiency}.
+
+\subsection{Sample Efficiency}
+\label{subsec:sample_efficiency}
+
+In this section, we show \ours achieves its strong performance in a sample-efficient manner, and reveal the mechanisms underlying this sample-efficiency. 
+As seen in~\cref{fig:sample_efficiency}a, for tasks with state-based inputs, \synther often attains its best performance around $100K$ environment steps. In contrast, curiosity-\ours is able to match this performance in both the cheetah-run and quadruped-walk tasks after only ${\sim}50K$ steps.
+Especially noteworthy is the finger-turn-hard task, where \synther actually underperforms compared to the vanilla model-free \redq baseline, while our curiosity-\ours continues outperforming. We argue conditioning is particularly valuable in sparse reward tasks, where efficient exploration of the environment presents a significant challenge.
+These observations hold for pixel-based tasks. As we see in~\cref{fig:sample_efficiency}b, 
+while \synther is eventually overtaken by \drq in both environments, our curiosity-\ours continues to consistently improve over \drq. 
+\begin{table*}[tp!]
+
+\definecolor{mygreen}{rgb}{0.13, 0.55, 0.13}
+
+\centering
+\setlength{\tabcolsep}{4pt}
+\scalebox{0.75}{
+\begin{tabular}{lccc}
+\toprule
+& Walker2d-v2 & HalfCheetah-v2 & Hopper-v2 \\ 
+\midrule
+\synther & 4.228 & 0.814 & 0.178 \\
+\ours & 6.683 (\textcolor{red}{+58.1\%}) & 0.699 (\textcolor{mygreen}{-14.1\%}) & 0.171 (\textcolor{mygreen}{-3.9\%}) \\ 
+\bottomrule
+\end{tabular}
+}
+\label{tab:dynamics_mse_table}
+\end{table*}
+\begin{figure}[tp!]
+    \centering
+    \scalebox{1.0}{
+        \includegraphics[width=\linewidth]{figures/dynamics_mse.pdf}
+    }
+    \caption{\textbf{\ours does not outperform baselines due to improved generation quality.} We compute mean-squared error (MSE) of dynamics over 10K generated transitions for \synther and curiosity-\ours across 3 OpenAI gym environments.
+    \textbf{Top:} Average MSE. \textbf{Bottom:} Histograms of MSE values.
+    }
+    \label{fig:dynamics_mse}
+\end{figure}
+
+\xhdr{Is the solution to simply replace unconditional with conditional generation?}
+Conditional generation is well-known to improve sample quality in the generative modeling literature~\citep{ho2022classifier, chen2023analog}. Thus, one sensible assumption is that \ours exhibits stronger performance simply because our generated samples are better in quality. We show this is not the case.
+
+Specifically, we borrow the methodology of~\citet{lu2024synthetic} and measure faithfulness of generated transitions to environment dynamics. Given a generated transition $(s, a, s', r)$, we roll out the action $a$ given the current state $s$ in the environment simulator to obtain the ground truth next state and reward. We then measure the mean-squared error (MSE) on these two values, comparing against generated next state $s'$ and reward $r$, respectively. This analysis is performed at epoch 50 (halfway through online policy learning), over 10K generated transitions, and across 3 different environments.
+
+As seen in~\cref{fig:dynamics_mse}, \synther and \ours are highly similar in terms of generation quality. Thus, our motivations for using conditional generation have nothing to do with traditional arguments in generative modeling surrounding enhanced generation quality. Generations under \ours are better because what matters is not simply quality, but generating the \emph{right classes/kinds of transitions}. More generally, our core contribution is to elegantly cast widely-used prioritized replay in online RL through this lens of conditional generation.
+
+Moreover, \naive choices for conditioning fail entirely. For example, training on a larger quantity of higher reward transitions should intuitively yield a high-reward policy. However, as we show in ~\cref{fig:sample_efficiency} and~\cref{tab:main_results}, \naive{}ly conditioning on high reward (Reward-\ours) actually results in worse performance than any of the other \ours variants we propose, and in fact does worse than unconditional generation (\synther). This is because greedily densifying high reward transitions does not actually provide the policy with any data on how to navigate to those high reward environment regions. Thus, it is non-trivial to even know what the correct conditioning signal should be to obtain strong performance.
+
+\begin{figure}[tp!]
+    \centering
+    \scalebox{1.0}{
+        \includegraphics[width=\linewidth]{figures/overfitting.pdf}
+    }
+    \caption{
+    \textbf{Curiosity-\ours reduces overfitting and improves diversity of replay data.} (a) Dormant ratio~\citep{xu2023drm} (DR) of policy networks for different approaches. DR is consistently lower for \ours, indicating a minimally overfitting policy. (b) Curiosity $\mathcal{F}$-values throughout training for unconditional baseline and \ours. We show that the distribution of states accessed by the curiosity-\ours policy is significantly shifted towards higher novelty environment transitions.
+    }
+    \label{fig:overfitting}
+\end{figure}
+
+\xhdr{What is the mechanism underlying our performance gains?}
+We now validate our argument in~\cref{subsec:relevance_funcs} for conditioning on relevance functions which mitigate overfitting. We quantify the ``dormant ratio'' (DR) ~\citep{sokar2023dormant} over the course of learning on the quadruped-walk task. DR is the fraction of inactive neurons in the policy network (\ie activations below some threshold). Prior work has shown this metric effectively quantifies overfitting in value-based RL, where higher DR correlates with policies that execute unmeaningful actions~\citep{sokar2023dormant, xu2023drm}.
+
+As we see in~\cref{fig:overfitting}a, the \redq baseline exhibits high and increasing DR over training, indicating aggressive overfitting. This reflects the underperformance of \redq on quadruped-walk. Crucially, our curiosity-\ours displays a low and stable DR, which increases only marginally (after task performance has saturated, as seen in~\cref{fig:sample_efficiency}.) Moreover, our DR remains consistently below that of the unconditional \synther baseline. This further suggests our \ours generates higher-relevance transitions with more diversity, and better addresses the issue of overfitting $Q$-functions to the synthetic data.
+
+\xhdr{How does curiosity lead to \ours's reduction in overfitting?}
+To show that conditioning on curiosity contributes to mitigating overfitting, we characterize the signal we obtain from $\mathcal{F}$ over time. 
+Specifically, we examine the curiosity-\ours variant on the quadruped-walk task, measuring the distribution of $\mathcal{F}(s, a, s', r)$ using~\cref{eqn:curiosity_f} over $10K$ \emph{real} transitions. We perform this evaluation every $10K$ timesteps, which is the frequency at which we retrain our generative model. For comparison, we also evaluate this trained $\mathcal{F}$ on $10K$ real transitions encountered by the unconditional \synther baseline.
+
+As we see in~\cref{fig:overfitting}b, as early as $10K$ timesteps, immediately after the policy has been trained on the first batch of synthetic data, the distribution of curiosity values is more left-skewed for the conditional model. This distribution becomes increasingly long-tailed over training, suggesting a growing diversity in the observed states as training progresses. This is contrasted by the increased biasedness of the unconditional distribution towards low-curiosity transitions. Thus, the agent trained on synthetic data from \ours is learning to move towards environment states that are more ``novel'' over time, improving diversity in both the real replay buffer $\mathcal{D}_\textrm{real}$ as well as synthetic replay buffer $\mathcal{D}_\textrm{syn}$. As further confirmation, we see that $100K$ timesteps, the environment is relatively well-explored, and curiosity values from $\mathcal{F}$ diminish, which correlates with the task reward saturation that we observe. We conclude that this is ultimately the mechanism underlying the improved sample efficiency of \ours. 
+
+\subsection{Scaling Properties}
+
+Finally, we perform a series of experiments examining the scaling behavior of our \ours, in comparison to the unconditional \synther baseline. For baselines, we reduce the capacity of the diffusion model in both \ours and \synther such that the resultant policies attain the same performance as the model-free \redq baseline on the quadruped-walk task in DMC-100K (\cf dashed lines in~\cref{fig:scaling}). We then introduce a sequence of experiments --- first increasing the size of the policy network, holding synthetic data constant, then increasing both the amount of synthetic data as well as how aggressively we rely on this data for training. Results show that \ours leverages conditionally generated synthetic data in a more scalable fashion than \synther is able to use its unconditionally generated data.
+
+\begin{figure}[tp!]
+    \centering
+    \scalebox{1.0}{
+        \includegraphics[width=\linewidth]{figures/scaling.pdf}
+    }
+    \caption{\textbf{Scaling behavior on DMC-100K quadruped-walk.} 
+    \textcolor{blue}{\ours} can effectively combine (a) larger networks with (b) higher ratios of synthetic data, (c) allowing us to train with a much higher UTD of 40. In comparison, the unconditional \textcolor{red}{\synther} does not scale as well, and combining (a) and (b) actually underperforms using either independently. Runs shown are averaged over 3 seeds.
+    }
+    \label{fig:scaling}
+\end{figure}
+\xhdr{Network size.}
+We employ the experimental protocol of \synther~\citep{lu2024synthetic}: for both networks, we increase the number of hidden layers from 2 to 3, and their widths from 256 to 512. This results in ${\sim}6$x more parameters, so we also increase batch size from 256 to 1024 to maintain per-parameter throughput. We see in~\cref{fig:scaling}a that this improves both \ours and \synther, commensurately with \redq trained with real data. This affirms that the synthetic data is a reasonable stand-in for real data.
+\xhdr{Amount of generative data.}
+Next, we analyze the behavior of \ours and \synther when varying the \emph{fraction} of generative data used per batch. This better answers the full extent to which synthetic data can replace real data. Recall our baseline models use a batch size of 256 and a synthetic data ratio $r$ of 0.5 (\ie every batch has 128 real and 128 generated transitions). We now double the batch size to 512 and then to 1024, each time scaling $r$ to 0.75 and 0.875, respectively. This keeps the number of real transitions per-batch fixed at 128, increasing only the number of generated transitions used. 
+
+We hypothesize that our generated transitions conditioned on curiosity are more effective for learning than \synther's unconditional synthetic transitions. Indeed, we observe in~\cref{fig:scaling}b that at $r = 0.75$, \ours continues to enjoy sample-efficient learning, whereas \synther fails to improve as significantly. Surprisingly, we find that both \ours and \synther fail catastrophically when the synthetic data ratio is pushed to 0.875. While useful as a mechanism to augment past online experience, further work is needed to completely supplant real environment interactions with synthetic ones.
+
+\xhdr{Merging insights.}
+Finally, we combine the above two insights, and show that this allows us to push the UTD ratio of \ours to new heights. For both \synther and \ours, we again use larger MLPs to parameterize the policies, and a synthetic data ratio of 0.75 and batch size of 512. Finally, we double the UTD from 20 to 40, and the size of the synthetic data buffer $\mathcal{D}_{\textrm{syn}}$, from 1M to 2M transitions. The idea here is to preserve average diversity of the sampled synthetic transitions. We show in~\cref{fig:scaling}c 
+\ours clearly leverages both components --- larger networks and more generative data --- in a complementary fashion to scale more effectively without additional real interactions. In contrast, \synther actually degrades in performance compared with using either component independently. 
+
+
+\section{Conclusion}
+
+In this work, we propose Prioritized Generative Replay (\ours): a parametric, prioritized formulation of an online agent's memory based on an end-to-end learned conditional generative model. \ours conditions on a relevance function $\mathcal{F}$ to guide generation towards more learning-informative transitions, improving sample efficiency in both state- and pixel-based tasks. 
+We show that it is not conditional generation itself, but rather conditioning on the correct $\mathcal{F}$ that is critical.
+We identify curiosity as the right choice for $\mathcal{F}$, and provide a decisive answer for why: curiosity-\ours improves the diversity of generative replay, thereby reducing overfitting to synthetic data. \ours also showcases a promising formula for scalable training using synthetic data, 
+opening up new directions in generative RL.
+
+
+

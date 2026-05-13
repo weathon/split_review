@@ -1,0 +1,177 @@
+# Zero-Shot Visual Classification with Guided Cropping
+
+- Decision: Reject
+- Scores: 5, 3, 5, 6
+
+## Abstract
+Pretrained vision-language models, such as CLIP, show promising zero-shot performance across a wide variety of datasets. For closed-set classification tasks, however, there is an inherent limitation: CLIP image encoders are typically designed to extract generic image-level features that summarize superfluous or confounding information for the target tasks. This results in degradation of classification performance, especially when objects of interest cover small areas of input images. In this work, we propose CLIP with Guided Cropping (GC-CLIP), where we use an off-the-shelf zero-shot object detection model in a preprocessing step to increase focus of zero-shot classifier to the object of interest and minimize influence of extraneous image regions. We empirically show that our approach improves zero-shot classification results across architectures and datasets, favorably for small objects.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this work, the authors identify that the Image Encoder of CLIP is more inclined to extract generic image representation, thus leading to performance degradation in zero-shot closed-set object classification tasks, especially for small objects. To address this problem, they proposed GC-CLIP, which crops and zooms in on the target itself by introducing a guided cropping method based on a zero-shot target detection model, thus improving the performance of CLIP.
+
+### Strengths
+1- The language is clearly presented. The authors use precise and concise language so that the reader can easily understand the background, methodology, and results of the study.
+2- Ablation studies are comprehensive. The authors demonstrated the superiority of GC-CLIP over CLIP through many ablation studies and analysed various factors.
+
+### Weaknesses
+1- I suggest the authors report the computational cost of GC-CLIP in the paper, including the parameters, FLOPs or the inference time, for a more comprehensive comparison with CLIP.
+2- I am confused about the necessity of combining OWL-ViT and CLIP, because the authors’ results in the experimental section show that the difference between introducing OWL-ViT for guided cropping and using random cropping is slight, more results and analysis on different datasets should be provided to illustrate the advancement of guided cropping. In particular, the authors did not report results with random cropping alone when guided cropping was used on CALIP.
+3- An essential prerequisite for the successful application of OWL-ViT in the GC-CLIP is that OWL-ViT can provide a detection box for every target in the image. The authors have yet to carry out validation on more datasets to verify the impact and constraints of the detectors on their method, so it cannot judge the processing performance of GC-CLIP for other more complex datasets, and more analysis is needed.
+4- Authors should report the performance comparison of GC-CLIP with current popular methods.
+5- Authors also need to check for grammatical problems. For example, in the last sentence of paragraph 5 of the introduction section, there is a subject-verb inconsistency between “the cropped image” and “decrease” and “result in”.
+
+### Questions
+Please refer to Weaknesses.
+My main concern is the necessity of this guided cropping approach as it seems to have less difference in performance compared to what random cropping brings. There is a need for more results on more datasets and comparisons with other popular methods to demonstrate the performance of GC-CLIP.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper proposes a method to crop input image to obtain more robust features for zero-shot object classification. The author use a pre-trained zero-shot object detection model to obtain an initial bounding box that is most responsive to an input prompt. The box is then enlarged before inputing into CLIP for classification. This approach brings consistent ZSC improvement using ViT-B model as baseline, tested on ImageNetS919 and CUB datasets.
+
+### Strengths
+The approach is simple and easy to re-implement.
+
+### Weaknesses
+The novelty is limited. Many papers [1,2,...] have discussed the impact of cropping in image classification. The paper aims to find an optimal crop but there is no technical contribution since the heavy-lifting is done purely based on the pre-trained object detector. Perhaps the core contribution is to show that an object detector can be used for this purpose? I think it is incremental. 
+
+The potential applicability is limited. The method is very specific to CLIP and the core method doesn't work right off the bat but requires post-processing steps on top of the initial boxes. Further, this method is only suitable for classifying images whose labels associating to a small object it contains. The authors did provide some qualitative evaluation on these cases but I think it could benefit the paper to frame it more aggressively into this direction since it seems to me this is the only scenario where it might prove a significant advantage.
+
+### Questions
+N/A
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes an inference pipeline that combines SOTA zero-shot image classification models (e.g. CLIP) with SOTA open vocabulary object detection models (e.g. OWL-ViT) to improve zero-shot classification of images with smaller objects. Notably, the proposed approach does not require any model training. The model relies on a combination of CLIP for whole-image and image crop classification and OWL-ViT for object localisation and cropping. The paper explores several hyper-parameters of the proposed pipeline (e.g. margin of the crops and random crop augmentation) and demonstrates that their method improves on several CLIP-based baselines and on OWL-ViT.
+
+### Strengths
+* Solid paper, clearly written and well-motived.
+* The method is pragmatic, and seemingly driven by practical considerations of actually using CLIP and OWL-ViT models in real life applications.
+* The proposed inference pipeline does not require any training and thus can be readily used for many applications.
+
+### Weaknesses
+ * The observations of current limitations of CLIP and OWL-ViT models are somewhat surface-level and I believe well-known (although possibly not written down in a publication)
+* The proposed solution to the observed limitations (i.e. the proposed inference pipeline) is as far as I know novel, but maybe better presented at a more computer vision focused conference.
+* Although the focus of the proposed approach is to correct failure cases of CLIP and OWL-ViT (i.e. small object classification), and the benchmarks were chosen to assess this specifically, it would be very useful to see the proposed method benchmarked on widely used zero-shot datasets like ImageNet.
+* It would be interesting to discuss the limitations of the proposed method. For example, it focuses on image classification, but CLIP and OWL-ViT provide more than that. For example, CLIP embeddings can be used for image-text retrieval, and OWL-ViT embeddings can be used for image-conditioned detection. Can the authors' method be extended to these use cases?
+
+### Questions
+See Weaknesses above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes GC-CLIP to improve the zero-shot transfer performance for image classification tasks at inference time. It uses the existing open vocabulary detector (OWL-ViT) to select the bounding box of the main object, and proposes Multi-Margin Box Augmentation (MAug) to avoid losing potentially useful context information.
+
+The result is positive but not significant on ImageNetS919 and CUB classification benchmarks, in which the gap is larger on datasets particularly for small objects.
+
+### Strengths
+The method is simple and shows positive results.
+
+Ablations are comprehensive and solid.
+
+Both qualitative and quantitative results are supplied.
+
+Well written and easy to read.
+
+### Weaknesses
+ImageNetS919 and CUB are carefully selected as the benchmarks, but the number of the benchmarks are usually too limited for zero-shot classification evaluations. For more solid results, it would be nice to also report results on common image classification tasks, such as ImageNet, VTAB, and OOD benchmarks (e.g. ObjectNet) etc.
+
+The cost of this method was not clearly mentioned, which is meaningful given an additional detector is needed during the inference time.
+
+In Table 2, the comparison between CALIP and GC-CLIP is not solid: we may be able to also say “CALIP can improve performance over vanilla GC-CLIP” (if this is the truth). The result in Table 2 is also hard to compare with Table 1. So I would suggest reusing the same setup as Table 1 to compare CALIP and GC-CLIP for a clearer result.
+
+Even though the empirical results are positive, the improvement looks a bit marginal, which might be less insightful to the community.
+
+### Questions
+as mentioned in “Weaknesses”:
+- could we report more results from more common image classification benchmarks?  
+- could we report the additional inference cost?
+
+mild comments:
+- In 5.4, could we also show the scores of the examples? So that we could understand a bit more possibly the confidence of the model (e.g. whether a smaller score could indicate that the model needs more context for classification?).
+- In 5.2: “Too tight bounding boxes can make the models have unclear information…” instead of “...having…”
+- In 5.4: the format of quotes seems wrong: ”land” and ”sea”
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

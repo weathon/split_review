@@ -1,0 +1,446 @@
+\title{QSpec: Speculative Decoding with Complementary Quantization Schemes}
+
+\begin{abstract}
+Quantization has been substantially adopted to accelerate inference and reduce memory consumption of large language models (LLMs).
+While activation-weight joint quantization speeds up the inference process through low-precision kernels, we demonstrate that it suffers severe performance degradation on multi-step reasoning tasks, rendering it ineffective.
+We propose a novel quantization paradigm called \sys{}, which seamlessly integrates two complementary quantization schemes for speculative decoding. 
+Leveraging nearly cost-free execution switching, \sys{} drafts tokens with low-precision, fast activation-weight quantization, and verifies them with high-precision weight-only quantization, 
+effectively combines the strengths of both quantization schemes.
+Compared to high-precision quantization methods, \sys{} empirically boosts token generation throughput by up to $1.80\times$ without any quality compromise, distinguishing it from other low-precision quantization approaches. 
+This enhancement is also consistent across various serving tasks, model sizes, quantization methods, and batch sizes.
+Unlike existing speculative decoding techniques, our approach reuses weights and the KV cache, avoiding additional memory overhead. Furthermore, \sys{} offers a plug-and-play advantage without requiring any training.
+We believe that \sys{} demonstrates unique strengths for future deployment of high-fidelity quantization schemes, particularly in memory-constrained scenarios (\textit{e.g.}, edge devices).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have demonstrated remarkable abilities across various domains, including mathematics, coding, and planning~\citep{ds_math, ds_code, UnderstandingThePlanning_Huang2024}. 
+Nonetheless, their immense scales pose substantial challenges for deployment due to high memory and computational demands, especially in resource-limited scenarios (\textit{e.g.}, inference on edge devices). Quantization has been an effective compression technique to facilitate %the democratization of 
+LLM inference with limited resources~\citep{awq, quarot, Atom, qserve}. 
+By converting high-precision values (\textit{e.g.}, FP16) into their lower-precision counterparts (\textit{e.g.}, INT4), quantization effectively lowers memory and computational requirements, allowing for larger serving batches and model sizes. Furthermore, the reduced memory footprint boosts token generation throughput by accelerating the typically memory-bound autoregressive decoding process~\citep{zhao2024llmpqservingllmheterogeneous}.
+
+Based on the quantized objects, recent quantization algorithms can be broadly classified into two categories: weight-only and WXAX: % each offering distinct trade-offs. 
+(1) Weight-only quantization, represented by W4A16~\citep{awq}, quantizes model weights to low precision (e.g., 4-bit) for storage, %loads quantized weights, 
+and then dequantizes them to a higher precision (\textit{i.e.}, FP16) during inference;
+(2) WXAX methods, such as W4A4~\citep{quarot, Atom} and W8A8~\citep{xiao2023smoothquant}, simultaneously quantize both weights and activations, and leverage low-precision hardware support for faster execution without dequantizing them to higher precision. %\cwu{without dequantizing them to a higher precision?}. %speed. 
+Nevertheless, WXAX schemes generally suffer model performance degradation due to more low-precision activations used (as verified in Sec.~\ref{sec: motivation}). This poses a tough trade-off between efficacy and efficiency, raising the question:
+
+\emph{``Is there a quantization solution that boosts efficiency while avoiding performance degradation?''}.
+
+Considering the comparable performance claims on recent W4A4 methods~\citep{Atom, quarot}, we first contend that their conclusions are biased due to limited evaluation tasks, and W4A4 still experiences significant performance drops when compared to their higher-precision activation counterparts.
+Specifically, while W4A4 schemes such as Atom~\citep{Atom} and QuaRot~\citep{quarot} perform well on general tasks, such as PIQA~\citep{piqa}, Winogrande~\citep{ai2:winogrande} and ARC~\cite{allenai:arc}, %\cwu{such as xx}, 
+they demonstrate notable performance declines in multi-step reasoning, %capabilities, 
+particularly on mathematical and coding benchmarks~\citep{xiong2024buildingmathagentsmultiturn, guo2024can} (shown in Table~\ref{tab:metric_q}).
+This raises concerns about the comprehensiveness of evaluation and emphasizes the necessity of incorporating multi-step reasoning tasks into quantization assessment. %protocols.
+
+
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figs/qspec_design.drawio.pdf}
+    \caption{Diagrams of different 4-bit quantization schemes. \textbf{Left:} W4A16 uses 4-bit weight and 16-bit activation for inference. \textbf{Middle:} W4A4 further adopts 4-bit activation to utilize low-precision W4A4 kernels. \textbf{Right:} \sys{} accelerates W4A16 by drafting tokens with W4A4 and verifying them with W4A16, and applies KV cache overwriting for consistent memory consumption. 
+    }
+    \label{fig:qspec_design}
+\end{figure}
+
+Then to answer the above question, we draw inspiration from Speculative Decoding~\citep{leviathan2023fastinferencetransformersspeculative, googlespec}, which combines %the 
+rapid drafting %speed
+of a small model with %the 
+high-quality token generation of a larger model to boost throughput (\textit{i.e.}, efficiency) without compromising performance (\textit{i.e.}, efficacy). 
+We propose a novel paradigm called \sys{}, which %integrates
+combines mixed-precision quantization execution to \textbf{tackle the trade-off between efficiency and efficacy while maintaining the memory usage of high-precision quantization}.
+Our key insight is that a single weight-quantized model can efficiently toggle two parallel quantization schemes: one with quantized activations and the other without, which we further empirically verify to produce highly similar tokens (Sec.~\ref{sec:salient_token}). This observation unveils the potential for a synergistic approach combining both schemes.
+As illustrated in Figure~\ref{fig:qspec_design}, for a 4-bit weight-quantized model, we can leverage the faster yet lower-quality execution flow (\textit{i.e.}, W4A4) to draft tokens, while verifying these drafted tokens with the higher-quality quantization flow (\textit{i.e.}, W4A16) with negligible switching costs.
+Similar to speculative decoding, this `draft-verify' mode with mixed quantization execution ensures high fidelity with the verifying flow.
+Differently, our approach re-utilizes the weights and high-precision KV cache, maintaining the memory overhead equivalent to that of the high-precision scheme alone, rather than the sum of both schemes in % regular 
+speculative decoding. %methods. 
+
+We evaluate the generation quality and end-to-end serving throughput of \sys{} against W4A4 and W4A16 schemes across multiple datasets, model sizes, quantization methods, and batch sizes.
+Empirically, \sys{} preserves memory consumption and generation quality compared to W4A16, while offering a high acceptance rate and up to $1.80\times$ higher token generation throughput, thereby mitigating the efficiency-efficacy trade-off of existing quantization methods. Notably, for multi-step reasoning tasks such as MATH~\citep{MATH}, \sys{} fully compensates for an up to 51.11\% decline in generation quality observed with existing W4A4 methods. Furthermore, \sys{} provides plug-and-play compatibility without any training requirements, and can be seamlessly applied to any existing models, delivering superior performance with minimal effort.
+In summary, our main contributions are as follows:
+\begin{enumerate}
+
+\item[\textbullet]  We demonstrate that 
+multi-step reasoning tasks 
+can better capture the performance variations of 
+quantization schemes than
+current evaluation protocols,
+and advocate for their incorporation for more comprehensive assessment.
+
+\item[\textbullet] We validate and instantiate the feasibility of switching between two quantization schemes of a shared weight-quantized model, as well as their high token-level similarities, illuminating future development of quantization schemes.
+
+\item[\textbullet]  We propose \sys{}, 
+synergizing two complementary weight-shared quantization schemes with speculative decoding, alleviating the efficiency-efficacy trade-off of quantization.
+\item[\textbullet] Our empirical results reveal up to $1.80\times$ acceleration without any quality sacrifice across diverse settings. %\cwu{detail a bit what the diverse settings are referring to}. 
+Alongside consistent memory usage, these advantages promise \sys{} for high-fidelity quantization deployment, especially in memory-constrained scenarios.
+\end{enumerate}
+
+
+
+\section{Motivation}
+
+
+\subsection{Compromised Performance of Activation Quantization}\label{sec:reason_better}
+\begin{table}[!b]
+    \centering
+    \caption{Performance of Atom-based quantization schemes with different weight and activation precision across diverse tasks. 
+    ``Acc'', ``PPL'' and ``EM'' stand for accuracy, perplexity, and exact match, respectively, with arrows indicating their positive trends.
+    }
+    \begin{tabular}{ccccc}
+    \toprule
+    \multirow{2}{*}{Task} & \multirow{2}{*}{Metric}    & \multirow{2}{*}{W16A16}   & \multicolumn{2}{c}{Quantization}  \\
+    \cmidrule(lr){4-5}
+                                   &                                        &                & Atom (W4A16)                 & Atom (W4A4)  \\
+    \midrule
+    WikiText-2                     & PPL $\downarrow$                       & 8.70                  & 7.87 \textcolor{red}{(+9.20\%)}         & 8.58 \textcolor{black}{(+1.15\%)}  \\
+    PIQA (10-shot)                 & EM $\uparrow$                         & 78.6                 & 77.5 (-1.40\%)                 & 75.6 (-3.81\%) \\
+    MBPP (0-shot)                  & EM $\uparrow$                         & 42.0                 & 41.5 \textcolor{black}{(-1.19\%)}        & 30.5  \textcolor{red}{(-27.38\%)}  \\
+    GSM8K (8-shot)                 & EM  $\uparrow$                         & 79.0                 & 73.4 \textcolor{red}{(-7.09\%)}        & 54.2  \textcolor{red}{(-31.39\%)}  \\
+    \bottomrule
+    \end{tabular}%
+    \label{tab:metric_q}
+\end{table}
+State-of-the-art (SOTA) activation-weight joint quantization methods, like Atom~\citep{Atom} and QuaRot~\citep{quarot}, 
+achieve notable speed-ups with negligible performance loss compared to weight-only ones. However, we argue that this conclusion is skewed by the limited evaluation benchmarks, which fail to capture the negative impacts of activation quantization.
+
+To substantiate this claim, we conduct experiments on Llama-3-8B-Instruct models~\citep{llama3} quantized with W16A16, W4A16, and W4A4 methods across four task datasets: PIQA~\citep{piqa}, WikiText-2~\citep{wikitext2}, GSM8K~\citep{gsm8k}, and MBPP~\citep{MBPP}. 
+PIQA %serves as 
+is a two-choice commonsense reasoning benchmark for physical knowledge, evaluated using classification accuracy, while WikiText-2 comprises a collection of high-quality Wikipedia articles, assessed for language fluency via perplexity~\citep{jelinek1977perplexity}. Both %of them 
+are commonly adopted in current quantization evaluations.
+GSM8K includes diverse grade school mathematical problems, evaluated by ``exact match'' metrics; MBPP focuses on crowd-sourced Python programming challenges, assessed by accuracy. 
+Unlike the former two benchmarks, both GSM8K and MBPP necessitate auto-regressive multi-step reasoning abilities. While these critical abilities are propelled by the rapid advancement in LLMs recently, they have not yet been integrated into mainstream quantization evaluation. %protocols. 
+As shown in Table~\ref{tab:metric_q}, 
+Atom-based quantization schemes show comparable (and even superior sometimes) performance to W16A16 across commonly adopted tasks such as on PIQA and WikiText-2, aligning with the claims in \citet{Atom}. 
+However, W4A4 suffers a nearly 30\% average performance decline on complex reasoning tasks (\textit{i.e.}, on MBPP and GSM8K), whereas W4A16 only experiences about 4\%.
+This indicates that activation quantization leads to several times more performance degradation on multi-step reasoning tasks, despite the improved efficiency.
+Besides, the performance trend observed on multi-step reasoning tasks shows a stronger correlation with quantization precision than perplexity does, validating their adequacy in assessing quantization performance. %highlighting its suitability as a metric for assessing quantization performance.
+
+In summary, activation quantization still incurs significant performance loss on more advanced multi-step reasoning tasks. This necessitates the inclusion of reasoning tasks in quantization evaluation %protocols 
+for a more comprehensive assessment. On the other hand, this also underscores the demand for a quality-preserving yet efficient quantization paradigm.
+
+
+\subsection{High-Similarity Token Predictions} \label{sec:salient_token}
+\begin{figure}[!b]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figs/token_prediction.png}
+    \caption{Scatter plot of token prediction probabilities for Atom-based W4A4 and W4A16 on GSM8K test set, along with their two-dimensional and marginal probability distributions. A striking similarity between the two quantization schemes is observed, laying the foundation of \sys{}.}
+    \label{fig: similar tokens}
+\end{figure}
+Despite the notable performance decline caused by activation quantization, we observe, more microscopically, high similarity in top-1 token predictions between quantization schemes with high and low precision activations.
+Specifically, we first employ Atom-based W4A16 greedy sampling to generate the golden token sequences for the GSM8K test set, obtaining the prediction probabilities for each top-1 answer token. Subsequently, we perform one Atom-based W4A4 forward pass (\textit{i.e.}, prefill) on the concatenated input of each question and its corresponding golden answer to acquire the token probabilities as well. This allows us to assess the prediction discrepancy between W4A4 and W4A16.
+As illustrated in Figure~\ref{fig: similar tokens},  we observe that
+(1)~the majority of token prediction probabilities of both W4A4 and W4A16 exceed 80\%, and most of the tokens associated with high probabilities are accepted.
+(2)~Compared to accepted tokens, the number of rejected ones is negligible, underscoring the high similarity between the two quantization methods.
+Combined with the analysis in Sec.~\ref{sec:reason_better}, this can be interpreted that a small set of salient token variations can trigger a snowball effect of errors, especially on multi-step reasoning tasks where the subsequent steps are closely conditioned on the previous ones, akin to findings in \cite{HalluSnowball}, thus impairing the performance of the low-precision activation scheme. 
+Prior studies indicate that low similarity leads to frequent token rejections, thereby diminishing the efficiency of speculative decoding~\citep{leviathan2023fastinferencetransformersspeculative}.
+The observed high token-level similarity suggests that we could potentially restore the generation quality by detecting and correcting a limited number of generation errors incurred by activation quantization. This insight motivates us to propose a quantization-specific speculative decoding framework.
+
+
+
+
+\section{Method}
+
+
+Targeting an efficient quantization scheme without sacrificing performance or increasing memory consumption, we propose a new quantization paradigm called speculative decoding with complementary quantization execution (\sys{}). 
+As shown in Figure~\ref{fig:qspec_design}, \sys{} employs and-verpipeline for next-token prediction with varying activation precisions and shared low-precision quantized weights, instead of a constantsingleaquantization scheme.
+The details are elaborated below, adhering to the core component breakdown of regular speculative decoding~\citep{leviathan2023fastinferencetransformersspeculative}.
+
+
+\subsection{QSpec}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figs/Speculative_decoding_demo.drawio.pdf}
+    \caption{A mini-sample of \sys{}, where green, red, and purple tokens represent draft tokens, rejected tokens, and tokens generated directly by W4A16, respectively.}
+    \label{fig:mini_sample}
+\end{figure}
+
+\paragraph{Draft Phase.}
+Current LLMs typically utilize an autoregressive process for next-token prediction, where a new token is drawn from a probability distribution conditioned on all previously generated tokens. This process can be formulated as:
+\begin{equation}
+t_{i+1} \sim p_{i+1}(t) \coloneqq \mathcal{M}(t_{i+1} | T_{\leq i}),
+\end{equation}
+where $\mathcal{M}$ denotes the model including the weight and activation configurations, 
+while $t_{i+1}$ and $T_{\leq i}$ represent the next predicted token and the preceding token sequence $(t_0, t_1, \ldots, t_i)$, respectively.
+
+Compared with previous research~\citep{leviathan2023fastinferencetransformersspeculative,googlespec}, on one hand, we employ a weight-shared quantization scheme with low-precision activations, rather than one standalone small-sized model, to speculate the next $\gamma$ tokens $\hat{T}_{i+1:i+\gamma}$ and their associated distributions $\hat{p}_{i+1:i+\gamma}(t)$. In $\hat{T}_{i+1:i+\gamma}$, each token $\hat{t}_j$ is sampled from $ \mathcal{M}_l(\hat{t}_{j} | T_{\leq i},\hat{T}_{i+1:j-1})$, where  \( j \in [i+1, i+\gamma] \) and  \( \mathcal{M}_l \) represent our quantized model executed with low-precision activation.
+On the other hand, our low-precision quantization scheme shares similar attributes as the draft model in \cite{leviathan2023fastinferencetransformersspeculative}, as both can generate tokens rapidly, though with reduced quality.
+\paragraph{Verify Phase.} 
+To compensate for the performance decline incurred by excessive quantization, we employ a high-precision weight-only quantization scheme to verify the proposed draft token sequence. This ensures that the final generation quality aligns with that of a high-precision activation quantization scheme. All drafted tokens are verified in parallel for higher efficiency. %The process is executed in parallel to minimize the average token latency of the high-precision model.
+
+Formally, the high-precision quantization scheme \( \mathcal{M}_h \) receives as input the concatenation of \( T_{\leq i} \) and \( \hat{T}_{i+1:i+\gamma} \), producing high-quality prediction probabilities \( {p}_{i+1:i+\gamma+1}(t) \) through a single forward pass. Following this, an acceptance policy \( \mathcal{A} \), which will be detailed later, is applied to rectify each drafted token sequentially. 
+Once a token \( \hat{t}_{i+j} \) is rejected, all subsequent tokens are discarded, and token \( {t}_{i+j} \) is resampled according to the distribution \( p_{i+j}(t) \).
+In the optimal scenario, all drafted tokens from the low-precision quantized model are accepted by the high-precision model. Subsequently, an additional token \( t_{i+\gamma+1} \) is sampled from \( p_{i+\gamma+1}(t) \). From this point, a new draft-verify cycle commences, persisting until the sequence is finalized.
+\paragraph{Acceptance Policy.}
+To maintain high reproducibility, both low-precision and high-precision activation quantization schemes utilize greedy decoding throughout the generation process. This means that one drafted tokens \( \hat{t}_{i+j} \) is accepted as  \({t}_{i+j} \) only when the top-1 tokens from \( {p}_{i+j} \) and \( \hat{p}_{i+j} \) coincide; otherwise, this token is rejected. 
+Nonetheless, we claim that alternative strategies, as outlined in \cite{leviathan2023fastinferencetransformersspeculative}, can be directly applied to our method due to the similarities in the framework. 
+Figure~\ref{fig:mini_sample} illustrates a mini-sample of this cycle with the draft token length $\gamma=4$. The model initially speculates four tokens using W4A4 scheme. Subsequently, adhering to a predefined acceptance policy, it accepts all drafted tokens after verifying them through the W4A16 scheme. In the second loop, however, only the first two tokens are accepted. A new token ``is'' is directly derived from the prediction probability of W4A16 scheme, and another draft-verify cycle will commence from the ninth token.
+\paragraph{KV Cache Overwriting.}
+To further reduce memory consumption, \sys{} overwrites KV caches of low-precision activation quantization with those of high-precision method.
+Specifically, 
+compared to W4A4, W4A16 is expected to yield a higher quality FP16 KV cache due to higher activation precision. 
+Alongside the shared weights, this naturally allows overwriting the low-quality KV caches generated by W4A4 with those from W4A16 for accepted tokens after each validation phase.
+This enables W4A4 to condition on high-quality KV caches for subsequent autoregressive generation,
+and saves the memory occupation of W4A4 KV caches, despite requiring negligible buffer space for temporarily storing.
+To some extent, this operation aligns with the settings of attention kernels in prior works~\citep{Atom, ominiquant, quarot}, where INT4 KV caches are typically dequantized to FP16 before or during precision-sensitive attention operations to ensure accurate computations.
+
+  
+
+\subsection{Advantage Analysis}
+\begin{table}[!b]
+\caption{Comparison of individual quantization schemes, regular speculative decoding, and \sys{} across memory, computation, and generation aspects.}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{Method}   & \multicolumn{2}{c}{Memory}    & \multicolumn{2}{c}{Computation}           & \multicolumn{2}{c}{Generation} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+                         & Draft Weight & Draft KV & W4A4 Kernel & Draft-Verify & High Acceptance Rate & High Fidelity \\
+\midrule 
+W4A16 &    \xmark  &    \xmark     &   \xmark &   \xmark             &     -        & \cmark \\
+W4A4 &    \xmark  &    \xmark     &   \cmark &   \xmark             &     -        & \xmark \\
+Speculative Decoding &    \cmark &  \cmark     &   \qmark &   \cmark             &     \qmark        & \cmark \\
+\sys{}               &       \xmark  &    \xmark      &      \cmark          &     \cmark                &     \cmark       & \cmark \\
+\bottomrule
+\end{tabular}%
+}
+\label{tb:cost-cmp}
+\end{table}
+As shown in Table~\ref{tb:cost-cmp}, we compare \sys{} with individual quantization schemes (\textit{i.e.}, W4A4 and W4A16) as well as speculative decoding across the dimensions of memory, computation, and generation.
+\sys{} offers several key advantages over these methods, detailed as follows:
+\begin{enumerate}
+    \item[\textbullet] \textbf{Memory-efficient.} 
+    Quantization is often motivated by memory constraints, rendering regular speculative decoding unsuitable due to the additional memory allocation for the weights and KV caches of the draft model. However, \sys{} addresses these memory overheads by sharing weights and overwriting KV caches, aligning with the costs associated with standalone high-precision activation quantization.
+
+    \item[\textbullet] \textbf{No efficiency-efficacy trade-off.} 
+    Leveraging the speculative decoding framework, \sys{} achieves efficiency gains without any quality sacrifice, thereby avoiding the trade-off between efficiency and efficacy. In contrast, individual quantization methods either endure significant performance degradation or accept reduced inference speed.
+
+    \item[\textbullet] \textbf{High acceptance rate.}
+    The shared weights inherently enable a strong similarity between the two quantization methods. Besides, the KV cache overwriting further enhances the consistency of subsequent predictions. Both factors collectively contribute to a high token acceptance rate of \sys{}.
+
+    \item[\textbullet] \textbf{Plug-and-play compatibility.} 
+    Compared to individual quantization schemes, \sys{} simply integrates an acceptance policy and a KV cache overwriting operation. This allows \sys{} to be swiftly implemented based on existing quantization codes without extensive modifications. Furthermore, \sys{} operates without additional training or classifiers, enabling its direct application to any existing model for enhanced inference efficiency.
+    
+\end{enumerate}
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+Our evaluation answers three key questions:
+\begin{enumerate}[label=Q\arabic*:, itemsep=0pt, topsep=0pt, partopsep=0pt]
+    \item Does \sys{} serve as a general solution without compromising quality compared to high-precision weight-only quantization methods? (Sec.~\ref{sec: acc_res})
+    \item Does \sys{} consistently accelerate high-precision weight-only quantization methods? (Sec.~\ref{sec: perf_ana})
+    \item What is the common acceptance rate of \sys{}, and how does the length of draft tokens affect it? (Sec.~\ref{sec: ablation})
+\end{enumerate}
+
+\subsection{General Setup} \label{sec:setup}
+
+\textbf{Benchmarks.}
+We assess \sys{} with two primary criteria: (1) generation fidelity and (2) end-to-end serving speedup. For fidelity evaluation, we adopt not only traditional tasks, including PIQA (500, 10-shot)~\citep{piqa}, WinoGrande (500, 5-shot)~\citep{ai2:winogrande}, and WikiText2~\citep{wikitext2}, but also challenging multi-step reasoning tasks such as GSM8K (All, 8-shot)~\citep{gsm8k}, MATH (All, 4-shot)~\citep{MATH}, MBPP (200, 0-shot)~\citep{MBPP}, and HumanEval (All, 0-shot)~\citep{HUMAN_EVAL}. To measure the acceleration, we use all the above reasoning tasks and two additional chatbot datasets, namely ShareGPT~\citep{sharegpt52k} and LMsys-1K~\citep{lmsys}. Following the setup of Atom~\citep{Atom}, we randomly sampled the dataset for the request prompts to reduce the workload. Due to memory limitations, we vary the batch size from 8 to 32 and serve all requests in a first-come, first-served (FCFS) manner. Once any request is finished, we refill the batch, adhering to the continuous batching approach of ORCA~\citep{orca}. We use greedy sampling for token generation.
+
+\textbf{Base Models.}
+To assess the effectiveness and scalability of our approach, we conduct experiments using multiple models from the Llama family~\citep{llama3}\footnote{\url{https://www.huggingface.co/meta-llama}} with varying scales and capacities:
+Llama3.2-3b, Llama2-7b, Llama3-8b-instruct, and Llama2-13b.
+\paragraph{Implementation.}
+All experiments are performed on a node equipped with four NVIDIA A100 GPUs (40GB HBM each) running CUDA 12.5.
+To demonstrate the versatility of \sys{}, we implement two SOTA 4-bit quantization methods, namely Atom~\citep{Atom} and QuaRot~\citep{quarot}. For W4A16 configurations, we incorporate AWQ-style~\citep{awq} weight dequantization logic for runtime inference. We select Atom to showcase the acceleration of \sys{}. We use these Group-wise quantization schemes with a group size of 128. 
+With the draft token length $\gamma$ as 3, we simulate the performance of \sys{} by initially employing fake quantization to fully emulate the execution flow, encompassing both the draft and verify stages of \sys{}. Subsequently, we replay the collected traces with real kernel execution to accurately reproduce the latency.\footnote{Atom's kernel only supports shape-specific models. We modify the model structure to meet requirements while maintaining the original model size.} 
+
+
+
+
+\subsection{Fidelity Evaluation} \label{sec: acc_res}
+
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{2pt}
+\caption{Performance of different quantization methods across multiple general and reasoning benchmarks: PIQA, WinoGrande, GSM8K, MATH, MBPP, and HumanEval.
+The quality degradation ratio is calculated by $1 - \frac{W4A4}{W4A16}$. }
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}ccccccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multirow{2}{*}{\textbf{Quantization}} & \textbf{WikiText-2}\footnotemark[5] & \textbf{PIQA} & \textbf{WinoGrande} & \textbf{GSM8K} & \textbf{MATH} & \textbf{MBPP} & \textbf{HumanEval} \\
+& & PPL $\downarrow$ & EM (\%) $\uparrow$ & EM (\%) $\uparrow$ & EM (\%) $\uparrow$ & EM (\%) $\uparrow$ & Pass@1 (\%) $\uparrow$ & Pass@1 (\%) $\uparrow$ \\
+\midrule
+\multirow{3}{*}{Atom} 
+ & W4A16 & 7.87 & 74.8 & 62.0 & 73.4 & 24.3 & 41.5 & 52.4 \\
+ & \sys{} & 7.87 & 75.0 & 62.0 & 73.4 & 24.3 & 39.0 & 52.4 \\
+& W4A4 & 8.6 (-9.58\%) & 65.8 (-12.03\%) & 56.2 (-9.35\%) & 54.7 (-25.47\%) & 15.5 (-36.21\%) & 30.5 (-26.50\%) & 31.7 (-39.50\%) \\
+\midrule
+\multirow{3}{*}{QuaRot} 
+ & W4A16 & 8.58 & 74.2 & 59.4 & 70.5 & 25.1 & 40.0 & 45.7 \\
+ & \sys{} & 8.58 & 74.4 & 59.2 & 71.0 & 24.7 & 40.5 & 47.6 \\
+& W4A4 & 10.2 (-19.24\%) & 62.6 (-15.63\%) & 53.8 (-9.43\%) & 42.0 (-40.43\%) & 12.3 (-51.11\%) & 28.5 (-28.75\%) & 28.0 (-38.73\%) \\
+\bottomrule
+\end{tabular}%
+}
+\label{tab:accuracy_main}
+\end{table}
+
+\textbf{\sys{} effectively maintains the generation quality of W4A16, whereas W4A4 does not.} As listed in Table~\ref{tab:accuracy_main},
+with the draft verification of W4A16, \sys{} exhibits only minimal performance fluctuations compared to W4A16. This negligible variation may stem from the nondeterministic algorithms of PyTorch\footnote{\url{https://pytorch.org/docs/stable/notes/randomness.html}} or occasional cases where two tokens have the same maximum prediction probability.
+In contrast, W4A4 experiences a substantial performance decline exceeding 10\% across most tasks, with the reduction becoming more pronounced as task difficulty increases. For instance, compared to GSM8K and MBPP, the performance drop for W4A4 is much greater on the more challenging MATH and HumanEval tasks, showing declines of 51.11\% and 38.73\%, respectively. 
+On the other hand, this also highlights the higher sensitivity of multi-step reasoning tasks to the negative effects of quantization compared to regular tasks, such as WikiText-2\footnote{To measure perplexity, only a single prefill stage is necessary, bypassing the verify stage.} and WinoGrande.
+This observation aligns with our earlier analysis in Sec.~\ref{sec: motivation}, encouraging incorporating multi-step reasoning tasks into quantization evaluation. %protocols.
+
+
+\subsection{Acceleration Evaluation} \label{sec: perf_ana}
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{2pt}
+\caption{
+Comparison of token generation throughput across different model sizes, quantization configurations, and batch sizes for various datasets. All values are measured in token/s.
+“Avg.” denotes the average speedup ratio for the corresponding row or column.
+}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{cccccccccc}
+\toprule
+\textbf{Model} & \textbf{Method} & \textbf{Batch} & \textbf{GSM8K} & \textbf{MATH} & \textbf{MBPP} & \textbf{HumanEval} & \textbf{ShareGPT} & \textbf{LMsys-1k} & \textbf{Avg.} \\
+\midrule
+\multirow{7}{*}{3B\footnotemark[1]} & \multirow{3}{*}{W4A16} 
+& 8 & 326.1 & 360.2 & 429.0 & 392.4 & 434.7 & 401.7 & -- \\
+& & 16 & 529.1 & 653.8 & 820.3 & 673.2 & 882.2 & 772.9 & -- \\
+& & 32 & 679.2 & 906.8 & 1261.4 & 848.4 & 1439.3 & 1103.6 & -- \\
+\cmidrule{2-10}
+&  \multirow{4}{*}{\sys{}} 
+& 8 & 501.5 ({1.54$\times$}) & 537.2 ({1.49$\times$}) & 640.4 ({1.49$\times$}) & 593.1 ({1.51$\times$}) & 646.6. ({1.49$\times$}) & 592.7 ({1.48$\times$}) & {1.50$\times$} \\
+& & 16 & 731.9 ({1.38$\times$}) & 837.8 ({1.28$\times$}) & 863.2 ({1.17$\times$}) & 875.9 ({1.30$\times$}) & 1081.4 ({1.23$\times$}) & 945.0 ({1.22$\times$}) & {1.24$\times$} \\
+& & 32 & 950.3 ({1.40$\times$}) & 1175.8 ({1.30$\times$}) & 1371.0 ({1.09$\times$}) & 1052.3 ({1.24$\times$}) & 1645.9 ({1.14$\times$}) & 1347.6 ({1.22$\times$}) & {1.23$\times$} \\
+\cmidrule{3-10}
+& & Avg. & {1.44$\times$} & {1.36$\times$} & {1.25$\times$} & {1.35$\times$} & {1.29$\times$} & {1.31$\times$} & {1.33$\times$} \\
+\midrule
+\multirow{7}{*}{7B} & \multirow{3}{*}{W4A16} 
+& 8 & 126.8 & 144.1 & 165.0 & 170.4 & 177.1 & 157.0 & -- \\
+& & 16 & 213.1 & 267.2 & 314.9 & 344.6 & 358.6 & 300.8 & -- \\
+& & 32 & 257.6 & 347.1 & 409.7 & 478.9 & 509.1 & 402.0 & -- \\
+\cmidrule{2-10}
+& \multirow{4}{*}{\sys{}} 
+& 8 & 203.7 ({1.61$\times$}) & 239.9 ({1.66$\times$}) & 234.8 ({1.42$\times$}) & 281.5 ({1.65$\times$}) & 274.4 ({1.55$\times$}) & 241.4 ({1.54$\times$}) & {1.57$\times$} \\
+& & 16 & 312.3 ({1.47$\times$}) & 377.6 ({1.41$\times$}) & 380.1 ({1.21$\times$}) & 459.6 ({1.33$\times$}) & 455.2 ({1.27$\times$}) & 379.5 ({1.26$\times$}) & {1.33$\times$} \\
+& & 32 & 496.2 ({1.54$\times$}) & 488.5 ({1.41$\times$}) & 473.4 ({1.16$\times$}) & 620.2 ({1.30$\times$}) & 633.1 ({1.24$\times$}) & 498.3 ({1.24$\times$}) & {1.31$\times$} \\
+\cmidrule{3-10}
+& & Avg. & {1.54$\times$} & {1.50$\times$} & {1.26$\times$} & {1.43$\times$} & {1.35$\times$} & {1.35$\times$} & {1.40$\times$} \\
+\midrule
+\multirow{7}{*}{8B} & \multirow{3}{*}{W4A16} 
+& 8 & 121.8 & 131.2 & 155.2 & 153.4 & 163.8 & 152.4 & -- \\
+& & 16 & 210.3 & 247.0 & 300.7 & 293.5 & 365.6 & 311.2 & -- \\
+& & 32 & 277.1 & 355.3 & 425.1 & 398.7 & 619.1 & 486.5 & -- \\
+\cmidrule{2-10}
+& \multirow{4}{*}{\sys{}} 
+& 8 & 191.7 ({1.57$\times$}) & 200.4 ({1.53$\times$}) & 214.4 ({1.38$\times$}) & 230.1 ({1.50$\times$}) & 241.0 ({1.47$\times$}) & 220.6 ({1.45$\times$}) & {1.48$\times$} \\
+& & 16 & 294.2 ({1.40$\times$}) & 333.4 ({1.35$\times$}) & 334.1 ({1.11$\times$}) & 373.0 ({1.27$\times$}) & 431.7 ({1.18$\times$}) & 373.4 ({1.20$\times$}) & {1.25$\times$} \\
+& & 32 & 368.8 ({1.33$\times$}) & 447.5 ({1.26$\times$}) & 478.1 ({1.12$\times$}) & 484.2 ({1.21$\times$}) & 687.3 ({1.11$\times$}) & 564.1 ({1.16$\times$}) & {1.20$\times$} \\
+\cmidrule{3-10}
+& & Avg. & {1.43$\times$} & {1.38$\times$} & {1.21$\times$} & {1.33$\times$} & {1.25$\times$} & {1.27$\times$} & {1.31$\times$} \\
+\midrule
+\multirow{7}{*}{13B\footnotemark[1]} & \multirow{3}{*}{W4A16} 
+& 8 & 74.0 & 85.1 & 103.7 & 100.5 & 104.1 & 92.3 & -- \\
+& & 16 & 128.6 & 163.0 & 185.8 & 177.7 & 222.8 & 173.1 & -- \\
+& & 32 & 195.1 & 206.9 & 323.7 & 327.8 & 330.1 & 241.6 & -- \\
+\cmidrule{2-10}
+& \multirow{4}{*}{\sys{}} 
+& 8 & 127.8 ({1.73$\times$}) & 148.6 ({1.75$\times$}) & 173.4 ({1.67$\times$}) & 180.8 ({1.80$\times$}) & 173.5 ({1.68$\times$}) & 150.2 ({1.63$\times$}) & {1.71$\times$} \\
+& & 16 & 194.7 ({1.51$\times$}) & 235.4 ({1.44$\times$}) & 285.9 ({1.54$\times$}) & 292.5 ({1.65$\times$}) & 288.7 ({1.30$\times$}) & 222.9 ({1.29$\times$}) & {1.45$\times$} \\
+& & 32 & 247.1 ({1.27$\times$}) & 307.4 ({1.49$\times$}) & 399.9 ({1.24$\times$}) & 435.3 ({1.33$\times$}) & 407.1 ({1.23$\times$}) & 323.3 ({1.34$\times$}) & {1.31$\times$} \\
+\cmidrule{3-10}
+& & Avg. & {1.50$\times$} & {1.56$\times$} & {1.48$\times$} & {1.59$\times$} & {1.40$\times$} & {1.42$\times$} & {1.49$\times$} \\
+\bottomrule
+\end{tabular}%
+}
+\label{tab:performance_comparison}
+\end{table}
+ 
+\textbf{\sys{} exhibits a substantial efficiency boost compared to W4A16.}
+In Table~\ref{tab:performance_comparison}, we present the token generation throughput for both \sys{} and W4A16 across different model sizes, quantization configurations, and batch sizes on diverse datasets. On average, \sys{} achieves a throughput increase of $1.38\times$ over W4A16 across all settings, with a peak improvement of $1.80\times$.
+\textbf{Speedup does not show an evident correlation with task difficulty.}
+As shown at the bottom of Table~\ref{tab:performance_comparison}, we calculate the average acceleration ratios across all configurations for each dataset. When comparing on simpler dialogue datasets (\textit{i.e.}, ShareGPT and LMsys-1k), \sys{} exhibits negligible throughput variation on multi-step reasoning tasks, particularly on coding tasks, despite a more pronounced performance decline of W4A4.
+Even on GSM8K and MATH tasks, a higher throughput is observed, due to the application of 8-shot and 4-shot prompts, respectively. 
+This finding supports our observations in Sec.~\ref{sec: motivation}, where we attribute the reduction in multi-step reasoning capabilities to a few token changes that cause a worsening snowball effect, rather than numerous token prediction errors.
+
+
+\textbf{Larger models tend to yield better speedup ratios.}
+We compare the average acceleration on all datasets across different models, and find a gradually-increasing acceleration as the base model scales up\footnote{It is noteworthy that Llama2-7B shows higher speedup than Llama3-8B. This stems from the size difference primarily related to vocabulary, coupled with the introduction of Group-Query Attention~\citep{GQA}, reducing the non-attention computation workload.}.
+This overall upward trend indicates a promising outlook for our approach with larger models, although further experiments are needed for confirmation. Due to resource limitations, this will be addressed in future work.
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/per_token_lat.pdf}
+    \caption{Per-valid-token latency comparison of \sys{} and W4A16 across different models and batch sizes. The latency of \sys{} is further decomposed into draft and verify categories.}
+    \label{fig:per_token_analysis}
+\end{figure*}
+\textbf{Latency Composition.}
+As illustrated in Figure~\ref{fig:per_token_analysis}, we compute the per-valid-token latency by dividing the total latency by only the number of accepted tokens before averaged on all evaluation datasets. Notably, \sys{} achieves remarkable latency savings ranging from 35.2\% to 50.2\%. 
+Besides, the per-token latency is further decomposed into two components: draft and verify latency.
+Clearly, the primary gains of \sys{} arise from the rapid drafting capability and the reduced latency achieved through the parallel verification of multiple tokens.
+
+
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/Llama_3B_throughput_accept_rate.png}
+        \caption{Llama3.2-3b}
+        \label{fig:llama3b}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/Llama_8B_throughput_accept_rate.png}
+        \caption{Llama3-8b-instruct}
+        \label{fig:llama8b}
+    \end{subfigure}
+    \caption{
+    Acceptance rate and throughput 
+    of Llama3.2-3b (batch size 8) and Llama3-8b-instruct (batch size 16) with respect to the draft token length $\gamma$.
+}
+    \label{fig:draft token length}
+\end{figure*}
+
+\textbf{Ablation on Draft Token Length.}~\label{sec: ablation}
+To assess parameter sensitivity, we vary the draft token lengths $\gamma$, the sole hyper-parameter of \sys{}, from 2 to 7 across all the benchmarks using Llama3-8b-instruct and Llama3.2-3b models.
+As depicted in Figure~\ref{fig:draft token length},
+an increase in \(\gamma\) leads to a gradual decline in the token acceptance rate, since all subsequent tokens are discarded once a token is rejected.
+Nevertheless, even at \(\gamma = 7\), the token acceptance rate remains relatively high, approximately $70\%$, compared to $28\sim 58\%$ in 160m-7b draft-target model pair under $\gamma=5$ in conventional speculative decoding~\citep{liu2024onlinespeculativedecoding}.
+Additionally, a consistent improvement in throughput is observed compared to W4A16, indicating the robustness of \sys{} with respect to \(\gamma\).
+
+
+
+
+\section{Related work}
+
+
+\textbf{Quantization} is a common technique for deploying LLMs on resource-limited scenarios. 
+Broadly, recent quantization algorithms can be classified into two categories: weight-only W4A16 and weight-activation joint W4A4.
+Notably, AWQ (W4A16)~\citep{awq} redistributes the quantization burden by scaling salient weight channels to protect them from degradation. In contrast, W4A4 aggressively quantizes activations to leverage low-precision hardware for improved speed at the cost of model quality degradation. To address this challenge, Atom~\citep{Atom} proposes reordering outlier channels in the activation through offline profiling. Similarly, QuaRot~\citep{quarot} employs Hadamard matrices to apply computational invariance on weights. Despite these advancements, our observations indicate that W4A4 methods still exhibit substantial degradation compared to weight-only quantization approaches across multi-step reasoning tasks.
+On the other hand, \textit{adaptive quantization} aims to optimize the trade-off between quantization-induced quality degradation and computational acceleration by mixed precision. LLM-PQ \citep{zhao2024llmpqservingllmheterogeneous} proposes an adaptive layer-wise bitwidth selection approach, while QAQ \citep{Dong2024QAQQA} focuses on KV-cache bitwidth optimization. Other works operate at finer granularity to address outliers \citep{lee2024owqoutlierawareweightquantization}. However, these methods cannot fully recover the generation quality of higher precision.
+
+\textbf{Speculative Decoding} leverages a draft model to generate candidate tokens, which are then validated by a target model \citep{leviathan2023fastinferencetransformersspeculative}. Recent research has primarily focused on improving the acceptance rate and generation speed of candidate tokens. SpecInfer \citep{spec_infer} introduces a boost-tuned small language model to generate candidate tokens in tree structures, enabling single-pass verification. In contrast, EAGLE \citep{eagle} adopts an aggressive pruning strategy for the draft model's architecture, allowing penultimate layer feature prediction with minimal computational overhead. Self-speculative decoding, a subset of this technique, employs a single model for both draft generation and verification. LayerSkip \citep{layerskip} introduces a training methodology for early exit with layer drop, subsequently verifying partially generated tokens through full model inference. Medusa \citep{Medusa} constructs a generation tree of multiple candidate continuations by augmenting the original LLM with additional heads atop the final hidden state while relaxing the acceptance policy. However, these approaches inevitably require retraining of the original model, which can be computationally expensive and time-consuming.
+
+\paragraph{Parameter Sharing} has been extensively applied for various purposes in previous research.
+Targeting parameter savings, Universal Transformer~\citep{UniversalTransformers_Dehghani2018} shares all layers within a transformer model,
+while Subformer~\citep{SubformerExploringWeight_Reid2021} shares its middle layers without sacrificing performance.
+Similarly, DictFormer~\citep{DictformerTinyTransformer_Lou2021} reparameterizes the model using a shared dictionary alongside unshared coefficients and indices, achieving reduced parameter redundancy and faster computations.
+\citet{OneWideFeedforward_Pires2023} enhances both accuracy and latency by implementing a single, larger shared feed-forward network across the encoder.
+In a different domain, \citet{PRoLoRAPartialRotation_Wang2024, mos} and \citet{VeRAVectorBased_Kopiczko2023} leverage parameter sharing in low-rank adaptation (LoRA)~\citep{LoraLowRank_Hu2021} to improve parameter efficiency. 
+Unlike these methods, our focus is on sharing low-precision weights from two quantization schemes to maintain memory overhead.
+
+
+
+\section{Conclusion}
+
+In this paper, we begin by validating that multi-step reasoning tasks can capture performance degradation incurred by activation quantization more sensitively and consistently than current evaluation protocols, advocating for their incorporation for a more comprehensive assessment.
+With nearly cost-free execution switching and high token-level similarities, we introduce \sys{}, a novel quantization paradigm that seamlessly synergizes two complementary weight-shared quantization schemes with speculative decoding.
+Empirically, \sys{} achieve up to $1.80\times$ acceleration without any quality sacrifice across diverse settings. Alongside consistent memory consumption and a plug-and-play property, these advantages distinguish \sys{} from any existing solution, promising it for high-fidelity quantization deployment, particularly in memory-constrained scenarios.
+
+
+
+
+

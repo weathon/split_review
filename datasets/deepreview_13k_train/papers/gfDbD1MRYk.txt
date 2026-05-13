@@ -1,0 +1,229 @@
+\title{Semi-autoregressive Decoding for Efficient LLM Inference}
+
+\begin{abstract}
+Inference in large language models (LLMs) is often slow due to their autoregressive nature. 
+In this work, we formulate a semi-autoregressive decoding paradigm for LLMs that delegates part of the expensive computation from the original large model to a smaller, more efficient autoregressive model. The core of our design lies in the separate modeling of token dependencies, where the large model handles long-term dependencies on distant tokens, while the smaller model addresses short-term dependencies on recent tokens. When employed as a draft model in speculative decoding, our method allows for substantial reuse of computation in the LLM without missing any token dependencies, thereby striking a good balance between draft quality and drafting speed. Experiments on text summarization, medical QA, code generation, and mathematical reasoning tasks demonstrates the efficacy of our method.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) have demonstrated remarkable capabilities across diverse natural language processing tasks (OpenAI, 2024; Dubey et al., 2024). However, their deployment in realworld applications is often hindered by the substantial inference latency. The autoregressive nature of LLMs exacerbates this issue, as generating $n$ tokens requires $n$ sequential passes through the model, each of which involves expensive computation of stacked attention layers (Vaswani, 2017).  
+
+To address the latency challenges, several approaches (Ding et al., 2024; Jiang et al., 2024; Leviathan et al., 2023) have been introduced to improve LLM inference efficiency by delegating parts of the computation to smaller models. Among these innovations, speculative decoding (Leviathan et al., 2023) has emerged as a particularly promising technique. This method leverages the observation that certain tokens within the same inference run are easier to predict and can be handled by a smaller model. Speculative decoding employs a smaller draft model to generate draft tokens, which are then verified and refined by the larger target model. Compared to other approaches, speculative decoding offers a distinct advantage by guaranteeing generation quality, as it always falls back to the target model if necessary. Since its introduction, speculative decoding has proven effective across a wide range of generation tasks and has become a widely adopted tool for efficient LLM inference.  
+
+The acceleration achieved by speculative decoding, however, hinges on two factors: (i) the acceptance rate of the draft tokens, as well as (ii) the latency of the draft model itself. As such, a key ingredient in speculative decoding has been the design of the draft model. Existing work has explored several designs of the draft model, including the use of a separate transformer model (Leviathan et al., 2023; Chen et al., 2023; Kim et al., 2024), training additional modules to predict multiple tokens simultaneously (Cai et al., 2024; Luk et al., 2024; Bhendawade et al., 2024), or leveraging selected layers of the target model itself as the draft model (Elhoushi et al., 2024; Bae et al., 2023; Zhang et al., 2024b). Despite reported successes, these designs often involve a trade-off between acceptance rate and latency: some designs achieve a high acceptance rate but with compromises on latency (Elhoushi et al., 2024; Bae et al., 2023; Zhang et al., 2024b; Leviathan et al., 2023), whereas others may offer low latency but at the expense of draft quality (Cai et al., 2024; Luk et al., 2024; Bhendawade et al., 2024; Fu et al., 2024; Gloeckle et al., 2024). The reason for this trade-off stems from the fact that proposing good draft tokens requires the draft model to be complex enough to competently process token dependencies, which in turn leads to considerable drafting latency.  
+
+![](images/65da5e81e9a010aa5ff53bcb628796807f93ade064dbf942bd7b6bc61ce1d357.jpg)  
+
+In this work, we propose a new draft model design that achieves both a high acceptance rate as well as low inference latency. We begin by introducing a unified probabilistic modeling framework to analyze the trade-off between the two metrics both conceptually and empirically — a key piece that is missing in existing literature. Through this analysis, we identify that the optimal trade-off hinges on the efficient and effective modeling of the dependencies over recent and distant tokens. Motivated by this insight, we develop a new draft design, semi-autoregressive drafting, which separately addresses the dependencies over distant and recent tokens of different-sized models. This approach effectively balances draft quality and latency, resulting in considerable acceleration. In summary, our main contributions are as follows.  
+
+• We propose a unified probabilistic framework for draft model design in speculative decoding, where we systematically compare their trade-off between acceptance rate and inference latency;  
+
+• Building upon this framework, we develop a new draft model that works in a semi-autoregressive fashion, serving as a high-quality yet computationally cheap draft model for speculative decoding. A systematic study in the trade-offs in different implementations of this model is also conducted;  
+
+Focusing on downstream LLM applications (realized via fine-tuning after model pretraining), we validate our method across four text generation tasks with three models in two training modes, demonstrating its advantages in terms of acceleration, memory cost, and training convenience.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+
+
+\section{2.1 LARGE LANGUAGE MODEL  }
+
+
+A large language model assigns a probability $p(\mathbf{w})$ to a sequence of words $\mathbf{w}=(w_{1},...,w_{T})$ . This joint probability is usually factorized using the chain rule:  
+
+$$
+p(\mathbf{w})=\prod_{i=1}^{T}p(w_{i}|w_{1},...,w_{i-1})
+$$  
+
+which reduces language modeling to the problem of estimating the conditional probability of the next word given the history of all preceding words, hence autoregressive. This autoregressive property imposes a sequential constraint on the decoding process, requiring $n$ sequential passes through the model to generate $n$ tokens, which limits the speed of generation.  
+
+2.2 SPECULATIVE DECODING  
+
+To accelerate inference in autoregressive language models, speculative decoding (Leviathan et al., 2023) leverages a more efficient approximation model, i.e. the draft model $M_{q}$ , to generate $K$ draft tokens $\{d_{1},...,d_{K}\}$ from an approximate distribution $q(\mathbf{w})\approx p(\mathbf{w})$ . The larger target model $M_{p}$ is then used to validate or override the draft tokens.  
+
+Specifically, a draft token $w_{i}\;\sim\;q(w_{i}|w_{<i})$ is accepted if $q$ provides a sufficiently close approximation to the target distribution $p$ . In this work, we enforce a greedy acceptance criterion: the draft token is accepted if $w_{i}=\arg\operatorname*{max}_{v}p(v|w_{<i})$ . Otherwise, the draft token is rejected, and the larger model overrides the draft by generating a new token from $w_{i}\sim p(w_{i}|w_{<i})$ . If a draft token is rejected, all subsequent draft tokens are also discarded, and the generation process reverts to the newest token generated by $M_{p}$ .  
+
+![](images/f5a9718ace6d7a693f8df5fbd03d1e082c61f862992b4d39d8d2b3ba9b3bd89e.jpg)  
+
+Figure 2: The graphical models of different draft model designs. Non-dashed nodes: tokens already generated and verified by the LLM. Dashed nodes: draft tokens to be generated by the draft model.  
+
+This process speeds up inference by exploiting parallelism in the draft token verification stage while retaining accuracy by falling back to the target model. Hence, the acceleration depends on the acceptance rate $\beta$ , i.e. the probability of accepting $d_{i}$ , as well as the latency of the draft model.  
+
+
+
+\section{3 A UNIFIED FRAMEWORK FOR DRAFT MODEL  }
+
+
+In this section, we present a unified view incorporating various draft model designs in speculative decoding as special cases, focusing on the different considerations for token dependency modeling. In the following, we use $q$ to denote the output distribution of draft model $M_{q}$ , $h_{p}(\cdot)$ and $h_{q}(\cdot)$ to represent the hidden states of the last layer of the target model $M_{p}$ and the draft model $M_{q}$ computed for the input tokens, respectively.  
+
+Drafting as sampling from $q$ . Consider a draft model $M_{q}$ in speculative decoding. Drafting the next $K$ tokens $\mathbf{d}=\{d_{1},...d_{K}\}\in\mathbb{N}^{K}$ can be seen as sampling from its output distribution $q$ conditioned on previously accepted tokens $\mathbf{w}_{\le i}$ :  
+
+$$
+\mathbf{d}\sim q(d_{1},...d_{K}|\mathbf{w}_{\leq i})=\prod_{j=1}^{K}q_{j}(d_{j}|\mathbf{d}_{<j},\mathbf{w}_{\leq i})
+$$  
+
+To improve decoding efficiency, we usually consider three desirable properties when designing $M_{q}$ : (i) high acceptance rate: distribution $q$ should well approximate the target distribution $p$ of the LLM; and (ii) fast drafting: sampling from $q$ should be faster than sampling from $p$ ; (iii) $q$ is a low-dimensional distribution, meaning that $K$ is small. The last property is important in our design.  
+
+One way to meet the aforementioned requirements is to focus on a powerful yet computationally cheap mechanism for modeling dependencies among the tokens $\mathbf{d}_{<j},\mathbf{w}_{\leq i}$ . Specifically, there are two distinct types of dependencies: (i) the dependencies on distant tokens $\mathbf{w}_{\le i}$ , i.e., the tokens already accepted and verified by $p$ ; and (ii) the dependencies on recent tokens ${\bf d}_{<j}$ , i.e., the draft tokens sampled from $q$ . In fact, many previous works can be categorized by how they handle these dependencies. For example:  
+
+• Block autoregressive model (Cai et al., 2024; Luk et al., 2024; Gloeckle et al., 2024) focuses on maximizing fast drafting by ignoring the dependencies of recent tokens and parallelizing draft token inference. In this case, the draft tokens $d_{k}$ and $d_{l}$ are conditionally independent given $\mathbf{w}_{\leq i}$ , i.e., $d_{k}\perp d_{l}|\mathbf{w}_{\le i}$ (Fig. 2a), leading to:  
+
+$$
+q_{j}(d_{j}|\mathbf{d}_{<j},\mathbf{w}_{\leq i})=q_{j}(d_{j}|h_{p}(\mathbf{w}_{\leq i}))
+$$  
+
+where each $q_{j}(\cdot)$ is a different LM head implemented as an independent multilayer perceptron (MLP) and $h_{p}(\cdot)$ represents the hidden states of the last layer of the target model.  
+
+• Pruned autoregressive model (Elhoushi et al., 2024; Zhang et al., 2024b) aims to achieve a balance between fast drafting and high acceptance rate. Unlike the block autoregressive model, it proposes to model all token dependencies with a pruned version of the target model $M_{p}$ , denoted as $M_{p^{\prime}}$ (Fig. 2b):  
+
+$$
+q_{j}(d_{j}|\mathbf{d}_{<j},\mathbf{w}_{\leq i})=q_{0}(d_{j}|h_{p^{\prime}}(\mathbf{d}_{<j},\mathbf{w}_{\leq i}))
+$$  
+
+where $q_{0}(\cdot)$ is the LM head for the draft model and $h_{p^{\prime}}(\cdot)$ is the hidden representation of a ‘truncated’ LLM, which can be either the first few attention layers of the target model $M_{p}$ (Elhoushi et al., 2024) or replacement of full attention with approximate attention (You et al., 2024). This pruned model can capture token dependencies and can be directly accelerated on commodity hardware depending on the type of pruning scheme employed.  
+
+Summary. The above two dependency modeling designs differ in terms of (a) acceptance rate and (b) drafting speed. In particular, block autoregressive model ignores the dependencies among recent tokens ${\bf d}_{<j}$ , which enables the reuse of hidden states $h_{p}$ to achieve highly efficient parallel decoding. However, this simplification harms the acceptance rate. In contrast, pruned autoregressive model captures all token dependencies through a pruned LLM, aiming to balance fast sampling (through pruning) and high draft quality (through dependency modeling). However, its accuracy is highly dependent on the pruned model. Furthermore, it processes both recent and distant tokens together without distinguishing them, leading to a sub-optimal design. To address these issues, we propose a new design based on the unified view of the draft model. This approach improves the balance between drafting speed and accuracy by separately modeling the two types of token dependencies.  
+
+
+
+\section{4 METHODOLOGY  }
+
+
+4.1 HIGH-LEVEL DESIGN  
+
+The core intuition of our proposal is to combine the advantages of the two previous models, i.e., maximizing hidden state re-use while effectively modeling token dependencies. Specifically, we propose to model distant token and recent token dependencies separately, using the target model $M_{p}$ for distant tokens, and a tiny language model1 (TLM) $M_{q}$ for recent tokens.  
+
+• Distant token dependency. These tokens determine the context and the semantics for drafting subsequent tokens. For these tokens, we process them with the original LLM $M_{p}$ , where we reuse the hidden state $h_{p}(w_{1},...w_{i})$ computed by the LLM. This hidden state represents the LLM’s understanding of the text context. Similar to the block autoregressive model, this context representation only needs to be computed once and is reused throughout the drafting process.  
+
+• Recent token dependency. These tokens correspond to the $K$ -gram generated by the draft model. To reduce the cost, we use a small model to compute the hidden states $h_{q}(d_{1},...,d_{j-1})$ . These hidden states encode the local status of the draft. Since $K$ is relatively small, a very simple model for $M_{q}$ suffices, which we refer to as a TLM.  
+
+By combining these two design choices, we can model recent token dependencies, as opposed to the block autoregressive model, while incurring small or negligible additional computation cost compared to the pruned autoregressive model, through the use of a TLM. This approach unifies the strengths of LLMs and TLMs for draft generation. While LLMs are powerful in understanding text semantics, they are known to be expensive to run. We thereby use them sparingly, calling them only when the context of the text is likely to have changed. In contrast, TLMs are much cheaper to run, though they struggle to parse complex semantics. We thereby only use them to handle short phrases and $K$ -grams, conditioned on the semantic understanding provided by the LLM. In this way, we achieve both high efficiency and good draft quality.  
+
+This design leads to what we call the semi-autoregressive draft model (see Fig. 2c), which is formally defined as follow:  
+
+Definition 1. (Semi-autoregressive draft model). Let $\mathbf{d}\,=\,\{d_{1},...,d_{K}\}$ be the draft tokens and $\mathbf{w}_{\le i}\,=\,\{w_{1},...,w_{i}\}$ be the tokens generated and already verified by $M_{p}$ . A semi-autoregressive draft model is a probabilistic model defined by the following probabilistic distribution:  
+
+$$
+q(\mathbf{d}|\mathbf{w}_{\leq i})=\prod_{j=1}^{K}q_{0}(d_{j}|h_{p}(\mathbf{w}_{\leq i}),h_{q}(\mathbf{d}_{<j}))
+$$  
+
+where $h_{p}(\cdot)$ and $h_{q}(\cdot)$ are the hidden states of an LLM and that of a TLM, respectively.  
+
+Inference. As discussed, sampling from the above model is highly efficient: while the computation of $h_{p}(\mathbf{w}_{\leq i})$ is expensive, it only needs to be computed once and can be reused for all draft tokens. On the other hand, $h_{q}(\mathbf{d}_{<j})$ must be recomputed for each $j$ , but this is cheap due to the light-weighted nature of $M_{q}$ , which normally requires even significantly less computation than a single decoding layer of a transformer.  
+
+![](images/8a20e30f344051b7aaa996e111f3986b1bcefdad0cc196995ce2a3bdbcda4df4.jpg)  
+Figure 3: The architecture of the semi-autoregressive draft model, which separately models distant tokens $\{w_{1},...w_{i}\}$ and recent tokens $\bar{\{d_{1},...d_{K}\}}$ with the hidden representations of the original LLM $h_{p}$ and a tiny language model (TLM) $h_{q}$ . Note that $w_{i+1}\,=\,d_{1}$ . The two models can be learned either jointly or separately using distinct Q-LoRA ranks.  
+
+4.2 IMPLEMENTATION  
+
+In this section, we discuss the detailed implementations of $M_{q}$ and the training procedure of the proposed model.  
+
+Realization of $h_{q}$ and $q_{0}$ . We consider the following two implementations of the tiny language model $M_{q}$ for processing recent tokens d. Both implementations are motivated by the fact that the number of recent tokens $K$ is small, so we only need to model short-range dependencies. Therefore, simple models are sufficient in this case, making our method significantly cheaper than conventional speculative decoding, which uses more expensive draft models.  
+
+• Simplified transformer. The first design is a one-layer transformer with hard-coded attention weights. Specifically, let $e(w)$ be the word embedding of a token $w$ . We implement the network $h_{q}(\cdot)$ as follows:  
+
+$$
+h_{q}(\mathbf{d}_{\leq j})=\frac{\sum_{l=1}^{j}\alpha_{l}\mathbf{M}\mathbf{L}\mathbf{P}(e(d_{l}))}{\sum_{l=1}^{j}\alpha_{l}}
+$$  
+
+where $\pmb{\alpha}=\left\{\alpha_{1},...\alpha_{K}\right\}\in(0,1)^{K}$ are learnable parameters and MLP is a multi-layer perceptron with two hidden layers. While fixed attention weights may be inadequate for processing long context, it exhibits as an effective method for handling short texts (Raganato et al., 2020).  
+
+• Recurrent networks. The second design involves using an LSTM (Hochreiter, 1997) or even a vanilla RNN (Hochreiter, 1997) to model the local dependencies of the draft tokens2:  
+
+$$
+h_{q}(\mathbf{d}_{\leq j})=\mathrm{LSTM}(e(d_{1}),...,e(d_{j}))
+$$  
+
+The LSTM consists of two hidden layers, and its output is the hidden state of the last draft token. While LSTMs may struggle in long-context modeling due to their fixed-sized hidden state in contrast to transformers, they are well-suited to capture short-term dependencies.  
+
+The LM head $q_{0}$ is implemented as a simple MLP model with two hidden layers, and its input is the concatenation of $h_{q}$ and $h_{p}$ .  
+
+Training procedure. We now address the question of how to train the TLM. Focusing on finetuning scenarios, we finetune the original LLM $M_{p}$ and learn the semi-autoregressive model $M_{q}$ by maximizing the following objective:  
+
+$$
+\mathcal{L}(p,q)=(1-\lambda)\mathbb{E}\Big[\sum_{i=1}^{T}\log p(w_{i}|w_{<i})\Big]+\lambda\mathbb{E}\Big[\frac{1}{k}\sum_{i=1}^{T-k}\sum_{j=1}^{k}\log q(w_{i+j}|w_{<(i+j)})\Big],
+$$  
+
+$$
+q(w_{i+j}|w_{<(i+j)})=q_{0}(w_{i+j}|h_{p}(w_{1},...,w_{i}),h_{q}(w_{i+1},...,w_{i+j}))
+$$  
+
+The expectation is taken over the fine-tuned dataset. $T$ is the number of tokens in a sample from the dataset and $\lambda\,\in\,(0,1)$ is a factor that balances the learning of $p$ and $q$ . Similar to existing literature (Cai et al., 2024), we consider two training setups:  
+
+• Separate training. In this mode, we train $p$ and $q$ in two stages, where we set $\lambda=0$ and $\lambda=1$ in the respective stages. In each stage, we freeze the parameters of $p$ when training the $q$ , and vice versa. This guarantees that the learning of $q$ will not affect $p$ ;   
+• Joint training. This corresponds to the case where we train $p$ and $q$ in one stage using a single $\lambda$ . This mode allows us to learn a $p$ whose representation is also useful for predicting more future tokens, which can potentially lead to better draft quality. However, the learning of $q$ may also ‘drag’ that of $p$ , leading to a potential degradation of $p$ ’s quality.   
+We use Q-LoRA (Dettmers et al., 2024) to train $p$ and $q$ , where we assign different ranks to the parameters in $p$ and $q$ : (a) For the parameters $\theta_{p}$ in $p$ , which include both the network $h_{p}(\cdot)$ and the original LM head, we use a LoRA rank $r_{p}$ that is much smaller than the matrix size (e.g. $r_{p}=32\$ ); (b) For the parameters $\theta_{q}$ in the TLM $q$ , which include both the network $h_{q}(\cdot)$ and the new LM head $q_{0}$ , we use a LoRA rank $r_{q}$ that is relatively larger (e.g. $r_{q}=4096)$ ). See Figure 3 for more details. 5 RELATED WORKS   
+Efficient inference schemes in LLMs (Bai et al., 2024; Xu et al., 2024; Zhou et al., 2024) have received significant attention recently due to the ever-increasing size of such models. Approaches to improving efficiency range from static methods, such as pruning (Men et al., 2024) and quantization (Ashkboos et al., 2024), which reduce overall model size and hence computational requirements, to dynamic methods, such as early-exiting (Schuster et al., 2022; Bae et al., 2023) and hybrid models (Kag et al., 2022; Ding et al., 2022; 2024), which accelerate inference by adjusting the amount of computation based on the (estimated) difficulty of a given token or prompt. Our work is complementary to these general efficiency efforts (e.g., our semi-autoregressive scheme can be easily applied on top a quantized model). Note, however, that unlike our work and other speculative decoding frameworks, such classic approaches cannot guarantee that LLM’s outputs remain identical. Non-autoregressive decoding (NAR) accelerates inference by eliminating or relaxing the sequential dependencies between tokens (Gu et al., 2018). However, NAR often suffers from reduced accuracy compared to its autoregressive counterparts. Current efforts to improve performance focus on reintroducing some degree of conditional dependence between tokens, for instance, through generative flows (Ma et al., 2019) and conditional random fields (Sun et al., 2019). Additional refinements include iterative decoding strategies (Lee et al., 2018; Ghazvininejad et al., 2019), as well as improvements to training data and loss functions (Ding et al., 2021; Du et al., 2021).   
+Speculative Decoding (Leviathan et al., 2023) is a widely used framework for accelerating LLM inference. It employs a (smaller) draft model to propose multiple tokens at once, which are then verified by a (larger) target model. Initially, a separate transformer-based language model was used as the draft model (Leviathan et al., 2023; Chen et al., 2023; Kim et al., 2024). More recent work has shifted toward using (part of) the target model itself for drafting (i.e., self-speculative decoding). For example, Medusa Decoding (Cai et al., 2024; Gloeckle et al., 2024) combines non-autoregressive (NAR) techniques with speculative decoding by training multiple LM heads conditioned on the target model’s final layer to generate draft tokens in parallel. Techniques like LayerSkip (Elhoushi et al., 2024) and FREE (Bae et al., 2023) integrate early-exit strategies by drafting with earlier layers and verifying with later layers, while Zhang et al. (2024b) adaptively skips intermediate layers for drafting. Recent works have explored the use of more light-weighted model as draft models, such as a n-gram model (Fu et al., 2024) and a small RNN (Zhang et al., 2024a), as discussed below. Light-weighted draft model design. Like our work, concurrent works have also explored taking the draft model as a small autoregressive model conditioned on the hidden states of the original LLM (Ankner et al., 2024; Zhang et al., 2024a; Li et al., 2024; Nair et al., 2024). Among these works, Zhang et al. (2024a) is similar to one of the implementations in our design. Apart from differences in practical implementation details, the major differences to these works are (a) unlike these works which focus on specific implementations, our works focuses on high-level design, which naturally connects different implementations. The disentanglement of specific implementations and high-level design allows us to explore different architecture choices with various trade-offs in drafting efficiency and draft quality; (b) Unlike existing works which primarily focus on learning the draft model on pre-trained dataset e.g. ShareGPT (2023), our work focus on fine-tuning scenarios, where the draft model is trained on specific domain data jointly or separately with the original LLM.  
+
+![](images/b5bb786a0bf265dec22ae1bdcb82a3e4911774d5d781e25f4110f1ea65a9e6f6.jpg)  
+Table 1: Summary of the tasks considered. A smaller subset of ChatDoctor is used in experiments.  
+
+
+
+\section{6 EXPERIMENTS  }
+
+
+Baselines. We compare the proposed semi-autoregressive method (denoted as ‘semi’ henceforth) with the following two representative methods in (self-)speculative decoding, both of which can be seen as different implementations of the framework specified in Eq. 2.  
+
+• Block autoregressive decoding (block). Widely known as Medusa decoding (Cai et al., 2024), this corresponds to the case where we implement the draft model as Eq. 3, which ignores the dependence between the draft tokens.  
+
+• Skip-layer decoding (skip). This corresponds to the case where we implement the draft model as a single transformer model with fewer layers (Elhoushi et al., 2024), as in Eq. 4. Here we use 8 layers, following the setups in Elhoushi et al. (2024).  
+
+Recurrent drafter (redraft). This corresponds to the design in (Zhang et al., 2024a), which can be seen as implementing $h_{q}$ in the proposed semi-autoregressive draft model (eq.5) as a RNN.  
+
+In addition to the above comparison, we also compare different implementations of the network $h_{q}$ in the proposed semi-autoregressive draft model. Some of these implementations are closely related to state-of-the-art methods such as Hydra (Ankner et al., 2024) and EAGLE (Li et al., 2024).  
+
+Evaluation metrics. We compare different (self-)speculative methods from the following angles:  
+
+• Acceleration. This metric is defined as the ratio between the wall time $t$ when decoding a sentence without speculative decoding and the wall time $t^{\prime}$ when decoding with speculative decoding:  
+
+$$
+\mathtt{A c c e l e r a t i o n:=}\frac{t}{t^{\prime}}
+$$  
+
+• Token acceptance rate. This metric measures how many tokens drafted by the draft model $M_{q}$ are accepted by the original LLM $M_{p}$ , which directly reflects the quality of the draft model $M_{q}$ . • Extra memory cost. This metric is defined as the ratio between the number of additional parameters $\theta^{\prime}$ introduced in a specific design of $q$ and the number of parameters $\theta$ in the original LLM:  
+
+$$
+\mathsf{M e m o r y C o s t:}=\frac{|\theta^{\prime}|}{|\theta|}\times100\%
+$$  
+
+• Generation quality of the target model. Finally, when we compare joint learning and separate learning, we also investigate how different designs of the draft model $M_{q}$ will affect the generation quality of the original model. Theoretically, the draft model should have no impact on the original model $M_{p}$ in speculative decoding. However, when $M_{p}$ and $M_{q}$ are trained jointly, the training of $M_{q}$ may have an impact on $p$ , as discussed in $\S4.2$ . Here, we measure generation quality by the Rouge-L score between models’ generation and the ground truth.  
+
+Tasks and models. A summary of the tasks and models considered is given in Table 1. Specifically, we use the following datasets: SQL-context (b-mc2, 2023) for SQL code generation based on user queries, SAMSUM (Gliwa et al., 2019) for text summarization, GSM8k that include 8k grade school math questions and answers, and ChatDoctor (Yunxiang et al., 2023) which is a dialogue dataset for conversations between a doctor and a patient. For ChatDoctor, we use a subset of 50k in experiments.  
+
+Computing resource. Results on SQL-context, SAMSUM, and GSM8K are computed using two A10 GPUs in under a day. Results on ChatDoctor are computed with a single A100 GPU in a day.  
+
+![](images/a0a2eae33494109d466b8b013b9aa3c2fdad06821d9e30e65cf1b9465875989e.jpg)  
+
+LSTM (a) Inference latency (b) Acceptance rate (c) Acceleration Figure 4: Comparison of different implementations of $h_{q}(\cdot)$ on SAMSUM, including Medusa, simplified transformer, LSTM, and standard transformer (denoted as Transformer) with varying number of layers. In the standard transformer implementation, the zero-layer case corresponds to taking the embedding $e(d_{j})$ of the last token $d_{j}$ as the transformer’s output, which is similar to Hydra (Ankner et al. though not identical, this implementation is closely related to two existing methods Hydra (Ankner et al., 2024) and EAGLE (Li et al. These results are collected from the first 200 samples of the test set in the SAMSUM dataset. The results clearly indicate that implementing $h_{q}$ as either a simplified transformer or an LSTM achieves a good trade-off between the two metrics: the inference latency in these two models is negligible even compared to a single transformer layer (see Fig. 4a), yet offering an acceptance rate comparable to a 6-layers transformer (see Fig. 4b). This leads to considerable acceleration as shown in Fig. 4c. This result verifies our hypothesis that even simple models are competent in handling a small number of draft tokens. On the other hand, although increasing the number of attention layers in a transformer does improve the acceptance rate owing to the increased capacity, it fails to deliver satisfactory acceleration due to higher inference latency. These results confirm our hypothesis that using standard transformer layers might be unnecessary to process a small number of (draft) tokens, and simpler designs like ours are sufficient. Another interesting result emerges when comparing our method with a transformer that has zero attention layers, which directly takes the embedding $e(d_{j})$ of the last draft token as the transformer’s output, i.e. $h_{q}(\mathbf{d}_{\leq j})\,=\,e(d_{j})$ . Unlike our approach, this setup only considers the last draft token $d_{j}$ while ignoring all previous draft token ${\bf d}_{<j}$ when predicting $d_{j+1}$ , resulting in a comparatively lower acceptance rate. This finding highlights the importance of considering the entire draft token sequence $d_{1},...d_{j}$ rather than solely considering $d_{j}$ for predicting $d_{j+1}$ . It also justifies our design of a lightweight LSTM or a simplified transformer to process the draft tokens, which is able to handle draft sequence of varying lengths while remaining computationally efficient. 6.2 FURTHER ANALYSIS Structured vs. unstructured data. From the results in Table 2, we find that the acceleration gap between our method and the block decoding method is small on code generation and math reasoning tasks. This could be due to: (i) model differences; see Table 1; and (ii) data differences, with the data in these tasks being more structured compared to others. For example, in the SQL generation task, the decoding space is smaller, making the additional dependencies introduced by our method less impactful3. To further investigate this, we conduct a more extensive comparison between our method and the block decoding method on tasks with highly structured data, where we eliminate the impact of model differences. The results in Table 3 indicate that our method only marginally improves acceleration on these tasks for both Mistral-7B and Phi-3. Specifically, while our method consistently achieves a higher acceptance rate for both models, the improvement is marginal $(\le5\%)$ ), suggesting that there are no substantial benefits for additionally considering the dependencies between the draft tokens in tasks with constrained syntax, which results in a marginal gain in acceleration.  
+
+![](images/44921937b36ac4dd4e9330fff826c925a7c7b4af211aed9356b11ab68129bf16.jpg)  
+Figure 5: Comparison between joint and separate training. Joint training typically offers a better acceptance rate and hence better acceleration, but may incur a slight drop in accuracy.  
+
+Table 3: A more detailed comparison with the block method on tasks with highly structured data.   
+
+![](images/be35f780bcc3b478a9e027d8eb7b27fd6d88c5aefbc0341fc5c6687ab7fc45fc.jpg)  
+
+Joint vs. separate training. We conducted experiments to compare these two training modes on the SAMSUM and SQL-context datasets. The key questions are: (a) how does joint training affect final acceleration, and (b) to what extent does joint training affect generation quality?  
+
+Fig. 5 presents a comparison of joint and separate training from four perspectives. Overall, joint training consistently achieves a significantly higher token acceptance rate and faster acceleration (Fig. 5a and Fig. 5b), particularly for the SQL generation task. This improvement can be attributed to better coordination $p$ and $q$ in joint training, where the model $M_{p}$ learns a representation that not only predicts the next token but also aids in predicting subsequent tokens. At the same time, we see that joint training does have a small impact on generation quality, as measured by the Rouge-L score (Fig. 5c). This minimal quality loss may be explained by our use of a relatively small factor $\lambda$ in the objective function (Eq. 8), where the training of the main model $M_{p}$ dominates the learning process.  
+
+Fig. 5d further compares the VRAM usage during training. The VRAM usage corresponds to the number of parameters in the LoRA weights. The VRAM usage of joint training mode is slightly higher than that of the separate training mode, as the former needs to simultaneously store the LoRA weights of the target model $M_{p}$ and that of the draft model $M_{q}$ .  
+
+Based on the above results, we recommend to use joint training whenever possible, but with careful attention to any potential drop in accuracy. However, we found this drop to be negligible in practice.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this work, we proposed a unified probabilistic framework for token dependency modeling and classified existing literature based on how they attempted to model the recent and distant token dependencies. We then analyzed the trade-off regarding drafting speed and acceptance rate explored in prior works. Based on these insights, we proposed an improved semi-autoregressive draft model, that processes the distant and recent tokens by the original LLM and TLM respectively for fast drafting while retaining a high acceptance rate. We proposed two variants of our scheme based on (i) a simplified transformer, and (ii) an LSTM. We validated the design of our draft model via experiments on four distinct applications, realized via model finetuning, where our model outperformed other competing methods in 3 out of 4 settings, and performed on par in the structured prediction task where the modeling of recent token dependencies carry negligible value. We further analyzed the reasons for these improvements, and highlighted several interesting avenues for future work.  
+
+
+

@@ -1,0 +1,293 @@
+\title{Eliminating Position Bias of Language Models: A Mechanistic Approach}
+
+\begin{abstract}
+Position bias has proven to be a prevalent issue of modern language models (LMs), where the models prioritize content based on its position within the given context. This bias often leads to unexpected model failures and hurts performance, robustness, and reliability across various applications. Our mechanistic analysis attributes the position bias to two components employed in nearly all state-of-the-art LMs: causal attention and position embedding. 
+Based on the analyses, we propose to \textbf{eliminate} position bias (e.g., different retrieved documents' orders in QA affect performance) with a \textbf{training-free zero-shot} approach. Our method changes the causal attention to bidirectional attention between documents and utilizes model attention values to decide the relative orders of documents instead of using the order provided in input prompts, therefore enabling \textbf{P}osition-\textbf{IN}variant inferenc\textbf{E} (\textbf{\model}) at the document level.
+By eliminating position bias, models achieve better performance and reliability in downstream tasks, including LM-as-a-judge, retrieval-augmented QA, molecule generation, and math reasoning. Notably, \model~is especially useful when adapting LMs for evaluating reasoning pairs: it consistently provides $8$ to $10$ percentage points performance gains, making \texttt{Llama-3-70B-Instruct} perform even better than \texttt{GPT-4-0125-preview} and \texttt{GPT-4o-2024-08-06} on the RewardBench reasoning set.
+$^1$ University of Illinois Urbana-Champaign, $^2$ Harvard University, $^3$ Texas A\&M University. Contact: \texttt{ziqiw9@illinois.edu}}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[!htbp]
+    \centering
+    \resizebox{\textwidth}{!}{
+    \includegraphics{figs/intro.pdf}
+    }
+    \caption{
+    Motivating examples showing how position bias affects model outputs. \textbf{Upper}: LMs are asked to select a more helpful one from two given responses. The example shows that LMs are prone to prefer the response positioned at first. \textbf{Lower Left}: LMs (\texttt{Llama-3-8B-Instruct}) are presented with 20 documents to answer a question, with only one document (the gold-standard document) containing the correct answer. The blue curve represents normal inference, while the red curve represents inference without inter-document attention (RoPE position encodings are kept, a concrete implementation is shown in the middle of Figure \ref{fig:baseline}). The height change of the \textcolor{amber}{yellow} and \textcolor{cadmiumorange}{orange} area reflects the position bias brought by \textcolor{amber}{causal attention} and \textcolor{cadmiumorange}{RoPE}: causal attention generally favors distant content, but RoPE prefers nearby content. \textbf{Lower Right}: We insert a real-world image to a large black background image at different positions and prompt VLMs (\texttt{Fuyu-8B} \citep{fuyu-8b}) to compute the loss on the ground truth token. We observe a consistent pattern that models have lower losses (black color) when images are presented at the bottom.}
+    \label{fig:intro}
+\end{figure}
+
+\label{sec:intro}
+Language models (LMs) \citep{brown2020language, chowdhery2022palm, touvron2023llama, achiam2023gpt} demonstrate impressive performance in general language tasks such as dialogue \citep{thoppilan2022lamda},  reasoning \citep{chowdhery2022palm}, and schema induction~\cite{hierarchicalschema2023}. 
+However, they tend to favor content at certain positions \citep{zheng2024judging, zheng2024large, wang-etal-2023-primacy, dominguez2023questioning, zhu2023judgelm, chen2024premise, liu2024lost}, which harms complex reasoning \citep{chen2024premise}, long-context understanding \citep{liu2024lost} and model-based evaluation \citep{zheng2024judging}. Different from \textit{ad hoc} solutions from previous works \citep{ratner-etal-2023-parallel, cai2023scaling, hao2022structured, junqing2023never, zhu2023judgelm}, we seek to understand the causes of position bias and propose to eliminate (not just mitigate) the position bias without training and searching. 
+
+We start by analyzing the key components of state-of-the-art LMs -- Casual Attention and Position Embedding. They are the key to the success of Transformers \citep{vaswani2017attention}, and are also the only two operations in Transformers \citep{vaswani2017attention} that will bring undesirable position bias.This claim could be obtained through  a concise logical proof (Section \ref{sec:analysis}). Moreover, we find an interesting phenomenon through simple experiments: the most popular Rotary Position Embedding \citep{su2024roformer} is shown to have recency bias \citep{su2024roformer, peysakhovich2023attention} due to its long-form attention weight decay w.r.t. the increase of relative positions, and the causal attention forces unidirectional information propagation, enabling models to pay more attention to distant content. Figure \ref{fig:intro} lower left shows this retrieval-augmented QA \citep{liu2024lost} experiment. The height change of the yellow area and orange area reflects the position bias of causal attention and RoPE. Since the yellow area is mostly wider at the beginning and the orange area generally becomes wider at the end (except for the last data point), this shows that the causal attention generally tends to favor distant content, while RoPE generally tends to favor nearby content.\footnote{More supporting experiments to this hypothesis in Section \ref{sec:lim_exp}.}
+
+Since the attention and position embedding are the causes of position bias, we propose \model~that can eliminate position bias by manipulating causal attention and RoPE to attend to different content equally. Take the retrieval augmented QA \citep{liu2024lost}, a task requiring LMs to answer questions based on retrieved documents, for example. The orders of retrieved documents should not affect the final results. To achieve this, we make the inter-document attention bidirectional so that the attention mask will equally attend to all documents.
+Next, we compute importance scores between documents and use them to re-assign document positions so that positions in the original inputs are discarded. 
+We prove resulting approach enables \textbf{P}osition-\textbf{in}variant inferenc\textbf{e} (\model) w.r.t. documents in a \textbf{training-free/zero-shot} manner.
+
+To justify the effectiveness of \model, we select four tasks: LM-as-a-judge \citep{zheng2024judging}, which prompts LMs to choose the more helpful one from two given responses to a question; retrieval-augmented question-answering \citep{liu2024lost}; molecule generation based on provided properties; and math reasoning. In different tasks, ``documents" have different meanings: responses in LM-as-a-judge, properties in molecule generation, and conditions in math reasoning. Notably, we find our method especially useful when LMs are used to assess reasoning pairs: \model with \texttt{Llama-3-70B-Instruct} perform even better than \texttt{GPT-4-0125-preview} and \texttt{GPT-4o-2024-08-06} on the RewardBench \citep{RewardBench} reasoning set.
+
+To summarize, we:
+\begin{itemize}[leftmargin=*]
+\item We pinpoint the causes of position bias in transformers: causal attention and position encoding (Section \ref{sec:analysis}). We then propose a training-free approach dubbed \model that can eliminate (with proof) the position bias given documents presumed to be position-invariant (Section \ref{sec:method}).
+\item Four popular tasks across the general domain to expert domains (chemistry and math) show \model~can bring performance gains consistently across different models and sizes.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\textbf{Position Bias in LMs}.
+Position bias widely exists in LMs
+\citep{zheng2024judging, zheng2024large, wang-etal-2023-primacy, zhu2023judgelm, chen2024premise, liu2024lost, shi2024judging}. The LM-as-a-judge task offers models two candidate responses to a question and asks models to select the more helpful one. It turns out that LM has a primacy bias that tends to favor the first response \citep{zheng2024judging}. 
+Retrieval-augmented QA asks LM to answer a question based on retrieved documents. \citet{liu2024lost, peysakhovich2023attention} find that LMs  are prone to answer correctly when the document that contains the correct answer is presented at the beginning and the end of retrieved documents. \citet{zheng2024large} points out that models favor options at certain positions (e.g., prefer ``A'') in multiple-choice QA. In the in-context learning task, \citet{zhang2024batch, xu2024context} find that the order of in-context examples affects the final performance. Recently, several papers have proposed to understand the nature of position bias through prompting \citep{zhang2024attention} and calibration \citep{hsieh2024found}. Our paper analyzes the phenomenon from the mechanical perspective: the computation must be positional-invariant to eliminate position bias.
+
+\textbf{Position Bias Solutions in LMs}. 
+\textit{Mitigating} position bias have been studied by many literature from many aspects, such as data augmentation with training \citep{junqing2023never, zhu2023judgelm}, content sorting by attention value during inference \citep{peysakhovich2023attention}, searching \citep{yu2024mitigate, adila2024discovering}, and calibration \citep{hsieh2024found}. Moving one step forward, some other solutions are designed to \textit{eliminate} position bias. \citet{zheng2024large, zheng2024judging} use permutation then average on classification tasks, which will have unacceptable $\mathcal{O}(k!)$ ($k$ is the number of segments) computational overhead when $k$ is large. \citet{hsieh2024found} assumes that the position bias and real relevance are linear combinations and propose solutions accordingly. Different from them, we aim to \textit{eliminate} the position bias from the mechanical perspective without any assumption at a reasonable cost. Although several existing approaches are from the mechanical perspective \citep{ratner-etal-2023-parallel, cai2023scaling, hao2022structured}, they only perform well in classification tasks and fail in a more general setting: language generation.
+
+
+\section{Methodology}
+
+We start by running an example to illustrate position bias, followed by analyzing the cause of position bias, and end with our own approach \model.
+
+\subsection{Formulation}
+\label{sec:formulation}
+We take retrieval-augmented QA as an example, where current LMs' performance may greatly suffer from position bias \citep{liu2024lost}. The task requires the model to answer a question based on a set of given retrieved documents, where only one of them contains the correct answer. The system prompt \textsc{SYS} is: ``\texttt{Write a high-quality one-sentence answer for the given question using only the provided search results (some of which might be irrelevant).}''. Given a question \textsc{Q}, and three retrieved documents: $\mathcal{D}_1$, $\mathcal{D}_2$, and $\mathcal{D}_3$, we can formulate several different inputs. 
+For example, $[\textsc{SYS} | \textsc{Q} | \mathcal{D}_1 | \mathcal{D}_2 | \mathcal{D}_3]$, and $[\textsc{SYS} | \textsc{Q} | \mathcal{D}_2 | \mathcal{D}_3 | \mathcal{D}_1]$.
+We expect models to have the same output for these inputs because $\mathcal{D}_2, \mathcal{D}_3, \mathcal{D}_1$ are \textbf{position-agnostic documents}: their relative order is not supposed to affect the final result. However, the current LMs answer differently when presented with these different inputs and tend to answer correctly when the document contains the answer at the beginning or at the end of all documents \citep{liu2024lost}. 
+The systematic differences of model outputs caused by relative positions of documents reflect the \textbf{position bias} of the model. Therefore, current LMs cannot conduct \textbf{inter-document position-invariant} inference, and our goal is to make the inference invariant w.r.t. relative document orders. In the rest of this section, we will use this running example. However, we emphasize that ``documents" have different meanings in different tasks: responses in LM-as-a-judge, properties in molecule generation, and conditions in math reasoning. Therefore, readers should be aware that the method is not just designed for a single task. In the rest of the paper, we merge SYS and Q into SYS for simplicity.
+
+\subsection{Causal Attention and Position Embedding Are The Cause of Position Bias}
+\label{sec:analysis}
+Feed-forward networks (FFNs), Query, Key, and Value (QKV) projections, and layer normalization in the Transformer architecture do not cause position bias, as they yield the same representations regardless of document positions. 
+Rather, the attention computation that leads to the position bias: 
+\begin{equation}
+\begin{aligned}
+    \mathbf{Q}_\text{\pe} = \text{\pe}(\mathbf{Q}, \mathbf{pos}_\mathbf{Q}), \mathbf{K}_\text{\pe} = \text{\pe}(\mathbf{K}, \mathbf{pos}_\mathbf{K}) \\
+    \mathbf{H} = \text{Softmax}\left(\mathbf{Q}_\text{\pe}\mathbf{K}_\text{\pe}^T / \sqrt{d}\right)\odot \textcolor{mayablue}{\mathbbm{1}_\text{causal}}\mathbf{V}
+\end{aligned}
+\label{eq:att}
+\end{equation}
+where $\mathbf{Q}, \mathbf{K}, \mathbf{V} \in \mathbb{R}^{n\times d}$ are queries, keys, and values,  \pe~donotes the position encoding, $\mathbf{pos}_\mathbf{Q}$ and $\mathbf{pos}_\mathbf{K}$ denote the position of queries and keys, and \textcolor{mayablue}{$\mathbbm{1}_\text{causal}$} denotes the causal attention mask. Eq. \ref{eq:att} reveals that (1) the PE function yields different representations for documents if their orders changes, therefore affecting the importance score $Q_\text{\pe}K_\text{\pe}^T$ and hidden states; (2) the \textcolor{mayablue}{$\mathbbm{1}_\text{causal}$} generates different attention masks for the input documents if we change their positions, resulting in different hidden states. To achieve inter-document position-invariant inference, \textbf{$\mathbf{H}$ must remain the same regardless of documents' orders}.
+\subsection{\model: Inter-Document Position-Invariant Inference via Bidirectional Attention
+}
+\label{sec:method}
+
+\begin{figure}
+    \centering
+    \resizebox{\textwidth}{!}{
+    \includegraphics{figs/method.pdf}
+    }
+    \caption{\model: inter-document position-invariant inference via bidirectional attention. The attention matrix of the running example in Section \ref{sec:formulation} is at the left of the figure, the \textcolor{cadmiumorange}{orange}, different \textcolor{mayablue}{blue}, and \textcolor{applegreen}{green} colors denote \textcolor{cadmiumorange}{system prompts} (1 token), \textcolor{mayablue}{three different documents} (2 tokens each) and \textcolor{applegreen}{decoded tokens} (1 token), respectively. The number at $(i,j)$ in the figure, $p_{ij}$, denotes the position of a token $j$ when computing the attention from query $\mathbf{q}_i$. Therefore, $p_{\cdot j}$ is equal for all $i$ in vanilla inference. \model~enables inter-document bidirectional attention and then uses attention scores between documents to compute their importance. Then, documents are sorted by importances: more important documents are placed in closer positions. The computation of ``importance score'' is introduced in Section \ref{sec:method}.}
+    \label{fig:method}
+\end{figure}
+
+Our goal is to obtain an inter-document position-invariant hidden state $\mathbf{H}_\text{\model}$, which does not change regardless of document orders. We can mechanistically eliminate the position bias by equally attending to all documents.  Therefore, we propose \model, an approach that uses bidirectional inter-segment attention and re-assigning positions by importance scores (computed from attention score) to eliminate position bias (Figure \ref{fig:method}).
+
+\textbf{Bidirectional Attention.} We first change the attention mask so that documents can attend to each other. Specifically, we make the inter-document attention \textbf{bidirectional}
+but keep the intra-document attention \textbf{causal} (Figure \ref{fig:method}, middle). Our goal is to eliminate ``inter'' position bias among different documents rather than ``intra'' position bias within each document. The latter will lose the order information of tokens, and models can degenerate into bag-of-words models, which is not what we expect.
+\textbf{Re-assign Positions: Sorting By Importance Scores.} Re-assigning positions must consider two folds: the position of queries and keys. Each token in conventional LMs has the same position when serving as both query and key. In the bidirectional attention we use, this assignment has to be reconsidered. First, LMs are trained causally, meaning the position of the query must be larger than the keys in the attention computation. Therefore, it is necessary to manipulate positions so that each document is the \textbf{last} document when serving as queries (the diagonal of the rightmost figure in Figure \ref{fig:method}). For tokens before and after documents, their positions are not affected when serving as queries.
+
+Re-assigning positions for keys must be redesigned to eliminate position bias. We determine the positions of documents based on importance scores when they serve as keys (numbers in the rightmost part of Figure \ref{fig:method}). Specifically, we first compute the attentions without position embedding involved: $\text{Importance}_{\text{token}}(i, j) = \text{Softmax}( \mathbf{q}_i\mathbf{k}_j^T/ \sqrt{d})$, where $d$ is the hidden state dimension. Then, we obtain the importance score between documents by aggregation. For example, 
+$\text{Importance}(\mathcal{D}_1, \mathcal{D}_2) = \sum_{i \in \mathcal{D}_1, j \in \mathcal{D}_2} \text{Importance}_{\text{token}}(i, j) / |\mathcal{D}_2|$. The length normalization is to prevent assigning higher importance scores to longer documents. The importance score could also be computed between individual tokens (e.g., Token 8) and documents. Lastly, we re-assign positions by importance scores as shown in the rightmost part of Figure \ref{fig:method}: more important documents will have closer positions to the query. The rightmost part of Figure \ref{fig:method} shows the concrete position re-assignment for keys (its diagonal also represents the position re-assignment for queries). To avoid confusion, we address the fact that we do not actually sort tokens and only re-assign them to different positions. In our position re-assignment, the position of keys may vary depending on the queries (numbers in column are different), which is the key difference between \model~and vanilla inference. Besides, our method is not limited to specific position embedding types.  
+
+\textbf{Inter-Document Position Invariant Inference.} Once we have new attention mask and position re-assignment, we can place them into Equation \ref{eq:att}, and obtain $\mathbf{H}_\text{\model}$. By applying $\mathbf{H}_\text{\model}$ to every layer, attention heads, and tokens, we reach our method \model. We prove that:
+
+\begin{lemma}
+    If the input $\mathbf{Q}, \mathbf{K}, \mathbf{V}$ are inter-document position-invariant representations, then $\mathbf{H}_\text{\model}$ are also inter-document position-invariant representations.
+\end{lemma}
+
+\begin{theorem}
+    Given an input, if $\mathbf{H}_\text{\model}$ is applied to every layer, attention head, and token to replace the conventional attention computation, then the model outputs are inter-document position-invariant representations.
+\end{theorem}
+
+The lemma can be proved by showing that (1) importance scores and position re-assignment are not a function of input document positions, and (2) bidirectional attention mask is not a function of document positions. The theorem can be proved by mathematical induction by (1) lemma, (2) FFN, QKV projection, and layer norm yield representations that are not a function of document positions, and (3) the embedding representation is not a function of document positions. We also suggest you read the proof if you feel unclear about the workflow of \model~, as we will go through a concrete example in the proof.
+
+Some takeaways that are worth noting: (1) Both bidirectional attention mask and position re-assignment are needed to complete the proof. (2) \model~needs to be applied to every layer, attention heads, and tokens to complete the proof. (3) \model~is not limited to specific position embedding types.
+\subsection{Discussion}
+\label{sec:discuss}
+\textbf{Different Position Re-Assignment Methods.} \model~puts documents with higher importance scores to a closer position to queries. Another option is to put documents with higher importance scores in a more distant position to the queries. Considering the recency bias brought by the most popular rotary position embedding (RoPE) \citep{su2024roformer}, this alternative approach makes RoPE ``disrespect" the attention of models. Therefore, we believe this alternative choice is not optimal, which is justified by our experiments in Section \ref{sec:lim_exp}. 
+
+\begin{figure}
+    \centering
+    \resizebox{0.8\textwidth}{!}{
+    \includegraphics{figs/baseline.pdf}
+    }
+    \caption{Previous work PCW \citep{ratner-etal-2023-parallel} eliminates position bias by first masking all inter-document attention and then re-assigning all documents the same positions. The notions are kept the same as Figure \ref{fig:method}. Our experiment in Section \ref{sec:exp} shows that PCW brings severe performance drop for tasks requiring language generation.} 
+    \label{fig:baseline}
+\end{figure}
+
+\textbf{Different Attention Masks.} Previous work PCW \citep{ratner-etal-2023-parallel} adopts a different way: it masks the inter-document attention instead of making it bidirectional (Figure \ref{fig:baseline}, middle and right). Accordingly, it adopts a simplified position re-assignment method of ours: putting all documents in the same positions. However, masking all inter-document attention loses contextual information (the white part surrounded by colored blocks in Figure \ref{fig:baseline}). Moreover, some different tokens now share the same positions (Figure \ref{fig:baseline}, right), which could confuse models. As a result, PCW performs poorly in language generation tasks (Section \ref{sec:exp}).
+
+\textbf{Inference Cost.} \model~incurrs additional computation overhead due to extra operations. Practically, the extra big $\mathcal{O}$ computation complexity to obtain hidden states is $\mathcal{O}(nk\log k)$, where $n$ and $k$ denote text length and the number of input documents, respectively. The bidirectional attention does not bring extra cost, the position re-assignment brings $\mathcal{O}(k\log k)$ for each token since the sorting algorithms are involved. The real computation cost is acceptable since $k$ is usually small (e.g., $k=2$ in the LLM-as-a-judge task and $k=20$ in the retrieval-augmented QA). Section \ref{sec:overhead} shows results of real-world wall time and memory cost. 
+
+
+
+\section{Experiment}
+
+\label{sec:exp}
+
+Our experiments aim to show \model~can improve model performance across diverse tasks and have superior performance than other approaches.
+\subsection{Settings}
+\label{sec:setting}
+
+We select four tasks that pose position bias: LM-as-a-judge \citep{zheng2024judging} that prompts LMs to select a better response out of two given a question, retrieval-augmented question-answering \citep{liu2024lost} that asks LMs to answer questions based on retrieved documents, molecule generation based on provided properties \citep{Ramakrishnan2014QuantumCS}, and math reasoning based on several given conditions \cite{chen2024premise}. We follow previous work \citep{liu2024lost, RewardBench} and use temperature 0 in avoid variance.
+
+\textbf{LM-as-a-judge.} We benchmark our method on 23 datasets in the RewardBench\footnote{Apache-2.0 license. We use the official data split, prompts, and evaluation scripts to ensure reproducibility. We use LLaMa-3-Instruct models \citep{llama3} and Qwen-1.5-Chat models \citep{qwen} for experiments. To show how positions affect results, we present four results: the ground-truth response is positioned at first, second, or shuffled, and \model~results (which yield the same results for all three scenarios above).
+
+\textbf{Retrieval-augmented QA.} We follow the settings and use the prompts, data, and evaluation scripts of \citep{liu2024lost}\footnote{MIT license. We use LLaMa-3-70B-Instruct model \citep{llama3} for experiment. To show how positions affect results, we present several results: the ground-truth document is positioned at the beginning, middle, last, or shuffled, and \model~results (which yield the same results for all scenarios above). 
+
+\textbf{Molecule Generation.} In this task, the input contains several properties that are interchangeable, and LMs are asked to generate molecules that satisfy these properties. We train such an LM with QM9 \citep{Ramakrishnan2014QuantumCS} dataset. The QM9 dataset collects over $130k$ 3D molecules with 3D structures \citep{li2024geometryinformedtokenizationmolecules} calculated by density functional theory (DFT). Each molecule in QM9 has less than 9 heavy atoms, and its chemical elements all belong to H, C, N, O, F. We take six quantum property values as the conditional input to LMs and train LMs to generate molecules with the conditioned quantum property values. We split the training dataset of QM9 to two subsets where each subset has $50k$ samples, and train LMs and an EGNN-based quantum property prediction models \citep{satorras2021egnn} on these two subsets, respectively. The six quantum properties are polarizability ($\alpha$), HOMO energy ($\epsilon_{\text{HOMO}}$), LUMO energy ($\epsilon_{\text{LUMO}}$), HOMO-LUMO gap ($\Delta\epsilon$), dipole moment ($\mu$) and heat capacity at $298.15$K ($C_v$). The LM is a 8-layer Llama model with 8 attention heads and 768 hidden dimensions. To evaluate the performance, we sample 10000 sets of 6-property conditions, randomize the property order in each condition, and generate molecules conditioned on these property values by the trained LM, and compute the mean absolute difference (MAE) between the given property values and the property values of the generated molecules. Note that we use the trained EGNN-based property prediction models to calculate the property values of the generated molecules.
+
+\textbf{Math Reasoning.} We use R-GSM \citep{Chen2024PremiseOM}, a subset of GSM8K. This small dataset (which contains 220 problems) is designed to test LMs' performance with interchangeable premise orders. Problems in the dataset contain several conditions that do not have a progressive relationship. Therefore, their positions are interchangeable. We further clean this dataset to remove problems where conditions do not read smoothly after changing positions (e.g., use pronouns in the first condition but introduce names in the second condition), yielding a small set containing 95 problems. We test Qwen-1.5 models on this dataset.
+
+\textbf{Baselines.} The goal of \model~is to eliminate position bias during inference mechanically. Therefore, we choose methods that have the same design principle as our baselines: (1) Vanilla inference (2) Vanilla inference with no inter-document attention (NIA for short, i.e., the middle figure in Figure. \ref{fig:baseline}): The latter documents will have no attention to formers. (3) Parallel Context Window (PCW, rightmost in Figure. \ref{fig:baseline}) \citep{ratner-etal-2023-parallel}: PCW extends the baseline (2) by manipulating positions of documents. PCW allows all documents to share the same positions. (4) Structured Prompting (SP, a variant version of PCW) \cite{hao2022structured}: SP extends (3) by lowering attentions between decoded tokens and input documents to $\frac{1}{N}$ to solve the perplexity exploding problem in PCW. Similar to the proof in Section \ref{sec:method}, we can know that (1) and (2) are not inter-document position invariant, whereas (3) and (4) are. Beyond these methods, we also introduce two other debiasing baselines: permutation \citep{zheng2024large} and calibration \citep{Zhao2021CalibrateBU}.
+
+\begin{table}[!t]
+    \centering
+    \caption{The portion of data (\%) that models have position bias in RewardBench, i.e., models change answers after swaping candidate responses orders. We color the subsets that have more than $25\%$ data causing position bias with \textcolor{cyan}{cyan}.}
+    \label{tab:rewardbench_stat}
+    \begin{tabular}{@{} l l| c c c c c @{}}
+    \toprule
+       \bf Model &\bf Size & \bf Chat &\bf Chat-Hard &\bf Safety &\bf Reasoning &\bf Avg.\\
+    \midrule
+         \multirow{2}{*}{\shortstack[c]{LLaMa-3 \\ -Instruct}} & 8B & $10.3$ & $21.5$ & $11.4$ & $\textcolor{cyan}{27.6}$ & $17.7$\\
+         & 70B & $3.6$ & $16.0$ & $5.8$ & $15.2$ & $10.2$\\
+    \midrule
+    \multirow{6}{*}{\shortstack[c]{Qwen-1.5 \\ -Chat}} & 1.8B & $\textcolor{cyan}{33.5}$ & $\textcolor{cyan}{37.9}$ & $24.7$ & $13.3$ & $27.4$ \\
+    & 4B & $\textcolor{cyan}{48.0}$ & $\textcolor{cyan}{38.6}$ & $\textcolor{cyan}{57.4}$ & $12.7$ & $39.2$\\
+    & 7B & $17.0$ & $20.6$ & $10.9$ & $\textcolor{cyan}{26.5}$ & $18.8$\\
+    & 32B & $7.8$ & $20.0$ & $9.6$ & $\textcolor{cyan}{26.4}$ & $16.0$\\
+    & 72B & $10.9$ & $22.6$ & $9.6$ & $24.7$ & $17.0$\\
+    & 110B & $8.7$ & $16.0$ & $11.5$ & $23.5$ & $14.9$\\
+                                            
+    \bottomrule
+    
+    \end{tabular}
+\end{table}
+
+\begin{table}[!t]
+    \centering
+    \caption{Main results of RewardBench. Vanilla denotes the normal inference, (GT at A) means the ground truth chosen response is presented at the first, and (GT at B) indicates the second. For the 72B model, we additionally benchmark the Qwen 2.5 model. \model consistently improves LM's performance across different models and sizes and is particularly useful when assessing reasoning pairs.
+    }
+    \label{tab:rewardbench}
+    \adjustbox{max width=\textwidth}{
+    \begin{tabular}{l | c c | c c c c c c}
+    \toprule
+      \multirow{2}{*}{Method} & \multicolumn{2}{c|}{Llama-3-Instruct} & \multicolumn{6}{c}{Qwen-1.5-Chat} \\
+      & 8B & 70B & 1.8B & 4B & 7B & 32B & 72B / 72B (Qwen 2.5) & 110B \\
+      \midrule
+    \multicolumn{9}{c}{RewardBench (Full set)} \\
+    \midrule
+    Vanilla (GT at A) & $67.5$ & $78.0$ & $36.3$ & $29.5$ & $61.4$ & $74.2$ & $79.6$ / $87.2$& $87.2$\\
+    Vanilla (GT at B) & $66.3$ & $76.5$ & $66.2$ & $76.6$ & $59.6$ & $74.8$ & $69.5$ / $80.5$& $75.7$\\
+    \midrule
+    Vanilla & $64.8$ & $76.0$ & $50.3$ & $53.1$ & $60.9$ & $72.8$ & $72.8$ / $83.4$ & $81.1$\\
+    \model & $\bm{66.7}_{\bm{\textcolor{ggreen}{+1.9}}}$ & $\bm{77.4}_{\bm{\textcolor{ggreen}{+1.4}}}$ & $\bm{52.9}_{\bm{\textcolor{ggreen}{+2.6}}}$ & $\bm{58.2}_{\bm{\textcolor{ggreen}{+5.1}}}$ & $\bm{61.5}_{\bm{\textcolor{ggreen}{+0.6}}}$ & $\bm{74.8}_{\bm{\textcolor{ggreen}{+2.0}}}$ & $\bm{71.8}_{\bm{\textcolor{gred}{-1.1}}}$ / $\bm{84.5}_{\bm{\textcolor{ggreen}{+1.1}}}$ & $\bm{82.9}_{\bm{\textcolor{ggreen}{+1.7}}}$ \\
+    \midrule
+    \multicolumn{9}{c}{RewardBench (Reasoning set)} \\
+    \midrule
+    Vanilla (GT at A) & $80.3$ & $87.8$ & $43.3$ & $42.8$ & $62.1$ & $78.3$ & $83.0$ / $93.7$ & $90.0$\\
+    Vanilla (GT at B) & $66.0$ & $80.3$ & $57.2$ & $62.3$ & $54.3$ & $73.6$ & $68.7$ / $76.0$ & $73.0$\\
+    \midrule
+    Vanilla & $65.3$ & $78.9$ & $48.4$ & $54.1$ & $59.3$ & $66.8$ & $68.2$ / $85.5$ & $78.0$\\
+    \model & $\bm{73.4}_{\bm{\textcolor{ggreen}{+8.1}}}$ & $\bm{87.6}_{\bm{\textcolor{ggreen}{+8.7}}}$ & $\bm{60.1}_{\bm{\textcolor{ggreen}{+11.7}}}$ & $\bm{61.0}_{\bm{\textcolor{ggreen}{+6.9}}}$ & $\bm{63.0}_{\bm{\textcolor{ggreen}{+3.7}}}$ & $\bm{76.7}_{\bm{\textcolor{ggreen}{+9.9}}}$ & $\bm{69.0}_{\bm{\textcolor{ggreen}{+0.8}}}$ / $\bm{91.3}_{\bm{\textcolor{ggreen}{+5.8}}}$ & $\bm{86.2}_{\bm{\textcolor{ggreen}{+8.2}}}$ \\
+         
+    \bottomrule
+    
+    \end{tabular}}
+\end{table}
+
+\begin{table}[!t]
+    \centering
+    \caption{Baseline performance on RewardBench. \model~achieves superior performance to baseline models, performing $4.8\%$ and $4.7\%$ better than the best performed baseline on two models. }
+    \label{tab:rewardbench_baseline}
+    \begin{tabular}{@{} l c c | c c @{}}
+    \toprule
+    \multirow{2}{*}{\bf Method} & \multicolumn{2}{c|}{LLaMa-3-8B-Instruct} & \multicolumn{2}{c}{Qwen1.5-7B-Chat}\\
+        &\bf Reasoning &\bf Full Set &\bf Reasoning &\bf Full Set\\
+    \midrule
+          NIA (GT at A) & $43.7$ & $56.3$ & $60.7$ & $61.3$\\
+          NIA (GT at B) & $66.7$ & $65.8$ & $44.1$ & $52.2$\\
+        \cmidrule{1-5}
+          NIA & $55.9$ & $61.9$ & $51.4$ & $56.8$\\
+          PCW & $56.5$ & $61.7$ & $53.4$ & $55.2$\\
+          SP & $55.4$ & $60.8$ & $52.4$ & $55.4$\\
+          \model & $\bm{73.4}_{\bm{\textcolor{ggreen}{+16.9}}}$ & $\bm{66.7}_{\bm{\textcolor{ggreen}{+4.8}}}$ &$\bm{63.0}_{\bm{\textcolor{ggreen}{+9.6}}}$& $\bm{61.5}_{\bm{\textcolor{ggreen}{+4.7}}}$\\
+    \bottomrule
+    \end{tabular}
+\end{table}
+\subsection{Results on LM-as-a-judge}
+\textbf{Position bias exists across different models and sizes.} Table \ref{tab:rewardbench_stat} shows the statistics of position bias in RewardBench with different models. Position bias is quite common in RewardBench, and can be up to $48.0\%$. Larger models have less position bias, however, the position bias could still on average affect up to $10\%$ data. 
+\textbf{\model~consistantly improve model performance across models and sizes.} Table \ref{tab:rewardbench} shows the main results on RewardBench. We experiment with Llama-3 and Qwen-1.5 across different model sizes. The position of the ground truth chosen option is randomly shuffled. Therefore, the accuracy of the random guess method is expected to be $50\%$. First, the first two rows reveal that larger models tend to have a primacy bias, whereas smaller models tend to have a recency bias. By comparing the last two rows of each model size, we conclude that models across different sizes perform better with the help of \model by eliminating position bias. The only exception is the Qwen-1.5-72B-Chat model. We suspect this model is not well-trained since Qwen-1.5-32B-Chat performs the same as the 72B model in vanilla inference, despite half of the model size. Qwen 2 report \citep{yang2024qwen2} also shows that the Qwen 1.5B 72B model performs even worse than 32B in reasoning. Moreover, Table \ref{tab:rewardbench} shows that Qwen 2.5 72B can obtain consistent performance gains. Overall, \model~improves performance from a statistical perspective and makes models more reliable when as evaluators.
+\textbf{\model~is extremely useful when assessing reasoning pairs.} \model consistently improves model performance on the ``reasoning" subset by a large margin: from $8$ to $10$ percentage points in most cases. Speficially, LlaMa-3 Instruct 70B is originally is ranked 22nd generative model in the reasoning subset of RewardBench. With \model, it achieves the 7th rank ($87.6\%$), \textbf{outperforming \texttt{GPT-4-0125-preview} (the previous 8th rank, $86.9\%$), \texttt{GPT-4o-2024-08-06} (the previous 9th rank, $86.6\%$), and \texttt{Llama-3.1-405B-Instruct-Turbo} (the previous 7th rank, $87.1\%$)}.\footnote{Results are provided by the official leaderboard (as of Sep 17, 2024): \url{https://huggingface.co/spaces/allenai/reward-bench}}.
+
+\textbf{\model~performs better than baseline models that adopt different attention masks.} We then compare \model~with baseline models mentioned in Section \ref{sec:setting} on Llama-3-8B-Instruct and Qwen1.5-7B-Chat model. They adopt a different attention mask: masking inter-document attention instead of making them bi-directional. Since NIA is not inter-document position-invariant, we also apply NIA with two extreme cases: the ground truth chosen response is always in the first or second place. Results on Table \ref{tab:rewardbench_baseline} show that \model~achieves the best performance and largely outperforms the best baselines by $\sim5\%$, and outperforms NIA even if NIA is placed in the extreme case. On the reasoning subset, this performance gap becomes much even greater. The results reveal that masking inter-document attention mask is much less effective than bidirectional inter-document attention mask applied in \model.
+
+Another two widely used debiasing methods are permutation \citep{zheng2024large} and calibration \citep{Zhao2021CalibrateBU}. They are usually used in the logit-based evaluation or single-token generation. Their effectiveness in the open-ended generation is less explored. In our experiments, we find calibration methods generates rubbish responses, which we believe is because of the strong assumption in \citep{Zhao2021CalibrateBU}: uniform distribution of all tokens in the generation task. For the permutation methods, we find LLama-3-8B-Instruct have $69.0\%$ and $65.9\%$ accuracy, Qwen1.5-7B-Chat has $58.2\%$ and $61.3\%$ accuracy on the reasoning set and fullest respectively, all underperforming \model (numbers reported in Table \ref{tab:rewardbench_baseline}).
+
+\subsection{Results on Retrieval-Augmented Question-Answering}
+\label{sec:lim_exp}
+
+\begin{figure}[!t]
+    \centering
+    \resizebox{\textwidth}{!}{
+    \includegraphics{figs/lim.pdf}
+    }
+    \caption{The results of retrieval-augmented QA on Llama-3-70B-Instruct. Dashed lines indicate that the method is either inter-document position-invariant or the result is obtained on the order-shuffled data (denoted in the legend). (a) shows results of \model~against baselines. (b) shows results of different designs of \model.}
+    \label{fig:lim}
+\end{figure}
+
+\textbf{\model~performs better than baselines, on-par with vanilla inference on average while not being affected by the worst case.} Models tend to perform better when the gold-standard document is at the beginning and the end of all documents in retrieval-augmented question-answers. Figure \ref{fig:lim} (a) shows the results on LLaMa-3-70B-Instruct when 10 or 20 documents were presented. First, it is easy to conclude that all baselines are much worse than \model~(the pink line), which is consistent to the previous experiment. Second, \model~ achieves on-par performance on average compared with vanilla inference while being inter-document position invariant. Specifically, \model~ is slightly better/worse than vanilla inference with the gap \textcolor{ggreen}{+1.2}/\textcolor{gred}{-2.0} when there are 10 and 20 documents in total. We hypothesize that the slight performance drop of \model~ for the 20 document setting is due to the performance drop of document importance score computation in \model when presented with many documents. However, \model~is position-invariant, therefore does not be affected by the worst case (the bottom of blue solid curves). Third, the height generally becomes smaller between blue and brown solid lines in Figure \ref{fig:lim} (a), and between the blue and red solid lines in Figure \ref{fig:lim} (b) when the gold-standard document position increases, reflecting the causal attention generally prefers distant content, which is consistent to the hypothesis in Section \ref{sec:analysis}. The brown line in Figure \ref{fig:lim} (a) and red line (b) generally reflect recency bias brought by RoPE, which is consistent to previous works \citep{su2024roformer, peysakhovich2023attention}.
+\textbf{\model~performs better than other position assignment methods.}
+So far, our experiments show that bidirectional inter-document attention is the better design choice than the masked one. However, there are still several design options for the position assignment, as discussed in Section \ref{sec:discuss}. The first option is to re-assign position reversely, and the other is to use \model~without position re-assignment (i.e., use input document positions when they serve as keys). To gain a deeper understanding, we extend the retrieval-augmented QA experiments with the two mentioned alternative position assignment methods, and the results are presented in Figure \ref{fig:lim} (b). The figure tells us that \model~is slightly better than \model~ without position re-assignment on average (\textcolor{ggreen}{+0.3}. The gap becomes larger when 20 documents are presented: \textcolor{ggreen}{+1.5}). Position re-assignment reversely has relatively worse results, showing that \model~is a better design choice, which is consistent with the intuitive analysis mentioned in Section \ref{sec:discuss}. Although position re-assignment seems only to bring less gains than bidirectional attention mask, it is required to complete the proof that \model~can \textit{eliminate} the position bias. Therefore, \model~without position re-assignment may suffice if one does not aim to eliminate the position bias and cares more about efficiency (no extra $\mathcal{O}(nk\log k)$ sorting cost).
+
+\begin{table}[]
+    \centering
+    \caption{The result of molecule generation on QM9 dataset. \model~improves model performance in 5 out of 6 criteria.}
+    \label{tab:molecule}
+    \begin{tabular}{c|cccccc}
+    \toprule
+         \bf Model &  $\alpha$ & $\epsilon_{\text{HOMO}}$ & $\epsilon_{\text{LUMO}}$ & $\Delta\epsilon$ & $\mu$ & $C_v$\\
+    \midrule
+         \bf LLama & $6.3997$ & $103.93$ & $53.4$ & $99.13$ & $\bm{3.4112}$ & $4.3785$ \\
+         \bf Llama + \model & $\bm{6.3702}$ & $\bm{102.15}$ & $\bm{53.09}$ & $\bm{98.27}$ & $3.4917$ & $\bm{4.2886}$ \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+\subsection{Results on Molecule Generation and Math Reasoning}
+
+\textbf{\model~improves model performance on 5 out of 6 criteria in molecule generation .} Table \ref{tab:molecule} shows the results of molecule generation. The consistent gain in 5 out 6 criteria shows the effectiveness of \model.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+  \begin{center}
+    \includegraphics[width=0.35\textwidth]{figs/rgsm_plot.pdf}
+    \end{center}
+  \caption{Math reasoning results of Qwen1.5 series on R-GSM subset. \model~improves the reasoning accuracy by $12.6\%$ and $5.3\%$ with 7B and 110B models respectively compared with vanilla inference.}
+  \label{fig:math}
+\end{wrapfigure}
+
+\textbf{\model~improves math reasoning capabilities.} Figure \ref{fig:math} shows the results of Qwen1.5 models on R-GSM dataset. It can be shown that \model~outperforms vanilla inference for both small 7B models and large 110B models.
+
+\subsection{Computational Overhead}
+\label{sec:overhead}
+Section \ref{sec:discuss} briefly discusses the computational overhead, with a conclusion that \model~'s efficiency is still doable. In our experiments, we find the wall time of \model~is $\sim$2x and $\sim$8x of the vanilla inference on the LM-as-a-judge task and retrieval-augmented QA task with 20 documents, which is acceptable at least during experiments. However, we did not specially optimize codes to accelerate \model, and our implementation still contains a ``for'' loop. Therefore, we believe there is room to accelerate \model. Compared with the time overhead, the memory overhead is small and \model~can be run with 70B models on 3x A100 80G on the retrieval-augmented QA task, which requires the same number of GPUs as the vanilla inference. Since efficiency is not the main focus of this paper, we leave this as our future work.
+
+
+\section{Conclusion, Limitations and Future Work}
+
+\label{sec:limit}
+This paper logically analyzes the transformers and attributes the position bias to causal attention and position embedding. Based on the analysis, we propose a novel train-free zero-shot approach to eliminate the position bias mechanically. The core idea is to make every input documents equally affected by the attention mask and position embedding. Experiments on four tasks show the effectiveness of our approach. However, \model~requires extra computation, and thus it is not suitable for scenarios that are efficiency-sensitive. We believe there is room to improve the efficiency with more efficient implementation, and we leave this as our future work.
+
+
+
+

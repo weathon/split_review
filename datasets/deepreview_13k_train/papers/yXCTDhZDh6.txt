@@ -1,0 +1,246 @@
+\title{Point-SAM: Promptable 3D Segmentation Model for Point Clouds}
+
+\begin{abstract}
+The development of 2D foundation models for image segmentation has been significantly advanced by the Segment Anything Model (SAM). However, achieving similar success in 3D models remains a challenge due to issues such as non-unified data formats, poor model scalability, and the scarcity of labeled data with diverse masks. To this end, we propose a 3D promptable segmentation model \textbf{Point-SAM}, focusing on point clouds. We employ an \textit{efficient} transformer-based architecture tailored for point clouds, extending SAM to the 3D domain. We then distill the rich knowledge from 2D SAM for Point-SAM training by introducing a data engine to generate part-level and object-level pseudo-labels at scale from 2D SAM. Our model outperforms state-of-the-art 3D segmentation models on several indoor and outdoor benchmarks and demonstrates a variety of applications, such as interactive 3D annotation and zero-shot 3D instance proposal.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The development of 2D foundation models for image segmentation has been significantly advanced by \emph{Segment Anything} \citep{kirillov2023segment}. That pioneering work includes a promptable segmentation task, a segmentation model (SAM), and a data engine for collecting a dataset (SA-1B) with over 1 billion masks. SAM shows impressive zero-shot transferability to new image distributions and tasks. Thus, it has been widely used in many applications, e.g., segmenting foreground objects for image-conditioned 3D generation~\citep{liu2023zero,liu2023one2345++}, NeRF~\citep{cen2023segment}, and robotic tasks~\citep{wang2023generalizable,chen2023easyhec}.
+
+\emph{Can we just lift SAM to create 3D foundation models for segmentation?}
+Despite a few efforts~\citep{yang2023sam3d,xu2023sampro3d,zhou2023partslip++} to extend SAM to the 3D domain, those existing approaches are limited to applying SAM on 2D images and then lifting the results to 3D. This process is constrained by image quality, and thus is likely to fail for textureless or colorless shapes like CAD models~\citep{lambourne2021brepnet}.
+Besides, it is also affected by view selection. Too few views may not adequately cover the entire shape, while too many views can significantly increase the computational burden.
+Moreover, it can suffer from multi-view inconsistency when results are merged from different views, since they may conflict and be impacted by occlusions.
+Furthermore, multi-view images only capture surface, making it infeasible to label internal structures, essential for annotating articulated objects (e.g. drawers in a cabinet).
+Therefore, it is necessary to develop native 3D foundation models to address the aforementioned limitations.
+
+\begin{figure}[ht]
+  \centering
+\includegraphics[width=\textwidth]{figures/teaser_new.pdf}
+  \caption{
+  We propose a 3D extension of SAM, named \textbf{\methodname} (Sec.~\ref{sec:model}), which predicts masks given the input point cloud and prompts. 
+  To scale up training data, we develop a data engine (Sec.~\ref{sec:training-datasets}) to generate pseudo labels with the help of SAM.
+  The final models, trained on a mixture of datasets, are capable of handling data from various sources and producing results at multiple levels of granularity. We demonstrate the versatility and efficacy of our approach through multiple applications and downstream tasks, as detailed in Sec.~\ref{sec:exp}.}
+  \label{fig:teaser}
+\end{figure}
+
+However, developing native 3D foundation models, or extending SAM to the 3D domain, presents several challenges:
+1) \textbf{There is no unified representation for 3D shapes.} 3D shapes can be represented by meshes, voxels, point clouds, implicit functions, or multi-view images, while 2D images are usually represented by a dense grid of pixels. Unlike 2D images, 3D shapes can vary significantly in scale and sparsity. For example, indoor and outdoor datasets often cover different ranges and typically require different models.
+2) \textbf{There are no unified network architectures in the 3D domain.} Due to the heterogeneity of 3D data, different network architectures have been proposed for different representations, such as PointNet~\citep{qi2017pointnet} for point clouds and SparseConv~\citep{graham20183d} for voxels.
+3) \textbf{It is more difficult to scale up 3D networks.} 3D networks are natively more computationally costly. For instance, SAM utilizes deconvolution and bilinear upsampling in its decoder, whereas there are no 3D operators for point clouds as efficient as their 2D counterparts.
+4) \textbf{High-quality 3D labels, especially those with diverse masks, are rare.} SAM is initially trained on existing datasets with ground-truth labels of low diversity, and then used to facilitate annotating more masks at different granularity (e.g., part, object, semantics) to increase label diversity. However, in the 3D domain, existing datasets contain only a small number of segmentation labels. For example, the largest dataset with part-level annotations, PartNet~\citep{mo2019partnet}, includes only about 26,671 shapes and 573,585 part instances.
+
+In this work, our goal is to build a 3D promptable segmentation model for point clouds, as a foundational step towards 3D foundation models. Point clouds are selected as our primary representation, because other representations can be readily converted into point clouds, and real-world data is often captured in this format. 
+Following SAM, we address 3 critical components: \textbf{task}, \textbf{model}, and \textbf{data}.
+We focus on the \textbf{3D promptable segmentation task}, which involves predicting valid segmentation masks in response to any given segmentation prompt. 
+To address this task, we propose a 3D extension of SAM, named \textbf{\methodname}. We utilize a transformer-based encoder to embed the input point cloud, alongside a point prompt encoder for point prompts, and a mask prompt encoder for mask prompts. Point-cloud and prompt embeddings are fed to a transformer-based mask decoder to predict segmentation masks. 
+To efficiently encode point clouds and pointwise prompts, we develop a novel tokenizer based on Voronoi diagram to obtain point-cloud embeddings, as input to the transformer-based encoder.
+Regarding data, we train \methodname on \textbf{a mixture of heterogeneous datasets}, including PartNet and ScanNet~\citep{dai2017scannet}, with both part- and object-level annotations. To expand label diversity and leverage large-scale unlabeled datasets such as ShapeNet~\citep{chang2015shapenet}, we have developed a data engine to generate pseudo labels with the assistance of SAM. This pipeline enables us to distill knowledge from SAM, and our experiments demonstrate that these pseudo labels significantly improve zero-shot transferability.
+Our contributions include:
+\begin{itemize}
+    \item We develop a 3D promptable segmentation model \textbf{\methodname}, adept at processing point clouds from various sources in a unified way. A novel tokenizer based on Voronoi diagram is proposed to efficiently embed point clouds and dense prompts.
+    \item We propose a data engine to generate pseudo labels with substantial mask diversity by distilling knowledge from SAM. It is shown to significantly enhance our model's performance on out-of-distribution (OOD) data.
+    \item Our experiments demonstrate the strong zero-shot transferability of our model to unseen point cloud distributions and new tasks, positioning it as a 3D foundation model.
+\end{itemize}
+
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+\paragraph{Lifting 2D foundation models for 3D segmentation}
+Despite the growing number of 3D datasets, high-quality 3D segmentation labels remain scarce. To address this, 2D foundation models trained on web-scale 2D data, such as CLIP~\citep{radford2021learning}, GLIP~\citep{li2022grounded}, and SAM~\citep{kirillov2023segment}, have been leveraged. A prevalent framework involves adapting these 2D foundation models for 3D applications by merging results across multiple views ~\citep{liu2023sanerfhq}~\citep{zhou2024serffinegrainedinteractive3d}~\citep{cen2024segment3dradiancefields}. SAM3D~\citep{yang2023sam3d} and SAMPro3D~\citep{xu2023sampro3d} utilize RGB-D images with known camera poses to lift SAM to segment 3D indoor scenes. PartSLIP~\citep{liu2023partslip,zhou2023partslip++}, dedicated to part-level segmentation, first renders multiple views of a dense point cloud, then employs GLIP and SAM to segment parts, and finally consolidates multi-view results into 3D predictions.
+These methods are limited by the capabilities of 2D foundation models and the quality of multi-view rendering. Besides, they usually require complicated and slow post-processing to integrate multi-view results, which also poses challenges in maintaining multi-view consistency.
+Another strategy involves distilling knowledge from 2D foundation models directly into 3D models. For example, Segment3D~\citep{huang2023segment3d} and SAL~\citep{ovsep2024better} both utilize SAM to generate pseudo labels given RGB images and train native 3D models on scene-level point clouds. However, these approaches can only handle surface points, making it difficult to segment internal structures that are common in part-level segmentation of articulated 3D shapes such as cabinets with drawers.
+\paragraph{3D foundation models}
+The development of 3D foundation models has advanced notably. PointBERT~\citep{yu2022pointbert} proposes a self-supervised paradigm for pretraining 3D representations for point clouds. OpenShape~\citep{liu2024openshape} and Uni3D~\citep{zhou2023uni3d} scale up 3D representations with multi-modal contrastive learning. \citep{hong20233d} trains 3D-based Large Language models (3D-LLM) on collected diverse 3D-language data, utilizing 2D pretrained VLMs. LEO~\citep{huang2023embodied}, sharing similar ideas, focuses on embodied ability such as navigation and robotic manipulation. Our work concentrates on 3D segmentation. Despite several initiatives aimed at open-world 3D segmentation, such as OpenScene~\citep{peng2023openscene} and OpenMask3D~\citep{takmaz2024openmask3d}, these primarily address scene-level segmentation and are trained on relatively small datasets.
+\paragraph{3D interactive segmentation}
+Interactive segmentation has been explored across both 2D and 3D domains. \citep{kirillov2023segment} introduces a groundbreaking project including the promptable segmentation task, the 2D foundation model (SAM), and a data engine to collect large-scale labels. In the 3D domain, InterObject3D~\citep{kontogianni2023interactive} and AGILE3D~\citep{yue2023agile3d} share similar ideas to segment point clouds while their training is confined to ScanNet~\citep{dai2017scannet}. 
+In contrast, our model is designed to handle both object- and part-level segmentation, leveraging a wide range of datasets including CAD models and real scans. Thus, our model shows greater versatility and adaptability.
+Besides, 3D interactive segmentation is also explored within implicit representations. SA3D~\citep{cen2023segment} enables users to achieve 3D segmentation of any target object through a single one-shot manual prompt in a rendered view. SAGA~\citep{cen2023saga} distills SAM features into 3D Gaussian point features through contrastive training. While these methods necessitate an additional optimization process, 
+our model operates on a feed-forward basis and can respond within seconds, offering a more efficient solution.
+
+
+\section{\methodname}
+
+\label{sec:model}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/figure2_pcsam.pdf}
+  \caption{Overview of \methodname. (a) illustrates the overall network architecture. The model takes a point cloud along with several point prompts as inputs. Initially, the point cloud is divided into patch tokens using a \textbf{Voronoi tokenizer}. After that, the patch tokens are embedded through a vanilla Vision Transformer (ViT). The token features are then fused with the mask features from the previous iteration. The a two-way transformer is employed to allow interaction with the features of the prompt points. Finally, a lightweight decoder generates the mask output. (b) depicts the design of the Voronoi tokenizer, where a \textbf{Voronoi diagram} is used for grouping the high-resolution point cloud into patch tokens, instead of relying on traditional K-nearest neighbors (KNN) methods. (c) provides a visual diagram of the grouping process within the Voronoi tokenizer.}
+  \label{fig:overview-pcsam}
+\end{figure}
+
+In this section, we present \methodname, a promptable segmentation model for point clouds. Fig.~\ref{fig:overview-pcsam} provides an overview of \methodname. Inspired by SAM~\citep{kirillov2023segment}, \methodname consists of 3 components: a point-cloud encoder, a prompt encoder, and a mask decoder.
+Unlike 2D models, \methodname addresses unique challenges related to point clouds: computation efficiency, scalability, and irregularity. We denote the input point cloud as $P \in \mathbb{R}^{N \times 3}$ and its point-wise feature as $F \in \mathbb{R}^{N \times \bar{D}}$.
+
+\paragraph{Point-cloud encoder with Voronoi tokenizer}
+The point-cloud encoder transforms the input point cloud into a point-cloud embedding. 
+Inspired by recent advancements in 3D point-cloud transformers~\citep{zhao2021point, wu2022point, yu2022point,zhou2023uni3d}, we employ a similar transformer-based encoder.
+Concretely, it first selects a fixed number of centers $C \in \mathbb{R}^{L \times 3}$ using farthest point sampling (FPS), and groups the k-nearest neighbors of each center as a \emph{patch}. 
+A local PointNet~\citep{qi2017pointnet} is used to tokenize each patch $G_{patch} \in \mathbb{R}^{L \times K \times (3+\bar{D})}$. The resulting patch tokens $F_{patch} \in \mathbb{R}^{L \times D}$, combined with the positional embeddings of the group centers, are processed by a Vision Transformer~\citep{dosovitskiy2020vit} to generate the final point-cloud embedding $F_{pc} \in \mathbb{R}^{L \times D}$.
+
+We observe that $L \times K$ is typically much larger than $N$, making the process of tokenizing point clouds to obtain $F_{patch}$ time-consuming and memory-intensive. To address this, we propose a novel tokenizer based on the \textbf{Voronoi diagram}, which strikes a balance between efficiency and effectiveness. Specifically, we group points by assigning each point to its nearest center, forming a Voronoi diagram where each patch corresponds to a Voronoi cell. An MLP is then used to extract pointwise features $\hat{F}_{patch} \in \mathbb{R}^{N \times D}$ based on the relative position of each point to its nearest center. Patch tokens $F_{patch} \in \mathbb{R}^{L \times D}$ are max-pooled within each Voronoi cell via a scatter-max operator.
+\paragraph{Prompt encoder}
+The prompt encoder encodes various types of prompts into prompt embeddings. In this work, we focus on two types of prompts: points and masks. Point prompts are processed similarly to SAM. Each point is associated with a binary label indicating whether it is a foreground prompt. These prompts are encoded to their positional encodings~\citep{tancik2020fourier} $F_{point} \in \mathbb{R}^{Q \times D}$, summed with learned embeddings indicating their labels. $Q$ denotes the number of point prompts.
+Mask prompts are represented as pointwise logits $X_{mask} \in \mathbb{R}^{N \times 1}$, typically derived from the model's previous predictions. These logits are concatenated with the input point cloud's coordinates and processed through a tokenizer described in the point-cloud encoder. The resulting mask prompt embeddings $F_{mask} \in \mathbb{R}^{L \times D}$ are element-wise summed with the point-cloud embedding.
+\paragraph{Mask decoder}
+The mask decoder efficiently maps the point-cloud embedding, prompt embeddings, and an output token $F_{out} \in \mathbb{R}^{1 \times D}$ into a segmentation mask $Y_{mask} \in \mathbb{R}^{N \times 1}$. 
+We follow SAM to employ two Transformer decoder blocks that use prompt self-attention and cross-attention in two directions (prompt-to-point-cloud and vice versa), to update all embeddings. Different from the 2D counterpart, we upsample the updated point-cloud embedding $F_{pc} \in \mathbb{R}^{L \times D}$ to match the input resolution by using inverse distance weighted average interpolation based on 3 nearest neighbors~\citep{qi2017pointnet++}, followed by an MLP. The upsampled point-cloud embedding is denoted as $X_{pc} \in \mathbb{R}^{N \times D}$. Another MLP transforms the output token to the weight of a dynamic linear classifier $X_{out} \in \mathbb{R}^{1 \times D}$, which calculates the mask's foreground probability at each point location as $Y_{mask}=X_{pc} \cdot X_{out}^T$. 
+Consistent with SAM, our model can generate multiple output masks for a single point prompt by introducing multiple output tokens. Note that multi-mask outputs are enabled only when there is only a single point prompt with no mask prompts.
+In addition, we also introduce another token $F_{iou} \in \mathbb{R}^{M \times D}$ to predict the IoU score for each mask output, where $M$ is the number of multiple mask outputs.
+
+\paragraph{Training}
+Mask predictions are supervised with a weighted combination of focal loss~\citep{lin2017focal} and dice loss~\citep{milletari2016v}, in line with SAM. We simulate an interactive setup, detailed in Sec.~\ref{sec:zero-shot-prompt-seg}, by sampling prompts across 7 iterations per mask. The loss for mask prediction is computed between the ground truth mask and the predictions at all iterations. 
+More details are provided in App.~\ref{sec:training-details}.
+For multiple mask outputs, we follow SAM to use a ``hindsight'' loss, where we only back-propagate only the minimum loss over masks. Additionally, the predicted IoU score is supervised using a mean squared error loss.
+For training, we randomly sample 10,000 points as input. Besides, we normalize the input point to fit within a unit sphere centered at zero, to standardize the inputs. The number of patches $L$ and the patch size $K$ are set to 512 and 64 by default.
+
+\paragraph{Inference with variability}
+A significant challenge in handling 3D point clouds is their irregular input structure; the number of points can vary, necessitating a dynamic approach to group points into a varying number of patches with adjustable sizes. While previous point-based methods~\citep{zhou2023uni3d} are typically limited to processing a fixed number of points, our model's flexible design allows it to handle larger point sets than those used during training, by adjusting the number of patches and the patch size. 
+Unless otherwise specified, we set the number of patches and the patch size to 2048 and 512 when the number of input points exceeds 32768.
+In contrast, voxelization-based methods~\citep{yue2023agile3d} struggle with such variations as changing voxel resolution can significantly impact performance, the results with different voxel resolutions are shown in App.~\ref{app:extra-exp}.
+
+
+
+
+\section{Training Datasets}
+
+\label{sec:training-datasets}
+
+\input{tables/training-dataset-stastic}
+
+\paragraph{Integrating existing datasets}
+Foundation models are typically data-hungry, and the diversity of segmentation masks is crucial to support ``segment anything''. Thus, we use a mixture of existing datasets with ground truth segmentation labels, which are summarized in Table~\ref{tab:training-dataset-stastics}. We utilize synthetic datasets including the training split of PartNet~\citep{mo2019partnet}, PartNet-Mobility~\citep{xiang2020sapien}, and Fusion360~\citep{lambourne2021brepnet}.
+Since PartNet does not provide textured meshes, we only keep the models that are from ShapeNet where textured meshes are available. We use all part hierarchies of PartNet. 
+For PartNet-Mobility, we hold out 3 categories (scissors, refrigerators, and doors) not included in ShapeNet, which are used for evaluation on unseen categories.
+For PartNet and Fusion360, we uniformly sample 32768 points from mesh faces. For each object in PartNet-Mobility, we render 12 views, fuse point clouds from rendered RGB-D images, and sample 32768 points from the fused point cloud using Farthest Point Sampling (FPS).
+For scene-level datasets, we use the training split of ScanNet200~\citep{dai2017scannet} and augment it by splitting each scene into blocks. The augmented version is denoted as ScanNet-Block. Concretely, we use a 3m$\times$3m block with a stride of 1.5m. We use FPS to sample 32768 points per scene or block.
+\paragraph{Generating pseudo labels}
+Existing datasets lack sufficient diversity in masks. Large-scale 3D datasets like ShapeNet~\citep{chang2015shapenet} usually do not include part-level segmentation labels. Besides, most segmentation datasets only provide exclusive labels, where each point belongs to a single instance. To this end, we develop a data engine to generate pseudo labels. 
+
+Figure~\ref{fig:pseudo-label} illustrates the pseudo label generation process. Initially, \methodname is trained on the mixture of existing datasets. Next, we utilize both pre-trained \methodname and SAM to generate pseudo labels. 
+Concretely, for each mesh, we render RGB-D images at 6 fixed camera positions and fuse a colored point cloud. SAM is applied to generate diverse 2D proposals for each view. For each 2D proposal, we intend to find a 3D proposal corresponding to it. We start from the view corresponding to the 2D proposal. A 2D prompt is randomly sampled from the 2D proposal and lifted to a 3D prompt, which prompts \methodname to predict a 3D mask on the fused point cloud. Then, we sample the next 2D prompt from the error region between the 2D proposal and the projection of the 3D proposal at this view. New 3D prompts and previous 3D proposal masks are fed to \methodname to update the 3D proposal. The process is repeated until the IoU between the 2D proposal and the projection of the 3D proposal is larger than a threshold. This step ensures 3D-consistent segmentation regularized by \methodname while retaining the diversity of SAM's predictions. 
+We repeat the above process with a few modifications at other views to refine the 3D proposal. At other view, we first sample the initial 2D prompt from the projection of previous 3D proposal, which is used to prompt SAM to generate multiple outputs. The output 2D mask with the highest IoU relative to the projection is selected as the ``2D proposal'' in the previous process. If the IoU is lower than a threshold, the 3D proposal is discarded. Previous 3D proposal mask is used to prompt \methodname at each iteration. This step aids in refining the 3D masks by incorporating 2D priors from SAM through space carving. 
+We use our data engine to generate pseudo labels for 20000 shapes from ShapeNet. On average, each shape is annotated with 17 masks, offering a diversity comparable to PartNet. 
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/pseudo-label-3.jpg}
+  \caption{Illustration of pseudo label generation. 
+  Initially, we select one segmentation mask from the instance proposals (``segment everything'') generated by SAM on the first view.
+  Then, we prompt Point-SAM by lifting 2D prompt points to 3D (\textbf{View 1 prompt}). Subsequently, the 3D segmentation mask output by Point-SAM is refined using additional views. We first prompt SAM by projecting the 3D segmentation mask onto the second view (\textbf{View 2}), leveraging SAM's strong prior knowledge to revise the mask. Then, we sample more 2D prompt points from the revised area by SAM, and prompt Point-SAM again by lifting these points to 3D (\textbf{View 2 prompt}).
+  }
+  \label{fig:pseudo-label}
+\end{figure}
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We have conducted the experiments showing the strong zero-shot transferability and the superior efficiency of our method. Experiments are conducted on zero-shot point-prompted segmentation (Sec.~\ref{sec:zero-shot-prompt-seg}), few-shot part segmentation (App.~\ref{sec:few-shot-part-seg}) and zero-shot object proposal generation (App.~\ref{sec:zero-shot-obj-proposals}). Furthermore, we showcase an application of 3D interactive annotation in our supplementary materials.
+
+\subsection{Zero-Shot Point-Prompted Segmentation}
+\label{sec:zero-shot-prompt-seg}
+
+\paragraph{Task and metric}
+The task is to segment instances based on 3D point prompts. For automatic evaluation, point prompts need to be selected. We adopt the same method to simulate user clicks described in \cite{kontogianni2023interactive}. In brief, the first point prompt is selected as the ``center'' of the ground truth mask, which is the point farthest from the boundary. 
+Each subsequent point is chosen from two candidates: one from the false-positive set at the farthest minimum distance to the complementary set, and the other from the false-negative set selected similarly. Then, the candidate farther from the boundary is selected. See App.~\ref{sec:sample-prompt} for details. 
+This evaluation protocol is commonly used in prior 2D~\citep{kirillov2023segment,zhang2024efficientvit} and 3D~\citep{kontogianni2023interactive,yue2023agile3d} works on interactive single-object segmentation.
+Following those prior works, we use the metric \textbf{IoU@k}, which is the Intersection over Union (IoU) between ground truth masks and prediction given $k$ point prompts. The metric is averaged across instances.
+
+\paragraph{Datasets}
+We evaluate on a heterogeneous collection of datasets, covering both indoor and outdoor data, along with part- and object-level labels.
+For part-level evaluation, we use the synthetic dataset PartNet-Mobility~\citep{xiang2020sapien} and the real-world dataset ScanObjectNN~\citep{uy2019revisiting}. As mentioned in Sec.~\ref{sec:training-datasets}, we hold out 3 categories of PartNet-Mobility for evaluation. In the same way as the training dataset, we render 12 views for each shape, fuse a point cloud from multi-view depth images, and sample 10,000 points for evaluation.
+ScanObjectNN contains 2902 objects of 15 categories collected from SceneNN~\citep{hua2016scenenn} and ScanNet~\citep{dai2017scannet}.
+For scene-level evaluation, we use S3DIS~\citep{armeni20163d} and KITTI-360~\citep{Liao2022PAMI}. Specifically, we use the processed data from AGILE3D~\citep{yue2023agile3d}, which contains scans cropped around each instance.
+Table~\ref{tab:test-dataset-stat} summarizes the datasets used for evaluation.
+
+\input{tables/evaluation-datasets-stastics}
+\paragraph{Baselines}
+We compare \methodname with a multi-view extension of SAM, named \textbf{MV-SAM}, and a 3D interactive segmentation method, \textbf{AGILE3D}~\citep{yue2023agile3d}.
+Inspired by previous works~\citep{yang2023sam3d,xu2023sampro3d,zhou2023partslip++} that lift SAM's multi-view results to 3D, we introduce MV-SAM for zero-shot point-prompted segmentation as a strong baseline. 
+First, we render multi-view RGB-D images from the mesh of each shape. Note that mesh rendering is needed to ensure high-quality images, which are essential for good SAM's performance. Thus, this baseline actually has access to more information than ours.
+Then we prompt SAM at each view with the simulated click sampled from the ``center'' of the error region between the SAM's prediction and 2D ground truth mask.
+The predictions are subsequently lifted back to the sparse point cloud (10,000 points) and merged into a single mask. If a point is visible from multiple views, its foreground probability is averaged.
+For both MV-SAM and our method, we select the most confident prediction if there are multiple outputs.
+AGILE3D is close to our approach, while it uses a sparse convolutional U-Net as its backbone and is only trained on the real-world scans of ScanNet40.
+Besides, it does not normalize its input, and thus it is sensitive to object scales.
+To process CAD models without known physical scales, we adjust the scale of the input point cloud for AGILE3D, so that its axis-aligned bounding box has a maximum size of 5m, determined through a grid search (App.~\ref{sec:agile3d-norm-scale}).
+\input{tables/quantitative-results-zero-shot-prompt-segmentation}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{figures/pcsam-main-experiments+2.pdf}
+  \caption{Qualitative results of prompt segmentation are presented for three different settings: KITTI360 for zero-shot outdoor scene segmentation, S3DIS for indoor scene segmentation, and PartNet-Mobility for zero-shot part segmentation. We compare our results with AGILE3D on KITTI360 and S3DIS, and with MVSAM on PartNet-Mobility. Point-SAM demonstrates superior segmentation results with fewer prompt points across all three datasets. \rebuttal{Red points represent positive prompt points, while blue points indicate negative prompt points.}}
+  \label{fig:main-experiment}
+\end{figure}
+\paragraph{Results}
+Table~\ref{tab:quantitative-zero-shot-point-prompt-seg} presents the quantitative results. \methodname shows superior zero-shot transferability and effectively handle data with different numbers of points as well as from different sources. 
+\methodname significantly outperforms MV-SAM, especially when only few point prompts are provided, while MV-SAM achieves reasonably good performance with a sufficient number of prompts. Notably, for \textbf{IoU@k}, MV-SAM actually samples $k$ prompts per view. It indicates that our 3D native method is more prompt-efficient. Besides, it is challenging for SAM to achieve multi-view consistency without extra fine-tuning, especially with limited prompts.
+Moreover, \methodname also surpasses AGILE3D across all datasets, particularly in out-of-distribution (OOD) scenarios such as PartNet-Mobility (held-out categories) and KITTI360. It underscores the strong zero-shot transferability of our method and the importance of scaling datasets. Figure ~\ref{fig:main-experiment} shows the qualitative comparison between \methodname, AGILE3D and MV-SAM, where \methodname demonstrates superior quality with a single prompt and significantly faster convergence compared to AGILE3D and MV-SAM.
+
+\input{tables/voronoi}
+
+Table~\ref{tab:quantitative-zero-shot-point-prompt-seg} also compares the Voronoi tokenizer with the previous KNN tokenizer. We observe that the Voronoi tokenizer achieves comparable performance to the KNN tokenizer,
+while showing superior efficiency. We test the time and memory efficiency on a single Nvidia RTX-4090 GPU using point clouds from KITTI360. For each point cloud, 10 prompt points are sampled. The Voronoi tokenizer increases the frames per second (FPS) 
+by \textbf{163.4\%}($5.2 \to 13.7$ shape/sec) and reduces GPU memory usage by \textbf{18.4\%}($3890 \to 3172$ MB). 
+
+\subsection{Ablations}
+\paragraph{Scaling up datasets}
+Previous works have been limited by the size and scope of their training datasets. For example, AGILE3D~\citep{yue2023agile3d} was trained solely on ScanNet~\citep{dai2017scannet}, which includes only 1,201 scenes. As detailed in Table~\ref{tab:training-dataset-stastics}, our training dataset encompasses 100,000 point clouds, 100 times larger than ScanNet. 
+To verify the effectiveness of scaling up training data, we conduct an ablation study on dataset size and composition. We introduce 4 dataset variants: 1) PartNet only, 2) PartNet+ScanNet (including ScanNet-Block), 3) PartNet+ShapeNet (pseudo labels), and 4) PartNet+ShapeNet+ScanNet.
+We train \methodname on these variants,
+resulting in different models. Table~\ref{tab:ablation-datasets} shows the comparison of these models in zero-shot prompt segmentation on PartNet-Mobility (held-out categories).
+The model trained on PartNet+ScanNet surpasses the one trained solely on PartNet, although the evaluation dataset (part-level labels) has a markedly different distribution from the added ScanNet (object-level labels).
+Moreover, the model trained on PartNet+ShapeNet achieves even better performance, particularly with a single prompt. Note that the IoU@1 metric assesses whether the model captures sufficient mask diversity, since a single prompt is inherently ambiguous and the ground-truth label depends on dataset bias.
+It suggests that our pseudo labels effectively incorporate part-level knowledge distilled from SAM. 
+Furthermore, it is observed that the zero-shot performance on out-of-distribution data consistently improves, as we utilize increasingly larger and more diverse data.
+
+\input{tables/ablation-dataset}
+
+\paragraph{Trained on ScanNet only}
+\label{sec:ablation-trained-on-scannet}
+To ensure a fair comparison with AGILE3D, we conduct an ablation study, where \methodname is trained exclusively on ScanNet, following the same settings as AGILE3D. This resulting model is denoted as Point-SAM*. Table~\ref{tab:scannet} presents the comparison among AGILE3D, Point-SAM* and the original Point-SAM. Provided similar training data, Point-SAM* significantly outperforms AGILE3D on the OOD datasets like KITTI360 and PartNet-Mobility, although performing worse on the in-domain dataset S3DIS. We hypothesize that AGILE3D is highly optimized for ScanNet (the only dataset it was trained on), and some of its design choices may lead to overfitting to this dataset, like its objective of simultaneously generating exclusive multiple objects.
+
+\paragraph{Data Engine}
+To demonstrate the effectiveness of distilling knowledge from SAM, we conduct an ablation study on our design of the data engine. We compare our current pipeline with a baseline that uses a pre-trained \methodname to generate instance proposals as pseudo labels. Specifically, we sample 1,024 prompt points from the point cloud, using each point to prompt \methodname. Non-Maximum Suppression (NMS) is applied to filter out duplicate instances. Table~\ref{tab:data-engine} compares the models trained on pseudo labels generated by our pipeline and the baseline. 
+Interestingly, \methodname even benefits from pseudo labels generated by itself. Moreover, incorporating 2D SAM plays a crucial role in improving the quality of the pseudo labels, leading to a substantial boost in overall performance.
+
+\input{tables/ablation-rebuttal}
+
+\paragraph{Sensitivity to Point Count}
+Point clouds are typically irregular. When handling point clouds with more points than those used in our training, we have to adjust the number of patches and the patch size accordingly. Thus, we conduct experiments to study the effect of these two hyperparameters. Table~\ref{tab:ablation-hyperparam} shows the qualitative results of zero-shot prompt-segmentation on S3DIS~\citep{armeni20163d}. We select S3DIS, because the average number of points for S3DIS is about 500K, 50 times larger than that of our training datasets. Our results indicate that it is important to increase the number of patches to accommodate larger point clouds. Enlarging the patch size is also crucial due to the different neighborhood densities compared to our training distribution.
+
+\input{tables/ablation-density}
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+
+In conclusion, our work presents significant strides towards developing a foundation model for 3D promptable segmentation using point clouds. By adopting a transformer-based architecture, we have successfully implemented \methodname, which effectively and efficiently responds to 3D point and mask prompts. Our model leverages a robust training strategy across mixed datasets like PartNet and ScanNet, which has proven beneficial, especially when enhanced with pseudo labels generated through our novel pipeline that distills knowledge from SAM.
+
+However, there are inherent limitations and challenges in our approach. The diversity and scale of the 3D datasets used still lag behind those available in 2D, posing a challenge for training models that can generalize well across different 3D environments and tasks. Furthermore, the computational demands of processing large-scale 3D data and the complexity of developing efficient 3D-specific operations remain significant hurdles. Our reliance on pseudo labels, while beneficial for expanding label diversity, also introduces dependencies on the quality and variability of the 2D labels provided by SAM, which may not always capture the complex nuances of 3D structures.
+
+
+
+
+
+\clearpage
+
+
+
+

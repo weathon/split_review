@@ -1,0 +1,425 @@
+\title{LEMON: Lossless model expansion}
+
+\begin{abstract}
+
+
+Scaling of deep neural networks, especially \Transformers{}, is pivotal for their surging performance and has further led to the emergence of sophisticated reasoning capabilities in foundation models.
+Such scaling generally requires training large models from scratch with random initialization, failing to leverage the knowledge acquired by their smaller counterparts, which are already resource-intensive to obtain.
+To tackle this inefficiency, we present \textbf{L}ossl\textbf{E}ss \textbf{MO}del Expansio\textbf{N} (LEMON), a recipe 
+to initialize scaled models using the weights of their smaller but pre-trained counterparts. This is followed by model training with an optimized learning rate scheduler tailored explicitly for the scaled models, substantially reducing the training time compared to training from scratch.
+Notably, LEMON is versatile, ensuring compatibility with various network structures, including models like Vision Transformers and BERT.
+Our empirical results demonstrate that LEMON reduces computational costs by 56.7\% for \vit{} and 33.2\% for BERT when compared to training from scratch.  
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{wrapfigure}[15]{r}{0.4\columnwidth}
+\begin{center}
+\centerline{\includegraphics[width=0.39\columnwidth]{plots/illustrations/overview-thin.pdf}}
+\caption{Comparison between training from scratch and model expansion.
+Our method expands a smaller pre-trained model into a larger model without any performance drop.
+The continual training of the large model requires significantly less training time than training from scratch. 
+}
+\label{fig:overview-expansion}
+\end{center}
+\vskip -1cm
+\end{wrapfigure}
+
+Deep neural networks (DNNs) have become increasingly popular, showcasing their adaptability across natural language processing to computer vision. Recent advances in architectural design, especially \Transformers{}, have further enhanced the scalability of DNNs. However, it is a common practice to train larger versions of these models from scratch, discarding the valuable knowledge acquired by their smaller counterparts. Such an approach can be highly inefficient, especially given the intensive computational resources required to train large language models such as Generative Pre-trained Transformer (GPT) \citep{GPT-3}, and the resultant huge carbon footprints. For instance, training GPT-3 incurs costs around \$4.6M \citep{gpt-price}.
+Given these challenges, researchers are keenly exploring ways to leverage the prior knowledge of smaller models for more efficient scaling.
+
+Knowledge inheritance and model expansion are two primary methodologies to achieve this goal. 
+Knowledge inheritance \citep{KI}, the reverse of knowledge distillation \citep{hinton2015distilling}, allows the large model to learn the predictions of a smaller pre-trained model.
+However, this method often necessitates additional computational resources and modifications to the training pipeline due to the involvement of a `teacher network.'
+In contrast, model expansion directly utilizes the weights from the pre-trained small source network, either without training \citep{chen2015net2net, chen2021bert2bert, yang2020progressively, shen2022staged} or with negligible training \citep{LIGO}. Hence, our work mainly focuses on model expansion due to its minimal impact on the training pipeline and negligible computational overhead.
+
+A compelling requirement for model expansion is to ensure it is `lossless,' meaning no information from the source model is lost. Specifically, the goal is for the larger target model to inherit the exact functional mapping as the smaller source model, thus preserving the performance. \NetToNet{} \citep{chen2015net2net} represents a foundational study of lossless model expansion for convolutional networks (CNNs) and multi-layer perceptrons (MLPs) where it duplicates neurons and averages their fan-out weights.
+However, a challenge arises with the `symmetry breaking' issue. This problem occurs when duplicated neurons in expanded layers introduce redundancy, which persists during subsequent training. In this sense, the expanded model will never gain more capacity than the source model. To counteract this problem, previous researchers introduced additional noise into the expansion process, leading to a shift away from a genuine lossless expansion.
+
+\Transformers{}, despite their rising popularity in modern deep learning, introduce additional complexities in achieving lossless expansion that goes beyond traditional issues like symmetry breaking. One key obstacle arises from the intricacy of the LayerNorm, which was evident when \BertToBert{} \citep{chen2021bert2bert} tried extending the \NetToNet{} approach to \Transformers{}, leading to lossy outcomes. Staged training \citep{shen2022staged} demonstrated the feasibility of lossless model expansion, but with a specific constraint: doubling the width during expansion and only for a variant of \Transformers{} known as Pre-Layer Normalization (Pre-LN) \Transformers{}. However, real-world applications often require width increases in the expanded model that are indivisible by the smaller source model's width, highlighting a limitation in existing methodologies. A typical scenario involves expanding the hidden dimension from 512 to 768.
+
+In exploring the possibilities of lossless model expansion, our research focuses on the ability to \textbf{break symmetry}, handle \textbf{indivisible width and depth increments}, and remain compatible with almost \textbf{all \Transformer{} varieties}.
+We have discovered affirmative answers, revealing that multiple solutions exist, enabling the selection of an optimal candidate to break the symmetry or find an initialization point with specific properties. Specifically, we break the symmetry of replicated neurons by setting their fan-out weights to be unequal, and we introduce average expansion to deal with LayerNorm for indivisible width increment.
+
+In addition to lossless model expansion techniques, our study also delves into training recipes for the expanded models. It is often overlooked whether applying the original training recipe remains optimal or whether the expanded models necessitate tailored approaches.
+Our empirical studies reveal two key insights: expanded models can benefit from utilizing a default maximum learning rate and, intriguingly, a learning rate scheduler that decays more rapidly.
+
+Our contributions are summarized as follows:
+\begin{enumerate}[topsep=0em,itemsep=0.1em,leftmargin=2em]
+\item We propose LEMON, a suite of algorithms designed for lossless model expansion across a variety of architectures, ensuring compatibility with indivisible width and depth increments.   
+\item Drawing inspiration from our empirical results, we propose an optimized learning rate scheduler for the expanded models. This scheduler maintains the maximum learning rate used by training from scratch, but features accelerated decay rates.
+\item LEMON reduces the computational costs by up to 56.7\% for \vit{} and 33.2\% for \bert{} compared to training from scratch, thereby setting a new benchmark in performance.
+\end{enumerate}
+
+
+\section{Related works}
+
+\label{sect:related}
+
+\input{tables/comparison}
+
+\textbf{From small models to larger models.}
+There are two main approaches to transferring the knowledge of the smaller models to larger models: knowledge inheritance and model expansion. Knowledge inheritance \citep{KI} enables a student network to learn the logits provided by a teacher network. \NetToNet{} \citep{chen2015net2net} was the first work to explore the idea of model expansion. It involves randomly duplicating neurons while preserving the output values through proper normalization and increasing depth by adding identity layers. However, \NetToNet{} resorts to introducing weight perturbations to overcome symmetry, resulting in performance deterioration. Follow-up work \BertToBert{} \citep{chen2021bert2bert} extends \NetToNet{} to \Transformer{} while others study depth growth \citep{gong2019efficient, yang2020progressively, interp_chang2017multi, interp_dong2020towards}. Staged training \citep{shen2022staged} made significant progress by proposing a lossless model expansion method for Pre-LN \Transformer{}, but with the constraint of width doubling. \ligo{} \citep{LIGO} suggests employing multiple training steps to find an appropriate linear combination of weights from the source networks. Despite these advancements, all existing methods still face the challenge of the performance drop or strict restrictions on the model width.
+\autoref{tab:methods-overview} compares the related methods.
+\textbf{Network initialization.}
+Numerous studies aim to seek optimal initialization methods for neural networks, primarily focusing on regulating the norm of network parameters \citep{glorot2010understanding, kaiminginit}. Theoretical works try to study these methods through dynamical isometry \citep{saxe2013exact} or mean field theory \citep{poole2016exponential}. Orthogonal initialization, which supports layer-wise dynamical isometry in fully-connected layers, has been extended to CNNs via Delta orthogonal initialization \citep{xiao2018dynamical}.
+However, there has been limited research on initialization methods specifically for \Transformers{}. Most of these works focus on theoretical approaches to train \Transformers{} without skip connections or normalization layers \citep{noci2022signal, he2023deep}. Mimetic initialization \citep{trockman2023mimetic} seeks to initialize attention based on the principles of pre-trained \Transformers{}.
+\textbf{Continual pre-training.}
+Recent research explores adapting pre-trained networks for new or improved datasets. While some target datasets from different domains \citep{scialom2022fine, ke2022continual, gupta2023continual, qin2022elle}, others focus on datasets that evolve over time \citep{han2020econet, jang2021towards, loureiro2022timelms}. Model expansion is similar to continual pre-training, with the distinction being a change in the model size rather than the data distribution.
+
+
+
+\section{Preliminaries}
+
+\label{sect:prelim}
+
+\textbf{Model expansion} aims to initialize a large model with the weights from its smaller pre-trained counterparts.
+Concretely, suppose we have pre-trained weights $\theta_S$ in a source network $f_S(\cdot; \theta^{\text{trained}}_S)$,
+our goal is to design a mapping $\theta^\text{expanded}_T = \mathcal{M}(\theta^{\text{trained}}_S)$, where the expanded weights initialize the target network as $f_T(\cdot; \theta^{\text{expanded}}_T)$. 
+Since these expanded weights contain knowledge acquired by the small pre-trained model, it should accelerate the training of $f_T$ compared to random initialization. Moreover, we call a model expansion algorithm \textbf{lossless} if $f_T(\mathbf{x}; \theta^\text{expanded}_T) = f_S(\mathbf{x}; \theta^\text{trained}_S), \forall \mathbf{x}$.
+
+
+An example for model expansion is to use a pre-trained \resnet-18 \citep{resnet} or \bert-Small ($f_S$) to facilitate the training of \resnet-50 or \bert-Base ($f_T$), respectively. Instead of training the larger models from scratch, the idea is to initialize them with the weights of their smaller pre-trained counterparts, i.e., \resnet-18 or \bert-Small, respectively.
+\textbf{\Transformer{} architecture,} introduced by \citet{Transformer}, consists of multiple \Transformer{} blocks $g(\cdot)$, where each block is a stack of two modules, a multi-head attention (MHA) and a two-layer MLP.
+Depending on the location of LayerNorm, \Transformer{} blocks can be categorized as (1) Post-Norm block used by the original \bert{} \citep{devlin2019bert}  where \LN{} is applied after the residual block, i.e., $g(x)=\LN(\Module(x)+x)$,
+(2) Pre-Norm used by GPT \citep{GPT-3}, Pre-LN \bert{}, \vit{} \citep{vit}, and SWin \Transformer{} \citep{liu2021swin} where \LN{} is applied inside the residual connection and before all other transformations, i.e., $g(x)=x+\Module(\LN(x))$, and 
+(3) Res-Post-Norm used by SWin \Transformer{} V2 \citep{liu2022swinv2} where \LN{} is applied inside the residual connection and after all other transformations, i.e., $g(x)=x+\LN(\Module(x))$. See \autoref{fig:illustration_norms} for an illustration.
+
+\begin{wrapfigure}[12]{r}{0.44\columnwidth}
+    \centering
+    \begin{subfigure}{0.14\columnwidth}
+        \centering
+        \includegraphics[width=0.99\textwidth]{plots/illustrations/post-norm.pdf}
+        \caption{}
+    \end{subfigure}
+    \begin{subfigure}{0.14\columnwidth}
+        \centering
+        \includegraphics[width=0.99\textwidth]{plots/illustrations/pre-norm.pdf}
+        \caption{}
+    \end{subfigure}
+    \begin{subfigure}{0.14\columnwidth}
+        \centering
+        \includegraphics[width=0.99\textwidth]{plots/illustrations/res-postnorm.pdf}
+        \caption{}
+    \end{subfigure}
+    \caption{Varieties of attention blocks.
+    \textbf{(a)} Post-Norm block.
+    \textbf{(b)} Pre-Norm block.
+    \textbf{(c)} Post-Res-Norm block.}
+    \label{fig:illustration_norms}
+\end{wrapfigure}
+
+\textbf{Multi-head attention (MHA)} uses multiple self-attention heads to attend to information from different representation subspaces of the input. Given an input sequence 
+$\X \in \R^{E\times D}$, where $E$ is the sequence length, and $D$ is the embedding dimension, each head projects the inputs into different subspaces using linear transformations. For the $i$-th head, its query is defined as $\Q_i = \X\W^Q_i$, its key as $ \K_i = \X \W^K_i$, and its values as $\V_i = \X \W^V_i$, where $\W_i^Q, \W_i^K \in \bb{R}^{D\times d_K}$ and $\W_i^V \in \bb{R}^{D\times d_V}$. Here, $d_K$ and $d_V$ represent the dimensions of the key and value, respectively. Each head then computes 
+the attention with $\text{Head}_i=\text{Attention}(\Q_i,\K_i,\V_i)=\Softmax\left(\Q_i\K_i^\T/\sqrt{d_K}\right)\V_i$. The outputs from all $H$ heads are concatenated and linearly transformed to yield the final output: 
+\begin{align*}
+    \text{MHA}(\X) = \concat{\text{head}_1, \cdots, \text{head}_H}\W^O, 
+\end{align*}
+where $\W^O \in \bb{R}^{Hd_V\times D}$ is the weight matrix. Please refer to \citet{Transformer} for more details.
+
+\textbf{Weight symmetry.} Consider a two-layer MLP with two hidden neurons in the form of $\MLP(\x) = \mathbf{v}^\T\sigma(\W_1 \x) 
+= v_1 \sigma(w_{1,1}x_1 + w_{1,2}x_2) + v_2 \sigma(w_{2,1}x_1 + w_{2,2}x_2)$, where $\sigma$ is the nonlinear activation, and $v_1,v_2$ are the weights associated with the hidden neurons. If the weights are initialized such that $v_1=v_2, w_{1,1}=w_{2,1}, w_{1,2}=w_{2,2}$, the two neurons will always compute identical values throughout training. This symmetry results from the fact that, at each iteration, the gradients for the corresponding weights are the same, i.e., $\dot{w}_{1,1}=\dot{w}_{2,1}, \dot{w}_{1,2}=\dot{w}_{2,2}$. Weight symmetry is significant as it implies that the two symmetric neurons do not contribute independently to the model's learning, potentially harming the model's expressive power and learning capability.
+
+
+
+\section{Our method: Lossless model expansion}
+
+\label{sect:method}
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.6\columnwidth}
+    \centering
+    \includegraphics[width=0.99\textwidth]{plots/illustrations/whole-45.pdf}
+    \caption{Width expansion of MLP from $2$ to $4$  (\textbf{left}) or $5$ (\textbf{right}).}
+    \label{fig:method-divisible}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.33\columnwidth}
+    \centering
+    \includegraphics[width=0.99\textwidth]{plots/illustrations/whole-MHA_v3.pdf}
+    \caption{Expand the number of heads in MHA from 2 to 3.}
+    \label{fig:method-heads}
+    \end{subfigure}
+    \caption{Lossless width expansion with symmetry breaking 
+    for multi-layer perceptron (MLP) and multi-head attention (MHA).
+    \textbf{(a)} \textbf{Left}: MLP expansion with divisible width. We replicate neurons $h_1$\big\slash$h_2$ to $h_1^\ast$\big\slash$h_2^\ast$ and set $\alpha+\beta=1$ with $\alpha \neq \beta$.
+    \textbf{Right}: MLP expansion with indivisible width. We further replicate the neuron $h_1$ to $h_1^{\ast\ast}$ and set $\alpha+\beta+\gamma=1$ with $\alpha \neq \beta \neq \gamma$.
+    \textbf{(b)} MHA expansion with head dimension unchanged. We duplicate $\text{Head}_1$ to $\text{Head}^\ast_1$ (i.e., duplicate key/query/value projections) and expand the projection layer as in an MLP module.}
+\end{figure}
+We decompose the expansion operator $\mathcal{M}$ to two operators, i.e. the depth expansion operator $\mathcal{D}$ and the width expansion operator $\mathcal{W}$, each applied to individual layers.
+
+Our expansion method mainly consists of three main components, i.e.,
+(1) general lossless width expansion with symmetry breaking, (2) average width expansion for LayerNorm, and (3) lossless depth expansion. 
+In the expansion process, each layer is independently subjected to these methods, ensuring a layer-level lossless expansion. This entails a systematic, recursive application of duplicating inputs for each layer in a lossless manner, and every layer, in turn, guarantees the lossless duplication of its output.
+ 
+\subsection{General lossless width expansion with symmetry breaking}
+\label{subsect:divisible}
+
+
+
+We first show how to apply lossless expansion with symmetry breaking for (1) fully-connected layers (FC-layers) and (2) multi-head attention (MHA).
+
+\textbf{Lossless width expansion for \fc.} \Transformers{} consist of a set of \fc. We first use MLP as an example to show the basic width expansion operator for the \fc. 
+
+For width expansion, we create copies of neurons similar to \NetToNet{} and \BertToBert{}, as this  step is necessary due to the nonlinear activation used in MLP. However, the essential difference is that we do \textbf{NOT} set the fan-out weights of replicated neurons to be equal. Out of simplicity, we use a single-hidden-layer MLP for illustration, and we show it on the left half in \autoref{fig:method-divisible} . We first replicate neurons $h_1, h_2$ to $h^*_1, h^*_2$ in a circular pattern. Consider the same neurons $h_1$ and $h_1^*$ in the plot with the original fan-out weight $v_{1,1}$; we can set the expanded fan-out weights to be $\alpha v_{1,1}$ and $\beta v_{1,1}$ where $\alpha +\beta = 1$ to ensure lossless expansion. 
+
+ 
+The selection of $(\alpha, \beta)$ corresponds to a specific lossless model expansion algorithm, and our method can be considered as a generalization of existing model expansion methods. Specifically, \NetToNet{} and \BertToBert{} perform width expansion by setting $\alpha=\beta=1/2$. However, such a choice causes weight symmetry problems where two neurons learn the exact same representations when it is initialized and for the subsequent training.  We introduce a simple modification to fix the issue, i.e., by setting $\alpha \neq \beta$ is enough to break symmetry for commonly-used nonlinear activation $\sigma$. This concept extends to cases where neurons are replicated more than twice, illustrated on the right half of \autoref{fig:method-divisible}. In such cases, we set coefficients such that $\alpha+\beta+\gamma=1$ and $\alpha \neq \beta \neq \gamma$.
+
+\textbf{MHA expansion.} We make sure that we directly copy the entire head in a circular pattern similar to \fc{} as mentioned in the previous section. We then perform width expansion for the corresponding key, query, and value matrices. Then, it reduces to a case similar to MLP due to the following projection matrix. Symmetry breaking is realized by setting the corresponding fan-out weights in the projection matrix differently. We illustrate the process in \autoref{fig:method-heads}.
+
+
+
+\subsection{Average width expansion for LayerNorm}
+\label{sect:method-average}
+When dealing with indivisible width increments, we need to design a specific expansion method for the LayerNorm layer. In this section, we demonstrate that achieving a lossless expansion is feasible provided that \fc{} are positioned before the LayerNorm layer.
+
+\begin{wrapfigure}[13]{r}{0.48\columnwidth}
+\begin{center}
+\centerline{\includegraphics[width=0.45\columnwidth]{plots/illustrations/whole-nondivisible.pdf}}
+\caption{Lossless average expansion. When the fully-connected layer right before LayerNorm is average expanded, the output of LayerNorm is expanded with zeros.}
+\label{fig:method-nondivisible}
+\end{center}
+\end{wrapfigure}
+
+\textbf{Average width expansion.} We first show that it is easy to perform the average expansion method such that the output of \fc{} is padded with its average. We do so by adding neurons whose weights are the average of existing neurons. Specifically, we pad the original weight $\mathbf{W} \in \mathbb{R}^{D_\text{out} \times D_\text{in}}$ with rows $1/D_\text{out} \sum_i^{D_\text{out}} \mathbf{W}[i]$, and pad bias $\mathbf{b} \in \mathbb{R}^{D_\text{out}} $ with $1/D_\text{out} \sum_i^{D_\text{out}} \mathbf{b}[i]$.\footnote{Input dimension should be expanded as well depending on how inputs are expanded.} See \autoref{fig:method-nondivisible} for an illustration. 
+
+\textbf{LayerNorm layer.} We now show that if the input of LayerNorm is average expanded, lossless width expansion is possible. Specifically, consider LayerNorm layer with element-wise affine-transformation in the form of $\LN(\cdot; \bm{\mu}, \mathbf{b}) = \bm{\mu} \odot \texttt{Norm}(\cdot) + \mathbf{b}$, where $\bm{\mu}, \mathbf{b} \in \mathbb{R}^{D_S}$ and $D_T\leq 2D_S$. Define average expanded of $\mathbf{x} \in \mathbb{R}^{D_S}$ to be $\mathbf{x}^* \in \mathbb{R}^{D_T}$.
+ It can be shown that $\LN(\mathbf{x}^*;\bm{\mu}^*,\mathbf{b}^*) = \concat{\LN(\mathbf{x};\bm{\mu},\mathbf{b}), \mathbf{0}}$ if $\bm{\mu}^*=\concat{\eta\bm{\mu}, \bm{\zeta}}$ and $\mathbf{b}^*=\concat{\mathbf{b}, \mathbf{0}}$, where $\mathbf{0} \in \mathbb{R}^{D_T-D_S}$ is a zero vector, $\bm{\zeta} \in \mathbb{R}^{D_T-D_S}$ is an arbitrary vector,  and $\eta=\sqrt{(D_S / D_T)}$ is a scalar. See \autoref{sect:proof-layernorm} for results and proof with a more generalized case where $D_T \geq D_S$.
+\subsection{Lossless depth expansion}
+\label{sect:method-depth}
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.32\columnwidth}
+    \centering
+    \includegraphics[width=0.99\textwidth]{plots/illustrations/whole-depth.pdf}
+    \caption{Arrangement of block stacking.}
+    \label{fig:method-depth}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.27\columnwidth}
+    \centering
+    \includegraphics[width=0.99\textwidth]{plots/illustrations/depth-zero.pdf}
+    \caption{Type-1 depth expansion.}
+    \label{fig:depth-zero}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.27\columnwidth}
+    \centering
+    \includegraphics[width=0.99\textwidth]{plots/illustrations/depth-cancel.pdf}
+    \caption{Type-2 depth expansion.}
+    \label{fig:depth-cancel}
+    \end{subfigure}
+    \caption{Lossless depth expansion.
+    \textbf{(a)} We place a new block next to the block where it originates.
+    \textbf{(b)} For type-1 depth expansion, we set the weights of the last fully-connected layer to zeros.
+    \textbf{(c)} For type-2 depth expansion, we specify the weights of the last fully-connected layer so that the contributions from replicated neurons cancel each other. For example, assume $h^\ast_1$ is a duplicate of $h_1$, we set their fan-out weights to be $\alpha v_{1,1}$ and $-\alpha v_{1,1}$ to enforce zero output.}
+\end{figure}
+
+In this section, we detail our approach for increasing model depth in a lossless manner.
+
+\textbf{Arrangement of added layers.} Similar to how \citet{interp_chang2017multi, interp_dong2020towards} deal with \Resnet{}, we put added layers directly next to the source layer. For example, when expanding two-layer network with blocks $\{g_1, g_2\}$, we perform depth expansion with the resulting model $\left\{\mathcal{W}[g_1], \mathcal{D}[\mathcal{W}[g_1]], \mathcal{W}[g_2], \mathcal{D}[\mathcal{W}[g_2]]\right\}$. See \autoref{fig:method-depth} for an illustration.
+
+\textbf{Lossless depth expansion.}  We now provide two ways to perform lossless depth expansion.
+
+Firstly, we can simply set the output of each module (MLP or MHA) to be zero, i.e. $\alpha=\beta=0$. Hence, the residual branch does not contribute to the output. This choice gives great flexibility to the rest of the parameters since we can (1) copy weights from other layers or (2) randomly initialize the weights. See \autoref{fig:depth-zero} for an illustration.
+
+Secondly, we can enforce the output to be zero by setting the summation of fan-out weights for replicated neurons to zero. With the example shown in \autoref{fig:method-divisible}, we can set the fan-out weights of replicated neurons  to be $\alpha=-\beta\neq 0$ to ensure all outputs are zeros.\footnote{If neurons are not replicated, then we have to set the fan-out weights to be zero.} See \autoref{fig:depth-cancel} for an illustration.
+
+
+
+\subsection{A summary of implementing model expansion} 
+We summarize the procedure of model expansion for Pre-LN \Transformer{} architecture with both depth and width increments. We first average expand the embedding weights. Then, make sure the output of each layer is average expanded. Hence, the input to the decoder layer is the original output padded with zeros after the last LayerNorm. We provide a detailed description of our expansion method in \autoref{sect:detail-expansion-procedure}. Furthermore, we explain how to use our method for Post-LN and Res-Post-Norm architectures in \autoref{sect:other-norms}.
+
+ 
+
+
+
+\section{How to train the expanded models}
+
+\label{sect:exp1}
+
+
+In this section, we delve into the influence of different factors in the training recipe, in particular the maximum learning rate and the learning rate scheduler, when training expanded models. 
+
+\textbf{Experiment setup.}
+Throughout this study, we adopt \deit{} \citep{vit} as our exemplary model and train it on the standard ImageNet-1k dataset. 
+In particular, we choose to expand \deit{}$(6,512)$ to \deit{}$(12,768)$, where $6$\big\slash$12$ represent the number of attention blocks and $512$\big\slash$768$ denote the hidden dimensions.
+When training these models from scratch, we apply a default maximum learning rate of $1\times 10^{-3}$ and run the training for 300 epochs with a batch size of 1024. We use a cosine learning rate scheduler that decays to a minimum learning rate of $10^{-5}$. 
+However, we will modify this training recipe for continual training of the expanded model \deit{}$(12,768)$.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.23\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/lr_study_train.pdf}
+         \caption{Train loss (LR)}
+         \label{fig:lr_study_train}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.237\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/lr_study.pdf}
+         \caption{Valid Acc. (LR)}
+         \label{fig:lr_study_val}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/sched_lr_val.pdf}
+         \caption{Used LR (Sched)}
+         \label{fig:sched_study_sched}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.237\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/sched_study.pdf}
+         \caption{Valid Acc. (Sched)}
+         \label{fig:sched_study_acc}
+    \end{subfigure}
+    \caption{Influence of maximum learning rate \textbf{(LR; a,b)} and learning rate scheduler \textbf{(Sched; c,d)} for training expanded \vit{}.
+    Dashed and solid horizontal lines represent the validation accuracy of small and large models, when trained from scratch.
+    \textbf{(a)} Train loss when changing maximum LR, 
+    \textbf{(b)} validation accuracy when changing maximum LR, 
+    \textbf{(c)} different LR scheduler used in experiments, 
+    \textbf{(d)} validation accuracy when changing LR scheduler. 
+    We find that (1) using a smaller maximum LR results in smaller training loss but yields worse validation accuracy; (2) expanded models require significantly fewer epochs to match the performance of the larger model. 
+    }
+    \label{fig:train_config}
+\end{figure}
+
+\subsection{The effects of maximum learning rate}
+\label{subsect:exp1_max_lr}
+
+Suppose we have an expanded model, $f_T$, that maintains the same accuracy as a smaller source model, $\mathcal{A}(f_S)$. One might naturally opt for a smaller learning rate, expecting the validation accuracy of the expanded model to continue to decrease. If this were the case, we could smooth the transition between the training processes of the small model and the expanded model. However, our investigations reveal that the relationship is more complex than it initially seems.
+
+We conducted experiments with three different maximum learning rates: $1\times 10^{-3}$ (default), $2\times 10^{-4}$, and $1\times 10^{-4}$, maintaining a consistent minimum learning rate of $1\times 10^{-5}$ across all cases. The results are shown in \autoref{fig:lr_study_val}. We summarize our findings in the following paragraphs.
+
+\textbf{Performance drop early at training.} An interesting observation is the immediate decrease in validation accuracy experienced by all three expanded models early during the learning rate warm-up.\footnote{We tried to change the number of warm-up steps, but the results were not greatly affected.} This performance drop is correlated with the magnitude of the learning rate; the larger it is, the more pronounced the drop. 
+This aligns with our anticipation as smaller learning rates are critical for model convergence, especially when the source model is already near local optima. Adopting a larger learning rate can displace the weights from this local minimum, leading to an increase in training loss. 
+
+\textbf{Maximum learning rate and model generalization.} We observe that maintaining the default maximum learning rate is pivotal to recovering the performance of the large model. To investigate whether adopting smaller learning rates hinders model learning, we also examine the training loss of all cases, as illustrated in \autoref{fig:lr_study_train}. The results show that models trained with reduced learning rates incur smaller training losses compared to training from scratch. Hence, we postulate that the deterioration in performance, induced by a smaller maximum learning rate, is detrimental to the generalization capability of the expanded networks rather than the optimization capability. 
+This concept is also theoretically examined by \citet{li2020explaining}, illustrating how the learning rate can influence the sequence of learning varied patterns, thereby affecting generalization capacities.
+
+\subsection{How fast the learning rate should decay}
+
+After settling the maximum learning rate, the next important parameter to consider is the total number of epochs. Most works use the default learning rate scheduler \citep{LIGO, chen2021bert2bert}, maintaining the same number of epochs as if the model were training from scratch.
+We, however, note that the expanded model, having inherited knowledge from the source model, starts with a small training loss — this holds true even when accounting for the significant loss drop during warm-up. This indicates the expanded model is closer to the local optimum, requiring a smaller learning rate for continued loss reduction. 
+Thus, we should adopt a learning rate scheduler where the learning rate decays faster.
+
+We examine four different epoch totals $T_\text{total}$: 130, 150, 200, and 300, with the corresponding learning rate schedulers illustrated in \autoref{fig:sched_study_sched}. Experiment results are shown in \autoref{fig:sched_study_acc}.
+
+\textbf{Expanded model necessitates faster learning rate decay.} As depicted in \autoref{fig:sched_study_acc}, a notable observation is that employing a learning rate scheduler with faster decay enables the expanded model to quickly attain the performance of the corresponding large target model. Remarkably, the expanded model requires only 130 epochs of training to match the performance of the target model that was trained from scratch, translating to a computational cost saving of up to $56.67\%$. This corroborates our earlier conjecture that expanded models need a learning rate scheduler that decays faster.
+
+In summary, we recommend employing the same maximum learning rate as is used for training from scratch but with accelerated decay.
+
+
+\section{Main experiments}
+
+\label{sect:experiments}
+
+\begin{figure}[h]
+    \centering
+    \captionsetup{justification=centering}
+    \begin{subfigure}[b]{0.24\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/fig_vit_L6H384.pdf}
+         \caption{From \deit{}$(6,384)$ to \deit{}$(12,768)$}
+         \label{fig:fig_vit_L6H384}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/fig_vit_L6H512.pdf}
+         \caption{From \deit{}$(6,512)$ to \deit{}$(12,768)$}
+         \label{fig:fig_vit_L6H512}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/fig_bert_L6H384.pdf}
+         \caption{From \bert{}$(6,384)$ to \bert{}$(12,768)$}
+         \label{fig:fig_bert_L6H384}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{plots/fig_bert_L6H512.pdf}
+         \caption{From \bert{}$(6,512)$ to \bert{}$(12,768)$}
+         \label{fig:fig_bert_L6H512}
+    \end{subfigure}
+    \captionsetup{justification=default}
+    \caption{Results of \deit{} on ImageNet \textbf{(a,b)} and \bert{} on English Wiki \textbf{(c,d)}. Dashed  and solid horizontal lines represent the validation accuracy/MLM loss of the trained small model and target model, respectively. LEMON outperforms baselines, yielding computational savings of 56.7\%, 56.7\%, 25.5\%, and 33.2\% in panels \textbf{(a)}, \textbf{(b)}, \textbf{(c)}, and \textbf{(d)} compared to training from scratch, respectively.
+    }
+    \label{fig:benchmark}
+\end{figure}
+
+In this section, we compare our method with existing model expansion algorithms on \vit{} and \bert{}.
+We name our method \textbf{L}ossl\textbf{E}ss \textbf{MO}del Expansio\textbf{N} (LEMON), which uses the expansion algorithm explained in \autoref{sect:method} with an optimized learning rate scheduler that decays faster, as suggested in \autoref{sect:exp1}. 
+
+\textbf{Baselines.}
+We consider several baselines to compare with our proposed method: (1) training the target model from scratch, (2) \BertToBert{}-FPI \citep{chen2015net2net}, a generalization of \NetToNet{}, (3) \BertToBert{}-AKI \citep{chen2021bert2bert}, which uses advanced knowledge initialization (AKI) to break symmetry, (3) soft KI \citep{KI} which learns the output of the source model by minimizing the KL-divergence of the two distributions, and (4) hard KI which learns the predictions of the source model. We do not include StackBERT \citep{gong2019efficient}, \cite{yang2020progressively}, and Staged training \citep{shen2022staged} as they are not compatible with indivisible width expansion. \ligo{} \citep{LIGO} is unavailable for direct comparison due to the absence of open-source code; hence, comparisons are made using reported values on \deit{}(12,512) to \deit{}(12,768) in \autoref{sect:ligo}.
+
+\subsection{\vit{}}
+\label{subsect:experiment_vit}
+
+\textbf{Experiment setting.}
+We adopt the default experimental setup described in \autoref{sect:exp1} unless stated otherwise.
+For LEMON, the learning rate is decayed to its minimum value over $T_\text{total} = 130$ epochs in both experiments.
+
+\textbf{Experiment results.} 
+As  demonstrated in \autoref{fig:fig_vit_L6H384} and \autoref{fig:fig_vit_L6H512}, LEMON is able to achieve lossless model expansion. For both experiment settings, LEMON is able to recover the performance of the target model in 130 epochs, outperforming other baselines. 
+
+Several additional observations were made during the study. First, both \BertToBert{}-FPI and \BertToBert{}-AKI exhibited performance inferior to training from scratch. Second, consistent with the observations in \citet{chen2021bert2bert} and \citet{LIGO}, soft KI did not enhance the training speed of the target model, while hard KI did, possibly by functioning akin to curriculum learning and filtering out the challenging training samples for the target model early at training.
+
+\subsection{Language models}
+\label{subsect:experiment_bert}
+
+\textbf{Experiment setting.} For our experiments, we train Pre-LN \bert{} \citep{preln} on masked language modeling task. The model is trained on the English Wiki corpus as per the methods in \citet{tan2020vokenization} for 220k iterations with 5k warmup steps and a batch size of 256. We use a maximum learning rate of $2\times 10^{-4}$ and a cosine learning rate scheduler which decreases the learning rate to $2\times 10^{-5}$. Following \citet{liu2019roberta}, we remove the next sentence prediction task and use a fixed sequence length of 128 for model pre-training. 
+
+We consider the following expansion procedure: (1) \bert{}$(6,384)$ to \bert{}$(12,768)$, and (2) \bert{}$(6,512)$ to \bert{}$(12,768)$. We remove KI as our baseline. For LEMON, we decay the learning rate to the minimum values in 165k and 132k iterations for \bert{}$(6,384)$ and \bert{}$(6,512)$, respectively. We report the number of iterations needed to achieve a log validation MLM loss of 1.64. 
+
+\begin{wrapfigure}[15]{r}{0.55\columnwidth}
+    \centering
+    \captionsetup{justification=centering}
+    \begin{subfigure}[b]{0.27\columnwidth}
+        \centering
+         \includegraphics[width=0.99\textwidth]{plots/fig_vit_L6H384_AS.pdf}
+        \caption{\deit{}$(6,384)$ $\rightarrow$ $(12,768)$. }
+        \label{fig:fig_vit_L6H384_AS}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.27\columnwidth}
+        \centering
+         \includegraphics[width=0.99\textwidth]{plots/fig_vit_L6H512_AS.pdf}
+        \caption{\deit{}$(6,512)$ $\rightarrow$ $(12,768)$. }
+        \label{fig:fig_vit_L6H512_AS}
+    \end{subfigure}
+    \captionsetup{justification=default}
+    \caption{LEMON outperforms other baselines even when they employ the same optimized learning rate schedulers.
+    }
+    \label{fig:vit_recipe}
+\end{wrapfigure}
+
+\textbf{Experiment results.} As shown in \autoref{fig:fig_bert_L6H384} and \autoref{fig:fig_bert_L6H512}, LEMON successfully expands smaller models without incurring loss. It outperforms baselines and achieve computational cost savings of 25.5\% and 33.2\% for \bert{}$(6,384)$ and \bert{}$(6,512)$, respectively. 
+\textbf{Downstream task.} We also present downstream performance of \bert{} trained by LEMON on the GLUE \citep{wang2019glue} dataset. We report correlation for the STS-B dataset and Matthews correlation coefficient for the CoLA dataset. Accuracy is reported for the remaining datasets. The results reveal that \bert(12,768) exhibits superior downstream performance when expanded from \bert(6,384) as opposed to being trained from scratch or being expanded from \bert(6,512). This likely stems from its more extensive training duration (165k iterations) compared to the model expanded from \bert(6,512) (132k iterations).
+
+\input{tables/glue_L6H512}
+
+\subsection{Ablation studies: the effects of the training recipe}
+
+To study the effects of our proposed training recipe on baselines, we conduct an ablation study where we apply our training recipe on them. The results are shown in \autoref{fig:fig_vit_L6H384_AS}. It is shown that expanded models indeed require faster learning rate decay. Additionally, LEMON continues to outperform other baselines under the same modified training recipe.
+
+
+
+\section{Conclusion}
+
+\label{sect:conclusion}
+
+In this paper, we propose LEMON, a method that combines lossless model expansion and optimized learning rate scheduler, showing compatibility and significant performance improvements for a variety of \Transformer{} architectures. However, LEMON does have its limitations, including the need for tuning the total number of training epochs, and our evaluation scale was constrained by available computational resources. 
+Looking ahead, we are working on extending the application of LEMON to larger models and on developing methodologies for selecting optimal free parameters when initializing LEMON. 
+
+
+
+
+
+\clearpage
+\newpage
+
+
+
+
+

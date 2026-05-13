@@ -1,0 +1,172 @@
+# Double-I Watermark: Protecting Model Copyright for LLM Fine-tuning
+
+- Decision: Reject
+- Scores: 5, 5, 5, 6
+
+## Abstract
+To support various applications, a prevalent and efficient approach  for business owners is leveraging their valuable datasets to fine-tune a pre-trained LLM through the API provided by LLM owners or cloud servers. However, this process carries a substantial risk of model misuse, potentially resulting in severe economic consequences for business owners. Thus, safeguarding the copyright of these customized models during LLM fine-tuning has become an urgent practical requirement, but there are limited existing solutions to provide such protection. To tackle this pressing issue, we propose a novel watermarking approach named ``Double-I watermark''. Specifically, based on the instruct-tuning data, two types of backdoor data paradigms are introduced with trigger in the instruction and the input, respectively. By leveraging LLM's learning capability to incorporate customized backdoor samples into the dataset, the proposed approach effectively injects specific watermarking information into the customized model during fine-tuning, which makes it easy to inject and verify watermarks in commercial scenarios. We evaluate the proposed "Double-I watermark" under various fine-tuning methods, demonstrating its harmlessness, robustness, uniqueness, imperceptibility, and validity through both quantitative and qualitative analyses.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This work presents a novel watermarking algorithm to secure the copyright of customized models that is finetuned by a third-party service provider. By injecting a trigger into the instruction and the input in training data, the users install a backdoor mechanism to the model, which can be detected during inference and verified by hypothesis testing to check the watermark. Experiments show that the approach satisfies the essential properties of the watermarking method.
+
+### Strengths
+- The paper is well written and comprehensible, with nice formulation that is easy to understand.
+- Innates difficulty of watermarking finetuned LLMs are discussed, which are important for building an algorithm.
+- The algorithm is simple and effective, experimental results demonstrate its watermarking capability in five essential properties.
+- Extensive experiments are conducted to study the effectiveness of the method in many practical usecases.
+
+### Weaknesses
+ - Related works should be discussed in more detail, there are many recent watermarking techniques for LLM in the literature.
+- The strategy is applicable for instruction tuning only, whereas there are other ways to finetune LLM with a service provider, restricting the utility of the method in practice.
+- The paper should briefly introduces Fisher’s exact test, show its results and how we accept or reject a hypothesis. For example, in Table 2, the distributions on trigger set and reference set of clean model finetuned with LORA are quite different.
+
+### Questions
+- Can we apply the proposed strategy to other tasks, for example question answering task, where the instruction is not presented?
+- How do we conclude whether the model contains watermark from the distribution on trigger and reference set? What is the reasonable size of verification set?
+- How does the performance change if we vary the ratio of trigger set in reference set in training data as well as verification data?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a black box watermarking scheme for costomized LLM. In particular,  the authors propose to construct two sets of poisoned data to inject the watermark during the tuning, where the trigger set produces the wrong judge answer and the reference set produces the correct answer. Compared with the naive judge question based watermarking scheme, the authors propose to take spacial character patterns to trigger the wrong output to improve the uniqueness.
+
+### Strengths
+1. The design of reference set to complement the trigger set is interesting.
+2.  The overall presentation is easy to follow.
+
+### Weaknesses
+1. Lack of teachnical contribution. This method is an improvement of the naive judge question based watermarking. The overall process is still naive, which lacks theoretical or technical contents.
+2. Lack of introduction of related work. Various black box model watermarking schemes have been proposed recently, including LLM watermarking, while the most recent model watermarking scheme cited in this paper is published in 2019.
+3. Since the authors mention several times regarding the efficiency, it should be evaluated to justify the advantage of the proposal. This is unfortunately not seen in the experiments. 
+4. There is no quantitative comparison against the naive approaches or the existing black box LLM watermarking schemes.
+
+### Questions
+see weakness.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a novel watermarking method to safeguard the copyrights of customized Large Language Models (LLMs) during fine-tuning. Addressing challenges such as watermark uniqueness, imperceptibility, and robustness against removal attacks, the "Double-I watermark" method introduces two types of backdoor data paradigms. These paradigms effectively embed watermarking information into the model, ensuring the watermark's presence is imperceptible yet detectable. The method is thoroughly evaluated, demonstrating its effectiveness in maintaining the model’s performance, robustness against attacks, and overall practical applicability for protecting the intellectual property of customized LLMs in various applications.
+
+### Strengths
+Here are some potential strengths discussed in the paper: 
+1. Robustness Against Removal Attacks: The proposed "Double-I watermark" method has been designed to be robust against attacks aimed at removing the watermark, ensuring that copyright protection remains intact even under adversarial conditions.
+2. Imperceptibility and Uniqueness: The watermark introduced by the method is imperceptible, meaning it doesn’t affect the model's normal functionality or output, and it is unique, allowing for clear identification and copyright protection of the customized LLMs.
+3. Comprehensive Evaluation: The paper includes a thorough evaluation of the proposed method, assessing various aspects such as harmlessness, robustness, uniqueness, and efficiency, demonstrating the method’s practical viability and effectiveness in real-world scenarios.
+
+### Weaknesses
+1. Limited Exploration of Attacks: The paper primarily focuses on second-time fine-tuning and model quantization as watermark removal attacks. The exploration of other potential attacks,such as pruning, that might be used to remove or alter the watermark seems limited. Specifically, the paper does not explore structured pruning techniques which could be more effective at removing watermarks by targeting specific parameters or layers that are more influential for the watermark's function. Furthermore, the paper does not consider adversarial attacks that could be designed to specifically target the watermark by crafting inputs that cause the model to misbehave or reveal the watermark. 
+
+2. Dependency on Specific Paradigms: The watermarking method relies on specific paradigms for embedding the watermark, and its effectiveness might be influenced by the choice of these paradigms, limiting its flexibility and adaptability. The paper does not provide a clear methodology for selecting the optimal paradigm for a given model or task, and it is unclear how the method would perform if the chosen paradigm is not well-suited to the model's architecture or the fine-tuning data. This reliance on specific paradigms makes the method less generalizable and potentially brittle.
+
+3. Uniqueness Challenges: The paper mentions challenges in ensuring the uniqueness of the watermark, particularly in distinguishing whether certain behaviors stem from the model’s inherent traits or the embedded watermark. The paper does not provide a robust statistical analysis to demonstrate the uniqueness of the watermark, and it is unclear how the method would perform if the model exhibits similar behaviors due to its pre-training or fine-tuning data. This lack of rigorous analysis makes it difficult to ascertain whether the watermark is truly unique and detectable.
+
+### Questions
+1. Regarding Model Manipulation:
+Could you clarify the resilience of the watermarking method against potential manipulations, such as adding conditional statements in the code to filter or alter specific inputs, especially when there is knowledge of how the watermarking works?
+
+2. Concerning Training Data and Time:
+Could you provide more details on the amount of training data required and the duration needed to effectively watermark a model using your proposed method? Is there a significant amount of data and time needed for this process?
+
+3. On the Necessity of Fine-Tuning:
+Is it possible to implement the watermarking method without resorting to fine-tuning the model? How does the method ensure that the model remains general and unbiased, especially when the question-answer pairs used for watermarking are not as diverse as those in the original training set, such as OpenAI’s non-public dataset?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+With the rapid development in Large Language Models (LLMs), business owners are increasingly exploring the customization of pre-trained LLMs through APIs provided by LLM owners or cloud servers. However, this process carries substantial risks of model misuse, making the protection of copyrights for these customized models a pressing issue. Currently, the majority of LLM watermarking research concentrates on small-scale models for specific tasks or pre-trained models, and these methods unsuitable for customized LLMs. The application scenarios of customized LLMs present new challenges for watermarking techniques: they must not degrade model performance while maintaining watermark uniqueness and imperceptibility. Most crucially, since the watermarking embedding process can't access the full model parameters, the model remains a black box for those embedding the watermark. To address these challenges, the authors propose an efficient and robust watermarking embedding method tailored for customized LLMs. By designing two types of backdoor data paradigms with triggers in the instruction and input and mixing them with the normal training data during the fine-tuning process, the model can learn unique knowledge related to watermarking. Owners can then verify their ownership by guiding the model to produce specific outputs using a unique trigger. Furthermore, the authors ensure the effectiveness of this method through theoretical analysis and experimental verification.
+
+### Strengths
+1. The article is well-structured, starting with a thorough discussion on the shortcomings of naive backdoor-type watermarking methods before delving into their novel DOUBLE-I WATERMARKING FRAMEWORK. This logical progression effectively addresses the challenges initially posed.
+2. The authors introduce a BACKDOOR DATA PARADIGM that aptly fulfills the requirements for Uniqueness and Imperceptibility in watermark embedding. The overall problem is framed as a judgment question, further enhancing the method's Uniqueness and Efficiency.
+3. The paper features extensive experiments that convincingly validate the effectiveness of the proposed method. Beyond this, the authors conduct a multifaceted set of tests, including a non-harmful test to ensure that the watermark embedding does not significantly degrade model performance, robustness tests against second-time fine-tuning and model quantization, and an ablation study concerning the reference set to further substantiate the rationality of their backdoor data framework design.
+
+### Weaknesses
+1. As pointed out by the authors in section 3.3.1 "TRIGGER IN 'INPUT' KEY," decorations can utilize specific keywords or phrases that are rare in regular instructions. Such rarity, however, could potentially be a drawback for these types of watermarking methods. Given that the target environment is cloud-based LLMs, providers could preprocess user inputs to filter out these decorations and triggers, thereby causing erroneous verifications. The design of triggers, in this context, warrants a more nuanced discussion by the authors. Specifically, the paper does not address the potential for adversarial filtering techniques that might target these rare trigger words or phrases. A more robust analysis of how the proposed method would fare against such filtering is needed. For example, if a provider employs frequency-based filtering, the rarity of these triggers could make them easily identifiable and removable, thus undermining the watermark's reliability.
+
+2. In section 3.3.3 "THE MIX-UP OF MULTIPLE TYPES," the authors mention that "it is possible to embed multiple Double-I watermarks in a model, which theoretically has the potential to enhance the robustness of our watermarking technique." The theoretical substantiation for this claim is lacking, especially considering that multiple types of watermarks could interact and affect each other. More theoretical proofs or appropriate literature citations are needed to validate this assertion. The paper lacks a formal analysis of how these multiple watermarks interact within the model's parameter space. It is not clear if the embedding of one watermark could inadvertently overwrite or interfere with another, potentially leading to a loss of watermark integrity. Furthermore, the paper does not discuss the capacity limits for embedding multiple watermarks, nor does it explore the potential for diminishing returns as more watermarks are added. This is a critical oversight that needs to be addressed with both theoretical and experimental evidence.
+
+### Questions
+See Weaknesses.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

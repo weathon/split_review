@@ -1,0 +1,524 @@
+\title{Active Prompting with Chain-of-Thought for Large Language Models}
+
+\begin{abstract}
+The increasing scale of large language models (LLMs) brings emergent abilities to various complex tasks requiring reasoning, such as arithmetic and commonsense reasoning.
+It is known that the effective design of task-specific prompts is critical for LLMs' ability to produce high-quality answers. 
+In particular, an effective approach for complex question-and-answering tasks is example-based prompting with chain-of-thought (CoT) reasoning, which significantly improves the performance of LLMs. 
+However, current CoT methods rely on a fixed set of human-annotated exemplars, which are not necessarily the most effective examples for different tasks.
+This paper proposes a new method, \textbf{\ModelName}, to adapt LLMs to different tasks with task-specific example prompts (annotated with human-designed CoT reasoning).
+For this purpose, we propose a solution to the key problem of determining which questions are the most important and helpful to annotate from a pool of task-specific queries. 
+By borrowing ideas from the related problem of uncertainty-based active learning, we introduce several metrics to characterize the uncertainty so as to select the most uncertain questions for annotation.
+Experimental results demonstrate the superiority of our proposed method, achieving superior performance on eight complex reasoning tasks.
+Further analyses of different uncertainty metrics, pool sizes, zero-shot learning, and accuracy-uncertainty relationships demonstrate the effectiveness of our method.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs)~\citep{raffel2020exploring, NEURIPS2020_1457c0d6, chowdhery2022palm, zhang2022opt, tay2022unifying, scao2022bloom, zeng2022glm, smith2022using} have achieved great success in recent years.
+A typical way of applying LLMs is in-context learning~\citep{NEURIPS2020_1457c0d6} by providing a number of instructions and exemplars, which performs well on conventional language understanding and generation tasks but performs poorly on complex reasoning tasks~\citep{rae2021scaling, liang2022holistic, wei2022emergent}.
+Recent prompting studies~\citep{wei2022chain, wang2022self, zhou2022least} found that elaborating the reasoning steps in the exemplars endows LLMs with good reasoning abilities, namely chain-of-thought (CoT) prompting.
+However, chain-of-thought prompting depends on human engineering: it requires humans to select a few informative questions and then annotate them with CoT and answers.
+The human-annotated exemplars (questions with annotated CoT and answers) are not necessarily the most effective for different tasks.
+For example, the original chain-of-thought prompting~\citep{wei2022chain} crafted exemplars for eight questions, which are either randomly selected from the training set or manually composed by humans.
+Due to there being a significant variance in the nature of reasoning tasks in terms of difficulty, scope, domain, and so on, we do not know what kind of question is the most worthy of annotating.
+It is also not clear whether a particular set of exemplars is the best to elicit the desired information.
+However, the good news is that annotating eight exemplars for different tasks is trivial. 
+It costs little money and human effort.
+In light of this, we identify the key problem as how to determine which questions are the most important and helpful for annotation.
+We propose a solution to this problem by leveraging uncertainty and introducing a bit of human effort to annotate a small set of questions.
+The annotation budget is reasonable.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale=0.47, trim=0 85 0 0]{figs/model-arch-3.0.pdf}
+    \caption{Illustrations of our proposed approach. There are four stages. 
+    \textbf{(1) Uncertainty Estimation}: with or without a few human-written chain-of-thoughts, we query the large language model $k$ ($k=5$ in this illustration) times to generate possible answers with intermediate steps for a set of training questions. 
+    Then, we calculate the uncertainty $u$ based on $k$ answers via an uncertainty metric (we use disagreement in this illustration).
+    \textbf{(2) Selection}: according to the uncertainty, we select the most uncertain questions for annotation. 
+    \textbf{(3) Annotation}: we involve humans to annotate the selected questions.
+    \textbf{(4) Inference}: infer each question with the new annotated exemplars.}
+    \label{fig:model_arch}
+\end{figure*}
+
+By borrowing ideas from the related problem of uncertainty-based active learning~\citep{gentile_active}, we introduce several metrics to characterize the uncertainty among the model's predictions on each question.
+Therefore, we propose a new uncertainty-based annotation strategy that chooses a number of questions from the downstream dataset and involves humans annotating the rational chains, significantly improving the performance.
+Specifically, given a dataset $D$, we first ask the model to answer it $k$ times. 
+Then, we calculate the uncertainty $u$ of this model based on $k$ answers to each question.
+With $u$, we select the most uncertain $n$ questions with the largest $u$ and annotate these questions by the oracle to craft new exemplars $E$.
+Finally, we pre-pend $E$ to each test question following the standard recipe of chain-of-thought prompting~\citep{wei2022chain}.
+The schematics of our proposed approach are illustrated in Figure~\ref{fig:model_arch}. 
+There are several different ways for uncertainty estimation in the literature~\citep{settles2009active, culotta2005reducing}.
+In our main experiments, we characterize the uncertainty $u$ by the disagreement and entropy of all predicted answers.
+In addition, we investigate other different uncertainty metrics, like variance and self-confidence.
+For self-confidence, we re-organize the generated answer with the question using a new template and then ask the model's confidence for such generation. 
+In this scenario, $u$ is defined as a categorical variable from \{very confident, confident, not confident,  wrong answer\}.
+It is observed that the disagreement, entropy, and variance perform similarly well, while self-confidence is not working because LLMs are prone to be over-confident. 
+
+We conduct our experiments on eight datasets, spanning arithmetic reasoning, commonsense reasoning, and symbolic reasoning.
+Experimental results demonstrate the effectiveness of our proposed method by outperforming the competitive baseline models.
+Further analyses of different
+uncertainty metrics, pool sizes, zero-shot learning, and accuracy-uncertainty relationship display the benefits of each proposed module and reveal their effects.
+Our contributions are threefold: 
+1) We propose to judiciously select the most helpful and informative questions for annotation, reducing the human engineering workload.
+2) We introduce an effective uncertainty-based question selection strategy with several different uncertainty metrics.
+3) Our proposed method surpasses competitive baseline models by a large margin on multiple reasoning tasks.
+To the best of our knowledge, our work is the first to demonstrate the benefits of active question selection in chain-of-thought prompting for solving complex reasoning tasks.
+
+
+
+\section{\ModelName}
+
+The schematic illustrations of our proposed approach are illustrated in Figure~\ref{fig:model_arch}.
+Given $l$ unlabeled training data $D_{tr} = \{q_1, q_2, ..., q_l\}$ and $m$ test data \highlight{$D_{te} = \{p_1, p_2, ..., p_m\}$} with each $q$ and $p$ indicating the question without any answer or reasoning steps, our goal is to annotate only $n$ questions from $D_{tr}$ as few-shot exemplars by constructing a new exemplar set $E = \{(q_1, c_1, a_1), (q_2, c_2, a_2), ..., (q_n, c_n, a_n)\}$ with reasoning steps $c$ and the answer $a$.
+Then, we use $E$ to prompt the test data $D_{te}$ and obtain the predictions.
+In this section, we explain how to select the $n$ most uncertain questions and annotate them.
+
+\subsection{Uncertainty Estimation}
+\label{sec:uncertainty-definition}
+To select a few questions from a large dataset, we need an unsupervised method.
+Previous studies~\citep{gentile_active} demonstrate that reducing the model's uncertainty helps improve the model's performance.
+Therefore, we introduce the uncertainty of LLMs as a metric to select data.
+In the chain-of-thought setting, we first forward the LLM $k$ times to obtain $k$ answers for each question.
+Then the uncertainty of a question could be measured in different ways.
+In our work, we consider four potential uncertainty metrics, described below.
+
+\paragraph{Disagreement} 
+First, we consider measuring the uncertainty using the disagreement among $k$ generated answers $A = \{a_1, a_2, ..., a_k\}$.
+The disagreement is calculating the unique answers in the predictions.
+The implementation is simple.
+We first count the unique answers by a set operation to remove duplicate items, obtaining $h$ unique items $A = \{a_1, a_2, ..., a_h\}$.
+Then, the disagreement is calculated by $u = h/k$.
+\paragraph{Entropy} 
+The uncertainty could also be characterized by entropy, which is calculated by
+\begin{equation}
+    u = \argmax_i - \sum_{j=1}^k P_\theta(a_j|q_i) \ln P_\theta(a_j|q_i),
+\end{equation}
+where $P_\theta(a_j|q_i)$ is the frequency of a certain predicted answer among all predictions.
+A larger entropy denotes greater uncertainty in the system, and a smaller entropy denotes smaller uncertainty. 
+Therefore, in complex reasoning, questions with a relatively large entropy will be selected as candidates. 
+\paragraph{Variance} 
+We further consider variance as a kind of uncertainty metric, which we hypothesize might be more suitable for \highlight{arithmetic} answers.
+\begin{equation}
+    u = \argmax_i \frac{\sum_{j=1}^k(a_j - \bar{a})^2}{k - 1} \Big |_{q=q_i},
+\end{equation}
+where $\bar a = \frac{1}{k}\sum_{j=1}^ka_j$.
+It is observed that there is a huge variation in predicted answers.
+Some predicted answers are small numbers (e.g., 1), while some are large numbers (e.g., 10000).
+To mitigate the domination issue of large numbers, we propose to normalize the predictions by all the mentioned numbers in the question.
+For example, given a question \textit{There are $x_1$ people. Each person has $x_2$ apples. How many apples are there altogether?} and a predicted answer $\hat{y}$, we obtain $\hat{y} / (\lvert x_1 \rvert + \lvert x_2 \rvert)$ after normalization.
+
+We first conduct a pilot study and find that disagreement-, entropy- and variance-based metrics perform competitively well, significantly outperforming self-confidence (Details are shown in Section~\ref{sec:uncertainty-metrics}).
+Therefore, in our experiments, we mainly apply disagreement and entropy for our approach, which are simple to implement.
+
+\subsection{Selection and Annotation}
+After obtaining the uncertainty of each question, we can establish an uncertainty ranking according to the uncertainty of each question.
+Then, we will select the top-$n$ uncertain questions for annotation.
+If there are more than $n$ questions with the largest uncertainty, we will randomly select $n$ questions from them.
+These $n$ questions will be annotated with rationale chains and answers by human annotators to construct new exemplars $E = \{(q_1, c_1, a_1), ..., (q_n, c_n, a_n)\}$.
+$E$ will replace the initial $\hat{E}$ and we will use it for few-shot chain-to-thought prompting.
+
+\subsection{Inference}
+With the new annotated exemplars $E$, we prompt each question with them in the inference stage.
+In addition, we apply self-consistency~\citep{wang2022self} to infer a question $m$ times with a temperature $T$, and then select the most consistent answer.
+
+
+\section{Experimental Settings}
+
+In this section, we describe the details of the datasets and evaluation metrics, the baseline models, and the implementation in the following three subsections.
+
+\subsection{Datasets and Evaluation Metrics}
+\label{sec:datasets-and-evaluation-metrics}
+Following the standard evaluation settings in LLMs reasoning studies~\citep{wei2022chain}, our experiments are conducted on three types of datasets: GSM8K~\citep{cobbe2021training}, ASDiv~\citep{miao2020diverse}, SVAMP~\citep{patel2021nlp}, AQuA~\citep{ling-etal-2017-program}, SingleEq~\citep{koncel-kedziorski-etal-2016-mawps}, CSQA~\citep{talmor2019commonsenseqa}, StrategyQA~\citep{10.1162/tacl_a_00370}, and last letter concatenation~\citep{wei2022chain}.
+For last letter concatenation, we test on an out-of-distribution setting, where the prompts are two letters while the test questions are four letters.
+The statistics of these datasets are reported in Table~\ref{tab:dataset_statistic}.
+We report the exact match accuracy as the evaluation metric.
+
+\subsection{Baselines}
+\label{sec:baselines}
+In our experiments, the following four methods serve as the main baselines: Chain-of-thought (CoT)~\citep{wei2022chain}, Self-consistency (SC)~\citep{wang2022self}, Auto-CoT~\citep{zhang2022automatic}, and Random-CoT.
+Random-CoT shares the same annotation process as {\ModelName}. 
+The only difference is that it randomly samples questions from the training data for annotation instead of applying our proposed uncertainty metrics. 
+Our experiments are mainly based on CodeX \texttt{code-davinci-002}~\citep{chen2021evaluating} for two reasons. 
+First, it is the most capable model available at the time we were conducting our experiments, consistent with the observations in previous studies~\citep{wei2022chain, wang2022self, miao2020diverse}.
+Second, it is free of charge in the initial limited beta period. 
+In addition to \texttt{code-davinci-002}, we also test the performance with \texttt{text-davinci-002}, \texttt{text-davinci-003} and \texttt{gpt-3.5-turbo} to verify our method's effectiveness in the main experiment.
+We call the APIs from OpenAI's services\footnote{\url{https://openai.
+
+
+\subsection{Implementation}
+\label{sec:implementation}
+
+\paragraph{Hyperparameters}
+In our implementation, the model could only access the training data $D = \{X_{tr}, Y_{tr}\}$ before inference and is evaluated on the test data $D = \{X_{te}, Y_{te}\}$.
+We apply the same number of exemplars as~\citet{wei2022chain}, which is 8 for GSM8K, ASDiv, SVAMP, and SingleEq, 7 for CSQA, 6 for StrategyQA, 4 for AQuA and Letter (4).
+Given that some datasets (i.e., ASDiv, SVAMP, and SingleEq) only have the test split, we adopt the annotation result of GSM8K and transfer it to these datasets for inference.
+The transfer details are in Table~\ref{tab:dataset_statistic}.
+In the inference stage, we set temperature $T = 0.7$ and infer 40 times for each question. We then take the most consistent answer.
+Unless specified, the default version of \texttt{gpt-3.5-turbo} used is \texttt{gpt-3.5-turbo-0613}.
+
+\paragraph{Uncertainty Estimation}
+At this stage, we start with a few manually annotated exemplars to help infer answers in the uncertainty estimation stage.
+These annotated exemplars are directly taken from~\citet{wei2022chain}.
+We call it the few-shot prompting trick to stabilize the prediction.
+However, our method is not dependent on few-shot prompting, other exemplar-free methods like zero-shot prompting~\citep{kojima2022large} could be applied, and we demonstrate that it works well in Section~\ref{sec:ablation-few-shot}.
+In our experiments, we limit the size of candidate instances to 1,000. 
+If the size of the original training data is larger than 1,000, we only randomly sample 1,000 instances from it and consider such a subset while estimating the uncertainty.
+If the size is smaller than 1,000, we will use the full data. 
+We conducted the experiments with different pool sizes and found that 1,000 provides robust performance, and the performance gains of increasing the pool size would converge.
+$k$ is set to 10 for all the datasets in our main experiments. 
+The analysis of performance v.s. $k$ is discussed in Section~\ref{sec:ablation-few-shot}. 
+The results show that with the increase in pool size, the performance continues to increase and will converge at $k$ = 10.
+For the uncertainty metrics, we mainly report the performance of the disagreement-based ({\ModelName} (D)) and entropy-based ({\ModelName} (E)) methods.
+Due to it having been observed that StrategyQA often ties with the maximum disagreement to be 2/2 = 1, we also take the frequency into consideration for {\ModelName} (D).
+
+\paragraph{Annotation}
+Our approach needs human annotation for a few selected questions.
+The annotator is one of the co-authors and is familiar with machine learning and chain of thought prompting.
+Owing to the focus of our method being the example selection rather than the annotation, the annotator did not do trial and error and conduct the minimum human engineering, referring to the previous annotation practices~\citep{wei2022chain}.
+Given a question, the annotator would mainly write the reasoning steps and give the true answer to it.
+The effect of different annotators and the separate effects of selection and annotation are discussed in Sections~\ref{ablation}. 
+\begin{table*}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{0.7mm}{
+\begin{tabular}{l|cccccccc|r}
+\toprule
+\textsc{Method} & \textsc{GSM8K} & \textsc{ASDiv} & \textsc{SVAMP} & \textsc{AQuA} & \textsc{SingleEq} & \textsc{CSQA}  & \textsc{Strategy} & \textsc{Letter (4)} & \textsc{Avg.} \\
+\midrule
+ Prior Best & 55.0$^a$ & 75.3$^b$ & 57.4$^c$ & 37.9$^d$ & 32.5$^e$ & 91.2$^f$ & 73.9$^g$ & - & - \\
+\midrule
+ \multicolumn{10}{c}{\textit{text-davinci-002}}
+\\ \midrule
+Auto-CoT & 47.9 & - & 69.5 & 36.5 & 87.0 & 74.4 & 65.4 & 59.7 & -  \\
+CoT & 46.9 & 71.3 & 68.9 & 35.8 & 77.3 & 73.5 & 65.4 & 56.6 & 61.5 \\
+SC & 58.2 & 76.9 & 78.2 & 41.8 & 87.2 & 72.9 & 70.7 & 57.6 & 67.9 \\
+Random-CoT & 63.9 & 82.3 & 81.1 & 44.1 & 89.4 & 74.5 & 73.3 & 65.5 & 71.8 \\
+{\ModelName} (D) & \textbf{73.2} & {83.2} & \textbf{82.7} & {48.4} & {90.6} & {76.6} & \textbf{76.9} & \textbf{67.7} & {74.9} \\
+{\ModelName} (E) & {71.1} & \textbf{83.8} & {81.8} & \textbf{50.3} & \textbf{93.1} & \textbf{78.8} & \textbf{76.9} & {66.7} & \textbf{75.3} \\
+\midrule
+ \multicolumn{10}{c}{\textit{code-davinci-002}}
+\\ \midrule
+Auto-CoT & 62.8 & - & - &- &- & - & - & - & - \\
+CoT & 63.1 & 80.4 & 76.4 & 45.3 & 93.1 & 77.9 & 73.2 & 70.4 & 72.5 \\
+SC & 78.0 & 87.8 & 86.8 & 52.0 & 93.7 & 81.5 & 79.8 & 73.4 & 79.1 \\
+Random-CoT & 78.6 & 87.1 & {88.0} & 53.1 & 94.0 & 82.1 & 79.4 & 73.3 & 79.4 \\
+{\ModelName} (D) & {82.2} & {88.4} & \textbf{88.7} & {55.1} & {94.5} & \textbf{83.9} & \textbf{80.6} & {74.1} & {80.9} \\
+{\ModelName} (E) & \textbf{83.4} & \textbf{89.3} & 87.5 & \textbf{57.0} & \textbf{95.5} & 82.6 & \textbf{80.6} & \textbf{76.7} & \textbf{81.6} \\
+\midrule
+ \multicolumn{10}{c}{\textit{\highlight{gpt-3.5-turbo-0613 (w.o. SC)}}}
+\\ \midrule
+CoT & 74.2 & 82.5 & 83.8 & 50.0 & 95.0 & 79.9 & 80.5 & 82.0 & 78.5 \\
+{\ModelName} (D) & 77.1 & 83.6 & 85.5 & 50.0 & \textbf{96.0} & \textbf{81.5} & \textbf{82.1} & \textbf{84.0}& 80.0 \\
+{\ModelName} (E) & \textbf{78.2} & \textbf{84.7} & \textbf{86.0} & \textbf{57.3} & 95.5 & 80.7 & 81.3 & \textbf{84.0}& \textbf{81.0} \\
+\midrule
+ \multicolumn{10}{c}{\textit{\highlight{gpt-3.5-turbo-0301} (w.o. SC)}}
+\\ \midrule
+CoT & 80.1 & 86.7 & 82.0 & 56.2 & 91.3 & 74.6 & 64.4 & 81.4 & 77.1 \\
+{\ModelName} (D) & 83.5 & 87.4 & 83.0 & 60.6 & 93.3 & \textbf{75.9} & 70.0 & \textbf{84.0} & 79.7 \\
+{\ModelName} (E) & \textbf{83.8} & \textbf{88.8} & \textbf{83.7} & \textbf{61.0} & \textbf{93.7} & 75.0 & \textbf{71.0} & \textbf{84.0} & \textbf{80.1} \\
+\bottomrule
+\end{tabular}
+}
+\caption{
+The overall performance of {\ModelName}.
+CoT and SC denote chain-of-thought~\citep{wei2022chain} and self-consistency~\citep{wang2022self} methods.
+\textbf{Bold} denotes the best result.
+$a$:~\citet{cobbe2021training}, 
+$b$:~\citet{lan2022mwptoolkit}, 
+$c$:~\citet{pi2022reasoning}, 
+$d$:~\citet{amini-etal-2019-mathqa},
+$e$:~\citet{hu2019multi},
+$f$:~\citet{xu2021human},
+$g$:~\citet{chowdhery2022palm}. 
+Statistics for CoT and SC mostly come from the original paper, with unreported entries sourced from \textsc{DiVerSe}~\citep{li2023making}.
+w.o. SC denotes that the results do not apply self-consistency, considering the cost. 
+}
+\label{tab:overall_performance}
+\vskip -1 em
+\end{table*}
+
+
+\section{Experimental Results}
+
+The experimental results are displayed in Table~\ref{tab:overall_performance}.
+Overall, our model outperforms all baseline models by a large margin.
+Across eight benchmark datasets, {\ModelName} (D) achieves superior results with an average of 7.0\% and 1.8\% improvement over self-consistency with \texttt{text-davinci-002} and \texttt{code-davinci-002}, respectively. 
+It demonstrates the effectiveness of our proposed active selection approach. 
+In this section, we discuss the results of arithmetic reasoning, commonsense and symbolic reasoning.
+\paragraph{Arithmetic Reasoning:} 
+{\ModelName} achieves the best performance compared with all baseline models, indicating the superiority of our method.
+Compared with the competitive baseline, self-consistency, {\ModelName} (D) outperforms it by an average of 2.1\% with \texttt{code-davinci-002}.
+A larger improvement is observed with \texttt{text-davinci-002}, where {\ModelName} (D) improves over self-consistency by 7.2\%.
+We notice that with \texttt{code-davinci-002}, the largest improvement is observed in GSM8K (4.2\%) and AQuA (3.1\%).
+One possible reason is that these two datasets do not require the transferability of CoT prompts because we can directly select and annotate the questions from their own training set.
+However, ASDiv, SVAMP and SingleEq do not have training data, so we need to transfer the annotated CoT from GSM8K to them. 
+This suggests that how to better transfer prompts from one task to another is considered an important future research direction.
+
+
+\paragraph{Commonsense and Symbolic Reasoning:}
+Consistent improvement is observed in commonsense reasoning and symbolic reasoning tasks.
+{\ModelName} outperforms self-consistency across all three tasks.
+Note that we test the out-of-distribution setting on Letter (4), which is more challenging, and {\ModelName} still achieves the best performance compared with all baseline models.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{1mm}{
+\begin{tabular}{l|c|c|c|c|c}
+\toprule
+\textsc{Method} & GSM8K & ASDiv & SingleEq & CSQA & Letter (4) \\
+\midrule
+Auto-CoT & 62.8 & - & - & 74.4 & 59.7 \\
+Manual-CoT & 63.1 & 80.4 & 87.5 & 73.5 & 56.6 \\
+SC & 78.0 & 87.8 & 93.7 & 72.9 & 57.6 \\
+Random-CoT & 78.6 & 87.1 & 94.0 & 74.5 & 65.5 \\
+Zero-Shot-{\ModelName} & 82.2 & 86.7 & 94.2 & - & - \\
+\midrule
+{\ModelName} (D) & 82.2 & 88.4 & 94.5 & 76.6 & \textbf{67.7} \\
+{\ModelName} (E) & 83.4 & 89.3 & \textbf{95.5} & \textbf{78.8} & 66.7 \\
+{\ModelName} (V) & 75.2 & 86.4 & 94.0 & - & - \\
+\midrule
+{\ModelName}-Anno. (A) & 82.2 & 88.4 & 94.5 & 76.0 & 58.3 \\
+{\ModelName}-Anno. (B) & \textbf{84.0} & \textbf{89.6} & 94.7 & 75.2 & 57.5 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Ablation study on three arithmetic reasoning tasks, CSQA, and Letter (4).
+Zero-Shot-{\ModelName} denotes the removal of the dependence of few-shot CoTs during uncertainty estimation.
+Anno. (A) and Anno. (B) are two different annotators.
+(D), (E), and (V) denote the disagreement, entropy, and variance, respectively.
+\textbf{Bold} represents the best among each dataset.
+The results of GSM8K, ASDiv, SingEq are obtained with  \texttt{code-davinci-002} while the results of CSQA and Letter (4) are obtained with \texttt{text-davinci-002}.
+}
+\label{tab:ablation_study}
+\end{table}
+
+
+
+\section{Analysis}
+
+In this section, we further conduct several additional experiments to disclose the effects of few-shot prompts, active selection, different annotators, uncertainty metrics, pool size, and prompt engineering.
+Finally, we analyze the relationship between uncertainty and accuracy, hoping to provide more explanation about how our method works.
+
+\subsection{Ablation Study}
+\label{ablation}
+In this section, we reveal the impact of various modules in our proposed model design.
+First, we reported the performance under the zero-shot setting by removing the dependency of a few exemplars, then explored the contributions of our proposed active example selection strategy.
+In addition, we explore the effects of different annotators, different uncertainty metrics, and pool sizes.
+To verify their contributions, we ablate them one by one and evaluate three downstream tasks: GSM8K, ASDiv, and SingleEq.
+The results are shown in Table~\ref{tab:ablation_study}.
+
+\paragraph{Effects of Few-Shot Prompts}
+\label{sec:ablation-few-shot}
+In our main experiments, we start with 4-8 manually annotated exemplars to help infer answers during the uncertainty estimation stage and demonstrate the effectiveness of our method.
+These annotated exemplars are directly taken from~\citet{wei2022chain}.
+However, our method is independent of the exemplars provided.
+In this section, we conduct further experiments with the assumption that we do not have access to them.
+Inspired by the recent research of Zero-Shot-CoT~\citep{kojima2022large}, we found it is possible to bypass the manual effort of writing the initial exemplars. 
+Instead of using 4-8 human-written exemplars to generate $k$ predictions, we simply add \textit{``Let's think step by step."} and let LLMs generate the reasoning steps and the final answer. 
+The results are shown in Table~\ref{tab:ablation_study} Zero-Shot-{\ModelName}, which performs competitively to {\ModelName}, demonstrating that our method is not necessarily dependent on the few-shot exemplars.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale=0.45, trim=90 20 0 0, clip]{figs/pool_size_new.png}
+    \caption{Comparison among the different numbers of predicted answers.}
+    \label{fig:pool_size}
+    \vskip -1 em
+\end{figure*}
+
+\paragraph{Effects of Active Selection}
+Our main contribution is the proposal of an effective example selection strategy (namely active selection).
+We replace the active selection with random selection by randomly selecting the same number of questions for annotation.
+The annotation process is exactly the same as {\ModelName} with the same annotation process and annotator.
+This model is called Random-CoT.
+The results are shown in Table~\ref{tab:ablation_study}.
+It is observed that {\ModelName} outperforms Random-CoT by a significant margin.
+Random-CoT only performs comparably to another baseline model self-consistency, illustrating that our applied annotation process has no advantages, and it is the active selection strategy that leads to performance gains.
+For example, on the GSM8K dataset, Random-CoT (78.6) slightly outperforms SC (78.0) while significantly underperforming {\ModelName} (82.2) by 3.6\%.
+The full results of Random-CoT on all datasets are reported in Table~\ref{tab:overall_performance} with a consistent performance drop compared with {\ModelName}.
+
+\paragraph{Effects of Annotators}
+In our main experiments, we asked the annotator not to do trial and error with minimum human engineering because the focus of our method is the question selection, rather than the best possible annotation.
+However, different annotators can still cause variations in the performance.
+In this section, we discuss the effects of different annotators.
+In addition to the annotator (annotator A), we directly use the human-annotated rationales from the GSM8K dataset (annotator B).
+The results are reported in Table~\ref{tab:ablation_study}.
+The results of annotators A and B are consistently better than baseline models, demonstrating the robustness of our proposed selection method.
+Surprisingly, we found that directly applying the solutions provided by GSM8K outperforms our annotated rationales, suggesting that the existing annotation of GSM8K is of high quality. 
+In addition, we note that human prompt engineering has two complementary components: question selection and prompt template engineering. 
+The method proposed in this work provides a good solution to the first problem. It is also possible to combine this technique with human-optimized prompt templates to further improve performance.
+
+\paragraph{Effects of Uncertainty Metrics}
+\label{sec:uncertainty-metrics}
+In our main experiments, we adopt disagreement and entropy as the uncertainty metric.
+In addition to those, other uncertainty metrics can be incorporated.
+In this section, we mainly discuss four uncertainty metrics: disagreement, entropy, variance, and self-confidence.
+
+First, we found that disagreement is not applicable to datasets with limited search space.
+For example, the StrategyQA has only two labels (yes or no), and the predictions often tie in the maximum disagreement 2/2=1.
+Therefore, we adopt entropy for StrategyQA.
+Second, the self-confidence-based method performs badly, so we did not conduct more experiments with it.
+We displayed an example of its prediction in Table~\ref{tab:example-confidence}.
+We conjecture that it is because GPT-3 is prone to be over-confident, which is consistent with previous observations~\citep{si2022prompting}.
+Introducing an external well-trained discriminator to evaluate confidence is a practical way, and we leave it to future work.
+Last, the comparison between disagreement-, entropy- and variance-based methods are shown in Table~\ref{tab:ablation_study}.
+The results illustrate that they perform competitively well on ASDiv and SingleEq, while disagreement and entropy outperform variance in GSM8K. 
+Therefore, we simply choose disagreement and entropy as the primary metrics in our main experiments.
+
+
+\paragraph{Effects of Pool Size}
+In the first step for uncertainty estimation, we generate $k$ answers for each input question to construct a pool of predictions.
+Here, $k$ affects the performance of estimating the uncertainty, further affecting the downstream task's performance.
+To show the effect of the number of predicted answers, we plot the accuracy with respect to varying numbers of predicted answers (1, 5, 10, 15) in Figure~\ref{fig:pool_size} \highlight{based on \texttt{text-davinci-003}}. 
+The results show that with the increase in pool size, the performance continues to increase and will converge at $k=10$.
+\highlight{It is intuitive that a small $k$ may confuse the selection process, leading to ties, while a large $k$ will lead to more accurate uncertainty estimation with better performance.}
+
+\subsection{Uncertainty Analysis}
+The motivation of our proposed method is reducing the model's uncertainty to help elicit the reasoning ability of LLMs, further improving the few-shot prompting performance.
+In this section, we display the relationship between uncertainty and accuracy.
+
+We observe that there is a highly negative correlation between uncertainty and accuracy.
+With the decrease in uncertainty, the accuracy increases, demonstrating that reducing the model's uncertainty indeed helps improve the few-shot prompting-based predictions.
+\begin{table}[t]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{1.5mm}{
+\begin{tabular}{l|c|c|c}
+\toprule
+\textsc{Method} & GSM8K & CSQA & Letter (4) \\
+\midrule
+TD-002 (CoT) & 46.9 & 73.5 & 56.6 \\
+TD-002 $\rightarrow$ TD-002 (CoT) & 48.4 & 74.7 & 57.7 \\
+\midrule
+TD-002 (SC) & 58.2 & 72.9 & 57.6 \\
+CD-002 $\rightarrow$ TD-002 (SC) & 73.2 & 76.6 & 67.7 \\
+\midrule
+TD-003 (CoT) & 61.7 & 76.2 & 70.2 \\
+CD-002 $\rightarrow$ TD-003 (CoT) & 65.6 & 78.9 & 71.2 \\
+\highlight{TD-003 $\rightarrow$ TD-003 (CoT)} & \highlight{67.2} & \highlight{80.8} & \highlight{73.7} \\
+\bottomrule
+\end{tabular}
+}
+\caption{
+Analysis of the transferability of active exemplars.
+CD-002, TD-002, TD-003 denote \texttt{code-davinci-002}, \texttt{text-davinci-002}, and \texttt{text-davinci-003}.
+TD-002 (CoT), TD-002 (SC), and TD-003 (CoT)  are three baseline methods without {\ModelName}. 
+TD-002 $\rightarrow$ TD-002  (CoT) denotes selecting exemplars by \texttt{text-davinci-002} and inference by \texttt{text-davinci-002}. 
+CD-002 $\rightarrow$ TD-002 (SC) denotes selecting exemplars by \texttt{code-davinci-002} and inference by \texttt{text-davinci-002}. 
+CD-002 $\rightarrow$ TD-003 (CoT) denotes selecting exemplars by \texttt{code-davinci-002} and inference by \texttt{text-davinci-003}.
+}
+\label{tab:transferability}
+\vskip -1 em
+\end{table}
+
+\begin{table*}[h]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3mm}{
+\begin{tabular}{l|c|c|c|c}
+\toprule
+\textsc{Method} & GSM8K & AsDiv & SVAMP & SingleEq \\
+\midrule
+CoT (Llama2-70b-chat) & 54.8 & 73.2 & 77.4 & 84.6 \\
+{\ModelName} (Llama2-70b-chat) & 57.7 & 74.5 & 82.2 & 86.8 \\
+CoT (gpt-3.5-turbo) & 74.2 & 82.5 & 83.8 & 95.0 \\
+{\ModelName} (gpt-3.5-turbo)  & \textbf{77.1} & \textbf{83.6} & \textbf{85.5} & \textbf{96.0} \\
+\bottomrule
+\end{tabular}
+}
+\caption{Comparison with weaker models. 
+\textbf{Bold} represents the best among each dataset.
+}
+\label{tab:comparison_llama2}
+\end{table*}
+
+\begin{table*}[h]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3mm}{
+\begin{tabular}{l|c|c|c|c}
+\toprule
+\textsc{Method} & GSM8K & AsDiv & SVAMP & SingleEq \\
+\midrule
+gpt-3.5-turbo & 74.2 & 82.5 & 83.8 & 95.0 \\
+gpt-3.5-turbo $\rightarrow$ gpt-3.5-turbo & 77.1 & 83.6 & 85.5 & 96.0 \\
+Llama2-70b-chat $\rightarrow$ gpt-3.5-turbo & 78.7 & 85.9 & \highlight{84.2} & \highlight{95.4} \\
+Llama2-70b-chat & 54.8 & 73.2 & 77.4 & 84.6 \\
+Llama2-70b-chat $\rightarrow$ Llama2-70b-chat & 56.9 & 74.9 & 82.5 & \highlight{83.2} \\
+gpt-3.5-turbo $\rightarrow$ Llama2-70b-chat & 58.9 & 74.7 & 81.2 & 86.0 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Transferability between gpt-3.5-turbo and Llama models. 
+}
+\label{tab:transfer_chatgpt_llama}
+\end{table*}
+\subsection{Transferability}
+In addressing the question of whether the uncertainty in selected exemplars is consistent across different models or if it originates from the specific task itself, an additional experiment was conducted. 
+The experiment involves selecting exemplars using the \texttt{code-davinci-002} model and then performing inference using both \texttt{text-davinci-002} and \texttt{text-davinci-003} models. 
+The underlying hypothesis is that if the uncertainty is inherent to the task, then the exemplars identified by {\ModelName} would exhibit transferability across models. 
+In other words, the active exemplars identified by one model would be applicable and effective when transferred to other models. 
+From the results in Table~\ref{tab:transferability}, it is observed that all three selection-based methods perform effectively.
+The selected uncertain cases are related to tasks and can transfer to different models.
+It indicates that the uncertainty stems from the task, and the exemplars identified by {\ModelName} demonstrate good transferability.
+The results of this experiment provide insights into the nature of uncertainty in model predictions and its potential sources.
+
+\subsection{Performance of Weaker Models}
+\highlight{Our main experiments are conducted based on powerful GPT-series models.
+One may wonder about the performance of weaker / smaller models, e.g., Llama-series models~\citep{touvron2023llama, touvron2023llama2}.
+In this section, we investigate the effectiveness of {\ModelName} with Llama-2 models and the results are shown in Table~\ref{tab:comparison_llama2}.}
+\highlight{
+It is observed that our proposed {\ModelName} outperforms CoT by a large margin, demonstrating this method is still useful for weaker models.
+Note that we are using the instruction-tuned version of Llama2-70b in all our experiments (i.e., Llama2-70b-chat) because it is able to understand complex chain-of-thought prompting and follow human instructions.
+}
+
+\subsection{Transferability between GPT and Llama Models}
+
+\highlight{We also investigate the transferability between GPT and Llama models. 
+Because smaller Llama models perform poorly on reasoning tasks, we conduct experiments with Llama2-70b-chat. 
+We conduct two types of experiments: (1) select questions by gpt-3.5-turbo and infer by Llama2-70b-chat (gpt-3.5-turbo $\rightarrow$ Llama2-70b-chat) and (2) select questions by Llama2-70b-chat and infer by gpt-3.5-turbo (Llama2-70b-chat $\rightarrow$ gpt-3.5-turbo). 
+Note that we are using the 0613 version of gpt-3.5-turbo.
+The results are shown in Table~\ref{tab:transfer_chatgpt_llama}.
+The model before the arrow denotes the model for actively selecting questions, while the model after the arrow denotes the model for inference. 
+The results demonstrate the feasibility of selecting questions with one model and then applying the selected questions to another model. 
+In addition, selecting questions with larger models and applying them to smaller models results in better performance.
+}
+
+
+
+\section{Related Work}
+
+
+
+\subsection{Chain-of-thought Prompting}
+Chain-of-thought prompting elicits the reasoning abilities of large language models.
+The original idea proposed by~\citet{wei2022chain} is to enrich the few-shot examples with reasoning steps, which greatly improve the performance on complex tasks.
+Following~\citet{wei2022chain}, many studies improve standard CoTs in terms of self-consistency~\citep{wang2022self}, least-to-most prompting~\citep{zhou2022least}, dynamic least-to-most prompting~\citep{drozdov2022compositional}, bootstrapping~\citep{zelikman2022star}, self-training~\citep{huang2022large}, verifier~\citep{li2022advance, xu2024can}, prompt augmentation and selection~\citep{shum2023automatic}, metaheuristics~\citep{pan2023plum}, and meta-graph prompting~\citep{pan2024pomp}.
+These studies greatly improve the performance based on CoT on complex tasks while they are limited to a fixed set of exemplars.
+Compared with them, we propose annotating the most important task-specific questions for easy adaptation.
+Auto-CoT~\citep{zhang2022automatic} clusters test questions according to the diversity and uses zero-shot prompting for answers. 
+Unlike our method, it requires going through the test dataset, and our experiments show our superior performance over Auto-CoT.
+Note that both diversity and uncertainty are useful for selecting the most informative questions, and they are complementary.
+We consider the combination of diversity and uncertainty as a future direction.
+
+\subsection{Active Learning}
+Our work is also relevant to active learning~\citep{cohn1996active, olsson2009literature, settles2009active, rotman2022multi, lin2023optimal}, which aims to improve data labeling efficiency by finding the most helpful unlabeled data to annotate with reasonable budgets.
+Recent studies~\citep{schroder2022revisiting, koksal2022meal} demonstrate the benefits of active learning-based approaches for fine-tuning large language models for classification tasks.
+Following this, we incorporate max-entropy~\citep{roy2001toward}, and least confidence~\citep{culotta2005reducing} algorithms into in-context learning scenarios, and we verify the effectiveness of chain-of-thought prompting especially for complex reasoning tasks.
+
+
+\section{Conclusion}
+
+In this paper, we proposed {\ModelName} to elicit reasoning abilities in large language models (LLMs).
+Inspired by the idea of annotating reasoning steps to obtain effective exemplars, we aim to select the most helpful questions for annotation judiciously instead of arbitrarily.
+For this purpose, we propose an uncertainty-based active selection strategy to determine which questions are the most important and helpful to annotate from a pool of task-specific questions. 
+We introduce four different strategies of uncertainty estimation for {\ModelName}: disagreement, entropy, variance, and self-confidence.
+These four strategies characterize uncertainty from different perspectives, and we primarily apply disagreement and entropy.
+Empirically, {\ModelName} achieved a promising performance on eight widely used datasets for arithmetic reasoning, commonsense reasoning, and symbolic reasoning.
+Further analyses of different uncertainty metrics, annotators, pool sizes, zero-shot learning, and an accuracy-uncertainty relationship demonstrate the effectiveness of our method.
+
+
+
+

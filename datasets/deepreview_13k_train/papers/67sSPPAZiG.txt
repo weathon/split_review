@@ -1,0 +1,465 @@
+\title{MMEgo: Towards Building Egocentric Multimodal LLMs}
+
+\begin{abstract}
+This research aims to comprehensively explore building a multimodal foundation model for egocentric video understanding.
+To achieve this goal, we work on three fronts. 
+First, as there is a lack of QA data for egocentric video understanding,
+we develop a data engine that efficiently generates 7M high-quality QA samples for egocentric videos ranging from 30 seconds to one hour long, based on human-annotated data.
+This is currently the largest egocentric QA dataset.
+Second, we contribute a challenging egocentric QA benchmark with 629 videos and 7,026 questions to evaluate the models' ability in recognizing and memorizing visual details across videos of varying lengths. We introduce a new de-biasing evaluation method to help mitigate the unavoidable language bias present in the models being evaluated.
+Third, we propose a specialized multimodal architecture featuring a novel ``Memory Pointer Prompting" mechanism. This design includes a \textit{global glimpse} step to gain an overarching understanding of the entire video and identify key visual information, followed by a \textit{fallback} step that utilizes the key visual information to generate responses. This enables the model to more effectively comprehend extended video content.
+With the data, benchmark, and model, we successfully build MM-Ego, an egocentric multimodal LLM that shows powerful performance on egocentric video understanding.
+\blfootnote{$^\text{\faApple}$Work done during an internship at Apple. 
+$^\dagger$First Authors.
+$^\ddagger$Senior Authors.
+}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Study on egocentric videos explores how machines can see and understand the world from a first-person, self-centered perspective.
+Egocentric videos differ significantly from static-camera videos, such as movies or animations, both in terms of content and viewpoint. 
+The content of egocentric videos primarily revolves around human daily activities. 
+These videos typically share a perspective similar to human vision, where the camera and viewpoint frequently move. As a result of these characteristics, egocentric videos exhibit a distinct data distribution compared to static-camera videos, which has motivated a new area of research. 
+In recent years, research interest in egocentric intelligence has been on the rise~\citep{sigurdsson2018charadesego,Damen2018EPICKITCHENS,grauman2022ego4d,mangalam2023egoschema,plizzari2024outlook}. 
+This growing interest is driven by the rapid advancements in AR/VR headsets and robotics, where cameras capture long-form egocentric videos in a manner akin to human vision. 
+Research on egocentric videos will allow these devices to understand their surroundings and human intentions, fostering more advanced machine intelligence and improving the human-machine interaction experience, with immeasurable research and application potential.
+However, research on understanding egocentric videos remains in its early stages, with previous research primarily centered on specialized tasks such as story summarization~\citep{lee2012discovering}, hand-object relationship understanding~\citep{cai2016understanding}, action classification~\citep{cartas2017recognizing,li2021ego}, and temporal or spatial grounding~\citep{grauman2022ego4d}. In contrast, works focusing on developing a more general egocentric video understanding model capable of complex understanding remain rare.
+Despite that video multimodal large language models (MLLMs) demonstrate strong video understanding and reasoning ability~\citep{damonlpsg2023videollama,wang2024internvideo2,lin2023vila,zhang2024llavanextvideo}, most of these works are unsuitable for egocentric video understanding from data, benchmark, and model design perspectives. 
+
+$(a)$ From a data standpoint, although many MLLMs use some egocentric videos from ActivityNet~\citep{yu2019activitynet}, Ego4D~\citep{grauman2022ego4d}, and Charades~\citep{sigurdsson2018charadesego} in their training,
+they have not been trained on \textit{large-scale} egocentric video datasets, which inherently restricts their ability to comprehend lengthy first-person videos and accurately extract visual details. While Ego4D~\citep{grauman2022ego4d} offers valuable human-annotated videos and labels for certain egocentric video understanding tasks, particularly episodic memory (which assesses a model's ability to retain visual details in such videos), its annotations are not structured for generating language responses, making them unsuitable for training MLLMs. Therefore, a large-scale egocentric video QA corpus is still needed. 
+$(b)$ In terms of benchmarking, exisiting video QA benchmarks either focus on shorter videos -- such as EgoSchema~\citep{mangalam2023egoschema} and QaEgo4D, which evaluate using around 3-minute and 8-minute videos, respectively -- or concentrate on Internet video content~(e.g., Video-MME~\citep{fu2024videomme}). This creates a notable gap in egocentric video understanding benchmarks that encompass videos ranging from seconds to an hour in length.
+$(c)$ From a model design perspective, 
+previous video MLLMs have primarily addressed long videos in two ways.  
+The first approach involves uniformly sampling a limited number of video frames as visual input, as seen in \citet{li2024llavaov,lin2023vila}.
+Despite its simplicity, this approach achieves better performance among open-source models on public video benchmarks~\citep{fu2024videomme}, largely because its design ensures high training efficiency and good scaling properties.
+The second approach involves feeding a large volume of visual tokens into the transformer backbone and employing engineering techniques, such as tensor parallelism and sequence parallelism~\citep{xue2024longvila,zhang2024longva}, to facilitate training with millions of visual tokens in context.
+However, these long-context transformers suffer from slow training speeds and small overall batch sizes, which hinder performance improvements given the constraints of computational resources and training time.
+Intuitively, even humans cannot remember every detail of an hour-long video. We believe a more effective approach is to understand the video progressively: first get an overview of the entire video, then focus on specific details with particular questions in mind.
+
+
+Building on the observations mentioned above, we introduce \modelname, an egocentric MLLM designed to process and understand long egocentric videos. Our contributions are threefold:
+
+($i$) \textbf{Data.}
+To scale training data for MLLMs with egocentric understanding ability, we develop an efficient data engine, using a ``narration to egocentric QA'' strategy, to automatically synthesize a large-scale egocentric QA dataset based on video narration data. 
+Notably, rather than relying on existing vision-language models as labelers, we generate egocentric QAs based on the human-annotated fine-grained video clip narrations. This approach ensures that our data quality is not constrained by the limitations of existing vision-language labeling models.
+In this way, we create the first large-scale egocentric QA dataset, consisting of over 7 million egocentric QA samples that span video lengths from seconds to over an hour. This dataset enables the training of models to recognize and retain visual details from egocentric videos.
+$(ii)$ \textbf{Benchmark.} To evaluate the MLLMs' performance in understanding and memorizing visual details from egocentric videos, we propose the \benchname benchmark. This challenging benchmark includes 7,026 multiple-choice questions for 629 egocentric videos ranging from 30 seconds to 1 hour. 
+In the experiments on \benchname, we further investigate the impact of inevitable language biases across different models during evaluation and introduce a debiased metric to more accurately assess the models' true egocentric understanding capabilities.
+($iii$) \textbf{Model.} 
+For our \modelname model, we develop a progressive approach to handle egocentric videos by introducing a Memory Pointer Prompting method.
+It consists of two steps: ``global glimpse'' and ``fallback". 
+In the \textit{global glimpse} step, we extract compressed frame-level visual embeddings from the entire video to get a global understanding. Then, we employ a memory pointer embedding, designed to examine all compressed frame-level visual embeddings along with the question embeddings, to aid in identifying key visual embeddings in a question-aware manner. 
+In the following \textit{fallback} step, the selected key visual embeddings, in a higher-resolution form, are then used as final input to the LLM for processing and generation.
+This approach allows us to achieve a global understanding of the entire video while also identifying and utilizing key visual information to answer questions related to visual details.
+
+
+
+
+
+\section{Method}
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth,clip]
+    {fig/dataset_samples.pdf}
+    \caption{``Narration to Egocentric QA'' data engine. Given a sequence of human-annotated video narrations, we instruct a language model (GPT-4o) to generate egocentric understanding-related questions and answers, along with identifying the key frames necessary to answer those questions.
+    }
+    \label{fig:ego_mm_dataset}
+\end{figure}
+
+\subsection{``Narration to Egocentric QA'' Data Engine}
+\label{sec:egomm_dataset}
+
+As outlined in Section~\ref{sec:intro}, high-quality egocentric QA pairs are lacking for training an MLLM with egocentric video understanding ability. To address this gap, we develop an innovative ``narration to egocentric QA" data engine that automatically generates episodic memory-related QA samples based on human-annotated video clip narrations from the Ego4D dataset~\citep{grauman2022ego4d} without the need for additional manual annotations. 
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+     \includegraphics[width=0.5\textwidth]{fig/train_stat.pdf}
+  \end{center}
+   \caption{Video length distribution in our egocentric QA dataset.}
+  \label{fig:mm_memory_stat}
+\end{wrapfigure}
+
+Our approach leverages over 3,000 hours of privacy-protected, de-identified egocentric videos accompanied by more than 3 million high-quality, human-created narrations. These fine-grained language descriptions provide a rich resource for generating QA pairs.
+
+The workflow of the data engine is illustrated in Figure~\ref{fig:ego_mm_dataset}. By organizing sequential video clips \{\text{Clip 1}, \text{Clip 2}, ..., \text{Clip N}\} and their corresponding narrations \{\text{Narration 1}, \text{Narration 2}, ..., \text{Narration N}\} in proper chronological order, we create comprehensive narration paragraphs that describe entire video sequences. 
+We then employ a powerful \textbf{text-only language model}, i.e., GPT4-o, to generate diverse and confident QA pairs related to episodic memory based on these narration paragraphs. The language model is instructed to attach the index of the narration sentence upon which each QA pair is based. 
+This indexing allows us to map each QA pair back to the corresponding time frames in the original videos, enabling the extraction of key frame information crucial for subsequent model training.
+
+Applying this data engine to the extensive Ego4D dataset allows us to efficiently scale the creation of egocentric QA data. We partition the dataset into training and testing sets according to the official Ego4D episodic memory task.
+The egocentric QA dataset provides more than 7 million QA samples in 938K multi-turn conversations.
+The data encompasses videos of varying durations, ranging from 30 seconds to 1 hour, as illustrated in Figure~\ref{fig:mm_memory_stat}. 
+To ensure comprehensive coverage and prevent bias towards shorter videos, we balance the number of conversations across different video lengths in training. 
+This is the first large-scale egocentric QA dataset featuring videos of such extended ranges of duration.
+
+Through these steps, our ``narration to egocentric QA" data engine addresses the scarcity of large-scale, high-quality egocentric QA data for egocentric scenes, and sets a solid foundation for building \modelname, a sophisticated egocentric MLLM, which we introduce in the following section. 
+
+
+
+\subsection{\modelname Model}
+
+Our modeling goal is to develop an MLLM for handling egocentric videos, which are lengthy and rich in visual details. 
+On the one hand, frame-level information is necessary to capture the full content of the video, as skipping frames during sampling could result in a significant loss of visual details. On the other hand, processing all visual tokens generated by the visual encoder is computationally challenging for the transformer model. 
+For instance, if each image is encoded into 729 visual embeddings~(tokens), the total number of visual embeddings for a 300-frame video would be 218,700. However, most MLLMs are trained with a context length of less than 10,000 tokens~\citep{li2024llavaov}.
+Taking these factors into account, we introduce the \modelname model, which is built for handling a large volume of egocentric video frames while maintaining manageable computational costs within the transformer backbone.
+\modelname introduces an innovative Memory Pointer Prompting mechanism, which operates in two main steps: global glimpse and fallback. 
+We will introduce the details of \modelname in the following sections.
+
+\subsubsection{Visual and Textual Embedding}
+Given an input video and the question, the first step is to embed them into visual and textual embeddings separately for later processing.
+We begin by uniformly sampling the video into up to $N$ frames, where $N$ can be in the range of hundreds. Then, we extract per-frame visual feature maps from these frames using a robust vision encoder, SigLIP-so400m~\citep{zhai2023siglip}. Following the method outlined by \cite{li2024llavaov}, we apply a 2-layer MLP to project the visual feature maps to the LLM embedding space and use average pooling to reduce the height and width of the visual feature maps by a factor of two and flatten the height and width dimension, resulting in $N$ relatively high-resolution visual embeddings 
+\{$\textbf{V}^i \in \mathbb{R}^{T\times C}$, $i \in [1, N]$\}
+ where $T$ is the embedding length and $C$ is the embedding dimension. 
+For the textual embedding, since we use Qwen2~\citep{yang2024qwen2} as the LLM, we use its tokenizer and embedding layer to transform the input text into textual embeddings. 
+For question $q$, we denote the corresponding textual question embedding as \{$\textbf{E}_{\text{que}}^q \in \mathbb{R}^{T_q\times C}$, $q \in [1, Q]$\} where $Q$ is the total number of questions and $T_q$ is the embedding length of question $q$.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth,clip]
+    {fig/pointer.pdf}
+    \caption{\textbf{(a)} Overview of the proposed Memory Pointer Prompting mechanism.
+    Its inference consists of two steps: 
+    (1) \emph{Global Glimpse}: We concatenate the compressed visual embeddings from all frames, denoted as $\mathbf{E}_{\text{vis}}^i$ for $i \in [1, N]$, with the question embeddings $\mathbf{E}_{\text{que}}^1$ and the memory pointer embedding $\mathbf{P}^1$. This combined embedding sequence is then input into the LLM. From the last layer, we extract embeddings and compute the dot product between the memory pointer embedding and all compressed visual embeddings to generate the correlation scores. The indices of the frames with the top $k$ scores are selected. During training, the correlation scores are supervised by ground-truth key frame indices via a binary cross-entropy loss.
+    (2) \emph{Fallback}: The high-resolution visual embeddings corresponding to the selected indices are fed into the LLM along with the question embeddings for final processing and response generation.
+    \textbf{(b)} Illustration of LLM input sequence during training.
+    }
+    \label{fig:pointer}
+\end{figure}
+\subsubsection{Memory Pointer Prompting}
+\label{sec:pointer}
+As processing all $N$ high-resolution visual embeddings with the LLM is computationally difficult, we propose to identify key visual embeddings in a question-aware manner and only send those selected embeddings to the subsequent LLM.
+Inspired by previous works on Pointer Networks~\citep{vinyals2015pointer,merity2016pointer}, we propose a Memory Pointer Prompting mechanism, which is illustrated in Figure~\ref{fig:pointer}. 
+Memory Pointer Prompting consists of two steps during inference: global glimpse and fallback.
+In the global glimpse step, key visual embeddings are identified from all frame-level embeddings, guided by the context of the question. During the subsequent fallback step, the important visual embeddings are selected, and their higher-resolution versions are provided to the LLM transformer backbone for further processing and language response generation.
+
+\paragraph{Global Glimpse Step.}
+We begin by compressing the visual embeddings through average pooling along the embedding length dimension, resulting in a set of compressed visual embeddings \{$\textbf{E}^{i}_{\text{vis}} \in \mathbb{R}^{1\times C}, i \in [1, N]$\}. 
+Next, we introduce a learnable memory pointer prompt embedding $\textbf{P} \in \mathbb{R}^{1\times C}$, 
+duplicate it $Q$ times, yielding \{$\textbf{P}^{i} \in \mathbb{R}^{1\times C}, i \in [1, Q]$\}, 
+and concatenate the embeddings as follows:
+\begin{equation}
+\small \nonumber
+    [\textbf{E}^{1}_{\text{vis}}, \textbf{E}^{2}_{\text{vis}}, ..., \textbf{E}^{N}_{\text{vis}}, \textbf{E}_{\text{que}}^1, \textbf{P}^1].
+\end{equation}
+Here $Q=1$ as MLLMs generate answers for only one question at a time.
+In this way, the question embedding is followed by a pointer embedding, which will be used to identify key visual embeddings with knowledge of the question embedding. The entire embedding sequence is then fed into the LLM, from which we obtain the output embedding sequence of the final layer:
+\begin{equation}
+\small \nonumber
+    [\textbf{E}^{'1}_{\text{vis}}, \textbf{E}^{'2}_{\text{vis}}, ..., \textbf{E}^{'N}_{\text{vis}}, \textbf{E}_{\text{que}}^{'1}, \textbf{P}^{'1}].
+\end{equation}
+We extract and stack the processed visual embeddings \{$\textbf{E}^{'i}_{\text{vis}} \in \mathbb{R}^{1\times C}, i \in [1, N]$\} to obtain the matrix $\bm{E}_{\text{vis}} \in \mathbb{R}^{N\times C}$. 
+We conduct a softmax dot product operation between  $\bm{E}_{\text{vis}}$ and $\textbf{P}^{'1}$: 
+\begin{equation}
+    \mathbf{s} = \text{Softmax} (\bm{E}_{\text{vis}} \cdot \textbf{P}^{'1\mathsf{T}}) \in \mathbb{R}^{N}.
+\end{equation}
+Here $\mathbf{s}$ is a correlation score vector indicating the correlation between the question and each frame.
+
+\textbf{Balancing Exploration and Exploitation.}
+Our approach to selecting key visual embeddings parallels the principles of Bayesian Optimization~\citep{frazier2018tutorial}, where the objective function is expensive to evaluate.
+In such cases, it's important to balance exploration~(sampling in areas where the uncertainty is high) and exploitation~(sampling in areas where the surrogate model predicts high performance). However, relying solely on the aforementioned Memory Pointer Prompting may lead to overemphasizing certain areas of interest, potentially undermining the exploration process. To mitigate this issue, we introduce perturbations into the score distribution by incorporating a uniform sampling distribution.
+The probability vector of uniform sampling can be written as:
+\begin{equation}
+\textbf{u}^i = 
+\begin{cases} 
+\alpha & \text{if } i \in \text{linspace}(0, N, k), \\
+0 & \text{otherwise}.
+\end{cases}
+\end{equation}
+Here $\alpha$ is an explore-exploit balancing parameter to adjust the probability distribution.
+We overlap the probability vector of uniform sampling and score matrix $\textbf{s}$:
+\begin{equation}
+\textbf{s} \leftarrow \textbf{s} + \textbf{u}.
+\end{equation}
+We then identify the top-$k$ indices as the set $\{\ermS_i, i \in [1, k]\}$. In this way, we find the key visual embeddings in a question-aware manner. 
+
+\paragraph{Fallback Step.}
+During inference, as shown in Figure~\ref{fig:pointer},
+with the set of indices $\{\ermS_i, i \in [1, k]\}$ for the selected visual embeddings, we now assemble the LLM input sequence as follows:
+\begin{equation}
+\small \nonumber
+    [\underbrace{\textbf{V}^{\ermS_1}, \textbf{V}^{\ermS_2}, ..., \textbf{V}^{\ermS_k}}_{\text{Selected Top-}k\text{ Visual Embeedings}}, \textbf{E}_{\text{que}}^1].
+\end{equation}
+As previously introduced, $\textbf{V}^{\ermS_1}, \textbf{V}^{\ermS_2}, ..., \textbf{V}^{\ermS_k}$ denote the selected top-$k$ high-resolution visual embeddings, which provide more visual details than the compressed visual embeddings.
+This new embedding sequence is fed into the LLM to generate the final language response.
+In summary, the proposed Memory Pointer Prompting approach allows us to consider the full scope of video information while filtering out redundant data in the LLM transformer, ensuring computational efficiency. The new input serves as the final input of the LLM to generate the language response given the visual and textual information.
+
+\paragraph{Training Procedure.}
+Given the novel design of \modelname, its training procedure is different from popular MLLMs~\citep{liu2023llava}.
+Specifically, let the answer embedding for question $q\in [1, Q]$ be denoted as $\mathbf{E}^q_{\text{ans}}$, %
+then the input embedding sequence during the training process is represented as:
+\begin{align}
+\small \nonumber
+    [\underbrace{\textbf{E}^{1}_{\text{\text{vis}}}, \textbf{E}^{2}_{\text{\text{vis}}}, ..., \textbf{E}^{N}_{\text{vis}}}_{\text{Compressed Visual Embeddings}}, \textbf{E}_{\text{que}}^1, \textbf{P}^1, ..., \textbf{E}_{\text{que}}^Q, \textbf{P}^Q, \underbrace{\textbf{V}^{\ermS_1}, \textbf{V}^{\ermS_2}, ..., \textbf{V}^{\ermS_k}}_{\text{Selected High-Res Visual Embeddings}}, \textbf{E}_{\text{que}}^1, \textbf{E}_{\text{ans}}^1, ..., \textbf{E}_{\text{que}}^Q, \textbf{E}_{\text{ans}}^Q].
+\end{align}
+We also provide a simplified illustration (where $Q=1$) of the input embedding sequence structure during training in Figure~\ref{fig:pointer}.
+Here, we begin by inputting the compressed visual embeddings for all $N$ frames, followed by the question embedding and memory pointer embedding. Next, we integrate the $k$ selected high-resolution visual embeddings (based on the ground-truth key frame labels), and finally, incorporate both the question and answer embeddings.
+Once the input sequence is prepared as outlined above, we can train \modelname similarly to traditional large language models.
+The compressed visual embeddings, question embedding, and memory pointer embeddings used as prefixes do not contribute to the language cross-entropy loss.
+
+When training on samples from our curated egocentric QA dataset where there are ground-truth key frame labels for each question, we compute the correlation score vector $\textbf{s}$ in the global glimpse step, and supervise it using a binary cross-entropy loss.
+For training samples that lack ground-truth key frame labels, we omit the prefixes, which results in the traditional MLLM training process.
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+In the experiment section, we will first present a new egocentric video understanding benchmark, specifically designed to assess episodic memory capabilities. Following this, we will perform comprehensive experiments to evaluate \modelname, utilizing both the newly introduced benchmark and existing public benchmarks.
+
+\begin{table}[t]
+  \centering
+  \begin{minipage}{0.5\textwidth}
+    \centering
+    \caption{Distribution of videos and QA samples with different lengths.}
+    \tablestyle{4pt}{1.2}\scriptsize
+    \begin{tabular}{ c | cc | ccc | cc|c  c | c }  
+    \toprule
+    \multicolumn{1}{c|}{\multirow{1}{*}{\textbf{Class}}} & \multicolumn{2}{c|}{\textbf{Short}} & \multicolumn{3}{c|}{\textbf{Medium}} & \multicolumn{2}{c|}{\textbf{Long}} & \multicolumn{1}{c}{\textbf{Sum}}  \\ 
+    \shline
+    \textbf{Minutes} & 0.5-1 & 1-2 & 2-4 & 4-10 & 10-20 & 20-40 & 40-60 & -  \\
+    \textbf{Videos} & 100 & 100 & 100 & 100 & 100 & 100 & 29 & 629 \\
+    \textbf{QAs} & 500 & 498 & 987 & 997 & 1715 & 1792 & 537 & 7026 \\
+      \bottomrule
+    \end{tabular}
+    \label{tab:ego_mem_stat}
+  \end{minipage}%
+  \hspace{1cm} %
+  \begin{minipage}{0.4\textwidth}
+    \centering
+    \caption{Distribution of correct options in MCQs.}
+    \resizebox{.8\linewidth}{!}{
+      \tablestyle{3pt}{1.2}\begin{tabular}{l| ccc ccc }
+      \toprule
+       \textbf{Option} & \multicolumn{1}{c}{\textbf{A}}  &  \textbf{B} & \textbf{C} & \textbf{D}    \\
+      \shline
+       \textbf{Counts} & 1776 & 1751 & 1770 & 1729 \\
+      \bottomrule
+      \end{tabular}
+    }
+    \label{tab:mcq_stat}
+  \end{minipage}
+  \label{tab:combined_subtables}
+\end{table}
+
+
+\subsection{\benchname Benchmark}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+     \includegraphics[width=0.5\textwidth]{fig/word_freq.pdf}
+  \end{center}
+   \caption{The most frequently occurring verbs and nouns in \benchname.}
+  \label{fig:word_freq}
+\end{wrapfigure}
+To evaluate the performance of egocentric MLLMs, especially in terms of episodic memory ability, we propose a new benchmark called \benchname.
+Specifically, we generate memory-related questions and answers from human-annotated narrations in the validation set of the Ego4D dataset.
+To ensure diversity, for each video we only generate a limited number of questions.
+We divide the videos into seven different length ranges: 0.5 to 1 min, 1 to 2 min, 2 to 4 min, 4 to 10 min, 10 to 20 min, 20 to 40 min, and 40 to 60 min. We aim to balance the number of samples in different video lengths. The distribution of videos and corresponding question-answer pairs (QAs) for each category is shown in Table~\ref{tab:ego_mem_stat}.  
+Furthermore, we group these video lengths into three broader categories: short (0.5 to 2 min), medium (2 to 20 min), and long (20 to 60 min). In total, we collect 629 videos with 7,026 questions. 
+The most frequently occuring verbs and nouns in the questions are visualized in Figure~\ref{fig:word_freq}.
+Since free-form answers are typically evaluated using a closed-source LLM as a judge, the evaluation can be inconsistent and subject to significant variance, especially due to model version updates. To ensure more reliable, standardized, and consistent performance evaluation, we convert the free-form answers into multiple-choice questions~(MCQs), which helps reduce score instability. In practice, based on the free-form answer, we instruct ChatGPT to generate three additional choices that are plausible but incorrect, considering the original question and answer. We then randomize the order of these choices to achieve a uniform distribution of correct options, as shown in Table~\ref{tab:mcq_stat}, to minimize bias in option placement.
+We visualize some randomly sampled examples in Figure~\ref{fig:frame_selection}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth,clip]
+    {fig/frame_selection.pdf}
+    \caption{\benchname QAs visualization and prediction analysis of the global glimpse step. We find high consistency between the identified key frames and the questions, demonstrating the effectiveness of the proposed Memory Pointer Prompting method.
+    The visualized correlation scores show distinct distributions for different questions given the same video, indicating its question-specific nature. The \textcolor{green}{\checkmark} indicates that the selected frames are relevant to the questions.
+    }
+    \label{fig:frame_selection}
+\end{figure}
+
+
+
+
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+
+\textbf{Training Data.}
+We employ a joint image-video supervised fine-tuning (SFT) strategy. To enhance the model's capability in understanding a broader range of visual data, we combine our egocentric QA dataset with a variety of multimodal datasets.
+We curate an SFT dataset mixture consisting of
+our egocentric QA dataset, 
+Ego4D narration dataset~\citep{grauman2022ego4d},
+LLaVA-NeXT SFT collection~(including ChartQA~\citep{masry2022chartqa}, AI2D~\citep{hiippala2021ai2d}, DocVQA~\citep{mathew2021docvqa}, DVQA~\citep{kafle2018dvqa}, COCO~\citep{lin2014COCO}), ShareGPT4V~\citep{chen2023sharegpt4v}, synthdog-en~\citep{kim2021donut}), ShareGPT-4o~\citep{chen2023internvl}, ALLaVA instruct~\citep{chen2024allava}, ShareGPT4Video~\citep{chen2024sharegpt4video}, sherlock~\citep{hesselhwang2022abduction}, ScienceQA~\citep{scienceqa}, NExT-QA~\citep{xiao2021next}, and ActivityNet-QA~\citep{yu2019activitynet}.
+
+\textbf{Implementation Details.}
+The model is trained for one epoch with a base learning rate of $1\times 10^{-5}$, using a cosine scheduler. The batch size is set to 128. We sample a maximum of 300 frames~($N=300$) and select 32 visual embeddings in the proposed memory pointer prompting mechanism. By default, we set the explore-exploit balancing parameter $\alpha$ to $0.1$.
+
+\textbf{Pretrained Models.}
+Our \modelname model is initialized from LLaVA-OV 7B~\citep{li2024llavaov}, a state-of-the-art MLLM known for its good performance on general multimodal understanding tasks.
+Following the same architecture, we use the SigLip-so400M ViT~\citep{zhai2023siglip} as the visual encoder for embedding video frames and Qwen2-7B~\citep{yang2024qwen2} as the LLM architecture.
+\subsection{Main Results}
+
+We first conduct experiments on our \benchname benchmark, primarily comparing three models: LLaVA-OV~\citep{li2024llavaov}, its fine-tuned version using our \modelname SFT data mixture (referred to as ``Ego SFT"), and our \modelname model, which incorporates the proposed Memory Pointer Prompting mentioned in Section~\ref{sec:pointer}. We show the \benchname accuracy in the first row of Table~\ref{tab:ego_mem_main_results}.
+We observe a significant improvement in the model's performance on egocentric QAs after training on our MM-Ego data mixture, attributed to the rich egocentric knowledge provided by our curated egocentric QA training data. Moreover, leveraging the \modelname model architecture further enhances performance, thanks to the effective Memory Pointer Prompting mechanism.
+
+However, we notice that the original overall performance metrics are higher than anticipated, raising curiosity about the extent to which language bias contributes to the models' accuracy. To answer this question, we conduct additional experiments aimed at eliminating these language biases.
+Specifically, we test the three model variants on the \benchname benchmark without any visual inputs, identifying questions that could be correctly answered without videos as ``language-biased questions". 
+Then, we evaluate the models' performance on the subset of the benchmark without language-biased questions.
+For fairness, we apply this debiasing process across all three models so that they are evaluated on the same sets of data. We calculate the mean accuracy of the debiased variants, referred to as the ``Mean Debiased Accuracy (MDA)". The results are presented in Table~\ref{tab:ego_mem_main_results}.
+
+As expected, after removing the language-biased questions, the accuracy of all three models drops significantly to a more reasonable level. 
+The performance decline is notably more pronounced in the ``Medium" and ``Long" classes compared to the ``Short" class.
+For example, the average accuracy of LLaVA-OV across the three classes (short, medium, and long) drops from 65.45 to 47.32. The decrease in the ``Short" class is 17.04, in the ``Medium" class is 17.93, and in the ``Long" class is 19.43. 
+Despite this, we still observe improvements in MDA after training with SFT data generated by our \modelname data engine~(\textbf{+8.65}) and applying our Memory Pointer Prompting method~(\textbf{+13.95}).
+These results demonstrate the effectiveness of our approach even after considering language bias.
+
+
+
+\begin{table}[t]
+  \centering
+   \caption{{Performance comparison and language bias analysis of different models on the \benchname benchmark.} Our \modelname model demonstrates the best performance both before and after excluding the language bias of different models.}
+  \tablestyle{2.5pt}{1.2}\scriptsize\begin{tabular}{l| cccc | cccc | cccc }
+  \toprule
+ \multicolumn{1}{c|}{\multirow{2}{*}{\textbf{Method}} }  & \multicolumn{4}{c|}{\textbf{LLaVA-OV~\citep{li2024llavaov}}} &  \multicolumn{4}{c|}{\textbf{Ego SFT}} & \multicolumn{4}{c}{\textbf{\modelname}} \\
+   & Short & Medium & Long & Avg & Short & Medium & Long & Avg & Short & Medium & Long & Avg  \\
+  \shline
+  Original & 70.24 & 64.94 & 61.19 & 65.45                              & 79.06 & 76.34 & 73.51 & 76.30 & {79.96} & 79.64 & 79.09 & \textbf{79.56}  \\
+  Exclude \textit{LLaVA-OV} Bias & 56.44 & 49.64 & 44.83 & 50.30 & 66.37 & 64.15 & 60.03 & 63.52 & 71.97 & 70.68 & 68.15 & \textbf{70.26} \\
+  Exclude \textit{Ego SFT} Bias & 55.75 & 49.27 & 45.21 & 50.08 & 61.73 & 59.59 & 54.50 & 58.61 & 67.70 & 66.33 & 63.89 & \textbf{65.97} \\
+  Exclude \textit{\modelname} Bias & 47.41 & 42.11 & 35.22 & 41.58 & 50.60  & 46.39 & 40.38 & 45.79 & 49.80 & 49.11 & 43.81 & \textbf{47.58}\\
+   \rowcolor{gray!15}
+  Mean Debiased Accuracy (MDA) & 53.20&	47.01&	41.76 & {47.32} & 59.56 & 56.71 & 51.64 & {55.97} & 63.16 & 62.04 & 58.62 & \textbf{61.27}  \\
+  \bottomrule
+  \end{tabular}
+\label{tab:ego_mem_main_results}
+\end{table}
+
+
+
+
+
+
+
+\begin{table}[t]
+  \centering
+   \caption{Comparison with state-of-the-art video MLLMs. \modelname shows strong performance on egocentric understanding and competitive performance on Internet video understanding.}
+  \tablestyle{3pt}{1.2}\scriptsize\begin{tabular}{l | cccc |c|cc  c |c  cccc }
+  \toprule
+  \multicolumn{1}{c|}{\multirow{2}{*}{\textbf{Method}} }  & \multicolumn{4}{c|}{\textbf{\benchname (MDA)}} & \textbf{EgoSchema} &  \multicolumn{4}{c}{\textbf{Video-MME (w/o subs)}} \\
+  & Short & Medium & Long & Avg & Full & Short & Medium & Long & Entire \\
+  \shline
+  GPT-4o & \textbf{64.31} & 59.47 & 57.65 & 60.48  & \textbf{72.2} & \textbf{80.00} & \textbf{70.30} & \textbf{65.30} & \textbf{71.90}\\
+  LLaVA-NeXT-Video-7B-DPO~\citep{zhang2024llavanextvideo} & 30.38 & 25.95 & 21.49 & 25.94 & - & - & - & - & - \\
+  LLaVA-NeXT-Video-32B-Qwen~\citep{zhang2024llavanextvideo} & 43.78 & 33.76 & 31.04 & 36.19 & 60.85 & - & - & - & 60.20  \\
+  LLaVA-OV 7B~\citep{li2024llavaov} & 53.20 & 47.01& 41.76 & 47.32 & 60.10 & 69.30 	 & 56.00 & 	49.40 &	58.30 \\
+  \rowcolor{gray!15}
+  \modelname (ours) & 63.16 & \textbf{62.04} & \textbf{58.62} & \textbf{61.27} & {69.03} & 67.60 & 55.70 & 47.80 & 57.00 \\
+  \bottomrule
+  \end{tabular}
+\label{tab:public_bench}
+\end{table}
+\begin{table}[h]
+  \centering
+  \caption{MDA on \benchname when inferring with different numbers of frames. Our \modelname model shows a smaller relative drop on average when decreasing the number of sampled frames.}
+    \resizebox{1.\linewidth}{!}{
+  \tablestyle{3pt}{1.2}
+  \scriptsize
+  \begin{tabular}{c|ccc|ccc|ccc|cccc}
+  \toprule
+  \multirow{2}{*}{\textbf{Frames}} & \multicolumn{3}{c|}{\textbf{Short}} & \multicolumn{3}{c|}{\textbf{Medium}} & \multicolumn{3}{c|}{\textbf{Long}} & \multicolumn{3}{c}{\textbf{Avg}} \\
+  &  LLaVA-OV & Ego SFT & \modelname & LLaVA-OV & Ego SFT  & \modelname & LLaVA-OV & Ego SFT  & \modelname & LLaVA-OV & Ego SFT  & \modelname  \\
+  \shline
+  \textbf{32} & 53.20 & 59.56 & 63.16 & 47.01 & 56.71 & 62.04 & 41.76 & 51.64 & 58.62 & 47.32 & 55.97 & 61.27 \\
+  \textbf{16} & 52.68 & 60.45 & 63.82 & 46.37 & 55.99 & 60.81 & 40.12 & 51.15 & 58.16 & 46.39 & 55.86 & 60.93 \\
+  \textbf{8}  & 50.76 & 59.59 & 62.22 & 44.82 & 54.55 & 58.23 & 39.41 & 49.11 & 55.19 & 44.99 & 54.42 & 58.55 \\
+  \textbf{4}  & 50.43 & 55.36 & 62.30 & 42.54 & 52.08 & 58.44 & 38.88 & 48.40 & 54.65 & 43.95 & 51.95 & 58.46 \\
+  \rowcolor{gray!15}
+  \textbf{Rel. Diff} & 5.20\% & 7.07\% & \textbf{1.36\%} & 9.49\% & 8.16\% & \textbf{5.81\%} & 6.89\% & \textbf{6.26\%} &{ 6.77\%} & 7.12\% & 7.19\% & \textbf{4.59\%} \\
+  \bottomrule
+  \end{tabular}}
+  \label{tab:infer_frames}
+\end{table}
+
+To better understand the capability of \modelname, 
+we compare its performance with state-of-the-art video MLLMs on \benchname and prevalent large-scale video QA benchmarks, including the long egocentric video understanding benchmark EgoSchema~\citep{mangalam2023egoschema} and the Internet-video-based long-video understanding benchmark Video-MME~\citep{fu2024videomme}.
+The results are shown in Table~\ref{tab:public_bench}.
+On \benchname, GPT-4o is evaluated using 32 uniformly sampled frames from the videos, while other models follow their respective official inference settings. The MDA on \benchname is computed using the debiased subsets used in Table~\ref{tab:ego_mem_main_results}.
+Notably, \modelname exhibits the highest performance on \benchname, particularly in the `Medium' and `Long' classes. On the EgoSchema benchmark, our model achieves a substantial performance gain of \textbf{+8.18} over the previous state-of-the-art open-source model, underscoring the effectiveness of both our data and model design for egocentric understanding.
+Additionally, on the challenging Internet video understanding Video-MME benchmark, our model is on par with the leading model of similar parameter size.
+These results showcase \modelname's capability in egocentric video understanding while preserving its general video comprehension abilities.
+
+\begin{wrapfigure}{r}{0.32\textwidth}
+  \begin{center}
+     \includegraphics[width=0.32\textwidth]{fig/alpha_values.pdf}
+  \end{center}
+   \caption{MDA scores with different $\alpha$ values for explore-and-exploit balancing.}
+  \label{fig:alpha}
+\end{wrapfigure}
+
+\subsection{Model Analysis}
+\paragraph{Quantitative Analysis of Different Numbers of Frames.}
+To evaluate the influence of sampling different numbers of frames for different models, we calculate the mean debiased accuracy~(MDA) in Table~\ref{tab:infer_frames}. The relative performance drop from sampling 32 frames to sampling 4 frames is also calculated. 
+As expected, all models exhibit a decrease in performance with fewer sampled frames. 
+Notably, \modelname exhibits a smaller average performance drop when the number of frames is reduced due to its ability to identify key frames given lower computational budget.
+The relative performance drop in the short category is considerably smaller compared to the medium and long categories, likely because shorter videos require fewer frames to comprehend. 
+\paragraph{Qualitative Analysis of Memory Pointer Prompting.}
+In Figure~\ref{fig:frame_selection}, we present a qualitative analysis of the accuracy of Memory Pointer Prompting on \benchname. We randomly select samples and visualize the key frames identified by the global glimpse step in Memory Pointer Prompting. The results show a strong alignment between the questions and the selected frames. In failure cases, we observe that the issues are often due to the ambiguity of the questions, causing the model to struggle with accurately localizing the key visual embeddings.
+Furthermore, the visualized correlation scores during the global glimpse step show distinct patterns across various videos and questions, confirming its effectiveness in selecting key visual embeddings tailored to the specific questions.
+
+\paragraph{Quantitative Analysis of Explore-Exploit Balancing Parameter $\alpha$.}
+As discussed in Section~\ref{sec:pointer}, we design an explore-exploit balancing parameter $\alpha$ to fuse the uniform distribution and the sampling probability computed by Memory Pointer Prompting.
+We illustrate \modelname's performance with varying values of $\alpha$ in Figure~\ref{fig:alpha}. The results show that $\alpha=0.1$ achieves the best performance, while larger or smaller values of $\alpha$ tend to either over-explore or over-exploit.
+
+\paragraph{Conversation Examples by \modelname.}
+In Figure~\ref{fig:conversation2}, we show a real-world demo of \modelname, where the input video is a 2-minute long egocentric video captured by a camera on an off-the-shelf wearable device (this video is not used in our dataset). \modelname is able to correctly answer the episodic memory-related questions given the egocentric video, despite the difference in data domain.
+
+
+
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth,clip]
+    {fig/conversation2.pdf}
+    \caption{Real-world conversation examples generated by \modelname. The input is a 2-minute long egocentric video recorded using a camera on an off-the-shelf wearable device. \modelname can accurately identify key visual details and provide correct answers to the user's memory-related questions.
+    }
+    \label{fig:conversation2}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\paragraph{Multimodal Large Language Models.} Recent advancements in Large Language Models~\citep{OpenAI_ChatGPT,touvron2023llama} have sparked significant interest in developing Multimodal Large Language Models (MLLMs) that combine the language understanding capabilities of LLMs with multi-modal perception abilities~\citep{alayrac2022flamingo,instructblip,zhu2023minigpt,mckinzie2024mm1}. 
+For video-based MLLMs, most works follow a structure akin to image-based MLLMs. 
+To handle the large volume of video frames, some methods reduce the number of frames \citep{damonlpsg2023videollama,wang2024internvideo2,Maaz2023VideoChatGPT,xu2024slowfast}, which results in the loss of many visual details. Others extend the LLMs' context length by employing parallel techniques \citep{xue2024longvila}, but this often leads to low training efficiency.
+Unlike these approaches, our method preserves global awareness of the entire video, allows for attention to visual details, and is efficiently trainable.
+\paragraph{Egocentric Video Understanding.}
+While the growing field of egocentric video understanding is still in its infancy, there have been many influential works. For a comprehensive overview of egocentric vision please refer to \cite{plizzari2024outlook}.
+On the data/benchmark side, 
+representative works include Ego4D \citep{grauman2022ego4d}, Ego-Exo4D \citep{grauman2024ego}, and EPIC-KITCHENS-100 \citep{Damen2018EPICKITCHENS}.
+When also considering language, prior work on egocentric video-language benchmarks include  QaEgo4D \citep{barmann2022qaego4d} and EgoSchema \citep{mangalam2023egoschema}.
+For understanding long egocentric videos, prior modeling efforts include GroundVQA \citep{di2024groundvqa}, Encode-Store-Retrieve \citep{shen2023encode}, and R-VLM \citep{xu2023retrieval}.
+However, most previous works focus on classic video understanding tasks such as activity recognition and temporal grounding, and hence they do not involve a language model.
+In contrast, we propose to develop a multimodal LLM to tackle open-ended egocentric video-language understanding.
+
+
+
+\section{Discussion}
+
+\noindent \textbf{Limitation and Future Work.}
+While \modelname demonstrates a strong ability in egocentric understanding, there is still room for further improvement. On the data and benchmark side, we can introduce more diverse egocentric understanding corpus. For the model itself, we plan to enhance its capacity to process a larger number of frames, such as at the order of thousands, to better handle longer or even always-on egocentric videos.
+
+\noindent \textbf{Conclusion.}
+In this paper, we make three key contributions towards the development of egocentric foundation model: the creation of the first large-scale egocentric QA training dataset, the introduction of a novel model designed for effective long egocentric video comprehension, and the establishment of the \benchname benchmark for assessing models' ability to capture visual details from egocentric videos. We hope that these efforts will benefit further research on egocentric MLLMs.
+ 
+
+
+
+

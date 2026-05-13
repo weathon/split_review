@@ -1,0 +1,524 @@
+\title{DynaVol: Unsupervised Learning for Dynamic Scenes through Object-Centric Voxelization}
+
+\begin{abstract}
+
+Unsupervised learning of object-centric representations in dynamic visual scenes is challenging. Unlike most previous approaches that learn to decompose 2D images, we present DynaVol, a 3D scene generative model that unifies geometric structures and object-centric learning in a differentiable volume rendering framework. The key idea is to perform \textit{object-centric voxelization} to capture the 3D nature of the scene, which infers the probability distribution over objects at individual spatial locations. These voxel features evolve through a canonical-space deformation function, forming the basis for global representation learning via slot attention. The voxel and global features are complementary and leveraged by a compositional NeRF decoder for volume rendering. DynaVol remarkably outperforms existing approaches for unsupervised dynamic scene decomposition. Once trained, the explicitly meaningful voxel features enable additional capabilities that 2D scene decomposition methods cannot achieve: it is possible to freely edit the geometric shapes or manipulate the motion trajectories of the objects.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Unsupervised learning of the physical world is of great importance but challenging due to the intricate entanglement between the spatial and temporal information~\citep{wu2015galileo,santoro2017simple,greff2020binding}.
+Existing approaches primarily leverage the consistency of the dynamic information across consecutive video frames but tend to ignore the 3D nature, resulting in a multi-view mismatch of 2D object segmentation~\citep{kabra2021simone,Elsayed2022SAViTE,singh2022simple}.
+\new{In this paper, we explore a novel research problem of unsupervised 3D dynamic scene decomposition. Different from the previous 2D counterparts, our method naturally ensures 3D-consistent scene understanding and can motivate downstream tasks such as scene editing.} 
+We believe that an effective object-centric representation learning method should satisfy two conditions: First, it should capture the \textit{time-varying local structures} of the visual scene in a 3D-consistent way, which requires the ability to decouple the underlying dynamics of each object from visual appearance; Second, it should obtain a \textit{global understanding} of each object, which is crucial for downstream tasks such as relational reasoning.
+
+Accordingly, we propose to learn two sets of object-centric representations: one that represents the local spatial structures using time-aware voxel grids, and another that represents the time-invariant global features of each object. 
+To achieve this, we introduce \textbf{\model{}}, which incorporates \textbf{object-centric voxelization} into the unsupervised learning framework of inverse rendering. The key idea is that object-centric voxelization allows us to \textit{infer the probability distribution over objects at individual spatial locations}, thereby naturally facilitating 3D-consistent scene decomposition (see Figure~\ref{fig:intro}).
+\model{} consists of three network components in the test phase: (i) A dynamics module that learns the transitions of voxel grid features in canonical space over time; (ii) A volume slot attention module that progressively refines the object-level, time-invariant global features by aggregating the voxel representations; (iii) An object-centric, compositional neural radiance field (NeRF) for view synthesis, driven by both the local and global object representations.
+In contrast to prior research that focuses on decomposing 2D images~\citep{kipf2021conditional,sajjadi2022object,Elsayed2022SAViTE}, our unsupervised voxelization approach provides two additional advantages beyond novel view synthesis. First, it allows for fine-grained separation of object-centric information in 3D space without any geometric priors. Second, it enables direct scene editing (\textit{e.g.}, object removal, replacement, and trajectory modification) that is not feasible in existing video decomposition methods. This is done by directly manipulating the voxel grids or the learned deformation function without the need for further training.
+
+
+
+
+
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=0.95\linewidth]{fig/intro3.pdf}}
+\caption{
+\model{} explores an unsupervised object-centric voxelization approach for dynamic scene decomposition. Unlike its 2D counterparts, such as SAVi~\citep{kipf2021conditional}, \model{} ensures 3D consistency and provides additional capabilities, \textit{e.g.}, novel view synthesis and scene editing.
+}
+\label{fig:intro}
+\end{center}
+\end{figure}
+
+
+
+
+
+
+In our experiments, we initially evaluate \model{} on simulated 3D dynamic scenes that contain different numbers of objects, diverse motions, shapes (such as cubes, spheres, and real-world shapes), and materials (such as rubber and metal). 
+On the simulated dataset, we can directly assess the performance of \model{} for scene decomposition by projecting the object-centric volumetric representations onto 2D planes, and compare it with existing approaches, such as SAVi~\citep{kipf2021conditional} and uORF~\citep{yu2021unsupervised}.
+Additionally, we demonstrate the effectiveness of \model{} in novel view synthesis and dynamic scene editing using real-world videos.
+
+
+
+
+\section{Problem Setup}
+
+
+We assume a sparse set of visual observations of a dynamic scene $\{\mathbf{I}_{t=1}^v, \mathbf{T}^{v}_{t=1}\}_{v=1}^V$ at the initial timestamp and a set of RGB images $\{\mathbf{I}_t, \mathbf{T}_t\}_{t=2}^T$ collected with a moving monocular camera, where $\mathbf{I}_t^v\in \mathbb{R}^{H\times W\times 3}$ are images acquired under camera poses $\mathbf{T}_t^v \in \mathbb{R}^{4\times 4}$. $T$ is the length of video frames and $V$ is the number of views at the initial timestamp.
+The goal is to decompose each object in the scene by harnessing the underlying space-time structures present in the visual data without additional information.
+Please note that we also consider scenarios where (i) only one camera pose is available at the first timestamp (\textit{i.e.}, $V=1$) and (ii) images are captured by a monocular camera along a smooth moving trajectory. These configurations can be easily achieved in real-world scenes.
+
+
+
+\section{Method}
+
+In this section, we first discuss the overall framework of \model{}. Subsequently, we introduce the concept of object-centric voxel representations and provide the details of each network component. Finally, we present the \new{three-stage} training procedure of our approach.
+\subsection{Overview of \model{}}
+\label{sec:overview}
+
+\model{} is trained in an inverse graphics framework to synthesize $\{\mathbf{I}_{t=1}^v\}_{v=1}^V$ and $\{\mathbf{I}_t\}_{t=2}^T$ without any further supervision.
+Formally, the goal is to learn an object-centric projection of $(\mathbf{x},\mathbf{d},t)\xrightarrow[]{}\{(c_n,\sigma_n)\}_{n=1}^N$, \new{where $\mathbf{x}=(x,y,z)$ is a 3D point sampled by the neural renderer and $N$ is the predefined number of slots, which is assumed to be larger than the number of objects}. 
+\new{The core of our approach is to introduce an object-centric 4D voxel representation, denoted by $\mathcal{V}_t \in \mathbb{R}^{N \times N_x\times N_y\times N_z}$, which maintains the time-vary density $\{\sigma_n\}_{n=1}^N$ of each possible object.}
+The renderer estimates the density and color for each object at view direction $\mathbf{d}$ and re-combines $\{(c_n,\sigma_n)\}_{n=1}^N$ to approach the target pixel value.
+As shown in Figure~\ref{fig:arch}, \model{} consists of three network components:
+(i) The bi-directional deformation networks $f_\psi$ and $f_\xi^\prime$ that learn the canonical-space transitions over time of the object-centric voxel representations contained within $\mathcal{V}_t$;
+(ii) The volume encoder $E_\theta$ and a slot attention block $Z_\omega$ that work collaboratively to refine a set of global slot features $\mathbf{S}_t=\{s_t^n\}_{n=1}^{N}$ iteratively, which convey time-invariant object information;
+(iii) The image renderers, which include a compositional NeRF denoted by $N_\phi$ that jointly uses $\mathcal{V}_t$ and $\mathbf{S}_t$ to generate the observed images, \new{and a non-compositional NeRF denoted by $N_{\phi^\prime}$ that is only used to initialize the voxel representations.}
+
+\new{\model{} involves three stages in the training phase: First, a 3D voxel warmup stage that learns to obtain a preliminary understanding of the geometric and dynamic priors. 
+Second, a 3D-to-4D voxel expansion stage that extends the 3D density grids $\mathcal{F}_{t=1}\in \mathbb{R}^{N_x\times N_y\times N_z}$ to 4D dimension, initializing $\mathcal{V}_{t=1}$ using the connected components algorithm.
+Third, a 4D voxel optimization stage that optimizes $\{\mathcal{V}_{t=1}, \mathbf{S}_{t=0}, f_\psi, E_\theta, Z_\omega, N_\phi\}$ to refine the object-centric voxel representations.}
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{
+\includegraphics[width=\linewidth]{fig/method-r7.pdf}}
+\new{\caption{
+The architecture of \model{} consists of three groups of network components: the bi-directional dynamics modules ($f_\psi$, $f_\xi^\prime$), the slot attention module with a GRU and a 3D volume encoder ($Z_\omega$, $E_\theta$), and neural rendering modules ($N_{\phi^\prime}$, $N_\phi$) based on 3D and 4D voxels respectively.\ref{sec:pseudocode}), and a 4D voxel optimization stage (bottom).}
+\label{fig:arch}
+}
+\end{center}
+\end{figure*}
+
+\subsection{Object-Centric Voxel Representations}
+\label{subsec:voxelgrid}
+
+We extend the idea of using 3D voxel grids to maintain the volume density for neural rendering with 4D voxel grids, denoted as $\mathcal{V}_t$. 
+The additional dimension indicates the occupancy probabilities of each object within each grid cell.
+The occupancy probability $\{\sigma_n\}_{n=1}^N$ at an arbitrary 3D location can be efficiently queried through the trilinear interpolation sampling method:
+\begin{equation}
+    \mathrm{Interp}(\mathbf{x}, \mathcal{V}_t): (\mathbb{R}^3, \mathbb{R}^{N \times N_x\times N_y\times N_z})\xrightarrow{}\mathbb{R}^{N},
+\end{equation}
+where $(N_x, N_y, N_z)$ are the resolutions of $\mathcal{V}_t$.
+To achieve sharp decision boundaries during training, we apply the Softplus activation function to the output of trilinear interpolation. 
+
+\subsection{Model Components}
+\paragraph{Canonical-space dynamics modeling.}
+As shown in Figure~\ref{fig:arch}, we use a dynamics module $f_\psi$ to learn the deformation field from $\mathcal{V}_{t=1}$ at the initial timestamp to its canonical space variations over time. \new{Notably, in the warmup stage, $f_\psi$ learns to transform the density values in $\mathcal{F}_{t}$.} 
+Given a 3D point $\forall \mathbf{x}_i \in \{\mathbf{x}\}$ at an arbitrary time, $f_\psi(\mathbf{x}_i, t)$ predicts a position movement $\Delta \mathbf{x}_i$, so that we can transform $\mathbf{x}_i$ to the scene position at the first moment by $\mathbf{x}_i+\Delta \mathbf{x}_i$.
+We then query the occupancy probability from $\mathcal{V}_{t=1}$ by 
+$\widehat{\mathcal{V}}_{t} = \mathrm{Interp}\left((\mathbf{x}_i + f_\psi(\mathbf{x}_i, t)\right), \mathcal{V}_{t=1})$.
+Notably, we encode $\mathbf{x}_i$ and $t$ into higher dimensions via positional embedding.
+Additionally, in the warmup stage, we use another dynamics module $f_\xi^\prime$ to model the forward movement $\Delta x^\prime$ from initial movement to timestamp $t$. \new{This module enables the calculation of a cycle-consistency loss, enhancing the coherence of the learned canonical-space transitions. Furthermore, it provides useful input features representing the forward dynamics starting from the initial time step for the subsequent connect components algorithm, which can improve the initialization of $\mathcal{V}_{t=1}$.}
+
+
+\paragraph{Volume slot attention.}
+\new{To progressively derive a set of global \textit{time-invariant} object-level representations from the local time-varying voxel grid features, we employ volume slot attention in our approach.}
+Specifically, we use a set of latent codes referred to as ``slots'' to represent these object-level features. This terminology is in line with prior literature on 2D static scene decomposition~\citep{locatello2020object}. 
+The slots are randomly initialized from a normal distribution and progressively refined episode by episode throughout our second training stage.
+\new{The \textit{episode} refers to a training period that iterates from the initial timestamp to the end of the sequence.}
+We denote the collection of slot features by $\mathbf{S}_{t}^e\in \mathbb{R}^{N\times D}$, where $e$ is the index of the training episode and $D$ is the feature dimensionality.
+At the beginning of each episode, we initialize the slot features as $\mathbf{S}_{t=0}^e = \bar{\mathbf{S}}^{e-1}_{1:T}= \frac{1}{T}\sum_{t=1}^{T}(\mathbf{S}_{t}^{e-1})$,
+where $\bar{\mathbf{S}}^{e-1}_{1:T}$ is the average of slot features across all timestamps in the previous episode.
+Each slot feature captures the time-invariant properties such as the appearance of each object, which enables the manipulation of the scene's content and relationships between objects.
+To bind the voxel grid representations to the corresponding object, at timestamp $t$, we pass $\mathcal{V}_{t}$ through a 3D CNN encoder $E_\theta$, which consists of $3$ convolutional layers with ReLU. It outputs $N$ flattened features $\mathbf{h}_t\in \mathbb{R}^{M \times D}$, where $M$ represents the size of the voxel grids that have been reduced in dimensionality by the encoder.
+From an optimization perspective, a set of well-decoupled global slot features can benefit the separation of the object-centric volumetric representations.
+To refine the slot features, we employ the iterative attention block denoted by $Z_w$ to incorporate the flattened local features $\mathbf{h}_t$. 
+In a single round of slot attention at timestamp $t \geq 1$, we have:
+\begin{equation}
+\begin{split}
+    \mathcal{A}_t = \mathrm{softmax}_{N}\left(\frac{1}{\sqrt{D}}k(\mathbf{h}_t)\cdot q(\mathbf{S}_{t-1})^T\right), \quad
+    {W}_t^{i,j} = \frac{\mathcal{A}_t^{i,j}}{\sum_{l=1}^M\mathcal{A}_t^{l,j}}, \quad
+    \mathcal{U}_t = W^T \cdot v(\mathbf{h}_t),
+\end{split}
+\end{equation}
+where $\mathbf{S}_{t-1}$ denotes $\mathbf{S}_{t-1}^e$ in short, $(q,k,v)$ are learnable linear projections $\mathbb{R}^{D\xrightarrow{}D}$~\citep{luong2015effective}, such that
+$\mathcal{A}_t \in \mathbb{R}^{M\times N}$ and $\mathcal{U}_t \in \mathbb{R}^{N\times D}$, and $\sqrt{D}$ is a fixed softmax temperature~\citep{vaswani2017attention}.
+The resulted slots features are then updated by a GRU as $\mathrm{GRU}(\mathcal{U}_t, \mathbf{S}_{t-1})$. 
+We update the slot features and obtain ${\mathbf{S}}_t$ by repeating the attention computation $3$ times at each timestamp.
+} 
+
+\paragraph{Object-centric renderer.}
+Previous compositional NeRF, like in uORF~\citep{yu2021unsupervised}, typically uses an MLP to learn a continuous mapping from sampling point $\mathbf{x}$, viewing direction $\mathbf{d}$, and slot features to the emitted densities $\{\sigma_n\}$ and colors $\{c_n\}$ of different slots.
+Our neural renderer takes as inputs $\{\hat{s}_t^n\}_{n=1}^N=\mathrm{mean}({\mathbf{S}}_t, \bar{\mathbf{S}}^{e-1}_{1:T})$ at timestamp $t$. 
+As discussed above, $\bar{\mathbf{S}}^{e-1}_{1:T}$ is the averaged slot features in the previous episode, which can be more stable than the frequently refined features ${\mathbf{S}}_t$.
+We perform object-centric projections using an MLP: $N_\phi: (\mathbf{x}$, $\mathbf{d}$, $\{\hat{s}_t^n\})\xrightarrow{}\{c_n\}$, and query $\{\sigma_n\}$ directly from the voxel grids $\widehat{\mathcal{V}}_t$ at the corresponding timestamp. 
+We use density-weighted mean to compose the predictions of $c_n$ and $\sigma_n$ for different objects, such that:
+\begin{equation}
+    w_n = {\sigma_n}/{\sum_{n=1}^N\sigma_n},\quad \overline{\sigma} = \sum_{n=1}^N w_n  \sigma_n, \quad \overline{\mathbf{c}} = \sum_{n=1}^N w_n c_n,
+\end{equation}
+where $\overline{\sigma}$ and $\overline{\mathbf{c}}$ is the output density and the color of a sampling point.
+We estimate the color $C(\mathbf{r})$ of a sampling ray with the quadrature rule~\citep{max1995optical}:
+    $\widehat{C}(\mathbf{r}) = \sum_{i=1}^P T_i\left(1-\exp(-\bar{\sigma}_i\delta_i)\right)\overline{\mathbf{c}}_i$, 
+where $T_i = \exp(-\sum_{j=1}^{i-1}\bar{\sigma}_j\delta_j)$, $P$ is the number of sampling points in a certain ray, and $\delta_i$ is the distance between adjacent samples along the ray.
+
+
+\subsection{Training}
+\label{subsec: optimiz}
+
+We train the entire model of \model{} using neural rendering objective functions. At a specific timestamp, we take the rendering loss $\mathcal{L}_\text{Render}$ between the predicted and observed pixel colors, the background entropy loss $\mathcal{L}_\text{Ent}$, and the per-point RGB loss $\mathcal{L}_\text{Point}$ following DVGO~\citep{sun2022direct} as basic objective terms. 
+$\mathcal{L}_\text{Ent}$ can be viewed as a regularization to encourage the renderer to concentrate on either foreground or background.
+To enhance dynamics learning in the warmup stage, we design a novel cycle loss between $f_\psi$ and $f^\prime_\xi$:
+\begin{equation}
+\begin{split}
+    &\mathcal{L}_\text{Render} = \frac{1}{|\mathcal{R}|}\sum_{{r}\in\mathcal{R}}\left\|\widehat{C}(\mathbf{r})-C(\mathbf{r})\right\|_2^2, 
+    \quad\quad \
+    \mathcal{L}_\text{Ent} = \frac{1}{|\mathcal{R}|}\sum_{{r}\in\mathcal{R}}-\widehat{w}_l^r  \log(\widehat{w}_{l}^r) - (1-\widehat{w}_{l}^r) \log(1-\widehat{w}_{l}^r),\\
+    &\mathcal{L}_\text{Point} = \frac{1}{|\mathcal{R}|}\sum_{{r}\in\mathcal{R}}\left(\frac{1}{P_r}\sum_{i=0}^{P_r}\left\|\overline{\mathbf{c}}_i - C(\mathbf{r})\right\|_2^2\right), 
+    \ \mathcal{L}_\text{Cyc} = \frac{1}{|\mathcal{R}|}\sum_{{r}\in\mathcal{R}}\left(\frac{1}{P_r}\sum_{i=0}^{P_r}\left\| f_{\psi} (x_i,t) + f^\prime_{\xi} (x^\prime_i,t)\right\|_2^2\right),\\
+\end{split}
+\label{eq:loss}
+\end{equation}
+where $x^\prime_i=x_i+f_{\psi} (x_i,t), i\in[0, P_r]$, $\mathcal{R}$ is the set of sampled rays in a batch, $P_r$ is the number of sampling points along ray $r$, and $\widehat{w}_l^r$ is the color contribution of the last sampling point obtained by $\widehat{w}^r_l = T_{P_r}(1-\exp(-\sigma_{P_r} \delta_{P_r}))$.
+\new{We discuss the three stages in the training phase below.}
+\paragraph{\new{3D voxel warmup stage.}}
+\new{To reduce the difficulty of learning the object-centric 4D occupancy grids, we optimize the 3D density grids $\mathcal{F}_{t=1}\in \mathbb R^{N_x \times N_y \times N_z}$ and warmup $f_\psi$ using $\{\mathbf{I}_{t=1}^v\}_{v=1}^V$ and $\{\mathbf{I}_t\}_{t=2}^T$.
+To enhance the coherence of the learned canonical-space dynamics, we train an additional module $f^\prime_\xi$ to capture the forward deformation field $\Delta x^\prime_{1 \rightarrow t}$ using $\mathcal{L}_\text{Cyc}$ in Eq. \eqref{eq:loss}. 
+$\Delta x^\prime_{1 \rightarrow t}$ is used in the subsequent connect components algorithm to improve the initialization of $\mathcal{V}_{t=1}$.
+We train the bi-directional $(f^\prime_\xi, f_\psi)$ and the non-compositional neural renderer $N_{\phi^\prime}$ based on $\mathcal{F}_{t=1}$.
+The overall objective is defined as $\mathcal{L}_\text{Warm} = \sum_{t=1}^{T} \left(\mathcal{L}_\text{Render} + \alpha_p \mathcal{L}_\text{Point} + \alpha_e \mathcal{L}_\text{Ent} + \alpha_c \mathcal{L}_\text{Cyc}\right)$. The hyperparameter values are adopted from prior literature~\citep{Liu2022DeVRFFD}.
+}
+
+\paragraph{\new{3D-to-4D voxel expansion stage.}}
+\new{
+We extend the 3D voxel grids $\mathcal{F}_{t=1}$ to 4D voxel grids $\mathcal{V}_{t=1}$ using the connected components algorithm, in which the expanded dimension corresponds to the number of slots ($N$). The input features for the connected components algorithm involve the forward canonical-space transitions generated by $f^\prime_\xi$ and the emitted colors by $N_{\phi^\prime}$. 
+The output clusters symbolize different objects, based on our assumption that voxels of the same object have similar motion and appearance features.
+\ref{sec:pseudocode}.}
+
+\paragraph{\new{4D voxel optimization stage.}}
+\new{In this stage, we finetune $f_\psi$ and $\mathcal{V}_{t=1}$ obtained in the first two stages respectively. Following an end-to-end training scheme, the dynamics module, volume slot attention mechanism, and compositional renderer collaboratively contribute to refining the object-centric voxel grids.}
+The loss function in this stage is defined as
+    $\mathcal{L}_\text{Dyn} = \sum_{t=1}^{T} \left(\mathcal{L}_\text{Render} + \alpha_p \mathcal{L}_\text{Point} + \alpha_e \mathcal{L}_\text{Ent}\right)$,
+where we finetune $(\mathcal{V}_{t_0},\psi)$ and train $(\theta,\omega,\phi)$ from the scratch.
+
+
+
+
+\section{Experiments}
+
+
+
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets.}
+We build the $8$ synthetic dynamic scenes in Table~\ref{tab:nv_ssim} using the Kubric simulator~\citep{Greff2022KubricAS}. Each scene spans $60$ timestamps and contains different numbers of objects in various colors, shapes, and textures. The objects have diverse motion patterns and initial velocities. All images have dimensions of $512 \times 512$ pixels
+We also adopt $4$ real-world scenes from HyperNeRF~\citep{park2021hypernerf} and $\text{D}^2$NeRF~\citep{Wu2022D2NeRFSD}, as shown in Table \ref{tab:real_world_synthesis}.
+For the synthetic scenes, we follow D-NeRF~\citep{Pumarola2020DNeRFNR} to employ images collected at viewpoints randomly sampled on the upper hemisphere. In contrast, real-world scenes are captured using a mobile monocular camera.
+
+\paragraph{Metrics.}
+For novel view synthesis, we report PSNR and SSIM~\citep{Wang2004ImageQA}. 
+To compare the scene decomposition results with the 2D methods, we employ the Foreground Adjusted Rand Index (FG-ARI)~\citep{rand1971objective,hubert1985comparing}. 
+It measures the similarity of clustering results based on the foreground object masks to the ground truth, ranging from $-1$ to $1$ (higher is better).
+\begin{table*}[h]
+\caption{Novel view synthesis results of our approach compared with D-NeRF~\citep{Pumarola2020DNeRFNR}, DeVRF~\citep{Liu2022DeVRFFD}, and their variants to align with our experimental configurations (see text for details). We evaluate the results averaged over $60$ novel views(one view per timestamp).
+}
+\label{tab:nv_ssim}
+\begin{center}
+\setlength{\tabcolsep}{2mm}{}
+\begin{small}
+\begin{sc}
+\begin{tabular}{lcccccccc}
+\toprule
+& \multicolumn{2}{c}{3ObjFall} &\multicolumn{2}{c}{3ObjRand} &\multicolumn{2}{c}{3ObjMetal} &\multicolumn{2}{c}{3Fall+3Still} \\
+Method
+& PSNR$\uparrow$  & SSIM$\uparrow$ 
+& PSNR$\uparrow$  & SSIM$\uparrow$ 
+& PSNR$\uparrow$  & SSIM$\uparrow$ 
+& PSNR$\uparrow$  & SSIM$\uparrow$ \\
+\cmidrule(lr){1-1}  \cmidrule(lr){2-3}  \cmidrule(lr){4-5}  \cmidrule(lr){6-7}  \cmidrule(lr){8-9}
+D-NeRF ($V=1$)        &28.54&0.946    &12.62&0.853    &27.83&0.945    &24.56&0.908\\
+D-NeRF ($V=5$)         &29.15&0.954    &27.44&0.943    &28.59&0.953    &25.03&0.913\\
+DeVRF          &24.92&0.927    &22.27&0.912    &25.24&0.931    &24.80&0.931\\
+DeVRF-Dyn           &18.81&0.799    &18.43&0.799    &17.24&0.769    &17.78&0.765\\
+\midrule
+Ours ($V=1$) &\underline{31.83}&\underline{0.967}   &\textbf{31.10}&\textbf{0.966} 
+&\underline{29.28}&\textbf{0.954}  &\underline{27.83}&\underline{0.942}\\ 
+Ours ($V=5$)         &\textbf{32.11}&\textbf{0.969}    &\underline{30.70}&\underline{0.964}   &\textbf{29.31}&\underline{0.953}    &\textbf{28.96}&\textbf{0.945}\\
+\midrule
+& \multicolumn{2}{c}{6ObjFall} &\multicolumn{2}{c}{8ObjFall} &\multicolumn{2}{c}{3ObjRealSimp} &\multicolumn{2}{c}{3ObjRealCmpx} \\
+Method
+& PSNR$\uparrow$  & SSIM$\uparrow$ 
+& PSNR$\uparrow$  & SSIM$\uparrow$ 
+& PSNR$\uparrow$  & SSIM$\uparrow$ 
+& PSNR$\uparrow$  & SSIM$\uparrow$ \\
+\cmidrule(lr){1-1}  \cmidrule(lr){2-3}  \cmidrule(lr){4-5}  \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+D-NeRF ($V=1$)          &28.27&0.940    &27.44&0.923    &27.04&0.927   &20.73&0.864\\
+D-NeRF ($V=5$)         &27.20&0.928    &26.97&0.919    &27.49&0.931    &22.72&0.874\\
+DeVRF          &24.83&0.905    &24.87&0.915    &24.81&0.922    &21.77&0.891\\
+DeVRF-Dyn           &17.35&0.738    &16.19&0.711    &18.64&0.717    &17.40&0.778\\
+\midrule
+Ours ($V=1$)  &\underline{29.70}&\underline{0.948}  &\textbf{29.86}&\textbf{0.945}   &\textbf{30.20}&\textbf{0.952}  &\underline{26.80}&\underline{0.917}\\ 
+Ours ($V=5$)         &\textbf{29.98}&\textbf{0.950}    &\underline{29.78}&\textbf{0.945}    &\underline{30.13}&\textbf{0.952}    &\textbf{27.25}&\textbf{0.918}\\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\end{table*}
+
+
+\begin{table*}[t]
+\caption{Quantitative comparisons for novel view synthesis in real-world scenes from HyperNeRF and $\text{D}^2$NeRF. On average, our approach outperforms HyperNeRF by $5.7\%$ in PSNR and $7.2\%$ in SSIM. It also outperforms $\text{D}^2$NeRF, another neural renderer with disentanglement learning.
+}
+\label{tab:real_world_synthesis}
+\begin{center}
+\begin{small}   
+\setlength{\tabcolsep}{0.95mm}{}
+\begin{sc}
+\begin{tabular}{lcccccccccc}
+\toprule
+& \multicolumn{2}{c}{Chicken} &\multicolumn{2}{c}{Broom} &\multicolumn{2}{c}{Peel-Banana} &\multicolumn{2}{c}{Duck} 
+&\multicolumn{2}{c}{Avg.}\\
+Method
+& PSNR$\uparrow$   & SSIM$\uparrow$
+& PSNR$\uparrow$   & SSIM$\uparrow$
+& PSNR$\uparrow$   & SSIM$\uparrow$
+& PSNR$\uparrow$   & SSIM$\uparrow$
+& PSNR$\uparrow$   & SSIM$\uparrow$\\
+\cmidrule(lr){1-1}  \cmidrule(lr){2-3}  \cmidrule(lr){4-5}  \cmidrule(lr){6-7} 
+\cmidrule(lr){8-9} \cmidrule(lr){10-11}
+NeurDiff      &21.17&0.822    &17.75&0.468    &19.43&0.748 &\underline{21.92}&\underline{0.862} &20.07&0.725\\
+HyperNeRF &\underline{26.90}&\textbf{0.948}    &19.30&0.591   &\underline{22.10}&0.780       &20.64&0.830  &\underline{22.23}&0.787    \\
+$\text{D}^2$NeRF            &24.27&0.890    &\underline{20.66}&\textbf{0.712}  &21.35&\underline{0.820}     &\textbf{22.07}&0.856  &22.09&\underline{0.820}\\
+Ours        &\textbf{27.01}&\underline{0.934}  &\textbf{21.49}&\underline{0.702}    &\textbf{24.07}&\textbf{0.863}       &21.43&\textbf{0.878}   &\textbf{23.50}&\textbf{0.844}\\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\end{table*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{fig/novel_view.pdf}
+    \caption{Novel view synthesis results in synthetic and real-world scenes. D-NeRF fails in 3ObjRand. We also visualize corresponding decomposition maps for real-world scenes. It's important to note that decomposing moving objects in a real-world scene often requires additional geometric priors. Relying solely on space-time continuity within a single scene may not be sufficient to separate objects like a hand and a banana, especially when they are in contact throughout the video.
+    }
+\label{fig:novel_view}
+\end{figure*}
+
+
+\paragraph{Compared methods.} 
+In the novel view synthesis task for synthetic scenes, we evaluate \model{} against D-NeRF~\citep{Pumarola2020DNeRFNR} and DeVRF~\citep{Liu2022DeVRFFD}.
+For real-world scenes, we compare it with NeuralDiff~\citep{tschernezki2021neuraldiff}, HyperNeRF~\citep{park2021hypernerf}, and $\text{D}^2$NeRF~\citep{Wu2022D2NeRFSD}. 
+In the scene decomposition task, we use established 2D/3D object-centric representation learning methods, SAVi~\citep{kipf2021conditional} and uORF~\citep{yu2021unsupervised}, as the baselines. These models are pre-trained on MOVi-A~\citep{Greff2022KubricAS} and CLEVR-567~\citep{yu2021unsupervised} respectively, which are similar to our synthetic scenes. Besides, we also include a pretrained and publicly available SAM model~\citep{kirillov2023segany} to compare the segmentation performance.
+
+\subsection{Novel View Synthesis}
+
+\paragraph{Synthetic scenes.}
+We evaluate the performance of \model{} on the novel view synthesis task with the other two 3D benchmarks (D-NeRF and DeVRF).
+For a fair comparison, we implement ``\textit{D-NeRF ($V=5$)}'' which is trained using multi-view frames at the first timestamp. 
+Besides, since DeVRF is trained with $V=60$ views at the initial timestamp and $4$ views for the subsequent timestamps, we additionally train a DeVRF model in a data configuration similar to ours. That is, we only have access to one image per timestamp ($t \ge 1$) in a dynamic view randomly sampled from the upper hemisphere. This model is termed as ``\textit{DeVRF-Dyn}''. 
+As shown in Table~\ref{tab:nv_ssim}, \model{} consistently achieves the best results in terms of PSNR and SSIM.
+Notably, there is no remarkable difference between the performance of our approach when trained with $V=1$ or $V=5$ initial images, which demonstrates that our model can be potentially applied to scenarios with monocular video data.
+In contrast, \textit{DeVRF-Dyn} has a significant decline in performance compared to its standard baseline due to its heavy dependence on accurate initial scene understanding.
+\paragraph{Real-world scenes.}
+We also evaluate the performance of \model{} in real-world scenes with the cutting-edge NeRF-based methods (NeurDiff, HyperNeRF, and $\text{D}^2$NeRF). 
+As shown in Table~\ref{tab:real_world_synthesis}, \model{} outperforms the previous state-of-the-art method HyperNeRF by $5.7\%$ in PSNR and $7.2\%$ in SSIM on average. It also outperforms the other neural rendering method that learns disentangled representations, $\text{D}^2$NeRF, by $6.4\%$ and $2.9\%$ in the respective metrics.}
+
+\paragraph{Qualitative results.}
+Figure~\ref{fig:novel_view} showcases the rendered images at an arbitrary timestamp from a novel view.
+On the synthetic dataset, it shows that \model{} captures 3D geometries and the motion patterns of different objects more accurately than the compared methods.
+In contrast, D-NeRF struggles to capture intricate dynamics and fails to model the complex motion in 3ObjRand. Additionally, it generates blurry results in 3ObjRealCpmx.
+DeVRF, on the other hand, also fails to accurately model the trajectories of the moving object with complex textures, as highlighted by the red box in 3ObjRealCmpx.
+The real-world examples on the right side of Figure~\ref{fig:novel_view} demonstrate that \model{} produces high-quality novel view images by understanding the stereo object-centric nature of the scene. This is further illustrated by the scene decomposition maps projected onto 2D planes.
+\begin{table*}[t]
+\caption{
+Results in FG-ARI for object-centric scene decomposition. Since SAVi requires videos with fixed viewpoints, we generate an image sequence with a stationary camera and also evaluate \model{} (\textit{FixCam}) using the fixed viewpoints. \new{Notably, unlike DynaVol, the compared models including SAM are fully generalizing models trained beyond the test scenes. In contrast, our model enables 3D scene decomposition by overfitting each individual scene in an unsupervised manner.}
+}
+\label{tab:FG-ARI}
+\begin{center}
+\begin{small}   
+\setlength{\tabcolsep}{1.7mm}{}
+\begin{sc}
+\begin{tabular}{lcccccccc}
+\toprule
+Method & 3Fall &3Rand &3Metal &3F+3S &6Fall &8Fall &3Simp &3Cmpx\\
+\midrule
+SAVi      &3.74  &4.38    &3.38  &6.12  &6.85    &7.87 &3.10 &4.82 \\
+Ours (FixCam, $V=5$) &\textbf{94.53}&\textbf{93.30} 
+ &\textbf{94.91}    &\textbf{93.20}&\textbf{93.42}&\textbf{93.42}    &\textbf{91.22}    &\textbf{91.84}         \\
+\midrule
+uORF            &28.77&38.65    &22.58&36.70  &29.23& 31.93      &38.26&33.76\\
+SAM &70.77   &55.52   &46.80  &47.36  &62.66  
+&71.68   &56.65  &51.91 \\
+Ours ($V=1$) &\underline{96.89} &\textbf{96.11} &\underline{85.78} &\underline{92.76} &\textbf{95.61} &\underline{93.38} &\textbf{94.28} &95.02\\
+Ours ($V=5$)        &\textbf{96.95}&\underline{96.01} &\textbf{96.06}&\textbf{94.40}    &\underline{94.73}&\textbf{95.10}       &\underline{93.96}&\textbf{95.26} \\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\end{table*}
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{fig/vis_seg_iclr_v4.pdf}
+    \caption{Visualization of scene decompostion results for \textit{6ObjFall}.}
+\label{fig:compare_seg}
+\end{figure*}
+\subsection{Scene Decomposition}
+
+\paragraph{Quantitative results.}
+To obtain quantitative results for 2D segmentation as well as the scene decomposition maps, we assign the casted rays in volume rendering to different slots according to each slot's contribution to the ray's final color. 
+Table~\ref{tab:FG-ARI} provides a comparison between \model{} with 2D/3D unsupervised object-centric decomposition methods (SAVi/uORF) and a pretrained Segment Anything Model (SAM).  
+For a fair comparison with SAVi, which works on 2D video inputs, we implement a \model{} model using consecutive images with a fixed camera view (termed as \textit{FixCam}). 
+For uORF and SAM, as they are primarily designed for static scenes, we preprocess the dynamic sequence into $T$ individual static scenes as the inputs of these models and evaluate their average performance on the whole sequence.
+The FG-ARI results in Table~\ref{tab:FG-ARI} show that \model{} ($V=1$) and \model{} ($V=5$) outperform all of the compared models by large margins.
+
+\paragraph{Qualitative results.}
+In Figure~\ref{fig:compare_seg}, we randomly select a timestamp on 6ObjFall and present the object-centric decomposition maps of SAVi, uORF, SAM, and \model{}. 
+We have the following three observations from the visualized examples.
+First, compared with the 2D models (SAVi and SAM), \model{} can effectively handle severe occlusions between objects in 3D space. It shows the ability to infer the complete shape of the objects, as illustrated in the $1$st and $5$th slots.  
+Second, compared with the 3D decomposition uORF, \model can better segment the dynamic scene by leveraging explicitly meaningful spatiotemporal representations, while uORF only learns latent representations for each object. 
+Last but not least, \model{} can adaptively work with redundant slots. This means that the pre-defined number of slots can be larger than the actual number of objects in the scene. In such cases, the additional slots can learn to disentangle noise in visual observations or learn to not contribute significantly to image rendering, enhancing the model's flexibility and robustness.
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{fig/edit.pdf}
+    \caption{Showcases of dynamic scene editing for both real-world (top) and synthetic scenes (bottom). We visualize the edited decomposition map and the corresponding rendering results.}
+    \label{fig:edit}
+\end{figure*}
+\begin{table*}[t]
+\caption{
+Ablation studies of the key components and the training stages in \model{}.
+}
+\label{tab:ablation:modules}
+\begin{center}
+\begin{small}   
+\setlength{\tabcolsep}{1.5mm}{}
+\begin{sc}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{3ObjFall} &\multicolumn{2}{c}{6ObjFall} &\multicolumn{2}{c}{3ObjRealCmpx} \\
+
+& PSNR$\uparrow$   & FG-ARI$\uparrow$
+& PSNR$\uparrow$  & FG-ARI$\uparrow$
+& PSNR$\uparrow$   & FG-ARI$\uparrow$\\
+\cmidrule(lr){1-1}  \cmidrule(lr){2-3}  \cmidrule(lr){4-5}  \cmidrule(lr){6-7} 
+w/o forward deformation $f_{\xi}^{\prime}(t)$      &31.50&95.66    &29.75&92.94    &\textbf{27.35}&94.90\\
+w/o Volume slot attention     &\underline{31.71}&95.33    &\textbf{30.09}&92.32    &27.16&94.86\\
+w/o Average slots $\bar{\mathbf{S}}^{e-1}_{1:T}$   &31.68&\underline{96.19}    &29.90&\underline{92.97}    &27.22&\underline{94.90}\\
+\midrule
+w/o 4D voxel optimization  &29.69&92.03    &27.87&89.85    &24.98&92.91  \\
+\new{4D voxel optim. from scratch} & 31.69 & 31.81     &     29.37 & 20.82     &     28.55 & 33.89 \\
+\midrule
+Full model      &\textbf{32.11}&\textbf{96.95}    &\underline{29.98}&\textbf{94.73} 
+&\underline{27.25}&\textbf{95.26}  \\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\end{table*}
+
+
+\subsection{Dynamic Scene Editing}
+
+After the training period, the object-centric voxel representations learned by \model{} can be readily used in downstream tasks such as scene editing without the need for additional model tuning. \model{} allows for easy manipulation of the observed scene by directly modifying the object occupancy values within the voxel grids or switching the learned deformation function to a pre-defined one. This flexibility empowers users to make various scene edits and modifications. For instance, in the first example in Figure~\ref{fig:edit}, we remove the hand that is pinching the toys. In the second example, we modify the dynamics of the shoe from falling to rotating.
+
+
+
+\subsection{Further Analyses}
+\label{analysis}
+\paragraph{Ablation studies.}
+We present ablation study results in Table~\ref{tab:ablation:modules}
+First, we can find that all network components are crucial to the final rendering and decomposition results.
+\new{Furthermore, in the absence of the 4D voxel optimization stage, the performance of \model{} significantly degrades, highlighting the importance of refining the object-centric voxel representation with a slot-based renderer.
+Additionally, we conduct an ablation study that performs 4D voxel optimization from scratch with randomly initialized $\mathcal{V}_{t=1}$ and $f_\phi(\cdot)$. The results clearly show that excluding the warmup stage has a substantial impact on the final performance, especially for the scene decomposition results.
+}
+
+
+\begin{table*}[b]
+\caption{
+The analysis of the impact of the number of slots ($N$) on the performance of our approach.
+}
+\label{tab:ablation:slots_num}
+\begin{center}
+\begin{small}   
+\setlength{\tabcolsep}{3mm}{}
+\begin{sc}
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{2}{c}{3ObjFall} &\multicolumn{2}{c}{6ObjFall} &\multicolumn{2}{c}{3ObjRealCmpx} \\
+
+\# Slots & PSNR$\uparrow$   & FG-ARI$\uparrow$
+& PSNR$\uparrow$  & FG-ARI$\uparrow$
+& PSNR$\uparrow$   & FG-ARI$\uparrow$
+\\
+\cmidrule(lr){1-1}  \cmidrule(lr){2-3}  \cmidrule(lr){4-5}  \cmidrule(lr){6-7} 
+5     &31.68&\underline{95.82}    &\underline{29.99}&81.12   &27.22&94.70  \\
+10 (Ours)  &\textbf{32.11}&\textbf{96.95} &29.98&\textbf{94.73}
+&\underline{27.25}&\textbf{95.26}  \\
+15 &\underline{31.71}&95.22 &\textbf{30.51}&\underline{84.85}
+&\textbf{27.27}&\underline{94.85} \\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\end{table*}
+
+
+
+
+\paragraph{Analysis of the slot features.}
+We first study the impact of the slot number. From Table~\ref{tab:ablation:slots_num}, we can see that find that the presence of redundant slots has only a minor impact on both rendering and decomposition results.
+In Figure~\ref{fig:abl_converg}, we explore the convergence of the slot values during the training process. 
+Specifically, we select the top $4$ slots (out of $10$) that contribute most to image rendering in 3ObjRand and 6ObjFall. 
+We present the average value across all dimensions of each slot ($\{\bar{s}_n^{e}\}$) at different training episodes. The results demonstrate that each slot effectively converges over time to a stable value, indicating that the features become progressively refined and successfully learn time-invariant information about the scene. Furthermore, the noticeable divergence among different slots indicates that \model{} successfully learned distinct and object-specific features.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{fig/slot_convergence4.pdf}
+    \caption{Visualization of the convergence of $\bar{\mathbf{S}}^e_{1:T}$ during training.}
+    \label{fig:abl_converg}
+\end{figure*}
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+\paragraph{Unsupervised 2D scene decomposition.}
+Most existing methods in this area~\citep{greff2016tagger,greff2019multi,burgess2019monet,engelcke2019genesis} use latent features to represent objects in 2D scenes.
+The slot attention method~\citep{locatello2020object} extracts object-centric latents with an attention block and repeatedly refines them using GRUs~\citep{Cho2014LearningPR}.
+SAVi~\citep{kipf2021conditional} extends slot attention to dynamic scenes by updating slots at each frame and using optical flow as the training target. 
+STEVE~\citep{singh2022simple} improves SAVi by replacing its spatial broadcast decoder with an autoregressive Transformer.
+SAVi++~\citep{Elsayed2022SAViTE} improves SAVi by incorporating depth information, enabling the modeling of static scenes with camera motion.
+
+\paragraph{Unsupervised 3D scene decomposition.}
+Recent methods~\citep{kabra2021simone,chen2021roots,stelzner2021decomposing,yu2021unsupervised,sajjadi2022object} combine object-centric representations with view-dependent scene modeling techniques like neural radiance fields (NeRFs)~\citep{mildenhall2021nerf}.
+ObSuRF~\citep{stelzner2021decomposing}
+adopts the spatial broadcast decoder and takes depth information as training supervision.
+uORF~\citep{yu2021unsupervised} extracts the background latent and foreground latents from an input static image to handle background and foreground objects separately.
+For dynamic scenes, \citet{guan2022neurofluid} proposed to use a set of particle-based explicit representations in the NeRF-based inverse rendering framework, which is particularly designed for fluid physics modeling.
+\citet{2022-driess-compNerfPreprint} explored the combination of an object-centric auto-encoder and volume rendering for dynamic scenes, which is relevant to our work. However, different from our unsupervised learning approach, it requires pre-prepared 2D object segments.
+
+\paragraph{Dynamic scene rendering based on NeRFs.}
+There is another line of work that models 3D dynamics using NeRF-based methods \new{\citep{Pumarola2020DNeRFNR, li2021neural, Liu2022DeVRFFD, Wu2022D2NeRFSD, Guo_2022_NDVG_ACCV, li2023dynibar}}.
+D-NeRF~\citep{Pumarola2020DNeRFNR} uses a deformation network to map the coordinates of the dynamic fields to the canonical space. 
+\new{\citet{li2021neural} extended the original MLP in NeRF to incorporate the dynamics information and determine the 3D correspondence of the sampling points at nearby time steps.
+\citet{li2023dynibar} achieved significant improvements on dynamic scene benchmarks by representing motion trajectories by finding 3D correspondences for sampling points in nearby views.
+} 
+DeVRF~\citep{Liu2022DeVRFFD} models dynamic scenes with volume grid features~\citep{sun2022direct} and voxel deformation fields. 
+$\text{D}^2$NeRF~\citep{Wu2022D2NeRFSD} presents a motion decoupling framework. 
+However, unlike \model{}, it cannot segment multiple moving objects.
+
+
+\section{Conclusion}
+
+In this paper, we presented \model{}, an inverse graphics method designed to understand 3D dynamic scenes using object-centric volumetric representations. 
+Our approach demonstrates superior performance over existing techniques in unsupervised scene decomposition in both synthetic and real-world scenarios. Moreover, it goes beyond the 2D counterparts by providing additional capabilities, such as novel view synthesis and dynamic scene editing, which greatly expand its application prospects.
+
+
+
+

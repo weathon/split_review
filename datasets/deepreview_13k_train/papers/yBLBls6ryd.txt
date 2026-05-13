@@ -1,0 +1,329 @@
+\title{Fast Fractional Natural Gradient Descent using Learnable Spectral Factorizations}
+
+\begin{abstract}
+Many popular optimization methods can be united through fractional natural gradient descent (FNGD), which pre-conditions the gradient with a fractional power of the inverse Fisher:
+    RMSprop and Adam(W) estimate a diagonal Fisher matrix and apply a square root before inversion; other methods like K-FAC and Shampoo employ matrix-valued Fisher estimates and apply the inverse and inverse square root, respectively.
+    Recently, the question of how fractional power affects optimization has moved into focus, e.g. offering trade-offs between convergence and generalization.
+    Gaining deeper insights into this phenomenon would require going beyond diagonal estimations and using cheap and flexible matrix-valued Fisher estimators capable of applying any fractional power; however, existing methods are limited by their expensive matrix fraction computation.
+    To address this, we propose a Riemannian framework to learn eigen-factorized Fisher estimations on the fly, allowing for the cheap application of  *arbitrary* fractional powers.
+    Our approach does not require matrix decompositions and, therefore, is stable in half precision.
+    We show our framework's efficacy on positive-definite matrix optimization problems and demonstrate its efficiency and flexibility for training neural nets.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Many well-known adaptive methods, like SGD (Robbins & Monro, 1951), RmsProp (Tieleman & Hinton, 2012) or Adam(W) (Kingma & Ba, 2015; Loshchilov & Hutter, 2017), can be framed as fractional natural gradient descent (FNGD): Given the neural network (NN) parameters $\pmb{\mu}$ , the gradient g and a curvature estimation S, FNGD applies $\pmb{\mu}\leftarrow\pmb{\mu}-\beta_{1}\mathbf{S}^{-1/p}\mathbf{\dot{g}}$ using a learning rate $\beta_{1}$ and subjecting the curvature approximation to a fractional power $^1\!/\!p$ before inversion. S approximates the Fisher information matrix (Amari, 1998), e.g. through exponential averages of the empirical Fisher (Kunstner et al., 2019) or the gradient outer product (GOP, Kingma & Ba, 2015; Agarwal et al., 2019; Lin et al., 2024). FNGD’s matrix fractional power allows interpolating between NGD (Amari, 1998) with $p=1$ and SGD as $p\rightarrow\infty$ ; RMSprop/Adam(W) use $p=2$ .  
+
+While most adaptive optimization algorithms rely on a square root $(p=2)$ , the fractional power’s role has recently garnered a lot of attention. Several works question the indispensable role of the square root and empirically demonstrate the usage of other fractions to trade off convergence and generalization (Chen et al., 2021), overcome the generalization gap between SGD and adaptive methods on convolutional neural nets (CNNs) observed by (Wilson et al., 2017), and to successfully train transformers (Lin et al., 2024). Theoretically, Huh (2020) identify limitations of SGD and NGD in terms of generalization, convergence, and stability when training deep linear networks. They argue that FNGD with $p\notin\{1,\infty\}$ can offer the ‘best of both worlds’, i.e. NGD’s convergence speed with SGD’s generalization.  
+
+Applying other fractional powers is straightforward for methods with a diagonal curvature approximation (e.g. PAdam from Chen et al., 2021) and does not add much computational cost. However, doing so for methods with non-diagonal preconditioning matrices such as K-FAC (Martens & Grosse, 2015) or Shampoo (Gupta et al., 2018; Anil et al., 2020; Shi et al., 2023) is computationally and numerically challenging. This is because computing matrix fractional powers is computationally intensive, and must usually be done in high precision to avoid numerical instabilities (Anil et al., 2020; Shi et al., 2023), preventing those methods from using fast, low-precision arithmetic (Micikevicius et al., 2018). Making the root computation fast and stable in low-precision can further unleash the potential of non-diagonal fractional methods.  
+
+To catalyze further investigations into the fractional power’s role, it would be desirable to have a flexible and efficient framework for learning non-diagonal curvature approximations that can (i) apply arbitrary fractional roots, and (ii) circumvent the numerical instabilities of matrix decompositions.  
+
+We address this instability and inefficiency and present an update scheme to directly adapt the spectral factorization $\mathbf{B}\mathrm{diag}(\mathbf{d})\mathbf{\dot{B}}^{\top}$ of the curvature approximation S on the fly, which we term a spectral parametrization of S. Thanks to this factorization, we can apply any matrix fractional power to S by elementwise operation on the eigenvalues d. Our approach directly adapts eigenfactors and maintains the factorization, and a practical version can operate without performing eigendecompositions. This makes our scheme amenable to running in low precision because we do not use any unstable matrix decomposition algorithm. However, the spectral factorization introduces several challenges as it imposes constraints and ambiguities (i.e. B must be orthogonal and d sorted) that need to be dealt with. These constraints make it more challenging to maintain the factorization on the fly. Our contributions are:  
+
+• We propose an update scheme to learn the spectral factorization $\mathbf{B}\mathrm{diag}(\mathbf{d})\mathbf{B}^{\top}$ of a curvature matrix S on the fly and address how to account for the constraints, and resolve the ambiguities, imposed by this parameterization. We then show how to learn Kronecker-factorized spectral decompositions, i.e. $\mathbf{S}\approx(\mathbf{S}^{(K)}\otimes\mathbf{S}^{(C)})$ where $\mathbf{S}^{(i)}=\mathbf{B}^{(i)}\mathrm{diag}(\mathbf{d}^{(i)})\mathbf{B}^{(i)}^{\top}$ , which are crucial to scale the approach. The Kronecker factorization introduces new ambiguities, which we resolve by introducing a scalar $\alpha$ and demanding $\operatorname*{det}(\mathbf{d}_{i})=1$ (Section 2). • Similar to Glasmachers et al. (2010); Lin et al. (2021; 2023), our approach views learning the curvature approximation as learning the covariance of a Gaussian variational distribution by performing Riemannian gradient descent on the manifold of dense or Kronecker-factorized positive-definite matrices. We extend these works by incorporating the new constraints arising from the spectral decomposition for the Fisher-Rao metric. (Section 3.) • Empirically, we demonstrate the effectiveness of our approach for a range of applications, including positive-definite matrix optimization (Pennec et al., 2006; Absil et al., 2009) and low-precision neural net training.  
+
+
+
+\section{1.1 BACKGROUND  }
+
+
+To train an NN model, we solve an unconstrained optimization problem. The objective function of the problem is expressed as a finite sum of cost functions with $N$ observations:  
+
+$$
+\begin{array}{r}{\operatorname*{min}_{\boldsymbol{\mu}}\,\ell(\boldsymbol{\mu}):=\sum_{i=1}^{N}c(f(\mathbf{x}_{i};\boldsymbol{\mu}),y_{i}),}\end{array}
+$$  
+
+where $\mathbf{x}_{i}$ and $y_{i}$ are features and a label for the $i$ -th observation, respectively, $f(\cdot;\pmb\mu)$ is an NN with learnable weights $\pmb{\mu}$ , and $c(\cdot,y_{i})$ is a cost function such as the cross-entropy function to measure the difference between the output of the NN and label $y_{i}$ .  
+
+We consider adaptive methods to solve this problem, where we estimate a preconditioning matrix by only using gradient information. For many well-known adaptive methods such as RMRprop (Tieleman & Hinton, 2012), a square root (i.e., $p=2$ ) is introduced.  
+
+$$
+\mathrm{RmsProp:}\;{\bf S}\gets(1-\beta_{2}){\bf S}+\beta_{2}\mathrm{diag}({\bf g}{\bf g}^{T}),\;\mu\gets\mu-\beta_{1}{\bf S}^{-1/p}{\bf g},
+$$  
+
+where $\mathbf{S}$ is a diagonal matrix and ${\mathbf{g}}=\nabla_{\mu}\ell$ is a gradient vector of the objective function. We often estimate the vector using a mini-batch of observations. Lin et al. (2024) consider a full matrix version of the root-free RmsProp update scheme (i.e., $p=1$ ) and propose an inverse-free update scheme. Other works improve the performance of adaptive methods on CNNs using other roots, such as $p=4$ in Chen et al. (2021) and $p=1$ in Lin et al. (2024).  
+
+$$
+\mathbf{S}\gets(1-\beta_{2})\mathbf{S}+\beta_{2}\mathbf{\mathcal{H}}=\mathbf{S}+\beta_{2}(\mathbf{\mathcal{H}}-\mathbf{S}),\ \pmb{\mu}\gets\pmb{\mu}-\beta_{2}\mathbf{S}^{-1/p}\mathbf{g},
+$$  
+
+Non-diagonal adaptive methods, like Shampoo (Gupta et al., 2018), also include a fractional root (e.g., $p=4$ ) in their update rule.  
+
+$$
+\begin{array}{r l}&{\mathrm{Shampoo:}\,\mathbf{S}_{C}\gets(1-\beta_{2})\mathbf{S}_{C}+\beta_{2}\mathbf{G}\mathbf{G}^{T},\,\mathbf{S}_{K}\gets(1-\beta_{2})\mathbf{S}_{K}+\beta_{2}\mathbf{G}^{T}\mathbf{G},}\\ &{\qquad\qquad\qquad\mu\gets\mu-\beta_{1}\,(\mathbf{S}_{K}\otimes\mathbf{S}_{C})^{-1/p}\,\mathbf{g}\,\,\Longleftrightarrow\,\mathbf{M}\gets\mathbf{M}-\beta_{1}\mathbf{S}_{C}^{-1/p}\mathbf{G}\mathbf{S}_{K}^{-1/p},}\end{array}
+$$  
+
+where $\mathbf{M}=\mathrm{Mat}(\pmb{\mu})$ and $\mathbf{G}=\mathrm{Mat}(\mathbf{g})$ are matrix representations of $\pmb{\mu}$ and $\mathbf{g}$ , respectively.  
+
+
+
+\section{2 FAST FNGD USING LEARNABLE SPECTRAL FACTORIZATIONS  }
+
+
+Our goal is to design pre-conditioner update schemes that offer the flexibility to apply arbitrary matrix roots at a low cost. The starting point is the observation that the pre-conditioner S can be interpreted as the inverse covariance matrix of a Gaussian variational distribution (Lin et al., 2024), which can be learned on the fly via the update scheme in Equation (3). However, this parameterization complicates applying any fractional root to S since the root computation requires matrix decomposition. Our contribution is to propose an update scheme for a new parameterization $\mathbf{S}=\mathbf{B}\mathrm{diag}(\mathbf{d})\mathbf{B}^{\top}$ , where B is an orthogonal square matrix and $\mathbf{d}$ is a vector with positive sorted entries, to learn d and B. We call this parameterization a spectral parameterization, due to its connection to the spectral decomposition of symmetric matrices. We empirically and theoretically establish its equivalence to update rules that directly update S, implying one can enjoy efficient updates while retaining the behavior of traditional methods. Our spectral parametrization allows us to easily compute any fractional root $\mathbf{S}^{-1/p}=\mathbf{B}\mathrm{diag}(\mathbf{d}^{-1/p})\mathbf{B}^{\top}$ through elementwise roots on d, instead of matrix roots on S. We then extend it to Kronecker-factorized matrices, which is crucial for large-scale applications. Our update schemes are efficient as learning $\mathbf{B}$ and $\mathbf{d}$ does not involve any matrix decomposition. In contrast to previous parameterizations, the spectral parameterization introduces new challenges, such as satisfying the orthogonal constraint on $\mathbf{B}$ and handling parametrization ambiguities. We defer the technicalities how to handle these constraints to Section 3 where we derive the update scheme from scratch. This is mainly to avoid introducing technical Riemannian optimization concepts needed that are necessary for our derivation. In the following, our focus will be on presenting and empirically validating the update scheme, and its connections to existing methods.  
+
+
+
+\section{2.1 FULL-MATRIX ADAPTIVE SCHEMES THROUGH A FULL GAUSSIAN APPROXIMATION  }
+
+
+We first present our update scheme in the context of full-matrix preconditioners. While full-matrix preconditioners are generally impractical for modern neural networks, this will serve to illustrate the core ideas which we later apply to structured preconditioners. We obtain the update scheme with $p\,=\,1$ by solving a Gaussian problem with mean $\pmb{\mu}$ and reparametrized inverse covariance $\mathbf{S}=\mathbf{B}\mathrm{Diag}(\mathbf{d})\mathbf{B}^{T}$ . We will discuss the procedure to obtain the scheme and satisfy the spectral constraints in Sec. 3.3. Given a learnable spectral parametrization, our update scheme shown in the leftmost box of Fig. 1 allows us to introduce any fractional $p$ -root further and efficiently compute the root when updating $\pmb{\mu}$ .  
+
+We theoretically establish the equivalence of this update to the default scheme as stated in:  
+
+Claim 1.  
+
+Empirical validation of the Full-matrix Update Scheme We empirically evaluate our scheme on $\mathbf{S}=\mathbf{B}\mathrm{Diag}(\mathbf{d})\mathbf{B}^{T}$ for curvature approximation. We compare our scheme to the default training scheme on S as $\dot{\mathbf{S}_{k+1}}\gets(1-\beta)\mathbf{S}_{k}\dot{+}\,\beta\mathbf{g}_{k}\mathbf{g}_{k}^{T}$ , and the inverse-free scheme (Lin et al., 2024) for a learnable Cholesky factorization $\mathbf{C}$ of $\mathbf{S}^{-1}$ (i.e., $\mathbf{S}=(\mathbf{C}\mathbf{C})^{-1})$ . We focus on the preconditioner estimation of S based on a fixed gradient sequence $\{\mathbf{g}_{1},\dots,\mathbf{g}_{T}\}$ and initialized by the same $\mathbf{S}_{0}$ . We consider two scenarios in this evaluation: (1) fixed-point matching and (2) iterate matching.  
+
+Fixed-point matching The ground truth in this setting is a fixed-point solution, $\mathbf{S}_{*}=E[\mathbf{g}\mathbf{g}^{T}]=\pmb{\Sigma}$ , to the default update scheme as $\mathbf{S}_{\ast}\,=\,(1-\phantom{\frac{1}{\beta}}\!\!\!\!\slash)\mathbf{S}_{\ast}\,+\,\beta\mathbf{\dot{g}}_{k}\mathbf{g}_{k}^{T}$ , where $\mathbf{g}_{k}$ is independently generated from a normal distribution $\mathbf{g}_{k}\sim\mathcal{N}(\mathbf{0},\pmb{\Sigma})$ at each iteration $k$ . We evaluate an update scheme in every iteration $k$ by comparing its current estimate denoted by $\mathbf{S}_{k}^{(e s t)}$ to the fixed point. We use a relative Frobenius norm $\frac{\|\mathbf{S}_{*}-\mathbf{S}_{k}^{\mathrm{(est)}}\|_{F}}{\|\mathbf{S}_{*}\|_{F}}$ and the Wasserstein-2 distance for positive-definite matrices to measure the difference.  
+
+Iterate matching The ground truth is a sequence of matrices $\{\mathbf{S}_{1}^{(\mathrm{true})},\dots,\mathbf{S}_{T}^{(\mathrm{true})}\}$ generated by the default scheme when applying the scheme to the gradient sequence. We are interested in matching the iterate that the default scheme generates at every step. We use a relative Frobenius norm ∥S(kt∥ruSe)(t−rueS)∥(kest )∥F and the Wasserstein-2 distance to measure the discrepancy between an update scheme and the default update scheme at every iteration $k$ .  
+
+162   
+163   
+164   
+165   
+166   
+167   
+168   
+169   
+170   
+171   
+172   
+173   
+174   
+175   
+176   
+177   
+178   
+179   
+180   
+181   
+182   
+183   
+184   
+185   
+186   
+187   
+188   
+189   
+190   
+191   
+192   
+193   
+194   
+195   
+196   
+197   
+198   
+199   
+200   
+201   
+202   
+203   
+204   
+205   
+206   
+207   
+208   
+209   
+210   
+211   
+212   
+213   
+214   
+215  
+
+Full-matrix $(\mathbf{S}=\mathbf{BDiag}(\mathbf{d})\mathbf{B}^{T})$   
+1: Compute gradient $\mathbf{g}:=\nabla\ell(\pmb{\mu})$ $\mathbf{d}\gets\mathbf{d}\odot\exp\{\beta_{2}\mathbf{d}^{-1}\odot[-\mathbf{d}+\mathrm{diag}(\mathbf{B}^{T}\mathbf{g}\mathbf{g}^{T}\mathbf{B})]\}$ $\mathbf{B}\gets\mathbf{BCayley}(\beta_{2}(\mathrm{Skew}(\mathrm{Tril}(\mathbf{U}))))$   
+2: $\mu\leftarrow\mu-\beta_{1}\mathbf{B}\mathrm{Diag}(\mathbf{d}^{-1/p})\mathbf{B}^{T}\mathbf{g}$  
+
+Figure 1: Adaptive update schemes for full-matrix and Kronecker structured spectral factorization for a finite sum of loss functions. Both update schemes use map $\operatorname{Cayley}(\mathbf{N}):=(\mathbf{I}+\mathbf{N})(\mathbf{I}-\mathbf{N})^{-1}$ with skew-symmetric $\mathbf{N}=-\mathbf{N}^{\top}$ to output an orthogonal matrix, map $\operatorname{Skew}(\mathbf{M}):=\mathbf{M}-\mathbf{M}^{\top}$ to skew-symmetrize an arbitrary square matrix, and map $\operatorname{Tril}(\cdot)$ returns a lower-triangular matrix with zero diagonal entries. $\odot$ denotes the elementwise product. For simplicity, we assume NN weights take a matrix form: $\mathbf{M}:=\mathrm{Mat}(\pmb{\mu})\in\mathbb{R}^{n\times m}$ . Fullmatrix scheme: matrix $\mathrm{Tril}(\mathbf{U})$ is a lower-triangular matrix (i.e., $i\,>\,j$ ) with the $(i,j)$ -th entry $[U]_{i j}:=-[\mathbf{B}^{T}\mathbf{g}\mathbf{g}^{T}\mathbf{B}]_{i j}/(d_{i}-d_{j})$ when $d_{i}\neq d_{j}$ and 0 otherwise. Kronecker-based scheme: This update scheme uses $\mathbf{W}^{(C)}:=(\mathbf{B}^{(C)})^{T}\mathbf{G}(\mathbf{S}^{(K)})^{-1}\mathbf{G}^{T}\mathbf{B}^{(C)}$ , and $\mathbf{W}^{(K)}:=(\mathbf{B}^{(K)})^{T}\mathbf{G}^{T}(\mathbf{S}^{(C)})^{-1}\mathbf{G}\mathbf{B}^{(K)}$ , where $\mathbf{S}^{(K)}:=\mathbf{B}^{(K)}\mathrm{Diag}(\mathbf{d}^{(K)})(\mathbf{B}^{(K)})^{T}\in\mathbb{R}^{m\times m}$ and $\mathbf{S}^{(C)}:=\mathbf{B}^{(C)}\mathrm{Diag}(\mathbf{d}^{(C)})(\mathbf{B}^{(C)})^{T}\in\mathbb{R}^{n\times n}$ is easy to compute due to the spectral factorization. For each Kronecker factor $\mathbf{S}^{(C)}$ , matrix $\mathrm{Tril}(\mathbf{U}^{(C)})$ is a lowertriangular matrix with its $(i,j)$ -th entry $[U^{(C)}]_{i j}:=-[W^{(C)}]_{i j}/([d^{(C)}]_{i}-[d^{(C)}]_{j})$ if $[d^{(C)}]_{i}\neq[d^{(C)}]_{j}$ and 0 otherwise, where $[d^{(C)}]_{i}$ denotes the $i$ -th entry of vector $\mathbf{d}^{(C)}$ . Vector $\mathbf{d}^{(C)}$ satisfies the determinant constraint $\operatorname*{det}(\operatorname{diag}(\mathbf{d}^{(C)}))=1$ since $\mathrm{sum}(\mathbf{m}^{(C)}-\mathrm{mean}(\mathbf{m}^{(C)}))=0$ (Sec. 3.2). For low-precision NN training, we truncate the Cayley and the exponential map.  
+
+Kronecker $\left(\mathbf{S}=\alpha[\mathbf{B}^{(C)}\mathrm{Diag}(\mathbf{d}^{(C)})(\mathbf{B}^{(C)})^{T}]\otimes[\mathbf{B}^{(K)}\mathrm{Diag}(\mathbf{d}^{(K)})(\mathbf{B}^{(K)})^{T}]\right)$ 1: Compute gradient $\mathbf{G}:=\mathrm{Mat}(\nabla\ell(\pmb{\mu}))$ 2: $\begin{array}{r l}&{\mathbf{m}^{(C)}\!=(\mathbf{\bar{d}}^{(C)})^{-1}\odot[-\mathbf{d}^{(C)}+\frac{1}{\alpha m}\mathrm{diag}(\mathbf{W}^{(C)})]}\\ &{\mathbf{m}^{(K)}=(\mathbf{d}^{(K)})^{-1}\odot[-\mathbf{d}^{(K)}+\frac{1}{\alpha n}\mathrm{diag}(\mathbf{W}^{(K)})]}\\ &{\mathbf{d}^{(C)}\leftarrow\mathbf{d}^{(C)}\odot\exp\{\beta_{2}[\mathbf{m}^{(C)}-\mathbf{mean}(\mathbf{m}^{(C)})]\}}\\ &{\mathbf{d}^{(K)}\leftarrow\mathbf{d}^{(K)}\odot\mathrm{exp}\{\beta_{2}[\mathbf{m}^{(K)}-\mathbf{mean}(\mathbf{m}^{(K)})]\}}\\ &{\mathbf{B}^{(C)}\leftarrow\mathbf{B}^{(C)}\mathrm{Cayley}(\frac{\beta_{2}}{\alpha m}\mathrm{Skew}(\mathrm{Til}(\mathbf{U}^{(C)})))}\\ &{\mathbf{B}^{(K)}\leftarrow\mathbf{B}^{(K)}\mathrm{Cayley}(\frac{\beta_{2}}{\alpha n}\mathrm{Skew}(\mathrm{Til}(\mathbf{U}^{(K)})))}\\ &{\alpha\leftarrow\alpha\exp(\frac{\beta_{2}}{2}[\mathbf{mean}(\mathbf{m}^{(K)})+\mathbf{mean}(\mathbf{m}^{(C)})])}\\ &{\mathbf{M}\leftarrow\mathbf{M}-\beta_{1}(\alpha^{-1/p})(\mathbf{S}^{(C)})^{-1/p}\mathbf{G}(\mathbf{S}^{(K)})^{-1/p}\mathbf{G}(\mathbf{S}^{(K)})^{-1/p}}\end{array}$  
+
+![](images/062028d02387341c12a45ace5c5551e7c8ee140b24d1829b535cc246b8acc08d.jpg)  
+Figure 2: Empirical validation of our full-matrix update scheme on estimating a preconditioner S ∈R100×100. The first two figures on the left show that our update scheme converges to a fixed-point solution as fast as the default update scheme in S and the Cholesky-based scheme. The last two figures illustrate how closely our update scheme matches the iterates generated by the default update scheme at each iteration. Our update scheme and the Cholesky-based scheme perform similarly for matching the preconditioner estimates generated by the default scheme.  
+
+From Fig. 2, we can see that our update scheme performs similarly to the default update scheme in the two scenarios. These results demonstrate the empirical equivalence between our scheme and the default scheme, at least for curvature estimation.  
+
+2.2 KRONECKER-STRUCTURED SCHEMES THROUGH A MATRIX GAUSSIAN APPROXIMATION  
+
+Using Kronecker-structured preconditioners (Martens & Grosse, 2015; Gupta et al., 2018) is necessary for large models as a full-matrix preconditioner is too large to store. Many Kronecker-based methods (Zhang et al., 2018; Ren & Goldfarb, 2021; Lin et al., 2023; 2024) are based on a (matrix) Gaussian family with Kronecker-structured inverse covariance $\mathbf{S}=\mathbf{S}^{(C)}\otimes\mathbf{S}^{(K)}$ . However, many Kronecker-based methods depend on a particular choice of Kronecker factorization because Kronecker factorization is not unique. As will be discussed in Sec. 3.2, we make the factorization unique by imposing a determinant constraint on each factor and introducing a learnable scalar $\alpha$ . Consequently, we consider this Kronecker structure $\mathbf{S}\,=\,\alpha[\mathbf{S}^{(C)}\otimes\mathbf{S}^{(K)}]$ with constraints $\operatorname*{det}(\mathbf{S}^{(C)})\ {\stackrel{\cdot}{=}}\ \operatorname*{det}(\mathbf{S}^{(K)})\,=\,1$ and $\alpha\,>\,0$ . We then propose a spectral parametrization for each Kronecker factor while satisfying these constraints. The update scheme is presented in Fig.1.  
+
+![](images/a4ef273e548bb95fdfe5040422da8d5412024f7602b9a0486036ee25b2eda6ef.jpg)  
+Figure 3: Empirical validation of our Kronecker-structured update scheme on estimating a preconditioner $\mathbf{S}\approx\mathbf{S}^{(\bar{C})}\otimes\mathbf{S}^{(K)}$ , where $\mathbf{S}^{(C)}\in\mathbb{R}^{9\times9}$ and $\mathbf{S}^{(K)}\in\mathbb{R}^{\bar{1}1\times11}$ . The first two figures on the left show that our update scheme gives a structural approximation of a fixed-point solution that obtained by the default full-matrix update scheme. Our scheme converges as fast as Kronecker-structured baseline methods, including the impractical projection-based method. The last two figures illustrate how closely our scheme matches the unstructured iterates generated by the default scheme at each iteration. All update schemes perform similarly due to the structural approximation gap.  
+
+Empirical Evaluation of the Kronecker-based Update Scheme Similarly, we evaluate our structured scheme for curvature approximation. Our goal is to obtain a Kronecker-structured estimation of S. We compare our scheme to the default unstructured scheme on S: $\mathbf{S}_{k+1}\leftarrow(1-\beta)\mathbf{S}_{k}+\beta\mathbf{g}_{k}\mathbf{g}_{k}^{T}$ . As baselines, we consider the curvature estimation used in the structured Cholesky factorization (Lin et al., 2024), and an impractical projection-based method (Van Loan & Pitsianis, 1993): $(\mathbf{S}_{k+1}^{(C)},\mathbf{S}_{k+1}^{(K)})\gets\mathrm{Proj}((1-\gamma)(\mathbf{S}_{k}^{(C)}\overset{\cdot}{\otimes}\mathbf{S}_{k}^{(K)})+\gamma\mathbf{\dot{g}}_{k}\mathbf{\check{g}}_{k}^{T})$ . We use a similar experimental setup and consider two similar scenarios discussed in Sec. 2.1. Here, we initialized all update schemes by a Kronecker structured matrix $\mathbf{S}_{0}$ to remove the difference introduced by initialization:  
+
+Fixed-point matching The ground truth is an unstructured fixed-point solution, $\mathbf{S}_{*}=E[\mathbf{g}\mathbf{g}^{T}]=\pmb{\Sigma}$ . We evaluate a Kronecker-structured scheme in every iteration $k$ by comparing its current structured estimate to the fixed point. We measure the difference using the same metrics considered previously.  
+
+Iterate matching The ground truth is a sequence of unstructured matrices generated by the default scheme. Our goal is to match the iterate that the default scheme generates using Kronecker structured approximations We use the same metrics to measure the difference.  
+
+From Fig. 3, we can see that our structural scheme performs as well as structural baselines. Our approach even performs similarly to the impractical method that requires storing a full matrix and solving a projection optimization problem at every iteration. This illustrates the effectiveness of our approach in Kronecker-structured cases.  
+
+2.3 CONNECTIONS TO DIAGONAL METHODS  
+
+Our update scheme in Fig. 1 also applies in diagonal cases by forcing $\mathbf{B}$ to be a diagonal matrix. We achieve that by changing map $\operatorname{Tril}(\cdot)$ to $\operatorname{Diag}(\cdot)$ in the update rule. Consequently, $\mathbf{B}$ becomes an identity matrix up to sign changes. Similar to the full matrix case, we can obtain this scheme through a diagonal Gaussian approximation. When truncating the exponential map, our scheme becomes the root-free RMSprop (Lin et al., 2024). If applying a fractional $p$ -root, our scheme also recovers RMSprop (Tieleman & Hinton, 2012) for $p=2$ and the fractional diagonal method (Chen et al., 2021) for $p=4$ . See Appx. B for the detail.  
+
+2.4 NUMERICAL APPROXIMATIONS FOR COST REDUCTION AND LOW-PRECISION TRAINING  
+
+Our update scheme can be slow because the Cayley map involves computationally expensive matrix inversion that requires high-precision floating-point arithmetic to avoid numerical instability. Like other works (Liu et al., 2021; Li et al., 2020; Qiu et al., 2023), we consider a truncated Cayley map for NN problems to work with lower precision and reduce cost while maintaining numerical stability. Our truncation is based on a Neumann series for the matrix inversion (Krishnan et al., 2017; Lorraine et al., 2020; Qiu et al., 2023). This is possible because we can approximate the matrix inversion in the Cayley map $\begin{array}{r}{\mathrm{Cayley}(\beta\mathbf{N})=(\mathbf{I}+\beta\mathbf{N})(\mathbf{\bar{I}}-\beta\mathbf{N})^{-1}=(\mathbf{I}+\beta\mathbf{N})\prod_{l=0}^{\infty}(\mathbf{\bar{I}}+(\beta\mathbf{N})^{2^{l}})\approx(\mathbf{I}+\beta\mathbf{N})^{2}(\mathbf{I}+(\beta\mathbf{N})^{2})(\mathbf{I}+(\beta\mathbf{N})^{4})}\end{array}$ based on a convergent Neumann series, when $\beta$ is small enough so that $\|\beta\mathbf{N}\|<1$ , where $\beta:=1\!-\!\hat{\beta}_{2}$ and $\hat{\beta}_{2}$ is Adam’s $\beta_{2}$ , see Appx. B for the detail.  
+
+
+
+\section{3 LEARNING SPECTRAL FACTORIZATIONS VIA COORDINATE TRANSFORMS  }
+
+
+Here, we derive our update schemes for learning a spectral factorization on the fly. Our starting point is that, according to Lin et al. (2024), a root-free method in (3) is a Riemannian solution to a Gaussian approximation problem in a particular coordinate. Because Riemannian methods are invariant under coordinate transformations, our idea is to change coordinates so that the Riemannian solution becomes a root-free update rule for spectral factorization in new coordinates.  
+
+Riemannian Approach for Obtaining Root-free Update Schemes Lin et al. (2024) show that a root-free adaptive update scheme is a simplified version of Riemannian gradient descent (RGD) (c.f., Eq. (7) ) on a Gaussian manifold (Amari, 2016), where $\pmb{\mu}$ and S in the root-free scheme become Gaussian’s mean and inverse covariance, respectively. They consider a Gaussian approximation problem and use the following procedure to obtain the adaptive update scheme in (3) with $p=1$ ,  
+
+Step 1 They first reformulate the original problem in (1) as a Gaussian approximation:  
+
+$$
+\operatorname*{min}_{\mu,S\succ0}\,\mathcal{L}(\mu,\mathbf{S}):=E_{w\sim q(w;\mu,S)}[\ell(\mathbf{w})]-\mathcal{Q}_{q},
+$$  
+
+where $\ell(\cdot)$ is the loss function in the original problem, a new symbol w is used to denote the weights of the NN because they are no longer learnable, $q(\mathbf{w};{\boldsymbol{\mu}},\mathbf{S})$ is a Gaussian with mean $\pmb{\mu}$ and covariance $\mathbf{S}^{-1}$ , and $\begin{array}{r}{\mathcal{Q}_{q}:=E_{w\sim q}[-\log q(\mathbf{w};\pmb{\mu},\mathbf{S})]=-\frac{1}{2}\log\operatorname*{det}(\mathbf{S})}\end{array}$ is the Gaussian’s differential entropy.  
+
+Step 2 They then suggest performing RGD in a parameter space $\boldsymbol{\tau}:=\{\boldsymbol{\mu},\mathbf{S}\}$ of the Gaussian.  
+
+$$
+\mathrm{RGD}:\tau\leftarrow\tau-\beta[\mathbf{F}_{\tau}]^{-1}\nabla_{\tau}\mathcal{L},
+$$  
+
+where $\mathbf{F}_{\tau}:=-E_{w\sim q}[\nabla_{\tau}^{2}\log q(\mathbf{w};\tau)]\in\mathbb{R}^{(l+l^{2})\times(l+l^{2})}$ is the Fisher-Rao metric representation in $\tau$ and $l$ is the number of NN weights. The metric is also known as the affine-invariant metric (Pennec et al., 2006) for positive-definite matrices (Minh & Murino, 2017) when the mean $\pmb{\mu}$ is constant.  
+
+Step 3 Simplifying the RGD step  
+
+$$
+\mathrm{RGD}:\left[\pmb{\mathscr{B}}\right]\leftarrow\left[\pmb{\mathscr{B}}\right]-\beta\left[\pmb{\mathscr{B}}^{-1}\right.\quad\left.0\pmb{\mathscr{B}}\right]\left[\partial_{\pmb{S}}\pmb{\mathscr{L}}\right]=\left[\pmb{\mathscr{B}}-\beta\pmb{\mathscr{S}}^{-1}\partial_{\pmb{\mathscr{n}}}\mathscr{L}\right]\approx\left[\pmb{\mathscr{B}}+\beta(\mathscr{H}-\pmb{\mathscr{S}})\right],
+$$  
+
+gives rise to the root-free adaptive scheme in (3), where they use (i) the analytical inverse metric $[\mathbf{F}_{\tau}]^{-1}=\left[\mathbf{S}^{-1}\mathbf{\Sigma}_{0}\mathbf{\Sigma}_{-2\frac{\partial\mathbf{S}}{\partial\mathbf{S}^{-1}}}\right].$ , (ii) Stein’s identities for the Gaussian (Opper & Archambeau, 2009), and $\mathbf{\mathcal{H}}=\mathbf{g}\mathbf{g}^{T}$  
+
+(iii) a valid Hessian approximation (Lin et al., 2024) with a delta evaluation at the mean $\pmb{\mu}$  
+
+$$
+\begin{array}{r}{\partial_{\mu}\mathcal{L}\overset{\mathtt{S t e i n}}{=}E_{w\sim q}[\nabla_{w}\ell]\overset{\mathrm{defia}}{\approx}\nabla_{\mu}\ell=\mathbf{g},\ \,2\partial_{S^{-1}}\mathcal{L}\overset{\mathtt{S t e i n}}{=}E_{w\sim q}[\nabla_{w}^{2}\ell]-\mathbf{S}\overset{\mathrm{defia}}{\approx}\nabla_{\mu}^{2}\ell-\mathbf{S}\approx\mathcal{H}-\mathbf{S}.}\end{array}
+$$  
+
+Challenges of Learning Spectral Parametrizations via RGD Our main idea is to learn a spectral parameterization/coordinate of $\mathbf{S}=\mathbf{B}\mathrm{Diag}(\mathbf{d})\mathbf{B}^{T}$ by solving a reparametrized Gaussian problem in Eq. 6. We then follow a similar procedure to convert an RGD step in the spectral coordinate into a root-free update scheme based on the spectral factorization. However, directly performing RGD in a spectral coordinate is challenging because we have to (1) satisfy parameter constraints, (2) use a non-singular metric (coordinate representation), and (3) analytically compute the metric inversion.  
+
+Conflict between Simplification for RGD and Coordinate Transformation The simplification step (Step 3) turns a computationally expensive RGD step involving the metric inversion into a more efficient root-free adaptive update scheme. Without an analytical metric inversion, we cannot simplify the RGD step and explicitly express it as a root-free update scheme. When changing coordinates, the metric representation has to be changed accordingly (Lee, 2018) to make RGD invariant to coordinate transformation. However, the coordinate change of the metric complicates the simplification. This is because we no longer analytically inverse this high-dimensional FisherRao metric, which is non-diagonal and singular in some coordinates like a spectral coordinate. The simplification process is more challenging in Kronecker-factorized cases because additional redundancy from Kronecker factorization renders the metric (coordinate representation) singular and complicates the simplification.  
+
+Constraint Satisfaction and Metric Diagonalization via Local Coordinate Transformation Inspired by general Riemannian (normal) local coordinates (Glasmachers et al., 2010; Lin et al., 2021; 2023) and Fermi coordinates (Manasse & Misner, 1963), we propose using local coordinates to tackle these challenges. The main idea is to construct local coordinates that handle constraints and facilitate the analytical metric inversion needed for the simplification. Using a local coordinate transformation can locally diagonalize the metric at a single evaluation point. Given a global coordinate, such as a spectral coordinate, we construct a local coordinate and its coordinate transformation map associated with the global coordinate at every iteration. In our approach, the coordinate and its transformation map should satisfy these conditions: (1) the map is differentiable and injective. (2) the coordinate should not have any coordinate constraint, and its origin represents a current iterate in the spectral coordinate. (3) it is common for the metric evaluated at the origin of the local coordinate to be an identity matrix (Lin et al., 2023). However, this can be loosened to be diagonal (Glasmachers et al., 2010) or even block-diagonal as long as the metric is easy to inverse. Our approach follows the requirements for local coordinate construction (Lin et al., 2023). We propose new local coordinates for spectral coordinates because the existing local coordinates do not account for spectral constraints.  
+
+
+
+\section{3.1 HANDLING SPECTRAL PARAMETER CONSTRAINTS AND REDUNDANCIES  }
+
+
+Here, we describe our local coordinates and coordinate transformation maps for handling constraints for spectral factorization. Through a coordinate transformation map, we express the spectral constraints using an unconstrained local coordinate. Because a spectral coordinate contains redundancies, we remove them to simplify the inverse metric computation. This allows us to make the metric diagonal in our local coordinates.  
+
+Handling Constraints via Local Coordinate Transformation A spectral coordinate has parameter constraints: $\mathbf{B}$ is an orthogonal square matrix, and $\mathbf{d}$ is a vector with positive entries. We consider Cayley1and exponential maps to construct transformation maps, where we introduce a map denoted by $\mathrm{Skew}(\cdot)$ to make its input skew-symmetric as required by the Cayley map. At every iteration $k$ , we handle the constraints (c.f., Claim (2)) by constructing a local parametrization in $(\mathbf{m},\mathbf{M})$ associated to the current iteration $(\mathbf{d}_{k},\mathbf{B}_{k})$ through a local transformation map :  
+
+$$
+(\mathbf{\,d}(\mathbf{m}),\mathbf{B}(\mathbf{M})\,)=(\,\mathbf{d}_{k}\odot\mathrm{exp}(\mathbf{m}),\mathbf{B}_{k}\mathrm{Cayley}(\mathrm{Skew}(\mathrm{Tril}(\mathbf{M})))\,),
+$$  
+
+where $\odot$ is the elementwise product, $(\mathbf{d}_{k},\mathbf{B}_{k})$ represents a point evaluated at the $k$ -th iteration. This transformation map is locally defined because it depends on a current point $(\mathbf{d}_{k},\mathbf{B}_{k})$ that changes at every iteration. We use the origin in this local system to represent $(\mathbf{d}_{k},\mathbf{B}_{k})$ . This is possible because (d(m), B(M))  m=0,M=0 becomes $({\bf d}_{k},{\bf B}_{k})=({\bf d}({\bf0}),{\bf B}({\bf0}))$ when evaluating this map (10) at the origin. The origin simplifies the metric computation as many terms arising in the metric vanish. Claim 2. The map in Eq. (10) is differentiable and injective. We satisfy the parameter constraints in a spectral coordinate by changing a local coordinate to the spectral coordinate through the map.  
+
+Removing Redundancy due to Spectral Factorization A spectral parametrization contains redundancy due to permutation. For simplicity, we assume all entries of $\mathbf{d}$ are distinct in the following discussion and will later address cases when $\mathbf{d}$ has repeated values. For example, consider another eigen factorization: $\mathbf{S}=\bar{\mathbf{B}}\mathrm{Diag}(\bar{\mathbf{d}})\bar{\mathbf{B}}^{T}$ , where $\bar{\mathbf{B}}:=\mathbf{B}\mathbf{Q}$ and $\bar{\mathbf{d}}$ are permuted values so that $\mathrm{Diag}(\bar{\mathbf{d}})\,=\,\mathbf{Q}^{T}\mathrm{Diag}(\mathbf{d})\mathbf{Q}$ . To remove this redundancy, we restrict $\mathbf{M}$ to be a lower-triangular matrix explicitly denoted by $\mathrm{Tril}(\mathbf{M})$ . In eigendecomposition, $\mathbf{d}$ (as a vector of eigenvalues) is ranked to disallow any permutation. We consider an alternative solution by restricting $\mathbf{B}$ because we can not simultaneously rank and learn $\mathbf{d}$ on the fly. Restricting $\mathbf{B}$ to remove this redundancy means ${\bf B}({\bf M}_{1})\mathrm{~=~}{\bf B}({\bf M}_{2}){\bf Q}$ holds only when $\mathbf{M}_{1}\equiv\mathbf{M}_{2}$ in the local coordinate. The lower-triangular restriction of $\mathbf{M}$ removes the redundancy because $\mathbf{M}_{1}\,\equiv\,\mathbf{M}_{2}$ as shown in Claim 3. Here, we assume the lower-triangular restriction, $\mathrm{Tril}(\mathbf{M})$ , also makes the diagonal entries of its input, M, zero. Otherwise, ${{\bf{M}}_{1}}$ and $\mathbf{M}_{2}$ can differ in their diagonal entries because the skew-symmetrization in the transformation map (Eq. (10)) always ignores these entries.  
+
+Claim 3. Given that entries of $\mathbf{d}$ are not duplicated, a spectral parameterization obtained through the map in (10) is unique under permutations when using a lower-triangular restriction.  
+
+Handling Redundancy due to Repeated Entries of d Recall that eigendecomposition is not unique when having repeat eigenvalues. Our spectral parametrization is also not unique when d has duplicated entries. In this case, the Fisher-Rao metric (coordinate representation) is singular. We allow d to have repeated entries and address the singularity using the Moore–Penrose inversion (van Oostrum et al., 2023). Computing the Moore–Penrose inversion is easy because we diagonalize the metric at evaluation points. In practice, we also use this inversion to improve numerical stability if $\mathbf{d}$ has very close entries.  
+
+3.2 HANDLING CONSTRAINTS AND REDUNDANCIES FOR KRONECKER STRUCTURES  
+
+Now, we propose spectral parametrizations and local coordinates for Kronecker structured matrices. Kronecker factorization introduces an additional redundancy that makes the exact Fisher-Rao metric singular and non-block-diagonal in Kronecker structured coordinate. We construct local coordinates to remove this redundancy and simplify the inverse metric computation. Furthermore, removing this redundancy makes our update scheme invariant to all equivalent Kronecker factorizations.  
+
+Removing Redundancy due to Kronecker Factorization Using a Kronecker structure introduces redundancy because Kronecker factorization is non-unique. For example, we can reexpress a structured matrix $\mathbf{S}=\mathbf{S}^{(C)}\otimes\mathbf{S}^{(K)}$ in another way: $\mathbf{S}=\gamma\boldsymbol{\otimes}[\bar{\mathbf{S}}^{(C)}\boldsymbol{\otimes}\bar{\mathbf{S}}^{(K)}]$ , where $\bar{\mathbf{S}}^{(C)}:=\gamma^{-1/2}\mathbf{S}^{(C)}$ , ¯S(K) := γ−1/2S(K), and γ > 0 is a learnable scalar. Without removing this redundancy, learning the factorization $({\bf S}^{(C)},{\bf S}^{(K)})$ is not equivalent to learning another factorization $(\gamma,{\bar{\bf S}}^{(C)},{\bar{\bf S}}^{(K)})$ (i.e., $\mathbf{S}=\mathbf{S}^{(C)}\otimes\mathbf{S}^{(K)}\neq\bar{\mathbf{S}}=\gamma\otimes\bar{\mathbf{S}}^{(C)}\otimes\bar{\mathbf{S}}^{(K)}$ ). We eliminate this redundancy by imposing a determinant constraint on each Kronecker factor and adding an extra scalar $\alpha$ . This leads to a unique representation: $\mathbf{S}:=\alpha[\mathbf{S}^{(C)}\otimes\mathbf{S}^{(K)}]=\bar{\alpha}[\gamma\otimes\bar{\mathbf{S}}^{(C)}\otimes\bar{\mathbf{S}}^{(K)}]$ because the constraint $\operatorname*{det}(\gamma)=1$ makes the scalar $\gamma$ constant, where $\mathrm{det}({\bf S}^{(C)})\,=\,\mathrm{det}({\bf S}^{(K)})\,=\,\mathrm{det}(\bar{\bf S}^{(C)})\,=\,\mathrm{det}(\bar{\bf S}^{(K)})\,=\,\mathrm{det}(\gamma)\,=\,1$ , $\alpha>0$ , and $\bar{\alpha}>0$ . Consequently, we propose a spectral parametrization for each Kronecker factor $\mathbf{S}^{(C)}=\mathbf{B}^{(C)}\mathrm{Diag}(\mathbf{d}^{(C)})(\mathbf{\bar{B}}^{(C)})^{T}$ with $\bar{\operatorname*{det}}(\operatorname{Diag}(\mathbf{d}^{(C)}))\bar{)}=1$ to satisfy the determinant constraint.  
+
+Handling Constraints via Local Coordinate Transformation We construct local coordinates to handle constraints, including the determinant constraints. For the positive scalar $\alpha$ , we introduce a local coordinate $n$ and use an exponential map in the coordinate transformation: $\alpha(n)=\alpha_{k}\exp(n)$ at every iteration $k$ . For each Kronecker factor, we drop the factor index for simplicity and construct a local coordinate $(\mathbf{m},\mathbf{M})$ . The coordinate transformation map for each factor  
+
+$$
+\begin{array}{r}{\mathbf{d}(\mathbf{m})=\mathbf{d}_{k}\odot\mathrm{exp}(\mathbf{m}),\,\mathbf{B}(\mathbf{M})=\mathbf{B}_{k}\mathrm{Cayley}(\mathrm{Skew}(\mathrm{Tril}(\mathbf{M}))),}\end{array}
+$$  
+
+is similar to the map (c.f., Eq. 10) in full-matrix cases, expect that we require $\mathrm{sum}(\mathbf{m})=0$ to satisfy the determinant constraint (i.e., $\operatorname*{det}(\operatorname{Diag}(\mathbf{d}(\mathbf{m})))=1)$ , where $l$ is the length of vector ${\bf d}_{k}$ and the local coordinate $\begin{array}{r}{\mathbf{m}:=[m_{1},\ldots,m_{l-1},-\sum_{i}^{l-1}m_{i}]}\end{array}$ has only $(l-1)$ free variables.  
+
+3.3 DERIVATION OF ROOT-FREE UPDATE SCHEMES THROUGH GAUSSIAN APPROXIMATIONS Now, we present a procedure to obtain root-free update schemes for our spectral parametrizations. Our procedure follows similar steps suggested by Lin et al. (2024) except that we use local coordinates. A similar procedure can solve positive-definite matrix optimization problems (Pennec et al., 2006).  
+
+Procedure for Full-matrix Spectral Parametrizations To derive full-matrix root-free update schemes, we follow these three steps.  
+
+Step 1 We solve a Gaussian problem similar to (6) using a learnable spectral parametrization, $\mathbf{S}=\mathbf{B}\mathrm{Diag}(\mathbf{d})\mathbf{B}^{T}$ , of the inverse covariance:  
+
+$$
+\operatorname*{min}_{u\ d\ R}\mathcal{L}(\mu,\mathbf{d},\mathbf{B}):=E_{w\sim q(w;\mu,d,B)}[\ell({\mathbf{w}})]-\mathcal{Q}_{q(\mu,d,B)},\quad\mathrm{s.t.}\quad\mathbf{B}\mathbf{B}^{T}=\mathbf{B}^{T}\mathbf{B}=\mathbf{I},\,\mathrm{d}>0.
+$$  
+
+Step 2 We construct a local coordinate at each iteration to remove the (spectral) constraints in (12) when performing RGD. We then take an RGD step without constraints in this local coordinate and translate the change from the local coordinate to the spectral coordinate.  
+
+Step 2.1 Concretely, at iteration $k$ , we create a local coordinate $\pmb{\eta}:=(\pmb{\delta},\mathbf{m},\mathbf{M})$ at the current point $\boldsymbol{\tau}_{k}:=(\mu_{k},\mathbf{d}_{k},\mathbf{B}_{k})$ and use this local transformation map  
+
+$$
+\tau(\eta;\tau_{k}):=\left[\mathbf{\Gamma}_{\mathbf{d}(\mathbf{m};\tau_{k})}^{\mu(\delta;\tau_{k})}\right]=\left[\begin{array}{c}{\mu_{k}+\mathbf{B}_{k}\mathrm{Diag}(\mathbf{d}_{k}^{-1/2})\delta}\\ {\mathbf{d}_{k}\odot\exp(\mathbf{m})}\\ {\mathbf{B}_{k}\mathrm{Cayley}(\mathrm{Skew}(\mathrm{Tril}(\mathbf{M})))}\end{array}\right],
+$$  
+
+to translate the change from the local coordinate to the spectral coordinate (c.f., Claim 2), where $\boldsymbol{\tau}_{k}=(\mu_{k},{\bf d}_{k},{\bf B}_{k})$ is considered as a constant in this map, and $\mathrm{Tril}(\mathbf{M})$ is used to explicitly enforce the lower-triangular restriction (c.f., Sec. 3.1).  
+
+Step 2.2 We then take an (unconstrained) RGD step in the local coordinate,  
+
+$$
+\mathrm{RGD}:\,\eta_{\mathrm{new}}\leftarrow\eta_{\mathrm{cur}}-\beta[{\mathbf{F}}_{\eta}(\eta_{\mathrm{cur}})]^{-1}\nabla_{\eta}\mathcal{L}\big|_{\eta:=\eta_{\mathrm{cur}}}=\mathbf{0}-\beta[{\mathbf{F}}_{\eta}(\mathbf{0})]^{-1}\nabla_{\eta}\mathcal{L}\big|_{\eta:=0},
+$$  
+
+and translate the change $\eta_{\mathrm{new}}$ from the local coordinate  
+
+$$
+\tau_{k+1}\leftarrow\tau(\eta_{\mathrm{new}};\tau_{k}),
+$$  
+
+to the eigen coordinate, where the Fisher-Rao metric $\mathbf{F}_{\eta}(\eta_{\mathrm{cur}})$ evaluated at $\eta_{\mathrm{cur}}$ is diagonal (c.f., Claim 4) in the local coordinate and the origin $\eta_{\mathrm{cur}}~\equiv~0$ represents the current point $\tau_{k}=\tau(\eta_{\mathrm{cur}};\tau_{k})\equiv\tau(\mathbf{0};\tau_{k})$ in the spectral coordinate.  
+
+Step 3 We obtain the root-free update scheme in Fig. 1 by simplifying this RGD step in (14)-(15), and making the same approximations in (9). The simplification is easy because the metric Fη(η)  η=ηcur evaluated at the origin in the local coordinate is diagonal. This allows us to simplify the inverse metric computation in Eq. (14) even when the metric is singular. Moreover, the gradient ∇ηL  η=ηcur required by RGD is easy to compute via the chain rule and has an analytical expression. See Appx. H for a complete derivation.  
+
+Claim 4. Metric Diagonalization: The exact Fisher-Rao metric $\mathbf{F}_{\eta}(\eta_{\mathrm{cur}})$ (for a full Gaussian) evaluated at the origin $\eta_{\mathrm{cur}}\equiv\mathbf{0}$ is diagonal and has a closed-form expression:  
+
+$$
+\mathbf{F}_{\eta}(\delta,\mathbf{m},\mathrm{vecTril(\mathbf{M})})\big|_{\delta=\mathbf{0},\mathbf{m}=\mathbf{0},\mathbf{M}=\mathbf{0}}=\left[\begin{array}{c c c}{\mathbf{F}_{\delta\delta}}&{\mathbf{0}}&{\mathbf{0}}\\ {\mathbf{0}}&{\mathbf{F}_{m m}}&{\mathbf{0}}\\ {\mathbf{0}}&{\mathbf{0}}&{\mathbf{F}_{M M}}\end{array}\right]
+$$  
+
+where $\mathbf{F}_{\delta\delta}=\mathbf{I}$ , $\mathbf{F}_{m m}={\textstyle{\frac{1}{2}}}\mathbf{I}$ , ${\bf F}_{M M}=\mathrm{Diag}(\mathrm{vecTril}({\bf C}))$ , vecTril(C) represents the low-triangular half of $\mathbf{C}$ excluding diagonal entries and its $(i,j)$ -th entry is $\begin{array}{r}{[C]_{i j}=4(\frac{d_{i}}{d_{j}}+\frac{d_{j}}{d_{i}}-2)\ge0}\end{array}$ and $d_{i}$ denotes the $i$ -th entry of ${\bf d}_{k}$ . The metric is singular when $\mathbf{d}$ has repeated entries (i.e., $d_{i}=d_{j}$ for $i\neq j$ ). Consequently, we can use the Moore-Penrose inversion to inverse the metric (c.f., Sec. 3.1).  
+
+Discussion about the Induced Metric for Orthogonal Matrix B Our approach implicitly constructs a Riemannian metric for the orthogonal matrix $\mathbf{B}$ through the coordinate transformation of the FisherRao metric of a Gaussian. This induced metric for the orthogonal matrix differs from existing metrics (Tagare, 2011; Li et al., 2020; Kong et al., 2022) in the Riemannian optimization literature. We use the Fisher-Rao metric because our goal is to learn an orthogonal matrix for spectral factorization.  
+
+Procedure for Kronecker-structured Spectral Parametrizations We use a similar procedure to obtain our update schemes in a structured case. We briefly describe the procedure and highlight the difference in this case.  
+
+Step 1 We solve a Gaussian problem similar to (6) using a Kronecker factorized eigenparametrization, $\mathbf{S}=\alpha[\mathbf{B}^{(C)}\mathrm{Diag}(\mathbf{d}^{(C)})\big(\mathbf{B}^{(\dot{C})}\big)^{T}]\otimes[\mathbf{B}^{(K)}\mathrm{Diag}(\mathbf{d}^{(K)})\big(\mathbf{B}^{(K)}\big)^{T}]$ , for the inverse covariance with extra constraints: $\operatorname*{det}(\operatorname{Diag}(\mathbf{d}^{(C)}))=\operatorname*{det}(\operatorname{Diag}(\mathbf{d}^{(K)}))=1$ and $\alpha>0$ .  
+
+Step 2 We construct a local coordinate at each iteration, perform RGD in the local coordinate, and translate the change using a transformation map in Eq. (11). See Eq.  
+
+Step 3 We obtain the root-free update scheme in Fig. 1 by simplifying this RGD step. The simplification is straightforward because the metric evaluated at the origin in the local coordinate is block diagonal (c.f., Claim 5).  
+
+Claim 5. Metric Block Diagonalization: The exact Fisher-Rao metric $\mathbf{F}_{\eta}(\eta_{\mathrm{cur}})$ (for a matrix Gaussian) evaluated at the origin $\eta_{\mathrm{cur}}\equiv\mathbf{0}$ is block-diagonal and has a closed-form expression. The inverse metric also has an analytical form.  
+
+4 EXPERIMENTS  
+
+We first consider a positive-definite matrix optimization problem to validate our full-matrix update scheme beyond NN training. We aim to learn a positive-definite matrix S from noisy observations that can be negative-definite. Therefore, a linear update scheme to update S like the one in Eq. (3) is unsuitable for the problem because the scheme assumes an observation (e.g., a gradient outer product) is semi-positive-definite. Given that our approach is RGD in local coordinates, we consider the standard RGD with retraction (Absil et al., 2009) and the Cholesky-based RGD (Lin et al., 2023) as baselines. We consider the metric nearness problem (Brickell et al., 200 $\begin{array}{r}{3)\operatorname*{min}_{W\times0}\ell(\mathbf{W}):=\frac{1}{2N}\sum_{i=1}^{N}\|\mathbf{W}\mathbf{Q}\mathbf{x}_{i}-\mathbf{x}_{i}\|_{2}^{2}}\end{array}$ used in the matrix optimization literature , where $\mathbf{Q}\in\mathbb{R}^{d\times d}$ is a known positive-definite matrix and only a subset of $\mathbf x_{i}\in\mathbb R^{d}$ are observed at each iteration. The ground truth is $\mathbf{W}_{*}=\mathbf{Q}^{-1}$ and we measure the difference between an estimate $\mathbf{W}_{\mathrm{est}}$ and the ground truth $\mathbf{W}_{*}$ using $\ell(\mathbf{W}_{\mathrm{est}})-\ell(\mathbf{W}_{*})$ . We consider a case for $d=60$ and generate $\mathbf{Q}$ and $\mathbf{x}_{i}$ . As we can see from the leftmost plot in Fig. 4, our method performs as well as the RGD-based methods. This result shows the potential of our scheme for positive-definite matrix optimization beyond NN training.  
+
+![](images/1e22ff439d5a26f09399a82ad37ac49ed4ed35c064536b22110afc8a5d7f5e07.jpg)  
+Figure 4: Experiments demonstrate effectiveness and efficiency of our update schemes. The first figure on the left shows the performance of our full-matrix update scheme for learning positive-definite matrices. Our update scheme matches the baselines as our scheme is RGD in local coordinates. The remaining three figures show the performance of our Kronecker update scheme for training vision transformers with low precision. To match AdamW’s running time (i.e, PAdamW with $p=2,$ ), we can update our perconditioner at every 10 iterations because we use a truncated Cayley map. Shampoo has to update its perconditioner at every 100 iterations to match the running time. This is because Shampoo performs eigendecompision when updating its preconditioner. We use grafting to improve Shampoo’s performance. Without grafting, Shampoo barely outperforms AdamW and is hard to tune due to the infrequent update of its preconditioner.  
+
+Next, we examine our Kronecker-structured update scheme in low-precision NN training problems. We use our update scheme to train vision transformers from scratch with half-precision. Training transformers in half-precision allows us to evaluate the numerical stability of our approach because matrix methods g can be unstable in low precision. We then show the effectiveness and efficiency of our approach by comparing our method to strong baselines like AdamW (i.e., PAdamW with $p=2$ ) and Shampoo. We consider training three vision transformers: ViT (Dosovitskiy, 2020), FocalNet (Yang et al., 2022), and FlattenViT (Han et al., 2023), on the ImageWoof dataset using mini-batches with batch size 128. Our method updates its preconditioner at every 10 iterations to match AdmaW’s runtime because it does not require matrix decomposition and inversion when using a truncated Cayley map. Shampoo has to update its preconditioner at every 100 iterations to match AdmaW’s runtime because of eigendecomposition. This also shows the low iteration cost of our method as our preconditioner can be updated more frequently. We use the state of the art implementation of Shampoo (Shi et al., 2023). We have to use grafting (Agarwal et al., 2021) to improve Shampoo’s performance due to the infrequency update of the preconditioner. We use random search (Choi et al., 2019) to tune all available hyperparameters for each method using 200 runs. From the remaining plots in Fig. 4, we can see that our method effectively trains transformers with low-precision and often outperforms these baselines. Moreover, our method is flexible enough to use other fractional roots. From the second plot on the left in Fig. 4, we can see that other roots such as $p=1$ is better than the square root $p=2$ . This shows that the potential of using other fractional roots.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We present a Riemannian approach for learning spectral factorizations on the fly. Our method fixes the instability and inefficiency of using a matrix fractional root for low-precision NN training and enables matrix methods to use other fractional roots. An interesting direction is to evaluate our methods in large-scale settings and investigate the potential benefit of using other fractional roots.  
+
+
+

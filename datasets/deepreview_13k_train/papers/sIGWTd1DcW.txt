@@ -1,0 +1,806 @@
+\title{Contextual Position Encoding: Learning to Count What’s Important}
+
+\begin{abstract}
+The attention mechanism is a critical component of Large Language Models (LLMs) that allows  tokens in a sequence to interact with each other, but is \textit{order-invariant}.
+Incorporating position encoding (PE) makes it possible to address by position,
+such as attending to the $i$-th token.
+However, current PE methods use token counts to derive position, and thus cannot generalize to higher levels of abstraction, such as attending to the $i$-th sentence.
+\if 0
+The attention mechanism is a critical component of Large Language Models (LLMs) that allows  tokens in a sequence to interact with each other.
+Since %the attention operation is order-invariant,
+attention is order-invariant,
+position encoding (PE) makes it possible to address by position, such as attending to the $i$-th token.
+However, current PE methods use token count to derive position, and thus cannot generalize to higher levels of abstraction, such as attending to the $i$-th sentence.
+\fi
+In this paper, we propose a new position encoding method, 
+\emph{\oursfull{}} (\ours{}), that allows positions to be conditioned on context by incrementing position  only on certain tokens determined by the model.
+This allows more general position addressing such as attending to  the $i$-th particular word, noun, or sentence.
+We %empirically 
+show that \ours{} can solve the selective copy, counting and Flip-Flop tasks  where popular position embeddings fail, and improves perplexity on language modeling and coding tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Many common data sources such as text, audio, code, and timelines of events are ordered sequences.
+When processing such sequences, the ordering information is clearly critical.
+In the case of text,
+position information is vital not only for decoding meaning between words, but is necessary at every scale, such as the sentence and paragraph level.
+ The Transformer architecture, which is the main backbone of current Large Language Models (LLMs), 
+ relies on the attention mechanism \citep{Bahdanau2014NeuralMT} that inherently lacks ordering information and treats sequences as sets.
+Thus, it is necessary to have an additional mechanism for encoding position information.
+Position encoding (PE) \citep{collobert2008unified,Sukhbaatar2015EndToEndMN} achieves this by assigning an embedding vector to each position and adding that to the corresponding token representations.
+Position itself can be measured in two ways: absolute PE that counts tokens from the start of a sequence, and relative PE that counts backward starting at the current token.
+PE methods have become an integral part of LLMs with
+ several proposed variations of these basic themes \citep{dufter2022position}. %, mostly focused on efficiency.
+
+\begin{figure}[t]
+    \centering
+\definecolor{beaublue}{rgb}{0.74, 0.83, 0.9}
+\definecolor{bleudefrance}{rgb}{0.19, 0.55, 0.91}
+\definecolor{arylideyellow}{rgb}{0.91, 0.84, 0.42}
+\definecolor{asparagus}{rgb}{0.53, 0.66, 0.42}
+
+\begin{tikzpicture}
+
+\tikzset{
+    context/.style={draw, fill=bleudefrance!20},
+    position/.style={draw, fill=white},
+    gates/.style={draw, fill=green!20},
+    axis/.style={draw, thick},
+    attention/.style={draw, preaction={fill, white}, pattern=north west lines},
+}
+
+\def\strings{{"Alice", "was", "tired", ".", "She", "tried", "reading", ".", "A", "rabb", "-it", "came"}}
+\def\gates{{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0}}
+\def\positions{{2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0}}
+
+\def\boxw{1.2}
+\def\boxh{0.7}
+\def\xgap{0.1}
+
+\def\rightlblx{12*\boxw+0.1}
+
+\foreach \i in {0,...,11} {
+    \draw [context] (\boxw*\i,0) rectangle +(\boxw,\boxh) ++(0.5*\boxw,0.5*\boxh-0.1) node[anchor=base] (context\i) {\pgfmathparse{\strings[\i]}\pgfmathresult};
+}
+\node [anchor=east,font=\bfseries] at (-0.1,0.5*\boxh) {Context};
+\node[anchor=west,align=left] at (\rightlblx+0.5,0.5*\boxh) (current) {current\\token at $i$};
+\draw [<-] (12*\boxw+0.2,0.5*\boxh) -- (node cs:name=current);
+
+\begin{scope}[yshift=-\boxh cm -0.7cm]
+    \path[rounded corners,fill=red!10] (-2,-\boxh-0.5) rectangle (\boxw*12+2.5,\boxh+0.5);
+    \path(-2,-\boxh-0.4) -- (-2,\boxh+0.4) coordinate[midway] (tokenpanel);
+    \node [left=0.1 of tokenpanel,anchor=east] {\rotatebox{90}{\large Relative PE}};
+    \begin{scope}[yshift=0.2cm]
+        \foreach \i in {0,...,11} {
+            \pgfmathtruncatemacro{\pos}{11 - \i}
+            \draw [position] (\boxw*\i,0) rectangle +(\boxw,\boxh) +(0.5*\boxw,0.5*\boxh) node (pos\i) {\pos};
+        }
+        \node [anchor=east,align=right,font=\bfseries] at (-0.1,0.5*\boxh) {Position};
+        \node[anchor=west] at (\rightlblx,0.5*\boxh) {$p_{ij}=i-j$};
+    \end{scope}
+    \begin{scope}[yshift=-\boxh cm -0.2cm]
+        \node [anchor=east,font=\bfseries] at (-.1,\boxh/2) {Attention};
+        \path [attention] (3*\boxw,0) .. controls +(\boxw*3,0) .. (\boxw*12,\boxh) -- (\boxw*12,0) -- cycle;
+        \draw [<-,axis] (0,0) -- ++(\boxw*12,0);
+        \draw [->,axis] (\boxw*12,0) -- +(0,\boxh+0.2);
+        \node[anchor=west,align=left] at (\rightlblx+0.5,0.5*\boxh) (current) {gradual \\decay};
+        \draw [<-] (12*\boxw+0.2,0.5*\boxh) -- (node cs:name=current);
+    \end{scope}
+\end{scope}
+
+\begin{scope}[yshift=-5cm]
+    \path[rounded corners,fill=arylideyellow!30] (-2,-\boxh-0.5) rectangle (\boxw*12+2.5,2*\boxh+0.8);
+    \path(-2,-\boxh-0.4) -- (-2,2*\boxh+0.8) coordinate[midway] (copepanel);
+    \node [anchor=north, left=0.1 of copepanel] {\rotatebox{90}{\large CoPE}};
+    \begin{scope}[yshift=\boxh cm + 0.5cm]
+        \foreach \i in {0,...,11} {
+            \draw [gates] (\boxw*\i,0) rectangle +(\boxw,\boxh) +(0.5*\boxw,0.5*\boxh) node (gate\i) {\pgfmathparse{\gates[\i]}\pgfmathresult};
+        }
+        \node [anchor=east,align=right,font=\bfseries] at (-.1,\boxh/2) {Gates};
+        \node[anchor=west] at (\rightlblx,0.5*\boxh) {$g_{ij}=\sigma(\vec{q}_i^\top \vec{k}_j)$};
+    \end{scope}
+    \begin{scope}[yshift=0.2cm]
+        \node [anchor=east,align=right,font=\bfseries] at (-.1,\boxh/2) {Position};
+        \foreach \i in {0,...,11} {
+            \draw [position] (\boxw*\i,0) rectangle +(\boxw,\boxh) +(0.5*\boxw,0.5*\boxh) node (cope\i) {\pgfmathparse{\positions[\i]}\pgfmathresult};
+        }
+        \node[anchor=west] at (\rightlblx,0.5*\boxh) {$\displaystyle p_{ij}=\sum_{k=j}^i(g_{ik})$};        
+    \end{scope}
+    \begin{scope}[yshift=-\boxh cm -0.2cm]
+        \node [anchor=east,font=\bfseries] at (-.1,\boxh/2) {Attention};
+        \path [attention] (8*\boxw,0) -- +(0,\boxh) -- (\boxw*12,\boxh) -- (\boxw*12,0) -- cycle;
+        \draw [<-,axis] (0,0) -- ++(\boxw*12,0);
+        \draw [->,axis] (\boxw*12,0) -- +(0,\boxh+0.2);
+        \node[anchor=west,align=left] at (\rightlblx+0.5,0.5*\boxh) (current) {attend to\\position 0};
+        \draw [<-] (12*\boxw+0.2,0.5*\boxh) -- (node cs:name=current);        
+    \end{scope}
+\end{scope}
+
+\end{tikzpicture}
+
+    \caption{{\bf Contextual Position Encoding (\ours{}).} Standard position encoding methods such as Relative PE are based on token positions. In contrast, \ours{} computes gate values conditioned on the context first, then uses that to assign positions to tokens using a cumulative sum. This allows positions to be contextualized, and represent the count of different units like words, verbs or sentences. CoPE operates on each attention head and so can attend to different position types on each. 
+    In this example, attending to the last sentence using Relative PE is challenging, and the best it can do is a decaying attention (``recency bias''). \ours{}  can count the sentence endings and simply attend to position ``0''. }
+    \label{fig:main}
+\end{figure}
+
+One common feature of existing PE methods is the use of tokens as the unit of measurement.
+However, a token is a variable unit that can be a whole word, or part of it, or even a character depending on the tokenization method. 
+For Byte-Pair Encoding (BPE) tokenization \citep{sennrich2015neural}, a word can be 1 or many tokens depending on the word itself.
+This position variance increases for more abstract elements like a sentence, which can have from ten to hundreds of tokens.
+Therefore token position is not suited for general position addressing such as finding the $i$-th word or sentence.
+
+In order to tie position measurement to more semantically meaningful units such as words, or sentences, one needs to take context into account.
+However, this is impossible with current PE methods as position addressing is computed independently of the context, and then later merged with context addressing. 
+We argue that this separation of the position and context addressing is the core problem, and instead we propose a new PE method that integrates
+context and position addressing together.
+In particular, we are interested in position encoding that is context dependent, so it can represent various levels of position abstraction at the same time, from token positions to sentence positions. 
+This way, it is  possible for example to use token positions to attend to the previous few tokens, while using sentence positions to attend to previous sentences for better understanding of the current sentence.
+We call our method \emph{\oursfull{}} (\ours{}).
+
+\ours{} first determines which tokens to count using their context vectors.
+Specifically, given the current token as a query vector, we compute a gate value for each previous token using their key vectors. 
+Then we aggregate those gate values to determine the relative position of each token with respect to the current token, as shown in \cref{fig:main}.
+Unlike token positions, this contextual position can take fractional values, thus cannot have an assigned embedding.
+Instead, we interpolate embeddings that are assigned to integer values to compute position embeddings.
+Like the other PE methods, these position embeddings are then added to the key vectors, so a query vector can use them in the attention operation.
+Since contextual position can vary from query-to-query and layer-to-layer, the model can simultaneously measure distances in multiple units.
+
+We first apply \ours{} to several toy tasks: counting, selective copying and the Flip-Flop task,
+where it outperforms token-based PE methods, especially in the case of out-of-domain generalization.
+To test real-world applicability, we use a language modeling task on Wikipedia text where we show \ours{} also leads to better performance.
+The same performance gain is also observed when trained on code. 
+
+
+
+
+\section{Background on Position Encoding}
+
+The core of the attention mechanism is a softmax operation over tokens in a sequence \citep{Bahdanau2014NeuralMT}. 
+Let $\{x_1, \ldots, x_T\}$ be a sequence of input tokens, and $\{\vec{h}_1, \ldots, \vec{h}_T\}$ be their hidden representations.
+The query $\vec{q}_i$, key $\vec{k}_i$ and value $\vec{v}_i$ vectors are built through linear transformations of $\vec{h}_i$.
+The attention outputs $\vec{o}_i$ for every $i$-th token are
+\[
+\vec{o}_i = \sum_j a_{ij} \vec{v}_j \quad \text{where} \quad
+a_{ij} = \text{Softmax}(\vec{q}_i^\top \vec{k}_j) .
+\]
+This attention operation is invariant to position information $j$, so it becomes necessary to have an additional position  encoding (PE) mechanism \citep{Sukhbaatar2015EndToEndMN}.
+PE methods can be categorized into two main groups: absolute and relative.
+The absolute PE simply adds a vector representing an absolute position $j$ to the hidden states, usually after token embedding:
+$\vec{h}_j \leftarrow \vec{h}_j + P(j) $.
+Here $P(i)$ can be implemented by an embedding layer that assigns a unique learnable vector $\vec{e}[i]$ to each position value $i$.
+Alternatively, $P(i)$ can be a fixed mapping that uses sinusoidal functions with different frequencies \citep{vaswani2017attention}.
+
+Relative PE \citep{shaw2018self} depends on the token position $j$ that is being attended to, in addition to the current token $i$.
+Therefore, it has to be implemented within the attention layer
+\[
+a_{ij} = \text{Softmax}(\vec{q}_i^\top (\vec{k}_j + P(i - j))) .
+\]
+Here we added it to only the key vectors, but there are  other variations.
+Again, $P$ can be an embedding layer so we have a learnable vector for each position:
+\begin{equation}
+\label{eq:rel_attn}    
+a_{ij} = \text{Softmax}(\vec{q}_i^\top (\vec{k}_j + \vec{e}[i - j])) .
+\end{equation}
+Fixed functions can also be used, such as in RoPE \citep{su2024roformer}.
+Now, we can view the $\vec{q}_i^\top \vec{k}_j$ term as context-addressing because it depends on what the $x_j$ token actually is, and view $\vec{q}_i^\top \vec{e}[i - j]$ as position-addressing since it solely depends on position information of $x_j$.
+Although many different position encoding methods have been proposed (see \citet{dufter2022position} for a survey), with most focusing on improving efficiency, they are all based on token positions.
+
+
+
+\section{Motivation for Contextual Position Encoding}
+
+
+\subsection{Standard position encoding fails on simple toy tasks}
+\label{sec:toy_fail}
+Here we analyze a simplified attention mechanism and a toy task to illustrate shortcomings of current position addressing techniques that are based on token positions.
+Let us consider simple sequences consisting of two types of tokens $x$ and $y$ to illustrate the interplay of the context and position addressing mechanisms.
+Given a sequence $yyyyxyyy$, for example,  context addressing can focus the attention on token $x$ by producing key and query vectors such that 
+\begin{equation}\label{eq:delta}  
+\vec{q}^\top \vec{k}_x = \vec{q}^\top \vec{k}_y + \Delta \quad \text{where} \ \Delta > 0 .
+\end{equation}
+This will give attention weights $a_x / a_y = \exp{\Delta}$.
+Suppose $\Delta=1$, then the attention on $x$ will be about $e\approx 2.7$ times larger than of $y$.
+Similarly, position addressing allows us to extract the $i$-th token (in relative position so $i=0$ is the last token)
+using position embeddings such that
+\[
+\vec{q}^\top \vec{e}[i] = \vec{q}^\top \vec{e}[j] + \delta \quad \text{where } \ \delta > 0 \text{ and } j \neq i .
+\]
+More interestingly, context and position addressing can work together to do more complex attention such as finding the last $x$ in the sequence $yyxyyxyy$. 
+If we assume $x$ tokens have the same context representation (i.e. the same key vectors), their attention difference will only depend on their positions $i$ and $j$:
+\[
+\frac{a_{x[i]}}{a_{x[j]}} = \exp{(\vec{q}^\top \vec{e}[i] - \vec{q}^\top \vec{e}[j])} > \exp(\delta).
+\]
+For the last $x$ at position $i$ to have larger attention, their difference should be larger than some $\delta > 0$.
+Since the positions $i$ and $j$ are unknown beforehand, the above inequality must hold for any $i<j$, including when $j=i+1$.
+Then we can derive
+\[
+\vec{q}^\top \vec{e}[0]  - \vec{q}^\top \vec{e}[i]  > i \delta  \quad \text{for } \ 0 < i .
+\]
+Now let us use $\Delta$ from \cref{eq:delta} and compare to the attention on $y$ at position 0.
+\[
+\frac{a_{x[i]}}{a_{y[0]}} = \exp{(\vec{q}^\top \vec{k}_x + \vec{q}^\top \vec{e}[i] - \vec{q}^\top k_y - \vec{q}^\top \vec{e}[0])} <  \exp{(\Delta - i \delta)}
+\]
+From this, we can see that $y$  will have larger attention  than $x$ when $i > \Delta / \delta$, thus the model cannot attend to the last $x$ if it is too far away.
+This  gives us an intuition  why independent position and context addressing might fail on very simple tasks.
+
+\subsection{State-of-the-art LLMs fail on counting problems}
+\label{sec:counting_failure}
+Basic failures of standard position encodings can be observed even in state-of-the-art LLMs.
+In \cref{tab:prompt}, we show a simple word counting task that should be trivial for capable LLMs. Surprisingly, both GPT4 and Llama-2 70B Chat  fail on this task.
+What makes this task challenging for PE is that the model needs to attend to the last sentence while ignoring the one before.
+The number of tokens in a sentence varies greatly, making token position imprecise.
+However, if positions were measured in terms of number of sentences instead of tokens, we argue that this task is easy as the model will then attend correctly.
+See \cref{app:failures} for more details on this experiment.
+
+\begin{table}[t]
+    \caption{Even powerful LLMs struggle to attend to abstract elements like sentences by their position. In this example, both the words ``Alice'' and ``book'' are mentioned in the first sentence, not the last. Addressing by token position is not very useful in this case because we do not know how many tokens the last sentence has.
+    Encoding sentence position could make this task trivial.}
+    \label{tab:prompt}
+    \centering
+    \small
+    \begin{tabular}{m{0.97\textwidth}}
+    \toprule
+    {\bf Prompt:} {\setlength{\fboxsep}{1pt}\colorbox{SkyBlue}{Alice}} was beginning to get very tired of sitting by her sister on the bank, and of having nothing to do: once or twice she had peeped into the {\setlength{\fboxsep}{1pt}\colorbox{BurntOrange}{book}} her sister was reading, but it had no pictures or conversations in it, “and what is the use of a {\setlength{\fboxsep}{1pt}\colorbox{BurntOrange}{book}},” thought {\setlength{\fboxsep}{1pt}\colorbox{SkyBlue}{Alice}} “without pictures or conversations?”
+    \newline
+
+    So she was considering in her own mind (as well as she could, for the hot day made her feel very sleepy and stupid), whether the pleasure of making a daisy-chain would be worth the trouble of getting up and picking the daisies, when suddenly a White Rabbit with pink eyes ran close by her.
+    \newline
+
+    Now, tell me how many times word "{\setlength{\fboxsep}{1pt}\colorbox{SkyBlue}{Alice}}" is mentioned in the last sentence. \\
+    \midrule
+    {\bf GPT4:}  The word "Alice" is mentioned 1 time in the last sentence. \\
+    \midrule
+    {\bf Llama-2 70B Chat:} The word "Alice" is mentioned twice in the last sentence ... \\
+    \midrule
+    \midrule
+    {\bf Prompt:} [THE SAME TWO SENTENCES]
+    \newline
+    
+    Now, tell me how many times word "{\setlength{\fboxsep}{1pt}\colorbox{BurntOrange}{book}}" is mentioned in the last sentence. \\
+    \midrule
+    {\bf GPT4:} The word "book" is mentioned one time in the last sentence. \\
+    \midrule
+    {\bf Llama-2 70B Chat:} The word "book" is mentioned twice in the last sentence: ... \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+\section{\oursfull{}
+
+\label{sec:encoding}
+In \ours{}, positions are measured in a context dependent way rather than being a simple token count. 
+The method works by first deciding
+which tokens should be included when measuring distance using their context vectors.
+To do that,  a gate value is computed for every query $\vec{q}_i$ and key $\vec{k}_j$ pair 
+\begin{equation}\label{eq:gates}
+g_{ij} = \sigma(\vec{q}_i^\top \vec{k}_j),
+\end{equation}
+where $j < i$ and $\sigma$ is the sigmoid function.
+A gate value of 1 means that the key will be counted in the position measurement, while 0 means it will be ignored.
+For example, to count the sentences between tokens $i$ and $j$, the gate value should be 1 for only sentence separation tokens such as ``.''. 
+The gates also condition on the query, so each query can have different position measurements if needed.
+The soft gating function allows differentiation so that the system can be trained with backpropagation.
+
+Next, we compute position values by adding the gate values between the current and the target token
+\begin{equation}\label{eq:position}
+p_{ij} = \sum_{k=j}^{i} g_{ik} .    
+\end{equation}
+Note that if the gates are always 1, then $p_{ij} = i - j +1$ and we recover token-based relative positions.
+Thus \ours{} can be viewed as a generalization of relative PE.
+In general, however, $p_{ij}$ can be the count of specific words or word types like nouns or numbers, the number of sentences, or other concepts the Transformer deems useful during training.
+
+Unlike token positions, our position values $p_{ij}$ are not restricted to integers and can take fractional values due to the sigmoid function. This means we cannot use an embedding layer to convert a position value to a vector like in the relative PE. Instead, we use interpolation between integer values.
+First, we assign a learnable embedding vector $\vec{e}[p]$ to each integer position $p \in [0, T]$.
+Then the embedding for position $p_{ij}$ will be a simple interpolation of the two closest integer embeddings
+\begin{equation}
+\label{eq:pos_enc}
+\vec{e}[p_{ij}] = ( p_{ij} - \lfloor p_{ij} \rfloor) \vec{e}[\lceil p_{ij} \rceil ] + (1 -  p_{ij} + \lfloor p_{ij} \rfloor) \vec{e}[\lfloor p_{ij} \rfloor] .
+\end{equation}
+Finally, we can compute the attention weights similar to \cref{eq:rel_attn}
+\begin{equation}
+\label{eq:attn}
+a_{ij} = \text{Softmax}(\vec{q}_i^\top (\vec{k}_j + \vec{e}[p_{ij}])) .
+\end{equation}
+In practice, however, computing and storing vectors $\vec{e}[p_{ij}]$ uses extra compute and memory. We can make this more efficient
+by first computing the $\vec{q}_i^\top \vec{e}[p]$ multiplications for all the integer positions $p$, and then interpolating the resulting values:
+\begin{align}
+z_{i}[p] &= \vec{q}_i^\top \vec{e}[p] \quad \text{for} \   p \in [0, 1, \ldots, T] \label{eq:q_pos_mult} \\
+z_{i}[p_{ij}] &= (p_{ij} - \lfloor p_{ij} \rfloor) z_i[\lceil p_{ij} \rceil ] + (1 - p_{ij} + \lfloor p_{ij} \rfloor) z_i[\lfloor p_{ij} \rfloor] \\
+a_{ij} &= \text{Softmax}(\vec{q}_i^\top \vec{k}_j + z_{i}[p_{ij}]) .\label{eq:final_attn}
+\end{align}
+See \cref{sec:code} for more practical implementation details of \ours{}.
+
+\paragraph{Limited positions}
+From \cref{eq:position}, we can see the maximum value for $p_{ij}$ is the context size $T$, which means we need $T+1$ position embeddings (including position 0).
+However, if the gates are sparsely activated (e.g. counting sentences), we can cover the whole context $T$ with much fewer positions.
+Thus we can set a limit $p_\text{max} < T$ on the maximum possible position by setting
+$
+p_{ij} \leftarrow \min \left( p_{ij} , p_\text{max} \right)
+$.
+
+\paragraph{Multi-head attention}
+So far, \ours{} is defined for single-head attention.
+The multi-head extension is straightforward as each head will do their own \ours{} independently.
+The keys and query vectors are different between heads, so that means they can implement different position measurements.
+For example, head 1 can have keys that turn all gates {\em on} so that the position counts tokens, while head 2 gates are {\em on} only for word-beginning tokens, to count words as positions.
+While the position embeddings $\vec{e}[p]$ are shared between the heads only, we also experiment with position embeddings that are shared across the layers as well.
+
+\paragraph{Computation}
+The most computationally expensive operation in the self-attention module is the key (or value) and query multiplication that has $\mathcal{O}(T^2 d_\text{h})$ FLOPS, where $d_\text{h}$ is the head dimension.
+The most expensive operation of \ours{} is the gate computation in \cref{eq:gates}, but we can benefit from the query and key multiplication that was already computed during attention, and reduce gate computation to simply applying the softmax function.
+The next most expensive operation in \ours{} is the matrix multiplication in \cref{eq:q_pos_mult} that has $\mathcal{O}(T p_\text{max} d_\text{h})$ FLOPS.
+This computation can be reduced by selecting a small $p_\text{max}$, which we show works well in our experiments.
+
+\paragraph{Computing gates}
+Note that the same keys are used in computing the gates in \cref{eq:gates} as the final attention computation of \cref{eq:final_attn}.
+This biases highly attended tokens to be counted in the position computation as well.
+To disentangle position from attention itself, we can use  separate keys that are computed with an additional projection $k_i=W_g h_i$ when computing gates. We denote this version as \emph{sep-keys} in our experiments.
+Another option is to use the value vectors instead so that $g_{ij} = \sigma(\vec{q}_i^\top \vec{v}_j)$, which we refer to as \emph{val-gates}.
+However, these versions will require more computation as we cannot reuse the key query multiplication.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section we summarize our experimental results. All models were trained and tested on 1 node with 8 GPUs, except the Language and Code Modeling tasks that were trained on 4 nodes (32 GPUs).  
+
+\subsection{Flip-Flop Task}
+The Flip-Flop language modeling task was introduced in \citet{liu2024exposing} to expose the failure of Transformer models to capture robust reasoning over long-range input sequences. The input strings consist of alternating sequences of instructions $\{w, i, r\}$ ("write", "ignore", and "read"), each followed by one bit of information ($0$ or $1$) that the model needs to memorize if it follows $w$, or recall the last memory if it follows $r$. It is guaranteed that all strings start with $w$ and end with $r$. For example, given string $"w0i1r0w1i0i1i1r"$, the expected output is $1$, since the last $w$ operation is followed by $1$.
+To solve this task, the model has to be able to sharply attend to the latest occurrence of the $w$ symbol, the position of which varies between sequences due to ignore instructions. The task defines two test sets: in-distribution and out-of-distribution (OOD), where the latter increases the distance to the last $w$ by increasing the number of ignore instructions.
+
+We replicate the setup described in \cite{liu2024exposing}, and report test error after 10K training steps
+for models with dimension 256, 4 heads and 4 layers.
+The results are provided in \cref{tab:flipflop} (left).
+They show that \ours{} outperforms existing methods, allowing the model to not only learn the in-distribution task, but also to generalize to OOD sequences --- a property that existing PE methods fail to provide. This is possible because \ours{} allows the model to attend to the last seen  positions of specific tokens
+by incorporating their counts 
+into the positional embedding using their keys, i.e. by making the gating function switch on for those tokens. For example, if the gates are 1 only on $w$ tokens, then position 1 will correspond to the last $w$ instruction.
+In contrast, relative PE  struggles to isolate the last $w$ as shown in \cref{sec:toy_fail}, especially when its position is unknown and far away.
+
+ 
+We find that \ours{} is generally robust to these changes with respect to in-distribution generalization, but out-of-distribution generalization can degrade on this task for certain hyperparameter choices.
+
+\begin{table}[t]
+  \caption{{\bf Flip-Flop and Selective Copy tasks.} We report in-distribution and out-of-distribution (OOD) generalization test error (\%) on both tasks. }
+  \label{tab:flipflop}
+\begin{minipage}{0.4\textwidth}
+    \centering
+    \scalebox{1}{
+    \begin{tabular}{lcc}
+    \multicolumn{3}{c}{Flip-Flop}\\
+    \toprule
+    PE Method   &  In-dist & OOD     \\
+    \midrule
+    Absolute PE  & 6.8 & 21.7 \\
+    RoPE & 1.8 & 20.3 \\
+    \ours  & \bf 0.0 & \phantom{0}\bf 4.9 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{minipage}%
+\begin{minipage}{0.58\textwidth}
+    \centering
+ \scalebox{1}{
+  \begin{tabular}{lccc}
+  \multicolumn{4}{c}{Selective Copy}\\
+    \toprule
+    PE Method   &  In-dist & OOD dense & OOD sparse  \\
+    \midrule
+    Absolute PE & 16.9 & \phantom{0}25.6 & \phantom{0}85.2\\
+    RoPE &  40.1 & 100.0 & 100.0\\
+    \ours  & \phantom{0}\bf0.0 & \phantom{00}\bf0.0 &\bf\phantom{00}0.0\\
+    \bottomrule
+  \end{tabular}
+  }
+\end{minipage}
+\end{table}
+
+\if 0
+
+\begin{table}[t]
+  \caption{{\bf Flip-Flop and Selective Copy tasks.} We report in-distribution and out-of-distribution test error (\%) on both tasks.} % @100k training steps}
+  \label{tab:flipflop}
+\begin{minipage}{0.4\textwidth}
+    \centering
+    \scalebox{1}{
+    \begin{tabular}{lcc}
+    \multicolumn{3}{c}{Flip-Flop}\\
+    \toprule
+    PE Method   &  In-dist & Out-dist     \\
+    \midrule
+    Absolute PE  & 6.8 \std{6.9} & 21.7 \std{7.9} \\
+    RoPE & 1.8 \std{3.1} & 20.3 \std{2.9} \\
+    \ours  & {\bf 0.03} \std{0.06} & {\phantom{0}\bf 4.9} \std{4.4} \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{minipage}%
+\begin{minipage}{0.58\textwidth}
+    \centering
+ \scalebox{1}{
+  \begin{tabular}{lccc}
+  \multicolumn{4}{c}{Selective Copy}\\
+    \toprule
+    PE Method   &  In-dist & Out-dist(D) & Out-dist(S)  \\
+    \midrule
+    Absolute PE & 62.8 & \phantom{0}73.9 & 100.0\\
+    RoPE &  70.9 & 100.0 & 100.0\\
+    \ours  & \phantom{0}\bf0.0 & \phantom{00}\bf0.0 & \phantom{0}\bf77.0\\
+    \bottomrule
+  \end{tabular}
+  }
+\end{minipage}
+\end{table}
+\fi
+
+\if 0
+\begin{table}[t]
+  \caption{{\bf Flip-Flop and Selective Copy tasks.} We report in-distribution and out-of-distribution test error (\%) on both tasks.} % @100k training steps}
+  \label{tab:flipflop}
+    \centering
+    \begin{tabular}{lccccc}
+    \toprule
+    \multirow{2}{*}{PE Method} & \multicolumn{2}{c}{Flip-Flop} & \multicolumn{3}{c}{Selective Copy} \\
+    \cmidrule(rl){2-3} \cmidrule(rl){4-6}
+     &  In-dist & Out-dist  & In-dist & Out-dist(D) & Out-dist(S)    \\
+    \midrule
+    Absolute PE  & 6.6 & 28.1  & 62.8 & \phantom{0}73.9 & 100.0 \\
+    RoPE & 5.3 & 21.5  &  70.9 & 100.0 & 100.0 \\
+    \ours  & \bf 0.1 & \bf \phantom{0}6.1   & \bf \phantom{0}0.0 & \bf \phantom{00}0.0 & \bf \phantom{0}77.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\fi
+\if 0
+\begin{table}[t]
+  \caption{The test error rates (\%) on the Flip-Flop task for different Transformer architectures. We report test error at 10k training steps for the models with dimension 256, 4 heads and 4 layers.
+  }
+  \label{tab:flipflop}
+  \centering
+  \begin{tabular}{lrr}
+    \toprule
+        Architecture   & In-distribution& Out-of-distribution\\
+          &   test error (\%) & test error (\%) \\
+    \midrule
+    Absolute PE + soft attn & 6.6 & 28.1 \\
+    Absolute PE + hard attn & 50.7 & 49.1 \\
+    RoPE + soft attn & 5.3 & 21.5 \\
+    \ours + soft attn & \bf 0.1 & \bf 6.1 \\
+    \midrule
+    \ours\_MLP + soft attn & 0.03 & 5.9 \\
+    \ours\_MLP$_{1^{st}\_layer}$ + soft attn & 0.9 & 24.3 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\fi 
+
+\if 0
+\begin{table}[t]
+  \caption{The test error rates (\%) on the Selective Copy task for different Transformer architectures. We report test error at 400k training steps for the models with dimension 64, 2 heads and 2 layers.
+  }
+  \label{tab:selectivecopy}
+  \centering
+  \begin{tabular}{lrrr}
+    \toprule
+        Architecture   & In-distribution& Out-of-dist (sparse) &  Out-of-dist (dense)\\
+          &   test error (\%) & test error (\%) & test error (\%) \\
+    \midrule
+    Absolute PE + soft attn &  & x &x\\
+    RoPE + soft attn & x & x &x\\
+    \midrule
+    \ours + soft attn & \bf x & \bf x &x\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\fi 
+
+\subsection{Selective Copy Task}
+The selective copy task  introduced by \cite{gu2023mamba}
+requires context-aware reasoning for selective memorization. In this task the model is given a sequence of tokens and asked to copy all tokens except a denoted blank token. For example, when the input is {\em DBBCFBFBE} where {\em B} is the blank, the model is expected to output {\em DCFFE}. In our experiments, we set the vocabulary size to 16, and  the output sequence length (number of non-blanks) to 256, and vary the number of blank tokens. The training and in-distribution test data have 256 blanks whereas
+the dense and sparse OOD test data have 128 blanks and 512 blanks, respectively.
+We train models with dimension 64, 2 layers and 2 heads, and report test error after 100k steps. The results, given in Table~\ref{tab:flipflop} (right),  show that on the in-distribution test set our method \ours can solve the task while others fail to do so. Similarly, \ours generalizes better on both dense and sparse OOD test sets.
+The presence of blank tokens makes it harder to locate the next token to copy, but \ours{} can count only non-blank tokens, and hence be more resilient to blanks. At each step, it can then simply copy the non-blank token a distance of 256 (non-blanks) away. Repeating this 256 times will copy the entire sequence of non-blanks.
+
+\subsection{Counting Task}
+
+\begin{figure}[t]
+\begin{minipage}{0.42\linewidth}
+  \captionof{table}{{\bf Counting task}
+  test error rates (\%) for different number of variables.}
+  \label{tab:count}
+  \centering
+  \begin{tabular}{lrrr}
+  \multicolumn{4}{c}{Counting}\\
+    \toprule
+         PE method   &  1 var &  3 var & \ 5 var  \\
+    \midrule
+    Absolute PE & 5.3 & 67.6 & 71.5 \\
+    Relative PE  & 1.1 & 17.8 & 22.4 \\
+    \ours & {\bf 0.0} & {\bf 1.2} & {\bf 7.4}\\
+    \bottomrule
+  \end{tabular}
+\end{minipage}\hfill
+\begin{minipage}{0.56\linewidth}
+  \centering
+  \includegraphics[scale=0.8]{figs/count_train_size.pdf}
+  \caption{\ours{} outperforms relative PE on the counting task, especially with less  training data of the task.}
+  \label{fig:count}
+\end{minipage}\hfill
+\end{figure}
+
+\if 0
+\begin{figure}[t]
+\begin{minipage}{0.44\linewidth}
+  \captionof{table}{{\bf Counting task}
+  test error rates  for different number of variables.}
+  \label{tab:count}
+  \centering
+  \begin{tabular}{lccc}
+  \multicolumn{4}{c}{Counting}\\
+    \toprule
+         PE method   &  1 var &  3 var & \ 5 var  \\
+    \midrule
+    Absolute PE & 5.3  & 67.6 & 71.5 \\
+    Relative PE  & 1.1 & 17.8 & 22.4 \\
+    \ours & {\bf 0.0} & \phantom{0}{\bf 1.2} & \phantom{0}{\bf 7.4}\\
+    \bottomrule
+  \end{tabular}
+\end{minipage}\hfill
+\begin{minipage}{0.54\linewidth}
+  \centering
+  \includegraphics[scale=0.85]{figs/count_train_size.pdf}
+  \caption{\ours{} outperforms relative PE on the counting task, especially with less  training data of the task.}
+  \label{fig:count}
+\end{minipage}\hfill
+\end{figure}
+\fi 
+\begin{table}[t]
+  \caption{{\bf Out-of-distribution (OOD) generalization error (\%) on the counting task}. We vary weight $w_{pass}$ of the dummy \texttt{pass} command so the  context is either shorter or longer. \ours{} generalizes better as it  learns to exclude irrelevant \texttt{pass} commands in the relevant attention operations.}
+  \label{tab:count_general}
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+        PE method   &  in-domain & OOD longer context & OOD shorter context \\
+        & $(w_\text{pass}=50)$ & $(w_\text{pass}=100)$ & $(w_\text{pass}=10)$ \\
+    \midrule
+    Relative PE & 1.1 & 8.8  & 34.1\\
+    \ours & {\bf 0.0}  & {\bf 0.0}  & \phantom{0}{\bf 4.0} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+Counting things is more challenging than simply recalling the last instance because it requires more uniform attention over a certain span.
+For example, to count verbs in the current paragraph, the model needs to attend to the verb tokens roughly equally within the current paragraph. 
+Thus, simple recency bias using position embeddings will not work because it will suppress verbs that  occur earlier.
+
+To demonstrate this in a controlled setting, we devise a simple algorithmic task that requires counting. 
+The context is a sequence of operations of three types: set variable to zero, increment it, and do nothing.
+Here is an example ``\texttt{...; pass; pass; a = 0 ; pass; a ++; pass; pass; a ++; print a 2}''.
+At the end of each sequence there is a print operation that outputs the current value of that variable.
+This is a fairly simple task as the model just needs to count \texttt{++} operations since the last set operation. In a more challenging version of this task, we mix multiple variables in a single sequence.
+
+Similar to the Flip-Flop task, we randomly select one from the three types of operation according to the predefined weights $w_\text{set}=1$, $w_\text{incr}=7$, and $w_\text{pass}=50$.
+We limit the maximum numerical value to be 10.
+To test OOD generalization, we modify $w_\text{pass}$ so that the average length of the relevant context (from the last set operation to the current step) is either longer or shorter.
+We generate 10K sequences for training, each containing up to 512 operations. We report the average of 3 random seeds.
+
+Results are given in Table~\ref{tab:count} and  \cref{fig:count}.
+The baseline model with relative PE struggles to learn this task, especially when there is more than one variable to track.
+Absolute PE performs even worse.
+The best performance comes from \ours{}, with a perfect score for the 1 variable case.
+For OOD generalization,
+ relative PE shows poor generalization, while \ours{}  generalizes very well as shown in \cref{tab:count_general}.
+ 
+\subsection{Language Modeling}
+To test our method on a language modeling task we use the Wikitext-103 dataset \citep{merity2016pointer}, which consists of 100M tokens extracted from Wikipedia.
+We train a Transformer model that matches the architecture of GPT-2 \citep{radford2019language} with 12-layers and a hidden size of 768.
+We train with the negative log-likelihood loss for 100 epochs using a batch size of 64.
+The model has a context size of 1024, but  we set the maximum position value in \ours{} to a much lower value of $p_\text{max}=64$.
+
+We compare different PE methods in \cref{tab:wiki} (left).
+Absolute PE performs worst.
+\ours{} outperforms  relative PE, and  improves even further when  combined with relative PE.
+This shows that even in general language modeling, \ours{} brings improvement.
+
+\begin{table}[t]
+  \caption{\bf Wikitext-103 and Code results.} % @100k training steps}
+  \label{tab:wiki}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \scalebox{0.94}{
+    \begin{tabular}{lccc}
+    \multicolumn{4}{c}{Wikitext-103}\\
+    \toprule
+    PE Method   &  Params (M) & Val. PPL & Test PPL     \\
+    \midrule
+    Absolute PE & 124.4 & 23.96 & 24.87 \\
+    Relative PE & 123.7 & 22.90 & 23.81 \\
+    \ours & 123.7 & 22.55 & 23.46 \\
+    \ours{} + Relative & 123.7 & \bf 22.31 & \bf 23.23 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{minipage}%
+\begin{minipage}{0.56\textwidth}
+    \centering
+ \scalebox{0.94}{
+  \begin{tabular}{lcc}
+  \multicolumn{3}{c}{Code}\\
+    \toprule
+    PE Method   &  Params (M) & Test PPL     \\
+    \midrule
+    Absolute PE & 20.8 & 4.7 \\
+    RoPE & 19.8 & 4.1 \\
+    \ours & 20.8 & \bf 3.9 \\
+    \ours{} + RoPE & 20.8 & 4.0 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{minipage}
+\end{table}
+
+\if 0
+\begin{table}[t]
+  \caption{Wikitext-103 results}
+  \label{tab:wiki}
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    Position embedding   &  Params (M) & Val. PPL & Test PPL     \\
+    \midrule
+    Absolute & 124.4 & 16.46 & 16.48 \\
+    Relative & 123.7 & 15.82 & 15.87 \\
+    \ours & 123.7 & 15.61 & 15.67 \\
+    \ours{} + relative & 123.7 & \bf 15.46 & \bf 15.53 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\fi 
+
+\begin{figure}[t]
+  \centering
+  \hfill
+  \includegraphics[scale=0.7]{figs/wiki103_context.pdf}
+  \hfill
+  \includegraphics[scale=0.7]{figs/wiki103_context2.pdf}
+  \hfill
+  \caption{{\bf Generalization to longer context length.} After training on the Wikitext-103 language modeling task with a context size of 1024 (left) and 512 (right), we evaluate the model on longer context sizes and report the validation perplexity. %Relative PE does not generalize well because it has no embedding for the newer seen positions. 
+  \ours{} generalizes well, outperforming existing PE methods, especially when evaluation context size is much larger than training context size (right).
+  }
+  \label{fig:wiki_context}
+\end{figure}
+\begin{figure}[h]
+  \centering
+  \hfill
+  \includegraphics[width=0.48\linewidth]{figs/attn_map_lay1_head9.pdf}
+  \hfill
+  \includegraphics[width=0.48\linewidth]{figs/attn_map_lay1_head0.pdf}
+  \hfill
+  \caption{{\bf \ours{} can focus attention on abstract 
+  elements
+  like current paragraph (left) and section (right)}. 
+  Here we show attention induced by position alone on Wikitext-103. Since \ours{} is contextualized, it can attend to paragraphs and sections by their position. 
+  On the left, the segments are found to be separated by newline tokens (indicated by black plus signs), while the right is separated by section titles like ``= = Description = ='' (similarly marked).}
+  \label{fig:attention_maps}
+\end{figure}
+
+\paragraph{Generalization to longer context:}
+Next, we test how well \ours{} generalizes to contexts  longer than  it was trained on.
+
+As \ours{} assigns positions conditioning on context, it is capable of distributing them to a much larger number of tokens.
+While the number of tokens was fixed during training, the number of positions will vary depending on each sample.
+Thus it is possible that tokens outside the training span of $T$ still get position values that are within the maximum limit $p_\text{max}$.
+
+In contrast, relative PE has embeddings that are tied to each token position.
+Therefore when there are $T'-T$ unseen positions during test time, those tokens will have no position embedding added to them.
+As this is never seen during training, it negatively affects the performance.
+To mitigate this, we test a version of relative PE where unseen positions use the embedding of the $T$-th position, which might indicate a ``far away'' position.
+This is similar to \ours{} where positions are capped by a specified limit.
+We call this version \emph{relative-capped}.
+
+The results are given in \cref{fig:wiki_context}.
+Relative PE generalizes poorly to longer context sizes.
+The relative-capped version, in contrast, shows much healthier performance.
+However, \ours{} still outperforms it, and the gap widens when the test context is much longer than the training context (see \cref{fig:wiki_context}, right). 
+
+In \cref{fig:attention_maps}, we show examples of attention maps from a model trained with {\em sep-keys} (gates are computed with separated keys, see \cref{sec:encoding}).
+The attention maps are built from position alone (they have to be multiplied by context attention for the final attention), which gives us better insight into what \ours{} is doing. 
+We also normalize so that the maximum attention weight is always 1 for each query.
+First, we can see that positions are clearly contextualized as the attention tends to drop at specific tokens regardless of their relative positions.
+A closer look at those tokens reveals that the attentions are mostly focused on the last paragraph (left) or section (right).
+For clarity, the actual paragraph and section boundaries are marked by black plus signs.
+In \ours{}, this is possible because one attention head can count paragraphs while another counts sections, and then it can focus on position 0 only.
+\subsection{Code Modeling}
+
+We further test the ability of \ours by evaluating on code data. Code data has more structure compared to natural language, and might be more sensitive to in-context learning. We train a small 20M Transformer model that resembles the Llama-2 architecture with the corresponding mix of code data \citep{Touvron2023Llama2O} with 4 layers, 8 heads, and a hidden dimension of 256. 
+We use context length 4096, learning rate  $5.0e-4$, and train for 100B tokens.
+
+The results are summarized in \cref{tab:wiki} (right).  \ours embeddings improve in perplexity over absolute PE and RoPE by 17\% and 5\% correspondingly. Combining RoPE and \ours embeddings together improves over RoPE, but does not bring any improvements over the proposed embedding method. 
+
+\if 0
+\begin{table}
+  \caption{Code results @100k training steps}
+  \label{tab:code}
+  \centering
+  \begin{tabular}{lcc}
+    \toprule
+    Position embedding   &  Params (M) & Test PPL     \\
+    \midrule
+    Absolute & 20.8 & 4.7 \\
+    RoPE & 19.8 & 4.1 \\
+    \ours & 20.8 & \bf 3.9 \\
+    \ours{} + RoPE & 20.8 & 4.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\fi
+
+\if 0
+\subsection{\textsc{WordCount} task}
+Finally, to understand if the proposed mechanism helps to improve over the counting problems described in \cref{sec:counting_failure}, we experiment with introducing a new \textsc{WordCount} task. In this task, model is asked to count how many times a specific word occurs in a specific sentence. To run experiments, we used \textsc{TinyStories} dataset \citep{eldan2023tinystories} to ?? 
+For experiments, we use the same model as described in \cref{sec:code}.
+
+Our results summarized in \cref{tab:wordcount} demonstrate that \ours significantly improves over standard embedding approaches, boosting model's capabilities on a complex context-depended task.
+
+\begin{table}
+  \caption{Evaluation of the model with different embedding approaches on the \textsc{WordCount} task.}
+  \label{tab:wordcount}
+  \centering
+  \begin{tabular}{lcc}
+    \toprule
+    Position embedding   &  Params (M) & Exact match score     \\
+    \midrule
+    Absolute & 20.8 & 37.8 \\
+    RoPE & 19.8 &  \\
+    \ours & 20.8 & \bf 45.8 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\fi
+
+
+
+\section{Related Work}
+
+While the attention mechanism 
+ was proposed in \citet{Bahdanau2014NeuralMT} for processing sequences of tokens, the model was still based on RNNs so position encoding (PE) was not necessary.
+The Memory Network \citep{Weston2014MemoryN}  architecture moved away from RNNs when processing sequences, instead using multiple layers of attention, and 
+first introduced using PE together with the attention mechanism \citep{Sukhbaatar2015EndToEndMN}.
+They added learnable embedding vectors that correspond to each relative position to the hidden representations.
+A similar position embedding was used earlier in a convolution-based architecture \citep{collobert2008unified}, and later in an architecture that combines convolution with attention
+\citep{gehring2017convolutional}.
+The latter used an absolute PE because relative position cannot be defined on the source text in machine translation.
+
+PE became in an important topic of research with the popularity of the Transformer architecture. The original paper by \citet{vaswani2017attention} employed an absolute PE with fixed vectors, but the relative position embedding was later used in \citet{shaw2018self}.
+Relative PE is especially suited to processing unbounded sequences \citep{Dai2019TransformerXLAL}.
+Since then, many different variations of relative and absolute PE have been proposed.
+In \citet{raffel2020exploring}, 
+each relative position is assigned a simple bias scalar that gets added to the attention logits.
+While being efficient, this makes position addressing independent of the current token.
+\citet{press2021train} further simplifies the bias terms by making them fixed in a decaying pattern instead of learning for generalization to longer context.
+\citet{haviv2022transformer} takes it to the extreme by removing PE and demonstrated that position information can be recovered by counting previous tokens with causal attention.
+
+While absolute PE was used in  early LLMs \citep{radford2019language}, relative PE is more common in recent LLMs \citep{Touvron2023Llama2O,Touvron2023LLaMAOA,Jiang2023Mistral7}.
+In particular, RoPE \citep{su2024roformer} made it possible to do relative PE without modifying the self-attention code.
+It relies on the fact that query and key dot product only depend on the angle between those vectors and are agnostic to their absolute angles. Thus if they are rotated by angles proportional to their absolute position, then its effect on the attention logit will only depend on their difference in position.
+However, \ours{} differs from all these PE methods as it measures position in a context dependent way instead of simply using token counts.
+
+While RNNs can be inserted into the Transformer architecture to represent position information in an implicit way \citep{wang2019r,neishi2019relation}, the sequential nature of RNN operations breaks the parallelization of Transformer training, making it slower and less practical. In comparison, the only sequential operation in \ours{} is a cumulative sum, which is lightweight and can be partially parallelized.
+For more details on different PE methods, see the survey by \citet{dufter2022position}.
+\citet{zhao2023length} also provides a survey focused on length generalization of PE methods.
+
+
+
+\section{Conclusion}
+
+In this paper, we proposed a novel position encoding method called \ours{} that measures position in a context dependent way, thus moving away from the current token-based position paradigm.
+This approach allows more freedom when addressing by position, and brings gains on several tasks.
+While this paper only focused on text and code domains, \ours{} has the potential to improve  domains such as video and speech  where token position seems intuitively even less appropriate.
+Another avenue to explore is training larger models with \ours{} and measuring performance on downstream tasks.
+
+
+

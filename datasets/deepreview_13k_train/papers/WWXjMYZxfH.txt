@@ -1,0 +1,286 @@
+\title{MA-RLHF: Reinforcement Learning from Human Feedback with Macro Actions}
+
+\begin{abstract}
+Reinforcement learning from human feedback (RLHF) has demonstrated effectiveness in aligning large language models (LLMs) with human preferences. 
+However, token-level RLHF suffers from the credit assignment problem over long sequences \citep{DBLP:journals/pami/BengioCV13}, where delayed rewards make it challenging for the model to discern which actions contributed to successful outcomes. This hinders learning efficiency and slows convergence \citep{pmlr-v32-mann14, JMLR:v24:21-1213}.
+In this paper, we propose MA-RLHF, a simple \textit{yet} effective RLHF framework that incorporates \textit{macro actions}--- sequences of tokens or higher-level language constructs---into the learning process. 
+By operating at this higher level of abstraction, our approach reduces the temporal distance between actions and rewards, facilitating faster and more accurate credit assignment. This results in more stable policy gradient estimates and enhances learning efficiency within each episode, all without increasing computational complexity during training or inference.
+We validate our approach through extensive experiments across various model sizes and tasks, including text summarization, dialogue generation, question answering, and program synthesis. Our method achieves substantial performance improvements over standard RLHF, with performance gains of up to 30\% in text summarization and code generation, 18\% in dialogue, and 8\% in question answering tasks. 
+Notably, our approach reaches parity with vanilla RLHF 1.7x to 2x faster in terms of training time and continues to outperform it with further training.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\label{sec:intro}
+
+Recent advancements in large language models (LLMs) have revolutionized natural language processing tasks, demonstrating impressive capabilities across a wide range of applications such as code generation~\citep{roziere2023code, DBLP:conf/acl/ChaiWPSTW23, lozhkov2024starcoder}, mathematical reasoning~\citep{minerva, palm2}, and dialogue assistance~\citep{gpt4, team2023gemini, claude2024}. Despite these successes, aligning LLMs with human values and preferences remains a critical challenge. Reinforcement learning from human feedback (RLHF) has emerged as a promising approach to address this alignment issue by incorporating human evaluations into the training process~\citep{rlhf,ziegler2019fine, summarize_feedback}. 
+Existing RLHF~\citep{instrutGPT, hhh, DBLP:journals/corr/abs-2112-00861} methods mainly optimize decisions at the level of individual tokens, and require to process a vast number of minute adjustments. However, this fine-grained training paradigm can lead to the credit assignment problem~\citep{DBLP:journals/pami/BengioCV13, 10.5555/1622737.1622748}, particularly when dealing with long-distance dependencies. As LLM agents attempt to optimize decisions across extensive sequences, the difficulty in attributing the credits of actions to specific tokens complicates the reinforcement learning (RL) process~\citep{DBLP:journals/tmlr/PignatelliFGMHT24}. Moreover, the use of subword tokenization, such as Byte-Pair Encoding~\citep{sennrich-etal-2016-neural}, often splits words into smaller pieces. For instance, OpenAI's ChatGPT\footnote{\url{https://platform.openai. 
+
+Additionally, standard RLHF methods may overlook essential linguistic structures and dependencies between adjacent tokens in natural language. For example, consider the phrase \texttt{Big Apple}\footnote{\url{https://en.wikipedia.org/wiki/Big_Apple}}, treating \texttt{Big} and \texttt{Apple} as isolated decisions misses the cohesive meaning of the term, which actually refers to the ``New York City''. The token-level granularity of natural language can hinder the agent's ability to capture high-level language constructs in RL optimization, as some sequences are better understood when evaluated holistically.
+
+To address these challenges, we propose a new framework called macro-action RLHF (MA-RLHF) that incorporate \textbf{macro action} --- sequences of tokens or high-level language constructs --- into the RLHF framework. The concept of macro actions, has been explored in the literature of planning ~\citep{iba1989heuristic, korf1985learning, sacerdoti1974planning} and reinforcement learning~\citep{thrun1994finding, precup1997planning, hauskrecht2013hierarchical}, simplifies decision-making by operating at high levels of temporal abstraction under the framework of semi-Markov Decision Processes (SMDPs) \citep{sutton1999between}. Macro actions leverage meaningful linguistic structures and allow the agent to learn from ``long-sighted'' macro-level actions instead of ``short-sighted'' token-level actions, which can potentially leads to improved learning efficiency and scalability.
+Alternatively, MA-RLHF can also be interpreted from the perspective of reversing tokenization; MA-RLHF serves as a de-tokenization process to reconstruct high-level language units from subword pieces. By merging tokens into macro actions, we reduce the number of decision points and shorten decision trajectories, alleviating the credit assignment problem caused by long temporal distances. 
+
+To conclude, our main contributions are as follows:
+
+
+
+
+ 
+\begin{itemize}[leftmargin=20pt]
+    \item We propose MA-RLHF, a simple \textit{yet} effective RLHF framework that integrate the macro actions into RLHF to align LLMs with human preference. We demonstrate the effectiveness of our approach through extensive experiments across various datasets and tasks, including text summarization, dialogue generation, question answering, and program synthesis.
+    \item We show that MA-RLHF achieves 1.7x to 2x faster convergence in reward scores during training compared to the standard token-level RLHF, without introducing additional computational costs during training or inference. MA-RLHF also exhibits strong scalability across model sizes ranging from 2B to 27B parameters.
+    \item Our analysis reveals that MA-RLHF exhibits robust generalization capabilities under varying experimental settings, such as temperature values and rejection sampling, consistently outperforms the standard RLHF approaches.  
+\end{itemize}
+ 
+
+
+
+
+
+\section{Preliminaries}
+
+\label{sec:bg}
+We introduce some basic concepts and notations used in RL and RLHF.
+
+\subsection{Reinforcement Learning and Policy Optimization}
+
+\textbf{Problem Definition}\,\, RL addresses the problem of finding an policy to make optimal sequential decisions in environments modeled as the Markov Decision Processes (MDPs) \citep{sutton1999reinforcement}. An MDP is defined by the tuple $(\mathcal{S}, \mathcal{A}, P, r, \rho_0, \gamma)$, where $\mathcal{S}$ denotes a finite set of states, $\mathcal{A}$ is a finite set of actions, $P: \mathcal{S} \times \mathcal{A} \times \mathcal{S} \rightarrow [0,1]$ represents the state transition probability distribution, $r: \mathcal{S} \times \mathcal{A} \rightarrow \mathbb{R}$ is the reward function, $\rho_0: \mathcal{S} \rightarrow [0,1]$ defines the initial state distribution, and $\gamma \in (0, 1)$ is the discount factor that determines the importance of future rewards.
+
+ The state-action value function $Q_\pi(s_t, a_t) = \mathbb{E}_{s_{t+1}, a_{t+1}, \dots} \left[ \sum_{l=0}^{\infty} \gamma^l r(s_{t+l}) \right]$ measures the expected return of taking action $a_t$ at state $s_t$ and following policy $\pi$ thereafter. The value function $V_\pi(s_t) = \mathbb{E}_{a_t, s_{t+1}, \dots} \left[ \sum_{l=0}^{\infty} \gamma^l r(s_{t+l}) \right]$ estimates the expected return from state $s_t$ under the policy $\pi$. The advantage function $A_\pi(s_t, a_t) = Q_\pi(s_t, a_t) - V_\pi(s_t)$ reflects the relative value of taking action $a_t$ at state $s_t$ compared to the average value of the state.
+
+The goal of RL is to find an optimal policy $\pi_\theta(a \mid s)$, parameterized by $\theta$, that maximizes the expected cumulative discounted reward: $J(\theta) = \mathbb{E}_{s_0, a_0, \dots} \left[\sum_{t=0}^{\infty} \gamma^t r(s_t) \right]$,
+where $s_0 \sim \rho_0(s_0)$ represents the initial state distribution, $a_t \sim \pi_{\theta}(a_t \mid s_t)$ denotes the action selection based on the policy, and $s_{t+1} \sim P(s_{t+1} \mid s_t, a_t)$ specifies the state transition dynamics.
+\textbf{Proximal Policy Optimization}\,\, Policy gradient methods are a common approach for optimizing policies by estimating the gradient of a performance objective with respect to the policy parameters $\theta$. The policy gradient is given by: $ \nabla_\theta J(\theta) = \mathbb{E} \left[ \sum_{t=0}^{\infty} A_t \nabla_\theta \log \pi_\theta (a_t \mid s_t) \right]$, where the expectation $\mathbb{E}[ \cdot ]$ is taken over the randomness of initial state, policy, and state-transition. The policy gradient guides us how to adjust the policy parameters to improve the expected return.
+Among the family of policy gradient methods,
+Proximal Policy Optimization (\citealp[PPO]{schulman2017proximal}) is perhaps the most widely-used one due to its simplicity and empirical effectiveness. PPO simplifies TRPO \citep{schulman2015trust} by using a clipped surrogate objective function to penalize large deviations from the old policy, thereby ensuring more stable updates. Specifically, PPO introduces a clipped objective function:
+\begin{equation} \label{eq:ppo}
+    J^\text{ppo-clip}(\theta) = \mathbb{E} \left[ \min \left( \frac{\pi_\theta (a_t \mid s_t)}{\pi_{\theta_\text{old}}(a_t \mid s_t)} {A}_t, \text{clip}(\frac{\pi_\theta (a_t \mid s_t)}{\pi_{\theta_\text{old}}(a_t \mid s_t)}, 1 - \epsilon, 1 + \epsilon) {A}_t \right) \right],
+\end{equation}
+where $\epsilon$ is a hyperparameter that defines the range for clipping. Nowadays, PPO usually comes as the first choice for RL practitioners.
+\subsection{RLHF for Human Alignment}
+
+The post-training of LLMs~\citep{summarize_feedback, instrutGPT} is a multi-stage training paradigm to align LLMs with human preferences. Post-training typically involves three stages: 
+
+\textbf{(1) SFT stage}: A pre-trained language model (LM) is fine-tuned on a dataset of human demonstrations, learning to generate responses that align with human instructions and preferences.
+
+\textbf{(2) RM stage:} A reward model $r_\phi(x, y)$, parameterized by $\phi$, is trained to predict human preference scores for model outputs. The training data $\mathcal{D} = {(x_i, y_i^+, y_i^-)}_{i=1}^N$ consists of prompts $x_i$ and pairs of responses $(y_i^+, y_i^-)$, where $y_i^+$ is preferred over $y_i^-$ by human annotators. The reward model is trained using the ranking loss: $\mathcal{L}_\textrm{RM} = -\log \sigma(\log(r_\phi(x, y_{+}) - r_\phi(x, y_{-})))$,
+where $\sigma$ denotes the sigmoid function, and $r_\phi$ represents the reward function parameterized by $\phi$. 
+
+\textbf{(3) RLHF stage:} The RL fine-tuning utilizes the RM to provide feedback on the generated outputs, optimizing the policy using RL methods such as PPO. The reward signal is modified by incorporating a Kullback-Leibler (KL) divergence penalty to balance the exploration of new policies with adherence to the SFT model. The reshaped reward is defined as:
+\begin{equation*}
+    R(x, y) = r_\phi(x, y) + \beta D_{\mathrm{KL}} ( \pi_{\mathrm{sft}}( y ~|~ x ) ~||~ \pi_{\theta}( y ~|~ x ) ),
+\end{equation*}
+where $\pi_\theta$ represents the policy learned through RL, $\pi_\mathrm{sft}$ is the policy produced from the SFT stage, and $\beta > 0$ is a hyperparameter that controls the strength of the KL penalty. 
+
+In the RLHF stage, the PPO algorithm, as detailed in \cref{eq:ppo}, is employed to optimize the RL policy. In the context of RLHF, we denote the state $s_t = \{a_1, a_2, \dots, a_{t-1}\}$ as the sequence of tokens generated up to time step $t$, while $a_t$ represents the token selected at the $t$-th position.
+
+
+
+
+\section{Marco-Action RLHF}
+
+\label{sec:method}
+
+\subsection{Revisiting Macro Actions (Options)}
+\label{sec:revisit_macro_actions}
+\textbf{Macro actions}, also referred to as \textbf{options}~\citep{sutton1999between}, are high-level constructs that encapsulate a sequence of primitive actions (\emph{i.e.}, subword tokens); by its definition, macro actions allows an agent to operate at a coarser temporal scale. 
+
+Formally, a macro action is characterized by three components: (1) a policy $\pi: \mathcal{S} \times \mathcal{A} \rightarrow [0,1]$ which guides the action selection among macro actions; (2) a termination condition $\zeta: \mathcal{S}^+ \rightarrow [0,1] $, which determines where the macro action should end; (3) a initiation set $ \mathcal{I} \subseteq \mathcal{S} $, which is a subset of states that macro actions can begin with.
+Once initiated with a state $ s_0 \in \mathcal{I}$, the macro action follows policy $\pi$ until it reaches the termination condition according to $\zeta$. Intuitively, the use of carefully designed macro actions can extend decision-making temporally, it allows the agent to avoid ``short-sighted'' token-level decisions and encourage ``long-sighted'' macro-level decisions, thereby simplifies the decision-making process and potentially enhances learning efficiency. 
+
+
+
+\subsection{RLHF with Macro Actions}
+
+\begin{figure}[t]
+\centering
+    \includegraphics[trim={15pt 10pt 10pt 0},width=0.85\textwidth]{figure/MA-RLHF.pdf}
+    \caption{Illustration of the MA-RLHF framework. Standard RLHF makes decisions and evaluates value scores at the token level, while MA-RLHF operates at the macro action level, making decisions over sequences of tokens at a coarser temporal scale.}
+    \label{fig:main}
+\end{figure}
+We describe how we integrate macro-actions into the existing RLHF framework, the resulting framework is named as macro-action RLHF (MA-RLHF).
+
+
+
+
+
+\subsubsection{Formalization of Macro Actions}
+\label{sec:formalization}
+We denote macro actions as $\omega_1, \omega_2, \ldots, \omega_\tau$. In the context of LLMs, a macro action $\omega_\tau$ consists of a sequence of consecutive tokens, $i.e.$, $\omega_\tau = \{ a_{t_\tau}, a_{t_{\tau} + 1}, \ldots, a_{t_{\tau+1}-1} \}$, where $t_\tau$ is the starting index of the $\tau$-th macro action. We let $| \omega_\tau |$ denotes the number of primitive actions that $\omega_\tau$ contains. Unless otherwise specified, we use $\tau$ to index macro actions/states and use $t$ to index primitive actions/states.
+As mentioned in \S\ref{sec:revisit_macro_actions}, macro actions are defined by the policy model, the termination condition and the initiation set. In MA-RLHF, we set the policy model the same as the standard token-level RLHF and let the initiation set to be any possible sequence of tokens. Therefore, the macro action used in MA-RLHF is decided solely by the termination condition, which plays a crucial rule in the MA-RLHF framework. We explore three termination conditions in this work:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{$n$-gram based termination}: Following~\cite{vezhnevets2016strategic}, we find that $n$-grams serve as a simple \textit{yet} effective termination condition for macro actions, \emph{i.e.}, $|\omega_\tau| = n$, where $n$ represents the length of the $n$-gram. We consider two variants of the $n$-gram termination condition: (a) \textbf{Fixed $n$-gram}: We group tokens into fixed-length $n$-grams, simplifying the action space while maintaining common linguistic patterns. We empirically find fixed $n$-gram macro action perform best and use it as the default setup. (b) \textbf{Randomized $n$-gram}: We randomly select the length of a $n$-gram from a predefined list of lengths $n \in \{2,3,5,10\}$ to introduce variability, allowing the policy to adapt to different sequence lengths.
+     \item \textbf{Parsing-based termination}: $\omega_\tau$ is derived from syntactic or semantic parsing of the input text, aligning macro actions with grammatical structures like phrases or clauses. Concretely, we traverse the constituent tree of the entire sequence using depth-first search (DFS), expanding non-terminal nodes until current non-terminal state contains no more than a specified threshold of leaf tokens, set at $C=5$.
+    \item \textbf{Perplexity-based (PPL) termination}: Perplexity measures the likelihood of a sequence of tokens. Here, the perplexity of a macro action is proportional to the averaged entropy of the token within it, $i.e.$, $\mathrm{ppl}( \omega_\tau ) \propto  - \frac{1}{|\omega_\tau|} \sum_{a \in \omega_\tau} \log p_{a} $. A macro action terminates until it reaches a token that has negative impact on the perplexity of the macro action. Mathematically, we construct $\omega_\tau = \{ a_{t_\tau}, \ldots, a_{ t_{\tau+1} - 1 }\}$ such that $\mathrm{ppl}( \omega_\tau \cup a_{\tau+1} ) > \mathrm{ppl}( \omega_\tau )$ and $\mathrm{ppl}( \{ a_{\tau}, \ldots, a_{i} \} ) \geq \mathrm{ppl}( \{ a_{ \tau }, \ldots, a_{i+1} \} )$ for all $t_\tau \leq i \leq t_{\tau + 1}$.
+\end{itemize}
+
+
+
+
+\subsubsection{Policy Optimization with Macro Actions}
+
+In MA-RLHF, we adapt the PPO algorithm to operate at the macro action level, referred to as MA-PPO. The policy $\pi_\theta$ still outputs probabilities over individual tokens, but for optimization, we consider the joint probability of the macro action: $\pi_\theta ( \omega_{\tau} ~|~ s_\tau ) = \prod_{t=t_\tau}^{ t_{\tau + 1} } \pi_\theta ( a_t ~|~ a_{< t} )$.
+The macro reward for executing the macro action $\omega_\tau$ at the macro time step $\tau$ is defined as:
+$
+    R_{\tau} = \mathbb{E} \big[ \sum_{i=0}^{|\omega_\tau|-1} \rho^i r_{t_\tau + i}  ~\big|~ s_\tau \big],
+$
+where $r_{t}$ is the reward received at time step $t$, and we set the discount factor $\rho = 1$ in our experiments.
+
+Each macro action represents a contiguous sequence of tokens, and is treated as an option in the SMDP framework.
+The option-level value function with macro action is then estimated as:
+\begin{equation*}
+    V^\pi(s_\tau, \omega_{\tau}) = \mathbb{E} \left[ R_{\tau} + \gamma V^\pi(s_{t_{\tau + 1}}) \ \middle| \ s_\tau, \omega_{\tau} \right],
+\end{equation*}
+where $\gamma$ is the discount factor for future rewards beyond the macro action.
+
+The advantage function $A_\pi(s_\tau, \omega_{\tau})$ in MA-PPO determines how much the chosen macro action outperforms the average, which is defined as $ A_\pi(s_\tau, \omega_{\tau}) = Q_\pi(s_\tau, \omega_{\tau}) - V^\pi(s_\tau)$. Similar to the definition stated in \S\ref{sec:bg}, $Q_\pi(s_\tau, \omega_{\tau})$ is the expected return conditioned on executing $\omega_{\tau}$ at state $s_\tau$, which is calculated by summing the immediate macro rewards from the macro action with the discounted value of the subsequent state.
+
+In MA-PPO, the objective function is adapted for MA-level evaluation. The policy gradient is computed based on the advantage of the MA sequences:
+\begin{equation*}
+    \mathcal{L}^{\text{MA-PPO}}(\theta) = {\mathbb{E}}_\tau \left[ \min \left( r_\tau(\theta) \hat{A}_\tau, \ \text{clip}\left( r_\tau(\theta), 1 - \epsilon, 1 + \epsilon \right) \hat{A}_\tau \right) \right],
+\end{equation*}
+where $r_\tau(\theta) = \pi_\theta \big( \omega_{\tau} \mid s_\tau \big) / \pi_{\theta_{\text{old}}} \big( \omega_{\tau} \mid s_\tau \big)$, and $\hat{A}_\tau$ is the estimated advantage at macro time step $\tau$, $\epsilon$ is a constant that defines the range for clipping, and $\pi_{\theta_{\text{old}}}$ is the policy before the update.
+
+
+
+
+
+
+    
+
+
+
+\subsubsection{Connection to Previous Methods}
+\label{sec:connection}
+MA-RLHF builds on and generalizes prior work in the RLHF literature by varying the length of macro actions. When the macro action length is set to $1$, MA-RLHF reduces to the standard token-level RLHF~\citep{summarize_feedback, instrutGPT}, operating as an MDP. Conversely, if we allow $|\omega_\tau| \rightarrow \infty$, then MA-RLHF converges toward methods like RLOO~\citep{ahmadian2024back} and REINFORCE~\citep{mcgovern1998macro}, approximating a contextual bandit problem where decisions are made based on the entire sequence context. By varying the length of macro actions $|\omega_\tau|$, MA-RLHF provides a flexible framework that balances the granularity of action decisions. We provide further analysis on the impact of $|\omega_\tau|$ in \S\ref{sec:ma_analysis}.
+
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Experimental Settings}
+\textbf{Tasks and Datasets$\:$} We evaluate MA-RLHF on three different datasets for open-ended generation tasks: TL;DR~\citep{summarize_feedback} dataset for text summarization, Anthropic Helpful and Harmless (HH-RLHF)~\citep{hhh} for dialogue generation\footnote{\url{https://huggingface.co/datasets/Dahoas/full-hh-rlhf}}, and WebGPT Comparison~\citep{webgpt} for question answering. Additionally, we evaluate MA-RLHF on code generation using the APPS \citep{apps} dataset. More details of the datasets can be found in \Cref{datasets}.
+
+\textbf{Base models and training details $\:$} For open-ended generation tasks, we use pre-trained Gemma-2B~\citep{gemma} as our base model; we further adopt Gemma-7B and Gemma-2-27B to test the scaling trend. For the program synthesis task, we use CodeGemma-1.1-2B and CodeGemma-1.1-7B-it as our base models.
+\textbf{Evaluation$\:$} For open-ended generation tasks, our evaluation metrics includes RM scores, GPT-4 pairwise evaluation, and human pairwise evaluation.
+To compute the RM score, we randomly sample 2k validation instances for the TL;DR and HH-RLHF datasets and use the default validation set of the WebGPT dataset.
+For GPT-4 and human evaluations, we simulate the win-rate on 50 instances that are drawn from the instances used in the RM evaluation. The GPT-4 and human evaluations are based on task-specific criterion: relevance, coherence, consistency, and fluency for TL;DR; helpfulness for HH-RLHF; factual accuracy, coherence, and usefulness for WebGPT. We followed prior studies~\citep{DBLP:journals/corr/abs-2112-00861,mt-bench} by randomizing the order of responses during evaluation to mitigating potential evaluation biases. For the program synthesis task, we utilize pass@1 and pass@5 metrics to assess the performance of the model, evaluated on the provided 5k test set. 
+
+\subsection{Main Results}
+\label{sec:main_results}
+In this section, we present the main results of applying MA-PPO across three key tasks: summarization, dialogue, and question answering. The main takeaway is that MA-PPO consistently outperforms vanilla PPO in terms of both training efficiency and generation quality; MA-PPO obtains a significant improvement in testing reward model scores and human/GPT-4 evaluation win rates.
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.65\linewidth}
+    \centering
+    \includegraphics[trim={30pt 10pt 0pt 100pt},width=0.45\columnwidth]{figure/tldr_2B_main.pdf}
+    \includegraphics[trim={10pt 10pt 20pt 20pt},width=0.45\columnwidth]{figure/tldr_7B_main.pdf}
+    \caption{\label{fig:tl;dr-main}Test RM scores of Gemma-2B and Gemma-7B models on the TL;DR dataset. 
+    The shaded regions represent the standard deviation on test RM scores across training runs.}
+\end{minipage}
+\hspace{1mm}
+\begin{minipage}{0.33\linewidth}
+\centering
+    \includegraphics[trim={20pt 35pt 10pt 10pt},width=0.9\columnwidth]{figure/tldr_2B_rm_distribution.pdf}
+    \caption{Distribution of the RM scores for vanilla PPO and MA-PPO on TL;DR test set. 
+    }
+    \label{fig:tl;dr-rm-ditribution}
+\end{minipage}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \includegraphics[trim={0pt 30pt 0pt 0pt},width=0.32\linewidth]{figure/tldr_win_rate.pdf}
+    \includegraphics[trim={0pt 30pt 0pt 0pt},width=0.32\linewidth]{figure/dialogue_win_rate.pdf}
+    \includegraphics[trim={0pt 80pt 0pt 0pt},width=0.32\linewidth]{figure/qa_win_rate.pdf}
+    \caption{The win rates of MA-PPO against vanilla PPO, estimated by GPT-4 and Human. The left/middle/right figures are results for \textbf{TL;DR}, \textbf{HH-RLHF} and \textbf{WebGPT Comparisons} respectively.}
+    \label{fig:win-rate}
+\end{figure}
+\textbf{TL;DR Summarization}\,\, For the TL;DR summarization task, MA-PPO shows a marked improvement over vanilla PPO. As shown in \Cref{fig:tl;dr-main}, MA-PPO achieves parity with vanilla PPO approximately 1.7 -- 2 times faster during training. Specifically, Gemma-2B trained with 1.7k MA-PPO updates reaches similar testing RM scores obtained by vanilla PPO trained with 3.7k steps. We also find similar trends when scaling up the parameter sizes to 7B, demonstrating the generalized capability of MA-PPO on model sizes.
+
+Moreover, \Cref{fig:tl;dr-rm-ditribution} highlights the distribution of RM scores, where MA-PPO consistently shifts towards higher RM sores compared to vanilla PPO. Further evaluation using GPT-4, given in the left figure of \Cref{fig:win-rate}, shows that MA-PPO achieves 78\% and 86\% win rate over vanilla PPO for the 2B and 7B models, respectively. Human evaluation gives similar result, where MA-PPO obtains win rates of 74\% and 69\%, and further confirming the effectiveness of macro actions. The final testing RM scores of MA-PPO and vanilla PPO are given in \Cref{tab:rm_score_and_ppl}.
+\textbf{HH-RLHF Dialogue}\,\, We use the HH-RLHF dataset to evaluate the helpfulness and harmlessness of single-turn dialogues. MA-PPO shows clear advantages over vanilla PPO, as depicted in the middle figure of \Cref{fig:win-rate}. GPT-4 evaluations show that MA-PPO yields a 72\% win rate for the Gemma-7B model, compared to 58\% for the Gemma-2B model. Human evaluation results align with these findings, with the win rate increasing from 52\% to 56\% as model size scales from 2B to 7B. The testing RM score of MA-PPO and vanilla PPO are presented in \Cref{tab:rm_score_and_ppl}. These results highlight the scalability and effectiveness of MA-PPO in dialogue tasks.
+
+\textbf{WebGPT Comparisons}\,\, We evaluate MA-PPO on the WebGPT Comparison dataset for question-answering tasks. As shown in \Cref{fig:win-rate} (Right), MA-PPO consistently outperforms vanilla PPO, with GPT-4 evaluations yielding a win rate of 64\% for the Gemma-7B model. This result demonstrate the robustness of MA-PPO across different tasks, including more structured tasks like question answering.
+
+\begin{table*}[t]
+\centering
+    \begin{minipage}{0.4\linewidth}
+    \centering
+    \small
+    \caption{\label{tab:tl;dr-agreement} Agreement among RM, GPT-4, and human evaluations on TL;DR.}
+    \scalebox{0.85}{
+    \begin{tabular}{c|c|ccc}
+    \toprule
+        &  \textbf{\#Param}   & \textbf{RM}    & \textbf{GPT-4} & \textbf{Human} \\
+    \midrule
+    RM & \multirow{3}{*}{2B}   & 100\% & -     & -     \\
+               GPT-4  & & 78\%  & 100\% & -     \\
+               Human  & & 76\%  & 58\%  & 100\% \\
+    \midrule
+    RM     & \multirow{3}{*}{7B} & 100\% & -     & -     \\
+               GPT-4  & & 78\%  & 100\% & -     \\
+               Human  & & 74\%  & 64\%  & 100\% \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{minipage}
+\hspace{5mm}
+    \begin{minipage}{0.55\linewidth}
+    \centering
+    \small
+     \caption{\label{tab:rm_score_and_ppl} Test RM scores of vanilla PPO and MA-PPO on TL;DR, HH-RLHF, and WebGPT datasets.} 
+    \scalebox{0.9}{
+    \begin{tabular}{l|lll}
+    \toprule
+    \textbf{Model}       & \textbf{TL;DR} & \textbf{HH-RLHF} & \textbf{WebGPT} \\
+    \midrule
+    Vanilla PPO (2B) & 0.84  & 1.31                        & -0.62                     \\
+    MA-PPO    (2B)    & $\textbf{1.41}_{\textcolor{deepgreen}{\text{+68\%}}}$  & $\textbf{1.55}_{\textcolor{deepgreen}{\text{+18\%}}}$                        & $\textbf{-0.60}_{\textcolor{deepgreen}{\text{+3\%}}}$                      \\
+    \midrule
+    Vanilla PPO (7B) & 1.90  & 1.05                        & -0.61                      \\
+    MA-PPO    (7B)    & $\textbf{2.47}_{\textcolor{deepgreen}{\text{+30\%}}}$  & $\textbf{1.24}_{\textcolor{deepgreen}{\text{+18\%}}}$                        & $\textbf{-0.56}_{\textcolor{deepgreen}{\text{+8\%}}}$                       \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{minipage}
+\end{table*}
+
+\textbf{Validating Model-based Judgments with Human Evaluation}\,\, We evaluate the reliability of our evaluation methods by calculating the agreement between the reward model, GPT-4, and human evaluators. Since GPT-4 and human evaluations are conducted pairwise, we determine the reward model's win rate by selecting the summary with the higher RM score. The results, shown in \Cref{tab:tl;dr-agreement}, demonstrate that the reward model aligns more closely with both GPT-4 and human evaluations. Furthermore, the agreement between GPT-4 and human evaluators averaged 62\% across models, reinforcing the consistency and validity of our evaluation framework.
+\input{section/analysis}
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\textbf{LLM Alignment}\,\, RLHF have shown impressive success in aligning LLMs with human preferences through multi-stage training, including SFT, RM, and RL fine-tuning~\citep{ziegler2019fine, summarize_feedback, instrutGPT}. Recent research has explored optimization methods for RL in LLMs, employing both online~\citep{ahmadian2024back, farebrother2024stop, shen2024improving, chakraborty2024maxmin} and offline RL algorithms~\citep{DBLP:conf/iclr/SnellKSYL23, DBLP:journals/corr/abs-2308-12050, yu2024mathcalbcoder} to address training instability and improve efficiency~\citep{DBLP:journals/corr/abs-2405-08448}. Improvements to RM learning have been proposed, such as parameter scaling~\citep{DBLP:conf/icml/GaoSH23}, fine-grained reward~\citep{wu2023finegrained}, tool use~\citep{li2024toolaugmented}, and model merging~\citep{DBLP:conf/icml/RameVHDCBF24, rame2024rewarded}. Alternatively, direct policy optimization~\citep{dpo,kto,ipo,rosset2024direct} has emerged as a promising approach, bypassing the instability of RL while directly aligning models to human preferences. In this paper, we enhance the RLHF action space by integrating macro actions, a well-established concept in RL\citep{sutton1999between, pmlr-v32-mann14}.
+\textbf{Macro Action in RL}\,\, Macro actions introduce temporal abstraction in RL by grouping sequences of primitive actions, reducing decision complexity and improving long-horizon credit assignment~\citep{precup1997planning,hauskrecht2013hierarchical, sutton1999between, DBLP:journals/tmlr/PignatelliFGMHT24,JMLR:v24:21-1213}. This method has demonstrated its utility in speeding up convergence and stabilizing policy updates in various domains~\citep{pmlr-v32-mann14, solway2014optimal}. Our work applies macro actions to RLHF in LLM training, leveraging this structure to enhance scalability and optimize credit assignment over extended sequences.
+
+
+
+
+
+
+\section{Conclusion and Future Work}
+
+\label{sec:concl}
+
+
+In this paper, we introduced MA-RLHF, a novel framework that incorporates macro actions into RLHF to enhance the alignment of LLMs with human preferences. Our approach demonstrates consistent improvements across multiple tasks, including summarization, dialogue generation, question answering, and program synthesis. Notably, MA-RLHF achieves 1.7x to 2x faster convergence in reward scores without incurring additional computational overhead, showing robust scalability across model sizes ranging from 2B to 27B parameters. It is promising to explore more fine-grained or learnable macro action strategies for future research.
+
+
+

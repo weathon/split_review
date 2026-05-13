@@ -1,0 +1,193 @@
+# Conservative Prediction via Data-Driven Confidence Minimization
+
+- Decision: Reject
+- Scores: 5, 6, 5, 3
+
+## Abstract
+In safety-critical applications of machine learning, it is often desirable for a model to be \textit{conservative}, abstaining from making predictions on ``\unknown{}'' inputs which are not well-represented in the training data.
+  However, detecting \unknown{} examples is challenging, as it is impossible to anticipate all potential inputs at test time.
+  To address this, prior work ~\citep{hendrycks2018deep} minimizes model confidence on an auxiliary outlier dataset carefully curated to be disjoint from the training distribution.
+  We theoretically analyze the choice of auxiliary dataset for confidence minimization, revealing two actionable insights: (1) if the auxiliary set contains \unknown{} examples similar to those seen at test time, confidence minimization leads to provable detection of \unknown{} test examples, and (2) if the first condition is satisfied, it is unnecessary to filter out \known{} examples for out-of-distribution (OOD) detection.
+  Motivated by these guidelines, we propose the Data-Driven Confidence Minimization (\ours{}) framework, which minimizes confidence on an \textit{uncertainty dataset}.
+  We apply \ours{} to two problem settings in which conservative prediction is paramount -- selective classification and OOD detection -- and provide a realistic way to gather uncertainty data for each setting.
+  In our experiments, \ours{} consistently outperforms existing selective classification approaches on 4 datasets when tested on unseen distributions and outperforms state-of-the-art OOD detection methods on 12 ID-OOD dataset pairs, reducing FPR (at TPR 95\%) by $6.3\%$ and $58.1\%$ on CIFAR-10 and CIFAR-100 compared to Outlier Exposure. %
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a method called Data-Driven Confidence Minimization (DCM) for OOD detection and selective classification (i.e., a reject option). The method builds on Outlier Exposure, using different uncertainty datasets. For selective classification, the uncertainty dataset is misclassified examples in a val set. For OOD detection, the uncertainty dataset is a potential mixture of in-distribution and OOD data. The paper includes a proof that having a noisy uncertainty dataset in this manner still allows for separating ID and OOD examples. In experiments, DCM performs well compared to several OOD detection baselines including OE.
+
+### Strengths
+- Good empirical results
+- The paper is well-written and easy to follow
+
+### Weaknesses
+ - There isn't much technical novelty on top of OE. The method is mainly about selecting a new uncertainty dataset, which is a fine direction to explore, but the approach is technically simple and possible not substantial enough for ICLR.
+
+- The proof seems fairly obvious; it seems to be saying that datasets are separable even when the training data are noisy. I may have missed some details, but surely this is already well-known and a standard result in learning theory. I'm worried that this proof doesn't contribute new knowledge to the field and may give rise to a false impression.
+
+- There are numerous more recent baselines, e.g., Virtual Outlier Synthesis. It would be good to include some of these.
+
+### Questions
+N/A
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes the Data-Driven Confidence Minimization (DCM) framework for detecting unknown inputs in safety-critical machine learning applications. By minimizing model confidence on an uncertainty dataset, DCM achieves provable detection of unknown test examples. Experimental results demonstrate that DCM outperforms existing approaches in selective classification and out-of-distribution detection tasks.
+
+### Strengths
+Overall I think the paper is well motivated and well written. The proposed method is well motivated by the theretical analysis and the empirical performance is convincing.
+
+### Weaknesses
+ * For the theretical part, what can we say when the following does not hold "(1) if the auxiliary set contains
+unknown examples similar to those seen at test time, confidence minimization leads to provable detection of unknown test examples". Specifically, what if the auxiliary set DOES NOT contain unknown examples similar to those seen at test time. It is important to know the theretical property in this case.
+
+* The experiment results are shown in CIFAR. I would be more interested in experiments on larger scale datasets with foundation models. For example, CLIP on ImageNet. Nowadays, the interest of the community has shifted to foundation models. I believe the paper can benefit from this aspect.
+
+### Questions
+See weakness
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a data-driven method to penalize the over-confident prediction on unknown samples. Specifically, the authors suggest that auxiliary datasets that contain unknown samples should be mixed with the original training dataset to obtain a conservative prediction. In addition, the authors propose a two-stage training scheme. For the first stage, the model is trained with training data. Then auxiliary dataset is combined with the training data to train the model with a loss composed of cross-entropy loss and regularization. To further understand the training scheme, theoretical analysis is provided by the authors which suggests that the proposed method can get a prediction confidence always lower than the true confidence.
+Additionally, according to the analysis, a known sample tends to be given larger confidence. 
+To verify the proposed method, extensive experiments are conducted. In detail, the method is validated with selective classification and OOD detection across several image classification datasets.
+
+### Strengths
+This paper proposes to use an auxiliary dataset combined with a penalized loss function to reduce the confidence in unseen samples. To further understand the proposed method, the authors analyze the proposed method theoretically and get two reasonable interpretations of the proposed method. To validate the efficacy of the proposed method, several datasets are selected to conduct experiments with different counterpart methods. The proposed method shows good performance on selective classification as well as ood detection.  An ablation study of the component of the method is also given to further analyze the method. The authors also show us the prediction histogram to validate the proposition.
+
+### Weaknesses
+It seems that the Figure 2 is not in correct order. 
+By observing Table1, we can find a performance drop on iid setting for relative simple datasets that can achieve classification accuracy more than 99\%. And we can also find an enhancement in the ood setting. 
+However on relatively hard setting like FMoW, the iid performance is enhanced by the performance, but the ood and iid+ood performance does not show a significant gap compared with other methods. 
+Take the loss into consideration, I am wondering whether the key is to use a strong regularization on training set and the enhancement for ood is in sacrifice of performance drop of the iid setting. 
+Could the authors show the result of adding a strong label smoothing or similar regularization during pretraining for more complete comparison?
+In addition, could the author show the results of larger datasets? I am wondering whether the regularization still works as the classification task becomes harder.
+
+### Questions
+Please refer to weakness.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+Pretrained models can perform well on known observations but might be overconfident on unknown points, which hence incur high risks in safety-critical domains. Motivated by this, the authors proposed a conservative approach based on the Data-Driven Confidence Minimization for both selective classification and out-of-distribution detection tasks.  Particularly, they introduced a regularizer in the objective function to penalize the over-confidence in those unknown observations.
+
+### Strengths
+* The authors provided insight into the choice of the auxiliary dataset severed as unknown observations, which can be used in the regularization part. 
+* Empirically, the authors conducted extensive experiments to show that the proposed method is promising.
+
+### Weaknesses
+ * To be honest, I got overwhelmed for a while due to some confusing notations and definitions.
+  *  I am confused about the definition of "unknown" in selective classification. For examples,
+     * The authors first referred to the unknown examples as those not well-represented in training (paragraph 1, section 2), later they said that unknown examples are those misclassified points (paragraph 2, section 2). In selective classification, one may use "hard" observations (easily misclassified) instead of "unknown" to avoid the confusion of the "unknown" in OOD.  
+     * When it comes to the notation for unlabeled data $D_u$ exclusively used in the OOD detection, Proposition 4.1 and 4.2 then sounds targeting OOD detection with the conclusion "DCM provably detects unknown examples". Here I presume that "detects unknown examples" solely means "detects OOD examples", excluding the "unknown" examples in the selective classification task.
+  * The authors need to well-articulate the notations before these are used. For examples, 
+    * What is $\mathcal{P}_{ID}$? It is not friendly for readers not familiar with this topic.
+    * Please add the appendix reference for the definition of $\delta$-neighborhoods in the comment after Proposition 4.1.
+    * What does $i$ in (4) stand for?
+
+* The uniform label distribution used for "unknown" observations is ad-hoc. It sounds like you are assuming all unknown examples overlap together and hence you cannot clearly distinguish them. However, what if there are only several overlapped classes? For example, some unknown observations from class 1 overlap with class 2, but they are disjoint with other classes. In this case, it is not appropriate to give non-zero probability to generate other “pseudo” labels for these unknown examples from class 1. Moreover, if this unknown example is an OOD point that is unlike any of the "known" classes, does it still make sense to give a non-zero probability to be labeled as "known" classes?
+
+* The authors need to discuss the practicality of the assumption "$D^\delta_{k}$ and $D^\delta_{unk}$ are disjoint" in Proposition 4.2 since the proposed method follows the corresponding theoretical guidance. In other words, is this assumption strong? 
+  * The unknown/misclassified points (I follow your definition of "unknown") in selective classification could be those hard points from some classes that intrinsically overlap with each other, then "known" and "unknown" are not disjoint. 
+  * In OOD detection, now that we have the assumption of "disjoint", why do we still bother with the unlabeled data? Why do not generate auxiliary data around but separable from ID?
+
+* The theoretical guidance is not that clear: Are the two theorems practically useful and how do the authors capitalize on these theorems in the experiments? In particular, as per Line 2, Page 5, what kind of "appropriate threshold" is used? Did the authors use the value of the left-hand side of the inequality in (4)?
+
+
+### Questions
+* In Algorithm 2, since there are no "easily misclassified" examples with known labels like the validation data in Algorithm 1, why do not just train the model based on $\mathcal{L}\_{xent}+\lambda\mathcal{L}\_{conf}$? In other words, is there any necessity for the prior step to optimize $\mathcal{L}\_{xent}$?
+
+* Equation (9) and the comment "resulting in a mixture between the true label distribution $p$ and the uniform distribution $\mathcal{U}$, with mixture weight $\lambda$" after Proposition 4.2: Is this rearrangement (9) correct? Since $\mathcal{P}\_{u}=\alpha_{test}\cdot\mathcal{P}\_{ID} + (1-\alpha_{test})\cdot\mathcal{P}\_{OOD}$, why is the mixture weight just $\lambda$, wouldn't there be an extra factor $\alpha_{test}$?
+
+* $\epsilon$ in Proposition 4.2 and the involved proof:  
+  * The exact value of $\epsilon$ depends on the model performance or $\mathcal{L}(\theta)$, how can we allow $\epsilon\leq\frac{1}{2N}(\frac{M-1}{(1+\lambda)M})^2$ to conclude the inequality (15)? 
+  * What is $M$ in (15)?
+
+* Proposition A.1: I think the dimension of $p$ is $C+1$ when it comes to OOD detection (as the authors mentioned $p$ is the true label distribution). However, the dimension of $s$ is $C$ as the authors explicitly showed. Then is that legitimate for the expression $s-p$ and $s-\frac{\mathbf{1}}{C}$ in (6)?
+
+* Other minor issues: 
+  * Please consistently add a comma after "i.e."
+  * What is (5) used for?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair

@@ -1,0 +1,319 @@
+\title{Non-invasive Neural Decoding in Source Reconstructed Brain Space}
+
+\begin{abstract}
+  Non-invasive brainwave decoding is usually done using Magneto/Electroencephalography (MEG/EEG) sensor measurements as inputs. This makes combining datasets and building models with inductive biases difficult as most datasets use different scanners and the sensor arrays have a nonintuitive spatial structure. In contrast, fMRI scans are acquired directly in brain space, a voxel grid with a typical structured input representation. By using established techniques to reconstruct the sensors' sources' neural activity it is possible to decode from voxels for MEG data as well. We show that this enables spatial inductive biases, spatial data augmentations, better interpretability, zero-shot generalisation between datasets, and data harmonisation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Real-time non-invasive neural decoding is typically done using sensor measurements, with models translating their time series to useful predictions like which word is read \citep{duan2023dewave} or picture is seen \citep{benchetrit2023brain}. Raw non-invasive sensor data resembles a static random point cloud where each point has an associated time series, making the relation between sensor data points unintuitive. This renders tasks like developing data augmentations, interpreting decoding models, designing strong inductive biases, generalising between datasets, and combining them non-trivial. Many common deep learning modalities, such as images, do not suffer from this as they have a clear structure --- they can be augmented by cropping, interpreted by masking regions, learnt using hierarchical local feature detectors, and combined by rescaling. Combining datasets is especially important as deep learning typically performs best with lots of data \citep{lecun2015deep}.
+
+These challenges are evident in existing works. \cite{defossez2023decoding} learn to predict perceived speech from magnetoencephalography (MEG) and electroencephalography (EEG) data, where despite their impressive engineering they do not combine datasets or use data augmentations. They do however use a spatial attention mechanism over the sensors' locations, thereby using spatial sensor space information. \cite{jayalath2024brain} pre-train and fine-tune on different datasets, thereby requiring projecting their data into a learnt latent space which lacks explicit geometric structure. Moreover, it requires fine-tuning for datasets not seen during training. \citet{afrasiyabi2024latent} learn a latent cross-modality representation but require corresponding functional magnetic resonance imaging (fMRI) and MEG/EEG data. \cite{wang2022open} and \cite{wang2023brainbert} transform sensors’ time series to construct better input representations but treat each sensor independently. While some works use spatial data augmentations over sensors, these tend to be simple like swapping the left and right hemispheres or masking random channels \citep{rommel2022data}.
+
+Other neural decoding modalities are amenable to more deep learning techniques as their inputs are spatially structured. fMRI scans are processed as 3D voxels, allowing the use of 3D convolutional networks \citep{mzoughi2020deep}, data augmentations \citep{chlap2021review, ren2024mindsemantix}, interpretability \citep{zintgraf2017visualizing}, and transfer learning by combining datasets \citep{wen2023machine}. Moreover, fMRI has a higher spatial resolution (\(\sim1\)mm) than MEG and EEG (several millimetres). However, its slow sampling speed (\(\sim0.5\)Hz) and bulky equipment requirements make it difficult to use for real-time decoding \citep{benchetrit2023brain}. Invasive approaches have high spatiotemporal resolutions and are spatially structured but require subjects undergoing surgery, thereby limiting their use \citep{peksa2023state}. MEG and EEG can record brain signals at cognitively relevant timescales (on the order of ms) while being non-invasive. So far, these data are not typically decoded in voxel space, possibly due to this mapping between measurements and their spatial sources being ill-posed and nontrivial \citep{mattout2006meg}.
+
+Still, approximate MEG and EEG source reconstruction is possible. This converts the sensor data to a 3D voxel grid of neural activity at different points in the brain, known as brain or source space. Being a regular grid with an underlying physical meaning source space has an inherent and intuitive spatial structure. This allows it to benefit from research on learning for 3D images \citep{maturana2015voxnet} in general and medical imaging \citep{lu2019deep} in particular.
+
+There is also a naturalness argument for why neural data should be analysed from a source instead of sensor perspective. Although representation learning should make different input representations equivalent, in practice structured inputs yield better performance as they enable data augmentations \citep{park2019specaugment, shorten2019survey} and architectures with inductive biases \citep{lecun1995convolutional, gilmer2017neural, ho2020denoising}. In well studied modalities input representations that fit human perception tend to work best. Bitmap images are standard inputs in computer vision and not spatial gradient information, which were prevalent in pre-deep learning handcrafted features \citep{lowe2004distinctive,dalal2005histograms}. In speech processing log mel spectrograms --- a logarithmic scale that approximates the human auditory response --- are the de-facto standard input representations \citep{choi2018comparison, park2019specaugment}. On the other hand, text has complex dependencies that make it difficult to design effective data augmentations, with state-of-the-art models often not using any \citep{vaswani2017attention}. Structured inputs are also easier to interpret --- practitioners care which brain regions play a role in decoding stimuli more than whether the most important sensor was number 15 or 32. While neural activations are not perceived in a sensory sense, they describe an underlying biological process instead of a measurement thereof.
+
+Decoding from MEG/EEG source space has been done before, but previous works are either impractical for real-time decoding or do not use deep learning. For example, \citet{daly2023neural} rely on simultaneous fMRI recordings, \citet{westner2023best} use only linear models and either simulated or small datasets, and \citet{westner2018across} use only random forests. Still, their results are promising --- \citet{westner2022unified} remarks that source reconstruction can induce denoising and for \citet{westner2023best} decoding from sources outperforms sensors.
+
+\begin{wrapfigure}[15]{r}{0.47\textwidth}
+    \centering
+    \includegraphics[width=0.41\textwidth]{plots/bvox_plot.PNG}
+    \caption{General setup --- MEG data is measured using sensors, preprocessed, and used for decoding. Here we use source reconstruction to learn over estimated neural activity instead.}
+\end{wrapfigure}
+In this work we compare decoding in source to sensor space, with an emphasis on large-scale deep learning. After tuning a preprocessing pipeline (section \ref{sec:prep}) we show that source space' structure can help decoding, enabling models with inductive biases (\ref{sec:indb}), spatial data augmentations (\ref{sec:da}), interpretability (\ref{sec:int}), zero-shot cross dataset generalisation (\ref{sec:intergen}), and learning from a combination of datasets without requiring projecting to a shared learnt latent space (\ref{sec:combl}), which is sometimes known as ``harmonisation'' \citep{cheng2024general}. We are unaware of other works that accomplish the last two points.
+
+
+
+\section{Preprocessing and Source\\Reconstruction}
+
+\label{sec:prep}
+Data is mapped from sensor to source space using source reconstruction \citep{hamalainen1993magnetoencephalography}, a set of techniques for determining neural activity from the sensors' electromagnetic measurements. These require anatomical brain scans to model how the fields permeate through their surroundings. For simplicity we focus here on MEG data although EEG source reconstruction is also possible. 
+
+As MEG data has many sources of noise a well-tuned preprocessing pipeline is important, especially for good approximate source reconstruction. While the pipeline can be designed by changing one of its settings, training a model on it, and then measuring decoding accuracy, this amounts to an expensive high-dimensional hyperparameter optimisation. Instead, we first train logistic regression classifiers on a large random sample of settings and then ablate the best ones, with both cases using a simple decoding task, here being heard speech detection --- whether or not the subject is hearing spoken language. Other common tasks like phoneme feature classification \citep{jayalath2024brain} or decoding heard speech \citep{defossez2023decoding} are not used as it is harder to get a meaningful signal for them. The settings, their meanings, and final values are given in Table \ref{tab:preprocessing_pipeline}.
+
+\begin{table}[h]
+    \caption{Preprocessing pipeline parameters and their final values.}
+    \label{tab:preprocessing_pipeline}
+    \centering
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.09}
+    \begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}c|lll@{}}
+    \toprule
+    \textbf{Stage} & \textbf{Parameter} & \textbf{Description} & \textbf{Final Value} \\
+    \midrule
+    \multirow{4}{*}{\rotatebox[origin=c]{90}{\textbf{Sensor Preproc.}}} 
+    & Highpass frequency & Sets the signal's lower frequency limit using&0.1Hz\\&&a bandpass filter&\\
+    & Lowpass frequency & Sets the signal's upper frequency limit using&48Hz\\&&a bandpass filter & \\
+    & Downsampling frequency & Reduces the signal's sampling rate & 150Hz \\
+    & Notch filter & Whether to remove powerline frequencies & False \\
+    \midrule
+    \multirow{5}{*}{\rotatebox[origin=c]{90}{\textbf{Source Reconstruction}}} 
+    & Reconstruction method & Source reconstruction algorithm & Min. norm\\
+    & Voxel size & Voxel's dimensions & 15mm\\
+    & SNR & Assumed signal-to-noise ratio for source&3\\&&reconstruction regularisation & \\
+    & Noise covariance form & Used for whitening data prior to source&diagonal\\&&reconstruction & \\
+    & Voxel type & Whether to keep all activity components in&vec\\&&voxels (vec) or only the field's magnitude (mag) & \\
+    \bottomrule
+    \end{tabular*}
+\end{table}
+\renewcommand{\arraystretch}{1.}
+
+Source reconstruction usually uses a subject's anatomical scans, known here as structurals, to better model the relation between the sensor measurements and their sources. We use the \citet{armeni_10-hour_2022} dataset for tuning the pipeline as it has such scans and multiple recording sessions per subject, allowing single-subject decoding. It contains MEG measurements of people listening to stories in English. For tuning the pipeline we train on the first subject's first session's recording while validating on the second session and testing on the third, each being 1-2 hours long. 
+
+The logistic regression classifiers showed several trends. For the sensor preprocessing a) lower highpass and lowpass frequencies tend to perform better, and b) the downsampling frequency and whether a notch filter is applied do not have a meaningful effect. Lowpass frequencies as low as 10Hz were found to perform well, surprising given that meaningful auditory processing occurs at higher frequencies \citep{hyafil2015speech}. On the other hand much of the auditory response is low frequency, see Figure \ref{fig:evoked}. Thus, as this is possibly due to logistic regression not having representation learning and hence latching onto coarse features we chose to use a lowpass frequency of 48Hz for the final pipeline, below the power line frequencies (50Hz for European and 60Hz for American measurements) but higher than typical neural auditory processing \citep{hyafil2015speech}. 
+
+The source reconstruction parameters also exhibited some patterns. Tomographic (global) source reconstruction methods that assume correlated voxels (minimum norm \citep{hamalainen1994interpreting}, sLORETA \citep{pascual2002standardized}, and dSPM \citep{dale2000dynamic}) outperform a local one which does not (LCMV beamformer \citep{van1997localization}). Vector source estimates --- keeping the source activity's 3 vector components --- perform better than magnitude based ones --- taking only its magnitude. No typical covariance matrix, signal-to-noise ratio, or voxel size are significantly better than any others. Voxel sizes of 10, 15, and 20mm had similar results, likely due to MEG's poor spatial resolution as larger voxels may yield a higher signal-to-noise ratio as a larger volume is averaged over. Smaller voxels were not used due to memory constraints.
+
+Given this, the best value was chosen for sensitive parameters while the rest were given typical default values, yielding a standard MEG preprocessing pipeline \citep{GROSS2013349} with a few notable exceptions. The sensor data is lowpass filtered at 48Hz and downsampled to 150Hz to reduce the amount of data while preventing aliasing by having the lowpass filter be about 50\% less than the Nyquist frequency. Although the covariance matrix' form seems insignificant, later larger-scale experiments showed that using a diagonal covariance yields slightly better results. Vector source estimates were chosen instead of magnitudes to make the sensor-to-source transformation be a simple linear transform per subject and to not discard information. 
+
+As preprocessing takes several minutes per subject the final processed data is cached. This makes sensor and source space dataloading times similar, with training time chiefly dictated by the batch size.
+
+\begin{table}
+\centering
+\caption{Ablations for parameters that reduce the input's information content. Frequencies are in Hz, balanced accuracies are reported. Parameters used for the final pipeline are marked in gray. In most cases methods that minimally decrease the input's information work best, with \ref{tab:highpass} finding little filtering preferable over none.}
+\label{tab:dimredbad}
+\begin{subtable}[t]{0.32\textwidth}
+    \centering
+    \caption{Dimensionality reduction methods. PCA is per voxel so 3 components amounts to doing nothing.}
+    \begin{tabular}{cc}
+    Method & acc \\
+    \midrule
+    \rowcolor[gray]{0.8} None & 66.9 \\
+    PCA (1 component) & 65.4 \\
+    PCA (2 components) & 65.0 \\
+    Parcels & 50.5 \\
+    \label{tab:dimred}
+    \end{tabular}
+\end{subtable}
+\hfill
+\begin{subtable}[t]{0.32\textwidth}
+    \centering
+    \caption{Voxel type, whether to keep the reconstructed field as a vector or take its magnitude.}
+    \begin{tabular}{cc}
+    Voxel type & acc \\
+    \midrule
+    \rowcolor[gray]{0.8} vec & 66.7 \\
+    mag & 62.3 \\
+    \end{tabular}
+\end{subtable}
+\hfill
+\begin{subtable}[t]{0.32\textwidth}
+    \centering
+    \caption{Highpass frequency, signals with a lower frequency are attenuated.}
+    \begin{tabular}{cc}
+    Highpass freq & acc \\
+    \midrule
+    None & 61.1 \\
+    \rowcolor[gray]{0.8} 0.1 & 67.1 \\
+    0.5 & 64.0 \\
+    1 & 60.5 \\
+    \label{tab:highpass}
+    \end{tabular}
+\end{subtable}
+\end{table}
+
+The final pipeline yields \(400-900\) voxels, with the exact number depending on the subject's anatomy. Although decoding from a variable number of voxels is possible, fixed-domain decoding reduces information loss by not requiring domain-agnostic pooling. For multi-subject decoding source activity estimates are morphed into a standard template brain using both the original subject's and the template's anatomy, as per \citet{avants2008symmetric}. Usually this increases the number of voxels.
+
+The template brain has $\sim900$ voxels with three components each, giving an input dimension of $\sim2700\approx10\times$ the number of sensors. Although MEG/EEG data is known to be low rank \citep{baryshnikov2004maximum} and vector source estimates are assumed to have only two relevant components,\footnote{This is because the electric dipoles are usually assumed to be normal to the cortical surface \citep{bonaiuto2020estimates}.} we did not use dimensionality reduction techniques such as applying PCA to a voxel's channels or grouping meaningful regions using parcellations \citep{eickhoff2018imaging}. This is to prevent inputting biases that may or may not help but to have the models learn which information is relevant, as often works best \citep{sutton2019bitter}. Indeed, Table \ref{tab:dimred} shows that dimensionality reduction harms performance.
+
+
+
+\section{Source vs Sensor Space}
+
+\label{sec:cmpr}
+To test how well the representations compare we benchmarked both when decoding across a single and several subjects. The former uses the Armeni dataset as it has only three subjects but 10 hours for each, while the latter uses the \citet{schoffelen2019204} dataset due to it having many subjects but each having only one session ($\sim$1 hour). Schoffelen includes Dutch subjects listening to Dutch sentences with randomly shuffled words. 
+
+For Schoffelen subjects A2002, A2003 are used for validation, A2004, A2005 for testing, and A2006-A2010 for training. Armeni is split into 10 different recording sessions, with sessions 001-008 here being used for training, 009 for validation, and 010 for testing. This ensures the models have to temporally extrapolate as we found that randomly splitting the data can erroneously yield much higher performance due to leakage.\footnote{This is similar to \citet{yang2024mad}'s data splits except they used training sessions after their validation/test sets and a dataset without structurals.} Only internal baselines are used due to the custom task, data splits and to minimise the setup's complexity.\footnote{This is not uncommon in neural decoding, with many important works making their own baselines \citep{hollenstein2019cognival, defossez2023decoding, wang2023brainbert, jayalath2024brain, afrasiyabi2024latent}. While clearly suboptimal, it is a symptom of a maturing field without standardised MNIST-like setups.} All models are trained in a supervised manner on heard speech detection with a binary cross-entropy loss.
+
+To test only the input representation's quality while minimising confounding factors, eg. inductive biases benefiting one domain more than the other, we train three-layer multilayer perceptrons (MLPs) with dropout. For the multi-subject case 16-dimensional subject embeddings are concatenated before each fully connected layer. This was found to work slightly better than additive embeddings or concatenating only before the first layer. For new ``unknown'' subjects the average embedding is used.
+
+ Unless stated otherwise all the following models have 0.25M parameters for multi-subject decoding and 0.5M for single-subject, with the latter having more training data.\footnote{For reference, \citep{defossez2023decoding}'s models have about 9M trainable parameters when trained on \citep{gwilliams2023introducing}'s dataset, $\sim$6 times as much data as a single Armeni subject. In the current setup larger models gave similar results but were harder to train, likely due to their lack of inductive biases.} We measure balanced accuracies as the data has different amounts of gaps/silence relative to speech. All models were given single time slices as inputs instead of short windows as we focus on comparing different input spatial representations. This is another reason heard speech detection is a convenient task --- it requires far less temporal context than, for example, phoneme or word classification. Single time slices have the added benefit of speeding up training relative to using context windows.
+
+As the models have similar capacities, equal inductive biases, and no additional information other than the input is used we a priori expect source and sensor space to perform similarly. Table \ref{tab:src_sen_cmpr} (middle) shows that for single subject decoding sensor space slightly outperforms source space, possibly due to the lower input dimensionality making the optimisation easier. 
+
+\begin{table}[h!]
+    \centering
+    \caption{Balanced accuracies for single-subject (Armeni) and inter-subject (Schoffelen) source and sensor space decoding. Errors denote standard deviations over subjects and $\geq$3 random seeds throughout the paper.}
+    \label{tab:src_sen_cmpr}
+    \begin{tabular}{@{}l|cccc|c@{}}
+        & \multicolumn{4}{c|}{\textbf{Single-subject (Armeni)}} & \textbf{Inter-subject (Schoffelen)} \\
+        Input & Subject 1 & Subject 2 & Subject 3 & Average & \\
+        \midrule
+        Source & \(66.33 \pm 0.09\) & \(66.40 \pm 0.13\) & \(67.54 \pm 0.18\) & \(66.8 \pm 0.6\) & \(53.5 \pm 0.5\) \\
+        Sensor & \(67.44 \pm 0.07\) & \(66.63 \pm 0.02\) & \(68.21 \pm 0.09\) & \(67.4 \pm 0.7\) & \(54.0 \pm 0.4\)
+    \end{tabular}
+\end{table}
+
+For inter-subject decoding the result is similar, as seen in Table \ref{tab:src_sen_cmpr} (right). Sensor space' inter-subject probability of improvement \citep{agarwal2021deep} over source space is 73\%. Inter-subject accuracies are typically lower than single-subject as it is easier to generalise across time than across subjects \citep{csaky2023group, jayalath2024brain}. Even for single-subject decoding accuracies are low relative to classical deep-learning modalities due to the task being hard and data being noisy.
+
+Sensor and source performing similarly goes against some previous studies that found source space to work better, eg. \citet{westner2023best, VANES2019703}. As they use either regular statistical methods or models with no representation learning, it is unclear if their performance gains are inherently from source space as a modality or due to its increased dimensionality. 
+
+The multi-subject setting is more common for large-scale non-invasive decoding due to having more data and allowing inter-subject knowledge transfer. Thus, unless specified otherwise, from here on all experiments are inter-subject.
+
+\subsection{Using Source Space for Inductive Bias}
+\label{sec:indb}
+In practice the inputs' structures would be used to improve model performance. For source space a simple way to do so is using a 3D CNN, however this is difficult as the voxels do not form a cubic grid due to the brain being non-cubic. A  na\"ive workaround is inscribing them into a larger 3D box with the voxels outside of the brain being zero, which is what we do here. We train a 3D CNN with two squeeze-excite (SE) blocks \citep{hu2018squeeze} followed by two fully connected layers, with channelwise and regular dropout applied respectively before each. 
+
+We compare this to a model that can process irregular domains, a Graph Attention Network (GATs) \citep{velivckovic2017graph}. GATs have seen success in other neuroscience tasks like creating cortical parcellations, albeit using MRI data \citep{cucurull2018convolutional}. We use two GAT layers followed by two fully connected layers, with dropout applied similarly to the CNN. We use a regular nearest-neighbours graph, leading to most voxels having 6 edges. 
+
+These models have translation/permutation symmetries respectively, which does not reflect the brain's structure, eg. with some phenomena occurring only in one hemisphere. To break this symmetry positional embeddings are used, resulting in 6 input channels --- 3 for the vector components and 3 for the $x,y,z$ positions. Subject embeddings are not added to the positional embeddings. Subjects not seen during training use the average subject embedding.
+
+To see if these biases help sensor space as well a GAT was trained on it as well, with the graph depending on the sensors' locations. Each sensor is connected to its 5 nearest neighbours so it has a similar average degree to the voxel graph.
+
+\begin{table}[h!]
+    \centering
+    \caption{Inter-subject (Schoffelen) balanced accuracies for different models in sensor and source space. Inductive biases improve performance. The most geometric/spatially-tuned model --- the CNN --- performs best.}
+    \label{tab:indb}
+    \begin{tabular}{c|cc|ccc}
+        & \multicolumn{2}{c|}{Sensor} & \multicolumn{3}{c}{Source} \\
+        \midrule
+        Model & MLP & GAT & MLP & CNN & GAT \\
+        Accuracy & ${54.0 \pm 0.4}$ & $53.3\pm0.7$ & $53.5 \pm 0.5$ & $54.5\pm0.3$ & ${52.7\pm0.3}$ \\
+    \end{tabular}
+\end{table}
+
+In spite of its inefficient input representation the CNN outperforms all sensor and source space models while the GATs are worse than the MLP baselines. The GATs struggle to learn, having lower validation accuracies than other models while also requiring more compute. The CNN's success indicates source space' spatial information's importance.
+
+
+
+\section{Spatial Data Augmentations}
+
+\label{sec:da}
+\begin{wrapfigure}[19]{r}{0.4\textwidth}
+    \centering
+    \includegraphics[width=0.27\textwidth]{plots/augmentations.pdf}
+    \caption{Illustration of slice dropout (top) and cube masking (bottom). Shaded voxels are set to zero.}
+\end{wrapfigure}
+
+Source space's spatial information also enables spatial data augmentations. This is especially important in neural decoding where data is expensive and scarce. While many works developed temporal, learnt, or sensorwise augmentations for MEG and EEG \citep{rommel2022data}, there are few spatial augmentations and none that we are aware of in source space. We compare a generic modality-independent augmentation -- mixup \citep{zhang2017mixup} --- with a 3D space-specific augmentation which is similar to masking parts of an image, which we call slice dropout. Slice dropout works by applying dropout to random planes of voxels. We report the dropout probability used for each axis, where in practice about $3\times$ as many planes are dropped as it is applied along the $x,y,z$ axes independently.
+
+Table \ref{tab:augs} shows that while slice dropout boosts the MLP it degrades the CNN's performance. This could be due to neighbouring voxels being highly correlated, thereby making masking planes ineffective for models that rely on local information. This led us to try a different augmentation where random cubes are masked out for some fraction of the inputs, which turns out to be effective for the CNN.
+
+\begin{table}[h!]
+    \centering
+    \caption{Balanced accuracies for different augmentations. Best results for each model are in bold. Parameters refer to the augmentation's defining parameter, where Cube Masking's $p$ is the percent of inputs it is applied to. $P_{\text{Best aug.}>\text{Baseline}}$ is the best augmentation's probability of improvement over its baseline.}
+    \label{tab:augs}
+    \begin{tabular}{c|c|ccc}
+        & Sensor & \multicolumn{2}{c}{Source} \\
+        \midrule
+        Augmentation & MLP & MLP & CNN \\
+        \midrule
+        Baseline & $54.0\pm0.4$ & $53.5 \pm 0.5$ & $54.5\pm0.3$ \\
+        Mixup $\alpha=1$ & $53.7\pm0.4$ & $52.7\pm0.1$ & $53.7\pm0.2$ \\
+        Mixup $\alpha=0.1$ & $\mathbf{54.3\pm0.4}$ & $53.3\pm0.6$ & $54.0\pm0.2$ \\
+        Slice dropout $p=0.05$ &  & $\mathbf{53.9\pm0.4}$ & $54.5\pm0.4$ \\
+        Slice dropout $p=0.1$ &  & $53.4\pm0.5$ & $54.7\pm0.4$ \\
+        Cube Masking $p=0.5$ &  & $53.6\pm0.5$ & $\mathbf{54.9\pm0.4}$ \\
+        \midrule
+        $P_{\text{Best aug.}>\text{Baseline}}$ & $76\%$ & $63\%$ & $76\%$ \\
+    \end{tabular}
+\end{table}
+
+
+
+\section{Impact of Different Brain Regions}
+
+\label{sec:int}
+To understand which parts of the brain the models rely on we evaluate them while masking different regions. We use the Harvard-Oxford atlas \citep{frazier2005structural, makris2006decreased, desikan2006automated, goldstein2007hypothalamic} to define regions of interest and test the single and inter-subject models that were trained without data augmentations. Due to a region's definition being sometimes ambiguous and the source reconstruction being imperfectly localised neighbouring voxels are included as a buffer, with only regions that have at least five voxels being considered.
+
+\begin{figure}[h!]
+  \centering
+  \includegraphics[width=\textwidth]{plots/regions1.pdf}
+  \caption{Accuracy when masking out different brain regions, shown here for the model trained on subject 001 in the Armeni dataset. ``Baseline'' corresponds to no masking. For all single-subject models the baseline performs better than most masks. Errors are standard deviations over models trained on different seeds.}
+  \label{fig:regions}
+\end{figure}
+
+Surprisingly, dropping any specific region has little effect, with Figure \ref{fig:regions} showing that the accuracy drops by at most $\sim$3\% relative to the baseline. This could be due to the relevant activity being distributed, with the model not relying solely on any specific region, or because of technical reasons like the source reconstruction being insufficiently localised. A relevant region might not be included in the atlas as about a third of the voxels are unassigned. No simple consistent trend is seen across subjects. Better understanding this is left for future work. 
+
+
+
+\section{Zero-shot Interdataset Generalisation}
+
+\label{sec:intergen}
+Due to source space being a standard shared input representation it allows evaluating models trained on one dataset on subjects from another. Here we test how well the inter-subject (Schoffelen) models perform when evaluated on the single-subject (Armeni) data and vice-versa. Although all models are trained on heard speech detection the Schoffelen data is for native Dutch speakers listening to randomly shuffled Dutch words while Armeni subjects are native English speakers listening to English audiobooks. Moreover, each dataset has a different number and configuration of sensors, making cross-dataset sensor space evaluation impossible for fixed-domain models.
+
+Each dataset has a slightly different setup when evaluated with the other's models. Armeni subjects are evaluated morphed into the template brain while Schoffelen test subjects are morphed into the relevant Armeni subject's anatomy. Test sets are the same as they are when evaluating in-domain.
+
+Table \ref{tab:interd_eval} shows that the CNN performs comparably on both datasets, despite seeing only one during training, with other models being close to if not below random chance. Although the MLP and CNN have a small gap on the inter-subject test set the CNN generalises much better across datasets. Subject 003 is interesting as they exhibit bilateral neural activity unlike the other two subjects which are right-lateralised \citep{armeni_10-hour_2022}. This may hint at why the CNN better generalises on this subject in contrast to the MLP --- its convolutions have partial feature sharing,\footnote{Only partial due to the positional embeddings breaking the translational symmetry.} thereby making the active hemisphere or activity's exact location matter less. 
+
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{cccc}
+     & \multicolumn{3}{c}{\textbf{Subject}} \\
+     & 001 & 002 & 003 \\
+     \midrule
+    \textbf{Sch.$\rightarrow$Ar.} & & & \\
+    MLP & $51.5\pm1.6$ & $51.4\pm0.4$ & $51.0\pm2.0$ \\
+    CNN & $52.7\pm0.5$ & $53.5\pm0.7$ & $55.7\pm0.6$ \\
+    \midrule
+    \textbf{Ar.$\rightarrow$Sch.} (MLP) & $50.0\pm0.5$ & $51.2\pm0.2$ & $48.2\pm0.2$ \\
+    \end{tabular}
+    \caption{Inter-dataset evaluations. Sch.$\rightarrow$Ar. indicates accuracies of models trained on Schoffelen (inter-subject) when evaluated on Armeni subjects. Ar.$\rightarrow$Sch. accuracies are how well models trained on a specific Armeni subject generalise to the Schoffelen test set. Inter-subject models manage to generalise while single-subject ones fail.}
+    \label{tab:interd_eval}
+\end{table}
+
+Unsurprisingly, the single-subject models do not generalise across subjects. In spite of morphing the subjects' anatomies into the trained one's structurals the model likely overfits to its training data. It would be interesting to see whether morphing on the activity and not only the anatomical level allows the model to generalise, although this mapping is much more complicated.
+
+
+
+\section{Learning from Combined Datasets}
+
+\label{sec:combl}
+A common input representation also allows aggregating datasets. We add to the standard inter-subject training setup the first session from Armeni's subjects 001-002 while leaving the validation and test sets fixed. This gives an approximately equal number of hours per Schoffelen/Armeni subject in the training data. To see whether the additional data helps the inter-subject MLP and CNN's hyperparameters are optimised without changing their capacity. No data augmentations are used. 
+
+Table \ref{tab:combd} shows that combining datasets helps given a model that can leverage them. The MLP struggles to learn with the extra data and performs worse, failing to transfer information between datasets. The CNN's performance improves, likely owing to better leveraging the additional data. Its probability of improvement with the combined data relative to the Schoffelen only baseline is 79\%.
+
+\begin{table}[h!]
+    \centering
+    \caption{Learning from a combined dataset improves performance given a model with good inductive biases. Errors are standard deviations over seeds.}
+    \label{tab:combd}
+    \begin{tabular}{c|cc}
+        Training data & \textbf{MLP} & \textbf{CNN} \\
+        \midrule
+        Schoffelen only & $53.5 \pm 0.5$ & $54.5\pm0.3$ \\
+        Combined & $52.9\pm0.2$ & $54.8\pm0.4$ \\
+    \end{tabular}
+\end{table}
+
+This is further supported by Table \ref{tab:ar_test_res} showing that combining datasets boosts performance for all subjects using the same scanner. The better accuracy for subject 003 is somewhat surprising as subjects 001-002 exhibit right-lateralised neural activity while 003 is bilateral, thereby skewing the data away from bilateralism relative to the only Schoffelen baseline. Evidently the within-dataset similarities make up for inter-subject disparities. 
+
+Although subjects 001-002 have better performance for the combined data their variance increases significantly. It is unclear why this occurs.
+
+\begin{table}[h!]
+    \centering
+    \caption{Armeni test accuracies for the CNNs trained on Schoffelen or the combined dataset. Subjects 001-002 are in the combined dataset while 003 is not. Combining data helps generalise across both seen and new subjects. Errors are standard deviations over seeds. $P_{\text{Comb.}>\text{Sch.}}$ is the empirical probability of improvement.}
+    \begin{tabular}{cccc}
+     & \multicolumn{3}{c}{\textbf{Subject}} \\
+     Training data & 001 & 002 & 003 \\
+     \midrule
+    Schoffelen only & $52.7\pm0.5$ & $53.5\pm0.7$ & $55.7\pm0.6$ \\
+    Combined & $57.7\pm2.0$ & $55.9\pm2.1$ & $59.3\pm0.3$ \\
+    \midrule
+    $P_{\text{Comb.}>\text{Sch.}}$ & $100\%$ & $100\%$ & $100\%$ \\
+    \end{tabular}
+    \label{tab:ar_test_res}
+\end{table}
+
+
+
+\section{Discussion and Future Work}
+
+\label{sec:disc}
+This work demonstrates source space' utility as a non-invasive neural decoding input representation instead of sensor data. Beyond simple performance improvements --- either through enabling spatial inductive biases or domain-specific spatial data augmentations --- it allows using techniques that decoding from sensors does not, namely model-agnostic cross-dataset evaluation and combination. Moreover, source space is more interpretable as it represents the object of interest, the brain, while sensor data is a proxy thereof. 
+
+Models that handle variable-size inputs, like transformers and graph neural networks, may carry these benefits over to sensor space. We are unaware of any works that try this and our attempt to train a graph attention network underperformed an MLP baseline. Computer vision still relies on fixed domain models although enough data allows relaxing that requirement \citep{he2015spatial, openai2024videogeneration}, perhaps neural decoding will follow suit.
+
+Still, source space has some clear limitations, eg. a higher input dimensionality. Although this was not a bottleneck here memory may become an issue when scaling to more subjects. Source reconstruction results in additional preprocessing but this is a one-off computational cost. Finding the right parameters for it is nontrivial, with our ablations being a step towards a standard pipeline. Unlike \citet{westner2023best} we do not find source space' preprocessing to be prohibitively long as long as results are cached, with optimal batch sizes chiefly dictating a model's training time. As sensor space in some cases has better performance out-of-the-box it might be preferred in simple applications.
+
+Source space could allow combining not only different MEG datasets but different neural modalities altogether, eg. EEG and fMRI. Given these domains' limited data cross-modal learning could enable valuable knowledge transfer.
+
+\clearpage
+
+
+

@@ -1,0 +1,588 @@
+\title{Performant, Memory Efficient and Scalable Multi-Agent Reinforcement Learning}
+
+\begin{abstract}
+
+
+As the field of multi-agent reinforcement learning (MARL) progresses towards larger and more complex environments, achieving strong performance while maintaining memory efficiency and scalability to many agents becomes increasingly important. Although recent research has led to several advanced algorithms, to date, none fully address all of these key properties simultaneously. In this work, we introduce Sable, a novel and theoretically sound algorithm that adapts the retention mechanism from Retentive Networks to MARL. Sable's retention-based sequence modelling architecture allows for computationally efficient scaling to a large number of agents, as well as maintaining a long temporal context, making it well-suited for large-scale partially observable environments. Through extensive evaluations across six diverse environments, we demonstrate how Sable is able to significantly outperform existing state-of-the-art methods in the majority of tasks (34 out of 45, roughly 75\%). Furthermore, Sable demonstrates stable performance as we scale the number of agents, handling environments with more than a thousand agents while exhibiting a linear increase in memory usage. Finally, we conduct ablation studies to isolate the source of Sable's performance gains and confirm its efficient computational memory usage. Our results highlight Sable's performance and efficiency, positioning it as a leading approach to MARL at scale.\footnote{All experimental data and code will be made available soon.}
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[h]
+  \begin{subfigure}{\textwidth}
+    \centering
+      \includegraphics[width=0.9\linewidth]{images/money_shot_plot.pdf}
+    \end{subfigure}
+\begin{comment}
+    Old caption:
+    Performance, memory, and scaling characteristics of \textbf{Sable} aggregated over 45 cooperative MARL tasks. \textbf{Left}: Sable demonstrates superior performance and ranked first in 34 out of 45 tasks compared to state-of-the-art MARL algorithms across 6 environments: RWARE \citep{rware}, LBF \citep{lbf}, MABrax, SMAX \citep{flair2023jaxmarl}, Connector \citep{bonnet2023jumanji} and MPE \citep{maddpg}. \textbf{Middle}: Sable achieves superior throughput (steps per second), processing up to 6.5 times more efficiently than attention-based systems as we scale to 512 agents. \textbf{Right}: Sable scales efficiently to thousands of agents, holding stable performance, while maintaining competitive GPU memory usage, comparable to independent systems such as IPPO \citep{ippo}, and significantly outperforming attention-based models such as MAT \citep{mat}.
+\end{comment}
+
+\caption{\textit{Performance, memory, and scaling properties of \textbf{Sable}, aggregated over 45 cooperative MARL tasks.} \textbf{Left}: Sable ranks first in 34 out of 45 tasks, outperforming state-of-the-art MARL algorithms across 6 environments: RWARE \citep{rware}, LBF \citep{lbf}, MABrax \citep{peng2021facmac}, SMAX \citep{flair2023jaxmarl}, Connector \citep{bonnet2023jumanji} and MPE \citep{maddpg}. \textbf{Middle}: Sable exhibits superior throughput, processing up to 6.5 times more steps per second compared to the attention-based MAT \citep{mat} as we scale to 512 agents. \textbf{Right}: Sable scales efficiently to thousands of agents, maintaining stable performance, while using GPU memory as efficiently as independent systems, in this case IPPO \citep{ippo}, and significantly more efficiently than MAT.}
+\label{fig:moneyshot}
+\end{figure}
+
+\begin{comment}
+Golden thread - desirable properties of MARL algo:
+* handle heterogeneous agents
+* varying number of agents
+* high quality performance
+* scale to large number of agents
+* Be a generalist
+
+* Optional others:
+    * Have memory -  this can fold into performance if we choose the right envs
+    * have convergence guarantees (theoretically backed?) - I think this is nice but not sure it reads as well
+\end{comment}
+When considering large-scale practical applications of multi-agent reinforcement learning (MARL) such as autonomous driving \citep{auton-driving-3,auton-driving-1,auton-driving-2} and electricity grid control \citep{electricity-grid-1,electricity-grid-2}, it becomes increasingly important to maintain three key properties for a system to be effective: strong performance, memory efficiency, and scalability to many agents. 
+Although many existing MARL approaches exhibit one or two of these properties, a solution effectively encompassing all three remains elusive.
+
+To briefly illustrate our point, we consider the spectrum of approaches to MARL. On the one end lie fully decentralised algorithms \citep{iql, ippo}. Such algorithms demonstrate proficiency in handling many agents in a memory efficient way by typically using shared parameters and conditioning on an agent identifier. However, at scale, the performance of fully decentralised methods remains suboptimal compared to more centralised approaches \citep{rware, mappo, mat}. 
+
+Between decentralised and centralised methods, lie CTDE approaches \citep{maddpg, rware, mappo}. These methods typically employ a centralised critic during training but have independent policies that can be scaled during execution. Although such methods have been shown to be more performant than decentralised methods while maintaining their scaling properties, they do not represent the state-of-the-art (SOTA) in terms of performance.
+
+On the other end of the spectrum, lie centralised algorithms such as the Multi-Agent Transformer (MAT) \citep{mat}. MAT re-frames MARL as a sequence modeling problem by leveraging the transformer architecture and achieves SOTA performance. Although MAT is highly performant, it has limitations: (1) MAT lacks the ability to scale to truly large multi-agent systems due to the inherent memory limitations of the attention mechanism \citep{linear-transformer}, and (2) MAT lacks the ability to condition on observation histories. These limitations significantly impact what is possible to achieve at scale and in partially observable settings, commonly encountered in the real world.
+In this work, we seek to develop an approach capable of SOTA performance, while being memory efficient and able to scale to many agents. To achieve this, we take inspiration from the MAT architecture and develop a memory efficient sequence modeling approach to MARL, but using an adapted version of the retention mechanism \citep{retnet} instead of attention. We call our approach \textbf{Sable}. Sable has theoretical convergence guarantees, is able to handle settings with up to a thousand agents and can process entire episode sequences as memory, crucial for learning in partially observable settings. Through comprehensive benchmarks across 45 different tasks, we empirically verify that Sable significantly outperforms SOTA methods in the majority of cases (34 out of 45). This includes outperforming the SOTA fully centralised MAT, while being as memory efficient and scalable as the fully decentralised IPPO, achieving the best of both sides of the MARL spectrum.
+
+
+\section{Background}
+
+\paragraph{Problem Formulation}
+Cooperative MARL in partially observable settings can be modeled using a decentralised-POMDP with $\langle N, \boldsymbol{\mathcal{O}}, \boldsymbol{\mathcal{A}}, R, P, \gamma \rangle$. Here $N$ is the number of agents, $\boldsymbol{\mathcal{O}} = \prod_{i=1}^N \mathcal{O}^i$ is the joint observation space of all agents, $\boldsymbol{\mathcal{A}} = \prod_{i=1}^N \mathcal{A}^i$ is the joint action space of all agents, $R: \boldsymbol{\mathcal{O}} \times \boldsymbol{\mathcal{A}} \to \mathbb{R}$ is the joint reward function, $P: \boldsymbol{\mathcal{O}} \times \boldsymbol{\mathcal{A}} \times \boldsymbol{\mathcal{O}} \to [0, 1]$ is the environment transition probability function and $\gamma \in [0, 1)$ is a discounting factor. At timestep $t$, each agent receives a separate observation $o^i_t \in \mathcal{O}^i$, collectively forming the joint observation $\boldsymbol{o}_t \in \boldsymbol{\mathcal{O}}$, and executes a separate action $a^i_t \in \mathcal{A}^i$, forming the joint action $ \boldsymbol{a}_t \in  \boldsymbol{\mathcal{A}}$, sampled from a joint policy $\boldsymbol{\pi}(\boldsymbol{a} | \boldsymbol{o}) = \prod_{i=1}^N \pi(a^i | o^i)$. All agents receive a shared reward $r_t = R(\boldsymbol{o}_t, \boldsymbol{a}_t)$. The goal is to learn an optimal joint policy which maximises the expected joint discounted reward $J = \mathbb{E}_{\boldsymbol{\pi}} [ \sum_{t=0}^{\infty} \gamma^t r_t ]$. 
+\paragraph{MARL as Sequence Modelling}
+
+Prior work has investigated formulating MARL as a sequence modelling problem. Specifically, the multi-agent transformer \citep{mat} uses an encoder-decoder transformer architecture, where the encoder applies full self-attention across all agent observations to produce encoded observations and value estimates. The decoder auto-regressively selects actions leveraging the multi-agent advantage decomposition theorem \citep{kuba2021settling}. This theorem ensures the joint advantage remains non-zero during optimisation, providing convergence guarantees. 
+
+
+\paragraph{Retention}
+Retention as used in Retentive networks (RetNets) introduced by \cite{retnet}, eliminates the $\text{softmax}$ operator from attention and instead incorporates a time-decaying causal mask (decay matrix) with GroupNorm \citep{groupnorm} and a swish gate \citep{gelu, swish} to retain non-linearity. This reformulation allows for the same computation to be expressed in three distinct but equivalent forms: 
+
+
+\textbf{1. Recurrent} which operates on a single input token at a time via a hidden state
+\begin{equation}
+    \label{eqn:retention-recurrent}
+    \begin{aligned}
+    h_s &= \kappa h_{s-1} + K^{\text{T}}_s V_s \\
+    \text{Retention}(\boldsymbol{x}_s) &= Q_s h_s, \quad s= 1, \dots, S
+    \end{aligned}
+\end{equation}
+
+where $Q_s, K_s, V_s$ are per token query, key and value matrices, respectively. Each of these is computed by applying learned projection matrices $W_Q$, $W_K$, and $W_V$ on the embedded input sequence $\boldsymbol{x}$. The decay factor $\kappa \in (0, 1)$ determines the rate at which information from earlier parts of the sequence is retained.
+
+\textbf{2. Parallel} which operates on a batch of tokens in parallel akin to attention, given as
+\begin{equation}
+    \label{eqn:retention-parallel}
+    \text{Retention}(\boldsymbol{x}) = (Q K^T \odot D) V, \quad 
+D_{sm} = \begin{cases} 
+\kappa^{s-m}, & \text{if } s \geq m \\
+0, & \text{if } s < m,
+\end{cases}
+\end{equation}
+where $D$ is referred to as the decay matrix.
+
+\textbf{3. Chunkwise} which is a hybrid between the parallel and recurrent forms and allows for efficient long-sequence modeling. The approach involves splitting the sequence into $i$ smaller chunks, each of length $B$ and can be written as: %The given [i] indicates the i-th chunk, i.e., $x_{[i]} = [x_{(i-1)B+1}, \dots, x_{iB}]$. Chunkwise retention can be written as follows:
+
+\begin{equation}
+\begin{aligned}
+\label{eqn: retention-chunkwise}
+    Q_{[i]} = Q_{B(i-1):Bi},& \quad K_{[i]} = K_{B(i-1):Bi}, \quad V_{[i]} = V_{B(i-1):Bi} \\
+    h_i &= K_{[i]}^{T}(V_{[i]} \odot \zeta) + \kappa^B h_{i-1}, \quad \zeta_{ij} = \kappa^{B - i - 1} \\
+    \text{Retention}(\boldsymbol{x}_{[i]}) &= (Q_{[i]}K_{[i]}^{T} \odot D) V_{[i]} + (Q_{[i]}h_{i-1}) \odot \xi, \quad \xi_{ij} = \kappa^{i+1}.
+\end{aligned}
+\end{equation}
+
+
+The above equivalent representations enable two key advantages over transformers: (1) it allows for constant memory usage during inference while still leveraging modern hardware accelerators for parallel training, and (2) it facilitates efficient handling of long sequences by using the chunkwise representation during training, which can be re-expressed in a recurrent form during inference.
+\begin{comment}
+
+
+\section{Preliminaries and Background}
+
+\subsection{Problem Formulation: Multi-Agent Reinforcement Learning}
+Cooperative MARL in partially observable settings can be modeled using a decentralised-POMDP with $\langle N, \boldsymbol{\mathcal{O}}, \boldsymbol{\mathcal{A}}, R, P, \kappa \rangle$. Here $N$ is the number of agents, $\boldsymbol{\mathcal{O}} = \prod_{i=1}^N \mathcal{O}^i$ is the joint observation space of all agents, $\boldsymbol{\mathcal{A}} = \prod_{i=1}^N \mathcal{A}^i$ is the joint action space of all agents, $R: \boldsymbol{\mathcal{O}} \times \boldsymbol{\mathcal{A}} \to \mathbb{R}$ is the joint reward function, $P: \boldsymbol{\mathcal{O}} \times \boldsymbol{\mathcal{A}} \times \boldsymbol{\mathcal{O}} \to [0, 1]$ is the environment transition probability function and $\kappa \in [0, 1)$ is a discounting factor. At each timestep $t$ the team of agents observe a joint observation $\boldsymbol{o}_t \in \boldsymbol{\mathcal{O}}$, execute a joint action $ \boldsymbol{a}_t \sim \boldsymbol{\pi}(\cdot | \boldsymbol{o}_t)$ in the environment and receive a joint reward $r_t = R(\boldsymbol{o}_t, \boldsymbol{a}_t)$. The goal of the team is then to learn an optimal joint policy $\boldsymbol{\pi}^*(\mathbf{a} | \mathbf{o}) = \{ \pi^{*i}(a^i | o^i)\}_{i=1}^{N}$ which maximises the expected joint discounted reward $J = \mathbb{E}_{\boldsymbol{\pi}} [ \sum_{t=0}^{\infty} \kappa^t r_t ]$. 
+
+\subsection{Multi-Agent Advantage Decomposition Theorem}
+The multi-agent advantage decomposition theorem \citep{kuba2021settling} states that, given a random permutation of agents $i_{1:N}$, then for any joint observation $\mathbf{o}$ and any joint action $\mathbf{a}$ the following equation for calculating the advantage $\text{A}$ always holds: 
+
+\begin{equation}
+\label{eqn:multi-agent-adv-theorem}
+    \begin{aligned}
+        \text{A}_{\mathbf{\pi}}^{i_{1:n}}(\mathbf{o}, \mathbf{a}^{i_{1:n}}) = \sum_{m=1}^n \text{A}_{\mathbf{\pi}}^{i_m} (\mathbf{o}, \mathbf{a}^{i_{1:m-1}}, a^{i_m})
+    \end{aligned}
+\end{equation}
+
+Intuitively, this theorem implies that the joint advantage decomposes into a sum where each agent is able to condition its own advantage estimate on the joint observation and the actions taken by all agents preceding it. This has 2 notable benefits; first, each agent is able to select its action such that the team advantage will be non-zero and positive leading to joint policy convergence guarantees. And second, each agent only has to optimise over its own action space limiting the joint action space to $ \boldsymbol{\mathcal{A}} = \sum^N_i \mathcal{A}^i $ instead of $\boldsymbol{\mathcal{A}} = \prod^N_i \mathcal{A}^i$.
+
+\subsection{Multi-agent transformer}
+
+\textbf{The attention mechanism.} Scaled dot-product attention is one of the most notable components of the Transformer architecture \cite{transformer} and can be given as $\text{Attention}(Q, K, V) = \text{softmax} \left( \frac{Q K^T}{\sqrt{d_k}} \right) V$ where $Q, K$ and $V$ and learnt query, key and value projections of a given model input token and $d_k$ is the model embedding dimension size.
+
+\citet{mat} propose the Multi-Agent Transformer (MAT) algorithm, which structures MARL as a sequence modelling problem. Notably, it achieves state of the art results in cooperative MARL. MAT uses an encoder-decoder transformer architecture. The encoder uses full self-attention across all agent's observations to produce encoded observations and observation-value estimates for all agents $V(\hat{o}^i), \dots, V(\hat{o}^N)$. While the decoder auto-regressively selects actions, thus leveraging \textit{the multi-agent advantage decomposition theorem}. It attends to the selected actions of previous agents within the same timestep, then passes the embedded actions to a cross-attention block along with the embedded observations from the encoder, this produces the next action of the current agent, which is fed back into the decoder restarting the auto-regressive loop until all actions are selected. At inference MAT must act auto-regressively to select actions one by one for each agent. In contrast, during training MAT has access to batches of observations and actions which, due to causal masking in the decoder, it can process in parallel.
+
+While MAT introduces a robust framework for multi-agent decision-making, it has some marked limitations. The auto-regressive action selection introduces computational overhead as the number of agents grows. Additionally, the use of the attention mechanism in the transformer limits the scalability of the algorithm to many agents due to its $O(N^2)$ memory requirements. Furthermore, MAT is not designed to retain information across timesteps, which can be a significant limitation in scenarios where temporal dependencies are crucial for success.
+
+\subsection{Retention}
+\label{sec:retention}
+Retention eliminates the softmax operator from attention and instead incorporates a positional embedding term and a swish gate \citep{swiglu, swish} to retain the non-linearity. A RetNet is created by stacking multiple multi-scale retention blocks (MSR) together, similar to how stacking multiple multi-head attention blocks creates a transformer.
+
+The shift from attention to retention allows RetNets to support multiple representations, rather than being restricted to parallel computation across the full sequence as with traditional attention. This flexibility introduces three distinct representations: \textit{Recurrent}, \textit{Parallel}, and \textit{Chunkwise}. Given projection matrices $W_Q,W_K,W_V \in \mathbb{R}^{d \times d}$, where $d$ is the model embedding dimension and subsequently, given an input $X$: $Q = XW_Q, K = X W_K, V = X W_V \in \mathbb{R}^{l \times d}$, \citet{retnet} define retention with the following three equations:
+
+\textbf{The Recurrent form} of retention, useful for decoding one token at a time, can be given as: 
+\begin{equation}
+    \label{eqn:retention-recurrent}
+    \begin{aligned}
+    S_n &= \kappa S_{n-1} + K^{\text{T}}_n V_n \\
+    \text{Retention}(X_n) &= Q_n S_n, \quad n= 1, \dots, |x|
+    \end{aligned}
+\end{equation}
+
+\textbf{The parallel form} of retention, which is retention's most similar form to attention, can be given as: 
+\begin{equation}
+    \label{eqn:retention-parallel}
+    \text{Retention}(X) = (Q K^T \odot D) V, \quad 
+D_{nm} = \begin{cases} 
+\kappa^{n-m}, & \text{if } n \geq m \\
+0, & \text{if } n < m 
+\end{cases}
+\end{equation}
+
+\textbf{The chunkwise representation} is a hybrid of the parallel and recurrent representations that allows for efficient long sequence modeling. The approach involves splitting the sequence into smaller chunks, each of length $B$. Given [i] indicates the i-th chunk, i.e., $x_{[i]} = [x_{(i-1)B+1}, \dots, x_{iB}]$, the chunkwise retention can be written as follows:
+
+\begin{equation}
+\begin{aligned}
+    &Q_{[i]} = Q_{B(i-1):Bi}, \quad K_{[i]} = K_{B(i-1):Bi}, \quad V_{[i]} = V_{B(i-1):Bi} \\
+    &R_i = K_{[i]}^{T}(V_{[i]} \odot \zeta) + \kappa^B R_{i-1}, \quad \zeta_{ij} = \kappa^{B - i - 1} \\
+    &\text{Retention}(X_{[i]}) = (Q_{[i]}K_{[i]}^{T} \odot D) V_{[i]} + (Q_{[i]}R_{i-1}) \odot \xi, \quad \xi_{ij} = \kappa^{i+1}
+\end{aligned}
+\end{equation}
+
+With the above three equations \citet{retnet} define gated \textbf{m}ulti-\textbf{s}cale \textbf{r}etention (MSR) a retention equivalent to multi-head attention. In MSR there are $h$ heads, each head has different weight matricies and a different $\kappa$, this allows each head to focus on different sections of the sequence. Additionally, MSR uses a swish gate \citep{swiglu,swish} to replace the missing non-linearity. Formally MSR is given as:
+
+\begin{equation}
+\begin{aligned}
+    \label{eqn:retention-multi-scale}
+    \kappa &= 1 - 2^{-5-[0 \dots h]} \in \mathbb{R}^h \\
+    \text{head}_i &= \text{Retention}(X, \kappa_i) \\
+    Y &= \text{GroupNorm}_h(\text{Concat}(\text{head}_1, \dots, \text{head}_h)) \\
+    \text{MSR}(X) &= (\text{swish}(XW_G) \odot Y)W_O
+\end{aligned}
+\end{equation}
+
+MSR forms the base of a retention block in RetNet, which is defined as:
+\begin{equation}
+\begin{aligned}
+    \label{eqn:retnet-block}
+    Y^l &= \text{MSR}(\text{LN}(X^l)) + X^l \\
+    X^{l+1} &= \text{FFN}(\text{LN}(Y^l)) + Y^l
+\end{aligned}
+\end{equation}
+
+where $\text{LN}(\cdot)$ denotes LayerNorm \citep{ba2016layer} and $\text{FFN}$ denotes a feedforward block which is computed as $\text{gelu}(X W_1)W2$ where $W_1, W_2$ are parameter matrices. 
+
+The decay matrix $D$ is used in both parallel and chunkwise representations. As can be seen in equation \ref{eqn:retention-parallel} it is constructed using the $\kappa$ hyperparameter, which plays a crucial role in determining \textit{the forgetting factor}—the rate at which information from earlier parts of the sequence is gradually reduced. This is particularly useful for ensuring that more recent information is prioritized, while still retaining some influence from past observations. Specifically, the value at $D_{i,j}$ represents the extent to which token $i$ \textit{retains} (or conversely, how much it has decayed) information from token $j$. As shown in equation \ref{eqn:retention-parallel} $D$ is zero above the main diagonal, mirroring the behavior of causal masking. Consequently, when $i < j$ token $j$ is positioned after token $i$ in the sequence, resulting in a decay value of $0$. This reflects that a token cannot \textit{remember} information from future tokens in the sequence. The inclusion of causal masking is essential for two reasons: first, it ensures equivalence to the recurrent representation by preserving the temporal order of information, and second, it is necessary because RetNet is a decoder-only architecture, making causal masking important for sequential iteration during inference.
+
+The flexibility of choosing different representations is a valuable feature that enables two key advantages over transformers: (1) it allows RetNets to maintain constant memory usage during inference, while still leveraging modern hardware accelerators during training, and (2) it facilitates efficient handling of long sequences during training. This is achieved by using the chunkwise representation to enable training on long sequences, which can then be re-expressed in a recurrent form during inference.
+\end{comment}
+
+
+\section{Method}
+
+
+\begin{figure}[t]
+\centering
+  \centering\includegraphics[width=0.9\linewidth]{images/main_paper/arch_1.pdf}
+  \label{fig:arch}
+\caption{\textit{Sable architecture and execution.} The encoder receives all agent observations $o^1_t, ..., o^N_t$ from the current timestep $t$ along with a hidden state $h^{enc}_{t-1}$ representing past timesteps and produces encoded observations $\hat{o}^1_t, ..., \hat{o}^N_t$, observation-values $v(\hat{o}^1_t), ..., v(\hat{o}^N_t)$ and a new hidden state $h^{enc}_{t}$. The decoder performs recurrent retention over the current action $a_t^{m-1}$, followed by cross attention with the encoded observations, producing the next action $a_t^{m}$. The initial hidden states for recurrence over agents in the decoder at the current timestep are $(h^{dec_1}_{t-1}, h^{dec_2}_{t-1})$ and by the end of the decoding process, it generates the updated hidden states $(h^{dec_1}_{t}, h^{dec_2}_{t})$.}
+\end{figure}
+
+In this section, we introduce \textbf{Sable}, our approach to MARL as sequence modelling using a modified version of retention suitable for RL. Sable enables parallel training and memory-efficient execution at scale, with the ability to capture temporal dependencies across entire episodes. We explain how Sable operates during both training and execution, how we adapt retention to work in MARL, and provide different strategies for scaling depending on the problem setting.
+\label{sec:acting}
+\begin{comment}
+Sable interacts with the environment for \textit{rollout length} number of steps before each training step. During this acting phase the encoder uses a chunkwise representation, where the observation representations, of all agents within the current timestep, are computed in parallel, while the process remains recurrent across timesteps. Notably, in the chunkwise representation, the decay matrix ($D$) is expressed as a matrix of ones, allowing for full self-retention over all agent observations within the same timestep, similar to the encoder in MAT. The decoder, on the other hand, operates recurrently over both agents and timesteps as it auto-regressively decodes actions. The encoder and decoder maintain separate hidden states that encapsulate memory from previous timesteps. These hidden states are decayed at the end of every timestep, reflecting the diminishing influence of past experiences and are reset at the end of each episode.
+
+\paragraph{Inference} Sable interacts with the environment for a defined rollout length before each training phase. During this interaction, the encoder uses a chunkwise representation, processing the observation of all agents within the same timestep in parallel, while maintaining recurrence across timesteps. In this representation, the decay matrix is set as a matrix of ones, allowing for full self-retention over all agents' observations within the same timestep, similar to MAT's encoder. The decoder, however, operates recurrently over both agents and timesteps, auto-regressively decoding actions. The encoder and decoder maintain separate hidden states that capture memory from previous timesteps. We adapt the recurrent from of Retention to the MARL case by only decaying the hidden state once per timestep, while updating the hidden state for each agent in that particular timestep. At each timestep the hidden state is updated over agents as:
+\end{comment}
+\paragraph{Execution} Sable interacts with the environment for a defined rollout length, $L$, before each training phase. During this interaction, the encoder uses a chunkwise representation, processing the observation of all agents at each timestep in parallel. A hidden state $h^{enc}$ maintains a memory of past observations and is reset at the end of each episode. During execution, the decay matrix, $D$, is set to all ones, allowing for full self-retention over all agents' observations within the same timestep. These adjustments to retention, particularly the absence of decay across agents and the resetting of memory at episode termination, result in the following encoder formulation during execution:
+\begin{equation}
+    \label{eqn:chunkwise-inference-encoder}
+    \begin{aligned}
+    \text{Retention}(\tilde{\boldsymbol{o}}_t) &= Q_t h_t^{enc}, \quad t= l, \dots, l+L \\
+    \text{where} \quad h_t^{enc} &= \delta(\kappa h_{t-1}^{enc} + K^{\text{T}}_t V_t)  , \quad
+    \delta = \begin{cases} 
+        0, &  \text{if the episode has ended} \\
+        1, & \text{if the episode is ongoing}
+    \end{cases}
+    \end{aligned}
+\end{equation}
+
+where $Q_t, K_t, V_t$ are query, key and value matrices of all agents' observations at timestep $t$ within the rollout that started at $l^{th}$ timestep and $\tilde{\boldsymbol{o}}_t$ is the embedded observation sequence.
+
+The decoder operates recurrently over both agents and timesteps, decoding actions auto-regressively per timestep as follows:
+
+\begin{comment}
+old formulation
+\begin{equation}
+    \label{eqn:recurrence-inference-decoder}
+    \begin{aligned}
+    \hat{h}_n &= \hat{h}_{n-1} + K^{\text{T}}_n V_n, \quad \text{with } \quad \hat{h}_1 = h_{t-1}^{dec} + K^{\text{T}}_1 V_1 \\
+    \text{Retention}(X^n_t) &= Q^n_t \hat{h}_n, \quad n= 1, \dots, N , \quad t=l, \dots, l+L\\\
+    h_{t}^{dec} &= \delta(\kappa\hat{h}_{N}) 
+    \end{aligned}
+\end{equation}
+\end{comment}
+
+\begin{equation}
+    \label{eqn:recurrence-inference-decoder}
+    \begin{aligned}
+    \text{Retention}(\tilde{a}^i_t) & = Q^i_t \hat{h}_i, \\
+    \text{where} \quad \hat{h}_i & = \hat{h}_{i-1} + (K^i_t)^{\text{T}} V^i_t, \quad i= 1, \dots, N, 
+    \end{aligned}
+\end{equation}
+
+with $\hat{h}_1 = h_{t-1}^{dec} + (K^1_t)^{\text{T}} V^1_t$ and $h_{t}^{dec} = \delta(\kappa\hat{h}_{N})$. Here, $Q^i_t, K^i_t, V^i_t$ are query, key and value matrices and $\tilde{a}^i_t$ the embedded action of the $i^{th}$ agent at timestep $t$. The hidden state $h^{dec}$ is carried across timesteps, decaying at the end of each timestep and resetting to zero when an episode ends. Within each timestep, the intermediate variable $\hat{h}_i$ is sequentially passed from one agent to the next and is used exclusively in the retention calculation. It is this auto-regressive action selection which leverages the advantage decomposition theorem to give Sable theoretically grounded convergence guarantees.
+
+\begin{comment}
+\paragraph{Training}
+Sable samples entire episodes from an on-policy buffer in the same manner as recurrent PPO and uses the chunkwise formulation for both encoding and decoding during training. This gives the benefit of parallel computation while maintaining memory across chunks. In order for memory to flow correctly, the hidden state from the first step of each rollout is used to provide the memory state at the start of the sequence. While both the encoder and decoder use the chunkwise formulation during training, they require different decay matrices. The encoder uses a blocked decay matrix to enable full self-retention over observations in a single timestep and the decoder uses a normal retention decay matrix, which mimics auto-regressive inference. 
+\end{comment}
+\paragraph{Training}
+During training, Sable samples entire trajectories $\tau$ from an on-policy buffer and randomly permutes the order of agents within timesteps. The encoder takes as input a sequence of flattened agent-timestep observations from an entire trajectory: $[o_l^{1},o_l^{2},...,o_{l+L}^{N-1},o_{l+L}^{N}]$, representing a sequence of observations that start at timestep $l$. The decoder takes a similar sequence but of actions instead of observations as input. Sable uses the chunkwise representation for both encoding and decoding during training, allowing it to process entire trajectories in parallel while using a hidden state to maintain the memory of previous trajectories.
+
+To implement the chunkwise formulation, Sable applies the decaying factor over time (not across agents), and resets the memory at the end of each episode through the $D$, $\zeta$ and $\xi$ matrices. This results in the following chunkwise training equation:
+\begin{equation}
+\label{eqn:chunkwise-training}
+ \begin{aligned}
+        h_{\tau} &= K_{[\tau]}^{T} (V_{[\tau]} \odot \zeta) +  \delta\kappa^L h_{\tau_{prev}}, \quad \zeta=D_{NL,1:NL}\\
+     \text{Retention}(\boldsymbol{x}_{[\tau]}) &= (Q_{[\tau]}K_{[\tau]}^{T} \odot D) V_{[\tau]} + (Q_{[\tau]}h_{\tau_{prev}}) \odot \xi, \\ \text{where } \quad & \xi_{ij} = \begin{cases} 
+        \kappa^{\left\lfloor i / N \right\rfloor + 1}, &  \text{if } i\leq Nt_{d_0}  \\
+        0, &   \text{if } i > Nt_{d_0} \\
+    \end{cases}.
+ \end{aligned}
+\end{equation}
+
+The floor operator in $\xi$, $\lfloor i/N \rfloor$, ensures that all agents from the same timestep share the same decay values. The input $\boldsymbol{x}_{[\tau]}$ is the sequence of observations from $\tau$ for the encoder and the sequence of actions for the decoder. We represent the index of the first terminal timestep in $\boldsymbol{x}_{[\tau]}$ as $t_{d_0}$ and use $h_{\tau}$ to denote the hidden state at the end of the current trajectory $\tau$. Finally, the matrix $D$ is a modified version of the decay matrix from standard retention, with dimensions $(NL,NL)$, which we define in more detail below.
+
+In practice, rather than computing $h$ during training, we reuse the hidden states from the final step of the previous execution trajectory $\tau_{prev}$, which means that we replace $h_{\tau_{prev}}$ with $h_{l-1}^{enc}$ in the case of the encoder and $h_{l-1}^{dec}$ in the case of the decoder.
+
+\paragraph{Adapting the decay matrix for MARL}
+Since the decay matrix represents the importance of past observations, it is critical to construct it correctly during training, taking into account multiple agents and episode terminations, so that no agent is ``favoured'' and memory doesn't flow over episode boundaries. To achieve this, we make three modifications to the original decay matrix formula.
+First, in cooperative MARL, a joint action is formed such that all agents act simultaneously from the perspective of the environment. This means the memory of past observations within the same timestep should be weighted equally between agents; therefore, Sable uses equal decay values for these observations.
+
+Second, unlike self-supervised learning, RL requires algorithms to handle episode termination. During acting this is trivial for Sable: hidden states must be reset to zero on the first step of every episode as seen in Equations \ref{eqn:chunkwise-inference-encoder} and \ref{eqn:recurrence-inference-decoder}. However, during training, resetting needs to be performed over the full trajectory $\tau$ in parallel using the decay matrix. If there is a termination on timestep $t_d$, then the decay matrix should be reset from index $(Nt_d, Nt_d)$. 
+Combining these two modifications, we obtain the following equation, given a set of terminal timesteps $\mathbf{T_d}$, then $\forall t_d \in \mathbf{T_d}$:
+\begin{equation}
+\label{eqn:decay-mat-decoder}
+D_{ij} = M_{ij} \odot \tilde{D}_{ij},
+\quad
+M_{ij} = \begin{cases}
+    0 &\text{if } i \geq Nt_d > j \\
+    1 &\text{otherwise}
+\end{cases},\quad
+\tilde{D}_{ij} = \begin{cases} 
+    \kappa^{\left\lfloor (i-j) / N \right\rfloor}, & \text{if } i \geq j \\
+    0, & \text{if } i < j
+\end{cases}
+\end{equation}
+This updated equation makes sure that Sable does not prioritise certain agent's past observations because of their arbitrary ordering and ensures that all observations before the terminal timestep are forgotten. 
+
+The final decay matrix modification is only required in the encoder to allow for full self-retention over all agents' observations in a single timestep, to match the full self-attention used in MAT's encoder. Since RetNet is a decoder only model where the decay matrix acts as a causal mask, we had to adjust Sable's architecture to be able to perform self-retention. We do this by creating $N \times N$ blocks within the decay matrix, where each block represents a timestep of $N$ agents. This leads to the final modification of the decay matrix specifically for the encoder:
+\begin{equation}
+\label{eqn:decay-mat-encoder}
+D_{ij} = M_{ij} \odot \hat{D}_{ij}, \quad
+\hat{D}_{ij} = \begin{cases} 
+    \kappa^{\left\lfloor (i-j) / N \right\rfloor}, & \text{if } \lfloor i / N \rfloor \geq \lfloor j / N \rfloor \\
+    0, & \text{otherwise}
+\end{cases}
+\end{equation}
+In this case, the floor operator in the first condition creates the blocks that enable full self-retention.
+
+\paragraph{Scaling and efficient memory usage}
+In practical applications, there might be different axes of interest in terms of memory usage. For example, scaling the number of agents in the system, or efficiently handling the sequence length that can be processed at training time, i.e.\ the number of timesteps per update. We propose slightly different approaches for efficient memory use and scaling across each axis.
+\begin{comment}
+When scaling over the number of timesteps, the chunkwise representation is directly applied during the learner phase. However, the key distinction is that the initial hidden state, $R_0$, is not empty—it is the hidden state from the preceding rollout. Additionally, because episodes may reset within the current rollout sequence, the calculation of the hidden state in the chunkwise representation must be adjusted accordingly, leading to the following modified equation:
+\end{comment}
+
+\begin{itemize}
+    \item \textit{Scaling the number of agents. } Scaling to thousands of agents requires a significant amount of memory. Therefore, in this setting, we use MAT-style single-timestep sequences to optimise memory usage and reserve chunking to be applied across agents. This requires only changing the encoder during execution, as the decoder is already recurrent over both agents and timesteps. However, this change to the encoder makes it unable to perform full self-retention across agents, as it cannot be applied across chunks. During training, the process mirrors that of execution but is applied to both the encoder and decoder.
+    \item \textit{Scaling the trajectory context length. } Since the training sequence will grow proportional to $NL$ in the case where Sable maintains memory over trajectories, training could become computationally infeasible for tasks requiring long rollouts. In order to accommodate this, we chunk the flattened agent-timestep observation along the time axis during training with the constraint that agents from the same timestep must always be in the same chunk. This allows sable to process chunks of rollouts several factors smaller than the entire rollout length while maintaining a memory of the full sequence during processing.
+    
+\end{itemize}
+
+    
+
+            
+Our implementation of Sable is in JAX \citep{jax}, and all code will be made available soon. 
+
+\begin{comment}
+ When scaling over the number of timesteps (increasing rollout length), our primary focus is on optimizing memory efficiency in the learner phase, as during inference, each timestep is processed independently. In the learner phase, we already employ a chunkwise implementation where the chunk length corresponds to the rollout length, meaning we perform recurrent computations across each rollout while handling the current rollout sequence in parallel. However, given a long rollout length, Sable can subdivide the sequence into chunks. To maintain consistency with the training approach (parallel computation for the full rollout length), the key distinction from the chunkwise method in RetNet is that the initial hidden state, $R_0$, is not empty—it is the hidden state from the preceding rollout. Additionally, because episodes may reset within the current rollout sequence, the calculation of the hidden state in the chunkwise representation must be adjusted accordingly, leading to the following modified equation:   
+\end{comment}
+
+
+\begin{comment}
+For scaling across agents, the process is similar to that of timestep scaling, with two key differences: first, during inference, the encoder employs a causal masking mechanism that is applied incrementally across agents' chunks. This masking ensures alignment with training, as during training, for chunk $i$, the encoder cannot access information from agents in chunk $i+1$. Secondly in this context, the binary indicator $\delta$ is set to 0 only if the episode has ended, and it specifically applies to the first chunk of agents.
+\end{comment}
+\begin{comment}
+The second axis available for scaling is agents and is only necessary for problems with hundreds of agents. The focus during inference is primarily on the encoder, as the decoder is already recurrent over both agents and timesteps. The encoder employs a chunkwise implementation by dividing the sequence into individual timesteps and computing the observations of all agents at a single timestep in parallel. When scaling to a larger number of agents, the sequence of agent observations grows longer, so the approach is similar to that used for scaling timesteps: we chunk the agents and apply the same method, with the key difference being that $\delta$ will only be set to zero for the first chunk of agents in cases where the episode has ended. In the training phase, the process mirrors that of inference but is applied to both the encoder and decoder.\\
+In Practice, we ... TODO: explain H1 and h2 and how we chunk agents for h1
+\end{comment}
+
+    
+
+
+
+
+\section{Experiments}
+
+
+We validate the performance, memory efficiency and scalability of Sable by comparing it against several SOTA baseline algorithms from the literature. These baselines can broadly be divided into two groups.  The first group consists of heterogeneous agent algorithms that leverage the advantage decomposition theorem. To the best of our knowledge, the Multi-Agent Transformer (MAT) \citep{mat} represents the current SOTA for cooperative MARL on discrete environments, and Heterogeneous Agent Soft Actor-Critic (HASAC) \citep{hasac} the current SOTA on continuous environments. The second group includes well-established baseline algorithms, including IPPO \citep{ippo}, MAPPO \citep{mappo}, QMIX \citep{qmix} and MASAC. For all baselines, we use the JAX-based MARL library Mava \citep{mava}.
+\paragraph{Evaluation protocol} We train each algorithm for 10 independent trials for each task. Each training run is allowed 20 million environment timesteps with 122 evenly spaced evaluation intervals. At each evaluation, we record the mean episode return over 32 episodes and, where relevant, any additional environment specific metrics (e.g. win rates). In line with the recommendations of \citet{gorsane2022towards}, we also record the absolute performance. For task-level aggregation, we report the mean with 95\% confidence intervals while for aggregations over entire environment suites, we report the min-max normalised inter-quartile mean with 95\% stratified bootstrap confidence intervals. Following from \citet{agarwal2021deep}, we consider algorithm $X$ to have significant improvement over algorithm $Y$ if the probability of improvement score and all its associated confidence interval values are greater than 0.5. All our evaluation aggregations, metric calculations and plotting leverages the MARL-eval library from \citet{gorsane2022towards}. 
+
+
+ 
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{\textwidth}
+      \includegraphics[width=\linewidth]{images/main_paper/legend.pdf}
+      \label{fig:all_plots_legend}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/env_level_se_and_poi/rware_se_and_poi.pdf}
+        \label{fig:ablation:rware}
+        \caption{RWARE}
+    \end{subfigure}
+    \hspace{1mm}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/env_level_se_and_poi/mabrax_se_and_poi.pdf}
+        \label{fig:ablation:mabrax}
+        \caption{MABrax}
+    \end{subfigure}
+    \hspace{1mm}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/env_level_se_and_poi/smax_se_and_poi.pdf}
+        \label{fig:ablation:smax}
+        \caption{SMAX}
+    \end{subfigure}
+    \hspace{1mm}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/env_level_se_and_poi/connector_se_and_poi.pdf}
+        \label{fig:ablation:connector}
+        \caption{Connector}
+    \end{subfigure}
+    \hspace{1mm}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/env_level_se_and_poi/lbf_se_and_poi.pdf}
+        \label{fig:ablation:lbf}
+        \caption{LBF}
+    \end{subfigure}
+    \hspace{1mm}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/env_level_se_and_poi/mpe_se_and_poi.pdf}
+        \label{fig:ablation:mpe}
+        \caption{MPE}
+    \end{subfigure}
+
+\caption{\textit{Sample efficiency curves and probability of improvement scores aggregated per environment suite}. For each environment, results are aggregated over all tasks and the min-max normalised inter-quartile mean with 95\% stratified bootstrap confidence intervals are shown. Inset plots indicate the overall aggregated probability of improvement for Sable compared to other baselines for that specific environment. A score of more than 0.5 where confidence intervals are also greater than 0.5 indicates statistically significant improvement over a baseline for a given environment \citep{agarwal2021deep}.}
+\label{fig: sample eff}
+\end{figure}
+
+\begin{table}%[htbp]
+\caption{\textit{Per task episode return.} Mean episode return with 95\% bootstrap confidence intervals for all tasks. Bold values indicate the highest score per task and an asterisk indicates that a score overlaps with the highest score within one confidence interval.}
+\label{table:all-results}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{c l |  c c c c c c c}
+\toprule
+ & \textbf{Task} & \textbf{Sable} & \textbf{MAT} & \textbf{MAPPO} & \textbf{IPPO} & \textbf{MASAC} & \textbf{HASAC} & \textbf{QMIX} \\
+\midrule
+\multirow{15}{*}{\rotatebox{90}{\textbf{Rware}}} & tiny-2ag & \textbf{17.68$_{(17.17, 18.07)}$} & 12.67$_{(10.68, 14.29)}$ & 7.80$_{(5.01, 10.43)}$ & 4.19$_{(2.01, 6.30)}$ & / & / & / \\
+ & tiny-2ag-hard & \textbf{13.67$_{(12.92, 14.25)}$} & 9.40$_{(6.53, 11.75)}$ & 11.40$_{(10.89, 12.06)}$ & 4.99$_{(1.97, 8.29)}$ & / & / & / \\
+ & tiny-4ag & \textbf{32.81$_{(31.85, 33.78)}$} & 25.69$_{(25.51, 25.87)}$ & 17.36$_{(13.72, 20.10)}$ & 10.47$_{(7.72, 12.55)}$ & / & / & / \\
+ & tiny-4ag-hard & \textbf{23.12$_{(20.86, 24.59)}$} & 14.17$_{(7.18, 21.05)}$$^{*}$ & 15.71$_{(15.08, 16.35)}$ & 6.53$_{(2.40, 10.77)}$ & / & / & / \\
+ & small-4ag & 10.75$_{(6.44, 14.54)}$$^{*}$ & \textbf{13.39$_{(13.02, 13.78)}$} & 6.75$_{(5.82, 7.40)}$ & 2.83$_{(1.07, 4.71)}$ & / & / & / \\
+ & small-4ag-hard & \textbf{7.64$_{(6.67, 8.44)}$} & 6.40$_{(4.64, 7.80)}$$^{*}$ & 4.81$_{(4.50, 5.13)}$ & 1.39$_{(0.35, 2.43)}$ & / & / & / \\
+ & medium-4ag & \textbf{8.34$_{(6.75, 9.50)}$} & 3.82$_{(2.11, 5.59)}$ & 4.27$_{(2.78, 5.57)}$ & 1.28$_{(0.70, 1.83)}$ & / & / & / \\
+ & medium-4ag-hard & \textbf{3.69$_{(2.69, 4.51)}$} & 2.05$_{(1.06, 3.07)}$$^{*}$ & 0.89$_{(0.21, 1.69)}$ & 1.68$_{(0.66, 2.71)}$$^{*}$ & / & / & / \\
+ & large-4ag & \textbf{4.28$_{(2.82, 5.39)}$} & 3.91$_{(3.49, 4.25)}$$^{*}$ & 1.16$_{(0.57, 1.77)}$ & 1.42$_{(0.55, 2.32)}$ & / & / & / \\
+ & large-4ag-hard & \textbf{1.96$_{(1.10, 2.79)}$} & 1.27$_{(0.55, 1.96)}$$^{*}$ & 0.00$_{(0.00, 0.00)}$ & 0.00$_{(0.00, 0.00)}$ & / & / & / \\
+ & xlarge-4ag & 2.21$_{(1.14, 3.22)}$$^{*}$ & \textbf{3.24$_{(2.77, 3.63)}$} & 1.06$_{(0.58, 1.57)}$ & 0.00$_{(0.00, 0.00)}$ & / & / & / \\
+ & xlarge-4ag-hard & \textbf{0.44$_{(0.00, 1.08)}$} & 0.14$_{(0.00, 0.41)}$$^{*}$ & 0.00$_{(0.00, 0.00)}$$^{*}$ & 0.00$_{(0.00, 0.00)}$$^{*}$ & / & / & / \\
+ & medium-6ag & \textbf{9.58$_{(7.95, 10.82)}$} & 9.44$_{(8.27, 10.35)}$$^{*}$ & 6.72$_{(6.21, 7.19)}$ & 2.47$_{(1.10, 3.86)}$ & / & / & / \\
+ & large-8ag & 9.06$_{(8.87, 9.25)}$ & \textbf{11.26$_{(10.89, 11.58)}$} & 5.84$_{(5.24, 6.43)}$ & 3.18$_{(1.63, 4.73)}$ & / & / & / \\
+ & large-8ag-hard & \textbf{6.76$_{(6.36, 7.12)}$} & 5.11$_{(4.19, 5.91)}$ & 1.27$_{(0.47, 2.21)}$ & 1.52$_{(0.65, 2.40)}$ & / & / & / \\
+\midrule
+\multirow{5}{*}{\rotatebox{90}{\textbf{MaBrax}}} & hopper\_3x1 & 1469.95$_{(1455.05, 1487.71)}$$^{*}$ & 1433.88$_{(1363.94, 1495.89)}$$^{*}$ & 1536.67$_{(1441.48, 1636.33)}$$^{*}$ & 1437.85$_{(1391.41, 1486.83)}$$^{*}$ & \textbf{1621.99$_{(1419.72, 1802.02)}$} & 1613.30$_{(1550.07, 1682.11)}$$^{*}$ & / \\
+ & halfcheetah\_6x1 & 2216.42$_{(2059.24, 2355.54)}$ & 2034.59$_{(1753.67, 2284.10)}$ & 2485.63$_{(2357.15, 2622.30)}$ & 2493.34$_{(2311.06, 2654.75)}$ & 2930.42$_{(2752.13, 3123.16)}$$^{*}$ & \textbf{3376.90$_{(3107.51, 3660.88)}$} & / \\
+ & walker2d\_2x3 & 668.68$_{(593.98, 748.42)}$ & 766.61$_{(672.31, 875.02)}$ & 1294.99$_{(1165.42, 1420.19)}$$^{*}$ & 571.58$_{(509.62, 629.28)}$ & \textbf{1470.89$_{(1345.06, 1611.62)}$} & 1229.26$_{(1128.54, 1322.44)}$ & / \\
+ & ant\_4x2 & 2087.42$_{(1907.36, 2285.86)}$ & 1585.95$_{(1401.20, 1705.86)}$ & 2196.26$_{(2048.08, 2340.83)}$ & 3210.00$_{(3012.26, 3390.20)}$ & 3828.43$_{(3404.10, 4259.06)}$$^{*}$ & \textbf{4150.12$_{(3787.47, 4476.47)}$} & / \\
+ & humanoid\_9|8 & 2200.64$_{(2142.08, 2260.57)}$ & 390.75$_{(385.77, 395.82)}$ & 471.11$_{(469.67, 472.49)}$ & 458.76$_{(452.74, 465.10)}$ & \textbf{4181.90$_{(3909.18, 4369.39)}$} & 3255.90$_{(3045.68, 3467.54)}$ & / \\
+\midrule
+\multirow{11}{*}{\rotatebox{90}{\textbf{Smax}}} & 2s3z & \textbf{2.00$_{(2.00, 2.00)}$} & 1.90$_{(1.87, 1.91)}$ & \textbf{2.00$_{(2.00, 2.00)}$} & 1.99$_{(1.98, 1.99)}$ & / & / & 1.99$_{(1.98, 1.99)}$ \\
+ & 3s5z & \textbf{2.00$_{(2.00, 2.00)}$} & 1.93$_{(1.90, 1.95)}$ & 1.99$_{(1.99, 2.00)}$$^{*}$ & \textbf{2.00$_{(2.00, 2.00)}$} & / & / & 1.98$_{(1.98, 1.99)}$ \\
+ & 3s\_vs\_5z & \textbf{1.98$_{(1.97, 1.98)}$} & 1.87$_{(1.84, 1.90)}$ & 1.92$_{(1.91, 1.93)}$ & 1.75$_{(1.70, 1.80)}$ & / & / & 1.90$_{(1.89, 1.91)}$ \\
+ & 6h\_vs\_8z & \textbf{2.00$_{(2.00, 2.00)}$} & 1.99$_{(1.99, 1.99)}$ & 1.99$_{(1.98, 1.99)}$ & 1.94$_{(1.92, 1.96)}$ & / & / & 1.62$_{(1.38, 1.80)}$ \\
+ & 5m\_vs\_6m & 1.26$_{(0.97, 1.56)}$ & 1.19$_{(0.95, 1.45)}$ & 0.87$_{(0.68, 1.09)}$ & \textbf{1.75$_{(1.64, 1.83)}$} & / & / & 1.59$_{(1.40, 1.77)}$$^{*}$ \\
+ & 10m\_vs\_11m & \textbf{1.73$_{(1.53, 1.92)}$} & 1.31$_{(1.26, 1.35)}$ & 1.19$_{(1.13, 1.23)}$ & 1.72$_{(1.66, 1.77)}$$^{*}$ & / & / & 1.59$_{(1.49, 1.67)}$$^{*}$ \\
+ & 3s5z\_vs\_3s6z & \textbf{1.81$_{(1.77, 1.84)}$} & 1.76$_{(1.66, 1.83)}$$^{*}$ & 1.52$_{(1.47, 1.57)}$ & 1.52$_{(1.44, 1.61)}$ & / & / & 1.62$_{(1.57, 1.66)}$ \\
+ & 27m\_vs\_30m & \textbf{1.99$_{(1.97, 2.00)}$} & 1.75$_{(1.69, 1.82)}$ & 1.73$_{(1.67, 1.78)}$ & 1.83$_{(1.72, 1.92)}$ & / & / & 1.42$_{(1.26, 1.58)}$ \\
+ & smacv2\_5\_units & \textbf{1.70$_{(1.69, 1.71)}$} & 1.67$_{(1.66, 1.68)}$ & 1.63$_{(1.63, 1.64)}$ & 1.63$_{(1.63, 1.64)}$ & / & / & 1.61$_{(1.60, 1.61)}$ \\
+ & smacv2\_10\_units & 1.40$_{(1.35, 1.44)}$ & 1.49$_{(1.48, 1.50)}$ & \textbf{1.59$_{(1.58, 1.60)}$} & 1.38$_{(1.36, 1.39)}$ & / & / & 1.41$_{(1.38, 1.43)}$ \\
+ & smacv2\_20\_units & 1.11$_{(1.05, 1.19)}$ & \textbf{1.32$_{(1.30, 1.33)}$} & 1.29$_{(1.28, 1.30)}$$^{*}$ & 0.89$_{(0.87, 0.91)}$ & / & / & 0.87$_{(0.82, 0.92)}$ \\
+\midrule
+\multirow{4}{*}{\rotatebox{90}{\textbf{Connector}}} & con-5x5x3a & \textbf{0.85$_{(0.85, 0.85)}$} & 0.75$_{(0.74, 0.76)}$ & 0.83$_{(0.83, 0.83)}$ & 0.83$_{(0.83, 0.83)}$ & / & / & / \\
+ & con-7x7x5a & \textbf{0.79$_{(0.79, 0.80)}$} & 0.72$_{(0.71, 0.72)}$ & 0.75$_{(0.75, 0.75)}$ & 0.76$_{(0.76, 0.76)}$ & / & / & / \\
+ & con-10x10x10a & \textbf{0.73$_{(0.73, 0.73)}$} & 0.19$_{(0.17, 0.21)}$ & 0.43$_{(0.42, 0.44)}$ & 0.52$_{(0.52, 0.53)}$ & / & / & / \\
+ & con-15x15x23a & \textbf{0.69$_{(0.68, 0.69)}$} & -0.11$_{(-0.14, -0.08)}$ & 0.18$_{(0.17, 0.20)}$ & 0.26$_{(0.24, 0.27)}$ & / & / & / \\
+\midrule
+\multirow{7}{*}{\rotatebox{90}{\textbf{LBF}}} & 8x8-2p-2f-coop & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & / & / & / \\
+ & 2s-8x8-2p-2f-coop & \textbf{1.00$_{(1.00, 1.00)}$} & 0.99$_{(0.99, 0.99)}$ & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & / & / & / \\
+ & 10x10-3p-3f & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & / & / & / \\
+ & 2s-10x10-3p-3f & \textbf{0.99$_{(0.99, 1.00)}$} & 0.95$_{(0.95, 0.95)}$ & 0.98$_{(0.98, 0.99)}$$^{*}$ & 0.98$_{(0.97, 0.98)}$ & / & / & / \\
+ & 15x15-3p-5f & \textbf{0.92$_{(0.91, 0.93)}$} & 0.77$_{(0.76, 0.79)}$ & 0.80$_{(0.77, 0.83)}$ & 0.73$_{(0.71, 0.75)}$ & / & / & / \\
+ & 15x15-4p-3f & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(1.00, 1.00)}$} & \textbf{1.00$_{(0.99, 1.00)}$} & / & / & / \\
+ & 15x15-4p-5f & \textbf{0.98$_{(0.97, 0.98)}$} & 0.91$_{(0.91, 0.92)}$ & 0.88$_{(0.87, 0.89)}$ & 0.91$_{(0.90, 0.92)}$ & / & / & / \\
+\midrule
+\multirow{3}{*}{\rotatebox{90}{\textbf{MPE}}} & simple\_spread\_3ag & -5.60$_{(-5.69, -5.50)}$ & -8.22$_{(-8.57, -7.95)}$ & -8.16$_{(-8.22, -8.10)}$ & -10.02$_{(-10.43, -9.57)}$ & \textbf{-5.36$_{(-5.42, -5.30)}$} & -5.71$_{(-5.96, -5.49)}$ & / \\
+ & simple\_spread\_5ag & \textbf{-17.15$_{(-17.65, -16.62)}$} & -29.51$_{(-30.20, -28.72)}$ & -23.65$_{(-23.73, -23.57)}$ & -23.47$_{(-23.59, -23.36)}$ & -24.98$_{(-26.88, -22.52)}$ & -18.96$_{(-20.85, -17.33)}$$^{*}$ & / \\
+ & simple\_spread\_10ag & \textbf{-38.81$_{(-38.94, -38.68)}$} & -57.15$_{(-57.80, -56.47)}$ & -42.25$_{(-42.52, -42.02)}$ & -42.52$_{(-42.69, -42.37)}$ & -53.31$_{(-53.61, -53.01)}$ & -51.13$_{(-51.74, -50.23)}$ & /  \\ \bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph{Environments} We evaluate Sable on several benchmark environments including Robotic Warehouse (RWARE) \citep{rware}, Level-based foraging (LBF) \citep{lbf}, Connector \citep{bonnet2023jumanji}, The StarCraft Multi-Agent Challenge in JAX (SMAX) \citep{flair2023jaxmarl}, Multi-agent Brax (MABrax) \citep{peng2021facmac} and the Multi-agent Particle Environment (MPE) \citep{maddpg}. All environments have discrete action spaces with dense rewards, except for MABrax and MPE, which have continuous action spaces and RWARE which has sparse rewards. Furthermore, we compare to HASAC and MASAC only on continuous tasks given their superiority in this setting and QMIX only on SMAX as it has been shown to perform suboptimally in other discrete environments (most notably in spare reward settings such as RWARE) \citep{papoudakis2020benchmarking}. Finally, we highlight that our evaluation suite comprised of 45 tasks represents nearly double the amount of tasks used by prior benchmarking work \citep{papoudakis2020benchmarking} and substantially more than conventional research works recently published in MARL \citep{gorsane2022towards}.
+\paragraph{Hyperparameters} All baseline algorithms as well as Sable were tuned on each task with a tuning budget of 40 trials using the Tree-structured Parzen Estimator (TPE) Bayesian optimisation algorithm from the Optuna library \citep{optuna_2019}.
+
+\subsection{Performance}
+
+In Figure \ref{fig:moneyshot}, we report the amount of times that an algorithm had a significant probability of improvement over all other algorithms on a given task. Furthermore, we present the per environment aggregated sample efficiency curves and probability of improvement scores in Figure \ref{fig: sample eff}, as well as the mean episode return for all tasks in Table \ref{table:all-results}. Our experimental evidence shows Sable achieving SOTA performance across a wide range of tasks. Specifically, Sable exceeds baseline performance on 34 out of 45 tasks. The only environment where this is not the case is on MABrax. For continuous robotic control tasks SAC is a particularly strong baseline, typically outperforming on-policy methods such as PPO \citep{sac,open-rl-bench}. However, Sable still manages to achieve SOTA performance in continuous control tasks on MPE. We note that previous benchmarking and evaluation work \citep{papoudakis2020benchmarking, gorsane2022towards} has recommended training off-policy algorithms for a factor of 10 less environment interactions than on-policy algorithms due to more gradient updates for the same number of environment interactions. In our case, we find that off-policy systems do roughly 15 times more gradient updates for the same amount of environment interactions. If we had done this the performance of HASAC, MASAC and QMIX would have been less performant than reported here.
+\subsection{Memory usage and scalability}
+
+We assess Sable's ability to efficiently utilise computational memory, focusing primarily on scaling across the agent axis.
+
+\begin{comment}
+\paragraph{Challenges in testing scalability using standard environments} Testing scalability and memory-efficiency in standard MARL environments poses challenges, as many, like SMAX, MPE, Connector and LBF, expand the observation space as the number of agents increases. This makes such environments unsuitable for scalability testing without significant modification. 
+While RWARE offers some control over the observation size by limiting the agents' field of view (fov), its state grows substantially with each additional item (agent or row of shelves), complicating trial and comparisons, as the reward signal weakens with a larger population. LBF, on the other hand, is more effective, as it allows for reduced visibility while maintaining reasonable state size and offering faster training. However, it still requires modifications to ensure fixed fov and limit observation size.
+Despite this, LBF could not fully demonstrate Sable's scaling capability as the environment was unable to handle beyond 128 agents. Therefore to explore scaling to thousands of agents, we introduce a new environment called \textbf{Neom} specifically designed to test scalability with larger agent populations.
+
+\end{comment}
+
+\paragraph{Challenges in testing scalability using standard environments} Testing scalability and memory efficiency in standard MARL environments poses challenges, as many environments such as SMAX, MPE and Connector, expand the observation space as the number of agents grows. MABrax has uniquely assigned roles per agent making it difficult to scale up and RWARE does not have a straightforward way to ensure task difficulty as the number of agents increases. For these reasons, the above environments are difficult to use when testing algorithmic scalability without significantly modifying the original environment code. Among these, LBF is unique in that it is easier to adjust by reducing agents' field of view (FOV) while maintaining reasonable state size and offering faster training.
+Despite these adjustments, LBF could not fully demonstrate Sable's scaling capability, as it could not scale past 128 agents due to becoming prohibitively slow. Therefore, to explore scaling up to a thousand agents, we introduce \textbf{Neom}, a fully cooperative environment specifically designed to test algorithms on larger numbers of agents.
+\paragraph{A new environment for testing agent scalability in cooperative MARL} 
+
+A task in Neom is characterised by a periodic, discretised 1-dimensional pattern that is repeated for a given number of agents. Each agent observes whether it is in the correct position and the previous actions it has taken. Agents receive a shared reward which is calculated as the Manhattan distance between the team's current pattern and the underlying task pattern. We design three task patterns: (1) \texttt{simple-sine}: $\{0.5, 0.7, 0.8, 0.7, 0.5, 0.3, 0.2, 0.3 \}$, (2) \texttt{half-1-half-0}: $ \{ 1, 0 \}$, (3) \texttt{quick-flip}: $\{ 0.5, 0, -0.5, 0 \}$.
+
+\paragraph{Experimental setup} We evaluate the performance of Sable, MAT, and IPPO on the LBF and Neom environments. For LBF, experiments involve tasks with 32, 64, and 128 agents, while for Neom we include tasks with 32, 512 and 1024 agents. Given the slower throughput of these tasks, hyperparameter tuning was not feasible. Instead, we take the optimal hyperparameters found on reasonably sized tasks and apply these across all larger tasks. For example, for LBF we use the \texttt{15x15-3p-5f} task as it appears to be one of the hardest and for Neom we use \texttt{simple-sine-16-ag}, \texttt{half-1-half-0-16-ag} and \texttt{quick-flip-16-ag} as reference tasks.
+To measure the memory usage efficiency on both LBF and Neom environments on the agents axis, we select 32 as the fixed chunk size, which corresponds to the smallest number of agents used in our experiments.
+
+
+
+
+\paragraph{Results} We observe the following from the results in Figure \ref{fig:scaling}. First, although IPPO scales well from a memory perspective, it is unable to learn with many agents. It achieves a high reward initially but its performance degrades as training continues. Second, we find that Sable can consistently outperform MAT. Although the margin is small, this performance is achieved while maintaining comparable computational memory usage to IPPO, whereas MAT scales poorly and requires more than the maximum available GPU memory (80GB) on Neom tasks with 1024 agents. Notably, for Neom with 1024 agents, Sable sustains a stable mean episode return of around 25, indicating that approximately 40\% to 50\% of the agents successfully reached the target location. This result is significant given the shared reward structure, which poses a difficult coordination challenge for such a large population of agents.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/LBF_train_memory.pdf}
+    \caption{LBF - memory}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/lbf/lbf_32.pdf}
+    \caption{LBF - 32 agents}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/lbf/lbf_64.pdf}
+    \caption{LBF - 64 agents}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/lbf/lbf_128.pdf}
+    \caption{LBF - 128 agents}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/Neom_train_memory.pdf}
+    \caption{Neom - memory}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/neom/neom_32.pdf}
+    \caption{Neom - 32 agents}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/neom/neom_512.pdf}
+    \caption{Neom - 512 agents}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth, valign=t]{images/main_paper/agents_scaling/neom/neom_1024.pdf}
+    \caption{Neom - 1024 agents}
+    \end{subfigure}
+    \caption{\textit{Memory usage and agent scalability.} When scaling to many agents, Sable is able to achieve superior converged performance while maintaining memory efficiency.}
+    \label{fig:scaling}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.45\textwidth}
+        \includegraphics[width=0.49\linewidth, valign=t]{images/main_paper/ablation_studies/impl-tricks-sample-effi-rware.pdf}
+        \label{fig:ablation:impl-tricks}
+        \includegraphics[width=0.49\linewidth, valign=t]{images/main_paper/ablation_studies/impl-tricks-sample-effi-smax.pdf}
+    \caption{Ablations - Implementation details}
+    \label{fig:ablation:f}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.45\textwidth}
+        \includegraphics[width=0.49\linewidth, valign=t]{images/main_paper/ablation_studies/ts_ablation_rware_train_memory.pdf}
+        \label{fig:ablation:gamma}
+        \includegraphics[width=0.49\linewidth, valign=t]{images/main_paper/ablation_studies/timestep-ablation-sample-effi-rware.pdf}
+       
+    \caption{Ablations - Memory vs chunk size}
+     \label{fig:ablation:chunksize}
+    \end{subfigure}
+        
+        
+    
+    
+    
+    
+    \caption{\textit{Ablation studies on RWARE and SMAX.} \textbf{(a)} Comparing Sable with MAT with modifications from Sable's implementation details. \textbf{(b)} Showing the relationship between chunk size, performance and memory usage on RWARE.}
+    \label{fig:ablations}
+\end{figure}
+
+\subsection{Ablations}
+
+
+We aim to better understand the source of Sable's performance gains as compared to MAT. There are two specific implementation details that Sable inherits from the retention mechanism that can easily be transferred to attention, and therefore to MAT. The first is using root mean square normalization (RMSNorm) \citep{rmsnorm} instead of layer normalization \citep{layernorm} and the second is using SwiGLU layers \citep{swiglu,swish} instead of feed forward layers. To determine if this is the cause of the performance differences between Sable and MAT, we adapt MAT's implementation to use the above changes, both independently and simultaneously. We test all three variants of MAT on two RWARE tasks (\texttt{tiny-4ag} and \texttt{medium-4ag}) and two SMAX tasks (\texttt{3s5z} and \texttt{smacv2\_5\_units}) and compare them with the original implementation. We tune all methods using the same protocol as for the main results. 
+
+In Figure \ref{fig:ablation:f}, we see that the above implementation details do make a difference to MAT's performance. In RWARE, MAT's variants slightly increase in both performance and sample efficiency. However, Sable still achieves significantly higher performance while maintaining a similar sample efficiency. In SMAX, we observe a marked increase in sample efficiency for MAT, but no increase in overall performance. This is likely due to the fact that both MAT and Sable already achieve close to the maximum performance in these SMAX environments. In summary, we find that these implementation details do matter and improve the performance and sample efficiency of MAT, however Sable's use of retention and long sequence processing allows it to outperform MAT even with all implementation details being the same. In Figure \ref{fig:ablation:chunksize}, we see that even when dividing the rollout trajectories into chunks that are up to a factor of 16 smaller than the full rollout length, Sable's performance remains consistent, while its memory usage decreases. 
+
+
+
+\section{Related Work}
+
+
+\paragraph{Linear recurrent models} Recent work in RL has leveraged structured state space models \citep{s5} for efficient long context memory. It has also been shown that various linear recurrent models including Linear Transformers \citep{linear-transformer}, Fast and Forgetful Memory \citep{lin-ffm}, and Linear Recurrent Units \citep{lin-rec-units} can be used for temporal memory in RL \citep{memory-monoids}. Sable falls into this category of algorithms due to leveraging the RetNet architecture, a linear recurrent model, instead of the Transformer.
+
+\paragraph{Transformers and RetNets in reinforcement learning} Other works have applied Transformers in the context of MARL \citep{updet, mat}. The closest to our work is MAT \citep{mat}. In single-agent RL, transformers have been used to enable long range memory \citep{txl-rl,DTQN}, most notably the Gated Transformer-XL \citep{txl-rl}. Sable differs from these works for two main reasons: (1) it is a distinctly multi-agent algorithm and (2) it has no need for appending observation histories to input sequences since it can retain all necessary information from previous timesteps with a hidden state. Moreover, and to the best of our knowledge, Sable is the first architecture to leverage RetNets for learning policies in RL. The only other application of RetNets has been to learn an efficient world model \citep{retnet-worldmodel}. 
+
+\paragraph{Heterogeneous agent algorithms} Sable is built to leverage the advantage decomposition theorem, and while MAT and HASAC \citep{hasac} are the SOTA heterogeneous agent algorithms there are other notable heterogeneous agent algorithms including heterogenous agent versions of proximal policy optimisation (HAPPO) and trust region policy optimisation (HATRPO) \citep{happo}.
+
+
+\section{Conclusion}
+
+
+In this work, we introduced Sable, a novel cooperative MARL algorithm that employs retentive networks to achieve significant advancements in memory efficiency, agent scalability and performance. Sable's ability to condition on entire episodes provides it with an enhanced temporal awareness, leading to SOTA performance. This is evidenced by our extensive evaluation, where Sable significantly outperforms other leading approaches in 75\% of tasks tested. Moreover, Sable's memory efficiency complements its performance by addressing the significant challenge of scaling MARL algorithms as it is able to maintain stable performance even when scaled to over $1000$ agents. 
+Looking ahead, we aim to explore Sable's integration into more complex, larger-scale, real-world environments.
+
+\begin{comment}
+Suggestion
+    In this paper, we introduce Sable, a novel approach that bridges cooperative multi-agent reinforcement learning (MARL) with retentive network architectures, aimed at advancing performance, memory efficiency and scalability in large-scale environments. Sable transforms the challenge of handling multi-agent temporal dependencies into a sequence modeling problem by processing entire episodes through a retention-based framework. This enables the algorithm to excel in tasks requiring long-term temporal reasoning and efficient memory use.\\
+    We have demonstrated Sable’s superior empirical performance across 45 diverse tasks, significantly outperforming state-of-the-art MARL algorithms in 75% of cases. Moreover, Sable’s scaling capabilities address critical challenges in MARL, enabling stable performance with over 1,000 agents. The development of Neom, a custom environment, allowed us to test Sable’s potential in large-agent systems where current JAX environments fall short.\\
+    Looking ahead, we aim to explore Sable’s integration into more complex, real-world environments. We envision Sable as a foundational step towards developing more scalable and efficient MARL systems, paving the way for more generalised multi-agent learning models that can handle high populations of agents. Furthermore, the development of scalable environments like Neom will be crucial in supporting future research and advancements, as current JAX-environments remain a limiting factor for testing large-scale multi-agent systems.
+\end{comment}
+
+\newpage
+
+
+
+

@@ -1,0 +1,447 @@
+\title{Differentially Private Bias-Term Fine-tuning of Foundation Models}
+
+\begin{abstract}
+We study the problem of differentially private (DP) fine-tuning of large pre-trained models -- a recent privacy-preserving approach suitable for solving downstream tasks with sensitive data. Existing work has demonstrated that high accuracy is possible under strong privacy constraint, yet requires significant computational overhead or modifications to the network architecture.
+We propose differentially private bias-term fine-tuning (DP-BiTFiT), which matches the state-of-the-art accuracy for DP algorithms and the efficiency of the standard BiTFiT. DP-BiTFiT is model agnostic (not modifying the network architecture), parameter efficient (only training about $0.1\%$ of the parameters), and computation efficient (almost removing the overhead caused by DP, in both the time and space complexity). On a wide range of tasks, DP-BiTFiT is $2\sim 30\times$ faster and uses $2\sim 8\times$ less memory than DP full fine-tuning, even faster than the standard full fine-tuning. This amazing efficiency enables us to conduct DP fine-tuning on language and vision tasks with long-sequence texts and high-resolution images, which were computationally difficult using existing methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[!htb]
+    \centering
+    \includegraphics[width=0.33\linewidth]{figs/acc_RobertaLarge.pdf}
+    \hspace{-0.25cm}
+    \includegraphics[width=0.33\linewidth]{figs/max_throughput_RobertaLarge.pdf}
+    \hspace{-0.25cm}
+    \includegraphics[width=0.33\linewidth]{figs/memory_RobertaLarge.pdf}
+\caption{Performance of different fine-tuning methods on MNLI dataset with RoBERTa-large. DP-BiTFiT is one of the most accurate (below DP LoRA marginally), fastest (only slower than DP Adapter), and memory efficient (outperforming others substantially by $3\times$) DP methods.}
+\label{fig:all param efficient}
+\end{figure*}
+
+Fine-tuning large pre-trained neural networks is one of the most critical technique in deep learning, yielding strong performance in a variety of domains \citep{pan2009survey,kenton2019bert,goyal2017accurate}. Among different methods, full fine-tuning is the most prevalent one, which trains all the model parameters on the downstream tasks and achieves high accuracy within a small number of training epochs. 
+However, full fine-tuning on large models, from hundreds of millions \citep{he2016deep,chen2016training} to billions of parameters \citep{brown2020language}, can be burdensome in terms of the computation and the deployment, since a full copy of fine-tuned model parameters is needed for each task.
+
+To alleviate this issue, the parameter efficient fine-tuning only trains a substantially small portion of the model parameters, in contrast to the full fine-tuning. At a high level, the parameter efficient fine-tuning methods can be divided into two categories. $\langle 1\rangle $ Model-aware methods, meaning a relatively small number of parameters are introduced into the neural network architecture and only the new parameters are optimized. Examples include LoRA \citep{hu2021lora}, Adapter \citep{houlsby2019parameter}, and Compacter \citep{mahabadi2021compacter}. $\langle 2\rangle $ Model-agnostic methods, meaning that only a subset of existing parameters are trainable. Examples include training only the output linear layer (linear probing, \citep{kornblith2019better}), only the layer normalization layer \citep{houlsby2019parameter} and bias-term fine-tuning (BiTFiT) \citep{zaken2022bitfit}. We illustrate the differences as follows: $\W_0,\b_0$ are the pre-trained weights and biases, $\hat\quad$ indicates trainable parameters, and $\bm\theta$ is the additional parameters.
+
+\begin{align*}
+\underbrace{f(\x;\W_0,\b_0)}_\text{pre-trained model}\to
+\begin{cases}
+{f(\x;\hat\W,\hat\b)}&\text{full fine-tuning} \\ {f(\x;\W_0,\b_0,\hat{\bm\theta})} &\text{model-aware} \\ {f(\x;\W_0,\hat\b)} &\text{bias-term only}
+\end{cases}
+\end{align*}
+
+Empirically, these parameter efficient fine-tuning methods have achieved high accuracy that is comparable to full fine-tuning in the standard non-private setting. For instance, linear probing of ResNet \citep{he2016deep} and Vision Transformer (ViT, \citep{dosovitskiy2020image}) achieves 80\% accuracy on the ImageNet dataset \citep{sun2017revisiting,kornblith2019better}; LoRA and BiTFiT of RoBERTa \citep{liu2019roberta} and BERT \citep{kenton2019bert} achieve about 94\% on SST2 and on average 85\% across the General Language Understanding Evaluation (GLUE) datasets \citep{he2021towards,hu2021lora}. In addition, parameter efficient methods are faster than full fine-tuning and save the communication cost significantly in distributed learning.
+
+Parallel to these developments, the success of deep learning models relies on the availability of large datasets, which may contain sensitive information to be protected rigorously. This privacy issue is well-known for neural networks can be vulnerable to privacy attacks: membership information can be leaked from the purchase records via Google and Amazon online services \citep{shokri2017membership}; sensitive texts can be reconstructed by specifically designed prefix on GPT2 \citep{carlini2021extracting} and so can images in CIFAR10 and MNIST \citep{haim2022reconstructing}. To protect against such privacy risks, the standard technique is differential privacy (DP, formally stated in \Cref{def:DP}) which randomizes the standard optimizers via the private gradient in \Cref{eq: private gradient}. 
+
+A recent line of work has extensively studied the DP fine-tuning in both computer vision and language tasks, often achieving less than 3\% accuracy drop across different settings via full fine-tuning \citep{de2022unlocking,li2021large,bu2022automatic,bu2022scalable}, linear probing \citep{mehta2022large}, LoRA, Adapter, or Compacter \citep{yu2021differentially}. In fact, fine-tuning or pre-training from large dataset is considered necessary in the DP deep learning literature. As a matter of fact, full fine-tuning DP-GPT2 only achieves 24.2 BLEU score ($\epsilon=8$) on E2E dataset if randomly initialized \citep{li2021large}, in starking contrast to 63.2 BLEU if pre-trained; similarly, state-of-the-art (SOTA) DP accuracy on ImageNet is 48\% ($\epsilon=10$) without pre-training \citep{kurakin2022toward} but 86.7\% accuracy if pre-trained \citep{de2022unlocking}. Specifically, parameter efficient DP fine-tuning has empirically demonstrated strong accuracy (see our \Cref{tab:finetuning comparison}) with $3\sim 4\times$ memory saving and $2\sim 3\times$ speedup compared to DP full fine-tuning by Opacus \citep[c.f. \Cref{fig:memory_time_vs_sequence_roberta} and ][Table 3]{yu2021differentially}. Although previous works have shed light on various DP fine-tuning methods, we are the first to study DP-BiTFiT specifically and to show two distinctive advantages of it. 
+Firstly, DP-BiTFiT is model-agnostic and remains its parameter efficiency around 0.1\% across models by \Cref{tab:parameter efficiency}. While linear probing is also model-agnostic, the parameter efficiency can be as high as 8\% in ResNet50. Other methods like LoRA, Adapter and Compacter are architecture-dependent and possibly parameter inefficient, making them difficult to directly apply on arbitrary neural networks: LoRA and Adapter may need to train more than 12\% on BART-large \citep{lewis2020bart} to achieve high accuracy by \citet[Figure 1\& 4]{he2021towards}.
+
+Secondly, DP-BiTFiT is computationally efficient, almost as much as the standard BiTFiT and significantly more efficient than DP full fine-tuning, particularly with large models and high-dimensional input data. For examples of DP full fine-tuning, \citet{li2021large} have reported $2\sim 4\times$ slowdown on large language models for four advanced private codebases and up to $5\times$ memory overhead, compared to the standard fine-tuning; even on small networks,  11 codebases  across Tensorflow, JAX, and Pytorch have demonstrated $0.2\sim 5\times$ slowdown and $3\sim 100\times$ reduction in maximum batch size in \citet{subramani2021enabling}. See more discussion in \Cref{sec:scalability of DP}.
+\begin{algorithm}[H]
+\caption{\colorbox{pink}{DP} Bias-Term Fine-Tuning (BiTFiT)}
+\label{alg:dp bitfit}
+\textbf{Parameters:} $l$-th layer's bias $\b_l$, subsampling probability $p$, number of iterations $T$, number of layers $L$, noise scale $\sigma$, clipping threshold $R$, clipping factor $C_i$ (if no clipping then $C_i=1$).
+\begin{algorithmic}[1]
+    \For{iteration $t = 1, \cdots, T$}
+			\State{Subsample a batch $B_t\subseteq \{1, \ldots, n\}$ from training set with probability $p$}
+			
+			\For{layer $l\in L,L-1,\cdots,1$}
+			\State Get output gradient $\frac{\partial \mathcal{L}}{\partial \s_l}$
+			\State {Compute per-example gradient and its norm:}
+        \hspace{1cm}\State{$\frac{\partial \mathcal{L}_i}{\partial\b_{l}}=\frac{\partial \mathcal{L}}{\partial \s_{l,i}}^\top \mathbf{1}$
+			\colorbox{pink}{$\Longrightarrow\|\frac{\partial \mathcal{L}_i}{\partial\b_{l}}\|_F^2$}
+			}
+			\EndFor
+			
+			\State \colorbox{pink}{Aggregate grad norms: $\|\frac{\partial \mathcal{L}_i}{\partial\b}\|_F^2=\sum_l\|\frac{\partial \mathcal{L}_i}{\partial\b_{l}}\|_F^2$}
+			\State \colorbox{pink}{Compute clipping factor: $C_{i}=C(\|\frac{\partial \mathcal{L}_i}{\partial\b}\|_F;R)$}
+			\State Compute sum of clipped gradients $\G=\sum_i C_i\frac{\partial \mathcal{L}_i}{\partial \b}$
+			\State \colorbox{pink}{Add Gaussian noise $\G=\G+\sigma R\cdot \mathcal{N}(0, \I)$}
+			\State Descend on bias terms with $\G$ by SGD/Adam/...
+			\EndFor
+		\end{algorithmic}
+	\end{algorithm}
+
+\noindent\textbf{Contributions.} We develop DP-BiTFiT, a fine-tuning method that is model-agnostic, accurate, privacy-preserving, parameter efficient, and computationally efficient.
+\begin{enumerate}
+	\item Algorithmically, we propose the Differentially Private Bias-Term Fine-Tuning (\textbf{DP-BiTFiT}) in \Cref{alg:dp bitfit} that is highly accurate under DP constraint, on par with SOTA in \Cref{sec:experiments} and even outperforming fully fine-tuned GPT2-large. 
+	\item DP-BiTFiT is \textit{\textbf{model-agnostic}}\footnote{In \Cref{sec:experiments}, DP-BiTFiT is applicable to all model architectures tested, unlike LoRA (mostly only applies to transformers) and last-layer training (mostly only works on vision models).} and only optimizes 0.1\% of the model parameters on BERT, RoBERTa, GPT2, ViT, ResNet, and so on (see \Cref{tab:parameter efficiency}). Thus DP-BiTFiT is one of the \textit{\textbf{most parameter efficient}} fine-tuning methods among DP LoRA, Adapter, last-layer, etc.
+	\item We design a \textit{\textbf{computationally efficient}} implementation of DP-BiTFiT, whose time and space complexity is almost the same as the standard non-DP BiTFiT, while being faster than non-DP full fine-tuning and other DP fine-tuning (see \Cref{fig:all param efficient}). This advantage is analyzed in \Cref{tab:complexity overhead weight bias}, and demonstrated via the substantial speedup and memory-saving in \Cref{fig:memory_time_vs_sequence_roberta} and \Cref{fig:memory_time_vs_models}.
+	\item DP-BiTFiT is a unique algorithm in that \textit{\textbf{the computation overhead is independent of the feature dimension}} $T$\footnote{The computation overhead to get the per-sample weight gradient norm is linear (by instantiating per-sample gradints) or quadratic in $T$ (if using the ghost norm trick \citep{goodfellow2015efficient,li2021large}), for DP full and any other PEFT.} (see \textcolor{red}{red texts} in \Cref{tab:complexity overhead weight bias}). This is due to the \textit{\textbf{activation-free forward pass}} that only happens in the no-weight training\footnote{We distinguish the weight training and bias training in \Cref{sec:backward} using the chain rules. Note that activation-free means memory-saving, which is not leveraged by DP full, LoRA, Adapter, Compacter, etc.} unlike LoRA. In \Cref{fig:all param efficient}, although DP-BiTFiT optimizes a similar number of parameters to DP LoRA or Compacter, its memory efficiency is dominating. Therefore, DP-BiTFiT enjoys a special advantage on long-sequence texts and high-resolution images (see \Cref{fig:memory_time_vs_sequence_roberta}).
+\end{enumerate}
+
+\noindent\textbf{Novelty.} At a glance, our results may appear to be incremental as we are merely adding differential privacy to an existing method (BiTFiT) through a standard mechanism (DP-SGD). This is not true! Computationally, our implementation of DP-BiTFiT is distinct and orthogonal to existing DP algorithms such as GhostClip \cite{li2021large}\footnote{Ghost clipping (GhostClip) is an algebraic technique that only works on weight gradients because it manipulates the activation tensors at $O(BT^2)$ cost. This is too expensive for high-dimension features, hence not applicable to the bias gradients.}, in that DP-BiTFiT exploits the special structures in the forward and backward passes (see the simplicity of computation graph in \Cref{fig:flowcharts}), hence removing the computational and memory overhead in DP-SGD (see the independence of $T$ in \Cref{tab:complexity overhead weight bias}), which is unavoidable in other methods. 
+
+Our main contributions also include 
+\begin{itemize}
+\item The complexity analysis of DP parameter-efficient fine-tuning (PEFT) in \Cref{tab:complexity overhead weight bias} and \Cref{tab:complexity overhead weight bias param eff}. This was a missing piece in previous DP and non-DP PEFT literature (including the BiTFiT paper) and significantly helpful in determining the benefit of applying different PEFT methods. Specifically, we leverage the complexity analysis to rigorously show that the complexity saving of DP-BiTFiT is 50\% compared to the full fine-tuning, and to reveal the unique benefit of DP-BiTFiT on high-dimension data.
+\item The engineering effort: at the time of writing this paper, none of existing codebases including GhostClip and Opacus remove the forward hooks, because no analysis has established that only BiTFiT can be activation-free, not LoRA/Adapter/Compactor or full fine-tuning. Our algorithm enables DP-BiTFiT by one line of code\footnote{In Pytorch, DP-BiTFiT can be enabled within our codebase by \texttt{[param.requires\_grad\_(0) for name,param in
+model.named\_parameters() if 'bias' in name]}.}.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+\noindent\textbf{Fine-tuning methods.}
+Fine-tuning, i.e. training a model on a large dataset for a sufficiently long time, and then continuing to train (or transferring) onto the downstream datasets, is the standard paradigm to achieve high accuracy in both the standard and the DP regimes. In DP deep learning, the pre-training takes place on a public dataset using regular optimizers like SGD, and the fine-tuning takes place on a private dataset which requires privacy protection, using DP optimizers like DP-SGD in \Cref{sec:dp prelim}.
+
+In a long line of research, various fine-tuning methods have been proposed. One of the most popular method is the full fine-tuning, which simply runs gradient descents on all trainable weights and biases, thus can be inefficient when the model is large. To improve the efficiency, \citet{li2021prefix} proposes the prefix tuning that only optimizes the prompts or the input layer activation \citep{lester2021power,liu2021gpt}. However, as pointed out in \citet{hu2021lora} and \citet{li2021large}, the prefix tuning can be difficult to optimize and thus sub-optimal on large models. Another approach is to reduce the number of trainable parameters. For example, LoRA \citep{hu2021lora}, Adapter \citep{houlsby2019parameter,rebuffi2017learning,pfeiffer2021adapterfusion,ruckle2021adapterdrop,lin2020exploring} and Compacter \citep{mahabadi2021compacter} insert small `adapter' layers (usually 1-10\% of total parameters) between existing layers, and only the newly added adapters are optimized. We describe the forms and complexity of LoRA and Adapter in \Cref{app:param eff and complexity}.
+
+In addition to the aforementioned methods, BiTFiT is a special parameter-efficient method that rivals the full fine-tuning \citep{zaken2022bitfit,cai2020tinytl,he2021towards}. Firstly, BiTFiT optimizes a subset of original parameters -- the bias terms, which usually constitute less than 1/1000 of all parameters as demonstrated in \Cref{tab:parameter efficiency}. Therefore, BiTFiT can be readily deployed to any network in a model-agnostic manner. Secondly, BiTFiT is fundamentally different to other parameter efficient methods such as LoRA, since the bias gradients are computed differently than the weight gradients on the computation graph. We will elaborate on this in \Cref{eq:outer product linear}.
+\label{sec:dp prelim}
+\noindent\textbf{Deep learning with differential privacy.}
+We recall the classic $(\epsilon,\delta)$-DP, under which we train deep neural networks with provably privacy guarantees.
+\begin{definition}[\citep{dwork2006calibrating}]\label{def:DP}
+A randomized algorithm $M$ is $ (\varepsilon, \delta)$-differentially private if, for any two neighboring datasets $S,S^{\prime}$ that differ by one datapoint and for any event $E$, we have
+$ \mathbb{P}[M(S) \in E] \leqslant \mathrm{e}^{\varepsilon} \mathbb{P}\left[M\left(S^{\prime}\right) \in E\right]+\delta.
+$
+\end{definition}
+In deep learning, DP can be achieved through applying an off-the-shelf optimizer (SGD or Adam) with a privately released stochastic gradient in place of the regular $\sum_i \g_i$. The private stochastic gradient is computed by first getting a minibatch $\mathcal{I}$ via Poisson sampling, then compute
+\begin{align}
+	\text{Private gradient:}&\sum\limits_{i\in\mathcal{I}} \g_i\cdot C(\|\g_i\|;R)+\sigma R\cdot\mathcal{N}(0,\I)
+	\label{eq: private gradient}
+\end{align}
+where $C$ is any function\footnote{Examples of gradient clipping include but not limited to Abadi's clipping $\min(R/\|\g_i\|,1)$ \citep{abadi2016deep} and automatic clipping (AUTO-S) $R/(\|\g_i\|+0.01)$ \citep{bu2022automatic,yang2022normalized}.} $\R^+\to\R$ subject to $C(x)\leq R/x$, $\g_i$ is the $i$-th per-sample gradient, $R$ is the clipping threshold, and $\sigma$ is the noise multiplier. The private gradient is guaranteed to be DP through the \emph{sampled-Gaussian mechanism} and the associated tight privacy accounting to compose over the iterations \citep[see, e.g.,][and the references therein.]{abadi2016deep,wang2019subsampled,mironov2019sampled,koskela2020computing,bu2020deep,gopi2021numerical}.
+
+\label{sec:backward}
+\noindent\textbf{Backward propagation.}
+We briefly introduce the back-propagation, which reveals a simple yet important difference between the gradients of weights and those of biases. We consider a linear layer, indexed as  the $l$-th layer, with weight $\W_l \in \R^{d\times p}$ and bias as $\b_l \in \R^{p}$. We leave the derivation of other layers such as normalization and convolution in \Cref{app:detail back-propagation}. We denote the mini-batched input of this layer as $\a_l \in \R^{B\times T\times d}$ and the immediate output as $\s_l \in \R^{B\times T\times p}$, where $B$ is the batch size and $T$ is the feature dimension\footnote{In sequential data such as text, $T$ is the sequence length; in vision data, $T$ is the product of input dimensions (e.g. for images, $T$ is the product of height and width). We refer to a high-dimensional input when $T$ is large.\label{footnote3}}:
+$\a_{l+1} = \phi (\s_l),  \s_{l}=\a_{l}\W_{l}+\b_{l}$.
+Here $\phi$ is any non-parametric inter-layer operation, e.g. the non-linear activation (like ReLU), pooling, padding, and so on.
+
+We write $\mathcal{L}=\sum_{i=1}^n \mathcal{L}_i$ as the total loss  and $\mathcal{L}_i$ as the per-sample loss of the $i$-th sample. During a standard back-propagation of $L$ layers, the chain rule keeps track of the \textit{output gradient} at each layer in a just-in-time fashion:
+\begin{align}
+\begin{split}
+\frac{\partial \mathcal{L}}{\partial \s_l}
+=&
+\frac{\partial \mathcal{L}}{\partial \a_L}\circ \frac{\partial \a_{L}}{\partial \s_{L-1}}\cdot\frac{\partial \s_{L-1}}{\partial \a_{L-1}}\circ\cdots\frac{\partial \a_{l+1}}{\partial \s_{l}}
+\\
+=& \frac{\partial \mathcal{L}}{\partial \s_{l+1}}\W_{l+1}\circ\phi^{\prime}(\s_{l}).
+\end{split}
+\label{eq:back prop1}
+\end{align}
+Here $\circ$ is the Hadamard product and $\cdot$ is the matrix product. 
+This output gradient $\frac{\partial\mathcal{L}}{\partial \s_l}$ is used to compute per-sample gradient of weights and biases,
+\begin{align}
+\begin{split}
+\frac{\partial \mathcal{L}_i}{\partial \W_{l}}^\top=\sum_j\frac{\partial \mathcal{L}_i}{\partial \s_{l,j}}^\top\frac{\partial \s_{l,j}}{\partial \W_{l}}=\frac{\partial \mathcal{L}}{\partial \s_{l,i}}^\top\a_{l,i}, 
+\\
+\frac{\partial \mathcal{L}_i}{\partial \b_{l}}^\top=\sum_j\frac{\partial \mathcal{L}_i}{\partial \s_{l,j}}^\top\frac{\partial \s_{l,j}}{\partial \b_{l}}=\frac{\partial \mathcal{L}}{\partial \s_{l,i}}^\top\mathbf{1}.
+\end{split}
+\label{eq:outer product linear}
+\end{align}
+Notably, the weight gradient needs the activation tensor $\a_l$ to compute an expensive $O(BTpd)$ tensor multiplication. Memory-wise, $\{\a_l\}_l$ across all layers is very costly to store (taking more than 95\% memory across VGG, ResNet, DenseNet, RoBERTa, etc. by \citet[Figure 3]{jain2020checkmate}). In sharp contrast, the computation of bias gradient does not need $\a_l$, and the multiplication with $\mathbf{1}$ in \Cref{eq:outer product linear} is actually a cheap $O(BTp)$ summation on $\frac{\partial \mathcal{L}}{\partial \s_l}: B\times T\times p\to B\times p$.
+
+\label{sec:forward}
+\noindent\textbf{Forward propagation and the hook.}
+During the forward propagation, all Pytorch-based codebases for DP algorithms such as Private Transformers, Opacus, FastGradClip, Private-Vision, and others \citep{yu2021differentially,bu2023differentially} register the forward hooks to extract the activation tensors $\{\a_l\}_l$ of all layers from the computation graph, where $\a_l$ is computed and stored. Hence, the majority of memory burden is on the activation that grows extremely large for huge models like GPT3 \citep{brown2020language} with 175B parameters: the activation tensors consume more than 3600GB of memory while the parameters and gradients only consume 300GB \citep{rajbhandari2020zero}. On one hand, this issue can be alleviated by the activation recomputation or checkpointing technique \citep{chen2016training,jain2020checkmate}, whose memory cost reduces from $O(L)$ to $O(\sqrt{L})$ with an extra 33\% slowdown. Alternatively, we note that the activation tensors are not necessary in the forward propagation, if we only optimize the bias terms.
+
+
+
+\section{Differentially private Bias-Term Fine-Tuning}
+
+We propose DP-BiTFiT, to privately train only the bias terms in a neural network by combining \Cref{eq:outer product linear} and \Cref{eq: private gradient}. We use shaded lines to represent the additional DP operations in \Cref{alg:dp bitfit}, and add DP-related variables and operations in red in the computation graph by \Cref{fig:flowcharts}.
+
+\begin{figure*}[!htb]
+	\centering
+	\includegraphics[width=0.95\linewidth]{temp.png}
+	\caption{Back-propagation for DP (red\&black) and non-DP (black) algorithms. Note that the bias gradient uses a much simpler computation graph than the weight gradient, rendering DP-BiTFiT easy-to-implement and efficient-to-compute. Left: full fine-tuning with GhostClip (ghost clipping; \citep{goodfellow2015efficient,li2021large,bu2022scalable}). Upper right: full fine-tuning with Opacus \citep{opacus}. Lower right: DP-BiTFiT.}
+	\label{fig:flowcharts}
+\end{figure*}
+
+Implementation-wise, DP-BiTFiT is different from all existing DP algorithms (including full, LoRA, Adapter, etc.) that optimize weights, since it does not apply a Pytorch forward hook to store the activation $\a_l$ for all layers. We provide the implementation details of DP-BiTFiT in \Cref{app:implementation}. To give a concrete example, we apply DP-BiTFiT to the RoBERTa-large model on QQP dataset, following the same setting as \citet{li2021large} and using one 40GB A100 GPU. This is the most time-consuming text classification task in our work, taking 119 minutes per epoch for a training batch size 20 using the fastest DP full fine-tuning implementation -- GhostClip \citep{li2021large}. To conduct a simple ablation study, setting all weights to not require gradients (but forward hooks are still operating) reduces the training time by 50\% to to 80 minutes; removing the forward hooks further reduces the training time by 30\% to 63 minutes; finally, using the maximum batch size allowed by the memory-saving DP-BiTFiT reduces to 43 minutes.
+
+\subsection{Parameter efficiency}
+DP-BiTFiT enjoys exactly the same parameter efficiency as the standard BiTFiT, training merely about 0.1\% of the total parameters in large models. We demonstrate that DP-BiTFiT is one of the most parameter-efficient fine-tuning through a list of models in \Cref{tab:parameter efficiency}. 
+
+\begin{table}[!htb]
+	\centering
+	  \resizebox{0.9\linewidth}{!}{
+	\setlength{\tabcolsep}{1pt}
+\begin{tabular}{c|c|c|c}
+     Dataset&Model&\# of params&\% of bias \\\hline\hline
+   \multirow{5}{*}{ImageNet} & VGG16& 138M&0.009\\
+& ResNet18& 11.7M&0.043\\
+& ResNet50& 25.6M&0.113\\
+& ViT-small-patch16& 21.7M&0.238\\
+& ViT-base-patch16& 85.8M&0.120\\
+& ViT-large-patch16& 303M&0.090\\\hline\hline
+\multirow{3}{*}{E2E} & GPT2-small& 124M&0.082\\
+&GPT2-medium& 355M&0.076\\
+&GPT2-large&774M &0.066\\\hline\hline
+\multirow{2}{*}{GLUE} & RoBERTa-base& 125M&0.083\\
+&RoBERTa-large &355M &0.077\\
+\end{tabular}
+}
+\caption{Parameter efficiency of (DP) BiTFiT. Extended results on more models are in \Cref{tab:parameter efficiency extended}.}
+\label{tab:parameter efficiency}
+\end{table}
+
+An advantage of this parameter efficiency is reflected in the computation efficiency, given that most parameters do not require gradients to be computed: we show in \Cref{tab:complexity overhead weight bias} and \Cref{sec:scalability of DP} that DP-BiTFiT is much more efficient than full fine-tuning (DP and even non-DP). Additionally, the parameter efficiency also translates to the communication efficiency in the distributed learning. For example, the 64-bit communication cost of DP full fine-tuning is $64MD$ where $M$ is number of worker and $D$ is total number of parameters, which can be reduced $1000\times$ by DP-BiTFiT.
+
+\subsection{Complexity of weight and bias training}
+
+\begin{table*}[!htb]
+\centering
+\caption{Per-layer time and space complexity (measured by float-point operations) of training on weights (full and LoRA, Adapter; rank$=16$ as in \cite{yu2021differentially}) and biases. Only bias training's overhead is free of $\textcolor{red}{T}$. `$+$' means additional overhead to non-DP training, and `$\langle\rangle$' means between two values.
+The layer index $l$ is omitted for simplicity.
+}
+\setlength{\tabcolsep}{1pt}
+\resizebox{\linewidth}{!}{
+    \begin{tabular}{c||c||c|c|c|c|c|c|c|c||c|c}
+         &forward&\multicolumn{6}{c|}{weight training}&\multicolumn{2}{|c||}{bias training}\\
+         \cline{3-10}
+         & \&output grad&non-DP(full)&Opacus(full)&GhostClip(full)
+         &Book-Keeping(full)
+         &DP(LoRA)&DP(Adapter)
+         &non-DP&DP (ours)\\\hline
+         \multirow{2}{*}{\shortstack{Time\\complexity}}&\multirow{2}{*}{$4BTpd$}&\multirow{2}{*}{$2BTpd$}&$+2B{\color{red}T}pd$&$+2B{\color{red}T}pd$&\multirow{2}{*}{$O(T)\approx 0$}
+&\multirow{2}{*}{$+32B{\color{red}T}(p+d)$}&\multirow{2}{*}{$+64B{\color{red}T}p$}      
+&\multirow{2}{*}{$BTp$}&\multirow{2}{*}{$+3Bp$}  \\
+         &&&&$ + 2B{\color{red}T^2}(p+d)$&
+         &&&&  \\\hline         \multirow{2}{*}{\shortstack{Space\\complexity}}&\multirow{2}{*}{\shortstack{$pd+$\\$BT(p+d)$}}&\multirow{2}{*}{$BT(p+d)$}&\multirow{2}{*}{$+Bpd$}&\multirow{2}{*}{$+2BT^2$}&\multirow{2}{*}{$+\min\{2BT^2,2Bpd\}$}
+         &\multirow{2}{*}{$+16B(p+d)$}         &\multirow{2}{*}{$+32Bp$}
+         &\multirow{2}{*}{$p$}&\multirow{2}{*}{$+Bp$}
+         \\
+         &&&&&&&&&
+         \\\hline
+         \# back-prop&&1&1&2&1%&1
+         &1 or 2&1 or 2&1&1
+         \\\hline
+storing activation&&{\color{red}\cmark}&{\color{red}\cmark}&{\color{red}\cmark}&{\color{red}\cmark}
+&{\color{red}\cmark}&{\color{red}\cmark}
+&\xmark&\xmark
+    \end{tabular}
+}
+\label{tab:complexity overhead weight bias}
+\end{table*}
+
+We present in \Cref{tab:complexity overhead weight bias} the complexity of DP training on weights and biases, for one layer mapping $B\times T_l\times d_l$ to $B\times T_l\times p_l$. To elaborate on \Cref{footnote3}, for text data, $T_l$ is the sequence length, $d_l$ is input dimension, and $p_l$ is output dimension; for image data and specially in a convolution layer, $T_l$ is height times width, $d_l$ is the input channels times kernel sizes, $p_l$ is the output channels \citep[c.f.][Section 2.3]{bu2022scalable}. Notice that the total complexity of training a network is summed across all layers, e.g. the time complexity of standard full training is $6B\sum_l T_l p_l d_l$, DP full fine-tuning is over $8B\sum_l T_l p_l d_l$, and DP-BiTFiT is about $4B\sum_l T_l p_l d_l$. Therefore, our complexity analysis indicates that DP-BiTFiT is $6/4=1.5\times$ faster than non-private full fine-tuning and over $8/4=2\times$ faster than DP full fine-tuning.
+
+Here, the DP weight training (full fine-tuning or any other PEFT) uses three efficient implementations that are equivalent mathematically but have different complexity: Opacus \citep{opacus}, GhostClip \citep{goodfellow2015efficient,li2021large}, and MixGhostClip \citep{bu2022scalable}. The first two implementations are illustrated in \Cref{fig:flowcharts}, of which MixGhostClip is a hybridization that reduces to GhostClip when $T$ is small. For the complexity of bias training in \Cref{tab:complexity overhead weight bias}, it suffices to analyze Line 5 of \Cref{alg:dp bitfit}. We leave the details in \Cref{app:param eff and complexity}, where we also apply the complexity analysis of weight training beyond full fine-tuning, including DP LoRA and DP Adapter for the first time.
+\subsection{Scalability of DP algorithms}
+\label{sec:scalability of DP}
+By \Cref{tab:complexity overhead weight bias}, we observe that DP training on weights can be memory costly, especially when the models are large and the data is high-dimensional. As an example of the large modelling issue, \citet{li2021large} shows that Opacus cannot fit even a single datapoint into a 16GB GPU using GPT2-large \citep{radford2019language} with 774M parameters, due to its $O(B\sum_l p_l d_l)$ space complexity where the number of parameters is $\sum_l p_l d_l$; for high-dimensional data, GhostClip cannot fit a single $400\times 400$ image into the same GPU using ResNet18 with 11.7M parameters, due to its $O(B\sum_l T_l^2)$ space complexity. Although MixGhostClip \citep{bu2022scalable,bu2023differentially} significantly alleviates the memory issue in both cases, the computational overhead from DP training may still be a concern when the dimension is extremely high \citep[c.f.][Figure 4]{bu2022scalable}. In sharp contrast, DP-BiTFiT is amazingly scalable since its computational overhead is negligible and independent of $T$ 
+(though the total complexity is still linear in $T$).
+\subsubsection{Efficiency v.s. feature dimension}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.48\linewidth]{figs/sstrobertabase_vs_dimension_memory.pdf}
+    \includegraphics[width=0.48\linewidth]{figs/sstrobertabase_vs_dimension_time.pdf}        \includegraphics[width=0.48\linewidth]{figs/cifarrestnet50_vs_dimension_memory.pdf}
+    \includegraphics[width=0.48\linewidth]{figs/cifarrestnet50_vs_dimension_time.pdf} 
+    \caption{Memory and speed by different fine-tuning methods. Top two: SST2 dataset (sequence length $T$; MixGhostClip is equivalent to GhostClip for this small $T$), RoBERTa-base and batch size 20.
+    Bottom two: 50000 images of
+    $\sqrt{T}\times\sqrt{T}$ pixels, ResNet50 and batch size 200.}
+\label{fig:memory_time_vs_sequence_roberta}
+\end{figure}
+To empirically evaluate the computation efficiency of DP fine-tuning methods, we measure the time and GPU memory for a fixed batch size. We depict the high-dimensional data issue in \Cref{fig:memory_time_vs_sequence_roberta}, in which the memory saving and speedup by DP-BiTFiT is substantial. We expect to observe greater efficiency advantage of DP-BiTFiT on higher dimensional data, e.g. in document-level language tasks with $T\approx 20000$ by \citet{beltagy2020longformer}, and in high-resolution image tasks, such as $1024\times 1024$ CelebA-HQ \citep{karras2018progressive} and Flickr-Faces-HQ \citep{karras2019style} where $T$ can be of order $10^5$ in the convolution layers.
+\begin{table*}[!b]
+\centering
+\caption{Accuracy of fine-tuning methods with RoBERTa, under $\epsilon=8$. More non-private fine-tuning results (similar to here) can be found in \citep{yu2021differentially,hu2021lora,zaken2022bitfit}. Note that linear probing of RoBERTa-base only gets 87.2\% on SST2 and 77.3\% on QNLI.}	
+\setlength{\tabcolsep}{0.8pt}
+	\resizebox{0.9\linewidth}{!}{
+		\begin{tabular}{|c||c|c|c|c|c|c|c|c|c|}			
+	    \hline
+		& \multicolumn{2}{|c|}{Full }&RGP&Adapter&\multicolumn{2}{|c|}{LoRA}&\multicolumn{2}{|c|}{BiTFiT}&Compacter \\
+		& \multicolumn{2}{|c|}{\citep{li2021large}}&\citep{yu2021differentially}&\citep{yu2021differentially}&\multicolumn{2}{|c|}{ \citep{yu2021differentially}}&\multicolumn{2}{|c|}{Ours}& \citep{yu2021differentially} \\\hline
+			Additional params to networks&\multicolumn{2}{|c|}{\xmark}&\xmark&\cmark&\multicolumn{2}{|c|}{\cmark}&\multicolumn{2}{|c|}{\xmark}&\cmark 
+			\\\hline
+			Forward caching activations&\multicolumn{2}{|c|}{\cmark}&\cmark&\cmark&\multicolumn{2}{|c|}{\cmark}&\multicolumn{2}{|c|}{\xmark}&\cmark
+			\\\hline\hline
+			\multicolumn{10}{|c|}{RoBERTa-base (125M)}
+			\\\hline
+			\% of trainable params&\multicolumn{2}{|c|}{100\%}&100\%&1.4\%&\multicolumn{2}{|c|}{0.94\%}&\multicolumn{2}{|c|}{0.083\%}&0.055\%
+			\\\hline
+			&\textcolor{cyan}{standard}&DP&DP&DP&\textcolor{cyan}{standard}&DP&\textcolor{cyan}{standard}&DP&DP\\\hline
+			Accuracy SST2&\textcolor{cyan}{94.5}&92.1&91.6&92.5&\textcolor{cyan}{95.1}&92.2&\textcolor{cyan}{93.5}&92.4&92.3
+			\\
+			Accuracy QNLI&\textcolor{cyan}{91.4}&87.9&87.2&87.5&\textcolor{cyan}{93.3}&87.3&\textcolor{cyan}{87.3}&86.9&85.1
+			\\
+			Accuracy QQP&\textcolor{cyan}{87.3}&86.1&85.5&85.6&\textcolor{cyan}{90.8}&85.7&\textcolor{cyan}{86.1}&85.6&84.7
+			\\
+			Accuracy MNLI-m&\textcolor{cyan}{85.9}&83.2&80.1&83.4&\textcolor{cyan}{87.5}&83.5&\textcolor{cyan}{83.4}&82.9&82.6
+			\\\hline\hline
+		\multicolumn{10}{|c|}{RoBERTa-large (355M)}
+			\\\hline
+			\% of trainable params&\multicolumn{2}{|c|}{100\%}&100\%&1.4\%&\multicolumn{2}{|c|}{0.94\%}&\multicolumn{2}{|c|}{0.077\%}&0.053\%
+			\\\hline
+			&\textcolor{cyan}{standard}&DP&DP&DP&\textcolor{cyan}{standard}&DP&\textcolor{cyan}{standard}&DP&DP\\\hline
+			Accuracy SST2&\textcolor{cyan}{96.2}&93.8&93.0&93.9&\textcolor{cyan}{96.2}&95.3&\textcolor{cyan}{95.5}&94.5&94.2
+			\\
+			Accuracy QNLI&\textcolor{cyan}{93.6}&91.1&90.0&90.7&\textcolor{cyan}{94.9}&90.8&\textcolor{cyan}{92.2}&91.1&90.2
+			\\
+			Accuracy QQP&\textcolor{cyan}{87.9}&87.5&86.7&86.3&\textcolor{cyan}{91.6}&87.4&\textcolor{cyan}{87.9}&86.9&86.2
+			\\
+			Accuracy MNLI-m&\textcolor{cyan}{90.3}&87.0&86.1&87.7&\textcolor{cyan}{90.6}&87.8&\textcolor{cyan}{89.3}&88.3&87.5
+			\\\hline
+		\end{tabular}
+	}
+\label{tab:finetuning comparison}
+\end{table*}
+
+\subsubsection{Efficiency v.s. model size}
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.48\linewidth]{figs/max_throughput_GPT2.pdf}
+\includegraphics[width=0.48\linewidth]{figs/max_batch_size_GPT2.pdf}
+    \includegraphics[width=0.48\linewidth]{figs/max_throughput_ResNet.pdf}
+    \includegraphics[width=0.48\linewidth]{figs/max_batch_size_ResNet.pdf}
+\caption{Maximum throughput and batch size by different fine-tuning methods. Each model is represented by one column, which sorts the model size in decreasing order from left to right.
+Top two: E2E dataset with GPT2-small/medium/large (MixGhostClip is equivalent to GhostClip for this small $T$). Bottom two: 50000 images of $512\times 512$ pixels with ResNet 50/101/152. 
+}
+\label{fig:memory_time_vs_models}
+\end{figure}
+
+To stress-test the computation efficiency of DP-BiTFiT with large models, we apply the maximum batch size with respect to each fine-tuning method, instead of using a fixed one across different methods. Therefore, DP-BiTFiT can further leverage its memory efficiency to achieve the best throughput. Here we consider a setting of high-dimensional data ($T=512^2$) but small ResNet ($11.7\sim 58.2$M parameters) and the other setting of low-dimensional data ($T=100$) but large GPT2 ($125\sim 774$M parameters).
+
+\subsection{Applicability of DP-BiTFiT}
+
+Some model architectures, such as LLAMA \cite{touvron2022llama,touvron2023llama,chowdhery2023palm} and the convolutional layers followed by batch normalization \cite{he2016deep}, may not contain any bias terms, hence DP-BiTFiT (and its non-DP counter-part) is either not directly applicable or less performant. We propose DP-BiTFiT-Add, which adds zero or randomly initialized bias terms to the layers and then applies DP-BiTFiT. Such initialization does not affect the pre-trained utility, but enlarges the parameter space and thus allows better performance after fine-tuning. As a concrete example, we experiment with ResNet18 (no bias in all convolutional layers) on CelebA for the multi-label classification task, under the same setting as \Cref{tab:finetuning images}. The accuracy boosts from 86.9\% of DP-BiTFiT to 87.3\% of DP-BiTFiT-Add, compared to 88.4\% of the full fine-tuning. 
+
+Note that DP-BiTFiT-Add is still activation-free and highly parameter-efficient: DP-BiTFiT-Add trains less than 0.1\% parameters on ResNet18, and only 0.03\% parameters on LLAMA2-7B.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We now test the accuracy of DP-BiTFiT on natural language and computer vision tasks, with the settings in \Cref{app:experiment details}. For DP full fine-tuning algorithms, we use GhostClip \citep{li2021large} on texts, and MixedGhostClip \citep{bu2022scalable} on images, which achieve SOTA efficiency and accuracy on these datasets respectively. We compute $\epsilon$ using a conversion from RDP though tighter privacy accountants in \Cref{sec:dp prelim} are feasible. 
+And we observe that, in all experiments with or without DP, the optimal learning rate for BiTFiT is larger than that for full fine-tuning. 
+\subsection{Text classification}
+We experiment on MNLI-m(mismatch) \citep{N18-1101}, QQP \citep{WinNT}, QNLI \citep{rajpurkar2016squad}, and SST2 datasets \citep{socher2013recursive}. Competitive algorithms include reparameterized gradient perturbation (RGP, \citep{yu2021large}), LoRA, Adapter and Compacter \citep{yu2021differentially}. We use the same setup as \citet{li2021large} on RoBERTa models with text-infiling, only increasing the learning rate for DP-BiTFiT. Additional results under a stronger privacy guarantee $\epsilon=3$ can be found in \Cref{tab:finetuning comparison eps3}.
+
+In \Cref{tab:finetuning comparison}, DP-BiTFiT is highly parameter efficiency and accurate compared with other DP fine-tuning. As indicated by \Cref{fig:all param efficient} and  \Cref{fig:memory_time_vs_sequence_roberta}, over $2\times$ speedup and over $3\times$ memory saving is observed, when switching from DP full fine-tuning to DP-BiTFiT.
+
+\begin{remark}\label{rem:gap better large model}
+It is encouraging to observe that the gap between the full fine-tuning and BiTFiT, with or without DP, tends to decrease as the model size increases. For instance on QNLI, this gap without privacy reduces from 4.1\% to 1.4\%, and with privacy reduces from 1.4\% to 0.1\%. This scaling pattern is consistently observed on different tasks, e.g. in \Cref{tab:gpt e2e} and \Cref{tab:finetuning images}.
+\end{remark}
+\subsection{Natural Language Generation}
+
+\begin{table*}[!htb]
+	\centering
+\caption{Performance of fine-tuning methods with GPT2, under $\epsilon=8$. LoRA and prefix results are documented in \citet{li2021large}. Best performance in each model is in bold text. DP-BiTFiT is comparable to DP full, especially on larger models.}
+\setlength{\tabcolsep}{2pt}
+	\resizebox{0.86\linewidth}{!}{
+		\begin{tabular}{c|c|c|c|c|c|c|c|c|c}
+			Model&Fine-tuning&\% of params&Privacy&Perplexity$\downarrow$&BLEU$\uparrow$&ROGUE-L$\uparrow$&NIST$\uparrow$&METEOR$\uparrow$&CIDEr$\uparrow$\\\hline
+			\multirow{8}{*}{\shortstack{GPT2-small\\(124M)}}&\multirow{2}{*}{full}&\multirow{2}{*}{100\%}&\textcolor{cyan}{standard}&\textcolor{cyan}{2.91}&\textcolor{cyan}{69.46} &\textcolor{cyan}{71.36} &\textcolor{cyan}{8.78} &\textcolor{cyan}{0.46}&\textcolor{cyan}{2.42}\\
+			&&&DP ($\epsilon=8$)&2.33&\textbf{63.60}&67.07&\textbf{7.71}&0.40&1.94\\\cline{2-10}
+			&\multirow{2}{*}{LoRA}&\multirow{2}{*}{---}&\textcolor{cyan}{standard}&\textcolor{cyan}{---}&\textcolor{cyan}{69.68} &\textcolor{cyan}{71.71} &\textcolor{cyan}{8.82} &\textcolor{cyan}{0.46}&\textcolor{cyan}{2.49}\\
+			&&&DP ($\epsilon=8$)&---&63.39&\textbf{67.53}&7.45&\textbf{0.41}&\textbf{1.95}\\\cline{2-10}
+			&\multirow{2}{*}{prefix}&\multirow{2}{*}{---}&\textcolor{cyan}{standard}&\textcolor{cyan}{---}&\textcolor{cyan}{68.85} &\textcolor{cyan}{70.81} &\textcolor{cyan}{8.72} &\textcolor{cyan}{0.45}&\textcolor{cyan}{2.35}\\
+			&&&DP ($\epsilon=8$)&---&49.26&60.73&5.53&0.36&1.57\\\cline{2-10}
+			&\multirow{2}{*}{BiTFiT}&\multirow{2}{*}{0.082\%}&\textcolor{cyan}{standard}&\textcolor{cyan}{3.19}&\textcolor{cyan}{64.46} &\textcolor{cyan}{63.67} &\textcolor{cyan}{4.25} &\textcolor{cyan}{0.36}&\textcolor{cyan}{1.36}\\
+			&&&DP ($\epsilon=8$)&2.89&60.56&64.96&6.14&0.37&1.62\\\hline\hline
+			\multirow{4}{*}{\shortstack{GPT2-medium\\(355M)}}&\multirow{2}{*}{full}&\multirow{2}{*}{100\%}&\textcolor{cyan}{standard}&\textcolor{cyan}{2.08}&\textcolor{cyan}{68.50} &\textcolor{cyan}{71.46} &\textcolor{cyan}{8.63} &\textcolor{cyan}{0.45}&\textcolor{cyan}{2.14}\\
+			&&&DP ($\epsilon=8$)&2.25&\textbf{64.22}&\textbf{67.53}&\textbf{8.17}&\textbf{0.42}&\textbf{2.08}\\\cline{2-10}
+			&\multirow{2}{*}{BiTFiT}&\multirow{2}{*}{0.076\%}&\textcolor{cyan}{standard}&\textcolor{cyan}{2.85}&\textcolor{cyan}{64.48} &\textcolor{cyan}{67.81} &\textcolor{cyan}{8.50} &\textcolor{cyan}{0.43}&\textcolor{cyan}{2.11}\\
+			&&&DP ($\epsilon=8$)&2.67&61.02&66.13&7.18&0.39&1.80\\\hline\hline
+			\multirow{4}{*}{\shortstack{GPT2-large\\(774M)}}&\multirow{2}{*}{full}&\multirow{2}{*}{100\%}&\textcolor{cyan}{standard}&\textcolor{cyan}{1.79}&\textcolor{cyan}{66.84} &\textcolor{cyan}{70.38} &\textcolor{cyan}{8.73} &\textcolor{cyan}{0.46}&\textcolor{cyan}{2.36}\\
+			&&&DP ($\epsilon=8$)&2.26&64.64&\textbf{68.97}&8.30&\textbf{0.42}&\textbf{2.16}\\\cline{2-10}
+			&\multirow{2}{*}{BiTFiT}&\multirow{2}{*}{0.066\%}&\textcolor{cyan}{standard}&\textcolor{cyan}{2.79}&\textcolor{cyan}{65.79} &\textcolor{cyan}{67.61} &\textcolor{cyan}{8.55} &\textcolor{cyan}{0.43}&\textcolor{cyan}{2.21}\\
+	&&&DP ($\epsilon=8$)&2.59&\textbf{65.21}&67.88&\textbf{8.43}&\textbf{0.42}&2.15\\\hline
+	\end{tabular}
+	}
+	\label{tab:gpt e2e}
+\end{table*}
+
+We compare DP-BiTFiT with DP LoRA, full fine-tuning, and prefix tuning \citep{li2021prefix} on E2E dataset \citep{dusek.etal2020:csl}, in order to train GPT2 that generates texts to evaluate a restaurant. The performance measures are BLEU \citep{Papineni02bleu}, ROGUE-L \citep{lin-2004-rouge}, NIST \citep{sadjadi20182017}, METEOR \citep{banarjee2005}, CIDEr \citep{vedantam2015cider} and perplexity. We use the same setup as \citet{bu2022automatic} with automatic clipping, only increasing the learning rate for DP-BiTFiT. More results under a stronger privacy guarantee $\epsilon = 3$ can be found in \Cref{tab:gpt e2e eps3}.
+
+In \Cref{tab:gpt e2e}, DP-BiTFiT has shown strong performance, even outperforming DP full fine-tuning on GPT2-large, as well as both the computation and parameter efficiency (see \Cref{fig:memory_time_vs_models}). Similar to \Cref{rem:gap better large model}, the gap of BLEU score between DP-BiTFiT and DP full fine-tuning reduces from -3.06/-3.20 (GPT2-small/medium) to +0.57 (GPT2-large), as the model size increases. We refer to \Cref{tab:gpt e2e eps3} for a more significant pattern when $\epsilon=3$.
+\begin{table}[!htb]
+\centering
+\setlength{\tabcolsep}{1pt}
+\caption{Accuracy of DP ViT-large on CIFAR, 3 epochs.}
+\resizebox{0.72\linewidth}{!}{
+\begin{tabular}{|c|c|c|c|}
+\hline
+CIFAR10&DP last-layer&DP-BiTFiT&DP full
+\\\hline
+$\epsilon=1$&98.4&  98.9& 98.9
+\\
+$\epsilon=2$&98.6&  99.0& 98.9
+\\
+$\epsilon=4$&98.6&  99.0& 99.0
+\\
+$\epsilon=8$&98.7&99.0& 99.0
+\\\hline
+CIFAR100&DP last-layer&DP-BiTFiT&DP full
+\\\hline
+$\epsilon=1$&86.2&90.2&87.7
+\\
+$\epsilon=2$&87.3&91.2&90.1
+\\
+$\epsilon=4$&88.1&91.8&91.0
+\\
+$\epsilon=8$&88.8&92.3&91.3
+\\\hline
+\end{tabular}
+}
+\label{tab:cifar100 BEIT}
+\\
+\hspace{-0.9cm}
+\includegraphics[width=0.7\linewidth]{figs/DP_many.pdf}
+\captionof{figure}{Accuracy of DP ViT-large on CIFAR100.}
+\end{table}
+
+\subsection{Image classification}
+\label{sec:image class}
+We further experiment on CIFAR10/CIFAR100 ($32\times 32$ pixels, resized to $224\times 224$) and CelebA ($218\times 178$ pixels, not resized; results in \Cref{tab:celebA 40} and \Cref{tab:finetuning images}) after pre-training on ImageNet ($224\times 224$ pixels). For these downstream datasets (e.g. CIFAR10 has only 10 classes), the number of classes is different than that in ImageNet, which has 1000 classes. Consequently, the classification head of the pretrained model is re-placed by random initialization. Therefore, our DP-BiTFiT is applied on top of the last-layer training, but the number of trainable parameter remains $\approx 0.1\%$ of the model parameters. For instance, ViT-large has 303M parameters, of which 282k are biases and the weight of last layer contains $\approx 100$k, depending on the number of classes in the downstram task.
+We observe that DP-BiTFiT enjoys $1.5\times$ speedup for transformers and ResNet in \Cref{tab:celebA 40}, and that DP-BiTFiT performs on par with full fine-tuning in \Cref{tab:finetuning images,tab:cifar100 BEIT,tab:extended two-phase-cifar10,tab:extended two-phase-cifar100}, e.g. achieving state-of-the-art 99.0\% accuracy on CIFAR10 and 91.2\% on CIFAR100 at $\epsilon=2$. Our observation holds across various models (especially on transformers), privacy budgets, and datasets. However, DP-BiTFiT needs extra attention for convolutional neural networks (CNN) as we elaborate in \Cref{app:bias cnn}.
+
+\begin{table*}[!htb]
+\centering
+\setlength{\tabcolsep}{1.5pt}
+\caption{Accuracy of DP fine-tuning methods on CIFAR10 and CelebA. More results under different $\epsilon$ and network architectures can be found in \Cref{app:more results image}.}
+		\begin{tabular}{|c||c|c|c|c|}
+	    \hline
+	    Dataset&&Model&Fine-tuning&Accuracy
+	    \\\hline
+		\multirow{7}{*}{\shortstack[c]{CIFAR10\\ ($\epsilon=2,\delta=$1e-5)}}
+		&\citep{yu2021do}&ResNet152 (GEP)&last-layer&94.8\\\cline{2-5}
+		&\citep{tramer2020differentially}&SIMCLRv2&last-layer&92.7\\\cline{2-5}
+		&\multirow{2}{*}{\citep{de2022unlocking}}&Wide-ResNet28&last-layer&93.6\\
+		&&Wide-ResNet28&full&95.4\\\cline{2-5}
+		&\multirow{3}{*}{\citep{bu2022scalable}}&crossvit-base-240&full&96.1\\
+  &&vit-base-patch16&full&97.4\\
+  \cline{2-5}
+		&&vit-large-patch16&full&98.9\\
+		&\multirow{3}{*}{Ours}&crossvit-base-240&BiTFiT&95.7
+		\\
+		&&vit-base-patch16&BiTFiT& 97.7
+		\\
+		&&vit-large-patch16&BiTFiT& 99.0
+		\\\hline
+		\multirow{3}{*}{\shortstack[c]{CelebA [Smiling]\\($\epsilon=8,\delta=$5e-6)}}&\citep{bu2022automatic}&ResNet9&full&91.08\\\cline{2-5}
+		&\multirow{3}{*}{Ours}&ResNet18&full&91.02\\
+		&&ResNet18&BiTFiT&88.17\\
+		&&ResNet18&last-layer&66.15\\\hline
+		\multirow{3}{*}{\shortstack[c]{CelebA [Male]\\ ($\epsilon=8,\delta=$5e-6)}}&\citep{bu2022automatic}&ResNet9&full&95.70\\\cline{2-5}
+		&\multirow{3}{*}{Ours}&ResNet18&full&95.15\\
+		&&ResNet18&BiTFiT&92.29\\
+		&&ResNet18&last-layer&78.70\\
+		\hline
+		\multirow{3}{*}{\shortstack[c]{CelebA [Multi-label]\\ ($\epsilon=8,\delta=$5e-6)}}&\citep{bu2022automatic}&ResNet9&full&87.58\\\cline{2-5}
+		&\multirow{3}{*}{Ours}&ResNet18&full&88.38\\
+		&&ResNet18&BiTFiT&86.87\\
+		&&ResNet18&last-layer&83.67\\\hline
+		\end{tabular}
+	\label{tab:finetuning images}
+\end{table*}
+
+
+\section{Discussion}
+
+In this work, we study DP-BiTFiT to privately train the bias terms of neural networks. The highlight of DP-BiTFiT is the accuracy, the parameter efficiency and the computation efficiency, which is realized by not forward caching the activation tensors, and not back-propagating the gradient of weights. This unique mechanism allows DP-BiTFiT to be as fast and memory-saving as its non-private counterpart, thus particularly suitable for large models and/or high-dimension data on which the full fine-tuning can be costly.
+
+While we have studied DP-BiTFiT as a standalone method, it is promising to combine it with other methods, such as prefix-based tuning and \textit{weights}-based fine-tuning.}. We readily offer such flexible combination in our codebase, which automatically implements any DP algorithms in the backend.
+
+\clearpage
+
+

@@ -1,0 +1,365 @@
+\title{Attention-aware Post-training Quantization without Backpropagation}
+
+\begin{abstract}
+Quantization is a promising solution for deploying large-scale language models (LLMs) on resource-constrained devices. 
+Existing quantization approaches, however, rely on gradient-based optimization, regardless of it being post-training quantization (PTQ) or quantization-aware training (QAT), which becomes problematic for hyper-scale LLMs with billions of parameters.
+This overhead can be alleviated via recently proposed backpropagation-free PTQ methods; however, their performance is somewhat limited by their lack of consideration of inter-layer dependencies.
+In this paper, we thus propose a novel PTQ algorithm that considers inter-layer dependencies without relying on backpropagation. 
+The fundamental concept involved is the development of attention-aware Hessian matrices, which facilitates the consideration of inter-layer dependencies within the attention module.
+Extensive experiments demonstrate that the proposed algorithm significantly outperforms conventional PTQ methods, particularly for low bit-widths. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The explosive growth in complexity (parameters) of large-scale language models (LLMs)~\cite{touvron2023llama,zhang2022opt} has resulted in a proportional increase in computational costs, which has prompted an urgent need for efficient model processing and compression strategies.
+Quantization has emerged as a pivotal solution in this context, and it serves as an essential step in the deployment of AI models on resource-constrained devices that primarily support fixed-point arithmetic. 
+By reducing precision, the memory bandwidth requirements can be alleviated, and the significant parallelism of quantized models can be SIMDified using highly efficient vector processing units, such as neural processing unit (NPU).
+
+Two main categories of quantization approaches have been proposed to preserve the performance of original full-precision models: quantization-aware training (QAT) and post-training quantization (PTQ).
+Although QAT can potentially outperform PTQ, its practicality diminishes considerably when handling hyper-scale LLMs featuring billions of parameters.
+Consequently, recent quantization efforts have been directed toward PTQ.
+
+Although classic PTQ methods have successfully quantized small-scale models~\citep{nagel2020up, li2021brecq}, they rely on time-consuming gradient-based optimization, so their efficacy decreases when the complexity of LLMs increases.
+Accordingly, backpropagation-free PTQ methods have been developed for LLMs~\citep{frantar2023optq, xiao2023smoothquant, jeon2023frustratingly}; however, their performance is somewhat limited owing to the lack of consideration of inter-layer dependencies. 
+Recent studies have attempted to consider inter-layer dependencies~\citep{shao2023omniquant, ma2024affinequant}, but they still rely on time-consuming gradient-based optimizations.
+
+In this paper, we propose a novel quantization algorithm that considers inter-layer dependencies without relying on backpropagation.
+Our primary contributions can be summarized as follows:
+\begin{itemize}
+    \item We propose a novel PTQ algorithm called \bptq.\footnote{\bptq: \underline{B}ackpropagation-free \underline{o}ptimization for \underline{A}ttention-aware PTQ}
+    To avoid time-consuming gradient-based optimization, we adopt the Hessian-based strategy introduced by~\citep{obq}.
+    The primary novelty lies in the fact that we exploit the attention reconstruction error, not the layer-wise reconstruction error, when approximating the Hessian.
+    This facilitates the consideration of the inter-layer dependencies within the attention module (\textbf{\cref{subsec:attention-considering-hessian}}).
+
+    \item While the proposed Hessian facilitates the consideration of inter-layer dependencies, it requires a large amount of memory and high computational cost.
+    Therefore, we incorporate several techniques to mitigate the computational overhead, including Hessian relaxation, efficient computation of inverse Hessians, and head-wise simultaneous quantization (\textbf{\cref{subsec:bptq}}).
+
+    \item We evaluate \bptq \ via extensive experiments on publicly available LLMs (\textbf{\cref{sec:experiments}}). 
+    Our results demonstrate that \bptq \ outperforms conventional LLM PTQ methods by a significant margin, particularly for low-bit precision (\eg, INT2).
+\end{itemize}
+
+
+
+\section{Related Works}
+
+
+\subsection{PTQ for LLMs}  \label{subsec:ptq_for_llms}
+When calibration data are available, PTQ primarily aims to minimize the increase in task loss incurred by quantization.
+Consider a neural network parameterized by weights $\mathbf{W}$.
+Provided that the network is trained to convergence, the problem of quantizing $\mathbf{W}$ to minimize task loss degradation can be formulated as~\citep{lecun1989optimal}
+\begin{align}
+    \min_{\Delta \mathbf{w}}~~\Delta \mathbf{w}^{T} \cdot \mathbf{H}^{(\mathbf{w})} \cdot \Delta \mathbf{w},
+    \label{eq:ptq goal}
+\end{align}
+where $\mathbf{H}^{(\mathbf{w})}$ is the Hessian related to the flattened weight $\mathbf{w}$ and $\Delta \mathbf{w}$ is a weight perturbation caused by the quantization.
+Owing to the infeasibility of computing and storing the exact Hessian $\mathbf{H}^{(\mathbf{w})}$, many studies have assumed independence between layers, which relaxes~\cref{eq:ptq goal} into the following layer-wise reconstruction problem~\citep{nagel2020up}:
+\begin{align}
+    \min_{\Delta \mathbf{W}^{(\ell)}}~& \left \| \Delta \mathbf{W}^{(\ell)} \mathbf{X}^{(\ell-1)} \right \|_{F}^{2}, \label{eq:layer-wise reconstruction}
+\end{align}
+where $\mathbf{X}^{(\ell-1)}$ is the input to the $\ell$-th layer parameterized by $\mathbf{W}^{(\ell)}$. 
+
+To solve~\cref{eq:layer-wise reconstruction}, early efforts aimed to optimize the weight-rounding mechanisms~\citep{nagel2020up, hubara2021accurate, li2021brecq, jeon2022mr, jeon2023genie}.
+Instead of selecting the nearest quantization bin, these studies attempted to assign quantized values that minimize layer-wise reconstruction errors.
+In AdaRound~\citep{nagel2020up}, an algorithm for optimizing the weight-rounding mechanism through backpropagation has been proposed.
+Further, this algorithm has been extended to \textsc{Brecq}~\citep{li2021brecq} to consider the inter-layer dependencies within a certain network block (\eg, Transformer block), thereby enhancing the low-bit quantization performance.
+
+Although these algorithms have successfully quantized small-sized models such as ResNet, they are heavily dependent on time-consuming gradient-based optimizations.
+This renders their application to LLMs with billions of parameters challenging.
+Consequently, recent efforts have shifted towards the development of cost-effective quantization methods for LLMs.
+For example, a backpropagation-free weight-rounding method called OPTQ (or GPTQ) has been proposed~\citep{frantar2023optq}.
+Furthermore, algorithms leveraging additional ``foldable'' parameters capable of being integrated into other layers (\eg, LayerNorm) have been proposed~\citep{xiao2023smoothquant, lin2023awq, jeon2023frustratingly, shao2023omniquant, ma2024affinequant}.
+Rather than optimizing a weight-rounding mechanism, these studies focused on enhancing the performance of the nearest-rounding by suppressing activation outliers or conducting more precise quantization based on foldable parameters. 
+
+\subsection{Review of OPTQ}
+
+Among the quantization methods developed for LLMs, OPTQ has been extensively focused upon owing to its efficiency. 
+OPTQ can quantize hyper-scale LLMs with more than 30B parameters in a few GPU hours with negligible performance degradation for INT3/INT4~\cite{frantar2023optq}.
+In addition, OPTQ can be used to boost the performance of other quantization methods that leverage foldable parameters~\cite{lin2023awq, jeon2023frustratingly, lee2023owq}.
+
+In OPTQ, weights are quantized one by one according to a pre-defined order.
+Once a weight is quantized, OPTQ updates the remaining (not-yet-quantized) weights to compensate for the task loss degradation caused by quantization.
+When the $q$-th weight $w_{q}$ is quantized, the weight-update $\bm{\delta} \vw$ is mathematically expressed as
+\begin{subequations} 
+    \begin{align}
+    \bm{\delta} \vw
+        &= - \frac{w_{q} - \gQ(w_{q})}{[ \mathbf{U} ]_{q, q}} [ \mathbf{U} ]_{q, :},  \label{eq:weight-update} \\
+    \mathbf{U}
+        &= \chol ( \mathbf{H}^{-1} )^{T},  \label{eq:cholesky}
+    \end{align}
+\end{subequations}
+where $\chol(\cdot)$ denotes a Cholesky decomposition (\ie, $\mathbf{U}$ is an upper triangular matrix satisfying $\mathbf{H}^{-1} = \mathbf{U}^{T} \mathbf{U}$).
+Owing to the difficulty in computing the exact Hessian $\mathbf{H}$, OPTQ approximates $\mathbf{H}$ by assuming layer-wise independence.
+Consequently, the task loss degradation is relaxed to a layer-wise reconstruction error (as in~\cref{eq:layer-wise reconstruction})~\cite{nagel2020up}, which yields the following Hessian equation:
+\begin{align} \label{eq:hessian_optq}
+    \mathbf{H}^{(\vw^{(\ell)})} 
+        &\approx 2\mathbf{X}^{(\ell-1)} \mathbf{X}^{(\ell-1)^{T}} \otimes \mathbf{I},
+\end{align}
+where $\otimes$ denotes the Kronecker product operation and $\mathbf{I}$ is the identity matrix.  \label{footnote:hessian}}
+As evident, the approximated Hessian relies only on the input.
+Therefore, OPTQ cannot consider the influence of other layers when compensating for the quantization error based on the Hessian (see \cref{eq:weight-update}).
+In other words, OPTQ does not consider the inter-layer dependency within the attention module, which is a key feature of Transformers.
+Owing to ignorance of inter-layer dependency, OPTQ exhibits somewhat limited low-bit (\eg, INT2) quantization performance~\citep{jeon2023frustratingly}. 
+Thus, we aim to develop attention-aware Hessians, thereby incorporating the inter-layer dependencies within the attention module.
+
+
+
+\section{Method}
+
+
+\input{table-hessians}
+
+\input{algorithm-boa}
+
+\subsection{Proposed attention-aware Hessian}  \label{subsec:attention-considering-hessian}
+
+To consider the inter-layer dependencies within the attention module, we exploit the attention reconstruction error rather than the layer-wise reconstruction error when approximating the Hessian.
+
+For an input sequence $\mathbf{X} \in \mathbb{R}^{d \times L}$, the output of the multi-head attention (MHA) is expressed as
+\begin{subequations}
+    \begin{align}
+        \mha(\mathbf{X})
+            &= \sum_{h=1}^{H} \mathbf{W}_{\text{out}, h} (\mathbf{A}_{h} \mathbf{V}_{h})^{T}, \label{eq:mha} \\
+        \mathbf{A}_{h}
+            &= \sigma \left ( \frac{\mathbf{Q}_{h} \mathbf{K}_{h}^{T}}{\sqrt{d_{h}}} \right ), \label{eq:attn-weights} \\
+        [ \mathbf{Q}_{h} | \mathbf{K}_{h} | \mathbf{V}_{h} ]
+            &= \mathbf{X}^{T} [ \mathbf{W}_{Q, h}^{T} | \mathbf{W}_{K, h}^{T} | \mathbf{W}_{V, h}^{T} ], \label{eq:qkv}
+    \end{align}
+\end{subequations}
+where $\sigma$ is the row-wise softmax function, $d_{h}$ is the embedding dimension of the $h$-th attention head, $\mathbf{W}_{\{ Q, K, V \}, h} \in \mathbb{R}^{d_{h} \times d}$, and $\mathbf{W}_{\text{out}, h} \in \mathbb{R}^{d \times d_{h}}$.
+
+\paragraph{Hessian for $\mathbf{W}_{Q, h}$}
+When $\mathbf{W}_{Q, h}$ is quantized, $\mathbf{W}_{\text{out}, h}$ and $\mathbf{V}_{h}$ in \cref{eq:mha} remain unchanged, but the attention weight $\mathbf{A}_{h}$ changes.
+Using the first-order Taylor polynomial, the perturbation in $\mathbf{A}_{h}$ can be approximated as
+\begin{align}
+    \Delta \mathbf{A}_{h}
+        &\hspace{-.5mm}= \sigma \left ( \frac{ (\mathbf{Q}_{h} + \Delta \mathbf{Q}_{h}) \mathbf{K}_{h}^{T}}{\sqrt{d_{h}}} \right ) - \sigma \left ( \frac{ \mathbf{Q}_{h} \mathbf{K}_{h}^{T}}{\sqrt{d_{h}}} \right ) \nonumber \\
+        &\hspace{-.5mm}\approx \frac{\Delta \mathbf{Q}_{h} \mathbf{K}_{h}^{T}}{\sqrt{d_{h}}} \mathbf{J}_{\sigma}^{T}
+        = \frac{\mathbf{X}^{T} \Delta \mathbf{W}_{Q, h}^{T} \mathbf{K}_{h}^{T} \mathbf{J}_{\sigma}^{T}}{\sqrt{d_{h}}},  \label{eq:approximation_attn-weights_query}
+\end{align}
+where $\mathbf{J}_{\sigma}$ is the Jacobian matrix of the softmax function $\sigma$.
+Thus, the attention reconstruction error is expressed as
+\begin{align}
+    \| \hspace{-.2mm} \Delta \hspace{-.5mm} \mha \hspace{-.2mm} ( \mathbf{X} ) \hspace{-.2mm} \|_{F}^{2}
+        &\hspace{-.5mm}=\hspace{-1mm} \| \mathbf{W}_{\text{out}, h} (\Delta \mathbf{A}_{h} \mathbf{V}_{h})^{T} \|_{F}^{2} \nonumber \\
+        &\hspace{-18mm}=\hspace{-1mm} \left \| \frac{\mathbf{W}_{\text{out}, h} \mathbf{V}_{h}^{T} \mathbf{J}_{\sigma} \mathbf{K}_{h}}{\sqrt{d_{h}}} \Delta \mathbf{W}_{Q, h} \mathbf{X} \right \|_{F}^{2}. \label{eq:attn-recon-error_query}
+\end{align}
+Combining this with \cref{footnote:hessian} yields the following Hessian for $\mathbf{W}_{Q, h}$:
+\begin{align}  \label{eq:hessian_query}
+    \lefteqn{\mathbf{H}^{(\mathbf{w}_{Q, h})}} \nonumber \\
+        &= 2 \mathbf{X} \mathbf{X}^{T} \otimes \frac{\mathbf{K}_{h}^{T} \mathbf{J}_{\sigma}^{T} \mathbf{V}_{h} \mathbf{W}_{\text{out}, h}^{T} \mathbf{W}_{\text{out}, h} \mathbf{V}_{h}^{T} \mathbf{J}_{\sigma} \mathbf{K}_{h}}{d_{h}}.
+\end{align}
+
+\paragraph{Hessian for $\mathbf{W}_{K, h}$}
+When $\mathbf{W}_{K, h}$ is quantized, the attention weight $\mathbf{A}_{h}$ changes as in the quantization of $\mathbf{W}_{Q, h}$.
+By following the steps for~\cref{eq:approximation_attn-weights_query}, $\mathbf{A}_{h}$ can be approximated as
+\begin{align}
+    \Delta \mathbf{A}_{h}
+        &\hspace{-.5mm}\approx \frac{\mathbf{Q}_{h} \Delta \mathbf{K}_{h}^{T}}{\sqrt{d_{h}}} \mathbf{J}_{\sigma}^{T}
+        = \frac{\mathbf{Q}_{h} \Delta \mathbf{W}_{K, h} \mathbf{X}\mathbf{J}_{\sigma}^{T}}{\sqrt{d_{h}}},  \label{eq:approximation_attn-weights_key}
+\end{align}
+and thus the attention reconstruction error can be expressed as
+\begin{align}
+    \| \hspace{-.2mm} \Delta \hspace{-.5mm} \mha \hspace{-.2mm} ( \mathbf{X} ) \hspace{-.2mm} \|_{F}^{2}
+        &\hspace{-.5mm}=\hspace{-1mm} \left \| \Delta \mathbf{A}_{h} \mathbf{V}_{h} \mathbf{W}_{\text{out}, h}^{T} \right \|_{F}^{2} \nonumber \\
+        &\hspace{-18mm}=\hspace{-1mm} \left \| \hspace{-.2mm} \frac{\mathbf{Q}_{h}}{\sqrt{d_{h}}} \Delta \hspace{-.5mm}\mathbf{W}_{K, h} \mathbf{X} \mathbf{J}_{\sigma}^{T} \mathbf{V}_{h} \mathbf{W}_{\text{out}, h}^{T} \right \|_{F}^{2}.
+\end{align}
+Thus, we obtain the following Hessian for $\mathbf{W}_{K, h}$:
+\begin{align}  \label{eq:hessian_key}
+    \lefteqn{\mathbf{H}^{(\mathbf{w}_{K, h})}} \nonumber \\
+        &= 2 \mathbf{X} \mathbf{J}_{\sigma}^{T} \mathbf{V}_{h} \mathbf{W}_{\text{out}, h}^{T} \mathbf{W}_{\text{out}, h}\mathbf{V}_{h}^{T} \mathbf{J}_{\sigma} \mathbf{X}^{T} \otimes \frac{\mathbf{Q}_{h}^{T} \mathbf{Q}_{h}}{d_{h}}.
+\end{align}
+
+\paragraph{Hessian for $\mathbf{W}_{V, h}$}
+When quantizing $\mathbf{W}_{V, h}$, only $\mathbf{V}_{h}$ changes.
+Thus, the attention reconstruction error is expressed as
+\begin{align*}
+    \left \| \Delta \mha (\mathbf{X}) \right \|_{F}^{2}
+        &= \| \mathbf{W}_{\text{out}, h} (\mathbf{A}_{h} \Delta \mathbf{V}_{h})^{T} \|_{F}^{2} \\
+        &= \| \mathbf{W}_{\text{out}, h} \Delta \mathbf{W}_{V, h} \mathbf{X} \mathbf{A}_{h}^{T} \|_{F}^{2},
+\end{align*}
+which yields the following Hessian for $\mathbf{W}_{V, h}$:
+\begin{align}  \label{eq:hessian_value}
+    \mathbf{H}^{(\mathbf{w}_{V, h})}
+        &= 2 \mathbf{X} \mathbf{A}_{h}^{T} \mathbf{A}_{h} \mathbf{X}^{T} \otimes \mathbf{W}_{\text{out}, h}^{T} \mathbf{W}_{\text{out}, h}.
+\end{align}
+
+\paragraph{Hessian for $\mathbf{W}_{\text{out}, h}$}
+
+When $\mathbf{W}_{\text{out}, h}$ is quantized, the attention reconstruction error is expressed as
+\begin{align*}
+    \left \| \Delta \mha (\mathbf{X}) \right \|_{F}^{2}
+        &= \| \Delta \mathbf{W}_{\text{out}, h} ( \mathbf{A}_{h} \mathbf{V}_{h} )^{T} \|_{F}^{2}.
+\end{align*}
+Thus, the corresponding Hessian is obtained as
+\begin{align}  \label{eq:hessian_out}
+    \mathbf{H}^{(\mathbf{w}_{out, h})}
+        &= 2 \mathbf{V}_{h}^{T} \mathbf{A}_{h}^{T} \mathbf{A}_{h} \mathbf{V}_{h} \otimes \mathbf{I} \nonumber \\
+        &= 2 \mathbf{X}_{\text{out}} \mathbf{X}_{\text{out}}^{T} \otimes \mathbf{I},
+\end{align}
+where $\mathbf{X}_{\text{out}, h} = (\mathbf{A}_{h} \mathbf{V}_{h})^{T}$ is the input to the out-projection layer.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=.85\linewidth]{fig/fig1.pdf}
+    \caption{Illustration of the proposed \bptq \ for the query projection $\mathbf{W}_{Q}$.}
+    \label{fig:quantization-order}
+\end{figure*}
+
+\input{table_ppl_comparison_with_optq}
+
+\input{table-zero_shot-comparison_with_optq}
+
+\input{table-integration-ppl}
+
+\input{table-integration-zero_shot}
+
+\subsection{Proposed \bptq}  \label{subsec:bptq}
+
+The proposed \bptq \ algorithm quantizes weights by repeating the quantization and weight-update steps; once \bptq \ quantizes one weight, it updates the remaining (not-yet-quantized) weights by exploiting the Hessian-based weight-update formula in~\cref{eq:weight-update} (see \cref{algo:boa}).
+The key difference over OPTQ is that we exploit the attention-aware Hessians developed in~\cref{subsec:attention-considering-hessian}, which facilitates the consideration of the inter-layer dependencies within the attention module.
+
+Notably, the proposed attention-aware Hessians are significantly more complex than the conventional Hessian in~\cref{eq:hessian_optq}, which may incur high computational costs.
+For example, computing the proposed Hessians is more expensive than computing the existing Hessian in~\cref{eq:hessian_optq}.
+In this subsection, we present techniques for mitigating the computational overheads incurred by the proposed attention-aware Hessians.
+
+\paragraph{Hessian relaxation}
+The largest overhead related to the computation of the proposed Hessians is the Jacobian matrix $\mathbf{J}_{\sigma}$ in~\cref{eq:hessian_query} and~\cref{eq:hessian_key}.
+For one input sequence, the shape of $\mathbf{J}_{\sigma}$ is $H \times L \times L \times L$, which requires a large amount of memory and high computational cost. 
+
+To mitigate such computational overhead, we establish a relaxed Hessian that does not require the computation of $\mathbf{J}_{\sigma}$.
+To this end, we build an upper bound for the attention reconstruction error in~\cref{eq:attn-recon-error_query}, which will be used as its surrogate:
+\begin{align}
+    \lefteqn{\| \Delta \mha ( \mathbf{X} ) \|_{F}^{2}} \nonumber \\
+        &~~~\le \hspace{-.5mm} \left \| \frac{\mathbf{W}_{\text{out}, h} \mathbf{V}_{h}^{T} \mathbf{J}_{\sigma}}{\sqrt{d_{h}}}  \right \|_{F}^{2} \hspace{-1.5mm} \cdot \hspace{-.3mm} \left \| \mathbf{K}_{h} \Delta \mathbf{W}_{Q, h} \mathbf{X} \right \|_{F}^{2}.  \label{eq:surrogate_query}
+\end{align}
+Moreover, we note that the term $\| \mathbf{W}_{\text{out}, h} \mathbf{V}_{h}^{T} \mathbf{J}_{\sigma} \|_{F}^{2}$ in~\cref{eq:surrogate_query} is constant and does not affect quantization.\footnote{The weight-update $\bm{\delta} \mathbf{w}$ in~\cref{eq:weight-update} is not affected by the constant multiple of $\mathbf{H}$ ($[ c\mathbf{U} ]_{q, :} / [ c\mathbf{U} ]_{q, q} = [ \mathbf{U} ]_{q, :} / [ \mathbf{U} ]_{q, q}$).}
+Thus, we do not need to consider this term when computing the Hessian.
+In short, we use the term $\| \mathbf{K}_{h} \Delta \mathbf{W}_{Q, h} \mathbf{X} \|_{F}^{2}$ as a surrogate of the attention reconstruction error when deriving the Hessian for $\mathbf{W}_{Q, h}$, which results in the following relaxed Hessian:
+\begin{align}
+    \mathbf{H}^{(\mathbf{w}_{Q, h})}
+        &= 2 \mathbf{X} \mathbf{X}^{T} \otimes \mathbf{K}_{h}^{T} \mathbf{K}_{h}.  \label{eq:relaxed-hessian_query}
+\end{align}
+Similarly, we can establish a relaxed Hessian for $\mathbf{W}_{K, h}$ as follows:
+\begin{align}
+    \mathbf{H}^{(\mathbf{w}_{K, h})}
+        &= 2 \mathbf{X} \mathbf{X}^{T} \otimes \mathbf{Q}_{h}^{T} \mathbf{Q}_{h}.  \label{eq:relaxed-hessian_key}
+\end{align}
+\cref{tab:hessians} summarizes the proposed Hessians for each layer inside the Transformer block.
+
+\paragraph{Efficient computation of inverse Hessians} 
+Owing to the size of the proposed attention-aware Hessians being $dd_{h} \times dd_{h}$, the complexity of the computation of the inverse Hessian (see \cref{eq:cholesky}) would be $\gO(d^{3}d_{h}^{3})$ in our approach.
+This is considerably more expensive than the complexity $\gO(d^{3})$ in OPTQ, where the inverse of only the column-wise Hessian $\mathbf{X} \mathbf{X}^{T} \in \mathbb{R}^{d \times d}$ (in \cref{eq:hessian_optq}) is needed~\cite{frantar2023optq}.
+For simplicity, let $\mathbf{H} = \mathbf{H}_{\text{col}} \otimes \mathbf{H}_{\text{row}}$ where $\mathbf{H}_{\text{col}} \in \mathbb{R}^{d \times d}$ and $\mathbf{H}_{\text{row}} \in \mathbb{R}^{d_{h} \times d_{h}}$, then we obtain
+\begin{align*}
+    \mathbf{H}^{-1}
+        &= (\mathbf{H}_{\text{col}} \otimes \mathbf{H}_{\text{row}})^{-1}
+        = \mathbf{H}_{\text{col}}^{-1} \otimes \mathbf{H}_{\text{row}}^{-1}.
+\end{align*}
+This implies that the inverse Hessian $\mathbf{H}^{-1}$ can be computed by computing $\mathbf{H}_{\text{col}}^{-1}$ and $\mathbf{H}_{\text{row}}^{-1}$ (line 6 in \cref{algo:boa}) whose complexity is $\gO(d^{3}) + \gO(d_{h}^{3})$ ($=\gO(d^{3})$) and not $\gO(d^{3}d_{h}^{3})$.
+Similarly, we can efficiently compute the Cholesky decomposition with the same order of complexity as OPTQ.
+Specifically, if $\mathbf{L}_{1} = \chol(\mathbf{H}_{\text{col}}^{-1})$ and $\mathbf{L}_{2} = \chol(\mathbf{H}_{\text{row}}^{-1})$, $\mathbf{H}^{-1}$ can be expressed as
+\begin{align*}
+    \mathbf{H}^{-1}
+        &\hspace{-.5mm}=\hspace{-.5mm} \mathbf{L}_{1} \mathbf{L}_{1}^{T} \otimes \mathbf{L}_{2} \mathbf{L}_{2}^{T}
+        \hspace{-.5mm}=\hspace{-.5mm} (\mathbf{L}_{1} \otimes \mathbf{L}_{2}) (\mathbf{L}_{1} \otimes \mathbf{L}_{2})^{T}.
+\end{align*}
+Subsequently, noting that the Kronecker product of lower triangular matrices is also lower triangular, we obtain
+\begin{align*}
+    \chol(\mathbf{H}^{-1})
+        &= \mathbf{L}_{1} \otimes \mathbf{L}_{2} \nonumber \\
+        &= \chol(\mathbf{H}_{\text{col}}^{-1}) \otimes \chol(\mathbf{H}_{\text{row}}^{-1}).
+\end{align*}
+Thus, we can obtain $\chol (\mathbf{H}^{-1})$ by computing $\chol(\mathbf{H}_{\text{col}}^{-1})$ and $\chol(\mathbf{H}_{\text{row}}^{-1})$ (line 7 in \cref{algo:boa}).
+Consequently, the computational complexity of the Choleksy decomposition would be $\gO(d^{3})$ and not $\gO(d^{3}d_{h}^{3})$.
+
+\paragraph{Simultaneous quantization of different heads}
+In contrast to OPTQ wherein only column-wise Hessian is considered, the proposed \bptq \ models both column- and row-wise Hessians (see \cref{fig:quantization-order}(a)).
+Using the row-wise Hessian, we can compensate for the quantization error of a certain row by updating the other rows.
+However, in this case, the rows must be quantized sequentially (not simultaneously).
+For example, the second row can be quantized after being updated to compensate for the quantization error of the first row.
+This is in contrast to OPTQ, wherein the two rows are quantized simultaneously.
+
+To accelerate the quantization process, we assume independence between different attention heads (see \cref{fig:quantization-order}(a)).
+Under this assumption, the rows related to different heads are independent and can thus be quantized together.
+For a better understanding, we consider the query projection $\mathbf{W}_{Q}$ as an example (see \cref{fig:quantization-order}(b)).
+In the quantization step, we stack the $j$-th rows $[ \mathbf{W}_{Q, h} ]_{j, :}$, constructing $\mathbf{W}_{Q}^{(j)} \in \mathbb{R}^{H \times d}$ (line 9 in \cref{algo:boa}).
+Because the rows of $\mathbf{W}_{Q}^{(j)}$ are mutually independent (\ie, the row-wise Hessian is the identity), $\mathbf{W}_{Q}^{(j)}$ can be quantized quickly, as in OPTQ (line 10 in \cref{algo:boa}).
+Following quantization, we compensate for the quantization error by updating the remaining rows.
+
+
+\section{Experiments}
+
+
+\subsection{Experimental setup}  \label{subsec:setup}
+
+To evaluate the performance of the proposed \bptq, we quantize publicly available language models including OPT~\cite{zhang2022opt}, BLOOM~\cite{scao2022bloom}, and LLaMA~\cite{touvron2023llama}).
+As in~\cite{frantar2023optq, jeon2023frustratingly, chee2023quip}, we quantize only weights and retain activations with full precision because activations do not pose a significant bottleneck for the inference of LLMs~\cite{frantar2023optq, kim2023squeezellm}.
+As a calibration dataset, we use 128 random 2048 token segments from the C4 dataset~\cite{c4}.
+Thus, we do not use any task-specific data for quantization.
+We evaluate the performance of the quantized models using benchmark datasets (\eg, WikiText-2~\cite{wiki}, C4~\cite{c4}, and PTB~\cite{ptb}) and zero-shot tasks.
+All experiments were conducted using a single NVIDIA A100 GPU (80~GB).
+
+When determining a quantization order, the heuristic introduced by~\citep{frantar2023optq} can be employed; the column/row corresponding to the largest $\text{diag}(\mathbf{H}_{\text{col}}) / \text{diag}(\mathbf{H}_{\text{row}})$ (\ie, the most sensitive column/row for quantization) is first quantized for better compensation.
+Empirically, we observed that this heuristic could occasionally enhance the performance, yet at other times, it may result in inferior performance.
+We conduct experiments with and without this heuristic and report the better results.
+
+\subsection{Comparison with OPTQ}  \label{subsec:comparison-with-optq}
+
+We compare the proposed \bptq \ with the conventional OPTQ~\cite{frantar2023optq}, which is our primary baseline.
+For both algorithms, we set per-channel quantization parameters (\ie, scale and zero-point) to minimize the layer-wise reconstruction error (line 5 in \cref{algo:boa}).
+We note that in OPTQ, the Min-Max-based quantization parameters have been used~\citep{frantar2023optq}; however, this results in significantly worse quantization performance~\citep{chee2023quip, jeon2023frustratingly}.
+To compare the pure performance of the proposed \bptq \ and OPTQ, we do not use foldable parameters in this experiment.
+The results of using the foldable parameters are presented in \cref{subsec:integration}.
+
+First, we compare the perplexity (PPL) performance of \bptq \ and OPTQ (Table~\ref{tab:comparison-with-optq}).
+The performance of the rounding-to-nearest (RTN) method (which naively assigns the nearest quantized value) is also included for comparison, as in~\cite{frantar2023optq}.
+While RTN collapses completely for low bit-widths, \bptq \ and OPTQ exhibit reasonable PPL, even for INT2 quantization.
+This is because \bptq \ and OPTQ minimize the task loss degradation, not the weight quantization error $\Delta \mathbf{W}$, by exploiting the Hessian.
+Moreover, our method outperforms OPTQ for all models.
+In particular, the performance gap is significant for low bit-width (\ie, INT2) and small-sized models suited for resource-limited devices (\eg, mobile devices). 
+
+To compare the zero-shot performance of the proposed \bptq \ and OPTQ, we measure the accuracy of the quantized models for several tasks and then average the results.
+We note that the zero-shot setting is maintained in our experiments because we do not use task-specific data for quantization.
+As shown in Table~\ref{tab:comparison-with-optq_zero-shot}, the proposed \bptq \ outperforms OPTQ for all models.
+The key factor leading to such an outstanding performance is that we consider inter-layer dependencies within the attention module by targeting attention-wise reconstruction.
+This is in contrast to OPTQ, where layers are assumed to be independent.
+
+\subsection{Integration with Existing Works}  \label{subsec:integration}
+
+As mentioned in \cref{subsec:ptq_for_llms}, recent studies have used foldable parameters for more precise quantization~\cite{xiao2023smoothquant, jeon2023frustratingly, lin2023awq, shao2023omniquant, ma2024affinequant}.
+Because these approaches are orthogonal to ours, we can further enhance the quantization performance by integrating them with the proposed \bptq.
+Among the various algorithms, we employ SmoothQuant~\citep{xiao2023smoothquant} and \zfold~\citep{jeon2023frustratingly} in our integration because they efficiently compute foldable parameters without time-consuming gradient-based optimization.\footnote{SmoothQuant and \zfold \ determine foldable parameters using a pre-defined heuristic rule and alternating least squares, respectively.}
+
+\cref{tab:integration-ppl} summarizes the PPL performance of the proposed \bptq \ combined with SmoothQuant and \zfold.
+For comparison, we also summarize the integration results for the conventional OPTQ.
+Overall, the performances of both \bptq \ and OPTQ improve when using the folding parameters.
+Moreover, the performance gap between the proposed \bptq \ and OPTQ remains significant, even when the folding parameters are used.
+A similar behavior is observed in the zero-shot results (\cref{tab:integration-zero_shot}); the performance is boosted by leveraging the folding parameters, and \bptq \ outperforms OPTQ for all models regardless of the folding parameter computation method.
+
+
+\section{Conclusion}
+
+
+In this paper, we proposed a novel PTQ algorithm called \bptq.
+To consider the inter-layer dependencies within the attention module while circumventing time-consuming gradient-based optimization, we approximated the Hessian matrices by exploiting the attention reconstruction error.
+Furthermore, to mitigate the computational overhead incurred by the proposed attention-aware Hessians, we incorporated several techniques, such as Hessian relaxation, efficient computation of inverse Hessians, and head-wise simultaneous quantization.
+Finally, through extensive experiments, we demonstrated the efficacy of the proposed \bptq \ algorithm.
+
+
+\clearpage
+
+
+
+\section{Limitations}
+
+
+Recall that we used the attention reconstruction error to approximate the Hessian matrix.
+If the reconstruction error for the entire Transformer block is used, then the dependencies between more layers, including fully-connected layers, can be considered, resulting in further enhancement at the expense of higher computational cost.
+Furthermore, we did not consider activation quantization in this study because activations do not pose a significant bottleneck, and the inference of LLMs can be sufficiently accelerated by reducing memory movement via weight quantization~\citep{frantar2023optq, kim2023squeezellm}.
+For the scenarios wherein the activation needs to be quantized, orthogonal techniques~\citep{xiao2023smoothquant, yao2022zeroquant} can be combined with the proposed \bptq, which will be considered in future studies.
+
+
+
+

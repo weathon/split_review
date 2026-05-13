@@ -1,0 +1,257 @@
+\title{ZeRO++: Extremely Efficient Collective Communication for Large Model Training}
+
+\begin{abstract}
+Zero Redundancy Optimizer (ZeRO) has been used to train a wide range of large language models on massive GPU clusters due to its ease of use, efficiency, and good scalability. However, when training on low-bandwidth clusters, and/or when small batch size per GPU is used, ZeRO’s effective throughput is limited due to communication overheads. To alleviate this limitation, this paper introduces ZeRO++ composing of three communication volume reduction techniques (lowprecision all-gather, data remapping, and low-precision gradient averaging) to significantly reduce the communication volume up to 4x that enables up to 2.16x better throughput at 384 GPU scale. Our results also show ZeRO++ can speedup the RLHF by 3.3x compared to vanilla ZeRO. To verify the convergence of ZeRO++, we test up to 13B model for pretraining with 8/6-bits all gather and up to 30B model for finetuning with 4/2-bits all gather, and demonstrate on-par accuracy as original ZeRO (aka standard training). As a byproduct, the model trained with ZeRO++ is naturally weight-quantized, which can be directly used for inference without post-training quantization or quantization-aware training.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The size of deep learning (DL) models has increased from 100 million to over $500+$ billion parameters, ranging from BERT (Devlin et al., 2018) to Megatron-Turing NLG (Smith et al., 2022). With the increase in model size, the memory and compute requirements for training have increased significantly beyond the capability of a single accelerator (e.g., a GPU). Training these massive models requires the efficient aggregation of computing power and memory across hundreds or even thousands of GPU devices. There are two popular approaches to alleviate this, namely 3D parallelism (Narayanan et al., 2021; Team & Majumder, 2020) and Zero Redundancy Optimizer (ZeRO) (Rajbhandari et al., 2020).  
+
+Compared to 3D parallelism, ZeRO is easier to use without model code refactoring. ZeRO is a memory efficient variation of data parallelism (Ben-Nun & Hoefler, 2019; Dean et al., 2012) where model states are partitioned across all the GPUs, instead of being replicated, and reconstructed using gather based communication collectives on-the-fly during training. This allows ZeRO to effectively leverage the aggregate GPU memory across machines, at the expense of minimal communication overhead $(50\%)$ compared to standard data parallel train  
+
+![](images/9d57b1532da339816fc88ef691cf540612f79b0b3e89ba1c2806c40539b2dce3.jpg)  
+Figure 1: Training throughput are constrained b work bandwidth and batch size per GPU.  
+
+ing (2M vs 3M for model size of $M$ ) (Rajbhandari et al., 2020), while still achieving excellent throughput scalability (Rajbhandari et al., 2021).  
+
+However, the communication overhead of ZeRO can limit throughput in two important scenarios (1) low-bandwidth cluster and (2) low-compute training scenario, e.g., the batch size per GPU is small. We demonstrate these two cases in Figure 1. As can be seen, as the bandwidth of the cluster becomes smaller and/or the training batch size decreases, the training efficiency of ZeRO significantly reduces.  
+
+To overcome the communication overhead of ZeRO, we here present a novel system of communication optimizations collectively called $Z\mathrm{eRO++}$ , for which the contribution can be summarized:  
+
+Quantized Weight Communication for ZeRO (qwZ). First, in order to reduce parameter communication volume during forward all-gather (which is M for ZeRO), we adopt quantization on weights to shrink down each model parameter from FP16 to lower-precision data type (e.g., 8/6-bits) before communicating. To preserve decent model training precision, we adopt block-based quantization (Dettmers et al., 2022; Yao et al., 2022), which conducts independent quantization on each subset of model parameters. There is no existing implementation for high performance block-based quantization. Thus, we implement highly optimized quantization CUDA kernels from scratch. Another great byproduct of qwZ is that it automatically converts the model weight from half-precision (16-bits) to lower precision for efficient inference without any inference quantization methods. Particularly, as compared to the current popular post-training quantization methods (Frantar et al., 2022), qwZ can push the weight-precision to 2-bits for finetuned model without significant accuracy drop.  
+
+Hierarchical Weight Partition for ZeRO (hpZ). Second, to reduce the communication overhead of all-gather on weights during backward (which is $M$ for ZeRO), we trade GPU memory for communication. More specifically, instead of spreading whole model weights across all the machines, we maintain a full model copy within each node. At the expense of higher memory overhead, this allows us to replace the expensive cross-machine all-gather on weights with intra-machine all-gather, which is substantially faster due to much higher intra-machine communication bandwidth. hqZ reduces the all-gather for backward from volume $M$ to 0.  
+
+Quantized Gradient Communication for ZeRO $\mathbf{\Psi}(\mathbf{q}\mathbf{g}\mathbf{Z})$ . Third, reducing the communication cost of gradients using reduce-scatter (which is $M$ for ZeRO) is even more challenging. Directly applying quantization to reduce communication volume is infeasible due to the training accuracy drop. To better preserve the accuracy, we propose a novel hierarchical all-to-all based gradient scatter-reduction schedule, where an intra-node gradient reduction is first applied and then a inter-node quantized gradient communication (e.g., 8/4-bits) is used resulting in $2/4\mathbf{x}$ communication volume reduction. To achieve the best outcome, we incorporate pipelining intra-node and inter-node communication and conducting CUDA kernel fusion.  
+
+By incorporating all three components above, we reduce the cross-node communication volume by $\mathbf{4x}$ from $3M$ down to less than $0.75M$ ( $<0.5M$ for forward, 0 for backward, and $0.25M$ for gradient reduce-scatter). We extensively test $\mathrm{ZeRO++^{\circ}s}$ system performance, and show (i) scalability of GPT3 like models on up to 384 GPUs achieving over $45\%$ of sustained peak throughput, (ii) consistent speedup of up to $2.4\mathrm{x}$ over ZeRO across models ranging from 10-138B parameters, (iii) comparing with baseline in $4\upkappa$ higher bandwidth cluster, $Z\mathrm{eRO++}$ achieve better throughput in low-bandwidth setting, (iv) $3.3\mathbf{x}$ better throughput for RLHF training and generation.  
+
+To verify the convergence of $Z\mathrm{eRO++}$ , we tested it on both pretraining and fine-tuning. Our results show that $Z\mathrm{eRO++}$ can (1) achieve on-par training loss as ZeRO for up to 13B GPT-3 models on pretraining with both 8-bits and 6-bits qwZ, and (2) realize similar (slightly worse) model quality as ZeRO for OPT-30B finetuning with 4-bits (2-bits) qwZ. The 2-bits qwZ trained model can be directly served for inference, which is significantly better than current post-training quantization methods (PTQ) (Frantar et al., 2022) while $Z\mathrm{eRO++}$ even saves training cost and PTQ cost.  
+
+
+
+\section{2 BACKGROUND AND RELATED WORK  }
+
+
+This section only describes the core background needed for understanding the techniques discussed in this paper.  
+
+
+
+\section{2.1 ZERO OPTIMIZER  }
+
+
+ZeRO is a memory-optimized solution for data parallel training. ZeRO partitions and distributes all model states (i.e., parameters, gradients, optimizer states) among GPUs in use and recollects model states only when the layer needs to be computed. There are three different stages for using ZeRO to optimize on-device memory usage. In ZeRO stage 1 (ZeRO-1), only optimizer states are split and spread across all GPUs in use. ZeRO stage 2 (ZeRO-2) partitions both optimizer states and gradients, and ZeRO stage 3 (ZeRO-3) splits all three components of model states as parameters, gradients, and optimizer states.  
+
+ZeRO-3 is the most memory efficient solution for model training at large scale, but at the cost of more collective communications. Algorithm 1 illustrates the high-level pseudocode for ZeRO-3. During model training, ZeRO-3 lazily schedules the fetching of parameters until the computation needs to happen on a particular layer. Before forward propagation, ZeRO launches an all-gather to collect the full model weights and then computes the forward pass (line 2-3) of Algorithm 1. Then ZeRO empties the all-gather weights buffer after forward computation completes (line 4). During backward, ZeRO re-collects all model weights again via a second all-gather (line 5) to calculate gradients (line 6). Once gradients are calculated on each GPU, ZeRO empties weights buffer again (line 7) and conducts a reduce-scatter operation to do gradient averaging and re-distribution (line 8). Model states and parameters are updated in the optimizer step (line 9).  
+
+![](images/94eff97c5fbe4a603aeb90b53a27f8b98d2cb00396cb4ba4d470eede76cf56ee.jpg)  
+
+In summary, to minimize the on-device memory footprint using ZeRO-3, at each iteration there are three collective communication operations: two all-gather on weights and one reduce-scatter on gradients.  
+
+
+
+\section{2.2 COMMUNICATION REDUCTION TECHNIQUES  }
+
+
+Quantization is often used to reduce memory footprint, and data movement volume by using low precision to represent data (Dettmers, 2015; Dettmers et al., 2022). However, the loss of information from representing high precision data with lower precision often comes with accuracy degradation. Related work aims to enhance quantization accuracy by addressing the challenges associated with differences in number ranges and granularity between high and low precision data. Some related work (Zhao et al., 2019) propose to filter the outliers in data to mitigate the gap in numerical ranges. Yet their accuracy hinges on the quality of outlier filtering and it brings extra filtering overhead. Dettmers et al. (2022) propose to use block based quantization on optimizer states to improve the quantization accuracy. However, it requires modifications to the model structure, thereby limiting its usability.  
+
+Gradient Compression techniques, including 1-bit SGD, 1-bit Adam, and 1-bit Lamb, have been developed to optimize gradient communication in distributed training by utilizing minimal bit representation (Seide et al., 2014; Tang et al., 2021; Li et al., 2021). However, direct application of these methods to ZeRO-3 is infeasible as they assume a full view of optimizer states (OS) across GPUs, which is not the case in ZeRO-3.  
+
+ZeRO Communication Reduction. Recent optimizations on ZeRO-3, like MiCS (Zhang et al., 2022c) and HSDP (Zhang et al., 2022a), divide the GPU cluster into sub-groups and leverage high bandwidth intra-node interconnect, or hierarchical communication to minimize communication volume. hpZ in $Z\mathrm{eRO++}$ adopts a similar approach yet it performs only secondary partitioning on weights, while keeping all other model states partitioned across all GPUs. This allows hpZ to achieve significant communication reduction without the massive memory overhead of MiCS.  
+
+
+
+\section{3 DESIGN  }
+
+
+In this section, we elaborate on the design of our three key optimizations in $Z\mathrm{eRO++}$ introduced in Section 1 for reducing the communication overhead of ZeRO: i) Quantized Weight Communication for ZeRO $(q w Z)$ , ii) Hierarchical Partitioning for ZeRO $(h p Z)$ , and iii) Quantized Gradient communication for ZeRO $(q g Z)$ .4.  
+
+3.1 QUANTIZED WEIGHT COMMUNICATION FOR ZERO (qwZ)  
+
+As discussed in Section 2.1, ZeRO partitions the model weights across all the ranks (i.e., GPUs) and fetches the FP16 weights layer-by-layer right before they are needed in computation via all-gather for the forward and backward of each training iteration. To reduce the communication overhead of forward all-gather on weights, $q w Z$ , quantizes FP16 weights to lower precision right during the all-gather, and dequantizes them back to FP16 on the receiver side, and then conducts layer computation.  
+
+While this reduces the communication volume of the all-gather by more than $2\mathbf{x}$ , doing so naively results in two major issues: i) the lowering of precision results in significant accuracy degradation during training as discussed in Section 2.2 , and ii) the quantization and dequantization overhead negates any throughput gain from communication volume reduction.  
+
+To improve quantization accuracy we use blocksize based quantization (Yao et al., 2022; Shen et al.1)
+
+
+
+\section{3.2 HIERARCHICAL PARTITIONING FOR ZERO (hpZ)  }
+
+
+With hpZ, we eliminate the inter-node allgather during the backward pass by holding secondary FP16 weights partition within each node. We do this by creating a hierarchical partitioning strategy consisting of two partitions: first, all model states are partitioned globally across all devices as in ZeRO-3, which we call primary partition. Second, a secondary copy of FP16 parameters is partitioned at the subglobal level (e.g., compute node, see Figure 2), which we call secondary partition. This secondary copy of FP16 parameters is replicated across multiple secondary partitions.  
+
+Consider a 64-node cluster, each node with 8 GPUs. Model weights are partitioned in two  
+
+![](images/8a5eaaa53b32320c561fb6160a97c3b515694a22b96177a063692f835dfae736.jpg)  
+Figure 2: hpZ removes cross node traffic in backward all-gather by holding secondary weight partitions in ondevice memory.  
+
+stages: i) across all 512 GPUs that we call primary partition, and ii) the same weights are also partitioned within a compute node across 8 GPUs, that we call secondary partition. In this example, for the secondary partition, each compute node in the cluster holds a full replica of FP16 weights partitioned among the 8 GPUs within the node, and there are 64 of such replicas in total.  
+
+A training iteration with hpZ. During the forward pass of a training iteration, we all-gather weights based on the primary partition across all GPUs. However, once the weights have been used during the forward pass, these weights are then partitioned based on the secondary partition. Given the temporal consistency of model parameters between forward and backward passes, when the weights are needed again during the backward pass, we all-gather weights based on this secondary group.  
+
+When the secondary partitioning is set to be inside a compute node, this avoids any inter-node communication for this all-gather. Finally, at the end of the iteration, during the optimizer step, all the model states, and the primary copy of the fp16 parameters are updated based on the primary partition. hpZ makes two changes to baseline ZeRO pseudocode in Algorithm 1: i) in line 4, parameter partitioning is based on secondary group size, ii) parameter all-gather preceding backward pass in line 5 is also based on secondary group size.  
+
+Our design of hpZ can flexibly support any secondary group size. The group size controls how many ranks (i.e., GPUs) are in the secondary partition.2.  
+
+
+
+\section{3.3 QUANTIZED GRADIENTS COMMUNICATION FOR ZERO (qgZ)  }
+
+
+$\mathrm{qg}Z$ is a novel quantized reduce-scatter algorithm based on all-to-all collectives that enables a $4\mathtt{x}$ communication volume reduction of gradient reduce-scatter by replacing FP16 with INT4.3), 3) tensor slice reordering for correct gradient placement.  
+
+
+
+\section{3.3.1 ALL-TO-ALL BASED IMPLEMENTATION  }
+
+
+A naive way to quantized reduce-scatter without precision loss is to apply quantization and dequantization to a ring-based reduce-scatter directly as shown on the left of Figure 3. We inject quantization and dequantization on each GPU. Once a GPU receives gradients from its predecessor, we dequantize it to full precision and conduct a local reduction. After that we quantize local reduction output and pass it to its successor. To complete the whole reduce-scatter, the number of sequential quantization and dequantization kernels is equal to the number of GPUs in use. Thus, applying quantization on existing ring based reduce-scatter collective will lead to high communication latency and low value precision due to multiple sequential quantization and dequantization steps. Although recent tree-based collectives like Blink(Wang et al., 2020) could reduce the number of sequential kernels from n to log(n), the long latency and low precision issue is not completely resolved.  
+
+To overcome this, we completely abandon existing ring-based reduce-scatter approach and incorporate 1-hop all-to-all collective for our gradient communication. As shown on the right of Figure 3, we first apply quantization on a given tensor, then we conduct all-toall communication among all the GPUs. After all-to-all, we apply another dequantization to recover the data precision and then reduce on high-precision values to get the final gradient reduction output. By replacing ringbased solution with our all-to-all collective, we reduce the number of sequential quantization+dequantization kernels from the number  
+
+![](images/86f2110be8e5f9c21eb5e84f76fd9396a12d08ee9bc8cfa8815aecc898eaa2e6.jpg)  
+Figure 3: Comparison between ZeRO-3 ring-based reduce-scatter and $\mathrm{{qgZ}}$ 1-hop all-to-all.  
+
+of GPUs to 1.3.  
+
+
+
+\section{3.3.2 TENSOR SLICE REORDERING FOR CORRECT DATA PLACEMENT  }
+
+
+With our 2-hop all-to-all, inter-node communication volume is as expected, however, this introduces a gradient misplacement issue. We describe this issue using a $2\mathtt{x}2$ example, where we have 2 machines and each machine has 2 GPUs. As shown in Figure 4, the correct final gradient placement is shown as green boxes in the figure, where GPU 0 holds final gradient partition 1, GPU 1 holds gradient partition 2, so on and so forth.  
+
+Our 2-step all-to-all communication works as follows, first we divide all gradients on each GPU into 4 chunks, then conduct our intra-node all-to-all. After intra-node all-to-all finishes, GPU0 (i.e., G0) holds partial aggregated gradient partitions 1,2 whereas G1 holds gradient partitions 3,4. Same thing happens on G2 and G3. Since G1 does not have gradient partition 2 (which is supposed to be held by G1) while G2 does not have gradient partition 3, after inter-node all-to-all, there is gradient misplacement issue on both G1 and G2.  
+
+![](images/66ff80fbe9626c7d97a287c1c209b6206a532df27cea59f555ffd529c3a02505.jpg)  
+Figure 4: Gradient partition misplacement when ap- Figure 5: Tensor slices reordering to correct gradient plying hierarchical all-to-all in $\mathrm{{qgZ}}$ . misplacement in qgZ.  
+
+We address this with tensor slice reordering. In Figure 5, before intra-node all-to-all, we first swap tensor slice order of slice 2 and 3, which is shown as orange arrows. Then after intra-node all-to-all is completed, G1 now has gradient 2 while G2 has gradient 3. Therefore, after inter-node all-to-all, all GPUs get the correct gradient placement. Mathematically, given X GPUs per node and Y nodes in total, each GPU holds $\mathbf{X}^{*}\mathbf{Y}$ gradient slices initially. Tensor slice reordering works as follows:  
+
+$$
+\begin{array}{c}{{b e f o r e:[0,1,2,3,4,...Y X-3,Y X-2,Y X-1]}}\\ {{a f t e r:[0,X,2X,...(Y-1)X,1,X+1,(Y-1)X+1,...Y X-1]}}\end{array}
+$$  
+
+Based on Eq. 1 and 2, we can map each original tensor slice position (i.e., Eq. 1) to new tensor slice position (i.e., Eq. 2) on each GPU to correct final gradient misplacement issue.  
+
+
+
+\section{3.4 OPTIMIZED IMPLEMENTATION  }
+
+
+To optimize $Z\mathrm{eRO++}$ , we implemented key optimizations: i) overlapping compute streams and, ii) optimizing CUDA kernels. Overlapping involves concurrent execution of quantization computation and communication during weight all-gathering, leveraging asynchronous quantization and execution order tracking. The CUDA kernels were optimized for quantization, dequantization, and tensor slice reordering to fully utilize device memory bandwidth and minimize memory traffic by $9\mathbf{X}$ in $q g Z$ . Additionally, a hierarchical approach in gradient communication and a generalized tensor slice reordering scheme are introduced to minimize latency and address the needs of different pipeline stages. These optimizations allow $Z\mathrm{eRO++}$ to efficiently leverage ${4\bf{x}}$ communication volume reduction, enhancing its throughput.  
+
+
+
+\section{4 EVALUATION  }
+
+
+This section evaluates $Z\mathrm{eRO++}$ in three areas. First, it shows end-to-end throughput scalability and speedup over baseline for standard and RLHF training across different models, model sizes, hardware configurations and cluster settings, demonstrating consistent speedup (up to 3.3x) across the board. Second, it shows convergence properties of $Z\mathrm{eRO++}$ for both pre-training and finetuning demonstrating its robustness and tolerance to extreme quantization all the way down to 2-bits. Third, it shows ablation studies demonstrating the impact of each component of $Z\mathrm{eRO++}$ and the effectiveness of our kernel optimizations.  
+
+
+
+\section{4.1 METHODOLOGY  }
+
+
+Hardware: 24 NVIDIA DGX-2 nodes where each with 16 V100 SXM3 32 GB GPUs. The nodes are connected by InfiniBand (IB) with NVIDIA SHARP support, achieving total inter-node bandwidth of over 800 Gbps. To evaluate $Z\mathrm{eRO++}$ in clusters under different network environments, we show the performance of $Z\mathrm{eRO++}$ running with different cross-node bandwidths by enabling from 1 to 8 IB connections (i.e., 100 Gbps to 800 Gbps).  
+
+Baseline: We use ZeRO-3 as the baseline given its ease-to-use for training giant models at large scale. To evaluate the performance of our optimized kernels, we also implemented $Z\mathrm{eRO++}$ with PyTorch quantization and non-fused kernels as baselines for our ablation study.  
+
+![](images/49f92cea49e86547c368ba1e67c80e934fe80f6e0b346f14104598d6c4cf412a.jpg)  
+Table 1: End-to-end speedup of $Z\mathrm{eRO++}$ on V100 and  
+
+![](images/69d2491716b7b50da1940ac3228fa8a3956251fa04212e1b6f28f39d9573184f.jpg)  
+Figure 6: Scalability on up to 384 GPUs of 18B model with different numbers of InfiniBand connections and tokens per GPU.  
+
+Model Configurations: We use transformer models for evaluation including GPT, OPT, andLLaMA for various model sizes. Given Megatron-Turing-NLG (Smith et al., 2022) training 530B model on 2K GPUs using 2K tokens per GPU (i.e., micro batch size), we evaluate $Z\mathrm{eRO++}$ with the same $2\mathbf{k}$ tokens per GPU setting. We also evaluate on 1K tokens per GPU to test $Z\mathrm{eRO++}$ with more extreme scale scenario. The number of layers and hidden sizes are adjusted to have models of different sizes.  
+
+
+
+\section{4.2 E2E SYSTEM EVALUATIONS  }
+
+
+We evaluate $Z\mathrm{eRO++}$ end-to-end performance and present an ablation study here. One key metric we use here is the percentage of peak performance, which is shown as Eq. 3.  
+
+E.g. when we use $\mathrm{V}100\ \mathrm{GPU}$ , its max TFLOPs is 120 TFLOPs (NVIDIA V100 datasheet) for mixed precision computation. Thus, our reported peak performance refers to the percentage number of achieved TFLOPs/120.  
+
+Scalability upto 384 GPUs In Figure 6, we present $Z\mathrm{eRO++}$ scalability evaluation from 64 to 384 GPUs with 18B model on both low (1 IB) and high (8 IB) bandwidth clusters. On low bandwidth cluster, $Z\mathrm{eRO++}$ achieves $30\%$ and $38.3\%$ of peak performance (120 TFLOPs) even at 384 GPUs for 1K and 2K batch sizes, which is much higher compared to $12.5\%$ and $21.6\%$ as baseline peak performance. This presents up to $\mathbf{2.4x}$ better throughput. On high bandwidth cluster, despite having significantly more bandwidth, $Z\mathrm{eRO++}$ still enables up to $1.29\mathbf{x}$ better throughput, and can achieve up $45\%$ of sustained peak throughput at 384 GPUs. $Z\mathrm{eRO++}$ significantly speed up large scale training for low bandwidth clusters while archiving decent speedup even on high bandwidth clusters.  
+
+Throughput for different model sizes and GPU architectures Table 1(a) compares training throughput for models of 18B-138B on 384 GPUs between $Z\mathrm{eRO++}$ and baseline on both low and high bandwidth clusters. On low bandwidth cluster, $Z\mathrm{eRO++}$ consistently achieves over $31.5\%$ and $18.1\%$ peak performance for 2K and 1K batch sizes on all models. Compared with the baseline peak performance of $16.6\%$ and $9.3\%$ , the speedup is up to 2.16x. On high bandwidth cluster, $Z\mathrm{eRO++}$ peak performances are $44.7\%$ and $31.5\%$ , which is $1.3\mathrm{x}$ over the baseline peak performance of $31.5\%$ and $26.0\%$ .  
+
+Table 1(b) illustrates the performance of $Z\mathrm{eRO++}$ on 32 A100 GPUs, demonstrating that $Z\mathrm{eRO++}$ surpasses the baseline even on a smaller scale cluster. Specifically, in low-bandwidth clusters, $Z\mathrm{eRO++}$ exceeds the baseline by $88.8\%$ , and in high-bandwidth clusters, it achieves a $9.3\%$ improvement over the baseline. $Z\mathrm{eRO++}$ exhibits robustness and uniform speedup across varying model and batch sizes, as well as differing network bandwidths and GPU architectures.  
+
+Democratization for large scale training Figure 7 compares the throughput of $Z\mathrm{eRO++}$ on a low cross-node bandwidth (200 Gbps as 2 IB) cluster with the baseline running on 800 Gbps highbandwidth (8 IB) cluster. For a small model of 18B, $Z\mathrm{eRO++}$ achieves a higher peak performance of  
+
+![](images/17adf312cd6c1add98c58dcfdedc7784cbbf4b2b3e794634ec2b10178b029f64.jpg)  
+Figure 7: $Z\mathrm{eRO++}$ achieves high bandwidth cluster performance with much lower bandwidth.  
+
+![](images/f2b57c6b354169fbb54275912bf6b708cf8d62a30eec4100deb24f7c3e7c458b.jpg)  
+Figure 8: $Z\mathrm{eRO++}$ achieves up to $3.3\mathbf{x}$ better throughput for RLHF training.  
+
+Table 2: Perplexity after fine-tuning different models with various quantization bits in $Z\mathrm{eRO++}$ .   
+
+![](images/04b755a7739393e53d5d42a50add75722831e7db50aaec80612fa907b5621e77.jpg)  
+
+![](images/6cfa4d5c2903754a106e0810061954e3d51e4eac4ffa2b395432cf542ad70c15.jpg)  
+Figure 9: Convergence curves: Pretraining GPT350M and GPT-13B on the Pile dataset.  
+
+$41.6\%$ compared with baseline peak performance of $39.1\%$ despite running with $4\mathbf{x}$ lower cross-node bandwidth. For large model of 138B, $Z\mathrm{eRO++}$ and baseline achieve the same peak performance of $40\%$ , but baseline runs at 4x higher cross-node bandwidth. This evaluation shows that $Z\mathrm{eRO++}$ makes large scale training more accessible by significantly decreasing the minimum cross-node bandwidth requirement for efficient training. Furthermore, it demonstrates that optimized $Z\mathrm{eRO++}$ implementation effectively translates the 4x communication reduction of $Z\mathrm{eRO++}$ into real end-toend system throughput gain.  
+
+Speedup for RLHF Reinforcement Learning from Human Feedback (RLHF) is a unique and commonly employed scenario in LLM training. In Figure 8, we present a comparison between $Z\mathrm{eRO++}$ and the baseline for OPT-30B and LLaMA-2-70B, demonstrating that $Z\mathrm{eRO++}$ can achieve up to $3.3\mathbf{x}$ and $2.97\mathbf{x}$ improved throughput forLLaMA-2-70B and OPT-30B respectively. The throughput is measured at step3 of RLHF training where there are both training and generation. It’s noteworthy that the results were obtained with 8 InfiniBand connections on V100 GPUs, and we anticipate an even larger gap in lower bandwidth clusters. These findings underscore the versatility and efficacy of $Z\mathrm{eRO++}$ across diverse training scenarios and various model families.  
+
+
+
+\section{4.3 MODEL CONVERGENCE ANALYSIS  }
+
+
+This section assesses $Z\mathrm{eRO++}$ ’s impact on the convergence of large models during both pretraining and fine-tuning stages.  
+
+Pretraining. We analyze the pretraining of GPT-350M and GPT-13B models on the Pile dataset (Biderman et al., 2022), employing $Z\mathrm{eRO++}$ with non-blocked quantization, $Z\mathrm{eRO++}$ (with blocked quantization), and ZeRO-3 as the baseline. To maintain fairness, all hyperparameters remain consistent between baseline and $Z\mathrm{eRO++}$ trainings. Convergence is measured by the validation LM loss.  
+
+Figure 9 displays the comprehensive pretraining trace. Training with 8-bit non-blocked quantization diverged initially, rendering no visible data. Conversely, $Z\mathrm{eRO++}$ with 8-bit blocked quantization aligns closely with the baseline, reinforcing our prior analysis that block-based quantization achieves superior quantization accuracy. Furthermore, $Z\mathrm{eRO++}$ convergence remains closely aligned with the baseline even when using 6-bit quantization.  
+
+Fine-tuning. We fine-tuned the pre-trained models: OPT-1.3B/-13B (Zhang et al., 2022b) and LLaMA-30B (Touvron et al., 2023), with $Z\mathrm{eRO++}$ using FP6, INT4, and INT2 precision for $q w Z$ and INT-4 for qgZ on the high-quality open-source instruction datasets1. We kept all training hyperparameters the same across all setups. The evaluation relies on the metric – perplexity (the lower, the better).  
+
+Table 3: End-to-end performance when using $Z{\mathrm{eRO++~w~}}$ .\wo. optimized kernels.   
+
+![](images/6e08984c2a95c6ca94571cda00f48fc5ff1d0aedcc5c293a83dd9a2dbab44b8d.jpg)  
+
+![](images/912ff45e42efa2c4b1febf62dcf33ec5f1e6d0ff96aff5758787ca99ebae9544.jpg)  
+Figure 10: Throughput of 18B models on128 GPUs with $Z\mathrm{eRO++}$ , qwZ, $\mathrm{{qgZ}}$ , hpZ, and baseline on various InfiniBand connections.  
+
+Table 2 reveals the robustness of $Z\mathrm{eRO++}$ , as well as its ability to create low-precision models during fine-tuning without requiring post-quantization. Notice, the validation perplexity of $Z\mathrm{eRO++}$ varies only slightly from the baseline, with a mere $0.27\%{-0.41\%}$ deviation, even when quantized to 4-bits.  
+
+
+
+\section{4.4 THROUGHPUT BREAKDOWN AND ANALYSIS  }
+
+
+Impact of Individual Techniques. In Figure 10, we show the individual and combined impact of qwZ, hpZ, and $\operatorname{qgZ}$ , on the throughput of 18B model on 128 GPUs. On low bandwidth clusters, each of these techniques enables a speedup ranging from $1.3–1.4\mathtt{x}$ compared with baseline, while achieving an aggregated speedup of up to $2.26\mathrm{x}$ . Note that our TFLOPs throughput is calculated from wall-clock time measurement, $Z\mathrm{eRO++}$ aggregated throughput gain is not equivalent to sum of qgZ, qwZ, hpZ gain. We can validate the theoretical speedup with composition of our techniques by accumulating the speedup multiplicatively: $1.4*1.26*1.3=2.29$ , which is very near to what we achieved as $2.26\mathrm{x}$ .  
+
+For high bandwidth clusters, the individual speedup ranges between 1.13-1.16x, for a combined speedup of up to $1.3\mathrm{x}$ . The figure demonstrates that each of these techniques has a similar impact towards throughput improvement and they compose effectively with a larger aggregated speedup.  
+
+Impact of Kernel Optimizations. We evaluate our optimized kernels on $Z\mathrm{eRO++}$ throughput using an 18B model running on 64 GPUs.  
+
+Quantization Kernel: As shown in Table 3, compared with the baseline that uses PyTorch quantization, our optimized quantization kernels can achieve up to $1.67\mathbf{x}$ speedup in terms of end-to-end throughput. Also, the baseline implementation suffers performance degradation as the group number increases which means the throughput gap will be larger when used with larger models.  
+
+2, kernel fusion is one of our key optimizations to improve memory throughput when executing sequences of CUDA kernels. Our fusion includes 1) tensor-reorder and quantization fusion 2) intra-node dequant, intra-node reduction and inter-node quant fusion. As shown in Table 3, we achieve up to $1.15\mathrm{x}$ speedup on the end-to-end throughput.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+This paper presents $Z\mathrm{eRO++}$ , an efficient collective communication solution for large model training using ZeRO stage-3. We optimize both model weights and gradients communication in the forward and backward pass of each training iteration. To reduce communication volume of model weights in forward propagation, we adopt block-based quantization and data pre-fetching. To remove crossnode communication of weights during backward pass, we hold secondary model partition on each node to trade memory for communication. To minimize gradient communication during backward propagation, we design and implement a novel all-to-all based gradient quantization and reduction scheme.  
+
+By incorporating all the three optimizations above, we improve system scalability and throughput for pre-training, fine-tuning and RLHF training with speedup of up to $3.3\mathbf{x}$ . Furthermore, $Z\mathrm{eRO++}$ can automatically quantize the parameters to ultra-low precision making the resulting model inference ready without post-training quantization. We envision $Z\mathrm{eRO++}$ as the next generation of easy-to-use framework for training large models at scale.  
+
+ACKNOWLEDGMENTS  
+
+We would like to thank all DeepSpeed members for their helpful discussion and support to this work, and anonymous reviewers for their constructive feedback. This work was sponsored in part by NSF grant CAREER-2048044.  
+
+
+
+

@@ -1,8 +1,8 @@
 # COT: Consistent Optimal Transport with Applications to Visual Matching and Travelling Salesman Problems
 
 - Decision: Reject
-- Avg Score: 3.00
-- Scores: 1, 0, 6, 5, 3
+- Avg Score: 6.00
+- Scores: 10, 6, 5, 3
 
 ## Abstract
 This paper generalizes the vanilla Optimal transport (OT) to the so-called Consistent Optimal Transport (COT) accepting more than two measures as input with transport consistency. We formulate the problem as minimizing the transport costs between each pair of measures and meanwhile requiring cycle-consistency among measures. We present both the Monge and Kantorovich formulations of COT and obtain the approximate solution with added entropic and consistency regularization, for which an iterative projection (RCOT-Sinkhorn) algorithm is devised to improve the Sinkhorn algorithm. We show the superiority on the task of visual multi-point matching, in which our COT solver directly utilizes the cosine distance between learned features of points obtained from off-the-shelf graph matching neural networks as the pairwise cost. We leverage the algorithm to learn multiple matching and the experiments show a great improvement without more feature training. Furthermore, based on COT, we propose a new TSP formulation called TSP-COT and also adopt regularization to relax the optimization and use the modified RCOT-Sinkhorn algorithm to get the probability matrix of TSP routing. Then post-process search method  is adopted to get the TSP routs and the experiments show the superiority of our method. The code will be available.

@@ -1,0 +1,462 @@
+\title{OpenNeRF: Open Set 3D Neural Scene Segmentation with Pixel-Wise Features and Rendered Novel Views}
+
+\begin{abstract}
+Large visual-language models (VLMs), like CLIP, enable open-set image segmentation to segment arbitrary concepts from an image in a zero-shot manner.
+This goes beyond the traditional closed-set assumption, \ie, where models can only segment  classes from a pre-defined training set.
+More recently, first works on open-set segmentation in 3D scenes have appeared in the literature.
+These methods are heavily influenced by closed-set 3D convolutional approaches that process point clouds or polygon meshes.
+However, these 3D scene representations do not align well with the image-based nature of the visual-language models.
+Indeed, point cloud and 3D meshes typically have a lower resolution than images and the reconstructed 3D scene geometry might not project well to the underlying 2D image sequences used to compute pixel-aligned CLIP features.
+To address these challenges, we propose \name{} which naturally operates on posed images and directly encodes the VLM features within the NeRF. This is similar in spirit to LERF, however our work shows that using pixel-wise VLM features (instead of global CLIP features) results in an overall less complex architecture without the need for additional DINO regularization. 
+Our \name{} further leverages NeRF's ability to render novel views and extract open-set VLM features from areas that are not well observed in the initial posed images.
+For 3D point cloud segmentation on the Replica dataset, \name{} outperforms recent open-vocabulary methods such as LERF and OpenScene by at least $+4.9$ mIoU.    
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[width=\textwidth]{figures/teaser.jpg}
+    \resizebox{\textwidth}{!}
+{\footnotesize
+\ColorMapCircle{wall}\,Wall
+\ColorMapCircle{ceiling}\,Ceiling
+\ColorMapCircle{floor}\,Floor
+\ColorMapCircle{blinds}\,Blinds
+\ColorMapCircle{window}\,Window
+\ColorMapCircle{lamp}\,Lamp
+\ColorMapCircle{door}\,Door
+\ColorMapCircle{pillow}\,Pillow
+\ColorMapCircle{cabinet}\,Cabinet
+\ColorMapCircle{blanket}\,Blanket
+\ColorMapCircle{cushion}\,Cushion
+\ColorMapCircle{bed}\,Bed
+\ColorMapCircle{picture}\,Picture
+\ColorMapCircle{indoor-plant}\,IndoorPlant
+\ColorMapCircle{shelf}\,Shelf
+\ColorMapCircle{vase}\,Vase
+\ColorMapCircle{wall-plug}\,Wall Plug
+\ColorMapCircle{book}\,Book
+\ColorMapCircle{switch}\,Switch}
+    \begin{tabular}{cccc}
+        \textit{\small \color{black} Input Scene} &
+        \textit{\small \color{white} LERF} &
+        \textit{\small \color{white} OpenScene} &
+        \textit{\small \color{white} \name{} (Ours)}\\
+        \hspace{0.22\textwidth} &
+        \hspace{0.22\textwidth} &
+        \hspace{0.22\textwidth} &
+        \hspace{0.22\textwidth}
+    \end{tabular}
+\caption{Open-vocabulary 3D semantic segmentation on point clouds. Compared to LERF~\citep{kerr2023lerf}, the segmentation masks of \name{} are more accurate and better localized, while achieving more fine-grained classification than OpenScene~\citep{peng2022openscene}. Zero-shot results on Replica \citep{replica19arxiv}.}
+\label{fig:teaser}
+\end{figure}
+
+3D semantic segmentation of a scene is the task of estimating, for each 3D point of a scene, the category that it belongs to. Being able to accurately estimate the scene semantics enables numerous applications, including AR/VR, robotic perception~\citep{zhi2021place, zurbrugg2024icgnet} and autonomous driving~\citep{kundu2022panoptic, kreuzberg20224d}, since they all require having a fine-grained understanding of the environment.
+While the domain of 3D scene understanding has recently made a lot of progress~\citep{schult2022mask3d, choy20194d,yue2023connecting,qi2017pointnet++,human3d}, these methods are exclusively trained in a fully supervised manner on (\emph{closed}-)sets of semantic categories, rendering them impractical for many real world applications as the models lack the flexibility to continuously adapt to novel concepts ~\citep{delitzas2024scenefun3d} or semantic classes ~\citep{dai2017scannet, armeni2017joint, ramakrishnan2021habitat, baruch2021arkitscenes, replica19arxiv}.
+Therefore, in this work we aim at tackling the problem of \emph{open-set} 3D scene segmentation. 
+The main idea of \emph{open}-set scene segmentation is that arbitrary concepts can be segmented, independent of any pre-defined closed set of classes.
+Given an \emph{arbitrary} query -- for example, a textual description or an image of an object -- the goal is to segment those parts in the 3D scene that are described by the query.
+Such general unconstrained functionality can be crucial for helping robots interact with previously unseen environments, or applications on AR/VR devices in complex indoor scenes, especially when training labels are scarce or unavailable \citep{ahn2022can}.
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/teaser.jpeg}
+    \caption{
+    We propose \name, an approach for open-set 3D scene understanding based on neural radiance fields.
+    Arbitrary concepts can be queried from our representation \emph{(left)}.
+    As the original camera trajectory \emph{(blue, middle)} might not capture all interesting scene details,
+    we use NeRFs ability to render novel views \emph{(right)} and propose a mechanism to obtain relevant novel camera poses \emph{(yellow, middle)} that focus on scene details from which we can extract additional open-scene features improving the overall open-set scene representation.
+    }
+    \label{fig:novel_views}
+\end{figure}
+
+Vision-language models (VLMs), such as CLIP \citep{wang2022clip} or ALIGN \citep{jia2021scaling}, have shown impressive performance on open-set image classification. 
+Trained on internet-scale image-caption pairs, they learn a joint embedding mapping text and image inputs to the same (or different) embedding vector depending on whether they describe similar (or different) concepts.
+More recently, these powerful concepts were applied to dense pixel-level tasks, enabling open-set 2D image segmentation \citep{ghiasi2022scaling, li2022language, rao2022denseclip}. 
+Using VLMs in combination with 3D point clouds is to date less explored.
+Similar to \citet{li2022language}, \citet{rozenberszki2022language} train a 3D convolutional network that predicts per-point CLIP features in a fully-supervised manner using the CLIP-text encodings of the annotated class names.
+Such fine-tuning on densely annotated datasets works well only on the classes labeled in the training set but does not generalize well to novel unseen classes which limits open-set scene understanding.
+OpenScene~\citep{peng2022openscene} recently proposed the first exciting results on open-vocabulary 3D scene understanding.
+In line with~\citet{rozenberszki2022language}, given a reconstructed 3D point cloud as input, a 3D convolutional network predicts CLIP features for each point.
+However, unlike \citet{rozenberszki2022language}, the model is supervised with projected CLIP-image features from posed 2D images, preserving the generalization ability of the pixel-aligned visual-language image features. Similarly, LERF \citep{kerr2023lerf} embeds CLIP features at multiple scales into neural radiance fields. As in \citet{kobayashi2022decomposing}, LERF adds a branch to predict CLIP features for a given 3D location. 
+Subsequently, this enables rendering CLIP images, which is used to perform open-set semantic segmentation by means of computing the similarity with the CLIP feature from encoded input text queries.
+While OpenScene~\citep{peng2022openscene}, OpenMask3D~\citep{takmaz2023openmask3d}, and LERF~\citep{kerr2023lerf} demonstrate impressive capability of segmenting any given concept, they still suffer from several limitations.
+Exemplary, OpenScene fully operates on a given 3D scene reconstruction in the form of a polygon mesh (or a point cloud sampled from the mesh surface) that usually stems from a recorded RGB-D sequence.
+This approach is naturally limited by the mesh resolution,
+thus constraining the representation of smaller objects.
+On the other hand, LERF does not exhibit this limitation.
+However, as it relies on the CLIP-image encoder, the resulting global VLM features are not well localized in 3D space which leads to segmentation masks that a fairly inaccurate as CLIP can only be computed on full images or crops. 
+To compensate for this issue, LERF employs multi-resolution patches for CLIP computation and further regularizes the rendered CLIP embeddings using DINO features.
+While this can mitigate inaccurate masks to some extent, it increases overall model complexity, yet achieving inferior open-set 3D segmentation masks (see Fig.~\ref{fig:teaser}).
+
+In this work, we address the aforementioned limitations and propose \name, a novel neural radiance field (NeRF)~\citep{Mildenhall2020ECCV} based approach for open-set 3D scene segmentation.
+As neural representation, NeRFs have inherently unlimited resolution and,
+more importantly, they also provide an intuitive mechanism for rendering novel views from arbitrary camera positions. Thus, we leverage this ability to extract additional visual-language features from novel views leading to improved segmentation performance. One key challenge is to determine the relevant parts of the scene requiring further attention. We identify the disagreement from multiple views as a powerful signal and propose a probabilistic approach to generate novel view points. Second, we further propose the direct distillation of pixel-aligned CLIP features from OpenSeg~\citep{ghiasi2022scaling} into our neural radiance field. Compared to LERF, this not only increases the segmentation quality via detailed and pixel-aligned CLIP features, it also significantly simplifies the underlying architecture as it eradicates the need for multi-resolution patches and additional DINO-based regularization terms.
+
+Our experiments show that NeRF-based representations, such as LERF and our\name{}, are better suited for detecting small long-tail objects compared to mesh based representations used \eg{}, in OpenScene.
+Further, we find that by incorporating pixel-aligned CLIP features from novel views, our system improves over prior works despite exhibiting a simpler design.
+We identify the Replica dataset as a promising candidate to evaluate open-set 3D semantic segmentation since, unlike ScanNet~\citep{dai2017scannet} or Matterport~\citep{ramakrishnan2021habitat}, it comes with very accurate mesh reconstruction, per-point semantic labels as well as a long-tail class distribution (see Fig.~\ref{fig:replica_class_distribution}).
+
+In summary, the contributions of this work are as follows:
+\begin{itemize}
+    \item We propose \name, a novel approach for open-set 3D semantic scene understanding based on distillation of pixel-aligned CLIP features into Neural Radiance Fields (NeRF).
+    \item We propose a mechanism utilizing NeRF's view synthesis capabilities for extracting additional visual-language features, leading to improved segmentation performance.
+    \item We present the first evaluation protocol for the task of open-set 3D semantic segmentation, comparing explicit-based (mesh / point cloud) and implicit-based (NeRF) methods.
+    \item \name{} significantly outperforms the current state-of-the-art for open-vocabulary 3D segmentation with an $+4.5$ mIoU gain on the Replica dataset.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\paragraph{2D Visual-Language Features.}
+CLIP~\citep{wang2022clip} is a large-scale visual-language model trained on Internet-scale image-caption pairs.
+It consists of an image-encoder and a text-encoder that map the respective inputs into a shared embedding space.
+Both encoders are trained in a contrastive manner, such that they map images and captions to the same location in the embedding space if the caption describes the image, and different locations in the opposite case.
+While the CLIP image-encoder yields a single global feature vector per image, LSeg~\citep{li2022language} extends this idea and predicts pixel-level features which enables dense image segmentation tasks.
+Pixel-aligned CLIP features are obtained via fine-tuning on a fully-annotated 2D semantic segmentation dataset.
+This works well for the semantic classes present in the fully-annotated dataset, however, the pixel-aligned features generalize less well to novel concepts outside of the training classes.
+OpenSeg~\citep{ghiasi2022scaling} further improves on these aspects and proposes a class-agnostic fine-tuning to obtain pixel-aligned features.
+OVSeg~\citep{liang2022open} is the latest development that proposes to fine-tune a CLIP-like model on cropped objects.
+In this work, we use the pixel-wise features from OpenSeg~\citep{ghiasi2022scaling} which enables a direct and fair comparison with the publicly available models of OpenScene~\citep{peng2022openscene}.
+Further, as also noted by \citep{peng2022openscene}, OpenSeg improves over LSeg~\citep{li2022language} on long-tail classes unseen during the training of LSeg.
+
+\paragraph{Neural Radiance Fields.}
+Since the introduction of Neural Radiance Fields (NeRFs)~\citep{Mildenhall2020ECCV} for view synthesis, they have been adopted as scene representation for various tasks ranging from 3D reconstruction~\citep{oechsle2021iccv,wang2021neurips,yu2022monosdf,yariv2021neurips} to semantic segmentation~\citep{zhi2021place} due their simplicity and state-of-the-art performance. 
+Next to impressive view synthesis results, NeRFs also offer a flexible way of fusing 2D-based information in 3D. A series of works have explored this property in the context of 3D semantic scene understanding. 
+In PanopticLifting~\citep{siddiqui2022panoptic}, predicted 2D semantic maps are utilized to obtain a 3D semantic and instance-segmented representation of the scene. 
+In~\citep{kobayashi2022decomposing}, 2D semantic features are incorporated and fused during the NeRF optimization which are shown to allow for localized edits for input text prompts.  
+Neural Feature Fusion Fields~\citep{tschernezki22neural} investigates the NeRF-based fusion of 2D semantic features in the context of 3D distillation and shows superior performance to 2D distillation. 
+Finally, in LERF~\citep{kerr2023lerf}, NeRF-based 3D CLIP-feature fields are optimized via multi-scale 2D supervision to obtain scene representations that allow for rendering response maps for long-tail open-vocabulary queries.
+While all of the above achieve impressive 3D fusion results, we propose to investigate NeRF-based feature fusing in the context of open-set 3D scene segmentation. This does not only require to solve additional challenges, such as detecting relevant parts of the scene, but also enables more rigorous evaluation and comparison to other fusion approaches.
+
+\paragraph{3D Open-Set Scene Understanding}
+While most approaches for 3D scene understanding utilize 3D supervision \citep{Han2020CVPR,Hu2021ICCV,Li2022CVPR}, a recent line of works investigates how 2D-based information can be lifted to 3D.
+In Semantic Abstraction~\citep{ha2022semantic}, 2D-based CLIP features are projected to 3D space via relevancy maps, which are extracted from an input RGB-D stream. While achieving promising results, their 3D reasoning is coarse and thus limited.
+Similarly, in ConceptFusion~\citep{jatavallabhula2023conceptfusion} multi-modal 3D semantic representations are inferred from an input RGB-D stream by leveraging 2D foundation models. They use point clouds as 3D representation.
+ScanNet200 \citep{rozenberszki2022language} uses CLIP to investigate and develop a novel 200-class 3D semantic segmentation benchmark. 
+Most similar to our approach is OpenScene~\citep{peng2022openscene}, which is the only existing method for open-set 3D semantic segmentation of point clouds.
+Our method is also similar to LERF~\citep{kerr2023lerf} in terms of NeRF representation but does not demonstrate results on 3D semantic segmentation. 
+Further, our NeRF-based scene representation offers high-quality novel view synthesis which we leverage to render novel views of ``interesting" scene parts towards improved segmentation performance.
+
+
+\section{Method}
+
+Given a set of posed RGB input images and corresponding pixel-aligned open-set image features,
+we want to obtain a continuous volumetric 3D scene representation that can be queried for arbitrary concepts.
+Our approach \name{} enables open-set 3D scene understanding to address a wide variety of different tasks, such as material and property understanding as well as object localization.
+By means of leveraging the normalized cosine similarity between the encoded queries and the rendered open-set features, we can explore multiple concepts (see Fig.~\ref{fig:quali_openset}).
+Alternatively, our approach can by seen as a method for unsupervised zero-shot 3D semantic segmentation (Fig.~\ref{fig:quali}) where we assign to each point the semantic class with the highest similarity score.
+
+\subsection{Open-Set Radiance Fields}
+
+A radiance field is a continuous mapping that predicts a volume density $\sigma \in [0, \infty]$ and a RGB color $\mathbf{c} \in [0, 1]^3$ for a given input 3D point $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{S}^2$.
+Mildenhall et.\ al.\ \citep{Mildenhall2020ECCV} propose to parameterize this function with a neural network (NeRF) using a multi-layer perceptron (MLP) where the weights of this MLP are optimized to fit a set of input images of a scene.
+To enable higher-frequency modeling, the input 3D point as well as the viewing direction are first passed to a predefined positional encoding~\citep{Mildenhall2020ECCV,Tancik2020neurips} before feeding them into the network.
+Building on this representation, we additionally assign an open-set feature $\mathbf{o} \in \mathbb{R}^D$ to each 3D point:
+\begin{align}    f_\theta(\mathbf{x}, \mathbf{d}) \mapsto \left(\sigma, \mathbf{c}, \mathbf{o}\right)
+\end{align}
+where $\theta$ indicates the trainable network weights. 
+Our representation is based on Mip-NeRF~\citep{barron2022mip} for appearance and density, while an additional MLP head models the open-set field.
+Essentially, the rendering of color, density and the open-set features is conducted following volumetric rendering via integrating over sampled point positions along a ray $\mathbf{r}$~\citep{levoy1990efficient}.
+We supervise the open-set head with OpenSeg feature maps which provide localized per-pixel CLIP features. As a result, we do not require rendering CLIP features at multiple scales for training or multiple renderings for each scale during inference as in LERF, leading to a simpler and more efficient representation.
+\subsection{Training Objectives}
+
+\paragraph{Appearance Loss.}
+Following standard procedure, we optimize the appearance using the Euclidean distance between the rendered color $\hat{\mathbf{c}}_r$ and the ground truth color $\mathbf{c}_r$ over a set of sampled rays $\mathcal{R}$: 
+\begin{align}
+\mathcal{L}_{\text{RGB}} = \frac{1}{|\mathcal{R}|} \sum_{r\in\mathcal{R}} || \mathbf{c}_r - \hat{\mathbf{c}}_r||^2.
+\end{align}
+
+\paragraph{Depth Loss.}
+While our method is able to be trained from RGB data alone, we can also leverage depth data if available. To this end, we supervise the density for those pixels where observed depth information is available (see Table \ref{tab:analysis} for an analysis). We compute the mean depth from the densities for each ray $r$ and supervise them using the smooth $L_1$ (Huber) loss:
+\begin{align}
+\mathcal{L}_{\text{depth}} = \frac{1}{|\mathcal{R}|} \sum_{r\in\mathcal{R}} || d_r - \hat{d}_r||.
+\end{align}
+\paragraph{Open-Set Loss.}
+The open-set features are supervised via pre-computed 2D open-set feature maps from OpenSeg.
+Similar to \citet{peng2022openscene}, we maximize the cosine similarity using
+\begin{align}
+\mathcal{L}_{\text{open}} = \frac{1}{|\mathcal{R}|} \sum_{r\in\mathcal{R}} - \frac{\mathbf{o}_r}{||\mathbf{o}_r||_2} \cdot \frac{\hat{\mathbf{o}}_r}{||\hat{\mathbf{o}}_r||_2}.
+\end{align}
+Since the 2D open-set feature maps are generally not multi-view consistent, we do not backpropagate from the open-set feature branch to the density branch~\citep{siddiqui2022panoptic, kobayashi2022decomposing}.
+Additionally, the 2D open-set maps from OpenSeg~\citep{ghiasi2022scaling} contain many artifacts near the image border.
+Therefore, we do not sample rays within a margin of 10 pixels from the image border during training.
+In summary, the total loss is defined as $\mathcal{L} = 
+\mathcal{L}_{\text{RGB}} + 
+\lambda_{\text{open}} \cdot \mathcal{L}_{\text{open}} + 
+\lambda_{\text{depth}} \cdot \mathcal{L}_{\text{depth}}$.
+
+\subsection{Rendering Novel Views}
+\label{sec:novel_view_points}
+A key advantage of NeRF-based representations is their ability to render photo-realistic novel views.
+These rendered novel views can naturally be used to extract 2D open-set features.
+We would like to use this ability to obtain improved open-set features for those parts of the scene
+where we have low confidence in the existing open-set features.
+A key challenge, however, is to first identify the parts of the scene that exhibit low confidence features and would thus benefit from rendering novel views.
+
+\paragraph{Confidence Estimation.}
+We identify the uncertainty $u_i \in \mathbb{R}$ over multiple projected open-set features as a surprisingly strong signal.
+Specifically, starting with the original color images, we compute open-set feature maps with OpenSeg.
+We then project each feature map onto a coarse 3D scene point cloud obtained using an of-the-shelf 3D reconstruction method \citep{dai2017bundlefusion} and compute for each point $i$ the mean $\mu_i \in \mathbb{R}^D$ and covariance $\Sigma_i \in \mathbb{R}^{D \times D}$ over the per-point projected features.
+As per-point uncertainty measure $u_i \in \mathbb{R}$ we compute the \emph{generalized} variance  \citep{wilks1932certain} defined as $u_i = \text{det}(\Sigma_i)$.
+Those parts of the scene that exhibit a large uncertainty intuitively correspond to areas where the open-set features from multiple viewpoints disagree on. They hence deserve further investigation by means of re-rendering from more suitable viewpoints.
+In practice, calculating the variance over a large number of high-dimensional features can be computational challenging.
+For a memory efficient and numerically stable implementation, we rely on Welford's online algorithm \citep{donald1999art} to compute the variance in a single pass.
+To confirm that idea, we compute the correlation between the per-point uncertainty $u_i$ and the per-point error $\epsilon_i$.
+We define the per-point error $\epsilon_i$ as the Euclidean distance between the ground truth open-set vector $\mathbf{o}_i^{\text{gt}}$
+(\ie{}, the CLIP text-encoding of the annotated class name) and the per-point mean open-set vector $\mu_i$.
+Indeed, measured over all Replica scenes, we observe a strong positive correlation ($\bar{r} = 0.653$) between $u_i$ and $\epsilon_i$. See Fig.~\ref{fig:correlation} for an illustration.
+
+\paragraph{Novel Camera View Selection.}
+To generate novel camera poses we compute the \texttt{lookat} matrix based on a target $\mathbf{t} \in \mathbb{R}^3$ and camera position $\mathbf{p} \in \mathbb{R}^3$.
+As targets $\mathbf{t}$ we select points with high uncertainty (shown in red, Fig.\ref{fig:correlation}) based on their uncertainty $u_i$ if $x < u_i$ with $ x \sim \texttt{Uniform}[0, 1]$.
+The camera position $\mathbf{p}$ is placed at a fixed small offset from the target position inside the scene with added small random noise.
+Importantly, we sample the density of the NeRF at the selected camera position to make sure the target is visible and does not collide with the scene geometry.
+
+\input{figures/correlation}
+
+\subsection{Implementation and Training Details}
+Our model is implement in Jax based on Mip-NeRF \citep{barron2022mip}.
+We train each NeRF scene representation for 3000 iterations and the pixel-aligned opens-set features are computed using OpenSeg~\citep{ghiasi2022scaling}
+resulting in $640 \times 360 \times D$ dimensional feature maps with $D = 768$.
+For memory efficiency reasons, we convert them to float16 values.
+For querying, we use the pre-trained CLIP text-encoder based on the ViT-144@336 model~\citep{wang2022clip}.
+
+
+
+\section{Experiments}
+
+
+\paragraph{Datasets. }
+We evaluate our approach on the Replica~\citep{replica19arxiv} dataset and show qualitative results on scenes captured with the iPhone \emph{3D Scanner App}.
+Replica consists of high quality 3D reconstructions of a variety of real-world indoor spaces with photo-realistic textures.
+Unlike other popular 3D semantic segmentation datasets, such as S3DIS~\citep{armeni2017joint}, Scannet~\citep{dai2017scannet} or Matterport~\citep{ramakrishnan2021habitat}, Replica is particularly well suited to evaluate open-set 3D scene understanding as it contains both a long-tail class distribution and carefully-annotated ground-truth semantic labels, including very small objects such as switches and wall-plugs.
+All experiments are evaluated on the commonly-used $8$ scenes \{\texttt{office0-4, room0-2}\} ~\citep{zhu2022nice,peng2022openscene,zhi2021place}, using the camera poses and RGB-D frame sequences from Nice-SLAM~\citep{zhu2022nice}.
+Each RGB-D video sequence consists of 2000 frames scaled to $640 \times 360$ pixels. For a fair comparison to OpenScene~\citep{peng2022openscene}, we use only every $10$-th frame for training  resulting in $200$ posed RGB-D frames per scene.
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[width=1\textwidth]{figures/replica_log.pdf}
+    \caption{\textbf{Class Frequency Distribution of the Replica Dataset  \citep{replica19arxiv}.}
+    We show the number of point annotations for each category.
+    The colors indicate the separation in \emph{head} (blue), \emph{common} (yellow) and \emph{tail} (green) classes from left to right in decreasing order.
+    Note that the plot is shown at log-scale.}
+    \label{fig:replica_class_distribution}
+\end{figure}
+
+\paragraph{Labels and Metrics.} Overall, the 3D scene reconstructions are annotated with $51$ different semantic class categories.
+To enable a more detailed analysis of the experiments, we further split the original categories into three equally sized subsets (\emph{head, common, tail})  based on the number of annotated points where each subset contains $17$ classes (see Fig.~\ref{fig:replica_class_distribution}).
+Note that the ground-truth semantic labels, however, are only used for evaluation and not for optimizing the representations.
+
+For evaluation purposes, we compute the 3D semantic segmentation performance on the provided 3D scene point clouds.
+In particular, we follow~\citep{peng2022openscene} and measure the accuracy of the predicted semantic labels using the mean intersection over union (mIoU)
+and mean accuracy (mAcc) over all ground truth semantic classes and the \emph{head}, \emph{common}, \emph{tail} subsets.
+
+\subsection{Methods in comparison.}
+We compare our approach to the recently proposed OpenScene~\citep{peng2022openscene} and LERF~\citep{kerr2023lerf}. OpenScene is currently the only method reporting open-world 3D semantic segmentation scores. For LERF, we obtain 3D semantic segmentation masks by rendering for each frame all relevancy maps over all evaluated semantic classes, then project these on the Replica point clouds and assign the semantic class with the highest summed relevancy score.
+The OpenScene model is a sparse 3D convolutional network that consumes a 3D point cloud and predicts for each point an open-set feature. The model is trained on large-scale 3D point cloud datasets and supervised with multi-view fused CLIP features.
+We compare with the two variations of their trained model,
+ the 3D distilled model (Distilled), which directly predicts per-point features,
+ and the improved 2D-3D ensemble model (Ensemble), which additionally combines the predicted per-point features with fused pixel features.
+For a fair comparison, we follow their experimental setup, using the same pixel-aligned visual-language feature extractor OpenSeg~\citep{ghiasi2022scaling}.
+ Note that OpenScene profits from additional training datasets not used by LERF or our \name{}.
+
+\subsection{Results on 3D Semantic Segmentation}
+\input{tables/sota_table}
+
+We show 3D semantic segmentation scores for all three subsets in Table~\ref{tab:sota_comparison}.
+The 3D scene segmentations are obtained by querying the 3D scene representations for each one of the annotated ground truth semantic classes and assigning the class with the highest similarity score to each 3D point.
+Querying is performed via correlation of the 3D point cloud features with the embedding from
+large language models, specifically the CLIP-text encoder (ViT-L14@336).
+For OpenScene, we observe a similar trend as reported in \citep{peng2022openscene}, where the \emph{Ensemble} model improves over the \emph{Distilled} model ($+1.1$ mIoU).
+
+Our results clearly improve over all baseline methods. 
+We outperform LERF significantly while possessing a simpler overall design.
+Compared to OpenScene, we achieve $+4.5$ mIoU over all classes, $+3.7$ (head), $+5.6$ (common) and $+4.3$ (tail) for each subset. While achieving improved results on all classes, the smallest improvement can be found for the head classes. We attribute this to the fact that OpenScene can benefit from the pre-training on large-scale 3D datasets in this setting, enabling OpenScene to learn geometric priors of more popular classes (wall, ceiling, floor, chair).
+However, it is interesting to note that our approach is able to detect semantic categories that are not recognized at all by OpenScene (wall-plug, clock, tissue-paper, tablet, cloth). This is an important aspect, as these are often exactly the classes that are most relevant for an autonomous agent to interact with.
+Nevertheless, we also observe that numerous long-tail classes are not detected at all by neither method.
+This highlights that open-scene segmentation is a difficult task especially for long-tail classes, and shows that Replica is a challenging dataset for benchmarking.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Untitled.001.jpeg}
+\resizebox{\textwidth}{!}{
+\ColorMapCircle{wall}\,Wall
+\ColorMapCircle{ceiling}\,Ceiling
+\ColorMapCircle{floor}\,Floor
+\ColorMapCircle{chair}\,Chair
+\ColorMapCircle{blinds}\,Blinds
+\ColorMapCircle{sofa}\,Sofa
+\ColorMapCircle{table}\,Table
+\ColorMapCircle{rug}\,Rug
+\ColorMapCircle{window}\,Window
+\ColorMapCircle{lamp}\,Lamp
+\ColorMapCircle{door}\,Door
+\ColorMapCircle{pillow}\,Pillow
+\ColorMapCircle{bench}\,Bench
+\ColorMapCircle{tv-screen}\,TV Screen
+\ColorMapCircle{cabinet}\,Cabinet
+\ColorMapCircle{pillar}\,Pillar
+\ColorMapCircle{blanket}\,Blanket
+\resizebox{\textwidth}{!}{
+\ColorMapCircle{tv-stand}\,TV Stand
+\ColorMapCircle{cushion}\,Cushion
+\ColorMapCircle{bin}\,Bin
+\ColorMapCircle{vent}\,Vent
+\ColorMapCircle{bed}\,Bed
+\ColorMapCircle{stool}\,Stool
+\ColorMapCircle{picture}\,Picture
+\ColorMapCircle{indoor-plant}\,IndoorPlant
+\ColorMapCircle{desk}\,Desk
+\ColorMapCircle{comforter}\,Comforter
+\ColorMapCircle{nightstand}\,Nightstand
+\ColorMapCircle{shelf}\,Shelf
+\ColorMapCircle{vase}\,Vase
+\ColorMapCircle{plant-stand}\,PlantStand
+\ColorMapCircle{basket}\,Basket
+\ColorMapCircle{plate}\,Plate
+\ColorMapCircle{monitor}\,Monitor
+\resizebox{\textwidth}{!}{
+\ColorMapCircle{pipe}\,Pipe
+\ColorMapCircle{panel}\,Panel
+\ColorMapCircle{desk-organizer}\,Desk Organizer
+\ColorMapCircle{wall-plug}\,Wall Plug
+\ColorMapCircle{book}\,Book
+\ColorMapCircle{box}\,Box
+\ColorMapCircle{clock}\,Clock
+\ColorMapCircle{sculpture}\,Sculpture
+\ColorMapCircle{tissue-paper}\,Tissue Paper
+\ColorMapCircle{camera}\,Camera
+\ColorMapCircle{tablet}\,Tablet
+\ColorMapCircle{pot}\,Pot
+\ColorMapCircle{bottle}\,Bottle
+\ColorMapCircle{candle}\,Candle
+\ColorMapCircle{bowl}\,Bowl
+\ColorMapCircle{cloth}\,Cloth
+\ColorMapCircle{switch}\,Switch
+}
+  \caption{\textbf{Qualitative 3D Segmentation Results and Comparison with OpenScene~\citep{peng2022openscene}.} The white dashed circles indicate the most noticeable differences between both approaches. Color and ground truth are shown for reference only. Overall, our approach produces less noisy segmentation masks.}
+  \label{fig:quali}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[,width=\textwidth]{figures/fig_queries.jpg}
+    \caption{\textbf{Open-Set Scene Exploration.}
+    We visualize the normalized cosine similarity between the rendered open-set scene features and the encoded text queries shown at the top-right of each example.
+    Examples cover a broad range of concepts. Going beyond specific objects (\emph{top}), we show scene properties (\emph{middle}) and various materials (\emph{bottom}). \textcolor{sofa}{\textbf{Red}} is the highest relevancy, \textcolor{door}{\textbf{green}} is middle, \textcolor{tablet}{\textbf{blue}} the lowest. Uncolored means the similarity values are under $0.5$.}
+    \label{fig:quali_openset}
+\end{figure}
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[,width=\textwidth]{figures/seafood.jpg}
+    \caption{\textbf{In-the-wild Qualitative Results.}
+    We capture scenes using the iPhone \emph{3D Scanner App}, which provides camera poses from on-board SLAM and query the reconstructed scenes with various search terms.}
+    \label{fig:quali_seafood}
+\end{figure}
+
+\clearpage
+
+\subsection{Analysis Experiments}
+
+\input{tables/analysis}
+\paragraph{Sampling or rendering?}
+Unlike OpenScene, which directly predicts per-point features for each point of a given 3D point cloud, our NeRF representation is more versatile.
+We can either directly \emph{sample} \circlenum{1} the open-set features at a specified 3D position from the NeRF representation,
+or we can first \emph{render} and then \emph{project} \circlenum{2} the open-set features onto the 3D point cloud for evaluation.
+When multiple open-set features are projected to the same 3D point we take the average over all points.
+Note that in both cases the 3D point cloud is only required for evaluation and, in contrast to OpenScene, not necessary to obtain the NeRF-based scene representation, which only relies on posed RGB(-D) images. Table~\ref{tab:analysis} shows that the projection approach \circlenum{2} improves over sampling \circlenum{1}, which can be a direct consequence of the volumetric rendering within NeRFs that accumulates multiple samples along each ray compared to a single sample at a given 3D point. Note that \circlenum{1} already improves over both OpenScene and LERF.
+
+\paragraph{Impact of Depth Supervision.}
+We further analyze the importance of depth as additional supervision signal.
+We implement an additional regression loss using the Huber (smooth-L$_1$) loss between the rendered average distance and the ground truth depth from each training pose. Table \ref{tab:analysis}, \circlenum{3} shows that depth supervision further improves the open-set feature field since the additional depth supervision has a direct impact on the volumetric reconstruction quality.
+
+\paragraph{Impact of Novel Views.}
+Next, we analyze the contribution of the rendered novel views from the generated view points using the approach described in Section \ref{sec:novel_view_points}.
+Table \ref{tab:analysis}, \circlenum{4} clearly demonstrates the increased performance from rendered novel views.
+To disseminate whether the improvement comes from the novel views or simply from additional views,
+we also compare with views generated along the same camera trajectory as the original views which yielded the same results as \circlenum{3}.
+We then placed additional random cameras into the scene volume to render novel views from random positions.
+This results in a drastic performance drop (15.4 mIoU) due to numerous frames that are either inside the scene geometry or showing no meaningful context leading to deteriorated open-set features. This demonstrates the  benefit of our novel view synthesis approach presented in Sec.~\ref{sec:novel_view_points}.
+
+\subsection{Qualitative Results for 3D Scene Segmentation and Open-Set Applications}
+In Fig.~\ref{fig:teaser} and \ref{fig:quali}, we compare qualitative semantic segmentation results of LERF, OpenScene and our \name{}.
+The white dashed circles highlight the different predictions of each method. In contrast to OpenScene, our approach is able to correctly segment the wall-plugs as well as the blanket on the bed (Fig.~\ref{fig:quali}, \emph{left}). Our approach also properly detects the basket, the blinds and produces less noisy results on the door (Fig.~\ref{fig:quali}, \emph{right}).
+The more interesting aspect of open-set scene representation is that they can be queried for arbitrary concepts. In Fig.~\ref{fig:quali_openset}, we show the response of open-set queries. For each example, we provide the text query as label.
+We observe that our method can be used to not only query for classes, but also for concepts like object properties or material types. Finally, in Fig.~\ref{fig:quali_seafood} we show results on newly recorded \emph{``in-the-wild"} sequences demonstrating the general applicability of our approach to unseen scenarios.
+
+\definecolor{wall}{RGB}{196, 51, 182}
+\definecolor{ceiling}{RGB}{174, 199, 232}
+\definecolor{floor}{RGB}{188, 189, 34}
+\definecolor{chair}{RGB}{152, 223, 138}
+\definecolor{blinds}{RGB}{255, 152, 150}
+\definecolor{sofa}{RGB}{214, 39, 40}
+\definecolor{table}{RGB}{91, 135, 229}
+\definecolor{rug}{RGB}{31, 119, 180}
+\definecolor{window}{RGB}{229, 91, 104}
+\definecolor{lamp}{RGB}{247, 182, 210}
+\definecolor{door}{RGB}{91, 229, 110}
+\definecolor{pillow}{RGB}{255, 187, 120}
+\definecolor{bench}{RGB}{141, 91, 229}
+\definecolor{tv-screen}{RGB}{112, 128, 144}
+\definecolor{cabinet}{RGB}{196, 156, 148}
+\definecolor{pillar}{RGB}{197, 176, 213}
+\definecolor{blanket}{RGB}{44, 160, 44}
+\definecolor{tv-stand}{RGB}{148, 103, 189}
+\definecolor{cushion}{RGB}{229, 91, 223}
+\definecolor{bin}{RGB}{219, 219, 141}
+\definecolor{vent}{RGB}{192, 229, 91}
+\definecolor{bed}{RGB}{88, 218, 137}
+\definecolor{stool}{RGB}{58, 98, 137}
+\definecolor{picture}{RGB}{177, 82, 239}
+\definecolor{indoor-plant}{RGB}{255, 127, 14}
+\definecolor{desk}{RGB}{237, 204, 37}
+\definecolor{comforter}{RGB}{41, 206, 32}
+\definecolor{nightstand}{RGB}{62, 143, 148}
+\definecolor{shelf}{RGB}{34, 14, 130}
+\definecolor{vase}{RGB}{143, 45, 115}
+\definecolor{plant-stand}{RGB}{137, 63, 14}
+\definecolor{basket}{RGB}{23, 190, 207}
+\definecolor{plate}{RGB}{16, 212, 139}
+\definecolor{monitor}{RGB}{90, 119, 201}
+\definecolor{pipe}{RGB}{125, 30, 141}
+\definecolor{panel}{RGB}{150, 53, 56}
+\definecolor{desk-organizer}{RGB}{186, 197, 62}
+\definecolor{wall-plug}{RGB}{227, 119, 194}
+\definecolor{book}{RGB}{38, 100, 128}
+\definecolor{box}{RGB}{120, 31, 243}
+\definecolor{clock}{RGB}{154, 59, 103}
+\definecolor{sculpture}{RGB}{169, 137, 78}
+\definecolor{tissue-paper}{RGB}{143, 245, 111}
+\definecolor{camera}{RGB}{37, 230, 205}
+\definecolor{tablet}{RGB}{14, 16, 155}
+\definecolor{pot}{RGB}{208, 49, 84}
+\definecolor{bottle}{RGB}{237, 80, 38}
+\definecolor{candle}{RGB}{138, 175, 62}
+\definecolor{bowl}{RGB}{158, 218, 229}
+\definecolor{cloth}{RGB}{38, 96, 167}
+\definecolor{switch}{RGB}{190, 77, 246}
+
+
+\section{Conclusion}
+
+We presented \name{}, a NeRF-based scene representation for open set 3D semantic scene understanding.
+We demonstrate the potential of NeRFs in combination with pixel-aligned VLMs as a powerful scene representation compared to explicit mesh representations, specifically on the task of unsupervised 3D semantic segmentation.
+We further exploit the novel view synthesis capabilities of NeRF to compute additional views of the scene from which we can extract open-set features.
+This enables us to focus in greater detail on areas that remain underexplored. To that end, we proposed a mechanism to identify regions for which novel views should be generated.
+In experiments \name{} outperforms the mesh-based OpenScene as well as the NeRF-based LERF.
+
+\textbf{Acknowledgements.}
+This work was  partially supported by an ETH Career Seed Award funded through the ETH Zurich Foundation and an ETH AI Center postdoctoral fellowship.
+
+\newpage
+
+
+
+

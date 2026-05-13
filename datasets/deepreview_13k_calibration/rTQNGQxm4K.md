@@ -1,8 +1,8 @@
 # PhyloLM: Inferring the Phylogeny of Large Language Models and Predicting their Performances in Benchmarks
 
 - Decision: Accept
-- Avg Score: 3.00
-- Scores: 6, 5, 1, 0, 3
+- Avg Score: 6.00
+- Scores: 6, 5, 10, 3
 
 ## Abstract
 This paper introduces PhyloLM, a method adapting phylogenetic algorithms to Large Language Models (LLMs) to explore whether and how they relate to each other and to predict their performance characteristics. Our method calculates a phylogenetic distance metrics based on the similarity of LLMs' output. The resulting metric is then used to construct dendrograms, which satisfactorily capture  known relationships across a set of 111 open-source and 45 closed models. Furthermore, our phylogenetic distance predicts performance in standard benchmarks, thus demonstrating its functional validity and paving the way for  a time and cost-effective estimation of LLM capabilities. To sum up, by translating population genetic concepts to machine learning, we propose and validate a tool to evaluate LLM development,  relationships and capabilities, even in the absence of transparent training information.

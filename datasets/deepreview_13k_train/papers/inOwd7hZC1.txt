@@ -1,0 +1,316 @@
+\title{M^3PC: Test-time Model Predictive Control using Pretrained Masked Trajectory Model}
+
+\begin{abstract}
+Recent work in Offline Reinforcement Learning (RL) has shown that  a unified Transformer trained under a masked auto-encoding objective can effectively capture the relationships between different modalities (e.g., states, actions, rewards) within given trajectory datasets. However, this information has not been fully exploited during the inference phase, where the agent needs to generate an optimal policy instead of just reconstructing masked components from unmasked ones. Given that a pretrained trajectory model can act as both a Policy Model and a World Model with appropriate mask patterns, we propose using Model Predictive Control (MPC) at test time to leverage the model's own predictive capability to guide its action selection. Empirical results on D4RL and RoboMimic show that our inference-phase MPC significantly improves the decision-making performance of a pretrained trajectory model without any additional parameter training. Furthermore, our framework can be adapted to Offline to Online (O2O) RL and Goal Reaching RL, resulting in more substantial performance gains when an additional online interaction budget is provided, and better generalization capabilities when different task targets are specified.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The Masked Modeling paradigm has a simple, self-supervised training objective: predicting a randomly masked subset of the original sequence. It has become a powerful technique for generation or representation learning for sequential data, e.g., language tokens~\citep{devlin2018BERT} or image patches~\citep{he2022masked}. Unlike autoregressive models like GPT~\citep{brown2020GPT2}, which condition only on the past context in the ``left'', bidirectional models trained with this objective learn to model the context from both sides, leading to richer representations and deeper understandings of the data's underlying dependencies.
+    
+Given that a sequential decision-making trajectory inherently involves a sequence of states $s$ and actions $a$, and other optional augmented properties like return-to-go (RTG) \(g\)~\citep{chen2021DT} or approximate state-action value \(v\)~\citep{yamagata2023QDT} across \(T\) timesteps, the mask modeling paradigm can be adapted easily for sequential decision-making tasks. For example, in the case of Reinforcement Learning, the policy output  \(\mathbb{P}(a|s)\) at each time step can be regarded as predicting a masked action $a$ conditioned on given states $s$. Moreover, recent works~\citep{carroll2022unimask, liu2022maskdp, wu2023MTM} have demonstrated that a unified bidirectional trajectory model (BTM) pretrained with a highly random masking pattern can be applied zero-shot in various downstream tasks. Different reconstruction tasks can be deliberately created by applying appropriate masks to different modalities- whether states, actions, or rewards- during inference time.
+
+\begin{figure}[h]
+      \centering
+      \includegraphics[width=1.0\linewidth]{door}
+      \caption{\textbf{Benefits of equipping pretrained bidirectional trajectory model with our test-time M$^3$PC. (a)} Instead of generating \textcolor{red}{actions} solely based on history context, we leverage the full capacity of the masked pretrained model to predict future outcomes (e.g. \textcolor{RoyalBlue}{states}, \textcolor{Goldenrod}{rewards}, \textcolor{ForestGreen}{returns}) as a test-time self-enhanced decision making approach. Such a MPC framework can be used to achieve higher \textcolor{ForestGreen}{return} at inference time or to reach a given goal \textcolor{RoyalBlue}{state} (in dashed square block) even unseen during offline training. \textbf{(b)} Forward M$^3$PC achieves better offline learning performances, using the same model without any finetuning, and gains better O2O improvement when online finetuning is allowed after offline pretrain. \textbf{(c)} Backward M$^3$PC unlocks zero shot goal reaching capability. Given a desired state, the walker agent can split its legs to a large degree without any prior experience.}
+      \label{fig:door}
+\end{figure}
+
+However, the inherent flexibility and versatility of models trained with random masking techniques have not been fully exploited in deployment settings. Previous research has highlighted the multitasking capabilities of Bidirectional Trajectory Models (BTMs) by assigning \textbf{one} single specific mask pattern to individual tasks, such as the RCBC mask commonly used in offline RL after the pretraining phase. Our findings, in contrast, suggest that integrating \textbf{multiple} capabilities such as short-term reward and long-term return prediction, along with forward dynamics, could significantly enhance decision-making. These capabilities allow the agent to explicitly evaluate action candidates and determine the optimal one, rather than merely relying on implicit mappings from expected returns to policies. 
+
+Building on these insights, we introduce the \textbf{M$^3$PC} framework: Enhancing Decision-Making by using the \textbf{M}asked \textbf{M}odel itself for test-time \textbf{M}odel \textbf{P}redictive \textbf{C}ontrol. Our framework decomposes decision-making tasks into a series of simpler steps in a typical sample-based MPC style: sampling potential actions, inferring possible future states, evaluating these actions based on predicted outcomes, and selecting the final optimal action. We then demonstrate how a pretrained model, equipped with our adaptation and ensemble of masks, can efficiently and effectively handle these subtasks. Our empirical results demonstrate that, by using M$^3$PC for final decision-making, the same pretrained model can get substantial decision quality improvement in offline RL and goal-reaching RL, outperforming traditional single-mask models. Furthermore, M$^3$PC supports sample-efficient online finetuning --- a capability rarely seen in previous sequential modeling agents. By fully leveraging the potential of a pretrained BTM, M$^3$PC evolves the model from a multitasking framework into an inference phase self-enhancing, and a finetuning phase self-improving generalist agent. We summarize our results in Figure~\ref{fig:door} and highlight our contributions as:
+
+\begin{itemize}[left=8pt] 
+\item We present M$^3$PC, a novel framework that utilizes mask ensembles to address complex decision-making tasks, effectively leveraging the multitasking abilities of a pretrained bidirectional trajectory model (BTM).
+\item We demonstrate that M$^3$PC not only improves the test-time performance of the same pretrained BTM in offline RL by 6.0\%, but also enables efficient finetuning through online interactions with environments, outperforming specialized offline-to-online (O2O) RL algorithms, such as ODT, by 26.0\%.
+\item We show that M$^3$PC can be adapted for goal-reaching tasks, effectively guiding agents to specified goal states—even when these states are out-of-distribution relative to the datasets used for pretraining.
+\end{itemize}
+
+
+\section{Related Work}
+
+
+\textbf{Transformers for Sequential Decision Making.} The Transformer ~\citep{vaswani2017attention} architecture has been extensively applied in sequential decision-making tasks such as reinforcement learning (RL)~\citep{chen2021DT, janner2021TT, wang2022bootstrapped} and imitation learning (IL)~\citep{reed2022gato, shafiullah2022bt, brohan2022rt1, baker2022vpt}. Representative work such as Decision Transformer (DT)~\citep{chen2021DT} and its variants~\citep{zheng2022ODT, yamagata2023QDT} learn a return-conditioned policy using a causal-masked Transformer. Recent studies~\citep{carroll2022unimask, liu2022maskdp, wu2023MTM} utilize a bidirectional Transformer to model trajectories, highlighting the model's versatility enhanced by the mask prediction training objective. These studies focus on the potential of trajectory Transformers to unify various decision-making tasks, typically employing a unique mask pattern tailored to each specific downstream task. Building upon these insights, our work proposes harnessing the functional versatility of pretrained models to enhance decision-making. More specifically, we investigate whether utilizing two or more mask patterns can lead to improved decision-making within a single downstream task.
+
+\textbf{Offline RL with Online Finetuning.} Traditional off-policy RL algorithms often suffer from bootstrapping error accumulation~\citep{fujimoto2019off, nair2020AWAC}. To mitigate these issues, most offline RL algorithms employ regularization techniques to mitigate errors caused by out-of-distribution actions~\citep{fujimoto2019off, nair2020AWAC, kumar2020cql, kostrikov2021IQL, an2021EDAC, kumar2019stabilizing}. However, finetuning an offline RL algorithm can be challenging due to its inherent conservatism and the offline-to-online data distribution shift~\citep{nair2020AWAC,yu2023actor}. Many techniques such as value calibration~\citep{nakamoto2024cal}, balanced replay~\citep{lee2022OFF2ON} and policy expansion~\citep{zhang2023PEX} have been investigated to improve the online sample efficiency. In parallel, some work~\citep{chen2021DT, zheng2022ODT} following supervised learning (SL) paradigm can naturally ensure in-distribution learning but also suffer from poor online sample efficiency~\citep{brandfonbrener2022does}. Our approach adheres to the SL paradigm while incorporating DP-based module to improve online sample efficiency.
+
+\textbf{Model-based RL.} Learning a dynamics model of the environment can be used for policy learning~\citep{pong2018temporal, ha2018recurrent, hafner2019dream} or planning~\citep{silver2008sample, walsh2010integrating, zhang2019solar, yu2020mopo}. Recent work has explored the feasibility of MPC in online RL~\citep{chua2018pets, janner2019trust, wu2022p2p, lowrey2018polo, hatch2021value, hansen2022tdmpc} Similar planning methods have also been tailored for offline RL using techniques such as behavior cloning regularization~\citep{argenson2020mbop} and trajectory pruning~\citep{zhan2021mopp, wang2023goplan}. Instead of maintaining separate world and policy models, Trajectory Transformer (TT)~\citep{janner2021TT} frames RL as a sequential modeling problem and performs beam search planning based on return heuristics. Our work follows a similar paradigm but leverages a bidirectional Transformer and mask autoencoding to enable a more flexible and computationally efficient planning process.
+
+  
+
+
+
+\section{Preliminary}
+
+
+We consider the environment as a Markov Decision Process (MDP), formally defined by the tuple $\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, P, R, \gamma, \rho_0 \rangle$. In this notation, $\mathcal{S}$ represents the state space, and $\mathcal{A}$ represents the action space. The transition probability distribution, $P(s_{t+1} \mid s_t, a_t)$, defines the likelihood of transitioning from state $s_t$ to state $s_{t+1}$ given action $a_t$. The reward function, $R(s_t, a_t)$, assigns a reward for each action taken in a particular state. The discount factor, denoted by $\gamma$, quantifies the preference for immediate rewards over future rewards. The maximum episode length, also referred to as the horizon of the MDP, is denoted as $H$.
+
+Additional notations are introduced to adapt RL to sequential modeling. We denote the training data distribution as $\mathcal{T}$, which may be dynamic when the agent interacts with the environment. A trajectory $\tau$, consisting of $T$ states, actions, RTGs and rewards is represented as $\tau = (s_1, g_1, a_1, r_1, \cdots, s_T, g_T, a_T, r_T)$. Note that some other properties can also be directly or indirectly accessed from the training data such as next-states $(s'_1, \cdots, s'_T)$, estimated values $(v_1, \cdots, v_T)$ for state-action pairs, but we do not model these modalities on the Transformer.
+
+
+
+\section{Method}
+
+
+\begin{figure}[ht]
+      \centering
+      \includegraphics[width=1.0\linewidth]{structure_and_masks}
+      \caption{\textbf{Model overview.} The bidirectional trajectory model is pre-trained using MAE loss that aims to reconstruct the whole MDP trajectory taken a \textbf{[Random]} masked trajectory. After pretraining, the model show multiple capabilities by applying different test-time masks. E.g., \textbf{Return-Conditioned Behaviour Clone \textbf[RCBC] Mask:} Predict \textcolor{red}{actions} given \textcolor{RoyalBlue}{states}, expected \textcolor{ForestGreen}{return} and context trajectory. \textbf{Reward and Return Prediction \textbf{[RP]} Mask:} Predict intermediate \textcolor{Goldenrod}{rewards} and future \textcolor{ForestGreen}{return} given \textcolor{RoyalBlue}{states} and \textcolor{red}{actions}. \textbf{Forward Dynamics [FD] Mask:} Predict future \textcolor{RoyalBlue}{states} given current \textcolor{RoyalBlue}{state} and future \textcolor{red}{actions}. \textbf{Inverse Dynamics [ID] Mask:} Infer \textcolor{red}{actions} needed taken to perform a given \textcolor{RoyalBlue}{state} path. As a pretrained masked transformer can always reconstruct the full trajectory, for those MDP-elements that are not related to the given task, e.g., the rewards during [RCBC], we omit and mark them as \textcolor{gray}{gray}.}
+      \label{fig:mask}
+\end{figure}
+This section details how we leverage a bidirectional trajectory model's versatile prediction capabilities within the M$^3$PC framework to enhance an agent's decision-making. In a typical MPC process, the system repeatedly solves an optimization problem to identify the best sequence of actions over a finite horizon by evaluating the outcomes of these actions and then executing the action at the current timestep. The following subsections describe our approach to adapting a BTM to perform these MPC steps: First, we enable the BTM to \textbf{reconstruct actions with uncertainty}, allowing us to sample from a distribution of action proposals. Next, we demonstrate how to use different masking patterns for \textbf{forward} or \textbf{backward} prediction for MDP sequence elements. These predictions serve as references for evaluating the expected outcomes of action proposals, which we use to determine the optimal action to execute. As illustrated in Figure~\ref{fig:com}, by breaking down decision-making into these structured steps and using the BTM for versatile predictions, our M$^3$PC framework enhances the agent's ability beyond simply imitating behaviors observed in offline data, e.g., achieving higher reward incomes or diverse goals which typically fall in offline RL and goal reaching domains, respectively.
+
+\textbf{Bidirectional Trajectory Model. } We illustrate the model architecture and how it process a masked MDP trajectory as Figure~\ref{fig:mask}. To perform masked trajectory modeling, we first flatten and tokenize the different elements of the raw trajectory sequence. This tokenization involves three components: a modality-specific encoder that lifts elements from the raw modality space to a common representation space, along with the addition of timestep embeddings and modality-type embeddings. These components collectively enable the Transformer to distinguish between different sequence elements.
+
+We employ an encoder-decoder architecture with both the encoder and decoder being bidirectional Transformers. The tokenized and flattened trajectory is fed into the Transformer encoder, where only unmasked tokens are processed. The decoder then processes the full trajectory sequence, leveraging values from the encoder when available or substituting a mask token when not. The decoder is trained to reconstruct the original sequence, including the unmasked tokens.
+
+\textbf{Training-phase Mask Pattern. } Inspired by previous work \citep{wu2023MTM, zeng2024goal}, we employ a two-step masking pattern for training. Firstly, we randomly mask a proportion of elements in the trajectory $\tau$. Secondly, we mask all elements to the right of a randomly chosen position. By learning to predict the mask elements, the model is trained to handle temporal dependencies and infer outcomes based solely on past events.
+
+\textbf{Uncertainty-Aware Action Reconstruction.} To equip the agent with robust decision-making capabilities beyond mere imitation, our method employs uncertainty-aware action reconstruction rather than predicting the masked action deterministically. The primary focus of MAE lies in perfectly reconstructing each token of the sequence, typically by optimizing a Mean Squared Error (MSE) loss. This inherently leads to deterministic action reconstruction, which limits the agent's ability to account for uncertainties associated with the actions. 
+
+To address this limitation, we propose reconstructing an uncertainty-aware action distribution $\mathcal{A}$ by minimizing a Negative Log Likelihood (NLL) loss $J(\theta)$ denoted by 
+
+\begin{equation}
+\label{eq:nll}
+    J(\theta) = \frac{1}{T} \mathbb{E}_{\tau \sim \mathcal{T}} \left[\sum_{t=1}^T -\log P_\theta(a_t|\texttt{Masked}(\tau))\right].
+\end{equation}
+Inspired by ODT~\citep{zheng2022ODT}, we additionally impose a lower bound on trajectory-level action entropy $\mathcal{H}^{\mathcal{T}}_\theta$ to encourage the agent's online exploratory behavior. The overall constraint problem is formally defined as
+
+\begin{equation}
+\label{eq:constraint}
+  \min_\theta J(\theta) \text{ subject to } \mathcal{H}^{\mathcal{T}}_\theta \geq \beta,\ \mathcal{H}^\mathcal{T}_\theta = \frac{1}{T}\mathbb{E}_{\tau \sim \mathcal{T}}\left[\sum_{t=1}^T H\left[P_\theta(a_t|\texttt{Masked}(\tau))\right]\right],
+\end{equation}
+where $H\left[\cdot\right]$ denotes the Shannon entropy of the distribution, $\beta$ represents the predefined target entropy. To avoid explicitly handling the inequality constraint, we solve the Lagrangian dual problem of Equation \ref{eq:constraint}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{3way-ellip}
+    \caption{\textbf{Leverage the Masked Model itself for test-time Model Predictive Control.} Our pipeline utilizes BTM's versatile inference capabilities to enhance decision making. \textbf{(a) Forward M$^3$PC.} We employ [RCBC], [FD] and [RP] masks to build an MPC pipeline for planning, prediction, and action resample. \textbf{(b) Backward M$^3$PC.} Given a goal state that we finally want to reach, we first use Path Inference [PI] mask to infer the waypoint-states, followed by a Inverse Dynamic [ID] mask to get the action sequence conditioned on those waypoints, and finally execute the first one.}
+    \label{fig:com}
+\end{figure}
+
+\textbf{Forward M$^3$PC for Reward Maximization.} A bidirectional trajectory model agent has demonstrated zero-shot ability in offline RL tasks when equipped with an [RCBC] mask as shown in previous work~\citep{carroll2022unimask, wu2023MTM}. By predicting actions conditioned on states and RTGs, the agent generates actions by imitating trajectories with similar RTGs in offline data. The performance of this imitative behavior is inherently upper-bounded by the best trajectory in the offline data.
+
+To address this limitation, we propose refining the decision-making process by implementing an explicit reward-maximization procedure using the forward dynamics function and the return and reward prediction functions provided by the unified trajectory model. Typically, this process divides decision-making into three substeps: generating action proposals, rolling out the future, and selecting action proposals based on their potential utilities. Suppose we have access to both intermediate and long-term reward estimation for candidate action sequence $a_{t:T}$, represented by $r_{t:T}$ and $g_{t:T}$, respectively. We define the TD($\lambda$)-style utility $U$ for this candidate action as follows
+\begin{equation}
+U = (1-\lambda)\sum_{n=0}^{T-t-1}\lambda^n G_{t:t+n} + \lambda^{T-t} G_{t:T},  \ \ \text{where}\ G_{t:t+n} = \sum_{k=0}^{n-1} \gamma^k r_{t+k} + \gamma^n g_{t+n}, \label{eq:U}
+\end{equation}
+where the decay parameter $\lambda$ determines the weights of longer horizon estimates that contribute to the final result which can help trade off the errors from dynamics predictions and value estimates. We construct a categorical distribution $\mathcal{P}$ using \textit{softmax} for proposal selection:
+\begin{equation}
+\label{eq:candidate}
+    P\left[i\right] = \frac{\exp(\xi U^i)}{\sum_{j} \exp(\xi U^j)}, \ \ \forall i \in \left[1, \cdots, N\right],
+\end{equation}
+where $\xi$ denote the \textit{softmax} temperature. Notably, M$^3$PC  requires only two prediction steps for planning at each timestep. Leveraging the bidirectional nature of Transformers and the masked autoencoding paradigm, M$^3$PC can predict all future actions given current states and all future states given future actions in parallel. This parallel prediction capability mitigates the computational cost's linear growth with respect to the planning horizon which is commonly observed in planning algorithms such as beam search in TT~\citep{janner2021TT} or CEM in TD-MPC~\citep{hansen2022tdmpc}. We detail the decision-making process for reward-maximization in Algorithm \ref{algo:forward MPC}. Since RTG value is a trajectory-wise Monte Carlo estimation, it becomes uninformative when datasets' behavior policies are diverse. We can optionally extend M$^3$PC by replacing RTG guidance with a transition-wise value for a better heuristic. In this case, we calculate this value with a standalone value estimator updated in a dynamic programming way proposed in IQL~\citep{kostrikov2021IQL}.
+
+Using the `Utility' metric to estimate future actions before they were taken, forward M$^3$PC can also adapt to an exploration strategy in the subsequent online finetuning phase, where \eqref{eq:U} are used again. During the offline-to-online process, instead of executing the expectation in categorical distribution \eqref{eq:candidate}, the M$^3$PC agent samples actions from the candidate set according to the possibilities proportional to their utility. This introduces stochasticity, maintaining overall superior actions while ensuring diversity in the experience collected during exploration, thereby balancing the exploration and exploitation.
+
+\begin{algorithm}
+\caption{Forward M$^3$PC for Reward Maximization}
+\label{algo:forward MPC}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Current state $s_t$, past trajectory $\tau_{<t}$, discount factor $\gamma$, decay parameter $\lambda$, number of candidates $N$, softmax temperature $\xi$
+\State \textbf{Initialize:} Proposal action set $\mathcal{A}$, Utilily set $\mathcal{U}$
+\State \textbf{Output:} Selected action $a$
+
+\State $\mathcal{A} \gets$ Initialize an empty list for candidate actions
+\State $\alpha_{t:T} \gets$ Predict uncertainty-aware action distribution sequence using [RCBC] mask as Fig. \ref{fig:mask}
+
+\For{$i = 1$ to $N$}
+\State $a_{t:T}^i \gets$ Sample a candidate action sequence from distribution $\alpha_{t:T}$
+\State $s_{t+1:T} \gets$ Roll out the candidate sequence with [FD] mask as Fig. \ref{fig:mask}
+\State $r_{t:T}^i$, $g_{t:T}^i \gets$ Simulate intermediate rewards and long-term rewards using [RP] mask as Fig. \ref{fig:mask}
+\State $U^i \gets $ Calculate expected utility \Comment{using Equation \ref{eq:U}}
+\State Append $a_t^i, U_i$ to $\mathcal{A}, \mathcal{U}$, respectively.
+\EndFor
+
+\State $\mathcal{P} \gets$  Construct candidate selection distribution  \Comment{using Equation \ref{eq:candidate}}\\
+\State \textbf{return} $a \gets \left[\mathcal{A}^i | i \sim \mathcal{P}\right]$ \textbf{if} online, \textbf{else} $a \gets \mathbb{E}_{i \sim \mathcal{P}}\left[\mathcal{A}^i\right]$
+
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Backward M$^3$PC for Goal Reaching.} 
+The ability of a BTM to infer past tokens conditioned on future events sets it apart from GPT-based models. This feature is particularly advantageous for implementing MPC from a reverse or "backward" perspective when the objective is to achieve a specified goal state. Unlike the goal-reaching mask proposed in previous works~\citep{liu2022maskdp, carroll2022unimask}, which masks all elements along the trajectory except the current and final states to reconstruct the action at the current timestep, we leverage the BTM's bidirectional conditioning capability to inpaint a transition path that guides action selection. We refer to this method as backward M$^3$PC.
+
+Specifically, the backward M$^3$PC approach uses a Path Inference (PI) mask (illustrated in Figure \ref{fig:com}(b)) to guide the model in predicting a sequence of intermediate states leading to the goal. Once a path is established, the model employs an Inverse Dynamics (ID) mask to deduce the necessary actions to transition between consecutive states along the predicted path. This approach eliminates the need to generate a large number of candidates and roll out each one, which inherently demands significant computational resources. Instead, it implicitly performs the same function as traditional MPC by selecting the first action in a sequence that most satisfies the given goal.
+
+
+
+\section{Experiments}
+
+
+Our experiments aim to answer the following questions:
+
+\begin{itemize}
+    \item[Q1:] Can forward M$^3$PC enable the (same) agent to achieve higher accumulated rewards in offline RL and subsequent online finetuning?
+    \item[Q2:] Can backward M$^3$PC enable the agent to perform diverse tasks given target states? 
+    \item[Q3:] How does each algorithmic component contribute to M$^3$PC?
+    \item[Q4:] Is the pretrained model capable enough to perform M$^3$PC in more complex environments that demand the knowledge of interaction with external objects, e.g. manipulation?
+
+    
+\end{itemize}
+
+\textbf{Tasks and Datasets. }
+To answer these questions, we utilize \textbf{D4RL} and \textbf{RoboMimic} dataset suites. We apply three D4RL locomotion domains (\texttt{Hopper}, \texttt{Walker2d}, \texttt{HalfCheetah}) with two dataset types for each task: \texttt{medium(m)} and \texttt{medium-replay(m-r)}, used to benchmark our proposed forward M$^3$PC in offline RL and O2O settings. The RoboMimic encompasses three manipulation tasks (\texttt{Can}, \texttt{Lift}, \texttt{Square}). We utilize three official datasets (\texttt{can-pair}, \texttt{square-mh}, \texttt{lift-mg}) and two customized datasets (\texttt{can-lim}, \texttt{can-real}) to evaluate M$^3$PC's potential real-world application, particularly in robotic manipulation tasks.
+
+\begin{table}[ht]
+    \centering
+    \caption{\textbf{Offline Results on D4RL.} Comparison of the average normalized return against several baseline methods \textbf{without} online finetuning. M$^3$PC-M and M$^3$PC-Q are shortened for our method M$^3$PC with (M)onte-carlo return estimation and (Q)-value estimation guidance heuristics, respectively. We report the mean and standard deviation of 5 seeds. The best result for each dataset is highlighted in \textbf{bold}. Note that M$^3$PC-M shares the same weights as a pretrained BTM, but constantly outperforms BTM in all tasks due to the test-time enhancement brought by M$^3$PC.}
+    \label{tab:d4rl_offline}
+    \setlength{\tabcolsep}{4.2pt}
+    \begingroup
+    \begin{tabular}{c|cccccc|cc} 
+        \toprule
+        {Dataset} & BC & TD3+BC & IQL & DT & TT & BTM & M$^3$PC-M & M$^3$PC-Q\\ 
+       \midrule
+        hopper-m & 53.5 & 60.4 & 63.8 & 65.1 & 61.1 & 64.3 & 70.7$_{\pm6.2}$ & \textbf{73.6$_{\pm5.6}$} \\ 
+        walker2d-m & 63.2 & 82.7 & 79.9 & 67.6 & 79.0 & 72.5 & 80.9$_{\pm2.5}$ & \textbf{86.4$_{\pm2.6}$} \\ 
+        halfcheetah-m & 42.4 & 48.1
+        & 47.4 & 42.2 & 46.9 &43.0 & 43.9$_{\pm3.9}$ & \textbf{51.2$_{\pm0.7}$} \\ 
+        hopper-m-r & 29.8 & 64.4 & \textbf{92.1} & 81.8 & 91.5 & 75.3 & 80.4$_{\pm5.2}$ & 78.3$_{\pm16.2}$ \\ 
+        walker2d-m-r & 21.8 & 85.6 & 73.7 & 82.1 & 82.6 & 76.6 & 78.2$_{\pm10.2}$ & \textbf{92.2$_{\pm2.4}$} \\ 
+        halfcheetah-m-r & 35.7 & 44.8 & 44.1 & \textbf{48.3} & 41.9 & 41.1 & 41.8$_{\pm0.5}$ & 48.2$_{\pm0.4}$ \\ 
+        \midrule
+        Total & 246.4 & 386.0 & 401.0 & 387.1 & 403.0 & 372.8 & 395.9 & \textbf{429.8} \\ 
+        \bottomrule 
+    \end{tabular}
+    \endgroup
+\end{table}
+
+\textbf{Q1: Offline RL. }
+We present the offline results of M$^3$PC with \textbf{M}onte Carlo return estimation guidance (M$^3$PC-M) and \textbf{Q}-value estimation guidance (M$^3$PC-Q) in Table \ref{tab:d4rl_offline}. To evaluate the offline RL performance of our proposed method, we compare it against the following baselines: (1) BC: behavior cloning, which directly mimics the behaviors in the offline dataset; (2) TD3+BC~\citep{fujimoto2021td3bc}: an off-policy RL method incorporating a behavior cloning regularization term; (3) IQL~\citep{kostrikov2021IQL}: a model-free algorithm designed to avoid bootstrapping errors by learning implicit Q-functions; (4) DT~\citep{chen2021DT}: a sequence-modeling model free approach that predicts actions conditioned on expected returns; (5) TT~\citep{janner2021TT}: a sequence-modeling model based approach that utilizes beam search planning and (6) BTM: which shares the same pretrained model as our method but applies only the [RCBC] mask for policy inference. The results demonstrate that M$^3$PC significantly improves reward accumulation compared to BTM, consistently outperforming it across all datasets and domains, irrespective of the guidance heuristic used. This indicates that M$^3$PC's planning phase effectively refines the action proposals generated by BTM. Furthermore, as a generalist agent, M$^3$PC-M performs competitively with specialized offline RL algorithms such as TD3+BC and IQL. Notably, M$^3$PC-Q achieves even more competitive results, outperforming all baselines by a considerable margin.
+\textbf{Online Finetuning. }
+Under the O2O setup, we compare our method against IQL and ODT~\citep{zheng2022ODT}, a specially designed O2O method for DT. In Table \ref{tab:d4rl}, we report the performance of each algorithm with a 200K online sample budget. To ensure a fair comparison, we use the best performance between ODT's original paper \citep{chen2021DT} and our result running its open-sourced implementation. Our method outperforms the other two methods in all the environments except the \texttt{hopper-medium} dataset.  After fine-tuning, our total performance score is 31\% higher than IQL and 26\% higher than ODT, with improvements over finetuning 123\% more substantial than those of ODT. We plot the normalized exploration rollout statistics of the M$^3$PC agent and the BTM agent in Figure \ref{fig:explore}. The results show that M$^3$PC is more likely to collect trajectories of high quality while maintaining some randomness to cover diverse states.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=1.0\linewidth]{explore} 
+\caption{\textbf{Exploration Rollout Statistics. }Results from two example runs of the \texttt{Hopper} task on the \texttt{medium} dataset using the same offline pretrained BTM agent. One run employs Gaussian noise for exploration, while the other utilizes M$^3$PC. The red line represents the offline result. Compared to naive Gaussian noise exploration, M$^3$PC significantly improves the agent's exploration quality by generating more high-return trajectories while maintaining stochasticity, including some mid-level or low-return trajectories.}
+\label{fig:explore}
+\end{figure}
+
+\begin{table}[t]
+    \centering
+    \caption{\textbf{Online Finetuning Results on D4RL. }Comparison of normalized returns before and after online finetuning, as well as the improvement achieved using a \textbf{200K} online sample budget. We report the mean from five seeds. The best final result for each dataset is highlighted in \textbf{bold} and the greatest improvement is highlighted in \textcolor{ForestGreen}{green}.}
+    \label{tab:d4rl}
+                    \begingroup
+        \setlength{\tabcolsep}{3pt} % Adjust as needed
+    \begin{tabular}{c|ccc|ccc|ccc} 
+    \toprule
+     Dataset & \multicolumn{3}{c}{IQL} & \multicolumn{3}{c}{ODT} & \multicolumn{3}{c}{M$^3$PC (Ours)} \\ 
+    & offline & online & $\delta$ & offline & online & $\delta$ & offline & online & $\delta$ \\ 
+    \midrule
+    hopper-m & \textcolor{gray}{63.8} & 66.8 & +3.0 & \textcolor{gray}{67.0} & $\textbf{97.5}$ & \textcolor{ForestGreen}{+30.6} & \textcolor{gray}{73.6$_{\pm5.6}$} & 93.9$_{\pm15.8}$ & +20.3 \\ 
+    walker2d-m & \textcolor{gray}{79.9} & 80.3 & +0.4 & \textcolor{gray}{72.2} & 76.8 & +4.6 & \textcolor{gray}{86.4$_{\pm2.6}$} & $\textbf{91.9}_{\pm7.8}$ & \textcolor{ForestGreen}{+5.5} \\ 
+    halfcheetah-m & \textcolor{gray}{47.4} & 47.4 & +0.0 & \textcolor{gray}{42.7} & 42.2 & \textcolor{BrickRed}{-0.6} & \textcolor{gray}{51.2$_{\pm0.7}$} & $\textbf{69.3}_{\pm2.1}$ & \textcolor{ForestGreen}{+18.1} \\ 
+    hopper-m-r & \textcolor{gray}{92.1} & 96.2 & +4.1 & \textcolor{gray}{86.6} & 88.9 & +2.3 & \textcolor{gray}{78.3$_{\pm16.2}$} & $\textbf{103.5}_{\pm6.0}$ & \textcolor{ForestGreen}{+25.2} \\ 
+    walker2d-m-r & \textcolor{gray}{73.7} & 70.6 & \textcolor{BrickRed}{-3.1} & \textcolor{gray}{68.9} & 76.9 & +7.9 & \textcolor{gray}{92.2$_{\pm2.4}$} & $\textbf{105.2}_{\pm1.0}$ & \textcolor{ForestGreen}{+13.0} \\ 
+    halfcheetah-m-r & \textcolor{gray}{44.1} & 44.1 & +0.0 & \textcolor{gray}{40.0} & 40.4 & +0.4 & \textcolor{gray}{48.2$_{\pm0.4}$} & $\textbf{67.0}_{\pm7.1}      $ & \textcolor{ForestGreen}{+18.8} \\ 
+    \midrule
+    Total & \textcolor{gray}{401.0} & 405.5 & +4.5 & \textcolor{gray}{377.4} & 422.7 & +45.3 & \textcolor{gray}{429.8} & $\textbf{530.8}$ & \textcolor{ForestGreen}{+101.0} \\ 
+    \bottomrule
+\end{tabular}
+
+    \endgroup
+\end{table}
+
+\textbf{Q2: Goal Reaching. }To assess whether our proposed method can effectively guide an agent to specified goal states, we evaluate it on the following three tasks: (a) Halfcheetah flipping, (b) Walker performing splits, and (c) Hopper wiggling. Due to the limited planning horizon of our model, we provide a sequence of consecutive subgoals to ensure that each goal-reaching task remains within the model's planning horizon capacity, rather than directly providing the final desired goal state.
+
+These tasks deviate from the reward mechanisms typically seen in offline data but can be extrapolated or stitched together from offline trajectories. Our results, showcased in Figure \ref{fig:goal}, illustrate that backward M$^3$PC enables the agent to generalize to diverse tasks rather than merely imitating offline experiences. This demonstrates the model's ability to adapt to new challenges by leveraging its knowledge of complex dynamics to achieve specific goals. 
+
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{goal} % Adjust the image file and width here
+    \end{minipage}% <--- Important: This comment prevents adding space between minipages
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \caption{        \textbf{Demonstration for D4RL Goal Reaching.} 
+        One evaluation visualization for (a) Halfcheetah flipping, (b) Walker doing splits, and (c) Hopper wiggling at a predefined frequency.}
+        \label{fig:goal} % Reference label
+    \end{minipage}
+\end{figure}
+
+Additionally, we evaluated the BTM's goal-reaching ability using a single goal-reaching mask, similar to previous studies~\citep{carroll2022unimask, liu2022maskdp}. This method involves keeping the current state and goal state unmasked while directly executing the inpainted action. This discrepancy underscores the effectiveness of our model-based approach.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{singletm}
+    \caption{\textbf{Offline RL comparison between unified and specialized model.} We report the normalized average returns of BTM and M$^3$PC on a unified pretrained agent compared to specified pretrained agents, denoted by BTM-S and M$^3$PC-S, respectively. The results represent the mean over five seeds. The comparison suggests that the unified pretrained model leads to more efficient representations and better performance with BTM and M$^3$PC.}
+    \label{fig:single-tm}
+\end{figure}
+
+\textbf{Q3: Ablation Studies. }
+We conduct ablation studies to evaluate the contribution of individual components to the success of our method. Specifically, we examine whether unifying the pretraining process using a random masking technique enhances M$^3$PC performance. To this end, we pretrained two separate models—a policy model and a world model—using the same training objective and model structure as the BTM. However, these models were only applied with the [RCBC] mask and [FD] mask, respectively, during the training phase. These specialized models were then integrated to implement MPC. Our findings, illustrated in Figure \ref{fig:single-tm}, indicate that two specialized pretrained models do \textbf{not} improve decision quality compared to the unified pretrained BTM. Moreover, implementing MPC with separate policy and world models does not significantly enhance decision-making compared to using only the specialized policy model. This suggests that the unified pretraining approach benefits performance, as the bidirectional Transformer cohesively captures both policy behaviors and environmental dynamics, leading to more effective planning during MPC.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.5\textwidth}
+        \centering        \includegraphics[width=0.90\textwidth]{abcd} % Adjust the image file and width here
+    \end{minipage}% <--- Important: This comment prevents adding space between minipages
+    \begin{minipage}{0.45\textwidth}
+    \centering
+    \caption{
+        \textbf{Ablation Study on Planning and Uncertainty-aware Action Reconstruction.} 
+        We ablate sample-based planning, uncertainty-aware action reconstruction, and both components to investigate their contributions to the algorithmic performance in the online finetuning phase. We report average results over six datasets. Mean of five seeds. The shaded area represents the averaged per-task standard deviation across random seeds.
+    }
+    \label{fig:ablation}
+    \end{minipage}
+
+\end{figure}
+We further justify some design choices in M$^3$PC's online finetuning phase by comparing: (a) Our M$^3$PC as in Algorithm \ref{algo:forward MPC}, which combines uncertainty-aware action distribution $\mathcal{A}$ reconstruction and planning-based action resampling (b) randomly sampling from $\mathcal{A}$ for exploration (c) the original BTM's method of action $\boldsymbol{a}$ reconstruction, trained with MSE loss, adding fixed action noise  $\mathcal{N}(\mathbf{0},\sigma I)$ for exploration, maintaining the same entropy level as M$^3$PC. (d) performing planning-based action resample using (c)'s decisions. We present the averaged finetuning process across D4RL datasets in Figure \ref{fig:ablation}. The results highlight the effectiveness of our key contributions.  Specifically, an uncertainty-aware policy for exploration is crucial for maintaining online training stability, and forward planning significantly improves sample efficiency. Figure \ref{fig:ablation} also shows that the performance drops drastically when naively using the uncertainty-``unaware'' original BTM for exploration.
+
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}[t]{0.42\textwidth}
+        \captionof{table}{\textbf{Offline Results on RoboMimic.} Success rate of various offline pretrained agents in manipulation tasks. We report the mean of 5 seeds (50 trials for simulator and 20 trials for real world). We exclude the BC and IQL from real-world implementation due to their poor performance in the corresponding simulated tasks.}
+        \label{tab:offline_mimic}
+        \centering
+                \begingroup
+        \setlength{\tabcolsep}{3pt} % Adjust as needed
+        \begin{tabular}{lcccc}
+            \toprule
+            Dataset & BC & IQL & DT & M$^3$PC \\
+            \midrule
+        Can-Pair & 0.64 & 0.34 & 0.94 & \textbf{0.98}$_{\pm0.01}$ \\
+        Square-MH & \textbf{0.53} & 0.13 & 0.21 & 0.28$_{\pm0.14}$ \\
+        Lift-MG & 0.65 & 0.29 & \textbf{0.93} & 0.77$_{\pm0.07}$ \\
+        Can-Lim & 0.25 & 0.27 & 0.46 & \textbf{0.54}$_{\pm0.16}$ \\
+        Can-Real & - & - & 0.50 & \textbf{0.70$_{\pm0.10}$} \\
+            \bottomrule
+        \end{tabular}
+        \endgroup
+    \end{minipage}\hspace{0.1in}
+    \begin{minipage}[t]{0.50\textwidth}
+        \includegraphics[width=\textwidth]{mimic}
+        \captionof{figure}{\textbf{Skill Generalization in Can-Pick task.} Simulated environments on the top and real-world environments on the bottom. The columns show the original behavior (left), behavior conditioned on the seen goal state (mid), and behavior conditioned on the unseen goal state (right).}
+        \label{fig:six-mani}
+    \end{minipage}
+\end{figure}
+
+\textbf{Q4: Manipulation. }In addition to the self-body motion control tasks explored in earlier experiments, we shift our focus to manipulation tasks to assess whether the proposed M$^3$PC method can be effectively applied to robotics tasks requiring interaction with objects in the environment. We conducted experiments across three simulated tasks in RoboMimic—Can, Square, and Lift—each with varying levels of complexity. Additionally, we utilized datasets of varying quality levels, including machine-generated (MG), mid-level human-demonstrated (MH), and paired positive-and-negative (Pair) demonstrations. We also created a customized simulated task named Can-Lim, a variant of the Can-Pick task, in which the dataset was adapted to a scenario where the relative pose between the gripper and the can is unavailable. Finally, we tested our method on a real-world Can-Pick task, referred to as Can-Real. The results are compared against several offline RL baselines, as shown in Table \ref{tab:offline_mimic}.
+
+To evaluate generalization capabilities, we conducted a goal-conditioned RL experiment on the Can-Picking task with the Paired dataset. This dataset contains 50\% perfect demonstrations, where the agent successfully picks up the can and places it into the box in the right corner, and 50\% negative demonstrations, where the can is thrown off the table, resulting in no reward. As illustrated in Figure \ref{fig:six-mani}, by specifying the final goal states, we can control the agent's behavior to either complete the original task or reproduce the throwing-away behavior. Furthermore, by specifying a final state numerically between two observed states in the dataset, the model generates actions that enable the agent to reach a previously unseen state—placing the can into the box adjacent to the right one.   
+
+
+
+\section{Discussions and Limitations}
+
+\label{sec:discuss}
+We propose M$^3$PC, a test-time MPC framework designed to enhance the inference performance of masked Transformers pretrained under offline RL settings. M$^3$PC offers the following benefits: \textbf{(1) Improved Decision-Making without Further Training}: During inference, M$^3$PC improves decision-making with high computational efficiency.
+\textbf{(2) Enhanced Finetuning Efficiency:} With an additional online interaction budget, M$^3$PC achieves better final performance and outperforms the previous sequential modeling O2O approach, ODT. This enhances the agent's continuous learning ability. \textbf{(3) Generalization Ability:} The framework demonstrates notable generalization capabilities, generating actions that effectively drive the agent toward unseen goal states in both simulated and real-world tasks.
+
+While M$^3$PC demonstrates promising results, there are areas for further investigation: \textbf{(1) Handling Pixel Observations:} Currently, our framework is limited to environments with state-based observations. Future work will explore methods for handling pixel observations. \textbf{(2) Transformer Scalability:} Our experiments employed a fixed-structure masked trajectory Transformer. It remains unclear whether increasing the Transformer's capacity would lead to better test-time planning.
+
+
+\clearpage
+
+
+
+
+
+

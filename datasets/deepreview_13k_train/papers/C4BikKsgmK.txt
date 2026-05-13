@@ -1,0 +1,216 @@
+\title{Str2Str: A Score-based Framework for Zero-shot Protein Conformation Sampling}
+
+\begin{abstract}
+The dynamic nature of proteins is crucial for determining their biological functions and properties, for which Monte Carlo (MC) and molecular dynamics (MD) simulations stand as predominant tools to study such phenomena. % background
+By utilizing empirically derived force fields, MC or MD simulations explore the conformational space through numerically evolving the system via Markov chain or Newtonian mechanics. 
+However, the high-energy barrier of the force fields can hamper the exploration of both methods by the rare event, resulting in inadequately sampled ensemble without exhaustive running.
+Existing learning-based approaches perform direct sampling yet heavily rely on target-specific simulation data for training, which suffers from high data acquisition cost and poor generalizability. % previous
+Inspired by simulated annealing, we propose \method, a novel structure-to-structure translation framework capable of zero-shot conformation sampling with roto-translation equivariant property.
+Our method leverages an amortized denoising score matching objective trained on general crystal structures and has no reliance on simulation data during both training and inference.
+Experimental results across several benchmarking protein systems demonstrate that {\method} outperforms previous state-of-the-art generative structure prediction models and can be orders of magnitude faster compared to long MD simulations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Understanding the dynamical properties of proteins is crucial for elucidating the mechanism of their biological functions and regulations. Transitions can exist in the conformational ensemble, ranging from angstrom to nanometer in length, and from nanosecond to second in time. Experimental measurements, such as crystallographic B-factors and NMR spectroscopy, can be used to probe such dynamics yet in limited spatial and temporal scale. Despite the success of structure prediction models~\citep{baek2021accurate, jumper2021highly, lin2023evolutionary} which enables the study of proteins based on high-accuracy structures, the predicted ensembles often lack diversity~\citep{chakravarty2022alphafold2, saldano2022impact} and modeling structure-dynamics relationship remains a challenge.
+
+Traditionally, Monte Carlo (MC) and molecular dynamics (MD) are two predominant families for conformation sampling by employing an empirical force field. Both of them operate by starting from an initial point and exploring the conformation space guided by the force field. MC methods sample conformations by steering a Markov chain of stochastic perturbations (eg., Gaussian noise) on the Cartesian or internal coordinates with an acceptance ratio, or Markov chain Monte Carlo (MCMC). However, the transition kernel can rapidly lose exploration efficiency with an increasing degree of freedom. On the other hand, MD simulations evolve the motion of atoms over time to generate time-indexed trajectories via the Newtonian mechanics. Due to the tiny timestep, a significant challenge encountered by MD simulation is the high energy-barrier, which forbids thermodynamics-favored transitions within a limited number of simulation steps. To ameliorate, enhanced sampling methods have been proposed to overcome the energy barrier and encourage more exploration of MD simulations. For example, methods based on biased potentials, such as umbrella sampling~\citep{torrie1977nonphysical} and metadynamics~\citep{laio2002escaping}; and those inspired by simulated annealing that schedule the temperature to encourage exploration, e.g., replica exchange molecular dynamics or REMD~\citep{hansmann1997parallel, sugita1999replica, swendsen1986replica}. 
+
+
+Another increasingly appealing solution to the problem is the generative modeling of protein conformations. Direct sampling by the neural generator is more efficient than time-consuming simulations from MC or MD. Boltzmann generator~\citep{noe2019boltzmann}, as one of the earliest attempt, modelled the system-specific conformation distribution with normalizing flow and performed \textit{i.i.d.} sampling from random noises. With reweighting, the sampled ensemble can approximate the physical Boltzmann distribution. However, learning from a specific protein system requires pre-acquired simulation data for training the sampler and can be difficult to generalize beyond the training system~\citep{wang2019machine}, leaving the use of such methods limited. Although generative training on the across-system conformation datasets can help, the data acquisition can be non-trivial due to lack of open-source MD trajectories for protein systems and the computationally intensive simulations from scratch.
+\begin{wrapfigure}{r}{0.6\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/illus_v3.pdf}
+    \caption{Illustration of traditional sampling methods with proposed {\method}. In (d), the energy landscape is made transparent to indicate that, in contrast to traditional cases, {\method} is agnostic to and thus not relying on the energy landscape but guided by the learned score functions.}
+    \label{fig:illus}
+\end{wrapfigure}
+
+To address the aforementioned issues, we propose a new framework that samples general protein conformations via an equivariant structure-to-structure ({\method}) translation. 
+Trained on general crystal structures, {\method} has no reliance on the computationally intensive simulation data and thus performs zero-shot\footnote{In the context of this paper, \textbf{zero-shot} means having no access to simulation data that belongs to the test protein during both training and inference stage.} conformation sampling for any unseen protein. 
+Specifically, we formulate the conformation sampling task as a translation problem within the conformation space of the target protein. 
+Motivated by simulated annealing, the proposed translation is composed of  stochastic perturbations followed by the score-based annealing, forming a forward-backward process. As an illustration, we present the inference diagram of {\method} in comparison with three traditional methods in Figure \ref{fig:illus}. 
+We demonstrate that the sampling process is equivariant to global roto-translations of the protein geometry, which guarantees the inference not yielding samples as trivial as rotated or translated variants. 
+For evaluation, we construct a benchmark covering various aspects for protein conformation sampling and perform a case study of protein BPTI to demonstrate the effectiveness of \method. 
+Experimental results show that our method not only significantly outperforms the previous baselines on protein conformation sampling but is also comparable to long MD simulations. 
+
+
+
+
+\section{Preliminaries}
+
+
+\paragraph{Equivariance of transformation.}
+Equivariance of a function (mapping) indicates that applying specific transformations (for example, rotation for Euclidean space) to the input or output of a function should have corresponding effects on the final output value. Formally, a function $\gF: \gX \to \gY$ with equivariant property can be described as:
+\begin{equation}
+    \gF\circ \rho(x) = \rho \circ \gF(x),
+\end{equation}
+where $\rho$ is some transformation  which acts on the element from space $\gX$ or $\gY$.
+
+\paragraph{Diffusion modeling on Riemannian manifolds.}
+Score-based generative models (SGMs) can be represented by a diffusion process $\rvx_t\in \R^n$  defined by the Itô stochastic differential equation (SDE):
+\begin{equation}
+\label{eq:fwd}
+    \rd \rvx = \rvf(\rvx, t){\rd}t + g(t) {\rd}{\rvw},
+\end{equation}
+with continuous time index $t\in [0, T]$, where the $\rvf(\rvx, t)  \in \R^n$ is the drift term, $g(t)  \in \R$ is the diffusion coefficient, and $\rvw \in \R^n$ is the standard Wiener process (or Brownian motion). Then, the corresponding backward SDE that describes the dynamics from $\rvx_t$ to $\rvx_0$ is~\citep{anderson1982reverse, song2020score}:
+\begin{equation}
+\label{eq:bwd}
+    \rd \rvx = [\rvf( \rvx, t) - g^2(t) \nabla_\rvx \log p_t(\rvx)] \rd t + g(t) {\rd}{\bar \rvw},
+\end{equation}
+where $\rd{t}$ is negative infinitesimal timestep and $\bar{\rvw}$ is the standard Wiener process as continuous time $t$ flows back from $T$ to $0$. \citet{de2022riemannian} proposed the corresponding forward and backward process on a Riemannian manifold $\gM$ beyond  Euclidean space. To steer diffusion process with validity, the drift $\rvf(\rvx, t)$, Brownian motion $\rvw$, and score $\nabla_\rvx \log p_t(\rvx)$ are elements in the tangent space $T_\rvx \gM$. Utilizing the exponential-logarithm map, the process can be discretized similar to the Euler–Maruyama step in Euclidean space as geodesic random walk. Several recent works realized the Riemannian diffusion for different types of geometric data. \citet{jing2022torsional} constructed the torsional diffusion on a hypertorus $\mathbb{T}^n$ while \citet{yim2023se} developed the $\rm{SE(3)}^n$ diffusion for orientation-preserving rigid motions in 3D space \footnote{Note that the frame  $\ermT_i \in \rm{SE(3)}$ is the data point. Some literature mentioned "SE(3)-equivariance" as the function equivariance to all the (global) rotations and translations in 3D space. To avoid ambiguity, we refer to the latter as \textit{roto-translation equivariance}. }.
+
+\paragraph{Notation on protein structure.}
+The protein conformation is represented by its Euclidean coordinates $\rvx \in \R^{3\times N}$, where $N$ is the number of heavy atoms (excluding hydrogen). We adopt the  \textit{backbone frame} parametrization $\ermT_i := [R_i, \vv_i] (1\le i \le n)$ one per residue . Here, $R_i \in \rm{SO(3)}$
+is a $3\times 3$ rotation matrix while $\vv_i \in \R^3$ is a translation vector for the $i$-th residue. Such tuple represents an Euclidean transformation for each atom $\vx$ in residue $i$ from the local coordinate $\vx_{\rm local}\in \R^3$ to a position in global coordinates as $\vx_{\rm global} = \ermT_i \circ \vx_{\rm local} := R_i \vx_{\rm local} + \vv_i$. The global atom coordinates on the backbone, specifically $[\rm{N, C^\alpha, C, C^\beta}]$ (except for GLY which has no $C^\beta$), can be constructed by applying the transformation induced by $\ermT_i$ to the corresponding amino acid structure with idealized bond length and angles~\citep{jumper2021highly}, that is $\rvx_{bb} = \Gamma_{bb}(\{\ermT_i\})$, where $\{[\cdot]_i\} := ([\cdot]_1, \dots, [\cdot]_n)$ is a brief sequence notation and $\Gamma_{bb}(\cdot)$ constructs the corresponding global coordinates. Conditioned on $\rvx_{\rm{bb}}$, the carbonyl oxygen on backbone can be parameterized by a torsion angle $\psi_i$, or written as $\rvx_{bb[\rm{O}]} = \Gamma_{bb[\rm{O}]}(\{\psi_i\}; \rvx_{bb})$. The side chain coordinates of $i$-th residue can be parameterized by at most four torsion angles $\bm{\chi}_i:= (\chi_{1}, \chi_{2}, \chi_{3}, \chi_{4})_i \in [0,2\pi)^4$, according to the rigid groups on which these heavy atoms depend. Given the backbone coordinates, the Euclidean coordinates of side chains can be constructed with these torsion angles, which is denoted as $\rvx_{sc} = \Gamma_{sc}(\{\bm{\chi}_i\}; \rvx_{bb})$. 
+Finally, we write collectively $\rmT := \{\ermT_i\}$, $\rmR := \{R_i\}$, $\rvv := \{\vv_i\}$, $\bm{\psi} := \{\psi_i\}$ and $\gX:=\{\bm{\chi}_i\}$.
+
+
+
+\section{Methods}
+
+Conformation sampling involves learning the probability distribution $p_X(\rvx)$ of some protein $X$ and then drawing samples $\rvx \sim p_X(\rvx)$. Different from organic molecules whose stable conformers are relatively more constrained~\citep{jing2022torsional}, the conformation data of protein is however intractable to acquire due to the complexity of protein systems. Secondly, modeling protein directly in atomic level  can be difficult due to the scaling of the number of atoms: protein with merely 60 residues can contain roughly $\sim$500 heavy atoms without considering hydrogens. To address the challenges above, we propose to approach the conformation sampling by transfer learning via a translation proposal on the residue frames, which is detailed as follows: Section~\ref{m1} formulates the modeling of probability distribution; Section~\ref{m2} introduces the sampling framework and model architecture; Section~\ref{m3} describes the amortized learning objectives.
+
+\subsection{Chain rule of the translation distribution}\label{m1}
+Given an initial conformation, the goal of conformation sampling is to capture the underlying dynamics of the target protein and infer plausibly stable candidates. We represent the overall translation distribution as $p_X(\rvx|\rvx_0)$, with $\rvx_0$ being an initial structure of protein $X$. Due to the enormous degrees of freedom in the atomic structure, direct modeling and sampling from $p_X(\rvx|\rvx_0)$ can be intractable. Based on the structural hierarchy, we decompose $p_X(\rvx|\rvx_0) = p_X(\rvx_{sc}|\rvx_{bb}, \rvx_0)\, p_X(\rvx_{bb[\rm{O}]}|\rvx_{bb}, \rvx_0) p_X(\rvx_{bb}|\rvx_0)$, The rationale behind is that: given the backbone, the corresponding side chains take relatively limited orientations and can be sampled more efficiently. 
+Therefore, the sampling can be performed step-wise: firstly, backbone frames are sampled from the backbone proposal $\rmT \sim p_X(\rmT|\rvx_0)$,  and backbone coordinates can be obtained followed by the local-to-global construction $\rvx_{bb} = \Gamma_{bb}(\rmT)$.  Secondly, the torsion angles can be sampled conditioning on the coordinates of backbone atoms: $\bm{\psi} \sim p_X(\bm{\psi}|\rvx_{bb}, \rvx_0)$ and  $\gX \sim p_X(\gX|\rvx_{bb}, \rvx_0)$. Since the torsion angles are usually treated as internal coordinates,  we may assume that these conditional torsion proposals only depend on the sampled backbone itself, i.e, $p_X(\bm{\psi}|\rvx_{bb}, \rvx_0) \approx p_X(\bm{\psi}|\rvx_{bb})$ and $p_X(\gX|\rvx_{bb}, \rvx_0) \approx p_X(\gX|\rvx_{bb})$, the backbone oxygen and side chain atoms can be constructed as follows $\rvx_{bb[\rm{O}]} = \Gamma_{bb[\rm{O}]}(\bm{\psi}, \rvx_{bb}), \rvx_{sc} = \Gamma_{sc}(\gX, \rvx_{bb})$ and finally $\rvx = [\rvx_{bb}, \rvx_{bb[\rm{O}]}, \rvx_{sc}] \sim p_X(\rvx|\rvx_0)$.
+
+
+\subsection{Equivariant structure-to-structure translation}\label{m2}
+
+\begin{wrapfigure}{r}{0.62\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/fb_v5.pdf}
+    \caption{Illustration of forward-backward \reb{process}. Given an input structure (example as Trp-cage, PDB entry: \textsc{2JOF}), replicas are fed to the forward (\textit{perturb}) diffusion, which independently perturbs each replica until the dynamic-transition time $T_\delta$;
+    then the reverse (\textit{anneal}) process will yield the sampled conformations. The sequence-to-structure task can be well solved by any existing folding module such as ESMFold.}
+    \label{fig:fb}
+\end{wrapfigure}
+
+\paragraph{Forward-backward Process.}
+To model the backbone proposal distribution, we firstly consider the distribution over Riemannian manifold $\rm{SE(3)}^n$ where length-$n$ frame sequences $\rmT$ populates. We firstly make a mild assumption that the proposal can be approximated by removing the initial side chain dependency $p_X(\rmT|\rvx_0) = p_X(\rmT|\rmT_0, \bm{\psi}_0, \gX_0) \approx p_X(\rmT|\rmT_0)$, which forms a translation problem\footnote{In analogy to text-to-text translation and image-to-image translation.} within the space of $\rm {SE(3)}^n$. 
+Motivated by simulated annealing, we propose a general score-based forward-backward (FB) process\footnote{\reb{Experiments in this work only involve sampling from an identical input structure. However, it is natural to enforce FB sequentially as a neural proposal in MCMC. We leave this for future work.}} that mimics the heating and annealing process. Here, the perturbing (heating) process aims to enhance the exploration while the annealing guarantees the fidelity (fine-grained structural characteristics) by exploitation. In practice, the FB \reb{process} leverages a stochastic perturbation kernel and multi-scale score functions, or formally defined by the following integrals:
+\begin{align}
+    \label{eq:fb}
+     \rmT \coloneqq \rmT_0 &+ \int_0^{T_\delta} \left[ \rvf(\rmT_t, t)\rd t + g(t) \rd {\rvw}\right] \notag \\ 
+     &+ \int_{T_\delta}^{2T_\delta} \left\{\left[-\rvf( \rmT_\tau, \tau) + g^2(\tau) \nabla_{\rmT_\tau} \log p_\tau( \rmT_\tau)\right] \rd\tau + g(\tau) {\rd}{\bar \rvw} \right\}
+     ,
+\end{align}
+where $\tau=\tau(t) \coloneqq 2T_\delta - t ~(T_\delta \in (0, T))$  is the change of time variable and the rest of symbols are defined similarly in Eq. (\ref{eq:fwd}) and (\ref{eq:bwd}). Here the addition operator indicates the composition of frames and updates symbolically. Intuitively, the Eq. (\ref{eq:fb}) perform noise injection (forward) followed by denoising process (backward) belonging to the above diffusion process  defined on the manifold of $\rmT$. The bound of integration $T_\delta$ is set to be strictly less than $T$  limiting the perturbation scale not to eliminate the information of the initial condition $\rmT_0$. Empirically, increasing $T_\delta$ \reb{to a proper extent} can lead to enhanced diversity yet it may hurt exploitation by demanding more reverse steps.
+\paragraph{Diffusion Process on $\rm{SE(3)^n}$.}
+The diffusion process $(\rmT_t)_{t\in [0,T]} \equiv ([\rmR_t, \rvv_t])_{t\in [0,T]}$ defined on manifold $\rm{SE(3)}^n$ can be represented as follows, by treating SO(3) and $\R^3$ independently~\citep{yim2023se}:
+\begin{equation}
+\label{eq:se3}
+    \rd\rmT_t = [0, -\frac{1}{2}\beta(t)\mP\rvv_t]\rd t + [\sqrt{\frac{d}{dt} \sigma^2(t)}\rd\rvw^{(\rm{SO(3)})}, \sqrt{\beta(t)}\mP\rd\rvw^{(\R^3)}],
+\end{equation}
+where $\beta(t), \sigma(t) \in \R_+$ are diffusion noise schedules, $\rvw^{(\mathcal M)}$ indicates the Brownian motion defined on manifold $\mathcal M$ and the projection matrix $\mP: \R^{3n} \to \R^{3n}$ removes the center of mass. The perturbation kernel $p_{t|0}(\rmR_t| \rmR_0)$ for the rotation components $(\rmR_t)_{t\in [0,T]}$ is considered element-wise via the isotropic Gaussian on SO(3) distribution~\citep{leach2022denoising, yim2023se}:
+\begin{align}
+\label{eq: igso3}
+    \mathcal{I} \mathcal{G}_{\rm{SO(3)}} (R_t; R_0, \sigma^2) = f(\omega_{t|0}) := \frac{1-\cos(\omega_{t|0})}{\pi}\sum_{l=0}^\infty (2l+1) e^{- l(l+1)\sigma^2}\frac{\sin((l+\frac{1}{2})~\omega_{t|0})}{\sin(\frac{\omega_{t|0}} {2} )}, 
+\end{align}
+with $\omega_{t|0} = {\rm{Axis\_angle}}(R_0^\top R_t)$ is the axis-angle representation of the composed rotation matrix $R_t^\top R_0$. On the other hand, the perturbation kernel for translation components $(\rvv_t)_{t\in [0,T]}$ is an Ornstein-Uhlenbeck process, also known as VP-SDE~\citep{song2020score}, which induces the isotropic gaussian kernel $p_{t|0}(\rvv_t| \rvv_0) = \mathcal{N} (\rvv_t;\rvv_0 e^{-\frac{1}{2}\int_0^t \beta(s)\rd s} , \rmI-\rmI e^{-\int_0^t \beta(s)\rd s})$ and converges to $\mathcal{N}(\bm{0}, \rmI)$.
+\paragraph{Packing of Side Chains.}
+Given the sampled frames, we can construct the atom coordinates on the backbone and then sample the side chains from $p_X(\gX|\rvx_{bb})$. Traditionally, this has been formulated as the protein side chain packing (PSCP) task~\citep{xu2006fast}. PSCP aims to, instead of freely exploring the conformation space, finding the conformation of side chains that minimize the energy. This casts the generative modeling of $p_X(\gX|\rvx_{bb})$ into its discriminative form, i.e. regression of torsion angles. In practice, we adopted the FASPR~\citep{huang2020faspr}, an efficient open-source method that leverages the backbone-dependent rotamer libraries and a simulated annealing Monte Carlo searching scheme to predict the most probable side chain conformations. 
+
+\paragraph{Roto-translations Equivariance.}
+Consider the forward-backward process in Eq. (\ref{eq:fb}). 
+The $\rm{SE(3)}^n$ diffusion integral in Eq. (\ref{eq:se3}) only updates the local-to-global transformations induced by the frames $\rmT$, and therefore the equivariance holds due to that fact that both drift and diffusion terms in Eq. (\ref{eq:se3}) are frame-independent. For the backward integral, the extra term in the integral is the frame-dependent score function $\nabla_{\rmT_t} \log p_t( \rmT_t)$. Based on the result above, if the score function is equivariant, the reverse diffusion as well as the whole forward-backward process are equivariant. The equivariance of packing steps naturally holds because the predicted torsion angles are naturally internal coordinates and roto-translation invariant. Therefore, we can derive the following proposition:
+\newtheorem{prop}{Proposition}
+\begin{prop}[Equivariance of \method]
+\label{prop:1}
+Let $\rvx \sim p_X(\rvx|\rvx_0)$ be the conformation sampled from the process defined in Section \ref{m1}. If the frame score functions $\nabla_{\rmT_t} \log p_t( \rmT_t)$ are equivariant to global roto-translations, then $\rvx_0 \to \rvx$ assumes roto-translation equivariance.
+\end{prop}
+ 
+\paragraph{Score Network Architecture.} To model the translation distributions, the score model is required to obey the equivariant property with respect to global rotations and translations. We adopted a variant of the structure module in \citet{jumper2021highly} called DenoisingIPA, to predict the score and steer the backward diffusion process. 
+In DenoisingIPA, we initialize the single embedding $\{\vs_i\}^0$ as the concatenation of the position encoding of residues and sinusoidal time embedding; the pair embedding $\{\vz_{ij}\}^0$ is constructed from the relative positional encoding~\citep{shaw2018selfattention}. In each layer $l$, the single representation $\{\vs_i\}^l$ and frames $\{\ermT_i\}^{l}$ are updated via the Invariant Point Attention (IPA) layer and backbone update (Algo. 22-23 in \citet{jumper2021highly}), followed by the multi-head self-attention~\citep{vaswani2017attention} and multiple layer perceptrons (MLP). The update of representations and frames are illustrated in Figure \ref{fig:ipa}. Slightly different from the vanilla structure module, we also allow the update of pair representations $\{\vz_{ij}\}^l$ by edge transition layers:
+\begin{align}
+\label{eq:pairupdate}
+    \{\vz_{ij}\}^{l+1} = {\rm{MLP}}\left({\rm {Concat}}\left[\{\vz_{ij}\}^{l},  \{\vs_i^l\otimes \vs_i^l\}\right]\right),
+\end{align}
+where $\otimes$ indicates the outer product. Following ~\citet{jumper2021highly}, we leverage the single representations $\{\vs_i\}^L$ from the last layer to predict angle $\bm{\psi}$ with an MLP. Because the carbonyl oxygen atoms do not affect global geometry, we treat it in a discriminative manner similar to side chains.
+\begin{figure}[htb]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/model_v3.pdf}
+    \caption{Illustration of $l$-th layer of DenoisingIPA, where $\parallel$ denotes the tensor \texttt{Concat} and $+$ means tensor \texttt{Add} operation. The multi-head attention is the transformer self-attention~\citep{vaswani2017attention}. The initial single representations $\{\vs_i\}^0$ are constructed from the positional encoding of residues and the time encoding of denoising step. Here, single representations $\{\vs_i\}^l$ and backbone frames $\{\ermT_i\}^l$ are updated similar to the structure module in \citet{jumper2021highly}, while pair representations $\{\vz_{ij}\}^l$ are updated according to Eq. (\ref{eq:pairupdate}).}
+    \label{fig:ipa}
+\end{figure}
+
+
+\subsection{Amortized learning objectives}\label{m3}
+
+\paragraph{Amortized Score Matching Loss.} To learn the translation distribution $ p_X(\rmT|\rmT_0)$ over the manifold $\rm{SE(3)}^n$, the conformation samples of $X$ are required for training the score networks. However, acquiring simulation training set suffers from high computation cost and the resulting generalization capacity is limited. To tackle this challenge, we propose to use the general crystal structures from Protein Data Bank (PDB) for training, which can be viewed as respective local minima in the energy landscape.
+In this amortized sense, it suffices to train a single score network for the inference of any unseen protein at test. The difference in the denoising score matching objective is that the data sample $\rmT_0$ are from general distribution of PDB (denoted as $p*$) instead of a target-specific $p_X(\rmT)$:
+\begin{equation}
+\label{eq:obj}
+\mathcal{L}_{\rm{dsm}} = \E_{t\in [0, \tau_m]} \left\{ \lambda(t) \,\E_{\rmT_0 \sim p*}\E_{\rmT_t|\rmT_0}\left[\|\rvs_\theta(\rmT_t,t) - \nabla_{\rmT_t} \log p_{t|0}(\rmT_t|\rmT_0) \|^2\right] \right\},
+\end{equation}
+where $\lambda(t) \propto 1/\E\left[\| \nabla_{\rmT_t} \log p_{t|0}(\rmT_t|\rmT_0) \|\right]$ is a positive loss reweighting function, and $\rmT_t \sim p_{t|0}(\rmT_t|\rmT_0)$ is defined by the corresponding perturbation kernel. Since the inference procedure does not require reversing from the pure random noise (when $t=T$), the time $t$ can be uniformly sampled over the truncated time domain $[0, \tau_m]$, where $0< \tau_m \le T$ is a pre-specified hyperparameter indicates the maximal time scale used for inference.
+\paragraph{Auxiliary Structural Losses} According to the findings in \citet{yim2023se}, solely training by score matching can be insufficient for learning fine-grained structural characteristics. Along with the score matching loss for the frames, we complement auxiliary structural losses including mean square error (MSE) of backbone atoms and the distogram loss as in \citet{jumper2021highly}. MSE loss is computed over the backbone atoms (including the carbonyl oxygen) to provide supervision for prediction of $\bm{\psi}$. Because the process is roto-translation equivariant and the distogram is based on the distances which are roto-translation invariant, the structural alignment is not necessary to perform. The overall training loss can be the weighted sum of all losses: $\mathcal{L} = \mathcal{L}_{\rm dsm} + \alpha\mathcal{L}_{\rm backb} + \beta\mathcal{L}_{\rm dist} ~(\alpha, \beta>0)$. 
+
+
+
+\section{Experiments}
+
+\input{tables/fastfolding}
+We compare the proposed method {\method} to several recent baselines: MSA subsampling~\citep{del2022sampling}, EigenFold~\citep{jing2023eigenfold}, and idpGAN~\citep{janson2023direct}. These baselines leverage general structure datasets for training and are claimed to be able to generalize to unseen protein, which is proper for zero-shot inference. MSA subsampling~\citep{del2022sampling} is a AF2-based protocol to sample strucuture ensemble from sequence via a reduced number of recycle and subsampled multiple sequence alignments (MSA); EigenFold is a sequence-to-ensemble diffusion model trained on PDB for conditional generation of protein structures based on the sequence embeddings from OmegaFold~\citep{wu2022high}; idpGAN is a generative adversarial network (GAN) that generates sequence-conditioned conformation ensembles. For sampling of {\method}, the initial conformation for each test target is set to be the output of ESMFold~\citep{lin2023evolutionary}.
+
+\subsection{Evaluation metrics}
+To assess the performance of {\method}  on the zero-shot conformational sampling, we set up a benchmark based on commonly used metrics in structure design and protein dynamics research. The evaluation metrics are categorized into: (a) \textbf{Validity} assesses whether the sampled conformations obey basic physical constraints; (b) \textbf{Fidelity} reflects the distributional gap between sampled ensemble and reference MD simulation (which is seen as the "ground truth"); (c) \textbf{Diversity} evaluates the possible variety of the sampled ensemble. As for reference, we set up and also benchmarked a ladder of timescales for better comparison: \textit{100ns, 1us, 10us, 100us, full} (the longest simulation time of each target)
+\paragraph{Validity.} 
+\reb{The validity is defined by the ratio of conformations passing the sanity check, which examines whether the sample contains any (1) \textit{steric clash} or (2) \textit{broken bond}. Given a conformation sample, the steric clashes are counted by checking whether the distance of each pair of $\rm{C}^\alpha$ atoms is within certain threshold that is based on atomic \textit{van der waals} radius; while the $\rm{C}^\alpha$-$\rm{C}^\alpha$ "bond" is considered breaking if the distance of adjacent $\rm{C}^\alpha$ atoms exceed certain threshold.} 
+\paragraph{Fidelity.} The fidelity compares the distributional divergence between the sampled ensemble and trajecotory from reference MD simulations. We adopt the symmetric Jensen-Shannon (JS) divergence based on three important quantities defined for conformations: (i) pairwise distance distribution (JS-PwD), (ii) the slowest two components of the time-lagged independent component analysis, or TICA~\citep{naritomi2011slow, perez2013identification} 
+(JS-TIC) and (iii) radius of gyration distribution (JS-Rg) as in idpGAN~\citep{janson2023direct}
+\paragraph{Diversity.} The diversity can be indicated by the averaged pairwise dissimilarity scores, based on root mean square deviation (RMSD, unit: nm) and TM-score~\citep{zhang2004scoring}. For the TM-score, we apply the inverse (i.e., $1-\rm{TM}(\rvx_i, \rvx_j)$) to express "diversity" aligned with RMSD (the higher the more diverse). We notice that the ensemble diversity is not the higher the better and  depends on the characteristics of the target system. Therefore, we report the diversity difference as the mean absolute error (MAE) compared with the reference full MD simulations on both metrics.
+
+\subsection{Fast folding proteins}
+
+ The benchmark set consists of 12 fast-folding protein targets with up to 1ms scale all-atom MD simulation trajectories as reference from \citet{lindorff2011fast}. To evaluate on the metrics above, we generated 1,000 conformations for each target using {\method} and other baseline models. Two different integration schemes: probability flow ("PF") and SDE are used for \method. For each method, metrics are evaluated independently for each target and averaged across these targets.
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/contact_2jof_v5.pdf}
+    \caption{Contact map of Trp-cage (visualized in Figure \ref{fig:fb}) of each model with MD reference.}
+    \label{fig:contact}
+\end{figure}
+The benchmarking results are shown in Table \ref{tb:science2011}, from which {\method} outperforms other zero-shot sampling baselines by a large margin. Note that EigenFold, also as a diffusion model trained on PDB, exhibited less diversity and failed to capture the conformational dynamics when compared with \method. This may be caused by the complexity of modeling  distributional mapping from sequence embedding to structure: the sequence-structure relationship can be well solved by  folding models~\citep{jumper2021highly, lin2023evolutionary} in a discriminative manner (regression), but is still challenging for conditional generative modeling. In contrast, the proposed sampling framework involves learning the structure-to-structure  within the conformation space and learns abundant distributional features solely from the PDB database.  The sampling speed of {\method} with MD simulation on single GPU is shown in Table \ref{tab:speed}, where {\method} exhibits significantly advantageous efficiency over MD simulations for a case with comparable performance. Note that in general {\method} can still underperform long MD simulations (e.g., 100us) on the distributional metrics. 
+
+\input{tables/speed}
+
+\subsection{Structural Dynamics of BPTI}
+We conducted a case study using the protein Bovine Pancreatic Trypsin Inhibitor (BPTI). The dynamic characteristics of BPTI have been well studied with 1.01ms-long MD simulation in \citet{shaw2010atomic}, based on which five kinetic clusters have been revealed. 
+To better demonstrate the performance of {\method}, we present the TICA plots~\citep{perez2013identification} for the sampled conformations from each method.
+Specifically, the conformation coordinates are reduced to the first two TICA dimensions, which indicates the slowest two components and can embody the meta-stable states with distinction. The TICA parameters are fit using the  the reference full MD trajectories. As shown in Figure \ref{fig:tica}, where the kinetic clusters are colored red, {\method} successfully captured four clusters similar to 100us simulations with small variation and outperform the rest of baselines. 
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/bpti_tica_v6.png}
+    \caption{Visualization of TICA plots for BPTI conformations sampled by each model with MD references. The kinetic clusters are colored red. In each subfigure, totally 1,000 samples were scattered in the 2D space. Note that most of the points are outside the target region for idpGAN.}
+    \label{fig:tica}
+\end{figure}
+
+
+
+
+
+\section{Related Work}
+
+
+\paragraph{Protein Backbone Design.}\label{r1} A parallel research interest emerging recently focuses on the protein backbone structure design based on deep generative models. Early attempts include ProtDiff~\citep{trippe2022diffusion}, which generates novel C$^\alpha$-only backbones; protein structure-sequence co-generation based on structural constraints~\citep{shi2022protein}; and diffusion models tailored for antibody design ~\citep{luo2022antigen}. FoldingDiff complements these by applying diffusion to the dihedral angles of backbones. Chroma~\citep{ingraham2022illuminating} designs novel  protein backbones with several conditional inputs including natural language and comprehensively evaluates the programmability. Meanwhile, RFDiffusion~\citep{watson2022broadly} pushed the diffusion-based protein design to the experimental side and validated the effectiveness of generative modeling for this task. More advanced methods including Genie~\citep{lin2023generating} and FrameDiff~\citep{yim2023se} have been proposed very recently that leverages the invariant point attention modules to enhance model capacity. 
+
+\paragraph{Learning from Simulation Data.} Due to the inefficiency of classical simulations for protein dynamics, several works attempted to perform efficient sampling or learn neural force fields from protein-specific simulation data. Boltzmann generators~\citep{noe2019boltzmann} were developed to generate equilibrium samples using normalizing flows~\citep{dinh2014nice, rezende2015variational} trained on simulation data or energy. CGNets~\citep{wang2019machine} proposed to learn coarse-grained (CG) force fields in a supervised learning manner. \citet{köhler2023flow} improved this by complementing density estimation and sampling right before force-matching, thus not relying on ground-truth forces in simulation data. \citet{arts2023two} proposed to train diffusion model on conformations from equilibrium distribution of a specific protein, and leveraged learned score functions as force field for simulation or i.i.d. sampler. \citet{wang2022data} attempted to recover the REMD ensembles of a small peptide by training denoising diffusion on trajectories.  However, these models suffer from the transferability problem~\citep{wang2019machine} and cannot be generalized to unseen proteins. \citet{klein2023timewarp} improves by modeling transition of a large timestep in MD simulation using normalizing flow, which achieves good performance, yet only for very small peptides (only 2-4 AA).
+Our {\method} is distinguished from these methods by performing zero-shot conformation sampling for unseen protein without any simulation data, and has  more promising use in practice.
+
+
+\section{Conclusion}
+
+
+In this paper, we presented {\method}, a score-based structure-to-structure translation framework for zero-shot protein conformation sampling. Motivated by simulated annealing, {\method} tactfully combines both exploration and exploitation into a forward-backward process based on the denoising diffusion for protein frames. {\method} was trained solely on crystal structures from the Protein Data Bank (PDB) and has no dependency on any simulation data during training or inference. Experimental results on several MD benchmarking systems demonstrate that {\method} can effectively sample a diverse ensemble from the input structure in a zero-shot manner. Limitations and potential future directions of {\method} encompass: \textbf{(1)} The isotropic perturbation kernels could be biased towards more efficient subspace based on some collective variables.
+\textbf{(2)} Since {\method} samples all-atom conformation, it can be plugged into atom-level MD simulations by incorporating physical-based force fields and perform enhanced sampling. \textbf{(3)} The pre-trained {\method} can be further fine-tuned by simulation data from specific systems to improve the sampling quality in a \textit{few-shot} manner or towards the unbiased sampling from Boltzmann distribution.
+
+
+\subsection*{Reproducibility Statement}
+ To describe the proposed forward-backward sampling process, a pseudo-code snippet is shown in Algorithm \ref{algo:vp}.
+
+
+
+
+

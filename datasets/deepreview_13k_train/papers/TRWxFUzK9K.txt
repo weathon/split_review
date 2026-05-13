@@ -1,0 +1,471 @@
+\title{Solving Video Inverse Problems Using Image Diffusion Models}
+
+\begin{abstract}
+Recently, diffusion model-based inverse problem solvers (DIS) have emerged as state-of-the-art approaches for addressing inverse problems, including image super-resolution, deblurring, inpainting, etc. 
+However, their application to video inverse problems arising from spatio-temporal degradation remains largely unexplored due to the challenges in training video diffusion models.
+To address this issue, here we introduce an innovative video inverse solver that leverages only image diffusion models.
+Specifically, by
+drawing inspiration from the success of the recent decomposed diffusion sampler (DDS), 
+our method treats the time dimension of a video as the batch dimension of image diffusion models and solves spatio-temporal optimization problems within denoised spatio-temporal batches derived from each image diffusion model.
+Moreover, we introduce a batch-consistent diffusion sampling strategy that encourages consistency across batches by synchronizing the stochastic noise components in image diffusion models. 
+Our approach synergistically combines batch-consistent sampling with simultaneous optimization of denoised spatio-temporal batches at each reverse diffusion step, resulting in a novel and efficient diffusion sampling strategy for video inverse problems.
+Experimental results demonstrate that our method effectively addresses various spatio-temporal degradations in video inverse problems, achieving state-of-the-art reconstructions.
+Project page: \small \textsf{\url{https://svi-diffusion.io}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{introduction}
+Diffusion models~\citep{ho2020denoising, song2020score} represent the state-of-the-art generative modeling by learning the underlying data distribution $p(\vx)$ to produce realistic and coherent data samples from the learned distribution $p_\theta(\vx)$.
+In the context of Bayesian inference, the parameterized prior distribution $p_\theta(\vx)$ can be disentangled from the likelihood $p(\vy|\vx)$, which denotes the probability of observing $\vy$ given $\vx$. This seperation facilitates the derivation of the posterior distribution $p_\theta(\vx|\vy) \propto p_\theta(\vx)p(\vy|\vx)$.
+
+Diffusion model-based inverse problem solvers (DIS)~\citep{kawar2022denoising, chung2022diffusion, song2023pseudoinverseguided, wang2023zeroshot, chung2024decomposed} leverage this property, enabling the unconditional diffusion models to solve a wide range of inverse problems. 
+They achieve this by conditional sampling from the posterior distribution $p_\theta(\vx|\vy)$, effectively integrating information from both the forward physics model and the measurement $\vy$. 
+This approach allows for sophisticated and precise solutions to complex inverse problems, introducing the power and flexibility of diffusion models in practical applications.
+
+Despite extensive DIS research on a wide range of image inverse problems such as super-resolution, colorization, inpainting, compressed sensing,  deblurring, and so on~\citep{jalal2021robust, kawar2022denoising, chung2022diffusion, song2023pseudoinverseguided, wang2023zeroshot, chung2024decomposed}, the application of these approaches to video inverse problems, particularly those involving spatio-temporal degradation, has received relatively less attention.
+Specifically, 
+in time-varying data acquisition systems, various forms of motion blur often arise due to the camera or object motions~\citep{potmesil1983modeling}, which can be modeled as a temporal PSF convolution of motion dynamics. These are often associated with spatial degradation caused by noise, camera defocus, and other factors.
+Specifically, the spatio-temporal degradation process can be  formulated as:
+ \begin{align}\label{eq:forward}
+\mY= \Ac(\mX)+\mW
+ \end{align}
+with
+\begin{align}\label{eq:def}
+\mX = \begin{bmatrix}\vx[1] & \cdots & \vx[N]\end{bmatrix},\quad
+\mY = \begin{bmatrix}\vy[1] & \cdots & \vy[N]\end{bmatrix},\quad
+\mW = \begin{bmatrix}\vw[1] & \cdots & \vw[N]\end{bmatrix},
+\end{align}
+where  $\vx[n],\vy[n]$ and $\vw[n]$ denote the $n$-th frame ground-truth image,
+measurement, and additive noise, respectively; $N$ is the number of temporal frames, and 
+$\Ac$ refers to the operator that describes the spatio-temporal degradation process. 
+The spatio-temporal degradation introduces complexities that image diffusion priors cannot fully capture, as image diffusion priors are primarily designed to handle spatial features rather than temporal dynamics. 
+Employing video diffusion models~\citep{ho2022video} could address these issues, but 
+poses significant implementation challenges for video inverse problems,  due to the  difficulty
+of training video diffusion models for various applications.
+
+Contrary to the common belief that a pre-trained video diffusion model is necessary for solving video inverse problems, here we propose a radically different method that addresses video inverse problems using only image diffusion models.
+Inspired by the success of the decomposed diffusion sampler (DDS) \citep{chung2024decomposed}, which simplifies DIS by formulating it as a Krylov subspace-based optimization problem for denoised images via Tweedie's formula at each reverse sampling step, 
+we treat the time dimension of a video as the batch dimension of image diffusion models
+and solve spatio-temporal optimization problems using the batch of denoised temporal frames from image diffusion models.
+However, treating each frame of the video as a separate sample in the batch dimension can lead to inconsistencies between temporal frames. To mitigate this, we introduce  the batch-consistent sampling strategy
+that controls the stochastic directional component (e.g., initial noise or additive noise) of each image diffusion model during the reverse sampling process, encouraging the temporal consistency along the batch dimension. 
+By synergistically combining batch-consistent sampling with the simultaneous optimization of the spatio-temporal denoised batch, our approach effectively addresses a range of spatio-temporal inverse problems, including spatial deblurring, super-resolution, and inpainting.
+Our contribution can be summarized as follows.
+\begin{itemize}
+\item We introduce an innovative video inverse problem solver using pre-trained image diffusion models by solving spatio-temporal optimization problems within the batch of denoised frames.
+\item We develop a batch-consistent sampling strategy to ensure temporal consistency by synchronizing stochastic noise components in image diffusion models.
+\item Extensive experiments confirm that our method generates state-of-the-art results for various video inverse problems.
+\end{itemize}
+
+
+\section{Background}
+
+\label{background}
+
+\textbf{Diffusion models.}
+Diffusion models~\citep{ho2020denoising} attempt to model the data distribution $p_{\text{data}}(\vx)$  based on  a latent variable model
+\begin{align}
+\label{eq:latent_variable}
+    p_{\theta}(\vx_0) = \int p_{\theta}(\vx_{0:T})  d\vx_{1:T}, \quad \text{where} \quad  p_{\theta}(\vx_{0:T}) := p_{\theta}(\vx_T) \prod_{t=1}^T p_{\theta}^{(t)}(\vx_{t-1}|\vx_{t})
+\end{align}
+where the $\vx_{1:T}$ are noisy latent variables defined by the Markov chain with Gaussian transitions
+\begin{align}
+\label{eq:ddpm_forward}
+    q(\vx_t|\vx_{t-1}) = \mathcal{N}(\vx_t|\sqrt{\beta_t} \vx_{t-1}, (1 - \beta_t) I), \quad
+    q(\vx_t|\vx_{0}) = \mathcal{N}(\vx_t|\sqrt{\bar\alpha_t} \vx_0, (1 - \bar\alpha_t) I).
+\end{align}
+Here, the noise schedule $\beta_t$ is an increasing sequence of $t$, with $\bar\alpha_t := \prod_{i=1}^t \alpha_i,\, \alpha_i := 1 - \beta_i$. 
+Training of diffusion models amounts to training a multi-noise level residual denoiser:
+\begin{align}\label{eq:2d}
+    \min_\theta \E_{\vx_t \sim q(\vx_t|\vx_0), \vx_0 \sim p_{\text{data}}(\vx_0), \boldsymbol{\epsilon} \sim \mathcal{N}({\boldsymbol 0, I})}\left[\|\boldsymbol{\epsilon}_\theta^{(t)}(\vx_t) - \boldsymbol{\epsilon}\|_2^2\right] .
+\end{align}
+
+Then, sampling from (\ref{eq:latent_variable}) can be implemented by ancestral sampling, which iteratively performs
+\begin{align}
+\label{eq:ddpm_ancestral_sampling}
+    \vx_{t-1} =& \frac{1}{\sqrt{\alpha_t}}\left(\vx_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar\alpha_t}} \boldsymbol{\epsilon}_{\theta^*}^{(t)}(\vx_t) \right) + \tilde\beta_t\boldsymbol{\epsilon}
+\end{align}
+where $\tilde\beta_t := \frac{1 - \bar\alpha_{t-1}}{1 - \bar\alpha_t}\beta_t$
+and 
+$\theta^*$ refers to the optimized parameter from  \eqref{eq:2d}.
+On the other hand, DDIM~\citep{song2021denoising} accelerates the sampling based on
+non-Markovian assumption. Specifically, the sampling iteratively performs
+\begin{align}
+\label{eq:ddim_sampling}
+    \vx_{t-1} =& \sqrt{\bar\alpha_{t-1}} \hat{\vx}_{t} +  \sqrt{1-\bar\alpha_{t-1}}\epsnull
+    \end{align}
+where 
+\begin{align}
+\label{eq:tweedie}
+    \hat{\vx}_{t} :=
+    \frac{1}{\sqrt{\bar\alpha_t}}\left(\vx_t - \sqrt{1 - \bar\alpha_t} \boldsymbol{\epsilon}_{\theta^*}^{(t)}(\vx_t)  \right),\quad
+  \epsnull:= \frac{\sqrt{1-\bar\alpha_{t-1}-\eta^2\tilde\beta^2_{t}}\boldsymbol{\epsilon}_{\theta^*}^{(t)}(\vx_t)  + \eta \tilde\beta_{t} \boldsymbol{\epsilon}}{\sqrt{1-\bar\alpha_{t-1}}}
+\end{align}
+Here, $\hat{\vx}_{t}$ is the denoised estimate of $\vx_{t}$ that is derived from Tweedie’s formula~\citep{efron2011tweedie}.
+Accordingly, DDIM sampling can be expressed as a two-step manifold transition: (i) the noisy sample $\vx_{t} \in \mathcal{M}_{t}$ transits to clean manifold $\mathcal{M}$ by deterministic estimation using Tweedie's formula, (ii) a subsequent transition from clean manifold to next noisy manifold $\mathcal{M}_{t-1}$ occurs by adding noise $\epsnull$,
+which is composed of the deterministic noise $\boldsymbol{\epsilon}_{\theta^{*}}^{(t)}(\vx_t)$ and the stochastic noise $\boldsymbol{\epsilon}$.
+\noindent\textbf{Diffusion model-based inverse problem solvers.}
+\label{sec:dds}
+For a given loss function $\ell(\x)$ which often stems from  the likelihood
+for
+measurement consistency, the goal of DIS is to address the following optimization problem
+\begin{align}\label{eq:opt3d}
+    \min_{\xb\in \Mc} \ell(\xb)
+\end{align}
+where 
+$\Mc$ represents the clean data manifold sampled from unconditional distribution $p_0(\x)$.
+Consequently, it is essential to find a way that minimizes cost while also identifying the correct manifold.
+Recently, \cite{chung2023diffusion} proposed a general technique called diffusion posterior sampling (DPS), where the updated estimate from the noisy sample $\x_t \in \Mc_t$ is constrained to stay on the same noisy manifold $\Mc_t$. 
+This is achieved by computing the manifold constrained gradient (MCG)~\citep{chung2022improving} on a noisy sample $\x_t\in \Mc_t$.
+The resulting algorithm can be stated as follows:
+\begin{equation}
+\begin{aligned}
+\label{eq:cvp_ddim}
+    \x_{t-1} &= \sqrt{\bar\alpha_{t-1}}\left(\tweedienull -  \gamma_t \nabla_{\x_t}\ell (\tweedienull)\right)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull,
+\end{aligned}
+\end{equation}
+where $\gamma_t>0$ denotes the step size.
+Under the linear manifold assumption \citep{chung2022improving,chung2023diffusion}, this allows precise transition to $\Mc_{t-1}$.
+Unfortunately, the computation of MCG  requires computationally expensive backpropagation and is often unstable.  
+
+In a subsequent work, \cite{chung2024decomposed} shows that   
+under the same linear manifold assumption in DPS,
+the one step update by $\tweedienull -  \gamma_t \nabla_{\tweedienull}\ell (\tweedienull)$ 
+are guaranteed to remain within a linear subspace, thus obviating the need for explicit computation of the MCG and
+leading to a simpler approximation:
+ \begin{equation}
+\begin{aligned}
+\label{eq:dds_ddim}
+    \x_{t-1} &\simeq \sqrt{\bar\alpha_{t-1}}\left(\tweedienull -  \gamma_t \nabla_{\tweedienull}\ell (\tweedienull)\right)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull . 
+\end{aligned}
+\end{equation}
+
+Furthermore, instead of using a one-step gradient update, \cite{chung2024decomposed} demonstrated that multi-step update using Krylov subspace methods, such as the conjugate gradient (CG) method, guarantees that the intermediate steps lie in the linear subspace. This approach improves the convergence of the optimization problem without incurring additional neural function evaluations (NFE). This method, often referred to as decomposed diffusion sampling (DDS), bypasses the computation of the MCG and improves the convergence speed, making it stable and suitable for large-scale medical imaging inverse problems \citep{chung2024decomposed}.
+
+
+\section{Video Inverse Solver using Image Diffusion Models}
+
+
+\subsection{Problem formulation}
+
+Using the forward model \eqref{eq:forward} and the optimization framework in \eqref{eq:opt3d}, the video inverse problem can be formulated as
+\begin{align}\label{eq:opt}
+    \min_{\mX\in \Mcb} \ell(\mX):=\|\mY - \Ac(\mX)\|^2
+\end{align}
+where  $\mX$ denotes the spatio-temporal volume of the clean image composed of $N$ temporal frames as defined in \eqref{eq:def}, and 
+$\Mcb$ represents the clean video manifold  sampled from unconditional distribution $p_0(\mX)$.
+Then, a naive application of the one-step gradient within the DDS framework can be formulated by
+ \begin{equation}
+\begin{aligned}
+\label{eq:main_ddim}
+    \mX_{t-1} &= \sqrt{\bar\alpha_{t-1}}\left(\hat\mX_t -  \gamma_t \nabla_{\hat\mX_t}\ell (\hat\mX_t)\right)+ \sqrt{1-\bar\alpha_{t-1}} \Epsnull . 
+\end{aligned}
+\end{equation}
+where $\Tweedienull$ and $\Epsnull$ refer to Tweedie's formula and noise in the spatio-temporal volume, respectively, which are defined by  
+\begin{align}
+\label{eq:Tweedie}
+    \Tweedienull :=
+    \frac{1}{\sqrt{\bar\alpha_t}}\left(\mX_t - \sqrt{1 - \bar\alpha_t} \boldsymbol{\mathcal{E}}_{\theta^*}^{(t)}(\mX_t)  \right),\quad
+  \Epsnull:= \frac{\sqrt{1-\bar\alpha_{t-1}-\eta^2\tilde\beta^2_{t}}\boldsymbol{\mathcal{E}}_{\theta^*}^{(t)}(\mX_t)  + \eta \tilde\beta_{t} \boldsymbol{\mathcal{E}}}{\sqrt{1-\bar\alpha_{t-1}}}
+\end{align}
+Here, $\mX_t$ refers to the spatio-temporal volume at the $t$-th reverse diffusion step  and
+$\boldsymbol{\mathcal{E}} \sim \prod_{i=1}^N\mathcal{N}(\boldsymbol{0},\mI)$.
+Although the formula \eqref{eq:Tweedie} is a direct extension of the image-domain counterpart \eqref{eq:tweedie},
+the main technical challenge lies in training the video diffusion model $\boldsymbol{\mathcal{E}}_\theta^{(t)}$, which is required for the formula \eqref{eq:Tweedie}. Specifically, the video diffusion model is trained by
+\begin{align}\label{eq:3d}
+    \min_\theta \E_{\mX_t \sim q(\mX_t|\mX_0), \mX_0 \sim p_{\text{data}}(\mX_0), \boldsymbol{\mathcal{E}} \sim \prod_{i=1}^N\mathcal{N}(\boldsymbol{0},\mI)}\left[\|\boldsymbol{\mathcal{E}}_\theta^{(t)}(\mX_t) - \boldsymbol{\mathcal{E}}\|_2^2\right] ,
+\end{align}
+which requires large-scale video training data and computational resources beyond the scale of training image diffusion models. 
+Therefore, the main research motivation is to propose an innovative method that can bypass the need for computationally extensive video diffusion models.
+\subsection{Batch-consistent reconstruction with DDS}
+
+Consider 
+a batch of 2D diffusion models along the temporal direction:
+\begin{align}\label{eq:batchdiff}
+\boldsymbol{\tilde\mathcal{E}}_\theta^{(t)}(\mX_t):= \begin{bmatrix}
+\boldsymbol{\epsilon}_{\theta^{*}}^{(t)}(\mX_t[1]) &\cdots &\boldsymbol{\epsilon}_{\theta^{*}}^{(t)}(\mX_t[N])
+\end{bmatrix}
+\end{align}
+where $\boldsymbol{\epsilon}_{\theta^{*}}^{(t)}$ represents an image diffusion model.
+Suppose that  $\boldsymbol{\tilde\mathcal{E}}_\theta^{(t)}(\mX_t)$ is used for \eqref{eq:Tweedie}.
+Since unconditional reverse diffusion is entirely determined by \eqref{eq:Tweedie}, the
+generated video 
+ is then
+fully controlled by the behavior of the image diffusion models.
+Thus, we investigate the limitations of using a batch of image diffusion models compared to using a video diffusion model
+and explore ways to mitigate these limitations.
+
+Recall that for the reverse sampling of each image diffusion model, the stochastic transitions occur from two sources: (i) the initialization and (ii) re-noising.
+Accordingly,   in batch-independent sampling, where each image diffusion model is initialized with independent random noise and re-noised with independent additive noise, it is difficult to impose any temporal consistency in video generation so that
+each generated temporal frame may represent different content from each other (see Fig.~\ref{fig:concept}(a)).
+Conversely, in batch-consistent sampling, where each image diffusion model is initialized with the same noise and re-noised with the same additive noise, the generated frames from the unconditional diffusion model should be trivially reduced to identical images (see Fig.~\ref{fig:concept}(b)). This dilemma is why separate video diffusion model training using \eqref{eq:3d} was considered necessary for effective video generation.
+
+\begin{figure*}[t]
+  \centering
+    \centerline{{\includegraphics[width=\linewidth]{figures/figure_2.jpg}}}
+    \caption{Geometric illustration of the sampling path evolution. (a) Batch-independent sampling produces
+    independent frames.  (b) Batch-consistent sampling produces identical frames. (c) Batch-consistent
+    sampling combined with frame-dependent perturbation through multi-step CG generates
+    distinct frame satisfying  spatio-temporal data consistency.}
+    \label{fig:concept}
+\end{figure*}
+
+One of the most important contributions of this paper is demonstrating that the aforementioned dilemma can be readily mitigated in conditional diffusion sampling originated from inverse problems. Specifically, inspired by the DDS formulation in \eqref{eq:main_ddim},  we propose a method that employs a batch-consistent sampling scheme to ensure temporal consistency and introduces temporal diversity from the conditioning steps.
+More specifically,  the denoised image for each frame is computed individually using Tweedie's formula via  image diffusion models:
+\begin{align}
+\label{eq:Tweedie2}
+    \Tweedienull^b :=
+    \frac{1}{\sqrt{\bar\alpha_t}}\left(\mX_t - \sqrt{1 - \bar\alpha_t} \boldsymbol{\tilde\mathcal{E}}_{\theta^*}^{(t)}(\mX_t)  \right)
+\end{align}
+where we use the superscript $^b$ to represent the batch-consistency and
+ $\boldsymbol{\tilde\mathcal{E}}_{\theta^*}^{(t)}$ is a batch of image diffusion models defined by \eqref{eq:batchdiff}.
+Here, the image diffusion models are initialized with the same random noises to ensure temporal consistency.
+Subsequently, the denoised spatio-temporal batch is perturbed as a whole by applying the $l$-step
+conjugate gradient (CG)  to optimize
+the data consistency term from the spatio-temporal degradation. 
+This can be formally represented by
+\begin{align}
+\label{eq:CG}
+   \bar\mX_t :=  \argmin_{\mX \in \Tweedienull^b + \boldsymbol{\mathcal K}_l}\|\mY - \Ac(\mX)\|^2
+\end{align}
+where $\boldsymbol{\mathcal K}_l$ denotes the $l$-dimensional Kyrlov subspace 
+associated with the given inverse problem \citep{chung2024decomposed}.
+The multistep CG can 
+diversify each temporal frame according to the condition and achieve faster convergence than a single gradient step.
+The resulting solution ensures that the loss function from the spatio-temporal degradation process can be minimized with coherent but frame-by-frame distinct reconstructions. 
+Finally,  the reconstructed spatio-temporal volume from the CG is renoised with additive noise as:
+\begin{align}
+    \mX_{t-1} &= \sqrt{\bar\alpha_{t-1}} \bar\mX_t + \sqrt{1-\bar\alpha_{t-1}} \Epsnull^b . 
+\end{align}
+where
+\begin{align}
+  \Epsnull^b:= \frac{\sqrt{1-\bar\alpha_{t-1}-\eta^2\tilde\beta^2_{t}}\boldsymbol{\tilde\mathcal{E}}_{\theta^*}^{(t)}(\mX_t)  + \eta \tilde\beta_{t} \boldsymbol{\mathcal{E}}^b}{\sqrt{1-\bar\alpha_{t-1}}}
+\end{align}
+Here, $\boldsymbol{\mathcal{E}}^b$ denotes the additive random noise from $\mathcal{N}(\boldsymbol{0},\mI)$.
+ In contrast
+to  $\boldsymbol{\mathcal{E}}$ in \eqref{eq:Tweedie}, which is composed of frame-independent random noises,
+we impose batch consistency by adding the same random noises to each temporal frame to ensure temporal consistency.
+In summary, the proposed batch-consistent sampling and frame-dependent perturbation through multistep CG ensure that the sampling trajectory of each frame, starting from the same noise initialization, gradually diverges from each other  during reverse sampling to meet the spatio-temporal
+data consistency. The
+geometric illustration of the sampling path evolution is shown in Fig.~\ref{fig:concept}(c). The detailed illustration of the intermediate sampling process of our method is shown in Fig.~\ref{fig:geometry}.
+Additionally, the pseudocode implementation is given in Algorithm~\ref{alg:ours}.
+
+\begin{algorithm}
+   \centering
+   \scriptsize
+   \caption{Video inverse problem solver using 2D diffusion models}\label{alg:ours}
+   \begin{algorithmic}[1]
+       \Require $\boldsymbol{\tilde\mathcal{E}}_{\theta^*}, T, \{\alpha_t\}^T_{t=1}, \eta, \mA, \boldsymbol{Y}, l$ 
+       \State $\mX_T \leftarrow \boldsymbol{\mathcal{E}}^{b} \sim \mathcal{N}(\boldsymbol{0}, \boldsymbol{I})$ \Comment{Controlled stochasticity}
+       \For{$t = T:2$} \do \\
+       \State $\Tweedienull^b \leftarrow \left(\mX_t - \sqrt{1 - \bar\alpha_t} \boldsymbol{\tilde\mathcal{E}}_{\theta^*}^{(t)}(\mX_t)\right) / \sqrt{\bar{\alpha}_t}$ \Comment{Tweedie denoising}
+       \State $\bar\mX_t \leftarrow \argmin_{\mX \in \Tweedienull^b + \boldsymbol{\mathcal K}_l}\|\mY - \Ac(\mX)\|^2$ \Comment{Imposing frame-dependent data consistency}
+       \State $\Epsnull^b \leftarrow \left(\sqrt{1-\bar\alpha_{t-1}-\eta^2\tilde\beta^2_{t}}\boldsymbol{\tilde\mathcal{E}}_{\theta^*}^{(t)}(\mX_t)  + \eta \tilde\beta_{t} \boldsymbol{\mathcal{E}}^b\right) / \sqrt{1-\bar\alpha_{t-1}}$ \Comment{Controlled stochasticity}
+       \State $ \mX_{t-1} \leftarrow \sqrt{\bar\alpha_{t-1}} \bar\mX_t + \sqrt{1-\bar\alpha_{t-1}} \Epsnull^b$ \Comment{Renoising}
+       \EndFor
+       \State $\mX_0 \leftarrow (\mX_1 - \sqrt{1-\bar{\alpha}_1}\boldsymbol{\tilde\mathcal{E}}_{\theta^*}^{(1)}(\mX_1)) / \sqrt{\bar{\alpha}_1}$
+       \State \textbf{return} $\mX_0$
+   \end{algorithmic}
+\end{algorithm}
+\begin{figure*}[t]
+  \centering
+    \centerline{{\includegraphics[width=0.9\linewidth]{figures/figure_3.jpg}}}
+    \caption{Sampling process in our video inverse problem solver. $\mX_t$ is denoised to produce $\hat{\mX}^b_t$ using
+    2D Tweedie formula, then reshaped into a video tensor. Multi-step CG in the video space, satisfying \eqref{eq:CG}, is applied to obtain $\bar{\mX}_t$, which is then reshaped back into an image batch. Finally, $\mX_{t-1}$ is sampled by adding noise $\hat{\boldsymbol{\mathcal{E}}}^b_t$.}
+    \label{fig:geometry}
+\end{figure*}
+
+
+
+\section{Experiments}
+
+\label{experiment}
+
+In this section, we conduct  thorough comparison studies to demonstrate the efficacy of the proposed method
+in addressing spatio-temporal degradations.
+Specifically, we consider two types of loss functions for video inverse problems:
+\begin{align}\label{eq:loss}
+ \ell(\mX):=\|\mY - \Ac(\mX)\|^2,\quad  \ell_{TV}(\mX):=\|\mY - \Ac(\mX)\|^2+\lambda \ TV(\mX)
+\end{align} 
+where the first loss is from \eqref{eq:opt}
+and  $TV(\mX)$ denotes the total variation loss along the temporal direction.
+
+Then, classical optimization methods are used as the baselines for comparison to minimize each loss function. Specifically, the stand-alone Conjugate Gradient (CG) method is employed to minimize $\ell(\mX)$, while the Alternating Direction Method of Multipliers (ADMM) is used to minimize $\ell_{TV}(\mX)$. Additionally, diffusion-based methods are utilized as baselines to minimize the loss functions in
+\eqref{eq:loss}.
+Specifically, DPS~\citep{chung2022diffusion} is used to minimize $\ell(\mX)$. However, instead of relying on 3D diffusion models, we use 2D image diffusion models, similar to our proposed methods, to ensure that backpropagation for MCG computation can be performed through 2D diffusion models.
+Second, we employ DiffusionMBIR~\citep{chung2023solving} to minimize $\ell_{TV}(\mX)$, also using 2D image diffusion models. Unlike the original DiffusionMBIR, which applies TV along the $z$-direction, we apply TV along the temporal direction.
+To test various spatio-temporal degradations, we select the temporal degradation in time-varying data acquisition systems, which is represented as PSF convolution along temporal dimension~\citep{potmesil1983modeling}. 
+We select three types of PSFs: (i) uniform PSF with widths of 7, (ii) uniform PSF with widths of 13, and (iii) Gaussian PSF with a standard deviation of 1.0. Each kernel is convolved along the temporal dimension with the ground truth video to produce the measurements. Note that convolving uniform PSF with widths of 7 and 13 correspond to averaging 7 and 13 frames, respectively.
+Furthermore, we combined temporal degradation and various spatial degradations to demonstrate various combinations of spatio-temporal degradations.
+For spatio-temporal degradations, we fix a temporal degradation as a convolving uniform PSF with a width of 7 and add various spatial degradations to the video. 
+These spatial degradations include (i) deblurring using a Gaussian blur kernel with a standard deviation $\sigma$ of 2.0, (ii) super-resolution through a 4$\times$ average pooling, and (iii) inpainting with random masking at a ratio $r$ of 0.
+
+\begin{figure*}[t]
+  \centering
+    \centerline{{\includegraphics[width=\linewidth]{figures/figure_4.jpg}}}
+    \caption{Qualitative evaluation of temporal degradation tasks. 1$^{\text{st}}$ row: temporal $\Ac$ with uniform PSF with kernel width $k$ = 7. 2$^{\text{nd}}$ row: temporal $\Ac$ with Gaussian PSF with $\sigma$=1. Red and blue boxes indicate the enlarged views of the previous and next frames, respectively.}
+    \label{fig:fig4}
+\end{figure*}
+
+\renewcommand{\arraystretch}{1.2}
+
+\begin{table}[t]
+\begin{adjustbox}{width=\linewidth,center}
+\centering
+\begin{tabular}{cccccccccccccc}
+\toprule[1.5pt]
+\multicolumn{1}{c}{} & \multicolumn{1}{c}{} & \multicolumn{4}{c}{$\textbf{Uniform PSF} \: (k=7)$} & \multicolumn{4}{c}{$\textbf{Uniform PSF} \: (k=13)$} & \multicolumn{4}{c}{$\textbf{Gaussian PSF} \: (\sigma=1.0)$} \\
+\cmidrule(rl){3-6} \cmidrule(rl){7-10} \cmidrule(rl){11-14}
+$\textbf{Method}$ & Time (s) &{PSNR $\uparrow$} & {SSIM $\uparrow$} & {LPIPS $\downarrow$} & {FVD $\downarrow$} & {PSNR $\uparrow$} & {SSIM $\uparrow$} & {LPIPS $\downarrow$} & {FVD $\downarrow$} & {PSNR $\uparrow$} & {SSIM $\uparrow$} & {LPIPS $\downarrow$} & {FVD $\downarrow$} \\
+\midrule
+Ours (20) & 12 &
+\textbf{43.16} & \textbf{0.992} & \textbf{0.004} & \textbf{0.008} & 
+\textbf{39.69} & \textbf{0.984} & \textbf{0.008} & \textbf{0.035} & 
+\textbf{34.25} & \textbf{0.959} & \textbf{0.029} & \textbf{0.068} \\
+\cmidrule(rl){1-14}
+DiffusiomMBIR (1000) & 611 & 
+29.13 & 0.865 & 0.096 & 0.430 &
+26.15 & 0.794 & 0.157 & 0.836 &
+29.29 & 0.875 & 0.086 & 0.322 \\
+DPS (1000) & 1244 &
+33.42 & 0.914 & 0.071 & 0.325 & 20.61 & 0.666 & 0.303 & 2.055 & 12.21 & 0.610 & 0.272 & 2.210 \\
+ADMM-TV & 2.4 &
+24.46 & 0.744 & 0.245 & 1.297 &
+23.57 & 0.697 & 0.304 & 1.580 &
+26.76 & 0.826 & 0.155 & 0.656 \\
+\bottomrule[1.5pt]
+\end{tabular}
+\end{adjustbox}
+\caption{Quantitative evaluation of temporal degradation tasks on the DAVIS dataset. \textbf{Bold} indicates the best results. FVD is displayed scaled by $10^{-3}$ for easy comparison.}
+\label{table1}
+\end{table}
+
+We conduct our experiments on the DAVIS dataset~\citep{perazzi2016benchmark, pont20172017}, which includes a wide variety of videos covering multiple scenarios. The pre-trained unconditional 256$\times$256 image diffusion model from ADM~\citep{dhariwal2021diffusion} is used directly without fine-tuning and additional networks. All videos were normalized to the range [0, 1] and split into 16-frame samples of size 256$\times$256. A total of 338 video samples were used for evaluation.
+
+For quantitative comparison, we focus on the following two widely used standard metrics: peak signal-to-noise-ratio (PSNR) and structural similarity index (SSIM)~\citep{wang2004image} with further evaluations with two perceptual metrics - Learned Perceptual Image Patch Similarity (LPIPS)~\citep{zhang2018perceptual} and Fréchet Video Distance (FVD)~\citep{unterthiner2019fvd}. FVD results are displayed scaled by $10^{-3}$ for easy comparison.
+For all proposed methods, we employ $l$ = 5, $\eta$ = 0.15 for 20 NFE in temporal degradation tasks, and $l$ = 5, $\eta$ = 0.8 for 100 NFE in spatio-temporal degradation tasks unless specified otherwise.
+\subsection{Results}
+We present the quantitative results of the temporal degradation tasks in Table.~\ref{table1}. The table shows that the proposed method outperforms the baseline methods by large margins in all metrics. 
+The large margin improvements in FVD indicate that the proposed method successfully solves inverse problems with temporally consistent reconstruction.
+Fig.~\ref{fig:fig4} shows the qualitative reconstruction results for temporal degradations $\Ac$. The proposed method restores much finer details compared to the baselines and demonstrates robustness across various temporal PSFs.
+In contrast, as shown in Fig.~\ref{fig:fig4}, while DPS performs well in reconstructing uniform PSFs with a kernel width of 7, it fails to accurately reconstruct frame intensities as the kernel becomes wider or more complex as shown in the bottom figures, leading to significant drops in Table~\ref{table1}.
+DiffusionMBIR ensures temporal consistency and performs well for static scenes, but it struggles with dynamic scenes in the video.
+In the same context, ADMM-TV produces unsatisfactory results for dynamic scenes.
+
+\begin{figure*}[t]
+  \centering
+    \centerline{{\includegraphics[width=\linewidth]{figures/figure_5.jpg}}}
+    \caption{Qualitative evaluation of spatio-temporal degradation tasks. Each spatio-temporal degradation is combined with various spatial degradation tasks. 1$^{\text{st}}$ row: Deblurring ($\sigma$ = 2.0). 2$^{\text{nd}}$ row: SR ($\times$ 4). 3$^{\text{rd}}$ row: Inpainting ($r$ = 0.5).}
+    \label{fig:fig5}
+\end{figure*}
+
+\begin{table}[t]
+\begin{adjustbox}{width=\linewidth,center}
+\centering
+\begin{tabular}{cccccccccccccc}
+\toprule[1.5pt]
+\multicolumn{1}{c}{} & \multicolumn{1}{c}{} & \multicolumn{4}{c}{+ $\textbf{Deblur} \: (\sigma = 2.0)$} & \multicolumn{4}{c}{+ $\textbf{Super-resolution} \: (\times 4)$} & \multicolumn{4}{c}{+ $\textbf{Inpainting} \: (r = 0.5)$} \\
+\cmidrule(rl){3-6} \cmidrule(rl){7-10} \cmidrule(rl){11-14}
+$\textbf{Method}$ & Time (s) &{PSNR $\uparrow$} & {SSIM $\uparrow$} & {LPIPS $\downarrow$} & {FVD $\downarrow$} & {PSNR $\uparrow$} & {SSIM $\uparrow$} & {LPIPS $\downarrow$} & {FVD $\downarrow$} & {PSNR $\uparrow$} & {SSIM $\uparrow$} & {LPIPS $\downarrow$} & {FVD $\downarrow$} \\
+\midrule
+Ours (100) & 60 &
+\textbf{27.77} & \textbf{0.810} & \textbf{0.270} & \textbf{0.275} & 
+\textbf{25.71} & \textbf{0.724} & \textbf{0.279} & \textbf{0.352} & 
+\textbf{29.45} & \textbf{0.877} & \textbf{0.047} & \textbf{0.136} \\
+\cmidrule(rl){1-14}
+DiffusiomMBIR (1000) & 611 & 
+21.79 & 0.583 & 0.304 & 1.809 & 21.41 & 0.552 & 0.418 & 2.085 & 19.46 & 0.535 & 0.509 & 2.689 \\
+DPS (1000) & 1244 &
+18.19 & 0.401 & 0.602 & 3.183 & 21.39 & 0.532 & 0.318 & 1.672 & 27.43 & 0.817 & 0.115 & 0.650 \\
+ADMM-TV & 2.4 &
+22.76 & 0.638 & 0.462 & 1.698 & 22.09 & 0.592 & 0.469 & 1.739 & 22.53 & 0.663 & 0.326 & 1.892 \\
+\bottomrule[1.5pt]
+\end{tabular}
+\end{adjustbox}
+\caption{Quantitative evaluation of spatio-temporal degradation tasks on the DAVIS dataset. \textbf{Bold} indicates the best results. FVD is displayed scaled by $10^{-3}$ for easy comparison.} \label{table2}
+\end{table}
+
+The results of the spatio-temporal degradations are presented in Table~\ref{table2} and Fig.~\ref{fig:fig5}. 
+Even with additional spatial degradations, the proposed method consistently outperforms baseline methods. 
+On the other hand, DPS often produces undesired details, as shown in Fig.~\ref{fig:fig5}. 
+DiffusionMBIR fails to restore fine details in dynamic scenes. 
+Specifically, in the 3$^{\text{rd}}$ row of Fig.~\ref{fig:fig5}, DiffusionMBIR restores the static mural painting but fails to capture the motion of the person. 
+This is because
+TV regularizer often disrupts the restoration of dynamic scenes. 
+In this context, our method ensures temporal consistency without the need for a TV regularizer.
+Furthermore, thanks to the consistent performance even at low NFE, the proposed method achieves a dramatic 10$\times$ to 50$\times$ acceleration in reconstruction time. 
+For handling temporal degradation with 20 NFE, the proposed diffusion model-based inverse problem solver can now achieve speeds exceeding 1 FPS.
+\subsection{Ablation study}
+\begin{figure*}[t]
+  \centering
+    \centerline{{\includegraphics[width=\linewidth]{figures/figure_6.jpg}}}
+    \caption{Reconstruction results of (left) stand-alone CG method and (right) the proposed method.}
+    \label{fig:fig6}
+\end{figure*}
+
+\textbf{Effect of CG updates.} Experimental results demonstrate the tangential CG updates in video space on the denoised manifold are key elements in solving spatio-temporal degradations. 
+Here, we compare the proposed method with a stand-alone CG method to demonstrate its impact within the solver.
+We applied the same CG iterations as in the proposed method but excluded the diffusion updates. As shown in Fig.~\ref{fig:fig6}, while the stand-alone CG method nearly solves the video inverse problem, it leaves residual artifacts, as seen in the first row, or fails to fully resolve spatial degradation, as shown in the second row. 
+In contrast, the proposed method generates natural and fully resolved frames. 
+This indicates that the diffusion update in the proposed method refines the unnatural aspects of the CG updates. 
+
+\textbf{Effect of batch-consistent sampling.}
+Fig.~\ref{fig:fig7} illustrates the inter-batch difference within the denoised manifold $\mathcal{M}$ during the reverse diffusion process. The blue plot shows results from our full method, while the green and orange plots represent results without stochasticity control and with gradient descent (GD) updates instead of conjugate gradient (CG) updates, respectively. Notably, GD converges more slowly than CG.
+Our method consistently achieves low inter-batch difference (i.e., high inter-batch similarity), ensuring batch-consistent reconstruction and precise reconstructions. In contrast, the absence of stochasticity control or the use of GD updates results in higher difference (i.e., lower similarity), leading to less consistent sampling. The intermediate samples $\Tweedienull$ in Fig.~\ref{fig:fig7} and reconstruction results in Table~\ref{table3} further confirm that our method outperforms the others in producing batch-consistent results.
+ 
+
+\begin{figure}[h]
+  \centering
+  \begin{minipage}[t]{0.8\linewidth}
+    \centerline{{\includegraphics[width=\linewidth]{figures/figure_7.jpg}}}
+    \caption{The inter-batch difference within the denoised manifold $\mathcal{M}$, quantified as $\sum_{i=1}^{N-1} \|\Tweedienull[i+1] - \Tweedienull[i]\| / (N-1)$, throughout the reverse diffusion sampling process. \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {1}}} indicates stochasticity control and \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {2}}} indicates using CG updates within the denoised manifold $\mathcal{M}$.}
+    \label{fig:fig7}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.19\linewidth}
+  \captionsetup{type=table}
+  \begin{adjustbox}{width=\linewidth,center}
+  \captionsetup{type=table}
+    \centering
+    \begin{tabular}{cc}
+    \toprule[1.5pt]
+    Method & PSNR $\uparrow$ \\
+    \midrule
+    Full & \textbf{39.69} \\
+    w/o \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {1}}} & 
+    30.86 \\
+    w/o \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {1}}}, \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {2}}} & 
+    23.22 \\
+    \midrule
+    \midrule
+    Method & FVD $\downarrow$ \\
+    \midrule
+    Full & \textbf{0.035} \\
+    w/o \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {1}}} & 
+    0.567  \\
+    w/o \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {1}}}, \raisebox{.5pt}{\textcircled{\raisebox{-.9pt} {2}}} & 
+     1.275  \\
+    \bottomrule[1.5pt]
+    \end{tabular}
+    \end{adjustbox}
+    \caption{Reconstruction results of the ablation study.} \label{table3}
+  \end{minipage}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+\label{conclusion}
+In this work, we introduce an innovative video inverse problem solver that utilizes only image diffusion models. Our method leverages the time dimension of video as the batch dimension in image diffusion models, integrating video inverse optimization within the Tweedie denoised manifold. We combine batch-consistent sampling with video inverse optimization at each reverse diffusion step, resulting in a novel and efficient solution for video inverse problems. Extensive experiments on temporal and spatio-temporal degradations demonstrate that the proposed method achieves superior quality while being faster than previous DIS methods, even reaching speeds exceeding 1 FPS.
+
+\newpage
+
+
+
+
+

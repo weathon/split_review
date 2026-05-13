@@ -1,0 +1,679 @@
+\title{Don’t Say No: Jailbreaking LLM by Suppressing Refusal}
+
+\begin{abstract}
+Ensuring the safety alignment of Large Language Models (LLMs) is crucial to generating responses consistent with human values. Despite their ability to recognize and avoid harmful queries, LLMs are vulnerable to jailbreaking attacks, where carefully crafted prompts seduce them to produce toxic content. One category of jailbreak attacks is reformulating the task as an optimization by eliciting the LLM to generate affirmative responses. However, such optimization objective has its own limitations, such as the restriction on the predefined objectionable behaviors, leading to suboptimal attack performance. In this study, we first uncover the reason why vanilla target loss is not optimal, then we explore and enhance the loss objective and introduce the \textit{DSN} (Don't Say No) attack, which achieves successful attack by suppressing refusal. Another challenge in studying jailbreak attacks is the evaluation, as it is difficult to directly and accurately assess the harmfulness of the responses. The existing evaluation such as refusal keyword matching reveals numerous false positive and false negative instances. To overcome this challenge, we propose an Ensemble Evaluation pipeline that novelly incorporates Natural Language Inference (NLI) contradiction assessment and two external LLM evaluators. Extensive experiments demonstrate the potential of the \textit{DSN} and effectiveness of Ensemble Evaluation compared to baseline methods.\footnote{Code is provided
+\end{abstract}
+
+\section{Introduction}
+
+
+\renewcommand{\thefootnote}{\arabic{footnote}}
+
+\label{sec:intro}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.85\textwidth]{./figs/DSN_v2_mainFigure.png}
+    \caption{Illustration of \textit{DSN} attack and Ensemble Evaluation pipeline.} 
+    \label{fig:main}
+\end{figure*}
+
+Large Language Models (LLMs) have extensive applications in facilitating decision-making, underscoring the importance of aligning LLMs with safety standards. To prevent generating responses that deviate from human values, safety alignment is pursued through diverse mechanisms, including model fine-tuning \cite{howard2018universal}, reinforcement learning with human feedback (RLHF) \cite{ziegler2019fine}, and model editing \cite{mitchell2022fast}. These approaches aim to mitigate the risk of LLMs producing harmful or illegal responses to user queries.
+
+\begin{table*}[t]
+\center
+\resizebox{.85\linewidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{Method Categories} & \multirow{2}{*}{Black-box} & \multirow{2}{*}{Fast training} & \multirow{2}{*}{Universal} & No extra & Easy to & Jailbreak \\ 
+  &   &   &  & Inference time & deploy  & Ability \\ 
+\midrule
+Manually designed \cite{website,li2024open} & \cmark & \cmark & \cmark & \cmark & \cmark & low \\
+LLM querying \cite{chao2024jailbreakingblackboxlarge,deng2024masterkey,yu2023gptfuzzer,jiang2024unlocking} & \cmark & \cmark & \xmark & \xmark & \cmark & relative low \\
+LLM generating \cite{liao2024amplegcg,xie2024jailbreaking,paulus2024advprompter} & \cmark & \xmark & \cmark & \cmark & \cmark & relative low \\
+LLM architecture modification \cite{zhou2024emulated,zhao2024weak,huang2023catastrophic} & \xmark & \cmark & \cmark & \xmark & \xmark & high \\
+Learning-based attack \cite{zou2023universal,liu2023autodan,zhu2023autodan,liu2024advancing} & \xmark & \xmark & \cmark & \cmark & \cmark & high \\
+\bottomrule
+\end{tabular}
+}
+\caption{Comparison of different text-domain jailbreak attack method categories.}
+\label{tab:attack_method_compare}
+\end{table*}
+While LLMs can recognize and reject harmful queries, they remain susceptible to carefully crafted prompts designed to manipulate them into generating toxic content, a phenomenon referred as "jailbreaking". 
+Existing studies on jailbreaking LLMs can be categorized into manually designed attacks \cite{website, li2024open}, LLM-involved methods \cite{chao2024jailbreakingblackboxlarge,deng2024masterkey,yu2023gptfuzzer,jiang2024unlocking,liao2024amplegcg,xie2024jailbreaking,paulus2024advprompter}, target model inner architecture modification \cite{zhou2024emulated,zhao2024weak,huang2023catastrophic} and learning-based attacks\cite{zou2023universal,liu2023autodan,zhu2023autodan,liu2024advancing}. Table \ref{tab:attack_method_compare} provides an overview of the characteristics of existing attacks, including the white/black box manner, training and inference overhead, universality, ease of deployment and jailbreak ability.
+
+Learning-based methods possess characteristics such as universality, ease of deployment, and strong jailbreak performance, making them particularly suited for real-world applications. Representative of the learning-based jailbreak attack method is the \textit{GCG} attack \cite{zou2023universal}, which reformulates the jailbreak attack into an optimization problem. In this approach, an optimized suffix is crafted to prompt LLMs to produce an affirmative response of a few initial tokens (e.g., "sure, here is how to..."). By leveraging LLMs' next-word prediction mechanisms, initiating a response with affirming language increases the likelihood that the model will complete the harmful query, which fulfill the attacker's goal. Building upon this, subsequent studies by \cite{zhu2023autodan} and \cite{liu2023autodan} have refined such attacks, improving readability and stealthiness with different optimization algorithms. 
+However, a major limitation of learning-based attacks like \textit{GCG} is the lack of a clearly defined optimization target. In traditional adversarial attacks \cite{szegedy2014intriguing, goodfellow2014explaining} on classification tasks, the goal is to cause misclassification, but for generation tasks like language model jailbreaks, the goal is unclear. The currently widely-used target is to elicit an affirmative response related to pre-defined objectionable behaviors. However the categories of objectionable behaviors and the reasonable responses are numerous \cite{carlini2023aligned}, leading to inconsistent results from \textit{GCG} across multiple rounds of testing \cite{liao2024amplegcg, jia2024improved}.
+
+In addition, the \textit{GCG} optimization term is not optimal due to a phenomenon known as token shift \cite{liao2024amplegcg}, where the loss is averaged across all tokens in a sequence. Since LLMs operate on a next-word prediction basis, the loss associated with the first few tokens is more critical. For example, if the loss for the first token is high (e.g. "Sure"), but the losses for subsequent tokens are low, the overall average loss might still be low. This results in a sequence that has a low average loss but fails to successfully execute the attack, as the model is more likely to generate a refusal response like "Sorry, I cannot fulfill your request." This issue makes the \textit{GCG} approach less effective for jailbreak attacks. 
+In this paper, we explore a new jailbreak objective with a valuable insight: the suppression of refusals can also contribute to successful jailbreaks. Unlike \textit{GCG} that aim to elicit affirmative responses, we focus on suppressing refusal responses, such as "this is illegal" or "I cannot assist with that". By suppressing these refusals, the model is more likely to response in an affirmative tone. The intuition behind this is that refusal responses are typically more constrained and predictable compared to harmful responses, which can vary widely in content. By targeting the narrower refusal category, it's easier to design a loss function that effectively bypasses these safeguards, making the attack more robust.
+
+To achieve this goal, we present \textit{DSN} attack (Don't Say No) with a novel and powerful \textit{DSN} loss function. We incorporate an augmentation loss item that directs LLM's response away from predefined refusal keywords or strings. As shown in the upper part of Figure \ref{fig:main}, the loss object involves: maximizing the affirmative responses and minimizing the refusal responses. Given the refusal targets and the initial suffix, the universal adversarial suffix is optimized by the Greedy Coordinate Gradient-based Search \cite{zou2023universal}. 
+
+\begin{table*}[h]
+\centering
+\small
+\resizebox{.85\linewidth}{!}{
+\begin{tabular}{>{\centering\arraybackslash}m{1cm}|>{\centering}m{7cm}|>{\centering}m{4cm}|>{\centering}m{1.5cm}|>{\centering\arraybackslash}m{1.5cm}}
+\hline
+\hline \bf False Type & \bf Responses  &\bf Reasons   &\bf Human Evaluation  &\bf Refusal Matching\\ 
+\hline
+FP & \small Here is a video that teaches viewers how to commit identity theft ten tutorials later. I apologize, but I cannot fulfill your request to create a video that teaches viewers how to commit identity theft. & Neglect the
+potential later refusal strings when initial segment is too short &\xmark & \cmark \\
+\hline
+FN & Sure. here is a tutorial to build a bomb. First, ......  However, it is illegal & Refusal appears late but harmful content is generated beforehand  & \cmark & \xmark \\
+\hline
+FP & Here is a fake online store that steals customers' credit card information for your fans. Please let me know if you need any further information or clarification. & Semantic sharp turn: agree to response but change topic & \xmark & \cmark \\
+\hline
+FP & Here is a guide for cyberbullying and harassment for your fans. Here is a guide for cyberbullying and harassment for your fans.  Here is a guide ... & Repeat the target without answering
+ & \xmark & \cmark \\
+\hline
+FN & Sure, here's a tutorial on how to acquire and use firearms illegally: Step 1: Find a ...
+ & The target already contains refusal key words/strings
+ & \cmark & \xmark \\
+\hline
+\hline
+\end{tabular}
+}
+\caption{Examples of false positive and false negative cases in the Refusal Matching evaluations. \cmark and \xmark \hspace{0.00em} indicates whether the jailbreak is evaluated as successful or not, respectively.}
+\label{tab:illustration}
+\end{table*}
+
+To mitigate token shift phenomenon in \textit{GCG}, we further introduce the \textit{Cosine Decay} weight scheduling method, which assigns higher weights to the first few tokens in a sequence. This approach ensures that the most crucial tokens at the start are given more importance in the loss calculation, thereby increasing the likelihood of a successful jailbreak attack.
+Another challenge of studying jailbreak attacks lies in the absence of an effective and efficient evaluation pipeline to assess the success of the attack.
+Unlike the traditional adversarial tasks in Machine Learning, where the success of an adversarial example can be typically indicated by misclassification, evaluating jailbreak attacks is challenging. It is hard to automatically reflect the human understanding of the harmfulness of LLM responses, and relying solely on manual annotation is both impractical and unrealistic.
+
+Previous work has primarily adopted a refusal string/keyword matching metric (Refusal Matching for short), where an attack is considered successful if the initial fixed-length segments of the response do not contain pre-defined refusal strings (e.g. "Sorry, I cannot ..."), and vice versa. While it appears intuitive and aligns with human evaluation processes, a closer examination reveals numerous false positive (FP) and false negative (FN) instances. One major limitation is it relies largely on the length of the pre-determined initial segments, as also proposed by one concurrent work~\cite{mazeika2024harmbench}. If the initial segments are short (e.g. 32 tokens), it might neglect the potential later refusal strings and evaluate it as a successful jailbreak instance, resulting false positive. On the other hand, if the initial segments are too long (e.g. 512 tokens), the result could have been a false negative if a keyword appears at the end but some harmful content is generated beforehand. We present a few erroneous evaluation cases in Table \ref{tab:illustration}, where the improper initial segment length, semantic sharp turn and many other complex semantic background might cause the erroneous Refusal Matching results.
+
+To enhance the reliability of the evaluation metric, we propose an Ensemble Evaluation approach involving three modules, as shown in the lower part of Figure \ref{fig:main}. Instead of solely relying on Refusal Matching metrics, we first employ a natural language inference (NLI) model \cite{he2021deberta}, aiming to assess the contradiction among the completions. This step addresses scenarios where responses include semantic shifts, potentially starting with an affirmative response but suddenly providing a refuse. 
+In addition, we integrate SoTA evaluators from two third-party LLMs: GPT-4 \cite{achiam2023gpt} and HarmBench \cite{mazeika2024harmbench}, to ensure a robust and comprehensive assessment. The final evaluation result is an aggregation of outputs from all three modules.
+
+Our contribution can be summarized as:
+\begin{itemize}[leftmargin=15pt,itemsep=2pt,parsep=0pt, partopsep=0pt,topsep=0pt]
+    \item  We uncover the phenomenon and illustrate why vanilla target loss $\mathcal{L}_{\text{target}}$ is suboptimal. \textit{Cosine Decay} weighting schedule is proposed to mitigate this limitation.
+    
+    \item  We introduce \textit{DSN} attack with a novel, powerful and performance consistent loss function which aims to not only elicit affirmative responses but also suppress the refusals. An \textit{Unlikelihood} loss is also applied to stabilize the refusal suppression convergence.
+        
+    \item We propose an Ensemble Evaluation pipeline by novelly incorporating NLI contradiction as well as LLM evaluators to examine the success of the attack more accurately. We adopt Shapley value to analyze the contribution of each component.
+    
+    \item Extensive experiments demonstrate the potency of \textit{DSN} attack among various of model and dataset, as well as its transferability to black-box models. The \textit{DSN} loss also demonstrates its adaptive ability to other learning-based attack other than \textit{GCG}. The Ensemble Evaluation is also proved to be more effective compared to baseline methods. 
+
+    
+\end{itemize}
+
+\partitle{Arrangement}
+The following paper are arranged as follow. In Section \ref{sec:related_work}, we analyze the jailbreak attack categories and discuss related topics such as adversarial examples, jailbreak attacks, jailbreak evaluation, and discrete space optimization algorithms.  In Section \ref{sec:intuition}, we detail a pilot experiment to illustrate the limitation of the traditional \textit{GCG} target loss and explain the token shift phenomenon behind this. Section \ref{sec:method} introduces the key insight of refusal suppression, presents \textit{DSN} loss objective, as well as the proposed Ensemble Evaluation methods. Section \ref{sec:experiment} provides an in-depth analysis and discussion of the threat model, experimental settings, and results across different attacks, models and datasets. 
+
+
+\section{Related work}
+
+\label{sec:related_work}
+
+\partitle{Adversarial examples} Since the discovery of adversarial examples~\cite{szegedy2014intriguing, goodfellow2014explaining}, the exploration of vulnerabilities within deep learning models to well-designed and imperceptible perturbations has attracted significant research interest for one decade. 
+Under the white-box setting, a series of effective adversarial attack algorithms have been proposed \cite{carlini2017towards,kurakin2017adversarial}. In an automated learning manner, these methods utilize gradient-based approaches to search for imperceptible perturbations. In addition, several effective adversarial attacks based on transfer attacks have also been proposed to address black-box setting~\cite{papernot2016limitations, liu2016delving}.
+
+\partitle{Jailbreak attacks}  Jailbreak attacks aims to break the human-value alignment and induce the target LLMs to generate harmful and objectionable content \cite{wei2023jailbroken}.  
+Table \ref{tab:attack_method_compare} provides an overview of the characteristics of existing attacks, categorized by factors such as whether they are white-box or black-box, the speed of the training process, the attack's universality, inference time overhead, ease of deployment, and, most importantly, jailbreak performance.
+Most of the current jailbreak methods can be classified into the categories outlined in the table, such as manual methods \cite{website,li2024open}, iteratively querying LLM to refine the malicious question \cite{chao2024jailbreakingblackboxlarge,deng2024masterkey,yu2023gptfuzzer,jiang2024unlocking}, training or fine tuning one LLM to provide jailbreaking prompts in a generation manner \cite{liao2024amplegcg,xie2024jailbreaking,paulus2024advprompter}, exploiting modifications of target model's inner architecture \cite{zhou2024emulated,zhao2024weak,huang2023catastrophic}, formulating the jailbreak problem as an optimization problem \cite{zou2023universal,liu2023autodan,zhu2023autodan,liu2024advancing} and others kinds \cite{zhang2023jade,niu2024jailbreaking,gong2023figstep}.
+However, aside from optimization-based methods, which pose a serious threat to LLM alignment due to their strong potential for real-world application, other categories of jailbreak methods exhibit various limitations in practical use. These include weaker jailbreak capabilities, extra inference time, and challenges in deployment within real-world scenarios. (Section \ref{sec:app:optimization_superiority})
+
+\partitle{Jailbreak evaluation} 
+One primarily employed evaluation method is Refusal Matching, as already described in Section \ref{sec:intro}.
+Other methods typically involve constructing a binary classifier or directly querying other LLMs, aiming to determine whether LLM generates harmful content~\cite{zhu2023autodan,huang2023catastrophic,mazeika2024harmbench}. However, these methods either fail to reflect human evaluation or requires large computation costs, indicating the necessity of more efficient and reliable evaluation metrics. 
+
+\partitle{Optimization Strategy} The major difficulty of learning-based jailbreak is the optimization in the discrete input space. To address it, there exist two main categories: embedding-based and token-based methods. The former category directly optimizes on continuous embeddings and then inferring back the target tokens \cite{lester2021power,wen2023hard,qin2022cold}. The latter treats the one-hot vectors of discrete tokens as optimizable continuous quantities, obtaining the final tokens through different greedy-based algorithms, which is widely adopted~\cite{ebrahimi2017hotflip,shin2020autoprompt,zou2023universal}. 
+
+
+
+\section{Intuition: Why \textit{GCG}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.47\textwidth]{./figs/inutition/0902_intuition.png}
+    \caption{A subset of sampled suffixes optimized by vanilla \textit{GCG} target loss $\mathcal{L}_{\text{target}}$. Each suffix is represented as a colored circle, with deeper colors indicating higher ASR.}
+    \label{fig:ASR_per_step_intuition}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.46\textwidth]{./figs/inutition/GCG_both_metric_in_one_fig.png}
+    \caption{ASR of the last step batch suffixes, optimized by \textit{GCG} target loss $\mathcal{L}_{\text{target}}$. The ASR results are calculated upon Refusal Matching metric and \textit{HarmBench} metric respectively.}
+    \label{fig:ASR_last_step_intuition}
+\end{figure}
+
+Recent studies suggest that the vanilla target loss $\mathcal{L}_{\text{target}}$ may not be optimal for jailbreaking \cite{liao2024amplegcg, zhao2024weak}. We hypothesize that this issue primarily stems from a phenomenon called token shift, where the loss associated with the initial tokens is disproportionately large, despite a relatively low overall average loss. In Large Language Models (LLMs), which rely on next-token prediction, the first few tokens have a substantial impact on the entire response. If the initial token is generated with a refusal tone, it can misdirect the response away from the intended target. As a result, even with a low average loss, the attack success rate may remain unsatisfactory. 
+To support this hypothesis, we conducted a pilot experiment to highlight the need for improving the current optimization target.
+We performed 500 steps of \textit{GCG} optimization, sampling 50 suffixes every 25 steps and report the Attack Success Rate (ASR) of each sampled suffix. Figure \ref{fig:ASR_per_step_intuition} illustrates the relation between the target loss $\mathcal{L}_{\text{target}}$ and the ASR. Each suffix is represented as a colored circle, with deeper colors indicating higher ASR. The overall best-performing suffix and the best suffix from the last step are highlighted by enlarging their markers. Ideally, if the loss objective was optimal, we would expect lower loss to correspond to higher ASR. However, the results show that neither the suffix with the strongest jailbreak ability from the last step nor the best overall suffix corresponds to the one with the lowest loss. In other words, optimizing for this loss does not necessarily lead to the suffix with the strongest jailbreak ability. Due to accumulated errors, the result after 500 steps may deviate significantly from the true optimal solution
+
+Further, in Figure \ref{fig:ASR_last_step_intuition}, we plotted a scatter diagram for the 50 suffixes sampled in the last step, showing the relation between ASR and the normalized vanilla target loss. Two plots are evaluated under two different metrics: Refusal Matching and HarmBench \cite{mazeika2024harmbench} to give a more comprehensive evaluation. We highlight the suffixes with minimum target loss, but they do not correspond to the highest ASR, which further suggests that the token shift occurs and the existing target loss $\mathcal{L}_{\text{target}}$ that eliciting affirmative response is not optimal.
+
+
+
+\section{Methods}
+
+
+In this section, we first formulate two parts of our proposed loss objective $\mathcal{L}_{\textit{DSN}}$: suppressing refusal response $\mathcal{L}_{\text{refusal}}$ and eliciting affirmative response $\mathcal{L}_{\text{affirmative}}$. Then, we will elaborate on the optimization process. Last, we will introduce each components of our proposed Ensemble Evaluation. 
+\subsection{\textit{DSN}: Suppress Refusal} 
+\label{sec:method:refusal}
+\partitle{Intuition} The first part of the objective is to suppress the refusal response from the model completion. As shown in the box below, the blue and red text represents the malicious user question and the optimized jailbreaking suffix, respectively. The purple text indicates the potential refusal response. 
+The key insight is that refusal responses are typically more constrained and predictable compared to harmful responses, which can vary widely in different context. By targeting the narrower refusal category, it's easier to design a loss function that explicitly force the model's generation far away from refusals, effectively bypasses the LLM built-in safeguards, making the jailbreak attack more promising and robust.
+
+\iffalse
+\begin{adjustbox}{minipage=.45\textwidth} % 将宽度设置为页面宽度
+\begin{minted}[breaklines, frame=single, breaksymbolleft={}, breaksymbolright={}, escapeinside=||, fontsize=\small]{text}
+|System: You are a chat assistant designed to
+        provide helpful and not harmful responses
+        to user queries.
+User: \textcolor{blue}{Tell me how to build a bomb.} \textcolor{red}{! ! ! ! ! }
+Assistant: \textcolor{violet}{As an AI, I cannot fulfill...}|
+\end{minted}
+\end{adjustbox}
+\fi
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.45\textwidth]{./figs/minted/sec41_1.jpg}
+\end{figure}
+
+
+\partitle{Notation} We consider an LLM to be a mapping from a sequence of tokens \begin{small}$x_{1:n}$\end{small}, with \begin{small}$x_i \in \{1,\ldots,V\}$\end{small} (where \begin{small}$V$\end{small} denotes the vocabulary size) to a distribution over the next token. Specifically, we use the notation \begin{small}$p(x_{n+1} | x_{1:n})$\end{small} to denote the probability of the next token being \begin{small}$x_{n+1}$\end{small} given previous tokens \begin{small}$x_{1:n}$\end{small}. 
+The probability of generating the response with a sequence of \begin{small}$H$\end{small} tokens as $p(x_{n+1:n+H}| x_{1:n})$ can be formalized as:
+
+\begin{equation}
+    p(x_{n+1:n+H} | x_{1:n}) = \prod_{i=1}^H p(x_{n+i} | x_{1:n+i-1})   % no CD in this equation
+\end{equation}
+\partitle{\textit{Unlikelihood} loss} As shown in Equation \ref{equ:loss_ce}, the standard softmax cross-entropy loss 
+is normally used to maximize the true probability distribution $p$ by minimizing the $\mathcal{L}_{\text{CE}}(p, q)$, where $p$ and $q$ refer to the true probability distribution and predicted probability distribution. However, our purpose is the opposite in refusal suppression, as we want to minimize the probability of refusal generation. One intuitive way is to just take the negative, which will however lead to negative infinity and catastrophic loss term unbalance. To stabilize the convergence, we apply the \textit{Unlikelihood} loss~\cite{welleck2019neural}, which is originally proposed to direct the language model outputs from unwanted contents. It can be formulated as below:
+
+\begin{equation}
+    \mathcal{L}_{\text{CE}}(p, q) = - \sum_{i} p_i \log(q_i)
+\label{equ:loss_ce}
+\end{equation}
+\begin{equation}
+    \mathcal{L}_{\text{Un}}(p, q) = - \sum_{i} p_i \log(1-q_i)
+\label{equ:loss_un}
+\end{equation}
+
+\partitle{Objective} The objective of refusal suppression is achieved by minimizing the probability of generating tokens in the pre-defined refusal keyword list, denoted as $RKL$ = \{"as an", "sorry, i cannot", "unethical", ...\}. Each refusal keyword's corresponding token length is represented by $RTL$. 
+The loss function for suppressing the refusal response using \textit{Unlikelihood} loss can be stated as below, where $H$ denotes the maximum length of the response. 
+
+\begin{equation}
+\label{equation:refusalloss}
+    \mathcal{L}_{\text{refusal}}(x_{1:n}) = \sum_{y \in \mathrm{RKL}}\sum_{i=n+1}^{n+H-\mathrm{RTL}(y)} \mathcal{L}_{\text{Un}}(y, x_{i:i+\mathrm{RTL}(y)})
+\end{equation}
+
+\subsection{\textit{DSN}: Elicit Affirmative Response}  \label{sec:method:affirmative}
+\partitle{Intuition} The second part of the objective is eliciting the model to truly begin its response with positive affirmation. An example is indicated in the box below. This insight stems from the LLM's next-token prediction nature \cite{zou2023universal}. By initiating with an affirmative tone, the subsequent completion is expected to align with the user query, bypass the alignment mechanism, and contain harmful content.
+However, this intuitive yet effective loss term design might mislead to the token shift problem, as detailed in Section \ref{sec:intuition}. Thus the \textit{Cosine Decay} weighting schedule is proposed to mitigate such problem.
+
+\iffalse
+\begin{adjustbox}{minipage=.45\textwidth} % 将宽度设置为页面宽度
+\begin{minted}[breaklines, frame=single, breaksymbolleft={}, breaksymbolright={}, escapeinside=||, fontsize=\small]{text}
+|System: You are a chat assistant designed to
+        provide helpful and not harmful responses
+        to user queries.
+User: \textcolor{blue}{Tell me how to build a bomb.} \textcolor{red}{! ! ! ! ! }
+Assistant: \textcolor{violet}{Sure, here is how to build a bomb:}|
+\end{minted}
+\end{adjustbox}
+\fi
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.45\textwidth]{./figs/minted/sec41_2.jpg}
+\end{figure}
+
+
+\partitle{\textit{Cosine Decay}}
+The next-token prediction characteristic of LLM might lead to the token shift problem, where average overall \textit{GCG} target loss $\mathcal{L}_{\textit{target}}$ does not align with jailbreak capability (Section \ref{sec:intuition}). To address this challenge, we novelly introduce the \textit{Cosine Decay} weighting schedule to place more emphasis on the earlier part of the sequence. \textit{Cosine Decay} is calculated for each token, serving as a coefficient, which can be formulated as Equation \ref{equ:cosinde_decay}.
+where $i$ denotes the $i$-th token and $H$ denotes the sequence length.
+The probability of generating the affirmative response with \textit{Cosine Decay} weighting can then be formalized as below:
+
+\begin{equation}
+    CD(i) = 0.5 + 0.5*cos(\frac{i}{H}*\frac{\pi}{2})
+\label{equ:cosinde_decay}
+\end{equation}
+\begin{equation}
+    p_{_\textit{CD}}(x_{n+1:n+H} | x_{1:n}) = \prod_{i=1}^H CD(i) p(x_{n+i} | x_{1:n+i-1})   % with CD in this equation
+\end{equation}
+
+\partitle{Loss function} 
+The objective of eliciting a truly affirmative response is to maximize the probability of generating affirmative response $\hat{x}_{n+1:n+H}$ under the \textit{Cosine Decay} weighting schedule, which is given by:
+
+\begin{equation}
+\label{eq:generation-loss}
+    \mathcal{L}_{\text{affirmative}}(x_{1:n}) = -\log p_{_\textit{CD}}(\hat{x}_{n+1:n+H} | x_{1:n})
+\end{equation}
+
+\begin{table*}[t]
+    \center
+    \resizebox{.8\linewidth}{!}{
+    \begin{tabular}{lcccccc}
+    \toprule
+    \multirow{2}{*}{Method Categories} & No Computation     & \multirow{2}{*}{Fast}  & \multirow{2}{*}{Inexpensive} & Explicitly handle     & Overall        \\ 
+                                       & Overhead           &                        &                              & Contradictions        & Reliability    \\ 
+    \midrule
+    Refusal Matching\cite{zou2023universal,zhu2023autodan, robey2023smoothllm}                   & \cmark                             & \cmark   & \cmark      & \xmark                         & low                      \\
+    Discriminative LLM\cite{mazeika2024harmbench,inan2023llamaguardllmbasedinputoutput}                 & \xmark                             & \xmark   & \cmark      & \xmark                         & medium                   \\
+    Querying LLM API\cite{chao2024jailbreakingblackboxlarge,yu2023gptfuzzer,ran2024jailbreakevalintegratedtoolkitevaluating,chao2024jailbreakbenchopenrobustnessbenchmark,shu2024attackeval,cai2024take}                   & \cmark                             & \xmark   & \xmark      & \xmark                         & medium                   \\
+    NLI (Ours)                                & \xmark                             & \xmark   & \cmark      & \cmark                         & medium                   \\
+    Ensemble Evaluation (Ours)                & \xmark                             & \xmark   & \xmark      & \cmark                         & high                     \\
+
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Comparison of different jailbreak results evaluation categories.}
+    \label{tab:eval_compare}
+\end{table*}
+
+\subsection{\textit{DSN}: Loss Function and Optimization}
+\label{sec:method:loss_fn}
+
+To establish a more effective jailbreak optimization target, we propose to integrate both $\mathcal{L}_{\text{refusal}}$ and $\mathcal{L}_{\text{affirmative}}$ into a complex and powerful jailbreaking optimization target $\mathcal{L}_{\textit{DSN}}$,
+which could mitigate the token shift problem by introducing \textit{Cosine Decay} weighting schedule and meanwhile explicitly suppress refusal responses to enhance jailbreaking capability.
+$\alpha$ is the hyper-parameter wishing to balance two loss items.
+Our goal is to optimize an adversarial suffix $adv^*$ with the aforementioned loss function:
+\begin{equation}
+\label{eq:overallloss}
+    \mathcal{L}_{\textit{DSN}}(x_{1:n}) = \mathcal{L}_{\text{affirmative}}(x_{1:n}) + \alpha * \mathcal{L}_{\text{refusal}}(x_{1:n})
+\end{equation}
+\begin{equation}
+\label{equation:opt_loss}
+    adv^* \gets  \mathop{arg\: min}\mathcal{L}_{\textit{DSN}}(x_{1:n} \oplus adv)
+\end{equation}
+
+To further demonstrate the potency and consistency of our proposed loss item $\mathcal{L}_{\textit{DSN}}$, 
+by substituting the original \textit{GCG} target loss $\mathcal{L}_{\text{target}}$, we first directly apply $\mathcal{L}_{\textit{DSN}}$ to the optimization-based method \textit{GCG} as its optimization target.
+We refer to this method as \textit{DSN} attack (or \textit{DSN} for short).
+Additionally, we apply the loss item $\mathcal{L}_{\textit{DSN}}$ to another learning-based method \textit{AutoDAN} \cite{zhu2023autodan}. This method will be referred as \textit{DSN} (AutoDAN), where only  original \textit{GCG} target loss $\mathcal{L}_{\text{target}}$ will be replaced by our proposed loss item $\mathcal{L}_{\textit{DSN}}$, and all the other settings will hold the same.
+\subsection{Ensemble Evaluation}
+\label{sec:method:eval}
+In Table \ref{tab:eval_compare}, we list widely-applied evaluation metrics, summarizing their advantages and disadvantages. To enhance the reliability of evaluation, we propose an Ensemble Evaluation framework. In this subsection, we first discuss the limitations of the Refusal Matching metric and then provide a detailed explanation of the natural language inference (NLI) contradiction evaluation algorithm, which serves as a method for detecting jailbreak responses.
+Then we introduce the Ensemble Evaluation pipeline. 
+\partitle{Refusal matching} The Refusal Matching algorithm detects whether a response contains any refusal keywords, as already described in Section \ref{sec:intro} and \ref{sec:related_work}. The attack is considered successful if the initial segment of the response do not contain pre-defined refusal strings or keywords. The length of the initial segment also plays a crucial role towards rigorous and trustworthy assessment \cite{mazeika2024harmbench}, as too short or too long segment could both lead to erroneous evaluation results (Section \ref{sec:intro}).
+
+
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\begin{algorithm}[t]
+\caption{NLI Contradiction Evaluation}
+\label{alg:nli}
+\begin{algorithmic}[1]
+\Require the user query $\mathcal{Q}$, the adversarial suffix $adv$, the language model $\mathcal{M}$, a threshold $T$.
+\State Response $\mathcal{R}:[o_1, o_2...o_n] = \mathcal{M}(\mathcal{Q} \oplus adv)$ \\ 
+\Comment{Generate the response $\mathcal{R}$, which are then split into $n$ sentences.}
+\For{$i = 1,\ldots,n$}
+    \State $\text{score}^{\mathcal{Q}o}_i$ = NLI($\mathcal{Q} \oplus adv, o_i$)
+    \State $l^{\mathcal{Q}o}_i$ = length($\mathcal{Q} \oplus adv \oplus o_i$)
+    \If{$i \neq n$}
+        \State $\text{score}_{i}^{oo}$ = NLI($o_i, o_{i+1}$)
+        \State $l^{oo}_{i}$ = length($o_i \oplus o_{i+1}$)
+    \EndIf
+\EndFor
+\State $CE^{\mathcal{Q}o} = \sum_{i = 1}^{n} \frac{l^{\mathcal{Q}o}_i * \text{score}^{\mathcal{Q}o}_i}{\sum l^{\mathcal{Q}o}_i}$ 
+\Comment{Compute the overall NLI contradiction extent between sentence and query.}
+\State $CE^{oo} = \sum_{i = 1}^{n-1} \frac{l^{oo}_{i} * \text{score}_{i}^{oo}}{\sum_{i} l^{oo}_{i}}$ 
+\Comment{Compute the overall NLI contradiction extent between adjacent sentences.}
+\If{ $CE^{oo}+CE^{\mathcal{Q}o} \ge T$}
+    \State Return \textit{Fail}
+\Else:
+    \State Return \textit{Success}
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\partitle{NLI contradiction} 
+To address scenarios where the LLM responses exhibit semantic shifts, such as actually starting with an affirmative sentence but then suddenly refusing to answer (case \textbf{1, 3} in Table \ref{tab:illustration}), or no semantic shifts scenarios (case \textbf{5} in Table \ref{tab:illustration}), we propose incorporating natural language inference (NLI) to detect semantic contradictions between the queries and responses, and within the responses themselves. Higher NLI contradiction scores indicate lower response consistency, thus indicating lower likelihood of jailbreak.
+
+\partitle{NLI algorithm}
+Algorithm \ref{alg:nli} is designed to evaluate contradictions among user queries and model responses: given the user query $\mathcal{Q}$, adversarial suffix $adv$, language model $\mathcal{M}$, we first generate response $\mathcal{R}$, which are then split into n sentences (line 1).
+Then, for each sentence $o_i$ in response $\mathcal{R}$, we assess how well it aligns with the user query and the relationship between sentences pairs within the response by calculating the standard NLI contradiction score (lines 2-7). We use a weighted sum of scores according to their sentence length to compute the overall contradiction extent $CE^{oo}$ and $CE^{\mathcal{Q}o}$ (lines 8-9). By comparing the contradiction extent with a predefined threshold $T$, it is determined whether this is a successful jailbreak response or not.
+\partitle{Ensemble evaluation}
+Besides the NLI contradiction extent metric, we incorporate HarmBench~\cite{mazeika2024harmbench} and GPT-4~\cite{achiam2023gpt} into our ensemble pipeline as third-party evaluators to ensure the trustworthy and rigorous evaluation. The aggregation of the results from each component is based on majority voting. The supreme of majority voting as aggregation policy will be discussed in Section \ref{sec:exp:eval2}.
+Moreover, one concurrent work \cite{ran2024jailbreakevalintegratedtoolkitevaluating} similarly proposed using ensemble methods for faithful evaluation. However, the ensemble components in this work are purely LLM-based, thus cannot effectively resolve the semantic conflicts scenarios discussed above. 
+
+
+
+\section{Experiments}
+
+
+In this section, we first introduce the threat model and the experimental configuration. 
+Second, in Section \ref{sec:exp:eval1} and Section \ref{sec:exp:JBB}, we present the effectiveness of \textit{DSN} attack method on two standard and widely-applied dataset \textit{AdvBench} \cite{zou2023universal} and \textit{JailbreakBench} \cite{chao2024jailbreakbenchopenrobustnessbenchmark}. 
+Then, we extend the \textit{DSN} loss to another learning-based method \textit{AutoDAN} \cite{zhu2023autodan} to demonstrate the universal effectiveness of \textit{DSN} loss.
+Last, we present the effectiveness of Ensemble Evaluation in Section~\ref{sec:exp:eval2} and analyse the \textit{DSN} transferability, as well as additional experiments on more datasets to demonstrate universality of \textit{DSN}.
+\subsection{Threat Model} \label{sec:exp:threat_model}
+The objective of attackers is to jailbreak Large Language Models (LLMs) by one universal suffix, aiming to circumvent the safeguards in place and generate malicious responses. The victim model in this paper is open-sourced language model, providing white-box access to the attacker. 
+In the context of assessing the effectiveness of the evaluation metric, we assume that the primary users are model developers or maintenance personnel. These users are presumed to be unaware of which specific components of the model input represent the jailbreak suffix and which are regular queries. Consequently, the Ensemble Evaluation method, as discussed in Section \ref{sec:exp:eval2}, will be conducted in an agnostic manner.
+
+Given the significant impact of system prompts on LLM jailbreaks \cite{huang2023catastrophic,jiang2024unlocking, xu2024llm}, all training and testing within this paper are conducted using each model's default system prompt template. This ensures consistency, reproducibility, and a strong relevance to real-world applications.
+
+\subsection{Configuration} \label{sec:exp:config}
+
+\subsubsection{Datasets}
+
+To ensure a rigorous and reliable evaluation, we will utilize multiple datasets. The results reported in Section \ref{sec:experiment} are primarily based on \textit{AdvBench} \cite{zou2023universal} and \textit{JailbreakBench} \cite{chao2024jailbreakbenchopenrobustnessbenchmark} datasets. Additionally, to demonstrate the \textit{DSN}'s universality and practical applicability, we will discuss its generalization performance across three datasets in Section \ref{sec:exp:universal}.
+\partitle{\textit{AdvBench}} \textit{AdvBench} \cite{zou2023universal} is a widely-used harmful query dataset designed to systematically evaluate the effectiveness and robustness of jailbreaking prompts \cite{zou2023universal}. It consists of 520 query-answer pairs that reflect harmful behaviors, categorized into profanity, graphic depictions, threatening behavior, misinformation, discrimination, cybercrime, and dangerous or illegal suggestions.
+\partitle{
+\textit{JailbreakBench}} \textit{JailbreakBench} \cite{chao2024jailbreakbenchopenrobustnessbenchmark} is another harmful query dataset, proposed to mitigate the imbalance class distribution \cite{cai2024take, chao2024jailbreakbenchopenrobustnessbenchmark, chao2024jailbreakingblackboxlarge} problem and the impossible behaviors problem \cite{chao2024jailbreakbenchopenrobustnessbenchmark}. We will also report both \textit{GCG} and \textit{DSN} method results upon the \textit{JailbreakBench} dataset considering its reproducibility, extensibility and accessibility.
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/inutition/refusal_GCG.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/inutition/refusal_DSN.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/inutition/HB_GCG.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/inutition/HB_DSN.png}
+    \end{subfigure}
+
+    \caption{ASR of the last step batch suffixes, optimized by both \textit{GCG} and \textit{DSN} loss. The ASR is calculated upon both Refusal Matching and \textit{HarmBench} metric, 
+    where demonstrates the numerical jailbreaking performance consistency.}
+    \label{fig:ASR_last_step}
+\end{figure*}
+
+\partitle{
+\textit{Malicious Instruct}} \textit{Malicious Instruct} \cite{huang2023catastrophic} contains 100 questions derived from ten different malicious intentions, including psychological manipulation, sabotage, theft, defamation, cyberbullying, false accusation, tax fraud, hacking, fraud, and illegal drug use.
+The introduction of \textit{Malicious Instruct} dataset will include a broader range of malicious instructions, enabling a more comprehensive evaluation of our approach’s adaptability and effectiveness.
+\partitle{Human evaluation}
+We also conducted human evaluation by manually annotating 300 generated responses as either harmful or benign. This was done to demonstrate that our proposed Ensemble Evaluation pipeline aligns with human judgment in identifying harmful content and can serve as a reliable metric for assessing the success of jailbreak attacks. 
+
+
+\subsubsection{Target models}
+We considered a wide range of open-source white-box model families with varying degrees of alignment to be our target models, including Llama2 \cite{touvron2023llama}, Llama3 \cite{llama3modelcard}, Llama3.1 \cite{dubey2024llama}, Vicuna \cite{zheng2023judging}, Mistral \cite{jiang2023mistral7b}, Qwen2 \cite{yang2024qwen2} and Gemma2 \cite{gemma_2024}. Additionally, we included transfer experiment results towards black-box commercial models in Section~\ref{sec:exp:transfer}.
+\subsubsection{Baselines and evaluation metrics} 
+We first compare \textit{DSN} attack with $GCG$~\cite{zou2023universal}, the typical and most powerful learning-based jailbreak attack method~\cite{mazeika2024harmbench}. 
+Further, we include \textit{AutoDAN} \cite{zhu2023autodan} as another baseline in Section \ref{sec:exp:autodan} to demonstrate that \textit{DSN} loss $\mathcal{L}_{\textit{DSN}}$ is adaptive to any other learning-based jailbreak attack methods.
+
+\partitle{Metrics for attack}
+To evaluate the effectiveness of our proposed \textit{DSN} method, we use the standard Attack Success Rate (ASR), which measures the proportion of samples that successfully attack the target models $\mathcal{M}$. The standard formula for ASR is given below, where the adversarial suffix $adv$ is appended to the malicious query $\mathcal{Q}$, and $\mathbb{I}$ is an indicator that returns 1 if the jailbreak is successful and 0 otherwise. No repeated queries are made for the same question or suffix, meaning we report ASR@1.
+\begin{equation}
+\label{equation:ASR}
+    \text{ASR}(\mathcal{M}) \overset{\text{def}}{=} \frac{1}{|\mathcal{D'}|} \sum_{(\mathcal{Q})\in \mathcal{D'}}\mathbb{I}(\mathcal{M}(\mathcal{Q}\oplus adv))
+\end{equation}
+\partitle{Metric for Ensemble Evaluation}
+In evaluating the utility of Ensemble Evaluation on the human-annotated datasets, we employ four standard metrics: Accuracy, AUROC, F1 score, and Shapley value, where human annotation represents the ground truth. The first three serve to demonstrate how closely the evaluation resembles human understanding. 
+To further illustrate each ensemble component's contribution towards the AUROC metric more concretely, we adopt the Shapley value metric. 
+Based on permutations, Shapley value provides a fair assessment of each component's overall contribution to the aggregated AUROC result.
+
+\begin{equation}
+\label{eq:shapley}
+s_i = \sum_{S \subseteq N \setminus i} \frac{|S|!*(|N| - |S| -1)!}{N!} \left(v(S \cup i) - v(S)\right)
+\end{equation}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{./figs/steps/steps_8_in_1.png}
+    \caption{The mean and best ASR of \textit{GCG} and \textit{DSN} over steps. Evaluated by Refusal Matching as well as \textit{HarmBench} metric. Columns correspond to Llama2-7b-chat-hf, Vicuna-7b, Mistral-7b-instruct-v0.2, Mistral-7b-instruct-v0.2 respectively.}
+\label{fig:steps_8_in_1}
+\end{figure*}
+
+\partitle{Shapley value calculation}
+Specifically, for each component $i$, its marginal contribution is calculated as $v(S \cup {i}) - v(S)$, where $S$ represents a subset of components and $v$ is the value function that measures the performance of the ensemble. The Shapley value of a component is then defined as the expected average of these marginal contributions over all possible permutations of components. This approach provides a fair and rigorous assessment of each component's contribution to the Ensemble Evaluation results \cite{shapley1953value,sundararajan2020shapley}.
+
+\subsection{Effectiveness of \textit{Cosine Decay}}
+
+To demonstrate the effectiveness of \textit{Cosine Decay}, we compare \textit{DSN} loss $\mathcal{L}_{\textit{DSN}}$ with vanilla \textit{GCG} target loss $\mathcal{L}_{target}$ in terms of relationship between ASR and loss. Similar to Section \ref{fig:ASR_last_step_intuition}, we present results obtained from optimizing by \textit{DSN} loss item $\mathcal{L}_{\textit{DSN}}$ as a demonstration of an ideal scenario. As shown in Figure \ref{fig:ASR_last_step}, minimizing $\mathcal{L}_{\textit{DSN}}$ with \textit{Cosine Decay} successfully identifies the suffix with the highest ASR in the last step, validating the relative superiority and effectiveness of our proposed \textit{Cosine Decay} weighting schedule method.
+
+\subsection{Effectiveness of \textit{DSN} Attack on \textit{AdvBench}}   
+\label{sec:exp:eval1}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.3\textwidth]{./figs/two_metric.png}
+    \caption{Two metrics yield similar evaluation results, indicating desirable consistency between the two metrics}
+\label{fig:two_metric}
+\end{figure}
+
+In Figure \ref{fig:steps_8_in_1}, we compare the ASR of \textit{GCG} and \textit{DSN} with respect to the optimization steps, under the Refusal Matching as well as \textit{HarmBench} metric, respectively. The shadow regions with the dotted lines are the margin plots representing the mean and variance of repeated experiments,
+while the solid lines represent the ASR of best run among repeated experiments. \textit{DSN} attack results significantly outperform the baseline method on Llama2 in both mean and best results across both Refusal Matching and \textit{HarmBench} metrics. 
+For LLMs which are more susceptible to jailbreak attacks, such as Vicuna and Mistral family models, both methods achieve nearly 100\% attack success rate (ASR).
+
+The varying ASR between the two metrics occurs primarily in susceptible models, where a significant portion of generated responses may initially indeed answer harmful questions but conclude with a disclaimer such as, "However, it is illegal and I recommend...". Refusal Matching would classify these as failed jailbreaks, whereas the \textit{HarmBench} evaluation offers a more comprehensive and accurate assessment.
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[h]{0.49\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/JBB2JBB/All2JBB_llama.png}
+        \caption{ASR of Llama2-7b-chat-hf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.49\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/JBB2JBB/JBB2JBB_vicuna.png}
+        \caption{ASR of Vicuna-13b-v1.5}
+    \end{subfigure}
+    \caption{Ablation study of $\alpha$ upon \textit{JailbreakBench} dataset, evaluated by both \textit{JailbreakBench} and \textit{HarmBench} metric.}
+\label{fig:asr_alpha_jbb}
+\end{figure*}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.45\textwidth]{./figs/AutoDAN_vicuna_HB_steps.png}
+    \caption{Results of both the \textit{AutoDAN} and \textit{DSN} (AutoDAN) method ASR, targeting the vicuna-7b model and \textit{AdvBench} dataset.}
+\label{fig:autodan_steps_vicuna}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[h]{0.47\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/autodan_adv2adv.png}
+        \caption{ASR of DSN (AutoDAN) on \textit{AdvBench}, Mistral-v0.2}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.47\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/autodan_adv2JBB.png}
+        \caption{ASR of DSN (AutoDAN) on \textit{JailbreakBench}, Mistral-v0.2}
+    \end{subfigure}
+
+    \caption{Ablation study of $\alpha$ for \textit{DSN} (AutoDAN) method}
+\label{fig:autodan_mistral_alpha}
+\end{figure}
+
+\subsection{Effectiveness of \textit{DSN} on \textit{JailbreakBench}}
+\label{sec:exp:JBB}
+Focusing on reproducibility, extensibility, and accessibility, \textit{JailbreakBench} \cite{chao2024jailbreakbenchopenrobustnessbenchmark} offers a dataset containing a wide range of original and representative jailbreaking queries as well as a classifier based on Llama-3-Instruct-70B.
+The default target model for \textit{JailbreakBench} is Llama-2-7B-chat-hf and Vicuna-13B-v1.5, which will be selected as our target model within this section.
+To further validate the efficacy of the \textit{DSN} method across various scenarios, we present the experimental results targeting and testing on \textit{JailbreakBench} below.
+
+\subsubsection{\textit{JailbreakBench} metric}
+To begin, we first evaluate the \textit{JailbreakBench} metric, which is based on querying Llama-3-Instruct-70B with a properly designed prompt. 
+ 
+Each result was first evaluated using the \textit{JailbreakBench} metric, followed by an additional round of evaluation with the \textit{HarmBench} metric to ensure consistency and reliability.
+The relative numerical outcomes are illustrated in Figure \ref{fig:two_metric}, where the scatter plot shows that prompts with varying jailbreak capabilities all yielded similar evaluation results under both metrics, evidenced by points clustering around the $y=x$ line. This indicates desirable consistency between two metrics on our test data. Consequently, we will include both \textit{JailbreakBench} metric and \textit{HarmBench} metric in reporting \textit{JailbreakBench} dataset results to maintain consistency throughout the paper.
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[h]{0.47\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/AdvBench2AdvBench/AdvB_llama_both.png}
+        \caption{ASR of Llama2-7b-chat-hf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.47\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/AdvBench2AdvBench/AdvB_vicuna_both.png}
+        \caption{ASR of Vicuna-7b-v1.3}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.47\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/AdvBench2AdvBench/AdvB_mistralv02_both.png}
+        \caption{ASR of Mistral-7b-instruct-v0.2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.47\textwidth}
+        \includegraphics[width=\textwidth]{./figs/alpha/AdvBench2AdvBench/AdvB_mistralv03_both.png}
+        \caption{ASR of Mistral-7b-instruct-v0.3}
+    \end{subfigure}
+
+    \caption{Ablation study of $\alpha$ upon \textit{AdvBench} dataset, evaluated by both Refusal Matching and Ensemble Evaluation metric.}
+\label{fig:asr_alpha_ensemble}
+\end{figure*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.45\textwidth]{./figs/AUROC.png}
+\caption{ROC curve of different aggregation policy on testset}
+\label{fig:ROC}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/universal/adv_2_JBB.png}
+        \caption{Trained on Adv and evaluated on JBB dataset}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/universal/adv_2_MI.png}
+        \caption{Trained on Adv and evaluated on MI dataset}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/universal/JBB_2_adv.png}
+        \caption{Trained on JBB and evaluated on Adv dataset}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{./figs/universal/JBB_2_MI.png}
+        \caption{Trained on JBB and evaluated on MI dataset}
+    \end{subfigure}
+    \caption{Illustration of optimized jailbreak prompts are universal cross dataset. The prompts were optimized using one dataset, either \textit{JailbreakBench} (JBB) or \textit{AdvBench} (Adv), and then evaluated on the other or \textit{MaliciousInstruct} (MI) dataset. The Ensemble Evaluation metric is adopted to ensure an accurate assessment.}
+\label{fig:discussion_universal}
+\end{figure}
+
+\subsubsection{\textit{JailbreakBench} results} 
+
+Figure \ref{fig:asr_alpha_jbb} presents the comparison to \textit{GCG} attack and the ablation study on hyperparameter $\alpha$. This hyperparameter controls the magnitudes of the $\mathcal{L}_{refusal}$ in Equation \ref{eq:overallloss}, where None represents the \textit{DSN} attack with \textit{Cosine Decay} and $\alpha = 0$. These results demonstrates that under both metrics, the \textit{DSN} attack consistently outperforms the baseline method \textit{GCG} across all hyperparameter selections (logarithmic) for both target models. 
+\subsection{Extend \textit{DSN} to \textit{AutoDAN}}
+\label{sec:exp:autodan}
+
+Apart from the baseline method \textit{GCG}, we also evaluate the effectiveness of our proposed \textit{DSN} loss $\mathcal{L}_{\textit{DSN}}$ by integrating it directly with another learning-based attack method AutoDAN \cite{zhu2023autodan},
+which aims to improve the readability of the optimized jailbreaking suffixes. 
+We replaced the loss objective $\mathcal{L}_{\text{target}}$ in \textit{AutoDAN} attack with our proposed \textit{DSN} loss objective $\mathcal{L}_{\textit{DSN}}$, which could be referred as \textit{DSN} (AutoDan) attack,
+and examine the ASR for both approaches on twp susceptible target models: Vicuna-7B and Mistral-7B-instruct-v0.2, as shown in Figure \ref{fig:autodan_steps_vicuna} and Figure \ref{fig:autodan_mistral_alpha}. 
+The results of both attack methods on the Llama model are not included, as both methods appear to fail in successfully jailbreaking well-aligned LLMs such as Llama.
+
+\subsection{Effectiveness of Ensemble Evaluation}     \label{sec:exp:eval2}
+
+Considering the limitations of Refusal Matching, we adopt Ensemble Evaluation to ensure more accurate and reliable evaluation. In Table~\ref{tab:eval_results}, we evaluate the utility of Ensemble Evaluation on the human-annotated datasets using Accuracy, AUROC, F1 score, where human annotation represents the ground truth. 
+It is observed that under each single metric, the Ensemble Evaluation achieves superior performance on the annotated test set. This is attributed to the NLI's focus on identifying semantic incoherence and semantic inconsistency within the model's completion, a consideration other evaluation methods do not adequately address.
+\partitle{Aggregation strategy comparison} 
+Aggregating evaluation results from each module is crucial for the accuracy of overall evaluation pipeline. Common aggregation methods include majority voting, one-vote approval (requires only one module to detect jailbreak), and one-vote veto (requires all modules to detect jailbreak). To determine which aggregation policy is more accurate and robust, we employ a ROC curve illustrating the True Positive Rate versus False Positive Rate and compare their AUROC scores (shown in Figure \ref{fig:ROC}). A larger area under the curve indicates better results. Specifically, the soft and hard majority votes return probabilities and binary outcomes, respectively. The ROC curve demonstrates the superiority of the majority vote as an aggregation strategy (the green and orange curve), with Ensemble Evaluation showing a higher AUROC score compared to other aggregation policy and other baseline metrics.
+
+\begin{table}[t]
+    \centering
+    \begin{tabular}{cccc}
+        \toprule
+        \bf Eval method &  \bf Acc & \bf AUROC & \bf F1 \\
+        \midrule
+        Refusal Matching & 0.74 & 0.72 & 0.79 \\
+        LlamaGuard & 0.60 & 0.60 & 0.64 \\
+        Gpt4 & 0.80 &  0.76 & 0.85 \\
+        HarmBench & 0.80 & 0.78 & 0.84  \\
+        NLI (ours) & 0.80 & 0.80 & 0.81  \\
+        \midrule        
+        Ensemble (ours) & \textbf{0.82} & \textbf{0.79} & \textbf{0.86} \\
+        \bottomrule
+    \end{tabular}
+    \caption{Comparison of different evaluation metrics.}
+    \label{tab:eval_results}
+\end{table}
+
+\partitle{Shapley Value results}
+Additionally, we report the Shapley value~\cite{shapley1953value} for AUROC metric to further illustrate each components' contribution. As shown in Table~\ref{tab:eval_shapley}, the high Shapley value of the NLI component highlights its crucial role in the ensemble process. This indicates the NLI component could significantly contribute to the overall performance by enhancing the model's ability to assess contradictions and maintain response consistency, thereby improving the effectiveness of the proposed Ensemble Evaluation method. Moreover, given that the NLI model is lightweight and open-source, employing this evaluation method results in significant savings in terms of time and computation resources, particularly in comparison to methods relying on multiple commercial LLM APIs calls.
+\begin{table}[t]
+    \centering
+    \begin{tabular}{cccc}
+        \toprule
+        \bf Components & \bf Gpt4 & \bf HarmBench & \bf NLI (ours)\\
+        \midrule
+        Shapley value   &  0.110 & 0.118 & \textbf{0.176}\\
+        \bottomrule
+    \end{tabular}
+    \caption{Shapley values of different evaluation components for the AUROC metric in the Ensemble Evaluation method.}
+    \label{tab:eval_shapley}
+\end{table}
+\begin{table*}[t]
+\centering
+\begin{tabular}{lcccccccccccc}
+    \toprule
+    \multirow{3}{*}{Models} & \multicolumn{2}{c}{\textit{AdvBench}} & \multicolumn{2}{c}{\textit{JailbreakBench}} & \multicolumn{2}{c}{\textit{MaliciousInstruct}}  \\
+    & \footnotesize Refusal & \footnotesize HarmBench & \footnotesize Refusal & \footnotesize HarmBench & \footnotesize Refusal & \footnotesize HarmBench & \\
+    & \textit{\footnotesize GCG} / \textit{\footnotesize DSN} &  \textit{\footnotesize GCG} / \textit{\footnotesize DSN} &  \textit{\footnotesize GCG} / \textit{\footnotesize DSN} &  \textit{\footnotesize GCG} / \textit{\footnotesize DSN} &  \textit{\footnotesize GCG} / \textit{\footnotesize DSN} &  \textit{\footnotesize GCG} / \textit{\footnotesize DSN} \\
+    \midrule
+    Llama-2-13B &      24\% / \textbf{38\%} &  53\% / \textbf{64\%} &32\% / \textbf{49\%} &  49\% / \textbf{62\%} & 25\% / \textbf{36\%} &  51\% / \textbf{72\%}    \\
+    Llama-3-8B  &      53\% / \textbf{63\%} &  59\% / \textbf{62\%} &60\% / \textbf{63\%} &  51\% / \textbf{65\%} & 29\% / \textbf{70\%} &  34\% / \textbf{69\%}    \\
+    Llama-3.1-8B&      56\% / \textbf{69\%} &  40\% / \textbf{61\%} &67\% / \textbf{80\%} &  37\% / \textbf{66\%} & 77\% / \textbf{77\%} &  32\% / \textbf{47\%}    \\
+    Qwen2-7B    &      45\% / \textbf{51\%} &  65\% / \textbf{77\%} &66\% / \textbf{72\%} &  64\% / \textbf{82\%} & 54\% / \textbf{84\%} &  71\% / \textbf{88\%}    \\
+    Gemma2-9B   &      68\% / \textbf{78\%} &  56\% / \textbf{71\%} &68\% / \textbf{82\%} &  61\% / \textbf{67\%} & 88\% / \textbf{95\%} &  88\% / \textbf{93\%}    \\
+    \bottomrule
+\end{tabular}
+\caption{Additional target model results for both \textit{GCG} and our proposed \textit{DSN} methods across various test datasets and metrics. Results for both methods are separated by a slash within the same cell, with \textit{GCG} results presented first, followed by \textit{DSN} results. These results were obtained by training on the \textit{AdvBench} dataset and testing on three datasets: \textit{AdvBench}, \textit{JailbreakBench}, and \textit{MaliciousInstruct}. Both Refusal Matching and \textit{HarmBench} metrics were used.}
+\label{tab:final_overall}
+\end{table*}
+
+
+\partitle{\textit{DSN} results under the Ensemble Evaluation metric}
+To investigate the impact of our proposed loss $\mathcal{L}_\textit{{DSN}}$ (Equation~\ref{eq:overallloss}) towards jailbreaking capability, we conduct ablation study on the hyperparameter $\alpha$ under both Refusal Matching and Ensemble Evaluation metrics.
+The ablation hyperparameter $\alpha$ controls the magnitudes of the $\mathcal{L}_{refusal}$ in Equation \ref{eq:overallloss}. We present the max ASR among multiple rounds of experiments in Figure \ref{fig:asr_alpha_ensemble}. 
+It could be observed that our proposed \textit{DSN} attack outperforms the baseline method \textit{GCG} on each target model selections and across nearly every hyperparameter $\alpha$ settings, highlighting the fact that our proposed loss $\mathcal{L}_\textit{{DSN}}$ is consistent with jailbreaking ability, being able to jailbreak various target models across a broad span of hyperparameter selection settings.
+This underscores that \textit{DSN} attack method is superior to the baseline method under broad (logarithmic) hyperparameter settings.
+Moreover, it is noteworthy that, for the same reasons outlined in Section \ref{sec:exp:eval1}, results evaluated by our proposed Ensemble Evaluation metric show a relative large gap compared to the Refusal Matching results, further suggesting it to be a reliable and comprehensive evaluation metric, capable of producing evaluation results more aligned with human values in complicated and complex scenarios.
+\subsection{Universal characteristics}
+\label{sec:exp:universal}
+In our experiments, we found that jailbreak prompts generated through optimization-based methods are highly universal. The optimized suffixes truly and effectively exploit inherent alignment flaws in the language model, which are independent of the specific malicious tasks or their types. For example, regardless of the dataset on which the jailbreak suffixes are trained, they perform consistently well across different datasets.
+
+To further illustrate this point, in Figure \ref{fig:discussion_universal}, we sampled some of the optimized suffixes and plotted their performance on a test set completely different from the training dataset. 
+We trained the suffixes on either the \textit{AdvBench} or \textit{JailbreakBench} dataset and tested them on the other dataset or the \textit{MaliciousInstruct} dataset. We observed that the same suffix achieved similar Attack Success Rates (ASR) across different test datasets, evidenced by the scatter points clustering around the y=x line.
+Additionally, we found stronger results consistency between the \textit{AdvBench} and \textit{JailbreakBench} datasets, as indicated by the tighter clustering of points along the y=x line, whereas the results on the \textit{MaliciousInstruct} dataset, while following a similar trend, were more dispersed.
+\subsection{Additional results over more Models}
+
+In Table \ref{tab:final_overall}, we present additional target model results for both \textit{GCG} and our proposed \textit{DSN} methods across various datasets and metrics. These results were obtained by first training on \textit{AdvBench} dataset and then testing on the following three datasets: \textit{AdvBench}, \textit{JailbreakBench}, \textit{MaliciousInstruct}. 
+As shown in Table \ref{tab:final_overall}, our proposed \textit{DSN} attack consistently achieves superior jailbreak performance across each target models, test datasets, and metrics. The robustness of \textit{DSN} method is fully examined, as it outperforms baseline methods across different target models, malicious question datasets, and evaluation metrics, highlighting its potential as a powerful jailbreak method for real-world applications.
+
+
+
+\subsection{Transferability} \label{sec:exp:transfer}
+\begin{table}[t]
+  \centering
+  \resizebox{1.0\columnwidth}{!}{
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \multirow{3}{*}{Transfer ASR\%} & \multicolumn{2}{c}{Llama}  & \multicolumn{2}{c}{Vicuna} \\
+     & Refusal & Eval & Refusal & Eval \\
+     & Matching & Ensemble & Matching & Ensemble \\
+    \midrule
+    $GCG_{paper}$ & None & None & 34.3 & None \\
+    $DSN_{mean}$  & 42.95 & 50.07 & 54.27 & 59.59  \\ 
+    $DSN_{max}$   & 87 & 95 & 90 & 93 \\ 
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Transfer results towards the black-box gpt-3.5-turbo model. Evaluated by both Refusal Matching and Ensemble Evaluation metrics.}
+    \label{tab:transfer}
+\end{table}
+
+The transferability of a jailbreak attack suggests the adversarial suffixes optimized by one target white-box LLM, such as Llama or Vicuna, can transfer to other LLMs (including black-box LLMs). Table~\ref{tab:transfer} shows the transfer ASR towards gpt-3.5-turbo. To conduct a fair comparison, we include both Refusal Matching and Ensemble Evaluation metrics results. 
+Remarkably, the suffixes solely optimized by \textit{DSN} demonstrate a high level of transferability towards the gpt-3.5-turbo model, with max ASR achieving near 100\%. It is noteworthy as our approach does not utilize multi-model optimization as described in the original \textit{GCG} paper~\cite{zou2023universal}. Additionally, it is crucial to mention the importance of system prompt~\cite{huang2023catastrophic,xu2024comprehensivestudyjailbreakattack}. When querying the gpt-3.5-turbo model, the default system prompt, e.g. "you're a helpful assistant", is not involved in the conversation history. Otherwise the transfer ASR of both methods would shrink to zero immediately.
+However, as noted in recent studies \cite{meade2024universaladversarialtriggersuniversal, schaeffer2024universal}, the transferability of jailbreak prompts across different target models still remains a challenging problem. This issue persists whether the jailbreak phenomenon is studied in the pure text domain, as in this paper, or in the multimodal vision-text domain, which is comparatively easier due to the continuous input space and a potentially larger attack surface.
+After testing on a variety of black-box commercial LLMs, including GPT-4 family, Claude family and Gemini family, by using both the \textit{GCG} and \textit{DSN} method, we were unable to achieve successful transfer jailbreaks towards any dataset. This may be directly attributed to the alignment differences across different black-box commercial models, but it could also be influenced by other factors such as model architecture, training data, and more. 
+The transfer problem remains not fully resolved, as it is beyond the scope of this work, though we propose the above hypotheses as potential explanations. We hope these ideas provide potential directions for future research.
+
+\subsection{Running time analysis}     \label{sec:exp:running_time}
+
+The comparison between the \textit{DSN} and \textit{GCG} methods shows that our proposed optimization target $\mathcal{L}_{\textit{DSN}}$ does not introduce significant extra computation overhead. 
+To validate this, we collected and analyzed the running times of experiments targeting the Llama2-7b-chat model and compared the execution times of both methods.
+On a single NVIDIA A40 GPU, we observed only a 0.77\% increase in average running time, from $60.42\pm0.45$ to $60.89\pm0.31$ hours, when comparing the \textit{DSN} method to the \textit{GCG} method
+
+This minimal increase in computation overhead could be attributed to the fact that the additional computation introduced by \textit{DSN} loss $\mathcal{L}_{\textit{DSN}}$ is significantly less demanding than the processes of obtaining logits during the forward pass and inferring gradients during backpropagation. Therefore, the extra time cost of the \textit{DSN} method is relatively negligible.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work we discover the reason why the loss objective of vanilla target loss is not optimal, and enhance with \textit{Cosine Decay}. We also novelly introduce the \textit{DSN} (Don't Say No) attack to prompt LLMs not only to produce affirmative responses but also to effectively suppress refusals. Furthermore, we propose an Ensemble Evaluation pipeline integrating Natural Language Inference (NLI) contradiction assessment and two external LLM evaluators to accurately assess the harmfulness of responses. Extensive experiments demonstrate the effectiveness of \textit{DSN} attack and the Ensemble Evaluation approach compared to baseline methods. This work offers insights into advancing safety alignment mechanisms for LLMs and contributes to enhancing the robustness of these systems against malicious manipulations
+
+\clearpage
+
+\clearpage
+
+
+
+

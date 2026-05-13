@@ -1,0 +1,227 @@
+\title{Track-On: Transformer-based Online Point Tracking with Memory}
+
+\begin{abstract}
+In this paper, we consider the problem of long-term point tracking, which requires consistent identification of points across multiple frames in a video, despite changes in appearance, lighting, perspective, and occlusions. We target online tracking on a frame-by-frame basis, making it suitable for real-world, streaming scenarios. Specifically, we introduce Track-On, a simple transformer-based model designed for online long-term point tracking. Unlike prior methods that depend on full temporal modeling, our model processes video frames sequentially without access to future frames, leveraging two memory modules —spatial memory and context memory— to capture temporal information and maintain reliable point tracking over long time horizons. At inference time, it employs patch classification and refinement to identify correspondences and track points with high accuracy. Through extensive experiments, we demonstrate that Track-On sets a new state-of-the-art for online models and delivers superior or competitive results compared to offline approaches on TAP-Vid benchmark. Our method offers a robust and scalable solution for real-time tracking in diverse applications.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Motion estimation is one of the core challenges in computer vision, with applications spanning video compression (Jasinschi et al., 1998), video stabilization (Battiato et al., 2007; Lee et al., 2009), and augmented reality (Marchand et al., 2015). The objective is to track physical points across video frames accurately. A widely used solution for motion estimation is optical flow, which estimates pixel-level correspondences between adjacent frames. In principle, long-term motion estimation can be achieved by chaining together these frame-by-frame estimations.  
+
+Recent advances in optical flow techniques, such as PWC-Net (Sun et al., 2018) and RAFT (Teed & Deng, 2020), have improved accuracy for short-term motion estimation. However, the inherent limitations of chaining flow estimations remain a challenge, namely error accumulation and the difficulty of handling occlusions. To address long-term motion estimation, Sand & Teller (2008) explicitly introduced the concept of pixel tracking, a paradigm shift that focuses on tracking individual points across a video, rather than relying solely on pairwise frame correspondences. This concept, often referred to as “particle video” has been revisited in recent deep learning methods like PIPs (Harley et al., 2022) and TAPIR (Doersch et al., 2023), which leverage dense cost volumes, iterative optimization, and learned appearance updates to track points through time.  
+
+Despite the advancements, the existing methods for long-term point tracking face two major limitations. First, they primarily rely on offline processing, where the entire video or a large window of frames is processed at once. This allows models to use both past and future frames to improve predictions but inherently limits their applicability in real-world scenarios (Doersch et al., 2024; 2023; Karaev et al., 2024; Harley et al., 2022; Li et al., 2024). Second, these approaches struggle with scalability, as they often require full attention computation across all frames, leading to significant memory overhead, especially for long videos or large frame windows. These limitations hinder their use in real-world applications, like robotics or augmented reality, where efficient and online processing of streaming video is crucial.  
+
+In this paper, we address the challenge of long-term point tracking in an online processing setting (Fig. 1, right), where the model processes video frames sequentially, without access to future frames (Vecerik et al., 2023). We propose a simple transformer-based model, where points of interest are treated as queries in the transformer decoder, attending the current frame to update their features. Unlike existing methods that aggregate temporal information across video frames, we achieve temporal continuity by updating the query representations with information from two specialized memory modules: spatial memory and context memory. This design enables the model to maintain reliable point tracking over time while avoiding the high computational and memory costs associated with full temporal modeling across entire video sequences.  
+
+![](images/402f382d758f48797d990886ade7c8baa4477232366a984cadd33d6f3d7d7ca3.jpg)  
+Figure 1: Offilne vs. Online Point Tracking. We propose an online model, tracking points frame-byframe (right), unlike the dominant offilne paradigm where models require access to all frames within a sliding window or the entire video (left). In contrast, our approach allows for frame-by-frame tracking in videos of any length. To capture temporal information, we introduce two memory modules: spatial memory, which tracks changes in the target point, and context memory, which stores broader contextual information from previous states of the point.  
+
+Specifically, spatial and context memory play distinct but complementary roles. The former aims to reduce tracking drift by updating the query representation with information from the latest frames. This ensures that the query reflects the most recent visual appearance of the tracked point, by storing the content around the model’s predictions in previous frames, rather than relying on features of the initial point. On the other hand, context memory provides a broader view of the track’s history, storing the point’s embeddings from past frames. This allows the model to consider changes to visual content including key information about the point’s status, such as whether the point was occluded in previous frames. Overall, spatial memory focuses on positional changes in predictions over time while context memory ensures temporal continuity by providing a full perspective of the track’s evolution. Together, these two memory modules aggregate useful temporal information across video.  
+
+At training time, the queries from the transformer decoder identify the most likely location by computing embedding similarity with each patch, and are trained using similarity-based classification, akin to contrastive learning. The prediction is then refined by estimating an offset within the local region using a deformable attention block to find the final correspondence. We conduct extensive experiments demonstrating that our simple patch-classification and refinement approach serves as a strong alternative to the dominant iterative update paradigm (Karaev et al., 2024; Harley et al., 2022; Doersch et al., 2023). Our method sets a new state-of-the-art among online models and either matches or surpasses offline approaches on datasets in the TAP-Vid benchmark (Doersch et al., 2022).  
+
+In summary, our contributions are as follows: (i) A simple architecture that treats points of interest as queries in the transformer decoder, identifying correspondences through patch classification and refinement; (ii) Memory modules that effectively store past content and address feature drift in an online manner; (iii) Extensive experiments and ablations demonstrating state-of-the-art performance among online models and competitive results compared to offilne models on the TAP-Vid benchmark.  
+
+
+
+\section{2 METHODOLOGY  }
+
+
+Given an RGB video of $T$ frames, $\mathcal{V}=\left\{\mathbf{I}_{1},\,\mathbf{I}_{2},\,.\,.\,.\,,\,\mathbf{I}_{T}\right\}\in\mathbb{R}^{T\times H\times W\times3}$ , and a set of $N$ predefined queries, $\mathcal{Q}=\left\{(t^{1},\mathbf{p}^{1})\right.$ , $(t^{2},{\bf p}^{2})$ , . . . , $(t^{N},\mathbf{p}^{N})\rbrace\,\in\,\mathbb{R}^{N\times3}$ , where each query point is specified  
+
+![](images/22421804358751a2bfdd375e38e12ba03ee354b9bfa4c1bc67581a9554b293f4.jpg)  
+
+Figure 2: Overview. We introduce Track-On, a simple transformer-based method for online, frameby-frame point tracking. The process involves three steps: (i) Visual Encoder, which extracts features from the given frame; (ii) Query Decoder, which decodes interest point queries using the frame’s features; (iii) Point Prediction, where correspondences are estimated in a coarse-to-fine manner, first through patch classification based on similarity, followed by refinement through offset prediction from the patch center. Note that the squares refer to point queries, while the circles represent predictions, either as point coordinates or visibility.  
+
+by the start time and pixel’s spatial location, our goal is to predict the correspondences $\hat{\mathbf{p}}_{t}\in\mathbb{R}^{N\times2}$ and visibility $\hat{\mathbf{v}}_{t}\in\{0,1\}^{N}$ for all query points in an online manner, i.e. using only frames up to the current target frame $t$ . To address this problem, we propose a transformer-based point tracking model, that tracks points frame-by-frame, with dynamic memories $\mathbf{M}$ to propagate temporal information along the video sequence:  
+
+$$
+\hat{{\bf p}}_{t},\ \hat{{\bf v}}_{t},\ {\bf M}_{t}=\Phi\left({\bf I}_{t},\ \mathcal{Q},\ {\bf M}_{t-1};\ \Theta\right)
+$$  
+
+In the following sections, we start by describing the basic transformer architecture for point tracking in Sec. 2.2, then introduce the two memory modules and their update mechanisms in Sec. 2.3.  
+
+2.2 TRACK-ON: POINT TRACKING WITH A TRANSFORMER  
+
+Our model is based on transformer, consisting of three components, as illustrated in Fig. 2: Visual Encoder is tasked to extract visual features of the video frame, and initialize the query points; Query Decoder enables the queried points to attend the target frame to update their features; and Point Prediction, to predict the positions of corresponding queried points in a coarse-to-fine (Doersch et al., 2023) manner.  
+
+2.2.1 VISUAL ENCODER  
+
+We adopt a Vision Transformer (ViT) as visual backbone, specifically, DINOv2 (Oquab et al., 2023), and use ViT-Adapter (Chen et al., 2022b) to upsample the feature. The ViT-Adapter allows us to obtain dense features at a higher resolution than the standard ViT. We then add learnable spatial positional embeddings $\gamma^{s}$ to the frame-wise features:  
+
+$$
+\mathbf{f}_{t}=\Phi_{\mathrm{vis-enc}}\left(\mathbf{I}_{t}\right)+\gamma^{s}\in\mathbb{R}^{\frac{H}{S}\times\frac{W}{S}\times D}
+$$  
+
+where $D$ denotes the feature dimension, and $S$ refers to the stride. We use a single-scale feature map from ViT-Adapter for memory efficiency, specifically with a stride of $S=4$ .  
+
+Query Initialization: To initialize the query features $(\mathbf{q}^{i n i t})$ , we apply bilinear sampling to the feature map at the query location $\left(\mathbf{p}^{i}\right)$ :  
+
+$$
+\mathbf{q}^{i n i t}=\left\{\mathbf{sample}(\mathbf{f}_{t^{i}},\ \mathbf{p}^{i})\right\}_{i=1}^{N}\in\mathbb{R}^{N\times D}
+$$  
+
+In practice, we initialize the query based on the features of the start frame $t^{i}$ for $i$ -th query and propagate them to the subsequent frames.  
+
+2.2.2 QUERY DECODER  
+
+After extracting the visual features for the frame and query points, we adopt a variant of transformer decoder (Vaswani et al., 2017), with 3 layers, i.e. cross-attention followed by a self-attention, with an additional feed forward network between attentions:  
+
+$$
+\mathbf{q}_{t}=\Phi_{\mathrm{q-dec}}\left(\mathbf{q}^{i n i t},\ \mathbf{f}_{t}\right)\in\mathbb{R}^{N\times D}
+$$  
+
+The points of interest are treated as queries, which update their features by iteratively attending the visual features of current frame with cross attention. These updated queries can thus be used to search for its best match within the current frame, as explained in the following section.  
+
+2.2.3 POINT PREDICTION  
+
+Unlike previous work that regresses the exact location of the points, we formulate the tracking as a matching problem to one of the patches, as required by ViT encoding, that provides a coarse estimate of the correspondence. To further find the exact correspondence with higher precision, we predict offsets to the patch center. Additionally, we also infer the visibility $\hat{\mathbf{v}}_{t}\in[0,1]^{\hat{N}}$ and the uncertainty $\hat{\mathbf{u}}_{t}\in[0,1]^{N}$ for the point of interest.  
+
+Patch Classification: We first pass the visual features into 4-layer MLP, and downsample the resulting features to obtain multiscale maps, i.e., ft →ht ∈RHS × WS ×D →hlt ∈R2lH.S ×2lW.S ×D. We then compute multi-scale similarity maps across the 4 levels, i.e., cosine similarity between the decoded queries and patch embeddings:  
+
+$$
+\mathbf{C}_{t}^{l}=\frac{\mathbf{q}_{t}\cdot\mathbf{h}_{t}^{l}}{\lVert\mathbf{q}_{t}\rVert\cdot\lVert\mathbf{h}_{t}^{l}\rVert}\in\mathbb{R}^{N\times\frac{H}{2^{l}.S}\times\frac{W}{2^{l}.S}},\quad l\in\{0,\dots,3\}
+$$  
+
+The final similarity map $\mathbf{C}_{t}$ is computed as the weighted average of these multi-scale similarity maps using learned coefficients at the highest resolution. We apply a temperature to scale the similarity map, and take softmax spatially over the patches within the current frame. We train the model with a classification objective, the patch with points of interest is treated as the ground-truth class. Specifically, we perform $P$ -class classification, where $P$ is the total number of patches in the frame. We select the center of the patch with the highest similarity $(\hat{\mathbf{p}}^{p a t c h}\in\mathbb{R}^{N\times2})$ as our coarse prediction.  
+
+Offset Prediction: For the exact correspondence $(\hat{\mathbf{p}}_{t}\,\,\in\,\mathbb{R}^{N\times2})$ , we further predict an offset $\hat{\mathbf{o}}_{t}\in\mathbb{R}^{N\times2}$ to the patch center by incorporating features from the local region around the inferred patch, as shown in Fig. 3:  
+
+$$
+\hat{\mathbf{o}}_{t}=\Phi_{\mathrm{off}}(\mathbf{q}_{t},\ \mathbf{h}_{t},\ \hat{\mathbf{p}}_{t}^{p a t c h}),\qquad\qquad\hat{\mathbf{p}}_{t}=\hat{\mathbf{p}}_{t}^{p a t c h}+\hat{\mathbf{o}}_{t}
+$$  
+
+Here, $\Phi_{\mathrm{off}}$ is a deformable transformer decoder (Zhu et al., 2021) block with 3 layers, excluding self-attention. In this decoder, the query $\mathbf{q}_{t}$ is processed using the key-value pairs $\mathbf{h}_{t}$ , with the reference point set to ˆptpatch. To limit the refinement to the local region, the offsets are constrained by the (stride) and mapped to the range $[-S,S]$ using a tanh activation.  
+
+In addition, we predict the visibility $\hat{\mathbf{v}}_{t}$ and uncertainty $\hat{\mathbf{u}}_{t}$ with two separate 2-layer MLPs, followed by a sigmoid. At training time, we define a prediction to be uncertain if the prediction error exceeds a threshold $\lambda_{u}\,=\,8$ pixels) or if the point is occluded. During inference, we classify a point as visible if its probability exceeds a threshold $\delta_{v}$ . Although we do not directly utilize uncertainty in our predictions during inference, we found predicting uncertainty to be beneficial for training.  
+
+Training: We train our model using the ground-truth trajectories $\mathbf{p}_{t}\ \in\ \mathbb{R}^{N\times2}$ and visibility information $\mathbf{v}_{t}~\in~\{0,1\}^{N}$ . For patch classification, we apply cross-entropy loss based on the ground-truth class, patch $\mathbf{c}^{p a t c h}$ . For offset prediction $\hat{\mathbf{o}}_{t}$ , we minimize the $\ell_{1}$ distance between the predicted offset and the actual offset. We supervise the visibility $\hat{\mathbf{v}}_{t}$ and uncertainty $\hat{\mathbf{u}}_{t}$ using binary cross-entropy loss. The total loss is a weighted combination of these four:  
+
+$$
+\mathcal{L}=\lambda\,\mathcal{L}_{\mathrm{CE}}\left(\mathbf{C}_{t},\ \mathbf{c}^{p a t c h}\right)\ .\ \mathbf{v}_{t}+\mathcal{L}_{\ell_{1}}\left(\hat{\mathbf{o}}_{t},\ \mathbf{o}_{t}\right)\ .\ \mathbf{v}_{t}+\mathcal{L}_{\mathrm{CE}}(\hat{\mathbf{v}}_{t},\mathbf{v}_{t})+\mathcal{L}_{\mathrm{CE}}(\hat{\mathbf{u}}_{t},\mathbf{u}_{t})
+$$  
+
+Discussion: Till this point, our model has exclusively considered relocating the queried points within the current frame. However, as the appearance of points consequently changes over time, the embedding similarity between the initial query point and future correspondences tends to decrease gradually (Fig. 4). This problem, known as feature drift, leads to inaccurate predictions (Li et al., 2024) when solely relying on the feature similarity with the initial point.  
+
+![](images/0ca56e3ebaa21ab1d44080f34f27feda59ea63adc23e831436a8a97e7f77cde1.jpg)  
+Figure 3: Offset Head. Starting with a rough estimation from patch classification (left), where lighter colors indicate higher correlation, we refine the prediction using the offset head (right). The selected patch center and the final prediction are marked by a blue dot and a red dot, respectively, with the ground-truth represented by a diamond.  
+
+![](images/6e01ba1b0b6d1048cf887d871d9e7bfcc8591d9826ef9651fe0e068fb46918c6.jpg)  
+Figure 4: Feature Drift. For the tracks shown below (start, middle, and final frames), the plot above illustrates the decreasing similarity between the features of the initial query and its correspondences over time, with the initial similarity indicated by horizontal dashed lines.  
+
+
+
+\section{2.3 TRACK-ON WITH MEMORY  }
+
+
+Here, we introduce two types of memories: spatial memory and context memory. Spatial memory stores information around the predicted locations, allowing us to update the initial queries based on the latest predictions. Context memory preserves the past states of the track by storing previously decoded queries, ensuring continuity over time and preventing inconsistencies. This design enables our model to effectively capture temporal relations in long-term videos while also adapting to changes in the target’s features to address feature drift.  
+
+We store the past features for each of the $N$ queries independently, with up to $K$ embeddings of dimension $D$ per query in each memory module. Once fully fliled, the earliest entry from the memory will be obsoleted as a new entry arrives, operating as a First-In First-Out (FIFO) queue.  
+
+
+
+\section{2.3.1 SPATIAL MEMORY  }
+
+
+Here, we introduce the spatial memory module that stores fine-grained local information from previous frames, enabling continuous updates to the initial query points. This adaptation to appearance changes helps mitigate feature drift.  
+
+Memory Construction: We zero-initialize the memory, $\mathbf{M}_{0}^{s}$ , update its content with each frame.   
+For the first frame, we make a prediction using initial query init without memory.  
+
+Memory Write $\mathbf{(}\Phi_{\mathrm{q-wr}})$ : To update the memory with the new prediction, $\mathbf{M}_{t-1}^{s}\rightarrow\mathbf{M}_{t}^{s}$ , we extract a feature vector around the predicted point $\hat{{\bf p}}_{t}$ on the feature map $\mathbf{f}_{t}$ of the current frame and add it to the memory:  
+
+$$
+\mathbf{M}_{t}^{s}=[\mathbf{M}_{t-1}^{s},\ \Phi_{\mathbf{q}\cdot\mathbf{wr}}\left([\mathbf{q}^{i n i t},\mathbf{q}_{t}],\ \mathbf{f}_{t},\ \hat{\mathbf{p}}_{t}\right)]
+$$  
+
+Here, ${\Phi}_{\mathrm{q-wr}}$ is a 3-layer deformable transformer decoder without self-attention, using the concatenated $\mathbf{q}^{i n i t}$ and $\mathbf{q}_{t}$ over the channel dimension as the query vector, attending a local neighborhood of predicted point for update. Utilizing deformable attention for the local summarization process helps prevent error propagation over time, as the query can flexibly select relevant features from any range, ideally refining itself in cases of inaccurate predictions.  
+
+Query Update $(\Phi_{\mathrm{q-up}})$ : With the memory module, the initial query points first read the spatial memory $\mathbf{M}_{t-1}^{s}$ , which is then passed into the query decoder to estimate the correspondence. Specifically, the update is performed by predicting a residual change to the initial query based on the memory content:  
+
+$$
+\mathbf{q}_{t}^{i n i t}=\Phi_{\tt q.u p}\left(\mathbf{q}^{i n i t},\mathbf{\xi}\mathbf{M}_{t-1}^{s}\right)=\mathbf{q}^{i n i t}+\phi_{\tt q q m}\left(\mathbf{q}^{i n i t},\mathbf{\xi}\phi_{\mathrm{mm}}(\mathbf{M}_{t-1}^{s}+\gamma^{s})\right)
+$$  
+
+Here, $\phi_{\mathrm{mm}}$ is a transformer encoder layer that captures dependencies across different time steps, by sharing information in memory. $\phi_{\mathrm{qqm}}$ is a transformer decoder layer without initial self-attention, where $\mathbf{q}^{i n i t}$ attends to updated memory, followed by a linear layer, and $\gamma^{s}\in\mathbb{R}^{K\times D}$ is learnable, temporal positional embeddings.  
+
+![](images/40558bffab848ffc658d9dc588720a5018e721f14f07b7c7ee07fb6ebac1d98b.jpg)  
+Figure 5: Memory Modules. Spatial memory $\mathbf{M}_{t-1}^{s}$ (left) is used to update the initial query $\mathbf{q}^{i n i t}$ from the first frame to $\mathbf{q}_{t}^{i n i t}$ on the current frame. The goal is to resolve feature drift by storing the content around the model’s predictions in previous frames. Context memory $\mathbf{M}_{t-1}^{c}$ (right) is input to the query decoder which updates $\mathbf{q}_{t}^{i n i t}$ to $\mathbf{q}_{t}$ . It provides a broader view of the track’s history with appearance changes and occlusion status by storing the point’s embeddings from past frames.  
+
+Instead of sequentially updating the query embeddings at each time step, e.g. extracting $\mathbf{q}_{t}^{i n i t}$ using $\mathbf{q}_{t-1}^{i n i t}$ , we update them with respect to the initial query ${\bf q}^{\mathrm{init}}$ , conditioned on all previous predictions stored in the memory. This approach prevents error propagation by taking into account the entire history of predictions.  
+
+
+
+\section{2.3.2 CONTEXT MEMORY  }
+
+
+In addition to spatial memory, we introduce a context memory that incorporates historical information of the queried points from a broader context, enabling the model to capture past occlusions and visual changes. Specifically, we store the decoded query features from previous time steps in context memory, $\mathbf{M}_{t-1}^{c}$ . We then integrate it by extending the query decoder with an additional transformer decoder layer without self-attention, where queries attend to memory with added learnable temporal embeddings $\gamma^{c}\in\mathbb{R}^{K\times D}$ :  
+
+$$
+\mathbf{q}_{t}=\Phi_{\mathrm{q-dec}}\left(\mathbf{q}_{t}^{i n i t},\ \mathbf{f}_{t},\ \mathbf{M}_{t-1}^{c}+\gamma^{c}\right)
+$$  
+
+Changes to the query decoder with memory are shown in red. For the writing operation, we add the most recent $\mathbf{q}_{t}$ to ${{\bf{M}}_{t-1}^{c}}$ and remove the oldest item, following the same procedure as in the spatial memory. Our experiments demonstrate that incorporating past content temporally with context memory enables more consistent tracking with additional beneftis over spatial memory, especially in visibility prediction, since spatial memory focuses only on the regional content where the point is currently visible.  
+
+2.3.3 INFERENCE-TIME MEMORY EXTENSION  
+
+Although the memory size $K$ is fixed at training time, the number of video frames at inference can be different from the training frame limit, impacting the optimal number of frames stored in memory for effective content capture. To address this, we extend the memory size during inference by linearly interpolating the temporal positional embeddings, $\gamma^{s}$ and $\gamma^{c}$ , to sizes $K_{s}$ and $K_{c}$ for spatial memory and context memory, respectively. In particular, we train our memories with $K=12$ , and extend them to $K_{s}=K_{c}=48$ at inference time.  
+
+Table 1: Quantitative Results on TAP-Vid Benchmark. This table shows results in comparison to the previous work on TAP-Vid under queried first setting, in terms of AJ, $\delta_{a v g}^{x}$ , and OA. † Release model. ‡ Reproduction using the official checkpoints.  
+
+![](images/23970f162c3b5eebf627029f5f6398e478995f2d91302acbd5011bd4b9a4faeb.jpg)  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+
+
+\section{3.1 EXPERIMENTAL SETUP  }
+
+
+Datasets: We use TAP-Vid (Doersch et al., 2022) for both training and evaluation, consistent with previous work. Specifically, we train our model on TAP-Vid Kubric, a synthetic dataset of 11,000 video sequences, each with a fixed length of 24 frames. For evaluation, we use three other datasets from the TAP-Vid benchmark: TAP-Vid DAVIS, which includes 30 real-world videos from the DAVIS video dataset; TAP-Vid RGB-Stacking, a synthetic dataset of 50 videos focused on robotic manipulation tasks, mainly involving textureless objects; TAP-Vid Kinetics, a collection of over 1,000 real-world online videos.  
+
+Metrics: We evaluate tracking performance with the following metrics of TAP-Vid benchmark: Occlusion Accuracy (OA), which measures the accuracy of visibility prediction; $\delta_{a v g}^{x}$ , the average proportion of visible points tracked within 1, 2, 4, 8, and 16 pixels; Average Jaccard (AJ), which jointly assesses visibility and localization precision.  
+
+Evaluation Protocol: We follow the standard protocol of TAP-Vid benchmark by first downsampling the videos to $256\times256$ . We evaluate models in the queried first protocol, which is the natural setting for causal tracking. In this mode, the first visible point in each trajectory serves as the query, and the goal is to track that point in subsequent frames.  
+
+As most of the models are offline, we perform comparisons to these models using their official checkpoints under the online setting. In particular, for a video with $T$ frames, we treat each target frame as the last frame of the video and run the model for that frame. While processing frame $t$ , we provide the model with all prior frames from the beginning of the video up to frame $t$ . This process is repeated for each frame sequentially, ensuring predictions are based only on past and present frames, without access to future frames. This gives an upper bound, for how well the model could work in an online setting.  
+
+3.2 RESULTS  
+
+We compare Track-On to previous works in Table 1. We report both the online and offline results of SpatialTracker (Xiao et al., 2024) and CoTracker (Karaev et al., 2024), with their offline models evaluated in an online setting, as explained above. The reported results for TAPIR (Doersch et al., to significant performance improvements. Model-C, in particular, achieves higher OA by providing a more comprehensive view of the track’s history, including occlusions. Combining both memory types (Model-D) further boosts performance, highlighting the complementary strengths of the two memory modules. Lastly, incorporating the memory extension at inference time yields slight improvements in AJ and $\delta_{a v g}^{x}$ , leading to an overall enhancement in performance.  
+
+Table 2: Offset Head. The effect of removing the offset head $(\Phi_{\mathrm{off}})$ on models with varying strides.   
+Table 3: Memory Components. The effect of spatial memory $(\mathbf{M}^{s})$ , context memory $(\mathbf{M}^{c})$ , and inference-time memory extension (IME).  
+
+![](images/3b421d11ab972e96def32e65901fc371d4d02f7d4bca6d2baf58ff84e695396b.jpg)  
+
+![](images/44be91409debafe0c48c34d1988f7056eeeec636cc2467df1968a545f93a50bc.jpg)  
+Figure 6: Memory Size. The effect of varying memory sizes set for training and extended during inference.  
+
+![](images/27a3c42e98a7ad387ac8d01ffe622b05b0c4019bfd641d5ec50244ccbe4259dd.jpg)  
+Figure 7: Efficiency. Inference speed for different memory sizes and strides.  
+
+Memory Size: We experimented with varying memory sizes, $K=\{4,8,12,16\}$ , during training and extended them further during inference, as shown in Fig. 6. When the same memory size is used for both training and inference, a memory size of 12 (green) yields the best performance, followed by 16 (red), 8 (orange), and 4 (blue). The lower performance of smaller memory sizes (4 and 8) suggests that memory needs to be sufficiently large to capture meaningful temporal dependencies. However, increasing memory size does not always lead to better results, as seen in the comparison between 12 and 16. This is because the memory also serves as a bottleneck for summarizing relevant information, and with a memory size of 16, this summarization function appears to be less effective compared to size 12, particularly for 24-frame-long training clips. The results indicate that extending memory during inference can improve performance up to a certain threshold. For example, with $K=12$ , performance improves up to a memory size of 48, after which it consistently declines. This suggests that while memory extension is beneficial, there is an optimal range beyond which performance begins to degrade.  
+
+Efficiency: We plot the inference speed (frames per second, FPS) as a function of memory size in Fig. 7, comparing stride values of 4 and 8. Unlike offline methods, our approach does not leverage temporal parallelization in the visual encoder, processing frames sequentially in the online setting. We report FPS on the TAP-Vid DAVIS dataset, averaging results from tracking 400 points over three runs on a single NVIDIA V100 GPU. As memory size increases, the model becomes slower due to the higher computational cost of temporal attention in memory operations. For example, with stride 4, the FPS drops from 20 with $K=8$ to 15 with $K=48$ , and down to 10 with $K=128$ . In contrast, using a stride of 8 consistently offers faster inference speeds, ranging from approximately 22 FPS to 12 FPS across all memory sizes, mainly because there are fewer visual tokens to process with this larger stride. Our framework allows flexibility in adjusting this hyperparameter based on real-time application needs. Furthermore, our model is highly memory-efficient, requiring only $1.24\,\mathrm{GB}$ and $1.20\;\mathrm{GB}$ of GPU memory to process a frame with 400 tracks for strides of 4 and 8, respectively, highlighting the efficiency of our frame-by-frame tracking approach.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Tracking Any Point: Point tracking, presents significant challenges, particularly for long-term tracking where maintaining consistent tracking through occlusions is difficult. PIPs (Harley et al., 2022) was one of the first approaches to address this by predicting motion through iterative updates within temporal windows. TAP-Vid (Doersch et al., 2022) initiated a benchmark for evaluation. TAPIR (Doersch et al., 2023) improved upon PIPs by refining initialization and incorporating depthwise convolutions to enhance temporal accuracy. BootsTAPIR (Doersch et al., 2024) further advanced TAPIR by utilizing student-teacher distillation on a large corpus of real-world videos. In  
+
+contrast, CoTracker (Karaev et al., 2024) introduced a novel approach by jointly tracking multiple points, exploiting spatial correlations between points via factorized transformers. More recently, TAPTR (Li et al., 2024) adopted a design inspired by DETR (Carion et al., 2020; Zhu et al., 2021), drawing parallels between object detection and point tracking. DINO-Tracker (Tumanyan et al., 2024) took a different route, using DINO as a foundation for test-time optimization.   
+However, all these models are designed for offilne tracking, assuming access to all frames within a sliding window (Karaev et al., 2024) or the entire video (Doersch et al., 2023; 2024). Models with online variants (Doersch et al., 2024; 2023) are re-trained with a temporally causal mask to process frames sequentially on a frame-by-frame basis, despite being originally designed for offilne tracking. In contrast, we explicitly focus on online point tracking by design, enabled by novel memory modules to capture temporal information. Additionally, many of these models use a regression objective with iterative updates, originally developed for optical flow (Teed & Deng, 2020), while we introduce a new paradigm based on patch classification and refinement.   
+Another line of research, orthogonal to ours, explores leveraging scene geometry for point tracking. SpatialTracker (Xiao et al., 2024) extends CoTracker to the 3D domain by tracking points in threedimensional space, while OmniMotion (Wang et al., 2023) employs test-time optimization to learn a canonical representation of the scene. Concurrent work DynOMO (Seidenschwarz et al., 2024) also uses test-time optimization, utilizing Gaussian splats for online point tracking.   
+Causal Processing in Videos: Online, or temporally causal models rely solely on current and past frames without assuming access to future frames. This is in contrast to current practice in point tracking with clip-based models, processing frames together. Causal models are particularly advantageous for streaming video understanding (Yang et al., 2022a; Zhou et al., 2024), embodied perception (Yao et al., 2019), and processing long videos (Zhang et al., 2024; Xu et al., 2021), as they process frames sequentially, making them well-suited for activation caching. Due to its potential, online processing has been studied across various tasks in computer vision, such as pose estimation (Fan et al., 2021; Nie et al., 2019), action detection (Xu et al., 2019; De Geest et al., 2016; Kondratyuk et al., 2021; Eun et al., 2020; Yang et al., 2022b; Wang et al., 2021; Zhao & Kra¨henbu¨hl, 2022; Xu et al., 2021; Chen et al., 2022a), temporal action localization (Buch et al., 2017; Singh et al., 2017), object tracking (He et al., 2018; Wang et al., 2020), video captioning (Zhou et al., 2024), and video object segmentation (Cheng & Schwing, 2022; Liang et al., 2020).   
+In causal models, information from past context is commonly propagated using either sequential models (De Geest et al., 2016), which are inherently causal, or transformers with causal attention masks (Wang et al., 2021). However, these models often struggle to retain information over long contexts or face expanded memory requirements when handling extended past contexts. To address this, some approaches introduce memory modules for more effective and efficient handling of complex tasks. For example, LSTR (Xu et al., 2021) separates past context as long-term and shortterm memories for action detection, while XMem (Cheng & Schwing, 2022) incorporates a sensory memory module for fine-grained information in video object segmentation. Long-term memory-based modeling is also applied beyond video understanding (Balazevic et al., 2024), including tasks like long-sequence text processing and video question answering (Zhang et al., 2021). We also employ an attention-based memory mechanism, which is specialized in point tracking with two types of memory; one focusing on spatial local regions around points, and another on broader context. 5 CONCLUSION & LIMITATION   
+In this work, we presented Track-On, a simple yet effective transformer-based model for online point tracking. To establish correspondences, our model employs patch classification, followed by further refinement with offset prediction. We proposed two memory modules that enable temporal continuity efficiently while processing long videos. Our model significantly advances the state-of-the-art in online point tracking with fast inference and narrows the performance gap between online and offilne models across a variety of public datasets.   
+Despite the strengths of our proposed model, there remain certain limitations. Future work could address these challenges by exploring learnable upsampling techniques to achieve higher-resolution feature maps and improve feature sampling accuracy.   
+
+

@@ -1,0 +1,332 @@
+\title{Compress then Serve: Serving Thousands of LoRA Adapters with Little Overhead}
+
+\begin{abstract}
+Fine-tuning large language models (LLMs) with low-rank adaptations (LoRAs) has become common practice, often yielding numerous copies of the same LLM differing only in their LoRA updates. This paradigm presents challenges for systems that serve real-time responses to queries that each involve a different LoRA. Prior works optimize the design of such systems but still require continuous loading and offloading of LoRAs, as it is infeasible to store thousands of LoRAs in GPU memory. To mitigate this issue, we investigate the efficacy of model compression when serving LoRAs. We propose a method for joint compression of LoRAs into a shared basis paired with LoRA-specific scaling matrices. We extend our algorithm to learn clusters of LoRAs that are more amenable to joint compression, allowing it to scale gracefully to large LoRA collections.
+Our experiments with up to 500 LoRAs demonstrate that compressed LoRAs preserve performance while offering major throughput gains in realistic serving scenarios with over a thousand LoRAs, maintaining 80\% of the throughput of serving a \emph{single} LoRA.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+The myriad uses for foundation models (FMs) have led to a proliferation of specialized models, each fine-tuned to perform a downstream task.
+To avoid fine-tuning foundation models with billions of parameters, more parameter-efficient fine-tuning (PEFT) algorithms were proposed. An especially successful PEFT method is low-rank adaptation (LoRA) \citep{hu2021lora}, which learns low-rank additive changes to neural network matrices. Because of the low-rank parameterization, these matrices (called adapter weights) contain orders-of-magnitude fewer parameters than the base model. Still, LoRA can achieve performance on par with full fine-tuning \citep{hu2021lora}.
+
+LoRA's popularity has triggered a growing need to serve large collections of LoRA adapters at scale. For example, proprietary and open-source LLM providers offer fine-tuning services \citep{openai_finetuning_api,together_ai,predibase} with user bases likely in thousands or even hundreds of thousands. As each user wants to use their own fine-tuned version of the LLM, simply serving a dedicated fine-tuned LLM per user becomes infeasible. To this end, S-LoRA \citep{sheng2023slora} considers a system where only the base LLM is placed on an inference server and individual LoRA adapters are switched as needed at inference time. S-LoRA optimizes the system's inner workings via custom CUDA kernels and memory management to increase the throughput when serving multiple LoRAs. Such multi-LoRA system design has also been adopted in vLLM \citep{kwon2023efficient}, a state-of-the-art LLM serving engine. Despite the optimized system design, serving LoRAs still has a fundamental limitation: when the number of adapters is large, they need to be constantly loaded and offloaded from GPU memory to accommodate incoming requests, degrading throughput. 
+
+The problem of accommodating multiple LoRA adapters is also apparent when placing LLMs on edge devices, where smaller LLMs are fine-tuned for various tasks and the adapters are swapped depending on the task at hand \citep{gunter2024apple}. In this case, the amount of adapters is smaller, e.g., a few dozen \citep{gunter2024apple}, but the memory constraints are also tighter due to the limited capacity of edge devices.
+
+In this work, we consider the problem of compressing a collection of LoRAs. We have two key objectives: (1) preserving the performance of the original LoRAs and (2) improving the throughput of serving many LoRAs. We formulate LoRA compression as a reconstruction problem, where the goal is to approximate the original adapters via collections of matrices of a smaller total size. We investigate an approach based on compressing LoRAs \emph{jointly} by finding a shared basis and LoRA-specific scaling matrices, and propose a joint diagonalization-based algorithm (JD). To improve reconstruction error for large numbers of LoRAs while keeping the number of parameters in check, we propose a clustering approach where each cluster is compressed independently using the joint diagonalization algorithm. Our clustering algorithm is based on alternating between optimizing the cluster assignments and the per-cluster reconstruction error.
+
+\begin{wrapfigure}[13]{r}{0.45\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/teaser_figure_new.png}
+    \caption{Throughput gains when serving 1000s of compressed LoRAs with vLLM.}
+    \label{fig:intro}
+\end{wrapfigure}
+
+We showcase the benefits of joint compression in Figure \ref{fig:intro}. We chose JD configurations that match the constraints. When serving up to 64 unique LoRAs we use JD without clustering and for 128 or more, we pick the number of clusters to match the performance of compressed and original LoRAs. In each case, the GPU memory footprint of the compressed and original LoRAs is matched for a fair comparison to the vLLM's multi-LoRA inference engine. When serving over 1000 LoRAs, compression increases throughput by a factor of 1.6 and maintains 80\% of the throughput of serving the base LLM (or a single LoRA merged into the LLM). Detailed results are presented in Section \ref{sec:experiments}.
+
+We summarize our main contributions below:
+\begin{itemize}
+\item We formulate the problem of compressing a collection of LoRAs and propose a joint compression scheme based on joint diagonalization.
+\item For large numbers of LoRAs, we scale the joint compression scheme by proposing a clustering algorithm where each cluster is jointly compressed to minimize the overall reconstruction error.
+\item We establish theoretical guarantees for the reconstruction error central to our compression formulation and verify the relation between reconstruction loss and performance empirically.
+\item We train a collection of 500 high-quality LoRAs for \texttt{Mistral-7B-Instruct-v0.2} \citep{jiang2023mistral} on 500 natural instruction tasks \citep{wang2022super} and demonstrate that our compression techniques preserve the performance of the original LoRAs. %\my{we can provide stronger statement if minimum performance across tasks is high} 
+We will release the 500 LoRAs to facilitate future work on LoRA compression as well as the code for our method.
+\item We incorporate LoRA compression into a state-of-the-art LLM serving system and demonstrate that it is possible to serve over 1000 LoRAs across thousands of asynchronous %concurrent \my{is it a thing or just asynchronous?} 
+requests with throughput comparable to serving a \emph{single LoRA}.
+\end{itemize}
+
+
+\section{Related Work}
+
+Parameter-efficient fine-tuning (PEFT) has become prevalent for updating foundation models thanks to the need for efficiency in training and communication \citep{lialin2023scaling}. Many PEFT methods have been proposed, e.g.\ \citep{houlsby2019parameter,liu2022few} and LoRA \citep{hu2021lora} became the standard, partially due to the ease of switching between LoRAs in inference time. 
+
+Several works improve LoRA  \citep{liu2024dora,Wang2024PRoLoRAPR}, sometimes with algebraic methods like SVD \citep{meng2024pissa,zhang2023adaptive,jiang2023byom} or by leveraging its statistical properties \citep{zhu2024asymmetry,zeng2024expressive}. Relatively few, however, accelerate inference times. S-LoRA \citep{sheng2023slora} provides an efficient means of switching between LoRAs. F-LoRA \citep{wen2024batched} adapts training to reduce batch multiplications, accelerating inference.g., \citet{meng2024pissa}). 
+There are many efforts to compress models \citep{cheng2017survey,gholami2022survey,sharma2024the, li2018measuring}---including some specifically for LoRAs---to accelerate inference. Predominantly, pruning and sparsification methods delete weights \citep{yadav2023compeft}, and quantization methods reduce the weights' precision \citep{dettmers2024qlora}. Some works compress weights to reduce model size but typically require decompression and hence do not save GPU memory \citep{hershcovitch2024lossless}. Similarly to our work, while most methods increase speed at the cost of performance, a few note increased performance and generalization after compression \citep{yadav2023compeft,nadjahi2023slicing,hershcovitch2024lossless,sharma2024the}.
+Our work also relates to model merging \citep{Choshen2022FusingFM,Wortsman2022ModelSA,matena2021merging} and mixture of experts methods \citep{muqeeth2024learning,yadav2024survey}. These methods reuse models trained by others \citep{yehia2023start,raffel2023building}, serving them together as one compressed model. Despite this similarity, these methods create a single general model that acts on any input, while our model allows for more performant per-task solutions.
+
+
+
+\section{Rank-Based LoRA Compression}
+
+\label{sec:joint}
+
+LoRA updates are parameterized by pairs of matrices \(A, B\), whose product \(BA\) updates the fixed weight matrices $W_0\in\R^{d_B\times d_A}$ of a neural network foundation model. Given an input $x$ to a layer, the output of the LoRA-updated model at this layer is \((W_0 + BA)x\). 
+
+In formulating our compression algorithms, we consider a collection of given LoRA adapters $\{(A_i, B_i)\}_{i=1}^n$ that we would like to serve. We let $r_i$ refer to the rank of the LoRA adapter-pair $(A_i, B_i)$, i.e., $B_i \in \mathbb{R}^{d_B \times r_i}$, $A_i \in \mathbb{R}^{r_i \times d_A}$.  
+
+
+While our compression technique has access only to a collection of $\{(A_i, B_i)\}_{i=1}^n$ pairs, in our experiments we will assess the efficacy of compression by comparing how the compressed matrices perform relative to the uncompressed LoRAs on typical data. For this reason, although in this section we optimize a Frobenius norm reconstruction error relative to the product \(B_iA_i\), in reality this is a proxy for the nonlinear and complex way that compression errors in the adapters impact transformer performance. Our experimental evaluation will thus focus on the performance of the compressed LoRAs against the uncompressed versions on real data in \S\ref{sec:experiments}. 
+Our compression methods significantly reduce the overall number of parameters. Reducing parameters through compression theoretically accelerates storage and serving processes for a collection of LoRAs. This reduction, however, alters the computational dynamics during inference, so parameter reduction alone does not immediately imply faster throughput. In light of the complexities of GPU optimization, we experimentally assess the throughput under realistic conditions in \S\ref{sec:vllm}.
+
+
+\subsection{Joint Diagonalization}\label{sec:jointdiagonalization}
+For compression to scale to large numbers of LoRAs, the compressed number of parameters should not scale linearly with $n$. Hence seeking to compress each LoRA individually (e.g., via SVD as detailed in the experimental baselines) is inherently limited.
+
+To address this, we suggest a Joint Diagonalization (JD) method, which optimizes a shared basis onto which we can project the set of $n$ LoRAs. This will allow structure to be shared, implicitly grouping and/or merging the collection of LoRAs. 
+
+In this model, each LoRA product $B_iA_i$ is factorized into the form $U \Sigma_i V$, where $U$ and $V$ are shared across all LoRAs and $\Sigma_i$ is specific to each LoRA. In this formulation, every $\Sigma_i$ shares the same rank $r$. This allows $U$ and $V$ to be pre-loaded onto the GPU, with $\Sigma_i$ loaded when necessary for each batch. The matrices $\Sigma_i$ can be either diagonal or small square matrices, accelerating the forward pass compared to conventional multi-LoRA serving configurations. % (see \S\ref{sec:serving} for details).
+
+\textbf{Objective function.} Motivated by the relationship of singular value decomposition to minimizing the Frobenius norm of the reconstruction error, we also propose to minimize the Frobenius norm of the adapter matrix approximation error. Specifically, we use the following objective function:
+\begin{equation}\label{eq:jointsvd}
+\min_{\{\Sigma_i\}_{i=1}^n, U,V}  \sum_{i=1}^n \|B_iA_i - U\Sigma_i V^\top\|_\Fro^2.
+\end{equation}
+Note this problem is \emph{not} solved by a single matrix SVD, since $U$ and $V$ are shared among all terms but the $\Sigma_i$'s are not.
+Using the Frobenius norm has the added benefit of making the objective convex in each argument separately, suggesting the possibility of efficient optimization.
+This objective function is underdetermined, however, so we consider two constrained regimes below. 
+\textbf{Full $\Sigma_i$ approximation.} The first method we call $\mathsf{JD-Full}$. Without loss of generality, $U$ and $V$ can be constrained to be orthogonal, so long as $\Sigma_i$ remains an unconstrained full matrix. $\mathsf{JD-Full}$ adopts this restriction to make the optimization better posed, but note it does not restrict the expressiveness of the objective \eqref{eq:jointsvd}.  This setting yields the following optimization problem:
+\begin{assbox}
+\vskip -0.1in
+\begin{align}
+\operatorname{JD-Full}_r(\{B_i A_i\}_{i=1}^n) =\underset{U^\top U = V^\top V =  I_r}{\underset{\{\Sigma_i\}_{i=1}^n}{\operatorname{argmin}}}  \sum_{i=1}^n \|B_iA_i - U\Sigma_i V^\top\|_\Fro^2 ~~~~ (\mathsf{JD-Full})
+\label{eq:jdfull}
+\end{align}
+\end{assbox}
+\textbf{Diagonal $\Sigma_i$ approximation.} As an alternative, we can leave $U$, $V$ unconstrained (other than to have $r$ columns) and instead constrain the matrices $\Sigma_i$ to be diagonal (but not necessarily positive). This formulation yields the following optimization problem:
+\begin{assbox}
+\vskip -0.1in
+\begin{align}
+\operatorname{JD-Diag}_r(\{B_i A_i\}_{i=1}^n) ={\underset{\{\Sigma_i\}_{i=1}^n, U, V}{\operatorname{argmin}}}  \sum_{i=1}^n \|B_iA_i - U\mathrm{diag}(\Sigma_i) V^\top\|_\Fro^2 ~~~~ (\mathsf{JD-Diag})
+\label{eq:jddiag}
+\end{align}
+\end{assbox}
+ This diagonal version has some per-LoRA parameter savings when compared to $\mathsf{JD-Full}$, since the diagonal $\Sigma_i$ only needs $r$ parameters instead of $r^2$. 
+
+\subsection{Clustering}
+\label{subsec:cluster}
+
+As the number of LoRAs $n$ grows and becomes more diverse, the rank $r$ needed for Joint Diagonalization to achieve good performance will tend to increase. This increases the size and number of parameters of each $\Sigma_i$ that needs to be stored, especially for $\operatorname{JD-Full}$ which will require $O(n r^2)$ storage for these matrices. If the necessary $r$ is growing proportionally to $n$, then this storage will eventually become the bottleneck. 
+
+To resolve this limitation with very large $n$, we propose to group the $n$ LoRAs into $|C_j|$ clusters $C_j$. Each cluster is given its own rank $r$ JD compression, and the clusters are chosen such that the overall reconstruction error is minimized. Specifically, the overall objective is
+\begin{align*}
+\min_{\{\{C_j\},{U_j,V_j}\},\{\Sigma_i\}}\sum_j\sum_{i\in C_j}||B_iA_i-U_j\Sigma_iV_j||^2_{F},
+\end{align*}
+and we optimize this by alternating between cluster assignments and the JD of each cluster. Typically, the goal with large $n$ is to have $|C_j|$ grow with $n$ as $r$ becomes fixed. Comparing $k$ rank-$r$ $\operatorname{JD-Full}$ clusters to a rank-$kr$ $\operatorname{JD-Full}$ single cluster compression, observe that the clustered approach requires $O(dkr + nr^2)$ parameters, while the single-cluster approach requires $O(dkr + nk^2r^2)$ parameters due to the increased sizes of the $\Sigma_i$s. While these two approaches have the same rank, note that they may have different reconstruction abilities. Empirically, we find that multiple clusters significantly aid performance for $n \geq 100$. %$ \my{???}. 
+
+
+
+
+
+
+
+
+
+
+\section{Theoretical Analysis}
+
+
+
+In this section, we seek to better understand the role of the joint diagonalization method presented in \S\ref{sec:jointdiagonalization} and how this understanding further motivates the clustering approach. We will focus on the full-$\Sigma_i$ case with orthogonal $U$, $V$ matrices. Note that, for the same $r$, the $r\!\!-\!\!\mathsf{JD\!-\!Diag}$ has at least as large reconstruction error as $r\!\!-\!\!\mathsf{JD\!-\!Full}$ since it imposes an additional constraint on the $\Sigma_i$. %\justin{something about the other case?}
+Firstly, note that perfect reconstruction can be achieved if and only if $r$ is large enough, since there exist $U,V$ such that all the $B_i$, $A_i$ are in the spans of $U,V$ resp.\ if and only if $r \geq \tilde{r}$:
+\begin{proposition}
+    Suppose that for all $i$, $\mathrm{rank}(B_i A_i) = r_i$, and let 
+    \[
+    \tilde{r} = \max\left\{\mathrm{rank}([A_1, \dots, A_n]), \mathrm{rank}([B_1^\top \dots, B_n^\top])\right\}.
+    \]
+    Note $\max_i r_i \leq \tilde{r} \leq \sum_{i=1}^n r_i$. Then $\mathsf{JD-Full}$ (\eqref{eq:jdfull}) with $r = \tilde{r}$ achieves lossless compression (perfect reconstruction), and using $r < \tilde{r} $ will give nonzero reconstruction error. %\justin{not sure about this last bit}
+\end{proposition}
+Due to training noise, $\tilde{r}$ will equal $\sum_{i=1}^n r_i$ almost always. This implies that in most realistic settings, the joint diagonalization approach is a lossy reconstruction.
+\begin{theorem}
+\label{thm}
+    Consider $n$ LoRAs ($\{A_i, B_i\}_{i=1}^n$) with $r,n \leq d^2$, and form the matrix
+    \[
+    L = \left[\begin{array}{ccc} \mathrm{vec}(B_1 A_1) & \cdots & \mathrm{vec}(B_n A_n)\end{array}\right].
+    \]
+    Let $\sigma_j$ be the singular values of $L$, sorted from largest to smallest, and  let $\bar{\sigma}_j$ be the singular values of $\sum_{i=1}^n B_i A_i$. Then, using $\mathsf{JD-Full}$ (\eqref{eq:jdfull}), 
+    \[
+    \sum_{j=1}^r \bar{\sigma}^2_j \leq \sum_{i=1}^n \|\Sigma_i\|^2_\Fro = \sum_{i=1}^n \|U \Sigma_i V^\top \|^2_\Fro \leq \sum_{j=1}^{\min(r^2, n)}\sigma_j^2,
+    \]
+    implying the sum of squared Frobenius norms of the reconstructed LoRAs satisfies
+    \[
+    \frac{\sum_{i=1}^n \|U \Sigma_i V^\top \|^2_\Fro }{\sum_{i=1}^n \|B_i A_i\|_\Fro^2}\!\leq\! \frac{\sum_{j=1}^{\min(r^2, n)}\!\!\sigma_j^2} {\sum_{j=1}^n \sigma_j^2}\leq 1,\:\:{and}\:\:\: \frac{\sum_{i=1}^n \|U \Sigma_i V^\top \!\!-\! B_i A_i \|^2_\Fro }{\sum_{i=1}^n \|B_i A_i\|_\Fro^2}\geq 1- \frac{\sum_{j=1}^{\min(r^2, n)}\!\!\sigma_j^2} {\sum_{j=1}^n \sigma_j^2}.
+    \]
+\end{theorem}
+
+In other words, if the singular values of $L$ are not concentrated in the top $r^2$ entries, significant reconstruction error is unavoidable.
+
+\begin{remark}[Lower bound and merging]
+The lower bound $\sum_{j=1}^r \bar{\sigma}^2_j$ could be achieved by setting all the $\Sigma_i$ equal, i.e., using a fully merged model instead of only merging the subspaces $U$, $V$ and allowing $\Sigma_i$ to vary with $i$.
+\end{remark}
+
+\begin{remark}[Upper bound and grouping]
+The upper bound is smallest when the LoRAs are relatively \emph{clustered}, i.e., when groups of vectors $\mathrm{vec}(B_i A_i)$ are similar. This situation raises the magnitude of the largest singular values of $L$, raising the upper bound in the proposition.  As the LoRAs are $d \times d$ matrices that can be thought of as points in $d^2$ dimensional space, for typical values of $d$ well into the hundreds, it is likely that unrelated LoRAs will be \emph{unclustered}, i.e., they will have relatively low inner products with each other. 
+\end{remark}
+
+For the case of orthogonal LoRAs, the singular values of $L$ are the norms of the LoRAs, and we immediately have the following corollary:\footnote{A result for isotropic Gaussian LoRAs could be obtained via the quantiles of the Marchenko-Pastur Law.}
+\begin{corollary}
+    Suppose (e.g., due to normalization) that the inputs to the joint diagonalization algorithm all have unit Frobenius norm, i.e., $\|B_i A_i\|_\Fro = 1$. Moreover, assume that the LoRAs are all orthogonal in the sense $\tr((B_i A_i) (B_jA_j)^\top) = 0$ for $i \neq j$. %\footnote{This does not require that the $B_i$ (or $A_i$) are orthogonal to each other.} 
+    Then, using the $\mathsf{JD-Full}$ method \eqref{eq:jdfull}, we have 
+    \(
+    1 \leq \sum_{i=1}^n \|\Sigma_i\|^2_\Fro \leq \min(r^2, n),
+    \) 
+    implying that the sum of squared Frobenius norms of the reconstructed LoRAs satisfies
+    \[
+    1 - \frac{1}{n} \geq \frac{\sum_{i=1}^n \|U \Sigma_i V^\top - B_i A_i\|^2_\Fro}{
+    \sum_{i=1}^n \|B_i A_i\|_\Fro^2
+    } \leq 1 - \min\left(\frac{r^2}{n},1\right).
+    \]
+\end{corollary}
+    This implies that for the common setting where $r^2 \ll n$, the reconstructed LoRAs will be significantly smaller than the original LoRAs and necessarily have significant reconstruction error.
+The results in this section illustrate the tradeoffs of using joint diagonalization. If the LoRAs are similar or well-clustered, reconstruction error will be low. On the other hand, if the LoRAs are random and orthogonal, reconstruction error will be high. 
+
+Since the loss space of transformers is highly complex, increasing weight reconstruction error does not necessarily imply degrading LLM performance. Interestingly, in Figure \ref{fig:reconstruction-vs-performance} below, we see that while large reconstruction error rapidly decreases performance, moderate (but still relatively large, at around 0.4) reconstruction error does not damage performance and may even slightly outperform the zero-error setting.
+This observation motivates our focus on minimizing weight reconstruction error, while also suggesting that our approach is capable of achieving something deeper than compression. Specifically, the tendency of joint diagonalization is to find subspaces that are shared among many LoRAs when $r$ is large, and to \emph{merge} subspaces when $r$ is small. When $r$ is particularly small, this tendency towards \emph{averaging} all or some of the LoRA signals directly connects to the concept of \emph{merging} LoRAs, whose empirical success \citep{shah2023ziplora, huang2024lorahub} could explain the success of our procedure despite the nonlinearity of transformers.
+
+ The reconstruction error is generally large, but significantly lower than the reconstruction error for random noise, indicating that there is a major shared component between the LoRAs that is being successfully retained. 
+
+That said, as the number of LoRAs grows, the shared component may not be significant enough to maintain sufficiently low reconstruction error with low rank $r$. This motivates the introduction of \emph{clustering} in \S\ref{subsec:cluster}, since clustering seeks to find groups of LoRAs that are similar and better compressible by joint diagonalization. In particular, if the number of clusters $|C_j|$ grows with $n$, the reconstruction error may no longer degrade with $n$ even when $r$ is fixed. 
+
+In the extreme case where $|C_j| = n$, each LoRA is compressed independently. By the Eckart-Young Theorem, JD applied to a single LoRA  reduces to an SVD, replacing each rank-$r_i$ LoRA adapter $B_i A_i$ with a reduced rank-$r$ approximation, where typically $r < \frac{1}{n}\sum_{i=1}^n r_i$:
+\begin{align}
+\operatorname{SVD}_r(B_i A_i) = U_i \Sigma_i V_i^\top ,\quad \forall i=1,\dots,n. %~~~~~~ (\mathsf{r-SVD})
+\label{eq:svd}
+\end{align}
+As $\Sigma_i V_i^\top$ can be saved as a single matrix, this approach has $r n (d_A +d_B)$ parameters. We refer to this $|C_j| = n$ method as $\mathsf{r-SVD}$ and find that it underperforms our other methods, while outperforming the baseline uncompressed LoRAs significantly. This result parallels \citet{jiang2023byom}'s observation that lowering LoRA ranks is beneficial for multi-task learning and model merging.  %Note that this $\operatorname{SVD}_r$ approach exactly corresponds to our JD clustering-based approach in the extreme case of $|C_j| = n$, i.e. each LoRA is its own cluster.
+
+
+
+\section{Training LoRAs \& Evaluating Task Performance}
+
+\label{sec:trainingevaletc}
+
+\subsection{Training}
+
+We trained LoRA adapters on 500 natural instruction tasks \citep{wang2022super} using \texttt{Mistral-7B-Instruct-v0.2} \citep{jiang2023mistral} as the base model. All LoRA adapters were configured with a rank of 16, i.e., $\forall i, r_i=16$. 
+
+ These tasks were exclusively in English (both input and output), ensuring higher quality and thorough review \citep{wang2022super}. Each task dataset was divided into training, validation, and test sets. 
+
+Hyperparameters, such as early stopping, were tuned using the validation sets. Evaluation on the test sets demonstrated that LoRA consistently outperformed the base model in terms of both Rouge scores and loss metrics, as shown in Table \ref{table:lora_metrics_comparison}.
+
+\begin{table}[h]
+\centering
+\caption{Comparison of metrics before and after LoRA training across 500 tasks.}
+\label{table:lora_metrics_comparison}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric}    & \textbf{Base Model} & \textbf{LoRA} \\
+\midrule
+Loss               & $4.99 \pm 3.11$     & $0.43 \pm 0.57$ \\
+Exact Match        & $2.28 \pm 7.89$     & $66.66 \pm 34.34$ \\
+Rouge-1            & $20.38 \pm 18.90$   & $76.74 \pm 24.89$ \\
+Rouge-L            & $19.66 \pm 18.16$   & $76.22 \pm 25.27$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Evaluation}
+\label{sec:evaluation}
+
+We evaluated multiple metrics for the natural instruction tasks, including cross-entropy loss, Rouge-1, Rouge-L \citep{lin-2004-rouge}, exact match, and \emph{agreement} between uncompressed and compressed LoRA. Here, \emph{agreement} measures the exact match in task-generations between the uncompressed LoRA model and the compressed LoRA model, rather than comparing to ground truth data. We find that all metrics correlate, but Rouge-L correlates most strongly with downstream utility. This finding aligns with prior work \citep{wang2022super}, which demonstrates that Rouge-L correlates well with classification accuracy.
+
+While cross-entropy is used for optimization during training, identical generation outputs across models can yield different cross-entropy losses. Exact match is too rigid and does not account for the variability in task responses. Similarly, agreement does not capture the inexactness associated with most of our tasks, nor does it account for the performance gains or losses of the compressed LoRAs. Arguably, practitioners are primarily concerned with task performance in the settings for which the LoRA was designed, rather than exact generational agreement between models.
+
+Joint diagonalization optimizes reconstruction error measured by the Frobenius norm, and our theoretical analysis in \S\ref{sec:theory} bounds this reconstruction error. Empirically, reconstruction error and downstream Rouge-L performance correlate.
+
+Instead of listing the absolute performance of different methods, we compute the performance difference between the base model and the LoRA model for each task. We present the ratio
+\begin{align*}
+\text{Performance relative to LoRA} := \frac{\text{method-performance}}{\text{LoRA-performance}}
+\end{align*}
+for the specific method in question, highlighting relative improvement with respect to the uncompressed LoRA and the base model.
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+
+
+\subsection{Task Performance}
+
+For each method, we vary the number of $n$ LoRAs that are compressed and the compression rank $r$. We run each experiment three times with different random seeds and report the mean and standard deviation. See Table~\ref{table:across-numbers-of-loras-relative} for results where we evaluate on the same ten manually selected tasks (Table \ref{table:task_information}) across settings. Every compressed collection of LoRAs contains these 10 tasks (i.e., in-distribution tasks), and each collection contains the smaller collections as subsets. 
+
+We normalize each LoRA adapter to have a Frobenius norm of one prior to running joint diagonalization. This normalization enhances performance and reduces the variance in reconstruction error. We restore the original norms of the LoRA adapters before reconstruction and testing. 
+
+Figure~\ref{fig:task-performance-compression} illustrates the Total Parameter Saved Ratio versus the Number of Unique LoRAs served. We only include methods that maintain over 99\% of the original LoRA's performance (as measured by RougeL). Notably, our JD methods uniquely approach the compression efficacy of a single LoRA, and with clustering, this aggressive reduction in size also maintains performance in larger LoRA collections.
+For efficiency, we limited the JD methods to ten iterations instead of pursuing full convergence. While the alternating algorithm quickly reaches an approximation of the minimizer, squeezing out the last few digits of precision takes many more iterations with limited to no performance gain.
+
+\begin{figure}[t!]
+    \centering
+    \centering
+    \includegraphics[width=0.5\textwidth]{figures/first_figure_v1/figure_1_total_lora_efficiency.png}
+    
+    \caption{Total Parameter Saved Ratio versus the Number of Unique LoRAs served. We only include methods that maintain over 99\% of the original LoRA's performance (as measured by RougeL). The Total Parameter Saved Ratio depicts the number of parameters saved for a system with a large number $n$ of different LoRAs. It is computed as:  $r_{total} := 1- \frac{\text{num. parameters after compression}}{\text{num. parameters before compression}}$.  }
+    \label{fig:task-performance-compression}
+\end{figure}
+
+
+
+\subsection{Performance and Reconstruction Error}
+\label{sec:performance}
+
+Figure~\ref{fig:reconstruction-vs-performance} relates reconstruction error and performance. The $y$-axis measures the mean performance improvement of Rouge-L relative to uncompressed LoRA, and the $x$-axis quantifies the mean reconstruction error between the compressed reconstruction of the product $BA$ and the original uncompressed product $BA$. Although the relationship between performance and reconstruction error is nonlinear, it demonstrates a generally decreasing, somewhat exponential trend. Notably, the minimal reconstruction error does not correlate with optimal performance, indicating that a degree of lossy reconstruction may be advantageous for enhancing generalization.
+
+ These preliminary experiments enabled efficient selection of cluster counts and rank values for compressing all LoRA modules.
+
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.5\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/reconstruction-vs-performance_svd.pdf}
+        \caption{Reconstruction error vs. performance.}
+        \label{fig:reconstruction-vs-performance}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.42\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/vllm_fig4.png}
+        \caption{Throughput ratio when serving varying numbers of LoRAs with vLLM.}
+        \label{fig:vllm}
+    \end{minipage}
+\end{figure}
+
+\subsection{Throughput of Serving Compressed LoRAs}
+\label{sec:vllm}
+
+Results in the previous sections demonstrate how to select an appropriate joint compression setting guided by the reconstruction error, such that the performance of the original LoRAs is preserved. Naturally, the rank and/or the number of clusters for the compression needs to increase as we compress larger LoRA collections to match LoRA performance.
+
+In Figure \ref{fig:vllm} we study how throughput with various compression settings compares to the vLLM multi-LoRA throughput with the matched GPU memory footprint. Specifically, for each number of unique LoRAs served and each compression setting, we compute the corresponding number of LoRAs to be placed on the GPU during serving and report the ratio of the two throughputs. As the number of unique LoRAs increases, vLLM multi-LoRA throughput degrades as it needs to schedule the requests and load and offload the adapters. We note that vLLM multi-LoRA already employs many advanced system optimization techniques, such as efficient scheduling and non-blocking CPU-GPU communication when swapping LoRAs \citep{sheng2023slora,kwon2023efficient}, but system optimization alone is not sufficient to fully mitigate throughput degradation when serving many LoRAs.
+In Figure \ref{fig:vllm} we see that across all LoRA collection sizes our compression techniques improve the throughput of vLLM multi-LoRA. Additionally, we highlight regions for each compression setting where compression is sufficiently moderate to achieve 99\%+ of LoRA performance, according to the results in Section \ref{sec:performance}. We also note that compression with a larger rank or too many clusters does not improve baseline throughput when serving a smaller number of LoRAs and should not be used in such cases. For example, rank 16 JD-Full improves baseline throughput with 4 and 8 LoRAs, but will underperform with more LoRAs, while 7 cluster rank 64 JD-Full does not improve throughput with 64 or fewer LoRAs, but when serving 1000+ LoRAs it improves the throughput significantly while maintaining the performance. To conclude, an appropriate joint compression setting improves vLLM multi-LoRA throughput and preserves performance for LoRA collections of any size between 4 and 1024, as we showed in Figure \ref{fig:intro}.
+
+Finally, we note that vLLM extensively uses custom CUDA kernels. To accommodate our compression techniques, we minimally adjusted the vLLM code to generate additional kernels needed by the compressed LoRAs. There likely is room for improvement to optimize the newly added kernels.
+
+\paragraph{Additional details} In this experiment we considered a varying number of rank-16 LoRAs, using a dataset of Shakespeare sonnets as inputs\footnote{\url{https://www.kaggle. We measured throughput, i.e., the number of requests served per second when generating ten tokens per request. The base model was Mistral 7B Instruct as in the other experiments; we simulated random LoRAs and assigned inputs to LoRAs at random. Experiments were conducted on H100 80GB GPU capped at 40\% memory consumption. This was done to reflect cost concerns in practical situations where a service provider might want to serve many LoRAs from cheaper hardware with lower memory than higher-end GPUs. This setting also takes into account the scenario where the LLM is large compared to the size of GPU and yet a provider may want to serve many LoRAs efficiently using the same device.
+
+
+
+
+
+
+\section{Discussion}
+
+
+
+
+This study introduces approaches to LoRA compression, addressing significant challenges facing foundation models and large language models. Our contributions include theoretical formulations, empirical validation, and practical implementations that enhance the understanding and application of LLMs in scalable environments. 
+
+The implications of our findings are manifold. Our theoretical guarantees for reconstruction error not only increase confidence in the use of compressed models but also lay a groundwork for future explorations in this area. Demonstrating that our compression techniques can preserve up to 100\% of the original LoRAs' performance highlights the effectiveness of our methods. Furthermore, integrating LoRA compression into state-of-the-art LLM serving systems demonstrates the potential for resource optimization, with throughput for thousands of LoRAs nearing that of a single LoRA.
+
+
+The promising results of our study suggest several future research directions. First, further compression may be possible via quantization. Our joint-diagonalization compression and quantization are independent axes of approaching the problem and exploring a combined solution can be fruitful. Second, when scaling to hundreds of thousands of LoRAs, joint compression, while effective, will not be sufficient to fit all LoRAs onto the GPU, thus requiring a procedure to schedule the requests. Our clustering variant offers opportunities to develop an efficient scheduling mechanism that takes into account the cluster assignments of LoRAs corresponding to the incoming requests.
+
+
+
+In conclusion, our research significantly advances the deployment of LLMs by providing robust, scalable, and efficient compression solutions. The ability of compressed LoRAs to maintain high performance while facilitating substantial resource savings opens new avenues for the broader application and adoption of LLMs across various industries. We encourage the community to build upon our findings and the shared LoRAs to further explore and enhance the utility of these technologies.
+
+
+
+
+
+
+

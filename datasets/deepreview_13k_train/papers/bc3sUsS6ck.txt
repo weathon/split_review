@@ -1,0 +1,537 @@
+\title{Generative Adapter: Contextualizing Language Models in Parameters with A Single Forward Pass}
+
+\begin{abstract}
+Large language models (LMs) are typically adapted to improve performance on new contexts (\eg text prompts that define new tasks or domains) through fine-tuning or prompting. However, there is an accuracy compute tradeoff---fine-tuning incurs significant training cost and prompting increases inference overhead. We introduce \Ours, an effective and efficient adaptation method that directly maps new contexts to low-rank LM adapters, thereby significantly reducing inference overhead with no need for finetuning. 
+The adapter generator is trained via self-supervised learning, and can be used to adapt a single frozen LM for any new task simply by mapping the associated task or domain context to a new adapter. 
+We apply \Ours to two pretrained LMs (Mistral-7B-Instruct and Llama2-7B-Chat) and evaluate the adapted models in three adaption scenarios: knowledge acquisition from documents, learning from demonstrations, and personalization for users.
+In StreamingQA, our approach is effective in injecting knowledge into the LM's parameters, achieving a 63.5\% improvement in F1 score over the model with supervised fine-tuning (from $19.5$ to $31.5$) for contexts as long as 32K tokens.
+In the MetaICL in-context learning evaluation, our method achieves an average accuracy of $44.9$ across 26 tasks, outperforming the base model. 
+On MSC, our method proves to be highly competitive in memorizing user information from conversations with a 4x reduction in computation and memory costs compared to 
+prompting with full conversation history.
+Together, these results suggest that \Ours should allow for general adaption to a wide range of different contexts.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Adaptation is essential for language models (LMs) to acquire new world knowledge~\citep{jiang-etal-2024-instruction, hu-etal-2023-meta, mecklenburg2024injectingnewknowledgelarge}, learn new tasks~\citep{min-etal-2022-metaicl}, and personalize to individual users~\citep{salemi-etal-2024-lamp}.
+Existing adaptation methods typically involve either \emph{prompting} or
+\emph{fine-tuning}~\citep{brown2020language}.
+As the scale of LMs continues to increase, adapting them becomes increasingly
+difficult due to efficiency constraints during both training and inference~\citep{hu2022lora}. 
+
+Prompting with task-specific demonstrations 
+(\ie in-context learning \citep{brown2020language})
+or background knowledge (\ie retrieval-augmented generation~\citep{lewis2020rag}) is one way to enable models to temporarily encode such relevant information, allowing flexible adaptation to various tasks.
+However, to maintain additional memory across sessions, some extra prompts must be added to the input, which incur an inference-time or storage overhead~\citep{chevalier-etal-2023-adapting}.
+Fine-tuning is another way to embed new information into the LM's parameters, retaining long-term memory. 
+Nevertheless, it requires a training phase that is more computationally expensive than a single forward pass, and acquiring knowledge through continual pretraining has shown to be data-inefficient~\citep{yang2024syntheticcontinuedpretraining, allenzhu2024physicslanguagemodels31}.
+Thus, we are interested in exploring alternative approaches for effectively and efficiently adapting pretrained LMs.
+In this work, we present \Ours, a novel method for training a neural network (adapter generator) to generate adapters that contextualize pretrained LMs on-the-fly with temporary knowledge from incoming contexts.
+Inspired by fast weights~\citep[][\textit{inter alia}]{ba2016using,schmidhuber1992learning}, our approach incorporates a lightweight adapter generator on top of pretrained LM as the slow network to produce updated parameters for the fast network (the adapted LM).
+As far as we know, we are the first to explore this direction.
+Specifically, the pretrained base LM remains frozen while we train the LM-specific adapter generator to generate layer-by-layer additive updates, similar to recent parameter-efficient fine-tuning (PEFT) techniques~\citep{houlsby2019parameter, hu2022lora}.
+For each layer, a adapter generator network uses the outer product of past context hidden states from the corresponding base LM layer to generate delta weights.
+These generated delta weights are then added to the base LM weights to form an adapted LM for future predictions.
+Similar to previous work on fast weights, our method achieves test-time adaptation using only forward passes, allowing dynamic updates as new context arrives in sequential chunks.
+We train the generator end-to-end in a self-supervised manner by compressing the context into a generated adapter and then computing the next-token prediction loss on a target sequence using the adapted LM.
+Once trained, our method can produce adapted LMs that effectively capture knowledge from the context to solve multiple downstream tasks, thus improving the adaptability of off-the-shelf pretrained LMs.
+We evaluate our method on three scenarios where on-the-fly contextualizing pretrained LMs is crucial: acquiring new factual knowledge, learning from demonstrations, and personalizing for individual users.
+These scenarios involve diverse forms of context with varying lengths, including documents with background knowledge, task-specific input-output examples and user-specific conversations.
+In the knowledge acquisition scenario, \Ours effectively memorizes factual knowledge from provided documents, with minimal information loss compared to full-context prompting at short context lengths.
+Notably, our method excels in memorizing long-context documents, managing to handle context lengths up to 32K on StreamingQA~\citep{pmlr-v162-liska22a} and 8K on SQuAD~\citep{rajpurkar-etal-2016-squad} better than continous pretraining.
+In learning from demonstrations on MetaICL, \Ours follows demonstrations effectively, achieving superior accuracy compared to the in-context learning of its base model. This exemplifies the model's ability to adapt to new tasks efficiently. 
+For personalization, \Ours is highly effective in retaining user information from conversations, achieving a fourfold reduction in computation and memory costs compared to full conversation prompting.
+In practical scenarios with many queries from the same user on edge computing devices, the benefits of our method are even more evident.
+This positions \Ours as a highly efficient tool for personalized LMs.
+
+Our contributions are summarized as follows:
+
+\begin{enumerate}
+   \item We introduce \Ours, a novel method for efficiently adapting pretrained LMs on-the-fly using test-time contexts. To our knowledge, we are the first to explore retaining the relevant temporary knowledge through generated parameter-efficient model updates for state-of-the-art pretrained LMs.
+    \item We develop an adapter generator network on top of frozen pretrained
+    LMs to transform text contexts into updated model parameters 
+    (adapted LMs)
+    for future queries. We also design an efficient end-to-end training process
+    to enhance the LMs' adaptability, \ie the resulting generator augmented LM
+    can be used for various downstream tasks using only forward passes.
+    \item We validate the proposed method on two representative pretrained LMs.
+    Empirically, we show the effectiveness of \Ours in various adaptation scenarios, including knowledge acquisition from documents, learning from demonstrations, and personalized user interactions. Our method proves to be generalizable across different types of contexts and applicable to multiple downstream tasks.
+\end{enumerate}
+
+
+
+\section{Method}
+
+\label{sec:method}
+We present \Ours, an efficient and effective framework for directly generating additive weight updates to contextualize the pretrained LM (a \textit{frozen} base LM) at test time.
+Unlike continual pretraining and supervised fine-tuning which update
+the pretrained LM via gradient descent, our method achieves adaptation using
+forward passes only.
+In the following sections, we first provide a task formulation and an overview of \Ours (\S\ref{ssec:problem}).
+Then we describe the the adapter generator (\S\ref{ssec:generative_adapter}),
+followed by the self-supervised pretraining tasks (\S\ref{ssec:pretraining_tasks}) and 
+the normalization techniques for improving training stability
+(\S\ref{ssec:normalization}).
+
+\input{figs/generative_adapter_overview}
+
+\subsection{Adaptation with Test-time Contextualization}
+\label{ssec:problem}
+
+To \textit{contextualize} a base model, $\Theta_{\rm base}$, to a given context $C$, our goal is to obtain an updated model, $\Theta_C$, that can respond to user instructions using the information provided in the context $C$. In practice, the context can include different types of data, such as documents,
+dialogues, or task description and few-shot demonstrations. 
+
+We specifically focus on \textit{test-time contextualization}, where context arrives incrementally as a stream of data, such as a continuous flow of documents or dialogue sessions. We represent this streaming context up to time step $t$ as 
+$\Sigma(t) \coloneq (C_1, \ldots, C_t)$, 
+where $C_t$ is the context chunk arriving at time step $t$. In this online adaptation scenario, the model must be efficiently adapted to each new context chunk as it becomes available.
+As shown in \autoref{fig:ga_flow}, we propose \Ours as a framework that adapts the base model $\Theta_{\rm base}$ to new contexts through a single forward pass as each context chunk arrives.
+Specifically, given test-time context $\Sigma(t)$, we adapt the base model
+$\Theta_{\rm base}$ to a new model $\Theta_{\Sigma(t)}$ using a context-dependent
+additive adapter $\Delta_t$, \ie $\Theta_{\Sigma(t)} = \Theta_{\rm base} + \Delta_t$.
+More details regarding the adapter $\Delta_t$ will be provided in \S\ref{ssec:generative_adapter}.
+After this adaptation, the modified model $\Theta_{\Sigma(t)}$ can be utilized for any
+test input relevant to the context $\Sigma(t)$ during inference. 
+For example, if the context $\Sigma(t)$ consists of a user's past conversations, 
+the modified model $\Theta_{\Sigma(t)}$ can effectively summarize or answer questions about these
+conversations.
+
+\subsection{Generative Adapter}
+\label{ssec:generative_adapter}
+
+In this paper, we propose using a learned adapter generator $\mathcal{G}$ to directly produce the adapter $\Delta$ based on the streaming context $\Sigma$.
+The core idea is to use the adapter generator to project context token embeddings, encoded by the base language model (LM), into the matrices of each layer in the LM. 
+Specifically, we consider only adapting the linear projection layers of the base
+Transformer model, \ie 
+the key/query/value/output layers of the multi-head attention unit and the
+down/up projection layers of the feed-forward network.
+Concretely, a linear projection layer in the $l$-th Transformer block ($l = 1, 2, \ldots, L$)
+can be written as $\ovec = \Wmat^{(l)} \hvec$,
+where $\Wmat^{(l)} \in \RR^{d_{\rm out} \times d_{\rm in}}$ is the weight matrix,
+$\hvec \in\RR^{d_{\rm in}}$ is the input vector,
+$\ovec \in\RR^{d_{\rm out}}$ is the output vector,
+and we omit the bias term for simplicity.
+For the adapted LM, we parameterize $\Wmat^{(l)} = \Wmat^{(l)}_{\rm base} + \Wmat^{(l)}_{\Delta}$,
+where $\Wmat^{(l)}_{\rm base}$ and $\Wmat^{(l)}_{\Delta}$ are the corresponding
+weight matrices in the base model $\Theta_{\rm base}$ and the context-dependent
+adapter $\Delta$, respectively.
+
+To generate the weights of the context-dependent adapter $\Delta$, we first
+encode the streaming context $\Sigma$ using the base model $\Theta_{\rm base}$ 
+and obtain the sequence of hidden states $\hvec^{(l)}_1, \hvec^{(l)}_2, \ldots,
+\hvec^{(l)}_M \in \RR^{d_h}$
+(\ie the outputs of the $l$-th Transformer block),
+where $M$ is the number of tokens in the context $\Sigma$, and $d_h$ is the dimension
+of hidden states.
+These hidden states are packed in a matrix $\Hmat^{(l)}\in \RR^{M \times d_h}$.
+Then we use the hidden states from the $(l - 1)$-th Transformer block to
+generate the adapter's weights $\Wmat^{(l)}_\Delta$ for the $l$-th Transformer
+block, \ie 
+$\Wmat^{(l)}_\Delta = \mathcal{G}^{(l)}(\Hmat^{(l - 1)})$,
+where $\mathcal{G}^{(l)}(\cdot){:}\,\RR^{* \times d_h} \rightarrow \RR^{d_{\rm out} \times d_{\rm in}}$ 
+denotes the layer-specific adapter generator which can transform any hidden state
+sequence of arbitrary length into a fixed-dimensional weight matrix.
+For conciseness, we will omit the superscript denoting the layer number $l$ when it
+does not cause ambiguity.
+
+To obtain a generator $\mathcal{G}(\cdot)$ without the undesirable dependency on
+the context length $M$, we use a bi-linear function as following,
+\begin{equation}
+\label{eqn:base_update}
+\Wmat_\Delta = \mathcal{G}(\Hmat)
+= (\Amat_1 \Amat_2) \Hmat^\top \Hmat (\Bmat_1 \Bmat_2)
+= (\Amat_1 \Amat_2) (\sum_{m=1}^M \hvec_m \otimes \hvec_m) (\Bmat_1 \Bmat_2),
+\end{equation}
+where 
+$\otimes$ denotes the outer product operator,
+$\Amat_1 \in \RR^{d_{\rm out} \times d_r}$,
+$\Amat_2 \in \RR^{d_r \times d_h}$,
+$\Bmat_1 \in \RR^{d_h \times d_r}$,
+$\Bmat_2 \in \RR^{d_r \times d_{\rm in}}$
+are all learnable parameters, 
+and we set the dimension $d_r$ to be much smaller than $d_{\rm in}$, $d_{\rm
+out}$ and $d_h$ to keep the number of learnable parameters within an acceptable
+range.
+
+\noindent\textbf{Dynamic Streaming Update}
+In practice, the context can arrive in chunks sequentially.
+The matrix of hidden states $H_{t}$ at step $t$ is computed based on all previous context chunks  $\Sigma(t-1)$. This hidden state is then used to generate an adapter for the current chunk $\Sigma(t)$, which, in turn, is also used to compute the hidden states for future context steps. 
+Based on \autoref{eqn:base_update}, to compute the adapter of $\Sigma(t)$ we need to concatenate 
+all hidden states (\ie $[\Hmat_1; \ldots; \Hmat_t] \in \RR^{(M_1 + \cdots + M_t) \times d_h}$)
+of the context chunks in $\Sigma(t)$ to generate the adapter, \ie
+$
+\Wmat_{\Delta_t} 
+= \mathcal{G}( \left[ \Hmat_1;\ldots;\Hmat_t \right]).
+$
+
+Fortunately, our formulation allows an efficient updating mechanism without
+explicitly storing history hidden states, noting that
+\begin{align}
+\Wmat_{\Delta_t} 
+= (\Amat_1 \Amat_2) ([\Hmat_1;\ldots;\Hmat_t]^\top [\Hmat_1;\ldots;\Hmat_t]) (\Bmat_1 \Bmat_2)
+= (\Amat_1 \Amat_2) (\sum_{i=1}^t \Hmat_i^\top \Hmat_i) (\Bmat_1 \Bmat_2).
+\label{eq:generate}
+\end{align}
+Thus, the update can be efficiently computed as
+\begin{align}
+{\bf S}_t &\leftarrow {\bf S}_{t - 1} + \Amat_2 \Hmat^\top_t \Hmat_t \Bmat_1 \\
+\Wmat_{\Delta_t} &\leftarrow \Amat_1 {\bf S}_t \Bmat_2
+\end{align}
+where $\Hmat_t \in \RR^{M_t \times d_h}$ stores the hidden states for the $t$-th
+context chunk, and the partial sum ${\bf S}_t \in \RR^{d_r \times d_r}$ acts as the memory of history context chunks 
+with ${\bf S}_0$ initialized as all zeros.
+Note directly storing 
+$\Wmat_{\Delta_t} \in \RR^{d_{\rm out} \times d_{\rm in}}$
+or 
+$\sum_i \Hmat_i^\top \Hmat_i \in \RR^{d_h \times d_h}$ 
+would require much more memory because we control 
+$d_r \ll \min\{d_{\rm in}, d_{\rm out}, d_h\}$.
+
+Our preliminary experiments find that this architecture exhibits some empirical instability because the generated matrix $W_{\Delta_t}$ can transform an input vector $\xvec$ into a vector containing values with either extremely large or near-zero magnitudes, due to its skewed distribution of its singular values. In \S\ref{ssec:normalization}, we will explain how normalization can address the instability issue.
+
+\subsection{Learning to Update with Self-supervised Pretraining}
+\label{ssec:pretraining_tasks}
+
+To preserve the language modeling capability of the adapted models $\Theta_{\Sigma(t)}$ for $t \in \{1, 2, \ldots \}$, 
+we pretrain the weight generator $\mathcal{G}$ using the next-token prediction loss
+of $\Theta_{\Sigma(t)}$ in a self-supervised manner on web corpora.
+In other words, the adapter generator is trained on top of the frozen base
+model $\Theta_{\rm base}$ in an end-to-end fashion. 
+Specifically, we use two self-supervision pretraining tasks:
+\emph{reconstruction} and \emph{completion}.
+
+The reconstruction task \citep{ge2024incontext} draws inspiration from autoencoders and aims to train
+the weight generator $\mathcal{G}$ to embed contextual information into the
+generated weights. 
+This process compresses the input context $(x_1, \ldots, x_m)$ into 
+a generated adapter, $\mathcal{G}(x_{1:m})$, which is subsequently used
+to reconstruct the input.
+Formally, this is accomplished by maximizing the log-likelihood of the input
+tokens with the adapted LM, using weights updated from the same text:
+$\mathcal{L}_{\rm reconstruction} (\mathcal{G}) = \log P \left( x_{1}, \ldots, x_{m} \mid \Theta_{\rm base} + \mathcal{G}({x_{1:m})} \right).
+$
+
+The completion task \citep{zhang2024compressinglengthycontextultragist, kim2024compressed} trains the adapted LM to generate the continuation of the given context.
+The goal is to maximize the log-likelihood of tokens $ x_{m+1}, \ldots, x_{n} $, which represent the continuation of the context $ x_{1}, \ldots, x_{m} $ in the dataset:
+$\mathcal{L}_{\rm completion} (\mathcal{G}) =  \log P \left( x_{m + 1}, \ldots, x_{n} \mid \Theta_{\rm base} + \mathcal{G}(x_{1:m}) \right).
+$
+
+We observe using both of the task can make the generated adapter memorize and
+utilize the contextual information. Similar to prior work
+\citep{ge2024incontext}, the generator is trained to maximize the sum of the
+objective functions of the two task:
+\begin{equation}
+\max_\mathcal{G} 
+\mathcal{L}_{\rm reconstruction} (\mathcal{G}) 
++ \mathcal{L}_{\rm completion} (\mathcal{G})
+\end{equation}
+
+\subsection{Normalization for Generated Weights}
+\label{ssec:normalization}
+
+In preliminary experiments, we find that using the naive outer product for generating weights led to instability during training, causing convergence issues. When multiplying the generated matrix with the input vector, the resulting output can either diminish to near-zero or grow excessively large. 
+
+To address this instability, we introduce normalization into the formulation, \ie
+\begin{equation}
+\Wmat_{\Delta_t} 
+\leftarrow \Amat_1 \operatorname{norm} (\mathbf{S}_t) \Bmat_2
+= \Amat_1 \operatorname{norm}\left( \Amat_2 \sum_{i=1}^t \left( \Hmat_i^\top \Hmat_i \right) \Bmat_1 \right) \Bmat_2.
+\label{eq:delta_w}
+\end{equation}
+Our pilot experiments find that normalization based on singular value
+decomposition (SVD) is particular effective, among other normalization
+strategies.
+ 
+\noindent\textbf{SVD Normalization}
+The SVD normalization technique ensures the singular values of the outer product are normalized to 1. Given a matrix $\mathbf{M}$, we define SVD normalization as:
+\begin{equation}
+\operatorname{norm}(\mathbf{M}) = \mathbf{U}\Vmat^\top,
+\end{equation}
+where $\mathbf{M} = \mathbf{U \Sigma V}^\top$ is the SVD factorization. This normalization resets the positive singular values of the matrix to one, preventing the vectors from excessively shrinking or exploding.
+
+\noindent\textbf{Low-Rank SVD and LoRA}
+An additional benefit of SVD normalization is that it can naturally produce low-rank matrices. Instead of performing a full-rank decomposition, we approximate the input matrix with a rank-$r$ SVD decomposition, where $r$ is a hyperparameter set in advance.
+Consequently, the matrix can be written as the product of two low-rank matrices, similar to a LoRA adapter \citep{hu2022lora}:
+\begin{align}
+\Wmat_{\Delta_t} 
+&= \Amat_1 \operatorname{norm} (\mathbf{S}_t) \Bmat_2 \\
+&= (\Amat_1  U(\Hmat)) (V^\top(\Hmat) \Bmat_2),
+\end{align}
+where $U(\Hmat)$ and $V(\Hmat)$ are the matrices resulting from SVD normalization. This low-rank approximation reduces both computational cost and memory usage.
+
+
+
+\section{Experiments Settings}
+
+
+
+We experiment with using both Mistral-7B-Instruct (v0.2)
+\citep{jiang2023mistral7b} and Llama2-7B-Chat
+\citep{touvron2023llama2openfoundation} as the base LMs.
+For efficiency, our main experiments train adapter generators to only update the
+output projection layers of the multi-head attention unit in Transformer.
+We study a more capable implementation in \S\ref{sec:analysis} and defer the
+full exploration of other modules for future work.
+\noindent\textbf{Hyperparameters}
+The intermediate dimension $d_r$ and SVD rank $r$ are set to 1,024 and 128, respectively.
+Approximately, this leads to 500 million parameters for the generator, with the
+generated adapter of 32 million parameters.
+ 
+
+\noindent\textbf{Training}
+Following the standard training pipeline of LM development
+\citep{jiang2023mistral7b,touvron2023llama2openfoundation}, the training of our
+adapter generator includes a pretraining phase described in
+\S\ref{ssec:pretraining_tasks} followed by instruction tuning.
+For pretraining, we randomly sample 1 billion tokens from SlimPajama~\citep{cerebras2023slimpajama} which are split into segments of 8,192 tokens each.
+For instruction tuning, we use a mix of tasks such as question answering, in-context learning, and general instruction following,
+
+The context is divided into chunks of 1,024 tokens to utilize the dynamic
+updating mechanism described in \S\ref{ssec:generative_adapter}.
+
+
+
+
+
+
+
+
+\section{Main Results}
+
+
+We evaluate \Ours on three representative scenarios where contextualizing
+pretrained LMs is crucial, \ie
+acquiring new factual knowledge (\S\ref{ssec:doc_qa}),
+learning from demonstrations (\S\ref{ssec:icl}),
+and personalizing to individual users (\S\ref{ssec:personalization}).
+
+\subsection{Document-based Question Answering with Varying Context Length}
+\label{ssec:doc_qa}
+
+
+The factual knowledge stored in the parameters of a LM remains static after pretraining.
+Here, we consider the scenario where the model needs to adapt to new knowledge based on documents.
+After adaptation, it is expected to correctly answer information-seeking questions about these documents. 
+
+\noindent\textbf{Setup and Baselines}
+To evaluate the fact recall ability of the adapted model, we use two question answering (QA) datasets, SQuAD~\citep{rajpurkar-etal-2016-squad} and StreamingQA~\citep{pmlr-v162-liska22a}, where each test case consists of a passage and a corresponding question about some information from that passage. 
+To analyze the impact of context length on performance, we conduct an evaluation using contexts of varying lengths.
+
+We divide the documents in the corresponding test set evenly into groups, with
+each group having an average length of $k$ tokens ($k \in \{$512, 1K, 2K, 4K,
+8K, 16K, 32K$\}$). Thus, the model should contextualize on the article in each
+group and evaluate fact recall by the question associated with the articles. The
+QA accuracy is evaluated by comparing the generated output with the gold answer
+for all questions associated with the documents within the group. 
+Following \citet{rajpurkar-etal-2016-squad},
+F1 score is used as the metric for evaluation.
+
+We also analyze the computational and storage requirements of \Ours, which comprises three phases: general-purpose pretraining, contextualization, and inference. The generator is pretrained once and can subsequently be used for any task. During the contextualization phase, \Ours encodes the context into an adapter with a single forward pass. In the inference phase, the adapted model generates responses based on the input. Beyond the LM parameters, the extra storage required includes the parameters of the generative adapter.
+
+Here, we consider both full parameter fine-tuning and full context prompting using the same base model as baselines.
+For fine-tuning, we consider two variants.
+The first approach, \textit{supervised fine-tuning} (SFT), trains the base model exclusively on a training set of question-answer pairs sourced from articles distinct from those in the test set.
+The second variant, known as \textit{continual pretraining} (CPT), involves first training the base model on all documents in the test set, followed by further adaptation through SFT using the the training set of question-answer pairs.
+During inference, we evaluate the fine-tuned model in a closed-book manner,
+\ie the model is tasked with directly producing the answer to a given question.
+For prompting, we simply concatenate all documents in the group as a single context and prompt the base model to respond accordingly.
+Specifically, for Llama2-7B-Chat, if the context length exceeds the maximum limit of 4K tokens, we truncate the prompt to include only the last 4K tokens.
+For \Ours, we create an adapted model for each document group, which is similar to how the context is encoded as prompting.
+After that, the adapted model is asked to answer the question again in a closed-book fashion, akin to fine-tuning.
+
+\input{figs/results-document-qa}
+
+\input{figs/results-efficiency}
+
+
+
+\noindent\textbf{Results}
+We present the QA accuracy results for SQuAD and StreamingQA and the computation costs for StreamingQA in \autoref{fig:document-qa} and \autoref{fig:efficiency}, respectively. Both fine-tuning methods (SFT and CPT) are evaluated in a closed-book manner, resulting in constant QA performance regardless of varying context lengths. In contrast, both \Ours and prompting are evaluated on varying context lengths, where recalling facts can become more difficult as the context length increases.
+
+As expected, both our method and prompting achieve improved QA performance by using relevant contexts compared to supervised fine-tuning baselines. Notably, \Ours is highly effective when the context is relatively short ($<$ 1K tokens). Moreover, it avoids the additional inference overhead associated with prompting, which requires attention computation over the context input regardless of using key-value (KV) caches (illustrated by the green lines in \autoref{fig:efficiency}). This overhead issue worsens with longer contexts.
+In most cases, \Ours outperforms CPT, especially when the context length is less than 8K tokens. Importantly, although both approaches adapt model parameters using documents, \Ours requires preprocessing time (forward passes only) that is orders of magnitude smaller than CPT (which involves multiple forward and backward passes), as demonstrated in \autoref{fig:efficiency}. 
+
+
+
+\input{figs/results-icl}
+
+\subsection{In-Context Learning with varying in-context examples}
+\label{ssec:icl}
+
+In the prompting paradigm, one emerging ability of pretrained LMs is that they can perform a task with a few task-specific input-output examples as context on unseen cases, also known as in-context learning \citep{brown2020language}.
+Here, we are interested to see whether \Ours can provide further benefits in enhancing the base LM's in-context learning ability.
+
+\noindent\textbf{Setup and Baselines}
+We conduct experiments using MetaICL \citep{min-etal-2022-metaicl}, consisting of 26 test tasks.
+We also ensure that none of these test tasks were seen during the training of adapter generator.
+For each task, we use 1, 2, 4, 8, and 16 demonstrations randomly sampled from the corresponding development split following the MetaICL evaluate pipeline. 
+To reduce evaluation variance, we repeat the sampling process five times for each few-shot setting.
+We report separate average accuracy for classification and non-classification tasks.
+For classification tasks, achieving high accuracy requires the model to learn both the candidate options and the input-output relationships from the provided examples. For non-classification tasks, the model also needs to learn the output style.
+
+We consider three baselines:
+1) zero-shot prompting with the base LM where only task instruction is provided;
+2) standard few-shot prompting with the base LM \citep{min-etal-2022-metaicl} where each test case is prepend with those few-shot examples;
+and 3) fine-tuning the base LM on each evaluation task using 16 input-output pairs, corresponding to the maximum number of shots in our evaluation.
+
+
+
+\noindent\textbf{Results}
+\autoref{fig:icl} summarizes the results for MetaICL with various number of in-context examples for both classification and non-classification tasks. 
+The performance of fine-tuned models (blue lines) and zero-shot prompt baselines (grey lines) is evaluated without demonstrations, resulting in constant performance across different numbers of shots. While fine-tuned models generally achieve higher accuracy on classification tasks, their performance on non-classification tasks is lower. We speculate that the few-shot setting (16 shots) is insufficient for the model to learn the desired output style through fine-tuning. In contrast, \Ours outperforms few-shot prompting in most cases, with more significant improvements observed in the more challenging non-classification tasks, where the model must adapt to specific output styles. This indicates that the generated adapter not only retains the in-context learning ability but also enhances the base model.
+
+
+
+\subsection{Personalization}
+\label{ssec:personalization}
+
+
+
+Using LMs to analyze users' behaviours and memorize their preferences is the key to unlocking a tailored and engaging user experience, \ie personalized LMs.
+Towards this goal, we focus on evaluating the LM's ability to memorize user information in conversations.
+
+\noindent\textbf{Setup and Baselines}
+We use the Multi-Session Conversation (MSC) dataset \citep{xu-etal-2022-beyond} for our experiments, following \cite{packer2024memgptllmsoperatingsystems}. 
+Each test case comprises a multi-session human-human conversation between two participants, along with a question regarding information mentioned within the conversation.
+The average length of the conversational context is 2.5K tokens, which makes it inefficient to prompt the model repeatedly with the entire conversation history for the same user.
+Similar to document-based QA (\S\ref{ssec:doc_qa}), we evaluate the model quality using the F1 score by comparing the generated answers to the ground truth.
+We also report computation and memory costs.
+Here, we use Mistral-7B-Instruct as the base LM.
+
+As baselines, we include both closed-book and full-conversation prompting based on the base LM, where the former involves random guesses and the latter incurs higher computation and memory costs by storing the entire long conversation.
+We also include the state-of-the-art prompt compression method, UltraGist \citep{zhang2024compressinglengthycontextultragist}, which reduces the context into fewer token embeddings, thereby saving computation and memory costs.
+
+\input{tables/results-msc}
+
+\noindent\textbf{Results}
+The results on MSC are summarized in \autoref{tab:msc}.
+As expected, the closed-book approach, which does not memorize any user information performs very poorly.
+In contrast, methods that utilize proper user conversations as context can accurately recall user information, achieving reasonable answer accuracy.
+Although using the entire conversation leads to better accuracy, full conversation prompting incurs significant computation and storage costs, \ie 4x those of \Ours.
+Such costs are highly undesirable for personalizing LMs for individual users, especially since most computations occur on edge devices without power GPUs.
+Comparing to UltraGist at the same level of storage cost (compressed into 512 tokens), \Ours further reduces inference cost without performance drop.
+In real world scenarios with many queries from the same user, the benefits of our method are even more pronounced.
+
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+
+\subsection{Ablation Study}
+Here, we examine how different design choices with \Ours affect model performance.
+Specifically, we train adapter generators for Mistral-7B-Instruct under various configurations and evaluate them using two metrics---reconstruction perplexity and completion perplexity---on a validation set drawn from the same distribution as the pretraining corpus.
+As we observe in our preliminary study, the quality of the resulting adapter generator is highly correlated with these metrics.
+The results are presented in \autoref{tab:ablation}, where the default setting is described in \S\ref{sec:method}.
+
+\noindent\textbf{Mix of both pretraining tasks is necessary.}
+As we can see, relying solely on one task does not yield good perplexity on the validation set for both metrics. 
+In particular, training with only reconstruction task results in a significant drop in completion perplexity, indicating a loss of general language modeling capabilities and overfitting to memorization.
+Thus, the completion task acts as data regularization for \Ours, enabling the model to distill contexts into generated adapters and effectively utilize them in future predictions.
+
+\noindent\textbf{SVD is a more effective normalization.}
+We explore an alternative normalization for \autoref{eq:delta_w} using the Frobenius norm, defined as $\operatorname{norm}(M) = M / \| M \|_F$, where $\|M\|_F = \sqrt{\sum_{i,j} M_{ij}^2}$. Compared to SVD used in our default setting, the Frobenius norm is computationally simple and helps bound the matrix scale.
+However, our results indicate that the Frobenius norm is not as effective.
+Observing substantial disparities in the scale of singular values, we hypothesize that applying the Frobenius norm may unnecessarily shrink certain directions, reducing the model's expressiveness.
+
+\noindent\textbf{More update parameters lead to better performance.}
+By default, we add the adapter into the output projection layer of the attention module. 
+We also experiment with adding the adapter to the down projection layer within the feedforward module, which introduces more update parameters (3x those of default).
+We observe that placing the adapter on the feedforward layer indeed leads to slightly improved reconstruction and completion perplexities.
+Due to computational constraints, a more thorough exploration was not feasible and we leave this for future investigation.
+
+\input{tables/analysis-ablation}
+
+
+
+
+
+
+
+
+
+\section{Related Works}
+
+
+
+{\bf Fast Weights}:
+Our proposed method is closely related to the idea of ``fast weights''
+\citep{hinton1987using,ba2016using,schlag2021linear}, which makes the model
+weights being adaptive to the model input.
+Context-dependent fast weight programmers (FWPs) introduced by
+\citet{schmidhuber1992learning,schmidhuber1993reducing} use a slow network with
+slow weights to reprogram the fast weights of the corresponding fast
+network.
+\cite{schlag2021linear} point out that self-attention without softmax and other
+linear Transformer variants
+\citep{tsai-etal-2019-transformer,katharopoulos2020transformers,choromanski2021rethinking,peng2021random}
+can be viewed as FWPs. 
+\cite{clark-etal-2022-meta} propose fast weight layers which are added on top of
+the Transformer model after the last attention layer for language modeling.
+Different from previous work mainly focusing on specific tasks, our goal is to enhance frozen pretrained LMs with fast associative memory for general language processing.
+Instead of using a slow network to program a separate fast model, our method can be viewed as a self-programming model, \ie context encoded by the base LM is used to update the base LM itself.
+
+{\bf Adapting LMs via Meta-Learning}:
+One line of work focuses on adapting pre-trained LMs for an online stream of
+documents using meta-learning.
+Observing that naively fine-tuning on the documents using the negative
+log-likelihood loss is not effective for downstream question answering,
+\cite{hu-etal-2023-meta} propose context-aware meta-learned loss scaling to
+re-weight the loss for individual tokens based on their importance during the
+online fine-tuning.
+\cite{tack2024onlineadaptationlanguagemodels} use a meta-learned amortization
+network to directly predict parameter efficient fine-tuning modulations of the
+base LM for individual context documents. 
+The modulations are then aggregated into a single output for downstream question
+answering.
+Unlike those methods that typically require a nested training loop, our adapter generator augments pretrained LMs and our model can be trained in an end-to-end fashion with self-supervised objectives.
+
+{\bf Parameter-Efficient Fine-Tuning (PEFT)}:
+\Ours employs a low-rank adapter akin to LoRA \citep{hu2022lora},
+which was originally designed for PEFT.
+Several derivatives of LoRA exist such as AdaLoRA \citep{zhang2023adaptive}
+and DoRA \citep{liu2024dora}, along with various other PEFT strategies such as
+serial adapters \citep{houlsby2019parameter} and prefix tuning
+\citep{li-liang-2021-prefix}.
+A thorough survey of PEFT methods is presented by
+\cite{han2024parameterefficientfinetuninglargemodels}.
+Most work focuses on task-specific fine-tuning scenarios.
+Instead, \Ours is a general LM and does not require a downstream dataset for adaptation.
+
+
+
+\section{Conclusion}
+
+
+
+In this work, we introduce \Ours, a method for efficiently adapting pretrained
+LMs on-the-fly using test-time context through forward passes only.
+We design a adapter generator network on top of frozen pretrained LMs,
+transforming text contexts into updated model parameters.
+Our adapter generator network is trained end-to-end with the frozen pretrained
+LM using two self-supervised tasks on web corpora.
+We assess \Ours across three scenarios that benefit from contextualizing
+pretrained LMs: acquiring new factual knowledge, learning from demonstrations,
+and personalizing to individual users.
+Our experiments indicate that \Ours reduces information loss compared to
+full-context prompting in retaining factual knowledge from context documents.
+Additionally, the model effectively adapts to new task instructions when
+learning from demonstrations.
+Finally, \Ours achieves comparable fact recall performance to efficient
+prompting methods while utilizing lower inference-time computation, showcasing
+its feasibility for user-specific adaptation in personalization scenarios.
+For future work, it would be interesting to further explore scaling up the adapter generator, such as by integrating adapters into additional layers, and to investigate more selective update rules~\citep{schlag2021linear}.
+
+
+
+
+
+
+
+
+
+

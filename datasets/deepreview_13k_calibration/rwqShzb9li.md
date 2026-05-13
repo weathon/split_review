@@ -1,8 +1,8 @@
 # Linear Representations of Political Perspective Emerge in Large Language Models
 
 - Decision: Accept
-- Avg Score: 4.20
-- Scores: 6, 1, 0, 8, 6
+- Avg Score: 7.50
+- Scores: 6, 10, 8, 6
 
 ## Abstract
 Large language models (LLMs) have demonstrated the ability to simulate responses aligned with human subjective perspectives, such as liberal or conservative ideologies in American politics. Our study reveals that LLMs achieve this by learning a ``geometry of perspective'' that linearly represents subjective perspectives in the activation space, where similar simulated perspectives are represented closer to each other. Specifically, we probe the hidden layers of open, transformer-based LLMs (\texttt{Llama-2-7b-chat, Mistral-7b-instruct, Vicuna-7b}) when prompted to generate texts under the ideological perspective of distinct politicians. We find a set of attention heads that represent U.S. ideological slant, which is primarily located in the middle layers known to encode high-level concepts and tasks. The activation of these attention heads, when prompted about U.S.~politicians and media outlets, linearly correlates with existing measures of their ideological slant. We use this activation to detect the ideological slant implicitly adopted by an LLM as it is generating each token. We further show that by intervening on these attention heads, we can tune LLM output to any position along the linear dimension from a liberal to conservative ideological perspective. Our research shows that political ideology serves as a fundamental dimension of LLM representations, and present an interpretability method to identify, monitor, and control the subjective perspective used to generate text. Code: https://osf.io/us9yx/?view_only=cf0fdcdb123e4d6bb7d10a64be5c1a09

@@ -1,0 +1,227 @@
+\title{SHARP: Accelerating Language Model Inference by SHaring Adjacent layers with Recovery Parameters}
+
+\begin{abstract}
+While Large language models (LLMs) have advanced natural language processing tasks, their growing computational and memory demands make deployment on resource-constrained devices like mobile phones increasingly challenging. In this paper, we propose SHARP (SHaring Adjacent Layers with Recovery Parameters), a novel approach to accelerate LLM inference by sharing parameters across adjacent layers, thus reducing memory load overhead, while introducing low-rank recovery parameters to maintain performance.
+Inspired by observations that consecutive layers have similar outputs, SHARP employs a two-stage recovery process: Single Layer Warmup (SLW), and Supervised Fine-Tuning (SFT).
+The SLW stage aligns the outputs of the shared layers using  $\mathcal{L}_2$ loss, providing a good initialization for the following SFT stage to further restore the model performance. Extensive experiments demonstrate that SHARP can recover the model's perplexity on various in-distribution tasks using no more than 50k fine-tuning data while reducing the number of stored MLP parameters by 38\% to 65\%.
+We also conduct several ablation studies of SHARP and show that replacing layers towards the later parts of the model yields better performance retention, and that different recovery parameterizations perform similarly when parameter counts are matched.
+Furthermore, SHARP saves 42.8\% in model storage and reduces the total inference time by 42.2\% compared to the original Llama2-7b model on mobile devices.
+Our results highlight SHARP as an efficient solution for reducing inference costs in deploying LLMs without the need for pretraining-scale resources.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Following the principles of scaling laws, large language models (LLMs) have become one of the central topics in Natural Language Processing (NLP) (Brown, 2020; Zhang et al., 2022; Hoffmann et al., 2022; Bubeck et al., 2023; Chowdhery et al., 2023; Bai et al., 2023; Team et al., 2023; Touvron et al., 2023). However, deploying a pre-trained large language model requires significant computational and memory resources (Aminabadi et al., 2022; Pope et al., 2023; Kim et al., 2023b; Zhang et al., 2024b), which may further restrict their inference speed. For instance, a 70-billion-parameter language model stored in FP16 precision requires approximately 148GB of memory to hold the model weights, necessitating two A100 GPUs with 80GB of memory each to load the entire model. During inference, the entire input sequence and the KV cache are also stored on the GPU, incurring additional memory usage. Although techniques like layer-wise inference (HuggingFace, 2022), which load the model to GPU layer by layer, enable LLM inference on a single GPU, they introduce additional inference latency due to frequent memory loading or disk reading. In particular, these concerns are significant for deployment on mobile devices, which typically have smaller DRAM (e.g., around 6GB in the iPhone 15) and higher communication overhead (Liu et al., 2024).  
+
+To alleviate these issues, several methods have been carefully explored. One direction is to optimize the calculation process of the attention mechanism and the storage of the KV cache, including Reformer (Kitaev et al., 2020), Flash Attention (Dao et al., 2022; Dao, 2023; Shah et al., 2024), $\mathrm{H_{2}O}$ (Zhang et al., 2024b), and so on. Another main direction is to compress the existing model while retaining model performance, including quantization (Dettmers et al., 2022; Liu et al., 2023a; Kang et al., 2024), pruning (?Sun et al., 2023), and sparsification (Frantar & Alistarh, 2023; Dong &  
+
+![](images/a71563b1842b75db5df8a7e05e8bcca643e0fa26a78a73fcc8a249925aca933b.jpg)  
+Figure 1: (a) Regular pretrained baseline model without layer sharing. (b) Adjacent layer sharing used in MobileLLM (Liu et al., 2024). They repeat the layer twice and train the model from scratch. (c) Direct Sharing: directly apply vanilla adjacent layer sharing to the pretrained model to accelerate inference. (d) (Ours) SHARP: SHaring Adjacent Layers with Recovery Parameters. SHARP leverages fine-tuning-scale data to train additional parameters $\Delta\Theta$ , which consist of far fewer parameters than the original $\Theta$ , in order to recover the model’s performance. In this paper, we explore several candidate transformations, including the LoRA-style function, to apply the additional parameters  
+
+Chen, 2024; Mirzadeh et al., 2023; Song et al., 2024). There are also other methods that try to accelerate inference by optimizing decoding algorithms, such as speculative decoding (Kim et al., 2024). Additionally, it’s worth mentioning some other research also tries to directly train small language models (SLMs) (Black et al., 2022; Zhang et al., 2022; Timiryasov & Tastet, 2023; Dey et al., 2023; Biderman et al., 2023; Gunasekar et al., 2023; Hu et al., 2024) rather than compressing existing large language models. However, this always requires pretraining-scale resources, which cost more than the methods that only use post-training-scale data for recovery, such as sparsification.  
+
+In this paper, we focus on a new methodology for efficient inference on current pretrained models, named the adjacent layer-sharing strategy. It is partially inspired by the observation from Deja $\mathrm{Vu}$ (Liu et al., 2023b): in Figure 5(a) and (b) of their paper, they show that the cosine similarity between representations at two consecutive layers, or even a few layers apart, can be very high (greater than $95\%$ ), which implies that the model outputs between layers may be similar. This suggests that we can save inference time by sharing parameters between layers to reduce communication overhead. A related algorithm, the “immediate block-wise weight sharing” strategy proposed recently by MobileLLM (Liu et al., 2024), also supports this idea. They share the weights between two adjacent layers to avoid frequent parameter movement in memory (Figure 1(b)) and then train a new small language model. Note that for mobile devices, the communication overhead in memory accounts for a major proportion of the latency overhead, therefore, they double the depth of the new model and obtain better downstream performance, but only increase a negligible additional inference time. However, although MobileLLM achieves significant improvements in accelerating model inference on mobile devices, they focus only on training a new model from scratch and do not fit our purpose of deploying pretrained models through a more resource-saving post-training process.  
+
+Our Contributions. To apply the layer-sharing strategy to existing LLMs, in this paper, we propose a new layer-sharing algorithm named SHARP (SHaring Adjacent layers with Recovery Parameters), which uses additional low-rank weights to predict subsequent layers, and thus save the memory load overhead of the predicted layers. We summarize our contributions as follows.  
+
+• First, we show that language models are robust to the replacement of adjacent or even later MLP layers, which further supports the insight of the layer-sharing strategy. Further, we find that the current layer can be a good approximation of later layers if we add some additional LoRA (Hu et al., 2021) parameters and fine-tune them on a high-quality dataset (Figure 2). We also note that although the outputs of the adjacent layers are similar, their parameters differ a lot. (Section 2.1). • Second, based on these observations, we propose our SHARP algorithm (Figure 1 (d)). Given the current layer, we use candidate transformations, such as LoRA addition, to predict the parameters of the next several layers using recovery parameters, which reduces memory load overhead and thus accelerates inference. SHARP consists of two stages: the Single Layer Warmup (SLW) stage and the Supervised Fine-Tuning (SFT) stage, which are used to tune the additional parameters. During SLW, we minimize the $\mathcal{L}_{2}$ loss between the output of the original replaced layer and the predicted layers, providing a good initialization for the SFT stage. While SFT is critical for recovering model performance, SLW plays an essential role in allowing one layer to aggressively predict multiple layers. With SLW, we can recover model perplexity effectively, even when dropping 3/4 of the original MLP layers (Section 2.2.2, 3.2).  
+
+![](images/480570dede05047470b89416b0929409a1982d005b1c6ac284e6142fd8cdfab5.jpg)  
+Figure 2: Language models are robust to the replacement of adjacent MLP layers. (Left) For each reference layer, we directly replace the MLP layer in the subsequent layer with that of the reference layer, then evaluate perplexity on various tasks. We find that, aside from the first and last layers, most replacements do not significantly increase perplexity compared to the original model (dotted line). If we fine-tune the model with additional low-rank learnable parameters (rank $=400$ ) added to the next layer, the perplexity gap is effectively closed (as shown by the ”Arxiv-math (Finetuned)” line). (Right) Similarly, we observe consistent perplexity results on Arxiv-math (baseline perplexity $=3.0$ ) when using more general reference-target replacement pairs (i.e., use reference layer to replace any later layer).  
+
+• Third, we conduct detailed ablation studies on SHARP. Specifically, we investigate how to achieve more efficient recovery by determining which layers to replace and selecting the best candidate functions. We find that the earlier layers (layers 5 to 15) are crucial for model performance, and thus, to preserve the model’s capacity, more layers should be replaced toward the latter parts of the model. Additionally, we explore various candidate functions, including the vanilla LoRA addition function and other parameterizations, such as left, right, and dot multiplication of the original weights. Interestingly, we find that these different parameterizations perform similarly when their total number of parameters is the same (Sections 2.2.3, 3.3).  
+
+• Lastly, we perform several experiments to demonstrate the advantages of our SHARP algorithm. In in-distribution tasks, we recover model perplexity across various tasks, such as Arxivmath (Kenny, 2023) and Dialogsum Chen et al. (2021), using no more than 50k fine-tuning examples, while saving $38\%{-}65\%$ of the MLP layer parameters. We also show that SHARP performs better on memorization-related downstream tasks, and we discuss how knowledge from different types of downstream tasks is stored in different layers. More importantly, evaluation results on mobile devices demonstrate that SHARP saves $42.8\%$ in model storage (and loading) and reduces total run time by $42.2\%$ compared to the original Llama2-7b (Section 3.2, 3.4, 3.5)  
+
+
+
+\section{2 MAIN METHODS  }
+
+
+2.1 INSIGHT: THE CURRENT LAYER CAN BE A GOOD APPROXIMATION OF THE NEXTLAYER WITH RECOVERY PARAMETERS  
+
+As illustrated in the introduction parts, the adjacent layer-sharing strategy (Figure 1 (b)) proposed by MobileLLM accelerates the inference of a newly-trained small language model (125-350M) by reusing the previous layers and reducing the communication overhead in memory. However, several questions about layer-sharing strategies have yet to be revealed: does the success of this adjacent layer-sharing strategy come from the fact that adjacent layers have similar parameters or behaviors?  
+
+Can we extend this method to a pretrained larger model like Llama2-7b (Touvron et al., 2023), to accelerate model inference (as shown in Figure 1 (a) and (c))? Further, can we even use one layer to predict more layers and thus further accelerate inference?  
+
+To answer these questions, we try to directly replace the MLP layer in the next layer with the current reference layer in Llama2-7b model, and then evaluate its perplexity on some evaluation tasks including Arxivmath (Kenny, 2023), GPT4-Alpaca (Peng et al., 2023), DatabricksDolly-15k (Conover et al., 2023) and Dialogsum (Chen et al., 2021). The result is shown in Figure 2 (Left). We found that except for the first and last layer, most replacements don’t increase the model perplexity significantly (solid line) compared to the original model (dash line).  
+
+More surprisingly, for Arxiv-math, we find that if we add some additional learnable parameters1 to the replaced layer like Figure 1 (d) and use $50\mathrm{k}$ instruction data from Arxiv-math to finetune them, we can recover the perplexity gap (as the “Arxiv-math (recovered)” line). Note that the Llama2 models use 2T tokens for pretraining, we claim that these results support it’s possible to apply SHARP in a larger language model without pretraining-level resources. Besides in Figure 2 (Right), we also try more general reference-target replacement pairs, i.e., use one reference layer to predict the later layers, and we obtain similar results on the small perplexity gap. This implies that it’s possible to use one reference layer to predict more layers.  
+
+![](images/9d5488e55fa4aa12ac993b01b4080a91f02f661dd45a2166a872ac19bd1600f4.jpg)  
+Figure 3: Average relative error between adjacent layers (mean of $\mathbf{\bar{\{}}\|}\mathbf{\Theta}_{i+1}-\mathbf{\bar{\Theta}}_{i}\|/\|\mathbf{\Theta}_{i}\|\mathbf{\}_{i=1}^{31})$ are all about $142\%$ for gate, up and down projections.  
+
+What’s more, it’s also worth noting that even though layers with recovery parameters can be good approximations of each other, the parameters themselves are quite different. This is supported by evaluating the average relative error between adjacent layers as shown in Figure 3. This phenomenon implies that to predict the next layer, we should find weights in parameter space to approximate the outputs of adjacent layers, rather than directly approximate their differing parameters.  
+
+
+
+\section{2.2 OUR METHODS  }
+
+
+In this section, we illustrate how we find the proper additional parameters for predicting each layer in SHARP. First, we introduce the notations and the settings used in our paper.  
+
+
+
+\section{2.2.1 PRELIMINARY  }
+
+
+We assume the original parameters of a particular function (for example, the gate projection of MLP layers) at $i$ -th layer as $\bar{\Theta}_{i}\in\mathbb{R}^{d_{1}\times d_{2}}$ $(i\in[N])$ , where $d_{1}$ and $d_{2}$ are the input/output dimension of the function, and we freeze their gradients during training. We denote the low-rank learnable LoRA parameters at $i$ -th layer as $A_{i}\ \in\overline{{\mathbb{R}^{d_{1}\times r}}},B_{i}\,\in\,\overline{{\mathbb{R}^{r\times d_{2}}}}$ . And we let $f(\cdot\,;\Theta_{i})$ denote the particular function that utilizes $\Theta_{i}$ as parameters. In this paper, we focus on reducing the parameters in MLP layers, which take up the main parts of the parameters in the intermediate layers. And we use Llama2-7b (Touvron et al., 2023) as our basic model.  
+
+To accurately illustrate the replacement, we denote $\mathcal{I}:=\left\{j_{1},\ldots,j_{K}\right\}\subset[N]$ as the reference layer sets2. And for each $j_{k}\,\in\,\mathcal I$ , we define a corresponding continuous sequence named target layer sets $\mathcal{T}_{j_{k}}\,=\,\left[j_{k}+1,\ldots,j_{k}^{\prime}\right]$ where $j_{k}^{\prime}\,\in\,[j_{k}+1,j_{k+1}-1]$ . We also denote $g$ to be the candidate transformation function (as in Figure 1 (d)). Our goal is to use each reference layer $j~\in~\mathcal{I}$ to approximate every later target layer $l\in\mathcal{T}_{j}$ with some learnable low-rank parameters, i.e., aiming to find some $\Delta\Theta_{l}$ , such that $f(\cdot\,;g(\Theta_{j},\Delta\Theta_{l}^{\bar{}}))$ performs like $f(\cdot,\Theta_{l})$ . We note that only the reference layer will be loaded and stored, and target layers will be obtained using the corresponding reference layer combining low-rank additional parameters on the fly. In this way, we trade cheaper parameter computation for more expensive memory loading.  
+
+Stored Ratio $\tau$ . We define $\tau$ to denote the ratio of the stored layers in the replaced model to that in the original model. For instance, if we consider Llama2-7b, which has 32 layers, and the number of replaced layers is $X$ , then $\tau:=(32-X)/32$ .  
+
+Compression Ratio $s$ . We define $s$ to represent the ratio of the parameters of the MLP layer in the replaced model to that in the original model. For instance, assume that we use the LoRA addition function as candidate transformation, the rank of additional weight is $r$ , and the number of replaced layers is $X$ . Then if we consider Llama2- $\cdot7\mathfrak{b}$ , whose MLP weights have the dimension $4096\times11008$ , then the compression ratio can be calculated by  
+
+$$
+s={\frac{32-X}{32}}+{\frac{X}{32}}\times{\frac{4096r+11008r}{4096\times11008}}\approx1-{\frac{X}{32}}+X\cdot r\times10^{-5}
+$$  
+
+2.2.2 SHARP ALGORITHM  
+
+In this part, we show how we achieve SHARP (Figure 1 (d)) algorithm. First, we illustrate why we choose such a two-stage algorithm for recovering.  
+
+Why Two-Stage? A natural way to recover the model performance is to directly finetune the model end-to-end for all learnable low-rank additional parameters. In general, it works fine when we try to use one layer to replace the next layer, which at most gives a $50\%$ reduction of the MLP layers. However, if we want to use one layer to compute multiple adjacent layers, just using the SFT stage will require more data for recovering, and result in a much slower convergence rate and worse final result. The detailed discussion of this has been investigated in Section 3.3.3 and Table 3, and the intuition for this phenomenon may be that when we use one layer to replace multiple layers aggressively, the model loses too many parameters and thus start optimizing from an initialization point that is far from the optimal solution. Therefore, we need first to align the output of the predicted and original target layers before the SFT stage. Details of the algorithm are as follows.  
+
+Stage 1: Single Layer Warmup (SLW). First, we minimize the $\mathcal{L}_{2}$ loss between the output of layer predicted by the reference layer and that of the original target layer by finetuning the model on high-quality data. Formally, for each reference layer $j\in\mathcal{I}$ and every target layer predicted by this reference layer $l\in{\mathcal{T}}_{j}$ , we want to find:  
+
+$$
+\Delta\Theta_{l}^{1}\gets\arg\operatorname*{min}_{\Delta\Theta_{l}}\mathbb{E}_{X\sim\mathcal{P}^{l}}\left[\|f(X;g(\Theta_{i},\Delta\Theta_{l}))-f(X;\Theta_{l})\|_{2}^{2}\right]
+$$  
+
+Here $\mathcal{P}_{l}$ is the distribution of the input activations of $f(\cdot,\Theta_{l})$ , and it can be obtained by running the forwarding pass of the original model on the finetuning dataset. We also note that the SLW stage of each target layer can be much faster than the SFT stage (Stage 2) since we just run one MLP layer, which has only 135M parameters (while the whole model has 7B parameters). And this process can also be fully parallelized since the SLW stages of different target layers are independent. In Section 3.3.3, we will show that SLW is critical for increasing the compression ratios.  
+
+Stage 2: Supervised Fine-Tuning (SFT). After the single MLP warmup stage, we partly recover the output of the replaced layers. To better align different replaced layers together and obtain better model output, at the second stage, we fixed the original parameters and finetune all the learnable low-rank components $\{\Delta\Theta_{*}\}$ together. In Section 3.3.3, we will also show that although SLW is important, SFT is still the key stage to recover the model capacity.  
+
+2.2.3 CHOICE OF REPLACEMENT AND CANDIDATE TRANSFORMATION  
+
+Replacement Type. Note that in SHARP, there are multiple ways to define the reference layer set $\mathcal{I}$ and the corresponding target layer set $\tau$ . To prevent ambiguity, we formally list the types of layer replacement that we used in this paper in Table 1. And more detailed table are in Table 8.  
+
+Notably, we skip the first and the last layer for all types, since Figure 2 shows that these two layers may be quite important or behave differently from other layers. For $\mathrm{T_{next}}$ and $\mathrm{T}_{\mathrm{next}2}$ , we consider the constant reference intervals (each reference predicts the next or next two target layers). For $\mathrm{T_{back}}$ and $\mathrm{T}_{\mathrm{front}}$ , we consider the cases where making one reference layer predicts more target layers in the front parts and back parts, respectively. And finally, for $\mathrm{T_{more}}$ and $\mathrm{T_{max}}$ , we aggressively try to remove more MLP layers. In Section 3.3.1, we will show that repeating layers in the back parts of the model is better than doing this in the front parts, i.e., $\mathrm{T_{back}}$ is better than $\mathrm{T}_{\mathrm{front}}$ , and even better than $\mathrm{T}_{\mathrm{next}2}$ . Furthermore, we will show that aggressively removing the layers like $\mathrm{T_{more}}$ and $\mathrm{T_{max}}$ can still achieve quite good recovery performance.  
+
+Table 1: Different replacement types. Here the stored ratio $\tau$ is defined in Section 2.2.1. For example in $\mathrm{T_{next}}$ , we need to store 18 layers (1,2,3,5,...29, 31,32), out of 32 layers in the original model, so $\tau=56\%$ . More details about the reference layers and the target layers are shown in Table 8.  
+
+Candidate Transformation Type. On the other hand, we also consider different candidate transformations $g$ . In detail, we investigate the following parameterization ways:   
+
+![](images/ebf03b91f37bdf2aaafdbf9a79710e1884f3f55ad6989c91eafbf41b2e79d2ff.jpg)  
+
+$$
+g_{0}(\Theta_{j},(\alpha,A_{l},B_{l})):=\alpha\Theta_{j}+A_{l}B_{l},\quad\alpha\in\mathbb{R},A_{l}\in\mathbb{R}^{d_{1}\times r},B_{l}\in\mathbb{R}^{r\times d_{2}}
+$$  
+
+$$
+\begin{array}{r}{g_{1}(\Theta_{j},(\alpha,A_{l},B_{l},C_{l},D_{l})):=\alpha\Theta_{j}C_{l}^{\top}D_{l}+A_{l}B_{l},\quad\alpha\in\mathbb{R},A_{l}\in\mathbb{R}^{d_{1}\times r},B_{l},C_{l},D_{l}\in\mathbb{R}^{r\times d_{2}}.}\end{array}
+$$  
+
+$$
+\begin{array}{r}{g_{2}(\Theta_{j},(\alpha,A_{l},B_{l},E_{l},F_{l})):=\alpha E_{l}F_{l}^{\top}\Theta_{j}+A_{l}B_{l},\quad\alpha\in\mathbb{R},A_{l},E_{l},F_{l}\in\mathbb{R}^{d_{1}\times r},B_{l}\in\mathbb{R}^{r\times d_{2}}}\end{array}
+$$  
+
+$$
+\begin{array}{r}{g_{3}(\Theta_{j},(\alpha,A_{l},B_{l},U_{l},V_{l})):=\alpha[(U_{l}V_{l})\odot\Theta_{j}]+A_{l}B_{l},\quad\alpha\in\mathbb{R},A_{l},U_{l}\in\mathbb{R}^{d_{1}\times r},B_{l},V_{l}\in\mathbb{R}^{r\times d_{2}}.}\end{array}
+$$  
+
+Here we consider the vanilla LoRA, left multiplication, right multiplication, and dot multiplication. We assume $d_{1}=4096<d_{2}=11008$ for Llama2-7b to prevent ambiguity. The comparison result is shown in Section 3.3.2. Surprisingly we find these four different transformations have almost the same capability for recovering model performance if their numbers of parameters are the same.  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+In the experiment section, we mainly focus on four parts: (E1) In-distribution recovery tasks, where we apply SHARP to the pretrained model, finetune it on a specific high-quality dataset, and then evaluate the model’s perplexity on the same dataset. (E2) Ablation study, where we investigate how to choose better replacement types and candidate transformations. We also try to analyze how the single-layer warmup stage and different settings influence the model recovery, and want to see how aggressively we can choose the replacement type. (E3) Downstream evaluation, where we assess the model’s performance on several widely-used downstream tasks. (E4) Latency analysis, where we examine how much inference acceleration SHARP can achieve.  
+
+3.1 EXPERIMENTAL SETTINGS  
+
+Dataset. We use several high-quality datasets in our in-distribution recovery tasks: (1) Arxivmath (Kenny, 2023): it includes 50k high-quality QA instruction data from the mathematical domain. (2) GPT4-Alpaca (Peng et al., 2023): it contains $52\mathrm{k}$ English instruction-following generated by GPT-4 using Alpaca prompts. (3) Databricks-Dolly (Conover et al., 2023): This is an open-source dataset comprising $15\mathbf{k}$ instruction-following records generated by Databricks employees. (4) DialogSum (Chen et al., 2021): this is a dialogue summarization dataset consisting of $13.5\mathbf{k}$ dialogues ( $_{12.5\mathrm{k}}$ for training) with corresponding manually labeled summaries and topics. (5) OpenOrca (Mukherjee et al., 2023), which is a collection of augmented FLAN Collection data (Longpre et al., 2023), containing about 1M GPT-4 completions and about 3.2M GPT-3.5 completions. We select a 50k subset of it for in-distribution tasks.  
+
+In downstream evaluation parts, we also use (6) FineWeb-Edu (Penedo et al., 2024; Lozhkov et al., 2024), consists of $1.3\mathrm{T}$ tokens of educational web pages filtered from the FineWeb dataset. We use its “sample-10BT” subset. (7) Tulu V2 Collection (Ivison et al., 2023), which contains $326\mathrm{k}$ instruction data mixed from FLAN (Longpre et al., 2023), Open Assistant 1 (Ko¨pf et al., 2024), GPT4-Alpaca (Peng et al., 2023), Code-Alpaca (Chaudhary, 2023), LIMA (Zhou et al., 2024), WizardLM (Xu et al., 2024) and Open-Orca (Mukherjee et al., 2023).  
+
+Finetuning Model. Here we use Llama2-7b (Touvron et al., 2023) as the basic model. For the Single Layer Warmup (Stage 1), we use the Adam optimizer with a fixed learning rate of 1e-3  
+
+Table 2: The perplexity of different methods and different replacement types in the In-distribution recovering tasks. The smaller value the better. We use rank $=\!400$ for the additional parameters and let $g_{0}$ (Eqn 3) be the candidate transformation. The compression ratio $s$ is defined in Section 2.2.1. “SHARP (w/o fine-tuning)” means just use the first Single Layer Warmup Stage for recovering.  
+
+![](images/db7e83d5033715d137e6f538370d0863e343d2fce1cd912f33f2816ae4601b3d.jpg)  
+
+for 5 epochs. For the SFT (Stage 2), we follow the pipeline of Open-Instruct (Wang et al., 2023) The learning rate of the SFT stage is 2e-5, the warmup ratio3of the SFT stage is $5\%$ and the max sequence length is 2048. In the in-distribution recovering tasks, we random sample $10\%$ of the training data (except $30\%$ for Databricks-Dolly and $5\%$ for OpenOrca) to calculate the activations in the intermediate layers for the SLW (Stage 1). While in the downstream evaluation tasks, we use $10\%$ of the Arxiv-math data for Stage 1, and then use $50\mathrm{k}$ instruction data from Arxiv-math, $200\mathbf{k}$ data from FineWeb-Edu, and all data that is from Tulu V2 and listed above for SFT (Stage 2). The total number of tokens used for finetuning at the downstream evaluation tasks is about 0.7B, which is much less than that of the pretraining data used by Llama2 (2T).  
+
+Evaluation. For the in-distribution recovering tasks, we select $1\%$ of the data from each task for calculating perplexity, while the other $99\%$ for recovering model performance. For the downstream evaluation, we follow the pipeline of Language Model Evaluation Harness (Gao et al., 2024). We select the evaluation tasks that are widely used in other works and measure various abilities of the model, including memorization and reasoning.1.  
+
+
+
+\section{3.2 E1: IN-DISTRIBUTION RECOVERING TASKS  }
+
+
+In this section, we use rank $=\!400$ for the additional parameters employed in SHARP. It is important to note that the projection matrices in the MLP layers of Llama2-7b have a shape of $4096\times11008$ , meaning the additional parameters occupy no more than $13\%$ of the original parameter size.  
+
+We show the results of in-distribution recovering tasks in Table 2. Directly sharing adjacent layers, as in Figure 1 (c) (Liu et al., 2024), leads to unacceptably high perplexity and meaningless output. However, using the Single Layer Warmup (SHARP w/o fine-tuning), the perplexity of the model gets to a reasonable range. After applying SFT with the in-distribution data, the perplexity gap between the original and the SHARP-processed model can be further reduced. In particular, Tnext almost fixes the gap for most of the tasks except Databricks-Dolly. What’s more, after radically giving up more than 3/4 of the layers $\mathrm{T_{more}}$ , compression ratios are calculated by Eqn. 1), we can still recover the perplexity gap quite well. These results show the potential of SHARP to save model parameters and accelerate inference.  
+
+3.3 E2: FURTHER ABLATION STUDY  
+
+In this section, we conduct several ablation studies of SHARP.  
+
+3.3.1 HOW TO REPLACE BETTER?  
+
+Table 3: Different settings for SHARP. It shows the model perplexity evaluated on Arxiv-math, where the baseline result is 3.0. We use $g_{0}$ (Eqn. 3) as the candidate function, and the Types are shown in Table 1 The percentage in the bracket means the proportion of the Arxiv-math training data that are randomly sampled for the SFT stage. Compression ratios $s$ is calculated by Eqn. 1.  
+
+![](images/48ddc7cd8d0cdcde6b48ed8ae8654ab807b84aac0de2775b879ad0d40f2b8c60.jpg)  
+
+First, we investigate that with the same or similar number of the stored layers (i.e., stored ratio $s$ ), which type of replacement can better retain model capacity. Like the previous section, we use matrices with rank $=\!400$ as the additional LoRA parameters, and we try all the SHARP types shown in Table 1. The results are in Table 4. We find that interestingly, although $\mathrm{T_{next}}$ recovers the perplexity quite well, $\mathrm{T}_{\mathrm{next2}}$ only has the same or even worse results than $\mathrm{T_{back}}$ , which has a smaller stored ratio (s). Similarly, $\mathrm{T}_{\mathrm{front}}$ has worse performance than $\mathrm{T_{back}}$ . These results show that replacing more layers at the back parts of the model can better maintain the model performance. The discussion of Figure 4 in Section 3.4 will further support this claim. Furthermore, we can see that $\mathrm{T_{more}}$ and $\mathrm{T_{max}}$ also have impressive recovery results, even though they drop most of the MLP layers, which also support our claims in Section 2.1.  
+
+Table 4: Recovery results for different SHARP Types. Store ratio $\tau$ is defined in Section 2.2.1   
+
+![](images/73ef5590438cd77d456e9ee9de17ddeaec1cf76c421fc4222b3d8e7c44349021.jpg)  
+
+
+
+\section{3.3.2 DIFFERENT CANDIDATE TRANSFORMATION  }
+
+
+In this part, we compare various candidate transformations listed in Section 2.2.3, i.e., Equation (3),(4),(5), and (6), to assess their impact on model recovery. For a fair comparison, we adjust ranks so all candidates have almost the same number of additional parameters. The setting and the result are shown in Table 5. Surprisingly, except for the SLW stage of $g_{1}$ , all other candidate transformations have similar performance for both SLW and the complete SHARP stages. This may show that using the same amount of additional parameters, different parameterization strategies have the same recovery capabilities. And since LoRA-style transformation, $g_{0}$ has the simplest forms and more comprehensive studies, we choose $g_{0}$ as our candidate transformation in the later experiment parts.  
+
+Table 5: Perplexity on Arxiv-math for different candidate transformations $(\mathrm{T_{next}})$ .   
+
+![](images/ffcd57c2200d3fd6346b2c140909d1e23d027c459cfe33b0441f4c7ae5a5121d.jpg)  
+
+
+
+\section{3.3.3 ABLATION STUDY FOR DATASET SIZE, RANK AND TYPE  }
+
+
+To find the optimal algorithm settings, we further explore how different choices of dataset size, rank of the additional parameters, and the SHARP Types together influence the recovery performance. We choose Arxiv-math as the in-distribution task and select ranks among 5, 20, and 400. The methods contain the vanilla adjacent layer sharing (Direct Sharing), just use the first stage of SHARP (SLW, SHARP w/o fine-tuning), just use the second stage (SFT), and the complete SHARP. Training dataset size includes all the dataset $(100\%)$ or a small random subset of it $(10\%)$ .  
+
+Table 6: Recover results on the downstream tasks. The higher the better for all the tasks. Here we use rank $=\!400$ and the replacement type is $\mathrm{T_{next}}$ , therefore, the compression ratio is $62\%$ .   
+
+![](images/2af88ce7266426fe83a10fea24a4796d4c24c73bdd064b12c4db39765cb212e7.jpg)  
+
+training tokens and the 30B–150B tokens used in sparsification works (Mirzadeh et al., 2023; Song et al., 2024). However, it still brings positive signals and further understanding of our methods. The result is shown in Table 6.  
+
+As expected, SHARP greatly outperforms Direct Sharing and SLW alone on all the evaluation tasks. In particular, we notice that SHARP performs relatively better in tasks requiring knowledge memorization capability. For example, compared to the original model, SHARP has very close evaluation results on SciQ and BoolQ, which focus on memorizing scientific concepts and knowledge from various domains, respectively. Notably, it even surpasses the baseline on CommonsenseQA (44.1 versus 32.6), which measures the commonsense knowledge of the model. On the other hand, for tasks that further require more complex reasoning capabilities, like GSM8k, ARC-Easy, ARC-Challenge, and PIQA, the performance gap between SHARP and the original model is still large.  
+
+For a better understanding of why SHARP has different performance on different kinds of evaluation tasks, we try to observe the sensitivity of different layers to each task. To achieve this, we set the parameters of each MLP layer to zero and compare the evaluation results between the original model and the modified model. The results are shown in Figure 4, and we have two observations: (1) We find that layers 5 to 15 and the last two layers are important for all tasks. Setting their parameters to 0 will hurt both knowledge-memorization tasks and reasoning tasks. This supports our claim in Section 3.3.1 that keeping the front parts of the layers can retain more model capacity.  
+
+![](images/d12d6491e9dd0ee6cf4dff1ed21ad4a1424418262da31423ce9c7fc7cc64418d.jpg)  
+Figure 4: Impact of different layers on model capabilities. The $\mathbf{X}$ -axis denotes the index of the zeroout MLP layer, whose weights are set to be zero, in the modified model, and the $\mathrm{y}$ -axis shows the difference between the original model and the modified model on the particular evaluation tasks, which means that the lower the value the better. (Left) Evaluation tasks focused on memorizing domain-specific knowledge or common sense. (Right) Evaluation tasks requiring reasoning abilities in areas like mathematics, physics, or general reasoning. We skip index 0 since it’s critical based on Figure 2.  
+
+(2) Interestingly, for layers 16 to 30, we find different phenomenons for knowledge memorization tasks and reasoning tasks. For knowledge memorization tasks, just a few layers between 16 to 30 are important for the performance, and they may vary for different tasks. For example, 19 and 29 for BoolQ, 19,24,26, and 27 for CommonsenseQA, and 22 and 29 for MedMCQA. While for the complex reasoning tasks, almost all the layers between 16 and 30 have a non-negligible influence on the model output. These may imply that the model uses some specific weights in the later layers to memorize knowledge from various domains, while for more complex reasoning tasks, the capability is related to all the layers, which results in it needing more data and resources for the model to recover performance. This ablation study will also be useful for future works of interpreting how models capture knowledge and capabilities at each layer.  
+
+Table 7: Run time results (seconds) on mobile.   
+
+![](images/2bdba4e328df13f5292606d2e0f3efe07678fe8fa55c55d84f030796b0085231.jpg)  
+
+
+
+\section{3.5 E4: LATENCY ANALYSIS  }
+
+
+In this section, we measure the time to load and initialize the model and the average time to run a single forward over 5 runs using ExecuTorch $\mathrm{v}0.3.0$ on iPhone 16 Pro (iOS 18.1), with XNNPack backend. To enable to model to be fitted into the phone with 8GB RAM, we use 4-bit integer quantized models.2. Results in Table 7 reflect that through weight sharing, SHARP saves $42.0\%$ of loading and initialization time, which is the dominant of the model execution, attributable to fewer layers required to store and load. SHARP also runs faster than the original Llama2-7b by $43.9\%$ , benefiting from data locality. Overall, our SHARP saves $42.2\%$ run time and $42.8\%$ model storage compared to the original Llama2-7b.  
+
+
+
+\section{4 CONCLUSION  }
+
+
+This paper presented SHARP, a method to accelerate large language model inference by sharing adjacent layers with recovery parameters. SHARP effectively reduces model size and inference time by using the reference layer to predict the later layers, which saves the memory load overhead. It recovers the model performance through a two-stage process: Single Layer Warmup and Supervised Fine-Tuning. Experimental results demonstrate that SHARP achieves comparable perplexity to original models across various in-distribution tasks. By minimizing the number of layers and parameters needed, SHARP provides a practical solution for deploying large models in resource-constrained environments. We believe this method can further enlighten researchers in designing advanced layersharing methods for accelerating inference and may be insightful for the interpretability-related works on understanding how each layer works in LLM.  
+
+
+

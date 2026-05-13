@@ -5,8 +5,8 @@ set -e
 cd "$(dirname "$0")/.."
 
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="ollama:glm-5.1:cloud"
-export MERGER_MODEL="ollama:glm-5.1:cloud"
+export HARSH_MODEL="claude_sdk:claude-opus-4-7"
+export MERGER_MODEL="claude_sdk:claude-opus-4-7"
 export NEUTRAL_MODEL="ollama:glm-5.1:cloud"
 export SUBAGENT_MODEL="ollama:glm-5.1:cloud"
 export OUTPUT_CSV="bench_scores_position.csv"

@@ -1,0 +1,475 @@
+\title{Differentially Private Synthetic Data via Foundation Model APIs 1: Images}
+
+\begin{abstract}
+\vspace{-0.2cm}
+   Generating \emph{differentially private (DP) synthetic data} that closely resembles the original private data %
+   is a scalable way to mitigate privacy concerns in the current data-driven world.
+   In contrast to current practices that train customized models for this task, 
+   we aim to %
+   \emph{generate \probname{} 
+ (\probnameshort{})}, where we treat foundation models as blackboxes and only utilize their inference APIs.
+   Such API-based, training-free approaches are easier to deploy as exemplified by the recent surge in the number of API-based apps. 
+   These approaches can also leverage the power of large foundation models which are %
+   only accessible %
+   via their inference APIs. %
+   However, this comes with greater challenges due to strictly more restrictive model access and the %
+   need to protect privacy from the API provider.
+   
+   In this paper, we present a new framework called \emph{\algname{} (\algnameshort{})} to solve this problem and show its initial promise on synthetic images.
+   Surprisingly, \algnameshort{} can match or even outperform state-of-the-art (SOTA) methods \emph{without any model training.}
+   For example, on \cifar{} (with \imagenet{} as the public data), we achieve FID$\leq$7.9 with privacy cost $\epsilon$ = $0.67$, significantly improving the previous SOTA from $\epsilon$ = $32$. 
+   We further demonstrate the promise of applying \algnameshort{} on large foundation models such as Stable Diffusion to tackle challenging private datasets with a small number of high-resolution images. 
+   The code and data are released at \codeurl{}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\blfootnote{$^\dagger$ Main updates in arXiv V2: (1) Fixing typos in the convergence analysis (\cref{sec:theory,app:theory}). (2) Adding additional experiments in \cref{app:ablation,app:cinic,app:camelyon,app:cifar,sec:exp_camelyon}. (3) Polishing the writing.}
+
+\label{sec:intro}
+
+
+\begin{wrapfigure}[12]{R}{0.42\linewidth}
+	\centering
+        \includegraphics[width=1\linewidth]{fig/problem.pdf}
+	\caption{We consider the problem of generating DP synthetic data with API access to pre-trained models without any model training. This is in contrast to prior work which assumes full access to pre-trained models and requires training.}
+	\label{fig:problem}
+\end{wrapfigure}
+
+While data-driven approaches have been successful, privacy is a major concern. For example, statistical queries of a dataset may leak sensitive information about individual users \cite{dwork2014algorithmic}. Entire training samples can be reconstructed from deep learning models \cite{haim2022reconstructing,fredrikson2015model,carlini2021membership,carlini2023extracting,carlini2023quantifying,CarliniLEKS19,CarliniTWJHLRBSEOR21,ChoquetteChooTCP21,TramerSJLJHC22,wang2023decodingtrust}. %
+\emph{Differential privacy (DP)} is the gold
+standard in quantifying and mitigating these concerns \cite{dwork2006calibrating}. DP algorithms ensure that information about individual samples in the original data cannot be inferred with high confidence from algorithm outputs. 
+\emph{Differentially private synthetic data} is the holy grail of DP research~\cite{hu2023sok,jordon2019pate,lin2020using,beaulieu2019privacy,dockhorn2022differentially,yin2022practical,yu2021differentially,he2022exploring,li2021large,ghalebikesabi2023differentially,yue2022synthetic,harder2022differentially,harder2021dp,Savage2023,lin2022data,tang2023privacy}. The goal is to generate a synthetic dataset that is statistically similar to the original data while ensuring DP. The benefits are: 
+(1) Thanks to the post-processing property of DP \cite{dwork2014algorithmic}, we can use any existing \emph{non-private} algorithm (e.g., training machine learning (ML) models) as-is on the synthetic data without incurring additional privacy loss. This is more scalable than redesigning and reimplementing every algorithm for DP.
+(2) Synthetic data can be shared freely with other parties without violating privacy. This is useful in situations when sharing data is necessary, such as when organizations (e.g., hospitals) want to release datasets to support open research initiatives \cite{beaulieu2019privacy,lin2020using}. (3) Since synthetic data is DP, developers can look at the data directly, which makes algorithm development and debugging a lot easier.
+
+
+
+At the same time, with the recent advancement of %
+large foundation models, API-based solutions are gaining tremendous popularity, exemplified by the surge of GPT4-based applications. 
+In contrast to the traditional paradigm that trains/fine-tunes customized ML models for each application, API-based solutions treat ML models as blackboxes and only utilize APIs\footnote{\label{footnote:openai_api}See \url{https://platform.openai. For example, a text completion API can complete a text prompt using a foundation model such as GPT4. An image variation API can produce variations of a given image using a foundation model such as DALLE2.} that provide the input/output functions of the models. 
+In fact, many foundation models including GPT4, Bard, and DALLE2 only provide API access %
+without releasing model weights or code.
+Key reasons for the success of API-based solutions are that APIs offer a clean abstraction of ML and are readily available and scalable. 
+Therefore, implementing and deploying these API-based algorithms is easier and faster even for developers without ML expertise. %
+Such an approach can also leverage %
+powerful foundation models that are only accessible through APIs.
+Unfortunately, SOTA DP synthetic data algorithms today are still in the old paradigm \cite{ghalebikesabi2023differentially,li2021large}: they need a customized training process for each dataset, whose implementation requires significant ML engineering efforts (\cref{sec:motivation}).
+
+
+\begin{figure}[!t]
+    \centering
+     \begin{subfigure}[b]{.44\textwidth}
+       \centering      \includegraphics[width=0.9\linewidth]{fig/dist.pdf}
+     \end{subfigure}
+     ~~~
+     \begin{subfigure}[b]{.41\textwidth}
+       	\centering      \includegraphics[width=\linewidth]{fig/alg.pdf}
+     \end{subfigure}
+     
+     \caption{\algname{} (\algnameshort{}) framework for DP synthetic data. 
+     \textbf{Left: Intuition of \algnameshort{}.} Though private data and pre-trained generative models have very different distributions, the support of the former is likely to be covered by the support of the latter. We gradually shift the distribution of generated data toward private data through \algnameshort{}.
+     \textbf{Right: Algorithm of \algnameshort{}.} We maintain a sample set (population), and iteratively select the most similar ones to the private samples (parents) and mutate them to generate the next population (offspring). The initial population and offspring are generated with foundation model APIs. Parent selection is done in DP using private samples.}
+    \label{fig:alg}
+    \label{fig:dist}
+\end{figure}
+Motivated from these observations, we ask the following ambitious question (\cref{fig:problem}):
+\highlightblock{Can we generate DP synthetic data using blackbox APIs of foundation models?}
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.45\linewidth}
+        \centering
+        \includegraphics[width=0.88\linewidth]{fig/cifar10/eps0.67/64/7.png}
+        \caption{Generated samples on \cifar{} with $\bra{0.67,10^{-5}}$-DP. Each row corresponds to one class. FID=7.87. See \cref{app:cifar} for real and generated images side-by-side.}
+        \label{fig:cifar_gen_samples}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.5\linewidth}
+	\includegraphics[width=0.9\linewidth]{fig/cifar10/cifar_fid_epsilon_fewer_methods.pdf}
+        \caption{FID \cite{heusel2017gans} (lower is better) v.s. privacy cost $\epsilon$ on \cifar{} ($\delta=10^{-5}$). (Un)cond means (un)conditional generation. Ours achieves the best privacy-quality trade-off compared to DP-MEPF \cite{harder2022differentially}, DP-GAN, DP-Diffusion \cite{ghalebikesabi2023differentially}.}
+        \label{fig:cifar_fid_epsilon}
+    \end{minipage}
+\end{figure}
+
+We treat API providers %
+as {\em untrusted} entities so we also want to protect user privacy from them, i.e., the API queries we make during generation should also be DP.
+If successful, we can potentially democratize the deployment of DP synthetic data in the industry similar to how API-based solutions have facilitated other applications.
+This is a challenging task, however, as we do not have access to model weights and gradients by assumption. In this paper, we conduct the first exploration of the potential and limits of this vision on DP synthetic \emph{images}. 
+Surprisingly, we show that not only is such a vision realizable, but that it also has the potential to match or improve SOTA training-based DP synthetic image algorithms despite more restrictive model access. Our contributions are:
+
+
+  
+    \myparatightestn{(1) New problem (\cref{sec:problem}).} %
+    We highlight the importance of  \emph{\probnamewithunderline{} (\probnameshort)}. Such algorithms are easy to implement and deploy and can leverage the foundation models behind APIs.
+    
+    \myparatightestn{(2) New framework (\cref{sec:alg}).} We propose %
+    \emph{\algname{} (\algnameshort{})} algorithm for achieving our goal (\cref{fig:alg}). 
+    We consider using 2 popular APIs: random generation %
+    and sample variation (i.e., generating a sample similar to the given one).\cref{footnote:dalle,footnote:stablediffusion}
+    The key idea is to iteratively use private samples to vote for the most similar samples generated from the blackbox model and ask the blackbox models to generate more of those similar samples. 
+    We theoretically prove that the distribution of the generated samples from \algnameshort{} will converge to the private distribution under some modeling assumptions (\cref{sec:theory}). \algnameshort{} only requires (existing) APIs of the foundation models, and does not need any model training.
+    
+    \myparatightestn{(3) Experimental results (\cref{sec:exp}).}\footnote{\revision{In the experiments of this paper, we only experimented with APIs from local models where the user has full control of the model weights and runs it in a controlled environment.}} Some key results are: (a) Surprisingly, without any training, \algnameshort{} can still outperform SOTA training-based DP image generation approaches on some datasets (\cref{fig:cifar_fid_epsilon,fig:cifar_gen_samples}). 
+    For example, to obtain FID$\leq7.9$ on \cifar{} dataset, \algnameshort{} (with blackbox access to an \imagenet{}-pre-trained model) only needs $\epsilon=0.67$. In contrast, DP fine-tuning of an \imagenet{}-pre-trained model (prior SOTA) requires $\epsilon=32$~\cite{ghalebikesabi2023differentially}.\\ %
+    (b) We show that \algnameshort{} works even when there is significant distribution shift between private and public data. We create a DP synthetic version (with $\eps=7.58$) of Camelyon17, a medical dataset for classification of breast cancer metastases, using the same \imagenet{}-pre-trained model. A downstream classifier trained on our DP synthetic data achieves a classification accuracy of 79.56\% (prior SOTA based on DP fine-tuning is 91.1\% with $\epsilon=10$ \cite{ghalebikesabi2023differentially}).\\ %
+    (c) We set up new challenging benchmarks that the DP synthetic image literature has not studied before. We show that with powerful foundation models such as Stable Diffusion \cite{rombach2022high}, \algnameshort{} can work with high-resolution (512x512) image datasets with a small size (100 images), which are common in practice but challenging for current DP synthetic image algorithms.
+
+ 
+
+
+
+
+
+\section{Background and Related Work}
+
+\label{sec:background}
+\myparatightestn{Differential Privacy (DP).} 
+We say a mechanism $\alg$ is $(\epsilon,\delta)$-DP if for any two neighboring datasets $\calD$ and $\calD'$ which differ in a single entry (i.e., $\calD'$ has one extra entry compared to $\calD$ or vice versa) and for any set $S$ of outputs of $\alg$, we have 
+$\probof{\alg\bra{\calD}\in S}\leq e^{\epsilon}\probof{\alg\bra{\calD'}\in S} + \delta$. Intuitively, this means that any single sample cannot influence the mechanism output too much. 
+
+\myparatightestn{DP synthetic data.} Given a private dataset $\calD$, the goal is to generate a DP synthetic dataset $\alg\bra{\calD}$ which is statistically similar to $\calD$. %
+One %
+method is to \emph{train generative models from scratch on private data} \cite{lin2020using,beaulieu2019privacy,dockhorn2022differentially} with DP-SGD \cite{abadi2016deep}, a DP variant of stochastic gradient descent. 
+Later studies show that \emph{pre-training generative models on public data} before fine-tuning them on private data with DP-SGD \cite{yin2022practical,yu2021differentially,he2022exploring,li2021large,ghalebikesabi2023differentially,yue2022synthetic} gives better privacy-utility trade-offs due to knowledge transfer from public data \cite{yin2022practical,ganesh2023public}, smaller gradient spaces \cite{li2022does}, or better initialization \cite{ganesh2023public}. 
+This approach achieves SOTA results on several data modalities such as text and images.
+In particular, DP-Diffusion \cite{ghalebikesabi2023differentially} achieves SOTA results on DP synthetic images by pre-training diffusion models %
+\cite{sohl2015deep,ho2020denoising} 
+on public datasets and fine-tuning them on the private dataset.
+Some other methods do not depend on DP-SGD \cite{jordon2019pate,harder2022differentially,harder2021dp,vinaroz2022hermite,cao2021don}. For example, DP-MEPF \cite{harder2022differentially} %
+trains generative models to produce synthetic data that matches the (privatized) statistics of the private features. 
+
+Note that all these methods obtain generative models \emph{whose weights are DP}, which can then be used to draw DP synthetic data. It is stronger than our goal which only requires DP synthetic data \cite{lin2021privacy}. In this paper, we do not do any model training and only produce DP synthetic data.
+
+
+
+
+\section{\probname{}
+
+\label{sec:problem}
+\subsection{Motivation}
+\label{sec:motivation}
+As discussed in \cref{sec:background}, SOTA DP synthetic data algorithms require training or fine-tuning generative models with DP-SGD.
+There are some obstacles to deploying them in practice.
+\myparaemphtightestn{(1) Significant engineering effort.}
+Deploying normal ML training pipelines is hard;
+deploying \emph{DP} training pipelines is even harder because most ML infrastructure is not built around this use case. %
+Recently, there has been significant progress in making DP training more efficient~\cite{li2021large,he2022exploring} and easy to use (Opacus \cite{opacus} and Tensorflow Privacy). 
+However, incorporating them in new codebases and new models is highly non-trivial. %
+For example, Opacus requires us to implement our own per-sample gradient calculator %
+for new layers. 
+Common layers and loss functions that depend on multiple samples (e.g., batch normalization) are often not supported.%
+
+\myparaemphtightestn{(2) Inapplicability of API-only models.} It may be appealing to take advantage of the powerful foundation models in DP synthetic data generation. However, due to the high commercial value of foundation models, many companies choose to only release inference APIs of the models but not the weights or code. Examples include popular models such as DALLE 2 \cite{ramesh2022hierarchical} and GPT 3/4 \cite{brown2020language,openai2023gpt4} from OpenAI and Bard from Google. In such cases, existing training-based approaches are not applicable.\footnote{Some companies also provide model fine-tuning APIs, e.g., \url{https://platform.openai. However, they do not support DP fine-tuning and do not provide gradients. Also, uploading sensitive data to these APIs controlled by other companies can lead to privacy violations.} 
+
+In contrast, DP synthetic data approaches that only require model inference APIs could potentially be deployed more easily,
+as they do not require ML or DP expertise to conduct modifications inside the model and require minimal modifications when switching to a different model (as long as they support the same APIs).  
+In addition, such an approach %
+is compatible with \revision{both the models running locally and the models behind APIs.}
+
+\subsection{Problem Formulation}
+\label{sec:problem_formulation}
+
+We now give a formal statement of \probnameshort{}. We first define a core primitive for DP synthetic data.
+
+\myparatightestn{\DPWAfull{} (\DPWA).} %
+Given a private dataset  $\privatesampleset=\brc{x_i: i\in [\numprisamples]}$ with $\numprisamples$ samples (e.g., images), a distance function $d(\cdot,\cdot)$ between samples and some $p\ge 1$, the goal is to design an $(\epsilon,\delta)$-DP algorithm $\alg$ that outputs a synthetic dataset $\generatedsampleset=\brc{x_i':i\in [\numgensamples]}$
+with $\numgensamples$ samples (as a multiset) whose %
+distance to $\privatesampleset$, $W_p(\privatesampleset, \generatedsampleset)$,
+is minimized. Here $W_p$ is the Wasserstein $p$-distance w.r.t. the distance function $d(\cdot,\cdot)$ (see \cref{app:wasserstein} for the definition).
+
+\myparatightestn{\probnameshort{}.} We want to solve \DPWA{} where $\alg$ is given blackbox access to foundation models trained on public data via APIs.\cref{footnote:openai_api}  API queries should also be $(\epsilon,\delta)$-DP as API providers cannot be trusted.
+
+In some applications, besides the raw samples $x_i$, we may also care about some auxiliary information such as class labels of images. In such cases, we may write  $\privatesampleset=\brc{(x_i,y_i): i\in [\numprisamples]}$ (and $\generatedsampleset=\brc{(x_i',y_i'): i\in [\numgensamples])}$) where $y_i$ (and $y_i'$) is the auxiliary information of $i$-th sample.
+
+When the distance function $d(\cdot,\cdot)$ is $\ell_2$ (in the sample space), \DPWA{} is closely related to DP Clustering~\cite{ghazi2020differentially,su2016differentially,balcan2017differentially} and DP Heatmaps~\cite{ghazi2022differentially}. But a direct application of 
+them %
+does not work in our setting; see \cref{app:dpclustering} for more discussions. %
+
+
+\subsection{Scope of This Work}
+\label{sec:scope}
+
+\myparatightestn{Data type.} %
+\revision{In this paper, we instantiate the above framework on \emph{images}.} %
+We consider both unconditional (i.e., no $y_i$) and conditional generation (e.g., $y_i$ can be image categories such as cats/dogs). 
+
+\myparatightestn{APIs.} In our algorithm design and experiments,  we use 2 APIs, both of which are either directly provided in the APIs of popular models (e.g., DALLE 2,\footnote{\label{footnote:dalle}See \url{https://platform.openai.} Stable Diffusion\footnote{\label{footnote:stablediffusion}See \url{https://huggingface.co/docs/diffusers/api/pipelines/stable_diffusion/overview}.}) or can be easily implemented by adapting current APIs (e.g., using appropriate text prompts in GPT APIs\cref{footnote:openai_api}): 
+
+    (1) $\randomsampleapi{n}$ that randomly generates $n$ samples. Some APIs %
+    accept condition information such as text prompts in text-to-image generation,\cref{footnote:dalle,footnote:stablediffusion} which we omit in the notation for simplicity.
+    
+    (2) $\samplevariationapi{S}$ that generates variations for each  sample in $S$. For images, it means to generate similar images to the given one, e.g., with similar colors or objects.%
+    \cref{footnote:dalle,footnote:stablediffusion} Some APIs also support setting the variation degree: $\samplevariationapi{S, \variationdegree}$, where larger $\variationdegree$ indicates more variation.\footnote{If this is not implemented, we can simply compose the \samplevariationapiname{} $\variationdegree$ times to achieve it.} %
+
+
+
+
+
+
+\section{\algname{}
+
+\label{sec:alg}
+
+Foundation models have a broad and general model of our world from their extensive training data. Therefore, we expect that foundation models can generate samples close to private data with non-negligible probability. The challenge is that by naively calling the APIs, the probability of drawing %
+such samples
+is quite low.  We need a way to \emph{guide} the generation towards private samples.
+
+Inspired by \emph{evolutionary algorithms (EA)}  \cite{davis1987genetic} (\cref{app_evolutionary}), we propose \emph{\algname{} (\algnameshort{})} framework for generating DP synthetic data via APIs. See \cref{fig:alg} for the intuition behind \algnameshort{}.
+The complete algorithm is in \cref{alg:main}.   %
+Below, we discuss the components %
+in detail. 
+
+
+\label{sec:implementation}
+
+\setlength{\textfloatsep}{0pt} %
+\setlength{\floatsep}{0pt} 
+\input{tex/alg_main_unconditional}
+\input{tex/alg_voting}
+\myparatightestn{Initial population (\cref{line:initial}).} We use \randomsampleapiname{} to generate the initial population. If there is public information about the private samples (e.g., they are dog images), we can use this information as prompts to the API to seed a better initialization.
+
+\myparatightestn{Fitness function (\cref{line:dp_voting} or \cref{alg:voting})}. 
+We need to evaluate how useful each sample in the population is for modeling the private distribution. Our idea is that, if a sample in the population is surrounded by many private samples, then we should give it a high score. 
+To implement this, we define the fitness function of a sample $x$ as \emph{the number of private samples whose nearest neighbor in the population is $x$}. A higher fitness value means that more private samples are closest to it. More details are below: 
+\myparaemphtightestn{(1) Distance function (\cref{line:distance}, \cref{alg:voting}).} To define ``nearest neighbor'', we need a distance function that measures the %
+similarity of two samples. A naive way is to use $\ell_2$ distance $\distancefunction{x,z}=\brnt{x-z}$, where $x$ is from the private dataset and $z$ is from the population. However, it is well-known that $\ell_2$ distance on pixel space is not a good metric for images. For example, 
+a small shift of an object can
+result in a high $\ell_2$ distance. We therefore compute the $\ell_2$ distance in the embedding space:
+\begin{align}
+    \distancefunction{x,z}=\brnt{\embeddingnetwork{x}-\embeddingnetwork{z}} \label{eq:distance_no_packing}
+\end{align}
+where $\embeddingnetworkname$ is a network for extracting image embeddings such as inception embedding 
+\cite{szegedy2016rethinking} or CLIP embedding \cite{radford2021learning}. 
+
+\myparaemphtightestn{(2) \Packing{}.} 
+The above approach gives high scores to the good samples in the \emph{current} population. However, as we will see later, these good samples will be modified through \samplevariationapiname{} for the next population. Therefore, it is better to ``look ahead'' to compute the distance based on the modified samples as if they are kept in the population. We modify \cref{eq:distance_no_packing} to compute the distance between the embedding of $x$ and the \emph{mean embedding of $k$ variations of $z$}:
+$\distancefunction{x,z}=\brnt{\embeddingnetwork{x}-\frac{1}{\packingdegree{}}\sum_{i=1}^k \embeddingnetwork{z^i}}$, %
+where $\packingdegree$ is called \emph{lookahead degree}, and $z^1,\dots,z^k$ are variations of $z$ obtained via $\samplevariationapiname{}$.
+
+\myparaemphtightestn{(3) Noise for DP (\cref{line:add_noise}, \cref{alg:voting}).}
+Because this step utilizes private samples, we need to add noise to ensure DP. We add i.i.d. Gaussian noise from $\normaldistribution{0}{\noisemultiplier}$. %
+The privacy analysis is presented in \cref{sec:privacy_analysis}.
+
+\myparaemphtightestn{(4) Thresholding (\cref{line:threshold}, \cref{alg:voting}).} When the number of generated samples is large, the majority of the histogram will be DP noise added above. To make the signal-noise ratio larger, we set a threshold $\threshold$ to each bin of the histogram. Similar ideas have been used in DP set union \cite{gopi2020differentially}.
+
+In summary, we called the above fitness function \emph{\dpvotingname{}}. Note that it is not the traditional ``histogram'' on a continuous space that requires binning. Instead, it is a histogram built on the generated samples: the value of $i$-th bin means the (privatized) number of \revision{private samples} whose nearest neighbor among the generated samples is the $i$-th sample.
+
+\myparatightestn{Parent selection (\cref{line:histogram_sampling}).}  We sample from the population according to the \dpvotingname{} so that a sample with more private samples around is more likely to be selected. %
+\myparatightestn{Offspring generation (\cref{line:offspring}).}  We use \samplevariationapiname{} to get variants of the parents as offsprings.
+
+Please see \cref{sec:theory} for the convergence analysis of \algnameshort{}.
+
+\subsection{Conditional Generation}
+\label{sec:conditional}
+
+The above procedure is for unconditional generation. To support conditional generation, i.e., each generated sample is associated with a label such as an image class (e.g., cats v.s. dogs),  we take a simple approach: \emph{we repeat the above process for each class of samples in the private dataset separately}. See \cref{alg:main_full} for the full algorithm.
+
+\subsection{Generating Unlimited Number of Samples}
+\label{sec:algorithm_unlimited}
+Our algorithm in \cref{alg:main} is preset with a fixed number of generated samples $\numgensamples$. 
+What if users want more samples afterward?
+In prior training-based methods \cite{ghalebikesabi2023differentially}, this is easy to achieve: one can draw an arbitrary number of samples from the trained generative models without additional privacy cost.
+In this section, we want to highlight that \algnameshort{} can also do that, again \emph{with API access only}. We can simply generate an unlimited number of samples by \revision{calling variation API multiple times, each with the generated dataset as input: $[\samplevariationapi{\generatedsampleset},\ldots,\samplevariationapi{\generatedsampleset}]$}. In \ref{sec:exp_unlimited_number_of_samples}, we will see that this simple algorithm is sufficient to provide more useful samples for downstream applications.
+
+\subsection{Privacy Analysis}
+\label{sec:privacy_analysis}
+Unlike the analysis DP-SGD which requires complicated DP composition theorems (e.g., \citet{gopi2021numerical,mironov2017renyi}) due to subsampling, \algnameshort{} does not have subsampling steps and therefore the privacy analysis is rather straightforward.
+The DP guarantee of  the unconditional version of \algnameshort{} (\cref{alg:main}) can be reasoned as follows:
+\begin{packeditemize}
+    \item \textbf{Step 1: The sensitivity of \dpvotingname{} (\cref{line:hist_init,line:hist_for,line:distance,line:hist_assign} in \cref{alg:voting}).} %
+    Each private sample only contributes one vote. If we add or remove one sample, the resulting histogram will change by 1 in the $\ell_2$ norm. Therefore, the sensitivity is 1.
+    \item \textbf{Step 2: Regarding each \algnameshort{} iteration as a Gaussian mechanism.} \cref{line:add_noise} adds i.i.d. Gaussian noise with standard deviation $\noisemultiplier$ to each bin. This is a standard Gaussian mechanism \cite{dwork2014algorithmic} with noise multiplier $\noisemultiplier$. %
+    \item \textbf{Step 3: Regarding the entire \algnameshort{} algorithm as $\numiterations$ \revision{adaptive} compositions of Gaussian mechanisms}, as \algnameshort{} is simply applying \cref{alg:voting}  $\numiterations$ times sequentially.
+    \item \textbf{Step 4: Regarding the entire \algnameshort{} algorithm as one Gaussian mechanism with noise multiplier $\noisemultiplier/\sqrt{\numiterations}$.} It is a standard result from \citet{dong2022gaussian} (see Corollary 3.3 therein).
+    \item \textbf{Step 5: Computing DP parameters $\epsilon$ and $\delta$.} Since the problem is simply computing $\epsilon$ and $\delta$ for a standard Gaussian mechanism, we use the formula from \citet{balle2018improving} directly.
+\end{packeditemize}
+For the conditional version of \algnameshort{} (\cref{alg:main_full}), since it does the unconditional version of \algnameshort{} for each class separately (discussed in \cref{sec:conditional}), adding or removing one sample will only influence the generation results of one class. For that class, the impact due to the added/removed sample is also bounded, as seen in the privacy analysis above. Therefore, \cref{alg:main_full} is also DP. In fact, we can show that \emph{the privacy guarantee of \cref{alg:main_full} is the same as \cref{alg:main}}. Please refer to \cref{app:alg} for more details.
+
+This privacy analysis implies that releasing all the (intermediate) generated sets $S_1,\dots,S_T$ also satisfies the same DP guarantees. Therefore \algnameshort{} provides the same privacy even from the API provider.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+In \cref{sec:exp_sota}, we compare \algnameshort{} with SOTA training-based methods on standard benchmarks to understand its promise and limitations. 
+In \cref{sec:exp_highreso}, we present proof-of-concept experiments to show 
+how \algnameshort{} can utilize the power of large foundation models.
+We did (limited) hyper-parameter tunings in the above experiments; following prior DP synthetic data work \cite{yu2021differentially,ghalebikesabi2023differentially}, we ignore the privacy cost of hyper-parameter tuning. However, as we will see in the ablation studies (\cref{sec:exp_ablation,app:ablation}), \algnameshort{} stably outperforms SOTA across a wide range of hyper-parameters, and the results can be further improved with better hyper-parameters than what we used. Detailed hyper-parameter settings and more results such as \emph{generated samples} and \emph{their nearest images in the private dataset} are in \cref{app:cifar,app:camelyon,app:stable_diffusion}.
+
+
+\subsection{Comparisons to State-of-the-Art}
+\label{sec:exp_sota}
+
+\myparatightestn{Public information.} We use standard benchmarks \cite{ghalebikesabi2023differentially} which treat \imagenet{} \cite{deng2009imagenet} as public data. For fair comparisons, we only use \imagenet{} as public information in \algnameshort{}: \emph{(1) Pre-trained model.} Unlike the SOTA \cite{ghalebikesabi2023differentially} which trains customized diffusion models, we simply use public  \imagenet{} pre-trained diffusion models (pure image models without text prompts) \cite{nichol2021improved}. %
+\revision{\randomsampleapiname{} and \samplevariationapiname{} are implemented using the same pre-trained model (see \cref{app:cifar}).}
+\emph{(2) Embedding (\cref{eq:distance_no_packing}).} We use   \imagenet{} inception embedding \cite{szegedy2016rethinking}.
+\algnameshort{} is not sensitive to embedding choice though and we get good results even with CLIP embeddings (\cref{fig:cifar_ablation_clip} in \cref{app:ablation}).
+
+\myparatightestn{Baselines.} We compare with DP-Diffusion \cite{ghalebikesabi2023differentially}, DP-MEPF \cite{harder2022differentially}, and DP-GAN \cite{harder2022differentially,goodfellow2020generative}.
+DP-Diffusion \cite{ghalebikesabi2023differentially} is the current SOTA that achieves the best results on these benchmarks.  Baseline results are taken from their paper.
+
+\begin{wrapfigure}[18]{R}{0.45\linewidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{fig/cifar10/cifar_acc_numsamples_more_runs.pdf}
+    \caption{Downstream classification accuracy (higher is better) on \cifar{} ($\delta=10^{-5}$). The baseline results are taken from \citet{ghalebikesabi2023differentially}. Two "ensemble" lines are from ensembles of 5 classifiers. The other two lines show the average accuracy of 5 independently trained classifiers with error bars. Our \algnameshort{} achieves better accuracy across almost all settings with smaller privacy costs.}
+    \label{fig:cifar_acc_numsamples_more_runs}
+\end{wrapfigure}
+\myparatightestn{Outline.} 
+We test \algnameshort{} on private datasets that are either similar to or differ a lot from \imagenet{} in \cref{sec:exp_cifar,sec:exp_camelyon}.  We demonstrate that \algnameshort{} can generate an unlimited number of useful samples in \cref{sec:exp_unlimited_number_of_samples}. We show that \algnameshort{} is computationally cheaper than train-based methods in \cref{sec:exp_computation}. %
+
+
+\subsubsection{Moderate Distribution Shift (\imagenet{} $\rightarrow$ \cifar{})}
+\label{sec:exp_cifar}
+
+We treat \cifar{} \cite{krizhevsky2009learning} as private data. 
+Given that both \imagenet{} and \cifar{} are natural images, it is a relatively easy task for \algnameshort{} (and also for the baselines). \cref{fig:cifar_fid_epsilon,fig:cifar_acc_numsamples_more_runs,fig:cifar_gen_samples} show the results. Surprisingly, despite the fact that we consider strictly more restrictive model access and do not need training, \algnameshort{} still outperforms the SOTA training-based methods. Details are below.
+
+\myparatightestn{Sample quality.} \cref{fig:cifar_fid_epsilon} shows the trade-off between privacy cost and FID, a popular metric for image quality \cite{heusel2017gans}. For either conditional or unconditional generation, \algnameshort{} outperforms the baselines significantly. For example, to reach FID$\leq 7.9$, \citeauthor{ghalebikesabi2023differentially} requires $\epsilon=32$, \citeauthor{harder2022differentially} cannot achieve it even with infinity $\epsilon$, whereas our \algnameshort{} only needs $\epsilon=0.67$. 
+
+\myparatightestn{Downstream classification accuracy.} 
+We train a downstream WRN-40-4 classifier \cite{zagoruyko2016wide} from scratch on 50000 generated samples and test the accuracy on \cifar{} test set. This simulates how users would use synthetic data, and a higher accuracy means better utility. 
+\cref{fig:cifar_acc_numsamples_more_runs} shows the results (focus on the left-most points with num of generated samples = 50000 for now).
+\citet{harder2022differentially} achieves 51\% accuracy with $\epsilon=10$ (not shown). Compared with the SOTA \cite{ghalebikesabi2023differentially}, \algnameshort{} achieves better accuracy (+6.1\%) with less privacy cost. Further with an ensemble of 5 classifiers trained on the same data, \algnameshort{} is able to reach an accuracy of 84.8\%. 
+\revision{For reference, the SOTA DP classifier pre-trained on ImageNet (without DP) and fine-tuned on CIFAR10 (with DP) \cite{de2022unlocking} achieves 94.8\% and 95.4\% accuracies with epsilon=1 and 2 respectively. It is not surprising that DP classifiers outperform \algnameshort{} (and other DP synthetic data approaches) on classification tasks, as DP classifiers are targeted at and optimized for a single task whereas DP synthetic data is general-purpose.} 
+
+The above results suggest that when private and public images are similar, \algnameshort{} is a promising framework given its better privacy-utility trade-off and the API-only requirement.
+
+
+\subsubsection{Large Distribution Shift (\imagenet{} $\rightarrow$ \camelyon{})}
+\label{sec:exp_camelyon}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.45\linewidth]{fig/camelyon/real_few.jpeg}
+    \put(-100,20){Real}
+    ~
+    \includegraphics[width=0.45\linewidth]{fig/camelyon/gen_stage2/11_few.jpeg}
+    \put(-180,20){Generated ($\bra{9.92,3\cdot 10^{-6}}$-DP, FID=10.66)}
+    \caption{Real and generated images from \camelyon{}. More in \cref{app:camelyon}.}
+    \label{fig:camelyon_gen_few}
+\end{figure}
+Next, we consider a hard task for \algnameshort{}, where the private dataset is very different from \imagenet{}. %
+We use \camelyon{} dataset \cite{bandi2018detection,koh2021wilds} as private data which contains 302436 images of histological lymph node sections with labels on whether it has cancer (real images in \cref{fig:camelyon_gen_few,fig:camelyon_real}). %
+Despite the large distribution shift, training-based methods can update the model weights to adapt to the private distribution (given enough samples). However, \algnameshort{} can only draw samples from APIs as is. %
+
+We find that even in this challenging situation, \algnameshort{} can still achieve non-trivial results. Following  \citet{ghalebikesabi2023differentially}, we train a WRN-40-4 classifier from scratch on 302436 generated samples  and compute the test accuracy. We achieve %
+\revision{80.33\%}
+accuracy with %
+\revision{$(10.00,3\cdot 10^{-6})$-DP}. Prior SOTA \cite{ghalebikesabi2023differentially} is 91.1\% with $(10,3\cdot 10^{-6})$-DP. Random guess is 50\%. \cref{fig:camelyon_gen_few} (more in \cref{fig:camelyon_gen_samples}) shows that generated images from \algnameshort{} are very similar to \camelyon{} despite that the pre-trained model is on \imagenet{}. \cref{fig:camelyon_gen_samples_iteration} further shows how the generated images are gradually moved towards \camelyon{} across iterations. 
+
+\revision{\myparatightestn{Why \algnameshort{} works under large distribution shifts.} 
+Even though the diffusion model is trained on natural images, the support of the generated distribution spans the entire sample space. \algnameshort{} is effective in guiding the model to generate samples from the region that is low-density in the original pre-trained distribution but high-density in the private distribution. See \cref{app:camelyon} for more explanations.}
+
+\revision{\myparatightestn{Limitation.}} These results demonstrate the effectiveness of \algnameshort{}. But when public models that are similar to private data are not available and when there is enough private data, the traditional training-based methods are still more promising at this point if the privacy-utility trade-off is the only goal. However, given the benefit of API-only assumption and the non-trivial results that \algnameshort{} already got, it is worth further exploiting the potential of \algnameshort{} in future work. Indeed, we expect these results can be improved with further refinement of \algnameshort{} (\cref{app:ablation}).
+
+\subsubsection{Generating Unlimited Number of Samples}
+\label{sec:exp_unlimited_number_of_samples}
+
+We use the approach in \cref{sec:algorithm_unlimited} to generate more synthetic samples from \cref{sec:exp_cifar} and train classifiers on them. The results are in \cref{fig:cifar_acc_numsamples_more_runs}. Similar as \citet{ghalebikesabi2023differentially}, the classifier accuracy improves as more generated samples are used. 
+With an ensemble of 5 classifiers, we reach 89.13\% accuracy with 1M samples.
+\emph{This suggests that \algnameshort{} has the same capability as training-based methods in generating an unlimited number of useful samples.} 
+
+We also see two interesting phenomena: \emph{(1) The gap between \algnameshort{} and DP-Diffusion diminishes as more samples are used.} We hypothesize that it is due to the limited improvement space: As shown in  \citet{ghalebikesabi2023differentially}, even using an \imagenet{} pre-trained classifier, the best accuracy DP-Diffusion achieves is %
+close to the best points in \cref{fig:cifar_acc_numsamples_more_runs}. 
+\emph{(2) The benefit of \algnameshort{} is more evident over ensembling, especially when having more generated samples.} We hypothesize it is due to different ways of generating more samples. In \citet{ghalebikesabi2023differentially}, the newly generated samples are from the same distribution as the first 50000 samples. In contrast, the newly generated samples in \algnameshort{} are from a different distribution (see \cref{sec:algorithm_unlimited}), which could be more diverse and therefore are more beneficial for ensembling approaches.
+
+
+    
+    \begin{wrapfigure}[12]{R}{0.45\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{fig/ablation/cifar_ablation_pretrained_network.pdf}
+        \captionof{figure}{Ablation studies on the pre-trained model. Both are public diffusion models trained on \imagenet{} \cite{nichol2021improved}. The 270M network is conditional, whereas the 100M network is unconditional.}
+        \label{fig:cifar_ablation_pretrained_network}
+    \end{wrapfigure}
+\subsection{More Challenging Benchmarks with Large Foundation Models}
+\label{sec:exp_highreso}
+We demonstrate the feasibility of applying \algnameshort{} on large foundation models with Stable Diffusion \cite{rombach2022high}.
+
+\myparatightestn{Data.} Ideally we want to experiment with a dataset that has no overlap with Stable Diffusion's training data.\footnote{The training set of Stable Diffusion is public. However, it is hard to check if a public image or its variants (e.g., cropped, scaled) have been used to produce images in it. Therefore, we resort to our own private data.} We take the safest approach: we construct two datasets with photos of the author's two cats that have never been posted online. Each dataset has 100 512x512 images. Such high-resolution datasets with a small number of samples represent a common need in practice (e.g., in health care), %
+but are challenging for DP synthetic data: to the best of our knowledge, no prior training-based methods have reported results on datasets with a similar resolution or number of samples.
+The dataset is released at \codeurl{} as a new benchmark. %
+See \cref{app:stable_diffusion} for all images.
+
+\myparatightestn{API implementation.} We use off-the-shelf Stable Diffusion APIs (see \cref{app:stable_diffusion}).
+
+\myparatightestn{Results.} We run \algnameshort{} for these two datasets with the same hyperparameters. \cref{fig:cat_gen} show examples of generated images for each of the cat datasets. We can see that \algname{} correctly captures the key characteristics of these two cats. See  \cref{app:stable_diffusion} for all generated images.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.09\linewidth]{fig/cat/cookie_real_few_1.jpeg}
+    \put(-25,40){Real}
+    ~
+    \includegraphics[width=0.36\linewidth]{fig/cat/cookie_gen_few_4.jpeg}
+    \put(-130,40){Generated ($(6.62,10^{-3})$-DP)}
+    ~
+    \includegraphics[width=0.09\linewidth]{fig/cat/ruby_real_few_1.jpeg}
+    \put(-25,40){Real}
+    ~
+    \includegraphics[width=0.36\linewidth]{fig/cat/ruby_gen_few_4.jpeg}
+    \put(-130,40){Generated ($(6.62,10^{-3})$-DP)}
+    ~
+    \caption{Real \& generated images from \catcookie{} (left) and \catruby{} (right). More in \cref{app:stable_diffusion}.}
+    \label{fig:cat_gen}
+\end{figure}
+
+\subsection{Ablation Studies}
+\label{sec:exp_ablation}
+
+\myparatightestn{Pre-trained network.}
+\cref{fig:cifar_ablation_pretrained_network} shows the results with two different \imagenet{} pre-trained networks: one is larger (270M) with \imagenet{} class labels as input; the other one is smaller (100M) without label input (see \cref{app:conditional_unconditional} for implementation details). 
+In all experiments in \cref{sec:exp_sota}, we used the 270M network. Two takeaways are: (1) The 270M network (trained on the same dataset) improves the results. This is expected as larger and more powerful models can learn public distributions better. %
+ This suggests the potential of \algnameshort{} with future foundation models with growing capabilities.
+(2) Even with a relatively weak model (100M), \algnameshort{} can still obtain good results that beat the baselines (though with a slower convergence speed), suggesting the effectiveness of \algnameshort{}.
+
+More ablation studies on the \packing{} degree $\packingdegree$, the number of generated samples $\numgensamples$, the threshold $\threshold$, and the embedding network are in \cref{app:ablation}, where we see that \algnameshort{} obtains good results across a wide range of hyper-parameters, and the main results %
+can be improved with better hyper-parameters.
+
+
+
+
+
+\section{Limitations and Future Work}
+
+\label{sec:discussion}
+\myparatightestn{Algorithms.} (1) %
+We did not take the number of API calls into account when optimizing \algnameshort{}.
+One future work is to optimize the number of API calls along with privacy-utility tradeoffs.
+(2) We considered two APIs: \randomsampleapiname{} and \samplevariationapiname{}. It is interesting to consider \algnameshort{} variants that leverage the large set of APIs.\cref{footnote:dalle,footnote:stablediffusion}
+(3) When the distributions of private data and foundation models are too different, \algnameshort{} achieved non-trivial classification results, but was still worse than SOTA (\cref{sec:exp_camelyon}). It is interesting to understand the limits of \algnameshort{} %
+and explore potential improvements.
+(4) \algnameshort{} requires an embedding network (\cref{eq:distance_no_packing}) that projects the samples into a space for measuring the similarity between samples. While for images there are plenty of open-source embedding networks to choose, %
+it may not be the case 
+for other modalities. 
+(5) Recent papers show the phenomenon of Model Autophagy Disorder (MAD), where repeatedly \emph{training} the next generative model using synthetic data from the previous one can result in degraded sample quality \cite{alemohammad2023self}. While \algnameshort{} also repeatedly uses synthetic data to create new synthetic data in the main loop (\cref{alg:main}), it is different in two aspects: (a) Instead of purely relying on the synthetic data, \algnameshort{} utilizes the signals from private data to guide the generation; (b) \algnameshort{} does repeated \emph{inference} instead of repeated \emph{training}. It would be interesting to study the MAD effect in the context of \algnameshort{}. 
+(6) Solving \probnameshort{} in the Local/Shuffle DP model and in federated learning settings.
+
+\myparatightestn{Applications.} (1) New privacy-preserving vision applications that were previously challenging but are now possible due to \algnameshort{}'s capability of generating %
+high-resolution DP synthetic images with small dataset sizes.
+(2) The use of 
+\algnameshort{} in other data modalities beyond images such as texts, tabular data, and time series data.
+(3) Besides DP, there are other parallel/orthogonal privacy concerns, notions, and metrics \cite{issa2019operational,lin2022distributional,lin2023summary,dataarticle}. It is interesting to study if \algnameshort{} can be used to generate privacy-preserving synthetic data with respect to these privacy notations.
+
+
+
+
+
+
+\section{\revision{Ethics Statement}
+
+\revision{
+\algnameshort{} uses the APIs of \emph{pre-trained} models. The DP guarantee of \algnameshort{} is rigorous for the data used in the \algnameshort{} algorithm (i.e., $\privatesampleset$). That being said, \algnameshort{} does not address the privacy of \emph{pre-training} data of foundation models, which is a different goal. \algnameshort{} has no control over the pre-training data---any privacy breaches in the pre-training data are attributable to the data holder (e.g., leaking the data publicly) or the foundation model developer (e.g., using data without permission). However, as a \algnameshort{} user, it is advisable to ensure no overlap between the pre-training data and $\privatesampleset$ for liability reasons.
+Depending on whether the APIs are from \emph{blackbox models}, which can only be accessed through APIs  (e.g., DALLE3), or \emph{local models}, whose weights and architectures are accessible by the users (e.g., Stable Diffusion), it has different implications.
+\begin{packeditemize}
+    \item \emph{Using APIs from blackbox models.}  
+    Since most blackbox models do not reveal their training dataset, it is safer to only consider $\privatesampleset$ that was never been shared or posted online. %
+    For instance, a hospital who wants to share a DP synthetic version of its proprietary medical records can safely run \algnameshort{} if it has never released these medical records to any other party, making it impossible for those records to be in the pre-training data of any foundation model. %
+    \item \emph{Using APIs from local models.} For local models, we have full control over the model weights and architectures. We can pre-train the models on data that surely has no overlap with the private data. In all experiments of the paper, we use local models including Improved Diffusion \cite{nichol2021improved} and Stable Diffusion \cite{rombach2022high}. We directly take the pre-trained models from prior work, and we make sure that the private data and the pre-training data have no overlap.
+\end{packeditemize}
+}
+
+
+

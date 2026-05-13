@@ -1,0 +1,366 @@
+\title{On Rollouts in Model-Based Reinforcement Learning}
+
+\begin{abstract}
+Model-based reinforcement learning (MBRL) seeks to enhance data efficiency by learning a model of the environment and generating synthetic rollouts from it. However, accumulated model errors during these rollouts can distort the data distribution, negatively impacting policy learning and hindering long-term planning. Thus, the accumulation of model errors is a key bottleneck in current MBRL methods. We propose Infoprop, a model-based rollout mechanism that separates aleatoric from epistemic model uncertainty and reduces the influence of the latter on the data distribution. Further, Infoprop keeps track of accumulated model errors along a model rollout and provides termination criteria to limit data corruption. We demonstrate the capabilities of Infoprop in the Infoprop-Dyna algorithm, reporting state-of-the-art performance in Dyna-style MBRL on common MuJoCo benchmark tasks while substantially increasing rollout length and data quality.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Reinforcement learning (RL) has emerged as a powerful framework for solving complex decisionmaking tasks like racing Vasco et al. (2024); Kaufmann et al. (2023) and gameplay OpenAI et al. (2019); Bi & D’Andrea (2024). However, when applying RL in real-world scenarios, a significant challenge is data inefficiency, which hinders the practicality of standard RL methods. Model-based reinforcement learning (MBRL) addresses this issue by learning an internal model of the environment Deisenroth & Rasmussen (2011); Chua et al. (2018); Janner et al. (2019); Hafner et al. (2020). By generating simulated interactions through model rollouts, MBRL can make informed decisions while substantially reducing the need for real-world data collection.  
+
+The quality of data from model-based rollouts is critical for MBRL performance. Model errors can distort the data distribution and hurt policy learning. Long-horizon planning is desirable, however, often infeasible as model errors accumulate over time. This effect is demonstrated in Figure 1. (2018) scheme diverging quickly from the ground truth distribution of environment rollouts. Thus, data from TS rollouts can even be harmful to policy learning after a couple of time steps. This is largely because the TS mechanism does not explicitly address the effect of model errors on the propagated data distribution.  
+
+To tackle this challenge, we propose Infoprop , a novel model-based rollout mechanism that mitigates data distortion by addressing two key questions: How to propagate? and When to stop? We build our mechanism on explicitly leveraging the ability of common MBRL models to distinguish between aleatoric uncertainty due to process noise and epistemic uncertainty due to lack of data Lakshminarayanan et al. (2017); Becker & Neumann (2022). Making use of this property leads to substantially improved data consistency as depicted in Figure 1. In particular, we  
+
+• estimate and remove the stochasticity due to model error from the predictive distribution; • formulate stopping criteria based on information loss to limit error accumulation; and • demonstrate the potential of Infoprop as a direct plugin to standard MBRL methods using the example of Dyna-style MBRL. The resulting Infoprop-Dyna algorithm yields state-of-theart performance in MBRL on common MuJoCo tasks, while substantially improving the data consistency of model-based rollouts and thus allowing for longer rollout horizons.  
+
+![](images/4cb32f7c48e5cc44da805b973ea8b43a089f04608eb1b20ccc1d8324a7a25ece.jpg)  
+Figure 1: Comparing Data Consistency of Model-based Rollouts. Trajectories under the proposed Infoprop mechanism follow the ground truth distribution of environment rollouts closely while rolling out the same model under the common TS scheme Chua et al. (2018) results in distorted data.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+In the following, we introduce the fundamental concepts of information theory and MBRL.  
+
+
+
+\section{2.1 INFORMATION THEORY  }
+
+
+We will estimate the degree of data corruption in Infoprop rollouts using information-theoretic arguments. Information theory serves to quantify the uncertainty of a random variable (RV) Shannon (1948). Given the discrete RVs $X\ :\ \Omega\ \rightarrow\ \chi$ and $Y\ :\ \Omega\ \rightarrow\ \mathcal{Y}$ , the marginal entropy $\begin{array}{r}{\mathbb{H}(X)\,=\,-\sum_{x\in\mathcal{X}}\mathbb{P}[X\,=\,x]\log_{2}(\mathbb{P}[X\,=\,x])}\end{array}$ describes the average uncertainty about $X$ in bits. Further, the conditional entropy $\begin{array}{r}{\mathbb{H}(X|Y=y)=-\sum_{x\in\mathcal{X}}\mathbb{P}[X|Y=y]\log_{2}(P[X|Y=y])}\end{array}$ gives the uncertainty about $X$ , given a realization of $Y$ . Based on marginal and conditional entropy, the reduction in uncertainty about $X$ given a realization of $Y$ is described by mutual information  
+
+$$
+\mathbb{I}(X;Y=y)=\mathbb{H}(X)-\mathbb{H}(X|Y=y),
+$$  
+
+with $I(X;Y=y)=0$ if the RVs are independent.1.  
+
+
+
+\section{2.2 REINFORCEMENT LEARNING  }
+
+
+Reinforcement learning addresses sequential decision-making problems where the environment is typically modeled as a discrete-time Markov decision process (MDP) represented by the tuple $\mathcal{M}=$ $\{S,A,\mathcal{R},P_{\mathcal{R}},P_{S},\xi_{0},\gamma\}$ . Here, $S\subseteq\mathbb{R}^{n_{S}}$ denotes the state space with $S_{t}\in S$ being the RV of the state at time $t$ and $s_{t}$ its realization. Similarly, $\mathcal{A}\subseteq\mathbb{R}^{n_{A}}$ represents the action space with $A_{t}\in\mathcal A$ the RV and $a_{t}$ the realization of the action as well as ${\mathcal{R}}\subseteq\mathbb{R}$ the set of rewards with $R_{t}\in\mathcal{R}$ and $r_{t}$ the reward at time $t$ . We make the common simplifying assumption Bellemare et al. (2023) that the next state and reward are independent given the current state-action pair. Thus, a transition step in the environment can be expressed concerning a reward kernel $P_{\mathcal{R}}$ and a dynamics kernel $P_{S}$ as  
+
+$$
+R_{t+1}\sim P_{\mathbb{R}}(\cdot|S_{t},A_{t})\quad\mathrm{and}\quad S_{t+1}\sim P_{S}(\cdot|S_{t},A_{t}).
+$$  
+
+Further, initial states are distributed according to $S_{0}\;\sim\;\xi_{0}$ , and actions according to the policy $A_{t}\sim\pi(\cdot|S_{t})$ . We aim to learn an optimal policy $\begin{array}{r}{\pi^{*}=\arg\operatorname*{max}_{\pi}\mathbb{E}_{\pi}\left[\sum_{t=0}^{\infty}\gamma^{t}R_{t+1}\right]}\end{array}$ that maximizes the expected sum of rewards discounted by $\gamma\in[0,1)$ , referred to as return.  
+
+2.3 MODEL-BASED REINFORCEMENT LEARNING  
+
+There are four main categories of MBRL that all build on model-based rollouts. $(i)$ Dyna-style methods Sutton (1991); Janner et al. (2019) use model-based rollouts to generate training data for a model-free agent. (ii) Model-based planning approaches Chua et al. (2018); Williams et al. (2017);  
+
+Nagabandi et al. (2018); Hafner et al. (2019) do not learn an explicit policy but perform planning via model rollouts during deployment. (iii) Analytic gradient methods Deisenroth & Rasmussen (2011); Hafner et al. (2020; 2021; 2023) optimize the policy by backpropagating the performance gradient through model rollouts. (iv) Value-expansion approaches Feinberg et al. (2018); Buckman et al. (2018) stabilize the temporal difference target using model-based rollouts.  
+
+The model architecture of an MBRL algorithm determines the set of mechanisms for model rollouts. In this work, we focus on rolling out the particularly successful class of aleatoric epistemic separator (AES) models Lakshminarayanan et al. (2017); Becker & Neumann (2022) that can distinguish aleatoric uncertainty corresponding to the estimate of process noise from epistemic uncertainty.  
+
+
+
+\section{2.4 ENVIRONMENT INTERACTION VS. MODEL-BASED ROLLOUTS  }
+
+
+Model-based rollouts aim to substitute environment interaction in MBRL. Thus, we compare the data generation process through environment interaction to the process of model-based rollouts.  
+
+We model environment dynamics as a nonlinear function $\mu(S_{t},A_{t})$ with additive heteroscedastic process noise that is normally distributed with variance $\Sigma(S_{t},A_{t})$ . Thus, environment rollouts, as depicted in Figure 1, are generated by iterating the dynamics  
+
+$$
+S_{t+1}=\mu(S_{t},A_{t})+L(S_{t},A_{t})W_{t},
+$$  
+
+with $L(S_{t},A_{t})L(S_{t},A_{t})^{\top}\,=\,\Sigma(S_{t},A_{t})$ and the process noise $W_{t}\sim\mathcal{N}(0,I)$ . Consequently, the transition kernel 1 of the environment is defined as $P_{S}\left(\cdot|S_{t},A_{t}\right)=\mathcal{N}\left(\mu(S_{t},\dot{A}_{t}),\Sigma(S_{t},A_{t})\right)$ .  
+
+In MBRL, however, we do not have access to $P_{S}$ directly but typically rely on a parametric model with the random parameters $\Theta_{t}~\in~\vartheta$ . Besides estimates of nonlinear dynamics $\hat{\mu}_{\Theta_{t}}(S_{t},A_{t})$ and process noise $\hat{\Sigma}_{\Theta_{t}}(S_{t},A_{t})$ , AES models provide an estimate of the parameter distribution $\Theta_{t}\sim\mathbb{P}_{\Theta}$ , e.g. via ensembling Lakshminarayanan et al. (2017) or dropout Becker & Neumann (2022). These models are typically propagated using the TS Chua et al. (2018) rollout mechanism via iterating  
+
+$$
+S_{t+1}=\hat{\mu}_{\Theta_{t}}(S_{t},A_{t})+\hat{L}_{\Theta_{t}}(S_{t},A_{t})W_{t}
+$$  
+
+with $\hat{L}_{\boldsymbol{\Theta}_{t}}(S_{t},A_{t})\hat{L}_{\boldsymbol{\Theta}_{t}}(S_{t},A_{t})^{\top}=\hat{\Sigma}_{\boldsymbol{\Theta}_{t}}(S_{t},A_{t})$ , $W_{t}\sim\mathcal{N}(0,I)$ , and $\Theta_{t}\sim\mathbb{P}_{\Theta}$ . This results in the TS rollouts in Figure 1 and induces the kernel $\hat{P}_{S,\mathrm{TS}}(\cdot|S_{t},A_{t})=\mathcal{N}\left(\hat{\mu}_{\Theta_{t}}(S_{t},A_{t}),\hat{\Sigma}_{\Theta_{t}}(S_{t},A_{t})\right)$ .   
+The majority of recent MBRL approaches use the TS rollout mechanism, e.g. Chua et al. (2018);   
+Becker & Neumann (2022); Janner et al. (2019); Pan et al. (2020); Yu et al. (2020); Luis et al.   
+(2023).  
+
+
+
+\section{3 PROBLEM STATEMENT  }
+
+
+Revisiting Figure 1 allows us to illustrate the effects of different sources of stochasticity by comparing environment interaction under $P_{S}$ to TS rollouts under $\hat{P}_{S,\mathrm{TS}}$ . While different realizations of process noise $w_{t}\sim\mathcal{N}(0,I)$ allow for keeping track of the environment distribution, the sampling process $\theta_{t}\sim\mathbb{P}_{\Theta}$ introduces additional stochasticity that leads to an overestimated total variance in the TS rollout distribution. This effect is amplified through the continued propagation of erroneous predictions making data at later steps unfit for policy learning. We ask the following questions:  
+
+(i) How can we construct a predictive distribution closely resembling environment dynamics? (ii) How can we quantify the degree of data corruption due to model error? (iii) When should model-based rollouts be terminated due to data corruption?  
+
+We address these questions by proposing the Infoprop rollout mechanism. Infoprop isolates and removes epistemic uncertainty for an improved predictive distribution, keeps track of data corruption using information-theoretic arguments, and terminates rollouts based on the degree of corruption.  
+
+4 INFOPROP ROLLOUT MECHANISM  
+
+In the following, we introduce the Infoprop mechanism for model-based rollouts. As depicted in Figure 2, we decompose model predictions into a signal fraction representing the environment dynamics and noise fraction introduced by model error. This perspective allows to interpret model rollouts as communication through a noisy channel. We estimate both the signal and the noise distribution and use these to infer a belief over the environment state, given an observation of the model state. This belief state represents the foundation of the Infoprop rollout mechanism.  
+
+![](images/2a505a4ff3fc195241ba6a4b781b25606a1ce4fd953f71070e0413271916cd5a.jpg)  
+Figure 2: Infoprop block diagram  
+
+4.1 THEORETICAL SETUP  
+
+First, we introduce additional notation to specify RVs under different transition kernels.  
+
+Definition 1 (Environment state). We define the environment state as the conditional expectation under the environment dynamics given a realization of a state-action pair  
+
+$$
+\check{S}_{t+1}:=\mathbb{E}_{P_{S}}\left[S_{t+1}\vert S_{t}=s_{t},A_{t}=a_{t},W_{t}\right].
+$$  
+
+Thus, $\check{S}_{t+1}$ is an RV, where the randomness is induced by the process noise and has an aleatoric nature. If we additionally condition on the realization $W_{t}=w_{t}$ , we obtain a deterministic object.  
+
+Definition 2 (Model state). We define the model state as the conditional expectation under $\hat{P}_{S,\mathrm{TS}}$  
+
+$$
+\hat{S}_{t+1}:=\mathbb{E}_{\hat{P}_{S,\mathrm{TS}}}\left[S_{t+1}\vert S_{t}=s_{t},A_{t}=a_{t},W_{t},\Theta_{t}\right].
+$$  
+
+As discussed in Section 3, stochasticity in $\hat{S}_{t+1}$ is induced not only by $W_{t}$ but also by the randomness in the parameters $\Theta_{t}$ . We project the uncertainty in the parameter space $\vartheta$ to $\boldsymbol{S}$ via an error process.  
+
+Definition 3 (Model error process). We define a model error process  
+
+$$
+\Delta_{t}=\hat{S}_{t+1}-\check{S}_{t+1}
+$$  
+
+that, given a realization of process noise $W_{t}=w_{t}$ , projects uncertainty in $\vartheta$ to $\boldsymbol{S}$  
+
+$$
+\begin{array}{r}{\mathbb{E}\left[\Delta_{t}\middle|W_{t}=w_{t}\right]=\mathbb{E}_{\hat{P}_{S,\mathrm{TS}}}\left[S_{t+1}\middle|s_{t},a_{t},w_{t},\Theta_{t}\right]-\mathbb{E}_{P_{S}}\left[S_{t+1}\middle|s_{t},a_{t},w_{t}\right].}\end{array}
+$$  
+
+We refer to the projected parameter uncertainty as epistemic uncertainty.  
+
+Further, we restrict model usage to a sufficiently accurate subset $\mathcal{E}\ \subseteq\ S\ \times\ A$ , as proposed in Frauenknecht et al. (2024). We define $\mathcal{E}$ amenable to the Infoprop setting in Section 4.4 and make the following assumptions when performing model-based rollouts in $\mathcal{E}$ :  
+
+Assumption 1 (Consistent estimator of aleatoric uncertainty). The model’s predictive variance $\hat{\textstyle\sum}_{\Theta_{t}}$ is a consistent estimator of $\Sigma$ following the definition of Julier & Uhlmann (2001), i.e.  
+
+$$
+\left(\hat{\Sigma}_{\Theta_{t}}(S_{t},A_{t})-\Sigma(S_{t},A_{t})\right)\succcurlyeq0\quad\forall(S_{t},A_{t})\in\mathcal{E}.
+$$  
+
+Assumption 2 (Unbiased estimator). The model bias $\mu^{\Delta}$ is negligible. Thus $\hat{S}_{t+1}$ according to (4) is an unbiased estimator of $\check{S}_{t+1}$ according to (3), i.e.  
+
+$$
+\mathbb{E}\left[\hat{S}_{t+1}\vert S_{t},A_{t}\right]=\mathbb{E}\left[\check{S}_{t+1}\vert S_{t},A_{t}\right]\quad\forall(S_{t},A_{t})\in\mathcal{E}.
+$$  
+
+Figure 1 empirically shows that these assumptions are reasonable. The Infoprop distribution is slightly more stochastic than the ground truth process, which indicates that Assumption 1 holds. As (9) states, the model does not underestimate aleatoric uncertainty; the Infoprop rollouts should be at least as stochastic as the true process. Further, we observe no substantial bias of the Infoprop distribution underscoring the soundness of Assumption 2. Infoprop shows a similar behavior in high dimensional problems as reported in Section 6.  
+
+4.2 DECOMPOSING THE MODEL STATE IN SIGNAL AND NOISE  
+
+We aim to isolate the stochasticity due to parameter uncertainty in $\hat{S}_{t+1}$ . We use the model error process (8) to project the noise in $\vartheta$ to the same space as the signal, i.e. the dynamics, which is $\boldsymbol{S}$ . The parameter distribution $\Theta_{t}\sim\mathbb{P}_{\Theta}$ can induce arbitrarily complex distributions $\Delta_{t}\sim\mathbb{P}_{\Delta}$ . To simplify the analysis, we solely consider the first two moments of $\mathbb{P}_{\Delta}$ , namely $\mu^{\Delta}$ and $\Sigma^{\Delta}$ . This allows to reformulate the propagation equation (4) of the model state  
+
+$$
+\hat{S}_{t+1}=\check{S}_{t+1}+\Delta_{t}\approx\check{S}_{t+1}+\mu^{\Delta}(S_{t},A_{t})+L^{\Delta}(S_{t},A_{t})N_{t}
+$$  
+
+concerning the $\check{S}_{t+1}$ and $\Delta_{t}$ represented by $\mu^{\Delta}(S_{t},A_{t})$ the model bias, $\Sigma^{\Delta}(S_{t},A_{t})$ the epistemic variance with Cholesky decomposition $L^{\Delta}\dot{(S_{t},A_{t})}$ , and $N_{t}$ the epistemic noise.  
+
+By Assumption 2, we have $\mu^{\Delta}(S_{t},A_{t})\,=\,0\quad\forall(S_{t},A_{t})\,\in\,\mathcal{E}$ . Consequently, we can interpret the model rollout as communication through a Gaussian noise channel Cover & Thomas (2006) via (11).  
+
+Based on the propagation equation (11), we aim to infer the maximum likelihood estimate of $\check{S}_{t+1}$ from $E$ realizations of $\{\mathbb{E}[\hat{S}_{t+1}|N_{t}=n_{t}^{e}]\}_{e=1}^{E}$ , to use it as the predictive distribution for our rollout scheme. As we cannot sample $N_{t}$ directly, we instead use an equivalent definition of $\hat{S}_{t+1}$ .  
+
+Definition 4 (Model state concerning epistemic uncertainty). Based on the model error process (8) the model state is defined as  
+
+$$
+\hat{S}_{t+1}=\mathbb{E}_{\hat{P}_{S,\mathrm{TS}}}\left[S_{t+1}\middle|S_{t}=s_{t},A_{t}=a_{t},W_{t},\Delta_{t}\right]\approx\mathbb{E}_{\hat{P}_{S,\mathrm{TS}}}\left[S_{t+1}\middle|S_{t}=s_{t},A_{t}=a_{t},W_{t},N_{t}\right],
+$$  
+
+Reformulating (6) concerning $\Delta_{t}$ does not change the information content or the induced sigmaalgebra, as $\Delta_{t}$ is a measurable function of $\Theta_{t}$ . In the simplified setting of solely considering the first two moments of $\mathbb{P}_{\Delta},\,N_{t}$ fully describes stochasticity due to model error. In reverse, we can obtain realizations $\{\mathbb{E}[\hat{S}_{t+1}|\Theta_{t}=\theta_{t}^{e}]\}_{e=1}^{E}$ and interpret them as samples $\{\mathbb{E}[\hat{S}_{t+1}|N_{t}=n_{t}^{e}]\}_{e=1}^{E}$ .  
+
+Lemma 1. Given $E$ realizations of E $\Big[\hat{S}_{t+1}|\Theta_{t}=\theta_{t}^{e}\Big]$ , we can estimate the environment state using maximum likelihood as  
+
+$$
+\check{S}_{t+1}=\mathbb{E}\left[\hat{S}_{t+1}|N_{t}=0\right]\approx\bar{S}_{t+1}=\bar{\mu}(S_{t},A_{t})+\bar{L}(S_{t},A_{t})W_{t}
+$$  
+
+Proof.2.1  
+
+Lemma 2. Following this line of thought, the maximum likelihood estimate of $\Sigma^{\Delta}$ is given by  
+
+$$
+\bar{\Sigma}^{\Delta}(S_{t},A_{t})=\frac{1}{E}\sum_{e=1}^{E}\left(\hat{\mu}_{\Theta_{t}=\theta_{t}^{e}}(S_{t},A_{t})-\bar{\mu}(S_{t},A_{t})\right)\left(\hat{\mu}_{\Theta_{t}=\theta_{t}^{e}}(S_{t},A_{t})-\bar{\mu}(S_{t},A_{t})\right)^{\top}.
+$$  
+
+Proof.2.2  
+
+Given the maximum likelihood estimates of the environment state $\bar{S}_{t+1}$ and the epistemic variance $\bar{\Sigma}^{\Delta}$ , we can decompose the model state $\hat{S}_{t+1}$ in a signal and noise fraction according to (11) in $\mathcal{E}$ .  
+
+4.3 CONSTRUCTING THE INFOPROP STATE  
+
+Having decomposed $\hat{S}_{t+1}$ into signal $\bar{S}_{t+1}$ and noise $\bar{\Sigma}^{\Delta}$ , allows us to define the Infoprop state. Definition 5 (Infoprop state). We define the Infoprop state  
+
+$$
+\tilde{S}_{t+1}:=\mathbb{E}\left[\bar{S}_{t+1}|\hat{S}_{t+1}=\hat{s}_{t+1}\right]=\mathbb{E}_{\Tilde{P}_{S,\mathrm{IP}}}\left[S_{t+1}|S_{t}=s_{t},A_{t}=a_{t},\hat{S}_{t+1}=\hat{s}_{t+1},U_{t}\right]
+$$  
+
+as the conditional expectation of the estimated environment state given $a$ sample of the model state.3.  
+
+Consequently, the Infoprop state aims to infer the signal $\bar{S}_{t+1}$ given a noisy observation $\hat{s}_{t+1}$ . Propagating model-based rollouts using $\tilde{S}_{t+1}$ , yields favorable properties as stated in Theorem 1.  
+
+![](images/5d58cddd7a121d134ca1eb6f2ee6e45be45866a0134a6d1f4ff8bd7d176c1db6.jpg)  
+Figure 3: Infoprop rollout mechanism. (a), $(b)$ : Generating the Infoprop state $\tilde{S}_{t+1}$ from the estimated predictive distribution $\bar{S}_{t+1}$ and the model sample $\hat{s}_{t+1}$ . (c) Performing an Infoprop rollout.  
+
+Theorem 1 (Infoprop state). By construction, $\tilde{S}_{t+1}$ addresses questions $(i)$ and (ii) of Section 3.  
+
+(i) The distribution of Infoprop states is identical to the estimated environment distribution.  
+
+$$
+\tilde{S}_{t+1}\overset{\mathrm{dist}}{=}\bar{S}_{t+1}
+$$  
+
+Proof.4.  
+
+(ii) The sum of marginal entropies of $\tilde{S}_{t+1}$ defines the information loss along an Infoprop rollout.  
+
+$$
+\mathbb{H}\left({\bar{S}}_{1},{\bar{S}}_{2},\ldots{\bar{S}}_{T}|S_{0}=s_{0},A_{0}=a_{0},{\hat{S}}_{1}={\hat{s}}_{1},\ldots{\hat{S}}_{T}={\hat{s}}_{T}\right)=\sum_{t=0}^{T}\mathbb{H}\left({\tilde{S}}_{t+1}\right)
+$$  
+
+Proof.5.  
+
+Figure 3 illustrates the Infoprop rollout mechanism and provides intuition for Theorem 1. In the case of a perfect model, i.e. $\bar{\Sigma}^{\Delta^{\prime}}\,{=}\,\bar{0}$ , depicted in Figure 3a, the realization $\hat{s}_{t+1}$ provides the information about the process noise realization $w_{t}$ without ambiguity. Consequently, the belief about the environment state given the sample from the model $\tilde{S}_{t+1}\stackrel{-}{=}\mathbb{E}[\bar{S}_{t+1}|\hat{S}_{t+1}=\dot{\hat{s}}_{t+1}]$ is a deterministic object and $\mathbb{H}(\tilde{S}_{t+1})=0$ . In the general scenario of $\bar{\Sigma}^{\Delta}\,>\,0$ depicted in Figure 3b, the epistemic uncertainty results in ambiguity about the environment state given $\hat{s}_{t+1}$ , such that $\mathbb{H}(\tilde{S}_{t+1})>0$ . Notably, conditioning $\bar{S}_{t+1}$ on $\hat{s}_{t+1}$ , results in Infoprop predictions $\tilde{S}_{t+1}$ following estimated environment distribution $\bar{S}_{t+1}$ as stated in Theorem 1 (i). This results in a data distribution that closely resembles the environment dynamics as desired in question (i) of Section 3. Finally, Figure 3c depicts a Infoprop rollout propagated via realization $\tilde{s}_{t+1}$ . We measure data corruption due to model error using the conditional entropy of a rollout under the estimated environment dynamics $(\bar{S}_{1},\bar{S}_{2},\dots\bar{S}_{T})$ given the realizations observed from the model $(S_{0}\,=\,s_{0},A_{0}\,=\,a_{0},\hat{S}_{1}\,=\,\hat{s}_{1},\dots\hat{S}_{T}\,=\,\hat{s}_{T})$ , i.e. given the observed model trajectory, how sure are we on how the corresponding environment trajectory would look like?. As per Theorem 1 (ii), this trajectory-based approach to uncertainty can be addressed with the accumulated marginal entropy of $\tilde{\tilde{S}}_{t+1}$ , addressing question (ii) of Section 3.  
+
+4.4 ROLLOUT TERMINATION CRITERIA  
+
+Having introduced how to propagate Infoprop rollouts, the question remains when to terminate them.   
+In the following, we propose two termination criteria to address question (iii) of Section 3.  
+
+First, Infoprop rollouts build on the assumption that mudel usage is restricted to a sufficiently accurate subset $\mathcal{E}\subseteq\mathcal{S}\times\mathcal{A}$ , following the ideas of Frauenknecht et al. (2024).  
+
+Definition 6 (Sufficiently accurate subset). We define the sufficiently accurate subset  
+
+$$
+\mathcal{E}:=\{(s_{t},a_{t})\in\mathcal{S}\times\mathcal{A}\mid\mathbb{H}(\tilde{S}_{t+1})\leq\lambda_{1},\hat{s}_{t+1}\sim\hat{P}_{\cal{S},\mathrm{TS}}(\cdot|s_{t},a_{t})\}
+$$  
+
+based on a threshold $\lambda_{1}$ for the single-step information loss $\mathbb{H}(\tilde{S}_{t+1})$ .  
+
+Second, we restrict Infoprop rollouts to sufficiently accurate paths to limit uncertainty accumulation.  
+
+Definition 7 (Sufficiently accurate path). Based on the estimated information loss along a rollout (17), we define the set of sufficiently accurate paths of length $t^{\prime}\in\{1,\ldots,T\}$ as  
+
+$$
+\mathcal{P}^{t^{\prime}}:=\left\{(s_{t},a_{t})_{t=0}^{t^{\prime}}\in\left(S\times A\right)^{t^{\prime}}\left|\sum_{t=0}^{t^{\prime}}\mathbb{H}(\tilde{S}_{t+1})\leq\lambda_{2}\right.\right\}\,.
+$$  
+
+Heuristics for determining values of $\lambda_{1}$ and $\lambda_{2}$ depend on the class of AES model and MBRL algorithm at hand with an example provided in Section 5. Combining the steps above yields the Infoprop rollout mechanism illustrated in Algorithm 1.  
+
+Algorithm 1 Infoprop   
+Require: $s_{0}$ while $t<T+1$ do $a_{t}\sim\pi(\cdot|s_{t})$ for $e\in\{1,\ldots,E\}$ do $\theta_{t}^{e}\sim\mathbb{P}_{\Theta}$ $\bar{S}_{t+1}\big(s_{t},a_{t}\big)$ from (13), and $\bar{\Sigma}^{\Delta}(s_{t},a_{t})$ from (14) $\hat{s}_{t+1}=\mathbb{E}\left[\hat{S}_{t+1}|W_{t}=w_{t},\Theta_{t}=\theta_{t}^{e^{\prime}}\right]$ with $\boldsymbol{w}_{t}\sim\mathcal{N}(0,I),\boldsymbol{\theta}_{t}^{e^{\prime}}\sim\mathcal{U}(\{\theta_{t}^{1},\dots,\theta_{t}^{E}\})$ $\tilde{S}_{t+1}$ from (51) and $\mathbb{H}(\tilde{S}_{t+1})$ from (24) if $\mathbb{H}(\tilde{S}_{t+1})>\lambda_{1}$ then break else if $\sum_{t^{\prime}=0}^{t}\mathbb{H}(\tilde{S}_{t^{\prime}+1})>\lambda_{2}$ then br eak else $s_{t}\gets\mathbb{E}[\tilde{S}_{t+1}|U_{t}=u_{t}]\;\mathrm{with}\;u_{t}\sim\mathcal{N}(0,I)$  
+
+
+
+\section{5 AUGMENTING STATE-OF-THE-ART: INFOPROP-DYNA  }
+
+
+While the Infoprop rollout mechanism is applicable to different kinds of MBRL with AES models, we illustrate its capabilities in a Dyna-style architecture with probabilistic ensemble (PE) models Lakshminarayanan et al. (2017). We design Infoprop-Dyna by integrating the Infoprop rollout mechanism in the state-of-the-art framework proposed in Janner et al. (2019) with minor adaptions.  
+
+As discussed in Section 4.4, heuristics for $\lambda_{1}$ and $\lambda_{2}$ depend on the algorithm at hand. In InfopropDyna , we take the common approach Chua et al. (2018); Janner et al. (2019) of neglecting crosscorrelations between state dimensions for computational reasons. Thus, we can consider data corruption of each state dimension independently. As the predictive quality of different state dimensions can differ substantially, we choose both thresholds as $n_{\ensuremath{S}}$ dimensional vectors, such that a rollout is terminated as soon as the data corruption of any dimension overshoots the corresponding threshold.  
+
+In Dyna-style MBRL Janner et al. (2019), the dynamics model is trained on the data distribution observed during environment interaction. The corresponding transitions are stored in an environment replay buffer $\mathcal{D}_{\mathrm{env}}\;=\;\{(\breve{s}_{t}^{(b)},\breve{a}_{t}^{(b)},\breve{r}_{t+1}^{(b)},\breve{s}_{t+1}^{(b)})\}_{b=1}^{|\mathcal{D}_{\mathrm{env}}^{\star}|}$ , where $(b)$ indicates the index in the replay buffer. After a fixed number of interaction steps between a model-free RL agent and the environment, the dynamics model is retrained on the data in $\mathcal{D}_{\mathrm{env}}$ , model-based rollouts are performed, and the data is stored stored in a replay buffer $\mathcal{D}_{\mathrm{mod}}$ to train the model-free RL agent. Consequently, we assume the PE model to be accurate within the data distribution of $\mathcal{D}_{\mathrm{env}}$ and build the heuristic for $\lambda_{1}$ and $\lambda_{2}$ on the predictive uncertainty within the environment buffer.  
+
+After each round of retraining the PE model, we compute a set of dimension-wise Infoprop state entropies for single-step predictions in $\mathcal{D}_{\mathrm{env}}$ according to  
+
+$$
+\begin{array}{r}{\mathcal{H}^{k}=\left\{\mathbb{H}\left(\bar{S}_{t+1}^{k}|S_{t}=\check{s}_{t}^{(b)},A_{t}=\check{a}_{t}^{(b)},\hat{S}_{t+1}^{k}=\hat{s}_{t+1}^{k,(b)}\right)=\mathbb{H}\left(\tilde{S}_{t+1}^{k,(b)}\right)\right\}_{b=1}^{|\mathcal{D}_{\mathrm{env}}|}}\end{array}
+$$  
+
+where $k\in\{1,\ldots,n_{S}\}$ indicates the corresponding state dimension. We define the dimension-wise thresholds $\bar{\lambda_{1}^{k}}$ and ${\lambda}_{2}^{k}$ based on the cumulative distribution function of dimension-wise entropies  
+
+$$
+F_{\mathcal{H}^{k}}(h)=\frac{1}{\vert\mathcal{H}^{k}\vert}\sum_{h^{\prime}\in\mathcal{H}^{k}}\mathbb{1}[h^{\prime}\leq h].
+$$  
+
+The $k^{\mathrm{th}}$ element of $\lambda_{1}$ is defined as the $\zeta_{1}$ quantile of the single-step entropy set  
+
+$$
+\lambda_{1}^{k}=\operatorname*{inf}\left\{h\in{\mathcal{H}}^{k}:F_{{\mathcal{H}}^{k}}(h)\geq\zeta_{1}\right\}
+$$  
+
+and limits model usage to the sufficiently accurate subset $\mathcal{E}$ . To restrict rollouts of length $t^{\prime}$ to $\mathcal{P}^{t^{\prime}}$ , we define the $k^{\mathrm{th}}$ element of $\lambda_{2}$ as the $\zeta_{2}$ quantile of the entropy set scaled by $\xi$  
+
+$$
+\lambda_{2}^{k}=\xi\operatorname*{inf}\left\{h\in\mathcal{H}^{k}:F_{\mathcal{H}^{k}}(h)\geq\zeta_{2}\right\}.
+$$  
+
+Here, $\zeta_{2}$ denotes a quantile corresponding to precise predictions and $\xi$ to the number of prediction steps we are willing to accumulate the resulting data corruption. We choose $\zeta_{1}=0.99$ , $\zeta_{2}=0.01$ and $\xi=100$ for all experiments in Section 6 without further hyperparameter tuning.  
+
+We use pink noise for environment exploration Eberhard et al. (2023) to quickly expand $\mathcal{E}$ Frauenknecht et al. (2024).  
+
+
+
+\section{6 EXPERIMENTS AND DISCUSSION  }
+
+
+To demonstrate the benefits of the Infoprop mechanism, we compare Infoprop-Dyna to state-of-theart Dyna-style MBRL algorithms on MuJoCo Todorov et al. (2012) benchmark tasks. We report  
+
+• substantial improvements in the consistency of predicted data, especially over long horizons; • effective rollout termination based on accumulated model error propagation; and • state-of-the-art performance in Dyna-style MBRL on several MuJoCo tasks.  
+
+Furthermore, we discuss the limitations of naively integrating Infoprop into the standard Dyna-style setup Janner et al. (2019) and point to further research questions.  
+
+
+
+\section{6.1 EXPERIMENTAL SETUP  }
+
+
+We compare Infoprop-Dyna to Model-Based Policy Optimization (MBPO) Janner et al. (2019) and Model-Based Actor-Critic with Uncertainty-Aware Rollout Adaption (MACURA) Frauenknecht et al. (2024) as well as to Soft Actor-Critic (SAC) Haarnoja et al. (2018) that represents the modelfree learner of all the Dyna-style approaches above. We build our implementation2 on the code base3 provided by Frauenknecht et al. (2024).1  
+
+
+
+\section{6.2 PREDICTION QUALITY  }
+
+
+To compare different rollout mechanisms, we train an Infoprop-Dyna agent on hopper for 120000 environment interactions and perform model rollouts from states in $\mathcal{D}_{\mathrm{env}}$ .  
+
+First, we evaluate the consistency of Infoprop and TS rollouts, propagating 20 steps without termination. Figure 4a depicts the resulting distributions for the $1\bar{1}^{\mathrm{th}}$ dimension of the hopper state. Infoprop rollouts show substantially improved data consistency compared to TS rollouts, underscoring the ability of Infoprop to effectively mitigate model error propagation.  
+
+Next, we compare the rollout mechanisms of MBPO and MACURA based on TS sampling with Infoprop-Dyna rollouts. Figure 4b shows the results for $11^{\mathrm{th}}$ dimension of the hopper and a maximum rollout length of 100 steps. MBPO rollouts are propagated for 11 steps following the schedule proposed in Janner et al. (2019), resulting in a widely spread distribution. In contrast, MACURA has an adaptive rollout length capped at 10 steps Frauenknecht et al. (2024), leading to better data consistency. The improved predictive distribution and capability to estimate accumulated error of Infoprop allows for substantially longer rollouts up to 100 steps. The Infoprop termination criteria reliably stop distorted rollouts, resulting in consistent rollouts over long horizons.2 provides additional results for setting the maximum rollout length of all three approaches to 100.  
+
+![](images/1c738cd70f77443a5857cb13ee24c3dab8ae2e1715e6392e8ba0aa7373e4867b.jpg)  
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+Figure 5: Evaluation on MuJoCo tasks. (a) Infoprop-Dyna shows state-of-the-art performance for Dyna-style MBRL on several MuJoCo tasks while considerably increasing average rollout length on most tasks. (b) Infoprop-Dyna shows substantially improved consistency between $\mathcal{D}_{\mathrm{env}}$ and $\mathcal{D}_{\mathrm{mod}}$ .   
+6.3 PERFORMANCE EVALUATION  
+
+As depicted in the top row of Figure 5a, Infoprop-Dyna performs on par with or better than MACURA, while substantially outperforming MBPO with respect to data efficiency and asymptotic performance. Notably, Infoprop-Dyna consistently outperforms SAC with a fraction of environment interaction. The bottom row of Figure 5a depicts the average rollout lengths. Infoprop-Dyna shows substantially increased rollout lengths compared to prior methods in all environments but ant.  
+
+A major concern of this work is the consistency of model-based rollouts with the environment distribution. Figure 5b depicts the data distribution in $\mathcal{D}_{\mathrm{env}}$ and $\mathcal{D}_{\mathrm{mod}}$ of the respective Dyna-style approaches throughout training for the $11^{\mathrm{th}}$ dimension of the hopper state. The figure shows a histogram over state values over the course of training. It can be seen that the model data distribution of Infoprop-Dyna closely follows the distribution observed in the environment, while both the data from MBPO and MACURA show severe outliers. This is the case, even though the rollout data in Infoprop-Dyna is obtained from substantially longer rollouts as can be seen from Figure 5a which indicates the capabilities of the Infoprop rollout mechanism.  
+
+
+
+\section{6.4 LIMITATIONS AND OUTLOOK  }
+
+
+Despite the excellent quality of model-generated data with the Infoprop rollout, the limitations of Infoprop-Dyna are most apparent on MuJoCo humanoid with results provided in E.3. These show instabilities in learning and point to structural problems when integrating Infoprop rollouts naively into standard Dyna-style architectures Janner et al. (2019).  
+
+Figure 5b shows that the long rollouts of Infoprop-Dyna can cause rapid distribution shifts in $\mathcal{D}_{\mathrm{mod}}$ , especially early in training. These nonstationary buffers are a challenge to deep Q-learning methods Mnih et al. (2015). Another issue is primacy bias in model learning Qiao et al. (2023), where the model overfits to initial data and subsequently struggles to generalize, as seen in the decreasing rollout length for the ant environment in Figure 5a. The main problem with Infoprop-Dyna is likely overfitting critics and plasticity loss Nikishin et al. (2022); D’Oro et al. (2023), as also reported by Frauenknecht et al. (2024) for Dyna-style MBRL trained on high-quality data.4.  
+
+
+
+\section{7 RELATED WORK  }
+
+
+The negative effects of accumulated model error on the performance of MBRL methods is a longstudied problem Venkatraman et al. (2015); Talvitie (2016); Asadi et al. (2018b;a).  
+
+Different model architectures have been proposed to mitigate this issue, such as trajectory models Asadi et al. (2019); Lambert et al. (2021), bidirectional models Lai et al. (2020), temporal segment models Mishra et al. (2017) or self-correcting models Talvitie (2016). These architectures, however, imply substantial additional effort for model learning, such that state-of-the-art performance in the respective fields of MBRL is often reported for simpler single-step model architectures Chua et al. (2018); Janner et al. (2019); Buckman et al. (2018).   
+These approaches address the problem of error accumulation by keeping model-based rollouts sufficiently short. Janner et al. (2019) introduce the concept of branched rollouts that allows to cover relevant parts of $\boldsymbol{S}$ with short model rollouts. Other methods weight rollouts of different lengths according to their single-step uncertainty Buckman et al. (2018) or use single-step uncertainty to schedule rollout length Pan et al. (2020); Frauenknecht et al. (2024). Infoprop allows to infer model data consistent with the environment distribution over long rollout horizons using comparatively simple model architectures and computationally cheap conditioning operations.   
+Infoprop is inspired by an information-theoretic view on RL Lu et al. (2023). Thus far, informationtheoretic arguments have been mostly used to improve the exploration Haarnoja et al. (2018); Lu & Roy (2019); Ahmed et al. (2019); Mohamed & Rezende (2015) and generalization Tishby & Zaslavsky (2015); Lu et al. (2020); Igl et al. (2019); Islam et al. (2023) of model-free RL methods. While aspects of dynamical systems such as causality, modeling, and control Lozano-Duran & Arranz (2021), predictability Kleeman (2011) or dealing with noisy observations Gattami (2014) have been studied from an information theoretic perspective, these works do not directly apply to the MBRL setup nor extend to long model-based rollouts.  
+
+
+
+\section{8 CONCLUDING REMARKS  }
+
+
+Data consistency of model-based rollouts is a key criterion for the performance of MBRL approaches. This work proposes the novel Infoprop mechanism that substantially improves rollouts with common AES models. We reduce the influence of epistemic uncertainty on the predictive distribution of model-based rollouts, keep track of data corruption through propagated model error over long horizons, and terminate rollouts based on data corruption. This allows for considerably increased rollout lengths while substantially improving data consistency simultaneously.  
+
+While Infoprop is applicable to a broad range of MBRL methods, we demonstrate its capabilities by naively integrating Infoprop into a standard Dyna-style MBRL architecture Janner et al. (2019) resulting in the Infoprop-Dyna algorithm. We report state-of-the-art performance in several MuJoCo tasks while pointing to necessary adaptions to the existing algorithmic framework to fully unleash the potential of Infoprop rollouts.  
+
+
+

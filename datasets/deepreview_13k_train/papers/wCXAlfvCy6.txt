@@ -1,0 +1,340 @@
+\title{LongVILA: Scaling Long-Context Visual Language Models for Long Videos}
+
+\begin{abstract}
+Long-context capability is critical for multi-modal foundation models, especially for long video understanding. We introduce LongVILA, a full-stack solution for long-context visual-language models \qinghao{by co-designing the algorithm and system. For model training, we upgrade existing VLMs to support long video understanding by incorporating two additional stages, {\em i.e.}, long context extension and long video supervised fine-tuning.
+However, training on long video is computationally and memory intensive. We introduce the long-context Multi-Modal Sequence Parallelism (MM-SP) system that efficiently parallelizes long video training and inference, enabling 2M context length training on 256 GPUs without any gradient checkpointing.
+LongVILA efficiently extends the number of video frames of VILA from 8 to 2048, improving the long video captioning score from 2.00 to 3.26 (out of 5), achieving 99.8\% accuracy in 6,000-frame (more than 1 million tokens) video needle-in-a-haystack. LongVILA-7B demonstrates strong accuracy on the VideoMME benchmark, {\em i.e.}, 61.8\% with subtitle. Besides, MM-SP is $2.1 \times$ - $5.7 \times$ faster than ring style sequence parallelism and $1.1 \times$ - $1.4 \times$ faster than Megatron with a hybrid context and tensor parallelism. Moreover, it seamlessly integrates with Hugging Face Transformers.
+}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Integrating multi-modal understanding with long-context capability is important.
+A foundation model supporting more modalities can take more flexible input signals so that people can interact with the model in more diverse manners, \eg GPT-4o-like multi-modal chatbot, multi-modal web agent~\citep{koh2024visualwebarena}, and real-world robotics foundation model~\citep{brohan2022rt,brohan2023rt,padalkar2023open}. Longer context enables models to process more information, \eg long documents, repo-level codebase, and hour-length video, which similarly provides required features to more real-world applications. 
+
+While some works have enabled long-context Vision-Language Models (VLMs)~\citep{lin2023vila, longvlm}, they employ simplified approaches rather than offering a comprehensive solution. For instance, LongVA~\citep{zhang2024longva} relies on long-context LLMs and trains models on short-context data. LongVLM~\citep{longvlm} utilizes token compression to circumvent context extension. These approaches sidestep more challenging issues, such as the development of a robust long-context multi-modal training framework and corresponding dataset design. 
+
+A full-stack design is crucial for long-context Vision-Language Models (VLMs). Training large models is typically a complex, systematic endeavor that demands both data engineering~\citep{betker2023improving,ouyang2022training,zhou2024lima} and system-software co-design~\citep{lepikhin2020gshard,chowdhery2023palm,shoeybi2019megatron,brown2020language,dehghani2023scaling}. Unlike text-only LLMs, VLMs (\eg LLaVA~\citep{liu2023llava}) often require distinct model architectures and flexible distributed training strategies. Additionally, long-context modeling necessitates not only long-context data to fully utilize the model's capabilities~\citep{fu2024data,chen2023longlora} but also infrastructure capable of supporting memory-intensive long-context training~\citep{li2021sequence,jacobs2023deepspeed,li2023lightseq}. Therefore, a full-stack design, \qinghao{encompassing training pipeline and system,} is indispensable for long-context VLMs.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/TrainingPipeline2.png}
+    \caption{{The LongVILA training pipeline. In Stages 1 through 3, the process starts with alignment, pre-training, and supervised fine-tuning. In Stage 4, the model undergoes mid-training context extension. Finally, in Stage 5, the model is fine-tuned for long video understanding with Multi-Modal Sequence Parallelism~(MM-SP). While this example uses VILA, the process is adaptable to other VLMs. We train LongVILA models to support 1024 video frames in Stage 5 in experiments.}}
+    \label{fig:training-pipeline}
+\end{figure}
+\begin{figure}[t]
+  \centering
+  \subfloat[VideoMME]{\includegraphics[width=0.48\textwidth]{figures/sacling_frames/scaling_videomme5.pdf}\label{fig:scale_videomme}}
+  \hfill
+  \subfloat[Captioning]{\includegraphics[width=0.50\textwidth]{figures/sacling_frames/scaling_caption4.pdf}\label{fig:scale_captioning}}
+  \caption{Scaling the context length can enhance multi-modality accuracy, improving performance on both Video-QA tasks with VideoMME and video captioning with LongVILA-Caption.}
+\label{fig:scaling_frames}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/Needle5.pdf}
+    \caption{Comparison of Needle in the Long Video Haystack Experiment. The 32-frame baseline model (left) can not retrieve right needles after 32 frames. LongVA (middle) achieves 87.6\% accuracy in 3,000 frames. In contrast, the LongVILA model (right),  trained on 2048 frames, presents 99.8\% accuracy on 6,000 frames (more than 1 million context length).}
+    \label{fig:needle-in-a-haystack}
+\end{figure}
+
+In this work, we introduce LongVILA, a comprehensive solution for long-context VLMs. 
+\qinghao{For training {\bf pipeline}, we implement a five-stage training curriculum as Figure~\ref{fig:training-pipeline}: (1) multi-modal alignment, (2) large-scale pre-training, (3) short supervised fine-tuning, (4) context extension for LLMs, and (5) long supervised fine-tuning. For {\bf system}, we establish an efficient and user-friendly framework, namely Multi-Modal Sequence Parallelism (MM-SP), which supports training and inferencing memory-intensive long-context VLMs.
+}
+LongVILA-7B presents strong performance on VideoMME~\citep{video-mme}, 61.8\% with subtitle.  The LongVILA model, trained on 2048 frames, achieves 99.8\% accuracy in the needle-in-a-haystack experiments with 6,000 frames, with a context length of more than 1 million tokens. In ablations, by increasing the number of video frames using LongVILA, the performance on VideoMME and long video captioning tasks consistently improves (Figure~\ref{fig:scaling_frames}). Our MM-SP system can efficiently scale the context length up to 2 million tokens without gradient checkpointing, achieving 2.1$\times$ to 5.7$\times$ speedup compared to ring style sequence parallelism, and 1.1$\times$ to 1.4$\times$ compared to Megatron with a hybrid context parallelism and tensor parallelism.
+
+
+
+\section{Background and Related work}
+
+\label{sec:related_work}
+
+\paragraph{Visual language model architecture.}
+
+There are two predominant designs for VLMs: the encoder-decoder architecture (\eg, LLaVA~\citep{liu2023llava}, PaLM-E~\citep{driess2023palm}) and the decoder-only architecture (\eg, Fuyu~\citep{fuyu-8b}, Chameleon~\citep{team2024chameleon}). Encoder-Decoder VLMs connect the vision encoder to the LLM decoder through a multi-modal projector. Certain multi-modal projectors, such as spatial pooling and Q-former, significantly reduce the number of tokens per image or video frame, thereby lowering the computational burden on the LLM decoder. In contrast, decoder-only LLMs typically process raw patches as input without hierarchical token pooling, making it more challenging to reduce the token count for each image or frame. In this work, we build on VILA~\citep{lin2023vila} as our foundation. It is worth noting that enhanced variants of VILA exist, such as VILA$^2$\citep{fang2024vila} for improved performance and X-VILA\citep{x-vila} for cross-modality understanding, reasoning, and generation. For our model architecture and training pipeline, we adhere to the standard VILA-1.5 version.
+
+\paragraph{Sequence parallelism and hybrid strategy.}
+
+Long-context training examples often exceed the memory capacity of a single device. To address this issue, the sequence parallelism paradigm has been widely adopted in the text-only LLM community, distributing a single sequence across multiple devices. \qinghao{Specifically, Ring-style systems~\citet{li2021sequence, li2023lightseq, liu2023ring} use Point-to-Point (P2P) communication primitives to collectively compute the attention module,
+while DeepSpeed-Ulysses~\citet{jacobs2023deepspeed} employs an All-to-All (A2A) primitive to alternate between sharding the sequence dimension and the attention head dimension during attention computation. Ulysses generally achieves higher throughput than Ring-style SP due to its more efficient A2A communication primitive and larger, unsegmented computation blocks. However, its scalability is limited by the number of attention heads.
+Recently, USP \citep{USP} was introduced as the first to integrate Ring-style SP and Ulysses SP, combining the strengths of both approaches. LoongTrain \citep{LoongTrain} further optimizes communication and placement strategies to enhance training efficiency.
+Following \citep{USP, LoongTrain}, we extend the system to multi-modal scenarios to accommodate complex attention masks and variable-length input sequences. Our work is the first to design and implement a sequence parallelism system for visual language models.
+}
+
+
+\section{LongVILA Training Pipeline}
+
+
+
+{As shown in Figure~\ref{fig:training-pipeline},
+in our pipeline, there are five training stages, {\em i.e.}, Stage 1: multi-modal alignment, Stage 2: large-scale pre-training, Stage 3: supervised fine-tuning, Stage 4: context extension for LLM, Stage 5: long supervised fine-tuning. Stage 1, 2, and 3 follow VILA~\citep{lin2023vila}, to firstly bridge the gap between LLM and vision encoder, and then pre-training on larger datasets. In Stage 1, only the multi-modal projector is trainable with others frozen. In Stage 2, we freeze the vision encoder and training LLM and the multi-modal projector. In Stage 3, we fully fine-tune the model for short data instruction following, {\em e.g.}, image and short video datasets.
+Afterwards, we extend the context length of LLM with text-only dataset in a continued pre-training manner in Stage 4. In Stage 5, \qinghao{we adopt our MM-SP system (\S\ref{sec_system}) to }enhance the instruction following abilities by long video supervised fine-tuning. It is noted that all parameters are trainable in the final stage.}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/LongVILASFT.pdf}
+    \caption{{The proportion of question and video categories in our LongVILA$\_$sft dataset. We have 15,292 videos in total. For each video, there are one sample for captioning and the other question.}}
+    \label{fig:longvila-sft-data}
+\end{figure}
+\subsection{Stage1\&2\&3: Alignment, Pre-training, and Short Supervised Fine-tuning}
+We first use open-sourced image and video caption datasets to train the multi-modal projector in stage (1) to conduct the multi-modal alignment. Note that, following~\citep{lin2023vila}, both vision encoder and LLM decoder are frozen at this stage. After that, we conduct large-scale pre-training to learn general multi-modal capacity at scale. To improve the quality of large open-sourced datasets, we follow VILA$^2$~\citep{fang2024vila} to relabel COYO-25M~\citep{lin2023vila,kakaobrain2022coyo-700m} with VILA-1.5-40B~\citep{lin2023vila}. 
+The supervised fine-tuning process incorporates mixed data types, including both images and videos. For short video comprehension, we utilize open-source video instruction-following datasets, \eg YouCook2~\citet{youcook2} and ShareGPTVideo~\citet{zhang2024direct}. In experiments, our model is based on Qwen2-7B~\citep{qwen2} for benchmark comparisons, {\em e.g.}, VideoMME, and Llama3-8B~\citep{llama3} for ablation study.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/Longvideo-data.png}
+    \caption{{The pipeline for generating instruction-following data from long videos. The process begins by segmenting the long video into short clips, each approximately 10 seconds in length. These clips are individually annotated with captions using the VILA-1.5 model. Subsequently, a Large Language Model (LLM) is employed to generate question-and-answer pairs based on the captions of these clips. The types of questions generated include summarization and other inquiries pertinent to the content of long videos.
+}}
+    \label{fig:longvideo-data}
+\end{figure}
+
+\subsection{{Stage4: Context Extension for LLMs}}
+{
+Our empirical research indicates that extending the context length of LLMs is essential prior to engaging in supervised fine-tuning with long video datasets. Following Stage 2 of our methodology, we execute a continuation of pre-training on the LLM to enhance its context length to 262,144, utilizing a total of 17B tokens. We employ a progressive training schedule, incrementally increasing the context length from 8,192 to 65,536, and ultimately to 262,144, utilizing the SlimPajama dataset~\citep{cerebras2023slimpajama} in accordance with the methodology outlined by \citep{long-context-data-engineering}.
+
+Furthermore, we augment the base frequency of the Rotary Position Embeddings (RoPE) as described in \citep{rope} during the fine-tuning phase. Sequence parallelism is implemented for the training at the 262,144 context length. We use low-rank adaptation for context extension fine-tuning~\citep{longlora}. These processes collectively require approximately 336 GPU hours on machines equipped with 80GB A100 GPUs.
+}
+
+\subsection{{Stage5: Long Supervised Fine-tuning}}
+\label{sec:method-stage4}
+
+\textbf{{Long video instruction following}}
+To facilitate the fine-tuning of long videos, we constructed a new, dedicated dataset for long video training, each consisting of 15,292 videos. We use the original long videos from the Shot2Story dataset~\citep{han2023shot2story20k}. Each video includes different questions and answers: one for generating captions and another for answering questions, enabling diverse applications in video understanding. Figure~\ref{fig:longvideo-data} illustrates the process for generating instruction-following datasets from long videos. Initially, the long video is segmented into shorter clips, each approximately 10 seconds in duration. These clips are then independently annotated with descriptive captions utilizing the VILA-1.5 model. Subsequently, an LLM is employed to generate question-and-answer pairs derived from the captions of these clips. The generated questions encompass summarization and other queries relevant to the comprehensive understanding of long video content. 
+
+As in Figure~\ref{fig:longvila-sft-data}, the left chart categorizes videos into several domains, including Travel \& Events, Sports, Education, Pets \& Animals, People \& Blogs, News \& Politics, Music, Science \& Technology, Comedy, Entertainment, Film, and Gaming, ensuring a wide-ranging representation of video content. The right chart breaks down the categories of questions into Spatial, Attribute, Action, Object, OCR, Synopsis, and Temporal, reflecting the variety of inquiries and cognitive tasks that the dataset can address. This dataset provides a rich resource for advancing the understanding and processing of long video formats in supervised fine-tuning.
+
+\qinghao{Once we acquired the long video dataset, applying it for supervised fine-tuning introduced new challenges, primarily due to the substantial number of frames in each sample—often ranging in the hundreds or even thousands. For instance, a single sequence from 1400 video frames can encompass around 274k tokens. Existing data-parallel training systems struggle to handle such extensive contexts. We developed the MM-SP system (Section \ref{sec_system}) to efficiently train long-context VLMs.}
+
+
+\section{Multi-Modal Sequence Parallelism}
+
+\label{sec_system}
+
+Training long-context Vision-Language Models (VLMs) results in substantial memory demands. The most widely used open-source solution, fully sharded data parallelism, does not distribute the activations generated by a single sequence, making it unsuitable for our needs. Consequently, we developed a custom system based on sequence parallelism~\citep{li2021sequence, li2023lightseq, liu2023ring, jacobs2023deepspeed}, a technique commonly employed in existing foundation model systems to optimize text-only LLM training. However, we discovered that existing systems are neither efficient nor scalable enough to handle our long-context VLM workloads.
+
+\begin{table}[h]
+\centering
+\caption{\dacheng{The forward and backward attention kernel wall-clock time with or without the overlapping design (Unit: $\mu$s). The communication overlap design in Ring-style SP \textbf{slows down} the attention kernel by occupying streaming multiprocessor (SM) resources.}}
+\small
+\resizebox{0.9\columnwidth}{!}{
+\color{DLTODO}{
+\begin{tabular}{llllll}
+\toprule
+Seq. length  & 4K &     8K & 16 K & 24K & 32K\\
+\midrule
+forw. w/o & 29.5 & 49.3& 122.1 & 239.2 & 402.9 \\
+forw. w/  & 35.0 (+18.6\%) & 54.6 (+10.7\%) & 131.2 (+7.5\%) & 250.9 (+4.8\%) & 420.1 (+4.2\%) \\
+backw. w/o & 77.7 & 123.3 & 362.9 & 730.0 & 1218.9 \\
+backw. w/ & 82.2 (+5.8\%) & 129.8 (+5.3\%)& 367.0 (+1.1\%) & 743.2 (+1.8\%)& 1225.3 (+0.5\%)\\
+\bottomrule
+\end{tabular}}}
+\label{tab:ring_style_computation}
+\end{table}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/system_overview_11.pdf}
+\caption{\qinghao{Sharding strategy and communication pattern of MM-SP. For sharding strategy, Ring SP is designed for text-only modalities, without optimization for the workload of an image encoder. Our MM-SP implements a novel sharding strategy that balances the computational load between the image encoder and the language modeling stages. 
+For communication pattern, Ring SP~\citep{liu2023ring, li2023lightseq} (top) relies on P2P communication for both intra-node and inter-node settings, resulting in underutilization of intra-node bandwidth.  MM-SP  (bottom) adopts 2D-Attention \citep{USP, LoongTrain} mechanism which utilizes intra-node All-to-All (All2All) and inter-node Point-to-Point (P2P) communication to transfer keys and values (KV), enhancing the efficiency of intra-node NVLink utilization. The bandwidth is for H100. }}
+    \label{fig:system_overview}
+\end{figure}
+
+\subsection{Limitations of Existing Systems}
+\label{sec:system_limitation}
+
+In this section, we address the inefficiencies of current sequence-parallel systems when applied to multi-modal LLMs.
+
+\textbf{Modality heterogeneity.} In text-only LLMs, sequences are processed by a single tokenizer into tokens, allowing for straightforward distribution of tokens across multiple GPUs. However, VLMs incorporate an encoder architecture where non-text data is initially represented by a placeholder token (\eg $<$img$>$) and subsequently encoded into multiple real tokens during training. For instance, a single video frame typically requires around 256 tokens~\citep{lin2023vila}. Due to the differing processing requirements of visual and text modalities, a simplistic implementation that treats placeholder tokens the same as text tokens leads to an imbalance in GPU workloads (Figure~\ref{fig:system_overview}).
+
+\textbf{Networking heterogeneity.}
+Our multi-modality comprises extremely long videos (Figure~\ref{fig:training-pipeline}), which requires employing sequence parallelism in a \textit{multi-node} setting. In a multi-node setting, inter-node and intra-node network bandwidth differs significantly. For example, the NVIDIA DGX H100 utilizes NVLink at 900 GB/s for intra-node GPU communication and InfiniBand at 50 GB/s for inter-node GPU communication (single path), resulting in an 18$\times$ difference in bandwidth. Previous work, Ring-Style sequence parallelism~\citep{li2021sequence, li2023lightseq, liu2023ring, ring-flash-attention} ignores the heterogeneous networking feature on GPUs and utilizes P2P communication in both inter-node and intra-node settings. This design induces excessive communication costs where they usually attempt to overlap them into computation. However, we found that this design cannot always hide the overhead, and even slows down the computation kernel (Table~\ref{tab:ring_style_computation}). 
+
+
+\textbf{Limited maximal sequence length.}
+DeepSpeed-Ulysses~\citep{jacobs2023deepspeed} presents a potential solution to the communication challenges in ring-style sequence parallelism by employing All-to-All communication primitives, which reduce the overall communication volume. However, this approach has its limitations. The design relies on parallelizing along the attention head dimension rather than the sequence dimension during attention computation. As a result, DeepSpeed-Ulysses cannot scale effectively beyond the number of attention heads. For instance, the Llama-3 8B model uses Grouped Query Attention (GQA) with 8 Key-Value heads, which restricts the maximum sequence parallelism degree to 8. Even when using replication for Key-Value heads, which introduces additional communication overhead~\citep{li2023lightseq}, the highest achievable sequence parallelism degree is still limited to 32 (the number of Query heads). This constraint is insufficient for handling extremely long sequences, such as full-length movies.
+\subsection{Multi-Modal Sequence Parallelism Training Mode}
+\label{sec:method_training}
+After identifying the limitations in existing systems, we conclude that an ideal multi-modal sequence parallelism approach should prioritize efficiency and scalability by addressing both modality and network heterogeneity, and should also be capable of scaling beyond the number of attention heads. 
+\qinghao{To achieve this, we adopt 2D-attention  \citep{USP, LoongTrain} mechanism for sequence parallelism. For instance, as illustrated on the left in Figure \ref{fig:system_overview}, to enable an 8-degree sequence parallelism across 2 nodes, we construct a 4$\times$2 communication mesh using 2D-SP. In this setup, the A2A process group, with a size of 4, distributes the QKV tensors according to the head dimension and re-partitions them along the sequence dimension within each node. Simultaneously, the P2P process group, with a size of 2, transfers the partitioned KV chunks between nodes. 
+ Additionally, to further explain how the 2D-attention mechanism operates, we depict the attention computation schedule using different methods in Figure \ref{fig:system_2d_attn}.}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/SP_Sharding.pdf}
+    \caption{Workflow of Multi-Modal Sequence Parallelism with a Batch Size (bs) of 4 and a Sequence Parallel Size (SP\_Size) of 3. To accomodate% sequence parallelism for
+    multi-modal inputs, we developed a customized sharding strategy that ensures balanced workload distribution and compatibility with \qinghao{SP communucation}.}
+    \label{fig:system_workflow}
+\end{figure}
+
+\textbf{MM-SP workflow.}
+To address the challenge of modality heterogeneity, we propose a two-stage sharding strategy that optimizes the compute workload for both image encoding and language modeling stages. As illustrated in Figure \ref{fig:system_workflow}, the process begins by evenly distributing images (e.g., video frames) across devices within the sequence parallelism (SP) process group, thereby achieving load balancing during the image encoding stage. In the second stage, we aggregate global vision and text inputs for token-level sharding. To support ring-based attention, sequences are extended with arbitrary dummy tokens, ensuring that each sequence can be evenly divided according to the ring-based SP degree. This adjustment maintains consistency with the original approach by modifying label inputs to ignore padded tokens during loss calculation. We implement a balanced sharding strategy that distributes the context to each rank from both ends, ensuring equal computation across ranks. The effectiveness of this strategy will be demonstrated later (Table~\ref{tab:two_stage}). Since this redistribution is performed only once during training, the overhead is minimal. Finally, the balanced local inputs are processed by the LLM backbone, utilizing 2D-Attention to achieve efficient sequence parallelism.
+
+
+\subsection{Multi-Modal Sequence Parallelism Inference Mode}
+\begin{wrapfigure}{r}{0.4\textwidth}
+  \centering
+  \includegraphics[width=0.4\textwidth]{figures/inference_vs_huggingface.pdf}
+  \caption{Inference scheduling comparison between HuggingFace Pipeline and MM-SP, illustrated with 4 GPUs. MM-SP utilizes all GPUs concurrently.
+  }
+\label{fig:inference_vs_hf}
+\end{wrapfigure}
+
+The model we developed through sequence parallelism training is capable of handling long-context multi-modal downstream tasks. However, the most commonly used inference system, built on HuggingFace Transformers, typically operates on a single GPU. This lack of distributed implementation limits the maximum sequence length that can be processed during inference. The most straightforward solution within HuggingFace Transformers is to use its pipeline parallelism inference feature, which shards a single model across multiple devices on a layer-by-layer basis~\citep{huang2019gpipe, narayanan2019pipedream}. However, this approach is inefficient, as it only activates one GPU at a time. Additionally, it struggles to support long sequence because the first device must store large input embeddings and images, creating a memory bottleneck.
+
+To address these limitations, we implemented sequence parallelism for distributed inference in VLMs. Unlike the training mode, the inference system additionally manages tensors, such as input tokens and position encodings, that progressively change during the decoding phase~\citep{yu2022orca}. It detects signals from the machine with the last token to terminate the distributed process appropriately. Compared to HuggingFace's pipeline parallelism strategy, our inference mode is more efficient, as all devices participate in computation simultaneously, accelerating the process by a factor proportional to the number of machines (Figure~\ref{fig:inference_vs_hf}). Furthermore, it is scalable, with memory evenly distributed across devices, enabling longer sequences with additional machines.
+
+
+
+\section{Evaluation}
+
+
+We evaluate our full-stack solution from both system and modeling perspectives. First, we present our training and inference results to demonstrate the efficiency and scalability of our system, which enables long-context training and inference. We then assess the performance of our long-context model on captioning and instruction-following tasks.
+
+\subsection{Training and inference system}
+
+Our training and inference systems can be integrated with HuggingFace Transformers through straightforward monkey patching, in line with the popular open-source approach outlined in~\citep{zheng2023judging}. In this section, we present a quantitative evaluation of the training system's throughput, the inference system's latency, and the maximum supported sequence length.
+\begin{figure}[t]
+\begin{subfigure}[t]{0.48\textwidth}
+  \centering
+    {\includegraphics[width=1.0\textwidth]{figures/train_throughput2.pdf}}
+\end{subfigure}
+\begin{subfigure}[t]{0.48\textwidth}
+{\includegraphics[width=1.0\textwidth]{figures/train_scale2.pdf}}
+\end{subfigure}
+\caption{Performance comparison of training systems on 32 H100 GPUs. MM-SP is as scalable as ZigZag-RingAttn, and as efficient as Ulysses.}
+\label{fig:train_performance}
+\end{figure}
+\begin{figure}[t]
+\begin{subfigure}[t]{0.48\textwidth}
+  \centering
+{\includegraphics[width=1.0\textwidth]{figures/inference_throughput2.pdf}}
+\end{subfigure}
+\begin{subfigure}[t]{0.48\textwidth}
+{\includegraphics[width=1.0\textwidth]{figures/inference_scale2.pdf}}
+\end{subfigure}
+\caption{Performance comparison of inference systems on 8 H100 GPUs.}
+\label{fig:inference_performance}
+\end{figure}
+
+\subsubsection{Training system} 
+\textbf{Baselines and hardware setup} 
+For training efficiency, we compare our system with ZigZag ring-style sequence parallelism, which incorporates load balancing and GPU optimization~ (\zigzag for consistency)\citep{li2023lightseq, ring-flash-attention, liu2024world, korthikanti2023reducing}. We use a widely adopted open-source implementation~\citep{ring-flash-attention}. Additionally, we compare our system with the expert-designed and highly optimized Megatron-LM\citep{shoeybi2019megatron, korthikanti2023reducing} system, focusing on their implementation of sequence parallelism, termed ``context parallelism" (CP). We also evaluate a hybrid strategy that combines tensor model parallelism (TP) within a node and CP across nodes, as recommended by the Megatron-LM team for advanced usage.
+
+We conduct most experiments on H100 nodes, each equipped with 8xH100 (80GB) GPUs interconnected via intra-node NVLink and 400 Gbps inter-node InfiniBand. For experiments involving the maximum supported sequence length during training, we extend the setup to 32 A100 nodes, each with 8xA100 (80GB) GPUs, where the conclusions are consistent with those for H100 due to the equivalent total memory. Our evaluations are based on an 8B model with a batch size of 1. Since the Megatron-LM baseline does not natively support VLM training and the visual encoder is typically orders of magnitude smaller than LLMs, we report the main results for the LLM backbone without the visual encoder. An ablation study of the visual encoder is provided in \S~\ref{sec:effect_two_stage}.
+\begin{wraptable}{r}
+{0.5\linewidth}
+\begin{center}
+\caption{
+Iteration time on the ShareGPT4Video dataset~\citep{chen2024sharegpt4video} with and without our two-stage sharding strategy, measured under various settings as detailed in $\S$~\ref{sec:effect_two_stage} (seconds).}
+\resizebox{1.0\linewidth}{!}{
+\begin{tabular}{c|ccc}
+\toprule                                             & 2 GPUs & 4 GPUs  & 8 GPUs  \\ 
+\midrule
+one-stage & 0.78 & 0.89 & 1.20\\
+two-stage (our MM-SP) & 0.77 & 0.86 & 1.12  \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:two_stage}
+\end{center}
+\end{wraptable}
+
+\textbf{Throughput} 
+Figure \ref{fig:train_performance} presents throughput results measured as iteration per second over 32 H100 GPUs. These results were obtained after 10 warmup iterations and averaged over 5 iterations to minimize variance. Our system achieves a speedup of $2.1\times$ to $5.7\times$ compared to \zigzag, and performs on par with DeepSpeed-Ulysses. When compared to the more optimized ring-style sequence parallelism in Megatron-LM CP, our method shows a $3.1\times$ to $4.3\times$ speedup. This highlights that our \qinghao{system design} effectively addresses the issues inherent in ring-style sequence parallelism, as in $\S~\ref{sec:method_training}$. Furthermore, our system achieves a $1.1\times$ to $1.4\times$ speedup compared to Megatron-LM’s hybrid strategy. Note that our system is currently implemented in Triton~\citep{tillet2019triton}, and further porting it to C++ could yield even greater speedup. Additionally, we observed that the Megatron-LM system supports a significantly lower maximum sequence length, which is why its results are not included in the next section. We observe similar conclusions using 8 H100 nodes (Table~\ref{tab:training_system_efficiency_64GPUs}).
+
+We evaluate the maximum sequence length supported by a fixed number of GPUs by progressively increasing the per-GPU sequence length from 1k to 10k until an out-of-memory error occurs. The results are summarized in Figure~\ref{fig:train_performance}. To ensure a fair comparison, activation checkpointing is disabled. Vanilla data parallelism fails to scale for long videos at larger cluster sizes. DeepSpeed-Ulysses partitions based on attention heads, which limits its ability to scale to higher context lengths, as the 8B model has only 32 attention heads. Consequently, our approach supports approximately $8\times$ higher context lengths when scaled to 256 GPUs. Additionally, our system achieves a similar context length scaling as \zigzag, with support for over \textbf{2 million} context length on 256 GPUs.
+
+In summary, our training system combines the best of both worlds—it achieves scalability comparable to \zigzag while maintaining the throughput of DeepSpeed-Ulysses. Additionally, it delivers a 1.3$\times$ speedup and supports 2.5$\times$ longer context lengths compared to the highly optimized Megatron-LM.
+\subsubsection{Inference system} 
+We evaluated our inference system against HuggingFace Pipeline parallelism using a single node with 8 H100 GPUs and the 8B model (Figure \ref{fig:inference_performance}). Our system achieves an $8.2\times$ speedup compared to HuggingFace Pipeline on 8xH100 GPUs. This significant improvement is primarily due to HuggingFace Pipeline inference activating only one GPU at a time, whereas our method leverages all GPUs to compute jointly. Figure~\ref{fig:inference_performance} compares the maximum supported sequence length, where our method supports sequences that are $2.9\times$ longer than those supported by HuggingFace Pipeline. Specifically, during 96K sequence length inference, %the maximum sequence length supported, 
+HuggingFace Pipeline stores 80GB of activations on the first GPU and only 18GB on the remaining GPUs. This imbalanced allocation of activations limits the maximum supported sequence length.
+
+\subsubsection{Effect of two-stage sharding}
+\label{sec:effect_two_stage}
+
+We evaluate the impact of our two-stage sharding strategy using a video captioning dataset~\citep{chen2024sharegpt4video}. We compare our two-stage sharding to a one-stage baseline that only distributes workload based on the number of images. We measure the time per iteration across different numbers of H100 GPUs. For $k$ GPUs, we use $k$ images per video and a batch size of $k$. The results, shown in Table~\ref{tab:two_stage}, indicate a speedup ranging from 1\% to 7\%. This improvement is primarily observed in longer captioning tasks, where the baseline suffers from workload imbalance due to the lack of sharding based on the number of text tokens.
+
+\begin{table}[t]
+\begin{center}
+\caption{{Performance comparison on VideoMME~\citep{video-mme} benchmark.}}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|c|c|cccc|cccc}
+\toprule
+\multirow{2}{*}{Model} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}LLM\\ Size\end{tabular}} & \multirow{2}{*}{Frames} & \multicolumn{4}{c|}{\textit{w/o subtitle}} & \multicolumn{4}{c}{\textit{w subtitle}} \\
+                       &                       &                         & Overall    & Short    & Medium    & Long   & Overall   & Short   & Medium   & Long   \\ \midrule
+Video-LLaVA            & 7B                    & 8                       & 39.9       & 45.3     & 38.0      & 36.2   & 41.6      & 46.1    & 40.7     & 38.1   \\
+SliME                  & 8B                    & 8                       & 45.3       & 53.3     & 55.4      & 39.8   & 47.2      & 55.4    & 44.4     & 41.7   \\
+ShareGPT4Video         & 8B                    & 16                      & 39.9       & 48.3     & 36.3      & 35.0   & 43.6      & 53.6    & 39.3     & 37.9   \\
+VideoChat2             & 7B                    & 16                      & 39.5       & 48.3     & 37.0      & 33.2   & 43.8      & 52.8    & 39.4     & 39.2   \\
+VideoLLaMA2            & 7B                    & 16                      & 47.9       & 56.0     & 45.4      & 42.1   & 50.3      & 59.4    & 47.6     & 43.8   \\
+Chat-Univi-v1.5        & 7B                    & 64                      & 40.6       & 45.7     & 40.3      & 35.8   & 45.9      & 51.2    & 44.6     & 41.8   \\
+Kangaroo               & 8B                    & 64                      & \underline{56.0}       & \underline{66.1}     & 55.3      & 46.7   & {57.6}      & {68.0}    & 55.4     & {49.3}   \\ 
+ShareGemini            & 7B                    & 64                      & 43.2       & 49.1     & 41.3      & 39.1   & 47.9      & 49.1    & 47.3     & 43.4   \\
+LongVA                 & 7B                    & 128                     & 52.6       & 61.1     & 50.4      & 46.2   & 54.3      & 61.1    & 53.6     & 47.6   \\
+\midrule
+InternVL-V1.5          & 20B                   & 10                      & 50.7       & 60.2     & 46.4      & 45.6   & 52.4      & 61.7    & 49.1     & 46.6   \\
+VITA                   & 8x7B                  & 20                      & 55.0       & 64.2     & 53.3      & \textbf{47.6}   & 57.6      & 67.9    & 55.3     & 49.6   \\ 
+Video-CCAM             & 14B                   & 96                      & 53.9       & 62.1     & 52.8      & \underline{47.0}   & 56.1      & 63.9    & {55.9}     & 48.3   \\
+\midrule
+\multirow{2}{*}{LongVILA}               & \multirow{2}{*}{7B}                    & 128                     & \textbf{57.5}       & \textbf{69.3}     & \underline{56.1}      & \underline{47.0}   & \underline{60.6}      & \underline{70.4}    & \underline{59.2}     & \underline{52.1}   \\
+               &                     & 256                     &   57.4     &  69.0    &   \textbf{56.7}    &  46.4  &   \textbf{61.8}    &  \textbf{70.8}   &  \textbf{60.6}    & \textbf{54.0}   \\ \bottomrule
+
+\end{tabular}}
+\label{tab:video-mme}
+\end{center}
+\end{table}
+\begin{table}[t]
+\centering
+\begin{minipage}{0.46\textwidth}
+\centering
+\caption{Ablation on Stage 3 (S-3) and Stage 4 (S-4) for LongVILA on VideoMME.}
+\resizebox{1.0\textwidth}{!}{\begin{tabular}{cc|c|c|c|c}
+\toprule
+ S-3  & S-4  & Average & Short  & Medium & Long           \\ \midrule
+ \xmark & \cmark   &  28.5\% & 29.2\%  & 28.8\% & 27.4\%           \\ 
+ \cmark & \xmark    & 44.9\%  & 55.1\%  & 43.0\%  & 36.5\%           \\ 
+ \cmark & \cmark    & 49.2\% & 60.2\%  & 48.2\% & 38.8\%           \\ \bottomrule 
+\end{tabular}
+}
+\label{tab:ablation-trainingstage}
+\end{minipage}
+\hfill
+\begin{minipage}{0.52\textwidth}
+\centering
+\caption{{Evaluation of LongVILA-Caption performance across different frame counts.}}
+\resizebox{\textwidth}{!}{\begin{tabular}{c|cccc}
+\toprule                                                                Frames  & Correctness  & Detailed  & Contextual  & Average \\ \midrule
+8  & 1.87 & 1.85  & 2.27  & 2.00 \\ 
+128  & 2.36  & 2.44  & 2.79 & 2.53   \\
+256  & 3.23  & 3.11  & 3.43  & 3.26   \\ \bottomrule
+\end{tabular}}
+\label{tab:longvila-caption}
+\end{minipage}
+\end{table}
+
+\subsection{General Video Understanding}
+
+Table~\ref{tab:video-mme} presents the performance of LongVILA, comparing to state-of-the-art models~\citep{video-llava, slime, chen2024sharegpt4video, videochat, videollama2, chat-univi, longva, sharegemini, intervl, vita, video-ccam, kangaroo} on the VideoMME benchmark, comparing their effectiveness across short, medium, and long video lengths, as well as overall performance. LongVILA, utilizing 128 frames, achieves an overall score of 57.5 / 60.6 without / with subtitle, which are competitive results. We also do the ablation on the effects of Stage 3 and Stage 4 in Table~\ref{tab:ablation-trainingstage}, using Llama3 based VILA models.
+
+\subsection{{Needle-in-a-Haystack}}
+{In Figure~\ref{fig:needle-in-a-haystack}, we present the results of the "Needle in a Haystack" experiment for long videos. Following the methodology established in the existing literature~\citep{longva}, we prepared a long video and sampled a fixed number of frames. We inserted specifically designed images at various depths and tasked the model with answering corresponding questions. The 32-frame baseline model (left) was unable to accurately retrieve the correct images beyond 32 frames. In contrast, the LongVILA model (right) demonstrated enhanced performance across a range of frame counts and depths.}
+
+\subsection{{LongVILA-Caption}}
+{We have developed a long video captioning benchmark, LongVILA-Caption, consisting of 100 long videos, with captions generated as detailed in Section~\ref{sec:method-stage4}, and verified through human examination. In line with the methodology of VideoChatGPT \citep{Maaz2023VideoChatGPT}, we evaluate the predictions of each model based on their correctness, detailed orientation, and contextual understanding. For instance, we assess correctness by employing GPT-4 to predict scores using a specific prompt. Additionally, we present two examples in Figures~\ref{fig:caption-demo-1} and \ref{fig:caption-demo-2}, featuring long videos in sports and technology. These examples demonstrate that LongVILA, with its capability to process more frames, offers a more comprehensive understanding of videos compared to its short-frame counterpart.}
+
+{The Table~\ref{tab:longvila-caption} presents the performance metrics for the LongVILA models being trained and evaluated on varying numbers of frames: 8, 128, and 256.  As the number of frames increases, the model's performance improves significantly. Specifically, the average scores rise from 2.00 to 3.26, highlighting the model's enhanced capability in generating accurate and rich captions with more frames.}
+
+
+
+\section{Conclusion}
+
+
+We introduce LongVILA, a comprehensive full-stack solution for long-context visual language models, \qinghao{encompassing model training pipeline and distributed system. Based on our curated long video datasets and five-stage training pipeline, our LongVILA model extends the feasible frame count from 8 to 2048, precisely capturing fine-grained information from 2-hour needle-in-a-haystack videos and delivering promising results in both video QA and captioning tasks. Our system efficiently scales context length up to 2 million tokens, achieving speedups of 2.1$\times$ to 5.7$\times$ compared to ring sequence parallelism and 1.1$\times$ to 1.4$\times$ compared to a hybrid Megatron context and tensor parallelism.}
+
+
+
+
+
+

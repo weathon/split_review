@@ -1,0 +1,704 @@
+\title{Optimizing Adaptive Attacks against Content Watermarks for Language Models}
+
+\begin{abstract}
+Large Language Models (LLMs) can be \emph{misused} to spread online spam and misinformation. 
+Content watermarking deters misuse by hiding a message in model-generated outputs, enabling their detection using a secret watermarking key. 
+Robustness is a core security property, stating that evading detection requires (significant) degradation of the content's quality.  
+Many LLM watermarking methods have been proposed, but robustness is tested only against \emph{non-adaptive} attackers who lack knowledge of the watermarking method and can find only suboptimal attacks.
+We formulate the robustness of LLM watermarking as an objective function and propose preference-based optimization to tune \emph{adaptive} attacks against the specific watermarking method.  
+Our evaluation shows that 
+(i) adaptive attacks substantially outperform non-adaptive baselines.
+(ii) Even in a non-adaptive setting, adaptive attacks optimized against a few known watermarks remain highly effective when tested against other unseen watermarks and 
+(iii) optimization-based attacks are practical and require less than seven GPU hours. 
+Our findings underscore the need to test robustness against adaptive attackers.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Few providers of Large Language Models (LLMs) empower millions of users to generate human-quality text at scale, raising concerns about dual use~\citep{barrett2023identifying}.
+Untrustworthy users can \emph{misuse} the provided LLMs to generate harmful content, such as online spam~\citep{weidinger2021ethical}, misinformation~\citep{chen2024combatingmisinformation}, or to facilitate social engineering attacks~\citep{shoaib2023deepfakes}.
+The ability to detect model-generated text can control these  risks~\citep{grinbaum2022ethical}.
+
+Content watermarking enables the detection of model-generated outputs by embedding hidden marks that can be extracted with a secret watermarking key.
+Some LLM providers, such as DeepMind~\citep{deepmind_synthid} and Meta~\cite{sanroman2024proactive}, have already deployed watermarking to promote the ethical use of their models.
+A threat to these providers are users who perturb model-generated text to evade watermark detection while preserving text quality. 
+Such undetectable, model-generated text could further erode trust in the authenticity of digital media~\cite{aiexecutiveorder}.  
+
+A core security property of watermarking is \emph{robustness}, which requires that evading detection is only possible by significantly degrading text quality.
+Testing robustness requires identifying the most effective attack against a specific watermarking method.
+However, existing content watermarks for LLMs~\citep{kirchenbauer2023watermark, aaronson2023watermarking, christ2023undetectable, kuditipudi2023robust} test robustness only against \emph{non-adaptive} attackers, who lack knowledge of the watermarking algorithms.  
+This reliance on obscurity makes watermarking vulnerable to \emph{adaptive} attacks~\citep{lukas2024leveraging, Nicks2024LanguageMD} when information about the watermarking algorithms is leaked. 
+
+We propose methods to adaptively optimize an attack's parameters against a set of \emph{known} LLM content watermarking algorithms. 
+Tuning attacks is challenging due to (i) the complexity of optimizing over the discrete textual domain and (ii) the limited computational resources available to attackers.
+Our work shows that attackers can adaptively tune publicly available LLMs such as $\texttt{Llama2-7b}$~\citep{touvron2023llama} to evade watermark detection from $\texttt{Llama3.1-70b}$~\citep{dubey2024llama}. 
+Our adaptively tuned attacks outperform any other attack, and they transfer to unseen watermarks in a non-adaptive setting. 
+Our attacker spends less than 7 GPU hours and achieves over $96\%$ evasion rate against any of the four surveyed watermarks with negligible impact on text quality. 
+\subsection{Contributions}
+We make the following contributions.
+\begin{itemize}
+    \item We propose methods to curate preference-based datasets using LLMs, enabling us to adaptively fine-tune watermark evasion attacks against four state-of-the-art language watermarks.
+    \item We demonstrate that adaptively fine-tuned paraphrasing models between 0.5-7 billion parameters evade detection from all surveyed watermarks at a negligible impact on text quality. 
+    Our attacks outperform all surveyed attacks, including those using models with two orders of magnitude more parameters.
+    Optimization requires less than seven GPU hours.
+    \item We test our optimized attacks in the non-adaptive setting against unseen watermarks and demonstrate that they remain more effective than any other surveyed attack.
+    Our results underscore the necessity of including optimized, adaptive attacks when testing robustness. 
+\end{itemize}
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+\textbf{Large Language Models (LLMs)} estimate the probability distribution of the next token over a vocabulary $\mathcal{V}$ given a sequence of tokens. 
+Autoregressive LLMs predict each subsequent token based on all preceding tokens. 
+Formally, for a sequence of tokens $x_1, \ldots, x_n$, an LLM models:
+
+\[P(x_n | x_1, \ldots, x_{n-1}) = \text{softmax}(f_\theta(x_1, \ldots, x_{n-1}))_n\]
+
+where $f_\theta$ is a neural network with parameters $\theta$.
+Optimizing LLMs to maximize a reward function is challenging because the text is discrete, and the autoregressive generation process prevents direct backpropagation through the token sampling steps~\cite {schulman2017proximal}.
+
+\textbf{LLM Content Watermarking} hides a message in model-generated content, such as text, that can later be extracted with access to the content using a secret watermarking key. 
+A \emph{watermarking method} is a set of algorithms (\textsc{KeyGen}, \textsc{Embed}, \textsc{Verify}) formalized as follows~\citep{lukas2024leveraging}.
+\begin{itemize}
+    \item $\tau \gets \Call{KeyGen}{\theta,\gamma}$: A randomized function to generate a watermarking key $\tau$ given secret (i) LLM parameters $\theta$ and (ii) random seeds $\gamma \in \mathbb{R}$. 
+    \item $\theta^* \gets \Call{Embed}{\theta, \tau, m}$: Given a LLM $\theta$, a watermarking key $\tau$ and a message $m$, this function returns parameters $\theta^*$ of a \emph{watermarked} LLM that generates watermarked text. 
+    \item $\eta \gets \Call{Verify}{x, \tau, m}$: Detection requires (i) extracting a message $m'$ from text $x$ using $\tau$ and (ii) returning the $p$-value $\eta$ to reject the null hypothesis that $m$ and $m'$ match by chance. 
+\end{itemize}
+A text watermark is a hidden signal in text that can be mapped to a message $m\in \mathcal{M}$ using a secret watermarking key $\tau$. 
+The key $\tau$ refers to secret random bits of information used to detect a watermark.
+A watermark is \emph{retained} if the verification procedure returns $\eta< \rho$, for $\rho \in \mathbb{R}^+$. 
+Let $Q: \mathcal{V}^*\times \mathcal{V}^* \rightarrow \mathbb{R}$ be a function to measure the quality between pairs of texts.
+For model-generated text $x$, the watermarking method is \emph{robust} if an attacker can only generate a paraphrased text $x'$ with text quality greater than $\delta\in \mathbb{R}$ that does not retain the watermark with probability at most $\epsilon\in \mathbb{R}^+$.
+\begin{align}
+    \text{Pr}\left[ \textsc{Verify}(x', \tau, m) \geq \rho ~\land~Q(x,x') > \delta  \right] < \epsilon
+\end{align}
+
+\textbf{Evasion Attacks.}
+Watermark evasion attacks are classified by the attacker’s access to the provider's (i) LLM, (ii) detection algorithm \textsc{Verify} that uses the provider's secret watermarking key, and (iii) knowledge of the watermarking algorithms. 
+A \emph{black-box} attacker can only interact with the provider's LLM through an API, whereas a \emph{white-box} attacker knows the parameters of the provider's LLM.
+\emph{Online} attackers can query the provider’s \textsc{Verify} functionality, as opposed to \emph{offline} attackers who have no such access. 
+\emph{Adaptive} attackers know the algorithmic descriptions (\textsc{KeyGen}, \textsc{Embed}, \textsc{Verify}) of the provider's watermarking method, while \emph{non-adaptive} attackers lack this knowledge.
+Our work focuses on black-box, offline attacks in adaptive and non-adaptive settings. 
+
+\textbf{Surveyed Watermarking Methods.}
+Following \cite{piet2023mark}, we evaluate the robustness of four state-of-the-art watermarking methods. 
+The \texttt{Exp}~\citep{aaronson2023watermarking} method marks text by selecting tokens that maximize a score combining the conditional probability $P(x_n \mid x_0 \dots x_{n-1})$ and a pseudorandom value derived from a sliding window of prior tokens.
+The \texttt{Dist-Shift}~\citep{kirchenbauer2023watermark} method favours tokens from a green list, which is generated based on pseudorandom values and biases their logits to increase their selection probability.
+The \texttt{Binary}~\citep{christ2023undetectable} approach converts tokens into bit-strings determined by pseudorandom values and the language model's bit distribution, subsequently translating the bit-string back into a token sequence. 
+Lastly, the \texttt{Inverse}~\citep{kuditipudi2023robust} scheme uses inverse transform sampling by computing a cumulative distribution function ordered pseudorandomly according to a secret key and using a fixed pseudorandom value to sample from this distribution.
+We refer to \cite{piet2023mark} for more details. 
+
+
+
+\section{Threat Model}
+
+We consider a provider capable of training LLMs and deploying them to many users via a black-box API, such as Google with Gemini or OpenAI with ChatGPT. 
+The threat to the provider are untrustworthy users who misuse the provided LLM and generate harmful content without detection.
+
+\textbf{Provider's Capabilities and Goals} \textit{(Deployment)} The provider fully controls the LLM and the text generation process, including the ability to embed a watermark into model-generated text. 
+\textit{(Watermark Verification)} The provider must be able to verify their content watermark in each model-generated text. 
+Their goal is to have an (i) quality-preserving and (ii) robust watermark that enables detection of model-generated text at a given, low False Positive Rate (FPR) $\rho\in \mathbb{R}^+$. 
+
+\textbf{Attacker's Capabilities.} 
+\textit{(Access Restrictions)} We consider a (i) black-box attacker who can only query the provider's model via an API but is (ii) offline, meaning that they cannot access the provider's \textsc{Verify} function.
+Our focus is on (iii) adaptive attackers, who know the provider's watermark method (\textsc{KeyGen}, \textsc{Embed}, \textsc{Verify}) but do not know the secret inputs used for watermarking, such as the provider's LLM or random seeds.
+We also evaluate how adaptive attacks transfer to the non-adaptive setting against unseen watermarks. 
+\textit{(Surrogate Models)} A surrogate model is a model trained for the same task as the provider's model. 
+For example, while ChatGPT3.5's weights are not public, the attacker could access the parameters of smaller, publicly released models such as those from the \texttt{Llama2}~\citep{touvron2023llama} model family from open model sharing platforms. 
+Our attacker can access such open-weight \emph{surrogate} models and use them for \emph{paraphrasing} text.
+We assume the surrogate model's text quality is inferior to the provided model; otherwise, there would be no need to use the watermarked model. 
+
+\textbf{Attacker's Goals.} The attacker wants to use the provided, watermarked LLM to generate text (i) without a watermark that (ii) has a high quality. 
+We measure quality using many metrics, including a quality function $Q: \mathcal{V}^* \times \mathcal{V}^* \rightarrow \mathbb{R}$ between pairs of text when the attacker attempts to evade detection. 
+We require that the provider correctly verifies their watermark with a given p-value threshold $\eta<\rho$ for $\rho \in \{0.01,0.025,0.05,0.075,0.1\}$.
+
+
+
+\section{Conceptual Approach}
+
+We adaptively fine-tune an open-weight paraphraser $\theta_P$ against given watermarking methods. 
+The attacker lacks knowledge of the provider's watermarking key $\tau \leftarrow \textsc{KeyGen}(\theta, \gamma)$, which depends on the (unknown) parameters $\theta$ of the provider's LLM and random seed $\gamma$. 
+Our attacker overcomes this uncertainty by choosing an open-weight surrogate model $\theta_S$ to generate so-called \emph{surrogate} watermarking keys $\tau'$ and optimizes the expected evasion rate over many random seeds $\gamma\sim \mathbb{R}$.
+
+\subsection{Robustness as an Objective Function} Let $P_\theta: \mathcal{V}^* \rightarrow \mathcal{V}^*$ denote a paraphrasing function, $H_\theta: \mathcal{V}^* \rightarrow \mathcal{V}^*$ is a function to produce model-generated text given a query $q\in \mathcal{V}^*$ and $Q: \mathcal{V}^* \times \mathcal{V}^* \rightarrow \mathbb{R}$ measures the similarity between pairs of text. 
+We formulate robustness using the following objective function that we can optimize.
+
+\begin{align}
+    \max_{\theta_P} \; 
+    \mathbb{E}_{\substack{
+        \gamma \sim \mathcal{R} \\ 
+        m' \sim \mathcal{M} \\[0.3em] 
+        q \sim \mathcal{T}
+    }} \; 
+    \mathbb{E}_{\substack{
+        \tau' \gets \textsc{KeyGen}(\theta_S, \gamma) \\
+        \theta_S^* \gets \textsc{Embed}(\theta_S, \tau', m') \\
+        r \gets H_{\theta_S^*}(q)
+    }} \; 
+    \left[ 
+        \textsc{Verify}\left(P_{\theta_P}(r), \tau', m'\right) + Q\left(P_{\theta_P}(r), r\right) 
+    \right]
+    \label{eq:attack_objective}
+\end{align}
+
+\Cref{eq:attack_objective} finds optimal parameters for the paraphraser $\theta_P$ by sampling uniformly at random over (i) random seeds $\gamma \sim \mathbb{R}$, (ii) messages $m' \sim \mathcal{M}$ and (iii) queries $q\sim \mathcal{T}$.
+The second expectation is taken over a surrogate watermarking key, using the surrogate model's parameters $\theta_S$ and the previously sampled random seed $\gamma$ as input. 
+The surrogate model, key and message are used to embed a watermark into the surrogate model $\theta_S^*$ to generate a watermarked sample $r$. 
+The optimization aims to find optimal parameters $\theta_P^*$, so the paraphraser has a high probability of generating text $r'\gets P_{\theta_P}(r)$ that evades watermark detection and preserves text quality compared to $r$. 
+
+Optimization presents multiple challenges.
+The attacker optimizes over different random seeds $\gamma$ and a surrogate model $\theta_S$ instead of the provider's model $\theta$, which may affect the attack's effectiveness when testing against the provider's watermark. 
+The discrete nature of text and the inability to backpropagate through the text generation process make maximising the reward challenging.
+Furthermore, the reward function depends on $\textsc{Verify}$, which may not be differentiable. 
+Deep reinforcement learning (RL) methods~\citep{schulman2017proximal, rafailov2024direct} do not require differentiable reward functions. 
+However, RL is known to be compute-intensive and unstable, making it unclear whether optimization can achieve a high reward using limited computational resources. 
+
+\subsection{Preference-based Optimization}
+We use reinforcement learning (RL) methods such as Direct Preference Optimization (DPO)~\citep{rafailov2024direct} to optimize \Cref{eq:attack_objective}.
+To optimize, DPO requires collecting a dataset of \emph{positive} and \emph{negative} examples and fine-tunes the paraphraser to increase the probability of generating positive examples while reducing the probability of generating negative examples. 
+A \emph{negative} sample retains the watermark and represents a failed attempt at watermark evasion. 
+In contrast, positive samples do not retain a watermark and have a high text quality $Q(r,r_p')>\delta$ for an attacker-chosen $\delta \in \mathbb{R}^+$. 
+To bootstrap optimization, we require the ability to curate positive and negative examples using non-optimized models. 
+We curate triplets $(r,r_n',r_p')$ containing a watermarked sample $r$ and two paraphrased versions $r_n',r_p'$ representing the negative and positive examples, respectively. 
+\Cref{alg:preference-dataset-collection} implements the dataset curation algorithm.
+
+\begin{figure}[ht]
+    \centering
+    \begin{algorithm}[H]
+    \caption{Preference Dataset Curation}
+    \label{alg:preference-dataset-collection}
+    \begin{algorithmic}[1]
+    \Require Surrogate $\theta_S$, Paraphraser $\theta_P$, Queries $\mathcal{T}$, Messages $\mathcal{M}$, Paraphrase Repetition Rate $c$, False Positive Rate Threshold $\rho$, Quality Threshold $\delta$
+    \State $\mathcal{D} \gets \{\}$\Comment{The preference dataset}
+    \For{$(\textsc{KeyGen}, \textsc{Embed}, \textsc{Verify}) \in \mathcal{W}$} \Comment{Optimize over known watermarking methods}
+        \For{each query $q \in \mathcal{T}$}
+            \State $m \sim \mathcal{M}$
+            \State $\tau' \gets \Call{KeyGen}{\theta_S, \textsc{Rnd}()}$ \Comment{Generate a surrogate watermarking key}
+            \State $\theta^*_S \gets \Call{Embed}{\theta_S, \tau', m}$  \Comment{Watermark the surrogate model}
+            \State $r \gets S_{\theta_S^*}(q)$      \Comment{Generate watermarked text}
+            \If {$\textsc{Verify}(r, \tau', m) < \rho$}
+                \State $R^0, R^1 \gets \{\}, \{\}$
+                \For{i $\in$ [c]}
+                    \State $r' \gets P_{\theta_P}(r)$ \Comment{Generate a paraphrased sample}
+                    \State $b \gets 
+                    \begin{cases}
+                      1 & \text{if } \Call{Verify}{r', \tau', m} > \rho \land Q(r,r') \geq \delta, \\
+                      0 & \text{otherwise}.
+                    \end{cases}$ 
+                    \State $R^b \gets R^b \cup \{r'\}$ 
+                \EndFor
+                \For{$j \in [|R^1|]$}
+                    \State $r_n' \gets \begin{cases}        
+                              R^0_j & \text{if } |R^0| \geq j, \\
+                              r & \text{otherwise}.
+                            \end{cases}$\Comment{Choose a negative sample}
+                    \State $\mathcal{D} \gets \mathcal{D} \cup \{(r, r_n', R^1_j)\}$
+                \EndFor
+            \EndIf
+        \EndFor
+    \EndFor
+    \State \Return $D$
+    \end{algorithmic}
+    \end{algorithm}
+    \caption{An algorithm to curate a preference dataset to optimize \Cref{eq:attack_objective} for multiple known watermarking methods $\mathcal{W}$. 
+    It consists of elements $(r,r_n',r_p')$ representing watermarked text $r$, a negative paraphrased sample $r_n'$ and a positive one $r_p'$ that does not retain the watermark.  }
+    \label{fig:algorithms}
+\end{figure}
+
+\Cref{alg:preference-dataset-collection} randomly samples from a set of known watermarking methods $\mathcal{W}$ (line 2) and from the set of task-specific queries $\mathcal{T}$ (line 3).
+It samples a message $m$ (line 4) and generates a surrogate watermarking key $\tau'$ to embed a watermark into the surrogate generator (lines 4-5). 
+We generate text $r$ using the watermarked model $\theta^*_S$ (line 7) and verify whether it retains the watermark (line 8).
+The paraphrase model $\theta_P$ generates $c$ paraphrased versions of $r$ that we partition into positive and negative samples (lines 10-11).
+A sample $r_p'$ is positive ($b=1$) if it does not retain the watermark and has high text quality $\geq \delta$ and negative $r_n'$ ($b=0$) otherwise. 
+For each positive sample, we select one corresponding negative sample and add the watermarked text and the negative and positive paraphrases to the preference dataset $\mathcal{D}$ (lines 15-17). 
+
+\begin{table}[ht]
+    \centering
+    \small
+    \begin{tabularx}{\linewidth}{lX} % l for Attack name, X for Description
+        \toprule
+        Attack Name & Description \\
+        \cmidrule(lr){1-2}
+        DIPPER~\citep{krishna2023paraphrasing} & Train an 11b Sequence-to-Sequence model for paraphrasing.  \\
+        Translate~\citep{piet2023mark} & Translate to another language and back (e.g., French, Russian). \\ 
+        Swap~\citep{piet2023mark} & Randomly remove, add or swap words. \\
+        Synonym~\citep{piet2023mark} & Replace words with a synonym using WordNet~\citep{miller1995wordnet}. \\
+        HELM~\citep{bommasani2023holistic} & Randomly add typos, lowercase or contractions \\ 
+        Llama, Qwen, GPT3.5  & Paraphrase text using a publicly accessible LLM.  \\ 
+        \midrule
+        Ours-\texttt{Llama2-7b}-\texttt{Exp} & Paraphrase with a \texttt{Llama2-7b} model tuned adaptively against \texttt{Exp}.\\
+        \bottomrule
+    \end{tabularx}
+    \caption{\label{tab:evasion-attack}(Top) The non-adaptive baseline attacks we consider in our study against (Bottom) our adaptively fine-tuned attacks.
+}
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We report all runtimes on NVIDIA A100 GPUs accelerated using VLLM~\citep{kwon2023efficient} for inference and DeepSpeed~\citep{deepspeed} for training.
+Our implementation uses PyTorch and the Transformer Reinforcement Learning\footnote{\url{https://huggingface.
+We test robustness using the hyper-parameters suggested by \cite{piet2023mark}.
+All LLMs used in our evaluations have been instruction-tuned.   
+\Cref{tab:evasion-attack} summarizes all other surveyed evasion attacks.
+
+\subsection{Preference Dataset Collection}
+\begin{wrapfigure}{r}{0.5\linewidth} 
+    \centering
+    \includegraphics[width=1.00\linewidth]{Figures/Llama2_needed_paraphrases-P0.1.pdf}
+    \caption{The expected evasion versus repetition rate with \texttt{Llama2-7b} (lines 9-12, \cref{alg:preference-dataset-collection}). Shaded areas denote one standard deviation.}
+    \label{fig:non-adaptive-paraphrasing-repetition}
+\end{wrapfigure}
+For a given watermarked sequence generated by the surrogate model, the attacker generates $c\in \mathbb{N}$ paraphrased versions using the non-optimized paraphraser and calculates the evasion rate using the surrogate watermarking key (\Cref{alg:preference-dataset-collection}, lines 9-12). 
+\Cref{fig:non-adaptive-paraphrasing-repetition} shows the number of repetitions $c$ needed to achieve a given evasion rate across four watermarking methods using \texttt{Llama2-7b} as both the surrogate and paraphrasing model. 
+Our attacker can choose the best-of-N paraphrases because they know the surrogate watermarking key to detect a watermark.
+The attacker cannot choose the best-of-N paraphrases against the provider's watermarked text, as they lack access to the provider's key. 
+
+In \Cref{fig:non-adaptive-paraphrasing-repetition}, we observe that \texttt{Dist-Shift} and \texttt{Exp} are more robust than \texttt{Inverse} and \texttt{Binary}.
+There is an interesting trade-off: Higher robustness leads to a higher computational burden for the attacker.
+For instance, to collect $N=7\,000$ 
+preference samples of $T=512$ tokens each, at $1\,800$ tokens/second, we expect to generate $N$ positive examples in approximately 1.5 GPU hours for \texttt{Dist-Shift}, but only 0.5 GPU hours for \texttt{Inverse}. 
+In practice, when including the overhead of evaluating quality and detecting watermarks, we require less than 5 GPU hours to curate $7\,000$ samples for \texttt{Dist-Shift}.
+At current AWS\footnote{\url{https://aws.amazon. 
+
+\subsection{Ablation Studies}
+
+In our experiments, we ablate over the following settings. 
+\begin{itemize}\itemsep0mm
+    \item \textbf{Adaptivity}: (\emph{Adaptive}) The same watermarking method is used for training and testing. 
+    (\emph{Non-adaptive}) The attack is tested against unseen watermarking methods. 
+    \item \textbf{Target Models}: We evaluate 2 models used by the provider: \texttt{Llama2-13b}, \texttt{Llama3-70b}
+    \item \textbf{Attacker's Models}: Our attacker matches surrogate and paraphrasing models. We consider \texttt{Llama2}~\citep{touvron2023llama} and \texttt{Qwen2.5}~\citep{qwen2.5} from $0.5$b to $7$b parameters.
+    \item \textbf{Watermarking Methods}: \texttt{Exp}~\citep{aaronson2023watermarking}, \texttt{Dist-Shift}~\citep{kirchenbauer2023reliability}, \texttt{Inverse}~\citep{kuditipudi2023robust}, \texttt{Binary}~\citep{christ2023undetectable} 
+    \item \textbf{False Positive Rates (FPR)}: We consider thresholds $\rho \in \{0.01, 0.025,0.05,0.075,0.1\}$ to evaluate the attack's effectiveness when the provider tolerates a higher FPR for detection.
+    \item \textbf{Hyper-Parameters}: We ablate over multiple hyper-parameters that a provider can choose. 
+\end{itemize}
+A watermark has been retained if the null hypothesis that the watermark is not present in the content can be rejected with a given p-value specified by the provider. 
+The \emph{evasion rate} is calculated as the fraction of watermarked text that does not retain the watermark after applying the paraphrasing attack. 
+Due to the lack of a gold-standard metric to assess text quality, we measure quality with multiple metrics: LLM-Judge, LLM-CoT and LLM-Compare from ~\citep{piet2023mark}, Mauve~\citep{pillutla2021mauvemeasuringgapneural} and Perplexity (PPL) with \texttt{Llama3-8B-Instruct}.
+Unless otherwise specified, we use a p-value detection threshold of $\rho=0.01$ and report the LLM-Judge metric for text quality.
+\subsection{Experimental Results}
+\label{sec:experimental_results}
+
+\begin{figure}[H] 
+    \centering
+    \begin{subfigure}{0.48\linewidth} 
+        \centering
+        \includegraphics[height=5.5cm]{Figures/conf_mat_detect.pdf}
+        \label{fig:sub1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\linewidth} 
+        \centering
+        \includegraphics[height=5.5cm]{Figures/conf_mat_attkq.pdf}
+        \label{fig:sub2}
+    \end{subfigure}
+    \caption{The evasion rates (Left) and text quality measured with LLM-Judge (Right). The attacker uses a matching \texttt{Llama2-7b} surrogate and paraphraser model versus the provider's \texttt{Llama2-13b}. We evaluate both the adaptive (diagonals) and the non-adaptive case (values not on the diagonal). For example, we obtain the bottom left value by training against \texttt{Dist-Shift} and testing on \texttt{Inverse}.   }
+    \label{fig:adaptivity-ablation}
+\end{figure}
+
+\textbf{Adaptivity}. \Cref{fig:adaptivity-ablation} shows the evasion rate and text quality of our methods trained in the adaptive and non-adaptive settings when the provider uses \texttt{Llama2-13b} and the attacker uses \texttt{Llama2-7b}. 
+We find that all adaptive attacks have an evasion rate of at least $96.6\%$, while the non-adaptive attacks have an evasion rate of at least $94.3\%$.
+We achieve the highest overall evasion rate when training against the \texttt{Exp} watermark, which achieves an evasion rate of at least $97.0\%$. 
+We train one attack, denoted \texttt{All}, against all four surveyed watermarking methods and test it against each watermark separately.
+Interestingly, \texttt{All} performs slightly worse compared to training only on \texttt{Exp} as it has an evasion rate of at least $96.3\%$ and a lower text paraphrased quality of at least $0.893$ against $0.901$ when training only on \texttt{Exp}.  
+In summary, \Cref{fig:adaptivity-ablation} shows that adaptive attacks trained against one watermark remain highly effective when tested against unseen watermarks in the non-adaptive setting. 
+
+\textbf{Model Sizes.} \Cref{fig:attack-summary-versus-dist-shift-70b} shows the Pareto front against the \texttt{Exp} watermark with a \texttt{Llama3-70b} target model.
+Our attacker uses paraphraser models with at most 7b parameters, which is less than the 11b DIPPER model~\citep{krishna2023paraphrasing} used to test robustness currently.
+We make three observations:
+\begin{enumerate}
+    \item \textbf{Non-adaptive baseline} attacks such as Contraction, Swapping and Synonym replacements are ineffective and have a low evasion rate of less than $20\%$. 
+    \item \textbf{Non-adaptive model-based} paraphrasing attacks such as using vanilla \texttt{Llama2-7b} or \texttt{ChatGPT3.5} models have a substantially higher evasion rate of $61.8\%$ up to $86.1\%$ respectively. 
+    Tuning \texttt{Llama2-7b} using our approach in the non-adaptive setting improves the evasion rate substantially to $90.9\%$ (when trained on \texttt{Binary}) and up to $97.6\%$ (when trained on \texttt{Inverse}). 
+    These non-adaptive, optimized attacks have a paraphrased text quality of 0.853 and 0.845, slightly improving over \texttt{ChatGPT3.5}, rated only 0.837. 
+    \item \textbf{In the adaptive setting}, our fine-tuned \texttt{Qwen2.5-7b} achieves an evasion rate of $97.3\%$ at a slightly higher text quality of $0.846$ compared to \texttt{Llama2-7b-Inverse}.
+\end{enumerate}
+By ablating over \texttt{Qwen2.5} between 0.5b and 7b parameters, we find that attackers can strictly improve paraphrased text quality at similar evasion rates by using more capable paraphrases with more parameters. 
+ 
+Against smaller target models, attackers can achieve higher evasion rates and text quality ratings. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.\linewidth]{Figures/qe_exp_70B.pdf}
+    \caption{
+    The evasion rate versus text quality trade-off of all surveyed attacks when the provider uses a \texttt{Llama3-70b} model and the \texttt{Exp}~\citep{aaronson2023watermarking} watermark.
+    The attacker uses matching surrogate and paraphrase models with parameters ranging between $0.5$b to $7$b from the \texttt{Qwen2.5} and \texttt{Llama2} model families. 
+    A circle and square denote non-adaptive and adaptive attacks, respectively, and our attacks are highlighted in red. 
+    For example, \texttt{Ours-Qwen-3b-Exp} means that we evaluate a \texttt{Qwen2.5} model with $3$b parameters optimized against \texttt{Exp} . }
+    \label{fig:attack-summary-versus-dist-shift-70b}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[
+        width=1.0\linewidth]{Figures/detect_pvalue_good.pdf}
+    \caption{The evasion rates against a watermarked \texttt{Llama2-13b} model. We compare non-adaptive attacks, including ChatGPT3.5, versus our adaptively fine-tuned \texttt{Llama2-7b} paraphraser model. }
+    \label{fig:false-positive-rates}
+\end{figure}
+
+\textbf{False Positive Rates.} \Cref{fig:false-positive-rates} shows the detection rates at different FPR-thresholds $\rho \in \{0.01, 0.025, 0.05, 0.075, 0.1\}$ against the \texttt{Dist-Shift} and \texttt{Exp} watermarking methods. 
+We focus on these two methods as they are more robust than \texttt{Inverse} and \texttt{Binary}. 
+Our results show that across all evaluated FPR thresholds, our adaptive attacks outperform all other surveyed attacks against both watermarking methods. 
+If the provider tolerates a $10\%$ FPR, our adaptive attacks achieve an evasion rate of only $80\%$ and $77\%$ against \texttt{Dist-Shift} and \texttt{Exp}, respectively. 
+
+\textbf{Text Quality}. \Cref{tab:qualitative_analysis} shows (i) a watermarked text sample generated using \texttt{Llama2-13b} with \texttt{Dist-Shift}, (ii) paraphrased text using a non-optimized \texttt{Llama2-7b} model, and (iii) paraphrased text obtained with an adaptively tuned \texttt{Llama2-7b} model using our attack.  
+We observe that all paraphrased texts preserve quality, but our attack has the lowest green-to-red token ratio (i.e., maximizes the evasion rate). 
+
+It shows that text quality is preserved across five text quality metrics when using our attacks. 
+ 
+\Cref{tab:failed_sample_full} shows a rare case when our attack fails at evading watermark detection after paraphrasing. 
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{p{0.96\linewidth}}
+\toprule
+\small \texttt{Llama2-13b-}\texttt{Dist-Shift} (163 green and 36 red)  \\ \midrule
+ \small
+\rbox{C}%
+\gbox{erv}%
+\rbox{antes}%
+\gbox{' "Don}%
+\rbox{ Quixote}%
+\gbox{" is a groundbre}%
+\rbox{aking}%
+\gbox{ masterpie}%
+\rbox{ce}%
+\gbox{ of literature that has enthr}%
+\rbox{alled readers for}%
+\gbox{ over 4}%
+\rbox{0}%
+\gbox{0}%
+\rbox{ years.}%
+\gbox{ The novel tells}%
+\rbox{ the}%
+\gbox{ story of Alonso Quixano, an old man who becomes so consumed by the chivalr}%
+\rbox{ous}%
+\gbox{ tales}%
+\rbox{ of}%
+\gbox{ his day that he ren}%
+\rbox{ames himself}%
+\gbox{ Don Qu}%
+\rbox{ixote}%
+\gbox{ and embarks upon an adventurous}%
+\rbox{ journey}%
+\gbox{ filled}%
+\rbox{ with}%
+\gbox{ humor, satire}%
+\rbox{,}%
+\gbox{ and tim}%
+\rbox{eless}%
+\gbox{ them}%
+\rbox{es}%
+\gbox{ about the}%
+\rbox{ human}%
+\gbox{ condition}%
+\rbox{.}%
+\gbox{$\hookleftarrow$$\hookleftarrow$ The story follows Quixote and}%
+\rbox{ his}%
+\gbox{ trustworthy}%
+\rbox{ side}%
+\gbox{kick}%
+\rbox{ San}%
+\gbox{cho}%
+\rbox{ Panza, a simple and pragmatic s}%
+\gbox{quire}%
+\rbox{ who provides moments of humor and contrast to the lofty ideals of the delusional Qu}%
+\rbox{ix}%
+\gbox{ano/Don Quix}%
+\rbox{ote}%
+\gbox{. Their travels in rural Spain lead them to encounter all sorts of people they mistake for knights, ladies in dist}%
+\rbox{ress}%
+\gbox{, bandits, and giants who are in fact ordinary villagers going about their everyday lives.}
+\\ \midrule
+\small \texttt{Llama2-7b} (125 green and 69 red)
+\\\midrule
+\small
+\gbox{"Don}%
+\rbox{ Quixote}%
+\gbox{" is a groundbre}%
+\rbox{aking}%
+\gbox{ masterpie}%
+\rbox{ce}%
+\gbox{ of literature that has}%
+\rbox{ capt}%
+\gbox{ivated}%
+\rbox{ readers for}%
+\gbox{ over 4}%
+\rbox{0}%
+\gbox{0}%
+\rbox{ years.}%
+\gbox{ The novel tells}%
+\rbox{ the}%
+\gbox{ story of Alonso Quixano, an}%
+\rbox{ elderly}%
+\gbox{ man}%
+\rbox{ whose fix}%
+\gbox{ation on chivalr}%
+\rbox{ous}%
+\gbox{ tales leads}%
+\rbox{ him to}%
+\gbox{ change}%
+\rbox{ his}%
+\gbox{ name to Don}%
+\rbox{ Quixote}%
+\gbox{ and embark on a}%
+\rbox{ thrilling}%
+\gbox{ adventure replete}%
+\rbox{ with}%
+\gbox{ humor}%
+\rbox{,}%
+\gbox{ satire}%
+\rbox{,}%
+\gbox{ and tim}%
+\rbox{eless}%
+\gbox{ them}%
+\rbox{es}%
+\gbox{ concerning}%
+\rbox{ the human condition.}%
+\gbox{$\hookleftarrow$$\hookleftarrow$ The narr}%
+\rbox{ative}%
+\gbox{ follows Don Qu}%
+\rbox{ixote}%
+\gbox{ and}%
+\rbox{ his}%
+\gbox{ loyal squire}%
+\rbox{ San}%
+\gbox{cho}%
+\rbox{ Pan}%
+\gbox{se}%
+\rbox{, a practical and}%
+\gbox{ good}%
+\rbox{-}%
+\gbox{n}%
+\rbox{ature}%
+\gbox{d individual who}%
+\rbox{ provides moments of}%
+\gbox{ lev}%
+\rbox{ity and contrast}%
+\gbox{ to}%
+\rbox{ the lofty ideals of the delusional Qu}%
+\rbox{ix}%
+\gbox{ano/Don Quix}%
+\rbox{ote}%
+\gbox{. Their travel}%
+\rbox{s}%
+\gbox{ across rural}%
+\rbox{ Spain result}%
+\gbox{ in encounters}%
+\rbox{ with}%
+\gbox{ various people}%
+\rbox{ who}%
+\gbox{ they mis}%
+\rbox{ident}%
+\gbox{ify as}%
+\rbox{ knights, dist}%
+\gbox{ressed}%
+\rbox{ ladies,}%
+\gbox{ bandits, and}%
+\rbox{ ordinary}%
+\gbox{ villagers going about their}%
+\rbox{ daily lives.}%
+ \\ \midrule
+ \small \texttt{Ours-Llama2-7b-Dist-Shift} (81 green and 78 red)
+ \\ \midrule
+ \small
+\gbox{Spain}%
+\rbox{ has been}%
+\gbox{ bl}%
+\rbox{essed with}%
+\gbox{ a literary}%
+\rbox{ tre}%
+\gbox{asure}%
+\rbox{ that has}%
+\gbox{ captivated}%
+\rbox{ readers for}%
+\gbox{ over}%
+\rbox{ four centuries in the}%
+\gbox{ form of Miguel}%
+\rbox{ de Cervantes}%
+\gbox{'}%
+\rbox{ immortal master}%
+\gbox{pie}%
+\rbox{ce}%
+\gbox{, "Don}%
+\rbox{ Quixote}%
+\gbox{".}%
+\rbox{ This}%
+\gbox{ tim}%
+\rbox{eless t}%
+\gbox{ome we}%
+\rbox{aves a hil}%
+\gbox{arious and poignant tale}%
+\rbox{ of a man consumed by}%
+\gbox{ the chivalr}%
+\rbox{ous}%
+\gbox{ stories}%
+\rbox{ of}%
+\gbox{ his youth}%
+\rbox{, who}%
+\gbox{ ren}%
+\rbox{ames}%
+\gbox{ himself}%
+\rbox{ Don Quix}%
+\gbox{ote}%
+\rbox{ and}%
+\gbox{ sets}%
+\rbox{ forth}%
+\gbox{ on a journey filled}%
+\rbox{ with moments}%
+\gbox{ of}%
+\rbox{ satire and a}%
+\gbox{ piercing exam}%
+\rbox{ination of}%
+\gbox{ the}%
+\rbox{ human}%
+\gbox{ condition.}%
+\rbox{$\hookleftarrow$$\hookleftarrow$}%
+\gbox{As Don}%
+\rbox{ Quix}%
+\gbox{ote}%
+\rbox{ and}%
+\gbox{ his}%
+\rbox{ trust}%
+\gbox{y}%
+\rbox{ s}%
+\gbox{quire}%
+\rbox{ Sancho}%
+\gbox{ Panza traverse rural}%
+\rbox{ Spain, they}%
+\gbox{ encounter}%
+\rbox{ various}%
+\gbox{ uns}%
+\rbox{uspect}%
+\gbox{ing}%
+\rbox{ villagers}%
+\gbox{,}%
+\rbox{ mistaking}%
+\gbox{ them}%
+\rbox{ for kn}%
+\gbox{ights}%
+\rbox{, maidens}%
+\gbox{ in dist}%
+\rbox{ress, bandits, and}%
+\gbox{ even}%
+\rbox{ giants.}
+\\ \bottomrule
+\end{tabular}
+\caption{\label{tab:qualitative_analysis}(Top) Watermarked text from the provider's \texttt{Llama2-13b} model, (Middle) a paraphrased version from a vanilla \texttt{Llama2-7b} model, and (Bottom) paraphrased text using our adaptively tuned \texttt{Llama2-7b} model.
+Green/red indicates whether a token is watermarked.
+A lower green-to-red token ratio implies a higher evasion rate. 
+Due to space constraints, we only show truncated texts. 
+}
+\end{table}
+
+\textbf{Detailed Analysis.}
+\Cref{fig:detailed-analysis} shows two results to compare the non-optimized \texttt{Llama2-7b} with our adaptively tuned \texttt{Llama2-7b} model.
+The result on the left plots the cumulative density of p-values.
+Our method strictly improves over the non-optimized model as it generates paraphrased text with higher mean p-values for watermark detection. 
+The result on the right plots the expected p-value against the token length.
+The watermarked text has a p-value of less than $0.01$ after approximately 170 tokens, whereas the non-optimized \texttt{Llama2-7b} model has an expected p-value of 0.10 at around 500 tokens compared to an expected p-value of 0.4 for our adaptively tuned model. 
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+$\beta$ & \texttt{Dist-Shift} & \texttt{Llama2-7b} & \texttt{Llama2-7b-Exp} & \texttt{Llama2-7b-Dist-Shift}  \\
+\midrule
+1 & 0.94, 0.72 & 0.94, 0.96 & 0.94, 0.98 & 0.95, \textbf{0.99} \\
+2 & 0.94, 0.20 & 0.95, 0.90 & 0.95, \textbf{0.98} & 0.95, \textbf{0.98} \\
+4 & 0.95, 0.00 & 0.96, 0.67 & 0.94, \textbf{0.97} & 0.94, \textbf{0.97} \\
+8 & 0.71, 0.00 & 0.92, 0.60 & 0.94, 0.95 & 0.94, \textbf{0.96} \\
+\bottomrule
+\end{tabular}
+\caption{We study our attack's effectiveness for different bias hyper-parameters for the \texttt{Dist-Shift}~\citep{kirchenbauer2023watermark} watermark.
+The top row label refers to the generation method, and we show two values: The text quality and the evasion rate at 512 tokens.}
+\label{tab:compact-bias-compare}
+\end{table}
+
+\textbf{Hyper-Parameters.}
+We evaluate how the strength of the bias parameter used for \texttt{Dist-Shift} affects its robustness against our attacks.
+Our attacker does not know which hyperparameters are used by the provider. 
+We set the bias $\beta\in \{1,2,4,8\}$, where higher bias should lead to higher robustness~\citep{piet2023mark,kirchenbauer2023reliability}.
+We train our attacks once with the $\beta=4$ value suggested by \cite{piet2023mark} and test it against all other hyper-parameters.
+\Cref{tab:compact-bias-compare} shows that our adaptive and non-adaptive attacks remain the most effective across all hyper-parameters. 
+
+\begin{figure}[H] 
+    \centering
+    \begin{subfigure}{.49\linewidth} 
+        \centering
+        \includegraphics[width=1\linewidth]{Figures/cumsum.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.49\linewidth} 
+        \centering
+        \includegraphics[width=1\linewidth]{Figures/median-distshift_log.pdf}
+    \end{subfigure}
+    \hfill
+    \caption{(Left) The cumulative density of p-values on the \texttt{Dist-Shift} watermark (blue), a vanilla \texttt{Llama2-7b} paraphraser (green) and our adaptively tuned \texttt{Llama2-7b} paraphraser (red). (Right) The median p-value relative to the text token length with a threshold of $\rho=0.01$ (dashed line).  }
+   \label{fig:detailed-analysis}
+\end{figure}
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+\textbf{Effectiveness of Adaptive Attacks.} Our work demonstrates that content watermarking methods for large language models are vulnerable to adaptively optimized attacks. 
+Attackers can adaptively fine-tune relatively small open-weight models, such as \texttt{Llama2-7b}~\citep{touvron2023llama}, using less than seven GPU hours to evade watermark detection from substantially larger and more capable open-source models, such as \texttt{Llama3.1-70b}~\citep{dubey2024llama}. 
+Our attacks remain effective even in the non-adaptive setting when testing with unseen watermarking methods. 
+Our findings challenge the robustness claims of existing watermarking methods, and we propose improved methods to test robustness with adaptive attacks. 
+
+\textbf{Open-Weight Models.}
+We show that current watermarking methods are not robust against attackers restricted to black-box API access to the provider's model. 
+Hence, current methods are also unlikely to withstand more capable attackers, such as those with white-box access to the provider's model. 
+We focus on fine-tuning open-weight models up to 7b parameters to illustrate our attack's effectiveness with relatively small models. 
+In practice, attackers could adaptively fine-tune more capable models such as \texttt{Llama3-70b} or \texttt{Llama3.1-405b} to improve watermark evasion rates substantially. 
+
+\textbf{Attack Runtime.} Our attacks involve two steps: Dataset Curation and Model Optimization. 
+Curating $7\,000$ samples requires less than 5 GPU hours, and model optimization requires only approximately 2 GPU hours for a \texttt{Llama-7b} model at 16-bit precision. 
+These attacks can be executed with limited computational resources and cost less than USD $10\$$ with current on-demand GPU pricing. 
+
+\textbf{Online Attacks.} Our work focuses on \emph{offline} attacks that do not require access to the provider's watermark detection functionality. 
+Offline attacks help study the robustness of a watermarking method without any information about the specific secret key generated by the provider. 
+An \emph{online} attacker can learn information about the provider's secret key through accessing \texttt{Verify}, which reduces the attack's uncertainty and could substantially improve the attack's effectiveness further. 
+
+\textbf{Limitations.}
+Our study also did not focus on evaluating adaptive defences that could be designed against our adaptive attacks. 
+Adaptive defences have not yet been explored, and we advocate studying their effectiveness.
+We focused exclusively on text generation tasks and did not explore other domains, such as source code generation or question-answering systems where different text quality metrics may be used to evaluate an attack's success.
+We did not consider the interplay between watermarking and other defences, such as alignment or content filtering, which could collectively control misuse.
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+We evaluate the robustness of \emph{content} watermarking~\citep{lukas2023ptw} methods against black-box, offline attackers in the adaptive and non-adaptive settings (see \Cref{sec:background}).
+A different line of work focuses on \emph{model} watermarking~\citep{uchida2017embedding} to protect a model's intellectual property by verifying the watermark with API access to a suspect model. 
+Other watermark evasion attacks \citep{hu2024stable,kassis2024unmarker,lukas2024leveraging} focus on the image domain, whereas we focus on LLMs. 
+\citep{jiang2023evading} propose online attacks with access to the provider's watermark verification, whereas we focus on a less capable offline attacker who cannot verify whether their evasion attack was successful.  
+Current attacks are either non-adaptive, such as DIPPER~\citep{krishna2023paraphrasing} or handcrafted against one watermarking algorithm~\citep{Nicks2024LanguageMD}.
+We focus on optimizable, adaptive attacks and show that they remain effective in the non-adaptive setting.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+Our work demonstrates the vulnerability of current LLM watermarking methods to adaptive attacks.
+We propose preference-based optimization on open-weight models to undermine the robustness of four watermarking methods and find that relatively small models such as \texttt{Llama2-7b} can be adaptively tuned to evade detection from larger models, such as \texttt{Llama3-70b}.
+Our adaptively tuned attacks outperform all existing attacks and can be trained using negligible computational resources of less than seven GPU hours.
+Adaptively tuned attacks remain effective in the non-adaptive setting against unseen watermarks.
+Our findings challenge the security claims of existing watermarking methods and suggest that future defences must consider adaptive attackers when testing robustness.
+
+
+
+
+

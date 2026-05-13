@@ -1,0 +1,292 @@
+\title{MeteoRA: Multiple-tasks Embedded LoRA for Large Language Models}
+
+\begin{abstract}
+The \textit{pretrain+fine-tune} paradigm is foundational for deploying large language models (LLMs) across various downstream applications. Within this framework, Low-Rank Adaptation (LoRA) stands out for its parameter-efficient fine-tuning (PEFT), producing numerous reusable task-specific LoRA adapters. However, this approach requires explicit task intention selection, posing challenges for autonomous task sensing and switching during inference with multiple existing LoRA adapters embedded in a single LLM.
+In this work, we introduce \textbf{\method} (\textbf{M}ultipl\textbf{e}-\textbf{t}asks \textbf{e}mbedded L\textbf{oRA}), a scalable and efficient framework that reuses multiple task-specific LoRA adapters into the base LLM via a full-mode Mixture-of-Experts (MoE) architecture.
+This framework also includes novel MoE forward acceleration strategies to address the efficiency challenges of traditional MoE implementations.
+Our evaluation, using the LlaMA2-13B and LlaMA3-8B base models equipped with 28 existing LoRA adapters through \method, demonstrates equivalent performance with the traditional PEFT method. Moreover, the LLM equipped with \method\ achieves superior performance in handling composite tasks, effectively solving ten sequential problems in a single inference pass, thereby demonstrating the framework's enhanced capability for timely adapter switching.
+    
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have achieved significant advancement in modern intelligent applications, excelling in tasks from language comprehension to generation within the field of natural language processing (NLP)~\citep{achiam2023gpt, touvron2023llama}. By applying the fine-tuning process to pretrained LLMs, these models have demonstrated remarkable efficacy in handling domain-specific tasks. Examples include converting natural language text into SQL queries~\citep{katsogiannis2023survey, pourreza2024din}, utilizing LLMs as agents in diverse interactive applications~\citep{song2023llm, chen2023driving, gupta2023visual}, and developing models tailored for specific domains, such as BloombergGPT~\citep{wu2023bloomberggpt} for financial analysis and ChatLaw~\citep{cui2023chatlaw} for legal consulting.
+
+This \textit{pretrain-fine-tune} paradigm has catalyzed the development of several parameter-efficient fine-tuning (PEFT) methods.
+Low-Rank Adaptation (LoRA)~\citep{hu2021lora} stands out as a noteworthy exemplar of PEFT, offering efficient fine-tuning by updating only the low-rank matrices while keeping the rest of base LLM's parameters unchanged.
+Once fine-tuned, these matrices, which consist of a minimal number of parameters, are encapsulated as a LoRA adapter that can be readily deployed or integrated with the base LLM for enhanced functionality.
+To improve the capability of handling multiple tasks simultaneously,
+the scalability of deploying these fine-tuned LoRA adapters has been explored. Solutions such as Huggingface PEFT~\citep{peft}, S-LoRA~\citep{sheng2023s}, and other variants have been developed to facilitate the simultaneous serving of numerous LoRA adapters on a single base LLM, enhancing the model's adaptability and efficiency in diverse application environments.
+\begin{figure}[t]
+	\begin{center}
+	\includegraphics[width=0.8\columnwidth]{figs/framework.pdf}
+		\caption{Our proposed framework provides a full-mode MoE architecture that directly reuses various off-the-shelf LoRA adapters, enhancing the LLM's ability to timely and autonomously activate appropriate adapters for the input. \method\ modules could be integrated into all basic linear layers of both Attention and MLP modules.  With the MoE forward acceleration strategies, LLM equipped with \method\ could be capable of addressing tasks across a wide range of domains effectively. \label{fig:framework}}
+		\end{center}
+\end{figure}
+
+Despite the success of LoRA in the \textit{pretrain-fine-tune} paradigm, several challenges remain. When reusing existing LoRA adapters, a primary challenge is the ability of multi-LoRA embedded LLMs to autonomously and on-demand LoRA selection during inference, a process that should allow LLM to handle different tasks by activating the appropriate LoRA adapters without explicit user instructions. Furthermore, managing composite tasks that require timely switching between LoRA adapters presents difficulties, especially when these tasks involve multiple sub-problems each requiring specific adapter activation. Current approaches such as Huggingface PEFT and S-LoRA, while capable of serving multiple existing adapters simultaneously, mainly focus on loading rather than autonomously activating adapters, thus requiring manual intervention. Similarly, current LoRA fusion methods such as LoRAHub \citep{huang2023lorahub} and MoA \citep{feng2024mixture}, although they integrate and merge knowledge from various adapters, are not suitably designed to fuse a wide range of existing LoRA adapters with such a limited MoE framework, and lack the evidence in effectively managing dynamic adapter switching during inference for composite tasks.
+
+In this paper, we introduce a novel multi-tasks embedded LoRA framework for LLMs to reuse existing LoRAs with the ability of autonomous task sensing and switching.
+The framework proposes a MoE-style module called \method. Each \method\ module provides a trainable Gating network with MoE forward acceleration strategies (overcome the efficiency issue in naive MoE, especially when number of experts is much larger than 8) for all LoRAs' low-rank matrices in the linear layer. 
+As shown in Figure \ref{fig:framework}, the \method\ module is applicable for all kinds of layers in Transformer-based LLMs (Q, K, V, and O in attention module and up\_proj, gating for SiLU \citep{elfwing2018sigmoid}, and down\_proj in MLP Module). Through fine-tuning all gates with minimal resources, \method\ effectively integrates the existing LoRA adapters into the base LLM model with the ability of autonomously on-demand LoRA selection, without the requirements of any explicit user or system instructions. Furthermore, the presence of numerous gates\footnote{For the LlaMA3-8B model, there are 224 \method\ modules in total, with each of the 32 decoder layers containing 7 gates (Q, K, V, O, up\_proj, gating, and down\_proj).} enhances the model with a full-mode MoE architecture, showing the capability of timely LoRA switching, addressing composite tasks with only two-shot examples as illustrations for all inputs.
+Our empirical evaluations, which embedded 28 existing LoRA adapters with \method\ to LlaMA2-13B-base and LlaMA3-8b-base, highlight the full-mode MoE capabilities and demonstrate a significant performance enhancement. This improvement is particularly notable in handling composite tasks, showcasing the efficacy of the \method\ framework.
+The primary contributions of \method\ are summarized as follows: 
+\begin{itemize}
+    \item \textbf{Scalable LoRA integration:} \method\ framework for reusing existing LoRA adapters advances the LLM's capability of autonomous on-demand LoRA selection and switching.
+
+    \item \textbf{MoE forward acceleration:} revealing efficiency issue of MoE and providing the forward acceleration strategies with new GPU kernel operators to achieve a $\sim\!\mathbf{4 \times}$ speedup in average while maintaining memory overhead.
+
+    \item \textbf{Advanced performance:} Evaluation shows superior performance in composite tasks when applying \method. thereby extending the practical utility of LLMs incorporating off-the-shelf LoRA adapters.
+\end{itemize}
+
+\noindent\emph{Organization.} Section~\ref{sec:back} discusses the background of LoRA adapters and the mixture-of-experts. Section~\ref{sec:method} formulates and details the proposed method for embedding numerous existing LoRA adapters into one base LLM. Section~\ref{sec:experiment} presents empirical evaluations. Section~\ref{sec:relatedwork} covers related work. Section~\ref{sec:limitation} discusses the limitations. Section~\ref{sec:conclusion} concludes the paper.
+
+
+
+\section{Background}
+
+\textbf{Low-Rank adaption.}
+Low-Rank Adaptation (LoRA)~\citep{hu2021lora} proposes a method to reduce the number of trainable parameters required for fine-tuning in downstream tasks. LoRA injects two trainable low-rank matrices $A \in \mathbb{R}^{d \times r}$ and $B \in \mathbb{R}^{r \times h}$ into each basic linear layer's weight matrix $W \in \mathbb{R}^{d \times h}$ of the Transformer-based LLM $\mathcal{M}$. The matrix multiplication of $A$ and $B$ represents the updates $\Delta W$ to the weight matrix $W$ when fine-tuning the model. The LoRA adapter modifies the forward process of this layer as follows:
+\begin{equation}\label{eq:lora_forward}
+\boldsymbol{o} = \boldsymbol{o}_{base} + \Delta\boldsymbol{o} = \boldsymbol{x}W_{base} + \boldsymbol{x}\Delta W = \boldsymbol{x}W + ((\boldsymbol{x}\times A) \times B)    
+\end{equation}
+where $\boldsymbol{x}\in \mathbb{R}^d$ represents the input hidden states for any token, $A, B$ first project it to the low-rank embedding space $\mathbb{R}^r$ and then map it back to the output space $\mathbb{R}^{h}$.
+LoRA can be applied to seven types of linear layers in the Transformer: four in the self-attention module ($W_q$, $W_k$, $W_v$, and $W_o$) and three in the MLP module ($W_{\mathrm{up\_proj}}$, $W_\mathrm{gating}$, and $W_\mathrm{down\_proj}$).
+Training LoRA adapters is straightforward. It continues to use the optimization target of causal language modeling to update LoRA's parameters while freezing the billions of parameters in the pretrained LLM $\mathcal{M}$.
+
+\textbf{Multi-task LoRA fusion.}
+LoRA adapter is usually fine-tuned to a specific downstream task.
+To enhance the capacity of LLMs in handling multiple tasks, two paradigms are utilized in practice. 
+One approach is to fuse datasets from different tasks and then fine-tune a single LoRA module on this combined dataset. However, \cite{ling2024domain} points out the difficulty in learning all specialized knowledge of various domains in one LLM.
+The other approach leverages existing LoRA adapters as off-the-shelf components, directly merging these adapters into one base LLM.
+Current popular LoRA frameworks, such as PEFT \citep{peft} and S-LoRA \citep{sheng2023s}, allow fusing multiple LoRA adapters. However, these frameworks must explicitly assign the active injected LoRAs, leaving an obvious disadvantage of lacking autonomous on-demand LoRA selection and timely LoRA switching during inference.
+Existing work, such as LoRAHub \citep{huang2023lorahub}, could combine multiple LoRA adapters without the explicit task intention given by humans. However, few-shot/in-context learning is required for LoRAHub for every single downstream task. 
+
+\textbf{Mixture-of-Experts.}
+MoE is a machine learning paradigm that enhances model performance and efficiency by combining predictions from multiple specialized models, or experts. Introduced by \cite{jacobs1991adaptive}, MoE uses a gating network to assign input data to the most relevant experts dynamically. This approach leverages specialized knowledge from different experts, improving overall performance on diverse and complex tasks.
+Recent progress, particularly by \cite{shazeer2017outrageously}, has demonstrated the effectiveness of MoE in large-scale neural networks. By using sparsely-gated MoEs, where only a subset of experts is activated for each input, computational efficiency is significantly increased without compromising model capacity. This has proven particularly useful in scaling Transformer-based architectures for various applications, such as Mixtral \citep{jiang2024mixtral}.
+
+
+
+
+\section{The Proposed MeteoRA}
+
+\subsection{MeteoRA architecture}
+Given a base LLM $\mathcal{M}$ and $n$ existing LoRA adapters $\{L_1, L_2, \cdots, L_n\}$ that have already been fine-tuned with the distinct tasks $\{D_1, D_2, \cdots, D_n\}$ on $\mathcal{M}$ separately, our objective is to integrate the $n$ existing LoRA adapters into the base $\mathcal{M}$ via \method\ framework, resulting in a LoRA embedded model $\mathcal{M}_\mathrm{embed}$.
+Figure~\ref{fig:framework} demonstrates the \method\ module complemented to each basic linear layer in LLM.
+The reused LoRA adapters are off-the-shelf ones, available from open-source communities or have been fine-tuned for specific tasks, 
+Each LoRA adapter $L_i$ contains a set of low-rank matrices $\{A_i,B_i\}$. \method\ furnishes each basic linear layer with a wide MoE architecture to embed the low-rank matrices provided by $n$ LoRA adapters.
+
+\begin{figure}[t]
+	\begin{center}
+	\includegraphics[width=0.7\columnwidth]{figs/meteora_block.pdf}
+		\caption{The architecture of \method\ module with MoE-style LoRA embedding. MeteoRA directly reuses existing LoRA adapters without fine-tuning and only requires training the Gating network.\label{fig:meteora}}
+		\end{center}
+\end{figure}
+
+Figure~\ref{fig:meteora} shows the architecture of \method\ module. 
+To embed $n$ existing LoRA adapters, \method\ module leverages the MoE architecture by injecting a trainable \textit{Gating network} $G: \mathbb{R}^{d}\rightarrow \mathbb{R}^{n}$ together with $n$ existing pairs of $\{A_i, B_i\}$ to $\mathcal{M}$. By applying $G(\boldsymbol{x})$, \method\ selects $k$ pairs of $\{A_i, B_i\}$ with the top-$k$ highest gated weights for each $x$. It then proceeds with the forward pass as follows:
+\begin{equation}\label{eq:forward}
+\boldsymbol{o} =\boldsymbol{o}_{base} + \Delta \boldsymbol{o}_{I(x)} = \boldsymbol{x}W_{\mathrm{base}} + \boldsymbol{x}\Delta W_{I(\boldsymbol{x})} = \boldsymbol{x}W_{\mathrm{base}} + \sum_{i\in I(\boldsymbol{x})}w_i \cdot( (\boldsymbol{x} \times A_i) \times B_i)
+\end{equation}
+where $I(\boldsymbol{x}):= \{i_1, i_2,..,i_k\}$ denotes the top-$k$ LoRAs selected for each token $\boldsymbol{x}$, which may varies from one another in every batch,
+and $w_i$ is the normalized weight of the selected LoRA $L_i$.
+$w_i$ could be calculated as follows:
+\begin{equation}
+w_i = \mathrm{softmax}(G_{i}(\boldsymbol{x}))=\frac{\exp(G_{i}(\boldsymbol{x}))}{\sum\limits_{j\in I(\boldsymbol{x})}\exp(G_{j}(\boldsymbol{x}))}
+\end{equation}
+where $G_i(\boldsymbol{x})$ denotes the unnormalized gated \textit{logits} for the $i$-th LoRAs. By doing this, the Gating network performs as a routing strategy for selecting the appropriate LoRA adapters based on the layer's input.
+Each \method\ module contains a Gating network, and the Gating networks from different \method\ modules make decisions based on their own inputs, the selection of LoRA adapters could be dynamically switched in the forward process of each \method\ module through all LLM's decoder blocks.
+\subsection{Learning algorithm}
+Training the injected \method\ modules adheres to the principles of fine-tuning LLM under autoregressive language modeling tasks. Given that $n$ pre-trained LoRA adapters, the training procedure for \method\ needs to maintain the parameters of the base LLM $\mathcal{M}$ and the $n$ LoRA adapters fixed.
+Since \method\ supports top-$k$ experts (LoRAs) selection, we introduce the joint optimization that combines the loss of autoregressive language modeling $\mathcal{L}_{\mathrm{lm}}$ and all losses of Gating networks $\mathcal{L}_{\mathrm{gate}}$:
+\begin{equation}\label{eq:loss}
+\mathcal{L}=\mathcal{L}_{\mathrm{lm}}+\beta\mathcal{L}_{\mathrm{gate}}=\arg\max_{\theta}\sum_{i=1}^L(\log\mathrm{P}(x_i\mid x_{i-1};\theta)+\beta\sum_{j=1}^B\sum_{k=1}^ml_{k,j}(h))
+\end{equation}
+where $\beta$ is the hyper-parameter, $i$ is the token index, $L$ is the length of the language sequence represented as tokens, $x_i$ represents the token.
+The loss $l_{k,j}$ is the cross-entropy loss for LoRA classification in one \method\ module.
+For a base $\mathcal{M}$ contained $B$ decoder blocks with $m$ \method\ modules in each decoder, $\mathcal{L}_{\mathrm{gate}}$ sums the loss $l_{k,j}(h)$ based on the corresponding hidden inputs $h$.
+\subsection{Forward acceleration}\label{sec:accelerate}
+The core component of the \method\ module is a MoE architecture that incorporates $n$ existing LoRA adapters.
+First of all, we allocate two big tensors $\mathcal{A}$ and $\mathcal{B}$ continuously on the HBM, each sized $(n, d, r)$ and $(n, r, h)$ to store all LoRA matrices $A_i$ and $B_i$, respectively. Then, as the real challenge, for each token $\boldsymbol{x}$ in the input sequence with the length $s$ for every batch with the size $b$, we should find its own candidate set $I(\boldsymbol{x})$ through $G$ to index $k$ pairs of $(A_i, B_i)$ from $\mathcal{A}$, $\mathcal{B}$ to apply the forward pass as Equation \ref{eq:forward}, making \method\ 
+almost impossible to be as efficient as the \textit{single-lora} setting. Based on Mixtral~\cite{jiang2024mixtral}, the naive implementation, named \textit{loop-original}, might employ a for-loop to traverse $n$ LoRA adapters, and in the $i$-th iteration, it gathers the tokens $\{\boldsymbol{x} | i \in I(\boldsymbol{x})\}$ as a matrix $X_i \in \mathbb{R}^{p_i \times d}$, and then apply normal LoRA pass as $((X_i \times A_i) \times B_i)$. This method solves the selection problem by simply splitting the $b\times s$ tokens into $n$ sets, and do the forward pass sequentially for each set. However, considering the nature that $b\times s$ tokens are independent to each other, it can not fully take advantage of parallelized GEMM operators~\cite{gemm} by looping over all the $n$ adapters every time, especially when $p_i$ is really small (\textit{some adapters are only picked by few tokens}) or when $b\!\times\! s\! <\! n$ (like the \textit{auto-regressive} inference phase where $s$ is fixed to $1$), which might cost at most $\mathbf{10 \times}$ runtime compared to \textit{single-lora} for some tasks in our experiments (see Section \ref{sec:efcy}). 
+ 
+The straightforward way to accelerate the forward pass, called \textit{bmm-torch}, is to directly index all the top-$k$ adapters for all the $b \times s$ tokens at the same time, leading to twice $bmm$ calculations followed by a batched weighted sum as:
+\begin{equation}
+    \underbrace{[\Delta\boldsymbol{o}_1, \Delta\boldsymbol{o}_2, .., \Delta\boldsymbol{o}_{bs}]}_{b\times s} =  \sum\limits_{k} \underbrace{[w_{1}, w..,w_{bsk}]}_{b\times s\times k} \odot \left(\big(\underbrace{[\boldsymbol{x}_1, .., \boldsymbol{x}_{bsk}]}_{b\times s\times k} \times \underbrace{[\boldsymbol{A}_{i_1}, .., \boldsymbol{A}_{i_{bsk}}]}_{b\times s\times k}\big) \times \underbrace{[\boldsymbol{B}_{i_1}, .., \boldsymbol{B}_{i_{bsk}}]}_{b\times s\times k}\right) \label{eq: bmm_torch}
+\end{equation}
+
+In contrast to \textit{loop-original}, \textit{bmm-torch} achieves $\sim\!\mathbf{4 \times}$ speedup by parallelizing all $b\!\times\! s \!\times\! k$ LoRA operations based on the PyTorch $bmm$ operator\cite{pytorch_bmm}, and only $\sim\!\mathbf{2.5 \times}$ slower than the upper bound \textit{single-lora} in most of our experiments (see Section~\ref{sec:efcy}). 
+
+However, due to PyTorch's indexing constraints~\cite{pytorch_index}, \textit{bmm-torch} needs to allocate a new larger HBM by $\frac{b\!\times\! s \!\times\! k}{n}$ times to hold the batched $\mathcal{A}$, $\mathcal{B}$. Additionally, when $b$ or $s$ is quite large (\textit{like long-history multi-turn chat}), the large memory overhead of \textit{bmm-torch} will become a practical bottleneck. To address this, we develop a custom GPU kernel operator for the \method\ forward pass using Triton\cite{triton_lang}, which not only keeps the $80\!\%$ time efficiency with \textit{bmm-torch}, but also remains the low memory overhead at the \textit{loop-original} level (see Section~\ref{sec:efcy}).
+
+
+
+\section{Evaluation}
+
+We conduct experiments on individual and composite tasks as detailed in Section \ref{sec:eval_settings}.
+For our base models, we use two well-known LLMs, LlaMA2-13B \citep{touvron2023llama} and LlaMA3-8B \citep{llama3}.
+co/ParagonLight/MeteoRA-llama2-13b} and \url{https://huggingface.co/ParagonLight/MeteoRA-llama3-8b}}.
+
+\subsection{Evaluation settings}\label{sec:eval_settings}
+\textbf{LoRA tasks and datasets.} We select 28 tasks from well-known benchmarks for our experiment. Specifically, our task set consists of 22 tasks from BigBench \citep{bigbench}, three non-English to English translation tasks from News-Commentary \citep{news_commentary}, and three widely utilized tasks: GSM8K \citep{gsm8k}, CNN/DailyMail \citep{cnn_dailymail}, and Alpaca \citep{alpaca}. These 28 tasks span a variety of NLP categories, such as contextual comprehension, conversational question answering, summarization, translation, mathematics, logical reasoning, and multilingual challenges.
+
+\textbf{Metrics.} We apply a zero-shot evaluation setting for all tasks, adding brief task descriptions for tasks such as CNN/DailyMail and the three translation tasks that do not inherently include task descriptions.
+As for metrics, we use \textit{accuracy} for multiple-choice tasks and GSM8K while employing metrics such as \textit{BLEU}, \textit{ROUGE-1}, \textit{ROUGE-2}, and \textit{ROUGE-L} for other tasks.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \includegraphics[width=0.8\textwidth]
+        {figs/llama2_radar_chart.pdf}
+        \caption{Evaluation results of models based on LlaMA2-13B.}
+        \label{fig:llama2_13b_radar_graph}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \includegraphics[width=0.8\textwidth]
+        {figs/llama3_radar_chart.pdf}
+        \caption{Evaluation results of models based on LlaMA3-8B.}
+        \label{fig:llama3_8b_radar_graph}
+    \end{subfigure}
+    \caption{Evaluation results on the 28 selected tasks. The MeteoRA performs similarly on most tasks, leading to high overlap between the two polygons in the radar graphs. For clarity, we only draw results from MeteoRA with top-1 strategy in the radar graphs
+    \label{fig:28_tasks_radar_graph}
+\end{figure}
+\textbf{Models.} We use LlaMA2-13B and LlaMA3-8B as the base LLMs for LoRA and \method\ adaption. Both LlaMA models are pretrained LLMs and do not include the process of instruction tuning. We train specific LoRA adapters for each task using their respective training sets. The process of training LoRA adapters could be offline or dismissed when off-the-shelf LoRA is accessible. Then, the Gating networks, which embed the adapters in the \method\ module, are fine-tuned efficiently based on the balanced dataset containing 1,000 samples for each task. The Gating networks for 28 tasks take no more than 10 hours to reach the convergence with 4 H800 training via Accelerate \citep{accelerate}. For scenarios where the training data for the original LoRA adapter is limited, we train Gating networks using a top-2 strategy, with only 100 and 5 samples accessible per task.
+
+For baseline comparisons, we train one LoRA adapter (i.e., LoRA-F) using a mixed training set from all 28 tasks, and another LoRA adapter (i.e., LoRA-B) with the balanced dataset designed for training the Gating network. 
+We also use Huggingface PEFT (short in PEFT) loading all 28 LoRA adapters (same ones used for \method) with explicit LoRA activation information during evaluation as a reference model. Additionally, we include several LoRA merge methods for comparison, including: averaging 28 LoRA adapters (referred to as Avg Merge), TIES \citep{ties}, DARE \citep{dare}, Arrow \citep{arrow}, and LoraHub \citep{huang2023lorahub}.
+
+All LoRA adapters interact with all seven linear layers in LLaMA’s Decoder layer, configured with $r=8$, $\alpha=16$, and a learning rate of $5e-5$. Due to some tasks having small training sets, the batch size for fine-tuning is set to $4$. All our experiments were conducted on a GPU server with five H800 80G GPUs. Notice that we carefully selected the training hyperparameters for the LoRA-F and LoRA-B to ensure that their performance on the 28 tasks would not be excessively incomparable.
+
+\textbf{Composite tasks.} To evaluate the model's capability of sequentially solving composite tasks, we construct three composite evaluation sets by serially concatenating independent tasks. These evaluation sets, referred to as \textit{composite-3}, \textit{composite-5}, and \textit{composite-10}, consist of 3, 5, and 10 tasks, respectively, each containing 200 samples. Models are expected to sequentially generate both the question number and the answer in the order of the tasks. Temperature scaling is involved in Gating network.
+
+\subsection{Main results}\label{sec:ondemand}
+
+Figures \ref{fig:llama2_13b_radar_graph} and \ref{fig:llama3_8b_radar_graph} demonstrate the performance of the \method\ models, LoRA-F, LoRA-B, 5 LoRA merge methods, and a reference model PEFT based on LlaMA2-13B and LlaMA3-8B, respectively, across the selected 28 tasks. Table \ref{tab:28_tasks_llama_avg} shows the averaged scores in various matrics for all methods.
+
+\begin{table}[t]
+\centering
+\caption{Results of the 28 selected tasks on LlaMA2-13B/LlaMA3-8B base LLMs. T1 and T2 represent the top-1 and top-2 strategies, while the subsequent numbers indicate the number of accessible samples per task for gate training.
+Our methods perform the best in most tasks. Notice that the task \textit{linguistics\_puzzles} achieves significantly higher ROUGE scores on LlaMA3-8B base, disproportionately influencing the average ROUGE scores and resulting in slightly higher averages for LoRA-B. Excluding this outlier, our methods consistently lead in performance across the evaluation.}
+\label{tab:28_tasks_llama_avg}
+\begin{tabular}{cccccc}
+\toprule
+Model           & Accuracy$\uparrow$ & BLEU$\uparrow$  & ROUGE-1$\uparrow$ & ROUGE-2$\uparrow$ & ROUGE-L$\uparrow$ \\
+\color{gray}{PEFT (reference)}            & \color{gray}{0.762 / 0.817}    & \color{gray}{35.66 / 45.32} & \color{gray}{0.340 / 0.341}   & \color{gray}{0.163 / 0.164}   & \color{gray}{0.316 / 0.317}   \\
+\midrule
+LoRA-F         & 0.730 / 0.767    & 41.27 / 42.93 & 0.318 / 0.327   & 0.136 / 0.157   & 0.294 / 0.306   \\
+LoRA-B         & 0.666 / 0.750    & 37.98 / 38.47 & 0.314 / \textbf{0.343}   & 0.128 / \textbf{0.171}   & 0.288 / \textbf{0.321}   \\
+Avg Merge   & 0.370 / 0.427  & 19.23 / 39.89  & 0.231 / 0.200  & 0.082 / 0.060  & 0.184 / 0.158  \\
+TIES       & 0.388 / 0.441  & \textbf{47.28} / 34.66  & 0.195 / 0.199  & 0.055 / 0.059  & 0.151 / 0.158  \\
+DARE       & 0.332 / 0.404  & 46.531 / 36.74  & 0.192 / 0.188  & 0.054 / 0.056  & 0.144 / 0.147  \\
+Arrow      & 0.569 / 0.647  & 41.03 / 29.93  & 0.281 / 0.283  & 0.123 / 0.142  & 0.234 / 0.242  \\
+LoraHub    & 0.307 / 0.235  & 13.43 / 10.11  & 0.158 / 0.141  & 0.049 / 0.035  & 0.124 / 0.104  \\
+\midrule
+MeteoRA (T1-1k) & 0.755 / \textbf{0.811}    & 36.73 / \textbf{45.64} & \textbf{0.336} / 0.338   & 0.160 / 0.158   & 0.313 / 0.314   \\
+MeteoRA (T2-1k) & 0.748 / 0.806    & 38.97 / 44.98 & \textbf{0.336} / 0.337   & \textbf{0.161} / 0.158   & \textbf{0.314} / 0.313   \\
+MeteoRA (T2-100)     & \textbf{0.758} / 0.783  & 39.44 / 39.90  & 0.331 / 0.309  & 0.159 / 0.139  & 0.281 / 0.256  \\
+MeteoRA (T2-5)       & 0.740 / 0.773  & 38.37 / 40.12  & 0.328 / 0.299  & 0.156 / 0.131  & 0.277 / 0.246  \\
+\bottomrule
+\end{tabular}
+\end{table}
+The evaluation results indicate that, regardless of the base LLM, the \method\ models utilizing the top-1 strategy achieve performance very close to the reference model PEFT, while no explicit LoRA activation/deactivation is required in \method. Although LLMs with both LoRA-F and LoRA-B reach comparable performance on several certain tasks, they exhibit significantly poorer outcomes on others. Additionally, \method\ employing the top-2 strategy, despite occasionally showing greater capability loss compared to \method\ with top-1 strategy, occasionally outperforms PEFT with adapters trained directly on the individual tasks. This suggests that the $L_{\mathrm{lm}}$ component in the loss function (Equation \ref{eq:loss}) becomes influential in these cases, indicating a beneficial mix of LoRA adapters from various tasks for future study. For the MeteoRA (T2-100) and MeteoRA (T2-5), although their performance shows a gap compared to MeteoRA 1k, they still outperform the baseline models on most metrics. This demonstrates that the Gating network can still learn to effectively utilize existing LoRA adapters with only a few examples.
+
+\subsection{Composte-n tasks}\label{sec:composite}
+The evaluation results for these three tasks are illustrated in Table \ref{tab:serial_eval_results}. 
+Notice that only LlaMA3-8B with the \method\ (top-2 strategy) and LoRA-B effectively address these \textit{composite-n} tasks. Subsequent discussions will therefore focus exclusively on these two models.
+Although the \method\ model attempts slightly fewer questions than LoRA-B in \textit{composite-3} tasks, it correctly answers a higher number of multiple-choice questions and achieves superior BLEU and ROUGE scores. As the task complexity increases to \textit{composite-5} and \textit{composite-10}, \method\ outperforms LoRA-B in almost all metrics.
+
+To further validate the functionality of the Gating network in the \method\ block, we display the LoRA selection patterns in the inference process of a \textit{composite-3} sample in Figure \ref{fig:serial_3_short}. With the top-$2$ strategy, Gating network appropriately assigns greater weight to the corresponding LoRA adapters for the majority of the tokens, no matter in input or output. At the junctions of two adjacent tasks, the Gating network correctly performed the timely switching actions of LoRA adapters.
+\begin{table}[t]
+\centering
+\caption{The evaluation results of \textit{composite-n} tasks. MeteoRA is marked in color on the left side, while LoRA-B is in black on the right side.}
+\label{tab:serial_eval_results}
+\begin{tabular}{ccccccc}
+\toprule
+Metric & \multicolumn{2}{c}{composite-3} & \multicolumn{2}{c}{composite-5} & \multicolumn{2}{c}{composite-10} \\
+\midrule
+\# Avg Attempt  & \textcolor{Red}{2.95}$\downarrow$  & 3.00  & \textcolor{Green}{4.63}$\uparrow$  & 4.33  & \textcolor{Green}{8.24}$\uparrow$  & 6.07  \\
+\# Avg Correct & \textcolor{Green}{1.49}$\uparrow$  & 1.31  & \textcolor{Green}{2.62}$\uparrow$  & 2.42  & \textcolor{Green}{3.75}$\uparrow$  & 2.95  \\
+Avg BLEU        & \textcolor{Green}{15.31}$\uparrow$ & 10.55 & \textcolor{Green}{9.86}$\uparrow$  & 9.41  & \textcolor{Green}{8.85}$\uparrow$  & 8.71  \\
+Avg ROUGE-1     & \textcolor{Green}{0.195}$\uparrow$ & 0.135 & \textcolor{Green}{0.221}$\uparrow$ & 0.219 & \textcolor{Green}{0.238}$\uparrow$ & 0.161 \\
+Avg ROUGE-2     & \textcolor{Green}{0.052}$\uparrow$ & 0.027 & \textcolor{Green}{0.069}$\uparrow$ & 0.063 & \textcolor{Green}{0.059}$\uparrow$ & 0.043 \\
+Avg ROUGE-L     & \textcolor{Green}{0.182}$\uparrow$ & 0.128 & \textcolor{Red}{0.207}$\downarrow$ & 0.208 & \textcolor{Green}{0.209}$\uparrow$ & 0.123 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+	\begin{center}
+	\includegraphics[width=0.8\columnwidth]{figs/serial_3_short.pdf}
+		\caption{An example of \textit{composite-3} task. We highlight the statistically dominant LoRA selected by \method\ in token level (decoded to words). The result shows that LLM with \method\ could achieve timely LoRA switching on both phases of input understanding and output generation. The background color gets darker when Gating network assigns a higher weight value. \label{fig:serial_3_short}}
+		\end{center}
+\end{figure}
+
+\subsection{Efficiency}\label{sec:efcy}
+To assess the efficiency of our novel forward pass designs using custom GPU kernel operators, we truncate $batch\_size \!\times\! 10$ samples from each test dataset of all 28 tasks. We evaluate these designs alongside \textit{four} variants with the same hyperparameters: the upper-bound \textit{single-lora}, the baseline \textit{loop-original}, and two novel forward acceleration strategies based on $bmm$: \textit{bmm-torch} and \textit{bmm-triton}, implemented by PyTorch and Triton respectively. Figure~\ref{fig:task-root-time} displays the histogram of the overall \textit{root-of-runtime} metric for each task and design.
+\begin{figure}[t]
+	\begin{center}
+	\includegraphics[width=0.7\columnwidth]
+    {figs/task_root_runtime_v2.pdf}
+		\caption{The overall \textit{root-of-runtime} of \textit{four} forward pass designs on 28 different Big-Bench subtasks. \label{fig:task-root-time}}
+		\end{center}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+{\bf Multi-task fusion.} Our proposed method falls into the field of LoRA adapter composition for multi-task fusion.
+The first category focuses on fusing the entire models.
+Researchers mainly study model ensembling and multi-task learning to achieve this goal. Existing works integrate the models under the setting of shared model architecture \citep{matena2022merging,jin2022dataless,wu2023pi,yadav2024ties}. Others focus on merging models with various architectures or from different tasks. Both methods \citep{stoica2023zipit, liu2022deep} try to merge models that are trained for various tasks without additional training.
+The second category is more concerned with fusion in terms of the tasks.
+\cite{ilharco2022editing} proposes a model editing method via task vectors.
+\cite{sun2022multitask} leverage in-context learning with few-shots to enhance the performance of unseen tasks.
+However, these methods require multi-task training or prior knowledge for the evaluation tasks.
+Our method embeds off-the-shelf LoRA adapters with a Gate network in the \method\ module. None of the examples (zero-shot) are required for all individual tasks.
+
+
+{\bf Fusion under MoE}. In the context of \textit{pretrain-fine-tune} paradigm, PEFT becomes a common sense for developing Transformer-based LLM downstream applications.
+Directly fine-tuning on a fused dataset from various tasks is unable to achieve better performance \cite{ling2024domain}.
+Some works focus on leveraging existing LoRA adapters as off-the-shelf components, integrating them directly into a base LLM. For example, PEFT \citep{peft} and S-LoRA \citep{sheng2023s} are frameworks aiming to embed multiple LoRA adapters to one LLM. However, requiring explicit activation/deactivition during usage.
+MixLoRA \citep{li2024mixlora} targets to a resource-efficient sparse MoE model, fine-tuning MoE on MLP module with the auxiliary load balance loss used in Mixtral \citep{jiang2024mixtral}. Although MixLoRA supports LoRA adapters for the attention layer, the adapters are still dense models encompassed with the linear layers in the attention module.
+Others \citep{huang2023lorahub,yang2024moral, feng2024mixture,chen2024llava, wu2023mole} propose LoRA fusion based on the concept of Mixture-of-experts that enhance the model's ability for cross-domain tasks.
+However, the methods mainly focus on fusing LoRA adapters to the FFN module or Q in the attention module. Our method could embed all kinds of LoRA adapters. By leveraging the full-mode MoE architecture, the LLM's capacity could be boosted with autonomous and timely LoRA switching, especially for solving composite tasks.
+
+
+
+
+\section{Limitations}
+
+{\bf LoRA adapter update.} Although the Gating network within \method\ module is trained separately among the adapters, it is necessary to retrain or fine-tune the Gating network if some LoRA adapters are updated.
+The Gating network is trained using the hidden state as inputs, which are influenced by LoRA adapters in previous layers. Testing revealed that directly replacing some LoRA adapters with improved versions did not enhance performance on our test set. However, after retraining the \method\ modules, the LLM equipped with \method\ exhibited performance improvements. Technically, this issue may be related to the domain shift problem, where the Gating network is applied to another operational field the distribution shift. Employing statistical methods such as \citep{10.1145/3368089.3409696, krishnan2020improving} may help calibrate the output of the Gating network to produce more accurate logits and results.
+
+{\bf Knowledge fusion tasks.} 
+Composite tasks, which involve a broad range of tasks, represent one type of complexity in terms of the scope of tasks.
+More challenging are tasks that require knowledge fusion across domains.
+To assess the capability of \method\ in knowledge fusion task, we construct a mathematics task by translating problems from GSM8K into a foreign language (e.g., Italian), so that the LLM with \method\ must solve these foreign language GSM8K problems by leveraging knowledge from both GSM8k LoRA (trained on problems in English) and the foreign language LoRA (trained for Italian to English translation). Although \method\ successfully fuses the two LoRA adapters to address the math problems in a foreign language, it does not show superior performance compared to LLM equipped only with the GSM8K LoRA. We hypothesize that the base LLM's existing proficiency in the selected foreign language may render the additional adapter unnecessary. Future efforts could focus on constructing more suitably complex tasks where the required cross-domain knowledge is not already pre-trained into the base LLM.
+
+{\bf MoE efficiency.} 
+Sparsely-gated MoE \citep{shazeer2017outrageously} offers computational efficiency advantages over dense MoE. However, the naive implementation of MoE forward (\textit{loop-original}), such as the SparseMoE in Mixtral \citep{jiang2024mixtral,hf_transformers}, still encounters efficiency issues when the number of experts increases.
+In our evaluations, the runtime for inference can be up to $\mathbf{10 \times}$ longer than that of \textit{single-lora} when embedding 28 LoRA adapters into one LLM. With our proposed forward acceleration techniques \textit{bmm-torch} and \textit{bmm-triton}, we achieve a speedup of $\sim\!\mathbf{4 \times}$ compared to the \textit{loop-original}, though this still falls short of the ideal upper bound (\textit{single-lora}). Technically, it is extremely difficult to increase the inference speeds for \method\ when the number of embedded LoRA adapters increases.
+Future work could explore developing new operators in triton or CUDA to continuously enhance MoE acceleration in terms of memory efficiency.
+
+
+
+\section{Conclusions}
+
+This paper presents a framework \method\ that achieves scalable multi-task LoRA embedding within LLMs, enhancing the existing LLMs with a full-mode MoE architecture with forward acceleration strategies. 
+LLMs equipped with \method\ enhance the ability to autonomously select the most pertinent LoRA adapters to generate appropriate responses. Moreover, its capability for timely LoRA switching leads to superior performance, particularly in sequentially solving composite tasks.
+Future work could explore the transformative potential of \method\ in multifaceted problem-solving scenarios, and inference efficiency by designing more efficient GPU kernel operators.
+
+
+\newpage
+
+
+
+

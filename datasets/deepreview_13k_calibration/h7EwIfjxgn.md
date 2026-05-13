@@ -1,8 +1,8 @@
 # Sharpness-Aware Black-Box Optimization
 
 - Decision: Accept
-- Avg Score: 3.60
-- Scores: 6, 1, 0, 6, 5
+- Avg Score: 6.75
+- Scores: 6, 10, 6, 5
 
 ## Abstract
 Black-box optimization algorithms have been widely used in various machine learning problems, including reinforcement learning and prompt fine-tuning. However, directly optimizing the training loss value, as commonly done in existing black-box optimization methods, could lead to suboptimal model quality and generalization performance.

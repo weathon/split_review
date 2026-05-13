@@ -1,0 +1,223 @@
+\title{Bitune: Leveraging Bidirectional Attention to Improve Decoder-Only LLMs}
+
+\begin{abstract}
+Decoder-only large language models typically rely solely on masked causal attention, which limits their expressiveness by restricting information flow to one direction. We propose Bitune, a method that enhances pretrained decoder-only LLMs by incorporating bidirectional attention into prompt processing. We evaluate Bitune in instruction-tuning and question-answering settings, showing significant improvements in performance on commonsense reasoning, arithmetic, and language understanding tasks. Furthermore, extensive ablation studies validate the role of each component of the method, and demonstrate that Bitune is compatible with various parameter-efficient finetuning techniques and full model finetuning.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) are being deployed in numerous practical applications where humans engage with them through various forms of natural language interaction. In use cases such as general purpose assistants (OpenAI, 2024), medical diagnosticians (Thirunavukarasu et al., 2023), game-conversation generation (Cox & Ooi, 2023) or coding-assistants (Roziere et al., 2023), the ability for an LLM to precisely interpret and respond to user inputs is of primary concern.  
+
+Correspondingly, Instruction-Tuning (IT) (Chung et al., 2024; Ouyang et al., 2022a) is the prevailing paradigm for finetuning LLMs after their self-supervised pretraining phase to improve them for such tasks. Here, the model is trained on a dataset comprised of pairs of instructions and corresponding responses. Given the instruction-with-response structure of IT data, the generation of an LLM response can be divided into two phases: first, converting the instruction into key and value embeddings, which we refer to as instruction features; second, using these features to autoregressively generate an answer. Due to this task’s inherently conditional nature, the instruction features’ effectiveness is crucial for obtaining high-quality model outputs.  
+
+In the past, bidirectional attention (Schuster & Paliwal, 1997) has been a key technique for obtaining stronger features for words or tokens. This is because the meaning of a word depends greatly on its context. In particular, for some words in a sentence, the information that comes later might be far more informative for generating a meaningful representation and resolving ambiguities. With only uni-directional causal attention, where the representation of each word is restricted to depend solely on the words that came before, this cannot be achieved. This is the reason why many previous transformers such as encoder-only BERT (Devlin et al., 2019) and encoder-decoder T5 (Raffel et al., 2020) employed bidirectional attention to improve the encoding of the input and why tasks like text retrieval (Lewis et al., 2020; Li & Li, 2023) still rely on this.  
+
+However, in the context of LLMs, architectures utilizing bidirectional attention have fallen out of favor, as decoder-only models such as GPT (OpenAI, 2024) and Llama (AI $@$ Meta, 2024) have focused on and vastly improved the generative performance of language models. These architectures are trained by large volumes of data with next-token prediction, eschewing any look-ahead mechanism for the sake of better autoregressive modeling. As there is simply more unlabeled data available for pretraining, training a decoder-only architecture on unlabeled data, and then finetuning it for tasks with instruction-tuning, is the best modus operandi of today (Wang et al., 2022). However, with this switch to decoder-only architectures, we lost bidirectional attention in the process. As we know this can improve feature representations for instructions, we set out to re-introduce bidirectional attention, such that it can be integrated into pretrained decoder-only LLMs.  
+
+![](images/ebff7e86f85a902e49e291c328f90aa91ec8b8aefbaff9389b96cf4f2670b0f6.jpg)  
+Figure 1: Overview of Bitune. (a) During the prefliling phase, features are obtained from the prompt using both causal and bidirectional attention in two passes with separate weights. The two sets of keys and values are then combined using a weighted average before being passed to the decoding phase. (b) During the decoding phase, new tokens are generated in the standard way with causal attention, utilizing the features extracted from the instruction in the previous step, along with the features of other generated tokens.  
+
+Our new method Bitune adds bidirectional attention to decoder-only architectures and combines it with causal attention to generate two sets of instruction features, using two different sets of weights. These features are then integrated, utilizing learnable mixing coefficients, and later used as the KV-cache for response generation. Notably, the autoregressive response generation process remains unaffected by the bidirectional attention and continues to be causal. By realizing these adaptations with parameter-efficient finetuning methods, we introduce only a minimal set of new parameters.  
+
+Overall, our contributions are as follows:  
+
+• We propose a novel method, Bitune, that improves the performance of pretrained decoderonly LLMs in instruction-following and question-answering settings.   
+• We evaluate the method on multiple downstream tasks, showing consistent improvements over the baselines.   
+• We conduct an extensive ablation study investigating the necessity of each component of the method, and showing the method’s PEFT-agnosticism, as well as its effectiveness in full finetuning scenarios.  
+
+
+
+\section{2 BIDIRECTIONAL INSTRUCTION-TUNING  }
+
+
+In the instruction-tuning setting (Ouyang et al., 2022b; Zhang et al., 2024), a dataset $\mathcal{D}$ consists of instruction-answer pairs that are used to adapt the model in a supervised fashion. Formally, a dataset of size $N$ can be described as $\mathcal{D}\,=\,\{q,a\}_{i=1}^{\prime N}$ , where $q$ and $a$ are instructions and answers. The training objective is to model $p(a|q)$ in an autoregressive manner: This means the answer is generated one token at a time, such that token $a_{i}$ at position $i$ has access to all earlier tokens:  
+
+$$
+p(a|q)=\Pi_{i=1}^{|a|}p(a_{i}|a_{1},\dots a_{i-1},q),
+$$  
+
+where $|a|$ denotes the length of the answer. Note how compared to the regular language modeling objective, the response is already conditional (on the instruction $q$ ) even for the first generated token.  
+
+This naturally leads response-generation to be divided into two phases: prefliling and decoding. During the prefliling phase, the entire instruction – also often called a prompt – is processed concurrently to generate a series of features to be stored. For a Transformer architecture (Vaswani et al., 2017), these features are those of the key and value vectors, which can be stored in a KV-cache to avoid costly recomputations. During the subsequent decoding phase, the model generates output tokens sequentially, one token at a time, based on the KV-cache of the instruction and the already generated tokens.  
+
+In this work, we introduce Bitune, a method to leverage this two-phase process to improve instructiontuning of language models. In our approach, the model processes the instruction with both causal and bidirectional attention using separate sets of parameters, leading to an enhanced KV-cache that is then used to condition the answer. Figure 1 provides an overview of the method, while Algorithm 1 presents pseudocode for the inference process.  
+
+![](images/c8d4dbda4ed087e3cf718467131ec3fef956526c1f58bea8ef675551c1e21671.jpg)  
+
+Two Sets of Features. In Bitune, the model performs two passes on the instruction to obtain two kinds of features for every transformer block. Namely, a set of causal features that the model was originally trained to process and utilize,  
+
+$$
+K_{c}=X_{c}W_{k c},\quad V_{c}=X_{c}W_{v c},
+$$  
+
+and a set of bidirectional features encoding the instruction without the constraints of causal masking,  
+
+$$
+K_{b}=X_{b}W_{k b},\quad V_{b}=X_{b}W_{v b}.
+$$  
+
+To allow the model to learn how to process the causal and bidirectional features differently, we introduce two sets of weights: one for the bidirectional pass on the instruction $(W_{k b},\,W_{v b})$ and another for the causal pass on the instruction, which is also used for the causal generation of answer tokens $(W_{k c},W_{v c})$ .  
+
+In the case of the first block of the model, representations $X_{c}$ , $X_{b}$ are the initial token embeddings. In other cases, they are the output of the preceding block and were processed by different components including the self-attention mechanism, which can be defined as:  
+
+$$
+\mathrm{Attention}(Q,K,V,M)=\mathrm{softmax}\left(\frac{Q K^{T}}{\sqrt{d_{k}}}+M\right)V,
+$$  
+
+where $Q$ are the queries, $M$ is the attention mask, and $d_{k}$ is the dimension of keys and queries.  
+
+For the causal pass, the mask $M_{c}$ enforces causality by masking future tokens, such that tokens $j$ can only attend to earlier tokens $i\leq j$ , while for the bidirectional pass, no masking is applied:  
+
+$$
+M_{c}(i,j)=\binom{0}{-\infty}\quad\mathrm{if}\;i\leq j\;,\qquad M_{b}(i,j)=0.
+$$  
+
+The final KV-cache is obtained by a learnable convex combination of causal and bidirectional features,  
+
+$$
+K_{\mathrm{Bitune}}=K_{c}\cdot(1-\alpha_{k})+K_{b}\cdot\alpha_{k},\quad V_{\mathrm{Bitune}}=V_{c}\cdot(1-\alpha_{v})+V_{b}\cdot\alpha_{v},
+$$  
+
+Table 1: Zero-shot results after instruction-tuning on the UltraFeedback dataset. We compare Bitune to the performance of the original model, the model finetuned with LoRA, and with $\mathrm{LoRA_{16}}$ using two times higher rank to match the parameter count of our method. Bitune significantly outperforms the baselines on almost all tasks for all models.  
+
+![](images/58f151bb3c6334166fce3264df566210962dfe8d3501550a5f284c1cb5650ee0.jpg)  
+
+where $\alpha$ represents the bidirectional-to-causal ratio of features. This ratio is parameterised as  
+
+$$
+\alpha_{j}=\frac{|\theta_{j}|}{\theta_{\mathrm{init}}+|\theta_{j}|},\quad j\in\{k,v\}
+$$  
+
+where $\theta_{j}$ is a learnable mixing coefficient per transformer block, and $\theta_{\mathrm{init}}$ is a hyperparameter defining the initial value of $\theta_{j}$ . The mixing coefficients are learnable to allow each block to independently adjust the balance between bidirectional and causal features throughout the training.  
+
+Parameter Efficient Fine-tuning Note that the components of the model, other than the key and value projections, can have their own separate sets of weights as well. In the case of full finetuning, this approach would require an additional set of full weights, which is impractical for large models.  
+
+Instead, we adapt our model using parameter-efficient finetuning methods. These introduce only a fraction of trainable parameters, making it viable to have two modified variants of the model within a single forward pass. In the default configuration of our method, we utilize the Low-Rank Adaptation (LoRA) of Hu et al. (2022) to adapt the model. However, Bitune can utilize different methods for updating the weights, including full model finetuning and other parameter-efficient techniques, as demonstrated in our ablations section.  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+
+
+\section{3.1 INSTRUCTION-TUNING  }
+
+
+Our core experiments involve training pretrained language models on an instruction-tuning dataset and zero-shot evaluating them on downstream tasks. We evaluate Bitune on multiple models, comparing results to standard finetuning with LoRA, and zero-shot results of pretrained models without finetuning.  
+
+Specifically, we use a subset of the cleaned UltraFeedback (Cui et al., 2023) dataset, which contains instructions and corresponding answers generated by various LLMs. From this dataset, we select completions generated by GPT-4 (OpenAI, 2024), ensuring high-quality responses for training. To fti every model on a single GPU, we filter out samples longer than 512 tokens, which leaves us with  
+
+roughly 10,000 samples for training.5.   
+We test the method on pretrained decoder-only language models of two different scales of approximately 2 billion and 7 billion parameters. The specific models used in our experiments are: Gemma 2B and 7B (Gemma Team et al., 2024), Llama2 7B (Touvron et al., 2023) and Llama3 8B (AI@Meta, 2024), and Phi-2 (Li et al., 2023), which has 2.7 billion parameters. We use HuggingFace Transformers (Wolf et al., 2020) implementation of these models.   
+For updating the weights we use the HuggingFace PEFT (Mangrulkar et al., 2022) implementation of LoRA, with the default rank of 8, and apply it to all linear layers of MLP and self-attention components of the model. We compare Bitune with the following three baselines: Pretrained - initial model without any finetuning; LoRA - model finetuned with LoRA without Bitune-specific modifications, using rank of 8 as used in our method; and $\mathbf{LoRA_{16}}$ - model finetuned with LoRA, using a rank of 16 to provide a fair comparison in terms of the number of parameters, as our method introduces two sets of weights.   
+For each model, we tune the learning rate on the LoRA baseline using steps on the approximate logarithmic scale $(1{\mathrm{e}}{-}4,3{\mathrm{e}}{-}4,1{\mathrm{e}}{-}3,3{\mathrm{e}}{-}3)$ , and then apply the same rate to the other approaches. Note that this potentially puts our method at a disadvantage compared to the LoRA baseline.2.   
+Models are evaluated zero-shot on multiple-choice tasks to assess their performance. For commonsense reasoning, we use the PIQA (Bisk et al., 2020), CommonsenseQA (Talmor et al., 2019), ARC-Challenge (Clark et al., 2018), and SIQA (Sap et al., 2019) datasets, while for language understanding, we use the MMLU (Hendrycks et al., 2021) benchmark. Each task consists of a series of questions, each with multiple choices, where only one answer is correct. As the tasks follow the question-answer pattern, they are compatible with the instruction-tuning setting.   
+For evaluation, we use the Language Model Evaluation Harness framework (Gao et al., 2023). This framework formats each question using a predefined template, tokenizes the question-choice pairs, runs them through the model, and compares the log-likelihoods of the choices to determine the selected answer. For each model and approach configuration, we conduct experiments using three different random seeds, and average the results.   
+Models are loaded and trained using bfloat16 precision, except for the mixing part, which operates in the full 32-bit floating-point format. This high level of precision for the mixing of features is important, as minor numerical inaccuracies in the learnable coefficients and intermediate results of the mixing operation may lead to significant deviations in the model’s behavior.   
+In the decoding phase of the inference with Bitune, to initiate generation, the model requires at least a single token to obtain a set of attention queries, in addition to the keys and values extracted from the instruction. To facilitate this, one can introduce a new learnable ${<}s e p{>}$ token that would be placed at the beginning of modeled answer, or utilize an existing token. For our experiments, we opted to move the last token of the instruction template to the beginning of the modeled answer. For details on the instruction template used, please refer to the section 6.   
+Results. Table 1 shows consistent and significant gains after instruction-tuning with Bitune, with the highest gains seen on the Gemma-2B model, showing a 4 percentage point (pp) improvement over the baseline LoRA and a $9.3\,\mathrm{pp}$ improvement over the pretrained model. For the other models, the average gains over baseline finetuning are equal to 1.8, 1.4, and $0.9\,\mathrm{pp}$ , for Llama3-8B, Llama2-7B, and Phi-2 respectively.   
+It is worth noting that the Gemma-7B model shows the lowest average improvement across all tasks, with merely 0.1 pp gain over the baseline finetuning. It is also a single case where the baseline pretrained model achieved the highest score on a task, MMLU, with degraded performance in all fine-tuning approaches. However, this is not an issue with the model’s scale, as significant gains are observed with the Llama2-7B and Llama3-8B models.   
+3.2 DOWNSTREAM TASK TRAINING  
+
+This complementary experiment verifies whether Bitune increases the capacity of the model within the narrow scope of a single task. It follows the setup from the instruction-tuning experiments with a few changes. Namely, models are not instruction-tuned but trained separately for each evaluation task  
+
+Table 2: Result for the downstream task training. We show accuracy on downstream tasks for the baseline LoRA finetuning and Bitune, averaged over 3 seeds. On average, our method works better than standard LoRA. We see the most significant gains on the GSM8K dataset, but slightly lower results for Gemma-7B and the SIQA task.  
+
+![](images/9a0d15c48e409d54bfb65798a99f924dd8fb4375d19b3e494fea7342edc3ec91.jpg)  
+
+using the corresponding training set. We use PIQA, ARC, CSQA, and SIQA introduced earlier, and an additional arithmetic task, GSM8K (Cobbe et al., 2021).  
+
+GSM8K differs from the other tasks, where we compare log-likelihoods of predefined answers, as it requires the model to generate a full answer token-by-token, including the intermediate step-by-step reasoning. The final answer follows a specific pattern, making it feasible to extract the answer using methods such as regular expressions as the model learns to adhere to this pattern during training.  
+
+Results. Table 2 presents the results, demonstrating improvements when finetuning on the downstream tasks with Bitune, similar to those seen with instruction-tuning. While there are a few cases where the baseline finetuning achieves better results on specific tasks, when considering the average gains, applying our method is beneficial across all models. Most importantly, on the GSM8K dataset, we see consistent high gains, suggesting that our method improves the model’s reasoning ability in generative tasks.6.  
+
+Similar to the instruction-tuning results, the highest gains are observed on the Gemma-2B model, while the lowest on the Gemma-7B. This indicates that the effectiveness of our method depends on the specific model used.  
+
+3.3 ABLATIONS  
+
+We conduct an ablation study on Bitune using the same experimental setup as in the instructiontuning experiment. For this purpose, two models are used: Gemma-2B and Llama3-8B, representing different size scales and model families.  
+
+Component Removal To verify the necessity of each component of the method, we remove selected parts to answer the following questions:  
+
+• Can we simply modify the attention mask to apply bidirectional attention on the prompt, without using separate weights and mixing? - We test this simplest variant, which we refer to as Naive Bidir.  
+
+• Do we need two sets of features? Is it sufficient to obtain bidirectional features from the prompt using different weights than those used for causal answer generation? - We remove the part responsible for generating the set of causal features, and therefore also the mixing component; we refer to this as No Mixing.  
+
+Table 3: Ablation study on components of Bitune. We report zero-shot accuracy averaged over PIQA, ARC, CSQA, SIQA and MMLU tasks. The components are explained in section 3.3. We see that all ablated variants outperform the LoRA baseline, and combining all components performs the best. Of note, especially bidirectional attention improves results the most.  
+
+![](images/62d6a2b83f764f697c9f9e5602b87795ddfed0d649922e3b52569e5b8867cc49.jpg)  
+
+Table 4: Combining Bitune with different PEFT methods. Performances are averaged over 3 seeds. We can see that our method improves results regardless of the specific PEFT method used.   
+
+![](images/20fdbfc0f8255bb5828b81d79320484c6959a970b86373afd99b29fe9ca871b9.jpg)  
+
+• Are the gains solely from mixing two sets of features generated with different weights, or is bidirectional attention necessary? - Here we keep the attention mask causal to generate both sets of features, which we refer to as Only Causal. • Do we need separate weights, or can the same weights be used to generate both causal and bidirectional features? - To answer this question, we do not introduce the second set of weights and use the same LoRA for both passes on the prompt, calling it Shared Weights.  
+
+The results, averaged over three seeds and presented in Table 3, indicate that all variants of the method lead to gains over the baseline LoRA finetuning. However, the highest gains are observed in the full variant of Bitune, demonstrating that each component contributes to the method’s effectiveness.  
+
+Different PEFT Methods To verify the impact of different PEFT methods on the performance of our method, we compare Bitune in combination with the following techniques: LoRA (Hu et al., 2022), that reparametrizes weight updates as a multiplication of two low-rank matrices; DoRA (Liu et al., 2024), which decomposes these weight updates into direction and magnitude; and IA3 (Liu et al., 2022), that instead rescales activations with learnable vectors.  
+
+The results are shown in Table 4. We find consistent gains across all three PEFT methods we analyze, with gains ranging from $+1.6\%$ to $+4.0\%$ for averaged accuracy. This demonstrates that Bitune is PEFT-agnostic and can be combined with existing and future innovations in PEFT methods.  
+
+Table 5: Results for full finetuning on the instruction-tuning setup. We compare our method to full finetuning baseline. For Bitune, we optimize two sets of full model’s weights.  
+
+![](images/7ff9d468c55bebc52f1e1c532ab6a3ad275d9b675e4576ca8ffc915cf69eeebf.jpg)  
+
+Full Finetuning Additionally, we test whether Bitune yields gains with full finetuning (Full-FT), by optimizing two sets of full model’s parameters. We conduct experiments on Gemma-2B model, and compare results with standard Full-FT baseline. The results in Table 5 demonstrate that Bitune improves the model’s performance even in full finetuning scenarios.  
+
+Initialization of Mixing Coefficient The initial value of the mixing coefficient $\theta$ is a hyperparameter in our method. To evaluate its impact on the performance and the training dynamics of the bidirectional-to-causal ratio of features, we conduct experiments on the instruction-tuning setup with the following values: 0.1, 0.01, and 0.001.  
+
+![](images/a8464bca5d2461f0658001c4f4828939fa56895955c73ec6d77dbd68d022cb95.jpg)  
+Figure 2: Bidirectional-to-causal ratio during training. The ratio is averaged over all layers and shown for different initial values of mixing coefficients for Llama3-8B. The initial value impacts the change of the ratio, with higher values slowing it down, and lower values increasing it.  
+
+![](images/54127a00d192066d5310aa023b333b0ede526e64189b85852774aba52b7b6537.jpg)  
+Figure 3: Ratio across layers. Here we show the final ratio of the model in Fig. 2 across all layers for the K and V values. The utilization of bidirectional attention is spread across all layers.  
+
+Table 6a demonstrates that the initial value of the mixing coefficient impacts the performance, with 0.01 being the most optimal value for both models, regardless of their scale. Figure 2 shows that the initial value substantially affects the rate of change of the mixing ratio, with the higher value leading to nearly no change in the ratio, while the lower value results in sharp changes at the very beginning of the training. In Figure 3, we also observe that after training, all layers utilize the bidirectional attention.  
+
+Attention Mask of Second Pass We test another option for the attention mask of the second pass on the instruction. We transpose the causal attention mask, blocking information flow from the past tokens, and allowing from the future tokens - we call it anti-causal attention mask.  
+
+Results shown in Table 6b indicate that the instruction has to be processed with full bidirectional attention to achieve the highest gains. Combining causal and anti-causal features independently does not lead to the same high performance.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Our approach shares similarities with the concept of "prefix language modeling", which enables a decoder-only model to handle bidirectional context within a prefix (instruction) while maintaining causal generation for the output sequence. The prefix-LM architecture was introduced by Liu et al. (2018) and further explored and popularized by Raffel et al. (2020). In their work on T5, Raffel et al. (2020) pretrained the prefix-LM architecture alongside other architectures, such as encoder-decoder and decoder-only models, demonstrating that prefix-LM outperforms decoder-only models on both training objectives: denoising and language modeling.  
+
+Table 6: Ablation of Bitune’s attention. We vary the additional attention mask for processing the instruction besides the causal pass, and evaluate different initial values of mixing coefficient, $\theta_{\mathrm{init}}$ .  
+
+(a) Different init. values for mixing coefficients.   
+
+![](images/333b9c554ce50c362268d1b00876ba1e2b7dc840c25749635df32e61add1c5f3.jpg)  
+
+(b) 2nd pass attention masks for instruction features.   
+
+![](images/7455a33e9e4cf7c1350f82bec5507bc3f70f604a552c40737dcdddefbbb192ae.jpg)  
+
+The prefix-LM approach has been used in UniLM (Dong et al., 2019), which trains a single transformer on three types of language modeling tasks: unidirectional, bidirectional, and sequence-to-sequence prediction. UniLM employs a shared Transformer network and utilizes specific self-attention masks to control the context that predictions are conditioned on, where the sequence-to-sequence task is equivalent to the prefix-LM approach.  
+
+Additionally, UL2 (Tay et al., 2023) introduces a pretraining objective called "Mixture of Denoisers", which combines various denoising strategies, including the prefix-LM approach. Lastly, XLNet (Yang et al., 2019) also allows for non-causal word ordering by allowing random permutations to be used with a next-token prediction objective.  
+
+All these works focused on the model pretraining. As for the utilization of pretrained causal language models, Springer et al. (2024) show in their work that simply repeating the input to these models improves the quality of token embeddings for text-retrieval. This work addresses the limitation that token embeddings in autoregressive models cannot contain information from tokens appearing later in the input. By repeating the input twice, the early tokens are allowed to encode information about later tokens, thereby improving the quality of the embeddings. Another approach, LLM2Vec (BehnamGhader et al., 2024), demonstrates that pretrained causal LLMs can be effectively converted to BERT-like encoders. It can be done by enabling bidirectional attention, training the model on the objective of masked token prediction, and applying unsupervised contrastive learning.  
+
+
+
+\section{5 DISCUSSION  }
+
+
+Limitations. During standard instruction-tuning training, the instruction and the answer are processed in a single forward pass. In our method, this processing is explicitly split into phases, extracting instruction features with two passes & answer modeling, increasing both training time and memory usage. As for the inference, these two passes on the instruction, bidirectional and causal, can be processed either in parallel, impacting memory usage, or sequentially, increasing latency.  
+
+However, this is a minor limitation in the context of instruction-tuning, since typically smaller datasets are used compared to pretraining, leading to relatively short training times. Furthermore, at inference time the added latency for processing the instruction is negligible, as the bulk of compute is used for the autoregressive answer generation: e.g. only a 0.2s increase from 11.5s to 11.4 for more results).  
+
+Conclusion. This work proposes the first method to utilize the instruction-answer structure of IT datasets that enables bidirectional processing in pretrained decoder-only models. Bitune demonstrates general applicability across different models and scales, and it consistently improves performance across commonsense reasoning, arithmetic, and language understanding tasks. We further demonstrate that our method is compatible with different existing PEFT methods and will likely benefit from further developments in this area.  
+
+Reproducibility Statement. We have made efforts to ensure the reproducibility of our work. The   
+code necessary to reproduce all experiments presented in this paper is provided in the supplementary   
+materials. Information about hyperparameters and other experimental specifications can be found in   
+ Each experiment was conducted using a single NVIDIA A100 GPU.   
+
+

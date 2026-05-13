@@ -1,0 +1,289 @@
+\title{Flash Inference: Near Linear Time Inference for Long Convolution Sequence Models and Beyond}
+
+\begin{abstract}
+While transformers have been at the core of most recent advancements in sequence generative models, their computational cost remains quadratic in sequence length.
+Several subquadratic architectures have been proposed to address this computational issue. Some of them, including long convolution sequence models (LCSMs), such as Hyena, address this issue at training time but remain quadratic during inference. We propose a method for speeding up LCSMs' exact inference to quasilinear $O(L\log^2L)$ time, identify the key properties that make this possible, and propose a general framework that exploits these. Our approach, inspired by previous work on relaxed polynomial interpolation, is based on a tiling which helps decrease memory movement and share computation. It has the added benefit of allowing for almost complete parallelization across layers of the position-mixing part of the architecture. Empirically, we provide a proof of concept implementation for Hyena, which gets up to $1.6\times$ end-to-end improvement over standard inference by improving $50\times$ within the position-mixing part.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+A lot of recent progress in deep learning, particularly in the form of large language models (LLMs) has been driven by the transformer architecture \citep{vaswani2017attentionAllYouNeed}. While these models have great quality, it comes at a computation cost which scales quadratically in sequence length - both during training and inference. %Alternative drop-in replacements for attention - the part of transformers that drives the quadratic cost - have been proposed 
+This can become prohibitive for very long contexts and as such a number of alternative architectures with better computational scaling in context length have been proposed \citep{gu2023mamba, poli2023hyena, fu2024monarchMixer}. While most of these works have improved computational efficiency for training, some still scale quadratically in sequence length when it comes to inference, thus not improving asymptotically over transformers.
+
+In this work, we propose a framework for optimizing inference efficiency for a general class of such models. As a case study, which inspired the method, we focus on long convolution sequence models (LCSMs) \citep{poli2023hyena, fu2022H3, romero2021ckconv, sgconv, karami2024orchid, fu2023simpleLongConv}. However, our approach is not limited to LCSMs alone and we identify the properties that allow for such inference speedups in hope to guide the design of future architectures.
+
+In the particular case of LCSMs (including Hyena), the building block of the architecture is that of convolving the input sequence with a sequence-length long, (potentially underparameterized) filter. If we let $L$ be the sequence length (e.g. number of tokens in the case of LLMs), then a naive implementation of convolution during training would take $\Omega(L^2)$ FLOPs, but one can employ FFT to bring that down to $O(L\log L)$. The issue that occurs during inference is that FFT cannot be used directly since the whole input sequence is not known ahead of time, but rather incrementally computed. Because of this, the naive inference approach goes up to $\Omega(L^2)$ - this is the apparent cost of moving from a \emph{static} input to a \emph{dynamic} one.
+
+It turns out that in fact, at least in the case of ``dynamic FFT'', one can obtain $O(L\log^2 L)$ time complexity by using \citet{van1997initalFastCDQ}'s result on relaxed polynomial convolution. Crucially, this result works by a direct reduction to several applications of FFT. This allows us to phrase a more general framework for turning training-efficient architectures to inference-efficient ones.
+
+Our main contributions are:
+\begin{itemize}
+    \item Proposing the first quasilinear-in-sequence-length $O(L\log^2 L)$, \emph{exact} inference algorithm for LCSMs.
+    \item Identifying the main features of LCSMs that allow for faster inference to propose a more general framework.
+    \item Highlighting and exploiting the potential for dealing with most workload of different layers in parallel, rather than having to wait for all computation of a layer to finish before moving on to subsequent layers.
+    \item Saving up on data movement thanks to the tiling approach used.
+    We show how to save factors of $2$ in several places, including activation storage, when the convolutional filters are data-independent. However, our method extends to any causal, data-dependent filters.
+    \item Our framework provides an $O(L\log^2 L)$ inference algorithm which, when run empirically, yields up to $1.6\times$ end-to-end time-efficiency improvement; and up to $50\times$ on the long convolution part.
+\end{itemize}
+
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}[t]{0.31\textwidth}
+        \centering
+        \begin{subfigure}[t]{\textwidth}
+            \centering
+            \adjustbox{valign=t}{\includegraphics[width=\textwidth]{diagrams/tiling_diagrams/lazy_5_gray.pdf}}
+        \end{subfigure}
+        \vfill
+        \begin{subfigure}[t]{\textwidth}
+            \centering
+            \adjustbox{valign=t}{\includegraphics[width=\textwidth]{diagrams/tiling_diagrams/eager_5_gray_notoplegend.pdf}}
+        \end{subfigure}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.63\textwidth}
+        \centering
+        \begin{subfigure}[t]{\textwidth}
+            \centering
+            \adjustbox{valign=t}{\includegraphics[scale=1.32]{diagrams/tiling_diagrams/fast_8_gray.pdf}}
+        \end{subfigure}
+    \end{minipage}
+    \caption{
+        Cell ($i$, $j$) corresponds to the contribution of mixer-input $y_i$ to mixer-output $z_j$. To compute $z_j$, all its line of contributions should be be accounted for. Because of the autoregressive nature of inference, one only has access to $y_i$ after $z_{i-1}$ has been computed.
+        \emph{(Left Top)} represents the standard (lazy) approach, 
+        \emph{(Left Bottom)} represents the eager approach, 
+        and \emph{(Right)} represents our suggested method.
+    }
+    \label{fig:lazy-eager-fast-tiling}
+\end{figure}
+
+
+
+
+
+
+\section{Setting and Related Work}
+
+\label{sec:background}
+Much recent effort has been put in designing more efficient alternatives to transformers \citep{tay2022efficientTransformers}. A couple of well-performing classes are state space models (SSMs) \citep{gu2021S4, gu2023mamba} and convolution-based models\citep{fu2022H3, poli2023hyena}. In this work we focus on the latter class. To avoid a popular misconception, it is worth emphasizing that while any linear-time invariant (LTI) SSM has an equivalent convolutional filter, it is \emph{not} true that any convolutional filter has an equivalent \emph{low-dimensional} LTI SSM representation. It could be the case that the smallest LTI SSM equivalent to a length-$L$ convolution filter has a dimension of $L$. However, such a dimension would deem an LTI SSM approach have quadratic time complexity both during training as well as during inference.
+\subsection{Notations and Definitions}
+\label{subsec:notations-and-defs}
+In the most general form, we consider architectures obtained by stacking several position-mixing layers potentially interleaved with element-wise, feature-mixing modules, partially following \citet{arora2023zoology}'s notation. Put formally, let $\block_1, \ldots \block_M : \R ^ D \to \R^ D$ be feature-mixing modules and $\mixer_1 \ldots \mixer_M : \R^{L\times D} \to \R^{L\times D}$ be position-mixing modules. One can think of the blocks as being combinations of MLPs, layernorms, skip connections and other modules of similar purpose and of mixers as playing the role of multi-head attention (MHA) in a transformer - the part where embeddings at different positions interact with each other. Assume these are all learnt from some well-defined parameterized classes. Here, $M$ is the number of layers, $D$ is the used embedding dimension and $L$ can be any sequence length (unless positional embeddings are used, case in which it can only take values up to some $L_{max}$). We define the activations $a_0, \ldots, a_M : \R^{L\times D} \to \R^{L \times D}$ at level $1 \leq \ell \leq M$ and position $1 \leq i \leq L$ as $(a_\ell(x))_i \defeq \block_\ell(\mixer_\ell(a_{\ell - 1}(x))_i)$ where $a_0(x) = x$ represents the input embeddings ($L$ $D$-dimensional tokens) and the model output at position $i$ is read from the last layer $(a_M(x))_i$.
+
+We focus on autoregressive sequence models where for an input sequence $x_1, \ldots x_p$, one generates the $(p+1)^{\text{th}}$ token by sampling from a distribution given by $(a_M(x))_p$ (usually via a linear map). In order for this generation procedure to be sensible, we constrain (by construction of $\mixer$s) the models to be causal, that is, $(a_\ell(x))_i$ is a function of only $x_{[1, i]}$ or, equivalently, $\mixer_\ell(y)_i$ is a function of $y_{[1..i]}$.
+
+We use $\odot$ to denote the element-wise (Hadamard) product: for two matrices $A, B \in \R^{N\times M}$, $A \odot B \in \R^{N\times M}$ is given by $(A \odot B)_{i, j} = A_{i, j} \cdot B_{i, j}$. We also use indexing by ranges to mean slicing a tensor in the respective dimension according to the range and indexing by a dot to mean leaving the dimension unchanged: for example, if $A:\R^{N\times M \times K}$, then $A_{\cdot, [l, r], 5} \in \R^{N\times[r-l+1]}$ and $(A_{\cdot, [l, r], 5})_{i, j}=A_{i, j+l-1, 5}$. 
+
+We call a function $f : \gX^* \to \gX$ associative, if $f(x_1, x_2, \ldots x_p)=f(f(x_1, \ldots x_i), f(x_{i+1}, \ldots x_p))$ for any $1 \leq i < p$ and $x_1\ldots x_p \in \gX$ - that is, it is invariant to bracketing. Finally, we define the time complexity of an algorithm as the number of floating-point operations (FLOPs) it executes - this is a notion independent of hardware.
+\input{2-background/attention.tex}
+\input{2-background/lcsms.tex}
+
+
+\section{Fast LCSM inference}
+
+In this section we describe our method for the case of long convolution sequence models. That is, we still work with models as described in Section~\ref{subsec:notations-and-defs}, but we further assume the mixers to be convolution-based, as described in Section~\ref{sec:lcsm-def}. Hence, for every $\mixer_\ell \in \{\mixer,\ldots \mixer_M\}$, there exists a filter $\rho_\ell \in R^{L\times D}$ such that \begin{align*}
+    \mixer_\ell(y)_t = \sum_{i=1}^t{y_i \odot \rho_{\ell, t-i}}
+\end{align*}
+We assume here, for simplicity, that $\rho$ is data-independent and part of the model, as is the case for Hyena. We also assume $L=2^P$ for some integer $P$ for simplicity - one can always round $L$ up to the closest power of $2$ without changing it by more than a factor of $2$ and thus keeping the asymptotics of all our analysis unchanged.
+
+\subsection{The Proposed Algorithm}
+\label{sec:proposed-lcsm-algorithm}
+
+We derive inspiration from the the work of \citet{van1997initalFastCDQ} regarding relaxed polynomial interpolation - they propose a fix to dealing with \emph{dynamic} structure of Eq.~\ref{onlineConv} to achieve an overall $O(L\log^2 L)$ time complexity.
+\subsubsection{Relaxed Polynomial Interpolation}
+Consider Eq.~\ref{onlineConv}:
+\begin{align*}
+    z_{t}\defeq \sum\limits_{i=1}^{t} y_i \cdot \rho_{t-i}
+\end{align*}
+The problem of relaxed polynomial interpolation can be thought of as having to compute $z_t$ for every $1\leq t \leq L$ with the further constraint that $y_t$ and $\rho_t$ are only made available once $z_{t-1}$ has been outputted. One could simply use the more general approach of \citep{van1997initalFastCDQ} even when $\rho$ is known ahead of time, but we can take advantage of this particularity to get a twice-faster and slightly simpler algorithm. We present this both for brevity and because existing architectures have data-independent $\rho$'s so this is the more efficient choice for them (and thus, for practical purposes).
+
+The main approaches to relaxed polynomial interpolation, as identified in \citep{van2002relaxButNotLazy}, are:
+\begin{itemize}
+    \item The lazy approach: for every $t \in \{1\ldots L\}$, one computes $z_t$ by simply applying the formula. It takes $O(t)$ FLOPs to do so and the overall complexity is $O(L^2)$. This approach can be thought of as the naive approach which only performs work when it is strictly needed.
+    \item At the opposite end, there is the eager (or zealous) approach: as soon as a new value of $y$ or $\rho$ becomes available, one accounts for all its contributions to $z$. Since we assumed the entire $\rho$ is known beforehand, this translates to the following:
+    \begin{quote}
+    After computing $z_{t-1}$, $y_t$ becomes available, so for every $t\leq i \leq L$, we increase $z_{i}$ by $y_t \cdot \rho_{i - t}$. $z_t$ is now fully computed so we proceed to the next iteration.
+    \end{quote}
+    Hence, the eager approach can be thought of as performing work as soon as it can be performed. Here, $t$\textsuperscript{th} iteration takes $O(L-t)$ so we still have an overall complexity of $O(L^2)$.
+    \item Relaxed approaches: these approaches perform some but not all available work ahead of time - their advantage stems from grouping contributions (i.e. accounting collectively for groups of pairs $y_i \cdot \rho_j$) in such a way that fast convolution methods (such as FFT) can be employed for a speedup.
+\end{itemize}
+
+The employment of FFT for speeding up accounting for groups of contributions is formalized in the following lemma:
+
+\begin{lemma}
+\label{lemma:lcsm-block-fft}
+Let $1 \leq l \leq r \leq l' \leq r' \leq L$ represent ranges of lengths $L_1=r-l+1$ and $L_2=r'-l'+1$ of $y$ and $z$, respectively.
+There exists an FFT-based algorithm running in $O(L_1+L_2)$ space and $O((L_1+L_2)\log(L_1+L_2))$ time complexity that, given access to $y_{[l, r]}$, computes the aggregated contributions of all $y_{[l, r]}$ to all of $z_{[l', r']}$.
+That is, for each $l' \leq t \leq r'$, it computes:
+\begin{align}
+\label{eq:taus}
+    \tau(y, [l, r], \rho, [l', r'])_t \defeq \sum_{i=l}^{r}{y_i \cdot \rho_{t-i}}
+\end{align}
+for all $l' \leq t \leq r'$.
+\end{lemma}
+
+What this lemma says is that we can compute efficiently the contribution of a range of inputs to a range of outputs, where the computational cost is asymptotically given by the larger of the ranges (this is because $O(L_1+L_2)=O(\max(L_1, L_2))$. Furthermore, observe that we assumed $r \leq l'$: this is because in order to account for all these contributions at once, we need to have all of $y_{[l, r]}$ available which means that all of $z_{[1, r-1]}$ was computed, so by that time we should have already accounted for the contributions of $y_{[l, r]}$ to all of $z_{[1,r-1]}$; hence, there is no point to (re)computing any of these. 
+
+The lazy, eager, and our version of a relaxed approach are depicted in Figure~\ref{fig:lazy-eager-fast-tiling} under the form of tilings of the contribution space. Note that the lazy and eager approaches can still be thought of as grouping contribution accounting, but do so along thin strips: the contribution of a long range of $y$'s to one element of $z$ in the lazy approach and that of a singe element of $y$ to a long range of $z$'s in the eager approach. The key to our relaxed tiling is using more balanced tiles since, as noted, the cost of a tile is given by the larger side (which is very expensive for thin tiles). The tiles still have to respect $r \leq l'$ and one needs to ensure that the whole line of contribution to some $z_t$ has been dealt with by the time we return the value of $z_t$ - this is indeed the case for our tiling.
+
+\input{algos/relaxed-poly-interp}
+While the lazy and eager algorithms have been described, one needs to make explicit the order of processing the tiles in the relaxed setting since we still cannot use $y_t$ before $z_{t-1}$ has been computed. This is shown in Algorithm~\ref{alg:relaxed-poly}: \emph{return} marks a value of $z$ having been computed and \emph{unlock} represents a value of $y$ becoming available. At the beginning of iteration $i$ it always holds that $z_i=\sum_{j=1}^{i-1}{y_j\cdot \rho_{i-j}}$. We start the iteration by completing this with the freshly unlocked $y_i \cdot \rho_0$ at line~\ref{line:relax-red-tile} - this corresponds to the red tiles of Figure~\ref{fig:lazy-eager-fast-tiling}. Following this step $z_i$ is ready to be returned. Then, we account for the gray tile that has just been unlocked (line~\ref{line:relax-gray-tile}) - this tile corresponds to the contribution of $y_{[i-U+1, i]}$ to $z_{[i+1, i+U]}$ where $U$ is the side of the tile, namely the largest power of $2$ dividing $i$. Finally we return $z_i$ as being in its final form and get access to $y_{i+1}$ - we could have done this before dealing with the gray tile as well. Note that the relative ordering of the red and gray lines does not matter within an iteration, but it is important to finish up the first red and gray tiles before second ones, the second ones before the third ones and so on.
+
+\begin{proposition}
+\label{prop:relaxed-analysis}
+    When $L=2^P$, Algorithm~\ref{alg:relaxed-poly} performs $2^{P - 1 - q}$ calls to $\tau$ on ranges of length $2^q$ for every $q \in \{0\ldots P-1\}$. If we base $\tau$'s implementation on Lemma~\ref{lemma:lcsm-block-fft}, this entails a total time complexity of $O(L\log^2L)$. Since the calls to $\tau$ are sequential and outputs are not stored, the peak memory usage is given by the largest call to $\tau$ and remains $O(L)$.
+\end{proposition}
+
+\subsubsection{Performing LCSM inference via fast relaxed polynomial interpolation}
+We can now use Algorithm~\ref{alg:relaxed-poly} to get an efficient inference algorithm for LCSMs, but to do so we need to be careful about data-dependency. First, for brevity, in our previous notation of activations, disregard the dependency on input $x$ - that is, use $a_{\ell, i}$ instead of $(a_\ell(x))_i$ - since we are only going to work with one input $x$ (the one we are generating). Furthermore, denote the intermediate mixer computation by $b \in \R^{M\times L \times D}$ as follows:
+
+\begin{align}
+\label{eq:activations}
+    & b_{\ell, i} \defeq \mixer_\ell(a_{\ell - 1})_i = \sum_{k=0}^i{a_{\ell-1, k} \odot \rho_{\ell, i-k}} \\
+    & a_{\ell, i} \defeq \block_\ell(b_{\ell, i})
+\end{align}
+for any $1 \leq \ell \leq M$, where $a_{0, i}$ is the embedding of $i$\textsuperscript{th} token.
+Whenever one has generated the tokens $x_{[1,i]}$ up to position $i$ or, equivalently, $a_{0, [1,i]}$, the whole of $a_{[0, M] \times [1,i - 1]}$ will have been computed (since $a_{M, [1, i-1]}$ is needed to sample $x_{[1,i-1]}$). Caching these up is the equivalent of a KV-cache in transformers and is simply the natural way to not repeat work when autoregressively sampling. To generate the next token $x_{i+1}=a_{0, i+1}$, we want to fill in the values of $a_{[1,M], i}$. To do so, as per Eq.~\ref{eq:activations}, we need to compute $b_{\ell, i}$ which is practically, for each level $\ell$, and within each dimension $1 \leq c \leq D$, a relaxed interpolation between $a_{\ell-1, :, c}$ (playing the role of $y$) and $\rho_{\ell, :, c}$. Further applying a $\block_\ell$ to $b_\ell$, one gets $a_\ell$. Thus, we can pipeline several instances of Algorithm~\ref{alg:relaxed-poly} sequentially across layers.
+The resulting algorithm is illustrated in Algorithm~\ref{alg:flash-inference-lcsm}. The outer loop (line~\ref{line:outer-loop}) iterates through positions $i$: at each iteration, one computes the activations at position $i$ across all layers, does some (limited) eager work and samples next token. To do so, the inner loop (line~\ref{line:inner-loop}) iterates through the several mixer-layers. It first accounts for the red cells in the diagram, that is, the direct dependency on previous layer's activations at position $i$ (line~\ref{line:red-tile}), thus finalizing $b_{\ell, i}$. After computing the activation at position $i$ (line~\ref{line:red-tile-block}), it also accounts for the contribution of the gray tile that has just been unlocked (line~\ref{line:gray-tile}) at the current layer. We reuse the notation from previous section for $\tau$ to be the same as before but within each of the $D$ dimensions - that is:
+\begin{align*}
+    \tau(y, [l, r], \rho, [l', r'])_t \defeq \sum_{i=l}^r{y_i \odot \rho_{t-i}}
+\end{align*}
+for all $l' \leq t \leq r'$. The accounting works by considering (in-place) the influence of last $U$ positions of $a$ to next $U$ ones of $b$.
+
+\input{algos/flash-lcsm}
+
+As far as performance goes, Algorithm~\ref{alg:flash-inference-lcsm} practically calls Algorithm~\ref{alg:relaxed-poly} $MD$ times (within each layer and within each of the $D$ dimensions of embeddings). Proposition~\ref{prop:lcsm-analysis} covers its complexity analysis:
+\begin{proposition}
+\label{prop:lcsm-analysis}
+The overall time complexity of Algorithm~\ref{alg:flash-inference-lcsm} is $O(MDL \log^2L)$ for the mixer-part plus $LM$ $\block$ calls, to generate $L=2^P$ tokens. Furthermore, for each $0 \leq q \leq P - 1$, there are $MD 2^{P-1-q}$ calls to $\tau$ on ranges of length $2^q$. The overall amount of memory it takes to store the activations is $O(MLD)$ (as is the case for the naive lazy approach) and the peak memory usage does not change the asymptotics.
+\end{proposition}
+
+\subsection{Across-layer Parallelization}
+\label{sec:across-layers-parallelization}
+
+One important feature of the proposed method is that it allows for higher parallelization across layers. In particular, the gray lines can be taken out of the inner loop and performed in parallel across all layers at once, just after the loop (Algorithm~\ref{alg:flash-inference-lcsm-parallel}) - this is because all their inputs and outputs are disjoint. However, the red lines need to be performed sequentially since $a_{\ell, i}$ is a function of $b_{\ell, i}$ which is a function of $a_{\ell - 1, i}$ for every $\ell$.
+
+\input{algos/flash-lcsm-parallel}
+
+Note that this optimization can be applied to the eager and lazy approaches as well (provided that the red tiles are accounted for separately from the gray ones). However, the benefit of extra parallelization is practically relevant only in settings that are not memory-bandwidth bound - this is the case for smaller tiles which represent a significant amount of the tiles in our method, but an insignificant amount in the eager and lazy approaches.
+\subsection{Memory Considerations}
+\label{sec:memory}
+
+As follows from Proposition~\ref{prop:relaxed-analysis}, the overall size of the inputs to (and outputs of) $\tau$ in the proposed algorithm is only $O(MDL\log L)$ - that is, we access on average activation values at $\log L$ positions per iteration as opposed to the naive implementations (such as lazy and eager approaches) that access an average of $\Omega(L)$ positions. This directly translates to data movement improvements by a factor of up to $L/\log L$.
+
+A simple optimization of static memory is to never store $b$, but rather use $a_{\ell, i}$ to store $b_{\ell, i}$ until hitting line~\ref{line:red-tile-block}: this will work because from that point onwards $b_{\ell, i}$ is never used again and $a_{\ell, i}$ was not needed (or available) thus far. Hence, the static memory overhead is minimal: at least in the LCSM case, one directly aggregates contributions to the same activation tensor, thus not using any extra storage (on top of the inherent $MLD$ it takes to store the activations).
+
+Lastly, if one is restricted to only using one GPU and the whole tensor of $M\times L \times D$ cannot fit it, it is possible to drop the requirement to only storing $M\times (L/2) \times D$ activations by dropping parallelization in the largest tile (which was alluded above).
+
+
+\section{The Flash Inference Framework}
+
+We propose a framework called Flash Inference to generalize our fast LCSM inference algorithm. To do so, we identify the main properties that are being exploited by Algorithm~\ref{alg:flash-inference-lcsm} and show how, granted these properties, one can get fast inference following the same kind of tiling.
+
+Notice that in the case of LCSMs, it never mattered how one computes the contribution of a range of inputs to another range: only that it is well-defined (as soon as the inputs are available) and that it can be done more efficiently than the brute-force approach. Thus, the crux of Algorithm~\ref{alg:flash-inference-lcsm} is not convolution-specific, but rather the way we tile the space of contributions, while ensuring autoregressive generation can still take place.
+\input{4-flash-inference/assumptions}
+
+\input{4-flash-inference/setting-definition}
+
+\input{4-flash-inference/main-result}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We performed two kinds of experiment: one synthetic and one on the Hyena architecture \citep{poli2023hyena}. The synthetic setup defines all $\block$s to be MLPs with a hidden dimension of $2D$ and GELU activation; it also simply sets $a_{0, i+1}$ as $a_{M, i}$ plus some noise to avoid dependency on vocabulary size since that is out of the scope of our framework and will be negligible at scale. Note that this can be viewed as a sampler: a function from logits at the last layer and previous position to the next token's embedding. In both settings the weights are initialized to random noise since it does not affect the runtime - this avoid unnecessarily training a new model for each hyperparameter choice.
+
+In terms of notation, we introduce the batch dimension $B$ and keep $M, D, L$ refer to the number of layers, embedding dimension and number of tokens generated, respectively. We use $U$ to refer to the square-tile length, as per line~\ref{line:define-tile-side}. We sweep over $B \in \{1, 2, 4, 8\}, M \footnote{In the Hyena setting, M represents the effective number of mixers, but we fix the Hyena Order to 3 - so M=18 corresponds to 9 Hyena Operators and 18 mixers} \in \{18, 36\}$, $D \in \{256, 768\}$ and generate tokens up to the greatest power of $2$ that fits the memory. All results are obtained by averaging over $4$ runs following $2$ runs of warm-up. We evaluate our approach on on the latest NVIDIA H100 and A100 GPUs.
+
+For our baselines, (1) we consider the eager and lazy approaches described in Section~\ref{sec:proposed-lcsm-algorithm}, depicted in~\ref{fig:lazy-eager-fast-tiling}. We also consider their implementation exploiting our observation regarding parallelization across layers~(\ref{sec:across-layers-parallelization}) (we denote the  the parallel versions simply as lazy and eager).
+
+Our Flash Inference framework explored various implementations of $\tau$, covered in Section~\ref{sec:impls}. Our best method is a \emph{Hybrid} that dynamically chooses the optimal implementation of $\tau$ depending on $(B, D, M, U)$.
+
+\subsection{Integrating Flash Inference in real world setting (Hyena Architecture)}
+
+Flash Inference significantly speeds-up the end-to-end inference by up to 1.6$\times$ and the convolution-based mixer component of the Hyena architecture by 50$\times$ compared to the baselines as shown in Figures`\ref{fig:hyena-breakdown} and \ref{fig:hyena-mixer}.
+
+Figure~\ref{fig:hyena-per-token} shows the per token response time of Hybrid and baselines. Hybrid shows low variance in per-token time except at the tokens positions where large tiles are computed. For a given sequence length of $L$, we have $L/2$ positions that use tile size 1, $L/4$ positions using tile size 2, and so on. That is, 93.75\% of tokens use a tile size $U \leq 8$. Hence the spikes occur rarely. 
+
+\begin{figure*}[ht]
+    \centering
+    \begin{subfigure}{.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/hyena_time_breakdown_B4_N19_D768_L32768_H100.png}
+    \caption{\small}
+    \label{fig:hyena-breakdown}
+    \end{subfigure}%
+    \begin{subfigure}{.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/plot_B=4_D=768_N=19_L=32768_cum_mixer_times_H100.png}
+    \caption{\small}
+    \label{fig:hyena-mixer}
+    \end{subfigure}%
+    \begin{subfigure}{.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/plot_B=4_D=768_N=19_L=32768_token_times_H100.png}
+    \caption{\small}
+    \label{fig:hyena-per-token}
+    \end{subfigure}
+\caption{\small Real world Hyena experiments: (a) End-to-end inference time breakdown shows Hybird provides 1.6$\times$ speed-up over optimized baselines  (b) Cumulative mixer time of Hybrid scales 50$\times$ better (c) Hybrid shows low variance in per-token response time except at the tokens positions where large tiles are computed.}
+\end{figure*}
+\subsection{$\tau$ Implementations}
+\label{sec:impls}
+\label{sec:optimizations}
+Algorithm~\ref{alg:flash-inference-lcsm} assumes an implementation of primitive $\tau$ that accounts for the contribution of a range of inputs to a range of outputs of a convolution. We considered $7$ different implementations but, here, we only present results of the ones on the Pareto Frontier - that is, those optimal for at least some $(B, N, D, U)$ setting. There are $4$ such implementations, of two types:
+\begin{enumerate}[label=(\arabic*)]
+\item Depthwise-separable 1D Convolution: We use two types of implementations (a) \emph{Conv1D} refers to the default PyTorch \citep{pytorch2019} kernel, that requires explicit padding (b) \emph{Flash Conv1D} refers to fused kernel by FlashFFTConv \citep{fu2023flashfftconv} - these are asymptotically quadratic in tile size $U$. 
+\item FFT based convolution: we again use two implementations (a) PyTorch native, shown as \emph{FFT}, that requires computing the FFTs of inputs, followed by pointwise multiplication and lastly performing the inverse FFT operation. (b) the second is provided by FlashFFTConv that does all the above in a single fused kernel shown as \emph{FlashFFT}- both these scale as $O(U \log U)$.
+\end{enumerate}
+
+\subsection{Mixer Isolation study and Hybridization of $\tau$ implementations}
+We evaluate the different convolution implementations for all settings of $B, D, M, U$ and observe that each of these four implementation lies on the pareto frontier curve of tile size vs latency as shown in Figure~\ref{fig:synthetic-pareto}. Our \emph{Hybrid} approach dynamically chooses the best $\tau$ implementation for a given tile size $U$ based on the isolated empirically-measured efficiency of each implementation as shown in Figures~\ref{fig:synthetic-cum}. Figure~\ref{fig:synthetic-breakdown} shows the cumulative token time breakdown for the mixer and non-mixer components of the synthetic setup for all our $\tau$ implementations. We observe an increase in the non-mixer components due to significant reduction in GPU kernel time that exposes the CPU kernel dispatch overhead for the MLP blocks in the non-mixer components.
+
+\begin{figure*}[ht]
+    \centering
+    \begin{subfigure}{.26\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/conv_bench_B=1_M=36_D=256_maxT=65536_H100.png}
+    \caption{\small}
+    \label{fig:synthetic-pareto}
+    \end{subfigure}%
+    \begin{subfigure}{.27\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/plot_B=1_D=256_N=37_L=131072_cum_token_times_mlp_H100.png}
+    \caption{\small}
+    \label{fig:synthetic-cum}
+    \end{subfigure}%
+    \begin{subfigure}{.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/synthetic_time_breakdown_B4_N19_D768_L32768_mlp_H100.png}
+    \caption{\small}
+    \label{fig:synthetic-breakdown}
+    \end{subfigure}
+\caption{\small Mixer Isolation in a Synthetic setting: (a) Different implementations of $\tau$ are optimal for different tile sizes creating a pareto optimal curve for Hybrid to choose, (b) Cumulative mixer inference of Hybrid achieves the best of all $\tau$ Implementations (c) End-to-end cumulative token inference breakdown: methods based on our tiling expose CPU overhead due to significantly reduced FLOPs and DRAM accesses}
+\label{fig:cum}
+\end{figure*}
+\subsection{Improvements justification}
+This significant speed-up can be attributed to:
+
+\begin{enumerate}[label=(\arabic*)]
+    \item The significantly lower $O(L\log^2 L)$ FLOPs required for our tile computation approach compared to the $\Omega(L^2)$ FLOPs required by \emph{Eager} and \emph{Lazy} counterparts. This is shown in Figure~\ref{fig:hyena-mixer} where methods based on our tiling outperform by a large constant the quadratic methods in terms of time spent on the mixer components.
+    \item Drastically reduced activation memory access from $\Omega(L^2)$ for \emph{Eager} and \emph{Lazy} to out $O(L\log L)$ tiling-based methods. This can be shown through the performance of \emph{Flash Conv1D} (Figure~\ref{fig:synthetic-cum}) which outperforms lazy and eager by a margin although it also performs $\Omega(L^2)$ FLOPs - it does so in a more memory-friendly and kernel-optimizable way.
+    \item The dynamic choice of best $\tau$ implementation for given tile $U$ - hybrid outperforming any method using a fixed implementation (Figure~\ref{fig:synthetic-cum}).
+    \item Our engineering contributions: first, the DFT for the convolutional kernel is pre-computed ahead of time for $\log_2(L) - 1$ tile sizes. Second, Flash-FFT configurations are pre-initialized for these tile sizes to maximize hardware performance. Third, right padding is used instead of left padding to reduce computation time by half. Fourth, properties of circular convolution are exploited to halven FFT length. Finally, tile calculations are parallelized across layers to saturate memory bandwidth for small tile computations and optimize computation for large tile computations, resulting in improved performance (one can notice improvements of $10-20$\% even in the Eager and Lazy implementations alone) 
+\end{enumerate}
+
+\label{sec:hybridizaion}
+
+
+
+\section{Conclusion and Further Work}
+
+We propose a framework for performing inference in certain autoregressive sequence models. Among such models, LCSMs such as Hyena, are noteworthy: there, our framework provides an $O(L\log^2 L)$ inference algorithm which, when run empirically, yields up to $\times 1.6$ time-efficiency improvement. The framework exploits a causal, fractal tiling that helps save on data movement and share computation. Moreover, it allows for almost-complete across-layers parallelization of $\mixer$-related workload. 
+
+An interesting future direction to pursue is that of designing architectures that fit out framework requirements and thus get fast-inference by construction. Furthermore, in the class of LCSMs, we have noted that one can achieve the same theoretical complexity if filters are made data-dependent, and, while previous works \citet{arora2023zoology, karami2024orchid} have shown the potential for these, they are not yet causal so looking into how to make filters data-dependent in a causal way is another promising direction.
+
+
+

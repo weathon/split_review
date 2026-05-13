@@ -1,0 +1,943 @@
+\title{Faster Cascades via Speculative Decoding}
+
+\begin{abstract}
+Cascades and speculative decoding are two common approaches to improving language models' inference efficiency. 
+Both approaches 
+involve
+interleaving models of different sizes, 
+but via fundamentally distinct mechanisms:
+cascades employ a \emph{deferral rule} that invokes the larger model only for ``hard'' inputs,
+while speculative decoding uses \emph{speculative execution} to primarily invoke the larger model in parallel verification mode.
+These mechanisms offer different benefits: empirically, cascades offer better cost-quality trade-offs, often even outperforming the large model, while theoretically, speculative decoding offers a guarantee of quality-neutrality. 
+In this paper, we leverage the best of both these approaches by designing new 
+\emph{speculative cascading} techniques that implement their deferral rule through speculative execution. We characterize the optimal deferral rule for our speculative cascades, and employ a plug-in approximation to the optimal rule. 
+Experiments with Gemma and T5 models on a range of language benchmarks show that our approach yields better cost-quality trade-offs than cascading and speculative decoding baselines.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have yielded significant advances in quality on a range of natural language processing tasks~\citep{Radford:2018,Raffel:2020,Brown:2020,Black:2022,Chowdhery:2022,Wei:2022,Chung:2022,Tay:2023,Anil:2023,Touvron:2023,Gemini:2023}, at the cost of an 
+increase in inference latency.
+This has sparked a growing body of literature on reducing LMs' inference costs without (overly) compromising 
+on quality~\citep{Elbayad:2020,Pope:2022,Schuster:2022,Leviathan:2023,chen2023accelerating,Sheng:2023,Sun:2023}.
+One such line of work involves constructing a family of models of various sizes (e.g., a small and large model), and suitably orchestrating amongst them to make a prediction.
+Two canonical instantiations of this strategy are \emph{model cascading}~\citep{wang2020wisdom,Mamou:2022,Varshney:2022,Khalili:2022,Dohan:2022,Chen:2023a,gupta2024language,Ding:2024} and \emph{speculative decoding}~\citep{Stern:2018,chen2023accelerating,Leviathan:2023,Sun:2023,Li:2024,Xia:2024}.
+
+While similar in spirit, 
+cascades and speculative decoding are fundamentally different in details.
+Cascades
+employ a \emph{deferral rule} to identify ``hard'' inputs,
+and only invoke larger models on such inputs.
+For example,
+in a two-model cascade, one first invokes the smaller model, and uses its associated probability of the generated output to decide whether to defer to the larger model.
+By contrast, 
+speculative decoding 
+uses a small model to \emph{draft} a block of tokens via standard auto-regressive decoding, which are then \emph{verified} in parallel by a large model. 
+One 
+then accepts all drafted tokens until the first ``implausible'' one,
+which is rolled back 
+based on
+the larger LM's prediction. 
+
+Owing to their different mechanisms, both methods have complementary strengths.
+Cascades seek to output distributions that have the best quality for a given cost budget, 
+and potentially provide \textit{\haricolor{red}better cost-quality trade-offs}, sometimes even
+yielding better accuracies than the individual models they are constructed with \citep{jitkrittum2024does, kim2023speculative} (\S\ref{sec:cascade-meets-speed}).  
+By contrast,
+speculative decoding is theoretically guaranteed to match the output distribution (or a close approximation thereof~\citep{Tran-Thien_2023}), and are practically observed to provide impressive speed-ups~\citep{Stern:2018,chen2023accelerating,Leviathan:2023,Sun:2023}.
+Given the complementary nature of these two approaches, a natural question arises: \emph{can we leverage the best of both techniques?} %To address this question, we first observe that any speculative decoding or cascading technique can be described by the distribution they output. 
+
+In this paper, we do so by designing new 
+techniques for two-model cascades
+that implement their deferral rule in a speculative manner: 
+we have the smaller model generate drafts auto-regressively, and the larger model execute in parallel on the drafts to decide \emph{whether or not to defer on them}. We show that this \emph{speculative cascading} approach %matches the quality  of a regular cascade but at significantly lower inference cost, and often yields better 
+yields better
+cost-quality trade-offs than both standard cascades and speculative decoding. % \citep{leviathan2023fast, Tran-Thien_2023}.
+In detail, we make the following contributions:%\todosk{let's highlight this because this is the core difference to the vanilla speculative decoding?}. 
+\begin{enumerate}[itemsep=2pt,topsep=0pt,leftmargin=16pt,label=(\roman*)]
+    \item  We introduce a general recipe for speculative execution, where we seek to mimic a general \emph{target} distribution that interleaves the drafter's and verifier's %output
+    distributions.
+    Lossy speculative sampling \citep{Tran-Thien_2023} is a special case of 
+    this recipe 
+    for a particular target distribution (\S\ref{sec:gen-speed}).
+    
+    \item We  show how common cascading %deferral 
+    rules, 
+    such as Chow's rule \citep{chow1970optimum} and confidence-difference thresholding \citep{jitkrittum2024does}, 
+    can be implemented speculatively by plugging in their target distribution into our framework. We refer to these as \emph{speculative cascades} (\S\ref{sec:seq-to-spec}).
+
+    \item 
+    We characterize the \emph{theoretically optimal} deferral rule for a speculative cascade, and design a speculative cascading technique that implements a plug-in estimate to the optimal rule (\S\ref{sec:opt-spec}, Lemma \ref{lem:spec-def-opt}, Table \ref{tab:targets}). {\haricolor{blue} We also present token-specific variants of our deferral rules (\S\ref{sec:sample-dep}).}
+    \item Through experiments with {
+    \haricolor{blue}
+    Gemma  \citep{team2024gemma} and T5 models \citep{raffel2020exploring} on a range of benchmark language tasks including summarization, translation, reasoning, coding and QA}, we show that speculative cascades %from T5 \citep{raffel2020exploring} and Gemma models \citep{team2024gemma} of different sizes 
+    are able to provide better cost-quality trade-offs than their sequential cascade and speculative decoding counterparts (\S\ref{sec:expts}).
+\end{enumerate}
+
+
+
+\section{A Tale of Two Efficient LM Inference Strategies}
+
+\label{sec:prelims}
+
+Let $\mathscr{V}$ denote a finite vocabulary of \emph{tokens},
+with $\mathscr{V}^*$ denoting the set of all \emph{sequences} generated by this vocabulary. 
+Let $\Delta_\cV$ denote the set of all probability distributions over tokens in $\cV$. 
+Given an arbitrary length sequence $x = x_1 x_2 \ldots x_L \in \mathscr{V}^*$ and index $i \leq L$, denote by $x_{<i} = x_1 x_2 \ldots x_{i - 1}$. 
+A \emph{language model} (LM)
+is a
+probability distribution over $\mathscr{V}^*$. 
+Let $\Pr$ denote the ground-truth probability distribution over $\mathscr{V}^*$. This could be, for example, a distribution over prompt-response pairs
+that the LM may encounter during deployment, or a distribution of sequences used to pre-train the LM. 
+We will measure the quality of an LM based on how closely it mimics $\Pr$. 
+
+Suppose we are provided two LMs $q$ and $p$, 
+where $p$ is the larger (more expensive)
+model. Our goal is to design an inference strategy that selectively invokes $q$ and $p$ to  trade-off between quality and latency (%to a first-order approximation, 
+which may be approximated by the fraction of times that $p$ is invoked).
+We will denote by $q(x_t|x_{<t})$ the probability $q$ associates to token $x_t \in \mathscr{V}$ given prefix 
+$x_{<t} \in \mathscr{V}^{t-1}$, and by $p(x_t|x_{<t})$ 
+the same distribution from model $p$. Whenever it is clear from context, we will hide the conditioning on prefix $x_{<t}$, and use the shorthand $p_t(\cdot)$ for $p(\cdot|x_{<t})$ and $q_t(\cdot)$ for $q(\cdot|x_{<t})$.  
+
+\textbf{Cascades} 
+are an effective strategy to trade-off cost and quality by having the smaller model $q$ handle the ``easy'' samples, 
+and the larger model $p$ handle the ``hard'' ones \citep{gupta2024language,Yue:2024}. A common cascading approach  is confidence thresholding or Chow's rule \citep{chow1970optimum, jitkrittum2024does},
+where we first run $q$ on the  input, and defer to $p$ when $q$'s {confidence} for its generated response is sufficiently low. This strategy is typically
+implemented at the \emph{sequence-level}, where for a given prefix $x_{<m}$ %$x_1x_2\ldots x_{m-1}$,
+we invoke $q$ to generate a complete response $x_{m}\ldots x_{m+n}$. We evaluate $q$'s predicted probability for the response, and check whether it falls below a threshold $\alpha \in [0,1]$:
+\begin{align}
+\textstyle
+ q(x_{m}\ldots x_{m+n}\,|\,x_{<m}) < 1 - \alpha.
+ \label{eq:sequential-chow}
+\end{align}
+If the above holds, 
+we defer to $p$ to generate a new response;
+otherwise,
+we retain $q$'s response. One may  tune the threshold to achieve a desired cost-quality trade-off. The literature also offers variants of Chow's rule that use a more nuanced aggregation of \emph{per-token} uncertainties \citep{gupta2024language}.  
+
+\textbf{Speculative decoding} 
+is an alternate strategy that applies \emph{token-level} interleaving between $q$ and $p$,  
+resulting in \emph{provably} matching the larger model quality at a reduced inference cost~\citep{Stern:2018,Leviathan:2023}.
+Given a prefix $x_{<t}$, we 
+\emph{draft} $\gamma$ draft tokens $x_t, \ldots, x_{t+\gamma-1}$ via auto-regressive sampling from $q$, 
+and \emph{verify} if these tokens can be accepted
+by
+running $p$ in parallel on the $\gamma$ prefixes $x_{<t}, \ldots, x_{<t+\gamma-1}$. 
+We then rollback to the first rejected token $t+j^*$ (where $j^* \in \{ 0, 1, \ldots, \gamma - 1 \}$), replace $x_{t+j^*}$
+with a new token, and repeat the process {%\color{red} 
+with prefix $x_{< t + j^* + 1}$}.
+
+During the verification stage, a draft token $x_{t+j}$ generated by $q$ is accepted 
+with probability
+$\min\left( 1, \frac{p_{t+j}(x_{t+j})}{q_{t+j}(x_{t+j})} \right)$
+and rejected otherwise,
+recalling the shorthand
+$q_{t+j}(\cdot) = q(\cdot|x_{<t+j})$ and $p_{t+j}(\cdot) = p(\cdot|x_{<t+j})$. 
+A rejected token is then replaced by a new token sampled from a modified distribution
+$\operatorname{norm}\left(\max\left\{0,\, p_{t+j}(\cdot) - q_{t+j}(\cdot)\right\}\right),$ 
+where $\text{norm}( \cdot )$
+denotes normalization to sum to 1. 
+This sampling process is 
+provably
+equivalent to sampling $\gamma$ tokens auto-regressively from $p$ for prefix $x_{<t}$~\citep{Leviathan:2023}. 
+We summarize this speculative sampling procedure in Algorithm \ref{alg:spec-decode}. 
+Each invocation of this algorithm generates 
+at most $\gamma + 1$ next tokens (and at least one) 
+\todoakm{and at least $1$? Hari: done!}
+for a given prefix $x_{<t}$. One may run this algorithm multiple times to generate a complete output sequence.
+
+In practice, one may employ a lossy variant \citep{Tran-Thien_2023} of the above sampling that allows some \emph{deviation} from verifier's distribution $p$. In this case, a draft token $x_{t+j}$ % $x_{t'}$
+is accepted 
+with probability
+$\min\left( 1, \frac{p_{t+j}(x_{t+j})}{(1 - \alpha) \cdot q_{t+j}(x_{t+j})} \right)$,
+where $\alpha \in [0, 1)$ is a strictness parameter, with higher values indicating greater deviation from $p$.
+A rejected token may then be replaced by a token sampled from the  residual distribution
+$\operatorname{norm}\left(\max\left\{0,\, \frac{1}{\beta}\cdot p_{t+j}(\cdot) - q_{t+j}(\cdot)\right\}\right),
+$
+where $\beta \geq 1 - \alpha$ is a parameter that depends on $\alpha$, $q$ and $p$. 
+A common heuristic is to simply set $\beta = 1$ \citep{ zhou2024distillspec}.
+
+\if 0
+This deferral strategy may  be implemented either at the \emph{sequence level}, where  the same model is used to predict the entire output sequence for a given context \citep{Chen:2023a,jitkrittum2024does}, or at the \emph{token level}, where the individual token could be predicted by different models in the cascade \citep{chen2023cascade}.\todo{Find better references} Sequence-level cascades are typically employed when $M_p$ is very expensive to query, and needs to be invoked only sparingly. Token-level cascades are useful in %the same settings where speculative decoding is applied
+settings where it is indeed feasible to  interleave of two models at the token level. In this paper, our focus is on the latter setting.
+\todoakm{this section seems to mix new material (token-level cascades) with old material (speculative decoding)}
+
+\textbf{Chow's rule.} A common approach to cascading is confidence-based thresholding or Chow's rule \citep{chow1970optimum, jitkrittum2024does}, where we first run $M_q$ on the given prefix, and defer to $M_p$ when the \textit{maximum predicted probability} from the model falls below a threshold. More precisely, one first computes the smaller model's distribution $q(\cdot|x_{<t})$, check whether $\max_{v \in \cV}\,q(v|x_{<t})$ is below a pre-chosen threshold; if the answer is no, 
+sample
+$x_t \sim q(\cdot|x_{<t})$; otherwise evaluate $p(\cdot|x_{<t})$, and  sample $x_t \sim p(\cdot|x_{<t})$. 
+
+More generally, we may design a deferral rule $r: \cV^{t-1}  \rightarrow \{0,1\}$ that takes the prefix $x_{<t}$ as input and outputs a binary decision, with $r(x_{<t}) =  1$ indicating that we sample from $M_p$. For example, Chow's deferral rule can be written as:
+\begin{align}
+    r_{\rm \tt Chow01}(x_{<t}) = 1 ~\iff~\max_{v \in \cV}\,q(v|x_{<t}) < 1 - \alpha,
+    \label{eq:chow01}
+\end{align}
+where $\alpha$ is a cost parameter; the higher the value, the lower is the frequency of deferral to $M_p$. One may also use a confidence measure different from the maximum probability, such as the entropy of the small model's probability distribution:
+\begin{align}
+    r_{\rm \tt ChowLog}(x_{<t}) = 1 ~\iff~\entropy\big(q(\cdot|x_{<t})\big) > \alpha,
+    \label{eq:chowlog}
+\end{align}
+where $\entropy(q) = -\sum_{v \in \cV} q(v) \cdot \log(q(v)).$ 
+While Chow's rule is easy to implement and effective in many applications, it can be sub-optimal if the smaller model's maximum token probability is not reflective of which of the two models are better equipped to predict the next token for a given prefix \citep{jitkrittum2024does}.
+
+\textbf{Optimal deferral rule.} 
+We now derive the optimal deferral rule $r$ for a cascade. For this, we must first specify an objective to minimize at each step $t$. 
+Adopting the setup from \citep{jitkrittum2024does,  gupta2024language}, a reasonable objective to  minimize is the expected loss from the deferral rule against the ground-truth distribution, with an added cost for  deferring to the larger model. We state this below for a fixed prefix $x_{<t}$,
+using the short-hand $q_t(v)$ for the conditional distribution $q(v|x_{<t})$ and $p_t(v)$ for $p(v|x_{<t})$:
+\todoakm{We need to introduce $\mathbb{P}$ somewhere}
+\begin{align}
+L_{\rm def}(r) &=\E_{x_t \sim \Pr(\cdot|x_{<t})}\Big[ \big(1 - r(x_{<t})\big) \cdot \ell(x_t, q_t) + r(x_{<t}) \cdot \big(\ell(x_t, p_t) + \alpha\big) \Big],
+\label{eq:seq-def-risk}
+\end{align}
+for a cost penalty $\alpha > 0$ and loss function $\ell: \cV \times \Delta_{\cV} \rightarrow \mathbb{R}_+$.
+\todoakm{define $\Delta$}
+Common choices for $\ell$ include the 0-1 loss $\ell_{\zo}(x_t, q_t) = \1\left(x_t \ne \argmax_v q_t(v)\right)$  and the log loss $\ell_{\log}(x_t, q_t) = -\log\left(q_t(x_t)\right).$
+\begin{lemma}[{Optimal deferral for sequential cascades} \citep{jitkrittum2024does}]
+The minimizer of \eqref{eq:seq-def-risk} is of the form:
+\begin{align}
+    r^*(x_{<t}) = 1 ~~\iff~~ \E_{x_t \sim \Pr(\cdot|x_{<t})}\left[\ell(x_t, q_t)\right] \,>\, \E_{x_t \sim \Pr(\cdot|x_{<t})}\left[\ell(x_t, p_t)\right] + \alpha.
+    \label{eq:seq-def-opt}
+\end{align}
+\label{lem:seq-def-opt}
+\end{lemma}
+Intuitively, we compare the expected loss  from $M_q$ with the expected cost of invoking $M_p$, and decide to defer when the latter is smaller.\todo{Explain that this optimization problem is set up for a fixed prefix $x_{<t}$. One may also consider the coupled optimization problem across all prefixes from 1 to $T$.}
+
+\textbf{Plug-in estimator for \eqref{eq:seq-def-opt}.} %There are two practical challenges in employing the optimal rule in \eqref{eq:seq-def-opt}. First, it requires computing expectations over the ground-truth   distribution $\Pr(\cdot|x_{>t})$, which is not available during inference time. Second, it  requires access to the larger model's distribution $p$, which in a sequential cascade, is not available at the time a deferral decision is made.
+The optimal rule in \eqref{eq:seq-def-opt} requires computing expectations over the ground-truth   distribution $\Pr(\cdot|x_{>t})$, which is not available during inference time.
+ A common approach in the cascades literature is to replace the expected losses with the models' confidence estimates  \citep{jitkrittum2024does}. For example, when $\ell = \ell_\zo$, it may be reasonable to use $1 - \max_v q_t(v)$ as an estimate of the expected 0-1 loss $\E_{x_t \sim \Pr(\cdot|x_{<t})}\left[\ell_\zo(x_t, q_t)\right]$ and $1 - \max_v p_t(v)$ as an estimate of $\E_{x_t \sim \Pr(\cdot|x_{<t})}\left[\ell_\zo(x_t, q_t)\right]$.  The extent to which these estimates are accurate depend on how well  $M_p$ and $M_q$ are calibrated \citep{Guo:2017}. The resulting plug-in estimator for \eqref{eq:seq-def-opt} is given by:
+\begin{align}
+\textstyle
+    r_{\rm\tt Diff01}(x_{<t}) = 1 ~~\iff~~ \max_{v} q_t(v)  \,<\, \max_{v} p_t(v) - \alpha.
+    \label{eq:seq-opt-def-01-plugin}
+\end{align}
+Similarly, when $\ell = \ell_{\log}$, we may use the entropy $-\sum_v q_t(v)\cdot \log(q_t(v))$ from $q_t$ as an estimate of its expected log-loss, and similarly for $p_t$, giving us the plug-in estimator: 
+\begin{align}
+\textstyle
+    r_{\rm\tt DiffLog}(x_{<t}) = 1 ~~\iff~~ \sum_v q_t(v)\cdot \log(q_t(v))  \,<\, \sum_v p_t(v)\cdot \log(p_t(v)) - \alpha.
+    \label{eq:seq-opt-def-log-plugin}
+\end{align}
+
+Note that both  $r_{\rm\tt Diff01}$ and $r_{\rm\tt DiffLog}$ cannot be used directly in a cascade, as they need the larger model to be invoked to compute $p$. However, they serve as \emph{oracle} deferral rules that allow to analyze the head-room available to improve upon Chow's rule.\todo{Mention about early-exit routers somewhere}
+ 
+
+
+\fi
+
+\begin{table}[]
+    \centering
+    \caption{Target distributions associated with different inference algorithms, where $\alpha$ is a free parameter and $\beta \geq 1-\alpha$ depends on $\alpha$, $q$ and $p$. The last column indicates whether the  execution is sequential (Algorithm \ref{alg:seq-sampling}), via an oracle (Algorithm \ref{alg:oracle}), or speculative (Algorithm \ref{alg:spec-cascade}) \citep{Leviathan:2023}. %The third row presents a variant of the algorithm in \cite{kim2023speculative}; the original algorithm applies speculative decoding with varying draft window size and a deterministic rejection rule 
+    See~(\ref{eqn:t_delta}) for details on $\delta$.
+    The third row presents a variant of the BiLD algorithm of \cite{kim2023speculative}, where $D(q, p)$ is a measure of discrepancy between $q$ and $p$; the original algorithm differs  in the use of a deterministic speculative decoding procedure with a dynamic draft window 
+    (see \S\ref{sec:related}). %The sequential cascades in the fifth ({\tt Diff01}) and  sixth row ({\tt DiffLog}) use deferral rules  that cannot be implemented exactly, because in this case, distribution $p$ is not available when the deferral decision is made; one can instead use a fitted model $\widetilde{\delta}(q, x_{<t})$ that approximates $\delta(q, p)$ using only distribution $q$ and the prefix $x_{<t}$.
+    }
+    \resizebox{\linewidth}{!}{%
+    \begin{tabular}{@{}llll@{}}
+    \toprule
+    Inference strategy & 
+    Deferral decision $\delta(q,p)$ &
+    Target distribution $\pi(x)$ & Execution\\
+    \midrule
+         SpecDecoding  \citep{Leviathan:2023} &
+        - &
+         $p(x)$
+          & Speculative
+         \\[2pt]
+         Lossy SpecDecoding  \citep{Tran-Thien_2023} & 
+         - &
+         $\max\{\min\{ q(x), \frac{p(x)}{1 - \alpha} \}, 
+         \frac{p(x)}{\beta}\}
+         $
+         & Speculative
+         \\[2pt]
+         BiLD* \citep{kim2023speculative} & 
+        $\1\big(\, D(q, p) > \alpha \big)$
+         &
+         $ (1 - \delta) \cdot q(x) + \delta \cdot p(x)$
+         & Speculative
+         \\
+         \midrule
+         TokenCascade [{\tt Chow}] \citep{chow1970optimum} &
+         $\1\big(\max_v q(v) < 1 - \alpha\big)$ 
+         & $ (1 - \delta) \cdot q(x) + \delta \cdot p(x)$
+         & Sequential
+         \\[2pt]
+         Oracle [{\tt Diff}] \citep{jitkrittum2024does}
+         & $\1\big(\max_v q(v) < \max_v p(v) - \alpha\big)$ 
+         & $ (1 - \delta) \cdot q(x) + \delta \cdot p(x)$
+         & Oracle
+         \\
+         \midrule
+         SpecCascade [{\tt Chow}]
+         & $\1\big(\max_v q(v) < 1 - \alpha\big)$ 
+         &$ (1 - \delta) \cdot q(x) + \delta \cdot p(x)$
+         & Speculative
+         \\[2pt]
+         SpecCascade [{\tt Diff}]
+         & $\1\big(\max_v q(v) < \max_v p(v)  - \alpha\big)$ 
+         &$ (1 - \delta) \cdot q(x) + \delta \cdot p(x)$
+         & Speculative
+         \\[2pt]
+         SpecCascade [{\tt OPT}]
+         & $\1\big(\max_v q(v) < \max_v p(v)  - \alpha \cdot D_{\tv}(p, q)\big)$ 
+         &$ (1 - \delta) \cdot q(x) + \delta \cdot p(x)$
+         & Speculative\\%[2pt]
+          \bottomrule
+    \end{tabular}%
+    }
+    \label{tab:targets}
+\end{table}
+
+
+
+\section{Cascades Meet Speculative Decoding}
+
+\label{sec:cascade-meets-speed}
+
+Both cascades and speculative decoding interleave models of different sizes to reduce inference cost, but fundamentally differ in the mechanisms they use. 
+As a step towards comparing the strengths and weaknesses of these approaches, we first
+describe how one may design a \emph{token-level cascade}.
+
+\subsection{Warm-up: Token-level cascades}
+\label{sec:token-cascades}
+It is straightforward to extend 
+the sequence-level
+Chow's rule from \S\ref{sec:prelims} to form a \emph{token-level cascade} between  $q$ and $p$. For a prefix $x_{<t}$, we first compute the smaller model's distribution $q(\cdot|x_{<t})$, and check whether $\max_{v \in \cV}\,q(v|x_{<t})$ is below a pre-chosen threshold.
+if so,
+we evaluate $p(\cdot|x_{<t})$, and  sample $x_t \sim p(\cdot|x_{<t})$;
+otherwise, 
+we  sample
+$x_t \sim q(\cdot|x_{<t})$.
+
+More generally, we may design a token-level \emph{deferral rule} ${r}: \cV^{t-1}  \rightarrow \{0,1\}$ that takes the prefix $x_{<t}$ as input and outputs a binary decision, with ${r}(x_{<t}) =  1$ indicating that we 
+defer to $p$ (i.e., draw a sample from $p$ rather than $q$). 
+For example, token-level Chow's rule can be written as:
+\begin{align}
+\textstyle
+    {r}_{\rm \tt Chow}(x_{<t}) = 1 ~\iff~\max_{v \in \cV}\,q(v|x_{<t}) < 1 - \alpha,
+    \label{eq:chow01}
+\end{align}
+where $\alpha$ is a threshold parameter; 
+the higher the value, the lower is the frequency of deferral to $p$. 
+One may also use other confidence measures than the maximum probability, such as the entropy of the small model's probability distribution.
+We elaborate in \S\ref{app:chow}
+that the  choice of confidence measure would depend on the evaluation metric of interest;  Equation \ref{eq:chow01} 
+is typically prescribed when the cascade's quality 
+is evaluated in terms of its accuracy against the ground-truth distribution on individual tokens, whereas entropy % \eqref{eq:chowlog} 
+is prescribed when the metric of interest is the cross-entropy loss.
+
+\subsection{Optimal token-level cascade deferral}
+\label{sec:opt-sec-cascade}
+While Chow's rule \eqref{eq:chow01} is easy to implement, 
+it can be sub-optimal if the smaller model's max-token probability is not reflective of which of the two models are better equipped to predict the next token for a given prefix \citep{jitkrittum2024does}.
+Given this, it is natural to ask what the \emph{optimal} deferral rule $r$ for a token-cascade looks like,
+and whether we can reasonably approximate this rule. 
+
+For this, we must first specify an objective to minimize at each step $t$. 
+Following the prior cascade literature \citep{jitkrittum2024does,  gupta2024language}, a reasonable objective to  minimize is the expected loss from the deferral rule against the ground-truth distribution
+$\Pr$,
+with an added cost for  deferring to the larger model. We state this below for a fixed prefix $x_{<t}$,
+using as before
+\todoakm{``using once more''? Hari: done!}
+the short-hand $q_t(\cdot)$ for $q(\cdot|x_{<t})$ and $p_t(\cdot)$ for $p(\cdot|x_{<t})$:
+\begin{align}
+L_{\rm def}(r; x_{<t}) &=\E_{v \sim \Pr(\cdot|x_{<t})}\Big[ \big(1 - r(x_{<t})\big) \cdot \ell(v, q_t) + r(x_{<t}) \cdot \big(\ell(v, p_t) + \alpha\big) \Big],
+\label{eq:seq-def-risk}
+\end{align}
+for a cost penalty $\alpha \geq 0$ 
+and loss function $\ell: \cV \times \Delta_{\cV} \rightarrow \mathbb{R}_+$.
+Common choices for $\ell$ include the 0-1 loss $\ell_{\zo}(v, q_t) = \1\left(v \ne \argmax_{v'} q_t(v')\right)$  and the log loss $\ell_{\log}(v, q_t) = -\log\left(q_t(v)\right).$
+\begin{lemma}[{Optimal deferral for token-level cascades} \citep{jitkrittum2024does}]
+\label{lem:seq-def-opt}
+The minimizer of \eqref{eq:seq-def-risk} is of the form:
+\begin{align}
+    r^*(x_{<t}) = 1 ~~\iff~~ \E_{v \sim \Pr(\cdot|x_{<t})}\left[\ell(v, q_t)\right] \,>\, \E_{v \sim \Pr(\cdot|x_{<t})}\left[\ell(v, p_t)\right] + \alpha.
+    \label{eq:seq-def-opt}
+\end{align}
+\end{lemma}
+Intuitively, we compare the expected loss  from $q$ with the expected cost of invoking $p$, and decide to defer when the latter is smaller.
+We note here that this optimization problem is set up for a \emph{fixed} prefix $x_{<t}$. One may also consider the coupled optimization problem across all positions.
+\todo{Explain that this optimization problem is set up for a fixed prefix $x_{<t}$. One may also consider the coupled optimization problem across all prefixes from 1 to $T$. Hari: done!}
+
+\emph{Plug-in estimator for \eqref{eq:seq-def-opt}.} %There are two practical challenges in employing the optimal rule in \eqref{eq:seq-def-opt}. First, it requires computing expectations over the ground-truth   distribution $\Pr(\cdot|x_{>t})$, which is not available during inference time. Second, it  requires access to the larger model's distribution $p$, which in a sequential cascade, is not available at the time a deferral decision is made.
+The optimal rule in \eqref{eq:seq-def-opt} requires computing expectations over the ground-truth   distribution $\Pr(\cdot|x_{>t})$, which is not available during inference time.
+ A common approach in the cascades literature is to replace the expected losses with the models' confidence estimates  \citep{jitkrittum2024does}. For example, when $\ell = \ell_\zo$, it may be reasonable to use $1 - \max_v q_t(v)$ as an estimate of the expected 0-1 loss $\E_{x_t \sim \Pr(\cdot|x_{<t})}\left[\ell_\zo(x_t, q_t)\right]$ and $1 - \max_v p_t(v)$ as an estimate of $\E_{x_t \sim \Pr(\cdot|x_{<t})}\left[\ell_\zo(x_t, q_t)\right]$.  The extent to which these estimates are accurate depend on how well  $q$ and $p$ are calibrated \citep{Guo:2017}. The resulting plug-in estimator 
+ for (\ref{eq:seq-def-opt}) thresholds the \textit{difference} of confidence estimates from both distributions:
+\begin{empheq}[box=\widefbox]{align}
+\textstyle
+    {\hat{r}_{\rm\tt Diff}(x_{<t}) = 1 ~~\iff~~ \max_{v} q_t(v)  \,<\, \max_{v} p_t(v) - \alpha.}
+    \label{eq:seq-opt-def-01-plugin}
+\end{empheq}
+ 
+\begin{remark}[\textbf{Oracle deferral rules}]
+\label{rem:oracle}
+For efficiency reasons, 
+  $\hat{r}_{\rm\tt Diff}$ %and $\hat{r}_{\rm\tt DiffLog}$ 
+  cannot be directly used in a \emph{token-level} cascade,\todowj{``to improve efficiency''? We can if we want quality, right? Hari: yep, added a clarification}
+  as it needs the large model to be invoked at every step $t$. 
+  However, it serves as an  \emph{oracle} that allows to analyze the head-room available to improve upon Chow's rule.
+  See also Remark~\ref{rem:exact-oracle}.
+\end{remark}
+
+\subsection{\haricolor{red}Contrasting token-level cascade and speculative decoding trade-offs}
+\label{sec:cascade-ensemble-effect}
+Token-level cascades and 
+speculative decoding differ in the distribution over tokens they seek to mimic. Speculative decoding seeks to mimic the large model's output distribution, and is usually used when one wants to match the quality of the large model. 
+On the other hand, token-level cascades seek to output distributions that closely approximate the ground-truth label distribution and potentially offer \textit{\haricolor{red} good cost-quality trade-offs}, sometimes yielding better quality than even the large model.
+
+Cascades are useful when the draft model fares better than the verifier on some inputs, and one may want to retain the drafter's predictions even when it disagrees with the verifier. Even in cases where both the drafter and verifier fare poorly on some inputs (e.g., due to label noise), one may want to ignore the disagreement between the drafter and verifier to avoid triggering unnecessary  roll-backs. % that would provide no gains in quality.
+
+As a concrete example, we consider token-level cascades of T5 models \citep{raffel2020exploring} of two different sizes finetuned on a WMT EN $\rightarrow$ DE translation \cite{bojar2014findings} and an extreme summarization (XSum) task \citep{narayan2018don}. We construct these cascades using both 
+(token-level)
+Chow's rule  in \eqref{eq:chow01} %(see Algorithm \ref{alg:seq-sampling}) 
+and the oracle {\tt Diff} rule in \eqref{eq:seq-opt-def-01-plugin}, %(see Algorithm \ref{alg:oracle}), 
+and also apply speculative decoding with the smaller (larger) model as the drafter (verifier). % (see Algorithm \ref{alg:spec-decode}). 
+In Figure \ref{fig:oracle_cascade}, we plot quality as a function of fraction of samples deferred to the large model (number of deferrals divided by number of generated tokens), as we vary the cost parameter $\alpha$. 
+Note that with speculative decoding, each verification step\todowj{Minor: worth explicitly mentioning $\gamma$ tokens are verified in parallel.} 
+verifies $\gamma$ tokens in parallel, but 
+is counted as a single deferral to the large model.
+While speculative decoding matches the quality of the large model (right-most point), the oracle yields significantly better 
+cost-qualty trade-offs.
+Even Chow's rule, which is sub-optimal for cascading \citep{jitkrittum2024does}, offers better trade-offs, and
+outperforms speculative decoding in a small region.\todoasr{But does this small improvement comes at some added cost? E.g., higher latency? -- Okay, we seem to be discussing this in the following program. But should we breifly allude to this in the caption of Figure 1 as well? Hari: done!} As noted by \cite{kim2023speculative}, this may be attributed to the ensembling effect in a cascade.
+\todoakm{the caption refers to ``deferral rate'', but the x-axis says ``Fraction of calls''. Hari: changed this as per next comment!}
+\todoakm{maybe the x-axis could be more explicit, like ``\# large-model calls / \# generated tokens''. Hari: done!}
+
+However, as also evident from the plots, token-level cascades require a significantly larger number of deferrals to the large model to achieve the same quality.
+This is because token-level cascades are executed \emph{sequentially}: whenever $q$ defers, we execute $p$  once to generate one next token for the prefix accumulated so far, and the control transfers back to $q$. In contrast, speculative decoding runs $p$ in \emph{scoring} mode to verify $\gamma$ draft tokens from $q$ in parallel.  Moreover,  the stochastic verification algorithm in speculative decoding often results in fewer tokens from $q$ getting rejected compared to the deterministic deferral rules used in a cascade. These observations motivate a natural question: \emph{given their complementary strengths, how can we leverage the best of both these techniques?} 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[scale=0.3]{ICLR2025/plots/iclr_oracle_wmt_large2small_T1.0_sns_deferrals.pdf}
+     \includegraphics[scale=0.3]{ICLR2025/plots/iclr_oracle_xsum_large2base_T1.0_sns_deferrals.pdf}
+    \caption{Plots of quality as a function of the \textit{\haricolor{red}number of deferrals to the larger model divided by the total number of generated tokens} for cascades constructed from T5 models (under temperature sampling with $T = 1$). The left-most point represents the small model and the right-most represents the large model.  We compare token-level cascades constructed with Chow's rule ({\tt Chow}) and an oracle deferral rule ({\tt Diff}), and speculative decoding with block size $\gamma = 5$. \textit{With a cascade, each call to the large model yields exactly one token, whereas with speculative decoding, a single call scores $\gamma$ draft tokens in parallel.}
+    While speculative decoding matches the quality of the large model (see dashed horizontal line), the oracle deferral rule yields significantly better quality
+    on a range of deferral rates; this however comes at the cost of higher number of deferrals to the large model.
+    }
+    \label{fig:oracle_cascade}
+\end{figure}
+
+
+
+\section{Speculative Cascades: Leveraging the Best of Both Worlds}
+
+\label{sec:spec-cascades}
+In addressing the above question, we present our main contribution: a principled approach to combining  the better trade-offs cascades offer with the faster execution of speculative decoding.
+
+\subsection{Speculative decoding with general target distributions}
+\label{sec:gen-speed}
+We begin by considering a generic version of speculative sampling that seeks to mimic a \emph{general} target distribution derived from the drafter's and verifier's distributions.
+In the proposed sampling procedure outlined in Algorithm \ref{alg:gen-speed}, we sample tokens auto-regressively as before from the drafter's distribution. During the verification step, however, we do not compare the drafter's token probabilities against the verifier's  distribution. Instead, we use a user-specified target distribution $\pi = \bT(q, p) \in \Delta_{\cV}$ derived from the drafter's and verifier's distributions at position $t$, for some function $\bT(\cdot,\cdot)$ that is inexpensive to compute.
+We accept a draft token  $x_t$ when $q(x_t) \leq \pi(x_t)$ and reject it otherwise with probability $1 - \frac{\pi(x_t)}{q(x_t)}$. Upon rejection, we re-sample from the residual distribution $\operatorname{norm}\left(\max\{0, \pi(\cdot) - q(\cdot)\}\right)$.
+
+This general procedure not only encompasses standard speculative decoding \citep{Leviathan:2023} for $\bT(q, p) = p$, but also includes lossy speculative decoding \citep{Tran-Thien_2023} as a special case:
+\begin{lemma}
+\label{lem:lossy-sd-target-distr}
+Algorithm \ref{alg:gen-speed} reduces to the lossy speculative sampling procedure in \citep{Tran-Thien_2023} with  parameters $\alpha$ and $\beta$ when $\bT(q, p)(v) = \max\{\min\{ q(v), \frac{p(v)}{1 - \alpha} \},  \frac{p(v)}{\beta}\}$. % and $\beta$ is such that $\sum_v \bT(q, p)(v) = 1$. 
+\end{lemma}
+
+\subsection{From sequential to speculative cascades}
+\label{sec:seq-to-spec}
+Equipped with Algorithm \ref{alg:gen-speed}, we now propose new cascading techniques that implement their deferral rule in a speculative manner. Recall 
+from \S\ref{sec:token-cascades}
+that a 
+token-level
+cascade of two models $q$ and $p$ is defined by a deferral rule $r: \cV^{t-1}\rightarrow \{0,1\}$. 
+For a prefix $x_{<t}$, the next-token distribution at position $t$ modeled by this cascade can be written as:
+\[
+\pi(v) = (1 - r(x_{<t})) \cdot q_t(v) + r(x_{<t}) \cdot p_t(v).
+\]
+In fact, for  all the deferral rules described in \S\ref{sec:prelims}, the resulting distribution can be described by a target distribution function $\bT_\delta$ of the form:
+\begin{equation}
+    \label{eqn:t_delta}
+    \bT_\delta(q, p)(v)
+     = (1 - \delta(q, p)) \cdot q(v) + \delta(q, p) \cdot p(v),
+\end{equation}
+for some function $\delta: \Delta_\cV \times \Delta_\cV \rightarrow \{0,1\}$ that maps  distributions $(q, p)$ to a binary decision. % $\delta(q, p) \in \{0,1\}$. 
+For example, for {\tt Chow}, $\delta(q, p) = \1\big(\max_v q(v) < 1 - \alpha\big)$, and for {\tt Diff}, $\delta(q, p) = \1\big(\max_v q(v) < \max_v p(v) - \alpha\big).$ See Table \ref{tab:targets} for a summary of target distributions for different deferral rules. \todowj{Table 1 is referred to for the first time here. But it is placed a few pages back. Hari: added a ref in the contributions list}
+
+Our proposal is to then invoke the speculative sampling procedure in Algorithm \ref{alg:gen-speed} with $\bT_\delta$ as the target distribution function.   
+We outline this generic \emph{speculative cascading} approach in Algorithm \ref{alg:spec-cascade}, and contrast it with the sequential execution of a deferral rule in Algorithm \ref{alg:seq-sampling}. % for  generic deferral function $\delta: \Delta_\cV \times \Delta_\cV \rightarrow \{0,1\}$ that takes $q$ and $p$ as input, and picks one of them to sample from.
+
+\begin{remark}[\textbf{Exact implementation of  oracle deferral rule {\tt Diff}}]
+\label{rem:exact-oracle}
+In a sequential cascade, the large model's distribution $p$ cannot be used \todowj{Saying that $p$ is not available may confuse some readers. ``using $p$ defeats the purpose of a cascade''? Hari: done!} at the time the deferral decision is made (see Remark \ref{rem:oracle}), as this would defeat the purpose of the cascade. With a speculative cascade, however, we can employ rules like {\tt Diff}  that depend on both $q$ and $p$. This is because we run the large model $p$ in parallel on  drafts generated by the small model $q$, allowing us to compute both $p(\cdot)$ and $q(\cdot)$ on every prefix.
+\end{remark}
+
+
+So far we have considered deferral rules designed for sequential cascades. In what follows, we derive the optimal deferral rule $r$ for a speculative cascade, where we sample speculatively from a target distribution $\pi = (1 - r(x_{<t})) \cdot q_t + r(x_{<t}) \cdot p_t$ using $q_t$ as the drafter.
+
+\begin{figure}
+\begin{minipage}[c]{0.43\linewidth}
+\begin{algorithm}[H]\small
+\caption{\tt{SpecDecode}}
+\label{alg:spec-decode}
+\begin{algorithmic}
+\Require Models $q$, $p$, Prefix $x_{<t}$, Block size $\gamma$
+\State $\bT(q,p) \defeq p$
+\Ensure $\text{\tt{GenSpecSample}}(q, p, \bT, x_{<t}, \gamma)$
+\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[H]\small
+\caption{\tt{TokenCascade}}
+\label{alg:seq-sampling}
+\begin{algorithmic}
+\Require Models $q$, $p$, Deferral logic ${\delta}$, Prefix $x_{<t}$
+\State $\bq(\cdot) \defeq q(\cdot|x_{<t})$
+\If{${\delta}(\bq, \emptyset) = 0$ }
+    \State Sample  $x_t \sim \bq(\cdot)$
+\Else
+    \State $\bp(\cdot) \defeq p(\cdot|x_{<t})$; ~~Sample  $x_t \sim \bp(\cdot)$
+\EndIf
+\Ensure $x_t$
+\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[H]\small
+\caption{\tt{OracleCascade}}
+\label{alg:oracle}
+\begin{algorithmic}
+\Require Models $q$, $p$, Deferral logic ${\delta}$, Prefix $x_{<t}$
+\State $\bq(\cdot) \defeq q(\cdot|x_{<t})$;~~~ $\bp(\cdot) \defeq p(\cdot|x_{<t})$
+\If{${\delta}(\bq, \bp) = 0$ }
+    \State Sample  $x_t \sim \bq(\cdot)$
+\Else
+    \State Sample  $x_t \sim \bp(\cdot)$
+\EndIf
+\Ensure $x_t$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+~~
+\begin{minipage}[c]{0.57\linewidth}
+\begin{algorithm}[H]
+\caption{\tt{GenSpecSample}}
+\label{alg:gen-speed}
+\begin{algorithmic}\small
+\Require Models $q$, $p$, Target distr.\ $\bT$, Prefix $x_{<t}$, Block size $\gamma$ 
+\State $[\gamma] \equiv \{0, \ldots, \gamma\}$
+\State {\color{olive}Sample $\gamma$ tokens auto-regressively from $q$}
+\For{$j = 0$ to $\gamma-1$}
+\State $q_{t+j}(\cdot) \defeq q(\cdot|x_{<t+j});~~~~$ $x_{t+j} \sim q_{t+j}(\cdot)$
+\EndFor
+\State {\color{olive}Run $p$ in parallel to score $\gamma$ draft tokens}
+\State $p_{t+j}(\cdot) \defeq p(\cdot|x_{<t+j}), ~\forall j \in [\gamma]$
+\State $\pi_{t+j} = \bT(q_{t+j}, p_{t+j})$
+\State {\color{olive}Find the earliest draft token that gets rejected}
+\State $a_{j} \sim \text{Ber}\left(\min\left\{1, \frac{ \pi_{t+j}({x_{t+j}}) }{ q_{t+j}({x_{t+j}}) }\right\} \right), ~\forall j \in [\gamma -1];$
+~~ $a_{\gamma} = 0$
+\State $j^{*} = \min\{j \in [\gamma] \,:\, a_{j} = 0\}$
+\State {\color{olive}Sample a new token from residual distribution}
+\State $p_{\rm res}(\cdot) =
+\begin{cases}
+\operatorname{norm}\hspace{-1pt}\left(\max\left\{0,\, \pi_{t+j^{*}}(\cdot) - q_{t+j^{*}}(\cdot)\right\}\right)
+& \text{if}~j^* < \gamma
+\\
+\pi_{t+\gamma}(\cdot) & \text{else}
+\end{cases}
+$
+\State Sample  $x_{t+j^{*}} \sim p_{\rm res}(\cdot)$
+\Ensure $x_t, \ldots, x_{t+j^{*}}$
+\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[H]\small
+\caption{{\tt{SpecCascade}}}
+\label{alg:spec-cascade}
+\begin{algorithmic}
+\Require Models $q$, $p$, Deferral logic $\delta$, Prefix $x_{<t}$, Block size $\gamma$
+\State $\bT_\delta(q,p) \defeq (1 - \delta(q,p)) \cdot q +  \delta(q,p)  \cdot p$
+\Ensure $\text{\tt{GenSpecSample}}(q, p, \bT_\delta, x_{<t}, \gamma)$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+
+
+\subsection{Optimal speculative cascade deferral} 
+\label{sec:opt-spec}
+As with sequential cascades (\S\ref{sec:prelims}), we begin by defining an  objective to minimize. We seek a deferral rule  $r: \cV^{t-1} \rightarrow \{0,1\}$ that minimizes a loss against the ground-truth distribution, while limiting the inference cost to be within a budget. 
+(Per above, this deferral rule implicitly defines a target distribution $\pi$.)
+The inference cost crucially depends on how frequently a draft token is rejected in the verification phase, triggering a rollback. 
+To this end, we derive the probability that a token sampled from $q$  is rejected during verification, for a target distribution resulting from a deferral rule $r$.\todoakm{nit, in Section 3 we did not keep a separate section on ``deferral risk for token-level cascades''. Hari: combined with next section!}
+\begin{lemma}
+\label{lem:token-acceptance-rate}
+For a given prefix $x_{<t}$,  and target distribution $\pi = (1 - r(x_{<t})) \cdot q_t + r(x_{<t}) \cdot p_t$,\todowj{$\pi_t$?} the probability of a token  drawn from draft distribution $q_t$ being rejected is equal to:
+$r(x_{<t}) \cdot D_{\textup{\tv}}(\bp, \bq),$
+where $D_\textup{\tv}(p, q) = \sum_{v \in \cV}\max\{0, p(v) - q(v)\}$ is the \emph{TV} distance between $p$ and $q$.
+\end{lemma}
+Intuitively, whenever $r(x_{<t}) = 0$, $\pi(v) = q_t(v)$, and therefore there is no rejection or roll-back; when $r(x_{<t}) = 1$, the rejection rate equals $D_{\textup{\tv}}(\bp, \bq)$.
+For a fixed prefix $x_{<t}$, we formulate the goal of finding a solution to:
+\begin{align}
+\hspace{-0.25cm}\min_{r}&~~\E_{v \sim \Pr(\cdot|x_{<t})}\Big[ \big(1 - r(x_{<t})\big) \cdot \ell(v, q_t) + r(x_{<t}) \cdot \ell(v, p_t)\big) \Big]
+\hspace{0.1cm}\text{s.t.}~~
+ r(x_{<t}) \cdot D_{\tv}(\bp, \bq)  \,\leq\, B,
+\label{eq:spec-def-constrained}
+\end{align}
+for some budget $B > 0$. %The key difference from \eqref{eq:seq-def-constrained} is that the  constraint takes into account 
+Equivalently, one may minimize an unconstrained objective similar to \eqref{eq:seq-def-risk},
+for suitable cost parameter $\alpha > 0$ (see \S\ref{app:equivalence}):
+\begin{align}
+\hspace{-5pt}L_{\rm spec}(r; x_{<t}) &= \E_{v \sim \Pr(\cdot|x_{<t})}\big[ \big(1 - r(x_{<t})\big) \cdot \ell(v, q_t) + r(x_{<t}) \cdot \big(\ell(v, p_t) + \alpha \cdot D_{\tv}(\bp, \bq)\big) \big],
+\label{eq:spec-def-risk}
+\end{align}
+
+Contrasting \eqref{eq:spec-def-risk}\todowj{nit: sometimes we use "\eqref{eq:seq-def-risk}". Sometimes we use (\ref{eq:seq-def-risk}).} with the deferral risk in \eqref{eq:seq-def-risk} for a sequential cascade, a  key difference is that the cost of deferring to  the larger model is \emph{no longer a constant}, but depends on the similarity between $\bq$ and $\bp$, as measured by the TV distance between them.
+
+\todoakm{nit, have we used the phrase ``speculative deferral'' in the text? what about ``optimal speculative cascade deferral''?. Hari: done!}
+We next derive the optimal deferral rule for \eqref{eq:spec-def-risk}, and construct a feasible estimator for it.
+
+\begin{lemma}[{Optimal deferral for speculative cascades}]
+The minimizer of \eqref{eq:spec-def-risk} is of the form:
+\begin{align}
+    r^*(x_{<t}) = 1 ~~\iff~~ \E_{v \sim \Pr(\cdot|x_{<t})}\left[\ell(v, q_t)\right] \,>\, \E_{v \sim \Pr(\cdot|x_{<t})}\left[\ell(v, p_t)\right] + \alpha \cdot D_{\textup{\tv}}(\bp, \bq).
+    \label{eq:spec-def-opt}
+\end{align}
+\label{lem:spec-def-opt}
+\end{lemma}
+When $p_t$ and $q_t$ are similar, the rejection rate for $q_t$ is low, and hence the deferral decision will  depend largely on which of the two models yields a lower expected loss. When $p_t$ and $q_t$ are very different, the optimal decision is to defer to  $p_t$ only when it yields a substantially lower loss than $q_t$. 
+
+\emph{Plug-in estimator for \eqref{eq:spec-def-opt}.} 
+The optimal rule requires estimating expectations with respect the ground-truth distribution $\Pr(\cdot|x_{<t}).$ We employ similar plug-in estimators as the ones used with sequential cascades (\S\ref{sec:cascade-meets-speed}). When $\ell=\ell_\zo$, we replace the expected 0-1 loss with (one minus) the  maximum probability from the model, giving us:
+\begin{empheq}[box=\widefbox]{align}
+\textstyle
+    {\hat{r}_{\rm\tt OPT}(x_{<t}) = 1 ~~\iff~~ \max_{v} q_t(v)  \,<\, \max_{v} p_t(v) - \alpha \cdot D_{\textup{\tv}}(\bp, \bq).}
+    \label{eq:spec-opt-def-01-plugin}
+\end{empheq}
+The efficacy of the  plug-in estimator depends on how closely the individual models approximate the ground-truth distribution $\Pr(\cdot|x_{<t})$; this is formalized by the following regret bound:
+\begin{lemma}[{Regret bound for $\hat{r}_{\rm\tt OPT}$}] 
+\label{lem:regret-01}
+Suppose $\ell = \ell_{\emph{\zo}}$. Then for a fixed prefix $x_{<t}$:
+\begin{align*}
+L_{\rm spec}(\hat{r}_{\rm\tt OPT}; x_{<t}) - \min_r\, L_{\rm spec}(r; x_{<t}) ~\leq~ \max_{v \in \cV} \big|\Pr(v|x_{<t}) - q_t(v)\big| \,+\, \max_{v \in \cV} \big|\Pr(v|x_{<t}) - p_t(v)\big|.
+\\[-20pt]
+\end{align*}
+\end{lemma}
+One can now run the speculative cascading procedure in Algorithm \ref{alg:spec-cascade} using  \eqref{eq:spec-opt-def-01-plugin} as the deferral rule; the corresponding $\delta(\cdot)$ is listed in Table \ref{tab:targets}. See  \S\ref{app:opt-log} for a similar derivation for $\ell=\ell_{\log}$.
+
+
+\if 0
+\begin{remark}[\textbf{Special case of greedy decoding}] 
+When temperature $T \rightarrow 0$, $D_{\textup{\tv}}(\tilde{p}_t, \tilde{q}_t) = 1$ whenever $\argmax_v p_t(v) \ne \argmax_v q_t(v)$, and is zero otherwise. In this case, running Algorithm \ref{alg:spec-cascade} with  $\tilde{r}_{\rm\tt OPT}$ as the deferral rule (and $\tilde{q}_t$ as the drafter) is equivalent to running it with  $\hat{r}_{\rm\tt Diff}$ in \eqref{eq:seq-opt-def-01-plugin} as the deferral rule. In other words, for greedy decoding, the optimal deferral rules for a speculative cascade coincides with that for a sequential cascade.  We formalize this in Lemma \ref{lem:greedy-special-case} in  \S\ref{app:greedy}. 
+\end{remark}
+\fi
+{\haricolor{blue}
+\subsection{Token-specific speculative cascades}
+\label{sec:sample-dep}
+The plug-in deferral rules 
+in  (\ref{eq:seq-opt-def-01-plugin}) and (\ref{eq:spec-opt-def-01-plugin}) 
+decide between the drafter's distribution $q_t(\cdot)$ and the verifier's distribution $p_t(\cdot)$ by comparing their maximum token probabilities. %,  to decide which of the two is better equipped to predict the next token.  
+A downside to this approach is that the draft token $x_t \sim q_t(\cdot)$ may not 
+maximize
+$q_t(\cdot)$.
+Thus, even when  $x_{t}$ is of poor quality, we may end up accepting it because $q_t$ happens to be \emph{more peaked} than $p_t$. 
+
+To alleviate this problem, we propose the use of \emph{token-specific deferral rules} $r: \cV^{t-1} \times \cV \rightarrow \{0,1\}$
+that use both the prefix $x_{<t}$ and a candidate token $v$ to provide a binary decision $r(x_{<t}, v) \in \{0, 1\}$, with 0 indicating that the token is of acceptable quality. We may then construct a target distribution of the following form:
+\begin{align}
+    \pi_{\rm\tt Token}(v) = q_t(v) \cdot (1 - r(x_{<t}, v))  + p_t(v) \cdot \eta,
+    \label{eq:sample-dep-target-distribution}
+\end{align}
+where $\eta = \sum_{v' \in \cV} r(x_{<t}, v') \cdot q_t(v')$ is a normalizing term chosen to ensure that $\sum_v \pi_{\tt Token}(v) = 1$. This target distribution closely mimics  $q_t(\cdot)$  on tokens that the deferral rule $r$ deems to be of acceptable quality, and defers to $p_t(\cdot)$ otherwise. 
+One can modify the generic speculative sampling algorithm in Algorithm \ref{alg:gen-speed} to use $\pi_{\tt Token}$ as the target distribution, as shown in Algorithm \ref{alg:token-spec} in \S\ref{app:sample-dep}.
+To design %the token-specific deferral rule 
+$r$, we propose a  heuristic variant of the {\tt Diff} rule in equation \ref{eq:seq-def-opt} that compares the expected 0-1 loss from the candidate token $v$ with the expected 0-1 loss from distribution $p_t$ (in \S\ref{app:sample-dep}, we discuss deriving a similar variant of the {\tt OPT} rule in equation \ref{eq:spec-def-opt}):
+\todoakm{the reviewer may wonder how these relate to Equations 4 and 9. Hari: added refs to eq 4 and 9.}
+\begin{align}
+    r(x_{<t}, v) = 1 ~~\iff~~ 1 - \Pr(v|x_{<t}) \,>\, \E_{v \sim \Pr(\cdot|x_{<t})}\left[\ell_{\zo}(v, p_t)\right] + \alpha,
+    \label{eq:token-specific-r}
+\end{align}
+for a cost parameter $\alpha$. 
+The following are some simple plug-in approximations to \eqref{eq:token-specific-r}:
+\begin{empheq}[box=\widefbox]{align}
+    \hat{r}_{\rm\tt TokenV1}(x_{<t}, v) = 1 &~~\iff~~\textstyle q_t(v)  \,<\, \max_{v'} p_t(v') - \alpha
+    \label{eq:sample-dep-01-plugin-v1}\\
+    \hat{r}_{\rm\tt TokenV2}(x_{<t}, v) = 1 &~~\iff~~\textstyle p_t(v)  \,<\, \max_{v'} p_t(v') - \alpha
+    \label{eq:sample-dep-01-plugin-v2}\\
+    \hat{r}_{\rm\tt TokenV3}(x_{<t}, v) = 1 &~~\iff~~\textstyle p_t(v)  \,<\, \max_{v'} p_t(v') \cdot(1 - \alpha)
+    \label{eq:sample-dep-01-plugin-v3},
+\end{empheq}
+where we approximate $\Pr(v|x_{<t})$ with either $q_t(v)$ or $p_t(v)$. Equation \ref{eq:sample-dep-01-plugin-v3}  is a multiplicative plug-in approximation that has  similarities to the rejection criterion used %with \emph{lossy} speculative sampling in
+by \citet{Leviathan:2023} for lossy speculative greedy decoding, and  results in an intuitive target distribution:
+\begin{align*}
+\textstyle
+    \pi_{\tt TokenV3}(v) =
+    q_t(v) \cdot \1\big(v \in \Top_\alpha\big)
+    \,+\,
+    p_t(v) \cdot \sum_{v' \notin \Top_\alpha} q_t(v'),
+\end{align*}
+where $\Top_\alpha = \{v \in \cV:\, p_t(v)  \,\geq\, \max_{v'} p_t(v') \cdot(1 - \alpha)\}$ is the set of top ranked tokens by $p_t(\cdot)$. For these top-ranked tokens, $\pi_{\tt TokenV3}$ approximates $q_t(\cdot)$; for the rest, it is a re-scaled version of $p_t(\cdot)$. %Intuitively, this amounts to trusting the drafter model $q$ on those tokens that are assigned high probabilities by the verifier $p$. 
+
+
+}
+
+
+\section{Further related work and conclusions}
+
+\label{sec:related}
+There has been a stream of work on improving
+the  draft generation process in speculative decoding; these include having the drafter and verifier share the same backbone \citep{Stern:2018, kim2024towards, cai2024medusa, monea2023pass, hooper2023speed, zhang2023draft, elhoushi2024layer, liu2024kangaroo}, using multiple small draft models \cite{chen2023cascade, wang2024minions}, using  tree-structured draft batches \citep{spector2023accelerating, miao2024specinfer},  distilling the drafter with the verifier \citep{zhou2024distillspec}, and leveraging multiple sampled draft candidates \cite{Sun:2023}.\todoakm{maybe this can come after Experiments? Hari: the problem with doing this is that we reference this section in the expts when pointing to the target distribution for BiLD!}
+
+
+The work that is most closely related to our specific proposal is the Big Little Decoder (BiLD)~\citep{kim2023speculative}, which can be seen as another lossy variant of speculative decoding \citep{Leviathan:2023, Tran-Thien_2023, zhou2024distillspec}. BiLD has two phases: a \emph{fallback} phase, during which the drafter $q$ is run auto-regressively until its maximum predicted probability is sufficiently low; and a \emph{rollback} phase, during which the verifier $p$ is run in parallel on the prefixes generated by $q$ and rolls back to the point where $D(q,p) > \alpha$, for a metric $D$ that measures discrepancy 
+and threshold $\alpha$. The fallback phase implements Chow's deferral rule in (\ref{eq:chow01}), and allows for the draft window size to vary dynamically based on an estimate of how likely the draft tokens will be accepted; the rollback phase can be seen as a deterministic variant of the rejection sampling algorithm of~\citet{Leviathan:2023}. 
+ An advantage of {BiLD} over the rejection sampling algorithm in \citep{Leviathan:2023} is the use of Chow's rule to vary the draft window size. However, the final target distribution it seeks to mimic, $\bT_{\textup{BiLD}}(q, p)(v) = \1(D(q, p) \leq \alpha)\cdot q(v) + \1(D(q, p) > \alpha)\cdot p(v)$, is an approximation to $p$; specifically, the target distribution $\pi = \bT_{\textup{BiLD}}(q, p)$ is chosen to satisfy $D(\pi, p) \leq \alpha$. Hence, in cases where $q$ deviates substantially from $p$,  BiLD would choose $p$  as the target distribution, even when $q$ offers better quality on a prefix (where quality can be measured using a suitable loss function). In contrast, our proposed approach in \S\ref{sec:spec-cascades} uses speculative decoding to approximate  target distributions that seek to \emph{optimally} cascade between $q$ and $p$.
+In our experiments, we compare the efficacy of using  $\bT_{\textup{BiLD}}$ as the target distribution with the target distributions we propose in this paper (see Table \ref{tab:targets}).
+\begin{figure}[t]
+    \centering
+\begin{table}[H]
+    \centering
+    \caption{Reduction in latency from different methods ($T=1, \gamma=5$) when matching the quality of the large model (cols 2--7), and the best quality metric when matching each method yields without exceeding the latency of the large model (cols 8--13). Quality is measured in terms of the BLEU for WMT and ROUGE-2 for XSum and CNNDM. See Figure \ref{fig:tradeoffs} for $T=0.5$ and \S\ref{app:T5-greedy} for $T=0$.}
+    \resizebox{\columnwidth}{!}{%
+    \begin{tabular}{lcccccccccccccccccc}
+    \toprule
+    & \multicolumn{7}{c}{Latency$\downarrow$ when matching large model's quality}
+    & &
+    \multicolumn{7}{c}{Best quality  \emph{without} exceeding large model's latency}
+    \\
+    \cmidrule{2-8}
+    \cmidrule{10-16}
+    & \multicolumn{3}{c}{Small $\rightarrow$ Large}
+    &
+    & \multicolumn{3}{c}{Small $\rightarrow$ XL}
+    &
+    & \multicolumn{3}{c}{Small $\rightarrow$ Large}
+    &
+    & \multicolumn{3}{c}{Small $\rightarrow$ XL}
+    \\
+     \cmidrule{2-4}
+     \cmidrule{6-8}
+     \cmidrule{10-12}
+     \cmidrule{14-16}
+    Method & 
+    WMT & XSum & CNNDM & & 
+    WMT & XSum & CNNDM & &
+    WMT & XSum & CNNDM & & 
+    WMT & XSum & CNNDM 
+    \\
+    \midrule
+         \texttt{SeqCascade} [{\tt Chow}] & 
+         1.55$\times$ &
+         0.84$\times$ &
+         0.98$\times$ & &
+         2.46$\times$
+         & 0.93$\times$
+         & 0.94$\times$
+         & 
+         & 16.56
+         & 12.97
+         & 9.91 
+         &
+         & 16.29
+         & 16.40
+         & 11.18
+         \\
+    \midrule
+         \texttt{TokenCascade} [{\tt Chow}] & 
+         1.03$\times$ & 
+         0.93$\times$ & 
+         1.40$\times$ & & 
+         1.46$\times$ &
+         0.82$\times$ &
+         1.51$\times$ & 
+         &16.52 
+         &13.30
+         &10.36 &
+         & 16.65
+         & 17.09
+         &11.44
+         \\
+         \texttt{SpecDecode} [{\tt Lossy}] & 
+         1.61$\times$ & 
+         1.10$\times$
+         & 1.57$\times$ &
+         & 2.17$\times$
+         & 1.28$\times$ 
+         & 2.07$\times$ &&
+         17.26& 
+         13.90& 
+         10.43& 
+         & 16.94
+         &17.36
+         &11.53
+         \\
+         \texttt{BiLD}$^*$ 
+         & 1.34$\times$ 
+         & 1.04$\times$ 
+         & 1.38$\times$ &
+         & 1.85$\times$
+         & 1.28$\times$
+         & 1.84$\times$ &&
+         16.49& 
+         13.81&
+         10.14& 
+         & 15.90
+         & 17.35
+         & 11.35
+         \\
+    \midrule
+         \texttt{SpecCascade} [{\tt Chow}]  
+         & 1.43$\times$ 
+         & 1.04$\times$ 
+         & 1.41$\times$ &
+         & 2.01$\times$
+         & 1.28$\times$
+         & 1.97$\times$ &&
+         17.76&
+         13.82&
+         10.28& 
+         & 16.35
+         &17.36
+         & 11.39
+         \\
+         \texttt{SpecCascade} [{\tt Diff}] 
+         & 1.79$\times$ 
+         & {1.17$\times$}
+         & 1.75$\times$ &
+         & 2.44$\times$ 
+         & 1.30$\times$
+         & {2.15$\times$} & &
+         18.04&
+         14.00&
+         10.64& 
+         & 18.07
+         & 17.37
+         & 11.67
+         \\
+         \texttt{SpecCascade} [{\tt OPT}] 
+         & \textbf{1.95$\times$}
+         & {1.17$\times$}
+         & {1.80$\times$} &
+         & \textbf{2.61$\times$} 
+         & {1.34$\times$} 
+         & \textbf{2.21$\times$} & &
+         {18.33}& 
+         {14.10}& 
+         {10.86}& 
+         & {18.09}
+         &{17.48}
+         &{11.85}
+         \\
+         \texttt{SpecCascade} [{\tt Token}]
+         & 1.85$\times$
+         & \textbf{1.18$\times$}
+         & \textbf{1.89$\times$} &
+         & {2.50$\times$}
+         & \textbf{1.40$\times$}
+         & {1.89$\times$}
+         & &
+         \textbf{22.50} &
+         \textbf{15.85} &
+         \textbf{12.63} &
+         & 
+         \textbf{22.70} &
+         \textbf{18.79} &
+         \textbf{12.63}
+         \\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:speedup}
+\end{table}
+    \hspace{-9pt}
+    \includegraphics[scale=0.35]{ICLR2025/plots/iclr_large2small_samplingTp5_wmt.pdf}
+    \hspace{-16pt}
+    \includegraphics[scale=0.35]{ICLR2025/plots/iclr_large2small_samplingTp5_cnndm_with_legend.pdf}
+    \caption{Latency-quality trade-off plots for methods that interleave T5-small with T5-large ($\gamma=5$). Latency is measured \emph{relative} to that of  calling  T5-large on all inputs.
+    The horizontal dotted line denotes the quality of T5-large. \S\ref{app:expts-temperature}--\ref{app:expts-gamma} contain more plots with varying temperatures and $\gamma$.
+    }
+    \label{fig:tradeoffs}
+\end{figure}
+
+
+\section{Experimental results}
+
+\label{sec:expts}
+We compare our speculative cascading techniques with both sequential cascades and standard speculative decoding on a range of language benchmarks, including translation, reasoning, coding, QA, etc. 
+We evaluate speculative cascades constructed from both the \textbf{T5 v1.1 family} of encoder-decoder models \citep{Raffel:2020}, and \textbf{Gemma v2} decoder-only models \citep{team2024gemma}. 
+We construct the cascades with four deferral rules: (i) {\tt Chow} in (\ref{eq:chow01}), (ii) {\tt Diff} in (\ref{eq:seq-opt-def-01-plugin}), (iii) {\tt OPT} in (\ref{eq:spec-opt-def-01-plugin}), and (iv) 
+the {\tt Token}-specific rule  in (\ref{eq:sample-dep-01-plugin-v3}) (we present results for the V1 and V2 variants in \S\ref{app:expts-token-specific}). % on a range of tasks, including translation, summarization, reasoning and QA.
+{\haricolor{blue}
+\textbf{Cascades versus SpecDecode evaluation}.\ Our evaluation protocol is markedly different from the standard evaluation of speculative decoding algorithms, where the goal is to speed up inference with a large model while preserving its output distribution.
+In contrast, our focus is on \textbf{trading-off quality for lower inference costs by cascading} two models of different sizes. %We require the small model in our cascades to be of sufficient quality, so that a reasonable cost-quality trade-off is possible, and consequently, may choose small-large model combinations that may not be favored with traditional speculative decoding. 
+\todoakm{the ``and'' seems like it could be a new sentence. it is not related to the point about deviating from the standard SPEED evaluation protocol? Hari: done!}
+We also 
+ \textbf{do \textit{not} claim to develop a new state-of-the-art method for fast LM inference}. Furthermore, the speculative cascades we design build on the  original speculative decoding algorithm \citet{Leviathan:2023}. While one could potentially also adapt our proposal to  other recent variants of speculative decoding \citep{cai2024medusa, li2024eagle}, these involve a wholly orthogonal suite of techniques to what we propose (such as architectural changes, allowing for multiple drafts, distillation, and so on; see \S\ref{sec:related}).
+}
+
+
+\textbf{Baselines.} The cascading and speculative decoding methods we compare to include:
+\begin{enumerate}[itemsep=1pt,topsep=0pt,leftmargin=16pt,label=(\roman*)]
+    \item  \emph{Sequence-level cascade} \citep{jitkrittum2024does,gupta2024language} based on sequence-level Chow's rule in \eqref{eq:sequential-chow} (\texttt{SeqCascade} [{\tt Chow}]).
+    \item \emph{Token-level cascade}
+    outlined in Algorithm \ref{alg:seq-sampling}, with token-level Chow's rule in \eqref{eq:chow01} used for deferral \citep{chow1970optimum, Gupta:2022} (\texttt{TokenCascade} [{\tt Chow}]).
+    \item \emph{Lossy speculative decoding} described in \S\ref{sec:prelims}, with both $\beta = 1$ \citep{Leviathan:2023, zhou2024distillspec} (\texttt{SpecDecode} [{\tt Lossy}]) and $\beta$ tuned using the procedure in \cite{Tran-Thien_2023} ({\tt Lossy}$^\star$).
+    \item \emph{Big-Little Decoder approach} \citep{kim2023speculative}, with both the original deterministic version (\texttt{BiLD}), and the variant where we apply Algorithm \ref{alg:gen-speed} to the target distribution $\mathbb{T}_{\textup{BiLD}}$ in \S\ref{sec:related} (\texttt{BiLD}$^*$).
+\end{enumerate}
+
+\textbf{Fine-tuned T5 cascades.} 
+\todoakm{maybe the para heading can explicate fine-tuning here, vs few-shot for Gemma. Hari: done!}
+Our experiments on T5 models are based on the setup in \cite{zhou2024distillspec}; see \S\ref{app:expt-setup} for details. We use T5-small (77M) as the small model, and either T5-large (800M) or T5-XL (3B) as the large model. In each case, we  supervised
+ fine-tune these models on three  tasks: WMT EN$\rightarrow$DE translation \citep{bojar-EtAl:2014:W14-33}, CNN/DM summarization \citep{hermann2015teaching}, and XSum abstractive summarization \citep{narayan2018don}. %, and (iv) GSM8K arithmetic reasoning \citep{cobbe2021training}.  
+\todoakm{do the latency numbers match what is reported in DistillSpec? Hari: our quality metrics match what they report; I'll be able to compare with their speed ups once I better understand how they compute relative latency}
+We use temperatures $T=0, 0.1, 0.5, 1.0$, and block sizes $\gamma = 3, 5, 7$ (full results in \S\ref{app:expts}). % for the methods based on speculative execution. 
+Following the protocol in \cite{Leviathan:2023, zhou2024distillspec}, to measure latency, we evaluate the wall-clock decoding time with batch size 1.
+
+\if 0
+We evaluate all methods under both greedy decoding ($T=0$), and temperature sampling with temperature $T=1$. As noted in \S\ref{sec:proposal}, with greedy decoding, the {\tt OPT} deferral rule  coincides with the {\tt Diff} deferral rule. 
+\fi
+\begin{figure}[t]
+\centering
+    \includegraphics[scale=0.27]{ICLR2025/plots/iclr_gemma_2B__27B_WMT_5-shot.pdf}
+    \includegraphics[scale=0.27]{ICLR2025/plots/iclr_gemma_2B__27B_CNNDM_5-shot.pdf}
+    \includegraphics[scale=0.27]{ICLR2025/plots/iclr_gemma_2B__27B_GSM8K_8-shot.pdf}
+    \includegraphics[scale=0.27]{ICLR2025/plots/iclr_gemma_2B__27B_WebQ_1-shot.pdf}
+    \includegraphics[scale=0.27]{ICLR2025/plots/iclr_gemma_2B__27B_PT_MBPP_3-shot_with_legend.pdf}
+    \includegraphics[scale=0.27]{ICLR2025/plots/iclr_gemma_2B__27B_NaturalQA_1-shot.pdf}
+    \caption{Plots of quality vs.\ rejection rate for methods that interleave Gemma 2B with Gemma 27B ($\gamma=1$).  We use instruction-tuned models; for MBPP we report additional results with pre-trained models. See \S\ref{app:expts-token-specific} for remaining plots, comparison to  (\ref{eq:sample-dep-01-plugin-v1}--\ref{eq:sample-dep-01-plugin-v2}) and 
+    results on 2B $\rightarrow$ 9B cascades.
+    }
+    \label{fig:tradeoffs-gemma}
+\end{figure}
+
+In Figure \ref{fig:tradeoffs}, we present plots of quality vs.\ latency for the different methods. %run with T5-small as the smaller (draft) model and either T5-large or T5-XL as the larger (verification) model. 
+In each case, we vary the lenience parameter $\alpha$, and  plot either the BLEU or ROUGE-2 metric as a function of the relative latency to the larger model. For brevity, we include the three main baselines; in \S\ref{app:expts-bild}--\ref{app:expts-lossy},
+we compare to \texttt{SpecDecode} [{\tt Lossy}$^\star$] \citep{Tran-Thien_2023} and the original {\tt BiLD} algorithm \cite{kim2023speculative}. 
+Methods that use speculative execution are considerably faster than sequential token-level cascades ({\tt TokenCascade [Chow]}), although sequential cascades do have an advantage in the low-latency regimes. This is because unlike speculative approaches, which always call the large model after every $\gamma$ steps, a sequential cascade only invokes the large model when the small model defers. %Under temperature sampling ($T=1$), the {\tt OPT} speculative cascading strategy is seen to provide the best quality metrics for most latency values, with {\tt Diff} coming in a close second. A similar trend is also seen with greedy decoding, where the optimal deferral strategy (\texttt{SpecCascade} [{\tt Diff}]) often yields better quality trade-offs than the other methods, although the gap to  speculative decoding is much smaller.
+\todoakm{the legend is a bit hard to make out. we may  consider only including two plots per row. Hari: Did this for Fig 2. For Fig 3, I've made the font size bigger. Would you like two figures per row for Fig 3 too?}
+\todoakm{further to the above, we may consider the value of including full deferral curves for both T5 and Gemma, versus having a summary like Table 2. Hari: hmm, I think reviewers usually like to see numbers in a tabulated form, especially when it comes to speed-ups}
+
+In Table \ref{tab:speedup}, 
+\todoakm{caption should clarify this is for T5. Hari: done!}
+we report  (i) the reduction in latency from T5 cascades when matching the quality of the large model, and (ii) the best quality that each method can deliver without exceeding the latency of the large model. % (for temperature $T=1$).
+{\haricolor{blue}\texttt{SpecCascade} [{\tt Token}]  often yields  the highest speed-up and the best quality metrics, with {\tt OPT} coming in second.} The cascading approaches are often seen to fare poorly on both quality and latency metrics, with the exception of WMT, where \texttt{SeqCascade} yields non-trivial speed-ups.\todoasr{Do we need to briefly remind the reader that BiLD* is different from BiLD implementation?}
+{\haricolor{blue}The reason the {\tt Token}-specific rule fares better than  {\tt OPT} and {\tt Diff} is because the latter compute their deferral decisions based on which of $q_t(\cdot)$ and $p_t(\cdot)$ is more \textit{peaked}; this can be a disadvantage when the sampled token is not  close to the distribution mode, which is likely to happen with higher temperatures. As shown in \S\ref{app:expts-temperature}, with lower temperatures, the gap between these rules diminishes.\todoakm{should we also call out the WMT results being sensitive to temperature? Hari: I think this is true of all methods. After I include that, I'll add a note in the main text.}
+}
+{\haricolor{blue}
+\textbf{Few-shot Gemma cascades.} 
+\todoakm{what about the MBPP results? Hari: TBD}
+To evaluate the Gemma model cascades, we use few-shot prompting with 8 language benchmarks: WMT, CNN/DM, GSM8K, MBPP, SQuAD 2.0, WebQuestions, NaturalQA and TriviaQA; many of these feature in the SpecBench suite \citep{xia2024unlocking}.  Figure \ref{fig:tradeoffs-gemma}  presents plots of quality vs.\ rejection rate with a 2B drafter and 27B verifier for $\gamma=1$. For brevity, we only compare the methods that fare the best in the previous experiments. With the exception of TriviaQA, {\tt SpecCascade [Token]} is able to both match the 27B's quality at a lower  rejection rate and yield the best overall quality, often better than 27B. 
+Since all three methods use the exact same implementation for speculative execution, a lower rejection rate directly translates to a lower latency. %{\tt SpecCascade [Token]} often yields a better quality than all other methods. \todoakm{maybe in the body we should prioritise the new datasets compared to T5.}
+}
+
+{\haricolor{red}
+Interestingly, {\tt OPT} is not as effective as with T5. We attribute this to the differences in distributions between the two setups: with T5, the maximum token probability served as a good indicator of token accuracy for both $q$ and $p$; with Gemma, we expect the large model to have a closer alignment with the ground-truth distribution (due to it being several billion parameters apart from the smaller model), and hence using the large model probabilities to measure confidence for both the small and large model (\ref{eq:sample-dep-01-plugin-v3}) yields better trade-offs than comparing the modes from the two model distributions. 
+}
+
+
+
+\section{Conclusions}
+
+We have proposed new speculative cascading techniques that use a combination of auto-regressive drafting and parallel verification to implement their deferral rule, and shown that they yield better cost-quality trade-offs than standard cascades and speculative decoding. {\haricolor{blue} A limitation of our approach is that while it offers a higher throughput, it also incurs a higher total compute cost compared to sequential cascades.} 
+In the future, we wish to replace our plug-in estimators
+with a router model \citep{gupta2024language} trained on ground-truth samples, % to approximate the optimal rule.
+ to improve the local deferral objective %we seek to optimize 
+ at each position $t$ (\ref{eq:spec-def-risk}) %, and replace it 
+ with a global 
+objective, % that applies jointly to all positions. 
+and to extend our proposal to {more than two models}.
+
+
+
+
+

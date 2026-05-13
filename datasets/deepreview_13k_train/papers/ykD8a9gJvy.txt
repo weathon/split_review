@@ -1,0 +1,414 @@
+\title{Generative Inbetweening: Adapting Image-to-Video Models for Keyframe Interpolation}
+
+\begin{abstract}
+   We present a method for generating video sequences with coherent motion between a pair of input key frames. We adapt a pretrained large-scale image-to-video diffusion model (originally trained to generate videos moving forward in time from a single input image) for key frame interpolation, i.e., to produce a video in between two input frames. We accomplish this adaptation through a lightweight fine-tuning technique that produces a version of the model that instead predicts videos moving \emph{backwards} in time from a single input image. This model (along with the original forward-moving model) is subsequently used in a dual-directional diffusion sampling process that combines the overlapping model estimates starting from each of the two keyframes. 
+   Our experiments shows that our method outperforms both existing diffusion-based methods and traditional frame interpolation techniques. Please see our project page at \href{https://svd-keyframe-interpolation.io/}{ svd-keyframe-interpolation.io}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Recent advances of large-scale text-to-video and image-to-video models~\cite{blattmann2023align, blattmann2023stable, wu2023tune, xing2023dynamicrafter, bar2024lumiere, zeng2024make} have shown the ability to generate high resolution videos with dynamic motion. While these models can accept a variety of input conditioning signals, such as text captions or single images, most available models remain unsuitable for an obvious application: keyframe interpolation. Interpolating between a pair of keyframes---that is, producing a video that simulates coherent motion between two input frames, one defining the starting frame of the video, and one defining the ending frame---is certainly possible if a large-scale model has been trained to accept these particular two conditioning signals, but most open-source models have not. Despite the task's similarity to existing conditioning signals, creating an interpolation model requires further training, and therefore both large amounts of data and substantial computational resources beyond what most researchers have access to.  
+
+Given the similarity between the input signals needed for keyframe interpolation (i.e., two-frame conditioning) and the input signals to existing models (e.g., one-frame conditioning), an interesting alternative solution is to instead \emph{adapt} an existing pre-trained image-to-video model, without training a specialized model from scratch. In this paper, we propose an approach for enabling key frame interpolation by doing precisely this. Our approach is founded upon the observation that a keyframe interpolation model needs to know how to accomplish three objectives: (1) given a starting frame, it needs to predict coherent motion starting from that frame and advancing into the future, (2) given an ending frame, it needs to predict coherent motion starting from that frame and advancing backwards into the \emph{past}, and (3) given these two predictions, produce a video that has a coherent combination of the two. Since existing image-to-video models can already accomplish the first of these three objectives, we focus our efforts on the the latter two, i.e., producing a single-frame conditioned model that can generate motion \emph{backwards} in time, and a mechanism for combining forward and backward motion predictions into coherent videos. 
+
+One may imagine that producing such a single-image conditioned model that produces backwards motion should be trivial: simply pass an image into a regular image-to-video model, and reverse the output. Unfortunately, real-world motion is inherently asymmetric, and reversed motion into the future is notably different from motion into the past. As such, we first propose a novel, lightweight fine-tuning mechanism that reverses the arrow of time by rotating the temporal self-attention maps (i.e., reversing the temporal interactions) within the diffusion U-Net. This enables the reuse of the existing learned motion statistics in the pretrained model, and enables generalization while only requiring  a small number of training videos. 
+
+Given both the original image-to-video model and this adapted reverse model, we also propose a sampling mechanism that merges the scores of both to produce a single consistent sample. These two sampling paths are synchronized through shared rotated temporal self-attention maps, ensuring they generate exactly opposite motions, an effect which we term ``forward-backward motion consistency". At each sampling step, their intermediate noise predictions are fused, resulting in a generated video with coherent motion that starts and ends with the provided frames.
+We compare our work qualitatively and quantitatively to related methods in keyframe interpolation, and find that our method produces notably higher quality videos with more coherent dynamics given temporally distant key frames. Please see our webpage for a complete collection of video results: \href{https://svd-keyframe-interpolation.io/}{svd-keyframe-interpolation.io}.
+
+
+
+
+
+\section{Related Works}
+
+\topic{Frame interpolation} Frame interpolation~\cite{dong2023video} synthesizes intermediate images between a pair of input frames, and has been a long-standing research area in computer vision. Example applications include temporal up-sampling to increase refresh rate, create slow-motion videos, or interpolating between near-duplicate photos. Much of the research in this field~\cite{jiang2018super, niklaus2020softmax, huang2020rife, park2020bmbc, lee2020adacof, park2021asymmetric} employs flow-based methods, which estimate optical flow between the frames  and then synthesize the middle images guided by the flow via either warping or splatting techniques. Traditionally, this task assumes unambiguous motion and the input frames are usually closely spaced ($\le 1/30$s) samples in the video. Recent studies have begun to address large motions~\cite{sim2021xvfi, reda2022film}, or quadratic motion~\cite{xu2019quadratic, liu2020enhanced}, though these still involve a single  motion interpolation and cannot address distant input frames. In contrast, we aim to generate in-between frames that capture dynamic motions across distant input keyframes ($\ge 1$s apart), a challenge that goes beyond the capability of current frame interpolation technique.
+
+\topic{Diffusion models for video interpolation} 
+Diffusion models have shown remarkable capabilities for generative modeling of images~~\cite{ho2020denoising, dhariwal2021diffusion, song2019generative, song2020denoising, song2020score, sohl2015deep} and videos~\cite{ho2022video, ho2022imagen, wu2023tune, blattmann2023align}. In earlier work, MCVD~\cite{voleti2022mcvd} devises a general-purpose diffusion model for a range of video generative modeling tasks including video interpolation. More recent works ~\cite{guo2023sparsectrl, jain2024video, xing2023dynamicrafter} explicitly train diffusion models to accept two end frames with conditioning to generate $7$ or $16$ intermediate frames at maximum resolution of $320\times 512$ at once, and achieved superior results in generating dynamic, ambiguous motions compared with traditional methods. In this work, we focus on enabling pre-trained large-scale image-to-video models to do key frame interpolation. Exposed to millions of videos, these models have demonstrated remarkable capabilities in generating high-resolution (up to $1080$p) and long (up to 4$s$) videos with rich motion priors.
+\topic{Diffusion sampling for consistent generation} In diffusion-based image generation tasks, novel joint diffusion sampling techniques~\cite{bar2023multidiffusion, zhang2023diffcollage, tang2023mvdiffusion, lee2023syncdiffusion} for consistent generation are usually employed in generating arbitrary-sized images or panoramas from smaller pieces. These methods involve concurrently generating these multiple pieces and merging their intermediate results in the overlapping areas within the sampling process. For example, MultiDiffusion~\cite{bar2023multidiffusion} averages the diffusion model predictions to reconcile the different denoising processes. Recent work, TRF~\cite{feng2024explorative} extends this joint generation approach to the bounded video generation taking two end frames as input. By running two parallel image-to-video generations guided by the start and end
+frames, it merge their outputs by averaging in each denoising step. 
+However, a significant  drawback of this method is that it cannot generate coherent motion in-between: simply fusing a forward video generation from the first end frame and the reversed forward video starting from the second end frame using a single image-to-video model designed for forward motion only causes the generated videos to oscillate between moving forward and then reversing, rather than continuously progress forward as our method does. 
+
+
+
+\section{Background}
+
+ 
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/method_overview.pdf}
+    \caption{{\bf Method overview.} In the lightweight backward motion fine-tuning stage, an input video $\mathbf{x}=\{I_0, I_1, ..., I_{N-1}\}$ is encoded into the latent space by $\mathcal{E}(\mathbf{x})$, and noise is added to create noisy latent $\mathbf{z}_{t}$; during inference, $\mathbf{z}_{t}$ is created by iterative denoising starting from $\mathbf{z}_T\sim\mathcal{N}(\mathbf{0, I})$.  (1) {\bf Forward motion prediction:} we first take the conditioning $\mathbf{c}_0$ of the first input image (inference stage) or the first frame in the video (training stage) $I_0$, along with the noisy latent $\mathbf{z}_t$ to feed into the pre-trained 3D UNet $f_{\theta}$ to get the noise predictions $\hat{\mathbf{v}}_{t, 0}$, as well as the temporal self attention maps $\{A_i\}$. (2) 
+    {\bf Backward motion prediction:} We reverse the noisy latent $\mathbf{z}_{t}$ along temporal axis to get $\mathbf{z}'_{t}$. Then we take the conditioning $\mathbf{c}_{N-1}$ of the second input image, or the last frame in the video  $I_{N-1}$, along with the 180-degree rotated temporal self-attention maps $\{A'_i\}$, and feed them through the fine-tuned 3D UNet $f_{\theta'}$ for backward motion prediction $\hat{\mathbf{v}}_{t, 1}$. (3) {\bf Fuse and update:} The predicted backward motion noise is reversed again to fuse with the forward motion noise to create consistent motion path. Note that only the  value and output projection matrices $W_{\{v, o\}}$ in the temporal self-attention layers ({\bf green}) are fine-tuned; see Fig.~\ref{fig:attnmap} for more details.}
+    \label{fig:demo}
+\end{figure*}
+
+We introduce some background on Stable Video Diffusion~\cite{blattmann2023stable}, the base image-to-video diffusion model used in our work, and then specifically explain the temporal self-attention layers within its architecture, which are key to modeling motion within the generated video.
+
+\subsection{Stable Video Diffusion} 
+Diffusion models are trained to convert random noise into high-resolution images/videos via an iterative sampling process~\cite{dhariwal2021diffusion, sohl2015deep, song2019generative, song2020denoising, song2020score, liu2022pseudo}.  This sampling process aims to reverse a fixed, time-dependent destructive process (forward process) that gradually corrupts data by adding Gaussian noise. In particular, Stable Video Diffusion (SVD) is a latent diffusion model where the diffusion process operates in the latent space of a pre-trained autoencoder with encoder $\mathcal{E}(\cdot)$ and decoder $\mathcal{D}(\cdot)$. 
+
+In the forward process, a video sample $\mathbf{x}=\{I_0, I_1,..., I_{N-1}\}$ composed of $N$ frames, is first encoded in the latent space $\mathbf{z} = \mathcal{E}(\mathbf{x})$, then the intermediate noisy video at time step $t$ is created as $\mathbf{z}_t = \alpha_t\mathbf{z} + \sigma_t\bm{\epsilon}$,
+where $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0, I})$ is Gaussian noise, and $\alpha_t$ and $\sigma_t$ define a fixed noise schedule. The denoising network $f_{\theta}$ receives this noisy video latent $\mathbf{z}_t$ and the conditioning $\mathbf{c}$ computed from the input image, i.e., the first frame $I_0$ in the video, and is trained by minimizing the loss:
+\begin{equation*}
+ \mathcal{L}(\theta) = \mathbb{E}_{t\sim U[1, T], \bm{\epsilon}\sim \mathcal{N}(\mathbf{0}, \mathbf{I})}[\|f_{\theta}(\mathbf{z}_t; t, \mathbf{c})-\mathbf{y}\|_2^2]
+\end{equation*}
+ where the target vector $\mathbf{y}$ here is $\mathbf{v}=\alpha_t\bm{\epsilon} - \sigma_t\mathbf{z}_t$, referred to as v-prediction.
+
+Once the denoising network is trained, starting from pure noise $\mathbf{z}_T\sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, the sampling process iteratively denoises the noisy latent by predicting the noise in the input and then applying an update step to remove a portion of the estimated noise from the noisy latent 
+\begin{equation*}
+    \mathbf{z}_{t-1} = \text{update}(\mathbf{z}_t, f_{\theta}(\mathbf{z}_t; t, \mathbf{c}); t)
+\end{equation*}
+until we get clean latent $\mathbf{z}_0$, followed by decoding $\mathcal{D}(\mathbf{z}_0)$ to get the generated video. The exact implementation of the $\text{update}(\cdot, \cdot)$ function depends on the specifics of the sampling method; SVD uses EDM sampler~\cite{karras2022elucidating}.
+\subsection{Temporal self-attention}\label{sec::temp_attn}
+The denoising network $f_{\theta}$ in SVD is a 3D UNet, composed of ``down", ``mid", and ``up" blocks. Each block contains spatial layers interleaved with  temporal layers, with the temporal self-attention layers responsible for modeling motion in the generated video. This layer takes a spatio-temporal  tensor $X \in \mathbb {R}^{1\times N \times H \times W \times C}$ as input, where  $N$ is the number of frames, and $C$ is the number of channels. Here we use batch size of $1$ for simplicity. The tensor is reshaped by moving the spatial dimensions $(H, W)$ into the batch dimension. This creates $X'\in \mathbb{R}^{HW\times N \times C}$, where self-attention operates solely on the temporal axis. More specifically, $X'$ is projected through three separate matrices $W_q$, $W_k, W_v \in \mathbb{R}^{d\times C}$ ($d$ is the dimensionality of the projected space.), resulting in the corresponding query ($Q=W_qX'$), key ($K=W_kX'$) and value ($V=W_vX'$) features. Then the scale-dot product attention is applied:
+\begin{equation*}
+    \text{Attention}(Q, K, V)=\text{softmax}(QK^T/{\sqrt{d}})V 
+\end{equation*}
+ The attention output is fed through another linear layer $W_o$ to get the final output. We refer to $A = QK^T \in \mathbb{R}^{HW\times N\times N}$ as the temporal self-attention map, which models the inter-frame correlations per spatial location. This temporal
+attention mechanism allows each frame’s updated feature to gather information from other frames.
+ 
+
+
+\section{Method}
+
+Given a pair of key frames $I_0$ and $I_{N-1}$, our goal is to generate a video $\{I_0, I_1, I_2, ...., I_{N-1}\}$ that begins with frame $I_0$ and ends with frame $I_{N-1}$, leveraging  the pre-trained image-to-video Stable Video Diffusion (SVD) model. The generated video should exhibit a natural and consistent motion path, such as a car traveling or a person walking in a steady direction.
+
+Image-to-video models typically generate video with motions that run forward in time. It is primarily the temporal self-attention layers that learn this motion-time association. In Sec~\ref{sec:reverse_motion}, we discuss how this forward motion can be reversed by rotating the temporal self-attention maps by 180 degrees. Then we introduce an efficient lightweight fine-tuning technique to reverse this association and enable SVD to generate backward motion videos from the input image in Sec.~\ref{sec:reverse_motion_train}. Finally we present our dual-directional sampling approach that fuses the forward motion  generation starting with frame $I_0$ and backward motion video generation starting with frame $I_{N-1}$ in a consistent manner in Sec.~\ref{sec:sampling}. An overview of our method is shown in Fig.~\ref{fig:demo}.
+
+\subsection{Reverse motion-time association by self-attention map rotation }~\label{sec:reverse_motion}
+ The temporal self-attention maps $\{A_i\}$ in the network $f_{\theta}$ feature the forward motion trajectory in video $\{I_0, I_1, ..., I_{N-1}\}$. By rotating these attention maps by 180 degrees, we obtain a new set $\{A_i'\}$ that depicts the opposite backward motion, corresponding to the reversed one $\{I_{N-1}, I_{N-2}, ..., I_{0}\}$ starting from the last frame $I_{N-1}$.
+
+ Specifically, rotating the temporal self-attention maps by 180 degrees---flipping them vertically and horizontally---yields a backward motion opposite to the original forward motion. For example, consider attention map $A$; the rotated map $A'_{N-j, N-k} = A_{j, k}$, where $A_{j, k}$ indicates the attention score between the j-th and k-th frames ($I_j$ and $I_k$). In the corresponding reversed video, the reverse frame indices $N-j$ and $N-k$ maintain the same relative response.
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figs/attention.pdf} 
+    \caption{ {\bf Temporal self-attention module in the backward motion generation.} Given input tensor $X$, our attention mechanism additionally takes the respective attention map $A$ from the pre-trained SVD featuring forward motion, rotating it by 180 degrees to create a reverse motion-time association $A'$. Note that $W_{\{v, o\}}$ are the only trainable parameters in this module.}
+    \label{fig:attnmap}
+\end{figure}
+\subsection{Lightweight backward motion fine-tuning}\label{sec:reverse_motion_train}
+We introduce a lightweight fine-tuning framework that specifically fine-tunes the value and output projection matrix $W_v, W_o$ in the temporal self-attention layers, using the 180-degree rotated attention map from the forward video as additional input (see Fig.~\ref{fig:attnmap}). We use $f_{\theta'}(\mathbf{z}_t; t, \mathbf{c}, \{A_i'\})$ to denote the backward motion generation network. This fine-tuning approach offers two key advantages.
+First, by utilizing existing forward motion statistics from the pre-trained SVD model, fine-tuning $W_{\{v, o\}}$ simplifies the model's task to focus on learning how to synthesize reasonable content when operating in reverse. This strategy requires significantly less data and fewer parameters compared to full model fine-tuning. Second, it enables the control for the model to generate a backward motion trajectory corresponding to the opposite of the forward trajectory described by the attention map. This feature is particularly beneficial when planning to merge forward and backward motions converging towards each other, and thus achieving forward-backward consistency.
+
+The detailed training process is shown in Alg.~\ref{alg:train}.   For latent video $\mathbf{z}\in \mathbb{R}^{1\times N\times C\times H\times W}$, we denote $\text{flip}(\mathbf{z})$ specifically by the second dimension, i.e., reversing the latent video along the time axis. In every training iteration, we sample an input video of $N$ frames, and random time step $t$, then the noisy video latent $\mathbf{z}_t$ is created by adding the noise in that time step. The noisy video latent along with the input conditioning $\mathbf{c}_0$ (computed from $I_0$) is fed into the pre-trained 3D UNet $f_{\theta}$ to extract the self attention maps $\{A_i\}$ from the temporal attention layers. Then we reverse the noisy video latent, along with the last frame conditioning $\mathbf{c}_{N-1}$, feed them into the backward motion 3D-UNet $f_{\theta'}$. The loss function is computed by taking the predictions of the network and the ground truth reverse video. 
+
+\begin{algorithm}[ht]
+\newcommand{\nosemic}{\renewcommand{\@endalgocfline}{\relax}}% Drop semi-colon ;
+\newcommand{\dosemic}{\renewcommand{\@endalgocfline}{\algocf@endline}}% Reinstate semi-colon ;
+\newcommand{\pushline}{\Indp}% Indent
+\newcommand{\popline}{\Indm\dosemic}% Undent
+\SetKwComment{Comment}{/* }{ */}
+\SetKwInput{KwData}{Input}
+\SetKwInput{KwResult}{Return}
+\caption{Light-weight backward motion fine-tuning}\label{alg:train}
+\KwData{$f_{\theta}, p_{\text{data}}(\mathbf{x}), \mathcal{E}(\cdot)$}
+\While{not converged}{
+    Sample $\mathbf{x}\sim  p_{\text{data}}(\mathbf{x}), \mathbf{x}=\{I_n\}_{n=0}^{N-1}, \mathbf{z} =\mathcal{E}(\mathbf{x})$\;
+    Compute conditioning $\mathbf{c}_0$ from $I_0$\;
+    $t\sim \text{Uniform}(\{1,...,T\}), \bm{\epsilon}\sim \mathcal{N}(\mathbf{0}, \mathbf{I})$\;
+     $\mathbf{z}_t = \alpha_t\mathbf{z} + \sigma_t\bm{\epsilon}$\;
+     $\{A_i\} = \text{extract\_attention\_map}(f_{\theta}(\mathbf{z}_t; t, \mathbf{c}_0))$ \;
+     $\mathbf{z}'_t = \text{flip}(\mathbf{z}_t)$\;
+    Compute conditioning $\mathbf{c}_{N-1}$ from $I_{N-1}$\;
+     Take gradient descent step on $\nabla_{W_{\{v, o\}}} \|f_{\theta'}(\mathbf{z}'_t; t, \mathbf{c}_{N-1},  \{A_i'\})-\mathbf{y}\|_2^2, \mathbf{y}=\alpha_t$\text{flip}$(\bm{\epsilon}) - \sigma_t\mathbf{z}'_t$\;
+}
+\KwResult{$W_{\{v, o\}}$}
+\end{algorithm}
+\subsection{Dual-directional sampling with forward-backward consistency}\label{sec:sampling}
+Our complete {\it dual-directional sampling} process is detailed in Alg.~\ref{alg:sample}. Given a pair of key frames $I_0$ and $I_{N-1}$,  their corresponding conditioning $\mathbf{c}_0$ and $\mathbf{c}_{N-1}$
+are pre-computed. Then each sampling step (illustrated in Figure~\ref{fig:demo}) works as follows: 
+
+(1) Forward motion denoising with $I_0$ as input: The noisy video latent $z_{t}$ along with the conditioning $\mathbf{c}_0$ is fed into the pre-trained 3D UNet $f_{\theta}$ in SVD to predict the noise volume $\hat{\mathbf{v}}_{t, 0}$. Additionally, the temporal self-attention maps $\{A_i\}$ in the 3D UNet are extracted.
+
+(2) Backward motion denoising with $I_{N-1}$ as input: The noisy video $\mathbf{z}_t$ is flipped along the temporal dimension to create the reverse video latent $\mathbf{z}'_t$ corresponding to the backward motion. This backward video, along with the conditioning $\mathbf{c}_{N-1}$, as well as the 180-degree rotated attention maps $\{A_i'\}$, are fed into our fine-tuned 3D UNet $f_{\theta'}$. This step predict the noise volume $\hat{\mathbf{v}}_{t, 1}$ representing a reverse motion  from $I_{N-1}$. 
+
+(3) Finally, the predicted noise volumes from both forward and reverse motion paths are fused and then denoised using the $\text{update}(\cdot, \cdot)$ function to create less noisy video $\mathbf{z}_{t-1}$. In this way, we ensure forward-backward consistency and thus a consistent moving direction in the generated video. The $\text{fuse}(\cdot, \cdot)$ function performs a simple average. In practice, we also adopt per-step recurrence to enhance the fusion as seen in~\cite{bansal2023universal, feng2024explorative},  by re-injecting Gaussian noise into the update $\mathbf{z}_{t-1}$ and repeating the denoising $5$ times before continuing the sampling for the next step.
+
+\begin{algorithm}[ht]
+\SetKwComment{Comment}{/* }{ */}
+\SetKwInput{KwData}{Input}
+\SetKwInput{KwResult}{Return}
+\caption{Dual-directional diffusion sampling}\label{alg:sample}
+\KwData{$I_0, I_{N-1}, f_{\theta}, f_{\theta'}, \mathcal{D}(\cdot)$}
+Compute condition $\mathbf{c}_0, \mathbf{c}_{N-1}$ from $I_0, I_{N-1}$\;
+Set $\mathbf{z}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$\;
+ \For{$t\gets T$ \KwTo $1$}{
+     $\hat{\mathbf{v}}_{t, 0} = f_{\theta}(\mathbf{z}_t; t, \mathbf{c}_0)$\; 
+     $\{A_i\}= \text{extract\_attention\_map} (f_{\theta}(\mathbf{z}_t; t, \mathbf{c}_0))$\;
+     $\mathbf{z}_t' = \text{flip}(\mathbf{z}_t)$\;
+      $\hat{\mathbf{v}}_{t, 1}  = f_{\theta'}(\mathbf{z}'_t; t, \mathbf{c}_{N-1}, \{A_i'\})$ \;
+       $\hat{\mathbf{v}}'_{t, 1}  = \text{flip}(\hat{\mathbf{v}}_{t, 1})$ \;
+      $\hat{\mathbf{v}}_t = \text{fuse}(\hat{\mathbf{v}}_{t, 0}, \hat{\mathbf{v}}'_{t, 1} $)\;
+      $\mathbf{z}_{t-1} = \text{update}(\mathbf{z}_t, \hat{\mathbf{v}}_{t}; t)$
+}
+\KwResult{$\mathcal{D}(\mathbf{z}_0$)}
+\end{algorithm}
+\subsection{Implementation Details}
+As presented in Sec.~\ref{sec:reverse_motion_train}, our lightweight fine-tuning does not rely on large collection of videos. So we collected $100$ high quality videos which are originally  generated from SVD from a community website\footnote{https://www.stablevideo. Our experimental results show that our method generalizes well to the real image data. We select the ones with large object motion such as animal running, vehicle moving, people walking, and so on. We use the Adam optimizer with learning rate of $1e-4$, $\beta_1=0.9, \beta_2=0.999$, and weight decay of $1e-2$. The training takes around $15K$ iterations with batch size of $4$. We trained on $4$ A100 GPUs. For sampling, we apply $50$ sampling steps. For other parameters in SVD, we use the default values: $\emph{ motion bucket id} = 127$, $\emph{ noise aug strength} = 0.02$.
+
+
+
+\section{Experiments}
+
+
+\begin{figure*}[ht!]
+    \centering
+    \def\imW{0.17\linewidth}
+    \setlength{\tabcolsep}{1pt}
+     \renewcommand\cellset{\renewcommand\arraystretch{0}}%
+    \renewcommand{\arraystretch}{0.3}
+    \begin{tabular}[b]{cccccc}
+        \rotatebox{90}{GT}
+        &\includegraphics[width=\imW]{figs/Results/GT/2053100-uhd_3840_2160_30fps/0001.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/2053100-uhd_3840_2160_30fps/0007.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/2053100-uhd_3840_2160_30fps/0013.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/2053100-uhd_3840_2160_30fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/2053100-uhd_3840_2160_30fps/0025.png} \\
+        \rotatebox{90}{FILM}
+        &\includegraphics[width=\imW]{figs/Results/FILM/2053100-uhd_3840_2160_30fps/0001.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/2053100-uhd_3840_2160_30fps/0007.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/2053100-uhd_3840_2160_30fps/0013.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/2053100-uhd_3840_2160_30fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/2053100-uhd_3840_2160_30fps/0025.png} \\
+        \rotatebox{90}{TRF}
+          &\includegraphics[width=\imW]{figs/Results/Feng/2053100-uhd_3840_2160_30fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/2053100-uhd_3840_2160_30fps/0006.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/2053100-uhd_3840_2160_30fps/0012.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/2053100-uhd_3840_2160_30fps/0018.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/2053100-uhd_3840_2160_30fps/0024.png} \\
+        \rotatebox{90}{\textbf{Ours}}
+        &\includegraphics[width=\imW]{figs/Results/Ours/2053100-uhd_3840_2160_30fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/2053100-uhd_3840_2160_30fps/0006.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/2053100-uhd_3840_2160_30fps/0012.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/2053100-uhd_3840_2160_30fps/0018.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/2053100-uhd_3840_2160_30fps/0024.png} \\
+         & $i=0$ & $i=6$ &$i=12$ &$i=18$ &$i=24$ \\
+         \rotatebox{90}{GT}
+        &\includegraphics[width=\imW]{figs/Results/GT/9190237-hd_1920_1080_25fps/0001.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/9190237-hd_1920_1080_25fps/0022.png}
+       &\includegraphics[width=\imW]{figs/Results/GT/9190237-hd_1920_1080_25fps/0023.png}
+       &\includegraphics[width=\imW]{figs/Results/GT/9190237-hd_1920_1080_25fps/0024.png}
+       &\includegraphics[width=\imW]{figs/Results/GT/9190237-hd_1920_1080_25fps/0025.png}\\
+          \rotatebox{90}{FILM}
+       &\includegraphics[width=\imW]{figs/Results/FILM/9190237-hd_1920_1080_25fps/0001.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/9190237-hd_1920_1080_25fps/0022.png}
+       &\includegraphics[width=\imW]{figs/Results/FILM/9190237-hd_1920_1080_25fps/0023.png}
+       &\includegraphics[width=\imW]{figs/Results/FILM/9190237-hd_1920_1080_25fps/0024.png}
+       &\includegraphics[width=\imW]{figs/Results/FILM/9190237-hd_1920_1080_25fps/0025.png}\\
+        \rotatebox{90}{TRF}
+         &\includegraphics[width=\imW]{figs/Results/Feng/9190237-hd_1920_1080_25fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/9190237-hd_1920_1080_25fps/0021.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/9190237-hd_1920_1080_25fps/0022.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/9190237-hd_1920_1080_25fps/0023.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/9190237-hd_1920_1080_25fps/0024.png}\\
+        \rotatebox{90}{\textbf{Ours}}
+        &\includegraphics[width=\imW]{figs/Results/Ours/9190237-hd_1920_1080_25fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/9190237-hd_1920_1080_25fps/0021.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/9190237-hd_1920_1080_25fps/0022.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/9190237-hd_1920_1080_25fps/0023.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/9190237-hd_1920_1080_25fps/0024.png}\\
+         &$i=0$ & $i=21$ &$i=22$ &$i=23$ &$i=24$ \\
+          \rotatebox{90}{GT}
+        &\includegraphics[width=\imW]{figs/Results/GT/3326847-hd_1920_1080_24fps/0001.png}
+       &\includegraphics[width=\imW]{figs/Results/GT/3326847-hd_1920_1080_24fps/0015.png}
+       &\includegraphics[width=\imW]{figs/Results/GT/3326847-hd_1920_1080_24fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/3326847-hd_1920_1080_24fps/0023.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/3326847-hd_1920_1080_24fps/0025.png} \\
+         \rotatebox{90}{FILM}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3326847-hd_1920_1080_24fps/0001.png}
+       &\includegraphics[width=\imW]{figs/Results/FILM/3326847-hd_1920_1080_24fps/0015.png}
+       &\includegraphics[width=\imW]{figs/Results/FILM/3326847-hd_1920_1080_24fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3326847-hd_1920_1080_24fps/0023.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3326847-hd_1920_1080_24fps/0025.png} \\
+     \rotatebox{90}{TRF}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3326847-hd_1920_1080_24fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3326847-hd_1920_1080_24fps/0014.png}
+       &\includegraphics[width=\imW]{figs/Results/Feng/3326847-hd_1920_1080_24fps/0018.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3326847-hd_1920_1080_24fps/0022.png}
+         &\includegraphics[width=\imW]{figs/Results/Feng/3326847-hd_1920_1080_24fps/0024.png}\\
+          \rotatebox{90}{\textbf{Ours}}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3326847-hd_1920_1080_24fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results//Ours/3326847-hd_1920_1080_24fps/0014.png}
+       &\includegraphics[width=\imW]{figs/Results/Ours/3326847-hd_1920_1080_24fps/0018.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3326847-hd_1920_1080_24fps/0022.png}
+         &\includegraphics[width=\imW]{figs/Results/Ours/3326847-hd_1920_1080_24fps/0024.png}\\
+        &$i=0$ & $i=14$ &$i=18$ &$i=22$ &$i=24$ \\
+    \end{tabular}
+    \caption{ {\bf Qualitative baseline comparisons.} Leftmost ($i=0$) and rightmost columns ($i=24$): start and end frames. TRF generates back-and-forth motions, such as vehicles moving forward and then reversing.  FILM struggles to find correspondences when the input frames are distant and morphs from the first frame to the last. The red arrow indicates the direction of motion. We recommend viewing the video results on the project webpage.}\label{fig:baseline_comp1}
+\end{figure*}
+
+In Figs.~\ref{fig:baseline_comp1}, ~\ref{fig:ablation}, ~\ref{fig:abltion_nonrigid}, ~\ref{fig:ablation_variations}, we demonstrate that our approach successfully generates high quality videos with consistent motion given key frames capturing a dynamic scene at different moments. We highly recommend viewing the video results on the project page to see the results more clearly.
+Sec.~\ref{sec:dataset} describes the data we used to evaluate our method and the baselines. Sec.~\ref{sec:baseline} demonstrates how our method outperforms traditional frame interpolation method FILM, and the recent work TRF~\cite{feng2024explorative} that also leverages SVD for video generation. 
+Sec.~\ref{sec:ablation} justifies our design decisions with an
+ablation study. Sec.~\ref{sec:limitation} discusses the optimal scenarios where our method excels and sub-optimal ones where it outperforms the baselines but remains limited by SVD itself. Sec.~\ref{sec:adaptation} demonstrates the adaptability of our method by fixing the first key frame and varying the second.
+ Sec.~\ref{sec:failures} discusses  our failure cases. 
+
+\subsection{Evaluation Dataset}\label{sec:dataset}
+We use two high-resolution (1080p) datasets for evaluations: (1) The Davis~\cite{pont20172017} dataset, where we create  a total of $117$ input pairs from all of the videos. This dataset mostly features subject articulated motions, such as animal or human motions. (2) The Pexels dataset,  where we collect a total of $45$ input key frame pairs from a compiled collection of high resolution  videos on Pexels\footnote{https://www.pexels. All input pairs are at least $25$ frames apart and have the corresponding ground truth video clips.
+
+\subsection{Baseline Comparisons}\label{sec:baseline}
+We mainly compare our approach to FILM~\cite{reda2022film}, the current state-of-the-art frame interpolation method for large motion, and TRF~\cite{feng2024explorative} which also adapts SVD for bounded generation. 
+We show representative qualitative results in Figs.~\ref{fig:baseline_comp1},~\ref{fig:abltion_nonrigid}. In addition,  we also include results for the keyframe interpolation feature from the recent work DynamiCrafter~\cite{xing2023dynamicrafter}---a large-scale image-to-video model.
+The keyframing feature is modified from it and specially trained to accept two end frames as conditions, while we focus on how to \emph{adapt} a pretrained image-to-video model in a lightweight way with small collection of training videos and much less computational resources. This feature generates $16$ frames at resolution $512 \times 320$, while ours generates at resolution $1024 \times 576$. 
+
+\topic{Quantitative evaluation} For each dataset, we evaluate the generated in-between videos using FID~\cite{heusel2017gans} and FVD~\cite{ge2024content}, widely used metrics for evaluating generative models. These two metrics measure the distance between the distributions of generated frames/videos and actual ones.  The results are shown in Tab.~\ref{tab:baseline_number}, and our method outperforms all of the baselines by a significant margin.
+
+\begin{table}[ht]
+    \centering
+    \small
+    \begin{tabular}{ccc|cc}
+    &\multicolumn{2}{c}{\bf Pexels} &\multicolumn{2}{c}{\bf Davis} \\ \cline{2-5}
+        &FID $\downarrow$ &FVD $\downarrow$  &FID $\downarrow$  &FVD$\downarrow$ \\ \hline
+    FILM~\cite{reda2019unsupervised} &36.03  & 460.89 &41.85 &1048.65\\
+    TRF~\cite{feng2024explorative}  &41.90  &788.07 & 36.79 &563.07 \\
+    DynamiCrafter~\cite{xing2023dynamicrafter} &47.60 &410.67 &38.32 &439.74 \\
+    \midrule
+    Ours w/o RA & 39.11 & 644.47  & 36.70 & 549.98 \\
+    Ours w/o FT  & 53.44  & 633.51  & 47.23 & 604.76\\
+    \midrule
+    {\bf Ours}  &{\bf 34.58}  & {\bf 366.53} &{\bf 32.68} &{\bf 424.69} \\ \hline
+    \end{tabular}
+    \caption{Comparisons with baselines and our ablation variants. \emph{Ours w/o RA}: full pipeline with fine-tuning all parameters $W_{\{q, k, v, o\}}$ without using the 180-degree rotated temporal attention map. \emph{Ours w/o FT}: full pipeline with using rotated attention map only in the ``up" blocks and without fine-tuning $W_{\{v, o\}}$ for backward motion. }\label{tab:baseline_number}
+\end{table} 
+
+\topic{Comparison to FILM} 
+The flow-based frame interpolation method FILM suffers from two problems. First, it struggles to find correspondences in scenes with large motions. For example, in the second row of Fig.~\ref{fig:baseline_comp1},  in a highway where vehicles moving in both directions, FILM fails to find the correspondence between the moving cars across the input keyframes, resulting in implausible intermediate motions. For example, some cars in the first frame disappear in the middle and reappear at the end.  Second, it generates undesirable unambiguous motion which takes the shortest path between the end frames. In the example in Fig.~\ref{fig:abltion_nonrigid}, given two similar-looking frames that captures different states of a person running, FILM produces a motion that merely translates the person across the frames, losing the natural kinematic motions of the legs. 
+
+\topic{Comparison to TRF}
+TRF fuses the forward video generation starting from the first frame and the reversed forward video starting from the second frame, both using the original SVD. The reversed forward video from the second frame creates a backward motion video that ends at the second frame. Fusing these generation paths results in a back-and-forth motion in the generated videos. One notable effect we observe with TRF is that the generated videos exhibit a pattern of progressing forward first and then reversing  to the end frame. For example,  in the third row of Fig.~\ref{fig:baseline_comp1},  we can see the red truck moving backward over time; in the seventh row, the dog's legs are moving backwards, leading to unnatural motions. In contrast, our approach fine-tunes SVD to generate a backward video starting from the second frame  in the opposite direction to the forward video from the first frame.This forward-backward motion consistency leads to the generation of a motion-consistent video.
+\begin{figure}[t!]
+    \centering
+    \def\imW{0.31\linewidth}
+    \setlength{\tabcolsep}{1pt}
+     \renewcommand\cellset{\renewcommand\arraystretch{0}}%
+    \renewcommand{\arraystretch}{0.5}
+   \begin{tabular}{cccc}
+    \rotatebox{90}{ w/o RA}
+        &\includegraphics[width=\imW]{figs/Ablations/full_finetuning/0000.png}
+        &\includegraphics[width=\imW]{figs/Ablations/full_finetuning/0002.png}
+        & \includegraphics[width=\imW]{figs/Ablations/full_finetuning/0024.png} \\
+        \rotatebox{90}{ w/o FT}
+        &\includegraphics[width=\imW]{figs/Ablations/no_finetuning/0000.png}
+        &\includegraphics[width=\imW]{figs/Ablations/no_finetuning/0002.png}
+        & \includegraphics[width=\imW]{figs/Ablations/no_finetuning/0024.png} \\
+        \rotatebox{90}{Ours}
+         &\includegraphics[width=\imW]{figs/Ablations/ours/0000.png}
+        &\includegraphics[width=\imW]{figs/Ablations/ours/0002.png}
+        & \includegraphics[width=\imW]{figs/Ablations/ours/0024.png} \\
+        &$i=0$ & $i=2$ &$i=24$ \\
+    \end{tabular}
+    \caption{{\bf Ablation study.} We evaluate other options for generating in-between motion consistency.  (1) \emph{Ours w/o RA}: full pipeline with fine-tuning all parameters $W_{\{q,k,v,o\}}$ in the temporal attention layers but without using 180-degree rotated temporal self-attention maps as extra input (top row). (2)  \emph{Ours w/o FT}: full pipeline without fine-tuning $W_{\{v, o\}}$ for backward motion (second row).}\label{fig:ablation}
+\end{figure}
+
+\subsection{Ablations}\label{sec:ablation}
+\begin{figure*}[ht!]
+    \centering
+     \def\imW{0.17\linewidth}
+    \setlength{\tabcolsep}{1pt}
+     \renewcommand\cellset{\renewcommand\arraystretch{0}}%
+    \renewcommand{\arraystretch}{0.5}
+   \begin{tabular}{cccccc}
+        \rotatebox{90}{GT}
+        &\includegraphics[width=\imW]{figs/Results/GT/3125907-uhd_3840_2160_25fps/0001.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/3125907-uhd_3840_2160_25fps/0007.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/3125907-uhd_3840_2160_25fps/0013.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/3125907-uhd_3840_2160_25fps/0020.png}
+        &\includegraphics[width=\imW]{figs/Results/GT/3125907-uhd_3840_2160_25fps/0025.png}\\
+       \rotatebox{90}{FILM}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3125907-uhd_3840_2160_25fps/0001.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3125907-uhd_3840_2160_25fps/0007.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3125907-uhd_3840_2160_25fps/0013.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3125907-uhd_3840_2160_25fps/0020.png}
+        &\includegraphics[width=\imW]{figs/Results/FILM/3125907-uhd_3840_2160_25fps/0025.png}\\
+         \rotatebox{90}{TRF}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3125907-uhd_3840_2160_25fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3125907-uhd_3840_2160_25fps/0006.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3125907-uhd_3840_2160_25fps/0012.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3125907-uhd_3840_2160_25fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/Feng/3125907-uhd_3840_2160_25fps/0024.png}\\
+         \rotatebox{90}{Ours}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3125907-uhd_3840_2160_25fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3125907-uhd_3840_2160_25fps/0006.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3125907-uhd_3840_2160_25fps/0012.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3125907-uhd_3840_2160_25fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/Ours/3125907-uhd_3840_2160_25fps/0024.png}\\
+         \rotatebox{90}{SVD}
+        &\includegraphics[width=\imW]{figs/Results/SVD/3125907-uhd_3840_2160_25fps/0000.png}
+        &\includegraphics[width=\imW]{figs/Results/SVD/3125907-uhd_3840_2160_25fps/0006.png}
+        &\includegraphics[width=\imW]{figs/Results/SVD/3125907-uhd_3840_2160_25fps/0012.png}
+        &\includegraphics[width=\imW]{figs/Results/SVD/3125907-uhd_3840_2160_25fps/0019.png}
+        &\includegraphics[width=\imW]{figs/Results/SVD/3125907-uhd_3840_2160_25fps/0024.png}\\
+         & $i=0$ & $i=6$ &$i=12$ &$i=18$ &$i=24$ \\
+    \end{tabular}
+    \caption{Our method outperforms FILM and TRF in generating articulated movements inbetween, but still struggles to create natural kinematic motions because of the limitation of SVD itself failing to generated complex kinematics (bottom row). Note that the input image serve as conditioning to SVD, so generated first frame might differ from the input image if SVD struggles to create plausible videos from that input.}\label{fig:abltion_nonrigid}
+\end{figure*}
+In Fig.~\ref{fig:ablation} and Tab.~\ref{tab:baseline_number}, we show visual and quantitative comparisons to simpler versions of our method to  evaluate the effect of the key components in our method.
+
+\topic{Fine-tuning without rotated attention map (Ours w/o RA)} We compare  with a variant that fine-tunes all parameters in the temporal self-attention layers, namely, $W_{\{q, k, v,o\}}$, but without using the 180-degree rotated temporal self-attention map from the forward video as extra input. Though fine-tuning all parameters can generate backward motion from the second input image, there is no guarantee that the backward motion will mirror the forward motion from the first input image. This discrepancy makes it hard for the model to reconcile the two motion paths, often resulting in blending artifacts,  as shown in the top row of Fig.~\ref{fig:ablation}. In contrast, fine-tuning $W_{\{v, o\}}$  with the rotated attention maps generates coherent and high-fidelity in-between videos. in forward-backward consistency.
+
+\topic{Fine-tuning $W_{\{v, o\}}$ vs. no fine-tuning (Ours w/o FT)}
+In Sec.~\ref{sec:reverse_motion}, we show that rotating the temporal attention maps by 180 degrees reverses the motion-time association, creating a backward motion trajectory. Here we show that  fine-tuning the value and output projection matrices $W_{v, o}$ is necessary for the model to synthesize high-fidelity content given the input backward motion-time association. We  run our full pipeline without any fine-tuning, and our attention map rotation operation is only applied to the ``up" blocks  in this variant. As shown in the second row of Fig.~\ref{fig:ablation} and Tab.~\ref{tab:baseline_number}, without fine-tuning these parameters, the model can create consistent motion but suffers from poor frame quality due to the low frame quality of the backward video generation. For example, the person is disfigured in the generated video. Moreover, applying  attention map rotation operation in the ``down" and ``mid" blocks in this variant  worsens the visual fidelity even further.
+\subsection{Optimal and sub-optimal scenarios}\label{sec:limitation}
+Our method is limited by the motion quality and priors learned by SVD. Firstly, our empirical experiments indicate that SVD works well with generating rigid motions, but struggles with non-rigid, articulated movements. It has difficulty accurately rendering the limb movements of animal/people. In Fig.~\ref{fig:abltion_nonrigid}, though our method significantly improves upon FILM and TRF,  it still appears unnatural compared to the ground truth movements. The bottom row, showing the sequence generated by SVD using only the first input frame, confirms that SVD itself struggles to generate natural running movements in between. 
+
+\subsection{Adaptive In-between generation}\label{sec:adaptation} Given the same first keyframe, and varying the second keyframe, our method can still generate plausible videos accordingly 
+due to the rich motion space of large-scale image-to-video models (see Fig.~\ref{fig:ablation_variations}  ).
+
+\subsection{Failures}\label{sec:failures} When the input pairs are captured at such distant intervals that they have sparse correspondences, as shown in Fig.~\ref{fig:failure}, where only a small portion of cars appear in both input frames, it becomes difficult for our method to fuse the forward and backward motions. This situation, where the overlapping areas are minimal,  leads to artifacts in the intermediate frames.
+
+\begin{figure}[ht]
+    \centering
+     \def\imW{0.33\linewidth}
+    \setlength{\tabcolsep}{1pt}
+     \renewcommand\cellset{\renewcommand\arraystretch{0}}%
+    \renewcommand{\arraystretch}{0.5}
+   \begin{tabular}{ccc}
+        \includegraphics[width=\imW]{figs/Results/Failures/frame1.png}
+        &\includegraphics[width=\imW]{figs/Results/Failures/frame2.png}
+        &\includegraphics[width=\imW]{figs/Results/Failures/mid.png}\\
+        input frame 1 &input frame 2 &mid frame
+    \end{tabular}
+    \caption{{\bf Failure case.} Our method fails to work well in the cases where input pairs have sparse correspondences. }\label{fig:failure}
+\end{figure}
+
+\begin{figure*}[ht!]
+    \centering
+    \def\imW{0.17\linewidth}
+    \setlength{\tabcolsep}{1pt}
+     \renewcommand\cellset{\renewcommand\arraystretch{0}}%
+    \renewcommand{\arraystretch}{0.5}
+   \begin{tabular}{cccccc}
+        &\includegraphics[width=\imW]{figs/Results/Variations/Ours/8746813-uhd_4096_2160_30fps/0000.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours/8746813-uhd_4096_2160_30fps/0006.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours/8746813-uhd_4096_2160_30fps/0012.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours/8746813-uhd_4096_2160_30fps/0018.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours/8746813-uhd_4096_2160_30fps/0024.png} \\
+       & \includegraphics[width=\imW]{figs/Results/Variations/Ours_d50/8746813-uhd_4096_2160_30fps/0000.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours_d50/8746813-uhd_4096_2160_30fps/0006.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours_d50/8746813-uhd_4096_2160_30fps/0012.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours_d50/8746813-uhd_4096_2160_30fps/0018.png}
+        & \includegraphics[width=\imW]{figs/Results/Variations/Ours_d50/8746813-uhd_4096_2160_30fps/0024.png}\\
+        &$i=0$ & $i=6$ &$i=12$ &$i=18$ &$i=24$ \\
+    \end{tabular}
+    \caption{ Leftmost ($i=0$) and rightmost columns ($i=24$): key frames input. Middle columns: generated frames. By fixing the first key frame and varying the second,  our method adapts to different ending poses of the dog, generating  motion kinematics that naturally depict a walking dog. }\label{fig:ablation_variations}
+\end{figure*}
+
+
+
+\section{Discussion \& Limitations}
+
+Our method is limited by the motion quality in Stable Video Diffusion (SVD), as discussed in Sec.~\ref{sec:limitation}. Another limitation is that SVD has strong motion priors derived from the input image, tending to generate only specific motions for a given input. As a result, the actual motion required to connect the input key frames may not be represented within SVD's motion space, making it challenging to synthesize plausible intermediate videos. However, with advancements in large scale image-to-video models like SoRA\footnote{https://openai. Another potential improvement involves using motion heuristics between the input key frames to prompt the image-to-video model to generate more accurate in-between motions.
+
+{\bf \noindent Acknowledgements} We thank Meng-Li Shih, Bowei Chen, and Dor Verbin for helpful discussions and feedback. This work was supported by the UW Reality Lab and Google.
+
+{
+    \small
+    
+
+
+

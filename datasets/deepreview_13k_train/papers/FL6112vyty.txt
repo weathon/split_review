@@ -1,0 +1,224 @@
+\title{DirectTriGS: Triplane-based Gaussian Splatting Field Representation for 3D Generation}
+
+\begin{abstract}
+We present DirectTriGS, a novel framework designed for 3D object generation with Gaussian Splatting (GS). GS-based rendering for 3D content has gained considerable attention recently. However, there has been limited exploration in directly generating 3D Gaussians compared to traditional generative modeling approaches. The main challenge lies in the complex data structure of GS represented by discrete point clouds with multiple channels.
+To overcome this challenge, we propose employing the triplane representation, which allows us to represent Gaussian Splatting as an image-like continuous field. This representation effectively encodes both the geometry and texture information, enabling smooth transformation back to Gaussian point clouds and rendering into images by a TriRenderer, with only 2D supervisions. The proposed TriRenderer is fully differentiable, so that the rendering loss can supervise both texture and geometry encoding. Furthermore, the triplane representation can be compressed using a Variational Autoencoder (VAE), which can subsequently be utilized in latent diffusion to generate 3D objects.
+The experiments demonstrate that the proposed generation framework can produce high-quality 3D object geometry and rendering results.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Neural rendering has grown to a focal point in rendering techniques in recent years, as it achieves more realistic rendering effects by leveraging the great expressiveness of neural network. The representatives are neural radience field (NeRF) (Mildenhall et al., 2021) and the newly emerged Gaussian Splatting (GS) (Kerbl et al., 2023). However, when applied to the field of 3D generation, the slow rendering and training speed become a strong limitation for NeRF. While GS is more flexible with greater rendering efficiency and editability, few works have addressed the challenge of direct GS generation in 3D due to its complex data structure. In this paper, we propose a novel approach called DirectTriGS, which encodes GS as triplane representation, and introduce its corresponding renderer, TriRenderer. Subsequently, we apply latent diffusion on the Triplane representation to generate high-quality GS objects.  
+
+Gaussian splatting uses multi-channel point cloud of “splats” to describe the 3D contents. With a differentiable splats rasterizer, GS has fast rendering speed. However, the sparsity, multiple channels, and uneven distributed density of 3D GS bring great difficulty for 3D generation. We propose to encode GS contents as multi-channel triplane representations, which have been shown to possess favorable properties for representing 3D geometry or NeRF, as demonstrated in previous works Wu et al. (2024); Shue et al. (2023). In our work, we leverage the triplane representation to encode both the geometry information and other GS attributes in two separate groups of channels. By training on a dataset of 3D objects, we obtain a shared TriRenderer that is capable of decoding different triplane representations to GS and then render it to image. TriRenderer is fully differentiable, enabling the use of only 2D rendering loss to supervise both the texture and geometry of 3D GS. The advantage of using Triplane to represent GS are two folds. First, it leads to high memory efficiency compared with dense voxels and is expressive enough for generating various 3D GS. Second, Triplane is more compatible with the convolution-based encoders compared with the original sparse GS point cloud, which require specifically designed networks on processing sparse point clouds.  
+
+We follow stable diffusion (Rombach et al., 2022) to train DirectTriGS on the proposed triplane representation. Specifically, a VAE is designed to further convert the Triplanes into latent code. We use two separate decoders to decouple the decoding of geometry and GS attributes. Second, we roll out the triplane latent to an expanded multi-channel image, then exploit staged latent diffusion to do generation. Two-stage diffusion is employed to generate the geometry and the corresponding GS appearance. Finally, score distillation sampling (SDS) (Poole et al., 2022) is adopted as a optional post-processing to refine or restyle the generated 3D objects.  
+
+Our contribution can summarized as follows. 1) We propose a Triplane representation for direct 3D GS generation, which is memory efficient to derive GS point clouds with vivid rendering. 2) We design a fully differentiable TriRenderer to enable the end-to-end training of triplane representations, with only 2D supervisions. 3) We develop a Triplane-based GS generation framework DirectTriGS that incorporates a specially designed VAE, latent diffusion module, and a SDS based refiner. 4) Experiments demonstrate our method produces competitive performance in both 3D geometry and multi-view rendering quality.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+Gaussian Splatting. Gaussian Splatting (Kerbl et al., 2023) exploits pointcloud of splats to describe the 3D content, and every splat is a 3D ball with a shape of Gaussian distribution, and it has other properties like opacity, color or SH parameters. The GS can be rendered like mesh using a special designed rasteraization, which allows real-time rendering of photorealistic scenes. As a newly developed rendering technique, there emerges so many research focusing on its reconstruction quality enhancement and algorithm optimization (Yu et al., 2023; Cheng et al., 2024; Fan et al., 2023; Lu et al., 2023). Another related active area includes 4D dynamic GS modeling (Wu et al., 2023a; Yang et al., 2023; Chen et al., 2023c) , scene editing (Fang et al., 2023; Chen et al., 2023b) and its applications like SLAM (Matsuki et al., 2023; Yan et al., 2023).  
+
+3D Object Generation. Recently, there emerges many works aiming to solve the geometry generation and rendering in combination, which can be roughly divide into 2 groups. First is the route of multiview image to 3D, which generate multi-view colored 3D image and then reconstruct the 3D shape and project image to texture, such as Poole et al. (2022); Shi et al. (2023); Höllein et al. (2023); Liu et al. (2023); Chung et al. (2023); Tang et al. (2023). Since these approaches are actually 2D generator, it is difficult to maintain 3D consistency, which may lead to Janus problem. And the second group mainly operate in 3D, which can be clustered by different 3D representation. For example, Gupta et al. (2023); Gao et al. (2022) are able to generate high-quality 3D textured meshes using differentiable rendering; Nichol et al. (2022); Wu et al. (2023c) generate colored pointcloud; Chen et al. (2023a); Metzer et al. (2023) generate NeRF volumes; Ju et al. (2023); Wu et al. (2024)generate SDF volumes.  
+
+As for GS generation, some works exploit multi-view image based route such as Chung et al. (2023); Tang et al. (2023), where the image generator output image from required views to enhance the GS rendering in a recursive manner. Rare works explore the GS generation directly in 3D space, such as Zou et al. (2023) generates a point cloud using a Transformer structure with 2D image as input, and build a mapping of image to tri-plane encoding of GS attribute; GaussianCube (Zhang et al., 2024) proposes to use optimal transport to model the 3D GS for text-to-3D generation.  
+
+
+
+\section{3 REVISITING GAUSSIAN SPLATTING  }
+
+
+Gaussian Splatting Kerbl et al. (2023) uses a set of Gaussian points to describe a 3D object. The Gaussian points are defined by a full 3D covariance matrix $\Sigma$ in a world space as $G(\mathbf{x})=e^{-\frac{\mathbf{\bar{\tau}}}{2}\mathbf{x}^{T}\mathbf{\Sigma}\mathbf{\Sigma}^{-1}\mathbf{x}}$ , centered at point (mean) $\mathbf{p}\in\mathbb{R}^{3}$ . Each point is with a opacity scalar $\alpha\in[0,1]$ for blending and a series of Spherical Harmonics (SH) coefficients to correctly capture the view-dependent appearance of the scene. The number of SH coefficients are $3\times(n+1)^{2}$ , where $n$ denotes the SH order, and higher $n$ corresponds to more accurate view-dependent appearance.  
+
+During rendering, the Gaussians are project to 2D given a viewing transformation W. The covariance is transformed as $\begin{array}{r}{\pmb{\Sigma^{\prime}}=\mathbf{J}\mathbf{W}\pmb{\Sigma}\mathbf{W}^{T}\mathbf{\dot{J}}^{T}}\end{array}$ , where $\mathbf{J}$ is the Jacobian of the affine approximation of the projective transformation. To ensure $\Sigma$ to be semi-positive in the whole training process, $\Sigma$ can be represented by a Cholesky decomposition as $\begin{array}{r}{\pmb{\Sigma}=\bar{\mathbf{R}}\mathbf{S}\mathbf{S}^{T}\mathbf{R}^{T}}\end{array}$ , represented by a tuple $\boldsymbol{s}=\left(s_{1},s_{2},s_{3}\right)$ for scaling and a unnormalized quaternion $\mathbf{q}\in\mathbb{R}^{4}$ for rotation. In summary, each Gaussian point are  
+
+1) Repr 2) Train a Triplane VAE. 3) Generation by LDM on Triplane latent. 4) Optional Refinement by SDS. → 白→ Late Mode (a) The overall procedure of our 3D content generation framework. TriRenderer Pipeline Deformable SDF Volume Mesh Point Cloud Triplane Feature Geometry Differentiable Surface Point Extractor Decoder Marching Cube Sampler Grid Points GS Attribu Geometry Branch Branch GS Attribute Branch Triplane TriplEaxntrea cFteoarture GSD eActtoridbeurte GS Renderer (frPoomi nGt eColmoeutrdy Branch) Multi-view Images GS Point Cloud (b) The forward pass of the TriRenderer pipeline: rendering a Triplane to multi-view images. Figure 1: The overview of the proposed 3D GS generation framework and the core component TriRenderer. We use triplane to represent 3D objects, and design a TriRenderer to decode triplane to GS pointcloud and render multi-view images. a union set of position $\mathbf{p}$ and its GS attributes: $\mathcal{G}_{\mathbf{p}}:=\{s,\mathbf{q},\mathrm{SH},\alpha\}.$ (1) GS pointcloud can be efficiently rendered by a rasterization-based splatting renderer (Kerbl et al., 2023), which is fully differentiable. 4 METHODOLOGY Our motivation is to directly generate 3D GS with fast speed by utilizing the proposed triplane-based GS representation. While 2D-lifting methods like SDS-based approaches yield intricate results, they are time-intensive and susceptible to Janus problem. Direct generation, notably with fast sampling, can complete 3D generation in under a minute, contrasting with SDS methods that take over 10 minutes or longer, such as Chen et al. (2024)Wang et al. (2024), posing challenges for users. Therefore, direct 3D generation is more practical, with 2D-lifting reserved for enhancing texture details when needed. The procedures of our generation framework can be divide into 4 stages as shown in Fig.1 (a). Firstly, we encode the 3D objects into triplanes using the TriRenderer. The triplane encoding and TriRenderer training can be concurrently executed with only the multi-view RGBA image and camera poses as supervision. Secondly, a VAE is trained to compress the triplanes to latent space, enabling effective capture of high-level information for subsequent modules. Thirdly, a diffusion model is trained on the triplane latent code. During inference, the diffusion model produces the latent code, which can be decoded back to its corresponding triplane by the VAE decoder. Subsequently, the TriRenderer decodes the triplane into the standard GS point cloud. Finally, an SDS-based refiner can be utilized as an optional post-processing step to enhance or restyle the generated 3D object. Leveraging the pretrained 2D diffusion model within the SDS, the generated GS can be further improved to achieve a more detailed appearance. 4.1 TRIPLANE-BASED GS FIELD  
+
+We employ triplanes to convert the discrete multi-channel GS point cloud into a continuous field, tailored for more efficient encoding in the subsequent generative model. Triplanes are 3 planes formed by every 2 axes of $x,y,z$ axes in 3D space, where every 3D point p can query these planes to get corresponding features $F_{\mathbf{p}}=(F_{x y},\bar{F_{x z}},F_{y z})$ using orthogonal projection. In real implementation, triplane is a tensor with the size of $3\times H\times H\times C$ , where $H$ denote the resolution along every axis and $C$ is the feature channel. The query of point with arbitrary continuous coordinate should be a bi-linear intepolation in the triplane grids. Considering GS is a set of points with multiple channels of attributes, it is natural to use triplane for GS encoding. If the triplane feature and GS attributes of a point can be transformed to each other, the sparse GS pointcloud of every object can be represented as continuous triplane GS field for further encoding. We use separate channels to encode 3D geometry and other GS attributes as described in Eq. 1, which is an experimental setting for better convergence in the training.  
+
+4.2 TRIRENDERER  
+
+The TriRenderer serves as the crucial component for converting a 3D object into a triplane-based GS field. It acts as a fully differentiable bridge connecting the GS field with rendering, enabling the optimization from 2D images to geometry and appearance encoding.  
+
+As depicted in Fig. 1 (b), the TriRenderer comprises a geometry branch and a GS attribute branch, each equipped with independent decoders to decode the triplane. The geometry branch is responsible for retrieve the geometry as triangular mesh from triplane, with a surface sampler for GS pointcloud sampling. Then GS attribute branch uses the obtained pointcloud to query the triplane to obtain the GS attribute corresponding to each point. In this way, the GS pointcloud in the original format is retrieved, and can be rendered using the original GS renderer. It is worth mentioning that all triplanes of different object share a common TriRenderer, which ensures the features on different triplanes subject to a similar distribution.  
+
+Geometry Branch. We use signed distance function (SDF) to represent the geometry, and allow every vertex deform as Shen et al. (2021), so that the geometry branch decodes $F_{p}$ to a SDF volume and its vertice deformation. By query all grid coordinates of the designated resolution $L\times L\times L$ , the deformable SDF volume is reconstructed. Then we exploit a differentiable Marching Cube algorithm FlexiCubes (Shen et al., 2023) to extract triangular mesh from the SDF volume.  
+
+Surface Sampling. Considering that GS pointcloud is generally gathered on the surface of objects, we randomly sample GS points on the faces of triangular mesh with barycentric coordinates. We expect that every splat is flat and with a normal consistent with its source triangular face. Assume a face is formed by vertices $<v_{a},v_{b},v_{c}>$ , and vector $\mathbf{v}_{1}=(v_{a}-v_{b})$ , $\mathbf{v}_{2}=\left(v_{b}-v_{c}\right)$ , the face normal can be calculated as $\mathbf{n}=\mathbf{v}_{1}\times\mathbf{v}_{2}$ . Then the rotation matrix of every splat drawn from this face can be formulated as  
+
+$$
+\mathbf{R}=\left[\mathbf{v}_{1},\mathbf{n}\times\mathbf{v}_{1},\mathbf{n}\right],
+$$  
+
+which can be transform to $\mathbf{q}$ in Eq.1 by standard matrix-to-quaternion algorithm. To make the splats flat, $s_{3}$ in Eq.1 is fixed to an infinite small value.  
+
+To further reduce the computational load in the subsequent GS rendering process, only faces oriented toward the camera are sampled. These face indices can be obtained through fast rasterization of the mesh faces. Note this rasterization is not required to be differentiable, and we use the library Nvdiffrast (Laine et al., 2020) for implementation.  
+
+GS Attribute Branch. By querying the triplane GS channels with the sampled pointcloud, we can obtain the GS feature and use the GS attribute branch to transform them to the rest GS attributes. Then the GS renderer can render GS pointcloud to multi-view images. Since different GS attributes have different numerical scales and distributions, we customize individual headers to decode them respectively, which is similar to Zou et al. (2023).  
+
+Training. The training consists of 2 stages. In the first stage, a small batch of data is used to train the triplanes and the TriRenderer together. The second stage involves the whole dataset to train all triplanes with the parameters of TriRenderer frozen. In this way, we can handle large dataset by distributed training in the second stage, and the same TriRenderer can be shared by all triplanes. There is no need to pre-train the GS pointcloud using original GS training as Kerbl et al. (2023).  
+
+The only required supervision data is $N$ multi-view images $\{I_{i}\}_{i=1}^{N}$ with camera poses, and the training losses consists of the rendering loss $L_{\mathrm{render}}$ and the geometric regularization $L_{\mathrm{geo}}$ . The rendering loss is a weighted sum as  
+
+$$
+{\cal L}_{\mathrm{render}}=w_{1}{\cal L}_{\mathrm{alpha}}+w_{2}{\cal L}_{\mathrm{rgb}}+w_{3}{\cal L}_{\mathrm{pips}},
+$$  
+
+![](images/fdd5531fb0c24183deb0d8b503cd3f0d8a3acfa4c5ddb5c6647d5d63537a1ff5.jpg)  
+Figure 2: Triplane VAE and 2-stage diffusion.  
+
+where $L_{\mathrm{alpha}}$ is a $L_{1}$ loss on the alpha map, namely the silhouette image loss; $L_{\mathrm{rgb}}$ is a combination of $L_{1}$ pixel loss and SSIM loss (Wang et al., 2004) between rendered image ${\hat{I}}_{i}$ and ground truth $I_{i}$ :  
+
+$$
+L_{\mathrm{rgb}}=\sum_{i=1}^{N}(1-\beta)\Vert I_{i}-\hat{I}_{i}\Vert_{1}+\beta\mathrm{SSIM}(I_{i},\hat{I}_{i}),
+$$  
+
+and $L_{\mathrm{pips}}$ is the perceptual loss (Johnson et al., 2016). $w_{1},\,w_{2},\,w_{3}$ and $\beta$ are all weighting factors determined by experiments.  
+
+The geometric regularization loss on the SDF volume $V$ is defined as  
+
+$$
+\begin{array}{r}{L_{\mathrm{geo}}=\gamma_{1}L_{\mathrm{dev}}+\gamma_{2}L_{\mathrm{weighting}}+\gamma_{3}L_{\mathrm{CE}}+\gamma_{4}L_{\mathrm{sign}},}\end{array}
+$$  
+
+where the $L_{\mathrm{dev}}$ and $L_{\mathrm{weighting}}$ are defined by Flexicubes (Shen et al., 2023) to regularize the extracted connectivity and the weighting scale of SDF vertices. To penalize the sign changes on all grid edges, we follow Munkberg et al. (2022) to define $L_{\mathrm{CE}}$ as  
+
+$$
+L_{\mathrm{CE}}=\sum_{(s_{a},s_{b})\in\epsilon}\mathrm{CE}(\sigma(s_{a}),\mathrm{sign}(s_{b})),
+$$  
+
+where CE denotes cross entropy; $\epsilon$ is the set of all edges connecting vertices with different signs; and $\sigma$ is the sigmoid function. Finally, $L_{\mathrm{sign}}$ is designed to prevent the SDF volume from being trapped in an empty shape, i.e. a fully positive or fully negative SDF volume,  
+
+$$
+L_{\mathrm{sign}}=\delta(V)M(|V|),
+$$  
+
+where $\delta(V)=1$ if $V$ is empty, otherwise ${\delta(V)=0.\;M(|V|)}$ denotes the mean of the absolute value of $V$ .  
+
+
+
+\section{4.3 TRIPLANE VAE  }
+
+
+We employ an UNet-like structure of VAE to compress the triplane to latent space. The training pipeline is demonstrated in Fig. 2 (a). Considering that the 3 planes of triplanes encodes features from 3 orthogonal view direction, these 3 planes should be homogeneous data, so that We reshape the triplanes of batchsize $B$ to a new batch as $B\times3\times H\times H\times C$ to $3B\times H\times H\times C$ for the VAE training. We use decoupled encoders and decoders for geometry and GS channels of triplanes, for experiments prove that a mixed encoding may lead to blur of the rendering results. After the triplane is reconstructed, the TriRenderer trained in Section.4.1 can be used to retrieve the GS pointclouds and render it to images.  
+
+In the training process, same loss functions as Eq. 3 and Eq. 5 are used, along with an $L_{1}$ loss between the input and reconstructed triplanes, denoted as $L_{\mathrm{Tri}}$ . Additionally, a Kullback–Leibler divergence loss $L_{\mathrm{KL}}$ is included to ensure that the latent variables do not deviate significantly from a normal distribution. The total losses is summarized as  
+
+$$
+{\cal L}_{\mathrm{VAE}}={\cal L}_{\mathrm{Tri}}+{\cal L}_{\mathrm{Geo}}+{\cal L}_{\mathrm{Render}}+\gamma{\cal L}_{\mathrm{KL}},
+$$  
+
+where $\gamma$ is a small weight.  
+
+![](images/282f5419197446b993ea71e9883dfeea991ce9d28fbbc35a9c90c54b829e5146.jpg)  
+Figure 3: Score distillation process(SDS) for optional texture refinement.  
+
+
+
+\section{4.4 TWO-STAGE LATENT DIFFUSION FOR TEXT-TO-3D GENERATION  }
+
+
+Taking into account the significant relevance of texture appearance to the underlying geometry, we proposed to utilize staged diffusion to generate geometry and GS attribute successively as shown in Fig. 2 (b). It is easy to implement it because the latent codes for geometry and other GS attributes are totally decoupled by VAE, as mentioned earlier . In this way, the geometry code can be a new condition for the second stage.  
+
+We follow DDPM Ho et al. (2020); Karras et al. (2022) to implement the latent diffusion conditioned on the text description. To better capture the relation between different planes, we roll out the triplane latent of $B\times3\times h\times h\times c$ to a image-like $B\times3h\times h\times c$ as the input of diffusion model, and the generated result will be transformed back to the original shape for TriRenderer decoding.  
+
+4.5 SDS-BASED TEXTURE BOOSTER  
+
+To refine or restyle the generated GS pointcloud, we utilize a pretrained 2D diffusion model for the SDS training process (Poole et al., 2022) as shown in Fig. 3. As the generated 3D GS is constrained by the mesh reconstructed from SDF, detailed in Section 4.2, we maintain the GS splats’ adherence as previously established. However, we enable the mesh vertices to shift within a limited radius to enhance the stability of the SDS process. Additionally, throughout the entire SDS procedure, there is no need for densification or pruning operations. This ensures that the number of points can be controlled to align with the number of mesh faces.  
+
+With the RGB image rendered from the initial GS pointcloud, the 2D diffusion model can produce images with better 2D/3D consistence in different views, so that the optimization process can converge rapidly without Janus problem.  
+
+
+
+\section{5 EXPERIMENT  }
+
+
+The experiments are conducted step-by-step according to the generation pipeline proposed as Fig.1 (a). We use OmniObject3D (Wu et al., 2023b) dataset for toy experiments, and Objaverse (Deitke et al., 2023) dataset for main evaluation. First, we sample 200K object to train their cooresponding triplanes and TriRenderer. Then we train the VAE and diffusion model for 3D GS generation. Finally, we exploit SDS to boost the texture quality for unsatisfactory generated objects.  
+
+The experimental results primarily consist of the following components: 1) A simple check of the trained triplane and VAE reconstruction. 2) For examining the proposed triplane modeling for GS generation, we focus on the text-to-3D task and showcase the direct GS generation outcomes qualitatively and quantitatively. These results are compared with Shap-E (Jun & Nichol, 2023), Direct3D Liu et al. (2024), and the most recent GaussianCube (Zhang et al., 2024). 3) In comparison to 2D-lifting GS generation methods, we present the performance of SDS refinement on unsatisfying samples, with GSGEN (Chen et al., 2024) and GaussianDreamer (Yi et al., 2024) as baselines.  
+
+
+
+\section{5.1 TRIPLANE FITTING AND VAE RECONSTRUCTION  }
+
+
+Triplane Fitting. We adopt a resolution of $3\times128\times128\times16$ for all triplane ftiting, with a resolution of $64\times64\times64$ for the deformable SDF grids. We randomly sample 1000 objects for the shared TriRenderer training, and train all residual objects distributively. Every triplane is initialized with Gaussian noise before training. Under such settings, every triplane takes less than 30 seconds for geometry and GS appearance reconstruction.  
+
+![](images/365d01d0672328371e572b2f8eb627a6345bb731a6d3454f1b69d0f483b25d40.jpg)  
+Figure 4: Channel visualization of sample triplanes.  
+
+To better investigate whether it is reasonable to encode triplane using convolution-based methods, we simply scale the channel value of trained triplanes to pixel range and visualize them as shown in Fig. 4, where clear shapes from 3 different views can be observed.  
+
+![](images/175a2242cb5285e1661d3fc75c65211cf9f2f020cb65870bc3b51b069060f347.jpg)  
+Figure 5: Triplane reconstructed by VAE. Left: ground truth. Right: reconstruction.  
+
+VAE Reconstruction.We use a down-sample factor of 4 to compress the triplanes to latent space. A slight blur in the reconstructed pictures are observed as Fig.5, which is inevitable but acceptable.  
+
+5.2 DIRECT 3D GS GENERATION BY LDM  
+
+In this section, we present the results of our 3D GS object generation without the SDS refinement, both quantitatively and qualitatively. Due to the current scarcity of work targeting direct 3DGS generation, we selected two state-of-the-art text-to-3D works based on other 3D representations(NeRF) ShapE (Jun & Nichol, 2023) and Direct3D (Liu et al., 2024) for comparison. For fairness, these selected methods also perform direct generation in the 3D domain without any refinement based on 2D diffusion. Additionally, we provide a qualitative comparison with GaussianCube (Zhang et al.3.  
+
+Qualitative Results. The generation results from different methods are listed in Fig. 6. Every generated sample is rendered from different views accompanied by the provided text prompt captioned beneath the images. Our method showcase enhanced proficiency in both geometry and rendering quality, resulting in sharper and clearer outputs, which can be further verified in the subsequent quantitative evaluation.  
+
+Quantitative Results. We use CLIP score to evaluate the text-to-3d consistency, and an user study is conducted to evaluate the generation results from various aspect such as geometry, texture, realistic rendering and the consistency with given prompt. 49 users participated in the user study to score the over 50 3D samples from 1 to 5 points, and the average results are shown in Tab. 1. As for the CLIP score, the open-source repository t2vmetrics (Lin et al., 2024) is used to calculate the CLIP score on two versions of ViT models, and the results are demonstrated in Tab. 2. Both the CLIP score and the user study indicate that the proposed method produces better performance.  
+
+5.3 TEXTURE BOOSTING BY SDS  
+
+To compare with other SDS-based 3D GS generation methods, we implement a version of SDS for our mesh-binding GS representation as described in Section 4.5. GSGEN (Chen et al., 2024) and  
+
+![](images/91f4fd913944c7c37cbd6edd7436beceaa519002f6a008ba2633fb69d8d5d406.jpg)  
+Figure 6: Comparison of generated 3D objects (without SDS refinement).  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+Table 1: User study on generated 3D objects (without SDS refinement).   
+
+![](images/f1572a8c55047effbb662f46da9523335f1dacc20a918baa68ed7df48102a08e.jpg)  
+
+![](images/8c01f0b5befb2d9e8576ec67b02469a5a4c0e6fcd94d12ea01c7de83e1684ce9.jpg)  
+
+Table 2: CLIP score $(\uparrow)$ for evaluation of similarity between rendered images and given text prompt.   
+Table 3: User study on generated 3D objects (with SDS refinement).   
+
+![](images/98912f9d9740c645a7e2bb3149f9666d7359d4945812d70830641b42fb28b57c.jpg)  
+
+GaussianDreamer (Yi et al., 2024) are selected as our baselines. The generated samples, as illustrated in Fig. 7, highlight that with the SDS refiner, our DirectTriGS can deliver competitive outcomes comparable to the state-of-the-art 2D-lifting methods.  
+
+Furthermore, we conducted a user study for quantitative evaluation. 40 users were tasked with ranking 15 samples from different methods based on two criteria: realism and level of detail. The results indicate that our approach marginally outperforms the other baseline methods.  
+
+
+
+\section{5.4 ABLATION STUDY  }
+
+
+3D Diffusion for voxel-based Gaussian Splatting. We attempt to do GS attribute generation conditioned on given voxel occupancy via 3D diffusion model. However, even a toy experiment of over-fitting one single object failed, which may attributes to the complex multiple channels with different distributions especially the non-Euclidean ones such as quaternion. As shown in Fig.8, the diffusion model learns to generate color but fails to generate splat scaling, opacity and orientation.  
+
+Triplane Diffusion without VAE. Since VAE inherently involves a reconstruction loss, we attempt to use direct diffusion on the triplane space for generation. The experiment results shows that such direct diffusion may cause serious noise on decoded geometry. Randomly generated samples are visualized in Fig.9. A possible reason is that the multi-channels of triplane contains considerable redundancy or noise, which is difficult to be captured or filtered by the diffusion model.  
+
+Inference Efficiency. The inference efficiency is listed in Table 4. This experiment is conducted on the platform equipped with RTX3090 GPU with 24GB memory.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We have presented a novel framework DirectTriGS for Gaussian Splatting Field generation. DirectTriGS mainly consists of 3 parts: 1) a light-weight triplane representation for 3D object with the format of Gaussian Splatting; 2) a fully differentiable TriRenderer which can decode triplane to orginal GS and render it to multi-view images; 3) the triplane VAE and staged diffusion model for the whole generation process. By utilizing our DirectTriGS, the intricate GS data can be generated directly and efficiently. 4) Additionally, we incorporate a SDS refiner to further improve the texture and details of generated objects.  
+
+Table 4: Inference efficiency of the generation (single stage of LDM), with the batch size is 1.   
+
+![](images/041db5535082bfabefd1f46b9cf2ea277f0d8a7fc934c76bd15bee479905b419.jpg)  
+
+![](images/fc87a9aa11085d653bf61e4cc8286e5b23604b2acfe72c8e961b295e186f90eb.jpg)  
+Figure 7: Refinement of unsatisfactory results by SDS, compared with pure SDS-based methods GSGEN and GaussianDreamer.  
+
+![](images/51e3c9bbbd21ed02236f7a8a0dec330170aeac08e808052917c4529f128b5fd0.jpg)  
+Figure 9: Noisy results of direct diffusion on triplane. The condition prompt are "train", "watermelon" and "box".  
+
+Figure 8: Failure of GS attribute generation.  
+
+
+

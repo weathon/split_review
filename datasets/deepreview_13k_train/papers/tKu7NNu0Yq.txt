@@ -1,0 +1,548 @@
+\title{DeepEMD: A Transformer-based Fast Estimation of the Earth Mover’s Distance}
+
+\begin{abstract}
+  The Earth Mover's Distance (EMD) is the measure of choice between point clouds. However the computational cost to compute it makes it prohibitive as a training loss, and the standard approach is to use a surrogate such as the Chamfer distance. 
+  We propose an attention-based model to compute an accurate approximation of the EMD that can be used as a training loss for generative models. To get the necessary accurate estimation of the gradients we train our model to explicitly compute the matching between point clouds instead of EMD itself. We cast this new objective as the estimation of an attention matrix that approximates the ground truth matching matrix. 
+  Experiments show that this model provides an accurate estimate of the EMD and its gradient with a wall clock speed-up of more than two orders of magnitude with respect to the exact Hungarian matching algorithm and one order of magnitude with respect to the standard approximate Sinkhorn algorithm, allowing in particular to train a point cloud VAE with the EMD itself. 
+  Extensive evaluation show the remarkable behaviour of this model when operating out-of-distribution, a key requirement for a distance surrogate. Finally, the model generalizes very well to point clouds during inference several times larger than during training
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+\begin{figure}[t]
+\hspace*{-2em}
+\begin{minipage}[t]{0.5\linewidth}
+\begin{tabular}{ccc}%
+\includegraphics[width=0.33\linewidth,trim=50 45 35 0, clip]{files/recons_main/airplane_chamfer.pdf}&
+\includegraphics[width=0.33\linewidth,trim=50 45 35 0, clip]{files/recons_main/chair_chamfer.pdf}&
+\includegraphics[width=0.33\linewidth,trim=50 45 35 0, clip]{files/recons_main/car_chamfer.pdf}\\
+\multicolumn{3}{c}{Trained with Chamfer distance}\\[2ex]
+\includegraphics[width=0.33\linewidth,trim=50 45 35 0, clip]{files/recons_main/airplane_deepemd.pdf}&
+\includegraphics[width=0.33\linewidth,trim=50 45 35 0, clip]{files/recons_main/chair_deepemd.pdf}&
+\includegraphics[width=0.33\linewidth,trim=50 45 35 0, clip]{files/recons_main/car_deepemd.pdf} \\
+\multicolumn{3}{c}{Trained with DeepEMD (ours)}
+\end{tabular}
+\caption{Example point clouds (blue) and their VAE reconstructions (orange) when trained with different reconstruction losses. Training with DeepEMD (bottom) consistently achieves lower reconstruction error (EMD, shown on top of each example) than with the standard Chamfer distance (top).}
+\label{fig:val_recon_intro}
+\end{minipage}%
+    \hfill%
+\begin{minipage}[t]{0.45\linewidth}
+\centering
+     \begin{subfigure}{\columnwidth}
+         \centering
+         \includegraphics[width=\textwidth,trim={25 0 22.8cm 0},clip]{files/example_pcs_emd.pdf}\\
+         \label{fig:example_pcs_emd}
+     \end{subfigure}
+     
+     \hfill
+     \begin{subfigure}{\columnwidth}
+         \centering
+         \includegraphics[width=\textwidth,trim={25 0 22.8cm 0},clip]{files/example_pcs_cd.pdf}
+         \label{fig:example_pcs_cd}
+     \end{subfigure}
+        \caption{Example pairs of point clouds. The true earth mover's distance (EMD, top) and Chamfer distance (CD, bottom) are shown above each example. Arrows indicate the matching between the two point clouds under their respective metrics.}
+        \label{fig:example_pcs}
+\end{minipage}
+\end{figure}
+
+The \emph{earth mover's distance} (EMD), also known as \emph{Wasserstein distance} is a distance between distributions that is defined as the minimum total of mass-time-distance displacement needed to transform one distribution to the other.  In the case of uniform distributions over a finite number of points, it turns into a distance between point clouds that corresponds to finding the one-to-one matching that minimizes the sum of the distances between pairs of matched points. Since there is no inherent ordering in point cloud data, computing the EMD between two point clouds involves finding a matching based on the euclidean distance between points. The matching is constrained to be bipartite so that one point cloud is completely transformed to the other, without any fractional assignment, and the transport cost is minimal.
+
+The EMD is the most commonly used distance metric on point clouds, and is extremely useful in many different contexts. In particular as we will see for both assessing the performance of, and for training variational autoencoders, since the generated point cloud should get as close as possible to the target in terms of displacement. It can also be interpreted as the distance between two distributions computed with a finite number of samples and reflects the notion of nearness properly, does not have quantization/binning and non-overlapping support problems of most other metrics, e.g., $f$-divergences, total variation distance, etc.
+
+The EMD between point clouds can be computed exactly, but it is extremely expensive computationally. The standard method is the Hungarian matching \cite{kuhn1955hungarian} algorithm whose complexity is $O(N^3)$ where $N$ is the number of points. Due to this computational cost, training deep generative models for point clouds is not done with this metric, even though it is a metric of choice for performance evaluation. The standard approach uses the \emph{Chamfer distance} (CD) as surrogate. This metric can be computed in $O(N^2)$ time complexity but relaxes the one-to-one matching, which may create pathological situations.
+
+We propose a deep architecture that takes as input two point clouds encoded as sets of geometric coordinate tuples, and computes an accurate estimate of the EMD. We show that the most efficient approach, in particular if that estimate is used as a loss for a training process, is to estimate the matching matrix itself. Since the EMD is the sum of the distance between matched points, this approach provides a very accurate estimate of the gradient with respect to the point coordinates. Training a deep variational autoencoder with our model instead of an exact computation is up to $\times 100$ faster (see Fig. \ref{fig:eval_time}), and the resulting model performs far better than one trained with the usual Chamfer surrogate (see \S~\ref{sec:genModels} and Fig. \ref{fig:recon_emd}). 
+
+\begin{comment}
+The \emph{earth mover's distance} (EMD) is a measure of the distance between two multi-dimensional probability distributions over a feature space $\mathcal{D}$, where the distance measure between individual features is defined. EMD lifts this distance measure from individual features to full distributions or sets of elements. EMD is more commonly known as \emph{wasserstein distance} in mathematics, coined by \citet{kantorovich1939mathematical}. When the $p$-norm $L_p$ is considered as the distance measure on features, the resulting metric is known as the Wasserstein-$p$ distance. If we think of a distribution as a pile of dirt over a region $\mathcal{D}$, the EMD is analogous to finding the minimum cost of turning one pile of earth into another pile, where the cost is a function of both, the distance and amount of dirt to be moved. The cost of moving ``earth'' reflects the notion of nearness properly, and does not have quantization and non-overlapping support problems of most other measures, e.g., $f$-divergences, total variation distance, etc.
+
+It is trivial to observe that EMD is a specific case of an \emph{optimal transport} problem. When working directly with samples from distributions, it reduces to a \emph{linear sum assignment} problem, which is solved by the hungarian algorithm in $\mathcal{O}(N^3)$ time complexity.
+\end{comment}
+
+The key contributions of this paper can be summarized as:
+\begin{itemize}
+    \setlength\itemsep{0.5em}
+    \item We propose DeepEMD which approximates the EMD between point clouds in $O(N^2)$ time complexity vs $O(N^3)$ of the hungarian algorithm (\S~\ref{sec:method}).
+    \item We propose to cast the prediction of a bipartite matching as an attention matrix from which we get an accurate estimate
+    of the EMD and its gradient (\S~\ref{sec:deepEMD}).
+    \item We show that DeepEMD  generalizes well to unseen data distributions (\S~\ref{sec:results}), and can be used for evaluation of generative models. It provides accurate estimates of the gradients of the distance and demonstrate that DeepEMD can be used as a surrogate reconstruction loss for training deep generative models of point clouds (\S~\ref{sec:genModels}).
+    \item We show that DeepEMD achieves about $40\times$ speed-up over Sinkhorn algorithm, achieving equal or better performance for various metrics (\S~\ref{sec:results}).
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+The two commonly used distance metrics for point clouds in literature are Earth Mover's Distance (EMD) and Chamfer Distance (CD). Consider two point clouds $X = \{x_i\}_{i=1}^N$ and $Y = \{y_j\}_{j=1}^N$, where $x_i, y_j \in \mathbb{R}^d$. The EMD between the two point clouds can be computed as,
+\begin{align}
+\operatorname{EMD}(X, Y) &=\min _{\phi \in \mathcal{M}(X, Y)} \sum_{x \in X}\|x-\phi(x)\|_2,
+\label{eq:emd}
+\end{align}
+where $\mathcal{M}(X,Y)$ is the set of 1-to-1 (bipartite) mappings from $X$ to $Y$. In addition to the distance, the optimal matching $\phi^*$ is also interesting for some applications.
+Since directly optimizing the EMD is computationally expensive, most methods in the literature rely on CD as a proxy similarity measure or reconstruction loss. The CD can be computed as,
+\begin{align}
+\operatorname{CD}(X, Y)=\sum_{x \in X} \min _{y \in Y}\|x-y\|_2^2+\sum_{y \in Y} \min _{x \in X}\|x-y\|_2^2,
+\end{align}
+and in ${O}(N^2)$ time complexity. The CD solution leads to a non-bipartite one-to-many matching between $x \rightarrow y$ and vice versa. We can also use the $L_2$ measure with $d = \|x-y\|_2$ instead $d = \|x-y\|_2^2$ to make it comparable to EMD. 
+The utility of EMD is limited by the $O(N^3)$ computational cost of evaluating it.  There have been several research efforts to circumvent this issue in various application settings.
+
+This is the case for application to point clouds where $N$ is usually in the range of several thousands. \citet{kim2021setvae} trains a variational auto-encoder with CD as the reconstruction loss. EMD is still the metric of choice for evaluating point cloud generative models \cite{huang2022learning, luo2021diffusion, kim2021setvae, yang2019pointflow, shu20193d, achlioptas2018learning}. Another issue is disparity between performance measures (minimum matching distance, coverage, etc.) computed with EMD and CD, the comparisons are contradictory and often inconsistent across measures.
+
+CD is usually insensitive to mismatched local density while EMD is dominated by global distribution and overlooks the fidelity of detailed structures \cite{wu2021density}. \citet{wu2021density} proposes a new similarity metric called Density-aware Chamfer distance (DCD) to tackle these issues. DCD is derived from CD and can also be computed in $O(N^2)$ time complexity. \citet{urbach2020dpdist} proposed Deep Point Cloud Distance (DPDist) which measures the distance between the points in one cloud and the estimated continuous surface from which the other point cloud is sampled. The surface is estimated locally by a network using the 3D modified Fisher vector representation. 
+
+\citet{shirdhonkar2008approximate} proposed a linear time algorithm for approximating the EMD by exploiting the Hölder continuity constraint in its dual form to convert it into a simple optimization problem with an explicit solution in the wavelet domain and computed as the sum of absolute values of the weighted wavelet co-efficients of the difference histogram. However, their approach is limited to low dimensional histograms. In the optimal transport literature, several efforts have been taken towards improving the statistical and computational properties. Recently, \citet{chuang2022infoot} proposed Information Maximizing Optimal Transport (InfoOT) which is an information-theoretic extension of optimal transport based on kernel density estimation of the mutual information which introduces global structure into OT maps. The resulting solution maximizes the mutual information between domains while minimizing geometric distance and improves the capability for handling data clusters and outliers. 
+
+Other approaches focus on regularizing the OT problem for making it smooth and strictly convex \cite{cuturi2013sinkhorn, flamary2016optimal, genevay2018learning, blondel2018smooth}. \emph{Sinkhorn distances} \cite{cuturi2013sinkhorn} smooth the classic OT problem with an entropic regularization term and can be computed through Sinkhorn’s matrix scaling algorithm at a speed that is several orders of magnitude faster than that of transport solvers. Meta OT \cite{amos2022meta} proposes a meta model to predict the solution to the optimal transport problem which is then used to initialize a standard Sinkhorn solver to further refine the predicted solution. The architecture of the meta model depends on the data domain, and DeepEMD can be utilized when working with point clouds. The choice of meta model architecture is contingent upon the specific data domain, and DeepEMD demonstrates its exceptional utility in point cloud processing.
+
+In this paper, our goal is to approximate the EMD using a deep network in a learning based paradigm where each sample represents two distributions and the target for regression is either the true metric i.e. EMD or the optimal matching $\phi^*$, or both. Existing point cloud datasets can serve as an interesting learning problem, where we can interpret each point cloud as a 2D or 3D distribution of points on a shape (manifold). It is posed as a supervised learning problem where the task is to estimate the true EMD, or the true bipartite matching, or both, between a pair of input point clouds.
+
+
+
+\section{Method}
+
+\label{sec:method}
+\begin{figure}[ht]
+\begin{minipage}[t]{0.5\linewidth}
+\center
+\resizebox{2in}{!}{%
+\begin{tikzpicture}[scale=0.6666666666]
+
+\node[draw,minimum width=0.75cm,minimum height=0.5cm] (u1) at (0, 0) {$u_1$};
+\node at (1.5,0) {$\dots$};
+\node[draw,minimum width=0.75cm,minimum height=0.5cm] (uN) at (3, 0) {$u_N$};
+
+\node[draw,fill=blue!25,minimum width=0.75cm,minimum height=1cm] (mlpu1) at (0, 1.5) {\rotatebox{90}{mlp}};
+\node at (1.5,2) {$\dots$};
+\node[draw,fill=blue!25,minimum width=0.75cm,minimum height=1cm] (mlpuN) at (3, 1.5) {\rotatebox{90}{mlp}};
+
+\node[draw,fill=blue!25,minimum height=0.7cm,minimum width=0.7cm] (plusu) at (1.5, 3) {$+$};
+
+\node[draw,minimum width=0.75cm,minimum height=0.5cm] (eu) at (4, 3.5) {$e_u$};
+
+\draw (u1)--(mlpu1); \draw (mlpu1.north)--(plusu);
+\draw (uN)--(mlpuN); \draw (mlpuN.north)--(plusu);
+\draw (plusu)--(eu);
+
+\node[draw,minimum width=0.75cm,minimum height=0.5cm] (v1) at (5, 0) {$v_1$};
+\node at (6.5,0) {$\dots$};
+\node[draw,minimum width=0.75cm,minimum height=0.5cm] (vN) at (8, 0) {$v_N$};
+
+\node[draw,fill=blue!25,minimum width=0.75cm,minimum height=1cm] (mlpv1) at (5, 1.5) {\rotatebox{90}{mlp}};
+\node at (6.5,2) {$\dots$};
+\node[draw,fill=blue!25,minimum width=0.75cm,minimum height=1cm] (mlpvN) at (8, 1.5) {\rotatebox{90}{mlp}};
+
+\node[draw,fill=blue!25,minimum height=0.7cm,minimum width=0.7cm] (plusv) at (6.5, 3) {$+$};
+
+\node[draw,minimum width=0.75cm,minimum height=0.5cm] (ev) at (4, 4.25) {$e_v$};
+
+\draw (v1)--(mlpv1); \draw (mlpv1.north)--(plusv);
+\draw (vN)--(mlpvN); \draw (mlpvN.north)--(plusv);
+\draw (plusv)--(ev);
+
+\node[draw,fill=blue!25,minimum width=0.75cm,minimum height=1cm] (mlpfinal) at (4, 6) {\rotatebox{90}{mlp}};
+
+\draw (ev)--(mlpfinal);
+
+\node[draw] (dhat) at (4,8) {$\hat{d}$};
+\draw (mlpfinal)--(dhat);
+
+\end{tikzpicture}
+}
+\caption{The MLP model (see \S~\ref{sec:baseline}) \mbox{predicts} directly an estimate $\hat{d}$ of the EMD.}\label{fig:mlp}
+
+\end{minipage}%
+\quad%
+\begin{minipage}[t]{0.5\linewidth}
+\center
+\resizebox{2in}{!}{%
+\begin{tikzpicture}[scale=0.6666666666]
+\node[draw,fill=green!20,minimum width=0.75cm,minimum height=1cm] (alpha1) at (-0.8, 0.5) {$\alpha$};
+\node[draw,fill=white,minimum width=0.75cm,minimum height=1cm] (u1) at (0, 0) {$u_1$};
+\node at (1.1,0) {$\dots$};
+\node[draw,fill=green!20,minimum width=0.75cm,minimum height=1cm] (alphaN) at (2.2, 0.5) {$\alpha$};
+\node[draw,fill=white,minimum width=0.75cm,minimum height=1cm] (uN) at (3, 0) {$u_N$};
+
+\node[draw,fill=blue!20,minimum height=0.7cm,minimum width=0.7cm] (plusu1) at (0   ,2) {$+$};
+\node at (1.5,2) {$\dots$};
+\node[draw,fill=blue!20,minimum height=0.7cm,minimum width=0.7cm] (plusuN) at (3   ,2) {$+$};
+\draw (alpha1)--(plusu1); \draw (u1)--(plusu1);
+\draw (alphaN)--(plusuN); \draw (uN)--(plusuN);
+
+\node[draw,fill=green!20,minimum width=0.75cm,minimum height=1cm] (beta1) at (4.2, 0.5) {$\beta$};
+\node[draw,fill=white,minimum width=0.75cm,minimum height=1cm] (v1) at (5, 0) {$v_1$};
+\node at (6.1,0) {$\dots$};
+\node[draw,fill=green!20,minimum width=0.75cm,minimum height=1cm] (betaN) at (7.2, 0.5) {$\beta$};
+\node[draw,fill=white,minimum width=0.75cm,minimum height=1cm] (vN) at (8, 0) {$v_N$};
+
+\node[draw,fill=blue!20,minimum height=0.7cm,minimum width=0.7cm] (plusv1) at (5   ,2) {$+$};
+\node at (6.5,2) {$\dots$};
+\node[draw,fill=blue!20,minimum height=0.7cm,minimum width=0.7cm] (plusvN) at (8   ,2) {$+$};
+\draw (beta1)--(plusv1); \draw (v1)--(plusv1);
+\draw (betaN)--(plusvN); \draw (vN)--(plusvN);
+
+\node[draw,fill=blue!20,minimum width=6cm,minimum height=1cm] (transformer) at (4,4) {transformer};
+\draw (transformer.south -| plusu1.north)--(plusu1.north);
+\draw (transformer.south -| plusuN.north)--(plusuN.north);
+\draw (transformer.south -| plusv1.north)--(plusv1.north);
+\draw (transformer.south -| plusvN.north)--(plusvN.north);
+
+\node[draw,minimum height=0.6666666666666666cm,minimum width=0.6666666666666666cm] at (3.5,6.5) {$A^b$};
+\node[draw,minimum height=0.6666666666666666cm,minimum width=0.6666666666666666cm,pattern=north east lines] at (4.5,6.5) {};
+\node[draw,minimum height=0.6666666666666666cm,minimum width=0.6666666666666666cm,pattern=north east lines] at (3.5,7.5) {};
+\node[draw,minimum height=0.6666666666666666cm,minimum width=0.6666666666666666cm] at (4.5,7.5) {$A^t$};
+\node[draw=none,minimum height=1.3333333333cm,minimum width=1.3333333333cm] (am) at (4,7) {};
+
+\draw (transformer)--(am);
+\end{tikzpicture}
+}
+\caption{The transformer model we use for DeepEMD (see \S\ref{sec:deepEMD}) predicts directly the bipartite graph as an attention matrix.}\label{fig:transformer}
+\end{minipage}
+\end{figure}
+We are interested in building a model which operates on a pair of point clouds $(U,V)$ as input, where $U, V \in \mathcal{D}^N$, $U = \{u_i\}_{i=1}^N$, $V = \{v_j\}_{j=1}^N$, $u_i, v_j \in \mathbb{R}^D$, and $N$ is the cardinality of the point clouds. Note that the points are unordered and the indexing is arbitrary. We denote the earth mover's distance between them as $d=\text{EMD}(U,V)$ where $d \in \mathbb{R}$. The goal of the model is to predict $d$ and $\nabla d$. Also, let $M \in \{0,1\}^{N \times N}$ denote the ground truth bipartite matching from EMD, where $M_{i,j}=1$ indicates that $u_i$ is matched to $v_j$ and vice-versa. Bipartite-ness implies   $\forall j, \sum_i M_{i,j}=1$ and $\forall i, \sum_j M_{i,j}=1$.
+
+Since point clouds are unordered and invariant to elementwise permutation, we seek mappings $f: \mathcal{D}^N \times \mathcal{D}^N \rightarrow \mathbb{R}$ which are permutation invariant for any permutations $\pi$ and $\pi'$, i.e.,
+\begin{align}
+    f(U, V) = f(\pi(U), \pi'(V)),
+\end{align}
+
+In the following sections, we first introduce a simple MLP based baseline, followed by our transformer-based model, \emph{DeepEMD}.
+
+\begin{comment}
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{.45\columnwidth}
+\includegraphics[width=1.1\linewidth]{files/syn2D/deepEMD/val_corr.png}
+\caption{DeepEMD}\label{fig:val_corr_syn2D_deepEMD}
+\end{subfigure}
+\begin{subfigure}[b]{.45\columnwidth}
+\includegraphics[width=1.1\linewidth]{files/syn2D/mlp/val_corr_3702_645b92e6e96d8f6bd8ba.png}
+\caption{MLP}\label{fig:val_corr_syn2D_mlp}
+\end{subfigure}
+
+\begin{subfigure}[b]{.45\columnwidth}
+\includegraphics[width=\linewidth]{files/syn2D/deepEMD/val_grads.png}
+\caption{DeepEMD}\label{fig:val_grads_syn2D_deepEMD}
+\end{subfigure}
+\begin{subfigure}[b]{.45\columnwidth}
+\includegraphics[width=\linewidth]{files/syn2D/mlp/val_grads_cosine_dis_3703_3f5d5e1088a4bb68263d.png}
+\caption{MLP}\label{fig:val_corr_grads_syn2D_deepEMD_mlp}
+\end{subfigure}
+\caption{(top) Scatter plot for true EMD vs. approximated distance on validation splits for Syn2D. Pearson ($r$), Spearman ($\rho$) and Kendall-Tau ($\tau$) correlations are shown above the plots. (bottom) Histogram of cosine similarity between true and estimated gradient for all points across all point clouds collected together.}
+\label{fig:val_corr_syn2D}
+\end{figure}
+\end{comment}
+
+\subsection{Predicting the distance}
+\label{sec:baseline}
+We propose a simple MLP baseline composed of a point-wise MLP backbone, followed by a prediction head which is also a MLP (see figure \ref{fig:mlp}). The backbone MLP takes a point cloud and returns an embedding $e \in \mathbb{R}^d$ as,
+\begin{equation}
+    e_u = \sum_{i=1}^n g(u_i), \quad e_v = \sum_{j=1}^n g(v_i)
+\end{equation}
+The prediction head then produces the final prediction as,
+\begin{align}
+    \hat{d} = h \left( e_u \oplus e_v \right) + h \left( e_v \oplus e_u \right),
+    \label{eq:mlp_head}
+\end{align}
+where $\oplus$ denotes vector concatenation. Both $g$ and $h$ are composed of sequential linear layers with ReLU non-linearity between layers. The embeddings are permutation equivariant because of the sum aggregation which does not depend on the ordering of points. Further, we concatenate the embeddings both ways as in Eq. (\ref{eq:mlp_head}), which makes the mapping symmetric. We train the model with mean-squared error loss, $l = (d-\hat{d})^2$. Since the model does not predict the matching, we can interpret it from the direction of the gradient of a point $\delta v_j = \left[\frac{\partial \hat{d}}{\partial V}\right]_j$, e.g., by taking cosine similarity between $\delta v_j$ and $u_i - v_j$, where $u_i$ is the point matching to $v_j$ from EMD.
+\subsection{Predicting bipartite matching}
+\label{sec:deepEMD}
+
+The transformer \cite{vaswani2017attention} intuitively seems to be a very good model for reasoning with point clouds and matching. Moreover, by considering that the output is the last layer's attention matrix, we can use it to directly predict the bipartite matching. Since the EMD--and consequently its gradient with respect to the point positions--is a function of the point positions and the matching array, predicting the latter leads to an accurate estimate of the former, that in particular is shielded from the issue of a possible decoupling between matching a functional point-wise (e.g. for MSE) and matching the gradients. While it is viable to directly predict the distance with a transformer-like architecture, we chose to only predict the matching since it is straightforward to estimate the distance using the predicted matching.
+
+We propose \emph{DeepEMD} composed of a sequence of multi-head full attention layers, followed by a prediction head which is also a full attention layer, but with a single head. Given two point clouds $U$ and $V$, add a learned cloud-specific positional embedding to indicate if a point originates from $U$ or $V$,  we concatenate the points sequence and feed the resulting $I = U \cup V$ as input to the model. The group-id embedding helps the model in modulating attention locally within a point cloud as well as globally across both point clouds. We tried other variants with self-attention layers, cross attention layers, and an alternating mixture of both, but found full attention over both point clouds to be best performing.
+
+For our problem, we get the input $X$ for the transformer by adding positional embeddings to $I$. Let $\vec{\mathit{0}}^n$ and $\vec{\mathit{1}}^n$ denote a vector of $n$ zeros and ones, respectively. $X$ is then obtained as,
+\begin{equation}
+    P = \vec{\mathit{0}}^n \cup \vec{\mathit{1}}^n, \quad
+    X = I + W^P[P] \quad \text{(indexing)}
+\end{equation}
+ Further, these intermediate representation are fed into a single-head attention layer which outputs the attention matrix as,
+\begin{gather}
+    {K} = t(X){W}^K, \quad
+    {Q} = t(X){W}^Q, \quad
+    {A} = \frac{{Q}{K}^\top}{d_k}\\
+    {A^t} = A_{:n, n:} \quad
+    {A^b} = A_{n:, :n}
+\end{gather}
+
+Here, $A$ is a $2N \times 2N$ matrix and we slice the top-right block (first $N$ rows and last $N$ columns) as $A^t$ and bottom-left block (last $N$ rows and first $N$ columns) as $A^b$. $A^t_{i, j}$ can be interpreted as the relatedness of $u_i$ with $v_j$. Similarly, $A^b_{i, j}$ can be interpreted as the relatedness of $v_i$ with $u_j$.
+
+Given $M$, the ground truth bipartite matching from EMD, we define the loss as the average of the cross-entropies as,
+\begin{align}
+    l(U, V) = \frac{1}{N} \sum_{i=1}^N\text{CE}({A}^t_{i, .}, M_{i, .})
+     + \frac{1}{N}\sum_{i=1}^N\text{CE}({A}^b_{i, .}, M_{., i})
+\end{align}
+
+The EMD is then estimated with the predicted matching as,
+\begin{gather}
+    \phi^b(i) = \argmax_j {A}^b_{i,j}, \quad
+    \phi^t(i) = \argmax_j {A}^t_{i,j} \\
+    \hat{d}  = \frac{1}{2} \left( \sum_{i} \|u_i-v_{\phi^t(i)}\| + \sum_{i} \|v_i-u_{\phi^b(i)} \| \right)
+\end{gather}
+
+
+\section{Experiments}
+
+\label{sec:experiment}
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{.28\linewidth}
+\includegraphics[width=\linewidth, clip]{files/scatterplots/scatter_chamferL2.png}
+\caption{Chamfer}
+\label{fig:val_scatter_chamfer}
+\end{subfigure}
+\begin{subfigure}[b]{.28\linewidth}
+\includegraphics[width=\linewidth]{files/scatterplots/scatter_mlp.png}
+\caption{MLP (ours)}\label{fig:val_scatter_mlp}
+\end{subfigure}
+\begin{subfigure}[b]{.28\linewidth}
+\includegraphics[width=\linewidth]{files/scatterplots/scatter_deepemd.png}
+\caption{DeepEMD (ours)}\label{fig:val_scatter_deepemd}
+\end{subfigure}
+\begin{subfigure}[b]{.14\linewidth}
+\includegraphics[width=\linewidth]{files/scatterplots/scatter_sinkhorn.png}
+\caption{Sinkhorn}\label{fig:val_scatter_sinkhorn}
+\end{subfigure}
+\caption{Scatter plot for true vs. approximate EMD from different models/metrics on validation splits for Syn2D and ShapeNet datasets. DeepEMD (ours) consistently performs better across different categories as it has less dispersion. Sinkhorn algorithm becomes more accurate with more iterations. Also note that it encounters numerical errors for some examples.}
+\label{fig:val_scatter}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{.24\linewidth}
+\includegraphics[width=1.05\linewidth]{files/cossimhists/syn2D_cos_sim.pdf}
+\caption{Syn2D}\label{fig:val_grads_cos_sim_syn2D}
+\end{subfigure} \:
+\begin{subfigure}[b]{.24\linewidth}
+\includegraphics[width=\linewidth]{files/cossimhists/airplane_cos_sim.pdf}
+\caption{ShapeNet Airplane}\label{fig:val_grads_cos_sim_airplane}
+\end{subfigure}
+\begin{subfigure}[b]{.24\linewidth}
+\includegraphics[width=\linewidth]{files/cossimhists/car_cos_sim.pdf}
+\caption{ShapeNet Car}\label{fig:val_grads_cos_sim_car}
+\end{subfigure}
+\begin{subfigure}[b]{.24\linewidth}
+\includegraphics[width=\linewidth]{files/cossimhists/chair_cos_sim.pdf}
+\caption{ShapeNet Chair}\label{fig:val_grads_cos_sim_chair}
+\end{subfigure}
+\caption{CDF of cosine similarity between true and estimated gradients for all points across all point clouds collected together on validation splits for Syn2D and ShapeNet datasets. The ideal cdf curve should have all the mass at cosine similarity $1$. DeepEMD (ours) consistently outperforms all the other methods across different datasets.}
+\label{fig:val_grads_cos_sim}
+\end{figure*}
+
+\begin{comment}
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{.5\columnwidth}
+\includegraphics[width=1.08\linewidth]{files/airplane/val_corr.png}
+\caption{ShapeNet Airplane}\label{fig:val_corr_airplane}
+\end{subfigure}
+\begin{subfigure}[b]{.5\columnwidth}
+\includegraphics[width=1.08\linewidth]{files/car/val_corr.png}
+\caption{ShapeNet Car}\label{fig:val_corr_car}
+\end{subfigure}
+\begin{subfigure}[b]{.5\columnwidth}
+\includegraphics[width=1.08\linewidth]{files/chair/val_corr.png}
+\caption{ShapeNet Chair}\label{fig:val_corr_chair}
+\end{subfigure}
+
+\begin{subfigure}[b]{.5\columnwidth}
+\includegraphics[width=\linewidth]{files/airplane/val_grads.png}
+\caption{ShapeNet Airplane}\label{fig:val_grads_airplane}
+\end{subfigure}
+\begin{subfigure}[b]{.5\columnwidth}
+\includegraphics[width=\linewidth]{files/car/val_grads.png}
+\caption{ShapeNet Car}\label{fig:val_grads_car}
+\end{subfigure}
+\begin{subfigure}[b]{.5\columnwidth}
+\includegraphics[width=\linewidth]{files/chair/val_grads.png}
+\caption{ShapeNet Chair}\label{fig:val_grads_chair}
+\end{subfigure}
+\caption{(top) Scatter plot for true EMD vs. approximate EMD from DeepEMD on validation splits for ShapeNet datasets. Pearson ($r$), Spearman ($\rho$) and Kendall-Tau ($\tau$) correlations are shown above the plots. (bottom) Histogram of cosine similarity between true and estimated gradient for all points across all point clouds collected together.}
+\label{fig:val_corr_grads_shapenet_deepEMD}
+\end{figure*}
+\end{comment}
+
+In this section, we present the overall experimental setup, performance results and comparisons of DeepEMD across various tasks.
+
+\subsection{Datasets}
+\label{sec:datasets}
+We consider different datasets for our experiments - \emph{Syn2D}, ShapeNet \cite{chang2015shapenet}, ModelNet40 \cite{wu20153d} and ScanObjectNN \cite{uy2019revisiting}. \emph{Syn2D} consists of 2D point clouds generated synthetically by sampling points on squares and circles (see Fig \ref{fig:example_pcs}). ShapeNet and ModelNet40 are datasets of 3D point clouds derived from 3D CAD models for different real world objects like chairs, cars, airplanes, etc. ScanObjectNN is a relatively new real-world point cloud object dataset based on scanned indoor scene data. In order to improve and assess generalization, we augment the train and test splits  with synthetic perturbations.
+\begin{comment}
+We generate 2D synthetic point clouds by uniformly sampling $200$ points on simple 2D shapes of circles and squares. The circles are generated by uniformly sampling the center and radius from $(0,1]$. For the squares, we sample its center, rotation and scale uniformly from $[-0.5, 0.5]$, $[0, \frac{\pi}{2}]$, and $[0.5, 1]$, respectively. We also evaluate our model on real dataset using point clouds from one of the three categories in the ShapeNet dataset : airplane, chair, and car. We sample $1024$ points from the ShapeNet point clouds. Further, we build pairs $(U,V)$ of point clouds by randomly sampling pairs from the collection of point clouds. We refer the first argument in the pair $U$ as the \emph{source} and the second argument $V$ as \emph{target}. We refer to the synthetic dataset as \emph{Syn2D} (Fig. \ref{fig:example_pcs}).
+\end{comment}
+\begin{comment}
+\begin{figure*}
+\centering
+\begin{subfigure}[b]{.45\linewidth}
+\includegraphics[width=\linewidth,trim={43cm 0 0 0},clip]{files/syn2D/gen/emd/val_recons_3825_9224c37a329ef6fbcdd5.png}
+\caption{Trained with EMD}\label{fig:val_recons_syn2D_deepEMD}
+\end{subfigure}
+\begin{subfigure}[b]{.45\linewidth}
+\includegraphics[width=\linewidth,trim={43cm 0 0 0},clip]{files/airplane/gen/emd/val_recons_187_73e0f538617cc8b335f3.png}
+\caption{Trained with EMD}\label{fig:val_recons_syn2D_EMD}
+\end{subfigure}
+\vskip 0.5cm
+
+\begin{subfigure}[b]{.45\linewidth}
+\includegraphics[width=\linewidth,trim={43cm 0 0 0},clip]{files/syn2D/gen/deepEMD/val_recons_3825_0792f9a0e605e802650a.png}
+\caption{Trained with DeepEMD (ours)}\label{fig:val_recons_syn2D_deepEMD}
+\end{subfigure}
+\begin{subfigure}[b]{.45\linewidth}
+\includegraphics[width=\linewidth,trim={43cm 0 0 0},clip]{files/airplane/gen/deepEMD/val_recons_2729_00d6d6adfea70978ba6b.png}
+\caption{Trained with DeepEMD (ours)}\label{fig:val_recons_syn2D_EMD}
+\end{subfigure}
+\vskip 0.5cm
+\begin{subfigure}[b]{.45\linewidth}
+\includegraphics[width=\linewidth,trim={43cm 0 0 0},clip]{files/syn2D/gen/chamfer/val_recons_3825_a781d87d4e349d200770.png}
+\caption{Trained with Chamfer}\label{fig:val_recons_syn2D_deepEMD}
+\end{subfigure}
+\begin{subfigure}[b]{.45\linewidth}
+\includegraphics[width=\linewidth,trim={43cm 0 0 0},clip]{files/airplane/gen/chamfer/val_recons_5953_706ae5d31ab733878678.png}
+\caption{Trained with Chamfer}\label{fig:val_recons_syn2D_EMD}
+\end{subfigure}
+\caption{Reconstruction on validation data with SetVAE trained with differnt reconstruction losses : DeepEMD surrogate (top), EMD (middle) and Chamfer (bottom).}
+\label{fig:val_recons_syn2D}
+\end{figure*}
+\end{comment}
+
+\subsection{Performance Measures}
+\label{sec:measures}
+We consider various measures to assess EMD approximation methods for distance as well as matching estimation. We compare accuracy and computation time to that of Sinkhorn and CD (see \S~\ref{sec:related}).
+
+\paragraph{Distance Estimation.} We visualize the true vs. predicted distance through scatter plots (Fig. \ref{fig:val_scatter}), we expect the data points to be close to $x=y$ line. We compare various correlation measures : linear correlation $(r)$, Spearman correlation ($\rho$) and Kendall-Tau correlation $(\tau)$, to assess the quality of distance estimation. The Spearman and Kendall-Tau are rank-statistic based correlation measures, indicative of the correspondence between two rankings. Note that, correlation measures are useful metrics as they indicate appropriateness of the predicted metric as a distance measure, irrespective of their absolute values. Additionally we  look at different quantiles (RE$_n$) of relative approximation error, which penalizes the difference between absolute values of the predicted and true distance. 
+
+\paragraph{Matching Estimation.} In order to assess quality of the matching, we consider the cosine similarity between the true and predicted gradient. The true gradient of EMD is always along the matched point. We visualize the cumulative distribution function (cdf) of cosine similarities (Fig. \ref{fig:val_grads_cos_sim}), where we expect all the mass to be close to $1$. We also look at different quantiles (CS$_n$) of the cosine similarity. We also consider accuracy which is computed as the average accuracy of matching source points to target points and vice-versa, bipartiteness (B) which is fraction of points with bipartite matching, and also bipartiteness-correctness (B$_{corr}$) which is fraction of points which are bipartite as well as matched correctly.
+
+\subsection{Results}
+\label{sec:results}
+
+\paragraph{EMD Prediction.}
+
+Fig. \ref{fig:val_scatter} shows the scatter plot of the true EMD vs. approximate EMD predicted from our trained models on the validation split for \emph{Syn2D} and ShapeNet datasets. Note that the validation split also contains the augmentations as discussed in Sec. \ref{sec:datasets}. The plots indicate that both DeepEMD (Fig. \ref{fig:val_scatter_deepemd}) and MLP baseline (Fig. \ref{fig:val_scatter_mlp}) approximate the EMD faithfully. The MLP baseline seems to struggle a bit on ShapeNet Chair dataset. The higher dispersion in Chamfer (Fig. \ref{fig:val_scatter_chamfer}) and Sinkhorn with $10$ iterations (Fig. \ref{fig:val_scatter_sinkhorn}, top) indicates poor EMD estimation. The approximation with Sinkhorn algorithm becomes more accurate with higher number of iterations (Fig. \ref{fig:val_scatter_sinkhorn}, bottom), as expected. 
+
+ DeepEMD and MLP baseline both achieve linear correlation higher than $0.99$ in each case. The models achieve Kendall-Tau correlation close to $0.99$ and $0.96$, respectively, and Spearman correlation close to $0.99$ in each case, indicating that ordering of the samples based on approximate distances and true distances are very similar, and monotonocity of samples are preserved. It can be observed that DeepEMD is best except for relative error where it may do worse than our method with MLP. Also it is interesting to note that Sinkhorn performs worse than DeepEMD on  correlation- or relative error-based measures.
+
+\paragraph{Matching/Gradient Prediction.}
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{.32\linewidth}
+\includegraphics[width=1.04\linewidth]{files/recon_emd_histograms/recon_emd_airplane.pdf}
+\caption{ShapeNet Airplane}\label{fig:recon_emd_airplane}
+\end{subfigure} \:
+\begin{subfigure}[b]{.32\linewidth}
+\includegraphics[width=1.0\linewidth]{files/recon_emd_histograms/recon_emd_car.pdf}
+\caption{ShapeNet Car}\label{fig:recon_emd_car}
+\end{subfigure}
+\begin{subfigure}[b]{.32\linewidth}
+\includegraphics[width=1.0\linewidth]{files/recon_emd_histograms/recon_emd_chair.pdf}
+\caption{ShapeNet Chair}\label{fig:recon_emd_chair}
+\end{subfigure}
+\caption{Comparison of EMD between input and reconstructed point clouds from SetVAE trained with different reconstruction losses. The better model should have smaller reconstruction loss and thus mass close to zero in the histograms. DeepEMD (ours) is consistently better as compared to Chamfer loss and very similar to EMD loss.}
+\label{fig:recon_emd}
+\end{figure*}
+
+ Estimating the matching and gradient of the distance is particularly important for training models with DeepEMD as a surrogate distance function. Note that the gradient of a point from true EMD is always along the matched point in the other point cloud. Fig. \ref{fig:val_grads_cos_sim_syn2D} shows the cdf of cosine similarity between the true and estimated gradient for all the points across all point clouds collected together for \emph{Syn2D}, while Figs. \ref{fig:val_grads_cos_sim_airplane}, \ref{fig:val_grads_cos_sim_car}, and \ref{fig:val_grads_cos_sim_chair} for ShapeNet. The cdf  has most mass at cosine similarity close to $1$ with a very short tail and is never negative indicating that the estimated gradient is aligned with the true gradient for DeepEMD. This is particularly important when the model is used as a surrogate reconstruction loss. Ideally, the model should provide good estimate of the true gradient throughout training and more particularly in the very beginning when the reconstructions are very noisy, and also towards the end when reconstructions likely become very similar to the training distribution. The MLP baseline usually did not perform well in this regard and also in generalizing to unseen examples and thus was not useful for training generative models. The same issue can be observed with Chamfer distance as well. DeepEMD performs better than other models and metrics in each of these measures and indicates better matching approximation.
+
+\paragraph{Out-of-distribution generalization.}
+
+The genralization of the prediction to a novel distribution is particularly importatnt for a surrogate metric. We test the out-of-distribution behaviour of our models in two different settings : Table \ref{tab:table_ood} shows the generalization performance of the model trained on a single category of ShapeNet and tested on validation split of multi-category ModelNet40 dataset, while 
+
+show the performance when tested on different ShapeNet categories. The results indicate that DeepEMD generalizes well when test and train data differ without any adaptation or fine-tuning. These quite remarkable behaviors point towards the network “meta-learning” in some way the matching algorithm. This is further strengthened by the results on scaling to different number of points during test time as shown in Table \ref{tab:table_scaling}.
+\begin{table}[!h]
+\centering
+\caption{Out-of-distribution (dataset) generalization for our models and comparison with other metrics (Chamfer and Sinkhorn), tested on full validation split for ModelNet40 (with 40 categories) and ScanObjectNN (with 15 categories). The models are trained on a single ShapeNet category. The reported numbers are averaged over these categories as well as four training seeds. The first six rows show distance estimation metrics (see \S~\ref{sec:measures}), while the last six rows correspond to matching estimation metrics. The arrows next to the metrics indicate whether higher ($\uparrow$) values are better or lower ($\downarrow$). Chamfer and Sinkhorn are deterministic, thus variances are not reported. Further, MLP does not provide accuracy and bipartiteness metrics.}
+\label{tab:table_ood}
+\begin{center}
+\begin{sc}
+\resizebox{1.0\columnwidth}{!}{%
+\begin{tabular}{l|llll|llll}
+\hline
+dataset & \multicolumn{4}{c|}{ModelNet40}         & \multicolumn{4}{c}{ScanObjectNN} \\ 
+\hline
+model                   & chamfer     & sinkhorn        & mlp                       & deepemd                                        & chamfer           & sinkhorn            & mlp                   & deepemd               \\ \hline
+$r$ ($\uparrow$)            &  $ 0.951 $    &  $ 0.971  $            &  $ 0.959 \pm 0.011 $      &  $ \mathbf{0.999} \pm 0.0 $      &  $ 0.971 $  &  $ 0.929$  &  $ 0.965 \pm 0.005 $  &  $ \mathbf{0.997} \pm 0.001 $  \\
+$\rho$ ($\uparrow$)         &  $ 0.935 $    &  $ 0.988  $            &  $ 0.945 \pm 0.017 $      &  $ \mathbf{0.999} \pm 0.0 $      &  $ 0.979 $  &  $ 0.965$  &  $ 0.963 \pm 0.007 $  &  $ \mathbf{0.999} \pm 0.0 $    \\
+$\tau$ ($\uparrow$)         &  $ 0.792 $    &  $ \mathbf{0.983}  $   &  $ 0.819 \pm 0.024 $      &  $ 0.974 \pm 0.002 $             &  $ 0.882 $  &  $ 0.968$  &  $ 0.855 \pm 0.011 $  &  $ \mathbf{0.973} \pm 0.002 $  \\
+RE$_{0.1}$ ($\downarrow$)   &  $ 0.03 $     &  $ 0.057  $            &  $ 0.009 \pm 0.001 $      &  $ \mathbf{0.005} \pm 0.002 $    &  $ 0.025 $  &  $ 0.038$  &  $ 0.013 \pm 0.001 $  &  $ \mathbf{0.004} \pm 0.001 $  \\
+RE$_{0.5}$ ($\downarrow$)   &  $ 0.129 $    &  $ 0.102  $            &  $ 0.062 \pm 0.005 $      &  $ \mathbf{0.019} \pm 0.004 $    &  $ 0.094 $  &  $ 0.078$  &  $ 0.076 \pm 0.005 $  &  $ \mathbf{0.019} \pm 0.004 $  \\
+RE$_{0.9}$ ($\downarrow$)   &  $ 0.321 $    &  $ 0.2    $            &  $ 0.257 \pm 0.03 $       &  $ \mathbf{0.04} \pm 0.004 $     &  $ 0.282 $  &  $ 0.244$  &  $ 0.299 \pm 0.025 $  &  $ \mathbf{0.051} \pm 0.005 $  \\ \hline
+CS$_{0.1}$ ($\uparrow$)     &  $ -0.067 $   &  $ 0.824  $            &  $ -0.293 \pm 0.047 $     &  $ \mathbf{0.927} \pm 0.003 $    &  $ 0.138 $  &  $ 0.879$  &  $ -0.208 \pm 0.042 $ &  $ \mathbf{0.946} \pm 0.002 $  \\
+CS$_{0.5}$ ($\uparrow$)     &  $ 0.834 $    &  $ 0.986  $            &  $ 0.684 \pm 0.023 $      &  $ \mathbf{1.0} \pm 0.0 $        &  $ 0.917 $  &  $ 0.992$  &  $ 0.719 \pm 0.02 $   &  $ \mathbf{0.999} \pm 0.0 $    \\
+CS$_{0.9}$ ($\uparrow$)     &  $ 0.997 $    &  $ 0.999  $            &  $ 0.96 \pm 0.003 $       &  $ \mathbf{1.0} \pm 0.0 $        &  $ 0.998 $  &  $ 1.0 $  &  $ 0.965 \pm 0.003 $  &  $ \mathbf{1.0} \pm 0.0 $      \\
+Accuracy ($\uparrow$)       &  $ 12.651 $   &  $ 31.91  $            &  -                        &  $ \mathbf{56.38} \pm 0.604 $    &  $ 7.673 $  &  $ 20.04 $ &  -      &  $ \mathbf{40.671} \pm 0.62 $  \\
+B ($\uparrow$)              &  $ 17.045 $   &  $ 33.458 $            &  -                        &  $ \mathbf{70.401} \pm 0.672 $   &  $ 9.474 $  &  $ 19.43 $ &  -      &  $ \mathbf{56.269} \pm 0.71 $  \\
+B$_{corr}$ ($\uparrow$)     &  $ 6.544 $    &  $ 19.615 $            &  -                        &  $ \mathbf{47.084} \pm 0.741 $   &  $ 3.38  $   &  $ 9.961$ &  -      &  $ \mathbf{30.055} \pm 0.678 $ \\ \hline
+\end{tabular}
+}
+\end{sc}
+\end{center}
+\end{table}
+\paragraph{Scaling number of points.} Remarkably, the size of point clouds during testing can differ greatly from those during training without degrading performance. Table \ref{tab:table_scaling} shows performance of the model for test point cloud sizes ranging from $256$ to $8196$, while training was done with only $1024$ points. Prediction of the metric itself (top 6 rows) does not degrade for all practical purposes. Regarding the matching estimation, directional measure of performance related to the cosine similarity (rows CS$_{n}$) do not degrade neither. We can notice degradation in accuracy based measures (last 3 rows) which is natural since the problem becomes difficult with increasing number of points $N$ because of its combinatorial nature. For training when memory requirement is much higher due to backprop, we can use smaller number of points, and scale it up during inference without any fine-tuning.
+\begin{table*}[!h]
+\centering
+\caption{Scaling number of points and out-of-distribution (scale) generalization for DeepEMD. The models are trained on a single ShapeNet category with 1024 points and tested on validation split of same category but with different number of points. Reported values are averaged over 4 training seeds. DeepEMD generalizes well to unseen number of points at test time without fine-tuning.}
+\label{tab:table_scaling}
+\begin{center}
+\resizebox{1.0\textwidth}{!}{%
+\begin{tabular}{l|lll|l|lll}
+\hline
+& \multicolumn{3}{c|}{$\longleftarrow$ Less \# points than training $\longrightarrow$}          &      \multicolumn{1}{|c|}{Trained}           & \multicolumn{3}{c}{$\longleftarrow$ More \# points than training $\longrightarrow$} \\
+\hline
+\# points & 256 & 512 & 768 & 1024 & 2048 & 4096 & 8192 \\ \hline
+$r$ & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 0.999 \pm 0.0$  & $ 0.999 \pm 0.001$  \\
+$\rho$ & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 0.999 \pm 0.0$  & $ 0.998 \pm 0.0$  \\
+$\tau$ & $ 0.985 \pm 0.0$  & $ 0.987 \pm 0.0$  & $ 0.988 \pm 0.0$  & $ 0.988 \pm 0.001$  & $ 0.986 \pm 0.001$  & $ 0.981 \pm 0.002$  & $ 0.974 \pm 0.004$  \\
+RE$_{0.1}$ & $ 0.002 \pm 0.001$  & $ 0.002 \pm 0.001$  & $ 0.004 \pm 0.002$  & $ 0.007 \pm 0.003$  & $ 0.012 \pm 0.005$  & $ 0.013 \pm 0.007$  & $ 0.014 \pm 0.008$  \\
+RE$_{0.5}$ & $ 0.01 \pm 0.002$  & $ 0.011 \pm 0.002$  & $ 0.014 \pm 0.003$  & $ 0.017 \pm 0.005$  & $ 0.027 \pm 0.009$  & $ 0.034 \pm 0.013$  & $ 0.04 \pm 0.016$  \\
+RE$_{0.9}$ & $ 0.026 \pm 0.003$  & $ 0.026 \pm 0.003$  & $ 0.029 \pm 0.004$  & $ 0.032 \pm 0.005$  & $ 0.042 \pm 0.009$  & $ 0.054 \pm 0.013$  & $ 0.066 \pm 0.018$  \\
+\hline
+CS$_{0.1}$ & $ 0.94 \pm 0.002$  & $ 0.955 \pm 0.002$  & $ 0.961 \pm 0.001$  & $ 0.964 \pm 0.001$  & $ 0.967 \pm 0.001$  & $ 0.967 \pm 0.001$  & -  \\
+CS$_{0.5}$ & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & -  \\
+CS$_{0.9}$ & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & $ 1.0 \pm 0.0$  & -  \\
+Accuracy & $ 72.348 \pm 0.44$  & $ 69.384 \pm 0.383$  & $ 66.901 \pm 0.379$  & $ 64.648 \pm 0.404$  & $ 57.588 \pm 0.464$  & $ 47.78 \pm 0.51$  & $ 35.274 \pm 0.483$  \\
+B & $ 81.857 \pm 0.755$  & $ 80.101 \pm 0.547$  & $ 78.013 \pm 0.507$  & $ 75.896 \pm 0.521$  & $ 68.658 \pm 0.584$  & $ 58.109 \pm 0.597$  & $ 44.603 \pm 0.734$  \\
+B$_{corr}$ & $ 64.838 \pm 0.756$  & $ 61.558 \pm 0.587$  & $ 58.545 \pm 0.547$  & $ 55.719 \pm 0.568$  & $ 46.831 \pm 0.618$  & $ 35.053 \pm 0.6$  & $ 21.606 \pm 0.469$  \\ \hline
+\end{tabular}
+}
+\end{center}
+\end{table*}
+\paragraph{Computational Time and Complexity.}
+
+Fig. \ref{fig:eval_time} compares the evaluation time for different models and metrics. DeepEMD achieves a significant speedup of about $100\times$ as compared to EMD and $40\times$ as compared to Sinkhorn with 100 iterations. This speedup becomes more pronounced on bigger point clouds as hungarian algorithm takes $O(N^3)$ time vs. $O(N^2)$ for DeepEMD.
+
+\subsection{DeepEMD used as a loss}
+\label{sec:genModels}
+ Training a SetVAE, as for any auto-encoder, requires a reconstruction loss to assess the quality of the learned representation. While the eventual goal would be to minimize the EMD, standard approach uses Chamfer Distance due to the prohibitive computation cost of calculating the EMD. Instead of Chamfer Distance we propose to use DeepEMD and demonstrate its utility as a reconstruction loss as compared to Chamfer Distance.
+
+DeepEMD was trained separately on each category of ShapeNet dataset and the trained model was then used as a surrogate reconstruction loss for training a variational auto-encoder. We use SetVAE \cite{kim2021setvae}, a transformer based VAE adapted for point clouds and set-structured data. The parameters of DeepEMD module are frozen during training of the SetVAE. We follow exactly the same protocol as in SetVAE and train using ShapeNet categories of airplane, chair, and car and also the same hyper-parameters for training. Fig. \ref{fig:val_recon_intro} and Fig. DeepEMD consistently achieves lower reconstruction EMD as compared to CD. This is further verified from Fig. \ref{fig:recon_emd} which shows the distribution of true EMD between a point cloud and its reconstruction.
+\begin{figure*}[!ht]
+\centering
+\begin{subfigure}[b]{.49\linewidth}
+\includegraphics[width=1.0\linewidth, trim=5 5 5 5, clip]{files/time_vs_accuracy.pdf}
+\end{subfigure} \:
+\begin{subfigure}[b]{.49\linewidth}
+\includegraphics[width=1.0\linewidth, trim=5 5 5 5, clip]{files/time_vs_tau.pdf}
+\end{subfigure}
+\caption{Comparison of empirical evaluation time and different performance measures : Accuracy (left) and Kendall-Tau correlation $\tau$ (right). We use Python Optimal Transport (POT) library for computing Sinkhorn distances, and show metrics at different iterations ($5$, $10$ and $100$). DeepEMD is $\sim100\times$  and $\sim40\times$ faster than Hungarian algorithm and Sinkhorn ($100$ iterations), respectively.}
+\label{fig:eval_time}
+\end{figure*}
+
+
+\section{Conclusion and Future Work}
+
+\label{sec:conclusion}
+We propose DeepEMD, a method for fast approximation of EMD, improving time complexity from ${O}(N^3)$ to ${O}(N^2)$. It is composed of a multi-head multi-layer transformer, followed by a single-head full attention layer as the final output layer. It operates on two point clouds and outputs an attention matrix which is interpreted as the matching matrix and optimized to match the ground turh matching obtained from the hungarian algorithm. We demonstrated the effectiveness of DeepEMD in approximating the true EMD for synthetic 2D point clouds as well as real world datasets like ShapeNet, ModelNet40 and ScanObjectNN. It achieves a speed-up of $\times 100$ with $1024$ points. Further, we show that it estimates the gradients well, generalizes well for unseen point clouds (or distributions), and can be used for end-to-end training of point cloud autoencoders achieving faster convergence than Chamfer distance surrogate. % we cast the attention matrix
+
+It would be interesting to explore fast transformer variants to further improve from the quadratic time complexity for future work. In terms of architecture various pooling/un-pooling strategies can be explored which can help with both, better time complexity and improved feature learning. In this work, we estimate the $\text{Wasserstein}-2$ metric, and extension to other Wasserstein$-p$ metrics and other optimal transport problems could also be interesting for various applications. Lastly, extension to general probability distributions with fractional assignments (i.e. mass splitting) can also be very useful and valuable for some applications.
+
+
+
+
+

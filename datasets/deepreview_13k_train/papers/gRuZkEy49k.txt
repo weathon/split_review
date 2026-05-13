@@ -1,0 +1,200 @@
+\title{Adapting Monte Carlo Tree Search for Generative Flow Network Training}
+
+\begin{abstract}
+Generative Flow Networks, or GFlowNets, formulate generative modelling in discrete spaces as a sequential decision-making problem. Sampling plays a key role in GFlowNet training, as most algorithms use the learned policy to sample trajectories from the environment. Monte-Carlo Tree Search (MCTS) is a planning algorithm that has successfully been applied to train sequential decision-making models with reinforcement learning (RL). In this work, we leverage known connections between GFlowNets and maximum-entropy RL to adapt MCTS for GFlowNet training. We prove that standard MCTS tree construction processes can be modified to calculate the optimal flows for a GFlowNet, given sufficient samples from the environment. Our results extend to multiple cases of GFN modelling, including terminating-energy and intermediate-energy environments. We investigate practical strategies for employing MCTS as a sampling tool and apply it to different GFN parameterizations and training objectives. Through extensive experiments in a variety of discrete domains, including a language-based reasoning task, we show that our proposed method offers an improvement over standard on-policy sampling.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Generative Flow Networks, or GFlowNets (Bengio et al., 2021a;b), are generative models that can sequentially generate objects based on their energy (or reward). GFlowNets act as energy samplers such that they learn and match the underlying energy function and can sample from multiple modes. The GFlowNet policy generates a sample sequentially, by taking one action at a time, and from this perspective, is similar to a Reinforcement Learning (RL) policy. However, unlike the RL training objective that mainly focuses on reward maximization, the GFlowNet training objective aims to learn a policy that can match the reward or energy distribution and sample proportionally to it. While Monte-Carlo Markov chains (MCMC) methods can also sample from an unnormalized energy function, they are computationally expensive and slow to achieve mode-mixing. However, GFlowNets amortize the expensive computation in a single trained generative pass, making it possible to leverage the generalization capabilities of machine learning and learn structure in the energy distribution.  
+
+The training objective of GFlowNets is usually formulated in the form of a flow objective such that the incoming and outgoing flows are matched (Bengio et al., 2021a;b; Malkin et al., 2022; Madan et al., 2023). The data to compute these objectives is commonly collected using the current GFlowNet policy and the quality of these collected samples can affect the training efficiency of GFlowNets. However, on-policy approaches face several limitations. They can fail to explore the environment by overfitting to high reward (low energy) trajectories that were sampled recently. This is of particular concern in low-entropy environments, where the reward landscape is quite sparse. On-policy approaches also suffer from poor sample efficiency, as each sampled trajectory is only used for a single gradient update. A number of works have taken inspiration from RL methods to improve sampling for GFlowNet training, including $\epsilon$ -uniform exploration, replay buffers, and local search (Kim et al., 2024). In this work, we propose a novel and flexible way of improving data sampling and training efficiency of GFlowNets.  
+
+Monte-Carlo Tree Search (MCTS) is a widely used planning algorithm in Reinforcement Learning that has been successfully applied to a number of settings (Browne et al., 2012; Silver et al., 2017;  
+
+Kajita et al., 2020). Since GFlowNets can be trained in an off-policy manner and usually operate in a deterministic environment dynamics, we demonstrate how integrating MCTS with GFlowNets can improve data sampling, leading to a more efficient learning algorithm. Through extensive experiments over a wide range of tasks, including an LLM based reasoning benchmark, we show how combining MCTS with GFlowNets can enable efficient training throughout the different default training objectives and GFlowNet parameterizations.  
+
+The main contributions of our work are the following:  
+
+1. We introduce Monte Carlo DAG Search (MCDS), an adaptation of MCTS that can be used to calculate optimal flows in a GFlowNet environment.   
+2. We provide a method for using the proposed MCDS to influence trajectory sampling in a way that improves GFlowNet training.   
+3. We empirically demonstrate the effectiveness of our method with different GFlowNet parameterizations and environment structures.  
+
+![](images/66deca9e5e5cf08bc7e5bf026aa29df01ba146d10707bcc61733270ef4ffca60.jpg)  
+Figure 1: Visual comparison of the Backup operation in Monte Carlo DAG Search (MCDS) vs standard MCTS. In MCDS, the information passed from a child node $s^{\prime}$ to its parent is modulated by a distribution $P_{B}\big(\boldsymbol{s}|\boldsymbol{s}^{\prime}\big)$ over all parents $s$ , taking into account the DAG structure of the environment.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+2.1 GENERATIVE FLOW NETWORKS (GFLOWNETS)  
+
+Consider a Directed Acyclic Graph, or DAG, $G=(S,A)$ where $\boldsymbol{S}$ and $\boldsymbol{\mathcal{A}}$ represent the state and action spaces. Given any two states $s~\in~s$ and $s^{\prime}\,\in\,\mathcal{S}$ , an edge is represented as $\left(s,s^{\prime}\right)$ . The action space $\boldsymbol{\mathcal{A}}$ consists of directed edges $s\times s$ and is thus made up of transitions between any two states. A trajectory $\tau$ is represented as a sequence of states: $\tau=(s_{1}\rightarrow s_{2}\rightarrow\dotsb\rightarrow s_{n})=$ $\left(s_{1},s_{2},\ldots,s_{n}\right)$ such that the corresponding actions are $(s_{i}\to s_{i+1})\in{\mathcal{A}}$ that iteratively build this trajectory one action, or one time step, at a time. Since $G$ is a DAG, there exists no trajectory with $s_{n}\,=\,s_{m};\forall n\,>\,m$ . Given a transition $s_{t}\ \to\ s_{t+1}$ , the state $s_{t}$ is called the parent of $s_{t+1}$ and $s_{t+1}$ is called the child of $s_{t}$ . A state $s^{\prime}$ is said to be a descendent of $s$ if there exists a trajectory $\tau\,\in\,\tau$ such that $s^{\prime}$ appears after $s$ : we denote this relationship as $s\prec s^{\prime}$ . A special initial state, called source state, $s_{0}$ , is defined such that $s_{0}\prec s$ for all $s\in\mathcal{S}\backslash\{s_{0}\}$ . Similarly, a final state called a sink state $s_{f}$ is defined such that $s\ \prec\ s_{f}$ for all $s\,\in\,{\mathcal{S}}\backslash\{s_{f}\}$ . The parent of a sink state $s_{f}$ is called a terminating state: the set of terminating states is denoted $\mathcal{X}\subseteq S$ . A complete trajectory is represented as $\tau=\left(s_{0},s_{1},\ldots,s_{n},s_{f}\right)$ and the set of all complete trajectories is denoted by $T$ .  
+
+An environment is a combination of a state graph $G$ and an energy function $\mathcal{E}(s)\;:\;\mathcal{S}\;\rightarrow\;\mathbb{R}^{+}$ . The energy can also be expressed as the reward function $R(x)\;=\;\exp{-\mathcal{E}(x)/\alpha}$ , where $\alpha$ is a temperature parameter (typically we set $\alpha=1$ ). The reward function can be normalized to define a distribution over terminating states $P(x)\propto R(x)$ . The goal of GFlowNet training is learn a model $P(x;\theta)$ that approximates $P(x)$ . The environment is described as having terminating energy (or terminating reward) if $\mathcal{E}(s)=\infty$ for all $s\in\mathcal S/\mathcal X$ , otherwise it is referred to as intermediate energy (intermediate reward).  
+
+Given a graph $G\,=\,(S,A)$ as defined above, a forward policy, $P_{F}$ , can be defined in terms of a forward probability function $\begin{array}{r}{P_{F}:\sum_{s^{\prime}:s^{\prime}\in C h(s)}\dot{P}_{F}(s^{\prime}|s)\dot{=}\,1}\end{array}$ , where $C h(s)$ is the set of children  
+
+of $s$ . Similarly a backward policy, $P_{B}$ , can be defined in terms of a backward probability function $\begin{array}{r}{P_{B}:\sum_{s:s\in P a r(s^{\prime})}P_{B}(s|s^{\prime})=1}\end{array}$ .   
+A state flow $F(s):S\rightarrow\mathbb{R}^{+}$ is defined as the measure of the set of complete trajectories passing through a state $s$ . An edge flow $F(s,s^{\prime}):(S\times S)\rightarrow\mathbb{R}^{+}$ is defined as the measure of the set of the complete trajectories through an edge $(s,s^{\prime})$ . The flow through a set of trajectories $A\subseteq{\mathcal{T}}$ is defined as the sum of flows of all trajectories $\tau\in A$ . The total flow $Z$ is the total flow through all the trajectories $\tau$ , defined as: $\begin{array}{r}{Z=F\dot{(}T)=\sum_{\tau\in\mathcal{T}}F(\tau)=\sum_{x\in\mathcal{X}}R(x)}\end{array}$ .   
+A flow $F$ corresponding to a given graph $G$ is called Markovian if it satisfies the Markovian property, i.e. the next state $s^{\prime}$ only depends on the current state $s$ and not the previous history. Formally, given a trajectory $\tau=(s_{0},s_{1},\ldots,s_{n},s_{f})$ , a flow is called Markovian if $\forall(s\rightarrow s^{\prime}),P(s^{\prime}|\tau)=P(s^{\prime}|s)$ . Using this Markovian flow formulation, a trajectory $\tau$ can be generated by either iteratively sampling the next state $s^{\prime}$ forward from the current state $s$ using the forward transition probability $P_{F}\big(s^{\prime}|s\big)$ until reaching $s_{f}$ , or starting at $s_{f}$ and iteratively sampling the parent state $s$ backwards from the current state $s^{\prime}$ until $s_{0}$ is reached.   
+Many training objectives have been defined for GFlowNets, such as Flow Matching objective (Bengio et al., 2021a), Detailed Balance objective (Bengio et al., 2021b), Trajectory Balance objective (Malkin et al., 2022) and $\operatorname{SubTB}(\lambda)$ objective (Madan et al., 2023), and these operate on the level of the state, edge, full length (complete) trajectories and sub-trajectories of any lengths, respectively. These training objectives are obtained by setting up a set of flow-matching constraints with the property that when all these constraints are satisfied, the GFlowNet sampling policy has the desired property that generates terminating states with probability proportional to $R(x)$ . Each constraint can be turned into a loss, typically by taking the square of the logarithm of the ratio of the right-hand side to the left-hand side of the equality constraint. Each loss term thus corresponds to an amount of constraint violation. Training consists in sampling trajectories and measuring these constraint violations (the loss) and its gradient on the parameters of interest.   
+The Flow Matching (FM) (Bengio et al., 2021a) objective parameterizes GFlowNets through edge flows $F(s\to s^{\prime};\theta)$ on states $s$ . The Trajectory Balance (TB) (Malkin et al., 2022) objective works with complete trajectories, and parameterizes the GFlowNet through an initial state flow $Z_{\theta}$ , and forward and backward policies, $P_{F}(s^{\prime}|s;\theta)$ and $P_{B}(s|s^{\prime};\theta)$ , respectively. The Detailed Balance (DB) (Bengio et al., 2021b) and the SubTB $(\lambda)$ (Madan et al., 2023) objectives parameterize the state flow $F(s;\theta)$ , forward policy $P_{F}(s^{\prime}|s;\theta)$ , and backward policy $P_{B}(\bar{s}|s^{\prime};\theta)$ on actions $s\rightarrow s^{\prime}$ to define a GFlowNet. The flow-matching constraints represented by these parameterized quantities are converted into a loss function by equating the left and right hand sides of the constraint equations as a squared loss. The flow matching equation for the DB loss is described by Equation 1: $F(s;\theta)P_{F}(s^{\prime}|s;\theta)=F(s^{\prime};\theta)P_{B}(s|s^{\prime};\theta)$ (1) 2.2 MONTE-CARLO TREE SEARCH (MCTS)   
+Although MCTS can in principle be applied to a variety of environments, for simplicity we consider only environments with DAG-structured discrete state spaces, as described in Section 2.1. For a more comprehensive treatment of the subject, we refer the reader to (Browne et al., 2012). Let the search tree $T$ be a DAG 1 consisting of a set of nodes $S_{T}\subseteq S_{\neg f}$ and edges ${\mathcal{A}}_{T}\subseteq A$ , where $S_{\neg f}\,=\,S/s_{f}$ and $A_{\neg f}\,=\,A/\{(x,s_{f})\,:\,x\,\in\,\mathcal{X}\}$ . Let $Q_{T}(s,s^{\prime})$ be the search value function for edge $(s,s^{\prime})\in A_{T}$ . The MCTS algorithm iteratively builds $T$ through repeated application of three construction steps: Select, Expand, and Backup.   
+The search tree is initialized without any information: $S_{T}=\{s_{0}\}$ , ${\cal A}_{T}=\left\{\begin{array}{r l}{\end{array}\right.$ . In the Select step, a new node $s^{\prime}\notin S_{T}$ is visited by sampling a trajectory through the search tree $^{\prime}s_{0}\rightarrow\dotsb\rightarrow s\rightarrow s^{\prime}$ ) where each action is selected using a tree policy $\bar{P}_{T}(s^{\prime}|s)$ . In the Expand step, the edge values $Q_{T}(s^{\prime},s^{\prime\prime})$ from the new node $s^{\prime}$ to each of its children $s^{\prime\prime}\in C h(s^{\prime})$ are initialized using a heuristic approximation. Finally, in the Backup step information from the new state $s^{\prime}$ is propagated back up along the path in reverse order, starting from $s$ and moving towards $s_{0}$ .  
+
+Like many sampling/search methods, MCTS can be used for both optimization (i.e. finding a $\mathrm{rg}\operatorname*{max}_{x}R(x))$ and integration (i.e. calculating $\textstyle\sum_{x}R(x))$ . Details about each step in the algorithm, such as how the paths through the search tree are selected (i.e. greedy vs stochastic), how the value functions are initialized (i.e. Monte Carlo rollout vs neural network prediction) and how the value functions are updated in the Backup step, can vary depending on the specific use case. In the next section, we discuss a particular implementation of MCTS that can be used to solve the GFlowNet problem in a tree-structured environments.  
+
+2.3 MCTS FOR APPROXIMATE INFERENCE  
+
+Suppose $G$ is tree-structured environment with terminal energies. Previous work has shown that MCTS can be used to calculate the true distribution $P(x)\propto R(x)$ : we briefly outline this work below.  
+
+First, observe that in tree-structured environments, each state $s$ can only be reached by a unique trajectory $\tau=(s_{0},\ldots,s)$ .  
+
+The reward function $R(s,s^{\prime})$ is defined by equation 2:  
+
+$$
+R(s,s^{\prime})=\left\{{-\mathcal{E}(s)\quad\mathrm{if}\;s^{\prime}=s_{f}}\right.
+$$  
+
+Further, suppose that the Backup step on a single pair of nodes $(s,s^{\prime})$ is given by Equation 3:  
+
+$$
+Q_{T}(s,s^{\prime})\leftarrow R(s,s^{\prime})+Q_{T}(s^{\prime})
+$$  
+
+Note that $\begin{array}{r}{Q_{T}(s)\,=\,\log\sum_{s^{\prime}\in C h(s)}\exp Q_{T}(s,s^{\prime})}\end{array}$ is simply the search value function for the node $s$ . This equation is reminiscent of the Soft-Bellman backup equation used in maximum-entropy RL (Haarnoja et al., 2017).  
+
+If the tree is fully constructed, i.e. ${\cal S}_{T}\;=\;{\cal S}_{\neg f}$ and $\mathbfcal{A}_{T}\;=\;\mathbfcal{A}$ , it is possible to show that the tree value functions are equivalent to the optimal maximum-entropy state-action value functions (Buesing et al., 2019). This is stated formally in Theorem 1:  
+
+Theorem 1 (Search Tree Consistency) If the search tree $T$ is constructed exhaustively using Equation 3 for the Backup step, then $\begin{array}{r}{Q_{T}(s,s^{\prime})=\sum_{x:s\prec x}R(x)}\end{array}$ for all $(s,s^{\prime})\in A_{T}$ .  
+
+Note that this result does not require a particular strategy for sampling search tree paths in the Select step, nor does it require a specific value function initialization in the Expand step. Theorem 1 can also be extended to environments with intermediate energies (see Buesing et al. 2019 for full details). While useful, this approach does not generalize to non-tree structured environments, such as the common GFlowNet benchmark Hypergrid (Bengio et al., 2021a). Briefly, if this Backup is applied to such an environment, the search tree values $\bar{Q}_{T}(s,s^{\prime})$ may be biased by the number of unique trajectories leading to each terminating state (see Figure 2); in tree-structured environments, this is not an issue since every state can only be reached by a single trajectory (refer to Bengio et al. 2021b for further details).  
+
+
+
+\section{3 RELATED WORK  }
+
+
+MCTS (Kocsis & Szepesva´ri, 2006; Kocsis et al., 2006) has long been used for planning in Markov Decision Processes Browne et al. (2012). Early approaches employed simple methods for estimating state values, such as performing Monte Carlo rollout with a heuristic policy. More recent approaches (Anthony et al., 2017; Silver et al., 2017) have replaced these heuristics with neural networks, which are faster and can in principle generalize to regions of the space that are unseen. Remarkably, it has been demonstrated that these networks can effectively be trained with the samples that they themselves generate through sampling, even in cases where the dynamics of the environment are unknown (Schrittwieser et al., 2019).  
+
+Maximum Entropy Reinforcement Learning (MaxEnt RL, Fox et al. (2015)) differs from standard RL by seeking a balance between maximizing rewards and maintaining diversity. This approach can improve exploration and make control more robust when the model is imperfect. It can also be viewed as a form of probabilistic inference, where the optimal policy samples trajectories proportion to their reward Levine (2018). More recently, MaxEnt RL has been linked to GFlowNets through reward shaping Tiapkin et al. (2024); Deleu et al. (2024); Mohammadpour et al. (2024). This provides a framework for converting existing maximum-entropy RL algorithms into equivalent GFlowNet algorithms: for example, the Detailed Balance GFlowNet algorithm (Bengio et al., 2021b) can be expressed as Soft Q-Learning (Haarnoja et al., 2017) with a particular type of reward shaping. MCTS can also be modified to work with MaxEnt RL (Xiao et al., 2019) and perform inference in tree-structured environments (Buesing et al., 2019).  
+
+Our work also shares some similarities with a concurrent work (Morozov et al., 2024): however, our contributions differ in several ways. Our work is more general in the sense that it is applicable to multiple GFlowNet parameterizations (DB, SubTB, and FM) and works with both terminatingreward and intermediate-reward environments, while theirs is limited to Soft Q-Learning (i.e. DB) in terminating-reward environments. Additionally, the manner in which their tree is constructed differs considerably from our own approach: theirs is similar to AlphaZero in the sense that it evolves several independent search trees simultaneously, while ours is more like TreeSample (Buesing et al., 2019) in that it builds one large search DAG (in parallel) from which trajectories can be sampled during training, somewhat like a replay buffer. Finally, the way they use search to influence training is distinct: their approach relies on taking the flow estimates from the search tree directly as training targets, while our approach only constructs the tree for the purposes of sampling.  
+
+
+
+\section{4 METHODOLOGY  }
+
+
+
+
+\section{4.1 MONTE CARLO DAG SEARCH (MCDS)  }
+
+
+In this section, we describe how to iteratively build a search DAG $D$ using MCTS-inspired graph operations. We call this approach Monte Carlo DAG Search (MCDS).  
+
+Like with the search tree $T$ in MCTS, the search DAG $D$ consists of a set of nodes $S_{D}\subseteq S_{\neg f}$ and edges ${\mathcal{A}}_{D}\subseteq A$ that corresponds to a connected subgraph of the environment DAG $G$ . Let $F_{D}(s,s^{\prime})$ be the search DAG flow function for edge $(s,s^{\prime})$ , and let $R(s,s^{\prime})$ be the reward function (defined below).  
+
+The particular manner in which the flow functions are updated for each action $\big(s,s^{\prime}\big)$ in the trajectory is described in Equation 4:  
+
+$$
+\log F_{D}(s,s^{\prime})\gets R(s,s^{\prime})+\log F_{D}(s^{\prime})
+$$  
+
+Note that $\begin{array}{r}{F_{D}(s)=\sum_{s^{\prime}\in C h(s)}F_{D}(s,s^{\prime})}\end{array}$ is simply the state flow in the search DAG $D$ . This equation is nearly identical to the Soft-Bellman backup in Equation 3, although the value functions have been replaced with flow functions.  
+
+Assuming that $G$ corresponds to a terminating reward environment, we can define the edge reward function as follows:  
+
+$$
+R(s,s^{\prime})={\left\{\begin{array}{l l}{-{\mathcal{E}}(s)}&{{\mathrm{if~}}s^{\prime}=s_{f}}\\ {\log P_{B}(s|s^{\prime})}&{{\mathrm{otherwise}}}\end{array}\right.}
+$$  
+
+This definition corresponds to the reward shaping for maximum entropy RL described in (Tiapkin et al., 2024; Deleu et al., 2024). If the DAG construction proceeds until the $D$ covers the entire environment graph $G$ (i.e.2).  
+
+Theorem 2 (Search DAG consistency) If the search DAG $D$ is constructed exhaustively using Equation 4 for the Backup step, then $\begin{array}{r}{\dot{F}_{D}(\dot{s},s^{\prime})=F(s,s^{\prime})}\end{array}$ for all $(s,s^{\prime})\in{\mathcal{A}}$ .  
+
+A simple corollary is that the tree policy $P_{D}(s^{\prime}|s)\propto F_{D}(s,s^{\prime})$ can be used to sample terminating states $x\in\mathscr{X}$ proportional to $R(x)$ . Let $\begin{array}{r}{P_{D}(x)=\sum_{\tau:(x,s_{f})\in\tau}P_{D}(\tau)}\end{array}$ .  
+
+![](images/f24d5c929b084d62fc319186cee5b78e76d03bcd2289a5d09e9f49fc1fede46f.jpg)  
+Figure 2: With sufficient budget, MCDS can approximate the true flows, forward policies, and terminating distributions in an 8x8 Hypergrid environment. Each square represents a state in the hypergrid, with $s_{0}=(0,0)$ in the bottom left. The green shading represents the terminating distribution $P(s)$ , and the arrows and dots represent the forward policy $P_{F}\big(s^{\prime}|s\big)$ , with the red dot indicating the terminating probability $P_{F}\big(s_{f}|s\big)$ . The MCTS solution is biased towards states further from the origin since they can be reached with a larger number of unique trajectories.  
+
+Corollary 2.1 If $D$ is exhaustive, then the terminating state distribution $P_{D}(x)$ induced by the tree policy $P_{D}(s^{\prime}|s)$ is equal to the true terminating state distribution $P(x)\propto R(x)$ .  
+
+Following (Deleu et al., 2024), the reward can be modified slightly to accommodate DAG construction in intermediate energy environments:  
+
+$$
+R(s,s^{\prime})={\left\{\!\!\!\begin{array}{l l}{0}&{{\mathrm{if~}}s^{\prime}=s_{f}}\\ {\operatorname{\mathcal{E}}(s)-\operatorname{\mathcal{E}}(s^{\prime})+\log P_{B}(s|s^{\prime})}&{{\mathrm{otherwise}}}\end{array}\right.}
+$$  
+
+2 covers both cases.  
+
+In terminating reward environments, it is possible to run MCDS without requiring additional reward function evaluations during construction. This can be accomplished by modifying Equation 5 such that $R(s,s^{\prime})\,=\,F_{D}(s,s^{\prime})$ when $s^{\prime}\,=\,s_{f}$ . In this case, the MCDS can be viewed as simply aggregating flow estimates across multiple states. After exhaustive construction the DAG flows $F_{D}(s,s^{\prime})$ will correspond to the flows for a distribution $\hat{P}(x)\propto\hat{R}(x)$ , where $\hat{R}(x)$ is the value used to initialize $F_{D}(x,s_{f})$ in the Expand step for the terminating state $x$ . In Section 5.1 we demonstrate that this approach can be useful for training.  
+
+4.2 APPLYING MCDS FOR GFLOWNET TRAINING  
+
+Most GFlowNet algorithms involve sampling trajectories from the environment and minimizing a differentiable loss on these samples with gradient descent. The precise form of the loss function depends on the particular GFlowNet parameterization and training objective. However, regardless of parameterization, the sampling strategy is a critical part of the optimization can have a large impact on overall performance.  
+
+Let $P_{M}(s^{\prime}|s)$ denote the sampling policy. In principle, the only requirement of the sampling policy is that it has full support over the set of trajectories $\tau$ . The most basic strategy therefore is to sample trajectories on-policy using the current model’s parameters. In the case of DB, SubTB, and TB, the learned forward policy can be used $P_{M}(s^{\prime}|s)\,=\,P_{F}(s^{\prime}|s;\theta)$ . In the case of FM, which does not parameterize a forward policy directly, the sampling policy can be defined using the edge flow function: $P_{M}(s^{\prime}|s)\propto F(s,s^{\prime};\theta)$ .  
+
+Our method involves constructing a search DAG $D$ with MCDS and drawing samples with $P_{M}(s^{\prime}|s)~=~P_{D}(s^{\prime}|s)$ . Inspired by previous works combining MCTS with RL (Silver et al., 2017; Buesing et al., 2019; Xiao et al., 2019), we can guide construction of $D$ by using the current GFlowNet flow estimates in the Expand step. First, let us consider the DB objective (Bengio et al., 2021b), which requires parameterizing a forward policy $P_{F}(s^{\prime}|s;\theta)$ , a state flow function $F(s;\theta)$ , and (optionally) a backward policy $\bar{P}_{B}\big(s|s^{\prime};\theta\big)$ . In this case we can apply the flow identity $F(s,s^{\prime};\theta)=\bar{F}(s;\theta)\bar{P_{F}}(s^{\prime}|s;\theta)$ and initialize tree flows for new nodes using Equation 7:  
+
+$$
+\log F_{D}(s,s^{\prime})\gets\log F(s,s^{\prime};\theta)
+$$  
+
+This approach also works for the SubTB objective (Madan et al., 2023), since it parameterizes the distribution in the same manner. For the FM (Bengio et al., 2021a) case, we can use the learned state-action flow $F(s,s^{\prime};\theta)$ directly.  
+
+In the intermediate reward case the forward-looking flow $\tilde{F}(s,s^{\prime};\theta)$ (Pan et al.2 for justification):  
+
+$$
+\log F_{D}(s,s^{\prime})\gets\log\tilde{F}(s,s^{\prime};\theta)-\mathcal{E}(s)
+$$  
+
+As tree construction progresses, the tree flows $F_{D}(s,s^{\prime})$ move away from the GFlowNet estimates $F(s,s^{\prime};\theta)$ and towards the optimal flows $F(s,s^{\prime})$ . Exhaustive tree construction is usually impractical; in cases where it is feasible, learning an approximation $P_{F}(s^{\prime}|s;\theta)$ is superfluous since the DAG distribution $P_{D}(x)$ perfectly models the distribution over terminating states $P(x)$ . In practice, we build $D$ stochastically using a fixed budget $B\ll|A|$ of construction iterations. The method for sampling from the (usually incomplete) search DAG is described in Equation 9:  
+
+$$
+P_{M}(s^{\prime}|s)={\binom{P_{D}(s^{\prime}|s)}{P_{F}(s^{\prime}|s;\theta)}}_{\mathrm{{otherwise}}}
+$$  
+
+Empirically we find that mixing samples from $P_{M}(s^{\prime}|s)$ and $P_{F}(s^{\prime}|s;\theta)$ in a 1:1 ratio produces the best results. We can observe that sampling trajectories from the optimal distribution $P_{F}\big(s^{\prime}|s\big)$ does not necessarily lead to superior optimization: empirically, simple on-policy training can result in faster convergence under certain conditions (Atanackovic & Bengio, 2024). Intuitively, it is important for the sampling policy to capture regions of the space where the current model and the optimal distribution differ. Focusing exclusively on the modes of the distribution might not be the best strategy for finding such states.  
+
+Building $D$ every iteration can be quite inefficient, since the GFlowNet policy $P_{F}(s^{\prime}|s;\theta)$ does not change much after a single gradient update. It also slows down training dramatically, since each time $D$ is constructed the model $F(s^{\prime}|s;\theta)$ and energy function $\mathcal{E}(s)$ are queried several times. In our experiments $D$ is built every few iterations, and the construction operations are executed in parallel (see Algorithm 1 for full details).  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+
+
+\section{5.1 HYPERGRID  }
+
+
+First we evaluate our method on the standard Hypergrid GFlowNet benchmark from (Bengio et al., 2021a). Hypergrid is a $D$ -dimensional grid environment of size $H^{D}$ where every state is terminating. It uses a sparse, multi-modal reward function that is concentrated near each of the $2^{D}$ corners of the such that all trajectories have the same length. A step count is used to prevent cycles and enforce the DAG structure of the environment. The reward for a terminating state $x$ is a function of how well the current block configuration meets the goal criteria specified in the environment definition. Let $f(x)$ be the fraction of the criteria satisfied in state $x$ ; if $f(x)=1$ then $R(x)=100$ , otherwise  
+
+![](images/c6f848b552fee7b0e21d65146efdea694a221f4ab917ecce72b27759aace5310.jpg)  
+
+Table 1: Results on the Blocksworld task with different difficulty levels, with the number of test examples (environments) indicated in brackets. Acc $=$ accuracy $@$ 20, Reward $=$ average reward $@$ 20. Mean and standard deviations reported over five seeds.  
+
+![](images/f7900cf14924c331fb717aaa57c88d7fc6206eeac12faee416c9cd247dd7739c.jpg)  
+
+in Figures 4a and 4c. Furthermore, MCDS does seem to improve over on-policy in the FL case, although in the terminating reward case MCDS and on-policy sampling both perform poorly. Figures 4b and 4d demonstrate that MCDS also works with SubTB FL, although both SubTB FL methods seem to be more unstable than their DB FL counterparts.  
+
+![](images/a088d92a8d583430f3d8420ba2e91eaf2082348ef83da3324e3b6e1c7be373b7.jpg)  
+486 487 488 489 490 491 492 493 494 495 496 497 498 499 500 501 502 503 504 505 506 507 508 509 510 511 512 513 514 515 516 517 518 519 520 521 522 523 524 525 526 527 528 529 530 531 532 533 534 535 536 537 538 539   
+Figure 4: Experiments in two different Factorgraphs environments (Permuted Chain and Factorgraphs1) with different GFN objectives (DB and SubTB). The thin dashed lines represent individual trajectories for 10 seeds; the thick lines represent the median across seeds. MCDS consistently results in faster convergence in the forward-looking (FL) case.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this work, we propose Monte Carlo DAG Search (MCDS), a novel adaptation of MCTS to the GFlowNet problem. Our method employs reward shaping to modify the Backup step in maximum entropy MCTS so that it can apply to GFlowNets. We show that our approach can be used to calculate optimal flows in both terminating and intermediate reward environments. By employing MCDS as a tool for sampling the environment, we demonstrate how it can improve GFlowNet training. Through a series of experiments covering different state spaces, reward structures, neural network architectures, and GFlowNet parameterizations, we demonstrate the broad applicability and effectiveness of our method for GFlowNet training.  
+
+There are several promising directions for future work. Our current MCDS formulation requires parameterizing a state flow $F(s)$ or state-action flow $F(s,s^{\prime})$ , which limits its applicability to the DB, SubTB, and FM parameterizations. However, it may be possible to develop a strategy that works with TB. Furthermore, we have not explored combining MCDS with other successful GFlowNet sampling methods like replay buffers, local search (Kim et al., 2024), and Thompson sampling (Rector-Brooks et al., 2023), which could further improve performance. Finally, it would be valuable to explore different formulations of the DAG policy $P_{D}\bar{(s^{\prime}|s)}$ that is used in tree construction. Our approach is most similar to MENTS (Xiao et al., 2019), but it may be possible to consider other variants (Buesing et al., 2019) which offer a different balance of exploration and exploitation.  
+
+
+

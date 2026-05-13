@@ -1,0 +1,372 @@
+\title{Hindsight Preference Learning for Offline Preference-based Reinforcement Learning}
+
+\begin{abstract}
+
+Offline preference-based reinforcement learning (RL), which focuses on optimizing policies using human preferences between pairs of trajectory segments selected from an offline dataset, has emerged as a practical avenue for RL applications. Existing works rely on extracting \emph{step-wise} reward signals from \emph{trajectory-wise} preference annotations, assuming that preferences correlate with the cumulative Markovian rewards. However, such methods fail to capture the holistic perspective of data annotation: Humans often assess the desirability of a sequence of actions by considering the overall outcome rather than the immediate rewards. To address this challenge, we propose to model human preferences using rewards conditioned on future outcomes of the trajectory segments, i.e. the \textit{hindsight information}. For downstream RL optimization, the reward of each step is calculated by marginalizing over possible future outcomes, the distribution of which is approximated by a variational auto-encoder trained using the offline dataset. Our proposed method, \emph{Hindsight Preference Learning (HPL)}, can facilitate credit assignment by taking full advantage of vast trajectory data available in massive unlabeled datasets. Comprehensive empirical studies demonstrate the benefits of HPL in delivering robust and advantageous rewards across various domains.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Although reinforcement learning (RL) has demonstrated remarkable success in various sequential decision-making tasks~\citep{alphastar, hok}, its application in real-world scenarios remains challenging for practitioners, primarily due to two key reasons. First, modern RL methods typically require millions of online interactions with the environment~\citep{sac}, which is prohibitively expensive and potentially dangerous in embodied applications~\citep{levine_survey}. Second, reward engineering is necessary to align the induced behavior of the policy with human interests~\citep{reward_engineer1,reward_engineer2}. 
+However, tweaking the reward requires substantial efforts and extensive task knowledge of the real-world scenarios.  
+Reward hacking frequently occurs when the reward is improperly configured, leading to unintended consequences~\citep{reward_hacking}. 
+
+
+There are several research directions aiming for addressing above challenges~\citep{reward_learning1,reward_learning2,reward_learning3}, among which \emph{offline Preference-based RL (offline PbRL)} has gained increasing attention recently~\citep{ipl,dppo,oppo}. 
+In offline PbRL, an offline dataset is collected by deploying a behavior policy, after which human labelers are  required to provide relative preferences between two trajectory segments selected from the offline dataset. %for further policy optimization. 
+Offline PbRL significantly reduces the burden on human effort given that labeling preferences between trajectories is considerably easier compared to crafting step-wise reward signals. 
+It has proven effective in large-scale applications including fine-tuning large language models~\citep{instruct_gpt, llama2, dpo}. 
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.86\linewidth]{figures/hpm.pdf}
+    \caption{Illustration of the reward learning procedure in HPL. Unlike previous methods, HPL first generates embeddings $z_t$ to encode the future part of the segments and optimize a reward function $r_{\psi}$ which is conditioned on the $s_t$, $a_t$ and the future $z_t$ using the Bradley-Terry model. }
+    \label{fig:hpm}
+\end{figure*}
+
+Offline PbRL typically follows a two-phase paradigm: 1) learning a reward function that aligns with human preferences using a small labeled {preference dataset}; 2) applying the reward function to label a massive {unlabeled dataset} and performing policy optimization~\citep{christiano1}. 
+For the first phase, existing methods employ Bradley-Terry model~\citep{btmodel} to learn \emph{step-wise} reward signals from \emph{trajectory-wise} preferences based on the \emph{Markovian reward assumption}: the preference correlates with the {cumulative rewards} of each trajectory~\citep{christiano1}. 
+However, as previous works~\citep{pt} have unveiled, such an assumption is technically flawed and limited since humans evaluate the trajectory segments from a global perspective, making the obtained reward bear an implicit dependence on the future part of the segment. Consider the case of purchasing lottery tickets as an example. Although the expected return is negative, the payoff can be substantial if one wins. However, when assigning credits, we should allocate higher rewards to purchasing tickets only when we are certain of winning, rather than unconditionally encouraging such behavior. 
+
+In light of this, we propose \emph{Hindsight Preference Learning (HPL)} to account for such dependence on future information. 
+The key idea of HPL is to develop a \emph{hindsight preference model}, which models human preferences using a reward function conditioning on the state $s$, action $a$ and the future trajectory starting from $(s, a)$, i.e. the \textit{hindsight information}. 
+In particular, given a $H$-length trajectory $\sigma_{1:H}=(s_1, a_1, s_2, a_2, \dots, s_H, a_H)$, the reward of $s_t, a_t$ for $1\leq t\leq H$ is given by  $r(s_t, a_t | \sigma_{t:t+k})$. When labeling the unlabeled dataset, a scalar reward signal is computed for each state-action pair by marginalizing over all possible hindsight information, $r(s,a) = \int_{\sigma} p(\sigma | s, a) r(s,a | \sigma) d \sigma$. 
+To deal with the high-dimensional nature of hindsight information, we pre-train a variational auto-encoder to efficiently represent the hindsight information, making the above marginalization feasible in practice. The reward learning procedure of HPL is illustrated in Figure~\ref{fig:hpm}.   
+
+HPL has two key benefits over prior works. First, by leveraging hindsight information in preference modeling, it captures the implicit holistic perspective of human preference labeling, addressing the key limitation of the Markovian reward assumption adopted in previous works.   
+Second, the two-phase paradigm of offline PbRL might become less effective if there is a substantial distribution mismatch between preference and unlabeled dataset. HPL can take advantage of the unlabeled dataset by learning a prior over future outcomes. This allows for incorporating the information of trajectory distribution carried by the unlabeled dataset, thus delivering robust and advantageous rewards when labeling the unlabeled dataset. 
+We provide extensive evaluations to verify these benefits. 
+
+
+
+\section{Preliminaries}
+
+\subsection{Markov Decision Process}
+In standard RL, an agent interacts with an environment characterized by a Markov Decision Process (MDP) $\langle\mathcal{S}, \mathcal{A}, r, T, \gamma\rangle$. Here, $\mathcal{S}$ and $\mathcal{A}$ represent the state space and action space respectively, while $r(s, a)$ denotes the reward function, $T(s'|s, a)$ is the transition function, and $\gamma$ is the discounting factor. 
+The value function defines the expected cumulative reward by following a policy $\pi(a|s)$,
+\begin{align}
+    V^\pi(s) = \mathbb{E} \left[\sum_{t=0}^\infty \gamma^tr(s_t, a_t) | s_0 = s \right] \, .
+\end{align}
+The primary objective of RL algorithms is to find an optimal policy that maximizes  $\mathbb{E}_{s_0\sim\mu_0} [V^\pi(s_0)]$, where $\mu_0$ is the initial state distribution. 
+\subsection{Offline Preference-Based Reinforcement Learning}\label{sec:preliminary_oprl}
+
+In this work, we consider the problem of learning an optimal decision-making policy from a previously collected dataset with \emph{preference feedback}. 
+In its generalist framework, the ground-truth reward is not given in the data. Instead, the learner is provided with a \emph{preference dataset} and a massive \emph{unlabeled dataset}, and follows a two-phase paradigm: 1) \emph{reward learning},  learn a reward model $r$ with the  preference data;
+and 
+2) \emph{reward labeling}, apply $r$ to label the unlabeled dataset in order to perform policy optimization with a large amount of data. 
+
+Let $\sigma=(s_0, a_0, s_1, a_1,\dots, s_{|\sigma|}, a_{|\sigma|})$ denote a consecutive segment of states and actions from a trajectory. 
+The preference dataset $\mathcal{D}_{\rm p}=\{(\sigma_i^0, \sigma_i^1, y_i)\}_{i=1}^{|\mathcal{D}_{\rm p}|}$ consists of segments pairs with preference label given by the human annotators.  
+The preference label is given by: $y_i=1$ if $\sigma^0 \succ \sigma^1$ and $y_i=0$ if $\sigma^1 \succ \sigma^0$, 
+where we use  $\sigma \succ \sigma'$ to denote $\sigma$ is more preferred than $\sigma'$.  
+We assume that all segments have the same length $|\sigma| = H$. 
+The unlabeled dataset $\mathcal{D}_{\rm u}$, contains reward-free trajectories $\{\sigma_i\}_{i=1}^{|\mathcal{D}_{\rm u}|}$ collected by some behavior policy $\pi_\beta$. In practice, we usually have $|\mathcal{D}_{\rm u}| \gg |\mathcal{D}_{\rm p}|$ as collecting human annotations is more time-consuming and expensive compared to collecting unlabeled trajectories. 
+To learn a reward function $r$, a common approach is to assume a probabilistic  preference model and maximize the likelihood of the preference dataset,
+\begin{align}
+\mathcal{L} (\psi) = 
+- \sum_{(\sigma^0, \sigma^1, y) \in \mathcal{D}_{\rm p}} (1-y) \log P(\sigma^0 \succ \sigma^1 ; \psi) + y P(\sigma^1 \succ \sigma^0 ; \psi)\, ,
+\label{eq:lh}
+\end{align}
+where $P(\sigma \succ \sigma' ; \psi)$ is the preference model parameterized by the parameters $\psi$.  
+For the probabilistic preference model, most existing methods adopt the Markovian reward assumption~\citep{christiano1, oprl,qpa}: 
+\begin{align}
+\rho_{\rm MR}(\sigma ; \psi) = \sum_{(s,a) \in \sigma} r_\psi (s, a)\, .
+\label{eq:rho-mr}
+\end{align}
+That is, the \emph{preference strength} of a segment $\sigma$ correlates with its {cumulative rewards}. 
+Applying the Bradley-Terry model~\citep{btmodel} leads to the following \emph{Markovian Reward (MR)} preference model,
+\begin{align}
+P_{\rm MR}(\sigma^0 \succ \sigma^1; \psi) =
+\frac{\exp(\rho_{\rm {MR}} (\sigma^0 ; \psi ) )}{ \exp(\rho_{\rm {MR}} (\sigma^0  ; \psi )  ) + \exp(\rho_{\rm {MR} } (\sigma^1 ; \psi ) )} \, .
+\label{eq:bt_model}
+\end{align}
+Plugging \eqref{eq:bt_model} into \eqref{eq:lh} yields a practical learning objective for learning the reward function.   
+Finally, we can label $\mathcal{D}_{\rm u}$ with the learned reward model for any $(s,a)\in\sigma, \sigma\in\mathcal{D}_{\rm u}$. 
+The resulting labeled dataset can be used for policy optimization with any offline RL algorithms, such as IQL  \citep{kostrikov2022offline} and AWAC \citep{nair2020awac}. 
+\iffalse
+\begin{equation}\label{eq:bt_model}
+    \begin{aligned}
+        P_{\rm MR}(\sigma^0 \succ \sigma^1; \psi) = \frac{\exp(\sum_{\sigma^0}r_\psi(s^0_t, a^0_t))}{\exp(\sum_{\sigma^0}r_\psi(s_t^0, a_t^0))+\exp(\sum_{\sigma^1}r_\psi(s_t^1, a_t^1))},
+    \end{aligned}
+\end{equation}
+\fi
+\iffalse
+
+where $y_i=1$ indicates $\sigma_i^1$ is more preferred than $\sigma_i^0$ according to the human annotator, and vice versa for $y_i=0$. The unlabeled dataset $\mathcal{D}_{\rm u}$, contains reward-free trajectories $\{\sigma_i\}_{i=1}^{\|\mathcal{D}_{\rm u}\|}$ collected by some behavior policy $\pi_\beta$. Usually, we have $|\mathcal{D}_{\rm u}| \gg |\mathcal{D}_{\rm p}|$ since collecting human annotations is more time-consuming and expensive compared to collecting unlabeled trajectories.
+
+The preference dataset $\mathcal{D}_p$ consists of segments pairs $\{(\sigma_i^0, \sigma_i^1, y_i)\}_{i=1}^{|\mathcal{D}_{\rm p}|}$ where $y_i=1$ indicates $\sigma_i^1$ is more preferred than $\sigma_i^0$ according to the human annotator, and vice versa for $y_i=0$. The unlabeled dataset $\mathcal{D}_{\rm u}$, contains reward-free trajectories $\{\sigma_i\}_{i=1}^{\|\mathcal{D}_{\rm u}\|}$ collected by some behavior policy $\pi_\beta$. Usually, we have $|\mathcal{D}_{\rm u}| \gg |\mathcal{D}_{\rm p}|$ since collecting human annotations is more time-consuming and expensive compared to collecting unlabeled trajectories.
+Offline PbRL deals with the setting where neither online sampling nor transition-wise rewards are available. In its generalist framework, the algorithm is provided with a \textit{preference dataset} $\mathcal{D}_{\rm p}$ and a massive \textit{unlabeled dataset} $\mathcal{D}_{\rm u}$. Let $\tau$ denote a consecutive segment of states and actions from a trajectory, the preference dataset $\mathcal{D}_p$ consists of segments pairs $\{(\sigma_i^0, \sigma_i^1, y_i)\}_{i=1}^{|\mathcal{D}_{\rm p}|}$ where $y_i=1$ indicates $\sigma_i^1$ is more preferred than $\sigma_i^0$ according to the human annotator, and vice versa for $y_i=0$. The unlabeled dataset $\mathcal{D}_{\rm u}$, contains reward-free trajectories $\{\sigma_i\}_{i=1}^{\|\mathcal{D}_{\rm u}\|}$ collected by some behavior policy $\pi_\beta$. Usually, we have $|\mathcal{D}_{\rm u}| \gg |\mathcal{D}_{\rm p}|$ since collecting human annotations is more time-consuming and expensive compared to collecting unlabeled trajectories.
+
+Most prior works adopt the Bradley-Terry model to establish the connection between the preference and a Markovian reward function approximator $r_\psi$:
+
+\begin{equation}\label{eq:bt_model}
+    \begin{aligned}
+        P_{\rm MR}(\sigma^0 \succ \sigma^1; \psi) = \frac{\exp(\sum_{\sigma^0}r_\psi(s^0_t, a^0_t))}{\exp(\sum_{\sigma^0}r_\psi(s_t^0, a_t^0))+\exp(\sum_{\sigma^1}r_\psi(s_t^1, a_t^1))},
+    \end{aligned}
+\end{equation}
+where the summation $\sum_\sigma$ iterates over all state-action pairs $(s_t^0, s_t^0)$ inside the segment. To extract a reward function for RL optimization, these works minimize the cross-entropy loss using the preference dataset:
+\begin{equation}
+    \begin{aligned}
+        \mathcal{L}_{\rm MR}(\psi)= - \mathbb{E}_{(\sigma^0, \sigma^1, y)\sim\mathcal{D}_{\rm p}}\left[(1-y)\log P_{\rm MR}(\sigma^0 \succ \sigma^1; \psi)+y\log P_{\rm MR}(\sigma^1 \succ \sigma^0; \psi)\right].
+    \end{aligned}
+\end{equation}
+
+Subsequently, the unlabeled dataset is labeled using the obtained reward function $\hat{r}$, and any offline RL algorithm, such as IQL or AWAC, can be employed to optimize the policy.
+
+\fi
+
+
+
+\section{Hindsight Preference Learning}
+
+
+
+In this section we introduce a new preference model designed to address the limitations of the MR preference model by utilizing hindsight information.  
+We begin with an illustrative example that serves as the primary motivation for our approach, followed by a detailed explanation of the formalization and implementation of the proposed method.
+\subsection{Motivating Example: The Influence of the Future}
+\label{sec:future_influence}
+
+To elucidate the influence of the future in preference modeling, we take the gambling MDP from~\citet{doc} as an example (Figure~\ref{fig:gambling_mdp}). 
+An agent begins at $s_1$ with two actions: $a_1$ and $a_2$. Choosing the high-risk action $a_1$, the agent transitions to a rewarding state $s_{\rm good}$ with probability of $10\%$, but is more likely ($90\%$) to a penalizing state $s_{\rm bad}$. 
+Alternatively, the safer and actually optimal action $a_2$ consistently leads to a neutral state $s_{\rm avg}$, yielding a reward of $0$.  
+Suppose we are to extract the reward function using the provided dataset, where preferences are labeled based on the ground-truth reward:
+$$
+\begin{aligned}
+    \mathcal{D}=\left\{
+    \begin{aligned}
+        &((s_1\rightarrow a_1 \rightarrow s_{\rm good}\rightarrow a_3), &(s_1\rightarrow a_2 \rightarrow s_{\rm avg}\rightarrow a_3),\quad &y=0) \\
+        &((s_1\rightarrow a_1 \rightarrow s_{\rm good}\rightarrow a_3), &(s_1\rightarrow a_2 \rightarrow s_{\rm avg}\rightarrow a_3),\quad &y=0) \\
+        &((s_1\rightarrow a_1 \rightarrow s_{\rm good}\rightarrow a_3), &(s_1\rightarrow a_1 \rightarrow s_{\rm bad}\rightarrow a_3),\quad &y=0) \\
+        &((s_1\rightarrow a_1 \rightarrow s_{\rm bad}\rightarrow a_3), &(s_1\rightarrow a_2 \rightarrow s_{\rm avg}\rightarrow a_3),\quad &y=1) \\
+    \end{aligned}\right\}.
+\end{aligned}
+$$
+Applying the MR preference model \eqref{eq:bt_model} to this dataset would likely yield a reward function where  $r_\psi(s_1, a_1) > r_\psi(s_1, a_2)$,
+because a larger proportion of trajectories involving $a_1$ lead to the rewarding state $s_{\rm good}$ (our experiments also validate this in Figure~\ref{fig:exp_gambling}). However, this violates rationality as selecting $a_2$ offers a higher return in expectation.
+This failure can be attributed to the inappropriate credit assignment inherent in the MR preference model \eqref{eq:bt_model}:  
+ a preference for $(s_1\rightarrow a_1\rightarrow s_{\rm good}\rightarrow a_3)$ will assign credits to both $r_\psi(s_1, a_1)$ and $r_\psi(s_{\rm good}, a_3)$ equally, leading to over-estimated utilities for $a_1$. To address this issue, a natural approach is to condition the reward of $(s_1, a_1)$ on the future outcome of the segment (i.e. $s_{\rm good}$ or $s_{\rm bad}$), so that $a_1$ is encouraged only when it leads to a favorable outcome $s_{\rm good}$. The conditional reward function $r_\psi(s, a | \sigma_{\rm future})$ thus answers the critical question: \textit{If my future is determined to be $\sigma_{\rm future}$, how advantageous it is for me to choose action $a$ at $s$? }
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+    \includegraphics[width=0.85\linewidth]{figures/toy_mdp.pdf}
+  \end{center}
+  \caption{A gambling MDP that illustrates the potential failure modes of the MR preference model. }
+  \label{fig:gambling_mdp}
+\end{wrapfigure}
+When applying $r_\psi(s, a | \sigma_{\rm future})$ to label data, we can marginalize over all possible future segments according to some prior distribution $p_{\rm prior}(\cdot |s, a) $ to get the value $r_\psi(s, a)=\mathbb{E}_{\sigma\sim p_{\rm prior}(\cdot|s, a)}[r_\psi(s, a| \sigma)]$. 
+Note that the prior distribution can be estimated using the unlabeled offline dataset, which is unbiased concerning the environment transition and the behavior policy. Take the gambling MDP again as an example, the marginalization would decrease the utility of action $a_1$ since most of the time ($90\%$) the agent will arrive at the bad state.  
+Besides, when there exists a mismatch between the data distribution of the preference dataset $\mathcal{D}_{\rm p}$ and that of the unlabeled dataset $\mathcal{D}_{\rm u}$ (which is a common occurrence because of the improvement of the policy or the non-uniform sampling for preference pairs), it is found that the reward from existing methods may not align with the RL agent's interests~\citep{qpa,rso}. 
+The conditional reward model provides an effective solution to this issue by enabling the marginalization of the reward function $r_\psi$ using a data distribution that is more closely aligned with the on-policy data, thereby improving the alignment between learned behaviors and desired outcomes. 
+
+\subsection{Hindsight Preference Model}\label{sec:hpm}
+
+We now present \emph{Hindsight Preference Model (HPM)}, a novel preference model that incorporates future information in preference modeling. 
+As opposed to \eqref{eq:rho-mr}, HPM assumes that the preference strength of a trajectory segment $\sigma=(s_0, a_0, s_1, a_1,\dots, s_H)$ is determined by 
+\begin{align}
+\rho_{\rm HPM}(\sigma ; \psi) = \sum_{(s_t, a_t) \in \sigma} r_\psi (s_t, a_t | \sigma_{t:t+k})\, ,
+\label{eq:rho-hpm}
+\end{align}
+where $\sigma_{i:j}$ denote the subsequence of $\sigma$ between step $i$ and $j$.\footnote{We use $\sigma_{t:t+k}$ to simplify the notations. For $t+k > H$, the subsequence will be clipped to $\sigma_{t:\min(t+k, H)}$. } 
+That is, in HPM the reward function $r_\psi$ not only takes the current state $s_t$ and action $a_t$ as input, but also depends on the $k$-step future outcome $\sigma_{t:t+k}$. 
+Then given a  segment pair $(\sigma^0, \sigma^1)$, HPM model their preference by
+\begin{align}
+P_{\rm HPM}(\sigma^0 \succ \sigma^1; \psi) =
+\frac{\exp(\rho_{\rm {HPM}} (\sigma^0 ; \psi ) )}{ \exp(\rho_{\rm {HPM}} (\sigma^0  ; \psi )  ) + \exp(\rho_{\rm {HPM} } (\sigma^1 ; \psi ) )} \, .
+\label{eq:hpm}
+\end{align}
+In practice, directly implementing this conditional reward $r_\psi (s_t, a_t | \sigma_{t:t+k})$ is challenging due to the high-dimensional nature of the $k$-step segment $\sigma_{t:t+k}$. 
+We address this issue by compressing the segment into a compact embedding rather than operating directly in the raw space of trajectory. 
+
+\iffalse
+
+Inspired by the above insights, we introduce the \emph{Hindsight Preference Model (HPM)}, a novel preference model that assumes the strength of preference depends on the exponential of the cumulative utilities $r_\psi$ conditioned on the future outcome of segments. Specifically, let $(\sigma^0, \sigma^1)$ be a pair of segments with length $H$, and $\sigma_{i:j}$ denote the subsequence of $\sigma$ between step $i$ and $j$, HPM assumes
+\begin{equation}
+    \begin{aligned}
+        P_{\rm HPM}(\sigma^1\succ \sigma^0; \psi)=\frac{\exp(\sum_{s_t,a_t\in\sigma} r_\psi(s^1_t, a^1_t | \sigma^1_{t:\min(t+k, H)}))}{\exp(\sum_{s_t,a_t\in\sigma} r_\psi(s^0_t, a^0_t | \sigma^0_{t:\min(t+k, H)}))+\exp(\sum_t r_\psi(s^1_t, a^1_t | \sigma^1_{t:\min(t+k, H)}))}.
+    \end{aligned}
+\end{equation}
+For the sake of brevity, in subsequent discussions, we will use $\sigma_{t:t+k}$ to denote $\sigma_{t:\min(t+k, H)}$. Now the utility function $r_\psi$ not only takes the current state $s_t$ and action $a_t$ as input but also depends on the $k$-step future outcome $\sigma_{t:t+k}$. We can again use the preference dataset and cross-entropy loss to optimize $r_\psi$;
+\begin{equation}\label{eq:loss_hpm}
+    \begin{aligned}
+        \mathcal{L}_{\rm HPM}(\psi)= - \mathbb{E}_{(\sigma^0, \sigma^1, y)\sim\mathcal{D}_{\rm p}}\left[(1-y)\log P_{\rm HPM}(\sigma^0 \succ \sigma^1; \psi)+y\log P_{\rm HPM}(\sigma^1 \succ \sigma^0; \psi)\right].
+    \end{aligned}
+\end{equation}
+
+\fi
+\begin{algorithm}[t]
+\caption{Hindsight Preference Learning (HPL)}
+\label{algo:hpl}
+\textbf{Input}: Preference dataset $\mathcal{D}_{\rm p}=\{(\sigma_i^0, \sigma_i^1, y_i)\}_{i=1}^{|\mathcal{D}_{\rm p}|}$, unlabeled dataset $\mathcal{D}_{u}=\{\sigma_i\}_{i=1}^{|\mathcal{D}_{\rm u}|}$.
+
+\begin{algorithmic}[1]
+\STATE {\color{gray}// VAE Training}
+\STATE Initialize the segment encoder $q_\theta$, decoder $p_\theta$ and prior $f_\theta$ with parameters $\theta$.
+\FOR{$n=1, 2, \cdots, N_{\rm VAE}$}
+\STATE Sample minibatch of segments $\sigma\sim \mathcal{D}_{u}$
+\STATE Update $\theta$ by maximizing Eq~\eqref{eq:elbo}
+\ENDFOR
+\STATE {\color{gray}// Reward Learning}
+\STATE Initialize the reward function $r_\psi$ with parameters $\psi$
+\FOR{$n=1, 2, \cdots, N_{\rm HPM}$}
+\STATE Sample minibatch of preference pairs $(\sigma^0, \sigma^1, y)\sim \mathcal{D}_{p}$
+\STATE Update $\psi$ by minimizing Eq~\eqref{eq:lh} with $P_{\rm HPM}$ defined in Eq~\eqref{eq:empirical_hpm}
+\ENDFOR
+\STATE {\color{gray}// RL Training}
+\STATE Label the reward for $\mathcal{D}_{\rm u}$ using Eq~\eqref{eq:marginalization} and optimize the policy with any offline RL algorithm
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Future Segment Embedding}\label{sec:traj_embedding}
+
+We propose to compress future segments $\sigma_{t:t+k}$ into a compact embedding vector $z_t$ by training a conditional \textit{Variational Auto-Encoder} (VAE) \citep{kingma2013auto}. 
+The architecture of our model consists of three components: the encoder $q_\theta$, the decoder $p_\theta$, and a learnable prior $f_\theta$, which can be jointly optimized with the \emph{Evidence Lower Bound (ELBO)}:
+\begin{equation}\label{eq:elbo}
+    \begin{aligned}
+        &\log p(\sigma_{t:t+k}|s_t, a_t)\\
+        &\geq \mathbb{E}_{q_\theta(z_t|s_t, a_t, \sigma_{t:t+k})}\left[\log \frac{p_\theta(\sigma_{t:t+k}, z_t|s_t, a_t)}{q_\theta(z_t|s_t, a_t, \sigma_{t:t+k})}\right]\\
+        &=\mathbb{E}_{q_\theta(z_t|s_t, a_t, \sigma_{t:t+k})}\left[\log p_\theta(\sigma_{t:t+k}|s_t, a_t, z_t)\right] - \operatorname{KL}\left[q_\theta(z_t|s_t, a_t, \sigma_{t:t+k})\|f_\theta(z_t|s_t, a_t)\right] \\
+        &\stackrel{\text{def}}{=} - \mathcal{L}_{\rm ELBO}(s_t, a_t, \sigma_{t:t+k}; \theta).
+    \end{aligned}
+\end{equation}
+Following the pre-training phase, the VAE can be utilized for both reward learning and reward labeling. 
+In the context of reward learning, the embedding $z_t$ can be employed as a substitute for $\sigma_{t:t+k}$ in preference modeling:
+\begin{align}
+\rho_{\rm HPM}(\sigma ; \psi) = \sum_{(s_t, a_t) \in \sigma} r_\psi (s_t, a_t | \sigma_{t:t+k})
+\approx
+\sum_{(s_t, a_t) \in \sigma} r_\psi (s_t, a_t | z_t)
+\, .
+\label{eq:empirical_hpm}
+\end{align}
+Here, the embedding is obtained using the encoder $z_t \sim q_\theta(\cdot | s_t, a_t, \sigma_{t:t+k})$. 
+Plugging this into the Bradley-Terry model gives an approximation of HPM \eqref{eq:hpm}. 
+We then once again utilize the preference dataset along with the cross-entropy loss, as defined in \eqref{eq:lh}, to optimize $r_\psi$.  
+During the reward labeling phase, 
+we compute the reward using the prior distribution $f_\theta$:
+\begin{equation}\label{eq:marginalization}
+\begin{aligned}
+    r_\psi(s_t, a_t) = \mathbb{E}_{z_t\sim f_\theta(\cdot|s_t, a_t)}\left[r_\psi(s_t, a_t, z_t)\right] 
+    \approx \frac{1}{N} \sum_{l=1}^N r_\psi(s_t, a_t, z_t^{(l)}) \, ,
+\end{aligned}
+\end{equation}
+where $z_t^{(1)}, z_t^{(2)}, \ldots, z_t^{(N)}$ are i.i.d. samples from $f_\theta$. This approach ensures a robust approximation of the expected reward, facilitating effective reward shaping based on learned preferences.
+
+We train these models using the unlabelled dataset $\mathcal{D}_{\rm u}$. This offers two benefits. Firstly, $\mathcal{D}_{\rm u}$ typically encompasses a substantial volume of data, which enhances model performance. Secondly, the scalar reward is obtained by marginalizing over the prior distribution $f_\theta$ during the reward labeling phase. Precisely aligning $f_\theta$ with  $\mathcal{D}_{\rm u}$ can significantly enhance the stability of this marginalization process, particularly in instances of distributional shifts between $\mathcal{D}_{\rm u}$ and $\mathcal{D}_{\rm p}$.  
+
+\paragraph{Practical Implementation.}
+
+We employ the GPT architecture \citep{brown2020language} for the encoder $q_\theta$ due to its expressivity in sequence modeling.  
+Given an input segment 
+$\sigma=(s_0, a_0, s_1, a_1,\dots, s_{H}, a_{H})$, 
+we concatenate $s_t$ and $a_t$ together as a single token. In each attention layer, we apply the anti-causal attention mask which restricts each token's attention to itself and subsequent tokens, ensuring that the output token $z_t$ encapsulates the forward-looking information starting from time step $t$. 
+The decoder network $p_\theta$ reconstructs $\sigma_{t:t+k}$ using the embedding $z_t$ and $(s_t, a_t)$. 
+In our implementation, $p_\theta$ takes inputs of $s_t, a_t, z_t$ and a time interval $\Delta t\in[0, 1, ..., k]$, and predicts $(s_{t+\Delta t}, a_{t+\Delta t})$. This parameterization facilitates the parallel decoding of the entire trajectory by processing all specified intervals in a single forward pass. Finally, the prior $f_\theta$ is parameterized as an MLP network which receives $(s_t, a_t)$ and outputs a distribution over the embedding space. 
+\subsection{Overall Framework of HPL}\label{sec:overall}
+
+Putting everything together, we outline \emph{Hindsight Preference Learning (HPL)} in Algorithm~\ref{algo:hpl}. HPL can be divided into three stages: 1) pre-training a VAE to embed future segments, using data from the unlabeled dataset $\mathcal{D}_{\rm u}$; 2) training the conditional reward function $r_\psi$ with the preference dataset $\mathcal{D}_{\rm p}$; and finally 3) label the unlabeled dataset with \eqref{eq:marginalization}, followed by applying any offline RL algorithms for policy optimization.
+ 
+
+
+
+\section{Related Work}
+
+\textbf{Preference-based Reinforcement Learning. }Human preferences are easier to obtain compared to well-calibrated step-wise rewards or expert demonstrations in some domains, making them rich yet easy source of signals for policy optimization. \citet{christiano1} utilizes the Bradley-Terry model to extract reward function from human preferences and lays the foundation of using deep RL to solve complex tasks. Based on this, several methods~\citep{pebble,pbrl1,pbrl2} further improves the query efficiency by incorporating techniques like pre-training and relabeling. OPRL~\citep{oprl} further proposes principled rules for query selection and provides baseline results using existing offline datasets. On the other hand, some works bypass the need for a reward model. IPL~\citep{ipl} achieves this by expressing the reward with value functions via the inverse Bellman operator, while OPPO~\citep{oppo} uses hindsight information matching (HIM) to conduct preference learning in compact latent space. FTB~\citep{ftb} employs powerful generative models to diffuse bad trajectories to preferred ones. DPPO~\citep{dppo} and CPL~\citep{cpl}, although with different starting points, both directly optimize the policy by relating it to the preferences.
+
+\textbf{Human Preference Modeling. }To extract utilities from human preferences for policy optimization, we need preference models to establish the connection between preferences and utilities. A common approach is to use the Bradley-Terry model~\citep{christiano1} and hypothesizes that preference is emitted according to the sum of Markovian rewards, while Preference Transformer~\citep{pt} and Hindsight PRIOR~\citep{prior} extend this by using the weighted sum of non-Markovian rewards. Besides, another line of research proposes that human preference is decided by the sum of optimal advantages in the segment~\citep{regret_rm, learning_adv}, rather than the rewards. In this paper, we focus on the influence of the future and consider the sum of future-conditioned rewards. 
+
+\textbf{Leveraging Hindsight Information. }Hindsight information can provide extra supervision during training. For example, HER~\citep{her} proposes to relabel the transitions to allow sample-efficient learning in sparse-reward tasks. Prior works have also explored learning representations by predicting the future~\citep{generalized_dt, pdt, doc}, and such representations facilitate downstream tasks such as policy optimization~\citep{generalized_dt, pdt}, preference modeling~\citep{oppo}, exploration~\citep{curiosity_in_hindsight}, and credit assignment~\citep{hca}. 
+
+
+\section{Experiments}
+
+We evaluate HPL as well as other methods with various benchmarks. Specifically, we selected two tasks (Hopper and Walker2D) from Gym-MuJoCo locomotion~\citep{brockman2016openai}, two tasks (Hammer and Pen) from the Adroit manipulation platform~\citep{Kumar2016thesis}, and four tasks (Drawer-Open, Button-Press, Plate-Slide and Sweep-Into) from Meta-World Benchmark~\citep{yu2020meta}. For Gym-MuJoCo tasks and Adroit tasks, we select datasets from the D4RL Benchmark~\citep{d4rl} and mask the reward labels as the unlabeled dataset $\mathcal{D}_{\rm u}$, while the annotated preference dataset $\mathcal{D}_{\rm p}$ is provided by \citet{pt}. For Meta-World tasks, we used the datasets released by \citet{ipl} as $\mathcal{D}_{\rm u}$ and $\mathcal{D}_{\rm p}$. It is worthwhile to note that for Gym-MuJoCo and Adroit tasks, the preference label is generated by real human annotators, while for Meta-World tasks it is synthesized based on trajectory return. 
+
+For baseline methods, we consider 1) \textbf{Oracle}, which uses the oracle step-wise reward for policy optimization; 2) Supervised Fine-Tuning (\textbf{SFT}), which imitates the preferred segments; 3) \textbf{MR}, which uses the Bradley-Terry Model to extract Markovian rewards from the preferences; 4) Preference Transformer (\textbf{PT})~\citep{pt}, which uses a transformer and bidirectional layer to model the reward; and 5) Inverse Preference Learning (\textbf{IPL})~\citep{ipl}, which removes the need of reward modeling using inverse Bellman operator. For evaluation metrics, we report the normalization score calculated by D4RL and the success rate for Meta-World tasks. 
+
+\input{tables/main_result.tex}
+
+\subsection{Benchmark Results}\label{sec:main_results}
+Our first experiment investigates the capability of HPL in standard offline PbRL settings using both $\mathcal{D}_{\rm u}$ and $\mathcal{D}_{\rm p}$. For policy optimization, we used IQL for all methods except for SFT. We found certain design choices such as reward normalization can have a significant effect on the performance, so we included the reference score (denoted as ref.) from the original paper for some algorithms and the score of our implementation (denoted as reimpl.) for fair comparisons.
+
+The results are listed in Table~\ref{tab:main_result}. Overall, HPL consistently outperforms other baselines both in locomotion tasks and manipulation tasks, especially in complex domains like the pen task. The promising performance validates the effectiveness of HPL for learning from human preferences.
+
+\subsection{Tasks with Preference Distribution Shift}
+As we illustrated in Section~\ref{sec:future_influence}, the distribution mismatch between the preference dataset $\mathcal{D}_{\rm p}$ and the unlabeled dataset $\mathcal{D}_{\rm u}$ may affect credit assignments. We take the gambling MDP (Figure~\ref{fig:gambling_mdp}) as a sanity check to see whether HPL can deliver better results. We used the dataset $\mathcal{D}$ in Section~\ref{sec:future_influence} as the preference dataset $\mathcal{D}_{\rm p}$, and additionally collected $\mathcal{D}_{u}$ by randomly choosing between $a_1$ and $a_2$. Afterwards, we compare the reward values of $(s_1, a_1)$ and $(s_1, a_2)$ given by both MR and HPL. We run both algorithms for 500 random seeds and plot the results in Figure~\ref{fig:exp_gambling}. In the figure, each point stands for one trial and its coordinate stands for $r_\psi(s_1, a_1)$ and $r_\psi(s_1, a_2)$ respectively. We note that every trial of both methods has achieved $100\%$ accuracy for predicting the preference labels, so we focus on the quality of rewards. As discussed in Section~\ref{sec:future_influence}, successful credit assignment should try to assign lower values to $r(s_1, a_1)$, i.e. the point should lie in the above triangular area. While HPL steadily assigns higher rewards to $(s_1, a_2)$, MR over-estimates the rewards for $(s_1, a_1)$ in almost half of the cases. Although it is still possible that MR can find the optimal policy through RL optimization, we emphasize that HPL delivers a much more robust and advantageous utility value that will facilitate the subsequent policy optimization. 
+\begin{wrapfigure}{r}{0.6\textwidth}
+  \begin{center}
+    \includegraphics[width=1.0\linewidth]{figures/exp_gambling.pdf}
+  \end{center}
+  \caption{The rewards values given by the MR method and HPL. Each dot represents one trial and its coordinates are the estimated reward values.}
+  \label{fig:exp_gambling}
+\end{wrapfigure}
+To validate HPL's capability of learning better rewards in the face of the preference distribution shift on a larger scale, we constructed a series of tasks by combining $\mathcal{D}_{\rm u}$ and $\mathcal{D}_{\rm p}$ collected by different behavior policies. For example, "hopper: med-e $\rightarrow$ med" means we used $\mathcal{D}_{\rm p}$ with \textit{medium-expert} quality and $\mathcal{D}_{\rm u}$ with \textit{medium} quality. The performance curves are presented in Figure~\ref{fig:exp_mismatch}. In such mismatched scenarios, HPL performs better than all baseline algorithms in most of the tasks. Besides, HPL demonstrates faster convergence speeds and more stable performances, which validates that the reward from HPL is more robust and shaped for downstream RL optimization. 
+
+\begin{figure*}[htbp]
+    \centering
+    \includegraphics[width=0.88\linewidth]{figures/mismatch.pdf}
+    \caption{The performance curves of HPL and baseline methods in tasks with mismatched datasets. 
+    We report the average (solid line) and the standard deviation (shaded area) of each algorithm across 5 random seeds and 10 evaluation episodes for each seed.}
+    \label{fig:exp_mismatch}
+\end{figure*}
+
+\subsection{Analysis of HPL}
+In this section, we examine each part of HPL to gain a deeper understanding of each design choice. 
+
+\begin{figure*}[htbp]
+    \centering
+    \begin{minipage}{0.55\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/recon.pdf}
+    \end{minipage}%
+    \begin{minipage}{0.3\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/density.pdf}
+    \end{minipage}
+    \caption{Left: The rendered image of one raw trajectory selected from the offline dataset (top row) and the reconstruction by the VAE (bottom row). Right: The relationship between the log-probabilities of segments and their embeddings. }\label{fig:vae}
+\end{figure*}
+
+\textbf{Future Segment Embedding and the VAE Structure. }HPL relies on the VAE structure to generate compact embeddings for future segment representation and sampling. Consequently, our first analysis investigates the quality of these embeddings. 
+Figure~\ref{fig:vae} displays the images of a trajectory segment from the offline dataset (top left) and its reconstruction by the VAE (bottom left). It is important to note that both the encoding and reconstruction processes are based on states and actions, rather than pixel observations. The VAE reconstruction is highly accurate, indicating that the embedding $z_t$ effectively compresses the relevant information. 
+In the right figure, we select one $(s_t, a_t)$ from the offline dataset and simulate trajectories from that point using a behavior cloning policy $\pi_\beta$. Subsequently, we plot the relationship between the log probability of each trajectory $\log p(\sigma_{t:t+k}|s_t, a_t)=\sum_{i=1}^k \log \pi_\beta(a_{t+i}|s_{t+i})$) and the log probability of the embedding $\log p(z_t|s_t, a_t)=\log f_\theta(z_t|s_t, a_t)$). The positive correlation observed between these two log validates the efficacy of sampling from $f_\theta$.
+\textbf{Ablation on the Future Length $k$. }The parameter $k$ controls the length of future segments encoded into the embedding $z$. As illustrated in Figure~\ref{fig:exp_future_len} (full tasks in Figure~\ref{fig:app_future_len}), extending $k$ generally enhances performance, highlighting the benefits of future conditioning. However, as $k$ exceeds a certain threshold, we witness \revise{increased fluctuation of the performance}{fluctuations and decreases in the performances}, probably due to the challenges of representing longer future segments accurately.
+
+\begin{figure*}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.28\textwidth}
+        \centering
+        \includegraphics[width=0.98\linewidth]{figures/main_future_len.pdf}
+        \caption{Ablation on $k$}
+        \label{fig:exp_future_len}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.28\textwidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/main_uscale.pdf}
+        \caption{Scaling trend for $\mathcal{D}_{\rm u}$}
+        \label{fig:exp_uscale}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.28\textwidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/main_pscale.pdf}
+        \caption{Scaling trend for $\mathcal{D}_{\rm p}$}
+        \label{fig:exp_pscale}
+    \end{subfigure}%
+    \caption{Quantitative analysis of HPL. We report the mean (solid line) and the standard deviation (error bar) across 10 seeds for all experiments. }
+\end{figure*}
+
+\textbf{Scaling with Dataset Sizes. }We conduct experiments to evaluate the scalability of MR and HPL with varying dataset sizes. In Figure~\ref{fig:exp_uscale} (full tasks in Figure~\ref{fig:app_uscale}), we adjust the size of $\mathcal{D}_{\rm u}$ from 10\% to 100\% of its total capacity and observe that HPL consistently outperforms MR across all proportions of unlabeled data. Figure~\ref{fig:exp_pscale} (full tasks in Figure~\ref{fig:app_pscale}) illustrates the scaling trends of HPL and MR with different numbers of preference queries. While both methods exhibit upwards trend in success rates, HPL \revise{demonstrates a more significant improvement}{is significantly better}. These experiments collectively confirm the scalability of HPL.
+
+
+\section{Conclusions and Discussions}
+
+This paper focuses on extracting rewards from human preferences for RL optimization. Unlike previous methods that assume the preference is determined by the sum of Markovian rewards, our method, HPL, instead employs a new preference model that correlates the preference strength with the sum of rewards which are conditioned on the future outcome of this trajectory. By marginalizing the conditional reward over the prior distribution of future outcomes induced by the vast unlabeled dataset, HPL produces more robust and suitable reward signals for downstream RL optimization. 
+
+\textbf{Limitations. }The primary limitation of the current version of HPL lies in its failure to exploit the full potential of the learned VAE. Although the VAE functions as a generative model, it has not been employed to augment the unlabeled offline dataset through sampling.  Additionally, the VAE architecture holds potential for other capabilities, such as uncertainty estimation~\citep{liang2022reward} and the identification of diverse preferences~\citep{xue2023reinforcement}, which have yet to be explored. Future work will focus on extending the HPL framework to fully harness these capabilities and thereby improve its overall performance.
+
+
+
+
+
+
+

@@ -1,0 +1,570 @@
+\title{S2-Attention: Hardware-Aware Context Sharding Among Attention Heads}
+
+\begin{abstract}
+
+Sparse attention, which selectively attends to a subset of tokens in the context, has been an established approach to enhance the efficiency of Transformers. 
+However, its theoretical reduction in FLOPs has rarely translated into wall-clock speed-up over its dense attention counterparts, mainly due to the lack of hardware-level optimizations like FlashAttention.
+Meanwhile, it remains unclear wheter sparse attention can maintain the model's quality at a scale of today's large language models (LLMs), and how this can be achieved.
+This paper presents Sparsely-Sharded(S2) Attention, a Triton library that provides kernel optimization for sparse attention customizable at both per-head and per-context-range levels.
+S2-Attention enables the exploration of novel and high-performance sparse attention techniques, which we demonstrate through extensive ablations across a wide range of sparse attention deisngs at various model scales. 
+From these insights, we present several basic guidelines to design sparse attention that can achieve not only practical efficiency improvements, but also strong performance on downstream tasks.
+To achieve high parallelization and optimized memory IO, sparse attention should \textbf{shard the context heterogeneously across attention heads}, where each head attends to a different subset of tokens while \textbf{collectively covering the full context}. Meanwhile, we find hybrid architectures combining sparse and dense attention particularly beneficial in practice.
+These design choices lead to a novel sparse attention architecture,
+which we evaluate with 1.3B, 7B models.
+It achieves wall-clock speedup of 8.79X, 15.87X, 25.3X compared to the strong FlashAttention-2 baseline with strong downstream performance on-par with full attention and perfect retrieval performance at a 128k context length. 
+In inference, for 7B models, our model, with the help of our S2-Attention kernel, achieves 4.5x speed-up compared to dense counterparts. 
+S2-Attention will be released with easy-to-customize APIs for direct usage in Megatron and vLLM. 
+We hope they will help future research develop sparse attention algorithms to improve the efficiency of large language models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Transformer-based LLMs have opened up fresh opportunities to both research and applications~\citep{openai2023gpt4,touvron2023llama}. 
+Their quadratic overhead imposes prohibitive overhead in training and serving these models.
+For example, training Llama 2~\citep{touvron2023llama} 70B with a 4K context length on 2 trillion tokens takes 23 days on 2048 A100 GPUs \cite{cost}.
+When serving the model, the model's KV cache consumes 343 GB GPU memory with a batch size 32 and 4K context length.
+There is an urgent need to train LLMs efficiently and serve them cost-effectively.
+
+\begin{figure}[h!]
+\includegraphics[width=\textwidth]{Figures/s2visual.pdf}
+\caption{Illustration of \ours with four attention heads on a hypothetical GPU with 4 thread blocks. Each attention head is allocated with a shard of the context.}
+\label{fig:s2visual}
+\end{figure}
+\begin{figure*}[h]
+\begin{subfigure}[]{0.55\textwidth}
+     \centering
+     \includegraphics[width=\textwidth]{Figures/attn_bench_70B.pdf}
+    \caption{Attention Latency Benchmark over FlashAttention-2.}
+\label{fig:attn_bench}
+\end{subfigure}
+\begin{subfigure}[]{0.45\textwidth}
+     \centering
+     \includegraphics[width=\textwidth]{Figures/l31v32dense12-20.pdf}
+     \caption{Perfect 128k Needle in a haystack.}
+     \label{subfig:helpeval}
+\end{subfigure}
+\caption{Training Efficiency and long-context analysis of S2-Attention.
+Our model, implemented with our kernel, achieves substantial reduction in latency compared to FlashAttention-2 (a). It also achieves perfect retrieval performance at a 32K context length (b).
+}
+\end{figure*}
+
+Many works aim to improve efficiency of attention through various \term{sparse attention} techniques~\citep{survey,sparsetransformer,longformer,bigbird},
+where only a subset of the tokens in the context are attended to.
+Despite their promising on-paper FLOP savings compared to full-context \term{dense attention}, these methods often fail to deliver real-world efficiency gains.
+As pointed out by the seminal work FlashAttention~\citep{flash,flash2},
+GPU memory access, rather than computation, is the primary bottleneck for attention.
+Dense attention has benefited from CUDA-level implementations specifically optimized for more efficient memory IO, an significant optimization that sparse attention methods have yet to receive.
+The absence of a flexible, efficient, and easy-to-use library for optimized implementations for sparse attention has become a major roadblock for research in this area, slowing the progress in improving LLMs' training and serving efficiency.
+
+With Sparsely-Sharded(S2) Attention, we aim to bridge this gap. S2-Attention is a Triton library that provides kernel optimization for sparse attention. 
+It is highly flexible, allowing practitioners to explore various sparse attention strategies and customize different attention patterns across attention heads and context ranges.
+The main challenge in implementing a fused kernel for general sparse attention arises from the sparsity itself. Tiling the Q, K, and V matrices in sparse attention results in idle threads within each tile, as parts of the context are not attended to, leading to reduced thread and SRAM usage while decreasing the FLOP reduction benefits.
+\ours addresses this by efficiently tracking the KV usage patterns and dynamically merging sparse query blocks that share common KVs into the same tile, ensuring each tile is fully utilized regardless of sparsity granularity. This approach substantially improves SRAM utilization and minimizes redundant KV loading.
+S2-Attention is applicable in both training and inference, substantially lowering the barrier to exploring novel sparse attention architectures, which we explore in Sections \ref{sec:formulation} and \ref{sec:exp}.
+
+Based on the insights from our systematic exploration of sparse attention strategies, we propose a novel architecture based on three key principles:
+(1) Efficient sparse attention must be designed with  hardware and software systems in mind. 
+Many sparse variants are incompatible with accelerator parallelization and efficient memory access patterns, making it challenging to translate their FLOP savings into real-world efficiency gains. 
+(2) Our approach uses a hardware-friendly sparse attention pattern that shards the context heterogeneously among attention heads.
+Each head applies a unique strided attention pattern to cover a different subset of tokens, while, collectively, they cover the full context (Figure\ref{fig:s2visual}). 
+(3) To achieve strong performance on challenging long-context tasks, the model must have direct access to all tokens, at least at certain layers. A hybrid design that combines sparse and dense attention balances efficiency and performance.
+
+To evaluate S2-Attention and our proposed hybrid architecture,
+we pre-train a suite of models at 1.3B, 7B scales with different sparse attention, and compare their quality to the dense attention baseline.
+Our results show that the 7B hybrid architecture matches the performance of dense attention while achieving a 2.5X training speed-up and 4.5X inference speed-up.
+Moreover, we extend the 1.3B models to a 32k context length, and 7B models to 128k.
+We show that the hybrid structures can achieve perfect Needle in a Haystack retrieval performance.
+Compared to FlashAttention-2~\citep{flash2}, \ours can achieve as much as  8.79X, 15.87X attention speed-up for 1.3B, 7B scale respectively, and 2.83X,2.47 e2e training time reduction.
+
+S2-Attention is compatible with commonly used LLM frameworks including PyTorch, Megatron, HuggingFace, and vLLM.
+With its user-friendly APIs, importing and customizing S2-Attention take no more than several lines of code. 
+S2-Attention will be publicly released upon publication.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Works}
+
+\textbf{Efficient Transformers} Numerous of attempts have been made to make the training and serving  of LLMs more efficient.
+FlashAttention family \citep{flash,flash2} are the most widely-adopted attention acceleration framework. 
+\cite{flash} breaks down the attention computation into smaller blockwise computation to reduce the IO between SRAM and HBM. 
+\cite{flash2} further improve the performance by reducing the non-matmul operations, extra parallelization over sequence length, and better warp organization.
+Our implementation is based on the FlashAttention kernel, and leverage its parallelization over the number of heads.
+
+\textbf{Sparse Self-Attention}  reduce the computational complexity of self-attention by only attending to a subset of tokens\citep{sparsetransformer,lineartrans,reformer,bigbird,longformer}. 
+\cite{sparsetransformer} factorized attention computation into local and stride patterns to reduce the computation. 
+\cite{axial} saves computation by applying multiple attentions along each axis of the input tensor.
+\cite{longformer} adds more sparsity on top of \cite{sparsetransformer} by taking advantage of the receptive field accumulation with dilated sliding window.
+\cite{bigbird} replaces the one-to-all attention in transformers with sliding window attention and random attention.
+\cite{blockwise} chunks the sequence into blocks, which reduces FLOPs by performing attention on a larger granularity.
+However, many of these methods can't bring wall-clock speed-up due to ignorance of realistic memory access cost~\citep{flash}.
+Meanwhile, we argue that some sparsity pattern are not inference-friendly for generative models due to inefficient KV caching.
+Also, as they underutilized the parallelization over head, there's actually great room to further reduce FLOPs while improving context coverage. 
+We will discuss this further in the following sections.
+
+\label{sec:observation}
+\begin{figure}[t!h!]
+\includegraphics[width=\textwidth]{Figures/merge.pdf}
+\caption{Left: Attention mass sparsity in different heads during decoding the same sequence. Right: Sparsity in different layers. Except for the bottom layer, all other layers display significant attention sparsity. Experiments are done on Llama3-8B with different task prompts, including needle retrieval, summarization and math.}
+\label{fig:obs}
+\end{figure}
+In this section, we present an empirical study to see what each attention head actually attends to at inference time.
+We conduct experiments on Llama-3 8B \citep{meta2024introducing} using a 2048 context length.
+We first start with the overall layer by layer pattern, then showcase specific sparsity patterns we find.
+
+\textbf{Scattered Distribution in Initial Layers}.
+In the initial layers, attention score is generally uniform for all heads. 
+We call this pattern \textbf{Uniform Scatter}, which is illustrated at the right of Figure~\ref{fig:obs}.
+Such pattern suggests the model does not heavily prioritize any specific part of the input.
+Thus, it's risky to reduce the context when the head show such patterns.
+Intuitively, these attention layers should be kept dense. 
+
+\textbf{Sparse Patterns in Middle Layers}.
+As we move deeper into the network, the attention mechanisms exhibit a marked departure from uniformity.
+We start with identifying simpler patterns.
+\textbf{Attention Sink} \cite{sink} and \textbf{Locality} can be seen in a small subset of heads.
+For these heads, nearly all attention probability concentrate on the first few tokens or tokens adjacent to the current position, as shown in the upper left and upper right of Figure~\ref{fig:obs}.
+
+\textbf{Middle Spikes}, as shown in Figure~\ref{fig:obs}, can also be identified in a few heads.
+This pattern puts significant probability mass on a few tokens that are in the middle of the context.
+
+However, the vast majority of attention heads actually show a more complex hybrid pattern that could be decomposed into patterns mentioned above. 
+For example, hybrids like Attention Sink + Local, or Attention Sink + Middle Spikes + Local are 
+the most prevalent patterns, which is also demonstrated in \cite{fastgen,attnpattern}.
+From the observation, we can conclude that (1) individual attention heads do not necessarily take the full context to function, (2) the actual context needed by different heads can be quite different, and (3) the initial attention layers are usually denser than any other layer.
+This inspires us to design \ours, where the context is diversely sharded and distributed to each attention head. 
+We will discuss the details of our method in the next section.
+
+
+
+\section{S2-Attention: Efficiency and Customization}
+
+
+
+In this section, we present the system implementation of S2-Attention.
+We first briefly cover the basic GPU memory and execution hierarchy. 
+Based on the discussion, we show why sparse attention will have suboptimal performance when naively following the same tiling strategy of FlashAttention series.
+We then propose MergeQ in Section \ref{subsec:mergeq}, a technique that can significantly improve the kernel efficiency while allowing more fine-grained sparsity customization by adaptive merging query segments that shares KV. 
+
+\begin{figure}[t!]
+\includegraphics[width=\textwidth]{Figures/mergeblock.pdf}
+\caption{Illustration of \ours System Implementation. Left: Naive CSR-based strategy can only efficiently handle very coarse sparse pattern that keep or mask context chunks of block size. Right: MergeQ adaptively merge smaller query shards to tile size, significantly improving the system efficiency and flexibility.}
+\label{fig:system}
+\end{figure}
+\subsection{Preliminaries}
+GPU threads can access several types of memory, including registers, on-chip shared-memory (SRAM), and the global high bandwidth memory (HBM).
+Access times vary greatly, with registers being the fastest and the HBM being the slowest. 
+Inefficient memory access patterns, such as frequent I/O to HBM, can significantly hurt efficiency.
+CUDA organizes threads into blocks, and blocks are further divided into warps, a group of 32 threads.
+Threads within a block share the data through SRAM.
+It is desirable that different threads in the same warp take the same execution path since otherwise efficiency will be hurt due to warp divergence.
+Besides, thread block size should be sufficiently large to achieve good utilization and load balancing.
+Lastly, a tile is a portion of the data assigned to a thread block to handle.
+For clarity, we take tile size as block size.
+FlashAttention imrpvoes efficiency by minimizing HBM I/O, tiling the Q, K, V matrices into  chunks that fit into SRAM for efficient computation \citep{flash}, a principle we follow below.
+
+\textbf{Why does sparse attention not fully benefit from fused kernels?}
+When tiling the Q, K, and V matrices, 
+some parts of the context are not attended to by the sparse attention.
+As a result, some warps may be assigned with tiles where only a small subset of threads are active,  reducing the utilization and  overall throughput.
+The issue is easier to handle if the sparsity is enforced at a  granularity close to thread block size, e.g., keep or mask for every 64 tokens, as the non-sparse portion can occupy the whole block without warp divergence.
+However,  for finer granularities, this strategy will not work, which \ours aims to address.
+
+\subsection{Overall Kernel Design}
+As shown in Figure\ref{fig:system}, for each query vector $\vq$, we iterate through the $\mK$ tiles in SRAM to compute $\operatorname{softmax}(\vq\mK^\top)$. 
+Unlike dense attention, which uses the entire $\mK$ matrix, we only consider the keys specified by the sparse attention pattern, defined by an attention mask. 
+This mask is stored in a Compressed Sparse Row (CSR) format to optimize memory efficiency.
+
+Given a sequence of $N$ tokens, without loss of generality, we first chunk context into a list of blocks of size $S \in [1,N]$, which gives us $B=ceil(N/S)$ blocks.
+The attention mask, M, is then a B*B matrix.
+Starting from here, to avoid ambiguity with thread blocks in kernel, we refer context blocks as \textbf{shards}.
+We use $qshard_i$ and $kshard_i$ to denote the ith query shard and ith key shard.
+
+For simplicity, we first consider a scenario where the shard size is the same as the tile size of Q, K, V.
+As shown in the left side of Figure \ref{fig:system}, given a attention mask M, we first transfer it into the CSR format.
+Each row can be viewed as the attended KV positions for each qshard, where the corresponding index is specified in the column\_idx arrary.
+row\_offset serves as pointers for each key to find its attended KV in column\_idx. 
+Then when computing $qshard_iK^T$ in SRAM, we only need to loop the necessary ones according to column\_idx.
+
+\subsection{Merge-Q}
+\label{subsec:mergeq}
+The implementation above works and can already generate expected speed-up.
+However, the premise here is that the context shard size is the same as the tile size to avoid divergence. 
+Ideally, we want the context shard size to be smaller to customize more fine-grained sparsity, but kernel block size are usually required to be much larger to increase GPU efficiency. 
+Such conflicts would greatly limit the granularity of sparsity patterns S2-Attention can support.
+
+Therefore, it is critical to decouple the context shard size and the kernel tile size in the implementation. 
+To achieve that, we design Merge-Q operation, which merges the context shards with the same K/V blocks but different q shards into a mega shard that forms a tile in the kernel. 
+Figure \ref{fig:system}(b) illustrate a simpler case, where we only merge neighboring q shards.
+Thanks the insight in section \ref{subsec:kvdiscussion} on KV-efficient sparsity, we only need to know the number of 
+non-empty shards within the mega shard regardless where the empty shards are, as empty blocks are either at the end or out of the causal region.
+For implementation, we twisted the CSR definition to use the data array to store how many times a $kshard[i]$ is used in the mega shard. 
+This help improve the reuse of those K/V shards, as now instead of reloading them into chip multiple times for different qshard, the kernel now only need to do it once.
+
+Merge-Q allows us to support sparse block size as small as 16.  
+As shown in Figure \ref{fig:trickbenchmark}, we see a significant improvement after merging multiple small blocks in the Q dimension.
+If the sparse block size is larger than the best kernel block size, we simply break the larger sparse block to a few of smaller blocks that are optimal for GPU.
+\subsection{Split-D} 
+FlashAttention load the whole head dimension(D) at once to SRAM, which is intuitive as the whole vector is needed to compute the attention scores. 
+However, in our experiment, we found that split over the D dimension in many cases is beneficial. 
+We suspect that this is because Split-D reduce SRAM usage and enable a larger degree of software pipelining. 
+Interestingly, we also find that with shard size of 64, Split-D only helps when head dimension is 128, the most commonly used case, while has no additional benefit when head dimension is 64 or 256.
+We suspect that this is due to under-tuned hyper-parameters like kernel tile sizes.
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/merge_q_batch4-head16-d128-sparse-local32-vert16-hetero-fwd_h1blk16_fwd128_dqdkdv128.pdf}
+      \caption{Forward w/ Merge-Q.}
+      \label{fig:mergeqfwd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/merge_q_batch4-head16-d128-sparse-local32-vert16-hetero-bwd-fwd_h1blk16_fwd128_dqdkdv128.pdf}
+      \caption{Backward w/ Merge-Q.}
+      \label{fig:mergeqbwd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/fwd_all_vert_dsplit_0_vs_1.pdf}
+      \caption{Forward w/ Split-D.}
+      \label{fig:dsplitfwd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/bwd_all_vert_dsplit_0_vs_1.pdf}
+      \caption{Backward w/ Split-D.}
+      \label{fig:dsplitbwd}
+  \end{subfigure}
+  \caption{Benchmark Latency Improvement with Merge-Q and Split-D.}
+  \label{fig:trickbenchmark}
+\end{figure}
+
+With the optimized kernel library, the community can customized fine-grained sparsity patterns while enjoying the speed-up.
+However, what sparsity pattern can bring speed-up without quality degradation remains unknown.
+We seek to answer this question and derisk architecture choices with out insights and experiments.
+
+
+
+
+\section{S2-Attention: Insights, Formulation, and Sparsity Cookbook}
+
+\label{sec:formulation}
+In this section, we first discuss which kind of sparse attention patterns are efficient for decoder-only LLMs.
+Building on these insights, we discuss strategies to improve context coverage while achieving more savings in memory and FLOPs.
+Lastly, we discuss general guidelines to design efficient and effective sparse attention.
+
+\subsection{KV-Efficient Sparsity}
+\label{subsec:kvdiscussion}
+\begin{figure}[t!]
+\includegraphics[width=\textwidth]{Figures/kvinsight.pdf}
+\caption{
+\textbf{(a):} The dilated attention as an example of sparse attention that is not KV-efficient. E.g., step 5 attends to KV at positions 1, 3, 5, while step 4 attends to 0, 2, 4.
+This results in requiring full KV cache.
+Although it suggests nearly 50\% memory savings on paper, it actually requires storing the full KV cache in practice
+}
+\label{fig:kvefficient}
+\end{figure}
+
+KV caching is a primary memory bottlenecks for decoder-only LMs at inference time. 
+Many existing sparse attention determine which tokens to attend to based on relative distances~\citep{sparsetransformer,bigbird,longformer}.
+However, these approaches are not GPU memory-efficient during decoding, making it difficult to translate their FLOP savings into real-world efficiency gains.
+Figure \ref{fig:kvefficient}(a) provides an illustrative example.
+The main issue is that, for such sparse attention, KV not used in earlier decoding steps might be required in later ones, making memory management more challenging.
+Despite the nearly 50\% memory saving on paper, it actually requires storing the full KV cache in practice, resulting in zero memory savings.
+
+In contrast, Figure \ref{fig:kvefficient}(b) illustrates a sparse attention that can achieve memory saving in practice.
+The key is that the stored KV cache is reused across several decoding steps but is no longer needed in future steps, and thus can be evicted, freeing up the GPU memory. 
+The comparison between these two approaches leads to the following general principle of designing KV-efficient sparse attention. For $\forall j \geq i,\, l \geq 1$,
+$$ (\vk_i, \vv_i) \mbox{ is attended by } \vq_{j+l} \implies (\vk_i, \vv_i) \mbox{ must also be attended by } \vq_j.$$
+
+Otherwise,  $\vk_i$ and $\vv_i$ need to be stored at step $j$ for future generations, even it is not used at step $j$.
+Intuitively, the attention pattern should include continuous "vertical lines" as shown in Figure \ref{fig:kvefficient}(b). This means the sparse patterns should be based on absolute positions rather than relative ones, except for windowed attention.
+
+
+
+\subsection{Heterogeneous Context Sharding}
+\label{subsec:shardformulation}
+
+A simple pattern that meets the principle above is a combination of fixed positions, dubbed \textbf{vertical stride}, and a local window.
+Each attention head accesses to a partial context at any given step.
+We have different heads should attend to different subsets of equal-sized positions. They also, collectively, cover the full context.
+We dub this method \term{heterogeneous context sharding}.
+Compared to using the same pattern across all heads,
+our heterogeneous sharding comes with the same overhead;
+but it ensures that the model always has access to the full context.
+The flexibility of our S2-Attention kernels facilitates us to implement this strategy efficiently.
+As we will show in experiments, this ensures that the model can achieve strong long-context performance while maximizing the efficiency gains.
+Figure~\ref{fig:s2visual} provides an illustrative example. 
+
+
+For a transformer with $H$ heads, we chunk a sequence of $N$ tokens into $B=ceil(N/S)$ shards.
+Among the total $B$ blocks, We take the most recent $N_{l}$ blocks as local blocks and set the rest as remote blocks.
+We denote the remote stride as $v_r$.
+In practice, $v_r$ is set to be a factor number of attention heads to satisfy the ``union as full context'' constraint.
+For each head $h \in \{1, ..., H\}$, we set a unique position offset $o_h$. For simplicity, we set $o_h = h$ here, which means the offset of each head equals its head index.
+
+Then for each head $h$, its block attention mask $M^h$ in $B \times B$ dimension is as follows:
+\begin{equation} \label{local-stride-hetero}
+M^h_{i,j} = 
+\left\{
+\begin{array}{ll}
+    1 & q_i - k_j < N_l,  \\
+    1 &  (k_j - o_h) \in v_r \mathbb{Z}_{\geq 0}\,\&\, q_i - k_j \in [N_l, B) \\
+    0 & \text{otherwise},
+\end{array}
+\right. 
+\end{equation}
+
+where $x \in m\mathbb{Z}_{\geq 0}$ mean $x$  is 0 or a positive multiple of $m$.
+
+The first constraint determines the shards within the local window. 
+The second constraint controls what shard each head attends to outside the local window. Note that if the distance is beyond $B$, the attention is dropped, thus extends similar to a sliding window.
+
+This local-stride pattern can be easily extended to have multiple strides in different context ranges. With blocks $N_l < N_{r_1} < N_{r_2} < B$, and $v_{r_1} < v_{r_2}$, we define block attention mask as
+
+\begin{equation} \label{multi-stride-hetero}
+M^h_{i,j} = 
+\left\{
+\begin{array}{llll}
+    1 & q_i - k_j \in [0, N_l), &&  \\
+    1 &   q_i - k_j \in [N_l, N_{r_1}) & \& & (k_j - o^1_h) \in v_{r_1}\mathbb{Z}_{\geq 0},\\
+    1 &   q_i - k_j \in [N_{r_2}, B) & \& & (k_j - o^2_h) \in v_{r_2}\mathbb{Z}_{\geq 0}, \\
+    0 & \text{otherwise}.
+\end{array}
+\right. 
+\end{equation}
+
+To ensure that $M_{i,j}^h$ is KV-cache efficient, we requires that
+$v_{r_2} \in v_{r_1}\mathbb{Z}_{\geq 0}$ and $(o^2_h - o^1_h) \in v_{r_1}\mathbb{Z}_{\geq 0}$.
+
+\subsection{Union Completeness, Hybrid Architecture}
+Despite \textbf{Heterogeneous Context Sharding}, we introduce two other insights that we empirically find useful for better model quality.
+With the formulation in Section \ref{subsec:shardformulation}, we can derive that the full context can be preserved if the vertical stride size is not larger than the number of attention heads.
+We denote such property as \textbf{Union Completeness}, when the union of all the attention heads' shards generate the full context.
+
+As previous studies shows~\citep{pyramid,lieber2403jamba}, some attention layers are significantly denser compared to the others, with attention weights distributed near uniformly across all positions. 
+Therefore, it is particularly beneficial to retain dense attention in these layers.
+This motivates us to explore a hybrid architecture that combines our efficient sparse attention in most layers with dense attention in others.
+We empirically find that our sparse attention strategy is highly effective, requiring only 1/6 of the attention layers to be dense to achieve strong retrieval performance with 128K-long contexts.
+More exploration is presented in our experiments.
+
+
+
+
+\section{Experiment}
+
+\label{sec:exp}
+We evaluate the efficiency advantage and quality preserving \ours can achieve.
+We first study the pre-training quality is Section\ref{subsec:downstream} and Section\ref{subsec:needle}.
+We then benchmark the kernel efficiency and end-to-end serving latency in Section\ref{subsec:attnbench} and Section\ref{subsec:inference}.
+Lastly, we ablate a few sparsity herustics for better understanding.
+\input{tables/training_quality}
+
+\subsection{Benchmarking Model Pre-Training Quality}
+\label{subsec:downstream}
+\textbf{Experiment Settings.} To study the \ours, we first train a range of 1.3B Llama 2 structure models with 24 layers, 2048 hidden size with 16 heads, with max sequence length as 8192.
+We use the open-source FineWeb-Edu-350B \cite{fineweb} as the pre-training corpus. 
+An OpenAI Tiktoken tokenizer with 100K vocabulary size is used to process the raw text. 
+All model variations use batch size of 4M tokens for all sequence lengths and train for a total of 300 billion tokens.  
+For hyperparameters, we use $\mu$P \cite{mup} with a base shape of 256.
+A $\mu$P learning rate of 0.02 is used with linear decay and 0.5\% of total training tokens for warmup.
+All models are evaluated after training on the total 300B tokens for one epoch.
+
+We use a model with all default attention as our baseline, denoted as Dense.
+To study our hybrid structure with heterogeneous sharding and union completeness, we control the FLOPs to be approximately equivalent.
+The total attended tokens is around 576 tokens, or 9 shards of 64 tokens.
+We use this to configure th sliding window attention(SWA), as the control set.
+We add different heuristics to the SWA to see how they affect the pre-training result.
+The treatment sets are grouped into Homogeneoeous, Heterogeneous\&Incomplete, and Heterogeneous\&Complete for comparison.
+
+From Table \ref{tab:downstream}, we can observe the hybrid architectures shows promising results. 
+As we can see from S2-L1V15+Dense in the last row, heterogeneous sharding with complete context and two dense layers give consistently best results across tasks, with minor  gap from the default attention baseline while using only 18\% FLOPs.
+Notably, in the Passkey Retrieval task, \ours can achieve much better performance compared to the dense model.
+This observation work as an initial demonstration of the context understanding ability of the \ours design.
+We'll discuss more the continual pre-training section.
+
+Across Homogeneous and Heterogeneous settings, adding two dense layers will translate to significant performance bonus.
+Within the Homogeneous group, in addition to dense layers, we can observe adding attention sink can significantly boost training quality, compared to only using SWA.
+In the Heterogeneous\&Incomplete group, the vertical stride size is bigger than the number of attention heads, making the context incomplete after union.
+For the Heterogeneous\&Complete group, we tune the stride size and local window so that it's just covering the full context while having the same FLOPs as the SWA control set.
+When comparing the Incomplete group to the Complete group, we can see the benefits of making the union of context complete by limiting vertical stride size.
+
+\subsection{Long Context Continual Pre-training}
+\label{subsec:needle}
+\begin{figure}[ht!]
+  \centering
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/L31v32dense15-17.pdf}
+      \caption{l31v32+dense15-17.}
+      \label{fig:mergeqfwd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/l31v32dense14-18.pdf}
+      \caption{l31v32+dense14-18.}
+      \label{fig:mergeqbwd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/l31v32dense12-20.pdf}
+      \caption{l31v32+dense12-20.}
+      \label{fig:dsplitfwd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.24\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/l4v24dense10-22.pdf}
+      \caption{l4v24+dense10-22.}
+      \label{fig:dsplitbwd}
+  \end{subfigure}
+  \caption{128k Needle In A Haystack Evaluation}
+  \label{fig:128kneedle}
+\end{figure}
+
+In this section, we further examine how to adapt sparse attention to longer contexts.
+Following the settings in previous section, we extended the best 1.3B model, S2-L1V15 + Dense, to 32k context length.
+We also continual pre-train Llama 2  to 128k context.
+We respectively changed the RoPE base to 1,00,000 and 5,000,000 for the 1.3B model and 7B model.
+Both models are continual trained with 10B tokens following the recipe in \citet{dataengineer}.
+We evaluate the extended models on the Needle In A Haystack~\citep{kamneedle}.
+
+As shown in Figure\ref{subfig:helpeval}, the 1.3B model can achieves perfect recall on the 32k context window without any further changes.
+For the 7B models, however, we need to tune the parameters to get a perfect score.
+Restricted by timing and computation resources, we mainly alternate the dense layer numbers and insertion depth, as we believe they are the quickest way to minimize the gap between sparse and dense architectures.
+As shown in Figure\ref{fig:128kneedle}, for 128k context, with a vertical stride size of 32, the model can retrieve the full context with 8 dense layers but fails to do so with only 2 and 4 dense layers.
+For a model with 24 vertical stride, the model can get perfect score with 12 dense layers.
+
+The results validate the long context capability of \ours design.
+We  believe the density could be further trimmed given more tuning, which we leave for future work.
+
+\subsection{Training Speed-up}
+\label{subsec:attnbench}
+\subsubsection{Attention Operation Benchmark}
+\textbf{Benchmark Settings} We measure the attention runtime of \ours and FlashAttention-2 on an A100 80GB GPU for different context length, number of head, and head dimension settings.
+\begin{figure}[h!]
+  \centering
+  \begin{subfigure}[b]{0.45\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/attn_bench_1.3b.pdf}
+      \caption{1.3B Attention Speed-up.}
+      \label{fig:attn1b}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.49\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/attn_bench_7b.pdf}
+      \caption{7B Attention Speed-up.}
+      \label{fig:attn7b}
+  \end{subfigure}
+  \caption{Attention Speed-up vs Sequence Length and Model Scale.}
+\label{fig:attn_small_bench}
+\end{figure}
+
+In Figure\ref{fig:attn_small_bench} and Figure\ref{fig:attn_bench} We benchmark the speed-up brought by \ours in 1.3B, 7B, 70B model sizes across different sequence lengths to showcase the scalability of our system.
+For all the model sizes, \ours can achieve multiple times of speed-up over FlashAttention-2. 
+For 70B models with 64 heads, \ours can give 25.3X end-to-end speed-up.
+For example, in 1.3B models with a vertical stride of 16, \ours can achieve as much as 8.79X speed-up. 
+As the max sequence length grows longer, the speed-up gradually approximate the theoretical FLOPs reduction benefits.
+The overall boost is hedged due to our less optimized backward kernel, which leaves room for further improvement.
+\subsubsection{End-to-end Training Speed-up}
+\begin{figure}[h!]
+  \centering
+  \begin{subfigure}[b]{0.4\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/token_throughput_1b.pdf}
+      \caption{1.3B end-to-end training speed-up.}
+      \label{fig:attn1btrain}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.40\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{Figures/token_throughput_7b.pdf}
+      \caption{7B end-to-end training speed-up.}
+      \label{fig:attn7b}
+  \end{subfigure}
+  \caption{End-to-end training speed-up.}
+\label{fig:e2e_bench}
+\end{figure}
+We evaluate the end to end training speed-up of the 1.3B and 7B models by measuring the token throughput of both models. 
+All models are trained on 256 A100, with a batch size of 8M tokens, and activation checkpointing.
+For 1.3B models, \ours can get 1.22X, 1.85X, 2.3X, and 2.83X token throughput on 8k to 128k context compared to FlashAttention-2.
+For 7B models, \ours can get 1.12X, 1.24, 1.47X, and 2.47X token throughput improvment.
+Namely, we can half the time for training a 128k context length model.
+\subsection{Inference Speed-up}
+\label{subsec:inference}
+\begin{figure}[h!t!]
+\centering
+\includegraphics[width=0.8\textwidth]{Figures/inference_latency.pdf}
+\caption{End-to-end latency speed-up for 7B size Llama architecture models. }
+\label{fig:infer_prefill}
+\end{figure}
+In order to demonstrate the inference improvments of \ours, we measure the end-to-end latency over different context length settings.
+To make comparison realistic, our experiments are done on vLLM~\citep{pagedatt}.
+We choose the FlashAttention-2 backend in vLLM as baseline for fair comparison, as the inference kernel of \ours is also based on vLLM.
+Both methods are deployed on a single node with 8 A100 80GPU, with tensor parallel size equals 4.
+We set output length as 128, and vary input length between 16k to 256k. 
+As shown in Figure \ref{fig:infer_prefill}, \ours can achieves 1.1X, 1.2X,1.5X, 1.9X, 2.9X, 4.5X speed-up on 8k, 16k, 128K, 256K context.
+
+
+
+\subsection{Ablation}
+In this section, we ablate a few herustics for a better understanding of effective sparsity design.
+We do so by starting from the same \ours with 8 local shards and a vertical stride of 16 shard.
+We then compare the validation perplexity and passkey result after they are trained with 300B tokens.
+
+\subsubsection{Dense Layer}
+\input{tables/layer_ab}
+We first study the effect of dense layers as shown in Table \ref{tab:layerab}.
+We can see adding dense layers can usually directly improve the valiation perplexity and passkey results, except when we put all the last 6 layers dense.
+Different from previous studies ~\citet{pyramid}, where attention layer are more dense at the start and last layers, we find it's actually more beneficial to put dense layers around the middle during pre-training.
+\subsubsection{Retrieval Head}
+\input{tables/head_ab}
+\citet{retrievalhead} propose the idea of retrieval head, which are attention head scattering attention around the context.
+Retrieval head is found to be crucial to long context understanding tasks, and costs fewer compute and memory compared to dense layers.
+In Table\ref{tab:headab}, we find adding 1 retrieval head can significantly improve the passkey performance and beneficial to perplexity.
+However, adding more of them doesn't further improve the model quality.
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce \ours, a framework that sparsely shards the context for different attention heads to divide-and-conquer.
+Experimental results show model trained with \ours can achieve promising performance on long context tasks with reduced context for each head.
+We back \ours with a highly optimized kernel library, we can get equivalent model quality while achieving speed-up over FlashAttention-2 linearly increasing over the number of attention heads.
+We open-sourced our kernel library and make it a plug-in-and-play alternative for  FlashAttention-2 module in popular training frameworks like Megatron and Pytorch.
+We also integrated \ours into vLLM backend for instant serving. 
+Both the training and inference kernels allow users to freely customize their sparsity pattern, facilitating the whole community to study the topic in the future.
+
+
+
+\section{Acknowledgement}
+
+We would like to thank Liyuan Liu from Microsoft Research, and Yao Fu from University of Edinburgh for insightful discussions.
+We also would like to thank Zhuohan Li, Simon Mo, and Kaichao You from UC Berkeley and Tsinghua University for sharing expertise on the vLLM codebase.
+
+
+
+

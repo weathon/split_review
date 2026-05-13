@@ -1,0 +1,359 @@
+\title{A Drop-In Solution for On-the-Fly Adaptation of Speculative Decoding in Large Language Models}
+
+\begin{abstract}
+Large Language Models (LLMs) are cutting-edge generative AI models built on transformer architecture, which tend to be highly memory-intensive when performing real-time inference. Various strategies have been developed to enhance the end-to-end inference speed for LLMs, one of which is speculative decoding. This technique involves running a smaller LLM (draft model) for inference over a defined window size, denoted as $\gamma$, while simultaneously being validated by the larger LLM (target model). Choosing the optimal $\gamma$ value and the draft model is essential for unlocking the potential of speculative decoding. But it is difficult to do due to the complicated influence from various factors, including the nature of the task, the hardware in use, and the combination of the large and small models. 
+This paper introduces *on-the-fly adaption of speculative decoding*, a solution that dynamically adapts the choices to maximize the efficiency of speculative decoding for LLM inferences. As a drop-in solution, it needs no offline benchmarking or training. 
+Experiments show that the solution can lead to 3.55-16.48\% speed improvement over the standard speculative decoding, and 1.2-3.4$\times$ over the default LLMs.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) are state-of-the-art generative AI models built on transformerbased blocks (Brown et al., 2020; Ouyang et al., 2022). LLMs have an enormous number of parameters, and recent research not only focuses on training them efficiently but also explores how to optimize inference performance. In fact, there is evidence indicating that even small improvement in LLM inference speeds can result in significant cost savings. For instance, Google’s infrastructure optimizations have demonstrated that improving inference efficiency can lead to substantial reductions in operational expenses. In large-scale deployments, a $1\%$ increase in speed can indeed translate into millions of dollars saved (AI, 2023; Cloud, 2023).  
+
+Due to the autoregressive and memory-intensive nature of LLMs, it is challenging to optimize its inference throughput. Sampling for a new token depends on the previously generated tokens. Researchers are exploring mainly two approaches to circumvent this sequential dependence for more efficient parallel executions. One is to change the model architecture thus sampling granularity to parallelize the decoding process. Medusa (Cai et al., 2024), for example, introduces multiple decoding heads to generate tokens in parallel; Lookahead Decoding (Jacobi Decoding) (Fu et al., 2024) generates multiple tokens in parallel using nonlinear systems. This approach changes the neural architecture and hence requires new training, the high costs of which makes them difficult to adopt in practice. The other approach is speculative decoding (Leviathan et al., 2023; Chen et al., 2023). This approach first runs inference with a smaller LLM $M_{q}$ , called the draft model, to generate the next $\gamma$ tokens $\langle\gamma$ is called speculation window size). After generating one window of tokens (called a speculation step), a verification step uses the Large LLM $M_{p}$ , called the target model, to validate those tokens in parallel. Upon finding the first incorrect token, the execution throws away the rest of the tokens speculated by the draft model in that window and corrects the first rejected token (or appends a new token when all of the tokens are accepted). From there, it continues the speculationvalidation process. This approach allows direct use of the pretrained LLMs, making it easier for adoption.  
+
+What is crucial for unlocking the potential of speculative decoding is to choose the best speculation window length, $\gamma$ , and the best draft model to use. The best choices depend on the nature of the inference task, target model, software stack, hardware, and resource availability or workload changes (if running in a cloud). Suboptimal choices may not only substantially throttle the benefits but sometimes cause slowdowns to the inference (see Section 6). The standard approach (Leviathan et al., 2023; Chen et al., 2023) relies on offline trial-and-error-based search, which not only takes long time, but more importantly, cannot adapt to the changes in the tasks, target models, software stacks, hardware or other runtime changes. A recent study, SpecDec $^{++}$ (Huang et al., 2024), attempts to improve it through a machine learning model. It trains a ResNet with many samples in offline data collection, and uses it to predict, at each generated token in actual inferences, whether the execution should stop speculation, so as to adapt the speculation window. Although the work shows some improvement in experiments, it requires hundreds or thousands of GPU-hours (Section 6.2) to train the model for one target-draft pair on one kind of task and one software and hardware configuration. Modern LLM servers often host many LLMs and their variants (e.g., different quantizations, with Lora or other fine-tuning models) and have various software and hardware configurations and task types, making the solution difficult to adopt in production systems.  
+
+This paper describes the first-known exploration of on-the-fly adaptive speculation, a drop-in solution that adapts speculative decoding at runtime without ahead-of-time training. Our exploration covers both speculation window size $\gamma$ and the choice of draft models. It experiments with several agile online methods for the adaptation, including a state machine-based mechanism, a cache-enabled state machine-based method, a reinforcement learning-based approach, and a token accuracy-based online window size optimization method. It analyzes these methods and evaluates them on four LLMs across three GPU models and four types of inference tasks. The results show that on-the-fly adaptive speculation, especially the online window size optimization, can deliver similar or even better improvements than the prior method that uses extensive ahead-of-time trainings, leading to $3.55{-}16.48\%$ speed improvement over the standard speculative decoding, and $1.2–3.4\times$ over the default LLMs. As a drop-in solution, this new approach needs no model changes, ahead-of-time preparation, lengthy training, or extensive benchmarking. It automatically adapts the optimal window size and directs the requests to the appropriate draft models for speculation, especially suitable for large LLM service providers.  
+
+It is worth mentioning that besides adapting the speculation process, there are some other methods explored in recent studies to improve speculative decoding (Li et al., 2024; Yan et al., 2024; Spector & Re, 2023; Hooper et al., 2023). Online Speculative Decoding (Liu et al., 2023), for instance, uses knowledge distillation to continuously train the smaller draft model during inference, enhancing performance. SpecInfer (Miao et al., 2023) introduces a tree-based decoding algorithm that uses the draft model to speculate multiple possible token sequences in parallel and then validates each of these sequences by the target model to keep the longest validated one. The on-the-fly adaptive speculation proposed in this current paper is from a different angle. It is hence complementary to those studies in the sense that it can be integrated into the speculation process in those solutions to further improve their effectiveness.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+This section covers the key concepts, details, and techniques related to LLMs and speculations.  
+
+
+
+\section{2.1 LARGE LANGUAGE MODELS  }
+
+
+Large language models (LLMs) are natural language processing (NLP) models built on transformer architecture. Due to their large capacity, LLMs can handle a wide range of tasks, including translation, code generation, and question answering. Prompt engineering involves providing the LLM with tailored instructions and guidance to improve the quality of task-specific outputs.  
+
+For an LLM workflow, training is one-time, and it can take several months to complete; the model is then deployed for inference, which typically requires continuous serving, and often, on a large scale (e.g., over 100 million users weekly). When serving LLM inference in real-time, it is mostly memory-bound. This means that it is bounded by the memory bandwidth of the hardware it is running on. More details about the memory-bound nature of LLM inference can be found in Ap  
+
+![](images/8a58afbefe788b9c755b8b5f13666ce0051f409c19e0b525d23e48cad2d71e9d.jpg)  
+
+108   
+109   
+110   
+111   
+112   
+113   
+114   
+115   
+116   
+117   
+118   
+119   
+120   
+121   
+122   
+123   
+124   
+125   
+126   
+127   
+128   
+129   
+130   
+131   
+132   
+133   
+134   
+135   
+136   
+137   
+138   
+139   
+140   
+141   
+142   
+143   
+144   
+145   
+146   
+147   
+148   
+149   
+150   
+151   
+152   
+153   
+154   
+155   
+156   
+157   
+158   
+159   
+160   
+161  
+
+
+
+\section{3 OVERVIEW  }
+
+
+Speculative decoding can provide significant speedups. Current speculative decoding methods, however, use fixed model pairs and a static $\gamma$ determined for a dataset after benchmarking. The motivation of this work is thus the need to choose an appropriate draft model and an optimal $\gamma$ before deployment. Different LLM tasks and domains have varying optimal model pairings and $\gamma$ values, making a static choice suboptimal. For example, suppose we adjust the best $\gamma$ for each prompt instead of the whole dataset. In that case, we see a $9\!\!-\!\!18\%$ increase in speedups, indicating the extra potential for additional performance if we adaptively choose a more optimal $\gamma$ at a fine-grained level. Overview. We propose on-the-fly adaptive speculation, overcoming the deployment challenges and making it efficient and productive. The workflow goes as follows. At the beginning, it sets up the  
+
+![](images/8ede88f6967d92de2cb6f9f755248a0b45d0529aecd618ac93bc48fb1758172c.jpg)  
+Green : Accepted tokens Blue : Resampled tokens Red : Rejected tokens Grey : Pending validation  
+
+Figure 1: Our on-the-fly adaptive speculation framework. When a prompt arrives, our scheduler directs it to the draft model $M_{q}$ . During speculation, our framework automatically adapts the right speculation window size $\gamma$ . The speculation is then validated by the target model $M_{p}$ .  
+
+target model and different draft model options. For each prompt, our solution as in Figure 1 involves two steps. First, it finds a proper draft model for the given prompt. This is done by extracting features of the prompt to estimate the single token accuracy. From there, the method approximates the acceptance rate and ultimately the throughput so it can choose a proper draft model. Second, it runs speculations, where $\gamma$ is adapted on the fly with the given model pairing. In the following content, we will first introduce the adaptive window size selection (Section 4) followed by adaptive draft model selection (Section 5).  
+
+
+
+\section{4 ADAPTIVE WINDOW SIZE SELECTION  }
+
+
+Suppose we have fixed the target and draft model pair. In this section, we first introduce the analytic model for capturing the relationship between the speculation setting and speculation benefits. With that, we present four agile algorithms for adaptively changing $\gamma$ during speculative decoding. The agility of these algorithms is essential for minimizing the runtime overhead.  
+
+
+
+\section{4.1 ONLINE WINDOW SIZE OPTIMIZATION  }
+
+
+A speculation window size that is too large risks high overhead if verification fails early, while a size that is too small misses out on the full benefits. The optimal size varies depending on the language model, contexts, and speculation accuracy. We translate this trade-off into an objective function to adaptively determine the optimal window size across various configurations. For each prompt, we want to minimize the end-to-end latency in generating a response with a fixed number of tokens. We define our objective function as the expected number of tokens verified as correct per unit time, aiming to maximize this function by optimizing the window size $\gamma$ :  
+
+Definition 1 (formulating objective). Let $a_{q}$ represent the latency of generating one token by the draft model, and $b_{p}(\gamma)$ represent the latency of a verification step with window size $\gamma$ . For $t=1,2,\cdot\cdot\cdot$ , let $A c c(x_{t}|X_{<t})$ be the accuracy of the speculation of a single token given the current context $X_{<t}\,=\,\{x_{1},\cdot\cdot\cdot\,,x_{t-1}\}$ . The window size $\gamma$ for the current speculation step can be determined by optimizing the objective  
+
+$$
+\mathcal{G}=\operatorname*{max}_{\gamma}\frac{1-A c c(x_{t}|X_{<t})^{\gamma+1}}{(1-A c c(x_{t}|X_{<t}))(\gamma a_{q}+b_{p}(\gamma))}.
+$$  
+
+1.  
+
+Algorithm. To adaptively determine the optimal $\gamma$ using estimation for $a_{q},b_{p}(\gamma),A c c(x_{t}|X_{<t}).$ , the algorithm goes as follows. At the start of each speculation step, it conducts the following two operations before it can solve the objective (1). First, it estimates $a$ and $b$ . These values are derived by observing the most recent steps. Second, it estimates $A c c(x_{t}|X_{<t})$ based on the recent history.2). In our algorithm, we let $\gamma(j)$ be the speculation window size during the $j$ -th most recent verification step, and $V(\gamma(j),X_{<t_{j}})$ the number of accepted tokens in this speculation window. We estimate $A c c(x_{t}|X_{<t})$ as  
+
+$$
+\widehat{A c c}(x_{t}|X_{<t})=\frac{\sum_{j}V(\gamma(j),X_{<t_{j}})}{\sum_{j}V(\gamma(j),X_{<t_{j}})+\sum_{j}\mathbf{1}(V(\gamma(j),X_{<t_{j}})<\gamma(j))}
+$$  
+
+where $\mathbf{1}(\cdot)$ is the indicator function. To avoid overly optimistic estimates and potential division-byzero error when $\widehat{A}_{\mathit{c c}}$ approaches 1, we set a fixed upper limit, $A c c_{\mathrm{max}}$ , and cap $\widehat{A}_{\mathit{c c}}$ at this value.  
+
+Analysis. We now analyze the throughput of the adaptive speculation.  
+
+Theorem 1. Let $L$ be the length of the answer to a prompt and is fixed, n be the total number of speculation steps, and $\{\gamma_{q}^{i}\}_{i=1}^{n}$ denote the history of the window sizes during the adaptive speculation. Let $d_{q}=\mathbb{E}_{i=1,\cdots,n}(\gamma_{q}^{i})$ be the average window size during speculation, and acceptance rate $\rho_{q}$ be the number of accepted tokens divided by the total number of tokens sampled by $M_{q}$ . The throughput $(R)$ can be formulated as  
+
+$$
+R=\frac{L}{b_{p}(\gamma)n+a_{q}\frac{L}{\rho_{q}}}.
+$$  
+
+Proof. In the following formulations, we omit $p$ and $q$ as the formulations are about a given $p$ and $q$ pair. The throughput $R$ is computed by dividing the length of the answer by the latency $t$ :  
+
+$$
+R={\frac{L}{t}}.
+$$  
+
+The total latency of generating outputs for one prompt is computed as  
+
+$$
+t=\sum_{i=1}^{n}a\gamma^{i}+b(\gamma)=b(\gamma)n+a\sum_{i=1}^{n}\gamma^{i}=n(b(\gamma)+a\cdot\mathbb{E}(\gamma^{i})).
+$$  
+
+Inspecting the relations among $d,n,\rho$ and $L$ gives us  
+
+$$
+L=d\cdot n\cdot\rho.
+$$  
+
+Solving for Equations 4, 5 and 6 gives us the expression for throughput.  
+
+Figure 3 shows our adaptive window size method actually increases the acceptance rate $\rho$ , and is eventually translated to improvement to throughput.  
+
+4.2 OTHER DROP-IN SPECULATION METHODS  
+
+Besides the online optimization method, we have explored three other methods for on-the-fly $\gamma$ adaption.  
+
+Finite State Machine (FSM)-Based Speculation. A finite state machine-based predictor (Hennessy & Patterson, 2017) is similar to an $n$ -bit saturating counter used in branch prediction. The mechanism works by decreasing $\gamma$ by 1 if a token from the draft model is rejected, and increasing $\gamma$ by 1 if all tokens are accepted. During benchmarking, We still select a value for $\gamma$ , but it is considered an upper limit, $\gamma_{\mathrm{max}}$ . If the draft and target models’ distributions significantly differ, $\gamma$ will remain low, potentially even at 0. Conversely, if the models align closely, $\gamma$ should increase, approaching $\gamma_{\mathrm{max}}$ . We consider this approach particularly effective for natural language processing because certain parts of a sentence—like common phrases or syntactically predictable structures—are easier for a smaller draft model to predict. In contrast, more unique or complex sub-sequences might be harder to guess. By adaptively changing $\gamma$ based on the previous token validations, we create a reward system that exploits patterns and predictable structures in autoregressive generation.  
+
+Cache-Enabled FSM-Based Speculation. We adjust $\gamma$ based on the context provided by the prompt and the history of generated tokens. In settings like question-answering, an LLM often reiterates or directly responds based on the context given by the user. Therefore, the user’s input can inform predictions about the type of response the LLM will generate. Specifically, this approach includes a token cache that updates after every sampling step. Initially, the cache is populated with tokens in the prompt, set up before the prefill stage. As new tokens are sampled and validated during speculation, the cache is updated with any previously unseen tokens. $\gamma$ is then adjusted dynamically: It increases by one if a validated token is already in the cache, and by an additional one when all speculated tokens are accepted. Conversely, if none of the accepted tokens are in the cache, it decreases by one. We see that this approach is particularly effective for structured tasks like QA chatbot interactions or code completion, where context and history play a significant role. However, it may be less effective for short prompts expecting broad and diverse content, such as tasks that require informative or creative responses. In such cases, the lack of initial context or history means the cache is less informative, making $\gamma$ adjustments less effective, potentially leading to performance similar to the more simplistic state-based adaptation.  
+
+Reinforcement Learning-Based Speculation. We in addition explored a reinforcement learning (RL) based approach. We use a Q-learning agent to choose a $\gamma$ .4. The agent takes the previous states of $\gamma$ as inputs and applies an action after each validation step.  
+
+
+
+\section{5 ADAPTIVE DRAFT MODEL SELECTION  }
+
+
+Besides the speculation window size, the selection of the draft model also makes a difference: A smaller draft model can make faster inferences but at the risk of a low acceptance rate, while a larger draft model renders a longer latency.  
+
+As answer length $L$ and target model latency $b$ in Equation 4 are considered constant in our setting, the main influence for choosing a draft model comes from draft model latency $a$ , the acceptance rate $\rho$ , and the number of speculation steps $n$ .  
+
+Influence of selecting a larger draft model. Let $c$ represent the inference latency ratio between the draft model and the target model. Choosing a larger draft model increases the single token accuracy, $\alpha=\mathbb{E}(A c c(x_{t}|X_{<t}))$ , and the draft latency $a$ . We estimate $d=\mathbb{E}(\gamma)$ by finding the numerical integer solution in objective 1. With $\alpha$ and the corresponding $d$ , the acceptance rate $\begin{array}{r}{\rho=\frac{1-\alpha^{\gamma+1}}{(1-\alpha)d}}\end{array}$ (1−α)d can be determined, as shown by scattered dots in Figure 2.  
+
+To analyze the influence on the number of speculation steps $n$ , we look into Equation 6, where $\begin{array}{r}{n=\frac{L}{d\cdot\rho}}\end{array}$ dL·ρ. The lines in Figure 2 illustrate how the denominator of $n$ changes as $\alpha$ varies, reflecting the product of $d$ and $\rho$ .  
+
+![](images/a27cf8f0a6433fb0b4727f37b99106dfbfc23a45df67fbad40c066f2a0d45d2e.jpg)  
+Figure 2: Results for different $\alpha$ and $c$ values.  
+
+Theorem 2. Let ∆n represent the reduction in speculation steps due to a larger draft model, $\Delta c$ the increase in latency ratio, and $\Delta\rho$ the improvement in acceptance rate. As long as the following condition holds:  
+
+$$
+\Delta n>\frac{\Delta c}{\Delta\rho}L,
+$$  
+
+the larger draft model would lead to a higher overall throughput than the smaller draft model.  
+
+A deeper look into formula 7 gives us that, when comparing two draft models, $\Delta c$ can be easily determined using sample profiling results. If we are able to approximate the increase in $\alpha$ , $\Delta\rho$ and $\Delta n(\alpha,d)$ can also be determined because their relation to $d,\,\alpha.$ , and $c$ is deterministic. Therefore, to select a suitable draft model when a new prompt arrives, we need to approximate $\alpha$ and inspect whether condition 7 holds in order to determine whether to use a larger draft model.  
+
+Typically a prompt can be represented as a vector. We represent a prompt as a vector $\mathbf{u}\in\mathbb{R}^{r}$ with $r>0$ being the vector length. We model our goal $\alpha_{c}^{\mathbf{u}}$ of prompt $\mathbf{u}$ for a certain ratio $c$ as  
+
+$$
+\alpha_{c}^{\mathbf{u}}=\mathbf{u}^{\top}\mathbf{Z}_{c}+\epsilon_{c}^{\mathbf{u}}
+$$  
+
+where $\mathbf{Z}_{c}$ is the parameter vector to determine and the random noise variable $\epsilon_{c}^{\mathbf{u}}$ is independent of $\mathbf{Z}_{c}$ . For each $\mathbf{u}\in\mathbb{R}^{r}$ , the random variables $\{\epsilon_{c}^{\mathbf{u}}\}$ are identically distributed with $\mathbb{E}(\epsilon_{c}^{\mathbf{u}})=0$ for all u. The vector embedding is constructed as a concatenation of the following features.  
+
+Prompt Features. We transform a prompt into a feature vector based on these features.  
+
+• Prompt length. Prompt length may affect the choice of draft prompts. Questions with short, open-ended prompts tend to be easier, for which, smaller draft models may suffice and offer faster speeds. Longer prompts tend to be more complex and more challenging for small draft models. $\rho$ tends to increase when a larger draft model is used for a prompt. $n$ can decrease to an extent greater than $\begin{array}{l}{\frac{\Delta c}{\Delta\rho}L}\end{array}$ which may justify the choice of a larger draft model.  
+
+• Prompt perplexity. The perplexity of a prompt influences the choice of draft model as well: In the case where the language model is more confident about a prompt (i.e., exhibits lower perplexity regarding its semantics), a smaller draft model is likely to generate high-quality answers with a higher $\alpha$ . Perplexity here is defined as  
+
+$$
+{\mathrm{PPL}}=2^{-{\frac{1}{N}}\log_{2}\operatorname*{Pr}(w_{i}|W_{<i})}
+$$  
+
+where $N$ is the length of the prompt and $\operatorname*{Pr}(w_{i}|W_{<i})$ is the probability of $w_{i}$ given the context $\{w_{1},\cdots,w_{i-1}\}$ .  
+
+• Term Frequency-Inverse Document Frequency $(T F{-}I D F)$ . The other features that also affect how challenging a prompt is to LLM are the TF-IDF feature, which is computed based on the term frequency in the prompt and the term importance in the entire corpus.  
+
+Algorithm. Based on the analysis, we devise the following algorithm to select draft model. Suppose there exist $r$ linearly independent prompts $\ensuremath{\mathbf{b}}_{1},\cdots,\ensuremath{\mathbf{b}}_{r}\in\mathbb{R}^{r}$ . In the beginning, for each ratio $c$ and these $r$ prompts, the algorithm runs the speculative decoding and observes the single token accuracy $\alpha_{c}^{\mathbf{b}_{p}}$ and computes the ordinary least square estimate for $\mathbf{Z}_{c}$ , given by  
+
+$$
+\widehat{\mathbf{Z}}_{c}=\left(\sum_{p=1}^{r}\mathbf{b}_{p}\mathbf{b}_{p}^{\top}\right)^{-1}\sum_{p=1}^{r}\mathbf{b}_{p}\alpha^{\mathbf{b}_{p}}.
+$$  
+
+For each newly arrived prompt $\mathbf{u}$ , it computes the estimated $\hat{\alpha}_{c}^{\mathbf{u}}$ for potential draft-target model pairs and check Equation 7 to select the optimal draft model. In an LLM server center setting that has many machines hosting many LLMs, the selection of draft models can be implemented by redirecting requests to the appropriate nodes in the center equipped with the desired draft model and target model pair.  
+
+6 EVALUATION  
+
+In this section, we present and analyze the experimental results gathered from testing our proposed algorithms and hypotheses.  
+
+
+
+\section{6.1 EXPERIMENTAL SETUPS  }
+
+
+This part outlines the configurations and setups used to collect the performance data.  
+
+Software. We primarily use the HuggingFace Transformers library with PyTorch implementations. The flexibility of Python and the availability of pre-trained weights on HuggingFace allow us to experiment with various methods and conduct detailed analyses. The GPU implementations utilize NVIDIA’s cuDNN library, which is optimized for large language models (LLMs) and transformers. To ensure the best performance and compatibility with the latest models, we use the most recent versions of Transformers (v4.38.2) and PyTorch (v2.2.1).  
+
+Datasets and Models. we used three datasets to evaluate model performance and benchmark various implementations. These datasets were selected to reflect common tasks found in chatbot settings and other LLM applications. We employed system prompts to guide the LLMs for higher-quality outputs, particularly for tasks like coding and text summarization.1 for more details. The datasets include OpenAI’s HumanEval (Chen et al., 2021a) for coding tasks, XSum for extreme text summarization (Chen et al., 2021b), GSM8K (Cobbe et al., 2021) for mathematical reasoning, and Alpaca (Taori et al., 2023) for complex advice queries. We include llama-2-chat 70B, Meta OPT 13B, BigScience BLOOM 7B, and Dolly 12B for target models.1. Each dataset was sampled with 25 prompts in online predictive model construction, and evaluated with all remaining prompts across various settings. Note that when using speculative decoding, the draft model and the target model should have been trained on the same datasets to achieve good prediction accuracies, which limits the possible combinations in our experiments.  
+
+Hardware. LLMs demand significant GPU computing power and memory, particularly during inference, where memory bandwidth is critical in achieving high throughput on GPUs. Table 1 lists the GPUs we used, their memory bandwidth, capacity, and the datatypes employed.  
+
+Table 1: GPU Hardware   
+
+![](images/af1f6ced283da68d590f02a1b274cb5e8412beb4de94eeac21aa14fa721b256e.jpg)  
+
+We use two NVIDIA A100 GPUs with 80G memory for the LLaMA 70B-7B pair and 70B-13B pair. We distribute the 70B model across two GPUs, which leads to communication overhead during inference with LLaMA 70B. However, for speculative decoding, the 7B (13B) draft model is only loaded on a single GPU, reducing this overhead. For other model pairs, we limit our study to one GPU, loading both the target and draft models on a single device. This approach serves two purposes. First, it allows us to explore the effects of resource constraints on a single GPU, which is relevant for future work on speculative decoding for personal devices. Second, it maximizes efficiency, as splitting a small LLM onto one GPU and a large LLM onto another would underutilize the resources; it is more effective to run both models on a single GPU.  
+
+
+
+\section{6.2 PERFORMANCE  }
+
+
+We list in Table 2 the throughput results of adaptive window size selection for different model pairs on different hardware. The results of the online window optimization method are reported. We have the following observations. First, our method achieves an average of $2.07\times$ speedups compared to original autoregressive decoding, and an additional $7.69\%$ improvement over speculative decoding baselines. Second, our method achieves different speedups when benchmarking on different datasets. For the HumanEval dataset, speculative decoding has the potential to significantly accelerate performance due to the structured nature of programming languages, which follow stricter grammar and syntax compared to natural language. Repetitive patterns, such as for loops or if-else statements, are easier for the draft model to predict accurately. With adaptive speculation, the algorithm can adjust the parameter $\gamma$ dynamically to suit different sub-sequences. For instance, $\gamma$ can be increased for predictable loops, whereas for more complex or less frequent constructs like API calls or high-level programming, $\gamma$ can be reduced to improve the alignment between the draft and target models, minimizing token waste. Third, the ratio of parameters matters when it comes to model pairing. Larger ratios generally lead to higher speedups while smaller target-draft parameter ratios such as BLOOM 7B-1B1 leave smaller room for improvement. This can be due to the very small model not providing enough throughput that overcome the large draft model.  
+
+Next, we show the results of the draft model selection. For a certain target model, when a new prompt comes in, we first decide on the draft model with the proper model size. This decision is made online. Table 3 compares the speedups over the speculative decoding with and without draft model selection. For LLaMA 70B, the draft model currently includes LLaMA 7B and LLama 13B. For BLOOM 7B, the draft model includes BLOOM 560M, 1B1, and 1B7. The overall throughput speedups from $3.55\%$ to $16.48\%$ using adaptive draft model selection.  
+
+We compare our online adaptive window size selection with $\mathrm{SpecDec}{+}$ (Huang et al., 2024) in Table 4. SpecDec $^{++}$ uses a ResNet to determine whether to stop speculation during speculative sampling at the current word predicted from the draft model. It employs this method based on its prediction of whether the next draft token will be accepted. Training this ResNet model requires conducting offline profiling runs and collecting data on the hardware (for example, 500 hours on A100-80G GPUs for training dataset generation, 400 hours for training, and 500 hours for evaluation set). The experimental setups are the same as in its paper. In the experiments, we use LLaMA2-chat models (Touvron et al., 2023b), selecting the 7B version as the draft model and the 70B version as the target model for the A100 platform and BigScience BLOOM $560\mathrm{m}$ version as the draft model and the 7B version as the target model for GTX 4090. To optimize memory usage, the  
+
+Table 2: Evaluation of adaptive window size selection. SPS denotes the throughput improvement our method achieves over the original speculative decoding. ARS denotes improvements over the default LLMs without speculative decoding. (“-” for not-runnable cases due to memory limit)  
+
+![](images/89b3a124dd3f2a22d2c8ffa962a784218546cf1a20167c8207597619050459c9.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+Table 3: Throughput performance improvement over speculative decoding.   
+
+![](images/0e256694e4ec95cb42a1dac22fae1156bc309a106f88b9e9cadb2f2863cce1b7.jpg)  
+
+models are implemented in the bfloat16 format. The tok/s speedups comparison is as follows on both the A100 and 4090 devices. We find that although our method uses no ahead-of-time training while $\mathrm{SpecDec}{+}$ uses hundreds of GPU-hours to do that, our method outperforms $\mathrm{SpecDec}{+}$ consistently, with an average of $5.7\%$ improvement in latency. Part of the time savings come from selecting the $\gamma$ value before each speculation instead of running a neural network each time the draft model produces a new token. Our approach further shows advancement by adaptively choosing $\gamma$ on the fly without arduous data collecting and training.  
+
+Table 4: Comparison of Tok/s speedups (v.s. autoregressive) and productivity of $\mathrm{SpecDec}{+}$ and our method (without draft model selection).  
+
+![](images/3a841bd0db98b475efd1113f4e29c10403fe9f472ae9d75a9685b7b4aab3331d.jpg)  
+
+6.3 DETAILED ANALYSIS  
+
+We compare the throughput and acceptance rate for different adaptive speculation methods in Figure 3. $\gamma$ denotes the speculation window size for the original speculative decoding method and upper-bound speculation (simply by skipping the validation process); we set a maximum $\gamma_{\mathrm{max}}$ value for other adaptive speculation methods so $\gamma$ will be truncated if it increases over $\gamma_{\mathrm{max}}$ . All experiments are conducted on the A100 machine with OPT 13B-125M model pair. From the figure, we find that (i) the online window size optimization method gives the best overall performance. (ii) Even though RL-based speculation gives better acceptance rates than the other methods, it shows lower throughput. This is because a higher acceptance rate is not directly linked to a higher throughput as in Equation 3. In our case, RL-based speculation remains at a low $\gamma$ value to keep the acceptance rate high while also losing the potential for more speedups. (iii) cache-based and state-based speculation perform better when prompts are longer (e.g., the humaneval dataset). This can be attributed to a more stable $\gamma$ prediction as more information is involved in the long prompt.  
+
+![](images/5795124f0871c8621a3a06cf2733d8e03d09f31242302b882cfefff99804711b.jpg)  
+Figure 3: Detailed experimental results of different adaptive methods.  
+
+6.4 RESULTS FOR SCALABILITY  
+
+Comprehensive Chat Dataset.3. Results show that our method achieves an average of $1.71\times$ speedups compared to original autoregressive decoding, and an additional $4.9\%$ improvement over speculative decoding baselines.  
+
+Adaptive Speculation for Tree-based Decoding Method. Current speculative decoding uses treebased methods (Cai et al., 2024; Li et al.). The on-the-fly adaptation of speculative decoding is complementary to the tree-based decoding. By adaptively changing the draft tree depth, our drop-in method can adjust the draft token sequence length on the fly and thus improving decoding performance. We apply our method to the state-of-the-art EAGLE-2 (Li et al.4. On the MT-Bench (Zheng et al., 2023), we achieve up to $3.56\times$ speedups compared to original autoregressive decoding, and an additional $4.2\%$ improvement over SOTA.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this paper, we propose on-the-fly adaptation for speculative decoding to accelerate LLM inferences. As a pure software approach, it introduces a two-level adaptation for draft model adaptation and online window size adaptation with no ahead-of-time profliing or training, providing a drop-in optimization for existing LLMs. We experimentally demonstrate the effectiveness of this method and show $3.55\%$ to $16.48\%$ speedups compared to the speculative decoding, and $1.2\times$ to $3.4\times$ over the default LLMs without speculative decoding. Among the several online adaptive methods, we found that the token accuracy-based online window size optimization method works the best, consistently outperforming other methods in terms of the overall LLM throughput.  
+
+
+

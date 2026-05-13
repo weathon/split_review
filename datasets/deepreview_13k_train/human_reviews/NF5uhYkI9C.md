@@ -1,0 +1,161 @@
+# Thin-Thick Adapter: Segmenting Thin Scans Using Thick Annotations
+
+- Decision: Reject
+- Scores: 6, 5, 6, 5
+
+## Abstract
+Medical imaging segmentation has been a prominent focus in the field of medical imaging analysis. Recent advances in radiological and storage technologies have led to an increased utilization of thin slice computed tomography (CT) acquisitions in clinical practice. These thin slices offer several advantages, including enhanced spatial resolution and sharper diagnostic information for clinicians. However, segmenting thin slices presents significant challenges. Annotations on thick is hard to adapt to the thin slices since there is a domain gap between thick and thin slices. Furthermore, there is no existing dataset which contains pixel-level thin annotations, and manually annotating thin slices is considerably more resource-intensive and time-consuming compared to annotating thick slices, making it impractical to obtain a sufficient quantity of high-quality thin annotations for training robust models in a supervised fashion. In response to these challenges, this paper introduces three key contributions. Firstly, we propose a research topic and setting focused on segmenting thin slice data exclusively, leveraging existing annotations from thick slices. Secondly, we present a newly created dataset called CQ500-Thin, which is a Non-Contrast CT scans featuring Intracranial Hemorrhage (ICH), including a subset of pixel-level thin annotations for evaluation purposes. This dataset serves as a benchmark for our proposed topic and methodology. Lastly, we introduce a robust pipeline named the Thin-Thick Adapter, which utilizes a simple-but-effective data alignment technique and a 3D-CPS for unsupervised domain adaptation. It is designed to address the thin slice segmentation problem and establish a foundational baseline for this emerging research area.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this work, the authors work with CT data for segmentation. Usually along the depth dimension, the resolution is low (thick) and so most widespread annotations are for such datasets. The annotations for thin datasets (high resolution in the depth dimension) is difficult to obtain as it is burdensome. The authors propose a method which uses thick annotations and unlabeled thin scans in an unpaired and semi-supervised manner to generate high quality segmentations for thin datasets. Additionally, they also release a dataset CQ500-Thin to evaluate models on thin datasets in order to promote research in this direction.
+
+### Strengths
+1) The authors release a new dataset called CQ500-Thin. They have annotated 15 thin volumes from the original CQ500 thick dataset. This new dataset is useful for the community in terms of fair validation/comparison for methods developed in the future.
+2) The authors propose a method to use thick annotations to generate segmentations for thin volumes. This has great potential to reduce the burden of GT-labeling for clinicians, as they can now focus on labeling thicker volumes and still get good performance on thin volumes.
+3) The authors conduct experiments on two datasets, and consider a range of appropriate settings. They demonstrate the superiority of their method over several settings such as 2D segmentation (SegViT), fine-tuning nnUNet, nnUNet trained on thick, as well as nnUNet trained on thin. In each setting, the proposed TTA method achieves superior performance on both DICE and IoU.
+
+### Weaknesses
+1) Could the authors provide a discussion on using CPS over EMA for the semi-supervised component in their TTA method?
+2) The paper seems more appropriate in the ‘datasets and benchmarks’ track.
+3) The authors could consider showing an ablation study for different ranges of $\lambda$ to show the robustness of the method.
+4) While the proposed method achieves good performance, could the authors discuss what is the norm in CT acquisition --- do most acquisitions generate thick datasets, or, are thin datasets more common? The significance of the authors' contribution depends on which of the two - thick or thin - is more prevalent in practice.
+
+### Questions
+1) Please also see weaknesses above.
+2) In Eqn (2) and (4), $l_{sup}$ and $l_{cps}$ correspond to which loss? Dice and Cross-Entropy or something else?
+3) In Eqn (3), $L^l_{cps}$ is not defined in later equations.
+4) The authors could consider doing a study to show how their method can reduce annotation burden significantly. For example, they could consider the existing thick datasets as “thin” , and generate a corresponding “thick” dataset by reducing the resolution by 2 (so an available volume 512 x 512 x 300 would have a thick counterpart of 512 x 512 x 150). This new “thick” dataset (image + GT) could be obtained by dropping intermediate frames, or, by asking clinicians to annotate on these really coarse volumes. Results in this setting would demonstrate how it can ease the burden on annotators.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper discusses the importance of medical imaging segmentation, particularly the challenges faced when working with thin CT slices due to the lack of annotated data for model training. To overcome the difficulties in training segmentation models on thin slice data, the authors introduce three innovations: a new task for segmenting thin scans using thicker slice annotations, a dataset called CQ500-Thin with Non-Contrast CT scans and expert annotations for thin slices, and a Thin-Thick Adapter (TTA) module that significantly improves segmentation performance on thin slices, making the models more versatile for clinical use.
+
+### Strengths
+This paper introduces a new problem formulation that allows for the segmentation of thin slices using annotations designed for thick slices, which is beneficial for clinical applications and has not been explored much before. Additionally, this paper presents a new dataset, CQ500-Thin Dataset, with expertly labeled thin-slice CT scans, which can serve as a benchmark for future research in this field.
+The proposed method employs a straightforward data alignment technique and unsupervised domain adaptation to enhance model performance on unlabeled thin slices, outperforming existing methods and showing significant improvements in standard evaluation metrics such as mean Dice Similarity Coefficient (mDSC) and mean Intersection over Union (mIoU).
+
+### Weaknesses
+While the newly introduced CQ500-Thin dataset offers 15 expertly labeled pixel-level annotations, this may not be representative of the diverse pathologies encountered in clinical practice. The limited number of annotations, while a valuable starting point, raises concerns about the model's ability to generalize across the spectrum of intracranial hemorrhages, which vary significantly in size, location, and etiology. The reliance on annotations from thicker slices may not effectively capture the nuanced details inherent in thin slices. Specifically, the fine-grained structures and subtle boundaries of smaller lesions, which are more apparent in thin slices, could be missed or inaccurately segmented when training is primarily guided by annotations from thicker slices. Furthermore, although the proposed method decreases the necessity for thin slice annotations, it could still be resource-intensive, posing a potential limitation in resource-constrained environments. The computational cost of the proposed Thin-Thick Adapter (TTA) module, especially during the unsupervised domain adaptation phase, could be a barrier to adoption in settings with limited computational resources. The evaluation of this method has been confined to the specified datasets, namely CQ500-Thin and ROTEM-Thin, raising concerns about its generalizability across varied datasets or medical imaging modalities. The lack of evaluation on other publicly available datasets, or different imaging modalities beyond CT, limits the assessment of the method's robustness and applicability in broader clinical contexts. An expanded comparative analysis would be beneficial to more comprehensively assess the method's effectiveness.
+
+### Questions
+Could you expand the CQ500-Thin dataset to include more than 15 expertly labeled pixel-level annotations to better represent the variety of pathologies found in clinical settings?
+How might the method be adapted to capture the fine-grained details in thin slices, which may not be reflected in annotations from thick slices?
+Could you discuss the potential for the proposed method's applicability to other datasets or medical imaging modalities beyond CQ500-Thin and ROTEM-Thin? Would it be possible to conduct a more extensive comparison to assess the effectiveness of the proposed method across different datasets and imaging scenarios?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes the task of segmenting thin slices/scans directly using annotations from thicker slices (with unpaired data), as opposed to the more direct approaches of inferring thin slice annotations from thick slices as ground truth, or some combination of training/finetuning on thick slices and possibly-paired but limited thin slice annotations. The fundamental issue is a lack of annotations on thin slices, due to the costs of procuring such annotations. Instead, the proposed Thick-Thin Adapter (TTA) applies an unsupervised domain adaptation approach – that performs data alignment/augmentation (DA) with adjustable depth spacing on thick slices – before applying 3D Cross Pseudo Supervision (3D-CPS) with unlabelled thin slice data.
+
+### Strengths
+-	Appropriate and direct adaptation of thick-thin slice task to the 3D-CPS methodology
+-	Ablation experiments to justify both DA and 3D-CPS
+
+### Weaknesses
+-	Relative lack of technical novelty, from direct application of existing 3D-CPS
+
+### Questions
+1. Annotation robustness appears especially relevant with fine-grained (and limited) data such as thin slices. Might any indication of inter-grader reliability be known, for the labelled thin slices?
+2. In Section 5.1, the generation of thin slices from thick slices via duplicating and depth spacing adjustment (i.e. thinning) does not appear to take neighbouring slices into account, which seems natural at the thin slice boundaries. Might some interpolation/additional processing have been considered for the output thin slice at the original thick slice boundaries?
+3. In Section 5.2, the methodology involving gradual linear increase of λ as the weight of the cross-supervision loss, is not justified in detail.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper presents a strategy to segment high resolution CT images (< 1mm in the Z-axis) using annotated images from low resolutions scans. To that end, the work makes use of a cross pseudo supervision loss to train a neural network using only low resolution data. The whole strategy is denoted thick thin adapted (TTA). The paper also introduces a "thick slice database".
+
+### Strengths
+- the paper is clear
+- Good figures to illustrate the method
+
+### Weaknesses
+The main criticism to this work is that it introduces a terminology that does not exist in the medical imaging community (thick and thin slices) and provides some context around it that is highly inaccurate. There is not such thing as generating thick slices from thin slices. Voxel spacing and in particular the resolution within the z axis of a scan strongly depends on the image acquisition and reconstruction process, including the properties of the scan used. In reality, both in clinical practice and research it is much more desirable to have high resolution (what here is denoted as thin slices). This is not often possible due to constraints in the acquisition process, but always desired. Hence, there is no such thing as generating "thick slices" from "thin" ones.
+
+On the methods side, the contributions are marginal. The proposed approach consists on resampling thick images to make them thin. Then a network is trained by using a loss (cross pseudo supervision) that has previously been proposed in the literature. This work extends it to 3D, which seems straightforward, and use of it to train the model.
+
+### Questions
+1) As mentioned in the weakness section, this work addresses a problem and describes a scenario that does not really exist within the medical imaging field. Perhaps, the described setup may be relevant in other domains. A quick exploration of the literature may help to identify use cases where the described limitations exist and, thus, the proposed solution is relevant. 
+2) Figure 3 refers to some acronyms that are not introduced in the text.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

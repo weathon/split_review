@@ -1,0 +1,385 @@
+\title{Improved Off-policy Reinforcement Learning in Biological Sequence Design}
+
+\begin{abstract}
+Designing biological sequences with desired properties is a significant challenge due to the combinatorially vast search space and the high cost of evaluating each candidate sequence.
+To address these challenges, reinforcement learning (RL) methods, such as GFlowNets, utilize proxy models for rapid reward evaluation and annotated data for policy training. Although these approaches have shown promise in generating diverse and novel sequences, the limited training data relative to the vast search space often leads to the misspecification of proxy for out-of-distribution inputs. 
+We introduce $\delta$-Conservative Search, a novel off-policy search method for training GFlowNets designed to improve robustness against proxy misspecification. The key idea is to incorporate conservativeness, controlled by parameter $\delta$, to constrain the search to reliable regions. Specifically, we inject noise into high-score offline sequences by randomly masking tokens with a Bernoulli distribution of parameter $\delta$ and then denoise masked tokens using the GFlowNet policy. Additionally, $\delta$ is adaptively adjusted based on the uncertainty of the proxy model for each data point. This enables the reflection of proxy uncertainty to determine the level of conservativeness. Experimental results demonstrate that our method consistently outperforms existing machine learning methods in discovering high-score sequences across diverse tasks—including DNA, RNA, protein, and peptide design—especially in large-scale scenarios.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Designing biological sequences with desired properties is crucial in therapeutics and biotechnology \citep{zimmer2002green, lorenz2011viennarna, barrera2016survey, sample2019human, ogden2019comprehensive}. However, this task is challenging due to the combinatorially large search space and the expensive and black-box nature of objective functions. Recent advances in deep learning methods for biological sequence design have shown significant promise at overcoming these challenges \citep{brookes2018dbas, brookes2019conditioning, angermueller2020dynappo, jain2022biological}.
+
+Among various approaches, reinforcement learning (RL), which leverages a proxy model as a reward function, has emerged as one of the successful paradigms for automatic biological sequence design \citep{angermueller2020dynappo}. RL methods have the benefit of exploring diverse sequence spaces by generating sequences token-by-token from scratch, enabling the discovery of novel sequences. They employ deep neural networks as inexpensive proxy models to approximate costly oracle objective functions. The proxy model serves as a reward function for training deep RL algorithms, enabling the policy network to generate high-reward biological sequences. The model can be trained in an active learning manner \citep{gal2017deep}, iteratively annotating new data by querying the oracle with points generated using the policy; these iterations are called query rounds. There are two approaches for training the policy in this context: on-policy and off-policy.
+
+DyNA PPO \citep{angermueller2020dynappo}, a representative on-policy RL method for biological sequence design, employs Proximal Policy Optimization \citep[PPO; ][]{schulman2017proximal} within a proxy-based active training loop. While DyNA PPO has demonstrated effectiveness in various biological sequence design tasks, its major limitation is the limited search flexibility inherent to on-policy methods. It cannot effectively leverage off-policy data points, such as data collected from previous rounds. 
+Conversely, Generative Flow Networks \citep[GFlowNets; ][]{bengio2021flow}, off-policy RL methods akin to maximum entropy policies~\citep{tiapkin2023generative, deleu2024discrete}, offer diversity-seeking capabilities and flexible exploration strategies. \citet{jain2022biological} applied GFlowNets to biological sequence design with additional Bayesian active learning schemes. They leveraged the off-policy nature of GFlowNets by mixing offline datasets with on-policy data during training. This approach provided more stable training compared to DyNA PPO and resulted in better performance.
+
+However, recent studies have consistently reported that GFlowNets perform poorly on long-sequence tasks such as green fluorescent protein (GFP) design \citep{kim2024bootgen, surana2024overconfident}. We hypothesize that this poor performance stems from the insufficient quality of the proxy model in the early rounds. For example, in the typical benchmark, the proxy is trained with 5,000 sequences, while GFPs have a combinatorial search space of $20^{238} > 10^{309}$. GFlowNets are capable of generating sequences from scratch and producing novel sequences beyond the data points. However, when the quality of the proxy model is unreliable, novel sequences that are out-of-distribution to the proxy model yield unreliable results \citep{trabucco2021conservative, yu2021roma}. 
+This motivates us to introduce a conservative search strategy to restrict the trajectories to the neighborhood of the existing data point.
+\textbf{Contribution.} In this paper, we propose a novel off-policy search method called $\delta$-Conservative Search (\ours), which enables a trade-off between sequence novelty and robustness to proxy misspecification by using a conservativeness parameter $\delta$. Specifically, we iteratively train a GFlowNet using \ours{} as follows: (1) we inject noise by independently masking tokens in high-score offline sequences with Bernoulli distribution with parameter $\delta$; (2) the GFlowNet policy sequentially denoises the masked tokens; (3) we use these denoised sequences to train the policy. When $\delta = 1$ (full on-policy), this becomes equivalent to sampling full trajectories, and when $\delta = 0$ (fully conservative), this reduces to only showing offline sequences in off-policy training. We adaptively adjust $\delta(x;\sigma)$ using the proxy model's uncertainty estimates $\sigma(x)$ for each data point $x$. This approach allows the level of conservativeness to be adaptively adjusted based on the prediction uncertainty of each data point. \Cref{fig:main} illustrates the overall procedure of the \ours{} algorithm.
+
+Our extensive experiments demonstrate that \ours{} significantly improves GFlowNets, successfully discovering higher-score sequences compared to existing model-based optimization methods on diverse tasks, including DNA, RNA, protein, and peptide design. This result offers a robust and scalable framework for advancing research and applications in biotechnology and synthetic biology.
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/ours.pdf}
+    \caption{The active learning process for biological sequence design with $\delta$-Conservative Search (\ours{}). Starting with high reward sequences from the offline dataset, we inject token-level noise with probability $\delta$, which determines the conservativeness of the search. Then, the GFlowNet policy denoises the masked sequences. Lastly, the GFlowNet policy is trained with new sequences. After policy training, we query a new batch of sequences and update the dataset for the next round.}
+    \label{fig:main}
+\end{figure}
+
+
+
+\section{Problem Formulation}
+
+
+We aim to discover sequences $x \in \mathcal{V}^L$ that exhibit desired properties, where $\mathcal{V}$ denotes the vocabulary, such as amino acids or nucleotides, and $L$ represents the sequence length, which is usually fixed. The desired properties are evaluated by a black-box oracle function $f: \mathcal{V}^L \to \mathbb{R}$, which evaluates the desired property of a given sequence, such as binding affinity or enzymatic activity. Evaluating $f$ is often both expensive and time-consuming since it typically involves wet-lab experiments or high-fidelity simulations.
+
+Advancements in experimental techniques have enabled the parallel synthesis and evaluation of sequences in batches. Therefore, lab-in-the-loop processes are emerging as practical settings that enable active learning. Following this paradigm, we perform $T$ rounds of batch optimization, where in each round, we have the opportunity to query $B$ batched sequences to the (\textit{assumed}) oracle objective function $f$. Due to the labor-intensive nature of these experiments, $T$ is typically very small. Following \citet{angermueller2020dynappo} and \citet{jain2022biological}, we assume the availability of an initial offline dataset $\mathcal{D}_0 = \{(x^{(n)}, y^{(n)}) \}_{n=1}^{N_0}$, where $y = f(x)$. The initial number of data points $N_0$ is typically many orders of magnitude smaller than the size of the search space, as mentioned in the introduction. The goal is to discover, after $T$ rounds, a set of sequences that are novel, diverse, and have high oracle function values.
+
+
+
+\section{Active Learning for Biological Sequence Design}
+
+\label{section:active_learning}
+\looseness=-1
+Following \citet{jain2022biological}, we formulate an active learning process constrained by a budget of $T$ rounds with query size $B$, is executed through an iterative procedure consisting of three stages with a novel component of $\delta$-Conservative Search (\ours{}) which will be detailed described in \Cref{sec:cs}:
+
+\textbf{Step A (Proxy Training):} We train a proxy model $f_{\phi}(x)$ using the offline dataset $\mathcal{D}_{t-1}$ at round $t$.
+
+\textbf{Step B (Policy Training with \ours{}):} We train a generative policy $p(x; \theta)$ using the proxy model $f_{\phi}(x)$ and the dataset $\mathcal{D}_{t-1}$ with \ours{}. 
+
+\textbf{Step C (Offline Dataset Augmentation with \ours{}):} We apply \ours{} to query batched data $\{x_i\}_{i=1}^B$ to the oracle $y_i = f(x_i)$. Then the offline dataset is augmented as: $\mathcal{D}_{t} \gets \mathcal{D}_{t-1} \cup \{ (x_i, y_i) \}_{i=1}^B$.
+
+The overall algorithm is described in \Cref{algorithm1}. In the following subsections, we describe the details of \textbf{Step A} and \textbf{Step B}.
+\looseness=-1
+\subsection{\textbf{Step A}: Proxy Training}
+\looseness=-1
+Following \citet{jain2022biological}, we train the proxy model \( f_{\phi} \) using the dataset \( \mathcal{D}_{t-1} \) by minimizing the mean squared error loss:
+\begin{equation}
+    \mathcal{L}(\phi) = \mathbb{E}_{x \sim P_{\mathcal{D}_{t-1}}(x)} \left[ \left( f(x) - f_{\phi}(x) \right)^2 \right],
+\end{equation}
+where \( \mathcal{D}_{t} \) is the dataset at active round $t$, augmented with oracle queries. In the initial round (\( t = 1 \)), we use the given initial dataset \( \mathcal{D}_0 \). See \Cref{appd:proxy_training} for detailed implementation.  
+\subsection{\textbf{Step B}: Policy training with \ours{}} \label{sec:step_b}
+
+For policy training, we employ GFlowNets, which aim to produce samples from a generative policy where the probability of generating a sequence $x$ is proportional to its reward, i.e., 
+\begin{equation}
+    p(x; \theta) \propto R(x;\phi) = f_{\phi}(x) + \kappa \sigma(x). \label{eq:aquisition}
+\end{equation}
+Following \citet{jain2022biological}, the reward $R(x;\phi)$ is defined as \( f_{\phi}(x) + \kappa \sigma(x) \), which combines the proxy value \( f_{\phi}(x) \) and the uncertainty \( \sigma(x) \) in the form of the upper confidence bound \citep[UCB;][]{srinivas2010gaussian} acquisition function. This approach prioritizes regions with higher uncertainty, enabling us to query them in the next active round. Here, $\kappa$ is a mixing hyperparameter. 
+
+\textbf{Policy parameterization.} The forward policy $P_F$ generates state transitions sequentially through trajectories $\tau = (s_0 \rightarrow \ldots \rightarrow s_L = x)$, where $s_0 = ()$ represents the empty sequence, and each state transition involves adding a sequence token. The full sequence $s_L = x$ is obtained after $L$ steps, where $L$ is the length of the sequences.  
+The forward policy $P_F(\tau;\theta)$ is a compositional  policy defined as:
+\begin{equation}
+    P_F(\tau;\theta) = \prod_{i=1}^{L} P_F(s_{i}|s_{i-1};\theta).
+\end{equation}
+
+GFlowNets have a backward policy $P_B(\tau|x)$ that models the probability of backtracking from the terminal state $x$. 
+The sequence $x = (e_1, \ldots, e_L)$ can be uniquely converted into a state transition trajectory $\tau$, where each intermediate state represents a subsequence.
+In the case of sequences, there is only a single way to backtrack, so $P_B(\tau|x) = 1$. This makes these types of GFlowNets equivalent to soft off-policy RL algorithms. For example, the trajectory balance (TB) objective of GFlowNets \citep{malkin2022trajectory} becomes equivalent to path consistency learning (PCL)~\citep{nachum2017bridging}, an entropy-maximizing value-based RL method according to~\citet{deleu2024discrete}.
+
+\textbf{Learning objective and training trajectories.} The policy is trained to minimize TB loss: $\mathcal{L}_{\text{TB}}(\tau;\theta)$:
+\begin{equation}\label{eq:tb}
+    \mathcal{L}_{\text{TB}}(\tau;\theta) = \left( \log \frac{Z_{\theta} P_F(\tau;\theta)}{R(x;\phi)} \right)^2
+\end{equation}
+
+Usually, GFlowNets training is employed to minimize TB loss with training trajectories $\tau$ on full supports, asymptotically guaranteeing optimality for the distribution: 
+\[
+p(x;\theta) \propto R(x; \phi).
+\]
+A key challenge in prior works \citet{jain2022biological} is that the proxy model $f_{\phi}(x)$ often produces highly unreliable rewards $R(x; \phi)$ for out-of-distribution inputs. In our approach, we mitigate this by providing off-policy trajectories within more reliable regions by injecting conservativeness into off-policy search. Therefore, \textbf{we minimize TB loss with \ours{}}, which offers controllable conservativeness.
+
+
+
+
+\section{$\delta$-CS: controllable conservativeness in off-policy search}
+
+\label{sec:cs}
+
+This section introduces $\delta$-Conservative Search (\ours{}), an off-policy search method that enables controllable exploration through a conservative parameter $\delta$. The parameter $\delta$ defines the Bernoulli distribution governing the masking of tokens in a sequence. Our algorithm is iterations of the following:
+\begin{list}{}{\setlength{\leftmargin}{1.2em}\setlength{\rightmargin}{0em}} 
+    \item[$\bullet$] Sample high-score offline sequences $x \sim P_{\mathcal{D}_{t-1}}(x)$ from the \textbf{rank-based reweighted prior}.
+    \item[$\bullet$] Inject noise by masking tokens into $x$ using the \textbf{noise injection policy} $P_{\text{noise}}(\tilde{x} \mid x, \delta)$.
+    \item[$\bullet$] Denoise the masked tokens using the \textbf{denoising policy} $P_{\text{denoise}}(\hat{x} \mid \tilde{x} ; \theta)$.
+\end{list}
+
+These trajectories are used to update the GFlowNet parameters $\theta$ by minimizing the loss function $\mathcal{L}_{\text{TB}}(\tau; \theta)$. For more details on the algorithmic components of \ours{} and its integration with active learning GFlowNets, see \Cref{algorithm1}. 
+\textbf{{Rank-based reweighted prior.}} First, we sample a reference sequence $x$ from the prior distribution \(P_{\mathcal{D}_{t-1}}\). To exploit high-scoring sequences, we employ rank-based prioritization \citep{tripp2020rank}.
+\begin{equation*} \label{eq:rank}
+    w(x; \mathcal{D}_{t-1}, k) \propto \frac{1}{kN + \text{rank}_{f, \mathcal{D}_{t-1}} (x)}.
+\end{equation*}
+Here, $\text{rank}_{f, \mathcal{D}_{t-1}}(x)$ is a relative rank of the value of $f(x)$ in the dataset $\mathcal{D}_{t-1}$ with a weight-shifting factor $k$; we fix $k = 0.01$.
+This assigns greater weight to sequences with higher ranks. Note that this reweighted prior can also be used during proxy training.
+
+\textbf{Noise injection policy.} Let $x = (e_1, e_2, \ldots, e_L)$ denote the original sequence of length \(L\). We define a noise injection policy where each position $i \in \{1, 2, \ldots, L\}$ is independently masked according to a Bernoulli distribution with parameter $\delta \in [0, 1]$, resulting in the masked sequence $\tilde{x} = (\tilde{e}_1, \tilde{e}_2, \ldots, \tilde{e}_L)$.
+The noise injection policy \( P_{\text{noise}}(\tilde{x} \mid x, \delta) \) is defined as:
+\begin{equation*}
+    P_{\text{noise}}(\tilde{x} \mid x, \delta) = \prod_{i=1}^{L} \left[ \delta \cdot \mathbb{I}\{\tilde{e}_i = \text{[MASK]}\} + (1 - \delta) \cdot \mathbb{I}\{\tilde{e}_i =  e_i\} \right],
+\end{equation*}
+where $\mathbb{I}\{\cdot\}$ is the indicator function.
+ 
+\textbf{Denoising policy.}
+We employ the GFlowNet forward policy $P_F$ to sequentially reconstruct the masked sequence $\tilde{x} = (\tilde{e}_1, \tilde{e}_2, \ldots, \tilde{e}_L)$ by predicting tokens from left to right. 
+The probability of denoising next token $\tilde{e}_t$ from previously denoised subsquence \( \hat{s}_{t-1} \) is:
+\begin{equation*}
+    P_{\text{denoise}}(\hat{e}_t \mid \hat{s}_{t-1}, \tilde{x} ;\theta) =
+    \begin{cases}
+    \mathbb{I}\{ \hat{e}_t = \tilde{e}_t \}, & \text{if } \tilde{e}_t \neq \text{[MASK]}, \\
+    P_F(\hat{s}_t = (\hat{s}_{t-1}, \hat{e}_t) \mid \hat{s}_{t-1}; \theta), & \text{if } \tilde{e}_t = \text{[MASK]}.
+    \end{cases}
+\end{equation*}
+The fully reconstructed sequence $\hat{x}=\hat{s}_L$ is obtained by sampling from:
+\begin{equation*}
+    P_{\text{denoise}}(\hat{x} \mid \tilde{x} ; \theta) = \prod_{t=1}^{L} P_{\text{denoise}}(\hat{e}_t \mid \hat{s}_{t-1}, \tilde{x}; \theta).
+\end{equation*}
+By denoising the masked tokens with the GFlowNet policy, which infers each token sequentially from left to right, we generate new sequences $\hat{x}$ that balance novelty and conservativeness through the parameter $\delta$.
+
+\begin{figure}[t!]
+    \centering
+    \begin{minipage}[t!]{0.95\textwidth}
+        \centering
+        \begin{algorithm}[H]
+            \small
+            \begin{spacing}{1.1}
+                \caption{Active Learning GFlowNets with \ours{}}
+                \label{algorithm1}
+
+
+ 
+
+
+\begin{algorithmic}[1]
+\State \textbf{Input:} Oracle $f$, initial dataset $\mathcal{D}_{0}$, active rounds $T$, query size $B$, training batch size $2 \times M$.
+\Procedure{\ours{ }}{$\mathcal{D}_{t-1}, M, \delta$} \Comment{\ours{} subroutine}
+    \State {sample high reward data $x_1, \ldots, x_M$ with \textbf{rank-based reweighed prior} $P_{\mathcal{D}_{t-1}}(\cdot)$.}
+    \State {obtain masked data $\tilde{x}_1, \ldots, \tilde{x}_M$ with \textbf{noise injection policy} $P_{\text{noise}}(\tilde{\cdot}|\cdot,\delta)$ from $x_1, \ldots, x_M$.}
+    \State {obtain denoised $\hat{x}_1, \ldots, \hat{x}_M$ with \textbf{denoising policy} $P_{\text{denoise}}(\hat{\cdot} \mid \tilde{\cdot} ; \theta)$ from $\tilde{x}_1, \ldots, \tilde{x}_M$.}
+    \State \textbf{return} $\hat{x}_1, \ldots, \hat{x}_M$.
+\EndProcedure
+
+\For{$t = 1$ to $T$} \Comment{Active learning with $T$ rounds}
+
+\While{proxy training iterations} \Comment{\textbf{Step A:} Proxy training}
+\State train proxy $f_{\phi}(x)$ with current round dataset  $\mathcal{D}_{t-1}$:
+$$\mathcal{L}(\phi) = \mathbb{E}_{x \sim P_{\mathcal{D}_{t-1}}(x)} \left[ \left( f(x) - f_{\phi}(x) \right)^2 \right].$$
+\EndWhile
+
+\While{policy training iterations} \Comment{\textbf{Step B:} Policy training}
+
+\State obtain off-policy trajectories $\hat{\tau}_1, \ldots, \hat{\tau}_M$ from $\hat{x}_1, \ldots, \hat{x}_M$ given by \ours{} ({$\mathcal{D}_{t-1}, M, \delta$}).
+
+\State obtain offline trajectory $\tau_{1}, \ldots, \tau_{M}$ from  $x_{1}, \ldots, x_M \sim P_{\mathcal{D}_{t-1}}(\tau)$.
+
+\State train $\theta$ with TB loss over $\hat{\tau}_1, \ldots, \hat{\tau}_M$ and $\tau_{1}, \ldots, \tau_{M}$
+
+$$
+    \frac{1}{2M}\sum_{i=1}^M\left( \log \frac{Z_{\theta} P_F(\tau_i;\theta)}{R(x_i;\phi)} \right)^2 + \frac{1}{2M}\sum_{i=1}^M\left( \log \frac{Z_{\theta} P_F(\hat{\tau}_i;\theta)}{R(\hat{x}_i;\phi)} \right)^2.
+    $$
+
+
+\EndWhile
+\State obtain query samples $\hat{x}_1, \ldots, \hat{x}_B$ from \ours{} ($\mathcal{D}_{t-1}$, $B$, $\delta$).
+    \State $\mathcal{D}_{t} \leftarrow \mathcal{D}_{t-1} \cup \{ (\hat{x}_i, f(\hat{x}_i))\}_{i=1}^B$. 
+\Comment{\textbf{Step C:} Dataset augmentation with oracle $f$ query}
+\EndFor
+
+\end{algorithmic}
+
+            \end{spacing}
+        \end{algorithm}
+    \end{minipage}
+\end{figure}
+\subsection{Adjusting conservativeness parameter $\delta$}
+
+Determining the conservative parameter $\delta$ is a crucial aspect of the algorithm. We propose and study two variants, constant and adaptive $\delta$.
+
+\paragraph{Constant.} As a simple approach, we set $\delta$ as a constant, selecting it to have the noise policy mask 4--15 tokens per sequence. Despite its simplicity, this choice effectively enhances policy training and leads to the discovery of high-scoring sequences during active rounds; we provide further studies on \ours{} with a constant $\delta$ in \Cref{appd:abl}.
+
+\paragraph{Adaptive.} Another intuitive approach is to adjust $\delta$ based on the uncertainty of the proxy $\sigma$ on each sequence $x$, that is $\delta(x; \sigma)$. Specifically, we define a function that assigns lower $\delta$ values for highly uncertain samples and vice versa: $\delta(x; \sigma) = \delta_{\text{const}} - \lambda \sigma(x)$. We estimate $\sigma(x)$, the standard deviation of the proxy model $f_{\phi}(x)$, via MC dropout~\citep{gal2016dropout} or an ensemble method~\citep{lakshminarayanan2017ensemble}. $\lambda$ is a scaling factor and related to the influence of the proxy uncertainty on $\delta$; we set it to satisfy $\lambda \sigma \approx \frac{1}{L}$ based on the observations from the initial round.
+
+In our main experiments, we use adaptive $\delta(x, \sigma)$ as the default setup.
+
+
+
+
+
+\section{Related work}
+
+\looseness=-1
+Designing biological sequences using machine learning methods is widely studied. Bayesian optimization methods \citep{mockus2005bayesian, belanger2019biological, zhang2022unifying} exploit posterior inference over newly acquired data points to update a Bayesian proxy model that can measure useful uncertainty. However, these methods usually suffer from scalability issues due to the complexity of the Gaussian process (GP) kernel \citep{belanger2019biological} or the difficulty of sampling from an intractable posterior \citep{zhang2022unifying}.
+
+Offline model-based optimization (MBO) \citep{kumar2020model, trabucco2021conservative, yu2021roma,chen2022bidirectional, kim2024bootgen, chen2023bidirectional, yun2024guided} also addresses the design of biological sequences using offline datasets only, which can be highly efficient because they do not require oracle queries. These approaches have reported meaningful findings, such as the conservative requirements on proxy models since proxy models tend to give high rewards on unseen samples \citep{trabucco2021conservative, yu2021roma, yuan2023importance,chen2023parallel}. This supports our approach of adaptive conservatism in the search process. \citet{surana2024overconfident} recently noted that offline design and existing benchmarks are insufficient to reflect biological reliability, indicating that settings without additional Oracle queries might be too idealistic.
+
+Reinforcement learning methods, such as DyNA PPO \citep{angermueller2020dynappo} and GFlowNets \citep{bengio2021flow, jain2022biological, jain2023multi, alexmulti2024}, and sampling with generative models \citep{brookes2018dbas, brookes2019conditioning,das2021accelerated, song23importance} aim to search the biological sequence space using a sequential decision-making process with a policy, starting from scratch. Similarly, sampling with generative models \citep{brookes2018dbas, brookes2019conditioning, song23importance} searches the sequence space using generative models like VAE \citep{Kingma2014vae}.
+While these approaches allow for the creation of novel sequences, as sequences are generated from scratch, they are relatively prone to incomplete proxy models, particularly in regions where the proxy is misclassified due to being out-of-distribution. 
+
+An alternative line of research is evolutionary search \citep{arnold1998design, bloom2009light,schreiber2020ledidi, sinai2020adalead, pex, ghari2023gfnseqeditor, kirjner2024ggs}, a popular method in biological sequence design. Especially \citet{ghari2023gfnseqeditor} proposed GFNSeqEditor, which utilizes GFlowNets as prior distribution to edit biological sequences as an evolutionary search. Evolutionary search methods iteratively edit given sequences and constrain the new sequences so as not to deviate too far from the seed sequence; they usually start from the \textit{wild-type}, which occurs in nature. 
+This can be viewed as constrained optimization, where out-of-distribution for the proxy model can lead to unrealistic and low-score biological sequences. Consequently, they do not aim to produce highly novel sequences. Our method can be seen as a hybrid of off-policy RL and evolutionary search, capitalizing on both the high novelty offered by GFlowNets and the high rewards with out-of-distribution robustness provided by constrained search where they are properly balanced by $\delta$. Our experimental comparison with GFNSeqEditor \citep{ghari2023gfnseqeditor} demonstrates this hybridization balanced by $\delta$ enables us to discover sequences with greater novelty and higher rewards rather than merely using the GFlowNet policy as editing priors. 
+
+\looseness=-1
+
+
+\section{Experiments}
+
+\looseness=-1
+
+} we evaluate our proposed method on various biological sequence design tasks.
+Furthermore, we analyze the effect of \ours{} by directly comparing with GFN-AL on TF-Bind-8 and an anti-microbial peptide design in \Cref{sec:exp_gfn-al}. For each experiment, we conduct five independent runs.
+\textbf{Implementation details.} 
+For proxy models, we employ a convolutional neural network (CNN) with one-dimensional convolutions \citep{sinai2020adalead} with a UCB acquisition function and an ensemble of three network instances to measure the uncertainty. 
+Note that we use the same architecture to implement proxy models for all baselines. For the GFlowNet policy, we use a simple two-layer long short-term memory (LSTM) network \citep{lstm} and train the policy with 1,000 inner-loop updates using a learning rate of $5\times 10^{-4}$ with a batch size of 256. However, in TF-Bind-8 and AMP, where we analyze the effectiveness of \ours{} compared to GFN-AL, we directly implement \ours{} on top of the GFN-AL implementation. Lastly, we set $\delta$ and $\lambda$ according to the description in \Cref{sec:cs}; specifically, $\delta=0.5$ for tasks with $L\leq 50$ and $\delta=0.05$ for long-sequences. More details are provided in \Cref{appd:policy}.
+\textbf{Baselines.} As our baseline methods, we employ representative exploration algorithms. Further details are provided in \Cref{appd:baseline_detail}.
+\begin{itemize}[left=0pt] %[left=0pt,nosep]
+\item \textbf{AdaLead} \citep{sinai2020adalead} is a well-implemented model-guided evaluation method with a hill-climbing algorithm. 
+\item \textbf{Bayesian optimization} \citep[BO; ][]{snoek2012practical} is a classical algorithm for black-box optimization. We employ the BO algorithm with a sparse sampling of the mutation space implemented by \citet{sinai2020adalead}.
+\item \textbf{CMA-ES} \citep{hansen2006cma} is another well-known evolutionary algorithm that optimizes a continuous relaxation of one-hot vectors encoding sequence with the covariance matrix.
+\item \textbf{CbAS} \citep{brookes2019conditioning} and \textbf{DbAS} \citep{brookes2018dbas} are probabilistic frameworks that use model-based adaptive sampling with a variational autoencoder \citep[VAE; ][]{Kingma2014vae}. Notably, CbAS restricts the search space with a trust-region search similar to the proposed method.
+\item \textbf{DyNA PPO} \citep{angermueller2020dynappo} uses proximal policy optimization \citep[PPO; ][]{schulman2017proximal}, an on-policy training method. 
+\item \textbf{GFN-AL} \citep{jain2022biological} is our main baseline that uses GFN with Bayesian active learning.
+\end{itemize}
+
+\begin{table*}[t!]
+    \caption{\looseness=-1 Maximum rewards achieved by each baseline method across six tasks, with the sequence length ($L$) for each task specified. The mean and standard deviation from five runs are reported. The highest values for each task are highlighted in \textbf{bold}. }
+    \label{tab:main_exp}
+\begin{tabular}{lcccccc}
+\toprule
+ & \makecell{RNA-A\\($L=14$)} & \makecell{RNA-B\\($L=14$)} & \makecell{RNA-C\\($L=14$)} & \makecell{TF-Bind-8\\($L=8$)} & \makecell{GFP\\($L=238$)} & \makecell{AAV\\($L=90$)} \\
+\midrule
+AdaLead          & 0.968 \footnotesize{$\pm$ 0.070} & 0.965 \footnotesize{$\pm$ 0.033} & 0.723 \footnotesize{$\pm$ 0.057} & \textbf{0.995 \footnotesize{$\pm$ 0.004}}
+ & 3.581 \footnotesize{$\pm$ 0.004} & 0.565 \footnotesize{$\pm$ 0.027} \\
+BO               & 0.722 \footnotesize{$\pm$ 0.025} & 0.720 \footnotesize{$\pm$ 0.032} & 0.506 \footnotesize{$\pm$ 0.003} & 0.977 \footnotesize{$\pm$ 0.008} & 3.572 \footnotesize{$\pm$ 0.000} & 0.500 \footnotesize{$\pm$ 0.000} \\
+CMA-ES           & 0.816 \footnotesize{$\pm$ 0.030} & 0.850 \footnotesize{$\pm$ 0.063} & 0.496 \footnotesize{$\pm$ 0.041} & 0.986 \footnotesize{$\pm$ 0.008}
+ & 3.572 \footnotesize{$\pm$ 0.000} & 0.500 \footnotesize{$\pm$ 0.000} \\
+CbAS             & 0.678 \footnotesize{$\pm$ 0.020} & 0.668 \footnotesize{$\pm$ 0.021} & 0.492 \footnotesize{$\pm$ 0.018} & 0.988 \footnotesize{$\pm$ 0.004} 
+& 3.572 \footnotesize{$\pm$ 0.000} & 0.500 \footnotesize{$\pm$ 0.000} \\
+DbAS             & 0.670 \footnotesize{$\pm$ 0.041} & 0.652 \footnotesize{$\pm$ 0.021} & 0.495 \footnotesize{$\pm$ 0.010} & 0.987 \footnotesize{$\pm$ 0.004}
+& 3.572 \footnotesize{$\pm$ 0.000} & 0.500 \footnotesize{$\pm$ 0.000} \\
+DyNA PPO         & 0.737 \footnotesize{$\pm$ 0.022} & 0.730 \footnotesize{$\pm$ 0.088} & 0.478 \footnotesize{$\pm$ 0.015} & 0.977 \footnotesize{$\pm$ 0.013}
+ & 3.572 \footnotesize{$\pm$ 0.000} & 0.500 \footnotesize{$\pm$ 0.000} \\
+GFN-AL         & 1.030 \footnotesize{$\pm$ 0.024} & 1.001 \footnotesize{$\pm$ 0.016} & 0.774 \footnotesize{$\pm$ 0.004} & 0.976 \footnotesize{$\pm$ 0.002}
+ & 3.578 \footnotesize{$\pm$ 0.003} & 0.560 \footnotesize{$\pm$ 0.008} \\
+\midrule
+\textbf{GFN-AL + \ours{}} & \textbf{1.055} \footnotesize{$\pm$ \textbf{0.000}} & \textbf{1.014} \footnotesize{$\pm$ \textbf{0.001}} & \textbf{0.972} \footnotesize{$\pm$ \textbf{0.043}} & 0.981 \footnotesize{$\pm$ 0.002}
+ & \textbf{3.592} \footnotesize{$\pm$ \textbf{0.003}} & \textbf{0.708} \footnotesize{$\pm$ \textbf{0.010}} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+\begin{figure}[t!]
+    \includegraphics[width=\textwidth]{figures/median_all.pdf}
+    \caption{Median scores of Top-128 over active rounds. Ours (GFN-AL + \ours{}) consistently outperforms baseline in RNA, DNA (TF-Bind-8), and protein (GFP and AAV) design tasks.}
+    \label{fig:all_median}
+\end{figure}
+
+For each task, we conduct 10 active learning rounds starting from the initial dataset $\mathcal{D}_0$. The query batch size is all set as 128 except for the AMP design, whose query size is 1,000. Further details of each task are provided in the following subsections. To evaluate the performance, we measure the maximum, median, and mean scores of Top-$K$ sequences. 
+
+\subsection{RNA sequence design}
+\textbf{Task setup.}
+The goal is to design an RNA sequence that binds to the target with the lowest binding energy, which is measured by ViennaRNA \citep{lorenz2011viennarna}. The length ($L$) of RNA is set to 14, with 4 tokens. In this paper, we have three RNA binding tasks, RNA-A, RNA-B, and RNA-C, whose initial datasets consist of 5,000 randomly generated sequences with certain thresholds; we adopt the offline dataset provided in \citet{kim2024bootgen}. We use $\delta=0.5$ and $\lambda=5$, according to the guidelines in \Cref{sec:cs}.
+
+\textbf{Results.} 
+As shown in \Cref{fig:all_median} and \Cref{tab:main_exp}, our method outperforms all baseline approaches. The curve in \Cref{fig:all_median} increases significantly faster than the other methods, indicating that \ours{} effectively trains the policy and generates appropriate queries in each active round. More results are provided in \Cref{appd:rna_full}.
+
+\subsection{DNA sequence design}
+
+\textbf{Task setup.} In this task, we aim to generate diverse and novel DNA sequences that maximize the binding affinity to the target transcription factor. The length $(L)$ of the sequence is fixed with 8. The initial dataset $\mathcal{D}_0$ is the bottom 50\% in terms of the reward, which results in $32,898$ samples, with the maximum score of 0.439. Though this has been widely used in many studies \citep{sinai2020adalead,jain2022biological,designbench,kim2024bootgen}, the TF-Bind-8 is easy to optimize, especially due to its size \citep{sinai2020adalead}. Similar to RNA, we use $\delta=0.5$ and $\lambda=5$.
+
+\textbf{Results.} As shown in \Cref{tab:main_exp}, AdaLead achieves the highest maximum performance, while \ours{} still outperforms GFN-AL. We believe that AdaLead's greedy evolutionary search capability is powerful, especially in the small search space of TF-bind-8. However, in \Cref{fig:all_median}, \ours{} demonstrates the best median performance compared to the other baselines; see the mean, diversity, and novelty in \Cref{appd:tf_full}.
+
+\subsection{Protein sequence design}
+
+We consider two protein sequence design tasks: the green fluorescent protein \citep[GFP; ][]{sarkisyan2016local} and additive adeno-associated virus \citep[AAV; ][]{ogden2019comprehensive}.
+
+\textbf{GFP. } The objective is to identify protein sequences with high log-fluorescence intensity values.\footnote{The score is evaluated by ML oracle models. FLEXS uses TAPE \citep{rao2019tape} for evaluation, while Design Bench Transformer \citep{designbench} is employed in GFN-AL.} The vocabulary is defined as 20 standard amino acids, i.e., $|\mathcal{V}|=20$, and the sequence length $L$ is 238; thus, we set $\delta$ as 0.05 and $\lambda$ as 0.1, according to our guideline. The initial datasets are generated by randomly mutating the provided wild-type sequence for each task while filtering out sequences that have higher scores than the wild-type; we obtain the initial dataset with $|\mathcal{D}_0|= 10\;200$ with a maximum score value of 3.572.
+
+\textbf{AAV. }  The aim is to discover sequences that lead to higher gene therapeutic efficiency. The sequences are composed of the 20 standard amino acids with a length of 90, resulting in the search space of $20^{90}$. In the same way as in GFP, we collect an initial dataset of 15,307 sequences with a maximum score of 0.500. We use $\delta=0.05$ and $\lambda=1$.
+\textbf{Results.} 
+\Cref{tab:main_exp} shows the results of all methods in protein sequence design tasks. Given the combinatorially vast design space with sequence lengths $L = 238$ and $90$, most baselines fail to discover new sequences whose score is higher than the maximum of the dataset.
+In contrast, as depicted in \Cref{fig:all_median}, our method finds high-score sequences beyond the dataset, even with a single active round. This underscores the superiority of our search strategy in practical biological sequence design tasks. Full results are provided in \Cref{appd:protein_full}.
+
+
+\subsection{Anti-microbial peptide design}
+\begin{table}[t]
+\centering
+\caption{Results on AMP with different acquisition functions (UCB, EI). The mean and standard deviation from five runs are reported. Improved results with \ours{} over GFN-AL are marked in \textbf{bold}.}
+
+\begin{tabular}{lcccc}
+\toprule
+ & Max & Mean & Diversity & Novelty \\
+\midrule
+{COMs} & {0.930 \footnotesize{$\pm$ 0.001}} & 0.920 \footnotesize{$\pm$ 0.000} & 0.000 \footnotesize{$\pm$ 0.000} & 11.869 \footnotesize{$\pm$ 0.298} \\
+{DyNA PPO}  & 0.953 \footnotesize{$\pm$ 0.005} &
+0.941 \footnotesize{$\pm$ 0.012} & 15.186 \footnotesize{$\pm$ 5.109} & 16.556 \footnotesize{$\pm$ 3.653} \\
+\midrule
+ GFN-AL (UCB) & 0.936 \footnotesize{$\pm$ 0.004} & 0.919 \footnotesize{$\pm$ 0.005} & \textbf{28.504 \footnotesize{$\pm$ 2.691}} & 19.220 \footnotesize{$\pm$ 1.369} \\
+ GFN-AL + \ours{} (UCB) & \textbf{0.948 \footnotesize{$\pm$  0.015}} & \textbf{0.938 \footnotesize{$\pm$  0.016}} & 25.379 \footnotesize{$\pm$  3.735} & \textbf{23.551 \footnotesize{$\pm$  1.290}}
+ \\
+\midrule
+GFN-AL (EI) & 0.950 \footnotesize{$\pm$ 0.002} & 0.940 \footnotesize{$\pm$ 0.003} & 15.576 \footnotesize{$\pm$ 7.896} & 21.810 \footnotesize{$\pm$ 4.165} \\
+ GFN-AL + \ours{} (EI) & \textbf{0.962 \footnotesize{$\pm$  0.003}} & \textbf{0.958 \footnotesize{$\pm$  0.004}} & \textbf{16.631 \footnotesize{$\pm$  2.135}} & \textbf{24.946 \footnotesize{$\pm$  4.246}}
+ \\
+\bottomrule
+\end{tabular}
+
+    \label{tab:amp}
+\end{table}
+\textbf{Task setup. }
+The goal is to generate protein sequences with anti-microbial properties (AMP). The vocabulary size $\vert\mathcal{V}\vert=20$, and the sequence length ($L$) varies across sequences, and we consider sequences of length 50 or lower. For the AMP task, we consider a much larger query batch size for each active round because they can be efficiently synthesized and evaluated \citep{jain2022biological}.
+We set $\delta$ as 0.5 with $\lambda=1$.
+\begin{figure}[t]
+    \centering
+        \includegraphics[width=\textwidth]{figures/score_div_nov_pareto.pdf}
+    \caption{Average score and diversity/novelty with five independent runs. Our method (GFN-AL + \ours{}) consistently approaches Pareto frontier performance. We set $\delta = 0.5$ for short sequences ($L \leq 50$) and set $\delta = 0.05$ for long length sequences ($L>50$).}\label{fig:pareto}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+        \begin{subfigure}[b]{0.35\textwidth}
+        \includegraphics[width=\textwidth]{figures/proxy_true_scatter.pdf}
+        \caption{Proxy vs. true scores at $t=1$} \label{fig:tf-proxy}
+    \end{subfigure} 
+    \hspace{5pt}
+    \begin{subfigure}[b]{0.225\textwidth}
+        \includegraphics[width=0.975\textwidth]{figures/correlation.pdf}
+        \caption{$\rho(f, f_\phi)$} \label{fig:tf-corr}
+    \end{subfigure} 
+    \caption{Proxy failure on Hard TF-Bind-8. (a) shows the proxy values (i.e., reward) and true score on the whole data point at the initial round. In (b), the correlation between $f$ and $f_\phi$ is much higher when the data points are close to the initial dataset (`$\leq 0$' and `$\leq 8$' correspond to the initial dataset and the whole sequence space, respectively).
+    }
+    \label{fig:tf-hard}
+\end{figure}
+
+\textbf{Results.} The results in \Cref{tab:amp} illustrate that ours consistently gives improved performance over GFN-AL regardless of acquisition function. 
+According to the work from \citet{jain2022biological}, we also adopt conservative model-based optimization method, \citep[COMs; ][]{trabucco2021conservative} and on-policy reinforcement learning, DyNA PPO \citep{angermueller2020dynappo} as baselines. Our method demonstrated significantly higher performance in terms of mean, diversity, and novelty compared to the baselines.
+\subsection{Achieving Pareto frontier with balancing capability of \ours{}} \label{sec:pareto}
+
+In this analysis, we demonstrate that \ours{} achieves a balanced search using $\delta$, producing Pareto frontiers or comparable results to the baseline methods: GFN-AL \citep{jain2022biological} and GFNSeqEditor \citep{ghari2023gfnseqeditor}. Notably, GFN-AL can be seen as a variant of our method with $\delta = 1$, which fully utilizes the entire trajectory search. This approach is expected to yield high novelty and diversity, but it is also prone to generating high rewards due to the increased risk of out-of-distribution samples affecting the proxy model. GFNSeqEditor, on the other hand, leverages GFlowNets as a prior, editing from a wild-type sequence. It is designed to deliver reliable performance and be more robust to out-of-distribution issues by constraining the search to sequences similar to the wild type. However, unlike \ours{}, GFNSeqEditor does not utilize such obtained samples for training GFlowNets in full trajectory level; GFNSeqEditor is expected to have lower diversity and novelty compared to GFN-AL and \ours{}.
+
+As shown in \cref{fig:pareto}, GFN-AL generally produces higher diversity and novelty in the RNA and GFP tasks compared to GFNSeqEditor. However, GFNSeqEditor performs better in terms of reward on the large-scale GFP task, whereas GFN-AL struggles due to the lack of a constrained search procedure in such a large combinatorial space. In contrast, \ours{} achieves Pareto-optimal performance compared to both methods, clearly outperforming GFNSeqEditor across six tasks, with higher rewards, diversity, and novelty. For the RNA and GFP tasks, we achieve higher scores than GFN-AL while maintaining similar novelty but slightly lower diversity. In the AAV task, \ours{} shows a distinct Pareto improvement. These results demonstrate that \ours{} provides a beneficial balance by combining conservative search with amortized inference on full trajectories using off-policy GFlowNets training, effectively capturing the strengths of both GFN-AL and GFNSeqEditor.
+\subsection{Study on proxy failure and conservativeness effect} \label{sec:exp_gfn-al}
+\textbf{Task: Hard TF-Bind-8.} By modifying the initial dataset distribution and the landscape, we can make a harder version of TF-Bind-8. Specifically, we collect the initial dataset near a certain sequence (considered as a wild-type) while ensuring that the initial sequences have lower scores than the given sequence, which is 0.431. The size of $\mathcal{D}_0$ is 1,024. Furthermore, we modify the landscape to give 0 rewards for sequences with scores lower than 0.3. These features are often observed in protein design tasks, where the search space is extremely large, e.g., $20^{238}$ previously--with a limited real-world dataset, and the score often falls to 0.
+
+
+\textbf{Proxy failure.} As shown in \Cref{fig:all_median}, \ours{} gives slightly better performance than GFN-AL, but only marginally. This is because the TF-Bind-8 task is relatively easy to optimize, leading to similar results across methods. To more clearly assess the effectiveness of \ours{}, we conduct several studies on the harder TF-Bind-8 task, which is more difficult to optimize. \Cref{fig:tf-proxy} illustrates the proxy values and true scores for all $x \in \mathcal{X}$ in the first round. While the proxy provides accurate predictions for the initial data points $x \in \mathcal{D}_0$ (represented by the red dots), it produces unreliable predictions for points outside $\mathcal{D}_0$. This supports our hypothesis that the proxy model performs poorly on out-of-distribution data. 
+
+\textbf{Effect of $\delta$ conservativeness.} \Cref{fig:tf-corr} illustrates that the correlation between the oracle $f$ and the proxy $f_\phi$ significantly decreases as data points move farther from the observed dataset. This strongly motivates the use of \ours{}, which constrains the search bounds using $\delta$. By limiting the search to within these constrained edit distances, \ours{} enhances the correlation with the oracle.
+
+\textbf{Studies on $\delta$.} We study on the choice of $\delta$ and effectiveness of adaptive $\delta(x, \sigma)$, in \Cref{appd:delta_abl}. 
+
+
+
+
+
+
+\section{Conclusions}
+
+
+In this paper, we introduced a novel off-policy sampling method for GFlowNets, called \ours{}, which provides controllable conservativeness through the use of a $\delta$ parameter. Additionally, we proposed an adaptive conservativeness approach by adjusting $\delta$ for each data point based on prediction uncertainty. We demonstrated the effectiveness of \ours{} in active learning GFlowNets, achieving strong performance across various biological sequence design tasks, including DNA, RNA, protein, and peptide design, consistently outperforming existing baselines.
+
+
+
+
+
+
+
+

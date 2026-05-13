@@ -1,0 +1,262 @@
+\title{Efficient Training of Sparse Autoencoders for Large Language Models via Layer Clustering}
+
+\begin{abstract}
+\ac{saes} have recently been employed as an unsupervised approach for understanding the inner workings of \ac{llms}. They reconstruct the model's activations with a sparse linear combination of interpretable features.
+However, training \ac{saes} is computationally intensive, especially as models grow in size and complexity. To address this challenge, we propose a novel training strategy that reduces the number of trained \ac{saes} from one per layer to one for a given group of contiguous layers. Our experimental results on Pythia 160M highlight a speedup of up to 6x without compromising the reconstruction quality and performance on downstream tasks. Therefore, layer clustering presents an efficient approach to train \ac{saes} in modern \ac{llms}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+With the significant adoption of \ac{llm}s in world applications, understanding their inner workings has gained paramount importance. A key challenge in \ac{llm}s interpretability is the polysemanticity of neurons in models' activations, lacking a clear and unique meaning~\citep{olah2020zoom}. Recently, \ac{saes}~\citep{huben2024sparse, bricken2023monosemanticity} have shown great promise to tackle this problem by decomposing the model's activations into a sparse combination of human-interpretable features. 
+
+The use of \ac{saes} as an interpretability tool is motivated by two key reasons: the first is the substantial empirical evidence supporting the \textit{\ac{lrh}}, or that \ac{llm}s exhibit interpretable linear directions in their activation space \citep{mikolov-etal-2013-linguistic, nanda-etal-2023-emergent, park2023thelinearreprhypandgeometry}; the second is the \textit{\ac{sh}}~\citep{elhage2022superposition}, which supposes that, by leveraging sparsity, neural networks represent more features than they have neurons. Under this hypothesis, we can consider a trained neural network as a compressed simulation of a larger disentangled model, where every neuron corresponds to a single feature. To overcome superposition, \ac{saes} leverage the \ac{lrh} to decompose model activations into a sparse linear combination of interpretable features.
+
+However, training \ac{saes} is computationally expensive and will become even more costly as the model size and parameter counts grow. Indeed, one \ac{sae} is typically learned for a given component at every layer in a \ac{llm}. Moreover, the number of features usually equals the model activation dimension multiplied by a positive integer, called the expansion factor. For example, a single \ac{saes} trained on the Llama-3.1 8B model activations with an expansion factor of 32 has roughly $4096^2 \cdot 32 \cdot 2 \approx 1.073$B parameters, with a total of more than 32B when the training each one of the 32 layers.
+
+In this work, we reduce the computational overhead of training a separate \ac{sae} for each layer of a target \ac{llm} by learning a single \ac{sae} for groups of related and contiguous layers. This approach is inspired by the observation that neural network layers often group together in learning task-specific representations \citep{szegedy2014intriguingpropertiesneuralnetworks, zeiler2014visualizing, jawahar-etal-2019-bert}: shallow layers typically capture low-level features, while deeper layers learn high-level abstractions. Additionally, adjacent layers in \ac{llm}s tend to encode redundant information, as evidenced by the similarity in the angular distance of their outputs \citep{gromov2024unreasonable}. To quantify the relatedness between layers, we measure the angular distance of the residual stream after the MLP’s contribution across neighboring layers.
+
+Denoting with $L$ the number of layers of the target model and $k$ the number of groups we want to cluster the layers into, our approach obtains at least a $\frac{(L-1)}{k}$ times speedup\footnote{We do not consider the last transformer layer, as different from every other layer w.r.t. the angular distance defined in Section \ref{sec:groups}.} without sacrificing neither reconstruction quality nor downstream performance. %Moreover, we empirically find that the performances of a cluster are a good proxy estimator for the performances of the ideal single layer \ac{saes}. We demonstrate our findings by training \ac{saes} on clusters of layers from Pythia-160M~\citep{biderman2023pythia}.
+
+Our \textbf{contributions} can be summarized as follows:
+
+\begin{itemize}
+    \item We demonstrate that a single \ac{sae} can effectively reconstruct the activations of an entire cluster as a sparse linear combination of interpretable features. This approach reduces the number of \ac{saes} required to be trained for a given model by a factor of $k$.
+    \item We demonstrate the practical effectiveness of our method by training \ac{saes} on the Pythia-160M model for different values of $k$, and we obtain a $\frac{L-1}{k}$ times speedup at the cost of a minor deterioration in performance.
+    \item We extensively analyze our method on reconstruction performance, downstream tasks, and human interpretability for different values of $k$.
+\end{itemize}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{img/paper_img.pdf}
+    \caption{The illustration of our method. While standard training of \ac{saes} requires training one per layer, our method first clusters layers by angular similarity and then trains a single \ac{sae} for each group.}
+    \label{fig:enter-label}
+\end{figure}
+
+
+
+\section{Related work}
+
+\label{sec:sota}
+
+\subsection{The linear representation and superposition hypotheses}
+Supported by substantial evidence, from the seminal \cite{mikolov-etal-2013-linguistic} vector arithmetic to the more recent work of \cite{nanda-etal-2023-emergent} and \cite{park2023thelinearreprhypandgeometry} on \ac{llm}s, the \acf{lrh} supposes that neural networks have interpretable linear directions in their activations space. However, neuron polysemanticity remains an essential challenge in neural network interpretability~\citep{olah2020zoom}.
+
+Recently, \cite{bricken2023monosemanticity} explored this issue by relating the \acf{sh} to the decomposition ideally found by a \ac{sae}. According to the \ac{sh}, neural networks utilize $n$-dimensional activations to encode $m \gg n$ features by leveraging their sparsity and relative importance. As a result, we can write the activations $\mathbf{x}^j$ in a model as
+\begin{equation}
+    \mathbf{x}^j \approx \mathbf{b} + \sum_i^m \boldsymbol{f}_i(\mathbf{x}^j)\mathbf{d}_i
+\end{equation}
+where $\mathbf{x}^j \in \mathbf{R}^n$ is the activation vector for an example $j$, $\boldsymbol{f} \in \mathbb{R}^m$ is a sparse feature vector, $\boldsymbol{f}_i(\mathbf{x}^j)$ is the activation of the i-th feature, $\mathbf{d}_i$ is a unit vector in the activation space and $\mathbf{b}$ is a bias. 
+ 
+\subsection{Sparse AutoEncoders}
+\acl{saes} have gained popularity in \ac{llm} interpretability due to their ability to counteract superposition and decompose neuron activations into interpretable features~\citep{bricken2023monosemanticity,huben2024sparse}. Given an input activation $\mathbf{x} \in \mathbb{R}^{d}$, a \ac{sae} reconstructs it as a sparse linear combination of $d_{\text{sae}} \gg d$ features, denoted as $\mathbf{v}_i \in \mathbb{R}^{d{\text{model}}}$. The reconstruction follows the form:
+
+\begin{equation}
+\label{eq:sae_recon}
+(\hat{\mathbf{x}} \circ \mathbf{f})(\mathbf{x}) = \mathbf{W}_d\mathbf{f}(\mathbf{x}) + \mathbf{b}_d
+\end{equation}
+
+Here, the columns of $\mathbf{W}_d$ represent the features $\mathbf{v}_i$, $\mathbf{b}_d$ is the decoder’s bias term, and $\mathbf{f}(\mathbf{x})$ represents the sparse features activations. The feature activations are computed as
+
+\begin{equation}
+\label{eq:sae_decomp}
+\mathbf{f}(\mathbf{x}) = \sigma(\mathbf{W}_e(\mathbf{x} - \mathbf{b}_d) + \mathbf{b}_e)
+\end{equation}
+
+where $\mathbf{b}_e$ is the encoder’s bias term and $\sigma$ is an activation function, typically $\text{ReLU}(\mathbf{x}) = \max(0, \mathbf{x})$. The training of a \ac{sae} involves minimizing the following loss function:
+
+\begin{equation}
+\label{eq:sae_loss}
+\mathcal L_{\text{sae}}=\norm{\mathbf{x} - \hat{\mathbf{x}}}^2_2 + \lambda \norm{\mathbf{f}(\mathbf{x})}_{1}
+\end{equation}
+
+where the first term in Equation \ref{eq:sae_loss} represents the reconstruction error, while the second term is an $\ell_1$ regularization on the activations $\mathbf{f}(\mathbf{x})$ to encourage sparsity. 
+
+Typically, $d_{\text{sae}}$ is set as $d_{\text{sae}} = c \cdot d$, where $c \in \{2^n | n \in \mathbb{N}_+\}$. As the size and depth of the model increase, training \ac{saes} can become more computationally intensive.
+
+\subsection{SAEs Evaluation}
+\ac{sae} evaluation in the context of \ac{llms} presents a significant challenge. While standard unsupervised metrics such as $L_2$ (reconstruction) loss and $L_0$ sparsity are widely adopted to measure \ac{sae} performance~\citep{gao2024scalingevaluatingsparseautoencoders,lieberum2024gemmascope}, they fall short of assessing two key aspects: causal importance and interpretability. 
+
+Recent approaches, including auto-interpretability \citep{bricken2023monosemanticity,huben2024sparse,bills2023language} and ground-truth comparisons \citep{sharkey2023temperature},  aim to provide a more holistic evaluation. These methods focus on the causal relevance of features \citep{marks2024sparse} and evaluate \ac{sae}s in downstream tasks. \citet{makelov2024towards}, for instance, proposed a framework for the Indirect Object Identification (IOI) task, emphasizing three aspects: the sufficiency and necessity of reconstructions, sparse feature steering \citep{templeton2024scaling}, and the interpretability of features in causal terms.
+
+\cite{karvonen2024measuring} further contributed by developing specialized metrics for board game language models. Using structured games like chess and Othello, they introduced supervised metrics, such as board reconstruction accuracy and coverage of predefined state properties, offering a more direct assessment of SAEs' ability to capture semantically meaningful and causally relevant features.%, complementing traditional unsupervised metrics like $L_2$ and $L_0$.
+
+\subsection{Improving SAEs Training}
+\label{subsec:transfer}
+As SAEs gain popularity for \ac{llm}s interpretability and are increasingly applied to state-of-the-art models \citep{lieberum2024gemmascope}, the need for more efficient training techniques has become evident. To address this, \citep{gao2024scalingevaluatingsparseautoencoders} explored the scaling laws of Autoencoders to identify the optimal combination of size and sparsity. 
+
+Recent work also explored using transfer learning to improve \ac{sae} training. For example, \citet{Kissane2024SAEs} and \citet{lieberum2024gemmascope} demonstrated the transferability of SAE weights between base and instruction-tuned versions of Gemma-1 \citep{gemmateam2024gemmaopenmodelsbased} and Gemma-2 \citep{gemmateam2024gemma2improvingopen}, respectively. On the other hand, \citet{ghilardi2024accelerating} shows that transfer also occurs among layers of a single model, both in forward and backward directions.
+
+
+
+\section{Experimental setup}
+
+
+\subsection{Dataset and hyperparameters}
+\label{subsec:hyperparams}
+We train \ac{saes} on the residual stream of the Pythia-160M model \citep{biderman2023pythia} after the contribution of the MLP. The chosen dataset is a 2B pre-tokenized version\footnote{\url{https://huggingface.co/datasets/NeelNanda/pile-small-tokenized-2b}} of the Pile dataset~\citep{pile} with a context size of 1024. We set the expansion factor $c=8$, $\lambda=1$ in Equation~\ref{eq:sae_loss}, learning rate equal to $3e\text{-}5$, and a batch size of $4096$ samples. Following~\cite{bricken2023monosemanticity}, we constrain the decoder columns to have unit norm and do not tie the encoder and decoder weights. 
+
+We use the JumpReLU activation function as specified in~\cite{rajamanoharan2024jumpingaheadimprovingreconstruction}, and defined as $\text{JumpReLU}_\theta(z) = z \cdot \text{ReLU}(z - \theta)$, with $\theta$ being a threshold learned during training. We fixed the hyperparameters for all the experiments conducted in this work. All hyperparameters can be found in Table~\ref{tab:hyperparams}.
+
+\label{sec:matrix-angular}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.55\linewidth]{img/distances.pdf}
+    \caption{Average angular distance between all layers of the Pythia-160M model, as defined in Equation~\ref{eq:angular_dist}. The angular distances are computed over 5M tokens from the training dataset.}
+    \label{fig:angular_distances}
+\end{figure}
+
+\subsection{Layer groups}
+\label{sec:groups}
+
+For a model with $L$ layers, the number of possible combinations of $k$ groups of adjacent layers that can be tested is given by $\binom{L-1}{k-1}$. With this number growing with model depth, we employed an agglomerative grouping strategy based on the angular distances between layers to reduce it drastically. In particular, we compute the mean angular distances, as specified in \cite{gromov2024unreasonable}, over 5M tokens from our training set:
+
+\begin{equation}
+\label{eq:angular_dist}
+d_{\text{angular}}\left(\mathbf{x}_{\text{post}}^p, \mathbf{x}_{\text{post}}^q\right) = \frac{1}{\pi} \arccos{\left(\frac{\mathbf{x}^p_{\text{post}} \cdot \mathbf{x}^q_{\text{post}}}{\norm{\mathbf{x}^p_{\text{post}}}_2\norm{\mathbf{x}^q_{\text{post}}}_2}\right)}
+\end{equation}
+
+for every $p,q \in \{1,...,L\}$, where $\mathbf{x}^l_{\text{post}}$ are the $l$-th residual stream activations after the MLP's contribution. From Figure\ref{fig:angular_distances}, it can be noted how the last layer is different from every other layer in terms of angular distance. For this reason, we have decided to exclude it from the grouping procedure. 
+
+We adopted a bottom-up hierarchical clustering strategy with a complete linkage~\citep{nielsen2016hc} that aggregates layers based on their angular distances. Specifically, at every step of the process, the two groups with minimal group-distance\footnote{The complete linkage clustering strategy defines the group-distance between two groups $X$ and $Y$ as $D(X,Y)=\max_{\mathbf{x} \in X, \mathbf{y} \in Y} d_{\text{angular}}(\mathbf{x},\mathbf{y})$} are merged; we repeat the process until the predefined number of groups $k$ is reached. This approach prevents the formation of groups as long chains of layers and ensures that the maximum distance within each group remains minimal. In this work, we create groups considering all layers except for the last one, and we chose $k$ varying from 1 (a single cluster with all layers) to 5.
+
+\subsection{SAEs training and evaluation}
+We train a \ac{sae} for every layer of the Pythia-160M model with the hyperparameters specified in Section~\ref{subsec:hyperparams} and consider it our baseline. We denote \saei{i} as the baseline \ac{sae} trained on the activations from the $i$-th layer. 
+
+Moreover, for every $1 \leq j \leq k \leq 5$ with $j,k \in \mathbb{N}$, we define \saeki as the \ac{sae} trained to reconstruct the post-MLP residual stream activations of all layers in the $j$-th group from a partition of $k$ groups.
+
+Additionally, we define $[j_k]$ as the set of all the layers that belong to the $j$-th group in the $k$ groups partition. We train a \saeki for every $k$ and $j$ and compare it with the baselines. In particular, we compare every \saeki against all the baseline \saei{s}, with $s \in [j_k]$. 
+
+Section~\ref{sec:recon} reports the performance w.r.t. standard reconstruction and sparsity metrics. Additionally, in Section~\ref{sec:downstream} and \ref{sec:human} we show, respectively, the performance achieved on popular downstream tasks\citep{marks2024sparse, hanna2023how, wang2023interpretability}, and human interpretability scores. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\linewidth]{img/avg_recon.pdf}
+    \caption{Average CE Loss Score, $R^2$, $L_2$ and $L_0$. The average is computed over layers for every $k$. The “Baseline” average is computed considering the performance obtained by \saei{i}, $\forall i=0,...,10$.}
+    \label{fig:avg-recon-score}
+\end{figure}
+
+
+
+\section{Reconstruction evaluation}
+
+\label{sec:recon}
+To assess the quality of the reconstruction of \ac{saes} trained with our grouping strategy, we report three standard reconstruction metrics and one sparsity metric. In particular, the Cross-Entropy Loss Score (CELS), defined as \( \frac{\text{CE}(\zeta) - \text{CE}(\hat{\mathbf{x}} \circ \mathbf{f})}{\text{CE}(\zeta) - \text{CE}(M)} \), measures the change in Cross-Entropy loss (CE) between the output with \ac{sae} reconstructed activations ($\hat{\mathbf{x}} \circ \mathbf{f}$) and the model's output ($M$), relative to the loss in a zero-ablated run ($\zeta$), i.e., a run with the activations set to zero. 
+
+The ${L_2}$ loss is the first term of Equation~\ref{eq:sae_loss} and measures the reconstruction error made by the \ac{sae}. The $R^2$ score, defined as $1 -\norm{\mathbf{x} - \hat{\mathbf{x}}}_2^2/\norm{\mathbf{x} - \mathbb{E}_{\mathbf{x} \sim \mathcal{D}}[\mathbf{x}]}_2^2$, measures the fraction of explained variance of the input recovered by the \ac{sae}. 
+
+Finally, the $L_0$ sparsity loss, defined as $\sum_{j=1}^{d_{\text{sae}}} \mathbb{I}[\text{f}_j \neq 0]$, represents the number of non-zero \ac{sae} features used to compute the reconstruction. For each metric, we compute the average over 1M examples from the test dataset.
+
+Figure \ref{fig:avg-recon-score} shows the reconstruction and sparsity metrics for each number of groups, averaged across layers. It can be noted that training a single \ac{saes} on the activations from multiple close layers doesn't dramatically affect the reconstruction, even when all layers cluster in a single group ($k=1$) and only one \ac{sae} is trained on all of their activations.
+
+These results demonstrate that a single \ac{sae} can effectively reconstruct activations across multiple layers. Furthermore, the comparable performance between \saeki and the individual layer-specific \saei{i} indicates that post-residual stream activations from adjacent layers share a common set of underlying features. This hypothesis is further supported by directly comparing the directions learned by \saei{i} and \saeki using the Mean Maximum Cosine Similarity (MMCS) score:
+
+\begin{equation}
+\label{eq:mmcs}
+    \text{MMCS} = \frac 1{d_{\text{sae}}} \sum_{\mathbf{u}} \underset{\mathbf{v}}{\max}\ \text{CosSim}(\mathbf{u}, \mathbf{v})
+\end{equation}
+
+where \( \mathbf{u} \) and \( \mathbf{v} \) are the columns of the \saeki and \saei{i} decoder matrices, respectively. Figure~\ref{fig:avg-mmcs} shows the average MMCS, where the average is computed for a given \( k \) by calculating the MMCS between \saeki and \saei{s} for every \( 1 \leq j \leq k \) and \( s \in [j_k] \), then dividing by $L-1$.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\linewidth]{img/avg_mmcs.pdf}
+    \caption{Average MMCS, as defined in Equation~\ref{eq:mmcs}. The average is computed for a given \( k \) by calculating the MMCS between \saeki and \saei{s} for every \( 1 \leq j \leq k \) and \( s \in [j_k] \), then dividing by $L-1$.}
+    \label{fig:avg-mmcs}
+\end{figure}
+
+
+
+\section{Downstream tasks evaluation}
+
+\label{sec:downstream}
+While achieving good reconstruction metrics is crucial for a trained \ac{sae}, it is insufficient for a comprehensive evaluation of its performance. For instance, unsupervised metrics alone cannot determine whether the identified features capture causally influential directions for the model. To address this, following \cite{marks2024sparse}, we applied \ac{saes} to three well-known tasks: Indirect Object Identification (IOI), Greater Than, and Subject-Verb Agreement. 
+
+Each task can be represented as a set of counterfactual prompts paired with their respective answers, formally denoted as $\mathcal T: \{x_{\text{clean}}, x_{\text{patch}}, a_{\text{clean}}, a_{\text{patch}}\}$. Counterfactual prompts are similar to clean ones but contain slight modifications that result in a different predicted answer.
+
+Ideally, a robust \ac{sae} should be able to recover the model’s performance on a task when reconstructing its activations. Furthermore, we expect the \ac{sae} to rely on a small subset of task-relevant features to complete the task. To assess this, we filtered the features to include only the most important ones, where importance is defined as the \textit{indirect effect} (IE)~\citep{pearl2022direct} of the feature on task performance, measured by a real-valued metric $m: \mathbb{R}^{d_{\text{vocab}}}\to\mathbb{R}$. Specifically,
+
+\begin{equation}
+\label{eq:ie}
+\text{IE}(m;\textbf{f};x_{\text{clean}},x_{\text{patch}}) = m(x_{\text{clean}}|\text{do}(\textbf{f}=\textbf{f}_{\text{patch}})) - m(x_{\text{clean}})
+\end{equation}
+
+In this equation, $\textbf{f}_{\text{patch}}$ represents the value of the $i$-th feature during the computation of $m(x_{\text{patch}})$, and $m(x_{\text{clean}}|\text{do}(\textbf{f}=\textbf{f}_{\text{patch}}))$ refers to the value of $m$ for $x_{\text{clean}}$ under an intervention where the activation of feature $\textbf{f}$ is set to $\textbf{f}_{\text{patch}}$.
+
+Calculating these effects is computationally expensive, as it requires a forward pass for each feature. To mitigate this, we employed two approximate methods: Attribution Patching (AtP)\citep{nanda2023attributionpatching, syed2024attribution} and Integrated Gradients (IG)\citep{sundararajan2017axiomatic}.
+
+Following \citet{marks2024sparse}, we used faithfulness and completeness metrics to evaluate the performance of the \ac{saes} on the tasks. These metrics are defined as \(\frac{m(C) - m(\O)}{m(M) - m(\O)}\) where $m(M)$ and $m(\O)$ represent the metric average over $\mathcal T$, achieved by the model alone and with the mean-ablated \ac{sae} reconstructions, respectively. $m(C)$ is computed based on the task and either the \textit{faithfulness} or \textit{completeness} criteria: for faithfulness, it is the metric average when using only the important \ac{sae} features, while mean-ablating the others; on the contrary for completeness, it is calculated by mean-ablating the important features while keeping the others active. 
+
+These metrics allow us to evaluate two critical aspects of \ac{sae} quality: whether the \ac{sae} learned a set of features that is both \textbf{sufficient} and \textbf{necessary} to perform the task. Figures \ref{fig:faithfulness} and \ref{fig:completeness} display the faithfulness and completeness scores for all $k$ groups. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{img/faith_attrib.pdf}
+    \caption{Average faithfulness~\citep{marks2024sparse} for every downstream task (IOI, Greater Than, Subject-Verb Agreement) with IE computed with AtP (Equation~\ref{eq:atp}). The “Baseline” average is computed considering the performance obtained by \saei{i}, $\forall i=0,...,10$. The ``Average'' plot depicts the average over the three downstream tasks.}
+    \label{fig:faithfulness}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{img/compl_attrib.pdf}
+    \caption{Average completeness for every downstream task (IOI, Greater Than, Subject-Verb Agreement) with IE computed with AtP (Equation~\ref{eq:atp}). The “Baseline” average is computed considering the performance obtained by \saei{i}, $\forall i=0,...,10$. The ``Average'' plot depicts the average performance over the three downstream tasks.}
+    \label{fig:completeness}
+\end{figure}
+
+All \saeki perform comparably to, or slightly better than, the baseline \saei{i} models on the faithfulness score (Figure~\ref{fig:faithfulness}) across all three downstream tasks evaluated, demonstrating the sufficiency of learned features. Remarkably, this performance is achieved using only the top 5\% of the most important active features, which recover 75\% of the baseline performance, on average. Even more remarkable are the performances of the single-group \saei{j_1} ($k=1$), which closely follow the trend of both the baseline \ac{saes} and the \saei{j_5} ($k=5$). Moreover, we did not observe any substantial differences in performance for any of the tested values of $k$. The necessity of the features learned by both the baseline \saei{i} and \saeki is confirmed by the completeness scores depicted in Figure~\ref{fig:completeness}, with a severe drop in performance even with only the top 10 active features mean-ablated.
+
+The results of \saeki on downstream tasks demonstrate that their learned features are both sufficient and necessary. Moreover, these findings confirm those in Section~\ref{sec:recon}, i.e., that a single \ac{sae} can effectively reconstruct activations across multiple contiguous layers and learn a set of shared, general features that span adjacent layers.
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[width=0.5\linewidth]{img/human_interp.pdf}
+    \caption{Average Human Interpretability Scores, with the average computed over layers for every $k$. The interpretability of features learned by the \saeki is comparable to the baseline \saei{i}.}
+    \label{fig:human-iterpr}
+\end{figure}
+
+
+
+\section{Human Interpretability}
+
+\label{sec:human}
+In addition to achieving excellent reconstruction and downstream performance, \ac{saes} must learn interpretable features. Following \cite{ghilardi2024accelerating}, we engaged human annotators to identify interpretable patterns in the feature annotations. Specifically, they attempted to provide clear definitions for each feature by examining its top and bottom logits attribution scores, as well as the top activating tokens for 96 features sampled from 1M tokens in the training dataset. To evaluate the quality of these features, we defined the \textit{Human Interpretability Score} as the ratio of features considered interpretable by the human annotators.
+
+Figure~\ref{fig:human-iterpr} presents the Human Interpretability Scores for all values of $k$, averaged across layers. According to human annotators, the interpretability of the features learned by \saeki is comparable to that of the baseline \saei{i}. Moreover, we found that when many layers are grouped together, e.g., when $k=1$, \saeki features are more polysemantic overall, probably due to increased interference. Nevertheless, some of them remain perfectly interpretable across all model layers, capturing critical directions in model computations.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+This work introduces a novel approach to efficiently train \acf{saes} for \acf{llms} by clustering layers based on their angular distance and training a single SAE for each group. Through this method, we achieved up to a 6x speedup in training without compromising reconstruction quality or performance on downstream tasks. The results demonstrate that activations from adjacent layers in LLMs share common features, enabling effective reconstruction with fewer SAEs.
+
+Our findings also show that the SAEs trained on grouped layers perform comparably to layer-specific SAEs in terms of reconstruction metrics, faithfulness, and completeness on various downstream tasks. Furthermore, human evaluations confirmed the interpretability of the features learned by our SAEs, underscoring their utility in disentangling neural activations.
+
+The methodology proposed in this paper opens avenues for more scalable interpretability tools, facilitating deeper analysis of LLMs as they grow in size. Future work will focus on further optimizing the number of layer groups and scaling the approach to even larger models.
+
+
+
+\section{Limitations and future works}
+
+One limitation of our approach is the absence of a precise method for selecting the optimal number of layer groups ($k$). This choice is due to the lack of a clear \textit{elbow rule} for identifying the correct number of groups. While our results showed comparable performance across different values of $k$ on all key metrics, further exploration is needed to determine whether certain configurations could yield more optimal outcomes under specific conditions.
+
+Additionally, we tested our method primarily on the Pythia-160M model, a relatively small \ac{llm}. While our findings demonstrate significant improvements in efficiency without sacrificing performance, the scalability of our approach to much larger models remains an open question. Future work could explore how the grouping strategy and training techniques generalize to models with billions of parameters, where the computational benefits would be even more pronounced.
+
+Another important direction for future research involves understanding how Sparse Autoencoders (SAEs) handle the superposition hypothesis when encoding information from multiple layers. While our method effectively grouped layers and maintained high performance, how SAEs manage the potential overlap in feature representation across layers remains unclear. Investigating this aspect could lead to a more clear understanding of the trade-offs between sparsity and feature disentanglement in SAEs, and inform strategies for improving interpretability without compromising task performance.
+
+In summary, while our work represents an efficient step forward in training SAEs for interpretability, extending this approach to larger models and exploring the handling of superposition will provide valuable insights for both practical applications and the theoretical understanding of sparse neural representations.
+
+
+
+\section{Reproducibility statement}
+
+To support the replication of our empirical findings on training \ac{saes} via layer groups and to enable further research on understanding their inner works, we plan to release all the code and \ac{saes} used in this study upon acceptance.
+
+
+
+
+
+

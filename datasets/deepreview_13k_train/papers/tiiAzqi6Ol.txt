@@ -1,0 +1,610 @@
+\title{Compositional Preference Models for Aligning LMs}
+
+\begin{abstract}
+As language models (LMs) become more capable, it is increasingly important to align them with human preferences. However, the dominant paradigm for training Preference Models (PMs) for that purpose suffers from fundamental limitations, such as lack of transparency and scalability, along with susceptibility to overfitting the preference dataset. We propose Compositional Preference Models (CPMs), a novel PM framework that decomposes one global preference assessment into several interpretable features, obtains scalar scores for these features from a prompted LM, and aggregates these scores using a logistic regression classifier. 
+\ptdyIII{Through these simple steps,}
+CPMs allow to control which properties of the preference data are used to train the preference model and to build it based on features that are believed to underlie the human preference judgement.
+Our experiments show that CPMs not only improve generalization and are more robust to overoptimization than standard PMs, but also that best-of-$n$ samples obtained using CPMs tend to be preferred over samples obtained using conventional PMs.
+Overall, our approach demonstrates the benefits of endowing PMs with priors about which features determine human preferences while relying on LM capabilities to extract those features in a scalable and robust way.%
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\begin{wrapfigure}{t}{0.51\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{figure/fig1.pdf} 
+    \caption{Compositional preference models score different features of LM responses separately and output a preference score as a linear combination of feature values.
+    }
+    \label{fig:main}
+\end{wrapfigure}
+
+As the capabilities of language models (LMs) continue to advance, there is a growing need for safe and interpretable \ptmdI{models}.
+The dominant approach to aligning LMs with human preferences,  reinforcement learning from human feedback \citep[RLHF;][]{ouyang2022training, bai2022training, openai2023gpt4}, consists in training a preference model (PM) to predict human preference judgments and then finetuning an LM to maximize \ptmdI{the} reward given by the PM.
+However, the current PM methodology exhibits certain limitations. 
+First, \ptmdII{it is} susceptible to overfitting the preference dataset. 
+The PM can misrepresent human preferences by fitting to spurious correlations in its training data \cite{gao2023scaling}. Heavily optimizing an LM against a PM incentivises the LM to exploit those flaws. This effect is known as reward hacking or Goodhart’s law \citep{goodhart1984problems}. 
+One way of addressing reward hacking is \ptmdII{to impose} certain inductive biases on the PM or limiting its capacity. Second, PMs are often difficult to interpret and 
+\ptdyI{to oversee}
+\fgkI{I didn't get the feedback part of this sentence\ptdyI{DY: basically it was for introducing scalable oversight}}. 
+They project preferences onto a single scalar feature, making it difficult to know what factors are influencing their decisions. This is especially problematic for complex preferences, such as helpfulness or harmlessness, which often encompass a multidimensional combination of attributes \citep{bai2022training, glaese2022improving, touvron2023llama}.
+\ptdyII{Further, a}s LM capabilities \ptmdII{improve}, it will be increasingly harder for unassisted humans to provide feedback on LM’s responses \citep{pandey2022modeling,bowman2022}.
+One way of addressing this problem is \ptmdII{to use} another LM to decompose those responses into simpler pieces that can be evaluated either by a human or \ptmdI{an} LM.
+In this paper, we propose \ptmdI{the} Compositional Preference Model (CPM), a novel framework for learning a PM that is robust to preference model overoptimization and allows for more transparent and interpretable supervision of complex behavior. \ptmdI{A} CPM decomposes one global preference assessment into a series of simpler questions which correspond to human-interpretable features. 
+Then, a prompted LM (e.g. 
+\ptmdII{GPT-3.5}) is asked to assign a numerical value to each feature. Finally, the feature scores are combined into \ptmdI{a} scalar preference score using a trained logistic regression classifier.
+
+CPM\ptmdII{s} have several advantages over standard PMs. First, \ptmdII{they} are more robust to overfitting and reward hacking. The pre-selected features on which CPM\ptmdI{s} operate provide a useful inductive bias that bootstraps learning human preferences.
+This, in turn, limits \ptmdI{their} vulnerability to reward hacking, as the parameter space of a PM is spanned by features selected to be meaningful and robust. Second, CPMs allow for the modular and human-interpretable supervision of complex behavior. \ptmdI{They} effectively decompose a hard question (e.g. ``is this text preferable?”) into a series of easier questions (e.g. ``is this text \ptdyIII{easy to read?”,}
+``is this text informative?”) that are easier to evaluate for an LM and easier to inspect for a human overseer. 
+This is a simple instance of a divide-and-conquer supervision approach \citep{cormen2022introduction},  which recursively breaks down a problem until it is easily solvable and then combines the solutions \citep{irving2018ai,leike2018scalable,christiano2018supervising}.
+
+In our experiments, we show that 
+CPMs generalize better and \ptmdI{that} using them results in less preference model overoptimization. 
+Additionally, CPMs exhibit superior performance in capturing the underlying 
+\ptdyII{human preferences.}
+In \ptmdI{an} auto-evaluation experiment with Claude \citep{claude} as an approximation of human evaluators \citep{vicuna2023,mukherjee2023orca,liu2023gpteval,he2023annollm},
+best-of-$n$ samples obtained using CPMs  are consistently preferred over samples obtained using conventional PMs
+
+Overall, the contributions of the paper include:
+\begin{enumerate}
+\itemsep0em 
+    \item Introducing CPM, a novel framework for learning PMs that is more robust to overoptimization and allows for more transparent 
+    supervision, by decomposing \ptmdI{the} preference problem into \ptmdI{a} series of intuitive features linked to human preferences, and employing \ptmdI{an} LLM as a feature score extractor (Sec.~\ref{sec:method}).
+    \item Investigating the performance of CPM\ptmdII{s} on a diverse array \ptmdI{of dimensions},  including model robustness (Sec.~\ref{sec:model_robustness}), generalization (Sec.~\ref{sec:referece_comparison}), robustness to overoptimization (Sec.~\ref{sec:overoptimization}), and effectiveness for preference alignment (Sec.~\ref{sec:quality_eval}).
+    \item Enabling \ptmdI{an} intuitive explanation of model optimization and generated responses (Sec.~\ref{sec:interpretability}).
+\end{enumerate}
+
+
+
+
+
+\section{Background}
+
+
+Let us have a dataset of comparisons 
+$\mathit{\mathcal{D}}=\{x^{i},y_{1}^{i},y_{2}^{i}\}_{i=1}^{N}$, 
+where $x$ \ptmdII{is} an input query and $y_1$ and $y_2$ are two possible responses to $x$, with $y_1$ the preferred response.
+The dominant approach to aligning language models, RLHF 
+\citep{christiano2017deep,ziegler2019fine,ouyang2022training, bai2022training}\footnote{{CPMs can also be used with other 
+\ptdyII{alignment}
+training methods both during pretraining \citep{korbak23_pretraining} and finetuning \citep{rafailov2023direct,pmlr-v202-go23a}.}},
+\ptmdII{involves}
+training a parametrized PM $R(y|x) = R_\theta(y|x)$ by defining a probability distribution
+\begin{equation}\label{eq:standard-PM}
+p_\theta(y_{1}>y_{2}|x) \doteq \sigma(R_\theta(y_{1}|x)-R_\theta(y_{2}|x)) = (1+\exp(R_\theta(y_{2}|x)-R_\theta(y_{1}|x))^{-1}
+\end{equation}
+and estimating $\theta$ by maximizing the likelihood of $p_\theta$ over $\mathcal{D}$. 
+Typically $R_\theta$ is obtained by adding a scalar head on top of a base language model and fine-tuning the resulting model. Since \ptmdII{$p_\theta$ is invariant to addition of a constant to $R_\theta$}, it is standard to shift the \ptmdII{$R$} scores such that $E_{(x,y)\sim D}[R(y|x)]=0$.
+
+
+
+
+
+\section{Method}
+
+
+
+The Compositional Preference Model (CPM) \ptmdII{is} a multi-step approach for decomposing preference learning into individual components. 
+We first decompose %
+preference judgements
+into a set of \ptmdII{$C$} distinct features, each designed to evaluate a specific aspect of the response $y$ (relative to context $x$). 
+\ptmdII{Then we} use a prompted LM to assign to a pair $(x, y)$ a scalar score 
+for each individual
+feature 
+\ptdyI{$c=1,\ldots,C$}.
+\ptmdII{Finally, we} employ a logistic regression classifier 
+to combine these features into a global scalar score that best predicts the human preference judgements. This approach enables us to construct a coherent description of the characteristics 
+that 
+underlie
+these judgements.
+
+\subsection{Feature extraction using a language model}\label{sec:feature_extraction}
+ 
+For each feature $c$, we consider an individual preference model $R_{c}$ that maps an input query $x$ and a 
+\ptdyI{response} $y$ to a scalar score.
+In order to do that, we associate each feature $c$ with a specific prompt $t_c$ and compute a score $r_c=R_c(y|x,t_c)$, where $R_c$ can be a general LLM like GPT-3.5, prompted \reb{with a combination of $t_c$, $x$, and $y$}.
+\ptmdII{These} features are designed to decompose the broad concept of preferability into  a series of more straightforward and interpretable components.\footnote{\reb{See \citet{sharma2023understanding} and \citet{hosking2023human} for further evidence that human preference judgements can be accurately predicted from a linear combinations of such features.}}  \reb{\ptdyII{In general, the features should be ``diverse" enough so that they can cover the broad concept of preference, 
+yet without too much ``overlap" between them to decrease  efficiency and interpretability.}} It is noteworthy that a feature can 
+represent
+not only positive categories that are aligned with preferability (e.g. informativeness), but also categories that are assumed to be negatively correlated with it
+(e.g. \ptdyI{biased\ptmdII{ness}}). 
+This procedure allows us to control which properties of the preference data are used to train the PM and 
+to build \ptmdII{it} based on \ptmdII{components} that we believe to 
+{determine}
+the human choices.
+\subsection{Combining multiple features}\label{sec:combining_features}
+
+The features assessed by the prompted LM
+serve as distinct modules, each of which evaluates a different aspect. 
+\ptdyI{To combine the features into an interpretable single model,
+we employ logistic regression to classify the preferred response in \ptmdII{a} pairwise comparison dataset.}\footnote{Expanding pairwise comparisons to rank data is possible, following \ptmdI{the} general approach of one-vs-one \citep{ouyang2022training}.}
+
+\reb{Based on the dataset $\mathit{\mathcal{D}}=\{x^{i},y_{1}^{i},y_{2}^{i}\}_{i=1}^{N}$, we obtain a feature matrix $\{x^{i},\boldsymbol{r}(y_{1}^{i}|x^{i}),\boldsymbol{r}(y_{2}^{i}|x^{i})\}_{i=1}^{N}$. 
+Here $\boldsymbol{r}(y|x)=(R_1(y|x,t_1),\ldots,R_C(y|x,t_C))$ is a  feature vector \ptdyIII{with} %
+decomposed feature scores.
+We standardize each feature score to have average $0$ and variance $1$ within the train data.
+We \ptdyIII{then} compute the pairwise difference of the feature vectors for each pair of responses, $\boldsymbol{r}(y_{1}|x)-\boldsymbol{r}(y_{2}|x)$, and train a logistic regression classifier with this difference 
+to predict $1$ if $y_1$ is preferred, and $0$ if $y_2$ is preferred. In other words, the distribution $p$ is formalized as:
+\begin{equation}\label{eq:CPM}
+p(y_{1}>y_{2}|x)\doteq \sigma(\left\langle \boldsymbol{\lambda},\boldsymbol{r}(y_{1}|x)-\boldsymbol{r}(y_{2}|x)\right\rangle)=(1+\exp(\left\langle \boldsymbol{\lambda},\boldsymbol{r}(y_{2}|x)-\boldsymbol{r}(y_{1}|x)\right\rangle))^{-1}
+\end{equation}\fmdIII{For comparability with Eq\ref{eq:standard-PM}}
+\ptdyI{where $\boldsymbol{\lambda}=(\lambda_1,\ldots,\lambda_C)$ is \ptmdI{the} vector of fitted coefficients}. 
+The coefficient $\lambda_c$ indicates the importance of the feature $c$ for predicting human preference judgements. To obtain the preference score of a single sample we simply compute 
+$\left\langle \boldsymbol{\lambda},\boldsymbol{r}(y|x) - \boldsymbol{0} \right\rangle = 
+\left\langle \boldsymbol{\lambda},\boldsymbol{r}(y|x)\right\rangle$, where $\boldsymbol{0}$ is the standardized average of the feature vector $\boldsymbol{r}(y|x)$ over the training data as explained above.
+} %
+
+
+
+
+
+\section{Experiments}
+
+
+
+In this section, we empirically evaluate 
+CPM on \ptmdII{several} aspects, including model robustness (Sec.~\ref{sec:model_robustness}), generalization (Sec.~\ref{sec:referece_comparison}), robustness to overoptimization (Sec.~\ref{sec:overoptimization}), and effectiveness for preference alignment (Sec.~\ref{sec:quality_eval}).
+We also provide an illustrative example of CPM \ptmdII{interpretability} in Sec.~\ref{sec:interpretability}.
+
+\subsection{Experimental setup}
+
+\paragraph{Datasets}
+We conduct experiments on two datasets, the HH-RLHF dataset \citep{bai2022training} and \ptmdII{the} SHP dataset \citep{shpdata}. Both consist of pairs of responses based on helpfulness. For each dataset, 
+\ptdyII{in order to establish a consistent setting and control for the data size factor, we sample 20K single-turn data points.}
+\paragraph{Features}
+We use 13 features\ptmdI{:} 
+\texttt{helpfulness, specificity, intent, factuality, easy-to-understand, relevance, readability, enough-detail, biased, fail-to-consider-individual-preferences, repetitive, fail-to-consider-context} and \texttt{too-long},
+with pre-specified prompt  templates (see App.~\ref{app:prompts} for the description of features and prompts). We use the same set of features for both datasets; prompt templates only differ in a preamble that describes $x$ as either a conversation with \ptmdI{an} AI assistant (HH-RLHF) or a StackExchange question (SHP).
+We also use the length of $y$\ptmdII{,} which we find to be helpful 
+on the SHP dataset. 
+\paragraph{Methods}
+
+To find out the ability of an LM as a feature extractor,
+we explore two LMs, GPT-3.5
+(\texttt{gpt-3.5-turbo-0301}) and Flan-T5-XL (3B parameters) \citep{flant5}, using the same features and prompt templates. \ptdyI{We refer to \ptmdII{the CPM models based on these extractors}  as CPM-GPT-3.5 and CPM-Flan-T5, respectively.}
+To select only the most important features, we add a 
+regularization term in logistic regression and use hyperparameters selected with 5-fold cross-validation on the training dataset.
+
+We \ptmdII{then} compare \ptmdII{the} conventional PM to \ptmdII{these} CPMs (trained respectively as described in Sec.~\ref{sec:preliminaries} and Sec.~\ref{sec:combining_features}). 
+\ptdyI{For a fair comparison, we train the standard PM \ptmdII{based on} the same Flan-T5-XL model that we use for 
+\ptdyII{the}
+CPM\ptmdII{s}, but with an added linear head that outputs a scalar preference score.}
+We compare the performances of CPM-GPT-3.5 \ptmdI{and} CPM-Flan-T5 with 
+\ptmdII{this} standard PM.
+Implementation details %
+are provided in App.~\ref{app:hyperparams}.
+
+\paragraph{Best-of-$n$ sampling (BoN)}
+
+To assess the robustness of PMs to overfitting, we use 
+Best-of-$n$ 
+(BoN) sampling \citep{gao2023scaling},
+\ptdyI{a simple yet effective method that has been shown to be competitive with more advanced techniques such as reinforcement learning \citep{openaibon}.} 
+\ptdyI{BoN abstracts away from RLHF design choices such as the details of policy optimization and provides a stable proxy for RLHF performance \citep{nakano2021webgpt,gao2023scaling}.}
+
+We generate $n$ responses using an initial LM 
+$a(x)$ and evaluate the performance of the PMs on these responses.\fbtkI{There are two things IMHO: computing PMs scores to rank responses and computing PMs scores to evaluate models \ptdyI{DY: (25/09/2023) Could you elaborate more on this please?} It soundes a bit confusing and wanted to suggest a rewrite (mentioning that PM is also used in generating BoN samples) but actually maybe it's okay as is?} We consider the BoN distribution $x\sim\text{BoN}(a,\text{PM},n)$, where $n$ candidates are sampled from $a$ and $x$ is the candidate maximizing the PM score.
+\ptdyI{Following \cite{gao2023scaling},} we compare the robustness of two related PMs, $\text{PM}_{A}(x)$ and $\text{PM}_{B}(x)$, 
+by \ptdyI{measuring the gap} between their \ptmdI{average scores relative to samples $x$ from $\text{BoN}(a,\text{PM}_A,n)$, where typically (by construction) 
+we have $\text{PM}_A(x) > \text{PM}_B(x)$, with the gap increasing with $n$.}%
+\footnote{The PM used for the BoN distribution is determined by the experimental design (e.g. proxy PM in the overoptimization experiment).}
+\begin{comment}
+\ptdyI{We use KLBoN\text{KL}_\text{BoN} when a property of BoN distribution itself (e.g. the distribution of features, Sec.~???\ref{sec:interpretability}) is the focus.
+}
+\end{comment}
+We generate up to 25,600 BoN responses, with 256 responses for each of 100 prompts in \ptmdI{a} held-out test set.\footnote{Due to computational constraints, 
+\ptdyII{we only evaluate CPM-GPT-3.5 on 
+BoN($n\le 16$).
+}
+}
+We use Flan-T5-Large \citep[780M parameters;][]{flant5} as the initial LM to generate the responses. 
+To ensure that the performance of different PMs can be compared 
+on the same scale
+across different reward models, we normalize each PM score to have average 0 and variance 1 within the training data.
+
+
+\begin{comment}
+\paragraph{Score scaling}
+To ensure that the performance of different PMs can be compared 
+\ptmdI{on the same scale}
+across different reward models, we normalize each PM score to have average 0 and variance 1 within the training data.\fbtkI{Maybe merge this with the paragraph above, doesn't seem to deserve a paragraph on its own]}
+\end{comment}
+\subsection{Model robustness}\label{sec:model_robustness}
+
+\begin{figure}[ht]
+\centering
+\begin{tabular}{cc}
+(a) HH-RLHF dataset\\
+\centerline{\includegraphics[width=\columnwidth]{figure/hh-variance_v7.pdf}}\\
+(b) SHP dataset\\
+\centerline{\includegraphics[width=\columnwidth]{figure/shp-variance_v7.pdf}}
+\end{tabular}
+\caption{
+BoN comparison over two models fitted independently in same condition \reb{(left: Standard PM, middle: CPM-GPT-3.5, right: CPM-Flan-T5)}\ptmdI{.} 
+\ptdyIII{PM A (blue line) is used for BoN selection.}
+}\label{fig:model-variance}
+\end{figure}
+
+Model robustness refers to the sensitivity of a predictive model to the selection of its training data \citep{hastie2009elements}.
+Specifically, it quantifies how much the model's predictions would change if we were to train it on different subsets of the preference dataset.
+A model with low robustness
+will show poor generalization on unseen data.
+
+To assess model robustness, we independently train two  PMs for each PM method\ptdyI{, $\text{PM}_{A}$ and $\text{PM}_{B}$,} on disjoint subsets of the training data\ptdyI{, each of size 10K.}
+We then conduct a BoN experiment and check whether the scores of these two PMs diverge with increasing $n$.
+\ptmdII{As explained above}, we pick the response with highest $\text{PM}_{A}$ score among $n$ samples and measure the gap between the scores of $\text{PM}_{A}$ and $\text{PM}_{B}$ on that sample.\footnote{We tested reversing the order for building BoN distribution, and the results remained unchanged. See Fig.}
+
+
+Fig.~\ref{fig:model-variance} shows that CPM
+is significantly more consistent between  $\text{PM}_{A}$ and $\text{PM}_{B}$
+than the standard PM method in terms of 
+\ptdyI{the score differences, }
+even for BoN with size $256$.
+The smooth 
+scaling trend as a function of $n$ suggests that our findings will 
+\ptmdI{generalize} to larger $n$. This suggests that the small number of trainable coefficients (in this experiment 14 coefficients) makes the model robust to \ptdyI{noise in data sampling.} 
+\ptmdI{Still,}
+the features extracted by LM are informative enough to 
+build an effective preference model for alignment tuning, as we \ptmdII{illustrate below.}
+\subsection{Comparison with reference PM\ptmdI{s}}\label{sec:referece_comparison}%
+
+\begin{figure}[ht]
+\begin{centering}
+\begin{tabular}{cc}
+{\includegraphics[width=0.48\columnwidth]{figure/hh_external_compare_v8.pdf}}  & {\includegraphics[width=0.48\columnwidth]{figure/shp_external_compare_v8.pdf}}  \tabularnewline
+\end{tabular}
+\par\end{centering}
+\caption{
+\ptdyI{Comparison \ptmdII{between} PM scores \ptmdII{relative to the distributions} $\text{BoN}(a,\text{PM}_\text{ref1},n)$ (HH-RLHF dataset, left) and   $\text{BoN}(a,\text{PM}_\text{ref2},n)$ (SHP-dataset, right). }
+}\label{fig:external_comparison}
+\end{figure}
+
+
+\ptdyII{To assess the generalizability
+of our CPM\ptmdII{s}, we compare \ptmdII{them} to two well-established reference PMs, $\text{PM}_{\text{ref}1}$ and $\text{PM}_{\text{ref}2}$, both instances of DeBERTa \citep{he2020deberta}, with $\text{PM}_{\text{ref}1}$ finetuned on a large dataset including HH-RLHF\footnote{\href{https://huggingface.co/OpenAssistant/reward-model-deberta-v3-large-v2}{https://huggingface.co/OpenAssistant/reward-model-deberta-v3-large-v2}} and $\text{PM}_{\text{ref}2}$ finetuned on a large dataset including SHP \citep{sileo2023tasksource}.}
+These 
+PMs, trained on larger and more diverse datasets,
+are shown to generalize better \ptdyI{than PMs trained on a 10K dataset}
+(see App.~\ref{app:deberta_evaluation}).
+We select BoN responses with the reference PM and then examine how their scores diverge 
+relative to
+\ptmdII{the different PMs} trained on a 10K dataset as in Sec. \ref{sec:model_robustness}.
+\ptdyII{We hypothesize that models that diverge less from such independently
+trained reference PMs will generalize better to unseen data.}
+Fig.~\ref{fig:external_comparison}
+\ptdyI{shows that all models  
+\ptmdII{scale monotonically}
+with the reference PM,}
+with \ptmdII{the} CPM\ptmdII{s} \ptmdII{staying} %
+closer to it.
+This suggests that \ptmdII{the extracted} features 
+are informative enough to allow for learning a 
+\ptmdII{more generalizable}
+model of preference judgements.
+
+\begin{comment}
+The CPM based on the GPT-3.5 feature extractor is fairly consistent with PMref1\text{PM}_{\text{ref}1} in HH-RLHF dataset, while it shows similar consistency with CPM-Flan-T5 in SHP dataset\ptdyII{, though it is still closer to PMref2\text{PM}_{\text{ref}2} than standard PM is}. 
+This suggests that feature extraction using a capable model helps 
+but is not crucial.
+Additionally, CPM benefits from decomposition, as CPM-Flan-T5 outperforms standard PMs, \ptdyI{
+which use the same Flan-T5 architecture.\fmdII{(26/09/2023) On a second reading, and following German's feedback, I find this paragraph difficult to follow. In particular, the reader could be confused by the fact that, for the right panel, we focus on the gap between the two CPMs, not the gap relative to the reference model. Should we try to explain this gap?\ptdyII{DY: (27/09/2023)I've added some general statement that "CPM is still closer to PMref2\text{PM}_{\text{ref}2} than standard PM is", which is still valid regarding (PMref2\text{PM}_{\text{ref}2} vs CPM) and (CPM vs standard PM). For the worse performance of CPM-GPT-3.5, we can say somethinkg like "SHP dataset is generated by human and we conjecture that sometimes its unexpected length prevents LM extractor to work properly", but I guess that might not helpful for our narrative. I would just say CPM-GPT-3.5 and CPM-Flan-T5 are still better than standard PM? \ptmdII{(27/09/2023) Perhaps it would be more effective and less confusing to the readers to just delete this last paragraph?}}}
+}
+\end{comment}
+
+\begin{comment}
+It is noteworthy that the CPM based on the GPT-3.5 feature extractor is fairly consistent with \ptdyI{PMref1\text{PM}_{\text{ref}1} in HH-RLHF dataset.}
+This suggests
+that using a more powerful LM as a feature extractor can improve the performance of the CPM.
+Additionally, 
+the larger divergence observed for standard PMs 
+suggests that the 
+\ptdyI{inductive biases based on pre-selected features in CPM}
+can be beneficial for learning the underlying preference.\fbtkI{Maybe I'd rewrite it as: feature extraction using a capable models helps (see CPM-GPT-3.5 vs standard gap) but is not crucial, CPMs also benefit from decomposition (see CPM-Flan-T5 vs standard gap where feature exctrator is the same model as the generator)}
+\end{comment}
+\subsection{Robustness to Overoptimization}\label{sec:overoptimization}
+\begin{figure}[ht]
+\begin{centering}
+\begin{tabular}{cc}
+{\includegraphics[width=0.48\columnwidth]{figure/hh_gold_external_v8.pdf}}  & {\includegraphics[width=0.48\columnwidth]{figure/shp_gold_external_v8.pdf}}  \tabularnewline
+\end{tabular}
+\par\end{centering}
+\caption{Overoptimization experiment in BoN distribution $\text{BoN}(a,\text{PM}_\text{Proxy},n)$. 
+\ptdyII{Dashed line means proxy PM used for BoN selection, corresponding solid line means gold PM.}
+(left: HH-RLHF dataset, right: SHP dataset)
+\label{fig:overeoptimization}}
+\end{figure}
+Overoptimization is a type of misalignment that occurs when the 
+{preference model}
+is overly optimized by exploiting flaws in the proxy objective \citep{amodei2016concrete,skalse2022}.
+This can lead to the PM diverging from the true objective, which we want to 
+\ptmdII{optimize}
+in alignment tuning. 
+
+To investigate overoptimization, we follow \cite{gao2023scaling} and construct a \ptmdI{synthetic} dataset where the output of \ptmdI{a} specific \ptmdI{``gold''} PM is \ptmdI{assumed} to be the ground truth \ptmdI{for preferences}. 
+\ptmdI{As gold PMs}, we use reference PMs \ptdyI{$\text{PM}_{\text{ref}1}$ and $\text{PM}_{\text{ref}2}$} (described in Sec. \ref{sec:referece_comparison}). 
+\ptdyII{We then use the gold models to generate synthetic labels to train proxy PMs using each of the studied techniques.}
+\ptmdI{Depending on the PM training method, overoptimizing the PM can cause it to diverge from the gold PM, which allows us to compare the robustness of different PM techniques.}
+
+Fig. \ref{fig:overeoptimization} shows that the gap between the gold PM and \ptmdI{the} proxy PM scores increases for each PM as the candidate size $n$ increases. 
+The distribution of the standard PM does not follow the gold PM distribution and has \ptmdI{a} larger divergence as \ptmdI{the} candidate size $n$ increases. 
+This 
+\ptmdI{illustrates}
+that 
+{fitting}
+{a} standard PM 
+can lead to overoptimization, which is consistent with existing literature \citep{gao2023scaling}. %
+On the other hand, 
+\ptdyI{the gap between \ptmdI{the} gold and proxy PM scores is smaller for 
+CPMs, \ptmdI{with the} gold PM score \ptmdI{beginning} to diverge later than for standard PMs. This suggests that CPMs are more robust to overoptimization.}
+The \ptdyI{rank correlation of the PM scores with increasing $n$ in Fig. \ref{fig:overeoptimization},}
+
+
+\subsection{Quality evaluation}\label{sec:quality_eval}
+
+The ultimate goal of PMs is to help align LMs with human preferences. While in the previous section we compared PMs with a certain gold PM, in this section we will investigate whether LMs aligned using CPMs are preferred by humans over LMs aligned using standard PMs. 
+Following previous literature \citep{vicuna2023,mukherjee2023orca,liu2023gpteval,he2023annollm}, we simulate human evaluation using a prompted \ptmdI{LLM.}
+
+For each PM, we 
+\ptdyII{draw}
+\ptmdII{a response} from $\text{BoN}(a,\text{PM},16)$ by generating \ptmdI{samples} 
+from 
+\ptdyII{$a$ \ptmdII{(namely Flan-T5)} }
+and select\ptmdI{ing the} best \ptmdI{response} based on \ptmdI{the} PM score.
+We then compare \ptmdI{this} response to vanilla Flan-T5, \ptmdI{namely a} response randomly selected from the same set of candidates.
+We \ptmdII{finally} use 
+\ptdyII{the LLM}
+to 
+\ptmdII{choose which response}
+is 
+preferable.
+We refer to this metric as the ``win rate''. 
+A good PM is expected to have high win rate against vanilla Flan-T5. 
+
+Importantly, 
+we use Claude \citep[\texttt{claude-2};][]{claude}, an LLM that
+was \emph{not} used in feature extraction. Hence, we avoid \emph{potential }subtle preference leaks from features extracted usig GPT-3.5\ptmdI{.} We use the prompt from \citep{vicuna2023,mukherjee2023orca} to rate the quality of \ptmdI{the} response selected by each PM method\footnote{To prevent the known bias towards the first 
+response \citep{vicuna2023,openai2023gpt4},  we average the scores with different orderings when making a comparison.} (see Tab.~\ref{tab:claude_prompt} for the prompt used in evaluation).
+We perform one BoN trial with $n=16$ for CPM-GPT-3.5 and 10 independent \ptmdI{such} trials for other PMs and report the average win rate.
+
+\begin{wraptable}{t}{0.5\textwidth}
+\begin{centering}
+\begin{tabular}{c|cc}
+\toprule
+Win Rate & \multicolumn{1}{c}{HH-RLHF} & \multicolumn{1}{c}{SHP}\tabularnewline
+\midrule
+CPM-GPT-3.5 & \textbf{0.810}\quad\quad(.) & \textbf{0.672}\quad\quad(.)\tabularnewline
+CPM-Flan-T5 & 0.742 (0.034) & 0.580 (0.045)\tabularnewline
+Standard PM & 0.588 (0.030) & 0.564 (0.037)\tabularnewline
+\bottomrule
+\end{tabular}
+\par\end{centering}
+\caption{
+Win rate over initial generation after BoN sampling based on each PM. 
+Except CPM-GPT-3.5, we independently conduct $10$ rounds of BoN($n=16$) samplings and report the average win rate along with standard error.\label{tab:claude_eval}
+}
+\end{wraptable}
+
+Tab.~\ref{tab:claude_eval} shows evaluation results. Considering that both standard PM and CPM-Flan-T5 use the same architecture \ptdyI{ and data}, 
+the higher win rate of CPM-Flan-T5 compared to standard PM suggests the 
+\ptmdI{advantage}
+of decomposing preference into multiple features and using an LM as feature extractor, 
+rather than directly using the PM based on fine-tuning the LM as in Eq. (\ref{eq:standard-PM}).
+CPM-GPT-3.5 shows 
+\ptmdI{an even higher win rate, again indicating} %
+that using a more powerful 
+\ptmdI{LM}
+as feature extractor can further improve the performance of CPM.
+
+\subsection{Model interpretability}\label{sec:interpretability}
+
+CPM\ptmdI{s}, as linear models, 
+\ptmdI{have a high degree of interpretability}
+\cite{hastie2009elements}.
+In this section, we provide a few illustrative examples \ptmdII{focussing on the dataset HH-RLHF}.
+
+\paragraph{Coefficients}
+The interpretability of our model is enhanced by the fact that the feature coefficients provide a direct indication of the factors that most influence the CPM's decisions. This information can \ptmdII{help} understand the CPM's internal workings. Tab.~\ref{tab:fitted_coeff}
+shows \ptmdI{the} top 3 largest coefficients
+(see Tab.~\ref{tab:full_fitted_coeff} for full coefficients). Although the coefficient\ptmdI{s} var\ptmdI{y} as they are extracted with different LMs, 
+\ptmdI{their orders are generally consistent, }
+except for a few features. This 
+\ptmdI{observation}
+provides some clues into how the CPM makes its decisions. In the current 
+\ptdyI{example,}
+the CPM focuses on general helpfulness and also prefers response\ptmdI{s} that are detailed enough but also factually correct.
+
+\begin{table}[htb]
+\begin{centering}
+\begin{tabular}{cccc}
+\toprule
+\multicolumn{2}{c}{CPM-GPT-3.5} & \multicolumn{2}{c}{CPM-Flan-T5}\tabularnewline
+\cmidrule(lr){1-2}\cmidrule(lr){3-4}
+Feature & Coefficient & Feature & Coefficient\tabularnewline
+\midrule
+helpfulness & 0.246 & fail-to-consider-context & 0.420\tabularnewline
+enough-detail & 0.235 & enough-detail & 0.244\tabularnewline
+factuality & 0.187 & factuality & 0.227\tabularnewline
+\bottomrule
+\end{tabular}
+\par\end{centering}
+\caption{%
+\ptmdI{Three largest CPM coefficients}
+on HH-RLHF dataset. 
+\label{tab:fitted_coeff}}
+\end{table}
+
+\paragraph{LM-extracted features}
+The features extracted by the LM enable intuitive explanation of generated responses. This 
+allows
+supervising complex behavior in \ptmdI{a} human-interpretable way.  Tab.~\ref{tab:feature_values}
+shows examples of these features,
+which can be used to identify which aspects of the response contribute most to the predicted preference judgement.  By decompos\ptmdI{ing} a hard preference (``This text is not preferable.”) into a series of easier features (``This text is generally unhelpful, as it is easy to read but has little detailed information"), it allows \ptmdI{easier inspection}
+for a human overseer.
+
+
+\begin{table}[htb]
+\centering{}%
+\begin{tabular}{lccccc}
+\toprule
+    & \multicolumn{5}{c}{\footnotesize{}Features}\tabularnewline
+\multicolumn{1}{c}{\footnotesize{}Dialogue} & {\tiny{}\rotatebox[origin=c]{90}{helpfulness}} & {\tiny{}\rotatebox[origin=c]{90}{readability}} & {\tiny{}\rotatebox[origin=c]{90}{enough-detail}} & {\tiny{}\rotatebox[origin=c]{90}{factuality}} & {\tiny{}\rotatebox[origin=c]{90}{\makecell{fail-to-consider-\\context}}}\tabularnewline
+\midrule
+{\tiny{}Q: What things can I create with java programming?} \tabularnewline
+    
+{\makecell[l]{\tiny{}R1: Java is a programming language that is designed to create applications that run on a computer.}} & {\tiny{}1.209} & {\tiny{}0.559} & {\tiny{}0.913} & {\tiny{}1.690} & {\tiny{}2.117}\tabularnewline
+    
+{\tiny{}R2: Robots} & {\tiny{}0.509} & {\tiny{}0.559} & {\tiny{}-0.075} & {\tiny{}-0.569} & {\tiny{}-0.239}\tabularnewline
+    
+\midrule
+{\tiny{}Q: Why is Lucifer referred to as the ``morning
+star"?} \tabularnewline
+    
+\makecell[l]{\tiny{}R1: Lucifer is the Morning Star because it is the brightest
+star in the sky.} & {\tiny{}1.209} & {\tiny{}0.880} & {\tiny{}1.901} & {\tiny{}0.843} & {\tiny{}0.232}\tabularnewline
+    
+{\tiny{}R2: angel} & {\tiny{}-0.890} & {\tiny{}0.239} & {\tiny{}-0.569} & {\tiny{}-0.851} & {\tiny{}-0.239}\tabularnewline
+
+\midrule
+{\tiny{}Q: I'd like to evaluate some art perhaps. Can you tell me some history about Mona Lisa, the painting?} \tabularnewline
+    
+{\makecell[l]{\tiny{}R1: The Mona Lisa is a famous painting in the Louvre, Paris, France. It is attributed to Leonardo da Vinci.}} & {\tiny{}1.909} & {\tiny{}0.880} & {\tiny{}1.901} & {\tiny{}1.690} & {\tiny{}2.588}\tabularnewline
+    
+{\makecell[l]{\tiny{}R2: It was painted by Gian Lorenzo da Sica in the late 18th century. The name of the painting is inspired by \\\tiny{}the story of the famous Italian painter Leonardo da Vinci. The painting has been described as having a\\\tiny{} ``poetic"  quality. }} & {\tiny{}0.859} & {\tiny{}0.239} & {\tiny{}1.901} & {\tiny{}0.278} & {\tiny{}-0.239}\tabularnewline
+
+\bottomrule
+\end{tabular}\caption{Examples of feature values of CPM-GPT-3.5. 
+Each feature value can provide information about which aspects of the response are good or bad. \label{tab:feature_values}}
+\end{table}
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
+
+
+
+\section{Ablation Study}
+
+\label{sec:ablation}
+
+In \ptmdI{this} ablation study, we evaluate the impact of two factors, data size and size of the LM for feature extraction on \ptmdII{the} HH-RLHF dataset. 
+
+\paragraph{Data scaling trend}
+To investigate the effect of data size on model robustness, we hold the model size constant (3B parameters) and vary the data size used to train the PMs.
+We independently train 
+\ptmdI{each PM method on two}
+disjoint subsets of the training data, as described in Sec.~\ref{sec:model_robustness}. We gradually increase the data size from 100 to 10,000.
+Fig.~\ref{fig:hh_data_scaling} shows the results of the model robustness experiment. CPMs rapidly become consistent as the data size increases and achieve stable consistency between two PMs with a data size of over 500. In contrast, standard PMs show poor consistency between models, especially when the data size is small. This suggests that CPMs are more robust than standard PMs and can produce reliable results even with a small amount of data.
+
+\begin{figure}[ht]
+\begin{centering}
+\begin{tabular}{cc}
+{\includegraphics[width=\columnwidth]{figure/hh_convergence_v2.pdf}} 
+\tabularnewline
+\end{tabular}
+\par\end{centering}
+\caption{
+BoN comparison of two models fitted independently with scaling data size in HH-RLHF dataset (left: CPM-GPT-3.5, middle: CPM-Flan-T5, right: standard PM\ptmdI{)}.}\label{fig:hh_data_scaling}
+\end{figure}
+
+\paragraph{Model scaling trend}
+To investigate the effect of \ptmdI{the size of the LM}
+used for feature extraction, 
+we gradually increase \ptmdI{this} size from Flan-T5 ``small'' (80M parameters) to ``XL'' (3B parameters) and track two important metrics: model generalizability (described in Sec.~\ref{sec:referece_comparison}) and win rate (described in Sec.~\ref{sec:quality_eval}). The training data size is fixed to 10K.
+As shown in Fig.~\ref{fig:hh_model_scaling},
+both model generalizability and win rate steadily improve with \ptmdI{increasing} LM size. This confirms that LM capability propagates to feature extraction, and that CPM can take advantage of it. 
+This further means that CPM\ptmdII{s} can become even more useful as \ptmdII{extractor} LMs become more capable. The smooth and gradual increase of the win rate as a function of LM size suggests that our findings generalize to the case of using even larger LMs for feature extraction.
+
+\begin{figure}[ht]
+\begin{centering}
+\begin{tabular}{ccc}
+{\includegraphics[width=0.5\columnwidth]{figure/hh_external_compare_scaling_v3.pdf}} & {\includegraphics[width=0.5\columnwidth]{figure/win_rate_scaling_v3.pdf}} \\ 
+ \tabularnewline
+\end{tabular}
+\par\end{centering}
+\caption{
+Model size scaling experiment using Flan-T5. 
+(left: comparison with the reference PM, right: win rate over initial generation after BoN sampling based on each PM)
+}\label{fig:hh_model_scaling}
+\end{figure}
+\begin{comment}
+This section presents just the key findings of our study. {Full results} and detailed discussions can be found in App. ????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????\ref{app:ablation}.
+
+\paragraph{Data scaling trend}
+
+\paragraph{Model scaling trend}
+
+\end{comment}
+
+
+
+\section{Related work}
+
+
+\paragraph{Robustness of preference models}
+PM overoptimization is an instance of reward hacking, a situation when a policy exploits flaws in its reward function \citep{amodei2016concrete,skalse2022}. These flaws can come from errors of human evaluators  \citep{pandey2022modeling}, the inherent difficulty of learning preferences of irrational agents \citep{mindermann2018occam,shah2019feasibility} or \ptmdI{the} fragility of learned reward functions \ptmdI{to} adversarial attacks \citep{mckinney2023fragility}. \cite{gao2023scaling} studied the scaling properties of PM overoptimization and \cite{casper2023open} discuss it in a broader context of open problems with RLHF. More generally, PMs can learn to be sensitive to spurious features associated with human feedback. This leads to failure modes such as sycophancy \cite[a tendency to answer a question with a user's preferred answer, even if that answer is not correct;][]{cotra2021why,perez2022discovering} or social bias \citep[due narrow demographics of feedback providers;][]{santurkar2023whose,hartmann2023political}. Despite its growing importance, the problem of learning robust PMs for aligning LMs is largely neglected. The present paper attempts to fill this gap.
+
+\paragraph{Decomposing tasks for LMs.}
+There are numerous examples of task decomposition increasing the accuracy or robustness of language models. 
+Breaking down problems into steps \citep[chain-of-thought;]{wei_chain--thought_2022} or into a sequence of subproblems depending on answers to previous subproblems \citep{zhou2023leasttomost} are enormously beneficial for tasks involving reasoning. 
+Others explored a stronger separation: solving subproblems independently in different LM context windows. For instance, 
+\cite{creswell2022selectioninference} alternate between selection and inference to generate a series of interpretable, casual reasoning steps. 
+\cite{radhakrishnan2023question} found that solving subproblems in separate context windows improves faithfulness of reasoning. 
+\cite{reppert2023iterated} build compositional LM programs by applying decomposition iteratively, with a human in the loop, to facilitate science question answering. The present paper find\ptmdI{s} similar robustness benefits of decomposition for preference modeling.
+\paragraph{Scalable oversight}
+Scalable oversight is the problem of evaluating the behaviour of agents more capable than the evaluators \citep{bowman_measuring_2022}. On the one hand, LMs may
+soon grow capable of completing tasks for which humans will not be able to provide feedback. On the other, LMs might also be capable of reasoning about flaws in their evaluation procedures \citep{berglund2023taken} and exploiting them unbeknownst to overseers. Current proposals for solving scalable oversight focus on recursively relying on other LMs to assist human evaluators \citep{irving2018ai,leike2018scalable,christiano2018supervising}. RL from AI feedback \citep{bai2022constitutional} attempts to implement this idea by using carefully prompted LMs to generate training data for PMs. In contrast, we propose to rely on LMs 
+during a single inference step of a PM.
+
+
+
+\section{Conclusion}
+
+
+We introduce Compositional Preference Models (CPMs), a simple and effective paradigm for training robust and interpretable preference models. CPMs decompose global preference scores into interpretable features and rely on language models (LMs) to extract those features. Despite their simplicity, CPMs are robust to different \ptmdII{sub}samplings of the dataset and to overoptimization, and they outperform conventional preference models at obtaining preferred best-of-$n$ samples. We believe that CPMs pave the way for combining human insights into preference judgements with the LM capabilities to extract them. Given the recent advances in LM \ptmdI{abilities}, CPMs have the potential to be\ptmdII{ing} used for alignment and scalable oversight of \ptmdII{models} with superhuman capabilities. 
+\reb{One limitation of our work is that instead of a genuine human evaluation of the preferences, 
+we use a proxy LLM (Claude 2) for \ptdyIII{the} evaluation. 
+One research direction here could be to introduce a task-oriented generation scenario \ptdyIII{(e.g. task accomplishment)} where helpfulness 
+could be evaluated easily and to understand how 
+to inform the preference model with this scenario.}
+\begin{comment}
+\reb{One limitation of our work is that instead of a genuine human evaluation of the preferences predicted by our CPM, we use a proxy LLM (Claude 2) for that evaluation. 
+There are serious challenges in performing human evaluation, 
+in particular in ensuring that the the evaluation protocol is consistent with the data used to train the preference model.
+A promising research directions there could be to use the ``generic'' preference data in tandem with some amount of specific training examples informed by the evaluation protocol.
+}\fdyIII{IMO the added part is a bit lengthy, and use words that are not used in other sections. I think one or two line of admitting the further needs of human evaluation and another direction of end-to-end task (e.g., helpfulness in the context of a task-oriented dialog scenario where success (task accomplishment) would suffice?}
+\end{comment}
+\ptmdII{Finally, another possible objective for future research would be to explore how to \emph{elicit} decomposed features that can capture various kinds of complex preference judgements. A promising direction here would be to leverage LMs to not only score, but actually \emph{discover} the component features that determine these judgements.
+
+
+
+}%
+
+\begin{comment}
+While \ptmdI{here} we have tried to \ptmdI{propose}
+sensible 
+features that can decompose \ptmdI{these judgements} into reasonable components, we have 
+\ptdyI{observed}
+that LMs are as efficient as humans at this task. 
+\end{comment}
+
+\clearpage
+
+
+
+

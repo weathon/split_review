@@ -1,0 +1,428 @@
+\title{GPU-Accelerated Counterfactual Regret Minimization}
+
+\begin{abstract}
+	Counterfactual regret minimization is a family of algorithms of no-regret learning dynamics capable of solving large-scale imperfect information games. We propose implementing this algorithm as a series of dense and sparse matrix and vector operations, thereby making it highly parallelizable for a graphical processing unit, at a cost of higher memory usage. Our experiments show that our implementation performs up to about 401.2 times faster than OpenSpiel's Python implementation and, on an expanded set of games, up to about 203.6 times faster than OpenSpiel's C++ implementation and the speedup becomes more pronounced as the size of the game being solved grows.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Counterfactual regret minimization (CFR)~\citep{NIPS2008_08d98638} and its variants dominated the development of AI agents for large imperfect information games like \textit{Poker}~\citep{10.5555/2832249.2832339,doi:10.1126/science.aam6960,doi:10.1126/science.aao1733,doi:10.1126/science.aay2400} and \textit{The Resistance: Avalon}~\citep{NEURIPS2019_912d2b1c} and were components of ReBeL~\citep{NEURIPS2020_c61f571d} and student of games~\citep{doi:10.1126/sciadv.adg3256}. Notable variants of CFR are as follows: CFR+ by~\citet{tammelin2014solvinglargeimperfectinformation} (optionally) eliminates the averaging step while improving the convergence rate; Sampling variants~\citep{NIPS2009_00411460} makes a complete recursive tree traversal unnecessary;~\citet{Burch_Johanson_Bowling_2014} proposes CFR-D in which games are decomposed into subgames;~\citet{10.1609/aaai.v33i01.33011829} explores modifying CFR such as alternate weighted averaging (and discounting) schemes;~\citet{xu2024dynamic} learns a discounting technique from smaller games to be used in larger games.
+
+We propose implementing CFR as a series of linear algebra operations, as done by GraphBLAS~\citep{7761646} for graph algorithms, thereby parallelizing it for a graphical processing unit (GPU) at a cost of higher memory usage. We analyze the runtimes of our implementation with both computer processing unit (CPU) and GPU backends and compare them to Google DeepMind's OpenSpiel~\citep{lanctot2020openspielframeworkreinforcementlearning} implementations in Python and C++ on 20 games of differing sizes.
+
+Our experiments show that, compared to Google DeepMind OpenSpiel's~\citep{lanctot2020openspielframeworkreinforcementlearning} Python implementation, our GPU implementation performs about 3.5 times slower for small games but is up to about 401.2 times faster for large games. Against their C++ implementation, our performance with a GPU is up to about 85.5 times slower for small games, but, on an expanded set of games, is up to about 203.6 times faster for large games. Even without a GPU, our implementation shows speedups compared to the OpenSpiel baselines (from about 1.5 to 46.8 times faster than their Python implementation and from 16.8 times slower to 4.5 times faster than theirs in C++). We see that the speedup becomes more pronounced as the size of the game solved grows.
+
+
+
+\section{Background}
+
+
+The background of our work and the notations we use throughout this paper is introduced below.
+
+\subsection{Finite Extensive-Form Games}
+
+An extensive-form game is a representation of games that allow the specification of the rules of the game, information sets (infosets), actions, actors (players and the nature), chances, and payoffs.
+
+\begin{definition}
+	\normalfont
+	The formal definition of a \textbf{finite extensive-form game}~\citep{osborne1994course} is a structure $\displaystyle \gG = \langle \gT, \sH, f_h, \sA, f_a, \sI, f_i, \sigma_0, u \rangle$ where:
+
+	\begin{itemize}
+		\item $\displaystyle \gT = \langle \sV, v_0, \sT, f_{\parents}\rangle$ is a \textbf{finite game tree} with a \textbf{finite set of nodes} (i.e., vertices) $\displaystyle \sV$, a unique \textbf{initial node} (i.e., a root) $\displaystyle v_0 \in \sV$, a \textbf{finite set of terminal nodes} (i.e., leaves) $\displaystyle \sT \subseteq \sV$, and a \textbf{parent function} $\displaystyle f_{\parents}: \sV_+ \rightarrow \sD$ that maps a non-initial node (i.e., a non-root) $\displaystyle v_+ \in \sV_+$ to an immediate predecessor (i.e., a parent) $\displaystyle d \in \sD$, with $\displaystyle \sV_+ = \sV \backslash \{v_0\}$ the finite set of non-initial nodes (i.e., non-roots) and $\displaystyle \sD = \sV \backslash \sT$ the finite set of decision nodes (i.e., internal vertices),
+		\item $\displaystyle \sH$ is a \textbf{finite set of infosets}, $\displaystyle f_h: \sD \rightarrow \sH$ is an \textbf{information partition} of $\displaystyle \sD$ associating each decision node $\displaystyle d \in \sD$ to an infoset $\displaystyle h \in \sH$,
+		\item $\displaystyle \sA$ is a \textbf{finite set of actions}, $\displaystyle f_a: \sV_+ \rightarrow \sA$ is an \textbf{action partition} of $\displaystyle \sV_+$ associating each non-initial node $\displaystyle v_+ \in \sV_+$ to an action $\displaystyle a \in \sA$ such that $\displaystyle \forall d \in \sD$ the restriction $\displaystyle f_{a,d}: S(d) \rightarrow A(f_h(d))$ is a bijection, with $\displaystyle S(d \in \sD) = \{v_+ \in \sV_+: f_{\parents}(v_+) = d\}$ the finite set of immediate successors (i.e., children) of a node $\displaystyle d \in \sD$ and $\displaystyle A(h \in \sH) = \{a \in \sA: [\exists v_+ \in \sV_+](f_h(f_{\parents}(v_+)) = h \land f_a(v_+) = a)\}$ the finite set of available actions at an infoset $\displaystyle h \in \sH$,
+		\item $\displaystyle \sI$ is a \textbf{finite set of (rational) players and, optionally, the nature} (i.e., chance) $\displaystyle i_0 \in \sI$, $\displaystyle f_i: \sH \rightarrow \sI$ is a \textbf{player partition} of $\displaystyle \sH$ associating each infoset $\displaystyle h \in \sH$ to a player $\displaystyle i \in \sI$,
+		\item $\displaystyle \sigma_0: \sQ_0 \rightarrow [0, 1]$ is a \textbf{chance probabilities function} that associates each pair of a nature infoset and an available action $\displaystyle (h_0, a) \in \sQ_0$ to an independent probability value, with $\displaystyle \sQ_j = \{(h, a) \in \sQ: h \in \sH_j\}$ the finite set of pairs of a player infoset $\displaystyle h_j \in \sH_j$ and an available action $\displaystyle a \in A(h_j)$, $\displaystyle \sQ = \{(h, a) \in \sH \times \sA: a \in A(h)\}$ the finite set of pairs of an infoset $\displaystyle h \in \sH$ and an available action $\displaystyle a \in A(h)$, and $\displaystyle \sH_j = \{h \in \sH: f_i(h) = i_j\}$ the finite set of infosets associated with a player $\displaystyle i_j \in \sI$, and
+		\item $\displaystyle u: \sT \times \sI_+ \rightarrow \R$ is a \textbf{utility function} that associates each pair of a terminal node $\displaystyle t \in \sT$ and a (rational) player $\displaystyle i_+ \in \sI_+$ to a real payoff value. $\sI_+ = \sI \backslash \{i_0\}$ is the finite set of (rational) players.
+	\end{itemize}
+\end{definition}
+
+\subsection{Nash Equilibrium}
+
+Each player $\displaystyle i_j \in \sI$ selects a \textbf{player strategy} $\displaystyle \sigma_j: \sQ_j \rightarrow [0, 1]$ from a \textbf{set of player strategies} $\displaystyle \sSigma_j$. A player strategy $\displaystyle \sigma_j \in \sSigma_j$ associates, for each player infoset $\displaystyle h_j \in \sH_j$, a probability distribution over a finite set of available actions $\displaystyle A(h_j)$. A \textbf{strategy profile} $\displaystyle \sigma: \sQ \rightarrow [0, 1]$ is a direct sum of the strategies of each player $\displaystyle \sigma = \mathsmaller{\bigoplus}_{i_j \in \sI}\sigma_j$ which, for each infoset $\displaystyle h \in \sH$, gives a probability distribution over a finite set of available actions $\displaystyle A(h)$. $\displaystyle \sSigma$ is a set of strategy profiles. $\displaystyle \sigma_{-j} = \mathsmaller{\bigoplus}_{i_k \in \sI \backslash \{i_j\}}\sigma_k$ is a direct sum of all player strategies in $\displaystyle \sigma$ except $\displaystyle \sigma_j$ (i.e., that of player $\displaystyle i_j \in \sI$).
+
+Let $\displaystyle \pi: \sSigma \times \sV \rightarrow \R$ be a probability of reaching a vertex $\displaystyle v \in \sV$ following a strategy profile $\displaystyle \sigma \in \sSigma$.
+
+\begin{equation*}
+	\pi(\sigma \in \sSigma, v \in \sV) = \begin{cases} \sigma(f_h(f_{\parents}(v)), f_a(v)) \pi(\sigma, f_{\parents}(v)) & v \in \sV_+ \\ 1 & v = v_0 \\ \end{cases}
+\end{equation*}
+
+Then, define $\displaystyle \hat{u}: \sSigma \times \sI \rightarrow \R$ to be an expected payoff of a (rational) player $\displaystyle i_+ \in \sI_+$, following a strategy profile $\displaystyle \sigma \in \sSigma$.
+
+\begin{equation*}
+	\hat{u}(\sigma \in \sSigma, i_+ \in \sI_+) = \sum_{t \in \sT}{\pi(\sigma, t)u(t, i_+)}
+\end{equation*}
+
+A strategy profile $\displaystyle \sigma^* \in \sSigma$ is a \textbf{Nash equilibrium}, a traditional solution concept for non-cooperative games, if no player stands to gain by deviating from the strategy profile.
+
+\begin{equation*}
+	\forall i_{+,j} \in \sI_+ \quad \hat{u}(\sigma^*, i_{+,j}) \ge \max_{\sigma_j' \in \sSigma_j}{\hat{u}(\sigma_j' \oplus \sigma^*_{-j}, i_{+,j})}
+\end{equation*}
+
+A strategy profile that approximates a Nash equilibrium $\displaystyle \sigma^*$ is an $\displaystyle \bm{\eps}$\textbf{-Nash equilibrium} $\displaystyle \sigma^{*,\eps} \in \sSigma$ if
+
+\begin{equation*}
+	\forall i_{+,j} \in \sI_+ \quad \hat{u}(\sigma^{*,\eps}, i_{+,j}) + \eps \ge \max_{\sigma_j' \in \sSigma_j}{\hat{u}(\sigma_j' \oplus \sigma^{*,\eps}_{-j}, i_{+,j})}
+\end{equation*}
+
+\subsection{Counterfactual Regret Minimization}
+
+Define $\displaystyle \check{u}: \sSigma \times \sV \times \sI_+ \rightarrow \R$ as an expected payoff of a (rational) player $\displaystyle i_+ \in \sI_+$ at a node $\displaystyle v \in \sV$, following a strategy profile $\displaystyle \sigma \in \sSigma$.
+
+\begin{equation}
+	\check{u}(\sigma \in \sSigma, v \in \sV, i_+ \in \sI_+) = \begin{cases} \sum_{s \in S(v)}\sigma(f_h(v), f_a(s))\check{u}(\sigma, s, i_+)  & v \in \sD \\ u(v, i_+) & v \in \sT \\ \end{cases}
+	\label{eqn:expected_payoff}
+\end{equation}
+
+Let $\displaystyle \check{\pi}: \sSigma \times \sV \times \sI \rightarrow \R$ be a probability of reaching a vertex $\displaystyle v \in \sV$ following a strategy profile $\displaystyle \sigma \in \sSigma$ while ignoring a strategy of a player $\displaystyle i \in \sI$.
+
+\begin{equation}
+	\resizebox{\linewidth}{!}{$
+		\check{\pi}(\sigma \in \sSigma, v \in \sV, i \in \sI) = \begin{cases} \check{\pi}(\sigma, f_{\parents}(v), i) \begin{cases} \sigma(f_h(f_{\parents}(v)), f_a(v)) & f_i(f_h(f_{\parents}(v))) \ne i \\ 1 & f_i(f_h(f_{\parents}(v))) = i \end{cases} & v \in \sV_+ \\ 1 & v = v_0 \\ \end{cases}
+	$}
+	\label{eqn:excepted_reach_probability}
+\end{equation}
+
+The below definition shows a counterfactual reach probability $\displaystyle \tilde{\pi}: \sSigma \times \sH \rightarrow \R$.
+
+\begin{equation}
+	\tilde{\pi}(\sigma \in \sSigma, h \in \sH) = \sum_{d \in \sD: f_h(d) = h}\check{\pi}(\sigma, d, f_i(h))
+	\label{eqn:counterfactual_reach_probability}
+\end{equation}
+
+Let $\displaystyle \bar{\pi}: \sSigma \times \sH \rightarrow \R$ be ``player'' reach probability, with $\displaystyle \hat{\pi}: \sSigma \times \sV \times \sI \rightarrow \R$ the probability of reaching a vertex $\displaystyle v \in \sV$, only considering the strategy of one particular player.
+
+\begin{equation}
+	\resizebox{\linewidth}{!}{$
+		\hat{\pi}(\sigma \in \sSigma, v \in \sV, i \in \sI) = \begin{cases} \check{\pi}(\sigma, f_{\parents}(v), i) \begin{cases} \sigma(f_h(f_{\parents}(v)), f_a(v)) & f_i(f_h(f_{\parents}(v))) = i \\ 1 & f_i(f_h(f_{\parents}(v))) \ne i \end{cases} & v \in \sV_+ \\ 1 & v = v_0 \\ \end{cases}
+	$}
+	\label{eqn:sub_player_reach_probability}
+\end{equation}
+
+\begin{equation}
+	\bar{\pi}(\sigma \in \sSigma, h \in \sH) = \sum_{d \in \sD: f_h(d) = h}\hat{\pi}(\sigma, d, f_i(h))
+	\label{eqn:player_reach_probability}
+\end{equation}
+
+Now, let $\displaystyle \tilde{u}: \sSigma \times \sH_+ \rightarrow \R$ be a counterfactual utility, with $\displaystyle \sH_+ = \sH \backslash \sH_0$ the finite set of infosets associated with (rational) players.
+
+\begin{equation}
+	\tilde{u}(\sigma \in \sSigma, h_+ \in \sH_+) = \frac{\sum_{d \in \sD: f_h(d) = h_+}\check{\pi}(\sigma, d, f_i(h_+))\check{u}(\sigma, d, f_i(h_+))}{\tilde{\pi}(\sigma, h_+)}
+	\label{eqn:counterfactual_utility}
+\end{equation}
+
+$\displaystyle \sigma|_{h \rightarrow a} \in \sSigma$ is an overrided strategy profile of $\displaystyle \sigma$ where an action $\displaystyle a \in A(h)$ is always taken at an infoset $\displaystyle h \in \sH$.
+
+\begin{equation*}
+	\sigma|_{h \rightarrow a}((h', a') \in \sQ) = \begin{cases} \1_{a = a'} & h = h' \\ \sigma(h', a') & h \ne h' \\ \end{cases}
+\end{equation*}
+
+$\displaystyle \tilde{r}: \sSigma \times \sQ_+ \rightarrow \R$ is the instantaneous counterfactual regret, with $\displaystyle \sQ_+ = \sQ \backslash \sQ_0$ the finite set of pairs of a (rational) player infoset $\displaystyle h_+ \in \sH_+$ and an available action $\displaystyle a \in A(h_+)$.
+
+\begin{equation}
+	\tilde{r}(\sigma \in \sSigma, (h_+, a) \in \sQ_+) = \tilde{\pi}(\sigma, h_+)(\tilde{u}(\sigma|_{h_+ \rightarrow a}, h_+) - \tilde{u}(\sigma, h_+))
+	\label{eqn:instantaneous_counterfactual_regret}
+\end{equation}
+
+$\displaystyle \bar{r}^{(T)}: \sQ_+ \rightarrow \R$ is the average counterfactual regret at an iteration $\displaystyle T$. $\displaystyle \sigma^{(\tau)} \in \sSigma$ is the strategy at $\displaystyle \tau$.
+
+\begin{equation}
+	\bar{r}^{(T)}(q_+ \in \sQ_+) = \frac{1}{T} \sum_{\tau=1}^{T} \tilde{r}(\sigma^{(\tau)}, q_+)
+	\label{eqn:average_counterfactual_regret}
+\end{equation}
+
+The strategy profile for Iteration $\displaystyle T + 1$ is $\displaystyle \sigma^{(T + 1)} \in \sSigma$.
+
+\begin{equation}
+	\sigma^{(T + 1)}((h, a) \in \sQ) = \begin{cases} \begin{cases} \frac{(\bar{r}^{(T)}(h, a))^+}{\sum_{a' \in A(h)}(\bar{r}^{(T)}(h, a'))^+} & \sum_{a' \in A(h)}(\bar{r}^{(T)}(h, a'))^+ > 0 \\ \frac{1}{|A(h)|} & \sum_{a' \in A(h)}(\bar{r}^{(T)}(h, a'))^+ = 0 \end{cases} & (h, a) \in \sQ_+ \\ \sigma_0(h, a) & (h, a) \in \sQ_0 \\ \end{cases}
+	\label{eqn:next_strategy_profile}
+\end{equation}
+
+\textbf{CFR}~\citep{NIPS2008_08d98638} is an algorithm that iteratively approximates a coarse correlated equilibrium $\displaystyle \bar{\sigma}^{(T)}: \sQ \rightarrow \R$~\citep{2e2b81f3-680a-335e-852c-e26662afca5e}.
+
+\begin{equation}
+	\bar{\sigma}^{(T)}((h, a) \in \sQ) = \frac{\sum_{\tau = 1}^{T}\bar{\pi}(\sigma^{(\tau)}, h)\sigma^{(\tau)}(h, a)}{\sum_{\tau = 1}^{T} \bar{\pi}(\sigma^{(\tau)}, h)}
+	\label{eqn:average_strategy_profile}
+\end{equation}
+
+Define $\displaystyle r^{(T)}: \sI_+ \rightarrow \R$ as the average overall regret of a (rational) player $\displaystyle i_{+,j} \in \sI_+$ at an iteration $\displaystyle T$.
+
+\begin{equation*}
+	r^{(T)}(i_{+,j} \in \sI_+) = \frac{1}{T} \max_{\sigma_j' \in \sSigma_j}\sum_{\tau = 1}^{T}(\hat{u}(\sigma_j' \oplus \sigma_{-j}^{(\tau)}, i_{+,j}) - \hat{u}(\sigma^{(\tau)}, i_{+,j}))
+\end{equation*}
+
+In 2-player zero-sum games, if $\displaystyle \forall i_+ \in \sI_+\ r^{(T)}(i_+) \le \eps$, the average strategy $\displaystyle \bar{\sigma}^{(T)}$ (at an iteration $\displaystyle T$) is also a $\displaystyle 2\eps$-Nash equilibrium $\displaystyle \sigma^{*,2\eps} \in \sSigma$~\citep{NIPS2008_08d98638}.
+
+\subsection{Prior Usages of GPUs for CFR}
+
+In the mainstream literature, algorithms inspired by CFR or using CFR as a subcomponent like DeepStack~\citep{doi:10.1126/science.aam6960}, Student of Games~\citep{doi:10.1126/sciadv.adg3256}, and ReBeL~\citep{NEURIPS2020_c61f571d} only perform a limited lookahead instead of a complete game tree traversal. A neural network-based value function is typically used to evaluate the heuristic value of a node -- GPUs can be utilized for the evaluation of these networks. Besides the fact that the vanilla CFR considers the entire game tree and does not use a value function, our approach differs significantly in that we use the GPU to parallelize CFR at every step of the process.
+
+A number of obscure unpublished works~\citep{reis2015gpu,rudolfgpu} have implemented CFR directly on CUDA and found orders of magnitude improvements in performance. However, in the implementation by~\cite{rudolfgpu}, every thread assigned to each node moves up the game tree (toward the root), thus resulting in a quadratic number of visits to the game tree per iteration in the worst case. The implementation by~\cite{reis2015gpu} is superior in that only one visit is made at each node per iteration by doing level-by-level updates (an approach we also use). However, aside from reproducibility issues with his work\footnote{Reis's thesis contains screenshots of his code as figures that cannot compile due to syntax errors. For example, we point out the missing semicolon in Line 4 of Figure 12 and the mismatched square brace in Line 8 of Figure 18. Aside from the obvious errors, the thesis's code snippets do not handle chance nodes, decision nodes, and terminal nodes separately.}, both require each thread to perform a ``large number of control flow statements'' -- a limitation mentioned by~\cite{reis2015gpu} -- and require more generalized kernel instructions.
+
+Our approach addresses these issues by framing this problem as a series of linear algebra operations, and the utilization of GPUs for this task is an extremely well-studied problem in the field of systems, and can take advantage of optimized opcodes for these operations. Our implementation is also compatible with discrete games in OpenSpiel, which are commonly used as benchmarks for evaluating newly proposed CFR variants, unlike the work by~\cite{reis2015gpu} whose compatible games are limited to customized poker variants. In addition, our pure Python code is open-source.
+
+
+
+\section{Implementation}
+
+
+In order to highly parallelize the execution of CFR, we implement the algorithm as a series of dense and sparse matrix and vector operations and avoid recursive game tree traversals.
+
+\subsection{Setup}
+
+Calculating expected payoffs of players $\displaystyle \check{u}: \sSigma \times \sV \times \sI_+ \rightarrow \R$ in~\Eqref{eqn:expected_payoff}, and reach probabilities $\displaystyle \check{\pi}: \sSigma \times \sV \times \sI \rightarrow \R$ in~\Eqref{eqn:excepted_reach_probability} and $\displaystyle \hat{\pi}: \sSigma \times \sV \times \sI \rightarrow \R$ in~\Eqref{eqn:player_reach_probability} are problems of dynamic programming on trees. To calculate these values with linear algebra operations, we represent the game tree $\displaystyle \gT$ as an adjacency matrix $\displaystyle \mG \in \R^{\sV^2}$ and the level graphs of the game tree $\displaystyle \gT$ as adjacency matrices $\displaystyle \mL^{(1)}, \mL^{(2)}, \hdots, \mL^{(D)} \in \R^{\sV^2}$, with $\displaystyle D = \max_{t \in \sT}{d_\gT(t)}$ the maximum depth of any node in the game tree $\displaystyle \gT$ and $\displaystyle d_\gT: \sV \rightarrow \sZ$ the depth of a vertex $\displaystyle v \in \sV$ in the game tree $\displaystyle \gT$ from the root $\displaystyle v_0$.
+
+\begin{equation*}
+	\mG = \left( \begin{cases} \1_{v = f_{\parents}(v')} & v \in \sD \land v' \in \sV_+ \\ 0 & v \in \sT \lor v' = v_0 \end{cases} \right)_{(v, v') \in \sV^2}
+\end{equation*}
+
+\begin{equation*}
+	\forall l \in [1,D] \cap \sZ \quad \mL^{(l)} = \left( \begin{cases} \1_{v = f_{\parents}(v') \land d_\gT(v') = l} & v \in \sD \land v' \in \sV_+ \\ 0 & v \in \sT \lor v' = v_0 \end{cases} \right)_{(v, v') \in \sV^2}
+\end{equation*}
+
+$\displaystyle \mM^{(Q_+,V)} \in \R^{\sQ_+ \times \sV}, \mM^{(H_+,Q_+)} \in \R^{\sH_+ \times \sQ_+}, \mM^{(V,I_+)} \in \R^{\sV \times \sI_+}$ are masking matrices that represent the game $\displaystyle \gG$. Matrix $\displaystyle \mM^{(Q_+,V)}$ describes whether a node $\displaystyle v \in \sV$ is a result of an action from a (rational) player infoset $\displaystyle (h_+, a) \in \sQ_+$. Matrix $\displaystyle \mM^{(H_+,Q_+)}$ describes whether a (rational) player infoset $\displaystyle h_+ \in \sH_+$ is the first element of the corresponding (rational) player infoset-action pair $\displaystyle (h_+, a) \in \sQ_+$. Finally, matrix $\displaystyle \mM^{(V,I_+)}$ describes whether a node $\displaystyle v \in \sV$ has a parent whose associated infoset's associated player is $\displaystyle i_+ \in \sI_+$ (i.e., which player $\displaystyle i_+ \in \sI_+$ acted to reach a node $\displaystyle v \in \sV$). Note that we omit the nature player $\displaystyle i_0$ and related infosets $\displaystyle \sH_0$ and infoset-action pairs $\displaystyle \sQ_0$ as only the strategies of (rational) players are updated by the algorithm. These mask-like matrices are later used to ``select'' the values associated with a player, action, node, or infoset during the iteration.
+
+\begin{equation*}
+	\mM^{(Q_+,V)} = \left( \begin{cases} \1_{q_+ = (f_h(f_{\parents}(v)), f_a(v))} & v \in \sV_+ \\ 0 & v = v_0 \end{cases} \right)_{(q_+, v) \in \sQ_+ \times \sV}
+\end{equation*}
+
+\begin{equation*}
+	\resizebox{\linewidth}{!}{$
+		\mM^{(H_+,Q_+)} = \left( \1_{h_+ = h_+'} \right)_{(h_+, (h_+', a)) \in \sH_+ \times \sQ_+} \qquad \mM^{(V,I_+)} = \left( \begin{cases} \1_{f_i(f_h(f_{\parents}(v))) = i_+} & v \in \sV_+ \\ 0 & v = v_0 \\ \end{cases} \right)_{(v, i_+) \in \sV \times \sI_+}
+	$}
+\end{equation*}
+
+$\displaystyle \mG, \mL^{(1)}, \mL^{(2)}, \hdots, \mL^{(D)}, \mM^{(Q_+,V)}, \mM^{(H_+,Q_+)}, \mM^{(V,I_+)}$ are constant matrices.\footnote{The sparsity of $\displaystyle \mM^{(V,I_+)}$ depends on the number of (rational) players. For games with many players, it may be more efficient to implement this as sparse as well.} As such, they are implemented as sparse matrices in a compressed sparse row (CSR) format. Matrix $\displaystyle \mM^{(V,I_+)}$ and all other defined matrices and vectors are dense.
+
+Define a vector $\displaystyle \vs^{(\sigma_0)}$ representing the probabilities of nature infoset-action pairs $\displaystyle \sQ_0$.
+
+\begin{equation*}
+	\vs^{(\sigma_0)} = \left(\begin{cases} \begin{cases} \sigma_0(f_h(f_{\parents}(v)), f_a(v)) & f_h(f_{\parents}(v)) \in \sH_0 \\ 0 & f_h(f_{\parents}(v)) \in \sH_+ \\ \end{cases} & v \in \sV_+ \\ 0 & v = v_0 \\ \end{cases}\right)_{v \in \sV}
+\end{equation*}
+
+$\displaystyle \vsigma \in \R^{\sQ_+}$ is the strategy over (rational) player infoset-action pairs $\displaystyle \sQ_+$ at an iteration $\displaystyle T$.
+
+\begin{equation*}
+	\vsigma = \left( \sigma^{(T)}(q_+) \right)_{q_+ \in \sQ_+}
+\end{equation*}
+
+A vector $\displaystyle \vsigma^{(T = 1)} \in \R^{\sQ_+}$ representing the initial strategy profile (i.e., at $\displaystyle T = 1$) is shown below.
+
+\begin{equation*}
+	\resizebox{\linewidth}{!}{$
+		\vsigma^{(T = 1)} = \left( \sigma^{(1)}(q_+) \right)_{q_+ \in \sQ_+} = \left( \frac{1}{|A(h_+)|} \right)_{(h_+, a) \in \sQ_+} = \1_{|\sQ_+|} \oslash \left(\left(\mM^{(H_+,Q_+)}\right)^\top \left(\left(\mM^{(H_+,Q_+)}\right)\1_{|\sQ_+|}\right)\right)
+	$}
+\end{equation*}
+
+On each iteration, the strategy at the next iteration $\displaystyle \vsigma' = \left( \sigma^{(T + 1)}(q_+) \right)_{q_+ \in \sQ_+}$ is calculated using $\displaystyle \vsigma$.
+
+\subsection{Iteration}
+
+\subsubsection{Tree Traversal}
+
+Let a vector $\displaystyle \vs \in \R^{\sV}$ represent the probabilities of taking an action that reaches a node $\displaystyle v \in \sV$ at an iteration $\displaystyle T$. This value is irrelevant for the unique initial node $\displaystyle v_0$.
+
+\begin{equation*}
+	\vs = \left(\begin{cases} \sigma^{(T)}(f_h(f_{\parents}(v)), f_a(v)) & v \in \sV_+ \\ 0 & v = v_0 \\ \end{cases}\right)_{v \in \sV} = \left( \mM^{(Q_+,V)} \right)^\top\vsigma + \vs^{(\sigma_0)}
+\end{equation*}
+
+For later use, we also broadcast the vector $\displaystyle \vs$ to be a matrix $\displaystyle \mS \in \R^{\sV^2}$. This is defined only for notational convenience and, in our implementation, this matrix is not actually stored in memory.
+
+\begin{equation*}
+	\mS = \left( \vs_{v'} \right)_{(v, v') \in \sV^2}
+\end{equation*}
+
+The recurrence relations of the expected payoffs of (rational) players $\displaystyle \check{u}: \sSigma \times \sV \times \sI_+ \rightarrow \R$ (see~\Eqref{eqn:expected_payoff}) is expressed with matrices. Define the following matrices $\displaystyle \widecheck{\mU}^{(1)}, \widecheck{\mU}^{(2)}, \hdots, \widecheck{\mU}^{(D + 1)} \in \R^{\sV \times \sI_+}$:
+
+\begin{equation*}
+	\forall l \in [1, D + 1] \cap \sZ \quad \widecheck{\mU}^{(l)} = \left( \begin{cases} \check{u}(\sigma^{(T)}, v, i_+) & d_\gT(v) \ge l - 1 \lor v \in \sT \\ 0 & d_\gT(v) < l - 1 \land v \in \sD \\ \end{cases} \right)_{(v, i_+) \in \sV \times \sI_+}
+\end{equation*}
+
+\begin{equation}
+	\resizebox{\linewidth}{!}{$
+		\widecheck{\mU}^{(D + 1)} = \left( \begin{cases} u(v, i_+) & v \in \sT \\ 0 & v \in \sD \end{cases} \right)_{(v, i_+) \in \sV \times \sI_+} \qquad \forall l \in [1, D] \cap \sZ \quad \widecheck{\mU}^{(l)} = \left(\mL^{(l)} \odot \mS\right) \widecheck{\mU}^{(l + 1)} + \widecheck{\mU}^{(l + 1)}
+	$}
+	\label{eqn:expected_payoffs_matrix_recurrence}
+\end{equation}
+
+Let $\displaystyle \widecheck{\mU} \in \R^{\sV \times \sI_+}$ represent $\displaystyle \check{u}: \sSigma \times \sV \times \sI_+ \rightarrow \R$.
+
+\begin{equation*}
+	\widecheck{\mU} = \left( \check{u}(\sigma^{(T)}, v, i_+) \right)_{(v, i_+) \in \sV \times \sI_+} = \widecheck{\mU}^{(1)}
+\end{equation*}
+
+Let $\displaystyle \widecheck{\mS} \in \R^{\sV \times \sI_+}$ be a matrix to be used in a later calculation.
+
+\begin{equation}
+	\widecheck{\mS} = \left( \begin{cases} \vs_v & \left( \mM^{(V,I_+)} \right)_{v,i_+} = 0 \\ 1 & \left( \mM^{(V,I_+)} \right)_{v,i_+} = 1 \\ \end{cases} \right)_{(v, i_+) \in \sV \times \sI_+}
+	\label{eqn:strategies_matrix}
+\end{equation}
+
+In order to represent a restriction (ignoring nature) of the ``excepted'' reach probabilities (defined in~\Eqref{eqn:excepted_reach_probability}) $\displaystyle \check{\pi}: \sSigma \times \sV \times \sI \rightarrow \R$ with matrices, we, again, express the recurrence relations with matrices. We therefore define the following matrices: $\displaystyle \widecheck{\mPi}^{(0)}, \widecheck{\mPi}^{(1)}, \widecheck{\mPi}^{(2)}, \hdots, \widecheck{\mPi}^{(D)} \in \R^{\sV \times \sI_+}$.
+
+\begin{equation*}
+	\forall l \in [0, D] \cap \sZ \quad \widecheck{\mPi}^{(l)} = \left( \begin{cases} \check{\pi}(\sigma^{(T)}, v, i_+) & d_\gT(v) \le l \\ 0 & d_\gT(v) > l \\ \end{cases} \right)_{(v, i_+) \in \sV \times \sI_+}
+\end{equation*}
+
+\begin{equation}
+	\resizebox{\linewidth}{!}{$
+		\widecheck{\mPi}^{(0)} = \left( \1_{v = v_0} \right)_{(v, i_+) \in \sV \times \sI_+} \qquad \forall l \in [1, D] \cap \sZ \quad \widecheck{\mPi}^{(l)} = \left(\left(\mL^{(l)}\right)^\top\widecheck{\mPi}^{(l - 1)}\right) \odot \widecheck{\mS} + \widecheck{\mPi}^{(l - 1)}
+	$}
+	\label{eqn:excepted_reach_probabilities_matrix_recurrence}
+\end{equation}
+
+For~\Eqref{eqn:expected_payoffs_matrix_recurrence} and~\Eqref{eqn:excepted_reach_probabilities_matrix_recurrence}, we use in-place addition in our implementation to make sure only newly ``visited'' nodes are touched at each depth. This way, each node is only ``visited'' once during a single pass.
+
+Let a vector $\displaystyle \widecheck{\vpi} \in \R^{\sV}$ be the terms in~\Eqref{eqn:counterfactual_reach_probability} for counterfactual reach probabilities $\displaystyle \tilde{\pi}: \sSigma \times \sH \rightarrow \R$.
+
+\begin{equation*}
+	\resizebox{\linewidth}{!}{$
+		\widecheck{\vpi} = \left( \begin{cases} \begin{cases} \check{\pi}(\sigma^{(T)}, v, f_i(f_h(f_{\parents}(v)))) & f_h(f_{\parents}(v)) \in \sH_+ \\ 0 & f_h(f_{\parents}(v)) \in \sH_0 \\ \end{cases} & v \in \sV_+ \\ 0 & v = v_0 \\ \end{cases} \right)_{v \in \sV} = \left(\mM^{(V,I_+)} \odot \widecheck{\mPi}^{(D)}\right)\1_{|\sI_+|}
+	$}
+\end{equation*}
+
+A vector $\displaystyle \widehat{\vpi} \in \R^{\sV}$ representing the terms of the equation for ``player'' reach probabilities $\displaystyle \bar{\pi}: \sSigma \times \sH \rightarrow \R$ in~\Eqref{eqn:player_reach_probability} can be calculated identically but with $\displaystyle \widehat{\mS}$ instead of $\displaystyle \widecheck{\mS}$ (defined in~\Eqref{eqn:strategies_matrix}) where
+
+\begin{equation*}
+	\widehat{\mS} = \left( \begin{cases} 1 & \left( \mM^{(V,I_+)} \right)_{v,i_+} = 0 \\ \vs_v & \left( \mM^{(V,I_+)} \right)_{v,i_+} = 1 \\ \end{cases} \right)_{(v, i_+) \in \sV \times \sI_+}
+\end{equation*}
+
+\begin{equation*}
+	\widehat{\vpi} = \left( \begin{cases} \begin{cases} \hat{\pi}(\sigma^{(T)}, v, f_i(f_h(f_{\parents}(v)))) & f_h(f_{\parents}(v)) \in \sH_+ \\ 0 & f_h(f_{\parents}(v)) \in \sH_0 \\ \end{cases} & v \in \sV_+ \\ 0 & v = v_0 \\ \end{cases} \right)_{v \in \sV}
+\end{equation*}
+
+\subsubsection{Average Strategy Profile}
+
+The average strategy profile $\displaystyle \bar{\sigma}^{(T)}: \sQ \rightarrow \R$ at an iteration $\displaystyle T$, formulated in~\Eqref{eqn:average_strategy_profile} and represented as a vector $\displaystyle \widebar{\vsigma} \in \R^{\sQ_+}$, can be updated from the previous iteration's $\displaystyle \bar{\sigma}^{(T - 1)}: \sQ \rightarrow \R$, represented as a vector $\displaystyle \widebar{\vsigma}' \in \R^{\sQ_+}$. For this, the ``player'' reach probabilities $\displaystyle \bar{\pi}: \sSigma \times \sH \rightarrow \R$ (\Eqref{eqn:player_reach_probability}), a restriction of which is represented by a vector $\displaystyle \widebar{\vpi} \in \R^{\sH_+}$, and their sums, a restriction of which is represented by a vector $\displaystyle \widebar{\vpi}^{(\Sigma)} \in \R^{\sH_+}$, must be calculated. The previous sums of counterfactual reach probabilities are denoted as a vector $\displaystyle \widebar{\vpi}^{(\Sigma)\prime} \in \R^{\sH_+}$.
+
+\begin{equation*}
+	\widebar{\vpi} = \left( \bar{\pi}(\sigma^{(T)}, h_+) \right)_{h_+ \in \sH_+} = \left( \mM^{(H_+, Q_+)} \right) \left( \mM^{(Q_+, V)} \right) \widehat{\vpi}
+\end{equation*}
+
+\begin{equation*}
+	\widebar{\vpi}^{(\Sigma)} = \left( \sum_{\tau = 1}^{T} \bar{\pi}(\sigma^{(\tau)}, h_+) \right)_{h_+ \in \sH_+} = \widebar{\vpi}^{(\Sigma)\prime} + \widebar{\vpi}
+\end{equation*}
+
+\begin{equation}
+	\widebar{\vsigma} = \left( \bar{\sigma}^{(T)}(q_+) \right)_{q_+ \in \sQ_+} = \widebar{\vsigma}' + \left( \left( \mM^{(H_+,Q_+)} \right)^\top \left( \widebar{\vpi} \oslash \widebar{\vpi}^{(\Sigma)} \right) \right) \odot \left( \vsigma - \widebar{\vsigma}' \right)
+	\label{eqn:average_strategy_profile_vector}
+\end{equation}
+
+\subsubsection{Next Strategy Profile}
+
+Let a vector $\displaystyle \widetilde{\vr} \in \R^{\sQ_+}$ represent instantaneous counterfactual regrets $\displaystyle \tilde{r}: \sSigma \times \sQ_+ \rightarrow \R$, defined in~\Eqref{eqn:instantaneous_counterfactual_regret}, for a strategy profile $\displaystyle \sigma^{(T)}$ at an iteration $\displaystyle T$.
+
+\begin{equation*}
+	\widetilde{\vr} = \left( \tilde{r}(\sigma^{(T)}, q_+) \right)_{q_+ \in \sQ_+} = \left(\mM^{(Q_+,V)} \right) \left(\widecheck{\vpi} \odot \left( \left( \left( \mM^{(V,I_+)} \right) \odot \left(\widecheck{\mU} - \mG^\top\widecheck{\mU}\right)\right)\1_{|\sI_+|} \right) \right)
+\end{equation*}
+
+Average counterfactual regrets $\displaystyle \bar{r}^{(T)}: \sQ_+ \rightarrow \R$ in~\Eqref{eqn:average_counterfactual_regret} can be represented with a vector $\displaystyle \widebar{\vr} \in \R^{\sQ_+}$. Let a vector $\displaystyle \widebar{\vr}' \in \R^{\sQ_+}$ be the average counterfactual regrets at the previous iteration $\displaystyle \bar{r}^{(T - 1)}: \sQ_+ \rightarrow \R$.
+
+\begin{equation}
+	\widebar{\vr} = \left( \bar{r}^{(T)}(q_+) \right)_{q_+ \in \sQ_+} = \widebar{\vr}' + \frac{1}{T} \left( \widetilde{\vr} - \widebar{\vr}' \right)
+	\label{eqn:average_counterfactual_regrets_vector}
+\end{equation}
+
+The clipped regrets are normalized to get a restriction of the next strategy profile $\displaystyle \sigma^{(T + 1)}: \sQ_+ \rightarrow \R$ from~\Eqref{eqn:next_strategy_profile} for (rational) player infoset-action pairs, represented as a vector $\displaystyle \vsigma'$.
+
+\begin{equation*}
+	\widebar{\vr}^{(+,\Sigma)} = \left( \sum_{a' \in A(h_+)} \left(\bar{r}^{(T)}(h_+, a')\right)^+ \right)_{(h_+, a) \in \sQ_+} = \left(\mM^{(H_+,Q_+)}\right)^\top\left(\left( \mM^{(H_+,Q_+)} \right) \widebar{\vr}^+\right)
+\end{equation*}
+
+\begin{equation*}
+	\vsigma' = \left( \sigma^{(T + 1)}(q_+) \right)_{q_+ \in \sQ_+} = \left( \begin{cases} \left( \widebar{\vr}^+ \oslash \widebar{\vr}^{(+,\Sigma)} \right)_{q_+} & \left( \widebar{\vr}^{(+,\Sigma)} \right)_{q_+} > 0 \\ \left( \vsigma^{(T = 1)} \right)_{q_+} & \left( \widebar{\vr}^{(+,\Sigma)} \right)_{q_+} = 0 \\ \end{cases} \right)_{q_+ \in \sQ_+}
+\end{equation*}
+
+
+
+\section{Benchmarks}
+
+
+\begin{figure}[ht]
+	\centering
+	\includegraphics[width=\textwidth]{figures/time3.pdf}
+	\caption{\label{fig:time} A log-log graph showing the average CFR iteration runtime with respect to the game size for both experiments. The four lines show the runtimes of the four benchmarked implementations. Note that the iteration time of each game does not depend solely on the number of nodes -- the number of players and the number of infosets play a sizable role as well. In addition, for OpenSpiel implementations, the efficiency of how the game logic is implemented also matters as, on each iteration, their implementations traverse the game tree by generating new states online.}
+\end{figure}
+
+\subsection{Experiment 1}
+
+ The games represent a diverse range of sizes from small (tiny Hanabi and Kuhn poker), medium (Kuhn poker (3-player), first sealed auction, and Leduc poker), to large (tiny bridge (2-player), liar's dice, and tic-tac-toe).
+
+In our GPU implementation (written in Python), we use CuPy~\citep{cupy_learningsys2017} for GPU-accelerated matrix and vector operations with both 64-bit and 32-bit floating-point data types. Here, we only discuss the 32-bit implementation as it is generally faster than the 64-bit version. Note that we save both memory and runtime if single-precision floating point numbers are used (by roughly a factor of 2). We also simply run our implementation with NumPy~\citep{harris2020array} and SciPy~\citep{2020SciPy-NMeth} (i.e., without a GPU) which we refer to as our CPU implementation (with 64-bit floats). Our testbench computer contains an AMD Ryzen 9 3900X 12-core, 24-thread desktop processor, 128 GB memory, and Nvidia GeForce RTX 4090 24 GB VRAM graphics card.
+
+ The relationship between the game sizes and the runtimes of each implementation is shown more clearly in the log-log graph in~\Figref{fig:time}. Note that our GPU implementation clearly scales better than both OpenSpiel's~\citep{lanctot2020openspielframeworkreinforcementlearning} and our CPU implementation.
+
+\subsubsection{Small Games: Tiny Hanabi and Kuhn Poker}
+
+In small games like tiny Hanabi (55 nodes) and Kuhn poker (58 nodes), our CPU implementation shows modest gains over the OpenSpiel's~\citep{lanctot2020openspielframeworkreinforcementlearning} Python baseline (about 1.5 times faster for both). However, our GPU implementation is actually about 3.5 and 3.3 times slower for both compared to OpenSpiel's Python baseline. OpenSpiel's C++ baseline vastly outperforms all others by at least an order of magnitude. This suggests the overheads from GPU and Python make our implementation impractical for games of similarly small sizes.
+
+\subsubsection{Medium Games: Kuhn Poker (3-Player), First Sealed Auction, and Leduc Poker}
+
+In medium-sized games like Kuhn poker (3-player) (617 nodes), first sealed auction (7,096 nodes), and Leduc poker (9,457 nodes), performance gains compared to OpenSpiel's~\citep{lanctot2020openspielframeworkreinforcementlearning} Python implementation can be observed for both our CPU (about 12.9, 46.8, and 44.6 times faster, respectively) and GPU implementation (about 3.1, 23.2, and 24.9 times faster, respectively). However, comparisons with OpenSpiel's C++ implementation are mixed. For Kuhn poker (3-player), OpenSpiel's C++ implementation is about 1.6 times faster than our CPU implementation and 6.8 times faster than our GPU implementation. But, for first sealed auction and Leduc poker, our CPU implementation is about 2.1 and 4.5 times faster, respectively, and our GPU implementation is about 1.1 and 2.5 times faster, respectively, than their C++ baseline. Here, while we begin to see our implementations outperform OpenSpiel's baselines, we see that our CPU implementation is faster than our GPU implementation. This suggests that, while the efficiency of our implementation overcomes the Python overhead, the remaining GPU overhead makes using a GPU less preferable than not.
+
+\subsubsection{Large Games: Tiny Bridge (2-Player), Liar's Dice, and Tic-Tac-Toe}
+
+In games like tiny bridge (2-player) (107,129 nodes), liar's dice (294,883 nodes), and tic-tac-toe (549,946 nodes), noticeable performance gains over OpenSpiel's~\citep{lanctot2020openspielframeworkreinforcementlearning} Python implementation can be observed for both our CPU (about 26.1, 13.9, and 16.8 times faster, respectively) and GPU implementation (about 111.8, 160.0, and 401.2 times faster, respectively). The same can be said for OpenSpiel's C++ implementation to a lesser degree: our CPU implementation is about 1.5, 1.0, and 1.1 times faster, respectively, and our GPU implementation is about 6.5, 11.6, and 25.2 times faster, respectively. Here, the performance benefits of utilizing a GPU are clear, and we predict that the differences will be even more pronounced for games of sizes larger than the ones explored.
+
+\subsubsection{Memory Usages}
+
+\begin{table}[ht]
+	\small
+	\centering
+	\caption{\label{tab:memory} The peak memory usage of the benchmark scripts of the 4 CFR implementations. For GPU implementations, peak usages of the process and the memory allocated by CuPy are shown.}
+	\begin{tabular}{|c|c|c|c||c|}
+		\hline
+		\multicolumn{4}{|c||}{Implementation} & {Peak Memory Usage (GB)} \\
+		\hline
+		\hline
+		\multirow{2}{*}{OpenSpiel} & \multicolumn{3}{c||}{Python} & 0.894 \\
+		\cline{2-5}
+		& \multicolumn{3}{c||}{C++} & 0.145 \\
+		\hline
+		\multirow{5}{*}{Ours} & \multicolumn{3}{c||}{CPU} & 2.863 \\
+		\cline{2-5}
+		& \multirow{4}{*}{GPU} & \multirow{2}{*}{64-bit} & Process & 3.169 \\
+		\cline{4-5}
+		& & & CUDA & 0.273 \\
+		\cline{3-5}
+		& & \multirow{2}{*}{32-bit} & Process & 2.371 \\
+		\cline{4-5}
+		& & & CUDA & 0.176 \\
+		\hline
+	\end{tabular}
+\end{table}
+
+The peak memory usages of the benchmark scripts for Experiment 1 are shown in Table~\ref{tab:memory}. Note that this is not exactly a fair comparison, as, in our implementations, we unnecessarily store the object representations of all states. By not doing so, further reduction in process memory usage would be possible.
+
+\subsection{Experiment 2}
+
+In order to see further scaling behavior or our GPU (both 64-bit and 32-bit versions) and OpenSpiel's C++ implementations, we run these implementations with much larger imperfect information games (12 battleship games of differing parameters) for 10 iterations each. For games as large as up to over 57.9 million nodes, our GPU implementation performs up to 203.6 times faster than OpenSpiel's C++ baseline. Again, the relationship between the game sizes and the runtimes is shown in the log-log graph in~\Figref{fig:time}.
+
+
+
+\section{Discussion}
+
+
+Our CFR implementations require a single complete game tree traversal during a setup phase to construct the game tree matrices. One advantage of our approach is that inefficient game logic implementation does not impact the runtime of our implementations as the game tree itself is encoded into matrices, whereas it can severely impact the performance of OpenSpiel's implementations which evaluate game logic during the traversal itself. This may explain the sizable gap in runtime between the speed of OpenSpiel's C++ implementation between the experiments even for the games of roughly the same sizes.
+
+We only explore parallelizing the vanilla CFR algorithm, as proposed by~\cite{NIPS2008_08d98638}. Later variants of CFR show improvements, namely in convergence speeds, which modify various aspects of the algorithm. The discounting techniques proposed by Brown and Sandholm can trivially be applied by altering~\Eqref{eqn:average_strategy_profile_vector} and \Eqref{eqn:average_counterfactual_regrets_vector}. However, pruning techniques~\citep{NIPS2015_c54e7837} would require non-trivial manipulations on the game-related matrices -- possibly between iterations -- problematic since updating CSR matrices is computationally expensive.
+
+On each iteration, our implementation deals with the entire game tree and stores values for every node -- impractical for extremely large games. In traditional implementations of CFR, while a complete recursive game tree traversal is carried out, counterfactual values are typically not stored for each node but instead for each infoset-actions. We demonstrate that it is possible to achieve a significant parallelization (and hence speedup) at a cost of higher memory usage. Intuitively, the root-to-leaf paths can be partitioned to construct subgraphs of which separate adjacency and submask matrices can be loaded and applied as necessary -- a similar approach can be used for alternating player updates~\citep{10.1613/jair.1.11370} and sampling variants~\citep{NIPS2009_00411460}.
+
+Our approach provides an alternate way for CFR to be run on supercomputers. During the development of Cepheus~\citep{10.5555/2832249.2832339}, the game tree was chunked into a trunk and many subtrees, each of which was assigned to a compute node to be traversed independently. This introduced a bottleneck in the trunk as the subtree nodes (which depend on the trunk's results) must wait for the trunk calculation to complete during the downward pass, and wait again while the trunk uses the values returned by the subtrees during the upward pass. Our approach is simply a series of matrix/vector operations, and distributing this is a well-studied problem in systems.
+
+In our GPU implementation, we used CuPy~\citep{cupy_learningsys2017} without any customizations in configurations and did not profile or probe into resource usage. A careful analysis of these for further optimizations will most likely yield further performance improvements.
+
+
+
+\section{Conclusion}
+
+
+We introduced our CFR implementation, designed to be parallelized by computing each iteration as dense and sparse matrix and vector operations and eliminating costly recursive tree traversal. While our goal was to run the algorithm on a GPU, the tight nature of our code also allows for a vastly more efficient computation even when a GPU is not leveraged. Our experiments on solving 20 games of differing sizes show that, in larger games, our implementation achieves orders of magnitude performance improvements over Google DeepMind's OpenSpiel~\citep{lanctot2020openspielframeworkreinforcementlearning} baselines in Python and C++, and predict that the performance benefit will be even more pronounced for games of sizes larger than those we tested. Addressing the memory inefficiency and incorporating the use of a GPU with non-vanilla CFR variants remains a promising avenue for future research.
+
+
+
+
+

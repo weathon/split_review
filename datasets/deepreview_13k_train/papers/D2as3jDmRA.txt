@@ -1,0 +1,509 @@
+\title{LinFusion: 1 GPU, 1 Minute, 16K Image}
+
+\begin{abstract}
+Modern diffusion models, particularly those utilizing a Transformer-based UNet for denoising, rely heavily on self-attention operations to manage complex spatial relationships, thus achieving impressive generation performance. 
+However, this existing paradigm faces significant challenges in generating high-resolution visual content due to its quadratic time and memory complexity with respect to the number of spatial tokens. 
+To address this limitation, we aim at a novel linear attention mechanism as an alternative in this paper. 
+Specifically, we begin our exploration from recently introduced models with linear complexity, \textit{e.g.}, Mamba2, RWKV6, Gated Linear Attention, \textit{etc}, and identify two key features—attention normalization and non-causal inference—that enhance high-resolution visual generation performance. 
+Building on these insights, we introduce a generalized linear attention paradigm, which serves as a low-rank approximation of a wide spectrum of popular linear token mixers. 
+To save the training cost and better leverage pre-trained models, we initialize our models and distill the knowledge from pre-trained StableDiffusion (SD). 
+We find that the distilled model, termed LinFusion, achieves performance on par with or superior to the original SD after only modest training, while significantly reducing time and memory complexity. 
+Extensive experiments on SD-v1.5, SD-v2.1, and SD-XL demonstrate that LinFusion enables satisfactory and efficient zero-shot cross-resolution generation, accommodating ultra-resolution images like 16K on a single GPU. 
+Moreover, it is highly compatible with pre-trained SD components and pipelines, such as ControlNet, IP-Adapter, DemoFusion, DistriFusion, \textit{etc}, requiring no adaptation efforts. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recent years have witnessed significant advancements in AI-generated content (AIGC) with diffusion models~\cite{croitoru2023diffusion,yang2023diffusion}. 
+On the one hand, unlike classic models like GAN~\cite{goodfellow2014generative}, diffusion models refine noise vectors iteratively to produce high-quality results with fine details~\cite{nichol2021improved,dhariwal2021diffusion,rombach2022high,ho2020denoising}. 
+On the other hand, having trained on large-scale data pairs, these models exhibit satisfactory alignment between input conditions and output results. 
+These capabilities have spurred recent advancements in text-to-image generation~\cite{balaji2022ediffi,ding2022cogview2,nichol2021glide,ramesh2022hierarchical,BetkerImprovingIG,rombach2022high,saharia2022photorealistic}. 
+Benefiting from the impressive performance and the open-source community, Stable Diffusion (SD)~\cite{rombach2022high} stands out as one of the most popular models. 
+
+The success of models like SD can be largely attributed to their robust backbone structures for denoising. 
+From UNet architectures with attention layers~\cite{ronneberger2015u, rombach2022high} to Vision Transformers~\cite{peebles2023scalable,bao2023all,chen2023pixart,esser2024scaling}, existing designs rely heavily on self-attention mechanisms to manage complex relationships between spatial tokens. 
+Despite their impressive performance, the quadratic time and memory complexity inherent in self-attention operations poses significant challenges for high-resolution visual generation. 
+For instance, as illustrated in Fig.~\ref{fig:2}(a), using FP16 precision, SD-v1.5 fails to generate 2048-resolution images on A100, a GPU with 80GB of memory, due to out-of-memory errors, making higher resolutions or larger models even more problematic\footnote{PyTorch 1.13 is adopted here for evaluation to reflect the theoretical complexity of various architectures. On higher versions of PyTorch, block-wise strategies are applied for memory efficient attention. However, the time efficiency is still a problem.}. 
+
+To address these issues, in this paper, we aim at a novel token-mixing mechanism with linear complexity to the number of spatial tokens, offering an alternative to the classic self-attention approach. 
+Inspired by recently introduced models with linear complexity, such as Mamba~\cite{gu2023mamba} and Mamba2~\cite{dao2024transformers}, which have demonstrated significant potential in sequential generation tasks, we first investigate their applicability as token mixers in diffusion models. 
+
+However, there are two drawbacks of Mamba diffusion models. 
+On the one hand, when a diffusion model operates at a resolution different from its training scale, our theoretical analysis reveals that the feature distribution tends to shift, leading to difficulties in cross-resolution inference. 
+On the other hand, diffusion models perform a denoising task rather than an auto-regressive task, allowing the model to simultaneously access all noisy spatial tokens and generate denoised tokens based on the entire input. In contrast, Mamba is fundamentally an RNN that processes tokens sequentially, meaning that the generated tokens are conditioned only on preceding tokens, a constraint termed causal restriction. Applying Mamba directly to diffusion models would impose this unnecessary causal restriction on the denoising process, which is both unwarranted and counterproductive. Although bi-directional scanning branches can somewhat alleviate this issue, the problem inevitably persists within each branch. 
+
+Focusing on the above drawbacks of Mamba for diffusion models, we propose a generalized linear attention paradigm. 
+Firstly, to tackle the distribution shift between training resolution and larger inference resolution, a normalizer for Mamba, defined by the cumulative impact of all tokens on the current token, is devised to the aggregated features, ensuring that the total impact remains consistent regardless of the input scale. 
+Secondly, we aim at a non-causal version of Mamba. 
+We start our exploration by simply removing the lower triangular causal mask applied on the forget gate and find that all tokens would end up with identical hidden states, which undermines the model's capacity. 
+To address this issue, we introduce distinct groups of forget gates for different tokens and propose an efficient low-rank approximation, enabling the model to be elegantly implemented in a linear-attention form. 
+We analyze the proposed approach technically alongside recently introduced linear-complexity token mixers such as Mamba2~\cite{dao2024transformers}, RWKV6~\cite{peng2024eagle}, and Gated Linear Attention~\cite{yang2023gated} and reveal that our model can be regarded as a generalized non-causal version of these popular models. 
+
+\begin{figure}[!t]
+\begin{floatrow}[1]
+\figureboxf{}{
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/efficiency.pdf}
+  \caption{(a) and (b): Comparisons of the proposed LinFusion with original SD-v1.5 under various resolutions in terms of generation speed using 8 steps and GPU memory consumption. The dashed lines denote estimated values using quadratic functions due to out-of-memory error. (c) and (d): Efficiency comparisons on various architectures under their default resolutions.}
+  \label{fig:2}
+  }
+\end{floatrow}
+\end{figure}
+
+The proposed generalized linear attention module is integrated into the architectures of SD, replacing the original self-attention layers, and the resultant model is termed as \underline{Lin}ear-Complexity Dif\underline{fusion} Model, or \emph{LinFusion} in short. 
+By only training the linear attention modules for 50k iterations in a knowledge distillation framework, LinFusion achieves performance on par with or even superior to the original SD, while significantly reducing time and memory complexity, as shown in Fig.~\ref{fig:2}. 
+Meanwhile, it delivers satisfactory zero-shot cross-resolution generation performance and can generate images at 16K resolution on a single GPU. 
+It is also compatible with existing components and pipelines for SD, such as ControlNet~\cite{zhang2023adding}, IP-Adapter~\cite{ye2023ip-adapter}, DemoFusion~\cite{du2024demofusion}, DistriFusion~\cite{li2024distrifusion}, \textit{etc}, allowing users to achieve various purposes with the proposed LinFusion flexibly without any additional training cost. 
+As shown in Fig.~\ref{fig:1}, extensive experiments on SD-v1.5, SD-v2.1, and SD-XL validate the effectiveness of the proposed model and method. 
+Our contributions can be summarized as follows: 
+\begin{itemize}
+    \item We investigate the non-causal and normalization-aware version of Mamba and propose a novel linear attention mechanism that addresses the challenges of high-resolution visual generation with diffusion models.
+    \item Our theoretical analysis indicates that the proposed model is technically a generalized and efficient low-rank approximation of existing popular linear-complexity token mixers.
+    \item Extensive experiments on SD demonstrate that the proposed LinFusion can achieve even better results than the original SD and exerts satisfactory zero-shot cross-resolution generation performance and compatibility with existing components and pipelines for SD. To the best of our knowledge, this is the first exploration of linear-complexity token mixers on the SD series model for text-to-image generation. 
+\end{itemize}
+
+
+
+\section{Methodology}
+
+
+\subsection{Preliminary}\label{sec:3-1}
+
+\textbf{Diffusion Models.} 
+As a popular model for text-to-image generation, Stable Diffusion~\cite{rombach2022high} (SD) first learns an auto-encoder $(\mathcal{E},\mathcal{D})$, where the encoder $\mathcal{E}$ maps an image $x$ to a lower dimensional latent space: $z\leftarrow\mathcal{E}(x)$, and the decoder $\mathcal{D}$ learns to decode $z$ back to the image space $\hat{x}\leftarrow\mathcal{D}(z)$ such that $\hat{x}$ is close to the original $x$. 
+In the inference time, a Gaussian noise in the latent space $z_T$ is sampled randomly and denoised by a UNet $\epsilon_\theta$ for $T$ steps. 
+The denoised latent code after the final step $z_0$ is decoded by $\mathcal{D}$ to derive a generated image. 
+In training, given an image $x$ and its corresponding text description $y$, $\mathcal{E}$ is utilized to obtain its corresponding latent code, and we add a random Gaussian noise $\epsilon$ for its noisy version $z_t$ with respect to the $t$-th step. 
+The UNet is trained via the noise prediction loss $\mathcal{L}_{simple}$~\cite{ho2020denoising,nichol2021improved}:
+\begin{equation}
+    \theta=\argmin_{\theta}\mathbb{E}_{z\sim\mathcal{E}(x),y,\epsilon\sim\mathcal{N}(0,1),t}[\mathcal{L}_{simple}]\quad \mathcal{L}_{simple}=\Vert\epsilon-\epsilon_\theta(z_t,t,y)\Vert_2^2.\label{eq:1}
+\end{equation}
+
+The UNet in SD contains multiple self-attention layers as token mixers to handle spatial-wise relationships and multiple cross-attention layers to handle text-image relationships. 
+Given an input feature map in the UNet backbone $X\in\mathbb{R}^{n\times d}$ and weight parameters $W_Q,W_K\in\mathbb{R}^{d\times d'}$ and $W_V\in\mathbb{R}^{d\times d}$, where $n$ is the number of spatial tokens, $d$ is the feature dimension, and $d'$ is the attention dimension, self-attention can be formalized as:
+\begin{equation}
+    Y=MV,\quad M=\mathrm{softmax}(QK^{\top}/\sqrt{d'}), \quad Q=XW_Q,\quad K=XW_K,\quad V=XW_V.\label{eq:2}
+\end{equation}
+We can observe from Eq.~\ref{eq:2} that the complexity of self-attention is quadratic with respect to $n$ since the attention matrix $M\in\mathbb{R}^{n\times n}$, we mainly focus on its alternatives in this paper and are dedicated on a novel module for token mixing with linear complexity. 
+
+\textbf{Mamba.} 
+As an alternative to Transformer~\cite{vaswani2017attention}, Mamba~\cite{gu2023mamba} is proposed to handle sequential tasks with linear complexity with respect to the sequence length. 
+At the heart of Mamba lies the State Space Model (SSM), which can be written as:
+\begin{equation}
+    H_i=A_i\odot H_{i-1}+B_i^\top X_i=\sum_{j=1}^i\{(\prod_{k=j+1}^{i}A_k)\odot (B_j^\top X_j)\},\quad Y_i=C_iH_i,\label{eq:3}
+\end{equation}
+where $i$ is the index of the current token in a sequence, $H_i$ denotes the hidden state, $X_i$ and $Y_i$ are row vectors denoting the $i$-th rows of the input and output matrices respectively, $A_i$, $B_i$, and $C_i$ are input-dependent variables, and $\odot$ indicates element-wise multiplication. 
+\subsection{Overview}
+
+\begin{wrapfigure}{r}{4cm}
+\begin{floatrow}[1]
+\figureboxs{}{
+  \centering
+  \includegraphics[width=0.96\linewidth]{figures/overview.pdf}
+  \caption{Overview of LinFusion. We replace self-attention layers in the original SD with our LinFusion modules and adopt knowledge distillation to optimize the parameters.}
+  \label{fig:3}
+  }
+\end{floatrow}
+
+\end{wrapfigure}
+
+In the latest version, \textit{i.e.}, Mamba2~\cite{dao2024transformers}, $A_i$ is a scalar, $B_i,C_i\in\mathbb{R}^{1\times d'}$, $X_i,Y_i\in\mathbb{R}^{1\times d}$, and $H_i\in\mathbb{R}^{d'\times d}$. 
+According to State-Space Duality (SSD), the computation in Eq.~\ref{eq:3} can be reformulated as the following expression, referred to as 1-Semiseparable Structured Masked Attention:
+\begin{equation}
+    Y=((CB^\top)\odot \tilde{A})X,\label{eq:4}
+\end{equation}
+where $\tilde{A}$ is a $n\times n$ lower triangular matrix and $\tilde{A}_{ij}=\prod_{k=j+1}^{i}A_k$ for $j\leq i$. 
+Such a matrix $\tilde{A}$ is known as 1-semiseparable, ensuring that Mamba2 can be implemented with linear complexity in $n$. 
+
+In this paper, we aim at a diffusion backbone for the general text-to-image problems with linear complexity with respect to the number of image pixels. 
+To this end, instead of training a novel model from scratch, we initialize and distill the model from pre-trained SD. 
+Specifically, we utilize the SD-v1.5 model by default and substitute its self-attention—the primary source of quadratic complexity—with our proposed LinFusion modules. 
+Only the parameters in these modules are trainable, while the rest of the model remains frozen. 
+We distill knowledge from the original SD model into LinFusion such that given the same inputs, their outputs are as close as possible. 
+Fig.~\ref{fig:3} provides an overview of this streamline. 
+
+This approach offers two key benefits: (1) Training difficulty and computational overhead are significantly reduced, as the student model only needs to learn spatial relationships, without the added complexity of handling other aspects like text-image alignment; (2) The resulting model is highly compatible with existing components trained on the original SD models and their fine-tuned variations, since we only replace the self-attention layers with LinFusion modules, which are trained to be functionally similar to the original ones while maintaining the overall architecture. 
+
+Technically, to derive a linear-complexity diffusion backbone, one simple solution is to replace all the self-attention blocks with Mamba2, as shown in Fig.~\ref{fig:4}(a). 
+We apply bi-directional SSM to ensure that the current position can access information from subsequent positions. 
+Moreover, the self-attention modules in Stable Diffusion do not incorporate gated operations~\cite{hochreiter1997long,cho2014learning} or RMS-Norm~\cite{zhang2019root} as used in Mamba2. 
+As shown in Fig.~\ref{fig:4}(b), we remove these structures to maintain the consistency and result in a slight improvement in performance. 
+In the following parts of this section, we delve into the issues of applying SSM, the core module in Mamba2, to diffusion models and accordingly introduce the key features in LinFusion: normalization and non-causality in Secs.~\ref{sec:3-2} and \ref{sec:3-3} respectively. 
+Finally, in Sec.~\ref{sec:3-4}, we provide the training objectives to optimize parameters in LinFusion modules. 
+
+\subsection{Normalization-Aware Mamba}\label{sec:3-2}
+
+In practice, we find that SSM-based structure shown in Fig.~\ref{fig:4}(b) can achieve satisfactory performance if the training and inference have consistent image resolutions. 
+However, it fails when their image scales are different. 
+We refer readers to Sec.~\ref{sec:4-2} for the experimental results. 
+To identify the cause of this failure, we examine the channel-wise means of the input and output feature maps, which exhibit the following proposition: 
+\begin{prop}\label{prop:1}
+Assuming that the mean of the $j$-th channel in the input feature map $X$ is $\mu_j$, and denoting $(CB^\top)\odot\tilde{A}$ as $M$, the mean of this channel in the output feature map $Y$ is $\mu_j\sum_{k=1}^nM_{ik}$. 
+\end{prop}
+The proof is straightforward. 
+We observe through Fig.~\ref{fig:4}(b) that there is non-negative activation applied on $X$, $B$, and $C$. 
+Given that $A$ is also non-negative in Mamba2, according to Prop.~\ref{prop:1}, the channel-wise distributions would shift if $n$ is inconsistent in training and inference, which further leads to distorted results. 
+
+Solving this problem requires unifying the impact of all tokens on each one to the same scale, a property inherently provided by the \texttt{Softmax} function. 
+In light of this, we propose normalization-aware Mamba in this paper, enforcing that the sum of attention weights from each token equals $1$, \textit{i.e.}, $\sum_{k=1}^nM_{ik}=1$, which is equivalent to applying the SSM module one more time to obtain the normalization factor $Z$:
+\begin{equation}
+    Z_i=A_i\odot Z_{i-1}+B_i,\quad C'_{ij}=\frac{C_{ij}}{\sum_{k=1}^{d'}\{C_{ik}\odot Z_{ik}\}}.\label{eq:5} 
+\end{equation}
+The operations are illustrated in Fig.~\ref{fig:4}(c). 
+Experiments indicate that such normalization substantially improve the performance of zero-shot cross-resolution generalization. 
+
+\begin{figure}[!t]
+\begin{floatrow}[1]
+\figureboxf{}{
+  \centering
+  \includegraphics[width=\linewidth]{figures/structure.pdf}
+  \caption{(a) The architecture of Mamba2. Bi-directional SSM is additionally involved here. (b) Mamba2 without gating and RMS-Norm. (c) Normalization-aware Mamba2. (d) The proposed LinFusion module with generalized linear attention.}
+  \label{fig:4}
+  }
+\end{floatrow}
+\end{figure}
+
+\subsection{Non-Causal Mamba}\label{sec:3-3}
+
+While bi-directional scanning enables a token to receive information from subsequent tokens—a crucial feature for diffusion backbones—treating feature maps as 1D sequences compromises the intrinsic spatial structures in 2D images and higher-dimensional visual content. 
+To address this dilemma more effectively, we focus on developing a non-causal version of Mamba in this paper. 
+
+Non-causality indicates that one token can access to all tokens for information mixing, which can be achieved by simply removing the lower triangular causal mask applied on $\tilde{A}$. 
+Thus, the recursive formula in Eq.~\ref{eq:3} would become $H_i=\sum_{j=1}^n\{(\prod_{k=j+1}^{n}A_k)\odot (B_j^\top X_j)\}$. 
+We observe that $H_i$ remains invariant with respect to $i$ in this formula. 
+This implies that the hidden states of all tokens are uniform, which fundamentally undermines the intended purpose of the forget gate $A$. 
+To address this issue, we associate different groups of $A$ to various input tokens. 
+In this case, $A$ is a $n\times n$ matrix and $H_i=\sum_{j=1}^n\{(\prod_{k=j+1}^{n}A_{ik})\odot (B_j^\top X_j)\}$. 
+The $\tilde{A}_{ij}$ in Eq.~\ref{eq:4} becomes $\prod_{k=j+1}^{n}A_{ik}$. 
+Compared with that in Eq.~\ref{eq:4}, $\tilde{A}$ here is not necessarily 1-semiseparable. 
+To maintain linear complexity, we impose the assumption that $\tilde{A}$ is low-rank separable, \textit{i.e.}, there exist input-dependent matrices $F$ and $G$ such that $\tilde{A}=FG^\top$. 
+In this way, the following proposition ensures that Eq.~\ref{eq:4} under this circumstance can be implemented via linear attention:
+\begin{prop}\label{prop:2}
+    Given that $\tilde{A}=FG^\top$, $F,G\in\mathbb{R}^{n\times r}$, and $B,C\in\mathbb{R}^{n\times d'}$, denoting $C_i=c(X_i)$, $B_i=b(X_i)$, $F_i=f(X_i)$, and $G_i=g(X_i)$, there exist corresponding functions $f'$ and $g'$ such that Eq.~\ref{eq:4} can be equivalently implemented as linear attention, expressed as $Y=f'(X)g'(X)^\top X$. 
+\end{prop}
+ 
+In practice, we adopt two MLPs to mimic the functionalities of $f'$ and $g'$. 
+Combining with the normalization operations mentioned in Sec.~\ref{sec:3-2}, we derive an elegant structure shown in Fig.~\ref{fig:4}(d). 
+
+Not only that, we further demonstrate that the form of linear attention described in Proposition~\ref{prop:2} can be extended to the more general case where $\tilde{A}_{ij}$ is a $d'$-dimension vector rather than a scalar:
+\begin{prop}\label{prop:3}
+    Given that $\tilde{A}\in\mathbb{R}^{d'\times n\times n}$, if for each $1\leq u\leq d'$, $\tilde{A}_{u}$ is low-rank separable: $\tilde{A}_{u}=F_{u}G^\top_{u}$, where $F_{u},G_{u}\in\mathbb{R}^{n\times r}$, $F_{uiv}=f(X_i)_{uv}$, and $G_{ujv}=g(X_j)_{uv}$, there exist corresponding functions $f'$ and $g'$ such that the computation $Y_i=C_iH_i=C_i\sum_{j=1}^n\{\tilde{A}_{:ij}\odot (B_j^\top X_j)\}$ can be equivalently implemented as linear attention, expressed as $Y_i=f'(X_i)g'(X)^\top X$, where $\tilde{A}_{:ij}$ is a column vector and can broadcast to a $d'\times d$ matrix. 
+\end{prop}
+ 
+From this point of view, the proposed structure can be deemed as a generalized linear attention and a non-causal form of recent linear-complexity sequential models, including Mamba2~\cite{dao2024transformers}, RWKV6~\cite{peng2024eagle}, GLA~\cite{yang2023gated}, \textit{etc}. 
+In Tab.~\ref{tab:0}, we provide a summary of the parameterization in recent works for $A_i$. 
+
+\begin{wraptable}{r}{9cm}
+\begin{floatrow}[1]
+  \tableboxf{}{
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\centering
+\begin{tabular}{ccc}
+\hline
+Model & Parameterization of $A_i$ & Causal \\ \hline
+Mamba2~\cite{dao2024transformers} & $A_i\in\mathbb{R}$ & Yes \\
+mLSTM~\cite{beck2024xlstm,peng2021random} & $A_i\in\mathbb{R}$ & Yes \\
+Gated Retention~\cite{sun2024you} & $A_i\in\mathbb{R}$ & Yes \\ 
+GateLoop~\cite{katsch2023gateloop} & $A_i\in\mathbb{R}^{d'}$ & Yes \\ 
+HGRN2~\cite{qin2024hgrn2} & $A_i\in\mathbb{R}^{d'}$ & Yes \\ 
+RWKV6~\cite{peng2024eagle} & $A_i\in\mathbb{R}^{d'}$ & Yes \\
+Gated Linear Attention~\cite{yang2023gated} & $A_i\in\mathbb{R}^{d'}$ & Yes \\ \hline
+MLLA~\cite{han2024demystify} & $A_{ij}=1$  & No \\ 
+VSSD~\cite{shi2024vssd} & $A_{ij}\in\mathbb{R}$ & No \\
+Generalized Linear Attention & $\tilde{A}_{ij}\in\mathbb{R}^{d'}$ & No \\ \hline
+\end{tabular}
+\caption{A summary of the parameterization in recent linear token mixers for $A_i$, partially adapted from \cite{yang2023gated}.}
+\label{tab:0}
+  }
+\end{floatrow}
+
+\end{wraptable}
+\subsection{Training Objectives}\label{sec:3-4}
+
+In this paper, we replace all self-attention layers in the original SD with LinFusion modules. 
+Only the parameters within these modules are trained, while all others remain frozen. 
+To ensure that LinFusion closely mimics the original functionality of self-attention, we augment the standard noise prediction loss $\mathcal{L}_{simple}$ in Eq.~\ref{eq:1} with additional losses. 
+Specifically, we introduce a knowledge distillation loss $\mathcal{L}_{kd}$ to align the final outputs of the student and teacher models, and a feature matching loss $\mathcal{L}_{feat}$ to match the outputs of each LinFusion module and the corresponding self-attention layer. 
+The training objectives can be written as:
+\begin{equation}
+\begin{aligned}
+    \theta=\argmin_{\theta}&\mathbb{E}_{z\sim\mathcal{E}(x),y,\epsilon\sim\mathcal{N}(0,1),t}[\mathcal{L}_{simple}+\alpha\mathcal{L}_{kd}+\beta\mathcal{L}_{feat}],\\
+    \mathcal{L}_{kd}=\Vert\epsilon_{\theta}(z_t,t,y)-\epsilon_{\theta_{org}}(z_t,&t,y)\Vert_2^2,\quad
+    \mathcal{L}_{feat}=\frac{1}{L}\sum_{l=1}^{L}\Vert\epsilon_{\theta}^{(l)}(z_t,t,y)-\epsilon_{\theta_{org}}^{(l)}(z_t,t,y)\Vert_2^2,\label{eq:8}
+\end{aligned}
+\end{equation}
+where $\alpha$ and $\beta$ are hyper-parameters controlling the weights of the respective loss terms, $\theta_{org}$ represents parameters of the original SD, $L$ is the number of LinFusion/self-attention modules, and the superscript $^{(l)}$ refers to the output of the $l$-th one in the diffusion backbone. 
+
+\begin{figure}[!t]
+\begin{floatrow}[1]
+\figureboxf{}{
+  \centering
+  \includegraphics[width=0.975\linewidth]{figures/selected.pdf}
+  \caption{Qualitative text-to-image results by LinFusion based on various architectures.}
+  \label{fig:5}
+  }
+\end{floatrow}
+\end{figure}
+
+
+\section{Experiments}
+
+
+\subsection{Implementation Details}\label{sec:4-1}
+
+\begin{table}[!t]
+\begin{floatrow}[1]
+\tableboxf{}{
+\scriptsize
+\centering
+\begin{tabular}{cc|cccc}
+ID & Setting                                       & FID($\downarrow$)            & CLIP-T($\uparrow$)         & GPU Memory (GB) & Running Time (sec./image) \\ \hline
+A  & Original SD (v1.5)                            & 12.86          & 0.321          &     5.17            &   2.32                        \\ \hline
+B  & Distilled Diffusion Model (Base)              & 16.63          & 0.315          &     4.62            &       1.58                    \\
+C  & Distilled Diffusion Model (Small)             & 18.58          & 0.297          &     4.45            &      1.44                     \\
+D  & Distilled Diffusion Model (Tiny)              & 18.82          & 0.295          &     4.13            &      1.32                     \\ \hline
+E  & Bi-Directional Mamba2                          & 18.90          & 0.307          &   4.70             &    4.54                       \\
+F  & E - Gating - RMS Norm                         & 17.30          & 0.309          &    4.69             &    4.33                       \\
+G  & F + Normalization                             & 17.60          & 0.308          &    4.73             &    6.51                       \\
+H  & G - SSM + Linear Attn.                        & 17.63          & 0.307          &    4.09             &     2.07                   \\ \hline
+I  & G - SSM + Generalized Linear Attn.            & 17.07          & 0.309          &    4.43             &    2.07                       \\
+J  & I + $\mathcal{L}_{kd}$ + $\mathcal{L}_{feat}$ & \textbf{12.57} & \textbf{0.323} &    4.43             &    2.07                       \\ \bottomrule
+\end{tabular}
+\caption{Performance and efficiency comparisons with various baselines on the COCO benchmark.}
+\label{tab:1}
+}
+\end{floatrow}
+\end{table}
+\begin{figure}[!t]
+\begin{floatrow}[1]
+\figureboxf{}{
+
+  \centering
+  \includegraphics[width=0.8\linewidth]{figures/attn_map.pdf}
+  \caption{Visualization of attention maps by various architectures. The prompt is ``\texttt{Astronaut in a jungle, cold color palette, muted colors, detailed, 8k}".}
+  \label{fig:6}
+  }
+  \end{floatrow}
+\end{figure}
+
+We present qualitative results on SD-v1.5, SD-v2.1, and SD-XL in Fig.~\ref{fig:5} 
+and mainly conduct experiments on SD-v1.5 in this section. 
+There are 16 self-attention layers in SD-v1.5 and we replace them with LinFusion modules proposed in this paper. 
+Functions $f'$ and $g'$ mentioned in Proposition~\ref{prop:2} are implemented as MLP, which consists of a linear branch and a non-linear branch with one \texttt{Linear-LayerNorm-LeakyReLU} block. 
+Their results are added to form the outputs of $f'$ and $g'$. 
+The parameters of the linear branch in $f'$ and $g'$ are initialized as $W_Q$ and $W_K$ respectively, while the outputs of the non-linear branch are initialized as $0$. 
+We use only 169k images in LAION~\cite{schuhmann2022laion} with aesthetics scores larger than $6.5$ for training and adopt the BLIP2~\cite{li2023blip} image captioning model to regenerate the textual descriptions. 
+Both hyper-parameters, $\alpha$ and $\beta$, are set as $0.5$, following the approach taken in \cite{kim2023bk}, which also focuses on architectural distillation of SD. 
+The model is optimized using AdamW~\cite{loshchilov2017decoupled} with a learning rate of $10^{-4}$. 
+Training is conducted on 8 RTX6000Ada GPUs with a total batch size of 96 under $512\times512$ resolution for 100k iterations, requiring $\sim1$ day to complete. 
+The efficiency evaluations are conducted on a single NVIDIA A100-SXM4-80GB GPU. 
+
+\subsection{Main Results}\label{sec:4-2}
+
+\textbf{Ablation Studies.} 
+To demonstrate the effectiveness of the proposed LinFusion, we report the comparison results with alternative solutions such as those shown in Fig.~\ref{fig:4}(a), (b) and (c). 
+We follow the convention in previous works focusing on text-to-image generation~\cite{kang2023gigagan} and conduct quantitative evaluation on the COCO benchmark~\cite{lin2014microsoft} containing 30k text prompts. 
+The metrics are FID~\cite{heusel2017gans} against the COCO2014 test dataset and the cosine similarity in the CLIP-ViT-G feature space~\cite{radford2021learning}. 
+We also report the running time per image with 50 denoising steps and the GPU memory consumption during inference for efficiency comparisons. 
+Results under $512\times512$ resolution are shown in Tab.~\ref{tab:1}. 
+
+\textbf{Mitigating Structural Difference.} 
+We begin our exploration from the original Mamba2 structure~\cite{dao2024transformers} with bi-directional scanning, \textit{i.e.}, Fig.~\ref{fig:4}(a), and try removing the gating and RMS-Norm, \textit{i.e.}, Fig.~\ref{fig:4}(b), to maintain a consistent holistic structure with the self-attention layer in the original SD. 
+In this way, the only difference with the original SD lies on the SSM or self-attention for token mixing. 
+We observe that such structural alignment is beneficial for the performance. 
+\textbf{Normalization and Non-Causality.} 
+We then apply the proposed normalization operation and the non-causal treatment sequentially, corresponding to Fig.~\ref{fig:4}(c) and (d). 
+Although results in Tab.~\ref{tab:1} indicate that normalization would slightly hurt the performance, we will show in the following Tab.~\ref{tab:2} that it is crucial for generating images with resolutions unseen during training. 
+Further adding the proposed non-causal treatment, we obtain results better than Fig.~\ref{fig:4}(b). 
+
+We also compare the proposed non-causal operation with the simplified case mentioned in Sec.~\ref{sec:3-3}, achieved by directly removing the lower triangular causal mask applied on $\tilde{A}$, which results in a $1$-rank matrix, \textit{i.e.}, various tokens share the same group of forget gates. 
+The inferior results demonstrate the effectiveness of the proposed generalized linear attention. 
+
+\begin{figure}[!t]
+\begin{floatrow}[2]
+
+\tablebox{\caption{Normalization is crucial for cross-resolution generation as demonstrated by the results on the COCO benchmark under $1024\times1024$ resolution, which is unseen in training.}}{
+    \centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{c|cc}
+Setting                                                                               & FID($\downarrow$)    & CLIP-T($\uparrow$) \\ \hline
+Original SD (v1.5)                                                                    & 32.71  & 0.290  \\ \hline
+Bi-Directional Mamba2                                                                 & 196.72 & 0.080  \\
++Normalization                                                                        & 37.02  & 0.273  \\ \hline
+\begin{tabular}[c]{@{}l@{}}Bi-Directional Mamba\\ w/o Gating \& RMS-Norm\end{tabular} & 134.78 & 0.158  \\
++Normalization                                                                        & 50.30  & 0.263  \\ \hline
+Generalized Linear Attention                                                          & 359.64 & 0.069  \\
++Normalization                                                                        & \textbf{36.33}  & \textbf{0.285}  \\ \bottomrule
+\end{tabular}
+    \label{tab:2}
+}
+
+\figureboxl{\caption{Qualitative studies of normalization on various architectures. The  resolution is $4096\times512$ and the prompt is ``\texttt{A group of golden retriever puppies playing in snow. Their heads pop out of the snow covered in}".}}{
+    \includegraphics[width=0.75\linewidth]{figures/normalization.pdf}
+    \label{fig:7}
+}
+
+\end{floatrow}
+\end{figure}
+
+\textbf{Attention Visualization.} 
+In Fig.~\ref{fig:6}, we visualize the self-attention maps yielded by various methods, including the original SD, bi-directional SSM, linear attention with shared forget gates, and generalized linear attention in LinFusion. 
+Results indicate that our method works better for capturing broader-range of spatial dependency and best matches the predictions of the original SD. 
+
+\textbf{Knowledge Distillation and Feature Matching.} 
+We finally apply loss terms $\mathcal{L}_{kd}$ and $\mathcal{L}_{feat}$ in Eq.~\ref{eq:8}, which enhance the performance further and even surpass the SD teacher. 
+
+\textbf{Cross-Resolution Inference.} 
+It is desirable for diffusion model to generate images of unseen resolutions during training--a feature of the original SD. 
+Since modules other than LinFusion are pre-trained and fixed in our work, normalization is a key component for this feature to maintain consistent feature distributions for training and inference. 
+We report the results of $1024\times1024$ resolution in Tab.~\ref{tab:2}, which indicate that the conclusion holds for all the basic structures such as Mamba2, Mamba2 without gating and RMS-Norm, and the proposed generalized linear attention. 
+Fig.~\ref{fig:7} shows a qualitative example, where results without normalization are meaningless. 
+
+\subsection{Empirical Extensions}\label{sec:4-3}
+
+The proposed LinFusion is highly compatible with various components/pipelines for SD, such as ControlNet~\cite{zhang2023adding}, IP-Adapter~\cite{ye2023ip-adapter}, LoRA~\cite{hu2022lora}, DemoFusion~\cite{du2024demofusion}, DistriFusion~\cite{li2024distrifusion}, \textit{etc}, without any further training or adaptation. 
+We present some qualitative results in Fig. 
+The overall performance of LinFusion is comparable with the original SD. 
+
+\textbf{ControlNet.} 
+ControlNet~\cite{zhang2023adding} introduces plug-and-play components to SD for additional conditions, such as edge, depth, and semantic map. 
+We substitute SD with the proposed LinFusion and compare the FID, CLIP score, and the similarity between the input conditions and the extracted conditions from generated images of diffusion models with original SD. 
+The results are shown in Tab.~\ref{tab:3}. 
+
+\textbf{IP-Adapter.} 
+Personalized text-to-image generation~\cite{gal2022image} is a popular application of SD, which focuses on generating images simultaneously following both input identities and textual descriptions. 
+IP-Adapter~\cite{ye2023ip-adapter} offers a zero-shot solution that trains a mapper from the image space to the condition space of SD, so that it can handle both image and text conditions. 
+We demonstrate that IP-Adapter trained on SD can be used directly on LinFusion. 
+The performance on the DreamBooth dataset~\cite{ruiz2023dreambooth}, containing 30 identities and 25 text prompts to form 750 test cases in total, is shown in Tab.~\ref{tab:4}. 
+We use 5 random seeds for each case and report the averaged CLIP image similarity, DINO~\cite{caron2021emerging} image similarity, and CLIP text similarity. 
+
+\textbf{LoRA.} 
+Low-rank adapters (LoRA)~\cite{hu2022lora} aim at low-rank matrices applied on the weights of a basic model such that it can be adapted for different tasks or purposes. 
+For instance, \cite{luo2023lcm} introduce LCM-LoRA such that the pre-trained SD can be used for LCM inference with only a few denoising steps~\cite{luo2023latent}. 
+Here, we directly apply LoRA in LCM-LoRA model to LinFusion. 
+The performance on the COCO benchmark is shown in Tab.~\ref{tab:5}. 
+
+\textbf{Ultrahigh-Resolution Generation.} 
+As discussed in \cite{huang2024fouriscale,he2023scalecrafter}, directly applying diffusion models trained on low resolutions for higher-resolution generation can result in content distortion and duplication. 
+A series of works are dedicated for higher-resolution image generation by leveraging off-the-shelf diffusion models~\cite{du2024demofusion,lin2024cutdiffusion,lin2024accdiffusion,haji2024elasticdiffusion}. 
+However, limited by the quadratic-complexity self-attention, when applied for ultrahigh-resolution generation, existing approaches turn to patch-wise strategies to overcome the heavy computation burden~\cite{bar2023multidiffusion}, which leads to inferior results, as shown in Settings A and B of Tab.~\ref{tab:7}. 
+
+Complementary to these methods, LinFusion addresses the computational overhead via generalized linear attention. 
+As shown in Settings C and D of Tab.~\ref{tab:7}, LinFusion achieves $\sim2\times$ acceleration under $2048\times2048$ resolution. 
+Instead of going through full denoising steps in the original DemoFusion~\cite{du2024demofusion}, tricks in SDEdit~\cite{meng2021sdedit} are additionally applied here so that the former 60\% steps are skipped, which further enhances the efficiency without scarifying the quality. 
+ 
+Backed up by the linear-complexity LinFusion, such strategies enable ultrahigh-resolution generation up to 16K on a single GPU as shown in Fig.~\ref{fig:1}. 
+
+\textbf{Distributed Parallel Inference.} 
+LinFusion is friendly for distributed parallel inference benefiting from its linear complexity, given that the communication cost is constant with respect to image resolution. 
+Specifically, unlike the original DistriFusion~\cite{li2024distrifusion} requiring transmitting all the key and value tokens for self-attention communication, the transmission in LinFusion is $g'(X)^\top X\in\mathbb{R}^{c'\times c}$, which is not related with the number of image tokens. 
+In consequence, as shown in Tab.~\ref{tab:6}, LinFusion does not require NVLink hardware to achieve satisfactory acceleration. 
+ 
+
+
+
+\section{Conclusion}
+
+
+This paper introduces a diffusion backbone termed LinFusion for text-to-image generation with linear complexity in the number of pixels. 
+At the heart of LinFusion lies in a generalized linear attention mechanism, distinguished by its normalization-aware and non-causal operations—key aspects overlooked by recent linear-complexity token mixers like Mamba, Mamba2, and GLA. 
+We reveal theoretically that the proposed paradigm serves as a general low-rank approximation for the non-causal variants of recent models. 
+Based on Stable Diffusion (SD), LinFusion modules after knowledge distillation can seamlessly replace self-attention layers in the original model, ensuring that LinFusion is highly compatible to existing components or pipelines for Stable Diffusion, like ControlNet, IP-Adapter, LoRA, DemoFusion, DistriFusion, \textit{etc}, without any further training effort. 
+Extensive experiments on SD-v1.5, SD-v2.1, and SD-XL demonstrate that the proposed model outperforms existing baselines and achieves performance on par with, or better than, the original SD with significantly reduced computational overhead. 
+On a single GPU, it can accommodate image generation with resolutions up to 16K. 
+
+
+
+\begin{figure}[!t]
+\begin{floatrow}[2]
+\tableboxll{\caption{Results of ControlNet on the original SD-v1.5 and LinFusion.}}{
+    \centering
+    \scriptsize
+    \setlength{\tabcolsep}{2pt}
+\begin{tabular}{c|cc|cc}
+Type               & \multicolumn{2}{c}{Canny Edge}      & \multicolumn{2}{c}{Depth}               \\ 
+Method             & F1($\uparrow$) & CLIP-T($\uparrow$) & RMSE($\downarrow$) & CLIP-T($\uparrow$) \\ \midrule 
+Original SD (v1.5) & 0.210          & 0.296              & \textbf{9.364}     & \textbf{0.300}     \\
+LinFusion        & \textbf{0.247} & \textbf{0.303}     & 9.460              & 0.294              \\
+\bottomrule
+\end{tabular}
+    \label{tab:3}
+}
+\tableboxs{\caption{Results of LinFusion on pipelines dedicated for high-resolution generation.}}{
+    \centering
+    \scriptsize
+    \setlength{\tabcolsep}{2pt}
+\begin{tabular}{cc|ccc}
+ID & Setting       & FID($\downarrow$)            & CLIP-T($\uparrow$)         & Time($\downarrow$) (sec.)    \\ \hline
+A  & DemoFusion    & 70.01          & 0.343          & 61.36          \\
+B  & A - Patch     & 65.44          & 0.340          & 57.56          \\
+C  & B + SDEdit    & 65.15          & \textbf{0.344} & 26.98          \\
+D  & C + LinFusion & \textbf{65.07} & 0.338          & \textbf{14.71} \\ \bottomrule
+\end{tabular}
+    \label{tab:7}
+}
+
+\end{floatrow}
+\end{figure}
+
+
+\begin{figure}[!t]
+\begin{floatrow}[2]
+\tableboxl{\caption{Results of IP-Adapter on the original SD-v1.5 and LinFusion.}}{
+    \centering
+    \scriptsize
+    \begin{tabular}{c|ccc}
+    Method &   CLIP-T($\uparrow$)  & CLIP-I($\uparrow$)  & DINO($\uparrow$) \\ \midrule 
+    Original SD (v1.5) & \textbf{0.281} & 0.841 & 0.731 \\
+    LinFusion & 0.280 & \textbf{0.846} & \textbf{0.740}  \\ 
+    \bottomrule
+\end{tabular}
+    \label{tab:4}
+}
+\tableboxl{\caption{Results of LCM-LoRA on the original SD-v1.5 and LinFusion.}}{
+    \centering
+    \scriptsize
+    \begin{tabular}{c|cc}
+    Method &   FID($\downarrow$) & CLIP-T($\uparrow$) \\ \midrule 
+    Original SD (v1.5) & \textbf{23.43} & \textbf{0.297} \\
+    LinFusion & 27.14 & 0.294 \\ 
+    \bottomrule
+\end{tabular}
+    \label{tab:5}
+}
+
+\end{floatrow}
+\end{figure}
+
+
+\begin{table}[!t]
+\begin{floatrow}[1]
+\tableboxf{}{
+\scriptsize
+\centering
+\begin{tabular}{cccccccc}
+                 & \multicolumn{2}{c}{Against Ground-Truth}  & \multicolumn{3}{c}{Against 1-GPU Results}                & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Time($\downarrow$)\\ (sec.)\end{tabular}} & \multirow{2}{*}{Speedup($\uparrow$)} \\ \cline{2-3} \cline{4-6}
+Setting          & LPIPS($\downarrow$)          & FID($\downarrow$)            & PSNR($\uparrow$)           & LPIPS($\downarrow$)          & FID($\downarrow$)           &                                                                        &                          \\ \hline
+SD-XL 1 GPU      & 0.797          & \textbf{23.96} & -              & -              & -             & 6.51                                                                   & -                        \\
+w. LinFusion 1 GPU  & \textbf{0.794} & 24.85          & -              & -              & -             & \textbf{6.49}                                                          & -                        \\ \hline
+DistriFusion 2 GPUs     & 0.797          & \textbf{24.18} & 24.63          & 0.146          & 4.87          & 5.36                                                                   & 1.21                     \\
+w. LinFusion 2 GPUs & \textbf{0.795} & 24.96          & \textbf{26.45} & \textbf{0.113} & \textbf{4.09} & \textbf{3.85}                                                          & \textbf{1.69}            \\ \hline
+DistriFusion 4 GPUs     & 0.798          & \textbf{24.22} & 23.05          & 0.183          & 5.77          & 4.22                                                                   & 1.54                     \\
+w. LinFusion 4 GPUs & \textbf{0.796} & 25.00          & \textbf{24.63} & \textbf{0.148} & \textbf{5.08} & \textbf{2.51}                                                          & \textbf{2.59}            \\ \hline
+DistriFusion 8 GPUs     & 0.799          & \textbf{24.40} & 22.04          & 0.211          & \textbf{6.45} & 4.37                                                                   & 1.49                     \\
+w. LinFusion 8 GPUs & \textbf{0.797} & 24.97          & \textbf{22.93} & \textbf{0.198} & 6.61          & \textbf{2.14}                                                          & \textbf{3.03}            \\ \bottomrule
+\end{tabular}
+\caption{Results of distributed parallel inference on a server with 8 RTX 4090 D GPUs. Benefiting from its linear complexity and constant communication cost among various patches, LinFusion is readily for distributed parallel inference with multiple GPUs. Compared with DistriFusion, it achieves more significant acceleration even \textbf{without} NVLink.}
+\label{tab:6}
+}
+\end{floatrow}
+\end{table}
+
+
+
+
+

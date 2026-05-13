@@ -1,0 +1,396 @@
+\title{Beyond 2:4: Exploring V:N:M Sparsity for Efficient Transformer Inference on GPUs}
+
+\begin{abstract}
+To date, 2:4 sparsity has stood as the only sparse pattern that can be accelerated using sparse tensor cores on GPUs. In practice, 2:4 sparsity often possesses low actual speedups ($\leq 1.3$) and requires fixed sparse ratios, meaning that other ratios, such as 4:8, 8:16, or those exceeding 50\% sparsity, do not incur any speedups on GPUs.
+Recent studies suggest that V:N:M sparsity is promising in addressing these limitations of 2:4 sparsity. 
+This sparsity divides a weight matrix into multiple V$\times$M blocks, pruning (M-4) columns within each block and applying 2:4 sparsity to the remaining columns. V:N:M sparsity inherently encompasses 2:4 sparsity but allows for higher and more flexible pruning ratios, typically resulting in greater practical speedups.
+However, regarding accuracy, the effects of V:N:M sparsity on broader Transformer models, such as vision Transformers and large language models (LLMs), are largely unexamined. Moreover, Some specific issues related to V:N:M sparsity, such as how to select appropriate V and M values, remain unresolved.
+In this study, we thoroughly investigate the application of V:N:M sparsity in vision models and LLMs across multiple tasks, from pretaining to downstream tasks. We propose three key approaches to enhance the applicability and accuracy of V:N:M-sparse Transformers, including heuristic V and M selection, V:N:M-specific channel permutation and three-staged LoRA training techniques.
+Experimental results show that, with our methods, the DeiT-small achieves lossless accuracy at 64:2:5 sparsity, while the DeiT-base maintains accuracy even at 64:2:8 sparsity. In addition, the fine-tuned LLama2-7B at 64:2:5 sparsity performs comparably or better than training-free 2:4 sparse alternatives on downstream tasks. More importantly, V:N:M-sparse Transformers offer a wider range of speedup-accuracy trade-offs compared to 2:4 sparsity.
+Overall, our exploration largely facilitates the V:N:M sparsity to act as a truly effective acceleration solution for Transformers in cost-sensitive inference scenarios.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Transformer has gained significant popularity as backbones across various domains due to its remarkable performance in data modeling and scalability. However, Transformers are often characterized by a large number of parameters  and high computational demands, resulting in prolonged inference latency. It is essential to compress Transformer models for efficient inference, especially in resource-constrained or latency-sensitive applications.
+
+One possible way to accelerate Transformers is 2:4 sparsity, where only two out of every consecutive four parameters are retained in weight tensors. 2:4 sparsity is widely supported by Nvidia Ampere or newer GPUs. However, the current ecosystem for 2:4 sparsity exhibits three weaknesses that are rarely addressed. \textbf{1) Low practical speedups.} Unlike the theoretical claims of a twofold speedup, in most cases, neural networks with 2:4 sparsity achieve only a speedup in the range of 1.1 to 1.3x \citep{PyTorchSparse, NVIDIA2021}. \textbf{2) Only one sparsity pattern, i.e., 2:4, can be accelerated.} Other patterns at 50\% sparsity, like 4:8 and 8:16, cannot yield any speedups on existing GPUs. \textbf{3) Failure to exploit higher sparsity ratio.} For some Transformer models with high weight redundancy, or in scenarios where inference overheads are more sensitive while model accuracy can be relatively relaxed, the optimal sparsity ratio can be larger than 50\%, and 2:4 sparsity cannot fully leverage the potential performance gains from higher sparsity levels. 
+
+To address the weaknesses, \cite{castro2023venom} proposes V:N:M sparsity. As shown in Figure \ref{fig:compare}, V:N:M sparsity divides the weight matrices of linear layers in Transformers into multiple blocks, each sized V × M. Within each block, (M - 4) columns are pruned, leaving 4 columns that implement 2:4 sparsity. V:N:M sparsity enables practical speedups for sparsity above 50\% on GPUs. Notably, any GPU that supports 2:4 sparsity can also accelerate V:N:M sparsity.
+Due to higher compression ratios, V:N:M sparse Transformers deliver greater
+speedups compared to those using 2:4 sparsity.
+
+The initial work on V:N:M sparsity primarily focuses on designing its acceleration kernels, with only basic verification of its effect on the accuracy of BERT using the SQuAD task. However, the impact of V:N:M sparsity on broader Transformer models, such as vision Transformers and large language models (LLMs) like the Llama series, remains under-explored. Additionally, fundamental issues regarding V:N:M sparsity, such as how to select appropriate values for V and M in a Transformer architecture, remain unresolved. In this work, we aim to bridge these gaps by systematically investigating the application of V:N:M sparsity across multiple Transformer models, with a particular emphasis on enhancing their accuracy. Specifically, our contributions are as follows:
+\begin{itemize}
+    \item We propose a scheme that enables the generation of highly accurate V:N:M-sparse Transformers under different constraints, which broadens the applicability of V:N:M sparsity.     
+    
+    \item
+We propose three techniques to address challenges specific to V:N:M sparsity. First, we present a heuristic method for selecting V and M values that yield optimal accuracy-speedup trade-offs for V:N:M sparse Transformers. Second, we introduce V:N:M-specific channel permutation, which improves the accuracy of V:N:M-sparse Transformers within limited training budgets. Finally, we propose a three-stage LoRA training technique that adapts V:N:M sparsity for LLMs.
+    
+    \item 
+    Extensive experiments demonstrate the efficacy of our proposed scheme and techniques. Impressively, DeiT-base with 64:2:8  sparsity (75\% sparse) achieves nearly lossless accuracy, with a minimal difference of less than 0.3\% compared to the dense counterpart. As for speedups, the 64:2:8-sparse DeiT-base achieves a 1.7x speedup, while the 2:4 sparsity only provides a 1.15x speedup compared to the dense counterpart. 
+\end{itemize}
+
+Our methods and results demonstrate that in scenarios with high inference costs or stringent latency requirements, V:N:M sparsity is a superior alternative to 2:4 sparsity for Transformers exhibiting significant redundancy. We advocate for the inclusion of V:N:M sparsity as a key consideration in deploying Transformers on GPUs that support 2:4 sparsity.
+
+ 
+
+\begin{figure}[htp] % 'h' means place the figure here
+    \centering % Center the figure
+    \includegraphics[width=0.9\textwidth]{pics/1-vnm-snip.pdf} % Include the image
+    \label{fig: nmvsvnm}
+    \caption{An example on N:M sparsity and V:N:M sparsity} % Add a caption
+    \label{fig:compare} % Add a label for referencing
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+\textbf{Sparsity in Transformers}
+Weight sparsity in Transformers can be categorized into three types: unstructured sparsity, like S$^2$ViTE \citep{chen2021chasing}, SparseGPT \citep{frantar2023sparsegpt}, and Wanda \citep{sun2023simple}; structured sparsity, represented by ViT-Slim \citep{chavan2022vision}, VTP \citep{zhu2021vision}, UVC \citep{yu2022unified}, and SAViT \citep{zheng2022savit}; and semi-structured sparsity. 
+In particular, semi-structured sparsity generally offers a preferable trade-off between accuracy and speed. 
+\citet{yu2023boost} introduce 2:4 sparsity to vision Transformers, demonstrating that the DeiT series with 2:4 sparsity can maintain a nearly lossless performance. \citet{xu2024lpvit} implement block-wise sparsity in Transformers, achieving notable speed improvements on neural processing units. Nevertheless, this approach results in unavoidable accuracy declines. In contrast, our V:N:M sparse DeiT-base can preserve nearly lossless accuracy even at 75\% sparsity. Beyond weight sparsity, other components, such as tokens and attention heads, can also be pruned in Transformers. Some works in this aspect include T2T-ViT-24 \citep{yuan2021tokens}, PVT \citep{wang2021pyramid}, Evo-ViT \citep{xu2022evo}, EViT \citep{liang2022not}, DynamicViT \citep{rao2021dynamicvit}, PS-ViT \citep{tang2022patch}, and AdaViT \citep{yin2021adavit}. However, in this study, we primarily focus on the effects of V:N:M sparsity on Transformers, rather than extreme compressing a Transformer. 
+
+\textbf{Optimization for sparse Transformers}
+The sparse Transformers can be retrained to restore accuracy. 
+The retraining process can be combined with techniques such as neural architecture search \citep{chen2021autoformer, chavan2022vision}. During retraining, sparse masks can be updated periodically \citep{zhang2023bi, lu2023step}. To address training instability, SR-STE \citep{zhou2021learning} proposes suppressing the weights that are masked out, allowing the updated masks to become progressively consistent as training advances.
+For large-scale Transformers, such as large language models (LLMs), post-training pruning \citep{frantar2023sparsegpt, sun2023simple, zhang2024plug} is effective when sparsity levels are low or moderate (less than 50\%). Additionally, some studies \citep{kuznedelev2023accurate, kale2021keep} indicate that sparse networks are often under-trained provided with the same number of training epochs as their dense counterparts. Our study also finds that as training duration increases, the accuracy of sparse Transformers improves significantly, while dense Transformers exhibit minimal accuracy gains. 
+
+\textbf{Channel permutation}
+Channel permutation (CP) is extensively utilized in model quantization \citep{yuan2023rptq} and sparsification \citep{ji2018tetris, tan2022accelerating, lin20221xn, pool2021channel}. In particular for model sparsity, rearranging the order of weight or activation tensors prior to pruning can significantly reduce the subsequent one-shot pruning loss. Furthermore, as a specialized form of teleportation \citep{zhao2023improving, mishkin2024level}, CP enhances the gradient flow of sparse models during training. However, other methods, such as extended training durations \citep{kuznedelev2023accurate} and gradual pruning strategies \citep{bambhaniya2024progressive, jaiswal2022training}, can also improve gradient flow in sparse models, CP is particularly advantageous in low-training-budget scenarios, where CP can promote model convergence. 
+
+
+
+\section{Preliminary}
+
+
+\textbf{Pruning of V:N:M sparsity }
+Pruning a weight matrix $\Wv$ to achieve the V:N:M-sparse pattern involves three steps: 
+1) Calculate importance scores. First, compute the importance score for each weight in $\Wv$. 
+2) Column Pruning. Next, prune the columns within each V$\times$M block. Within each block, the L1 norms of the importance scores for each column are compared, and the weights corresponding to minimal M$-4$ columns are pruned.
+3) Conduct 2:4 Sparsity. After the column-wise pruning, each block retains exactly four columns. Subsequently, for each row, the weights corresponding to the last two importance scores are further pruned to establish the final V:N:M-sparse pattern. For descriptive convenience, we signify this V:N:N-sparse pruning process as $S_{V:N:M}$.  
+
+In this work, there are two commonly used criteria to form the importance score of a weight: the naive absolute values (ABS) and relative importance and activation (RIA) \citep{zhang2024plug}. Specifically, RIA defines the importance score of a weight $\Wv_{ij}$  as:
+\begin{equation}
+RIA_{ij}  = (\frac{|\Wv_{ij}|}{\sum |\Wv_{*j}|} + \frac{|\Wv_{ij}|}{\sum |\Wv_{i*}|})\times \left( \| \Xv_i \|_2 \right)^a ,
+\end{equation}
+where $\sum |\Wv_{*j}|$ and $\sum |\Wv_{i*}|$ denote the summation of the absolute values of the input channel $j$ and output channel $i$, respectively. $\| \Xv_i \|_2$ is L2 norms of activations and $a$ is a factor to control the impact of activations on importance scores. Notably, both ABS and RIA are computationally efficient pruning criteria.
+
+\textbf{Fixed and dynamic mask training for V:N:M sparsity} To restore the accuracy of V:N:M-sparse Transformers, sparse training is essential as V:N:M sparsity lies in high sparsity levels f at least 60\% (V:2:5). At these high levels, merely applying post-training pruning is insufficient to reduce the significant accuracy loss. Specifically, after pruning a weight matrix, its 0-1 mask $\Mv$ that follows the V:N:M-sparse pattern can be easily derived. Denote the sparse weight matrix $\Wv'=\Wv \odot \Mv$, where $\odot$ is the element-wise multiplication operator. The weight update mechanism for fixed mask training is represented as:
+\begin{equation}
+\Wv'_t=\Wv'_{t-1}-\gamma \nabla_{\Wv'}\mathcal{L}_t (\Wv'_{t-1}) 
+\label{eq:fixedmask}
+\end{equation}
+Meanwhile, the weight update using dynamic mask training in the SR-STE framework is expressed as:  
+\begin{equation}
+\mathbf{W}_t \leftarrow \mathbf{W}_{t-1} - \gamma \left( \nabla_{\mathbf{W}} \mathcal{L}_t (\mathbf{W'}_{t-1}) + \lambda \overline{\Mv}_{t-1} \odot \mathbf{W}_{t-1} \right)
+\label{eq:dynamask}
+\end{equation}
+In Eq. \ref{eq:fixedmask} and \ref{eq:dynamask}, $\nabla \mathcal{L}$ denotes the gradient, while $\gamma$ and $\lambda$ are the learning rate and regularization coefficient, respectively. 
+Eq. \ref{eq:fixedmask} indicates that only the retained weights are updated, with the V:N:M-sparse mask $\Mv$ remaining unchanged after one-shot pruning. In contrast, Eq. \ref{eq:dynamask} gradient-updates the dense $\Wv$ and $\Mv$ is time-variant. 
+
+\textbf{Acceleration of V:N:M sparsity}
+As illustrated in Figure \ref{fig:workflow}(b), the acceleration of V:N:M-sparse Transformers involves three steps: weight padding, conversion to compressed formats, and the application of V:N:M accelerated kernels.
+First, the weights of all linear layers are zero-padded to ensure that the input and output channels of weight matrices in linear layers are divisible by M and V, respectively. Next, the padded weights are converted into sparse storage formats that include only the compact non-zero values and their indices.
+Due to the effective utilization of higher sparsity greater than 50\%, V:N:M-sparse MMs possess fewer computations than 2:4-sparse MMs. Thus, for a dense Transformer, the V:N:M-sparse version typically achieves higher speedups than its 2:4 counterpart, with maximal end-to-end speedups reaching over 2x.
+
+
+\section{Methods}
+
+
+\textbf{Scheme overview} We show the process of generating a V:N:M-sparse Transformer with high accuracy in Figure \ref{fig:workflow}(a).  
+Given a pretrained dense Transformer and a specified speedup threshold, a heuristic approach is employed to select appropriate V and M values for pruning the dense Transformer. 
+After that, we consider two distinct scenarios.
+In the first scenario, where a limited training budget is available, V:N:M-specific CP, RIA-based pruning, and fixed mask training are sequentially employed. CP and RIA can significantly improve the accuracy of V:N:M-sparse Transformers upon pruning, while for low training budget constraints, fixed mask training, no matter with full-parameters or LoRA, incurs significantly lower overhead compared to dynamic mask training as the mask update costs are canceled.
+
+\begin{wraptable}{r}{0.4\textwidth}
+\captionof{table}{64:2:5-sparse DeiT-small accuracy with update frequencies}
+\label{tab:mdsrste}
+\begin{tabular}{cc}
+            \toprule
+            Update frequency   & Top-1 Accu.(\%) \\ \midrule
+            Fixed   & 78.72           \\
+            1 & 72.96           \\
+            5 & \textbf{79.65} \\
+            10 & 79.48
+            \\ \bottomrule
+\end{tabular}
+\end{wraptable}
+In the second scenario, when the training budget is not constrained, ABS-based pruning and dynamic mask training are conducted in order. In particular, we use ABS-based pruning for dynamic mask training as the criterion performs well provided long training duration \citep{huang2024pruning}. As for dynamic mask training, two specific cases involving full-parameter and LoRA training 
+are considered. For full-parameter training, the SR-STE framework formulated using Eq. \ref{eq:dynamask} is employed with one modification. That is, the sparse masks are updated less frequently, specifically every five epochs instead of the one iteration per update reported in the original approach. As suggested in Table \ref{tab:mdsrste}, this reduced update frequency enhances training stability, resulting in improved final accuracy for V:N:M sparse Transformers. Besides, we propose a three-staged LoRA training technique to train V:N:M-sparse Transformers under memory constraints, such as during the fine-tuning of LLMs.
+Overall, our scheme encompasses three training settings, each corresponding to one branch shown in Figure \ref{fig:workflow}(a). For clarity, these three \textbf{t}raining \textbf{s}ettings are designated as \textbf{TS1}, \textbf{TS2}, and \textbf{TS3}, respectively. By addressing all the possible conditions, our scheme significantly expands the applicability of V:N:M-sparse Transformers. Afterward, three key techniques marked with the blue color in Figure \ref{fig:workflow} in the scheme are detailed.
+
+\begin{figure}[htp] % 'h' means place the figure here
+    \centering % Center the figure
+    \includegraphics[width=1.0\textwidth]{pics/2-overview-snip10.pdf} % Include the image
+    \label{fig: overview}
+    \caption{The workflow of utilizing V:N:M sparsity for Transformer inference acceleration. a) The generation process of a V:N:M sparse Transformer, which is our major contribution. b) The deployment process of the generated V:N:M-sparse Transformer.} % Add a caption
+    \label{fig:workflow} % 如果是下游任务，a）图还得改
+\end{figure}
+\subsection{V and M selection}
+For a dense Transformer, different V and M value combinations result in different final accuracy and speedups for its V:N:M-sparse counterparts. Among these combinations, we aim to select the proper V and M combinations with which a V:N:M-sparse Transformer consistently lies in the Pareto front in terms of both accuracy and speedups. However, it is often time-consuming to generate a V:N:M-sparse Transformer via sparse training, before its accuracy can be evaluated. To address this issue, we propose a heuristic V and M selection strategy including two key factors:
+
+\paragraph{1) Definition.} We define the process of solving for optimal combinations of \( V \) and \( M \) on the Pareto front as Eq. \ref{eq:sparse_transformer}:
+\begin{equation}
+\begin{aligned}
+& \argmax_{V,M}{Accu.\{f(\wv(V,N,M)), \dv_v\}}, \\ &\text{subject to} \ Speedup\{f(\wv), f(\wv(V,N,M)\} \geq s 
+ \label{eq:sparse_transformer}
+\end{aligned}
+\end{equation}
+That is, given a specified speedup threshold \( s \), training data \( \dv_t \), and a dense Transformer $f(\wv)$, our goal is to identify a proper V and M to maximize the accuracy of the Transformer's sparse version $f(\wv(V,N,M))$, on validation data $ \dv_v $. This optimization is subject to the constraint that the speedup of $f(\wv(V,N,M))$ relative to $f(\wv)$ is at least \( s \). In practice, considering the GPU acceleration affinity, \{V$\in 2^ 
+k|k\in N^{+},  k \geq 4\}$  and \{M$\in N^{+}, $M$ \geq 5 \}$. Besides, N$\equiv$2 in V:N:M sparsity if practical speedup is required.
+Notably, the Pareto front is defined in our work as the optimization of accuracy subject to speedup constraints, rather than maximizing speedup under accuracy constraints. This distinction arises from our observation that the speedups of a V:N:M-sparse Transformer can be measured more rapidly than its accuracy. Thus, given a specified speedup threshold, it is feasible to quickly obtain all (V, M) combinations that lead to greater speedups.
+
+\paragraph{2) Sifting.} A two-phase sifting is conducted to select the optimal (V, M) combination from all the (V, M) combinations that meet the given speedup constraints. First, for a group of (V, M) combinations with the same V, it is evident the smallest M results in the highest accuracy of V:N:M-sparse Transformers, as a smaller M implies lower sparsity in the resulting sparse Transformers. This rule can be utilized to exclude most  (V, M) combinations. Secondly, mask diversity (MD) \citep{hubara2021accelerated} is utilized to distinguish the rest of the (V, M) combinations. MD of V:N:M sparsity quantifies the number of unique masks permissible under the V:N:M sparse pattern constraint. Generally, a higher MD indicates greater sparse weight configuration flexibility, leading to better Transformer accuracy. Specifically, the MD of a V:N:M-sparse Transformer is: 
+\begin{equation}
+MD_f=\prod_l MD_{V:N:M}^l, \qquad MD_{V:N:M}^l=[C_M^4(C_4^N)^V]^{\frac{m}{V}\frac{n}{M}}=K(V,M)^{mn}
+\label{eq:md}
+\end{equation}
+It is straightforward to prove that for the same Transformer, the relative order of different $MD_f$ is entirely determined by the values of V and M, i.e., $K$ in Eq. Thus, only calculating $K$ suffices for comparison and choosing the best (V, M) combination. 
+
+\subsection{V:N:M-specific channel permutation for low training budget}
+\begin{wraptable}{r}{0.35\textwidth}
+\centering
+\captionof{table}{64:2:5-sparse DeiT-base accuracy on downstream tasks with different iterations}
+\label{tab:permutek}
+\renewcommand{\arraystretch}{0.8} % 调整行高
+\begin{tabular}{cc}
+\toprule
+Iterations & AVG Accu. (\%) \\ \midrule
+1             & 94.56              \\
+2             & \textbf{94.71}     \\
+3             & 94.53              \\
+4             & 94.44              \\ \bottomrule
+\end{tabular}
+\end{wraptable}
+To enhance the accuracy of V:N:M-sparse Transformer in scenarios with limited training budgets, i.e., only a small number of training epochs, a V:N:M-specific channel permutation (CP) approach is proposed and should be conducted before RIA-based pruning, i.e., as shown in Figure \ref{fig:workflow}(a). Notably, CP for 2:4 and V:N:M sparsity is different. In 2:4 sparsity, only the input CP of a weight matrix influences the norm of importance scores of retained weights after pruning. In contrast, V:N:M sparsity allows both input and output CP to affect the retained norm. Specifically, both input and output CP for a weight matrix $\Wv$ are:  
+\begin{equation}
+\Yv = \Wv \Xv = \Pv_o^T \Pv_o \Wv \Pv_i \Pv_i^T \Xv = \Pv_o^T \Wv_p \Pv_i^T \Xv,
+\end{equation}
+where $\Pv_o$ and $\Pv_i$ are output CP and input CP matrices, respectively. $\Wv_p$ is the weight matrix after CP. After conducting V:N:M-sparse pruning to the permuted $\Wv_p$, we aim for the norm of the importance scores of the retained weights to be maximized, thus the optimization objective is:
+\begin{equation}
+\arg \max_{\Pv_o,\Pv_i} \sum_{i,j}RIA_{ij}( S_{V:N:M}( \Wv_p ) )
+\end{equation}
+We employ alternative optimization to iteratively solve for $\Pv_o$ and $\Pv_i$. Specifically, both $\Pv_o$ and $\Pv_i$ are initialized as identity matrices. In the $k$th iteration, 
+\begin{equation}
+\Pv_i^{k+1} = \arg \max_{\Pv_i} \sum_{i,j}RIA_{ij}( S_{V:N:M}( \Pv_o^k \Wv \Pv_i ) )
+\label{eq:admm1}
+\end{equation}
+\begin{equation}
+\Pv_o^{k+1} = \arg \max_{\Pv_o} \sum_{i,j}RIA_{ij}( S_{V:N:M}( \Pv_o \Wv \Pv_i^k ) )
+\label{eq:admm2}
+\end{equation}
+Like \citep{zhang2024plug}, Eq. \ref{eq:admm1} or \ref{eq:admm2} can be approximately modeled as the traditional linear sum assignment problem, efficiently solvable using Hungarian algorithm\citep{kuhn1955hungarian}. The total number of iterations is 2, based on the ablation study presented in Table \ref{tab:permutek}. Note that during inference, $\Pv_o^T$ and $\Pv_i^T$ can be fused with post-Layernorm or preceding linear layers in standard Transformers, generally resulting in negligible time overheads \citep{zhang2024plug}.    
+
+\subsection{Three-staged LoRA training}
+For LoRA training \citep{hu2021lora}, the V:N:M sparse version $\Wv'$ of a dense weight matrix $\Wv$ is derived by:
+\begin{equation}
+\Wv' = (\Wv + \Bv\Av)\odot \Mv,
+\label{eq:unify}
+\end{equation}
+where $\Bv$ and $\Av$ are two low rank matrices.  
+Normally, $ Mv$ is a function of $ Wv$, $ Bv$, and $ Av$. During training, $ Wv$ remains fixed while $ Bv$ and $ Av$ are updated. We propose a three-stage LoRA training technique to enable dynamic mask training with LoRA and enhance the accuracy of V:N:M-sparse Transformers. 
+1) Dense LoRA. At the beginning of training, standard LoRA fine-tuning is applied to the Transformer, where the masks $\Mv$ are consistently all-one matrices.
+2) 
+\begin{wrapfigure}{r}{0.45\textwidth}
+    \centering
+    \includegraphics[width=0.45\textwidth]{pics/3-gradnorm-2.pdf} 
+    \caption{Gradient norm of Llama2-7B during sparse LoRA fine-tuning with dynamic masks and fixed masks, respectively. }
+    \label{fig:gradnorm}
+\end{wrapfigure}
+Sparse LoRA with the dynamic masks. After the dense LoRA, 
+the masks $\Mv$ are updated at regular intervals according to the V:N:M sparse patterns as training progresses, which means each update occurs after a fixed number of iterations. During the mask update, the low-rank matrices $\Bv$ and $\Av$ are merged with the original dense weight matrix $\Wv$ before calculating the importance scores and conducting V:N:M-sparse pruning.
+3) Sparse LoRA with the fixed masks. While dynamic mask updates facilitate the exploration of appropriate V:N:M-sparse masks, they can also introduce instability in the training process. Furthermore, directly applying regularization such as SR-STE, as illustrated in Eq. \ref{eq:dynamask}, is challenging because the LoRA term $\Bv\Av$ is complex to regularize. Therefore, in the third stage, we advocate for fine-tuning with fixed masks to balance the exploration and exploitation of masks. At this stage, the masks $\Mv$ are inherited from the last update in the previous stage and remain unchanged until the training is completed.
+
+It is important to note that the number of iterations in the first two stages should only constitute a smaller proportion of the total iterations, with the majority allocated to the third stage, i.e., Sparse LoRA with fixed masks. This is because, in the absence of regularization, frequent updates to the masks can negatively impact the gradient flow of V:N:M sparse Transformers during fine-tuning, as exemplified in Figure \ref{fig:gradnorm}. In practice, the iterations for the first two stages should not exceed 10\% of the total iterations.
+
+
+
+\section{Experiments}
+
+\textbf{Models, datasets and tasks} 
+To evaluate the proposed V:N:M-sparse Transformer generation method—which incorporates V and M selection, V:N:M-specific channel permutations, and three staged LoRA training techniques, three benchmarks have been established: 1) DeiT \citep{touvron2021training} for image classification. This benchmark is widely recognized for assessing the efficacy of model compression techniques in vision Transformers. Given that V:N:M sparsity operates at high sparsity levels (greater than 50\%), the DeiT-tiny is excluded due to insufficient redundancy. The datasets used for the tasks include ImageNet-1K \citep{deng2009imagenet}, Cifar-10 and Cifar-100 \cite{krizhevsky2009learning}, Bird and Vehicle from the subset of ImageNet-1K. Note that the latter four datasets are used to form downstream tasks. 
+2) Swin Transformers. This category of vision Transformers, known for its hierarchical architecture and shifted window mechanisms, demonstrates increased sensitivity to model compression \citep{liu2021swin}. In this work, the V:N:M-sparse Swin Transformers are assessed across two tasks: image classification on the ImageNet-1K dataset and object detection on the COCO 2017 dataset \citep{lin2014microsoft}. 
+3) Llama2-7B on downstream tasks including predicting the next token on wikitext2 \citep{merity2016pointer} and eight well-established 5-shot tasks \citep{gao2021framework}. 
+Note that Llama2-7B undergoes LoRA training on both Wikitext2 and Alpaca \citep{taori2023alpaca} before testing on these tasks, which is a standard practice in the fine-tuning of LLMs. In addition, the speedups of these V:N:M-sparse Transformers compared to their dense counterparts are measured on RTX 3090 GPUs, which were also the speed-testing platform in the initial study. 
+\subsection{Results for V and M selection}
+Figure \ref{fig:tradeoff} compares the accuracy and speedup for V:N:M-sparse Transformers, both with and without the proposed V and M selection technique.
+In this experiment, for practical speedups, V is confined to the values $[16,32,64,128]$. Sparse Transformers with varying M values and unified V=64 are selected to establish the speedup threshold $s$, as specified in Eq. \ref{eq:sparse_transformer}, with 64 representing a central value in the V distribution. Using the thresholds, the V and M selection technique is applied to derive new (V, M) and further generate the V:N:M-sparse Transformers accordingly, as indicated by the yellow lines in Figure \ref{fig:tradeoff}.
+
+Specifically, in Figure \ref{fig:tradeoff}(a), the V:N:M-sparse DeiT-base models located on the Pareto front exhibit higher Top-1 accuracy compared to the baseline, achieving a maximum accuracy improvement of 2.6\% under similar speedup conditions. For the Llama2-7B, shown in Figure \ref{fig:tradeoff}(b), the maximal average score difference is 3.41. Besides, when appropriate values of V and M are utilized, the sparse DeiT-base maintains a nearly lossless accuracy of 81.59\% while achieving a speedup of 2.02 relative to its dense counterpart. Similarly, the sparse Llama2-7B achieves a speedup of 1.65, with a score of 50.85 on 5-shot tasks. 
+Furthermore, it is essential to emphasize that V:N:M-sparse vision Transformers exhibit substantially greater speedups compared to 2:4 counterparts. As depicted in Figure \ref{fig:tradeoff}(a), the 128:2:6-sparse DeiT-base matches the accuracy of the 2:4-sparse DeiT-base while achieving a \textbf{1.71x} speedup over its dense counterpart, in contrast to the 2:4-sparse version, which achieves only a 1.15x speedup.      
+\begin{figure}[htb] 
+    \centering % Center the figure
+    \includegraphics[width=1\textwidth]{pics/4-tradeoff-1.pdf} % Include the image
+    \caption{The speedup-accuracy curves of V:N:M-sparse Transformer. a) Top-1 accuracy of DeiT-base using TS2 with different V and M values. b) Average scores of Llama2-7B using TS3 on 5-shot tasks with different V and M values. }  % Add a caption
+    \label{fig:tradeoff} % Add a label for referencing
+\end{figure}
+\subsection{Results for V:N:M-specific channel permutation and TS1}
+\begin{wraptable}{r}{0.38\textwidth} 
+\caption{64:2:5-Sparse Llama2-7B \\ results under 1500 training iterations. }
+\label{tab:permutellama}
+\begin{tabular}{ccc}
+\toprule
+\begin{tabular}[c]{@{}c@{}}Pruning\\ method\end{tabular} & \begin{tabular}[c]{@{}c@{}}Wikitext2\\ PPL\end{tabular} & \begin{tabular}[c]{@{}c@{}}5-shot\\ AVG scores\end{tabular} \\ \midrule
+No  & 11.19    & 48.44   \\
+Ours  & \textbf{11.09} & \textbf{49.69}       \\ \bottomrule
+\end{tabular}
+\end{wraptable}
+Since the proposed V:N:M-specific CP is effective for low-budget training scenarios, we assess this technique on downstream tasks that allow for a limited number of training epochs to attain acceptable accuracy. 
+The results, presented in Tables \ref{tab:permutellama} and \ref{tab:permutedeit}, were all obtained using TS1. For vision downstream tasks with a maximum of 30 training epochs, our technique enhances final accuracy by 0.71\% for full-parameter training and 1.43\% for LoRA training. Notably, when V:N:M-sparse pruning is only applied without any training, the accuracy gap can increase to 5.87\% with or without our technique. Similarly, for Llama2-7B, which underwent only 1500 training iterations—a relatively short duration compared to the 50,000 iterations shown in the subsequent Table \ref{tab:5shot}, our technique improves the 5-shot scores by 1.25.  
+\begin{table}[htb]
+\caption{ Results of 64:2:5 DeiT-base on downstream tasks with 30 training epochs }
+\label{tab:permutedeit}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{cccccccccccccc}
+\toprule
+Downstream tasks           & \multicolumn{3}{c}{BIRD} & \multicolumn{3}{c}{VEHICLE} & \multicolumn{3}{c}{CIFAR-10} & \multicolumn{3}{c}{CIFAR-100} & \multirow{3}{*}{\begin{tabular}[c]{@{}c@{}}Average \\ $\Delta$\end{tabular}} \\ \cmidrule{1-13}
+Dense model (\%)           & \multicolumn{3}{c}{97.8} & \multicolumn{3}{c}{97.3}    & \multicolumn{3}{c}{98.1}    & \multicolumn{3}{c}{87.54}    &                                                                \\ \cmidrule{1-13}
+Permutation Method         & No    & Ours  & $\Delta$ & No     & Ours   & $\Delta$  & No     & Ours   & $\Delta$  & No      & Ours   & $\Delta$  &                                                                                 \\ \midrule
+Upon Pruning (\%)          & 81.6  & 87.6  & 6        & 78.6   & 85.7   & 7.1       & 84.42  & 89.85  & 5.43      & 57.65   & 63.07  & 5.42      & \textbf{5.87}                                                                  \\
+30 epochs-all params. (\%) & 96.5  & 96.9  & 0.4      & 95.7   & 96.4   & 0.7       & 97.51  & 97.73  & 0.22      & 85.54   & 86.65  & 1.11      & \textbf{0.71}                                                                  \\
+30 epochs-LoRA (\%)        & 96.3  & 96.9  & 0.6      & 94.7   & 96.4   & 1.7       & 97.26  & 97.73  & 0.47      & 83.96   & 86.65  & 2.69      & \textbf{1.63}                                                                   \\ \bottomrule
+\end{tabular}
+
+}
+\end{table}
+
+\subsection{Results for TS2}
+\textbf{DeiT on image classification}
+As the training budget is not limited in terms of TS2, the experiments are to investigate the extent to which the DeiT can be compressed while still achieving nearly lossless performance, i.e., gap$<0.3\%$. 
+As shown in Table \ref{tab:deit}, our TS2 allows DeiT-base to achieve lossless accuracy at a sparsity level of 75\%, represented as 64:2:8. This level of sparsity results in a 73.8\% reduction in parameters and a 71.6\% reduction in FLOPs. Similarly, DeiT-small maintains lossless accuracy at 64:2:5, achieving a 57.9\% reduction in parameters and a 54.3\% reduction in FLOPs.
+Due to computational power limitations, larger Transformers, such as ViT-huge and ViT-giant, were not included in this investigation. However, it is generally acknowledged that larger models tend to exhibit greater redundancy. For the ImageNet-1K classification task, larger vision Transformers than DeiT-base are anticipated to achieve higher sparsity than 64:2:8 while maintaining lossless accuracy.
+\begin{table}[htb]
+\centering
+\caption{Results comparison of sparse DeiTs on ImageNet-1K}
+\label{tab:deit}
+\renewcommand{\arraystretch}{0.8}
+\begin{tabular}{lcccccc}
+\toprule
+{Model} & {Param. (M)} & {(↓\%)} & {FLOPs (G)} & (↓\%) & {Top-1 Acc. (\%)} & {$\Delta$} \\
+\midrule
+DeiT-B & 86.6 & - & 17.6 & - & 81.84 & - \\
+DeiT-B-600e & 86.6 & - & 17.6 & - & 82.01 & +0.17 \\
+T2T-ViT-24  & 64.1 & 26.0 & 13.8 & 21.6 & 82.30 & +0.46 \\
+PVT-L  & 61.4 & 29.1 & 9.8 & 44.3 & 81.70 & -0.14 \\
+AutoFormer-B  & 54.0 & 37.6 & 11.0 & 37.5 & 82.40 & +0.56 \\
+SSP-B  & 56.8 & 34.4 & 11.8 & 33.1 & 80.80 & -1.04 \\
+S$^2$ViTE-B  & 56.8 & 34.4 & 11.8 & 33.1 & 82.22 & +0.38 \\
+Evo-ViT  & 56.3 & - & 11.7 & 33.3 & 80.30 & -0.54 \\
+EViT-DeiT-B  & 86.6 & - & 11.5 & 34.7 & 81.50 & -0.34 \\
+DynamicViT  & 61.0 & - & 11.5 & 34.7 & 81.30 & -0.54 \\
+ViT-Slim  & 52.6 & 39.3 & 10.6 & 39.6 & 82.40 & +0.56 \\
+VTP-B  & 47.3 & 45.4 & 10.0 & 43.2 & 80.70 & -1.14 \\
+PS-ViT-B  & 86.6 & - & 9.8 & 44.3 & 81.50 & -0.34 \\
+UVC  & - & - & 8.0 & 54.5 & 80.57 & -1.27 \\
+SAViT  & 25.4 & 70.7 & 5.3 & 69.9 & 81.66 & -0.18 \\
+Ours (64:2:8) & 22.7 & 73.8 & 5.0 & 71.6 & 81.08 & -0.76 \\
+Ours-600e (64:2:8) & \textbf{22.7} & \textbf{73.8} & \textbf{5.0} & \textbf{71.6} & \textbf{81.76} & \textbf{-0.08} \\
+\midrule
+DeiT-S & 22.1 & - & 4.6 & - & 79.85 & - \\
+DeiT-S-600e & 22.1 & - & 4.6 & - & 80.02 & +0.17 \\
+AdaViT-S  & 22.1 & 0.0 & 3.6 & 21.7 & 78.60 & -1.25 \\
+DynamicViT  & 22.1 & - & 3.4 & 26.1 & 79.60 & -0.25 \\
+EViT-DeiT-S  & 22.1 & - & 3.4 & 34.8 & 79.50 & -0.35 \\
+SSP-S  & 14.6 & 33.3 & 3.1 & 31.6 & 77.74 & -2.11 \\
+S$^2$ViTE-S  & 14.6 & 33.3 & 3.1 & 31.6 & 79.22 & -0.63 \\
+SAViT & 14.7 & 33.5 & 3.1 & 31.7 & 80.11 & +0.26 \\
+Ours (64:2:5) & 9.3 & 57.9 & 2.1 & 54.3 & 78.97 & -0.68 \\
+Ours-600e (64:2:5) & \textbf{9.3} & \textbf{57.9} & \textbf{2.1} & \textbf{54.3} & \textbf{79.65} & \textbf{-0.2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Swin Transformers} 
+The Swin Transformer is generally considered challenging to compress. However, the V:N:M-sparse Swin Transformer, utilizing our TS2, achieves results comparable to the state of the art. As shown in Table \ref{tab:swin}, under identical training epochs, the Swin Transformer at a sparsity of 32:2:5 achieves the same Top-1 accuracy as LPViT \citep{xu2024lpvit}. Notably, it achieves a 59.1\% reduction in parameters and a 60.4\% reduction in FLOPs, which is significantly greater than LPViT’s 27\% reduction in FLOPs relative to its dense counterpart.
+For object detection, the dense H-DETR, using Swin-Tiny as the backbone and trained for 24 epochs, is employed to generate the V:N:M-sparse H-DETR. With TS2 and 12 training epochs, the H-DETR at 32:2:5 achieves a mean Average Precision (mAP) of 47.8\%, outperforming the dense equivalent trained for 12 epochs, by 2.5\%. Furthermore, at a sparsity of 32:2:6, the sparse H-DETR with TS2 retains an mAP of 45.3\%, surpassing that with the fixed mask training (FMT) setting by 1.2\%. These results demonstrate that our TS2 is more favorable to the accuracy restoration of V:N:M-sparse Transformers.  
+\begin{table}[htb]
+\centering
+\caption{V:N:M-sparse Swin Transformers on image classification and object detection}
+\label{tab:swin}
+\begin{tabular}{lcccccc}
+\toprule
+Model & Method & Param.(M) & (↓\%) & FLOPs (G) & (↓\%) & Top-1 Acuu. (\%) \\ \midrule
+\multirow{3}{*}{Swin-base} & Dense  & 87.8 & - & 15.4 & - & 83.51  \\
+& LPViT & 64.1*  & 27.0   & 11.24   & 27.0  & 81.7 \\
+& Ours(32:2:5) & \textbf{35.9} & \textbf{59.1} & \textbf{6.1}  & \textbf{60.4} & \textbf{81.7} \\ 
+\midrule
+\multirow{6}{*}{\begin{tabular}[c]{@{}l@{}}H-DETR\\ (Swin-Tiny)\end{tabular}} & Dense & 40.2 & -  & 212.0   & - & 45.3  \\
+& Dense-24e  & 40.2  & -  & 212.0  & -  & 49.2   \\ \cmidrule{2-7}
+& FMT(32:2:5)  & 18.1 & 55.0 & 93.7 & 55.8 & 47.5   \\
+& Ours(32:2:5) & \textbf{18.1} & \textbf{55.0} & \textbf{93.7} & \textbf{55.8} & \textbf{47.8}  \\ \cmidrule{2-7}
+& FMT(32:2:6)  & 15.5 & 61.4 & 78.0 & 63.2 & 44.1 \\
+& Ours(32:2:6) & \textbf{15.5} & \textbf{61.4} & \textbf{78.0} & \textbf{63.2} & \textbf{45.3}    \\ 
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Results for three-staged LoRA training and TS3}
+\begin{wraptable}{r}{0.45\textwidth} % 'r' for right, adjust width as needed
+    \centering
+    \caption{64:2:5-Sparse Llama2-7B results on Wikitext2. Training iteration: 50000}
+    \begin{tabular}{lcc}
+    \toprule
+                    & PPL & Speedup     \\ \midrule
+    Dense           & 5.12       & 1           \\ \midrule
+    SparseGPT (2:4) & 10.17      & 1.26        \\
+    Wanda (2:4)     & 11.27      & 1.26        \\
+    RIA (2:4)       & 10.52      & 1.26        \\
+    Ours (64:2:5)   & \textbf{9.97} & \textbf{1.49} \\ \bottomrule
+    \end{tabular}
+    \label{tab:ppl}
+\end{wraptable}
+The experiments aim to demonstrate that the V:N:M-sparse Llama2, with our TS3 involving three-staged LoRA training, can achieve performance levels comparable to its 2:4-sparse version formed by post-pruning approaches, e.g., RIA \citep{zhang2024plug}. The LoRA training was conducted over 50,000 samples, each consisting of 1,024 tokens. Each training iteration utilizes one sample as input, resulting in a total of 50,000 iterations. The results show that utilizing our approach, Llama2-7B achieved a perplexity (PPL) of 9.97 on the Wikitext2 dataset, as shown in Table \ref{tab:ppl}. Additionally, in the 5-shot tasks, the 64:2:5-sparse Llama2-7B scored 53.04, outperforming the state-of-the-art RIA-based post-pruning 2:4-sparse counterpart, which yielded a score of 50.64, as shown in Table \ref{tab:5shot}. Furthermore, the 64:2:5-sparse Llama2-7B delivers a higher speedup compared to the 2:4 sparsity, achieving a speedup of \textbf{1.49} versus 1.26.
+\begin{table}[htb]
+\caption{5-shot results of 64:2:5-sparse Llama2-7B}
+\label{tab:5shot}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccl}
+\toprule
+& OpenBookQA & ARC-C & ARE-E & WinoGrande & Hellaswag & RTE   & PIQA  & BoolQ & AVG  \\ \midrule
+Dense & 31.40 & 43.43  & 76.26  & 69.06      & 57.23     & 62.82 & 78.08 & 77.74 & 61.99  \\ \midrule
+Wanda (2:4) & 20.00 & 30.97  & 65.24  & 59.75      & 39.88     & 54.51 & 69.53 & 66.21 & 50.76   \\
+RIA (2:4)   & 20.20      & 30.80  & 64.77  & 59.59      & 40.63     & 55.23 & 69.70 & 64.19 & 50.64   \\
+Ours (64:2:5)   & 25.80      & 34.30  & 64.27  & 61.80      & 42.88     & 56.68 & 72.03 & 66.54 & \textbf{53.04} \\ \bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{wrapfigure}{r}{0.48\textwidth}
+\centering
+\includegraphics[width=0.48\textwidth,height=0.22\textheight]{pics/5-llmablation-1.pdf}
+\captionof{figure}{Average scores of V:N:M-sparse Llama2-7B on 5-shot tasks under different LoRA finetuning schemes}
+\label{fig:ABCDE}
+\end{wrapfigure}
+\textbf{Ablation study} For TS3, five different LoRA training strategies are explored:
+A) Sparse LoRA with fixed masks;
+B) Dense LoRA combined with sparse LoRA, using fixed masks;
+C) Sparse LoRA with dynamic masks, updated at equal intervals;
+D) Sparse LoRA with dynamic masks, utilizing early updates only;
+E) Our proposed three-stage training technique.
+Figure \ref{fig:ABCDE} illustrates that the proposed technique consistently achieves the highest scores across various sparsity levels, thanks to its optimal balance between enhanced gradient flow and moderate mask exploration. In contrast, Scheme C, which employs dynamic mask updates at equal intervals throughout the training, produces the lowest scores due to impaired gradient flow and increased training instability. Additionally, only using one or two stages within our technique for LoRA training results in suboptimal performance. It is evident that the three-staged LoRA training is the most effective technique for V:N:M-sparse Transformers.
+
+
+
+\section{Conclusion}
+
+ This study focuses on 
+enhancing the accuracy and accuracy-speedup trade-offs of V:N:M-sparse Transformers in multiple scenarios. We address the crucial yet unexplored questions specific to V:N:M sparsity, including selecting appropriate values for V and M, and CP tailored for V:N:M sparsity. Additionally, we propose a three-staged LoRA training technique, which for the first extends V:N:M sparsity to LLMs. Extensive experiments demonstrate that, with our methodology, V:N:M-sparse Transformers can attain nearly lossless accuracy or perform comparably to those with post-pruning 2:4 sparsity. 
+Given its superior speed performance, we conclude that V:N:M sparsity is more effective than 2:4 for compressing highly redundant Transformers in inference-cost-sensitive scenarios. 
+We hope our work will promote the widespread use of V:N:M sparsity as a truly effective solution for compressing Transformers.
+
+\textbf{Reproducibility Statement} We are committed to ensuring the reproducibility of our work. 
+ 
+Detailed descriptions of our experiments, including the architecture configurations and hyperparameters used for training the V:N:M-sparse Transformers, can be found in Section 5 of the main text. 
+In addition, We will publicly release our source code anonymously at the appropriate time.
+We believe these resources collectively facilitate the reproducibility of our findings and ensure that our methodologies can be adopted in future research without difficulty.
+
+
+
+
+
+

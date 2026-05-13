@@ -1,8 +1,8 @@
 # On the Surprising Efficacy of Online Self-Improvement for Embodied Multimodal Foundation Models
 
 - Decision: Reject
-- Avg Score: 3.20
-- Scores: 5, 1, 0, 5, 5
+- Avg Score: 6.25
+- Scores: 5, 10, 5, 5
 
 ## Abstract
 Foundation models trained on web-scale data have revolutionized robotics, but their application to low-level control remains largely limited to behavioral cloning. Drawing inspiration from the sample efficiency and success of reinforcement learning (RL) fine-tuning in large language models (LLMs), we propose a two-stage approach suited to robotics. The first stage, Supervised Fine-Tuning (SFT), fine-tunes pre-trained foundation models using goal-conditioned behavioral cloning and “steps-to-go” prediction objectives. In the second stage, this foundation enables the extraction of a well-shaped reward function and a success detector, eliminating the need for manual reward engineering and real-world instrumentation, and allowing robots to practice autonomously with minimal human supervision. Our experiments on both real-world and simulated robots demonstrate that the combination of SFT and online Self-Improvement is significantly more sample-efficient than supervised learning alone. Furthermore, the combination of our proposed approach with web-scale pre-trained foundation models enables rapid acquisition of new skills, allowing robots to generalize far beyond the behaviors observed in the imitation learning datasets used during training. These findings highlight the transformative potential of combining pre-trained foundation models with online fine-tuning to unlock new levels of autonomy and skill acquisition in robotics.

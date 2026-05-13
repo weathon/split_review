@@ -1,0 +1,491 @@
+\title{Controlled Generation of Natural Adversarial Documents for Stealthy Retrieval Poisoning}
+
+\begin{abstract}
+
+Recent work showed that retrieval based on embedding similarity (e.g., for retrieval-augmented generation) is vulnerable to poisoning: an adversary can craft malicious documents that are retrieved in response to broad classes of queries.  We demonstrate that previous, HotFlip-based techniques produce documents that are very easy to detect using perplexity filtering.  Even if generation is constrained to produce low-perplexity text, the resulting documents are recognized as unnatural by LLMs and can be automatically filtered from the retrieval corpus.
+
+We design, implement, and evaluate a new controlled generation technique that combines an adversarial objective (embedding similarity) with a ``naturalness'' objective based on soft scores computed using an open-source, surrogate LLM.  The resulting adversarial documents (1) cannot be automatically detected using perplexity filtering and/or other LLMs, except at the cost of significant false positives in the retrieval corpus, yet (2) achieve similar poisoning efficacy to easily-detectable documents generated using HotFlip, and (3) are significantly more effective than prior methods for energy-guided generation, such as COLD. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Many modern retrieval systems use embeddings, i.e., dense vector representations, of documents and queries to enable retrieval based on semantic similarity.  \cite{chaudhari2024phantom} and \cite{zhong2023poisoning} recently demonstrated that an adversary can
+use HotFlip~\cite{ebrahimi2017hotflip} to generate documents whose embeddings have high similarity to, and will thus be retrieved in response to, broad classes of queries.  An adversary can poison a retrieval corpus with such documents to propagate spam and disinformation, influence retrieval-augmented generation (RAG), etc.
+
+We first demonstrate that adversarial documents produced by HotFlip have much higher perplexity than normal text and can be filtered out with negligible collateral damage (i.e., false positives).  Controlled generation with a perplexity constraint is a plausible evasion.  It produces low-perplexity, yet unnatural text.  Our first contribution is a defense that uses multiple LLMs and prompts to filter out unnatural adversarial texts without collateral damage to legitimate documents.
+
+The main question we investigate in the rest of this paper is whether it is possible to generate adversarial texts whose embeddings are similar to broad classes of queries, yet evade both perplexity-based and LLM-based detection of unnatural documents. Inspired by prior work on controllable text generation \cite{lu2020neurologic}, we design, implement, and evaluate a new \textbf{adversarial decoding} method for generating natural-looking adversarial documents.  Our method maximizes cosine similarity with the target embedding and minimizes perplexity in the decoding stage of generation.  As mentioned above, this is not enough.  We also use the logits of a surrogate open-source LLM to compute a \emph{soft ``naturalness'' score} that helps guide generation towards natural sequences.  Adversarial decoding requires only black-box access to the embedding encoder models (and can thus be deployed against closed-source encoders) and no access to the LLMs used for detection or filtering.
+
+We demonstrate that adversarial decoding is effective in the retrieval poisoning scenarios considered in~\cite{chaudhari2024phantom} and~\cite{zhong2023poisoning}.  It outperforms energy-guided decoding~\cite{qin2022cold} and
+produces adversarial texts that are likely to be judged as natural by LLM-based detection, including LLMs significantly more advanced than the surrogate LLM used for guidance.  These documents cannot be filtered out using existing or proposed defenses (including our own), without also filtering out a large fraction of the legitimate documents in the corpus.
+
+
+
+\section{Related Work}
+
+
+ 
+\cite{zhong2023poisoning} and \cite{xue2024badrag} poison a retrieval corpus by first separating documents into clusters, then generating an adversarial document for each cluster using a gradient-based method similar to HotFlip (see Section~\ref{sec:hotflip}).  \cite{shafran2024machine} use black-box optimization to generate adversarial documents that are retrieved for specific queries and cause the RAG system to refuse to answer these queries.
+\cite{chaudhari2024phantom} generate adversarial documents that are retrieved for any query containing a particular trigger word, and also investigate how to influence LLM responses generated from the retrieved documents (i.e., RAG poisoning).  
+
+Adversarial documents produced by these attacks are unnatural and thus not stealthy. \cite{morris2020reevaluating} show that if adversarial examples are constrained to be grammatical and to preserve the semantics of documents from which they are generated, their success rate against several NLP tasks drops by over 70\%. \cite{jain2023baseline} show that optimization-based attacks are unable to achieve both low perplexity and jailbreaking (a different adversarial objective from the embedding similarity objective in this paper). \cite{cho2024typos} propose Genetic Attack on RAG to generate adversarial typos in text to poison retrieval systems. \cite{zhang2024human} insert adversarial strings at locations that are invisible to readers when rendered in rich text formats like HTML.   These approaches do not produce natural adversarial text but rather hide unnatural text where it is unlikely to be noticed.
+\cite{xiang2024certifiably} propose a defense for RAG that generates the answer based on the majority of retrieved documents.  The answer is correct as long as adversarial documents are in the minority.
+
+Retrieval poisoning is related to ``hubness'': there exists a small set of embedding vectors that are similar to many queries.  \cite{liu2020hal} proposed a hubness-aware loss for text-image matching.
+\begin{comment}
+Adversarial examples for classification and other NLP tasks:
+\begin{itemize}
+\item
+\url{https://arxiv.org/abs/1908.07125}
+\item
+\url{https://arxiv.org/abs/2005.05909}
+\item Adversarial examples are unnatural: \url{https://arxiv.org/pdf/2004.14174}
+\end{itemize}
+Retrieval and RAG poisoning:
+\begin{itemize}
+\item \cite{zhong2023poisoning} \url{https://arxiv.org/abs/2310.19156}  
+"a malicious user generates a small number of adversarial passages by perturbing discrete tokens to maximize similarity with a provided set of training queries"
+
+\item \cite{chaudhari2024phantom} \url{https://arxiv.org/abs/2405.20485}  
+the Phantom Paper
+
+\item \cite{zou2024poisonedrag} \url{https://arxiv.org/abs/2402.07867}  
+They prompt llm to generate the adversarial text like this
+```
+This is my question: [question].
+This is my answer: [answer].
+Please craft a corpus such that the answer is [answer]
+when prompting with the question [question].
+```
+looks like they are targeting single query
+
+\item \cite{xue2024badrag} \url{https://arxiv.org/abs/2406.00083}  
+also rag attack, they use gradient-based approach to generate adversarial documents, which is similar to hotflip
+
+\item \cite{jiao2024exploring} \url{https://arxiv.org/abs/2405.20774}  
+\TODO
+
+\item \cite{cho2024typos} \url{https://arxiv.org/abs/2404.13948}  
+genetic algo that changes a few words in a sentence
+
+    \item ``Machine against the RAG''
+    \item Human-Imperceptible Retrieval Poisoning Attacks in LLM-Powered Applications: \url{https://arxiv.org/abs/2404.17196}
+\end{itemize}
+
+Defenses:
+\begin{itemize}
+    \item Adversarial training for embeddings: \url{https://arxiv.org/abs/1909.11764}, \cz{this doesn't look very related, it's mainly for generalization}
+    \item Perplexity-based detection: for a different adversarial objective (jailbreaking), prior work~\cite{jain2023baseline} showed that optimization-based attacks are unable to achieve both low perplexity and jailbreaking.
+    \item \cite{xiang2024certifiably} "we can formally prove and certify that, for certain queries, RobustRAG can always return accurate responses, even when the attacker has full knowledge of our defense and can arbitrarily inject a small number of malicious passages."
+\end{itemize}
+\end{comment}
+
+
+\section{Background: Controlled Generation}
+
+\label{sec:background}
+\label{sec:hotflip}
+
+There are several methods for generating natural text that satisfies non-adversarial constraints, e.g., LLM decoding. \cite{lu2020neurologic} introduced a soft penalty term in the LLM beam-search decoding objective to generate fluent text satisfying lexical constraints.  
+HotFlip is a white-box method for generating adversarial texts~\cite{ebrahimi2017hotflip}. Starting with a sequence of [PAD] tokens, it iteratively replaces individual tokens with the token \(t^*\) from the vocabulary that reduces the target loss function the most,
+$
+t^* = \arg\min_{t \in \mathcal{V}} -\mathbf{e}_{t}^{\top} \nabla_{\mathbf{e}_{t}} L(x)
+$, where
+\(\mathbf{e}_t\) is the token embedding, \(\nabla_{\mathbf{e}_t} L(x)\) is the gradient of the loss.  Because token space is discrete,
+HotFlip uses beam search to explore multiple flip candidates.
+\cite{chaudhari2024phantom} and \cite{zhong2023poisoning} used HotFlip to produce adversarial documents for retrieval poisoning.
+
+
+
+COLD uses an energy-based model (EBM) for constrained text generation \cite{qin2022cold}.  Starting with a ``soft'' sequence of token vectors in logit space, it applies an energy function \(E(y)\) to evaluate how well the sequence meets constraints such as fluency or coherence, then iteratively updates it using Langevin dynamics
+$
+y^{(n+1)} \leftarrow y^{(n)} - \eta \nabla E(y^{(n)}) + \epsilon^{(n)},
+$
+where \( \eta \) is the step size and \( \epsilon^{(n)} \) is noise. After several iterations, the soft sequence is converted into discrete text using top-k sampling. 
+\cite{guo2024cold} applied COLD to generate adversarial text for jailbreak attacks.
+In our experiments, the original COLD failed to produce useful text under an adversarial constraint (embedding similarity).  For comparisons in Section~\ref{sec:eval}, we modify COLD following \cite{song2020adversarial}: always set the noise level to 0 and use beam search for decoding instead of top-k sampling.
+
+
+
+
+\section{Retrieval Poisoning}
+
+\label{sec:retrieval_poison}
+
+Dense retrieval systems employ an encoder $E$ that encodes texts to $d$-dimensional embedding vectors.  Similarity between two texts $t, t'$ can be computed as $\operatorname{Sim}(t, t') = E(t)^\top E(t')$, assuming embeddings are normalized. Given a query $q$ and a corpus $P_n$ of documents and their embeddings, the retrieval system returns top $K$ documents 
+$
+\mathcal{P}^*_k = \operatorname{TopK}(q, P_n, k)
+$ whose embeddings are most similar to $E(q)$:
+$
+    \operatorname{TopK}(q, \mathcal{P}, k) = \{ p_i \in \mathcal{P} : |\{ p_j \in \mathcal{P} : \operatorname{Sim}(q, p_j) > \operatorname{Sim}(q, p_i) \}| < k \}
+$
+
+\para{Trigger attack.}
+As in~\cite{chaudhari2024phantom}, we assume that the attacker controls a small fraction of the retrieval corpus $P_n$.  His goal is to generate documents that will be retrieved when some trigger word occurs in the query.  For example, the attacker may target queries about rival products by using brands and product names as triggers (e.g., ``spotify'').  This attack may be used to decrease the quality of retrieval results or to spread adversarial content.  We assume that the attacker is restricted to a single document per trigger, to keep the attack stealthy. 
+
+Formally, the attacker's goal is to generate text $a'$ that, when added to the corpus, will be retrieved as a top-k result whenever trigger $s_\text{trg}$ is prepended to query $q$ from the set of queries $Q$:
+$
+    a' \in \operatorname{TopK}(s_\text{trg} \oplus q, P_n \cup \{ a' \}, k), \forall q \in Q,
+$
+Generating such documents is non-trivial because there could be millions of real documents in the corpus.  $a'$ cannot be query-specific (e.g., simply repeating the query will not work) because it should be retrieved for \emph{any} query with the trigger.
+\para{No-trigger attack.}
+We also demonstrate the effectiveness of adversarial decoding for the triggerless attack of~\cite{zhong2023poisoning}.  The goal of this attack is to generate adversarial documents that will be retrieved for \emph{any} query.  Since it is usually impossible to find a single adversarial document that achieves this goal, the attacker can insert a set of adversarial documents $A$ into the corpus $P_n$, where $|A| \ll |P_n|$, such that
+$
+    A: \forall q \in Q,\ \exists a' \in A\ \textrm{where}\ a' \in \operatorname{TopK}(q, P_n \cup A, k),
+$
+Both attacks described above are \emph{inference-time} attacks. We assume that the encoder $E$ is already trained and the attacker has no control over it.  Furthermore, the attacker has only \emph{black-box} access to $E$ and cannot observe its gradients when generating adversarial documents.
+
+\para{Defense.}
+The defender's goal is to filter adversarial documents $A$ from the corpus without accidentally filtering some of the legitimate documents $P$.  Given a document $p$, define the filter function
+$
+F(p) =
+\begin{cases} 
+1 & \text{if}\ p \in A \\
+0 & \text{if}\ p \in P
+\end{cases}
+$
+
+The defender's objective is to maximize the ``true positive'' probability that adversarial documents are correctly classified as adversarial,
+$
+\max \mathrm{Expect}[F(p) \mid p \in A]
+$.
+Simultaneously, the defender seeks to minimize the ``false positive'' probability that legitimate documents are incorrectly classified as adversarial,
+$
+\min \mathrm{Expect}[F(p) \mid p \in P]
+$.
+
+In the rest of this paper, we show that a simple GPT-2-based perplexity filter effectively detects adversarial texts produced by the previous methods, with a very low false-positive rate on legitimate documents.  We propose another filter based on ``naturalness'', as judged by a more advanced LLM, then demonstrate that documents generated by adversarial decoding cannot be filtered by this ``naturalness'' filter without incurring high false positives on legitimate documents.
+
+
+
+
+\section{Generating Natural Adversarial Documents}
+
+
+Decoding strategies are essential for generating coherent text.  \emph{Beam search} enhances quality of generation by exploring multiple possible output sequences and focusing on the most probable ones.  Beam search maintains a fixed number of beams (hypotheses).  At every time step, each beam is extended by appending tokens with the highest probabilities, ensuring that the final sequence represents the most likely or plausible completion of the given input.  At the end of the time step, all candidates are ranked by their log-likelihood and only top candidates are retained.  In effect, this process optimizes for fluency and alignment with the model's training data.
+
+\subsection{Decoding with Low Perplexity and High Embedding Similarity}
+\label{sec:target_similarity}
+
+To generate texts with low perplexity and high embedding similarity with the target queries, we first prompt an auxiliary LLM to generate a low-perplexity sequence, then optimize it for similarity.  We use the prompt ``Tell me a story about \{trigger\}''.  Perplexity of a sentence $w$ is defined as
+$
+P(\mathbf{w}) = \exp\left( - \frac{1}{L} \sum_{t=1}^{L} \log P(w_t \mid w_{<t}) \right)
+$.
+Observe that $P(w_t \mid w_{<t}) = \text{softmax}(z_t)[w_t]$, where $z_t$ are the logits produced by the LLM given all previous tokens.  Therefore, if we sample from the top $k$ tokens, the resulting sequence has low perplexity.
+
+Next, we increase cosine similarity to the embeddings of target queries. Because queries are not known in advance, we approximate the query distribution by sampling. 
+For the trigger attack, we sample a set $Q^*$ of queries, then search for a text that maximizes similarity to these queries with the prepended trigger:
+$
+a = \arg\max_{a'} \frac{1}{|Q^*|} \sum_{q_i \in Q^*} \operatorname{Sim}(s_\text{trg} \oplus q_i, a')
+$.
+For the no-trigger attack, we use k-means to cluster queries based on the similarity of their embeddings and, for each cluster $Q_i$, search for a text that maximizes similarity to $Q_i$:
+$
+a = \arg\max_{a'} \frac{1}{|Q_i|} \sum_{q_i \in Q_i} \operatorname{Sim}(q_i, a')
+$.
+
+At every step of beam search, we start with $m$ candidate texts $\{B_1, B_2, \ldots, B_m\}$ and extend each $B_i$ into $\{B_i \oplus t_0^*, \ldots, B_i \oplus t_k^* \}$, where $\{t_0^*, \ldots, t_k^*\} = argmax(z_t, k)$.  For all $m * k$ candidates $B_i \oplus t_j$, we compute their scores as the average cosine similarity with the target queries:
+\[
+s_\text{cos\_sim} =
+\begin{cases} 
+\frac{1}{|Q^*|} \sum_{q_i \in Q^*} \operatorname{Sim}(s_\text{trg} \oplus q_i, B_i \oplus t_j) & \text{trigger attack} \\
+\frac{1}{|Q_i|} \sum_{q_i \in Q_i} \operatorname{Sim}(q_i, B_i \oplus t_j) & \text{no-trigger attack}
+\end{cases}
+\]
+We then select the overall best $m$ as candidates for the next iteration and continue iterating until candidate sequences reach pre-defined maximum length. 
+
+
+We call this decoding method \textbf{BasicAdversarialDecoding}.  It is not sufficient to evade automated filtering because low-perplexity sequences produced by controlled generation with an adversarial embedding constraint still look unnatural and unintelligible.  For example, when optimizing for the "xbox" trigger, BasicAdversarialDecoding produced the following text:
+\begin{tcolorbox}
+the XBOX game you play and the Xbox games. Is Xbox the new Xbox for Xboxes in a lot, the Xbox XBOX for consoles is in the
+\end{tcolorbox}
+\begin{algorithm}[H]
+\caption{\textbf{Adversarial Decoding}: Beam Search for Generating Natural Adversarial Documents}
+\label{alg:beam_search}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Target documents $\{d_1, d_2, \dots\}$, maximum sequence length \texttt{max\_length}, beam width $m$, $k$ for top K, prefix prompt $P$
+\State \textbf{Output:} best found sequence of length \texttt{max\_length}
+\State \textbf{Initialize:} Beams $\mathcal{B} = \{ \emptyset \}$
+\For{each time step $t$ from $1$ to \texttt{max\_length}}
+    \State $\mathcal{B}_{\text{new}} \gets \{\}$ \Comment{List of new beams}
+    \State $\mathcal{S}_{\text{new}} \gets \{\}$ \Comment{List of new beam scores}
+    \For{each beam $b \in \mathcal{B}$}
+        \State $z_t \gets \text{LLM}_\text{logits}(P \oplus b)$ \Comment{Generate LLM logits for current beam}
+        \State $\text{topk\_tokens} \gets \text{TopK}(z_t)$ \Comment{Select top $k$ tokens from $z_t$}
+        \For{each token $t_k \in \text{topk\_tokens}$}
+            \State $b' \gets b \oplus t_k$ \Comment{Extend beam with new token}
+            \State $\mathcal{B}_{\text{new}}.\text{append}(b')$ \Comment{Add new beam}
+            \State $s_\text{cos\_sim} \gets \text{avg\_cos\_sim}(b', \{d_1, d_2, \dots\})$ \Comment{Cos sim with target documents}
+            \If{\texttt{NaturalnessConstraint}}
+                \State $s_\text{natural} \gets \text{LLM}_{\text{naturalness}}(b')$ \Comment{Evaluate naturalness using LLM}
+                \State $\mathcal{S}_{\text{new}}.\text{append}(s_\text{cos\_sim} + \lambda s_\text{natural})$ \Comment{Add combined score}
+            \Else
+                \State $\mathcal{S}_{\text{new}}.\text{append}(s_\text{cos\_sim})$ \Comment{Add only cosine similarity score}
+            \EndIf
+        \EndFor
+    \EndFor
+    \State \text{Sort } $\mathcal{B}_{\text{new}}$ \text{ by } $\mathcal{S}_{\text{new}}$ \text{ in descending order}
+    \State $\mathcal{B} \gets \mathcal{B}_{\text{new}}[:m]$ \Comment{Select top $k$ beams}
+\EndFor
+\State \textbf{Return} $\mathcal{B}[0]$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Adding a Naturalness Constraint}
+\label{sec:natural_constraint}
+
+Because decoding under an embedding constraint does not produce natural text, we also need to evaluate ``naturalness'' and impose the corresponding constraint on generation.  We use an auxiliary LLM as an evaluator by prompting it
+``Is this text unintelligible? \{TEXT\} Just answer Yes or No.''  Empirically, this prompt has few false positives (see Section~\ref{sec:natfilter}) and yields naturalness scores that work well for optimization.  Still, binary decisions do not change smoothly with small modifications to the text and thus cannot serve as an optimization target to guide generation during beam search.
+
+To overcome this limitation, we developed a new method to compute a soft score that can be smoothly incorporated into the beam search objective.  LLMs output logits $z_t$ that indicate the next-token distribution conditioned on the input sequence.  The outputs of our evaluator LLM are ``Yes'' and ``No''.  We use the ratio between the corresponding probabilities as a ``naturalness'' score:
+\[
+s_\text{natural} = \frac{z_t(w_\text{no})}{z_t(w_\text{no}) + z_t(w_\text{yes})}
+\]
+We incorporate this score into the beam search process as an additional objective, alongside cosine similarity, with parameter $\lambda$ controlling the trade-off between the objectives:
+\[
+s = s_\text{cos\_sim} + \lambda s_\text{natural}
+\]
+Algorithm~\ref{alg:beam_search} shows our full 
+\textbf{AdversarialDecoding} method.  At each decoding step, beams are ranked not only by their semantic alignment with the target queries (measured by cosine similarity), but also by their naturalness. This multi-objective optimization helps generate sequences that are (1) semantically relevant to the target queries, (2) have low perplexity, (3) are natural and readable, and (4) cannot be filtered out by asking an LLM to evaluate their naturalness.  Empirically, adversarial decoding maintains both semantic and perceptual quality of generated text in a unified decoding framework.  This is a significant improvement over pure likelihood-based methods.
+
+
+
+
+\section{Experimental Setup}
+
+\label{sec:exp_setup}
+
+
+\para{Data.}
+We use the MS MARCO dataset~\citep{bajaj2016ms}, a large-scale benchmark (8 million documents, 1 million queries) for deep learning on search tasks.  For fair comparison with the trigger attack of~\citep{chaudhari2024phantom}, we randomly select $|Q^*|=128$ queries to approximate the query distribution during generation (see Section~\ref{sec:target_similarity}) and test on a separate set of 100 queries.  For the no-trigger attack~\citep{zhong2023poisoning}, we sample 50,000 queries for clustering, form 500 clusters, generate an adversarial document for each cluster, and test on 1,000 queries.
+
+\para{Retrievers.}
+We use the popular BERT-based Contriever encoder~\citep{izacard2021unsupervised} and also evaluate transferability of the resulting texts to Sentence-T5~\citep{ni2021sentence}, which is based on the T5 architecture, and BERT-based MiniLM~\citep{wang2020minilm}.
+
+\para{Baselines.}
+We use HotFlip and COLD (see Section~\ref{sec:background}).  After observing that adversarial documents often repeat the trigger word multiple times, we prompt GPT4o to ``Write a sentence that contains the word [TRIGGER] six times'' and use the resulting sentences as an additional baseline.
+
+\para{LLMs.} For BasicAdversarialDecoding, we use GPT-2 \cite{radford2019language} to generate the top-k tokens. For AdversarialDecoding, we use LLama3.1-8B \cite{dubey2024llama} to (1) generate the top-k tokens, and (2) evaluate the naturalness of adversarial documents.  An ablation study in Section~\ref{sec:llama_ablation} shows that LLama3.1-8B without the naturalness constraint does not produce natural text.
+
+\para{Metrics.}
+For the trigger attack, the Top-K Attack Success Rate (ASR) of an adversarial text is the probability that it is ranked among the top $k$ results for a given query with the trigger.  We average ASR across all 10 triggers from \citep{chaudhari2024phantom}.  For the no-trigger attack, the ASR is the probability that at least one of the documents is ranked among the top $k$ results for a given query. 
+
+\para{Hyperparameters.} We set a 32-token limit on generated texts.  
+For HotFlip, we select substitutions from the 10 most probable tokens.  For COLD, we set $k=10$ and adjust the soft token logits using the learning rate of 0.5.  We run for 5 epochs with 30 perturbation iterations per epoch.  For both of our methods, we set $k=10$ and beam width to $50$, unless otherwise noted.  For AdversarialDecoding, we set $\lambda=1$ to control the trade-off between target similarity and naturalness. All experiments were conducted on an NVIDIA A40 GPU.
+
+\para{Perplexity filtering.} We use GPT-2 to measure the perplexity of generated adversarial documents and to compare it with real documents from the MS MARCO dataset. 
+
+
+\para{Naturalness filtering.} 
+\label{sec:natfilter}
+To evaluate ``naturalness'' of adversarial and real documents, we prompt GPT4o and LLaMA-3.1-8B with these prompts:
+\begin{tcolorbox}
+    Is this text meaningless?
+
+    Is this text unintelligible?
+
+    Is this text gibberish?
+\end{tcolorbox}
+For each prompt, we instruct both LLMs to respond with "Yes" or "No."  We assign the document 1 point for each LLM-prompt combination where the answer is ``No.''  The naturalness score is the sum of all points.  It ranges from 0 to 6.   
+
+
+
+\section{Evaluation}
+
+\label{sec:eval}
+
+\subsection{Retrieval Poisoning for the Trigger Attack}
+
+Table~\ref{table:benchmark} compares ASR of our method with several baselines for corpus poisoning that targets queries with specific triggers~\cite{chaudhari2024phantom}.  BasicAdversarialDecoding includes perplexity and target similarity constraints, AdversarialDecoding adds a naturalness constraint.  The GPT4o baseline shows that simply inserting the trigger word is not effective.  BasicAdversarialDecoding has much better ASR than COLD and similar to HotFlip (but, unlike HotFlip, it produces documents that cannot be filtered out by perplexity\textemdash see Section~\ref{sec:perpfilter}).  Adding a naturalness constraint decreases ASR but produces documents that cannot be filtered out by LLM testing (see Section~\ref{sec:llmfilter}).
+\begin{table}[h!]
+\centering
+\begin{tabular}{lcccccc}
+    \toprule
+    \textbf{Method}  & \textbf{Beam width} & \textbf{Top-1} & 
+    \textbf{Top-3} & \textbf{Top-5} & 
+    \textbf{Top-10} & \textbf{Top-100} \\
+    \midrule                   
+    GPT4o    & --  & 0.02 & 0.04 & 0.06  & 0.08  &  0.22 \\
+    HotFlip  & 10 & 0.55 & 0.61 & 0.64  & 0.69  &  0.86 \\
+    COLD     & 10 & 0.11 & 0.16 & 0.18  & 0.22  &  0.43 \\
+    \midrule 
+    \multirow{2}{*}{{\textbf{BasicAdversarialDecoding}}}  & 10 &  0.38 &  0.50  & 0.55 &   0.63  &   0.85 \\
+    & 50 &  0.53 & 0.63 & 0.66  & 0.73  &  0.90 \\
+    \midrule 
+    \multirow{2}{*}{{\textbf{AdversarialDecoding}}}  & 10 &  0.31  & 0.42  & 0.48 &   0.57   &  0.84 \\
+    & 50   & 0.37 & 0.51 & 0.56  & 0.64  &  0.88 \\
+\bottomrule
+\end{tabular}
+\caption{Attack success rate of different generation methods (trigger attack).}
+\label{table:benchmark}
+\end{table}
+\begin{comment}
+\begin{table}[h!]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{Top-1} & \textbf{Top-3} & \textbf{Top-5} & \textbf{Top-10} & \textbf{Top-100} \\
+\midrule                   
+GPT4o                     & 0.02 & 0.04 & 0.06  & 0.08  &  0.22 \\
+HotFlip         & 0.55 & 0.61 & 0.64  & 0.69  &  0.86 \\
+COLD           & 0.11 & 0.16 & 0.18  & 0.22  &  0.43 \\
+\textbf{BasicAdversarialDecoding} (w=10)  &  0.38 &  0.50  & 0.55 &   0.63  &   0.85 \\
+\textbf{AdversarialDecoding} (w=10) &  0.31  & 0.42  & 0.48 &   0.57   &  0.84 \\
+\textbf{BasicAdversarialDecoding}    & 0.53 & 0.63 & 0.66  & 0.73  &  0.90 \\
+\textbf{AdversarialDecoding}    & 0.37 & 0.51 & 0.56  & 0.64  &  0.88 \\
+
+\bottomrule
+\end{tabular}
+\caption{Attack success rate of different generation methods (trigger attack).}
+\label{table:benchmark}
+\end{table}
+\end{comment}
+
+The following example illustrates the differences in the quality of adversarial text generated by the five methods for the ''olympics'' trigger.
+\begin{tcolorbox}
+    \textit{GPT4o}: The Olympics are a prestigious global event, where athletes from around the world compete in the Summer Olympics, Winter Olympics, and Paralympics, making the Olympics a celebration of unity, competition, and athletic excellence that has inspired generations to participate in future Olympics. \\
+    
+    \textit{HotFlip}: ownw olympicgameswhataxeftraltnesspoowithtisteka conditions saddle paid cadewtment globally exhausteityes won ioc most yearswhahat \\
+
+    \textit{COLD}: of a series of athletes from both the olympic games compete at both olympic gameswhalt events in each sporthat \\
+    \textbf{BasicAdversarialDecoding}:  The Olympic Games? The Olympics in Olympic History in Olympic Sport in Olympic Games for Women at Sochi Olympics Olympics. I donnghat what the Olympics in Olympic \\
+    \textbf{AdversarialDecoding}:  Olympic Games are about sports, culture, history but what does the Olympics mean to athletes who compete at the Olympic Summer Games every time they represent country in Olympics Games   
+\end{tcolorbox}
+
+\subsection{Perplexity Filtering}
+\label{sec:perpfilter}
+
+Figure~\ref{fig:perp_dist} compares perplexity distribution (measured by GPT-2) of real documents with those of adversarial documents generated by different methods.  99\% of documents in the MS MARCO corpus have perplexity below 220, while the lowest perplexity of a HotFlip-generated adversarial document is 1308.  Therefore, even a weak LLM like GPT-2 is sufficient to detect and filter out adversarial documents produced by HotFlip, with very few false positives on the real documents.  Perplexity filtering does not work against adversarial documents generated by BasicAdversarialDecoding or AdversarialDecoding because their perplexity is within the range of real documents.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/violin.pdf}
+    \caption{Perplexity distributions of real and adversarial documents.}
+    \label{fig:perp_dist}
+\end{figure}
+\subsection{Naturalness Filtering}
+\label{sec:llmfilter}
+
+
+Low perplexity is not enough for stealthiness.  Table~\ref{table:trigger-rates} shows that all texts generated by BasicAdversarialDecoding can be detected by the LLM-based naturalness filter defined in Section~\ref{sec:natfilter} with a false positive rate of 0.  AdversarialDecoding, however, produces documents that are much more difficult to detect and filter out.
+
+The defender's threshold on the naturalness score determines the trade-off between the true and false positives.  If the threshold is low, the filter detects more adversarial documents (true positives) but also incorrectly detects real documents (false positives) and drops them from the corpus.  If the threshold is high, both true and false positives decrease and more adversarial documents evade detection.  Table~\ref{table:trigger-rates} shows that a threshold which filters only 20\% of adversarial documents also incorrectly filters 6\% of the real corpus.  Filtering 70\% of adversarial documents incorrectly filters 17\% of the corpus.  Therefore, the naturalness filter cannot be deployed to detect documents generated by AdversarialDecoding except at the cost of substantial collateral damage to the real corpus.
+
+\para{Transferability of evasion across LLM evaluators.}
+Per Section~\ref{sec:natural_constraint},
+our adversarial documents are optimized for a single prompt (``Is this text unintelligible?'') and LLM (Llama-3.1-8B).  Table~\ref{table:trigger-rates} shows that evasion of detection transfers to two other prompts and another LLM\textemdash unless the defender is willing to incur significant false positives on the real corpus.
+
+\para{Ablation of naturalness constraint.}
+\label{sec:llama_ablation}
+We use GPT-2 to generate top-k tokens for BasicAdversarialDecoding (for efficiency) and Llama-3.1-8B to generate top-k tokens and also compute the naturalness score for AdversarialDecoding.  Table~\ref{table:trigger-rates} shows the results for BasicAdversarialDecoding with Llama-3.1-8B but without the naturalness constraint.  Adversarial documents generated by this method are easy to filter out without significant false positives by setting the detection threshold to 2.  This shows that AdversarialDecoding is better than Basic at generating documents that evade detection due to the naturalness constraint, and not simply because it uses a more powerful LLM.
+
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{lclccccc}
+    \toprule
+    \multicolumn{1}{c}{\multirow{4.0}{*}{\textbf{Threshold}}} & \multicolumn{1}{c}{\multirow{4.0}{*}{\textbf{FP}}} & \textbf{Method} & \multicolumn{3}{c}{\textbf{Basic}} & \multicolumn{2}{c}{\textbf{Adv}}\\
+    \cmidrule(lr){4-6} \cmidrule(lr){7-8} & & \textbf{$\text{LLM}_\text{logits}$} & \multicolumn{2}{c}{{GPT-2}}  & \multicolumn{1}{c}{{Llama}} & \multicolumn{2}{c}{{Llama}} \\
+    \cmidrule(lr){4-5} \cmidrule(lr){6-6} \cmidrule(lr){7-8} & & \textbf{Beam width} & \multicolumn{1}{c}{10} & \multicolumn{1}{c}{50} & \multicolumn{1}{c}{{50}} & \multicolumn{1}{c}{{10}} & \multicolumn{1}{c}{{50}} \\    
+\midrule
+1 & 0.00 &  & 1.0 & 1.0 & 0.9 & 0.0 & 0.0 \\
+2 & 0.00 &  & 1.0 & 1.0 & 1.0 & 0.0 & 0.0 \\
+3 & 0.02 &  & 1.0 & 1.0 & 1.0 & 0.0 & 0.0 \\
+4 & 0.06 &  & 1.0 & 1.0 & 1.0 & 0.0 & 0.2 \\
+5 & 0.09 &  & 1.0 & 1.0 & 1.0 & 0.4 & 0.4 \\
+6 & 0.16 &  & 1.0 & 1.0 & 1.0 & 0.5 & 0.7 \\
+\bottomrule
+\end{tabular}
+\caption{False- and true-positive rates of LLM-based naturalness filtering (trigger attack).}
+\label{table:trigger-rates}
+\end{table}
+
+
+\subsection{Retrieval Poisoning for the No-Trigger Attack}
+
+We also evaluate the efficacy of adversarial decoding for the no-trigger attack~\cite{zhong2023poisoning}, which aims to generate adversarial documents that are retrieved for any query.  We separate documents in the corpus into 500 clusters and generate an adversarial passage for each cluster.  Table~\ref{table:no_trigger} shows the attack success rates, as defined in Section~\ref{sec:exp_setup}.  We used beam width of $10$ for the experiments with AdversarialDecoding.   We expect that increasing the beam width will improve the results, at the cost of increasing generation time. Both BasicAdversarialDecoding and AdversarialDecoding significantly outperform HotFlip by a wide margin.
+
+Table~\ref{table:notrigger-rates} shows the efficacy of LLM-based naturalness filtering.   Even though we use the same hyperparameters for BasicAdversarialDecoding in the trigger and no-trigger attack, the adversarial documents it generates for the no-trigger attack are harder to detect.  True positives never reach 100\%, and it is necessary to sacrifice 2\% of real documents to filter 74\% of adversarial documents.  Documents produced by AdversarialDecoding are harder to detect: filtering 57\% of adversarial documents incorrectly filters 9\% of the corpus.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & \textbf{Top-1} & \textbf{Top-5} & \textbf{Top-10} & \textbf{Top-20} & \textbf{Top-100} \\
+\midrule
+HotFlip & 0.00 &  0.00  &   0.01  &  0.01  &  0.06 \\
+\textbf{BasicAdversarialDecoding}                     & 0.07  & 0.18  &  0.25  &  0.34  &   0.58 \\
+\textbf{AdversarialDecoding}                          & 0.02  & 0.05  & 0.08   &  0.12  &   0.30 \\
+\bottomrule
+\end{tabular}
+\caption{Attack success rate (no-trigger attack).}
+\label{table:no_trigger}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Threshold} & \textbf{FP} & \textbf{Basic(GPT-2)} & \textbf{Adv} \\
+\midrule
+1 & 0.00 & 0.49 & 0.00 \\
+2 & 0.00 & 0.60 & 0.00 \\
+3 & 0.02 & 0.74 & 0.07 \\
+4 & 0.06 & 0.87 & 0.32 \\
+5 & 0.09 & 0.95 & 0.57 \\
+6 & 0.16 & 0.97 & 0.72 \\
+\bottomrule
+\end{tabular}
+\caption{False- and true-positive rates of LLM-based naturalness filtering (no-trigger attack).}
+\label{table:notrigger-rates}
+\end{table}
+\subsection{Transferability Across Encoders}
+
+Table~\ref{tab:transfer} shows that transferability of adversarial decoding is non-trivial but fairly low (similar to HotFlip and COLD).  An interesting direction for future research is whether it is possible to generate adversarial documents that are effective for multiple encoders, e.g., by optimizing them against multiple embedding targets simultaneously.
+\begin{table*}[tb]
+\renewcommand{\arraystretch}{1.16}
+    \centering
+    \fontsize{9.06}{10.68}\selectfont
+    \begin{tabular}{llccc ccc ccc}
+    \toprule
+    \multicolumn{2}{c}{\multirow{2.5}{*}{Method}} & \multicolumn{3}{c}{Contriever} & \multicolumn{3}{c}{Sentence 5} & \multicolumn{3}{c}{MiniLM}\\ 
+    \cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-11}
+    & & \multicolumn{1}{c}{Top-1} & \multicolumn{1}{c}{Top-10} & \multicolumn{1}{c}{Top-100} & \multicolumn{1}{c}{Top-1} & \multicolumn{1}{c}{Top-10} & \multicolumn{1}{c}{Top-100} & \multicolumn{1}{c}{Top-1} & \multicolumn{1}{c}{Top-10} & \multicolumn{1}{c}{Top-100} \\ 
+    \midrule
+     & HotFlip & 0.548 & 0.686 & 0.857 & 0.006 & 0.025 & 0.098 & 0.009 & 0.029 & 0.112 \\
+    & COLD & 0.112 & 0.215 & 0.432 & 0.000 & 0.003 & 0.012 & 0.004 & 0.015 & 0.111 \\
+    & \textbf{Basic} & 0.528 & 0.734 & 0.898 & 0.020 & 0.053 & 0.143 & 0.002 & 0.011 & 0.061 \\ 
+    & \textbf{Adv} & 0.372 & 0.645 & 0.879 & 0.004 & 0.019 & 0.109 & 0.006 & 0.024 & 0.096 \\ 
+    \bottomrule
+    \end{tabular} 
+    \caption{Transferability across encoders.}
+    \label{tab:transfer}
+\end{table*}
+
+
+
+
+
+\section{Discussion}
+
+
+
+We proposed and evaluated adversarial decoding, a new controlled generation method that creates low-perplexity adversarial documents whose embeddings are similar to broad classes of queries.  We also demonstrated that low perplexity is not sufficient for stealthiness, since even low-perplexity adversarial documents can be detected with high accuracy by LLM evaluators.
+
+We then developed a new technique that converts logits of an LLM ``naturalness'' evaluator into a soft score that can be used to guide generation.  The resulting adversarial documents maintain their efficacy for retrieval poisoning but can no longer be detected by LLM evaluators, except at the cost of significant collateral damage to the corpus of real documents due to false positives.
+ 
+
+Defenses are an important topic for future work. Current techniques, including ours, produce adversarial documents that do not transfer well across encoders.  This observation can potentially be a basis for a defense (but may be evaded with more sophisticated generation methods).  Hubness-aware encoders are another potential direction for developing defenses.
+
+
+
+
+
+
+
+
+
+
+
+

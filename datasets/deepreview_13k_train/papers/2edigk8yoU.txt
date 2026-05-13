@@ -1,0 +1,353 @@
+\title{Looped Transformers for Length Generalization}
+
+\begin{abstract}
+Recent work has shown that Transformers trained from scratch can successfully solve various arithmetic and algorithmic tasks, such as adding numbers and computing parity. While these Transformers generalize well on unseen inputs of the same length, they struggle with length generalization, i.e., handling inputs of unseen lengths. In this work, we demonstrate that looped Transformers with an \emph{adaptive number of steps} significantly improve length generalization. We focus on tasks with a known iterative solution, involving multiple iterations of a RASP-L operation—a length-generalizable operation that can be expressed by a finite-sized Transformer. We train looped Transformers using our proposed learning algorithm and observe that they learn highly length-generalizable solutions for various tasks. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Most algorithmic tasks such as coding, writing mathematical proofs, and reasoning are defined with inputs of variable \emph{length}.
+The length of an input often correlates with the difficulty of the problem instance. For example, the longer the input, the more difficult the problem tends to be.
+We say a model perfectly \emph{length-generalizes} if it can solve an algorithmic task on inputs of any length, even if it was only trained on data with inputs up to a finite length \citep{anil2022exploring}. 
+Generally, it is hard to expect models to be trained on inputs with all possible lengths, and we need to rely on length generalization. 
+Also, if a model can length-generalize, it means the model has truly learned the correct algorithmic solution to the task, not just a spurious solution that works only for a certain range of input lengths.
+
+Recently, many works on Large Language Models (LLMs) have shown that we can get more powerful AI models by scaling both compute and data at training time. 
+This scaling approach has indeed succeeded in improving accuracies on various benchmarks.
+However, even the largest and latest LLMs like \cite{achiam2023gpt} which have been trained on much of the existing text on the Internet, still struggle with length generalization \citep{wu2023reasoning,anil2022exploring,lee2024teaching}. 
+One possible cause is the particular computing model. 
+LLMs are built based mostly on the Transformer architecture \cite{vaswani2017attention}. 
+While Transformers can accept a variable length of inputs (that can be processed in parallel), they usually have a fixed depth. This might be sufficient for certain tasks, but not always. 
+To learn a model that can effectively generalize to longer problems, it is important to consider architectures that can adaptively adjust the computational budget to the difficulty of the tasks~\citep{anil2022exploring,du2022learning, dulearning}. One approach to achieve this is to explicitly generate intermediate output tokens, similar to writing down a scratchpad, which improves LLMs' capability for solving harder problems\citep{nye2021show}. In theory, LLMs may generate more scratchpad tokens representing intermediate computation when solving a more difficult task, indicating that they can allocate elastic computation according to the length and difficulty of the given instance. This approach can be learned by explicitly training a model on data with intermediate computation steps \cite{ling2017program, cobbe2021training}. Alternatively, it can be achieved via Chain-of-Thought (CoT) reasoning with few-shot examples \cite{wei2022chain} or even in a zero-shot manner \cite{kojima2022large}. Notice that these approaches still use 
+fixed-depth models.
+While these approaches help solve more complex reasoning tasks, they are still far from achieving near-perfect length generalization for simple algorithmic tasks. 
+For instance, Lee et al. applied CoT for arithmetic tasks but observed that Transformers cannot length generalize even for simple addition tasks \cite{lee2024teaching}. 
+
+
+Recently, there has been growing interest in using recurrent architectures for reasoning~\cite{ dehghani2018universal,bai2019deep, bansal2022end, yang2023looped}.
+Unlike standard RNN-type architectures that process different parts of the input sequence incrementally, one can consider a recurrent architecture that processes the entire input sequence multiple times. This architecture passes the intermediate processing output to the next iteration's input, possibly along with the original input.
+In particular, if the base model used in each iteration is a Transformer, this model is called a Looped Transformer \cite{yang2023looped}. 
+
+\begin{wrapfigure}{r}{0.45\linewidth}
+\begin{center}
+\includegraphics[width=0.9\linewidth]{figures/ours.pdf}
+\caption{\textbf{Method Overview.} During training, we supervise the output of the model to match the target data only after a certain number of steps of applying the same decoder block, helping the model learn intermediate steps that can be reused and can handle input of arbitrary lengths. All grey blocks share the same parameters. Examples are from the Copy task with $n$ symbols.  ``\#'' indicates EOS, ``*'' indicates ignored output, and ``>'' indicates the end of the query (EOQ). 
+}
+\label{fig:looped}
+\end{center}
+\end{wrapfigure}
+
+Looped Transformer can naturally break the limitation of the fixed depth in the standard Transformer architecture: \emph{One can adjust the number of looped steps based on the computational complexity of the underlying algorithmic solution}. Consider a problem set with the following properties: 1) The problems can be solved by a loop of one RASP-L~\citep{zhou2024what} program\footnote{Here we consider a more general way to loop, i.e., predicting all missing tokens at the end of the loop, not necessarily in the way of predicting the single next token at a time. See more discussions in Section~\ref{ntp&fap}.}, i.e., each step in the loop can be performed by a decoder-only Transformer with a fixed depth; 2) The number of steps needed in the loop depends on the problem's complexity, i.e., more difficult problems could potentially require more steps to solve. Under the length generalization scheme, we consider the number of steps depending on the problem length, and define this problem set as $n$-RASP-L problems. For $n$-RASP-L problems, if we can learn these length-independent steps, we can utilize an adaptive number of steps to achieve length generalization.
+
+Inspired by this observation, we study training Looped Transformers models for length generalization. Specifically, we consider a training setup where we do not require any intermediate supervision data (such as reasoning steps or scratchpad). We only assume access to end-to-end supervision (input and output) and the number of steps needed. Depending on the number of steps, we iteratively apply the same decoder block and then decode the final answer; See Figure \ref{fig:looped} for illustration. At inference time, the model could either decide when to stop with predefined stopping criteria or stop when reaching the ground-truth number of steps. Empirically, we show that looped Transformers with an adaptive number of steps can successfully length-generalize to longer lengths simply by appropriately adapting the number of loops at inference time, indicating that our approach encourages the model to implicitly learn the necessary steps to solve a task.
+
+Our contributions can be summarized as follows: \textbf{(1)} We first formally define $n$-RASP-L problems, and provide examples of $n$-RASP-L solutions to the Copy, Parity, and Addition tasks (Section~\ref{sec:n-rasp-l}); \textbf{(2)} We propose to learn $n$-RASP-L problems with Looped Transformers where we supervise the final answer in a step-dependent way, which enables us to use an adaptive number of steps depending on the problem complexity (Section~\ref{sec:method}); \textbf{(3)} Empirically, we show that our proposed method outperforms the baseline approaches in terms of length generalization performance (Section~\ref{sec:exps}).
+
+
+
+\section{Background}
+
+\label{sec: bg}
+\subsection{RASP-L}
+A decoder-only Transformer is a type of Transformer architecture that consists of only the decoder part of the original Transformer model introduced by \cite{vaswani2017attention}, where a causal mask is applied to the attention weights to prevent the model from attending to future tokens. 
+
+RASP (Restricted Access Sequence Processing)~\citep{weiss2021thinking} is a computational model for the Transformer architecture in the form of a programming language. 
+RASP-L~\citep{zhou2024what}, where `L' stands for learnable, is a learnable subset of the RASP language.
+Some key points about RASP-L are:
+\begin{itemize}[leftmargin=0.5cm]
+    \item RASP-L programs accept an input sequence and return an output sequence of the same length for an \emph{arbitrary length}, like decoder-only Transformers. 
+    \item The core operations in RASP-L include element-wise operations on sequences and a specific type of non-elementwise operation called \texttt{kqv}, which simulates a causal attention layer.
+    \item RASP-L has restrictions on the allowed operations to ensure learnability: It does not allow arbitrary index arithmetic, and restricts operations on token indices to order comparisons and computing successor/predecessor.
+    \item RASP-L \emph{does not allow control flow} statements like branching or loops. Programs must be straight-line code, with each line being a call to a core function or another RASP-L program.
+\end{itemize}
+
+In \cite{zhou2024what}, the authors show that algorithmic tasks that can be written as a RASP-L program can be easily learned by a Transformer in a length-generalizable way with next-token prediction. The length-generalizable tasks include counting, finding the mode, copying the input sequence (consisting of unique tokens), and sorting. However, they also showed that for algorithmic tasks whose RASP-L program representation is not known to exist, such as addition, parity, and copying the input sequence, it is hard to learn in a length-generalizable way. In other words, once the Transformer is trained on in-distribution data up to a particular length, it fails to generalize to unseen lengths.
+
+\subsection{Next-token prediction and full-answer prediction}
+\label{ntp&fap}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+    \includegraphics[width=0.48\textwidth]{figures/ntp_fap.pdf}
+  \caption{Visualization of the next-token prediction (NTP) and full-answer prediction (FAP) schemes. ``\#" indicates EOS, ``*" indicates ignored output, and ``>" indicates the end of the query (EOQ).}
+  \label{fig:ntp&fap}
+    \end{center}
+\end{wrapfigure}
+Decoder-only Transformers are naturally convenient for next-token prediction (NTP) which could be efficiently trained in parallel. In \cite{zhou2024what}, their setup and RASP-L solutions are both constrained to predicting the single next token: During training, the full sequence (both the query and the answer) is provided as input and the output is expected to be the shifted sequence. During inference, only the query part is provided, and the model continues to output the next token and append the token to the current sequence until the output token is EOS. The output locations before the end of query (EOQ) sign are ignored. See (a) in Figure~\ref{fig:ntp&fap} for illustration.
+
+On the other hand, we can also consider a more general way of predicting the answer: full-answer prediction (FAP). During both training and inference time, the input given is just the query part, and the rest of the locations are filled with multiple EOS tokens to keep the input and the output to be the same length. The model is supposed to output the answer with a shifted location, and the output locations before the EOQ sign are ignored; see (b) in Figure~\ref{fig:ntp&fap}. Notice that in FAP, the model is not forced to predict token-by-token as NTP. Instead, the model is expected to predict all missing tokens after all internal processing steps. 
+
+
+\section{\texorpdfstring{$n$}
+
+\label{sec:n-rasp-l}
+
+Recall that RASP-L programs do not allow loops. If we consider the next-token prediction (NTP) scheme, it means that we need to find the same RASP-L program (which can be represented with a fixed-depth decoder-only Transformer) to predict the next token given any possible prefix in the answer sequence. Such solutions might not always exist for all problems: there is no known RASP-L program for addition, parity, and copy under the NTP scheme~\cite{zhou2024what}. 
+
+On the other hand, architectures such as the Looped Transformer have external loops embedded in the architecture which naturally provides adaptive depth. Thus, a natural question is: what kind of algorithmic tasks can we represent with a decoder-only Transformer in a loop? Specifically, what if we also allow the number of iterations to explicitly depend on the input length, say $n$? Moreover, what if we are not constrained by the NTP scheme, but a more general FAP scheme?
+
+Inspired by these questions, we define the following class of algorithmic tasks:
+
+\begin{definition}[$n$-RASP-L]
+A program $P$ is called an $n$-RASP-L program if 
+(1) there exist $T(n): \mathbb{N} \rightarrow \mathbb{N}$, and (2) $P$ can be decomposed to a sequential application of $P'$ for $T(n)$ steps. 
+\end{definition}
+
+We show that $n$-digit addition, $n$-bit parity, copying $n$ symbols indeed have $n$-RASP-L solutions.
+\begin{proposition}
+
+(Parity.) There exists a n-RASP-L program with $T(n) = n$ that solves the $n$-bit parity check task: $$\underbrace{\mybox{$x_1$}\mybox{\dots}\mybox{$x_n$}}_\text{$n$ tokens}\mybox{>}\underbrace{\mybox{\#}\mybox{\dots}\mybox{\#}}_\text{$n'$ tokens, $n'\geq 0$}\Rightarrow \underbrace{\mybox{*}\mybox{\dots}\mybox{*}}_\text{$n$ tokens}\mybox{y}\underbrace{\mybox{\#}\mybox{\dots}\mybox{\#}}_\text{$n'$ tokens},$$ where $y$ is the parity check result for the arbitrary binary input sequence $\{x_i\}$.
+
+\end{proposition}
+\begin{proof}
+
+where the number of steps required in \texttt{parity\_loop} is $T(n) = n$ for the input query with $n$ bits.
+\end{proof}
+\begin{proposition}
+
+ \begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/steps.pdf}
+\caption{Visualization of the $n$-RASP-L solutions for Copy, Parity, and Addition with $n=2$. Copy is implemented by $n$ iterations of shifting; Parity is implemented by $n$ iterations of shifting and XOR; Addition is implemented by $n+1$ iterations of shifted XOR and AND; The inputs are preprocessed. See details in Section~\ref{sec:n-rasp-l}.
+}
+\label{fig:steps-vis}
+\end{figure}
+
+(Copy.) There exists a n-RASP-L program with $T(n) = n$ that solves the $n$-symbol copy task: 
+$$\underbrace{\mybox{$x_1$}\mybox{\dots}\mybox{$x_n$}}_\text{$n$ tokens}\mybox{>}\underbrace{\mybox{\#}\mybox{\dots}\mybox{\#}}_\text{$n'$ tokens, $n'\geq n-1$}\Rightarrow  
+\underbrace{\mybox{*}\mybox{\dots}\mybox{*}}_\text{$n$ tokens}\underbrace{\mybox{$x_1$}\mybox{\dots}\mybox{$x_n$}}_\text{$n$ tokens}
+\underbrace{\mybox{\#}\mybox{\dots}\mybox{\#}}_\text{$n'-n+1$ tokens},$$
+where  $\{x_i\}$ is an arbitrary binary input symbols.
+\end{proposition}
+\begin{proof}
+
+where the number of steps required in \texttt{copy\_loop} is $T(n) = n$ for the input query with $n$ symbols.
+\end{proof}
+
+\begin{proposition}
+(Addition.) There exists a n-RASP-L program with $T(n) = n+1$ that solves the $n$-digit addition task: $$\underbrace{\mybox{$x_1$}\mybox{$\dots$}\mybox{$x_n$}}_\text{$n$ tokens}\mybox{+}\underbrace{\mybox{$y_1$}\mybox{$\dots$}\mybox{$y_n$}}_\text{$n$ tokens}\mybox{>}\underbrace{\mybox{\#}\mybox{\dots}\mybox{\#}}_\text{$n'$ tokens, $n'\geq n$}\Rightarrow 
+\underbrace{\mybox{*}\mybox{\dots}\mybox{*}}_\text{$2n+1$ tokens}\underbrace{\mybox{$z_1$}\mybox{\dots}\mybox{$z_{n+1}$}}_\text{$n+1$ tokens}\underbrace{\mybox{\#}\mybox{\dots}\mybox{\#}}_\text{$n'-n$ tokens},$$
+where $\{x_i\}$, $\{y_i\}$ are arbitrary binary summands and $\{z_i\}$ is the result of adding $\{x_i\}$ and $\{y_i\}$\footnote{For simplicity, we include the leading 0's to keep the same length of the output for all possible inputs.}.
+\end{proposition}
+\begin{proof}
+  
+\end{proof}
+We present visualizations of the intermediate steps in the loops of our n-RASP-L solutions in Figure~\ref{fig:steps-vis}: For the parity task, $P'_{\text{parity}}$ is to shift the input sequence to the right by 1 and calculate XOR of the answer sequence and the input sequence; For the copy task, $P'_{\text{copy}}$ is to shift the input sequence to the right by 1; For the addition task $P'_{\text{addition}}$ is to calculate the XOR of two sequences and shift the results to the right by 1 position as the partial answer, and calculate the AND of two sequences as the carry-on sequence\footnote{Here we omit the pre-processing and post-processing steps like handling EOS (``\#'') and EOQ (``>'') tokens which can be done by fixed-depth attention layers outside of the loop (see Listings~\ref{lst:parity}, \ref{lst:copy}, \ref{lst:add}).}. 
+
+
+\section{Learning \texorpdfstring{$n$}
+
+\label{sec:method}
+
+Consider a task solvable by an $n$-RASP-L program. It is straightforward to learn the looped Transformer model with the supervision of the ground truth intermediate outputs: One can use a fixed-depth TF block and simply supervise the input and output for each step. However, such intermediate supervision can be difficult to get, just like collecting helping CoT steps could be difficult. Therefore, a more interesting setup we consider is to learn looped Transformers in an end-to-end manner \emph{without} intermediate-step supervision.
+
+Here we present a novel framework for length generalization: In the absence of ground truth CoT data/intermediate output, we propose to leverage the inherent structure of the problem with the help of ``knowing when to stop''. We present the setup for training data in Section~\ref{sec: ete_training}, the model architecture and training algorithm in Section~\ref{sec: training}, and the inference algorithm in Section~\ref{sec: inf}. 
+
+\subsection{End-to-end supervised data without intermediate step supervision}
+\label{sec: ete_training}
+
+We consider the following settings for the training data and the tasks:
+\begin{itemize}[leftmargin=0.5cm]
+    \item There exists an $n$-RASP-L program that solves the given task.
+    \item Training data consists only of $(x, y)$ pairs, but not intermediate steps.
+    That is, we do not have access to $P'(x), P'(P'(x)), \ldots$. 
+    \item $T(n)$, i.e., the ground truth number of iterations to solve the problem (with some $P'$) is available in the training data\footnote{This assumption is to provide supervision for when to stop during training; for inference, we can either use the ground truth steps or leverage the confidence of the output as a stopping criterion (see Section~\ref{sec: inf} for details.)}.
+    \item The length $n$ is diversely distributed in the dataset, e.g., $n\in\{1,  \ldots, n_{\text{max}}\}$ where $n_{\text{max}}$ is the maximum number of lengths in the dataset; The ground truth number of steps needed $T(n)$ is also diversely distributed in the dataset, e.g., $T(n)\in\{1,, \ldots, T(n_{\text{max}})\}$ where $T(n_{\text{max}})$ is the maximum number of steps in the dataset\footnote{The length of the problem is not necessarily the same as the actual length of the input due to EOS and EOQ tokens; see Section~\ref{sec:task} for the definition of the length of the specific tasks.}.
+\end{itemize}
+
+\subsection{Looped training with step supervision}
+\label{sec: training}
+\subsubsection{Architecture of the looped Transformers}
+
+We present the architecture for Looped Transformer model in Figure~\ref{fig:looped}. The key characteristics are:
+
+\textbf{Recurrence:} Instead of having a simple stack of blocks, the Looped Transformer is recurrent (like~\cite{giannou2023looped} but with decoder-only structure) in the sense that we reuse the same decoder block (which consists of a certain number of layers) for a number of looped steps, and we can adjust the number of looped steps at will. 
+
+\textbf{Input injection:} For each step, the original input sequence is injected together with the output from the previous decoder block, i.e. the input embeddings are added to the output embeddings of the previous step as the input of the current step. With input injection, the model can maintain a strong connection to the original input, preventing information loss with improved performance~\cite{bai2019deep, yang2023looped}.
+
+\paragraph{Positional embedding:} Notice that  there is no positional encoding in the RASP-L operations~\citep{zhou2024what}. To follow our $n$-RASP-L assumption and test the effect of the looped training only, we use NoPE~\citep{kazemnejad2024impact} in decoder-only Transformers to avoid the impact from different positional embeddings\footnote{NoPE is shown to inherently learn to use relative positional embeddings in practice~\cite{kazemnejad2024impact}.}. 
+
+\subsubsection{Training algorithm}
+Given a dataset $D = \{(\{(x_l)_{l=1}^{L_i}\}_i, \{(y_l)_{l=1}^{L_i}\}_i, T_i, L_i)\}_{i=1}^N$, where $\{(\{(x_l)_{l=1}^{L_i}\}_i$ is the input with $L_i$ tokens, $\{(y_l)_{l=1}^{L_i}\}_i$ is the output with $L_i$ tokens, and $T_i$ is ground truth number of steps of sample $i$. We aim to learn the transformer model $M_\theta$\footnote{$M_\theta$ only handles the embedding space and we use greedy decoding to get the decoded output.} by minimizing the following loss:
+\begin{align}
+    \mathbb{E}_{D}[\mathcal{L}\left(f_{T_i}(M_\theta,\{(\{(x_l)_{l=1}^{L_i}\}_i),\{(y_l)_{l=1}^{L_i}\}_i\right)],
+\end{align}
+where $\mathcal{L}$ is the cross entropy loss and $f_{T_i}(M_\theta,\{(\{(x_l)_{l=1}^{L_i}\}_i) = \underbrace{M_\theta(M_\theta(\cdot\cdot\cdot M_\theta}_\text{$T_i$ iterations}(\{(\{(x_l)_{l=1}^{L_i}\}_i)))$.
+
+How would our training help to learn more length-generalizable steps without intermediate supervision? Consider that for some input, we want to match the target after $T$ steps, $T\geq1$. Although we do not have intermediate supervision for this input, there could exist some other input where we match the output after $T-1$ steps as shown in Figure~\ref{fig:looped}, which means the model also receives supervision from $T-1$ steps with a different input length. The same argument applies to other $T$ values covered in the training set, so the same decoder block receives supervision from not only variable lengths, but also a variable number of steps. As a result, we expect the model to learn length-generalizable intermediate steps that could potentially generalize to more steps at test time.
+
+\subsection{Adaptive inference}
+\label{sec: inf}
+Recall that looped Transformers can use adaptive depth at inference time, so we need certain rules to decide when to stop. In this paper, we consider two rules: 1) \emph{Oracle}: We can assume that the number of steps needed is given; 2) \emph{Maximum confidence}: We can use confidence base rules to decide when to stop, i.e., stop when we are confident about the output at the current step. More specifically, for (2), given a test sequence $\{(\{(x_l)_{l=1}^{L}\}$ and a trained model $M_\theta$, we can get the number of steps $T$ from Equation~(\ref{eq: step}): 
+\begin{equation}
+\label{eq: step}
+    T = {\arg\max}_{t\in[1, T_{\text{max}}]}\mathcal{L}\left(f_{t}(M_\theta,\{(\{(x_l)_{l=1}^{L}\}), \{(\hat{y_l})_{l=1}^{L}\}^t\right),
+\end{equation}
+where $\{(\hat{y_l})_{l=1}^{L}\}^t$ is the decoded sequence from $f_{t}(M_\theta,\{(\{(x_l)_{l=1}^{L}\})$ at step $t$, $T_{\text{max}}$ is a threshold for the maximum number of steps.
+
+
+
+\section{Related work}
+
+\label{sec: related}
+
+\paragraph{Positional embedding for length generalization.}  Positional embeddings have been shown to greatly affect Transformers' ability to generalize to longer lengths \cite{press2021train, kazemnejad2024impact, ruoss2023randomized, su2024roformer,li2023functional, cho2024position, sabbaghi2024explicitly, mcleish2024transformers, golovneva2024contextual}. By designing positional embedding schemes that better capture relative positional information with techniques such as randomization and functional representations, researchers have made significant progress in improving length generalization. Especially, \cite{cho2024position} and~\cite{mcleish2024transformers} are tailor-made positional embeddings for some arithmetic problems without potential generality. \footnote{In~\cite{mcleish2024transformers}, they show that models with weight-tied layers (but with a fixed depth) can improve the generalization ability when comparing with the variants of the same positional embedding, but they do not find adaptive depths to be helpful since they do not perform the step-specific training as our method, while the key to our method is to use models with adaptive depths. To also compare with this baseline, we add NTP-Loop in Section~\ref{sec: baseline}.} This direction is orthogonal to our work since there is no positional encoding in RASP-L operations. We choose no positional embedding in our experiments, but other positional embeddings could further be synergistically applied with our approach. However, they might not be expressed as RASP-L operations. We leave further investigation with different positional embeddings to future work. 
+
+\paragraph{RNNs and Chomsky Hierarchy.} \cite{deletang2022neural} conducts an extensive empirical study to investigate the limits of the generalization performance of different neural network structures, demonstrate that grouping tasks according to the Chomsky hierarchy allows forecasting whether certain architectures will be able to generalize to out-of-distribution inputs. Their results show that RNNs and Transformers fail to generalize on non-regular tasks, LSTMs can solve regular and counter-language tasks, and only networks augmented with structured memory (such as a stack or memory tape) can successfully generalize on some context-free and context-sensitive tasks. In our paper, the Looped Transformer architecture also has augmented memory and the recurrent structure but is potentially more powerful since each iteration contains an operation of the whole sequence.
+
+\paragraph{Universal Transformers and other looped models.}
+Our method is an adaptation of Universal Transformer~\cite{dehghani2018universal} to solve n-RASP-L problems. Compared with Universal TF and its follow-up work~\cite{baninopondernet}, our training uses decoder-only models and step-dependent supervision data, without next-token prediction, dynamic halting, and timestep embeddings. Moreover, in looped Transformers, the original input is constantly fed into every iteration's input along with the previous iteration's output with input injection. Besides,~\cite{bansal2022end} studies learning recurrent networks to generalize to harder maze problems than seen during training, but with a focus on CNN architectures.
+
+\paragraph{Input representation.} Recall that adding two numbers of length $n$ could not be solved by a RASP-L program where the difficulty mainly comes from indexing operations~\cite{zhou2024what}. It could be solved by reformatting the input so that each digit is presented to the model with ``index hints'' in \cite{zhou2024what}. Such reformatting enables a simple RASP-L program for addition. Similarly, representing the answer in reversed order also helps because the corresponding RASP-L program gets much shorter, providing a concrete justification of the empirical observation made in \cite{lee2024teaching}. However, such input representations are highly dependent on the specific problems and might not necessarily exist in general. 
+
+\paragraph{COT.} Scratchpad or CoT reasoning~\cite{nye2021show, ling2017program, cobbe2021training, wei2022chain, hou2024universal} is also useful for length generalization as it could simplify the next-token prediction task with intermediate results presented to the input layer. 
+There are also potential drawbacks and limitations to CoT reasoning. First, CoT training data might be hard to collect. Training and inference with pause tokens~\cite{goyal2023think} has been proposed to learn implicit CoT steps without CoT data, but pause tokens only increase horizontal compute, not sequential compute. Second, not all CoT steps are helpful. If CoT steps introduce additional complexity or require operations not easily expressible in RASP-L, then CoT may hinder length generalization, as shown in \cite{zhou2024what}.
+Moreover, CoT steps that could convert the next token prediction task to RASP-L programs might not always exist. Besides, CoT is normally constrained to fixed-depth models, while in our paper we study a more general and powerful way to use adaptive compute at inference time.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exps}
+
+In this section, we evaluate the efficacy of looped Transformers in solving tasks that require length generalization. We introduce the experimental setup in Section~\ref{sec:experiment_setup}, present length generalization results in Section~\ref{exp:main_results} and ablation studies in Section~\ref{exp: ablation}, and visualize the stopping criterion in Section~\ref{exp:stop}.
+\subsection{Experimental setup}
+\label{sec:experiment_setup}
+\subsubsection{Tasks}
+\label{sec:task}
+\begin{figure}[t]
+\includegraphics[width = \textwidth]{figures/acc/acc_ntp.pdf}
+ \caption{\textbf{Length Generalization Performance.} Our looped Transformer model with adaptive depth generalized better than NTP methods across studied tasks, including the variants with pause tokens and weight-tied layers. The vertical dashed line indicates the maximum training length.}
+ \label{fig:acc}
+\end{figure}
+Here we consider tasks with $n$-RASP-L solutions presented in Section~\ref{sec:n-rasp-l}: Parity, Copy, and Addition, together with more tasks like calculating the sum, multiplication, and calculating the unique set. 
+
+
+\paragraph{Parity.} Checking the parity of the binary string. Example input: $\mybox{0}\mybox{0}\mybox{0}\mybox{1}\mybox{1}\mybox{>}\mybox{\#}\mybox{\#}$, example output: $\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{0}\mybox{\#}\mybox{\#}$. We define the length of the problem to be the number of the digits, set $T$ (the number of steps needed) to be the same as the length, and train with length $[1, 20)$. 
+
+\paragraph{Copy (with repeated tokens).}  Copying the binary string. Example input: $\mybox{1}\mybox{0}\mybox{1}\mybox{>}\mybox{\#}\mybox{\#}\mybox{\#}\mybox{\#}$, example output: $\mybox{*}\mybox{*}\mybox{*}\mybox{1}\mybox{0}\mybox{1}\mybox{\#}\mybox{\#}$. We define the length of the problem to be the number of the binary digits to copy, set $T$ to be the same as the problem length, and train with length $[1, 20)$. It has been shown that copy with unique tokens could be easily solved by inductive head~\citep{olsson2022context}, but copy with repeated tokens (e.g., binary) does not length-generalize with vanilla NTP training~\citep{zhou2024what}. 
+    
+\paragraph{Binary Addition.} Performing binary addition of two binary numbers with the same number of digits, and the output has one more digit (without removing leading 0 if it appears). Example input: $\mybox{1}\mybox{0}\mybox{+}\mybox{1}\mybox{1}\mybox{>}\mybox{\#}\mybox{\#}\mybox{\#}$, example output: $\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{1}\mybox{0}\mybox{1}\mybox{\#}\mybox{\#}$. We highlight that we do not reverse the output like recent works~\cite{lee2024teaching, mcleish2024transformers, zhou2024transformers}. We define the length of the problem to be the number of digits to be added, set $T$ to be the same as the problem length, and train with length $[1, 20)$. It has been shown that binary addition without index hint is hard to generalize in vanilla NTP~\citep{zhou2024what}. 
+
+\paragraph{Binary Sum.} 
+Calculating the sum of the binary string in the binary form (in reversed order). 
+Example input: $\mybox{1}\mybox{0}\mybox{1}\mybox{1}\mybox{>}\mybox{\#}\mybox{\#}\mybox{\#}\mybox{\#}$, 
+example output:$\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{1}\mybox{1}\mybox{\#}\mybox{\#}\mybox{\#}$.
+We define the length of the problem to be the number of binary digits to be added, set $T$ to be the same as the problem length, and train with length $[1, 20)$.
+    
+\paragraph{Binary Multiplication.} Multiplying two binary numbers, while the first number has up to two digits. The output is in reversed order and the length is the sum of the lengths of two numbers, without removing leading 0. Example input:
+    $\mybox{1}\mybox{1}\mybox{$\times$}\mybox{1}\mybox{1}\mybox{0}\mybox{>}\mybox{\#}\mybox{\#}\mybox{\#}\mybox{\#}\mybox{\#}$, 
+    example output: $\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{0}\mybox{1}\mybox{0}\mybox{0}\mybox{1}\mybox{0}\mybox{\#}$. We define the problem length to be the number of the second digits, and set $T$ to be the product of the lengths of two digits, and train with length $[1, 12)$. 
+
+\paragraph{Unique Set.} Calculating the unique set with the first occurrence order with an alphabet of 50 tokens. Example input: $\mybox{1}\mybox{4}\mybox{2}\mybox{2}\mybox{4}\mybox{3}\mybox{>}\mybox{\#}\mybox{\#}\mybox{\#}\mybox{\#}\mybox{\#}$, example output: $\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{*}\mybox{1}\mybox{4}\mybox{2}\mybox{3}\mybox{\#}\mybox{\#}$. We define the length of the problem to be the number of digits to be calculated, set $T$ to be the same as problem length, and train with length $[1, 20)$.
+
+\subsubsection{Baseline methods}
+\label{sec: baseline}
+\paragraph{Vanilla NTP.} We use vanilla next-token prediction as one of our baselines, which is referred to as ``NTP'' in Figure~\ref{fig:acc}. To ensure that the baseline method uses a maximum effective depth comparable to our method during training, we train the transformer model with a depth 20 times the depth of the looped block in our approach.
+
+\paragraph{NTP with pause tokens.}
+Training and inference with pause tokens~\cite{goyal2023think} is a way to implicitly learn implicit CoT steps without CoT data by enabling extra compute pathways before outputting the answer in NTP. We use it as a baseline with the same depth as in vanilla NTP which is referred to as ``NTP-Pause'' in Figure~\ref{fig:acc}.
+
+\paragraph{NTP with weight-tied layers.} Using weight-tied layers but with a fixed number of overall depths in NTP is also shown to improve the performance in~\cite{mcleish2024transformers}. Here we fix the number of looped steps as 20, use the same depth as the decoder block of our looped model, and train the model with NTP as another baseline which is referred to as ``NTP-Loop'' in Figure~\ref{fig:acc}.
+
+\subsubsection{Training and evaluation setup}
+For training, we use a decoder-only Transformer block in GPT-2 architecture~\cite{radford2019language}. We adopt a curriculum learning strategy for all methods that starts from the smallest length and incrementally increases the length during training till it reaches the maximum length as in~\cite{garg2022can}.
+
+For evaluation, we measure the exact match accuracy for the whole output sequence. For our looped inference, we test two possible stopping criterion discussed in Section~\ref{sec: inf}: 1) \emph{Oracle}: Adopt the same rule when generating the dataset as the number of steps to perform, 2) \emph{Maximum confidence}: Run a maximum number of steps, and choose the step using Equation~(\ref{eq: step})\footnote{Another option is to set a threshold for the cross-entropy loss and stop when the threshold is first met. This will also succeed if the maximum confidence rule works.
+ }.  We report test results from 1) in Section~\ref{exp:main_results} and~\ref{exp: ablation}, and we also find 2) to be an effective stopping criterion in Section~\ref{exp:stop}.
+ 
+ 
+
+\subsection{Length generalization results}
+
+\label{exp:main_results}
+We present the generalization performance on various reasoning tasks in Figure~\ref{fig:acc}. 
+
+\paragraph{Looped Transformers help with length generalization.} Our looped training significantly improves the length generalization performance. For example, for Parity, it can generalize to more than 50 digits near perfectly\footnote{It still maintains accuracy higher than 0.95 when tested with 100 digits, which is not included in the graph.} when only trained with up to 20 digits. Moreover, for tasks like addition and copy, where the next token prediction failed when tested on maximum training length $+10$, our looped model can still perform nearly perfectly. 
+All of the models are only trained with a relatively small number of lengths, and the looped model generalizes surprisingly well.
+
+\paragraph{Variants of NTP could improve generalization but not as effectively as our adaptive-depth model.} Compared with vanilla NTP, we observe that NTP-Loop could lead to improved generalization in tasks like Addition, Copy and Multiplication. Similarly, NTP-pause could introduce slight improvement in Parity and Unique Set. However, they all fall behind compared with our method. Besides, NTP-Loop suffers from lower in-distribution accuracy in Parity, possibly because using a fixed-depth model with weight-tied layers for NTP with all lengths might be too constrained for the task.
+\begin{figure}[t]
+\includegraphics[width = \textwidth]{figures/acc/acc_fap.pdf}
+ \caption{\textbf{Ablation study}. Our looped Transformer model with adaptive depth generalized better than FAP variants across studied tasks, including the variant of our method without input injection, and FAP with pause tokens. The vertical dashed line indicates the maximum training length.} 
+ \label{fig:acc_fap}
+\end{figure}
+\subsection{Ablation studies}
+\label{exp: ablation}
+
+In Section~\ref{exp:main_results}, we compare with NTP baselines while the efficacy of components in our architecture design remains unclear.}; ``FAP'' indicates vanilla FAP, without weight-tied layers or adaptive depth.
+\paragraph{Effect of input injection.} We observe that the generalization performance with input injection is generally better than without it, which aligns with the findings in~\cite{bai2019deep, yang2023looped}. The effect of input injection is more visible in tasks like Addition, Binary Sum, and Unique Set.
+
+\paragraph{Comparison with pause tokens and vanilla FAP.} We find that training with pause tokens in FAP could boost the generalization performance compared to vanilla FAP, but not as effective as our method with looped steps and adaptive depth. As discussed in ~\cite{goyal2023think}, pause tokens mainly introduce parallel but not sequential compute, which is less powerful than adaptive depth. Besides, we find worse in-distribution accuracy for both FAP and FAP-Pause in Addition, which mainly comes from the difficulty in training a deep model (20$\times$ the depths of the decoder block used in the looped model) in FAP. It further highlights the importance of supervision with variant depths used in our training.
+
+\subsection{The stopping criterion and visualizations}
+\label{exp:stop}
+In this section, we visualize the accuracy and the cross-entropy loss w.r.t. the decoded output in each iterative step across tasks in Figure~\ref{fig:stop3}, with the test length to be the maximum length in Figure~\ref{fig:acc}. 
+\paragraph{Convergence in Addition, Copy, Multiplication, and Unique Set.}
+We notice that for Addition, Copy, Multiplication, and Unique Set, the looped model somehow learns to converge for a certain number of steps after solving the task, even though we do not explicitly train the model to converge. The loss curves for these tasks are also smoother than those without convergence behaviors.
+
+\paragraph{The maximum confidence stopping criterion chooses the step with near-perfect accuracy.} 
+In Figure~\ref{fig:stop3}, the cross-entropy loss reaches the lowest when the generalization performance is near perfect, which indicates the maximum confidence rule chooses the right time to exit. By training with the ground truth number of iterations in the loop, we learn both the length-generalizable iterative steps and when to stop, which is important for looped models. 
+\begin{figure}[t]
+ \begin{subfigure}[b]{0.32\textwidth}
+     \centering
+     \includegraphics[width=\textwidth]{figures/entropy/parity_2.pdf}
+     \caption{Parity (test length=50)
+     }
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.32\textwidth}
+     \centering     \includegraphics[width=\textwidth]{figures/entropy/addition_2.pdf}
+     \caption{Addition (test length=30)
+     }
+ \end{subfigure}
+ \hfill
+  \begin{subfigure}[b]{0.32\textwidth}
+     \centering
+\includegraphics[width=\textwidth]{figures/entropy/copy_2.pdf}
+     \caption{Copy (test length=35)
+     }
+ \end{subfigure}
+
+  \begin{subfigure}[b]{0.32\textwidth}
+     \centering
+\includegraphics[width=\textwidth]{figures/entropy/multi_2.pdf}
+     \caption{Multiplication (test length=16)
+     }
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.32\textwidth}
+     \centering     \includegraphics[width=\textwidth]{figures/entropy/sum_2.pdf}
+     \caption{Binary Sum (test length=30) 
+     }
+ \end{subfigure}
+\hfill
+  \begin{subfigure}[b]{0.32\textwidth}
+     \centering
+\includegraphics[width=\textwidth]{figures/entropy/dict_2.pdf}
+     \caption{Unique Set (test length=35)
+     }
+ \end{subfigure}
+ \caption{\textbf{Stopping criterion visualizations.} Plot of the stopping criterion. The vertical line indicates the step chosen from Equation~(\ref{eq: step}) within the range shown in the plots. The chosen steps have accuracy $\approx1$ across tasks.}
+ \label{fig:stop3}
+\end{figure}
+
+
+
+\section{Limitations and conclusion}
+
+\label{sec:limit}
+Our work has several limitations. Direct looped training could be computationally demanding when the number of looped steps is too large. A possible workaround for more efficient training could be stopping the gradient tracking for earlier steps like~\cite{clark2023directly}, but there might be a trade-off in performance and computation.
+We only train the looped Transformers for a limited number of steps and lengths due to a lack of computing resources. With more diverse training data, the looped model has the potential to generalize to even longer test lengths. We use NoPE for simplicity, and an orthogonal direction is to use more delicate positional embedding to further improve length generalization performance. Moreover, our step-dependent supervision requires the ground-truth number of steps in the training data, which is an additional requirement compared with normal end-to-end training. However, we still require fewer assumptions than CoT training.
+
+In conclusion, we show that $n$-RASP-L problems can be learned by looped Transformer with step-dependent supervision on the final answer, and can be applied with an adaptive number of steps during inference time to improve generalization. Note that $n$-RASP-L, as a challenging algorithmic problem set, could cover more challenging reasoning problems than presented in the paper, and we believe that our method has the potential to generalize to more challenging tasks.
+
+
+
+
+
+
+

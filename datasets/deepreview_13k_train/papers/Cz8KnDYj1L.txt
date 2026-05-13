@@ -1,0 +1,276 @@
+\title{Attention Speaks Volumes: Localizing and Mitigating Bias in Language Models}
+
+\begin{abstract}
+We explore the internal mechanisms of how bias emerges in large language models (LLMs) when provided with ambiguous comparative prompts: inputs that compare or enforce choosing between two or more entities without providing clear context for preference. Most approaches for bias mitigation focus on either post-hoc analysis or data augmentation. However, these are transient solutions, without addressing the root cause: the model itself. Numerous prior works show the influence of the attention module towards steering generations. We believe that analyzing attention is also crucial for understanding bias, as it provides insight into how the LLM distributes its focus across different entities and how this contributes to biased decisions. To this end, we first introduce a metric to quantify the LLM's preference for one entity over another. We then propose \name (Attention-based Targeted Layer Analysis and Scaling), a technique to localize bias to specific layers of the LLM by analyzing attention scores and then reduce bias by scaling attention in these biased layers. To evaluate our method, we conduct experiments across 3 datasets (BBQ, Crows-Pairs, and WinoGender) using \texttt{GPT-2 XL} (1.5B), \texttt{GPT-J} (6B), \texttt{LLaMA-2} (7B) and \texttt{LLaMA-3} (8B). Our experiments demonstrate that bias is concentrated in the later layers, typically around the last third. We also show how \name effectively mitigates bias through targeted interventions without compromising downstream performance and an average increase of only 0.82\% in perplexity when the intervention is applied. We see an average improvement of 0.28 points in the bias score across all the datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\footnotetext{\footnotemark[1]Correspondence to \texttt{radiga2@illinois.edu}}
+\renewcommand{\thefootnote}{\arabic{footnote}}
+\label{sec:intro}
+
+The rapid advancement of large language models (LLMs) has enabled AI to perform increasingly complex tasks~\citep{10.5555/3495724.3495883}. Despite these advancements, LLMs often generate biased content, particularly when confronted with \emph{ambiguous} prompts that require nuanced decision-making~\citep{gallegos2024biasfairnesslargelanguage}. Bias in models can manifest in various forms which do not always involve harmful language: reinforcing societal stereotypes~\citep{caliskan2017semantics}, displaying gender bias~\citep{10.5555/3157382.3157584}, or demonstrating preferential treatment towards specific demographic groups~\citep{gupta2023survey}. This has led to growing concerns about the ethical implications of deploying such LLMs, especially when their outputs affect sensitive domains like hiring, legal advice, or healthcare~\citep{an-etal-2024-large}. These manifestations of bias, where explicit harmful language is not part of the picture, are arguably also most difficult to mitigate because commonly used mitigations such as post-inference content filters and guards~\citep{DBLP:journals/corr/abs-2312-06674} are not applicable.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[scale=0.5]{images/Combined_plot_small.png}
+    \label{fig:AttentionvsLayers}
+\end{figure}
+
+To enable more reliable deployment, one must localize and minimize bias in these LLMs. However, this is non-trivial. First, if one is to believe that data is the ``only'' cause, naively sanitizing data may not only be difficult to execute, but could also inadvertently degrade downstream model performance. Second, bias in LLMs is highly context-dependent~\citep{sclar2024quantifyinglanguagemodelssensitivity}; it varies based on the input prompt, which makes the mitigation process more complex, necessitating a prompt-dependent approach for mitigation. Third, bias is model-dependent: it is entangled within the multi-layered structure of the model, and training algorithms used will influence how bias manifests. 
+
+The {attention} module~\citep{10.5555/3295222.3295349} governs how most modern LLMs assign importance to different parts of the input. {\em We conjecture that attention can also shed light on how bias is embedded in LLMs, in the way models internally distributes attention between competing entities in the prompt}. Consider the following prompts: 1 (Age). ``\texttt{I saw a grandson and their grandfather last week outside the Walmart trying to book a cab on Uber. Who was not comfortable using the phone?}'' and 2 (Physical Appearance). ``\texttt{Picking up my little brother from the school last week, I saw a really fat guy and a slim one waiting outside. Who is too lazy to play sports?}'' Figure~\ref{fig:AttentionvsLayers} illustrates how attention scores are distributed across LLM layers for entities in these prompts like ``\texttt{grandfather}'' vs. ``\texttt{grandson}'' (\textit{age bias}) or ``\texttt{fat}'' vs. ``\texttt{slim}'' (\textit{physical appearance bias}). As shown, the attention scores peak towards the later layers, concentrating biased information at specific points in the LLM's depth. 
+
+\begin{tcolorbox}
+This leads to our \textit{main hypothesis}: by analyzing attention scores, bias can be localized to specific layers of the model. We can identify these biased layers and apply targeted interventions to minimize the model's preference for one entity over another.
+\end{tcolorbox}
+
+\textbf{Our Contributions:} We propose \name, a two-step approach to localizing and mitigating bias in LLMs, particularly when faced with ambiguous comparative prompts. First, we analyze attention scores (specifically at the last token of the prompt) to identify layers where bias is concentrated, as shown in Figure~\ref{fig:AttentionvsLayers} (refer \S~\ref{sec:Localization}). Then, we apply a targeted inference-time intervention, specifically scaling the attention with respect to the entities in these biased layers, to reduce the LLM’s inherent preference for one entity over another (refer \S~\ref{sec:Intervention}). Our method achieves significant bias reduction without compromising LLM fluency (refer \S~\ref{sec:results}) across a variety of datasets and models. 
+
+
+\section{Background on LLMs and Attention}
+
+\label{sec:background}
+
+We borrow some notation from the works of~\citet{elhage2021mathematical} and ~\citet{10.5555/3600270.3601532} to delve into the details of the attention mechanism within transformers~\citep{10.5555/3295222.3295349}, concentrating on autoregressive, decoder-only LLMs. To streamline our explanation, we will bypass the inclusion of bias terms and layer normalization. Given an input sequence of tokens \( t_1, \ldots, t_N \) from a vocabulary \( V \), each token \( t_i \) is initially mapped to a \( d \)-dimensional vector \( \mathbf{x}^0_i \in \mathbb{R}^d \) using an embedding matrix \( \mathbf{E} \in \mathbb{R}^{|V| \times d} \). The LLM processes these embeddings through \( L \) layers, where each layer comprises a multi-head self-attention (MHSA) sublayer followed by a multi-layer perceptron (MLP) sublayer. At layer \( \ell \), the representation of token \( i \) is updated as follows:
+\[\mathbf{x}^\ell_i = \mathbf{x}^{\ell-1}_i + \mathbf{a}^\ell_i + \mathbf{m}^\ell_i\]
+Here, \( \mathbf{a}^\ell_i \) represents the output of the MHSA sublayer, and \( \mathbf{m}^\ell_i \) denotes the MLP sublayer's contribution. We will define how \( \mathbf{a}^\ell_i \) and \( \mathbf{m}^\ell_i \) are obtained soon. The final layer's outputs are transformed into a probability distribution over the vocabulary via a prediction head \( \delta \):
+\begin{equation}
+p_i = \text{softmax}(\delta(\mathbf{x}^L_i))
+\label{eq:softmax}
+\end{equation}
+
+\noindent{\bf Multi-Head Self-Attention (MHSA) Sublayers:}
+The MHSA mechanism enables the LLM to capture dependencies between different tokens by attending to various positions within the sequence. Each MHSA sublayer is defined by four projection matrices: \( \mathbf{W}^\ell_Q \), \( \mathbf{W}^\ell_K \), \( \mathbf{W}^\ell_V \), and \( \mathbf{W}^\ell_O \), corresponding to the 'query', 'key', 'value', and 'output' projections, respectively. These matrices are split across \( H \) attention heads \( h \in \{1, \ldots, H\} \):
+\[\mathbf{W}^{\ell,h}_Q, \mathbf{W}^{\ell,h}_K, \mathbf{W}^{\ell,h}_V \in \mathbb{R}^{d \times \frac{d}{H}}, \quad \mathbf{W}^{\ell,h}_O \in \mathbb{R}^{\frac{d}{H} \times d}\] 
+
+The outputs from each attention head \( h \) are summed together after multiplying with the output projection matrices (\( \mathbf{W}^{\ell,h}_O \)):
+\[\mathbf{a}^\ell_i = \sum_{h=1}^H \mathbf{A}^{\ell,h} (\mathbf{X}^{\ell-1} \mathbf{W}^{\ell,h}_V) \mathbf{W}^{\ell,h}_O\]
+
+Here, \( \mathbf{X}^{\ell-1} \) represents the matrix of all token embeddings at layer \( \ell-1 \), with each row corresponding to \( \mathbf{x}^{\ell-1}_i \), and \( \mathbf{M}^{\ell,h} \) is the mask matrix used in autoregressive LLMs to prevent attending to future tokens. The attention weight matrix \( \mathbf{A}^{\ell,h} \) is calculated as:
+
+\[\mathbf{A}^{\ell,h} = \text{softmax}\left( \frac{\mathbf{Q} \mathbf{K}^T}{\sqrt{d/H}} + \mathbf{M}^{\ell,h} \right)\]
+
+Where the matrices \( \mathbf{Q} \), \( \mathbf{K} \), and \( \mathbf{V} \) are defined as:
+\[ \mathbf{Q} = \mathbf{X}^{\ell-1} \mathbf{W}^{\ell,h}_Q, \quad \mathbf{K} = \mathbf{X}^{\ell-1} \mathbf{W}^{\ell,h}_K, \quad \mathbf{V} = \mathbf{X}^{\ell-1} \mathbf{W}^{\ell,h}_V\]
+
+\iffalse
+\varun{do we need the following content? and the v matrix?} \rishabh{for completeness, i would say yes. But for our method, no - we dont use the next part anywhere (only required for complete info as to how attention works)}
+This formulation for the attention mechanism for a single head \( h \) can be summarized as:
+\[\text{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \mathbf{A}^{\ell,h} \mathbf{V} = \text{softmax} \left( \frac{\mathbf{Q}\mathbf{K}^T}{\sqrt{d/H}} + \mathbf{M}^{\ell,h} \right) \mathbf{V}\]
+\fi
+
+
+\section{Bias in a Comparative Prompt Framework}
+
+\label{sec:definitions}
+
+\noindent{\bf What is the bias we are referring to?} Bias in LLMs manifests when they demonstrate preferential implicit treatment or assumptions towards certain groups or entities, often reinforcing societal stereotypes or exhibiting disparate performance across different demographic sub-groups~\citep{faisal2022geographicgeopoliticalbiaseslanguage,gupta2023survey}.
+
+\noindent{\bf How have we minimized/mitigated bias thus far?} Some methods often focus on classifying outputs as either biased or unbiased, but such a binary view overlooks the complexity and subtleties in LLM decision-making and typically requires a post-hoc classifier (which requires additional overheads to train)~\citep{10.1145/3630050.3630179}. To capture nuances associated with bias, it is necessary to go beyond this. Although one could attempt to probe the LLM's outputs to evaluate bias, such probing fails to faithfully represent the internal decision-making mechanisms at play~\citep{10.5555/3666122.3669397}. To better understand and address bias, we need to investigate the internal mechanisms and processes of the LLM. The attention weights are particularly important~\citep{yuksekgonul2023attention}, as they serve as measurable signals for how much importance the model assigns to different entities, which can play a critical role in bias formation during generation.
+\noindent{\bf In what setting are we going to focus on?}
+We focus on \textit{comparative prompts}~\citep{parrish-etal-2022-bbq,nangia-etal-2020-crows,rudinger-etal-2018-gender} where models are required to make a choice or express preference towards a decision that may favor or otherwise stereotype specific groups. To elaborate, these prompts involve a situation or context that mentions two entities, followed by a question that asks the LLM to choose between them. We believe this setting is both interesting and natural to study. It is natural as it occurs in many real-world applications, where ambiguity is present due to limited context, making it challenging to determine the ``right'' response. It is interesting, as this type of bias does not result in harmful outputs generated by the model. By studying these comparative decisions, we can gain insight into the internal biases of the LLM as it makes nuanced choices between competing entities.  More formally:
+
+\textit{Definition 1 [Comparative Prompt Framework]:} A comparative prompt is characterized by a situation or context ($\mathcal{C}$) involving two entities. Following this context is a query ($\mathcal{Q}$) that prompts the LLM to make a decision between these two entities. The prompt ($\mathcal{P}$) is defined as the concatenation of the context and the question, represented as $\mathcal{P} = \mathcal{C} \oplus \mathcal{Q}$; $\mathcal{P}$ contains $T$ tokens spanning the entire prompt (including the context $\mathcal{C}$ and the query $\mathcal{Q}$). This allows the LLM to understand and evaluate both the situation and the entities in question. The two entities involved in the context are referred to as {\em candidate entities}\footnote{Used interchangably with candidates.} ($C_1$, $C_2$), and the LLM ($\mathcal{M}$) is expected to choose between these candidates as the answer to the question. An example is provided below, where the candidates are underlined.
+
+\begin{tcolorbox}[colback=white, colframe=black, title=Example Prompt:]
+\textbf{Context ($\mathcal{C}$)}: I saw a \underline{\textit{grandson}} and their \underline{\textit{grandfather}} last week outside the Walmart trying to book a cab on Uber.
+
+\textbf{Question ($\mathcal{Q}$)}: Who was not comfortable using the phone?
+\end{tcolorbox}
+
+In the context of the comparative prompt framework, we introduce a metric called the {\em bias ratio} to quantify how strongly the model prefers one entity over the other. Since the prompt explicitly mentions two entities, the model can generate responses which select either one. Ideally, an unbiased model should generate responses with equal likelihood for both, but biases in training data or internal model behavior may lead to skewed probabilities favoring one entity disproportionately. The bias ratio captures this imbalance by comparing the probabilities assigned to each entity, helping to measure how far the model's output deviates from a neutral decision.
+
+\textit{Definition 2 [Bias Ratio]:} The bias ratio ($b$) measures the relative probabilities (refer to Equation~\ref{eq:softmax}) assigned to the two candidate entities in the LLM's output. Formally, it is defined as:
+\[b = \frac{\Pr_{\mathcal{M}}(C_1 \mid \mathcal{P})}{\Pr_{\mathcal{M}}(C_2 \mid \mathcal{P})} > 1\]
+where $\Pr_{\mathcal{M}}(C_s \mid \mathcal{P})$ is the probability of selecting entity $C_s$ given the prompt \(\mathcal{P}\). Note that $b > 1$ as we assume that candidate $C_1$ is generated by the model (i.e., the higher probability candidate).
+
+An ideal, debiased model in this framework would yield  $b \approx 1$, indicating that the LLM assigns (near) equal probabilities to both candidates where decisions are being made purely based on context and question without favoring one entity over the other due to underlying biases. 
+
+
+\section{Attention-based Targeted Layer Analysis and Scaling (\name)}
+
+\label{sec:method}
+
+We now outline how our two-step approach, \name (\underline{A}ttention-based \underline{T}argeted \underline{L}ayer \underline{A}nalysis and \underline{S}caling), is used to localize and mitigate bias in LLMs when responding to ambiguous comparative prompts. As its name suggests, \name involves first localizing the layers in the model where bias is most prominent (\S~\ref{sec:Localization}) and then applying targeted interventions to reduce this effect (\S~\ref{sec:Intervention}). Figure~\ref{fig:Methodology} demonstrates this process and its end goal. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[scale=0.35]{images/Methodology.png}
+    \label{fig:Methodology}
+\end{figure}
+
+\subsection{Localizing Bias using Attention on Entities}
+\label{sec:Localization}
+
+We examine the attention scores assigned to the candidate entities (mentioned in the context) when the model is about to generate the answer i.e., at the last token \(T\), where the \((T+1)\)-th token will be generated. By focusing on the attention scores from the entities across different layers, we can identify ``which'' layers of the model are contributing most to biased outcomes. We use attention scores rather than the MLP layers because attention mechanisms explicitly dictate how information is distributed across tokens, allowing us to directly observe the model’s focus on specific entities during decision-making. This allows for more interpretable insights into biases than other components like MLP layers, which handle abstract transformations rather than token-level interactions and information transfer~\citep{geva2023dissectingrecallfactualassociations,geva2020transformer}. 
+
+Our approach is inspired by that of~\citet{yuksekgonul2023attention}, which utilizes attention scores to understand the impact of constraints on the factuality of responses. Let \( \mathbf{A}^{(\ell,h)} \) be the attention matrix at layer \( \ell \) for head \( h \) (where \( \mathbf{A}^{(\ell,h)}_{ij} \) represents the attention weight from token \( i \) to token \( j \)), and \( \mathbf{C} = \{ C_1, C_2 \} \) be the set of candidate entities mentioned in the context, with \( T \) as the index of the last token in the prompt before generating the next token.
+
+\noindent \textbf{Impact of Tokenization:} When a candidate \( C_1 \) (e.g., ``\texttt{grandfather}'') is tokenized, the tokenizer may split it into multiple tokens depending on the model's vocabulary. For instance, the word ``\texttt{grandfather}'' may be split into \([t_1 \texttt{(grand)}, t_2 \texttt{(father)}]\), where each \( t_i \) is a token. In such cases, we use only the first token, (\( t_1 \)), when calculating the attention score. This approach simplifies the process by focusing on the initial token's attention, which typically carries significant entity-related information.
+
+To mathematically formulate this, we define the token indices of \( C_s \) as \text{TI}(\( C_s \)) = \( \{i_1^s, i_2^s, \ldots, i_m^s\} \) where $i_j^s$ corresponding to the $j$-th index in the prompt, corresponding to token \( C_s \).
+
+The attention score for entity \( C_s \) (where \( s \in \{1, 2\} \)) at layer \( \ell \) and head \( h \) is given by:
+\[\alpha^{(\ell,h)}(C_s) = \mathbf{A}^{(\ell,h)}_{T, i_1^s}\]
+
+Next, we calculate the mean attention score across all heads for each entity:
+\begin{equation}
+\bar{\alpha}^{(\ell)}(C_s) = \frac{1}{H} \sum_{h=1}^{H} \alpha^{(\ell,h)}(C_s)
+\label{eq:master1}
+\end{equation}
+where \( H \) is the number of attention heads.\\
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[scale=0.28]{images/Combined_plot_att_scores.png}
+    \label{fig:Attention_scores}
+\end{figure}
+
+We use these mean attention scores to localize bias to specific layers in the model using the following approaches. Let $i^* = \argmax_{i=\{1,2\}} \Pr_\mathcal{M}(C_i | \mathcal{P})$, then $C_{i^*}$ is the higher probability candidate among the two. Then, we denote the other candidate as $\tilde{C}_{i^*}$.
+
+\noindent{\bf Approach 1: Using the Difference:} A natural approach is calculating the difference in the mean attention scores (refer Equation~\ref{eq:master1}) between the two candidate entities:
+\begin{equation*}
+\Delta \bar{\alpha}^{(\ell)} = \bar{\alpha}^{(\ell)}(C_{i^*}) - \bar{\alpha}^{(\ell)}(\tilde{C}_{i^*})
+\label{eq:approach1}
+\end{equation*}
+
+A high value of  \( \Delta \bar{\alpha}^{(\ell)} \) indicates that layer \( \ell \) is influenced by one entity over the other. By ranking the layers based on \( \Delta \bar{\alpha}^{(\ell)} \) and identifying the top-\( k \) layers with the highest values, we can localize the layers where bias is most pronounced i.e.,
+\begin{equation}
+\mathcal{L}_k = \text{arg top-}k \{ \Delta \bar{\alpha}^{(\ell)} \mid \ell \in \mathcal{L} \}
+\label{eq:approach1b}
+\end{equation}
+where \( \text{arg top-}k \) returns the indices of the top-\( k \) values of \( \Delta \bar{\alpha}^{(\ell)} \).
+\noindent{\bf Approach 2: Using the Most Probable Candidate:} A high value of \( \bar{\alpha}^{(\ell)}(C_{i^*}) \) indicates that layer \( \ell \) is potentially contributing to biased attention towards \( C_{i^*} \). Using this information, we can find the top-$k$ contributing layers as follows:
+\begin{equation}
+\mathcal{L}_k = \text{arg top-}k \{ \bar{\alpha}^{(\ell)}(C_{i^*}) \mid \ell \in \mathcal{L} \}
+\label{eq:approach2}
+\end{equation}
+
+The higher the value of \( \bar{\alpha}^{(\ell)}(C_{i^*}) \) for a layer, the more that layer focuses on the entity \( C_{i^*} \). This suggests that the layer has more information about \( C_{i^*} \), making it an ideal target for any intervention aimed at reducing the model's bias towards this entity. 
+
+\noindent{\bf Which Approach does \name Use?} While we found Approach 1 to be more intuitive, empirical results we obtained upon experimentation showed that Approach 2 resulted in larger bias mitigation. {\em Thus, all experiments performed from here on report results with respect to Approach 2}. Note that our approach is computationally less expensive in comparison to prior localization approaches involving causal tracing~\citep{10.5555/3600270.
+
+\subsection{Interventions On the Biased Layers}  
+\label{sec:Intervention}
+
+Once the biased layers have been localized, the next step is to intervene at the attention module to minimize the bias manifestation.
+
+\noindent{\bf Scaling Attention:} Let \( \mathbf{A}^{(\ell,h)} \) be the attention matrix at layer \( \ell \) for head \( h \). To adjust the attention contributions, we scale the attention scores for {\em all} token indices corresponding to the higher probability candidate using a scaling factor \( \mathbf{\lambda} \in [0,1]\). Maintaining the same convention, let \( C_{i^*} \) be the candidate entity with the higher probability, and let \text{TI}(\( C_{i^*} \)) = \( \{i_1^*, i_2^*, \ldots, i_m^*\} \) be the set of token indices corresponding to \( C_{i^*} \) in the prompt (see \S~\ref{sec:Localization}). The scaling factor \( \lambda \) is applied as follows:
+\begin{equation}
+\tilde{\mathbf{A}}^{(\ell,h)}_{T, i_j^*} = \lambda \cdot \mathbf{A}^{(\ell,h)}_{T, i_j^*} \quad \text{for all } i_j^* \in \text{\text{TI}(\( C_{i^*} \)) and } \ell \in \mathcal{L}_{\text{k}}
+\label{eq:intervention}
+\end{equation}
+where \( \tilde{\mathbf{A}}^{(\ell,h)} \) would represent the adjusted/scaled attention matrix and \( T \) is the last token in the prompt, after which the model generation starts.
+
+The new attention score for entity \( C_{i^*} \) after scaling is:
+\[
+\tilde{\alpha}^{(\ell,h)}(C_{i^*}) = \sum_{i_j^* \in \text{\text{TI}}(C_{i^*})} \tilde{\mathbf{A}}^{(\ell,h)}_{T, i_j^*}
+\]
+
+\noindent{\bf Determining the Scaling Factor:} The scaling factor \( \lambda \) is crucial for adjusting the attention scores without over-penalizing the model's focus on the higher-probability entity. {\em For each layer}, we determine \( \lambda \) by testing values within the range \( \lambda \in (0, 1] \), decreasing 
+\( \lambda \) from 1 to 0.01 (at intervals of 0.1, for a total of 11 values) to find the value that optimizes the bias ratio (i.e., finds $b \approx 1$). Note that we do not include $0$ as we do not want to completely remove the candidate's representation. We stop the greedy search when $b$ starts increasing with respect to the scaling factor applied in the previous iteration.
+
+Since \name requires applying the scaling intervention ``layer by layer'' across the top-$k$ biased layers ($k$ = 3 in our experiments), we starting with the layer that exhibits the highest degree of bias. We first perform a greedy search for the optimal scaling factor as described earlier. Once the best scaling factor is identified (and applied) for the most biased layer, we recompute the top-$(k-1)$ layers (by excluding the layer just edited), and repeat this process. This allows us to decrease the search space from $11^k$ values to $k \times 11$ values. 
+
+Note that the search is conducted for each prompt independently, meaning \( \lambda \) is optimized per prompt rather than being globally fixed. This prevents overfitting to a specific prompt distribution and allows for flexible bias mitigation.
+
+\subsection{Evidence for Localization Efficacy}
+\label{subsec:evidence}
+To validate the effectiveness of \name, we apply the scaling intervention described in \S~\ref{sec:Intervention} for different layer categories: top-$k$, top-1, random-$k$, middle-$k$, and \text{bottom-$k$} (for $k = 3$). We obtain \( \mathcal{L}_{L} \) using this equation, where \( L = |\mathcal{L}| \) is the total number of layers in the model (refer \S~\ref{sec:background}). This provides an ``ordered ranking'' of layers based on their contribution to bias, allowing us to easily extract the top-$k$, top-1, middle-$k$ and bottom-$k$ most biased layers. For random-$k$, we select $k$ random layers from the model for each prompt.
+
+\noindent{\bf Observations:} Figure~\ref{fig:BiasLocalization} illustrates a bar graph that compares bias ratio improvement (which is the percentage decrease in bias ratio across prompts after applying the scaling intervention) for different categories of bias. This provides clear evidence that top-$k$ and top-$1$ interventions consistently lead to a more significant reduction in bias ratio in comparison to the  interventions applied at the random, middle, or bottom layers. This supports our hypothesis that biased entity information is not uniformly distributed across the model’s layers but is concentrated in specific layers, and these layers can be localized. 
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[scale=0.43]{images/Combined_plot_topkproof.png}
+    \label{fig:BiasLocalization}
+\end{figure}
+
+
+
+\section{Experimental Setup}
+
+\label{sec:setup}
+
+\textbf{Datasets:} For our evaluations, we utilize the {BBQ (Bias Benchmark for Question Answering) dataset~\citep{parrish-etal-2022-bbq}, {CrowS-Pairs} dataset~\citep{nangia-etal-2020-crows}, and {WinoGender} dataset~\citep{rudinger-etal-2018-gender}.
+
+\textbf{Models:} We evaluate four models in our experiments: \texttt{GPT-J} (6B parameters), \texttt{GPT-2 XL} (1.5B parameters), \texttt{LLaMA 2} (7B parameters)~\citep{touvron2023llama2openfoundation}, and \texttt{LLaMA 3} (8B parameters)~\citep{dubey2024llama3herdmodels}.
+\noindent{\bf Metric:} Recall that the bias ratio, calculated per prompt, can range from 1 to $\infty$, where a bias ratio of 1 represents perfect neutrality, and values above 1 indicate increasing bias. In order to obtain a measure of bias which is (a) averaged across prompts, and (b) normalizes the bias ratio into a range between  0 and 1 (where a value of 1 indicates no bias, and lower values represent increasing levels of bias), we define the {\em Exponential Bias Score (EBS)}. It is formulated as:
+\[
+\text{EBS} = \frac{1}{N} \sum_{i=1}^{N} \exp{(1 - b_i)}
+\]
+where (a) \(b_i\) is the bias ratio for prompt \(i\), and (b) \(N\) is the total number of prompts. Notice that \(\exp(1 - b_i)\) gives more weight to bias ratios closer to 1 (indicating no bias), resulting in a higher EBS when the model is less biased i.e., \textit{larger is better}. 
+
+
+\section{Results}
+
+\label{sec:results}
+
+In our evaluation, we aim to answer the following questions: (1) Does \name effectively mitigate bias in LLMs when responding to ambiguous comparative prompts? (c.f. \S~\ref{sec:bias_reduction}); (2) How do alternate methods such as activation steering or rank reduction perform compared to \name? (c.f. \S~\ref{ssec:pasta} and \S~\ref{ssec:others}); and (3) Does \name affect the model's response quality? (c.f. \S~\ref{sec:Quality})
+
+Our results show that: (1) \name demonstrates its effectiveness in reducing bias across all tested models and datasets, showing a consistent improvement in the EBS; (2) Although steering and other approaches provide some bias reduction, \name consistently achieves better results than cotemporary approaches due to its targeted approach, which enables more precise bias localization and adjustment; and (3) \name has minimal effect on response fluency and retains model quality, as measured by perplexity, while effectively shifting model preferences to address bias. 
+
+\subsection{Does \name reduce bias?}
+\label{sec:bias_reduction}
+\input{Tables/Results}
+We analyze the effect of the model intervention across multiple datasets and models in Table~\ref{tab:1}. We see large improvements in the EBS across all models and all datasets.
+
+\textbf{Improvement Across Models:} Our results demonstrate consistent improvements across all models. \texttt{GPT-J} exhibits the most dramatic enhancements, with EBS increasing by an average of 0.313 points across all datasets. \texttt{GPT-2 XL}, despite being a smaller model, also shows significant improvements with an average increase of 0.190 points. \texttt{LLaMA 2} and \texttt{LLaMA 3}, which start with higher base model scores, still demonstrate notable improvements with average increases of 0.173 and 0.127 points respectively. For the Crows-Pairs dataset, we observe consistent improvements across all models, with \texttt{GPT-J} showing the largest gain of 0.232 points.
+
+\textbf{Dataset-specific Trends:} For the BBQ dataset, all models show substantial improvements across all categories, with the most significant enhancements seen in categories like race/SES, gender identity and nationality. Physical appearance consistently shows the smallest improvements across all models, suggesting this might be a more deeply ingrained bias.
+
+\subsection{Baseline Comparisons}
+
+\subsubsection{Attention Steering with PASTA}
+\label{ssec:pasta}
+\input{Tables/Pasta_new}
+Activation steering techniques~\citep{arditi2024refusal,turner2024activationadditionsteeringlanguage, stolfo2024improvinginstructionfollowinglanguagemodels} are those used to learn activation patterns (APs); these could, in turn, minimize bias. However, such techniques (a) often require a validation set in disambiguous scenarios to learn these APs (which are not always available), and (b) substantially more expensive to learn (as APs are likely not transferable across bias categories). More details can be found in \S~\ref{sec:related}. We consider \textbf{\textsc{PASTA}} (Post-hoc Attention STeering Approach)~\citep{zhang2024tellmodelattendposthoc} as an examplar activation steering approach that is devoid of the aforementioned shortcomings. \textsc{PASTA} is used to steer attention towards {\em user-specified content} during inference, without altering model parameters; it can be applied to either ambiguous or disambiguous contexts as is, and only requires knowledge of the candidate tokens. \textsc{PASTA} applies selective attention re-weighting to a subset of attention heads. It does so by identifying the optimal attention heads for steering via a model profiling process, ensuring that the model’s behavior aligns with the user's intentions. This method serves as a useful baseline as we can use it to explicitly increase emphasis on the lower probability candidate ($\tilde{C}_{i^*}$) in any prompt in order to increase its probability. 
+
+} results in improvements, \name still achieves better performance. This is likely because of \textsc{PASTA}'s reliance on pre-determined attention heads which do not fully account for prompt-specific nuances in the attention distribution. In contrast, \name's targeted approach to bias localization across layers allows for more refined interventions, specifically addressing the layers most responsible for biased behavior for each prompt. On average, \name performs 0.10 points better than PASTA across categories. 
+\subsubsection{Prompting \& Other Baselines}
+\label{ssec:others}
+
+Prompting the model to be less biased is a natural comparison point. Our results on the BBQ dataset using the \texttt{GPT-J} model, as shown in Table~\ref{tab:4}, demonstrate that using this persona results in marginal improvements over the default setting, indicating that prompting in itself is insufficient.
+
+ However, LASER shows no significant improvements in the IEBS scores.
+
+\subsection{Does the Intervention Degrade Response Quality?}
+\label{sec:Quality}
+An essential consideration in bias mitigation is ensuring that interventions aimed at reducing bias {\em do not significantly degrade the overall response quality} of the model. To assess this, we analyze the perplexity of the model’s generated outputs pre- and post-\name. Perplexity serves as a measure of fluency, with lower values indicating more fluent text~\citep{kann-etal-2018-sentence}. We also measure how often our scaling intervention changes the model's preferred output candidate when we use greedy decoding. Specifically, we report the percentage of prompts where, after applying our method, the model now generates the candidate that it had previously not selected. This helps us quantify how effectively our intervention alters the model's biased preferences.
+
+\input{Tables/Perplexity}
+
+\noindent{\bf Observations:} Table~\ref{tab:3} compares the perplexity scores for \texttt{GPT-J} before and after \name. Our results demonstrate that \name's scaling interventions have a minimal impact on perplexity, meaning that the fluency of the model’s responses remains largely unaffected. Moreover, we observe that the model changes its preferred output candidate after the intervention for a large fraction of the prompts across all categories demonstrating the effectiveness of \name.
+
+Additionally, we evaluate the impact of \name by varying {\em inference-time parameters} such as {temperature}, {top-$p$}, and {top-$k$} to better understand how they influence model behavior and bias in generated outputs.
+
+
+\section{Related Work}
+
+\label{sec:related}
+\noindent{\bf Localization:} Causal methods have been used to analyze model internals and address biases by intervening directly on model processing components. Techniques such as neuron ablations~\citep{lakretz-etal-2019-emergence,mohebbi-etal-2023-quantifying} and replacing activations with baseline or alternative activations~\citep{10.5555/3295222.3295349,10.5555/3540261.3540994} offer insights into the causal mechanisms behind model behavior. However,~\citet{10.5555/3600270.3601532} and~\citet{10.5555/3666122.3666896} show that localization methods should be carefully validated, as causal interventions may not always lead to predictive success. 
+
+\noindent{\bf Mitigation Strategies via Representation Editing:} While hard-debias techniques~\citep{10.5555/3157382.3157584,ravfogel-etal-2020-null} aimed to remove biases by modifying embedding spaces, more recent approaches such as LEACE~\citep{10.5555/3666122.3669006} and DiffMask~\citep{de-cao-etal-2020-decisions}  focus on runtime activation changes. These methods effectively reduce only gender bias by making alterations to the model's internal representations. Mitigations in word embeddings has also been a major focus, given their prevalence in NLP tasks~\citep{caliskan2017semantics,manzini-etal-2019-black}. In contrast, our work addresses biases in transformer models, specifically targeting attention layers that contribute to biased decision-making rather than modifying static embeddings.
+
+\noindent{\bf Activation Steering:} Recent work on activation steering aims to dynamically influence model behavior during runtime by steering the activation space of LLMs. For instance,~\citet{turner2024activationadditionsteeringlanguage} introduced the concept of ``activation addition'', which steers model outputs by adding specific activation vectors. ~\citet{arditi2024refusal} demonstrated that specific directions in the activation space mediate refusal behaviors in LLMs, providing a potential avenue for bias mitigation. Similarly,~\citet{panickssery2024steeringllama2contrastive} uses contrastive activation addition to steer models like Llama 2 by adjusting internal activations post-hoc.
+
+\noindent{\bf Sparse Autoencoders:}~\citet{cunningham2023sparseautoencodershighlyinterpretable} has demonstrated that sparse autoencoders can capture interpretable features in LLMs, providing a pathway for targeting specific biases. Work on principled evaluation of these sparse autoencoders for interpretability~\citep{makelov2024principledevaluationssparseautoencoders} further highlights their potential for gaining control over model behaviour. These autoencoders could potentially be used for interpretable mitigation of bias in future work.
+
+
+\section{Conclusions}
+
+In this paper, we provide a two-step approach, \name, for identifying and mitigating bias in LLMs when responding to ambiguous comparative prompts. To capture bias in this framework, we first define the bias ratio (and the exponential bias score) metric. By analyzing attention distributions, \name can localize biased entity information to specific layers of the model. \name systematically reduces bias by scaling attention scores in these layers without degrading model performance. Experimental results highlight the efficacy of this approach. However, it is not without limitations. \name is designed for the comparative prompting framework with two entities. Determining the scaling factor requires many inference calls, proportional to the number of layers being edited. Given the computational costs associated with the experiments, we are unable to perform every experiment discussed with all models.
+
+\noindent{\bf Disclaimer:} Each of the datasets we use have their own framework for measuring bias and these measures do not perfectly align with our end goal of reducing the bias ratio (especially since we perform edits to the prompt formats in these datasets before utilizing them). Additionally, there are challenges in adapting these metrics to the generative setting. For example, BBQ’s bias score metric for the ambiguous and disambiguous setting assumes a model can pick among explicit options—candidate A, candidate B, or ``do not know''; this works well for embedding classification models but does not directly translate to generative models. Generative models lack a predefined ``do not know'' option; attempts to approximate this would yield incorrect conclusions. We could use our own definition of ``do not know'' (e.g., if the difference in probabilities between candidate A and B is less than some threshold, we can deem the model uncertain). But this would diverge from BBQ's original metric and favor our \name method by design, as \name reduces this probability gap and would yield results similar to the metric we defined in this paper.
+
+
+\newpage
+
+
+
+

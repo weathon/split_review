@@ -1,0 +1,246 @@
+\title{Generating Pragmatic Examples to Train Neural Program Synthesizers}
+
+\begin{abstract}
+Programming-by-example is the task of synthesizing a program that is consistent with a set of user-provided input-output examples. 
+As examples are often an under-specification of one's intent, a good synthesizer must choose the intended program from the many that are consistent with the given set of examples. 
+Prior work frames program synthesis as a cooperative game between a listener (that synthesizes programs) and a speaker (a user choosing examples), and shows that models of computational pragmatic inference are effective in choosing the user intended programs. 
+However, these models require counterfactual reasoning over a large set of programs and examples, which is infeasible in realistic program spaces. 
+In this paper, we propose a novel way to amortize this search with neural networks. 
+We sample pairs of programs and examples via self-play between listener and speaker models, and use pragmatic inference to choose informative training examples from this sample.
+We then use the informative dataset to train models to improve the synthesizer's ability to disambiguate user-provided examples \emph{without human supervision}.
+We validate our method on the challenging task of synthesizing regular expressions from example strings, and find that our method (1) outperforms models trained without choosing pragmatic examples by 23\% (a 51\% relative increase) (2) matches the performance of supervised learning on a dataset of pragmatic examples provided by humans, despite using no human data in training.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In program synthesis---specifically programming by example (PBE)---an user describes a target program using input-output examples (i.e.\ test cases) and the synthesizer finds a program that is consistent with these input-output examples. 
+In PBE, the users directly express the semantics of the intended program (what it \emph{should do}) without having to understand the syntax of the program (what it \emph{should look like}).
+Such systems have found real-world use in a variety of scenarios such as spreadsheet formulas \citep{pmlr-v139-chen21m,gulwani-2010-automating} and data wrangling \citep{feng2018program}. 
+An important aspect of inferring programs from examples is dealing with \emph{ambiguity}. Given a set of examples, there can be many spurious programs consistent with the set, and picking out the right one the user has in mind is a long-standing challenge. For example, when describing the regular expression \texttt{a+b*},\footnote{1 or more \textsf{\textit{a}} s followed by 0 or more \textsf{\textit{b}} s} an informative user might provide the example \regexample{ab}{\tickmark} indicating that the string \textsf{\textit{ab}} matches the target regular expression. However, to the program synthesizer, both \texttt{a+b*} and \texttt{a*b+c?} \footnote{\texttt{c?} means optionally having a \textsf{\textit{c}} at the end} would be among many acceptable answers based on this example.
+
+\citet{pu-etal-2020} resolves this ambiguity by framing program synthesis as a coorporative communicative game: the user chooses an informative set of examples to convey the program to the synthesizer, and the synthesizer chooses a program under the assumption that these examples were chosen informatively. 
+Models of \emph{pragmatic inference}, specifically, the Rational Speech Acts (RSA) framework \citep{frank-goodman-2012} can then be used to build a program synthesizer that can resolve ambiguity via recursive Bayesian inference. The RSA framework allows the synthesizer to reason about what program a user intended, given that they chose that particular set of examples rather than a different one. For example, the synthesizer could reason that a user that wanted to describe \texttt{a*b+c?} would have chosen an example containing the character \textsf{\textit{c}}. However, this approach requires the synthesizer to perform expensive counterfactual inference over the space of all programs and examples to resolve ambiguity, making it difficult to scale to realistic programming domains. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{assets/regexpragintro.png}
+    \caption{Our approach iteratively generates datasets containing increasingly informative program specifications (lists of examples consistent with the program), and updates models on the generated datasets. {\large \ding{192}} We use a \textsf{Speaker} model --- that generates an example consistent with a target \textsc{\textsf{program}} --- to propose a set of candidate specifications. Using the Rational Speech Acts model of pragmatic reasoning (red box; described in in \Cref{fig:rsa}), we choose the example that is most informative to a \textsf{Listener} model that synthesizes programs consistent with a given specification. In this manner, we incrementally build the list of examples \textsc{\textsf{spec}} for the \textsc{\textsf{program}}. We repeat this for different programs to create a dataset of informative \textsc{\textsf{program}}-\textsc{\textsf{spec}} pairs. {\large \ding{193}} We use the dataset to update the \textsf{Speaker} and \textsf{Listener} models. We train the speaker to generate the selected pragmatic examples, and the listener to synthesize the target program given the generated examples.}
+    \label{fig:teaser}
+\end{figure}
+To scale to realistic program spaces, modern approaches of PBE systems have relied on training neural networks to efficiently search through large program spaces for consistent programs given examples \citep{balog2017deepcoder,pmlr-v70-devlin17a}.
+In this paper, we explore whether we can use simulated reasoning in communication games using the RSA framework as a way to generate training data consisting of pragmatic examples. The generated data is then used to train neural networks to enable scaleable pragmatic program synthesis. 
+We hypothesize that since the RSA framework computationally models how a human chooses examples to communicate a program, end users would succeed more often when communicating with a neural synthesizer trained on pragmatic data (our work) as compared to a neural synthesizer trained on non-pragmatic data \citep{balog2017deepcoder,pmlr-v70-devlin17a}.
+
+An overview of our approach is shown in Figure \ref{fig:teaser}.
+We start with a neural \textit{literal listener} --- a synthesizer trained in the style of \cite{pmlr-v70-devlin17a} --- and a neural \textit{literal speaker} that generates examples consistent with a given program.
+We generate a sequence of pragmatic examples incrementally  to obtain a training pair $(\texttt{program}, \textsf{examples})$.
+This pair is then added to an aggregate training set, which is used to finetune both the speaker model --- making it more likely to generate pragmatic examples --- and the listener model --- making it more likely to recover the intended program given pragmatic examples.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{assets/rsa.png}
+    \caption{An illustration of how the Rational Speech Acts framework is used to select an informative example for a given program. We start with the matrix corresponding to the consistency relation between the sample of programs and examples shown in \Cref{fig:teaser}. We obtain a literal listener distribution $L_0$ over programs for each example by normalizing the rows of this matrix. Since the $M$ matrix is binary, each row in $L_0$ is a uniform distribution over consistent programs in the sample --- any of the consistent programs is equally likely to be the intended program. We then obtain a pragmatic speaker distribution $S_1$ by normalizing the columns of the $L_0$ matrix: modeling the probability an informative speaker might have for choosing each example when communicating a program to a literal listener. RSA outputs the highest-probability example in $S_1$ (e.g., (\textsf{\textit{aa}}, \tickmark)) in the column corresponding to the target program (e.g., \texttt{a+b*}).
+    }
+    \label{fig:rsa}
+\end{figure}
+
+We validate the effectiveness of our methods on the well-studied PBE task of inferring regular expressions from a set of examples. Each example is a pair $(\textsf{\textit{string}}, \textsf{\textbf{bool}})$, indicating whether a particular string matches the regex. To compare our training algorithm to standard supervised learning from human-annotated data, we collect a novel dataset of human annotations, consisting of $(\texttt{program}, \textsf{examples})$ where the examples were given by a person for a total of 440 
+regular expressions. We find that with only a small number (40) of human annotations -- used only for model selection -- our method is able to outperform a system that is fine-tuned using 400 annotated regexes from this dataset.
+We conduct human evaluation of our approach by giving a user a target regex to communicate interactively to the synthesizer using examples, and find that the informative examples generated by our procedure substantially improve the performance of a regular expression synthesizer, with improvements of 22.8\% absolute (51.4\% relative) in accuracy (11 participants, 340 regexes total).
+Our approach, despite not using human-provided data during training, matches the performance of of a model fine-tuned on a large dataset of human-written pragmatic examples.
+
+
+
+\section{Background}
+
+\label{sec:background}
+\paragraph{Programming-by-Example} In this paper, we tackle the task of finding a $\texttt{program} \in P$, where $P$ is a space of possible programs. As a \emph{specification} of intent, a user provides a sequence of input-output $\textsf{examples} \in E^+$,\footnote{Here the notation $X^+$ indicates a sequence of 1 or more elements belonging to $X$} where $E = \mathcal{X} \times \mathcal{Y}$ is the space of all possible input-output pairs that programs in $P$ operate over. For example, $P$ may be a space of regular expression programs, $\mathcal{X}$ the space of all strings in the alphabet that the regular expressions are defined over, and $\mathcal{Y} \in \{\tickmarkmath, \xmarkmath\}$ where output \tickmark\ indicates whether the input string matches the regular expression. For simplicity of explanation, in this section we consider cases where the specification consists of \emph{a single example}, deferring the cases of multiple examples to the next section.
+
+The semantics of programs are captured by the \emph{consistency relation} $M$ between $P$ and $E$:
+\begin{align*}
+    M = \{(\texttt{program}, \textsf{example})\ |\ \textsf{example} = (x, y) \in \mathcal{X} \times \mathcal{Y}, \texttt{program}(x) = y\}
+\end{align*} 
+A program is consistent with an example iff executing the program on the input produces the intended output.
+We can view $M$ as a \emph{consistency matrix} where each row corresponds to an example, each column corresponds to a program, and an element is 1 if the program is consistent with the example and 0 otherwise (\Cref{fig:teaser,fig:rsa}, left).
+
+\paragraph{Literal Model of Program Synthesis}
+A minimal requirement of a program synthesizer is that it finds \emph{any} program that is consistent with the given specification. We refer to such a synthesizer as the \emph{literal listener} $L_0$, which naively assigns equal probability to any consistent program.
+\begin{align}
+    L_0(\texttt{program}|\textsf{example}) \propto M(\textsf{example}, \texttt{program})P(\texttt{program}) \label{eqn:rsa_l0}
+\end{align}
+This literal listener distribution is given by normalizing the rows of the consistency matrix to produce uniform probability distributions ($L_0$ in Figure \ref{fig:rsa}).
+However, 
+this literal listener cannot resolve ambiguity when interacting with users, as it places equal probability on all consistent programs. A literal speaker -- one that generates \emph{any} consistent examples for a given program -- is defined analogously as $S_0(\textsf{example}|\texttt{program}) \propto M(\textsf{example}, \texttt{program})P(\textsf{example})$.
+\paragraph{Pragmatic Model of Program Synthesis}
+When interacting with a synthesizer, users choose examples that are \emph{informative} -- those that distinguish the program they desire from others. For example, given the specification $[$\textrm{\regexample{ab}{\tickmark}}$]$, a user is likely wants the regular expression \texttt{a+b+} than \texttt{a+b+c?}, since they probably would have included the character \textsf{\textit{c}} if they wanted the latter expression. 
+
+To leverage the informativity of examples, \citet{pu-etal-2020} use the Rational Speech Acts (RSA; \citealt{frank-goodman-2012}) framework to derive a \emph{pragmatic program synthesizer} that resolves ambiguity by modeling how people choose examples informatively. First, they construct a pragmatic speaker $S_1$ that chooses an example in proportion to the likelihood that it would make the literal listener infer the intended program:
+\begin{align}
+    S_1(\textsf{example}|\texttt{program}) \propto L_0(\texttt{program}|\textsf{example}) P(\textsf{example}) \label{eqn:rsa_s1}
+\end{align}
+Using a uniform prior $P(\textsf{example})$, the $S_1$ distribution is given by normalizing the columns of the $L_0$ matrix ($S_1$ in Figure \ref{fig:rsa}). As we can see, given a program $S_1$ selects an example in proportion to the likelihood of $L_0$ recovering the program given the example, choosing examples that are informative to the listener.\footnote{When working with a sequence of \textsf{examples} rather than a single \textsf{example}, \citet{pu-etal-2020} propose factoring the pragmatic speaker distribution autoregressively as 
+$$S_1(\textsf{examples}|\texttt{program}) = \prod_{i=1}^{N_\textit{examples}} S_1(\textsf{example}_i|\texttt{program}, \textsf{examples}_{:i})$$
+}
+
+Finally, a pragmatic listener (program synthesizer) $L_1$ is built on top of $S_1$:
+\begin{align}
+    L_1(\texttt{program}|\textsf{example}) \propto S_1(\textsf{example}|\texttt{program}) P(\texttt{program}) \label{eqn:rsa_l1}
+\end{align}
+using a prior $P(\texttt{program})$ over programs. This listener resolves ambiguity by choosing that program that an informative speaker (modeled by $S_1$) would have described using the chosen example.
+
+\citet{pu-etal-2020} demonstrated that building a pragmatic synthesizer $L_1$ in this way allows for users to communicate the target program to the synthesizer using fewer examples without training a model on human-produced examples or explicitly defining a prior over the space of programs. However, in realistic domains, enumerating large numbers of programs and examples is intractable, preventing the application of this framework to a broader range of tasks.
+
+
+
+\section{Method}
+
+
+In this section, we describe the iterative process by which we bootstrap a pragmatic neural program synthesizer by generating informative specifications, without human supervision (\Cref{fig:teaser}). The full algorithm is detailed in \Cref{sec:pragmatic_model_training}.
+
+\subsection{Speaker and Listener Models}\label{sec:speakers_and_listeners}
+We build on past work that uses neural models as specification-conditioned proposal distributions over programs \citep{balog2017deepcoder,pmlr-v70-devlin17a}. 
+Our listener (synthesizer) models represent distributions over programs $L_\theta(\texttt{program}|\textsf{examples})$. 
+Our speaker (specification generation) models generate the sequence of examples in a specification autoregressively: $S_\phi(\textsf{example}_i|\texttt{program}, \textsf{examples}_{1:i-1})$.\footnote{We train the speaker to predict the input-output pair to encourage the model to capture aspects of the domain semantics}
+While all our listener and speaker models share the same architecture and initialization, we vary their training data, as described below.
+\subsection{Training Base Models} \label{sec:base_models}
+As a foundation for our approach, we train \emph{base} listener and speaker models to approximate literal speakers and listeners $S_0$ and $L_0$ (\Cref{eqn:rsa_l0}).
+To train the base model, we sample random programs from the space of programs $P$, sample an input from the space of inputs $\mathcal{X}$, and execute the program on the input to obtain the output (e.g., by checking if an sampled example string is matched by a sampled regular expression) \citep{pmlr-v70-devlin17a}.
+This lets us generate as many samples from $M$ as we can, which we can use to train a base listener to approximate $L_0$ (\Cref{eqn:rsa_l0}), and a base listener to approximate an analogous $S_0$, using standard maximum likelihood training.
+We denote the resulting base listener model as $L_{\theta_0}$ and the base speaker model as $S_{\phi_0}$, and use these as the initial models in our iterative model bootstrapping procedure. 
+\subsection{Generating informative examples} \label{sec:gen_examples}
+The crux of our algorithm is using the existing $S_\phi$ and $L_\theta$ to approximate $S_1$, which can then be used to generate training data to improve $S_\phi$ and $L_\theta$ over rounds of training.
+At each round $r$ of our approach, we use the current speaker and listener models, together with the RSA procedure, to create a dataset of informative examples specifying programs ({\large \ding{192}} of \Cref{fig:teaser}). We incrementally generate examples to create a specification.
+Given a partial specification of $i$ examples $\textsf{examples}_{1:i}$, we sample a set of additional candidate examples: $S_{\phi_r}(\textsf{example}_{i+1}|\texttt{program}, \textsf{examples}_{1:i})$. Similarly, we sample a set of alternative programs: $L_{\theta_r}(\texttt{program}|\textsf{examples}_{1:i})$ from the partial specification. 
+
+We can then compute the sampled consistency matrix over the generated examples and programs, and use RSA inference as shown in \Cref{fig:rsa} to choose the highest scoring example from the approximate $S_1$ distribution.\footnote{Ideally, one could perform exact inference to draw samples from $S_1$ directly. As stated earlier, this is intractable. Therefore, we first sample a subset of the rows and columns in the consistency matrix, then perform the RSA inference over this much smaller and denser sampled matrix. However, the consistency matrix $M$ is sparse (mostly 0s) -- most programs are inconsistent with any non-trivial set of examples -- allowing for reasoning about a sample of the matrix.}  This example is added to the partial specification, and we repeat until a maximum number of examples are reached.\footnote{Since the models are used only to generate the programs and utterances that are used to create the lexicon, we can draw examples from other sources, including models other than $S_{\phi_r}(\textsf{example}_i|\texttt{program}, \textsf{examples}_{:i})$ and $L_{\theta_r}(\texttt{program}|\textsf{examples}_{:i})$.} The completed program-specification pair is then added to a dataset $\mathcal{D}_r$ of examples from that round of training.
+This process amounts to choosing an example proposed by the current speaker model that minimizes ambiguity among programs that the current listener infers to be likely. The full algorithm for incrementally generating a sequence of examples is presented in \Cref{alg:innerlooprsa} (\Cref{sec:pragmatic_model_training}).
+
+\subsection{Model updates} \label{sec:update_model}
+We use the dataset $\mathcal{D}_r$ to update both the speaker and listener models as sketched in part {\large \ding{193}} of \Cref{fig:teaser} using standard maximum likelihood training. 
+In each round $r$ we further fine-tune the speaker and listener models on the generated data to obtain the updated parameters $\theta_{r+1}$ and $\phi_{r+1}$. The full algorithm to iteratively generate examples and update the model is presented in \Cref{alg:outerloop} (\Cref{sec:pragmatic_model_training}).
+
+To select the model that works best with human-provided examples, we choose the model that maximizes a model selection metric computed over a small set of programs paired with human-provided examples.\footnote{This amounts to performing early stopping on the validation metric.} Note that this validation set is never used to update the model parameters, and only is used to choose a model.
+
+
+
+\section{Experiments}
+
+\subsection{Regular expressions}
+We validate the training algorithm we propose on the task of synthesizing regular expressions (`regexes') as formally defined in \Cref{sec:background}.
+We use the regular expression 
+domain-specific language  presented by \citet{ye-etal-2020-benchmarking}. In addition to defining a regular expression specification language, they also define a sampling distribution over the space of regular expressions that we use to sample programs for training and evaluating our model. This distribution uses templates that generalize types of regular expressions that people ask about on fora such as StackOverflow.
+
+\subsection{Models for Comparison}\label{sec:comparison_models}
+
+\paragraph{Base models}
+We use ByT5-small models \citep{xue-etal-2022-byt5} as the backbone for all speaker and listener models. To obtain the base speaker $S_{\theta_0}$ and listener $L_{\phi_0}$ models that approximate the literal speaker and listener respectively, we use a set of 300,000 randomly-generated program--specification pairs (with varying numbers of examples in each specification) and finetune the pretrained ByT5 checkpoint. 
+ The $L_{\theta_0}$ model acts as the \textsc{literal} model in our experiments.
+
+\paragraph{Pragmatic model}
+We start with the base models $S_{\theta_0}$ and $L_{\phi_0}$ and use the iterative data generation and finetuning algorithm to obtain a sequence of synthesis models $L_{\phi_r}$ for rounds $r = 0, \ldots, R_\textit{max}$. We use the \textsc{Top-1} metric evaluated on a small validation set to choose the best model which we refer to as the \textsc{pragmatic} model. 
+
+\paragraph{Finetuning on human-provided specifications}
+We obtain an \textsc{hft} model by fine-tuning $L_{\phi_0}$ on a curated high-quality human-provided specifications (\Cref{sec:dataset_collection}). This model allows us to compare how well our approach of using model generated informative examples compares with sourcing more expensive human annotations.
+
+\paragraph{\textsc{gpt}-3.5}
+We evaluate \textsc{gpt}-3.5 by using the program-specification pairs we obtain as users interact with the other three models, and revealing each specification to the \textsc{gpt}-3.5 model in the order the user provided them, one example at a time. We stop when the model guesses the correct regular expression, or when all the examples are presented.We can think of this as a form of interaction where the human doesn't observe the outputs of this model while giving examples. Further details of how the model is prompted are in \Cref{sec:gpt}.
+
+\paragraph{Inference} Crucial to our approach is the ability to generate programs from examples, and vice versa. To generate programs from a specification (sequence of examples from either self-play or human), we present it to the listener, and sample 500 programs using top-$p$ sampling \citep{nucleus-sampling} with $p=0.9$. We then deduplicate the set of sampled programs, and filter out programs inconsistent with the given specification. We can then sort the remaining programs by their score under the model to obtain a ranked list of consistent programs. Similarly, to generate specifications from a program, we sample 500 examples using top-$p$ sampling with $p=1$ and check that the examples are consistent with the program.
+
+\subsection{Procedure} \label{sec:procedure}
+We evaluate the model on the basis of successful communications on 11 human participants. A sampled regex $p$ is given to a human participant, whom describes it using a sequence of examples, providing one example in each turn for upto a maximum of 10 turns. The synthesizer takes the examples provided and generates a ranked list of inferred programs, of which the top-1 regex $p'$ is shown to the participant. The communication is successful when $p = p'$, at which point the interaction ends.\footnote{We used the \texttt{greenery} Python library to identify regex matches in terms of semantic similarity, and not just surface form match.}
+A total three synthesizers were considered -- the \textsc{literal} model, the human fine-tuned \textsc{hft} model, and the model trained using the method we propose, which we refer to as the \textsc{pragmatic} model. The identity of the models is referred to the users only as differently colored robots. The study yielded communication history over a total of 340 regexes (109 to the \textsc{literal} model, 113 to the \textsc{hft} model, and 118 to the \textsc{pragmatic} model)\footnote{a small bug caused us to collect few extra interactions for some of the models, which does not change the measurements on the models' relative performances}.
+
+\subsection{Measurement} \label{sec:evaluation}
+We consider the following metrics.
+$\textsc{Top-1}@t$ measures whether the model's top-1 matches intended regular expression at any point at turn $t$ of the interaction. 
+We can also consider the average value of $\textsc{Top-1}$ by aggregating across the turns $t \in \{1, \ldots, 10\}$. Averaging across turns rewards models that pass success criteria given fewer turns --- a model that can infer the target regex at turn 4 on average is better than a model that can only infer the target at turn 10. We use \textsc{Top-1} over a validation set as the model selection criterion for our proposed method.
+$\textsc{Top-10}@t$ and \textsc{Top-10} are similarly defined.
+$\textsc{Edit Distance}\leq 1@t$ measures whether the model's highest scoring prediction in any of the turns up to $t$ is at most a 1 token edit from the intended program, and $\textsc{Edit Distance}\leq 1$ is the average of this value over $t \in \{1, \ldots, 10\}$. 
+
+\begin{table}[]
+    \centering
+    \small
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Model} & \textbf{\textsc{Top-1}@10} \textsubscript{(SE)} & \textbf{\textsc{Top-10}@10} \textsubscript{(SE)} & \textbf{\textsc{Edit Distance $\leq 1$}@10} \textsubscript{(SE)} \\
+        \midrule
+        \textsc{literal} & 0.434 \textsubscript{(0.047)} & 0.522 \textsubscript{(0.047)} & 0.513 \textsubscript{(0.047)} \\
+        \textsc{gpt-3.5\textsuperscript{*}} & 0.074 \textsubscript{(0.014)}  & 0.189 \textsubscript{(0.021)} & 0.082 \textsubscript{(0.015)} \\
+        \textsc{hft} & 0.587 \textsubscript{(0.047)}  & 0.623 \textsubscript{(0.047)} & 0.614 \textsubscript{(0.047)} \\
+        \midrule
+        \textsc{pragmatic} & \textbf{0.661} \textsubscript{(0.043)} & \textbf{0.703} \textsubscript{(0.042)} & \textbf{0.694} \textsubscript{(0.042)}  \\
+        \bottomrule
+    \end{tabular}
+    \caption{Success metrics at the end of 10 turns of interaction with each model, with standard errors computed using bootstrap sampling. \textsuperscript{*} indicates that the results are in replay.}
+    \label{tab:10_metric_table}
+\end{table}
+
+\begin{table}[]
+    \centering
+    \small
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Model} & \textbf{\textsc{Top-1}} \textsubscript{(SE)} & \textbf{\textsc{Top-10}} \textsubscript{(SE)} & \textbf{\textsc{Edit Distance $\leq 1$}} \textsubscript{(SE)} \\
+        \midrule
+        \textsc{literal} & 0.233 \textsubscript{(0.028)} & 0.333 \textsubscript{(0.034)} & 0.296 \textsubscript{(0.031)} \\
+        \textsc{gpt-3.5\textsuperscript{*}} & 0.048 \textsubscript{(0.010)} & 0.122 \textsubscript{(0.014)} & 0.056 \textsubscript{(0.011)} \\
+        \textsc{hft} & 0.349 \textsubscript{(0.032)} & 0.424 \textsubscript{(0.035)} & 0.390 \textsubscript{(0.034)} \\
+        \midrule
+        \textsc{pragmatic} & \textbf{0.373} \textsubscript{(0.028)} & \textbf{0.430} \textsubscript{(0.030)} & \textbf{0.432} \textsubscript{(0.031)} \\
+        \bottomrule
+    \end{tabular}
+    \caption{Average success metric over 10 turns. We see that the \textsc{pragmatic} training method we propose is on par with \textsc{hft}, and outperforms other baselines significantly for all success criteria. \textsuperscript{*} indicates that the results are in replay.}
+    \label{tab:aggr_metric_table}
+\end{table}
+
+\subsection{Human-provided Specifications} \label{sec:dataset_collection}
+An alternative to generating informative examples using the method we propose is to have human annotators provide examples. We collect a new dataset of high-quality program-specification pairs. %
+
+\paragraph{Procedure}
+We present a participant with a sampled regular expression, and instruct them to provide examples that they might use to illustrate the regular expression to another person. Participants are asked to provide at least 5-7 examples. We verify whether the examples are informative by checking whether a different annotator is able to identify the program which the given set of examples describes. 
+ 
+
+\paragraph{Usage of Data}
+We collect a total of 440 program-specification pairs. 
+We sample a small subset of 40 pairs that received 2 ``correct'' verifications as a validation set for model selection.
+\input{sections/experiment_result}
+
+
+
+\section{Analysis of training}
+
+
+
+\begin{figure}
+\centering
+\includegraphics[width=0.5\textwidth]{assets/top_1_over_rounds.pdf}
+\caption{\textsc{Top-1} metric over the course of rounds of training of the \textsc{pragmatic} model. We report the metric on the validaton set as well evaluating on all interactions from the user study in the replay setting (similar to how we evaluated \textsc{gpt}-3.5). We compare the accuracy over rounds of training to generating specifications and updating the models only once, amounting to a \textsc{single round} of the procedure with more programs.}
+\label{fig:top_1_rounds}
+\end{figure}
+
+\Cref{fig:top_1_rounds} shows the progression of the \textsc{Top-1} metric over the course of different rounds of training. We see that as we train the model for more rounds, the performance of the model generally increases, and then tapers off. This shows that as the model is trained for more rounds, it gets increasingly pragmatic. Since the model we choose for the user study is trained for 5 rounds, on $5 \times 1024 = 5120$ programs, we also compare to training the model for only a single round on the same number of programs. In a replay study (similar to how we evaluated \textsc{gpt}-3.5; \Cref{fig:top_1_rounds}), we find that iteratively generating data and updating the model performs better.
+
+
+\section{Related work}
+
+\paragraph{Neural network models of pragmatic reasoning}
+Prior work has applied the the RSA pragmatic reasoning framework to improve neural models at inference time
+for tasks including image captioning \citep{andreas-klein-2016-reasoning,cohn-gordon-etal-2018-pragmatically}, instruction generation \citep{fried-etal-2018-unified}, vision-and-language navigation \citep{fried-etal-2018-speaker}, and machine translation \citep{cohn-gordon-goodman-2019-lost}. 
+These approaches differ from ours because (1) they require human data to train the base models, while our approach does not and (2) they typically require multiple calls to the speaker and listener models at inference time. Our approach amortizes these calls into training time by generating data, allowing for much faster inference.
+
+Other approaches have used pragmatically-motivated training procedures. The closest works to ours are \citet{white2020learning} and \citet{lazaridou-etal-2020-multi}, who use reinforcement learning approaches to fine-tune a speaker model using reward from a fixed listener model. \citet{monroe2015learning} and \citet{mcdowell-goodman-2019-learning} backpropagate through the RSA procedure at training time to reason counterfactually. Again, our approach is unique in that we do not require human datas during training, but instead, rely on the consistency matrix $M$ defined by the synthesis task alone.
+\citet{andreas-klein-2016-reasoning} also consider the problem of amortizing (compiling)
+pragmatic reasoning into a single model, and find that this does \emph{not} perform as well as inference-time pragmatic reasoning in the image captioning domain. We show that for programming-by-example, we are able to compile pragmatic reasoning into a single model and improve the performance of the model.
+\paragraph{Pragmatic reasoning for program synthesis} Similar to our work, \citet{vaithilingam2023usability} conduct a study of how users interact with an exact RSA pragmatic regular expression synthesizer over a toy domain of ~1000 regexes total over strings of only 0s and 1s. \citet{pu2023amortizing} propose a way to make pragmatic programming-by-example more efficient by inferring a global ranking function, but still relies on the expensive exact RSA during training. Our approach is different in that by using neural models for speakers and listeners \emph{during training time itself}, we are able to scale to a realistic regex domain. \citet{regex_plus} also present an approach to version space algebra-based approach to regular expression synthesis from examples by explicitly modeling the probability of examples describing programs (as in our speaker models), but they work with only positive examples (a subset of our example space with examples that have the output \tickmark, excluding those with the output \xmark). \citet{forest_synthesizer} present an SMT-based method that reasons about distinguishing inputs to synthesize regular expressions.
+
+
+\section{Conclusion}
+
+In this paper, we present a novel approach to train program synthesis models that can resolve ambiguity in program specification examples by modeling \emph{pragmatics}: how users choose examples informatively. Our method bootstraps pragmatic synthesizers by iteratively generating data using speaker (example generator) and listener (program synthesizer) models, filtering the generated data with an example selection method drawn from work on computational pragmatics, and further training the speaker and listener models on the generated data.
+We show that our approach produces pragmatic program synthesizers with minimal supervision: in a challenging regular expression domain, matching the performance of synthesizers trained on human-produced examples, despite not using any human-produced data to train our approach.
+
+Future work might explore scaling pragmatic program synthesis further, to domains such as open-ended Python code generation, which have an even larger space of possible programs and input/output specifications, and where it is even more challenging to collect supervised pairs of programs and specifications. It also opens up the possibility of reasoning about informativity in multimodal specifications --- e.g. with natural language and examples \citep{ye-etal-2020-benchmarking}.
+
+

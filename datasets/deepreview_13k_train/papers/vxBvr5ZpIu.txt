@@ -1,0 +1,657 @@
+\title{Diffusion-PINN Sampler}
+
+\begin{abstract}
+Recent success of diffusion models has inspired a surge of interest in developing sampling techniques using reverse diffusion processes.
+However, accurately estimating the drift term in the reverse stochastic differential equation (SDE) solely from the unnormalized target density poses significant challenges, hindering existing methods from achieving state-of-the-art performance.
+In this paper, we introduce the \emph{Diffusion-PINN Sampler} (DPS), a novel diffusion-based sampling algorithm that estimates the drift term by solving the governing partial differential equation of the log-density of the underlying SDE marginals via physics-informed neural networks (PINN).
+We prove that the error of log-density approximation can be controlled by the PINN residual loss, enabling us to establish convergence guarantees of DPS.
+Experiments on a variety of sampling tasks demonstrate the effectiveness of our approach, particularly in accurately identifying mixing proportions when the target contains isolated components.
+  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{keywords}
+    posterior sampling, multi-modal sampling, mixing proportion identification, diffusion model, physics-informed neural network
+\end{keywords}
+\maketitle
+\begin{spacing}{1}
+    \tableofcontents
+\end{spacing}
+
+Sampling from unnormalized distributions is a fundamental yet challenging task encountered across various scientific disciplines such as Bayesian statistics, computational physics, chemistry, and biology \citep{liu2001,stoltz2010}.
+Markov chain Monte Carlo (MCMC) and variational inference (VI) have historically been the go-to methods for this problem. However, these approaches exhibit limitations when dealing with complex target distributions (e.g., distributions with multimodality or heavy tails).
+Recently, the success of diffusion models for generative modeling \citep{song2020score, ho2020denoising, pmlr-v139-nichol21a, VDM} have sparked considerable interest in tackling the sampling problem using the reverse diffusion processes that transport a given prior density to the target, governed by stochastic differential equations (SDE).
+
+In diffusion-based generative models, the score function in the drift term of the reverse SDE is learned based on score matching techniques \citep{scorematching, vincent2011connection} that require samples from the target data distribution.
+However, for sampling tasks, we only have access to an unnormalized density function $\pi$, making it challenging to estimate the score function for the reverse SDE.
+From a stochastic optimal control perspective \citep{pmlr-v99-tzen19a,NEURIPS2021_940392f5}, several VI methods that parameterize the drift term with neural network approximation have been proposed \citep{zhang2021path, berner2022optimal, vargas2023,vargas2023denoising}.
+Nevertheless, these approaches face challenges such as instability during training, the computational complexity associated with differentiating through SDE solvers, and mode collapse issues arising from training objectives based on reverse Kullback-Leibler (KL) divergences \citep{zhang2021path, vargas2023denoising}.
+On the other hand, \citet{huang2023reverse} proposed a scheme based on the connection between score matching and non-parametric posterior mean estimation.
+More specifically, they use MCMC estimation of the scores to potentially alleviate the numerical bias intrinsic in parametric estimation methods such as neural networks.
+However, this method also introduces noise in the estimates and requires repetitive posterior sampling in each time step of the reverse SDE.
+Overall, despite their potential, diffusion-based sampling methods have not yet achieved state-of-the-art performance.
+
+In addition to its connection with posterior mean estimation, the score function has also been shown to evolve according to a partial differential equation known as the \emph{score Fokker Planck equation} (score FPE) \citep{lai2023fp}.
+This discovery has led to a novel regularization technique for enhancing score function estimation in diffusion models \citep{lai2023fp,deveney2023closing}.
+In this paper, we adopt this strategy for diffusion-based sampling methods.
+While the score function can be recovered by solving the score FPE using the score of target distribution $\pi$ as the initial condition, we demonstrate that it may fail to identify correct mixing proportions when $\pi$ has isolated components, a common limitation of score-based methods \citep{wenliang2020, zhang2022towards}.
+To remedy this issue, we propose to solve the log-density FPE, a similar partial differential equation for the log-density function, using physics-informed neural networks (PINN) \citep{raissi2019physics, wang20222}.
+The estimated log-density function is then integrated into the reverse SDE, leading to a novel sampling algorithm termed \emph{Diffusion-PINN Sampler} (DPS).
+We prove that the error of log-density estimation can be controlled by the PINN residual loss, which allows us to ensure convergence guarantee of DPS based on established results for score-based generative models \citep{chen2023sampling, chen2023improved,benton2023linear}.
+Experiments on a variety of sampling tasks provide compelling numerical evidence for the superiority of our method compared to other baseline methods.
+
+
+
+\section{Related Works}
+
+Recently, several works have explored the combination of Physics-Informed Neural Networks (PINN) and sampling techniques. 
+For instance, \citet{mate2023learning, fanpath, tian2024liouville} address the continuity equation using PINN based on ODEs and achieve flow-based sampling through a linear interpolation (i.e., annealing) path between the target distribution and a simple prior, such as a Gaussian distribution.
+ 
+However, both approaches lack comprehensive numerical investigation and thorough theoretical analysis.
+In contrast, our work investigates a limitation of score-based Fokker-Planck equations (FPE) in identifying the mixing proportions of multi-modal distributions, introduces novel computational techniques for solving PDEs via PINN in the context of diffusion-based sampling, and provides the first complete theoretical analysis of the algorithm.
+
+
+\section{Background}
+
+\paragraph{Notations.}
+Throughout the paper, $\Omega\subset\bR^d$ denotes a bounded and closed domain. 
+For simplicity, we do not distinguish a probabilistic measure from its density function.
+We use $\bmx=(x_1,\cdots, x_d)^{\prime}$ to denote a vector in $\bR^d$ and $\|\bmx\|=\sqrt{x_1^2+\cdots x_d^2}$ stands for the $L^2$-norm.
+Let $\nu$ denote a probability measure on $\bR^d$, for any $\bmf:\bR^d\to\bR^m$, we denote $\|\bmf(\cdot)\|^2_{L^2(\Omega;\nu)}:=\int_{\Omega}\|\bmf(\bmx)\|^2\rmd\nu(\bmx)$.
+For any $\bmf:\bR^d\times [0, T]\to\bR^m$ , we define $\|\bmf_t(\cdot)\|_{L^2(\Omega;\nu)}^2:=\int_{\Omega}\|\bmf_t(\bmx)\|^2\rmd\nu(\bmx)$ as a function of $t\in [0, T]$.
+For any $\bm{F}=(F_1,\cdots, F_d)^{\prime}:\bR^d\to\bR^d$, we denote the divergence of $\bm{F}$ by $\diver\bm{F}:=\sum_{i=1}^d\partial_{x_i}F_i$.
+For any $F:\bR^d\to\bR$, we denote the Laplacian of $F$ by $\Lap F:=\sum_{i=1}^d\partial^2_{x_i}F$.
+
+
+\paragraph{Diffusion models.}
+In diffusion models, noise is progressively added to the training samples via a forward stochastic process described by the following stochastic differential equation (SDE)
+\begin{equation}\label{eq: diffusion forward}
+    \rmd\bmx_t = \bmf(\bmx_t,t)\rmd t + g(t)\rmd\bmB_t,\quad \bmx_0\sim p_0(\cdot),\quad 0\les t\les T,
+\end{equation}
+where $p_0(\cdot)$ is the data distribution, $\bmB_t$ is a standard Brownian motion, and $\bmf(\bmx_t,t)$ and $g(t)$ are the drift and diffusion coefficients respectively. 
+The derivatives of the log-density of the forward marginals, i.e., \emph{scores}, are learned via score matching techniques \citep{vincent2011connection, song2020score} and new samples from the data distribution can be obtained by simulating the following reverse process
+\begin{equation}\label{eq: diffusion backward}
+\rmd\bmx_t = \left[\bmf(\bmx_t,t) - g^2(t)\nabla_{\bmx_t}\log p_t(\bmx_t)\right]\rmd t + g(t)\rmd\Bar{\bmB}_t,\quad \bmx_T\sim p_T(\cdot),
+\end{equation}
+where $p_t(\cdot)$ is the probability density of $\bmx_t$ and $\Bar{\bmB}_t$ is a standard Brownian motion from $T$ to $0$.
+
+\paragraph{Physics-informed neural networks (PINN).}
+PINN is a deep learning method for solving partial differential equations (PDEs) \citep{raissi2019physics}.
+Consider the following general form of PDE
+\begin{subequations}
+\arraycolsep=1.8pt
+\def\arraystretch{1.5}
+    \label{eq: pinn pdes}
+    \begin{align}
+        \mathcal{L}u(\bmx) = \varphi(\bmx), \quad & \bmx\in\Omega\subseteq\mathbb{R}^d,\\
+        \mathcal{B}u(\bmx) = \psi(\bmx),\quad & \bmx\in\partial\Omega,
+    \end{align}
+\end{subequations}
+where $\mathcal{L}$ and $\mathcal{B}$ are the differential operators on domain $\Omega$ and boundary $\partial\Omega$, respectively.
+PINN seeks an approximate solution using deep model $u_\theta(\bmx)$ by minimizing the $L^2$ PINN residual losses
+\begin{subequations}
+\arraycolsep=1.8pt
+\def\arraystretch{1.5}
+\label{eq: pinn loss}
+\begin{align}
+    \ell_{\Omega}(u_\theta)&:=\left\|\mathcal{L}u_\theta(\bmx)-\varphi(\bmx)\right\|^2_{L^2(\Omega;\nu)},\label{eq: pinn loss a}\\
+    \ell_{\partial\Omega}(u_\theta)&:=\left\|\mathcal{B}u_\theta(\bmx) - \psi(\bmx)\right\|^2_{L^2(\Omega;\nu)}, \label{eq: pinn loss b}
+\end{align}
+\end{subequations}
+where $\nu$ is a probability measure for collocation points generation, often taken to be the uniform distribution on $\Omega$.
+The two terms $\ell_{\Omega}(u)$ and $\ell_{\partial\Omega}(u)$ in Eq. \eqref{eq: pinn loss} reflect the approximation error on $\Omega$ and $\partial\Omega$ respectively.
+In practice, the losses in Eq. \eqref{eq: pinn loss} can be optimized by gradient-based methods with Monte Carlo gradient estimation.
+
+\paragraph{Fokker Planck equation.}
+The evolution of the density $p_t(\bmx)$ associated with the forward SDE \eqref{eq: diffusion forward} is governed by the Fokker Planck equation (FPE) \citep{oksendal2003stochastic}
+\begin{equation}\label{eq: fokker planck equaiton}
+\pt p_t(\bmx)= \underbrace{\frac{1}{2}g^2(t)\Lap p_t(\bmx) - \diver\left[\bmf(\bmx,t)p_t(\bmx)\right]}_{:= \mathcal{L}_{\textrm{FPE}}p_t(\bmx)}.
+\end{equation}
+
+\begin{theorem}[Log-density FPE and score FPE; Proposition 3.1 in \citet{lai2023fp}]\label{thm: fp}
+ Assume the density $p_t(\bmx)$ is sufficiently smooth on $\mathbb{R}^d\times[0,T]$. Then for all $(\bmx, t) \in \mathbb{R}^d\times[0,T]$, the log-density $u_t(\bmx):=\log p_t(\bmx)$ satisfies the PDE
+\begin{equation}\label{eq:log-fp}
+\partial_t u_t(\bmx) = \underbrace{
+     \frac{1}{2}g^2(t) \Lap u_t(\bmx) 
+    +\frac{1}{2}g^2(t)\left\|\nx u_t(\bmx)\right\|^2
+    -\bmf(\bmx, t)\cdot \nx u_t(\bmx) 
+    - \diver\bmf(\bmx, t)}_{:=\mathcal{L}_{\emph{\textrm{L-FPE}}}u_t(\bmx)},
+\end{equation}
+and the score $\bms_t(\bmx):=\nabla_{\bmx}\log p_t(\bmx)$ satisfies the PDE
+\begin{equation}\label{eq:score-fp}
+\partial_t \bms_t(\bmx) = \underbrace{\nabla_{\bmx}\left[
+\frac{1}{2}g^2(t) \diver\bms_t(\bmx) 
++\frac{1}{2}g^2(t)\left\|\bms_t(\bmx)\right\|^2
+-\bmf(\bmx, t)\cdot \bms_t(\bmx)
+- \nabla\cdot \bmf(\bmx, t) \right]}_{:=\mathcal{L}_{\emph{\textrm{S-FPE}}}\bms_t(\bmx)}.
+\end{equation}
+\end{theorem}
+
+
+
+
+\section{Diffusion-PINN Sampler}
+
+\label{section: diffusion pinn sampler}
+We consider sampling from a probability density $\pi(\bmx)=\mu(\bmx)/Z$ with $\bmx\in\bR^d$, where $\mu(\bmx)$ has an analytical form and $Z=\int_{\mathbb{R}^d}\mu(\bmx)\mathrm{d}\bmx$ is the intractable normalizing constant. 
+Throughout, we only consider the forward process \eqref{eq: diffusion forward} with an explicit conditional density of $\bmx_t|\bmx_0\sim \pi_{t| 0}(\cdot| \bmx_0)$. 
+We denote by $\pi_t$ the marginal density of $\bmx_t$ associated with \eqref{eq: diffusion forward} from $\bmx_0\sim\pi_0=\pi$. 
+
+Inspired by diffusion models, sampling can be performed by simulating a reverse process \eqref{eq: diffusion sampling} targeting at $\pi(\bmx)$, given an accurate estimate of the perturbed scores $\bms_{\theta}(\bmx, t)\approx\nx\log\pi_t(\bmx)$,
+\begin{equation}\label{eq: diffusion sampling}
+\rmd\bmx_t = \left[\bmf(\bmx_t,t) - g^2(t)\bms_{\theta}(\bmx_t, t)\right]\rmd t + g(t)\rmd\Bar{\bmB}_t,\quad \bmx_T\sim \pi_{\textrm{prior}},
+\end{equation}
+where $\pi_{\textrm{prior}}$ denotes the stationary distribution of the forward process \eqref{eq: diffusion forward} and $T$ is large enough such that $\pi_T\approx \pi_{\textrm{prior}}$.
+However, unlike generative models, sampling tasks lack training data from $\pi$, which hinders the application of denoising score matching for perturbed score estimation.
+In this section, we propose to solve the log-density FPE \eqref{eq:log-fp} with PINN to estimate the perturbed scores.
+While the score FPE can also be used for this purpose, we find that it may fail to learn the mixing proportions properly when the target contains isolated modes.
+
+
+\subsection{Failure of Score FPE}
+\label{subsection: failure of score fp}
+
+Consider the case where the target is a mixture of Gaussians (MoG) with two distant modes.
+The following example shows that, for two MoGs with the same modes but different weights, the Fisher divergence\footnote{The Fisher divergence is defined as $F(\nu_1,\nu_2):=\bE_{\bmx\sim\nu_1}\left[\left\|\nx\log\nu_1(\bmx)-\nx\log\nu_2(\bmx)\right\|^2\right]$ for two probability measures $\nu_1$ and $\nu_2$.} between them can be arbitrarily small but the KL divergence between them remains large when the two modes are sufficiently separated.
+See Figure \ref{fig:KL_density_score} (left) for an illustration of this phenomenon.
+
+\begin{example}\label{example: mog failure}
+For any $\tau>0$, there exists $M_{\tau}(d)>0$ such that the following holds. For every $\bma\in\bR^d$ satisfied $\|\bma\|\ges M_{\tau}(d)$, $w_1, w_2, \tilde{w}_1, \tilde{w}_2\ges 0.1$, $w_1+w_2=1$, and $\tilde{w}_1+\tilde{w}_2=1$, MoG $\pi^M=w_1\cN(\bma,I_d)+w_2\cN(-\bma,I_d)$ and $\tilde{\pi}^M=\tilde{w}_1\cN(\bma,I_d)+\tilde{w}_2\cN(-\bma,I_d)$ satisfy
+\begin{equation}\label{eq: mog failure ineq}
+\operatorname{KL}(\pi^M\|\tilde{\pi}^M)\ges w_1\log\frac{w_1}{\tilde{w}_1} + w_2\log\frac{w_2}{
+\tilde{w}_2} - \tau, \text{ but } F(\pi^M,\tilde{\pi}^M) < \tau,
+\end{equation}
+where $F(\pi^M,\tilde{\pi}^M)$ denotes the Fisher divergence between $\pi^M$ and $\tilde{\pi}^M$.
+\end{example}
+
+
+\subsubsection{Solving Score FPE Struggles to Learn the Weights}
+Let $\pi^M,\tilde{\pi}^M$ be the MoGs in Example \ref{example: mog failure}. For any $t\in [0, T]$, $\pi^M_t$ denotes the marginal distribution of $\bmx_t$ associated with the forward process \eqref{eq: diffusion forward} from $\bmx_0\sim\pi^M$. We denote $\bms_t^M(\bmx):=\nx\log\pi^M_t(\bmx)$ which is the solution to \eqref{eq:score-fp} with $\bms_0^M(\bmx)=\nx\log\pi^M(\bmx)$. 
+Similarly, we define $\tilde{\pi}^M_t$ and $\tilde{\bms}_t^M(\bmx)$.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{pictures/KL_score_density.pdf}
+    \caption{\textbf{Left}: KL divergence, Fisher divergence, and log-density error between $\pi^M$ and $\tilde{\pi}^M$ as functions of $w_1$, where $\tilde{w}_1=0.2$ and $\bm{a}=(-5,-5)'$. 
+    \textbf{Middle/Right}: The evolution of log-density error/Fisher divergence along the forward process respectively. The forward process achieves standard Gaussian at $t=1$.}
+    \label{fig:KL_density_score}
+
+\end{figure}
+
+Consider solving score-FPE \eqref{eq:score-fp} using the following PINN residual loss
+\begin{equation}\label{eq: score pinn residual}
+\ell_{\textrm{S-res}}\left(\bms;\bmx, t\right):= 
+\left\|
+\pt\bms_t(\bmx) -
+\mathcal{L}_{\textrm{S-FPE}}\bms_t(\bmx) 
+\right\|^2,
+\end{equation}
+Though $\pi^M$ and $\tilde{\pi}^M$ are equipped with different weights, their scores both satisfy the PDE \eqref{eq:score-fp} such that $\ell_{\textrm{S-res}}(\bms^M;\bmx, t)=\ell_{\textrm{S-res}}(\tilde{\bms}^M;\bmx, t)=0$ for any $(\bmx, t)\in\bR^d\times [0, T]$. 
+The PINN approach, therefore, can only distinguish $\pi^M$ and $\tilde{\pi}^M$ through the initial condition. 
+However, Example \ref{example: mog failure} shows that the difference between $\bms_0^M(\bmx)$ and $\tilde{\bms}_0^M(\bmx)$ can be arbitrarily small, indicating the difficulty of correctly identifying the weights by solving the score FPE.
+Figure \ref{fig:KL_density_score} (right) shows that the perturbed score can not tell the difference of weights until the every end of the forward process.
+On the other hand, it is noticeable that the perturbed log-density distinguishes the weights well throughout the forward process (Figure \ref{fig:KL_density_score}, middle).
+This suggests us to solve log-density FPE and compute the scores by taking the gradient of the approximated log-density.
+\subsection{Solving Log-density FPE}
+\label{subsection: solving log-density FPE}
+To estimate the perturbed scores, we consider solving log-density FPE with initial condition:
+\begin{subequations}
+\arraycolsep=1.8pt
+\def\arraystretch{1.5}
+\label{eq: cauchy problem}
+\begin{align}
+    \pt u_t(\bmx) &= 
+\mathcal{L}_{\textrm{L-FPE}}u_t(\bmx), \label{eq: solving cauchy problem 1}\\
+    u_0(\bmx)&=\log\mu(\bmx), \label{eq: solving cauchy problem 2}
+\end{align}
+\end{subequations}
+where the exact solution is $u^{*}_t(\bmx)=\log\mu_t(\bmx):=\log\pi_t(\bmx)+\log Z$ (which induces the same score as $\nx u^{*}_t(\bmx)=\nx\log\pi_t(\bmx)$).
+In what follows, we describe how to find an approximation $ u_\theta(\bmx, t)$ to $u^*_t(\bmx)$ within the PINN framework.
+\paragraph{Target-informed parameterization.}
+To incorporate the initial condition \eqref{eq: solving cauchy problem 2}, we use the following parameterization for the log-density function
+\begin{equation}\label{eq: parameterized solution}
+     u_\theta(\bmx, t)=\frac{T-t}{T}\log \mu(\bmx) + \frac{t}{T}\times \mathrm{NN}_{\theta}(\bmx, t),\quad \forall (\bmx, t)\in \mathbb{R}^d\times [0, T],
+\end{equation}
+where $\mathrm{NN}_{\theta}(\bmx, t): \mathbb{R}^d\times [0, T]\to \mathbb{R}$ is a deep neural network. 
+This parameterization satisfies the initial condition \eqref{eq: solving cauchy problem 2}, thus we only need to consider the PINN residual loss induced by \eqref{eq: solving cauchy problem 1}.
+Similar strategy is also used in consistency models \citep{pmlr-v202-song23a}. 
+\paragraph{Underlying distribution for collocation points.} When training PINN, it is very important to collect proper collocation points $(\bmx_t,t)\in\bR^d\times [0, T]$ where $\bmx_t\sim\nu_t$. We expect samples from $\nu_t$ to cover the high-density domain of $\pi_t$ where PINN can provide a good approximation.
+To achieve this, we first generate samples $\bmx_0\sim\nu_0$ by running a short chain of Langevin Monte Carlo (LMC) for $\pi$ so that $\nu_0$ covers the high density domain of $\pi$.
+Given $\bmx_0\sim\nu_0$, we obtain $\bmx_t\sim\nu_t$ by sampling from the conditional distribution of the forward process given $\bmx_0$, namely, $\bmx_t|\bmx_0\sim \pi_{t| 0}(\cdot| \bmx_0)$.
+
+\paragraph{Training objective.} 
+One useful property of the forward process \eqref{eq: diffusion forward} is that $\bmx_T\sim\pi_T\approx \pi_{\textrm{prior}}$ when $T$ is large. 
+In practice, we may use this property to further regularize the PINN residual loss, leading to the following training objective:
+\begin{equation}\label{eq: log-fp objective}
+\begin{aligned}
+L_{\textrm{train}}(u_\theta):= &\ 
+\bE_{t\sim\mathcal{U}[0, T]}\bE_{\bmx_t\sim \nu_t}\left[
+\beta^2(t)\cdot \left\|\pt  u_\theta(\bmx_t, t) - \mathcal{L}_{\textrm{L-FPE}}  u_\theta(\bmx_t, t)\right\|^2
+\right]\\
+&\ \quad\quad
++\lambda \cdot
+\bE_{\bm{z}\sim \pi_{\textrm{prior}}}
+\left[\ell_{\textrm{reg}}(u_\theta; T, \bm{z})\right],
+\end{aligned}
+\end{equation}
+where $\ell_{\textrm{reg}}(u_\theta; T, \bm{z}):=\left\|\nabla_{\bmz} u_\theta(\bm{z},T)-\nabla_{\bmz} \log\pi_{\textrm{prior}}(\bm{z})\right\|^2$ denotes the regularization term, $\beta(t)$ is a weight function and $\lambda$ is a regularization coefficient.
+We seek a good approximation $ u_\theta(\bmx, t)$ by minimizing \eqref{eq: log-fp objective} via stochastic optimization methods where the stochastic gradient is computed by Monte Carlo estimation.
+Our algorithm is summarized in Algorithm \ref{algorithm: PINN}.
+
+Once $ u_\theta(\bmx, t)$ is learned, the induced score approximation is then substituted into the reverse process \eqref{eq: diffusion sampling}, resulting in a new variant of diffusion-based sampling method that we call \emph{Diffusion-PINN Sampler} (DPS).
+\begin{algorithm}[t!]
+    \caption{: Solving Log-density FPE via PINN}
+    \label{algorithm: PINN}
+    \begin{algorithmic}[1]
+        \REQUIRE Unnormalized density $\mu(\bmx)$, the number of training iterations $N$, the number of samples used to estimate the training objective \eqref{eq: log-fp objective} $M$, the running time of the forward process \eqref{eq: diffusion forward} $T$.
+        \STATE Initialize the parameterized solution $ u_\theta(\bmx, t)$ using target-informed parameterization \eqref{eq: parameterized solution}.
+        \FOR{$n=1,\cdots, N$}
+        \STATE Sample i.i.d. $t_i\sim \mathcal{U}[0, T], 1\les i\les M$.
+        \STATE Sample i.i.d. $\bmx_i^0\sim \nu_0$ and $\bm{z}_i\sim \pi_{\textrm{prior}}, 1\les i\les M$.
+        \STATE Sample collocation points by the forward process \eqref{eq: diffusion forward}: 
+        $\bmx^{t_i}_{i}\sim \pi_{t_i| 0}(\cdot|\bmx_i^0), 1\les i\les M$.
+        \STATE Compute the training objective (\ref{eq: log-fp objective}) by Monte Carlo estimation 
+        \begin{equation}\label{eq: monte-carlo estiamtion of objective in algorithm}
+            L_{\textrm{MCMC}}(u_\theta):= 
+            \frac{1}{M}\sum_{i=1}^M \beta^2(t_i)\cdot \left\|\pt u_\theta(x_i^{t_i},t_i) - 
+            \mathcal{L}_{\textrm{L-FPE}} u_\theta(x_i^{t_i},t_i)\right\|^2  + 
+            \frac{\lambda}{M}\sum_{i=1}^M 
+            \ell_{\textrm{reg}}(u_\theta; T, \bm{z}_i).
+        \end{equation}
+        \STATE Gradient-based optimization: $\theta\leftarrow \texttt{Optimizer}\left(\theta, \nabla_{\theta}L_{\textrm{MCMC}}(u_\theta)\right)$.
+        \ENDFOR
+        \RETURN Parameterized solution $ u_\theta(\bmx, t)$.
+    \end{algorithmic}
+\end{algorithm}
+
+\paragraph{Hutchinson's trick for the gradient of the PINN residual.}
+Hutchinson’s trace estimator provides a stochastic method for estimating the trace of any square matrix and is commonly used in Laplacian estimation. 
+However, directly using Hutchinson’s trick here can result in biased gradient estimation. 
+To address this issue, we propose a novel variant of Hutchinson’s trick that allows unbiased gradient estimation.
+Recall that the PINN residual can be decomposed as 
+\[
+\pt u_\theta - \cL_{\textrm{L-FPE}}u_\theta:=\underbrace{\pt u_\theta + \bmf\cdot\nx u_\theta + \nabla\cdot \bmf -\frac{g^2(t)}{2}\|\nx u_\theta\|^2}_{:=\cL_{\textrm{I}} u_\theta} - \frac{g^2(t)}{2}\Delta u_\theta.
+\]
+Using this decomposition, the PINN residual loss $\|\pt u_\theta - \cL_{\textrm{L-FPE}} u_\theta\|^2$ has the following gradient,
+\[
+\begin{aligned}
+    & \nabla_\theta \left\|\pt u_\theta - \cL_{\textrm{L-FPE}} u_\theta\right\|^2
+ = 2\left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\Delta u_\theta\right)\nabla_\theta\left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\Delta u_\theta\right) \\
+ = & 2\left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\cdot\bE_{v_1}\left[v_1^\top \nx\left(v_1^\top \nx u_\theta\right)\right]\right)\nabla_\theta \left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\cdot\bE_{v_2}\left[v_2^\top \nx\left(v_2^\top \nx u_\theta\right)\right]\right) \\
+ = & \bE_{v_1,v_2}\left[2\left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\cdot v_1^\top \nx\left(v_1^\top \nx u_\theta\right)\right)\nabla_\theta \left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\cdot v_2^\top \nx\left(v_2^\top \nx u_\theta\right)\right)\right],
+\end{aligned}
+\]
+where $v_1$ and $v_2$ are independent and satisfy $\mathbb{E}_{v_1}[v_1v_1^\top]=\mathbb{E}_{v_2}[v_2v_2^\top]=\boldsymbol{I}_d$.
+Therefore, the following objective yields an unbiased gradient estimate of the PINN residual loss,
+\[
+\mathbb{E}_{v_1,v_2}\left[\textrm{Detach}\left(2\left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\cdot v_1^\top \nx\left(v_1^\top \nx u_\theta\right)\right)\right)\left(\cL_{\textrm{I}} u_\theta-\frac{g^2(t)}{2}\cdot v_2^\top \nx\left(v_2^\top \nx u_\theta\right)\right)\right].
+\]
+
+
+\section{Theoretical Guarantees}
+
+
+\paragraph{Notations.}
+Let us denote $e_t(\bmx):= u_\theta(\bmx, t)-u_t^*(\bmx)$ and $r_t(\bmx):=\pt u_\theta(\bmx, t)-\mathcal{L}_{\textrm{L-FPE}} u_\theta(\bmx, t)$. 
+For any $C\in\bR$ and $t\in[0, T]$, we define the weighted PINN objective on $\Omega$ as 
+\begin{equation}\label{eq: def of PINN residual objective}
+L_{\textrm{PINN}}(t;C):=\int_0^t e^{C(t-s)} \|r_s(\cdot)\|^2_{L^2(\Omega;\nu_s)}\rmd s,
+\end{equation}
+where $\{\nu_t\}_{t=0}^T$ denotes the underlying distribution for collocation points introduced in Section \ref{subsection: solving log-density FPE} which satisfies the FPE $\pt\nu_t(\bmx)=\mathcal{L}_{\textrm{FPE}}\nu_t(\bmx)$.
+
+\subsection{Approximation Error of PINN for Log-density FPE}
+\label{subsection: convergence PINN analysis}
+In this section, we provide an upper bound on the approximation error of PINN for the log-density FPE \eqref{eq:log-fp} on a constrained domain $\Omega$. 
+Namely, we control $\|e_t(\cdot)\|^2_{L^2(\Omega;\nu_t)}$ and $\|\nx e_t(\cdot)\|^2_{L^2(\Omega;\nu_t)}$ by the residual loss $\|r_t(\cdot)\|^2_{L^2(\Omega;\nu_t)}$ and the weighted PINN objective \eqref{eq: def of PINN residual objective}. 
+We make the following assumptions.
+\begin{assumption}
+\label{PINN assumption: boundary identity}
+    $u^*$ and $u_\theta$ are the same on the boundary, i.e., $u^*_t(\bmx)=u_\theta(\bmx,t)$ on $\partial\Omega\times [0, T]$.
+\end{assumption}
+\begin{assumption}
+\label{PINN assumption: diffusion bound}
+    For any $t\in \left[0, T\right]$, $g^2(t)$ is bounded: $m_1\les g^2(t)\les M_1$ for some $m_1, M_1>0$.
+\end{assumption}
+\begin{assumption}
+\label{PINN assumption: continuous assumption}
+$\log \nu_t(\bmx), u^*_t(\bmx),  u_\theta(\bmx, t)\in \cC^2(\Omega\times [0,T])$.
+\end{assumption}
+
+Assumption \ref{PINN assumption: boundary identity} is necessary for us to ensure the uniqueness of the solution to \eqref{eq:log-fp} on $\Omega$, which is also considered in \citet{deveney2023closing,wang20222}.
+Assumption \ref{PINN assumption: diffusion bound}, \ref{PINN assumption: continuous assumption} are also considered in \citet{deveney2023closing}.
+Based on Assumption \ref{PINN assumption: continuous assumption}, there exists $\Bv_0, \Bu_0, \hB_0, \Bv_1, \Bu_1, \hB_1\in\bR_+$ and $\Bv_2, \Bu_2, \hB_2\in \bR$ depended on $\Omega$ such that for any $(\bmx, t)\in\Omega\times [0, T]$, we have
+\[\begin{aligned}
+   & \vert\pt \log \nu_t(\bmx)\vert\les \Bv_0, \quad  
+   \vert\pt u^*_t(\bmx)\vert \les \Bu_0, \quad
+   \vert \pt  u_\theta(\bmx, t)\vert \les \hB_0, \\
+   & \|\nx\log \nu_t(\bmx)\|^2\les \Bv_1, \quad
+   \|\nx u^*_t(\bmx)\|^2\les \Bu_1, \quad
+   \|\nx  u_\theta(\bmx, t)\|^2\les \hB_1, \\
+   & \Lap\log \nu_t(\bmx)\les \Bv_2, \quad
+   \Lap u^*_t(\bmx)\ges \Bu_2, \quad 
+   \Lap  u_\theta(\bmx, t)\ges \hB_2.
+\end{aligned}\]
+In practice, using weights clipping strategy as in \citet{pmlr-v70-arjovsky17a}, we can control the regularity of neural network approximation $ u_\theta(\bmx, t)$, thus bound the constants $\hB_0, \hB_1,\hB_2$. 
+We summarize our main results in the following theorem.
+
+\begin{theorem}
+\label{thm: PINN analysis}
+Suppose that Assumption \ref{PINN assumption: boundary identity}, \ref{PINN assumption: diffusion bound}, and \ref{PINN assumption: continuous assumption} hold. 
+We further assume that $u_\theta(\bmx,0)=u^*_0(\bmx)$\footnote{This is a reasonable assumption due to the target-informed parameterization introduced in Section \ref{subsection: solving log-density FPE}.} for any $\bmx\in\Omega$.
+Then for any positive constant $\vareps>0$, the following holds for any $0\les t\les T$,
+\begin{equation}\label{eq: thm PINN analysis e 1 in context}
+\|e_t(\cdot)\|^2_{L^2(\Omega;\nu_t)}\les \vareps L_{\emph{\textrm{PINN}}}(t;C_1(\vareps)).
+\end{equation}
+Moreover, for any $0\les t\les T$,
+\begin{equation}\label{eq: thm PINN analysis nabla e 1 in context}
+m_1\|\nx e_t(\cdot)\|^2_{L^2(\Omega;\nu_t)}\les
+\vareps\|r_t(\cdot)\|^2_{L^2(\Omega;\nu_t)}
++C_3(\vareps)L_{\emph{\textrm{PINN}}}(t;C_1(\vareps)) 
++C_2\sqrt{\vareps L_{\emph{\textrm{PINN}}}(t;C_1(\vareps))}.
+\end{equation}
+where $C_2:=2\sqrt{2}(\hB_0^2+B_0^{*2})^{1/2}$, $C_3(\vareps):=\vareps(C_1(\vareps)+\Bv_0)$, and $C_1(\vareps)$ is a constant depended on $\Bv_1$, $\Bu_1$, $\hB_1$, $\Bv_2$, $\Bu_2$, $\hB_2$ and $m_1$, $M_1$.
+\end{theorem}
+\begin{remark}
+The results of \citet{wang20222} show that the 
+$L^2$-error cannot be bounded by the PINN residual with universal constants independent of the approximate solution.
+Therefore, some natural continuity assumptions (Assumption \ref{PINN assumption: continuous assumption}) about the approximate solution are necessary to control the $L^2$-error by the PINN residual. 
+It is noted that this continuity assumption can be satisfied by regularizing the neural network via weight clipping \citep{pmlr-v70-arjovsky17a}, and would not sacrifice much approximation accuracy as the true solution is initialized as the log-density of the target and follows the diffusion process (e.g., the OU process) that would only become smoother as time evolves. 
+Moreover, our upper bound of $L^2$-error depends on continuity constants rather than an universal bound. 
+In this regard, our analysis aligns with the results of \citet{wang20222}, but with a more flexible bound based on some natural continuity assumption in the context of diffusion-based sampling.
+\end{remark}
+
+
+\subsection{Convergence of Diffusion-PINN Sampler}
+\label{subsection: convergence Sampler analysis}
+In this section, we present our convergence analysis of DPS based on Theorem \ref{thm: PINN analysis} and the analysis of score-based generative modeling in \cite{chen2023improved}. 
+Following \citet{chen2023sampling,chen2023improved}, we focus on the forward process with $\bmf(\bmx,t)=-\frac{1}{2}\bmx$ and $g(t)\equiv 1$, which is driven by
+\begin{equation}\label{eq: special forward process}
+\rmd\bmx_t=-\frac{1}{2}\bmx_t\rmd t+ \rmd\bmB_t, \quad \bmx_0\sim \pi, \quad 0\les t\les T.
+\end{equation}
+In practice, we use a discrete-time approximation for the reverse process. 
+Let $0=t_0 < \cdots < t_N=T$ be the discretization points and $h_k:=t_k-t_{k-1}$ be the step size for $1\les k\les N$. 
+Let $t_k^{\prime}:=T-t_{N-k}$ for $0\les k\les N$ be the corresponding discretization points in the reverse SDE. 
+In our analysis, we consider the exponential integrator scheme which leads to the following sampling dynamics for $0\les k\les N-1$,
+\begin{equation}\label{eq: special reverse process with discretization}
+    \rmd \widehat{\bm{y}}_t = \left(\frac{1}{2}\widehat{\bm{y}}_t+\bms_{T-t_k^{\prime}}(\widehat{\bm{y}}_{t_k^{\prime}})\right)\rmd t + \rmd\bmB_t, \quad \widehat{\bm{y}}_0\sim \mathcal{N}(\bm{0},\bm{I}_d),\quad t\in [t_k^{\prime}, t_{k+1}^{\prime}],
+\end{equation}
+where $\bms_t(\bmx)\approx\nx\log\pi_t(\bmx)$ denotes the score approximation.
+Let $\widehat{\pi}_T$ denotes the distribution of $\widehat{\bm{y}}_T$ from \eqref{eq: special reverse process with discretization}. 
+We summarize all the assumptions we need as follows.
+\begin{assumption}\label{Sampler assumption: target distr}
+The target distribution admits a density $\pi\in\mathcal{C}^2(\mathbb{R}^d)$ where $\nx\log\pi(\bmx)$ is $K$-Lipschitz and has the finite second moment, i.e., $M_2:=\mathbb{E}_{\pi}\left[\|\bmx\|^{2}\right]<\infty$.
+\end{assumption}
+\begin{assumption}\label{Sampler assumption: bounded region}
+For any $\delta>0$, there exists bounded $\Omega$ such that $\int_{\Omega^c}\pi_t(\bmx)\|\nx\log \pi_t(\bmx)\|^2\rmd\bmx\les\delta$ for any $t\in[0, T]$.
+\end{assumption}
+
+\begin{assumption}\label{Sampler assumption: base target ratio}
+For any $(\bmx, t)\in \Omega\times [0, T]$, there exists $R_t\ges 0$ depended on $t$, such that $\frac{\pi_t(\bmx)}{\nu_t(\bmx)}\les R_t$.
+\end{assumption}
+
+Theorem \ref{thm: Diffusion PINN Sampler analysis} summarizes our main theoretical results of DPS.
+
+\begin{theorem}\label{thm: Diffusion PINN Sampler analysis}
+Suppose that $T\ges 1$, $K\ges 2$, and Assumptions \ref{PINN assumption: boundary identity}-\ref{Sampler assumption: base target ratio} hold. 
+For any $\delta>0$, let $\Omega$ be chosen as in Assumption \ref{Sampler assumption: bounded region}.
+For any positive constant $\vareps>0$, we further assume that $ u_\theta(\bmx, t)$ satisfies
+\begin{equation}\label{eq: Sampler analysis PINN loss condition}
+\vareps\sum_{k=1}^N h_kR_{t_k}\|r_{t_k}(\cdot)\|^2_{L^2(\Omega;\nu_{t_k})}\les\delta_1
+\quad{\textrm{and}}
+\quad\vareps\sum_{k=1}^N h_kR_{t_k}L_{\emph{\textrm{PINN}}}(t_k;C_1(\vareps))\les \delta_2.
+\end{equation} 
+Then there is a universal constant $\alpha\ges 2$ such that, using step size
+$h_k=h\min\{\max\{t_k,1/(4K)\}, 1\}$, $0<h\les 1/(\alpha d)$, and $\bms_t(\bmx)=\nx u_\theta(\bmx, t)\cdot\bbmone\{\bmx\in\Omega\}$ in \eqref{eq: special reverse process with discretization}, we have the following upper bound on the KL divergence between the target and the approximate distribution
+\begin{equation}\label{eq: main results Diffusion-PINN sampler 1}
+\operatorname{KL}(\pi\|\widehat{\pi}_T)\lesssim 
+ (d+M_2)\cdot e^{-T} 
+ + d^2h(\log K+T) 
+ + T\delta 
+ + \delta_1 
+ + C_5(\vareps)\delta_2
+ + C_2\sqrt{\sum_{k=1}^Nh_kR_{t_k}\delta_2},
+\end{equation}
+where $C_5(\vareps):=C_1(\vareps)+\Bv_0$, $C_2$ and $C_1(\vareps)$ are defined in Theorem \ref{thm: PINN analysis}.
+\end{theorem}
+
+\subsection{Theoretical Comparison between Different Sampling Methods for Collocation Points}
+
+In practice, we typically lack prior knowledge of the high-probability regions of the diffusion path starting from the target distribution. As a result, specifying a sufficiently large support for uniform sampling of collocation points, becomes challenging and inefficient, especially in high-dimensional settings.
+In contrast, we employ a more sophisticated strategy for generating collocation points that integrates Langevin Monte Carlo (LMC) with the forward pass (see Section \ref{subsection: solving log-density FPE} for details). 
+In this section, we theoretically demonstrate our strategy for collocation points generation has a faster convergence for DPS.
+
+Similar to Theorem \ref{thm: PINN analysis} and \ref{thm: Diffusion PINN Sampler analysis}, we can establish theoretical guarantees for uniformly sampled collocation points. 
+However, these guarantees differ from those in Theorem \ref{thm: PINN analysis} and \ref{thm: Diffusion PINN Sampler analysis}, since the distribution of uniformly sampled collocation points does not depend on $t$ and does not satisfy the corresponding FPE.
+This distinction necessitates a slightly different analysis, requiring an additional assumption compared to the previous analyses (see more details in Section \ref{subsubsect: approximation error extended}).
+\subsubsection{Approximation Error of PINN for Log-density FPE with Uniformly Sampled Collocation Points}
+\label{subsubsect: approximation error extended}
+In this section, we control the approximation error of PINN for the log-density FPE \eqref{eq:log-fp} on a constrained domain $\Omega$ with uniformly sampled collocation points $\nu_t\sim{\rm Unif}(\Omega)$.
+First, we redefine the weighted PINN objective on $\Omega$ as follows and state an additional assumption for our analysis in Assumption \ref{assump:comparsion-add_uniform},
+\[L_{\textrm{PINN}}^{\textrm{Unif}}(t;C):=\int_0^t e^{C(t-s)} \left\|r_s(\cdot)\right\|^2_{L^2(\Omega)}\rd s.\]
+\begin{assumption}\label{assump:comparsion-add_uniform}
+    For any $(\bmx, t)\in \Omega\times [0, T]$, $\nabla\cdot \bmf(\bmx,t)\les \mathrm{m}_2$ for some $\mathrm{m}_2\in\bR$.
+\end{assumption}
+\begin{theorem}
+\label{thm: extended PINN analysis for uniform sampling}
+Suppose that Assumption \ref{PINN assumption: boundary identity}, \ref{PINN assumption: diffusion bound}, \ref{PINN assumption: continuous assumption} and \ref{assump:comparsion-add_uniform} hold.
+We further assume that $u_\theta(\bmx,0)=u^*_0(\bmx)$ for any $\bmx\in\Omega$. 
+Then for any positive constant $\eps>0$, the following holds for any $t\in[0, T]$,
+\begin{equation}\label{eq: Unif thm PINN analysis e 1}
+    \|e_t(\cdot)\|^2_{L^2(\Omega)}\les\eps L_{\emph{\textrm{PINN}}}^{\emph{\textrm{Unif}}}(t;C_1^{\emph{\textrm{U}}}(\eps)).
+\end{equation}
+Moreover, for any $t\in[0, T]$,
+\begin{equation}\label{eq: Unif thm PINN analysis nabla e 1}
+    m_1\|\nx e_t(\cdot)\|^2_{L^2(\Omega)}\les 
+    \eps\|r_t(\cdot)\|^2_{L^2(\Omega)}
+    +\eps\cdot C_1^{\emph{\textrm{U}}}(\eps)L_{\emph{\textrm{PINN}}}^{\emph{\textrm{Unif}}}(t;C_1^{\emph{\textrm{U}}}(\eps))
+    + C_2\sqrt{\eps L_{\emph{\textrm{PINN}}}^{\emph{\textrm{Unif}}}(t;C_1^{\emph{\textrm{U}}}(\eps))},
+\end{equation}
+where $C_1^{\emph{\textrm{U}}}(\eps):=\frac{1}{\eps}+\mathrm{m}_2-\frac{m_1}{2}\left(B_2^*+\widehat{B}_2\right)$ and $C_2$ is defined in Theorem \ref{thm: PINN analysis}.
+\end{theorem}
+\begin{remark}
+    Indeed, we only need the assumption of the lower bound on $g^2(t)$ from Assumption \ref{PINN assumption: diffusion bound} and the continuity assumptions for $u_t^*(\bmx)$ and $u_\theta(\bmx,t)$ from Assumption \ref{PINN assumption: continuous assumption} in Theorem \ref{thm: extended PINN analysis for uniform sampling}.
+\end{remark}
+
+\subsubsection{Convergence of Diffusion-PINN Sampler with Uniformly Sampled Collocation Points}
+In this section, within the similar setting in section \ref{subsection: convergence Sampler analysis}, we present the convergence analysis of DPS when the collocation points are uniformly sampled from $\Omega$.
+\begin{theorem}\label{thm: Unif KL bound}
+    Suppose that $T\ges 1, K\ges 2$, and Assumption \ref{PINN assumption: boundary identity}, \ref{PINN assumption: diffusion bound}, \ref{PINN assumption: continuous assumption}, \ref{Sampler assumption: target distr}, \ref{Sampler assumption: bounded region}, and \ref{assump:comparsion-add_uniform} hold. 
+    For any $\delta>0$, let $\Omega$ be chosen as in Assumption \ref{Sampler assumption: bounded region}. 
+    For any positive constant $\eps>0$, we further assume that $  u_\theta(\bmx, t)$ satisfies the following\footnote{Here, we contain the term $\textrm{Vol}(\Omega)$ since the PINN residual objective used for uniform collocation points is given by $\|r_t(\cdot)\|^2_{L^2(\Omega)}/\textrm{Vol}(\Omega)$.},
+    \begin{equation}\label{Unif PINN error in KL}
+    \begin{aligned}
+        &\ \eps\sum_{k=1}^Nh_k\max_{\bmx\in\Omega}\left\{\pi_{t_k}(\bmx)\right\}\cdot\left\|r_{t_k}(\cdot)\right\|^2_{L^2(\Omega)}\les\delta_1\cdot\emph{\textrm{Vol}}(\Omega), \\
+        &\ \eps\sum_{k=1}^Nh_k\max_{\bmx\in\Omega}\left\{\pi_{t_k}(\bmx)\right\}\cdot L_{\emph{\textrm{PINN}}}^{\emph{\textrm{Unif}}}(t_k;C_1^{\emph{\textrm{U}}}(\eps))\les\delta_2\cdot\emph{\textrm{Vol}}(\Omega).
+    \end{aligned}
+    \end{equation}
+    Then there is a universal constant $\alpha\ges 2$ such that, using step size $h_k:=h\min\{\max\{t_k,\frac{1}{4K}\}\}$ for $0<h\les \frac{1}{\alpha d}$, and $\bms_t(\bmx)=\nx  u_\theta(\bmx, t)\cdot\1\{\bmx\in\Omega\}$,
+    we have the following upper bound on the KL divergence between the target and the approximate distribution,
+    \[
+    \begin{aligned}
+        \operatorname{KL}\left(\pi\|\widehat{\pi}_T\right)\lesssim &\ \left(d+M_2\right)\cdot e^{-T} + d^2h\left(\log K+T\right) + T\delta + \left(\delta_1 + C_1^{\emph{\textrm{U}}}(\eps)\delta_2\right)\cdot\emph{\textrm{Vol}}(\Omega) \\
+        &\ \quad + C_2 \sqrt{\sum_{k=1}^Nh_k\max_{\bmx\in\Omega}\left\{\pi_{t_k}(\bmx)\right\}\cdot\delta_2\cdot \emph{\textrm{Vol}}(\Omega)}.
+    \end{aligned}
+    \]
+    where $C_1^{\emph{\textrm{U}}}(\eps)$ and $C_2$ are defined in Theorem \ref{thm: extended PINN analysis for uniform sampling}.
+\end{theorem}
+
+Specifically, our results indicate that employing LMC and the forward pass for sampling collocation points is advantageous over uniform sampling. This is because, in the uniform case, the KL bound includes a factor proportional to the volume of the support, ${\rm Vol}(\Omega)$, which can be prohibitively large in high dimensions. In contrast, our bound depends on the density ratio $\pi_t/\nu_t$, which is more manageable due to LMC and converges to $1$ as $t$ increases, thanks to the forward process.
+
+
+
+\section{Numerical Experiments}
+
+In this section, we conduct experiments on various sampling tasks to demonstrate the effectiveness and efficiency of the Diffusion-PINN Sampler (DPS) compared to previous methods.
+Our sampling tasks includes 9-Gaussians ($d=2$), Rings ($d=2$), Funnel \citep{neal2003slice} ($d=10$), and Double-well ($d=30$), which are commonly used to evaluate diffusion-based sampling algorithms \citep{zhang2021path,berner2022optimal,grenioux2024stochastic}.
+
+For DPS, we employ a time-rescaled forward process and use a weight function $\beta(t)=2(1-t)$ for the PINN residual loss to improve numerical stability.
+To generate collocation points for each task, we run a short chain of LMC with a relatively large step size for better coverage of the high-density domain.
+For 9-Gaussians, Rings, and Double-well, the PINN residual loss alone suffices for good performance, so we set the regularization coefficient $\lambda=0$.
+For Funnel, however, regularization proves helpful, and we set $\lambda=1$ (details in Section \ref{sec:ablation}).
+
+\begin{wrapfigure}[12]{r}{0.4\textwidth}
+\includegraphics[width=\linewidth]{pictures/mix_gaussian_score_estimation_error.pdf}
+\caption{Comparison between solving log-density FPE by PINN and denoising score matching on score estimation.}
+\label{fig:score estimation mog-3}
+\end{wrapfigure}
+\paragraph{Baselines.}
+We benchmark DPS performance against a wide range of strong baseline methods. 
+For MCMC methods, we consider the Langevin Monte Carlo (LMC).
+As for sampling methods using reverse diffusion, we include RDMC \citep{huang2023reverse} and SLIPS \citep{grenioux2024stochastic}.
+We also compare with the VI-based PIS \citep{zhang2021path} and DIS \citep{berner2022optimal}.
+
+
+\subsection{Score Estimation}
+We first evaluate the accuracy of score function estimates obtained by solving the log-density FPE (Algorithm \ref{algorithm: PINN}).
+To do that, we conduct an experiment on the 9-Gaussians target $\pi$ where we know the ground truth scores throughout the entire forward process.
+Figure \ref{fig:score estimation mog-3} shows the $L^2(\pi)$ error of the score estimation for our method compared to denoising score matching \citep{vincent2011connection,song2020denoising}. 
+We see clearly that our method provides more accurate score estimation than denoising score matching.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{pictures/samples_visualization_1.pdf}
+    \caption{Sampling performance of different methods for 9-Gaussians ($d=2$), Rings ($d=2$), Funnel ($d=10$), and Double-well ($d=30$).}
+    \label{fig:samples visualization of different methods}
+\end{figure}
+
+\begin{table}[t]
+    \caption{KL divergence ($\downarrow$) to the ground truth obtained by different methods. Bold font indicates the best results. We use the KL divergence of the first two dimensions for Funnel ($d=10$) and the KL divergence of the first five dimensions for Double-well ($d=30$). All the KL divergence is computed by the ITE package \citep{szabo2014information}.}
+    \label{table:KL}
+    \centering
+    \scalebox{0.8}{
+    \begin{tabular}{c  c  c  c  c  c  c}\toprule
+          Target
+         & LMC & RDMC & SLIPS & PIS & DIS & DPS (ours)
+         \\
+         \midrule
+         9-Gaussians      &
+        $1.6568_{\pm 0.0189}$   &
+          $1.0844_{\pm 0.0132}$   &
+           $0.0901_{\pm 0.0071}$  &
+           $2.0042_{\pm 0.0203}$  &
+            $2.2758_{\pm 0.0240}$ &
+         $\mathbf{0.0131_{\pm 0.0093}}$
+         \\ 
+         Rings   &
+            $2.4754_{\pm 0.0302}$ &
+            $0.7487_{\pm 0.0073}$ &
+            $0.4127_{\pm 0.0144}$ &
+            $2.6985_{\pm 0.0290}$ &
+             $2.3433_{\pm 0.0275}$ &
+           $\mathbf{0.0176_{\pm 0.0059}}$
+         \\ 
+         Funnel    &
+           $0.1908_{\pm 0.0156}$  &
+            $2.0250_{\pm 0.0364}$ &
+            $0.1971_{\pm 0.0133}$ &
+            $0.4377_{\pm 0.0199}$ &
+             $0.2383_{\pm 0.0169}$ &
+          $\mathbf{0.0846_{\pm 0.0122}}$
+         \\ 
+         Double-well  &
+            $0.1915_{\pm 0.0122}$ &
+            $1.5735_{\pm 0.0162}$ &
+            $0.4840_{\pm 0.0145}$ &
+            $0.0969_{\pm 0.0114}$ &
+            $0.6796_{\pm 0.0139}$ &
+           $\mathbf{0.0273_{\pm 0.0113}}$ 
+        \\ 
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\begin{table}[h!]
+    \caption{$L^2$ error ($\downarrow$) of the mixing proportions estimation when sampling multimodal target distributions using different methods. Bold font indicates the best results. All the estimation is computed with 1,000 samples.}
+    \label{table:weights error}
+    \centering
+    \scalebox{0.8}{
+    \begin{tabular}{c  c  c  c  c  c  c}\toprule
+          Target
+           & LMC & RDMC & SLIPS & PIS & DIS & DPS (ours)
+         \\
+         \midrule
+         9-Gaussians    &
+          $0.5199_{\pm 0.0159}$   &
+            $0.1313_{\pm 0.0099}$ &
+           $0.0018_{\pm 0.0005}$  &
+           $0.4893_{\pm 0.0110}$  &
+            $0.7268_{\pm 0.0146}$ &
+          $\mathbf{0.0006_{\pm 0.0003}}$ 
+         \\  
+         Rings   &
+           $0.6005_{\pm 0.0251}$  &
+            $0.0537_{\pm 0.0035}$ &
+            $0.2471_{\pm 0.0144}$ &
+            $0.8016_{\pm 0.0194}$ &
+             $0.5233_{\pm 0.0194}$ &
+          $\mathbf{0.0006_{\pm 0.0006}}$ 
+         \\ 
+         Double-well   &
+            $0.0673_{\pm 0.0082}$ &
+            $0.2154_{\pm 0.0075}$ &
+            $0.1645_{\pm 0.0113}$ &
+            $0.0044_{\pm 0.0011}$ &
+            $0.0684_{\pm 0.0035}$ &
+           $\mathbf{0.0004_{\pm 0.0002}}$
+        \\ 
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+\subsection{Sample Quality}
+
+In this section, we compare DPS with the aforementioned baseline methods on various target distributions.
+We use KL divergence to evaluate the quality of samples provided by different methods in low dimensional problems (9-Gaussians, Rings), and use the projected KL divergence instead for Funnel and Double-well that are problems with relatively higher dimensions. 
+The results are reported in Table \ref{table:KL}.
+Figure \ref{fig:samples visualization of different methods} visualizes the samples from different methods.
+We clearly see that DPS provides the best approximation accuracy and sample quality among all methods.
+Although we use LMC to generate collocation points, DPS greatly outperforms LMC, indicating the power of diffusion-based sampling methods with learned score functions.
+For multimodal distributions, we estimate the mixing proportions for different modes using samples generated by different methods, and evaluate the estimation accuracy in terms of $L^2$ error to the true weights.
+The results are shown in Table \ref{table:weights error}. 
+It is clear that DPS provides accurate weights estimation while other baselines tend to struggle to learn the weights.
+
+\subsection{Ablation Study}\label{sec:ablation}
+In this section, we compare the performance of score estimation between solving the score FPE and the log-density FPE, and investigate the effect of regularization in DPS.
+
+We first solve the corresponding score FPE and log-density FPE for a MoG with two distant modes: $\pi^M=0.2\mathcal{N}((-5,-5)^{\prime}, \bm{I}_2)+0.8\mathcal{N}((5,5)^{\prime}, \bm{I}_2)$. 
+The left plot in Figure \ref{fig:ablation on failure of score fpe and adaptive sampling} show the PINN residual loss and the score estimation error as functions of the number of iterations.
+We see that for the score FPE, the score approximation error decreases rapidly at first but quickly levels off, while the PINN residual loss continues to decrease with more iterations.
+In contrast, when solving the log-density FPE, the PINN residual loss and the score approximation error decrease consistently, resulting in more accurate score approximation overall.
+The middle and right plots in Figure \ref{fig:ablation on failure of score fpe and adaptive sampling} display the histogram based on samples generated from the reverse SDE using the score estimates from both methods, together with the true marginal density. We observe that the score FPE-based method fails to identify the correct mixing proportions, whereas the log-density FPE-based method successfully recovers the correct weights.
+Next, we solve the log-density PFE with different regularization coefficients $\lambda$ on the Funnel target. 
+Figure \ref{fig:ablation on regularization} (left) shows the KL divergence for various $\lambda$ as a function of the number of iterations.
+We see that, compared to the non-regularized case ($\lambda =0$), both the convergence speed and overall approximation accuracy have been greatly improved when regularization is applied.
+The middle and right plots in Figure \ref{fig:ablation on regularization} show the samples generated from DPS with $\lambda=1$ and $\lambda=0$ respectively.
+With regularization, DPS provides a better fit to the target distribution, more accurately capturing the thickness in the tails. This indicates that regularization could be beneficial for heavy-tail distributions.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{pictures/ablation_study_1_no_adaptive_version.pdf}
+    \caption{\textbf{Left}: PINN residual loss and score approximation error during solving score/log-density FPE; \textbf{Middle/Right}: Marginals of the first dimension from DPS by solving score/log-density FPE for MoG with two modes.}
+    \label{fig:ablation on failure of score fpe and adaptive sampling}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{pictures/ablation_study_2_no_adaptive_version.pdf}
+    \caption{\textbf{Left}:  KL divergence to the ground truth during solving log-density FPE with different regularization for Funnel. \textbf{Middle/Right}: Sampling performance of DPS with/without regularization for Funnel.}
+    \label{fig:ablation on regularization}
+\end{figure}
+
+
+
+
+\section{Conclusion}
+
+
+In this work, we proposed \emph{Diffusion-PINN Sampler} (DPS), a novel method that leverages Physics-Informed Neural Networks (PINN) and diffusion models for accurate sampling from complex target distributions.
+By solving the log-density FPE that governs the evolution of the log-density of the underlying SDE marginals via PINN, DPS demonstrates accurate sampling capabilities even for distributions with multiple modes or heavy tails, and it excels in identifying mixing proportions when the target features isolated modes.
+The control of log-density estimation error via PINN residual loss ensures convergence guarantees to the target distribution, building upon established results for score-based diffusion models.
+We demonstrated the effectiveness of our approach on multiple numerical examples.
+
+
+
+

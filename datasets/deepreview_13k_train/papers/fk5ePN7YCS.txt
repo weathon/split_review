@@ -1,0 +1,418 @@
+\title{NEPENTHE: Entropy-Based Pruning as a Neural Network Depth's Reducer}
+
+\begin{abstract}
+
+While deep neural networks are highly effective at solving complex tasks, their computational demands can hinder their usefulness in real-time applications and with limited-resources systems. Besides, for many tasks it is known that these models are over-parametrized: neoteric works have broadly focused on reducing the width of these networks, rather than their depth.\\
+In this paper, we aim to reduce the depth of over-parametrized deep neural networks: we propose an e\textbf{N}tropy-bas\textbf{E}d \textbf{P}runing as a n\textbf{E}ural \textbf{N}etwork dep\textbf{TH}'s r\textbf{E}ducer (NEPENTHE) to alleviate deep neural networks' computational burden.
+Based on our theoretical finding, NEPENTHE focuses on un-structurally pruning connections in layers with low entropy to remove them entirely. We validate our approach on popular architectures such as MobileNet and Swin-T, showing that when encountering an over-parametrization regime, it can effectively linearize some layers (hence reducing the model's depth) with little to no performance loss. The code will be publicly available upon acceptance of the article.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The landscape of computer vision has undergone a transformative evolution propelled by the advent of Deep Neural Networks (DNNs), which have emerged as instrumental in achieving state-of-the-art outcomes across pivotal computer vision domains, including semantic segmentation~\cite{chaudhry2022lung}, classification~\cite{barbano2022two}, and object detection~\cite{mazzeo2022image}. Notably, the pervasive impact of DNNs extends beyond conventional computer vision tasks, showcasing absolute potential in realms such as natural language processing~\cite{touvron2023llama}, and multi-modal tasks~\cite{8292801}. The employment of DNNs is becoming massive in our lives and looks unstoppable.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\columnwidth]{figures/teaser.pdf}
+    \caption{In this work we show that the average neuron's entropy calculated at the layer scale reduces as we induce some sparsity in the model. The main challenge is to make the average neuron's entropy go to zero for some layers, as it will be possible to remove it.}
+    \label{fig:Teaser_image}
+\end{figure} 
+
+While DNN performance has exhibited scalability concerning model and dataset size~\cite{hestness2017deep}, the inherent computational burden is one major downside. Notably, contemporary state-of-the-art models are characterized by millions (or even billions) of parameters, demanding billions (or trillions) of floating-point operations (FLOPs) for a single input prediction~\cite{guo2022cmt}. Consequently, the substantial resources requisite for training and deploying large neural networks, both in terms of pure hardware capability and energy consumption, pose challenges for real-time applications and edge devices.%, wherein their latency is notably affected by the formidable computational demands. 
+
+Over the past decade, the research landscape has witnessed the emergence of compression techniques as a crucial avenue to address the resource-intensive nature of DNNs. The intrinsic link between the generalization capability of DNNs and the model's complexity has been well-established~\cite{hestness2017deep}. Notably, off-the-shelf architectures utilized in downstream tasks tend to be over-parameterized, presenting an opportunity for compression with marginal or no performance loss~\cite{tartaglione2022loss}. A spectrum of approaches has been proposed to craft more efficient architectures, spanning from parameter removal~\cite{han2015learning} to the lowering of numerical precision~\cite{rastegari2016xnor}; however, most of the approaches are unable to reduce the number of layers in a DNN. 
+
+The impact of removing individual parameters or whole filters on recent computing resources, such as GPUs, is relatively marginal. Due to the parallelization of computations, the size of layers, whether larger or smaller, is primarily constrained by memory caching and core availability. The critical bottleneck in computation lies in the \emph{critical path} that computations must traverse~\cite{pmlr-v202-ali-mehmeti-gopel23a}, a challenge that can be addressed by strategically removing layers. While some existing works implicitly address this concern~\cite{hinton2015distilling}, they fail to a-priori guarantee no performance loss (given that they impose a target shallow model) or avoid substantial perturbations. This motivates the exploration of designing an iterative pruning strategy, aimed at reducing the model's depth while preserving optimal performance.
+
+In this work, we present NEPENTHE, an approach that iteratively attempts to remove layers from a DNN. More specifically, given the large use of \emph{rectifier} activation functions such as ReLU, GELU, and Leaky-ReLU, we can identify the average \emph{state} of a given neuron for the trained task, and from that, we can maximize the utilization of one of the two regions identifiable in these activations by minimizing an entropy. We find out that vanilla unstructured pruning is implicitly already minimizing such entropy, but is hardly able to completely force a whole layer to utilize one of these two regions. Through the design of our entropy-weighted pruned parameter budget at the layer's scale, we can favor solutions where the layer's entropy drops to zero, hence becoming linearizable (Fig.~\ref{fig:Teaser_image}). We summarize, here below, our key messages and contributions:
+\begin{itemize}
+    \item we propose a measure of entropy at the single neuron's scale, which indicates how much such neuron uses its linear part(s): through its minimization, it is in principle possible to linearize it, and by making the average entropy drop to zero it is possible to linearize the whole layer (Sec.~\ref{sec:recact}); 
+    \item we suggest from a theoretical perspective that unstructured pruning, in rectifier-activated layers, naturally reduces the layer's entropy (Sec.~\ref{sec:theory}), and we validate such result empirically (Sec.~\ref{sec:layent});
+    \item we propose NEPENTHE, a new method aiming to decrease a neural network's depth (Sec.~\ref{sec:nepmethod}) through a proper entropy-guided reweighting of the pruning budget at the layer's scale (Sec.~\ref{sec:score});
+    \item we test NEPENTHE in a variety of setups and with some popular architectures (Sec.~\ref{sec:res}), showcasing that it can achieve layer removal with little or no performance loss when over-parametrized networks are employed.
+\end{itemize}
+
+
+
+\section{Related Works}
+
+\label{sec:sota}
+
+\paragraph{Neural Network Pruning}
+
+Neural network pruning has gained considerable attention in recent years due to its potential to enhance model performance and reduce over-fitting. Its goal is to reduce a cumbersome network to a smaller one while maintaining accuracy by removing irrelevant weights, filters, or other structures, from neural networks.
+While \emph{structured} pruning removes entire neurons, filters, or channels~\cite{tartaglione2021serene,he2023structured}, \emph{unstructured} pruning algorithms remove weights without explicitly considering the neural network's structure~\cite{han2015learning}.
+Magnitude-based pruning, where the importance score to prune parameters is based on their magnitude~\cite{han2015learning,louizos2018learning,h.2018to}, and gradient-based pruning, where the ranking or the penalty term is a function of the gradient magnitude (or to higher order derivatives)~\cite{lee2018snip,tartaglione2022loss}, are the main types of unstructured pruning approaches. 
+\cite{blalock2020state} compared the effectiveness of these approaches and concluded that, in general, gradient-based methods are less accurate than magnitude-based methods. Moreover, \cite{Gale_Magnitude} showed that simple magnitude pruning approaches achieve comparable or better results than complex methods, making them a good trade-off between complexity and competitiveness. Computationally-wise, it is broadly known that, in general-purpose hardware setup, structured pruning is able to provide larger benefits, in terms of both memory and computation, than unstructured approaches, despite the achieved sparsity rate can be substantially lower~\cite{bragagnolo2021role}.
+
+\paragraph{Entropy-Guided Pruning}
+Some works have already tried to propose entropy-based approaches to guide pruning. For convolutional neural networks, \cite{luo2017entropy} put forward an iterative filter pruning strategy in which the importance of each filter is calculated by their entropy-based channel selection metric. To recover performance, the pruned model is then fine-tuned. Also for CNNs, \cite{hur2019entropy} suggested an entropy-based method that determines dynamically during training the threshold by considering the average amount of information from the weights to output. 
+Moreover, \cite{min20182pfpce} proposed a two-stage filter pruning framework, first intra-layer and then extra-layer. Given that the entropy is a measure of disorder, evidently, it identifies filters that mutually have low entropy: these can be considered \emph{redundant} and for instance, can be removed from the model. These approaches, despite reducing the layer's width, are not designed to explicitly remove entire layers.
+
+\paragraph{Neural Network Depth Reduction}
+Towards neural network depth reduction, \cite{8485719} inspect the possibility of having a layer-wise pruning method based on feature representation, a-posteriori employing a retraining strategy that utilizes knowledge distillation. This work reinforces the possibility of designing a layer-pruning algorithm. Endorsing this, \cite{dror2021layer} proposed a method that learns whether non-linear activations can be removed, allowing to folding of consecutive linear layers into one. More specifically, ReLU-activated layers are replaced with PReLU activations, showcasing a regularized slope. Post-training, the PReLUs almost linear are removed, and the layer can be folded with its subsequent one. \cite{pmlr-v202-ali-mehmeti-gopel23a} proposes a similar channel-wise approach that enables to significant reduction of more non-linear units in the network while maintaining similar performance.
+While these works sought to shrink the neural network's depth by working at the activation level and forcing it to stay either linear or non-linear, our approach does not directly enforce any of that. In rectifier-activated networks, we perform a targeted unstructured pruning that off-line favors either the neuron's shutdown or the use of its linear part.
+
+
+
+\section{NEPENTHE}
+
+\label{sec:method}
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}{0.33\textwidth}
+        \includegraphics[width=\columnwidth]{figures/fw_distribution.pdf}
+        \caption{~}
+        \label{fig:fwdist}
+    \end{subfigure}
+    \begin{subfigure}{0.33\textwidth}
+        \includegraphics[width=\columnwidth]{figures/fz_distribution.pdf}
+        \caption{~}
+        \label{fig:fzdist}
+    \end{subfigure}
+    \begin{subfigure}{0.33\textwidth}
+        \includegraphics[width=\columnwidth]{figures/entropy_theory.pdf}
+        \caption{~}
+        \label{fig:entropy}
+    \end{subfigure}
+    \caption{Distribution of a layer's parameters with magnitude pruning at threshold $t$ (a), pre-activation distribution at varying $t$ under the assumption of independence and centering of the Gaussian distributed input and layer's parameters (b), and entropy of the rectifier-activated neuron's output as a function of $t$ (c), all in the large $N$ limit.}
+    \label{fig:entropytheory}
+\end{figure*}
+
+\iffalse
+\begin{figure}[!ht]
+    \centering
+    \begin{subfigure}{0.8\columnwidth}
+        \includegraphics[width=\columnwidth]{figures/fw_distribution.pdf}
+        \caption{~}
+        \label{fig:fwdist}
+    \end{subfigure}
+    \begin{subfigure}{0.88\columnwidth}
+        \includegraphics[width=\columnwidth]{figures/fz_distribution.pdf}
+        \caption{~}
+        \label{fig:fzdist}
+    \end{subfigure}
+    \begin{subfigure}{0.88\columnwidth}
+        \includegraphics[width=\columnwidth]{figures/entropy_theory.pdf}
+        \caption{~}
+        \label{fig:entropy}
+    \end{subfigure}
+    \caption{Distribution of a layer's parameters with magnitude pruning at threshold $t$ (a), pre-activation distribution at varying $t$ under the assumption of independence and centering of the Gaussian distributed input and layer's parameters (b), and entropy of the rectifier-activated neuron's output as a function of $t$ (c), all in the large $N$ limit.}
+    \label{fig:entropytheory}
+\end{figure}
+\fi
+\iffalse
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\columnwidth]{figures/fw_distribution.pdf}
+    \caption{Distribution of a layer's parameters with magnitude pruning at threshold $t$ in the large $N$ limit.}
+    \label{fig:fwdist}
+\end{figure}
+\fi
+In this section, we present our method NEPENTHE, which focuses on pruning connections in layers with low entropy to remove them entirely. First, we show that unstructured pruning naturally minimizes the neuron's entropy (in rectifier-activated layers). This will motivate our entropy-guided pruning approach, which allows a gradual layer removal. 
+
+\subsection{Entropy for Rectifier Activations}
+\label{sec:recact}
+Let us assume $\psi$ is the rectifier of the $l$-th layer, populated by $N_L$ neurons. We can monitor the output $y_{l,i}^{\boldsymbol{x}}$ of the $i$-th neuron from a given input $\boldsymbol{x}$ of the dataset $\mathcal{D}$ and write it as:
+\begin{equation}
+    \label{eq:activation}
+    y_{l,i}^{\boldsymbol{x}} = \psi(z_{l,i}^{\boldsymbol{x}}),
+\end{equation}
+where $z_{l,i}^{\boldsymbol{x}}$ is the output of the $i$-th neuron inside the $l$-th layer. From \eqref{eq:activation}, we can define three possible ``States'' for the neuron:
+\begin{equation}
+    \label{eq:dontcare}
+    s_{l, i}^{\boldsymbol{x}} = \left\{
+    \begin{array}{ll}
+        +1 & \text{if}\  y_{l,i}^{\boldsymbol{x}} > 0\\
+        -1 & \text{if}\  y_{l,i}^{\boldsymbol{x}} < 0\\
+        0 & \text{if}\  y_{l,i}^{\boldsymbol{x}} = 0\\
+    \end{array}
+    \right .
+\end{equation}
+
+More synthetically, for the output of the $i$-th neuron, we can easily identify in which of these States we are by simply applying the $\sgn$ function to $z_{l,i}^{\boldsymbol{x}}$, obtaining $~{s_{l,i}^{\boldsymbol{x}} = \sgn(z_{l,i}^{\boldsymbol{x}})}$. Informally, we can say that the neuron is in the \emph{ON State} when $s_{l,i}^{\boldsymbol{x}}=+1$ (as it is typically the linear region) while it is in the \emph{OFF State} when $s_{l,i}^{\boldsymbol{x}}=-1$ (given that $~{\lim_{x\rightarrow -\infty}\psi(x) = 0}$).\footnote{There are few exceptions to this, like LeakyReLU- in those cases, even though the activation will not converge to zero, we still like to call it OFF State as, given the same magnitude of input, the output's magnitude is lower.} The third State $s_{l, i}^{\boldsymbol{x}}=0$ is a special case, as it can be either mapped as an ON or OFF State. From the average over a batch of outputs for the neuron, we can obtain the probability (in the frequentist sense) of the i-th neuron of being in either the ON or the OFF States. For instance, we can obtain the probability of the ON State as:
+\begin{equation}
+    \label{eq:probability}
+    p(s_{l,i}\!=\!+1) = \left\{
+    \begin{array}{cl}
+         \displaystyle\dfrac{{\displaystyle\sum_{j=1}^{\|\mathcal{D}\|_0} s_{l,i}^{\boldsymbol{x}_j}}\Theta(s_{l,i}^{\boldsymbol{x}_j}-\frac{1}{2})}{S_{l,i}} & \text{if}\ S_{l,i}\neq 0\\&\\
+        0 & \text{otherwise},
+    \end{array}
+    \right .
+\end{equation}
+where
+\begin{equation}
+    S_{l,i} = \sum_{j=1}^{\|\mathcal{D}\|_0} s_{l,i}^{\boldsymbol{x}_j}\sgn(s_{l,i}^{\boldsymbol{x}_j})
+\end{equation}
+\iffalse
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\columnwidth]{figures/fz_distribution.pdf}
+    \caption{Pre-activation distribution at varying $t$ under the assumption of independence and centering of the Gaussian distributed input and layer's parameters in the large $N$ limit.}
+    \label{fig:fzdist}
+\end{figure}
+\fi
+
+counts how many times the ON and the OFF States are encountered, $\|\mathcal{D}\|_0$ is the number of the input samples, and $\Theta$ is the Heaviside function.\footnote{Please note that for convolutional layers it is necessary to add another sum and average over the whole feature map generated per input.} Evidently, we exclude the third State from this count as it can be associated with being either within ON or OFF. Given that we are either interested in the ON or the OFF States, we can then deduce that, when $~{S_{l,i}\neq 0}$, $~{p(s_{l,i}\!=\!-1) = 1-p(s_{l,i}\!=\!+1)}$. Given this, we can calculate the entropy of the $i$-th neuron in the $l$-th layer as follows:
+\begin{equation}
+    \label{eq:entr_neuron}
+    \mathcal{H}_{l,i} =-\sum_{s_{l,i}=\pm 1} p(s_{l,i}) \log_2\left[p(s_{l,i})\right ]
+\end{equation}
+\iffalse
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\columnwidth]{figures/entropy_theory.pdf}
+    \caption{Entropy of the rectifier-activated neuron's output as a function of $t$ in the large $N$ limit.}
+    \label{fig:entropy}
+\end{figure}
+\fi
+With the definition in \eqref{eq:entr_neuron}, $\mathcal{H}_{l,i}$ can be zero in two possible cases:
+\begin{itemize}%[noitemsep,nolistsep]
+    \item $s_{l,i}=\!-1\ \forall j$. In this case, $z_{l,i} \leq 0\ \forall j$. When employing a ReLU, the output of the $i$-th neuron is always 0, and in this specific case, the neuron can be simply pruned.
+    \item $s_{l,i}=\!+1\ \forall j$. In this case, $z_{l,i} \geq 0\ \forall j$. The output of the $i$-th neuron is always the same as its input,\footnote{or very close as in GeLU} this neuron can in principle be absorbed by the following layer as there is no non-linearity between them anymore.
+\end{itemize}
+By averaging the entropy values for the total number of neurons $N_l$ inside the $l$-th layer, we can define the average entropy of the $l$-th layer as:
+\begin{equation}
+    \label{eq:entr_layer}
+    \widehat{\mathcal{H}}_l = \frac{1}{N_l}\sum_i \mathcal{H}_{l,i}.
+\end{equation}
+Since we aim to minimize the depth of deep neural networks by eliminating zero-entropy layers, we would like to have $\widehat{\mathcal{H}}_l=0$. Unfortunately, directly minimizing \eqref{eq:entr_layer} in the optimization function is hard as it relies on non-differentiable measures like \eqref{eq:probability}. In the next section, we will see how unstructured pruning can surprisingly be a promising choice for such a goal. 
+
+\subsection{Unstructured Pruning Naturally Reduces the Entropy}
+\label{sec:theory}
+Let us assume the input $\boldsymbol{x}$ for a given neuron is a sequence of random variables $~{X\sim\mathcal{N}(\mu_X, \sigma_X^2)}$. Similarly, we can assume the $N$ parameters populating such neuron, for a large $N$ limit, follow as well a Gaussian distribution, and we model it as $~{W\sim \mathcal{N}(\mu_W, \sigma^2_W)}$. Let us assume we apply a magnitude-based pruning mask to the neuron's parameters, where we apply some threshold $t$. As such, we obtain a modified distribution for the layer's parameters:
+\begin{equation}
+    f_{\widehat{W}}(w,t)\!=\!\left\{
+    \begin{array}{ll}
+        \displaystyle\dfrac{1}{\sigma_W \sqrt{2\pi}}\exp\left[-\frac{1}{2}\left(\frac{w-\mu_W}{\sigma_W}\right)^2\right] &\! |w|> t\\~&\\
+        \zeta(t) \delta(w) & \!|w|\leq t,
+    \end{array}
+    \right .
+\end{equation}
+where
+\begin{equation}
+    \zeta(t) = \frac{1}{2}\left[\erf\left(\frac{t-\mu_W}{\sigma_W\sqrt{2}}\right) - \erf\left(\frac{-t-\mu_W}{\sigma_W\sqrt{2}}\right)\right]
+\end{equation}
+is the fraction of parameters pruned, or \emph{pruning rate}, $\delta$ is the Dirac delta and $\erf$ is the error function. Fig.~\ref{fig:fwdist} displays an example of distribution when applying magnitude pruning having threshold $t$ against the original distribution.  Under the assumption of independent-centered distributions having a unitary variance, we can obtain the distribution for the pre-activation $z$ (resulting from the product of the weights and the input, modeled through the random variable $Z$), according to the result obtained by~\cite{craig1936frequency,seijas2012approach}, follows 
+\begin{equation}
+    f_{Z}(z,t) = \frac{1}{\pi}K_0\left(\left|\frac{1}{q(t)} \cdot \corr{z}\right|\right), 
+\end{equation}
+where 
+\begin{equation}
+    q(t) = 1-\erf\left(\frac{t}{\sqrt{2}}\right)
+\end{equation}
+and $K_n$ is the n-th order modified Bessel function of the second kind. We can observe, from Fig.~\ref{fig:fzdist}, how \corr{$f_Z$} is affected by increasing the thresholding $t$. Now, let us assume the activation function of such a neuron is a rectifier function, and we are interested in observing what is the probability of the post-activation output being in the linear region: we are interested in measuring
+\begin{align}
+    p[Z > 0] &= \frac{1}{\pi}\int_{\epsilon}^{+\infty}K_0\left(\left|\frac{1}{q(t)}\cdot z\right|\right) dz\nonumber\\ 
+    &= \frac{1}{2}\left[1 - I\left(\frac{\epsilon}{q(t)}\right)\right],
+\end{align}
+where
+\begin{equation}
+    I(x) = x[L_{-1}(x)K_0(x)+L_0(x)K_1(x)],
+\end{equation}
+$L_n$ is the n-th order modified Struve function, and $\epsilon$ is a positive small value. From this, we can easily obtain the complementary probability \corr{$p[f_{Z}(z,t) \leq 0]$} and for instance calculate the entropy between the two States.
+
+Fig.~\ref{fig:entropy} displays the entropy as a function of the thresholding parameter $t$: as we observe, the entropy decreases given that the threshold increases: through unstructured pruning, the neuron's output entropy is naturally minimized when employing rectified activations, even in the oversimplified case here treated. In the following, we will present how we are exploiting such a property of unstructured pruning towards layer entropy minimization. 
+
+\subsection{A Layer Entropy-Aware Pruning Score}
+\label{sec:score}
+Driven by the promising theoretical results presented in Sec.~\ref{sec:theory}, we will design here a relevance metric that will guide the unstructured pruning to lower the whole layer's entropy $\widehat{\mathcal{H}}_l$. As we aim to increase the number of zero-entropy layers, intuitively more pruning should be applied to layers with lower entropy, as they are the best candidates to be removed. Concurrently, to minimize the impact on performance, only low-magnitude weights should be removed, as they are typically those providing the lowest contribution to the neural network's output~\cite{han2015learning,tartaglione2021serene}. To reach these two objectives, we define first an intra-layer's pruning irrelevance score $\mathcal{I}_l$:
+\begin{equation}
+    \label{eq:EntroMag}
+    \mathcal{I}_l = \frac{1}{N_l}\sum_{i=1}^{N_l}\widehat{\mathcal{H}}_{l,i} \cdot \frac{1}{\|\boldsymbol{w}_{l,i}\|_0}|w_{l,i}|,
+\end{equation}
+where $\|\boldsymbol{w}_l\|_0$ is the current layer's parameters cardinality (hence, not accounting for the already pruned weights, if any). This metric accounts for the average parameter's magnitude and the layer's entropy at the same time: layers with few parameters but high entropy are less prone to be removed than layers with more parameters but lower entropy (under the same parameter's norm constraint). Besides, the parameter's magnitude of neurons with zero entropy is not accounted for in the importance score calculation. Symmetrically, to remove parameters from layers having lower pruning irrelevance, we define the inter-layer's pruning relevance score $\mathcal{R}_l$ as:
+\begin{equation}
+    \label{eq:EntroMag_hat}
+    \mathcal{R}_l = \left\{
+    \begin{array}{c l}
+        \displaystyle\frac{1}{\mathcal{I}_l}\displaystyle\sum_{j\in L} \mathcal{I}_j & \text{if}\ \mathcal{I}_l\neq 0\\&\\
+        0   & \text{otherwise} .
+    \end{array}
+    \right.
+\end{equation}
+This measure is as large as the $l$-th layer's pruning irrelevance score is smaller compared to the other layer's. Noticeably, $\mathcal{R}_l\in[1;+\infty)$: to exactly establish how many parameters $\|\boldsymbol{w}_l\|_0^{\text{pruned}}$ should be removed inside each layer $l$ at a given pruning iteration, we have the \emph{entropy-weighted pruned parameter budget}
+\begin{equation}
+    \label{eq:LayerPrunParas}
+     \|\boldsymbol{w}_l\|_0^{\text{pruned}} =  \|\boldsymbol{w}\|_0^{\text{pruned}} \cdot  \frac{\exp[\mathcal{R}_l]}{\sum_{j}\exp[\mathcal{R}(j)]}.
+\end{equation}
+Here follows an overview of NEPENTHE.
+\subsection{Entropy-Based Iterative Pruning}
+\label{sec:nepmethod}
+
+\begin{algorithm}[t]
+    \caption{Our proposed method NEPENTHE.}
+    \label{alg:NEPENTHE}
+    \begin{algorithmic}[1]
+        \Function{{\texttt{NEPENTHE}}($\boldsymbol{w}^{\text{init}}$, $L$, $\mathcal{D}$, $\zeta$, $\theta$)}{}
+        \State $\boldsymbol{w} \gets$ Train($\boldsymbol{w}^{\text{init}}$, $\mathcal{D}_{\text{train}}$) \label{line:train_dense}
+        \State dense\_acc $\gets $Evaluate($\boldsymbol{w}$, $\mathcal{D}_{\text{val}}$) \label{line:evaluate_dense}
+        \State current\_acc $\gets$ dense\_acc
+        \While{current\_acc $>$ $\theta \cdot$ dense\_acc} 
+        \State $\widehat{\mathcal{H}} \gets$ Entropy($\boldsymbol{w}$, $L$, $\mathcal{D}_{\text{train}}$) \label{line:evaluate_entropy}
+        \State $\|\boldsymbol{w}\|_0^{\text{pruned}} \gets \zeta \cdot \|\boldsymbol{w}\|_0$ \label{line:total_numbers_parameters}
+        \State Weights\_to\_prune($L$, $\widehat{\mathcal{H}}$, $\|\boldsymbol{w}\|_0^{\text{pruned}}$, $\mathcal{D}_{train}$) \label{line:numbers_parameters_per_layer}
+        \State $\boldsymbol{w} \gets$ Prune($\boldsymbol{w}$, $L$, $\|\boldsymbol{w}\|_0^{\text{pruned}}$) \label{line:prune}
+        \State $\boldsymbol{w}\gets$ Train($\boldsymbol{w}$, $\mathcal{D}_{\text{train}}$)\label{line:retrain}
+        \State current\_acc $\gets$ Evaluate($\boldsymbol{w}$, $\mathcal{D}_{\text{val}}$)\label{line:re-evaluate}
+        \EndWhile
+        \State \textbf{return} $\boldsymbol{w}$
+        \EndFunction
+        \State
+        \Function{\texttt{Weights\_to\_prune}($L$, $\widehat{\mathcal{H}}$, $\|\boldsymbol{w}\|_0^{\text{pruned}}$, $\mathcal{D}$)}{} \label{line:function}
+        \For{$l \in L$}
+        \State $\mathcal{I}_l \gets\frac{1}{N_l}\sum_{i=1}^{N_l}\widehat{\mathcal{H}}_{l,i} \cdot \frac{1}{\|\boldsymbol{w}_{l,i}\|_0}|w_{l,i}|$ \label{line:irrelevance}
+        \State \label{line:importance} $\mathcal{R}_l \gets \left\{
+    \begin{array}{c l}
+        \frac{\sum_{j\in L} \mathcal{I_j}}{\mathcal{I}_l} & \text{if}\ \mathcal{I}_l\neq 0\\
+        0   & \text{otherwise} .
+    \end{array}
+    \right.$
+        \State $\|\boldsymbol{w}_l\|_0^{\text{pruned}} \gets \|\boldsymbol{w}\|_0^{\text{pruned}} \cdot  \frac{\exp[\mathcal{R}_l]}{\sum_{j}\exp[\mathcal{R}(j)]}$ \label{line:softmax}
+        \EndFor
+        \EndFunction
+    \end{algorithmic}
+\end{algorithm}
+
+ Depicted in Alg.~\ref{alg:NEPENTHE}, we guide our entropy-based iterative pruning algorithm to remove layers with zero entropy. Indeed, if a layer has an entropy equal to zero, then all of its neurons have an entropy equal to zero: $\widehat{\mathcal{H}}_l = 0 \Leftrightarrow \mathcal{H}_{l,i} = 0\ , \forall i$. Hence, this layer doesn't necessarily need to have a rectifier: this layer can be removed entirely without the need for future pruning.
+Towards this end, we first train the neural network, represented by its weights at initialization $\boldsymbol{w}^{\text{init}}$, on the training set $\mathcal{D}_{\text{train}}$ (line~\ref{line:train_dense}) and evaluate it on the validation set $\mathcal{D}_{\text{val}}$ (line~\ref{line:evaluate_dense}). 
+As defined in \eqref{eq:entr_layer}, we then calculate the entropy $\widehat{\mathcal{H}}$ on the training set $\mathcal{D}_{\text{train}}$ for each layer $l$ of the considered list of layers $L$ (line~\ref{line:evaluate_entropy}). This list is initialized to all the layers of the neural network having a rectifier activation (hence, the output layer is excluded). \\
+Considering that $\zeta$ represents the percentage of parameters to remove at each pruning iteration and $\|\boldsymbol{w}\|_0$ the total weight parameters of the considered $L$ layers in the model, we can define the number of weight parameters to be pruned at each iteration $\|\boldsymbol{w}\|_0^{\text{pruned}}$ (line~\ref{line:total_numbers_parameters}) as:
+\begin{equation}
+    \label{eq:totalPrunParas}
+\|\boldsymbol{w}\|_0^{\text{pruned}} = \zeta \cdot \|\boldsymbol{w}\|_0 .
+\end{equation}
+To assign the parameters to prune in each layer, we define a function \texttt{Weights\_to\_prune} that calculates, for each layer, the weights to remove, according to what discussed in Sec.~\ref{sec:score} (line~\ref{line:function}). 
+At this point, for each layer $l$, the neurons having non-zero entropy are first selected and then $\|\boldsymbol{w}_l\|_0^{\text{pruned}}$ non-zero weights having the lowest absolute magnitude are removed (line~\ref{line:prune}). %However, after several pruning iterations, there may be fewer remaining weights than there are weights to prune: $\|\boldsymbol{w}_l\|_0^{\text{pruned}} > \|\boldsymbol{w}_l\|_0 $. In this case, all the remaining weights are pruned, and the extra budget $\|\boldsymbol{w}\|_0^{\text{pruned}}-\|\boldsymbol{w}_l\|_0$ is redistributed to the other pruning layers (line~\ref{line:extra_bugdet}).
+The model is then retrained (line~\ref{line:retrain}) and re-evaluated on the validation set $\mathcal{D}_{\text{val}}$ (line~\ref{line:re-evaluate}).
+The final model is obtained once the performance on the validation set drops below some relative threshold $\theta$.
+
+
+\section{Experiments}
+
+\label{sec:result}
+
+\begin{table}[t]
+    \centering
+    \resizebox{0.8\columnwidth}{!}{
+    \begin{tabular}{@{}c @{~~~}M M M M M M M M M c@{}}
+    \toprule
+    \bf Approach & $\widehat{\mathcal{H}}_1$ & $\widehat{\mathcal{H}}_2$ & $\widehat{\mathcal{H}}_3$& $\widehat{\mathcal{H}}_4$& $\widehat{\mathcal{H}}_5$& $\widehat{\mathcal{H}}_6$& \bf top-1\\
+    \midrule
+    \small{Dense} & \col{0.647} & \col{0.680} & \col{0.728} & \col{0.785} & \col{0.791} & \col{0.797} & 91.66 \\
+    \midrule
+     \small{IMP} \footnotesize{(iter \#1)}&\col{0.585}&\col{0.650}& \col{0.699} & \col{0.725} & \col{0.767} & \col{0.778} & 92.29 \\
+     \small{IMP} \footnotesize{(iter \#2)}& \col{0.506} & \col{0.580} & \col{0.647} & \col{0.654} & \col{0.700} & \col{0.722} & 92.25\\
+     \small{IMP} \footnotesize{(iter \#3)}& \col{0.256} & \col{0.623} & \col{0.658} & \col{0.672} & \col{0.682} & \col{0.737} & 92.46\\
+    \small{IMP} \footnotesize{(iter \#4)} & \col{0.192} & \col{0.660} & \col{0.667} & \col{0.676} & \col{0.698} & \col{0.763} & 92.27 \\
+     \small{IMP} \footnotesize{(iter \#5)}& \col{0.136} & \col{0.589} & \col{0.648} & \col{0.727} & \col{0.728} & \col{0.791} & 92.44\\
+     \small{IMP} \footnotesize{(iter \#6)}& \col{0.093} & \col{0.447} & \col{0.640} & \col{0.650} & \col{0.764} & \col{0.765} & 91.89 \\
+     \small{IMP} \footnotesize{(iter \#7)}& \col{0.055} & \col{0.335} & \col{0.487} & \col{0.592} & \col{0.640} & \col{0.775} & 91.66 \\
+    \midrule
+    \small{NEPENTHE} & \col{0} & \col{0} & \col{0} & \col{0.014} & \col{0.121} & \col{0.942} & 92.55 \\
+    \bottomrule    
+    \end{tabular}
+    }
+    \caption{Trend in the bottom six layer's entropies for ResNet-18 trained on CIFAR-10.}
+    \label{tab:entropy}
+\end{table}
+
+In this section, we empirically evaluate the effectiveness of our proposed approach, NEPENTHE, across multiple architectures and datasets for traditional image classification setups. We compare our results with one baseline method: iterative magnitude pruning (IMP)~\cite{han2015learning}, as well as the existing approach Layer Folding~\cite{dror2021layer}.
+
+\subsection{Experimental setup}
+\label{sec:setup}
+
+We evaluate our method on three models: ResNet-18, MobileNet-V2 and Swin-T, trained on five datasets: CIFAR-10~\cite{krizhevsky2009learning}, Tiny-ImageNet~\cite{le2015tiny} and PACS, VLCS, SVIRO from DomainBed~\cite{gulrajani2020search}.
+We follow the same training policies as~\cite{quetu2024dsd2} and~\cite{Xu_2021_CVPR}.
+For all the datasets, we set $\zeta=0.5$ for ResNet-18, $\zeta=0.25$ for Swin-T, and $\zeta=0.1$ for MobileNet-V2. %\footnote{The code will be publicly available upon acceptance.} %\todo{Comment on why these values?}
+Moreover, the results for Layer Folding are obtained using the same aforementioned training policy, with the hyper-parameters declared in \cite{dror2021layer}. %\zhu{We used top-k to select the threshold. We want the same number of layers to be prunned as our method. So the threshold is different for each case.}
+
+\subsection{Trend of Layer's Entropy}
+\label{sec:layent}
+
+\input{sections/main_table}
+As a preliminary experiment, we will study here the effect of pruning on the layer's entropy. Table~\ref{tab:entropy} reports the entropy trend of the six layers showing the lowest entropy. The iterative magnitude approach removes progressively, in this setup, the 50\% of the parameters from the model, following a vanilla global unstructured magnitude pruning approach. As expected from the derivation as in Sec.~\ref{sec:theory}, as the pruning progresses (and implicitly $t$ grows), the entropy is naturally decreased, showcasing very small values after some pruning iterations. 
+
+However, we also observe that as the entropy $\widehat{H}_1$ decreases, the top-1 accuracy begins to deteriorate. This happens as there is no proper pruning re-allocation, that instead happens with NEPENTHE according to \eqref{eq:EntroMag_hat}: indeed, in such case not only does the performance remain high, but we can successfully remove three layers from the model. Noticeably, $\widehat{H}_4$ and $\widehat{H}_5$ are also very low, while already starting from $\widehat{H}_6$ the entropy is very high. Contrarily to magnitude pruning where the entropy is in general in intermediate-range values, NEPENTHE tries to push all the encoded information toward layers having already high entropy, enabling effective layer removal with little (or in this case no) performance loss. This is also illustrated in Fig.~\ref{ResNet18-bar}, showing the distribution of the neuron states per layer for ResNet-18 on CIFAR-10 trained with NEPENTHE. Our unstructured pruning approach effectively removes three layers by pushing all the neurons inside low-entropy layers to be either in the ON or in the OFF state. Besides, we also notice that in some layers (like the 1, 13, and 17) there are entire units at zero entropy- we also achieve some structured sparsity by an unstructured approach, as already reported in some works~\cite{han2015learning,tartaglione2021serene}. Here follows an extensive analysis of more datasets and architectures. 
+
+\subsection{Results}
+\label{sec:res}
+Table~\ref{tab:results_cifar-10} shows the test performance (top-1), the lowest non-zero layer's entropy ($\widehat{\mathcal{H}}_{\text{min}}$) as well as the number of removed layers (Rem.) for all the considered setups. Since Layer Folding is changing the architecture by hand, it is inconvenient to calculate $\widehat{\mathcal{H}}_{\text{min}}$.\\ %, whose value is replaced by - in the table.\\
+As expected, the IMP approach does not significantly harm the performance but does not enable the removal of any layer.
+Nevertheless, Layer Folding removes some layers from the architecture but comes at the cost of lower generalizability.
+On the contrary, NEPENTHE obtains models with a sizable number of removable layers for a little (or no) performance loss compared to dense models. 
+It is also noticeable that in most cases, compared to Layer Folding, NEPENTHE yields better results, either better top-1 accuracy, more removable layers, or both.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\columnwidth]{figures/histogram.pdf}
+\caption{Distributions of neuron states per layer for ResNet-18 trained on CIFAR-10 pruned %3-times 
+by NEPENTHE. In blue neurons having non-zero entropy, in orange always OFF, and in red always ON.} 
+\label{ResNet18-bar}
+\end{figure}
+
+\subsection{Ablation study}
+\label{sec:ablation}
+
+\begin{table}[t]
+    \centering
+    \begin{tabular}{c c c c c c}
+    \hline
+    \toprule
+        \multirow{2}{*}{\bf Entropy} & \bf Don't care & \bf Neurons & \multirow{2}{*}{\bf top-1} & \multirow{2}{*}{\bf Rem.} \\
+        \bf  & \bf state& \bf Selection & &  \\
+        \midrule
+        ~ & ~ & ~ & 91.66 & 0/17 \\
+        $\checkmark$ & ~ & ~ & 92.18 & 3/17 \\ 
+        $\checkmark$  & $\checkmark$ & ~ & 92.33 & 3/17 \\ 
+        $\checkmark$ & $\checkmark$ & $\checkmark$ & 92.55 & 3/17 \\ 
+        \bottomrule
+    \end{tabular}
+    \caption{Ablation study on ResNet-18 trained on CIFAR-10.}
+    \label{tab:ablation_study}
+\end{table}
+\begin{table}[t]
+\centering
+\begin{tabular}{cccc}
+\toprule
+\bf Activation                  &\bf Method             & \bf top-1 & \bf Rem. \\ \midrule
+                            & Dense & 91.66                  & 0/17  \\
+\multirow{-2}{*}{ReLU}      & NEPENTHE         & 92.55                  & 3/17  \\ \midrule
+                            & Dense & 91.66                  & 0/17  \\
+\multirow{-2}{*}{SiLU}      & NEPENTHE        & 92.77                  & 3/17  \\ \midrule
+                            & Dense & 91.25                  & 0/17  \\
+\multirow{-2}{*}{PReLU}     & NEPENTHE        & 92.27                  & 3/17  \\ \midrule
+                            & Dense & 91.66                  & 0/17  \\
+\multirow{-2}{*}{LeakyReLU} & NEPENTHE        & 92.49                  & 3/17  \\  \midrule
+                            & Dense & 91.89                  & 0/17  \\
+\multirow{-2}{*}{GELU}      & NEPENTHE        & 92.57                  & 3/17   \\ 
+\bottomrule
+\end{tabular}
+\caption{Analysis with different activation functions on ResNet-18 trained on CIFAR-10.}
+\label{resnet18_acti}
+\end{table}
+We will perform, in this section, two different studies: the first is a classical ablation, where we analyze the contribution of each term employed within NEPENTHE, and the second where we will test NEPENTHE with some of the most popular rectifiers. Table~\ref{tab:ablation_study} provides an ablation study on the three key components identifiable within NEPENTHE: the entropy-based weighted pruned parameter budget~\eqref{eq:EntroMag_hat}, the presence of the don't care state in the entropy formulation~\eqref{eq:dontcare} and the filtering mechanism of non-zero entropy neurons~\eqref{eq:EntroMag}. Every component contributes towards the effectiveness of NEPENTHE. 
+
+Finally, Table~\ref{resnet18_acti} shows the test performance of ResNet-18 on CIFAR-10, for different rectifiers. NEPENTHE is not dependent on any particular rectifier and can be effective with any since our method removes three layers without performance loss for all the tested activations.
+\subsection{Limitations and Future Work} 
+Our entropy-based method NEPENTHE is a successful approach to alleviate deep neural networks' computational burden by decreasing their depth. However, this method also presents some limits: compressing already parameter-efficient architectures that are not over-fitting is challenging, and this approach evidently is unable to reduce the depth of an already under-fitting architecture (like for instance a ResNet-18 trained on ImageNet, for which we report the experiment in the supplementary material). Nevertheless, our work is the first to use unstructured pruning to successfully reduce neural networks' depth, despite being relatively inefficient at compression time as it relies on an iterative strategy. A possible solution to this issue would be to include the entropy in the minimized objective function; however, this is not directly a viable approach as it is a non-differentiable metric. The exploration of differentiable proxies of the layer's entropy is left as future work. 
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we have presented NEPENTHE, an iterative unstructured approach towards layer removal in rectifier-activated deep neural networks. Leveraging on some theoretical results showing that unstructured pruning has the potential to concretely reduce the neural network's depth, an entropy-based weighting mechanism has been designed to select parameters to prune from the network toward depth reduction and attempt to preserve high performance in the considered tasks. Experiments were conducted on popular architectures, including the Transformer-based Swin-T, showcasing the potential of NEPENTHE to concretely reduce the number of layers in the model. This work has a practical impact even in computation on parallel architectures such as GPUs or TPUs, as it inherently reduces the critical path forward propagation undergoes.
+
+
+
+
+

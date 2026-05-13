@@ -1,0 +1,698 @@
+\title{Dynamic-LLaVA: Efficient Multimodal Large Language Models via Dynamic Vision-language Context Sparsification}
+
+\begin{abstract}
+    Multimodal Large Language Models (MLLMs) have achieved remarkable success in vision understanding, reasoning, and interaction.
+    However, the inference computation and memory increase progressively with the generation of output tokens during decoding, directly affecting the efficacy of MLLMs.
+    Existing methods attempt to reduce the vision context redundancy to achieve efficient MLLMs. %
+    Unfortunately, the efficiency benefits of the vision context reduction in the prefill stage gradually diminish during the decoding stage.
+    To address this problem, we proposed a dynamic vision-language context sparsification framework \textbf{Dynamic-LLaVA}, which dynamically reduces the redundancy of vision context in the prefill stage and decreases the memory and computation overhead of the generated language context during decoding.
+    Dynamic-LLaVA designs a tailored sparsification inference scheme for different inference modes, \textit{i.e.}, prefill, decoding with and without KV cache, to achieve efficient inference of MLLMs.
+    In practice, Dynamic-LLaVA can reduce computation consumption by \textbf{$\sim$75\%} in the prefill stage.
+    Meanwhile, throughout the entire generation process of MLLMs, Dynamic-LLaVA reduces the \textbf{$\sim$50\%} computation consumption under decoding without KV cache, while saving \textbf{$\sim$50\%} GPU memory overhead when decoding with KV cache, due to the vision-language context sparsification.
+    Extensive experiments also demonstrate that Dynamic-LLaVA achieves efficient inference for MLLMs with negligible understanding and generation ability degradation or even performance gains compared to the full-context inference baselines.
+    
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have achieved outstanding performance and made a significant impact in real-world applications~\citep{zheng2023judging,team2023internlm,touvron2023llama,touvron2023llama2,achiam2023gpt,jiang2024mixtral}.
+In particular, within the vision-language multimodal fields, the LLaVA paradigm~\citep{liu2024visual,liu2024improved,bai2023qwen,zhu2023minigpt,zhao2024aligngpt} has emerged as the mainstream approach of Multimodal Large Language Models (MLLMs).
+This paradigm involves mapping visual data, through feature extractors and projecting embeddings, into the same feature distribution of LLMs for processing.
+It has shown notable success in enabling general capabilities in vision understanding, reasoning, and interaction.
+However, LLMs often adopt the decoder-only Transformer as the base architecture and typically contain an extremely large number of parameters.
+As output tokens are generated during decoding, the computational consumption progressively increases, leading to a substantial computational burden~\citep{vaswani2017attention}.
+To alleviate this issue, modern LLMs frequently employ the KV cache technique during decoding, which accelerates inference speed by storing previously computed KV activations and reusing them in subsequent decoding steps.
+It helps reduce redundant computations but introduces significant GPU memory overhead to store activated intermediate variables~\citep{luohe2024keep,radford2019language}.
+Moreover, the GPU memory overhead gradually increases in the decoding progresses.
+This problem becomes even more pronounced in MLLMs within the LLaVA paradigm, which is often combined with LLM, requiring significant resources for inference.
+To achieve efficient MLLMs, recent works attempted to reduce the number of image tokens processed by LLMs, which decreases computation and memory overhead while maintaining model performance~\citep{jin2024efficient}.
+One category of these methods~\citep{chen2024image, shang2024llava, ye2024voco, arif2024hired, song2024less} selects a subset of image tokens feeding to LLMs, \textit{e.g.}, FastV~\citep{chen2024image} uses the full-context attention matrix to determine which image tokens feed to LLMs. 
+We refer to this approach as vision context sparsification.
+Another category~\citep{li2024tokenpacker,kar2024brave,li2024mini} modifies the vision feature extractors or projectors to generate few number of image tokens.
+We refer to this strategy as efficient vision encoders/projectors.
+However, reducing image tokens primarily accelerates the prefill stage.
+We argue that \textit{\textbf{the efficiency benefits of the image token reduction in the prefill stage gradually diminish during the decoding stage}}.
+As shown in Fig.~\ref{fig:motivation}, the previous state-of-the-art (SoTA) methods with image token reduction, \textit{e.g.}, FastV~\citep{chen2024image}, significantly reduce the number of image tokens during the prefill stage, leading to substantial resource savings.
+Unfortunately, as decoding progresses, the actual benefits of this reduction diminish.
+This is because, in the decoding stage, the computation cost increasingly shifts towards the autoregressive generation of the output text tokens, where the reduced image tokens have less impact on the overall efficiency.
+As a result, the initial speedup from fewer image tokens becomes less dominant as decoding progresses.
+This phenomenon is discussed in detail in Sec.~\ref{subsubsec:Motivation}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[scale = 0.28]{fig/llava_mem.png}
+    \caption{
+        The entire generation process of MLLMs.
+        As generation progresses, the primary resource overheads of MLLMs under decoding with and without KV cache modes are GPU memory overhead and computation consumption, respectively.
+        Previous vision context sparsification methods achieved initial inference efficiency through vision context sparsification.
+        However, these benefits gradually diminish as decoding continues.
+        The results are measured in one A100 (80G) and the batch size is fixed to 8.
+        ``OOM'' means the generation process has failed due to the out of GPU memory.
+    }
+    \label{fig:motivation}
+\end{figure}
+
+To address the above problem, we propose a novel dynamic vision-language context sparsification framework, named \textit{\textbf{Dynamic-LLaVA}}.
+Specifically, we introduce two learnable predictors to sparsify the vision and language contexts in both prefill and decoding of MLLM, respectively (Sec.~\ref{subsubsec:Overview}).
+The tailored sparsification inference scheme is designed for different inference modes within MLLMs, \textit{i.e.}, prefill, decoding without KV cache and with KV cache (Sec.~\ref{subsubsec:Sparsification Inference}).
+During the training process, the proposed Dynamic-LLaVA employees masked softmax to isolate the influence of non-essential tokens on the important tokens and the Gumbel-Softmax~\citep{jang2016categorical} with Straight-Through Gradient Estimator~\citep{bengio2013estimating} to avoid the gradient flow problem, which enables end-to-end optimization (Sec.~\ref{subsubsec:End-to-end Sparsification Training}).
+Last but not least, we further develop the batch-parallel strategy for the sparsification inference of the Dynamic-LLaVA framework, which fully leverages GPU hardware advantage under batch parallel inference conditions (Sec.~\ref{subsec:Parallel Sparsification Inference Optimization}).
+Our framework can be easily integrated into MLLMs (\textit{e.g.}, LLaVA~\citep{liu2024visual,liu2024improved}) and efficient vision encoder/projector methods for MLLMs (\textit{e.g.}, TokenPacker~\citep{li2024tokenpacker}) to achieve more efficient inference.
+Extensive experiments conducted on the vision understanding benchmarks and the generation ability evaluations demonstrate that the proposed Dynamic-LLaVA framework achieves efficient inference throughout the entire MLLM generation process with negligible performance degradation.%
+In practice, the computation consumption of the prefill stage is reduced by \textbf{$\sim$75\%} via the vision context sparsification.
+Meanwhile, during the entire MLLM generation process, through the comprehensive vision-language context sparsification, the proposed Dynamic-LLaVA reduces computation cost by \textbf{$\sim$50\%} when decoding without KV cache, while saving \textbf{$\sim$50\%} GPU memory overhead with KV cache.
+To the best of our knowledge for efficient MLLMs, Dynamic-LLaVA is the \textbf{first} framework which attempts simultaneous sparsification of both vision and language contexts.
+We believe that our work can inspire new insights for the research community.
+
+
+
+
+\section{Related Work}
+
+
+\subsection{Token reduction for Efficient MLLMs}
+
+The existing vision context sparsification~\citep{chen2024image, shang2024llava, ye2024voco, arif2024hired, song2024less} and efficient vision encoder/projector~\citep{li2024tokenpacker,kar2024brave,li2024mini,bai2023qwen,cha2024honeybee,chen2024far, chu2024mobilevlm} methods have attempted to reduce the image token to accelerate the prefill stage.
+However, with the decoding of MLLMs, the efficiency benefits gradually diminish during the decoding.
+Our proposed Dynamic-LLaVA framework achieves consistently efficient inference throughout the entire generation phase via the vision-language context sparsification.
+}
+\subsection{KV Cache Compression for Efficient LLMs}
+
+{Some previous works~\citep{zhang2024pyramidkv,zhang2023h2o,li2024snapkv,xiao2023efficient,ge2023model,han2023lm,yang2024tidaldecode,zhang2024simlayerkv}} compress KV cache in order to reduce the GPU memory overhead of LLM inference during decoding, which has a similar goal to our Dynamic-LLaVA when considering decoding with KV cache.
+However, these methods typically necessitate using the subset of past generated KV cache to facilitate the selection of critical activations for participation during inference.
+In other words, it is imperative to obtaion the generated KV cache to make the decision for {which activations should be removed} during LLM inference.
+Dynamic-LLaVA, when decoding with KV cache, can be regarded as \textbf{\textit{``online KV cache compression''}}, \textit{i.e.}, it utilizes the features of the current output text token to determine whether to retain {the generated} activations without relying on past KV cache.
+This capability is crucial, as it enables Dynamic-LLaVA to enhance efficiency during the stages of prefill and decoding without KV cache, which do not involve KV cache utilization.
+{Moreover, the additional efficiency gained in prefill and decoding without KV cache modes is of comparable importance for MLLMs~\citep{liu2024visual, li2024monkey, chen2024image, huangivtp, cha2024honeybee, leviathan2023fast, chen2023accelerating, liu2023online}.
+}
+
+
+
+
+\section{Method}
+
+
+\subsection{Preliminaries and Notations}
+
+Multimodal large language model (MLLM), \textit{e.g.}, LLaVA~\citep{liu2024visual}, continues the autoregressive model paradigm~\citep{radford2019language,liu2024improved} and typically includes prefill and decoding stages during inference.
+In the prefill stage, features from different modalities are mapped into the same feature distribution as the input embeddings of large language model~(LLM).
+These multimodal features, in conjunction with text tokens, are simultaneously processed by LLM to generate the initial output text token.
+During the decoding stage, the tokens in the prefill stage, together with all subsequently generated output text tokens, are used in an autoregressive manner to predict the next output text token.
+In the context of LLM with $L$ Transformer decoder layers, we denote distinct index sets for various types of tokens processed across the stages of the model.
+Specifically, the index set for image tokens during prefill is denoted as $\mathcal{I}^{I}=\{1, 2, \cdots, N_l^{I}\}$, for text tokens during prefill as $\mathcal{I}^{T}=\{1, 2, \cdots, N_l^{T}\}$, while for output text tokens during decoding as $\mathcal{I}^{OT}=\{1, 2, \cdots, N_l^{OT}\}$, where $N_l^{I}$, $N_l^{T}$ and $N_l^{OT}$ are the counts of image tokens, text tokens and output text tokens of $l$-th decoder, respectively.
+The sets of image tokens, text tokens, and output text tokens processed by the $l$-th LLM decoder layer are denoted as $\mathcal{S}_{l}^{I}=\{\mit{t}_{l, i}^{I}|\forall i\in\mathcal{I}^{I}\}$, $\mathcal{S}_{l}^{T}=\{\mit{t}_{l, i}^{T}|\forall i\in\mathcal{I}^{T}\}$ and $\mathcal{S}_{l}^{OT}=\{\mit{t}_{l, i}^{OT}|\forall i\in\mathcal{I}^{OT}\}$, respectively, where $\mit{t}_{l, i}^{I},\mit{t}_{l, i}^{T},\mit{t}_{l, i}^{OT}\in \mathbb{R}^{d}$ denotes the $i$-th token of the different token sets for the $l$-th decoder.
+The sets of all tokens and the corresponding size are defined as $\mathcal{S}_{l}=\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}\!\cup\!\mathcal{S}_l^{OT}$ and $N_l=N_l^{I}\!+\!N_l^{T}\!+\!N_l^{OT}$, respectively.
+
+Considering the computation of the standard LLM~\citep{touvron2023llama}, the prefill stage of the $l$-th decoder is simply described as follows:
+\begin{equation}
+\small
+    \mathcal{S}_{l+1}^{P}=\operatorname{FFN}(\operatorname{MHA}(\mathcal{S}_{l}^{P}\,,\, \mathcal{S}_{l}^{P}\,,\,\mathcal{S}_{l}^{P})),
+    \label{eq1}
+\end{equation}
+where $\mathcal{S}_{l}^{P}=\mathcal{S}_{l}^{I}\!\cup\!\mathcal{S}_{l}^{T}$.
+$\operatorname{MHA}(\cdot\,,\,\cdot\,,\,\cdot)$ and $\operatorname{FFN}(\cdot)$ denote the Multi-Head Attention Block and the Feed-Forward Networks in $l$-th LLM decoder layer~\citep{vaswani2017attention}.
+
+During the decoding stage, there are typically two methods available, \textit{i.e.}, decoding without and with KV cache.
+First, we consider decoding without KV cache as an extension of the prefill stage.
+The one-pass decoding is computed as follows:
+\begin{equation}
+\small
+    \mathcal{S}_{l+1}^{P}\!\cup\!\mathcal{S}_{l+1}^{OT}=\operatorname{FFN}(\operatorname{MHA}(\mathcal{S}_{l}^{P}\!\cup\!\mathcal{S}_{l}^{OT}\,,\, \mathcal{S}_{l}^{P}\!\cup\!\mathcal{S}_{l}^{OT}\,,\, \mathcal{S}_{l}^{P}\!\cup\!\mathcal{S}_{l}^{OT})).
+    \label{eq2}
+\end{equation}
+For the decoding with KV cache, we further split the MHA operation as follows:
+\begin{equation}
+\small
+    \begin{split}
+        & Q\,,\,K\,,\,V=\{W_l^Q\mathcal{S}_{l,N_{l}^{OT}}^{OT}\}\,,\,\{W_l^K\mathcal{S}_{l,N_{l}^{OT}}^{OT}\}\,,\,\{W_l^V\mathcal{S}_{l,N_{l}^{OT}}^{OT}\}, \\
+        & \mathcal{S}_{l}^{K}=\mathcal{S}_{l}^{K}\!\cup\!K\,,\, \mathcal{S}_{l}^{V}=\mathcal{S}_{l}^{V}\!\cup\!V, \\
+        & O=W_O\operatorname{Attention}(Q\,,\,\mathcal{S}_{l}^{K}\,,\,\mathcal{S}_{l}^{V}), \\
+        & \mathcal{S}_{l+1,N_{l+1}^{OT}}^{OT}=\operatorname{FFN}(O),
+    \end{split}
+    \label{eq3}
+\end{equation}
+where $W_l^Q$, $W_l^K$, $W_l^V$ and $W_l^O$ are the linear layers to obtain the activation sets $Q$, $K$, $V$ and $O$ in $l$-th LLM decoder layer.
+$\operatorname{Attention}(\cdot\,,\,\cdot\,,\,\cdot)$ is the Scaled Dot-Product Attention operation~\citep{vaswani2017attention}.
+And $\mathcal{S}_{l,N_{l}^{OT}}^{OT}$ is the last output text token ($N_{l}^{OT}$-th output text token) in the $l$-th decoder layer during decoding, while $\mathcal{S}_{l}^{K}$ and $\mathcal{S}_{l}^{V}$ are KV cache of the $l$-th decoder layer.
+
+The primary computation cost of the prefill and decoding without KV cache operations involve processing various sets of tokens and most overhead is in the activation of linear layers. 
+Specifically, the cost of $l$-th deocder layer during the prefill stage is dictated by the combined size of the image and text token sets, denoted as $\operatorname{Computation}(\operatorname{Prefill})_l\propto |\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}|$, where $|\cdot|$ denotes the number of tokens.
+For the decoding stage without KV cache, the computation overhead is determined by the sum of the aforementioned components plus the size of the generated output text tokens, represented as $\operatorname{Computation}(\operatorname{Decoding_{w/o\, cache}})_l\propto |\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}\!\cup\!\mathcal{S}_l^{OT}|$.
+Unlike the previous two methods, decoding with KV cache operation requires only the last output text token to be activated.
+This decoding method yields lower computation overhead compared to decoding without KV cache.
+However, it needs additional GPU memory to store the the activated intermediate variables, thereby introducing a higher GPU memory cost~\citep{luohe2024keep}.
+The GPU memory overhead of $l$-th KV cache is also determined by the quantity of the token sets, defined as $\operatorname{Memory}(\operatorname{Decoding_{w/\, cache}})_l\propto |\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}\!\cup\!\mathcal{S}_l^{OT}|$.
+Given a $l$-th LLM decoder layer, reducing the sizes $|\mathcal{S}_l^{I}|$, $|\mathcal{S}_l^{T}|$ and $|\mathcal{S}_l^{OT}|$ results in a corresponding reduction in the number of tokens for layers beyond the $l$-th decoder layer~\citep{huang2024general}.
+This reduction decreases the computation consumption and GPU memory overhead during the prefill and decoding stage of LLM.
+
+\subsection{Motivation}
+\label{subsubsec:Motivation}
+
+As mentioned above, the token number affects the computation consumption and GPU memory overhead, while the previous works~\citep{chen2024image, shang2024llava, li2024tokenpacker, ye2024voco, arif2024hired, song2024less} focus on reducing the image token set $\mathcal{S}_l^{I}$.
+However, the reduction in the number of image tokens often primarily accelerates the prefill stage and gradually diminishes in benefit during the decoding stage.
+\begin{equation}
+\small
+    \begin{split}
+        & \operatorname{Computation}(\operatorname{Prefill})_l\propto |\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}|, \\
+        & \operatorname{Computation}(\operatorname{Decoding_{w/o\, cache}})_l\propto |\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}\!\cup\!\mathcal{S}_l^{OT}|\approx |\mathcal{S}_l^{OT}|, \\
+        & \operatorname{Memory}(\operatorname{Decoding_{w/\, cache}})_l\propto |\mathcal{S}_l^{I}\!\cup\!\mathcal{S}_l^{T}\!\cup\!\mathcal{S}_l^{OT}|\approx |\mathcal{S}_l^{OT}|, \\
+        & \text{where,}\quad |\mathcal{S}_l^{OT}|\to \infty.
+    \end{split}
+    \label{eq4}
+\end{equation}
+As shown in Eq.~\ref{eq4} and Fig.~\ref{fig:motivation}, with the generation of output text tokens during the decoding stage, the computation consumption and GPU memory overhead increase progressively.
+Meanwhile, the prefill stage typically computes only once during the generation process of LLM.
+Therefore, the benefits gained from reducing the number of image tokens diminish over the course of the entire generation process, as their impact becomes less significant during the later stages of decoding.
+Inspired by this, we propose the \textit{\textbf{Dynamic-LLaVA}} framework to sparsify both vision context $\mathcal{S}_l^{I}$ and language context $\mathcal{S}_l^{OT}$ involved in LLM generation to achieve the consistently \textbf{Efficient MLLM}.
+\subsection{Dynamic Vison-language Context Sparsification}\label{sec:3.3}
+
+\subsubsection{Overview}
+\label{subsubsec:Overview}
+
+To compress the image token set and output token set, we use two binary masks $\mathcal{M}^{I}$ and $\mathcal{M}^{OT}$ to determine whether their tokens should be retained or discarded in $l$-th decoder layer, where $\mathcal{M}^{I}=\{\mit{m}_{i}|\mit{m}_{i}\in\{\text{0},\text{1}\}\land\forall i\in\mathcal{I}^{I}\}$ and $\mathcal{M}^{OT}=\{\mit{m}_{i}|\mit{m}_{i}\in\{\text{0},\text{1}\}\land\forall i\in\mathcal{I}^{OT}\}$.
+The reduced image token set and output text token set are defined as $\mathcal{S}_l^{I*}=\{\mathcal{S}_{l,i}|\mathcal{M}_{i}^{I}=\text{1}\land\forall i\in\mathcal{I}^{I}\}$ and $\mathcal{S}_l^{OT*}=\{\mathcal{S}_{l,i}|\mathcal{M}_{i}^{OT}=\text{1}\land\forall i\in\mathcal{I}^{OT}\}$, respectively, where $|\mathcal{S}_l^{I*}|\leq|\mathcal{S}_l^{I}|$ and $|\mathcal{S}_l^{OT*}|\leq|\mathcal{S}_l^{OT}|$.
+In this way, the computation consumption and GPU memory overhead in both the prefill and decoding stages, as described in Eq.~\ref{eq4}, are simultaneously reduced.
+Such optimization contributes to efficient resource utilization during the entire generation process of LLM.
+In particular, Dynamic-LLaVA uses two learnable predictors $P^{I}$ and $P^{OT}$ to generate the binary masks $\mathcal{M}^{I}$ and $\mathcal{M}^{OT}$, respectively.
+{
+The learnable predictors are applied only once, after the $l$-th decoder layer of the MLLM.
+Specifically, once the predictor makes the decisions on tokens, this decisions are shared across all subsequent layers.
+This one-time token reduction strategy circumvents the need for complex adjustments to sparsity ratios of MLLM decoders. 
+In practice, we follow the work~\citep{chen2024image} and set $l$ to 2.
+The ablation study for $l$ is presented in Tab.~\ref{tab:hyper-parameter}.
+}
+{Note that} the learnable predictors consist of lightweight, multi-layer neural networks that introduce only marginal additional computation costs {(less than 1\% of the total)}.
+{The detailed real GPU latency and memory of the Dynamic-LLaVA framework are shown in Tab.~\ref{tab:time_and_memory} and Tab.~\ref{tab:decoding_efficiency}.}
+
+In the following sections, we introduce how to perform the sparsification inference in the prefill and decoding stages of MLLMs in Sec.~\ref{subsubsec:Sparsification Inference}.
+We also introduce the end-to-end training for the learnable predictors in Sec.~\ref{subsubsec:End-to-end Sparsification Training}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[scale = 0.23]{fig/overview.png}
+    \caption{
+    The sparsification inference modes for MLLMs.
+    In the prefill stage, only image tokens are dropped based on the decisions of the learnable image predictor.
+    For decoding without KV cache, we reduce both the image tokens and output text tokens to maintain consistent inference efficiency.
+    {When decoding with KV cache}, the output predictor determines whether the activations generated by the current output text token should be added to KV cache and thereby discard part of the activations to reduce the size of KV cache.
+    {Note that the decision regarding the activations of the current output text token will be shared across all subsequent layers beyond the $l$-th layer.}
+    {Meanwhile, the ``Yes'' branch means the decision to keep the token or its activations to participate in subsequent calculations.}
+    }
+    \label{fig:overview}
+\end{figure}
+
+\subsubsection{Sparsification Inference}
+\label{subsubsec:Sparsification Inference}
+
+As shown in Fig.~\ref{fig:overview}, we apply different sparsification strategies tailored to specific generation stages of MLLMs.
+For the token sets $\mathcal{S}_l^{I}$ and $\mathcal{S}_l^{T}$ processed by $l$-th decoder layer in the prefill stage, we consider the reduction of the image tokens.
+The image predictor leverages the features of image tokens and predicts the binary mask to select the tokens that participate in the prefill computation.
+Specifically, we consider the set $\mathcal{S}_l^{I}\in \mathbb{R}^{N_l^{I}\times d}$ as 2D matrices and the pipeline is defined as:
+\begin{equation}
+\small
+    \begin{split}
+        & \mathcal{D}^{I}=P^{I}(\mathcal{S}_l^{I})\in \mathbb{R}^{N_l^{I}\times 2}, \\
+        & \mathcal{M}^{I}=\operatorname{argmax_j}(\mathcal{D}^{I}), \\
+        & \mathcal{S}_l^{I*}=\{\mathcal{S}_{l,i}^{I}|\mathcal{M}_{i}^{I}=\text{1}\land \forall i\in\mathcal{I}^{I}\},
+    \end{split}
+    \label{eq5}
+\end{equation}
+where $P^{I}(\cdot)$ is the forward propagation of the image predictor, $\mathcal{D}^{I}$ is a feature sampling decision generated by $P^{I}$, and $\operatorname{argmax_j}$ indicates that we sample values of $\mathcal{D}^{I}$ along the second dimension.
+This indicates that a token should be kept if the second value is greater than the first value in the second dimension of $\mathcal{D}^{I}$.
+Then we replace the reduced token set $\mathcal{S}_l^{P*}=\mathcal{S}_l^{I*}\!\cup\!\mathcal{S}_l^{T}$ with $\mathcal{S}_l^{P}$ in Eq.~\ref{eq1} to perform the prefill stage.
+For the decoding stage, we first consider decoding without KV cache.
+This operation is similar to the prefill stage except that the last output token generates the next output token during decoding.
+Thus we use the pipeline in Eq.~\ref{eq5} with $S_l^{OT}$ and $P^{OT}$, while keeping $\mathcal{M}_{N_{l}^{OT}}^{OT}=\text{1}$ to obtain $S_l^{OT*}$, {where $\mathcal{M}_{N_{l}^{OT}}^{OT}$ is the $N_{l}^{OT}$-th value of the mask $\mathcal{M}^{OT}$.}
+We further replace the above $\mathcal{S}_l^{P*}$ and $\mathcal{S}_l^{OT*}$ with $\mathcal{S}_l^{P}$ and $\mathcal{S}_l^{OT}$ in Eq.~\ref{eq2} to conduct the decoding stage.
+{Note that in both the prefill and decoding without KV cache stages, after the predictors reduce the token set $\mathcal{S}_l$ to $\mathcal{S}_l^{*}$, all subsequent layers use this reduced token set for computation, \textit{i.e.}, the length of computed token sets is smaller to introduce the computation efficiency.}
+
+For decoding with KV cache, our primary goal is to reduce the sizes of KV cache, specifically $\mathcal{S}_{l}^{K}$ and $\mathcal{S}_{l}^{V}$, to achieve GPU memory savings during the decoding process.
+We use the last output token $\mathcal{S}_{l,N_{l}^{OT}}^{OT}$ and $P^{OT}$ to get a binary decision $\mathcal{M}_{N_l^{OT}}^{OT}\in\{\text{0},\text{1}\}$ by Eq.~\ref{eq5} and the decoding operation in Eq.~\ref{eq3} is modified to the following operation:
+\begin{equation}
+\small
+    \begin{split}
+        & Q\,,\,K\,,\,V=\{W_l^Q\mathcal{S}_{l,N_{l}^{OT}}^{OT}\}\,,\,\{W_l^K\mathcal{S}_{l,N_{l}^{OT}}^{OT}\}\,,\,\{W_l^V\mathcal{S}_{l,N_{l}^{OT}}^{OT}\}, \\
+        & O=W_O\operatorname{Attention}(Q\,,\,\mathcal{S}_{l}^{K}\cup K\,,\,\mathcal{S}_{l}^{V}\cup V), \\
+        & \begin{cases}
+            \mathcal{S}_{l}^{K}=\mathcal{S}_{l}^{K}\!\cup\!K\,,\, \mathcal{S}_{l}^{V}=\mathcal{S}_{l}^{V}\!\cup\!V,                 & \text{if\quad}\mathcal{M}_{N_l^{OT}}^{OT}=1, \\
+            \mathcal{S}_{l}^{K}=\mathcal{S}_{l}^{K}\!\cup\!\emptyset\,,\, \mathcal{S}_{l}^{V}=\mathcal{S}_{l}^{V}\!\cup\!\emptyset, & \text{otherwise},                            \\
+        \end{cases} \\
+        & \mathcal{S}_{l+1,N_{l+1}^{OT}}^{OT}=\operatorname{FFN}(O),
+    \end{split}
+    \label{eq6}
+\end{equation}
+where the binary mask $\mathcal{M}_{N_l^{OT}}^{OT}$ determines whether {KV activations of} the current output text token should be added to KV cache.
+{Meanwhile, the decision to add the current token's activations to the KV cache is also propagated to subsequent layers, and the size of the KV cache for subsequent layers is reduced accordingly.}
+Note that we still include this token in the current attention computation, regardless of whether it will be discarded in subsequent calculations.
+This ensures that this token contributes to the attention mechanism immediately, even if it does not persist in KV cache for future decoding steps.
+\subsubsection{End-to-end Sparsification Training}
+\label{subsubsec:End-to-end Sparsification Training}
+Unlike the sparsification inference phase, where the token sets are directly reduced, we employ the full-token sets along with binary masks to optimize the predictors and LLM in an end-to-end training process, as inspired by~\citep{veit2018convolutional, herrmann2020channel, rao2021dynamicvit, lin2023filter}.
+This approach ensures the model dynamically adjusts and learns which tokens are essential during training while maintaining the full set of tokens for comprehensive optimization.
+{The details of the end-to-end sparsification training are presented in Fig.}
+
+Given the binary masks of the token sets, we need to use these masks to isolate the influence of non-essential tokens on the important tokens during the LLM training computation.
+One native idea is to directly set the values of the unnecessary tokens to zero vectors.
+However, this method introduces a problem: when we sparsify output text tokens during the parallel training of LLM, discarding the value of an output text token will prevent it from autoregressively predicting the next output text token, making it impossible to compute the loss.
+{This ``hard training'' result is presented in Tab.~\ref{tab:maskedsoftmax}.}
+To address this, we apply the masks to the $\operatorname{Softmax(\cdot)}$ operation in $\operatorname{Attention(\cdot)}$ during training.
+Specifically, we firstly obtain a binary mask of the full-token set $\mathcal{M}=\mathcal{M}^{I}\!\cup\!\{\text{1}\}^{N_l^{T}}\!\cup\!\mathcal{M}^{OT}$.
+Then we use the full-token set mask to get the binary mask matrix $\mathbb{G}=\{\mathcal{M}\}^{N_l}\in\mathbb{R}^{N_l\times N_l}$ and let $\text{diag}(\mathbb{G})=\text{1}$.
+The $\operatorname{Softmax(\cdot)}$ is changed to $\operatorname{MaskedSoftmax(\cdot\,,\, \cdot)}$ operation during training:
+\begin{equation}
+\small
+    \operatorname{MaskedSoftmax(\mathbb{X}_{i,j}\,,\, \mathbb{G})}= \frac{\exp(\mathbb{X}_{i,j})\mathbb{G}_{i,j}}{\sum_{k=1}^{N_l} \exp(\mathbb{X}_{i,k})\mathbb{G}_{i,k}},
+    \label{eq7}
+\end{equation}
+where $\mathbb{X}\in \mathbb{R}^{N_l\times N_l}$ is the input of $\operatorname{Softmax(\cdot)}$ operation.
+Eq.~\ref{eq7} allows our framework to maintain parallelism in training while ensuring that the non-essential tokens do not influence the output, without breaking the autoregressive process essential for loss calculation.
+{
+Note that this form of masking and predictors maintains uniformity between training and inference. 
+Specifically, during training, the presence of the causal attention mask~\citep{brown2020language} ensures that each token focuses only on prior context information, while the use of MLP in the output predictor $P^{OT}$ ensures that decisions are based solely on its own features, consistent with the process used during decoding.
+}
+
+In addition to the issues mentioned above, we have the gradient flow problem in the backward propagation of training.
+The $\operatorname{argmax}(\cdot)$ operation we performed to obtain $\mathcal{M}^{I}$ and $\mathcal{M}^{OT}$ is non-differentiable and impedes end-to-end training.
+Thus we use the Gumbel-Softmax~\citep{jang2016categorical} with Straight-Through Gradient Estimator~\citep{bengio2013estimating} to avoid the gradient flow problem.
+Taking the reduction of the image token set as an example and the $\operatorname{argmax}(\cdot)$ in Eq.~\ref{eq5} is modified to the differentiable operation during training.
+The forward propagation is formulated as follows:
+\begin{equation}
+\small
+    \begin{split}
+        & \mathcal{D}^{I\dag}=\operatorname{GumbelSoftmax}_j(\mathcal{D}^{I},\tau), \\
+        & \mathcal{M}^{I}=\operatorname{argmax}_j(\mathcal{D}^{I\dag}),
+    \end{split}
+    \label{eq8}
+\end{equation}
+where $\tau$ is the temperature of the Gumbel-Softmax function.
+When $\tau$ becomes smaller, $\mathcal{D}^{I\dag}$ smoothly approaches the discrete distribution.
+Following the work~\citep{lin2023filter}, Dynamic-LLaVA employ the exponential decay for $\tau$ from 1 to 0.1 during training.
+Meanwhile, in the backward propagation, we propagate the gradient flow from $\mathcal{M}^{I}$ to $\mathcal{D}^{I\dag}$:
+\begin{equation}
+\small
+    \frac{\partial{\cal{L}}}{\partial{\mathcal{D}^{I\dag}}} = \frac{\partial{\cal{L}}}{\partial{\mathcal{M}^{I}}},
+    \label{eq9}
+\end{equation}
+where $\cal{L}$ is the objective loss function.
+Furthermore, we incorporate a constraint regularization term to constrain binary masks according to a pre-defined keep rate for token sets.
+This constraint ensures that the predictors retains a certain proportion of tokens, adhering to the desired sparsification strategy.
+It is worth noting that we found that applying sparsification to $\mathcal{S}_l^{OT}$ on samples with short output tokens during training lead to instability training and performance degradation.
+To avoid this problem, we apply $\mathcal{S}_l^{OT}$ sparsification only to samples where output text tokens exceed a pre-defined length $\text{LEN}^{OT}\in\mathbb{N}_0$, where $\mathbb{N}_0$ denotes the set of non-negative integers.
+The constraint regularization term $\mathcal{R}$ can be defined as:
+\begin{equation}
+\small
+    \mathcal{R}= \|\operatorname{sum}(\mathcal{M}^{I})/|\mathcal{S}_{l}^{I}|-r^{I}\|_F+
+    \begin{cases}
+        \|\operatorname{sum}(\mathcal{M}^{OT})/|\mathcal{S}_{l}^{OT}|-r^{OT}\|_F, & \text{if\quad}|\mathcal{S}_{l}^{OT}|\geq\text{LEN}^{OT}, \\
+        \text{0},                                                                 & \text{otherwise},
+    \end{cases}
+    \label{eq10}
+\end{equation}
+where $\operatorname{sum}(\cdot)$ is the summation operation and $\|\cdot\|_F$ denotes the Frobenius norm.
+$r^{I}$ and $r^{OT}$ are the pre-defined keep rates of $\mathcal{S}_{l}^{I}$ and $\mathcal{S}_{l}^{OT}$, respectively.
+We directly add this term to the original objective loss function, with a hyper-parameter $\lambda$ used to control its weight.
+{
+The trade-off analysis of vision context ($r^I$) and language context ($r^{OT}$) are presented in Tab.~\ref{tab:trade-off}, while the ablation study of the sample used for training should have a minimum output text token length ($\text{LEN}^{OT}$) and the weight of the regularization term ($\lambda$) are shown in Tab.~\ref{tab:hyper-parameter}.
+}
+\begin{table*}[t]
+    \caption{
+        Comparison with SoTA vision context sparsification methods on vision understanding benchmarks.
+        The best results are \textbf{bolded} and the second best results are \underline{underlined} in all following tables.
+        The sign ``$\textcolor{red}{I}$'' and ``$\textcolor{red}{I}|\textcolor{softgreen}{T}$'' mean only the vision sparsification and the vision-language sparsification of Dynamic-LLaVA in all following tables, respectively.
+        ``TFLOPs'' is only the computation consumption of the image tokens.
+        Dynamic-LLaVA achieves the best performance in most benchmarks using a similar number of image tokens. {The ``Free'' column indicates whether a method is training-free (\textit{i.e.}, can be applied directly to MLLMs without training).}
+    }
+    \centering
+    \resizebox{0.99\linewidth}{!}{
+        \begin{threeparttable}
+            \begin{tabular}{c|c|cc|ccccccccccc}
+                \toprule
+                \multirow{2}{*}{Method}                                                                      & \multirow{2}{*}{{Free}}&\multicolumn{2}{c|}{\textcolor{red}{Image (prefill)}}& \multirow{2}{*}{VQAv2}           & \multirow{2}{*}{GQA}             & \multirow{2}{*}{SciQA}           & \multirow{2}{*}{TextVQA}                    & \multirow{2}{*}{POPE}                       & \multirow{2}{*}{MME}                        & \multirow{2}{*}{MMBench} & \multirow{2}{*}{SEED}                                                                                                                                                         & \multirow{2}{*}{{MMVP}}& \multirow{2}{*}{{RealWorldQA}}&\multirow{2}{*}{{CVBench-2D}}\\
+                \cmidrule{3-4}
+                                                                                                             &                                 & Token                            & TFLOPs                           &                                             &                                             &                                             &                                              &                                              &                                                         &                                              &                                              & & &\\
+                \midrule    
+                \midrule
+                LLaVA-1.5-7B                                                                                 & $-$                       & 576                              & 10.1                             & 78.5                                        & 62.0                                        & 66.8                                        & 58.2                                         & 85.9                                         & 1510.7                                                  & 64.3                                         & 66.1                                         & {29.3}& {53.7}&{58.5}\\
+                \midrule
+                (Arxiv24) LLaVA-PruMerge+                                                                    & {\ding{55}}& 146 (-75\%)                      & 2.5 (-75\%)                      & 76.8 (-1.7)                                 & $-$                                         & 68.3 (+1.5)                                 & \textbf{57.1 (-1.1)}                         & 84.0 (-1.9)                                  & 1462.4 (-48.3)                                          & \underline{64.9 (+0.6)}                                  & $-$                                          & {$-$}& {$-$}&{$-$}\\
+                (ECCV24) LLaVA-FastV$_{k=3, r=0.75}$                                                  & {\ding{51}}                       & 144 (-75\%)                      & 3.2 (-68\%)                      & 75.1 (-3.4)                                 & 57.5 (-4.5)                                 & \underline{68.7 (+1.9)}                     & 56.2 (-2.0)                                  & 81.0 (-4.9)                                  & 1458.9 (-51.8)                                  & 63.5 (-0.8)                                  & 62.8 (-3.3)                                  & {\underline{24.0 (-5.3)}}& {\underline{53.7 (-0.0)}}
+&{\underline{56.7 (-1.9)}}\\
+ {$^\dag$(ECCV24) LLaVA-FastV$_{k=3, r=0.75}$} &{{\ding{55}}} & {144 (-75\%)}  & {3.2 (-68\%)} & 74.2 (-4.3) & {56.6 (-5.4)} & {64.0 (-2.8)} & {54.3 (-3.9)} & {82.7 (-3.2)} & {1292.2 (-218.5)} & {58.6 (-5.7)} & {58.4 (-7.7)} & {16.7 (-12.6)} & {49.8 (-3.9)} & {44.7 (-13.8)} \\
+                (Arxiv24) VoCo-LLaMA                                                                         & {\ding{55}}                       & 128 (-78\%)                      & 2.2 (-78\%)                      & 76.9 (-1.6)                                 & 59.8 (-2.2)                                 & $-$                                         & $-$                                          & $-$                                          & $-$                                                     & 61.0 (-3.3)                                  & 59.1 (-7.0)                                  & {$-$}& {$-$}&{$-$}\\
+                (Arxiv24) LLaVA-HiRED                                                                        & {\ding{51}}                       & 115 (-80\%)                      & 2.0 (-80\%)                      & 74.7 (-3.8)                                 & $-$                                         & 66.4 (-0.4)                                 & 44.2 (-14.0)                                 & $-$                                          & $-$                                                     & $-$                                          & $-$                                          & {$-$}& {$-$}&{$-$}\\
+                \cellcolor[gray]{0.8}Dynamic-LLaVA-7B$_{\textcolor{red}{I}}$ (Ours)                          & \cellcolor[gray]{0.8}{\ding{55}}  & \cellcolor[gray]{0.8}115 (-80\%) & \cellcolor[gray]{0.8}2.5 (-75\%) & \cellcolor[gray]{0.8}\textbf{78.0 (-0.5)}   & \cellcolor[gray]{0.8}\textbf{61.4 (-0.6)}   & \cellcolor[gray]{0.8}\textbf{69.1 (+2.3)}   & \cellcolor[gray]{0.8}\underline{57.0 (-1.2)} & \cellcolor[gray]{0.8}\underline{85.0 (-0.9)}             & \cellcolor[gray]{0.8}\underline{1479.8 (-30.9)} & \cellcolor[gray]{0.8}\textbf{65.4 (+1.1)} & \cellcolor[gray]{0.8}\underline{64.6 (-1.5)}             & \cellcolor[gray]{0.8}{$-$}& \cellcolor[gray]{0.8}{$-$}&\cellcolor[gray]{0.8}{$-$}\\
+                \cellcolor{softblue}Dynamic-LLaVA-7B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)  & \cellcolor{softblue}{\ding{55}}   & \cellcolor{softblue}115 (-80\%)  & \cellcolor{softblue}2.5 (-75\%)  & \cellcolor{softblue}\underline{77.9 (-0.6)} & \cellcolor{softblue}\underline{61.3 (-0.7)} & \cellcolor{softblue}68.6 (+1.8)             & \cellcolor{softblue}56.5 (-1.7)              & \cellcolor{softblue}\textbf{85.9 (+0.0)}     & \cellcolor{softblue}\textbf{1501.0 (-9.7)}      & \cellcolor{softblue}64.1 (-0.2)              & \cellcolor{softblue}\textbf{65.0 (-1.1)}  & \cellcolor{softblue} \textbf{{26.3 (-3.0)}}& \cellcolor{softblue} \textbf{{57.0 (+3.3)}}&\cellcolor{softblue} \textbf{{58.3 (-0.2)}}\\
+                \midrule
+                {\color[gray]{0.4}$^\ddag$LLaVA-1.5-7B+H2O$_{r=0.5}$}& {\color[gray]{0.4}{\ding{51}}}& \color[gray]{0.4}576 & \color[gray]{0.4}{10.1} & \color[gray]{0.4}{$-$} & \color[gray]{0.4}{$-$}  & \color[gray]{0.4}{$-$} &\color[gray]{0.4}{11.6 (-46.6)} &  \color[gray]{0.4}{50.5 (-30.4)} &  \color[gray]{0.4}{500.5 (-1010.2)} &  \color[gray]{0.4}{$-$} &  \color[gray]{0.4}{$-$} &  \color[gray]{0.4}{$-$} &  \color[gray]{0.4}{$-$} &  \color[gray]{0.4}{$-$} \\
+ {\color[gray]{0.4}$^\ddag$LLaVA-1.5-7B+H2O$_{k=10,r=0.5}$}& {\color[gray]{0.4}{\ding{51}}}  & \color[gray]{0.4}576  & \color[gray]{0.4}{10.1} & \color[gray]{0.4}{77.9 (-0.6)}& \color[gray]{0.4}{61.0 (-1.0)}& \color[gray]{0.4}{41.9 (-16.3)}& \color[gray]{0.4}{55.9 (-2.3)}& \color[gray]{0.4}{86.9 (+1.0)}& \color[gray]{0.4}{1458.4 (-52.3)}&  \color[gray]{0.4}{1.4 (-62.9)}& \color[gray]{0.4}{26.8 (-39.3)}& \color[gray]{0.4}{0 (-29.3)}& \color[gray]{0.4}{42.3 (-11.4)}&\color[gray]{0.4}{49.7 (-8.8)}\\
+ 
+                \midrule
+                \midrule
+                LLaVA-1.5-13B                                                                                & $-$                      & 576                              & 19.6                             & 80.0                                        & 63.3                                        & 71.6                                        & 61.3                                         & 85.9                                         & 1531.3                                                  & 67.7                                         & 68.2                                         & {30.7}& {55.3} & {62.3} \\
+                \midrule
+                (Arxiv24) LLaVA-PruMerge+                                                                    & {\ding{55}}                      & 146 (-75\%)                      & 4.9 (-75\%)                      & 77.8 (-2.2)                                 & $-$                                         & 71.0 (-0.6)                                 & 58.6 (-2.7)                                  & 84.4 (-1.5)                                  & 1485.5 (-45.8)                                          & 65.7 (-2.0)                                  & $-$                                          & {$-$} & {$-$} & {$-$}\\
+                (ECCV24) LLaVA-FastV$_{k=3, r=0.75}$                                                  & {\ding{51}}                      & 144 (-75\%)                      & 6.0 (-69\%)                      & 77.0 (-3.0)                                 & 60.1 (-3.2)                                 & \textbf{72.8 (+1.2)}                        & 59.0 (-2.3)                                  & 83.2 (-2.7)                                  & 1470.3 (-61.0)                                  & \underline{66.9 (-0.8)}                                  & 65.4 (-2.8)                                  & \underline{{28.0 (-2.7)}} & \underline{{52.8 (-2.5)}} & \underline{{58.9 (-3.4)}}\\
+                \cellcolor[gray]{0.8}Dynamic-LLaVA-13B$_{\textcolor{red}{I}}$ (Ours)                         & \cellcolor[gray]{0.8}{\ding{55}} & \cellcolor[gray]{0.8}115 (-80\%) & \cellcolor[gray]{0.8}4.7 (-76\%) & \cellcolor[gray]{0.8}\textbf{79.1 (-0.9)}   & \cellcolor[gray]{0.8}\textbf{62.7 (-0.6)}   & \cellcolor[gray]{0.8}72.2 (+0.6)            & \cellcolor[gray]{0.8}\underline{59.5 (-1.8)} & \cellcolor[gray]{0.8}\textbf{86.8 (+0.9)}    & \cellcolor[gray]{0.8}\underline{1554.1 (+22.8)} & \cellcolor[gray]{0.8}\textbf{68.3 (+0.6)} & \cellcolor[gray]{0.8}\textbf{66.6 (-1.6)}    & \cellcolor[gray]{0.8} {$-$} & \cellcolor[gray]{0.8} {$-$} & \cellcolor[gray]{0.8} {$-$}\\
+                \cellcolor{softblue}Dynamic-LLaVA-13B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours) & \cellcolor{softblue}{\ding{55}}  & \cellcolor{softblue}115 (-80\%)  & \cellcolor{softblue}4.7 (-76\%)  & \cellcolor{softblue}\underline{78.8 (-1.2)} & \cellcolor{softblue}\underline{62.5 (-0.8)} & \cellcolor{softblue}\underline{72.4 (+0.8)} & \cellcolor{softblue}\textbf{59.6 (-1.7)}     & \cellcolor{softblue}\underline{86.5 (+0.6)}  & \cellcolor{softblue}\textbf{1563.3 (+32.0)}     & \cellcolor{softblue}\underline{66.9 (-0.8)}              & \cellcolor{softblue}\underline{66.5 (-1.7)}  &\cellcolor{softblue} \textbf{{31.3 (+0.6)}} & \cellcolor{softblue}\textbf{{53.3 (-2.0)}} & \cellcolor{softblue} \textbf{{60.7 (-1.6)}} \\
+                \midrule
+                {\color[gray]{0.4}$^\ddag$LLaVA-1.5-13b+H2O$_{k=10,r=0.5}$}& {\color[gray]{0.4}{\ding{51}}}& \color[gray]{0.4}576 &\color[gray]{0.4}{19.6} & \color[gray]{0.4}{78.9 (-1.1)} & \color[gray]{0.4}{62.3 (-1.0)}  &\color[gray]{0.4}{48.5 (-23.1)} &\color[gray]{0.4}{57.5 (-3.8)} &  \color[gray]{0.4}{87.3 (+1.4)} &  \color[gray]{0.4}{1448.3 (-83.0)} &  \color[gray]{0.4}{4.7 (-59.6)} &  \color[gray]{0.4}{32.3 (35.9)} &  \color[gray]{0.4}{0 (-30.7)} &  \color[gray]{0.4}{43.9 (-11.4)} &  \color[gray]{0.4}{50.8 (-11.5)} \\
+                \bottomrule
+            \end{tabular}
+            \begin{tablenotes}
+                \item[$\dag$]{
+                It means that we apply one additional epoch sparsification training for FastV. 
+                For a fair comparison, the settings are the same as for Dynamic-LLaVA.
+
+                }
+                \item[$\ddag$]{
+                It means that we directly apply the LLM KV cache compression method H2O to MLLMs.
+                \textbf{Note that H2O cannot provide the significant computation efficiency in the prefill stage of MLLMs}.
+
+                }
+            \end{tablenotes}
+        \end{threeparttable}
+    }
+    \label{tab:llava}
+\end{table*}
+
+\begin{table*}[t]
+    \caption{
+        Comparison with SoTA efficient vision projector methods on vision understanding benchmarks.
+        Dynamic-LLaVA uses the original vision projector and achieves competitive performance.
+    }
+    \centering
+    \resizebox{0.78\linewidth}{!}{
+        \begin{threeparttable}
+            \begin{tabular}{c|c|ccc|ccccccc}
+                \toprule
+                \multirow{2}{*}{Method}                                                                                  & \multirow{2}{*}{Projector}       & \multicolumn{3}{c|}{\textcolor{red}{Image (prefill)}}& \multirow{2}{*}{MMBench} & \multirow{2}{*}{MM-Vet}          & \multirow{2}{*}{VQAv2}          & \multirow{2}{*}{GQA}                 & \multirow{2}{*}{POPE}                 & \multirow{2}{*}{VizWiz}              & \multirow{2}{*}{Avg.}                                                                                                                                                        \\
+                \cmidrule{3-5}
+                                                                                                                         &                                  & Res.                                                  & Token                    & TFLOPs                           &                                      &                                       &                                      &                                      &                                       &                                                        &                                      \\
+                \midrule
+                \midrule
+                LLaVA-1.5-7B                                                                                             & MLP                              & 336                                                   & 576                      & 10.1                             & 64.3                                 & {31.1}                                & 78.5                                 & 62.0                                 & 85.9                                  & 50.0                                                   & 62.0                                 \\
+                \midrule
+                (Arxiv23) LLaVA-Resampler-7B                                                                             & Resampler                        & 336                                                   & 144                      & 2.5                              & 63.1                                 & 29.2                                  & 75.1                                 & 58.4                                 & 84.7                                  & \textbf{51.9}& 60.4                                 \\
+                (CVPR24) LLaVA-C-Abstractor-7B                                                                           & C-Abstractor                     & 336                                                   & 144                      & 2.5                              & 63.1                                 & 29.4                                  & 74.6                                 & 59.2                                 & 84.6                                  & 49.2                                                   & 60.0                                 \\
+                (Arxiv24) LLaVA-Pixel-Shuffle-7B                                                                         & Pixel-Shuffle                    & 336                                                   & 144                      & 2.5                              & 64.0                                 & \underline{29.7}& 76.2                                 & 60.1                                 & 85.9                                  & 48.8                                                   & 60.8                                 \\
+                (Arxiv24) LLaVA-LDP-v2-7B                                                                                & LDP-v2                           & 336                                                   & 144                      & 2.5                              &\textbf{66.2}& 28.7                                  & 77.3                                 & 61.1                                 & \underline{86.1}& 47.6                                                   & 61.2                                 \\
+                \cellcolor[gray]{0.8}Dynamic-LLaVA-7B$_{\textcolor{red}{I}}$ (Ours)                                      & \cellcolor[gray]{0.8}MLP         & \cellcolor[gray]{0.8}336                              & \cellcolor[gray]{0.8}115 & \cellcolor[gray]{0.8}2.5         & \cellcolor[gray]{0.8}\underline{65.4}& \cellcolor[gray]{0.8}{29.5}& \cellcolor[gray]{0.8}\textbf{78.0}& \cellcolor[gray]{0.8}\textbf{61.4}& \cellcolor[gray]{0.8}\textbf{86.2}& \cellcolor[gray]{0.8}50.2                              & \cellcolor[gray]{0.8}\underline{61.8}\\
+                \cellcolor{softblue}Dynamic-LLaVA-7B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)              & \cellcolor{softblue}MLP          & \cellcolor{softblue}336                               & \cellcolor{softblue}115  & \cellcolor{softblue}2.5          & \cellcolor{softblue}64.1             & \cellcolor{softblue}\textbf{32.2}& \cellcolor{softblue}\underline{77.9}& \cellcolor{softblue}\underline{61.3}& \cellcolor{softblue}85.9              & \cellcolor{softblue}\underline{51.2}& \cellcolor{softblue}\textbf{62.1}\\
+                \midrule
+                \midrule
+                LLaVA-TokenPacker-7B-144Token                                                                            & TokenPacker                      & 336                                                   & 144                      & 2.5                              & 65.1                                 & 31.7                                  & 77.9                                 & 61.8                                 & 87.0                                  & 52.0                                                   & 62.6                                 \\
+                \midrule
+                (Arxiv24) LLaVA-TokenPacker-7B-64Token                                                                   & TokenPacker                      & 336                                                   & 64                       & 1.1 (-56\%)                      & 64.1                                 & $-$                                   & 77.2                                 & 61.1                                 & \textbf{86.3}                         & 50.7                                                   & $-$                                  \\
+                (ECCV24) LLaVA-TokenPacker-FastV-7B$_{k=3, r=0.5}$                                                       & TokenPacker                      & 336                                                   & 72                       & 1.4 (-44\%)                      & {\underline{65.0}}                   & {\underline{32.0}}                    & 76.6                                 & 60.8                                 & 85.2                                  & \textbf{51.4}                        & 61.8                                 \\
+                \cellcolor[gray]{0.8}Dynamic-LLaVA-TokenPacker-7B$_{\textcolor{red}{I}}$ (Ours)                          & \cellcolor[gray]{0.8}TokenPacker & \cellcolor[gray]{0.8}336                              & \cellcolor[gray]{0.8}57  & \cellcolor[gray]{0.8}1.1 (-56\%) & \cellcolor[gray]{0.8}\textbf{65.1}   & \cellcolor[gray]{0.8}\textbf{32.1}    & \cellcolor[gray]{0.8}\textbf{77.8}   & \cellcolor[gray]{0.8}\textbf{61.9}   & \cellcolor[gray]{0.8}85.9             & \cellcolor[gray]{0.8}\underline{51.2} & \cellcolor[gray]{0.8}\textbf{62.3}   \\
+                \cellcolor{softblue}Dynamic-LLaVA-TokenPacker-7B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)  & \cellcolor{softblue}TokenPacker  & \cellcolor{softblue}336                               & \cellcolor{softblue}57   & \cellcolor{softblue}1.1 (-56\%)  & \cellcolor{softblue}63.5             & \cellcolor{softblue}31.9              & \cellcolor{softblue}\underline{77.6} & \cellcolor{softblue}\underline{61.7} & \cellcolor{softblue}\underline{86.0}  & \cellcolor{softblue}\underline{51.2}                   & \cellcolor{softblue}\underline{62.0} \\
+                \midrule
+                \midrule
+                LLaVA-TokenPacker-13B-144Token                                                                           & TokenPacker                      & 336                                                   & 144                      & 4.9                              & 68.0                                 & 34.6                                  & 78.9                                 & 62.5                                 & 87.4                                  & 55.6                                                   & 64.5                                 \\
+                \midrule
+                (Arxiv24) LLaVA-TokenPacker-13B-64Token                                                                  & TokenPacker                      & 336                                                   & 64                       & 2.2 (-55\%)                      & 66.2                                 & $-$                                   & \underline{78.1}                     & 62.0                                 & \textbf{87.3}                         & 52.9                                                   & $-$                                  \\
+                (ECCV24) LLaVA-TokenPacker-FastV-13B$_{k=3, r=0.5}$                                                      & TokenPacker                      & 336                                                   & 72                       & 2.6 (-47\%)                      & \underline{66.8}                     & 34.5                                  & 77.5                                 & 61.5                                 & 86.3                                  & \underline{54.9}                                       & 63.6                                 \\
+                \cellcolor[gray]{0.8}Dynamic-LLaVA-TokenPacker-13B$_{\textcolor{red}{I}}$ (Ours)                         & \cellcolor[gray]{0.8}TokenPacker & \cellcolor[gray]{0.8}336                              & \cellcolor[gray]{0.8}57  & \cellcolor[gray]{0.8}2.1 (-57\%) & \cellcolor[gray]{0.8}\textbf{67.4}   & \cellcolor[gray]{0.8}\underline{34.8} & \cellcolor[gray]{0.8}\textbf{78.3}   & \cellcolor[gray]{0.8}\textbf{62.5}   & \cellcolor[gray]{0.8}\underline{86.7} & \cellcolor[gray]{0.8}\textbf{56.4}                     & \cellcolor[gray]{0.8}\textbf{64.4}   \\
+                \cellcolor{softblue}Dynamic-LLaVA-TokenPacker-13B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours) & \cellcolor{softblue}TokenPacker  & \cellcolor{softblue}336                               & \cellcolor{softblue}57   & \cellcolor{softblue}2.1 (-57\%)  & \cellcolor{softblue}\underline{66.8} & \cellcolor{softblue}\textbf{37.1}     & \cellcolor{softblue}\textbf{78.3}    & \cellcolor{softblue}\underline{62.1} & \cellcolor{softblue}86.3              & \cellcolor{softblue}54.8                               & \cellcolor{softblue}\underline{64.2} \\
+                \bottomrule
+            \end{tabular}
+        \end{threeparttable}
+    }
+    \label{tab:llava_projector}
+\end{table*}
+
+\begin{table*}[t]
+    \caption{
+        Comparison of generation ability benchmarks.
+        ``Total$\rightarrow$Computing'' means the total generated token number and the maximum number of tokens involved in decoding.
+        ``a/b'' means the results in experiments of PPL/METEOR.
+        ``TFLOPs'' and ``Mem.'' in ``\textcolor{softgreen}{Text (decoding)}'' are measured under decoding w/o and w/ KV cache, respectively, while ``Mem.'' means maximum GPU memory of KV cache.
+        Dynamic-LLaVA achieves significant inference efficiency during the decoding stage with negligible generation ability drop when sparsifying both vision and language.
+    }
+    \centering
+    \resizebox{0.85\linewidth}{!}{
+        \begin{threeparttable}
+            \begin{tabular}{c|c|c|ccc|cc}
+                \toprule
+                \multirow{2}{*}{Benchmark} & \multirow{2}{*}{Method}                                                                                  & \textcolor{red}{Image (prefill)}& \multicolumn{3}{c|}{\textcolor{softgreen}{Text (decoding)}} & \multirow{2}{*}{PPL$\downarrow$}                 & \multirow{2}{*}{METEOR$\uparrow$}                                                                                                         \\
+                \cmidrule{3-6}
+                                           &                                                                                                          & TFLOPs                                                & Total$\rightarrow$Computing                      & TFLOPs & Mem. (M)                                    &                           &                             \\
+                \midrule
+                \midrule
+                \multirow{16}{*}{\makecell{LVIS-VQA                                                                                                                                                                                                                                                                                                                                                                                                                        \\(single-round)}}             & LLaVA-1.5-7B                                                                                                                                &                      10.1                            &  159/173$\rightarrow$159/173            &      2.75/2.99&   103/91                                    &    4.59                  &   0.3103                   \\
+                \cmidrule{2-8}
+                                           & LLaVA-FastV-7B$_{k=3, r=0.75}$                                                                           & 3.2 (-68\%)                                           & 159/172$\rightarrow$159/172                      &                                   2.75/2.99& 103/89                                      & 4.67                      & 0.3074                      \\
+                                           & \cellcolor[gray]{0.8}Dynamic-LLaVA-7B$_{\textcolor{red}{I}}$ (Ours)                                      & \cellcolor[gray]{0.8}2.5 (-75\%)                      & \cellcolor[gray]{0.8}159/174$\rightarrow$159/174                            &                                   \cellcolor[gray]{0.8}2.75/3.02& \cellcolor[gray]{0.8}102/89                       & \cellcolor[gray]{0.8}4.70     & \cellcolor[gray]{0.8}0.3099       \\
+                                           & Random                                                                                                   & 10.1                                                  & 159/570$\rightarrow$79/285                       &                                   2.67/4.98& 62 (-40\%)/157                              & 11.52                     & 0.2080                      \\
+                                           & Structure                                                                                                & 10.1                                                  & 159/603$\rightarrow$79/302                &                                   2.68/5.72& 63 (-39\%)/166                              & 9.69                      & 0.1865                      \\
+                                           & H2O$_{r=0.5}$                                                                                               &   10.1                                               & 159/589$\rightarrow$79/295                 &                                   $-$ & 62 (-40\%)/158                              & 78.95 & 0.0388 \\
+                                           & $^\dag$FastV-7B$_{k=3, r=0.75}$+H2O$_{r=0.5}$                                                                                                & 3.2 (-68\%)                                                 & 159/168$\rightarrow$79/84                 &                                   $-$ & 61 (-41\%)/58 (-36\%)                              & 5.62 & 0.3071 \\
+                                           & \cellcolor{softblue}Dynamic-LLaVA-7B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)              & \cellcolor{softblue}2.5 (-75\%)                       & \cellcolor{softblue}159/181$\rightarrow$84/90    &                                   \cellcolor{softblue}1.52 (-45\%)/1.57 (-47\%) & \cellcolor{softblue}63 (-39\%)/46 (-49\%)   & \cellcolor{softblue}4.90  & \cellcolor{softblue}0.3108  \\
+                    \cmidrule{2-8}
+                                           & LLaVA-1.5-13B                                                                                            & 19.6                                                  & 159/174$\rightarrow$159/174                      &                                   5.36/5.88& 149/143                                     & 4.39                      & 0.3148                      \\
+                    \cmidrule{2-8}
+                                           & LLaVA-FastV-13B$_{k=3, r=0.75}$                                                                          & 6.0 (-69\%)                                           & 159/176$\rightarrow$159/176                      &                                   5.36/5.88& 152/143                                     & 4.46                      & 0.3118                      \\
+                                           & \cellcolor[gray]{0.8}Dynamic-LLaVA-13B$_{\textcolor{red}{I}}$ (Ours)                                     & \cellcolor[gray]{0.8}4.7 (-76\%)                      & \cellcolor[gray]{0.8}159/178$\rightarrow$159/178 &                                   \cellcolor[gray]{0.8}5.36/{6.01}& \cellcolor[gray]{0.8}148/144                & \cellcolor[gray]{0.8}4.55 & \cellcolor[gray]{0.8}0.3148 \\
+                                           & Random                                                                                                   & 19.6                                                  & 159/262$\rightarrow$79/131                       &                                   2.67 (-50\%)/4.43& 88 (-41\%)/113                              & 10.47                     & 0.2774                      \\
+                                           & Structure                                                                                                & 19.6                                                  & 159/330$\rightarrow$79/165                       &                             2.68 (-50\%)/5.60      & 88 (-41\%)/145                              & 8.39                      & 0.2393                      \\
+                                           & H2O$_{r=0.5}$                                                                                          &    19.6                                              & 159/152$\rightarrow$79/76                 &                                   $-$ & 86 (-43\%)/62 (-57\%)                              & 41.44 & 0.0428 \\
+                                           & $^\dag$FastV-13B$_{k=3, r=0.75}$+H2O$_{r=0.5}$                                                                                               &    6.0 (-68\%)                                              & 159/168$\rightarrow$79/84                 &                                   $-$ & 84 (-44\%)/89 (-38\%)                             & 5.30 & 0.3151 \\
+                                           & \cellcolor{softblue}Dynamic-LLaVA-13B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)             & \cellcolor{softblue}4.7 (-76\%)                       & \cellcolor{softblue}159/179$\rightarrow$84/88    &                   \cellcolor{softblue}2.95 (-44\%)/3.06 (-48\%)               & \cellcolor{softblue}90 (-40\%)/72 (-50\%)   & \cellcolor{softblue}4.76  & \cellcolor{softblue}0.3151  \\
+                    
+                    \midrule
+                \multirow{16}{*}{\makecell{LVIS-VQA                                                                                                                                                                                                                                                                                                                                                                                                                        \\(multi-round)}} & LLaVA-1.5-7B                                                                                                                         &                    10.1                                &     351/461$\rightarrow$351/461               &{6.12}/8.08   &   222/236                                   &   2.97                   &    0.4227                  \\
+                    \cmidrule{2-8}
+                                           & LLaVA-FastV-7B$_{k=3, r=0.75}$                                                                           & 3.2 (-68\%)                                           & 351/463$\rightarrow$351/463                      &{6.12}/8.12                                 & 227/242                                     & 3.06                      & 0.4159                      \\
+                                           & \cellcolor[gray]{0.8}Dynamic-LLaVA-7B$_{\textcolor{red}{I}}$ (Ours)                                      & \cellcolor[gray]{0.8}2.5 (-75\%)                      & \cellcolor[gray]{0.8}351/491$\rightarrow$351/491                            & \cellcolor[gray]{0.8}6.12/8.61                                  & \cellcolor[gray]{0.8}223/251                       & \cellcolor[gray]{0.8}3.08     & \cellcolor[gray]{0.8}0.4222       \\
+                                           & Random                                                                                                   & 10.1                                                  & 351/1160$\rightarrow$176/580                     & 3.04 (-50\%)/{10.35}                                  & 141 (-38\%)/328                             & 5.96                      & 0.3290                      \\
+                                           & Structure                                                                                                & 10.1                                                  & 351/951$\rightarrow$176/475                      &  3.04 (-50\%)/{8.47}                                 & 141 (-38\%)/270                             & 5.40                      & 0.2820                      \\
+                                           & H2O$_{r=0.5}$                                                                                                &   10.1                                               & 351/503$\rightarrow$99/175                 &                                   $-$ & 133 (-41\%)/149 (-38\%)                             & 42.6 & 0.0892 \\
+                                           & $^\dag$FastV-7B$_{k=3, r=0.75}$+H2O$_{r=0.5}$                                                                                                &      3.2 (-68\%)                                            & 351/482$\rightarrow$175/240                 &                                   3.04 (-50\%)/4.19 (-48\%)& 140 (-38\%)/128 (-47\%)                              & 3.57 & 0.4049 \\
+                                           & \cellcolor{softblue}Dynamic-LLaVA-7B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)              & \cellcolor{softblue}2.5 (-75\%)                       & \cellcolor{softblue}351/522$\rightarrow$182/260  &  \cellcolor{softblue}3.33 (-45\%)/4.38 (-46\%)                                & \cellcolor{softblue}144 (-35\%)/140 (-41\%) & \cellcolor{softblue}3.17  & \cellcolor{softblue}0.4251  \\
+                    \cmidrule{2-8}
+                                           & LLaVA-1.5-13B                                                                                            & 19.6                                                  & 351/497$\rightarrow$351/497                      &{11.92}/16.97                                & 331/405                                     & 2.88                      & 0.4240                      \\
+                    \cmidrule{2-8}
+                                           & LLaVA-FastV-13B$_{k=3, r=0.75}$                                                                          & 6.0 (-69\%)                                           & 351/501$\rightarrow$351/501                      &{11.92}/17.11                                 & 326/399                                     & 2.96                      & 0.4193                      \\
+                                           & \cellcolor[gray]{0.8}Dynamic-LLaVA-13B$_{\textcolor{red}{I}}$ (Ours)                                     & \cellcolor[gray]{0.8}4.7 (-76\%)                      & \cellcolor[gray]{0.8}351/507$\rightarrow$351/507 & \cellcolor[gray]{0.8}{11.92}/{17.30}                                  & \cellcolor[gray]{0.8}328/405                & \cellcolor[gray]{0.8}2.98 & \cellcolor[gray]{0.8}0.4221 \\
+                                           & Random                                                                                                   & 19.6                                                  & 351/600$\rightarrow$175/300                      &  5.92 (-50\%)/10.23                                 & 195 (-41\%)/265 (-35\%)                            & 5.40                      & 0.3900                      \\
+                                           & Structure                                                                                                & 19.6                                                  & 351/671$\rightarrow$176/335                      &  5.93 (-50\%)/11.48                                 & 194 (-41\%)/303 (-25\%)                            & 4.67                      & 0.3627                      \\
+                                           & H2O$_{r=0.5}$                                                                                                &    19.6                                              & 351/144$\rightarrow$99/72                 &                                   $-$ & 183 (-45\%)/283 (-30\%)                             & 18.62 & 0.0493 \\
+                                           & $^\dag$FastV-13B$_{k=3, r=0.75}$+H2O$_{r=0.5}$                                                                                                &  6.0 (-69\%)                                                & 351/493$\rightarrow$175/247                 &                                   $-$ & 186 (-44\%)/197 (-51\%)                             & 3.45 & 0.4127 \\
+                                           & \cellcolor{softblue}Dynamic-LLaVA-13B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)             & \cellcolor{softblue}4.7 (-76\%)                       & \cellcolor{softblue}351/494$\rightarrow$181/242  &  \cellcolor{softblue}6.40 (-46\%)/8.27 (-51\%)                                 & \cellcolor{softblue}196 (-41\%)/202 (-50\%) & \cellcolor{softblue}3.07  & \cellcolor{softblue}0.4243  \\
+                \midrule
+                    
+                
+                \multirow{12}{*}{\makecell{{ShareGPT4V-VQA}                                                                                                                                                                                                                                                                                                                                                                                                                        \\ {(single-round)}}} 
+                
+                                           & {LLaVA-1.5-7B}                                                                                                                        &   {10.1}                                                 &     {1555/100}${\rightarrow}${1555/100}               &{28.70/1.75}   &   {1024/50}                                   &   {2.52}                   &   $^\ddag${\textit{0.0540}}                  \\
+                \cmidrule{2-8}
+                                           & Random                                                                                                   & 10.1                                                  & 1555/450$\rightarrow$779/224                      &  13.97 (-51\%)/3.95                                 & 664 (-35\%)/120                             & 6.07                      & $^\ddag${\textit{0.0560}}                      \\
+                                           & Structure                                                                                                & 10.1                                                 & 1555/531$\rightarrow$777/266                      &  13.93 (-51\%)/4.68                                 & 644 (-37\%)/144                             & 30.7                      & $^\ddag${\textit{0.0484}}                   \\
+                                           & H2O$_{r=0.5}$                                                                                                & 10.1                                                 & 1555/392$\rightarrow$777/196                 &                                   $-$ & 607 (-41\%)/107                              & 25.54 & $^\ddag${\textit{0.0185}} \\
+                                           & $^\dag$FastV-7B$_{k=3, r=0.75}$+H2O$_{r=0.5}$                                                              & 3.2 (-68\%)                     & 1555/112$\rightarrow$777/56                 &                                   $-$ & 604 (-41\%)/27 (-46\%)                              & 3.56 & $^\ddag${\textit{0.0537}} \\
+                & \cellcolor{softblue}Dynamic-LLaVA-7B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)              & \cellcolor{softblue} 2.5 (-75\%)                      & \cellcolor{softblue}1555/102$\rightarrow$784/51    &                                   \cellcolor{softblue}14.97 (-47\%)/0.95 (-46\%)& \cellcolor{softblue}625 (-39\%)/28 (-44\%)  & \cellcolor{softblue}3.14  & \cellcolor{softblue}$^\ddag${\textit{0.0551}}  \\
+                \cmidrule{2-8}
+                & LLaVA-1.5-13B                                                                                                                         &  19.6                                                  &     1555/103$\rightarrow$1555/103               &55.40/3.49   &   1489/83                                   &  2.43                   &    $^\ddag${\textit{0.0523}}                  \\
+                \cmidrule{2-8}
+                                           & Random                                                                                                   & 19.6                                                  & 1555/192$\rightarrow$777/97                      &  27.01 (-51\%)/3.30                                 & 875 (-41\%)/265                             & 5.32                      & $^\ddag${\textit{0.0589}}                      \\
+                                           & Structure                                                                                                & 19.6                                                  & 1555/285$\rightarrow$777/142                      &  27.04 (-51\%)/4.88                                 & 876 (-41\%)/126                             & 21.10                      & $^\ddag${\textit{0.0489}}                      \\
+                                           & H2O$_{r=0.5}$                                                                                                &  19.6                                                & 1555/72$\rightarrow$777/36                 &                                   $-$ & 840 (-43\%)/29                            & 10.51 & $^\ddag${\textit{0.0131}} \\
+                                           & $^\dag$FastV-13B$_{k=3, r=0.75}$+H2O$_{r=0.5}$                                                            & 6.0 (-79\%)                                           & 1555/115$\rightarrow$777/57                 &                                   $-$ & 835 (-44\%)/45 (-46\%)                             & 3.41 & $^\ddag${\textit{0.0507}} \\
+                & \cellcolor{softblue}Dynamic-LLaVA-13B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ (Ours)              & \cellcolor{softblue}  4.76 (-76\%)                     & \cellcolor{softblue}1555/100$\rightarrow$763/50    &                                   \cellcolor{softblue}27.96 (-49\%)/1.78 (-49\%)& \cellcolor{softblue}854 (-43\%)/44 (-46\%)  & \cellcolor{softblue}3.10  & \cellcolor{softblue}$^\ddag${\textit{0.0524}}  \\
+                \bottomrule
+            \end{tabular}
+            \begin{tablenotes}
+                \item[$\dag$]{
+                It means that we use FastV to reduce the token set of prefill, while using H2O to only compress generated KV cache during decoding.
+
+                } 
+                \item[$\ddag$]{
+                In long text generation tasks, the substantial discrepancy between lengths of text generated by MLLMs and the label text leads to a significant degradation of the METEOR metric.
+                }
+            \end{tablenotes}
+        \end{threeparttable}
+    }
+    \label{tab:llava_lvis}
+\end{table*}
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Settings}
+
+\textbf{Datasets, Benchmarks, and Metrics.}
+During training, we use the instruction-tuning dataset 656K Mixture Dataset, as in LLaVA-1.5~\citep{liu2024improved}.
+For vision understanding evaluations, we use the commonly used vision understanding benchmarks to evaluate the performance similar as LLaVA-1.5~\citep{liu2024improved}, such as VQAv2~\citep{goyal2017making}, GQA~\citep{hudson2019gqa}, VizWiz~\citep{gurari2018vizwiz}, SciQA~\citep{lu2022learn}, TextVQA~\citep{singh2019towards}, POPE~\citep{li2023evaluating}, MMBench ({en})~\citep{liu2023mmbench}, SEED ({image})~\citep{li2023seed} and MM-Vet~\citep{yu2023mm}.
+{Furthermore, we also use the vision-centric vision understanding benchmarks, such as MMVP~\citep{tong2024eyes}, RealWorldQA~\citep{realworldqa} and CVBench-2D~\citep{tong2024cambrian}.}
+We employ the same evaluation metrics of the above benchmarks to assess the results.
+
+Specially, to evaluate the generation ability of MLLM before and after the generated language context sparsification.
+We constructed LVIS-VQA single- and multi-round Benchmarks based on the subset of LVIS-Instruct4V~\citep{wang2023see}. 
+
+{
+Meanwhile, we constructed a single-round long generation text benchmark ShareGPT4V-VQA by ShareGPT4V dataset~\citep{chen2023sharegpt4v}.
+
+}
+To ensure a fair comparison, none of the images selected for our benchmarks were included in the training set of the base MLLMs and Dynamic-LLaVA.
+We evaluate the fluency of the generated responses of MLLMs using the Perplexity Metric (PPL)~\citep{radford2019language, jelinek1977perplexity}, and the similarity of the generated answers to the standard answers using the Metric for Evaluation of Translation with Explicit ORdering (METEOR)~\citep{banerjee2005meteor}.
+\textbf{Implementations.}
+All of the methods are trained on 8 NVIDIA A100 (80G) using Pytorch~\citep{paszke2019pytorch}.
+
+The hyper-parameters of which decoder layer to sparsify the tokens ($l$),
+the sample used for training should have a minimum output text token length ($\text{LEN}^{OT}$) and the weight of the regularization term ($\lambda$) are set to 2, 50 and 100 in all experiments, respectively.
+
+\begin{table*}[t]
+    \caption{
+        Total time and maximum GPU memory overhead during MLLMs' generation.
+        ``2K/4K'' means the number of the generated output text tokens.
+        ``$\times$'' means the generation process has failed due to the OOM.
+        The results are measured in one A100 (80G) and the batch size is fixed to 8. 
+    }
+    \centering
+    \resizebox{0.5\linewidth}{!}{
+        \begin{threeparttable}
+            \begin{tabular}{c|c|c|c|c|c|c|c}
+                \toprule
+                \multirow{3}{*}{Method}                                                               & \multicolumn{1}{c|}{\multirow{2}{*}{\textcolor{red}{Prefill}}} & \multicolumn{3}{c|}{\textcolor{softgreen}{Decoding w/o KV cache}} & \multicolumn{3}{c}{\textcolor{softgreen}{Decoding w/ KV cache}}                                                                                                 \\
+                \cmidrule{3-8}
+                                                                                                      &                                                                & 1K                                                                & 2K                                                              & 4K                    & 1K                    & 2K                    & 4K                    \\
+                                                                                                      \cmidrule{2-8}
+                                                                                                      &    Time                                                            & Time                                                              & Time                                                            & Time                  & Mem.                  & Mem.                  & Mem.                  \\
+                \midrule
+                \midrule
+                LLaVA-1.5-13B                                                                         & 0.83s                                                          &        1453s                                                           &   4117s                                                              &    13368s                   &   46G                    &     58G                   & $\times$              \\
+                \cmidrule{1-8}
+                LLaVA-FastV-13B$_{k=3, r=0.75}$                                                       & 0.43s                                                          &   1079s                                                                &     3462s                                                            &  $\times$                     &    41G                   &   53G                   & 77G              \\
+                \cellcolor{softblue}Dynamic-LLaVA-13B$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$ & \cellcolor{softblue}0.37s                                      & \cellcolor{softblue}838s                                              & \cellcolor{softblue}2682s                                            & \cellcolor{softblue}8184s  & \cellcolor{softblue}35G  & \cellcolor{softblue}42G  & \cellcolor{softblue}56G  \\
+                \bottomrule
+            \end{tabular}
+            \begin{tablenotes}
+                \item[$\dag$] We apply the Parallel Sparsification Inference for FastV to achieve the batch-parallel inference.
+            \end{tablenotes}
+        \end{threeparttable}
+    }
+    \label{tab:time_and_memory}
+\end{table*}
+
+
+\subsection{Main Results}
+\textbf{Vision understanding.}
+As demonstrated in Tab.~\ref{tab:llava}, our proposed Dynamic-LLaVA framework achieves superior performance compared to SoTA vision context sparsification methods in most benchmarks while reducing image tokens by approximately 80\%.
+Additionally, the Dynamic-LLaVA framework reduces FLOPs by more than 70\% for official LLaVA-1.5 baselines in the prefill stage, with only minimal performance degradation across most benchmarks.
+Especially, for the LLaVA-1.5 with 7B and 13B parameters, the Dynamic-LLaVA even shows performance improvements on the SciQA, POPE, MME, and MMBench benchmarks.
+For instance, on the SciQA benchmark, the 7B and 13B Dynamic-LLaVA models achieve performance gains of +2.3\% and +0.8\%, respectively, compared to the original LLaVA-1.5.
+}
+\begin{wraptable}{l}{0.45\textwidth}
+    \caption{Trade-off of the keep rates of vision context ($r^I$) and language context ($r^{OT}$).}
+    \centering
+    \resizebox{0.99\linewidth}{!}{
+        \begin{tabular}{c|c|cc|ccc|cc}
+            \toprule
+            \multirow{3}{*}{Context}  & \multirow{3}{*}{Rate}              &  \multicolumn{2}{c|}{Token}&\multicolumn{5}{c}{Benchmark}\\
+            \cmidrule{3-9}&                                    &  \multirow{2}{*}{Vision}& \multirow{2}{*}{Language}&\multirow{2}{*}{VQAv2}        & \multirow{2}{*}{GQA}      &\multirow{2}{*}{{MMVP}}& \multicolumn{2}{c}{LVIS (single)}                  \\
+            \cmidrule{8-9}&                                    &                                & &&                           && PPL$\downarrow$                   & MET.$\uparrow$ \\
+            \midrule
+            \midrule
+            \multirow{3}{*}{Vision}   & \cellcolor{softblue}\textbf{20\%}  &  \cellcolor{softblue}115& \cellcolor{softblue}84/90&\cellcolor{softblue}77.9      & \cellcolor{softblue}61.3  &\cellcolor{softblue}{26.3}& \cellcolor{softblue}4.90&                \cellcolor{softblue}0.3108\\
+                                      & 50\%                               &  288& 83/86&78.8                          & 62.3                      &{26.3}&                                   4.88&                0.3107\\
+                                      & 80\%                               &  461& 83/85&78.9                          & 62.5                      &{26.2}&                                   4.88&                0.3090\\
+            \midrule
+            \multirow{3}{*}{Language} & 20\%                               &  115& 41/39&77.6                          & 61.4                      &{26.0}& 5.53                                  &                0.2592\\
+                                      & \cellcolor{softblue}\textbf{50\% } &  \cellcolor{softblue}115& \cellcolor{softblue}84/90&\cellcolor{softblue}77.9      & \cellcolor{softblue}61.3  &\cellcolor{softblue}{26.3}& \cellcolor{softblue}4.90&                \cellcolor{softblue}0.3108\\
+                                      & 80\%                               &  115& 129/138&78.0                          & 61.6                      &{26.0}&                                   4.76&                0.3116\\
+            \midrule
+            \midrule
+ LLaVA-7B & 100\%&  576& 159/173&78.5& 62.0 &{29.3}& 4.59&0.3103\\
+ \bottomrule
+        \end{tabular}
+    }
+    \label{tab:trade-off}
+\end{wraptable}
+{As shown in Tab.~\ref{tab:llava_projector}}, for efficient vision projector methods for MLLMs, Dynamic-LLaVA exclusively utilizes the original MLP of LLaVA-1.5 as the vision projector.
+This approach surpasses those that modify the vision projector across most benchmarks, achieving an average performance that exceeds the best alternative methods by 0.9\%.
+Furthermore, our Dynamic-LLaVA framework can be integrated with other efficient vision projector methods.
+For instance, our combination with the TokenPacker projector, Dynamic-LLaVA-TokenPacker, achieves significant reductions in vision tokens by an additional 60\% on top of the already reduced count by efficient vision projector methods, with only a minimal loss in performance.
+\begin{wraptable}{r}{0.3\textwidth}
+    \caption{Hyper-parameter ablation for $l$, $\text{LEN}^{OT}$ and $\lambda$.}
+    \centering
+    \resizebox{0.90\linewidth}{!}{
+        \begin{tabular}{c|c|ccc}
+            \toprule
+            \multirow{2}{*}{Hyper}             & \multirow{2}{*}{Value}          & \multicolumn{3}{c}{Benchmark}                                                       \\
+            \cmidrule{3-5}
+                                               &                                 & VQAv2                         & GQA                      & POPE                     \\
+            \midrule
+            \midrule
+            \multirow{3}{*}{$l$}               & 1                               & 77.6                          & 61.3                     & 85.7                     \\
+                                               & \cellcolor{softblue}\textbf{2}  & \cellcolor{softblue}77.9      & \cellcolor{softblue}61.3 & \cellcolor{softblue}85.9 \\
+                                               & 4                               & 77.9                          & 61.4                     & 85.8                     \\
+            \midrule
+            \multirow{3}{*}{$\text{LEN}^{OT}$} & 0                               & 77.4                          & 61.0                     & 85.5                     \\
+                                               & \cellcolor{softblue}\textbf{50} & \cellcolor{softblue}77.9      & \cellcolor{softblue}61.3 & \cellcolor{softblue}85.9 \\
+                                               & 100                             & 77.8                          & 61.2                     & 86.1                     \\
+            \midrule
+ \multirow{3}{*}{$\lambda$}& 10& 77.9& 61.2&85.8\\
+ & \cellcolor{softblue}\textbf{100}& \cellcolor{softblue}77.9      & \cellcolor{softblue}61.3 &\cellcolor{softblue}85.9 \\
+ & 1000& 77.7& 61.3&85.7\\
+ \bottomrule
+        \end{tabular}
+    }
+    \label{tab:hyper-parameter}
+\end{wraptable}
+Compared to the official LLaVA-TokenPacker method, our Dynamic-LLaVA-TokenPacker incurs only a minimal performance loss of 0.3\% and 0.1\% (for 7B and 13B models) while using fewer vision tokens (57 vs. 144).
+Moreover, we observe that the sparsification of the output text tokens does not impede the comprehension ability of MLLMs.
+This finding is supported by comparisons between Dynamic-LLaVA$_{\textcolor{red}{I}}$ and Dynamic-LLaVA$_{\textcolor{red}{I}|\textcolor{softgreen}{T}}$, as detailed in last two rows of Tab.~\ref{tab:llava} and Tab.~\ref{tab:llava_projector}.
+\textbf{Generation ability.}
+To evaluate the impact of vision-language context sparsification on generation ability, we utilize the LVIS-VQA (single-round) and LVIS-VQA (multi-round) as benchmarks.
+
+To demonstrate the advantages of Dynamic-LLaVA in dynamically sparsifying the language context, we compare it against traditional static methods, ``Random'' and ``Structure''.
+``Random'' refers to randomly discarding $\sim$50\% output text tokens, while ``Structure'' involves discarding every alternate output text token.
+
+As shown in Tab.~\ref{tab:llava_lvis}, Dynamic-LLaVA maintains nearly unchanged generation fluency (by PPL) and quality (by METEOR) when only the vision context is sparsified.
+When sparsifying both vision and language contexts, Dynamic-LLaVA exhibits a slight increase in PPL (less than 0.3) and a minor improvement in METEOR score compared to full-context baselines, while also reducing $\sim$50\% FLOPs (decoding without KV cache) and GPU memory overhead (decoding with KV cache) of the output text tokens.
+In comparison with the traditional static methods under the same condition of discarding $\sim$50\% output text tokens, both ``Random'' and ``Structure'' methods significantly underperform in terms of fluency and quality of generation compared to Dynamic-LLaVA's language context sparsification.
+Furthermore, compared to methods only focusing on the image token reduction, Dynamic-LLaVA achieves additional inference efficiency during the decoding stage while maintaining nearly consistent generation ability.
+{ 
+Meanwhile, the LLM KV cache compression method H2O, directly discarding historical KV cache does not adapt well to mixed-modality contexts, causing a significant performance degradation.
+We enhance the generation ability by integrating FastV with H2O.
+Despite these reductions, Dynamic-LLaVA still maintains a slight advantage in generation ability.
+}
+
+\textbf{Practical inference efficiency.}
+As presented in Tab.~\ref{tab:time_and_memory}, we measured the practical inference time and GPU memory usage of MLLMs.
+}
+Vision token reduction methods provide noticeable inference benefits during the prefill stage and play a role in subsequent generations.
+However, the proportion of this efficiency gradually decreases throughout the entire generation process. 
+Dynamic-LLaVA not only achieves significant inference speed improvements during the prefill stage but also reduces generation time by $\sim$50\% when decoding without KV cache and significantly lowers GPU memory overhead when decoding with KV cache.
+}
+
+\subsection{Ablation Study}
+\textbf{Trade-off.}
+We respectively adjust the keep rates of vision context ($r^I$) and language context ($r^{OT}$) during training, as mentioned in Sec.~\ref{subsubsec:End-to-end Sparsification Training}.
+As in Tab.~\ref{tab:trade-off}, we observe that increasing the value of $r^I$, i.e., retaining more image tokens during inference, significantly enhances the vision understanding performance of Dynamic-LLaVA. 
+On the other hand, adjusting the value of $r^{OT}$ has negligible effects on vision understanding but impacts the generation ability of Dynamic-LLaVA.
+By tuning the values of $r^I$ and $r^{OT}$ during training, it is possible to achieve a balance between performance and efficiency tailored to specific requirements.
+\textbf{Hyper-parameters.}
+Tab.~\ref{tab:hyper-parameter} provides an analysis of which decoder layer to sparsify the tokens ($l$), the sample used for training should have a minimum output text token length ($\text{LEN}^{OT}$) and the weight of the regularization term ($\lambda$), as mentioned in Sec.~\ref{sec:3.3}. 
+This analysis enables the Dynamic-LLaVA framework to be easily integrated into various MLLMs.
+For $l$ and $\lambda$, Dynamic-LLaVA shows relative insensitivity in vision understanding performance.
+We follow the work~\citep{chen2024image} and let $l=2$, while $\lambda=100$.
+For $\text{LEN}^{OT}$, sparsifying output text tokens of all samples significantly reduces the understanding performance of Dynamic-LLaVA. 
+Incrementally increasing the threshold of $\text{LEN}^{OT}$ results in diminishing returns.
+
+
+
+\section{Conclusion}
+
+In this paper, we proposed a dynamic vision-language context sparsification framework, termed Dynamic-LLaVA.
+This framework is designed with tailored sparsification inference strategies for the inference modes of MLLMs and can be integrated into MLLMs' training in an end-to-end manner.
+
+
+
+
+
+

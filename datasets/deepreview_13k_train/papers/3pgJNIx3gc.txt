@@ -1,0 +1,291 @@
+\title{AlphaFold Distillation for Protein Design}
+
+\begin{abstract}
+Inverse protein folding, the process of designing sequences that fold into a specific 3D structure, is crucial in bio-engineering and drug discovery. Traditional methods rely on experimentally resolved structures, but these cover only a small fraction of protein sequences. Forward folding models like AlphaFold offer a potential solution by accurately predicting structures from sequences. However, these models are too slow for integration into the optimization loop of inverse folding models during training.
+To address this, we propose using knowledge distillation on folding model confidence metrics, such as pTM or pLDDT scores, to create a faster and end-to-end differentiable distilled model. This model can then be used as a structure consistency regularizer in training the inverse folding model. Our technique is versatile and can be applied to other design tasks, such as sequence-based protein infilling.
+Experimental results show that our method outperforms non-regularized baselines, yielding up to 3\% improvement in sequence recovery and up to 45\% improvement in protein diversity while maintaining structural consistency in generated sequences.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\addtocontents{toc}{\protect\setcounter{tocdepth}{0}}
+
+Eight of the top ten best-selling drugs are engineered proteins, making inverse protein folding a crucial challenge in bio-engineering and drug discovery~\citep{Pharma}. Inverse protein folding involves designing amino acid sequences that fold into a specific 3D structure. Computationally, this task is known as computational protein design and has been traditionally addressed by optimizing amino acid sequences against a physics-based scoring function~\citep{kuhlman2003design}. Recently, deep generative models have been introduced to learn the mapping from protein structure to sequences \citep{jing2020learning, cao2021fold2seq, wu2021representing, karimi2020novo, hsu2022learning, fu2022sipf}. While these models often use high amino acid recovery, TM score, and low perplexity as success criteria, they overlook the primary goal of designing novel and \emph{diverse} sequences that fold into the desired structure and exhibit novel functions.
+
+
+In parallel, recent advancements have also greatly enhanced protein representation learning \citep{rives2021biological, zhang2022protein}, structure prediction from sequences \citep{jumper2021highly, baek2021accuraterosettafold}, and conditional protein sequence generation  \citep{das2021accelerated, anishchenko2021novo}. While inverse protein folding has traditionally focused on sequences with resolved structures, which represent less than 0.1\% of known protein sequences, a recent study improved performance by training on millions of AlphaFold-predicted structures \citep{hsu2022learning}. Despite this success, large-scale training is computationally expensive. A more efficient method could be to use a pre-trained forward folding model to guide the training of the inverse folding model.
+\begin{figure*}[!ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figs/DesignOverview.pdf}
+\caption{%Overview of the proposed system. The traditional inverse protein folding (designing sequences that fold into a given 3D structures) is augmented by our proposed AFDistill model to increase the diversity of generated sequences while maintaining consistency with the given structure. One way of doing this (red line) would be to use forward protein folding models, e.g., AlphaFold, estimate structure from generated sequence, compare it with the ground truth to compute metrics such as TM or LDDT and, finally, regularize the original training loss (usually cross-entropy (CE)). However, inference through folding models is slow (see Fig.~\ref{fig:times}), making them impractical to be a part of the optimization loop. Alternatively, bypassing structure estimation, the folding model's internal confidence metrics, such as pTM or pLDDT can be used instead (blue line). This results in lower fidelity solutions that are still slow. Instead, in this work, we propose to distill the confidence metrics of AlphaFold into a smaller, faster, and differentiable model (referred as AFDistill).  AFDistill is trained to maintain the comparable accuracy of the AlphaFold-estimated pTM/pLDDT, which now can be seamlessly used as part of the training loop (green line).  The inference of the improved inverse folding model remains unmodified and is shown on the right side of the figure.
+Overview of the proposed AFDistill system. AFDistill contrasts with traditional methods (red line) that use models like AlphaFold to predict protein structure, which is then compared to the actual structure. This method is slow due to model inference times (refer Fig.~\ref{fig:times}). An alternative (blue line) uses internal metrics from folding model without structure prediction but remains slow and less precise. Our solution, distills AlphaFold's confidence metrics into a faster, differentiable model that offers accuracy akin to AlphaFold, allowing seamless integration into the training process (green line). The improved inverse folding model's inference is shown on the right.}
+\label{fig:DesignOverview}
+\end{figure*}
+In this work we construct a framework where the inverse folding model is trained  using a loss objective that consists of regular sequence reconstruction loss, augmented with an additional \emph{structure consistency loss (SC)} (see Fig.~\ref{fig:DesignOverview} for system overview). 
+One way of implementing this would be to use folding models, e.g., AlphaFold, to estimate structure from generated sequence, compare it with ground truth and compute TM score to regularize the training. However, a challenge in using Alphafold (or similar) directly is computational cost of inference (see Fig.~\ref{fig:times}), and the need of ground truth reference structure. Internal confidence structure metrics from folding model can be used instead. However, that approach is still slow for the in-the-loop %inverse folding model 
+optimization.  To address this, we: 
+
+\textbf{(i)} 
+Carry out knowledge distillation on AlphaFold and incorporate the resulting model, AFDistill (fixed), into the regularized training of the inverse folding model, which is referred to as structure consistency (SC) loss. The major \emph{novelty} here is that AFDistill enables direct prediction of TM or LDDT scores of a given protein sequence bypassing the structure estimation or the access to ground truth structure. Primary practical benefits of our model include being fast, precise, and end-to-end differentiable. Employing SC loss during training for downstream tasks can be seen as integrating AlphaFold's domain expertise into the model, thereby offering additional boost in its performance. 
+
+\textbf{(ii)} 
+Perform extensive evaluations, demonstrating that our proposed system surpasses existing benchmarks in structure-guided protein sequence design by achieving lower perplexity, higher amino acid recovery, and maintaining proximity to the original protein structure. Additionally, our system enhances sequence diversity, a key objective in protein design. Due to a trade-off between sequence and structure recovery, our regularized model offers better sequence diversity while maintaining structural integrity. Importantly, our regularization technique is versatile, as evidenced by its successful application in sequence-based protein infilling, where we also observe performance improvement.
+\textbf{(iii)} Lastly, our SC metric can either be used as regularization for inverse folding, infilling and other protein optimization tasks (e.g., \citep{moffat2021using}) which would benefit from structural consistency estimation of the designed protein sequence, or as an affordable AlphaFold alternative that provides scoring of a given protein, reflecting its structural content.  
+
+
+
+
+\section{Related Work}
+
+
+\begin{figure*}[!ht]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/times_upd.png}
+\caption{Inference times for protein sequences using our AFDistill model compared to alternatives are displayed on the left. AFDistill maintains fast inference for longer sequences: 0.028s for 1024-length and 0.035s for 2048-length. Timings for AlphaFold and OpenFold~\citep{Ahdritz_OpenFold_2021} do not include MSA search times, which can range from minutes to hours. Values for HelixFold~\citep{fang2022helixfold}, OmegaFold~\citep{OmegaFold}, and ESMFold~\citep{lin2022language} are from their publications. The center plot shows kernel density of true vs. AFDistill-predicted TM scores (Pearson's correlation: 0.77), while the right displays a similar plot for pLDDT values (Pearson's correlation: 0.76). Refer to Section \ref{sec:distill} for details.}
+\label{fig:times}
+\end{figure*}
+
+\paragraph{Forward Protein Folding.}
+Recent computational methods for predicting protein structure from its sequence include AlphaFold~\citep{jumper2021highly}, which uses multiple sequence alignments (MSAs) and pairwise features. Similarly, RoseTTAFold~\citep{baek2021accurate} integrates sequence, 2D distance map, and 3D coordinate information. OpenFold~\citep{Ahdritz_OpenFold_2021} replicates AlphaFold in PyTorch. However, due to the unavailability of MSAs for certain proteins and their inference time overhead, MSA-free methods like OmegaFold~\citep{OmegaFold}, HelixFold~\citep{fang2022helixfold}, ESMFold~\citep{lin2022language}, and \cite{roney22} emerged. These leverage pretrained language models, offering accuracy on par with or exceeding AlphaFold and RoseTTAFold based on the input type.
+\paragraph{Inverse Protein Folding.} 
+Recent algorithms address the inverse protein folding problem of finding amino acid sequences for a specified structure. 
+~\citep{norn2020protein} used a deep learning method optimizing via the trRosetta structure prediction network~\citep{yang2020improved}. 
+~\citep{anand2022protein} designed a deep neural network that models side-chain conformers structurally. In contrast, ~\citep{jendrusch2021alphadesign} employed AlphaFold~\citep{jumper2021highly} in an optimization loop for sequence generation, though its use is resource-intensive due to MSA search. MSA-free methods like OmegaFold, HelixFold, and EMSFold are quicker but still slow for optimization loops.
+
+In this work, we propose knowledge distillation from the forward folding algorithm AlphaFold, and build a student model that is small, practical and accurate enough. We show that the distilled model  can be efficiently used within the inverse folding model optimization loop and improve quality of designed protein sequences. 
+ 
+
+
+
+\section{AlphaFold Distill}
+
+\label{sec:distill}
+Knowledge distillation \citep{hinton2015distilling} transfers knowledge from a large complex model, in our case AlphaFold, to a smaller one, here this is the AFDistill model (see Fig. ~\ref{fig:DistillOverview}). Traditionally, the distillation would be done using soft labels, which are probabilities from AlphaFold model, and hard labels, the ground truth classes. However, in our case we do not use the probabilities as they are harder to collect or unavailable, but rather the model's predictions (pTM/pLDDT) and the hard labels, TM/LDDT scores, computed based on AlphaFold's predicted 3D structures.   
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/DistillOverview.pdf}
+\caption{Distillation overview. Top diagram shows the training of AFDistill.
+The scores from AlphaFold's confidence estimation are denoted as pTM and pLDDT, while the scores which are computed using ground truth and the AlphaFold's predicted 3D structures are denoted as TM and LDDT. These values are then discretized and treated as class labels during cross-entropy (CE) training. Note that the training based on TM/LDTT is limited since the number of known ground truth structures is small. The bottom diagram shows the inference stage of AFDistill, where for each protein sequence it estimates pTM and pLDDT scores.}
+\label{fig:DistillOverview}
+\end{figure*}
+
+\paragraph{Scores to Distill}
+
+
+\emph{TM-score} \citep{zhang2004scoring} measures the mean distance between structurally aligned $C_\alpha$ atoms, scaled by a length-dependent distance parameter, while \emph{LDDT} \citep{mariani2013lddt} calculates the average of four fractions using distances between atom pairs based on four tolerance thresholds within a 15\r{A} inclusion radius. Both metrics range from 0 to 1, with higher values indicating more similar structures.
+\emph{pTM} and \emph{pLDDT} are AlphaFold-predicted metrics for a given protein sequence, representing the model's confidence in the estimated structure. \emph{pLDDT} is a local per-residue score, while \emph{pTM} is a global confidence metric for overall chain reconstruction. In this work, we interpret these metrics as indicators of sequence quality or validity for downstream applications (see Section \ref{sec:design}).
+
+
+\subsection{Data}\label{sec:data}
+
+\begin{table}[!ht]
+\caption{Statistics from January 2022 (left side) and July 2022 (right size) releases of the AlphaFold database. For the earlier release, we created multiple datasets for pTM and pLDDT estimation, while for the later, larger release we curated datasets only  for pLDDT estimation.}
+\label{tab:afdata}
+\centering
+\begin{tabular}{@{}lr|lr@{}}
+\toprule
+\multicolumn{2}{c|}{Release 3 (January 2022)}    & \multicolumn{2}{c}{ Release 4 (July 2022)}         \\ \midrule
+Name             & \multicolumn{1}{c|}{Size} & Name               & \multicolumn{1}{c}{Size} \\ \midrule
+Original         & 907,578                   & Original           & 214,687,406              \\
+TM 42K           & 42,605                    & pLDDT balanced 1M & 1,000,000                \\
+TM augmented 86K & 86,811                    & pLDDT balanced 10M & 10,000,000               \\
+pTM synthetic 1M  & 1,244,788                 & pLDDT balanced 60M & 66,736,124               \\
+LDDT 42K         & 42,605                    &                    & \multicolumn{1}{c}{}     \\
+pLDDT 1M         & 905,850                   &                    & \multicolumn{1}{c}{}     \\ \bottomrule
+\end{tabular}%
+\end{table}
+
+Using Release 3 (January 2022) of AlphaFold Protein Structure Database \citep{gkab1061}, we collected a set of 907,578 predicted structures. Each of these predicted structures contains 3D coordinates of all the residue atoms as well as the per-resiude pLDDT confidence scores. 
+
+To avoid data leakage to the downstream applications, we first filtered out the structures that have 40\% sequence similarity or more to the validation and test splits of CATH 4.2 dataset (discussed in Section \ref{sec:design}).  Then, using the remaining structures, we created our pLDDT 1M dataset (see Table~\ref{tab:afdata}), where each protein sequence is paired with the sequence of per-residue pLDDTs. Additionally, to reduce the computational complexity of AFDistill training, we limited the maximum protein length to 500 by randomly cropping a subsequence. 
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.49\textwidth]{figs/tm_density.pdf}
+\includegraphics[width=0.49\textwidth]{figs/lddt_density.pdf}
+\caption{Distribution of the (p)TM/(p)LDDT scores in various datasets used in AFDistill training.}
+\label{fig:tm_density}
+\end{figure}
+
+
+We created datasets based on true TM and LDDT values using predicted AlphaFold structures. Specifically, using the PDB-to-UniProt mapping, we selected a subset of samples with matching ground truth PDB sequences and 3D structures, resulting in 42,605 structures.  We denote these datasets as TM 42K and LDDT 42K (see Table~\ref{tab:afdata}). Fig.~\ref{fig:tm_density} shows their score density distribution, which is skewed towards higher values. To address data imbalance, we curated two additional TM-based datasets. TM augmented 86K was obtained by augmenting TM 42K with a set of perturbed original protein sequences (permuted/replaced parts of protein sequence), estimating their structures with AlphaFold, computing corresponding TM-score, and keeping the low and medium range TM values. pTM synthetic 1M was obtained by generating random synthetic protein sequences and feeding them to AFDistill (pre-trained on TM 42K data), to generate additional data samples and collect lower-range pTM values. The distribution of the scores for these additional datasets is also shown in Fig.~\ref{fig:tm_density}, where both TM augmented 86K and pTM synthetic 1M datasets are less skewed, covering lower (p)TM values better. 
+
+Using Release 4 (July 2022) with over 214M predicted structures, we observed a similar high skewness in pLDDT values. To mitigate this, we filtered out samples with upper-range mean-pLDDT values, resulting in a 60M sequences dataset, with additional 10M and 1M versions created. Their density is shown in Fig.~\ref{fig:tm_density}.
+
+In summary, AFDistill is trained to predict both the actual structural measures (TM, LDDT, computed using true and AlphaFold's predicted structures) as well as AlphaFold's estimated scores (pTM and pLDDT). In either case the estimated structural consistency (SC) score is well correlated with its target (refer to Fig.\ref{fig:times}) and can be used as an indicators of protein sequence quality or validity.  
+
+\subsection{Model}
+AFDistill model is based on ProtBert \citep{elnaggar2020prottrans}, a Transformer BERT model (420M parameters) pretrained on a large corpus of protein sequences using masked language modeling. For our task we modify ProtBert head by setting the vocabulary size to 50 (bins), corresponding to discretizing pTM/pLDDT in range (0,1). For pTM (scalar) the output corresponds to the first $\mathtt{\langle CLS \rangle}$ token of the output sequence, while for pLDDT (sequence) the predictions are made for each residue position.
+
+\begin{table}[]
+\caption{Validation loss of AFDistill on  datasets from Table~\ref{tab:afdata} (For more details, see Tables~\ref{tab:tm_val_ce} and \ref{tab:lddt_val_ce}.)}
+\label{tab:exp_distill}
+\centering
+\begin{tabular}{@{}lr|lr@{}}
+\toprule
+\multicolumn{1}{l}{Training data} & \multicolumn{1}{r|}{Val CE loss} & \multicolumn{1}{l}{Training data} & \multicolumn{1}{r}{Val CE loss} \\ \midrule
+TM 42K               & \textbf{1.10} & LDDT 42K           & 3.39 \\
+TM augmented 86K     & 2.12 & pLDDT 1M           & 3.24 \\
+pTM synthetic 1M      & 2.55 & pLDDT balanced 1M  & 2.63 \\
+\multicolumn{1}{c}{} &      & pLDDT balanced 10M & 2.43 \\
+\multicolumn{1}{c}{} &      & pLDDT balanced 60M & \textbf{2.40} \\ \bottomrule
+\end{tabular}%
+\end{table}
+
+\begin{figure}[!h]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/pdb.pdf}
+\caption{Examples of  3D protein structures from the dataset,  corresponding to high, medium, and low actual TM scores (top row in  legend), as well as AFDistill predictions, trained on TM 42K (middle row) and TM augmented 86K (bottom row).}
+\label{fig:tm_examples}
+\end{figure}
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/plddt.pdf}
+\caption{Dataset examples of the per-residue predictions for two AFDistill models (blue and green lines), build on pLDDT balanced 1M and 60M datasets, versus the AlphaFold predictions (red line).}
+\label{fig:plddt_examples}
+\end{figure}
+
+\subsection{Distillation Experimental Results}
+
+In this section, we discuss the model evaluation results after training on the presented datasets. To address data imbalance, we used weighted sampling during minibatch generation and Focal loss  \citep{lin2017focal} instead of traditional cross-entropy loss. Table~\ref{tab:exp_distill} shows results for (p)TM-based datasets. AFDistill trained on TM 42K performed the best, followed by augmented and synthetic data. For (p)LDDT-based datasets, increasing scale and data balancing improved validation performance.
+In Fig.~\ref{fig:times} we show kernel density plots of the true vs pTM scores and pLDDT values on the entire validation set. Majority of the density is concentrated along the diagonal, indicating that the predicted scores match well with the ground truth. The mismatches are grouped in off-diagonal regions, but these areas have low density, indicating that the predictions are still accurate. Moreover, since the data for TM 42K is skewed towards 1.0 (top density plot in Fig. \ref{fig:tm_density}), most of the data is clustered in upper left corner. On the other hand, for the dataset pLDDT bal 60M which is balanced (bottom panel in Fig. \ref{fig:tm_density}), the predictions and true values are spread more uniformly along the diagonal.
+
+Finally, in Fig.~\ref{fig:tm_examples} and \ref{fig:plddt_examples}, we show a few examples of the data samples together with the corresponding AFDistill predictions. Fig.~\ref{fig:times} and Fig.
+
+
+
+
+
+\section{Inverse Protein Folding Design}
+
+\label{sec:design}
+
+In this section we demonstrate the benefit of applying AFDistill as a structure consistency (SC) score for solving the task of inverse protein folding, as well as for the protein sequence infilling as a means to  novel antibody generation. %In both of these tasks, we observe a clear improvement over the original baselines.
+The overall framework is presented in Fig.~\ref{fig:DesignOverview} (following the green line in the diagram), where the traditional inverse folding model is regularized by our SC score. Specifically, during training, the generated protein is fed into AFDistill, for which it predicts pTM or pLDDT score, and combined with the original CE training objective results in 
+\begin{align}
+\mathcal{L} = \mathcal{L}_\text{CE} + \alpha\mathcal{L}_\text{SC},
+\end{align}
+\noindent where $\mathcal{L}_\text{CE} = \sum_{1}^N\mathcal{L}_\text{CE}(\mathbf{s}_i, \hat{\mathbf{s}}_i)$ is the CE loss, $\mathbf{s}_i$ is the ground truth and $\hat{\mathbf{s}}_i$ is the generated protein sequence, $\mathcal{L}_\text{SC} = \sum_{i=1}^N (1-SC(\hat{\mathbf{s}}_i))$ is the structure consistency loss, $N$ the number of training sequences, and $\alpha$ is the weighting scalar for the SC loss, in our experiment it is set to 1.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/bar_gvp.pdf}
+\caption{%Evaluation results of GVP trained with SC regularization. The horizontal x-axis shows various datasets for AFDistill pretraining, the left vertical y-axis shows sequence metrics (recovery and diversity gains), while the right y-axis shows structure metrics (TM and SC scores). %Baseline GVP with no regularization achieves 38.6 in recovery, 15.1 in diversity and 0.79 in TM score on the test set. 
+Evaluation results for GVP with SC regularization are shown with various AFDistill pretraining datasets on the x-axis. The left y-axis displays sequence metrics (recovery and diversity gains), and the right y-axis shows structure metrics (TM and SC scores). Blue and orange solid bars represent recovery and diversity gains over the vanilla GVP baseline (38.6 in recovery, 15.1 in diversity, and 0.79 in TM score). Olive and purple bars display predicted SC and test set TM scores, respectively, while dashed cyan bar shows the baseline GVP TM score. TM 42K and TM augmented 86K pretrained AFDistill models achieve the best overall performance, with high diversity and moderate improvement in sequence and structure recovery.}
+\label{fig:gvp_results}
+\end{figure*}
+\paragraph{Metrics}
+
+We use standard sequence evaluation metrics to measure prediction design quality. \emph{Recovery} (0-100) is the normalized average of exact matches between predicted and ground truth sequences. \emph{Diversity} (0-100) is the complement of the average recovery for pairwise comparisons in a set. We aim for high recovery and high diversity rates. \emph{Perplexity} measures sequence likelihood, with lower values indicating better performance. For structure evaluation, we use \emph{TM-score} and \emph{structure consistency (SC)} score, which is AFDistill's output for a given input.
+
+\subsection{Results}
+We present experimental results for several recently proposed deep generative models for protein sequence design accounting for 3D structural constraints. For the inverse folding  tasks we use CATH 4.2 dataset, curated by \citep{ingraham2019generative}. The training, validation, and test sets have 18204, 608, and 1120 structures, respectively. While for protein infilling  we used SabDab \citep{gkt1043} dataset curated by \citep{jin2021iterative} and focus on infilling CDR-H3 loop. The dataset has 3896 training, 403 validation and 437 test sequences. 
+
+\paragraph{GVP}
+
+\begin{figure*}[!ht]
+\centering
+\includegraphics[width=0.85\textwidth]{figs/recdiv_1aal_gvp.pdf}
+\caption{%Comparison between baseline GVP (left) and SC regularized GVP (right), where AFDistill was pre-trained on TM augmented 86K dataset. The tables display 15 generated protein sequences from each model, top red row is the ground truth. Green cell with the * indicates amino acid identity compared to ground truth (top red row), while blue cell shows novelty. The shade of blue cell represents the frequency of the amino acid in that
+The comparison between baseline GVP (left) and SC regularized GVP (right) using AFDistill pre-trained on TM augmented 86K dataset shows 15 generated protein sequences from each model. Green cells with * indicate amino acid identity with ground truth (top red row), while blue cells represent novelty. The shade of blue indicates amino acid frequency in the column (darker = more frequent, lighter = rare). High recovery and diversity rates are seen with many green and light blue cells. Bottom plots display AlphaFold estimated structures (green) and ground truth (red). Recovery is 40.8 and diversity is 11.2 for GVP, while for GVP+SC, it is 42.8 and 22.6, respectively. SC-regularized GVP has accurate reconstructions with high sequence diversity, while GVP alone exhibits more inconsistencies, marked with arrows.}
+\label{fig:recdiv}
+\end{figure*}
+
+Geometric Vector Perceptron GNNs (GVP)~\citep{jing2020learning} is the inverse folding model, that for a given target backbone structure, represented as a graph over the residues, replaces dense layers in a GNN by simpler layers, called GVP layers, directly leveraging both scalar and geometric features. This allows for the embedding of geometric information at nodes and edges without reducing such information to scalars that may not fully capture complex geometry. 
+The results of augmenting GVP training with SC score regularization are shown in Fig. 
+
+
+Baseline GVP without regularization achieves 38.6 in recovery, 15.1 in diversity, and 0.79 in TM score on the test set. Employing SC regularization leads to consistent improvements in sequence recovery (1-3\%) and significant diversity gain (up to 45\%) while maintaining high TM scores. pTM-based SC scores show a better overall influence on performance compared to pLDDT-based ones. It's important to note that AFDistill's validation performance on distillation data doesn't always reflect downstream application performance. For example, TM augmented 86K outperforms TM 42K, despite having slightly worse validation CE loss. This suggests that augmented models may enable more generalized sequence-structure learning and provide a greater performance boost for inverse folding models.
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.85\textwidth]{figs/sesa.pdf}
+\caption{Distribution of recovery and diversity values across residues in generated structures. Left Table shows the analsys with respect to core ($\geq$ 24 neighbors), surface ($\leq$ 16 neighbors) and all residue categories. Right Figure shows similar analysis with respect to solvent-exposed surface area.}
+\label{fig:sesa}
+\end{figure*}
+
+Fig.~\ref{fig:recdiv} further demonstrates the effect of recovery and diversity on protein sequences and AlphaFold-generated 3D structures for GVP and GVP+SC models. GVP+SC achieves higher diversity while retaining accurate structure. Recovery and diversity scores are 40.8 and 11.2 for GVP, and 42.8 and 22.6 for GVP+SC, respectively. The bottom plots display AlphaFold estimated structures (green) and ground truth (red). Despite its high sequence diversity, GVP+SC shows very accurate reconstructions (average TM score 0.95), while GVP exhibits more inconsistencies (TM score 0.92), marked with blue arrows.
+
+\begin{table}[!ht]
+\centering
+\caption{Evaluation results of ProteinMPNN trained with and without SC regularization (AFDistill trained on TM aug 86K dataset). The values in parenthesis show gain on test set of using SC-regularized training as compared to original training.}
+\resizebox{0.99\textwidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\multirow{2}{*}{}   & \multicolumn{2}{c|}{Recovery} & \multicolumn{2}{c|}{Diversity} & \multicolumn{2}{c}{Perplexity} \\ \cmidrule(l){2-7} 
+ &
+  ProteinMPNN &
+  \begin{tabular}[c]{@{}c@{}}ProteinMPNN\\ +SC\end{tabular} &
+  ProteinMPNN &
+  \begin{tabular}[c]{@{}c@{}}ProteinMPNN\\ +SC\end{tabular} &
+  ProteinMPNN &
+  \begin{tabular}[c]{@{}c@{}}ProteinMPNN\\ +SC\end{tabular} \\ \cmidrule(l){2-7} 
+Backbone Noise 0.02 & 47.7          & 47.5 {\small(-0.4\%)}         & 22.5           & 24.3 {\small(+8.0\%)}        & 5.1            & 5.1 {\small(+0.0\%)}  \\
+Backbone Noise 0.1  & 43.8          & 44.0 {\small(+0.5\%)}         & 28.1           & 30.4 {\small(+8.2\%)}        & 5.3            & 5.4 {\small(+1.9\%)}  \\
+Backbone Noise 0.2  & 39.5          & 39.9 {\small(+1.0\%)}         & 31.3           & 34.4 {\small(+9.9\%)}       & 5.8            & 5.8 {\small(+0.0\%)}  \\
+Backbone Noise 0.3  & 36.3          & 36.4 {\small(+0.0\%)}         & 33.0           & 37.8 {\small(+14.6\%)}       & 6.2            & 6.3 {\small(+1.6\%)}   \\ \bottomrule
+\end{tabular}%
+}
+\label{tab:mpnn}
+\end{table}
+
+We also conducted a core/surface analysis similar to \cite{hsu2022learning} to examine recovery and diversity distribution across residues in generated structures. Residues were categorized by the density of neighboring $C_\alpha$ atoms within 10A (core: $\geq$ 24 neighbors; surface: $\leq$ 16 neighbors). Using SC-regularized GVP results on TM 42K dataset, we computed recovery and diversity scores per class (Fig. \ref{fig:sesa}). Core residues, being more constrained, better match ground truth with less diversity. Surface residues, being less constrained, exhibit lower recovery but higher diversity as the model has more freedom in selecting residues.
+
+Additionally, we plot the solvent-exposed surface area \cite{sasa} versus recovery and diversity, computed per residue (see right panel in Fig. \ref{fig:sesa}). As expected, the recovery plot shows negative correlation and diversity plot shows positive correlation as the surface area increases. Solvent-exposed surface area was calculated using GROMACS software suite \cite{gromacs} with default parameters.
+
+\paragraph{Note on sequence diversity}
+ In particular in Fig.\ref{fig:tr_regime} we show that the main source of diversity is in the limited guidance from AFDistill about the specific sequence to generate to match a given 3D structure, since it does not have access to the structural information, allowing many relevant sequences with high pTM/pLDDT to be considered as good candidates. AFDistill regularization during training injects candidate sequences which have high pTM/pLDDT scores, therefore likely matching the input structure better, thus ensuring high recovery rate. At the same time these sequences differ from the ground truth, thus promoting diversity (see Section \ref{sec:gvp_training} for more details).
+\paragraph{ProteinMPNN}
+ProteinMPNN model \cite{dauparas2022robust} is a recent protein design model, which is based on message passing neural network (MPNN) with specific modifications to improve amino acid sequences recovery of proteins given their backbone structures. The model incorporates structure features, edge updates, and an autoregressive approach for decoding the sequences. In Table \ref{tab:mpnn} we compared the results of original unmodified training of ProteinMPNN to the SC-regulared training (AFDistill model trained on TM aug 86K dataset). We also varied ProteinMPNN internal parameter, which adds noise to the input backbone protein structure. 
+As can be seen, SC regularization maintains high recovery and perplexity rates while improving the diversity of the generated protein sequences. Backbone noise, which is a part of ProteinMPNN model, can also be seen as a form of regularization, however while the increase in noise leads to improved sequence diversity it also leads to the decrease in amino acid recovery rate. SC regularization, on the other hand, promotes diverse generation and maintains high sequence recovery rates.
+
+
+\paragraph{PiFold}
+
+PiFold \cite{gao2023pifold} is another recent protein design model which introduces a new residue featurizer and stacked PiGNNs (protein inverse folding graph neural networks). The residue featurizer constructs residue features and introduces learnable virtual atoms to capture information that could be missed by real atoms. The PiGNN layer learns representations from multi-scale residue interactions by considering feature dependencies at the node, edge, and global levels. In Table \ref{tab:pifold_main} we present the results of original and SC-regularized PiFold (using different AFDistill models). We note that the original PiFold evaluation was based on using greedy decoding to generate a sequence. Following the standard practice (GVP, GraphTrans, ProteinMPNN, etc), we have included also the results based on sampling (using 100 samples per sequence) to match other works and compute sequence diversity score. The results show that SC regularization based on AFDistill trained on TM aug 86K results in a near-identical recovery rate compared to the original model, while notably enhancing sequence diversity. This indicates an improvement in PiFold's performance by maintaining recovery rates while increasing the variety of generated sequences. Also observe a decrease in recovery rates for sampled generation as compared to greedy decoding across all the models.
+
+\begin{table}[]
+\centering
+\caption{Experiments on PiFold comparing the performance metrics on the test set of CATH 4.2 for different model variants (original vs SC-regularized training based on different AFDistill models) using greedy and sampled decoding strategies. The values in parentheses represent the percentage change with respect to the original PiFold model.}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}ccccccccccccccc@{}}
+\toprule
+ &
+  \multicolumn{2}{c}{Original} &
+  \multicolumn{2}{c}{TM 42K} &
+  \multicolumn{2}{c}{TM aug 86K} &
+  \multicolumn{2}{c}{TM synth 1M} &
+  \multicolumn{2}{c}{LDDT 42K} &
+  \multicolumn{2}{c}{pLDDT 1M} &
+  \multicolumn{2}{c}{pLDDT bal 60M} \\
+  \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13} \cmidrule(lr){14-15}
+        & Rec  & Perp & Rec  &Perp & Rec  & Perp & Rec  & Perp & Rec  & Perp & Rec  & Perp  & Rec  & Perp \\ [2pt]
+Greedy  & 51.1 & 4.8  & 50.9 & 5.0  & 51.0 & 4.8  & 50.5 & 5.2  & 50.8 & 4.9  & 50.9 & 4.8   & 51.1 & 4.7  \\ 
+        &      &      & {\small(-0.4\%)} & {\small(+4.0\%)} & {\small(-0.2\%)}  & {\small(+0.0\%)}  & {\small(-1.2\%)} & {\small(+8.3\%)}  & {\small(-0.6\%)} & {\small(+2.1\%)}  & {\small(-0.4\%)} & {\small(+0.0\%)}  & {\small(+0.0\%)} & {\small(-2.1\%)}  \\ [6pt]
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11} \cmidrule(lr){12-13} \cmidrule(lr){14-15} 
+        & Rec  & Div  & Rec  & Div  & Rec  & Div  & Rec  & Div  & Rec  & Div  & Rec  & Div  & Rec  & Div  \\[2pt]
+Sampled & 42.6 & 52.4 & 42.5 & 60.7 & 42.8 & 60.2 & 42.4 & 61.1 & 42.3 & 60.9 & 42.5 & 60.5 & 42.9 & 60.0 \\        
+ & & & {\small(-0.2\%)} & {\small(+15.8\%)} & {\small(+0.5\%)} & {\small(+14.9\%)} & {\small(-0.5\%)} & {\small(+16.6\%)} & {\small(-0.7\%)} & {\small(+16.2\%)} & {\small(-0.2\%)} & {\small(+15.5\%)} & {\small(+0.7\%)} & {\small(+14.5\%)} \\ \bottomrule
+\end{tabular}%
+}
+\label{tab:pifold_main}
+\end{table}
+\paragraph{Additional Experiments}
+ Finally, in addition to protein design, we also examine the effect of SC regularization on a protein infilling task to design complementarity-determining regions (CDRs) of an antibody sequence. 
+
+
+\section{Conclusion}
+
+In this work we introduce AFDistill, a distillation model based on AlphaFold, which for a given protein sequence estimates its structural consistency (SC: pTM or pLDDT) score. We provide experimental results to showcase the efficiency and efficacy of the AFDistill model in high-quality protein sequence design, when used together with many of the current state of the art protein inverse folding models or large protein language model for sequence infilling. Our AFDistill model is fast and accurate enough so that it can be efficiently used for regularizing structural consistency in protein optimization tasks, maintaining sequence and structural integrity, while introducing diversity and variability in the generated proteins.
+
+\clearpage
+\newpage
+
+
+
+
+

@@ -1,0 +1,418 @@
+\title{Pyramid Vector Quantization for LLMs}
+
+\begin{abstract}
+Recent works on compression of large language models (LLM) using quantization considered reparameterizing the architecture such that weights are distributed on the sphere. This demonstratively improves the ability to quantize by increasing the mathematical notion of coherence, resulting in fewer weight outliers without affecting the network output. In this work, we aim to further exploit this spherical geometry of the weights when performing quantization by considering \textit{Pyramid Vector Quantization} (PVQ) for large language models. Arranging points evenly on the sphere is notoriously difficult, especially in high dimensions, and in case approximate solutions exists, representing points explicitly in a codebook is typically not feasible due to its additional memory cost. Instead, PVQ uses a fixed integer lattice on the sphere by projecting points onto the 1-sphere, which allows for efficient encoding and decoding without requiring an explicit codebook in memory. To obtain a practical algorithm, we propose to combine PVQ with scale quantization for which we derive theoretically optimal quantizations, under empirically verified assumptions. Further, we extend pyramid vector quantization to use Hessian information to minimize quantization error under expected feature activations, instead of only relying on weight magnitudes. Experimentally, we achieve state-of-the-art quantization performance with pareto-optimal trade-off between performance and bits per weight and bits per activation, compared to competitive methods. On weight-only, we find that we can quantize a Llama-3 70B model to 3.25 bits per weight and retain 98\% accuracy on downstream tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Quantization enables compression of large language models (LLMs) by reducing the number of bits per weight required to represent weights. Weight outliers can make quantization difficult, as they cause weight distributions to not match the implicit evenly distributed grids used in many quantization methods. To overcome this, recent works have proposed to reparameterize architectures by rotating weights in a way that leaves the network as a function unchanged \citep{ashkboos2024quarot,chee2024quip}.
+
+In this work, we aim to exploit the spherical geometry in weights when performing quantization by considering Pyramid Vector Quantization (PVQ) \citep{fischer1986pyramid} for LLMs. In PVQ, weights are quantized on a hyper-pyramidal lattice that allows efficient encoding and decoding without having to explicitly represent a codebook in memory. By projecting the lattice onto the hyper-sphere, a quantization grid is obtained that accurately approximates a uniform grid on the spherical domain.
+
+PVQ has been very successful in well-known audio \citep{valin2012definition} and video codecs \citep{daede2016daala}. We demonstrate that the same algorithm allows practical quantization of large language models, by proposing a group-wise quantization scheme and further extending PVQ to use Hessian information accounting for curvature in the loss. We also propose a scheme to quantize the normalized scales (amplitudes) of each group according to theoretically derived quantiles, which we verified to closely match the empirical weight distributions of pretrained LLMs in practice. Our contribution extends beyond \citet{liguori2017pyramid}, which considered PVQ on weights of small neural networks.
+
+Experimentally, we find that our proposed PVQ quantization scheme outperforms the state-of-the-art in terms of bits per weight and bits per activation. We do not only perform simulated quantization, but also provide kernels that allow hardware accelerated encoding and decoding of PVQ. We achieve state-of-the-art quantization on the most prominent Llama-3, Phi-3 and Mistral architectures in terms of performance against bits per weight (BPW). In particular, we demonstrate 3.25 bit weight quantization at a negligible 1-3\% drop in performance, as measured in accuracy on downstream tasks.
+
+
+
+\section{Background}
+
+
+Before discussing our approach on using pyramid vector quantization to quantize LLMs, we provide an overview of vector quantization, spherical geometry of LLM weights, and describe classic PVQ.
+
+\subsection{Quantization}
+Quantization is a compression technique for machine learning models by storing weights ($\mW$) or activations ($\vx$) in a some chosen lower bit representation, such as lower precision floats or scaled integers ($\widehat\mW$). A common conversion is to minimize a second-order layer-wise proxy loss \citep{nagel2020up,frantar2022gptq},
+\begin{align}
+L(\widehat{\mW}) = \E_{\vx} \left[ || \mW \vx - \widehat{\mW} \vx ||_2 \right] = \Tr\left( (\mW - \widehat{\mW}) \mH (\mW - \widehat{\mW}) \right)
+\label{eq:proxy-loss}
+\end{align}
+where the layer-wise Hessian $\mH = \E_{\vx} \left[ \vx_n \vx_n^T \right] \approx \frac{1}{N} \sum_{n=1}^N \vx_n \vx_n^T$ is empirically estimated using a calibration dataset $\{ \vx_n \}_{n=1}^N$. The objective is optimal in the sense that it minimizes the layer-wise output at each layer, but a crude approximation with respect to the actual training loss. Some recent works have proposed to also use gradients to improve the approximation to the true training objective \citep{van2023llm}. Although it would be interesting to combine ideas presented in this paper with gradients, we stick to a layer-wise loss \cref{eq:proxy-loss} for simplicity and because this yields a faster quantization method that does not require backpropagation.
+
+\subsection{Vector quantization}
+
+Instead of individually quantizing weights, as done in scalar quantization, vector quantization aims to simultaneously quantize multiple weights. It can be shown that, even for completely independent Gaussian sources, this typically results in much higher theoretical signal-to-noise ratios, leading recent works to consider vector quantization for LLMs \citep{van2024gptvq, liu2024vptq,egiazarian2024extreme,tseng2024quip,tseng2024qtip}. Yet, vector quantization is not widely adopted in practice because of two practical problems. Firstly, naive vector quantization requires constructing an explicit codebook using clustering (such as K-means), quickly becoming infeasibly large for higher number of dimensions. Secondly, quantization requires an expensive search over this explicit codebook, which can not practically be used on-the-fly on activations. Although application to LLMs is limited, it is common in vector quantization \citep{gray1998quantization} to use an \textbf{implicit codebook} which does not have to be explicitly instantiated in memory. PVQ is such a vector quantization and comes with the additional benefit of being \textbf{search-free}, allowing encoding and decoding of vectors without having to perform an explicit and exhaustive lookup that at least linearly scales in algorithmic complexity with the size of the codebook. As a result, it can be applied on-the-fly and not only on the neural network weights, but also to the activations during inference. 
+
+\subsection{Weights on the sphere}
+\label{sec:weights-on-sphere}
+
+Instead of viewing weight vectors in Euclidean $D$-space $\vw \in \mathbb{R}^D$, they can be interpreted as scaled points $\vw = s \vv$ on the unit sphere $\vv \in \Omega_D$, with $\Omega_D = \{ \vv = (v_1, v_2, \ldots, v_D) \in \mathbb{R}^D : \|\vv\|_2 = 1\}$. We refer to this spherical decomposition as the \textit{direction} $\vv = \frac{\vw}{\|\vw\|_2}$ and the \textit{amplitude} $s = \|\vw\|_2$ of a vector. Recent works that use such a spherical perspective on LLM weights have offered new insights in properties of the training dynamics and guide algorithmic improvements. For example, \citep{kosson2023rotational} noted that LLM weights under weight decay or popular deep learning optimizers converge to an equilibrium on the sphere, theoretically predicting the magnitude of the amplitude after training. Recent works have shown that only updating direction components can be beneficial in low-rank adaptation \cite{liu2024dora} and training itself \citep{loshchilov2024ngpt}. Yet, weights are not always uniformly distributed making quantization hard and giving rise to outliers. We use \textit{coherence processing} \citep{chee2024quip} to reparameterize weights on the sphere in a way that reduces outliers without functionally changing the output of the network. Further, in high dimensions the information in the amplitude is negligible compared to the information in the direction \citep{kipnis2021gaussian}. The observation that LLM weights are in practice uniformly distributed across the sphere is the primary motivation behind exploring pyramid vector quantization, which allows us to construct an efficient spherical quantization code.
+
+\paragraph{Hadamard coherence processing}
+Recent works have shown that rotating weights \citep{chee2024quip,ashkboos2024quarot} can improve weight coherence and reduce the number of outliers without altering the network's output,
+$\widetilde{\mW} = \mU \mW \mV$
+where $\mU \in \R^{R \times R}$ and $\mV \in \R^{C \times C}$ are both orthogonal matrices. Since the transpose of orthogonal matrices equals their inverse, the reparameterisation can simply be undone in the forward pass by left- and right multiplying with matrix transposes, $\mW = \mU^T \widetilde{\mW} \mV^T$. We follow \cite{chee2024quip,ashkboos2024quarot} and use random Hadamard matrices for $\mU$ and $\mV$, which can be implemented very efficiently.
+
+Representing weights on the sphere through incoherence processing has shown to improve existing quantization methods by preventing outliers in weight distributions. Yet, these methods still quantize weights to Euclidean grids and do not exploit the spherical geometry of underlying weight distributions. We explore pyramid vector quantization to construct a quantization grid that is tailored to the spherical geometry by being approximately uniform on the sphere.
+\paragraph{Absorbing rotation matrices}
+In most cases, the additional rotation matrices do not result in a memory or compute overhead during inference since rotation matrices can be absorbed into weight matrices: depending on the placement of the rotation matrix in the architecture, it can be left- or right- multiplied with an adjacent weight matrix. This principle was used in \quarot~\citep{ashkboos2024quarot}, which describes how rotation matrices can be efficiently absorbed into attention and fully-connected layers in commonly used LLM architectures.
+
+\subsection{Classic Pyramid Vector Quantization}
+\label{sec:pvq-background}
+
+\begin{figure}[t]
+\hspace{-0.1\linewidth}
+\includegraphics[width=1.15\linewidth]{figures/3d_pvq.pdf}
+\caption{Illustration of the PVQ integer lattice in $d=3$ dimensions with increasing pulses $k$ from 1 to 6. Points on the pyramid $\gP_{3, k}$ are projected onto the sphere $\gS_{3, k}$.}
+\label{fig:3d-pvq}
+\end{figure}
+
+To quantize points on the sphere, we would like to construct \textit{spherical code}, a finite subset on the unit sphere $\gS \subset \Omega_D$. Packing a set of points on the surface of a sphere such that their distance is maximized is a notoriously hard problem in mathematics, famously dating back to the Dutch botanist \citet{tammes1930origin}. Just like sphere packing, optimal spherical codes are not generally known, with the exception of some specific dimensions, similar to the E8 packing in 8 dimensions exploited in \citep{tseng2024quip}. Even though good but sub-optimal spherical codes exist \citep{conway2013sphere}, there is not always an efficient method to enumerate the packing without requiring an explicit codebook, resulting in costly quantization. PVQ \citep{fischer1986pyramid} provides a solution to both of these issues simultaneously, allowing good spherical codes to be constructed in arbitrary dimension that can be efficiently encoded and decoded without having to maintain an explicit codebook in memory. This is achieved by projecting an integer lattice on the $l_1$ ball $\gP_{D, K}$ onto the hypersphere $\gS_{D, K}$. We now formalize these concepts by providing an overview of classic PVQ algorithm.
+
+\paragraph{The integer pyramid lattice} Formally, the integer lattice of PVQ on the $D$-dimensional hyper-sphere is obtained by starting from a set of points on the $l_1$ ball of radius $K$, and projecting the set of points onto the sphere. We denote the set of integer points on the $l_1$ ball as $\gP_{D, K}$,
+\begin{align}
+\gP_{D, K} = \left\{ \vp \in \mathbb{Z}^D : ||\vp||_1 = \sum_{d=1}^D |\vp_d| = K \right\} 
+\end{align}
+To obtain our spherical code $\gS_{D, K}$, we can project the points $\gP_{D, K}$ onto the sphere, by normalizing,
+\begin{align}
+\gS_{D, K} = \left\{ \frac{\vp}{||\vp||_2} : \vp \in \gP_{D, K} \right\}\,.
+\end{align}
+The number of codes $N(D, K) = |\gS_{D, K}| = |\gP_{D, K}|$ can be written as
+\begin{align}
+N(D, K) = 
+2 D \cdot {}_2 F_1(1-D, 1-K, 2 ; 2)
+\end{align}
+where
+${}_2F_1(a, b, c ; z)$ is the hypergeometric function \citep{terriberry2007pulse}, and for specific $D, K \in \mathbb{Z}$ can be computed through the following recurrence relation,
+\begin{align}
+\label{eq:size_table}
+N(D, K) = N(D - 1, K) + N(D, K - 1) + N(D, K)
+\end{align}
+where we define $N(D, 0)=1$ for all $D \geq 0$ and $N(0, K) = 0$ for all $K\geq 1$.
+
+\subsection{Subroutines of classic PVQ}
+
+\paragraph{Quantizing the direction}
+To quantizing a vector $\vw \in \R^D$, we map it to the closest point on the pyramid $\gP_{D, K}$ using an iterative procedure that projects the vector $\vw_0 = \vw$ onto the $l_1$ ball of radius $K$, and round it to the closest integer,
+\begin{align}
+\vw_{t+1} = \text{quantize\_step}_K(\vw_{t}) = \text{round}\left(\frac{K}{||\vw_t||_1} \vw_t \right)
+\end{align}
+After this step, we check whether the norm satisfies $||\vw||_1 = K$. If this is the case, we're done. If not, we either decrease by 1 or increase by 1, the element in $\vw_t$ with the biggest deviation $|\vw_i| - K$. We then call $\text{quantize\_step}_K(\cdot)$ again, and repeat this process until convergence, which should happen within at most $T < D$ steps. The resulting vector lies on the pyramid $\vw_T \in \gP_{D, K} \subset \mathbb{Z}^D$, meaning it is integer-valued and the absolute values sum to 1. We provide pseudocode of the quantization algorithm in \cref{alg:encode} in \cref{sec:encode-alg} to be fully self-contained.
+\begin{wrapfigure}{r}{0.37\textwidth}
+    \centering
+    \includegraphics[width=13em]{figures/pvq_codebook-fixed.pdf}
+    \caption{Illustration of points on pyramid $\gP_{2, 7}$, their projections onto the sphere $\gS_{2, 7}$ and codes in $\gC_{2,7}$.}
+    \label{fig:pvq-codebook}
+\end{wrapfigure}
+
+\paragraph{Pyramid encoding} We can encode points on the pyramid $\vp \in \gP_{D, K}$ to integer codes $c \in [1, \ldots, N(D, K)-1]$ using an efficient algorithm, which avoids having to build an explicit table in memory to represent the codebook. The original PVQ paper \citep{fischer1986pyramid} describes an encoding scheme, of which we provide pseudocode \cref{alg:encode} in \cref{sec:encode-alg}, for the purpose of being self-contained. The algorithm provides a bijective mapping from the points of the pyramid $\gP_{D,K}$ to the set of integer indices $\gC_{D,K}$, providing a compact representation that allow vectors to be efficiently stored in as few bits as possible. In \cref{fig:pvq-codebook}, we provide an example illustration of points on $\gP_{2,7}$ and indices $\gC_{2,7}=[0, 27]$. The table of $N(d, k)$ can be precomputed for $0 \leq d \leq D$ and $0 \leq k \leq K$ and reused to avoid recomputing the same quantity.
+
+\paragraph{Pyramid decoding}
+
+We decode the integer codes $c \in \gC$ of PVQ to their associated vectors $\vp \in \gP_{D, K}$ through a decoding algorithm which performs the inverse operation of the encoding algorithm above. In \cref{sec:decode-alg}, we provide a corrected version of the decoding algorithm described in the original PVQ paper \citep{fischer1986pyramid}. The original paper contains an error and misses a line after setting $x_i \gets -j$, resulting in wrong decodings when $\vp$ contains negative values, except for when the last value is negative (which happens to be the case for the example given in the original paper).
+\newpage
+
+
+\section{PVQ for LLM compression}
+
+
+Before we present our overall algorithm to perform PVQ to LLMs in \cref{sec:pvq-llm-overview}, we discuss the motivations and practical benefits of PVQ for LLM quantization in \cref{sec:why-pvq-for-llm} and analyse the theoretical signal-to-noise ratio of PVQ \cref{sec:theoretical-analysis}.
+
+\subsection{Practical advantages of PVQ}
+\label{sec:why-pvq-for-llm}
+
+PVQ offers several practical advantages over competing methods. Firstly, PVQ is a vector quantization method which means it can achieve higher signal-to-noise ratios than scalar quantization methods that quantize weights independently. Secondly, \textbf{PVQ uses an implicit codebook}, which means that it does not require an explicit codebook to be constructed in memory. This makes the approach more memory efficient, but more importantly, the implicit codebook size can reach far beyond the memory that would have been required with an explicit codebook. To illustrate, explicitly storing a codebook that quantizes 16 bit precision vectors of a groupsize of 128 to 4 bit per weight would require approximately $2.7\cdot 10^{154}$ bytes, exceeding the estimated information capacity of the observable universe. With PVQ, we can use implicit codebooks of this size because encoding and decoding are done by an efficient algorithm, not a table lookup. Thirdly, \textbf{PVQ is search-free}, which means that vectors can be encoded without having to search over a codebook. This is significant apart from the computational benefits, because it allows for on-the-fly quantization of activations and opens the door to quantization at train time. Lastly, the desired bits per weight after quantization can also be fractions (e.g. $b_{\text{direction}} = 3.5$) and are not limited to integers. The ability to choose the groupsize, and bits for the direction make PVQ highly flexible and can be chosen such that the most optimal trade-off between compression and performance is achieved. We find that PVQ outperforms competitive quantization methods in terms of weight-only and activation quantization.
+
+In this work, our focus is on post-training quantization of weights and activations. Some current works quantize LLMs during training \citep[e.g.][]{ma2024era}. We anticipate that PVQ could be used during training because of the advantages outlined above, though we leave a thorough investigation and comparisons to future work. 
+
+\begin{wrapfigure}{r}{0.61\textwidth}  % 'r' for right, '0.5\textwidth' for the width
+\resizebox{\linewidth}{!}{
+\includegraphics[width=0.94\linewidth]{figures/snr_plot-fixed.pdf}
+}
+\caption{Signal-to-quantization-noise-ratio (QSNR) of quantization methods on standard Gaussian source. PVQ achieves high QSNR close to E8, which uses an optimal packing on a uniform source. PVQ uses an implicit codebook and is search-free, thereby amenable to quantization of weight and activations.}
+\label{fig:snr-plot}
+\end{wrapfigure}
+\subsection{Signal-to-quantization-noise on ideal Gaussian source}
+\label{sec:theoretical-analysis}
+
+To assess the theoretical effectivity between different quantization algorithms are, we start by comparing empirical estimates of their performance on an idealized standard Gaussian source, zero mean unit variance. We measure the signal-to-quantization-noise ratio QSNR by averaging the mean squared error between true and quantized signal over 1000 samples in \cref{fig:snr-plot}. We compare PVQ with E8, a method that has optimal packing of uniformly distributed weights in $D=8$ dimensions only \citep{tseng2024quip} and naive rounding-to-nearest (RTN) scalar quantization. We find that PVQ achieves QSNR ratios close to the optimal E8 method. Further, PVQ can also be applied to activation quantization, in which case we compare to RTN without search as a baseline that is suitable to quantization of both weights and activations.
+
+
+
+\newpage
+\subsection{Pyramid vector quantization for LLMs}
+\label{sec:pvq-llm-overview}
+
+This section describes the overall method for quantizing an LLM using PVQ. 
+
+\paragraph{Step 0. Choose the desired BPW.}
+\label{sec:bpw}
+In PVQ, the trade-off between performance and effective bits per weight (BPW) is controllable through the groupsize $D$, which must divide the number of columns so that $\mW \in \R^{N \times DG}$, direction bits $b_{\text{direction}} \in \mathbb{N}$ and amplitude bits $b_{\text{amplitude}} \in \mathbb{N}$:
+\begin{align}
+\text{BPW} = b_{\text{direction}}/D + b_{\text{amplitude}}/G \end{align}
+As the number of direction bits per weight $b_{\text{direction}}/D$, and amplitude bits per weight $b_{\text{amplitude}}/G$ are fractions, it is easy to choose a non-integer number of bits per weight in PVQ.
+
+\paragraph{Step 1. Coherence processing.} Before we begin quantizing the weights, we perform coherence processing using efficient Hadamard rotation matrices proposed in \citep{chee2024quip}, which can be fused into the architecture as described in \quarot \citep{ashkboos2024quarot}.
+
+\paragraph{Step 2. Determine the number of pulses $K$.}
+To determine the number of pulses $K$ such that the number of bits required to encode PVQ vectors remains within the desired maximum, we find the largest $K$ by increasing it such that it still satisfies $\left\lceil \log_2(N(D, K))/D \right\rceil < b_{\text{direction}}$. Here, $N(D, K)$ is computed using the recursive algorithm outlined in Section \ref{sec:pvq-background}. In practice, the number $N(D, K)$ can exceed regular integer types and may require arbitrary precision integers.
+
+\paragraph{Step 3. Quantizing the direction.}
+
+We quantize all LLM weight matrices making up key, query, value and fully-connected components. We write the normalized weight matrix $\mW = \begin{bmatrix} \mW_1 &\mW_2 &\ldots &\mW_G \end{bmatrix} \in \R^{N \times GD}$, with $N$ features, $G$ groups and a groupsize of $D$. Given our choice of $K$, we quantize groups $\mW_g \in \mathbb{R}^{N \times D}$ using the quantization procedure of \cref{sec:pvq-background} yielding a quantized direction matrix $\widehat{\mW}_g$ on the pyramid $\gP_{D, K}$, ie. elements are rounded integers and absolute values of rows sum to 1. This operation can be parallelized over features and groups.
+
+\paragraph{Step 4. Computing the amplitude.}
+
+For each quantized row vector $\widehat{\vw} \in \R^D$ in a group, we can find an optimal rescaling by $s \in \R$ that minimizes the Euclidean distance to the original weight $\vw$ in closed-form $ s = \widehat{\vw}^T\widehat{\vw} / \widehat{\vw}^T \vw$. Repeating this for all features and groups yields an amplitude matrix $\mS \in \R^{N \times G}$.
+We refer to quantized $\widehat{\mW}$ as the `\textit{direction}' and the scales $\mS$ as the `\textit{amplitude}'.
+\paragraph{Step 5. Quantizing the amplitude (optional)}
+
+For small groupsizes, we can optionally quantize amplitudes as described in \cref{sec:amplitude-quantization}. For each row $\vs \in \R^G$ in $\mS$, this entails quantizing normalized elements $\floor{\text{CDF}(s_i^2 / || \vs ||_2^2) \cdot 2^b}$ using the CDF of the $\text{Beta}(D/2, D(G-1)/2)$ distribution. The normalizing constant $||\vs||_2^2$ needs to be stored for dequantization, but because it is shared across groups its contribution to the total $<0.01$ bits per weight is negligibly small.
+
+\paragraph{Step 6. Correcting the quantization error.}
+
+For each quantized group of weights indexed by the quantized columns $\vs_g \widehat{\mW}_g \in \R^{N \times D}$, we can update the other remaining columns $\mW_{\neg g} \in \R^{N \times (G-1)D}$ to compensate the quantization error that minimizes the proxy loss $L$ of \cref{eq:proxy-loss}:
+\begin{align}
+\mW_{\neg g} \leftarrow \mW_{\neg g} - \mH^{-1}_{\neg g, \neg g} \mH_{\neg g, g} (\mW_g - \vs_g \widehat{\mW}_g)
+\end{align}
+where $\mH_{\neg g, \neg g}$ is a square submatrix of the inverse Hessian with rows and columns corresponding to remaining weights and $\mH^{-1}$ is a rectangular submatrix of the inverse Hessian with rows and columns that correspond to quantized and remaining weights respectively. We can avoid inverting the full Hessian for every update by working with its Cholesky decomposition $\mH = \mL \mL^T$, as detailed in GPTQ \citep{frantar2022gptq} which proposed the update in the context of scalar quantization.
+
+\paragraph{Step 7. Encoding the direction.}
+
+To encode a quantized weight $\widehat{\mW} \in \R^{N \times GD}$ (e.g. 32 bit float for $\R$) into the actual low bit integer representation $\overline{\mW} \in \mathbb{N}^{N \times G}$, sometimes referred to as the `code', we can use the PVQ encoding algorithm described in \cref{alg:encode}. This is problematic, since the number of bits required to store a vector may exceed the bit width of integer types in many languages (e.g. when $\ceil{\log_2(N(D, K))} > 128 $ bits, it can not be represented in a 128 bit integer). To overcome this, we implemented arbitrary precision arithmetic in CUDA/C++ to support arbitrary bit width integer types to allow encoding and decoding kernels.
+
+\newpage
+\subsection{amplitude quantization}
+\label{sec:amplitude-quantization}
+
+\paragraph{Normalized amplitudes follow the Beta distribution.}
+Smaller groupsizes lead to a lower quantization error, but lead to an increase in the number of bits required to store amplitude parameters. This is because the amplitude $\mS \in \R^{N \times G}$ grows linearly with the number of groups $G$, and therefore inversely proportional to the chosen groupsize $D$. To overcome this issue, we propose a theoretically and empirically motivated scheme to quantize amplitude parameters. In \cref{thm:beta-dist}, we note that row vectors of normalized amplitudes follow a Beta distribution $\text{Beta}(\frac{D}{2}, \frac{D(G-1)}{2})$ of which the coefficients depend on the groupsize $D$ and the number of groups $G$. We empirically confirm that our theory meets practice, as we find that the Beta distribution matches normalized weight distributions of pretrained LLM models, after performing the rotation described in \cref{sec:weights-on-sphere}, as shown for selection of layers in a pretrained LLM in \cref{fig:direction-amplitude-plot}. To exploit the observation that amplitudes are Beta distributed, we propose to use the quantiles of this distribution to quantize amplitudes.
+
+\begin{figure}[t]
+    \includegraphics[width=1.0\linewidth]{figures/shape-gain-plot-fixed2.pdf}
+    \caption{Effect of different direction and amplitude bits on effective PVQ quantization grid. The distribution automatically matches the theoretical $\text{Beta}$ weight distribution.}
+\label{fig:direction-amplitude-plot}
+\end{figure}
+\begin{theorem}
+\label{thm:beta-dist}
+Let $\vw \in \R^{GD}$ be a normally distributed vector that can be grouped in $G$ equally sized vectors $\vw = \begin{bmatrix} \vv_1 & \vv_2 & \cdots & \vv_G \end{bmatrix}$ where each of the vectors $\vv_g$ has the same dimensionality equal to the groupsize $\vv_g \in \R^D$. Then the normalized radius (the `amplitude') of each group $s_g = \vv_g^T \vv_g/||\vw||_2^2$ follows the $s_g \sim \text{Beta}(\frac{D}{2}, \frac{G(D-1)}{2})$ distribution. (Proof in \cref{sec:beta-proof})
+\end{theorem}
+\begin{figure}[h]
+ \centering
+ \includegraphics[width=\linewidth]{figures/histogram-small.pdf}
+ \caption{Theoretical Beta distribution of \cref{thm:beta-dist} closely match amplitudes of rotated weights in trained LLMs, here demonstrated for empirical weight distributions of a pretrained Llama-v3 8B.}
+ \label{fig:hist-example}
+\end{figure}
+\begin{wrapfigure}{r}{0.37\textwidth}
+\hspace{0.5em}
+  \includegraphics[width=0.9\linewidth]{figures/quantile_fig.pdf}
+  \caption{Quantiles of Beta(2, 6).}
+  \label{fig:beta-cdf}
+\end{wrapfigure}
+
+\paragraph{Quantizing amplitudes using Beta quantiles.}
+The observation that normalized amplitudes are Beta distributed is important, as it suggests that we can quantize amplitudes efficiently by mapping centers of linearly spaced regions through the quantile function of a Beta distribution, without introducing additional hyper-parameters. To obtain a $b$ bit quantizer, we take a regular uniform grid of $2^b$ points after first transforming elements through a change-of-variables given by the CDF of the Beta distribution and dequantizing using the inverse CDF (see \cref{fig:beta-cdf}):
+\begin{align}
+\text{quantize}(x) &= \floor{\text{CDF}(x) \cdot 2^b} \\
+\text{dequantize}(x) &= \text{PPF}((x + 0.5) / 2^b)
+\end{align}
+where $\floor{\cdot}$ denotes the floor function, $\text{CDF}(\cdot)$ the cumulative density function of the Beta distribution and its inverse $\text{PPF}(\cdot)$, known as the percentile point function of the Beta distribution.
+
+
+\newpage
+
+
+\section{Results}
+
+\label{sec:results}
+
+\subsection{Weight-only quantization (without amplitude quantization)}
+\label{sec:weight-only}
+
+Since most prior work focuses on weight-only quantization, we begin by comparing the performance of weight-only PVQ quantization with common weight-only quantization baselines. Following prior work \citep{frantar2022gptq,ashkboos2024quarot}, we measure test perplexity (PPL) and average accuracy on a range of zero-shot downstream tasks after quantizing common open-source LLM models of Phi, Mixtral and Llama families. We compare groupsizes in [16, 32, 64, 128, 256], keep the amplitude in 16 bit, and use direction bits in [3, 3.5, 4, 4.5, 5, 5.5, 6, 7, 8] for PVQ and [3, 4, 5, 6, 7, 8] for other methods. Unlike most scalar quantization methods, PVQ more easily supports non-integer number of direction bits as we can choose an integer number of bits per codeword that is not divisible by the number of groups $G$ -- for instance, with groupsize $D=16$ and 40 bits per group results in $40/16=2.5$ direction bits).
+
+\begin{figure}[h]
+\resizebox{\linewidth}{!}{
+\includegraphics[width=1.15\linewidth]{figures/weight-only-plot-ppl.pdf}
+}
+\caption{Weight only quantization. Test perplexities (PPL) after quantizing with different methods at group size settings (within connected set) and various direction bits (between connected sets).}
+\label{fig:weight-only}
+\end{figure}
+
+\begin{table}[h!]
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l r c c c c | cc | cc | cc cc }
+& & & & & 
+& \multicolumn{2}{c}{Phi-3-mini-4k}
+& \multicolumn{2}{c}{Mixtral-8x7B} 
+& \multicolumn{2}{c}{Llama-3-8B} 
+& \multicolumn{2}{c}{Llama-3-70B}
+\\
+Method & & Hessian & Spherical & Groupsize & BPW &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$)
+\\
+\hline
+Original & & & & & 16 & 6.01 & 0.72 & 3.84 & 0.78 & 6.13 & 0.73 & 2.85 & 0.80
+\\
+RTN & & & & 128 & 3.125 & 19.03 & 0.53 & 8.95 & 0.66 & 29.41 & 0.41 & 487.94 & 0.45
+\\
+GPTQ & & \checkmark & & 128 & 3.125 & 7.36 & 0.65 & 8.40 & 0.52 & 17.77 & 0.40 & nan$^{*}$ & nan$^{*}$
+\\
+\quarot & & \checkmark & \checkmark & 128 & 3.125 & 7.17 & 0.67 & 4.29 & 0.76 & 7.62 & 0.69 & 5.14  & 0.76
+\\
+\hline PVQ & & \checkmark & \checkmark & 128 & 3.125 & \textbf{6.85} & \textbf{0.68} & \textbf{4.20} & \textbf{0.77} & \textbf{7.01} & \textbf{0.72} & \textbf{4.82} & \textbf{0.77}
+\\
+\hline
+\end{tabular}
+}
+\caption{Weight-only quantization in sub-4 bits. Post-quantization test perplexity (PPL) and average zero-shot (Avg. Acc) performance. PVQ yields the highest performance after quantization. Details and additional results in \cref{sec:additional-weight-only}. nan$^{*}$ indicates GPTQ fails due to non-psd Hessian.}
+\label{tab:weight-only-acc}
+\end{table}
+
+\subsection{Weight-only quantization (direction and amplitude quantization)}
+\label{sec:results-direction-and-amplitude}
+
+A benefit of PVQ is that the number of bits for the direction and bits for the amplitudes can be chosen flexibly, even to not-integer ratios. To evaluate the effect of different amplitude bits, we repeat the same experiment as before, but rather than varying the groupsize, we fix the groupsize to 16 and vary the amount of bits used for the amplitude. 
+
+\begin{figure}[h]
+\resizebox{\linewidth}{!}{
+\includegraphics[width=1.0\linewidth]{figures/gains-plot-ppl-acc-shared-x.pdf}
+}
+\caption{direction and amplitude quantization. Test perplexities (PPL) and test accuracies (Avg. Acc
+) at different bits for amplitudes (within connected sets) and various direction bits (between sets).}
+\label{fig:gains-plot-ppl-and-acc}
+\end{figure}
+
+\begin{table}[h!]
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l r c c c c | cc | cc | cc cc }
+& & & & &  
+& \multicolumn{2}{c}{Phi-3-mini-4k}
+& \multicolumn{2}{c}{Mixtral-8x7B} 
+& \multicolumn{2}{c}{Llama-3-8B} 
+& \multicolumn{2}{c}{Llama-3-70B}
+\\
+Method & & Groupsize & Hessian & Spherical & BPW &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$)
+\\
+\hline
+Original & & & & & 16.00 & 6.01 & 0.72 & 3.84 & 0.78 & 6.13 & 0.73 & 2.85 & 0.80 % & -1.00 & -1.00
+\\
+\hline PVQ [2.5 bit directions, 16 bit amplitudes] & & 16 & \checkmark & \checkmark & 3.50 & \textbf{7.52} & \textbf{0.67} & \textbf{4.42} & \textbf{0.76} & \textbf{8.04} & \textbf{0.68} & \textbf{5.92} & \textbf{0.74}
+\\
+PVQ [3 bit directions, 4 bit amplitudes] & & 16 & \checkmark & \checkmark & 3.25 & \textbf{6.85} & \textbf{0.69} & \textbf{4.22} & \textbf{0.76} & \textbf{7.14} & \textbf{0.70} & \textbf{4.51} & \textbf{0.78}
+\\
+\hline
+\end{tabular}
+}
+\caption{Quantizing direction and amplitude. We compare post-training perplexity (PPL) and average zero-shot performance (Avg. Acc). PVQ yields the highest performance after quantization. Details and additional results in \cref{sec:additional-direction-and-amplitude}.}
+\label{tab:direction-and-amplitude}
+\end{table}
+
+\newpage
+\subsection{Weights and Activation quantization}
+\label{sec:weight-and-acts}
+
+As PVQ use an implicit codebook and is search-free, it can
+be applied to not only the weights but also the activations during inference and reduce computational requirements of the forward-pass. In \cref{fig:activations-plot} we evaluate the final test perplexity for different settings of effective bits per weight and bits per activations. In \cref{tab:weight-and-acts}, we compare the resulting test perplexities to other methods for quantizing weight and activation. We also compare to naive round-to-nearest (RTN) without search, which is also amenable to quantization of weights and activations but has much lower signal to noise. We find that PVQ obtains state-of-the-art performance across the considered LLM architectures, and that this holds generally across different settings of bit rates.
+
+\begin{figure}[H]
+\resizebox{\linewidth}{!}{
+\includegraphics[width=1.15\linewidth]{figures/activations-plot-ppl-shared-y.pdf}
+}
+\caption{Weights and activations. Comparing test perplexity at different bits per weight and bits per activations. From minimal compression (top right) to high levels of compression (bottom left).}
+\label{fig:activations-plot}
+\end{figure}
+
+\begin{table}[h!]
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l l r c c c c c | cc |cc | cc  }
+\multicolumn{2}{c}{Method} & & & & & &
+& \multicolumn{2}{c}{Phi-3-mini-4k}
+& \multicolumn{2}{c}{Mixtral-8x7B} 
+& \multicolumn{2}{c}{Llama-3-8B} 
+\\
+Weights & Activations & & Groupsize & Hessian & Spherical & BPW & BPA &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$) &
+PPL ($\downarrow$) & Avg. Acc ($\uparrow$)
+\\
+\hline
+Original & - & & & & & 16 & 16 & 6.01 & 0.72 & 3.84 & 0.78 & 6.13 & 0.73 
+\\
+GPTQ & RTN & & 128 & \checkmark & & 4.125 & 4.125 & 8.36 & 0.63 & 7.41 & 0.59 & 4747.68 & 0.36
+\\
+\quarot & RTN & & 128 & \checkmark & \checkmark & 4.125 & 4.125 & 7.48 & 0.67 & 4.43 & 0.75 & 7.34 & 0.70
+\\
+\hline PVQ & RTN & & 128 & \checkmark & \checkmark & 4.125 & 4.125 & 7.37 & 0.66 & \textbf{4.40} & \textbf{0.76} & 7.16 & 0.70
+\\
+PVQ & PVQ & & 128 & \checkmark & \checkmark & 4.125 & 4.125 & \textbf{6.94} & \textbf{0.68} & 4.57 & 0.75 & \textbf{6.89} & \textbf{0.71}
+\\
+\hline
+\end{tabular}
+}
+\caption{Quantizing weight and activation in 4 bits. We compare perplexity (PPL) and average zero-shot performance (Avg. Acc) after quantizing different open source LLM models using various post-training quantization methods. PVQ yields the highest performance after quantization. Additional results in \cref{sec:additional-weights-and-activations}.}
+\label{tab:weight-and-acts}
+\end{table}
+
+
+\subsection{Downstream zero-shot tasks} 
+
+In \cref{tab:downstream-llama3}, we provide results on downstream zero-shot tasks split out per task. We report weight-only PVQ with both direction and amplitude quantization on a Llama-3-8B model. Additional results including other LLM models can be found in \cref{sec:additional-downstream-tasks}.
+
+\begin{table}[h!]
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l r c c c c | c | cccccc | c}
+& & & & &  
+& \multicolumn{7}{c}{Llama-3-8B} \\
+Method & & Groupsize & Hessian & Spherical & BPW &
+PPL $\downarrow$ &
+PQ $\uparrow$ &
+WG $\uparrow$ &
+HS $\uparrow$ &
+A-e $\uparrow$ &
+A-c $\uparrow$ &
+LA $\uparrow$ &
+Avg. $\uparrow$ \\
+\hline
+Original & & & & & 16.000 & 6.13 & 0.81 & 0.73 & 0.79 & 0.78 & 0.53 & 0.76 & 0.73 \\
+\hline RTN & & & & & 3.125 & 29.41 & 0.64 & 0.55 & 0.42 & 0.41 & 0.25 & 0.22 & 0.41 \\
+GPTQ & & 128 & \checkmark & & 3.125 & 17.77 & 0.63 & 0.59 & 0.35 & 0.43 & 0.26 & 0.17 & 0.40 \\
+\quarot & & 128 & \checkmark & \checkmark & 3.125 & 7.62 & 0.77 & 0.71 & 0.73 & 0.75 & 0.46 & 0.71 & 0.69 \\
+\hline PVQ [3 bit directions, 16 bit amplitudes] & & 128 & \checkmark & \checkmark & 3.125 & 7.01 & 0.80 & 0.73 & 0.76 & 0.78 & 0.50 & 0.75 & 0.72 \\
+\hline
+\end{tabular}
+}
+\caption{Performance on downstream tasks. We compare performance on zero-shot downstream tasks after quantizing weights using different weight quantization methods.}
+\label{tab:downstream-llama3}
+\end{table}
+
+\newpage
+\subsection{Optimizing PVQ for CUDA}
+\label{sec:results:optimizing_pvq_for_cuda}
+For large $D$ and $K$, PVQ results in large precision integer codes $c$, far surpassing the native 32-bit integer operations on CUDA. As highlighted in \cref{sec:pvq-llm-overview}, even 128-bit operations introduced with CUDA 11.5 are not sufficient. We therefore implement the CUDA kernels for PVQ on custom subroutines for arbitrary precision integer arithmetic relying on PTX instructions using the \textit{carry-forward} registry (\texttt{CC.CF}) for multi-word integer addition, subtraction and bit-shifting. We use a word-minor memory layout to ensure that the memory access can be coalesced. \autoref{tab:cuda_complexity} presents the time and I/O complexity for our implementations.
+
+For quantization, encoding and decoding we parallelize the work across the batch dimension. Further optimizations are possible, especially for small batch sizes $B$. In particular, the inner loops of each algorithm (\cref{sec:pseudocode}) can be further parallelized by first sorting or computing the cumulative sum of $|x_i|$ respectively using a CUDA optimized reduction \citep{harris2007gems}.
+
+The recurrent formulation for the size table ($N\left[D, K\right]$) quickly becomes prohibitive as its naive implementation requires $O(D \cdot K \cdot G)$ serial operations, each requiring overlapping reads and writes. This has the further advantage of only having to read from global memory for synchronization following \citep{xiao2010inter}, otherwise the threads keep the values in registry and exclusively writes to global memory.
+
+\begin{table}[h]
+\begin{tabular}{lll}
+\textbf{Function}     & \textbf{Time complexity}          & \textbf{I/O complexity}                                    \\ \hline
+Quantization          & $O(B \cdot D)$                   & $O(B \cdot D)$                                                          \\
+Encoding / Decoding   & $O(B \cdot D \cdot G)$           & $O(B \cdot D \cdot G)$ reads, $O(B \cdot D)$ ordered writes \\
+Size table generation & $O(K \cdot \log(K) \cdot D \cdot G)$ & $O(K \cdot D \cdot G)$ ordered writes                     
+\end{tabular}
+\caption{\label{tab:cuda_complexity} The time and I/O complexity on the HBM for our CUDA optimized PVQ kernels, where $B$ is the batch size and $G$ the number of words comprising each integer. All functions have $O(G)$ space complexity. We highlight ordered I/O operations as this more efficient use of the memory bandwidth as they can be coalesced into fewer operations as opposed to random ones.}
+\end{table}
+
+
+
+\section{Conclusion}
+
+
+This work explored pyramid vector quantization (PVQ) for quantization of weights and activations in large language models (LLMs). PVQ is a vector quantization method that allows high signal-to-noise ratios without having to build an explicit codebook or perform search. This results in state-of-the-art quantization performance in terms of the most favourable performance to bits-per-weight trade-off, and is amenable to quantization of activation. This has direct practical benefit for post-training model compression, but also opens the door towards quantization at train time. We propose to quantize LLMs using an implicit PVQ codebook on the unit sphere, which can be flexibly configured for codesize and dimensions. In addition, we propose a theoretically and empirically motivated way to also quantize amplitudes enabling small groupsizes in practice. Lastly, we incorporate Hessian information throughout the process to minimize feature error due to quantization. This yields a novel and highly parallelisable algorithm for LLM weights and activations. We demonstrate state-of-the-art quantization performance in terms of superior performance after quantizing pre-trained models, on both weight-only and weight and activation quantization. 
+
+\newpage
+
+
+
+

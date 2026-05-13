@@ -1,0 +1,397 @@
+\title{Delphic Offline Reinforcement Learning under Nonidentifiable Hidden Confounding}
+
+\begin{abstract}
+A prominent challenge of offline reinforcement learning (RL) is the issue of hidden confounding: unobserved variables may influence both the actions taken by the agent and the observed outcomes. Hidden confounding can compromise the validity of any causal conclusion drawn from data and presents a major obstacle to effective offline RL. In the present paper, we tackle the problem of hidden confounding in the nonidentifiable setting. We propose a definition of uncertainty due to hidden confounding bias, termed delphic uncertainty, which uses variation over world models compatible with the observations, and differentiate it from the well-known epistemic and aleatoric uncertainties. We derive a practical method for estimating the three types of uncertainties, and construct a pessimistic offline RL algorithm to account for them. Our method does not assume identifiability of the unobserved confounders, and attempts to reduce the amount of confounding bias. We demonstrate through extensive experiments and ablations the efficacy of our approach on a sepsis management benchmark, as well as on electronic health records. Our results suggest that nonidentifiable hidden confounding bias can be mitigated to improve offline RL solutions in practice.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large observational datasets for decision-making open the possibility of learning expert policies with minimal environment interaction. This holds promise for contexts where exploration is impractical, unethical or even impossible, such as optimising marketing, educational or clinical decisions based on relevant historical datasets \citep{thomas2017predictive,gottesman2018evaluating,singla2021reinforcement}. Recent years have thus seen the emergence of offline reinforcement learning (RL) literature \citep{Levine2020}, which proposes to adapt RL methods to overcome estimation biases induced by learning from finite, fully offline data. 
+
+Aside from estimation biases, confounding variables are common in offline data \citep{gottesman2018evaluating}. The problem of hidden confounding, where outcome and decisions are both dependent on an unobserved factor, is widely overlooked in many of the concurrent offline RL methods. Nevertheless, it may induce significant errors, even for the simplest of bandit problems, and is especially aggravated in the sequential setting \citep{chakraborty2014dynamic,Zhang2019,Tennenholtz2022}. Hidden confounding exists in numerous applications. In autonomous driving, for example, the observational policy may behave according to unobserved factors (e.g. road conditions \citep{DeHaan2019}), which also affect environment dynamics and rewards. Alternatively, in the medical context, unrecorded patient state information such as socio-economic factors or visual appearance may have been taken into account by the acting physician \citep{gottesman2018evaluating}. 
+
+In this work, we focus on \emph{nonidentifiable} hidden confounding in offline RL. While prior work has mostly addressed the problem in the identifiable setup \citep{lu2018deconfounding, Zhang2020DTR, kumor2021sequential, wang2021provably}, we show that significant improvement in policy learning can be achieved even in the realistic nonidentifiable setting. We propose an approach to estimate uncertainty due to confounding bias and to account for the degree of confoundedness while learning. In turn, this leads to improved downstream performance for offline learning algorithms. %
+
+Our main contributions are as follows. (1) To the best of our knowledge, we are the first to address \emph{nonidentifiable} confounding bias in \emph{deep offline RL}.
+(2) We achieve this by introducing a novel uncertainty quantification method from observational data, which we term delphic uncertainty.\linebreak  (3) We propose an offline RL algorithm that leverages this uncertainty to obtain confounding-averse policies, and (4) we demonstrate its performance on both synthetic and real-world medical data. 
+
+
+\section{Preliminaries}
+
+\label{sec: preliminaries}
+\begin{wrapfigure}[14]{r}{0.5\textwidth}
+\centering
+\begin{tikzpicture}[auto,
+    vertex/.style={minimum size=0.8cm,draw,circle,text width=0.8mm}, %
+    vertex2/.style={circle,minimum size=0.7cm,fill=light-gray},%
+    ]
+        \node[vertex,label=center:$s_{t-1}$] (st-1) {};
+        \node[vertex,right=1.5cm of st-1,label=center:$s_t$] (st) {}; %
+        \node[vertex,right=1.5cm of st, label=center:$s_{t+1}$] (st+1) {};
+        \node[right=0.25cm of st+1] (st+2) {\footnotesize $\ldots$};
+        \node[left=0.25cm of st-1] (st-2) {\footnotesize $\ldots$};
+        \node[vertex,below right=0.1cm and 0.6cm of st-1, label=center:$a_{t-1}$,fill=light-red] (at-1) {};
+        \node[vertex,below right=0.1cm and 0.6cm of st, label=center:$a_t$,fill=light-red] (at) {};
+        \node[vertex,below=0.35cm of at, label=center:$r_t$,fill=light-blue] (rt) {};
+        \node[vertex,below=0.35cm of at-1, label=center:$r_{t-1}$,fill=light-blue] (rt-1) {};
+        \node[vertex2,below=1.8cm of st] (x) {$z$};
+        
+        \path[-{Stealth[]},color=TabRed]
+                (x) edge [dashed] (at)  
+                (st) edge (at)
+                (st-1) edge (at-1)
+                (x) edge  [dashed] (at-1)
+                  ;
+         \path[-{Stealth[]}]
+          (st) edge (st+1) 
+          (at) edge (st+1)
+          
+          (st+1) edge (st+2)
+          (st-1) edge (st)
+          (st-1) edge (rt-1)
+          (st-2) edge (st-1)
+          (at-1) edge (st)
+          (x) edge [dashed] (st)  
+          (x) edge [dashed, bend right=50] (st+1)
+          (x) edge [dashed, bend left=50] (st-1)
+          ;
+
+          \path[-{Stealth[]}, color=TabBlue]
+          (st) edge (rt) 
+          (at) edge (rt)
+          (st-1) edge (rt-1)
+          (at-1) edge (rt-1)
+          (x) edge [dashed] (rt)
+          (x) edge [dashed] (rt-1)
+          ;
+
+          
+\end{tikzpicture}
+\caption{\textbf{Contextual MDP.} Black arrows show the transition dynamics, blues ones the \textcolor{TabBlue}{reward function}, and red ones the \textcolor{TabRed}{policy}. Confounding arises when both behavioural policy $\behav$ and environment returns depend on hidden context variable $z$ (dashed lines).} 
+\label{fig:cmdp}
+\end{wrapfigure}
+
+We consider the contextual Markov Decision Process (MDP) \citep{Hallak2015}, defined by the tuple ${\M = (\Sspace,  \Zspace, \Aspace, T, r, \rho_0, \nu, \gamma)}$, where $\Sspace$ is the state space, $\Aspace$ is the action space, $\Zspace$ is the context space, $T:\Sspace \times \Zspace \times \Aspace \rightarrow \Delta\Sspace$ is the transition function, $r:\Sspace \times \Zspace \times \Aspace \rightarrow [0, 1]$ is the reward function, and $\gamma \in [0, 1)$ is the discount factor. We assume an initial state distribution $\rho_0: \Zspace  \rightarrow \Delta\Sspace$ and a context distribution $\nu$, such that each interaction episode has a fixed context $z \sim \nu$, which may or may not be accessible to the agent, and the environment initialises at state $s_0 \sim \rho_0( \wc |z)$. At time $t$, the environment is at state $s_t \in \Sspace$ and an agent selects an action $a_t \in \Aspace$. The agents receives a reward $r_t = r(s_t, a_t, z)$ and the
+environment then transitions to state $s_{t+1} \sim T( \wc | s_t, a_t, z)$. A causal graph of the process is depicted in \Cref{fig:cmdp}.
+We define a \textit{context-aware} policy $\pi$ as a mapping $\pi: \Sspace \times \Zspace \rightarrow \Delta\Aspace$, such that $\pi( a |s, z)$ is the probability of taking action $a$ in state $s$ and context $z$. Likewise, we define a \textit{context-independent} policy as $\tilde{\pi}: \Sspace \rightarrow \Delta\Aspace$. We denote the set of all such policies as $\Pi$ and $\tilde{\Pi}$, respectively.\footnote{One can also consider history-dependent policies. Nevertheless, Markov policies sufficiently illustrate the challenges of our task, and can be easily generalised to history-dependent ones.}
+
+We assume access to a dataset of $N$ trajectories $\mathcal{D} =  \{ \tau^i \}_{i=1}^{N}$, where the sequences ${\tau^i = ({s}_0^i, {a}_0^i, r_0^i, \ldots {s}_{H}^i, {a}_{H}^i, r_H^i)}$ are trajectories induced by an unknown, context-aware behavioural policy $\behav \in \Pi$ such that $a_t^i \sim \behav (\wc |s_t^i, z^i)$. The decision-making context $z^i$ for each trajectory is \textit{not} included in the observational dataset. In the following, we drop index $i$ unless explicitly needed.
+Finally, we define the offline RL task with hidden confounding, which consists of finding an optimal context-independent policy $\tilde{\pi}^* \in \tilde{\Pi}$ -- one which maximises the expected discounted returns. Specifically, we define the state-action value function of a policy $\tilde{\pi} \in \tilde{\Pi}$ by $Q^{\tilde{\pi}}(s,a) = \Expt_{\tilde{\pi}, z \sim \nu}\left[ \sum_{t=0}^{\infty} \gamma^t r(s_t, a_t, z) \vert s_0 = s, a_0 = a\right]$, where $\Expt_{\tilde{\pi}}$ denotes the expectation induced by following policy $\tilde{\pi} \in \tilde{\Pi}$. We also define the value of $\tilde{\pi}$ by $V^{\tilde{\pi}}(s) = \Expt_{a \sim \tilde{\pi}} \left[ Q^{\tilde{\pi}}(s,a) \right]$. An optimal policy is then defined by
+$
+\tilde{\pi}^*(\wc|s) = \argmax_{\tilde{\pi} \in \tilde{\Pi}} \left[ V^{\tilde{\pi}}(s) \right].
+$
+
+
+
+\section{Sources of Error in Offline RL}
+
+
+Optimising a policy from observational data is prone to various sources of error, which many RL works propose to decompose, estimate, and bound \citep{Levine2020,tennenholtz2022uncertainty}. First, the process is prone to statistical error in correctly estimating a value model from the observed data \citep{jin2021pessimism}. Inherent stochasticity in the environment (aleatoric uncertainty) can result in imprecise models, whereas finite data quantities (epistemic uncertainty) can lead to poor model approximation. 
+When learning from observational data, improper handling of estimation errors causes covariate shift and overestimation problems, as evident in behaviour cloning \citep{Ross2011} and offline RL \citep{kumar2020conservative}. Such errors can be reduced through access to larger data quantities or online interactions with the true environment at training time. Offline RL approaches typically mitigate these errors through pessimism, penalising areas where error is expected to be large \citep{Levine2020, jin2021pessimism}. 
+
+Another source of error, which is often overlooked in the RL literature, is structural bias. Independent of data quantity, such a bias can occur when the state-action space coverage is incomplete \citep{ueharapessimistic}, or when the expressivity of the model class considered is inappropriate \citep{lu2018nondelusional}. Our work considers confounding bias -- a critical type of structural bias, evident in a vast number of applications~\citep{DeHaan2019,kallus2018confounding,kallus2020confounding,gottesman2018evaluating}. This bias can arise when the data-generating policy relies on unobserved factors that also affect downstream transitions and/or rewards \citep{Tennenholtz2022}.
+
+\paragraph{Confounding Bias.}
+
+Confounding bias is a critical source of error in offline RL, which is often disregarded despite many data collection environments being prone to its occurrence \citep{kallus2018confounding}. This source of error arises when the observational policy depends on unobserved factors which affect the chosen action and the reward or transition function. To better understand how confounding bias may affect offline RL algorithms, consider the process detailed in \Cref{sec: preliminaries} and depicted in Figure~\ref{fig:cmdp}. The offline data was generated by sampling trajectories from the behavioural policy distribution $\tau \sim P_{\behav}(\tau)$, which is marginalised over $\nu(z)$ and factorises as follows:\begin{align}
+     P_{\behav}(\tau) 
+     = 
+     \Expt_{\textcolor{red}{z} \sim \nu} \brk[s]*{ 
+     \rho_0(s_0|\textcolor{red}{z}) \prod_{t=0}^H \behav(a_t|s_t,\textcolor{red}{z}) \: %
+     P_r(r_t|s_t, a_t, \textcolor{red}{z}) \:
+     T(s_{t+1}|s_{t},  a_{t},  \textcolor{red}{z})
+     },
+     \label{eq:prob_traj}
+\end{align} 
+where $P_r$ is the probability of sampling reward $r_t$ from $r(s_t,a_t,z)$.
+
+Any offline reinforcement learning objective can be written as an expectation over this trajectory distribution \citep{Levine2020}. Confounding arises when one learns models on trajectories following $P_{\behav}(\tau)$, but estimates the value of policies $\pi$ that \textit{change} the probability of taking an action $a$ in a given state and context $(s,z)$ -- as is necessarily the case when considering context-independent policies. Since all model terms in \Cref{eq:prob_traj} are unknown and nonidentifiable due to their dependence on $z$, there may exist several ``worlds" that could induce the same observational distribution $P_{\behav}(\tau)$. This is known as the ``identifiability problem" in the causal inference literature \citep{kallus2018confounding,Namkoong2020}, which has been studied extensively, providing methods for analyzing when counterfactual estimates can be obtained. Particularly, without additional assumptions about the causal structure of the environment -- such as using environment interventions \citep{lu2018deconfounding,Zhang2020DTR} or the existence of observable back- or front-door variables  \citep{kumor2021sequential, wang2021provably} -- the context $z$ acting as confounder is nonidentifiable and cannot be estimated.  Below, we illustrate through a simple example, how two equally plausible models can correctly construct the same observational distribution, yet induce two different values for another policy. 
+
+
+\paragraph{An Illustrative Example.} Suppose access to the bandit data in Figure \ref{fig:poc_data}, induced by an unknown context-dependent policy $\behav$ with marginal distribution $P_{\behav}(a, r)$. Assume no access to the episode context $z$ in the data. Simplifying \Cref{eq:prob_traj} to this setup, we obtain:
+\begin{align*}
+    P_{\behav}(a, r)
+    =
+    \Expt_{z \sim \nu} [\behav(a|z) P_r(r|a,z)].
+\end{align*}
+We can therefore change $\nu$, $\behav$, and $P_r$ to induce the same marginalised distribution $P_{\behav}$, with a significant difference in reward for a counterfactual policy. Indeed, in Figures \ref{fig:poc_wm1} and \ref{fig:poc_wm2} we show how different models that are compatible with the observational quantities can result in substantially different reward estimates for a different policy. Particularly, in World 1 (\Cref{fig:poc_wm1}), we assume a deterministic singleton context, with a corresponding uniform behavioural policy, whereas in World 2 (\Cref{fig:poc_wm2}) we assume two contexts with uniform distribution, and a behavioural policy which changes its distribution w.r.t. the sampled context. In both of these worlds, the observational distribution $P_{\behav}(a, r)$ remains the same. Nevertheless, calculating the reward of the uniform policy $\tilde{\pi}_{uni} (\cdot) = 1/|\Aspace|$ results in different reward distributions. Moreover, the optimal actions in World 1 and World 2 are different. 
+
+Without explicit access to the ground-truth context or a proxy thereof (in the identifiable context), modelling an alternative policy to the privileged data-generating one will therefore be prone to spurious correlations and estimation biases. 
+
+In the next section, we propose to address the general \textit{nonidentifiable} confounding problem in offline RL by estimating the amount of confounding error within the observational dataset and correcting for it during learning. Importantly, this source of error cannot be captured by epistemic or aleatoric uncertainty quantification methods, as discussed next.
+
+\begin{figure}[t!]
+     \centering
+     \begin{subfigure}[b]{0.23\textwidth}
+         \centering \includegraphics[trim=0.2cm 0 0 0, clip,height=4.2cm]{figs/fig2/POCdata.pdf}
+        \caption{Observational data} \label{fig:poc_data}
+     \end{subfigure} \hfill %
+     \begin{subfigure}[b]{0.25\textwidth}
+         \centering \hspace{-1em}\includegraphics[trim=0.1cm 0 0.3cm 0, clip,height=4.2cm]{figs/fig2/POCw1.pdf}
+         \caption{World 1: $\nu(0)=1$.} \label{fig:poc_wm1}  
+     \end{subfigure} %
+     \begin{subfigure}[b]{0.46\textwidth}
+         \raggedleft \includegraphics[trim=0 0 0.1cm 0 , clip,height=4.2cm]{figs/fig2/POCw2.pdf}%
+         \caption{World 2: $\nu(0)=0.5$.} \label{fig:poc_wm2} 
+     \end{subfigure} 
+    \caption{\footnotesize \textbf{Confounding Bias Example.} World 1 and 2 are two models for the binary confounding variable that are compatible with the marginalised observational bandit data in (a), composing models for $\nu(z)$, $\behav(a|z)$ and $P(r|a,z)$. Under an alternative policy, such as a context-independent uniform policy $\tilde{\pi}_{uni} (\cdot) = 1/|\Aspace|$, these two worlds give different values to each action.}
+    \label{fig:banditexample}
+\end{figure}
+
+
+\section{Measuring Confounding Bias through Delphic Uncertainty}
+
+
+
+In this section, we formulate a method for estimating uncertainty arising from confounding bias in offline RL, which we term \textit{delphic} uncertainty\footnote{The word ``delphic" characterises quantities that are ambiguous and opaque, relating to the hidden confounding variables and their elusive effect on model predictions.}. While aleatoric and epistemic uncertainty can be expressed as probability distributions over model outputs and parameters, respectively \citep{hullermeier2021aleatoric}, delphic uncertainty is a distribution over counterfactual values. We propose a general approach to decouple aleatoric, epistemic, and delphic uncertainties, which we later leverage to overcome confounding bias in \Cref{sec:method}.
+
+To introduce delphic uncertainty we first define a set of worlds compatible with the marginalised data distribution $P_{\behav}(\tau)$. 
+\begin{definition}
+\label{def: compatible world models}
+    A compatible world for $P_{\behav}$ is a tuple $w=(\Zspace_w, \nu_w, \rho_{0,w}, P_{r,w}, T_w, \pi_{b,w})$ which satisfies $P_{\behav}(\tau) = \Expt_{z \sim \nu_w} \brk[s]*{\rho_{0,w}(s_0|z)\prod_{t=0}^H \pi_{b,w}(a_t|s_t,z) P_{r,w}(r_t|s_t, a_t, z) T_w(s_{t+1}|s_{t}, a_{t}, z)}$ for any trajectory $\tau = (s_0, a_0, r_0, \hdots, s_H, a_H, r_H)$. We denote by $\W$ the set of all compatible worlds.
+\end{definition}
+
+We focus on uncertainty estimates of value functions. Let $w \in \W$ (i.e., $w$ is some compatible world for $P_{\behav}$). We use $\theta_w$ to denote the parameters of a Q-value function in world $w$. For a fixed $w$ and $\theta_w$, we assume each value model $Q_{\theta_w}$ is defined by some stochastic model, e.g., a normal distribution $Q_{\theta_w} | \theta_w, w \sim \mathcal{N}\brk*{\mu_{\theta_w}, \sigma_{\theta_w}^2}$. Indeed, here $\sigma_{\theta_w}$ accounts for \textbf{aleatoric uncertainty}, capturing the intrinsic stochasticity of the environment \citep{kendall2017uncertainties}. Additional statistical uncertainty arises from the distribution over model parameters $\theta_w$ in the fixed world $w \in \W$. Starting from a prior over $\theta_w$, evidence from the data leads to a posterior estimate over the correct model parameters $P(\theta_w| \dataset)$, which captures \textbf{epistemic uncertainty} \citep{hullermeier2021aleatoric}. %
+
+We are now ready to define the uncertainty induced by confounding variables, which we term \textbf{delphic uncertainty}. To do this, we leverage \Cref{def: compatible world models} and define delphic uncertainty by varying over compatible world models. Based on the law of total variance \citep{weiss2006course} and following on prior work separating epistemic and aleatoric uncertainty \citep{kendall2017uncertainties}, we can decompose the variance in the value function estimate between the three types of uncertainties. Particularly, let $w$ be a compatible world for $P_{\behav}$, and let $P_{w} \mapsto \Delta\W$ be some distribution over worlds in $\W$. We have the following result.
+
+\begin{theorem}[Variance Decomposition]
+\label{thm:var_decomp}
+For any $\pi \in \Pi$, we have
+\begin{align*}  \resizebox{\hsize}{!}{
+$\Var (Q^{\pi}_{\theta_w}) 
+= 
+\Expt_{w} \left[\underbrace{\Expt_{\theta_w} \left[\Var(Q^{\pi}_{\theta_w} | \theta_w, w) | w \right]}_\text{\normalsize{aleatoric uncertainty}}  
++ 
+\underbrace{\Var_{\theta_w}\left(\Expt[Q^{\pi}_{\theta_w} |  \theta_w, w] | w\right)}_\text{\normalsize{epistemic uncertainty}}  \right] 
++
+\underbrace{\Var_{w} (\Expt_{\theta_w}[\Expt[Q^{\pi}_{\theta_w}| \theta_w, w]|w ])}_{\text{\normalsize{delphic uncertainty}}}.$
+}
+\end{align*}
+\end{theorem}
+
+To gain further intuition of this result, consider the case of normal distributions. We can rewrite \Cref{thm:var_decomp} as:
+\begin{align}
+ \Var (Q^{\pi}_{\theta_w}) 
+ =
+ \Expt_{w} 
+ \left[
+ \Expt_{\theta_w} [\sigma_{\theta_w} | w]^2
+ + %
+ \Var_{\theta_w}(\mu_{\theta_w} | w) + \Var_{\theta_w}(\sigma_{\theta_w}| w)
+ \right]
+ +
+\Var_{w} (\Expt_{\theta_w}[\mu_{\theta_w}|w ]) 
+\label{eq:total_var}
+\end{align}
+The first three terms, calculated by the square average of predicted standard deviations and the variance of the predicted means and standard deviations, correspond to aleatoric and epistemic uncertainties, whereas the final term, calculated by the variation over compatible world models, corresponds to delphic uncertainty. Indeed, the latter form of uncertainty cannot be diminished, even in deterministic environments and infinite data: as $\abs{\dataset} \to \infty$ (no epistemic uncertainty), and $\sigma_{\theta_w} \to 0$ (no aleatoric uncertainty), the delphic uncertainty remains. 
+
+
+
+\section{Offline RL Under Delphic Uncertainty}
+
+\label{sec:method} 
+
+In the previous section, we defined delphic uncertainty through variation over compatible world models. In this section, we propose a method to measure delphic uncertainty in practice. We then leverage our uncertainty estimate within an offline reinforcement learning framework and demonstrate its ability to mitigate confounding bias. 
+
+Following the estimation approach outlined in \Cref{thm:var_decomp}, delphic uncertainty can be measured through the disagreement within value functions for a given policy, under different worlds $w$ compatible with the observational distribution. %
+
+ 
+\begin{wrapfigure}[10]{r}{0.5\textwidth}
+    \includegraphics[width=\textwidth]{figs/ConfORL_model_elements.drawio.pdf} %
+    \caption{\footnotesize \textbf{Individual world model architecture} $w = ( \nu_\theta, \pi_{b,\theta}, Q^{\behav}_\theta)$, under a prior $p(z)$ for the confounder distribution. Multiple worlds are trained and their variance in estimating $Q ^{\pi}$ is taken as delphic uncertainty.}
+    \label{fig:architecture}
+\end{wrapfigure}
+
+\subsection{Measuring Delphic Uncertainty}
+\paragraph{Modelling Compatible Worlds.} The first practical step for evaluating delphic uncertainty is the definition of compatible world models. While one could theoretically consider all possible world models in \Cref{def: compatible world models}, we found that, in practice, varying over a subset of compatible models was enough to show improved offline RL efficiency.
+
+A compatible world $w \in \W$ must capture key relationships from the observational data.  \Cref{fig:architecture} depicts our proposed approach. Our model, parameterised by $\theta$, consists of a confounder prior, a behaviour policy, and a value function estimator. During training, a trajectory $\tau \sim \dataset$ is mapped to a latent distribution $\nu_\theta (z|\tau)$, from which the policy $\pi_{b,\theta}$ and value $Q^{\behav}_\theta$ are estimated. Estimates are trained by draws from state-action pairs $(s,a) \sim \tau$ and a sampled $z$. 
+
+More specifically, we train compatible world models through variational inference, using the posterior $\nu_\theta(z|\tau)$ and prior $p(z)$. For $\tau \sim \dataset$, the model is trained by maximising the Evidence Lower BOund (ELBO, \citet{kingma2014}): \begin{equation*}
+    \Expt_{(s,a) \sim \tau; \: z \sim \nu_\theta(z|\tau)} 
+    \brk[s]!{
+     \log Q^{\behav}_\theta(s,a,z) + \alpha \log \pi_{b,\theta}(a|s,z)
+     }
+     - \beta D_{KL} \brk!{ \nu_\theta (z|\tau) \,\big\Vert\, p(z) }
+\end{equation*}
+where $\{\alpha, \beta\}$ are hyperparameters \citep{betaVAE} and $D_{KL}$ is the Kullback-Leibler divergence between two distributions. Sampling from $\nu_\theta$ is achieved through the reparametrisation trick \citep{kingma2014}. Optimal parameters for $\{ \nu_\theta, \pi_{b,\theta}, Q^{\behav}_\theta\}$ are obtained by maximising the objective over $\dataset$. Once a compatible world model is trained, the value function of a policy $\pi$ can be estimated over one step using importance sampling and marginalising over $z$, i.e., $Q^{\pi} (s,a) =\Expt_{\tau \sim \dataset}  \Expt_{z \sim \nu_\theta(z|\tau)} \brk[s]*{\frac{\pi(a|s)}{\pi_{b,\theta}(a|s,z)} Q^{\behav}_\theta (s,a,z) } $.
+\paragraph{Counterfactual Variation Across Worlds.} We approximate $\W$ by a set of $W$ compatible worlds $\{ \nu_{\theta_w}, \pi_{b,\theta_w}, Q^{\behav}_{\theta_w}\}_{w=1}^W$ on the observational training dataset $\dataset$, each trained using different priors and model architectures. Following our definition of confounding bias (\Cref{thm:var_decomp}), we measure delphic uncertainty through the variance in $Q_{\theta_w} ^{\pi} (s,a)$ across worlds. That is, delphic uncertainty for policy $\pi$ at state-action $(s,a)$ is defined by $u_d ^{\pi}(s,a) = \Var_w ( Q_{\theta_w} ^{\pi} (s,a) )$. When no confounding exists, all models in $\W$ should identify similar $\nu, Q^{\behav}$ and $\behav$ (up to epistemic uncertainty), returning a similar value of $Q^{\pi}$. On the other hand, confounding with ambiguous returns would lead to different values across world models. Epistemic and aleatoric uncertainty are separately captured by implementing each world model component as an ensemble of probabilistic models.
+
+
+
+\subsection{Delphic ORL: Offline Reinforcement Learning with Delphic Uncertainty} \label{sec:pessimism}
+
+
+Inspired by pessimistic approaches in offline RL \citep{Kumar2019, kumar2020conservative, fujimoto2019off, Levine2020, jin2021pessimism}, we propose to penalise the value of states and actions where delphic uncertainty is high, such that the learned policy is less likely to rely on spurious correlations between actions, states and rewards. This pessimistic approach, which enables the agent to account for and mitigate confounding bias when making decisions, is summarised in \Cref{alg:algo}.
+
+      \begin{algorithm}[t!]
+        \caption{Delphic Offline Reinforcement Learning} \label{alg:algo} 
+        \SetKw{Input}{Input:}
+        \Input{Observational dataset $\dataset$, Offline RL algorithm.} \\
+        Learn compatible world models $\{\Zspace_w, \nu_w, \rho_{0,w}, P_{r,w}, T_w, \pi_{b,w}\}_{w\in \W}$ that all factorise to $P_{\behav}(\tau)$. \\ %
+        Obtain counterfactual predictions $Q_w ^{\pi}$ for each $w \in \W$. \\
+        Define local delphic uncertainty: $u_d^{\pi} (s,a) = \Var_w ( Q_w ^{\pi} (s,a) )$. \\
+        Apply pessimism using $u_d$ in Offline RL algorithm (see \Cref{sec:pessimism}) \\    
+      \end{algorithm}
+
+In this paper, we incorporate pessimism with respect to delphic uncertainty by modifying the target $Q_{target}$ for the Bellman update in a model-free offline RL algorithm to $$Q_{target}'(s, a) = Q_{target}(s, a) - \lambda u_d^{\pi} (s, a),$$ where $\pi$ is the latest learned policy, $(s,a)$ is a tuple sampled for the update and hyperparameter $\lambda$ controls the penalty strength. We apply our penalty to Conservative Q-Learning~\citep{kumar2020conservative}, but this approach could also be implemented within any model-free offline RL algorithm -- which already induces pessimism with respect to epistemic uncertainty \citep{kumar2020conservative,fujimoto2021minimalist,Levine2020}. %
+
+Note that various other methods can be adopted to drive pessimism against delphic uncertainty within existing offline RL algorithms \citep{kumar2020conservative, yu2020mopo, fujimoto2021minimalist}, depending on the task at hand. The above penalty can be subtracted from the reward function in model-based methods \citep{yu2020mopo}. The uncertainty measure can also be used to identify a subset of actions over which to optimise the policy, as demonstrated by \citet{fujimoto2019off}, or to weigh samples in the objective function, prioritising unconfounded data.
+
+
+
+\section{Experiments}
+
+
+In this section, we study the benefits of our proposed delphic uncertainty estimation method and its application in offline RL. We validate two principal claims: (1) Our delphic uncertainty measure captures bias due to hidden confounders. (2) \Cref{alg:algo} leads to improved offline RL performance in both simulated and real-world confounded decision-making problems, compared to state-of-the-art but biased approaches. As baselines compatible with the discrete action spaces of environments studied here, we consider Conservative Q-Learning (CQL) \citep{kumar2020conservative}, Batch-Constrained Q-Learning (BCQ) \citep{fujimoto2019off} and behaviour cloning (BC) \citep{Bain1996}. In the following, we measure and vary confounding strength through the dependence of the behavioural policy on the hidden confounders, $\Gamma = \max_{z,z' \in \Zspace} [{\behav(a|s,z)}/{\behav(a|s,z')}]$ \citep{rosenbaum2002}, where $z$ also affects the transition dynamics or reward function. 
+
+\subsection{Sepsis Simulation}
+We explore a simulation of patient evolution in the intensive care unit adapted from \citet{Oberst2019}. The diabetic status of a patient, accessible to the near-optimal behavioural policy but absent from the observational dataset, acts as a hidden confounder $z$. 
+\begin{figure}
+     \centering
+     \begin{subfigure}[b]{0.33\textwidth}
+         \centering \includegraphics[height=3cm]{figs/u_vs_N.pdf}
+        \caption{Number of trajectories $N$} \label{fig:u_vs_N_real}
+     \end{subfigure} \hfill
+      \begin{subfigure}[b]{0.31\textwidth}
+         \centering \includegraphics[height=3cm]{figs/u_vs_envstoch3.pdf}
+         \caption{Environment stochasticity $\sigma^2_r$} \label{fig:u_vs_stocha_real}
+     \end{subfigure}  \hfill
+     \begin{subfigure}[b]{0.31\textwidth}
+         \centering \includegraphics[height=3cm]{figs/u_vs_Gamma.pdf}
+         \caption{Confounding strength $\Gamma$} \label{fig:u_vs_conf_real}
+     \end{subfigure} \\ 
+    \caption{\footnotesize \textbf{Uncertainty measures as a function of data properties}, averaged over state-action pairs in the sepsis dataset. Epistemic uncertainty reduces most with more data, aleatoric uncertainty increases most with environment stochasticity (reward variance), and delphic uncertainty increases most with confounding strength.}
+    \label{fig:u_vs_NZ}
+\end{figure}
+
+
+\paragraph{Uncertainty Measures.} First, we study the relationship between our uncertainty estimates and the decision-making setup. In Figure \ref{fig:u_vs_NZ}, we find that epistemic uncertainty reduces with greater data quantities and increases out of the training set distribution, whereas aleatoric uncertainty increases with environment stochasticity, in agreement with prior work~\citep{kendall2017uncertainties}. Our delphic uncertainty estimate, on the other hand, cannot be reduced with more data and increases with greater confounding. Moreover, we found that delphic uncertainty relates to meaningful regions of state-action space, as it is highest under vasopressor administration -- the only treatment for which patient evolution is confounded by the hidden diabetic status.
+
+\begin{wrapfigure}[15]{r}{0.45\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/returns_vs_Gamma_wBCQ.pdf} %
+    \caption{\footnotesize \textbf{Performance Results} as a function of confounding strength $\Gamma$. Normalised environment returns (mean and shaded 95\% CIs) over 10 runs.}
+    \label{fig:perf_vs_conf}
+\end{wrapfigure} 
+
+\paragraph{Offline RL Performance.} In \Cref{fig:perf_vs_conf}, we compare environment returns obtained through offline RL, imitation learning, and our proposed approach. Our results reveal the susceptibility of offline RL to confounding bias: the presence of unobserved factors $z$ that influence both the behaviour policy and transition dynamics leads to inaccurate value function estimates. Behaviour cloning appears to be less prone to this bias but still faces challenges in dealing with missing information in $z$, evidenced by the performance gap to the online policy in the unconfounded case ($\Gamma=1$), and with the distribution shift in observed histories \citep{ortega2021shaking}. In contrast, our approach to penalising delphic uncertainty leads to superior performance, especially as confounding strength increases.
+
+\subsection{Real-World Data}
+
+We demonstrate the added value of our algorithm in optimising decision-making policies from real-world medical data. Our clinical policies are trained using a publicly available dataset of electronic health records, with over 33 thousand patient stays in intensive care and over 200 measured variables \citep{Hyland2020}. We consider the problem of optimising the treatment policy for vasopressor and fluid administration\footnote{These therapeutic agents are commonly given to overcome shock in intensive care \citep{benham2012cardiovascular}. Their administration strategy has already been studied as an RL task \citep{Raghu2017,gottesman2018evaluating}.}, and design the reward function to avoid states of circulatory failure. Significant information about patients' conditions is not available in the dataset, despite being critical to the treatment choices of attending physicians, such as socio-economic factors or medical history \citep{Yang2018}. For ease of evaluation, we introduce additional, artificial confounders by excluding them from the observational dataset, focusing on diagnostic indicator variables, age and weight ($\Gamma \in [1, 200]$). Disease severity is measured through the SOFA score system \citep{vincent1996sofa}.
+
+\paragraph{Confounding in Medical Dataset.} As the aforementioned variables affect both the probability of treatment assignment and downstream patient evolution, they act as confounders over outcome models when excluded from the data. In Figure~\ref{fig:confounding_ICU}, we highlight how our delphic uncertainty measure captures confounded state-action pairs in concordance with the introduced confounders. Delphic uncertainty is generally highest for high disease severity, where important factors such as age or comorbidity may affect the choice of treatment intensity \citep{azoulay2009}. Indeed, delphic uncertainty increased to a greater extent under important confounders (e.g., age or patients' neurological diagnosis) than less critical factors (e.g., orthopaedic diagnosis).
+
+
+\begin{figure}[tb]
+\centering
+     \begin{subfigure}[b]{0.31\textwidth}
+         \centering \includegraphics[width=\textwidth]{figs/data_circ_age2.pdf}
+         \caption{$\{$age$\}$, $\Gamma=48.2$}
+     \end{subfigure} \hfill
+      \begin{subfigure}[b]{0.31\textwidth}
+         \centering \includegraphics[width=\textwidth]{figs/data_circ_neuro2.pdf}
+        \caption{$\{$neuro. diag.$\}$, $\Gamma=29.1$}
+     \end{subfigure} \hfill
+     \begin{subfigure}[b]{0.36\textwidth}
+         \centering \includegraphics[width=\textwidth]{figs/u_z_comparison2.pdf}
+         \caption{Uncertainty increase under $\Zspace$.} \label{fig:u_increase_vs_z}
+     \end{subfigure}
+    \caption{\footnotesize \textbf{Delphic uncertainty as a function of $(s,z)$} in real-world medical data, for $a=\{$vasopressors$\}$. In (a, b), we note the dependence of the behavioural policy $\behav$ (top) and/or state distribution $P(s)$ (bottom) on confounders $z$. In (c), delphic uncertainty increases most in confounded states and under factors with greater confounding strength, compared to orthopaedic diagnosis ($\Gamma=3.4$).}  
+    \label{fig:confounding_ICU}
+\end{figure}
+\begin{figure}[tb]
+    \centering \begin{floatrow}%
+\capbtabbox{%
+      \resizebox{0.56\textwidth}{!}{%
+     \begin{tabular}{lccccc}
+    \toprule
+        Confounders $\Zspace$ & $\Gamma$ & BCQ & BC & CQL & Delphic ORL \\ \midrule
+        All 14 & $\approx$200 & 54.6 $\pm$ 1.3 & 59.6 $\pm$ 0.8 & 59.3 $\pm$ 0.9 & \textbf{62.2} $\pm$ 1.0 \\ \midrule
+        $\{$age$\}$ & 48.2 & 58.8 $\pm$ 0.8 & 64.7 $\pm$ 0.5 & 64.4 $\pm$ 0.8 & \textbf{66.5} $\pm$ 0.9 \\
+        $\{$neuro. diag.$\}$ & 29.1 & 55.0 $\pm$ 1.3 & 61.8 $\pm$ 0.9 & 59.6 $\pm$ 1.7 & \textbf{65.7} $\pm$ 1.2 \\
+        $\{$gastro. diag.$\}$ & 19.0 & 55.8 $\pm$ 0.8 & 60.9 $\pm$ 0.6 & 59.8 $\pm$ 0.6 & \textbf{63.3} $\pm$ 1.1 \\
+        $\{$trauma$\}$ & 16.3 & 56.3 $\pm$ 0.8 & 63.2 $\pm$ 1.1 & 63.5 $\pm$ 0.7 & \textbf{65.7} $\pm$ 1.0 \\
+        $\{$cardio. diag.$\}$ & 13.2 & 56.2 $\pm$ 1.0 & 60.6 $\pm$ 0.7 & 58.6 $\pm$ 0.9 & \textbf{62.7} $\pm$ 1.1 \\
+        $\{$hemato. diag.$\}$ & 11.6 & 59.6 $\pm$ 0.9 & 63.2 $\pm$ 0.6 & 63.1 $\pm$ 0.7 & \textbf{65.3} $\pm$ 1.1 \\
+        $\{$weight$\}$ & 8.3 & 60.1 $\pm$ 0.8 & \textbf{64.2} $\pm$ 1.0 & \textbf{65.4} $\pm$ 0.6 & \textbf{66.3} $\pm$ 0.9 \\
+        $\{$sedation$\}$ & 6.8 & 61.2 $\pm$ 0.8 & \textbf{64.5} $\pm$ 0.6 & \textbf{64.8} $\pm$ 0.9 & \textbf{65.3} $\pm$ 1.2 \\
+        $\{$endo. diag.$\}$ & 4.7 & 60.1 $\pm$ 1.1 & 63.1 $\pm$ 0.6 & \textbf{65.5} $\pm$ 0.8 & \textbf{65.7} $\pm$ 1.0 \\
+        $\{$resp. diag.$\}$ & 4.4 & 61.6 $\pm$ 1.3 & \textbf{64.0} $\pm$ 0.9 & \textbf{65.9} $\pm$ 1.0 & \textbf{64.7} $\pm$ 1.0 \\
+        $\{$ortho. diag.$\}$ & 3.4 & 62.3 $\pm$ 0.8 & \textbf{64.6} $\pm$ 0.6 & \textbf{65.8} $\pm$ 0.7 & \textbf{65.9} $\pm$ 1.0 \\
+        $\{$surgical status$\}$ & 3.2 & 62.2 $\pm$ 1.1 & 64.3 $\pm$ 0.5 & \textbf{67.4} $\pm$ 0.7 & \textbf{66.8} $\pm$ 1.1 \\
+        $\{$sepsis$\}$ & 2.8 & 60.3 $\pm$ 0.9 & 63.9 $\pm$ 0.6 & \textbf{65.4} $\pm$ 0.7 & \textbf{66.2} $\pm$ 1.0 \\
+        $\{$intoxication$\}$ & 1.2 & 62.3 $\pm$ 0.9 & 63.4 $\pm$ 0.5 & \textbf{65.2} $\pm$ 0.6 & \textbf{66.6} $\pm$ 1.1 \\ \midrule
+        $\emptyset$ & 1 & 62.6 $\pm$ 0.8 & \textbf{65.4} $\pm$ 0.5 & \textbf{68.2} $\pm$ 0.7 & \textbf{67.6} $\pm$ 1.1 \\ 
+    \bottomrule
+    \end{tabular}}%
+}{%
+  \caption{\textbf{Off-Policy Evaluation (OPE)} on the real-world medical dataset. Delphic ORL yields improvements when $z$ strongly confounds treatment decisions (large $\Gamma$). Mean and 95\% CIs over 10 runs. Best and overlapping results in bold.}\label{tab:hirid_res}%
+}%
+\ffigbox[\FBwidth]{%
+  \includegraphics[width=0.42\textwidth]{figs/expert_ranking_vs_Gamma_bars.pdf}%
+}{%
+   \caption{\textbf{Expert Clinician Evaluation} of treatment policies, supporting the conclusion that Delphic ORL improves learning in confounded settings.}\label{fig:hirid_res_expert}%
+}%
+
+\end{floatrow}
+\end{figure}
+
+    
+
+\paragraph{Confounding-Averse Policies.} We investigate the efficacy of our penalisation approach in learning policies that optimise patient outcomes in the presence of confounding bias. To evaluate the performance of these policies, we employ doubly-robust off-policy evaluation (OPE) \citep{jiang2016doubly,le2019batch}, which provides a confounding-independent estimate of treatment success by leveraging access to $z$. 
+
+\Cref{tab:hirid_res} shows our approach maintains improved performance even as the confounding level increases, while offline RL methods suffer from bias and yield suboptimal policies. As an ablation, we also studied the discrepancy of our trained policy with that in the data. Particularly, we compared the actions taken by our policy and the policy in the data and found that, unlike behaviour cloning, our policy was significantly different. This suggests our learned policy was indeed able to extrapolate from the data efficiently, identifying treatment strategies that may be more robust to confounding biases. 
+
+\paragraph{Expert Clinician Evaluation.} Motivated by the observed success of our method, we evaluated our algorithm using expert clinicians. \Cref{fig:hirid_res_expert} shows the evaluation results of six human expert clinicians, who ranked pairs of different policies based on their observed patient outcomes. More specifically, the human experts were shown simulated patient trajectories and were asked to blindly compare the expected value of actions from either our policy or the CQL policy to those of the behaviour cloning policy. The results provide additional validation for the performance improvements of our method in confounded settings.
+
+
+
+
+\section{Related Work}
+
+
+Online-RL methods rely on environment interaction for training, limiting their applicability in many real-world domains such as healthcare \citep{gottesman2018evaluating}. This has fueled research efforts in offline methods to optimise policies through pessimism \citep{Levine2020,buckmanimportance,jin2021pessimism,xie2021bellman,ueharapessimistic,cheng2022adversarially}. Recent practical algorithmic developments in offline RL have focused on addressing statistical errors induced by epistemic and aleatoric uncertainty, in both model-based and model-free methods \citep{kumar2020conservative,kostrikov2021offline,fujimoto2021minimalist,kidambi2020morel,yu2020mopo}. 
+
+Structural errors such as confounding bias are also pervasive in offline RL \citep{lu2018deconfounding}. Such biases cannot be captured by epistemic or aleatoric uncertainty quantification methods, as they do not depend on data quantity. Confounding bias cannot be reduced to the missing information problem in partially-observable environments either \citep{hausknecht2015deep}. History-dependent policies, for example, are equally prone to this source of error: while long-term information can recover latent environment information, it exacerbates distribution shifts between behavioural and learned policies when learning from observational data \citep{swamy2022sequence, ortega2021shaking}.
+
+Several approaches have been proposed to address confounding bias in offline RL. Most make assumptions to estimate the confounding variables, including access to the environment \citep{lu2018deconfounding,Zhang2020DTR} or to observable back- or front-door proxy variables \citep{kumor2021sequential, wang2021provably, lu2022pessimism, shi2022off}. This allows algorithms to apply covariate adjustment methods \citep{pearl2009} to correct for confounding when modelling alternative policies (interventional probabilities and counterfactuals). Extensive work also discusses confounding bias in off-policy evaluation \citep{bennett2021proximal, bennett21ope} and bandits \citep{sen17a,tennenholtz2021bandits,chen2023unified}, but the proposed solutions remain poorly translatable to learning offline RL policies in practice, due to the aforementioned limiting assumptions.
+
+Our work is also closely related to research on sensitivity analysis for treatment effect estimation under hidden confounding \citep{rosenbaum2002, kallus19a, jesson21a, oprescu2023b}. These works propose partial identification bounds for confounded heterogeneous treatment effect estimation or bandit decision-making problems \citep{kallus2018confounding} by assuming a bound on the dependence of the behavioural policy on hidden confounders. In this context, \citet{jesson21a} also distinguish sources of aleatoric and epistemic uncertainty from confounding biases. Other work has proposed sensitivity analysis bounds for off-policy evaluation, formulating uncertainty sets over policy returns \citep{Zhang2019, Namkoong2020}. Still, regret bounds from sensitivity analysis remain wide and often ill-adapted to high-dimensional state and action spaces or sequential decision-making problems. Our approach complements these theoretical frameworks with a practical solution to addressing confounding bias in offline RL. Finally, \citet{saengkyongam2023invariant,Tennenholtz2022} also study confounding in offline environments, but are more concerned with the complementary challenge of covariate shift -- with the latter work even assuming access to the contextual information. 
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+We proposed a practical solution to address the challenge of learning from confounded data, specifically in situations where confounders are unobserved and cannot be identified. Delphic ORL captures uncertainty by modelling world models compatible with the observational distribution, achieving improved performance across both simulated and real-world confounded offline RL tasks. Our results demonstrate that Delphic ORL can learn useful policies in cases where traditional algorithms fail due to excessive confounding. Overall, we believe research into tackling hidden confounding in offline RL will lead to more reliable and effective decision-making tools in various critical fields. %
+
+
+
+Finally, we note several limitations of our work. First, we focused our empirical evaluation on medically-motivated confounding scenarios, on the hypothesis that these should be representative of general confounded decision-making contexts. Second, the computational cost of modelling compatible worlds in Delphic ORL may be expensive for large-scale, highly confounded problems. Lastly, as with any RL algorithm, the effectiveness and safety of Delphic ORL depend on the quality and representativeness of the training data.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

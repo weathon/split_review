@@ -1,0 +1,450 @@
+\title{From Sparse to Soft Mixtures of Experts}
+
+\begin{abstract}
+Sparse mixture of expert architectures (MoEs) scale model capacity without significant increases in training or inference costs.
+Despite their success, MoEs suffer from a number of issues: training instability, token dropping, inability to scale the number of experts, or ineffective finetuning.
+In this work, we propose \name, a \emph{fully-differentiable} sparse Transformer that addresses these challenges, while maintaining the benefits of MoEs.
+\name performs an implicit soft assignment by passing different weighted combinations of all input tokens to each expert.
+As in other MoEs, experts in \name only process a subset of the (combined) tokens, enabling larger model capacity (and performance) at lower inference cost.
+In the context of visual recognition, \name greatly outperforms dense Transformers (ViTs) and popular MoEs (Tokens Choice and Experts Choice).
+Furthermore, \name scales well: \name Huge/14 with 128 experts in 16 MoE layers has over $40\times$ more parameters than ViT Huge/14, with only 2\% increased inference time, and substantially better quality.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Larger Transformers improve performance at increased computational cost.
+Recent studies suggest that model size and training data must be scaled together to optimally use any given training compute budget~\citep{kaplan2020scaling,hoffmann2022training,zhai2022scaling}.
+A promising alternative that allows to scale models in size without paying their full computational cost is sparse mixtures of experts (MoEs). 
+Recently, a number of successful approaches have proposed ways to sparsely activate token paths across the network in language~\citep{lepikhin2020gshard, fedus2022switch}, vision~\citep{riquelme2021scaling}, and multimodal models~\citep{mustafa2022multimodal}.
+
+Sparse MoE Transformers involve a discrete optimization problem to decide which modules should be applied to each token.
+These modules are commonly referred to as \emph{experts} and are usually MLPs.
+Many techniques have been devised to find good token-to-expert matches: linear programs \citep{lewis2021base}, reinforcement learning \citep{bengio2015conditional}, deterministic fixed rules \citep{roller2021hash}, optimal transport \citep{liu2022sparsity}, greedy top-$k$ experts per token \citep{shazeer2017outrageously}, or greedy top-$k$ tokens per expert \citep{zhou2022mixture}.
+Often, heuristic auxiliary losses are required to balance utilization of experts and minimize unassigned tokens.
+These challenges can be greater in out-of-distribution settings: small inference batch sizes, novel inputs, or in transfer learning.
+
+We introduce \name, that overcomes many of these challenges.
+Rather than employing a sparse and discrete router that tries to find a good \emph{hard} assignment between tokens and experts, \names instead perform a \emph{soft} assignment by mixing tokens.
+In particular, we compute several weighted averages of all tokens---with weights depending on both tokens and experts---and then we process each weighted average by its corresponding expert.
+
+\name L/16 outperforms ViT H/14 on upstream, few-shot and finetuning while requiring almost half the training time, and being \textbf{2$\times$ faster at inference}.
+Moreover, \name B/16 matches ViT H/14 on few-shot and finetuning and outperforms it on upstream metrics after a comparable amount of training. Remarkably, \name B/16 is \textbf{5.7$\times$ faster at inference} despite having 5.5$\times$ the number of parameters of ViT H/14 (see \cref{tab:long_runs} and \cref{fig:long_runs} for details).
+\Cref{sec:contrastive_experiments} demonstrates \name's potential to extend to other tasks: we train a contrastive model text tower against the frozen vision tower, showing that representations learned via soft routing preserve their benefits for image-text alignment.
+
+
+
+\section{Soft Mixture of Experts}
+
+\label{sec:softmoe}
+\subsection{Algorithm description}
+\label{sec:softmoe_description}
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{plots/sparse_vs_soft_diagram}
+\caption{%
+\textbf{Sparse and \name layers.} While the router in Sparse MoE layers (left) learns to \emph{assign} individual input tokens to each of the available slots, in \name layers (right) each slot is the result of a (different) \emph{weighted average} of all the input tokens. Learning to make discrete assignments introduces several optimization and implementation issues that \name sidesteps.
+\Cref{app:model_inspection} visualizes learned distributions of soft-assignments by \name.
+\label{fig:sparse_vs_soft_diagram}}
+\end{figure}
+The \name routing algorithm is depicted in \cref{fig:soft_moe_diagram}.
+We denote the inputs tokens for one sequence by $\mX \in \R^{m \times d}$, where $m$ is the number of tokens and $d$ is their dimension.
+Each MoE layer uses a set of $n$ expert functions\footnote{%
+In practice, all experts apply the same function with different parameters, usually an MLP.}
+applied on individual tokens, namely $\{f_i: \R^d \rightarrow \R^d \}_{1:n}$. 
+Each expert processes $p$ \emph{slots}, and each slot has a corresponding $d$-dimensional vector of parameters, $\mPhi \in \R^{d \times (n \cdot p)}$. 
+
+In particular, the input slots $\tilde{\mX} \in \R^{(n \cdot p) \times d}$ are the result of convex combinations of all the $m$ input tokens, $\mX$:
+\begin{equation}
+\label{eq:dispatch_weights_def}
+\begin{gathered}
+\mD_{ij} = \frac{\exp((\mX \mPhi)_{ij})}{\sum_{i'=1}^m \exp((\mX \mPhi)_{i'j})},\qquad
+\tilde{\mX} = \mD^\top \mX.
+\end{gathered}
+\end{equation}
+
+Notice that $\mD$, which we call the \emph{dispatch} weights, is simply the result of applying a softmax over the \emph{columns} of $\mX \mPhi$.
+Then, as mentioned above, the corresponding expert function is applied on each slot (i.e. on rows of $\tilde{\mX}$) to obtain the output slots:
+$\tilde{\mY}_i = f_{\left\lfloor{i / p}\right\rfloor}(\tilde{\mX}_i)$.
+
+Finally, the output tokens $\mY$ are computed as a convex combination of all ($n \cdot p$) output slots, $\tilde{\mY}$, whose weights are computed similarly as before:
+\begin{equation}
+\label{eq:combine_weights_def}
+\begin{gathered}
+\mC_{ij} = \frac{\exp((\mX \mPhi)_{ij})}{\sum_{j'=1}^{n \cdot p} \exp((\mX \mPhi)_{ij'})},\qquad
+\mY = \mC \tilde{\mY}.
+\end{gathered}
+\end{equation}
+We refer to $\mC$ as the \emph{combine} weights, and it is the result of applying a softmax over the \emph{rows} of $\mX \mPhi$.
+
+Following the usual design for Sparse MoEs, we replace a subset of the Transformer's MLP blocks with \name blocks. We typically replace the second half of MLP blocks.
+The total number of slots is a key hyperparameter of \name layers because the time complexity depends on the number of slots rather than on the number of experts.
+One can set the number of slots equal to the input sequence length to match the FLOPs of the equivalent dense Transformer.
+
+\begin{SCfigure}
+\centering
+\includegraphics[width=0.7\textwidth]{plots/SoftMoE_diagram.pdf}
+\caption{%
+\textbf{\name routing details.}
+\name computes scores or logits for every pair of input token and slot.
+From this it computes a slots$\times$tokens matrix of logits, that are normalized appropriately to compute both the dispatch and combine weights.
+The slots themselves are allocated to experts round-robin.
+\label{fig:soft_moe_diagram}}
+\end{SCfigure}
+
+\subsection{Properties of \name and connections with Sparse MoEs}
+\label{sec:soft_moe_vs_sparse}
+
+\paragraph{Fully differentiable}
+Sparse MoE algorithms involve an assignment problem between tokens and experts, which is subject to capacity and load-balancing constraints.
+Different algorithms approximate the solution in different ways: for example, the top-$k$ or ``Token Choice'' router \citep{shazeer2017outrageously,lepikhin2020gshard,riquelme2021scaling} selects the top-$k$-scored experts for each token, while there are slots available in such expert (i.e.\ the expert has not filled its \emph{capacity}). The ``Expert Choice'' router \citep{zhou2022mixture} selects the top-\emph{capacity}-scored tokens for each expert. Other works suggest more advanced (and often costly) algorithms to compute the assignments, such as approaches based on Linear Programming algorithms \citep{lewis2021base}, Optimal Transport \citep{liu2022sparsity,clark2022unified} or Reinforcement Learning \citep{clark2022unified}.
+Nevertheless virtually all of these approaches are discrete in nature, and thus non-differentiable.
+In contrast, all operations in \name layers are continuous and fully differentiable. 
+We can interpret the weighted averages with softmax scores as \emph{soft} assignments, rather than the \emph{hard} assignments used in Sparse MoE.
+
+\begin{lstlisting}[language=Python, caption={Simple JAX \citep{bradbury2018jax} implementation of a \name layer.}, label=alg:soft_moe_python, escapechar=|]
+def soft_moe_layer(X, Phi, experts):
+  # Compute the dispatch and combine weights.
+  logits = jnp.einsum('md,dnp->mnp', X, Phi)|\label{line:logits}|
+  D = jax.nn.softmax(logits, axis=(0,))
+  C = jax.nn.softmax(logits, axis=(1, 2))
+  # The input slots are a weighted average of all the input tokens,
+  # given by the dispatch weights.
+  Xs = jnp.einsum('md,mnp->npd', X, D)
+  # Apply the corresponding expert function to each input slot.
+  Ys = jnp.stack([
+    f_i(Xs[i, :, :]) for i, f_i in enumerate(experts)],
+    axis=0)
+  # The output tokens are a weighted average of all the output slots,
+  # given by the combine weights.
+  Y = jnp.einsum('npd,mnp->md', Ys, C)
+  return Y
+\end{lstlisting}
+\paragraph{No token dropping and expert unbalance}
+The classical routing mechanisms tend to suffer from issues such as ``token dropping'' (i.e.\ some tokens are not assigned to any expert),
+or ``expert unbalance'' (i.e.\ some experts receive far more tokens than others).
+Unfortunately, performance can be severely impacted as a consequence.
+For instance, the popular top-$k$ or ``Token Choice'' router \citep{shazeer2017outrageously} suffers from both,
+while the ``Expert Choice'' router \citep{zhou2022mixture} only suffers from the former (see \cref{app:dropping} for some experiments regarding dropping).
+\names are immune to token dropping and expert unbalance since every slot is filled with a weighted average of all tokens.
+
+\paragraph{Fast}
+The total number of slots determines the cost of a \name layer.
+Every input applies such number of MLPs.
+The total number of \emph{experts} is irrelevant in this calculation: few experts with many slots per expert or many experts with few slots per expert will have matching costs if the total number of slots is identical.
+The only constraint we must meet is that the number of slots has to be greater or equal to the number of experts (as each expert must process at least one slot).
+The main advantage of \name is completely avoiding sort or top-$k$ operations which are slow and typically not well suited for hardware accelerators.
+As a result, \name is significantly \emph{faster} than most sparse MoEs (\cref{fig:heatmap}).
+See \cref{sec:implementation} for time complexity details.
+\paragraph{Features of both sparse and dense}
+The \emph{sparsity} in Sparse MoEs comes from the fact that expert parameters are only applied to a subset of the input tokens.
+However, \names are not technically sparse, since every slot is a weighted average of all the input tokens.
+Every input token \emph{fractionally} activates all the model parameters.
+Likewise, all output tokens are fractionally dependent on all slots (and experts). 
+Finally, notice also that \names are not Dense MoEs, where every expert processes all input tokens, since every expert only processes a subset of the slots.
+
+\paragraph{Per-sequence determinism}
+Under capacity constraints, all Sparse MoE approaches route tokens in \emph{groups} of a fixed size and enforce (or encourage) balance within the group.
+When groups contain tokens from different sequences or inputs, these tokens \emph{compete} for available spots in expert buffers.
+Therefore, the model is no longer deterministic at the sequence-level, but only at the batch-level.
+Models using larger groups tend to provide more freedom to the routing algorithm and usually perform better, but their computational cost is also higher.
+
+\subsection{Implementation}
+\label{sec:implementation}
+
+\paragraph{Time complexity} Assume the per-token cost of a single expert function is $O(k)$. The time complexity of a \name layer is then $O(mnpd + npk)$. %
+By choosing $p = O({m}/{n})$ slots per expert, i.e. the number of tokens over the number of experts, the cost reduces to $O(m^2 d + m k)$. 
+Given that each expert function has its own set of parameters, increasing the number of experts $n$ and scaling $p$ accordingly, allows us to increase the total number of parameters without any impact on the time complexity.
+Moreover, when the cost of applying an expert is large, the $mk$ term dominates over $m^2 d$, and the overall cost of a \name layer becomes comparable to that of applying a single expert on all the input tokens.
+Finally, even when $m^2 d$ is not dominated, this is the same as the (single-headed) self-attention cost, thus it does not become a bottleneck in Transformer models. This can be seen in the bottom plot of \cref{fig:heatmap} where the throughput of \name barely changes when the number of experts increases from 8 to 4\,096 experts, while Sparse MoEs take a significant hit.
+
+\paragraph{Normalization} In Transformers, MoE layers are typically used to replace the feedforward layer in each encoder block. Thus, when using pre-normalization as most modern Transformer architectures \citep{domhan2018much,xiong2020layer,riquelme2021scaling,fedus2022switch}, the inputs to the MoE layer are ``layer normalized''. This causes stability issues when scaling the model dimension $d$, since the softmax approaches a one-hot vector as $d \rightarrow \infty$ (see \cref{sec:layernorm_problems}). Thus, in \cref{line:logits} of \cref{alg:soft_moe_python} we replace \lstinline{X} and \lstinline{Phi} with \lstinline{l2_normalize(X, axis=1)} and \lstinline{scale * l2_normalize(Phi, axis=0)}, respectively; where \lstinline{scale} is a trainable scalar, and \lstinline{l2_normalize} normalizes the corresponding axis to have unit (L2) norm, as \Cref{alg:l2_normalization} shows.
+
+\begin{lstlisting}[language=Python, caption={JAX implementation of the L2 normalization used in \name layers.}, label=alg:l2_normalization]
+def l2_normalize(x, axis, eps=1e-6):
+  norm = jnp.sqrt(jnp.square(x).sum(axis=axis, keepdims=True))
+  return x * jnp.reciprocal(norm + eps)
+\end{lstlisting}
+
+For relatively small values of $d$, the normalization has little impact on the model's quality. 
+However, with the proposed normalization in the \name layer, we can make the model dimension bigger and/or increase the learning rate (see \cref{sec:layernorm_problems}).
+
+\paragraph{Distributed model} When the number of experts increases significantly, it is not possible to fit the entire model in memory on a single device, especially during training or when using MoEs on top of large model backbones. In these cases, we employ the standard techniques to distribute the model across many devices, as in \citep{lepikhin2020gshard,riquelme2021scaling,fedus2022switch} and other works training large MoE models. Distributing the model typically adds an overhead in the cost of the model, which is not captured by the time complexity analysis based on FLOPs that we derived above. In order to account for this difference, in all of our experiments we measure not only the FLOPs, but also the wall-clock time in TPUv3-chip-hours.
+
+
+
+\section{Image Classification Experiments}
+
+\label{sec:classification_experiments}
+
+\textbf{Training Pareto frontiers}. In \cref{sec:pareto_plots} we compare dense ViT models at the Small, Base, Large and Huge sizes with their dense and sparse counterparts based on both Tokens Choice and Experts Choice sparse routing.
+We study performance at different training budgets and show that \name dominates other models in terms of performance at a given training cost or time.
+
+\textbf{Inference-time optimized models}. In \cref{sec:long_runs}, we present longer training runs (``overtraining'').
+Relative to ViT, \name brings large improvements in terms of inference speed for a fixed performance level (smaller models: S, B) and absolute performance (larger models: L, H).
+
+\textbf{Model ablations}. In \cref{sec:analysis,sec:abaltions} we investigate the effect of changing slot and expert counts, and perform ablations on the \name routing algorithm.
+
+\subsection{Training and evaluation data}
+We pretrain our models on JFT-4B \citep{zhai2022scaling}, a proprietary dataset that contains more than 4B images, covering 29k classes.
+During pretraining, we evaluate the models on two metrics: upstream validation precision-at-1 on JFT-4B, and ImageNet 10-shot accuracy.
+The latter is computed by freezing the model weights and replacing the head with a new one that is only trained on a dataset containing 10 images per class from ImageNet-1k \citep{deng2009imagenet}. 
+Finally, we provide the accuracy on the validation set of ImageNet-1k after finetuning on the training set of ImageNet-1k (1.3 million images) at 384 resolution.
+
+\subsection{Sparse routing algorithms}
+
+\emph{Tokens Choice}. Every token selects the top-$K$ experts with the highest routing score for the token~\citep{shazeer2017outrageously}.
+Increasing $K$ typically leads to better performance at increased computational cost.
+Batch Priority Routing (BPR) \citep{riquelme2021scaling} significantly improves the model performance, especially in the case of $K=1$ (\cref{app:additional_results}, \cref{table:bpr_vs_no_bpr}).
+Accordingly we use Top-$K$ routing with BPR and $K \in \{1, 2\}$.
+We also optimize the number of experts (\cref{app:additional_results}, \cref{fig:ablation_dropping_topk_bpr}).
+
+\emph{Experts Choice}. Alternatively, experts can select the top-$C$ tokens in terms of routing scores \citep{zhou2022mixture}. $C$ is the buffer size, and we set $E \cdot C = c \cdot T$ where $E$ is the number of experts, $T$ is the total number of tokens in the group, and $c$ is the capacity multiplier.
+When $c = 1$, all tokens can be processed via the union of experts.
+With Experts Choice routing, it is common that some tokens are simultaneously selected by several experts whereas some other tokens are not selected at all.
+\Cref{fig:ablation_dropping_topc}, \cref{app:dropping} illustrates this phenomenon.
+We experiment with $c=0.5,1,2$.
+\subsection{Training Pareto-optimal models}
+\label{sec:pareto_plots}
+We trained ViT-\{S/8, S/16, S/32, B/16, B/32, L/16, L/32, H/14\} models and their sparse counterparts.
+We trained several variants (varying $K$, $C$ and expert number), totalling 106 models.
+We trained for 300k steps with batch size 4096, resolution 224, using a reciprocal square root learning rate schedule.
+
+\Cref{fig:upstream_pareto,fig:imagenet10shot_pareto} show the results for models in each class that lie on their respective training cost/performance Pareto frontiers.
+On both metrics, \name strongly outperforms dense and other sparse approaches for any given FLOPs or time budget.
+\cref{table:pareto_runs}, \cref{sec:app_pareto_runs}, lists all the models, with their parameters, performance and costs, which are all displayed in \cref{fig:small_pareto_all}.
+
+\begin{figure}[tb]
+\centering
+\begin{subfigure}[b]{0.49\textwidth}
+\includegraphics[width=\textwidth]{plots/jft4b_days_and_flops.pdf}
+\caption{JFT-4B Precision-at-1\label{fig:upstream_pareto}}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.49\textwidth}
+\includegraphics[width=\textwidth]{plots/imagenet10shot_days_and_flops.pdf}
+\caption{ImageNet 10-shot Accuracy\label{fig:imagenet10shot_pareto}}
+\end{subfigure}
+\caption{
+\textbf{Train Pareto frontiers.}
+\name dominates both ViTs (dense) and popular MoEs (Experts and Tokens Choice) on the training cost / performance Pareto frontier.
+Larger marker sizes indicate larger models, ranging from S/32 to H/14.
+Cost is reported in terms of FLOPS and TPU-v3 training time.
+Only models on their Pareto frontier are displayed, \cref{app:additional_results} shows all models trained.
+\label{fig:small_pareto}}
+\end{figure}
+
+\subsection{Long training durations}
+\label{sec:long_runs}
+
+We trained a number of models for much longer durations, up to 4M steps.
+We trained a number of \names on JFT, following a similar setting to~\citet{zhai2022scaling}.
+We replace the last half of the blocks in ViT S/16, B/16, L/16, and H/14 with \name layers with 128 experts, using one slot per expert.
+We train models ranging from 1B to 54B parameters.
+All models were trained for 4M steps, except for H/14, which was trained for 2M steps for cost reasons.
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{plots/softmoe_vs_vit_long_runs_only_flops_log_log_line.pdf}
+\caption{%
+\textbf{Models with long training durations.}
+Models trained for 4M steps (H/14 trained only for 2M steps).
+Equivalent model classes (S/16, B/16, etc.) have similar training costs, but \name outperforms ViT on all metrics at a fixed training budget.
+\label{fig:softmoe_vs_vit_long_runs}}
+\end{figure}
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{plots/softmoe_long_runs_training_inference_cooldowns_flops.pdf}
+\includegraphics[width=\textwidth]{plots/softmoe_long_runs_training_inference_cooldowns.pdf}
+\caption{
+\textbf{Models optimized for inference speed.} Performance of models trained for more steps, thereby optimized for performance at a given inference cost (TPUv3 time or FLOPs). 
+\label{fig:long_runs}}
+\end{figure}
+\Cref{fig:softmoe_vs_vit_long_runs} shows the JFT-4B precision, ImageNet 10-shot accuracy, and the ImageNet finetuning accuracy for \name and ViT versus training cost.
+\cref{app:additional_results}, \cref{tab:long_runs_upstream} contains numerical results, and \cref{fig:softmoe_vs_vit_long_runs_time} shows performance versus core-hours, from which the same conclusions can be drawn.
+\name substantially outperforms dense ViT models for a given compute budget.
+For example, the \name S/16 performs better than ViT B/16 on JFT and 10-shot ImageNet, and it also improves finetuning scores on the full ImageNet data, even though its training (and inference) cost is significantly smaller.
+Similarly, \name B/16 outperforms ViT L/16 upstream, and only lags 0.5 behind after finetuning while being 3x faster and requiring almost 4x fewer FLOPs.
+Finally, the \name L/16 model outperforms the dense H/14 one while again being around 3x faster in terms of training and inference step time.
+
+We continue training the small backbones up to 9M steps to obtain models of high quality with low inference cost. 
+Even after additional (over) training, the overall training time with respect to larger ViT models is similar or smaller.
+For these runs, longer cooldowns (linear learning rate decay) works well for \name.
+Therefore, we increase the cooldown from 50k steps to 500k steps.
+
+\Cref{fig:long_runs} and \cref{tab:long_runs} present the results.
+\name B/16 trained for 1k TPUv3 days matches or outperforms ViT H/14 trained on a similar budget, and is \textbf{10$\times$ cheaper at inference} in FLOPs (32 vs. 334 GFLOPS/img) and \textbf{$\bf >5\times$ cheaper} in wall-clock time (1.5 vs. 8.6 ms/img). 
+\name B/16 matches the ViT H/14 model's performance when we double ViT-H/14's training budget (to 2k TPU-days).
+\name L/16 \textbf{outperforms all ViT models while being almost 2$\times$ faster at inference} than ViT H/14 (4.8 vs. 8.6 ms/img).
+
+\begin{table}[bt]
+\begin{center}
+\caption{Models trained for longer durations (cooldown steps in parentheses).
+\label{tab:long_runs}}
+\resizebox{\textwidth}{!}{%
+\setlength{\tabcolsep}{2pt} %
+\begin{tabular}{lrrrrrrrrr}
+\toprule
+Model & Params & \multicolumn{1}{c}{Train} & \multicolumn{1}{c}{Train} & \multicolumn{1}{c}{Train} & \multicolumn{1}{c}{Eval} & \multicolumn{1}{c}{Eval}  & \multicolumn{1}{c}{JFT @1} &  \multicolumn{1}{c}{INet} &  \multicolumn{1}{c}{INet} \\
+ &  & \multicolumn{1}{c}{steps (cd)} & \multicolumn{1}{c}{TPU-days} & \multicolumn{1}{c}{exaFLOP} & \multicolumn{1}{c}{ms/img} & \multicolumn{1}{c}{GFLOP/img}  & \multicolumn{1}{c}{P@1} & \multicolumn{1}{c}{10shot} & \multicolumn{1}{c}{finetune} \\
+\midrule
+ViT S/16  &    33M &    4M (50k) &       153.5 &       227.1 &          0.5 &           9.2 &     51.3 &       67.6 & 84.0 \\
+ViT B/16  &   108M &    4M (50k) &       410.1 &       864.1 &          1.3 &          35.1 &     56.2 &       76.8 & 86.6 \\
+ViT L/16  &   333M &    4M (50k) &      1290.1 &      3025.4 &          4.9 &         122.9 &     59.8 &       81.5 & 88.5 \\
+ViT H/14  &   669M &    1M (50k) &      1019.9 &      2060.2 &          8.6 &         334.2 &     58.8 &       82.7 & 88.6 \\
+ViT H/14  &   669M &    2M (50k) &      2039.8 &      4120.3 &          8.6 &         334.2 &     59.7 &       83.3 & 88.9 \\
+\midrule
+\name S/14 256E  &   1.8B &   10M (50k) &       494.7 &       814.2 &          0.9 &          13.2 &     60.1 &       80.6 &   87.5 \\
+\name B/16 128E  &   3.7B &   9M (500k) &      1011.4 &      1769.5 &          1.5 &          32.0 &     62.4 &       82.9 &   88.5 \\
+\name L/16 128E  &  13.1B &   4M (500k) &      1355.4 &      2734.1 &          4.8 &         111.1 &     63.0 &       84.3 &   89.2 \\
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+
+\subsection{Number of slots and experts}
+\label{sec:analysis}
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{plots/softmoe_num_slots_per_token_vs_num_experts.pdf}
+\caption{
+\textbf{Top}: Performance (ImageNet) for MoEs with different number of experts (columns) and slots-per-token / assignments-per-token (rows).
+\textbf{Bottom}: Training throughput of the same models.
+Across the columns, the number of parameters increases, however, the theoretical cost (FLOPS) for the model (not including routing cost) remains constant.
+Descending the rows, the expert layers become more compute intensive as more tokens/slots are processed in the MoE layers.
+\label{fig:heatmap}}
+\end{figure}
+
+We study the effect of changing the number of slots and experts in the Sparse and Soft MoEs.
+\Cref{fig:heatmap} shows the quality and speed of MoEs with different numbers of experts, and numbers of slots per token;
+the latter is equivalent to the average number of experts assigned per token for Sparse MoEs.
+When varying the number of experts, the models' backbone FLOPs remain constant, so changes in speed are due to routing costs.
+When varying the slots-per-expert, the number of tokens processed in the expert layers increases, so the throughput decreases.
+First, observe that for \name, the best performing model at each number of slots-per-token is the model with the most experts (i.e. one slot per expert).
+For the two Sparse MoEs, there is a point at which training difficulties outweigh the benefits of additional capacity, resulting in the a modest optimum number of experts.
+Second, \name's throughput is approximately constant when adding more experts.
+However, the Sparse MoEs' throughputs reduce dramatically from 1k experts, see discussion in \cref{sec:soft_moe_vs_sparse}.
+
+\subsection{Ablations}
+\label{sec:abaltions}
+We study the impact of the components of the \name routing layer by running the following ablations:
+\emph{Identity routing}:
+Tokens are not mixed: the first token goes to first expert, the second token goes to second expert, etc.
+\emph{Uniform Mixing}:
+Every slot mixes all input tokens in the same way: by averaging them, both for dispatching and combining.
+Expert diversity arises from different initializations of their weights.
+\emph{Soft / Uniform}:
+We learn token mixing on input to the experts to create the slots (dispatch weights), but we average the expert outputs.
+This implies every input token is identically updated before the residual connection.
+\emph{Uniform / Soft}.
+All slots are filled with a uniform average of the input tokens.
+We learn slot mixing of the expert output tokens depending on the input tokens.
+\Cref{table:ablation_liquid} shows that having slots is important; Identity and Uniform routing substantially underperform \name, although they do outperform ViT.
+Dispatch mixing appears slightly more important than the combine mixing.
+See \cref{app:soft_vs_uniform_vs_identity} for additional details.
+
+\begin{table}[t]
+\begin{center}
+\caption{Ablations using \name-S/14 with 256 experts trained for 300k steps.}
+\label{table:ablation_liquid}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{ccccccc}
+\toprule
+Method & Experts & Mixing & Learned Dispatch & Learned Combine & JFT p@1 & IN/10shot \\
+\midrule
+\name & \checkmark & \checkmark & \checkmark & \checkmark & 54.3\% & 74.8\% \\
+Soft / Uniform & \checkmark & \checkmark & \checkmark &  & 53.6\% & 72.0\% \\
+Uniform / Soft & \checkmark & \checkmark &  & \checkmark & 52.6\% & 71.8\% \\
+Uniform  & \checkmark & \checkmark &  &  & 51.8\% & 70.0\% \\
+Identity & \checkmark &  &  &  & 51.5\% & 69.1\% \\
+ViT &  &  & &  & 48.3\% & 62.3\% \\
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+
+
+
+\section{Contrastive learning}
+
+\label{sec:contrastive_experiments}
+We test whether the \name's representations are better for other tasks.
+For this, we try image-text contrastive learning.
+Following \citet{zhai2022lit}, the image tower is pre-trained on image classification, and then frozen while training the text encoder on a dataset of image-text pairs.
+We re-use the models trained on JFT in the previous section and compare their performance zero-shot on downstream datasets.
+For contrastive learning we train on WebLI~\citep{chen2022pali}, a proprietary dataset consisting of 10B images and alt-texts.
+The image encoder is frozen, while the text encoder is trained from scratch.
+
+\Cref{table:lit_0shot_long_training} shows the results.
+Overall, the benefits we observed on image classification are also in this setting.
+For instance, \name-L/16 outperforms ViT-L/16 by more than 1\% and 2\% on ImageNet and Cifar-100 zero-shot, respectively.
+However, the improvement on COCO retrieval are modest, and likely reflects the poor alignment between features learned on closed-vocabulary JFT and this open-vocabulary task. 
+
+\begin{table}[t]
+\begin{center}
+\caption{LIT-style evaluation with a ViT-g text tower trained for 18B input images ($\sim 5$ epochs).}
+\label{table:lit_0shot_long_training}
+\setlength{\tabcolsep}{2pt} %
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & Experts & IN/0shot & Cifar100/0shot & Pet/0shot & Coco Img2Text & Coco Text2Img \\
+\midrule
+ViT-S/16 & -- & 74.2\% & 56.6\% & 94.8\% & 53.6\% & 37.0\% \\
+\name-S/16 & 128 & 81.2\% & 67.2\% & 96.6\% & 56.0\% & 39.0\% \\
+\name-S/14 & 256 & 82.0\% & 75.1\% & 97.1\% & 56.5\% & 39.4\% \\
+\midrule
+ViT-B/16 & -- & 79.6\% & 71.0\% & 96.4\% & 58.2\% & 41.5\% \\
+\name-B/16 & 128 & 82.5\% & 74.4\% & 97.6\% & 58.3\% & 41.6\% \\
+\midrule
+ViT-L/16 & -- & 82.7\% & 77.5\% & 97.1\% & 60.7\% & 43.3\% \\
+\name-L/16 & 128 & 83.8\% & 79.9\% & 97.3\% & 60.9\% & 43.4\% \\
+Souped \name-L/16 & 128 & 84.3\% & 81.3\% & 97.2\% & 61.1\% & 44.5\% \\
+\midrule
+ViT-H/14 & -- & 83.8\% & 84.7\% & 97.5\% & 62.7\% & 45.2\% \\     %
+\name-H/14 & 256 & 84.6\% & 86.3\% & 97.4\% & 61.0\% & 44.8\% \\   %
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+Finally, in \cref{app:additional_results_laion} we show that \name{}s also surpass vanilla ViT and the Experts Choice router when trained from scratch on the publicly available LAION-400M \citep{schuhmann2021laion}. With this pretraining, \name{}s also benefit from data augmentation, but neither ViT nor Experts Choice seem to benefit from it, which is consistent with our observation in \cref{sec:analysis}, that \name{}s make a better use of additional expert parameters.
+
+
+
+\section{Related Work}
+
+\label{sec:soft_moe_vs_others}
+Many existing works \emph{merge}, \emph{mix} or \emph{fuse} input tokens to reduce the input sequence length \citep{jaegle2021perceiver,ryoo2021tokenlearner,renggli2022learning,Wang_2022_CVPR}, typically using attention-like weighted averages with fixed keys, to try to alleviate the quadratic cost of self-attention with respect to the sequence length. Although our dispatch and combine weights are computed in a similar fashion to these approaches, our goal is not to reduce the sequence length (while it is possible), and we actually recover the original sequence length after weighting the experts' outputs with the \emph{combine weights}, at the end of each \name layer.
+
+Multi-headed attention also shows some similarities with \name, beyond the use of softmax in weighted averages:
+the $h$ different \emph{heads} can be interpreted as different (linear) experts.
+The distinction is that, if $m$ is the sequence length and each input token has dimensionality $d$, each of the $h$ heads processes $m$ vectors of size ${d}/{h}$.
+The $m$ resulting vectors are combined using different weights for each of the $m'$ output tokens (i.e. the attention weights), on each head independently, and then the resulting $(d/h)$-dimensional vectors from each head are concatenated into one of dimension $d$. Our experts are non-linear and combine vectors of size $d$, at the \emph{input and output} of such experts.
+
+Other MoE works use a weighted combination of the experts parameters, rather than doing a sparse routing of the examples \citep{yang2019condconv,tian2020conditional,muqeeth2023soft}. These approaches are also fully differentiable, but they can have a higher cost, since 1) they must average the parameters of the experts, which can become a time and/or memory bottleneck when experts with many parameters are used; and 2) they cannot take advantage of vectorized operations as broadly as Soft (and Sparse) MoEs, since \emph{every input uses a different weighted combination of the parameters}. We recommend the ``computational cost'' discussion in \citet{muqeeth2023soft}.
+
+
+\section{Current limitations}
+
+\label{sec:limitations}
+
+\paragraph{Auto-regressive decoding}
+One of the key aspects of \name consists in learning the merging of all tokens in the input. This makes the use of \names in auto-regressive decoders difficult, since causality between past and future tokens has to be preserved during training. Although causal masks used in attention layers could be used, one must be careful to not introduce any correlation between token and slot \emph{indices}, since this may bias which token indices each expert is trained on. The use of \name in auto-regressive decoders is a promising research avenue that we leave for future work.
+
+\paragraph{Lazy experts \& memory consumption}
+We show in \cref{sec:classification_experiments} that one slot per expert tends to be the optimal choice.
+In other words, rather than feeding one expert with two slots, it is more effective to use two experts with one slot each.
+We hypothesize slots that use the same expert tend to align and provide small informational gains, and a expert may lack the flexibility to accommodate very different slot projections.
+We show this in \Cref{app:slot_correlation}.
+Consequently, \name can leverage a large number of experts and---while its cost is still similar to the dense backbone---the memory requirements of the model can grow large. 
+
+\clearpage
+
+
+
+
+

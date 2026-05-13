@@ -1,8 +1,8 @@
 # Trust or Escalate: LLM Judges with Provable Guarantees for Human Agreement
 
 - Decision: Accept
-- Avg Score: 4.60
-- Scores: 1, 0, 8, 8, 6
+- Avg Score: 8.00
+- Scores: 10, 8, 8, 6
 
 ## Abstract
 We present a principled approach to provide LLM-based evaluation with a rigorous guarantee of human agreement. We first propose that a reliable evaluation method should not uncritically rely on model preferences for pairwise evaluation, but rather assess the confidence of judge models and selectively decide when to trust its judgement. We then show that under this \textit{selective evaluation} framework, human agreement can be provably guaranteed---such that the model evaluation aligns with that of humans to a user-specified agreement level. As part of our framework, we also introduce \textit{Simulated Annotators}, a novel confidence estimation method that significantly improves judge calibration and thus enables high coverage of evaluated instances. Finally, we propose \textit{Cascaded Selective Evaluation}, where we use cheaper models as initial judges and escalate to stronger models only when necessary---again, while still providing a provable guarantee of human agreement. Experimental results show that \emph{\method} guarantees strong alignment with humans, far beyond what LLM judges could achieve without selective evaluation. For example, on a subset of Chatbot Arena where GPT-4 almost never achieves 80\% human agreement, our method, even while employing substantially cost-effective models such as Mistral-7B, \textit{guarantees} over 80\% human agreement with almost 80\% test coverage

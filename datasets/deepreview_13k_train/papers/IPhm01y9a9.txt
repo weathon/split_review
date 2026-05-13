@@ -1,0 +1,192 @@
+\title{Window Attention is Bugged: How not to Interpolate Position Embeddings}
+
+\begin{abstract}
+\vspace{-0.7em}
+Window attention, position embeddings, and high resolution finetuning are core concepts in the modern transformer era of computer vision. However, we find that na\"ively combining these near ubiquitous components can have a detrimental effect on performance.
+The issue is simple: interpolating position embeddings while using window attention is \textit{wrong}. We study two state-of-the-art methods that have these three components, namely Hiera and ViTDet, and find that both do indeed suffer from this bug. To fix it, we introduce a simple absolute window position embedding strategy, which solves the bug outright in Hiera and allows us to increase both speed and performance of the model in ViTDet. We finally combine the two to obtain HieraDet, which achieves 61.7 box mAP on COCO, making it state-of-the-art for models that only use ImageNet-1k pretraining. This all stems from what is essentially a 3 line bug fix, which we name ``absolute win''.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Transformer-based architectures dominate many tasks throughout computer vision \cite{scalingvits,vitdet,sam}.
+But despite their ubiquity, these architectures are relatively new, and thus many best practices have yet to be set in stone.
+In this paper, we focus on a relatively unassuming operation in modern vision transformers: \textit{interpolating position embeddings}.
+
+Absolute position embeddings added at the beginning of a transformer allow the model to distinguish between tokens based on location, an important detail for most vision tasks. While natural language processing (NLP) can sometimes get away with omitting a position embedding \cite{haviv-language_without_posemb}, those in computer vision often find themselves adding \textit{additional} position embeddings to deal with more difficult tasks (e.g., detection in \citet{vitdet}). Several recent works even design custom position embeddings to inject directly into attention \cite{swin,levit,mvit2}, so that location information is right where it is needed.
+
+However, these additional position embeddings can be costly: techniques like attention bias \cite{swin,levit} or relative position embeddings \cite{mvit2,vitdet} are added directly into the attention matrix. Not only are these operations slow, but they also cannot benefit from recent innovations such as Flash Attention \cite{flashattn,flashattn2} that speed up transformers by not constructing the attention matrix. Ideally, we would like to avoid relative position embeddings and just use simple and fast absolute position embeddings like the original ViT \cite{vit}.
+
+So, why do most architectures \textit{not} use absolute positioning embeddings? One potential reason becomes apparent when we study Hiera \cite{hiera}, a modern hierarchical vision transformer that only uses absolute position embeddings. Hiera is as powerful and more efficient than other state-of-the-art vision architectures, while being composed entirely of simple ViT blocks. Instead of adding more position bias architecturally (e.g., with relative position embeddings), it \textit{learns} good spatial biases through a strong pretext task (i.e., MAE \cite{mae}). This makes it the perfect case study for modern architectural design paired with simple absolute position embeddings.
+
+And immediately, an issue presents itself: \textit{Hiera does not \textbf{interpolate} well}. When finetuning Hiera on images that are even slightly larger than what it was trained on, the accuracy of the resulting model plummets. This includes mediocre results on detection, where ViT
+outperforms Hiera \cite{hiera}. The culprit, we discover, is the interaction between \textit{window attention} and \textit{absolute position embeddings}. That is, having window attention and absolute position embeddings in the same model induces a \textbf{bug} when interpolating to larger images. 
+To solve this, we introduce a simple absolute window-aware position embedding (namely, ``absolute win'') that can be interpolated to any image size without issue. This change alone is enough to completely alleviate any problems with image size in Hiera, resulting in strong performance on both image and video benchmarks at high resolution.
+
+However, the problem goes deeper: this is an issue in \textit{any} model that uses both absolute position embeddings and window attention at once, e.g., ViTDet \cite{vitdet}, a state-of-the-art method for detection without extra detection data. In fact, \citeauthor{vitdet} find that adding relative position embeddings is necessary for good performance, and we believe this bug is the reason. By using our absolute win method for detection, we can remove almost all the relative position embeddings in the model. This allows for an up to 43\% speed-up over the original model while \textit{increasing mAP}. Furthermore, fixing the bug unlocks other techniques that allow us to increase Hiera's performance on detection by up to \textbf{1.5 mAP} on COCO \cite{coco}, significantly outperforming ViT and establishing a new state-of-the-art for detection and instance segmentation with only ImageNet-1k pretraining.
+
+Note that we do not claim to introduce any exceedingly novel techniques here. Instead, we identify and analyze a bug present in the current state-of-the-art, introduce a simple strategy to fix it, and establish best practices for interpolating position embeddings. We then show how this alone is enough to improve the state-of-the-art in image and video classification, detection, and instance segmentation.
+
+
+
+\inputfig{00_teaser}
+
+
+
+\section{Background and Related Work}
+
+In this paper, we explore a bug caused by the combined use of three popular components in computer vision: window attention, absolute position embeddings, and high resolution finetuning.
+
+\paragraph{Window Attention.}
+In transformers, global attention \cite{attnisallyouneed} compares each token to \textit{all} other tokens. This is the default for ViTs \cite{vit}, but it is often costly and potentially wasteful for larger image sizes. Several alternative attention approaches have been proposed for vision, such as pooling attention \cite{pvt,pvtv2,mvit,mvit2} or linear attention \cite{performers,linformer,hydraattn}. However, particularly popular is window attention \cite{swin,twins,cswin,vitdet,hiera}, which compares each token \textit{only} to those in the same window as itself. This makes compute a function of window size, rather than image size, making it much faster.
+
+\paragraph{Absolute Position Embeddings.}
+By default, attention has no spatial bias, i.e., each token is treated the same regardless of its position. The original transformer \cite{attnisallyouneed} as well as ViT \cite{vit} introduce spatial bias using an \textit{absolute position embedding} (abs pos embed) different for each spatial location and added directly to each token after the embedding or patchification step. Subsequent strategies have been proposed that add this bias directly to the attention layers, such as relative position embeddings \cite{shaw_relpos,huang_relpos,liu_relpos,wu_relpos}, attention bias \cite{swin,levit}, or rotary embeddings \cite{su2021roformer}. While these are effective, they are often much slower than simply adding an absolute embedding at the start of the network. Furthermore, works such as Hiera \cite{hiera} show that relative position embeddings (relpos) are not necessary so long as the model is trained effectively.
+\paragraph{High Resolution Finetuning.}
+Finetuning models at higher resolutions (high res) has been a common practice in computer vision in the past \cite{huang2019gpipe,efficientnet}, so it's not a surprise that the same is true for modern vision transformers (\citet{swin,mvit2}, etc.). In fact, the only component that depends on image size in most ViTs is the position embedding. The standard strategy to resize, e.g., an absolute position embedding is to simply upsample them with bicubic interpolation as in \citet{vit}. However, in this paper we show that doing this in an architecture that has both window attention and absolute position embeddings can lead to errors.
+
+
+
+
+
+\section{Discovering a Bug}
+
+We begin our exploration of absolute position embeddings with Hiera \cite{hiera}, a modern hierarchical (i.e., \textit{multi-scale}) vision transformer that forgoes architectural bells-and-whistles in favor of learning spatial bias through a strong pretext task (MAE, \citet{mae}). This includes using absolute position embeddings like ViT \cite{vit} instead of more complex relative position embeddings \cite{vitdet,mvit2} or attention bias \cite{swin,levit}.
+
+\inputsbs{01_hiera_posemb}{05_hiera_motivation}
+
+While Hiera works well in its default configuration, we obtain a puzzling result when finetuning the model on even a slightly larger image size. If we take an original Hiera-L model pretrained on 224px images and finetune it on 256px images for ImageNet-1k \cite{imagenet}, the top-1 accuracy \textit{drops} by 0.4\% (see ``absolute'' in Tab.~\ref{tab:motivation}). Needless to say, this is the \textit{opposite} of what's supposed to happen: prior work significantly benefits from finetuning on larger images.
+
+\paragraph{The problem.}
+For efficiency, Hiera uses ``mask unit'' attention within the first two stages of the network. This is essentially window attention, but each window always corresponds to the same $8\times8$ tokens in the input (i.e., the windows get smaller as the tokens are pooled). This results in some interesting emergent properties when used alongside learned absolute position embeddings.
+
+In Fig.~\ref{fig:hiera_posemb}, we show two channels from Hiera's learned position embeddings, one from the public Hiera-B model pretrained with MAE, and the other from training Hiera-B fully supervised from scratch. In both cases, the learned position embeddings are \textit{tiled}. That is, there is a repeating $8\times 8$ pattern in the embedding. And unsurprisingly, this has the same layout as Hiera's window attention.
+
+Normally, this would not be an issue. However, when finetuning on larger image sizes, it is standard practice in vision to \textit{interpolate} the position embeddings (i.e., via bicubic interpolation). But in this case, na\"ively interpolating \textit{misaligns} the learned embeddings for each window with the windows themselves (see Fig.~\ref{fig:teaser}\hyperref[fig:teaser]{ab}). In most cases, this drastically changes the position embeddings for each window, which explains the low accuracy after finetuning in Tab.~\ref{tab:motivation}. % While not necessarily a problem itself, this tiling behavior prevents us from interpolating properly.
+
+\paragraph{Why it happens.}
+Position embeddings add \textit{spatial bias} to the model, which allows attention to learn operations that depend on a token's position.
+Thus, learned position embeddings are closely tied to the behavior of attention. Since each window shares the same weight matrix (for $Q$, $K$, and $V$), any update made to attention in one window would affect all other windows as well. This would cause the behavior of attention to \textit{average out} for each window during training. And if position embeddings are closely tied to this behavior, then it is not surprising that they would become similar as well.
+
+However, that is not the full picture: the tiling effect is \textit{significantly} more pronounced in an MAE trained model than a fully supervised one (Fig.~\ref{fig:hiera_posemb}). MAE \textit{deletes} most windows during pretraining, which seems to encourage the model to learn \textit{redundant} operations for each window. That is, each window should be treated the same no matter the position, as not all windows are guaranteed to exist in the forward pass. This produces a starkly different embedding, which suggest that MAE pretrained and fully supervised models are learning \textit{completely different} attention operations.
+
+To motivate this hypothesis, in Fig.~\ref{fig:window_sim} we plot the average pairwise cosine similarity of the windows in Hiera-L's position embedding throughout training. For both images and video, pretraining with MAE causes the window similarity to increase drastically 
+over the course of training (though not to 1.0, because Hiera still has global attention as well). Video reaches lower similarity, perhaps because video compression makes discerning the precise location of a token not as beneficial.
+In contrast, a fully supervised image model \textit{does} increase in similarity, but not as much. The trend suggests each model relies on spatial information differently, with supervised models potentially not enough.
+
+
+
+\sbsfig{\inputstacked{03_absolute_win}{02_window_sim}}{\inputstacked{04_embed_action}{06_bkg_size}}
+
+\paragraph{The fix.} 
+While not necessarily a problem itself, Hiera's tiled position embedding behavior prevents it from interpolating properly.
+But instead of treating it as a problem, we fix it by \textit{embracing} the tiling behavior and \textit{baking it in} to the position embeddings. Since Hiera has both window and global attention (window in stages 1 and 2, global in 3 and 4), we define a separate \textit{window embedding} and \textit{global embedding}. The former is the size of one window ($8\times8$ tokens), while the latter is the size of the feature map without windows ($7\times7$). Both are randomly initialized and learned during training.
+
+To construct Hiera's full $56 \times 56$ position embedding, we \textit{tile} the window embedding and \textit{interpolate} the global embedding, then add the results (see Fig.~\ref{fig:absolute_win}). This is similar to the learned behavior of absolute embeddings (Fig.~\ref{fig:hiera_posemb}), but we can now interpolate properly (Fig.~\ref{fig:teaser}\hyperref[fig:teaser]{e}): tile the window embedding and interpolate the global embedding to the desired size (cropping as necessary). This is a drop in replacement to the original absolute position embeddings, but with slightly fewer parameters.
+
+    
+To test our strategy, we pretrain a Hiera-L model with 400 epochs of MAE on ImageNet-1k using 224px images and then finetune on either 224px or 256px images in Tab.~\ref{tab:motivation}. When finetuning on 256px images, the original absolute embeddings \textit{drop} accuracy by 0.4\%. Our absolute window embeddings, on the other hand, both \textit{increase} accuracy at 224px (slightly, likely due to faster convergence) \textit{and} obtain the expected accuracy after finetuning at 256px. Moreover, they \textit{significantly increase} performance for a fully supervised Hiera-B.%
+\footnote{This suggests pure transformers (ViT, Hiera) learn suboptimal pos embeds when fully supervised on IN-1k. }
+Thus, we entitle this method ``absolute win''.
+
+\paragraph{Analysis.}
+We can study the effect position embeddings have by measuring their \textit{similarity}. If the position embedding for two tokens are similar, then they are likely to be paired together in attention. We present the similarity of individual tokens within the learned $8\times8$ window and $7\times7$ global embeddings in Fig.~\ref{fig:absolute_win_action} for our Hiera-L model trained with absolute win. The global embeddings act as expected: tokens close by (or in a close row or column) are considered similar. However, the window embeddings act very differently. In fact, they seem to perform \textit{dilated convolution}. % Neat. NEAT indeed! Let's remove the neat. 
+
+Furthermore, we study the importance of each component in Tab.~\ref{tab:bkg_size}. Our default $7\times7$ size for global embeddings seems to be optimal. Moreover, both window and global embeddings alone fix the bug, since the window embed will always align with window attn and the global embed is at the resolution where windows are pooled to $1\times1$. Neverthless, together they result in the most performant model.
+
+
+
+
+
+
+
+\section{Expanding to Detection}
+
+In Sec.~\ref{sec:discovery}, we explored how an interaction between window attention and absolute position embeddings caused undesirable behavior in learned position embeddings using Hiera \cite{hiera} as our test platform. However, Hiera is not the only model that uses both window attention and absolute position embeddings. In fact, a common strategy when applying vanilla vision transformers (ViT, \citet{vit}) to high resolution downstream tasks is to \textit{add} window attention.
+
+\subsection{ViTDet} \label{sec:vitdet}
+Of particular note is ViTDet \cite{vitdet}, a popular method to use ViTs for object detection. ViTDet takes a standard $224$px ViT model (i.e., with $14\times14$ tokens) pretrained with MAE \cite{mae}, and then finetunes at resolutions of $1024$px or more. But doing this with global attention is too expensive, so instead the authors convert all but 4 of the attention layers in the model to window attention, with each window being $14\times14$ tokens (i.e., the same as the pretrained model). Naturally, ViT uses absolute position embeddings, so to allow the model to input larger images, ViTDet na\"ively interpolates them. Finally, ViTDet adds \textit{relative position embeddings} \cite{mvit2} to the attention module in each layer, which the authors find important for good performance.
+
+\paragraph{Does ViTDet also suffer from the bug?}
+ViTDet has all the necessary components for the titular bug to occur: window attention, absolute position embeddings, and na\"ive interpolation; but this time, in a different order. Hiera trains a model with both absolute position embeddings and window attention, and then tries to interpolate the result. On the other hand, ViTDet takes an interpolatable position embedding (learned or sinusoidal), interpolates it, and \textit{then} adds window attention during finetuning.
+
+While not as egregious, this is still wrong. As described in Sec.~\ref{sec:discovery}, position embeddings are how attention implements spatial operations. Drastically changing the position embeddings when finetuning, then, would change the operation performed from what the model learned during pretraining. Interpolating the position embedding and adding window attention certainly ``drastically changes the position embeddings'' for each window by spliting one embedding into multiple parts (see Fig.~\ref{fig:teaser}\hyperref[fig:teaser]{cd}).
+
+\inputsbs{07_vitdet_motivation}{08_detection_abl}
+
+\paragraph{Applying Absolute Win.}
+To fix this, we can apply the same ``absolute win'' technique, but in a different way. The original ViT model operates at a resolution of $14\times14$ tokens. Based on that, ViTDet sets the size of each window to $14\times14$ in the interpolated model. Thus, if we want attention to perform the same operation it did during pretraining, we simply need to ensure that each $14\times14$ window has the same position embedding---i.e., by \textit{tiling} the position embeddings instead of na\"ively interpolating them. Essentially, we construct an absolute win embedding with the original pretrained position embeddings acting as window embeddings (Fig.~\ref{fig:detection_posemb}). Note that ViTDet has 4 global attention layers, so we still need a global embedding. We will discuss how to achieve that in the next section.
+If we apply this technique to a ViTDet model on COCO \cite{coco} using the same training setup as \citet{vitdet}, we only get small gains for both box and mask (see Tab.~\ref{tab:vitdet_motivation}). Does this mean that ViTDet is not actually affected by the bug? Actually, the secret is in the relative position embeddings (relpos): not adding them during finetuning drops performance by up to {1 mAP box} and {0.7 mAP mask} for the original model. If we then apply absolute win \textit{without relpos}, we gain {+0.4 mAP box} and {+0.6 mAP mask}. This means that a portion of the gain for box mAP and most of the the gain from mask mAP for using relpos in the first place is due to the bug.
+
+\paragraph{Removing Relative Position Embeddings.}
+Does this matter? If relpos can make up the difference, why would we want to remove it? Simple: relpos is \textit{slow}. In Tab.~\ref{tab:vitdet_motivation}, we present the inference runtime for each model (A100 fp16). Using relpos in every attention layer can slow the model down by \textit{47\%}. % , especially because without relpos we can use flash attention \cite{flashattn}. % Getting rid of relpos would make the model a lot faster and would allow the use of methods such as flash attention \cite{flashattn}.
+
+We now return to the component missing from our implementation of absolute win for detection: the global embedding. Using the pretrained model's embeddings as the finetuned model's window embeddings is correct \textit{for the window attention layers}. However, the model still has 4 global attention layers that now use the wrong position embeddings. We addressed this in Sec.~\ref{sec:discovery} with a global embedding, but the pretrained model does not have one here. We could try to train our own during finetuning, but this would adversely affect the windows from pretraining (Tab.~\ref{tab:detection_ablations}: absolute, patchify).
+
+Instead, we want to inject this position information directly into the layers with global attention, avoiding those with window attention. However, if we add a zero-initialized absolute position embedding to either the input to the block or the outputs of qkv (as is done in DETR \cite{detr}) for blocks with global attention, we also see no gain (Tab.~\ref{tab:detection_ablations}). Not being able to learn good absolute embeddings during supervised finetuning is not so surprising, as we found supervised Hiera-B in Sec.~\ref{sec:discovery} to also not be able to learn good absolute position embeddings from scratch. But we \textit{do} have an embedding strategy that does not require a good pretext task to learn: namely, relpos.
+
+Thus, our final method for absolute win applied to ViTDet is to \textit{tile} the pretrained model's position embeddings and learn new relative position embeddings \textit{for only the 4 global attention layers}. The result in Tab.~\ref{tab:vitdet_motivation} is a model that is \textit{stronger} than the original ViTDet-L, while \textit{being significantly faster}.
+
+\inputsbs{09_detection_posemb}{10_hieradet_motivation}
+
+\subsection{HieraDet} \label{sec:hieradet}
+If absolute win can improve ViT for detection, then what about Hiera? In \citet{hiera}, Hiera outperforms ViT in almost all cases when not finetuned at a higher res. However, Hiera-L performs \textit{significantly worse} than ViT-L for detection (55.0 v.s. 55.6 box mAP on COCO). Of course, this result is bugged. Hiera uses the same set up as ViTDet, i.e., funetune at 1024px images. Thus, we should expect to see a drop in accuracy as in Tab.~\ref{tab:motivation}. Naturally, we can fix this with absolute win.
+
+\paragraph{Building a Model.}
+We build on the methodology of \citet{hiera} to construct our HieraDet. We replace the ViT backbone with Hiera and use an FPN \cite{fpn} to aggregate multi-scale features. We then use the same Mask R-CNN \cite{maskrcnn} heads as ViTDet. Similar to ViTDet, we replace the global attention in Hiera with window attention \textit{of the same scale} (i.e., $14\times14$ windows for stage 3 and $7\times7$ windows for stage 4) and leave the existing windows in stages 1 and 2 unchanged.  
+
+\paragraph{Applying Absolute Win.}
+But what do we do for position embeddings? We now have two ``scales'' of window attention: the $8\times8$ windows originally within Hiera, and the $56\times56$ windows (i.e., $14\times14$ at stage 3 and $7\times7$ at stage 4 after downsampling) added following ViTDet. Simple---we have multiple \textit{scales} of window attention, so apply absolute win \textit{recursively}. At the lowest level, we have our pretrained Hiera model with $8\times8$ window and $7\times7$ global embeddings. Then we construct a $56\times56$ embedding from these as in Fig.~\ref{fig:absolute_win}, and then use \textit{that} as the window embedding for the entire HieraDet model (see Fig.~\ref{fig:detection_posemb}). We also add relpos to just the 3 global attention layers to serve as the new global embedding. Finally, with the position embeddings corrected, we can now use layer-wise lr decay \cite{electra,beit} which boosts performance for larger models.\footnote{ViTDet uses this, but the Hiera detection experiments in \citet{hiera} do not. This is because the bugged interpolated embeddings need to be retrained in order to get good accuracy. }
+
+We show the results of these changes in Tab.~\ref{tab:hieradet_motivation} for a Hiera-L on COCO. Without absolute win embeddings, our HieraDet is already {+0.6 box mAP} and {+0.7 mask mAP} over the original Hiera for detection results in \citet{hiera}, matching the performance of ViTDet-L. However, applying absolute win unlocks Hiera's performance even further, adding \textit{another +0.6 box mAP and +0.7 mask mAP on top}. This makes our HieraDet-L with absolute win {\bf +1.2 box mAP} and {\bf +1.4 mask mAP} over the original, \textit{while being faster} (due to having only 3 relpos).
+
+
+
+
+\section{Results}
+
+With the bug fixed, both Hiera and ViT perform better on several tasks. Here we evaluate absolute win v.s. the original models and other state-of-the-art. % All accuries presented are top-1.
+\paragraph{Image Recognition.}
+In Tab.~\ref{tab:imnet_results} we evaluate the effectiveness of absolute win for Hiera on ImageNet-1k \cite{imagenet} by pretraining for 1600 epochs on 224px images using the hyperparameters from \citet{hiera} and then finetuning on either 224px or 384px images. We then compare the resulting models to other existing work, i.e. MViTv2 \cite{mvit2} and Swin \cite{swin}, that have both 224px and 384px results as well as the original Hiera models \cite{hiera} which we finetune at 384px.
+In particular, we care about the \textit{performance increase} from finetuning at a larger image size (i.e., not the raw acc, as that would be unfair for supervised models). Compared to models of the same compute, Hiera with absolute win benefits \textit{more} from increased resolution, while retaining 224px acc. We further test this in Tab.~\ref{tab:imnet_scale}, where we present more finetune resolutions. While the original model can lose accuracy at some resolutions, absolute win solves the issue.
+
+\sbsfig{\inputstacked{11_imnet_results}{13_k400_results}}{\inputstacked{12_imnet_scale}{14_ava_results}}
+
+\paragraph{Video Recognition.}
+We perform a similar experiment in Tab.~\ref{tab:k400_results} on Kinetics-400 \cite{kinetics} action classification for video using 3200 ep of pretraining and the same hyperparameters as \citet{hiera}. We then finetune using 32 frames (each of 320px) to compare with Video MAE \cite{videomae}. We interpolate the temporal embedding linearly and use absolute win on the spatial embedding. While our 224px models are not as strong as Hiera's, our 320px results clearly show the benefits of absolute win, resulting in a Hiera-L model that outperforms Video MAE by {\bf 1-2\%} at high res. In Tab.~\ref{tab:ava_results}, we test this further by finetuning the resulting model on AVAv2.2 \cite{ava}, an action localization dataset. This allows us to outperform the prior state-of-the-art for K400 pretraining by {\bf +2.6} AP for L and {\bf +1.3} AP for H. Thus, absolute win is as effective on video as images.
+
+\paragraph{Object Detection and Segmentation.}
+We evaluate our absolute win applied to ViTDet and HieraDet for object detection and instance segmentation on COCO \cite{coco} using Detectron2 \cite{wu2019detectron2} training on \texttt{train2017} and testing on \texttt{val2017}. ViT baselines are from ViTDet \cite{vitdet} and Hiera baselines are from the original paper \cite{hiera}. For ViT, we keep all hyperparameters the same, but for Hiera we use our own implementation as described in Sec.~\ref{sec:hieradet}.
+
+In Tab.~\ref{tab:coco_backbones}, we compare ViTDet and HieraDet with absolute win the results from their original papers by finetuning Mask R-CNN \cite{maskrcnn} or Cascade Mask R-CNN \cite{cascade}. In every case, absolute win improves performance. Notably, the performance increase is slight for ViTDet (as its extra relpos hides the improvement), but our version is much faster (see Fig.~\ref{fig:coco_speed}). Furthermore, absolute win both speeds up HieraDet and results in huge performance improvements: up to \textbf{1.5 AP$^\text{box}$} and \textbf{1.6 AP$^\text{mask}$} for the base model. The resulting Hiera models outperform ViTDet.
+
+\sbsfig{\inputstacked{15_coco_backbones}{17_coco_results}}{\inputstacked{16_coco_speed}{18_lvis_results}}
+In Fig.~\ref{fig:coco_speed}, we benchmark our models against ViTDet as well as MViTv2 \cite{mvit2} and Swin \cite{swin} using ImageNet-21k pretraining from \citet{vitdet}, and the more recent Swin using SimMIM \cite{simmim} pretraining. Our method significantly speeds up both ViTDet and HieraDet, with the resulting HieraDet being faster and more accurate than everything else.
+
+Finally, like in \citet{vitdet}, we present additional results using cascade (cas), 1280px images, and softnms \cite{softnms} with and without test-time augmentation. In Tab.~\ref{tab:coco_results}, we compare the resulting model to other ImageNet pretrained work. HieraDet with absolute win is \textit{extremely} strong: with our bug fix, \textbf{{Hiera-B}} outperforms methods using heavier backbones and pipelines like HTC \cite{htc}. Moreover, multi-scale testing requires interpolating the position embedding. Thus, our models with absolute win benefit more, with \textbf{Hiera-L} outperforming \textbf{ViT-H} on box mAP.
+
+We conduct the same experiment on LVIS \cite{lvis} using the setup from ViTDet in Tab.~\ref{tab:lvis_results}. Our version of HieraDet also significantly outperforms ViTDet. It comes close to the results from the LVIS-optimized 2021 challenge winner \cite{lvischallengewinner}, despite using only baseline LVIS strategies.
+
+
+
+
+\section{Conclusion}
+
+
+We find a bug, fix it with absolute win, and show extensively how doing so improves the state-of-the-art. Our findings lead to a few practical suggestions. From Hiera: embracing the emergent behavior of a model can lead to significant gains. From ViTDet: minimizing the disparity between pretraining and finetuning can lead to optimal performance.
+But more than that, we discover a potential issue for any method with window attention and absolute position embeddings. While we only show two examples here, several others use these components. Moreover, other methods could be partially affected---e.g., Swin has window attention but uses relative embeddings, which if replaced with absolute embeddings could lead to a faster model.
+We hope that future work can use these techniques to obtain a more powerful and more efficient state-of-the-art, which we would see as an \textit{absolute win}.
+
+
+
+
+
+
+
+
+
+
+

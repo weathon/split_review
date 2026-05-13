@@ -1,0 +1,380 @@
+\title{GLASU: A Communication-Efficient Algorithm for Federated Learning with Vertically Distributed Graph Data}
+
+\begin{abstract}
+Vertical federated learning (VFL) is a distributed learning paradigm, where computing clients collectively train a model based on the partial features of the same set of samples they possess. Current research on VFL focuses on the case when samples are independent, but it rarely addresses an emerging scenario when samples are interrelated through a graph. In this work, we train a graph neural network (GNN) through VFL, where each client owns a part of the node features and a different edge set. This data scenario incurs a significant communication overhead, not only because of the handling of distributed features but also due to neighborhood aggregation in a GNN. Moreover, the training analysis is faced with a challenge caused by the biased stochastic gradients. We propose a model-splitting method that splits a backbone GNN across the clients and the server and a communication-efficient algorithm, GLASU, to train such a model. GLASU adopts lazy aggregation and stale updates to skip communication in neighborhood aggregation and in model updates, respectively, greatly reducing communication while enjoying convergence guarantees. We conduct extensive numerical experiments on real-world datasets, showing that GLASU effectively trains a GNN that matches the accuracy of centralized training, while using only a fraction of the time due to communication saving.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Vertical federated learning (VFL) is a newly developed machine learning scenario in distributed optimization, where clients share data with the same sample identity but each client possesses only a subset of the features for each sample. The goal is for the clients to collaboratively learn a model based on all features. Such a scenario appears in many applications, including healthcare, finance, and recommendation systems.
+
+Most of the current VFL solutions~\citep{chen2020vafl, liu2022fedbcd} treat the case where samples are independent, but omit their relational structure. However, the pairwise relationship between samples emerges in many occasions and it can be crucial in several learning scenarios, including the low-labeling-rate scenario in semi-supervised learning and the no-labeling scenario in self-supervised learning.
+
+Consider, for example, a company that offers news recommendations to its subscribed users. Several departments may be maintaining a separate user graph in their own compute infrastructure: a professional network where users are connected through occupational ties; a personal network where users are connected through personal life interactions; a follower network where a user is a follower of another on social media, etc. Further, the user data in each graph may contain different features (e.g., occupation related, life related, and interest related, respectively). To offer personal recommendations, the company sets up a server that communicates with each client (each department's computer), to train a model that predicts multiple labels for each user without revealing each client's raw local data. See \figref{fig:data} for an illustration.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.6\linewidth]{figure/Data_v1.png}
+  \caption{Data isolation of vertically distributed graph-structured data over three clients.}
+  \label{fig:data}
+\end{figure}
+
+One of the most effective machine learning models for such a prediction task is graph neural networks (GNNs)~\citep{kipf2016semi,hamilton2017inductive,chen2018fastgcn,velickovic2018graph,chen2020simple}. This model performs neighborhood aggregation in every feature transformation layer, such that the prediction of a graph node is based on not only the information of this node but also that of its neighbors.
+
+VFL on graph-structured data is not as well studied as that on other data, in part because of the challenges incurred by an enormous amount of communication. The communication overhead comes not only from the aggregation of the partial features/representations of a datum, but also from the neighborhood aggregation unique to GNNs. That is, communication occurs in each layer of the neural network, so that the latest representation of a neighboring node can be used to update the representation of the center node. One solution to reduce communication is that each client uses a local GNN to extract node representations from its own graph and the server aggregates these representations to make predictions~\citep{zhou2020vertically}. The drawback of this method is that the partial features of a node outside one client's neighborhood are not used, even if this node appears in another client's neighborhood. Another solution is to simulate centralized training: intermediate representations of each node are aggregated by the server, from where neighborhood aggregation is performed~\citep{ni2021vertical}. This method suffers the communication overhead incurred in each layer computation.
+
+In this work, we propose \ourmethod for communication-efficient VFL on graph data. The GNN model is split across the clients and the server, such that the clients can use a majority of existing GNNs as the backbone, while the server contains no model parameters. The server only aggregates and disseminates processed data (e.g., node embeddings) with the clients. The communication frequency between the clients and the server is mitigated through \emph{lazy aggregation and stale updates} (hence the name of the method). For an $L$-layer GNN, \ourmethod communicates partial node representations only in $K$ layers and in every other $Q$ iterations, enjoying the reduction of communication by a factor of $QL/K$. \ourmethod can be considered as a framework that encompasses several well-known models and algorithms as special cases, including the work of~\citet{liu2022fedbcd} when the graphs are absent, the work of~\citet{zhou2020vertically} when all aggregations but the final one are skipped ($K=1$), the work of~\citet{ni2021vertical} when no aggregations are skipped ($K=L$), and centralized training when only a single client exists.
+
+With the enjoyable reduction in communication, another difficulty is the convergence analysis, which admits two challenges: the biased gradient caused by neighborhood sampling in training GNNs and the correlated updates due to the use of stale node representations. We conduct an analysis based on the error decomposition of the gradient, showing that the training admits a convergence rate of $\cO((TQ)^{-1})$, where $T$ is the number of training rounds, each of which contains $Q$ iterations.
+
+We summarize the main contributions of this work below:
+\begin{enumerate}[leftmargin=*]
+\item Model design: We propose a flexible, federated GNN architecture that is compatible with a majority of existing GNN models. 
+
+\item Algorithm design: We propose the communication-efficient \ourmethod algorithm to train the model. Therein, lazy aggregation saves communication for each joint inference round, through skipping some aggregation layers in the GNN; while stale updates further save communication by allowing the clients to use stale global information for multiple local model updates.
+
+\item Theoretical analysis: We provide theoretical convergence analysis for \ourmethod by addressing the challenges of biased stochastic gradient estimation caused by neighborhood sampling and correlated update steps caused by using stale global information. {To the best of our knowledge, this is the first convergence analysis for federated learning with graph data.} %{\mhcomment[this is what we have done; emphasize novelty?]}
+
+\item Numerical results: We conduct extensive experiments on seven datasets, together with ablation studies, to demonstrate that \ourmethod can achieve a comparable performance as the centralized model on multiple datasets and multiple GNN backbones, and that \ourmethod effectively saves communication and reduces training time. %{\mhcomment{[emphasize specifically different dataset types?] }\xwcomment{this is not necessary, as no reviewer question about it}}
+\end{enumerate}
+
+
+\section{Problem, Background, and Related Works}
+
+
+
+\subsection{Problem Setup}
+Consider $M$ clients, indexed by $m = 1,\ldots,M$, each of which holds a part of a graph with the node feature matrix $\mX\in\R^{N \times d}$ and the edge set $\cE$. Here, $N$ is the number of nodes in the graph and $d$ is the feature dimension. We assume that each client has the same node set and the same set of training labels, $\yy$, but a different edge set $\cE_m$ and a non-overlapping node feature matrix $\mX_m\in\R^{N\times d_m}$, such that $\cE = \bigcup_{m=1}^M\cE_m$, $\mX=[\mX_1,\ldots,\mX_M]$, and $d=\sum_{m=1}^M d_m$. We denote the client dataset as $\cD_m = \{\mX_m, \cE_m, \yy\}$ and the full dataset as $\cD = \{\mX, \cE, \yy\}$. The task is for the clients to collaboratively infer the labels of nodes in the test set.
+\subsection{Graph Convolutional Network}\label{sec:GCN}
+The graph convolution network (GCN)~\citep{kipf2016semi} is a typical example of the family of GNNs. Inside GCN, a graph convolution layer reads
+\begin{equation}\label{eqn:GCN}
+\mH[l+1] = \sigma\Big(\mA(\cE)\cdot\mH[l]\cdot\mW[l]\Big),
+\end{equation}
+where $\sigma(\cdot)$ denotes the point-wise nonlinear activation function, $\mA(\cE)\in \R^{N\times N}$ denotes the adjacency matrix defined by the edge set $\cE$ with proper normalization, $\mH[l] \in \R^{N\times d[l]}$ denotes the node representation matrix at layer $l$, and $\mW[l] \in \R^{d[l]\times d[l+1]}$ denotes the weight matrix at the same layer.
+The initial node representation matrix $\mH[0]=\mX$. The classifier is denoted as $\hat{\yy} = f(\mH[L],\mW[L])$ with weight matrix $\mW[L]$ and the loss function is denoted as $\ell(\yy, \hat{\yy})$. Therefore, the overall model parameter is $\mW = \{\mW[0],\dots,\mW[L-1],\mW[L]\}$.
+
+Mini-batch training of GCN (and GNNs in general) faces a scalability challenge, because computing one or a few rows of $\mH[L]$ (i.e., the representations of a mini-batch) requires more and more rows of $\mH[L-1]$, $\mH[L-2]$, \ldots recursively, in light of the multiplication with $\mA(\cE)$ in~\eqref{eqn:GCN}. This is known as the \emph{explosive neighborhood problem} unique to graph-structured data. Several sampling strategies were proposed in the past to mitigate the explosion; in this work, we adopt the layer-wise sampling proposed by FastGCN~\citep{chen2018fastgcn}. Starting from the output layer $L$, which is associated with a mini-batch of training nodes, $\cS[L]$, we iterate over the layers backward such that at layer $l$, we sample a subset of neighbors for $\cS[l+1]$, namely $\cS[l]$. In doing so, at each layer, we form a bipartite graph with edge set $\cE[l] = \{(i,j)\vert i\in \cS[l+1], j\in\cS[l]\}$. Then, each graph convolution layer becomes
+\begin{equation}\label{eqn:FastGCN}
+\mH[l+1][\cS[l+1]] = \sigma\Big(\mA(\cE[l])\cdot\mH[l][\cS[l]]\cdot\mW[l]\Big),
+\end{equation}
+where $\mA(\cE[l])\in \R^{\abs{\cS[l+1]}\times\abs{\cS[l]}}$ is a properly scaled submatrix of $\mA(\cE)$ and $\mH[l][\cS[l]]$ denotes the rows of $\mH[l]$ corresponding to $\cS[l]$.
+\subsection{Related Works}
+\textbf{Vertical federated learning} is a learning paradigm where the features of the data are distributed across clients, who collaborate to train a model that incorporate all features~\citep{liu2022fedbcd, chen2020vafl,romanini2021pyvertical,yang2019parallel,gu2021privacy,yang2019quasi,xu2021fedv}. Thus, the global model is split among clients and the key challenge is the heavy communication costs on exchanging partial sample information for computing the losses and the gradients for each sample. Most works consider simple models (e.g., linear) because complex models incur multiple rounds of communication for prediction.
+
+\textbf{Federated learning with graphs} includes four scenarios. The \emph{graph-level} scenario is \emph{horizontal}, where each client possesses a collection of graphs and all clients collaborate to train a unified model~\citep{zhang2021federated,he2021fedgraphnn,bayram2021federated,xie2021federated}. The task is to predict graph properties (such as molecular properties).
+
+The \emph{subgraph-level} scenario could be either \emph{vertical} or \emph{horizontal}. In the vertical scenario, each client holds a part of the node features, a part of the whole model, and additionally a subgraph of the global graph~\citep{zhou2020vertically,ni2021vertical}. The clients aim to collaboratively train a global model (combined from those of each client) to predict node properties (such as the category of a paper in a citation network). Our work addresses this scenario.
+
+The \emph{subgraph-level, horizontal} scenario, on the other hand, considers training a GNN for node property prediction in a \emph{distributed} manner: a graph is partitioned and each client holds one partition~\citep{zhang2021subgraph,wu2021fedgnn,chen2022fedgraph,yao2022fedgcn}. A challenge to address is the aggregation of information along edges crossing different clients. This scenario differs from the vertical scenario in that features are not partitioned among clients and the graph partitions do not overlap.
+
+The fourth scenario is \emph{node-level}: the clients are connected by a graph and thus each of them is treated as a node. In other words, the clients, rather than the data, are graph-structured. It is akin to \emph{decentralized learning}, where clients communicate to each other via the graph to train a unified model~\citep{lalitha2019peer,meng2021cross,caldarola2021cluster,rizk2021graph}.
+
+Due to the space limitation, please see \appref{app:related} for in-depth discussions of the related works.
+
+
+\section{Proposed Approach}
+
+In this section, we present the proposed model and the training algorithm \ourmethod for federated learning on vertically distributed graph data. The neighborhood aggregation in GNNs poses communication challenges distinct from conventional VFL. To mitigate this challenge, we propose lazy aggregation and stale updates to effectively reduce the communication between the clients and the server, while maintaining comparable prediction performance as centralized models. For notational simplicity, we present the approach by using the full-graph notation~\eqref{eqn:GCN} but note that the implementation involves neighborhood sampling, where a more precise notation should follow~\eqref{eqn:FastGCN}, and that one can easily change the backbone from GCN to other GNNs.
+\begin{figure*}[t]
+  \begin{minipage}[t]{.65\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figure/Model_v2.png}
+  \end{minipage}%
+  \hspace*{\fill}
+  \begin{minipage}[b]{.32\linewidth}
+    \caption{Illustration of the split model on $M=3$ clients with lazy aggregation. In the model, the second server aggregation layer is skipped and the graph size used by each layer gradually decreases, due to neighborhood aggregation (inverse of neighborhood sampling).}
+    \vskip 10pt
+    \label{fig:model}
+  \end{minipage}
+  \vskip -0.1in
+\end{figure*}
+\subsection{GNN Model Splitting}\label{sec:MS}
+We split the GNN model among the clients and the server, approximating a centralized model. Specifically, each GNN layer contains two sub-layers: the client GNN sub-layer and the server aggregation sub-layer. At the $l$-th layer, each client computes the local feature matrix
+\[
+\mH^+_m[l] = \sigma\Big(\mA(\cE_m)\cdot\mH_m[l]\cdot\mW_m[l]\Big)
+\]
+with the local weight matrix $\mW_m[l]$ and the local graph $\cE_m$, where we use the superscript $^+$ to denote local representations before aggregation. Then, the server aggregates the clients' representations and outputs $\mH[l+1]$ as
+\[
+\mH[l+1] = \mathrm{Agg}(\mH^+_1[l],\dots,\mH^+_M[l]),
+\]
+where $\mathrm{Agg}(\cdot)$ is an aggregation function. In this paper, we only consider parameter-free aggregations, including averaging and concatenation. The server broadcasts the aggregated $\mH[l+1]$ to the clients so that computation proceeds to the next layer. In the final layer, each client computes a prediction. This layer is the same among clients because they receive the same $\mH[L]$.
+
+The two aggregation operations of our choice render a rather simple implementation of the server. They bring in two advantages: parameter-free and memory-less. Since the operations do not contain any learnable parameters, the server does not need to perform gradient computations. Moreover, in the backward pass, these operations do not require data from the forward pass to back-propagate the gradients (memory-less). Specifically, for averaging, the server back-propagates $\frac{1}{M}\nabla_{\mH[l+1]}\cL$ to each client, where $\cL$ denotes the loss; while for concatenation, the server back-propagates the corresponding block of $\nabla_{\mH[l+1]}\cL$.
+
+We illustrate in \figref{fig:model} the split of each GNN layer among the clients and the server. Note the difference of our approach from existing approaches. Our model splitting resembles federated split learning (SplitFed)~\citep{thapa2022splitfed}; but in SplitFed, each client can collaborate with the server to perform inference or model updates without accessing information from other clients, whereas in our case, all clients collectively perform the job. Our approach also differs from conventional VFL that splits the local feature processing and the final classifier among the clients and the server respectively, such that each model update requires a single U-shape communication~\citep{chen2020vafl}. In our case, due to the graph structure, each GNN layer contains one client-server interaction and the number of interactions is equal to the number of GNN layers (we will relax this in the following subsection).
+\subsection{Lazy Aggregation}\label{sec:LLA}
+The development in the preceding subsection approximates a centralized model, but it is not communication friendly because each layer requires one round of client-server communication. We propose two communication-saving strategies in this subsection and the next. We first consider \emph{lazy aggregation}, which skips aggregation in certain layers.
+
+Instead of performing server aggregation at each layer, we specify a subset of $K$ indices, $\cI=\{l_1,\dots,l_K\} \subset [L]$, such that aggregation is performed only at these layers. That is, at a layer $l\in \cI$, the server performs aggregation and broadcasts the aggregated representations to the clients, serving as the input to the next layer:
+\[
+\mH_m[l+1] = \mH[l+1];
+\]
+while at a layer $l \notin \cI$, each client uses the local representations as the input to the next layer:
+\[
+\mH_m[l+1] = \mH^+_m[l].
+\]
+By doing so, the amount of communication is reduced from $\cO(L)$ to $\cO(K)$.
+
+There are subtleties caused by neighborhood sampling, similar to those faced by FastGCN (see \secref{sec:GCN}). First, it requires additional rounds of communication to synchronize the sample indices, because whenever server aggregation is performed, it must be done on the same set of sampled nodes across clients. Hence, in the additional communication rounds, the server takes the union of the clients' index sets $\cS_m[l_k]$ and broadcasts $\cS[l_k] = \bigcup_{m=1}^M \cS_m[l_k]$ to the clients. Second, when server aggregation is skipped at a layer $l\notin \cI$, each client can use its own set of sampled nodes, $\cS_m[l]$, which may differ from each other. Such a procedure is more flexible than conventional VFL where sample features are generally processed synchronously. The sampling procedure is summarized in \algref{alg:sample} in \appref{app:algorithm}.
+\subsection{Stale Updates}\label{sec:SU}
+To further reduce communication, we consider \emph{stale updates}, which skip aggregation in certain iterations and use stale node representations to perform model updates. The key idea is to use the same mini-batch, including the sampled neighbors at each layer, for training $Q$ iterations. In every other $Q$ iterations, the clients store the aggregated representations at the server aggregation layers. Then, in the subsequent iterations, every server aggregation is replaced by a local aggregation between a client's up-to-date node representations and other clients' stale node representations. By doing so, the clients and the server only need to communicate once in every $Q$ iterations.
+
+Specifically, let a round of training contain $Q$ iterations and use $t$ to index the rounds. At the beginning of each round, the clients and the server jointly decide the set of nodes used for training at each layer. Then, they perform a joint inference on the representations $\mH_m^{t,+}[l]$ at every layer $l\in\cI$. Each client $m$ will store the ``all but $m$'' representation $\mH_{-m}^t[l+1]$ through extracting such information from the aggregated representations $\mH_m^t[l+1]$:
+\[
+\mH^t_{-m}[l+1]= \mathrm{Extract}(\mH^t_{m}[l+1], \mH^{t,+}_{m}[l]).
+\]
+For example, when the server aggregation is averaging, the extraction is
+\[
+\mathrm{Extract}(\mH^t_{m}[l+1], \mH^{t,+}_{m}[l]) = \mH^t_{m}[l+1] - \frac{1}{M}\mH^{t,+}_{m}[l],
+\]
+Afterward, the clients perform $Q$ iterations of model updates, indexed by $q = 0,\dots, Q-1$, on the local parameters $\mW_m^{t,q}$ in parallel, using the stored aggregated information $\mH_{-m}^t[l+1]$ to perform local computation, replacing server aggregation. The name ``stale updates'' comes from the fact that $\mH_{-m}^t[l+1]$ is computed by using stale model parameters $\{\mW_{m'}^{t,0}\}_{m'\neq m}$ at all iterations $q\ne0$. The extraction and the local updates are summarized in \algref{alg:local_update:1} and \algref{alg:local_update:2}, respectively, in \appref{app:algorithm}.
+\begingroup
+\setlength{\textfloatsep}{6pt}
+\begin{algorithm}[t]
+  \begin{algorithmic}[1]
+    \FOR{$t = 0, \dots, T$}
+    \STATE {\bf Server/Client} (\algref{alg:sample}): Sample $\{\cS_m^t[l]\}^L_{l=0}$.
+    \STATE {\bf Client}: $\mW_m^{t,0} = \begin{cases}\mW_m^{t-1,Q}, & t>0\\ \mW_m^0, &t = 0\end{cases}.$
+      \STATE {\bf Server/Client} (\algref{alg:local_update:1}): $\{\mH^t_{-m}[l+1]\}_{l\in\cI} = ${\bf JointInference}$(\mW_m^{t,0}, \cD_m, \{\cS_m^t[l]\}^L_{l=0}).$
+      \FOR {$q = 0,\dots, Q-1$}
+      \STATE {\bf Client} (\algref{alg:local_update:2}): $\mW_m^{t,q+1}=$ {\bf LocalUpdate} $(\mW_m^{t,q}, \cD_m, \{\cS_m^t[l]\}^L_{l=0},\{\mH^t_{-m}[l+1]\}_{l\in\cI}).$
+      \ENDFOR
+      \ENDFOR
+      \STATE \textbf{Output:} $\{\mW_m^{T,Q}\}^{M}_{m=1}$
+  \end{algorithmic}
+  \caption{Training Procedure. All referenced algorithms are detailed in \appref{app:algorithm}.}
+  \label{alg:train}
+\end{algorithm}
+
+\subsection{Summary}
+The overall training procedure is summarized in \algref{alg:train}. For communication savings, lazy aggregation brings in a factor of $L/K$ and stale updates bring in a factor of $Q$. Therefore, the overall saving factor is $QL/K$.
+
+Note that the algorithm assumes that all clients have the training labels. If the labels can be held by only one client (say, A), a slight modification by broadcasting the gradient with respect to the final-layer output possessed by A, suffices. See \appref{app:algorithm_v2} for details.
+\subsection{Special Cases}\label{sec:special}
+It is interesting to note that \ourmethod encompasses several well-known methods as special cases.
+
+\textbf{Conventional VFL.} VFL algorithms can be viewed as a special case of \ourmethod, where $\mA(\cE_m) = \mI$ for all $m$. In this case, no neighborhood sampling is needed and \ourmethod reduces to~\citet{liu2022fedbcd}.
+
+\textbf{Existing VFL algorithms for graphs.} The model of~\citet{zhou2020vertically} is a special case of \ourmethod, with $K=1$; i.e., no communication is performed except the final prediction layer. In this case, the clients omit the connections absent in the self subgraph but present in other clients' subgraphs. The model of~\citet{ni2021vertical} is also a special case of \ourmethod, with $K = L$. This case requires communication at all layers and is less efficient.
+
+\textbf{Centralized GNNs.} When there is a single client ($M=1$), our setting is the same as centralized GNN training. Specifically, by letting $K=L$ and properly choosing the server aggregation function $\mathrm{Agg}(\cdot)$, our split model can achieve the same performance as a centralized GNN model. Of course, using lazy aggregation ($K\ne L$) and choosing the server aggregation function as concatenation or averaging will make the split model different from a centralized GNN.
+
+\endgroup
+\subsection{Privacy}
+\ourmethod enables privacy protection because it is compatible with existing privacy-preserving approaches.
+
+\textbf{Secure Aggregation (SA)}~\citep{bonawitz2017practical,hardy2017private} is a form of secure multi-party computation approach used for aggregating information from a group of clients, without revealing the information of any individual. This can be achieved by homomorphic encryption~\citep{li2010secure,hardy2017private}. In our case, when the server aggregation is averaging, homomorphic encryption can be directly applied.
+
+\textbf{Differential Privacy (DP)}~\citep{wei2020federated} is a probabilistic protection approach. By injecting stochasticity into the local outputs, this approach guarantees that an attacker cannot distinguish the sample from the dataset up to a certain probability. DP can be applied either solely or in combination with SA to our algorithm in the server-client communication, to offer privacy protection for the client data.
+
+
+\section{Convergence Analysis}
+
+In this section, we analyze the convergence behavior of \ourmethod under lazy aggregation and stale updates. To start the analysis, denote by $\cS^t = \{\cS^t_m[l]\}^{L,M}_{l=1,m=1}$ the samples used at round $t$ (which include all sampled nodes at different layers and clients); by $S = \abs{\cS^t_m[L]}$ the batch size; and by $\cL(\mW;\cS)$ the training objective, which is evaluated at the overall set of model parameters across clients, $\mW = \{\mW_m\}^M_{m=1}$, and a batch of samples, $\cS$.
+
+ \textbf{A1}: The loss function $\ell$ is $G_\ell$-smooth with $L_\ell$-Lipschitz gradient; and a client's prediction function $f_m$ is $G_f$-smooth with $L_f$-Lipschitz gradient.
+\textbf{A2}: The training objective $\cL(\mW;\cD)$ is bounded below by a finite constant $\cL^\star$.
+\textbf{A3}: The samples $\cS^t$ are uniformly sampled from the neighbor set in each layer.
+
+\begin{theorem}\label{thm:convergence}
+  Under assumptions A1--A3, by running \algref{alg:train} with constant step size $\eta \leq C_0^{-1}\cdot (1+2Q^2M)^{-1}$, with probability at least $p = 1-\delta$, the averaged squared gradient norm is bounded by:
+  \begin{equation*}
+    \frac{1}{TQ}\sum^{T-1}_{t=0}\sum^{Q-1}_{q=0}\E\norm{\nabla \cL(\mW^{t,q};\cD)}^2 \leq  \frac{2\Delta_{\cL}}{\eta TQ}+\frac{28\eta M\cdot\left(C_0 + \sqrt{M+1}Q\right)}{3}\sigma,
+  \end{equation*}
+  where $\Delta_{\cL}=\cL(\mW^{0,0})-\cL^\star$, $C_0 = G_\ell L_f + L_\ell G_f^2$, and $\sigma>0$ is a function of $\log(TQ/\delta), L_f, L_g, G_f$ and $G_g$.
+\end{theorem}
+
+\begin{remark}
+There are two key challenges in the analysis. (1) Owing to neighborhood sampling, the stochastic gradient is biased (i.e., $\E_\cS\nabla \cL(\mW; \cS) \neq \nabla \cL(\mW; \cD)$). (2) The stale updates in one communication round are correlated, as they use the same mini-batch and samples. Hence, the general unbiasedness and independence assumptions on the stochastic gradients in the analysis of SGD-type of algorithms do not apply. We borrow the technique by~\citet{ramezani2020gcn} to bound the error of the stochastic gradient through the bias-variance decomposition and extend the analysis by~\citet{liu2022fedbcd} for VFL with correlated updates to establish our proof. For details, see \appref{app:theory}.
+\end{remark}
+
+\begin{remark}\label{rem:stationary}
+To better expose the convergence rate, assuming that $Q$ is upper bounded by $\frac{C_0}{\sqrt{M+1}}$, one may set $\eta = \sqrt{\frac{3\Delta_{\cL}}{28MC_0\sigma TQ}}$, such that
+\[
+  \frac{1}{TQ}\sum^{T-1}_{t=0}\sum^{Q-1}_{q=0}\E\norm{\nabla \cL(\mW^{t,q};\cD)}^2
+  \leq 8\sqrt{\frac{7\Delta_{\cL}MC_0\sigma}{3TQ}}.
+\]
+Ignoring the logarithmic factor $\log(TQ/\delta)$ in $\sigma$, the above bound states that the squared gradient norm decreases as $\cO((TQ)^{-1})$. Note that this bound holds only when $T$ is sufficiently large, because the choice of $\eta$ must satisfy the condition of \thref{thm:convergence}.
+\end{remark}
+
+\begin{remark}\label{rem:QT}
+Based on the preceding remark, we see that to achieve $\epsilon$-stationarity, the number of model updates is $QT = \cO(\frac{1}{\epsilon^2})$. That is, as long as $Q$ obeys the upper bound, running more local updates ($Q$) reduces the amount of communications ($T$). To the best of our knowledge, this is the first result for VFL on graph data.
+\end{remark}
+
+\begin{remark}
+While we have analyzed the impact of stale updates ($Q$), lazy aggregation ($K$) does not play a role in convergence, because it does not affect model updates. Instead, it affects model accuracy in a manner similar to how changing a neural network impacts the prediction accuracy.
+\end{remark}
+
+\begin{remark}
+If we consider the impact of the number of clients, the factor $M$ in the numerator of the bound indicates a slowdown when more clients participate training. Similar results are seen in FedBCD~\cite{liu2022fedbcd}, but therein one can use a large batch size $S$ to counter the slowdown. For graphs, however, $S$ does not appear in the bound because of the biased gradient estimation. Nevertheless, we note that unlike other federated scenarios, in VFL, $M$ is very small because it is limited by, e.g., the feature length.
+\end{remark}
+
+
+\section{Numerical Experiments}
+
+In this section, we conduct numerical experiments on a variety of datasets and demonstrate the effectiveness of \ourmethod in training with distributed graph data. We first compare its performance with related methods, including those tackling a different assumption on the data distribution and communication pattern. Then, we examine the communication saving owing to the use of lazy aggregation and stale updates. We further showcase the flexibility of \ourmethod through demonstration with different GNN backbones and varying clients. The experiments are conducted on a distributed cluster with three Tesla V100 GPUs communicated through Ethernet.
+\subsection{Datasets}
+We use seven datasets (in three groups) with varying sizes and data distributions: the Planetoid collection~\citep{yang2016revisiting}, the HeriGraph collection~\citep{bai2022heri}, and the Reddit dataset~\citep{hamilton2017inductive}. Each dataset in the HeriGraph collection (Suzhou, Venice, and Amsterdam) contains data readily distributed: three subgraphs and more than three feature blocks for each node. Hence, we use three clients, each of which handles one subgraph and one feature block. For the other four datasets (Cora, PubMed, and CiteSeer in the Planetoid collection; and Reddit), each contains one single graph and thus we manually construct subgraphs through randomly sampling the edges and splitting the input features into non-overlapping blocks, so that each client handles one subgraph and one feature block. %{\mhcomment[emphasize again different data modality?]}
+
+\begin{table}[t]
+  \centering
+  \caption{Datasets. Each of the HeriGraph datasets (Suzhou, Venice, Amsterdam) contains three naturally formed subgraphs. For other datasets, each contains one single graph and each client holds a sampled subgraph of it.}
+  \label{tab:dataset}
+  \vskip 5pt
+  \small
+  \begin{tabular}{c|rrrc}
+    \toprule
+    Dataset & \# Nodes & \# Edges & \# Feat. & \# Class \\
+    \midrule
+    Cora & $2,708$ & $10,556$ & $1,433$ & $7$ \\
+    PubMed & $19,717$ & $88,648$ & $500$ & $3$\\
+    CiteSeer & $3,327$ & $9,104$ & $3,703$ & $6$\\
+    \midrule
+    Suzhou & $3,137$ & $916,496$ & $979$ & $9$ \\
+    Venice & $2,951$ & $534,513$ & $979$ & $9$ \\
+    Amsterdam & $3,727$ & $1,271,171$ & $979$ & $9$ \\
+    \midrule
+    Reddit & $232,965$ & $114,615,892$ & $602$ & $41$ \\
+    \bottomrule
+  \end{tabular}
+  \vskip -0.1in
+\end{table}
+\subsection{Accuracy}
+We compare \ourmethod with three training methods: (a) centralized training, where there is only a single client ($M=1$), which holds the whole dataset without any data distribution and communication; (b) standalone training~\citep{zhou2020vertically}, where each client trains a model with its local data only and they do not communicate; (c) simulated centralized training~\citep{ni2021vertical}, where each client possesses the full graph but only the partial features, so that it simulates centralized training through server aggregation in each GNN layer. Methods (b) and (c) are typical VFL baselines; they are also special cases of our method (see \secref{sec:special}). Except for centralized training, the number of clients $M=3$. The number of training rounds, $T$, and the learning rate $\eta$ are optimized through grid search.
+
+We use GCNII~\citep{chen2020simple} as the backbone GNN. GCNII improves over GCN through including two skip connections, one with the current layer input and the other with the initial layer input.
+We set the number of layers $L=4$ and the mini-batch size $S=16$. For neighborhood sampling, the sample size is three neighbors per node on average. We set $K=2$; i.e., lazy aggregation is performed in the middle and the last layer.
+
+Table~\ref{tab:accuracy} reports the average classification accuracy of \ourmethod and the compared training methods, repeated five times. As expected, standalone training produces the worst results, because each client uses only local information and misses edges and node features present in other clients. The centralized training and its simulated version lead to similar performance, also as expected, because server aggregation (or its equivalence in centralized training) on each GNN layer takes effect. Our method \ourmethod, which skips half of the aggregations, yields prediction accuracy rather comparable with these two methods. Using stale updates ($Q=4$) is generally outperformed by no stale updates ($Q=1$), but occasionally it is better (see PubMed and Amsterdam). The gain in using lazy aggregation and stale updates occurs in timing, as will be demonstrated next.
+
+\begin{table*}[t]
+  \centering
+  \caption{Test accuracy ($\%$). The compared algorithms are Centralized training (Cent.); Standalone training (StAl.); Simulated centralized training (Sim.); \ourmethod with no stale updates, i.e., $Q=1$ (\ourmethod-1); and \ourmethod with stale updates $Q=4$ (\ourmethod-4).}
+  \label{tab:accuracy}
+  \vskip 5pt
+  \small
+  \begin{tabular}{c|ccc|cc}
+    \toprule
+    Dataset      & Cent. & StAl. & Sim. & \ourmethod-1 & \ourmethod-4 \\
+    \midrule
+    Cora        & $80.9\pm0.6$ & $74.6\pm0.5$ & $80.1\pm1.2$ & $81.0\pm1.3$ & $80.3\pm1.2$ \\
+    PubMed      & $84.9\pm0.6$ & $77.2\pm 0.5$  & $82.7\pm1.2$ & $82.3\pm1.6$ & $83.8\pm1.8$  \\  
+    CiteSeer    & $70.2\pm0.8$  & $64.4\pm0.5$   & $70.0\pm1.2$& $70.0\pm1.7$  & $68.8\pm3.3$ \\
+    \midrule
+    Suzhou   & $94.3\pm0.3$   & $51.6\pm0.9$  & $93.5\pm0.6$    & $92.7\pm1.4$  & $90.4\pm0.8$   \\  
+    Venice   & $95.7\pm 0.5$ & $33.5 \pm 2.1$    & $93.1\pm1.3$    & $92.2\pm0.6$  & $91.0\pm1.6$   \\ 
+    Amsterdam    & $94.6\pm0.1$  & $59.8\pm1.0$    & $95.5\pm0.8$    & $93.1\pm0.8$    & $94.9\pm0.4$  \\ 
+    \midrule
+    Reddit       & $95.6\pm0.1$   & $87.3\pm0.3$    & $95.3\pm0.7$  & $95.7\pm0.6$  & $94.7\pm1.1$  \\ 
+    \bottomrule
+  \end{tabular}
+  \vskip -0.1in
+\end{table*}
+\subsection{Communication Saving}
+To further investigate how the two proposed techniques affect the model performance and save the communication, we conduct a study on (a) the lazy aggregation parameter $K$ and (b) the stale update parameter $Q$.
+
+\textbf{Lazy aggregation:} We use a 4-layer GCNII as the backbone and set $K=1,2,4$. The aggregation layers are ``uniform'' across the model layers. That is, when $K=1$, server aggregation is performed on the last layer; when $K=2$, on the middle layer and the last layer; and when $K=4$, on all layers. The test accuracy and runtime are listed in Table~\ref{tab:abl:LA}. We observe that the runtime decreases drastically when using fewer and fewer aggregation layers: from $K=4$ to $K=1$, the reduction is $37.5\%$ for PubMed and $58.2\%$ for Amsterdam. The accuracy is comparable in all cases.
+
+\begin{table}[t]
+  \centering
+  \caption{Test accuracy (\%), runtime (seconds), and saving in runtime (\%) under different numbers of lazy aggregation layers ($K =4,2,1$). The saving is with respect to $K=4$. Top: PubMed; bottom: Amsterdam.}
+  \label{tab:abl:LA}
+  \vskip 5pt
+  \small
+  \begin{tabular}{l | ccc}
+    \toprule
+    \# Layer            & $K=4$             & $K=2$             & $K=1$             \\
+    \midrule
+    Accuracy      & $82.5\pm1.0$      & $83.8\pm1.8$      & $82.2\pm0.7$      \\
+    Runtime        &  $130\pm12$       & $96.6\pm9.9$      & $81.3\pm6.5$      \\
+    Saving        & $-$               & $25.7$            & $37.5$            \\
+    \bottomrule 
+    \toprule
+    \# Layer            & $K=4$             & $K=2$             & $K=1$             \\
+    \midrule
+    Accuracy      & $93.6\pm0.7$      & $94.9\pm0.4$      & $92.0\pm1.7$      \\
+    Runtime        & $913\pm76$        & $544\pm44$        & $382\pm35$        \\
+    Saving        & $-$               & $40.4$            & $58.2$            \\
+    \bottomrule
+  \end{tabular}
+  \vskip -0.1in
+\end{table}
+
+\textbf{Stale updates:} We experiment with a few choices of $Q$: 2, 4, 8, and 16. We report the time to reach the same test accuracy threshold in Table~\ref{tab:abl:SU}. We see that stale updates help speed up training by using fewer communication rounds, corroborating \remref{rem:QT} of the theory in \secref{sec:theory:converge}. This trend occurs on the Amsterdam dataset even when taking $Q$ as large as 16. The trend is also noticeable on PubMed, but at some point ($Q=8$) it is reverted, likely because it gets harder and harder to reach the accuracy threshold. We speculate that the target 82\% can never be achieved at $Q=16$. This observation is consistent with \remref{rem:stationary} of the theory, requiring $Q$ to be upper bounded to claim $\cO((TQ)^{-1})$ convergence.
+
+\begin{table}[t]
+  \centering
+  \caption{Test accuracy (\%) and runtime (seconds) under different numbers of stale updates ($Q =2,4,6,16$) for the same accuracy threshold. Top: PubMed (threshold: $82\%$); bottom: Amsterdam (threshold: $89\%$).}
+  \label{tab:abl:SU}
+  \vskip 5pt
+  \small
+  \begin{tabular}{l | cccc}
+    \toprule
+    \# Stale     & $Q = 2$           & $Q = 4$           & $Q=8$             & $Q=16$             \\
+    \midrule
+    Accuracy     & $82.5\pm1.6$      & $82.0\pm2.4$      & $82.1\pm0.3$      & N/A                \\
+    Runtime       & $66.1\pm5.0$      & $43.8\pm4.0$      & $88.9\pm7.4$      & $>128$      \\
+    \bottomrule
+    \toprule
+    \# Stale     & $Q = 2$           & $Q = 4$           & $Q=8$             & $Q=16$             \\
+    \midrule 
+    Accuracy     & $89.2\pm0.4$      & $89.3\pm0.7$      & $90.7\pm0.5$      & $90.3\pm1.1$      \\
+    Runtime       & $1323\pm44$       & $521\pm44$        & $324\pm31$        & $250\pm24$    \\
+    \bottomrule
+  \end{tabular}
+  \vskip -0.1in
+\end{table}
+\subsection{Flexibility}
+To demonstrate the flexibility of \ourmethod, we conduct experiments to show the performance under (a) different GNN backbones and (b) different numbers of clients, $M$.
+
+\textbf{Backbone model:} We compare three backbones: GCN, GAT~\citep{velickovic2018graph}, and GCNII, which are representative GNNs.
+The learning rate for each backbone is tuned to its best performance. The test accuracy over training rounds is plotted in \figref{fig:abl:models}. We see that \ourmethod can take different GNNs as the backbone and reach a similar prediction performance, despite that the convergence curves are not all similar. For example, the convergence histories of GCN and GCNII are quite close, whereas that of GAT experiences roughness.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width = 0.5\linewidth]{figure/abl_models.eps}
+  \vskip -10pt
+  \caption{Test accuracy under three backbone GNNs on PubMed.}
+  \label{fig:abl:models}
+  \vskip -0.1in
+\end{figure}
+
+\textbf{Number of clients:} We set $M=3,5,7$ and investigate the change of performance for different training methods. Hyperparameters are tuned to achieve the optimal accuracy under a fixed number of epochs. \tabref{tab:abl:client} suggests that the performance of standalone training decreases as $M$ increases, which is expected because each client has fewer features while server aggregation is not performed. Meanwhile, the performance of \ourmethod is not affected and it stays comparable with that of centralized training. We note that it is unrealistic to set $M$ arbitrarily large, because $M$ is limited by the feature length and also in practice, it is determined by data ownership.
+
+\begin{table}[t]
+  \centering
+  \caption{Test accuracy (\%) of Centralized training (Cent.), Standalone training (StAl.), and \ourmethod under different numbers of clients ($M =3,5,7$). Top: CiteSeer; bottom: PubMed.}
+  \label{tab:abl:client}
+  \vskip 5pt
+  \small
+  \begin{tabular}{l | ccc}
+    \toprule
+    \# Client   & $M=3$             & $M=5$             & $M=7$             \\
+    \midrule
+    Cent.       & \multicolumn{3}{c}{\rule[3pt]{.6in}{0.4pt} \,\, $70.2\pm0.8$ \,\, \rule[3pt]{.6in}{0.4pt}}     \\
+    StAl.       & $64.4\pm0.5$      & $44.6\pm0.3$      & $36.6\pm 0.8$      \\
+    \ourmethod  & $68.8\pm3.3$      & $69.5\pm1.4$      & $69.4\pm0.7$\\
+    \bottomrule 
+    \toprule
+    \# Client   & $M=3$             & $M=5$             & $M=7$             \\
+    \midrule
+    Cent.       & \multicolumn{3}{c}{\rule[3pt]{.6in}{0.4pt} \,\, $84.9\pm0.6$ \,\, \rule[3pt]{.6in}{0.4pt}}     \\
+    StAl.       & $77.2\pm 0.5$      & $73.8\pm0.5$      & $67.0\pm1.3$      \\
+    \ourmethod  & $83.8\pm1.8$       & $84.6\pm 0.4$    &$84.4\pm 0.2$   \\
+    \bottomrule
+  \end{tabular}
+  \vskip -0.1in
+\end{table}
+
+
+\section{Conclusion}
+
+We have presented a flexible model splitting approach for VFL with vertically distributed graph data and proposed a communication-efficient algorithm, \ourmethod, to train the resulting GNN. Due to the graph structure, VFL on GNNs incurs heavy communication and poses an extra challenge in the convergence analysis, as the stochastic gradients are no longer unbiased. To overcome these challenges, our approach uses lazy aggregation to skip server-client communication and stale global information to update local models, leading to significant communication reduction. Our analysis makes no assumptions on unbiased gradients. We provide extensive experiments to show the flexibility of the model and the communication saving in training, without compromise on the model quality.
+
+
+
+
+
+

@@ -1,0 +1,554 @@
+\title{MaxCutPool: differentiable feature-aware Maxcut for pooling in graph neural networks}
+
+\begin{abstract}
+We propose a novel approach to compute the \maxcut in attributed graphs, \textit{i.e.}, graphs with features associated with nodes and edges. Our approach is robust to the underlying graph topology and is fully differentiable, making it possible to find solutions that jointly optimize the \maxcut along with other objectives.
+Based on the obtained \maxcut partition, we implement a hierarchical graph pooling layer for Graph Neural Networks, which is sparse, differentiable, and particularly suitable for downstream tasks on heterophilic graphs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The \maxcut is the problem of partitioning the nodes of a graph such that as many edges as possible connect nodes from different sides of the partition. 
+The \maxcut is orthogonal to the more commonly encountered \mincut, which aims at partitioning the nodes into strongly connected groups.
+While \mincut is closely related to clustering, \maxcut relates to the concept of downsampling, \emph{e.g.}, keeping one-every-$K$, under the assumption that there is a redundancy among the $K$ samples.
+Like the \mincut, the \maxcut is a combinatorial optimization problem that, in practice, is approximated by approaches that find suboptimal or unstable solutions for a large class of graphs~\citep{makarychev2014bilu}.
+
+Pooling is ubiquitously used in deep learning for gradually reducing the size of the data while retaining important information. In \glspl{cnn}, pooling is typically implemented by selecting the maximum within a contiguous patch (\textit{max-pool}) or by computing an average (\textit{avg-pool}). These strategies are naturally related to \maxcut and \mincut problems, respectively.
+Similarly to \glspl{cnn}, \glspl{gnn}, which can be seen as a generalization to irregular data, are typically built by alternating \gls{mp} and graph pooling layers \citep{zhou2020review}. A hierarchy of pooling layers gradually extracts global graph properties through the computation of local summaries and is key to building deep \glspl{gnn} for graph classification~\citep{Khasahmadi2020Memory-Based}, node classification~\citep{gao2019graph, ma2020path}, graph matching~\citep{liu2021hierarchical}, and spatio-temporal forcasting~\citep{cini2024graph, marisca2024graph}.
+
+Two important approaches are followed when implementing hierarchical graph pooling. 
+One is to account for the node features with trainable functions that are adapted to a downstream task at hand. The other is to optimize graph theoretical objectives, such as the \mincut or the \maxcut, to guide the computation of the coarsened graph.
+Combining the first approach with \mincut objectives is relatively straightforward, as they complement the smoothing effect of \gls{mp} layers~\citep{hansen2023total}.
+Conversely, objectives such as \maxcut that select sparse and uniformly distributed subsamples of nodes have been implemented so far only within non-differentiable frameworks, which account neither for node features nor for task objectives~\citep{luzhnica2019clique}.
+
+\subsection{Contributions}
+
+\paragraph{\maxcut for attributed graphs.}
+Our first contribution is graph theoretical and consists of a novel \gls{gnn}-based approach to compute a \maxcut partition in attributed graphs. Being completely differentiable, our method can be seamlessly integrated into a deep-learning framework where other loss functions can influence the \maxcut solution.
+Remarkably, our method is also more robust than traditional approaches in computing the \maxcut on non-attributed graphs, as it finds a better cut on most graph topologies.
+This makes our contribution relevant to \emph{every} application of the \maxcut problem, such as quantum computing~\citep{zhou2020quantum}, circuit design~\citep{9204635}, statistical physics~\citep{borgs2012convergent}, material science~\citep{liers2004computing}, computer vision~\citep{abbas2022rama}, and quantitative finance~\citep{lee2023quantumized}.
+
+\paragraph{Graph pooling and coarsening.}
+The \maxcut application we focus on is the problem of learning a coarsened graph within a \gls{gnn}. In particular, we design a new hierarchical pooling layer that reduces the graph by keeping the nodes from one side of the \maxcut partition. Our layer is the first to combine a graph theoretical \maxcut objective with a differentiable and features-aware approach for pooling. When we include the newly proposed pooling layer in \glspl{gnn} for graph and node classification, we achieve similar or superior performances compared to state-of-the-art pooling techniques.
+
+\paragraph{Improved score-based pooling framework.}
+We propose a simple and efficient scheme to assign node to supernodes when computing the pooled graph.
+Our scheme can be applied not only to our method but to the whole family of sparse score-based graph pooling operators enhancing, in principle, their representational power.
+Importantly, we bridge the gap between score-based and dense pooling methods by using the same operations to compute the features and the topology of the pooled graph.
+
+\paragraph{Heterophilic graph classification dataset.}
+Differently from the existing differentiable pooling operators, the nature of the \maxcut solution makes our graph pooling operator particularly suitable for heterophilic graphs.
+While there are benchmark datasets for node classification on heterophilic graphs, there is a lack of such datasets for graph classification.
+To fill this gap, we introduce a novel synthetic dataset that, to our knowledge, is the first of its kind.
+
+
+
+\section{Background}
+
+
+\subsection{The \maxcut problem and the continuous relaxations} 
+\label{sec:maxcut}
+
+Let $\gG = (\gV,\gE)$ be an undirected graph with non-negative weights on the edges, and let $N$ be the number of nodes in $\gG$. A cut in $\gG$ is a partition $(\gS, \gV \setminus \gS)$ where $\gS \subset \gV$. The \maxcut problem consists of finding a cut that maximizes the total volume of edges connecting nodes in $\gS$ with those in $\gV \setminus \gS$. 
+The \maxcut objective can be expressed as the integer quadratic problem
+\begin{equation}
+    \label{eq:maxcut}
+    \max_{\vz} \sum \limits_{i,j \in  \mathcal{V}} w_{ij}(1- z_i z_j) \;\; \text{s.t.} \;\; z_i \in \{ -1, 1 \},
+\end{equation}
+where $\vz \in \{-1,1\}^N$ is an assignment vector indicating to which side of the partition each node is assigned to and $w_{ij}$ is the weight of the edge connecting nodes $i$ and $j$.
+
+Like other discrete optimization problems of this kind, \maxcut is NP-hard.
+The \gls{gw} algorithm \citep{goemanswilliamson1995improved} provides a semidefinite relaxation of the integer quadratic problem, which makes it tractable:
+\begin{equation}
+    \label{eq:maxcut_relaxation}
+    \max_{\mX} \sum \limits_{i,j \in  \mathcal{V}} w_{ij}(1 - \vx_i \cdot \vx_j) \;\; \text{s.t.} \;\; \Vert \vx_i \Vert = 1,
+\end{equation}
+where $\mX \in \sR^{N \times D}$ is a matrix whose rows are the continuous embeddings of the nodes in $\gG$.
+The vectors $\mX$ are projected on a random hyperplane to split the nodes and assign them to the two sides of the partition. This algorithm guarantees an expected cut size of $.868$ of the maximum cut.
+
+Another simple yet effective continuous relaxation is the \gls{levs} method~\citep{shuman2015multiscale}.
+Let $\mL$ be the Laplacian matrix associated to the graph $\gG$ and let $\vu_{\max}$ be the eigenvector of $\mL$ associated to the largest eigenvalue $\lambda_{\max}$. A cut in $\gG$ can be found based on the polarity of the components of $\vu_{\max}$, for instance by letting $\gS = \{i: \vu_{\max}[i] \geq 0 \}$.
+In the field of graph signal processing, the eigenvectors related to the largest eigenvalues of $\mL$ are closely related to the operation of high-pass filtering of a graph signal~\citep{tremblay2018design}. Specifically, they are used to design graph filters that amplify \textit{high-frequency} components of a signal, \emph{i.e.}, the components that vary the most across adjacent nodes~\citep{shuman2013emerging}.
+
+The \maxcut problem is closely related to \textit{graph coloring}, which aims at assigning different colors to adjacent nodes.
+In particular, the 2-color \emph{approximate coloring}~\citep{1984Graph}, is the problem of identifying subsets of nodes such that the connections within each subset are minimized. Such coloring is a high-frequency graph signal and induces a partition that is orthogonal with respect to spectral clustering~\citep{vonluxburg2007tutorial}.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/ring-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/grid-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/randreg-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/sensor-crop.pdf}
+        \caption{}
+    \end{subfigure}
+
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/ring_hist.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/grid_hist.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/randreg_hist.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/sensor_hist.pdf}
+        \caption{}
+    \end{subfigure}
+
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/ring_hist_diffndp.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/grid_hist_diffndp.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/randreg_hist_diffndp.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/sensor_hist_diffndp.pdf}
+        \caption{}
+    \end{subfigure}
+
+    \caption{\textbf{Top row:} Partitions induced by the sign of the elements in $\vu_{\max}$. The nodes are colored based on the partition and the red edges are those not cut (the less, the better). \textbf{Middle row:} histograms of $\vu_{\max}$ inducing the partitions above. While in bipartite graphs the separation is sharp, the more a graph is irregular and dense the more the values are clustered around zero, making it difficult to find the optimal \maxcut.
+    \textbf{Bottom row:} histograms of the score vectors generated by our model, which always produce a clear and sharp partition.
+    }
+    \label{fig:vmax}
+\end{figure}
+
+A \maxcut partition that cuts every edge exists only for bipartite graphs. Conversely, in fully connected graphs no more than half of the edges can be cut.
+Algorithms relying on continuous relaxations to find the \maxcut partition tend to be unstable and perform poorly, especially as the graph topology departs from the bipartite case~\citep{trevisan2009max}.
+Fig.~\ref{fig:vmax}(a-h) shows the performance of the \gls{levs} method on bipartite and non-bipartite graphs: numerical issues typically occur in more dense and less regular graphs, making it difficult to identify the optimal \maxcut solution.
+
+\subsection{Message passing in GNNs}
+Let us consider a graph $\gG = \left(\mX \in \sR^{N \times F}, \mA \in \sR^{N \times N} \right)$. A basic \gls{mp} operator can be described as
+\begin{equation}
+    \label{eq:mp}
+    \mX' = \sigma \left( \mP \mX \boldsymbol{\Theta} \right)
+\end{equation}
+where $\sigma$ is a non linear activation function, $\boldsymbol{\Theta}$ are trainable parameters, and $\mP$ is a propagation operator matching the sparsity pattern of $\mA$. 
+Each \gls{mp} layer relies on a specific propagation operator. 
+For instance, in \glspl{gcn}~\citep{kipf2017semisupervised}, the propagation operator is defined as $\mP = \Hat{\mD}^{-\frac{1}{2}}\Hat{\mA}\Hat{\mD}^{-\frac{1}{2}}$, where $\Hat{\mA} = \mA + \mI$ and $\Hat{D}_{ii} = \sum_{j=0}\Hat{\mA}_{ij}$.
+
+Due to the fixed, non-negative smoothing nature of most propagation operators, the repeated application of $\mP$ can lead to over-smoothing. 
+If that happens, the feature representations of nodes become increasingly similar, 
+hindering the function approximation capabilities of a \gls{gnn}, which can only learn smooth graph signals~\citep{wu2019oversmoothing, wang2019oversmoothing}. 
+In contrast, by using a \emph{sharpening} propagation operator, any kind of gradients can be learned~\citep{eliasof2023improving}.
+Since there is no universal definition for such an operator, we rely on the formulation introduced by \cite{bianchi2022simplifying}:
+\begin{equation}
+\label{eq:het_mp}
+    \mP = \mI - \delta \left( \mI - \mD^{\frac{1}{2}}\mA\mD^{\frac{1}{2}} \right) = \mI - \delta\mL^{\text{sym}}
+\end{equation}
+where $\delta$ is a smoothness hyperparameter and $\mL^{\text{sym}}$ is the symmetrically normalized Laplacian of $\gG$. 
+As observed by \cite{bianchi2022simplifying}, when $\delta = 0$ the \gls{mp} behaves like a simple \gls{mlp}. Instead, when $\delta = 1$ the behavior is close to that of a \gls{gcn}. 
+Finally, as noted by \cite{eliasof2023improving}, when $\delta > 1$ the propagation operator favors the realization of non-smooth signals on the graph and we refer to this variant as a \gls{hetmp} operator. We note that this can be seen as a graph-equivalent of the Laplacian sharpening kernels for images, mapping connected nodes to different values~\citep{mather2022computer}.
+
+\subsection{Graph pooling}
+While there are profound differences between existing graph pooling approaches, most of them can be expressed through the \gls{src} framework \citep{grattarola2022understanding}. 
+Specifically, a pooling operator $\texttt{POOL}: (\mA,\mX) \mapsto (\mA', \mX')$ can be expressed as the combination of three sub-operators:
+
+\begin{itemize}
+    \item $\texttt{SEL}:(\mA,\mX) \mapsto \mS \in \sR^{N \times K}$, is a selection operator that defines how the $N$ original nodes are mapped to the $K$ pooled nodes, called \emph{supernodes}, being $\mS$ the \emph{selection matrix}. 
+    \item $\texttt{RED}:(\mX, \mS) \mapsto \mX' \in \sR^{K \times F}$, is a reduction operator that yields the features of the supernodes. A common way to implement \texttt{RED} is $\mX' = \mS^\top\mX$.
+    \item $\texttt{CON}:(\mA, \mS) \mapsto \mA' \in \sR^{K \times K}_{\geqzero}$, is a connection operator that generates the new adjacency matrix and, potentially, edge features. Typically, \texttt{CON} is implemented as $\mA' = \mS^\top\mA\mS$ or $\mA' = \mS^{+}\mA\mS$.
+\end{itemize}
+
+Different design choices for \texttt{SEL}, \texttt{RED}, and \texttt{CON} induce a taxonomy of the operators. 
+For example, if \texttt{SEL}, \texttt{RED}, and \texttt{CON} are learned end-to-end the pooling operators are called \emph{trainable}, \emph{non-trainable} otherwise. 
+Relevant to this work, are the families of pooling methods described in the following.
+
+\textbf{Soft-clustering} methods, sometimes referred to as \emph{dense}~\citep{grattarola2022understanding}, assign each node to more than one supernode through a soft membership. 
+Representatives methods such as DiffPool~\citep{ying2018hierarchical}, \acrlong{mincut}~\citep{bianchi2020spectral}, 
+StructPool~\citep{yuan2020structpool},
+HoscPool~\citep{duval2022higher}, 
+and \gls{dmon}~\citep{tsitsulin2020graph}, compute a soft cluster assignment matrix $\mS \in \R^{N \times K}$ either with an \gls{mlp} or an \gls{mp}-layer operating on node the features and followed by a \texttt{softmax}. 
+Each method leverages different unsupervised auxiliary loss functions to guide the formation of the clusters. 
+Trainable soft-clustering methods usually perform well on downstream tasks due to their flexibility and \emph{expressive power}, which is the capability of retaining all the information from the original graph~\citep{bianchi2023expr}.
+However, storing the soft assignments $\mS$ is a memory bottleneck for large graphs (see, \emph{e.g. 
+Additionally, each graph is mapped to the same fixed number of supernodes $K$, which can hinder the generalization capabilities in datasets where the size of each graph varies significantly.
+
+\textbf{Score-based} methods select supernodes from the original nodes based on a node scoring vector $\vs$. 
+The chosen nodes correspond to the top $K$ elements of $\vs$, where $K$ can be a ratio of the nodes in each graph, making these methods adaptive to graph size. 
+Representatives such as \gls{topk}~\citep{gao2019graph, knyazev2019understanding}, ASAPool~\citep{ranjan2020asap}, SAGPool~\citep{lee2019self}, PanPool~\citep{ma2020path}, TAPool~\citep{gao2021topologytapool}, CGIPool~\citep{pang2021graph}, and IPool~\citep{gao2022ipool} primarily differ in how they compute the scores or in the auxiliary tasks they optimize to improve the quality of the pooled graph. 
+Despite a few attempts to encourage diversity among the selected nodes~\citep{zhang2019hierarchical, noutahi2019towards}, score-based methods derive the scores from node features that tend to be locally similar, especially after being transformed by \gls{mp} operations.
+As such, the pooled graph often consists of a chunk of strongly connected nodes that possess similar characteristics. 
+Consequently, entire sections of the graph are usually not represented, leading to reduced expressiveness and lower performance in downstream tasks~\citep{wang2024comprehensive}.
+
+\textbf{One-every-$\boldsymbol{K}$} methods leverage graph-theoretical properties to select supernodes by subsampling the graph uniformly. 
+For instance, \gls{kmis} \citep{bacciu2023pooling} identifies as supernodes the members of a maximal $K$-independent set, \emph{i.e.}, nodes separated by at least $K$-hops on the graph. 
+Graclus~\citep{dhillon2007weighted, defferrard2016convolutional} creates supernodes by merging the pairs of most connected nodes in the graph.
+SEP~\citep{wu2022structural} partitions the node hierarchically according to a precomputed tree that minimizes the structural entropy of the graph.
+\gls{ndp}~\citep{bianchi2020hierarchical} divides the graph into two sets, $\gV_+$ and $\gV_-$, according to the partition induced by the components of $\vu_{\max}$ (see Section \ref{sec:maxcut}).
+One of the two sides of the partition is dropped ($\gV_-$), while the other ($\gV_+$) becomes the set of supernodes.
+While both Graclus and \gls{ndp} can only reduce the number of nodes by approximately half, higher pooling ratios (one-every-$2^K$) are achieved by applying them recursively $K$ times.
+Nevertheless, they lack the same control of soft-clustering and score-based methods in fixing the size of the pooled graphs.
+Like the score-based methods, one-every-$K$ methods are adaptive and produce crisp cluster assignments.
+However, they are not trainable and they precompute the pooled graph based on the topology without accounting neither for the node features nor the downstream task. 
+Tab.~\ref{tab:drawbacks} summarizes the drawbacks of the existing families of pooling methods. 
+
+\bgroup
+\setlength\tabcolsep{.95em} %horizontal padding
+\begin{table}[htbp]
+\centering
+\caption{Drawbacks of different types of pooling operators.}
+\label{tab:drawbacks}
+\begin{tabular}{@{}lll@{}}
+\textbf{Soft-clustering} & \textbf{Score-based} & \textbf{One-every-$\boldsymbol{K}$} \\
+\toprule
+\xmark \; Not adaptive to graph size & \xmark \; Pooling not uniform & \xmark \; Limited flexibility \\
+\xmark \; Dense and not interpretable pooled graphs & \xmark \; Not expressive & \xmark \; Features agnostic \\
+\xmark \; High memory cost & \xmark \; Worse performance &  \xmark \; Task agnostic \\
+\bottomrule
+\end{tabular}
+\end{table}
+\egroup
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+We leverage a GNN to generate a \maxcut partition while accounting for node features and additional objectives from a downstream task. 
+In particular, we let node features and task-specific losses influence the selection of the \maxcut solution, creating partitions that not only maximize the number of cut edges but also prioritize nodes that are optimal for the downstream task.
+To reach this goal, it is necessary to overcome a tension between the effect of a standard MP layer and the \maxcut: the first applies a smoothing operation that makes adjacent nodes as similar as possible, which is orthogonal to the objective of the latter. 
+Therefore, to implement \maxcut with a GNN we rely on \gls{hetmp}, implemented by setting $\delta > 1$ in the \gls{mp} operation in Eq.~\ref{eq:het_mp}. 
+As discussed in Sec. \ref{sec:maxcut}, solving the \maxcut problem is equivalent to coloring adjacent nodes differently. Notably, this is an intrinsic effect of \gls{hetmp} that makes features of adjacent nodes as different as possible, effectively acting as a high-pass filter. 
+Therefore, optimizing a \maxcut loss on features generated by \gls{hetmp} layers addresses the limitation of traditional score-based methods that compute the scores from features produced by homogeneous MP operations.
+
+The layer we propose is called \gls{diffndp} and we present it through the \gls{src} framework. 
+The \texttt{SEL} operation in \gls{diffndp} identifies as supernodes a subset $\gS$ of the nodes in the original graph. An auxiliary GNN, called \emph{ScoreNet}, consists of a stack of \gls{hetmp} layers that map the node features into a vector $\boldsymbol{s} = \text{ScoreNet}(\mX,\mA) \in [-1,1]^N$ that assigns a score to each node.  
+The indices $\vi = \text{top}_K(\vs)$ associated with the highest scores identify the $K$ supernodes.
+
+Fig.~\ref{fig:vmax}(i-l) shows the histograms of the score vectors $\boldsymbol{s}$ generated by the ScoreNet for the $4$ example graphs.
+Compared to the histograms of $\vu_\text{max}$ in Fig.~\ref{fig:vmax}(e-h), the values in $\boldsymbol{s}$ always follow a distribution with two sharp and well-separated modes, yielding a clear node partition.
+
+After the $K$ supernodes are selected, the remaining $N-K$ nodes are assigned to one of the supernodes via the nearest neighbor aggregation.
+An assignment matrix $\mS$ is built by performing a breadth first visit of the graph where, starting from the supernodes, all the remaining nodes are assigned to their nearest supernode (see Figure \ref{fig:propagation}).
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/partial0-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/partial1-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/partial2-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/partial3-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/partial4-crop.pdf}
+        \caption{}
+    \end{subfigure}
+    
+    \caption{\textbf{(a)} The nodes with the $K=9$ highest scores are selected. \textbf{(b-c)} Their ID is propagated to the unselected nodes until all are covered or until a maximum number of iterations ($2$ here) is reached. \textbf{(d)} The $4$ remaining nodes are assigned randomly. \textbf{(e)} The pooled graph is obtained by aggregating the nodes with the same ID and coalescing the edges connecting nodes from different groups.}
+    \label{fig:propagation}
+\end{figure}
+More formally, the assignment matrix $\mS$ is defined as
+$$\texttt{SEL}: [\mS]_{ij} = 1 \iff j = \phi(\gS, \mA,i),$$ 
+where $\phi(\gS, \mA, i)$ returns the nearest supernode of node $i$. 
+The visit of the graph is iterated until all nodes are assigned to a supernode or until a maximum number of iterations is reached.
+In the latter case, nodes that are still unassigned are assigned at random, which ensures that the pooled graph is always connected.
+Keeping the maximum number of iterations small (\emph{e.g.}, $2$ or $3$) prevents pointless attempts to reach a supernode, \emph{e.g.}, when there are no supernodes within a disconnected graph component, and also injects randomness acting as a regularizer that helps to move away from suboptimal configurations often encountered at the beginning of the training stage.
+ 
+
+The \texttt{RED} operation for computing the features of the supernodes can be implemented in two ways: 
+    \begin{center}
+    \texttt{RED}: $[\mX']_{i:} = s_i \odot [\mX]_{i:}$ \;\; or \;\;
+    \texttt{RED}: $\mX' = \vs \odot \mS^\top\mX $.
+    \end{center}
+
+When the first and second options are used to implement \texttt{RED}, we refer to the pooling operator as \gls{diffndp} and \gls{diffndp}-E, respectively.
+The suffix ``-E'' indicates the pooling operator satisfies the sufficient conditions for expressiveness defined by \cite{bianchi2023expr}.
+
+Finally, having defined a cluster assignment matrix $\mS$, the \texttt{CON} operation can be implemented as 
+$$\texttt{CON}: \mA' = \mS^\top\mA\mS.$$
+
+\subsection{Auxiliary loss}
+
+Each \gls{diffndp} layer is associated with an auxiliary loss that encourages the top-$K$ selected nodes to belong to the same side of the \maxcut partition.
+The loss is defined as:
+\begin{equation} 
+\label{eq:loss}
+    \mathcal{L}_{\text{cut}} = \frac{\vs^\top A \vs}{|E|}
+\end{equation}
+where $|E| = \sum_{ij} w_{ij}$ is the total edge weight of the graph. Since $-1 \leq s_i \leq 1$, we have $-|E| \leq \vs^\top A \vs \leq |E|$, hence $-1 \leq \mathcal{L}_{\text{cut}} \leq 1$. 
+This loss evaluates the ratio between the volume of the cut and the total volume of the edges. 
+Minimizing $\mathcal{L}_{\text{cut}}$ encourages the nodes to be assigned to different partitions if and only if they are connected. 
+The loss reaches its minimum $-1$ when all connected nodes are assigned to opposite sides of the partition, \emph{i.e.}, when all the edges are cut.
+Clearly, this can happen only in bipartite graphs.
+
+A GNN model consisting of \gls{mp} layers interleaved with \gls{diffndp} layers can be trained end-to-end to jointly minimize a task loss $\mathcal{L}_{\text{task}}$ and the auxiliary loss $\mathcal{L}_{\text{cut}}$.
+The total loss is then defined as
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{task}} + \sum_l \beta \mathcal{L}^{(l)}_{\text{cut}}
+\end{equation}
+where $\beta$ is a scalar weighting each auxiliary loss $\mathcal{L}^{(l)}_{\text{cut}}$ associated with the $l$-th \gls{diffndp} layer.
+
+\subsection{Relation with other pooling methods}
+
+\gls{diffndp} belongs to the score-based pooling family from which inherits the possibility of specifying any desired pooling ratio adaptable to the size $N_i$ of the $i$-th graph, \emph{i.e.}, $K^{(i)} = \floor{N^{(i)} * 0.5}$. 
+Differently from the other score-based methods and thanks to the \gls{hetmp} layers, \gls{diffndp} selects supernodes that are not concentrated in the same section of the graph but are, instead, distributed more uniformly over the whole graph, which is similar to the one-over-$K$ methods.
+In methods like \gls{kmis} the flexibility provided by trainable functions is only used to choose between a small set of maximal solutions that do not break the hard constraint of the supernodes to be $K$-independent.
+On the other hand, in \gls{diffndp} any set of supernodes can, in principle, be chosen making \gls{diffndp} more flexible and able to better adapt to the requirements of the downstream task. 
+Finally, \gls{diffndp} is the only score-based pooler with a graph-theoretical auxiliary regularization loss. 
+
+The proposed method for constructing the cluster assignment matrix $\mS$ from the selected supernodes can be applied to other score-based pooling methods. 
+This naturally enhances their expressiveness by enabling the use of the same \texttt{CON} and \texttt{RED} operations adopted by soft-clustering approaches, which retains all the information from the original graph.
+By addressing the key limitation in expressiveness of score-based pooling methods, our approach retains the benefits of sparsity and interpretability of score-based poolers while narrowing the gap with soft-clustering methods.
+
+
+
+\section{Experimental evaluation}
+
+\label{sec:experiments}
+
+We consider three different tasks to demonstrate the effectiveness of \gls{diffndp}.
+The code to reproduce the reported results in publicly available\footnote{
+
+}.
+\subsection{Computation of the \maxcut partition}
+\label{sec:maxcut_experiment}
+
+This experiment focuses on computing a \maxcut partition by training a simple \gls{gnn} consisting of a \gls{mp} layer followed by \gls{diffndp} and trained by minimizing only the loss in Eq.
+We use a \gls{gin} layer \citep{xu2018powerful} as the \gls{mp} layer. 
+We compare our model against the \gls{levs} approach based on $\vu_\text{max}$, the \gls{gw} algorithm, and a \gls{gnn} with \gls{gcn} layers that minimize a \maxcut loss, as proposed by~\cite{schuetz2022combinatorial}.
+For a fair comparison, ours and this \gls{gnn} architecture have a comparable number of learnable parameters.
+
+We considered $9$ graphs generated via the PyGSP library \citep{defferrard2017pygsp}, including bipartite graphs such as the Grid2D and Ring, and $7$ graphs from the GSet dataset~\citep{ye2003gset}, including random, planar, and toroidal graphs, typically used as benchmark for evaluating \maxcut algorithms (details in App.~\ref{app:cut-datasets}). 
+Results are shown in Tab.~\ref{tab:maxcut}. 
+Performance is computed in terms of the percentage of cut edges: the higher, the better.
+With one exception, \gls{diffndp} always finds the best cut.
+
+\bgroup
+\def\arraystretch{1.0} %vertical padding 
+\setlength\tabcolsep{.2em} %horizontal padding
+\begin{table}[ht]
+\fontfamily{bch}\selectfont
+\caption{Size of the graph cuts obtained with \gls{diffndp}, a \gls{gnn} with \gls{gcn} layers, and two common algorithms to compute the \maxcut. GW results are absent for some entries of the PyGSP datasets and for GSet because the solver failed to converge.}
+\label{tab:maxcut}
+\centering
+\subfloat[PyGSP datasets]{
+
+\begin{tabular}{@{}l|cccc@{}}
+\cmidrule[1.5pt]{1-5}
+Dataset        & GW              & NDP             & GCN    & \gls{diffndp} \\ \midrule
+BarabasiAlbert & 0.6875          & 0.6589          & 0.7240 & \textbf{0.7292}                \\
+Community      & 0.6767          & 0.6429          & 0.6805 & \textbf{0.6814}                \\
+ErdősRenyi     & 0.6920          & 0.6858          & 0.6797 & \textbf{0.7105}                \\
+Grid (10$\times$10) & \textbf{1.0000} & \textbf{1.0000} & 0.9222 & \textbf{1.0000}                \\
+Grid (60$\times$40) & -               & 0.9787          & 0.1862 & \textbf{0.9815}                \\
+Minnesota      & -               & 0.9104          & 0.8904 & \textbf{0.9130}                \\
+RandRegular  & 0.4827               & 0.8760          & 0.8733 & \textbf{0.9040}                \\
+Ring           & \textbf{1.0000}               & \textbf{1.0000} & 0.4200 & \textbf{1.0000}                \\
+Sensor         & 0.6000          & 0.5719          & 0.6281 & \textbf{0.6406}                \\ 
+\cmidrule[1.5pt]{1-5}
+\end{tabular}
+  }
+\subfloat[GSet datasets]{
+\begin{tabular}{@{}l|ccc@{}}
+\cmidrule[1.5pt]{1-4}
+Dataset & NDP             & GCN    & \gls{diffndp} \\ \midrule
+G14     & 0.6155          & 0.6323 & \textbf{0.6412}                \\
+G15     & 0.5945          & 0.6288 & \textbf{0.6424}                \\
+G22     & 0.6441          & 0.6409 & \textbf{0.6577}                \\
+G49     & \textbf{1.0000} & 0.9683 & \textbf{1.0000}                \\
+G50     & \textbf{0.9800} & 0.9610 & 0.9750                         \\
+G55     & 0.7568          & 0.7865 & \textbf{0.8068}                \\
+G70     & 0.8803          & 0.8945 & \textbf{0.9086}                \\ \cmidrule[1.5pt]{1-4}
+\end{tabular}
+}
+\end{table}
+\egroup
+
+\subsection{Graph classification}
+
+For this task, we evaluate the classification accuracy of a GNN classifier with the following structure: \gls{mp}(32)-Pool-\gls{mp}(32)-Readout, using \gls{gin} as the \gls{mp} layer.
+The Pool operation is implemented either by \gls{diffndp} or by the following competing methods:
+Diffpool~\citep{ying2018hierarchical}, \gls{dmon}~\citep{tsitsulin2020graph}, 
+\acrlong{mincut}~\citep{bianchi2020spectral},
+\gls{topk}~\citep{gao2019graph},
+Graclus~\citep{dhillon2007weighted}, 
+\gls{kmis}~\citep{bacciu2023pooling}.
+We also consider \gls{ecpool}~\citep{diehl2019edge} that pools the graph by contracting the edge connecting similar nodes.
+For \gls{diffndp}, we evaluate three variants:
+(i) \gls{diffndp}, the standard version;
+(ii) \gls{diffndp}-E, the variant with expressive \texttt{CON};
+(iii) \gls{diffndp}-NL, where ``NL'' stands for ``no loss'', meaning we do not optimize the auxiliary loss in the GNN. This serves as an ablation study to assess the importance of the auxiliary loss.
+Whenever edge attributes are available, the first \gls{gin} layer is replaced by a GINE layer~\citep{hu2020strategies-gine}, which takes into account edge attributes.
+
+As graph classification datasets we consider $8$ TUD datasets (COLLAB, DD, NCI1, ENZYMES, MUTAG, Mutagenicity, PROTEINS, and REDDIT-BINARY)~\citep{morris2020tudataset}, the \gls{gcb}~\citep{bianchi2022pyramidal}, and EXPWL1~\citep{bianchi2023expr}, which is a recent dataset for testing the expressive power of GNNs. 
+In addition, we introduce a novel dataset consisting of $5,000$ multipartite graphs:
+each graph is complete $10$-partite, meaning that the nodes can be partitioned into $10$ groups so that the nodes in each group are disconnected, but are connected to all the nodes of the other groups. 
+To the best of our knowledge, this is the first benchmark dataset for graph classification with heterophilic graphs.
+While the Multipartite dataset consists of complex graph structures, the classification label is determined solely by the node features, allowing us to assess whether the \gls{gnn} can effectively isolate relevant information despite the presence of misleading topological information.
+Whenever the node features were not available, we used node labels. 
+If node labels were also unavailable, we used a constant as a surrogate node feature.
+The datasets were split via a $10$-fold cross-validation procedure. 
+The training dataset was further partitioned into a 90-10\% train-validation random split. 
+This approach is similar to the procedure described by \cite{Errica2020A}. 
+Each model was trained for $1,000$ epochs with early stopping, keeping the checkpoint with the best validation accuracy.
+
+\bgroup
+\def\arraystretch{.8} %vertical padding
+\setlength\tabcolsep{.3em} %horizontal padding
+\begin{table}[ht]
+\caption{Mean and standard deviations of the graph classification accuracy. For each dataset the best performing method and those that are not significantly different from it are colored in green.
+If a method is in the top-performing group is assigned with a score of $1$, $0$ otherwise.}
+\label{tab:graph-classification}
+\makebox[\textwidth]{
+\fontfamily{bch}\selectfont
+\centering
+\begin{tabular}{@{}l|ccccccc|c@{}}
+\cmidrule[1.5pt]{1-9}
+\textbf{Pooler}  & \textbf{GCB-H} & \textbf{COLLAB} & \textbf{EXPWL1} & \textbf{Mult.} & \textbf{Mutag.} & \textbf{NCI1} & \textbf{REDDIT-B} & \textbf{Score} \\
+\midrule[1pt]
+No pool     & \textcolor{gray}{\textit{74{{\tiny$\pm$4}}}} & \textcolor{gray}{\textit{74{{\tiny$\pm$2}}}} & \textcolor{gray}{\textit{ 87{{\tiny$\pm$2}}}}  & \textcolor{gray}{\textit{ 14{{\tiny$\pm$12}}}} & \textcolor{gray}{\textit{79{{\tiny$\pm$2}}}} & \textcolor{gray}{\textit{78{{\tiny$\pm$3}}}} & \textcolor{gray}{\textit{90{{\tiny$\pm$2}}}} & -\\ 
+\midrule
+DiffPool     & \textcolor{black}{51{{\tiny$\pm$8}}} & \textcolor{black}{70{{\tiny$\pm$2}}} & \textcolor{black}{69{{\tiny$\pm$3}}}  & \textcolor{black}{9{{\tiny$\pm$1}}}   & 78{{\tiny$\pm$2}} & 75{{\tiny$\pm$2}} & \textcolor{darkgreen}{90{{\tiny$\pm$2}}} & 1 \\
+\gls{dmon}         & \textcolor{darkgreen}{74{{\tiny$\pm$3}}} & \textcolor{black}{68{{\tiny$\pm$2}}} & \textcolor{black}{73{{\tiny$\pm$3}}}  & \textcolor{black}{52{{\tiny$\pm$2}}}  & \textcolor{darkgreen}{80{{\tiny$\pm$2}}} & \textcolor{darkgreen}{77{{\tiny$\pm$2}}} & 88{{\tiny$\pm$2}}& 3 \\
+EdgePool     & \textcolor{darkgreen}{75{{\tiny$\pm$4}}} & \textcolor{black}{72{{\tiny$\pm$3}}} & 90{{\tiny$\pm$2}}  & 55{{\tiny$\pm$3}}  & \textcolor{darkgreen}{80{{\tiny$\pm$2}}} & \textcolor{darkgreen}{77{{\tiny$\pm$3}}} & \textcolor{darkgreen}{91{{\tiny$\pm$2}}} & 4 \\
+Graclus      & \textcolor{darkgreen}{75{{\tiny$\pm$3}}} & \textcolor{black}{72{{\tiny$\pm$3}}} & 90{{\tiny$\pm$2}}  & \textcolor{black}{25{{\tiny$\pm$18}}} & \textcolor{darkgreen}{80{{\tiny$\pm$2}}} & \textcolor{darkgreen}{77{{\tiny$\pm$2}}} & \textcolor{darkgreen}{90{{\tiny$\pm$3}}} & 4 \\
+\gls{kmis}        & \textcolor{darkgreen}{75{{\tiny$\pm$4}}} & \textcolor{black}{71{{\tiny$\pm$2}}} & \textcolor{darkgreen}{99{{\tiny$\pm$1}}}  & 58{{\tiny$\pm$2}} & \textcolor{darkgreen}{79{{\tiny$\pm$2}}} & 75{{\tiny$\pm$3}} & \textcolor{darkgreen}{90{{\tiny$\pm$2}}} & 4 \\
+\acrlong{mincut}       & \textcolor{darkgreen}{75{{\tiny$\pm$5}}} & \textcolor{black}{70{{\tiny$\pm$2}}} & \textcolor{black}{71{{\tiny$\pm$3}}}  & 56{{\tiny$\pm$3}}  & 78{{\tiny$\pm$3}} & \textcolor{black}{73{{\tiny$\pm$3}}} & \textcolor{black}{87{{\tiny$\pm$2}}} & 1 \\
+\gls{topk}         & \textcolor{black}{56{{\tiny$\pm$5}}} & \textcolor{black}{72{{\tiny$\pm$2}}} & \textcolor{black}{73{{\tiny$\pm$2}}}  & \textcolor{black}{43{{\tiny$\pm$3}}}  & \textcolor{black}{75{{\tiny$\pm$3}}} & \textcolor{black}{73{{\tiny$\pm$2}}} & \textcolor{black}{77{{\tiny$\pm$2}}} & 0\\
+\midrule
+\gls{diffndp}      & \textcolor{darkgreen}{73{{\tiny$\pm$3}}} & \textcolor{darkgreen}{77{{\tiny$\pm$2}}} & \textcolor{darkgreen}{100{{\tiny$\pm$0}}} & \textcolor{darkgreen}{90{{\tiny$\pm$2}}}  & 77{{\tiny$\pm$2}} & 75{{\tiny$\pm$2}} & \textcolor{darkgreen}{89{{\tiny$\pm$3}}} & 5 \\
+\gls{diffndp}-E & \textcolor{darkgreen}{74{{\tiny$\pm$3}}} & \textcolor{darkgreen}{77{{\tiny$\pm$2}}} & \textcolor{darkgreen}{100{{\tiny$\pm$0}}} & \textcolor{darkgreen}{87{{\tiny$\pm$5}}}  & \textcolor{darkgreen}{79{{\tiny$\pm$1}}} & \textcolor{darkgreen}{76{{\tiny$\pm$2}}} & \textcolor{darkgreen}{89{{\tiny$\pm$2}}} & \textbf{7}\\ 
+\midrule
+\gls{diffndp}-NL & \textcolor{black}{61{{\tiny$\pm$6}}} & \textcolor{darkgreen}{77{{\tiny$\pm$3}}} & \textcolor{darkgreen}{100{{\tiny$\pm$0}}} & \textcolor{darkgreen}{91{{\tiny$\pm$1}}} & \textcolor{black}{76{{\tiny$\pm$3}}} & \textcolor{black}{74{{\tiny$\pm$2}}} & \textcolor{black}{86{{\tiny$\pm$3}}} & 3 \\
+\cmidrule[1.5pt]{1-9}
+\end{tabular}
+}
+
+\end{table}
+\egroup
+
+The results are reported in Tab.~\ref{tab:graph-classification}. 
+For completeness, we also reported the performance of the same GNN model without pooling layers (``No pool'').
+We conducted a preliminary ANOVA test ($p$-value $0.05$) for each dataset followed by a pairwise Tukey-HSD test ($p$-value $0.05$) to group models whose performance is not significantly different.
+Those belonging to the top-performing group are colored in green.
+The ANOVA test failed on ENZYMES, PROTEINS, MUTAG, and DD, meaning that the difference in the performance of the GNNs equipped with different poolers is not significant. For this reason, the results on these datasets are omitted from Tab.
+
+\gls{diffndp} consistently ranks among the top-performing methods across all evaluated datasets.
+Notably, on the EXPWL1 even the non-expressive variant of \gls{diffndp} achieves a perfect accuracy (100\%), outperforming the competitors. This is the first known instance of a non-expressive pooler passing the expressiveness test provided by this dataset, serving as a counterexample to Theorem $1$ in \cite{bianchi2023expr}.
+On the Multipartite dataset, \gls{diffndp} performs significantly better than every pooling method. 
+When compared to the ``No pool'' baseline, on most datasets \gls{diffndp} improves the classification performance by increasing the receptive field of the \gls{mp} layers while retaining only the necessary information and enhancing the overall expressive power of the \gls{gnn} model.
+
+On the COLLAB dataset, all \gls{diffndp} variants achieve the top accuracy of $77\%$, showing a statistically significant improvement over other methods. Notably, in the \gls{diffndp} and \gls{diffndp}-E variants the auxiliary loss term plateaued around $0$, making them equivalent to the \gls{diffndp}-NL variant that, in this case, achieves the same performance.
+This indicates that our method remains robust even when the auxiliary loss is not needed for the downstream task. 
+Overall, the \gls{diffndp}-E variant, which satisfies expressiveness conditions, exhibits similar or better performance compared to \gls{diffndp} across most datasets. In contrast, the performance decline observed in the \gls{diffndp}-NL variant demonstrates the importance of the auxiliary loss.
+\subsection{Node classification}
+\label{sec:node_class}
+
+For this task, we adopted a simple auto-encoder architecture for node classification: \gls{mp}($32$)-Pool-\gls{mp}($32$)-Unpool-\gls{mp}($32$)-Readout, with \gls{gin} as \gls{mp}. 
+The Unpool operation (also referred to as \emph{lifting}~\citep{jin2020graph}) is implemented by copying in each node $i$ the value of the supernode $j$ to which the $i$ was assigned by the \texttt{SEL} operation in the pooling phase.
+Zero-padding is used when lifting nodes not assigned to any supernode, like in the case of \gls{topk}.
+
+
+As pooling methods we considered \gls{topk}~\citep{gao2019graph}, \gls{kmis}~\citep{bacciu2023pooling}, \gls{ndp}~\citep{bianchi2020hierarchical}, and \gls{diffndp}.
+We did not consider Graclus or any soft-clustering poolers, as they were exhausting the RAM and GPU VRAM, respectively, given the large size of the graphs. 
+On the other hand, \gls{diffndp} is very parsimonious in terms of computational resources and scales very well with the graph size.
+Following \cite{platonov2023a}, in Tab.~\ref{tab:node-classification} we report the means and standard deviations of the accuracy for Roman-empire and Amazon-ratings, and of the ROC AUC for Tolokers, Minesweeper, and Questions.
+The results are computed on the $10$ public folds of these datasets.
+\bgroup
+\def\arraystretch{.8} %vertical padding
+\setlength\tabcolsep{.5em} %horizontal padding
+\begin{table}[ht]
+\caption{Node classification accuracy (Roman-empire, Amazon-ratings) and AUROC (Minesweeper, Tolokers, Questions). The best performing models in each dataset are in green and get 1 score point, 0 otherwise.}
+\label{tab:node-classification}
+\makebox[\textwidth]{
+\fontfamily{bch}\selectfont
+\centering
+\begin{tabular}{@{}l|ccccc|c@{}}
+\cmidrule[1.5pt]{1-7}
+\textbf{Pooler} & \textbf{Roman-e.} & \textbf{Amazon-r.} & \textbf{Minesw.} & \textbf{Tolokers} & \textbf{Questions} & \textbf{Score} \\ 
+\midrule
+\gls{topk}      & 26{\tiny$\pm$7} & 46{\tiny$\pm$4} & 94{\tiny$\pm$1} & \textcolor{darkgreen}{89{\tiny$\pm$5}} & 64{\tiny$\pm$3} & 1 \\
+\gls{kmis}      & 23{\tiny$\pm$3} & 48{\tiny$\pm$2} & 75{\tiny$\pm$2} & 84{\tiny$\pm$2} & \textcolor{darkgreen}{83{\tiny$\pm$1}} & 1 \\
+\gls{ndp}       & 22{\tiny$\pm$5} & \textcolor{darkgreen}{53{\tiny$\pm$2}} & \textcolor{darkgreen}{98{\tiny$\pm$0}} & \textcolor{darkgreen}{88{\tiny$\pm$6}} & 68{\tiny$\pm$4} & 3 \\
+\gls{diffndp}   & \textcolor{darkgreen}{56{\tiny$\pm$3}} & \textcolor{darkgreen}{53{\tiny$\pm$1}} & \textcolor{darkgreen}{96{\tiny$\pm$1}} & 87{\tiny$\pm$3} & \textcolor{darkgreen}{82{\tiny$\pm$4}} & 4 \\
+\gls{diffndp}-E & \textcolor{darkgreen}{60{\tiny$\pm$4}} & \textcolor{darkgreen}{53{\tiny$\pm$2}} & \textcolor{darkgreen}{97{\tiny$\pm$1}} & \textcolor{darkgreen}{91{\tiny$\pm$2}} & \textcolor{darkgreen}{85{\tiny$\pm$5}} & \textbf{5} \\
+\cmidrule[1.5pt]{1-7}
+\end{tabular}
+}
+
+\end{table}
+\egroup
+When configured with \gls{diffndp} and \gls{diffndp}-E, the node classification architecture achieves significantly superior performance on the Roman-Empire dataset, which is notably the most heterophilic among all the datasets (see Tab.~\ref{tab:node-class_stats}). 
+On the remaining datasets, our method performs well overall. 
+Unlike the other pooling methods that achieve top performance only on a subset of the datasets, \gls{diffndp}-E is consistently in the top tier.
+
+
+
+\section{Conclusion}
+
+
+This work contributes significantly to both the \maxcut optimization and the development of specialized \gls{gnn} architectures to solve combinatorial optimization problems with \glspl{gnn}. 
+Our proposed \gls{gnn}-based \maxcut algorithm not only extends the \maxcut optimization to attributed graphs and combines it with task-specific losses but also surpasses the performances of traditional methods on non-attributed graphs. 
+While a conventional \gls{gnn} with a huge capacity manages to optimize a \maxcut loss~\citep{schuetz2022combinatorial}, our model is much more efficient thanks to the \acrlong{hetmp} layers.
+This results highlight the importance of aligning the \gls{gnn} architecture with the problem's inherent structure: in this case, leveraging heterophilic propagation to solve problems that seek dissimilarity between neighboring nodes.
+
+Our second contribution is to utilize the proposed \maxcut optimizer to implement a graph pooling method that combines the flexibility of soft-clustering approaches with the efficiency of score-based methods and with the theoretically-inspired design of one-every-$K$ strategies. \glspl{gnn} for graph and node classification equipped with our proposed pooling layer consistently achieves superior performance across diverse downstream tasks.
+Differently from existing graph pooling and graph coarsening approaches that aim at preserving low-frequencies on the graph~\citep{loukas2019graph}, our method performs exceptionally well also on heterophilic datasets.
+While our pooling layer can implement any pooling ratio, the auxiliary loss is optimized for the node partition induced by the \maxcut, whose size might not be aligned with the specified pooling ratio. When the distribution of the nodes' degree is approximately uniform, the \maxcut induces an approximately balanced partition corresponding to a pooling ratio of $\approx 0.5$, which is, thus, generally a good choice. 
+
+Looking forward, we see great potential in pretraining \glspl{gnn} with auxiliary losses. This aligns with the principles of foundational models~\citep{bommasani2021opportunities} and could facilitate the development of more effective and general-purpose graph pooling techniques.
+
+
+
+

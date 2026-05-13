@@ -1,8 +1,8 @@
 # Depth Any Video with Scalable Synthetic Data
 
 - Decision: Accept
-- Avg Score: 2.75
-- Scores: 5, 1, 0, 5
+- Avg Score: 6.67
+- Scores: 5, 10, 5
 
 ## Abstract
 Video depth estimation has long been hindered by the scarcity of consistent and scalable ground truth data, leading to inconsistent and unreliable results. In this paper, we introduce \textbf{Depth Any Video}, a model that tackles the challenge through two key innovations. First, we develop a scalable synthetic data pipeline, capturing real-time video depth data from diverse synthetic environments, yielding 40,000 video clips of 5-second duration, each with precise depth annotations.

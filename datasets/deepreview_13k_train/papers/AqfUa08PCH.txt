@@ -1,0 +1,267 @@
+\title{Training Language Models on Synthetic Edit Sequences Improves Code Synthesis}
+
+\begin{abstract}
+Software engineers mainly write code by editing existing programs. In contrast, large language models (LLMs)  autoregressively synthesize programs in a single pass. One explanation for this is the scarcity of open-sourced edit data. While high-quality instruction data for code synthesis is already scarce, high-quality edit data is even scarcer. To fill this gap, we develop a synthetic data generation algorithm called LintSeq. This algorithm refactors existing code into a sequence of code edits by using a \emph{linter} to procedurally sample across the error-free insertions that can be used to sequentially write programs. It outputs edit sequences as text strings consisting of consecutive program \textit{diffs}. To test LintSeq, we use it to refactor a dataset of instruction + program pairs into instruction + program-diff-sequence tuples. Then, we instruction finetune a series of smaller LLMs ranging from 2.6B to 14B parameters on both the re-factored and original versions of this dataset, comparing zero-shot performance on code synthesis benchmarks. We show that during repeated sampling, edit sequence finetuned models produce more diverse programs than baselines. This results in better inference-time scaling for benchmark coverage as a function of samples, i.e. the fraction of problems ``pass@k'' solved by any attempt given ``k'' tries. For example, on HumanEval pass@50, small LLMs finetuned on synthetic edit sequences are competitive with GPT-4 and outperform models finetuned on the baseline dataset by +20\% ($\pm$3\%) in absolute score. Finally, we also pretrain our own tiny LMs for code understanding. We show that finetuning tiny models on synthetic code edits results in state-of-the-art code synthesis for the on-device model class. Our 150M parameter edit sequence LM matches or outperforms code models with twice as many parameters, both with and without repeated sampling, including Codex and AlphaCode.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{section:introduction}
+
+ 
+The successes of large language models (LLMs) are difficult to overstate. However, consistent and correct zero-shot generation in code synthesis remains out-of-reach for all but the largest models \citep{abdin2024phi, groeneveld2024olmo, dubey2024llama}. Compared to other reasoning tasks, this setting has two challenging properties, namely solutions are both structured and long-form.  
+Humans tackle problems that have these properties by leveraging abstract mental models, first developing a plan for their solution that reflects the setting's structure and then executing the plan one step at a time \citep{ gopnik1982words, kirsh2009problem}. For example, a software engineer might employ object-oriented programming when creating a new code-base by developing a ``class'' object and then gradually adding new functionality to this class as their code-base becomes more complex. 
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{template/figures/method_viz_teaser_v43.png}
+    \caption{\textbf{Code synthesis with LMs trained on synthetic code edit sequences}. Left: An example generation from an LM trained to synthesize code as a stream of static-error-free edits. Right: Comparing zero-shot HumanEval coverage (in \%) as a function of FLOPs for large external LLMs vs the smaller LMs that we instruction finetune in this paper. \textbf{Repeatedly sampling from edit sequence LMs yields coding problem solutions that are competitive with GPT-4 and GPT-4-Omni, and have total cost similar to sampling once from the best open-source LLMs}
+}
+    \label{fig:teaser}
+\end{figure*}
+
+
+In contrast, LLMs are trained to autoregressively synthesize entire programs from scratch. This makes repeatedly editing a program with an LLM extremely expensive -- current state-of-the-art, LLM-powered code editing tools like Cursor repeatedly prompt models to rewrite entire programs during every edit generation call \citep{cursorapply}. LLM outputs also suffer from degrading quality as sequence lengths grow and exhibit limited diversity across samples \citep{chen2021evaluating, li2022competition, roziere2023code, lozhkov2024starcoder}. The consequence of these pathologies is that there does not exist a reliable trade-off between zero-shot generation quality and inference-time compute cost under the current paradigm of autoregressive code synthesis, particularly for smaller models.
+In this paper, we claim that these issues can be mitigated at the data-level by reparameterizing code synthesis as a sequential edit problem. Rather than training models for single-step generation of entire programs, we propose that models be trained to generate code by predicting \textit{code edit sequences}.
+
+This objective has a major obstacle: while high-quality solution data for code synthesis is scarce, open-source edit data with good coverage over the distribution of all error-free code ``diffs'' is non-existent \citep{muennighoff2023octopack}. To address this, we introduce an algorithm titled ``LintSeq'' that re-factors existing programs into sequences of static error-free code edits. LMs trained on data generated with our algorithm output code edits that effect interdependent lines of a program. LintSeq is parameter-free. It consists of two phases: a backward sampling phase, which takes a source file as input and uses a static program verifier to sample sequences of error-free program states that begin with this file and end with empty programs; and a forward edit computation phase, which reverses each sequence of programs, employing the Unix \diff{} \citep{thompson1975unix} operator to compute deltas between consecutive versions of the source file, and outputs edit sequences. The static program verifier used by \method{} in its backward sampling phase is also referred to as a \textit{linter}. 
+
+To test the impact of finetuning LMs to synthesize code with edit sequences via \method{} instruction data, we conduct a series of experiments comparing these models to those finetuned on a standard version of the same instruction data. We evaluate LMs zero-shot on the code synthesis benchmarks HumanEval \citep{chen2021evaluating} and MBPP \citep{austin2021program} by computing coverage, the proportion of problems solved by any attempt, as a function of samples. We do not allow LMs to use chain-of-thought reasoning \citep{wei2022chain} during evaluation. Our results are five-fold:
+
+\begin{enumerate}    
+    \item  Across models ranging in scale from 150M to 14B parameters, instruction finetuning LMs on edit sequences vs full programs improves the quality and diversity of synthesized code.
+    \item The improved diversity of samples means that pass@k performance increases smoothly as a function of inference-time compute, allowing for a better trade-off between the two.
+    \item Tiny edit sequence LMs have state-of-the-art performance in their model class (Table \ref{table:sub_200M_code_LM_perfs}).
+    \item For smaller LLMs, repeatedly sampling from edit sequence models results in HumanEval coverage that is competitive with GPT-4 models and has similar cumulative cost to sampling once per problem from open-source LLMs like Llama 3.1 405B (Figures \ref{fig:teaser} and \ref{fig:diff_vs_raw_finetuning_agg}).
+    \item Ablating the linter from edit sampling during data generation hurts the downstream quality of programs synthesized by edit sequence models (Figures \ref{fig:linter_ablation} and \ref{fig:static_error_freq}).
+\end{enumerate}
+
+
+
+\section{\method{}
+
+\label{section:method}
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{template/figures/algorithm_viz_v16.png}
+    \caption{\textbf{Visualizing \method{}}, an algorithm for re-factoring programs into sequences of edits. This algorithm samples across all of the static error-free line insertions that can be used to write a program chunk-by-chunk. It uses the Unix-diff operator to express generated edit sequences as text strings. }
+    \label{fig:edit_gen_sketch}
+\end{figure*}
+
+\method{} is an algorithm for synthetic data generation that samples across sequences of insertions that can be used to sequentially write a program, leveraging a \textit{linter} to repeatedly check program states for static errors during generation. A linter is a type of standard code analysis tool that verifies the correctness of programs. The \method{} algorithm is loosely inspired by recent work on discrete diffusion methods for text generation, where decoding is non-autoregressive \citep{li2022diffusion}. 
+
+
+The key hypothesis underlying \method{} is as follows: by training LMs on code edit sequences with teacher-forced supervised learning, we can potentially achieve a better trade-off between generation quality and compute at inference-time while still benefiting from the training and sampling efficiency of the autoregressive modeling paradigm. In this section, we provide a formalism for the edit sequence re-parameterization of code synthesis and we formally introduce \method{}. 
+
+\subsection{Reparameterizing Code Datasets with Edits}
+We operate in the textual supervised learning setting in this paper, where we have access to a code dataset $\mathcal{D}$ of $N$ example programs $y$, each of which may be optionally paired with a corresponding natural language instruction $x$ that describes the program's function, i.e. $\mathcal{D} = \{(x^i, y^i)\}_{i=1}^{N}$. 
+
+Let $\Delta(\cdot, \cdot)$ denote the Unix \diff{} operator \citep{thompson1975unix}, which computes a text difference between a pair of strings by performing a line-by-line matching and returns a string summarizing the detected differences. The \diff{} operator is implemented by popular version control and software development systems to help programmers track edits or code ``diffs'' between versions of text files. A single edit computed with the \diff{} operator may consist of multiple line deletions and/or line insertions. 
+
+Fix a program $y$ in the dataset $\mathcal{D}$. Consider a sequence $\boldsymbol \sigma_y$ of $j$ text strings corresponding to programs or program states that terminates at $y$. 
+\begin{equation}
+    \boldsymbol \sigma_y = (y_1, \dots, y_{j-1}, y)
+\end{equation}
+
+We can equivalently re-express $\boldsymbol \sigma_y$ as an edit sequence $\boldsymbol \delta_{y}$ of length $j$ by first computing a diff between an empty program $\epsilon$ and the first program in the sequence, and then computing diffs between all pairs of consecutive programs, as shown below.
+\begin{equation}
+    \boldsymbol \delta_{y} = (\Delta(\varepsilon, y_1), \Delta(y_1, y_2),\Delta(y_2, y_3), \dots, \Delta(y_{j-1}, y))
+    \label{eq:edit_seq}
+\end{equation}
+If $\mathcal{D}'$ is a dataset such that for every pair $(x, y) \in \mathcal{D}$, there exists a pair $(x, \boldsymbol \delta_y) \in \mathcal{D}'$, then we say that $\mathcal{D}'$ is an \textit{edit sequence re-factoring} of $\mathcal{D}$.
+
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{template/figures/data_stats_viz_v3.png}
+    \caption{\textbf{Empirics of processing code data with \method{}}. Left: Lines per example in a dataset of instruction finetuning data for Python synthesis before and after processing with \method{} via the linter \texttt{\small{pylint}} (see Section \ref{subsection:results_data_generation}). Right: The corresponding edit counts per synthetic code edit sequence.  On a dataset of short programs (14 lines of code, on average), the mean \method{} edit sequence contains four edits. }
+    \label{fig:data_stats}
+\end{figure*}
+\subsection{Generating Linter-Guided Synthetic Edit Sequences}
+\label{subsection:method_algorithm}
+Recall from above that a single program edit computed by the \diff{} operator $\Delta(\cdot, \cdot)$ can consist of any number of deletions and insertions. \method{} is an algorithm for computing edit sequence re-factorings $\mathcal{D'}$ such that all data $(x, \boldsymbol \delta_y) \in \mathcal{D'}$ have a particular property: every edit in $\boldsymbol \delta_y$ consists of \textit{insertions only}. There are two phases in \method{}: a backward sampling phase that is used to compute program state sequences $\boldsymbol \sigma_y$, and a forward edit sequence computation phase that is used to re-express $\boldsymbol \sigma_y$ as edit sequences $\boldsymbol \delta_y$. An illustration of these phases is shown in Figure \ref{fig:edit_gen_sketch}.
+
+\paragraph{Phase I: Backward Sampling}  In the backward sampling phase of \method{}, for each of the $N$ pairs  $(x, y) \in \mathcal{D}$, we generate $s$ sequences of intermediate program states $\boldsymbol \sigma_y$ that begin with the empty program and terminate at the original program $y$. These sequences are generated in reverse or backwards using a simple procedure that we dub \textit{linter-guided sampling}. Starting with the program $y$, we sequentially generate each predecessor program in $\boldsymbol \sigma_y$ from its successor by following these steps: (1)  delete a line from the current program by sampling uniformly at random; (2)  run a linter or other verifier on the remaining code; (3) if the deletion induced new errors, remove all affected lines; and (4)  repeat steps 2 and 3 until no errors are caught by the linter.  We repeat these steps until all lines have been removed from the original program $y$, at which point $\boldsymbol \sigma_y$ has been generated.
+ 
+
+ \paragraph{Phase II: Forward Edit Computation}
+Once  $s$ program state sequences $\boldsymbol \sigma_y$ have been generated for each $(x, y) \in \mathcal{D}$, we run the forward edit computation phase of our algorithm. In this phase, we apply Equation \ref{eq:edit_seq} from above to compute an edit sequence $\boldsymbol\delta_y$ for each $\boldsymbol \sigma_y$. Starting from the last program that was added to $\boldsymbol \sigma_y$, we use the \diff{} operator to compute edits between each pair of consecutive programs in $\boldsymbol \sigma_y$ up to the original program $y$. Finally, we pair each edit sequence $\boldsymbol \delta_y$ with its instruction $x$ (if present) to yield an edit sequence re-factoring $\mathcal{D}'$ of $\mathcal{D}$ with size $sN$.
+\subsection{Properties of \method{} Data}
+Synthetic edit sequences generated by \method{} have a few other important properties. Let $\boldsymbol \delta_y$ be an arbitrary $j$-length edit sequence in $\mathcal{D}'$ generated with \method{}, $\boldsymbol \delta_y =  (\Delta(\varepsilon, y_1), \dots, \Delta(y_{j-1}, y))$. First, we observe that there is a simple correspondence between $\boldsymbol \delta_y$ and the original program $y$ used to generate it: $y$ can be re-constructed by starting with an empty program, and successively applying each edit in $\boldsymbol \delta_y$  to this program one-by-one. In other words, the edit sequence $\boldsymbol \delta_y$ \textit{resolves to $y$}. Furthermore, by construction, every prefix subsequence of $\boldsymbol \delta_y$ resolves to a  sub-program of $y$ that is error-free, i.e. that throws no errors when checked with the linter or the verifier used during generation. These two properties, in conjunction with the uniform sampling step used in the first phase of the algorithm, show that \method{} samples $s$ examples across all possible static error-free sequences of line insertions that can be used to sequentially write a program $y$ from-scratch. 
+
+We show an example of program synthesis dataset statistics before and after \method{} processing in Figure \ref{fig:data_stats}.
+\subsection{Practicalities of Training Language Models on \method{} Data}
+\label{method:practicalities}
+
+\method{} can be run on any code data. It is agnostic to the contents of a program, and only depends on knowledge of the programming language that a file is written in and the existence of a linter or another kind of verifier for written program files. 
+
+We use teacher-forced supervised learning \citep{williams1989learning} to train models on \method{} data, concatenating edit sequences into a single string by interleaving edits with special tokens, ``\texttt{\small{<|diff|>}},'' and computing instruction-conditioned losses over the resultant sequences. During inference, finetuned models can be prompted to synthesize programs with edit sequences by appending these special tokens to the ends of prompts.
+Synthetic data  generation with \method{} is controlled by a single hyperparameter: the number of edit sequences $s$ that are sampled for each example in the source code dataset $\mathcal{D}$. Edit sequence sampling can optionally be constrained to avoid repetitions, though this may yield a dataset $\mathcal{D}'$ with fewer than $s|\mathcal{D}|$ examples if there are programs in $\mathcal{D}$  with no non-empty and static error-free sub-programs.
+
+
+
+
+\section{Experiments}
+
+\label{section:results}
+
+To study \method{} and the impact of re-parameterizing program synthesis as a sequential edit generation problem, we conduct a multi-pronged set of instruction finetuning experiments. These experiments study code synthesis in Python and are designed to answer the following questions:
+\begin{itemize}
+    \item How does finetuning tiny  LMs on re-factorized code edit data generated with \method{} impact benchmark coverage compared to finetuning on the original code data? 
+    \item Do performance improvements hold across model scales, families, and tokenizers?
+    \item How does ablating linter-guidance from \method{} to finetune on randomly sampled edit sequences impact code synthesis?
+\end{itemize}
+
+Similar to previous works \citep{chen2021evaluating}, we evaluate models by computing zero-shot coverage statistics on code synthesis benchmarks with and without repeated sampling.
+
+\subsection{Pretraining Tiny LMs for Code Understanding}
+\label{subsection:results_pretraining}
+We begin our investigations by pre-training two tiny decoder-only transformers, \texttt{\small{TinyCodeLM-150M}} and \texttt{\small{TinyCodeLM-400M}}, for Python code understanding on 72 billion tokens of text. Pretraining our own language models grants us a data contamination-free test-bed to study code synthesis with edit sequences, rapidly evaluate \method{}, and broadly re-examine the trade-off between inference-time compute and generation quality in code synthesis for models that can be updated on-device.
+We rely on open-source data and libraries to pretrain our models \citep{penedo2024fineweb, lozhkov2024starcoder, soldaini2024dolma, groeneveld2024olmo}. Our pretraining data mix is inspired by Code Llama \citep{roziere2023code}, and reflects a code-skewed mixture of web text and raw Python sampled from FineWeb and TheStack, respectively \citep{penedo2024fineweb, li2023starcoder}. The architecture of our models respectively mimics the two smallest versions of GPT-2 \citep{radford2019language}, but integrates the transformer architecture changes proposed by the OLMo framework. This includes the absence of bias terms and the addition of non-parametric layer norms \citep{ba2016layer}, as well as the use of SwiGLU \citep{shazeer2020glu}, rotary positional embeddings \citep{su2024roformer}, and the GPT-NeoX-20B tokenizer \citep{black2022gpt}. We train both models for two epochs with a batch size of 524,288 tokens on an NVIDIA H100 node with four GPUs. Our experiments are supported by Pytorch FSDP \citep{zhao2023pytorch}.
+
+
+\subsection{Generating a Synthetic Dataset with \method{}}
+\label{subsection:results_data_generation}
+Next, to support our finetuning experiments, we prepare a large ``baseline'' dataset of paired instruction and program data. We re-factorize the programs in this dataset into code edit sequences with \method{}.
+
+\begin{table}[h!]
+    \centering
+    \caption{Summary of \textbf{temperature-tuned coding benchmark results for LMs with $\mathbf{\leq 0.2}$B parameters}. We list models in order of increasing HumanEval pass@1 score.}
+    \begin{tabular}{lcccccc}
+        \toprule
+         &  &  \multicolumn{2}{c}{HumanEval} &  \multicolumn{2}{c}{MBPP(+)} &   \\
+         \cmidrule(r){3-4} \cmidrule(r){5-6}  
+         Model & Size & \small{pass@1} & \small{pass@10} & \small{pass@1} & \small{pass@10} & \small{Open-Source}\\ 
+         \toprule
+         PolyCoder & 160M & 2.1 & 3.4 & - & - & \newmoon \\
+         AlphaCode & 89M & 4.3 & 12.2 & - & - & \fullmoon \\
+         Codex & 85M & 8.2 & 12.8 & - & - & \fullmoon \\
+         SmolLM-Instruct & 135M & 7.6 & 14.4($\dagger$) & 10.1($\dagger$) & 14.6($\dagger$)  & \newmoon \\
+         \rowcolor{gray!20} TinyCodeLM-Instruct & 150M & 9.1 & 13.2 & 11.5 & 16.4  & \newmoon \\
+         \rowcolor{diffpurple!20} TinyCodeLM-\method{}Instruct & 150M & 12.8 & 20.6 & 13.6 & 24.4  & \newmoon \\
+         \bottomrule
+    \end{tabular}
+    \label{table:sub_200M_code_LM_perfs}
+\end{table}
+
+\begin{table}[h!]
+    \centering
+    \caption{Summary of \textbf{temperature-tuned coding benchmark results for $\mathbf{0.2}$B to $\mathbf{0.4}$B parameter language models}. Annotations, model order, and evaluation procedure are the same as in Table \ref{table:sub_200M_code_LM_perfs}.}
+    \begin{tabular}{lcccccc}
+        \toprule
+         &  &  \multicolumn{2}{c}{HumanEval} &  \multicolumn{2}{c}{MBPP(+)} &   \\
+         \cmidrule(r){3-4} \cmidrule(r){5-6}
+         Model & Size & \small{pass@1} & \small{pass@10} & \small{pass@1} & \small{pass@10} & \small{Open-Source} \\ 
+         \toprule
+         PolyCoder  & 400M & 3.0 & 5.3 & - & -  & \newmoon \\
+           \rowcolor{gray!20} TinyCodeLM-Instruct & 400M & 9.6 & 18.5 & 15.5 & 22.2  & \newmoon \\
+            SmolLM-Instruct  & 360M & 11.3 & 19.3($\dagger$) & 19.4($\dagger$) & 23.1($\dagger$) & \newmoon \\
+         AlphaCode & 302M & 11.6 & 18.8 & - & -  & \fullmoon \\
+         CodeT5+  & 220M & 12.0 & 20.7 & - & -  & \newmoon \\
+         Codegen-Mono & 350M & 12.8 & 23.1 & 9.4($\dagger$) & 15.2($\dagger$)  & \newmoon \\
+         Codex & 300M & 13.2 & 20.4 & - & -  & \fullmoon \\
+         \rowcolor{diffpurple!20} TinyCodeLM-\method{}Instruct & 400M & 13.4 & 20.9 & 19.4 & 29.9  & \newmoon \\
+         \bottomrule
+    \end{tabular}
+    \label{table:200M_to_400M_code_LM_perfs}
+\end{table}
+
+
+To that end, we first pool the Python portions of two open-source instruction datasets for code synthesis: the GPT 3.5/4-based Magicoder instruction tuning dataset and the StarCoder2-15B-based self-alignment training dataset \citep{wei2024magicoder, wei2024starcoder2instruct}. These datasets are generated with the OSS-Instruct approach by \citet{wei2024magicoder} and have undergone decontamination for the benchmarks that we evaluate on in this paper. We conduct de-duplication on the pooled data to check for repeated examples. Furthermore, we strip any chain-of-thought-like natural language explanations from completion data. The resultant dataset has over 88,900 instruction-Python program pairs.
+With our baseline dataset prepared, we run \method{} to generate  $s=5$ synthetic edit trajectory samples for each instruction-program pair. As described in Section \ref{method:practicalities}, we concatenate each synthetic edit trajectory into a single string by interleaving consecutive edits with a special reserved ``edit'' token. Inspired by \citet{muennighoff2024scaling}, we do not restrict against edit sequence repetitions. We use the popular Python linter \texttt{\small{pylint}} to guide edit sampling during generation.
+
+\subsection{Finetuning Language Models on \method{} Edit Sequences}
+\label{subsection:results_finetuning_lms}
+We now probe the impact of instruction finetuning a variety of autoregressive LMs to synthesize code with edit sequences, compared to standard generation of full programs. We use two code synthesis benchmarks to support our model evaluations: HumanEval \citep{chen2021evaluating} and Mostly Basic Programming Problems (MBPP) \citep{austin2021program}. 
+
+
+Using both the code edit re-factorized and baseline instruction datasets obtained in section \ref{subsection:results_data_generation}, we run pairs of finetuning experiments with six different models. In each experiment pair, we finetune an LM on both datasets for an equal number of optimizer steps and with the same learning rate schedule, saving intermediate checkpoints throughout finetuning. We run full benchmark evaluations on HumanEval and MBPP on each saved checkpoint\footnote{To process the generations of edit sequence LMs into executable programs, we simply resolve each of the predicted code edits one-by-one.}, performing no prompt tuning. Then, we compare the best inference-time scaling behavior, i.e. benchmark coverage (pass@k) as a function of samples (k), obtained by edit sequence finetuning vs standard finetuning for each model.
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{template/figures/diff_vs_raw_finetuning_agg_v8.png}
+    \caption{\textbf{HumanEval and MBPP coverage with repeated sampling} (``pass@k vs. k'') achieved by instruction finetuning Gemma 2, Phi-3, and Llama 3.1 language models on a dataset of \method{} edit sequence re-factored vs standard Python code (temperature $=1$, top-p $=0.95$).}
+    \label{fig:diff_vs_raw_finetuning_agg}
+\end{figure*}
+\subsubsection{TinyCodeLM}
+\label{subsection:results_tiny_code_lm}
+We run our first two pairs of finetuning experiments on 
+\texttt{\small{TinyCodeLM-150M}} and \texttt{\small{TinyCodeLM-400M}}. These models were not pretrained on code synthesis instruction data, nor were they pretrained on any ``diff''-like edit data. Our experimental results are summarized in Tables \ref{table:sub_200M_code_LM_perfs} and \ref{table:200M_to_400M_code_LM_perfs}, where we compare the temperature-tuned performance of our models to the reported benchmark coverage of existing code LMs at similar parameter scales.
+
+For both the 150M and 400M parameter versions of TinyCodeLM, we find that finetuning LMs to synthesize code with edits via \method{}  data dramatically improves benchmark performance compared to baseline finetuning. Indeed, the edit sequence variants of TinyCodeLM outperform all existing code language models of comparable scale that we are aware of, including AlphaCode \citep{li2022competition}, Codex \citep{chen2021evaluating}, CodeT5+ \citep{wang2023codet5+}, and the recent SmolLM-Instruct \citep{smollm}. Our smaller edit sequence-finetuned model is particularly strong for its size, roughly matching or out-performing models with twice as many parameters including the 300M parameter version of Codex and the 302M-parameter version of AlphaCode (Tables \ref{table:sub_200M_code_LM_perfs} and \ref{table:200M_to_400M_code_LM_perfs}).
+
+\subsubsection{Gemma 2, Phi-3, and Llama 3.1}
+\label{subsection:results_gemma_phi_llama}
+The results above raise a natural question: do performance improvements from finetuning LMs to synthesize code with edit sequences hold for other model scales, architectures, and tokenizers? To test this, we conduct four additional pairs of instruction finetuning experiments on LMs from three model families, Gemma 2, Phi-3, and Llama 3.1, ranging in size from 2.6B to 14B. We employ pretrained-only model weights, if available. The results of these experiments are in Figure \ref{fig:diff_vs_raw_finetuning_agg}, where we plot zero-shot benchmark coverage as a function of samples for instruction finetuned models.
+
+
+Most of our findings echo those of Section \ref{subsection:results_tiny_code_lm}. Aggregating across sample counts, we find that finetuning models to synthesize code with edits improves overall zero-shot performance on HumanEval and MBPP compared to finetuning on the original data. This suggests that re-factoring code with edit sequences is an architecture- and tokenizer-independent mechanism for improving downstream LM outputs. Furthermore, as shown in Figure \ref{fig:diff_vs_raw_finetuning_agg} and Tables \ref{tab:extlms_humaneval_infscaling} and \ref{tab:extlms_mbpp_infscaling}, we find that the degree by which edit sequence LMs outperform baseline model variants increases with repeated sampling for all tested models, culminating in an average absolute gain in pass@50 of +20\% ($\pm$ 3\%) on HumanEval and +12\% ($\pm$ 2\%) on MBPP. This observation confirms the hypothesis posed in Section \ref{section:method}, showing that training LMs to synthesize code with edits using \method{} data improves the relationship between cumulative inference-time compute and zero-shot performance.
+At pass@1, however, our results are slightly more mixed than in Section \ref{subsection:results_tiny_code_lm}. For Phi-3 models, we observe either no difference or a decrease in score between each pair of model-data variants. One explanation for this is bias: the Phi-3 models have been previously instruction finetuned and were likely to have been trained on standard code data, putting LM variants finetuned to generate edit sequence re-factorized code at a comparative disadvantage due to distributional shift. 
+
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{template/figures/linter_ablation_v12.png}
+    \caption{HumanEval and MBPP ``pass@k vs. k'' achieved by finetuning TinyCodeLM models on \textbf{linter-guided vs randomly sampled code edit sequences} (temperature $= 1$, top-p $=0.95$).}
+    \label{fig:linter_ablation}
+\end{figure*}
+\subsection{Ablating Linter-Guidance}
+\label{subsection:results_linter_abl}
+
+ 
+The backward sampling phase of \method{} uses a linter or other verifier to group interdependent lines of a program together during edit sequence generation, ensuring that all code edits resolve to programs that are free of static errors. We conclude our experiments by testing the importance of this design choice with TinyCodeLM models. 
+To do this, we replace the backwards procedure described in Section \ref{subsection:method_algorithm} with exclusively random sampling; during each step of the algorithm, we first sample the number of lines to delete from the current program uniformly at random, before sampling a set of lines with the desired count. Using this linter-ablated version of the algorithm, we generate a new synthetic edit sequence dataset with the same size as the \method{} dataset used in all previous finetuning experiments, i.e. with $s=5$ example sequences per sample in the source dataset. The average number of edits per example in this dataset  ($\overline{E}_{\text{RandSeqInstruct}} = 3.9$) is empirically similar to its linter-guided counterpart ($\overline{E}_{\text{LintSeqInstruct}} = 3.8$, see Figure \ref{fig:data_stats}). We employ the same procedure as the one used in Section \ref{subsection:results_finetuning_lms} to instruction finetune TinyCodeLM models on the dataset of randomly sampled edit sequences.
+
+In Figure \ref{fig:linter_ablation}, we compare the temperature $1$  inference-time scaling laws on HumanEval and MBPP obtained by finetuning models on randomly sampled vs static error-free edit sequences. Ablating linter-guidance results in a decline in benchmark coverage. On HumanEval, linter ablation reduces absolute pass@50 score on TinyCodeLM-150M ($22.6\% \mapsto 17.7\%$) and on TinyCodeLM-400M ($26.8\% \mapsto 22.0\%$). MBPP pass@50 is similarly affected, dropping for both models ($34.5\% \to 30.2\%$ and $39.6\% \mapsto 34.5\%$). These results suggest that the error-free nature of edits in \method{} instruction finetuning data does indeed have a positive impact on the coding problem coverage of sampled solutions.
+
+To conclude our analysis, we probe whether training models on error-free edit sequences also has an effect on the presence of errors in across all generated programs, aside from its positive effects on coverage. To assess this, we run the Python linter  \texttt{\small{pylint}} over each of the synthesized programs used to compute the reported temperature $1$ pass@k metrics, checking code for static errors.
+
+In Figure \ref{fig:static_error_freq}, we plot the total proportions of synthesized program samples with at least one static error across finetuned model variants. On both benchmarks, LMs trained on  randomly sampled edits (dark grey) appear to generate ``buggy'' code with much higher frequency than all other models. Furthermore, on HumanEval, we find that \method{} models (indigo) synthesize programs with static errors at a higher frequency than baseline models (light grey), despite their higher coverage of benchmark coding problems. This additional finding suggests that model performance gains from \method{} cannot simply be attributed to improvement in static error frequency across code -- training on re-factored code must be helping models write generally better, more diverse programs.
+In summary, the error-free nature of the linter-guided edits sampled in \method{} appears to indeed be important for improving both the quality and diversity of sampled programs (Figure \ref{fig:linter_ablation}), as well as the overall correctness (Figure \ref{fig:static_error_freq}) of code synthesized by language models trained on edit sequences.
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{template/figures/code_error_rate_v5.png}
+    \caption{Comparing \textbf{static error frequency in synthesized code samples} across baseline vs edit sequence instruction finetuned model variants (n $=50$, temperature $=1$, top-p $=0.95$).}
+    \label{fig:static_error_freq}
+\end{figure*}
+
+
+\section{Related Work}
+
+\label{section:related_work}
+
+\paragraph{Foundation Models for Code} Code synthesis is one of the oldest problems in computer science. Neural language model-based approaches such as Codex, AlphaCode, CodeT5+, CodeGen, StarCoder, and Code Llama have recently proven to be extremely competitive with previous methods \citep{chen2021evaluating, li2022competition, wang2023codet5+, nijkamp2022codegen, li2023starcoder, roziere2023code}. Many general-purpose LLMs are also trained on code data. While the largest of these LLMs show strong performance on coding benchmarks, generations continue to suffer from limited meaningful output diversity, prompt sensitivity, and degrading quality on long-contexts \citep{achiam2023gpt, team2023gemini, dubey2024llama}. Smaller models also lag behind \citep{abdin2024phi, team2024gemma, smollm}. As of the writing of this paper, directly prompting LLMs to generate code ``diffs'' results in low quality edits across models \citep{cursorapply}. We claim that this is the result of a data problem and we attempt to address it in this work. 
+\paragraph{Finetuning on Synthetic Data} LLM post-training methods like supervised finetuning have been shown to be extremely powerful for improving model performance across tasks \citep{wei2021finetuned}. However, high-quality datasets of paired instruction-response examples are extremely expensive to curate. One possible solution lies in synthetic data generation methods like Self-Instruct, wherein an LLM is prompted to generate instructions and/or responses from examples \citep{wang2022self}. Such data have been used extensively for improving LLM performance through self-refinement and/or knowledge distillation on coding tasks \citep{codealpaca, roziere2023code, abdin2024phi, lozhkov2024starcoder}. We employ post-processed instruction data for code synthesis created with a method from this family, OSS-Instruct \citep{wei2024magicoder}, as the base of our experiments on re-factorizing code with code edit sequences via \method{}. Unlike Self-Instruct-like synthetic data generation methods, our algorithm does not employ an LLM for data generation, and instead generates examples of error-free edit sequences from existing code data by using a simple linter.
+\paragraph{Finetuning on Edits} Several works have investigated finetuning code LLMs on edit data.5/ChatGPT. Both of these works specifically focus on better-equipping LLMs for natural language-prompted code editing tasks, in which a model is \textit{explicitly} prompted to generate an edit in response to a natural language specification. Our work differs in three important ways: first, we study edit sequences rather than single edits; second, we train LLMs to predict edits  \textit{implicitly} during code synthesis; third, our synthetic edit generation algorithm does not rely on the existence of any kind of commit data.
+
+\paragraph{``On Device'' Language Models} As the capabilities of LLMs have improved, so to have those of small language models. Recent projects like SmolLM \citep{smollm} and OpenELM \citep{mehta2024openelm} re-examine the potential of tiny language models that can be run and even updated ``on-device,'' i.e. on a smart phone or laptop. The representations learned by such models during pretraining are weaker than those of scaled-up LLMs \citep{kaplan2020scaling}. This is particularly true for harder tasks that involve reasoning, such as code synthesis \citep{team2024gemma, abdin2024phi}. To our knowledge, the most recent open-source work studying small language models pretrained entirely for code understanding is from several years ago \citep{xu2022systematic, nijkamp2022codegen, wang2021codet5, wang2023codet5+}. The 150M and 400M parameter TinyCodeLM models pretrained in this paper belong to the ``on device'' model family and build upon previous works. These models provide an efficient test-bed for experiments on LM code synthesis that is updated to recent advancements in high throughput pretraining and to improvements in open-source data quality.
+\paragraph{Inference-Time Compute Scaling} 
+The performance of language models can be boosted during inference by using scaled-up sample counts, hand-engineered prompting schema, and/or search \citep{brown2024large, snell2024scaling}. These methods dramatically increase inference costs. Their effectiveness is tightly linked to the expressivity of learned model representations and the diversity of outputs across samples. Our experiments with smaller language models are  inspired by these works -- we study whether it is possible to (1) improve the expressivity of representations for code synthesis across LM parameter scales during finetuning, and (2) take advantage of this property to improve the inference-time performance of smaller LMs by larger margins during repeated sampling.
+
+
+
+\section{Discussion, Limitations, and Conclusion}
+
+\label{section:conclusion}
+
+This paper introduces an algorithm, \method{}, for generating synthetic code edit sequences from existing programs.  \method{} enables LLM reasoning settings like code synthesis to be re-parameterized at the data-level as sequential edit generation tasks. The algorithm is parameter-free, requires only CPU to run, and makes no assumptions about the content or structure of code files.
+
+Re-parameterizing code generation with edits has a few immediate benefits. 
+
+In our experiments with \method{}, we also show the following:
+\begin{enumerate}
+ 
+    \item Tiny LMs can be efficiently finetuned to synthesize Python programs with edit sequences via \method{} data. This results in state-of-the-art code benchmark performance for models that can be trained ``on device'' (Sections \ref{subsection:results_pretraining} and \ref{subsection:results_tiny_code_lm}).
+
+    \item Across other tested models from the Phi, Gemma, and Llama families, finetuning on \method{} data also improves the diversity of zero-shot generations, boosting the inference-time scaling of coverage on HumanEval and MBPP at fixed sample counts (Section \ref{subsection:results_gemma_phi_llama}). 
+    \item On HumanEval, the cumulative inference cost of repeatedly sampling from small edit sequence LLMs is similar to sampling once from larger LLMs and yields coverage that is competitive with GPT-4, GPT-4-Omni, and Llama 3.
+    \item Ablating linter-guidance from \method{} hurts the quality, diversity, and correctness of code synthesized by instruction finetuned models (Section \ref{subsection:results_linter_abl}).
+\end{enumerate}
+
+There are several limitations to our work. 
+
+First, as currently formulated, \method{} can only be used to generate synthetic sequences of insertion edits. This is a consequence of the parameter-free nature of the algorithm -- every edit in a \method{} sequence reflects an existing line of code in the source file used to generate it. As a result, \method{} edit data can only be used to train models for synthesis-like tasks, rather than for refinement. 
+
+Second, our experiments with \method{} study code synthesis in Python only. We look forward to testing \method{} with other programming languages, verifiers, and problems in future work. One other exciting setting where \method{} might improve the tradeoff between model generation quality and inference-time compute is in mathematical reasoning and formal theorem proving.
+
+
+

@@ -1,0 +1,320 @@
+\title{SIEVE: General Purpose Data Filtering System Matching GPT-4o Accuracy at 1% the Cost}
+
+\begin{abstract}
+Creating specialized large language models requires vast amounts of clean, special purpose data for training and fine-tuning. With only a handful of existing large-scale, domain-specific datasets, creation of new datasets is required in most applications. This requires the development of new application-specific filtering of web-scale data. Filtering with a high-performance, general-purpose LLM such as GPT-4o can be highly effective, but this is extremely expensive at web-scale. This paper proposes \name, a lightweight alternative that matches GPT-4o accuracy at a fraction of the cost. \name can perform up to 500 filtering operations for the cost of one GPT-4o filtering call. The key to \name is a seamless integration of GPT-4o and lightweight T5 models, using active learning to fine-tune T5 in the background with a small number of calls to GPT-4o. Once trained, it performs as well as GPT-4o at a tiny fraction of the cost. We experimentally validate \name on the OpenWebText dataset, using five highly customized filter tasks targeting high quality and domain-specific content. Our results demonstrate the effectiveness and efficiency of our method in curating large, high-quality datasets for language model training at a substantially lower cost (1\%) than existing techniques. To further validate \name, experiments show that \name and GPT-4o achieve similar accuracy, with human evaluators preferring \name's filtering results to those of GPT-4o.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have revolutionized natural language processing, demonstrating remarkable capabilities across a wide range of tasks. As the field progresses, there is growing interest in developing specialized LLMs tailored to specific domains or applications~\citep{lee2023benefits,gupta2024rag,li2024small}.
+A critical component in this process is the curation of high-quality, domain-specific datasets for training and fine-tuning these models. However, the task of filtering vast amounts of web-scale data to create such datasets presents significant challenges in terms of cost, time, and effectiveness.
+Existing approaches to data filtering and curation primarily rely on two strategies: (1) sourcing data from specific, trusted sources, and (2) employing pre-existing quality and toxicity detection models to filter harmful content. For instance, medical LLMs often utilize datasets derived from PubMed to ensure domain specificity. While these data filtering methods have their merits, they suffer from notable limitations in terms of both flexibility and comprehensiveness. Many domains lack comprehensive, exclusive sources of high-quality text data, and pre-trained detection models typically focus on general quality metrics and toxicity, limiting their applicability for domain-specific queries or customized quality rubrics. Furthermore, relying solely on established data sources ignores the vast amount of potentially valuable information available on the broader internet, leading to datasets that may be limited in scope and diversity. These constraints can significantly hinder the development of specialized language models that require rich, domain-specific training data.
+
+Recent advancements in general-purpose language models, such as GPT-4o, offer a potential solution to these challenges. These models can act as effective filtering mechanisms when provided with appropriate filtering prompts. To illustrate as an example, one could employ GPT-4o to iterate over all text snippets of the internet to determine whether each piece pertains to the 2024 presidential election. In this context, the machine learning model serves as a binary classification mechanism, evaluating one snippet at a time. However, the computational cost of applying models like GPT-4o to web-scale datasets is prohibitively expensive for most organizations.
+In this paper, we present a novel system \name that addresses these limitations, providing versatile and high-quality data filtering at a fraction of the cost of using high performance, general-purpose models directly. Shown in Figure~\ref{fig:alg_demo}, our method is based on a lightweight T5 model in combination with a small number of calls to GPT-4o, effectively reducing the cost per filtering to one call to T5 instead of GPT-4o.  This is accomplished by training and distilling a lightweight T5 model in the background that learns to mimic the filtering decisions of GPT-4o and eventually handles all/most of the filtering. This background job is optimized via a novel active learning algorithm that further reduces the need to call GPT-4o.
+
+Our active learning algorithm operates in a stream-based setting, sequentially and adaptively selecting the most informative text snippets for evaluation by GPT-4o. Inspired by previous work in deep active learning~\citep{zhang2022galaxy,nuggehalli2023direct}, we propose a novel stream-based algorithm designed to tackle scenarios where the data distribution is imbalanced. As all of the filtering decisions are highly imbalanced (see Table~\ref{tab:imbalance}), one of our main contributions is proposing the algorithm to tackle this imbalance issue. Our algorithm is designed to efficiently label a set of more balanced and uncertain examples. As demonstrated in our experiments, \name achieves GPT-4o quality filtering performance at less than 1\% of the cost. In addition, compared to random sampling methods, our active learning algorithm reduces the number of queries to GPT-4o by more than 5x (see Section~\ref{sec:experiments}).
+In Section~\ref{sec:analysis}, we provide theoretical analysis of our algorithm, establishing formal proofs of balancedness bounds for active learning in scenarios with imbalanced underlying data distributions. To the best of our knowledge, this represents the first attempt to provide rigorous theoretical guarantees in this context.
+
+The implications of \name are far-reaching, democratizing access to clean, task-specific data and facilitating the development of specialized language models across various domains. By dramatically reducing the cost and complexity of data filtering, \name opens new avenues for researchers and organizations to create tailored LLMs for specific applications, industries, or scientific disciplines.
+
+In summary, the core contributions of this work are:
+\begin{itemize}
+\item A novel, cost-effective system, \name, for high-quality data filtering that achieves GPT-4o level performance at less than 1\% of the cost.
+
+\item A stream-based active learning algorithm for imbalanced datasets that efficiently selects informative snippets, reducing the number of queries to GPT-4o more than 5x compared to random sampling. 
+
+\item Theoretical analysis and formal proofs of balancedness bounds for our active learning algorithm in scenarios with imbalanced data distributions.
+
+\item Experimental validation of \name on the OpenWebText dataset using five highly specific filters, demonstrating its effectiveness and versatility.
+\end{itemize}
+
+
+
+\section{A General Purpose Data Filtering System}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/SIEVE_intro_figure.pdf}
+    \caption{\textbf{System Overview.} From user's perspective, \name acts as if applying GPT-4o with the filtering prompt to all text snippets in a web-scale dataset. The output from the \name system is the set of all text snippets that receive a `pass'. To reduce the prohibitively high cost of applying GPT-4o on every snippet, \name utilizes active learning to distill lightweight filtering models based on pretrained T5 encoders, effectively reducing the overall cost to less than $1\%$.}
+    \label{fig:sieve_system}
+\end{figure}
+
+In this section we provide a detailed description of the \name system. A visualization of our system can be found in Figure~\ref{fig:sieve_system}.
+
+\paragraph{A Bird's-Eye View.} When viewed as a black box, \name processes a web-scale dataset of $N$ text snippets along with a filtering prompt that specifies the criteria for passing or failing each snippet. This prompt specifies the criteria for passing or failing each snippet, similar to how one would instruct any high-performance, general-purpose LLM, such as GPT-4o. From this perspective, \name efficiently categorizes each snippet as `pass' or `fail' based on the provided prompt, with filtering quality comparable to that of GPT-4o.
+
+A straightforward approach would be to apply GPT-4o with the filtering prompt to each text snippet. However, this becomes extremely costly for web-scale datasets containing billions or trillions of tokens. For example, filtering the OpenWebText dataset~\citep{Gokaslan2019OpenWeb} used in this study, which contains 9 billion tokens, would cost approximately \$67,000 using GPT-4o directly. For even larger datasets like the PILE~\citep{gao2020pile}, this cost would increase by at least 1000 times, making it prohibitively expensive.
+To overcome this challenge, we utilize an active distillation framework as detailed in the following section. 
+\subsection{An Active Distillation Framework}
+In this section, we describe the inner workings of \name, which employs a lightweight binary classification model trained on GPT-4o's filtering decisions. By leveraging active learning techniques, we selectively gather GPT-4o decisions on a small, informative subset of text snippets from the web-scale dataset. This approach significantly reduces costs while maintaining filtering quality comparable to GPT-4o.
+
+Active learning minimizes annotation costs from expensive sources by selecting the most informative subset of snippets to query for labels. The goal is to train a high-performance model $f$ with minimal annotation cost. In our framework, GPT-4o serves as the expensive annotation source, while we fine-tune a pretrained T5 encoder model for binary classification on the collected data and annotations to achieve high performance. Active learning strategies collect annotations incrementally, retraining the lightweight T5 model $f$ after labeling every $B$ new snippets. While most deep active learning literature focuses on the pool-based setting \citep{ash2019deep,nuggehalli2023direct,fairstein2024class,lesci2024anchoral}, these algorithms require forward inference of $f$ on the entire dataset at every iteration, incurring high computational costs for large-scale datasets (see Section~\ref{ssec:cost} for details). To mitigate this, we apply active learning in the streaming setting, an area well-studied classically but with limited research for neural networks. We specifically designed our algorithm to tackle the imbalance in filtering decisions generated by GPT-4o (see Table~\ref{tab:imbalance}), aiming to query GPT-4o on a more balanced and informative set of text snippets.
+
+Formally, we assume access to a stream of i.i.d. drawn snippets $x_1, x_2, ..., x_N$, all following the same underlying data distribution $\P_X$. We let $S = x_1, ..., x_N$ denote the stream. In practice, we construct the stream by randomly shuffling all snippets in the OpenWebText dataset~\citep{Gokaslan2019OpenWeb}. At time $i$, the active learning algorithm observes $x_i \sim \P_X$ and decides whether to query GPT-4o for its annotation based on the snippet's informativeness to model $f$. If queried, we obtain the corresponding filtering decision from GPT-4o, which we denote by $y_{GPT}(x_i) \in \{0, 1\}$. Here, the randomness comes from the nondeterministic nature of GPT-4o's response. After every $B$ new annotations, we fine-tune the T5-decoder model from its pretrained checkpoint to obtain an updated model $f$. The distillation process terminates after a total annotation budget of $T$ snippets. The final model $f$ fine-tuned on queried snippets is then applied to filter the entire web-scale dataset.
+
+
+
+\section{Active Learning Algorithm for Distilling GPT-4o}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=.9\linewidth]{figures/SIEVE_algorithm.pdf}
+    \caption{Demonstration of the TRM threshold. Snippets (shown on the bottom) are first ordered based on their predictive sigmoid scores. GPT-4o class labels $0$ and $1$ are represented by the solid or dashed borders. Queried snippets are shaded. Under imbalanced scenarios, sigmoid score of $0.5$ generally will not provide a good indication of where to sample, and will likely result in labeling much more snippets in the majority class. The probability $\mu(s)$ denotes the likelihood of a snippet with sigmoid score $s$ belonging to class 0. The TRM threshold is defined to best separate the two classes of snippets.}
+    \label{fig:alg_demo}
+\end{figure}
+
+\begin{algorithm}[t]
+    \begin{algorithmic}
+    \STATE \textbf{Input: } Data Stream $S$, labeling function $y_{GPT}$ based on GPT-4o and specified filtering prompt, batch size $B$, total budget $T$ and confidence level $\delta$.
+    \STATE \textbf{Initialize: } Query $x_1$, ..., $x_B \overset{iid}{\sim} \P_X$ to form the initial labeled set $L = \{x_i, y_i\}_{i=1}^B$.
+
+    \FOR{$r = 1, ..., \frac{T}{B}$}
+        \STATE Fine-tune pretrained T5 encoder model on the latest labeled set $L$ to form $f: S \rightarrow [0, 1]$.
+        \STATE Initialize confidence set $\underline{\mu}, \bar{\mu} \leftarrow 0, 1$, counter $t \leftarrow 0$.
+        \STATE Let $j$ index the head of the stream $S$, $x_j$.
+        
+        \WHILE[\underline{\textbf{Find optimal separation threshold for $f$.}}]{$|L| < (s + 1) B$}
+
+        \STATE Receive the next snippet in the stream $S$, $x_{j+t} \sim \P_X$.
+
+        \IF{$f(x_{j+t}) \in [\underline{\mu}, \bar{\mu}]$}
+            \STATE Query GPT-4o for label $y_{j+t}$ by $y_{GPT}$, and insert to set $L \leftarrow L \cup \{x_{j+t}, y_{j+t}\}$.
+        \ENDIF
+
+        \IF[\underline{\textbf{Update confidence interval.}}]{$t \in 2^{\N^+}$}
+            \STATE Store previously computed sigmoid scores $F_t \leftarrow \{0, f(x_j), ..., f(x_{j + t})\}$.
+        
+            \STATE Compute the empirical TRM threshold as $\widehat{s}_t \leftarrow \min_{s \in F_t} \widehat{\mc{L}}_{t}(s)$, where \\ 
+            $\widehat{\mc{L}}_{t}(s) := \frac{1}{t+1}(\sum_{i\in[j, j+t]: f(x_{i}) \leq s} \1\{y_{i} \neq 0\} + \sum_{i\in[j, j+t]: f(x_{i}) > s} \1\{y_{i} \neq 1\})$.
+
+            \STATE Update $\underline{\mu}, \bar{\mu}$ be the smallest and largest thresholds $s\in F_t$ such that
+            \begin{align*}
+                \widehat{\mc{L}}_{t}(s) - \widehat{\mc{L}}_{t}(\widehat{s}_t) \leq \beta_{t+1}\sqrt{(|\{s'\in F_t: \min(s, \widehat{s}_t) \leq s' \leq \max(s, \widehat{s}_t)\}|-1) / t} + \beta_{t+1}^2 / 2
+            \end{align*}
+            where $\beta_{t+1} = \sqrt{2\log(2\log_2(t+1)^2N^2/\delta)/(t+1))}$ is chosen so that the TRM threshold lies in the updated confidence threshold with probability of at least $1 - \delta / \log_2(N)$.
+        \ENDIF
+
+        \STATE Update counter $t \leftarrow t+1$. \COMMENT{\textbf{\underline{Loop over snippets in S.}}}
+        \ENDWHILE
+
+    \ENDFOR
+
+    \STATE \textbf{Return:} T5 encoder model $f$ finetuned on $L$. $f$ is then used for filtering on the entire dataset. 
+    \end{algorithmic}
+    \caption{Stream-Based Class-Balancing Active Learning}
+    \label{alg:active}
+\end{algorithm}
+
+In this section, we present a novel stream-based active learning algorithm for class-imbalanced scenarios. We use a modified version of the uncertainty sampling strategy~\citep{lewis1994sequential,tong2001support, balcan2006agnostic,settles2009active, kremer2014active}. In our setting, uncertainty sampling labels snippets $x_i$ that have predictive sigmoid score around $0.5$, i.e. $f(x_i) \approx 0.5$, as these  are believed to be the most informative data to be labeled. However, our binary classification tasks of data filtering is naturally imbalanced as shown in Table~\ref{tab:imbalance}. Previous active learning work by \citet{zhang2022galaxy} and \citet{nuggehalli2023direct} observed that the threshold of $0.5$ is generally biased towards the majority class under imbalanced scenarios, which means that most of the snippets selected by uncertainty sampling will be in the majority class.  This translates into poor performance in detecting snippets from the target minority class.  To combat this, our approach instead aims to find a threshold near where the majority and minority classes are equiprobable, which we will refer to as an \emph{True Risk Minimizer (TRM) threshold}.  Selecting and labeling snippets around the TRM threshold yields a labeled dataset that is more balanced and includes uncertain snippets. In a nutshell, our algorithm (detailed in Algorithm~\ref{alg:active}) alternates between
+\begin{enumerate}
+    \item Spending $B$ budget in finding and labeling close to the TRM threshold;
+
+    \item Fine-tuning a new T5 encoder model $f$ on all labeled snippets thus far.
+\end{enumerate}
+More concretely as shown in Figure~\ref{fig:alg_demo}, when ordering snippets according to their sigmoid scores, labeling snippets around the threshold of $0.5$ can often result in selecting and labeling of most of snippets from a single (majority) class. Our proposed alternative, the TRM threshold, minimizes the expected number of class $1$ snippets to its left and class $0$ snippets to its right. Thus, the TRM threshold minimizes the expected number of misclassifications. 
+Formally, let $\eta_{j}$ denote the probability of snippet $x_j$ belonging to class $0$
+$$\eta_j \ := \ \P\big(y_{\mbox{\tiny GPT}}(x_{j})= 0\big)$$ 
+where the possible randomness is with respect to GPT-4o's response as well as the distribution underlying the snippet $x_j \sim P_X$. The distribution $P_X$ is unknown, so $\{\eta_{j}\}$ are unknown as well. 
+For model $f$ and a stream of i.i.d. text snippets $x_1, ..., x_N \sim \P_X$, the \emph{True Risk Minimizer (TRM) threshold} is then the sigmoid score $s^\star \in \{0, f(x_1),\dots,f(x_N)\}$, where
+\begin{align}
+    s^\star \ := \ \argmin_{s \in \{f(x_1),\dots,f(x_N)\}} \left(\sum_{j: f(x_j)\leq s} (1 - \eta_j) + \sum_{j: f(x_j)>s} \eta_j\right).
+\end{align}
+The optimization objective above can be viewed as the expected risk (probability of error) of a finite set of threshold classifiers with threshold locations at $\{0, f(x_1),\dots,f(x_N)\}$.
+A threshold classifier at $s$ categorizes snippets into class $0$ if their sigmoid score is less than or equal to $s$, and into class $1$ if their score is greater than $s$. The TRM threshold can also be viewed as where the two classes best separate from each other. Snippets around this threshold are therefore truly uncertain to the neural network model. Moreover, in Section~\ref{sec:analysis}, we will provide a novel theoretical analysis demonstrating labeling around the TRM threshold also improves the balancedness of the queried snippets, alleviating the data imbalance issues when training the lightweight model $f$.  Of course, the TRM threshold is unknown (because the probabilities $\{\eta_{j}\}$ are unknown), so we employ an efficient active learning procedure to identify a threshold close to it.
+
+Our algorithm, shown in Algorithm~\ref{alg:active}, applies agnostic active learning techniques~\citep{dasgupta2007general,jamieson2022interactive,katz2021improved} to threshold classifiers. It focuses on identifying the TRM threshold. The algorithm initializes by querying the first $B$ snippets from the stream to create a labeled set $L$. Each iteration begins with fine-tuning classifier $f$ on $L$. To estimate the TRM threshold $s^\star$, we maintain a high-confidence interval $[\underline{\mu}, \bar{\mu}]$ while annotating stream snippets. Snippets with predictive sigmoid scores within this interval are queried using GPT-4o. We update the confidence interval on a geometric schedule, every $2^i$ snippets, using empirical estimates $\widehat{s}_t$ of the optimal threshold. This interval, centered around the empirical estimate, ensures $s^\star \in [\underline{\mu}, \bar{\mu}]$ with at least $1 - \delta$ probability across all $t=2^i$ for the current iteration. For constructing the confidence interval, we employ an empirical Bernstein bound, as introduced in~\citet{jamieson2022interactive}. This approach differs from the original CAL algorithm~\citep{dasgupta2007general}, which uses a uniform convergence bound requiring synchronous querying. Our method allows for parallel GPT-4o queries, significantly reducing computational time in practice.
+
+
+
+\section{Theoretical Analysis}
+
+In this section, we first provide formal guarantee of the performance of our algorithm. We then proceed to analyze the balancedness of the snippets our algorithm queries, showing its improvement in collecting a more balanced set of snippets. Note that all of our analysis are conducted for any single iteration $s$ in Algorithm~\ref{alg:active}.
+Define the true risk function over all snippets $1,\dots,N$ at threshold $s$ is denoted by
+$$R(s) \ = \  \frac{1}{N}\left(\sum_{i\leq N: f(x_i) \leq s} (1 - \eta_{i}) + \sum_{i\leq N: f(x_i) > s} \eta_{i}\right) \ .$$
+Recall the goal is to find a threshold near $s^* = \arg\min_s R(s)$.  This learning problem over the discrete set of threshold classifiers at thresholds $f(x_1)$, ..., $f(x_N)$ can be exactly represented in the framework of \citet{jamieson2022interactive}, leading to Algorithm~\ref{alg:active} and the following bound.
+
+\begin{theorem}[\citet{jamieson2022interactive}]
+    During iteration $r$ of Algorithm~\ref{alg:active}, given the classifier model $f$, with probability at least $1 - \delta$, both $R(\underline{\mu}) - R(s^\star)$ and $R(\bar{\mu}) - R(s^\star)$ are upper bounded by
+    \begin{align}
+        c_0 R(s^\star) + c_1\beta_t \sqrt{R(s^\star)} + c_2\beta_t^2.
+    \end{align}
+    for all the confidences intervals $[\underline{\mu}, \bar{\mu}]$ updated at time $t \in 2^{N^+}$. Here, $c_0, c_1$ and $c_2$ are some universal constants.
+\end{theorem}
+The theorem suggests that the gap in the true risk of the confidence intervals shrinks roughly on the scale of $\frac{1}{\sqrt{t}}$ over time since $\beta_t = \widetilde{O}(\frac{1}{\sqrt{t}})$. For large $t$, this gap goes to $0$.
+
+\begin{definition}[Score Re-Ordering]
+Let $\pi$ denote the permutation of $\{1,\dots,N\}$ such that $f(x_{\pi(1)}) \leq \cdots \leq f(x_{\pi(N)})$.
+\end{definition}
+
+\begin{definition}[Discrete Smoothness]
+    Let $L = \max_{j\in [N-1]} |\eta_{\pi(j)} - \eta_{\pi(j+1)}|$ denote the maximum change in probabilities $\eta_{(j)}$. This mirrors the Lipschitz smoothness in a discrete fashion. Note we always have $L\leq 1$.
+\end{definition}
+Without loss of generality, assume class $0$ to be the minority class. The expected imbalance ratio is then $\frac{\sum_{j=1}^N \eta_{j}}{\sum_{j=1}^N 1-\eta_{j}} < 1$. When $s^\star = 0$, it means even the lowest sigmoid score snippets are more likely to be in the majority class. In this case, a reasonable strategy is simply query the lowest sigmoid score snippets, which is exactly what our algorithm does.
+
+\begin{theorem}[Balancedness of Labeled Snippets]
+    Assume class 0 is the minority class and $s^\star \neq 0$. Consider an interval of scores $[\underline{\mu},\bar{\mu}]$ with $s^\star \in [\underline{\mu},\bar{\mu}]$. Let the corresponding gaps in risk denoted by $\gamma_0 := R(\underline{\mu}) - R(s^\star) > 0$ and $\gamma_1 := R(\bar{\mu}) - R(s^\star) > 0$. When labeling snippets indexed within this interval uniformly at random, the imbalance ratio $\lambda(\underline{\mu},\bar{\mu})$ between the minority class and the majority class must satisfy
+    \begin{align*}
+        \lambda(\underline{\mu},\bar{\mu}) = \frac{\sum_{j: f(x_j)\in[\underline{\mu},\bar{\mu}]}\eta_{j}}{\sum_{j: f(x_j)\in[\underline{\mu},\bar{\mu}]}1-\eta_{j}} \geq 1 - \min(\frac{N\bar{\gamma} + LN}{1.5 - 2L}, \sqrt{L}\cdot\frac{N\bar{\gamma} + LN + 1}{(1-L)\sqrt{N\underline{\gamma}}})
+    \end{align*}
+    where $\underline{\gamma}:=\min(\gamma_0, \gamma_1)$ and $\bar{\gamma}:=\max(\gamma_0, \gamma_1)$, with $L, \underline{\gamma}, \bar{\gamma}< 1$. This implies, 
+    
+    (a) if $\bar{\gamma} \rightarrow 0$ and $L \rightarrow$, $\lambda(\underline{\mu},\bar{\mu}) \geq 1 - \frac{N\bar{\gamma} + LN}{1.5 - 2L} \rightarrow 1$ (perfect balance);
+
+    (b) if $\underline{\gamma} \geq \frac{c}{N}$ for some constants $c > 0$, then $\lambda(\underline{\mu},\bar{\mu}) \geq 1 - \sqrt{L}\cdot\frac{N\bar{\gamma}+LN + 1}{c(1-L)}$. When $L \rightarrow 0$, we again recovers $\lambda(\underline{\mu},\bar{\mu}) \rightarrow 1$ (perfect balance).
+\end{theorem}
+
+\textit{Proof sketch.}
+Let $A = \sum_{j: f(x_j)\in[\underline{\mu},\bar{\mu}]}\eta_{j}$ and $B=\sum_{j: f(x_j)\in[\underline{\mu},\bar{\mu}]}1 - 2\eta_{j}$, we can rewrite the imbalance ratio into $\lambda(\underline{\mu},\bar{\mu}) = \frac{A}{A + B}$. Since $N(\gamma_1 - \gamma_0) = \sum_{j:f(x_j)\in (\underline{\mu}, \bar{\mu}]} 1 - 2\eta_j \geq B - LN$, we can lower bound the balancedness by $\frac{A}{A + N(\gamma_1 - \gamma_0) + LN}$. We therefore need to prove that $A$ is sufficiently large as compared to $N(\gamma_1 - \gamma_0) + LN$.
+
+To prove this, we note that the $\eta$ values around the optimal separation threshold $s^\star$ are close to $.5$. Therefore, by the smoothness condition, when $L$ is small, $\eta_j \approx .5$ for all $f(x_j) \in [\underline{\mu},\bar{\mu}]$, so $A$ roughly scales linearly in the number of elements within $[\underline{\mu},\bar{\mu}]$. We can prove that there are at least $O(\sqrt{\frac{N\bar{\gamma}}{L}})$ elements in this confidence interval. $A$ therefore follows a similar scale, which is much greater than $N(\gamma_1 - \gamma_0) + LN$ when $L\rightarrow 0$. Under such case, we recover a balancedness bound of $1$, i.e. the annotated snippets are perfectly balanced.
+
+
+
+\section{Experiments}
+
+
+In this section, we present our experiments conducted for the five highly customized data filters in Table~\ref{tab:result}: politics, climate, AI, mainstream knowledge and text quality filters. These filters are applied to the OpenWebText dataset~\citep{Gokaslan2019OpenWeb}, which is divided into around 13.5M snippets of $1024$ tokens. The first three filters identify text snippets related to a particular topic, with highly detailed specifications of filtering prompts to GPT-4o about the subdomain of topics that should be included. The mainstream knowledge prompt aims to exclude any obscure and niche content determined by GPT-4o. Lastly, the quality filter aims to identify text snippets that are considered high quality by GPT-4o.
+\begin{wraptable}{r}{.4\linewidth}
+    \begin{tabular}{cc}
+        \toprule
+        Filter & \shortstack{Imbalance Ratio $\lambda$} \\
+        \midrule
+        Politics & 0.153\\
+        Climate & 0.043\\
+        AI & 0.026\\
+        \shortstack[c]{Mainstream} & 0.208\\
+        Quality & 0.457\\
+        \bottomrule
+    \end{tabular}
+    \caption{Imbalance ratio of minority vs majority decisions, calculated based on $5000$ randomly sampled snippets. $\lambda = \text{\#Minority} /\, \text{\#Majority}$.}
+    \label{tab:imbalance}
+\end{wraptable}
+
+Throughout our experiments, we use the encoder part of pretrained T5-large~\citep{raffel2020exploring} as the lightweight model. A linear layer is attached to the encoder model for binary classification. The classification model has less than $770$M parameters, orders of magnitude smaller than GPT-4o. To mitigate the imbalanced nature of the snippets shown in Table~\ref{tab:imbalance}, we utilize the focal loss~\citep{lin2017focal}.
+
+\subsection{Results: GPT-4o-Based and Human-Based Evaluation}
+\begin{table}[t]
+    \centering
+    \scalebox{0.85}{
+    \begin{tabular}{llccccc}
+    \toprule
+    Filter & Method & \shortstack{Bal. Accuracy\\(GPT-4o as GT)} & \shortstack{Human Preference\\Over GPT-4o} & \shortstack{\#Queries to \\ GPT-4o} & \shortstack{Lightweight \\Model Cost} & Total Cost\\
+    \midrule
+    \multirow{2}{*}{Politics} & GPT-4o & \textbf{95.6\%}$^\ast$ & --- & 13.5M & \$0 & \$67,000\\
+    & \name (Ours) & \textbf{95.6\%} & --- & 60K & $\$270$ & $\$570$\\
+    \midrule
+    \multirow{2}{*}{Climate} & GPT-4o & \textbf{96.6\%}$^\ast$ & --- & 13.5M & \$0 & \$67,000\\
+    & \name (Ours) & \textbf{96.7\%} & --- & 7.5K & $\$180$ & $\$220$\\
+    \midrule
+    \multirow{2}{*}{AI} & GPT-4o & \textbf{95.5\%}$^\ast$ & --- & 13.5M & \$0 & \$67,000\\
+    & \name (Ours) & \textbf{95.7\%} & --- & 6K & $\$180$ & $\$210$ \\
+    \midrule
+    \multirow{2}{*}{\shortstack[l]{Mainstream}} & GPT-4o & 92.4\%$^\ast$ & $50\%$ & 13.5M & \$0 & \$67,000\\
+    & \name (Ours) & 91.0\% & $\textbf{54\%}$ & 100K & $\$400$ & $\$900$ \\
+    \midrule
+    \multirow{2}{*}{Quality} & GPT-4o & 88.2\%$^\ast$ & 50\% &  13.5M & \$0 & \$67,000\\
+    & \name (Ours) & 86.3\% & \textbf{53\%} & 60K & $\$270$ & $\$570$\\
+    \bottomrule
+    \end{tabular}
+    }
+ \name can match or exceed GPT-4o's quality in terms of balanced accuracy and human preference. On the other hand, \name saves more than 99\% of the cost compared to using GPT-4o. See Section~\ref{sec:experiments} for experiment details. $^\ast$We assess GPT-4o's accuracy by measuring output consistency between identical API calls using greedy decoding (temperature set to 0). Some inconsistency persists, possibly due to hardware non-determinism. This may be amplified when using our CoT prompts.}
+    \label{tab:result}
+\end{table}
+
+\paragraph{GPT-4o-Based Evaluation.} Table~\ref{tab:result} demonstrates that \name achieves comparable balanced accuracy to GPT-4o on politics, climate, and AI filters, while closely matching its performance on mainstream knowledge and text quality filters. We evaluated these filters using a set of test snippets randomly sampled from OpenWebText. Ground truth labels were established through individual GPT-4o API calls for each snippet.
+To assess GPT-4o's performance against this ground truth, we conducted additional API calls using identical prompts for each test snippet, effectively measuring the model's self-consistency rate. Surprisingly, we observed inherent noise in GPT-4o's decisions, even when using greedy decoding (temperature set to $0$). This variability likely stems from non-deterministic factors in the hardware infrastructure.
+ We also note that CoT plays an increasing role in inference-time scaling as demonstrated by OpenAI's o1 model, which may inevitably cause inconsistencies in the models' decisions.
+
+\paragraph{Human Evaluation.} In the above, we compared our distilled lightweight model's accuracy to GPT-4o for both mainstream and quality filters. When evaluated by GPT-4o itself, our model's performance appeared lower, raising the question: Is our lightweight model actually worse, or is GPT-4o biased when judging its own decisions? To investigate, we conducted a human evaluation. For each filter, we randomly selected 100 text snippets where GPT-4o and our lightweight model disagreed. We then recruited two groups of 13 annotators per filter to manually assess these challenging cases. The ground truth for each snippet was determined by the majority vote of the annotators, allowing us to compare both models' performance against human judgment.
+As shown in the fourth column of Table~\ref{tab:result}, we see even a slight edge of our lightweight model over GPT-4o when judged by human. This suggests our lightweight model is at least comparable to the decisions made by GPT-4o, while incurring much less computational cost when filtering web-scale datasets.
+
+\subsection{Active vs Random Distillation}
+\begin{figure}
+\begin{subfigure}[t]{.33\linewidth}
+    \includegraphics[trim={0 1.2cm 0 1cm}, width=\linewidth]{figures/political_figure.pdf}
+    \caption{Politics filter accuracy}
+    \label{fig:politics_comparison}
+\end{subfigure}
+\begin{subfigure}[t]{.33\linewidth}
+    \includegraphics[trim={0 1.2cm 0 1cm}, width=\linewidth]{figures/climate_figure.pdf}
+    \caption{Climate filter accuracy}
+    \label{fig:climate_comparison}
+\end{subfigure}
+\begin{subfigure}[t]{.33\linewidth}
+    \includegraphics[trim={0 1.2cm 0 1cm}, width=\linewidth]{figures/political_imb.pdf}
+    \caption{Politics filter imbalance ratio of queried snippets}
+    \label{fig:politics_imb}
+\end{subfigure}
+\caption{\textbf{Active vs Random Distillation}: Performance of the distilled lightweight model across different number of queries made to GPT-4o. With active learning, we can save the number of queries to GPT-4o by more than 5x for the politics filter and more than 3x for the climate filter.}
+\label{fig:active_random}
+\end{figure}
+In this section, we compare the effectiveness of active learning versus random querying for distilling our lightweight model. The random distillation strategy involves querying GPT-4 on a predetermined number of randomly selected snippets from the OpenWebText dataset, followed by fine-tuning the T5 encoder model on this queried data. As illustrated in Figure \ref{fig:active_random}, our comparison of the lightweight model's performance when trained with active versus random sampling for both politics and climate filters reveals significant advantages for active distillation. Specifically, active distillation demonstrates remarkable efficiency, requiring over 5 times fewer queries for the politics filter and more than 3 times fewer for the climate filter compared to random distillation. Figure~\ref{fig:politics_imb} also demonstrates our active learning algorithm's effectiveness in querying a much more balanced set of snippets.  It's noteworthy that even with 100,000 queries, random distillation fails to match GPT-4o's performance. Due to budgetary constraints, we did not extend random distillation experiments beyond this query count. Importantly, we observe that as accuracy increases, active learning typically yields greater query budget savings compared to random sampling~\citep{citovsky2021batch,ash2021gone,zhang2024labelbench}, suggesting that for the politics filter, in particular, the efficiency gains from active distillation could potentially exceed the observed 5-fold reduction in query costs.
+As inference cost of state-of-art LLMs increases, active distillation could play an increasingly important role in \name.
+
+\subsection{Computational Cost Comparisons} \label{ssec:cost}
+\begin{table}[t]
+    \centering
+    \scalebox{0.8}{
+    \begin{tabular}{llcccccc}
+    \toprule
+    Filter & Method & \shortstack{Bal. Accuracy\\(GPT-4o as GT)} &  \shortstack{\#Queries to \\ GPT-4o} & \shortstack{GPT-4o\\Cost} & \shortstack{Lightweight \\Model Training} & \shortstack{Lightweight \\Model Inference} & \shortstack{Total\\Cost}
+    \\
+    \midrule
+    \multirow{4}{*}{Politics} & GPT-4o & \textbf{95.6\%}$^\ast$ & 13.5M & \$67,000 & \$0 & \$0 & \$67,000\\
+    & \name (Ours) & \textbf{95.6\%} & 60K & \$300 & \$120 & \$150 & \$570\\
+    & \name (Ours) & \textbf{95\%} & 25K & \$125 & \$30 & \$150 & \$305\\
+    & Random & \textbf{95\%} & 100K & \$500 & \$20 & $\$150$ & \$670\\
+    \midrule
+    \multirow{3}{*}{Climate} & GPT-4o & \textbf{96.6\%}$^\ast$ & 13.5M & \$67,000 & \$0 & \$0 & \$67,000\\
+    & \name (Ours) & \textbf{96.7\%} &  7.5K & \$40 & \$30 & \$150 & \$220\\
+    & Random & \textbf{96.6\%} & 25K & \$125 & \$20 & $\$150$ & \$315\\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Cost breakdown of politics and climate filters. Total cost is consisted of GPT-4o querying cost, lightweight model training cost and T5 inference cost.}
+    \label{tab:cost_comparison}
+\end{table}
+\paragraph{Cost Breakdown and Comparison.}
+Table~\ref{tab:cost_comparison} presents a comprehensive breakdown of \name's computational costs, consisting of GPT-4o query costs, lightweight model training costs, and inference costs for filtering the entire OpenWebText dataset. The sum of GPT-4o query and training costs represents the total model distillation expense for \name. Our experiments indicate that querying GPT-4o for 1000 snippets costs approximately \$5. The lightweight model inference cost, a conservative estimate for processing 13.5M snippets using a 770M parameter model, is expected to be lower in practice by parallelization across multiple CPUs or cheap inference GPUs. The lightweight model training cost includes costs for model fine-tuning at each iteration of Algorithm \ref{alg:active}, inference costs for computing sigmoid scores of data in stream, and negligible uncertainty update expenses. We calculated these costs based on the hourly rate for 8xA100 80GB GPUs, multiplied by the actual time spent on each experiment. Together, these components provide a detailed overview of the computational resources required for \name's implementation and application to the entire dataset.
+
+As shown in Table~\ref{tab:cost_comparison}, active distillation offers a more cost-effective approach compared to random distillation in achieving equivalent model performance. This cost advantage becomes even more pronounced when considering more expensive teacher models, such as the recently released o1, which significantly increases query costs and potentially dominates the total expenses. Given that active distillation substantially reduces the number of required queries, the cost disparity between active and random distillation methods is expected to widen further, especially when utilizing more advanced and costly teacher models.
+\paragraph{Stream-Based vs Pool-Based Active Distillation.}
+The choice of a stream-based active learning approach for \name is justified by its significant cost advantages over pool-based methods. While stream-based algorithms process snippets only once, pool-based active learning requires repeated forward inference on the entire dataset of 13.5M snippets for each batch of queried snippets. This difference translates to substantial additional costs: approximately \$1800 for the politics filter and \$750 for the climate filter. These extra expenses would dramatically increase the overall cost of active distillation. Our decision to develop a stream-based active learning algorithm for \name, particularly effective in imbalanced scenarios, is thus strongly supported by these cost considerations, ensuring a more economically viable solution for our system.
+
+
+
+\section{Related Work}
+
+\paragraph{Data Filtering for Large Language Models.} Data curation is fundamental to the development of LLMs \citep{longpre2023pretrainer, zhou2023oasis}. As interest in domain-specific LLMs grows, the need for extensive, relevant data collection becomes increasingly important. For a comprehensive overview of existing datasets, we direct readers to \citet{raffel2020exploring,gao2020pile,liu2024datasets}.
+Current methods for acquiring domain-specific data predominantly rely on a few established large-scale databases, including textbooks \citep{gunasekar2023textbooks}, code repositories \citep{muennighoff2023octopack,gao2020pile}, medical literature, and other specialized sources \citep{gao2020pile,cheng2023adapting}. However, for rapidly evolving topics like the 2024 presidential election, climate change and artificial intelligence, relevant information is often dispersed across the internet, making comprehensive data collection challenging.
+Our approach involves training lightweight, task-specific data filtering models distilled from GPT-4. These models are then applied to web-scale datasets to identify pertinent information across various domains.
+Existing data filtering techniques span a wide range, from basic rule-based methods utilizing sentence-level statistical features \citep{rae2021scaling,yang2019xlnet,laurenccon2022bigscience,zhang2022opt} to sophisticated filters leveraging pretrained neural networks for text quality~ \citep{brown2020language,du2022glam,chowdhery2023palm,touvron2023llama, enomoto2024investigating,qian2024understanding} and toxicity~\citep{lees2022new,friedl2023dis} filtering.
+To our knowledge, this work represents the first attempt to develop domain-specific data filtering models adaptable to a diverse array of filtering requirements and specialized domains.
+
+\paragraph{Active Learning}
+Active learning is a strategy aimed at reducing data annotation costs by selectively choosing which examples to label. Traditional approaches iteratively update machine learning models based on newly labeled data, using various informativeness metrics to guide the selection process. These metrics typically include uncertainty~\citep{lewis1994sequential,tong2001support, settles2009active, balcan2006agnostic, kremer2014active,gal2017deep,ducoffe2018adversarial,beluch2018power}, diversity~\citep{sener2017active,geifman2017deep,citovsky2021batch}, and expected model change~\citep{ash2019deep,ash2021gone,wang2021deep, elenter2022lagrangian,mohamadi2022making}. However, most existing methods are designed for pool-based settings with balanced data distributions, which may not be suitable for all real-world scenarios.
+
+In contrast, our work focuses on stream-based algorithms capable of handling data imbalance, an area that has received limited attention in deep learning contexts. While pool-based algorithms have shown success in addressing class imbalance~\citep{aggarwal2020active, kothawade2021similar, emam2021active, zhang2022galaxy, coleman2022similarity, jin2022deep, cai2022active,nuggehalli2023direct,zhang2024algorithm,lesci2024anchoral,fairstein2024class}, stream-based approaches for deep neural networks remain understudied. The recent work by \citet{saran2023streaming} introduces an online volume sampling technique for annotating diverse sets of examples in the representation space. Representation diversity, however, has been shown to struggle on class-imbalanced data distribution under the pool based setting~\citep{zhang2022galaxy,nuggehalli2023direct,lesci2024anchoral,fairstein2024class}. Specifically these studies suggest that sampling diversely in the representation space does not necessarily improve the class-balancedness of the annotated examples. To address this gap, we propose what we believe to be the first stream-based algorithm specifically designed for class imbalance scenarios in active learning.
+
+As part of our algorithm, we use an agnostic active learning algorithm for identifying the TRM threshold. Agnostic active learning has been widely studied in the classical PAC learning setups, where the labels of any particular example is inherently noisy. Our procedure is a direct application of \citet{jamieson2022interactive}, which was inspired by \citet{dasgupta2007general}. The algorithm is proven to be near minimax optimal in these literature. In addition, our algorithm can also be seen as an instance of the algorithm proposed by~\citet{katz2021improved} for threshold classifiers, where they also prove such algorithm is near instance-optimal. In this paper, we also prove the first bound towards balancedness of labeled examples in agnostic active learning, focusing on the class of threshold classifiers.
+
+\paragraph{Knowledge Distillation}
+Knowledge distillation is a technique where a smaller ``student" model learns to emulate a larger, more sophisticated ``teacher" model. With the increasing capabilities of large language models (LLMs) across diverse tasks, recent research has explored using LLMs as annotators to train domain-specific student models. For a comprehensive review, see \citet{tan2024large}. While most research in LLM knowledge distillation focuses on knowledge extraction methods, few studies address the high computational cost of using LLMs for large-scale annotation. Recent work by \citet{zhang2023llmaaa} and \citet{rouzegar2024enhancing} has begun to tackle this issue by using active learning.
+Our paper applies knowledge distillation to the specific problem of data filtering. We employ a straightforward approach, using LLM annotations as binary classification labels to actively fine-tune an encoder-based model. Future research could explore using GPT-4's chain-of-thought outputs to distill a decoder-based student model within the multi-task learning framework proposed by \citet{hsieh2023distilling}.
+It's worth noting that classic knowledge distillation work, such as \citet{hinton2015distilling}, trains student classifiers to match the teacher models' output logits. However, in our case, using chain-of-thought filtering prompts makes it impractical to obtain probabilities for the binary decision.
+
+
+
+\section{Conclusion, Limitations and Future Work}
+
+In this paper, we introduced \name, demonstrating the feasibility of achieving GPT-4o quality data filtering across a diverse range of user-specified filtering prompts. Our comprehensive study showcases the effectiveness of \name in curating large-scale, high-quality datasets for language model training at a fraction of the cost of existing techniques. The experimental results, validated on the OpenWebText using five highly customized filter tasks, provide strong evidence of \name's capability to match GPT-4o's accuracy while significantly reducing computational expenses.
+
+While our initial study presents promising results, we acknowledge that there are several avenues for future enhancement and exploration. For future work, we are particular excited in scaling \name to even larger datasets like the PILE, and more data modalities beyond text. The modular nature of \name also allows for the integration of more advanced active learning algorithms. Additionally, \name serves as an excellent testbed for these algorithms, offering immediate real-world impact. Future work could also investigate the incorporation of semi-supervised learning techniques to further reduce annotation costs following the framework proposed by~\citet{zhang2024labelbench}. Moreover, while our current implementation focuses on T5 architectures, future research could examine the efficacy of \name with a broader range of pretrained model architectures for transfer learning. Lastly, exploring the use of more powerful models beyond GPT-4o, such as o1, for handling complex filtering prompts could extend the capabilities of \name to even more challenging scenarios. In such cases, the importance of active learning becomes even more pronounced, as the increased querying costs associated with these advanced models necessitate highly efficient sampling strategies.
+
+
+
+

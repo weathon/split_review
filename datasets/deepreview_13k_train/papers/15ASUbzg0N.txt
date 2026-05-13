@@ -1,0 +1,1024 @@
+\title{AVID: Adapting Video Diffusion Models to World Models}
+
+\begin{abstract}
+Large-scale generative models have achieved remarkable success in a number of domains. However, for sequential decision-making problems, such as robotics, action-labelled data is often scarce and therefore scaling-up foundation models for decision-making remains a challenge. 
+A potential solution lies in leveraging widely-available unlabelled videos to train world models that simulate the consequences of actions. 
+If the world model is accurate, it can be used to optimize decision-making in downstream tasks. 
+Image-to-video diffusion models are already capable of generating highly realistic synthetic videos. 
+However, these models are not action-conditioned, and the most powerful models are closed-source which means they cannot be finetuned.
+In this work, we propose to adapt pretrained video diffusion models to action-conditioned world models, without access to the parameters of the pretrained model.
+Our approach, AVID, trains an adapter on a small domain-specific dataset of action-labelled videos. AVID uses a learned mask to modify the intermediate outputs of the pretrained model and generate accurate action-conditioned videos. We evaluate AVID on video game and real-world robotics data, and show that it outperforms existing baselines for diffusion model adaptation. Examples available at \href{https://sites.google.}
+Our results demonstrate that if utilized correctly, pretrained video models have the potential to be powerful tools for embodied AI.
+ 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large generative models trained on web-scale data have driven rapid improvement in natural language processing~\citep{brown2020language, touvron2023llama, achiam2023gpt}, image generation~\citep{rombach2022high}, and video generation~\citep{sora}. 
+The potential for scaling to unlock progress in sequential-decision making domains, such as robotics, gaming, and virtual agents, has invoked a surge of interest in foundation models for decision-making agents~\citep{reed2022generalist}, particularly for robotics~\citep{brohan2022rt, brohan2023rt}. However, the quantity of action-labelled data in these domains remains a significant bottleneck~\citep{padalkar2023open}. This raises  the question of to how to utilize widely-available unlabelled videos to bootstrap learning~\citep{baker2022video, bruce2024genie}. 
+One promising approach is to use video data to learn a~\textit{world model}~\citep{ha2018world}, a model the predicts the consequences of actions and acts as a learned simulator.
+Such a model can be used to optimize decision-making for downstream tasks~\citep{hafner2021mastering}.
+
+Current image and video diffusion models are highly adept at generating text-conditioned synthetic data~\citep{podell2023sdxl, zhang2023i2vgen, blattmann2023stable}. If actions can be expressed as natural language, these models have the potential to be used out-of-the-box for decision-making~\citep{kapelyukh2023dall, zhu2024sora}.
+However, in many real-world domains the core challenge is optimizing low-level actions, such as joint angles in robotics, and therefore using natural language as the only interface is insufficient.
+To overcome this limitation, one option is to finetune a pre-trained model to condition on low-level actions for a domain-specific dataset~\citep{seo2022reinforcement}. 
+Another possibility is to apply existing adapter architectures such as ControlNet~\citep{zhang2023adding}, to add action-conditioning by modifying the activations inside the original model.
+However, the parameters for state-of-the-art video diffusion models are usually not available publicly~\citep{LumaAI, sora, runwaymlRunwayResearch}, which rules out these approaches.
+
+In this work we address the problem of exploiting a pretrained video diffusion model to generate action-conditioned predictions~\textit{without access to the parameters of the pretrained model}.
+Inspired by the recent work from \citet{yang2024probabilistic}, we instead assume that we only have access to the noise predictions of the pretrained diffusion model.
+We propose AVID, a domain-specific adapter that conditions on actions and modifies the noise predictions of the pretrained model to generate accurate action-conditioned predictions.
+To train the adapter, we assume that we have access to a domain-specific dataset of action-labelled videos.
+The core contributions of our work are:
+\begin{itemize}[leftmargin=*]
+    \item Proposing to adapt pretrained video diffusion models to action-conditioned world models, without access to the parameters of the pretrained model.
+    \item Analyzing the limitations of the adaptation approach proposed by \citet{yang2024probabilistic}.
+    \item AVID, a novel approach to adding conditioning to pretrained diffusion models. AVID applies a learned mask to the outputs of of a pretrained model, and combines them with conditional outputs learned by a domain-specific adapter.
+\end{itemize}
+We evaluate AVID on video game data, as well as real-world robotics data where we use a 1.4B parameter model trained on internet-scale data as the pretrained model~\citep{xing2023dynamicrafter}.
+Our results show that our  approach outperforms existing baselines, and demonstrates that AVID obtains a considerable benefit from using the pretrained model, even with limited access to the model.
+We advocate for providers of closed-source video models to provide access to intermediate model outputs in their APIs to facilitate more flexible use of these models.
+
+
+\section{Preliminaries}
+
+
+\paragraph{Denoising Diffusion Probabilistic Models (DDPM)} 
+Diffusion models~\citep{ho2020denoising, sohl2015deep} are a class of generative models.
+Consider a sequence of positive noise scales, $0 < \beta_1, \beta_2, \ldots, \beta_N < 1$.
+In the forward process, for each training data point $\mathbf{x}_0 \sim p_{\mathrm{data}}(\mathbf{x})$, a Markov chain $\mathbf{x}_0, \mathbf{x}_1,\ldots,\mathbf{x}_N$ is constructed such that $p(\mathbf{x}_i \ |\ \mathbf{x}_{i-1}) = \mathcal{N}(\mathbf{x}_i; \sqrt{1 - \beta_i}\mathbf{x}_{i-1}, \beta_i\mathbf{I})$.
+Therefore, $p_{\alpha_i}(\mathbf{x}_i\ |\ \mathbf{x}_0) = {\mathcal{N}(\mathbf{x}_i; \sqrt{\alpha_i}\mathbf{x}_0, (1-\alpha_i)\mathbf{I})}$, where $\alpha_i := \Pi_{j=1}^i (1 - \beta_j)$.
+We denote the perturbed data distribution as $p_{\alpha_i}(\mathbf{x}_i) := \int p_{\mathrm{data}}(\mathbf{x}) p_{\alpha_i}(\mathbf{x}_i \ |\ \mathbf{x}) \mathrm{d}\mathbf{x}$.
+The noise scales are chosen such that $\mathbf{x}_N$ is distributed according to $\mathcal{N}(\mathbf{0}, \mathbf{I})$.
+Define $s(\mathbf{x}_i, i)$ to be the score function of the perturbed data distribution: $s(\mathbf{x}_i, i) := \nabla_{\mathbf{x}_i} \log p_{\alpha_i}(\mathbf{x}_i)$, for all $i$.
+Samples can be generated from a diffusion model via Langevin dynamics by starting from $\mathbf{x}_N \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ and following the recursion:
+\begin{equation}
+    \mathbf{x}_{i-1} = \frac{1}{\sqrt{1 - \beta_i}}(\mathbf{x}_i + \beta_i s_{\mathbf{\theta}}(\mathbf{x}_i, i) ) + \sqrt{\beta}_i \mathbf{z}, \label{eq:diffusion_sample}
+\end{equation}
+where $s_\theta$ is a learned approximation to the true score function $s$, and $\mathbf{z}$ is a sample from the standard normal distribution.
+If we reparameterize the sampling of the noisy data points according to: $\mathbf{x}_i = \sqrt{\alpha_i}\mathbf{x}_0 + \sqrt{1 - \alpha_i}\boldsymbol\epsilon$, where $\boldsymbol\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, we observe that
+$
+\nabla_{\mathbf{x}_i} \log p_{\alpha_i}(\mathbf{x}_i |\ \mathbf{x}_0) = - \frac{\boldsymbol\epsilon}{\sqrt{1 - \alpha_i}}.$
+Therefore, we can define the estimated score function 
+in terms of a function $\mathbf{\epsilon_\theta}$ that predicts the noise $\boldsymbol\epsilon$ used to generate each sample
+\begin{equation}
+    s_\theta(\mathbf{x}_i, i) := -\frac{\mathbf{\epsilon}_\theta (\mathbf{x}_i, i)}{\sqrt{1 - \alpha_i}}.
+\end{equation}
+The noise prediction model $\mathbf{\epsilon}_\theta$ is trained to optimize the objective
+\begin{equation}
+    \mathbf{\theta}^* = \argmin_{\mathbf{\theta}} \mathbb{E}_{\mathbf{x}_0 \sim p_\mathrm{data}(\mathbf{x}),{\boldsymbol\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})}, i \sim \mathcal{U}(\{1, 2, \dots, N\})} \big[ ||\boldsymbol\epsilon -  \epsilon_\theta (\sqrt{\alpha_i}\mathbf{x}_0 + \sqrt{1 - \alpha_i}\boldsymbol\epsilon, i)||^2  \big] \label{eq:diffusion_noise_obj}.
+\end{equation}
+To add a conditioning signal to the diffusion model, the denoising can be trained with an additional conditioning signal $\mathbf{\epsilon}_\theta (\mathbf{x}_i, i, c)$, where $c$ is the desired conditioning signal.
+\paragraph{Probabilistic Adaptation of Diffusion Models} \cite{yang2024probabilistic} proposes to model the problem of diffusion model adaptation via a product of experts. Given a pretrained model $p_{\text{pre}}(\mathbf{x})$ and a small domain specific video model $p_{\text{adapt}}(\mathbf{x})$, the final adapted model is defined as the following product of expert (PoE) distribution:
+$$p_\textnormal{PoE} := \frac{p_{\text{pre}}(\mathbf{x})p_{\text{adapt}}(\mathbf{x})}{Z},$$
+ which generates samples that are likely under both of the original models, with the aim of maintaining strong video quality from $p_{\text{pre}}(\mathbf{x})$ and the desired domain-specific quality from $p_{\text{adapt}}(\mathbf{x})$.
+In practice, $p_\textnormal{PoE}$ is intractable. To sample from the PoE, the authors propose to compose their scores:
+$$ \mathbf{\epsilon}_{\text{PoE}} (\mathbf{x}_i, i, c) := 
+\mathbf{\epsilon}_{\text{pre}} (\mathbf{x}_i, i, c) + \mathbf{\epsilon}_{\text{adapt}} (\mathbf{x}_i, i, c), $$
+and pass the combined score to a  DDPM sampler.
+
+
+
+\section{Adapting Video Diffusion Models to World Models (AVID)}
+
+
+\subsection{Problem Setting}
+
+In the context of video diffusion models each datapoint is a video, $\mathbf{x} = [x^0, x^1, \ldots, x^{T-1}]$, where $x^\tau$ indicates a video frame. Note that we use superscript indices, $x^\tau$, to indicate steps in time, and subscript indices, $\mathbf{x}_i$, to indicate steps in a diffusion process. We assume that we have access to a pretrained image-to-video diffusion model $\epsilon_{\textnormal{pre}}$, that is trained on web-scale data. Given an initial image, $x^0$, the image-to-video model  $\epsilon_{\textnormal{pre}}$ generates a synthetic video $\hat{\mathbf{x}} = [x^0, \hat{x}^1, \ldots, \hat{x}^{T-1}]$. 
+
+We consider each video to be a sequence of observations generated by a partially observable Markov decision process (POMDP)~\citep{kaelbling1998planning}, with corresponding action sequence $\mathbf{a} = [a^0, a^1, \ldots, a^{T-1}]$. For each domain, we assume access to a dataset of action-labelled videos, $\mathcal{D} = \{(\mathbf{x}, \mathbf{a}), \ldots\}$. Given a new initial image, $x^0$, and action sequence $\mathbf{a}$, the goal is to generate a synthetic video $\hat{\mathbf{x}}$ that accurately depicts the ground-truth realization of the actions.
+
+To utilize the pretrained model $\epsilon_{\textnormal{pre}}$, we need to add action-conditioning to the model as accurate videos cannot be generated without the actions. Adding a new conditioning signal to a pretrained diffusion model is well-explored in previous works~\citep{zhang2023adding, mou2024t2i,mokady2023null}. However, most existing works assume access to the parameters of the pretrained model. In this work, we assume that we \textit{do not have access to the parameters of the pretrained model}.
+\subsection{Limitations of naive adaptation of \cite{yang2024probabilistic}}
+\label{sec:yang_limitations}
+
+\cite{yang2024probabilistic} propose to adapt a pretrained diffusion model to a specific use-case without access it its weights by composing (omitting the prior strength $\lambda$):
+\begin{align}
+\mathbf{\epsilon}_{\text{PoE}} (\mathbf{x}_i, i, c) := 
+\mathbf{\epsilon}_{\text{pre}} (\mathbf{x}_i, i, c) + \mathbf{\epsilon}_{\text{adapt}} (\mathbf{x}_i, i, c) \label{eq: yang}
+\end{align}
+However, this method has a fundamental limitation that it will produce biased samples. To see this, consider the following forward diffusion process 
+$$d\mathbf{x} = -\frac{1}{2} \beta(t) \mathbf{x} dt + \sqrt{\beta(t)} dW, $$
+where $t$ indicates continuous time. Assume the intial target distribution at $t=0$ is $p_0(\mathbf{x}) := p_\textnormal{PoE} = \frac{p_{\text{pre}}(\mathbf{x})p_{\text{adapt}}(\mathbf{x})}{Z}$. 
+Notice that the transition kernel can be written as \citep{sarkka2019applied}:
+$$p(\mathbf{x}_t|\mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \mathbf{x}_0 e^{-\frac{1}{2} \int_0^t \beta(s) ds }, I-I e^{- \int_0^t \beta(s) ds})$$
+Therefore, for $\forall t>0$, the resulting distribution is the convolution $p_t(\mathbf{x}_t) = p_0(\mathbf{x}_0) * \mathcal{N}(\mathbf{x}_t - \mathbf{x}_0 e^{-\frac{1}{2} \int_0^t \beta(s) ds }; 0, I-I e^{- \int_0^t \beta(s) ds})$. 
+Due to the fact that convolution does not distribute over multiplication, the resulting score $s(\mathbf{x}_t, t)$ cannot be expressed as a sum of the two individual score functions:
+\begin{align*}
+s(\mathbf{x}_t, t)  = & \nabla_{\mathbf{x}_t} \log \left [p_0(\mathbf{x}_0) * \mathcal{N}(\mathbf{x}_t - \mathbf{x}_0 e^{-\frac{1}{2} \int_0^t \beta(s) ds }; 0, I-I e^{- \int_0^t \beta(s) ds}) \right ] \\
+ \neq  & \nabla_{\mathbf{x}_t} \log \left [ p_{0, \text{pre}}(\mathbf{x}_0) * \mathcal{N}(\mathbf{x}_t - \mathbf{x}_0 e^{-\frac{1}{2} \int_0^t \beta(s) ds }; 0, I-I e^{- \int_0^t \beta(s) ds}) \right ] \\
+& + \nabla_{\mathbf{x}_t} \log \left [ p_{0, \text{adapt}}(\mathbf{x}_0) * \mathcal{N}(\mathbf{x}_t - \mathbf{x}_0 e^{-\frac{1}{2} \int_0^t \beta(s) ds }; 0, I-I e^{- \int_0^t \beta(s) ds}) \right ]
+\end{align*}
+As a result, the true noise prediction of the target distribution also cannot be expressed as a sum: $\mathbf{\epsilon}_{\text{PoE}} (\mathbf{x}_t, t, c) \neq
+\mathbf{\epsilon}_{\text{pre}} (\mathbf{x}_t, t, c) + \mathbf{\epsilon}_{\text{adapt}} (\mathbf{x}_t, t, c)$. Therefore, the composition in  \Cref{eq: yang} does not hold and  will result in biased samples. 
+In the following section, we propose AVID to overcome this limitation.
+Rather than attempting to compose two independently trained models, AVID uses the outputs of the pretrained model to train an adapter that directly optimizes the denoising loss.
+
+\subsection{Adapting Video Diffusion Models to World Models (AVID)}
+\label{sec:avid}
+AVID is a new approach for diffusion model adaptation that does not require access to the pretrained model.  The motivation for AVID is that while pretrained image-to-video models can generate \textit{realistic} videos, they cannot generate videos that are \textit{accurate} with respect to a given sequence of actions. To achieve accuracy, the pretrained model must be guided towards the correct generation for the action sequence. However, as our experiments show, techniques such as classifier(-free) guidance do not perform well in this setting. AVID addresses this by training a lightweight adapter to adjust the output of the pretrained model to achieve accurate action-conditioned video predictions.
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/video-adapter.png}
+    \caption{Overview of AVID world model adapter architecture.}
+    \label{fig:your_label}
+\end{figure}
+AVID trains an adapter that takes the output of the pretrained model as an input. AVID learns to generate a mask, and uses this mask to combine the outputs of the pretrained model with those of the adapter. The final combined output is used to compute the standard denoising loss, and the adapter parameters are trained to optimize this loss. 
+We train the AVID adapter using samples $(\mathbf{x}, \mathbf{a})$ from the action-labelled dataset.
+For the pretrained image-to-video model $\epsilon_{\textnormal{pre}}$ we assume that we do not have to access to it's parameters, $\theta_{\textnormal{pre}}$, but we can run inference using the model to obtain it's noise predictions.  To do this, we input a noisy video, $\mathbf{x}_i \in \mathbb{R}^{T \times h \times w \times c}$, initial image, $x^0 \in \mathbb{R}^{h \times w \times c}$, and diffusion step, $i$, to the pretrained image-to-video model to obtain its noise prediction, $\epsilon_{\textnormal{pre}}(\mathbf{x}_i, i, x_0) \in \mathbb{R}^{T \times h \times w \times c}$. The parameters of the pretrained model $\epsilon_{\textnormal{pre}}$ are not modified.
+
+The adapter that we train is a 3D UNet~\citep{ho2022video, ronneberger2015u} consisting of a sequence of spatio-temporal blocks with residual connections. Each spatio-temporal block consists of a 3D convolution, spatial attention, and temporal attention~\citep{ho2022video}. The UNet takes as input a tensor of shape $\mathbb{R}^{T \times h \times w \times 3c}$. The input consists of the noisy video, $\mathbf{x}_i $, the output of the pretrained model, $\epsilon_{\textnormal{pre}}(\mathbf{x}_i, i, x_0)$, and the initial image $x^0$ repeated $T$ times across the time dimension. These three inputs are concatenated channel-wise to create the input tensor.
+
+The adapter is also conditioned on the diffusion step $i$ and the sequence of actions $\mathbf{a}$. For noisy video $\mathbf{x}_i$ we embed the diffusion timestep according to a learned embedding table to get the diffusion step embedding $e_i$. For each timestep $\tau$ of the noisy video $\mathbf{x}_i$ we embed the corresponding action $a^\tau$ to compute the action embedding $e_{a}^\tau$ using an embedding table for discrete actions or a linear layer for continuous actions. In each block, these two embeddings are concatenated and processed by an MLP to compute the scale and shift parameters, $\gamma^\tau$ and $\beta^\tau$, for the $\tau^{th}$ frame. These parameters scale and shift the feature maps of the $\tau^{th}$ frame after each 3D convolution~\citep{perez2018film}.
+To inject the correct action-conditioning into the predictions made by the pretrained model, the adapter needs to erase incorrect motions predicted by the pretrained model and add the correct motion. To facilitate this, the adapter outputs a tensor of shape $\mathbb{R}^{T \times h \times w \times (c + 1)}$ consisting of a mask, $m \in \mathbb{R}^{T \times h \times w \times 1}$ which is bounded between 0 and 1 by a sigmoid layer, and the noise prediction from the adapter $\epsilon_{\textnormal{adapt}}$.
+The mask is then used to combine the noise predictions from the pretrained model and the adapter according to:
+\begin{equation}
+    \epsilon_{\textnormal{final}}(\mathbf{x}_i, \mathbf{a}, i, x_0) = \epsilon_{\textnormal{pre}} \odot m + \epsilon_{\textnormal{adapt}} \odot (1 - m), 
+\end{equation}
+where $\odot$ denotes the Hadamard product, and the mask is broadcast across all $c$ channels.
+The parameters of the adapter model, $\theta_{\textnormal{adapt}}$, are optimized to minimise the standard unweighted denoising loss using $\epsilon_{\textnormal{final}}$:
+\begin{equation}
+    \mathcal{L}(\theta_{\textnormal{adapt}}) = \mathbb{E}_{(\mathbf{x}, \mathbf{a}) \sim \mathcal{D}, {\boldsymbol\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})}, i \sim \mathcal{U}(\{1, 2, \dots, N\})}\|\epsilon_{\textnormal{final}}(\mathbf{x}_i, \mathbf{a}, i, x_0) - \boldsymbol\epsilon \|^2.  \label{eq:adapt_loss}
+\end{equation}
+In the case where $\epsilon_{\textnormal{pre}}$ is a latent diffusion model, we assume that we can also run inference on the corresponding encoder and decoder.
+For each training example, we first encode the video: $\mathbf{z} = \mathtt{enc}(\mathbf{x})$ where $\mathbf{z} \in \mathbb{R}^{T \times h' \times w' \times c'}$, and add noise to this latent representation of the video to produce noisy latent $\mathbf{z}_i$.
+The rest of the pipeline proceeds in the same manner, except that the initial image $x^0$ is replaced by  the latent corresponding to the first frame, $z^0$, and the noisy video $\mathbf{x}_i$ is replaced by the noisy latent $\mathbf{z}_i$. The adapter loss in Equation~\ref{eq:adapt_loss} predicts the noise added to the latent sample, and we decode the sampled latent to generate the final video.
+
+
+\section{Experiments}
+
+We evaluate AVID in two different domains with different pretrained base models. As the focus of our work is on training lightweight adapters with limited compute, we compare adapter models with limited parameters under a computational budget.
+\paragraph{Procgen} The pretrained model is a pixel-space image-to-video diffusion model~\citep{ho2022video} trained on videos sampled from 15 out of the 16 procedurally generated games of Procgen~\citep{cobbe2020leveraging}, excluding the 16th game Coinrun.
+The adaptation approaches are trained using an action-labelled dataset sampled from Coinrun.
+At each timestep, the discrete action is one of 15 possible keypad inputs, and the models are trained on sequences of 10 frames.
+Each adaptation approach is limited to 3 days of training on a single A100 GPU.
+We test three dataset sizes, \textit{Coinrun100k/500k/2.5M}, evaluate the models on a held-out test set of initial frames and actions.
+
+\paragraph{RT1 + DynamiCrafter} In this benchmark, the pretrained model is DynamiCrafter~\citep{xing2023dynamicrafter} which is currently one of the best performing  image-to-video models in the VBench image-to-video leaderboard~\citep{huang2024vbench}. DynamiCrafter is a latent image-to-video diffusion model that uses the autoencoder from Stable Diffusion~\citep{rombach2022high} and a 1.4B parameter 3D UNet trained on web-scale video data. As DynamiCrafter is a latent diffusion model, we assume that we can run inference on the encoder and decoder as described in Section~\ref{sec:avid}.
+For the action-labelled dataset we use the RT1 dataset~\citep{brohan2022rt} which consists of real-world robotics videos. The action at each step is a 7 dimensional continuous vector corresponding to the movement and rotation of the end effector and opening or closing of the gripper. The models are trained on trajectories of 16 frames. Each adaptation approach is limited to 7 days of training on $4\times$ A100 GPUs, and is evaluated using a held-out test set of ground truth trajectories.
+
+\subsection{Baselines}
+\label{sec:baselines}
+We compare AVID with several baselines, both with and without access to the parameters of the pretrained model.
+
+\textbf{Full access to pretrained model parameters:}
+\begin{itemize}[leftmargin=*, topsep=0pt]
+\setlength\itemsep{0.3mm}
+    \item \textit{Action-Conditioned Finetuning} -- tunes all of the parameters of the pretrained model on the action-conditioned dataset. To add action-conditioning, we first compute an action embedding according to Section~\ref{sec:avid}. For Procgen and RT1, we concatenate and add the action embeddings with the time step embeddings respectively. 
+    \item \textit{Language-Conditioned Finetuning} -- finetunes the pretrained model using a language description of each video. The language is embedded using CLIP~\citep{radford2021learning} and conditioned upon using cross-attention following~\cite{xing2023dynamicrafter}.
+    \item \textit{ControlNet} \citep{zhang2023adding} -- freezes the parameters of the pretrained model  and makes a \textit{trainable copy}  of its UNet encoder. The trainable part of the model is conditioned on a new signal, and connected to the decoder in the original model via convolutions which are initialised to zero. In our work, we use ControlNet to add action-conditioning. 
+    \item \textit{ControlNet Small} -- ControlNet still has a large number of trainable parameters. ControlNet Small freezes the pretrained model in the same way as ControlNet, but reduces the number of trainable parameters to a similar amount to AVID by decreasing the number of channels in the layers of the UNet encoder. A learned projection at each layer projects the activations of the smaller model to match the number of channels in the pretrained base model.
+\end{itemize}
+\textbf{No access to pretrained model parameters\ \ } For a fair comparison to AVID, we evaluate the following approaches which either do not leverage the pretrained model or, like AVID, assume access to only noise predictions from the pretrained model:
+\begin{itemize}[leftmargin=*, topsep=0pt]
+    \setlength\itemsep{0.3mm}
+    \item \textit{Action-Conditioned Diffusion} -- We train an action-conditioned diffusion model $\boldsymbol{\epsilon}_{\theta}(\mathbf{x}_i, \mathbf{a}, i, x_0)$  from scratch, with the same number of parameters and same UNet architecture as AVID.
+    \item \textit{Classifier Guidance} \citep{dhariwal2021diffusion} -- We train a classifier $f_{\phi}(\mathbf{a} | \mathbf{x}_i)$ on noisy images $\mathbf{x}_i$ to predict actions. With weighting $w$, the classifier is used to steer the diffusion sampling process towards samples consistent with the actions. The final noise prediction becomes: 
+    \begin{align*}
+        \bar{\boldsymbol{\epsilon}}_{\textnormal{final}}(\mathbf{x}_i, \mathbf{a}, i, x_0) = \boldsymbol{\epsilon}_{\textnormal{pre}}(\mathbf{x}_i, i, x_0) - \sqrt{1 - \bar{\alpha}_t} \; w \nabla_{\mathbf{x}_i} \log f_\phi(\mathbf{a} \vert \mathbf{x}_i).
+    \end{align*}
+
+    \item \textit{Product of Experts} -- Inspired by \citet{yang2024probabilistic}, we add action conditioning to a pretrained video diffusion model by adding its score to an action-conditioned model.
+    We train a small video diffusion model on action conditioned data $\boldsymbol{\epsilon}_{\textnormal{adapt}}(\mathbf{x}_i, \mathbf{a}, i, x_0)$, and compute the final denoising prediction as a weighted sum of predictions from the pretrained and action-conditioned models:
+    \begin{align*}
+    \bar{\boldsymbol{\epsilon}}_{\textnormal{final}}(\mathbf{x}_i, \mathbf{a}, i, x_0) = \lambda_{p}\boldsymbol{\epsilon}_{\textnormal{adapt}}(\mathbf{x}_i, \mathbf{a}, i, x_0) + (1-\lambda_{p}) \boldsymbol{\epsilon}_{\textnormal{pre}}(\mathbf{x}_i, i, x_0),
+    \end{align*}
+    where $\lambda_{p}$ controls the strength of the pretrained prior  during video generation.
+    \item \textit{Action Classifier-Free Guidance} \citep{ho2022classifier} -- We train a small action-conditioned diffusion model $\boldsymbol{\epsilon}_{\textnormal{adapt}}(\mathbf{x}_i, \mathbf{a}, i, x_0)$  while randomly removing the action conditioning ($\mathbf{a} = \varnothing$) during training with probability $p=0.2$. 
+    We then compute the final denoising prediction as:
+    \begin{align*}
+        \bar{\boldsymbol{\epsilon}}_{\textnormal{final}}(\mathbf{x}_i, \mathbf{a}, i, x_0) = \boldsymbol{\epsilon}_{\textnormal{pre}}(\mathbf{x}_i, i, x_0) + \lambda_{a} \left(\boldsymbol{\epsilon}_{\textnormal{adapt}}(\mathbf{x}_i, \mathbf{a}, i, x_0) - \boldsymbol{\epsilon}_{\textnormal{adapt}}(\mathbf{x}_i, \mathbf{a} = \varnothing, i, x_0)\right).
+    \end{align*}
+    Note that unlike standard classifier-free guidance this approach combines predictions from two separate models, $\boldsymbol{\epsilon}_{\textnormal{pre}}$ and $\boldsymbol{\epsilon}_{\textnormal{adapt}} $, which are trained on different data.
+\end{itemize}
+
+\subsection{Evaluation}
+For evaluation, we use a set of 1024 held-out test videos and their corresponding action sequences. We generate 1024 synthetic videos by conditioning the models on each initial frame and action sequence, and compare the generated videos against the ground truth using the following metrics: 
+\begin{itemize}[leftmargin=*, topsep=0pt]
+    \setlength\itemsep{0.3mm}
+    \item \textit{Action Error Ratio} -- To assess the consistency between the videos and the action sequences, we train a model to predict actions from real videos. The Action Error Ratio is the ratio of errors obtained by using this model on generated videos, divided by the error obtained on real videos.
+    \item \textit{FVD}~\citep{unterthiner2019fvd} -- measures the similarity between feature distributions of generated and real video sequences in the I3D network~\citep{carreira2017quo}, accounting for both spatial quality and temporal coherence. 
+   \item \textit{FID}~\citep{heusel2017gans} -- compares the feature distributions of all real and generated images in the Inception-v3 network~\citep{szegedy2015going}, measuring the quality and variety of the images. 
+    \item \textit{SSIM}~\citep{wang2004image} -- compares each ground truth and generated image, focusing on luminance, contrast, and structural information. 
+    \item \textit{PSNR}~\citep{hore2010image} -- is computed using the mean squared error between each ground truth and generated video, and thus computes the distance between the videos in pixel-space.
+    \item \textit{LPIPS}~\citep{zhang2018unreasonable} -- compares the similarity between the features representations of each ground truth and predicted image using the VGG network~\citep{simonyan2014very}. 
+\end{itemize}
+We bold results within 2\% of the best performance in each model size category. We also compute normalized metrics by normalizing each value between 0 and 1.
+
+\begin{figure}[t!]
+    \centering
+    \begin{minipage}{0.055\textwidth} % Column for rotated method name
+        \centering
+        \raisebox{0.3\textwidth}{\rotatebox{90}{\textbf{\tiny Ground Truth}}} % Rotating and vertically centering method name
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/real_videos/3-70-real_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/real_videos/3-70-real_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/real_videos/3-70-real_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/real_videos/3-70-real_frames/frame_9.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/real_videos/3-70-real_frames/frame_12.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/real_videos/3-70-real_frames/frame_15.png}
+    \end{minipage}%
+   \begin{minipage}{0.055\textwidth} % Column for rotated method name
+        \centering
+        \raisebox{0.3\textwidth}{\rotatebox{90}{\textbf{\tiny AVID 145M}}} % Rotating and vertically centering method name
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/avid_145M/3-70-samples_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/avid_145M/3-70-samples_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/avid_145M/3-70-samples_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/avid_145M/3-70-samples_frames/frame_9.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/avid_145M/3-70-samples_frames/frame_12.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/avid_145M/3-70-samples_frames/frame_15.png}
+    \end{minipage}%
+    \begin{minipage}{0.055\textwidth} % Column for rotated method name
+        \centering
+        \raisebox{0.1\textwidth}{\rotatebox{90}{\textbf{\tiny \shortstack{Action Cond.\\Diffusion 145M }}}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/act_cond_diffusion_145M/3-70-samples_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/act_cond_diffusion_145M/3-70-samples_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/act_cond_diffusion_145M/3-70-samples_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/act_cond_diffusion_145M/3-70-samples_frames/frame_9.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/act_cond_diffusion_145M/3-70-samples_frames/frame_12.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rt1/edited_frames/3-70_act_cond_145M_final_frame.png}
+    \end{minipage}%
+    \begin{minipage}{0.055\textwidth} % Column for rotated method name
+       \centering
+        \raisebox{0.1\textwidth}{\rotatebox{90}{\textbf{\tiny \shortstack{AVID 145M\\Latent Mask}}}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/rt1_avid_145M/3-70-mask_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/rt1_avid_145M/3-70-mask_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/rt1_avid_145M/3-70-mask_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/rt1_avid_145M/3-70-mask_frames/frame_9.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/rt1_avid_145M/3-70-mask_frames/frame_12.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.15\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/rt1_avid_145M/3-70-mask_frames/frame_15.png}
+    \end{minipage}%
+ Bottom row: Mask generated in downsampled latent space by AVID. White indicates the mask is set to 1 and black indicates the mask is set to 0.\label{fig:rt1_qual}}
+\end{figure}
+\begin{figure}[t!]
+    \begin{minipage}{0.06\textwidth} % Column for rotated method name
+        \centering
+        \raisebox{0.3\textwidth}{\rotatebox{90}{\textbf{\tiny Ground Truth}}} % Rotating and vertically centering method name
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_2.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_5.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_8.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/real_videos/3-424_frames/frame_9.png}
+    \end{minipage}%
+    \begin{minipage}{0.06\textwidth} % Column for rotated method name
+        \centering
+        \raisebox{0.3\textwidth}{\rotatebox{90}{\textbf{\tiny AVID 71M}}} % Rotating and vertically centering method name
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_2.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_5.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_8.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/avid_71M/3-424_frames/frame_9.png}
+    \end{minipage}%
+    \begin{minipage}{0.06\textwidth} % Column for rotated method name
+        \centering
+        \raisebox{0.1\textwidth}{\rotatebox{90}{\textbf{\tiny \shortstack{Action Cond.\\Diffusion 71M }}}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_0.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_2.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_3.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_5.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_6.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_8.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/coinrun/act_cond_diffusion_71M/3-424_frames/frame_9.png}
+    \end{minipage}%
+    \begin{minipage}{0.06\textwidth} % Column for rotated method name
+        \centering
+         \raisebox{0.1\textwidth}{\rotatebox{90}{\textbf{\tiny \shortstack{AVID 71M \\ Mask}}}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_1.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_1.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_2.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_4.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_5.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_7.png}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.125\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/masking/coinrun_avid_71M/3-424_frames/frame_8.png}
+    \end{minipage}%
+ Bottom row: Mask generated by AVID where white indicates
+the mask is set to 1 and black indicates the mask is set to 0.\label{fig:procgen_qualitative}}
+\end{figure}
+\subsection{Results}
+\textbf{Qualitative Results\ \ }
+ We observe for both RT1 and Coinrun that the action-conditioned diffusion model trained from scratch fails to maintain consistency with the original conditioning image: objects in the initial image disappear in later frames in the video. In contrast, the videos generated by AVID are consistent throughout. In both AVID and action-conditioned diffusion, we observe that the motion in the generated videos is accurate compared to the ground truth motion. The masks generated by AVID are visualised in Figures~\ref{fig:rt1_qual} and~\ref{fig:procgen_qualitative}. The lighter parts of the mask show that the pretrained models predictions are predominantly used by AVID for maintaining background textures. The mask is reduced nearer to 0 around the robot arm in RT1 and the character in Coinrun, showing that the adapter outputs are predominantly used for action-relevant parts of the video.
+
+
+
+\textbf{Quantitative  Results\ \ } To evaluate overall performance, in Figures~\ref{fig:rt1_perf} and~\ref{fig:coinrun500_perf} we plot the normalized performance averaged across all evaluation metrics. 
+AVID obtains similar or slightly better overall performance compared to ControlNet/ControlNet Small on both Coinrun500k and RT1. Note that unlike ControlNet variants,  AVID does not require access to the weights of the original pretrained model.
+For RT1, we observe that training an action-conditioned diffusion model performs slightly worse than AVID at the largest model size. For Coinrun500k, AVID significantly outperforms action-conditioned diffusion at the larger model size. As the number of trainable parameters is reduced, the performance of action-conditioned diffusion declines much more quickly than AVID in both domains, and therefore AVID is considerably stronger at smaller model sizes.
+In Figure~\ref{fig:coinrun_perf} we plot the overall performance of these three approaches against the  Coinrun dataset size. A similar trend is observed for all approaches as dataset size is modified.
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/rt1_performance.png}
+        \caption{}
+        \label{fig:rt1_perf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/coinrun500k_performance.png}
+        \caption{}
+        \label{fig:coinrun500_perf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/coinrun_performance.png}
+        \caption{}
+        \label{fig:coinrun_perf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mask_levels.png}
+        \caption{}
+        \label{fig:mask_levels}
+    \end{subfigure}
+    \caption{(a) RT1 averaged normalized performance versus parameter count. (b) Coinrun500k averaged normalized performance versus parameter count. (c) Coinrun averaged normalized performance versus dataset size. (d) Average mask ($m$) values of AVID throughout diffusion process.}
+    \label{fig:mainfig}
+\end{figure}
+\begin{table}[t!]
+\tiny
+\centering
+\begin{tabular}{|l|l|>{\centering\arraybackslash}p{1.1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|}
+\hline
+\rowcolor[HTML]{2A5B93} &
+\textbf{\textcolor{white}{Method}} &
+ \textbf{\textcolor{white}{Action Err. Ratio $\downarrow$}} &
+  \textbf{\textcolor{white}{FVD $\downarrow$}} &
+  \textbf{\textcolor{white}{FID $\downarrow$}} &
+  \textbf{\textcolor{white}{SSIM $\uparrow$}} &
+  \textbf{\textcolor{white}{LPIPS $\downarrow$}} &
+  \textbf{\textcolor{white}{PSNR $\uparrow$}} 
+  \\ \hline
+\multirow{5}{*}{\rotatebox{90}{\textbf{Medium}}} &
+  AVID (Ours) (22M) &
+ \textbf{1.257} &
+ \textbf{28.5} &
+ \textbf{8.07} &
+ \textbf{0.666} & 
+ \textbf{0.192} &
+ \textbf{22.4}
+ \\ 
+  &   Action-Conditioned Diffusion (22M) &
+ 1.500 &
+ 41.6 & 
+ 8.95 & 
+ 0.562 &
+ 0.284 &
+ 18.7 
+ \\ 
+ &
+  Product of Experts (22M) &
+1.601 &
+101.8 &
+9.96 &
+0.584 &
+0.281 &
+19.1
+ \\ 
+ &
+  Action Classifier-Free Guidance (22M) &
+1.966 &
+191.1 &
+13.09 & 
+0.454 &
+0.3495 &
+17.5 \\  
+ &
+  ControlNet-Small (22M) \shadecell &
+ 1.465 \shadecell &
+ 34.7 \shadecell & 
+ 8.49 \shadecell & 
+ 0.652 \shadecell &
+ 0.205 \shadecell &
+ 21.9  \shadecell
+ \\ \hline
+\multirow{5}{*}{\rotatebox{90}{\textbf{Large}}} &
+  AVID (Ours) (71M) &
+\textbf{1.154} &
+23.1 &
+7.33 & 
+0.713 &
+0.161 &
+23.8
+\\ 
+  &  Action-Conditioned Diffusion (71M) &
+1.216 &
+31.3 &
+7.78 & 
+0.648 & 
+0.220 & 
+20.9 
+  \\ 
+ &
+  Product of Experts (71M) &
+  1.247 &
+ 84.8 &
+ 9.07 &
+ 0.651 &
+ 0.229 &
+ 21.0 \\ 
+ &
+  Action Classifier-Free Guidance (71M) &
+  2.079 &
+  188.7 &
+  13.05 &
+  0.463 &
+  0.341 &
+  17.7 \\ 
+ &
+  ControlNet (71M) \shadecell &
+  1.418 \shadecell &
+  \textbf{18.5} \shadecell &
+  \textbf{7.16} \shadecell &
+\textbf{0.758} \shadecell &
+\textbf{0.128} \shadecell &
+\textbf{25.5}  \shadecell
+ \\ \hline
+\multirow{4}{*}{\rotatebox{90}{\textbf{Full}}} &
+  Pretrained Base Model (97M) &
+ 3.855 &
+ 204.0 &
+ 13.03 &
+ 0.451 &
+0.352 & 
+17.3 
+ \\ 
+ &
+  Classifier Guidance &
+  4.070 &
+  192.9 &
+  12.68 &
+  0.450 &
+  0.351 &
+  17.4 \\ 
+ &
+  Action-Conditioned Finetuning (97M) \shadecell &
+\textbf{1.227} \shadecell &
+\textbf{14.1} \shadecell &
+\textbf{6.52} \shadecell &
+\textbf{0.761} \shadecell & 
+\textbf{0.120} \shadecell &
+\textbf{25.8} \shadecell
+ \\ \hline
+\end{tabular}
+\caption{Results for Coinrun 500k dataset. Methods trained for 3 days on a single A100. Shading indicates method requires access to the model parameters. Brackets indicate trainable parameters.}
+\label{tab:results_coinrun500k}
+\end{table}
+\begin{table}[t!]
+\tiny
+\centering
+\begin{tabular}{|l|l|>{\centering\arraybackslash}p{1.1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|}
+\hline
+\rowcolor[HTML]{2A5B93} &
+\textbf{\textcolor{white}{Method}} &
+ \textbf{\textcolor{white}{Action Err. Ratio $\downarrow$}} &
+  \textbf{\textcolor{white}{FVD $\downarrow$}} &
+  \textbf{\textcolor{white}{FID $\downarrow$}} &
+  \textbf{\textcolor{white}{SSIM $\uparrow$}} &
+  \textbf{\textcolor{white}{LPIPS $\downarrow$}} &
+  \textbf{\textcolor{white}{PSNR $\uparrow$}} 
+  \\ \hline
+\multirow{5}{*}{\rotatebox{90}{\textbf{Small}}} &
+  AVID (Ours) (11M) &
+  2.572 &
+  54.0 &
+  4.344 &
+  \textbf{0.811} &
+  \textbf{0.166} & 
+ \textbf{24.5} \\ 
+  & Action-Conditioned Diffusion (11M) &
+  \textbf{2.238} &
+  80.4 &
+  5.329 &
+  0.767 &
+  0.226 & 
+  22.9 \\ 
+ &
+  Product of Experts (11M) &
+  2.859 &
+  89.9 &
+  5.276 &
+  0.790 &
+  0.201 & 
+  23.6 \\ 
+ &
+  Action Classifier-Free Guidance (11M) &
+  3.503 &
+  104.8 &
+  4.858 &
+  0.737 &
+  0.217 & 
+  22.2 \\ 
+ &
+ ControlNet-Small (10M) \shadecell  &
+  2.640 \shadecell &
+  \textbf{38.6} \shadecell &
+  \textbf{3.730} \shadecell &
+  \textbf{0.811} \shadecell &
+  \textbf{0.169} \shadecell & 
+  23.4 \shadecell \\  \hline
+\multirow{5}{*}{\rotatebox{90}{\textbf{Medium}}} &
+  AVID (Ours) (34M) &
+  1.907  &
+  38.7 &
+  3.645 &
+  \textbf{0.831} &
+  \textbf{0.150} &
+  \textbf{25.0} \\ 
+  &   Action-Conditioned Diffusion (34M) &
+ \textbf{1.737}  &
+  36.7 &
+  4.038 &
+  0.813 &
+  0.172 &
+  24.3  \\ 
+ &
+  Product of Experts (34M) &
+  2.421
+ &
+  61.7
+ &
+  4.533
+ &
+  0.813
+ &
+  0.175
+ &
+  24.4
+ \\ 
+ &
+  Action Classifier-Free Guidance (34M) &
+ 3.129 &
+ 71.4 &
+ 4.690 &
+ 0.748 &
+ 0.205 &
+22.6 \\  
+ &
+  ControlNet-Small (38M) \shadecell &
+  2.227 \shadecell &
+  \textbf{35.0} \shadecell &
+  \textbf{3.539} \shadecell &
+  \textbf{0.821} \shadecell &
+  0.162 \shadecell &
+  24.0 \shadecell \\ \hline
+\multirow{5}{*}{\rotatebox{90}{\textbf{Large}}} &
+  AVID (Ours) (145M) &
+  1.609 &
+  39.3 &
+  \textbf{3.436} &
+  \textbf{0.842} &
+  \textbf{0.142} &
+  \textbf{25.3} \\ 
+  & 
+  Action-Conditioned Diffusion (145M) &
+  \textbf{1.384} &
+  \textbf{24.9} &
+  3.504 &
+  0.817 &
+  0.153 &
+  24.6 \\ 
+ &
+  Product of Experts (145M) &
+  1.947 &
+  47.0 &
+  4.026 &
+  0.819 &
+  0.160 &
+  24.8 \\ 
+ &
+  Action Classifier-Free Guidance (145M) &
+  3.188 &
+  79.3 &
+  4.775 &
+  0.748 &
+  0.205 &
+  22.8 \\ 
+ &
+  ControlNet-Small (170M) \shadecell &
+  1.779 \shadecell &
+  30.0 \shadecell &
+  \textbf{3.375} \shadecell &
+  \textbf{0.832} \shadecell &
+  0.153 \shadecell &
+  24.4 \shadecell \\ \hline
+\multirow{5}{*}{\rotatebox{90}{\textbf{Full}}} &
+  Pretrained Base Model (1.4B) &
+   4.183 &
+  237.6 &
+  5.432 &
+  0.712 &
+  0.228 &
+  20.6 \\ 
+ &
+  Classifier Guidance &
+  4.182 &
+  213.1 &
+  6.005 &
+  0.683 &
+  0.250 &
+  19.8 \\ 
+ &
+  ControlNet (654M)  \shadecell &
+  1.708 \shadecell &
+  27.1 \shadecell &
+  3.248 \shadecell &
+  0.836 \shadecell &
+  0.148 \shadecell &
+  24.5 \shadecell  \\ 
+ &
+  Action-Conditioned Finetuning (1.4B) \shadecell &
+   \textbf{1.297} \shadecell &
+  \textbf{24.2} \shadecell &
+  \textbf{2.965} \shadecell &
+  \textbf{0.852} \shadecell &
+  \textbf{0.134} \shadecell &
+ \textbf{25.6} \shadecell \\ 
+ & \shadecell Language-Conditioned Finetuning (1.4B) &
+3.859 \shadecell&
+33.7 \shadecell&
+ 3.511 \shadecell&
+0.812 \shadecell & 
+0.177 \shadecell
+ &
+ 22.1 \shadecell\\ \hline
+\end{tabular}
+\caption{Quantitative results for RT1 dataset. Methods trained for 7 days on $4 \times$ A100. Shading indicates method requires access to the model parameters. Brackets indicate trainable parameters.}
+\label{tab:rt1_main_results}
+\end{table}
+In Figure~\ref{fig:mask_levels} we plot the average mask value at each step of the diffusion process. On RT1 AVID has a higher mask value, and therefore uses the pretrained model more heavily than on Coinrun. This is likely because the backgrounds in RT1 are mostly static and DynamiCrafter is a strong model. We see that the mask values are lower at diffusion steps where the noise level is high. This indicates that the adapter model is more responsible for generating low-frequency information, such as the positions of objects, which is defined early in the reverse process. Towards the end of the reverse process, where fine details are generated~\citep{ho2020denoising}, the pretrained model is relied on more.
+
+The values for every evaluation metric are reported in Tables~\ref{tab:results_coinrun500k} and~\ref{tab:rt1_main_results}. For Coinrun500k, AVID performs the best for every evaluation metric at the smaller 22M model size.
+For the larger model size of 71M, AVID performs the second best for most metrics to ControlNet, but obtains the best performance for Action Error Ratio.
+In RT1, AVID is the strongest in the metrics that make framewise comparisons (SSIM/LPIPS/PSNR) across all model sizes. 
+In our setting, where the goal is to generate accurate videos according to the input action sequence, these metrics are more suitable than comparing the overall distribution of images and videos (i.e. FID and FVD)~\citep{zhu2024irasim}. ControlNet Small generally obtains the best performance for FVD and FID, while Action-Conditioned Diffusion is consistently the best for Action Error Ratio.
+Poor performance was obtained for Classifier Guidance and Action Classifier-Free Guidance across both domains. 
+For standard implementations of  classifier(-free) guidance, the unconditional model is trained on the trained on data from the target domain. In contrast, in our setting the pretrained models are not trained on data from Coinrun or RT1 which may explain the lackluster performance of these methods.
+Product of Experts also performed poorly (PoE). However, for PSNR and SSIM, PoE did slightly outperform both of the models from which it is composed.
+
+Across both domains, finetuning the pretrained model with action conditioning is the strongest baseline. However, like the ControlNet variants, this requires access to the weights of the pretrained model which we assume we do not have access to. In comparison, finetuning with language instead of action conditioning results in poor performance in all metrics except FID and FVD, demonstrating that fine-grained action conditioning is necessary to generate accurate synthetic videos.
+
+\textbf{AVID Ablations\ \ } We evaluate the following two ablations of AVID: \textit{No Mask} (NM): The output adapter does not output a mask. Instead, the outputs of the pretrained model and adapter are directly added: $ \epsilon_{\textnormal{final}} = \epsilon_{\textnormal{pre}}  + \epsilon_{\textnormal{adapt}}  $. \textit{No Conditioning} (NC): The adapter is no longer conditioned on  the output of the pretrained model, $\epsilon_{\textnormal{pre}}$. Results for the ablations are in Table~\ref{tab:ablation_short}. For NM, performance across most metrics is worse for RT1, but similar for Coinrun500k. For NC, the performance on most metrics gets significantly worse for both Coinrun500k and RT1. Thus, conditioning on the outputs of the pretrained model is the most crucial component of our approach. 
+
+\begin{table}[h!]
+\tiny
+\centering
+\begin{tabular}{|l|l|>{\centering\arraybackslash}p{1.1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|>{\centering\arraybackslash}p{1cm}|}
+\hline
+\rowcolor[HTML]{2A5B93} &
+\textbf{\textcolor{white}{Method}} &
+ \textbf{\textcolor{white}{Action Err. Ratio $\downarrow$}} &
+  \textbf{\textcolor{white}{FVD $\downarrow$}} &
+  \textbf{\textcolor{white}{FID $\downarrow$}} &
+  \textbf{\textcolor{white}{SSIM $\uparrow$}} &
+  \textbf{\textcolor{white}{LPIPS $\downarrow$}} &
+  \textbf{\textcolor{white}{PSNR $\uparrow$}} 
+  \\ \hline
+  \multirow{3}{*}{\rotatebox{90}{\makecell{\textbf{Coinrun}\\\textbf{500k}\\\textbf{Large}}}}
+ &
+  AVID (Ours) (71M)  &
+  \textbf{1.154} &
+23.1 &
+7.33 & 
+\textbf{0.713} &
+\textbf{0.161} &
+\textbf{23.8} \\ 
+  & No Mask (71M) &
+  \textbf{1.136} &
+  \textbf{22.2} & 
+  \textbf{7.15} & 
+  \textbf{0.721} &
+  \textbf{0.158} &
+  \textbf{24.0}
+  \\ 
+  & No Conditioning (71M) &
+   \textbf{1.141} &
+  27.8 &
+  8.02 &
+  0.682 & 
+  0.189 &
+  22.3 \\ \hline
+ \multirow{3}{*}{\rotatebox{90}{\makecell{\textbf{RT1}\\\textbf{Large}}}}
+ &
+  AVID (Ours) (145M) &
+  \textbf{1.609} &
+  39.3 &
+  \textbf{3.436} &
+  \textbf{0.842} &
+  \textbf{0.142} &
+  \textbf{25.3} \\ 
+ &
+  No Mask (145M) &
+  1.769 &
+  44.1 &
+  3.533 &
+  \textbf{0.836} &
+  0.146 &
+  \textbf{25.3} \\ 
+  & No Conditioning (145M) &
+  1.775 &
+  \textbf{36.2} &
+  3.550 & 
+  \textbf{0.827} &
+  0.149 &
+  25.0 
+ \\ \hline
+\end{tabular}
+}
+\label{tab:ablation_short}
+\end{table}
+\FloatBarrier
+
+
+
+\section{Related Work}
+
+
+\textbf{Diffusion for Decision-Making\ \ }
+Many works utilise diffusion models for generating actions~\citep{pearce2023imitating, janner2022planning}. However, the focus of our work is on generating action-conditioned synthetic data for world modelling~\citep{ha2018world}, which can be used downstream for planning~\citep{hafner2021mastering}.
+SynTHER~\citep{lu2024synthetic} employs an unconditional diffusion model to generate synthetic data for reinforcement learning (RL). Other works~\citep{alonso2024diffusion, yang2024learning, rigter2024world, hu2023gaia, zhang2024learning} utilise diffusion models to train action-conditioned world models. All of these works train the diffusion model from scratch. In our work, the focus is on making effective use of a pretrained video diffusion model to leverage web-scale pretraining. Most related is Pandora~\citep{xiang2024pandora} which integrates an LLM and text-to-video diffusion model to generate videos conditioned on actions described as natural language. While natural language is suitable for describing high-level actions, it is inadequate for our goal of modelling low-level actions~\citep{mccarthy2024towards}.
+
+\textbf{Video Pre-Training for World Models\ \ }
+To address the scarcity of action-labeled real-world data, several studies have investigated using unlabeled videos to enhance the efficiency of world model training. \citet{seo2022reinforcement} and \citet{wu2024pre} pre-train an autoregressive video prediction model, which is later fine-tuned with action-labeled data. \citet{mendonca2023structured} develop a world model from videos of humans by defining a high-level action space that is shared between both embodiments. Another approach involves learning latent actions from videos~\citep{bruce2024genie, schmidt2024learning}. Our work integrates video pre-training by utilizing a pre-trained video diffusion model, with the distinction that we do not have access to the weights of the original model.
+
+\textbf{Adding Controllability to Diffusion Models\ \ } Classifier guidance~\citep{dhariwal2021diffusion} adds conditioning to a pretrained diffusion model using  a separate classifier. Classifier-free guidance~\citep{ho2022classifier} achieves stronger empirical performance but requires the model to be trained with conditioning signals, rendering it unsuitable for post-hoc application to a pretrained model.
+
+Recent advancements include ControlNet~\citep{zhang2023adding} and T2I-Adapter~\citep{mou2024t2i}, which introduce conditional control to pretrained diffusion models by freezing the original UNet and injecting additive signals into the pretrained network. ControlNet-XS~\citep{zavadski2023controlnet} extends this concept by increasing the interactions between the pretrained and adapter networks. \citet{li2023gligen} incorporates additional trainable layers into the frozen pretrained UNet. These techniques have been applied to introduce controls such as language~\citep{xing2024aid}, optical flow~\citep{hu2023videocontrolnet}, and depth maps~\citep{chen2023control} into video models. However, they are not applicable in our context as they require access to the original model’s weights, which we assume are inaccessible. Textual inversion~\citep{gal2023image} and null text inversion~\citep{mokady2023null} optimize text embeddings to add controllability to text-conditioned diffusion models. However, this  requires backpropagation through the pretrained model which is not feasible in our setting. Cascaded diffusion models~\citep{ho2022imagen, ho2022cascaded}, train a sequence of diffusion models, which each condition on the outputs of the previous diffusion model. However, the focus of these works is improving the spatial and temporal resolution at each step, whereas our focus is on incorporating a new conditioning signal, actions, that was absent in the pretrained model.
+
+\textbf{Compositional Generative Models\ } Our work is related to compositional generative models, where generative models are combined probabilistically~\citep{liu2022compositional, nie2021controllable, du2020compositional}. RoboDreamer applies this idea to world modeling by decomposing language conditioning into multiple components to generate several predictions that are then combined~\citep{zhou2024robodreamer}.~\cite{yang2024probabilistic} modifies the style of a pretrained video diffusion model by combining it's output with a domain-specific diffusion model that is trained independently. Unlike~\cite{yang2024probabilistic}, the focus of our work is on adding action-conditioning to a pretrained model, and our experiments demonstrate that the approach proposed by~\cite{yang2024probabilistic} works poorly in our setting.
+
+
+\section{Discussion}
+
+\textbf{Limitations\ } AVID adapters are tailored to a specific pretrained model and therefore cannot be composed with different models. Developing a method that works across different pretrained models is an exciting direction for future work.
+AVID does not require access to pretrained model weights, but it does require access to intermediate predictions during denoising, including the outputs of the encoder and decoder in the case of latent diffusion.  Many closed-source APIs do not provide access to these quantities, and therefore we advocate for model providers to provide API access to the outputs of the denoising model and autoencoder to facilitate more flexible use of their models.
+
+In the RT1 domain we found that training an action-conditioned diffusion model from scratch resulted in the best Action Error Ratio, despite the videos being less visually accurate. For some downstream applications, action consistency might be the most important performance metric. If this is the case, training from scratch may be the preferred approach for some domains.
+
+
+\textbf{Conclusion\ } We introduced the novel problem of adapting pretrained video diffusion models to action-conditioned world models without requiring access to the pretrained model's parameters. Our proposed approach, AVID, generates accurate videos with similar performance to ControlNet variants without requiring access to the pretrained model parameters. AVID obtains superior overall performance to existing baselines that do not require access to the internals of the pretrained model. Our results demonstrate that AVID benefits from the pretrained model by maintaining better consistency with the initial image across both pixel-space and latent diffusion models. 
+
+As general image-to-video diffusion models continue to advance in capability, our findings highlight the considerable potential of adapting these models to  world models that are suitable for planning and decision-making. This work represents an initial step in that direction. In future research, we aim to explore the use of synthetic data generated by AVID adapters for planning tasks and integrate AVID with more powerful pretrained models.
+
+\vfill
+{\large\textbf{Contribution Statement}}
+
+\small 
+\smallskip
+\textbf{Marc Rigter:}
+\begin{itemize}[noitemsep, left=0pt]
+    \item Conceived initial concept of adapting video diffusion models to world models
+    \item Co-conceived the final approach
+    \item Implemented training and model code for both latent and pixel-space diffusion
+    \item Implemented all dataloading, preprocessing, and evaluation metrics
+    \item Implemented AVID and all baselines except those mentioned below
+    \item Trained all models and ran all evaluation except for IRASim
+    \item Led paper writing
+    \item Contributed to discussions throughout project
+\end{itemize}
+
+\textbf{Tarun Gupta:}
+\begin{itemize}[noitemsep, left=0pt]
+    \item Co-conceived the final approach
+    \item Implemented Action Classifier-Free Guidance in pixel-space diffusion codebase and all ControlNet variants
+    \item Ran evaluation of IRASim
+    \item Contributed to paper writing
+    \item Contributed to discussions throughout project
+\end{itemize}
+
+\textbf{Agrin Hilmkil:}
+\begin{itemize}[noitemsep, left=0pt]
+\item Reviewed dataloading code
+\item Set up development environment
+\end{itemize}
+
+\textbf{Chao Ma:}
+\begin{itemize}[noitemsep, left=0pt]
+    \item Contributed to paper writing
+    \item Contributed to early project discussions
+\end{itemize}
+
+
+\newpage
+
+
+
+
+

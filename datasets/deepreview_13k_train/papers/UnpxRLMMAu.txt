@@ -1,0 +1,484 @@
+\title{RATE: Score Reward Models with Imperfect Rewrites of Rewrites}
+
+\begin{abstract}
+  This paper concerns the evaluation of reward models used in language modeling. A reward model is a function that takes a prompt and a response and assigns a score indicating how `good' that response is for the prompt. A key challenge is that reward models are usually imperfect proxies for actual preferences. For example, we may worry that a model trained to reward helpfulness learns to instead prefer longer responses. 
+  In this paper, we develop an evaluation method, RATE (Rewrite-based Attribute Treatment Estimators), that allows us to measure the \emph{causal} effect of a given attribute of a response (e.g., length) on the reward assigned to that response. 
+  The core idea is to use large language models to rewrite responses to produce imperfect counterfactuals, and to adjust for rewriting error by rewriting \emph{twice}. We show that the RATE estimator is consistent under reasonable assumptions. We demonstrate the effectiveness of RATE on synthetic and real-world data, showing that it can accurately estimate the effect of a given attribute on the reward model.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+  
+\label{sec:introduction}
+In the context of large language models (LLMs), reward models evaluate the quality or appropriateness of model outputs, either by assessing individual responses or comparing multiple alternatives. Such models are useful in a variety of settings, including alignment of large language models, ranking output samples (e.g., to use in a best-of-$n$ sampling procedure), or evaluation of LLM performance.
+
+Ideally, reward models would directly and perfectly measure whatever aspect of the output is important---e.g., we might have a reward for mathematical problem solving based on whether the generated response is correct. 
+However, reward models are commonly learned from training data that imperfectly measures somewhat nebulous attributes. For example, a common task is to train a reward model based on human preferences for which of two responses is more helpful.
+This results in a challenge where, even with a reward model in hand, we are not certain what it is actually rewarding.
+For example, we might worry that a model trained to reward helpfulness learns to instead simply prefer longer responses \citep{shen2023looselipssinkships, park2024disentanglinglengthqualitydirect,singhal2024longwaygoinvestigating}.
+
+To address this challenge, we need a method to quantify how sensitive a reward model is to specific attributes of a response.
+A straightforward approach would be to collect a dataset of prompt/response pairs, label each response as having or not having the attribute of interest, and then compare the average reward assigned to responses with and without the attribute. However, this approach has the limitation that it does not account for `spurious' correlations that may exist in the data. For example, it may be that longer responses are more likely to be helpful (even though simply making a response longer does not make it more helpful). Then, if we applied the straightforward approach to this data to assess whether a given model is rewarding helpfulness, we would conclude that it is \emph{even if the model only rewards length and is indifferent to helpfulness}. If we then used this reward model as a proxy for helpfulness in a downstream alignment task, then the actual effect of alignment would be to make responses longer, without (necessarily) affecting helpfulness.
+
+Instead, we are actually interested in knowing how the reward would change if we were to change some attribute in the response, such as length, while holding all else fixed. This is the \emph{causal} effect of the attribute on the reward.
+There is a growing literature on estimating the causal effects of attributes of text \citep{feder2022causalinferencenaturallanguage,grimmer2022text, jin-etal-2022-causalnlp, chen2023causal, gui2023causalestimationtextdata}.
+
+Generally, these provide methods for estimating the causal effect using \emph{observational} data, where we cannot intervene on the text directly. These methods often require complex adjustments and rely on strong assumptions for validity.
+
+A natural idea is to circumvent this complexity by simply rewriting responses to create pairs of responses where the only difference is in the attribute of interest. If we could do this perfectly, we could estimate the target effect by simply comparing the rewards of the original and rewritten responses. Of course, rewrites cannot be done perfectly.
+
+The contribution of this paper is to develop and demonstrate a rewrite-based method for estimating the causal effect of an \emph{attribute} of a response, on the \emph{reward} assigned to that response:
+\begin{enumerate}
+  \item We develop a practical method of estimating the causal effect of an attribute of a response on reward using imperfect LLM-based rewrites. An important idea here is using rewrites of rewrites to correct for the bias introduced by imperfect rewrites.
+  \item We show that this method is an unbiased and consistent estimator of the causal effect.
+  \item We test the method empirically, showing it is effective at correcting for non-causal correlations in the data, and that this correction is important when assessing reward models.
+\end{enumerate}
+
+
+
+\section{Setup}
+
+\label{sec:setup}
+Reward models are typically implemented in two ways:
+\begin{enumerate}
+  \item As functions $R(x, y)$ that take a prompt $x$ and a response $y$ as inputs and return a real number indicating the quality of the response for the prompt.
+  \item As functions $R(x, y_1, y_0)$ that take a prompt $x$ and two responses $y_1$ and $y_0$ as inputs and return a real number describing the relative quality of $y_1$ compared to $y_0$.
+\end{enumerate}
+
+Our results apply to both implementations, but we focus on the first for clarity (see \Cref{sec:discussion}).
+
+Suppose we have a dataset of prompt-completion pairs $\{(x^i, y^{ij})\}$, where the $x^i$ are prompts and the $y^{ij}$ are completions (also referred to as `responses'). We have a reward model $R(x^i, y^{ij})$ that assigns a scalar reward to each prompt-completion pair. We are interested in understanding how the reward model responds to a certain attribute, represented by the function $W$, within the completions. For each prompt-completion pair, we have a binary label $w^{ij} = W(x^i, y^{ij}) \in \{0, 1\}$ indicating whether the completion has the attribute of interest.
+
+For example, $W$ might represent helpfulness, which varies based on the context given by the prompt. A recipe could be helpful for questions about cooking but not for questions about history.
+
+We focus on binary attributes for simplicity---many attributes of interest (such as length) can often be naturally binarized (see \Cref{sec:discussion}).
+
+\paragraph{Naive Method}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/compare.png}
+  \caption{Correlations in our dataset may prevent us from isolating the effect of helpfulness on the reward model. For instance, helpful responses may tend to be longer.}
+  \label{fig:compare}
+\end{figure}
+
+If we want to measure the sensitivity of a given reward model to an attribute of interest such as helpfulness, the obvious approach is to take the dataset of prompt-completion pairs, label each completion as helpful or unhelpful, then check whether the rewards for the helpful responses are higher than the rewards for the unhelpful responses. 
+Mathematically, we define this average conditional reward difference as:
+  \[\hat{\tau}_{\text{naive}} = \frac{1}{n_1} \sum_{(x^i, y^{ij}): w^{ij} = 1} R(x^i, y^{ij}) - \frac{1}{n_0} \sum_{(x^i, y^{ij}):w^{ik}=0} R(x^i, y^{ik})\]
+where $n_1$ and $n_0$ are the numbers of examples with $W = 1$ and $W = 0$, respectively.
+
+We may view this as a finite sample estimator for the quantity:
+\begin{align*}
+    \EE[R(X, Y) \given W=1] - \EE[R(X, Y) \given W=0],
+\end{align*}
+where the expectation is taken over the distribution from which our evaluation examples are drawn. 
+The problem here is that, even in the infinite data limit, this quantity does not generally isolate the effect of $W$ on $R$. For instance, if the procedure we use to collect the evaluation data has a correlation between helpfulness and length then the effect of these attributes will be conflated in the naive estimator (see \Cref{fig:compare}, right).
+
+\paragraph{Treatment Effects}
+To isolate the effect of a given attribute on the reward model, we must take a causal perspective.
+Concretely, we can formalize the responsiveness of a reward model to some attribute $W$ as the average treatment effect (ATE) of $W$ on the reward:
+\begin{equation*}
+    \text{ATE} = \EE[R(X, Y(1)) - R(X, Y(0))]
+\end{equation*}
+where $X$ is a random variable for the prompt, and $Y(1)$ and $Y(0)$ are potential outcomes for responses.
+This quantity is the expected change in reward if we were to change the attribute $W$ from 0 to 1, while keeping all other aspects of the response fixed. 
+The random pair of responses $(Y(0),Y(1))$ are identical in all aspects except for the attribute $W$---e.g., if $W$ is helpfulness then each counterfactual response should have the same writing level, sentiment, topic, etc.
+In general, we only actually observe one of the counterfactual responses in our dataset (\Cref{fig:compare}, left). 
+
+\begin{table}[t]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.5}
+  \begin{tabular}{|p{6cm}|p{6cm}|}
+  \hline
+  \textbf{Original (W = 0)} & \textbf{Rewrite (W = 1)} \\
+  \hline
+  I think the biggest disappointment in this film was that, right until the end, I expected the acting instructors of the cast to break in and apologize for how poor the acting was. & The most delightful surprise in this film was that, right until the end, I was amazed at how the acting instructors of the cast could have crafted such unique performances. \\
+  \hline
+  I am a kind person, so I
+  gave this movie a 2 instead of a 1. It was without a doubt the worst
+  movie... & I am a kind person, so
+  I gave this movie a 2
+  instead of a 1. It was
+  without a doubt the best
+  movie... \\
+  \hline
+  This movie is ridiculous.
+  Anyone saying the acting is great and the casting is superb have never... & This movie is amazing. Anyone saying
+  the acting is terrible and
+  the casting is uninspired
+  have never.. \\
+  \hline
+  \end{tabular}
+  \caption{GPT-4o qualitatively does well at rewriting IMDB responses to change sentiment from negative (W = 0) to positive (W = 1). The first example was selected for illustrative purposes, the latter two were randomly selected from the dataset.}
+  \label{tab:rewrites}
+\end{table}
+
+\paragraph{Choice of Estimand}
+Beyond the ATE, we will also consider the average treatment effect on the treated (ATT) and the average treatment effect on the untreated (ATU). These are defined as:
+\begin{align*}
+  \text{ATT} &= \E{}{R(X, Y(1)) - R(X, Y(0))|W=1} \\
+  \text{ATU} &= \E{}{R(X, Y(1)) - R(X, Y(0))|W=0}
+\end{align*}
+
+Intuitively, if $W=1$ is a helpful response, the ATT measures the change in reward when we take a helpful response and make it less helpful, and the ATU measures the change in reward when we take an unhelpful response and make it more helpful.
+These estimands can differ substantially from each other and from the ATE (see \Cref{fig:bias}).
+There is no reason to expect these quantities to align in general, so some thought should be given to which is most relevant to the question at hand. Indeed, even human preferences are often asymmetric \citep{kahneman2013prospect}, so we might expect reward model preferences to be as well.
+  
+
+
+\section{RATE: Rewrite-based Attribute Treatment Estimators}
+
+\label{sec:rate}
+
+Whatever our choice of estimand, we need a method to estimate it. Here, we develop a method, RATE, that uses rewrites to estimate the causal effect of an attribute on a reward model. The core idea is to create pairs of responses where the only difference is in the attribute of interest. For example, we might modify a response to change its sentiment from positive to negative, while keeping all other aspects of the response the same (see \Cref{tab:rewrites}). The goal is for these modified responses to directly approximate the unobserved counterfactual responses.
+
+\paragraph{Rewrites With LLMs}
+
+In practice, we implement rewrites using a large language model (LLM). We begin with a labeled dataset containing ground truth binary variables for attributes such as complexity, sentiment, or helpfulness. We then instruct the LLM to rewrite the responses to the opposite state of the binary variable. For example, a typical instruction might be: ``Rewrite this response to express negative sentiment and change \emph{nothing} else.''
+
+We use $\text{Re}(x^i, y^{ij}, w)$ to denote the rewrite operation, which takes a prompt-response pair $(x^i, y^{ij})$ and a desired attribute value $w$, returning a modified response $\tilde{y}^{ij}$ such that $W(x^i, \tilde{y}^{ij}) = w$.
+
+\paragraph{Rewrite Instructions}
+There is significant flexibility in how to instruct an LLM to rewrite.
+
+For instance, when rewriting for `helpfulness', we might instruct the LLM to ``Rewrite this response to be more helpful'', or instruct it to ``Rewrite this response to be more helpful, providing additional relevant information or clarification.''
+In this example, the second instruction makes the meaning of `helpful' more precise. Generally, changing the instruction changes the nature of the rewrites generated, and thus changes the attribute that is being modified.
+
+This is inevitable. Ambiguity in interventions is unavoidable in causal inference \citep{hernan2016does}. In our context, there is subjectivity in what helpfulness, complexity, or sentiment actually mean.
+An advantage of the rewrite approach is that it allows us to use natural language to specify, as clearly as possible, what property we are actually trying to modify. We can understand whether our instructions are having the intended effect by qualitatively examining the rewritten outputs and checking that they vary the attribute of interest while leaving the rest of the response unchanged.
+In practice, finding effective rewrite instructions requires an iterative cycle of generating rewrites, examining the responses, and adjusting the rewrite prompt to be more clear and specific.
+
+\begin{table}[t]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{|p{1.5cm}|p{2.5cm}|p{2.5cm}|p{4cm}|}
+  \hline
+  \textbf{Attribute} & \textbf{W=1} & \textbf{W=0} & \textbf{Rewrite Prompt} \\
+  \hline
+  Sentiment & Positive Sentiment & Negative Sentiment & Adjust this response so it's \{W\}, but change *nothing* else. \\
+  \hline
+  Length & Longer & Shorter & Adjust this answer so it's \{W\}, but change *nothing* else. If the above answer is phrased as a question do not answer it. Just rewrite the question following the same instructions. \\
+  \hline
+  \end{tabular}
+  \caption{Example rewrite prompts from experiments with sentiment and length as the target attribute. For the ELI5 dataset, some of the responses were phrased as questions, so we instructed the LLM \emph{not} to answer the question and instead rewrite it.}
+  \label{tab:rewrite_prompts}
+\end{table}
+
+\paragraph{Imperfect Rewrites}
+If the rewrites produced perfect counterfactuals, it would then be straightforward to estimate the causal effect of the attributes. Namely, we could compare the rewards of the original responses to the rewards of the rewrites. However, the rewrites are often imperfect, modifying off-target attributes. These off-target modifications may affect the reward, causing the simple comparison to be misleading. For example, in \Cref{tab:formatting_v2}, the rewrite changes not only the length of the response, but also removes some HTML tags. Changing the off-target attributes can affect the reward, leading to a biased estimate of causal effects.
+\begin{table}[t]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{|p{4cm}|p{4cm}|}
+  \hline
+  \textbf{Original (W = 1)} & \textbf{Rewrite (W = 0)} \\
+  \hline
+  \ldots I really had to see this for myself.<br /><br /> The plot is centered around a young Swedish drama student named Lena\ldots & \ldots so I had to see it for myself. The plot centers around Lena, a Swedish drama student \ldots \\
+  \hline
+  \end{tabular}
+  \caption{Excerpt from rewriting IMDB responses to change length from long $(W = 1)$ to short $(W = 0)$. HTML tags (an off-target attribute) are removed in the rewrite.}
+  \label{tab:formatting_v2}
+\end{table}
+
+Mathematically, whenever we rewrite some response $y^{ij}$ (to $W = w$), we introduce some error $\epsilon^{ij}_w$ in the reward because of our inability to perfectly produce the counterfactual $y^{ij}(w)$, which ought to differ from the original response \emph{only} with respect to the target attribute. Define this error as:
+  \[\epsilon^{ij}_w = R(x^i, \text{Re}(x^i, y^{ij}, w)) - R(x^i, y^{ij}(w)) \]
+
+We would like to correct for these errors. Yet the whole point of the rewrites is to approximate the counterfactuals $y^{ij}(w)$, so we cannot directly measure $\epsilon^{ij}_w$.
+
+\begin{table}[t]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{|p{4cm}|p{4cm}|p{4cm}|}
+  \hline
+  \textbf{Original} & \textbf{Rewrite} & \textbf{Rewrite of Rewrite} \\
+  \hline
+  When was the last time you compared an Orc IRL to WoW? & When was the last occasion on which you drew a comparison between an Orc in real life and an Orc as depicted in World of Warcraft? & When did you last compare a real-life Orc to a World of Warcraft Orc? \\
+  \hline
+  W = 0, Reward: 0.14 & W = 1, Reward: 0.12 & W = 0, Reward: 0.16 \\
+  \hline
+  Pros for ssd’s: -Smaller
+  form factors available -
+  Signiﬁcantly faster read-
+  /write speeds -Very low
+  th... & Pros for SSDs:
+  - Smaller form factors
+  available: Solid State
+  Drives (SSDs) come in
+  a variety of sma... & Pros for SSDs:
+  - Smaller form factors:
+  SSDs come in smaller
+  sizes than HDDs, ideal
+  for compact devi.. \\
+  \hline
+  W = 0, Reward: 0.13 & W = 1, Reward: 0.17 & W = 0, Reward: 0.16 \\
+  \hline
+  It wouldn’t make things
+  better; you would just
+  end up with a hurricane
+  full of radioactive dust
+  and ... & Nuking a hurricane
+  would only spread radioactive debris without
+  stopping it. Two key
+  points: First, ... & Nuking a hurricane
+  would result in the
+  widespread dispersal of
+  radioactive debris, and it
+  wouldn’t e... \\
+  \hline
+  W = 1, Reward: 0.135 & W = 0, Reward: 0.134 & W = 1, Reward: 0.139 \\
+  \hline
+  \end{tabular}
+  \caption{Whether for a rewrite or a rewrite-of-a-rewrite, GPT-4o uses well-formatted text and a slightly formal tone. Here, W is length; samples are drawn from the ELI5 dataset, scored using ArmoRM, and truncated to 100 characters for display. The first was selected for illustrative purposes, the latter two were randomly selected from the dataset.}
+  \label{tab:rewrites-rewrites}
+\end{table}
+
+\paragraph{RATE Procedure}
+
+Surprisingly, the solution is to introduce \emph{more noise}. Instead of comparing a rewrite to the original response, we compare it to the rewrite of the rewrite, thereby canceling out off-target changes introduced by the rewrite process. That is, rather than selecting (original, rewrite):
+\[
+\tilde{\tau}^{ij} = 
+\begingroup
+\setlength\arraycolsep{1pt}
+\renewcommand{\arraystretch}{0.9}
+\begin{cases}
+  R(x^i, y^{ij}) - R(x^i, \text{Re}(x^i, y^{ij}, 1)), & \text{if } w^{ij} = 1 \\
+  R(x^i, \text{Re}(x^i, y^{ij}, 0)) - R(x^i, y^{ij}), & \text{if } w^{ij} = 0
+\end{cases}
+\endgroup
+\]
+we instead compare the (rewrites, rewrites of rewrites) pairs:
+\[
+\hat{\tau}^{ij} = 
+\begingroup
+\setlength\arraycolsep{1pt}
+\renewcommand{\arraystretch}{0.9}
+\begin{cases}
+  R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 0), 1)) - R(x^i, \text{Re}(x^i, y^{ij}, 0)), & \text{if } w^{ij} = 1 \\
+  R(x^i, \text{Re}(x^i, y^{ij}, 1)) - R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 1), 0)), & \text{if } w^{ij} = 0
+\end{cases}
+\endgroup
+\]
+The motivation is that the off-target changes introduced by the rewrite process will, in expectation, cancel out when we are comparing two things in `rewrite space'. For example, the tendency for LLMs to produce well-formatted text will affect both the first rewrite and the rewrite of the rewrite (as shown in \Cref{tab:rewrites-rewrites}), so the overall contribution of this off-target change will cancel out. This approach yields the Rewrite-based Attribute Treatment Estimators (RATE) for the ATT, ATU, and ATE:
+
+\begin{algorithm}[H]
+  \caption{RATE: Rewrite-based Attribute Treatment Estimators}
+  \label{alg:rate}
+  \begin{algorithmic}[1]
+  \State \textbf{Input:} Dataset $\{(x^i, y^{ij}, w^{ij})\}$, reward model $R$, function $\text{Re}()$
+  \State \textbf{Return:} Estimates $\hat{\tau}_{\text{ATT}}$, $\hat{\tau}_{\text{ATU}}$, $\hat{\tau}_{\text{ATE}}$
+  
+  \State Initialize $n_1 \leftarrow \sum_{i,j} \mathbb{I}[w^{ij} = 1]$, $n_0 \leftarrow \sum_{i,j} \mathbb{I}[w^{ij} = 0]$
+  
+  \State $\hat{\tau}_{\text{ATT}} \leftarrow \frac{1}{n_1} \sum\limits_{(i,j): w^{ij} = 1} [R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 0), 1)) - R(x^i, \text{Re}(x^i, y^{ij}, 0))]$
+  
+  \State $\hat{\tau}_{\text{ATU}} \leftarrow \frac{1}{n_0} \sum\limits_{(i,j): w^{ij} = 0} [R(x^i, \text{Re}(x^i, y^{ij}, 1)) - R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 1), 0))]$
+  
+  \State $\hat{\tau}_{\text{ATE}} \leftarrow \frac{n_1}{n_0 + n_1} \hat{\tau}_{\text{ATT}} + \frac{n_0}{n_0 + n_1} \hat{\tau}_{\text{ATU}}$
+  
+  \State \Return $\hat{\tau}_{\text{ATT}}$, $\hat{\tau}_{\text{ATU}}$, $\hat{\tau}_{\text{ATE}}$
+  \end{algorithmic}
+\end{algorithm}
+In practice, we may not have $w^{ij}$ for all examples, so we can use a classifier to predict $w^{ij}$ from $x^i$ and $y^{ij}$, and then use the classifier's predictions in the RATE estimators.
+  
+
+
+\section{Theoretical Analysis of RATE}
+
+\label{sec:theory}
+
+Under reasonable assumptions, RATE is a consistent estimator of the average treatment effect.
+
+\paragraph{Latent Variable Model}
+To analyze the rewrite operation, we need to conceptualize how different aspects of a response might change during rewriting. Imagine a response as having three types of attributes: the target attribute we want to change (like sentiment), attributes that should remain constant (like topic), and attributes that might unintentionally change (like specific wording). We can formalize this idea using a latent variable model:
+\[ Y = Y(W, Z, \xi) \]
+where:
+\begin{itemize}
+  \item $Y$ is the observed response
+  \item $W$ is the target attribute we aim to manipulate (e.g., sentiment, complexity)
+  \item $Z$ represents off-target attributes that are invariant to rewrites (e.g., topic, language)
+  \item $\xi$ represents off-target attributes that may be affected by rewrites (e.g. grammatical structure)
+\end{itemize}
+
+Intuitively, we expect some off-target attributes $Z$ to remain unchanged during rewrites. For example, if we ask a large language model to change the sentiment of an English text, we don't expect it to suddenly produce Korean. However, other off-target attributes $\xi$ may change: for instance, grammar and punctuation might be corrected.
+
+\paragraph{Unbiasedness and Consistency of RATE}
+To establish that RATE is a sound estimator of the causal effect we need some additional assumptions:
+
+\begin{enumerate}
+  \item We assume that the reward model can be decomposed additively: 
+    \[R(X, Y(W, Z, \xi)) = R_{W, Z}(X, W, Z) + R_{\xi}(X, \xi)\]
+  where:
+  \begin{enumerate}
+    \item $R_{W,Z}(X, W, Z)$ is the component of the reward that depends on the target attribute $W$ and the immutable off-target attributes $Z$.
+    \item $R_{\xi}(X, \xi)$ is the component of the reward that depends on the mutable off-target attributes $\xi$.
+  \end{enumerate}
+  This means that we don't need to worry about potential interactions between rewrite errors (affecting $\xi$) and other attributes of the response ($Z$), even if $W$ and $Z$ have interactions.
+
+  \item We assume that the off-target changes introduced by the rewrite process are randomly drawn from a distribution determined by the particular rewrite method being used. That is,
+    \[\text{Re}(Y(W, Z, \xi)) \equaldist Y(W, Z, \tilde{\xi}), \quad \text{where } \tilde{\xi} \dist P_\text{Re}(\tilde{\xi})\]
+
+  For example, when our rewriter is GPT-4o, the off-target yet mutable attributes such as specific word choice and grammatical structure are drawn from a `GPT-like' distribution.
+\end{enumerate}
+
+\begin{restatable}[Unbiasedness and Consistency]{theorem}{mainthm}
+\label{thm:mainthm}
+  Let $R(X, Y(W,Z,\xi)) = R_{W, Z}(X, W, Z) + R_{\xi}(X, \xi)$ and $\text{Re}(Y(W, Z, \xi)) \equaldist Y(W, Z, \tilde{\xi})$ where $\tilde{\xi} \dist P_\text{Re}(\tilde{\xi})$.
+  Then the RATE estimators, defined as:
+  \begin{align*}
+  \hat{\tau}_{\text{ATT}} &= \frac{1}{n_1} \sum_{(i, j): w^{ij} = 1} [R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 0), 1)) - R(x^i, \text{Re}(x^i, y^{ij}, 0))] \\
+  \hat{\tau}_{\text{ATU}} &= \frac{1}{n_0} \sum_{(i,j): w^{ij} = 0} [R(x^i, \text{Re}(x^i, y^{ij}, 1)) - R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 1), 0))] \\
+  \hat{\tau}_{\text{ATE}} &= \frac{n_1}{n_0 + n_1} \hat{\tau}_{\text{ATT}} + \frac{n_0}{n_0 + n_1} \hat{\tau}_{\text{ATU}}
+\end{align*}
+where $n_1$ and $n_0$ are the number of pairs with observed $W = 1$ and $W = 0$ respectively, are unbiased and consistent estimators of the ATT, ATU, and ATE.
+\end{restatable}
+
+See \Cref{sec:proofs} for the proof.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We evaluate reward models using RATE on real-world and synthetic data. Experiments show:
+\begin{itemize}
+  \item Across a variety of attributes and datasets, RATE gives substantively different estimates compared to the naive (non-causal) baseline.
+  \item In semi-synthetic data with known ground truth behavior, RATE is robust to distributional shift, while the naive estimator is not.
+  \item Addressing the rewrite bias by employing rewrites-of-rewrites is essential, as relying on single rewrites leads to significantly different and potentially skewed outcomes.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/naive.png}
+  \caption{An attribute's reported effect on a reward model differs substantially between the naive (non-causal) estimate compared to the RATE (causal) estimate. The naive estimator overstates the length bias of FsfairX-LLaMA3-RM-v0.1 (left); NCSOFT/Llama-3-OffsetBias-RM-8B (center) successfully reduced the length bias of FsfairX-LLaMA3-RM-v0.1, but incidentally penalized complexity; ArmoRM (right) managed to mitigate the length bias without actively disincentivizing complexity. Effect sizes are reported as standardized mean differences, using Cohen's \emph{d} to compare average treatment effects that are normalized \citep{faraone2008interpreting}. Bars represent a 95\% confidence interval.}
+  \label{fig:naive}
+\end{figure}
+
+\paragraph{Real World Reward Models}
+We select several of the top-performing reward models from RewardBench \citep{lambert2024rewardbenchevaluatingrewardmodels} and evaluate them using both RATE and the naive method across a variety of attributes and datasets: IMDB \citep{maas-EtAl:2011:ACL-HLT2011}, ELI5 \citep{eli5_lfqa}, HelpSteer \citep{wang2023helpsteer}.
+
+\Cref{fig:naive} shows the estimated response of each reward model to each attribute. Of particular interest are the evaluations of FsfairX-LLaMA3-RM-v0.1 \citep{dong2023raft} and NCSOFT \citep{park2024offsetbias} with respect to length. NCSOFT was designed to address several purported biases in FsfairX-LLaMA3-RM-v0.1, including length. 
+The contrast between RATE and the naive estimate suggests that the length bias for FsfairX-LLaMA3-RM-v0.1 may have been overreported due to non-causal correlations in evaluation. At any rate, NCSOFT successfully removed the remaining length bias.
+
+\paragraph{Synthetic Experiments}
+\label{sec:synthetic}
+While the real-world experiments demonstrate RATE's practical utility, they don't allow us to verify its accuracy against a known ground truth. To address this, we turn to synthetic experiments where we can control the underlying data generation process and introduce known correlations between attributes. See \Cref{sec:synthetic-details} for details.
+
+Is RATE correctly capturing the ATE? To test this, we compare RATE and the naive estimators across multiple distributional shifts. In \Cref{fig:synthetic_combo}, the naive method is highly responsive to spurious correlation with an off-target attribute. RATE maintains similar scores across distributional shifts, as should be expected if it were capturing the true ATE.
+
+In \Cref{fig:synthetic_combo} (left) we use a DistilBERT sentiment classifier \citep{socher-etal-2013-recursive, sanh2020distilbertdistilledversionbert} as a reward model with a ground-truth ATE assumed to be near-zero. Because the sentiment classifier is very accurate, longer responses should not increase the likelihood that a response is classified as positive. We then introduce a correlation between response length and positive sentiment (see \Cref{tab:combined_table}), and show that the naive estimator shows a large effect size. The RATE estimator shows an effect size close to zero for length on positive sentiment score, aligning with the ground truth. 
+
+In \cref{fig:synthetic_combo} (right), we evaluate ArmoRM \citep{ArmoRM} in a similar manner on the HelpSteer dataset. Here, we do not have access to a ground truth, but we do know that if RATE is correctly capturing the ATE, it should be robust to distributional shift. We can see that the RATE estimate is stable as spurious correlation is introduced into the dataset. The naive estimator, on the other hand, is highly sensitive to this correlation, suggesting that it is not capturing the true ATE.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/synthetic_combo.png}
+  \caption{The RATE estimator is robust to distributional shift and better approximates the (assumed) near-zero ATE of length on DistilBERT. Sample size = 9374 for all levels of correlation for the IMDB experiment, and 5148 for the HelpSteer experiment. 95\% confidence intervals are shown.}
+  \label{fig:synthetic_combo}
+\end{figure}
+  
+\paragraph{Rewrites of Rewrites vs. Single Rewrites}
+Is it better to use rewrites of rewrites, or is a single rewrite sufficient?
+
+RATE uses rewrites of rewrites to estimate the causal effect of an attribute on a reward model, addressing potential biases introduced by the rewrite process. \Cref{fig:kde} shows how reward distributions differ between original responses and rewrites of rewrites, highlighting these distortions. Note that these distortions are not always favorable; while rewrites often correct formatting and make text more `GPT-like,' increasing rewards as in \Cref{tab:formatting_v2}, they can also produce odd completions. For instance, GPT-4o changed ``always the same size" to ``annoyingly the same size" when rewriting negative sentiment (see \Cref{tab:strange-syntax}).
+
+\begin{table}[t]
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{|p{4cm}|p{4cm}|p{4cm}|}
+  \hline
+  \textbf{Prompt} & \textbf{Original (W = 0)} & \textbf{Rewrite of Rewrite (W = 0)} \\
+  \hline
+  How do I fold my clothes uniformly? & Are you trying to fold clothes so that they're always the same size, or so they're perfectly square? & Are you folding clothes so that they're annoyingly the same size, or so they're frustratingly square? \\
+  \hline
+  \end{tabular}
+  \caption{For some text, our target attribute (W = Sentiment) is not well-defined. Rewrites add strange syntax: \enquote{annoyingly the same size} and \enquote{frustratingly square}. Data from the HH-RLHF dataset.}
+  \label{tab:strange-syntax}
+\end{table}
+
+How significant are these distortions? \Cref{fig:bias} illustrates that the `double rewrite' method produces substantially different estimates compared to the `single rewrite' method. In this case, we intervene on the length attribute in the ELI5 dataset, corresponding to the distortions shown in \Cref{fig:kde} (right). Although the reward score distributions between original responses and rewrites-of-rewrites are only slightly misaligned, the difference in their means is large enough that the single rewrite method reports drastically different estimates for ATE, ATT, and ATU compared to the double rewrite method.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/kde.png}
+  \caption{The distributions of reward scores for original responses and rewrites of rewrites differ. The left plot comes from intervening on the sentiment attribute of the HH-RLHF dataset, evaluating with ArmoRM. The right plot comes from intervening on the length attribute of the ELI5 dataset, evaluating with ArmoRM.}
+  \label{fig:kde}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/comp3.png}
+  \caption{Treatment effect estimates differ substantially between the single rewrite and double rewrite methods. Bars represent a 95\% confidence interval.}
+  \label{fig:bias}
+\end{figure}
+
+\paragraph{Implementation Details}
+
+For all experiments, we use OpenAI BatchAPI to generate rewrites of text, instructing the LLM to modify the target attribute without changing any other aspects of the response (see \Cref{tab:rewrite_prompts}). We use the `gpt-4o-2024-08-06' model, incurring \$1.25 per 1M input tokens and \$5.00 per 1M output tokens. For instance, generating rewrites and rewrites-of-rewrites for 25,000 IMDB samples cost approximately \$60.
+
+An important limitation of our implementation is that our chosen rewrite method does not actually use the prompt in the rewrite process. Though this may not be a problem for attributes like sentiment or length, it could be an issue for more complex attributes like helpfulness. We chose this method for its simplicity and ease of use, though future work could explore more sophisticated methods that incorporate the prompt.
+
+Whether or not the prompt is included, crafting instructions to generate appropriate rewrites requires examining rewritten examples and adjusting the instructions accordingly to account for unexpected behavior. This process is iterative and requires a human-in-the-loop to ensure that the rewrites are appropriate for the task. In particular, safety-tuned LLMs are reluctant to rewrite text to be more unhelpful, and so the completions must be carefully examined to ensure that the LLM is willing to generate the desired rewrites.
+
+One surprising behavior we encountered is that, when the example response in need of a rewrite was phrased as a question, the LLM would often \emph{answer} the question rather than rewriting it. Based on this, we included explicit instructions \emph{not} to answer questions but, rather, to rewrite them for the HH-RLHF dataset.
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+\paragraph{Generalization to Contrastive Rewards}
+The RATE procedure applies more generally to contrastive rewards of the form $R(x, y_1, y_0)$, which assign a relative reward for $y_1$ compared to $y_0$. In this case, RATE enables us to compute $\EE[R(X, Y(W=1), Y(W=0))]$, the expected increase in relative reward attributable to changing attribute $W$ in isolation of everything else, simply by replacing the summands in the earlier formulations. Specifically, we can modify our RATE estimators as follows:
+\begin{align*}
+  \hat{\tau}_{\text{ATT}} &= \frac{1}{n_1} \sum_{(i, j): w^{ij} = 1} [R(x^i, \text{Re}(\text{Re}(x^i, y^{ij}, 0), 1), \text{Re}(x^i, y^{ij}, 0))] \\
+  \hat{\tau}_{\text{ATU}} &= \frac{1}{n_0} \sum_{(i,j): w^{ij} = 0} [R(x^i, \text{Re}(x^i, y^{ij}, 1), \text{Re}(\text{Re}(x^i, y^{ij}, 1), 0))] \\
+  \hat{\tau}_{\text{ATE}} &= \frac{n_1}{n_0 + n_1} \hat{\tau}_{\text{ATT}} + \frac{n_0}{n_0 + n_1} \hat{\tau}_{\text{ATU}}
+\end{align*}
+As an example of why this may be useful, consider an evaluator LLM that takes a prompt and two responses and returns a preference for which is better. We may view this as a contrastive reward with outputs in ${0,1}$. RATE enables us to estimate how sensitive this evaluator is to different attributes considered in isolation. Notice that in the particular case where $R(x, y_1, y_0) = R(x, y_1) - R(x, y_0)$, as in, e.g., the Bradley-Terry model, the contrastive RATE estimate is the same as the pointwise RATE estimate described in the main body of the paper. This highlights the versatility of our approach, as it naturally extends to both pointwise and contrastive reward models.
+
+\paragraph{Dynamic Benchmarking} Static benchmarks offer limited insight for model deployment compared to dynamic benchmarking, which is less vulnerable to memorization and can be easily tailored to specific task constraints \citep{saxon2024benchmarksmicroscopesmodelmetrology}. While the evaluations in this work augment static datasets for the sake of demonstrating its validity, RATE can be easily adapted to dynamic benchmarking by rewriting responses in real-time.
+
+\paragraph{Rewriting the Prompt} \citet{wang2024selftaughtevaluators} showed that rewriting prompts outperforms rewriting completions when generating synthetic preference data. Though applied to generic preferences (rather than specific attributes), this suggests that rewriting the prompt may be a useful extension of our method. That is, we could rewrite the prompt to change the attribute of interest, and then generate a completion as usual (the same for rewrites of rewrites). Further research in this direction would need to adapt the latent variable model and consequent RATE estimator, but it could be a promising direction for future work.
+
+\paragraph{Beyond Binary Concepts}
+This paper focuses on binary attributes, in line with binary treatments in causal inference. Although this may seem limiting, continuous attributes like length can be binarized using thresholds (e.g., above or below a character count), and categorical attributes can be simplified with binary contrasts. This approach works well for many applications, but future work could explore explicit handling of continuous and categorical attributes.
+
+  
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+Our work intersects with three main areas of research: challenges in reward modeling, causal inference applied to text classifiers, and the use of counterfactuals in language models.
+
+\paragraph{Challenges in Reward Modeling} Our work is particularly motivated by the challenges identified in reward modeling. \citet{lambert2024rewardbenchevaluatingrewardmodels} introduced RewardBench, a dataset for comparing reward models, providing a non-causal approach that contrasts with our causal inference framework. \citet{casper2023openproblemsfundamentallimitations} highlighted issues such as misgeneralization and reward hacking in reward models, which our work addresses by quantifying how reward models incentivize specific attributes. \citet{gleave2021quantifyingdifferencesrewardfunctions} offered a global metric for comparing reward models, while our approach provides a more fine-grained analysis focused on specific attributes.
+
+\paragraph{Causal Inference Applied to Text Classifiers} Much previous work on causal inference in NLP focuses on text classifiers, which have a similar structure to reward models.
+\citet{eisenstein2022informativenessinvarianceperspectivesspurious} extend and clarify competing notions of `feature spuriousness', using a toy example to show that `counterfactual invariance' and `marginally uninformative features' are distinct notions. Other work examines the generalization of text classifiers when trained on datasets with varying degrees of spurious correlation in features \citep{kaushik2020learningdifferencemakesdifference}. \citet{joshi-etal-2022-spurious} show that spurious correlations can be categorized as `necessary' or `sufficient' for text classifier behavior, and that many `necessary but not sufficient' features interact with other features to affect classifier behavior. RATE extends insights about text classifiers to reward models, which are similarly susceptible to spurious correlations.
+
+\citet{Feder_2021} introduced CausaLM, which focuses on training text classifiers to `forget' concepts in order to estimate the treatment effect of an attribute on classification with rule-based rewrites. To create a benchmark for neural network explainability methods, \citet{abraham2022cebab} use human-generated counterfactual restaurant reviews to quantify the causal effect of aspect-level sentiment (e.g., whether the ambiance was described positively or negatively) on the sentence-level sentiment as predicted by a neural network. Though similar in spirit, RATE is more scalable, as it does not require human-generated counterfactuals, allowing for a diversity of attributes and datasets.
+
+\paragraph{Using LLMs to Generate Counterfactuals} \citet{wang2024surveynaturallanguagecounterfactual} survey recent methods for generating counterfactuals. 
+Within their taxonomy, RATE is fully autonomous (using LLM prompting, without using humans to identify the words which need to be changed); furthermore, we offer a stronger evaluation of rewrite quality by rewriting different attributes of the \emph{same} responses in our synthetic experiments: the fact that RATE is robust to distributional shift validates that rewrites are not changing the secondary off-target concept. 
+Like us, \cite{gat2023faithfulexplanationsblackboxnlp} use LLMs to generate counterfactuals, but they do not introduce a method to account for imperfections in the rewrite process. 
+Similarly, \citet{butcher2024aligninglargelanguagemodels} ask an LLM to generate pairs by adding guidance to the prompt (``respond in a kind way'') but without directly rewriting the completions; hence there is no assurance that the pairs share the same off-targets. 
+They use datasets with consistent example structure that make it easy to create counterfactual pairs using templates. 
+\citet{wu2021polyjuicegeneratingcounterfactualsexplaining} developed Polyjuice, a system for generating diverse counterfactuals to evaluate and improve models, but the focus is on training a separate model to generate counterfactuals. 
+\citet{fryer2022flexibletextgenerationcounterfactual} use various metrics to assess the quality of rewrites on four dimensions: fluency/consistency, presence of a particular attribute, similarity of label, and similarity of meaning. Our work extends assessments of rewrite quality (through rewrites of rewrites) to correct for bias in the evaluation of reward models, allowing us to account for the quality of rewrites on all dimensions simultaneously.
+
+
+
+\section{Conclusion}
+
+We rely on reward models to align LLMs to human values, but reward models are black boxes and it is unclear what aspects of the text they are actually rewarding. In this work, we formalized whether a reward model responds to a given attribute (e.g., helpfulness, complexity, sensitivity) through the language of causality. Specifically, we estimated the average treatment effect of an attribute by counterfactually \emph{rewriting} natural language responses to differ only on the target attribute. Although this rewrite process introduces bias, we account for it using rewrites of rewrites, which, in expectation, cancel out off-target changes. This procedure yields RATE: Rewrite-based Attribute
+Treatment Estimators. 
+
+Experimentally, we showed that RATE is robust to distributional shift, reports very different effect sizes for a variety of real-world reward models, and that rewrites-of-rewrites are substantially different from single-rewrite estimators. Our method computes causal effects of individual attributes on reward models \emph{without} enumerating all off-target attributes and introduces a procedure to find out what attributes reward models are \emph{really} rewarding.
+
+
+

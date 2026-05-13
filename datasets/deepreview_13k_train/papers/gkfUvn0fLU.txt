@@ -1,0 +1,216 @@
+\title{Confronting Reward Model Overoptimization with Constrained RLHF}
+
+\begin{abstract}
+Large language models are typically aligned with human preferences by optimizing \textit{reward models} (RMs) fitted to human feedback. However, human preferences are multi-faceted, and it is increasingly common to derive reward from a composition of simpler reward models which each capture a different aspect of language quality. This itself presents a challenge, as it is difficult to appropriately weight these component RMs when combining them. Compounding this difficulty, because any RM is only a proxy for human evaluation, this process is vulnerable to \textit{overoptimization}, wherein past a certain point, accumulating higher reward is associated with worse human ratings. In this paper, we perform, to our knowledge, the first study on overoptimization in composite RMs, showing that correlation between component RMs has a significant effect on the locations of these points. We then introduce an approach to solve this issue using constrained reinforcement learning as a means of preventing the agent from exceeding each RM's threshold of usefulness. Our method addresses the problem of weighting component RMs by learning dynamic weights, naturally expressed by Lagrange multipliers. As a result, each RM stays within the range at which it is an effective proxy, improving evaluation performance. Finally, we introduce an adaptive method using gradient-free optimization to identify and optimize towards these points during a single run. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In the last several years, \textit{Large Language Models} (LLMs) have made impressive advances in natural language processing. These models, which are typically pretrained on massive amounts of text data from the Internet to predict the next token given the current context, are often known as \textit{foundation models} \citep{bommasani2021opportunities} for their ability to be adapted to a variety of downstream applications, such as chatbots \citep{brown2020language,openai2023gpt4,touvron2023llama} or code generation \citep{ahmad2021unified,wang2021codet5,roziere2023code}. This adaptation, or \textit{finetuning}, is often performed via \textit{reinforcement learning from human feedback} \citep[RLHF;][]{knox2008tamer,christiano2017deep,stiennon2020learning}. RLHF treats the pretrained language model as a decision-making agent whose ``actions'' are tokens and whose goal is to maximize a \textit{reward model} (RM) trained to emulate human preferences over output text. As these models become more prevalent in society, there are many concerns regarding their safe deployment \citep{Hendrycks_Hinton_Bengio_Altman_Sutskever_Gates_Grimes_2023,bubeck2023sparks,legg2008machine},
+including biases against marginalized or underrepresented groups \citep{bender2021dangers}, proliferation of false information \citep{lin2021truthfulqa}, and leakage of sensitive information \citep{carlini2021extracting}. These concerns are collectively known as the \textit{alignment problem}: how can we ensure that the behavior of these models is aligned with human preferences? 
+Current approaches to alignment within RLHF center around the collection of vast amounts of human rating data and the training of larger, more powerful RMs  \citep{ouyang2022training,gao2022scaling}. However, a fundamental issue with any RM is that ultimately, it is only an imperfect proxy for human preferences. \cite{gao2022scaling} drew attention to this fact, showing that maximizing a reward model beyond a certain point can actually begin to decrease ground truth performance (\textit{i.e.}, lead a text-based agent to produce outputs which are judged as qualitatively worse). This phenomenon is known as \textit{reward model overoptimization}. Examples of overoptimization include producing overly wordy responses or hallucinating information in an effort to give the impression of expertise. One simple, yet  expensive, approach to mitigating this issue is to periodically evaluate the model with fresh human rating throughout finetuning and stop early when ratings decline. %simply perform RLHF as usual, but periodically pause training to evaluate the model, stopping altogether when human ratings begin to decline.
+
+It is also increasingly common to derive reward from \textit{composite RMs}: fixed combinations of several RMs each designed to capture a different aspect of text quality \citep{ramamurthy2022rl4lms, glaese2022improving,yuan2023rrhf,bakker2022fine,wu2023fine}. Such composite RMs are useful because they allow for more fine-grained measurement of agent behavior and each component can be retrained or swapped out without affecting the others. %, and it can be easier to collect accurate human evaluations if the raters are only considering one asp  
+Despite these advantages, this approach also presents its own challenges. Determining the weighting among RMs requires hyperparameter optimization to find the combination that produces the best correlation with ground truth evaluation, and the risk of overoptimization means that the best weighting is contingent on a set training duration. Furthermore, when the reward is constructed from several RMs, information about each individual RM is lost, and the agent cannot attribute changes in reward to any single model. In particular, component rewards may even oppose one another, such as an RM which measures safety (and thus may deny certain user requests) versus another rewarding helpfulness \citep{bai2022training}. Worse, early stopping to avoid overoptimization in composite RMs is problematic, as different components will have different values at which they stop being effective proxies for human evaluation. 
+
+
+In this paper, we propose a simple approach to address these challenges: identify the points of overoptimization, which we term \textit{proxy points}, and then use constrained optimization to ensure that each component RM reaches, but does not exceed, its associated proxy point. Rather than use a fixed weighting among components, our method dynamically adapts a weighting to modulate the influence of each RM on the learning process. % However, such approaches inherently entangle the multiple distinct qualities which define desirable (or undesirable) behavior, ``scalarizing'' the reward signal into a single value. Ideally, it would be preferable to isolate specific components of behavior and maximize desirable outcomes while constraining potentially risky actions. Additionally, it is simpler to train simpler reward models which are designed to capture specific aspects of behavior, rather than additionally devise a specific mixture.  Here, we propose an alternative approach which allows for the isolation of different behaviors built on constrained optimization. 
+The core idea behind our approach is to use these constraints to prevent the agent from overoptimizing its (composite) RM beyond the proxy points. 
+
+As in existing methods \citep{gao2022scaling}, we rely on some access to ground-truth queries. We propose two ways of using these queries to identify proxy points. %In our approach, we use these queries to determine proxy points. We propose two ways of finding these points, which we call \textit{proxy points}. 
+In the first approach, we train multiple runs and track each reward model value, periodically querying the ground-truth reward model. This approach then finds an optimal joint proxy point by fitting a surface to this data and maximizing it. While effective, this approach requires multiple runs to fit the surface used to find proxy points. In the second approach, we speed up this process by only using one reinforcement learning run. As this run is training, we can periodically query the ground-truth reward model and use this data to run a derivative-free optimization algorithm to find the next candidate proxy points. % In this paper we use Nelder-Mead, but other approaches might work as well. 
+To summarize, we make the following contributions:
+\begin{itemize}
+    \item %To our knowledge, 
+    We provide %the first 
+    analysis of reward model overoptimization in the context of composite reward functions, showing that the correlation between RMs has a significant influence on proxy points.
+    \item We propose several constrained RL approaches which incorporate these points into the optimization objectives, preventing overoptimization and improving evaluation performance. 
+    \item We show that a derivative-free optimization method can be used to dynamically find these proxy points during a single run, significantly saving computation. 
+\end{itemize}
+
+
+\section{Preliminaries: Reinforcement Learning from Human Feedback}
+
+\paragraph{RL Problem Formulation}
+In \textit {reinforcement learning} \citep[RL;][]{sutton2018reinforcement}, an agent seeks to take actions in its environment in order to maximize reward. Mathematically, this problem is typically formalized as a \textit{Markov decision process} \citep[MDP;][]{puterman2014markov}, defined as a tuple $\mathcal M \triangleq (\St, \A, P, r, \gamma, \rho)$, where $\St$ is the state space, $\A$ is the action space, $P: \St \times \A \to \mathcal P(\St)$ is the transition kernel (where $\mathcal P(X)$ denotes the set of distributions over $X$), $r: \St \times \A \times \St \to \reals$ is the reward function, $\gamma \in [0, 1)$ is the discount factor, and $\rho \in \mathcal P(\St)$ is the initial state distribution. In practice, the agent's experience is typically broken into discrete segments, or ``episodes'' of maximum length $T$. At the beginning of each episode, the environment resets and an initial state is sampled $s_0 \sim \rho(\cdot)$. At each time step $t=0, 1, \dots, T-1$, the agent selects an action $a_t$ conditioned on its current state $s_t$ using a stationary policy $\pi(a_t|s_t)$, where $\pi: \St \to \mathcal P(\A)$. Each episode can be summarized as a trajectory $\tau = (s_0, a_0, s_1, \dots, s_T)$. The agent's goal is to find a policy with maximum expected \textit{return} $R(\tau)$, where $R(\tau) \triangleq \sum_{t=0}^{T-1} \gamma^t r(s_t, a_t, s_{t+1})$. The expected return under policy $\pi$ is known as the \textit{value} $v^\pi(s) \triangleq \E[R(\tau)|s_0=s]$ or the \textit{action-value} if conditioned on both states and actions $q^\pi(s, a) \triangleq \E[R(\tau)|s_0=s,a_0=a]$. The optimization problem faced by the agent, then, is
+$
+    \max_{\pi} \ v^\pi,
+$
+where $v^\pi \triangleq \E_{s_0\sim\rho(\cdot)} v^\pi(s_0)$ is the average value over initial states.
+
+\paragraph{Integrating Human Feedback} 
+The origin and nature of the reward is a fundamental question when formalizing a problem using RL. Using human evaluation to delineate good agent behaviors from bad has a history that extends beyond language models. \cite{knox2008tamer} used human ratings of actions to construct a reward model for the game Tetris, while \cite{christiano2017deep} proposed a mechanism for using human feedback to express preferences over trajectories collected in Atari and MuJoCo. In language modeling, each action is viewed as adding a new token to the current context string~\citep{ziegler2019fine, stiennon2020learning, bai2022training, ouyang2022training}, which can be viewed as the state. The LM is then the policy, with action space $\A$ being the vocabulary of possible tokens, and state space $\St$ being the set of all sequences of tokens up to maximum length $T$.
+Transitions are deterministic, with each action token simply appended to the current state.
+Given a pretrained LM $\pi_0$, RLHF often consists of three stages \citep{casper2023open}: 1) collecting human feedback on model utterances (typically in the form of ranked preference data), 2) training a RM to model score utterances in alignment with human feedback (typically initialized from a separate pretrained LM) and 3) finetuning the LM with RL using the learned RM. While early work in RLHF for LLMs \citep{stiennon2020learning} focused on a single reward model, more recent work has shown performance benefits of using a weighted combination of simpler RMs \citep{wu2023fine}.
+\paragraph{Overoptimization} Recently, \cite{gao2022scaling} performed an empirical study of a phenomenon with deep ramifications for alignment: RM overoptimization. Their core finding is that after a certain point, increasing an LLM agent's value with respect to a given RM will actually begin to decrease its quality on the actual preferences it is trying to learn. (\cite{gao2022scaling} use a ``gold standard'' RM to stand in for human ratings for convenience.) The root of this issue is that any RM is only a proxy for the agent's true measuring stick---human evaluation---so as predicted by Goodhart's Law \citep{goodhart1984problems}, an agent trained to maximize it will eventually learn behaviors which the true objective would discourage. Our approach to addressing this issue is based on a simple two-stage process: first, find the points where the available rewards stop being useful proxies, and second, train an agent to only maximize reward up until that point. 
+
+
+
+\section{Finding Proxy Points}
+
+
+\paragraph{Setting} In order to conduct an in-depth analysis given our available computational resources, we focus on a single setting as a case study: dialogue generation with the DailyDialog \citep{li2017dailydialog} dataset, which consists of transcripts of conversations between humans. As input, the agent receives a snippet of conversation, and from this context, it must predict the next utterance. As a base LLM, we follow prior work \citep{wu2023fine} and use GPT-2 \citep{radford2019language} here and throughout this paper. For the reward, we use a combination of two component rewards, each meant to capture a different element of desired behavior, to demonstrate our approach most directly. The first, $r^{met}$, is the METEOR score \citep{banerjee2005meteor} between the generated utterance and reference output, which is computed based on a number of features, including word-matching, synonym-matching, and phrasing. The second, $r^{int}$, measures how well the intent of the generated utterance matches that of the reference output. It is computed using a fine-tuned RoBERTa model \citep{liu2019roberta} which classifies text into different ``intent categories'' such as `inform,' `question,' or `direct.' The typical approach \citep{ramamurthy2022rl4lms} is to linearly combine these RMs to form a composite reward:
+\begin{align} \label{eq:combined_reward}
+    \tilde r_t = \alpha^{met} r^{met}_t + \alpha^{int} r^{int}_t,
+\end{align}
+where the coefficients $(\alpha^{met}, \alpha^{int})$ are fixed. As is standard in RLHF applied to language models, an additional KL penalty was added to discourage deviation from the initial model $\pi_0$:
+\begin{align}
+    r_t =  \tilde r_t - \alpha^{\kl}_t \log\frac{\pi(a_t|s_t)}{\pi_0(a_t|s_t)}. 
+\end{align}
+The coefficient $\alpha_t^{\kl}$ effectively acts as a Lagrange multiplier, increasing if the KL exceeds some threshold and decreasing otherwise.
+\paragraph{Evaluation and Proxy Points} 
+\begin{wrapfigure}[23]{r}{0.6\textwidth}
+  \centering
+  \includegraphics[width=0.99\textwidth]{figures/correlation_proxy-pts2.pdf}
+  \caption{Correlated rewards influence proxy points.}
+  \label{fig:correlated}
+\end{wrapfigure}
+In an ideal world, evaluation performance for all agents across all runs could be measured by collecting a large number of human ratings. Our choice is in line with prior work that uses held out metrics as the ground truth for convenience of iteration \citep{gao2022scaling}.
+We call the value at which further increasing the proxy reward results in decreased ground-truth performance the \textit{proxy point} $\theta^\star$. 
+\begin{figure}[t!] 
+  \centering
+  \includegraphics[width=0.99\textwidth]{figures/proxy_pts_big.pdf}
+  \caption{\textbf{Individual RMs are imperfect proxies for evaluation score.} Evaluation score initially increases as individual RMs and the KL divergence grow before falling at proxy points, denoted by dashed lines. Results are averaged over 5 seeds, with shading showing standard error.}
+  \label{fig:proxy-pts}
+\end{figure}
+To identify proxy points, we trained \textsc{PPO} agents \citep{schulman2017ppo} to maximize only one reward or the other (without KL regularization) and plotted the resulting evaluation scores against the METEOR and intent scores in \cref{fig:proxy-pts}. In both cases, the evaluation score initially increases before falling. \cite{gao2022scaling} also observed that, in general, maximization of reward causes the KL divergence between the trained and pretrained policies to increase, and therefore we also expect evaluation score to initially increase before decreasing as the KL grows as well, also shown in \cref{fig:proxy-pts}. One additional phenomenon that makes optimization of composite RMs challenging is that the component RMs may be correlated. We hypothesized that this interaction would influence the proxy points of the component rewards. The maximizing point $(\theta_{intent}^\star, \theta_{meteor}^\star)$ indeed differs from the proxy points found by only considering one RM at a time. It is also important to note that the predicted maximizing point is of the fitted surface, rather than any point attained by one of the individual runs. %\ted{Be sure to mention that proxy point is maximum of the surface, not the data points---this is why you can't just pick the best model from among the existing runs.}
+
+
+
+
+\section{Constrained RLHF}
+
+Once one has identified proxy points for the component reward models, the next question is how to train agents to maximize these rewards until they hit these critical values. We propose that a useful approach to doing this is to reformulate the optimization objective using constraints. 
+\paragraph{Adding Constraints to RL} In constrained reinforcement learning, an agent seeks to maximize its value while adhering to constraints on its behavior. Mathematically, this problem is formalized as a \textit{constrained} MDP \citep[CMDP;][]{altman99cmdps}, which is defined as a tuple $\mathcal M_C \triangleq \left(\St, \A, P, r_0, \gamma, \rho, \{r_{i}\}_{i=1}^N, \{\theta_i\}_{i=1}^N \right)$. Here, $\St$, $\A$, $P$, $r_0$, $\gamma$, and $\rho$ are all as defined for standard MDPs (with $r_0$ the reward function), with $r_i: \St \times \A \to \reals, \ i=1,\dots, N$ being \textit{constraint reward functions} and $\theta_i \in \reals, \ i=1,\dots, N$ associated \textit{constraint thresholds}. Note that the subscripts on $r_{0:N}$ are indices over reward functions, not time steps. For clarity, we will hereafter refer to $r_0$ as the ``task reward'' rather than just the reward. Rather than simply maximize value with respect to $r_0$, the CMDP optimization problem is given by
+\begin{align} \label{eq:CMDP_opt}
+    \max_\pi \ v^\pi_0 \quad \text{s.t.} \quad v_{i}^\pi \geq \theta_i, \ i=1, \dots, N.
+\end{align}
+That is, CMDPs represent behaviors which one would like to constrain in the form of value estimates with respect to reward functions which measure these behaviors. The $\geq$ symbol in \cref{eq:CMDP_opt} can easily be reversed if the constraint(s) encode behaviors which should be limited, and the inequality constraint(s) can be replaced with equality constraint(s). While there are many possible formulations, we default to the canonical form in \cref{eq:CMDP_opt} %here and in the following sections 
+for the purposes of exposition. 
+\paragraph{Proposed Method} 
+Given our possible objectives, we can now consider how to optimize them. One popular approach to solving constrained problems such as \cref{eq:CMDP_opt} is to use Lagrangian relaxation \citep{everett1963lagrangian,altman99cmdps}:
+\begin{align} \label{eq:lagrangian}
+    \max_\pi \min_{\vec\mu \geq 0}\ v^\pi_0 + \sum_{i=1}^N \mu_i(v_i^\pi - \theta_i) \triangleq \mathcal L(\pi, \vec \mu),
+\end{align}
+where the weights on the value of each RM $\vec \mu = [\mu_1, \dots, \mu_N]\tr \in \reals_{\geq 0}^N$ are the Lagrange multipliers associated with each constraint. In the case that we use equality constraints rather than inequality constraints, we use the variable $\vec\xi$ rather than $\vec\mu$. Optimization then proceeds by collecting experience using the policy and updating the policy and Langrange multipliers using gradient descent-ascent. We stress that the Lagrange multipliers are \textit{not} fixed hyperparameters, but rather are learned as part of the optimization process. The negative gradient with respect to $\vec \mu$ is simply the constraint violation:
+$
+    -\grad_{\mu_i} \mathcal L(\pi, \vec \mu) = \theta_i - v_i^\pi
+$.
+To see how policy optimization works, we can rewrite the Lagrangian as
+\begin{align}
+\begin{split}
+    \mathcal L(\pi, \vec \mu) &=  v_0^\pi + \sum_{i=1}^N \mu_i v_i^\pi - \sum_{i=1}^N \mu_i \theta_i \\
+        &= \E_{\stackrel{s_0 \sim \rho(\cdot)}{a_0\sim\pi(\cdot|s_0)}}\left[ q_0^\pi(s_0, a_0) + \sum_{i=1}^N \mu_i q_i^\pi(s_0, a_0) \right]  - \sum_{i=1}^N \mu_i \theta_i % \stackrel{s_0\sim \rho(\cdot)}{a_\sim\pi(\cdot|s_0)}
+        \\
+        &= \E_{\stackrel{s_0 \sim \rho(\cdot)}{a_0\sim\pi(\cdot|s_0)}}\left[ q_{\vec\mu}^\pi(s_0,a_0)\right] - \sum_{i=1}^N \mu_i \theta_i,
+\end{split}
+\end{align}
+where we define $q_{\vec\mu}^\pi(s,a) \triangleq q_0^\pi(s, a) + \sum_{i=1}^N \mu_i q_i^\pi(s, a)$ as the \textit{mixed} $q$-values of policy $\pi$ given the current Lagrange multipliers $\vec \mu$. Note that this value is non-stationary, as the same policy will have a different value as the weightings on each constraint value change. Policy optimization then proceeds as normal with respect to the mixed $q$-values. As is frequently done in deep RL to reduce variance, we can replace the mixed $q$-values with mixed \textit{advantages} $A_{\vec\mu}^\pi \triangleq q_{\vec\mu}^\pi(s,a) - v_{\vec\mu}(s)$, with $v_{\vec\mu}(s) = \E_{a\sim\pi} q_{\vec\mu}(s,a)$. We can optimize this objective with any policy gradient approach, in our case PPO. %Here, we do so with \textsc{PPO} \citep{schulman2017PPO}, which has proven an effective algorithm for RLHF. 
+Detailed pseudocode is provided in \cref{alg:cPPO}. 
+\paragraph{Formal Guarantees} While our focus is primarily empirical, we briefly comment on the theoretical properties of the above approach. Lagrangian relaxation converts the CMDP problem into a min-max game. If the values are decomposed as $v^\pi_i = \langle r_i, d_\pi\rangle$, where $d_\pi(s,a) \triangleq (1 - \gamma)\sum_{t\geq 0} \text{Pr}(s_t=s, a_t=a|\pi)$ is the policy's cumulative, discounted state-action occupancy measure, and optimization is performed over $d_\pi$, then the problem is convex-concave and gradient descent-ascent (under basic assumptions) guarantees convergence of the average iterates to a saddle point, \textit{i.e.}, $\left(K^{-1}\sum_{k=1}^K d_\pi^{(k)}, K^{-1}\sum_{k=1}^K\mu^{(k)} \right) \to (d^\star_\pi, \mu^\star)$ as the number of iterations $K \to \infty$ \citep{freund1997online}. However, in large-scale problems it is difficult to optimize directly over $d_\pi$, and we instead update the policy directly. In this case, the problem is convex in $\vec \mu$ but non-concave in $\pi$. \cite{efroni2020cmdps} show sublinear regret bounds with respect to both policy optimality and constraint satisfaction using an optimistic approach, and \cite{ding2020opdop} show a convergence rate for the averaged iterates for general smooth policy classes of $\mathcal O(1/\sqrt{K})$ for the policy and $\mathcal O(1/K^{1/4})$ for the constraint violation using natural policy gradients. %\ted{TODO: continue, discuss regret bounds for policy-based case, \textit{e.g.}, \cite{efroni2020cmdps}.}
+ 
+
+\begin{table}[t!]
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+ \textbf{Method}            &     \textbf{Objective} & \textbf{Intuition}  \\
+\midrule
+ \textsc{PPO} (no KL)   &     $\max_{\pi} \sum_i \alpha_i v_i^\pi$  &     Max. values \\
+ \textsc{PPO}  & $\max_{\pi} \sum_i \alpha_i v_i^\pi \ \text{s.t.} \ v_{\kl}^\pi \geq \theta_{\kl}$ & Max. values \& stay close to pretrained $\pi_0$ \\
+ \midrule
+ \multicolumn{3}{c}{New Methods} \\
+ \midrule
+  \textsc{PPO}-SAT  & Find $\pi \in \{\pi \vert v_i^\pi = \theta_i \ \forall i \}$ & Find `feasible' policy whose values hit targets \\
+ $\mu$-\textsc{PPO} & $\max_{\pi} v_{\kl}^\pi \ \text{s.t.} \ v_{j} \geq \theta_{j} \ \forall j \neq i$ & Stay close to $\pi_0$ \& ensure RMs high enough \\
+ All-\textsc{PPO} & $\max_{\pi} \sum_i \alpha_i v_i^\pi \ \text{s.t.} \ v_i \leq \theta_i\ \forall i$ &  Max. RMs but not too much \\
+ $\xi$-\textsc{PPO} & $\max_{\pi} v_{\kl}^\pi \ \text{s.t.} \ v_j = \theta_j \ \forall j\neq i$ &  Stay close to $\pi_0$ \& ensure RMs hit targets  \\
+\hline
+\end{tabular}
+\end{center}
+\caption{A summary of the approaches we consider.}
+\label{table:methods}
+\end{table}
+
+\paragraph{Choosing a Constrained Objective} 
+Given this approach, we can now consider possible constraint formulations, all of which should embody the intuition that the agent should maximize each component reward only until its corresponding proxy point. This naturally suggests that the proxy points should be used as thresholds in the constrained objective. However, there are a number of possible formulations to consider when casting RLHF as a CMDP with this goal in mind. Once the proxy point for a given RM is reached, the agent has two options: continue to update the Lagrange multiplier on that RM to ensure that values remain at that point (via equality constraints), or simply stop optimizing/un-weight that RM entirely, \textit{i.e.}, set the multiplier to zero, only re-weighting it if the constraint is violated (via inequality constraints). This latter approach carries that risk that the value with respect to that RM will continue to increase (past the proxy point) as other RMs continue to be optimized, but may be empirically effective if this is not the case and optimization is simplified by having a source of non-stationarity eliminated. In both of these cases, each component RM is assigned a constraint threshold, but the question of how to set the task reward remains. We propose the \textit{KL reward} $r_{\kl}= -\log \frac{\pi(a_t|s_t)}{\pi_0(a_t|s_t)}$ as the main task reward. \cite{gao2022scaling} liken the KL to a resource which the agent spends, such that it should try to maximize its reward while limiting its divergence from the original policy as much as possible. Using the negative KL as the task reward carries the intuition of keeping the policy as similar as possible to the pretrained policy, subject to the constraint that each RM hits the point beyond which it stops aligning with the true objective. Note that the requirement that the agent hits these thresholds is crucial, as it prevents the agent from fully maximizing the negative KL reward (\textit{i.e.}, remaining at the pretrained policy). In addition to these, there is another possible constrained approach wherein the agent simply maximizes the combined reward as in standard PPO, but constrained so that each individual RM does not violate its respective threshold. Finally, one could try to formulate the problem as one purely of constraint satisfaction: find any feasible policy whose values with respect to each of the RMs hit the appropriate proxy points. This could be implemented via a reward function that penalizes deviations from these point, \textit{\textit{e.g.}}, $r_{\text{SAT}} = -\sum_i \alpha_i (r_i - \theta_i)^2$. However, this approach faces the same problem as standard PPO---namely, how to best set the weights $\alpha_i$. These proposed approaches are summarized in \cref{table:methods}.
+
+\paragraph{Practical Improvements}
+Here, we describe several practical modifications to the ``ideal'' algorithm which we found to improve empirical performance.
+In practice, the noise and non-stationarity that primal-dual optimization in RL must contend with can lead to instability in the updates for the Lagrange multipliers. To handle this in practice, we follow prior work \citep{stooke2020pid,zahavy2022domino,moskovitz2023reload}  and use a sigmoid function to bound the Lagrange multipliers between 0 and 1. This results in mixed advantages which are a convex combination of the task and constraint advantages:
+\begin{align}
+    A_{\vec\mu}^\pi(s,a) = \left(N - \sum_{i=1}^N\sigma(\mu_i)\right) A_0^\pi(s,a) + \sum_{i=1}^N\sigma(\mu_i) A_i^\pi(s,a).
+\end{align}
+This equation has the intuitive interpretation of placing more weight on optimizing constraint reward $r_{i>0}$ when $\mu_{i>0}$ is high (indicating a constraint violation), and more weight on task reward $r_0$ when $\mu_{1:N}$ are low (indicating that constraints are satisfied). When we use equality constraints rather than inequality constraints, we replace the sigmoid with a $\tanh$ function (bounding the Lagrange multipliers between $-1$ and $1$). When updating the Lagrange multipliers, we found that using low or no momentum in the optimizer (we use SGD with a momentum parameter of 0.1) was helpful for performance, as otherwise $\sigma(\mu_i)$ or $\tanh(\xi_i)$ could be overly ``sticky,'' remaining high for too long when constraints became satisfied and vice versa. Another hack which we found to be useful was to replace the value estimates in the constraint violation calculations with the sum of rewards to-go (for the appropriate reward function) for the remainder of a given episode. This is because we found that early in training, value estimates are inaccurate, which can cause the agent to incorrectly believe it is either adhering to or violating the constraint, leading to incorrect weighting of rewards via the Lagrange multiplier and slower overall learning.
+
+
+
+\section{Experimental Evaluation}
+
+
+We now evaluate these possible approaches in the same setting as described in \cref{sect:proxy-pts}. The primary questions we would like to answer are as follows. (1) Do constrained methods result in better evaluation performance compared to PPO (and PPO-SAT)? (2) Do these approaches successfully enforce the desired constraints? (3) Do the thresholds determined by the proxy points lead to the best performance? Unless otherwise noted, all experiments are run for 5 random seeds, and any shading in plots denotes standard error.
+\begin{figure}[t!] 
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/crlhf_all_eval_labels.pdf}
+  \caption{\textbf{Constrained RLHF improves evaluation performance.} (Left) Two constrained methods, $\mu$-PPO and $\xi$-PPO produce the best performance over the course of training. (Right) Balancing RMs using constraints makes performance more robust to longer training time.}
+  \label{fig:eval_all}
+\end{figure}
+\paragraph{Does constrained RLHF improve performance?}
+In \cref{fig:eval_all}, we indeed find that two constrained approaches, $\mu$-PPO and $\xi$-PPO achieve better evaluation performance than other methods, with $\xi$-PPO performing slightly better at the end of training. To ensure fairness across methods, to set the fixed RM weightings used to train PPO and PPO-SAT, we selected the best settings found after 10 initial runs of each approach, the same as the total number of runs used to find proxy points used for the constrained methods. We conjecture that the strong performance of $\mu$- and $\xi$-PPO is due to the beneficial effects of jointly optimizing the policy and Lagrange multipliers (RM weightings). For example, even setting the weightings to be the \textit{optimal} Lagrange multipliers and fixing them throughout training is not guaranteed to converge to a saddle point \citep{szepesvari2020cmdps}, a phenomenon observed empirically by \cite{moskovitz2023reload}. This is common in constrained problems with ``paradoxical'' objectives \citep{moskovitz2023reload}. Another benefit of continually modulating the weightings among RMs is that the weightings themselves are not hyper-optimized to a particular training duration. We trained both PPO and $\xi$-PPO using their hyperparameter settings optimized over runs with 128,000 steps for 3 times as long over 3 seeds and confirmed that the constrained approach was more stable (\cref{fig:eval_all}). 
+\paragraph{Are constraints successfully enforced?}
+To verify that the constrained algorithms are working as expected, we plotted the intent and METEOR rewards across training for $\mu$-PPO, All-PPO, and $\xi$-PPO in \cref{fig:constraint_satisfaction}. We can see that, as required by the constraints, $\mu$-PPO (approximately) reaches at least as high as the proxy point thresholds, All-PPO remains below them, and $\xi$-PPO approximately hits them. $\mu$-PPO continues to increase above the intent proxy point, which may contribute to its slightly worse final performance compared to $\xi$-PPO in \cref{fig:eval_all}.
+\begin{figure}[t!] 
+  \centering
+  \includegraphics[width=0.8\textwidth]{figures/constraint_satisfaction_labels.pdf}
+  \caption{\textbf{Constraints are satisfied.} $\mu$-PPO reaches or exceeds the required intent (left) and METEOR (right) thresholds (dashed lines), All-PPO remains below them, and $\xi$-PPO hits them.}
+  \label{fig:constraint_satisfaction}
+\end{figure}
+\paragraph{Are proxy points the best thresholds?}
+We compared the performance of $\xi$-PPO using the proxy points identified in \cref{sect:proxy-pts} against the same method using thresholds that were 10\% lower and 10\% higher. The left panel of \cref{fig:proxy-pt_performance} shows that making thresholds lower causes initial performance to increase more quickly, as once the easier-to-reach thresholds are met, the agent is able to begin tightening the KL with respect to the pretrained policy earlier. However, performance plateaus at a lower level. When thresholds are set too high, the KL reward is ignored and the proxy rewards are optimized beyond the point at which they are useful, leading to worse performance. We also compared the performance of $\xi$-PPO using the correlated proxy points found in \cref{fig:correlated} against the independent proxy points found by only considering one RM at a time (\cref{fig:proxy-pts}). 
+
+\begin{figure}[t!] 
+  \centering
+  \includegraphics[width=0.9\textwidth]{figures/crlhf_threshold_perf.pdf}
+  \caption{\textbf{Using proxy points as thresholds leads to the best performance.} (Left) Using thresholds that are 10\% lower or higher reduces performance compared to proxy point thresholds. (Right) The proxy points that account for the correlation between RMs are more effective than those estimated independently.}
+  \label{fig:proxy-pt_performance}
+\end{figure}
+
+\subsection{Improving Threshold Identification}
+\begin{figure}[t!] 
+  \centering
+  \includegraphics[width=0.9\textwidth]{figures/crlhf_nm.pdf}
+  \caption{\textbf{Nelder-Mead threshold search saves computation.} (Left) Final evaluation performance versus total number of training steps (including hyperparameters searches). We allowed NM-PPO twice as many training steps for a single run, 256,000. (Right) An example threshold simplex trajectory overlaid on a contour plot of predicted evaluation performance from \cref{fig:correlated}. The search converges to a local maximum.}
+  \label{fig:nm}
+\end{figure}
+One downside of all methods considered so far is the need for multiple runs %for hyperparameter optimization. In the case of PPO, this process is required to find the best fixed weightings among the component RMs, and for $\mu$- and $\xi$-PPO, multiple runs of PPO are needed to identify  proxy points. 
+to either select a fixed weighting of RMs or identify proxy points.
+It would save significant compute---and reduce environmental impact, particularly for larger models---if it were possible to identify thresholds over the course of a single training run. Assuming we are allowed a limited number of queries to the evaluation metric over the course of training, one approach to accomplishing this would be to use a gradient-free optimizer to update the constraint thresholds to reach better performance. In order to limit the required number of policy updates between threshold updates, we used a local hill-climbing algorithm, Nelder-Mead \citep{nelder1965simplex}, which iteratively updates a simplex of thresholds based on the evaluation performance at each point. Once a new set of thresholds is proposed, we use $\xi$-PPO to converge to those points and then evaluate the model once they're reached. We plotted the final evaluation performance of this variant of our approach, which we term NM-PPO, versus total number of training steps (including runs used for hyperparameter optimization) of PPO and $\xi$-PPO in \cref{fig:nm}. We found that NM-PPO obtains strong performance over the course of a single run, significantly saving in computation. Furthermore, the trajectories of simplexes proposed by Nelder-Mead closely follow the predicted evaluation performance found in \cref{fig:correlated}, converging to local maxima of the surface. 
+One caveat with respect to this result is that the feasible region of threshold pairs is relatively small. There is therefore a moderate chance that the initial simplex already contains at least one threshold pair which produces reasonable performance. Further experimentation is required on problems with larger feasible regions and more than two component RMs.
+
+
+
+\section{Discussion}
+
+
+In this work, we studied reward model overoptimization and the influence of correlation on proxy points in composite RMs. Then, we introduced a set of approaches for identifying and using these points as thresholds within a constrained optimization approach to RLHF. One weakness shared by all approaches---unconstrained and constrained alike---is that at least some minimal degree of access to the true objective/evaluation metric is required.  Though in resource-rich settings this could be feasible (\textit{\textit{e.g.}}, by occasionally freezing training and querying human evaluators), ideally, this would be dispensed with entirely. However, doing so is nontrivial. One weakness of gradient descent-ascent applied to primal-dual policy optimization is that it does not guarantee that the final policy and Lagrange multiplier(s) converge to a saddle point, only their averages. It would be an interesting direction for future work to apply an approach which does have such guarantees, such as ReLOAD \citep{moskovitz2023reload}. For optimizing the constraint thresholds during a single run, it would be interesting to explore alternative optimizers to Nelder-Mead, such as Bayesian optimization. Another interesting direction for future work would be to study the usefulness of a CMDP formulation for avoiding degeneration/collapse of model outputs, as while a deterministic optimal policy always exists for standard MDPs, CMDPs may demand optimal policies which are stochastic \citep{szepesvari2020cmdps}. A similar idea was explored using a maximum entropy formulation by \cite{khalifa2020distributional}. In general, further testing of our methods is necessary on more domains and with composite RMs with more components. We believe there are additional interesting avenues to explore in mitigating overoptimization, such as multi-objective RL \citep{abdolmaleki2020dmpo} or with constraints added to supervised learning \citep{rafailov2023direct}. More broadly, we believe constrained optimization offers an important toolbox for approaching the alignment problem.
+
+
+
+
+
+
+
+
+\paragraph{Acknowledgements}
+Ted Moskovitz is funded by the Gatsby Charitable Foundation. Tuomas Sandholm is supported by the Vannevar Bush Faculty Fellowship ONR N00014-23-1-2876, National Science Foundation grants RI-2312342 and RI-1901403, and ARO award W911NF2210266. Stephen McAleer is funded by a CI Fellowship. The authors would like to thank Vivek Veeriah, Tom Zahavy, Misha Laskin, and Dave Abel for helpful discussions. 
+
+
+
+\clearpage
+
+
+
+

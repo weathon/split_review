@@ -1,0 +1,550 @@
+\title{Parameter-Efficient Fine-Tuning of State Space Models}
+
+\begin{abstract}
+Deep State Space Models (SSMs), such as Mamba~\citep{gu2023mamba}, have emerged as powerful tools for language modeling, offering high performance with efficient inference and linear scaling in sequence length. 
+However, the application of parameter-efficient fine-tuning (PEFT) methods to SSM-based models remains largely unexplored. 
+This paper aims to systematically study two key questions: (i) How do existing PEFT methods perform on SSM-based models? (ii) Which modules are most effective for fine-tuning?
+We conduct an empirical benchmark of four basic PEFT methods on SSM-based models.
+Our findings reveal that prompt-based methods (e.g., prefix-tuning) are no longer effective, an empirical result further supported by theoretical analysis. 
+In contrast, LoRA remains effective for SSM-based models. 
+We further investigate the optimal application of LoRA within these models, demonstrating both theoretically and experimentally that applying LoRA to linear projection matrices without modifying SSM modules yields the best results, as LoRA is not effective at tuning SSM modules. 
+To further improve performance, we introduce LoRA with Selective Dimension tuning (SDLoRA), which selectively updates certain channels and states on SSM modules while applying LoRA to linear projection matrices. 
+Extensive experimental results show that this approach outperforms standard LoRA.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Over the past two years, Large Language Models (LLMs) such as ChatGPT~\citep{achiam2023gpt,brown2020language} have achieved groundbreaking performance and are now widely used in daily life. 
+Many models use the Transformer architecture~\citep{vaswani2017attention}, with its attention mechanism essential in predicting subsequent tokens based on context. Each token computes attention scores with every preceding one, selectively focusing only on the most relevant during processing. This, however, creates quadratic time complexity, posing challenges when dealing with long sequences.
+In response, various alternative architectures like Linear Attention~\citep{katharopoulos2020transformers}, RWKV~\citep{peng2023rwkv}, RetNet~\citep{sun2024retnet}, and Mamba~\citep{gu2023mamba} have been developed to operate with subquadratic time complexity.
+
+As the most popular subquadratic-time architecture currently serving as an alternative to Transformers, SSMs ~\citep{gu2021combining,gu2022s4,gu2022s4d,gu2023mamba} achieve efficient training and inference.
+SSMs are closely related to linear RNNs, which maintain a hidden state to encapsulate the information of previous tokens. 
+When a new input token is introduced, the prediction of the next token involves only operations on this hidden state and the new token, which enhances inference efficiency. To overcome the limitation of RNNs, which cannot be trained in parallel, S4~\citep{gu2022s4,gu2022s4d} leverages its linearity, enabling it to adopt a convolutional form during training, facilitating parallel computation.
+Consequently, SSMs are highly efficient and have demonstrated success in numerous long-sequence tasks~\citep{gu2022s4,gu2022s4d}. 
+Recently, a new series of SSM models, Mamba (Mamba-I~\citep{gu2023mamba} and Mamba-II~\citep{mamba2}), have achieved Transformer-level performance in language modeling. 
+Although numerous SSM-based models exist, we primarily focus on the deep S4 model and Mamba. 
+The deep S4 model, serving as the foundational architecture, readily extends its properties to other variants, while Mamba has emerged as one of the most popular SSM-based models.
+
+Consequently, we expect fine-tuning these pretrained SSMs for downstream tasks will become a crucial problem in the near future. 
+While fine-tuning the entire model is expensive and inefficient, numerous Parameter-Efficient Fine-Tuning (PEFT) methods~\citep{houlsby2019parameter,hu2021lora,he2021towards,li2021prefix,lester2021power,zaken2021bitfit,liu2021gpt,liu2021p} have been developed for efficient adaptation under resource constraints.
+Notably, most popular PEFT methods fall into two categories: 
+(i) prompt-based tuning, which involves modifying the input sequence~\citep{lester2021power} or tuning the sequence at each layer~\citep{li2021prefix}; 
+and (ii) parameter-based tuning, which directly updates the model parameters, such as LoRA~\citep{hu2021lora}, which modifies the weight matrices, and BitFit~\citep{zaken2021bitfit}, which updates only the bias terms.
+
+Despite the success that existing PEFT methods have achieved in adapting Transformer-based models, their efficacy in adapting SSM-based models remains largely unexplored, leaving many interesting questions open.
+For instance, are existing popular PEFT methods still effective for SSM-based models? 
+If they are applicable, what is the optimal way to apply these methods to SSM-based models, and which parameters should be updated?
+If not, can we develop variants specifically tailored for SSMs that perform better? 
+To answer these questions, to the best of our knowledge, we conduct the first comprehensive study of PEFT on SSM-based models, both theoretically and empirically.
+
+To the best of our knowledge, we are the first to benchmark existing PEFT methods on SSM-based models. 
+Through extensive experiments, we demonstrate that \uline{\textbf{(Finding 1)} prompt-based PEFT methods are no longer effective for SSM-based models,} and \uline{\textbf{(Finding 2)} LoRA remains effective on SSM-based models.}
+Meanwhile, the two major components of SSM-based models are the SSM module, which functions analogously to attention in Transformers, and linear projection matrices, which are similar to feed-forward layers.
+We next investigate which part of the model is more effective for applying PEFT. 
+We empirically find that \uline{\textbf{(Finding 3)} applying LoRA to linear projection matrices without modifying the SSM module is already effective,} while the most effective linear projection matrices differ depending on the dataset.
+Notably, Findings 1 and 3 are supported by our theoretical analysis. 
+While LoRA is not effective for tuning SSM modules, theoretically, tuning additional SSM modules increases expressivity.
+Finally, we analyze the architecture of SSM-based models using the theoretical framework of \citet{giannou2023expressive} and \citet{zeng2023expressive}. 
+We show that, in addition to applying LoRA to linear projection matrices, \textit{S}electively updating the channel and state \textit{D}imensions of SSM modules further enhances performance. 
+We dub this method as \ours{}, the first PEFT method tailored for SSM-based models. 
+Through extensive experiments, we observe that \uline{\textbf{(Finding 4)} \ours{} outperforms LoRA alone in fine-tuning SSM-based models.}
+
+
+\section{Related Works}
+
+\paragraph{State Space Models (SSMs).} 
+Linear State-Space Layers (LSSL) represent one of the earliest SSM layers utilized in deep learning, functioning as continuous-time, recurrent, and convolutional models~\citep{gu2021combining}. 
+LSSL employs HiPPO theory~\citep{gu2020hippo} to initialize the state matrix $\A$, enabling the capture of long dependencies. 
+However, LSSL is computationally expensive, limiting its practical application.
+\citet{gu2022s4} introduced Structured State Space Models (S4), which optimize computation efficiency by employing a structured state matrix $\A$. 
+\citet{gupta2022dss} proposed DSS, which simplifies the model by using a diagonal matrix for $\A$ and empirically demonstrated that it suffices to achieve performance comparable to S4. 
+Further, \citet{gu2022s4d} provided a theoretical explanation for the effectiveness of the diagonal state matrix $\A$ in DSS and introduced S4D, which offers various initialization methods for $\A$. 
+Subsequently, the diagonal structure of the state matrix $\A$ has been adopted in follow-up methods~\citep{gu2023mamba}.
+Despite differences in optimization algorithms, we refer to S4 and its close variants, including DSS and S4D, collectively as S4. This terminology encompasses models that maintain the standard discrete-time SSM form with a diagonal state matrix.
+
+Despite of the remarkable performance of SSMs on certain tasks of sequence modeling, SSMs still showed worse performance than Transformers on language modeling. 
+\citet{fu2022hungry} transitioned from synthetic language modeling tasks to real language modeling tasks with SSMs. They proposed H3, which is inspired by Linear Attention~\citep{katharopoulos2020transformers}, introducing both diagonal SSM and shift SSM.
+Recently, Mamba~\citep{gu2023mamba,mamba2} escaped from linear time invariance (LTI) modeling by introducing input-dependent terms and achieved better performance than Transformer on language modeling. Furthermore, several hybrid models~\citep{lieber2024jamba,park2024can} tried to exploit the advantages of both SSMs and Transformers.
+\paragraph{Parameter-Efficient Fine-Tuning (PEFT).}
+Due to the increase in model size, PEFT methods have gained increasing popularity as they achieve good performance while being much more efficient compared to full model updating~\citep{houlsby2019parameter,hu2021lora,he2021towards,li2021prefix,lester2021power,zaken2021bitfit,liu2021gpt,liu2021p}.
+Most of the existing popular PEFT methods fall into two categories: (i) prompt-based methods~\citep{li2021prefix,lester2021power,liu2021gpt,liu2021p}, and (ii) parameter tuning methods~\citep{donahue2014decaf,yosinski2014transferable,hu2021lora,zaken2021bitfit}.
+Common prompt-based methods include prompt tuning~\citep{lester2021power}, and prefix-tuning~\citep{li2021prefix}. 
+Prompt tuning prepends a sequence of learnable virtual tokens, which are continuous vectors.
+Prefix-tuning further expands on Prompt tuning by prepending tokens across the model’s depth, making it more powerful.
+Therefore, our analysis of prompt-based methods’ limitations will focus on prefix-tuning, with the findings also applicable to the other prompt-based methods.
+Conversely, parameter tuning methods, which originated from traditional transfer learning practices, typically involve freezing the initial layers and only tuning the last few layers~\citep{donahue2014decaf,yosinski2014transferable}. 
+In recent years, more effective and innovative parameter tuning approaches have emerged~\citep{hu2021lora,zaken2021bitfit}.
+The widely used Low-Rank Adaptation (LoRA) updates a subset of parameters (\eg, attention layers of a Transformer) in a low-rank manner. 
+BitFit~\citep{zaken2021bitfit}, focuses on tuning only the bias terms of a pretrained model.
+In Sec.~\ref{app:related_works}, we provide a more detailed description of these baseline methods. 
+Numerous efforts have been made to theoretically understand existing PEFT methods. 
+For prompt-based methods, \citet{wang2023universality}, \citet{petrov2023prompting}, and \citet{oymak2023role} have theoretically analyzed the effectiveness and limitations of prompt tuning and prefix-tuning for Transformer-based models.
+For LoRA,  \citet{zeng2023expressive} explored its expressive power by demonstrating that even a randomly initialized model can be adapted to match any smaller target model using LoRA. 
+Some of our theoretical analysis draws upon the framework established by \citet{zeng2023expressive}.
+\citet{jang2024lora} conducted a theoretical exploration of LoRA within the neural tangent kernel (NTK) regime.
+
+
+\section{Preliminaries of State Space Models}
+
+\paragraph{Scalar-input Scalar-output SSM.} 
+The initial SSM is derived from a specific continuous system that maps a one-dimensional function or signal $x(t) \in \sR$ to $y(t) \in \sR$ via an $\dimh$-dimensional latent state $\h(t) \in \sR^\dimh$, as described in \eqref{eq:rnn_continuous_ssm}.
+In \eqref{eq:rnn_continuous_ssm}, input transition vector $\B \in \sR^{\dimh \times 1}$ indicates the input's impact on the state of the system,
+state matrix $\A \in \sR^{\dimh \times \dimh}$ characterizes the system's internal state dynamics,
+and the output mapping vector $\C \in \sR^{1\times \dimh}$ relates the state to the output $y(t)$.\footnote{Note that $\B,\C$ are vectors. 
+We use bold capital letters to remain consistent with existing works~\citep{gu2022s4,gu2023mamba}.}
+\begin{minipage}{.29\textwidth}
+\begin{equation}\label{eq:rnn_continuous_ssm}
+ \resizebox{.8\textwidth}{!}{$
+    \begin{aligned}
+    \h'(t) &= \A \vh(t) +  \B x(t) \\
+    y(t) &= \C\h(t)
+\end{aligned}
+$}
+\end{equation}
+\end{minipage}\hfill 
+\begin{minipage}{.29\textwidth}
+\begin{equation}\label{eq:rnn_discrete_ssm}
+ \resizebox{.8\textwidth}{!}{$
+   \begin{aligned}
+    \h_t &= \dA \h_{t-1} + \dB x_{t}, \\
+    y_t &= \C\h_t
+\end{aligned} 
+$}
+\end{equation}
+\end{minipage}\hfill
+\begin{minipage}{.41\textwidth}
+\begin{equation}
+ \resizebox{.8\textwidth}{!}{$
+\begin{gathered}\label{eq:cnn_discrete_ssm}
+    \dK = (\C\dB, \C\dA^{\,}\dB, \ldots, \C {\dA}^{t-1}\dB), \\
+    (y_1, \ldots, y_t) = (x_1, \ldots, x_t) * \dK
+\end{gathered}
+$}
+\end{equation}
+\end{minipage}
+
+To adapt SSMs for deep learning, the continuous parameters $(\A, \B)$ are transformed into discrete counterparts $(\dA, \dB)$ using a learnable step size $\Delta \in \sR$. 
+An example of a discretization rule is the zero-order hold, which defines $\dA =\exp (\Delta \A), \dB =(\Delta \A)^{-1}(\exp (\Delta \A)-\mI) \cdot \Delta \B$.
+
+The discrete-time SSM is formulated as \eqref{eq:rnn_discrete_ssm}. 
+For efficient and parallelizable training, the output $\vy$ of a length-$N$ input $\vx$ in the discrete-time SSM can be computed with a long convolution, as detailed in \eqref{eq:cnn_discrete_ssm}. This convolution operation can be efficiently computed in the frequency domain with FFT.
+
+\paragraph{Vector-input Vector-output SSM.}
+Many deep learning tasks, such as language modeling, often use multi-channel inputs. When the input and output are vectors, denoted as $\x, \y \in \sR^{\dimd}$, separate SSMs are used for each of the $D$ input channels. As such, a superscript $(d)$ is introduced to indicate parameters specific to each channel when necessary. This notation may be omitted for simplicity. 
+
+\paragraph{Structured State Space Sequence Model (S4).}
+S4 introduced by \citet{gu2022s4} represents one of the earliest applications of SSMs in deep learning. 
+It features a \textbf{diagonal} structure for the state matrix $\A$, a design theoretically validated by \citet{gu2022s4} and practically implemented through its subsequent variants, DSS~\citep{gupta2022dss} and S4D~\citep{gu2022s4d}.
+
+\paragraph{Deep S4 Layer.} Since S4 lacks non-linearity and operates with independent channels, a position-wise linear layer and a non-linear activation function are integrated into the deep S4 layer, facilitating information mixing across channels and introducing non-linearity. Furthermore, a residual connection from the input to the output of S4 is introduced.
+Let $\otimes$ represent the element-wise product, and $\operatorname{S4}(\cdot)$ denote the S4 mechanism, where the output of each channel is computed according to \eqref{eq:cnn_discrete_ssm} using its own convolutional kernel $\dK\dth$.
+While the subtle details such as the activation functions may vary slightly from the previous studies~\citep{gu2022s4,gu2022s4d}, for the theoretical analysis in this paper, we define the deep S4 layer as below.
+The output of a deep S4 layer is then formulated as:
+\begin{equation}\label{eq:deep_s4}
+    \y_t = \relu(\mW \cdot \operatorname{S4}_t(\x_1, \ldots, \x_t) + \vbeta +  \vu \otimes \x_t),
+\end{equation}
+where $\mW\in \sR^{\dimd \times \dimd}$ and $\vbeta \in \sR^{\dimd}$ represent the linear projection matrix and bias, respectively, and $\vu \in \mathbb{R}^{\dimd}$ is the coefficient of the residual connection. 
+Note that in a deep S4 layer, the trainable parameters are SSM parameters $(\A\dth, \B\dth, \C\dth, \Delta^{(d)})$ across $D$ channels with $\A\dth$ being diagonal
+and the parameters $(\mW, \vbeta)$ for the linear layer and $\vu$ for the residual connection. 
+\paragraph{Selective State Space Models (S6).} 
+A key property of all SSMs mentioned above is linear time invariance (LTI), where model dynamics remain constant over time. 
+However, LTI models face significant limitations: their constant dynamics fail to selectively extract relevant information from the context or influence the hidden state in an input-dependent manner. 
+The S6 model, proposed by \citet{gu2023mamba}, addresses these limitations by making its parameters input-dependent. 
+
+In particular, at each time step $t$, given the input $\x_t \in \sR^{\dimd}$, they introduce input-dependency to step size $\dt_t = (\Delta^{(1)}_t, \ldots, \Delta^{(D)}_t)^\top \in \sR^D$, input transition vectors $\B_t \in \sR^{\dimh \times 1} $ and the output mapping vectors $\C_t \in \sR^{1\times \dimh}$ via linear projection:
+\begin{equation}
+    \dt_t = \softplus (\Wdt \x_t + \vbeta_{\dt}),\quad \B_t = \mW_{\B} \x_t,\quad \C_t = \mW_{\C} \x_t,
+\end{equation}
+whereas the diagonal state matrices $\A^{(1)}, \ldots, \A^{(D)}$ remain input-independent.
+Note that $\Wdt \in \sR^{\dimd \times \dimd}$ is implemented via a rank-$r$ low-rank parameterization, denoted by $\Wdt = \Wdtu\Wdtd$, where $\Wdtu \in \sR^{D\times r}$ and $\Wdtd \in \sR^{r\times D}$, which is a common method for reducing compute overheads~\citep{pufferfish,wang2023cuttlefish}.
+To summarize, the trainable parameters in S6 include state matrices $\A\dth$ across $D$ channels, parameters $\Wdtu, \Wdtd$ and $\vbeta_{\dt}$ for computing $\dt_t$, and weight matrices $\mW_{\B}, \mW_{\C} \in \sR^{\dimh \times \dimd}$ for computing $\B_t, \C_t$. 
+The state matrices and the input transition vectors of S6 are then discretized according to $\dA_t\dth = \exp(\Delta_t\dth \A\dth ), \dB_t\dth = \Delta_t\dth \mB_t.$
+In contrast to S4, where $\dB\dth$ varies independently across channels, the differences in $\dB\dth$ in S6 are solely due to the scalar $\Delta_t\dth$. 
+Additionally, S6 uses the same $\C_t$ for all channels at each time step $t$, unlike S4, which has unique $\C\dth$ for each channel.
+\paragraph{Mamba.}
+Similar to the Transformer block, which consists of attention and linear layers, the Mamba block proposed by \citet{gu2023mamba} features an S6 module, a point-wise 1D causal convolution layer ($\conv1d$) for token mixing, linear layers — including input ($\Win$) and output ($\Wout$) projection layers and a gated MLP. 
+Mamba, primarily allocating its parameters in $\Win$ and $\Wout$, is inspired by H3~\citep{fu2022hungry}.
+
+
+\section{Benchmarking PEFT Methods on SSM-based Models}
+
+In this section, we examine the effectiveness of popular PEFT methods when applied naively to SSM-based models, specifically Mamba (130M and 1.4B).
+
+\paragraph{Experiment Setup.}
+We consider two main categories of PEFT methods: parameter-based and prompt-based. 
+From each category, we evaluate two representative methods. 
+For parameter-based methods, we select BitFit~\citep{zaken2021bitfit} and LoRA~\citep{hu2021lora}. 
+For prompt-based methods, we choose prefix-tuning~\citep{li2021prefix} and prompt tuning~\citep{lester2021power}. For BitFit, fine-tuning is performed on all bias terms present in the Mamba architecture, specifically the biases of the $\conv1d$ and the linear projection layer of step size $\dt$.
+For prefix-tuning, we adopted the huggingface implementation~\citep{peft} to construct a MLP, employing the overparameterization technique to ensure stable optimization.
+
+
+We consider five datasets spanning diverse domains: the GLUE natural language understanding benchmark~\citep{wang2018glue}, the DART RDF-to-text generation benchmark~\citep{nan2021dart}, the Spider text-to-SQL generation benchmark~\citep{yu2018spider}, and CIFAR-10 for computer vision tasks~\citep{krizhevsky2009learning}.
+A more detailed introduction of the datasets considered in this paper is provided in Sec.~\ref{app:datasets}.
+Notably, prefix-tuning requires substantially more parameters than other PEFT methods, as it employs a multilayer perceptron at each layer to project a fixed sequence into soft tokens for training stability. 
+For all other PEFT methods, we constrain the trainable parameters to fewer than 0.5\% for language tasks and 1\% for vision tasks, ensuring a fair comparison. 
+The higher allowance for vision tasks accommodates the need for extensive fine-tuning for new modalities.
+Consequently, LoRA adapters are applied exclusively to linear projection matrices, leaving the SSM modules unchanged to comply with these parameter constraints.
+
+\paragraph{Results.}
+Table~\ref{tab:benchmark_all} presents our results. 
+Parameter-based PEFT methods generally outperform prompt-based methods significantly, despite using the same number of trainable parameters—except for prefix-tuning, which underperforms despite using more parameters. 
+LoRA consistently achieves the best performance across all tasks and metrics, occasionally surpassing full fine-tuning while tuning less than 1\% of parameters.
+We provide the full experimental results, including detailed results of subtasks on GLUE and Spider, in Sec.~\ref{app:bench_exp}.
+
+These findings above raise two critical questions: (i) Why do existing prompt-based PEFT methods lose effectiveness when applied to SSM-based models? (ii) Can LoRA achieve better performance when applying on both linear projection matrices and SSM modules? 
+To address these questions, we conduct both theoretical analysis and further empirical studies on prompt-based PEFT methods and LoRA in the context of SSMs.
+\begin{table}[ht]
+    \centering
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{l|c|cc|ccc|c|c}
+    \toprule
+        \textbf{Dataset} & \textbf{GLUE} & \multicolumn{2}{c|}{\textbf{DART}}& \multicolumn{3}{c|}{\textbf{SAMSum} } & \textbf{Spider} & \textbf{CIFAR-10} \\ \midrule
+        Metric ($\uparrow$) & Avg. Score  & METEOR & BLEU & R1 & R2 & RL & Acc. & Acc. \\ \midrule 
+        Prompt Tuning & 63.8 & 66.2 & 39.8 & 50.1 & 25.6 & 41.6 & 43.6 & 30.4  \\
+        Prefix-Tuning & 68.6 & 66.6 & 42.5 & 50.6 & 26.5 & 42.1 & 39.7 & 41.0 \\ \midrule
+        BitFit & 76.8 & 67.0 & 43.7 & 50.3 & 25.7 & 41.9 & 48.4 & 44.4  \\ 
+        LoRA (Linear Projection Matrices) & \underline{\textbf{80.5}} & \textbf{70.4} & \textbf{49.1} & \textbf{50.9} & \textbf{27.0} & \textbf{42.3} & \textbf{57.5} & \underline{\textbf{61.1}} \\ \midrule 
+        Full Fine-Tuning & 80.5 & 71.0 & 51.8 & 51.2 & 27.3 & 42.9 & 66.2 & 60.0 \\ \bottomrule
+    \end{tabular}}
+\caption{
+\textbf{Benchmarking popular Parameter-Efficient Fine-Tuning (PEFT) methods on five real-world datasets.} R1/R2/RL stand for ROUGE-1/2/L.
+For all PEFT methods except prefix-tuning, we report the best results for cases where fewer than 0.5\% of parameters are tunable for language tasks and fewer than 1\% for vision tasks (i.e., CIFAR-10) after comprehensive hyperparameter search.
+Prefix-tuning is an exception, as it requires training a multilayer perceptron at each layer to project a fixed sequence into soft tokens for training stability, consuming more trainable parameters than our threshold.
+\textbf{Bold} numbers indicate outperformance over all PEFT methods, while \underline{underlined} numbers indicate outperformance over full fine-tuning.
+}
+    \label{tab:benchmark_all}
+\end{table}
+
+\subsection{Limitations of Applying Existing Prompt-based Methods on SSMs}
+\label{sec:prefix_tuning_limit}
+This part addresses our first question arised in this section: Why do existing prompt-based PEFT methods lose effectiveness when applied to SSM-based models?
+We approach this by establishing an upper bound on the performance of existing prompt-based PEFT methods.
+
+A key feature of SSMs is their next-token prediction mechanism, which relies solely on the current token and hidden states, without considering previous tokens directly. 
+The hidden states encapsulate all information from preceding tokens. 
+Consequently, prepending tokens to an SSM is functionally equivalent to tuning the initial state, as demonstrated by the following proposition.
+The formal version and proof of \cref{prop:prefix_informal} are presented in \cref{app:prompt}.
+\begin{proposition}[Informal: Expressivity of Prefix-Tuning on SSMs]\label{prop:prefix_informal}
+The maximum expressiveness achievable via prefix-tuning on SSMs is equivalent to the expressiveness of solely tuning the initial hidden state $\h_0$.
+\end{proposition}
+
+To evaluate the performance of initial state tuning, we conducted experiments on the GLUE benchmark, comparing prompt-tuning, prefix-tuning, initial state tuning, and LoRA across seven GLUE tasks. 
+Table~\ref{tab:glue} presents our findings. 
+The results demonstrate that initial state tuning generally outperforms prefix-tuning, corroborating our analysis. 
+However, LoRA significantly surpasses initial state tuning in performance.
+These observations lead us to conclude that the limitations of initial state tuning inherently constrain the potential of existing prompt-based methods, preventing them from outperforming LoRA in the context of SSM-based models.
+While the reason for the underperformance of initial state tuning is unclear, we identify explaining it as an interesting direction for future research.
+Nevertheless, we propose a plausible explanation.
+We hypothesize that SSM's exclusive reliance on hidden states, without direct access to previous tokens or states, severely restricts the impact of initial state tuning, particularly for long sequences. 
+This aligns with the findings of \citet{fu2022hungry}, which demonstrate SSM's limitations in recalling older tokens.
+
+\begin{table}[htbp]
+    \centering
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{l|cccccccc}\toprule
+        \textbf{Task} & \textbf{RTE} & \textbf{MRPC} & \textbf{CoLA} & \textbf{SST-2} & \textbf{QNLI} & \textbf{QQP} & \textbf{MNLI} & \textbf{Avg. Score} \\ \midrule
+         Prompt Tuning & .560 & .716 & .120 & .894 & .768 & .796 & .615 & .638 \\
+         Prefix-Tuning & \underline{.695} & \underline{.757} & .434 & .915 & .834 & .831 & .356 & .686  \\
+         Initial State Tuning & .668 &  .751 & \underline{.524} & \underline{.924} & \underline{.864} & \underline{.861} & \underline{.785} & \underline{.768}\\ \midrule
+         LoRA (Linear Projection Matrices) & \textbf{.704} & \textbf{.828} & \textbf{.606} & \textbf{.924} & \textbf{.884} & \textbf{.877} & \textbf{.815} & \textbf{.805} \\
+\bottomrule
+    \end{tabular}}
+    \caption{
+\textbf{Comparison of prompt-tuning, prefix-tuning, initial state tuning, and LoRA on seven tasks from the GLUE benchmark.}
+We report the Matthews correlation ($\uparrow$) for CoLA, overall (matched and mismatched) accuracy $(\uparrow)$ for MNLI, and accuracy for other tasks.
+Initial State Tuning and LoRA are constrained to use less than 0.5\% trainable parameters. 
+\textbf{Bold} numbers indicate the best performance across all three methods, while \underline{underlined} numbers show the highest score among prompt-based methods (prefix-tuning and initial state tuning). 
+Initial state tuning outperforms prefix-tuning and prompt-tuning on five out of seven tasks, while LoRA consistently outperforms all prompt-based methods.}
+    \label{tab:glue}
+\end{table}
+
+\subsection{Optimal Application of LoRA in SSM-based Models}\label{sec:lora}
+In our previous experiments, we applied LoRA exclusively to linear projection matrices. 
+However, SSM-based models typically comprise various modules, including S4 (convolution layer), S6, and multiple distinct linear projection matrices. 
+To investigate the impact of applying LoRA to different components, we conduct a comprehensive study across five datasets.
+
+\begin{table}[ht]
+    \centering
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{l|c|c|cc|c|c|ccc|c}
+    \toprule
+        \textbf{Model} & \multicolumn{5}{c|}{\textbf{Mamba-130M}} & \multicolumn{5}{c}{\textbf{Mamba-1.4B}} \\ \midrule
+        Dataset & \multirow{2}{*}{Params. (\%)} & \textbf{GLUE} & \multicolumn{2}{c|}{\textbf{DART}} & \textbf{CIFAR-10} & \multirow{2}{*}{Params. (\%)} &\multicolumn{3}{c|}{\textbf{SAMSum}} & \textbf{Spider} \\
+        Metric ($\uparrow$) & & Avg. Score  & METEOR & BLEU & Acc. & &  R1 & R2 & RL & Acc. \\ \midrule 
+        SSM Modules & .92 & 79.3 & 69.9 & \textbf{50.8} & 44.0 & .46 & 50.5 & 26.4 & 42.2 & 56.3  \\
+        Linear Projection Matrices & 1.02 & \textbf{80.5} & \textbf{71.2} & 49.2 & \textbf{62.8} & .51 & \textbf{50.8} & \textbf{26.9} & \textbf{42.8} & 54.7  \\
+        Both & 1.92 & 80.2 & 71.0 & 49.5 & 60.4 & .97 & \textbf{50.8} & 26.6 & 42.7 & \textbf{56.4} \\
+        \bottomrule
+    \end{tabular}}
+    \caption{ 
+    \textbf{For LoRA, targeting only the linear projection matrices yields better performance than applying it to all modules in Mamba. }
+    Consistent rank is maintained across all three methods.
+    }
+    \label{tab:lora}
+\end{table}
+
+We examine LoRA's performance when applied to SSM modules and linear projection matrices separately, as well as in combination. 
+For linear projections, we test LoRA on all possible matrices. 
+For SSM modules, we apply LoRA to all weight matrices (e.g., weight matrices of input-dependent step size $\dt$) in SSM modules. 
+For the state transition matrices $\A$, given their diagonal structure for each channel, we treat them as vectors, concatenate the channels into a matrix, and apply LoRA. 
+The results are presented in Table~\ref{tab:lora}. 
+We observe that applying LoRA to linear projection matrices achieves superior performance on six out of eight metrics. 
+Interestingly, additional tuning of SSM modules lead to decreased performance in some cases. 
+This suggests that LoRA might not be well-suited for tuning SSM modules, while being highly effective for linear projection matrices.
+
+To further elucidate this concept, we present the following lemma, which examines a simplified model architecture consisting of S6 with a linear input projection matrix at each layer. 
+We demonstrate that fine-tuning the projection matrix $\Win$ encompasses the expressivity of fine-tuning the parameters $\Wb$, $\Wc$, and $\Wdtu$.
+
+\begin{lemma}[Expressivity of Fine-Tuning Projection Matrices]\label{lemma:s6_projection_informal}
+    Consider an S6 with an additional linear input projection matrix $\Win$. 
+   Denote the input-dependent SSM parameters $\set{\set{\dA\dth_n}_{d=1}^D, \dB_n, \C_n}_{n=1}^N$ as 
+$
+ \vtheta(\cdot; \set{\A\dth}_{d=1}^D, \Wb, \Wc, \Wdtu, \Wdtd, \Win).
+$
+For any given $\overline{\W}_{\B}$, $\overline{\W}_{\C}$, and $\overline{\W}_{\Delta, \uparrow}$, there exists a $\widehat{\Win}$ such that for any input sequences $\mX\in \sR^{D\times N}$,
+\begin{align}
+\vtheta(\mX; \set{\A\dth}_{d=1}^D, \overline{\W}_{\B}, \overline{\W}_{\C}, \overline{\W}_{\Delta, \uparrow}, \Wdtd) = \vtheta(\mX; \set{\A\dth}_{d=1}^D, \Wb, \Wc, \Wdtu, \Wdtd, \udwin).
+\end{align}
+\end{lemma}
+
+We expand upon this section in Sec.~\ref{sec:app_ffn_ssm}, where we provide more detailed statements of the above assertion and its corresponding proofs.
+Additionally, we empirically examine applying LoRA to different weight matrices of Mamba, which incorporates multiple linear projection matrices in each layer, including output projection matrices $\Wout$ after the S6 module and input projection matrices $\Win$ before the gating and convolutional layer. 
+Our experiment results, however, reveal that applying LoRA to different matrices achieves similar performance, as detailed in Sec.~\ref{sec:app_ffn_ssm}.
+
+
+
+\section{Dimension Selection for Tuning State-Space Models}
+
+In Sec.~\ref{sec:lora}, we demonstrate the efficacy of LoRA in fine-tuning linear projection matrices. 
+Theoretically, fine-tuning all components should offer greater expressive power. However, Table~\ref{tab:lora} indicates that applying LoRA to SSM modules might paradoxically decrease performance. Therefore, we aim to develop an algorithm specifically tailored for tuning SSM modules. To achieve this, we first seek to understand the relative importance of different parameters within SSM modules.
+\subsection{Understanding the Roles of State Matrix \textbf{\textit{A}}, Input Transition Vector \textbf{\textit{B}}, and Output Mapping Vector \textbf{\textit{C}} for a Single Channel in S4 Modules}
+
+\paragraph{Problem Setting.} 
+Inspired by \citet{zeng2023expressive}'s theoretical analysis of LoRA's expressive power, we adopt a similar framework to explore the expressive potential of various parameters in the S4 model.
+Specifically, we assume a target model that performs well on the intended task and a frozen model, which may be either pretrained or randomly initialized.
+Our goal is to identify a parameter-efficient method to update the frozen model so that it becomes functionally equivalent to the target model.
+In alignment with \citet{zeng2023expressive}, we assume that the frozen model's capacity is equal to or exceeds that of the target model. 
+This assumption is based on two main considerations: 
+(i) analytical tractability, which necessitates that the frozen model must have the potential to match the functionality of the target model, 
+and (ii) a practical rationale, given that the models typically used in practice are often overparameterized.
+Assume that both the target model and the frozen model are S4, with the target model having a hidden state dimension $\tgH$ and the frozen model having a hidden state dimension $H \geq \tgH$.
+Meanwhile, suppose that all the hidden dimensions of both models are valid, meaning that none of the parameter elements are zero.
+The target model, frozen model, and the updated model after tuning the parameters on the frozen model can be formulated using discretized parameters $\dA, \dB, \C$ as follows:
+\begin{align}
+\text{(Target model)}\quad & \tgf(\vx)_n = \sum\nolimits_{m=1}^n \tgC \tgdA^{m-n} \tgdB x_m,\text{ where } \diag(\tgdA), \tgdB, \tgC \in \sR^{\tgH}, \\
+\text{(Frozen model)}\quad &  \fzf(\vx)_n = \sum\nolimits_{m=1}^n \C \dA^{m-n} \dB x_m,\text{ where } \diag(\dA), \dB, \C \in \sR^{H}, \\
+\text{(Updated model)}\quad&  \udf(\vx)_n = \sum\nolimits_{m=1}^n \udC \uddA^{m-n} \uddB x_m,\text{ where } \diag(\uddA), \uddB, \udC \in \sR^{H}.
+\end{align}
+
+\paragraph{Parameter Efficiency Analysis on S4.} 
+Let $\gP^H$ denote the set of all $H\times H$ permutation matrices.
+Given this formulation, we present our first analysis of parameter efficiency for the S4 model in the following lemma. 
+This analysis is based on the parameters after necessary discretization $(\dA, \dB, \C)$.
+\begin{lemma}[Essential Discretized Parameter Set for S4]
+\label{lemma:discretization}
+    Consider the parameters after discretization, \ie{}, $\dA, \dB, \C$. 
+    To achieve functional equivalence between the updated model and the target model, \ie{}, $\udf \equiv \tgf$, it is sufficient to tune the following number of parameters: 
+    \begin{equation}
+    \resizebox{\textwidth}{!}{$
+        \min_{\mP \in \gP^H} 
+        \overbrace{
+            \norm{\sqbrac{\mP^\top (\diag(\dA) \otimes \dB \otimes \C^\top)}_{(\tgH + 1): H}}_0 
+        }^{\text{eliminating redundant dimensions}}
+        + 
+        \overbrace{
+            \underbrace{
+                \norm{\sqbrac{\mP^\top \dA \mP}_{1:\tgH, 1:\tgH} - \tgdA}_0 
+            }_{\text{aligning the state matrix}}
+            +
+            \underbrace{
+                \norm{ \sqbrac{\mP^\top (\dB \otimes \C^\top)}_{1:\tgH} - \tgdB \otimes \tgC^\top }_0
+            }_{\text{aligning input-output interactions}}
+        }^{\text{aligning used dimensions with target model}}.
+    $}
+    \end{equation}
+\end{lemma}
+This lemma highlights the significance of identifying essential hidden state dimensions. 
+The term $\norm{\sqbrac{\mP^\top (\diag(\dA) \otimes \dB \otimes \C^\top)}_{(\tgH + 1): H}}_0$ underscores the importance of excluding redundant dimensions. 
+This can be achieved by either directly removing these dimensions from the state matrix $\dA$, or by updating $\dB$ or $\C$ to ensure that only the selected hidden state dimensions are utilized during the input transition or output mapping phases. 
+Once redundant dimensions are filtered out, tuning only the essential dimensions is sufficient to align the updated model with the target model.
+
+\subsection{SSM Dimension Selection Algorithm}
+Inspired by Lemma~\ref{lemma:discretization}, we introduce the \textit{Dimension Selection} algorithm to construct adapters on SSMs for fine-tuning. 
+This algorithm first selects unimportant dimensions and sets them to zero, filtering out irrelevant information based on Lemma~\ref{lemma:discretization}. 
+For enhanced parameter efficiency, we then update only the most important channels and state dimensions within these selected subsets. 
+Regardless of other selections, we consistently tune the coefficients of residual connections and biases in linear projections, as these components contain a negligible number of parameters.
+However, we will later demonstrate that in practice, tuning residual connections and biases is unnecessary. 
+The detailed pseudo-code is presented in Alg.~\ref{alg:ours}.
+Given that tuning $\C$ alone is as effective as tuning both $\B$ and $\C$ for S4~\citep{gupta2022dss}, subsequent discussions on S4 will focus solely on $\C$, excluding $\set{\B^{(d)}}_{d=1}^D$ for simplicity, without loss of generality.
+
+\normalem
+\begin{algorithm}
+\KwIn{Dataset $\gD$, warmup epochs $E_0$, train epochs $E$, number of layers $L$, total channels $D$, total states $H$, initial state sparsity $\beta_0$, initial channel sparsity $\alpha_0$, state update fraction $\beta$, channel update fraction $\alpha$}
+\KwOut{Model adapter}
+\BlankLine
+\tcc{Warmup Epochs}
+Update SSM modules using $\gD$ for $E_0$ epochs\;
+\tcc{Setup Adapters}
+\For{$l = 1$ \KwTo $L$}{
+\tcc{Set dimensions as zero}
+Sort channels based on magnitude of $\dA\dth$ at each channel\;
+Set final $(1-\beta_0) D$ as zero by letting $\C\dth = \vzero$, denote non-zero channels as set $\sD$\;
+\For{$d\in \sD$}{
+Sort states based on magnitude of $\bar{A}\dth_h$ at each state dimension\;
+Set final $(1-\alpha_0) H$ as zero by letting corresponding $C\dth_h = 0$, denote non-zero states as set $\sH$\;
+}
+\tcc{Unfreeze dimensions}
+Sort non-zero channels $\sD$ based on magnitude of parameter changes at each channel\;
+Denote first $\beta |\sD|$ as $\sD'$\;
+\For{$d \in \sD'$}{
+Sort non-zero state dimensions based on magnitude of parameter changes\;
+Construct adapter to update first $\alpha |\sH|$ states at $d$-th channel\;
+}
+\tcc{Include Residual Connections and Bias}
+Construct adapter for all residual connections and bias\;
+}
+\caption{Dimension Selection Algorithm for S4}
+\label{alg:ours}
+\end{algorithm}
+We refer to our method as \ours{}. 
+This approach extends beyond applying LoRA to linear projection matrices by \textit{S}electively updating certain subset of channels and states \textit{D}imensions, which are chosen by Alg.~\ref{alg:ours}.
+Our analysis considers cases where each input token $x_t \in \gX$, with $\gX \in \sR^D$ bounded, and the input sequence length is finite.
+The following theorem elucidates the expressive capacity of \ours{} on deep S4 models.
+For proof and additional details, refer to Sec.~\ref{app:ours_theory_s4}.
+\begin{theorem}[Expressive Power of \ours{} on Deep S4 Models]\label{thm:s4_mixture}
+    Consider a $\dimd$-dimensional input sequence.
+    Assume that the linear layers in the model have linear activation functions.
+    Using \ours{}, any deep S4 model with $\dimh$ hidden states per channel and $\diml$ layers can be updated to accurately present any target deep S4 model without residual connections, having a reduced hidden state dimension $\tgdimh < \dimh$, and fewer layers $\tgdiml < \diml$. 
+    This can be achieved by selectively fine-tuning at most $\ceil{\dimd\tgdiml/\diml}$ channels, $\tgdimh$ hidden states on SSM modules, applying rank-$\ceil{\frac{\diml}{\tgdiml}}$ updates on linear projection matrices and updating residual connections and biases at each layer, while additionally fully fine-tuning the linear projection matrix of the last layer only.
+\end{theorem}
+
+This theorem demonstrates that a larger pretrained model requires selecting fewer channels and hidden states at each layer. 
+Furthermore, if the target task is less complex — evidenced by a smaller target model with fewer layers $\tgdiml$ and hidden states $\tgdimh$ — the number of channels and hidden states needed is also reduced. 
+This finding aligns with the theoretical analysis of LoRA presented in \citet{zeng2023expressive}, which shows that larger pretrained models require fewer learnable parameters (referred to as ``lower rank'' in their context) during fine-tuning, especially for simpler tasks. 
+Although this theorem is constrained by the assumptions of linear activations and the absence of residual connections in the target model, while also requiring fully fine-tuning the linear project matrix of last layer, our findings have broader implications.
+Our following experimental results suggest that these findings generalize beyond these restrictions.
+
+\subsection{Empirical Evaluation on Deep S4 Models}
+
+In this experiment, we seek to validate the theoretical guarantees for \ours{} under more general conditions, including residual connections in the target model and ReLU activations in both frozen model and target model, without full fine-tuning the linear projection matrix of the last layer. 
+Additionally, we assess \ours{}'s empirical performance on both synthetic and real datasets.
+More experiment setup details are provided in Sec.~\ref{app:s4_exp}. 
+
+\begin{minipage}{\textwidth}
+\begin{minipage}{.49\textwidth}
+    \includegraphics[width=\linewidth]{figures/s4_synthetic.pdf}
+    \captionof{figure}{Approximation error of  PEFT methods on deep S4 models for synthetic experiments.}
+    \label{fig:s4_curves}
+\end{minipage}\hfill
+\begin{minipage}{.49\textwidth}
+   \resizebox{\linewidth}{!}{
+    \begin{tabular}{lr|c}\toprule
+         \textbf{Method} &  \textbf{\# Params (\%)}&  \textbf{Accuracy}  \\ \midrule
+         Frozen & 0.00 &  73.9 \\ \midrule
+         LoRA (Proj) & 16.00 & 77.6 \\ 
+         LoRA (S4+Proj) & 15.52 & 77.6 \\ 
+         \ours{} & 11.17 & \textbf{78.0} \\ \midrule
+         Full Fine-Tuning & 100.00 & 77.6 \\ \bottomrule
+    \end{tabular}
+    }
+    \captionof{table}{Accuracy comparison between \ours{} and LoRA on deep S4 models for CIFAR-10~\citep{krizhevsky2009learning}.}
+    \label{tab:s4_cifar}
+\end{minipage}
+\end{minipage}
+\paragraph{Synthetic Dataset.}
+For the synthetic dataset, we employ a regression setting to validate our theoretical results. 
+\textit{(Experiment Setting)} We randomly initialize two models: a one-layer deep S4 model as the target and a four-layer deep S4 model as the frozen model. 
+The task is to update the frozen model to match the functionality of the target model. 
+We generate an input sequence $\mX$ of length $200$ and dimension $64$, with values uniformly drawn from integers between 0 and 9. 
+This input is then processed through the target model to obtain the corresponding outputs. 
+These input-output pairs are used to train the frozen model over 500 iterations using the Mean Squared Error (MSE) loss. 
+
+\textit{(Results)}
+Figure~\ref{fig:s4_curves} displays the MSE, averaged across all tokens, plotted against the trainable parameters of different methods. 
+We observe that by using only $\approx 28\%$ of the total parameters of the frozen S4 model, \ours{} closely approximates the performance of the target S4 model, achieving results comparable to full fine-tuning, thereby substantiating our theorem.
+Meanwhile, we observe that \ours{} outperforms both the approach of applying LoRA solely to linear projection matrices and the approach of applying LoRA to both the S4 module and linear projection matrices. 
+In this latter approach, the diagonal vectors of state matrices $\A\dth$, input transition vectors $\B^{(d)}$ and output mapping vectors $\C^{(d)}$ are naively concatenated across $D$ channels into three $D\times H$ matrices before low-rank updates are applied.
+In Sec.~\ref{app:s4_exp}, we also evaluate an extension of \ours{} that performs sparse tuning on the linear projection matrices by updating only the columns corresponding to the channels selected by Alg.\ref{alg:ours}, instead of applying LoRA. 
+This extension shows promising results.
+\paragraph{CIFAR-10.}
+We also conduct experiments on the CIFAR-10 dataset~\citep{krizhevsky2009learning}. 
+We employ an eight-layer deep S4 model with a hidden state dimension of 16 and a model dimension of 64. 
+Since pretrained deep S4 models are not available, we simulate a pretrained scenario by fully updating the model for 50 epochs first, then subsequently evaluating the PEFT methods over an additional 5 epochs.
+The results, as reported in Table~\ref{tab:s4_cifar}, indicate that \ours{} outperforms LoRA with fewer trainable parameters.
+
+\subsection{Empirical Evaluation on Mamba}
+Lastly, we conduct experiments on pretrained Mamba models. We consider four datasets, using Mamba-130M for GLUE and DART, and Mamba-1.4B for SAMSum and Spider. 
+We evaluate three configurations each for LoRA and \ours{}, applying LoRA to distinct parameter subsets and varying \ours{}'s state freeze ratios while maintaining a 99\% channel freeze ratio.
+In this experiment, we allow channels and states to learn directly from the datasets without manually setting any to zero.
+We then select a LoRA-rank such that all configurations have a similar number of trainable parameters for a fair comparison. 
+Residual connections and biases are frozen in this experiment. 
+All reported values represent averages across three simulations, with learning rates independently selected for each simulation.
+For more details, please see Sec.~\ref{app:pretrained_exp_ours}.
+The experimental results are reported in Table~\ref{tab:ours_pretrained}. 
+The results demonstrate that \ours{} outperforms LoRA alone for fine-tuning the SSM even when 99\% of the channels are frozen.
+This result underscores the efficacy of \ours{}.
+
+\begin{table}[htbp]
+        \centering
+        \resizebox{\linewidth}{!}{
+        \begin{tabular}{l|c|cc|cc|cc|c|cc|cc|cc|cc}
+        \toprule
+       \textbf{Model}  & \multicolumn{7}{c|}{\textbf{Mamba-130M}} & \multicolumn{9}{c}{\textbf{Mamba-1.4B}} \\ \midrule
+            \multirow{3}{*}{\textbf{Method}} & \multirow{3}{*}{
+            \begin{tabular}{c}
+                 \textbf{Params} \\
+                 \textbf{(\%)} 
+            \end{tabular}
+             } &  \multicolumn{2}{c|}{\textbf{GLUE}} & \multicolumn{4}{c|}{\textbf{DART}} & \multirow{3}{*}{
+            \begin{tabular}{c}
+                 \textbf{Params} \\
+                 \textbf{(\%)} 
+            \end{tabular}
+             } &  \multicolumn{6}{c|}{\textbf{SAMSum}} &  \multicolumn{2}{c}{\textbf{Spider}} \\  \cmidrule{3-8} \cmidrule{10-17}
+            &  & \multicolumn{2}{c|}{Avg. Score ($\uparrow$)}  & \multicolumn{2}{c|}{BLEU ($\uparrow$)} & \multicolumn{2}{c}{METEOR ($\uparrow$)} & &  \multicolumn{2}{c|}{R1 ($\uparrow$)} &  \multicolumn{2}{c|}{R2 ($\uparrow$)} &  \multicolumn{2}{c|}{RL ($\uparrow$) }&  \multicolumn{2}{c}{Acc. ($\uparrow$)} \\ \cmidrule{3-8} \cmidrule{10-17}
+            & & Val & Test & Val & Test & Val & Test & & Val & Test & Val & Test & Val & Test & Val & Test  \\ \midrule
+            \multirow{3}{*}{LoRA} & .3178 & 80.71 & 78.74 & 50.44 & 41.27 & 70.00 & 65.84 & .1594 & 51.59 & 50.56 & 27.66 & 26.49 & 42.87 & 42.22 & 82.08 & 61.19\\
+            & .3600 & 80.79 & 79.39 & 51.03 & 42.02 & 70.16 & 66.18 & .1810 & 51.61 & \underline{\textbf{51.03}} & \underline{\textbf{28.15}} & 26.81 & 43.18 & 42.36 & 83.52 & \underline{\textbf{62.64}}\\
+            & .3883 & 80.39 & 79.49 & 50.70 & 41.55 & 69.83 & 65.98 & .1947 & 51.48 & 50.90 & 27.90 & 26.63 & 43.26 & 42.41 & 82.98 & 59.25 \\
+            \midrule
+            \multirow{3}{*}{\ours{}}
+            & .3492 & \underline{80.93} & \underline{\textbf{79.75}} &  \underline{51.45} & \underline{42.37} & \underline{70.45} & \underline{\textbf{66.60}} & .1760 & \underline{51.63} & 50.90 & 27.97 & \underline{\textbf{26.86}} & \underline{43.32} & \underline{\textbf{42.52}} & \underline{84.36} & 62.57  \\
+            & .3498 & \underline{\textbf{81.05}} & 79.16 & \underline{51.47} & \underline{\textbf{43.85}} & \underline{\textbf{70.46}} & \underline{66.38} & .1761 & 51.61 & 50.76 & 28.02 & 26.65 & \underline{43.38} & 42.29 & \underline{\textbf{84.48}} & 59.96 \\
+            & .3509 & 80.67 & 78.73 & \underline{\textbf{51.54}} & \underline{42.56} & \underline{70.45} & \underline{66.45} & .1764 & \underline{\textbf{51.74}} & 50.86 & 28.08 & 26.54 & \underline{\textbf{43.39}} & 42.19 & \underline{84.19} & 61.25\\
+            \bottomrule
+        \end{tabular}}
+
+    \caption{
+    \textbf{Performance comparison between \ours{} and LoRA on pretrained Mamba models.} 
+    \textbf{Bold} numbers indicate the best performance for each task. 
+    \underline{Underlined} numbers indicate that the model outperforms all models fine-tuned via the alternative method for the same task (e.g., \ours{} outperforms all LoRA methods, or vice versa).
+    On Mamba-130M, we compare the performance of \ours{} and LoRA on GLUE~\citep{wang2018glue} and DART~\citep{nan2021dart} benchmarks.
+    On Mamba-1.4B, we compare performance of \ours{} and LoRA on SAMSum~\citep{gliwa2019samsum} and Spider~\citep{yu2018spider} benchmarks.
+    R1, R2, and RL represent ROUGE-1, ROUGE-2, and ROUGE-L, respectively.
+    }
+    \label{tab:ours_pretrained}
+\end{table}
+
+
+
+\section{Conclusion \& Discussion}
+
+In this paper, we present the first study on the performance of PEFT methods applied to SSM-based models. 
+Our evaluation of existing PEFT methods provides valuable insights and guidelines for future researchers to parameter-efficiently fine-tune SSM-based models to other domains.
+Moreover, we take a first step in establishing a theoretical framework for studying PEFT methods on SSM-based models.
+Furthermore, we introduce \ours{}, the first PEFT method specifically tailored for SSM-based models, which outperforms existing methods.
+
+While our work offers numerous valuable insights, some limitations exist.
+Theoretically, our guarantees for \ours{} are limited to linear activations and require full fine-tuning of the last layer. 
+However, our experiments demonstrate that \ours{} does not suffer from these limitations in practice. 
+Removing such restrictions for \ours{} in theory or developing new PEFT methods under more general theoretical cases is an interesting future direction. 
+Additionally, our theory only demonstrates that updating a subset of channels and states is sufficient, without providing guidance on optimal selection. 
+Our channel and state selection, based on a warmup stage and parameter magnitude, may not be optimal.
+Further investigation into the impact of channel/state selection and development of improved dimension selection algorithms presents an interesting avenue for future work. 
+Lastly, our work primarily focuses on SSM-based models. Studying PEFT methods on SSM-Transformer hybrid models~\citep{lieber2024jamba,park2024can}, is an interesting future direction.
+
+
+

@@ -1,0 +1,401 @@
+\title{Lean-STaR: Learning to Interleave Thinking and Proving}
+
+\begin{abstract}
+
+  
+Traditional language model-based theorem proving assumes that by training on a sufficient amount of formal proof data, a model will learn to prove theorems. Our key observation is that a wealth of \textit{informal} information that is not present in formal proofs can be useful for learning to prove theorems. For instance, humans think through steps of a proof, but this thought process is not visible in the resulting code.
+We present Lean-STaR, a framework for training language models to produce informal thoughts prior to each step of a proof, thereby boosting the model's theorem-proving capabilities.
+Lean-STaR uses retrospective ground-truth tactics to generate synthetic thoughts for training the language model.
+At inference time, the trained model directly generates the thoughts prior to the prediction of the tactics in each proof step. Building on the self-taught reasoner framework, we then apply expert iteration to further fine-tune the model on the correct proofs it samples and verifies using the Lean solver.
+Lean-STaR achieves state-of-the-art results on the miniF2F-test benchmark within the Lean theorem proving environment, significantly outperforming base models ($\boldsymbol{43.4\% \rightarrow 46.3\%,}$ Pass@64). We also analyze the impact of the augmented thoughts on various aspects of the theorem proving process, providing insights into their effectiveness.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\setcounter{footnote}{0}
+
+Theorem proving is a fundamental aspect of mathematics, and mathematical reasoning %serves as a foundational element in
+is an important part of artificial intelligence \citep{newell1956logic,zhou2023teach}.
+\textit{Formalized mathematics} in particular provides a %medium for testing
+challenging testbed for assessing mathematical reasoning capabilities. %capabilities. In this setting, a theorem and proof is  represented as checkable source code, making it
+Since theorems and proofs in this setting can be represented in the form of checkable source code, it is easy to evaluate proofs of arbitrary complexity~\citep{de2015lean}. %Automatically proving formal theorems also has implications for mathematics as interest in formal systems increasingly grows within the 
+Automated theorem proving, if successful, can also help discover unknown errors in previous proofs\footnote{For example, Terence Tao found a non-trivial error while using Lean to formalize a project \citep{tao2023blog}.}, and make it easier to guarantee that new proofs are correct.
+More broadly, formal mathematics coupled with powerful automation may unlock new forms of education and collaboration, mathematical insights, and applications to verifying critical software~\cite{avigad2023mathematics,first2024automating,buzzard2024,national2023artificial}.
+Recently, language models have shown promising progress in formal theorem proving~\citep{polu2020generative,rabe2020mathematical,wu2021lime,han2021proof,lample2022hypertree,yang2023leandojo,li2024survey}. 
+Existing approaches typically train a model solely based on the proofs in a formal language (code) such as Lean~\citep{de2015lean}, Isabelle~\citep{nipkow2002isabelle}, or Coq~\citep{coq1996coq}.
+Our key observation is that such approaches ignore a wealth of \textit{informal} information that may be useful for learning to prove theorems \citep{welleck2021naturalproofs,welleck2022naturalprover}. For instance, the underlying \textit{thought process} prior to each step of a proof is not present in formal source code. %Towards this end, we study the problem of training
+Based on this insight, we propose to train a language model that can produce a natural language chain-of-thought (``thought'') prior to each step (``tactic'') of a formal proof.
+
+We introduce Lean-STaR, a framework for learning to interleave informal thoughts with steps of formal proving. Building on the Self-Taught Reasoner (STaR) framework \citep{zelikman2022star}, we enable language models to interleave step-by-step rationales (i.e., thoughts) \citep{nye2021show, wei2022chain} with formal proving in a two-stage process. 
+In an initial phase, we prompt a sufficiently capable language model, such as GPT-4 \citep{achiam2023gpt}, and generate retrospective thoughts based on a dataset of human-written proofs, such as Mathlib, the largest collection of human-written proofs in Lean~\citep{mathlib2020}.
+Subsequently, we fine-tune a thought-augmented tactic predictor \citep{bohme2010sledgehammer, blanchette2016hammering, gloeckle2023temperature, czajka2018hammer} that, given a Lean state, can generate a thought and predict the subsequent tactic.
+In a second  phase, we optimize this thought-augmented tactic predictor with the expert iteration algorithm \citep{anthony2017thinking,singh2023beyond}, using multi-step success rate in theorem proving as the reward.
+
+Our work presents a new link between informal and formal mathematics, complementary to prior explorations that translate standalone mathematical statements~\cite{szegedy2020promising,wang2020exploration,wu2022autoformalization} or translate informal proofs into formal proofs~\cite{agrawal2022towards,jiang2022draft,azerbayev2023proofnet,zhou2024don,huang2024mustard}. Lean-STaR generates natural language thoughts specifically for each proof step, 
+improving formal proving capabilities by interleaving natural and formal languages.
+
+We instantiate Lean-STaR by generating roughly 50,000 thought-augmented examples from Lean's Mathlib~\cite{mathlib2020}, then synthesize an additional 50k examples through two iterations of expert iteration.
+To the best of our knowledge, this yields the first thought-augmented dataset for theorem proving. After fine-tuning an InternLM2-7b base model \citep{ying2024internlmmath} on our thought-augmented data, our final Lean-STaR model can solve $\mathbf{34.8\%}$ (pass@32) or $\mathbf{36.1\%}$ (pass@64) of the problems on miniF2F-test  \citep{zheng2021minif2f}. Using stronger base model InternLM2-7b-plus, Lean-STaR can achieve $\mathbf{45.4\%}$ (pass@32), significantly surpassing the previous state-of-the-art results of $43.4\%$ (pass@32).  In summary, Lean-STaR offers a framework for teaching language models to interleave informal thoughts with formal verification,  advancing the capabilities  of language models in automated theorem proving.
+
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=0.98\linewidth]{direct_vs_rational_augmented_v2.png}
+  \caption{The illustration of tactic prediction in one proof step with and without thought.}
+  \label{rational}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+\paragraph{Automatic Theorem Proving \& Autoformalization.} Previous work on learning-based theorem proving typically follows the GPT-f framework \citep{polu2020generative}, which trains a language model on (proof state, next-tactic) pairs, then proves theorems by using the model within a best-first tree search. Subsequent work has explored several directions, including data augmentation~\cite{han2022proof}, novel proof search methods \citep{lample2022hypertree, wang2023dt}, further training through curriculum learning \citep{polu2022formal}, retrieval augmentation~\citep{yang2023leandojo}, or practical tools~\citep{welleck2023llmstep}.
+Others use prompted models to generate tactics~\cite{azerbayev2023llemma,thakur2023language}, or fine-tune models to generate a full proof~\cite{first2023baldur}.
+A second \textit{auto-formalization}~\citep{wu2022autoformalization} thread incorporates informal mathematics into formal theorem proving.
+Draft-Sketch-Prove \citep{jiang2022draft} shows that language models have some ability to use informal proofs to improve a model's formal proving abilities, by drafting an informal proof, translating into a formal proof sketch, then completing the proof with tools like Sledgehammer \citep{bohme2010sledgehammer}.
+Draft-Sketch-Prove and related methods~\cite{wang2023legoprover,zhao2024decomposing,zhou2024dont} are limited to the Isabelle prover, since they use powerful automatic proving tools like Sledgehammer. Lean lacks these tools, so generating the entire proof at once would be more unlikely in Lean. 
+We focus on Lean, and train language models to generate a thought and predict the subsequent tactic in each proof step.
+To the best of our knowledge, we are the first to introduce thought-augmented reasoning in automatic theorem proving.
+\paragraph{Rationale-augmented Reasoning.}
+Recently, many works demonstrated that letting language models reason before an answer can improve their performance on tasks including math, science, and code \citep{nye2021show, wei2022chain, chen2022program}.
+Although the corresponding techniques (e.g., Scratchpad and Chain-of-Thought) have proven to be effective, they require either extensive annotated training examples or exposure to numerous similar examples during pre-training \citep{brown2020language}. The scarcity of natural language reasoning in formal theorem proving, coupled with the impracticality of manually annotating rationales for formal mathematics, thus presents a challenge. We propose a new Lean-STaR framework for \textit{synthesizing} training examples by taking advantage of the correctness signal from the formal system.
+
+\paragraph{Bootstrapping Language Model Reasoning.}
+Recently, several works suggest that language models may be taught to reason via  synthetic data that they generate themselves,
+akin to a reinforcement learning method that improves a policy through self-play.
+\citet{polu2022formal} showed that a simple RL algorithm, expert iteration, paired with curriculum learning can improve a formal theorem proving model. Self-Taught Reasoner (STaR) \cite{zelikman2022star} showed that we can iteratively fine-tune the language model on the correct (reasoning, answer) pairs generated by itself to gradually improve performance. \citet{singh2023beyond} proposed ReST-EM, which filters data generated by language model with a binary feedback signal rather than using fully manually annotated data (similar to expert iteration in \cite{polu2022formal}).
+Our work builds on these ideas, providing the first study of bootstrapped thought-augmented proving.
+
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=\linewidth]{lean_star_example.png}
+  \caption{\textbf{An example of Lean proof and thoughts generated by Lean-STaR}. Note that there is a calculation error in the thought (in red), but this does not affect the correctness of the proof because the calculation task is actually completed by the interactive theorem prover (i.e., Lean's \texttt{nlinarith}) instead of the language model. This shows a benefit of combining neural and symbolic systems.}
+  \label{Lean-STaR example}
+\end{figure}
+
+
+
+\section{Our Method: Lean-STaR}
+
+
+We introduce Lean-STaR, a new method for combining informal thoughts with formal theorem proving. First, we recap interactive theorem proving (\S\ref{ssec:prelim}). Then we present Lean-STaR's data-generation (\S\ref{ssec:direct}, \S\ref{ssec:data}) and reinforcement learning (\S\ref{ssec:rl}) phases. Finally, we present our evaluation protocols  (\S\ref{ssec:evaluation}).
+
+\subsection{Preliminaries}\label{ssec:prelim}
+\textit{Interactive Theorem Provers} (ITPs) are typically used for step-by-step automatic theorem proving in formal mathematics. At each step, we can provide the ITP with a high-level ``tactic'' to simplify the current goal state (e.g., the initial goal theorems to be proven) into subgoals. These subgoals will form new states, and proving all the subgoals results in a complete proof of the given theorem.
+We use Lean \citep{de2015lean}, a popular interactive theorem prover.
+\begin{figure}[t]
+  \centering
+\begin{lstlisting}[basicstyle=\small, frame=single, inputencoding=utf8,literate={⊢}{$\vdash$ }1 {∧}{$\land$ }1 {∨}{$\lor$ }1 {↔}{$\leftrightarrow$ }1 {ℕ}{$\mathbb{N}$ }1 {≠}{$\neq$ }1]
+### State
+a b n : ℕ
+⊢  ¬ (n ≠ 0 ∧ a ≠ 0) ↔  n = 0 ∨ a = 0
+### Tactic
+```lean4
+    simp only [not_and_or, ne_eq, not_not]
+```
+\end{lstlisting}
+\begin{lstlisting}[basicstyle=\small, frame=single, inputencoding=utf8,literate={⊢}{$\vdash$ }1 {∧}{$\land$ }1 {∨}{$\lor$ }1 {↔}{$\leftrightarrow$ }1 {ℕ}{$\mathbb{N}$ }1 {≠}{$\neq$ }1]
+### Reasoning
+To prove the equivalence between the negation of a conjunction and a disjunction, we utilize logical equivalences, specifically the negation of a conjunction (`¬(P ∧ Q)`) being equivalent to the disjunction of the negations (`P = 0 ∨ Q = 0`) and simplifications related to negation and inequality.
+\end{lstlisting}
+  \caption{Examples of (input, output) pairs of retrospective rationale generation with GPT-4. See \S\ref{ssec:data} for the detailed explanation.}
+  \label{gptgeneranted}
+\end{figure}
+\subsection{Data Generation \& Training}
+
+We describe the data generation and training of the direct tactic prediction model (SFT), the thought-augmented tactic prediction model trained with synthetic data (Lean-CoT), and the final model trained with expert iteration (Lean-STaR).
+
+\subsubsection{Direct Tactic Prediction} \label{ssec:direct}
+We define the theorem-proving problem as a \textit{Markov Decision Process} (MDP) $(\mathcal{S}, \mathcal{A}, P_a, R_a)$ where proof states serve as states in MDP and tactics serve as actions.
+From this perspective, a proof is a trajectory $(s_1, a_1, r_1), (s_2, a_2, r_2), \cdots$ of states $s_i$, tactics $a_i$, and rewards $r_i\in \mathbb{R}$, and the ITP (e.g., Lean) provides each new state $s_{i+1}$. 
+
+In the typical setting~\cite{polu2020generative}, proving a theorem consists of providing a proof state $s$ to the language model and then generating a tactic from the language model $M$, i.e., $\pi_M(a|s)$. 
+The language model can be fine-tuned for this task using a dataset of (proof state, next-tactic) pairs from
+successful proof trajectories, i.e. $D= \{(s^i, a^i): i=1,\cdots,M\}$, where final states have a reward of 1.
+We refer to a language model fine-tuned on such a dataset as a \textit{supervised fine-tuning (SFT)} model. 
+
+\subsubsection{Thought-augmented Tactic Prediction} \label{ssec:data}
+Existing approaches typically train only on formal states and tactics~\cite{polu2020generative}. We hypothesize that incorporating a latent \textit{thought} can improve a model's ability to predict the next tactic.
+Formally, we introduce a hidden ``thought'' variable $t_i$ prior to each tactic, and then extend the model to the form $\pi_M(a_i,t_i|s_i)=\pi_M(a_i|t_i,s_i)\pi_M(t_i|s_i)$.
+In thought-augmented tactic prediction, the  distribution over the next tactic can then be expressed as:
+$$\pi_M(a_i|s_i)=\sum\limits_{t_i}\pi_M(a_i|t_i,s_i)\pi_M(t_i|s_i).$$
+
+The key challenge is obtaining (state, thought, tactic) pairs for training a model.
+To this end, we introduce \textbf{retrospective rationale generation}. Our motivating observation is that the distribution of natural language thoughts in theorem-proving $\pi_M(t_i|s_i)$ is scarce in the pre-training corpus of large language models. In turn, we find that even the most powerful GPT-4 model does not perform well in generating the correct rationale through few-shot prompting \citep{brown2020language}.
+To develop a language model capable of generating thoughts and tactics $a_i,t_i|s_i$, we need an entirely new dataset $D_T=\{(s^i, t^i, a^i) : i = 1,\cdots,N\}$.
+However, in Lean, we only have a dataset of $D_S=\{(s^i, a^i) : i = 1,\cdots,N\}$ where $(s^i, a^i)$ is one step in some successful proof trajectories.
+Given a powerful large language model $G$, which we refer to as the oracle model\footnote{For instance, in our experiments we use the best available large language model, GPT-4.}, we give the oracle model the ground-truth tactic $a_i$ and let the oracle model produce the thought $t_i$ given the current state $s_i$ and ground-truth tactic $a_i$. This helps improve the pass rate and produce thought-augmented data more efficiently.
+
+The design principle of the prompt is to prevent the oracle model from generating hindsight-like thoughts.
+
+We randomly select $M$ pairs $(s^i, a^i) \in D_S$ . Then the oracle model is used to produce a thought $t^i$ for each pair $(s^i, a^i)$ to create a new dataset $D_T\{(s^i, t^i, a^i): i=1,\cdots,M\}$. With this retrospectively annotated dataset by the oracle model $D_T$, we obtained our first thought-augmented tactic prediction model, Lean-CoT, by fine-tuning from the SFT model.
+
+\subsubsection{Bootstrapping Thought-augmented Theorem Proving} \label{ssec:rl}
+
+We propose to apply expert iteration to further improve the performance of Lean-CoT. Specifically, we start from the initial Lean-CoT model $M_0$ and the initial dataset $D=\{s^i : i = 1,\cdots,M\}$, which consists of all initial states $s^i$ of the theorems to be proved. In iteration $1$, we use model $M$ to sample $K$ times per problem. Each time the model will produce a proof trajectory $[(s_0, t_0, a_0), (s_1, t_1, a_1), \cdots, (s_n, t_n, a_n)]$. Then we create a new dataset $D_1$ by filtering the generated trajectories to include only the successful ones. De-duplication is then applied to the collected trajectories. Now, we can further fine-tune the SFT model $M$ on dataset $D_T \cup D_1$ to produce Lean-STaR model $M_1$. Then we can use $M_1$ as initial model to produce dataset $D_2$ and further fine-tune to obtain model $M_2$ in the next iteration.
+
+This method can be seen as an offline RL method  \citep{singh2023beyond} in the theorem proving  MDP. In this MDP, the cumulative reward $R\left((s_0, t_0, a_0), (s_1, t_1, a_1), \cdots, (s_n, t_n, a_n)\right) = 1$ if and only if the proof trajectory is successful. The total expected reward is 
+$$J(M, D)=\sum\limits_i \mathbb{E}_{(s_0, t_0, a_0), \cdots, (s_n, t_n, a_n) \sim \pi_{M}(\cdot | s^i)}R\left((s_0, t_0, a_0), \cdots, (s_n, t_n, a_n)\right),$$
+and Lean-STaR's expert iteration can be seen as optimizing this reward~\citep{singh2023beyond}.
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=395pt]{lean_star_pipeline.png}
+  \caption{\textbf{The diagram of our pipeline.} (1) Produce CoT dataset through GPT-4. (2) Fine-tune the SFT model with the CoT dataset to obtain Lean-CoT. (3) Use expert iteration to generate the STaR dataset through the model in the last iteration (Lean-CoT in the first iteration) and then fine-tune Lean-CoT on the updated STaR dataset to obtain the model in the next iteration. We continue performing this step until a stopping condition is met (e.g., a fixed number of iterations).}
+  \label{pipeline}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=395pt]{search_vs_sampling_v2.png}
+  \caption{\textbf{The visualization of Best-first Search ($K=1$) and Sampling ($S=1$).} Search method maintains a search tree and explores $S$ tactics on each expanded node. Sampling method explores $K$ tactic trajectories from the root and ignores illegal tactics in the trajectories.}
+  \label{sreachvssampling}
+\end{figure}
+\subsection{Evaluation} \label{ssec:evaluation}
+
+\paragraph{Setup.}
+
+We evaluate the model on formal theorem proving -- given a theorem statement, produce a theorem that is correct according to the formal system. This requires an algorithm for producing a full proof by interacting with Lean. As a new form of theorem-proving system, it is unclear what the best strategy is when we have informal thoughts.
+Our preliminary experiments indicate that best-first search with beam search does not work well for the thoughts in the natural language format.
+Thus we describe the traditional strategy (best-first search), and our new approach based on sampling.
+
+\paragraph{Best-First Search.} The most popular method to evaluate the theorem proving ability of a language model $M$ is to use best-first search like GPT-f \citep{polu2020generative,yang2023leandojo,azerbayev2023llemma,welleck2023llmstep}. In best-first search, we keep all unexpanded states $s_i$. Each time, we expand the ``best'' state $s_i$ and use the language model to sample $S$ next tactics $a_{i, 1 \cdots S}$ for the current state $s_i$. For each legal tactic $a_{i,j}$, a new state can be obtained by applying tactic $a_{i,j}$ on state $s_i$. 
+Following standard practice~\cite{polu2020generative,yang2023leandojo,welleck2023llmstep}, we assume the state with maximum log-probabilities is the ``best''s. Specifically, we select state $s_i$ with maximum $\sum\limits_{j=0}^{i-1} \log p(a_j, s_j)$, where $(s_0, a_0), \cdots, (s_{i-1}, a_{i-1})$ is the proof trajectory before state $s_i$ and $\log p(a_j, s_j)$ is the average log probability of each generated token. We expand up to $N$ states and we get a successful proof search when we reach any proof state with no goals. Then, we can attempt the search $K$ times to obtain a pass rate $pass@K$. However, we found that the best-first search method performs poorly with the Lean-CoT and Lean-STaR models.
+We attribute this to using average log probabilities, which may not be a reliable quality indicator  when the thought sequence $t_j$ is  generated. 
+
+\paragraph{Sampling.} Motivated by these issues with applying best-first search to thought-augmented proving, we develop a new method based on sampling trajectories in parallel.
+Specifically, our method samples $K$ times in parallel for each problem,  each time  generating at most $N$ tactics. Also, illegal sampled tactics will be ignored during sampling. Specifically, in a sample, suppose our current state is $s_i$, the proof trajectory before $s_i$ is $(s_0, a_0), \cdots, (s_{i-1}, a_{i-1})$ and the sampled tactic is $a_i$. If $a_i$ is a legal tactic, $(s_i, a_i)$ will be added to the proof trajectory and we will reach a new state obtained by applying tactic $a_{i,j}$ on state $s_i$. Otherwise, we ignore this $a_i$ and use language model $M$ to sample a new tactic given state $s_i$. We limit the number of times a tactic can be generated by language model $M$ to a total of $N$ per time in $K$ sampling times. The sampling method is roughly equivalent to the search with $S = 1$, except that the sampling ignores illegal tactics. We assume that in the sampling method we have $S=1$. In this setting, evaluating our sampling method and best-first search with equal $S \times K$ took approximately the same amount of GPU time. This sampling method can easily accommodate hidden variable ``thoughts'' $t_j$. 
+Figure \ref{sreachvssampling} compares best-first search and our sampling method.
+
+
+
+\section{Experiments}
+
+
+We instantiate Lean-STaR using the best available open language model pre-trained on the Lean corpus (InternLM2-Math-base-7b~\citep{ying2024internlmmath}), and follow standard practice in using Lean's Mathlib as the underlying training set (via the Lean Dojo dataset~\cite{yang2023leandojo}).
+We generate an initial set of thoughts for Mathlib using GPT-4, perform two rounds of expert iteration, then evaluate the model on miniF2F~\cite{zheng2021minif2f}, the de-facto standard benchmark for evaluating language-model based theorem provers. 
+Our experimental results show that both retrospective rationale generation and expert iteration significantly improve the theorem-proving capabilities of language models in this setting.
+We describe our setup and findings in detail below.
+\begin{table}[t]
+  \renewcommand{\arraystretch}{1.5}
+  \caption{\textbf{Pass rates on the minif2f-test dataset with Lean.} This table shows the pass rates of previous works and our work. $S$ is the number of tactics attempted at each expanded node (assumed to be $1$ in sampling) and $K$ is the total number of search or sampling attempts per problem. In sampling we use temperature 0.7, and in search we use beam search when generating the next tactic. Note that we sample $32$ examples twice when $K=64$ in sampling.}
+  \label{result1}
+  \small
+  \centering
+  \begin{sc}
+  \begin{tabular}{p{6.5cm}ccccc}
+    \toprule
+    Approach & Decoding & $N$ & $K$& $S$& Pass rate\\
+    \midrule
+    GPT-3.5 \citep{achiam2023gpt} (Few-Shot) & Sampling & 50 & 1 & 1 & $2.8\%$ \\
+    GPT-4 \citep{achiam2023gpt} (Few-Shot) & Sampling & 50 & 1 & 1 & $11.9\%$ \\
+    Transformer \citep{polu2022formal} (w/o RL) & Search & 512 & 1 & 8 & $24.6\%$     \\
+    Llemma-34b \citep{azerbayev2023llemma} (Few-Shot) & Search & 50 & 1 & 32 & $25.8\%$ \\
+    Llemma-7b \citep{azerbayev2023llemma} (Few-Shot) & Search & 50 & 1 & 32 & $26.2\%$ \\
+    ReProver \citep{yang2023leandojo} & Search & 50 & 1 & 64 & $26.5\%$     \\
+    Transformer \citep{polu2022formal} (w/ RL)& Search & 512 & 1 & 8 & $29.6\%$     \\
+    InternLM2-34b \citep{ying2024internlmmath} (Few-Shot) & Search & 50 & 1 & 32 & $29.5\%$     \\
+    COPRA (with GPT-4) \citep{thakur2023language} & Customized & - & 60 & 1 & $29.9\%$     \\
+    COPRA (with GPT-4) \citep{thakur2023language} & Customized & - & 100 & 1 & $30.7\%$     \\
+    \midrule
+    InternLM2-7b \citep{ying2024internlmmath} (Few-Shot) & Sampling & 50 & 32 & 1 & $28.7\%$     \\
+    InternLM2-7b \citep{ying2024internlmmath} (Few-Shot) & Search & 50 & 1 & 32 & $30.3\%$     \\
+    SFT (InternLM2-7b)      & Sampling & 50 & 32 & 1 & $29.5\%$      \\
+    SFT (InternLM2-7b) & Search & 50 & 1 & 32 & $30.7\%$\\
+    \textbf{Lean-CoT} (InternLM2-7b)  & Sampling & 50 & 32 & 1 & $32.8\%$   \\
+    \textbf{Lean-STaR (Iter-1)} (InternLM2-7b)     & Sampling & 50 & 32 & 1 & $34.0\%$   \\
+    \textbf{Lean-STaR (Iter-2)} (InternLM2-7b)     & Sampling & 50 & 32 & 1 & $\mathbf{34.8\%}$   \\
+    \textbf{Lean-STaR (Iter-2)} (InternLM2-7b)     & Sampling & 50 & 64 & 1 & $\mathbf{36.1\%}$   \\
+    \bottomrule
+  \end{tabular}
+  \end{sc}
+\end{table}
+
+\subsection{Experimental Setup}
+
+We use \textit{LeanDojo Benchmark 4 v9} as the supervised fine-tuning (SFT) dataset containing $231,240$ data examples.
+We fine-tune for $1$ epoch to obtain the SFT model. For the learning rate, we use a warmup in the first $20\%$ steps  from $0$ to $2 \times 10^{-5}$, followed by a cosine schedule decaying to zero.
+
+We randomly select $17,256$ different successful proof trajectories from \textit{LeanDojo Benchmark 4 dataset} \citep{yang2023leandojo}, and use GPT-4-0125 \citep{openaigpt4blog} to annotate $52,438$ thoughts from those proof trajectories. We filtered out all proof steps $(s^i, a^i)$ for which $a^i$ contains the newline symbol ``\textbackslash n'' before annotating.
+We evaluate our method on the \textit{MiniF2F} benchmark \citep{zheng2021minif2f}. We use a similar evaluation setting as previous works \citep{yang2023leandojo, welleck2023llmstep, ying2024internlmmath}, but use our sampling method instead of best-first search for the evaluation of our thought-augmented theorem proving model as discussed in (\S\ref{ssec:evaluation}).
+For each problem, Lean-STaR samples $K=32$ times in parallel with temperature $T=0.7$, and limits the number of times a tactic can be generated to a total of $N=50$. We also limit sampling to $10$ minutes per problem.
+We choose these settings to resemble the inference budget used in our baselines, which follow previous work~\citep{welleck2023llmstep, azerbayev2023llemma, ying2024internlmmath}.
+Namely, for best-first search baselines we  use beam search to generate the next tactic with $S=32,K=1$~\citep{welleck2023llmstep, azerbayev2023llemma, ying2024internlmmath}. We do not compare with methods designed for other formal languages such as \citet{jiang2022draft, xin2023lego} since language differences greatly influence the pass rate due to the different tactics and automation.
+We also do not compare with \citet{lample2022hypertree} since they only report $S=32, K=64$ on best-first search, which is approximately equivalent to $S=1, K=512$ for the sampling method, which is too computationally expensive for us.
+\setlength{\tabcolsep}{3pt}
+\begin{table}
+  \small
+  \renewcommand{\arraystretch}{1.2}
+  \caption{
+    Counts of problems successfully proved in \textit{minif2f-test} benchmark, split by type and difficulty.
+    The methods use sampling with $N=50, K=32$. Thought-augmented methods improve performance on all categories, while Lean-STaR significantly improves Number Theory performance. 
+  }
+  \label{types}
+  \centering
+  \begin{sc}
+  \resizebox{0.98\linewidth}{!}{%
+  \begin{tabular}{c|c|c|c|cccc}
+    \toprule
+    \multicolumn{3}{c}{TOTAL}& \multicolumn{1}{c}{\makecell{Test Set\\Size}} & InternLM2-7b& SFT& Lean-CoT& \makecell{Lean-STaR\\(Iter-2)}\\
+    \hline
+    \multicolumn{3}{c|}{IMO} & 20 & 0& 0& 0& 0\\
+    \multicolumn{3}{c|}{AIME}& 15 & 2& 1& 2& \textbf{3}\\
+    \multicolumn{3}{c|}{AMC}& 45 & 3& 3& \textbf{7}& 5\\
+    \cline{1-3}
+    \multirow{10}{*}{MATH}     & \multirow{5}{*}{Algebra}& Level 5 & 14 & 1& 2& \textbf{3}& \textbf{3}\\
+    & & Level 4 & 14 & \textbf{7}& \textbf{7}& \textbf{7}& \textbf{7}\\
+    & & Level 3 & 14 & 9& 9& \textbf{11}& \textbf{11}\\
+    & & Level 2 & 14 & 10& 10& 9& \textbf{11}\\
+    & & Level 1 & 14 & 9& \textbf{10}& \textbf{10}& \textbf{10}\\
+    \cline{2-3}
+    & \multirow{5}{*}{Number Theory}& Level 5 & 16 & 6& 6& 6& \textbf{7}\\
+    & & Level 4 & 11 & \textbf{5}& \textbf{5}& 4& \textbf{5}\\
+    & & Level 3 & 11 & 4& 5& 5& \textbf{6}\\
+    & & Level 2 & 11 & \textbf{6}& 5& 5& \textbf{6}\\
+    & & Level 1 & 11 & 8& 8& \textbf{9}& \textbf{9}\\
+    \cline{1-3}
+    \multirow{3}{*}{CUSTOM}& \multicolumn{2}{|c|}{Algebra} & 18 & 0& \textbf{1}& \textbf{1}& \textbf{1}\\
+    & \multicolumn{2}{|c|}{Number Theory} & 8 & 0& 0& 0& 0\\
+    & \multicolumn{2}{|c|}{Induction} & 8 & 0& 0& \textbf{1}& \textbf{1}\\
+    \bottomrule
+  \end{tabular}
+  }
+  \end{sc}
+\end{table}
+\setlength{\tabcolsep}{6pt}
+\subsection{Main Results}
+
+Our main results are reported in Table \ref{result1}.
+Lean-STaR gives a significant improvement over the previous state-of-the-art in Lean.
+For instance, with a similar inference budget, Lean-STaR achieves 34.8\% versus $30.3\%$ in InternLM2 \citep{ying2024internlmmath} using best-first search and $30.7\%$ in COPRA \citep{thakur2023language} using GPT-4.
+With a larger compute budget, Lean-STaR's performance improves further to 36.1\%.
+
+\begin{table}[t]
+  \renewcommand{\arraystretch}{1.5}
+  \caption{\textbf{Pass rates about InternLM2-Plus-7B on the minif2f-test dataset with Lean.} This table shows the pass rates of previous works and our work. $S$ is the number of tactics attempted at each expanded node (assumed to be $1$ in sampling) and $K$ is the total number of search or sampling attempts per problem. In sampling we use temperature 0.7, and in search we use beam search when generating the next tactic. Note that we sample $32$ examples twice when $K=64$ in sampling. In search we follow the setup in \citep{ying2024internlmmath} and limit each search to $20$ minutes.}
+  \label{result2}
+  \small
+  \centering
+  \begin{sc}
+  \begin{tabular}{p{6.5cm}ccccc}
+    \toprule
+    Approach & Decoding & $N$ & $K$& $S$& Pass rate\\
+    \midrule
+    InternLM2-plus-7b \citep{ying2024internlmmath} (Few-Shot) (from paper) & Search & 1000 & 1 & 32 & $43.4\%$     \\
+    InternLM2-plus-7b \citep{ying2024internlmmath} (Few-Shot) (reproduced) & Search & 1000 & 1 & 32 & $42.6\%$     \\
+    \midrule
+    InternLM2-plus-7b \citep{ying2024internlmmath} (Few-Shot) & Sampling & 50 & 32 & 1 & $40.9\%$     \\
+    SFT (InternLM2-plus-7b) \citep{ying2024internlmmath} (Few-Shot) & Sampling & 50 & 32 & 1 & $41.3\%$     \\
+    \textbf{Lean-CoT} (InternLM2-plus-7b)  & Sampling & 50 & 32 & 1 & $43.4\%$   \\
+    \textbf{Lean-STaR (Iter-1)} (InternLM2-plus-7b)     & Sampling & 50 & 32 & 1 & $45.4\%$   \\
+    InternLM2-plus-7b \citep{ying2024internlmmath} (Few-Shot) & Sampling & 50 & 64 & 1 & $42.2\%$     \\
+    SFT (InternLM2-plus-7b) \citep{ying2024internlmmath} (Few-Shot) & Sampling & 50 & 64 & 1 & $43.4\%$     \\
+    \textbf{Lean-CoT} (InternLM2-plus-7b)  & Sampling & 50 & 64 & 1 & $45.5\%$   \\
+    \textbf{Lean-STaR (Iter-1)} (InternLM2-plus-7b)     & Sampling & 50 & 64 & 1 & $\mathbf{46.3\%}$   \\
+    \bottomrule
+  \end{tabular}
+  \end{sc}
+\end{table}
+\paragraph{Thought augmentation improves theorem proving.}
+The first phase of Lean-STaR trains a model to interleave thoughts and tactics, by fine-tuning on a synthesized dataset of thought-augmented examples.
+The fine-tuned model from this phase, denoted \textsc{Lean-CoT} in Table \ref{result1}, achieves a pass rate of $32.8\%$, which is higher than the model prior to this phase, denoted \textsc{SFT} (29.5\%).
+We conclude that the first phase of Lean-STaR can improve the theorem proving ability of a language model, even one that is already specialized for generating tactics in Lean such as the \textsc{SFT} model.
+
+\paragraph{Bootstrapping improves thought-augmented theorem proving.}
+The second phase of Lean-STaR consists of generating new thoughts and tactics with the current language model, saving those that result in correct proofs, and training on the union of the initial thought-augmented dataset and the saved examples (i.e., expert iteration~\cite{polu2022formal,zelikman2022star,singh2023beyond}).
+We perform two iterations of expert iteration, and present the results in Table \ref{result1}, denoted \textsc{Lean-STaR}.
+Each iteration improves the model's theorem proving performance, from 32.8\% (the initial model) to 34\% (\textsc{Lean-STaR} after iteration 1) to 34.8\% (\textsc{Lean-STaR} after iteration 2). 
+Furthermore, we find that the model is amenable to further improvement via additional sampling, achieving 36.1\% by doubling the sampling budget.
+We conclude that Lean-STaR's second phase can further improve a model's ability to generate thoughts and tactics that lead to correct proofs.
+
+\subsection{Performance Analysis by Types and Difficulties}
+Tasks in \textit{minif2f-test} are manually formalized from Olympiad type problems, drawn from multiple sources including AIME, AMC, IMO problems, and problems from the MATH dataset \citep{hendrycks2021measuring}.
+These problems can have different levels of difficulty and types. Table \ref{types} reports the number of problems successfully proved, partitioned by type and difficulty. We see that Lean-CoT  improves performance in solving difficult problems on all categories, especially those from mathematics competitions. On top of these improvements, Lean-STaR's improvements come mainly in Number Theory.
+
+\begin{table}[t]
+  \renewcommand{\arraystretch}{1.5}
+  \caption{Performence of SFT-Direct and our Lean-STaR at different search size or sampling times $S \times K$. We fix $N=50$. We use beam search in search and temperature $T=0.7$ in sampling when generating the next tactic. We have $K=1$ in search and $S=1$ in sampling. Note that we sample $32$ examples twice when $K=64$ in sampling.}
+  \label{samples}
+  \centering
+  \small
+  \begin{sc}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lccc}
+    \toprule
+    & SFT-Direct (Search) & SFT-Direct (Sampling) & Lean-STaR (Iter-2) (Sampling) \\
+    \midrule
+    $S \times K=1$ & $13.5\%$ & $20.9\%$ & $21.7\%$      \\
+    $S \times K=2$ & $18.0\%$ ($+4.5\%$)& $22.5\%$ ($+1.6\%$) & $24.6\%$($+2.9\%$)     \\
+    $S \times K=4$ & $23.3\%$ ($+5.3\%$) & $25.0\%$ ($+2.5\%$) & $27.5\%$($+2.9\%$)      \\
+    $S \times K=8$ & $27.5\%$ ($+4.2\%$) & $27.0\%$ ($+2.0\%$) & $30.7\%$ ($+3.2\%$)  \\
+    $S \times K=16$ & $29.9\%$ ($+2.4\%$) & $28.3\%$ ($+1.3\%$) & $33.6\%$ ($+2.9\%$)     \\
+    $S \times K=32$ & $30.7\%$ ($+0.8\%$) & $29.5\%$ ($+1.2\%$) & $34.8\%$ ($+1.2\%$)    \\
+    $S \times K=64$ & $30.7\%$ ($+0.0\%$) & $30.3\%$ ($+0.8\%$) & $36.1\%$ ($+1.3\%$)\\
+    \bottomrule
+  \end{tabular}
+  }
+  \end{sc}
+\end{table}
+\subsection{Search and sampling budget}
+Table \ref{samples} reports the trends of the pass rate against the search size or sampling budget $S \times K$. We find that Lean-STaR benefits more as $K$ increases, especially when $K$ is relatively large. The result suggests that additional sampling with thoughts improves performance, while additional sampling without thoughts may saturate. We believe this is because thoughts increase the diversity of outputs and contribute to exploration in the theorem proving space. Therefore, Lean-STaR is more scalable (in terms of inference-time compute), and may be amenable to further improvements with additional iterations of expert iteration.
+
+\subsection{Experiments with stronger base model and more data}
+~\label{secc:plus}
+
+We instantiate Lean-STaR using a stronger language model (InternLM2-Math-plus-7b~\citep{ying2024internlmmath}), which was released after the experiment above. We follow a similar setup to the previous experiment.
+
+In this experiment, we used $140,000$ thoughts annotated by GPT-4o \citep{openaigpt4blog} to fine-tune a model (``Lean-CoT''). Then we performed only one iteration of expert iteration and collected about $60,000$ (proof state, thoughts, next-tactic) pairs in data, named ``STaR dataset'' $D_1$. We further fine-tuned the Lean-CoT model on dataset $D_1$ to get the Lean-STaR model.
+
+Our new results are reported in Table \ref{result2}.
+We can see that Lean-STaR still gives a significant improvement over the baseline. For instance, Lean-STaR achieves $45.4\%$ versus $39.8\%$ in InternLM-plus using sampling with a similar inference budget and $43.4\%$ using best-first search with more inference budget reported in \citep{ying2024internlmmath}.
+This results show that both retrospective rationale generation and expert iteration can improve the theorem-proving capabilities on a stronger base model.
+
+\subsection{Experiments on expert iteration without CoT}
+
+Table \ref{result_ei} shows the result of expert iteration without CoT (i.e., using (state, tactic) pairs only) as well as the result of Lean-CoT and Lean-STaR. 
+Expert iteration alone achieves 43.0\%, which is less than Lean-STaR (45.4\%).
+This shows that Lean-STaR's performance gains do not only come from the use of expert iteration. 
+
+\begin{table}[t]
+  \renewcommand{\arraystretch}{1.5}
+  \caption{Results for the InternLM2-plus-7b and our Lean-CoT, Lean-STaR, and expert iteration without CoT. We use sampling with $N=50, K=32, \&\ T=0.7$. }
+  \label{result_ei}
+  \centering
+  \small
+  \begin{sc}
+  \begin{tabular}{p{5cm}ccc}
+    \toprule
+    Approach     & \# (Continual) Training Data& \textit{Pass@32}& \\
+    \midrule
+    InternLM2-plus-7b (Few-Shot) & - & $40.9\%$ & -     \\
+    SFT     & $231,240$ & $41.3\%$& $+ 0.4\%$      \\
+    Lean-CoT  & $140,000$ & $43.4\%$& $\mathbf{+ 2.1\%}$   \\
+    Lean-STaR     & $60,000$& $45.5\%$& $\mathbf{+ 2.1\%}$   \\
+    \midrule
+    Expert iteration (SFT)     & $60,000$& $43.0\%$& $+ 1.7\%$   \\
+   \bottomrule
+  \end{tabular}
+  \end{sc}
+\end{table}
+
+
+
+\section{Conclusion \& Limitations}
+
+
+In this paper, we presented Lean-STaR, a novel approach that significantly enhances the theorem-proving capabilities of language models in formal mathematics by integrating Chain-of-Thought (CoT) rationales into each proof step. Our method begins with generating synthetic rationales using ground-truth tactics retrospectively, followed by fine-tuning the language model to generate these rationales and predict subsequent tactics, resulting in the Lean-CoT model. We further improved this model using expert iteration, fine-tuning it on correct proofs it samples and verifies using the Lean solver. Our contributions include the introduction of the first thought-augmented theorem proving dataset, demonstrating that expert iteration can further improve performance, and achieving new state-of-the-art results on the miniF2F-test benchmark, increasing the pass rate from $30.3\%$ to $36.1\%$. These advancements are not only about improving %not only improve 
+the accuracy of automated theorem proving, but also offer a scalable and efficient framework %to advance 
+for advancing human understanding of mathematics, which may %have significant applications
+lead to significant impacts in education, scientific discovery, and program verification \citep{carter2013lurch,kang2020document,szegedy2020promising,avigad2023mathematics,first2024automating,national2023artificial}.
+
+The primary limitation of our method is that its performance may be constrained by issues of computational scalability. Both Lean-CoT and Lean-STaR have been fine-tuned on a dataset that is %insufficiently 
+not very large. Additionally, the use of GPT-4 to generate synthetic data may incur a significant cost and possibly introduce biases.  Also, expert iteration could face %and may introduce biases. Moreover, expert iteration faces 
+a bottleneck due to CPU and IO limitations, which %considerably slows he process given the sluggish speed of Lean ITP.
+might slow down the process due to a sluggish speed of Lean ITP.
+
+
+
+
+
+

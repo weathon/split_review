@@ -1,0 +1,314 @@
+\title{Understanding Likelihood Over-optimisation in Direct Alignment Algorithms}
+
+\begin{abstract}
+Direct Alignment Algorithms (DAAs), such as Direct Preference Optimisation (DPO) and Identity Preference Optimisation (IPO), have emerged as alternatives to online Reinforcement Learning from Human Feedback (RLHF) algorithms such as Proximal Policy Optimisation (PPO) for aligning language models to human preferences, without the need for explicit reward modelling.
+These methods generally aim to increase the likelihood of generating better (preferred) completions while discouraging worse (non-preferred) ones, while staying close to the original model's behaviour.
+In this work, we explore the relationship between completion likelihood and model performance in state-of-the-art DAAs, and identify a critical issue of likelihood over-optimisation.
+Contrary to expectations, we find that higher likelihood of better completions and larger margins between better and worse completion likelihoods do not necessarily lead to better performance, and may even degrade it.
+Our analysis reveals that while higher likelihood correlates with better memorisation of factual knowledge patterns, a slightly lower completion likelihood tends to improve output diversity, thus leading to better generalisation to unseen scenarios.
+Moreover, we identify two key indicators that signal when over-optimised output diversity begins to harm performance:
+\textit{Decreasing Entropy over Top-$k$ Tokens} and \textit{Diminishing Top-$k$ Probability Mass}.
+Our experimental results validate that these indicators are reliable signs of declining performance under different regularisation schemes, helping prevent over-optimisation and improve alignment with human preferences.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent advancements in Large Language Models (LLMs) \citep{touvron2023llama,achiam2023gpt,roziere2023code,dubey2024llama,land2024fishing} have significantly expanded their capabilities, enabling applications such as code generation, tool use, and interactive communication. As LLMs become increasingly powerful, the challenge of aligning them with human preferences has grown in importance. Direct Alignment Algorithms (DAAs), such as Direct Preference Optimisation (DPO) \citep{rafailov2023direct} and Identity Preference Optimisation (IPO) \citep{azar2024general}, have emerged as alternatives to Reinforcement Learning from Human Feedback (RLHF) \citep{ziegler2019fine,bai2022training} for training LMs on human preference data. These methods aim to bypass the traditional RLHF pipeline by directly optimising the policy without explicit reward modelling.
+
+DAAs are designed to increase the likelihood of better completions while reducing the likelihood of worse ones, all while staying close to the original model's behaviour. 
+However, a known issue with standard DAAs is that they may decrease the likelihood of better completions as long as the relative probability between better and worse completions increases \citep{rafailov2023direct,pal2024smaug}. 
+Recent research has sought to address this by focusing on maintaining a high likelihood for better completions \citep{pal2024smaug}. 
+For example, several works \citep{pang2024iterative,hong2024orpo}, including \textsc{Llama-3.1} \citep{dubey2024llama} and \textsc{Nvidia Nemotron} \citep{adler2024nemotron}, introduce a scaled negative log-likelihood (NLL) loss on better completions, aiming to stabilise DAA training by preserving the desired formatting and preventing a drop in log probability for better completions. 
+Despite these efforts, key research questions remain: 
+\textit{Is it truly necessary to maintain a higher likelihood of better completions, and aim for a larger likelihood margin between better and worse completions?} And if not, \textit{How can we strike a balance for completion likelihood to maximise model performance in terms of alignment with human preferences?}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figure/win_prob_likelihood_length_ultrafeedback.pdf}
+\caption{
+\textbf{Mean Log Likelihood (\llh) of Better Completion vs Win Probability (Left) and Average Number of Tokens in Model Outputs (Right).}
+We report 7B and 35B model results on the \ultrafeedback dataset. 
+Our results indicate that:
+(1) A higher likelihood for better completions does not necessarily translate to higher win probability; and
+(2) There is no obvious correlation between the average number of tokens in model outputs and the likelihood of better completions.
+}
+\label{fig:win_prob_likelihood_length_ultrafeedback}
+\end{figure}
+
+In this work, we first explore the relationship between completion log-likelihood and model performance in state-of-the-art DAAs (\sect{sec:preliminaries}).
+Specifically, we find that neither a higher likelihood of preferred completions nor larger margins between better and worse completion likelihoods necessarily lead to better performance (measured by win probability) and may even degrade it (\sect{sec:evaluating_llh_overoptimisation}), as shown in Figure \ref{fig:win_prob_likelihood_length_ultrafeedback}.
+Furthermore, our experiments demonstrate that optimising both factors simultaneously also does not guarantee improvement.
+Our results reveal that while a higher likelihood of better completion generally has better memorisation of factual knowledge patterns, an excessively high likelihood can result in over-optimisation.
+In contrast, slightly lower completion likelihood tends to improve output diversity, thus leading to better generalisation to unseen scenarios (\sect{sec:generalization_and_diversity}).
+
+While avoiding an overly high completion likelihood tends to improve model diversity and generalisation, it is crucial to strike a balance between diversity and maintaining a high likelihood for desired outputs preferred by humans.
+To this end, our study outlines two key indicators that signal when overly generating diverse outputs begins to negatively impact model performance (\sect{sec:signals}):
+(1) \textit{\textbf{Decreasing Entropy over Top-$k$ Tokens}}\footnote{In this work, entropy measures uncertainty in token distribution, with a uniform distribution giving the highest entropy of 1 (maximum diversity) and a single-token distribution yielding 0 (no uncertainty).}: 
+As the likelihood of better completions decreases during training, an increasing entropy suggests that tokens within better completions still have higher probabilities relative to other tokens in the Top-$k$, though the gap is narrowing.
+However, a decreasing entropy over the Top-$k$ tokens is a warning sign that the model is assigning disproportionately low probabilities to tokens within better completions, allowing other tokens to rise in probability, which may lead to outputs that are not aligned with human preferences.
+Notably, a reversed entropy trend is a particularly strong indicator of over-optimised diversity; and
+(2) \textit{\textbf{Diminishing Top-$k$ Token Probability Mass}}:
+This occurs when the probability mass concentrated on the top $k$ most likely tokens declines, resulting in more random outputs and a higher likelihood of selecting tokens outside the top $k$. 
+Such a flattening of the probability distribution can lead to phenomena such as code-switching \citep{dogruoz-etal-2021-survey,marchisio2024understanding}, making the model more prone to confusion.
+Our experimental results validate that these two indicators are strong predictors of declining model performance, providing critical markers to help avoid over-optimization while balancing diversity.
+
+
+\section{Related Work}
+
+\paragraph{Preference learning.}
+Recent years have seen significant progress in aligning large language models (LLMs) with human preferences \citep{hosking2024human,kirk2024prism,wu2024understanding}. 
+RLHF, pioneered by \citet{NIPS2017_d5e2c0ad,ziegler2019fine} and developed in subsequent works \citep{NEURIPS2020_1f89885d,bai2022training,NEURIPS2022_b1efde53}, typically consists of three stages: supervised fine-tuning (SFT), reward modelling, and RL fine-tuning \citep{schulman2017proximal,mnih2016asynchronous,NEURIPS2023_1289f919,aryabumi2024aya,ahmadian-etal-2024-back}. 
+The reward model is trained to predict human preferences between pairs of model outputs, while the RL phase optimises the model to maximise the reward \citep{ye2024improving,lambert2024rewardbenchevaluatingrewardmodels,zhou2024fairer,liu2024aligning}. More recently, researchers have proposed Direct Alignment Algorithms \citep{rafailov2023direct,zhao2023slic,azar2024general} that aim to simplify RLHF by directly optimising the policy without a reward modelling or RL phase.
+
+\paragraph{Over-optimisation for preference learning.}
+Over-optimisation in preference learning occurs when a model's performance on a proxy measure improves while its true performance declines. 
+\citet{gao2023scaling} was the first to extensively characterise this issue in the context of RLHF, where optimisation against a learned reward model leads to increased proxy rewards, while actual task performance plateaus or worsens, a phenomenon termed ``\textit{reward over-optimisation}". Subsequent studies have observed similar patterns \citep{eisenstein2023helping,touvron2023llama,NEURIPS2023_5fc47800}. 
+To mitigate reward over-optimisation, researchers have proposed various approaches, such as using ensembles or data smoothing for reward modelling \citep{eisenstein2023helping,zhang2024overcoming,coste2024reward,pmlr-v235-zhu24e,yang2024bayesianrm}, and leveraging uncertainty signals \citep{yang2024bayesian,zhai2023uncertainty,zhou2024batch,yang2024just}.
+\citet{rafailov2024scaling} extended this analysis to DAAs, showing that even without an explicit reward model, DAAs exhibit similar over-optimisation patterns at higher KL-divergence budgets. 
+In this work, we explore the DAAs' over-optimisation in the context of completion likelihood.
+
+\paragraph{Generalisation and diversity.}
+Generalisation and diversity in LM outputs has been a growing concern in the field of NLP, particularly regarding the impact of fine-tuning methods \citep{hendrycks-etal-2020-pretrained}.
+Several studies have explored how RLHF influences output diversity and generalisation. \citet{khalifa2021a,perez-etal-2022-red} suggests that RLHF tends to produce models with reduced output diversity. 
+\citet{kirkunderstanding} highlights a trade-off between generalisation and diversity in current LLM fine-tuning, with RLHF showing better out-of-distribution generalisation but substantially decreased output diversity compared to SFT. 
+This trade-off between alignment, performance, and diversity relates to the broader concept of ``\textit{alignment tax}" in LM fine-tuning. 
+\citet{bai2022training,ouyang2022training,bai2023qwen,kotha2023understanding} observed that aligning models with human preferences, through RLHF, can sometimes degrade performance on specific tasks, especially for smaller models. Various approaches have been proposed to mitigate the alignment tax \citep{NEURIPS2023_0a980183,shi2024dept,qi2024finetuning}. For example, \citet{ouyang2022training} suggested incorporating pretraining data into RLHF fine-tuning to minimise performance regressions on standard NLP datasets. 
+However, these studies have not explored how the optimisation of completion likelihood correlates with model performance, including diversity and generalisation.
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+\subsection{Direct Alignment Algorithms}
+Direct Alignment Algorithms (DAAs) are a family of methods designed to train LMs to align with human preferences without the need for explicit reward modelling. These algorithms aim to optimise a policy model to maximise the probability of better completions over worse ones.
+
+\paragraph{Direct Preference Optimisation.} 
+Direct Preference Optimisation (DPO) \citep{rafailov2023direct} is a foundational DAA method.
+The DPO loss function is defined as follows:
+\begin{align}
+L_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}}) &= -\mathbb{E}_{(x,y_w,y_l)\sim D} \left[\log \sigma\left(\beta \Delta(x,y_w,y_l)\right)\right], \\
+\Delta(x,y_w,y_l) &= \log\frac{\pi_\theta(y_w | x)}{\pi_{\text{ref}}(y_w | x)} - \log\frac{\pi_\theta(y_l | x)}{\pi_{\text{ref}}(y_l | x)},
+\end{align}
+where $\pi_\theta$ is the policy model being optimised, $\pi_{\text{ref}}$ is a reference model where $\pi_\theta$ is initialised from, $D$ is the dataset of preference pairs, $x$ is the input, $y_w$ and $y_l$ are the better and worse completions respectively, $\sigma$ is the sigmoid function, and $\beta$ is a temperature hyperparameter. 
+The term $\Delta(x,y_w,y_l)$ quantifies the difference in log probabilities between better and worse completions.
+\paragraph{Identity Preference Optimisation.} Identity Preference Optimisation (IPO) \citep{azar2024general} is a variant of DAA methods. Specifically, IPO uses a quadratic loss function, which is defined as:
+\begin{equation}
+L_{\text{IPO}}(\pi_\theta; \pi_{\text{ref}}) = \mathbb{E}_{(x,y_w,y_l)\sim D} \left[\left(\tau\Delta(x,y_w,y_l) - \frac{1}{2}\right)^2\right],
+\end{equation}
+where $\tau$ is a temperature hyperparameter. This formulation aims to push the difference in log probabilities $\Delta(x,y_w,y_l)$, defined within the DPO framework, towards a target value of $\frac{1}{2\tau}$. 
+\paragraph{Hinge Loss.} The hinge loss method \citep{zhao2023slic,liu2024statistical} represents another variation within the DAA framework. Specifically, we adopt the loss function from \textsc{SLiC-HF} \citep{zhao2023slic}, which is defined as follows:
+\begin{equation}
+L_{\text{Hinge}}(\pi_\theta; \pi_{\text{ref}}) = \mathbb{E}_{(x,y_w,y_l)\sim D} \left[\max\left(0, \gamma - \log\frac{\pi_\theta(y_w | x)}{\pi_\theta(y_l | x)}\right)\right],
+\end{equation}
+where $\gamma$ is a hyperparameter and we set to $\gamma= 1$ for simplicity. In line with \citet{zhao2023slic},  we incorporate a regularisation term into the hinge loss, defined as follows:
+\begin{equation}
+L_{\text{reg}}(\pi_\theta; \pi_{\text{\text{ref}}}) = \mathbb{E}_{(x, y_w, y_l) \sim D} \left[\log\left(1 + \exp\left(1 - \log\left(\frac{\pi_\theta(y_w|x)}{\pi_{\text{\text{ref}}}(y_w|x)}\right)\right)\right)\right],
+\end{equation}
+which represents a smoothed version of hinge loss \citep{huber1992robust,cristianini2000introduction}. This term encourages the likelihood of better completions to remain higher than that of the reference model. 
+The total hinge loss is given by $L_{\text{Hinge}}(\pi_\theta; \pi_{\text{\text{ref}}}) = L_{\text{Hinge}}(\pi_\theta; \pi_{\text{\text{ref}}}) + \alpha L_{\text{reg}}(\pi_\theta; \pi_{\text{\text{ref}}})$,
+where $\alpha$ is a scaling coefficient.
+
+\subsection{Better Likelihood Support}
+Standard DAAs do not guarantee an increase in the absolute probability of better completions. This can lead to scenarios where the model assigns very low probabilities to both better and worse completions, as long as the better completion has a higher relative probability.
+
+\paragraph{Negative Log-Likelihood Loss.} 
+To mitigate this issue, Negative Log-Likelihood (NLL) loss is commonly employed as a regularisation term in DAA \citep{hong2024orpo,pang2024iterative,adler2024nemotron,dubey2024llama}. It encourages the policy to maintain a high likelihood of better completions. The NLL loss is formulated as:
+\begin{equation}
+L_{\text{NLL}}(\pi_\theta) = -\mathbb{E}_{(x,y_w)\sim D} \left[\log\pi_\theta(y_w | x)\right],
+\end{equation}
+where $y_w$ represents the better completion for a given input $x$. This loss term is typically combined with the primary objective of the DAA using a scaling coefficient $\lambda$.
+
+Several other regularisation methods have been proposed to address this issue. For example, \citet{pal2024smaug} introduces an additional term, \(-\max\left(0, \log\frac{\pi_\theta(y_w | x)}{\pi_\theta(y_l | x)}\right)\), to \(\Delta(x,y_w,y_l)\) to ensure that the log-likelihood of better examples remains high relative to that of the reference model. In this work, we mainly discuss the impact of Negative Log-Likelihood Loss.
+
+
+\section{Understanding the impact of Completion Likelihood}
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+\paragraph{Model and Datasets.}
+In our experiments, we utilise two instruction-tuned models: Cohere Command R (7B) and Cohere Command R (35B) \citep{cohere_for_ai_2024}. 
+We train and evaluate them on two datasets:
+(1) A binarised version of \ultrafeedback \citep{tunstall2024zephyr}, which is collected based on \citet{cui2023ultrafeedback}, containing 62,600 training examples and 647 examples for evaluation.
+(2) A Binarised preference dataset \coheredata, which comprises over 100,000 examples. These include annotated conversational data across multiple languages, synthetic code generation, and specialised tasks such as length control, safety, tool use, and natural language-to-SQL generation.
+
+\paragraph{Training and Evaluation Details.} 
+For each method (Hinge, DPO, and IPO), we test six different values for its hyper-parameter (\ie $\alpha$, $\beta$, or $\tau$), respectively. 
+We use a batch size of 32 for both training and evaluation, with a maximum sequence length of 8192. 
+The model is trained with a peak learning rate of either $5 \times 10^{-6}$ or $1 \times 10^{-5}$ and an end learning rate ratio of 0.1. 
+Following recent studies \citep{ouyang2022training,overfitting2023,shi2024instruction}, we train all models within a single epoch.
+The learning rate warms up over 128 steps. 
+We monitor the model training every 50 steps to apply early stopping. 
+We use the Adam optimiser \citep{kingma2014adam} with $\beta_1 = 0.9$, $\beta_2 = 0.95$, $\epsilon = 1 \times 10^{-8}$, an additive weight decay of 0.1, and a gradient clipping norm of 1.0. 
+The model training is conducted on TPU v5-128 for the 7B model and TPU v5-256 for the 35B model, utilising the flash attention \citep{NEURIPS2022_67d57c32} to improve training efficiency.
+For both DPO and IPO, we use the sum of the token log-likelihoods as the completion log-likelihood during training. For the Hinge method, we compute the average token log-likelihood instead for better performance.
+During evaluation, we calculate the log-likelihood for both the better and worse completions from the validation set.
+For all methods, we report the average of token log-likelihoods for better and worse completions respectively, without normalising against the reference model's likelihood.
+Additionally, we monitor the difference in log-likelihood between better and worse completions.
+
+\paragraph{Generalisation Evaluation.} 
+Following the previous work \citep{kirkunderstanding}, we evaluate the model in open-ended text generation tasks to assess generalisation ability. 
+Specifically, we employ the LLM-as-a-Judge framework \citep{zheng2023judging,alpaca} based on the reward model to compare our models' outputs against leading models, including GPT-3.5-Turbo, GPT-4o \citep{achiam2023gpt}, Claude-3-Sonnet \citep{claude2024}, Llama-3-8B, and Llama-3-70B-Chat \citep{dubey2024llama}. 
+The evaluation uses the closed-source reward model, which ranked the top position on \textsc{RewardBench} \citep{lambert2024rewardbenchevaluatingrewardmodels}.
+This validates that the evaluation provides a reliable proxy for human preferences.
+We use win probability, denoted as $P_{\text{win}}$, as the primary evaluation metric. 
+It is computed as:
+\begin{equation}
+    P_{\text{win}} = \sigma(r_v - r_c),
+\end{equation}
+where $\sigma(\cdot)$ is the sigmoid function, $r_v$ is the reward assigned to the trained policy model's output, and $r_c$ is the reward assigned to the competitor model's output by the same reward model.
+ During the decoding, we use a top-$p$ probability threshold of $p=0.75$, a temperature of $0.5$, and a maximum limit of $2048$ tokens.
+
+\paragraph{Diversity Evaluation.} 
+To assess output diversity, we also measure \textbf{\PerInputDiversity}, defined as the average diversity of the output sets over inputs, and \textbf{\CrossInputDiversity}, which captures the diversity of outputs across different inputs, similar to previous works \citep{kirkunderstanding,hong2024orpo}. 
+However, instead of generating a set of $K$ outputs from the model, we take a more efficient way to measure \PerInputDiversity. Specifically, we compute the entropy over the top $k$ tokens with the highest probability in the model’s next token distribution \citep{kuhn2023semantic}.
+Let $p_k$ represent the probability distribution over the top $k$ tokens, and $H(p_k)$ represent the entropy of the distribution. The entropy is calculated using the following formula:
+\begin{equation}
+H(p_k) = - \sum_{i=1}^{n} p_i \log_b(p_i),
+\end{equation}
+where $b$ is the logarithm base.
+Here we set $b = 2$ and $k = 10$. 
+This formula quantifies the uncertainty within the top $k$ token predictions as a proxy for \PerInputDiversity.
+This entropy is highest when the output is minimally informative: predicting the same probability for all possible tokens, indicating more diverse outputs.
+To evaluate \CrossInputDiversity, we use distinct N-grams \citep{li-etal-2016-diversity}, which counts the unique N-grams across model outputs and averages them over $n=1,2,3,4,5$.
+Following \citet{kirkunderstanding}, we use the expectation-adjusted distinct N-grams (EAD) formula to remove the bias towards shorter outputs.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.99\textwidth]{figure/win_llh_diversity_curve_7b_ultrafeedback_6.pdf}
+\caption{
+\textbf{Learning curves across training steps for various metrics}. 
+Results are reported for the 7B models using the Hinge, DPO, and IPO on the \ultrafeedback dataset. 
+}
+\label{fig:win_llh_diversity_curve_7b_ultrafeedback_6}
+\end{figure}
+
+\paragraph{Factuality Evaluation.} 
+We also evaluate model factuality performance on open-domain question-answering tasks using \NaturalQuestionsOpen \citep{nq2019} and \TriviaQA \citep{2017arXivtriviaqa} validation sets, with 3610 and 7993 examples respectively. Greedy decoding is used to ensure deterministic outputs, and the word-level F$_1$ score is reported.
+\subsection{Evaluating Likelihood Over-optimisation}
+\label{sec:evaluating_llh_overoptimisation}
+In this section, we explore the relationship between model likelihood and performance. Below, we discuss our key findings in detail.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figure/win_prob_heatmap_ultrafeedback_two_datasets.pdf}
+\caption{
+\textbf{Win Probability Heatmaps Across Better and Worse Mean Log-Likelihoods.}
+Results are reported for both 7B and 35B models on \ultrafeedback and \coheredata datasets. 
+Best performance does not always occur at the Pareto frontier of high likelihood for better completions and low likelihood for worse completions. 
+}
+\label{fig:win_prob_heatmap_ultrafeedback}
+\end{figure}
+
+\paragraph{1) Higher likelihood for better completions and larger gaps between better and worse completions do not necessarily improve model performance.} \label{para:findings1}
+As shown in Figure \ref{fig:win_prob_likelihood_length_ultrafeedback}, we plot the likelihood of better completions against the win probability (compared to GPT-3.5-Turbo) with different methods across two model sizes, with points recorded every 500 steps.
+Our analysis reveals that simply increasing the likelihood of better completions does not consistently result in performance improvements.
+Previous work in classical RLHF has established scaling laws for reward model scores \citep{gao2023scaling}. 
+Similarly, Figure \ref{fig:win_prob_likelihood_length_ultrafeedback} exhibits a clear scaling law behaviour.
+We extend their analysis to the relationship between win probability and the log-likelihood of better completions in DAAs. 
+When fitting the data to a second-degree polynomial, the Root Mean Square Error decreases by approximately 24.42\% for the 7B model and 25.78\% for the 35B model, compared to a linear fit.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figure/win_llh_diversity_dpo_bc_curve_ultrafeedback_5.pdf}
+\caption{
+\textbf{Learning curves for DPO with different weights ($\lambda$) of NLL loss}. 
+We report the performance with different values of $\beta$ and $\lambda$ on the \ultrafeedback dataset.
+A reversed entropy trend trending for entropy is a strong indicator of diversity over-optimisation.
+}
+\label{fig:win_llh_diversity_dpo_bc_curve_ultrafeedback_5}
+\end{figure}
+
+Figure \ref{fig:win_llh_diversity_curve_7b_ultrafeedback_6} tracks win probability alongside the average log-likelihood difference between better and worse completions throughout training. 
+Notably, while larger differences in log-likelihood, such as those represented by the pink line typically with the largest difference, are often observed, they do not correspond to better performance. 
+Instead, excessively larger likelihood gaps can lead to performance degradation in win probability, especially for DPO and IPO after 1,000 steps.
+Figure \ref{fig:win_prob_heatmap_ultrafeedback} presents a heatmap of win probabilities based on the better and worse completion log-likelihoods on \ultrafeedback and \coheredata datasets, using both 7B and 35B models. 
+Points are plotted every 50 steps.
+Our findings indicate that the best performance (highlighted by the red star) does not occur at the Pareto frontier of maximising the likelihood of better completions while minimising it for worse ones. Instead, optimal performance is often found in the middle range.
+
+\paragraph{2) Length Correlation.}
+We investigate the relationship between the mean log-likelihood of better completions and the average number of tokens in completions, as shown in Figure \ref{fig:win_prob_likelihood_length_ultrafeedback}. 
+To quantify this relationship, we calculate the Pearson correlation coefficient and perform its associated significance test. 
+The null hypothesis posits no linear relationship between these two variables.
+For the 7B model, we find a weak negative correlation ($r$ = \textminus 0.114, $p$-value = 0.266), while the 35B model shows a weak positive correlation ($r$ = 0.198, $p$-value = 0.173). 
+In both cases, the p-values exceed the conventional significance level of 0.05, indicating insufficient evidence to reject the null hypothesis.
+
+\paragraph{3) Training Negative Log-Likelihood Loss on better completions has limited influence on the model when it cannot affect completion likelihood.}
+As shown in Figure \ref{fig:win_llh_diversity_dpo_bc_curve_ultrafeedback_5}, we experiment with DPO using three different values of $\beta$, adding NLL loss as an auxiliary loss with four $\lambda$ coefficients. 
+Our results indicate that when there is limited impact on the likelihood (from the left column to the right column), the NLL loss has minimal impact on model performance.
+This suggests that NLL loss can be seen as a tool to regulate completion likelihood, but it remains susceptible to likelihood over-optimisation: higher likelihood may lead to a sub-optimal performance.
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figure/nq_triviaqa_better_llh.pdf}
+\caption{
+\NaturalQuestionsOpen and \TriviaQA vs Better Mean \llh on the \ultrafeedback dataset. 
+A higher \llh tends to memorise the factuality knowledge better.
+}
+\label{fig:nq_triviaqa_better_llh}
+\end{figure}
+\subsection{Generalisation and Diversity}
+\label{sec:generalization_and_diversity}
+In this section, we explore the impact of model likelihood on generalisation and diversity. 
+
+\paragraph{1) Lower Completion likelihood improves the models' \CrossInputDiversity.} 
+Figure \ref{fig:win_llh_diversity_curve_7b_ultrafeedback_6} presents \CrossInputDiversity (measured by distinct N-grams) of the model outputs throughout training. 
+Specifically, within each DAA, models with lower likelihood tend to produce more diverse outputs. 
+For example, the pink lines for DAAs indicate that models with lower completion likelihood typically show the highest level of \CrossInputDiversity scores throughout training.
+Better output diversity tends to improve their generalisation to unseen scenarios, as reflected in increased win probability at the early stage of the training phase.
+Figure \ref{fig:win_llh_diversity_dpo_bc_curve_ultrafeedback_5} further demonstrates that output diversity follows a similar trend under the different regularisation (\ie Negative Log-Likelihood Loss), suggesting a strong correlation between likelihood and model diversity.
+However, it is worth noting that the relationship between diversity and win probability is not linear. While some diversity is beneficial for generalisation, excessive diversity can lead to performance degradation, similar to our previous discussion in \sect{para:findings1}.
+We will explore this phenomenon further in \sect{sec:signals}.
+
+\paragraph{2) Higher Likelihood tends to have better memorisation of factual patterns.}
+Figure \ref{fig:nq_triviaqa_better_llh} showcases the relationship between model performance on \NaturalQuestionsOpen and \TriviaQA and the log-likelihood of better completions. 
+Our findings reveal a clear trend: higher mean log-likelihood values are associated with improved F$_1$ scores. 
+A higher F$_1$ reflects better memorisation for some specific patterns, which can come at the expense of diversity. 
+This can create a trade-off between the ability to recall facts and the capacity to generate diverse, adaptive outputs in more creative or open-ended tasks. 
+
+Specifically, instead of relying on exact string matching, which can be overly rigid, we employ an LLM-as-a-Judge using the GPT-4o model. 
+Our analysis reveals that while the model performance from LLM-as-a-Judge evaluation consistently yields higher performance metrics,
+it demonstrates a trend similar to the F$_1$ score. 
+\subsection{Signals for Likelihood Over-optimisation}
+\label{sec:signals}
+We have demonstrated that a slight decrease in the likelihood of better completion correlates with improved performance, which can be explained by an increase in output diversity. However, the critical question remains: when should we stop lowering the likelihood of better completion? In this section, we outline two key indicators that signal the over-optimisation of likelihood.
+
+\paragraph{1) Decreasing Entropy over Top-$k$ tokens (\PerInputDiversity).} 
+Figure \ref{fig:win_llh_diversity_curve_7b_ultrafeedback_6} and \ref{fig:win_llh_diversity_dpo_bc_curve_ultrafeedback_5} presents \PerInputDiversity (measured by the entropy) of the model outputs throughout training. 
+For DPO and IPO curves, at the beginning of the training, the \PerInputDiversity increases, signifying a broader distribution of selected tokens and a more uniform output distribution for the next token prediction. 
+Considering that the better completion likelihood is decreasing across the training, the increase of entropy at the beginning phase indicates that those tokens from better completion have a higher probability at the initial policy model over other tokens in the top $k$ (here $k=10$).
+The decrease better completion likelihood gives the model a better chance to select other tokens, which increases diversity and enhances generalisation, as reflected in the win probability. 
+However, at a certain point in training, this trend reverses. 
+As \PerInputDiversity (entropy) starts decreasing, the model begins to over-prioritise certain tokens. 
+This suggests that those tokens in the better completion now have an overly low likelihood, lower than other tokens in the top $k$. 
+Despite this, \CrossInputDiversity keeps increasing, which indicates that the model is still generating diverse outputs, but now it includes tokens that are less relevant or nonsensical, \ie tokens that humans do not prefer.
+Notably, the turning points of entropy often coincide with those of win probability for DPO and IPO, as the model’s outputs become less aligned with desirable outcomes.
+
+\paragraph{2) Decreasing in Probability Mass in Top $k$ Tokens.} 
+In another scenario, the entropy of the top 10 tokens continues to increase, suggesting a progressively broader and more uniform output distribution (refer to the hinge curves in Figure \ref{fig:win_llh_diversity_curve_7b_ultrafeedback_6}). 
+This suggests that even as the likelihood of better completions decreases, the model does not tend to over-prioritise any specific tokens during training. 
+However, this can result in degraded model performance.
+As depicted in the bottom row of the figure, the probability mass of all top-$10$ tokens diminishes, leading to more random outputs, with an increased likelihood of selecting tokens outside the top $10$. 
+This can introduce issues such as code-switching, where the model becomes prone to world-level language confusion when the number of tokens in the sampling nucleus is high and the distribution becomes too flat \citep{dogruoz-etal-2021-survey,marchisio2024understanding}.
+Interestingly, hinge loss models do not exhibit the same patterns observed with DPO and IPO. This could be attributed to the fact that DPO and IPO apply different forms of regularisation compared to hinge loss.
+
+
+\section{Epilogue}
+
+
+\paragraph{Limitations.}
+This study primarily focuses on two models (7B and 35B), which may not fully represent the broader spectrum of LLMs available. 
+However, most LLMs are very standard transformers \citep{NIPS2017_3f5ee243}, and we would not expect other LLMs to behave differently.
+
+\paragraph{Implications for Practical Applications.}
+The findings of this study have several implications for enhancing offline preference learning methods in practical applications:
+(1) \textbf{\textit{Early stopping signal}}.
+In practice, we can integrate entropy/probability mass monitoring into the training loop.
+Training can employ adaptive methods like early stopping once entropy falls below a specific threshold. 
+(2) \textbf{\textit{Adaptive regularisation for over-optimisation}}.
+Rather than using a fixed coefficient for the NLL loss \citep{dubey2024llama}, we could implement an adaptive regularisation based on the entropy and probability mass, \ie adding dropout or noise to prevent over-prioritisation of tokens or adding an explicit regularisation term that maintains a certain degree of entropy and the probability mass of the top-$k$ tokens.
+While maintaining a certain degree of entropy and probability mass of the top-$k$ tokens is important, care should be taken not to overly constrain the model, as some tasks inherently require a broader token distribution (\eg give me a random number between $0$ and $10$).
+
+
+
+
+

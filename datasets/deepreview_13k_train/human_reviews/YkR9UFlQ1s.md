@@ -1,0 +1,247 @@
+# Non-backtracking Graph Neural Networks
+
+- Decision: Reject
+- Scores: 3, 6, 5, 3, 5
+
+## Abstract
+The celebrated message-passing updates for graph neural networks allow representing large-scale graphs with local and computationally tractable updates. However, the updates suffer from backtracking, i.e., a message flowing through the same edge twice and revisiting the previously visited node. Since the number of message flows increases exponentially with the number of updates, the redundancy in local updates prevents the graph neural network from accurately recognizing a particular message flow relevant for downstream tasks. In this work, we propose to resolve such a redundancy issue via the non-backtracking graph neural network (NBA-GNN) that updates a message without incorporating the message from the previously visited node. We theoretically investigate how NBA-GNN alleviates the over-squashing of GNNs, and establish a connection between NBA-GNN and the impressive performance of non-backtracking updates for stochastic block model recovery. Furthermore, we empirically verify the effectiveness of our NBA-GNN on the long-range graph benchmark and transductive node classification problems.
+{\let\thefootnote\relax\footnote{{$^{\dag}$ Equal Contribution, $^{\ddag}$ Co-corresponding author.}}}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces non-backtracking GNNs, which only send messages through non-backtracking paths. A theoretical analysis of their sensitivity and of their expressive power in comparison with conventional GNNs is conducted. Numerical experiments demonstrate the superiority of non-backtracking GNNs in a number of graph machine learning tasks.
+
+### Strengths
+- The experiments are sufficiently convincing of the superiority of NBA-GNNs in the considered tasks.
+- The paper is generally clear and well-written.
+
+### Weaknesses
+ - The paper misses important related work, specifically:
+Zhengdao Chen, Lisha Li, Joan Bruna. Supervised Community Detection with Line Graph Neural Networks. ICLR 2019.
+This paper was the first to propose the use of the non-backtracking operator in GNNs. 
+- In light of the above, the proposed architecture is somewhat incremental.
+- The theoretical results are not convincing. 
+    * The claim that NBA-GNNs might help with oversquashing is supported by the assumption, backed only by empirical evidence, that NBA-GNNs have shorter access time than BA-GNNs. A proposition is provided stating that non-backtracking random walks have shorter access times, but it only holds for trees. The conditions of this proposition are too far away from the setup of NBA-GNNs to make a conving claim.
+     * As the authors themselves note, Lemma 1 and Theorem 1 only provide upper bounds on the sensitivity of conventional and NBA-GNNs.  It is a stretch to conclude that, because the upper bound for conventional GNNs is lower than the upper bound for NBA-GNNs, the sensitivities behave similarly. I understand that tighter results/lower bounds may not be possible, but considering that this is the main contribution of this paper, it falls somewhat short.
+     * The authors do not comment on the fact that for moderate-to-large degree d, the decay rates of the sensitivity upper bounds for conventional and NBA-GNNs will become very close. Moreover, this finding is not in agreement with the empirical findings from Table 1, which show that NBA-GNNs lead to significant performance improvements on dense graphs. This could be regarded as evidence that the sensitivity upper bounds are not very tight.
+     * The second theoretical analysis, from Section 4.2, is not very novel, as it is essentially a restatement of theoretical results from the spectral clustering community.
+
+Minor: 
+
+- Important references on the expressivity of GNNs from spectral considerations are missing. See e.g. Kanatsoulis et al., and the work of Ribeiro, A.
+- The paper can be quite wordy, and repeat many of the same observations.
+- While the limitations are briefly discussed, they perhaps deserve a more extensive treatment as the increase in computational complexity is quite high.
+
+### Questions
+N/A
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes the Non-Backtracking Graph Neural Network (NBA-GNN) to address the redundancy issue in message-passing updates of conventional  GNNs.  NBA-GNN updates messages without incorporating the message from the previously visited node. They also provided a theoretical analysis of the over-squashing phenomenon in the setting of NBA-GNN. The proposed NBA-GNN is empirically evaluated on long-range graph benchmarks and transductive node classification problems, demonstrating competitive performance.
+
+### Strengths
+1) The proposed NBA-GNN addresses an important issue in GNNs related to the redundancy of message flows and its impact on downstream tasks. Using non-backtracking updates to reduce redundancy is a novel and well-motivated approach.
+
+2) The paper provides a thorough analysis of the redundancy issue, linking it to the over-squashing phenomenon in GNNs.
+
+3) The empirical evaluation of NBA-GNN on long-range graph benchmarks and transductive node classification problems demonstrates its effectiveness and competitive performance compared to conventional GNNs.
+
+### Weaknesses
+1) The paper lacks a detailed description of the construction of the non-backtracking operator/walk/update and the related implementation in NBA-GNN. Specifically, it is unclear how the non-backtracking constraint is enforced during message aggregation. The paper should clarify whether it uses a precomputed non-backtracking adjacency matrix or if the non-backtracking updates are performed on-the-fly. Furthermore, the precise mathematical formulation of the message update rule, incorporating the non-backtracking constraint, is missing, making it difficult to reproduce the results.
+
+2) The time complexity of processing the non-backtracking seems high, and the preprocessing time is not reported. Additionally, the run time and memory usage of NBA-GNN compared with other GNNs is not reported, making it difficult to evaluate the proposed method comphensively. The paper should provide a detailed analysis of the computational cost, including both time and memory, for both training and inference. This should include a breakdown of the time spent on preprocessing, message passing, and other operations. A comparison with the computational cost of other GNN models, especially those designed for long-range dependencies, is crucial to understand the trade-offs of the proposed method.
+
+### Questions
+What is the performance of NBA-GNN on the other two datasets in LRGB?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In the submitted manuscript, the authors notice that representations learned via standard message passing schemes in graph neural networks (GNNs) are dependent on all walks present in graphs. They propose to remove redundancy from the message passing process by considering non-backtracking (and begrudgingly non-backtracking) walks only. This leads them to propose the NBA-GNN, which learns two embeddings per edge, and analyse the potential impact of the over-squashing phenomenon on NBA-GNNs and perform an expressivity analysis. The NBA-GNNs are found to outperform state-of-the-art baselines on several real-world datasets.
+
+### Strengths
+- The paper is clear and well-written.
+- The considered idea is interesting and some theoretical understanding of it is offered by the theoretical results in Section 4.
+- The performance in practice of your NBA-GNNs is impressive and compared against a set of relevant baseline models.
+
+### Weaknesses
+ - Comparison to seemingly closely related previous work appears to be lacking (see Question 1).
+- NBA-GNNs are prohibitively expensive and the additional expense in terms of computation time is insufficiently explored (see Question 2). 
+- The theoretical result in Theorem 1 is only a weak indication of alleviated over-smoothing (see Question 3).
+
+### Questions
+1) There appears to be previous work proposing the use of non-backtracking operators in GNNs, also investigating their model in the context of stochastic blockmodels [1]. I believe it to be pivotal for you to firstly, discuss the differences between their proposed Line Graph Neural Networks and your NBA-GNNs and to secondly, include their LGNN in your experimental baselines to demonstrate whether/which empirical differences exist. 
+
+2) The NBA-GNNs you propose are rather expensive in the sense that you learn two embeddings per edge. While it is very good, that you have included a discussion of the additional memory cost in the "Limitations" paragraph, I also believe a discussion of the time complexity of your method to be necessary. Ideally you should evaluate both the time complexity in theory and also provide experimental evaluation of the computation time of your NBA-GNNs compared to the baseline methods. 
+
+3) Your result in Theorem 1 appears to be of limited importance to me. The fact that your upper bound on NBA-GNNs is larger than the bound on standard GNNs could either mean that one of the bounded quantities is indeed larger than the other as you suggest, but it could equally well be the case that one of the two bounds is looser than the other in practice, i.e., given the bound on standard GNNs any larger upper bound is trivially also true and would surpass your larger bound, which might put the conclusions you drew from the magnitude of the two upper bounds in jeopardy. It would significantly strengthen your result if you could observe (even if just experimentally) that the considered derivatives are indeed larger for the non-backtracking operator than for the normalised adjacency matrix. 
+
+
+[1] Chen, Zhengdao, Xiang Li, and Joan Bruna. "Supervised community detection with line graph neural networks." ICLR. (2019).
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The article proposes an architecture of graph neural network that is based on the non-backtracking operator on graphs. The authors explain what non-backtracking walks are and define a GNN based on them. They give some theoretical insights proving this model is less sensitive to mixing far features (over-squashing) than ordinary GNNs and that it is expressive enough to be able to classify sparse binary SBMs. They provide a few experiments on benchmarks showing their network does better or as good as benchmarks.
+
+### Strengths
+The results in table 2 are promising and using non-backtracking updates for GNN seems relevant. This is also supported by theory, in particular on SBM.
+
+The article is well-written.
+
+### Weaknesses
+I think the contribution this article brings is too small.
+
+Mainly it seems the authors do not know about the work « Supervised Community Detection with LGNN » Chen et al. ICLR19 arxiv:1705.08415. In this article a GNN based on the non-backtracking operator is proposed ; it has features on the edges that are aggregated via the non-backtracking matrix B ; and, if I am right, it is very similar to the NBA-GNN the authors propose. The differences are that it is formulated directly as a GCN and not a generic permutation-invariant GNN ; and it seems more expressive since it also has features on the nodes (which, for instance, permits not to use the trick of begrudgingly updates) and it applies powers of B to aggregate the features (which, as they show, increases the performance).
+
+The theoretical analysis the authors propose is quite light in the sense that theorems 2 and 3 come straightforwardly from Bordenave 15 and Stephan and Massoulié 22. In the sensibility analysis (theorem 1) the improvement given by non-backtracking is quite modest ; considering the spectral properties of B on a model seems better than analyzing the sensibility.
+
+My point of view is that the novelty of this article is restricted to the experiments it proposes and its broader theroretical frame, that was less developped at the time of Chen 19.
+
+### Questions
+About NBA-GNN on SBM : the theoretical results are only about its expressiveness ; what about the training ? do the authors actually observe that a trained NBA-GNN can correctly classify the nodes ? They could compare to the conjectured optimal performances given by BP on sparse SBM. I guess they would obtain the same as Chen 19.
+
+It would have been interesting to consider NBA-GNN on the CSBM since this model has features.
+
+Another reference the authors may not know : arxiv:1306.5550, that first used the non-backtracking matrix for node classification.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 5
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper investigates the message-passing scheme of GNNs and introduces non-backtracking GNNs, which avoid that a message passed from a node $u$ to a node $v$ contributes to the message that is passed from $v$ to $u$ in the next layer. The authors introduce established concepts for random walks and their analysis to GNNs and make formal connections to oversquashing. The experimental evaluation shows clear improvements of the approach over their standard counterpart and SOTA results on various data sets.
+
+### Strengths
+1. An established and well-investigated concept from other fields is used to improve GNNs.
+2. The experimental evaluation is convincing and shows improvements, particularly for long-range task datasets and heterophilic node classification.
+3. The paper is well written and illustrated by figures.
+
+### Weaknesses
+1. The novelty of the introduced techniques is limited. The authors do not sufficiently discuss closely related works:
+   - Non-backtracking concepts in walk-based graph learning: The problem of backtracking has been investigated for random walk kernels, see:
+      * Pierre Mahé, Nobuhisa Ueda, Tatsuya Akutsu, Jean-Luc Perret, Jean-Philippe Vert: Extensions of marginalized graph kernels. ICML 2004
+      * Furqan Aziz, Richard C. Wilson, Edwin R. Hancock: Backtrackless Walks on a Graph. IEEE Trans. Neural Networks Learn. Syst. 24(6): 977-989 (2013)
+
+      The first paper by Mahé et al. proposes a transformation of an undirected input graph to a directed graph, where each undirected edge is represented by two nodes reflecting the two ways of traversing the edge. These nodes are connected such that walks with backtracking are not possible. The construction and the idea are highly similar to the method described in the paper under review.
+   - The paper "Zhengdao Chen, Lisha Li, Joan Bruna: Supervised Community Detection with Line Graph Neural Networks. ICLR 2019" (cited but not sufficiently acknowledged) introduces a similar idea of avoiding backtracking to GNNs. A GNN implicitly performing message-passing on a directed line graph is proposed, conceptually highly similar to the technique proposed in the paper under review. Moreover, its strength for learning on graphs generated via the stochastic block model is investigated and explored.
+   - The paper "Rongqin Chen, Shenghui Zhang, Leong Hou U, Ye Li: Redundancy-Free Message Passing for Graph Neural Networks. NeurIPS 2022" is closely related to the proposed method but only cited among others on page 4 and not sufficiently acknowledged. The approach uses simple paths (and cycles), allowing no repeated vertices at all instead of no repetition in subpaths of length two as the non-backtracking approach. Moreover, it investigates the link to oversquashing via the same techniques based on the Jacobian. A more detailed discussion of the differences compared to this work is necessary.
+
+2. Analysis of expressive power: The section argues that spectral analysis of GNNs overcomes the issues of Wesifeiler-Leman-based expressivity results. I cannot follow the reasoning. While focusing on spectral analysis allows to draw from existing results on non-backtracking walks, I have difficulties understanding Theorems 2 and 3. What exactly is the learning task in Theorem 2? How to interpret "can accurately map from graph $\mathcal{G}$ to node labels"? What is the influence of the learnable parameters of the GNN? Most importantly, it is unclear whether standard GNNs with WL expressivity cannot solve these learning tasks, at least theoretically.
+
+3. The authors argue that non-backtracking GNNs reduce redundancy. However, it is not discussed to what extent this is possible using the proposed method. While the illustrating examples are trees, in graphs with cycles, redundancy still occurs. A natural generalization would be to avoid backtracking within $k$ hops. A discussion of this could strengthen the paper.
+
+4. The space and time complexity increases compared to standard GNNs.
+
+5. Experimental evaluation:
+   - The reported results in the tables are the maximum of two variants, which is slightly unfair. Please report the results separately.
+
+Minor remarks:
+  - The caption of Figure 3 contains several repetitions
+
+### Questions
+1. How does the expressivity of NBA-GNNs (e.g., NBA-GIN) compare to GIN? 
+2. Can you clarify the relation to other works (see weaknesses 1)?
+3. Can the approach be extended to avoid backtracking within $k$ hops?
+4. What is the intuition as to why begrudgingly backtracking should work better? Does this mean that redundancy is not inherently problematic?
+5. LapPE enhances the performance for the long-range task. Are there results for GIN/GCN with LapPE?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

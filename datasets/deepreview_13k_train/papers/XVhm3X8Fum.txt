@@ -1,0 +1,422 @@
+\title{Stack Attention: Improving the Ability of Transformers to Model Hierarchical Patterns}
+
+\begin{abstract}
+Attention, specifically scaled dot-product attention, has proven effective for natural language, but it does not have a mechanism for handling hierarchical patterns of arbitrary nesting depth, which limits its ability to recognize certain syntactic structures. To address this shortcoming, we propose stack attention: an attention operator that incorporates stacks, inspired by their theoretical connections to context-free languages (CFLs). We show that stack attention is analogous to standard attention, but with a latent model of syntax that requires no syntactic supervision. We propose two variants: one related to deterministic pushdown automata (PDAs) and one based on nondeterministic PDAs, which allows transformers to recognize arbitrary CFLs. We show that transformers with stack attention are very effective at learning CFLs that standard transformers struggle on, achieving strong results on a CFL with theoretically maximal parsing difficulty. We also show that stack attention is more effective at natural language modeling under a constrained parameter budget, and we include results on machine translation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Although transformers \citep{vaswani-etal-2017-attention} have proven very successful on natural language, linguists have long held that language contains hierarchical syntactic structures \citep[][\textit{inter alia}]{chomsky-1956-three}. Transformers do not appear to have any explicit mechanism for dealing with nested syntactic patterns of arbitrary depth. Recent theoretical work, in fact, has shown that finite-precision transformers cannot recognize certain syntactic patterns, such as Dyck-2 \citep{hahn-2020-theoretical}, although they can do so up to bounded depth \citep{yao-etal-2021-self}. Recent work has also shown that transformers have a linear, rather than hierarchical, inductive bias \citep{petty-frank-2021-transformers,mueller-etal-2022-coloring} unless trained long past convergence \citep{murty-etal-2023-grokking}. This might explain, at least partly, why transformers are much less data-efficient than human children at learning language \citep{gilkerson-etal-2017-mapping,van-schijndel-etal-2019-quantity,zhang-etal-2021-when,frank-2023-bridging,warstadt-etal-2023-findings}.
+
+In this paper, we propose a novel type of attention mechanism, \newterm{stack attention}, that is explicitly designed to model hierarchical patterns. It does this by treating input vectors as items in a stack, and performing a soft-selection not directly over input vectors, but over sequences of stack actions. We motivate this theoretically by pointing out that pushdown automata (PDAs), which are finite automata augmented with stacks, recognize the entire class of context-free languages (CFLs), which capture the essence of compositionality and recursion in natural language syntax \citep{hopcroft-ullman-1979-introduction,sipser-2013-introduction}. Accordingly, we expect stack attention to increase transformers' expressive power, in addition to possibly learning language from fewer examples and generalizing to held-out combinations of syntactic patterns in more human-like fashion.
+
+Stack attention draws from prior work on \newterm{differentiable stacks}, which are continuous functions that approximate the behavior of discrete stacks \citep{grefenstette-etal-2015-learning,joulin-mikolov-2015-inferring,dusell-chiang-2020-learning}. We adapt two differentiable stacks into attention operators: the ``superposition'' stack of \citet{joulin-mikolov-2015-inferring}, and a nondeterministic generalization introduced by \citet{dusell-chiang-2023-surprising}. Previous work attached differentiable stacks to recurrent neural networks (RNNs) as external memory modules, but here we integrate differentiable stacks into transformers in a much deeper way. Whereas standard attention performs a soft-selection over input vectors, these differentiable stacks perform a soft-selection over \emph{sequences of push and pop actions} on stacks of vectors, returning the topmost vector of the stack of the selected sequence. Accordingly, we use differentiable stacks as a drop-in replacement for standard attention, resulting in a transformer with a latent model of syntax that, unlike most prior work, requires no syntactic supervision, and, in the case of nondeterministic stack attention, is able to recognize the entire class of CFLs.
+
+Our experiments show that transformer language models with nondeterministic stack attention learn CFLs very effectively, consistently outperforming baseline transformers, and outperforming even the previously-proposed VRNS-RNN \citep{dusell-chiang-2022-learning} on a CFL with maximal parsing difficulty \citep{greibach-1973-hardest}. We also show that under a constrained parameter budget, transformer language models with stack attention outperform baseline transformers on the Penn Treebank by 4.3 perplexity points, and we include results on a small machine translation task based on the German-English dataset from Europarl v7. Our code is publicly available
+
+
+
+\section{Related work}
+
+\label{sec:related-work}
+
+Our method enjoys two key advantages over prior work on syntax-oriented transformers: (1) it does not require syntactic supervision (although it can be extended to leverage it); and (2) it is unidirectional in time, so it can be used in causal language models and decoders. Most prior work requires syntactic supervision \citep{shiv-quirk-2019-novel,deguchi-etal-2019-dependency,zhang-etal-2020-sg,mcdonald-chiang-2021-syntax,qian-etal-2021-structural,sartran-etal-2022-transformer,murty-etal-2023-pushdown}. \Citet{wang-etal-2019-tree} proposed an unsupervised but bidirectional model. \citet{kim-etal-2017-structured} proposed a framework for structured attention mechanisms that sum over an exponential number of latent structures, similar to our approach. Their work included an attention operator based on the inside-outside algorithm for projective dependency trees, whereas we propose one based on a dynamic programming algorithm for PDAs. A key difference is that, at each timestep, their attention mechanism marginalizes over all latent structures backward \emph{and forward} in time, so it is bidirectional. Our stack attention marginalizes backward in time only.
+
+
+
+\section{Background}
+
+
+We start by reviewing attention and differentiable stacks. For any tensor (matrix, vector) $\tens{A}$, let $\tens{A}[i, j, \ldots]$ indicate the element or sub-tensor indexed by $i, j, \ldots$. Let $\logisticletter$ be the logistic function.
+
+\subsection{Scaled dot-product attention}
+\label{sec:standard-attention}
+
+Attention has become a cornerstone of modern neural network architectures \citep{cho-etal-2015-describing,bahdanau-etal-2015-neural,vaswani-etal-2017-attention}. Loosely defined, attention refers to an operation that, given a sequence of \newterm{values} $\attvaluet{1}, \ldots, \attvaluet{n} \in \realset^{d_v}$, produces an output $\attoutputletter$ that represents a linear interpolation, or ``soft-selection,'' over $\attvaluet{1}, \ldots, \attvaluet{n}$.
+
+The transformer uses an attention operator called \newterm{scaled dot-product attention (SDPA)}. The self-attention sublayer function in a transformer receives input vectors $\sublayerfuncinputt{1}, \ldots, \sublayerfuncinputt{n} \in \realset^{\dmodel}$ and linearly transforms them to sequences of \newterm{query vectors} $\vecvar{q}_1, \ldots, \vecvar{q}_n \in \realset^{d_k}$, \newterm{key vectors} $\attkeyt{1}, \ldots, \attkeyt{n} \in \realset^{d_k}$, and value vectors $\attvaluet{1}, \ldots, \attvaluet{n} \in \realset^{d_v}$. It runs SDPA for each timestep $1 \leq t \leq n$, producing outputs $\attoutputt{1}, \ldots, \attoutputt{n} \in \realset^{d_v}$. Each $\attoutputt{t}$ is linearly transformed to an output $\sublayerfuncoutputt{t} \in \realset^{\dmodel}$.
+\begin{align}
+    \attqueryt{t} &= \lineartransform{q}{\sublayerfuncinputt{t}} &
+    \attkeyt{t} &= \lineartransform{k}{\sublayerfuncinputt{t}} & \hspace{3em}
+    \attvaluet{t} &= \lineartransform{v}{\sublayerfuncinputt{t}} 
+    \label{eq:sdpa-qkv-projection}
+    \\
+    \vecvar{z}'_t[i] &= \frac{ \attqueryt{t} \cdot \attkeyt{i} }{ \sqrt{d_k} } \quad (1 \leq i \leq n) &
+    \vecvar{z}_t &= \softmax(\vecvar{z}'_t) & \label{eq:sdpa-softmax}
+    \\
+    \attoutputt{t} &= \sum_{i=1}^n \vecvar{z}_t[i] \; \attvaluet{i} &
+    \sublayerfuncoutputt{t} &= \lineartransform{y}{\attoutputt{t}} & \label{eq:sdpa-output}
+\end{align}
+If we prevent SDPA from attending to future timesteps by ending the iterations over $i$ at $t$ instead of $n$, which is necessary for causal language modeling and decoding, we say it is \newterm{causally masked}. Each sublayer typically has multiple attention \newterm{heads}, applying multiple SDPA operators to the input sequence and adding the results together.\footnote{This is presented a little differently from \citet{vaswani-etal-2017-attention}, but it is mathematically equivalent.}
+
+\subsection{Differentiable stacks}
+\label{sec:differentiable-stacks}
+
+A \newterm{stack} is a container of elements that allows one to \newterm{push} and \newterm{pop} elements in last-in-first-out order. A \newterm{differentiable stack} is a continuous function that approximates the behavior of a stack; in this paper, we assume elements are vectors in $\realset^{\stackvectorsizeletter}$. Suppose we start with an empty stack $\stackobjectt{0}$ and perform $n$ operations on it (e.g.\ pushing and popping), resulting in a sequence of stacks $\stackobjectt{1}, \ldots, \stackobjectt{n}$. In a differentiable stack, we represent the actions as \newterm{stack action} vectors $\stackactionvect{1}, \ldots, \stackactionvect{n}$, where each $\stackactionvect{t}$ is a set of action \emph{weights}. The exact set of available actions varies with the particular style of differentiable stack. The inputs also include a sequence of \newterm{pushed vectors} $\pushedstackvectort{1}, \ldots, \pushedstackvectort{n} \in \realset^{\stackvectorsizeletter}$ that serve as the new elements inserted by push actions. The output of the differentiable stack is a sequence of \newterm{stack reading} vectors $\stackreadingt{1}, \ldots, \stackreadingt{n}$, where each $\stackreadingt{t}$ represents the top vector element of the stack after processing the stack actions and pushed vectors up to timestep $t$. Each differentiable stack can be abstracted into a function $\stackobjectfuncname$ that incrementally updates the stack, and a function $\stackreadingfuncname$ that queries the stack reading from it.
+\begin{align}
+    \stackobjectt{t} &= \stackobjectfunc{\stackobjectt{t-1}}{\stackactionvect{t}}{\pushedstackvectort{t}} &
+    \stackreadingt{t} &= \stackreadingfunc{\stackobjectt{t}} \label{eq:stack-and-reading-func}
+\end{align}
+The stack readings are differentiable with respect to the stack actions and pushed vectors, so if the stack is incorporated into a neural network, the whole network can still be trained end-to-end with backpropagation, without any need for supervision over stack actions.
+
+\subsubsection{Superposition stack}
+\label{sec:superposition-stack}
+
+The differentiable stack of \citet{joulin-mikolov-2015-inferring} uses a strategy called \newterm{superposition}. It simulates fractionally-weighted stack actions by computing three new, separate stacks: one with all elements shifted down (push), kept the same (no-op), and shifted up (pop). The new stack is an element-wise interpolation (``superposition'') of these three stacks. Another way of viewing this is that each element is an interpolation of the elements above, at, and below it at the previous timestep, weighted by push, no-op, and pop probabilities respectively. Here, $\stackactionvect{t} = \transpose{[\suppusht{t} ~ \supnoopt{t} ~ \suppopt{t}]}$ is a probability distribution over the three actions, and the stack state $\stackobjectt{t}$ is a matrix $\supstacktensort{t}$ containing the stack elements. We implement $\supstacktensort{t} = \stackobjectfunc{\supstacktensort{t-1}}{\stackactionvect{t}}{\pushedstackvectort{t}}$ as
+\begin{align}
+    \supstackvector{t}{i}
+        &=  \suppusht{t} \; \funcname{Above}_t(i)  
+        + \supnoopt{t} \; \funcname{At}_t(i) 
+        + \suppopt{t} \; \funcname{Below}_t(i)
+        \quad (1 \leq i \leq t) 
+\end{align}
+\begin{align}
+    \funcname{Above}_t(i) &= \begin{cases}
+        \pushedstackvectort{t} & i = 1 \\
+        \supstackvector{t-1}{i-1} & i > 1
+    \end{cases} \\
+    \funcname{At}_t(i) &= \begin{cases}
+        \supstackvector{t-1}{i} & i < t \\
+        \vzero & i = t
+    \end{cases} \\
+    \funcname{Below}_t(i) &= \begin{cases}
+        \supstackvector{t-1}{i+1} & i < t-1 \\
+        \vzero & i \geq t-1.
+    \end{cases}
+\end{align}
+The stack reading $\stackreadingt{t} = \stackreadingfunc{\supstacktensort{t}}$ is simply the top vector element $\supstackvector{t}{1}$, and we set $\supstacktensort{0} = [\vzero]$. This stack has quadratic time and space complexity with respect to input length.
+
+\subsubsection{Nondeterministic stack}
+\label{sec:nondeterministic-stack}
+
+\Citet{dusell-chiang-2023-surprising} recently proposed a differentiable stack based on \newterm{pushdown automata (PDAs)}. PDAs are a type of nondeterministic automaton that consists of a finite state machine connected to an infinite stack memory (for a detailed definition, see \cref{sec:pda-details}). They recognize exactly the class of CFLs. Every PDA has a finite alphabet of input symbols $\Sigma$, a finite set of states $Q$, and a finite alphabet of stack symbols $\Gamma$. The initial stack consists of $\bot \in \Gamma$, which is a designated bottom symbol.
+
+A PDA has transitions of the form $\pdatrans{q}{a}{u}{r}{v}$, which signifies that if the PDA is in state $q \in Q$ and has string $u \in \Gamma^\ast$ on top of the stack, and string $a \in \Sigma \cup \{\emptystring\}$ can be scanned from the input tape, then it goes to state $r \in Q$, pops $u$, and pushes string $v \in \Gamma^\ast$ onto the stack. PDAs are \emph{nondeterministic} in the sense that multiple transitions may apply ambiguously to the same machine configuration, in which case all sequences of transitions are explored. Nondeterminism is essential for recognizing all CFLs, because deterministic PDAs are strictly less powerful. We call a sequence of connecting transitions that starts from the initial machine configuration a \newterm{run}. We write $\pdarunendsin{\pdarunletter}{t}{q}{x}$ to indicate that run $\pdarunletter$ scans exactly $t$ input symbols, ends in state $q$, and ends with symbol $x$ on top of the stack.
+
+The differentiable stack of \citet{dusell-chiang-2023-surprising} assumes the PDA is in the following normal form, which is equivalent in recognition power. Transitions must have one of the following forms, where $q, r \in Q$, $a \in \Sigma$, and $x, y \in \Gamma$:
+\begin{align}
+    &\pdatrans{q}{a}{x}{r}{xy} && \text{\newterm{Push} $y$ on top of $x$.} \label{eq:normal-form-push} \\
+    &\pdatrans{q}{a}{x}{r}{y} && \text{\newterm{Replace} $x$ with $y$.} \label{eq:normal-form-replace} \\
+    &\pdatrans{q}{a}{x}{r}{\emptystring} && \text{\newterm{Pop} $x$.} \label{eq:normal-form-pop}
+\end{align}
+
+\newterm{Weighted PDAs (WPDAs)} are an extension of PDAs that assigns a non-negative weight to each transition. The weight of run $\pdarunletter$, which we denote $\wpdarunweight{\pdarunletter}$, is the product of its transition weights. \Citet{dusell-chiang-2023-surprising} extended WPDAs further by augmenting every instance of a stack symbol with a vector in $\realset^{\stackvectorsizeletter}$, so that stack elements are members of $\Gamma \times \realset^{\stackvectorsizeletter}$. The purpose of adding vectors is to allow the automaton to transmit information via the stack efficiently using embedding vectors rather than a finite alphabet of discrete symbols. We will refer to it as the \newterm{vector PDA (VPDA)}.
+
+Let $w = w_1 \cdots w_n \in \Sigma^n$ be a string of input symbols, and assume that there is a sequence of pushed vectors $\pushedstackvectort{0}, \ldots, \pushedstackvectort{n}$. In a vector PDA, the initial stack consists of $(\bot, \pushedstackvectort{0})$. Transitions have the following semantics when scanning $w_t$:
+\begin{align*}
+    &\pdatrans{q}{w_t}{x}{r}{xy} && \text{If $(x, \vecvar{u})$ is on top, push $(y, \pushedstackvectort{t})$.} \\
+    &\pdatrans{q}{w_t}{x}{r}{y} && \text{If $(x, \vecvar{u})$ is on top, replace it with $(y, \vecvar{u})$.} \\
+    &\pdatrans{q}{w_t}{x}{r}{\emptystring} && \text{If $(x, \vecvar{u})$ is on top, pop it.}
+\end{align*}
+Note that transitions can only be conditioned on $(q, x) \in Q \times \Gamma$, never the value of vector $\vecvar{u}$, so only $Q$ and $\Gamma$ direct the nondeterministic branching of the VPDA (this will allow \cref{eq:nondeterministic-stack-reading} to be tractable).
+
+The differentiable stack of \citet{dusell-chiang-2023-surprising} is a differentiable simulation of a vector PDA. We will refer to it as the \newterm{differentiable vector PDA (\diffvrns{})}. Here, each $\stackactionvect{t}$ is the flattening of a tensor $\nstranst{t}$ which contains the transition weights used when scanning $w_t$. We denote the weight of transition $\pdatrans{q}{w_t}{x}{r}{v}$ as $\nstransweight{q}{t}{x}{r}{v}$. Since $q, r \in Q$, $x \in \Gamma$, and there are $2 |\Gamma| + 1$ possibilities for $v$ given \cref{eq:normal-form-push,eq:normal-form-replace,eq:normal-form-pop}, the size of $\nstranst{t}$ is $|Q| \times |\Gamma| \times |Q| \times (2 |\Gamma| + 1)$. We set $\vrnsbottomvector = \logistic{\vectorparam{w}{v}}$, where $\vectorparam{w}{v} \in \realset^{\stackvectorsizeletter}$ is a learned parameter.
+
+Let $\topvectorofrun{\pdarunletter}$ denote the top stack vector at the end of VPDA run $\pdarunletter$. The stack reading $\stackreadingt{t} \in \realset^{|Q| \cdot |\Gamma| \cdot \stackvectorsizeletter}$ includes, for each $(r, y) \in Q \times \Gamma$, an interpolation of $\topvectorofrun{\pdarunletter}$ for every run $\pdarunendsin{\pdarunletter}{t}{r}{y}$, normalized by the weight of all runs. Let $\vrnsstackreadingvec{t}{r}{y}$ denote the slice of $\stackreadingt{t}$ corresponding to $(r, y)$. Then
+\begin{equation}
+    \vrnsstackreadingvec{t}{r}{y} = \frac{
+        \sum_{\pdarunendsin{\pdarunletter}{t}{r}{y}} \wpdarunweight{\pdarunletter} \; \topvectorofrun{\pdarunletter}
+        }{
+            \sum_{r' \in Q} \sum_{y' \in \Gamma} \sum_{\pdarunendsin{\pdarunletter}{t}{r'}{y'}} \wpdarunweight{\pdarunletter}
+        }. \label{eq:nondeterministic-stack-reading}
+\end{equation}
+In this way, the \diffvrns{} is a soft-selection over VPDA runs that outputs the expected top stack vector. Although \cref{eq:nondeterministic-stack-reading} sums over an exponential number of runs, it can be computed in cubic time and quadratic space using Lang's dynamic programming algorithm \citep{lang-1974-deterministic}, which can be expressed using the abstraction of \cref{eq:stack-and-reading-func}. See \cref{sec:nondeterministic-stack-implementation} for details.
+
+
+
+\section{Comparison of differentiable stacks}
+
+\label{sec:comparison}
+
+Here we make the novel insight that the superposition stack is a special case of the \diffvrns{}. If we unroll the superposition stack's equation for $\stackreadingt{t}$, we see that it is a summation that enumerates all possible sequences of actions:
+\begin{equation}
+    \stackreadingt{t} = \sum_{\pdarunletter \leadsto t} \wpdarunweight{\pdarunletter} \; \topvectorofrun{\pdarunletter}
+\end{equation}
+where $\pdarunletter$ is a run of a VPDA with $|Q| = |\Gamma| = 1$, and $\pdarunletter \leadsto t$ means that $\pdarunletter$ ends at timestep $t$. This means the superposition stack is a special case of the \diffvrns{} with $|Q| = |\Gamma| = 1$, normalized transition weights, and $\pushedstackvectort{0} = \vzero$. So, like the \diffvrns{}, the superposition stack is a soft-selection over VPDA runs, but for a weak VPDA where nondeterministic branching can only be directed by the choice to push, pop, or do nothing at each step, and not by the state machine or stack contents.
+
+This explains differences in the range of tasks these two stacks can solve, which we will observe in \cref{sec:cfl-experiments}. Both stacks are \newterm{real-time}, meaning that all PDA transitions scan exactly one input symbol. The superposition stack resembles \newterm{real-time deterministic PDAs (DPDAs)}, which recognize only a subset of CFLs called \newterm{real-time deterministic CFLs (DCFLs)} \citep{ginsburg-greibach-1966-deterministic,igarashi-1985-pumping}. In contrast, nondeterministic PDAs recognize all CFLs even when they are real-time \citep{greibach-1965-new} and in the normal form of \cref{eq:normal-form-push,eq:normal-form-replace,eq:normal-form-pop} \citep{dusell-chiang-2023-surprising}. Therefore \diffvrns{}s, and transformers that contain them, can recognize all CFLs.
+
+
+
+\section{Method}
+
+\label{sec:stack-attention}
+
+We construct a stack attention layer by replacing multi-head SDPA with a differentiable stack. Transformers consist of multiple \newterm{layers}, each of which contains multiple \newterm{sublayers}. Every sublayer includes layer normalization, dropout, and residual connections. In a transformer encoder, each layer consists of a self-attention sublayer followed by a feedforward sublayer. Similarly, in a transformer decoder, each layer consists of a self-attention sublayer, a cross-attention sublayer that attends to the output of an encoder, and a feedforward sublayer, in that order. Let $\sublayerinputt{t} \in \realset^{\dmodel}$ and $\sublayeroutputt{t} \in \realset^{\dmodel}$ be the input and output, respectively, of a sublayer at timestep $t$. A sublayer is implemented as
+\begin{align}
+    \sublayerfuncinputt{t} &= \funcname{LayerNorm}(\sublayerinputt{t}) \\
+    \sublayerfuncoutputt{t} &= \funcname{Sublayer}(t, (\sublayerfuncinputt{1}, \ldots, \sublayerfuncinputt{n})) \\
+    \sublayeroutputt{t} &= \sublayerinputt{t} + \funcname{Dropout}(\sublayerfuncoutputt{t}).
+\end{align}
+Here, $\funcname{Sublayer}$ is called the \newterm{sublayer function}, and it customizes the behavior of the sublayer. In a standard SDPA layer, the sublayer function is multi-head SDPA (\cref{sec:standard-attention}). $\funcname{LayerNorm}$ is \newterm{layer normalization} \citep{ba-etal-2016-layer}. We use pre-norm instead of post-norm \citep{wang-etal-2019-learning,nguyen-salazar-2019-transformers}. Layer normalization is also applied to the output of the last layer.
+
+Like SDPA, the superposition stack and \diffvrns{} produce a weighted sum of input vectors (\cref{sec:comparison}). Based on this insight, we adapt each differentiable stack into an attention sublayer by using it as the sublayer function instead of multi-head SDPA. We linearly transform each sublayer function input $\sublayerfuncinputt{t} \in \realset^{\dmodel}$ to $\pushedstackvectort{t} \in \realset^{\stackvectorsizeletter}$, using the logistic function to ensure elements are in $(0, 1)$.
+\begin{align}
+    \pushedstackvectort{t} &= \logistic{\lineartransform{v}{\sublayerfuncinputt{t}}} \label{eq:stack-attention-value}
+\end{align}
+This is similar to the way SDPA generates values (cf.~\cref{eq:sdpa-qkv-projection}), and like SDPA, stack attention performs a soft-selection over them. We also linearly transform $\sublayerfuncinputt{t}$ to $\stackactionvect{t} \in \realset^{d_a}$, analogously to the way SDPA generates queries (cf.~\cref{eq:sdpa-qkv-projection} again). For the superposition stack, we use softmax to ensure $\stackactionvect{t}$ is a probability distribution.
+\begin{align}
+    \stackactionvect{t} &= \softmax(\lineartransform{a}{\sublayerfuncinputt{t}}) \label{eq:superposition-stack-attention-actions}
+\end{align}
+For the \diffvrns{}, we ensure weights are non-negative using $\exp$. (In implementation, we actually calculate run weights in log space to avoid overflow, and the $\exp$ is merely implicit.)
+\begin{align}
+    \stackactionvect{t} &= \exp(\lineartransform{a}{\sublayerfuncinputt{t}}) \label{eq:nondeterministic-stack-attention-actions}
+\end{align}
+
+We compute $\stackreadingt{t}$ from $\stackactionvect{1}, \ldots, \stackactionvect{t}$ and $\pushedstackvectort{1}, \ldots, \pushedstackvectort{t}$ according to \cref{eq:stack-and-reading-func}, using $\stackobjectfuncname$ and $\stackreadingfuncname$ for one of the two differentiable stacks. We call stack attention based on the superposition stack \newterm{superposition stack attention}, and we call stack attention based on the \diffvrns{} \newterm{nondeterministic stack attention}. We linearly transform each $\stackreadingt{t} \in \realset^{d_r}$ to get the sublayer function output $\sublayerfuncoutputt{t} \in \realset^{\dmodel}$ (cf.~\cref{eq:sdpa-output}).
+\begin{align}
+    \sublayerfuncoutputt{t} &= \lineartransform{y}{\stackreadingt{t}} \label{eq:stack-attention-output}
+\end{align}
+Note that because the differentiable stack does not attend to future timesteps, we do not need to apply any masking to enforce causality. We illustrate our stack attention architecture in \cref{fig:stack-attention-diagram}. To characterize the practical speed of stack attention on GPUs, we show its parallel time complexity in \cref{tab:parallel-complexity}. See \cref{sec:complexity} for more details on time and space complexity.
+
+\begin{figure}
+    \tikzset{linear/.style={dotted,thick}}
+    \tikzset{residual/.style={dashed}}
+    \newcommand{\dropout}{\scalebox{0.8}{$\funcname{Dropout}$}}
+    \newcommand{\layernorm}{\scalebox{0.8}{$\funcname{LayerNorm}$}}
+    \def\xsep{1in}
+    \def\ysep{0.6in}
+    \def\ysepmid{0.325in}
+    \def\dotsx{1.6in}
+    \def\labelx{1.7in}
+    \newcommand{\mycolumn}[3]{
+        \node (h#1) at (#2*\xsep, -\ysep) {$\sublayerinputt{#3}$};
+        \node (ln#1) at (#2*\xsep, -\ysepmid) {\layernorm};
+        \draw[->] (h#1) edge (ln#1);
+        \node (s#1) at (#2*\xsep, 0) {$\stackobjectt{#3}$};
+        \draw[->, linear] (ln#1) edge node[right, align=left] {$\stackactionvect{#3}, \pushedstackvectort{#3}$} (s#1);
+        \node (dr#1) at (#2*\xsep, \ysepmid) {\dropout};
+        \draw[->, linear] (s#1) edge node[right] {$\stackreadingt{#3}$} (dr#1);
+        \node (o#1) at (#2*\xsep, \ysep) {$\sublayeroutputt{#3}$};
+        \draw[->] (dr#1) edge (o#1);
+        \draw[->, bend left, residual] (h#1) edge (o#1);}
+    \centering
+    \scalebox{0.9}{
+    \begin{tikzpicture}[x=2.5cm,y=2.3cm]
+        \node (leftdots) at (-\dotsx, 0) {$\cdots$};
+        \mycolumn{1}{-1}{t-1}
+        \mycolumn{2}{0}{t}
+        \mycolumn{3}{1}{t+1}
+        \node (rightdots) at (\dotsx, 0) {$\cdots$};
+        \draw[->] (leftdots) edge (s1);
+        \draw[->] (s1) edge (s2);
+        \draw[->] (s2) edge (s3);
+        \draw[->] (s3) edge (rightdots);
+        \node[anchor=east] at (-\labelx, -\ysep) {input \big\{};
+        \node[anchor=east] at (-\labelx, 0) {stack \big\{};
+        \node[anchor=east] at (-\labelx, \ysep) {output \big\{};
+    \end{tikzpicture}
+    }
+    \caption{Conceptual diagram of a stack attention sublayer, unrolled across a portion of time. Dotted arrows indicate linear transformations, and dashed arrows indicate residual connections.}
+    \label{fig:stack-attention-diagram}
+\end{figure}
+
+\begin{table}
+    \caption{Parallel time complexity of the types of attention studied in this paper, as a function of sequence length $n$. ``Implemented'' shows the complexity of each implementation used in this paper. Nondeterministic stack attention could be further parallelized in a manner similar to parallel CKY \citep{rao-1975-speed}, which is impossible in RNNs (``Parallel CKY''). Since CFL recognition is in $\mathrm{NC}^2$ \citep{ruzzo-1981-uniform}, theoretically this could be lowered even further to $O((\log n)^2)$ (``Theoretical'').}
+    \label{tab:parallel-complexity}
+    \begin{center}
+        \small
+        \begin{tabular}{@{}llll@{}}
+            \toprule
+            Attention & Implemented & Parallel CKY & Theoretical \\
+            \midrule
+            SDPA & $O(\log n)$ & -- & -- \\
+            Superposition & $O(n)$ & -- & $O((\log n)^2)$ \\
+            Nondeterministic & $O(n^2)$ & $O(n \log n)$ & $O((\log n)^2)$ \\
+            \bottomrule
+        \end{tabular}
+    \end{center}
+\end{table}
+
+
+
+\section{Context-free languages}
+
+\label{sec:cfl-experiments}
+
+In this section, we test the performance of transformers with stack attention as language models on the same five CFL tasks from \citet{dusell-chiang-2020-learning,dusell-chiang-2022-learning}. Let $\reverse{w}$ denote the reverse of $w$.
+\begin{compactdesc}
+    \item[$\bm{\MarkedReversal{}}$] The language $\{ w \sym{\#} \reverse{w} \mid w \in \{\sym{0}, \sym{1}\}^\ast \}$.
+    \item[$\bm{\UnmarkedReversal{}}$] The language $\{ w \reverse{w} \mid w \in \{\sym{0}, \sym{1}\}^\ast \}$.
+    \item[$\bm{\PaddedReversal{}}$] Like \UnmarkedReversal{}, but with a higher tendency to have a long stretch of the same symbol repeated in the middle. Strings are of the form $w a^p \reverse{w}$, where $w \in \{\sym{0}, \sym{1}\}^\ast$, $a \in \{\sym{0}, \sym{1}\}$, and $p \geq 0$.
+    \item[Dyck] The language of strings with two types of balanced brackets.
+    \item[Hardest CFL] A highly ambiguous, CFL-complete language with maximal parsing difficulty \citep{greibach-1973-hardest}. See \citet{dusell-chiang-2020-learning} for details.
+\end{compactdesc}
+The \MarkedReversal{} and Dyck languages are real-time DCFLs, whereas \UnmarkedReversal{}, \PaddedReversal{}, and Hardest CFL are nondeterministic CFLs. We use the same sampling procedure as \citet{dusell-chiang-2020-learning} to generate datasets for each task. Every time we train a model, we randomly sample a training set of 10k examples and a validation set of 1k examples, both with lengths in the range $[40, 80]$. For each task, we sample a test set with string lengths varying from 40 to 100, with 100 examples per length. The test sets remain the same across all runs. Following \citet{dusell-chiang-2022-learning}, we evaluate models using the \newterm{cross-entropy difference} between the distribution the model learns and the true distribution the data is sampled from. Units are nats, lower is better, and 0 is optimal.
+
+We compare transformers with SDPA (\LabelTransformerBaseline{}), superposition stack attention (\LabelTransformerSuperposition{}), and nondeterministic stack attention (\LabelTransformerNondeterministic{}), as well as their stack-augmented LSTM \citep{hochreiter-schmidhuber-1997-long} counterparts (\LabelLSTMNondeterministic{} is what \citet{dusell-chiang-2023-surprising} call the VRNS-RNN). All transformers have 5 layers. For transformers with stack attention, in the third (middle) layer, we replace the SDPA sublayer with the corresponding stack attention sublayer. Although we could have used stack attention in all layers, only one is necessary for recognizing CFLs, and multiple stack attention layers would be computationally costly. Using stack attention in the middle layer is a compromise between placing it at the beginning or end of the transformer.
+
+We have adjusted model sizes so that their parameter counts satisfy the following constraints on the Hardest CFL: (1) each type of stack has fewer parameters than the preceding types (none $>$ \LabelSuperposition{} $>$ \LabelNondeterministic{}); and (2) each transformer has fewer parameters than its LSTM counterpart. For transformers, the feedforward hidden layer size is $2 \cdot \dmodel$. SDPA layers are causally masked and have 4 heads. For \LabelTransformerBaseline{}, we use $\dmodel = 32$. For \LabelTransformerSuperposition{}, we use $\dmodel = \stackvectorsizeletter = 32$. For \LabelTransformerNondeterministic{}, we use $\dmodel = 28$, $\stackvectorsizeletter = 5$, and the same values for $|Q|$ and $|\Gamma|$ as \citet{dusell-chiang-2022-learning} ($|Q| = 2$, $|\Gamma| = 3$ for \MarkedReversal{}, \UnmarkedReversal{}, and Dyck; $|Q| = 3$, $|\Gamma| = 3$ for \PaddedReversal{} and Hardest CFL). For \LabelLSTM{}, we use one layer with 100 hidden units. For \LabelLSTMSuperposition{}, we use 93 hidden units and $\stackvectorsizeletter = 10$. For \LabelLSTMNondeterministic{}, we use 64 hidden units and the same dVPDA sizes as \LabelTransformerNondeterministic{}. See \cref{sec:cfl-experiment-details} for more details.
+
+For each language and architecture, we train 10 models and report results for the model with the best validation performance (\cref{fig:stack-attention-cfls}). \LabelTransformerSuperposition{} outperforms \LabelTransformerBaseline{} on all tasks except Hardest CFL. \LabelTransformerNondeterministic{} achieves strong results across all tasks, except out-of-distribution lengths on DCFLs (\MarkedReversal{} and Dyck). Notably, \LabelTransformerNondeterministic{} outperforms all models on Hardest CFL for in-distribution lengths despite having the fewest parameters. It also outperforms \LabelTransformerBaseline{} and \LabelTransformerSuperposition{} on all nondeterministic CFLs (\UnmarkedReversal{}, \PaddedReversal{}, Hardest CFL). Although multi-head SDPA can express multiple interpretations of an input at once, it represents only a fixed number, whereas \LabelTransformerNondeterministic{} sums over an exponential number of VPDA runs. The poor performance of \LabelTransformerBaseline{} and even \LabelTransformerSuperposition{} on \UnmarkedReversal{}, an extremely simple nondeterministic task, highlights the importance of nondeterminism.
+
+How do transformers compare to their LSTM counterparts? For all tasks except Dyck, \LabelLSTM{} outperforms \LabelTransformerBaseline{}, and transformers have serious length generalization issues. This may have to do with the linear bias in the SDPA layers, and different positional encodings might also alleviate this (we use sinusoidal encodings). However, \LabelTransformerNondeterministic{} appears to alleviate this problem on nondeterministic CFLs, but it still overfits to the training length distribution on the DCFLs. \LabelLSTMSuperposition{} generally outperforms \LabelTransformerSuperposition{}. \LabelLSTMNondeterministic{} has better length generalization than \LabelTransformerNondeterministic{} and outperforms on \UnmarkedReversal{}, but \LabelTransformerNondeterministic{} has better in-distribution performance on Hardest CFL.
+
+Qualitatively, we find that \LabelTransformerSuperposition{} learns easily interpretable action patterns on the real-time DCFLs. On \MarkedReversal{}, it learns to push before $\sym{\#}$ and pop afterwards. On Dyck, it learns to push after reading opening brackets and pop after reading closing brackets. See \cref{sec:stack-attention-analysis} for details.
+
+\begin{figure*}
+    \pgfplotsset{
+        every axis/.style={
+            width=3.3in,
+            height=1.9in
+        },
+        title style={yshift=-4.7ex},
+        y tick label style={
+            /pgf/number format/.cd,
+            fixed,
+            fixed zerofill,
+            precision=1,
+            /tikz/.cd
+        }
+    }
+    \centering
+    \begin{tabular}{@{}l@{\hspace{0.05in}}l@{}}
+\begin{tikzpicture}
+\definecolor{color0}{rgb}{0.12156862745098,0.466666666666667,0.705882352941177}
+\definecolor{color1}{rgb}{1,0.498039215686275,0.0549019607843137}
+\definecolor{color2}{rgb}{0.172549019607843,0.627450980392157,0.172549019607843}
+\definecolor{color3}{rgb}{0.83921568627451,0.152941176470588,0.156862745098039}
+\definecolor{color4}{rgb}{0.580392156862745,0.403921568627451,0.741176470588235}
+\definecolor{color5}{rgb}{0.549019607843137,0.337254901960784,0.294117647058824}
+\begin{axis}[
+  hide axis,
+  height=0.7in,
+  legend style={
+    draw=none,
+    /tikz/every even column/.append style={column sep=0.4cm}
+  },
+  legend columns=3,
+  xmin=0,
+  xmax=1,
+  ymin=0,
+  ymax=1
+]
+\addlegendimage{cedline,color0}
+\addlegendentry{\LabelLSTM{}}
+\addlegendimage{cedline,color1}
+\addlegendentry{\LabelLSTMSuperposition{}}
+\addlegendimage{cedline,color2}
+\addlegendentry{\LabelLSTMNondeterministic{}}
+\addlegendimage{cedline,color3}
+\addlegendentry{\LabelTransformerBaseline{}}
+\addlegendimage{cedline,color4}
+\addlegendentry{\LabelTransformerSuperposition{} (Ours)}
+\addlegendimage{cedline,color5}
+\addlegendentry{\LabelTransformerNondeterministic{} (Ours)}
+\end{axis}
+\end{tikzpicture}
+
+\scalebox{0.8}{\input{figures/01-cfls/train/marked-reversal}}
+&\scalebox{0.8}{\input{figures/01-cfls/test/marked-reversal}}
+\\
+\scalebox{0.8}{\input{figures/01-cfls/train/unmarked-reversal}}
+&\scalebox{0.8}{\input{figures/01-cfls/test/unmarked-reversal}}
+\\
+\scalebox{0.8}{\input{figures/01-cfls/train/padded-reversal}}
+&\scalebox{0.8}{\input{figures/01-cfls/test/padded-reversal}}
+\\
+\scalebox{0.8}{\input{figures/01-cfls/train/dyck}}
+&\scalebox{0.8}{\input{figures/01-cfls/test/dyck}}
+\\
+\scalebox{0.8}{\input{figures/01-cfls/train/hardest-cfl}}
+&\scalebox{0.8}{\input{figures/01-cfls/test/hardest-cfl}}
+\\
+
+    \end{tabular}
+    \caption{Language modeling results on context-free languages, comparing transformers with and without stack attention, as well as their LSTM counterparts. Left: Cross-entropy difference ($\downarrow$) in nats between model and source distribution on the validation set, as a function of training time. Lines are the best of 10 runs, selected by validation cross-entropy difference. Right: Cross-entropy difference ($\downarrow$) on the test set, binned by string length. The dashed line indicates the longest length in the training set. See \cref{tab:cfl-parameter-count} for model parameter counts. Nondeterministic stack attention (\LabelTransformerNondeterministic{}) outperforms standard attention (\LabelTransformerBaseline{}) on \UnmarkedReversal{}, \PaddedReversal{}, and Hardest CFL; and it achieves the best in-distribution performance on Hardest CFL despite having the fewest parameters.}
+    \label{fig:stack-attention-cfls}
+\end{figure*}
+
+
+
+\section{Natural language modeling}
+
+\label{sec:ptb-experiments}
+
+In this section, we test transformers with and without stack attention on a natural language modeling benchmark. We use the Penn Treebank \citep{marcus-etal-1994-penn} as preprocessed by \citet{dyer-etal-2016-recurrent}. We train the models to learn a probability distribution over single sentences, without context from past sentences. Each transformer has 5 encoder layers, with stack attention inserted in the same way as \cref{sec:cfl-experiments}. We use $\dmodel = 256$ and a feedforward hidden layer size of 1024. SDPA sublayers are causally masked and have 8 heads. For superposition stack attention (\LabelTransformerSuperposition{}), we set $\stackvectorsizeletter = 511$. For nondeterministic stack attention, we set $|Q| = 3$, $|\Gamma| = 3$, and $\stackvectorsizeletter = 10$. These settings ensure that the number of parameters in each model is less than that of the preceding baselines. Note that these models are relatively small; for comparison, the Transformer-XL language model of \citet{sartran-etal-2022-transformer} has 12M parameters. See \cref{sec:ptb-experiment-details} for more details, including computational cost.
+
+For each architecture, we train 20 models and report results for the model with the lowest validation cross-entropy (\cref{tab:ptb}). We see that \LabelTransformerSuperposition{} does not outperform the \LabelTransformerBaseline{}~baseline, but \LabelTransformerNondeterministic{} outperforms both, despite having the fewest parameters. This suggests that nondeterministic stack attention is more efficient at encoding language under a constrained parameter budget.
+
+\begin{table}
+    \caption{Results of training transformers with different attention mechanisms as language models on the Penn Treebank benchmark of \citet{dyer-etal-2016-recurrent}, measured with perplexity. All results are the best of 20 random restarts, selected by validation cross-entropy. Despite having the fewest parameters, our nondeterministic stack attention (\LabelTransformerNondeterministic{}) has the lowest perplexity.}
+    \label{tab:ptb}
+    \begin{center}
+        \small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Model & Params. & Val. $\downarrow$ & Test $\downarrow$ \\
+\midrule
+\LabelTransformerBaseline{} & 10,051,072 & 115.11 & 92.84 \\
+\LabelTransformerSuperposition{} (Ours) & 10,050,304 & 122.94 & 98.67 \\
+\LabelTransformerNondeterministic{} (Ours) & 9,861,898 & \textbf{110.59} & \textbf{88.54} \\
+\bottomrule
+\end{tabular}
+
+    \end{center}
+\end{table}
+
+
+
+\section{Machine translation}
+
+\label{sec:mt-experiments}
+
+In this section, we test transformers with stack attention on a small machine translation task, using stack attention in both the encoder and decoder. We use a subset of the German-English dataset from Europarl v7 \citep{koehn-2005-europarl}, simulating a low-resource scenario. We use the news translation tasks from WMT 16 (newstest2016) and WMT 17 (newstest2017) as validation and test data, respectively. To accommodate the computational cost of nondeterministic stack attention, we limit the training, validation, and test sets to examples where both the source and target side have no more than 150 characters, and we randomly subsample 100k examples from the training set. We tokenize the data into a vocabulary of 32k tokens using BPE \citep{sennrich-etal-2016-neural}.
+
+We use 5 layers in both the encoder and decoder, swapping out SDPA with the same kind of stack attention in the third layer of each. We continue to use SDPA as the cross-attention mechanism. In order to examine model performance as a function of parameter count, we vary $\dmodel$ to test models with three size tiers, roughly doubling the number of parameters in each successive tier, and ensuring that the number of parameters in each model is less than that of the preceding baselines. We use 8 heads in each SDPA sublayer and set the feedforward hidden layer size to $4\cdot\dmodel$. For superposition stack attention (\LabelTransformerSuperposition{}), we set $\stackvectorsizeletter = \dmodel$. For nondeterministic stack attention (\LabelTransformerNondeterministic{}), we set $|Q| = 3$, $|\Gamma| = 3$, and $\stackvectorsizeletter = 5$. See \cref{sec:mt-experiment-details} for more details.
+
+For each tier and architecture, we train 5 models and report results for the model with the lowest decoder cross-entropy on the validation set (\cref{tab:mt}). Stack attention does not appear to improve translation quality over \LabelTransformerBaseline{}, although \LabelTransformerSuperposition{} performs best on the middle tier. Why does stack attention not help consistently? Perhaps natural language does not actually contain many deeply-nested hierarchies (especially on sentences limited to 150 characters), so adding a latent model of syntax does not provide a benefit over the baseline transformer, as suggested by \citet{yao-etal-2021-self}. However, \cref{sec:ptb-experiments} seems to indicate that this is not the case, at least for language modeling. Perhaps language \emph{is} hierarchical, but baseline transformers of this size are already able to learn syntax just as effectively as those with stack attention. Or, perhaps stack attention \emph{can} provide an advantage over baseline transformers, but the training procedure simply does not find parameter settings that do so.
+
+\begin{table}
+    \caption{Machine translation results for models trained on a subset of 100k examples from the Europarl v7 de-en corpus. Models are organized into three tiers by number of parameters. All results are the best of 5 runs, selected by decoder cross-entropy on the validation set. We report decoder perplexity on the validation set (newstest2016) and BLEU on the test set (newstest2017).}
+    \label{tab:mt}
+    \begin{center}
+        \small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Model & \dmodel & Params. & Val. Perp. $\downarrow$ & Test BLEU $\uparrow$ \\
+\midrule
+\LabelTransformerBaseline{} & 160 & 4,595,200 & 12.52 & \textbf{12.21} \\
+\LabelTransformerSuperposition{} (Ours) & 160 & 4,492,480 & \textbf{11.94} & 12.03 \\
+\LabelTransformerNondeterministic{} (Ours) & 160 & 4,465,610 & 13.00 & 11.86 \\
+\midrule
+\LabelTransformerBaseline{} & 240 & 9,580,800 & 12.54 & 12.11 \\
+\LabelTransformerSuperposition{} (Ours) & 240 & 9,349,920 & \textbf{11.53} & \textbf{12.81} \\
+\LabelTransformerNondeterministic{} (Ours) & 240 & 9,232,810 & 12.46 & 11.50 \\
+\midrule
+\LabelTransformerBaseline{} & 360 & 20,419,200 & \textbf{11.80} & \textbf{12.69} \\
+\LabelTransformerSuperposition{} (Ours) & 360 & 19,900,080 & 12.03 & 12.03 \\
+\LabelTransformerNondeterministic{} (Ours) & 360 & 19,551,610 & 12.54 & 11.74 \\
+\bottomrule
+\end{tabular}
+    \end{center}
+\end{table}
+
+
+
+\section{Conclusion}
+
+
+We showed that two types of differentiable stack, the superposition stack \citep{joulin-mikolov-2015-inferring} and a nondeterministic generalization of it \citep{dusell-chiang-2023-surprising}, can be incorporated into transformers as an attention mechanism. On CFL language modeling tasks, we showed that nondeterministic stack attention improves upon the standard transformer architecture, and even improves upon its RNN counterpart on the Hardest CFL, a challenging ambiguous language. We also showed that nondeterministic stack attention improves perplexity on a language modeling benchmark. We believe stack attention is an important development in unsupervised syntax-oriented transformers.
+
+\subsubsection*{Reproducibility statement}
+
+To facilitate reproducibility, we have publicly released all code we used to download and preprocess datasets, run our experiments, and generate the figures and tables in this paper. During both development and experimentation, we ran our code in containers to simplify the replication of our software environment. Our code includes the original Docker image definition we used, as well as the shell commands we used for each experiment, figure, and table. We have thoroughly documented our experimental settings in \cref{sec:cfl-experiments,sec:ptb-experiments,sec:mt-experiments,sec:cfl-experiment-details,sec:ptb-experiment-details,sec:mt-experiment-details}.
+
+Although we cannot distribute the Penn Treebank dataset used in \cref{sec:ptb-experiments}, we have included a script that generates the same preprocessed files used by \citet{dyer-etal-2016-recurrent} and \citet{sartran-etal-2022-transformer} from the raw Penn Treebank distribution files, so that anyone with a license for the Penn Treebank can reproduce them. To our knowledge, such a script was not available previously.
+
+We used publicly available datasets for the machine translation experiments in \cref{sec:mt-experiments}.
+
+\subsubsection*{Acknowledgements}
+
+We thank Laurent Sartran for providing us with the preprocessed Penn Treebank dataset used by \citet{dyer-etal-2016-recurrent} and \citet{sartran-etal-2022-transformer}, and for answering our questions. We thank Ken Sible for helpful discussion about the implementation of our machine translation system. We thank Darcey Riley, Aarohi Srivastava, Stephen Bothwell, and Ken Sible for their feedback on a draft of this paper. We thank Alex Warstadt and Chihiro Taguchi for pointing us to some of the cited work. We thank the Center for Research Computing at the University of Notre Dame for providing the computing infrastructure used for our experiments. Finally, we thank the anonymous reviewers for their invaluable discussion and feedback. This material is partially based upon work supported by the National Science Foundation under Grant No.~CCF-2019291.
+
+
+
+
+

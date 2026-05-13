@@ -1,0 +1,568 @@
+\title{LoRA-Pro: Are Low-Rank Adapters Properly Optimized?}
+
+\begin{abstract}
+
+Low-rank adaptation, also known as LoRA, has emerged as a prominent method for parameter-efficient fine-tuning of foundation models.
+Despite its computational efficiency, LoRA still yields inferior performance compared to full fine-tuning.
+In this paper, we first uncover a fundamental connection between the optimization processes of LoRA and full fine-tuning: using LoRA for optimization is mathematically equivalent to full fine-tuning using a low-rank gradient for parameter updates.
+And this low-rank gradient can be expressed in terms of the gradients of the two low-rank matrices in LoRA.
+Leveraging this insight, we introduce LoRA-Pro, a method that enhances LoRA's performance by strategically adjusting the gradients of these low-rank matrices.
+This adjustment allows the low-rank gradient to more accurately approximate the full fine-tuning gradient, thereby narrowing the performance gap between LoRA and full fine-tuning.
+Furthermore, we theoretically derive the optimal solutions for adjusting the gradients of the low-rank matrices, applying them during fine-tuning in LoRA-Pro.
+We conduct extensive experiments across natural language understanding, dialogue generation, mathematical reasoning, code generation, and image classification tasks, demonstrating that LoRA-Pro substantially improves LoRA's performance, effectively narrowing the gap with full fine-tuning.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Foundational models~\citep{radford2021learning, brown2020language, achiam2023gpt, kirillov2023segment, rombach2022high, touvron2023llama} have become the cornerstone of modern deep learning. 
+By undergoing pre-training on massive datasets, these models typically exhibit excellent generalization and versatility. 
+Remarkably, some foundation models even demonstrate emergent properties~\citep{hoffmann2022training, kaplan2020scaling}.
+Due to these advantages, foundational models have been widely applied to various downstream applications.
+
+Nevertheless, it still requires additional fine-tuning when applied to downstream tasks, where the huge parameter size of foundation models result in high cost in this stage.
+To address this issue, recent research has focused on parameter-efficient fine-tuning (PEFT) methods~\citep{hu2022lora, houlsby2019parameter, lester2021power}.
+PEFT methods reduce the fine-tuning cost by keeping the foundation models frozen and only fine-tuning small, additional lightweight adapters.
+With the majority of parameters frozen, PEFT enables faster fine-tuning and requires fewer resources.
+
+Low-rank adaptation~\citep{hu2022lora}, also known as LoRA, is one of the most famous PEFT methods, which has been widely adopted across various domains.
+Inspired by previous works~\citep{aghajanyan2021intrinsic, li2018measuring}, LoRA hypothesizes that the changes in weights during model adaptation exhibit a low-rank structure.
+To capture this, LoRA re-parameterizes these changes by expressing them as the product of two low-rank matrices: $W = W_0 + \Delta W \approx W_0 + sBA$, where $s$ is a scaling factor, and $A \in \mathbb{R}^{r \times n}$ and $B \in \mathbb{R}^{m \times r}$ are low-rank matrices with rank $r \ll \min(m, n)$.
+LoRA reduces the number of trainable parameters from $m\times n$ to $r\times (m + n)$, thereby decreasing the cost of fine-tuning.
+However, despite its efficiency, LoRA's fine-tuning performance often falls short compared to full fine-tuning~\citep{hu2022lora, liu2024dora, ding2023parameter}. 
+
+In this paper, we propose a novel PEFT method, LoRA-Pro, aimed at bridging the gap between LoRA and full fine-tuning.
+To begin with, we uncover a crucial connection between the optimization processes of LoRA and full fine-tuning: using LoRA for optimization is equivalent to full fine-tuning using a low-rank gradient for parameter updates.
+In LoRA, we discover that the change in weight $W$ is connected to the changes in matrices $A$ and $B$, expressed as $\dd W = \frac{\partial W}{\partial A}\dd A + \frac{\partial W}{\partial B}\dd B$.
+This relationship implies that updating matrices $A$ and $B$ with gradients $g^A$ and $g^B$ is equivalent to updating $W$ with a low-rank equivalent gradient $\tilde{g}$ in full fine-tuning, where:
+\begin{equation}
+    \tilde{g} = \frac{\partial W}{\partial A}g^A + \frac{\partial W}{\partial B}g^B
+    = sBg^A + sg^BA.
+\end{equation}
+Leveraging this insight, our goal is to bridge LoRA's gap with full fine-tuning by minimizing the discrepancy between the low-rank equivalent gradient $\tilde{g}$ and the full fine-tuning gradient $g$, by adjusting the gradients of matrices $A$ and $B$, i.e., $\min_{g^A,g^B}\|\tilde{g} - g\|^2_F$.
+Furthermore, we theoretically demonstrate that this optimization problem admits an optimal closed-form solution, as shown in Theorem~\ref{thm:close_form}.
+\textbf{Notably, the optimal gradients for the low-rank matrices do not explicitly depend on the full fine-tuning gradient.}
+
+Our main contributions are summarized as follows:
+\begin{itemize}
+    \item 
+    We first uncover a crucial connection between LoRA and full fine-tuning in the optimization process: optimizing with LoRA is mathematically equivalent to full fine-tuning using a low-rank gradient for updating.
+    \item 
+    We propose a novel PEFT method called LoRA-Pro.
+    Our approach minimizes the distance between the true gradient and the low-rank gradient by adjusting the gradients of matrices A and B.
+    We theoretically prove the optimal gradients and optimize using these gradients.
+    \item Extensive experiments across tasks in natural language understanding, dialogue generation, mathematical reasoning, code generation, and image classification demonstrate the effectiveness of our method.
+\end{itemize}
+
+
+
+\section{Method}
+
+\label{sec:method}
+In this section, we begin by revisiting LoRA~\citep{hu2022lora} in Section~\ref{subsec:pre}. 
+Following this, we conduct a comparison between LoRA and full fine-tuning, and point out their connection in the optimization process in Section~\ref{subsec:compare}. 
+Finally, in Section~\ref{subsec:lorapro}, we introduce LoRA-Pro as a solution to bridge the gap between LoRA and full fine-tuning.
+
+\subsection{Revisiting Low-Rank Adaptation}
+\label{subsec:pre}
+First of all, let's dive back into Low-Rank Adaptation (LoRA)~\citep{hu2022lora}.
+LoRA's core idea revolves around recognizing the low-rank structure of the change matrix $\Delta W$ in the standard fine-tuning process. 
+This insight allows LoRA~\citep{hu2022lora} to re-parameterize the change matrix into the product of two low-rank matrices, 
+\begin{equation}
+    W = W_0 + \Delta W \approx W_0 + sBA.
+\end{equation}
+Here, $W_0 \in \mathbb{R}^{m \times n}$ represents the pre-trained weight matrix, $B \in \mathbb{R}^{m \times r}$ and $A \in \mathbb{R}^{r \times n}$ are the low-rank matrices, and $s$ is a scaling factor. 
+For LoRA~\citep{hu2022lora}, $s = \frac{\alpha}{r}$, while for rsLoRA~\citep{kalajdzievski2023rank}, $s = \frac{\alpha}{\sqrt{r}}$. 
+Here, $\alpha$ is the hyper-parameter and $r\ll min(m, n)$ denotes the rank.
+Consequently, LoRA significantly reduces the number of fine-tuning parameters from $m \times n$ to $r \times (m + n)$, thereby decreasing the computational cost of fine-tuning. 
+
+\subsection{LoRA v.s. Full Fine-Tuning}
+\label{subsec:compare}
+Despite its widespread applications across various domains, LoRA's performance still falls short when compared to full fine-tuning.
+In this part, we compare LoRA and full fine-tuning in the optimization process.
+Then, we demonstrate that optimizing using LoRA is equivalent to using a low-rank gradient in full fine-tuning for updating the parameters.
+
+\noindent
+\textbf{Full fine-tuning.}
+In full fine-tuning, we utilize differential to analyze the relationship between changes in the loss and changes in the weights:
+\begin{equation}
+\label{eq:fft}
+    \dd L = \langle \frac{\partial L}{\partial W}, \dd W \rangle_F,
+\end{equation}
+where $\dd L$ and $\dd W$ denotes the changes of the parameter $W$ and the loss $L$, and $\langle\cdot, \cdot\rangle_F$ is the Frobenius inner product. 
+To minimize the loss function, we typically set $\dd W = -\frac{\partial L}{\partial W}\triangleq -g$ (omitting the learning rate for simplicity), which results in $\dd L = -\|\frac{\partial L}{\partial W}\|^2_F \le 0$.
+
+\noindent
+\textbf{Low-rank adaptation.}
+In LoRA optimization, given that $W = W_0 + sBA$, we compute the differential using the chain rule:
+\begin{equation}
+\label{eq:lora}
+\begin{aligned}
+    \dd L 
+    & = \langle \frac{\partial L}{\partial W}, \dd W \rangle_F \\
+    & = \langle \frac{\partial L}{\partial W}, \frac{\partial W}{\partial A}^T \dd A +  \frac{\partial W}{\partial B}^T \dd B\rangle_F \\
+    & = \langle \frac{\partial L}{\partial W}\frac{\partial W}{\partial A}, \dd A \rangle_F + \langle \frac{\partial L}{\partial W}\frac{\partial W}{\partial B}, \dd B \rangle_F \\
+    & = \langle \frac{\partial L}{\partial A}, \dd A \rangle_F + \langle \frac{\partial L}{\partial B}, \dd B \rangle_F.
+\end{aligned}
+\end{equation}
+Similarly, LoRA sets $\dd A = -\frac{\partial L}{\partial A}\triangleq -g^A_{lora}$ and $\dd B = -\frac{\partial L}{\partial B}\triangleq -g^B_{lora}$, and thus $\dd L = -\|\frac{\partial L}{\partial A}\|^2_F -\|\frac{\partial L}{\partial B}\|^2_F \le 0$.
+Moreover, employing the chain rule, we derive:
+\begin{equation}
+    g^A_{lora} = \frac{\partial L}{\partial W}\frac{\partial W}{\partial A} = sB^Tg, \qquad
+    g^B_{lora} = \frac{\partial L}{\partial W}\frac{\partial W}{\partial B} = sgA^T. 
+\end{equation}
+
+\noindent
+\textbf{Why LoRA performs worse than full fine-tuning.}
+With Equation~(\ref{eq:fft}) and~(\ref{eq:lora}), we observe a critical connection between full fine-tuning and LoRA in the optimization process.
+In LoRA, changes in matrices $A$ and $B$ are inherently linked to changes in matrix $W$, i.e., $\dd W= \frac{\partial W}{\partial A}^T \dd A +  \frac{\partial W}{\partial B}^T \dd B$.  
+This indicates that updating $A$ and $B$ with gradient $g^A$ and $g^B$ is equivalent to performing full fine-tuning on $W$ via the following update:
+\begin{equation}
+\label{eq:lrg}
+    \dd W = \frac{\partial W}{\partial A}^T \dd A +  \frac{\partial W}{\partial B}^T \dd B = -(sBg^A + sg^BA).
+\end{equation}
+
+Consequently, the performance gap between LoRA and full fine-tuning may stem from differences between $\tilde{g}$ and the full gradient $g$.
+The low-rank gradient $\tilde{g}$ may lose important information contained in $g$, leading to distinct optimization trajectories and ultimately causing LoRA to converge to a sub-optimal solution.
+
+\subsection{Low-Rank Adaptation with Equivalent Gradient}
+\label{subsec:lorapro}
+\begin{tcolorbox}[colback=gray!20,colframe=gray]
+\begin{definition}[Equivalent Gradient]
+\label{def:eg}
+In the context of LoRA optimization, we define the equivalent gradient as,
+\begin{equation*}
+    \tilde{g} \triangleq sBg^A + sg^BA,
+\end{equation*}
+where $s$ is the scaling factor, and $g^A$ and $g^B$ are gradients with respect to $A$ and $B$, respectively.
+\end{definition}
+\end{tcolorbox}
+In this part, we introduce our LoRA-Pro method, which bridges the performance gap by minimizing the discrepancy between the gradients.
+For convenience, we define the concept of equivalent gradient in Definition~\ref{def:eg}. 
+Equivalent gradient describes the virtual low-rank gradient of the matrix $W$ in LoRA optimization process, despite $W$ not being a trainable parameter.
+To narrow the performance gap, our goal is to carefully adjust $g^A$ and $g^B$ of matrices $A$ and $B$ to minimize the distance between the equivalent gradient $\tilde{g}$ and the full gradient $g$ in full fine-tuning. 
+Hence, our objective is:
+\begin{equation}
+\label{eq:obj}
+\begin{aligned}
+    & \min_{g^A, g^B}\|\tilde{g} - g\|_F^2 \\
+    \text{s.t.} \quad
+    & \tilde{g} = sBg^A + sg^BA, \\
+    & \dd L \le 0.
+\end{aligned}
+\end{equation}
+Here, $\|\cdot\|_F$ denotes the Frobenius norm, and $\dd L$ denotes the change in loss when updating with gradients $g^A$ and $g^B$. 
+The objective aims to minimize the distance of the gradients while ensuring a decrease in loss using the solutions for $g^A$ and $g^B$.
+\begin{figure}[tbp]
+    \centering
+    \includegraphics[width=1.0\textwidth]{images/illustrate_v2.pdf}
+    \caption{
+    \textbf{Illustration of LoRA-Pro.}
+    LoRA~\citep{hu2022lora} reduces the trainable parameter by re-parameterizing the weight into the product of two low-rank matrices, i.e., $W = W_0 + sBA$.
+    We have discovered a connection between the optimization processes of full fine-tuning and LoRA.
+    Updating matrices $B$ and $A$ using gradients $g^B$ and $g^A$ is equivalent to updating weight $W$ using a virtual low-rank gradient $\tilde{g} = sBg^A + sg^BA$.
+    Therefore, in LoRA-Pro, we aim to adjust gradients $g^B$ and $g^A$ to minimize the distance between the equivalent gradient $\tilde{g}$ and the full fine-tuning gradient $g$, thereby reducing their performance gap.
+
+    }
+    \label{fig:illustration}
+\end{figure}
+
+\noindent
+\textbf{Closed-form solution.}
+Fortunately, we prove that the optimization problem~(\ref{eq:obj}) admits an optimal closed-form solution, as stated in Theorem~\ref{thm:close_form}.
+Additionally, an interesting observation arises from Theorem~\ref{thm:close_form}: while the full gradient $g$ serves as the ground truth in the objective, it does not necessarily explicit appear in the closed-form solution.
+Instead, the closed-form solution for the optimal gradients can be expressed in terms of the gradients of LoRA.
+This allows for an efficient gradient adjustment process, where we backpropagate using the standard LoRA and adjust the gradients of matrices $A$ and $B$ based on the closed-form solution presented in Theorem~\ref{thm:close_form}.
+}
+\begin{tcolorbox}[colback=gray!20,colframe=gray]
+\begin{theorem}\label{thm:close_form}
+Assume matrices $B\in\mathbb{R}^{m\times r}, A\in\mathbb{R}^{r\times n}$ are both full rank. 
+For the objective $\min_{g^A, g^B} \|\tilde{g} - g\|^2_F$, the optimal solutions are given by:
+\begin{align}
+    g^A &= \frac{1}{s}(B^TB)^{-1}B^Tg + XA = \frac{1}{s^2}(B^TB)^{-1}g^A_{lora} + XA, \\ 
+    g^B &= \frac{1}{s}[I - B(B^TB)^{-1}B^T]gA^T(AA^T)^{-1} - BX \\
+        &= \frac{1}{s^2}[I - B(B^TB)^{-1}B^T]g^B_{lora}(AA^T)^{-1} - BX. 
+\end{align}
+Here, $X\in\mathbb{R}^{r\times r}$ represents an arbitrary matrix.
+\end{theorem}
+\begin{proof}
+
+\end{proof}
+\end{tcolorbox}
+
+\textbf{Loss minimization.}
+While Theorem~\ref{thm:close_form} offers a closed-form solution to the optimization problem $\min_{g^A, g^B} \|\tilde{g} - g\|^2_F$, it's crucial to understand that this solution does not inherently guarantee a decrease in loss when updating the matrices $A$ and $B$.
+To address this concern, we introduce Theorem~\ref{thm:ge0}.
+In this theorem, we prove that the change in loss $\dd L$ can be expressed as a negative sum of two Frobenius norms, which leads to $\dd L < 0$.
+This result ensures that the optimization process consistently drives towards a lower loss.
+
+\noindent
+\textbf{Selection of matrix X.}
+Although the equivalent gradient itself is not directly related to the matrix $X$, the presence of $X$ plays a significant role in the updates of matrices $A$ and $B$.
+We select an appropriate $X$ such that $g^A$ and $g^B$ remain close to $g^A_{lora}$ and $g^B_{lora}$ respectively.
+To achieve this, we minimize their Frobenius norm, as demonstrated in Equation~(\ref{eq:select_x}). 
+In practical terms, $B^TB$ and $-AA^T$ do not share common eigenvalues. 
+Therefore, according to Theorem~\ref{thm:x_select}, we can determine a unique optimal $X$ for updating matrices $A$ and $B$.
+\begin{tcolorbox}[colback=gray!20,colframe=gray]
+\begin{theorem}
+\label{thm:ge0}
+When updating matrices $A$ and $B$ using the closed-form solution from Theorem~\ref{thm:close_form}, we proceed as follows:
+\begin{gather}
+    A\leftarrow A - \gamma g^A \\
+    B\leftarrow B - \gamma g^B, 
+\end{gather}
+where $\gamma \ge 0$ denotes the learning rate.
+Our method ensures a decrease in the loss, akin to the standard gradient descent algorithm, expressed by:
+\begin{equation}
+    \dd L = -\gamma \{\langle g^A_{lora}, \frac{1}{s^2}(B^TB)^{-1}g^A_{lora} \rangle_F + \langle g^B_{lora}, \frac{1}{s^2}[I - B(B^TB)^{-1}B^T]g^B_{lora}(AA^T)^{-1} \rangle_F\} \le 0.
+\end{equation}
+\end{theorem}
+\begin{proof}
+
+\end{proof}
+\end{tcolorbox}
+\begin{tcolorbox}[colback=gray!20,colframe=gray]
+\begin{theorem}
+\label{thm:x_select}
+Consider the optimization problem,
+\begin{equation}
+\label{eq:select_x}
+    \min_X \|g^A - g^A_{lora}\|_F^2 + \|g^B - g^B_{lora}\|_F^2,
+\end{equation}
+where $g^A$ and $g^B$ are the optimal solutions as stated in Theorem~\ref{thm:close_form}.
+The optimal $X$ can be determined by solving the Sylvester equation:
+\begin{equation}
+    B^TBX + XAA^T = -\frac{1}{s^2}(B^TB)^{-1}g^A_{lora}A^T,
+\end{equation}
+which has a unique solution $X$ provided that $B^TB$ and $-AA^T$ do not have any shared eigenvalues.
+\end{theorem}
+\begin{proof}
+
+\end{proof}
+\end{tcolorbox}
+
+
+\section{Experimental Results}
+
+In this section, we present extensive experiments to evaluate the effectiveness of LoRA-Pro across various tasks and models.
+First, we assess natural language understanding capabilities using the GLUE benchmark by fine-tuning the T5-base~\citep{raffel2020exploring} model in Section~\ref{subsec:nlu}.
+Next, we evaluate its capabilities in dialogue generation, mathematical reasoning, and code generation using the Llama-2-7B model~\citep{touvron2023llama}, covered in Section~\ref{subsec:instruction-tuning}.
+We then examine LoRA-Pro's effectiveness on image classification tasks using the CLIP-ViT-B/16~\citep{radford2021learning} model in Section~\ref{subsec:image_classification}.
+Finally, we conduct an ablation study of LoRA-Pro in Section~\ref{subsec:ablation}.
+
+\textbf{Training details.}
+To ensure a fair comparison, we align our experimental setup with that of LoRA-GA~\citep{wang2024loraga}.
+By default, we fine-tune the model using the AdamW optimizer \citep{loshchilov2019decoupled} with hyper-parameters $\beta_1=0.9$, $\beta_2=0.999$, and weight decay set to 0.
+We implement a cosine learning rate schedule with a warmup ratio of 0.03.
+LoRA is applied to all linear modules, excluding the embedding layer, normalization layer, and classification head. 
+By default, we set the rank $r=8$ and $\alpha=16$.
+
+For natural language understanding tasks, we fine-tune T5-base~\citep{raffel2020exploring} model with learning rate 1e-4.
+The sequence length is set to 128, and the training batch size is 32.  
+For dialogue generation, mathematical reasoning and code generation tasks, we fine-tune the Llama-2-7B~\citep{touvron2023llama} model with a learning rate of 2e-5. 
+We set the sequence length to 1024 and the macro batch size to 32.
+For image classification tasks, we fine-tune the CLIP-ViT-B/16~\citep{radford2021learning} model with learning rate 1e-4. 
+The classifier is obtained using prompts such as ``a photo of a \{class\}" and kept frozen during fine-tuning.
+And the training batch size is set to 64.
+
+All experiments are conducted on NVIDIA RTX A6000 GPUs.
+To obtain a reliable estimate of model performance, we perform three runs with different random seeds and report the average and standard deviation of the results.
+
+\subsection{Results on Natural Language Understanding Tasks}
+\label{subsec:nlu}
+\setlength{\tabcolsep}{6pt}
+\begin{table}[!htbp]
+  \centering
+  \caption{
+  Results of fine-tuning T5-base using full fine-tuning and various LoRA variants on a subset of the GLUE datasets.
+  The LoRA rank is set to 8 by default.
+  \textbf{Bold} and \underline{underline} indicate the highest and second-highest scores, respectively.
+  }
+    \begin{tabular}{cc|lllll|c}
+    \toprule
+    \multicolumn{2}{l|}{Method} & \multicolumn{1}{c}{\textbf{MNLI}} & \multicolumn{1}{c}{\textbf{SST2}} & \multicolumn{1}{c}{\textbf{CoLA}} & \multicolumn{1}{c}{\textbf{QNLI}} & \multicolumn{1}{c|}{\textbf{MRPC}} & \multicolumn{1}{c}{\textbf{Average}} \\
+    \midrule
+    \multicolumn{2}{l|}{Full FT} & \textbf{86.33±0.00} & \textbf{94.75±0.21} & \underline{80.70±0.24} & \underline{93.19±0.22} & 84.56±0.73 & \underline{87.91}  \\
+\multicolumn{2}{l|}{LoRA} & 85.30±0.04 & 94.04±0.11 & 69.35±0.05 & 92.96±0.09 & 68.38±0.01 & 82.08  \\
+    \midrule
+    \multicolumn{2}{l|}{PiSSA} & 85.75±0.07 & 94.07±0.06 & 74.27±0.39 & 93.15±0.14 & 76.31±0.51 & 84.71  \\
+    \multicolumn{2}{l|}{rsLoRA} & 85.73±0.10 & \underline{94.19±0.23} & 72.32±1.12 & 93.12±0.09 & 52.86±2.27 & 79.64  \\
+    \multicolumn{2}{l|}{LoRA+} & 85.81±0.09 & 93.85±0.24 & 77.53±0.20 & 93.14±0.03 & 74.43±1.39 & 84.95  \\
+    \multicolumn{2}{l|}{LoRA-GA} & 85.70±0.09 & 94.11±0.18 & 80.57±0.20 & 93.18±0.06 & \underline{85.29±0.24} & 87.77  \\
+    \midrule
+    \multicolumn{2}{l|}{DoRA} & 85.67±0.09 & 94.04±0.53 & 72.04±0.94 & 93.04±0.06 & 68.08±0.51 & 82.57  \\
+    \multicolumn{2}{l|}{AdaLoRA} & 85.45±0.11 & 93.69±0.20 & 69.16±0.24 & 91.66±0.05 & 68.14±0.28 & 81.62  \\
+    \midrule
+    \rowcolor[RGB]{204, 230, 230}
+    \multicolumn{2}{c|}{LoRA-Pro} & \underline{86.03±0.19} & \underline{94.19±0.13} & \textbf{81.94±0.24} & \textbf{93.42±0.05} & \textbf{86.60±0.14} & \textbf{88.44}  \\
+    \bottomrule
+    \end{tabular}%
+  \label{tab:nlu}%
+\end{table}%
+
+In this section, we evaluate our LoRA-Pro across various natural language understanding datasets.
+To provide a comprehensive comparison, we include several baseline methods: 1) full fine-tuning and the standard LoRA~\citep{hu2022lora}. 2) LoRA variants maintaining the original structure, such as rsLoRA~\citep{kalajdzievski2023rank}, LoRA+~\citep{hayou2024lora+}, PiSSA~\citep{meng2024pissa}, and LoRA-GA~\citep{wang2024loraga}, 3) LoRA variants with modified structures, including DoRA~\citep{liu2024dora} and AdaLoRA~\citep{zhang2023adaptive}.
+
+The results are presented in Table~\ref{tab:nlu}.
+We fine-tune the T5-base model~\citep{raffel2020exploring} with the baseline methods on a subset of GLUE datasets: MNLI, SST2, CoLA, QNLI, and MRPC.
+As shown in Table~\ref{tab:nlu}, we observe that LoRA-Pro achieves the highest scores on 3 out of 5 datasets and the highest average score across all 5 datasets, and achieves the highest accuracy on average over the 5 datasets.
+Specifically, on average over 5 datasets, LoRA-Pro surpasses standard LoRA~\citep{hu2022lora} with a margin of 6.36.
+And LoRA-Pro even achieve higher than full fine-tuning. 
+This superior performance may be attributed to overfitting in full fine-tuning, where optimizing all model parameters can lead to overfitting on the training data, thus reducing the model's generalization to the test set. 
+This effect is particularly pronounced on small datasets, such as MRPC, which contains only 3.7k training data.
+These results validate the effectiveness of our methods.
+
+\setlength{\tabcolsep}{6pt}
+\begin{table}[!htbp]
+  \centering
+  \caption{
+  Fine-tuning results of Llama-2-7B model. 
+  We fine-tune the Llama-2-7B model using full fine-tuning and LoRA variants on subsets of the WizardLM~\citep{xu2024wizardlm}, MetaMathQA~\citep{yu2024metamath}, and CodeFeedback~\citep{zheng2024opencodeinterpreter} datasets, respectively.
+  And we assess dialogue generation, mathematical reasoning, and coding abilities on MT-Bench, GSM8K, and HumanEval datasets.
+  \textbf{Bold} and \underline{underline} indicate the highest and second-highest scores, respectively.
+  }
+  \resizebox{0.75\textwidth}{!}{
+    \begin{tabular}{lllll}
+    \toprule
+    \multicolumn{2}{l|}{} & \multicolumn{1}{c}{MT-Bench} & \multicolumn{1}{c}{GSM8K} & \multicolumn{1}{c}{HumanEval} \\
+    \midrule
+    \multicolumn{2}{l|}{Full FT} & \multicolumn{1}{l}{5.30±0.11} & \textbf{59.36±0.85} & \textbf{35.31±2.13} \\
+    \multicolumn{2}{l|}{LoRA} & \multicolumn{1}{l}{5.61±0.10} & 42.08±0.04 & 14.76±0.17 \\
+    \midrule
+    \multicolumn{2}{l|}{PiSSA} & \multicolumn{1}{l}{5.30±0.02} & 44.54±0.27 & 16.02±0.78 \\
+    \multicolumn{2}{l|}{rsLoRA} & \multicolumn{1}{l}{5.25±0.03} & 45.62±0.10 & 16.01±0.79 \\
+    \multicolumn{2}{l|}{LoRA+} & \multicolumn{1}{l}{5.71±0.08} & 52.11±0.62 & 18.17±0.52 \\
+    \midrule
+    \multicolumn{2}{l|}{DoRA} & \multicolumn{1}{l}{\textbf{5.97±0.02}} & 53.07±0.75 & 19.75±0.41 \\
+    \multicolumn{2}{l|}{AdaLoRA} & \multicolumn{1}{l}{5.57±0.05} & 50.72±1.39 & 17.80±0.44 \\
+    \midrule
+    \multicolumn{2}{l|}{LoRA-GA} & \multicolumn{1}{l}{\underline{5.95±0.16}} & 53.60±0.30 & 19.81±1.46 \\
+    \multicolumn{2}{l|}{LoRA-GA (rank=32)} & \multicolumn{1}{l}{5.79±0.09} & 55.12±0.30 & 20.18±0.19 \\
+    \multicolumn{2}{l|}{LoRA-GA (rank=128)} & \multicolumn{1}{l}{6.13±0.07} & 55.07±0.18 & 23.05±0.37 \\
+    \midrule
+    \rowcolor[RGB]{204, 230, 230}
+    \multicolumn{2}{l|}{LoRA-Pro} & 5.86±0.06 & \underline{54.23±0.79} & \underline{22.76±0.35} \\
+    \rowcolor[RGB]{204, 230, 230}
+    \multicolumn{2}{l|}{LoRA-Pro (rank=32)} & 6.01±0.05 & 55.14±1.73 & 28.05±0.00 \\
+    \rowcolor[RGB]{204, 230, 230}
+    \multicolumn{2}{l|}{LoRA-Pro (rank=128)} &    5.68±0.14   & 56.48±0.23 & 34.55±2.46 \\
+    \bottomrule
+    \end{tabular}
+    }
+  \label{tab:nlg}
+\end{table}%
+
+\subsection{Results on Large Language Models}
+\label{subsec:instruction-tuning}
+In this section, we evaluate the performance of LoRA-Pro on large language models, focusing on dialogue generation, mathematical reasoning, and code generation capabilities. 
+Our experimental setup follows the configuration used in LoRA-GA~\citep{wang2024loraga}.
+\begin{itemize}
+    \item For the dialogue generation task, we fine-tune the Llama-2-7B~\citep{touvron2023llama} model on a 52k subset of the WizardLM dataset~\citep{xu2024wizardlm} and evaluate it using the MT-Bench dataset~\citep{zheng2024judging}. 
+    GPT-4 is used to assess the quality of the model’s responses, and we report the first-turn score as the metric.
+    \item For the math task, we fine-tune the Llama-2-7B~\citep{touvron2023llama} model on a 100k sample from the MetaMathQA dataset~\citep{yu2024metamath}. 
+    The model is then evaluated on the GSM8K test set~\citep{cobbe2021training}, and we report the accuracy as the metric.
+    \item For the coding task, we fine-tune the Llama-2-7B~\citep{touvron2023llama} model on a 100k subset of the CodeFeedback dataset~\citep{zheng2024opencodeinterpreter} and test it on the HumanEval dataset~\citep{chen2021evaluating}, reporting the PASS@1 metric.
+\end{itemize}
+
+We compare LoRA-Pro with several baselines, including full fine-tuning, LoRA~\citep{hu2022lora}, PiSSA~\citep{meng2024pissa}, rsLoRA~\citep{kalajdzievski2023rank}, LoRA+\citep{hayou2024lora+}, DoRA\citep{liu2024dora}, AdaLoRA~\citep{zhang2023adaptive}, and LoRA-GA~\citep{wang2024loraga}. 
+By default, we set the rank to 8 and $\alpha=16$. 
+Following LoRA-GA~\citep{wang2024loraga}, we initialize the scaling factor as in rsLoRA~\citep{kalajdzievski2023rank}, i.e., $s = \frac{\alpha}{\sqrt{r}}$.
+
+Table~\ref{tab:nlg} presents our experimental results, which demonstrate LoRA-Pro's superior performance.
+With a rank of 8, LoRA-Pro achieves notable improvements over the original LoRA: 0.25 on MT-Bench, 11.98 on GSM8K, and 8.00 on HumanEval. 
+When compared to the second-best PEFT method, LoRA-GA, LoRA-Pro shows consistent gains: 0.46 on GSM8K and a substantial 2.95 on HumanEval. 
+These results validate the effectiveness of our LoRA-Pro method.
+
+Interestingly, we observe that full fine-tuning unexpectedly underperforms on MT-Bench. 
+We attribute this to potential discrepancies between the WizardLM training data distribution and the MT-Bench evaluation set.
+The extensive learning capacity of full fine-tuning may lead to overfitting on the training distribution, compromising generalization to MT-Bench.
+Since LoRA-Pro aligns more closely with full fine-tuning during optimization, its relatively poor performance on MT-Bench may also be attributed to overfitting.
+
+To further explore the scalability of our method, we increase the rank in LoRA-Pro from 8 to 128.
+Our observations reveal a clear trend: as the rank increases, the performance gap between LoRA-Pro and full fine-tuning narrows rapidly.
+Notably, LoRA-Pro consistently outperforms LoRA-GA at the same ranks on both GSM8K and HumanEval datasets.
+At rank 32, LoRA-Pro surpasses LoRA-GA by 0.02 on GSM8K and 7.87 on HumanEval. 
+This performance disparity becomes even more pronounced at rank 128, where LoRA-Pro outperforms LoRA-GA by 1.41 on GSM8K and 11.5 on HumanEval.
+These results demonstrate the superior scalability and effectiveness of LoRA-Pro across various rank settings.
+\subsection{Results on Image Classification Tasks}
+\label{subsec:image_classification}
+\setlength{\tabcolsep}{6pt}
+\begin{table}[!htbp]
+  \centering
+  \caption{
+  Fine-tuning results of CLIP-ViT-B/16 on image classification tasks.
+  We fine-tune CLIP-ViT-B/16 using full fine-tuning and LoRA variants across StanfordCars, DTD, EuroSAT, GTSRB, RESISC45, SUN397, and SVHN datasets.
+  \textbf{Bold} indicates the highest results, while \underline{underline} represents the second-highest results.
+  }
+  \resizebox{1.0\textwidth}{!}{
+    \begin{tabular}{ll|ccccccc|c}
+    \toprule
+    \multicolumn{2}{c|}{Method} & \textbf{Cars} & \textbf{DTD	} & \textbf{EuroSAT	} & \textbf{GTSRB} & \textbf{RESISC45} & \textbf{SUN397} & \textbf{SVHN} & \textbf{Average} \\
+    \midrule
+    \multicolumn{2}{l|}{Zero-shot} & 63.75  & 44.39  & 42.22  & 35.22  & 56.46  & 62.56  & 15.53  & 45.73  \\
+    \multicolumn{2}{l|}{Full FT} & \underline{84.23±0.06} & 77.44±0.19 & \underline{98.09±0.03} & 94.31±0.28 & 93.95±0.0 & 75.35±0.10 & \underline{93.04±0.18} & \underline{88.06}  \\
+    \midrule
+    \multicolumn{2}{l|}{LoRA} & 72.81±0.13 & 73.92±0.38 & 96.93±0.07 & 92.40±0.10 & 90.03±0.14 & 70.12±0.18 & 88.02±0.07 & 83.46  \\
+    \multicolumn{2}{l|}{rsLoRA} & 82.38±0.20 & \underline{78.03±0.76} & 98.06±0.08 & \underline{95.04±0.11} & \underline{93.96±0.18} & \underline{75.38±0.24} & 92.74±0.18 & 87.94  \\
+    \multicolumn{2}{l|}{LoRA+} & 72.87±0.18 & 74.07±0.45 & 97.01±0.02 & 92.42±0.18 & 89.96±0.11 & 70.17±0.15 & 88.08±0.05 & 83.51  \\
+    \multicolumn{2}{l|}{DoRA} & 73.72±0.06 & 73.72±0.33 & 96.95±0.01 & 92.38±0.17 & 90.03±0.08 & 70.20±0.19 & 88.23±0.05 & 83.48  \\
+    \midrule
+    \rowcolor[RGB]{204, 230, 230}
+    \multicolumn{2}{l|}{LoRA-Pro} & \textbf{85.87±0.08} & \textbf{78.64±0.25} & \textbf{98.46±0.03} & \textbf{95.66±0.05} & \textbf{94.75±0.21} & \textbf{76.42±0.14} & \textbf{94.63±0.20} & \textbf{89.20}  \\
+    \bottomrule
+    \end{tabular}
+  }
+  \label{tab:clip}
+\end{table}
+In this section, we assess the performance of LoRA-Pro on image classification tasks.
+To provide a comprehensive comparison, we compare it with several baselines: zero-shot CLIP~\citep{radford2021learning}, full fine-tuning, vanilla LoRA~\citep{hu2022lora}, rsLoRA~\citep{kalajdzievski2023rank}, LoRA+~\citep{hayou2024lora+}, and DoRA~\citep{liu2024dora}.
+
+We fine-tune the CLIP-ViT-B/16~\citep{radford2021learning} model on various datasets, including StanfordCars~\citep{krause20133d}, DTD~\citep{cimpoi2014describing}, EuroSAT~\citep{helber2019eurosat}, GTSRB~\citep{houben2013detection}, RESISC45~\citep{cheng2017remote}, SUN397~\citep{xiao2010sun}, and SVHN~\citep{netzer2011reading}.
+Accuracy is used as the evaluation metric.
+During fine-tuning, only the visual backbone of the CLIP-ViT-B/16 model is updated, while the classifier, derived from prompts such as ``a photo of a \{class\}", remains frozen.
+
+The results are presented on Table~\ref{tab:clip}.
+LoRA-Pro achieves the highest accuracy across all seven datasets.
+Specifically, on average, LoRA-Pro surpasses zero-shot classification by 43.47, outperforms LoRA~\citep{hu2022lora} by 5.74, and exceeds rsLoRA~\citep{kalajdzievski2023rank} by 1.26.
+These results validate the effectiveness of our LoRA-Pro method.
+
+\subsection{Ablation Study}
+\label{subsec:ablation}
+\setlength{\tabcolsep}{6pt}
+\begin{table}[htbp]
+  \centering
+  \caption{Ablation study on the selection of different X in LoRA-Pro.}
+    \begin{tabular}{ll|ccc}
+    \toprule
+    \multicolumn{2}{c|}{choice of X} & MT-Bench & GSM8K & HumanEval \\
+    \midrule
+    \multicolumn{2}{l|}{Zero} & 5.76±0.02 & 53.83±1.16 & 22.96±1.96 \\
+    \multicolumn{2}{l|}{Sylvester (Thm.~\ref{thm:x_select})} & 5.86±0.06 & 54.23±0.79 & 22.76±0.35 \\
+    \multicolumn{2}{l|}{Symmetry (Eq.~(\ref{eq:symmetry}))} & 5.63±0.12 & 54.46±0.88 & 22.56±1.06 \\
+    \bottomrule
+    \end{tabular}%
+  \label{tab:select_x}%
+\end{table}%
+\textbf{Ablation study on the selection of X.}
+Based on Theorem~\ref{thm:close_form}, in LoRA-Pro, the matrix $X$ can be chosen arbitrarily. 
+While its selection does not affect the equivalent gradient, it does influence the updates of matrices $A$ and $B$ in LoRA. 
+Here, we conduct an ablation study on the choice of $X$.
+
+We compare three possible values for $X$.
+1) Zero solution: In this simplest case, we set $X = \mathbf{0} $.
+2) Sylvester solution: Here, $X$ is obtained by solving the Sylvester equation, as described in Theorem~\ref{thm:x_select}.
+3) Symmetry solution: This approach aims to balance the contributions of both terms in the equation $\tilde{g}=sg^BA + sBg^A$, enforcing the condition $g^BA = Bg^A$.
+For the symmetry solution, solving for $X$ yields:
+\begin{equation}
+\label{eq:symmetry}
+    X = -\frac{1}{2s}B(B^TB)^{-1}B^TgA(A^TA)^{-1}A = -\frac{1}{2s^2}B(B^TB)^{-1}B^Tg^B_{lora}(A^TA)^{-1}A.
+\end{equation}
+The comparison of the selection of $X$ is presented in Table~\ref{tab:select_x}.
+As shown in the table, the results obtained from different choices of $X$ are similar, and, except on MT-Bench, they outperform the other PEFT baselines listed in Table~\ref{tab:nlg}.
+However, considering the high variance in the results for both the zero solution and the symmetry solution, we ultimately select the sylvester solution as the default choice for the matrix $X$.
+
+\begin{minipage}{0.5\textwidth}
+\textbf{Ablation study on the full-rank assumption.} 
+In Theorem~\ref{thm:close_form}, we assume that the matrices $A\in\mathbb{R}^{r\times n}$ and $B\in\mathbb{R}^{m\times r}$ are full-rank during training.
+Our goal here is to verify whether this assumption holds in practice.
+We track the rank changes of all $A$ and $B$ matrices during the fine-tuning process of Llama-2-7B on the MetaMathQA~\citep{yu2024metamath} dataset.
+
+In Figure~\ref{fig:rank_vis}, we illustrate the rank changes of matrices $A$ and $B$ from the $q$ projection of layer 9 during the training process, with rank set to 8 and 32, resipectively.
+We observed that, although $A$ and $B$ do not initially satisfy the full rank assumption (with matrix $B$ initialized as a zero matrix), both matrices achieve full rank after the first update step.
+The rank behavior of $A$ and $B$ in other layers also exhibits similar results.
+\end{minipage}
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{images/rank_assumption.pdf}
+    \captionof{figure}{Visualization of matrix ranks of A and B during training, with ranks set to $8$ and $32$, respectively.
+    }
+    \label{fig:rank_vis}
+\end{minipage}
+This observation provides practical evidence that the assumption in Theorem~\ref{thm:close_form} is reasonable and supports the validity of the proposed solutions.
+
+\setlength{\tabcolsep}{6pt}
+\begin{table}[!tbp]
+  \centering
+  \caption{
+  We compare LoRA, LoRA-Pro, and Full Fine-Tuning in terms of memory cost, training time, and performance on the MT-Bench, GSM8K, and HumanEval datasets.
+  Memory cost is measured using a single A6000 GPU with a batch size of 1.
+  Training time is recorded on the WizardLM dataset using 8 A100 GPUs with DeepSpeed ZeRO-2 stage optimization.
+  }
+  \resizebox{0.85\textwidth}{!}{
+    \begin{tabular}{l|c|c|ccc}
+    \toprule
+          & \multicolumn{1}{c|}{Memory Cost} & \multicolumn{1}{c|}{Training Time} & \multicolumn{1}{c}{MT-Bench} & \multicolumn{1}{c}{GSM8K} & \multicolumn{1}{c}{HumanEval} \\
+    \midrule
+    Full FT   &   $>$ 48 GB    &  2h 33min     & \multicolumn{1}{c}{5.30±0.11} & \multicolumn{1}{c}{59.36±0.85} & \multicolumn{1}{c}{35.31±2.13} \\
+    LoRA  &   22.26 GB
+    &    1h 22min   & \multicolumn{1}{c}{5.61±0.10} & \multicolumn{1}{c}{42.08±0.04} & \multicolumn{1}{c}{14.76±0.17} \\
+    \rowcolor[RGB]{204, 230, 230}
+    LoRA-Pro &   23.05 GB
+    &    1h 23min   &   5.86±0.06    &    54.23±0.79   & 22.76±0.35 \\
+    \bottomrule
+    \end{tabular}%
+    }
+  \label{tab:add_cost}%
+\end{table}%
+
+\textbf{Memory footprint and training time.}
+Here, we evaluate the additional costs associated with using LoRA-Pro compared to LoRA.
+We primarily focus on comparing the differences in memory cost and training time between LoRA-Pro, LoRA, and full fine-tuning.
+The results of the experiments are presented in Table~\ref{tab:add_cost}.
+We measure memory cost using a single A6000 GPU with a batch size of 1. 
+Training time is recorded on the WizardLM dataset using 8 A100 GPUs with DeepSpeed~\citep{rasley2020deepspeed} ZeRO-2 stage optimization.
+
+The results are shown in Table~\ref{tab:add_cost}.
+From the table, we observe the following: 1) LoRA-Pro requires approximately 0.8GB more GPU memory compared to LoRA.
+This difference likely stems from the need to compute $B^TB$, $AA^T$, and their inverses during the calculation of the optimal gradients.
+2) Surprisingly, the training time for LoRA-Pro is nearly identical to that of LoRA, with only about a 1\% increase in additional training time.
+We attribute this to the fact that the matrices $A$ and $B$ in LoRA are low-rank. 
+Consequently, the extra computations required by LoRA-Pro (such as matrix inversion and the calculation of $X$) are performed on small $r \times r$ matrices, resulting in negligible computational overhead.
+
+Considering that LoRA-Pro uses less memory and trains faster than full fine-tuning, while also providing performance improvements over LoRA, we believe that the additional memory and training time costs are acceptable.
+
+
+
+\section{Related Work}
+
+\noindent
+\textbf{Parameter-Efficient Fine-Tuning.}
+Given the huge size of foundation models, recent research has focused on developing parameter-efficient fine-tuning methods~\citep{hu2022lora, liu2024dora, ding2023parameter, houlsby2019parameter, liu2023pre, lester2021power}. 
+These methods aim to reduce the cost of fine-tuning by adjusting only a small portion of the model's parameters.
+Generally, these methods fall into two main categories.
+The first category is adapter tuning~\citep{houlsby2019parameter, sung2022vl,he2021effectiveness, zhang2024llama, bapna2019simple, hu2022lora}, which involves inserting small neural network modules, called adapters, into specific layers of the model.
+During fine-tuning, we keep the model frozen and only fine-tune the lightweight adapter modules, significantly reducing the memory footprint for fine-tuning.
+The second category is prompt tuning~\citep{lester2021power, zhou2022learning, li2021prefix, liu2022p}. 
+Prompt tuning adapts the models to specific tasks by adding specially designed prompts or learnable tokens to the input data, rather than directly modifying the internal parameters of foundation models.
+In this paper, we focus on LoRA~\citep{hu2022lora}, a prominent method within the realm of adapter tuning.
+
+\noindent
+\textbf{Low-Rank Adaptation.}
+Low-rank adaptation, initially referred to as LoRA~\citep{hu2022lora}, has evolved into a broad category encompassing parameter-efficient fine-tuning methods based on low-rank approximations~\citep{hu2022lora, liu2024dora, hayou2024lora+, kalajdzievski2023rank, zhang2023adaptive, kopiczko2024vera, hyeon2022fedpara, zhang2024riemannian, wang2024loraga, zhao2024galore, wang2024loraga}.
+LoRA~\citep{hu2022lora} assumes that the changes in the weights of pre-trained models exhibit a low-rank structure. 
+Consequently, it re-parameterizes these changes as the product of low-rank matrices, thereby reducing the cost during fine-tuning.
+
+Several variants of LoRA have been proposed to address different aspects of this approach. 
+For example, DoRA~\citep{liu2024dora} improves LoRA~\citep{hu2022lora} by incorporating a learnable magnitude vector to re-scale the normalized product of low-rank matrices.
+Another variant, rsLoRA~\citep{kalajdzievski2023rank}, introduces a new scaling factor to stabilize training in high-rank scenarios.
+LoRA+\citep{hayou2024lora+} improves upon LoRA by applying different learning rates to the two low-rank matrices.
+Additionally, Galore~\citep{zhao2024galore} employs SVD to project the gradients and its first and second momentum of full training into a low-rank space, thereby reducing the memory footprint during pre-training and fine-tuning.
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce LoRA-Pro, a novel approach designed to bridge the performance gap between LoRA and full fine-tuning.
+We have discovered that using LoRA for fine-tuning is equivalent to fine-tuning the original weights with a virtual equivalent low-rank gradient.
+Based on this insight, we propose adjusting the gradients of matrices $A$ and $B$ to make the equivalent gradient match the true full fine-tuning gradient, thereby reducing their performance gap.
+Fortunately, we theoretically prove that there exists an optimal closed-form solution for updating matrices $A$ and $B$, which are applied during fine-tuning in LoRA-Pro.
+To validate the effectiveness of our method, we conduct extensive experiments across various domains, including natural language understanding, dialogue generation, mathematical reasoning, code generation, and image classification tasks.
+The results demonstrate that LoRA-Pro significantly improves LoRA performance and narrows the performance gap with full fine-tuning.
+
+
+
+
+
+

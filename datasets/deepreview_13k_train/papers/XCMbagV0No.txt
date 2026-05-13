@@ -1,0 +1,230 @@
+\title{A Language-Agent Approach to Formal Theorem-Proving}
+
+\begin{abstract}
+Language agents, which use a large language model (LLM) capable of in-context learning to interact with an external environment, have emerged as a promising approach to control tasks. We present a language-agent approach that offers state-of-the-art performance in formal theorem-proving. Our method, COPRA, uses a high-capacity, black-box LLM (GPT-4) as part of a policy for a stateful backtracking search. During the search, the policy can select proof tactics and retrieve lemmas and definitions from an external database. Each selected tactic is executed in the underlying proof framework, and the execution feedback is used to build the prompt for the next policy invocation. The search also tracks selected information from its history and uses it to reduce hallucinations and unnecessary LLM queries.
+
+We evaluate COPRA on the miniF2F benchmark for Lean and a set of Coq tasks from the Compcert project. On these benchmarks, COPRA is significantly better than one-shot invocations of GPT-4, as well as state-of-the-art models fine-tuned on proof data, at finding correct proofs quickly.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Automatically proving formal theorems (Newell et al., 1957) is a longstanding challenge in computer science. Autoregressive language models (Polu & Sutskever, 2020; Han et al., 2021; Yang et al., 2023) have recently emerged as an effective approach to this problem. Such models are trained on proofs written in frameworks like Coq (Huet et al., 1997) or Lean (de Moura et al., 2015), which allows proof goals to be iteratively simplified using a set of tactics. Theorem-proving then amounts to generating a sequence of tactics that iteratively “discharges” a given proof goal.  
+
+A weakness of this method is that it does not model the interaction between the model and the underlying proof framework. The application of a tactic is an action that changes the state of the proof and the interpretation of future tactics. By ignoring these game-like dynamics, autoregressive models miss out on a valuable source of feedback and end up being more susceptible to hallucinations.  
+
+In this paper, we show that the nascent paradigm of large-language-model (LLM) agents (Yao et al., 2022; Wang et al., 2023; Shinn et al., 2023) can help address this weakness. Here, one uses an LLM as a agent that interacts with an external environment. Information gathered through interaction is used to update the LLM’s prompt, eliciting new agent behavior because of in-context learning.  
+
+Our approach, called COPRA1 (Figure 1), uses an off-the-shelf, high-capacity LLM (GPT-4 (OpenAI, 2023a)) as part of a policy in that interacts with a proof environment like Coq or Lean. At each time step, the policy consumes a textual prompt and chooses to use an available tactic, or backtrack, or retrieve relevant lemmas and definitions from an external corpus. When the policy selects a tactic, we “execute” it using the underlying proof assistant. The feedback from the execution is used to construct a new prompt for the policy, and the process repeats.  
+
+COPRA goes beyond prior language-agent methods in using domain knowledge and information from the search history to use LLM queries frugally. When tactics fail, the policy records this information and uses it to avoid future failures. The policy also has access to a symbolic procedure that checks if one goal is “simpler” than another. A tactic is only used when it simplifies the agent’s proof obligations (ruling out, among other things, cyclic tactic sequences).  
+
+![](images/e8d4a7b391475ceefdc375fa020d6a7a9920c1ad399fae0ad3fec63d4152d95f.jpg)  
+Figure 1: An overview of COPRA. The system implements a policy that interacts with a proof environment (Coq or Lean). Internally, a COPRA policy consists of an LLM (GPT-4), a stackbased backtracking search, a retrieval mechanism, a dictionary tracking past failures, and a prompt serialization protocol that constructs LLM prompts using the stack and environment feedback and parse LLM outputs into actions.  
+
+We have integrated COPRA with both the Coq and the Lean environments. We evaluate the system using the miniF2F (Zheng et al., 2021) benchmark for competition-level mathematical reasoning in Lean and a set of Coq proof tasks (Sanchez-Stern et al., 2020) from the Compcert (Leroy, 2009) project on verified compilation. Using a new metric called prove-at- $.k$ -guidance-steps, we show that COPRA can converge to correct proofs faster than competing approaches, including the state-of-theart models (Yang et al., 2023; Sanchez-Stern et al., 2020) trained on formal proof data. We also show that when COPRA fails, it fails quicker than the baseline methods.  
+
+To summarize our contributions, we offer: (i) The first approach to formal theorem-proving that leverages LLMs while also modeling interactions between the model and the underlying proof framework; (ii) the first language agent, from any domain, to integrate LLM policies with a search that minimizes LLM queries and hallucinations by tracking domain-specific information from the past; and (iii) an implementation of COPRA that interacts with the Coq and Lean proof environments, and an evaluation on two domains — mathematics competition problems and formal verification — that shows COPRA to find proofs faster than competing approaches.  
+
+
+
+\section{2 THEOREM-PROVING AS A CONTROL PROBLEM  }
+
+
+
+
+\section{2.1 BACKGROUND ON THEOREM-PROVING  }
+
+
+A formal proof starts with a set of unmet obligations stated in a formal language and applies a sequence of proof tactics to progressively eliminate these obligations. Each obligation $o$ consists of a goal $g$ and a hypothesis $h$ . The goal $g$ consists of the propositions that need to be proved in order to meet $o$ ; the hypothesis $h$ captures assumptions that can be made in the proof of $g$ . The prover’s long-term objective is to reduce the obligations to the empty set.  
+
+We illustrate this process with the example in Figure 2-(a). This example shows a Lean (de Moura et al., 2015) proof, automatically generated using COPRA, of a basic theorem about modular arithmetic. The proof first applies the intro tactic, which changes a goal $P\to Q$ to a hypothesis $P$ and a goal $Q$ . Next, it applies the rw (rewrite) tactic, which gives a way to apply substitutions to goals and hypotheses, several times. It ends with the application of the refl (reflexivity) tactic, which eliminates goals that say that a value is equal to itself.  
+
+Existing LLM-based approaches to automatic theorem-proving view such proofs as purely syntactic artifacts. However, the rigorous semantics of proofs can be difficult to learn using such an approach, leading to the gen  
+
+![](images/3ad187ba88bafa0568b866b41762dedd4f3ce15a3fb83cba8d31cd4ddc5d5286.jpg)  
+
+Figure 2: (a) A Lean theorem and a correct proof found by COPRA. (b) Proof state after the first tactic. (c) An incorrect proof generated by GPT-4.  
+
+eration of incorrect proofs. Figure 2-(c) shows a GPT-4-generated incorrect proof of our theorem.  
+
+
+
+\section{2.2 A MARKOV DECISION PROCESS FORMULATION  }
+
+
+By contrast, COPRA is based on a view of automatic theorem-proving as a control problem. Like prior work on reinforcement learning (RL) for proof synthesis (Wu et al., 2021), we view a theoremprover as a policy that interacts with a stateful proof environment (e.g., Lean) and model the interaction between the policy and the environment as a deterministic Markov Decision Process (MDP). We depart from prior RL-based work for theorem-proving by imposing a partial order on MDP states, adding execution feedback in error states, and allowing history-dependent policies.  
+
+Now we describe the different components of our proof MDP.  
+
+States. As before, let an obligation be a pair $(g,h)$ , where $g$ is a goal and $h$ a hypothesis. A state of the MDP is either a special symbol called error or a set $\bar{O}=\{o_{1},\ldots,o_{k}\}$ of obligations $o_{i}$ . The MDP has a unique initial state $o_{i n}$ with a single obligation $(g_{i n},h_{i n})$ , where the goal $g_{i n}$ and the hypothesis $h_{i n}$ are extracted from the user-provided theorem that we are trying to prove. Its unique final state $\mathsf{Q E D}$ is the empty obligation set. The special error symbol is accompanied by textual feedback in the form of an execution error message, execution feedback, from the proof environment.  
+
+Following Sanchez-Stern et al. (2020), we define a partial order $\sqsubseteq$ over states that defines when a state is “at least as hard” than another and use it to avoid actions that do not lead to progress in the proof. Formally, for states $O_{1}$ and $O_{2}$ with $O_{1}\neq$ error and $O_{2}\neq e r r o r,O_{1}\subseteq O_{2}$ iff  
+
+$$
+\forall\;o_{i}=(g_{i},h_{i})\in O_{1}.\;\exists o_{k}=(g_{k},h_{k})\in O_{2}.
+$$  
+
+Intuitively, $O_{1}\subseteq O_{2}$ if for every obligation in $O_{1}$ , there is a stronger obligation in $O_{2}$ . We assume we have an efficient symbolic procedure that can check this relationship for any pair of states. The procedure is sound, meaning that if it reports $O_{1}\subseteq O_{2}$ , the relationship actually holds. However, it is incomplete, i.e., it may not detect all relationships of the form $O_{1}\subseteq O_{2}$ .  
+
+Actions and Transitions. The actions in our MDP are the proof environment’s tactics. The transition function $T(O,a)$ determines the result of applying an action $a$ to a state $O$ . When $a$ is a tactic, we assume the underlying proof environment to return a state $O^{\prime}$ that results from applying $a$ to $O$ . If $a$ is a “bad” tactic, then $O^{\prime}$ equals error; otherwise, $O^{\prime}$ is a new set of obligations. We assume that our agent can evaluate $T(O,a)$ for any state $O$ and action $a$ . While this assumption is unacceptable in many MDP problems, it is reasonable in the theorem-proving setting.  
+
+Rewards. As usual, we assume a reward function $R(O,a)$ that evaluates an action $a$ at a state $O$ . Concretely, we consider rewards of the form $R(O,a)={\tilde{r}}$ , where $\tilde{r}$ is a very high positive value if  
+
+$T(O,a)\,=\,{\tt Q E D}$ , a high negative value if $T(O,a)\,=\,e r r o r$ , and a small negative value otherwise.   
+The small negative reward on the successful execution of the action incentivises smaller proofs.  
+
+Histories and Policies. A history of length $N$ is a sequence  
+
+$$
+h=\langle(O_{0},a_{0},O_{0}^{\prime},r_{0}),(O_{1},a_{1},O_{1}^{\prime},r_{1}),\dots,(O_{N-1},a_{N-1},O_{N}^{\prime},r_{N})\rangle
+$$  
+
+such that $O_{0}=O_{i n}$ and for all $i$ , $r_{i}=R(O_{i},a_{i})$ and $O_{i}^{\prime}=T(O_{i},a_{i})$ . Intuitively, a history records the interactions between the prover agent and the proof environment up to a point of time. We denote by $h_{i}$ the $i$ -th prefix of $h$ . For example, $h_{0}=\langle\rangle$ , $\bar{h}_{1}=\langle(O_{0},a_{0},O_{0}^{\prime},\bar{r}_{0})\rangle$ , and so on.  
+
+A policy is a probabilistic function $\pi$ that maps histories to distributions over pairs $(O,a)$ , where $O$ is a state and $a$ is an action. Intuitively, at each point, the policy determines the next query to make to the proof environment. A policy can have an internal state as well as access to external knowledge (specifically, a lemma database). A trajectory of a policy $\pi$ is a history $h$ as above such that for each $i$ , $\mathbf{Pr}[\pi(h_{i})\,=\,(O_{i},a_{i})]\,>\,0$ . Letting each $r_{i}\,=\,\tilde{r_{i}}$ , the reward from a trajectory is simply the average $\textstyle{\frac{1}{N}}\sum_{i}{\tilde{r_{i}}}$ . We define the aggregate reward of $\pi$ as the expected reward from trajectories sampled from $\pi$ .  
+
+Language Agents. Given our setup, one can naturally pose the problem of reinforcement-learning a policy with optimal aggregate reward. In this paper, we do not take on this problem. Instead, we consider a fixed policy — a wrapper around a pretrained LLM (GPT-4) that can learn in-context — and show that this policy can achieve a high reward. It is this policy that defines our language agent.  
+
+
+
+\section{3 THE COPRA AGENT  }
+
+
+A COPRA policy has access to an LLM (in practice, GPT-4) and performs a depth-first search. During the search, it records information about failed actions. It also uses the $\sqsubseteq$ relation over states to checks that it is making progress on the proof.  
+
+Figure 3 shows pseudocode for such a policy. The policy maintains a stack of MDP states and a “failure dictionary” Bad that maps a state to a set of actions that are known to be “unproductive” at the state. At each search step, the algorithm pushes the current state on the stack and retrieves external lemmas and definitions relevant to the state. After this, it repeatedly serializes the stack and $B a d(O)$ into a prompt and feeds it to the LLM. The LLM’s output is parsed into an action, and the agent executes it in the environment.  
+
+COPRA $(O)$   
+1 $\mathrm{PUSH}(s t,O)$   
+2 $\rho\gets\mathsf{R E T R I E V E}(O)$   
+3 for $j\leftarrow1$ $\begin{array}{r l}&{\mathrm{~\,~-~1~\mathbf{to}~}t}\\ &{\mathrm{~\,~\,~\,~\,~\,~\,~\,~\,~~\,~~\,~~\,~~}\mathbf{p}\gets\mathrm{PRoMPTIFY}(s t,B a d(O),\rho,r)}\\ &{\mathrm{~\,~\,~\,~}a\sim\mathrm{PARSEACTION}(\mathrm{LLM}(p))}\\ &{\mathrm{~\,~\,~\,~}O^{\prime}\leftarrow T(O,a),r\leftarrow R(O,a)}\\ &{\mathrm{~\,~\,~\,~}\mathbf{if}\;O^{\prime}=\mathrm{QED}}\end{array}$   
+4 d   
+5   
+6   
+7   
+8 then terminate successfully   
+9 else if $O^{\prime}=e r r o r$ or   
+$\exists O^{\prime\prime}\in s t$ . O′′ ⊑O′   
+10 then add $a$ to $B a d(O)$   
+11 else COPRA $^{(O^{\prime})}$   
+12 POP(st)  
+
+One outcome of the action could be that the agent arrives at QED. Alternatively, the new state could be an error or represent obligations that are at least as hard as what is currently on the stack (for example, this could be because of a cycle  
+
+Figure 3: The search procedure in COPRA. $T$ is the environment’s transition function and $R$ is the reward function. $^{s t}$ is a stack, initialized to be empty. $B a d(O)$ is a set of actions, initialized to $\varnothing$ , that are known to be bad at $O$ . LLM is an LLM, PROMPTIFY generates a prompt, PARSEACTION parses the output of the LLM into an action (repeatedly querying the LLM in case there are formatting errors in its output), and RETRIEVE gathers relevant lemmas and definitions from an external source. The procedure is initially called with argument $O_{i n}$ .  
+
+in a tactic). In this case, the agent rejects the new state. Otherwise, it recursively continues the proof from the new state. After issuing a few queries to the LLM, the agent backtracks.  
+
+Prompt Serialization Protocol. The routines PROMPTIFY and PARSEACTION together constitute the prompt serialization protocol and are critical to the success of the policy. Now we elaborate on these procedures.  
+
+![](images/8de915a780dc14ac40ba2cb7506984afb4a097d1cbddc7957f56e6b970ab5bed.jpg)  
+
+Figure 4: We highlight the different parts of the prompts to show how we use the state stack and the execution feedback from the environment. This figure shows the low-level details of the interactions between COPRA and LLM as shown in Figure 1  
+
+PROMPTIFY carefully places the different pieces of information relevant to the proof in the prompt. It also includes logic for trimming this information to fit the most relevant parts in the LLM’s context window. Every prompt has two parts: the “system prompt” and the “agent prompt.”  
+
+The agent prompts are synthetically generated using a context-free grammar and contain information about the state stack (including the current proof state), the execution feedback for the previous action, and the set of actions we know to avoid at the current proof state.  
+
+The system prompt describes the rules of engagement for the LLM. It contains a grammar (distinct from the one for agent prompts) that we expect the LLMs to follow when it proposes a course of action. The grammar carefully incorporates cases when the response is incomplete because of the LLM’s token limits. We parse partial responses to extract the next action using the PARSEACTION routine. PARSEACTION also identifies formatting errors (if any) in the LLM’s responses, possibly communicating with the LLM multiple times until these errors are resolved. Figure 4 shows an example back-and-forth between COPRA and LLM, highlighting the low-level details of the use of state stack, execution feedback from ITP, etc.  
+
+
+
+\section{4 EVALUATION  }
+
+
+Our findings about COPRA are that: (i) the approach can find proofs significantly quicker than the state-of-the-art finetuning-based baselines, both in terms of number of LLM queries and wall-clock time; (ii) in problems where all current methods fail, COPRA fails faster; (iii) the use of GPT-4, as opposed to GPT-3.5, within the agent is essential for success; and (iv) backtracking significantly improves the system’s performance on harder problems. Now we elaborate on our experimental methodology and these results.  
+
+Implementing COPRA. Our implementation of COPRA can have GPT-3.5, GPT-4, GPT-4-turbo (OpenAI, 2023b) or CodeLlama (Roziere et al., 2023) as the underlying LLM and can interact with both the Lean and the Coq proof environments. Because of the substantial cost of GPT-4 queries, we cap the number of LLM queries that COPRA can make by 60. To further reduce costs, COPRA first tries to prove its theorems in a single LLM query (one-shot prompting), and then it invokes the agent behavior when it fails to find a proof via one-shot prompting. At first, the retrieval mechanism is not used by the agent to keep the prompts smaller and cost-effective, but if the agent fails to find the proofs then retrieval is used to enrich the proof state before prompting the LLM.1.1.  
+
+The “system prompt” in the one-shot approach is slightly different than that for COPRA, containing instructions to generate a proof in one go rather than step by step. For both COPRA and the one-shot baselines, the prompt contains a single proof example that clarifies how proofs need to be formatted. This proof example remains the same for all test cases.  
+
+Benchmarks. We evaluate our approach on two domains: (i) miniF2F (Zheng et al., 2021), a collection of 244 Lean formalizations of mathematics competition problems, solved using a range of techniques such as induction, algebraic manipulation, and contradiction; and (ii) a set of Coq problems from the CompCert compiler verification project (Leroy, 2009) that was previously used to evaluate the PROVERBOT9001 system SanchezStern et al. (2020).  
+
+![](images/bbfacd04d21a68878929d7555a644309a134ac6a35d31c965f2057b5e179f8da.jpg)  
+Figure 5: COPRA vs. REPROVER on the miniF2F benchmark  
+
+Baselines. We compare with one-shot invocations of GPT-3.5 and GPT-4 in both the miniF2F and the Compcert domains. We also consider an ablation of COPRA that uses GPT-3.5 as its LLM and another that does not use backtracking. Additionally, we also consider GPT-4- turbo, and CodeLLama models for miniF2F domain. For the miniF2F dataset, we also have additional baselines with models like GPT-4-turbo (OpenAI, 2023b) and CodeLlama (Roziere et al., 2023), and ablations with COPRA’s retrieval capabilities disabled. As for fine-tuned baselines, a challenge is that all existing open-source theorem-proving systems only target a single-proof environment. As a result, we had to choose different baselines for the Lean (miniF2F) and Coq (Compcert) domains.  
+
+Our fine-tuned baseline for the miniF2F domain is REPROVER, a state-of-the-art open-source prover that is part of the Leandojo project (Yang et al., 2023). We use BM25 search on Lean’s mathlib library for retrieval of relevant lemmas.  
+
+In the Compcert domain, we compare with PROVERBOT9001 (Sanchez-Stern et al., 2020), which, while not LLM-based, is the best publicly available model for Coq. Unlike miniF2F, this benchmark comes with a large training set as well as a test set, and we use the training set for retrieving relevant lemmas and definitions. Our retrieval mechanism, in this case, is a simple BM25 search.  
+
+For cost reasons, our evaluation for Compcert uses 118 out the 501 theorems used in the original evaluation of PROVERBOT9001 Sanchez-Stern et al. (2020). For fairness, we include all the 98 theorems proved by PROVERBOT9001 in our subset. The remaining theorems are randomly sampled.  
+
+![](images/75c9b54103a75a95d61ca5339fc7df8cc98b0df1594d6840770a821ada92eb68.jpg)  
+Figure 6: COPRA vs. PROVER$\mathtt{B O T9001}$ on the Compcert benchmark.  
+
+Metric: pass $@k$ -guidance-steps. The standard metric for evaluating theorem-provers is $p a s s@k$ (Lample et al., 2022; Yang et al., 2023). In this metric, a prover is given a budget of $k$ proof attempts; the method is considered successful if one of these attempts leads to success. However, a key objective of our research is to discover proofs quickly, with fewer LLM queries and lower wall-clock time. The pass $@_{\mathrm{k}}$ metric does not evaluate this characteristic as it does not quantify the number of LLM queries or amount of time needed by a proof attempt.  
+
+![](images/316d99bae8411550b2afe8661a6b2cc6b694f85a45ed23ccb74fe2730e677bc9.jpg)  
+
+Table 1: Aggregate statistics for COPRA and the baselines on miniF2F and Compcert   
+
+![](images/b1a0bec2727e1b872e2baee520967ed592f2dd8724fbcc9d83a43615309fe79d.jpg)  
+Table 2: Average time taken by our approach (COPRA) and ReProver on miniF2F dataset.  
+
+To address this concern, we introduce a new metric, pass $@k$ -guidance, and evaluate COPRA and its competitors using this metric. Here, we measure the number of correct proofs that a prover can generate with a budget of $k$ or fewer guidance steps from the LLM or any neural model. For LLMs, one guidance step is a single inference query. One challenge here is that we want this metric to be correlated with the number of correct proofs that the prover produces within a wall-clock time budget; however, the cost of an inference query is proportional to the number of responses generated per query. To maintain the correlation between the number of inference queries and wallclock time, we restrict each inference on LLM to a single response.1.3)  
+
+Results Figure 5 shows our comparison results for the miniF2F domain. As we see, COPRA outperforms REPROVER, completing, within just 60 guidance steps, problems that REPROVER could not solve even after a thousand guidance steps. This is remarkable given that COPRA is based on a black-box foundation model and REPROVER was fine-tuned for at least a week on a dataset derived from Lean’s Mathlib library. For fairness, we ran REPROVER multiple times with 16, 32, and 64 (default) as the maximum number of guidance steps per proof step. We obtained the highest success rates with 64 guidance steps.  
+
+Figure 6 shows a comparison between COPRA and PROVERBOT9001.  
+
+Table 3: Ablation showing the effectiveness of backtracking   
+
+![](images/3add946f0241abcedcdfc0c3c0967d6a6a4e3bb994539a2e7e13594474978e88.jpg)  
+
+We find that COPRA is significantly faster than PROVERBOT9001. Since we put a cap of 60 guidance steps on COPRA, it cannot prove all the theorems that PROVERBOT9001 eventually proves. However, as shown in the figure, COPRA proves many more theorems than PROVERBOT9001 if only 60 guidance steps are allowed. Specifically, we prove $77.5\%$ of the proofs found by PROVERBOT9001 in less than 60 steps.  
+
+Aggregate statistics for the two approaches, as well as a comparison with the one-shot GPT-3.1.2), appear in Table 1. It is clear from this data that the languageagent approach offers a significant advantage over the one-shot approach.1.5). Also, the use of GPT4 as opposed to GPT-3.5 seems essential.  
+
+![](images/43cb5298453398e901ef17f0ec08f6e8af3f28c026a70ece9f452e691d6adca3.jpg)  
+Figure 7: A theorem in the ‘algebra’ category that COPRA could prove but REPROVER could not.  
+
+1.4). Although the average time per guidance step is higher for COPRA, COPRA still finds proofs almost $9\mathbf{X}$ faster than REPROVER. This can explained by the fact that our search is more effective as it uses 46x fewer guidance steps than REPROVER. These guidance steps not only contain the average time spent on generating responses from LLM but at times have some contribution corresponding to the execution of the tactic on the Lean environment itself.  
+
+Table 2 also offers data on when the different approaches report failures. Since REPROVER uses a timeout for all theorems, we also use a timeout of 10 minutes while considering failures in Table 2. The data indicates that COPRA is comparatively better at giving up when the problem is too hard to solve. We also note that less time is spent per guidance step in case of failure for all approaches.  
+
+We show the impact of ablating the backtracking feature of COPRA in Table 3. We note that backtracking has a greater positive impact in the Compcert domain. We hypothesize that this is because the Compcert problems are more complex and backtracking helps more when the proofs are longer.  
+
+Finally, we offer an analysis of the different categories of miniF2F problems solved by COPRA and REPROVER in Figure 8. We see that certain kinds of problems, for example, International Mathematics Olympiad (IMO) problems and theorems that require induction, are difficult for all approaches. However, Figure 8b shows that COPRA takes fewer steps consistently across various categories of problems in miniF2F.  
+
+From our qualitative analysis, there are certain kinds of problems where the language-agent approach seems especially helpful. For instance, Figure 7 shows a problem in the ‘algebra’ category that REPROVER could not solve.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Supervised Learning for Theorem-Proving. There is a sizeable literature on search-based theorem-proving techniques based on supervised learning. These methods train a model to predict the next proof step at each point in a proof. This model is then used to guide a search technique, e.g., best-first or depth-limited search, that synthesizes a proof. Earlier methods of this sort used small-scale neural networks (Yang & Deng, 2019; Sanchez-Stern et al., 2020; Huang et al., 2019) as predictors. More recent methods, such as GPT-f (Polu & Sutskever, 2020), PACT (Han et al., 2021), HyperTree Proof Search (Lample et al., 2022), and REPROVER (Yang et al., 2023), have used LLMs. COPRA has some resemblance with the latter approaches. However, it departs from these prior methods in using execution feedback and a more sophisticated search algorithm.  
+
+The recent Draft-Sketch-Proof (Jiang et al., 2022) method relies on informal proofs to generate formal proofs. Other methods like Baldur (First et al., 2023) generate the whole proof in one shot using an LLM and then repair it.1.6).  
+
+![](images/d6cdcfb2af5d6aa61e728b1432438b65af20a7ee26711cc0db78a226089ce8b0.jpg)  
+Figure 8: Breakdown of theorems proved in various categories  
+
+Reinforcement Learning for Theorem-Proving. Kaliszyk et al. (2018) pioneered the use of RL in theorem-proving; subsequently, Wu et al. (2021) gave TacticZero, a deep RL approach to the problem. TacticZero does not use LLMs, thus missing out on a key source of generic mathematical knowledge. Also, COPRA has retrieval capabilities that TacticZero lacks.  
+
+Language Agents. Several distinct LLM agent architectures have been proposed over the last year (Significant-Gravitas, 2023; Yao et al., 2022; Shinn et al., 2023; Wang et al., 2023). These models combine an LLM’s capability to use tools Schick et al. (2023), decompose a task into subtasks (Wei et al., 2022; Yao et al., 2023), and self-reflect (Shinn et al., 2023) However, we are the first to offer an LLM agent for theorem-proving. We also distinguish ourselves from prior work along these lines by introducing a more efficient stateful search in the policy.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We have presented COPRA, the first LLM-agent approach to formal theorem-proving. The approach departs from prior LLM-based theorem-proving techniques by explicitly modeling the interaction between the prover and the proof environment. It also goes beyond prior language-agent approaches for any domain in using a stateful backtracking search within the policy.  
+
+Many questions remain open. First, we gave our GPT-4 a budget of a maximum of 60 inferences per problem for cost reasons. Whether the learning dynamics would drastically change with a much larger inference budget remains to be seen. A related question is whether a GPT-4-scale model is truly essential for our task. We have shown that the cheaper GPT-3.5 agent is not competitive against our GPT-4 agent; however, it is possible that a different, more affordable foundation model would have done better. Finally, our proof MDP also enables approaches where an LLM policy is finetuned using RL. It remains to be seen how such an approach, done by necessity with smaller-scale models, would compare with our in-context-learning approach.  
+
+
+
+\section{7 REPRODUCIBILITY STATEMENT  }
+
+
+We are releasing all the code needed to run COPRA as supplementary material. The code contains all “system prompts” described in Section A.4 and Section A.3, along with any other relevant data needed to run COPRA. However, to use our code, one must use their own OpenAI API keys. An issue with reproducibility in our setting is that the specific models served via the GPT-4 and GPT  
+
+3.5 APIs may change over time. In our experiments, we set the “temperature” parameter to zero to ensure the LLM outputs are as deterministic as possible.  
+
+
+
+

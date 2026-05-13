@@ -1,0 +1,496 @@
+\title{Generative Flows on Synthetic Pathway for Drug Design}
+
+\begin{abstract}
+
+
+Generative models in drug discovery have recently gained attention as efficient alternatives to brute-force virtual screening. However, most existing models do not account for synthesizability, limiting their practical use in real-world scenarios. In this paper, we propose \modelname, which sequentially assembles molecules using predefined molecular building blocks and chemical reaction templates to constrain the synthetic chemical pathway. We then train on this sequential generating process with the objective of generative flow networks (GFlowNets) to generate both highly rewarded and diverse molecules. To mitigate the large action space of synthetic pathways in GFlowNets, we implement a novel action space subsampling method. This enables \modelname to learn generative flows over extensive action spaces comprising combinations of 1.2 million building blocks and 71 reaction templates without significant computational overhead. Additionally, \modelname can employ modified or expanded action spaces for generation without retraining, allowing for the introduction of additional objectives or the incorporation of newly discovered building blocks. We experimentally demonstrate that \modelname outperforms existing reaction-based and fragment-based models in pocket-specific optimization across various target pockets. Furthermore, \modelname achieves state-of-the-art performance on CrossDocked2020 for pocket-conditional generation, with an average Vina score of –8.85 kcal/mol and 34.8\% synthesizability.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Structure-based drug discovery (SBDD) has emerged as a pivotal paradigm for early drug discovery, facilitated by the increasing accessibility of protein structure prediction tools \citep{jumper2021highly} and high-resolution crystallography \citep{liu2015pdb}.
+However, traditional brute-force virtual screening is computationally expensive \citep{graff2021accelerating}, prompting the development of deep generative models that can bypass this inefficiency.
+In this context, various approaches such as deep reinforcement learning \citep{zhavoronkov2019deep}, variational autoencoders \citep{zhung20243d} generative adversarial network \citep{ragoza2022generating}, and diffusion models \citep{guan2023d, guan2023decompdiff} have been proposed to directly sample candidate molecules against a given protein structure.
+
+While generative models have shown success in molecular discovery with desirable biological properties, most overlook synthesizability which is a crucial factor for wet-lab validation \citep{gao2020synthesizability}. 
+One line to improve synthesizability is multi-objective optimization using cheap functions to estimate the synthesizability \citep{ertl2009estimation}, but this is too simplified to reflect complex synthetic principles \citep{cretu2024synflownet}.
+Other efforts aim to project molecules from generative models into a synthesizable space \citep{gao2022amortized, luo2024projecting}, but chemical modifications in this process can degrade the optimized properties.
+
+To address this issue, recent works formulate the generation of synthetic pathways as a Markov decision process (MDP) for molecular design \citep{gottipati2020learning}.
+\modify{These approaches return a synthesizable molecule by assembling purchasable building blocks and reaction templates according to the generated synthetic pathway.}
+Notably, the emergence of virtual libraries---created by combinatorially enumerating building blocks and reaction templates, such as Enamine REAL \citep{grygorenko2020generating}---allows the generated molecules to be readily synthesizable on demand with their synthetic pathways.
+Recent studies \citep{cretu2024synflownet, koziarski2024rgfn} advanced this approach by training the decision-making policy using the objective of generative flow networks \citep[GFlowNets;][]{bengio2021flow}.
+This objective encourages the policy to sample in proportion to the reward function, enabling the retrieval of samples from a diverse range of modes.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/action_space_subsampling2.png}
+    \caption{
+    \textbf{Overview of \modelname.}
+    \textbf{(a)} Synthetic action space which is represented in a continuous action space. Each colored box corresponds to a reaction template and the molecules in the box are reactant blocks.
+    \textbf{(b)} Policy estimation using the action space subsampling in a manner of importance sampling.
+    \textbf{(c)} Molecular generation process and model training. 
+    }
+    \label{fig: overview}
+\end{figure}
+
+Unlike atom-based or fragment-based models, the synthetic action spaces are massive and composed of millions of building blocks and tens of reaction templates.
+While the large action spaces offer opportunities to discover novel hit candidates by expanding an explorable chemical space \citep{sadybekov2022synthon}, it incurs significant computational overhead.
+Thus, prior works have restricted the action spaces to trade off the size of the search space for efficiency.
+However, reducing the search space leads to a decrease in diversity and synthetic complexity. 
+While one could compensate for the reduced number of building block candidates by adding more reaction steps, this leads to the increase in synthetic complexity, negatively influencing synthesizability, yield, and cost \citep{coley2018scscore, kim2023dfrscore}.
+
+In response to this challenge, we propose \modelname, a synthesis-oriented generative framework that allows training generative flows over a large action space to generate synthetic pathways for drug design. The distinctive features of this method are as follows.
+First, we introduce an \textit{action space subsampling} (\Cref{fig: overview}) to handle massive action spaces without significant memory overhead, enabling us to explore a broader chemical space with fewer reaction steps than existing models.
+Then, we train the generative policy with a GFlowNet objective to sample both diverse and potent molecules from the expanded search space.
+We demonstrate that \modelname effectively generates drug candidates, outperforming existing reaction-based, atom-based, and fragment-based baselines across various SBDD tasks, while ensuring the synthesizability of generated drug candidates.
+\modify{
+We also achieve a new state-of-the-art Vina score, drug-likeness, and synthesizability on the CrossDocked2020 pocket-conditional generation benchmark \citep{luo20213d}.
+}
+
+\modify{
+Furthermore, we formulate an adaptable MDP (\Cref{fig: non-hierarchical}) for consistent flow estimation on modified building block libraries, which can be highly practical in real-world applications.
+By combining the proposed MDP with action embedding \citep{dulac2015deep}, which represents actions in a continuous space instead of a discrete space, \modelname can achieve further objectives or incorporate newly discovered building blocks without retraining.
+We experimentally show that \modelname can achieve an additional solubility objective and behave appropriately for unseen building blocks.
+This capability makes \modelname highly adaptable to real-world drug discovery pipeline, where new objectives frequently arise \citep{fink2022structure} and building block libraries are continuously expanding \citep{grygorenko2020generating}.
+}
+
+
+\section{Related Works}
+
+\textbf{Structure-based drug discovery.}
+The first type of SBDD involves \textbf{pocket-specific optimization} methods to enhance docking scores against a single pocket, including evolutionary algorithms \citep{reidenbach2024evosbdd}, reinforcement learning (RL) \citep{zhavoronkov2019deep}, and GFlowNets \citep{bengio2021flow}.
+However, these require individual optimizations for each pocket, limiting scalability.
+The second type is based on \textbf{pocket-conditional generation}, which generates molecules against arbitrary given pockets without additional training.
+This can be achieved by distribution-based generative models \citep{ragoza2022generating, peng2022pocket2mol, guan2023decompdiff, schneuing2023structurebased} trained on protein-ligand complex datasets to model ligand distributions for given pockets.
+On the other hand, \citet{shen2024tacogfn} formulated a pocket-conditioned policy for GFlowNets to generate samples from reward-biased distributions in a \textit{zero-shot} manner.
+
+\textbf{Syntheis-oriented generative models.}
+To ensure the synthesizability of generated molecules, synthesis-oriented \textit{de novo} design approaches incorporate combinatorial chemistry principles into generative models.
+\citet{bradshaw2019model} represented the synthetic pathways as directed acyclic graphs (DAG) for generative modeling.
+\citet{horwood2020molecular} formulated the synthetic pathway generation as an MDP and optimize the molecules with RL.
+Similarly, \citet{gao2022amortized} employed a genetic algorithm to optimize synthesis trees to generate molecules with the desired properties.
+\citet{seo2023molecular} proposed 
+a conditional generative model to directly sample molecules with desired properties without optimization.
+Recently, \citet{cretu2024synflownet,koziarski2024rgfn} trained the models with the GFlowNets objective to generate diverse and potent molecules.
+
+\textbf{Action embedding for large action spaces.}
+To handle large action spaces in the synthesis-oriented generation, \citet{gottipati2020learning} employed action embedding \citep{dulac2015deep} that represents building blocks in a continuous action space with their chemical information. 
+Later, \citet{seo2023molecular, koziarski2024rgfn} experimentally demonstrated that it can enhance the model training and generative performance. 
+The continuous action space provides the benefit of reducing the computational complexity for sampling from large space of actions and the memory requirement for parameterizing the categorical distribution over the large action space.
+
+\textbf{Generative Flow Networks.}
+GFlowNets are a learning framework for a stochastic generative policy that constructs an object through a series of decisions, where the probability of generating each object is proportional to a given reward associated with that object \citep{bengio2021flow}.
+Unlike other optimization methods that maximize rewards and often converge to a single solution, GFlowNets aim to sample a diverse set of high-rewarded modes, which is vital for novel drug design \citep{shen2024tacogfn, jain2022biological}.
+To this end, the generative policy is trained using objectives such as flow matching \citep{bengio2021flow}, detailed balance \citep{bengio2023gflownet}, and trajectory balance \citep{malkin2022trajectory}.
+Extending the GFlowNets to various applications is an active area of research,
+e.g., GFlowNets have been applied to designing crystal structures \citep{nguyen2023hierarchical}, phylogenetic inference \citep{zhou2023phylogfn}, finetuning diffusion models \citep{venkatraman2024amortizing}, and causal inference \citep{nguyen2023causal}.
+
+
+\section{Method}
+
+\subsection{GFlowNet Preliminaries}
+GFlowNets \citep{bengio2021flow} are the class of generative models that learn to sample objects $x \in \mathcal{X}$ proportional to a given reward function, i.e., $p(x) \propto R(x)$.
+This is achieved by sequentially constructing a compositional object $x$ through a series of state transitions $s \rightarrow s'$, forming a trajectory $\tau = (s_0 \rightarrow \ldots \rightarrow s_n = x) \in \mathcal{T} $.
+The set of all complete trajectories from the initial state \( s_0 \) can be represented as a directed acyclic graph $\mathcal{G} = (\mathcal{S}, \mathcal{A})$ with a reachable state space $\mathcal{S}$ and an action space $\mathcal{A}$.
+Each action $a$ induces a transition from the state $s$ to the state $s'$, expressed as $s' = T(s, a)$ and represented as $s \rightarrow s'$.
+Then, we define the \textit{trajectory flow} $F(\tau)$, which flows along the trajectory $\tau = (s_0 \rightarrow \ldots \rightarrow s_n = x)$, as the reward of the terminal state, $R(x)$.
+The \textit{edge flow} $F(s \rightarrow s')$, or equivalently $F(s, a)$, is defined as the total flow along the edge $a:s \rightarrow s'$:
+\begin{equation}
+F(s\rightarrow s') = F(s,a) = \sum_{\tau \in \mathcal{T} \text{ s.t. } (s \rightarrow s') \in \tau} F(\tau).
+\end{equation}
+The \textit{state flow} $F(s)$ for the intermediate state is defined as the total flow through the state $s$:
+\begin{equation}
+F(s) = \sum_{\tau \in \mathcal{T} \text{ s.t. } s \in \tau} F(\tau)
+    = \underbrace{
+            \sum_{(s'' \rightarrow s) \in \mathcal{A}} F(s'' \rightarrow s)
+            =
+            \sum_{(s \rightarrow s') \in \mathcal{A}} F(s \rightarrow s').
+        }_{\text{Intermediate flow matching condition}}
+\label{flow_matching}
+\end{equation}
+In addition to the flow matching condition for intermediate states, there are two boundary conditions for the states.
+First, the flow of a terminal state $x$ must equal the reward of the objective: $F(x) = R(x)$.
+Second, the \textit{partition function}, $Z$, is equivalent to the sum of all trajectory flows and the sum of all rewards: $Z = F(s_0) = \sum_{\tau \in \mathcal{T}} F(\tau) = \sum_{x \in \mathcal{X}} R(x)$.
+These three conditions—one for intermediate states and two for boundary states—are known as the \textit{flow matching} conditions and ensure that GFlowNets generate objectives proportional to their rewards.
+
+To convert the flow network into a usable policy, we define the \textit{forward policy} as the forward transition probability $P_F(s'|s)$ and the \textit{backward policy} as the backward transition probability $P_B(s|s')$:
+\begin{equation}
+    P_F(s'|s):= P(s \rightarrow s'|s)  
+        = \frac{F(s \rightarrow s')}{F(s)},
+    \quad
+    P_B(s|s'):= P(s\rightarrow s'|s') 
+        = \frac{F(s \rightarrow s')}{F(s')}.
+\end{equation}
+
+\subsection{Action Space for Synthetic Pathway Generation}
+Following \citet{cretu2024synflownet}, we treated a chemical reaction as a forward transition and a synthetic pathway as a trajectory for molecular generation.
+For the initial state $s_0$, the model always chooses \texttt{AddFirstReactant} to sample a building block $b$ from the entire building block set $\mathcal{B}$ as a starting molecule.
+For the later states $s$, the model samples actions among \texttt{ReactUni}, \texttt{ReactBi}, or \texttt{Stop}.
+When the action type is \texttt{ReactUni}, the model performs \textit{in silico} uni-molecular reactions with an assigned reaction template $r \in \mathcal{R}_1$. 
+When the action type is \texttt{ReactBi}, the model performs bi-molecular reactions with a reaction template $r \in \mathcal{R}_2$ and a reactant block $b$ in the possible reactant set for the reaction template $r$: $\mathcal{B}_r \subseteq \mathcal{B}$.
+If \texttt{Stop} is sampled, the trajectory is terminated.
+To sum up, the allowable action space $\mathcal{A}(s)$ for the state $s$ is:
+\begin{equation}
+    \mathcal{A}(s) =
+    \displaystyle
+    \begin{cases}
+        \mathcal{B} & \text{if~} s = s_0 \\
+        \{\texttt{Stop}\} \cup \mathcal{R}_1 \cup \{(r, b) | r \in \mathcal{R}_{2}, b \in \mathcal{B}_r\} & \text{otherwise}
+    \end{cases}
+    \label{eq: action-set}
+\end{equation}
+where unavailable reaction templates to the molecule of the state $s$ are masked.
+
+\subsection{Flow Network on Action Space Subsampling}
+We propose a novel memory-efficient technique called the \textit{action space subsampling}, that estimates the state flow $F_\theta (s)$ from a subset of the outgoing edge flows $F_\theta(s \rightarrow s')$ for forward policy estimation.
+First, we implement an auxiliary policy, termed \textit{subsampling policy} $\mathcal{P}(\mathcal{A})$, which samples a subset of the action space $\mathcal{A}^\ast \subseteq \mathcal{A}$.
+\modify{This reduces both the memory footprint and the computational complexity from $\mathcal{O}(|\mathcal{B}||\mathcal{R}_2|)$ to $\mathcal{O}(|\mathcal{B}^\ast||\mathcal{R}_2|)$ with the controllable size $|\mathcal{B}^\ast|$.}
+We then estimate the forward policy by importance sampling.
+In contrast to the parameterized forward policy, we formulate a fixed backward policy \modify{since it is hard to force invariance to molecule isomorphism~\citep{malkin2022trajectory}.}
+\textbf{Subsampling policy.}
+Subsampling policy $\mathcal{P}(\mathcal{A})$ performs uniform sampling for the initial state and importance sampling for the later states.
+For the initial state, the allowable action space $\mathcal{A}(s_0) = \mathcal{B}$ is homogeneous since all of them are \texttt{AddFirstReactant} actions.
+For the later state, the action space is comprised of one \texttt{Stop}, tens of \texttt{ReactUni} actions, and millions of \texttt{ReactBi} actions.
+To capture rare-type actions in the inhomogeneous space, we use all \texttt{Stop} and \texttt{ReactUni} actions.
+The partial action space $\mathcal{A}^\ast(s) \sim \mathcal{P}(\mathcal{A}(s))$ comprises the uniform subset $\mathcal{B}^\ast \subseteq \mathcal{B}$ or $\mathcal{B}_r^\ast \subseteq \mathcal{B}_r$:
+\begin{equation}
+    \mathcal{A}^\ast(s) =
+    \displaystyle
+    \begin{cases}
+        \mathcal{B}^\ast & \text{if~} s = s_0 \\
+        \{\texttt{Stop}\} \cup \mathcal{R}_1 \cup \{(r, b) | r\in\mathcal{R}_{2}, b \in \mathcal{B}^\ast_r\} & \text{otherwise~}
+    \end{cases}
+    \label{eq: action-subset}
+\end{equation} 
+
+\textbf{Forward policy.}
+To estimate the forward policy $P_F(s'|s) = F(s\rightarrow s')/F(s)$ from the partial action space $\mathcal{A}^\ast$, we estimate the state flow $F(s)$ with a subset of outgoing edge flows $F(s \rightarrow s')$.
+Since we introduce importance sampling for action types, we weight the edge flow $F(s\rightarrow s')$ of edge $a: s\rightarrow s'$ according to the subsampling ratio:
+\begin{equation}
+    w_{a} =
+    w_{(s\rightarrow s')} =
+    \begin{cases}
+        |\mathcal{B}|/|\mathcal{B}^\ast| & \text{if}~a \in \mathcal{B} \\
+        |\mathcal{B}_r|/|\mathcal{B}^\ast_r| & \text{if}~ a ~\text{is}~ (r, b)~\text{where}~ r \in \mathcal{R}_2 \\
+        1 & \text{if}~a ~\text{is}~ \texttt{Stop} ~\text{or}~ a \in \mathcal{R}_1 \\
+    \end{cases}
+\end{equation}
+
+\modify{
+By weighting edge flows, we can estimate the state flow $\hat{F}_\theta(s;\mathcal{A}^\ast)$ as:
+\begin{equation}
+    \hat{F}_\theta(s ; \mathcal{A}^\ast) 
+    =
+        \sum_{(s \rightarrow s') \in \mathcal{A}^\ast(s)}
+        w_{(s \rightarrow s')}
+        F_\theta(s \rightarrow s'),
+    \label{eq: our-forward-policy}
+\end{equation}
+which the estimated forward policy is $\hat{P}_F(s'|s;\mathcal{A}^\ast;\theta)=F_\theta(s\rightarrow s')/\hat{F}_\theta(s ; \mathcal{A}^\ast)$.
+}
+
+\modify{
+\textbf{Action embedding.}
+In the standard implementation \citep{bengio2021flow} of the flow function $F_\theta$ and its neural network $\phi_\theta$, the edge flow of the edge $a: s \rightarrow s'$ is computed with the corresponding action-specific parameter $\theta_a$: $F_\theta(s \rightarrow s') = F_\theta(s, a) = \phi^{\text{flow}}_{\theta_a}(\phi_\theta^{\text{state}}(s))$.
+}
+
+\modify{
+However, large action spaces require numerous parameters which increase model complexity.
+To address this, we use an additional network $\phi^{\text{block}}_{\theta}$ for \texttt{AddFirstReactant} and \texttt{ReactBi}, which embeds the building block $b$ into a continuous action space with its structural information:
+\begin{align}
+    F_\theta(s_0, b) =
+        \phi^{\text{flow}}_\theta(\phi_\theta^{\text{state}}(s), \phi_\theta^{\text{block}}(b)), \quad
+    F_\theta(s, (r, b)) =
+        \phi^{\text{flow}}_\theta(\phi_\theta^{\text{state}}(s), \delta(r), \phi_\theta^{\text{block}}(b))
+\end{align}
+where $\delta(r)$ is the one-hot encoding for a bi-molecular reaction template $r$.
+}
+\textbf{GFlowNet training.}
+In this work, we use the trajectory balance \citep[TB;][]{malkin2022trajectory} as the training objective of GFlowNets from \Cref{eq: trajectory-balance-loss} and train models following \Cref{algorithm: training}.
+The action space subsampling is performed for each transition $s_t \rightarrow s_{t+1}$: $\mathcal{A}^\ast_t \sim \mathcal{P}(\mathcal{A})$.
+\begin{equation}
+    \hat{\mathcal{L}}_\text{TB}(\tau)
+    =
+    \left(
+    \log \frac
+        {Z_\theta \prod^n_{t=1} \hat{P}_F (s_t| s_{t-1} ;\mathcal{A}^\ast_{t-1} ; \theta)}
+        {R(x) \prod^n_{t=1} P_B (s_{t-1}| s_t)}
+    \right)^2
+    \label{eq: trajectory-balance-loss}
+\end{equation}
+
+For online training, we use the sampling policy $\pi_\theta$ proportional to $\hat{P}_F(-|-;\mathcal{A}^\ast;\theta)$, given by:
+\begin{equation}
+    \pi_\theta(s' | s ; \mathcal{A}^\ast) =
+    \frac
+    {w_{(s \rightarrow s')} F_\theta (s \rightarrow s')}
+    {
+    \sum_{(s \rightarrow s'') \in \mathcal{A}^\ast(s)}
+    w_{(s \rightarrow s'')} F_\theta (s \rightarrow s'')
+    }
+\end{equation}
+
+\begin{algorithm}[!t]
+	\caption{Training GFlowNets with action space subsampling}
+    \label{algorithm: training}
+	\begin{algorithmic}[1]
+        \State \textbf{input} Entire action space $\mathcal{A}$, Maximum trajectory length $N$
+        \Repeat
+            \State Sample partial action spaces $\mathcal{A}^\ast_0$, $\mathcal{A}^\ast_1$, ..., $\mathcal{A}^\ast_{N-1}$ from subsampling policy $\mathcal{P}(\mathcal{A})$
+            \State Sample trajectory $\tau$ from sampling policy $\pi_\theta(-|-; \mathcal{A}^\ast_{(-)})$
+            \State Update model $\theta \leftarrow \theta - \eta \nabla \hat{\mathcal{L}}_\text{TB} (\tau)$
+        \Until model converges
+	\end{algorithmic} 
+\end{algorithm}
+\subsection{Joint Selection of Templates and Blocks}
+\label{section: method-non-hierarchical}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/mdp.png}
+    \caption{
+    \textbf{Comparison of using modified building block library for the generation}:
+    \textbf{(a)} a hierarchical MDP, and \textbf{(b)} a non-hierarchical MDP.
+
+    }
+    \label{fig: non-hierarchical}
+\end{figure}
+
+For bi-molecular reactions, existing synthesis-oriented methods \citep{gao2022amortized, cretu2024synflownet, koziarski2024rgfn} formulated a hierarchical MDP which selects a reaction template $r$ first and then the corresponding reactant block $b$ sequentially from \Cref{eq: hierarhical}.
+\modify{
+However, as shown in \Cref{fig: non-hierarchical}, the probability of selecting each reaction template $r$ is fixed after training in a hierarchical MDP, and this rigidity can lead to incorrect policy estimates in modified block libraries.
+}
+Therefore, we formulate a non-hierarchical MDP that jointly selects reaction templates and reactant blocks $(r, b)$ at once, as given by \Cref{eq: non-hierarchical}, \modify{resulting in more consistent estimates of forward policy $P_F$.}
+\begin{align}
+    P_F(T(s,(r, b))| s;\theta) &=
+        \frac{F_\theta(s, r)}
+        {
+        \sum_{r' \in \mathcal{R}_1 \cup \mathcal{R}_2 \cup \{\texttt{Stop}\}}
+        {F_\theta(s,r')}
+        }
+        \times
+        \frac{F_\theta(s,(r,b))}
+        {\sum_{b' \in \mathcal{B}_r} F_\theta(s,(r, b'))}
+    \label{eq: hierarhical}
+    \\
+    P_F(T(s,(r, b))| s;\theta) &= 
+        \frac{F_\theta(s,(r, b))}
+        {
+        \sum_{r' \in \mathcal{R}_1 \cup \{\texttt{Stop}\} }{F_\theta(s,r')} +
+        \sum_{r' \in \mathcal{R}_2}\sum_{b' \in \mathcal{B}_{r'}}F_\theta(s,(r', b'))
+        }
+    \label{eq: non-hierarchical}
+\end{align}
+
+
+\section{Experiments}
+
+\textbf{Overview.} We validate the effectiveness of \modelname in two common SBDD tasks: pocket-specific optimization (\Cref{section: result-pocket-specific}) and pocket-conditional generation (\Cref{section: result-zero-shot}).
+To the best of our knowledge, this is the first synthesis-oriented approach for pocket-conditional generation.
+We also investigate the applicability of \modelname in real-world drug discovery pipelines where new further objectives may be introduced (\Cref{section: result-additional-objective}) and the building block libraries are constantly expanded (\Cref{section: result-scaling}).
+\textbf{Setup.}
+We use the reaction template set constructed by \citet{cretu2024synflownet} including 13 uni- and 58 bi-molecular reaction templates.
+For the building blocks, we use 1.2M blocks from the Enamine comprehensive catalog.
+We use up to 3 reaction steps for generation following Enamine REAL Space \citep{grygorenko2020generating}, while SynFlowNet and RGFN allow 4 steps.
+For the subsampling policy, we set a sampling ratio of 1\%.
+\textbf{Synthesizability estimation.}
+To assess the synthesizability of the generated compounds, we used the computationally intensive retrosynthetic analysis tool AiZynthFinder \citep{genheden2020aizynthfinder} with the Enamine building block library.
+We note that the molecule is identified as synthesizable only if it can be synthesized using the USPTO reactions \citep{Lowe2017} and given building blocks.
+
+\subsection{Pocket-Specific Optimization with GPU-accelerated Docking}
+\label{section: result-pocket-specific}
+
+\input{seo/5-1_exp1_table}
+
+\textbf{Setup.}
+Since GFlowNets sample a large number of molecules for online training, we employed a GPU-accelerated UniDock \citep{yu2023uni} with Vina scoring \citep{trott2010autodock}.
+It is well known that docking can be hacked by increasing molecule size \citep{pan2003consideration}, so the appropriate constraints are required.
+We select QED \citep{bickerton2012quantifying} as a comprehensive molecular property constraint, QED$>$0.5, and set the reward function as $R(x) = w_1 \text{QED}(x) + w_2 \widehat{\text{Vina}}(x)$
+where $w_1,w_2$ are used as the input of multi-objective GFlowNets \citep{jain2023multi} and are set to 0.5 for non-GFlowNet baselines.
+Each method generates up to 64,000 molecules for each of the 15 proteins in the LIT-PCBA dataset \citep{tran2020lit}.
+We then filter the molecules with the property constraint and select the top 100 diverse candidates based on the docking score, using a Tanimoto distance threshold of 0.5 to ensure structural diversity.
+The selected molecules are evaluated with the following metrics:
+\textbf{Hit ratio (\%)} measures the fraction of \textit{hits}, defined as the molecules that are identified as synthesizable by AiZynthFinder and having better docking scores than known active ligands \citep{lee2023exploring}. 
+\textbf{Vina (kcal/mol)} measures the average docking score.
+\textbf{Synthesizability (\%)} is the fraction of synthesizable molecules.
+\textbf{Synthetic complexity}, which is highly correlated to yield and cost, is evaluated as the average number of synthesis steps \citep{coley2018scscore}.
+
+\textbf{Baselines.}
+We perform comparisons to various synthetic-oriented approaches: genetic algorithm (\textbf{SynNet}) \citep{gao2022amortized}, conditional generative model (\textbf{BBAR}\footnote{Since BBAR requires labeled training data with QED and docking score, we perform docking with random 62,720 ZINC molecules for training and evaluate 1,280 samples according to the reported splitting ratio.}) \citep{seo2023molecular}, and GFlowNets (\textbf{SynFlowNet}, \textbf{RGFN}) \citep{cretu2024synflownet, koziarski2024rgfn}.
+For SynFlowNet and RGFN, we used 6,000 and 350 blocks, respectively, and set the maximum reaction step to 4 following the original papers.
+Moreover, we consider fragment-based GFlowNets (\textbf{FragGFN}) to analyze the effects of synthetic constraints on the performance.
+For FragGFN, we also consider additional synthesizability objectives with commonly-used synthetic accessibility score \citep[SA;][]{ertl2009estimation} (\textbf{FragGFN+SA}).
+
+\textbf{Results.}
+
+\modelname outperforms the baselines across all test proteins, demonstrating that the expanded sample space with the large action space enabled the model to generate more potent and diverse molecules.
+Additionally, as shown in \Cref{tab: pocket-specific-aiz-success,tab: pocket-specific-aiz-steps}, \modelname ensures the synthesizability of the generated molecules more effectively than the other synthesis-oriented methods and GFlowNets which employ the same reactions as ours.
+These results support our primary assertion that existing synthesis-oriented approaches using more synthetic steps with smaller building block libraries can increase overall synthesis complexity and reduce synthesizability.
+Furthermore, FragGFN+SA does not show meaningful improvement in synthesizability, implying that optimization of a cheap synthesizability estimation function is suboptimal.
+
+Furthermore, it is noteworthy that \modelname outperformed FragGFN which does not consider synthesizability.
+This improvement can be attributed to two key factors.
+First, the Enamine building block library is specifically curated for drug discovery, limiting the search space $\mathcal{X}$ to a drug-like chemical space and simplifying the optimization complexity.
+Second, \modelname needs shorter trajectories compared to FragGFNs since it assembles molecules with large building blocks instead of atoms or small fragments.
+This is beneficial for trajectory balance objectives where stochastic gradient variance tends to increase over longer trajectories \citep{malkin2022trajectory}.
+
+\subsection{Zero-Shot Sampling via Pocket Conditioning}
+\label{section: result-zero-shot}
+
+\begin{table}[t]
+\centering
+\caption{
+\textbf{CrossDocked2020 benchmark}.
+We report the average and median values over the average properties for each test pocket.
+The best results are in bold and the second ones are in underlined.
+We denote the Validity as Valid, Synthesizability as Synthesiz, and Diversity as Div.
+Reference means the known binding active molecules in the test set.
+}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llccccccccc}
+    \toprule
+            && Valid ($\uparrow$) & \multicolumn{2}{c}{Vina ($\downarrow$)} & \multicolumn{2}{c}{QED ($\uparrow$)}  & \multicolumn{2}{c}{Synthesiz ($\uparrow$)} & Div ($\uparrow$) & Time ($\downarrow$)\\
+    \cmidrule(lr){3-3}
+    \cmidrule(lr){4-5}
+    \cmidrule(lr){6-7}
+    \cmidrule(lr){8-9}
+    \cmidrule(lr){10-10}
+    \cmidrule(lr){11-11}
+    Category & Model & Avg. & Avg.  & Med.  & Avg.  & Med.  & Avg.   & Med.  & Avg. & Avg.\\
+    \midrule
+    Reference& -  & -       & -7.71 & -7.80 & 0.48  & 0.47  & 36.1\% & - & - & -\\
+    \midrule
+    \multirow{3}{*}{Atom}
+    & Pocket2Mol  & \phantom{0}98.3\%  & -7.60 & -7.16 & 0.57  & 0.58  & \underline{29.1\%} & \underline{22.0\%}  & 0.83 & 2504$^a$\\
+    & TargetDiff  & \phantom{0}91.5\%  & -7.37 & -7.56 & 0.49  & 0.49  & \phantom{0}9.9\%  & \phantom{0}3.2\%  & \textbf{0.87} & 3428$^a$\\
+    & DecompDiff  & \phantom{0}66.0\%  & \underline{-8.35} & -8.25 & 0.37  & 0.35  & \phantom{0}0.9\%  & \phantom{0}0.0\% & \underline{0.84}  & 6189$^a$\\
+    \midrule
+    Fragment & TacoGFN     & \textbf{100.0\%}   & -8.24 & \underline{-8.44} & \textbf{0.67}  & \textbf{0.67}  & \phantom{0}1.3\%  & \phantom{0}1.0\%  & 0.67 & \phantom{000}\textbf{4}$^b$\\
+    \midrule
+    Reaction & \textbf{\modelname}  & \textbf{100.0\%}   & \textbf{-8.85} & \textbf{-9.03} & \textbf{0.67}  & \textbf{0.67}  & \textbf{34.8\%} & \textbf{34.5\%} & 0.81 & \phantom{000}\textbf{4}\phantom{$^b$}\\
+    \bottomrule
+\end{tabular}
+}
+\label{tab: sbdd}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/result/generated_molecules_tiny.png}
+    \caption{
+        \textbf{Visualization of generated molecules} in a zero-shot manner.
+        \textbf{(a-b)} Docking results of generated molecules and known reference ligands of TBK1 (PDB Id: 1FV, SU6).
+        \textbf{(c)} Generative trajectory, which is the generated synthetic pathway of the left molecule in (a).
+    }
+    \label{fig: visualization}
+\end{figure}
+
+\textbf{Setup.}
+We extend our works to a pocket-conditional generation problem to design binders for arbitrary pockets without additional training oracles \citep{ragoza2022generating, liu2022generating, peng2022pocket2mol, guan2023d, guan2023decompdiff, schneuing2023structurebased}.
+To address this challenge, we follow TacoGFN \citep{shen2024tacogfn}, which is a fragment-based GFlowNet for pocket-conditional generation.
+Since it requires more training oracles to learn pocket-conditional policies than target-specific generation, TacoGFN used pre-trained proxies that predict docking scores against arbitrary pockets using pharmacophore representation \citep{seo2023pharmaconet}.
+We generate 100 molecules for each of the 100 test pockets in the CrossDocked2020 benchmark \citep{francoeur2020three} and evaluate them with the following metrics:
+\textbf{Vina (kcal/mol)} measures the average docking score from QuickVina \citep{alhossary2015fast}.
+\textbf{QED} measures the average drug-likeness of molecules.
+\textbf{Synthesizability (\%)} is the fraction of synthesizable molecules.
+\textbf{Diversity} measures an average pairwise Tanimoto distance of ECFP4 fingerprints \citep{morgan1965generation}.
+Moreover, we report the \textbf{Validity (\%)} which is the percentage of unique RDKit-readable molecules, and \textbf{Time (sec.)} which is the average sampling time to generate 100 molecules.
+
+\textbf{Baselines.}
+We compare \modelname with state-of-the-art distribution learning-based models trained on a synthesizable drug set: an autoregressive model (\textbf{Pocket2Mol} \citep{peng2022pocket2mol}) and diffusion models (\textbf{TargetDiff} \citep{guan2023d}, \textbf{DecompDiff} \citep{guan2023decompdiff}).
+We also perform a comparison with an optimization-based \textbf{TacoGFN} \citep{shen2024tacogfn}.
+For a fair comparison with the distribution learning-based approaches, we used the docking proxy trained on CrossDocked2020.
+
+\textbf{Result.}
+As shown in \Cref{tab: sbdd}, \modelname achieves significant improvements in drug-related properties.
+In particular, \modelname attains the best average docking score of -8.85 kcal/mol, significantly outperforming TacoGFN at -8.24 kcal/mol and the state-of-the-art diffusion model (DecompDiff) at -8.35 kcal/mol while achieving high drug-like properties.
+Moreover, \modelname ensures the synthesizability comparable to known active ligands, outperforming the fragment-based TacoGFN trained on the SA score objective and the distributional learning-based models trained on synthesizable drug molecules.
+\Cref{fig: visualization} illustrates generated molecules against TANK-binding kinase 1 (TBK1) which is not included in the training set.
+
+An important finding is that \modelname maintains high structural diversity (0.81) despite the typical trade-off between optimization power and diversity \citep{gao2022sample}.
+This is a significant improvement over the fragment-based TacoGFN, which scored 0.67 and is comparable to the distributional learning-based models that range from 0.83 to 0.87.
+We attribute this enhancement to our action space, which contains chemically diverse building blocks, in contrast to the small and limited fragment sets used in fragment-based GFlowNets.
+This suggests that our model can effectively balance the potency and diversity of generated molecules.
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.50\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/result/ana2_further_objective.png}
+        \caption{
+            \textbf{Property distribution} of sampled molecules with ``all" building blocks and ``low''-TPSA building blocks.
+            Vina score was calculated against the KRAS-G12C target.
+        }
+        \label{fig: result-low-tpsa}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.40\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/result/ana1_generalization.png}
+        \caption{
+            \textbf{QED reward distribution} of generated molecules for each of the ``seen", ``unseen", and ``all" blocks.
+
+        }
+        \label{fig: result-scale}
+    \end{minipage}
+\end{figure}
+
+\subsection{Introducing Additional Objective without Retraining}
+\label{section: result-additional-objective}
+In drug discovery, new objectives often arise during the research process, such as enhancing solubility, reducing toxicity, or improving selectivity \citep{fink2022structure, joshi2021structure}.
+These additional objectives typically not only require retraining models but also increase the optimization complexity.
+In this context, \modelname can achieve some additional objectives by simply introducing constraints to MDP without retraining thanks to the non-hierarchical action space (\Cref{section: method-non-hierarchical}).
+
+As shown in \Cref{fig: result-low-tpsa}, we explore the scenario of adding a solubility objective to a pre-trained GFlowNet in \Cref{section: result-zero-shot}.
+Specifically, we target the generation of hydrophobic molecules by restricting the building blocks with topological polar surface area (TPSA) in the bottom 15\% (``low") and sampled 500 molecules for the KRAS-G12C mutant (PDB Id: 6oim).
+While there are slight differences in the QED distributions due to the correlation between TPSA and QED, the generated molecules are more hydrophobic and retain similar overall reward distributions.
+
+\subsection{Scaling Action Space without Retraining}
+\label{section: result-scaling}
+The building block libraries for drug discovery continue to grow, from 60,000 in 2020 to over 1.2 million blocks today, to enhance chemical diversity and novelty \citep{grygorenko2020generating}.
+However, existing generative models require retraining to accommodate newly discovered building blocks, limiting their scalability and adaptability.
+On the other hand, \modelname can integrate new building blocks without retraining by understanding the chemical context of actions through action embedding. 
+We first divide the 1M-sized block library (``all") into two sets: 500,000 blocks for training (``seen") and the remaining blocks (``unseen").
+After training with the QED objective on various reward exponent settings ($R^\beta$), we generate 5,000 molecules from each set (``seen", ``unseen", and ``all").
+\Cref{fig: result-scale} shows that the reward distributions of samples are nearly identical, demonstrating that \modelname performs robustly with unseen building blocks.
+This result highlights the generalization ability and scalability of \modelname, a significant advantage for real-world applications.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/result/ana3_ablation.png}
+    \caption{
+        \textbf{Optimization power, diversity, and generation time} according to building block library size.
+        \textbf{(a-c)} Average and standard deviation of properties of the top-1000 high-affinity molecules over 4 runs on pocket-specific generation.
+        \textbf{(a)} Average docking score.
+        \textbf{(b)} The uniqueness of Bemis-Murcko scaffolds.
+        \textbf{(c)} Average Tanimoto distance.
+        \textbf{(d)} Average runtime to generate 100 molecules over the CrossDocked2020 test pockets in a zero-shot manner.
+    }
+    \label{fig: result-ablation}
+\end{figure}
+\subsection{Ablation Study: the effect of building block library size}
+\label{section: result-remain}
+Expanding the size of building block libraries provides an opportunity to discover more diverse and potent drug candidates \citep{grygorenko2020generating}.
+In \Cref{section: result-pocket-specific}, \modelname outperforms SynFlowNet and RGFN which use smaller block libraries, but differences in model architectures may have contributed to these results.
+To isolate the effect of the building block library size, we conduct an ablation study using partial libraries with a pocket-specific optimization task against the kappa-opioid receptor (PDB Id: 6b73), as illustrated in \Cref{fig: result-ablation}(a-c).
+The results indicate that increasing the library size enhances both optimization power, in terms of docking scores, and diversity, in terms of a higher number of unique Bemis-Murcko scaffolds \citep{bemis1996properties} and an increased Tanimoto diversity of the generated molecules.
+Additionally, as shown in \Cref{fig: result-ablation}(d), the generation time only doubles on the 100-fold larger action space, highlighting the efficiency of \modelname.
+\modify{These results demonstrate the forte of \modelname in navigating a broader chemical space to discover novel drug candidates by overcoming the computational limitations for expanding the action space.}
+
+
+\section{Conclusion}
+
+In this work, we introduce \modelname, a synthesis-oriented generative framework designed to explore broader chemical spaces, thereby enhancing both diversity and potency for drug discovery.
+Our framework efficiently handles massive action spaces to expand the search space without significant computational or memory overhead by employing a novel action space subsampling technique.
+\modelname can effectively identify diverse drug candidates with desired properties and synthetic feasibility by learning the objective of generative flow networks on synthetic pathways.
+Additionally, by formulating a non-hierarchical MDP, \modelname can model generative flows on modified action spaces, allowing it to achieve additional objectives and incorporate newly discovered building blocks without retraining.
+These results highlight the potential of \modelname as a practical and versatile solution for real-world drug discovery.
+
+\newpage
+
+
+
+

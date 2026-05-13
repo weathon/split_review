@@ -1,0 +1,458 @@
+\title{Diffusion State-Guided Projected Gradient for Inverse Problems}
+
+\begin{abstract}
+  Recent advancements in diffusion models have been effective in learning data priors for solving inverse problems. They leverage diffusion sampling steps for inducing a data prior while using a measurement guidance gradient at each step to impose data consistency. For general inverse problems, approximations are needed when an unconditionally trained diffusion model is used since the measurement likelihood is intractable, leading to inaccurate posterior sampling. In other words, due to their approximations, these methods fail to preserve the generation process on the data manifold defined by the diffusion prior, leading to artifacts in applications such as image restoration. To enhance the performance and robustness of diffusion models in solving inverse problems, we propose \textit{Diffusion State-Guided Projected Gradient} (DiffStateGrad), which projects the measurement gradient onto a subspace that is a low-rank approximation of an intermediate state of the diffusion process. DiffStateGrad, as a module, can be added to a wide range of diffusion-based inverse solvers to improve the preservation of the diffusion process on the prior manifold and filter out artifact-inducing components. We highlight that DiffStateGrad improves the robustness of diffusion models in terms of the choice of measurement guidance step size and noise while improving the worst-case performance. Finally, we demonstrate that DiffStateGrad improves upon the state-of-the-art on linear and nonlinear image restoration inverse problems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Inverse problems are ubiquitous in science and engineering, playing a crucial role in simulation-based scientific discovery and real-world applications~\citep{groetsch1993inverse}. They arise in fields such as medical imaging, remote sensing, astrophysics, computational neuroscience, molecular dynamics simulations, systems biology, and generally solving partial differential equations (PDEs). Inverse problems aim to recover an unknown signal $\x^{\star} \in \R^n$ from noisy observations
+\begin{equation}
+\y = \mathcal{A}(\x^{\star}) + \n \in \R^{m},
+\end{equation}
+where $\mathcal{A}$ denotes the measurement operator, and $\n$ is the noise. Inverse problems are ill-posed, i.e., in the absence of a structure governing the underlying desired signal $\x$, many solutions can explain the measurements $\y$. In the Bayesian framework, this structure is translated into a \textit{prior} $p(\x)$, which can be combined with the \textit{likelihood term} $p(\y | \x)$ to define a \textit{posterior distribution} $p(\x | \y) \propto p(\y | \x) p(\x)$. Hence, solving the inverse problem translates into performing a Maximum a Posteriori (MAP) estimation or drawing high-probability samples from the posterior~\citep{stuart2010inverse}. Given the forward model $p(\y | \x)$, the critical step is to choose the prior $p(\x)$, which is often challenging; one needs domain knowledge to define a prior or a large amount of data to learn it.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.99\linewidth}
+        \centering
+    \includegraphics[width=1.0\linewidth]{figures/figure1_v200.pdf}
+    \end{subfigure}
+\caption{\textbf{High-level interpretation of Diffusion State-Guided Projected Gradient (DiffStateGrad).} DiffStateGrad projects the measurement gradient onto a subspace defined to capture statistics of the diffusion state at time $t$ { on which the gradient guidance is applied}. This helps the process stay closer to the data manifold during the diffusion process, resulting in better posterior sampling. Without such projection, the measurement gradient pushes the process off the data manifold. { For when the measurement gradient guidance is applied to  $\z_{0\mid t}$, the projection is defined to capture the structure of the tangent space of the clean data manifold}. The dotted straight line conceptually visualizes the subspace to which the measurement gradient is projected.}
+\label{fig:fig1}
+\end{figure}
+
+\begin{wrapfigure}[30]{r}{0.45\textwidth}
+ \begin{center}
+\begin{flushright}
+\begin{subfigure}[b]{0.95\linewidth}
+    \includegraphics[width=0.999\linewidth]{figures/rec_high.png}
+    \caption{Image visualizations.}
+    \label{fig:psld_default_highmeas}
+\end{subfigure} 
+\end{flushright}
+\begin{subfigure}[b]{0.999\linewidth}
+	\centering
+\includegraphics[width=0.999\linewidth]{figures/z0givent_zt_gt/PSLD_default_highfeedback_z0givent_zt_gt_latent1_1-10-20-30-40-50.png}
+ \label{fig:psld_lowrank_lowmeas}
+ \caption{PSLD diffusion dynamics.}
+ \end{subfigure}
+\begin{subfigure}[b]{0.999\linewidth}
+	\centering
+\includegraphics[width=0.999\linewidth]{figures/z0givent_zt_gt/PSLD_lowrank_highfeedback_z0givent_zt_gt_latent1_1-10-20-30-40-50.png}
+ \label{fig:psld_lowrank_highmeas}
+ \caption{DiffStateGrad-PSLD diffusion dynamics.}
+ \end{subfigure}
+  \caption{\textbf{Visualization of DiffStateGrad in removing artifacts.} The large MG step size pushes the process away from the manifold in PSLD, while DiffStateGrad-PSLD is unaffected. The title refers to the diffusion steps.}
+ \label{fig:vis_largestep}
+\end{center}
+\end{wrapfigure}
+
+Prior works consider sparse priors and provide a theoretical analysis of conditions for the unique recovery of data, a problem known as compressed sensing~\citep{donoho2006compressed, candes2006robust}. Sparse priors have shown usefulness in medical imaging~\citep{lustig2007sparse}, computational neuroscience~\citep{olshausen1997sparse}, and engineering applications. This approach is categorized into model-based priors where a structure is assumed on the signal instead of being learned.
+
+Recent literature goes beyond such model-based priors and leverages information from data. The latest works employ generative diffusion models~\citep{song2019generative, kadkhodaie2021stochastic}, which implicitly learn the data prior $p(\x)$ by learning a process that transforms noise into samples from a complex data distribution. For inverse problems, this reverse generation process is guided by the likelihood $p(\y | \x)$, forming a denoiser posterior, to generate data-consistent samples. While diffusion models are state-of-the-arts, they still face challenges in solving inverse problems.
+
+The main challenge arises from the fact that the denoiser posterior, specifically the likelihood component $p(\y | \x)$, is intractable since the diffusion is trained unconditionally~\citep{song2021score}. Prior work addresses this challenge by proposing various approximations or projections to the gradient related to the measurement likelihood $p(\y | \x)$ to achieve likely solutions~\citep{kawar2022denoising}; when these approximations are not valid, it results in inaccurate posterior sampling and the introduction of ``artifacts'' in the reconstructed data~\citep{chung2023diffusion}. \emph{Latent} diffusion models (LDMs)~\citep{rombach2022high}, due to the nonlinearity of the latent-to-pixel deco
+der, further exacerbate this challenge. Besides this approximation, the lack of robustness of diffusion models to the measurement gradient step size~\citep{peng2024improving} and the measurement noise, and the lack of guarantees for worst-case performance limits their practical applications for inverse problems.
+\textbf{Our contributions:} We propose a \textit{Diffusion State-Guided Projected Gradient} (DiffStateGrad) to address the challenge of staying on the data manifold in solving inverse problems. We focus on gradient-based measurement guidance approaches that use the measurement as guidance to move the intermediate diffusion state $\x_t$ toward high-probability regions of the posterior. DiffStateGrad projects the measurement guidance gradient onto a low-rank subspace, { capturing the data statistics of the learned prior}  (\Cref{fig:fig1}). We visualize how the diffusion process is pushed off the manifold when the measurement step size is relatively large in a diffusion model and how the incorporation of DiffStateGrad alleviates this challenge (\Cref{fig:vis_largestep}). { We define a projection step to preserve the measurement gradient on the tangent space of the state manifold. We achieve this projection by} performing singular value decomposition (SVD) on the diffusion state of an image { to which guidance is applied} and use the $r$ highest contributing singular vectors as a choice of our projection matrix; by projecting the measurement gradient onto our proposed subspace, we aim to remove the directions orthogonal to the local manifold structure.
+
+\begin{itemize}[leftmargin=5mm]
+    \setlength\itemsep{0em}
+    \item We show that the crucial factor is the choice of the subspace, not the low-rank nature of the subspace projection. We find that our DiffStateGrad enhances performance. { Our projection defines the subspace based on the structure of the state to which the measurement guidance is applied}. { This is} in contrast to random subspace projections or low-rank approximations (\Cref{tab:proj_random_comparison}).
+    \item We theoretically prove how DiffStateGrad helps the samples remain on or close to the manifold, hence improving reconstruction quality (\Cref{prop:plorg}). 
+    \item We demonstrate that DiffStateGrad increases the robustness of diffusion models to the measurement guidance gradient step size (\Cref{fig:combined_robustness}, \Cref{tab:psld_default_large_mg_step}) and the measurement noise (\Cref{fig:fig3}). For example, for a large step size, DiffStateGrad drastically improves the LPIPS of PSLD~\citep{rout2023solving} from $0.463$ to $0.165$ on random inpainting. For large measurement noise, DiffStateGrad improves the SSIM of DAPS~\citep{zhang2024daps} from $0.436$ to $0.705$ on box inpainting.
+    \item We empirically show that DiffStateGrad improves the worst-case performance of the diffusion model, e.g., significantly reducing the failure rate (PSNR $<20$) from $26\%$ to $4\%$ on the phase retrieval task, increasing their reliability (\Cref{fig:combined_robustness_psnr}). DiffStateGrad consistently shows lower standard deviation across the test datasets than state-of-the-art methods.
+    \item We demonstrate that DiffStateGrad significantly improves the performance of state-of-the-art (SOTA) methods, especially in challenging tasks such as phase retrieval and high dynamic range reconstruction. For example, DiffStateGrad improves the PSNR of ReSample~\citep{song2023solving} from $27.61 (8.07)$ to $31.19 (4.33)$ for phase retrieval, reporting mean (std). Our experiments cover a wide range of linear inverse problems of box inpainting, random inpainting, Gaussian deblur, motion deblur, and super-resolution (\Cref{tab:linear_tasks_ffhq,tab:linear_tasks_imagenet}) and nonlinear inverse problems of phase retrieval, nonlinear deblur, and high dynamic range (HDR) (\Cref{tab:nonlinear_tasks_ffhq}) for image restoration tasks.
+\end{itemize}
+\begin{wraptable}[10]{r}{0.40\textwidth}
+\centering
+\fontsize{8}{10}\selectfont
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{.999\linewidth}{!}{%  % Make table full width
+\begin{tabular}{l*{3}{c}}
+\toprule
+Projection Subspace & LPIPS$\downarrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ \\
+\midrule
+No Projection & 0.246 & \underline{0.809} & 29.05 \\
+\midrule
+Random matrix & 0.299 & 0.753 & 27.30  \\
+Measurement gradient & \underline{0.242}  & 0.808 & \underline{29.21} \\
+DiffStateGrad (ours) & \textbf{0.165}  & \textbf{0.898} & \textbf{31.68} \\
+\bottomrule
+\end{tabular}
+}
+\caption{\textbf{Advantage of diffusion state-guided projection.} Results are from random inpainting on FFHQ $256 \times 256$.}
+\label{tab:proj_random_comparison}
+\end{wraptable}
+
+
+
+\section{Background \& Related Works}
+
+
+\textbf{Learning-based priors.}\quad These methods leverage data structures captured by a pre-trained denoiser~\citep{romano2017little} as plug-and-play priors~\citep{venkatakrishnan2013plug}, or deep generative models such as variational autoencoders (VAEs)
+~\citep{kingma2013auto} and generative adversarial networks (GANs)~\citep{goodfellow2014generative} to solve inverse problems~\citep{bora2017compressed, ulyanov2018deep}. The state-of-the-art is based on generative diffusion models, which have shown promising performance in generating high-quality samples in computer vision \citep{song2023pseudoinverseguided}, solving PDEs~\citep{shu2023physics}, and high-energy physics~\citep{shmakov2024end}.
+\textbf{Diffusion models.}\quad
+Diffusion models conceptualize the generation of data as the reverse of a noising process, where a data sample $\x_t$ at time $t$ within the interval $[0, T]$ follows a specified stochastic differential equation (SDE). This SDE~\citep{song2021score} for the data noising process is described by
+\begin{equation}
+d\x = -(\nicefrac{\beta_t}{2}) \x \, dt + \sqrt{\beta_t} \, d\w,
+\end{equation}
+where $\beta_t \in (0, 1)$ is a positive, monotonically increasing function of time $t$, and $\w$ represents a standard Wiener process. The process begins with an initial data distribution $\x_0 \sim p_{\text{data}}$ and transitions to an approximately Gaussian distribution $\x_T \sim \mathcal{N}(\boldsymbol{0}, \eye)$ by time $T$. The objective of regenerating the original data distribution from this Gaussian distribution involves reversing the noising process through a reverse SDE of the form
+\begin{equation}
+d\x = [-(\nicefrac{\beta_t}{2}) \x - \beta_t \nabla_{\x_t} \log p_t(\x_t)]dt + \sqrt{\beta_t} d\bar{\w},
+\end{equation}
+where $dt$ indicates time moving backward and $\bar{\w}$ is the reversed Wiener process. To approximate $\nabla_{\x_t} \log p_t(\x_t)$, a neural network $s_\theta$ trained via denoising score matching \citep{vincent2011score} is used.
+
+\textbf{Solving inverse problems with diffusion models.}\quad
+Diffusion-based approaches to inverse problems seek to reconstruct the original data $\x_0$ from the measurement $\y = \mathcal{A}(\x_0) + \n$. In this case, the reverse SDE implements
+\begin{equation}
+d\x = [-(\nicefrac{\beta_t}{2}) \x - \beta_t (\nabla_{\x_t} \log{p_t(\x_t)} + \nabla_{\x_t} \log p_t(\y | \x_t))]dt + \sqrt{\beta_t} d\bar{\w}.
+\end{equation}
+Conceptually, the learned score function $\nabla_{\x_t} \log{p_t(\x_t)}$ guides the reverse diffusion process from noise to the data distribution, and the likelihood-related term $\nabla_{\x_t} \log p_t(\y \mid \x_t)$ ensures measurement consistency. When the model is trained unconditionally, the main challenge is the intractable denoiser posterior due to the lack of an explicit analytical expression for $\nabla_{\x_t} \log{p_t(\y \mid \x_t)}$; the exact relationship between $\y$ and intermediate states $\x_t$ is not well-defined, except at the initial state $\x_0$. 
+
+\begin{wrapfigure}[16]{r}{0.45\textwidth}
+    \begin{center}
+    \centering
+    \begin{subfigure}[b]{1.0\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/psnr_histogram_improved.png}
+    \end{subfigure}
+    \caption{\textbf{DiffStateGrad improves the worst-case performance}. { The} PSNR histogram for phase retrieval { shows} that { DiffStateGrad significantly} lowers the failure rate.}
+    \label{fig:combined_robustness_psnr}
+    \end{center}
+\end{wrapfigure}
+\textbf{Solving inverse problems with latent diffusion models.}\quad For complex scenarios where direct application of pixel-based models is computationally expensive or ineffective, latent diffusion models (LDMs) offer a promising alternative \citep{rombach2022high}. Given data $\x \in \R^n$, the LDM framework utilizes an encoder $\mathcal{E}: \R^n \rightarrow \R^k$ and a decoder  $\mathcal{D}: \R^k \rightarrow \R^n$, with $k \ll n$, to work in a compressed latent space. $\x_T$ is encoded into a latent representation $\z_T = \mathcal{E}(\x_T)$ and serves as the starting point for the reverse diffusion process. Then, $\z_0$ is decoded to $\x_0 = \mathcal{D}(\z_0)$, the final { image} reconstruction. Using a \emph{latent} diffusion model introduces an additional complexity to solving inverse problems. The challenge arises from the nonlinear nature and non-uniqueness mapping of the encoder/decoder~\citet{rout2023solving}; { PSLD proposed} to improve performance by enforcing fixed-point properties on representations.
+
+\textbf{Diffusion-based inverse problems addressing challenges of intractable denoiser posterior.}\quad To address the intractability of the gradient for the reverse diffusion, Diffusion Posterior Sampling (DPS)~\citep{chung2023diffusion}, approximates the probability $p(\y \mid \x_t) \approx p(\y | \hat{\x}_0 \coloneqq \mathbb{E}[\x_0 \mid \x_t])$ using the conditional expectation of the data. Extending to the latent case, \textit{Latent-DPS} uses $p(\y|\z_t) \approx p(\y|\hat{\x}_0 := \mathcal{D}(\mathbb{E}[\z_0|\z_t]))$~\citep{song2023solving}. Two intuitive drawbacks of this approach are that a) the image estimate $\hat{\x}_0$ is reconstructed using an expectation, which results in inaccurate estimations for multi-modal complex distributions, and b) the measurement gradient directly updates the noisy state $\x_t$, which may push away the state from the desired noise level at $t$. 
+
+Prior works aim to address the first challenge by going beyond first-order statistics~\citep{rout2024beyond} or incorporating posterior covariance into the maximum likelihood estimation step~\citep{peng2024improving}. Other lines of work address the second issue by decoupling the measurement guidance from the sampling process; they update the data estimate $\hat{\x}_0$ at time $t$ using the measurement gradient guidance before resampling it to the noisy manifold at time $t-1$~\citep{song2023solving, zhang2024daps}. The above-discussed approaches are still highly sensitive to the measurement gradient step size~\citep{peng2024improving}. Indeed, balancing the measurement gradient with the unconditional score function remains a significant challenge to solving inverse problems using measurement-guided generation. \citet{wu2024principled} avoids the discussed approximations and samples from the posterior directly to resolve the need to find a balance between measurement guidance and the prior process.
+
+\textbf{Projections in diffusion models.}\quad Manifold and subspace projections are used in various contexts in diffusion models. { MPGD~\citep{hemanifold} uses a manifold-preserving approach to improve the efficiency of diffusion generation and solving inverse problems. While this method follows a similar sentiment as our proposed framework, it is only applicable when the measurement gradient is applied to $\hat \x_{0\mid t}$. Moreover, it requires the existence of an autoencoder for achieving manifold projection, and its performance is heavily dependent on the expressive power of the autoencoder. Unlike MPGD, DiffStateGrad is applicable to methods that apply the guidance to $\hat \x_{0\mid t}$/$\hat \z_{0\mid t}$ (i.e., ReSample and DAPS) and methods that apply the guidance to $\hat \x_{t}$/$\hat \z_{t}$ (i.e., PSLD and DPS).} \citet{chung2022improving} proposes a manifold constraint to project the measurement gradient into the data manifold $\x_0$ { while the guidance updates $\x_t$}; our proposal is more effective since we project the measurement gradient on the noisy diffusion state related to $\x_t$ or $\z_t$, { preserving the $t$ state} on $\mathcal{M}_t$ rather than $\mathcal{M}_0$.
+
+\begin{wraptable}[11]{r}{0.6\textwidth}
+\centering
+\fontsize{9}{11}\selectfont
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{.999\linewidth}{!}{%  % Make table full width
+\begin{tabular}{l*{5}{c}}
+\toprule
+ Method & \multicolumn{1}{c}{ Gradient computation} & 
+\multicolumn{2}{c}{ Gradient incorporation} & \multicolumn{2}{c}{ Projection}\\
+\cmidrule(lr){2-2} \cmidrule(lr){3-4} \cmidrule(lr){5-6}
+ &  $\x_{0\mid t}$/$\z_{0\mid t}$ &   $\x_t$/$\z_t$ &  $\x_{0\mid t}$/$\z_{0\mid t}$ &  $\x_t$/$\z_t$ &  $\x_{0\mid t}$/$\z_{0\mid t}$\\
+\midrule
+ DPS &  \cmark &  \cmark &  \xmark &  \xmark &  \xmark\\
+ PSLD &  \cmark &  \cmark &  \xmark &  \xmark &  \xmark\\
+ ReSample &   \cmark &  \xmark &  \cmark &  \xmark &  \xmark\\
+ DAPS &  \cmark &  \xmark &  \cmark &  \xmark &  \xmark\\
+ MCG &  \cmark &  \cmark &  \xmark &  \xmark &  \cmark\\
+ MPGD &  \cmark &  \xmark &  \cmark &  \xmark &  \cmark\\
+ DiffStateGrad (ours) &  \cmark &  \cmark &  \cmark &  \cmark &  \cmark\\
+\bottomrule
+\end{tabular}
+}
+\caption{{\textbf{Gradient guidance computation, incorporation, and projection for diffusion-based inverse problems.}}}
+\label{tab:compared_method_gradient_guidance}
+\end{wraptable}
+\textbf{Gradient guidance incorporation.}\quad { Prior works differ from one another in two key aspects: (a) how the gradient is computed and (b) how the gradient is used to update the diffusion state. \Cref{tab:compared_method_gradient_guidance} categorizes prior works based on these characteristics. While a few approaches, such as diffusion-based MRI~\citep{chung2022score}, compute the measurement gradient using $\x_{t}$, most recent literature has shifted toward using $\x_{0|t}$ for gradient computation. Regarding gradient incorporation, the literature is further subdivided. For instance, methods like DPS and PSLD use the measurement gradient to update the state at time $t$, whereas other approaches, such as ReSample, DAPS, and MPGD, apply the guidance to the conditional state at $0|t$ before resampling. Additionally, while the projections in MCG~\citep{chung2022improving} and MPGD~\citep{hemanifold} are restricted to $\x_{0|t}$, DiffStateGrad stands out by being applicable to both types of methods.}
+
+\textbf{Conditional diffusion models for inverse problems.}\quad We focus on unconditional diffusion models as learned priors to solve general inverse problems. This approach leverages \emph{already trained} diffusion models, which is useful for domains with abundant data. Another approach is to train conditional diffusion models where $\nabla_{\x_t} \log p_t(\y \mid \x_t)$ is directly captured by the score function, or where the diffusion directly transforms the measurement into the underlying data (e.g., image-to-image diffusion)~\citep{saharia2022palette, liu20232, chung2024direct}. This latter approach is problem-specific; hence, it is not generalizable across inverse tasks. { Finally, we note that while this work focuses on gradient-based guidance, prior work such as RePaint~\citep{lugmayr2022repaint} introduces a gradient-free masking strategy to solve inverse problems. Although RePaint is appealing, it is limited to inpainting tasks and scenarios where measurement noise is negligible.}
+
+
+\section{Diffusion State-Guided Projected Gradient (DiffStateGrad)}
+
+
+We propose a \textit{Diffusion State-Guided Projected Gradient} (DiffStateGrad) to solve inverse problems. DiffStateGrad can be incorporated into a wide range of diffusion models to improve guidance-based diffusion models. Without loss of generality, we explain DiffStateGrad in the context of Latent-DPS~\citep{chung2023diffusion} { which applies the measurement guidance to $\z_t$}. We note that DiffStateGrad applies to a wide range of pixel and latent diffusion-based inverse solvers (see \Cref{sec:results}).
+Given $\z_{t+1}$, we sample $\z_{t}$ from the unconditional reverse process, and then compute the estimate $\hat \z_0(\z_{t}) \coloneqq \mathcal{D}(\mathbb{E}[\z_0 \mid \z_{t}])$. Then, the data-consistency guidance term can be incorporated as follows.
+\begin{equation}
+\z_{t} \leftarrow \z_{t} - \eta_t \mathcal{P}_{\mathcal{S}_t}(\bm{g}_t),
+\end{equation}
+where $\bm{g}_t = \nabla_{\z_{t+1}} \log p(\y \mid \hat \z_0(\z_t))$ is the measurement gradient (MG), $\eta_t$ is the step size, and $\mathcal{P}_{\mathcal{S}_t}$ is a projection step onto the low-rank subspace $\mathcal{S}_t$. The main contribution of this paper is { a) to highlight that the measurement gradient should be projected onto a subspace imposed by the state being updated by the gradient (see gradient incorporation column in~\Cref{tab:compared_method_gradient_guidance}) and b)} to define this subspace so it results in better posterior sampling; in other words, to define a subspace such that when the measurement gradient is projected onto, the diffusion process is not disturbed and pushed away from the data manifold. In \Cref{tab:proj_random_comparison}, we show { for PSLD} that indeed the subspace $\mathcal{S}_t$, defined by the intermediate diffusion state, results in an improved posterior sampling, unlike a subspace that is constructed based on a random matrix or the low-rank structure of the measurement gradient. Hence, we choose the diffusion state $\z_t$ to define $\mathcal{S}_t$. { Finally, for methods where the measurement gradient guidance is being applied to $\z_{0 \mid t}$, we define the low-rank subspace based on $\z_{0 \mid t}$ (see~\Cref{tab:compared_method_gradient_guidance}).}
+
+We focus on images as our data modality and implement the projection $\mathcal{P}_{\mathcal{S}_t}$ by computing the SVD of $\z_t$ in its image matrix form, denoted by $\bm{Z}_t$ (i.e., $\bm{U}, \bm{S}, \bm{V} \gets \text{SVD}(\bm{Z}_t)$). Then, we compute an adaptive rank $r \gets \underset{k}{\argmin} \{\nicefrac{\sum_{j=1}^k s_j^2}{\sum_{j} s_j^2} \geq \tau\}$ leveraging a fixed variance retention threshold $\tau$. The gradient $\bm{g}_t$, which takes a matrix form for images, is projected onto a subspace defined by the highest $r$ singular values of $\Z_t$ as follows:
+\begin{equation}
+\bm{G}_t \leftarrow \bm{U}_r \bm{U}_r^{\text{T}} \bm{G}_t \bm{V}_r^{\text{T}} \bm{V}_r,
+\end{equation}
+where $\bm{G}_t$ is the measurement gradient in image matrix form, and $\bm{U}_r$ and $\bm{V}_r$ contain the first $r$ left and right singular vectors, respectively (\Cref{algo:plorg_main}). While we use the \textit{full} SVD projection (i.e., combining both left and right projection), in practice, one may choose to do either left or right projection. Next, we provide mathematical intuitions (\Cref{prop:plorg}) on the effectiveness of DiffStateGrad in preserving $\z_t$, particularly for high-dimensional data with low-rank structure, after the MG update on the manifold $\mathcal{M}_t$. Finally, we note that while DiffStateGrad can significantly improve the runtime and computational efficiency of diffusion frameworks that use Adam optimizers for data consistency~\citep{song2023solving, zhaogalore}, the current implementation and this paper does not explore this aspect and, instead, focuses on the property of the proposed subspace.
+\begin{algorithm}[t]\label{algo:plorg_main}
+    \caption{Diffusion State-Guided Projected Gradient (DiffStateGrad) for Latent Diffusion-based Inverse Problems (Image Restoration Tasks)}
+    \begin{algorithmic}[1]
+        \Require Normal input + variance retention threshold $\tau$
+        \State Let $T$ = number of total iterations of sampling algorithm and assume we calculate latent image representation $\Z_t$ for each iteration. Note that $\Z_t$ is a matrix.
+        \For{$t = T-1$ \textbf{to} $0$}
+            \State Compute measurement gradient $\bm{G}_t$ according to sampling algorithm 
+            \State $\bm{U}, \bm{S}, \bm{V} \gets \text{SVD}(\Z_t)$ \Comment{Perform SVD on current diffusion state}
+            \State $\lambda_j \gets s_j^2$ (where $s_j$ are the singular values of $\bm{S}$) \Comment{Calculate eigenvalues}
+            \State $c_k \gets \frac{\sum_{j=1}^k \lambda_j}{\sum_{j} \lambda_j}$ \Comment{Cumulative sum of eigenvalues}
+            \State $r \gets \underset{k}{\argmin} \{c_k \geq \tau\}$ \Comment{Determine rank $r$ based on threshold $\tau$}
+            \State $\bm{A}_t \gets \bm{U}_r$ \Comment{Get first $r$ left singular vectors}
+            \State $\bm{B}_t \gets \bm{V}_r$ \Comment{Get first $r$ right singular vectors}
+            \State $\bm{R}_t \gets \bm{A}_t^T \bm{G}_t \bm{B}_t^T$ \Comment{Project gradient}
+            \State $\bm{G}'_t \gets \bm{A}_t \bm{R}_t \bm{B}_t$ \Comment{Reconstruct approximated gradient}
+            \State Use updated gradient $\bm{G}'_t$ in sampling algorithm
+        \EndFor
+        \State \Return $\mathcal{D}(\hat{\z}_0)$
+    \end{algorithmic}
+\end{algorithm}
+
+\begin{restatable}[]{proposition}{propplog}\label{prop:plorg}
+Let $\mathcal{M}$ be a smooth $m$-dimensional submanifold of a $d$-dimensional Euclidean space $\mathbb{R}^d$, where $m < d$. Assume that for each { state} $\z_t \in \mathcal{M}$, the tangent space $T_{\z_t} \mathcal{M}$ is well-defined, and the projection operator $\mathcal{P}_{\mathcal{S}_{\z_t}}$ onto an approximate subspace $\mathcal{S}_{\z_t}$ closely approximates the projection onto $T_{\z_t} \mathcal{M}$. For the state $\z_t \in \mathcal{M}$ and measurement gradient $\g_t \in \mathbb{R}^d$, consider two update rules:
+\begin{equation}
+\begin{aligned}
+\z_{t-1} &= \z_t - \eta \g_t \quad \text{(standard update)}, \\
+\z_{t-1}' &= \z_t - \eta \mathcal{P}_{\mathcal{S}_{\z_t}}(\g_t) \quad \text{(projected update)},
+\end{aligned}
+\end{equation}
+where $\eta > 0$ is a small step size. Then, for sufficiently small $\eta$, the projected update $\z_{t-1}'$ stays closer to the manifold $\mathcal{M}$ than the standard update $\z_{t-1}$. That is,
+\begin{equation}
+\text{dist}(\z_{t-1}', \mathcal{M}) < \text{dist}(\z_{t-1}, \mathcal{M}).
+\end{equation}
+\end{restatable}
+The remainder of this section provides intuition on how DiffStateGrad improves solving inverse problems in the presence of a suitable learned prior. Let the initial latent state $\z_t$ be on the manifold $\mathcal{M}_t$ (e.g., being artifact-free). { The term ``artifact-free'' refers to the generation process of an unconditional diffusion model that is trained on clean data samples and provides an artifact-free trajectory from $\mathcal{M}_T$ to $\mathcal{M}_0$}. We observe that pushing away from the manifold process (e.g., introducing artifacts) can only be introduced via the guidance by the data-consistency gradient step, as this is the sole mechanism by which information from the measurement process enters the latent space. Consider the manifold $\mathcal{M}$ of artifact-free latent representations. Each $\z_t$ lies on this manifold, and the tangent space $T_{\z_t} \mathcal{M}$ represents the directions of ``allowable'' updates that maintain the artifact-free property staying on the current manifold. { Finally, we note that this motivates to project the gradient onto the tangent space of the data manifold where the guidance is applied. Alternatively, when the measurement gradient guidance is applied to $\z_{0|t}$, we define the projection step based on $\mathcal{S}_0$ (see also~\citep{hemanifold}).}
+
+Our DiffStateGrad method, through the projection operator $\mathcal{P}_{\mathcal{S}_{t}}$, approximates this tangent space. The effectiveness of DiffStateGrad depends on how well $\mathcal{P}_{\mathcal{S}_{t}}$ approximates the projection onto $T_{\z_t}\mathcal{M}$. Hence, we discuss a rationale on how the approximated projection is sufficient for performance; we, accordingly, support this by experimental results in~\Cref{sec:results}. First, the SVD captures the principal directions of variation in $\z_t$, which are likely to align with the local structure of the manifold when the data is high-dimensional. Second, by adaptively choosing the rank based on a variance retention threshold, we ensure that the projection preserves the most significant state-related structural information while filtering out potential noise or artifact-inducing components from the measurement gradient. Finally, the low-rank nature of our approximation aligns with the assumption that the manifold of representations has a lower intrinsic dimensionality than the ambient space.
+Hence, by projecting the measurement gradient onto this subspace defined by the current latent state $\z_t$, we effectively filter the directions orthogonal to the local manifold structure, and hence, remove artifacts-inducing components. This projection ensures that updates to $\z_t$ remain closer to the manifold $\mathcal{M}$ than unprojected updates would, as stated in~\Cref{prop:plorg}. Consequently, DiffStateGrad relies on the reliability of the learned prior and helps to provide high-probability posterior samples. This creates an inductive process: if $\z_t$ is artifact-free, and we only allow updates that align with its structure (i.e., updates that stay close to the manifold $\mathcal{M}$), subsequent latent representation $\z_t$ will likely be samples from the high-probability regions of the posterior.
+\Cref{fig:vis_largestep} demonstrates the effectiveness of DiffStateGrad in removing artifacts when the MG step size is large; artifacts are introduced onto the measurement gradient and stay within the latent representation in PSLD~\citep{rout2023solving}. On the other hand, the reverse process via DiffStateGrad-PSLD (our method applied to PSLD) stays artifact-free, consistent with the mathematical analysis in~\Cref{prop:plorg} and the practical efficacy of the proposed SVD-based subspace projection. Finally, we note that the most significant improvements appear in challenging tasks such as phase retrieval, HDR, and inpainting. We attribute the effectiveness of DiffStateGrad, particularly in challenging tasks, to a reduced rate of failure cases (\Cref{fig:combined_robustness_psnr}). By constraining solutions closer to the data manifold, DiffStateGrad minimizes extreme failures, enhances consistency in reconstruction { quality}.
+\begin{wrapfigure}[14]{r}{0.55\textwidth}
+    \begin{center}
+    \centering
+    \begin{subfigure}[b]{0.999\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/runtime/diffusion_solvers_runtime_comparison_horizontal.png}
+    \end{subfigure}
+    \caption{\textbf{Runtime complexity of DiffStateGrad.} The increase of runtime with DiffStateGrad is minimal.}
+    \label{fig:runtime}
+    \end{center}
+\end{wrapfigure}
+
+\textbf{Efficiency.}\quad DiffStateGrad introduces minimal computational overhead. We perform SVD \textit{at most} once per iteration, and for latent diffusion solvers, this occurs in the latent space on $64 \times 64$ matrices. By selecting a low rank based on a variance threshold, subsequent projection and reconstruction operations are performed on reduced matrices, further decreasing computational complexity. \Cref{fig:runtime} illustrates the runtime for the three diffusion-based methods of PSLD~\citep{rout2023solving}, ReSample~\citep{song2023solving}, and DAPS~\citep{zhang2024daps} with and without DiffStateGrad. The figure shows that the additional computational cost of incorporating DiffStateGrad is marginal, typically adding only a few seconds to the total runtime (see~\ref{subsec:efficiency_experiment} for further details). We note that our method is not intended to \textit{improve} efficiency, but rather to enhance performance and robustness.
+
+
+\section{Results}
+
+This section provides extensive experimental results on the effectiveness of DiffStateGrad employed in several methods for image-based inverse problems. We show that DiffStateGrad significantly improves (1) the robustness of diffusion-based methods to the choice of measurement gradient step size and measurement noise, and (2) the overall posterior sampling performance of diffusion. 
+\textbf{Experimental setup.}\quad {We evaluate the performance of DiffStateGrad applied to four SOTA diffusion methods of PSLD~\citep{rout2023solving}, ReSample~\citep{song2023solving}, DPS~\citep{chung2023diffusion}, and DAPS~\citep{zhang2024daps}. These methods span both latent solvers (PSLD and ReSample) and pixel-based solvers (DPS and DAPS). We also directly compare against other methods including DDNM~\citep{wang2023zero}, DDRM~\citep{kawar2022denoising}, MCG~\citep{chung2022improving}, and MPGD-AE~\citep{hemanifold}.} We evaluate performance based on key quantitative metrics, including LPIPS (Learned Perceptual Image Patch Similarity), PSNR (Peak Signal-to-Noise Ratio), and SSIM (Structural Similarity Index)~\citep{wang2004image}. We demonstrate the effectiveness of DiffStateGrad on two datasets: a) the FFHQ $256 \times 256$ validation dataset~\citep{karras2021stylebased}, and b) the ImageNet $256 \times 256$ validation dataset~\citep{deng2009imagenet}. For pixel-based experiments, we use (i) the pre-trained diffusion model from \citep{chung2023diffusion} for the FFHQ dataset, and (ii) the pre-trained model from \citep{dhariwal2021diffusion} for the ImageNet dataset. For latent diffusion experiments, we use (i) the unconditional LDM-VQ-4 model trained on FFHQ~\citep{rombach2022high} for the FFHQ dataset, and (ii) the Stable Diffusion v1.5~\citep{rombach2022high} model for the ImageNet dataset.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.49\textwidth}
+            \centering
+            \includegraphics[width=0.7\textwidth]{figures/nmse_vs_omega_plot_var_cutoff_robust.png}
+            \caption{Box Inpainting (NMSE).}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{0.49\textwidth}
+            \centering
+            \includegraphics[width=0.7\textwidth]{figures/psnr_vs_omega_plot_var_cutoff_robust.png}
+            \caption{Box Inpainting (PSNR).}
+        \end{subfigure}
+        \label{fig:robustness}
+    \end{subfigure}
+    
+    
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/robust_step_size/lpips_vs_mg_step_size_plot_random_inpainting_with_std.png}
+            \caption{Random Inpainting (LPIPS).}
+            \label{fig:random_inpainting}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/robust_step_size/lpips_vs_mg_step_size_plot_motion_deblur_with_std.png}
+            \caption{Motion Deblur (LPIPS).}
+            \label{fig:motion_deblur}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/robust_step_size/lpips_vs_mg_step_size_plot_super_resolution_with_std.png}
+            \caption{Super-Resolution (LPIPS).}
+            \label{fig:super_resolution}
+        \end{subfigure}
+        \label{fig:three_task_comparison}
+    \end{subfigure}
+    \caption{\textbf{Robustness of DiffStateGrad to MG step size}. (a-b) Performance on box inpainting across various MG step sizes. (c-e) Performance on different tasks with default and large step sizes. We evaluate the performance of PSLD and DiffStateGrad-PSLD using FFHQ $256 \times 256$.}
+    \label{fig:combined_robustness}
+\end{figure}
+\begin{figure}[t]
+\begin{subfigure}[b]{0.48\linewidth}
+	\centering
+\includegraphics[width=0.8\linewidth]{figures/robust_meas_noise/ssim_vs_noise_plot_plorg_daps_vs_daps.png}
+ \caption{Inpainting (Box).}
+ \end{subfigure}
+\begin{subfigure}[b]{0.48\linewidth}
+	\centering
+\includegraphics[width=0.8\linewidth]{figures/robust_meas_noise/ssim_vs_noise_plot_plorg_psld_vs_psld.png}
+ \caption{Motion Deblur.}
+ \end{subfigure}
+\caption{\textbf{Robustness of DiffStateGrad to measurement noise.} We evaluate the performance of DiffStateGrad-PSLD and DiffStateGrad-DAPS with their respective counterparts on different tasks across a range of measurement noise levels { (std of 0 to 0.2)} using FFHQ $256 \times 256$.}
+ \label{fig:fig3}
+\end{figure}
+\begin{table}[t]
+\centering
+\label{tab:all_tasks_ffhq}
+\caption{\textbf{Performance comparison for linear and nonlinear tasks on FFHQ 256 $\times$ 256.}}
+\begin{subtable}{1.00\textwidth}
+\fontsize{8}{10}\selectfont
+\setlength{\tabcolsep}{2pt}
+\resizebox{\textwidth}{!}{%  % Make table full width
+\begin{tabular}{l*{10}{c}}
+\toprule
+Method & \multicolumn{2}{c}{Inpaint (Box)} & \multicolumn{2}{c}{Inpaint (Random)} & \multicolumn{2}{c}{Gaussian deblur} & \multicolumn{2}{c}{Motion deblur} & \multicolumn{2}{c}{SR (x4)} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11}
+& LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$  & LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ \\
+\midrule
+\multicolumn{11}{l}{\textit{Pixel-based}} \\
+DAPS & 0.136 & \underline{24.57} & 0.130 & \underline{30.79} & 0.216 & 27.92 & 0.154 & \underline{30.13} & 0.197 & \underline{28.64} \\
+DiffStateGrad-DAPS (ours) & \textbf{0.113} & \textbf{24.78} & \textbf{0.099} & \textbf{32.04} & 0.180 & \textbf{29.02} & \underline{0.119} & \textbf{31.74} & \underline{0.181} & \textbf{29.35} \\
+ DPS &   0.127 &   23.91 &   0.130 &  28.67 &    \underline{0.145}  &  25.48 &  0.132 &  26.75 &  0.191 &  24.38
+\\
+ DiffStateGrad-DPS (ours) &   \underline{0.114} &  24.10 &  \underline{0.107} &   30.15 &    \textbf{0.128}  &  26.29 &  \textbf{0.118} &  27.61 &  0.186 &  24.65
+\\
+ DDNM &  0.235 &  24.47 &  0.121 &  29.91 &  0.216 &  \underline{28.20} &  - &  - &  0.197 &  28.03
+\\
+ DDRM &  0.159 &  22.37 &  0.218 &  25.75 &  0.236 &  23.36 &  - &  - &  0.210 &  27.65
+\\
+ MCG &  0.309 &  19.97 &  0.286 &  21.57 &  0.340 &  6.72 &  0.702 &  6.72 &  0.520 &  20.05
+\\
+ MPGD-AE &  0.138 &  21.59 &  0.172 &  25.22 &  0.150 &  24.42 &  0.120 &  25.72 &  \textbf{0.168} &  24.01
+\\
+\midrule
+\multicolumn{11}{l}{\textit{Latent}} \\
+PSLD & 0.158 & \underline{24.22} & 0.246 & 29.05  & 0.357 & 22.87 & 0.322 & 24.25 & 0.313 & 24.51 \\
+DiffStateGrad-PSLD (ours) & \textbf{0.092} & \textbf{24.32} & 0.165 & \underline{31.68} & 0.355 & 22.95 & 0.319 & 24.31  & 0.320 & 24.56 \\
+ReSample & 0.198 & 19.91 & \underline{0.115} & 31.27 & \underline{0.253} & \underline{27.78} & \underline{0.160} & \underline{30.55} & \underline{0.204} & \underline{28.02} \\
+DiffStateGrad-ReSample (ours) & \underline{0.156} & 23.59 & \textbf{0.106} & \textbf{31.91} & \textbf{0.245} & \textbf{28.04} & \textbf{0.153} & \textbf{30.82} & \textbf{0.200} & \textbf{28.27} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:linear_tasks_ffhq}
+\caption{Linear inverse problems.}
+\end{subtable}
+\begin{subtable}{1.00\textwidth}
+\centering
+\fontsize{8}{10}\selectfont
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{\textwidth}{!}{%  % Make table full width
+\begin{tabular}{l*{6}{c}}
+\toprule
+Method & \multicolumn{2}{c}{Phase retrieval} & \multicolumn{2}{c}{Nonlinear deblur} & \multicolumn{2}{c}{High dynamic range} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ \\
+\midrule
+\multicolumn{7}{l}{\textit{Pixel-based}} \\
+DAPS & \underline{0.139} {\scriptsize(0.026)} & \underline{30.52} {\scriptsize(2.61)} & \underline{0.184} {\scriptsize(0.032)} & \underline{27.80} {\scriptsize(1.97)} & \underline{0.170} {\scriptsize(0.075)} & \underline{26.91} {\scriptsize(3.94)} \\
+DiffStateGrad-DAPS (ours) & \textbf{0.105} {\scriptsize(0.023)} & \textbf{32.25} {\scriptsize(1.34)} & \textbf{0.145} {\scriptsize(0.027)} & \textbf{29.51} {\scriptsize(2.16)} & \textbf{0.143} {\scriptsize(0.070)} & \textbf{27.76} {\scriptsize(3.18)}\\
+\midrule
+\multicolumn{7}{l}{\textit{Latent}} \\
+ReSample & \underline{0.237} {\scriptsize(0.189)} & \underline{27.61} {\scriptsize(8.07)} & \underline{0.188} {\scriptsize(0.037)} & \underline{29.54} {\scriptsize(1.89)} & \underline{0.190} {\scriptsize(0.067)} & \underline{24.88} {\scriptsize(3.46)} \\
+DiffStateGrad-ReSample (ours) & \textbf{0.154} {\scriptsize(0.104)} & \textbf{31.19} {\scriptsize(4.33)} & \textbf{0.185} {\scriptsize(0.035)} & \textbf{29.91} {\scriptsize(1.60)} & \textbf{0.164} {\scriptsize(0.041)} & \textbf{25.50} {\scriptsize(3.07)} \\
+\bottomrule
+\end{tabular}%
+}
+\label{tab:nonlinear_tasks_ffhq}
+\caption{Nonlinear inverse problems.}
+\end{subtable}
+\end{table}
+\begin{figure}[t]
+\begin{subfigure}[b]{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/rec_examples_good_fixed_title/chosen-images-updated_task_chosen-bip-images_id_60012.png}
+    \includegraphics[width=\textwidth]{figures/rec_examples_good_fixed_title/chosen-images-updated_task_chosen-bip-images_id_60027_notitle.png}
+    \caption{Box inpainting.}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/rec_examples_good_fixed_title/chosen-images-updated_task_chosen-rip-images_id_60037.png}
+    \includegraphics[width=\textwidth]{figures/rec_examples_good_fixed_title/chosen-images-updated_task_chosen-rip-images_id_60097_notitle.png}
+    \caption{Random inpainting.}
+\end{subfigure}
+\caption{\textbf{Qualitative comparison of DiffStateGrad-PSLD and PSLD for their best-performing MG step size}. DiffStateGrad-PSLD can remove artifacts and reduce failure cases, producing more reliable reconstructions. Images are chosen at random for visualization.}
+\label{fig:example_PLoRGpsld_vs_psld_large_stepsize_v2}
+\end{figure}
+We consider both linear and nonlinear inverse problems for natural images. For evaluation, we sample a fixed set of $100$ images from the FFHQ and ImageNet validation sets. Images are normalized to the range $[0, 1]$. {We use the default settings for all experiments (see~\Cref{subsec:implement} for more details).} For linear inverse problems, we consider (1) box inpainting, (2) random inpainting, (3) Gaussian deblur, (4) motion deblur, and (5) super-resolution. In the box inpainting task, a random $128 \times 128$ box is used, while the random inpainting task employs a $70\%$ random mask. Gaussian and motion deblurring tasks utilize kernels of size $61 \times 61$, with standard deviations of $3.0$ and $0.5$, respectively. For super-resolution, images are downscaled by a factor of $4$ using a bicubic resizer. For nonlinear inverse problems, we consider (1) phase retrieval, (2) nonlinear deblur, and (3) high dynamic range (HDR). For phase retrieval, we use an oversampling rate of 2.0, and due to the instability and non-uniqueness of reconstruction, we adopt the strategy from DPS \citep{chung2023diffusion} and DAPS \citep{zhang2024daps}, generating four separate reconstructions and reporting the best result. Like DAPS \citep{zhang2024daps}, we normalize the data to lie in the range [0, 1] before applying the discrete Fourier transform. For nonlinear deblur, we use the default setting from \citep{tran2021explore}. For HDR, we use a scale factor of 2. We note that PSLD is not designed to handle nonlinear inverse problems. { We also conduct an additional experiment for Magnetic Resonance Imaging (MRI) (see~\Cref{sec:mri}).}
+
+\textbf{Robustness.}\quad \Cref{fig:combined_robustness} exhibits the sensitivity of PSLD to the choice of MG step size; the performance of PSLD significantly deteriorates when a relatively large MG step size is used, leading to poor results across all tasks. In contrast, DiffStateGrad-PSLD shows superior robustness, maintaining high performance over a wide range of MG step sizes. \Cref{fig:fig3} demonstrates the robustness of DiffStateGrad methods compared to their non-DiffStateGrad counterparts when faced with increasing measurement noise. For both inpainting and Gaussian deblur tasks, the performance of DAPS and PSLD deteriorates significantly as noise levels rise. In contrast, DiffStateGrad-DAPS and DiffStateGrad-PSLD exhibit superior resilience across the range of noise levels tested.
+\textbf{Performance.}\quad We provide quantitative results in \Cref{tab:linear_tasks_ffhq,tab:nonlinear_tasks_ffhq,tab:linear_tasks_imagenet}, and qualitative results in \Cref{fig:example_PLoRGpsld_vs_psld_large_stepsize_v2}. {These results demonstrate the substantial improvement in the performance of DiffStateGrad-PSLD, DiffStateGrad-ReSample, DiffStateGrad-DPS, and DiffStateGrad-DAPS against their respective SOTA counterparts across a wide variety of linear and nonlinear tasks on both FFHQ and ImageNet.} For example, DiffStateGrad significantly improves performance and increases reconstruction consistency in both pixel-based and latent solvers for phase retrieval (\Cref{tab:nonlinear_tasks_ffhq}). { Our results also highlight the superiority of our choice of subspace compared to prior works. For example, DiffStateGrad-DPS is superior to MCG, which is the special case of DPS for manifold constrained diffusion. Furthermore, the outperformance of DiffStateGrad-DAPS against DAPS and MPGD-AE emphasizes the effectiveness of the proposed SVD-based subspace projection.} We additionally show that DiffStateGrad does not impact the diversity of the posterior sampling (see~\Cref{fig:diverse}). Finally, we note that DiffStateGrad is robust to the choice of subspace rank (\Cref{fig:three_task_comparison_2,fig:tau_compare}). We refer the reader to~\Cref{subsec:visuals} for the extensive qualitative performance of DiffStateGrad.
+\begin{table}[t]
+\centering
+\caption{\textbf{Performance comparison for { linear} tasks on ImageNet 256 $\times$ 256.}}
+\begin{subtable}{1.00\textwidth}
+\fontsize{8}{10}\selectfont
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{\textwidth}{!}{%  % Make table full width
+\begin{tabular}{l*{6}{c}}
+\toprule
+Method & \multicolumn{3}{c}{Inpaint (Box)} & \multicolumn{3}{c}{Inpaint (Random)} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+& LPIPS$\downarrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ \\
+\midrule
+\multicolumn{7}{l}{\textit{Pixel-based}} \\
+ DAPS &   \underline{0.217} {\scriptsize(0.043)} &   \underline{0.762} {\scriptsize(0.041)} &   \underline{20.90} {\scriptsize(3.69)}&   \underline{0.158} {\scriptsize(0.039)} &   \underline{0.794} {\scriptsize(0.067)} &   \underline{28.34} {\scriptsize(3.65)}\\
+ DiffStateGrad-DAPS (ours) &   \textbf{0.191} {\scriptsize(0.044)} &   \textbf{0.801} {\scriptsize(0.056)}&   \textbf{21.07} {\scriptsize(3.77)} &  \textbf{0.107} {\scriptsize(0.037)} &   \textbf{0.856} {\scriptsize(0.067)} &   \textbf{29.78} {\scriptsize(4.17)} \\
+ DPS &   0.257 {\scriptsize(0.086)} &   0.718 {\scriptsize(0.097)} &   19.85 {\scriptsize(3.54)}&   0.256 {\scriptsize(0.133)} &   0.728 {\scriptsize(0.143)} &   26.25 {\scriptsize(4.15)}\\
+ DiffStateGrad-DPS (ours) &   0.243 {\scriptsize(0.093)} &   0.731 {\scriptsize(0.100)}&   19.87 {\scriptsize(3.61)}&  0.233 {\scriptsize(0.138)} &   0.754 {\scriptsize(0.150)} &   27.28 {\scriptsize(4.88)} \\
+ MPGD-AE &   0.295 {\scriptsize(0.057)} &   0.621 {\scriptsize(0.053)}&   16.12 {\scriptsize(2.26)}&  0.554 {\scriptsize(0.148)} &   0.388 {\scriptsize(0.112)} &   17.91 {\scriptsize(3.25)} \\
+\midrule
+\multicolumn{7}{l}{\textit{Latent}} \\
+PSLD & \underline{0.182} {\scriptsize(0.033)} & \underline{0.780} {\scriptsize(0.044)} & \underline{16.28} {\scriptsize(3.49)} & 0.217 {\scriptsize(0.073)} & \underline{0.846} {\scriptsize(0.070)} & \underline{26.56} {\scriptsize(2.98)} \\
+DiffStateGrad-PSLD (ours) & \textbf{0.176} {\scriptsize(0.030)} & \textbf{0.803} {\scriptsize(0.045)} & \textbf{18.90} {\scriptsize(3.82)} & \textbf{0.169} {\scriptsize(0.050)} & \textbf{0.878} {\scriptsize(0.051)} & \textbf{28.48} {\scriptsize(4.04)} \\
+\bottomrule
+\end{tabular}
+}
+\caption{{ Inpainting inverse problems.}}
+\end{subtable}
+\begin{subtable}{1.00\textwidth}
+\fontsize{8}{10}\selectfont
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{\textwidth}{!}{%  % Make table full width
+\begin{tabular}{l*{6}{c}}
+\toprule
+Method & \multicolumn{2}{c}{Gaussian deblur} & \multicolumn{2}{c}{Motion deblur} & \multicolumn{2}{c}{SR (x4)} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ \\
+\midrule
+\multicolumn{7}{l}{\textit{Pixel-based}} \\
+ DAPS &  \underline{0.266} {\scriptsize(0.087)}  &  \underline{25.27} {\scriptsize(3.56)} &  \underline{0.166} {\scriptsize(0.058)}  &  \underline{28.85} {\scriptsize(3.64)} &  \underline{0.259} {\scriptsize(0.073)} &  \underline{25.67} {\scriptsize(3.40)}  \\
+ DiffStateGrad-DAPS (ours) &  \textbf{0.243} {\scriptsize(0.075)} &  \textbf{25.87} {\scriptsize(3.56)} &  \textbf{0.143} {\scriptsize(0.050)} &  \textbf{29.71} {\scriptsize(3.54)} &  \textbf{0.229} {\scriptsize(0.057)} &  \textbf{26.40} {\scriptsize(3.44)} \\
+ MCG &  0.550 {\scriptsize(-)} &  16.32 {\scriptsize(-)} &  0.758 {\scriptsize(-)} &  5.89 {\scriptsize(-)} &  0.637 {\scriptsize(-)} &  13.39 {\scriptsize(-)} \\
+\midrule
+\multicolumn{7}{l}{\textit{Latent}} \\
+PSLD & \underline{0.466} {\scriptsize(0.085)} & \underline{20.70} {\scriptsize(3.01)} & \underline{0.435} {\scriptsize(0.102)} & \underline{21.26} {\scriptsize(3.44)} & \underline{0.416} {\scriptsize(0.063)} & \underline{22.29} {\scriptsize(3.08)} \\
+DiffStateGrad-PSLD (ours) & \textbf{0.446} {\scriptsize(0.076)} & \textbf{22.34} {\scriptsize(3.19)} & \textbf{0.399} {\scriptsize(0.060)} & \textbf{23.80} {\scriptsize(3.27)} & \textbf{0.370} {\scriptsize(0.081)} & \textbf{23.53} {\scriptsize(3.52)} \\
+\bottomrule
+\end{tabular}
+}
+\caption{{ Deblurring and super-resolution inverse problems.}}
+\end{subtable}
+\label{tab:linear_tasks_imagenet}
+\end{table}
+
+
+
+\section{Conclusion}
+
+
+We introduce a \textit{Diffusion State-Guided Projected Gradient} (DiffStateGrad) to enhance the performance and robustness of diffusion models in solving inverse problems. DiffStateGrad addresses the introduction of artifacts and deviations from the data manifold by constraining gradient updates to a subspace approximating the manifold. DiffStateGrad is versatile, applicable across various diffusion models and sampling algorithms, and includes an adaptive rank that dynamically adjusts to the gradient's complexity. Overall, DiffStateGrad reduces the need for excessive tuning of hyperparameters and significantly boosts performance for more challenging inverse problems. We note that DiffStateGrad assumes that the learned prior is a relatively good prior for the task at hand. Since DiffStateGrad encourages the process to stay close to the manifold structure captured by the generative prior, it may introduce the prior's biases into image restoration tasks. Hence, DiffStateGrad may not be recommended for certain inverse problems such as black hole imaging~\citep{feng2024event}. { We finally note that DiffStateGrad can be combined with prior works that adopt initialization strategies for the diffusion process to further accelerate and improve performance~\citep{fabian2024adapt, chung2022come}. We leave this for future work.}
+
+
+
+\section{Reproducibility Statement}
+
+
+To ensure the reproducibility of our results, we thoroughly detail the hyperparameters used in our experiments in~\ref{subsec:hyper}. We also provide specific implementation and configuration details of all the baselines used in~\ref{subsec:psld},~\ref{subsec:resample},~\ref{subsec:dps}, and~\ref{subsec:daps}. Moreover, we use easily accessible pre-trained diffusion models throughout our experiments. We will make our code available upon acceptance to the conference.
+
+
+\newpage
+
+
+
+

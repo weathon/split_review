@@ -1,0 +1,282 @@
+\title{Scaling Laws for Precision}
+
+\begin{abstract}
+Low precision training and inference affect both the quality and cost of language models, but current scaling laws do not account for this. In this work, we devise ``precision-aware'' scaling laws for both training and inference. We propose that training in lower precision reduces the model's \textit{effective parameter count}, allowing us to predict the additional loss incurred from training in low precision and post-train quantization. For inference, we find that the degradation introduced by post-training quantization increases as models are trained on more data, eventually making additional pretraining data actively harmful. For training, our scaling laws allow us to predict the loss of a model with different parts in different precisions, and suggest that training \textit{larger} models in \textit{lower} precision may be compute optimal.  We unify the scaling laws for post and pretraining quantization to arrive at a single functional form that predicts degradation from training and inference in varied precisions. We fit on over 465 pretraining runs and validate our predictions on model sizes up to 1.7B parameters trained on up to 26B tokens.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Scale has emerged as a central driver of progress in deep learning \citep{brown2020languagemodelsfewshotlearners}. Key work on scaling \citep{kaplan2020scaling, hoffmann2022training} studied tradeoffs between model/dataset size to balance performance and compute. However, the precision in which models are trained and served is an important third factor that contributes to both cost and performance. Deep learning is trending towards lower precision: current frontier models like the Llama-3 series are trained in BF16 \citep{dubey2024llama}, and there is widespread effort to move the pretraining paradigm to FP8 \citep{micikevicius2022fp8}. The next generation of hardware will support FP4, and advances in weight-only quantization have led to training in binary and ternary at scale \citep{ma2024era, wang2023bitnet}. How far will these paradigms go? Specifically, we ask: 
+\begin{center}
+\textit{What are the tradeoffs between precision, parameters, and data?\\How do they compare for pretraining and inference?}
+\end{center}
+
+Studying scaling in precision is challenging because work on scaling laws generally aims to drop fine-grained implementation details in pursuit of universal functional forms while work on quantization generally does the opposite, focuses on the details: how quantization is done, with what type, to what part of the model. In seeking a balance, we consider a variety of plausible functional forms, and choose one that abstracts implementation details of quantization away from loss scaling, allowing us to predict loss scaling in many situations of practical interest. This functional form that posits bit precision and parameter count interchangeably contribute to a model's ``effective parameter count," $N_\text{eff}$, and implementation details like which parts of a model are quantized to what precision, interact with loss scaling only through their effect on this quantity. 
+
+\begin{figure}[t] % Use [b] to place figures at the bottom
+    \centering
+    \includegraphics[width=\linewidth]{test_fig1_new_evals.pdf} % test-fig1 
+    \caption{ Schematic of key findings. (Left) Training a fixed model size to various data budgets in BF16 and quantizing weights at the end. We find that degradation due to post-train quantization increases with tokens seen during pretraining, so that eventually \textbf{additional pretraining data can be harmful}. (Right) Our scaling suggests\textbf{ training \textit{larger} models in \textit{lower} precision can be compute-optimal} according to the cost model in Section \ref{section:implications-pretraining}.
+    }
+    \label{fig:main_figures}
+\end{figure}
+
+Overall, we study the scaling of the effects of precision on loss as we vary data and parameters, both \textit{during} and \textit{after} training. We first study how the degradation induced by post-train quantization scales with parameters and data. We find that the degradation increases with data, so that for a fixed model, training on additional data after a certain point can be actively harmful if the model will be quantized after training. We then shift our focus to quantized training, examining both the quantization-aware-training (weights only) and low-precision training (weights, activations, attention all quantized) settings. Our scaling laws for pretraining suggest that the compute-optimal pretraining precision is in general independent of compute budget. Surprisingly, however, this independence ceases to be true if model size is constrained, in which case the compute-optimal precision grows slowly in compute. 
+
+In all, we pretrain a suite of 465 language models in 3 to 16 bit precisions, as well as post-train quantize each to multiple precisions. For a language model with $N$ parameters, trained on $D$ tokens with training precision $P_\text{train}$, and post-train weight precision $P_\text{post}$, we ultimately find a unified scaling law that takes the following form:  
+    \begin{equation}
+        L(N, D, P_\text{train}, P_\text{post}) = \underbrace{\underbrace{AN_\text{eff}^{-\alpha}}_{\text{Training-time Effects}} + B D^{-\beta} + 
+E}_\text{Usual Chinchilla form} + \underbrace{\delta_\text{PTQ}(N_\text{eff}, D, P_\text{train}, P_\text{post})}_{\text{Post-Training Effects}}
+\end{equation}
+where $A, B, E, \alpha, \beta$ are positive fitted constants, and $\delta_\text{PTQ}$ refers to the loss degradation induced by post-training quantization before inference. Altogether, our results for post-train quantization illustrate how \textbf{more pretraining FLOPs do not always lead to better models} at inference-time, and our results for low-precision pretraining suggest \textbf{that both the standard practice of training models in 16-bit, and the race to extremely low (sub 4-bit) pretraining precision, may be suboptimal. }
+
+
+
+\section{Background, Related Work, and Setup}
+
+
+\textbf{Notation.}
+Throughout, $D$ denotes dataset size in tokens and $N$ denotes model size in parameters. $P_\text{w}, P_\text{a}, P_\text{kv}$ refer to the bit precision, in integer-type, of the weights, activations, and key-value cache (``attention")\footnote{We study KV, rather than QKV, because understanding scaling in the KV cache alone is important for many inference settings. For pretraining claims in Section \ref{section:implications-pretraining}, we quantize the entire attention computation, including queries, finding additionally quantizing the query vectors makes a negligible difference to scaling.} during \textit{training}, and $P_\text{post}$ refers to the precision we post-train quantize (PTQ) weights to at the end for model inference. When $P$ or $P_\text{train}$ is used without reference to a part of the model, all three model parts are tied to the same precision. The inference-time loss degradation induced by post-train quantization will be denoted $\delta_\text{PTQ}(N, D, P_\text{train}, P_\text{post})$, and it is defined as the change in loss from performing post-training quantization compared to the end of pretraining. We use ``high precision" to mean 16-bit or above. 
+
+\subsection{Quantization Fundamentals: How, What, When}
+\textbf{The Problem: Compute vs Memory-Bound Workloads.} Most deep learning workloads are bottlenecked by either \textit{compute}, in the form of matrix multiplications, or \textit{memory bandwidth}, in the form of data movement between different parts of the GPU. Different types of workloads have different bottlenecks: most time is spent doing large matrix multiplications during pretraining, so it is compute-bound; in contrast, small-batch inference is bandwidth-bound by model weights; long-sequence decoding is bandwidth-bound by KV cache, etc. \textbf{This motivates studying scaling in the training precision of the (weights, activations, KV cache) both in isolation and in combination. }
+\textbf{Quantization: How.} Quantization of an operation typically refers to rounding of values in matrices involved in some computation on the forward or backward pass, depending on what is quantized, and when. Quantization is usually done to integer or floating-point type.
+
+\textbf{Quantization: What.} \textit{Only weights. ``Quantization-aware training"} Quantizing only weights during training does not offer any compute savings because matrix multiplications are still done in high precision. However, this is commonly done to allow weights to adapt to low precision so they can be served at very low precision at inference-time, thereby alleviating memory bottlenecks \citep{ma2024era, wang2023bitnet}. 
+\textit{Weights, activations, attention. ``Low-precision training"} Quantizing and activations and attention in addition to weights allows for compute gains because matrix multiplications can be done in low precision (if the hardware supports it) since everything is in the same precision. We will refer to this setting as ``low-precision training" to distinguish it from quantization-aware training.  
+
+\textbf{Quantization: When.} Quantization can be done \textit{during} or \textit{after} training. In practice, when seeking to reduce inference-time memory costs, one first attempts post-train quantization. If that degrades the model too much, quantization-aware-training is used. Post-train quantization is typically only applied to model weights \citep{frantar2022gptq, dettmers2022gpt3, lin2023awq, xiao2023smoothquant}. To reduce pretraining costs, low-precision-training is needed. We will study scaling laws for post-training quantization in Section \ref{section:ptq}, for quantized training in Section \ref{section:training} (examining both quantization-aware training and low precision training) and unify the two in Section \ref{section:unifying}.
+
+\subsection{Scaling Laws and Parametric Fits}
+\textbf{Scaling Laws.}  \citet{hoffmann2022training} model loss scaling using the functional form $L(N, D) = AN^{-\alpha} + BD^{-\beta} + E$ where $A, B, \alpha, \beta, E$ are positive fitted constants, finding that data and parameters should be scaled in roughly equal proportion as more compute becomes available. We will refer to the scaling of \citep{hoffmann2022training} as ``Chinchilla-optimal" or just ``Chinchilla" and note this is often used colloquially as $D/N \approx 20$ being pretraining compute-optimal. On the theoretical front, work on scaling laws \citep{bahri2024explaining, bordelon2024dynamical, lin2024scaling} finds that noise to various parts of model or data affects loss in a predictable way. While previous works have explored the scaling behavior of post-training quantization in terms of total model bits~\citep{dettmers2023case} and knowledge capacity~\citep{allen2024physics}, we focus instead on data scaling. We note that in general the exact fitted values of all coefficients and exponents can vary drastically based on small implementation differences: \citet{besiroglu2024chinchilla} find different constants when attempting to replicate \citep{hoffmann2022training}, \citet{sardana2023beyond} fit coefficients $A, B$ of different orders of magnitude. For this reason, we emphasize our contribution is not the numerical values we fit, but the trends and functional forms we identify. 
+
+\textbf{Overtraining.} In practice, accounting for inference costs means training smaller models for substantially longer than Chinchilla-optimal \citep{sardana2023beyond, gadre2024language}. For instance, Llama-3-8B is trained to $D/N \approx 2000$ \citep{dubey2024llama} and the Gemma-2 series up to $D/N > 1000$ \citep{team2024gemma}. We refer to such models as ``overtrained" in this paper, with the token/parameter ratio $D/N$ being a key quantity throughout. Work on inference-time compute \citep{snell2024scaling, brown2024large} and on synthetic and multimodal data \citep{yang2024synthetic, fan2024scaling, bauer2024comprehensive} suggests future models may be even more overtrained. Therefore, modern work on scale must consider ratios much larger than Chinchilla-optimal, and in this work we perform experiments up to $D/N \approx 10^3$ and analyze the predictions found by our scaling law for up to $D/N \approx 10^5$.
+
+\subsection{Setup}
+
+We train and evaluate a suite of OLMo-style models on the Dolma V1. Our experiments consist of a sweep of language model pretraining runs over $N \in [30, 60, 110, 220]$ million parameters (non-embedding) and $D \in [1.5, 3, 6, 13, 26]$ billion tokens. Our model sizes are relatively small because we train up to a very high $D/N \approx 10^3$ to study data scaling and set off over 20 runs at every $(N, D)$: we sweep 8 values of precision for each of the (weights, activations, attention). 
+
+
+\section{Scaling Laws for Post-Train Quantization}
+
+\label{section:ptq}
+
+The easiest and most common quantization technique is post-train quantizing a model off-the-shelf \citep{chee2024quip, huang2024billm, dettmers2022gpt3, lin2023awq, xiao2023smoothquant}. We quantify the resulting loss degradation $\delta_\text{PTQ}$, finding that post-train quantization scales poorly in data. 
+
+\subsection{Overtrained Models Degrade more when Post-Train Quantized}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{tpr_gptq_new_evals.pdf}
+    \caption{Loss degradation from PTQ increases with data. Top row is loss after PTQ, bottom row is loss degradation compared to end of training, before PTQ. The top row is thus the gray line in each plot plus the corresponding value in the bottom row. We can see that degradation grows with data, bottom row is fitted with Equation \ref{eqn:degrade}. For $D/N $ sufficiently large (left), loss can increase in data. Even at lower $D/N$, where post-quant loss continues to decrease with data, the value of data is reduced compare to the baseline. $R^2 = 0.97$ over all fitted points (bottom row).}
+    \label{fig:tpr}
+\end{figure}
+
+We consider different model sizes (columns) trained on various data budgets (x-axis of each plot) and plot in Figure \ref{fig:tpr} both the loss after post-train quantization (top row) and the degradation incurred relative to end of training (bottom row). We find that the degradation $\delta_\text{PTQ}$ increases in training data size across all model sizes, but that for a fixed dataset size larger models incur a smaller degradation. We additionally observe that $\delta_{\text{PTQ}}$ increases exponentially as we decrease the precision we quantize to.
+Based on these observations we model $\delta_\text{PTQ}$ as taking the form:
+\begin{equation}
+\label{eqn:degrade}
+    \delta_\text{PTQ}(N, D, P_\text{post}) = C_T \left(\frac{D^{\gamma_D}}{N^{\gamma_N}}\right) e^{-P_\text{post}/\gamma_\text{post}}
+\end{equation}
+where $C_T, \gamma_D, \gamma_N, \gamma_\text{post}$ are positive fitted constants. The intuition for this poor data scaling might be that as models train on more data, they compress more information into their weights, so that perturbations to weights in the form of quantization are more harmful to loss, all else equal. 
+
+This finding implies that for models that will be post-train quantized, \textit{there exists an amount of pretraining data beyond which additional data is actively harmful to performance at inference-time} (see top-left, Figure \ref{fig:tpr}). This can be defined as the point where additional data increases post-train degradation more than it decreases loss during pretraining. We thus summarize our first scaling finding as follows. 
+
+\begin{tcolorbox}[colback=lightblue!10, colframe=lightblue!50!black, boxrule=0.5mm, arc=2mm]
+\label{finding:1}
+    \textbf{Finding 1.} Overtrained language models are more sensitive to post-training quantization. For models trained in BF16 or above, we can model this loss degradation as
+    $$\delta_\text{PTQ}(N, D, P_\text{post}) = C_T \left(\frac{D^{\gamma_D}}{N^{\gamma_N}}\right) e^{-P_\text{post}/\gamma_\text{post}}$$ where $C_T, \gamma_D, \gamma_N, \gamma_\text{post}$ are positive fitted constants. This implies that when $D/N$ is sufficiently large, or $P_\text{post}$ sufficiently small, loss after quantization can increase as models are pretrained for longer, as in Figure \ref{fig:tpr}. We will revisit and modify Equation \ref{eqn:degrade} in Section \ref{section:unifying} to account for the effects of \textit{training} in low-precision on $\delta_\text{PTQ}$.
+\end{tcolorbox}
+
+
+\section{Scaling Laws for Quantized Training}
+
+\label{section:training}
+
+In this section we study pretraining with weights, activations, and KV cache in various precisions. Importantly, only training precision, not test-time precision, is varied in this section; we discuss the interaction between train and test-time precision in Section \ref{section:unifying}. We sweep the training precisions of the weights, activations, and KV cache $P_\text{w}, P_\text{a}, P_\text{kv} \in [3, 12]$ individually, as well as training BF16 baselines. We also pretrain models with arbitrary combinations of $P_\text{w}, P_\text{a}, P_\text{kv}$ to validate our scaling laws.
+
+\subsection{Quantization-Aware-Training: Quantizing Weights During Training has a Consistent and Predictable Effect}
+
+We first examine the trade-off between weight precision $P_\text{w}$ and parameters $N$ while holding $P_\text{a} = P_\text{kv}$ fixed at high precision. We fix $D=13$B tokens and perform a grid sweep over combinations of $N$ and $P_\text{w}$. We plot the resulting IsoLoss contours where we linearly interpolate the final loss values in Figure~\ref{fig:isoloss}. We observe that the bit precision of the weights can be traded off for the number of parameters, i.e., a model with smaller $N$ but larger $P_\text{w}$ can achieve the same loss as a model with larger $N$ but smaller $P_\text{w}$.
+Additionally, we find that the gains from increasing the bit precision of the weights are large at lower precisions but saturate at higher precisions (typically around 6-7 bits per weight).
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{isoloss_N_eff_new_evals.pdf} % isoloss_contours_comparison_with_Neff_over_N
+    \caption{ (Left) $N_\text{eff}/N$ from our final scaling law. Our fit of $N_\text{eff}(N, P_\text{w})$ in this section is the first step towards this (blue). Empirical (center) and predicted (right) IsoLoss contours illustrating the precision-parameter tradeoff. Y-axis is weight precision during quantized training. All runs plotted trained on $D = 13$B tokens. Predictions from a fitted version of Equation \ref{eqn:our-chinchilla}, darker lines correspond to lower loss. }
+    \label{fig:isoloss}
+\end{figure}
+
+ We therefore modify Chinchilla scaling to account for $N_\text{eff}$ by making the substitution $N \mapsto N_\text{eff}(N, P_\text{w})$, giving the modified form:
+
+\begin{equation}
+\label{eqn:our-chinchilla}
+    L(N, D) = A[N(1-e^{-P_\text{w}/\gamma_\text{w}})]^{-\alpha} + BD^{-\beta} + E
+\end{equation}
+
+where we recall that $A, B, E, \alpha, \beta$ are fitted positive constants in the usual Chinchilla scaling form, and $\gamma_\text{w}$ is a fitted constant we introduce.  We plot the predictions of our fit compared to observed values in Figure \ref{fig:pw-fit} for a range of $(N, D)$. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{loss_vs_w_new_evals.pdf} % loss_vs_w_fit_Dolma
+    \caption{Predicting final validation losses $L(N, D, P_\text{w})$ for various $N, D, P_\text{w}$ to test our proposed functional form. Points are experimental values, lines are predictions of a single parametric fit of the form in Equation \ref{eqn:our-chinchilla}. We train only two model sizes at 26B due to compute constraints. }
+    \label{fig:pw-fit}
+\end{figure}
+
+\subsection{Low-Precision-Training: The Effects of Quantizing Weights, Activations, and Attention are Compositional and Multiplicative}
+
+Quantization-aware training does not change the cost of pretraining. This is because modern GPUs require inputs to a matrix multiplication to have the same precision, i.e. $P_\text{w} = P_\text{a}=P_\text{kv}$ \citep{micikevicius2022fp8}. To understand the interplay between precision and pretraining compute we must now analyze the scaling behavior of $P_\text{a}$ and $P_\text{kv}$ as well. 
+
+\textbf{Precision of activations and KV cache affect loss in a similar way.
+
+We refer to the scaling coefficients computed by varying the precision of just one part of the model at a time as \textit{marginally fitted constants}, and those found by fitting on runs that include multiple model components in low precision at the same time as \textit{jointly fitted constants}.  
+
+\textbf{Constants fitted marginally and jointly make similarly good predictions}.
+We now turn our attention to understanding the interactions between weights, activations, and attention. If the effects of quantizing weights, activations, and attention are independent, then a factorized, multiplicative interaction of the following form is a natural proposal. 
+\begin{equation}
+\label{eqn: full}
+    N_\text{eff}(P) = N(1-e^{-P_\text{w}/\gamma_\text{w}})(1-e^{-P_\text{a}/\gamma_\text{a}})(1-e^{-P_\text{kv}/\gamma_\text{kv}})
+\end{equation}
+We test whether this independence approximately holds by comparing the predictive power of a model with marginally fitted constants and a model with jointly fitted constants.
+We show the predictive power of both models in Figure \ref{fig:validate-qat-law}(b, c), finding that both methods for fitting constants have approximately the same predictive power.
+These results suggest that the independence assumption is reasonable.
+ 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{predictions_comparison_new_evals.pdf}
+    \caption{(Left) Predicted loss based on fitted values with Equation \ref{eqn: full}. (center) Fitting $\gamma$ parameters jointly on sweeps with combinations of precisions vs (right) fitting them on ``marginal" sweeps where only one model part is in low precision at a time. Outliers are those at extremely low precision whose training runs are sometimes unstable.}
+    \label{fig:validate-qat-law}
+\end{figure}
+\begin{tcolorbox}[colback=lightblue!10, colframe=lightblue!50!black, boxrule=0.5mm, arc=2mm]
+\label{finding:3}
+    \textbf{Finding 2.} The effects of quantizing the weights, activations, and KV cache during training are well modeled as independent and multiplicative so that $$L(N, D, P_\text{w}, P_\text{a}, P_\text{kv}) = 
+AN_\text{eff}^{-\alpha} + B D^{-\beta} + E$$ where $$N_\text{eff}(P_\text{w}, P_\text{a}, P_\text{kv}) = N(1-e^{-P_\text{w}/\gamma_\text{w}})(1-e^{-P_\text{a}/\gamma_\text{a}})(1-e^{-P_\text{kv}/\gamma_\text{kv}})$$ for which we fit constants $\gamma_\text{w}, \gamma_\text{a}, \gamma_\text{kv}$ that reflect the different sensitivities of weights, activations, and KV cache. If the three precisions are set to the same value $P$, as in pretraining, this simplifies to $N_\text{eff}(P) \approx N(1-e^{-P/\bar{\gamma}})^3$ where $\bar{\gamma}$ is the average of the three parameters. We visualize this functional form with our fitted values in Figure \ref{fig:isoloss} (left). 
+\end{tcolorbox}
+
+\subsection{Implications For Pretraining}
+\label{section:implications-pretraining}
+
+When training in a precision $P$, meaning $P_\text{w}=P_\text{a}=P_\text{kv}=P$, compute cost scales linearly in~$P$ \citep{abdelkhalik2022demystifying}\footnote{In practice, the gains are less than linear due to systems overhead.}.
+\citet{hoffmann2022training} performed all experiments in 16-bit precision and use a cost model of $C = 6ND$ FLOPs. We generalize this to $C = \frac{6}{16}NDP$ to account for the linear relation between compute and precision, which reduces to the Chinchilla cost function for $P=16$. We now examine three practically relevant variants of the following optimization problem. 
+\begin{equation}
+    \min_{N, D, P} L(N, D, P) = A[N(1-e^{-P/\gamma})^3]^{-\alpha} + BD^{-\beta} + E \text { subject to } C = \frac{6}{16} NDP 
+\end{equation}
+Since derivations are algebraically involved, we will work up to proportionality and verify proposed solutions numerically. We note that the implications of our functional form are true no matter the scale at which future experiments are done, but the numerical values we predict depend on our fitted constants which are fitted on smaller-scale, integer-type experiments. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{new_fig_6_new_evals.pdf} % new-fig-6
+    \caption{Scaling law predictions (left, fitted on integer type) vs empirical values (right, floating-point type). Precision of weights, activations, attention fixed to $P_\text{train}$. Predictions closely match the empirical trend, but are shifted up by a small amount since floating-point is a more expressive type and will incur lower loss at the same precision. (Right) When $N$ is held fixed, compute-optimal precision increases approximately logarithmically with data. Markers correspond to predicted compute-optimal precision for Llama-3 (8b, 70b, 405b), denoted by (circle, triangle, star) at each IsoFLOP (lines), illustrating how compute-optimal precision increases in data when model size is held fixed.}
+    \label{fig:pretraining-plots}
+\end{figure}
+
+\subsubsection{If You Must Train in Low Precision, Increase Parameters Before Data}
+
+\textbf{Minimizing $L(N, D)$ with $P$ fixed, subject to $C \propto NDP$.} We get with some algebra that at precision $P$ and compute budget $C$, the optimal allocations $N^*, D^*$ of parameters and data relative to Chinchilla-optimal $N_{\text{Ch}}, D_{\text{Ch}}$ will be given by 
+    \begin{equation}
+    \label{eqn: N(P)-top}
+        \frac{N^*(P, C)}{N_{\text{Ch}}(C)} \propto \left[1-e^{-P/\bar{\gamma}}\right]^{-\frac{3\alpha}{\alpha + \beta}} P^{-\frac{\beta}{\alpha + \beta}} \text{  and  } \frac{D^*(P, C)}{D_{\text{Ch}}(C)} \propto \left[1-e^{-P/\bar{\gamma}}\right]^{\frac{3\alpha}{\alpha + \beta}} P^{ \frac{\beta}{\alpha + \beta}}
+    \end{equation}
+    \textbf{which suggests as precision of training decreases at fixed compute, we should increase parameters and decrease data}. The interpretation of this is that at very low precisions, our effective parameter count vanishes so that increasing parameter count is compute-optimal since data egregiously outstrips effective parameters.
+    
+\subsubsection{Compute-Optimal Pretraining Precision is in General Independent of Compute} 
+
+\textbf{Jointly minimizing $L(N, D, P)$ with $C \propto NDP$}. This is the setting of pretraining without constraints on $N, D, P$ except for a fixed compute budget. Solving this joint minimization problem gives an implicit equation for $P^*(C)$
+\begin{align}
+    \frac{3\alpha}{\bar{\gamma}}\ u(P)^{\frac{3\alpha+1}{3\alpha}} e^{- P/\bar{\gamma}} = P^{-1 } u(P)
+\end{align}
+ which reveals that in general the optimal pretraining precision is independent of compute budget. This suggests that compute-optimal precision should be held fixed to $P^*$ while $N, D$ are scaled according to Equation $\ref{eqn: N(P)-top}$. We find this $P^*$ to be around 7-8 bits when fitting our scaling law on runs with quantization done to integer type. This has two consequences: first, this means \textbf{the de-facto practice of training models in 16-bit may be suboptimal.} Second,\textbf{ the race to low-precision training may have to stop before going below 4-bits}, since this would force model sizes to become disproportionately (more than 4x) larger to maintain loss scaling (see Figure \ref{fig:isoloss}, left). 
+ 
+ We test our predictions in Figure \ref{fig:pretraining-plots} at a larger scale. We train compute-matched models at various parameter count and precision ranging from FP4 to FP32 and 220M to 1.6B parameters. We train in floating-point type since that is standard in pretraining \citep{groeneveld2024olmo, deitke2024molmo}, though our scaling laws are fitted on integer type. We plot our predicted trend in Figure \ref{fig:pretraining-plots} (left) and the empirical values in the middle. We find that scaling fits on integer type are a strong fit until 4-bit precision, at which points the difference between the two types becomes more apparent. The matching of qualitative trends throughout, with the optimum being close to the predicted optimum of $P^*$ near 7-8 bits suggests that similar scaling laws may exist across types. 
+ 
+\subsubsection{But Compute-Optimal Pretraining Precision Can Increase in Compute if Model Size \texorpdfstring{$N$}{N} is Constrained}
+\textbf{Minimizing $L(D, P)$ with $N$ fixed, subject to $C \propto NDP$.} A common use case in practice is to train a suite of models of various sizes on similar data. The Llama-3 and Gemma-2 series \citep{dubey2024llama, team2024gemma} are examples. In this setting, $N$ is fixed in advance and only $D, P$ are jointly optimized. Surprisingly, our scaling laws predict that models of differing sizes should \textit{not} necessarily be trained in the same precision, and that compute-optimal precision scales as $P^*(C) \propto \log C$. The intuition for this is that, for a fixed $N$, precision acts as a new lever to bring highly overtrained models closer to pretraining optimality\footnote{An important subtlety here is that since models are overtrained for inference, we want to keep the cost of a forward pass---which is proportional to $NP$---fixed, not just $N$. While $NP$ is the same for both a model of $N_0$ parameters in 16-bit and one with $2N_0$ parameters in 8-bit, the latter has higher $N_\text{eff}$ with our $\bar{\gamma}$, so will reach a lower pretraining loss on the same data with the same training/inference costs.} by reducing $D/N_\text{eff}$. 
+    
+\begin{tcolorbox}[colback=lightblue!10, colframe=lightblue!50!black, boxrule=0.5mm, arc=2mm]
+    \textbf{Finding 3.} When $N, D, P$ are optimized jointly, compute-optimal pretraining precision is independent of compute. 16-bit has many unnecessary bits, and 4-bit requires increasing the model size disproportionately to maintain loss scaling. Our fits imply that 7-8 bits are compute-optimal. In contrast, when $N$ is fixed in advance, such as when training a model family on similar data, $P^*(C) \propto \log C$. This suggests that for models that will be significantly overtrained, higher precision during training may be compute-optimal.
+\end{tcolorbox}
+
+
+
+\section{A Unified Scaling Law for Precision}
+
+
+In this section, we combine the two scaling laws presented into a unified functional form that predicts both training/post-training effects, including interactions between the two. We now treat $\delta_\text{PTQ}$ as a function $\delta_\text{PTQ}(N, D, P_\text{train}, P_\text{post})$ rather than just $\delta_\text{PTQ}(N, D, P_\text{post})$ as we did earlier in Section \ref{section:ptq}. We find two competing effects at play when predicting $\delta_\text{PTQ}$, but \textbf{overall, models trained in lower precision are more robust to post-train quantization in the sense of incurring lower degradation. }
+
+\textbf{Two competing effects at play during post-train quantization.} Intuitively, training any of $P_\text{w}, P_\text{a}, P_\text{kv}$ in low precision forces the model to learn weights that are robust to ``quantization noise," so they degrade less under PTQ. But the reduced $N \mapsto N_\text{eff}$ implies that models trained in low precision will degrade \textit{more} because $\delta_\text{PTQ}$ increases with $N^{-\gamma_N}$ (Section \ref{section:ptq}). We call this second effect the ``overtraining" effect. In practice, the first ``robustification" effect is larger, so that models trained in lower precision overall degrade \textit{less} when post-train quantized. We confirm using $N_\text{eff}$ rather than $N$ to predict degradation given various training precisions leads to a substantially stronger fit in Figure \ref{fig:ptq-tax-unifying}(top left, top center), to verify the competing overtraining effect. 
+
+    \begin{figure}
+        \centering
+        \includegraphics[width=\linewidth]{combined_plots_new_evals.pdf}  % combined_plots
+    \caption{Combined plots for predicting degradation. (Left) demonstrates the quality of our fit on all our runs, including all combinations of pre and post-training precisions. (Center, right) illustrate visually that our unified degradation form can predict degradation when training and serving in any precision. Plots (center, right) vary $P_\text{w}$ only, but fits in (left) include runs where $P_\text{a}, P_\text{kv}$ are also jointly varied. 
+    }
+    \label{fig:ptq-tax-unifying-main}
+    \end{figure}
+
+\textbf{Modifying $\delta_\text{PTQ}$ to account for training precision.} We assume training precision is strictly greater than inference precision, and define degradation as identically zero if they are equal. We begin by studying how degradation scales with just weight-precision during training, $P_\text{w}$. 
+
+Consider Figure \ref{fig:ptq-tax-unifying-main}(center). We fix $(N,D)$ and each cell of the heatmap represents the empirical degradation $\delta_\text{PTQ}(P_\text{w}, P_\text{post})$. We observe that degradation very quickly increases to its exponentially large value from Section \ref{section:ptq} if there is any gap between training and inference-time precision. This motivates modifying our initial functional form fitted in Section \ref{section:ptq} to 
+\begin{equation}\label{eqn:final-ptqw}
+    \delta_\text{PTQ}(N, D, P_\text{w}, P_\text{post}) = 
+    C_T e^{-P_\text{post}/\gamma_\text{post}} 
+    \underbrace{\left(\frac{D^{\gamma_D}}{N_\text{eff}^{\gamma_N}}\right)}_{\text{Overtraining effect}}
+    \underbrace{[1 - e^{-C_\text{w}(P_\text{w} - P_\text{post})}]}_{\text{Robustification effect}}
+\end{equation}
+where $C_\text{w}$ is the only new fitted value. Then, we can extend this to include the precision effects of activations/attention in the natural way:
+
+\begin{equation}
+    \label{eqn:final-ptq}
+    \delta_\text{PTQ}(N, D, P_\text{w},P_\text{a},P_\text{kv}, P_\text{post}) = 
+    C_T e^{-P_\text{post}/\gamma_\text{post}} 
+    \left(\frac{D^{\gamma_D}}{N_\text{eff}^{\gamma_N}}\right)
+    \prod_{\text{x} \in \{\text{w}, \text{a}, \text{kv}\}} [1 - e^{-C_\text{x}(P_\text{x} - P_\text{post})}]
+\end{equation}
+
+We measure the fit to the data of such a functional form in Figure \ref{fig:ptq-tax-unifying-main}, and find a strong fit with $R^2 = 0.90$ on over 1000 data points (each of 465 pretraining runs post-train quantized to multiple precisions). 
+
+\textbf{An interpretable, unified functional form.} Now we simplify and interpret the resulting functional form. Consider training with only weights in low precision and take $C_\text{w} =1$ for illustrative purposes so we can simplify Equation \ref{eqn:final-ptq}. Denote $\sigma^2_\text{tr} := e^{-P_\text{w}/\gamma_\text{w}}$ as ``training noise" reflecting the decrease in effective parameter count due to training weights in lower precision. Then, Equation \ref{eqn:final-ptq} simplifies to
+\begin{equation}
+    \delta_\text{PTQ}(N, D, P_\text{train}, P_\text{post}) = C_T 
+    \underbrace{(\sigma^2_{\text{PTQ}} - \sigma^2_\text{tr})}_{\text{Robustification effect}} \cdot 
+    \underbrace{\left(\frac{D^{\gamma_D}}{N_\text{eff}^{\gamma_N}}\right)}_{\text{Overtraining effect}}
+\end{equation}
+which we note is the intuitive modification one might make to the form of the initial post-training quantization degradation we fitted in Section \ref{section:ptq}, in Finding \ref{finding:1}, with a small competing effects factor from $N_\text{eff}$ pushing in the opposite direction. \textit{It cleanly reflects the intuition that models are robustified to PTQ noise to the extent they were trained with similar noise}. 
+
+\begin{tcolorbox}[colback=lightblue!10, colframe=lightblue!50!black, boxrule=0.5mm, arc=2mm]
+    \textbf{Finding 4 (Unified Scaling Laws).} Modeling low-precision effects during pretraining as independent and multiplicative noise that accumulates, and including post-training quantization degradation, the predicted loss for a language model with $N$ parameters, trained on $D$ tokens, with training precision $P_\text{w}, P_\text{a}, P_\text{kv}$ to end-time weight-precision $P_\text{post}$, can be predicted as 
+
+    \begin{equation}
+        L(N, D, P_\text{w}, P_\text{a}, P_\text{kv}, P_\text{post}) = AN_\text{eff}^{-\alpha} + BD^{-\beta} + E + \delta_\text{PTQ}
+    \end{equation}
+
+    where $\delta_\text{PTQ}(N, D, P_\text{w}, P_\text{a}, P_\text{kv}, P_\text{post})$ is in general as in Equation \ref{eqn:final-ptq} and $N_\text{eff}(N, P_\text{w}, P_\text{a}, P_\text{kv})$ as in Finding \ref{finding:3}.
+    
+\end{tcolorbox}
+
+
+
+\section{Conclusion and Limitations}
+
+
+We find that the common inference-time technique of post-train quantization can incur large degradation at very high data budgets, demonstrating a striking example of how more pretraining compute does not always imply stronger models at inference-time. Seeking better data scaling, we study quantization-aware and low precision training. We find that parameters and bit precision are well modeled as interchangeably controlling an ``effective parameter count" of the model allows us to predict finite-precision loss effects accurately during both training and inference. 
+
+There are limitations to our analysis. First, we use a fixed architecture throughout to examine the effects of precision, parameters, and tokens in a controlled manner. In contrast, low precision training often involves architectural tweaks \citep{ma2024era, zhu2024scalable} that can close much of the gap from a vanilla full precision model. Second, while compute costs do scale linearly with precision, the gains from halving precision are usually less than 2x due to systems overhead. Third, we only consider loss scaling without downstream model evaluations. We emphasize that the trends we find aim to be suggestive rather than prescriptive, and hope future work can more comprehensively examine these effects at larger model scale. In all, we find that the effects of precision on loss are predictable and consistent, with important and surprising implications.
+
+\newpage 
+
+
+\section{Acknowledgements}
+
+
+Tanishq Kumar thanks Tim Dettmers, Chris De Sa, Neil Band and Luke Bailey for helpful comments and discussion, as well as Ludwig Schmidt for spotting an early typo. Blake Bordelon is supported by a Google PhD Fellowship. Cengiz Pehlevan is supported by NSF grant DMS-2134157, NSF CAREER Award IIS-2239780, and a Sloan Research Fellowship. This work has been made possible in part by a gift from the Chan Zuckerberg Initiative Foundation to establish the Kempner Institute for the Study of Natural and Artificial Intelligence. Aditi Raghunathan acknowledges support from AI2050 program by Schmidt Sciences (Grant G2264481), Google Research Scholar, Apple, NSF, Cisco. 
+
+We gratefully acknowledge the support of NIH under No. U54EB020405 (Mobilize), NSF under Nos. CCF2247015 (Hardware-Aware), CCF1763315 (Beyond Sparsity), CCF1563078 (Volume to Velocity), and 1937301 (RTML); US DEVCOM ARL under Nos. W911NF-23-2-0184 (Long-context) and W911NF-21-2-0251 (Interactive Human-AI Teaming); ONR under Nos. N000142312633 (Deep Signal Processing); Stanford HAI under No. 247183; NXP, Xilinx, LETI-CEA, Intel, IBM, Microsoft, NEC, Toshiba, TSMC, ARM, Hitachi, BASF, Accenture, Ericsson, Qualcomm, Analog Devices, Google Cloud, Salesforce, Total, the HAI-GCP Cloud Credits for Research program, the Stanford Data Science Initiative (SDSI). Benjamin F. Spector is supported by a Hertz Fellowship. The U.S. Government is authorized to reproduce and distribute reprints for Governmental purposes notwithstanding any copyright notation thereon. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the authors and do not necessarily reflect the views, policies, or endorsements, either expressed or implied, of NIH, ONR, or the U.S. Government.
+
+
+
+
+

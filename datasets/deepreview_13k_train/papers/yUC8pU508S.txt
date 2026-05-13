@@ -1,0 +1,272 @@
+\title{APE: Faster and Longer Context-Augmented Generation via Adaptive Parallel Encoding}
+
+\begin{abstract}
+Many modern language model applications, such as RAG and in-context learning, require the efficient combination of multiple external contexts to generate a response. Directly incorporating these contexts sequentially presents two challenges: (i) re-encoding each combined selection of contexts for every request creates a significant computational burden. (ii) concatenating selected contexts into a single sequence often exceeds LLM's context window limit. In this work, we explore the promising potential of parallel encoding as a solution to pre-cache the KV states of each context separately, allowing for direct loading and position reuse during inference. However, due to the misalignment of attention distribution, directly applying parallel encoding results in significant performance degradation. To enable accurate and efficient parallel encoding, we propose adaptive parallel encoding, which brings a shared prefix, additional scaling factor, and lower attention temperature to align the distribution of parallel encoding with sequential encoding. Experimental results on both ICL and RAG tasks tasks demonstrate an average improvement of 7.8% over standard parallel encoding. Comparing to sequential encoding, APE enhances performance by 2.9% for long context understanding while preserving 93% accuracy in few-shot learning. Efficiency evaluation demonstrates that APE achieves a 976$\times$ speedup for a 512K context-augmented generation with a 256-token response.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recently, retrieval-augmented generation (RAG) (Gupta et al., 2024; Gao et al., 2023) and in-context learning (ICL) (Dong et al., 2022; Wei et al., 2022) have been widely adopted in large language models (LLMs) (Dubey et al., 2024; Achiam et al., 2023) to drastically increase their ability to generalize to unseen tasks with external data. Both techniques incorporate a sequential encoding process to ground LLM inputs with additional texts: concatenating them into one sequence, and encoding the sequence into key-value (KV) states to serve as the context for the following query. This new, significantly longer input prompt enhances performance but introduces two key challenges. First, the increased latency required to preflil these contexts becomes a bottleneck in many tasks (Bai et al., 2023; Agarwal et al., 2024; Jiang et al., 2024b). Second, the limited size of context window (Chen et al., 2023a) leads to an accuracy gap compared to the ideal case where all relevant texts are included. These challenges, as illustrated in Figure 1, prevent us from fully using knowledge-rich external contexts in real-world deployments, leaving significant room for improvement in both efficiency and accuracy.  
+
+Since these contexts are typically predetermined and stored independently in external databases (Zayarni et al., 2024; Douze et al., 2024), one might naturally address these challenges by (i) pre-caching these contexts to accelerate inference and (ii) assigning the same positions across contexts to re-use the context window. However, for autoregressive LLMs, the KV states are inherently context-dependent, which means the KV states for the same text will vary based on the preceding context. Consequently, all possible permutations need to be cached, resulting in factorial growth of memory requirements as the database size increases. For example, caching all permutations of just ten 256-token texts for the LLAMA-3-8B model would demand an impractical 22 PB of memory. Moreover, re-using positions across contexts introduces negative relative positions, which is incompatible with the casual attention.  
+
+![](images/07ee52557d77fd1b6cb293229f20f40b66e61b1737980cea911c124b0a8be09a.jpg)  
+Problem Setup: Context-Augmented Generation   
+Figure 1: Overview of our approach. Context-augmented generation leverages additional context for response generation. Sequential encoding requires us to concatenate and re-encode each context during inference, leading to longer context exceeding LLM’s window size and larger latency for prefilling context. Parallel encoding offers an alternative approach to pre-cache the context and share same positions but leads to worse performance. We propose adaptive parallel encoding to align the attention weight distribution of parallel encoding with sequential encoding via three steps: shared prefix, scaling factor, and adaptive temperature. Our approach brings the benefti of parallel encoding while preserving the accuracy of the prediction without requiring additional fine-tuning of the model.  
+
+Pre-caching Contexts for Fast Inference: Contexts from the external sources can be pre-cached into KV states for direct loading during inference. Additionally, this approach allows for cost-free manipulation of the loaded texts, including insertion, deletion, replacement, and swapping operations.  
+
+Re-using Positions for Long Context: Contexts can be prepended to the same range of positions in an LLM’s context window, allowing for unlimited context length. This also avoids the “positional bias” in context ordering (Liu et al., 2024a), as each context is equally “close” to the generated tokens.  
+
+Despite the potential advantages of parallel encoding, Figure 2 demonstrate a significant performance degradation if directly applying parallel encoding in multiple scenarios, with average declines of $4.9\%$ (despite using $2.10\times$ context length) and $49.0\%$ , respectively. While there are some prior work attempts to correct this with fine-tuning, we still find these methods brings accuracy drop in reasoning tasks. This is primarily because the knowledge acquired from simple tasks can’t generalize well to complex ones.  
+
+Additionally, our results in Figure 2 reveal that parallel encoding, despite without further modifications, does not entirely break down and continues to generate reasonable responses. This observation highlights an inherent alignment between sequential and parallel encoding. Our key insight from Figure 3 and 4 is that $K V$ states from independently encoded contexts can be naturally merged into one single sequence due to their similarity in both direction and magnitude, attributed to the presence of an attention sink (Xiao et al., 2023). The sink ensures that KV states for distinct initial tokens exhibit a high cosine similarity and comparable $L^{2}$ norm. This initial alignment subsequently influences the direction of following KV states, which consistently maintain a similar large angle with the sink (see Figure 5).  
+
+Motivated by the above insight, we propose Adaptive Parallel Encoding (APE), which further align the distribution of attention weights with sequential encoding. APE enables accurate and efficient parallel encoding, as illustrated in Figure 1 (bottom). The main contribution of this paper is as follows:  
+
+• We systematically analyze the distribution properties of parallel encoding, focusing on the magnitude and direction of key-value (KV) states across various samples and positions. Our analysis identifies potential alignments and misalignments between parallel encoding and sequential encoding.  
+
+• We introduce APE for faster and longer context-augmented generation. Built upon parallel encoding, APE involves three key alignment steps: (i) Prepend a shared prefix to each context, avoiding the duplication of abnormal token distributions that can occur at the start positions. (ii) Apply a scaling factor to offset the increased attention weights resulting from placing all contexts closer to the query. (iii) Utilize a lower attention temperature to focus on undervalued semantically important tokens.  
+
+• We empirically demonstrate that (i) APE outperforms parallel encoding in both RAG and ICL scenarios, yielding improvements of $7.6\%$ and $7.9\%$ , respectively. (ii) APE extends the context length for long-context scenarios, surpassing the original model by $2.9\%$ . (iii) APE approaches the sequential encoding using same context input, maintaining $93\%$ accuracy. (iv) APE accelerates longcontext generation, achieving up to a $976\times$ speedup by eliminating prefilling time for the context.  
+
+
+
+\section{2 BACKGROUND AND RELATED WORK  }
+
+
+
+
+\section{2.1 PARALLEL ENCODING  }
+
+
+To start with, we present the formulation of parallel encoding for in-context augmented LLMs. Let $\boldsymbol{S}$ represent the input sequence comprising $N$ contexts and one query. This can be formally denoted as:  
+
+$$
+\begin{array}{r}{\mathcal{S}\!=\!\{\underbrace{s_{C_{0},0},...,s_{C_{0},l_{0}}}_{\mathrm{Context}\:0},\underbrace{s_{C_{1},0},...,s_{C_{1},l_{1}}}_{\mathrm{Context}\:1},...,\underbrace{s_{C_{N-1},0},...,s_{C_{N-1},l_{N-1}}}_{\mathrm{Context}\:N-1},\underbrace{s_{0},...,s_{l}}_{\mathrm{Query}}\}.}\end{array}
+$$  
+
+For simplicity, we can express this as: $\boldsymbol{S}\!=\!\left\{\boldsymbol{S}_{C_{0}},\boldsymbol{S}_{C_{1}},...,\boldsymbol{S}_{C_{N-1}},\boldsymbol{S}_{Q}\right\}$ , where $S_{C_{i}}$ represents the $i$ -th context, and $S$ represents the query. Given two models $\Theta_{\mathrm{Enc}}$ and $\Theta_{\mathrm{Dec}}$ (which may be the same model), we generate a response $\mathcal{R}$ to $\boldsymbol{S}$ using parallel encoding through the following two steps:  
+
+Pre-caching Contexts. The initial step involves calculating and caching the KV states for each context independently. For a given context $S_{C_{i}}$ , we compute the KV states as $(K_{C_{i}},V_{C_{i}})=\Theta_{\mathrm{Enc}}(S_{C_{i}})$ and store them into a database, where $K_{C_{i}}\!=\!\left\{k_{C_{i},0},\!\ldots,\!k_{C_{i},l_{i}}\right\}$ and $V_{C_{i}}\!=\!\left\{v_{C_{i},0},...,v_{C_{i},l_{i}}\right\}$ .  
+
+Generating Response. Next, we input the query $S_{Q}$ and load all pre-cached KV states to generate our response: $\mathcal{R}{\bar{=}}\,\Theta_{\mathrm{Dec}}(S_{Q},K_{C},V_{C})$ , where $K_{C}\!=\!\{\!K_{C_{0},\ldots,K_{C_{N-1}}}\}$ and $V_{C}\!=\!\{V_{C_{0}},...,\bar{V_{C_{N-1}}}\}$ .  
+
+Previous parallel encoding approaches vary in their implementation of $\Theta_{\mathrm{Enc}}$ and $\Theta_{\mathrm{Dnc}}$ . Parallel Context Windows (PCW) (Ratner et al., 2022) directly employ the pre-trained LLM as both, resulting in significant performance drops. Block-Attention (Sun et al., 2024a) further fine-tuning the model, successfully recovering performance in RAG tasks. Alternatively, CEPE (Yen et al., 2024) and FocusLLM (Li et al., 2024b) train additional transformers for $\Theta_{\mathrm{Enc}}$ , using encoder-only and decoder-only architectures respectively. These methods also differ in their design of $\Theta_{\mathrm{Dnc}}$ : CEPE train additional cross-attention layers for processing contexts, whereas FocusLLM directly input the context into the original self-attention layers. While these trainable approaches show promising results in retrieval tasks, challenges remain regarding their training costs and generalization to more complex scenarios.  
+
+
+
+\section{2.2 ATTENTION MECHINISM  }
+
+
+In a standard Softmax Attention, we attend the query to all KV states using the following formula:  
+
+$$
+O\!=\!\operatorname{Softmax}\!(\frac{Q K^{T}}{\sqrt{d}})V\quad Q\!\in\!\mathbb{R}^{n\times d}\quad K,V\!\in\!\mathbb{R}^{m\times d},
+$$  
+
+where $Q$ is the query state, and $K$ and $V$ denote the key and value states, respectively.  
+
+Previous research has revealed several significant insights into the distribution of attention weights (i.e., $\mathrm{Softmax}\big(\frac{Q K^{T}}{\sqrt{d}}\big))$ , which has motivated the design of our Adaptive Parallel Encoding method.  
+
+Attention Sink. StreamingLLM (Xiao et al., 2023) identifies the presence of an “attention sink” in LLMs – a token that receives a significantly higher attention score than other tokens but provides limited semantic information. It observes that the attention sink only exists in the initial token.  
+
+Position Embedding. To effective process sequential input, LLMs necessitate the explicit encoding of positional information. Common techniques include absolute positional embedding Vaswani (2017); Devlin (2018) and relative positional encoding (Su et al., 2024; Press et al., 2021). However, the introduction of position embedding not only limits the context window to the training length (Chen et al., 2023a), but also results in the “lost in the middle" phenomenon (Liu et al., 2024a), where LLMs struggle to produce correct answers when relevant information is located in the middle of the context.  
+
+2.3 LONG-CONTEXT FOR LLMS  
+
+Recent work has focused on expanding the context window of LLMs with inherently limited capacity. Main approaches include (i) Prompt Compression (Liu et al., 2024b; Pan et al., 2024; Jiang et al., 2023b), (ii) KV Cache Eviction (Zhang et al., 2024; Xiao et al., 2023; Li et al., 2024a), (iii) Long-context Fine-tuning (FT) (Chen et al., 2023b; Ding et al., 2024; Fu et al., 2024), and (iv) Linear Attention (Munkhdalai et al., 2024; Gu and Dao, 2023; Ma et al., 2024). While these methods allow for longer input prompt, their performance on downstream task has yet to be discussed.  
+
+On another line of research, prefilling is bottlenecked by the high computational cost of attention for long-context input (Fu, 2024). Optimizations to accelerate this can be categorized into four directions: Sparse Attention (Jiang et al., 2024a; Tang et al., 2024), Speculative Decoding (Sun et al., 2024b; Chen et al., 2024), Sequence Parallelism (Zhao et al., 2024), and Prefix Caching (Jin et al., 2024).  
+
+Our work aims to tackle both context window expansion and prefilling time acceleration, especially for Context-Augmented Generation like RAG or ICL, which involves multiple independent contexts.  
+
+![](images/81f99e999716d169614f091643c24cf6e8c578380cf24184b0d0a6f855bd0e9b.jpg)  
+3 OBSERVATIONS  
+
+Figure 2: Comparison of sequential encoding, parallel encoding, and CEPED in RAG and ICL scenarios.   
+Both parallel encoding and CEPED degrades performance compared to sequential encoding.  
+
+In this section, we evaluate the long-context understanding and few-shot learning capabilities of sequential encoding, parallel encoding, and CEPE-Distilled (CEPED) (Yen et al., 2024) on the LLAMA-2-7B-CHAT model 1 across various tasks, with results presented in Figure 2. Our analysis yields several key observations of parallel encoding. In Section 3.1, we first explain the limitation of trainable approaches in their generalization ability to complex tasks. Then, we investigates why parallel encoding doesn’t completely break down, despite LLMs being trained sequentially in Section 3.2. This analysis illuminates both the alignments and misalignments between parallel and sequential encoding.  
+
+
+
+\section{3.1 TRAINABLE APPROACHES ARE ONLY EFFECTIVE FOR EASY TASKS.  }
+
+
+Figure 2a evaluates CEPED’s long-context understanding ability on LongBench (Bai et al., 2023). Although CEPED accesses more contexts, it only surpasses the sequential baseline in 2 out of 3 question-answering (QA) tasks, and it even notably underperforms the naïve parallel encoding in the Summarization task (i.e., MultiNews), which requires synthesizing information from the entire context. We hypothesize that CEPED is unable to process complex tasks due to its training being limited to a unlabelled pre-training corpus, without instruction-tuning on high-quality QA samples. This explanation is supported by the results of ICL tasks (See Figure 2b), where CEPED performs on par with 1-shot sequential encoding on TriviaQA but falls short of it on GSM8K and MMLU, despite using 5 and $8\times$ more examples respectively. The latter involves reasoning tasks that are hard for the ill-trained model to understand. In conclusion, training models for parallel encoding requires (i) more diverse and labeled data, and (ii) resource-intensive instruction-tuning (e.g., SFT or RLHF (Ouyang et al., 2022)), presenting an unfavorable trade-off between training costs and model versatility.  
+
+
+
+\section{3.2 COMPARING PARALLEL ENCODING AND SEQUANTIAL ENCODING.  }
+
+
+In Figure 2, we observe an interesting phenomenon: the naïve parallel encoding, despite reducing performance, can generate reasonable responses without further modifications. This is surprising as  
+
+![](images/cb71d0453c212efef11b0497241a78a149bdc844b5b01037b9a9c9c296d02745.jpg)  
+216 217 218 219 220 221 222 223 224 225 226 227 228 229 230 231 232 233 234 235 236 237 238 239 240 241 242 243 244 245 246 247 248 249 250 251 252 253 254 255 256 257 258 259 260 261 262 263 264 265 266 267 268 269   
+Figure 3: Top Left: Both LLAMA-3-8B-INSTRUCT (a) and MISTRAL-7B-INSTRUCT-V0.3 (b) states exhibit a cosine similarity larger than 0.9 for the key states from distinct initial tokens. Top Right: Initial token’s key states show similar negative similarity to those from other positions for LLAMA-3-8B-INSTRUCT (c) and MISTRAL-7B-INSTRUCT-V0.3 (d). Bottom: The findings for value states is similar to that of key states. The X-axis represents the position in the context, using a logarithmic scale. Results are measured on on the HotPotQA dataset.  
+
+![](images/df773dfda2cec49daba447ad8f66913af7ad7c8b188ae30413b41118a6d9bb13.jpg)  
+
+Figure 4: Left: The cosine similarity between query and key states increases as the distance between their positions decreases. Middle and Right: The magnitude of key and value states remain relatively stable across positions, with the exception of an abnormal region demarcated by a red dashed line. The X-axis is the position in the context, displayed on a logarithmic scale. Results are measured using LLAMA-3-8B-INSTRUCT on the HotPotQA dataset.  
+
+contexts are encoded into KV states separately, with no guarantee that these states can be compared or combined. However, our analysis reveals that the attention mechanism in LLMs naturally enables these crucial capabilities, building an inherent alignment across independent contexts similar to sequential encoding. To clarify this, Figures 3 and 4 visualize and compare the direction (cosine similarity) and magnitude ( $L^{2}$ norm) of KV states for different samples and positions, respectively. Our observation is that key states share similar direction and value states demonstrate comparable magnitudes across different contexts. The direction similarity is primarily determined by the attention sink (Xiao et al., 2023), while the magnitude consistency stems from the normalization effect of the Softmax function.  
+
+Key states from different contexts are similar. The presence of an attention sink enables the comparison of key states from different contexts. In Figures 3a and 3b, we measure the cosine similarity of the key states for different initial tokens for the LLAMA-3-8B-INSTRUCT and MISTRAL-7BINSTRUCT-V0.3 model, which consistently yields a value close to 1. This indicates that the direction of the initial token remains largely invariant across different input. Figure 3c and 3d further analyze the similarity between the key states of the initial token and those of tokens at each subsequent position. We observe comparable negative values for key states from different positions, demonstrating a similarly large angle between initial key states and following ones, as visualized in Figure 5. This suggests that the direction of key states remains relatively consistent across various contexts, as they are primarily influenced by the initial token’s key state, which exhibits similar orientations across examples. These findings, combined with the small variance shown in Figure 4b, provide preliminary evidence that key states from different contexts share similar directions and magnitudes, making them comparable. A similar directional similarity for the value states can be found in Figure 3 (Bottom).  
+
+![](images/aca8fc81f8d89b24d53942db66b24e5b215942269e4598ca650a2dc82c698960.jpg)  
+Figure 5: Geometry of Key States.  
+
+To further understand this key observation, we conducted a small experiment using the LLAMA-3-8BINSTRUCT model on the HotPotQA dataset. Our anlysis involved applying rotations of varying degrees around random axes to the key states of initial tokens. For parallel encoding, we explored two rotation modes: one using the same rotation axis across different contexts, and another employing different random axes for each context. Figure 6 presents our findings, revealing that sequential encoding maintains performance across various rotation degrees. In contrast, both modes in parallel encoding deteriorate when rotations exceed 150 degrees. This effect arises from the duplication of initial tokens’ key states, which intensifies the impact of our rotations. Notably, using separate axes for each context leads to an earlier breakdown beginning at 90 degrees. This disrupts the directional similarity of key states with different initial tokens (i.e., $k_{\mathrm{initial}})$ in Figure 5 and enlarges the angle between key states from different contexts.  
+
+![](images/495e5ee4e544d45e713e752045352dd66cafb48f0baa10835d81f3aff2f3f31a.jpg)  
+Figure 6: Rotation Analysis  
+
+Values states from different contexts can be combined. In equation 2, value states are combined through a weighted summation in the attention calculation, where the Softmax operator would normalize the weights (i.e., attention scores) of all value states to sum to 1. This normalization indicates that the magnitude of current value states is determined solely by those from previous positions, resulting in a similar $L^{2}$ norm across positions, as shown in Figure 4c. Additionally, the small variance observed in this figure demonstrates that the magnitudes are comparable across samples. This consistency is likely determined by the first few tokens, which have nearly identical magnitudes.  
+
+Opportunities for improvement. Previous analyses demonstrate that key and value states exhibit a natural alignment across contexts in both direction and magnitude for most positions. However, the residual misalignments still severely reduce performance. We summarize these misalignments as follows:  
+
+• In Figures 3 and 4, we observe a notable discrepancy in both direction (larger cosine similarity) and magnitude (smaller $L^{2}$ norm) within the first few positions. We designate this area as an abnormal region within the whole context, which is delineated by a red dashed line in Figures 4b and 4c.  
+
+• Figure 4a illustrates the cosine similarity between query states from the last position and all key states. A significant increase is observed when the distance between these states is extremely close.  
+
+
+
+\section{4 ADAPTIVE PARALLEL ENCODING  }
+
+
+With all the lessons learned in Section 3, we will design our Adaptive Parallel Encoding (APE) to address the observed misalignments. APE enables a seamless shift to parallel encoding without requiring retraining, while maintaining the majority of the model’s capabilities. Our approach adaptively aligns the distribution of attention weights between sequential encoding and parallel encoding through a three-step procedure as showcased in Figure 1 (Bottom), thereby boosting both efficiency and accuracy.  
+
+4.1 PREPENDING SHARED PREFIX.  
+
+Figure 4b and $4\mathrm{c}$ illustrates that the magnitudes of both key and value states for the initial tokens differ significantly from those of subsequent tokens (A similar observation regarding their directions can be found in Figure 3). This discrepancy poses a challenge when encoding contexts in parallel from the beginning, as it would result in the duplication of these abnormal KV states. To address this issue, we propose a simple yet effective solution: prepending a shared prefix to all contexts. This approach ensures that these KV states appear only once in each generation step. In practice, the choice of prefix varies with the model and task. We use existing system prompts and instructions as the shared prefix when available. Otherwise, we will insert a few newline characters (i.e., $\"{\mathfrak{m}}")$ before all contexts. Additionally, the magnitudes increase approximately linearly on a logarithmic ${\bf X}$ -axis. This indicates that the magnitude increases rapid at the beginning and gradually slows down. Consequently, we also consider extending the existing prefix with additional newline characters to mitigate the discrepancy.  
+
+
+
+\section{4.2 ADDING SCALING FACTOR.  }
+
+
+In Figure 4a, the cosine similarity between query and key states increases as their distance decreases, with a notably sharper rise when the distance approaches zero. To offset this, we introduce a scaling factor $s$ smaller than one to the context. This factor is applied after the exp operation in the Softmax, allowing for a proportionally greater reduction for larger product values between query and key states.  
+
+
+
+\section{4.3 ADJUSTING ATTENTION TEMPERATURE.  }
+
+
+In the final step, we adjust the attention temperature $T$ to a value less than 1. This emphasizes semantically important tokens whose attention weights are above average but not as high as those closest to the query token. A carefully chosen temperature can recover the attention on these tokens while still maintaining a reduced scaling for the query’s immediate neighbors. To prevent an overall increase in attention weights across the entire context, we also apply the temperature $T$ as an exponent to the sum of attention weights before normalization. This can be expressed as $(\sum\exp(q k/T))^{T}$ , where $q$ and $k$ represents query and key states, respectively. When there is only one element in the sum, this expression simplifies to $\exp(q k)$ , which is equivalent to the standard attention mechanism.  
+
+
+
+\section{4.4 FORMULATION.  }
+
+
+Given these alignment processes, we can formulate the modified attention in APE. We begin with the standard Softmax attention, where $Q,K$ , and $V$ are the query, key, and value states from the input:  
+
+$$
+\begin{array}{r l}&{O\!=\!\mathrm{Softmax}(\frac{Q[K_{C_{0}}^{\top},\dots,K_{C_{N-1}}^{\top},K^{\top}]}{\sqrt{d}})\!\times\![V_{C_{0}},...,V_{C_{N-1}},V]}\\ &{\quad\!=\!\frac{[A_{C_{0}},...,A_{C_{N-1}},A]}{\sum_{i=0}^{N-1}\!\sum_{j=0}^{l_{i}-1}\!a_{C_{i},j}+\!\sum_{j=0}^{l-1}\!a_{j}}\!\times\![V_{C_{0}},...,V_{C_{N-1}},V],}\end{array}
+$$  
+
+After incorporating our proposed changes, the formula for our refined attention calculation becomes:  
+
+$$
+{\cal O}^{\prime}\!=\!{\frac{[A_{P},A_{C_{0}}^{\prime},...,A_{C_{N-1}}^{\prime},A]}{\sum_{j=0}^{l_{P}-1}\!a_{P,j}+\!(\sum_{i=0}^{N-1}\!\sum_{j=0}^{l_{i}-1}\!a_{C_{i,j}}^{\prime})^{T}\!+\!\sum_{j=0}^{l-1}\!a_{j}}}\times[V_{P},V_{C_{0}},...,V_{C_{N-1}},V],
+$$  
+
+Here, $A_{P}$ represent the attention weights for the shared prefix, respectively. The scaling factor $s$ and attention temperature $T$ for the context are both less than 1 $(s\!<\!1,T\!<\!1)$ . All these modifications can be fused into fast attention implementations such as Dao et al. (2022) without additional cost.  
+
+For the choice of hyperparameters, we conduct a greedy search over the validation set. We begin by adding two $"\backslash\mathfrak{n}"$ if no prefix is provided, then increase the prefix length by 10, 20, and 40 for the best one. $s$ and $T$ are searched within the ranges [0.5, 1.0] and [0.1, 0.7] respectively, using 0.1 step sizes.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+In this section, we showcase the effectiveness and efficiency of APE in various settings. Specifically, • In Section 5.1, we show that APE exhibit infinite-context understanding abilities, yielding an average improvement $2.9\%$ . In contrast, other baselines performs worse than the original models. • In Section 5.2, we demonstrate APE outperforms parallel encoding by $7.9\%$ on ICL. Moreover, APE maintains $93\%$ of the accuracy achieved by sequential encoding with the same number of examples. • In Section 5.3, we present that APE can accelerate inference up to $756\times$ in long-context scenarios.  
+
+5.1 LONG-CONTEXT UNDERSTANDING  
+
+Setup. Our evaluation involves four challenging long-context tasks on the LongBench dataset (Bai et al., 2023), each requiring multi-document input: HotpotQA (Yang et al., 2018), 2WikiMQA (Ho et al., 2020), MuSiQue (Trivedi et al., 2022), and MultiNews (Fabbri et al., 2019). We choose three LLMs with limited context window sizes as base models: LLAMA-3-8B-INSTRUCT (Dubey et al., 2024), LLAMA-2-7B-CHAT (Touvron et al., 2023), and GEMMA-2-9B-IT (Team et al., 2024).  
+
+Baselines. We compare with various strategies for lengthy input including: (i) Prompt Compression: Truncation, LLMLingua2 (Pan et al., 2024), (ii) KV Cache Eviction: StreamingLLM (Xiao et al., 2023), (iii) Long-context FT: Llama-3-8B-Instruct-262K (Gradient, 2024), Llama-2-7B-Instruct32K (Together, 2023), (iv) Parallel Encoding: PCW (Ratner et al., 2022), CEPE (Yen et al., 2024).  
+
+Results. As in Table 1, APE is the only method that consistently enhances performance across various models, leading to an average improvement of $2.9\%$ compared to the base models. Moreover, it demonstrates the ability to generalize to an unlimited number of contexts without requiring additional training. In contrast, other baselines underperform the original models in most tasks, highlighting their limitations in real-world scenarios. Another intriguing observation is that nearly all methods struggle with MultiNews, the only summarization task, which we hypothesize may be due to the length extension adversely affecting the fluency of the generated summaries.  
+
+Table 1: Performance of various methods on different models with LongBench (Bai et al., 2023) samples exceeding 8K tokens. APE outperforms baselines, improving both efficieny and accuracy. Markers $\bigcirc$ and • refer to training-required and inference-only methods, respectively.  
+
+![](images/fc6a25bb2ad5d12c3a1b9a8d7c4df52b342e98c29f493442c0a47f546c9a845d.jpg)  
+
+
+
+\section{5.2 FEW-SHOT LEARNING  }
+
+
+Setup. We evaluate APE on three in-context learning tasks: GSM8K (8-shot) (Cobbe et al., 2021), TriviaQA (5-shot) (Joshi et al., 2017), and MMLU (5-shot) (Hendrycks et al., 2020). All evaluations can conducted using the LM Evaluation Harness (Gao et al., 2024). The base models include LLAMA3.1-8B-INSTRUCT (Dubey et al., 2024), LLAMA-3-8B-INSTRUCT (Dubey et al., 2024), MISTRAL7B-INSTRUCT-V0.3 (Jiang et al., 2023a), and GEMMA-2-9B-IT (Team et al., 2024).  
+
+Baselines. We compare naïve parallel encoding to show the improvement from APE’s alignment. Sequential encoding with varying numbers of shots (i.e., 1-shot, half-shots, and full-shots) are also employed to illustrate how close we are to the ideal scenarios. All methods can access the full input.  
+
+Results. In Figure 7, APE significantly surpasses naïve parallel encoding with average improvements of $15.4\%$ on GSM8K, $4.7\%$ on TriviaQA, and $3.5\%$ on MMLU. When compared with the 1-shot sequential baseline with comparable context length, our method consistently yields superior results. Moreover, APE achieves better performance than half-shot sequential encoding in 8/12 settings and preserve $93\%$ accuracy comparing to the full-shot sequential encoding. Additionally, our results suggest that the LLAMA family exhibits enhanced compatibility with parallel encoding, potentially due to the stronger directional alignment of initial tokens from different contexts (see Figure 3a). Across different tasks, the performance gap between APE and full-shot sequential encoding is largest on GSM8K, illustrating that the effectiveness of APE may decreases as task becomes more complex.  
+
+![](images/8b4212edbee3d24fb7e33c87f3d9c0c71855db9573c13a9b52726ff3f8e6d887.jpg)  
+Figure 7: Performance comparison of APE, parallel encoding, and sequential encoding on ICL tasks.  
+
+
+
+\section{5.3 EFFICIENCY EVALUATION  }
+
+
+Setup. We measured the latency for sequential encoding and APE on the Llama-3.1-8B-Instruct (Dubey et al., 2024) model. Our evaluation were conducted on an H100 GPU with batch sizes of 1 and 4. The query and generation lengths were fixed at 256 tokens, while input context lengths varied across 2K, 8K, 32K, 128K, and 512K tokens. We employed VLLM (Kwon et al., 2023) as our inference engine and measured both prefilling time (Time to first token) and total generation time.  
+
+Results. Table 2 demonstrates that our method can accelerate inference up to $756\times$ in long-context scenarios, where the prefliling time dominates the overall process. For a 512K-token prompt with 256 tokens generated, prefilling occupies $97\%$ of the total generation time. Moreover, as context length and batch size increase, prefilling time rises significantly faster than decoding time. This is because prefilling is computation-bound, making it less susceptible to acceleration through I/O optimizations.  
+
+Table 2: Latency on H100 GPU: [preflil / generation time (ms)]. The gray text in brackets is batch size.   
+
+![](images/7576dedfeb99a1111dd13cb32e450b1b7418151a503fa4540bf476a3277632b5.jpg)  
+
+
+
+\section{6 ANALYSIS  }
+
+
+In this section, we present analyses to answer the following research questions: RQ1:Does each alignment process in APE function effectively? RQ2: Can APE generalize to more general scenarios featuring single long-context input? RQ3: Can APE improve performance for real-world RAG tasks?  
+
+6.1 HOW DOES EACH STEP IN APE CONTRIBUTE TO THE PERFORMANCE?  
+
+In Table 3, we conduct an ablation study to examine each alignment process in APE, including the shared prefix $(S_{P})$ , scaling factor (s), and attention temperature $(T)$ . We present results averaged across the four models evaluated in Figure 7. Our findings indicate that incorporating each of these components can consistently enhance performance across all tasks, with average improvements of $5.19\%$ , $0.59\%$ , and $2.07\%$ , respectively. Among them, adding the scaling factor yields minimal performance gains without the complementary effect of attention temperature.  
+
+Table 3: Ablation study of APE on three ICL tasks. $S_{P}$ : shared prefix, $s$ : scaling factor, and $T$ : attention temperature.   
+
+![](images/2b9fed620cd6125580296e9e0325d1e93c8268cf6e694523491e00fdbaa47851.jpg)  
+
+
+
+\section{6.2 CAN APE WORK WITH SINGLE, CONTINUOUS LONG CONTEXT?  }
+
+
+Table 4 examines the effectiveness of APE when processing a single long context input for the LLAMA3-8B-INSTRUCT model on LongBench (Bai et al., 2023). To accommodate the long context within our APE, we spilt it into multiple segments, each containing fewer than 7,500 tokens. The results demonstrate that APE enhances performance on 6 tasks, with the exception of two code completion tasks. This limitation arises from the disruption of long-range dependencies within the original context, leading to performance degradation in tasks that heavily rely on these contextual relationships.  
+
+Table 4: Performance comparison between the LLAMA-3-8B-INSTRUCT model with and without APE on LongBench (Bai et al., 2023) . All eight tasks involve single, continuous long-context inputs.  
+
+![](images/98173e70d9e92772e96b1cc4e4fc957bb68d157c3cc64f4e55da5acc5ca8c7d1.jpg)  
+
+
+
+\section{6.3 CAN APE WORK IN REAL-WORLD RAG APPLICATIONS?  }
+
+
+In Table 5, we evaluate APE’s performance in real-world RAG scenarios using the CRAG benchmark (Yang et al., 2024). Task 1 augments the model with several webpages, while Task 2 provides an additional knowledge graph. By incorporating significantly more external data during generation, APE consistently outperforms sequential encoding that have limited context sizes. Moreover, the improvement in Task 2 further shows our method’s effectiveness in merging text from multiple sources.  
+
+Table 5: Performance comparison using LLAMA-3-8B-INSTRUCT on CRAG.   
+
+![](images/2a9c11a21b2b4b7f29bb426b633c2c514d4e0978d7307589a1a30f8c34b4a052.jpg)  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In summary, the work explores the potential of parallel encoding, which pre-cache the context for fast inference and reuse positions for extended context but leads to worse performance. To address this, we propose APE to enable accurate, fast, and long context-augmented generation without requiring additional fine-tuning. APE achieves this by aligning the attention weight distribution of parallel encoding with sequential encoding via three steps: shared prefix, scaling factor, and adaptive temperature. Our method improves both efficiency and performance in RAG and ICL scenarios.  
+
+
+

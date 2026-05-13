@@ -1,0 +1,391 @@
+\title{RNA FrameFlow: Flow Matching for de novo 3D RNA Backbone Generation}
+
+\begin{abstract}
+We introduce \textsc{RNA-FrameFlow}, the first generative model for 3D RNA backbone design. We build upon $SE(3)$ flow matching for protein backbone generation and establish protocols for data preparation and evaluation to address unique challenges posed by RNA modeling. We formulate RNA structures as a set of rigid-body frames and associated loss functions which account for larger, more conformationally flexible RNA backbones (13 atoms per nucleotide) vs. proteins (4 atoms per residue). Toward tackling the lack of diversity in 3D RNA datasets, we explore training with structural clustering and cropping augmentations. Additionally, we define a suite of evaluation metrics to measure whether the generated RNA structures are globally self-consistent (via inverse folding followed by forward folding) and locally recover RNA-specific structural descriptors. The most performant version of \textsc{RNA-FrameFlow} generates locally realistic RNA backbones of 40-150 nucleotides, over 40\% of which pass our validity criteria as measured by a self-consistency TM-score $\geq0.45$, at which two RNAs have the same global fold.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\textbf{Designing RNA structures. }
+Proteins, and the diverse structures they can adopt, drive essential biological functions in cells. 
+Deep learning has led to breakthroughs in structural modeling and design of proteins \citep{AlphaFold2021, dauparas2022proteinmpnn, watson2023rfdiff}, driven by the abundance of 3D data from the Protein Data Bank (PDB). 
+Concurrently, there has been a surge of interest in \textit{Ribonucleic Acids} (RNA) and RNA-based therapeutics for gene editing, gene silencing, and vaccines \citep{doudna2014new, metkar2024tailor}.
+RNAs play a dual role as carriers of genetic information coding for proteins (mRNAs) as well as performing functions driven by their tertiary structural interactions (riboswitches and ribozymes). 
+While there is growing interest in designing structured RNAs for a range of applications in biotechnology and medicine \citep{mulhbacher2010therapeutic, damase2021limitless}, the current toolkit for 3D RNA design uses classical algorithms and heuristics to assemble RNA motifs as building blocks \citep{han2017single, yesselman2019computational}. 
+However, hand-crafted heuristics are not always broadly applicable across multiple tasks and rigid motifs may not fully capture the conformational dynamics that govern RNA functionality \citep{ganser2019roles,li2023dynamic}. This presents an opportunity for deep generative models to learn data-driven design principles from existing 3D RNA structures.
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{assets/pipeline.pdf}
+    \caption{\textbf{The \textsc{RNA-FrameFlow} pipeline for 3D backbone generation.} 
+    Our implementation establishes RNA-specific protocols for data preparation and evaluation for FrameFlow \citep{yim2023fast}.
+    (1) Each nucleotide in the RNA backbone is converted into a \textit{frame} to parameterize the placement of $C4^\prime$ by a translation, $C3^\prime-C4^\prime-O4^\prime$ by a rotation, and the rest of the atoms via 8 torsion angles $\Phi$.
+    (2) We train generative models on all RNA structures of length 40-150 nucleotides from RNAsolo \citep{rnasolo2022}. We also explore training with structural clustering and cropping augmentations to tackle the lack of diversity in 3D RNA datasets.
+    (3) We introduce evaluation metrics to measure the recovery of local structural descriptors and global self-consistency of designed structures via inverse-folding with gRNAde \citep{joshi2023grnade} followed by forward-folding with RhoFold \citep{shen2022e2efold3d}.}
+    \label{fig:main-pipeline}
+\end{figure*}
+
+\textbf{What makes deep learning for RNA hard? }
+The primary challenge is the paucity of raw 3D RNA structural data, manifesting as an absence of ML-ready datasets for model development \citep{joshi2023grnade}. 
+Protein structure is primarily driven by hydrogen bonding along the backbone, and current geometric deep learning models incorporate this inductive bias through backbone frames to represent residues \citep{AlphaFold2021}. 
+RNA structure, however, is often more conformationally flexible and driven by base pairing interactions across strands as well as base stacking between rings of adjacent nucleotides \citep{vicens2022thoughts}, all of which can only be learnt implicitly at present\footnote{
+See \href{https://youtu.be/oVaABC2oTs0?si=JaEsMi-saJvRbMEd}{Eric Westhof's talk} contrasting RNA and protein structure.
+}.
+
+Additionally, RNA nucleotides, the equivalent of amino acids in proteins, include significantly more atoms as part of the backbone (13 compared to 4) which necessitates a generalization of backbone frames where the placement of most atoms needs to be parameterized by torsion angles. 
+These complexities have contributed to relatively poor performance of deep learning for RNA structure prediction compared to proteins \citep{kretsch2023rna, abramson2024af3}.
+Additionally, structure prediction models cannot directly be used for designing or generating \textit{novel} RNA structures with desired constraints, which our work aims to do.
+
+\textbf{Our contributions. }
+We develop \textsc{RNA-FrameFlow}, the first generative model for 3D RNA backbone design, illustrated in \Cref{fig:main-pipeline}. 
+We adapt FrameFlow \citep{yim2023fast}, an $SE(3)$ equivariant flow matching model for proteins to RNA. We introduce RNA-specific modifications to the data preparation and loss formulation, including representing RNA nucleotides as rigid-body frames that parameterize all 13 atoms. We also introduce an evaluation pipeline to benchmark RNA backbone design models' capabilities at recovering local and global structure. Our best model is trained on RNAs of lengths 40-150 from the PDB and can unconditionally sample locally plausible backbones with over 40\% validity as measured by a self-consistency TM-score $\geq0.45$. 
+
+Through this study, we aimed to evaluate the extent to which generative models for proteins can be adapted for RNA. This brought up critical challenges and limitations of deep learning for RNA modelling, such as a lack of explicit representations of the physical interactions that drive RNA structure as well as biases in 3D RNA datasets, which we have made preliminary efforts towards addressing. Together with our engineering contributions, we hope this work will stimulate future research in generative models for RNA design.
+
+
+
+\section{The \textsc{RNA-FrameFlow}
+
+
+\textbf{Overview. }
+We are concerned with building a generative model that unconditionally outputs all-atom RNA backbones, sampled from a distribution of realistic 3D RNA structures. 
+Formally, given an RNA sequence length of $N_{\text{nt}}$ nucleotides, we aim to generate a real-valued tensor $\mathbf{X}$ of shape ${N_{\text{nt}} \times 13 \times 3}$ representing 3D atomic coordinates for each of the 13 backbone atoms per nucleotide.
+In the following sections, we will describe how we adapt FrameFlow \citep{yim2023fast}, an $SE(3)$ equivariant flow matching model for protein backbones, to our setting. 
+
+\subsection{Representing RNA Backbones as Frames}
+
+As shown in Figure \ref{fig:main-pipeline}, the RNA backbone consists of nucleotides with a phosphate group ($P, OP1, OP2, O5'$), a ribose sugar ($C1'-C5', O2', O3', O4'$), and a nitrogen atom $N$ at the stem of the base.
+We represent the group of atoms within each nucleotide as a rigid-body frame.
+Frames enable inferring the positions of all atoms within the nucleotide via a frame center and orientation (described subsequently).
+However, the 13 atoms per nucleotide in the RNA backbone is significantly greater than protein residues with 4 atoms ($C_{\alpha}, N, C, O$).
+In proteins, it is standard to represent each residue by a frame centered at $C_{\alpha}$ with vectors along $C_{\alpha}-N$ and $C_{\alpha}-C$, and $O$ is placed assuming an idealised planar geometry \citep{AlphaFold2021}.
+No such canonical frame representation exists for RNAs.
+
+\textbf{RNA frames. }
+We use the $C4^\prime, C3^\prime$, and $O4^\prime$ atoms to create the frame for each nucleotide, as in \citet{morehead2023joint}. 
+All other backbone atoms are inferred with 8 torsions $\Phi = \{\phi_1\rightarrow \phi_8\}, \phi_i \in SO(2)$ that are predicted post-hoc after frame generation.
+The Gram-Schmidt process is used on $v_1,v_2$ defined by the vectors along the $C4^\prime-O4^\prime$ and $C4^\prime-C3^\prime$ bonds; $C5^\prime$ is imputed based the positions of the other 3 atoms and tetrahedral geometry. 
+Given the 8 torsion angles, we autoregressively place non-frame atoms in order of the torsions $\Phi$ in Figure \ref{fig:main-pipeline}, constructing the final all-atom RNA backbone structure.
+
+\textbf{Criteria on choosing frame atoms.} 
+We had two main considerations for selecting the subset of atoms to create RNA frames:
+(1) the atoms should have roughly the same spatial orientation w.r.t. each other; and
+(2) the atoms should be reasonably close to the centroid in the nucleotide to reduce error accumulation when placing the furthest non-frame atoms.
+We choose $C3^\prime$, $C4^\prime$, and $O4^\prime$ as these atoms spatially shift the least in naturally occurring RNA \citep{harvey1986ribose}. 
+The non-frame backbone atoms -- the remaining atoms in the ribose sugar ring and the phosphate group atoms -- are parameterized by torsion angles to account for their relative conformational flexibility.
+This choice of frame enables models to learn ring puckering, the planar rotation of the ribose sugar ring about the $C4^\prime-C5^\prime$ bond which affects how the RNA interacts with partners to form complexes \citep{clay2017resolving}. We are actively evaluating alternate choices of RNA frame atoms.
+
+\subsection{$SE(3)$ Flow Matching on RNA Frames}\label{se3-fm}
+
+\textbf{Input. }
+Given a set of 3D coordinates, a simultaneous rotation and translation $(r, x)$ forms an orientation-preserving rigid-body transformation of the coordinates. 
+The set of all such transformations in 3D is the Special Euclidean group $SE(3)$, which composes the group of 3D rotations $SO(3)$ and 3D translations in $\mathbb{R}^3$. 
+
+We can represent an RNA frame $T=(r,x)$ as a translation $x \in \mathbb{R}^3$ from the global origin to place $C4^\prime$ and a rotation $r \in SO(3)$ to orient $C3^\prime-C4^\prime-O4^\prime$.
+Compared to working with raw 3D coordinates for each backbone atom, using the frame representation entails performing flow matching on the space of $SE(3)$. 
+This is an inductive bias to reduce the degrees of freedom the generative model needs to learn. Instead of predicting 13 correlated 3D coordinates independently (39 quantities) for each nucleotide, we instead predict one 3D coordinate (of $C4^\prime$) and one 3$\times$3 rotation matrix (12 quantities). We follow \citet{chen2024flow} and \citet{yim2023fast}'s framework for flow matching on $SE(3)$, which we summarise subsequently.
+
+\textbf{Overview. }
+Flow matching generates or learns how to place and orient a set of $N$ frames $\mathbf{T} = \{ T^{(n)} \}^{N}_{n=1}$, where $T^{(n)} = (r^{(n)}, x^{(n)})$, to form an RNA backbone of length $N$.
+To do so, we initialize frames at random in 3D space at time $t=0$, and train a denoiser or flow model to iteratively refine the location and orientation of each frame for a specified number of steps until time $t=1$.
+
+Suppose $p_0(T_0)$ and $p_1(T_1)$ are the marginal distributions of randomly oriented and ground truth frames from our dataset of RNA structures, respectively. 
+Suppose a non-unique time-dependent vector field $u_t$ leads to an ODE between the two distributions $p_0$ and $p_1$, i.e., assume there is a way to map from noisy samples to the corresponding true samples. 
+This solution forms a ground truth \textit{probability path} $p_t$ between the two distributions at time $t \in [0, 1]$, which we can use to transform samples from noise to the true distribution. 
+The \textit{continuity equation} $\frac{\partial p}{\partial t} = -\nabla \cdot (p_t u_t)$ relates the vector field $u_t$ to the evolution of the probability path $p_t$. 
+
+Given a noisy frame $T_0$ sampled from $p_0(T_0)$ and the corresponding ground truth frame $T_1$ sampled from $p_1(T_1)$, we construct a \textit{flow} $T_t$ by following the probability path $p_t$ between $T_0$ and $T_1$ for any time step $t$ sampled from $\mathcal{U}(0,1)$. 
+As shown by \citet{chen2024flow} for the $SE(3)$ group (and other manifolds), the shortest path between the two states $T_0$ and $T_1$ can be used to define an interpolation:
+\begin{align}
+    T_t \ = \ \operatorname{exp}_{T_0}(t \cdot \operatorname{log}_{T_0}(T_1)).
+\end{align}
+Here, $\operatorname{exp}({\cdot)}$ and $\operatorname{log}({\cdot})$ are the \textit{exponential} and \textit{logarithmic} maps that enable moving (taking random walks) on curved manifolds such as the $SE(3)$ group. 
+As we can decompose a frame $T=(r,x)$ into separate rotation and translation terms, we can obtain closed-form interpolations for the group of rotations $SO(3)$ and translations $\mathbb{R}^3$. 
+This gives us two independent flows:
+\begin{align}
+    \text{Translations:\quad} x_t \ &= \ tx_1 + (1-t)x_0 \ , \\
+    \text{Rotations:\quad} r_t \ &= \ \operatorname{exp}_{r_0}(t \cdot \operatorname{log}_{r_0}(r_1)) \ .
+\end{align}
+The random translation $x_0$ is sampled from a zero-centered Gaussian distribution $\mathcal{N}(0, \mathbf{I})$ in $\mathbb{R}^3$, and the random rotation $r_0$ is sampled from $\mathcal{U}(SO(3))$, a generalization of the uniform distribution for the group of rotations, $SO(3)$. 
+For an RNA backbone consisting of a set of $N$ frames $\mathbf{T} = \{\ T^{(n)} \}^{N}_{n=1}$, we can define the interpolation for each frame in parallel via the aforementioned procedure. 
+
+\textbf{Training. }
+During training, we would like to learn a parameterized vector field $v_\theta(\mathbf{T}_t, t)$, a deep neural network with parameters $\theta$, which takes as input the intermediate frames $\mathbf{T}_t$ at time $t$ sampled from $\mathcal{U}(0,1)$, and predicts the final frames $\mathbf{\hat{T}} = \{ \hat{T}^{(n)} \}^{N}_{n=1}$, where $\hat{T}^{(n)} = (\hat{r}_t^{(n)}, \hat{x}_t^{(n)})$. The ground truth vector field $u_t$ for mapping from the intermediate frames $\mathbf{T}_t$ to the ground truth frames $\mathbf{T}_1$ can also be decomposed into a ground truth rotation and translation for each frame $T^{(n)}$:
+\begin{align}
+    \text{Translations:\quad} u_t(x^{(n)} | x_0^{(n)}, x_1^{(n)}) &= x_1^{(n)} \ , \\
+    \text{Rotations:\quad} u_t(r^{(n)} | r_0^{(n)}, r_1^{(n)}) &= \operatorname{log}_{r_t^{(n)}}(r_1^{(n)}) \ .
+\end{align}
+To train the model $v_\theta$, we compute separate losses for the predicted rotation $\hat{r}_t \in SO(3)$ and translation $\hat{x}_t \in \mathbb{R}^3$. The combined $SE(3)$ flow matching loss over $N$ frames is as follows:
+\begin{align}
+\mathcal{L}_{SE(3)} = \mathbb{E}_{~t, \ p_0(\mathbf{T}_0), \ p_1(\mathbf{T}_1)} &\Bigg[ \ \frac{1}{(1-t)^2}\sum_{n=1}^N\underbrace{\Big\|\hat{x}_t^{(n)} - x_1^{(n)}\Big\|^2_{\mathbb{R}^3}}_{\mathcal{L}_{\mathbb{R}^3}^{(n)}} + \underbrace{\Big\|\operatorname{log}_{r_t^{(n)}}(\hat{r}_1^{(n)}) - \operatorname{log}_{r_t^{(n)}}(r_1^{(n)})\Big\|^2_{SO(3)}}_{\mathcal{L}_{SO(3)}^{(n)}}\Bigg].
+\label{eq:se3-loss}
+\end{align}
+The architecture of the flow model $v_\theta$ is similar to the structure module from AlphaFold2 comprising Invariant Point Attention layers interleaved with standard Transformer encoder layers, following \citet{yim2023fast, yim2023se3}.
+We use an MLP head to predict torsion angles $\Phi$. 
+\textbf{Auxiliary losses. }
+The inclusion of auxiliary loss terms to the objective in \cref{eq:se3-loss} can be seen as a form of adding domain knowledge into the training process \citep{yim2023se3}.
+We include 3 additional losses that operate on the all-atom structure inferred from the predicted frames, weighted by tunable coefficients to modulate their contribution to the total loss:
+\begin{align}
+\mathcal{L}_{\text{tot}} &= \mathcal{L}_{SE(3)} \ + \ \mathcal{L}_{\text{bb}} \ + \ \mathcal{L}_{\text{dist}} \ + \ \mathcal{L}_{\text{tors}} \ .
+\end{align}
+Suppose $S = \{C4', C3', O4'\}$ is the set of frame atoms\footnote{In \Cref{app:frame-complexity}, we show how including all backbone atoms better accounts for larger RNA nucleotides and improves validity of generated samples.} and the sequence length is $N$. We summarise the auxiliary losses subsequently. 
+\begin{itemize}[itemsep=0em, topsep=0pt]
+    \item \textbf{Coordinate MSE} $\mathcal{L}_{\text{bb}}$: A direct all-atom MSE is computed between generated and ground truth coordinates. Here, $a, \hat{a}$ are the ground truth and predicted atomic coordinates for the frame atoms:
+    \begin{align}
+        \mathcal{L}_{\text{bb}} = \frac{1}{|S| N} \sum^N_{n=1} \ \sum_{a \in S} \| a^{(n)} - \hat{a}^{(n)} \|^2.
+    \end{align}
+    \item \textbf{Distogram loss} $\mathcal{L}_{\text{dist}}$: A distogram $D \in \mathbb{R}^{NS \times NS}$ containing all-to-all coordinate differences between the atoms in an RNA structure is computed. Let $D^{(nm)}_{ab} = \| a^{(n)} - b^{(m)} \|$ be the elements of the distogram for the ground truth structure. Here, atom $a$ belongs to nucleotide $n$ and atom $b$ to nucleotide $m$. Given the corresponding predicted distogram $\hat{D}^{(nm)}_{ab}$, we compute another difference between the tensors:
+    \begin{align}
+        \mathcal{L}_{\text{dist}} = \frac{1}{(|S|N)^2 - N}\sum_{\substack{n,m=1 \\ n \neq m}}^{N} \ \sum_{\substack{a,b \in S}}\| D^{(nm)}_{ab} - \hat{D}^{(nm)}_{ab} \|^2.
+    \end{align}
+    \item \textbf{Torsional loss} $\mathcal{L}_{\text{tors}}$: An angular loss between the 8 predicted torsions by the auxiliary MLP head and the angles from the ground truth all-atom structure. 
+    Suppose $\phi \in \Phi_n$ and $\hat{\phi} \in \hat{\Phi}_n$ are the ground truth and predicted torsion angles for residue $n$, we compute:
+    \begin{align}
+        \mathcal{L}_{\text{tors}} = \frac{1}{8N} \sum_{n=1}^{N} \ \sum_{\phi \in \Phi_n} \Big(\|\phi - \hat{\phi}\|^2\Big).
+    \end{align}
+\end{itemize}
+
+\textbf{Sampling. }
+To generate or unconditionally sample an RNA backbone of length $N$, we initialize a random point cloud of frames.
+We use our trained flow model $v_\theta$ within an ODE solver to iteratively transform the noisy frames into a realistic RNA backbone.
+For each nucleotide, we begin with a noisy frame $T_0 = (r_0, x_0)$ at time step $t = 0$, and integrate to $t = 1$ using the Euler method for a specified number of steps $N_T$, with step size $\Delta t = 1 / N_T$. 
+At each step $t$, the flow model $v_\theta$ predicts updates for the frames via a rotation $\hat{r}_1$ and translation $\hat{x}_1$:
+\begin{align}
+    \text{Translations:\quad} x_{t + \Delta t} \ &= \ x_t + \Delta t \cdot (\hat{x}_1 - x_t) \ , \\
+    \text{Rotations:\quad} r_{t + \Delta t} \ &= \ \operatorname{exp}_{r_t}( \ c \ \Delta t \cdot \operatorname{log}_{r_t}(\hat{r}_1)) \ ,
+\end{align}
+where $c=10$ is a tunable hyperparameter governing the exponential sampling schedule for rotations.
+
+\textbf{Conditional generation. }
+The unconditional sampling strategy described above aims to generate realistic RNA backbone structures sampled from the training distribution. 
+However using generative models in real-world design tasks entails \textit{conditional} generation based on specified design constraints or requirements \citep{ingraham2022illuminating, watson2023rfdiff}, which we are currently exploring.
+For example, unconditional models can leverage inference-time guidance strategies \citep{wu2024practical}, be fine-tuned conditionally \citep{denker2024deft} or in an amortized fashion for motif-scaffolding \citep{didi2023framework}.
+For sequence conditioning and structure prediction, we can incorporate embeddings from language models \citep{penic2024rinalmo, he2024ribonanza}.
+
+
+
+\section{Experiments}
+
+
+\textbf{3D RNA structure dataset.}
+RNAsolo \citep{rnasolo2022} is a recent dataset of RNA 3D structures extracted from isolated RNAs, protein-RNA complexes, and DNA-RNA hybrids from the Protein Data Bank (as of January 5, 2024). 
+The dataset contains 14,366 structures at resolution $\leq 4$ \r{A} ($1$ \r{A} = 0.1nm). 
+We select sequences of lengths between 40 and 150 nucleotides (5,319 in total) as we envisioned this size range contains structured RNAs of interest for design tasks.
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{assets/selfconsistency.pdf}
+    \caption{
+    \textbf{Structural self-consistency evaluation.}
+    We sample a backbone from our model and pass it through an inverse folding model (gRNAde) to obtain $N_{\text{seq}}=8$ sequences. Each sequence is fed into a structure prediction model (RhoFold) to get the predicted all-atom backbone. Self-consistency between each predicted backbone and the generated sample is measured with TM-score (we also report RMSD and GDT\_TS). For a given generated sample, we thus have $N_{\text{seq}}=8$ TM-scores of which we take the maximum as the \texttt{scTM} score for that sample. 
+    }
+    \label{fig:validity}
+\end{figure*}
+
+\textbf{Evaluation metrics.}
+We evaluate our models for unconditional RNA backbone generation, analogous to recent work in protein design \citep{yim2023se3, yim2023fast, bose2023se3stochastic, lin2023generating}.
+We generate 50 backbones for target lengths sampled between 40 and 150 at intervals of 10. We then compute the following indicators of quality for these backbones:
+\begin{itemize}[itemsep=0em, topsep=0pt]
+    \item \textbf{Validity} (\texttt{scTM} $\geq 0.45$): We inverse fold each generated backbone using gRNAde \citep{joshi2023grnade} and pass $N_{\text{seq}}=8$ generated sequences into RhoFold \citep{shen2022e2efold3d}. We then compute the self-consistency TM-score (\texttt{scTM}) between the predicted RhoFold structure and our backbone at the $C4^\prime$ level. We say a backbone is \textit{valid} if \texttt{scTM} $\geq 0.45$; this threshold corresponds to roughly the same fold between two RNA strands \citep{zhang2022usalign}. We expand on this framework in Figure \ref{fig:validity}. 
+    \item \textbf{Diversity}: Among the valid samples, we compute the number of unique structural clusters formed using \texttt{qTMclust} \citep{zhang2022usalign} and take the ratio to the total number of samples. Two structures are considered similar if their TM-score $\geq 0.45$. This metric shows how much each generated sample varies from others across various sequence lengths.
+    \item \textbf{Novelty}: Among the valid samples, we use \texttt{US-align} \citep{zhang2022usalign} at the $C4^\prime$ level to compute how structurally dissimilar the generated backbones are from the training distribution. For a set of samples for a given sequence length, we compute the TM-score between all pairs of generated backbones and training samples, and for each generated backbone, we assign the highest TM-score. We call the average across this set, \texttt{pdbTM}.
+    \item \textbf{Local structural measurements}: 
+    We measure the similarity between bond distances, bond angles, and dihedral angles from the set of generated samples and the training set.
+    To do so, we compute histograms for each of the local structural metrics and use 1D Earth Mover's distance to measure the similarity between generated and training distributions.
+\end{itemize}
+
+\textbf{Hyperparameters.}
+We use 6 IPA blocks in our flow model, with an additional 3-layer torsion predictor MLP that takes in node embeddings from the IPA module. 
+Our final model contains 16.8M trainable parameters. 
+We use Adam optimizer with learning rate $0.0001$, $\beta_1=0.9$, $\beta_2=0.999$.  
+We train for $120K$ gradient update steps on four NVIDIA GeForce RTX 3090 GPUs for about 15 hours with a batch size $B=20$. Each batch contains samples of the same sequence length to avoid padding.
+
+
+
+\section{Results}
+
+
+\subsection{Global evaluation of generated RNA backbones}
+We begin by analyzing \textsc{RNA-FrameFlow}'s samples using the aforementioned evaluation metrics. For validity, we report percentage of samples with \texttt{scTM} $\geq 0.45$; for diversity, we report the ratio of unique structural clusters to total \textbf{valid} samples; and for novelty, we report the highest average \texttt{pdbTM} to a match from the PDB. For each sequence length between 40 and 150, at intervals of 10, we generate 50 backbones. Table \ref{tab:main-res-table} reports these metrics across different variants for the number of denoising steps $N_T$.  We compare our model to protein-RNA-DNA complex co-design model MMDiff \citep{morehead2023joint}, which is a diffusion model. As the original version of MMDiff was trained on shorted RNA sequences, we retrain it on our training set. Additionally, we inverse-folded MMDiff's backbones using gRNAde.
+
+We identify $N_T=50$ as the best-performing model that balances validity, diversity, and novelty; furthermore, it takes 4.74 seconds (averaged over 5 runs) to sample a backbone of length 100, as opposed to 27.3 seconds for MMDiff with 100 diffusion steps. We note that increasing $N_T$ does not improve validity despite allowing the model to perform more updates to atomic coordinate placements. Our model also outperforms MMDiff.
+
+\begin{table}[t!]
+\caption{\textbf{Unconditional RNA backbone generation}. 
+  We evaluate the performance of \textsc{RNA-FrameFlow} for multiple values for denoising steps $N_T$.
+  The best-performing model uses $N_T=50$ steps, taking 4.74s to sample a backbone of length 100.
+  Diffusion-based MMDiff generated no valid backbones and took $5\times$ longer to sample.
+  }
+    \centering
+    \resizebox{0.75\linewidth}{!}{
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{Model} & \textbf{Timesteps} $N_T$ & \% Validity $\uparrow$ & Diversity $\uparrow$ & Novelty $\downarrow$ \\
+        \midrule
+        \textsc{RNA-FrameFlow} & $10$ & 16.7 & \textbf{0.62} & 0.70 \\
+        & $50$ & \textbf{41.0} & 0.61 & \textbf{0.54} \\
+        & $100$ & 20.0 & 0.61 & 0.69  \\
+        & $500$ & 20.0 & 0.57 & 0.67 \\
+        \midrule
+        MMDiff & $100$ & 0.0 & - & - \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:main-res-table}
+\end{table}
+
+\begin{figure*}[t!]
+    \centering
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/redrawn2/length_sctm_pdbtm_plot_baseline_fig3a.pdf} 
+    \end{minipage}\hfill
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/redrawn2/sctm_pdbtm_length_plot_baseline_fig3b.pdf} 
+    \end{minipage}
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/selected_samples.pdf} 
+    \end{minipage}
+    \caption{\textbf{Validity and novelty of generated backbones.} \textbf{(Left)} \texttt{scTM} of backbones of lengths 40-150 with the mean and spread of \texttt{scTM} for each length; we select the top 10 structures with the best validation scores per length. \textbf{(Middle)} Scatter plot of self-consistency TM-score (\texttt{scTM}) and novelty (\texttt{pdbTM}) across lengths. Vertical and horizontal dotted lines represent TM-score thresholds of 0.45. \textbf{(Right)} Selected samples with high pdbTM scores (colored) with the closest, aligned match from the PDB (gray).  
+    Our model generates valid backbones for certain sequence lengths and tends to recapitulate the most frequent folds in the PDB (e.g., tRNAs, small rRNAs). 
+    }
+    \label{fig:mega-plot}
+\end{figure*}
+\subsection{Local evaluation with structural measurements}
+
+For our best-performing model with number of timesteps $N_T = 50$, we plot histograms of bond distance, bond angles, and dihedral angles in Figure \ref{fig:struct-metrics}.  We include the Earth Mover's distance (EMD) between measurements from the training and generated distributions as an indicator of local realism (using 30 bins for each quantity). 
+An ideal generative model will score an EMD close to 0.0 (i.e. consistent with the training set comprising naturally occurring RNA). 
+In Table \ref{tab:local-emd}, we observe EMD values from our best-performing model's backbones being significantly closer to 0.0 compared to MMDiff and random Gaussian all-atom point clouds (akin to an untrained model), which serve as sanity checks.
+
+We also show RNA Ramachandran angle plots for generated samples and the training distribution in Figure \ref{fig:struct-metrics}.
+\citet{keating2011ramarna} introduced $\eta-\theta$ plots, similar to Ramachandran angle plots for proteins, that track the separate dihedral angles formed by $\{C4^\prime_{i}, P_{i+1}, C4^\prime_{i+1}, P_{i+2}\}$ and $\{P_{i}, C4^\prime_{i}, P_{i+1}, C4^\prime_{i+1}\}$ respectively, for each nucleotide $i$ along the chain. 
+We observe that the dehedral angle distribution from \textsc{RNA-FrameFlow} closely recapitulates the distribution of naturally occuring RNA structures from the training set.
+
+\subsection{Generation quality across sequence lengths}
+We next investigate how sequence length affects the global realism of generated samples (measured by \texttt{scTM}). 
+Figure \ref{fig:mega-plot} (Left) shows the performance of \textsc{RNA-FrameFlow} for different sequence lengths. 
+We observe our model generates samples with high \texttt{scTM} for specific sequence lengths like 50, 60, 70, and 120 while generating poorer quality structures for other lengths. 
+We believe the fluctuation of TM-scores may be due to certain lengths being over-represented in the training distribution.
+ 
+With a better structure predictor, we expect an increase in valid samples that meet the 0.45 TM-score threshold. 
+
+We also analyze the novelty of our generated samples (measured by \texttt{pdbTM}) in Figure \ref{fig:mega-plot} (Middle). 
+We are particularly interested in samples that lie in the right half with high \texttt{scTM} and low \texttt{pdbTM}, which means that the designs are highly likely to fold back into the sampled backbone but are structurally dissimilar to any RNAs in the training set. 
+It is worth noting that our training set has high structural similarity among samples: running \texttt{qTMclust} on our training dataset revealed only 342 unique clusters from 5,319 samples, which indicates that the model does not encounter a diverse set of samples during training.
+This contributes to many generated samples from our model looking similar to samples from the training distribution. 
+We include two such examples in Figure \ref{fig:mega-plot} (Right). 
+Both generated RNAs yield relatively high \texttt{pdbTM} scores and look similar to their respective closest matching chain from the training set: a tRNA at length 70 and a 5S ribosomal RNA at length 120, respectively.
+
+\begin{table}[t!]
+    \centering
+    \begin{minipage}{0.48\linewidth}
+    \caption{\textbf{Local structural metrics.}
+        Earth Mover's Distance for local structural measurements compared to ground truth measurements from RNAsolo. 
+        Our model ($N_T = 50$) shows improved recapitulation of local structural descriptors compared to baselines.}
+        \label{tab:local-emd}
+        \centering
+        \resizebox{\linewidth}{!}{
+        \begin{tabular}{lccc}
+            \toprule
+            \multirow{2}{*}{\textbf{Model}} & \multicolumn{3}{c}{\textbf{Earth Mover's Distance} ($\downarrow$)} \\ 
+            & dist & angles & torsions \\
+            \midrule
+            \textsc{RNA-FrameFlow} & \textbf{0.17} & \textbf{0.11} & \textbf{2.36} \\
+            \midrule
+            MMDiff (original) & 1.38 & 0.43 & 3.06 \\
+            MMDiff (retrained) & 0.39 & 0.21 & 3.23 \\
+            Gaussian noise & 29.00 & 6.35 & 4.37 \\
+            \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.48\linewidth}
+    \caption{\textbf{Impact of data preparation strategies}. Increasing the diversity of the training dataset using a combination of strategies improves diversity and novelty of generated structures but leads to fewer designs passing the validity threshold.}
+        \label{tab:data-prep-table}
+        \centering
+        \resizebox{\linewidth}{!}{
+        \begin{tabular}{lccc}
+            \toprule
+            \textbf{Model} & \% Validity $\uparrow$ & Diversity $\uparrow$ & Novelty $\downarrow$ \\
+            \midrule
+            Base & \textbf{41.0} & 0.62 & 0.54 \\
+            \ + Clustering & 12.0 & \textbf{0.88} & 0.49 \\
+            \ \ + Cropping & 11.0 & 0.85 & \textbf{0.47} \\
+            \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+\end{table}
+
+\begin{figure*}[t!]
+    \centering
+    \begin{minipage}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/redrawn2/c4p_c4p_bond_distances_baseline.pdf} % first figure itself
+    \end{minipage}
+    \begin{minipage}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/redrawn2/c4p_ijk_bond_angle_baseline.pdf} % second figure itself
+    \end{minipage}
+    \begin{minipage}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/redrawn2/c4p_ijkl_dihedrals_baseline.pdf} % second figure itself
+    \end{minipage}
+    \begin{minipage}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{assets/redrawn2/combined_rama13_baseline.pdf} % first figure itself
+    \end{minipage}
+    \caption{\textbf{Local structural metrics} from 600 generated backbone samples, compared to random Gaussian point cloud as a sanity check. Our model can recapitulate local structural descriptors. \textbf{(Subplots 1-3)} Histograms of inter-nucleotide bond distances, bond angles between nucleotide triplets, and torsion angles between every four nucleotides. \textbf{(Subplot 4)}: RNA-centric Ramachandran plot of structures from the training set (purple) and generated backbones (green).}
+    \label{fig:struct-metrics}
+\end{figure*}
+
+\subsection{Data preparation protocols}
+Due to the overrepresentation of RNA strands of certain lengths (mostly corresponding to tRNA or 5S ribosomal RNA) in our training set, our models generate close likenesses for those lengths that achieve high self-consistency but are not novel folds. 
+To avoid this memorized recapitulation and promote increased diversity among samples, we sought to develop data preparation protocols to balance RNA folds across sequence lengths. 
+\begin{itemize}[itemsep=0pt, topsep=0pt]
+    \item \textbf{Structural clustering:} We cluster our training set using \texttt{qTMclust}. When creating a training batch, we sample random clusters and from each, a random structure. This ensures a batch does not comprise solely of samples for a single sequence length or is dominated by over-represented folds. There are only 342 structural clusters for the 5,319 samples within sequence lengths 40-150, highlighting the lack of diversity in RNA structural data. 
+    \item \textbf{Cropping augmentation:} We expand our training set by cropping longer RNA strands beyond length 150 by sampling a random crop length in $[40,150]$ and extracting a contiguous segment from the larger chains. As cropped RNA are not standalone molecules and serve only to augment the dataset, we consider a randomly chosen 20\% of the training set size to balance uncropped and cropped samples; this gives 1,063 extra cropped samples.
+\end{itemize}
+
+We train identical models on these data splits for $120$K gradient steps, with evaluation results reported in \Cref{tab:data-prep-table} showing improved diversity and novelty in the generated samples, at the cost of reduced validity. For structural clustering, each batch comprises padded samples up to a maximum length of 150 from randomly selected structural clusters across sequence lengths. See \Cref{app:data-prep-strat} for full results for the two alternate data preparation protocols.
+
+\newpage
+
+
+
+\section{Limitations and Discussions}
+
+
+Altogether, our experiments demonstrate that the $SE(3)$ flow matching framework is sufficiently expressive for learning the distribution of 3D RNA structure and generating realistic RNA backbones similar to well-represented RNA folds in the PDB. Select examples are shown in \Cref{fig:addition-samples}. We have also identified notable limitations and avenues for future work, which we highlight below.
+
+\textbf{Physical violations.}
+While well-trained models usually generate realistic RNA backbones, we do observe some physical violations: generated backbones sometimes have chains that are either too close by or directly clash with one another, are highly coiled, have excessive loops and unrealistically intertwined helices, or have chain breaks. We highlight these limitations in Figure \ref{fig:rna-limitations}. RNA tertiary structure folding is driven by \textit{base pairing} and \textit{base stacking} \citep{vicens2022thoughts} which influence the formation of helices, loops, and other tertiary motifs. Base pairing refers to nucleotides along adjacent chains forming hydrogen bonds, while base stacking involves interactions between rings of adjacent nucleotide bases along a chain. To our knowledge, all current deep learning models operate on individual nucleotides, only implicitly learning base pairing and stacking. Developing explicit representations of these interactions as part of the architecture may further minimize physical violations and provide stronger inductive biases to learn complex tertiary RNA motifs.
+
+\textbf{Generalisation and novelty.}
+We observed that the best designs from our models (as measured by \texttt{scTM} score) are sampled at lengths 70-80 and 120-130, and often have closely matching structures in the PDB (high TM-scores).
+This suggests that models can recapitulate well-represented RNA folds in their training distribution (e.g., both tRNAs at length 70-90 and small 5S ribosomal RNAs at length 120 are very frequent).
+However, self-consistency metrics were relatively poorer for less frequent lengths, suggesting that models are currently not designing novel folds.
+We evaluated preliminary strategies for structural clustering and cropping augmentations during training, which improved the novelty of designed structures but led to fewer designs passing the validity filter.
+Overall, the relative scarcity of RNA structural data compared to proteins necessitates greater care in preparing data pipelines for scaling up training and/or incorporating inductive biases into generative models, which we hope to continue exploring.
+
+
+
+\section{Conclusion}
+
+
+We introduce \textsc{RNA-FrameFlow}, a generative model for 3D RNA backbone design.
+Our evaluations show that our model can design locally realistic and moderately novel backbones of length 40 -- 150 nucleotides. 
+We achieve a validity score of 41.0\%  and relatively strong diversity and novelty scores compared to diffusion model baselines and ablated variants. 
+While generative models can successfully recapitulate well-represented RNA folds (e.g., tRNAs, small rRNAs), the lack of diversity in the training data may hinder broad generalization at present.
+We are actively exploring improved data preparation strategies combined with inductive biases that explicitly incorporate physical interactions that drive RNA structure.
+We hope \textsc{RNA-FrameFlow} and the associated evaluation framework can serve as foundations for the community to explore 3D RNA design, towards developing conditional generative models for real-world design scenarios.
+
+
+
+

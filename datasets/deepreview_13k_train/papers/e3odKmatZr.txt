@@ -1,0 +1,398 @@
+\title{Critique-out-Loud Reward Models}
+
+\begin{abstract}
+Traditionally, reward models used for reinforcement learning from human feedback (RLHF) are trained to directly predict preference scores without leveraging the generation capabilities of the underlying large language model (LLM).
+This limits the capabilities of reward models as they must reason implicitly about the quality of a response, i.e., preference modeling must be performed in a single forward pass through the model.
+To enable reward models to reason explicitly about the quality of a response, we introduce Critique-out-Loud (CLoud) reward models.
+CLoud reward models operate by first generating a natural language critique of the assistant's response that is then used to predict a scalar reward for the quality of the response.
+We demonstrate the success of CLoud reward models for both Llama-3-8B and 70B base models:
+compared to classic reward models CLoud reward models improve pairwise preference classification accuracy on RewardBench by 4.65 and 5.84 percentage points for the 8B and 70B base models respectively.
+Furthermore, CLoud reward models lead to a Pareto improvement for win rate on ArenaHard when used as the scoring model for Best-of-N.
+Finally, we explore how to exploit the dynamic inference compute capabilities of CLoud reward models by performing self-consistency decoding for reward prediction.
+
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In reinforcement learning from human feedback (RLHF)~\citep{christiano2017rlhf, nguyen-etal-2017-reinforcement}, a reward model is trained as a proxy for human preferences.
+Such reward models are then used to produce a human-preference aligned generation policy. 
+Methods to do this include RL training or generating multiple responses and selecting the highest scoring generation under the reward model.
+In this work, we focus on improving the performance of reward models by training them to critique responses before predicting a reward.
+
+Generally, reward models are trained as simple LLM based classifiers of the user's prompt and the assistant's response~\citep{stiennon2020summary, ouyang2022training}.
+Importantly, the language modeling (LM) head of the underlying LLM is not used during reward modeling.
+We hypothesize that this limits the performance of classic reward models as they cannot explicitly reason about the quality of the response in a Chain-of-Thought (CoT)~\citep{cot-wei} like manner.
+Namely, without generating reasoning traces, all reasoning in classic reward models must be performed implicitly in the model within a single forward pass.
+
+The utility of reasoning traces for preference modeling is demonstrated by the LLM-as-a-Judge framework~\citep{zheng2023judging}, where a scoring rubric is provided to an LLM, and the LLM reasons about how the provided response adheres to the rubric before scoring the quality of the response.
+While LLM-as-a-Judge provides both the ability to define preferences at inference time through the judging rubric and interpretable evaluation by inspecting the produced CoT reasoning, LLM-as-a-Judge generally under-performs classic reward models at pairwise preference classification\footnote{\href{https://huggingface.co/spaces/allenai/reward-bench}{https://huggingface.co/spaces/allenai/reward-bench}}.
+
+In this work, we investigate how to leverage the language generation capabilities of LLMs to improve reward model performance.
+Adding the capacity for language generation to reward models enables them to explicitly reason about the quality of the input via variable inference compute in a CoT like manner.
+To this end, we propose Critique-out-Loud (CLoud) reward models: conditioned on the user's prompt and the assistant's response, CLoud reward models first generate a detailed critique about how well the response answers the user's query.
+Then, as a function of the user's prompt, the assistant's response, and the self-generated critique, the CLoud reward model produces a scalar reward for the quality of the response.
+We present an overview of CLoud reward models in~\Cref{fig:method-diagram}.
+By introducing language generation to classically trained reward models, our work provides the groundwork to unify classic reward models and LLM-as-a-Judge and inherits the advantages of both methods.
+To train CLoud reward models we assume access to a preference dataset composed of prompts, responses, and oracle critiques of the responses.
+We train CLoud reward models to both generate critiques by supervised finetuning (SFT) on the oracle critiques and to produce scalar rewards based on the Bradley-Terry (BT) preference model~\citep{bradley-tery-model}.
+
+We also explore how to exploit the stochasticity in critique generation via multi-sample inference techniques to improve reward modeling performance.
+Specifically, we investigate self-consistency~\citep{wang2023selfconsistency} for CLoud reward models and sample multiple (critique, reward) predictions before marginalizing across critiques to produce a better estimate of the reward.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/Method.pdf}
+    \caption{
+    \textbf{Overview of CLoud reward models}.
+    CLoud reward models augment classic reward models with a language modeling (LM) head to provide critiques in addition to a scalar reward.
+    Given a user's prompt and an assistant's response as inputs, a CLoud reward model first generates a critique describing the quality of the assistant's response.
+    Then, conditioned on the prompt, response, and self-generated critique, the CLoud reward head produces a scalar reward.
+    }
+    \label{fig:method-diagram}
+\end{figure}
+
+\paragraph{Contributions} 
+Our work makes the following contributions:
+\begin{itemize}
+    \item We introduce Critique-out-Loud (CLoud) reward models: reward models that are trained to explicitly reason about the quality of responses before scoring them.
+    Through adding critique capabilities to reward models, CLoud lays the groundwork for unifying reward models and LLM-as-a-Judge.
+    \item We demonstrate that CLoud reward models improve pairwise preference classification accuracy on RewardBench by up to 4.65 and 5.84 percentage points for the 8B and 70B base models respectively (\Cref{fig:static_results}).
+    Additionally, we show that CLoud reward models lead to a Pareto improvement for win rate on ArenaHard when used as the scoring model for Best-of-N (\Cref{fig:bon_main_results}).
+    \item We ablate an important design choice in the training of CLoud reward models, on versus off-policy training, and show that on-policy training is essential for the success of CLoud reward models for both preference classification and for BoN (\Cref{fig:dynamic_results,fig:bon_on_vs_off_policy}).
+    \item
+    We investigate self-consistency over critiques as a method to trade added inference compute for better reward modeling.
+    We demonstrate that self-consistency over the critiques improves pairwise preference classification accuracy for reasoning tasks by up to 0.70 and 0.49 percentage points for the 8B and 70B models respectively (\Cref{fig:dynamic_results}).
+\end{itemize}
+
+
+
+
+
+
+
+\section{Methods}
+
+In this section, we review how classic reward models that model human preferences are trained and we then extend this methodology to training CLoud reward models. 
+We also detail how CLoud reward models are used to score samples at inference time using both standard and self-consistency decoding.
+Note, we will refer to the trunk of a pretrained LLM before the final language modeling layer as the \textit{base model} and the linear or shallow multi-layer perceptrons (MLPs) that operate on the output of the base model as \textit{heads}.
+
+\subsection{Classic reward models}
+Typically, classic reward model consists of a base model and a shallow MLP reward head. 
+Its parameters are $(\theta_B, \theta_R)$, where $\theta_{B}$ and $\theta_{R}$ are the parameters of the base model and reward head respectively.
+Given a user prompt $x$ and an assistant response $y$, the classic reward model predicts a scalar reward score $\hat{R} = r_{\theta_B, \theta_R}(x, y)$.
+A classic reward model is initialized from a pretrained base model and a randomly initialized reward head and then trained on a dataset of $N$ examples, $D=\{(x, y^-, y^+)_i\}_{i=1}^N$.
+Here, $x$ is a user's prompt and the $y$s are two different assistant responses to the prompt: $y^+$ is the chosen or preferred response and $y^-$ is the rejected response as judged by a human or a more powerful model.
+Reward models are trained to predict a higher reward for $y^+$ than for $y^-$ under the Bradley-Terry model~\citep{bradley-tery-model}.
+This is achieved by minimizing:
+\[\mathcal{L}_{RM}(\theta_B, \theta_R, D) = -\mathbb{E}_{(x, y^-, y^+)\sim D}[\log(\sigma(r_{\theta_B, \theta_R}(x, y^+) - r_{\theta_B, \theta_R}(x, y^-)))]\]
+where $\sigma(*)$ is the sigmoid function.
+
+\subsection{CLoud reward models}
+\label{methods:CLoud_reward_models}
+In addition to the base model and reward head, CLoud reward models preserve the language modeling head of the original pretrained LLM and are defined by parameters $\theta = (\theta_{B}, \theta_{LM}, \theta_{R})$ where $\theta_{LM}$ are the parameters of the language modeling head.
+CLoud reward models extend classic reward models by first generating a critique of the assistant's response and then predicting a scalar reward conditioned on the critique (depicted in~\Cref{fig:method-diagram}).
+Formally, given a user prompt $x$ and assistant response $y$ we first sample a critique $\hat{c} \sim p(*|x,y;\theta_{B};\theta_{LM})$ and then predict a reward conditioned on the prompt, the response, \textit{and the critique}: $\hat{R} = r_{\theta_{B};\theta_{R}}(x,y,\hat{c})$.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/TrainingFigure.pdf}
+    \caption{
+    \textbf{Overview of training CLoud reward models.}
+    CLoud reward models are trained using a dataset that consists of user prompts, chosen and rejected assistant responses, and critiques of the response quality generated by an oracle.
+    We first train a pretrained LLM to generate critiques for the responses by finetuning on the oracle critiques.
+    We then rebuild the dataset by replacing oracle critiques with critiques generated by the finetuned model.
+    Finally, we initialize a scalar reward head on top of the finetuned model and train on the new dataset composed of self-generated critiques to minimize both a language modeling and a preference modeling loss.
+    }
+    \label{fig:training-diagram}
+\end{figure}
+
+\paragraph{Training CLoud reward models.}
+CLoud reward models are trained with a dataset of $N$ examples, $D=\{(x, y^-, y^+, c^-, c^+)_i\}_{i=1}^N$, where we introduce oracle critiques, $c^-, c^+$, of the rejected and chosen responses $y^-, y^+$ respectively.
+The critiques are reasoning traces that provide feedback on the weaknesses of the responses and strategies for improving them.
+While ideally $c^-, c^+$ would be human critiques of the responses, we use critiques generated by a more powerful model, specifically Llama-3.1-405B-Instruct~\citep{dubey2024llama}, to approximate human critiques as done in prior work~\citep{bai2022constitutional, dubois2024alpacafarm}.
+Further details on how these oracle critiques are generated are provided in~\Cref{sec:generating-oracle-critiques}.
+To train CLoud reward models we: (1) train the base model and LM head to generate critiques via supervised finetuning on the oracle critiques, (2) replace oracle critiques in the dataset with critiques generated by the finetuned model, and (3) train a reward head conditioned on self-generated critiques.
+We choose to train the reward head on self-generated critiques as to minimizes the distribution shift in the critiques seen by the reward head between training and inference when oracle critiques are not available.
+We present an overview of CLoud reward model training in~\Cref{fig:training-diagram}.
+
+Before formally detailing the steps of CLoud reward model training, we introduce the following objectives.
+First, we modify $\mathcal{L}_{RM}$ to work with CLoud reward models as:
+\[
+\mathcal{L}_{RM}(\theta_{B}, \theta_{R}, D) = -\mathbb{E}_{(x, y^-, y^+, c^-, c^+)\sim D}[\log(\sigma(r_{\theta_B, \theta_R}(x, y^+, c^+) - r_{\theta_B, \theta_R}(x, y^-, c^-)))]
+\]
+where the reward estimator $r_\theta(x, y, c)$ is now also conditioned on a critique $c$.
+Next, we introduce the critique SFT loss, which is the negative log likelihood of the rejected and chosen critiques:
+\begin{align*}
+\mathcal{L}_{SFT}(\theta_B, \theta_{LM}, D) = -\mathbb{E}_{(x, y^-, y^+, c^-, c^+)\sim D}[&\sum_{c^-_t \in c^-}\log p(c^-_t|x, y^-, c^-_{<t};\theta_B,\theta_{LM}) \\& + \sum_{c^+_t \in c^+}\log p(c^+_t|x, y^+, c^+_{<t};\theta_B,\theta_{LM})]
+\end{align*}
+where $c_{<t}=c_1,...,c_{t-1}$ is the prefix of the critique up to the $t^{th}$ token.
+Finally, we introduce a joint SFT and RM loss as:
+\[
+\mathcal{L}_{CLoud}(\theta_{B}, \theta_{LM}, \theta_{R}, D) =
+\mathcal{L}_{RM}(\theta_{B}, \theta_{R}, D) + \lambda \cdot \mathcal{L}_{SFT}(\theta_{B}, \theta_{LM}, D)
+\]
+where $\lambda$ is a hyperparameter that weights the contribution of the language modeling loss.
+
+To train CLoud reward models we first train $\theta_{B},\theta_{LM}$ to generate critiques by minimizing $\mathcal{L}_{SFT}$ on the oracle critiques in the oracle dataset $D$ and obtain parameters $\tilde{\theta}_{B},\tilde{\theta}_{LM}$.
+We use the finetuned model to modify our dataset with self-generated critiques that replace the oracle critiques.
+Specifically, given the $i^{th}$ element from our dataset $(x, y^-, y^+, c^-, c^+)=D_i$ we sample new critiques $\hat{c}^- \sim p(*|x,y^-;\tilde{\theta}_{B},\tilde{\theta}_{LM})$ and $ \hat{c}^+ \sim p(*|x,y^+;\tilde{\theta}_{B},\tilde{\theta}_{LM})$.
+We then construct a new dataset as $D_{self,i} = (x, y^-, y^+, \hat{c}^-, \hat{c}^+)$.
+Finally, we obtain our CLoud reward model parameters by training on our self-critique dataset:
+\[
+\theta_{B}^*,\theta_{LM}^*,\theta_{R}^* = \operatorname*{arg\,min}_{\theta_{B}, \theta_{LM}, \theta_{R}}\mathcal{L}_{CLoud}(\theta_{B}, \theta_{LM}, \theta_{R}, D_{self})
+\]
+where $\theta_{B}, \theta_{LM}$ are initialized to the finetuned parameters $\tilde{\theta}_{B},\tilde{\theta}_{LM}$.
+We train CLoud reward models on the joint loss $\mathcal{L}_{CLoud}$ instead of $\mathcal{L}_{RM}$ to preserve the critique generation capability of the CLoud reward model and to prevent over-fitting to solely producing reward scores.
+\paragraph{Self-consistent reward scores.}
+Self-consistency~\citep{wang2023selfconsistency} is an inference technique for computing the maximum marginal likelihood answer by sampling multiple \texttt{(reasoning, answer)} tuples and marginalizing over the reasoning traces.
+It provides a simple method to improve performance at the cost of added inference compute.
+In this work, we leverage self-consistency to provide a better estimate of the reward by marginalizing over critiques.
+
+Given a prompt $x$ and response $y$ to score, we first sample $N$ critiques $c_1, c_2, \ldots, c_N \sim p(*|x,y;\theta_{B};\theta_{LM};\tau)$, where $\tau$ is the sampling temperature.
+For each critique, we predict a reward as $\hat{R}_i = r_{\theta_B, \theta_R}(x,y,c_i)$.
+We then estimate the true reward as the mean of the individual rewards.
+
+
+
+
+
+\section{Results}
+
+In this section we detail our experimental setup and provide evaluations of CLoud reward models in the pursuit of answering the following research questions:
+\begin{enumerate}[label=\textbf{RQ\arabic*:}]
+  \item How does CLoud impact performance, both in terms of preference classification and the quality of the policy achievable by maximizing its reward (\Cref{fig:static_results,fig:bon_main_results})?
+  \item Is it necessary to train CLoud reward models in an on-policy manner via training on self-generated critiques (\Cref{fig:reward_bench_on_vs_off_policy,fig:bon_on_vs_off_policy})?
+  \item Does self-consistency decoding benefit the performance of CLoud reward models, and if so, under what distribution of inputs (\Cref{fig:dynamic_results,fig:reasoning-steps})?
+\end{enumerate}
+
+\subsection{Setup}
+
+\paragraph{Training.}
+As base models we experiment with the Llama-3 family of models~\citep{dubey2024llama}.
+Specifically, we train reward models starting from the Llama-3-8B and Llama-3-70B base models.
+For both classic and CLoud reward models we perform a hyperparamater sweep of their learning rate and number of training epochs.
+For CLoud reward models we additionally sweep the SFT loss weight $\lambda$.
+We provide further details on our hyperparamater sweep in~\Cref{sec:hyperparamater-sweep}.
+We use a cosine learning rate schedule~\citep{loshchilov2017cosine} with a warmup duration of 5\% and a final decay factor of 1\%.
+Additionally, we use the Adam optimizer with decoupled weight decay~\citep{loshchilov2018decoupled} with parameters $\beta_1=0.9, \beta_2=0.95, \epsilon=\texttt{1e-10}$.
+We train each model with two random seeds.
+All models are trained using \texttt{Nvidia H100} gpus and training is conducted using MosaicML Composer~\citep{composer-mosaicml}.
+
+\paragraph{Data.}
+
+For training data we use a mix of the prompts from the  UltraFeedback~\citep{cui2023ultrafeedback} and UltraInteract~\citep{yuan2024ultra-interact} datasets.
+Together, UltraFeedback and UltraInteract contain a diverse collection of prompts covering topics such as general chat, instruction following, reasoning, etc.
+As UltraInteract is almost twice the size of UltraFeedback, we first uniformly sub-sample UltraInteract to be the same size as UltraFeedback before merging the prompts in the two datasets.
+
+We replace the chosen and rejected responses in the merged Ultra dataset with responses from Llama-3-8B-Instruct.
+Specifically, for each prompt we sample two responses from Llama-3-8B-Instruct and assign chosen and rejected labels through a pairwise judgement using Llama-3.1-405B-Instruct as an oracle preference model.
+To perform the pairwise judgement we use the pairwise judgement prompt from ArenaHard~\citep{li2024arenahard}.
+We refer to the dataset composed of prompts from UltraFeedback and UltraInteract but with responses from Llama-3-8B-Instruct as UltraLlama.
+
+After labeling the chosen and rejected responses, we generate oracle critiques for each of the chosen and rejected responses using Llama-3.1-405B-Instruct as the oracle.
+We do so by prompting the oracle model to provide detailed, step-by-step feedback about the correct and incorrect elements of each response.
+The prompt we use to generate oracle critiques can be found in~\Cref{sec:generating-oracle-critiques}.
+\paragraph{Evaluation.}
+We evaluate the quality of reward models on both pairwise preference classification accuracy and Best-of-N (BoN) win rate.
+
+We evaluate pairwise preference classification on the RewardBench~\citep{lambert2024rewardbench} evaluation suite, which is composed of $2,985$ examples and is organized into Chat, Chat-Hard, Safety, and Reasoning categories.
+Each example contains a prompt and a chosen and rejected response and a reward model is evaluated as to whether it predicts a greater reward for the chosen response.
+In addition to the accuracy on each category, we report the average accuracy across all categories.
+
+We evaluate BoN win rate performance on ArenaHard~\citep{li2024arenahard}, an open-ended generation benchmark consisting of five hundred prompts meant to reflect high-quality, real-world use cases of LLMs.
+To preform BoN, for each user query we sample $N$ potential responses from Llama-3-8B-Instruct.
+Then, for a given reward model, we compute its reward on each of the $N$ responses and select the ``best'' response as the response with the highest reward.
+To evaluate the performance of the BoN generations, we use the ArenaHard eval harness to compute the win rate of the BoN generations as compared to greedy generations from Llama-3.1-70B-Instruct using Llama-3.1-405B-Instruct as the judge.
+We evaluate BoN at $N=2,...,16$ where responses are generated at a temperature of $1.0$.
+Additionally, we found high variance in win rate based on the set of responses sampled, and as such, we average the BoN win rate for each $N$ over four different seeds of responses.
+
+\subsection{Comparing classic and CLoud reward models}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/reward_bench_static_results.pdf}
+    \caption{
+    \textbf{Comparing pairwise preference classification accuracy of classic and CLoud reward models on RewardBench.}
+    Pairwise preference classification accuracy measures if the reward model correctly classifies the chosen and rejected responses.
+    At both the 8B and 70B model scales, CLoud reward models significantly outperform classic reward models on all categories.
+    This leads to a large increase in average accuracy for CLoud reward models.
+    }
+    \label{fig:static_results}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/arena_hard_static_results.pdf}
+    \caption{
+    \textbf{Comparing Best-of-N (BoN) win rates using classic and CLoud reward models on ArenaHard.}
+    The shaded area represents $\pm1$ standard error from the mean.
+    To perform BoN we sample a given number of responses, compute the reward for each response, and then select the response with the highest score from the reward model.
+    BoN serves as a proxy for the quality of a policy achievable under a reward model.
+    At both model sizes, CLoud is a Pareto improvement meaning that it produces an equal or significantly higher win rate BoN policy than the classic reward model.
+    For Best-of-16, CLoud improves the win rate by 1.84 and 0.89 percentage points for the 8B and 70B models respectively.
+    }
+    \label{fig:bon_main_results}
+\end{figure}
+
+\paragraph{RQ1: Do critiques improve performance?}
+To test whether critiques improve reward model performance we first compare classic reward models to CLoud reward models on RewardBench (\Cref{fig:static_results}).
+On RewardBench, we find that across both model sizes, CLoud reward models lead to large gains in pairwise preference accuracy, significantly outperforming the corresponding classic reward model on all categories.
+On average, we find that CLoud reward models outperform classic reward models by 4.65 and 5.84 percentage points for the 8B and 70B base models respectively.
+Furthermore, on both the chat and safety categories, the 8B CLoud reward model even outperforms the 70B classic reward model.
+To better understand the critiques generated by CLoud reward models, we present critiques from examples in RewardBench in~\Cref{sec:example-critiques}.
+
+We next evaluate BoN with classic and CLoud reward models in~\Cref{fig:bon_main_results}.
+We find that for all model sizes BoN with CLoud reward models is a Pareto improvement over BoN with classic reward models, meaning that for each number of responses, the BoN win rate with CLoud is equal to or better than that of classic.
+Selecting from sixteen responses with CLoud reward models leads to a win rate improvement of 1.84 and 0.89 percentage points as compared to classic reward models for the 8B and 70B base models respectively.
+These results suggest that adding the capability for the reward models to generate critiques leads to significant performance gains in preference modeling.
+Furthermore, the improvements in preference modeling transfer to improving the quality a generation policy.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/on_off_policy_results.pdf}
+    \caption{
+    \textbf{
+    Comparing pairwise classification accuracy between CLoud reward models trained on-policy and off-policy on RewardBench.} 
+    In this experiment, we ablate the importance of self-generating critiques for training CLoud reward models.
+    For CLoud off-policy, the reward head is trained on the oracle critiques.
+    For CLoud on-policy, the reward head is trained on self generated critiques.
+    For both model sizes, training in an off-policy manner leads to a significant drop in performance.
+    This highlights the importance of matching the distribution of critiques seen by the reward head during training and inference.
+    }
+    \label{fig:reward_bench_on_vs_off_policy}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/bon_on_off_policy_results.pdf}
+    \caption{
+    \textbf{Comparing BoN win rates on ArenaHard of CLoud reward models trained on and off-policy.}
+    The shaded area represents $\pm1$ standard error from the mean.
+    At both model sizes, we find that the win rate from performing BoN with CLoud reward models trained on-policy is a Pareto improvement over those trained off-policy.
+    For Best-of-16, training off-policy decreases the win rate by 3.31 and 1.56 percentage pooints for the 8B and 70B models respectively, highlighting the importance of training on-policy CLoud reward models for defining better downstream policies.
+    }
+    \label{fig:bon_on_vs_off_policy}
+\end{figure}
+
+\paragraph{RQ2: Is on-policy training necessary?}
+In our setup for training CLoud reward models, we augment the original dataset by replacing all oracle critiques with self-generated critiques before training the reward head.
+We do so to mitigate the distribution shift between the critiques the reward head is trained on and the critiques available at inference.
+To determine whether this on-policy training is necessary, we train an off-policy CLoud reward model by training on oracle critiques instead of self-generated critiques.
+Namely, we train our off-policy CLoud reward model by minimizing $\mathcal{L}_{CLoud}$ over the original oracle critique labeled dataset, instead of the self-critique dataset.
+
+We plot the pairwise preference modeling accuracy for on-policy and off-policy CLoud reward models in~\Cref{fig:reward_bench_on_vs_off_policy}.
+CLoud trained on-policy significantly outperforms CLoud trained off-policy on all categories except for chat-hard at the 70B base model scale.
+Off-policy training leads to a 5.60 and 3.03 percentage point drop in average performance for the 8B and 70B base models respectively.
+
+We plot the BoN win rate for on-policy and off-policy CLoud reward models in~\Cref{fig:bon_on_vs_off_policy}.
+We find that CLoud reward models trained on-policy are a Pareto improvement in BoN win rate over models trained off-policy.
+Specifically, selecting from sixteen responses with the off-policy reward model leads to a 3.31 and 1.56 percentage point decrease in win rate as compared to the on-policy reward models for the 8B and 70B base models respectively.
+
+These results suggests that training CLoud reward models in an on-policy manner is necessary to achieve strong performance.
+
+\subsection{Self-consistency for CLoud reward models}
+\label{sec:self-consistency}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/dynamic_results.pdf}
+    \caption{
+    \textbf{Effect of self-consistency decoding on performance of CLoud reward models on RewardBench.}
+    The shaded area represents $\pm 1$ standard error from the mean.
+    For each prompt and response input, we sample multiple (critique, reward) tuples from the CLoud reward model and average the reward over the critiques to provide a better estimate of the reward. 
+    While self-consistency does not improve the performance for most categories, on the reasoning category it is an effective method to trade added inference compute for increased performance.
+    }
+    \label{fig:dynamic_results}
+\end{figure}
+
+\paragraph{RQ3: Do CLoud reward models benefit from added inference compute?}
+To test whether CLoud reward models benefit from added inference compute, we examine how accuracy changes when using self-consistency decoding.
+For each response in RewardBench, we sample up to sixteen critiques at a temperature of $0.5$.
+We plot the performance of self-consistency decoding on RewardBench for 8B and 70B CLoud reward models in~\Cref{fig:dynamic_results}.
+We find that reasoning is the only category that benefits from additional inference compute in the form of self-consistency.
+Specifically, we find that self-consistency leads to an improvement in preference classification accuracy of up to 0.70 and 0.49 percentage points for the 8B and 70B base models respectively.
+Furthermore, that we do not see a gain in self-consistency for non-reasoning categories agrees with the results of \citet{lee2024rlaif}.
+We also evaluate the effect of self-consistency reward modeling for BoN on ArenaHard.
+Unlike RewardBench, we do not find any gain in BoN win rate from self-consistent rewards.
+For the sake of brevity we present these results in~\Cref{sec:sc-bon}.
+Our self-consistency results provide initial evidence that in specific situations, added inference compute can improve the performance of CLoud reward models, but that it is important to know the distribution of tasks being scored as not all task categories benefit.
+\begin{wrapfigure}{r}{0.50\textwidth}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/reasoning_horizon.pdf}
+    \caption{
+    \textbf{The dependence of performance gain from self-consistency on the number of reasoning steps in the assistant's response.}
+    We find that prompts that require only 1-2 reasoning steps observe a significant lift in performance as the number of critiques increases, while all other groups of reasoning steps actually degrade in performance past eight critiques.
+    This result shows that self-consistency with CLoud reward models enables better judgement of response quality for short horizon tasks.
+    }
+    \label{fig:reasoning-steps}
+\end{wrapfigure}
+
+\paragraph{RQ3: When is self-consistency useful?}
+To better understand when self-consistency improves pairwise preference classification accuracy, we investigate the effect that a response's reasoning horizon has on self-consistency's performance.
+We do so on the reasoning split of RewardBench and we approximate the number of reasoning steps required for a problem as the average number of sentences in the chosen and rejected response.
+We bin the number of reasoning steps as 1-2, 3-4, 5-6, and 7+ steps.
+We plot the performance gain from self-consistency grouped by reasoning steps for CLoud 8B on the reasoning split of RewardBench in~\Cref{fig:reasoning-steps}.
+We find that only problems requiring 1-2 steps see a consistent gain in pairwise preference classification accuracy as the number of critiques increases, while the performance on problems with a greater number of steps actually decreases after eight critiques.
+This result provides initial evidence that CLoud + self-consistency may be a strong combination when evaluating solutions with short reasoning horizons.
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{Classic reward models.}
+In RLHF, reward models have traditionally modeled human preferences after ranking models such as the Bradley-Terry (BT) model \citep{bradley-tery-model, ouyang2022training, bai2022constitutional, bai2022training, dubey2024llama} or the Plackett-Luce model \citep{plackett1975analysis, luce1959individual, zhu2023principled}.
+Recent work has showed shortcomings of these models when handling intransitive preferences \citep{munos2023nash, swamy2024minimaximalist}.
+Another line of work directly models the probability of one response being preferred over the other \citep{jiang2023llm, zhao2023slic, liu2023statistical, dong2024rlhf, swamy2024minimaximalist}.
+Finally, another line of work aims to model rewards over multiple objectives \citep{wang2023helpsteer, wang2024helpsteer2, wang2024interpretable}.
+The improvements of CLoud reward models are orthogonal to the above methods as CLoud is agnostic to the preference modeling objective.
+Future work should explore the composition of CLoud reward models with more complex reward model objectives.
+Recently, \citet{yang2024regularizingrm} proposed to maintain the LM head of a reward model, and train the LM head on the chosen and rejected responses as a form of regularization.
+While CLoud also maintains and further trains the LM head, we do so for the purpose of generating critiques.
+
+\paragraph{Critique-based feedback.}
+There is a large body of work that concerns providing feedback in the form of natural language critiques.
+In settings where oracle critiques or signals for critique quality do not exist, past works have explored using the model itself to generate critiques that are then either referenced to improve generation quality or directly leveraged as a preference signal~\citep{bai2022constitutional, shinn2024reflexion, ganguli2023capacity, madaan2024self, yuan2024selfrewarding, ramji2024proxyrefine, kim2024rci}.
+While our work also leverages self-generated critiques at inference, our work differs in that we aim to train better reward models when human preference data is available as opposed to bootstrapping preferences from the model itself.
+\citet{lee2024rlaif} extend self-generated critiques for preference modeling by leveraging additional inference compute via self-consistency to improve preference modeling performance.
+While they find that self-consistency does not help for the tasks they examine, we demonstrate that self-consistency does help for reward modeling on reasoning tasks (\Cref{sec:self-consistency}).
+
+Previous works have also explored the setting where oracle critiques are available for training.
+\citet{saunders2022sftcritique,akyurek-etal-2023-rl4f} teach an LLM to critique by performing SFT on oracle critiques and \citet{mcaleese2024llm-critic} teach an LLM to critique by performing RLHF on human-labeled critique preferences.
+Other works leverage access to oracle feedback (e.g., human, error traces, etc.) to generate refined answers conditioned on the critiques~\citep{gao-etal-2023-rarr, scheurer2023iterative-refine, chen2024selfdebug, gou2024critic}.
+Our work differs from the above as our goal is to leverage critiques to train better reward models.
+Most similar to our work is that of \citet{synth-critiques-ye} which explores improving reward model performance by training reward models on human preferences conditioned on critiques generated by other models.
+While their work similarly demonstrates the advantages of reward scores conditioned on critiques, our work differs in that we investigate training the reward model to generate its own critiques.
+As such, CLoud reward models can perform inference without requiring access to a larger model.
+\paragraph{LLM-as-a-Judge.}
+In the LLM-as-a-Judge framework, an LLM scores responses based on a user provided grading rubric~\citep{gilardi2023crowdworkers, huang2023annotatespeech,zheng2023judging,kim2023prometheus,li2024autojudge}.
+While similar to methods above such as Constitutional AI, LLM-as-a-Judge differs in that the objective is to evaluate responses, not revise responses.
+Similar to CLoud reward models, LLM-as-a-Judge produces chain-of-thought reasoning about how the grading rubric applies to the response before producing a score.
+However, CLoud differs from LLM-as-a-Judge as our models maintain a scalar reward head and as such can be trained according to classic reward modeling objectives such as the BT model.
+Our work takes a first step towards unifying the classic reward model and LLM-as-a-Judge methods for preference modeling.
+Future work should investigate how the human crafted grading rubrics used in LLM-as-a-Judge can be integrated with the critique process of CLoud reward models.
+
+
+
+
+\section{Conclusion}
+
+In this work, we propose Critique-out-Loud (CLoud) reward models which preserve the language modeling capabilities of the underlying LLM while additionally training a scalar reward head.
+To perform inference with CLoud reward models, we first sample a critique of the response from the reward model before predicting a scalar reward.
+Through generating critiques, CLoud reward models can explicitly reason about the quality of a response while classic reward models must reason implicitly.
+We demonstrate on the RewardBench evaluation suite that, as compared to classic reward models, CLoud reward models can improve average pairwise preference modeling accuracy by up to 4.64 and 5.84 percentage points for 8B and 70B base models respectively.
+Similarly, we demonstrate that performing Best-of-N decoding with CLoud reward models is a Pareto improvement over classic reward models for ArenaHard win-rate.
+We further investigate how CLoud reward models can leverage additional inference compute via multi-sample decoding strategies.
+Specifically, we evaluate self-consistency decoding for CLoud reward models where we marginalize over sampled critiques to provide a better estimate of the reward.
+We find that CLoud reward models only benefit from self-consistency on reasoning problems and demonstrate that self-consistency is predominantly useful when assigning rewards to responses with short reasoning horizons.
+CLoud reward models establish a new paradigm for reward models by unifying language generation with preference modeling and open new avenues for improving reward models through variable inference~compute.
+
+
+
+
+
+

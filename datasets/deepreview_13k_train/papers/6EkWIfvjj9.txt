@@ -1,0 +1,326 @@
+\title{RARe: Retrieval Augmented Retrieval with In-Context Examples}
+
+\begin{abstract}
+We investigate whether in-context examples, widely used in decoder-only language models (LLMs), can improve embedding model performance in retrieval tasks. Unlike in LLMs, naively prepending in-context examples (query-document pairs) to the target query at inference time does not work out of the box. We introduce a simple approach to enable retrievers to use in-context examples. Our approach, \texttt{RARe}, finetunes a pre-trained model with in-context examples whose query is semantically similar to the target query. This can be applied to adapt various base architectures (i.e., decoder-only language models, retriever models) and consistently achieves performance gains of up to +2.72\% nDCG across various open-domain retrieval datasets (BeIR, RAR-b). In particular, we find \texttt{RARe} exhibits stronger out-of-domain generalization compared to models using queries without in-context examples, similar to what is seen for in-context learning in LLMs. We further provide analysis on the design choices of in-context example augmentation and lay the foundation for future work in this space.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In-context learning (ICL) \citep{brown2020language} has emerged as a powerful paradigm enabling diverse applications without parameter updates in large language models (LLMs). By conditioning on input-output examples that demonstrate a specific task, LLMs can generate predictions while maintaining fixed parameters. While in-context learning has been extensively studied for LLMs \citep{xu2023knnpromptingbeyondcontextlearning, min-etal-2022-metaicl, dong2024surveyincontextlearning}, its potential for retriever models remains unexplored. 
+
+We study how in-context examples can be effectively leveraged to enhance performance in retriever models. Unlike in decoder-only LLMs where in-context examples expand model capacity at generation time, in-context examples may primarily provide task-relevant information rather than increasing model capacity. Specifically, we study injecting in-context examples to build a dense retriever model~\citep{karpukhin-etal-2020-dense} which embeds queries and documents into a shared representational space for efficient search over a large corpus. Text retrieval is a core component of many natural language processing (NLP) tasks, serving as a key component for retrieval-augmented language language models~\citep{lewis2021retrievalaugmentedgenerationknowledgeintensivenlp}. State-of-the-art retriever models started to leverage decoder-only models as a backbone \citep{wang2024improving, behnamghader2024llm2vec, muennighoff2024gritlm, SFRAIResearch2024, lee2024nvembedimprovedtechniquestraining}, further motivating our study of applying in-context examples.
+
+We begin by naively prepending in-context examples to the target query and provide it to existing retriever models~\citep{behnamghader2024llm2vec, wang2024improving, SFRAIResearch2024}, observing that this leads to significant performance drop. We propose a new approach to construct retrieval models that can leverage in-context examples, which we name as \texttt{RARe}: Retrieval Augmented Retrieval with In-Context Examples. Our approach modifies the query format of retrieval systems by providing in-context examples whose query is semantically similar to the target query. Then, we apply standard continued fine-tuning with contrastive loss. We conduct a comprehensive evaluation of new query format across various experimental settings, initializing from both decoder-only checkpoints and pre-trained retriever model checkpoints. We demonstrate that \texttt{RARe} outperforms baseline models across multiple tasks, achieving up to +1.41\% nDCG@10 on standard retrieval benchmarks \citep{thakur2021beir} and demonstrating even larger gains (+2.72\%) on reasoning-oriented retrieval tasks \citep{xiao2024rarbreasoningretrievalbenchmark}.\looseness=-1
+Our contributions can be summarized as follows:
+\begin{itemize}[noitemsep,leftmargin=10px]
+    \item We introduce \texttt{RARe}, an approach that adapts pre-trained checkpoints to use in-context examples for retrieval. 
+    \item We demonstrate that this recipe can improve the performance of various base architectures, including decoder-only models and existing retriever models. %\texttt{RARe} consistently improves performance (up to +2.72\% nDCG@10) on both standard retrieval benchmarks~\citep{thakur2021beir} and advanced reasoning tasks~\citep{xiao2024rarbreasoningretrievalbenchmark}. 
+    \item We provide detailed analyses on how the quality, quantity, and selection of in-context examples affect performance, contextualizing the sources of our experimental gains. 
+\end{itemize}
+All our code and model checkpoints are publicly released
+\begin{figure*}
+  \centering
+  \includegraphics[width=\linewidth]{Figures/IC-Retrieval-6.pdf}
+  \caption{Overview -- Prior work augments a task-specific instruction to a given query as input to the Retriever. In \texttt{RARe}, we further leverage a set of in-context exemplars that contain pairs of queries and relevant documents. These in-context examples are augmented with the original query as input to the retriever along with the instruction.
+  }
+  \label{fig:main}
+\end{figure*}
+
+
+
+\section{Setup \& Existing Approaches}
+
+
+\paragraph{Standard Retrieval Setup} We consider a standard dense retriever ~\citep{karpukhin-etal-2020-dense}, where input queries $q$ and documents $d$ are encoded with an embedder $E(\cdot)$ into a fixed-dimensional embedding. The embedder $E(\cdot)$ is trained on a training set $\train$ which consists of multiple retrieval tasks $\{\train_1, \train_2, \cdots, \train_T\}$, where each task contains training examples of the form $(q, d^+, d^-)$ \citep{wang2024improving, behnamghader2024llm2vec}. Here, $q$ is the input query, $d^+$ is a positive (relevant) document, and $d^-$ is a hard-negative (irrelevant) document, which allows for a contrastive-loss based training.\looseness=-1
+
+The evaluation task $\test$ consists of a corpus of documents $C$, as well as test pairs $(q, R^+)$, where $R^+ = \{d^+_1, d^+_2, ..., d^+_m\} \subset C$ is a set of relevant document(s) for the query \citep{thakur2021beir}. The aim is to retrieve these relevant documents $R^+$ from the corpus $C$ using the embedder $E(\cdot)$. Specifically, an index $C_\ve$ of the corpus with document embeddings $E(d), \forall d \in C$ is created. Then, the embedding $E(q)$ of a test query $q$ is used to retrieve the documents $d$ whose embedding $E(d)$ is closest to $E(q)$, typically with the cosine (cos) similarity function.
+
+\paragraph{Existing Methods} Current architectures \citep{asai-etal-2023-task, behnamghader2024llm2vec} prepend task-specific instruction $t_i$, $i \in [1, 2, \cdots, T]$ to the query to contextualize the task:
+\begin{equation}
+q^{\text{inst}} = \text{Instruct: } \{t_i\} ; \text{ Query: } \{q\}, \quad q \in \train_i 
+\label{eq:query_base}
+\end{equation}
+Then, the embedder $E(\cdot)$ is trained with a standard contrastive loss \citep{izacard2022unsupervised, karpukhin-etal-2020-dense}, incorporating $q^{\text{inst}}$, and $d^+, d^- \in \train_i$, along in-batch negatives $n \in \sN$, where $\sN$ represents the set of in-batch negatives,
+\begin{gather}
+\ve_{q^{\text{inst}}}=E(q^{\text{inst}}); \quad \ve_{d^+}=E(d^+); \quad \ve_{d^-} = E(d^-); \quad \ve_{n} = E(n) \\
+\mathcal{L} = - \log \frac{\exp(\text{cos}(\ve_{q^{\text{inst}}}, \ve_{d^+}))}{\exp(\text{cos}(\ve_{q^{\text{inst}}}, \ve_{d^+})) + \exp(\text{cos}(\ve_{q^{\text{inst}}}, \ve_{d^-})) + \sum\limits_{n \in \sN} \exp(\text{cos}(\ve_{q^{\text{inst}}}, \ve_{n}) )} \label{eq:loss}
+\end{gather}
+
+During evaluation on $\test$, each test query is augmented with task-specific instruction $t_\text{test}$.\looseness=-1
+
+\begin{algorithm}[t]
+\caption{\texttt{RARe} - Training}
+\label{algorithm:RARe}
+\KwIn{Training set $\train$, embedder $E(\cdot)$, BM25, the number of in-context examples $k$, mini-batch size $B$.}
+
+\begin{algorithmic}[1]
+\FOR{each training iteration}
+    \STATE{Sample mini-batch $\mathcal{B}$ of size $B$ from $\train$}
+    
+    \FOR{$(t_i, q, d^+, d^-) \in \mathcal{B}$}
+        \STATE{In-Context Example Retrieval:}
+        \STATE $\{q^{ic}_1, q^{ic}_2, \ldots, q^{ic}_k\} \leftarrow \text{Retrieve nearest neighbor queries of } q   \text{ from } \train \text{ using BM25}$ %\text{BM25}(q, \train, k)$
+        \STATE $\{d^{ic+}_1, d^{ic+}_2, \ldots, d^{ic+}_k\} \leftarrow \{d^+ : (q', d^+) \in \train, q' \in \{q^{ic}_1, \ldots, q^{ic}_k\}\}$
+        \STATE $\train^{\text{ic}}_i \leftarrow \{(q^{\text{ic}}_1, d^{\text{ic}+}_1), \ldots, (q^{\text{ic}}_k, d^{\text{ic}+}_k)\}$
+        \STATE{Query Augmentation:} 
+        \STATE $q^{\text{inst+ic}} = \text{Instruct: } \{t_i\}; \text{ Query: } \{q^{ic}_1\}; \text{ Document: } \{d^{ic+}_1\} \, \cdots ; \text{ Query: } \{q\}$
+    \ENDFOR
+    \STATE{Training with Contrastive Loss:}
+        \STATE Compute the mini-batch contrastive loss $\mathcal{L}_{\text{\texttt{RARe}}}$ as described in \autoref{eq:loss1}.
+        \STATE Update $E(\cdot)$ by minimizing $\mathcal{L}_{\text{\texttt{RARe}}}$.
+
+\ENDFOR
+\end{algorithmic} 
+\KwOut{Trained embedder $E(\cdot)$}
+\end{algorithm}
+
+
+
+\section{Our Method -- RARe}
+
+\texttt{RARe} consists of two main components -- (a) We enhance the query representation by incorporating in-context examples, which provide additional query-specific guidance to the model, (b) We fine-tune $E(\cdot)$ on $\train$ to learn to leverage these in-context examples.
+
+Given a query $q$, we use BM25 \citep{bm25}, a sparse retrieval technique that ranks documents based on keyword matching, and find $k$ closest queries $q_j$ from $\train_i \in \train$ to obtain in-context examples $\train^{\text{ic}}_i = \{(q^{\text{ic}}_1, d^{\text{ic}+}_1), (q^{\text{ic}}_2, d^{\text{ic}+}_2), \cdots, (q^{\text{ic}}_k, d^{\text{ic}+}_k)\}$. As shown in \autoref{fig:main}, we then augment these examples to the original query $q^{\text{inst}}$ to obtain the final query $q^{\text{inst+ic}}$,
+\begin{equation}
+q^{\text{inst+ic}} = \text{Instruct: } \{t_i\} ; \text{ Query: } \{q^\text{ic}_1\} ; \text{ Document: } \{d^{\text{ic}+}_1\} \, \cdots ; \text{ Query: } \{q\}
+\label{ref:query_format}
+\end{equation}
+
+We then train embedder $E(\cdot)$ with the same loss as \autoref{eq:loss}, but with $q^{\text{inst+ic}}$ instead of $q^{\text{inst}}$,
+\begin{gather}
+\mathcal{L}_{\text{\texttt{RARe}}} = - \log \frac{\exp(\text{cos}(\ve_{q^{\text{inst+ic}}}, \ve_{d^+}))}{\exp(\text{cos}(\ve_{q^{\text{inst+ic}}}, \ve_{d^+})) + \exp(\text{cos}(\ve_{q^{\text{inst+ic}}}, \ve_{d^-})) + \sum\limits_{n \in \sN} \exp(\text{cos}(\ve_{q^{\text{inst+ic}}}, \ve_{n}) )}  \label{eq:loss1}
+\end{gather}
+
+\Cref{algorithm:RARe} presents our training procedure in detail. At inference time, we similarly perform a search to find nearest in-context examples to form an augmented query.
+
+
+
+\section{Experimental Setup}
+
+\subsection{Fine-Tuning}
+\paragraph{Base Models} We explore two training setups: fine-tuning decoder-only models for retrieval, and fine-tuning existing retriever models. For the first setup, we train the \textit{Llama-3} family of models, following the training methodology outlined by \citet{ma2023finetuningllamamultistagetext, weller2024promptriever}. For the second setup, we use two high-performing publicly available embedding models that were trained with task-specific instructions: \textit{LLM2Vec-Llama-3-8b-Supervised} \citep{behnamghader2024llm2vec} and \textit{E5-Mistral-Instruct} \citep{wang2024improving}. We chose these two models because, unlike some other strong performers \citep{SFRAIResearch2024, moreira2024nvretrieverimprovingtextembedding}, they were not trained on most of the datasets used in our downstream benchmarks. The \textit{LLM2Vec-Llama-3-8b-Supervised} model is initially trained using an unsupervised text reconstruction objective and then fine-tuned with supervised contrastive learning on a public subset of the E5 dataset, which incorporates various supervised training datasets \citep{gao-etal-2021-simcse, msmarco, kwiatkowski-etal-2019-natural}. In contrast, \textit{E5-Mistral-Instruct} undergoes further training on synthetic data that is not publicly available. These models are chosen to assess the impact of additional supervised training on an existing retriever model versus training a generative model for retrieval from scratch.
+
+\paragraph{Training Data} For fine-tuning existing retriever models, we follow prior work \citep{behnamghader2024llm2vec} and train on a publicly available portion of E5 dataset \citep{springer2024repetition, wang2024improving}, which contains MS-MARCO \citep{msmarco} NLI \citep{gao-etal-2021-simcse}, ELI5 \citep{fan-etal-2019-eli5}, FEVER \citep{thorne-etal-2018-fever}, HotpotQA \citep{yang-etal-2018-hotpotqa}, NQ \citep{kwiatkowski-etal-2019-natural}, SQuAD \citep{rajpurkar-etal-2016-squad}, Quora Duplication Questions \citep{quora-question-pairs}. For fine-tuning decoder-only models from scratch, we use the MS-MARCO \citep{msmarco} passage ranking dataset and train without a task-specific instruction prefix, following \citet{ma2023finetuningllamamultistagetext}.
+
+\paragraph{Constructing In-Context Examples} During training, we provide each training example with five in-context examples from the dataset that it belongs to ($k$=5). Specifically, the set of examples $\train^{\text{ic}}_i$ for each task is drawn from the training set $\train_i$, $q \notin \train^{\text{ic}}_i$.
+
+\subsection{Evaluation}
+
+\paragraph{Datasets} We evaluate on the widely used BeIR retrieval benchmark \citep{thakur2021beir}. For ablative experiments, we follow prior work and focus on low-resource datasets \citep{wang-etal-2023-query2doc} that potentially benefit more from few-shot examples. Since the BeIR benchmark contains a few datasets whose training sets are in the E5 dataset mixutre, we categorize them as in-domain and out-of-domain i.e. not seen during training.
+We also evaluate on a subset of the RAR-b \citep{xiao2024rarbreasoningretrievalbenchmark} benchmark, which requires complex reasoning for retrievers. Specifically, we evaluate on HellaSwag~\citep{zellers-etal-2019-hellaswag}, PIQA~\citep{bisk2020piqa}, ARC-C~\citep{clark2018think}, TempReason-L1~\citep{tan2023towards}, WinoGrande~\citep{sakaguchi2021winogrande}, $\alpha$-NLI~\citep{Bhagavatula2020Abductive}, SiQA~\citep{sap2019social}, and Quail~\citep{rogers2020getting}. Unlike BeIR, some RAR-b queries are %also 
+composed of sentences with (multiple) indicators (e.g., Start:, End:). Each dataset is associated with a task-specific instruction, following prior work \citep{muennighoff-etal-2023-mteb, wang2024improving, behnamghader2024llm2vec}. We provide additional preprocessing details in \autoref{appdx:experiment_details}.
+
+\paragraph{Constructing In-Context Examples} We construct $\train^{\text{ic}}_\text{test}$ from the training/development set of each datasets. For datasets on BeIR that do not have either of these, we use a synthetically generated collection of document-query pairs (GenQ) from \citet{thakur2021beir}. For all experiments, we use $k$=5 in-context examples.
+
+\paragraph{Metrics} We use standard metrics for retrieval benchmarks. Following~\citet{thakur2021beir}, we report nDCG@10, which measures the ranking quality of the top 10 retrieved documents, taking into account both the relevance and position of each retrieved document \citep{wang2013theoreticalanalysisndcgtype}.
+
+
+
+\section{Results}
+
+\label{section:results}
+
+\begin{figure*}
+  \centering
+  \caption{\textbf{Inference-only modification does not work} Performance after adding in-context examples to the query without updating model parameters. We see that embedding models are not able to leverage in-context examples out of the box, as opposed to decoder-only models.}
+  \label{fig:ic_existing_models}
+\end{figure*}
+
+We evaluate in-context example augmented queries in three settings. First, we evaluate the performance after inference-only modification, where we take existing pre-trained retrievers and simply provide in-context examples at inference time (Section \ref{section:results}). Second, we evaluate training retriever with in-context examples from an LLM (decoder-only) backbone (Section \ref{section:llm_checkpoints}). Third, we compare training retriever models with in-context examples from a pre-trained retriever (Section \ref{section:retriever_checkpoints}).\looseness=-1
+\paragraph{Inference-only Modification}
+\autoref{fig:ic_existing_models} illustrates the impact of incorporating in-context examples at inference time. Here, we simply modify the query format with retrieved in-context examples (i.e. $q^{\text{inst+ic}}$, Eq.~\ref{ref:query_format}) at inference time and compare its performance with the query format that does not have retrieved in-context examples (i.e. $q^{\text{inst}}$, Eq.~\ref{eq:query_base}). We evaluate the performance on three retriever models: \textit{SFR-Embedding-2-R} \citep{SFRAIResearch2024}, \textit{LLM2Vec-Llama-3-8B-Supervised} \citep{behnamghader2024llm2vec}, and \textit{E5-Mistral-7B-Instruct} \citep{wang2024improving}. Unlike in autoregressive LLMs, these embedding models generally exhibit decreased performance when in-context examples are added, with \textit{LLM2Vec-Llama-3-8B-Supervised} showing the largest drops in performance, except on one dataset (SciFact), where 2 out of 3 models show marginal gains over providing only instructions. Our experiments, which include adding more in-context examples and using nearest-neighbor examples, extend the findings of \citet{muennighoff2024gritlm}, where in-context examples led to decrease in performance on the GritLM models.%\eunsol{we need to separate a bit from their finding here, anything *new* in our finding? }
+
+\begin{table}[h]
+\small
+\centering
+\addtolength{\tabcolsep}{-1.5pt}
+\renewcommand{\arraystretch}{1.1}
+\caption{\textbf{Training from decoder-only (LLM) checkpoint.} Performance is measured by nDCG@10. RARe shows up to +2.72\% absolute gain on average over Promptriever, demonstrating that starting from an existing embedding model is not a requirement. We provide a breakdown of In-Domain (ID) and Out-of-Domain (OOD) performance.}
+\begin{tabular}{lccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multirow{2}{*}{\textbf{Base model}} & \multirow{2}{*}{\textbf{Training Data}} &\multicolumn{1}{c}{ID} &\multicolumn{2}{c}{OOD} & \multirow{2}{*}{\textbf{Average}} \\ \cmidrule(lr){4-4} \cmidrule(lr){5-6}
+&&& \textbf{MS-MARCO} & \textbf{BeIR} & \textbf{RAR-b} & \\ \midrule
+RepLLaMA & Llama-2 & MS-MARCO & 42.00 &53.69 & 20.23 & 38.64 \\
+RepLLaMA & Llama-3 & MS-MARCO & 43.56 & 53.99& 18.50 & 38.68\\
+\rowcolor[HTML]{EFEFEF}{\texttt{RARe}} & Llama-3  & MS-MARCO & \textbf{44.77} & 55.87 & 22.34 & \textbf{40.99} \\
+RepLLaMA & Llama-3.1-Instruct & MS-MARCO & 43.67 & 54.34 & 19.20 & 39.07 \\
+Promtpriever & Llama-3.1-Instruct &  MS-MARCO + Synthetic & 42.70& \textbf{56.10}& 20.95 & 39.94\\
+\rowcolor[HTML]{EFEFEF} {\texttt{RARe}} & Llama-3.1-Instruct & MS-MARCO & 42.93 & 56.05 & \textbf{23.67} & 40.88\\
+
+\bottomrule
+\end{tabular}
+\label{table:repllama_comp}
+\end{table}
+\subsection{Training from LLM Checkpoints} 
+\label{section:llm_checkpoints}
+
+Next, we present the results of applying our approach when training from LLM checkpoint. This might preserve in-context learning capacity of the LLM, which can be lost during standard IR training, which compresses query and passage into a fixed dimensional vector. We experiment with three LLM checkpoints (\textit{Llama-2}~\citep{touvron2023llama2openfoundation}, \textit{Llama-3} \citep{dubey2024llama3herdmodels}, \textit{Llama-3.1-Instruct}) to enable comparison with prior work~\cite{ma2023finetuningllamamultistagetext,weller2024promptriever}. 
+
+\paragraph{Comparison Systems} We compare training with our in-context example augmented query with two baselines. The first baseline is vanilla query (Eq.~\ref{eq:query_base}), which was explored in {RepLLaMA} \citep{ma2023finetuningllamamultistagetext}. The second baseline is {Promptriever} \citep{weller2024promptriever} which augments query-specific instructions using a synthetically generated training set from MS-MARCO. In all these systems, the task-specific instruction is a null string \citep{ma2023finetuningllamamultistagetext} as we train on a single task (MS-MARCO).
+\paragraph{Results} \autoref{table:repllama_comp} presents the performance on downstream benchmarks when training from LLM checkpoints. Comparing within the same base LLM checkpoint, our apporach outperforms both baselines (RepLLaMA and Promptriever). Our performance is competitive to that of Promptriever \citep{weller2024promptriever}, without incorporating synthetic data during training. Specifically, \texttt{RARe} achieves an absolute gain of +2.7\% over Promptriever on the RAR-b benchmark.
+
+\subsection{Training from Retriever Checkpoints}
+\label{section:retriever_checkpoints}
+\begin{table}
+\small
+\centering
+\addtolength{\tabcolsep}{-1pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{\textbf{Training from retriever checkpoint.} {Performance (nDCG@10) on BeIR~\citep{thakur2021beir} and RAR-b~\citep{xiao2024rarbreasoningretrievalbenchmark} benchmarks when fine-tuning retriever model on E5 dataset.} We report a breakdown of performance on In-Domain (ID) and Out-of-Domain (OOD) tasks on BeIR. We consider all RAR-b tasks as OOD.}
+\begin{tabular}{lccccccccc}
+\toprule
+\multirow{3}{*}{\textbf{Method}} & \multicolumn{4}{c}{\textit{LLM2Vec-Llama-3-8b-Supervised}}  & \multicolumn{4}{c}{\textit{E5-Mistral-Instruct}} \\ 
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+& \multicolumn{3}{c}{\textbf{BeIR}} & \multirow{2}{*}{\textbf{RAR-b}} & \multicolumn{3}{c}{\textbf{BeIR}} & \multirow{2}{*}{\textbf{RAR-b}} \\ \cmidrule(lr){2-4} \cmidrule(lr){6-8}
+ & ID & OOD & All & & ID & OOD & All \\ \midrule
+Base  & 71.31 &	49.28 &	56.63 & 21.55 &71.95 & 49.33 & 56.87 & 22.17 \\
+Instruct  & 70.46 & 47.79 & 55.35 & \textbf{23.44} &72.91 & 48.98 & 56.96 & 24.12 \\
+\rowcolor[HTML]{EFEFEF} {\cellcolor[HTML]{EFEFEF}\texttt{RARe}} &  \textbf{71.67} & \textbf{49.30} & \textbf{56.76} & 23.10 & \textbf{72.98} & \textbf{50.93} & \textbf{58.28} & \textbf{25.79} \\ \bottomrule
+\end{tabular}
+\label{table:mteb}
+\end{table}
+
+Lastly, we continue training retriever models -- \textit{LLM2Vec-Llama-3-8B-Supervised} \citep{behnamghader2024llm2vec}, \textit{E5-Mistral-Instruct} \citep{wang2024improving} on a training set where queries are augmented with in-context examples. As these initial checkpoints have already been trained on the training dataset, the extent that retrievers adapt to new query format can be limited. 
+\paragraph{Comparison Systems} We first report the initial retriever performance (\textbf{Base}) without any modification. Then, we compare continued fine-tuning with the task-specific instruction query format (Eq.~\ref{eq:query_base}) which only prepends the task specific instruction (\textbf{Instruct}, $q^\text{inst}$) to our in-context example augmented query format (Eq.~\ref{ref:query_format}).
+
+\paragraph{Results}
+
+\autoref{table:mteb} reports experimental results in this setting. Overall, both fine-tuning approaches provides gains over the base checkpoints. Comparing two settings, Instruct ($q^\text{inst}$) vs. \texttt{RARe} ($q^\text{inst+ic}$), our method achieves notable improvement with \textit{E5-Mistral-Instruct} base model (1.95\% over Instruct on out-of-domain tasks, and 1.32\% overall). Our method performs similar to Instruct ($q^\text{inst}$) setting when trained with the LLM2Vec base model. It is hard to attribute why experimental results varies based on the base retriever checkpoint, but we note the following differences between the two models. \textit{LLM2Vec-Llama-3-8b-Supervised} is the only model in our experiments where further fine-tuning with only instructions led to a decrease in in-domain performance. \textit{E5-Mistral-Instruct} employs causal attention with last token pooling, and trains on a proprietary synthetic dataset, \textit{LLM2Vec-Llama-3-8b-Supervised} uses bidirectional attention with mean pooling, training only on the E5 public portion. The effectiveness of learning with in-context examples may depend on the model architecture or data setting, and further investigation can be explored in future work.
+\begin{figure*}
+  \centering
+  \includegraphics[width=\linewidth]{Figures/retvsrandom_bar.pdf}
+  \caption{\textbf{Retrieved vs. Random In-context Examples.} Change in performance ($\Delta$nDCG@10) on \textit{E5-Mistral-Instruct} with \texttt{RARe} ($q^\text{inst+ic}$) from the baseline setting ($q^\text{inst}$ both during training and evaluation time). Using retrieved examples during training and inference enhance model performance in most benchmark datasets.}
+  \label{fig:retvsrandom}
+\end{figure*}
+
+
+\section{Discussions and Analysis}
+
+
+
+\subsection{Choice of In-context Examples}
+\paragraph{Retrieved (Similar) vs. Random In-Context Examples} In \autoref{fig:retvsrandom}, we study the impact of retrieving the nearest neighbor query-document pairs as examples against randomly chosen examples during training and evaluation. We observe that using retrieved examples during both training and evaluation (Retrieved, Retrieved) consistently outperforms other configurations across most datasets. (Random, Retrieved) shows second best overall performance, and generally outperforms (Random, Random), suggesting retrieved examples during evaluation is advantageous even when trained with randomly paired in-context examples. Our findings align with prior work in in-context learning -- that the incorporation of semantically similar examples is beneficial \citep{agrawal2022incontextexamplesselectionmachine, rubin-etal-2022-learning}.
+
+\begin{figure*}
+  \centering
+  \includegraphics[width=\linewidth]{Figures/icrar_results_bucket.pdf}
+  \caption{Change in performance ($\Delta$nDCG@10) from the base model (\textit{E5-Mistral-Instruct}) for varying similarity between the closest in-context example query and target query (Score@Top-1).}
+  \label{fig:top_p_vs_ndcg}
+\end{figure*}
+\paragraph{Does Having Semantically Relevant In-Context Example Help?} For some test examples, augmented in-context examples are very relevant, and for others, much less so. In this section, we group the evaluation examples by the maximum similarity of in-context query and the test query measured by an off-the-shelf sentence embedding model (Score@Top-1).\footnote{\url{https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2}} and plot the performances for each group. \autoref{fig:top_p_vs_ndcg} presents the performance of our system (RARe) and baseline (Instruct). On NFCorpus and SciFact datasets, we observe that when the closest in-context example has a high similarity with the target query, \texttt{RARe} demonstrates over 10\% gains compared to the base model. On the other hand, fine-tuning exhibits relatively lower performance gains with increasing similarity thresholds. For ArguAna, and FiQA2018, \texttt{RARe}'s gains with increasing Score@Top-1 are less pronounced, but generally matches the performance of the base model.\looseness=-1
+
+\paragraph{How Many In-Context Examples Are Sufficient?}
+We analyze the performance of \text{RARe} when varying the number of in-context examples provided during training and inference. \autoref{table:n_ic_examples} shows that increasing the number of in-context examples generally enhances performance. On ArguAna, we observe that 0 examples are optimal, which is likely due to the mismatch in the lengths of the queries used as in-context examples\footnote{\url{https://huggingface.co/datasets/BeIR/arguana-generated-queries}} (which are significantly shorter) versus the actual test queries. However, the impact is not uniformly positive across all datasets, suggesting that the optimal number of in-context examples may be dataset-dependent.
+\begin{table}[ht]
+\small
+\centering
+\addtolength{\tabcolsep}{-2pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{\textbf{Impact of the number of in-context examples ($k$) during training and evaluation.} All results are on \textit{E5-Mistral-Instruct}. In general, performance increases when increasing the number of examples, and the optimal number of examples depends on the task.}
+\begin{tabular}{cccccccc}
+\toprule
+\textbf{$k$} & \textbf{Arguana} & \textbf{CQADupStack} & \textbf{FiQA2018} & \textbf{NFCorpus} & \textbf{SciFact} & \textbf{Touche2020} & \textbf{Average} \\ \midrule
+Instruct (0) & 61.19 & 44.82 & \textbf{57.39} & 40.99 & 77.28 & 29.35 & 51.84 \\ \midrule
+1 & 60.47 & 46.76 & 56.07 & 40.67 & 81.47 & \textbf{29.78} & 52.54 \\
+3 & \textbf{62.98} & 47.12 & 57.08 & 40.77 & 83.71 & 27.12 & 53.13 \\
+\rowcolor[HTML]{EFEFEF} 5 & 60.87 & 48.46 & 57.31 & \textbf{42.28} & 84.79 & 28.70 & 53.74 \\
+10 & 58.85 & \textbf{48.92} & 57.03 & 42.24 & \textbf{87.61} & 28.29 & \textbf{53.82} \\ \bottomrule
+\end{tabular}
+\label{table:n_ic_examples}
+\end{table}
+
+\begin{table}
+\small
+\centering
+\addtolength{\tabcolsep}{-3.2pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{\textbf{In-Context Format} Comparing variants of in-context example format on \textit{E5-Mistral-Instruct}. Instruct refers to the baseline which does not use any in-context examples.}
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Fine-Tuning} & \textbf{IC Eval Setting} & \textbf{ArguAna} & \textbf{CQA} & \textbf{FiQA2018} & \textbf{NFCorpus} & \textbf{SciFact} & \textbf{Touche2020} & \textbf{Average} \\ \midrule
+ Instruct & - & \textbf{61.19} & 44.82 & \textbf{57.39} & 40.99 & 77.28 & \textbf{29.35} & 51.83 \\ \midrule
+\multirow{5}{*}{\texttt{RARe}} & Queries-Only & 58.88 & 46.66 & 54.44 & 41.42 & 78.84 & 28.09 & 51.39 \\
+& Doc-Only & 57.54 & 48.28 & 56.02 & 41.62 & 79.80 & 29.01 & 52.05 \\
+& Shuffle-NC & 60.17 & 45.78 & 54.25 & 41.17 & 80.70 & 29.18 & 51.88 \\
+ & Shuffle-C & 58.97 & 47.97 & 55.98 & 41.78 & 80.51 & 28.97 & 52.36  \\
+ \rowcolor[HTML]{EFEFEF} & Regular  & 60.87 & \textbf{48.46} & 57.31 & \textbf{42.28} & \textbf{84.79} & 28.70 & \textbf{53.74} \\
+\bottomrule
+\end{tabular}
+\label{table:shuffle}
+\end{table}
+\paragraph{Ablating Content and Format of In-context Examples} 
+One can view in-context examples as a form of query expansion \citep{lvpseudo, wang-etal-2023-query2doc}, providing useful keywords to improve the performance. In \autoref{table:shuffle}, we analyze the impact of various formats of in-context examples. All models are trained with the same format that they are evaluated on. Query-Only and Doc-Only contain only queries and documents of in-context examples, respectively. For Shuffle-C, we randomly shuffle the mapping between $q$ and $d$. On the other hand, for Shuffle-NC, we do not assume any structure, meaning that a query can be followed by a query as well as a document. First, we observe that Query-Only shows a larger performance drop over Doc-Only, suggesting in-context documents might contain more useful contents than in-context queries. Second, we observe that shuffling the pairings (Shuffle-C) marginally hurts in-context learning in \texttt{RARe}, as opposed to Shuffle-NC. Our findings align with prior study in decoder-only models~\citep{min2022rethinkingroledemonstrationsmakes} which showed strict correspondence between $q$ and $d$ is not required for performance gains from in-context examples.
+
+\begin{table}[ht]
+\centering
+\small
+\addtolength{\tabcolsep}{-3.9pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{\textbf{Impact of adding negative documents in the in-context prompt.} All results are on \textit{E5-Mistral-Instruct}. Negative documents $(d^-)$ in the prompt do not enhance performance.}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Training / Eval Setting} & \textbf{ArguAna} & \textbf{CQA} & \textbf{FiQA2018} & \textbf{NFCorpus} & \textbf{SciFact} & \textbf{Touche2020} & \textbf{Average} \\ \midrule
+{\texttt{RARe}-$q^\text{inst+ic}$}  & 60.87 & 48.46 & 57.31 & 42.28 & 84.79 & 28.70 & 53.74 \\ \midrule
+\texttt{RARe}-$q^\text{inst+ic+neg}$  & 61.19 & 48.09 & 56.89 & 41.58 & 82.37 & 30.51 & 53.44 \\ \bottomrule
+\end{tabular}
+\label{table:negatives}
+\end{table}
+\paragraph{Negative Documents in the Query} So far, we have used $(q, d^+)$ i.e (Query, Positive Document) pairs as the in-context prompt. Therefore, we study the impact of including negative documents. Specifically, the augmented query $q^{\text{inst+ic+neg}}$ includes examples of the form $(q, d^+, d^-)$, where the documents are prefixed with the term ``Positive Document: " and ``Negative Document: " respectively. \autoref{table:negatives} presents the downstream performance comparison between \texttt{RARe} variants trained solely on positive examples and those trained with augmented negative documents. The results indicate no performance gains from including negative documents. In fact, training with negative examples led to a slight decrease in performance.
+\begin{table}
+\small
+\centering
+\addtolength{\tabcolsep}{-2pt}
+\renewcommand{\arraystretch}{1.1}
+\caption{Latency breakdown (in seconds) of each stage in the retrieval pipeline for $q^\text{inst}$ and $q^\text{inst+ic}$ evaluation settings. 
+\textbf{\# Corpus} denote the number of documents and \textbf{Avg Q len.} denote the average number of query tokens split by whitespace.
+}
+\begin{tabular}{lcccccccc}
+\toprule
+{\textbf{Dataset}} & \textbf{\# Corpus} & \textbf{Eval Setting} & \textbf{Avg Q len.} & \textbf{NN} & \textbf{Query} & \textbf{Search} & \textbf{Total} & \textbf{Inc.} \\ \midrule
+\multirow{2}{*}{NFCorpus} & \multirow{2}{*}{3633} & $q^\text{inst}$ & 3.3 & 0 & 3.30 & 0.54 & 3.84 & - \\
+& & $q^\text{inst+ic}$ & 866.0 & 0.20 & 152.99 & 0.57 & 153.76 & 40.04$\times$ \\ \midrule
+\multirow{2}{*}{FiQA2018} & \multirow{2}{*}{57638} & $q^\text{inst}$ & 10.9 & 0 & 6.92 & 7.92 & 14.84 & - \\
+& & $q^\text{inst+ic}$ & 1016.6 & 0.45 & 278.62 & 8.83 & 287.90 & 19.40$\times$ \\ \midrule
+\multirow{2}{*}{TRECCOVID} & \multirow{2}{*}{171332} & $q^\text{inst}$ & 10.6 & 0 & 1.83 & 4.08 & 5.91 & - \\
+& & $q^\text{inst+ic}$ & 722.54 & 0.31 & 21.78 & 4.30 & 26.39 & 4.47$\times$ \\ \midrule
+\multirow{2}{*}{Touche2020} & \multirow{2}{*}{382545} & $q^\text{inst}$ & 6.6 & 0 & 1.42 & 9.29 & 10.71 & - \\
+& & $q^\text{inst+ic}$ & 1287.8 & 0.20 & 40.32 & 10.50 & 51.02 & 4.76$\times$ \\ \midrule
+\multirow{2}{*}{Quora} & \multirow{2}{*}{522931} & $q^\text{inst}$ & 9.5 & 0 & 113.93 & 986.42 & 1100.35 & - \\
+& & $q^\text{inst+ic}$ & 129.5 & 3.19 & 530.33 & 982.61 & 1516.13 & 1.38$\times$ \\ \midrule
+\multirow{2}{*}{DBPedia} & \multirow{2}{*}{4635922} & $q^\text{inst}$ & 5.5 & 0 & 36.93 & 588.38 & 625.31 & - \\
+& & $q^\text{inst+ic}$ & 158.2 & 0.19 & 46.21 & 709.27 & 755.67 & 1.21$\times$ \\
+\bottomrule
+\end{tabular}
+\label{table:eff}
+\end{table}
+\subsection{Efficiency Analysis}
+\label{subsection:efficiency}
+
+In Table \ref{table:eff}, we present a breakdown of the latency of each stage of the retrieval pipeline for both baseline ($q^{\text{inst}}$) and in-context ($q^{\text{inst+ic}}$) settings. We measure the total time required to obtain nearest-neighbour in-context examples (\textbf{NN}) from BM25, compute query embeddings (\textbf{Query}), and perform search with FAISS \citep{douze2024faisslibrary} with encoded query embeddings on the pre-computed document index (\textbf{Search}). We observe that the largest contributing factors to latency are the average length of input queries (\textbf{Avg Q len.}), and the size of the index (\textbf{\# Corpus}). For large query length and small corpus sizes, the in-context setting demonstrates a significant increase in total latency (19.40-40.04$\times$ for FiQA2018 and NFCorpus, respectively). However, for smaller average query lengths, this latency diminishes, as seen for Quora ($1.38\times$) and DBPedia ($1.21\times$). Moreover, the added latency due to the in-context setting also diminishes when the corpus size grows, as the time required for search outweighs the  time to encode the query. For example, on Touche2020 with a larger corpus of 380K documents, the increase in latency is $4.76\times$ compared to FiQA2018 ($19.40\times$) for similar query lengths.\looseness=-1
+
+
+\section{Related Work}
+
+
+\paragraph{In-context learning} ICL \citep{brown2020language} allows models to adapt to new tasks in a few-shot manner by conditioning on the input data and the context provided at inference time. ICL has been effectively applied to a wide range of tasks such as classification \citep{milios-etal-2023-context}, translation \citep{zhu-etal-2024-multilingual}, mathematical reasoning \citep{wei2022chain, zhou2022teaching}, and code generation \citep{li2023code}. Recent advancements have enhanced the ICL capabilities of language models through additional training procedures \citep{huang2022incontextdistillation, gu-etal-2023-pre, shi2024incontext}. \citet{min-etal-2022-metaicl} and \citet{chen2022metalearning} perform meta-learning with in-context examples on a wide collection of tasks, with the goal of adapting to a new task at inference time through few-shot in-context examples. Other works have explored improving performance through more principled approaches to select in-context examples during inference \citep{zhang-etal-2022-active, sorensen-etal-2022-information, wang2024largelanguage, qin2024incontext, lee2024crafting}. A simple and popular approach is to retrieve examples that are most similar to the input \citep{liu-etal-2022-makes, rubin-etal-2022-learning, li-etal-2023-unified}. Providing in-context examples to re-ranking models has been studied in prior work~\citep{drozdov2023paradepassagerankingusing}, but the potential of augmenting retrievers themselves by leveraging in-context examples remains unexplored. \citet{muennighoff2024gritlm} explored providing an in-context example out-of-the-box, but showed an overall decrease in performance compared to zero-shot inference.
+
+\paragraph{Retrieval} Large language models pre-trained with autoregressive  setups \citep{jiang2023mistral7b, dubey2024llama3herdmodels} have shown remarkable performance when adapted to retrieval tasks \citep{wang2024improving, behnamghader2024llm2vec}, outperforming encoder-style retrievers \citep{izacard2022unsupervised, wang2024textembeddings}. Despite these advancements, a challenge that remains is the ability to tailor retrieval systems to specific tasks or queries. To address this, a recent line of work explores incorporating instructions into retrieval by training models to use task-specific instructions along with the query \citep{su-etal-2023-one, asai-etal-2023-task}. \citet{oh2024instructir} and \citet{weller2024followir} further propose using instructions that are specific to each query. Another well-established technique in retrieval is query expansion \citep{jagerman2023queryexpansion, li2023generate, chen-etal-2024-analyze}, where the query is augmented with additional terms to enrich the embedding as a form of relevance feedback \citep{lvpseudo}. Recent efforts have focused on applying LLMs to expand the original query before retrieval \citep{wang-etal-2023-query2doc, shen-etal-2024-retrieval}. These techniques are not mutually exclusive, and can be integrated with our approach. 
+
+
+
+\section{Conclusion}
+
+In this paper, we explored augmenting in-context examples to retrieval models. Building on the limitations of existing retriever models in following in-context examples, we introduced \texttt{RARe}, a simple strategy that equips retrievers with the ability to leverage in-context examples by training with semantically similar in-context examples. Through detailed experiments and analyses, we demonstrated that \texttt{RARe} consistently improves performance across various architectures and downstream retrieval tasks, demonstrating the effectiveness of in-context learning for retriever models.
+
+
+
+\section{Limitations and Future Work}
+
+Similar to in-context settings in autoregressive models, a limitation of our approach is the requirement for a set of in-context examples in the form of $(q, d^+)$ pairs at inference time. \texttt{RARe} also introduces additional latency at inference time due to the encoding of in-context examples in the augmented query. This latency becomes more pronounced with longer documents, resulting in correspondingly extended queries. While the overhead is particularly significant for small indexes, it diminishes as the size of the index grows. To address these challenges, future research could explore several avenues, such as using efficient long-context retrievers \citep{saadfalcon2024benchmarkingbuildinglongcontextretrieval, zhang2024mambaretrieverutilizingmamba} as a backbone, or developing extractive and/or abstractive compression techniques on in-context documents to reduce query length. In this work, we used BM25 due to its lightweight nature to retrieve nearest neighbour examples. Future work could explore stronger models and approaches to reduce latency. Our current experiments are limited to English-language tasks, with potential to expand the scope to multilingual settings. Future work could explore curating synthetic data, an increasingly popular area of study for embedding models \citep{lee2024geckoversatiletextembeddings, wang2024improving, weller2024promptriever}, but for training with in-context examples. Future work could also explore developing new contrastive objectives to provide better signals during training with in-context examples.\looseness=-1
+
+
+
+

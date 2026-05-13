@@ -1,8 +1,8 @@
 # AIR-BENCH 2024: A Safety Benchmark based on Regulation and Policies Specified Risk Categories
 
 - Decision: Accept
-- Avg Score: 4.20
-- Scores: 6, 8, 1, 0, 6
+- Avg Score: 7.50
+- Scores: 6, 8, 10, 6
 
 ## Abstract
 Foundation models (FMs) provide societal benefits but also amplify risks. Governments, companies, and researchers have proposed regulatory frameworks, acceptable use policies, and safety benchmarks in response. However, existing public benchmarks often define safety categories based on previous literature, intuitions, or common sense, leading to disjointed sets of categories for risks specified in recent regulations and policies, which makes it challenging to evaluate and compare FMs across these benchmarks. To bridge this gap, we introduce AIR-BENCH 2024, the first AI safety benchmark aligned with emerging government regulations and company policies, following the regulation-based safety categories grounded in the AI Risks taxonomy, AIR 2024. AIR 2024 decomposes 8 government regulations and 16 company policies into a four-tiered safety taxonomy with 314 granular risk categories in the lowest tier. AIR-BENCH 2024 contains 5,694 diverse prompts spanning these categories, with manual curation and human auditing to ensure quality. We evaluate leading language models on AIR-BENCH 2024 uncovering insights into their alignment with specified safety concerns. By bridging the gap between public benchmarks and practical AI risks, AIR-BENCH 2024 provides a foundation for assessing model safety across jurisdictions, fostering the development of safer and more responsible AI systems.

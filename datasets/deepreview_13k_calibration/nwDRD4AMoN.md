@@ -1,8 +1,8 @@
 # ARTIFICIAL KURAMOTO OSCILLATORY NEURONS
 
 - Decision: Accept
-- Avg Score: 3.00
-- Scores: 8, 8, 1, 0, 1, 0
+- Avg Score: 9.00
+- Scores: 8, 8, 10, 10
 
 ## Abstract
 It has long been known in both neuroscience and AI that ``binding'' between neurons leads to a form of competitive learning where representations are compressed in order to represent more abstract concepts in deeper layers of the network. More recently, it was also hypothesized that dynamic (spatiotemporal) representations play an important role in both neuroscience and AI. Building on these ideas, we introduce Artificial Kuramoto Oscillatory Neurons (\method) as a dynamical alternative to threshold units, which can be combined with arbitrary connectivity designs such as fully connected, convolutional, or attentive mechanisms. Our generalized Kuramoto updates bind neurons together through their synchronization dynamics. We show that this idea provides performance improvements across a wide spectrum of tasks such as unsupervised object discovery, adversarial robustness, calibrated uncertainty quantification, and reasoning. }.

@@ -1,0 +1,258 @@
+\title{Designing Concise ConvNets with Columnar Stages}
+
+\begin{abstract}
+In the era of vision Transformers, the recent success of VanillaNet shows the huge potential of simple and concise convolutional neural networks (ConvNets). Where such models mainly focus on runtime, it is also crucial to simultaneously focus on other aspects, e.g., FLOPs, parameters, etc, to strengthen their utility further. To this end, we introduce a refreshing ConvNet macro design called \OursNetHighlight{}~(\OursNet{}). \OursNet{} has a systematically developed simple and concise structure, smaller depth, low parameter count, low FLOPs, and attention-less operations, well suited for resource-constrained deployment. The key novelty of \OursNet{} is deploying parallel convolutions with fewer kernels fed by input replication, using columnar stacking of these convolutions, and minimizing the use of $1 \times 1$ convolution layers. Our comprehensive evaluations show that \OursNet{} rivals many renowned ConvNets and Transformer designs under resource-constrained scenarios.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+In the past decade, there has been enormous study in the neural network architectures \cite{alexnet, vgg}, demonstrating that different information paths \cite{resnet, densenet, googlenet, efficientnet, resnext} can affect the performance. However, as highlighted in recent VanillaNet~\cite{vanillanet}, due to the increased network complexity, the primary source of runtime bottleneck would be the off-chip memory traffic apart from the main computations because GPUs are constantly becoming more powerful.
+
+The issue is prevalent in more advanced models, such as ConvNext~\cite{convnext}, CoatNet~\cite{coatnet}, ViT~\cite{vit}, etc., due to the indirect information paths or the attention mechanism that requires frequent memory reordering. Hence, despite these models being far ahead of their simpler counterparts~\cite{resnet,alexnet}, there are still opportunities to develop concise models for better accuracy, runtime, and resource tradeoffs.
+Efforts in this direction are noteworthy. For example, RepVGG~\cite{repvgg} improves runtime via structural parameterization. ParNet \cite{nondeepnetwork} reduces depth by utilizing multiple shallower network modules. Recent VanillaNet~\cite{vanillanet} merges layers during inference while avoiding branches. These works fall in the paradigm of simplifying ConvNet models for resource-constrained scenarios, in contrast to the advanced ConvNets \cite{coatnet,convnext}, or ViT \cite{vit} focusing on state-of-the-art accuracy.
+
+We are inspired by the utility of the former class of works, i.e., simpler and concise models. However, besides focusing on runtime or depth \cite{vanillanet, repvgg, nondeepnetwork}, we also focus on other ConvNet aspects, such as FLOPs, parameters, depth, computational density, etc.
+To this end, we propose a concise model by revisiting the fundamentals of prominent ConvNet designs and define the following key sub-objectives:
+
+$1)$ \textit{Reducing depth:} Network depth refers to the number of layers stacked. More depth means more sequential operations, thus more latency and wastage of parallel computing elements (GPU cores).
+\\
+$2)$ \textit{Controlled parameter growth:} Reducing depth to achieve lower latency leads to an increased number of parameters \cite{vanillanet, nondeepnetwork}, thus necessitating parameter control while having short depth.
+\\
+$3)$ \textit{Low branching:} Network branching increases memory requirements to hold intermediate tensors and also increases memory access cost to account for the branched operations.
+\\
+$4)$ \textit{High computational density:} A layer must have a high computing density since fewer computations per layer waste the parallel computing cores, e.g., depthwise convolutions~\cite{mobilenetv1} have less computation density and high memory access cost compared to the dense convolutions~\cite{vgg}.
+\\
+$5)$ \textit{Uniform primitive operations:} Maintaining a uniform convolution kernel size throughout the network and branches is desirable so that computations can be packed into minimum GPU transactions.
+
+This leads to a concise refreshing ConvNet design (Figure~\ref{fig:netunit}) that shows enhanced performance in various aspects, such as low memory consumption, low memory access costs on parallel computing hardware, smaller depth, minimum branching, lower latency, low parameter count, and reduced FLOPs. The key attributes of \OursNet{}-unit are \textit{parallel columnar convolutions} (Sec.~\ref{sec:pcc}), \textit{input replication} (Sec.~\ref{sec:ir}), and \textit{shallow-deep projections} (Sec.~\ref{sec:proj}), allowing \OursNet{} to perform better than simple ConvNets or rival the advanced designs. The achievements of \OursNet{} emphasize simplicity's importance in effective ConvNet designs.
+
+
+\section{Related Work}
+
+\label{sec:rel}
+
+\begin{figure}[t]
+\centering
+
+\begin{tikzpicture}
+
+\colorlet{clr}{white!100!gray}
+\node (vgg)[draw=clr, rounded corners=0.2ex, line width=0.1ex]{
+\includegraphics[scale=0.47]{plots/other_units.pdf}
+};
+\node (a) [ xshift=-41ex, yshift=-23ex, scale=0.7]{(a) VGG};
+\node (b) [xshift=-32ex, yshift=-23ex, scale=0.7]{(b) Inception};
+\node (c) [ xshift=-18ex, yshift=-23ex, scale=0.7]{(c) ResNet};
+\node (d) [ xshift=-1ex, yshift=-23ex, scale=0.7]{(d) ResNeXt};
+\node (e) [ xshift=13ex, yshift=-23ex, scale=0.7]{(e) ConvNeXt};
+\node (f) [ xshift=25ex, yshift=-23ex, scale=0.7]{(f) RepVGG};
+\node (g) [ xshift=38.5ex, yshift=-23ex, scale=0.7]{(g) Group Conv};
+
+\end{tikzpicture}
+\subfloat{\label{fig:stages_vgg}}
+\subfloat{\label{fig:stages_inception}}
+\subfloat{\label{fig:stages_resnet}}
+\subfloat{\label{fig:stages_resnext}}
+\subfloat{\label{fig:stages_convnext}}
+\subfloat{\label{fig:stages_repvgg}}
+\subfloat{\label{fig:stages_groupconv}}
+\caption{Design of various representative architectures in the order of their development in the timeline from (a) to (e). Each graph represents a stage of a network operating at a particular resolution.}
+\label{fig:stages}
+\end{figure}
+This section provides an overview of representative network designs (Figure~\ref{fig:stages}). The earlier ConvNets~\cite{alexnet, vgg} stacked dense convolutions with an increasing number of channels and decreasing resolution (Figure~\ref{fig:stages_vgg}). Improved versions \cite{resnet, googlenet, resnext} achieve higher accuracy via manually designed blocks (Figure~\ref{fig:stages_resnet}), while \cite{mobilenetv1, shufflenetv2, mobilenetv2, shufflenetv1}, use depthwise convolutions \cite{depthwise} for saving computations.
+
+ConvNets have also grown from branchless \cite{alexnet, vgg} (Figure~\ref{fig:stages_vgg}) to single branch \cite{resnet} (Figure~\ref{fig:stages_resnet}) to multi-branch \cite{regnet, inception, efficientnet, nasnet} (Figure~\ref{fig:stages_inception}). These models utilize $1\times1$ convolutions frequently, which rapidly increases network depth \cite{resnet, mobilenetv2, efficientnet, shufflenetv1} (Figure~\ref{fig:stages_resnet}-\ref{fig:stages_convnext}). Although beneficial, both large depth and high branching tend to increase the latency, memory requirements, and Memory Access Cost (MAC) \cite{vanillanet} due to the serialized execution of parallel branches \cite{repvgg, highwaynets, efficientnet}.
+
+Recent RepVGG~\cite{repvgg} proposes structural parameterization (SR) to resolve the branching issue. While ParNet \cite{nondeepnetwork} and VanillaNet \cite{vanillanet} reduce depth to achieve lower latency. Efforts to reduce depth increase the parameter count \cite{vanillanet, nondeepnetwork} to match the accuracy of relatively deeper counterparts \cite{resnet}.
+
+Recent Vision Transformers (ViTs) \cite{vit, efficientvit, swint, deit} have attracted huge research interests. As outlined in \cite{coatnet}, the $O(N^2)$-complex attention in ViTs is a notable issue from a data size and resource-constrained viewpoint. This issue continues to inspire improvements in ConvNets. For instance, RepLKNet \cite{replknet} aims to bridge the gap between ViT and CNNs by employing large kernels.
+
+The previously discussed designs focus on particular aspects, e.g., \cite{resnet, resnext} on the accuracy, \cite{vanillanet, nondeepnetwork} on runtime and depth. On the other hand, our aim is not to develop large-scale complex models. Instead, given the success of VanillaNet-style networks, we focus on our sub-objectives (Sec~\ref{sec:intro}) to push the frontier of simple, concise models by revisiting the representative ConvNets.
+
+
+
+
+\section{\OursNetFULL{}
+
+\label{sec:method}
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+
+\node (unit)[]{
+\includegraphics[scale=0.57]{plots/cosnet_unit.pdf}
+};
+\node (a) [xshift=-32.5ex, yshift=-25.0ex]{\footnotesize (a)};
+\node (b) [xshift=-16.8ex, yshift=-25.0ex]{\footnotesize (b)};
+\node (c) [xshift=7.0ex, yshift=-25.0ex]{\footnotesize (c)};
+\node (d) [xshift=32.0ex, yshift=-25.0ex]{\footnotesize (d)};
+\end{tikzpicture}
+\subfloat{\label{fig:unit_a}}
+\subfloat{\label{fig:unit_b}}
+\subfloat{\label{fig:unit}}
+\subfloat{\label{fig:optunit}}%
+\caption{Design evolution flow of \OursNet{}-unit. (a) A ResNet \cite{resnet} stage with three blocks. (b) removing all $1\times1$ convolutions except the first of the first block and the last of the last block. (c) detailed design of the \OursNet{}-unit by integrating our design ideas into `(b)', and (d) final optimized \OursNet{}-unit from an implementation viewpoint.}
+\label{fig:netunit}
+\end{figure}
+
+Our approach is a series of improvements motivated by representative ConvNet designs. To understand better, we begin with ResNet~\cite{resnet} as a stepping stone as done in \cite{convnext}. We design the building block of \OursNet{} i.e., \OursNet{}-unit while recalling our sub-objectives: $1)$ reducing depth, $2)$ controlled parameter count, $3)$ high computational density, $4)$ uniform primitive operation, and $5)$ low branching.
+
+\subsection{Avoiding $1\times 1$ for Reducing Depth}
+
+\label{sec:reducing_depth}
+The recent works of reducing depth \cite{vanillanet, nondeepnetwork} increase the parameter count to achieve accuracy similar to a deeper network. However, we aim to reduce depth while avoiding a large parameter count, which is a difficult objective. Hence, we handle reducing depth and controlling parameter count separately.
+
+To reduce depth, we identify that $1 \times 1$ convolutions in the ResNet-like designs (Figure~\ref{fig:unit_a}) \citep{resnet, convnext} etc., form almost $66\%$ of depth without improving receptive field due to their pointwise nature \cite{effectivereceptivefield}. Hence, we minimize the number of these layers. Specifically, we use only two $1 \times 1$ convolutions $L_s$ and $L_f$ in a \OursNet{}-unit, where $L_s$ reduces the channel squeezing while $L_f$ performs expansion (Figure~\ref{fig:unit_b}). Then, we stack $l$ number of $3\times3$ convolutions, forming a \textit{column} sandwiched between $L_s$ and $L_f$.
+
+This strategy brings two benefits. \textit{First}, it reduces the overall depth at the same receptive field, e.g., three blocks of ResNet-like design have $9$ layers with three receptive-field governing $3\times3$ layers. In contrast, the proposed design only has $5$ layers, i.e., two $1 \times 1$ and three $3 \times 3$ conv, indicating a notable $45\%$ \emph{depth reduction} with the same receptive field.
+
+\textit{Second}, the reduced depth results in \textit{reduced FLOPs} and \textit{latency} e.g., \OursNet{} performs better than ResNet-$50$ at $50\%$ fewer layers while having relatively fewer parameters, FLOPs, and latency.
+\subsection{Parallel Columnar Convolutions for Controlled Parameters.}
+\label{sec:pcc}
+
+We propose \textit{Parallel Columnar Convolutions} to handle the large parameter count originating to compensate for the lost non-linearity due to the reduced depth \cite{vanillanet}. In this design, we first deploy $M$ columns in parallel (Figure~\ref{fig:unit}), and crosstalk among columns does not exist, i.e. a convolution of a column can only feed a convolution of the same column. Then, we restrict the number of kernels in a convolution layer of a column to a small number of $N$. This design affects the number of parameters less aggressively when the number of columns increases (see ablations in the supplement). This is a powerful feature of \OursNet{} design, offering controlled growth of parameter count during network scaling. This helps \OursNet{} achieve higher accuracy with fewer parameters.
+
+The idea of the parallel column is based on our hypothesis that multiple kernels with fewer channels can be better than one with large channels. Having $M$ convolutions in parallel with a smaller number of kernels $N$ is equivalent to synthesizing multiple kernels from a large kernel. On the other hand, the idea of smaller $N$ is motivated by the fact that many parallelly operating neurons tend to learn redundant representations while being computationally taxing and causing overfitting. For the same reason, EfficientViT \cite{efficientvit} slices the input channels in its structure. Hence, by keeping $N$ small, we expect to decouple the data patterns learned by the different columns.
+
+In ConvNets, a similar idea was proposed in Inception \cite{googlenet}, then in ResNeXt \cite{resnext}, and then abandoned later as it caused inefficiency. For instance, Inception uses different-sized convolutions and pooling in parallel, which must be executed serially despite being employed in parallel. Also, Inception differs from our columnar architecture since it does not have columns as deep as \OursNet{}.
+
+\subsection{Input Replication}
+\label{sec:ir}
+In \OursNet{}, all the columns are fed with replicas of the input. We achieve that via a simple \textit{Input Replication} \texttt{IR} operation (Figure~\ref{fig:unit}), which transforms a tensor $\in \mathbb{R}^{C \times H \times W}$ into duplicated one $\in \mathbb{R}^{(M \times C) \times H \times W}$, where $M$ denotes the desired number of the columns. In the \OursNet{}-unit, the \texttt{IR} is applied over the output of the $L_s$ layer to feed each column with the input replica.
+
+Input replication has also been employed in the earlier ResNeXt \cite{resnext}, but notable differences exist. ResNeXt has multiple blocks per stage, and \emph{each block performs} \texttt{IR}, as shown in Figure~\ref{fig:stages_resnext}. Whereas \OursNet{} performs  \texttt{IR} only once. In ResNeXt, \texttt{IR} is performed before $1\times1$ squeeze layer, whereas in \OursNet{}, it is done after the squeeze layer. 
+
+The parallel columnar organization may seem to overlap with widely explored group convolutions \cite{resnext, shufflenetv1}. However, there are two key differences. \textit{First}, group convolution \emph{divides the input channels}, thus defying the objective of \texttt{IR} because now each column receives only a subset of the input channels, thus less information per group, as shown in Figure~\ref{fig:stages_groupconv}. On the contrary, \OursNet{} uses \texttt{IR}, which feeds each column with the replica of the input, thus making the entire input information accessible to each column. This becomes one of the reasons that despite infrequent fusion (Sec.~\ref{sec:fuse_once}), unlike group conv, \OursNet{} still performs better (See ablations in the supplement).
+
+\subsection{Uniform Kernel Size for High Computational Density \& Uniform Primitive Operations.} 
+The parallel columns of a \OursNet{}-unit can be executed independently; however, this design can be optimized further if all the convolutions in all the columns have uniform kernel size. To this end, we first set the kernel size in all the convolutions to $k \times k$, where $k \in \mathbb{R}_{\geq 3}$. Then, we combine the convolutions of different columns lying at the same level, i.e., the first convolution of each column is combined into one convolution having $M$ batches.
+
+With this optimization, all columns can be efficiently processed using GPU-based highly optimized Batched-Matrix-Multiply routines, leading to increased computational density, increased GPU utilization, reduced memory access cost \cite{repvgg}, and minimized GPU load-dispatch transactions. Thus resulting in a simplified \OursNet{} design (Figure~\ref{fig:optunit}).
+Moreover, since an \OursNet{}-unit is made up mostly of $3\times 3$ convolutions, it well suits the convolution hardware accelerators because they have dedicated support for them, and more chip area can be dedicated to $3\times3$ computational units.
+
+\subsection{Batched Processing for Minimal Branching.} From the previous step, batched processing yields additional benefits, i.e., \OursNet{} becomes uni-branched regardless of training and testing. This reduces memory consumption and access costs, resulting in lower per-iteration training time and increased parallelization. This contrasts with RepVGG \cite{repvgg}, which has a considerable training time. Regarding ASIC development, low branching in \OursNet{} leaves more area on the chip because of the reduced memory requirement to store intermediate tensors. This area can now be dedicated to more computational units.
+
+Although the multi-branch design is beneficial for achieving high accuracy \cite{repvgg} (Figure~\ref{fig:stages_repvgg}), \OursNet{}, despite having minimal branching, effortlessly achieves high accuracy. This is because the core design of \OursNet{}-unit posses multiple branches in the form of columns and short projections (Figure~\ref{fig:unit}). However, due to batched processing \OursNet{}-unit mimics uni-branched behavior. In this way, \OursNet{} takes advantage of both worlds, i.e., eliminated train time complexity due to multiple branches and fast inference during test time without needing structural parameterization \cite{repvgg}. 
+
+\subsection{Fuse Once}
+\label{sec:fuse_once}
+Finally, the output of all the columns is fused by $L_f$. In ResNeXt (Figure~\ref{fig:stages_resnext}), the output of $3\times3$ convs are fused immediately via a $1\times1$ conv, whereas in \OursNet{}, it is done much later. 
+Our fuse once strategy is different from group \cite{shufflenetv1} or depthwise convolutions \cite{mobilenetv1} that are followed by $1\times 1$ (Figure~\ref{fig:stages_groupconv}) to avoid loss of accuracy because each group/channel has too few connections which restrict its learning ability without frequent fusion (\cite{shufflenetv1}, Figure~\ref{fig:stages_groupconv}). This increases network depth and, hence, latency. On the contrary, \OursNet{} is free from this constraint because we increase $N$ as we go deep in \OursNet{} unlike \cite{shufflenetv1}. Hence, each neuron in $M$ columns has a sufficiently large number of connections that enable learning without frequent fusion. We performed an ablation (see supplement) by applying the same strategy as Figure~\ref{fig:stages_groupconv} in \OursNet{}. We observed increased network depth, latency, and decreased accuracy.
+\begin{wrapfigure}[11]{r}{0.30\textwidth}
+\centering
+\includegraphics[scale=0.5]{plots/pff.pdf}
+\caption{Illustration of Vanilla Frequent Fusion (left) (\cite{shufflenetv1}, Figure~\ref{fig:stages_groupconv}) and Pairwise Frequent Fusion (right).}
+\label{fig:pff}
+\end{wrapfigure}
+
+\textit{Pairwise Frequent Fusion (PFF):} Although we aim to reduce $1\times1$ layers as they have a high concentration of most of the network parameters and FLOPs (Sec.~\ref{sec:reducing_depth}), we propose a frequent fusion scheme via $1\times 1$ while avoiding the parameter and FLOPs concentration issue. In this scheme, instead of fusing all the columns simultaneously, we fuse columns only pairwise via $1 \times1$ (Figure~\ref{fig:pff}). This strategy essentially offers several benefits. Firstly, with pairwise fusion, $1 \times 1$ kernel incorporates only a few computations per layer due to small kernel size (fewer channels) while improving network accuracy. Secondly, the latency incorporated due to these layers does not increase the overall latency because of the few computations per layer, hence offers better accuracy with negligible latency overhead ($1-2$ms). See Table~\ref{tab:imagenet_300}. We denote all such \OursNet{} variants as \OursNet{}-PFF.
+\subsection{Projections}
+\label{sec:proj}
+To facilitate better gradient flow during network training, we employ projections introduced by ResNet \cite{resnet} but slightly differently in two ways:
+
+$1)$ \textit{Shallow Range.} These projections are formed between any two layers of a column and promote better gradient flow through the stack of $l$ layers (Figure~\ref{fig:unit}). Since such projections connect only two layers, unlike a stack of layers in ResNet-like designs, these are named shallow ranges.
+
+$2)$ \textit{Deep Range.} These projections are formed between the input and the output of a \OursNet{}-unit. Specifically, the input to \OursNet{}-unit is projected to its output via a $3 \times 3$ pooling layer followed by a $1 \times 1$ convolution $L_p$ whose output is fused with the output of $L_f$  (Figure~\ref{fig:unit}). The pooling operation gathers spatial context by enlarging the receptive field, which is otherwise impossible for $L_p$ alone due to its point-wise nature. 
+We call it deep projection because it bypasses the entire columnar structure while combining information from the previous network stages, i.e., multi-layer information fusion, and providing a short alternative path for gradient flow. 
+
+The above projection design helps achieve \OursNet{} better accuracy (see ablations) and is slightly different from the existing ones. First, projection in ResNet-like models \cite{resnet, resnext} is used only in the first block of a stage (shallower), and projection between stages does not exist. Second, projection in these models operates at a stride of $2$. On the contrary, in \OursNet{}, the projection connects two stages (deeper) while operating at unit stride and utilizing pooling to increase the receptive field. 
+
+\subsection{\OursNet{} Instantiation}
+\label{sec:designspace}
+\input{plots/old_vs_oursnet_macro}
+
+A \OursNet{} variant can be instantiated by stacking \OursNet{}-units (Figure~\ref{fig:macroarch}). \OursNet{} does not have the notion of blocks but only has stages in the form of \OursNet{}-unit. This contrasts with existing ConvNets, which have stages, and each stage comprises multiple blocks \cite{nondeepnetwork, resnet, convnext, resnext} e.g., ResNet-$50$ has four stages, having $3$, $4$, $6$, and $3$ blocks respectively (Figure~\ref{fig:stages_resnet}-~\ref{fig:stages_convnext}).
+
+To instantiate a \OursNet{} variant, we follow the tradition of five stages \cite{resnet, vgg}, among which the first (stem) is a $3 \times 3$ convolution with a stride of $2$, while the remaining are the \OursNet{}-units. 
+
+Following ResNet~\cite{resnet}, we set channels of $L_s$ to $64$, which gets doubled at each stage, while the channels of $L_p$ and $L_f$ always equal to $\zeta$ times the channels of $L_s$. We set $\zeta=4$, following \cite{resnet}. To further simplify the instantiation, we set the depth of a column, i.e. $l$ in $k^{th}$ \OursNet{}-unit equal to the number of blocks in the $k^{th}$ stage of a widely used model ResNet-$50$~\cite{resnet}. Summarily, \OursNet{}-unit has \emph{only three hyperparameters: $M, N, l$} which can be changed to construct different \OursNet{} variant. Please refer to the supplement for \OursNet{} instance names.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We evaluate \OursNet{} on ImageNet \cite{imagenet} dataset consisting of $1.28$M train and $50$k validation images of $1000$ categories. Our training methodology is consistent with recent VanillaNet~\cite{vanillanet}. We use data augmentation techniques in \cite{vanillanet, convnext}.
+
+\input{tables/imagenet_300}
+
+\subsection{Advanced ConvNets and Vision Transformers}
+\label{sec:big_cnn}
+\noindent\textbf{\OursNet{} \textit{vs} recent EfficientViT \cite{efficientvit}}
+As shown in Table~\ref{tab:imagenet_300} and Figure~\ref{fig:mde}, \OursNet{} is less deep and runs $60\%$ faster than EfficientViT Transformer while exhibiting better accuracy, e.g., EfficientVit-M$4$ vs \OursNet{}-A$0$. EfficientVit is another example of lower FLOPs that do not guarantee lower latency. Even the \OursNet{}-A$1$-PFF variant is still relatively shallower than EfficientVit while delivering better accuracy.
+
+\noindent\textbf{\OursNet{} \textit{vs} DeiT \cite{deit}}
+From Table~\ref{tab:imagenet_300}, \OursNet{}-B$1$ is almost $50\%$ less deep, has $23\%$ fewer params, and runs $60\%$ faster than DeiT Transformer while exhibiting slightly better accuracy. With PFF, \OursNet{}-B$0$-PFF performs better in terms of accuracy, depth, and runtime.
+
+\noindent\textbf{\OursNet{} \textit{vs} advanced mid-range ConvNets and Transformers}
+\OursNet{}-B$2$ is $72\%$ less deeper, $55\%$ faster, and $1.2\%$ more accurate than the popular Swin Transformer~\cite{swint}. It is also $55\%$ less deeper, $30\%$ faster with slightly lower accuracy than the popular ConvNeXt~\cite{convnext}. Moreover, \OursNet{}-C$2$ rivals the latest ConvNext-v$2$-T \cite{convnextv2} with similar accuracy but higher speed and smaller depth.
+
+\OursNet{}-B$2$, C$1$, C$2$ models rivals advanced Transformers, such as ViTAE-S~\cite{vitae} and hybrid models, such as CoAtNet-0~\cite{coatnet}. With similar parameter counts and accuracy, our models show faster inference speed. The competitive tradeoffs offered by \OursNet{} show the significance of concise models.
+\input{plots/multi_aspect_plot}
+\subsection{Comparison with Standard ConvNets} We show that \OursNet{} achieves efficiency in multiple aspects in a large spectrum of models while being simpler during training and inference and offering competitive trade-offs relative to the rival network. See Table~\ref{tab:imagenet_300} for the comparison. Figure~\ref{fig:mde} plots the trends regarding various aspects.
+
+\noindent\textbf{\OursNet{} \textit{vs} recent VanillaNet~\cite{vanillanet}}. 
+\OursNet{} rivals recent ConvNet design, VanillaNet. VanillaNet is shallow and mainly focuses on latency. Our \OursNet{}-A$0$ shows similar latency at fewer parameters, fewer FLOPs, and high accuracy compared with VanillaNet-$6$ (Table~\ref{tab:imagenet_300}). 
+
+\noindent\textbf{\OursNet{} \textit{vs} recent ParNet \cite{nondeepnetwork}.} 
+\OursNet{} outperforms recent non-deep ParNet that focuses on lower latency (Table~\ref{tab:imagenet_300} R4). \OursNet{} is uni-branched, while ParNet has multiple shallow branches which serialize the computations, thus making them deeper virtually.
+
+\noindent\textbf{\OursNet{} \textit{vs} RepVGG \cite{repvgg}.}
+RepVGG offers a plain VGG-like \cite{vgg} structure via Structural Reparameterization (SR). However, its training complexity is high due to a large number of parameters and three branches at each layer (Figure~\ref{fig:stages_repvgg}). Hence, we show its performance with and without SR.
+
+Compared with the RepVGG family, \OursNet{} offers considerably lower complexity during training and testing, thanks to its parallel columnar convolutions. In addition, \OursNet{} has fewer parameters and fewer FLOPs while offering similar speeds with higher accuracy. For instance, \OursNet{}-B$2$ is better than RepVGG-B$3$ at similar depth, $73\%$ fewer parameters, $80\%$ lesser FLOPs while running faster. This shows the significance of parallel columns of \OursNet{} that during model scaling, parameter count does not grow rapidly.
+
+\noindent\textbf{\OursNet{} \textit{vs} EfficientNet \cite{efficientnet}.} 
+Although we do not aim for a mobile regime in this paper, we show that having fewer parameters and FLOPs does not guarantee faster speeds. As shown in Table~\ref{tab:imagenet_300}, EfficientNet-B$0$ has $50\%$ fewer parameters and $77\%$ fewer FLOPs, but is $50\%$ deeper, and runs $37\%$ slower. By exploring the design space, \OursNet{} can be extended to the mobile regime.
+
+\noindent\textbf{\OursNet{} \textit{vs} ResNet \cite{resnet} family.}
+As shown in Table~\ref{tab:imagenet_300}, \OursNet{}-A$0$ is $6\%$ more accurate, has $25\%$ fewer parameters, shows similar runtime, and shows $31\%$ fewer FLOPs than ResNet-$18$ although \OursNet{} has $6$ more layers. Similarly, in contrast to ResNet-$34$, it is more accurate by $3\%$ with $59\%$ fewer parameters, $66\%$ fewer FLOPs, and $23\%$ less layers, while it is fast by $37\%$.
+ResNet-$50$ is the widely employed backbone in downstream tasks~\cite{detr, imagenet1hr, maskrcnn, fasterrcnn} due to its affordability regarding representation power, FLOPs, depth, and accuracy. Table~\ref{tab:imagenet_300} shows that \OursNet{}-B$0$ surpasses ResNet-$50$ while being $50\%$ shallower, $22\%$ fewer parameters, $25\%$ fewer FLOPs, and $40\%$ faster.
+
+\noindent\textbf{\OursNet{} \textit{vs} bigger ResNet \cite{resnet} and ResNeXt \cite{resnext} models.} 
+As shown in Table~\ref{tab:imagenet_300}, \OursNet{}-C$1$ is better than bigger variants of ResNet, which serves as backbones for cutting-edge works \cite{detr, dndetr}. Our \OursNet{} outperforms them in various aspects while being $72\%$ and $82\%$ less deep relative to ResNet-$101$ and ResNet-$152$, respectively. \OursNet{} also runs faster by $50\%$ in $50\%$ fewer parameters and FLOPs.
+In addition, despite being smaller than ResNeXt \cite{resnext}, \OursNet{}-C$1$ outperforms it in various aspects. Overall \OursNet{}-C$1$ is $50\%$ less deeper than ResNeXt-$50$ while running $50\%$ faster at $6\%$ fewer FLOPs, $2\%$ fewer parameters while being more accurate. In contrast to ResNeXt-$101$, \OursNet{}-C$2$ is $75\%$ less deeper, $11\%$ fewer parameters, $12\%$ fewer FLOPs, and $35\%$ faster at a higher accuracy. 
+\input{tables/vanillanet_train}
+
+\input{tables/faster_convergence}
+
+\subsection{Additional Experiments}
+
+\noindent\textbf{\OursNet{} has small training walltime.} We provide an additional comparison with the recent ConvNet design, VanillaNet \cite{vanillanet}, under training settings. Table~\ref{tab:vanillanet_train} shows that despite VanillaNet being a shallow network, it has a high training time. We speculate that the large number of channels in the deeper layers of VanillaNet slows down batch processing at large batch sizes. In \OursNet{}, parallel columnar convolutions and controlled parameter growth in the deeper layers counter this issue, leading to lower training time.
+\noindent\textbf{\OursNet{} is seamlessly compatible with SE-like \cite{senet} modules.} Table~\ref{tab:comnet_with_attention} shows the results when \OursNet{} is used in conjunction with Squeeze and Excitation (SE) like modules \cite{senet}. It outperforms recent attention mechanism (AFF~\cite{attentionalfeaturefusion}, SKNet~\cite{sknet}, and CBAM~\cite{cbam}) applied to ResNet-50.
+
+\input{tables/detection}
+
+\subsection{\OursNet{} in State-of-the-art Detection Transformer}
+We apply \OursNet{} to state-of-the-art object Detection Transformer, DN-DETR \cite{dndetr} to demonstrate the effectiveness of \OursNet{} in the downstream task.
+We experiment on MS-COCO \cite{mscoco} benchmark and utilized DN-DETR's default training settings. 
+
+Table~\ref{tab:detection} shows that DN-DETR with \OursNet{} improves the inference speed and average precision compared to the DN-DETR with ResNet-50 backbone. By further optimizing the DETR hyperparameters, \OursNet{} can be configured to deliver better performance.
+\subsection{Visualization of Attention}
+\input{plots/gradcam}
+To comprehend \OursNet{}'s better performance, we investigate its class activation maps (CAM) on ImageNet \cite{imagenet} validation set. We use CAM output from popular Full-Grad-CAM \cite{fullgradcam} for a given class. CAM visualizations of ResNet-$50$ and \OursNet{}-B$1$ are shown in Figure~\ref{fig:gradcam}. It can be seen that \OursNet{}, despite being $50\%$ shallower than ResNet, is better at learning to attend regions of the target class relative to the baseline. 
+
+
+\section{Conclusion}
+
+\label{sec:conc}
+We propose \textit{\OursNet{}}, which revisits ConvNet design based on multiple aspects for concise models. \OursNet{} is based on our parallel columnar convolutions and input replication concepts to be efficient in parameters, FLOPs, accuracy, latency, and training duration. Through extensive experimentation and ablations, we show that \OursNet{} rivals many representative ConvNets and ViTs such as ResNet, ResNeXt, RegNet, RepVGG, and ParNet, VanillaNet, DeiT, EfficientViT while being shallower, faster, and being architecturally simpler.
+
+\noindent\textbf{Limitations.} \OursNet{} is open for improvement. In this paper, we have built a simple template architecture that can further evolve like ConvNext~\cite{convnext}. For instance, a comprehensive design space of \OursNet{} including mobile regime can be explored, similar to RegNet~\cite{regnet}. Besides, layer merging post-training, shown in VanillarNet~\cite{vanillanet}, can be utilized to develop more shallower variants of \OursNet{}. In addition to that, \OursNet{} can also be married with a Transformer attention mechanism like \cite{coatnet} or \cite{efficientvit}.
+
+
+
+
+
+
+
+
+
+

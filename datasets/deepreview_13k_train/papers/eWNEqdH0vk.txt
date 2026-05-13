@@ -1,0 +1,651 @@
+\title{Layerwise Recurrent Router for  Mixture-of-Experts}
+
+\begin{abstract}
+The scaling of large language models (LLMs) has revolutionized their capabilities in various tasks, yet this growth must be matched with efficient computational strategies. 
+The Mixture-of-Experts (MoE) architecture stands out for its ability to scale model size without significantly increasing training costs. 
+Despite their advantages, current MoE models often display parameter inefficiency. 
+For instance, a pre-trained MoE-based LLM with 52 billion parameters might perform comparably to a standard model with 6.7 billion parameters~\citep{rajbhandari2022deepspeedmoe}. 
+Being a crucial part of MoE, 
+current routers in different layers independently assign tokens without leveraging historical routing information, potentially leading to suboptimal token-expert combinations and the parameter inefficiency problem.
+To alleviate this issue, we introduce the Layerwise Recurrent Router for Mixture-of-Experts (RMoE). 
+RMoE leverages a Gated Recurrent Unit (GRU) to establish dependencies between routing decisions across consecutive layers.
+Such layerwise recurrence can be efficiently parallelly computed for input tokens and introduces negotiable costs.
+Our extensive empirical evaluations demonstrate that RMoE-based language models consistently outperform a spectrum of baseline models. 
+Furthermore, RMoE integrates a novel computation stage orthogonal to existing methods, allowing seamless compatibility with other MoE architectures. 
+Our analyses attribute RMoE's gains to its effective cross-layer information sharing, which also improves expert selection and diversity
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In the era of large language models (LLMs), scaling the model parameters and training data up has unlocked remarkable model capabilities, such as in-context learning~\citep{brown2020language, dong2022survey}, nuanced conversations~\citep{ouyang2022training}, and even complex code~\citep{guo2024deepseek} and math~\citep{imani2023mathprompter} tasks.
+These advancements showcase the profound impact of increasing model size. 
+The quest to enhance neural networks' capacity while ensuring training and inference efficiency spurred the development of computation-efficient transformer architectures. 
+The Mixture-of-Experts (MoE) framework is one of such efficient architectural recipes~\citep{DBLP:conf/iclr/ShazeerMMDLHD17, lepikhin2020gshard, DBLP:journals/jmlr/FedusZS22, DBLP:conf/emnlp/ZhangSHZR022, dai2024deepseekmoe}.
+Most MoE modules comprise one \textit{router} and a group of \textit{expert} networks. 
+The router, usually parametrized as one linear layer, conditionally and sparsely assigns each input token to its corresponding experts, \textit{i.e.}, the FeedForward Network (FFN) in the transformer layer. 
+Therefore, MoE can significantly scale the model size and keep computational costs nearly unchanged~\citep{smith2022using}.
+
+Despite efficiently increasing the model size, most current pre-trained MoE models are not on par with standard models of the same size, demonstrating their parameter inefficiency. 
+For example, \citet{rajbhandari2022deepspeedmoe} shows that with the same training data, an MoE with 52B parameters and 1.3B activated ones for each token performs similarly to a 6.7B standard model. 
+\citet{DBLP:conf/iclr/KomatsuzakiPLRM23} demonstrates that upcycling a standard T5-base (248M) into its MoE counterpart (2B) by copying existing FFN can bring some improvements, but it still lags behind the T5-large with 783M parameters. 
+Similarly, \citet{dai2024deepseekmoe} use fine-grained and shared experts to improve the effectiveness, but the 16B MoE performs comparably with the 7B standard model~\citep{bi2024deepseek}. 
+
+One potential bottleneck for the current MoE could be the router. 
+Typically, the router is parameterized as one lightweight linear layers, which may limit its capacity to explore the optimal token-expert combination. 
+Previous works also reveal such limitations.
+For instance, ~\citet{xue2024openmoe} finds the routing results converge to the token-id-based routing very quickly during the early phase of pre-training, which means the token-expert combination is far from well-explored.
+Some works even show hash functions~\citep{roller2021hash}, stochastic routing policy~\citep{ zuo2021taming}, and fixed-random router~\citep{chen2023sparse} achieves competitive performance with the learnable router, illustrating that the learnable router component in MoE needs further enhancement.
+
+\begin{figure}[t!]
+    \vskip  -0.5in
+\centerline{\includegraphics[width=0.68\textwidth]{pic/RMoE.pdf}}
+    \vskip  -0.08in
+  \caption{\footnotesize Recurrent router for Mixture-of-Experts. 
+  In the $i$-th layer, the hidden state $\mathbf{x}_i$ is \textbf{I.} projected to $\mathbf{x}^\prime$ with alower hidden dimension (Eq.~\ref{eq:RMoE-1}), \textbf{II.} combined with previous layer's GRU output \(\mathbf{h}_{i-1}\), and processed through the cross-layer-shared GRU to produce the current layer's GRU output, \(\mathbf{h}_i\) (Eq.~\ref{eq:RMoE-hidden-state}). \textbf{III.} layer $i$'s router uses this output to select experts and executes standard MoE computation (Eq.~\ref{eq:RMoE-3}).
+  Such operation doesn't introduce sequence-level recurrence and can be efficiently implemented, as shown in Tab.~\ref{tab:main_results} and Tab.~\ref{tab:megatron-main}.
+  }
+  \label{fig:RMoE}
+  \vskip  -0.3in
+\end{figure}
+
+Despite some enhancements for router~\citep{DBLP:conf/nips/Chi0HDMPSBSMHW22,DBLP:journals/corr/abs-2306-04640,do2023hyperrouter,chen2023sparse}, current routers in different MoE layers still operate independently without comprehensive investigations into the decisions of other layers. 
+This isolation may lead to suboptimal expert utilization, as each layer manages its routing based solely on local information, potentially leading to inefficiency of model parameters.
+Though vanilla MoE models could technically share the routing information via hidden states residual, this information may be overshadowed by the language modelling loss, requiring routing-relevant information to "compete" for its representation.
+
+To this end, we introduce a dedicated component to capture and pass routing information for each layer. 
+The proposed architecture, \textbf{R}ecurrent Router for \textbf{M}ixture-\textbf{o}f-\textbf{E}xperts (RMoE), is shown in the Fig.~\ref{fig:RMoE}.
+Concretely, we regard routing decisions in consecutive layers as a sequence in which the routing results of the $i$-th layer should be conditioned on previous layers' decisions.
+We thus introduce a lightweight Gated Recurrent Unit (GRU)~\citep{dey2017gate} to capture this dependence and simulate the information flow between routers across layers.
+Intuitively, GRU has a reset and an update gate to control the information flow across time steps. 
+Hence, such layerwise recurrence will inform the router to which experts the current token was assigned in previous layers, potentially supporting cross-layer collaborations.
+Furthermore, the introduced GRU is especially for routing. It thus helps to disentangle the states relevant to model prediction and routing decisions.
+We validate RMoE's performance with various model sizes, architectures, datasets, and training settings (per-training and supervised fine-tuning), demonstrating that RMoE outperforms a range of baselines.
+Moreover, RMoE's introduction of a novel computation stage during routing makes it orthogonal to and compatible with most existing methods.
+We further analyze RMoE and elucidate the primary contributors to its improvement.
+Our findings indicate that while the relatively complex GRU in RMoE shares essential cross-layer information, it also enables additional gradient propagation for the router.
+Our analysis shows that layerwise recurrence provides cross-layer information, fostering router exploration and optimizing expert utilization.
+Consequently, the selected experts are leveraged more effectively, leading to increased diversity of experts. 
+We believe that our innovative router design and massive analysis can offer insights into the development of future MoE models.
+
+
+
+\section{Related Works: Various Routers for MoE}
+
+In this section, we review previous approaches to improve router design in SMoE.
+For example, XMoE~\citep{DBLP:conf/nips/Chi0HDMPSBSMHW22} first projects hidden states into a lower-dimension space and computes their cosine-similarity to low-dimension expert embeddings, which can prevent the hidden states from collapsing to a linear combination of expert embeddings.
+Moduleformer~\citep{DBLP:journals/corr/abs-2306-04640} uses an MLP router with ReLU activation to increase router capacity.
+SMoE-dropout~\citep{chen2023sparse} utilizes a fixed random-initialized linear router and gradually increases $\operatorname{Top-k}$ during training. 
+HyperMoE~\citep{do2023hyperrouter} introduces a fixed random-initialized hypernet~\citep{ha2016hypernetworks} at each layer to generate router weights condition on input and one learnable router embedding. 
+One concurrent work~\citep{gong2024mixture} also introduces GRU in sequential routing stages. 
+However, it does not view such a recurrent mechanism as a general and composable method with broad MoE fields or provide relative ablation or analysis.
+Extra discussion of related work to improve MoE from routing and training strategies, and utilize recurrent controllers can be found in App.~\ref{app:related_work}.
+
+
+\section{Methodology}
+
+
+
+\subsection{Preliminaries}
+
+\paragraph{Mixture-of-Experts} MoEs are typically implemented by replacing transformer models' original feed-forward networks (FFNs) with a group of parallel FFNs and incorporating a router. 
+Suppose there are $ N $ experts, denoted as $E_n, n \in [1, N]$. The router $ g(\cdot; \mathbf{G}, k)$, defined by its parameters $\mathbf{G} \in \mathbb{R}^{(h, N)}$ and an integer $k$, maps the input $\mathbf{x}$ to a score distribution over the experts, $ g(\mathbf{x}; \mathbf{G}, k) \in \mathbb{R}^N $. 
+Given $\mathbf{x} \in \mathbb{R}^h$, the output $\mathbf{y} \in \mathbb{R}^h$ is the weighted sum of the outputs from all experts:
+\begin{equation}
+\label{eqn:MoE}
+\mathbf{y} = \sum_{n \in N} g_n(\mathbf{x}; \mathbf{G}, k) E_n(\mathbf{x})
+\end{equation}
+Typically, $g$ is a simple linear layer followed by a $\operatorname{softmax}$ and a $\operatorname{Top-k}$ function.
+The $n$~th element of $\textbf{x}\times \mathbf{G} \in R^{N}$ represents the gating score of expert $E_n$, and the $n$~th column of $\mathbf{G}$ can be regarded as the \textit{expert embedding} for expert $E_n$.
+When $k$ for $\operatorname{Top-k}$ is smaller than $N$, only a subset of experts is involved in the computation, which is known as Sparse Mixture-of-Experts (SMoE)~\citep{DBLP:conf/iclr/ShazeerMMDLHD17, DBLP:journals/jmlr/FedusZS22}.
+
+\paragraph{Recurrent Neural Networks} 
+RNNs~\citep{medsker2001recurrent} are designed to handle sequential data by maintaining a hidden state $\mathbf{h}$ that holds the information from previous time steps. 
+This hidden state is updated at each time step $i$ based on the current input $\mathbf{x}^{\prime}_i$ and the hidden state at the last time step $\mathbf{h}_{i-1}$, formulated as $\mathbf{h}_i=f(\mathbf{h}_{i-1},\mathbf{x}^{\prime}_i)$.
+
+The Gated Recurrent Units~\cite{dey2017gate} module is an advanced variant of RNNs that addresses some of the traditional RNNs' limitations, such as difficulty capturing long-term dependencies and gradient vanishing issues. 
+Given an input $\mathbf{x}^{\prime}_i$ at time step $i$, GRU first calculates the reset gate $\mathbf{s}_i$ and the update gate $\mathbf{z}_i$ to determine how much of the previous memory to keep and to forget,
+\vskip -0.15in
+\begin{equation}
+\begin{aligned}
+    \mathbf{s}_i &= \sigma(\mathbf{W}_s \mathbf{x}^\prime_i + \mathbf{U}_{s} \mathbf{h}_{i-1}) \\
+    \mathbf{z}_i &= \sigma(\mathbf{W}_{z} \mathbf{x}^\prime_i + \mathbf{U}_{z} \mathbf{h}_{i-1}) \\
+\end{aligned}
+\end{equation}
+\vskip -0.05in
+where $\sigma$ represented the sigmoid activation function and all $\mathbf{W}$ and $\mathbf{U}$ are tranable parameters. And then, the hidden state $h_t$ is updated by
+\vskip -0.15in
+\begin{equation}
+\begin{aligned}
+    \mathbf{\tilde{h}}_i &= \tanh(\mathbf{W}_{h} \mathbf{x}^\prime_i + \mathbf{s}_i \odot (\mathbf{W}_{h} \mathbf{h}_{i-1})) \\
+    \mathbf{h}_i &= (1 - \mathbf{z}_i) \odot \mathbf{\tilde{h}}_i + \mathbf{z}_i \odot \mathbf{h}_{i-1}
+\end{aligned}
+\end{equation}
+\vskip -0.15in
+\subsection{Layerwise Recurrent Router}
+
+Existing routers work independently, 
+this lack of global information may prevent routers from discovering more effective token-expert combinations.
+Therefore, we integrate a GRU into the routing process, explicitly incorporating historical routing information into the current expert selection for each token.
+Formally, at the \(i\)~th layer, we first project the hidden state \(\mathbf{x}_i\) to the dimension of the GRU state $\mathbf{x}^\prime_i \in \mathbb{R}^{p} $ (usually smaller than the dimension \(h\) of \(\mathbf{x}_i\).
+We choose 128 for most of the settings to save computational cost and provide further analysis in Tab.~\ref{tab:abl-architecture} and Tab.~\ref{tab:abl-hidden_size}):
+\vskip -0.18in
+\begin{equation}
+\label{eq:RMoE-1}
+\mathbf{x}^\prime_i = \operatorname{Proj}_i(\mathbf{x}_i)
+\end{equation}
+Importantly, we use separate projectors for each layer since the hidden states $\mathbf{x}$ of different layers vary greatly (more discussion in Sec.~\ref{abl:architecture}). This projection output $\mathbf{x}^\prime$, along with the GRU result from the previous layer, \(\mathbf{h}_{i-1}\), is then fed into a GRU unit to obtain the current GRU output \(\mathbf{h}_i\).
+\vskip -0.15in
+\begin{equation}
+\label{eq:RMoE-hidden-state}
+\mathbf{h}_i = \operatorname{GRU}(\mathbf{x}^\prime_i, \mathbf{h}_{i-1}).
+\end{equation}
+Next, \(\mathbf{h}_i\) is input into the router to make router decisions and then to aggregate different experts based on that decision:
+\begin{equation}
+\label{eq:RMoE-3}
+\mathbf{y_i} = \sum_{n \in N} g_n(\mathbf{h}_i; \mathbf{G}_i, k) E_n(\mathbf{x}_i).
+\end{equation}
+\vskip -0.1in
+Here, \(\mathbf{y}_i\) represents the output of the \(i\)-th layer, \(\mathbf{h}_i\) is the GRU output, \(g_n(\mathbf{h}_i; \mathbf{G_i}, k)\) is the router output computed with routing parameter $\mathbf{G_i}$ in layer $i$.
+Notice that, unlike traditional RNNs, which use a shared projector together for sequential inputs when the input dimension isn't equal to the RNN's hidden dimension, we use different projectors $\operatorname{Proj}_i$ in Eq.~\ref{eq:RMoE-1} for different layers since hidden states and model weights in different layers usually various a lot (Fig.~\ref{fig:router-weights} and Tab.~\ref{tab:abl-architecture}).
+
+Despite capturing inter-layer dependencies between routers in different layers, RMoE potentially has other advantages:
+(1) \textit{Prevent representation collapse}: \cite{DBLP:conf/nips/Chi0HDMPSBSMHW22} 
+identified that the single linear layer routers encourage token embeddings clustering around
+\textit{expert embedding}, implying a trend toward representation collapse issue. 
+And they propose XMoE to first project hidden states into a low-dimension and then calculate the gating score. 
+Similarly, the projector (Eq.~\ref{eq:RMoE-1}) and GRU (Eq.~\ref{eq:RMoE-3}) in RMoE also separate hidden states from expert embeddings and can reduce this issue.
+(2) \textit{Additional Gradient Flow}: 
+Before the inclusion of GRU, the router's gradient mainly derive from the expert weight score $g_n$ in Eq.~\ref{eqn:MoE}.
+The introduction of GRU not only provides enriched information about historical routing 
+but also an extra gradient propagation through GRU hidden states. 
+We denote this extra gradient flow as \textit{Recurrent Gradient}, and we empirically demonstrated that this \textit{Recurrent Gradient} is important to RMoE.
+(3) \textit{Applicable with other MoE design}: the proposed method introduces an additional computation stage into SMoE, it is orthogonal to most existing attempts to improve MoE and is seamlessly compatible with them.
+
+
+\section{Experiments}
+
+
+\subsection{Experimental settings}
+
+\paragraph{Langauge Modeling Tasks and Metrics} 
+Following~\citep{pham2024competesmoe}, 
+we first test on two common language modeling tasks: enwiki8 (character-level language modeling, with Bits-Per-Character (\textbf{BPC}) as the evaluation metrics) and WikiText-103 (word-level language modeling, with Perplexity (\textbf{PPL}) as the evaluation metrics). 
+We employ default train-validation-test splits for each dataset. 
+We report test performances of the best validation checkpoints. 
+More details can be found in App.~\ref{small-setting}.
+
+\paragraph{Configurations and Baselines} 
+We mainly compare RMoE with other existing router designs.
+All methods are based on the decoder-only standard switch-transformer architecture. 
+Following~\cite {pham2024competesmoe}, all routers adopt the same MoE configuration: selecting top-2 experts from 16 experts. Each task is trained on 2 NVIDIA A100 GPUs for about 20 hours.
+More training configurations can be found in App.~\ref{small-setting}. 
+Our baselines include 
+(1) \textbf{SMoE}: standard switch-transformers with a standard linear router. 
+(2) \textbf{HyperMoE}~\citep{do2023hyperrouter}:
+the method employs a fixed, randomly initialized hypernetwork~\citep{ha2016hypernetworks} to produce the weights for the linear router, subsequently allowing the generated linear layer to perform the routing.
+(3) \textbf{SMoE-MLP}~\citep{DBLP:journals/corr/abs-2306-04640}: it replaces the linear router with a two-layer MLP using the GELU activation function. 
+(4) \textbf{RandomMoE}: inspired by SMoE-Dropout~\citep{chen2023sparse} and HyperMoE, we propose to compare with a fixed randomly initialized linear router; this could be a naive baseline for all learnable routers. 
+(5) \textbf{XMoE}~\citep{DBLP:conf/nips/Chi0HDMPSBSMHW22}: it first down-projects the token embeddings to a lower dimension (default 16) and computes its cosine-similarity with the low-dimension expert embeddings. It also uses a learnable temperature in softmax operation. 
+(5) \textbf{CosineSMoE}, similar to XMoE except without down-projection.
+\paragraph{Pre-Training and SFT paradigm}
+As pre-training-then-supervised-fine-tuning has become the standard paradigm, we also evaluate the RMoE in this setting. 
+Our pre-training corpus is a multilingual data collection that spans common and specialized domains, including Wikipedia, finance, and legal texts. 
+We follow the filtering guidelines in Redpajama V2~\citep{together2023redpajama} and subsequently perform a de-duplication process on the filtered data, yielding approximately 126.5 billion high-quality tokens. 
+Our model architecture is modified based on Llama family~\citep{touvron2023llamaopenefficientfoundation}. 
+Specifically, we use a 24-layer model and top-4 gating from 16 experts per layer following~\citep{dai2024deepseekmoe}. 
+This yields a model with approximately 0.53B activated / 0.91B total parameters. 
+All different routers use the same training configurations.
+To ensure expert load balance, we employ balance loss with weights $0.01$ during training. 
+These experiments are conducted using the Megablocks~\citep{megablocks} on 8 NVIDIA A100 GPUs for about 5 days. More details can be found in App.~\ref{app:pretrain}.
+After pertaining, we perform supervised fine-tuning (sft). 
+All models are trained on Alpaca~\citep{alpaca} with the same configuration. 
+
+To simulate the real LLMs application scenario, we don't perform task-specific fine-tuning and evaluation. 
+Since the models are largely under-trained due to computation resource limitation, they give almost random-guessing results on challenging tasks like MMLU~\citep{hendrycks2020measuring}. 
+Therefore, we only test on tasks (ARC-easy, Hellaswag, PIQA, SciQ, LAMBADA) in lm-evaluation-harness, where the results largely surpass random guessing. More details about sft configurations and tasks can be found in App.~\ref{sft-eval}.
+
+\subsection{Main Results}
+
+\begin{table*}[tbp!]
+    \vskip  -0.45in
+    \caption{
+    \footnotesize
+    Performance of RMoE and baselines on two language modeling tasks, Enwiki8 and WikiText-103. \textbf{Params} means the non-embedding model parameters and (router parameters). Notice we don't separate unlearnable parameters in HyperMoE and RandomSMoE. \textbf{Mem} means the peak GPU memory usage with the same batch-size configurations. \textbf{Speed} is the average time for 1k training steps. Results demonstrate that the RMoE outperforms baseline models and achieves comparable memory usage and speed as the standard SMoE. 
+    }
+    \vskip -0.1in
+    \setlength{\extrarowheight}{1pt} % 增加每行的额外高度
+    \centering
+    \small
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.0}
+    \resizebox{0.75\textwidth}{!}{
+    \begin{tabular}{l|ccccccc}
+    \toprule
+        \multirow{2}{*}{\textbf{Algorithm}} & \multicolumn{2}{c}{\textbf{Enwiki8 (BPC)$\downarrow$}} & \multicolumn{2}{c}{\textbf{WikiText (PPL)$\downarrow$}} & 
+        \textbf{Params} &
+        \textbf{Mem} &
+        \textbf{Speed}
+        \\
+        \cmidrule{2-5}
+         ~ & val & test  & val & test  & (M) & (GB) & (s/1k steps) \\ 
+        \midrule
+        \textbf{SMoE}  & 1.152 & 1.128 & 31.279 & 33.061  & 36.08 (0.04) & 47.92 & 960.2 \\ 
+        \textbf{HyperMoE} & 1.162 & 1.139 & 31.918 & 33.374 & 48.41 (12.4) & 49.69 & 962.0 \\
+        \textbf{SMoE-MLP} & 1.164 & 1.137 & 31.430 & 33.142 & 36.79 (0.75) & 48.70 & 964.1 \\
+        \textbf{RandomSMoE} & 1.163 & 1.135 & 31.938 & 33.410 & 36.08 (0.04) & 47.72 & 961.4 \\
+        \textbf{CosineMoE} & 1.148 & 1.122 & 31.367 & 33.047 & 36.08 (0.04) & 48.68 & 962.4 \\
+        \textbf{XMoE} & 1.150 & 1.125 & 31.265 & 32.926 & 36.13 (0.09) & 48.70 & 967.5 \\
+        \textbf{RMoE} & \textbf{1.141} & \textbf{1.116} & \textbf{30.939} & \textbf{32.867} & 36.51 (0.47) & 49.46 & 972.9 \\
+        \bottomrule
+ 
+    \end{tabular}
+    }
+    \vskip -0.15in
+\label{tab:main_results}
+\end{table*}
+
+\begin{wraptable}{r}{0.5\columnwidth}
+    \vskip -0.15in
+    \caption{
+    \footnotesize Performance of combining layer-wise recurrent routing mechanism with XMoE.
+    }
+    \vskip -0.1in
+    \centering
+    \resizebox{0.5\textwidth}{!}{
+    \begin{tabular}{l|cccc}
+    \toprule
+        \multirow{2}{*}{\textbf{Algorithm}} & \multicolumn{2}{c}{\textbf{Enwiki8 (BPC)}$\downarrow$}  & \multicolumn{2}{c}{\textbf{WikiText (PPL)}$\downarrow$} \\ 
+        \cmidrule{2-5}
+         & Val & test & val & test \\ 
+         \midrule
+        XMoE (8) & 1.160 & 1.132 & 31.74 & 33.55 \\ 
+        + GRU router & 1.150 & 1.124 & 31.34 & 32.99 \\ 
+        XMoE (16) & 1.150 & 1.125 & 31.27 & 32.93 \\ 
+        + GRU router & 1.144 & 1.119 & 31.15 & 32.47 \\ 
+        XMoE (32) & 1.140 & 1.114 & 31.30 & 32.71 \\ 
+        + GRU router & \textbf{1.136} & \textbf{1.112} & \textbf{31.25} & \textbf{32.55} \\ 
+        \bottomrule
+    \end{tabular}
+    }
+    \vskip -0.1in
+\label{tab:XMoE+GRU}
+\end{wraptable}
+
+Tab.~\ref{tab:main_results} shows the performance of RMoE and selected baselines on two language modelling tasks. 
+Our observations are as follows: 
+(1) RMoE performs best on validation and test sets of two tasks, and the recurrent routing mechanism and the introduction of extra GRU block do not severely impact the training speed and memory usage, making RMoE more practical.
+(2) Comparing SMoE-MLP and SMoE, we find that replacing the original simple linear layer with a more capable MLP does not improve performance. It even underperforms the fixed random routing (RandomMoE) on Enwikik8, suggesting that naively increasing model capacity can't result in a more powerful router.
+Furthermore, \textit{since RMoE introduces novel computation stages in routing and is orthogonal to most existing router designs, it can easily be combined with them.}
+Tab.~\ref{tab:XMoE+GRU} showcases the performance of the original XMoE and XMoE with GRU router in different XMoE lower dimensions (8, 16, and 32). We observe that the GRU router benefits all of the 3 configurations of XMoE.
+\begin{table*}[!tbp]
+    \vskip -0.5in
+    \caption{\footnotesize SMoE and RMoE's pre-training costs and evaluation results in selected informative lm-evaluation-harness tasks. `sft' means supervised fine-tuning on the Alpaca dataset. The task names and metrics for short names in the table are: `\textbf{ARC-e}' for ARC-Easy, acc; `\textbf{Hella}' is for Hellaswag, acc-norm; `\textbf{Piqa}' for PIQA, acc-norm; `\textbf{Lamb}' for LAMBADA, acc. Each model has approximately 0.53B activated parameters out-of 0.91B parameters. RMoE introduces about 3.5M additional parameters relative to SMoE.}
+    \vskip -0.1in
+    \setlength{\extrarowheight}{1pt} % 增加每行的额外高度
+    \centering
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.0}
+    \resizebox{0.9\textwidth}{!}{
+    \begin{tabular}{c|c|ccccc|c}
+    \hline
+        \textbf{Algorithm} & \textbf{Training} & \textbf{ARC-e} & \textbf{Hella} & \textbf{Piqa} & \textbf{Sciq} & \textbf{Lamb} & \textbf{Avg$\uparrow$} \\ 
+        \toprule
+        \multirow{6}{*}{
+        \parbox{2.5cm}{\centering \textbf{SMoE} \\ \small ~   \\ Speed: 48.87 s/step\\ Mem: 48.00 GB}} 
+        & pre-train 20B tokens & 47.14 & 35.51 & 64.69 & 76.2 & 14.61 & 47.63 \\ 
+        ~ & +sft & 50.93 & 35.82 & 65.61 & 74.7 & 17.81 & 48.97  \\ 
+        ~ & +sft (freeze router) & 50.59 & 35.78 & 66.32 & 74.7 & 18.18 & 49.11  \\ 
+        \cmidrule{2-8}
+        ~ & pre-train 40B tokens & 52.57 & 40.85 & 67.74 & 83.4 & 26.74 & 54.26 \\ 
+        ~ & +sft & 53.70 & 42.07 & 68.61 & 83.5 & 32.80 & 56.13  \\ 
+        ~ & +sft (freeze router) & 53.45 & 41.94 & 68.88 & 83.1 & 32.06 & 55.88 \\ 
+        \midrule
+        \multirow{8}{*}{
+        \parbox{3cm}{\centering \textbf{RMoE}  \\ \small ~  \\ Speed: 49.07 s/step\\ Mem: 48.69 GB}} 
+        & pre-train 20B tokens & 47.01 & 35.91 & 65.23 & 78.7 & 19.13 & 49.20 \\ 
+        ~ & +sft & 48.53 & 36.90 & 66.21 & 79.6 & 24.74 & 51.20  \\ 
+        ~ & +sft (freeze router) & 49.24 & 36.79 & 66.16 & 79.7 & 24.32 & 51.24 \\ 
+        \cmidrule{2-8}
+        ~ & pre-train 40B tokens & 51.18 & 41.38 & 67.79 & 83.6 & 32.58 & 55.31  \\ 
+        ~ & +sft & 53.20 & 43.05 & 68.55 & 83.8 & 37.16 & 57.15  \\ 
+        ~ & +sft (freeze router) & 53.11 & 43.16 & 68.77 & 82.8 & 37.57 & 57.08  \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:megatron-main}
+    }
+    \vskip -0.1in
+\end{table*}
+
+While previous work on improving routers has not mostly been evaluated on large-scale pre-training~\citep{dai2022stablemoe, DBLP:conf/nips/Chi0HDMPSBSMHW22, do2023hyperrouter}, we scale up RMoE to billion-level parameters and training tokens.
+We report SMoE and RMoE's evaluation results (both directly evaluated and evaluated after supervised fine-tuning (sft)) in Tab.~\ref{tab:megatron-main}.
+Existing works suggest freezing the router during SMoE tuning~\cite {zoph2022st}; we report SMoE's results under freeze and unfreeze settings.
+Correspondingly, for RMoE, we freeze the GRU and the linear layer under the freeze setting.
+From Tab.~\ref{tab:megatron-main}, we can observe that (1) Even in large-scale pre-training that requires more complex parallel training strategies, RMoE brings negligible wall time and memory cost compared with vanilla SMoE.
+(2) In comparable settings (e.g., the same number of tokens and with/without sft), RMoE outperforms SMoE, and even the best results of SMoE are lower than those of RMoE.
+
+
+
+
+
+\section{Ablation Studies}
+
+
+\begin{wraptable}{r}{0.6\columnwidth}
+    \centering
+    \vskip -0.2in
+    \caption{\footnotesize Enwiki8 validation and test BPC for different routing designs. `NP' stands for not passing recurrent states cross-layer. `RMoE+NP' has the same parameters and FLOPs as `RMoE'. 
+    }
+    \vskip -0.1in
+    \resizebox{0.6\textwidth}{!}{
+    \begin{tabular}{lccc|ccc}
+    \toprule
+        \textbf{Algorithm} & \textbf{Val}$\downarrow$ & \textbf{Test}$\downarrow$ & \textbf{Paras (M)} & \textbf{Val}$\downarrow$ & \textbf{Test}$\downarrow$ & \textbf{Paras (M)} \\ 
+        \midrule
+        \multicolumn{4}{c}{Small} & \multicolumn{3}{c}{Medium}\\ 
+        \midrule
+        SMoE & 1.214 & 1.184 & 15.32 & 1.152 & 1.128 & 36.08 \\ 
+        SMoE + MLP & 1.214 & 1.183 & 15.73 & 1.164 & 1.137 & 36.79 \\ 
+        RMoE + NP & 1.227 & 1.196 & 15.61 & 1.150 & 1.123 & 36.51 \\ 
+        RMoE & 1.213 & 1.183 & 15.61 & 1.141 & 1.116 & 36.51 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \vskip -0.15in
+    \label{tab:more-compute}
+\end{wraptable}
+
+\paragraph{Which contributes more? \;\;\;\;\; More Router parameters or layerwise recurrence.}
+A straightforward reason for RMoE improvement could be that RMoE introduces additional computation and parameters. 
+To disentangle the effect of introducing more router parameters and layerwise recurrence, we consider the following two extra settings: (1) SMoE+MLP: we naively increase the router parameters by replacing the original linear layer with a larger MLP layer; (2) RMoE + NP: we change Eq.~\ref{eq:RMoE-hidden-state} to $\operatorname{GRU}(\mathbf{r}_i, \mathbf{h}_0)$ to cancel the layerwise recurrence of RMoE, rendering a stateless GRU. 
+The setting has the same parameters and computation as RMoE. 
+From Tab.~\ref{tab:more-compute}, we can observe that (1) in our setting, introducing larger routers in SMoE doesn't bring improvement (SMoE v.s. SMoE + MLP). 
+(2) When ablated on the layerwise recurrence in RMoE, the performance largely drops, even worse than SMoE.
+Both results suggest that the layerwise recurrence is the main contributor.
+
+\begin{wraptable}{r}{0.47\columnwidth}
+\vskip -0.2in
+    \caption{\footnotesize Enwiki8 validation and test BPC. `detach $h_{i-1}$' means detaching the recurrent hidden states before passing it to the next block. 
+    `r-0.5$/$1.0' means passing the routing logits of the previous block to the current block. 
+    `detach-r' means detaching the gradient computation of passed logits.}
+    \vskip -0.1in
+    \centering
+    \resizebox{0.38\textwidth}{!}{
+    \begin{tabular}{lcc}
+    \toprule
+        \textbf{Algorithm} & \textbf{Val} & \textbf{Test} \\ 
+        \midrule
+        SMoE & 1.152 & 1.128 \\ 
+        \midrule
+        RMoE & 1.141 & 1.116 \\ 
+        + NP & 1.150 & 1.123 \\ 
+        + detach $h_{i-1}$ & 1.159 & 1.133\\
+        \midrule
+        + NP + r-0.5 & 1.149 & 1.124 \\ 
+        + NP + r-1.0 & 1.150 & 1.124 \\ 
+        + NP + r-0.5 + detach-r & 1.157 & 1.133 \\
+        + NP + r-1.0 + detach-r & 1.152 & 1.126 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:detach-exp}
+    \vskip -0.15in
+\end{wraptable}
+
+\paragraph{\textit{Recurrent Gradient} is important to RMoE}
+\label{RMoE-gradient-pathwas}
+Following the aforementioned analysis, we try to further disentangle the effect of the layerwise recurrence.
+When removing the layerwise recurrence as in the RMoE + NP setting, we remove two information flows across layers: 
+(1) the forward information about previous routers' decisions and 
+(2) the backward gradient propagation through GRU hidden states in different layers.
+To compare the two information flows, we investigate the following settings: 
+(1) RMoE + detach $h_{i-1}$: in intermediate stage between RMoE and RMoE-NP. By detaching $h_{i-1}$ to stop its gradient computation in Eq.~\ref{eq:RMoE-hidden-state}, each GRU cell can only use previous information during feed-forward.
+(2) RMoE + NP + r-$\alpha$: inspired by Realformer~\citep{he2020realformer} that introduces residual attention score to facilitate attention gradient back-propagation, we investigate an intermediate stage between RMoE and RMoE-NP by adding gating logits residual for the RMoE + NP settings. 
+Concretely, the gating score of $i$-th layer for expert $n$ is $g_n(\mathbf{h}_i; \mathbf{G}_i, k) + \alpha g_n(\mathbf{h}_{i-1}; \mathbf{G}_{i-1}, k)$.
+It is a straightforward way to supplement router information across layers based on the NP setting. 
+In our experiments, we set $\alpha$ as 0.5 and 1.0.
+(3) Moreover, we also test detaching the gradient computation of passed logits ($\textbf{h}_{i-1} \times \textbf{G}_{i-1}$), denoted as `detach-r'. 
+From Tab.~\ref{tab:detach-exp}, RMoE + detach $h_{i-1}$ performs even worse than RMoE-NP, 
+showing that the \textit{Recurrent Gradient} is important.
+Similarly, `NP+r0.5' and `NP+r1.0' are comparable with `NP', demonstrating that the naive gating score residual cannot provide effective cross-layer information. 
+The performance of their detached version largely drops, further demonstrating the importance of extra backward gradient passing.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+\begin{center}
+\vskip -0.2in
+\centerline{
+\includegraphics[width=0.4\columnwidth]{pic/layer_number_change_test.pdf}
+}
+\vskip -0.15in
+\caption{\footnotesize Test BPC on Enwiki8 with different model sizes (6, 12, 18, 24, 32). Similar validation results are in App.~\ref{Add-results} Fig.~\ref{fig:results-layers-val}}
+\label{fig:results-layers-test}
+\end{center}
+\vskip -0.33in
+\end{wrapfigure}
+
+To further validate the gradient passing hypothesis, we test `NP` and `NP-r0.5$/$1.0` on deeper models. The results are summarized in Fig.~\ref{fig:results-layers-test}. 
+As the layer increases, we can observe that 
+(1) RMoE consistently outperforms other settings, and RMoE-NP even lags behind SMoE.
+The possible reason is, without passing recurrent states, RMoE-NP is similar to SMoE-MLP which simply increases router complexity but doesn't refine the router training.
+(2) RMoE-NP-r0.5 surpasses RMoE-NP, further emphasizing that SMoE's optimization benefits from the added additional gradient flow for routers. The spirit echoes the principles behind residual network, where residual connection are used to create direct paths for gradient propagation, thereby mitigating gradient vanishing as lerys deepen. Similarly, the GRU and the direct logits passing help for gradient flow of routers in deep layers. Ad shown in the Fig.~\ref{fig:results-layers-test}, as the layer increases. the performance gaps between them may becomes more significant
+(3) While providing additional gradient across layers, RMoE-NP-r0.5 underperforms RMoE. 
+This may because the indexes of experts in layer $i$ are not aligned with those in other layers, directly adding logits can lead to improper constraints and hurt the model performance, further highlighting that RMoE adds flexible while informative pathways in the SMoE framework.
+
+\begin{table*}[!ht]
+ \vskip -0.05in
+    \caption{\footnotesize Ablation of RMoE design. `L-proj` means the layerwise projector in Equ~\ref{eq:RMoE-1}, `S-proj` is the standard RNN projector. `SMoE + L-proj + GRU router` is our proposed used RMoE method.}
+    \vskip -0.1in
+    \centering
+    \resizebox{0.65\textwidth}{!}{
+    \begin{tabular}{l|cccc|c}
+    \toprule
+        \multirow{2}{*}{\textbf{Algorithm}} & \multicolumn{2}{c}{\textbf{Enwiki8 (BPC)}$\downarrow$}  & \multicolumn{2}{c}{\textbf{WikiText (PPL)}$\downarrow$} & \multirow{2}{*}{\textbf{Params}} \\ 
+        \cmidrule{2-5}
+         ~ & Val & test & val & test & ~ \\ 
+         \midrule
+        SMoE & 1.152 & 1.128 & 31.28 & 33.06 & 36.08 \\
+        SMoE + L-proj + GRU router & 1.141 & 1.116 & 30.93 & 32.86 & 36.50 \\ 
+        SMoE + S-proj + GRU router & 1.148 & 1.123 & 31.15 & 33.02 & 36.23 \\ 
+        SMoE + L-proj + RNN router & 1.145 & 1.119 & 31.18 & 32.72 & 36.44 \\ 
+        SMoE + L-proj + LSTM router & 1.148 & 1.122 & 31.19 & 33.04 & 36.54 \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:abl-architecture}
+    }
+    \vskip -0.1in
+\end{table*}
+\begin{wraptable}{r}{0.4\columnwidth}
+    \vskip -0.15in
+    \caption{\footnotesize Ablation of the recurrent design on large scale per-training setting. $p$ is the dimension of the recurrent state $\textbf{r}_i$ in Eq.~\ref{eq:RMoE-1}. We report averaged tasks (the same as Tab.~\ref{tab:megatron-main}) results for pre-trained and stf models. All models are trained with 20B tokens.}
+    \vskip -0.1in
+    \centering
+    \resizebox{0.4\textwidth}{!}{
+    \begin{tabular}{lcc}
+    \toprule
+        \textbf{Algorithm} & \textbf{Pretrain} & \textbf{+sft} \\ 
+        \midrule
+        SMoE & 47.63 & 49.11 \\ 
+        RMoE (GRU, $p=128$) & 49.20 & 51.32 \\
+        RMoE (GRU, $p=256$) & 49.08 & 50.04 \\
+        RMoE (GRU, $p=512$) & 49.19 & 50.02 \\
+        RMoE (RNN, $p=256$) & 47.92 & 50.44 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \vskip -0.1in
+    \label{tab:abl-hidden_size}
+\end{wraptable}
+\paragraph{Layerwise projector and suitable recurrent net bring the best results.} 
+\label{abl:architecture}
+This part tests the other components in RMoE, such as recurrent hidden state dimension, layerwise projector, and GRU cell.
+As shown in Tab.~\ref{tab:abl-architecture}: 
+(1) All methods with recurrent routers outperform SMoE, further validating the effectiveness of RMoE. 
+(2) Layerwise projector in Eq.~\ref{eq:RMoE-hidden-state} performs better than standard RNNs using a single shared projector. One possible reason is that the weights and hidden states norm in different layers vary greatly (as shown in App.~\ref{app:router_weights_info} Fig.~\ref{fig:router-weights}), and it would be hard for a single shared projector to process them.
+(3) The GRU router performs better than the RNN and LSTM routers. 
+Moreover, we further compare RMoE variants in the larger scale settings. We compare pre-trained models with different structures and recurrent hidden dimensions in Tab.~\ref{tab:abl-hidden_size} (Averaged results, full results in App.~\ref{Add-results} Tab.~\ref{tab:more-megatron-results}). We can find similar results: (1) All RMoE variants outperform SMoE; (2) Simple router (RNN) and complex routers (GRU with $p=256, 512$) perform worse than GRU with $p=128$. In short, \textit{layerwise projector and moderate recurrent cell (e.g. GRU with $p=128$) effectively introduce layerwise recurrent.}
+
+\begin{figure}[ht]
+\vskip -0.4in
+\begin{center}
+\centerline{
+\includegraphics[width=0.3\columnwidth]{pic/MI_baselines/smoe.pdf}
+\includegraphics[width=0.3\columnwidth]{pic/MI_baselines/xmoe.pdf}
+\includegraphics[width=0.3\columnwidth]{pic/MI_baselines/hyper.pdf}
+}
+
+\centerline{
+\includegraphics[width=0.3\columnwidth]{pic/MI_baselines/rmoe.pdf}
+\includegraphics[width=0.3\columnwidth]{pic/MI_baselines/rmoe-np.pdf}
+\includegraphics[width=0.3\columnwidth]{pic/MI_baselines/rmoe-np-1.pdf}
+}
+\vskip -0.1in
+\caption{\footnotesize Heat maps of cross-layer mutual information (MI) for different methods. The (i-th row, j-th column) value represents MI between layers i and j. The \textbf{First Row} ((a) SMoE, (b) XMoE, (c) HyperMoE): All three methods have low cross-layer MI.
+\textbf{Second Row}((d) RMoE, (e) RMoE-NP, (f) RMoE-NP-r1.0): While RMoE has high cross-layer MI when disabled layerwise recurrent states passing, MI largely drops.}
+\label{fig:results-MI}
+\end{center}
+\vskip -0.3in
+\end{figure}
+
+
+
+
+\section{Observations}
+
+\label{observations}
+
+\paragraph{Layerwise recurrence increases cross-layer mutual information.}
+The intuition of the proposed RMoE is that current routers in different layers are isolated, and the layerwise GRU is incorporated to provide routers with some global information for coordination. 
+Therefore, we measure the Mutual Information (MI) between routing distributions in different layers for each router. 
+The code implementation can be found in App.~\ref{code-MI}. 
+We can observe:
+(1) Besides RMoE, all existing methods show low cross-layer MI, indicating that the routers of different layers work relatively independently. 
+(2) RMoE shows higher MI than three baselines (d v.s. a, b, and c) and RMoE-NP (d v.s. e), showing the recurrent router can facilitate cross-layer information sharing. 
+(3) While RMoE-NP's MI is largely smaller than RMoE, it still surpasses the three baseline methods. The reason can be the shared GRU in Eq.~\ref{eq:RMoE-hidden-state}. 
+(4) Intuitively, passing routing logits can directly improve MI (f v.s. e). However, directly passing logits can't ensure long-range information sharing, as the values in the right part of (f), which indicate the MI between non-neighbor layers, are smaller than those in (d).
+
+\paragraph{RMoE enables moderate flat gating scores.} 
+\label{router-entropy}
+The router's gating score is a noteworthy feature for MoE-based models. It showcases the models' training dynamics and how they ultimately exploit their experts.
+Ideally, the training paradigm of MoE models may have two stages: exploration and then exploitation. \textit{i.e.}, the router should actively explore more new expert combinations at the early stage of learning. But if the gating score converges to a sharp distribution too early, the router will learn very shallow routing mechanisms and fail to find optimal routing decisions.
+So We record gate entropy for each token($-(\sum_n g_n \ln{g_n})$, $g_n$ is the gating score for expert $n$) and plot the entropy distribution in Fig.~\ref{fig:results-router-entropy} (left).
+Generally, the higher the entropy, the more evenly the router activates different experts rather than allowing one expert to dominate the layer. Thus, large density in high-entropy parts means many recorded tokens have flat gating score distributions.
+We can observe that 
+(1) RandomMoE, with a fixed random-initialized router, shows the largest gate entropy. Moreover, most tokens have high entropy, as there is only one peak in the large entropy location.
+This indicates while RandomRMoE can highly encourage exploration, the router may be under-trained and lack exploitation.
+(2) SMoE and HyperMoE show low routing entropy, with many tokens having nearly zero entropy. 
+Such low entropy means the softmax operation gives nearly one-hot results, which means the $\operatorname{Top-k}$ experts degrade to $\operatorname{Top-1}$ and the router's gradient are very sparse. This can hurt the exploration of expert selection and lead to inefficient $\operatorname{Top-k}$ experts usage.
+(3) XMoE and CosineMoE, using cosine similarity, which normalized the input and weights $G$ before computing logits, show relatively high entropy.
+They also perform better than SMoE in Tab.~\ref{tab:main_results}, indicating the benefits of suitable exploration.
+(4) RMoE, with unique cross-layer information sharing, has high entropy for many tokens while low entropy for a few tokens. 
+These moderate gating scores can achieve a better balance between exploration and exploitation.
+
+One may argue that such high entropy may come from the under-trained recurrent router in RMoE instead of capturing the dependency across layers, as the unlearnable RandomMoE also gives high entropy. 
+Therefore, we further visualize the scores of `RMoE-NP' and `RMoE-NP-r0.5/1.0` in Fig.~\ref{fig:results-router-entropy} (right).
+The observations are: (1) RMoE-NP's entropy is slightly larger than SMoE's but largely smaller than RMoE's. 
+, indicating that the larger entropy in RMoE is not from under-training but from cross-layer information sharing.
+(2) While `RMoE-NP-r0.5` is larger than SMoE and smaller than RMoE, `RMoE-NP-r1.0` is the largest.
+From Tab.~\ref{tab:detach-exp} and Fig.~\ref{fig:results-layers-test}, the small and large one both under-perform RMoE,
+These further demonstrate that the recurrent network can achieve a moderate flat gating score distribution, leading to a better trade-off between exploration and exploitation.
+
+\begin{figure}[ht]
+\begin{center}
+\centerline{
+\includegraphics[width=0.5\columnwidth]{pic/entropy_layer8/gate_entropy_layer_5.pdf}
+\includegraphics[width=0.5\columnwidth]{pic/entropy_NP_analysis/mid_layer8/gate_entropy_layer_5.pdf}
+}
+\vskip -0.1in
+\caption{\footnotesize Gate score entropy distribution over Enwiki8 test set for different router configurations. More similar results can be found in App.~\ref{app:more-router-entropy} Fig.~\ref{fig:more-entropy-dist-8-layer} and Fig.~\ref{fig:more-entropy-dist-8-layer-abl}.}
+\label{fig:results-router-entropy}
+\end{center}
+\end{figure}
+\begin{wraptable}{r}{0.35\columnwidth}
+\vskip -0.15in
+    \caption{\footnotesize Expert scores balance on Enwiki8. Inner Balance (IB) represents the (top-1 score / top-2 score) ratio, and Outer Balance (OB) represents summed selected gate scores. }
+    \vskip -0.1in
+    \centering
+    \resizebox{0.3\textwidth}{!}{
+    \begin{tabular}{lcc}
+    \toprule
+        \textbf{Algorithm} & \textbf{IB} & \textbf{OB} \\ 
+        \midrule
+        SMoE & 34.68 & 0.915 \\ 
+        HyperMoE & 34.60 & 0.920 \\
+        CosineMoE & 7.611 & 0.794 \\
+        XMoE & 19.93 & 0.861 \\
+        RandomMoE & 2.000 & 0.414 \\
+        \midrule
+        RMoE & 2.021 & 0.573 \\
+        + NP & 16.58 & 0.842 \\ 
+        + NP + r-0.5 & 2.792 & 0.661 \\ 
+        + NP + r-1.0 & 1.147 & 0.212 \\ 
+    \bottomrule
+    \end{tabular}
+    
+    }
+    \vskip -0.1in
+    \label{tab:expert-balance}
+\end{wraptable}
+
+We also look into the statistics of selected experts' scores. 
+Here we calculate the (1) \textbf{Inner Balance (IB)}: defined as the ratio $\operatorname{Top-1}$ score / $\operatorname{Top-k}$ score, large IB means the first expert dominates all selected experts; and (2) \textbf{Outer Balance (OB)}, defined as  $\sum_{k\in \operatorname{Top-k}} g_k$, indicating the selected scores' ratio in the score distribution, large OB means selected expert scores dominate the gate score distribution.
+Because such a ratio could have some extreme values, we report the median number for all tokens in Tab.~\ref{tab:expert-balance}. 
+We can observe: 
+(1) RandomMoE, with a fixed router, shows the lowest IB and OB.
+(2) Low-entropy models in the previous section (Sec.~\ref{router-entropy}) have high IB and OB.
+(3) RMoE gives suitable IB and OB. While simply using a complex router (`RMoE-NP') shows relatively low IB and OB, RMoE is even lower. Moreover, passing logits can reduce IB and OB (`RMoE-NP-r0.5/1.0'). 
+\textit{All these experiments show sharing cross-layer router information can lead to more balanced routing decision and thus facilitate expert usage.}
+
+
+\paragraph{Layerwise recurrence encourages expert diversity} 
+One intriguing feature of MoE
+is that experts could modularly specialize on different inputs.
+Therefore, following recent works that analyze the FFNs~\citep{DBLP:conf/emnlp/GevaSBL21, qiu-etal-2024-unlocking, qiu2024empirical} and expert weights similarity~\citep{wu2022residual, lo2024closer}, we use the cosine-similarity of expert's parameters to measure the expert diversity .
+We calculate for SMoE and RMoE in the large-scale pre-training settings, and
+the results are shown inFig.~\ref{fig:results-experts-sim}. 
+To better understand the scale of similarity score, we also plot one dash line showing the similarity of random initialized experts.
+More details about similarity calculation and explanation can be found in App.~\ref{code-similarity}. We can observe that: (1) At the beginning of the training, the lowest expert similarities are similar to the random initialized one.
+(2) The expert similarity increases in the early training stages, then decreases later.
+This may be due to the randomly initialized router in the early stages, which essentially assigns tokens randomly to different experts, leading to increased expert similarity. 
+As the router continues to learn, it gradually assigns specific tokens to the corresponding experts, resulting in decreased expert similarity as training progresses.
+(3) During the entire training stages, the average similarity score between experts in RMoE is lower than those in SMoE, indicating that RMoE encourages more diverse experts. 
+This expert diversity also reasonably corresponds to the moderate flat gate scores in Sec~\ref{router-entropy}. 
+
+\begin{figure}
+\vskip -0.1in
+\begin{center}
+\vskip -0.2in
+\centerline{
+\includegraphics[width=0.8\columnwidth]{pic/expert_similarity.pdf}
+}
+\vskip -0.1in
+\caption{\footnotesize Experts similarity distribution across layers during large-scale pre-training. We plot box plots of expert similarity from checkpoints taken every 1k training steps (approximately 4B tokens), showing the expert similarity across the 24 layers of the model (with maximum, minimum, first quartile, median, and mean).}
+\label{fig:results-experts-sim}
+\end{center}
+\vskip -0.3in
+\end{figure}
+
+
+\section{Conclusion}
+
+This work introduces a layer-wise recurrent router for existing MoE-based language models. 
+We validate the effectiveness of this layer-wise recurrence across various settings, tasks, and model sizes. 
+By adding a new yet efficient computation stage in the routing, RMoE stands orthogonal to most existing methods and can be flexibly integrated with them. 
+Ablation studies reveal that this recurrent mechanism offers additional \textit{Recurrent Gradients}, aiding router optimization. 
+Further analysis validates our intuition that GRU facilitates inter-layer information sharing. 
+We also systematically compare RMoE's model behavior with various baseline models, demonstrating that RMoE can enhance existing SMoE methods and providing insights for future research.
+
+
+\section{Limitations}
+
+Our pre-trained language model is still under-trained and not tested on popular challenging tasks like MMLU~\citep{hendrycks2020measuring} and GSM8K~\citep{cobbe2021training}.
+Introducing moderate z-loss~\citep{zoph2022st} (penalizes large router logits) and changing temperature in softmax operation (leads to more flat score distributions) to achieve moderate flat gating scores. We will investigate these modifications and combine them with RMoE in future works.
+The supplement gradient pathways hypothesis is only investigated by indirect observations like performance (Sec~\ref{RMoE-gradient-pathwas}). 
+More direct gradient analysis for MoE's router might bring more insights.
+
+
+
+
+
+
+

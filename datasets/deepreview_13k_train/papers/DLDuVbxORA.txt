@@ -1,0 +1,845 @@
+\title{OATS: Outlier-Aware Pruning Through Sparse and Low Rank Decomposition}
+
+\begin{abstract}
+The recent paradigm shift to large-scale foundation models has brought about a new era for deep learning that, while has found great success in practice, has also been plagued by prohibitively expensive costs in terms of high memory consumption and compute. To mitigate these issues, there has been a concerted effort in post-hoc neural network pruning techniques that do not require costly retraining. Despite the considerable progress being made, existing methods often exhibit a steady drop in model performance as the compression increases. In this paper, we present a novel approach to compressing large transformers, coined OATS, that utilizes the second moment information in the input embeddings to decompose the model weights into a sum of sparse and low-rank matrices. Without any retraining, OATS achieves state-of-the-art performance when compressing models by up to $60\%$ on large language models such as Llama-3 and Phi-3 and vision transformers such as ViT and DINOv2 while delivering up to $1.37\times$ the CPU acceleration versus a model that was comparably pruned. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large scale transformer-based models have found great success in a number of domains ranging from image classification \citep{wu2020visual}, language modelling \citep{devlin-etal-2019-bert}, and question answering \citep{NEURIPS2020_1457c0d6}. However, these models contain billions of parameters making them computationally expensive to train and deploy which has lead to an increased demand for resource-saving techniques like model quantization \citep{dettmers2022gptint, egiazarian2024extreme}, parameter efficient fine-tuning \citep{hu2022lora, zhao2024galore}, and, most relevant to this work, neural network pruning \citep{frantar-sparsegpt}. 
+
+Pruning has been a key focus for model compression since the early days of deep networks \citep{NIPS1988_07e1cd7d, NIPS1989_6c9882bb, NIPS1992_303ed4c6}. Over the years, various pruning techniques have emerged, introducing sparsity either before training \citep{lee2018snip, Wang2020Picking, NEURIPS2020_46a4378f, jorge2021progressive}, during training \citep{zhugupta, pmlr-v119-evci20a}, or post-training \citep{pmlr-v202-benbaki23a}. In the context of large foundation models, post-training pruning methods, particularly those requiring minimal \citep{xia2022structured, ma2023llmpruner} or no re-training \citep{frantar-sparsegpt, sun2024a, ashkboos2024slicegpt, zhang2024dynamic} are preferred for their computational efficiency. These techniques, when compressing models by $50\%$, have demonstrated the ability to accelerate end-to-end CPU inference by up to $1.8\times$ \citep{frantar-sparsegpt, yin2024outlier} and GPU inference by up to $1.63\times$ using structured N:M sparsity \citep{Mishra2021AcceleratingSD}, highlighting their potential in real-world applications.
+
+Despite the significant advancements in pruning techniques, it was recently shown that current methods suffer from a consistent degradation in model performance as compression levels increase \citep{yin2024junk}. Moreover, although structured pruning offers greater potential for acceleration compared to unstructured pruning, it often imposes a much steeper trade-off in terms of model accuracy and effectiveness \citep{pmlr-v162-chen22a}. These challenges underscore the need for more sophisticated pruning strategies to strike a better balance between efficiency and performance.
+\subsection{Contributions}
+To mitigate these issues, we introduce \textsc{\textbf{O}utlier-\textbf{A}ware Pruning \textbf{T}hrough \textbf{S}parse and Low Rank Decomposition} (\textbf{OATS}), a novel retraining-free method for compressing large transformers that utilizes the second moment of the input embeddings to approximate the model's weight matrices as a sum of a sparse matrix and a low-rank matrix.
+We evaluate OATS on recent large language models -- Phi-3 \citep{phi3tr} and Llama-3 \citep{dubey2024llama3herdmodels} -- and vision transformers -- ViT \citep{wu2020visual} and DinoV2 \citep{oquab2023dinov2} -- demonstrating that OATS achieves new state-of-the-art performance across a wide range of commonly employed performance metrics. Furthermore, by combining structured pruning with unstructured pruning, our benchmarks utilizing the Deepsparse Engine by \citet{deepsparse} reveal that OATS leads to more CPU speed-up across all levels of compression when compared to models that utilize just unstructured pruning. 
+
+To facilitate the interpretability of the sparse and low-rank terms found by OATS, we run experiments where we divide the compressed model into two models, a sparse model and a low-rank model, and visualize their respective attention heat maps utilizing attention rollout \citep{abnar-zuidema-2020-quantifying}. Our visualizations on vision transformers \citep{wu2020visual} reveal a complementary relationship between the two models, with each focusing on different key areas of the image, effectively segmenting it into distinct regions.
+
+
+
+\section{The \algname Algorithm}
+
+The key observation behind the OATS algorithm is that the weight matrices, $\mW\in \mathbb{R}^{d_{out}\times d_{in}}$, in a transformer model can be faithfully approximated as a summation of a sparse and low rank matrix by solving the following optimization problem, commonly known as Robust PCA \citep{slr, rpca}:
+\begin{equation}\label{eqn:rpca}
+    \min_{\mS, \mL \in \mathbb{R}^{d_{out} \times d_{in}}} \| \mW - \mS - \mL \|_F^2 \; \text{ s.t. } \; \text{Rank}(\mL) \leq r, \; \|\mS\|_0 \leq k. 
+\end{equation}
+
+\subsection{Alternating Thresholding} To solve Equation \ref{eqn:rpca}, \algname leverages the alternating thresholding algorithms proposed by \citet{alt_proj} and \citet{alt_rpca} that iteratively alternates between solving for the low-rank term $\mL$, through singular-value thresholding, and for the sparse term $\mS$, through hard-thresholding. Given a matrix $\mA \in \mathbb{R}^{m\times n}$, singular-value thresholding, also known as truncated SVD, is defined as:
+$$ \textsc{TruncatedSVD}(\mA, r) = \mU_r \mathbf{\Sigma}_r \mV_r^{\top},$$
+where $\mU_r, \mathbf{\Sigma}_r, \mV_r^{\top}$ correspond to the matrices formed by retaining only the top-$r$ singular vectors and singular values from the full SVD of $\mA$. Hard-thresholding, which succeeds the singular-value thresholding step, is defined as:
+$$ \textsc{HardThreshold}(\mA, k) = \mM \odot \mA,$$
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \begin{minipage}{0.5\textwidth}
+\begin{algorithm}[H]
+\caption{\textsc{AlternatingThreshold}} \label{alg:altmin}
+\begin{algorithmic}[1]
+    \STATE \textbf{Inputs:} 
+    \STATE \hspace{1em} Weight Matrix: $\mW \in \mathbb{R}^{d_{out} \times d_{in}}$
+    \STATE \hspace{1em} Iterations: $N$
+    \STATE \hspace{1em} Rank: $r$
+    \STATE \hspace{1em} Nonzeros: $k$
+    \STATE \textbf{Procedure:}
+    \STATE $\mS = \mathbf{0}$
+    \FOR{$t = 1$ to $N$}
+        \STATE $\mL = \textsc{TruncatedSVD}(\mW - \mS, r)$
+        \STATE $\mS = \textsc{HardThreshold}(\mW - \mL, k)$
+    \ENDFOR
+    \STATE \textbf{return}: $\mS$, $\mL$ 
+\end{algorithmic}
+\end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+where $\mM \in \mathbb{R}^{m\times n} $ is a binary matrix with $k$ non-zero entries coinciding with the $k$ largest entries in magnitude in $\mA$. Alternatively, the hard-thresholding can also be performed row-wise rather than layer-wise in which case $\mM$ would be a binary matrix with $m\cdot \left \lfloor \frac{k}{m} \right \rfloor$ non-zero entries coinciding with the $\left \lfloor \frac{k}{m} \right \rfloor$ largest entries in magnitude in each row of $\mA$.
+
+These steps are summarized in Algorithm \ref{alg:altmin} on the right. To optimize memory usage, the low-rank term $\mL$ is stored as its two low-rank components: $\mU_r$ and $\mathbf{\Sigma}_r \mV_r^{\top}$. 
+
+\subsection{Incorporating Outlier Information} The alternating thresholding on its own yields suboptimal results because the activations of large-scale transformers exhibit a small number of large-magnitude features and altering these negatively impacts model performance \citep{kovaleva-etal-2021-bert, dettmers2022gptint, sun2024massive}. OATS takes inspiration from Wanda \citep{sun2024a} and incorporates outlier information through a diagonal scaling matrix $\mD\in \mathbb{R}^{d_{in}\times d_{in}}$ that captures the second moment of the input activations
+$$ \mD =  \text{diag}\left(\sqrt{\mX^{\top} \mX}\right),$$
+where $\mX\in \mathbb{R}^{B\times d_{in}}$ and $B$ is the product of the batch size and sequence length. 
+The weight matrix $\mW$ is then scaled by $\mD$ before applying \textsc{AlternatingThreshold}:
+$$ \mS, \mL = \textsc{AlternatingThreshold}\left(\mW \mD, N, r, k\right). $$
+To undo the scaling, \algname applies the inverse transformation to reach the compressed weight
+$$\mW_{\text{compressed}} =  (\mS + \mL)\mD^{-1}, $$
+where it leverages the fact that $\mD$ is diagonal so that it both preserves the sparsity pattern of $\mS$ and is easy to invert. Aligned with \citep{frantar-sparsegpt, sun2024a}, and \citet{zhang2024dynamic}, the activations are calculated through a calibration set that is propagated through the compressed layers. 
+
+\subsection{OATS Parameters} To determine the rank $r$ and the number of nonzeros $k$, \algname takes in as input two hyperparameters: the \emph{compression rate}, $\rho \in (0,1)$, and the \emph{rank ratio}, $\kappa \in (0,1)$. The compression rate coincides with the sparsity rate required by existing pruning algorithms and is defined as:
+$$\rho = 1 - \frac{\# \text{ of nonzero parameters in compressed layer}}{\# \text{ of parameters in original layer}} = 1- \frac{k + r(d_{out} + d_{in})}{d_{out} \cdot d_{in}}. $$ 
+The rank ratio represents the proportion of nonzero parameters that appear in the low-rank term: $$\kappa =\frac{r(d_{out} + d_{in})}{(1-\rho)d_{out} \cdot d_{in}}.$$ 
+Given a fixed compression rate $\rho$ and rank ratio $\kappa$, the two equations above can be solved to obtain the rank $r$ and nonzeros $k$: 
+\begin{equation}\label{eqn:oats_hyper}
+r = \left \lfloor \kappa \cdot (1-\rho) \cdot \frac{d_{out} \cdot d_{in}}{d_{out} + d_{in}} \right \rfloor \qquad k = \left \lfloor (1-\kappa) \cdot (1 - \rho) \cdot d_{out}\cdot d_{in}\right \rfloor.
+\end{equation} 
+The complete \algname algorithm pseudocode can be found in Algorithm \ref{alg:OATS} below. 
+\begin{algorithm}[H]
+\caption{\textsc{\algname}} \label{alg:OATS}
+\begin{algorithmic}[1]
+\STATE \textbf{Inputs:} 
+\STATE \hspace{1em} Layer Inputs: $\mX^{\ell} \in \mathbb{R}^{B \times d_{in}}$
+\STATE \hspace{1em} Layer Matrix: $\mW^{\ell} \in \mathbb{R}^{d_{out}\times d_{in}}$
+\STATE \hspace{1em} Compression Rate: $\rho$
+\STATE \hspace{1em} Rank Ratio: $\kappa$
+\STATE \hspace{1em} Iterations: $N$
+\STATE \textbf{Procedure:}
+\STATE $r \leftarrow \left \lfloor \kappa \cdot (1-\rho) \cdot \frac{d_{out} \cdot d_{in}}{d_{out} + d_{in}} \right \rfloor, \; k \leftarrow \left \lfloor (1-\kappa) \cdot (1 - \rho) \cdot d_{out}\cdot d_{in}\right \rfloor$
+\STATE $\mD \leftarrow \text{diag}(\sqrt{\mX^{\top} \mX})$ 
+\STATE $\mL, \mS \leftarrow \textsc{AlternatingThreshold}(\mW \mD, N, r, k)$
+\STATE $\mW \leftarrow (\mL + \mS)\mD^{-1}$ 
+\STATE \textbf{return:} $\mX^{\ell+1} \leftarrow \mW\mX^{\ell}$
+\end{algorithmic}
+    
+\end{algorithm}
+
+
+
+\section{Experiments on Large Language Models}
+
+\subsection{Experiment Setup}
+\paragraph{Models and Tasks} We evaluate \algname on two state-of-the-art families of large language models: Phi-3 \citep{phi3tr} and Llama-3 \citep{dubey2024llama3herdmodels}. To gauge the algorithm's performance under various model sizes, we select Phi-3 Mini, a $3.8$B parameter model, Phi-3 Medium, a $14$B parameter model, and Llama-3 8B, an $8$B parameter model, so that models of various sizes are represented in our experiments. We utilize LM Harness developed by \citet{eval-harness} to evaluate zero-shot performance on eight tasks, five-shot performance on the Massive Multitask Language Understanding benchmark by \citet{hendrycks2021measuring}, and language generation on WikiText-2. 
+\begin{wraptable}{r}{7.5cm}
+\centering
+\renewcommand{\arraystretch}{1.2} %
+\begin{tabular}{lccc}
+\toprule
+\textbf{Parameters} & \textbf{Phi-3} &\textbf{Llama-3} \\ 
+\midrule
+Iterations  &  80 & 80  \\ 
+Rank Ratio  &  25\% & 30\% \\ 
+\bottomrule
+\end{tabular}
+\caption{Hyperparameters utilized for \algname across model families. Both parameters are further ablated in Section \ref{sec:hyper}.} \label{table:oats_hyper}
+\end{wraptable}
+\paragraph{Pruning Benchmarks} As \algname does not require costly retraining after model compression, we opt to benchmark it with three current state-of-the-art algorithms that similarly do not require such overhead: SparseGPT by \citet{frantar-sparsegpt}, Wanda by \citet{sun2024a}, and DSNoT\footnote{DSNoT experiments are run with both SparseGPT and Wanda. We report the best results across the two.} by \citet{zhang2024dynamic}. The parameters utilized for \algname are depicted in Table \ref{table:oats_hyper}.
+\paragraph{Calibration Data} Remaining consistent with \citet{frantar-sparsegpt}, \citet{sun2024a}, and \citet{zhang2024dynamic}, our calibration data consists of 128 sequences of length 2048 sampled from the first shard of the C4 training set \citep{JMLR:v21:20-074}. To ensure consistency, we utilize the same calibration data for all pruning algorithms that we benchmark. 
+\paragraph{Layer-Wise Compression Rates} We benchmark our algorithm across a wide range of compression rates: \{0.3, 0.4, 0.5, 0.6\}. For compression rates at or below $0.5$, we compress all transformer blocks uniformly. At the higher compression rate of $0.6$, we utilize Outlier Weighed Layerwise Sparsity Ratios (OWL) developed by \citet{yin2024outlier} which was shown to lead to significant performance improvements at higher compression rates. We exclude pruning any linear layers that are present in the model head and embeddings which conforms with what was done in the prior works by \citet{frantar-sparsegpt}, \citet{sun2024a}, and \citet{zhang2024dynamic}. 
+\paragraph{Hardware Speedup} To measure the CPU speedup generated by the unstructured sparsity and low-rank compression of OATS, we utilize the DeepSparse Inference Engine developed by \citet{deepsparse}. More recently, NVIDIA's sparse tensor cores are able to leverage for acceleration structured N:M sparsity, a sparsity pattern where every $N$ in $M$ parameters are zero \citep{Mishra2021AcceleratingSD}. We include in our experiments the natural extension of \algname to structured N:M sparsity where we impose the structured sparsity pattern onto the sparse term in the decomposition.
+\subsection{Results} \label{sec:results_llm}
+\paragraph{Five-shot MMLU} Depicted in Table \ref{table:mmlu} below is the MMLU accuracy of \algname relative to current state of the art pruning algorithms. \algname is able to outperform all prior methods across all compression rates with an increasing gap as the compression rate increases. Specifically, at $50\%$ compression, \algname surpasses previous pruning algorithms by a margin of $2.52\%$ on Phi-3 Medium and $5.42\%$ on Phi-3 Mini.
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.2} %
+
+\begin{tabular}{lccccc}
+\toprule
+ \multirow{2}{*}{\makecell[l]{\textbf{Compression} \\ \textbf{Rate}}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Phi-3}} & \multicolumn{1}{l}{\multirow{2}{*}{\textbf{Llama-3 8B}}}\\ 
+\cmidrule(lr){3-4}
+ &  & \textbf{Mini} & \textbf{Medium} & \\ 
+\midrule
+0\% & Dense   & 70.34 & 76.78 & 64.97 \\ 
+\midrule 
+\multirow{3}{*}{30\%} & SparseGPT  & 68.31 & 74.12 & 64.25  \\ 
+& Wanda     &  67.63 & 75.18 & 63.67 \\ 
+& DSNoT     &  68.02 & 75.13 & 63.72 \\ 
+& \algname & \textbf{68.84} & \textbf{76.15} & \textbf{65.22} \\
+\midrule
+\multirow{3}{*}{40\%} & SparseGPT  & 63.47 & 72.42 & 60.91 \\ 
+& Wanda     &  64.15 & 73.34 & 60.33 \\ 
+& DSNoT     &  63.57 & 73.20 & 59.99 \\ 
+& \algname & \textbf{65.75} & \textbf{74.99} & \textbf{62.46} \\
+\midrule 
+\multirow{3}{*}{50\%} & SparseGPT  & 53.22 & 67.63 & 53.60 \\ 
+& Wanda     &  54.57 & 69.76 & 49.83 \\ 
+& DSNoT     &  54.28 & 68.65 & 49.20 \\ 
+& \algname & \textbf{59.99} & \textbf{72.28} & \textbf{56.46} \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of average five-shot accuracies (\%) on MMLU under different compression rates.} \label{table:mmlu}
+\end{table}
+\paragraph{Zero-shot Tasks} Table \ref{table:zero_shot} below reports the zero-shot accuracy of OATS relative to current state of the art pruning algorithms averaged across the following eight popular tasks: PIQA \citep{piqa}; HellaSwag \citep{zellers2019hellaswag}; Winogrande \citep{winogrande}; OpenBookQA \citep{OpenBookQA2018}; RTE \citep{wang-etal-2018-glue}; BoolQ \citep{clark-etal-2019-boolq}; ARC-e and ARC-c \citep{arcchallenge}. Mirroring the trend observed in the five-shot results, the improvement from \algname compared to prior pruning algorithms increases with compression, culminating in a $2.05\%$ advantage over prior methods at $50\%$ compression for Phi-3 Mini.
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.2} %
+
+\begin{tabular}{lccccc}
+\toprule
+ \multirow{2}{*}{\makecell[l]{\textbf{Compression} \\ \textbf{Rate}}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Phi-3}} & \multicolumn{1}{l}{\multirow{2}{*}{\textbf{Llama-3 8B}}} \\ 
+\cmidrule(lr){3-4}
+&  & \textbf{Mini} & \textbf{Medium} &\\ 
+\midrule
+0\% & Dense   & 71.99 & 74.27 & 69.79 \\ 
+\midrule 
+\multirow{3}{*}{30\%} & SparseGPT  & 70.63 & \textbf{74.53} & 69.08  \\ 
+& Wanda     &  70.66 & 74.05 & 68.63 \\ 
+& DSNoT     &  71.20 & 74.03 & 68.98 \\ 
+& \algname & \textbf{71.48} & 74.04 & \textbf{69.34} \\
+\midrule
+\multirow{3}{*}{40\%} & SparseGPT  & 69.18 & 74.40 & 67.58  \\ 
+& Wanda     &  68.80 & 73.01 & 67.04 \\ 
+& DSNoT     &  69.08 & 72.90 & 66.65 \\ 
+& \algname & \textbf{70.04} & \textbf{74.46} & \textbf{68.68}  \\
+\midrule 
+\multirow{3}{*}{50\%} & SparseGPT  & 66.36 & 73.25 & 64.66  \\ 
+& Wanda     &  65.03 & 70.96 & 63.27 \\ 
+& DSNoT     &  65.33 & 71.12 & 62.74 \\ 
+& \algname & \textbf{68.41} & \textbf{73.39} & \textbf{65.71}  \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of average zero-shot accuracies (\%) under different compression rates.} \label{table:zero_shot}
+\end{table}
+
+\paragraph{Generation Task} Depicted in Table \ref{table:ppl} below is the WikiText-2 perplexity of \algname relative to current state of the art pruning algorithms. At $50\%$ compression, \algname results in an $8.5\%$ reduction in perplexity on the larger Phi-3 Medium model, and an even larger $9\%$ reduction on Phi-3 Mini and Llama-3 8B. 
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.2} %
+
+\begin{tabular}{lccccc}
+\toprule
+ \multirow{2}{*}{\makecell[l]{\textbf{Compression} \\ \textbf{Rate}}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Phi-3}} & \multicolumn{1}{l}{\multirow{2}{*}{\textbf{Llama-3 8B}}} \\ 
+\cmidrule(lr){3-4}
+ &  & \textbf{Mini} & \textbf{Medium} & & \\ 
+\midrule
+0\% & Dense   & 9.50 & 6.21 & 10.17  \\ 
+\midrule 
+\multirow{4}{*}{30\%} & SparseGPT  & 11.19 & 7.48 & 9.71  \\ 
+& Wanda     &  10.71 & 7.28 & 9.39 \\ 
+& DSNoT     &  10.51 & 7.11 & \textbf{9.36} \\ 
+& \algname & \textbf{10.27} & \textbf{6.85} & 9.59 \\
+\midrule
+\multirow{4}{*}{40\%} & SparseGPT  & 13.03 & 8.52 & 10.01 \\ 
+& Wanda     &  12.59 & 8.49 & 9.74 \\ 
+& DSNoT     &  12.17 & 8.24 & 9.60 \\ 
+& \algname & \textbf{11.53} & \textbf{7.70} & \textbf{9.24} \\
+\midrule 
+\multirow{4}{*}{50\%} & SparseGPT  & 16.80 & 9.89 & 11.95  \\ 
+& Wanda     &  17.23 & 10.12 & 12.36 \\ 
+& DSNoT     &  16.68 & 9.96 & 12.41 \\ 
+& \algname & \textbf{15.18} & \textbf{9.05} & \textbf{10.87} \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of perplexity (lower is better) on WikiText-2 under different compression rates.} \label{table:ppl}
+\end{table}
+\begin{wraptable}{r}{7.5cm}
+\renewcommand{\arraystretch}{0.9} %
+\centering
+\begin{tabular}{ccc}
+\toprule
+ \textbf{Method} & \textbf{Phi-3 Mini} & \textbf{Llama-3 8B} \\ 
+\midrule 
+ SparseGPT  & 46.20 & 39.48  \\
+ Wanda     &  44.22 & 31.20 \\ 
+ DSNoT  & 44.75 & 33.28\\
+ \algname & \textbf{52.59} & \textbf{44.46}  \\
+\bottomrule
+\end{tabular}
+\caption{MMLU accuracy ($\%$) of models compressed by $60\%$ using OWL ratios.} \label{table:hs}
+\end{wraptable}
+\paragraph{Performance Under High Compression} Depicted in Table \ref{table:hs} on the right is the 5-shot MMLU accuracy ($\%$) of models compressed to a higher compression rate of $60\%$ utilizing OWL ratios. Following the trend above, we can see that \algname continues to considerably outperform its competitors. 
+
+\subsection{Ablations for \algname}\label{sec:hyper}
+We conduct ablation studies for \algname on Phi-3 Mini  at $40\%$ compression rate with a rank ratio of $20\%$ to depict the quantitative impact of the following design choices that were made:
+\begin{itemize}
+    \item Scaling the weights by the second moment of the input activations, $\mD$, versus not scaling.
+    \item Pruning the weights per each output row in the matrix versus pruning layer-wise. 
+\end{itemize}
+The results of our ablations are depicted in Table \ref{table:ablate} below:
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.2} %
+\begin{tabular}{lc|ccc}
+\toprule
+ \multicolumn{2}{c}{\textbf{Ablation}} & \textbf{MMLU $(\uparrow)$} & \textbf{Zero-shot $(\uparrow)$} & \textbf{Perplexity $(\downarrow)$} \\ 
+\midrule 
+\multirow{2}{*}{No Scaling} & Layer-Wise  & 62.46 & 67.58 & 19.21  \\ 
+& Row-Wise  & 65.31 & 68.22 & 18.34 \\ 
+\midrule
+\multirow{2}{*}{Scaling by $\mD$}  & Layer-Wise  & 64.44 & 70.52 & 11.68  \\
+& Row-Wise  & \textbf{65.84} & \textbf{70.71} & \textbf{11.50}  \\ 
+\bottomrule
+\end{tabular}
+\caption{Ablations of OATS on Phi-3-Mini  at $40\%$ compression rate with a rank ratio of $20\%$. The experiments show that scaling the weights by the second moment of the input activations and pruning row-wise significantly improves the performance of OATS.} \label{table:ablate}
+\end{table}
+In addition to the ablations, in Figure \ref{fig:ablation} below, we show how the rank ratio and the number of iterations impact the performance of \algname.
+
+\begin{figure*}[h]
+    \centering
+\begin{tikzpicture}
+\small
+\begin{groupplot}[
+    group style={
+        group size=2 by 1,
+        horizontal sep=0.2cm,
+    },
+    width=0.5\textwidth,
+    height=5cm,
+    ylabel={Accuracy (\%)},
+    grid=major,
+    domain=0:10,
+    samples=100,
+    ymin=40, ymax=80, %
+    xlabel shift={-1ex},
+    ylabel shift={-1ex},
+    legend style={
+        font=\small,
+        at={(1.02,0.5)},
+        anchor=west,
+        draw=none,
+        },
+]
+\nextgroupplot[xlabel={Rank Ratio},
+    xtick={0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7},
+    xticklabels={0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7},
+    tick style={draw=none},
+]
+\addplot[mark=*, mark options={fill=pastelBlue!50}, pastelBlue,  mark size=1.8pt]coordinates {
+    (0.1, 67.37)
+    (0.2, 68.02)
+    (0.25, 68.41)
+    (0.3, 68.63)
+    (0.35, 68.40)
+    (0.4, 67.30)
+    (0.45, 66.97)
+    (0.5, 67.70)
+    (0.6, 65.24)
+    (0.7, 62.08)
+};
+
+\addplot[mark=triangle*, mark options={fill=pastelRed!50}, pastelRed,  mark size=2.5pt] coordinates {
+    (0.1, 57.96)
+    (0.2, 59.12)
+    (0.25, 59.99)
+    (0.3, 58.68)
+    (0.35, 59.02)
+    (0.4, 57.09)
+    (0.45, 57.09)
+    (0.5, 56.75)
+    (0.6, 53.17)
+    (0.7, 45.09)
+};
+
+\nextgroupplot[xlabel={Number of Iterations}, ylabel={}, yticklabels={},
+    tick style={draw=none},
+    xtick={1, 20, 40, 60, 80, 100, 120, 140, 160},
+    xticklabels={1, 20, 40, 60, 80, 100, 120, 140, 160},
+]
+\addplot[mark=*, mark options={fill=pastelBlue!50}, pastelBlue,  mark size=1.8pt] coordinates {
+    (1, 58.93)
+    (5, 66.39)
+    (10, 67.59)
+    (20, 68.02)
+    (40, 68.35)
+    (60, 68.27)
+    (80, 68.41)
+    (100, 67.87)
+    (120, 67.48)
+    (160, 68.78)
+};
+\addlegendentry{0-shot}
+
+\addplot[mark=triangle*, mark options={fill=pastelRed!50}, pastelRed,  mark size=2.5pt] coordinates {
+    (1, 42.48)
+    (5, 53.75)
+    (10, 57.18)
+    (20, 58.01)
+    (40, 59.07)
+    (60, 59.99)
+    (80, 59.99)
+    (100, 59.46)
+    (120, 59.51)
+    (160, 58.97)
+};
+\addlegendentry{MMLU}
+\end{groupplot}
+\end{tikzpicture}
+
+    \caption{\label{fig:ablation}The effect of varying the rank ratio and number of iterations on zero-shot and five-shot accuracy.} 
+\end{figure*}
+
+The experiments reveal that the performance under the rank ratio generally saturates  between $25\%$ to $30\%$ prior to deteriorating. For the number of iterations, there is a sharp increase in performance from $0$-$20$ iterations before leveling off and saturating at around $80$ iterations. 
+\subsection{Hardware Speedup}
+\paragraph{CPU Speedup} We utilize the DeepSparse engine by \citet{deepsparse} to measure the CPU acceleration induced by OATS compared to pruned models with unstructured sparsity. We run end-to-end inference on a compressed Phi-3 Medium 15B model for a single batch of 2048 tokens on an Intel Xeon Gold 6148 CPU @ 2.40GHz with 32 cores. The achieved speed-ups are depicted in Table \ref{table:cpu_speedup} below. 
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.2} %
+\begin{tabular}{lccc}
+\toprule
+ \multirow{2}{*}{\makecell[l]{\textbf{Compression} \\ \textbf{Rate}}} & \multirow{2}{*}{\textbf{Method}} & \multirow{2}{*}{\textbf{Throughput (tokens/sec)}} & \multirow{2}{*}{\textbf{Speedup}} \\ 
+ & & &  \\
+\midrule 
+& Dense &  4.03 & $1.00\times$  \\ 
+\midrule
+\multirow{2}{*}{30\%} & Unstructured Pruning  &  4.32 & $1.07\times$   \\
+& OATS &  \textbf{5.58} &   $\mathbf{1.38\times}$ \\ 
+\midrule
+\multirow{2}{*}{40\%} & Unstructured Pruning  &  5.08 & $1.26\times$   \\
+& OATS &  \textbf{6.86} &   $\mathbf{1.73\times}$ \\ 
+\midrule
+\multirow{2}{*}{50\%} & Unstructured Pruning  &  7.16 & $1.78\times$   \\
+& OATS &  \textbf{8.31} &   $\mathbf{2.06\times}$ \\ 
+\bottomrule
+\end{tabular}
+\caption{Comparison of throughput and speedup achieved through OATS and unstructured pruning methods relative to their dense counterparts.} \label{table:cpu_speedup}
+\end{table}
+Our results highlight that by trading unstructured sparsity for structured sparsity through the low-rank terms, OATS leads to significantly more CPU speed-up compared to models that rely solely on unstructured pruning. In particular, at $40\%$ compressed, OATS has $1.37\times$ the speed-up than unstructured pruning.  
+\paragraph{N:M Performance} \label{sec:nm} We benchmark the N:M performance of OATS against the 2:4 structured sparsity performance of current state of the art pruning algorithms. Since the low-rank terms found by \algname remains dense, we opt to impose the \emph{sparser} structured sparsity pattern of 2:8 on the sparse term returned by OATS testing various rank ratios of $0.25$, $0.3$, $0.35$, $0.4$, $0.45$, and $0.5$. In Figure \ref{fig:mn} below, we depict the compression ratio versus the 5-shot MMLU accuracy of different compression algorithms.  
+\begin{figure*}[h]
+    \centering
+\pgfdeclareplotmark{mystarBlue}{
+    \node[star,star point ratio=2.25,minimum size=6pt,
+          inner sep=0pt,draw=pastelBlue,solid,fill=pastelBlue!50] {};
+}
+\pgfdeclareplotmark{mystarGreen}{
+    \node[star,star point ratio=2.25,minimum size=6pt,
+          inner sep=0pt,draw=pastelGreen,solid,fill=pastelGreen!35] {};
+}
+\pgfdeclareplotmark{mystarYellow}{
+    \node[star,star point ratio=2.25,minimum size=6pt,
+          inner sep=0pt,draw=pastelYellow,solid,fill=pastelYellow!50] {};
+}
+\begin{tikzpicture}
+\small
+\begin{groupplot}[
+    group style={
+        group size=2 by 1,
+        horizontal sep=0.2cm,
+        vertical sep=0.3cm,
+        group name=my plots,
+    },
+    title style={
+        yshift=-1.5ex,
+    },
+    tick style={draw=none},
+    width=0.9\textwidth,
+    height=4cm,
+    ylabel style={align=center},
+    grid=major,
+    xmode=log, log basis x=10,
+    xtick=data,
+    xlabel shift={-1ex},
+    ylabel shift={-1ex},
+    legend style={
+        at={(1.02,0.5)}, %
+        anchor=west,
+        draw=none,
+    },
+]
+\nextgroupplot[
+    title={Phi-3 Mini},
+    ylabel={MMLU \\Avg. Accuracy},
+    xticklabels = {50, 54, 58, 61, 64, 66},
+    mark size=2.5pt,
+    width=0.48\textwidth,
+]
+
+\addplot[mark=triangle*, mark options={fill=pastelRed!50}, pastelRed] coordinates {
+    (50, 45.82)
+    (54.54, 36.96)
+    (58.33, 31.11)
+    (61.54, 28.16)
+    (64.29, 26.12)
+    (66.67, 24.04)
+};
+\addplot[only marks, mark=mystarBlue] coordinates {
+    (50, 39.48)
+};
+
+\addplot[only marks, mark=mystarYellow] coordinates {
+    (50, 32.08)
+};
+
+\addplot[only marks, mark=mystarGreen] coordinates {
+    (50, 36.96)
+};
+\nextgroupplot[
+    title={Llama-3 8B},
+    ylabel={},
+    yticklabels={},
+    xticklabels = {50, 54, 58, 61, 64, 66},
+    mark size=2.0pt,
+    mark=triangle*,
+    width=0.48\textwidth,
+]
+\addplot[mark=triangle*, mark options={fill=pastelRed!50}, pastelRed] coordinates {
+    (50, 43.69)
+    (54.54, 37.35)
+    (58.33, 30.43)
+    (61.54, 28.11)
+    (64.29, 25.35)
+    (66.67, 25.59)
+};
+\addplot[only marks, mark=mystarBlue] coordinates {
+    (50, 34.49)
+};
+
+\addplot[only marks, mark=mystarYellow] coordinates {
+    (50, 27.87)
+};
+
+\addplot[only marks, mark=mystarGreen] coordinates {
+    (50, 29.03)
+};
+
+\addlegendentry{OATS}
+\addlegendentry{SparseGPT}
+\addlegendentry{Wanda}
+\addlegendentry{DSNoT}
+
+
+
+
+\end{groupplot}
+\end{tikzpicture}
+
+    \caption{\label{fig:mn} Experiments evaluating OATS with 2:8 structured sparsity on the sparse terms against 2:4 sparsity of state-of-the pruning algorithms. The rank ratio for OATS is varied to capture the performance across different compression rates. } 
+\end{figure*}
+
+Our results show that despite having a much stricter structured sparsity pattern of 2:8, OATS is able to recover the model performance through the presence of its low-rank terms. Specifically, at a fixed compression rate of $50\%$, OATS is able to outperform all prior state-of-the-art by up to $9.2\%$. In the case of Llama-3 8B, OATS surpasses previous methods by $2.86\%$ with $8\%$ more compression. 
+
+
+\section{Experiments on Vision Transformers}
+
+We run experiments on Google's ViT-Base \citep{wu2020visual}, an $86.6$M parameter model trained in a supervised manner on ImageNet-21k \citep{ridnik2021imagenet21k} and fine-tuned on ImageNet 2012 \citep{ILSVRC15}, and DinoV2-Giant \citep{oquab2023dinov2}, a $1.14$B parameter model that was trained utilizing self-supervised learning. 
+
+We benchmark \algname against the same three pruning algorithms: SparseGPT, Wanda, and DSNoT, by evaluating on the validation split of ImageNet \citep{ILSVRC15}. A subset of size $2048$ from the training split of ImageNet is utilized for the calibration data and is maintained consistent across all pruning experiments. All \algname experiments utilize a rank ratio of $\kappa = 20\%$ and $N=80$ iterations. We exclude from compression the embedding layers and the classifier layer. 
+
+Depicted in Table \ref{table:vit} below are the validation accuracies of ImageNet for ViT-Base and DinoV2-Giant under various compression rates. 
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lccc}
+\toprule
+  \makecell[l]{\textbf{Compression} \\ \textbf{Rate}} & \textbf{Method} &\textbf{ViT-Base} & \textbf{DinoV2-Giant} \\
+\midrule 
+$0\%$ & Dense & 80.33 & 86.55 \\
+\midrule
+ \multirow{4}{*}{30\%} & SparseGPT  & 80.21 & 86.46 \\
+ &Wanda     &  \textbf{80.28} & 86.47 \\ 
+ &DSNoT   & 80.16 & 86.46 \\
+ &\algname & 80.15 & \textbf{86.52} \\
+ \midrule
+ \multirow{4}{*}{40\%} & SparseGPT  & 79.58 & 86.39 \\
+ &Wanda     &  79.34 & 86.32 \\ 
+ &DSNoT   & 79.46 & 86.37 \\
+ &\algname & \textbf{79.86} & \textbf{86.46} \\
+ \midrule
+ \multirow{4}{*}{50\%} & SparseGPT  & 78.44 & 86.04 \\
+ &Wanda     &  76.19 & 85.81 \\ 
+ &DSNoT   & 76.90 & 85.93 \\
+ &\algname & \textbf{78.77} & \textbf{86.14} \\
+\bottomrule
+\end{tabular}
+\caption{ImageNet validation accuracy ($\%$).} \label{table:vit}
+\end{table}
+
+
+\section{Visualizing and Interpreting the Decomposition}
+
+To develop a better understanding of how the sparse and low rank components individually contribute to the flow of information through the attention mechanism, we compute and visualize the attention rollout \citep{abnar-zuidema-2020-quantifying} of the compressed model when:
+\begin{itemize}
+    \item All low-rank terms are set to zero and inputs are propagated through only the sparse terms.
+    \item All sparse terms are set to zero and inputs are propagated through only the low-rank terms.
+\end{itemize}
+Figure \ref{fig:low_sparse_viz} below provides a visualization of how the information would flow through a standard transformer block for both settings.  
+\begin{figure}[h!]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \scalebox{0.46}{
+\begin{tikzpicture}[
+module/.style={draw, very thick, rounded corners, minimum width=15ex},
+linear/.style={module, fill=pastelBlue!20, minimum width=1.63cm, minimum height=1.63cm},
+lr_l/.style ={trapezium, trapezium angle=63, shape border rotate=270, minimum width=1.53cm, fill=pastelRed!20, opacity=0.1, draw, very thick, rounded corners},
+lr_r/.style ={lr_l, shape border rotate=90},
+nonlinearity/.style={module, minimum width=1cm, fill=white},
+block/.style={module, fill=black!3, draw=black!50, thin},
+comp/.style={module, fill=black!10, thin},
+arrow/.style={-stealth, very thick, rounded corners},
+fadedarrow/.style={-stealth, opacity=0.1, very thick, rounded corners},
+line/.style={very thick, rounded corners},
+]
+\node[linear](wk_s) {$\mS_k$};
+\node[below=4mm of wk_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](wk_l_l) {$\mL_k$};
+\node[below=4mm of wk_s.south east, anchor=north east, lr_r, text width=3mm,align=center](wk_l_r) {$\mL_k$};
+\node[right=2mm of wk_s, linear](wq_s) {$\mS_q$};
+\node[below=4mm of wq_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](wq_l_l) {$\mL_q$};
+\node[below=4mm of wq_s.south east, anchor=north east, lr_r, text width=3mm,align=center](wq_l_r) {$\mL_q$};
+\node[right=2mm of wq_s, linear](wv_s) {$\mS_v$};
+\node[below=4mm of wv_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](wv_l_l) {$\mL_v$};
+\node[below=4mm of wv_s.south east, anchor=north east, lr_r, text width=3mm,align=center](wv_l_r) {$\mL_v$};
+\node[right=15mm of wv_s.south east, anchor = west, nonlinearity, minimum height=2cm, align=center](mha) {Multi-Head\\Attention};
+\node[right=10mm of mha.east, anchor=south west, yshift=-1.5mm, linear](out_s) {$\mS_o$};
+\node[below=4mm of out_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](out_l_l) {$\mL_v$};
+\node[below=4mm of out_s.south east, anchor=north east, lr_r, text width=3mm,align=center](out_l_r) {$\mL_v$};
+\begin{scope}[on background layer]
+\node[fit={(wk_s)(wk_l_l)(wk_l_r)(wq_s)(wq_l_l)(wq_l_r)(wv_s)(wv_l_l)(wv_l_r)(mha)(out_s)(out_l_l)(out_l_r)}, block, inner xsep=11mm, inner ysep=8mm] (attnmod) {};
+\node[anchor=south east] at (attnmod.north east) {Attention};
+\node[fit={(wk_s)(wk_l_l)(wk_l_r)(wq_s)(wq_l_l)(wq_l_r)(wv_s)(wv_l_l)(wv_l_r)}, linear, fill=white, inner sep=2.2mm, thin] (linin) {};
+\node[anchor=south] at (linin.north) {$\mW_k$, $\mW_q$, $\mW_v$ Compressed};
+\node[fit={(out_s)(out_l_l)(out_l_r)}, linear, fill=white, inner sep=2.2mm, thin] (outpair) {};
+\node[anchor=south] at (outpair.north) {$\mW_o$ Compressed};
+\end{scope}
+
+\coordinate (lininfork_l) at ($(attnmod.west)!0.4!(linin.west)$);
+\draw[fadedarrow] (lininfork_l) |- ($(linin.west)!0.5!(linin.south west)$);
+\draw[arrow] (lininfork_l) |- ($(linin.west)!0.5!(linin.north west)$);
+
+\node[draw, circle, left=5mm of mha, minimum size=0.01cm, font=\tiny] (linincomb) {$+$};
+
+\coordinate (mhafork) at ($(mha.west)!0.3!(linin.east)$);
+\draw[arrow] (mhafork) |- ($(mha.west)!0.5!(mha.south west)$);
+\draw[arrow] (mhafork) |- ($(mha.west)!0.5!(mha.north west)$);
+\draw[arrow] (linincomb) -- (mha);
+\draw[arrow]  ($(linin.east)!0.5!(linin.north east)$) -| (linincomb);
+\draw[fadedarrow]  ($(linin.east)!0.5!(linin.south east)$) -| (linincomb);
+
+\coordinate (outfork_l) at ($(mha.east)!0.4!(outpair.west)$);
+\draw[fadedarrow] (outfork_l) |- ($(outpair.west)!0.5!(outpair.south west)$);
+\draw[arrow] (outfork_l) |- ($(outpair.west)!0.5!(outpair.north west)$);
+\draw[line] (mha) -- (outfork_l);
+
+\node[below=of attnmod] (inputs) {Inputs};
+\node[draw, circle, above=0.6cm of attnmod] (resid1) {$+$};
+\node[draw, circle, right=3cm of mha, minimum size=0.01cm, font=\tiny] (wocomb) {$+$};
+
+\node[above=0.35cm of resid1, nonlinearity,  align=center, inner sep=3mm](normlayer) {Normalization};
+
+\node[above=2.0cm of normlayer, nonlinearity,  align=center, inner sep=3mm](relu) {Activation\\ Function};
+\node[left=15mm of relu.west, anchor=south east, linear, minimum height=1.35cm](w1_s) {$\mS_1$};
+\node[draw, circle, left=0.5cm of relu, minimum size=0.01cm, font=\tiny] (w1comb) {$+$};
+\node[below=4mm of w1_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](w1_l_l) {$\mL_1$};
+\node[below=4mm of w1_s.south east, anchor=north east, lr_r, text width=3mm,align=center](w1_l_r) {$\mL_1$};
+\node[right=of relu.east, anchor=south west, linear, minimum height=1.35cm] (w2_s) {$\mS_2$};
+\node[below=5mm of w2_s.south west, anchor=north west, lr_l, text width=3mm,align=center](w2_l_l) {$\mL_2$};
+\node[below=5mm of w2_s.south east, anchor=north east, lr_r, text width=3mm,align=center](w2_l_r) {$\mL_2$};
+\node[draw, circle, right=3cm of relu, minimum size=0.01cm, font=\tiny] (w2comb) {$+$};
+\begin{scope}[on background layer]
+\node[fit={(w1_s)(w1_l_l)(w1_l_r)(relu)(w2_s)(w2_l_l)(w2_l_r)}, block, inner xsep=11mm, inner ysep=8mm,] (mlp) {};
+\node[anchor=south east] at (mlp.north east) {FFN};
+\node[fit={(w1_s)(w1_l_l)(w1_l_r)}, linear, fill=white, inner sep=2.2mm, thin] (w1pair){};
+\node[anchor=south] at (w1pair.north) {$\mW_1$ Compressed};
+\node[fit={(w2_s)(w2_l_l)(w2_l_r)}, linear, fill=white, inner sep=2.2mm, thin] (w2pair) {};
+\node[anchor=south] at (w2pair.north) {$\mW_2$ Compressed};
+\end{scope}
+\coordinate (w1fork_l) at ($(mlp.west)!0.4!(w1pair.west)$);
+\draw[fadedarrow] (w1fork_l) |- ($(w1pair.west)!0.5!(w1pair.south west)$);
+\draw[arrow] (w1fork_l) |- ($(w1pair.west)!0.5!(w1pair.north west)$);
+\draw[arrow]  ($(w1pair.east)!0.5!(w1pair.north east)$) -| (w1comb);
+\draw[fadedarrow]  ($(w1pair.east)!0.5!(w1pair.south east)$) -| (w1comb);
+
+\coordinate (w2fork_l) at ($(relu.east)!0.4!(w2pair.west)$);
+\draw[fadedarrow] (w2fork_l) |- ($(w2pair.west)!0.5!(w2pair.south west)$);
+\draw[arrow] (w2fork_l) |- ($(w2pair.west)!0.5!(w2pair.north west)$);
+
+\draw[arrow] (w1comb) -- (relu);
+\draw[line] (relu) -- (w2fork_l);
+\coordinate (resid2loc) at ($(resid1.north |- mlp.north) + (0, 0.85cm)$);
+\node[draw, circle] (resid2) at (resid2loc) {$+$};
+
+\draw[line] (inputs) -- (attnmod.south) -| (attnmod.west) -- (lininfork_l);
+\coordinate[left=5mm of attnmod] (attnleft);
+\draw[arrow] (inputs) -| (attnleft) |- (resid1);
+\draw[arrow]  ($(outpair.east)!0.5!(outpair.north east)$) -| (wocomb);
+\draw[fadedarrow]  ($(outpair.east)!0.5!(outpair.south east)$) -| (wocomb);
+\draw[arrow] (wocomb) -- (attnmod.east) |- (attnmod.north) -- (resid1);
+\draw[arrow] (resid1) -- (normlayer);
+\draw[line] (normlayer.north) |- (mlp.south) -| (mlp.west) -- (w1fork_l);
+\coordinate[left=5mm of mlp] (mlpleft);
+\draw[arrow] (normlayer) -| (mlpleft) |- (resid2);
+\coordinate (mlpleft) at ($(attnleft |- mlp.east)$);
+\draw[arrow]  ($(w2pair.east)!0.5!(w2pair.north east)$) -| (w2comb);
+\draw[fadedarrow]  ($(w2pair.east)!0.5!(w2pair.south east)$) -| (w2comb);
+\draw[arrow] (w2comb.east) -- (mlp.east) |- ($(resid1.north |- mlp.north)$) -| (resid2.south);
+\end{tikzpicture}
+
+        }
+        \caption{Sparse Terms Only}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \scalebox{0.46}{
+\begin{tikzpicture}[
+module/.style={draw, very thick, rounded corners, minimum width=15ex},
+linear/.style={module, fill=pastelBlue!20, opacity=0.1, minimum width=1.63cm, minimum height=1.63cm},
+linearfull/.style={module, fill=pastelBlue!20, minimum width=1.63cm, minimum height=1.63cm},
+lr_l/.style ={trapezium, trapezium angle=63, shape border rotate=270, minimum width=1.53cm, fill=pastelRed!20, draw, very thick, rounded corners},
+lr_r/.style ={lr_l, shape border rotate=90},
+nonlinearity/.style={module, minimum width=1cm, fill=white},
+block/.style={module, fill=black!3, draw=black!50, thin},
+comp/.style={module, fill=black!10, thin},
+arrow/.style={-stealth, very thick, rounded corners},
+fadedarrow/.style={-stealth, opacity=0.1, very thick, rounded corners},
+line/.style={very thick, rounded corners},
+]
+\node[linear](wk_s) {$\mS_k$};
+\node[below=4mm of wk_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](wk_l_l) {$\mL_k$};
+\node[below=4mm of wk_s.south east, anchor=north east, lr_r, text width=3mm,align=center](wk_l_r) {$\mL_k$};
+\node[right=2mm of wk_s, linear](wq_s) {$\mS_q$};
+\node[below=4mm of wq_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](wq_l_l) {$\mL_q$};
+\node[below=4mm of wq_s.south east, anchor=north east, lr_r, text width=3mm,align=center](wq_l_r) {$\mL_q$};
+\node[right=2mm of wq_s, linear](wv_s) {$\mS_v$};
+\node[below=4mm of wv_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](wv_l_l) {$\mL_v$};
+\node[below=4mm of wv_s.south east, anchor=north east, lr_r, text width=3mm,align=center](wv_l_r) {$\mL_v$};
+\node[right=15mm of wv_s.south east, anchor = west, nonlinearity, minimum height=2cm, align=center](mha) {Multi-Head\\Attention};
+\node[right=10mm of mha.east, anchor=south west, yshift=-1.5mm, linear](out_s) {$\mS_o$};
+\node[below=4mm of out_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](out_l_l) {$\mL_v$};
+\node[below=4mm of out_s.south east, anchor=north east, lr_r, text width=3mm,align=center](out_l_r) {$\mL_v$};
+\begin{scope}[on background layer]
+\node[fit={(wk_s)(wk_l_l)(wk_l_r)(wq_s)(wq_l_l)(wq_l_r)(wv_s)(wv_l_l)(wv_l_r)(mha)(out_s)(out_l_l)(out_l_r)}, block, inner xsep=11mm, inner ysep=8mm] (attnmod) {};
+\node[anchor=south east] at (attnmod.north east) {Attention};
+\node[fit={(wk_s)(wk_l_l)(wk_l_r)(wq_s)(wq_l_l)(wq_l_r)(wv_s)(wv_l_l)(wv_l_r)}, linearfull, fill=white, inner sep=2.2mm, thin] (linin) {};
+\node[anchor=south] at (linin.north) {$\mW_k$, $\mW_q$, $\mW_v$ Compressed};
+\node[fit={(out_s)(out_l_l)(out_l_r)}, linearfull, fill=white, inner sep=2.2mm, thin] (outpair) {};
+\node[anchor=south] at (outpair.north) {$\mW_o$ Compressed};
+\end{scope}
+
+\coordinate (lininfork_l) at ($(attnmod.west)!0.4!(linin.west)$);
+\draw[arrow] (lininfork_l) |- ($(linin.west)!0.5!(linin.south west)$);
+\draw[fadedarrow] (lininfork_l) |- ($(linin.west)!0.5!(linin.north west)$);
+
+\node[draw, circle, left=5mm of mha, minimum size=0.01cm, font=\tiny] (linincomb) {$+$};
+
+\coordinate (mhafork) at ($(mha.west)!0.3!(linin.east)$);
+\draw[arrow] (mhafork) |- ($(mha.west)!0.5!(mha.south west)$);
+\draw[arrow] (mhafork) |- ($(mha.west)!0.5!(mha.north west)$);
+\draw[arrow] (linincomb) -- (mha);
+\draw[fadedarrow]  ($(linin.east)!0.5!(linin.north east)$) -| (linincomb);
+\draw[arrow]  ($(linin.east)!0.5!(linin.south east)$) -| (linincomb);
+
+\coordinate (outfork_l) at ($(mha.east)!0.4!(outpair.west)$);
+\draw[arrow] (outfork_l) |- ($(outpair.west)!0.5!(outpair.south west)$);
+\draw[fadedarrow] (outfork_l) |- ($(outpair.west)!0.5!(outpair.north west)$);
+\draw[line] (mha) -- (outfork_l);
+
+\node[below=of attnmod] (inputs) {Inputs};
+\node[draw, circle, above=0.6cm of attnmod] (resid1) {$+$};
+\node[draw, circle, right=3cm of mha, minimum size=0.01cm, font=\tiny] (wocomb) {$+$};
+
+\node[above=0.35cm of resid1, nonlinearity,  align=center, inner sep=3mm](normlayer) {Normalization};
+
+\node[above=2.0cm of normlayer, nonlinearity,  align=center, inner sep=3mm](relu) {Activation\\ Function};
+\node[left=15mm of relu.west, anchor=south east, linear, minimum height=1.35cm](w1_s) {$\mS_1$};
+\node[draw, circle, left=0.5cm of relu, minimum size=0.01cm, font=\tiny] (w1comb) {$+$};
+\node[below=4mm of w1_s.south west, anchor=north west, align=left, lr_l, text width=3mm,align=center](w1_l_l) {$\mL_1$};
+\node[below=4mm of w1_s.south east, anchor=north east, lr_r, text width=3mm,align=center](w1_l_r) {$\mL_1$};
+\node[right=of relu.east, anchor=south west, linear, minimum height=1.35cm] (w2_s) {$\mS_2$};
+\node[below=5mm of w2_s.south west, anchor=north west, lr_l, text width=3mm,align=center](w2_l_l) {$\mL_2$};
+\node[below=5mm of w2_s.south east, anchor=north east, lr_r, text width=3mm,align=center](w2_l_r) {$\mL_2$};
+\node[draw, circle, right=3cm of relu, minimum size=0.01cm, font=\tiny] (w2comb) {$+$};
+\begin{scope}[on background layer]
+\node[fit={(w1_s)(w1_l_l)(w1_l_r)(relu)(w2_s)(w2_l_l)(w2_l_r)}, block, inner xsep=11mm, inner ysep=8mm,] (mlp) {};
+\node[anchor=south east] at (mlp.north east) {FFN};
+\node[fit={(w1_s)(w1_l_l)(w1_l_r)}, linearfull, fill=white, inner sep=2.2mm, thin] (w1pair){};
+\node[anchor=south] at (w1pair.north) {$\mW_1$ Compressed};
+\node[fit={(w2_s)(w2_l_l)(w2_l_r)}, linearfull, fill=white, inner sep=2.2mm, thin] (w2pair) {};
+\node[anchor=south] at (w2pair.north) {$\mW_2$ Compressed};
+\end{scope}
+\coordinate (w1fork_l) at ($(mlp.west)!0.4!(w1pair.west)$);
+\draw[arrow] (w1fork_l) |- ($(w1pair.west)!0.5!(w1pair.south west)$);
+\draw[fadedarrow] (w1fork_l) |- ($(w1pair.west)!0.5!(w1pair.north west)$);
+\draw[fadedarrow]  ($(w1pair.east)!0.5!(w1pair.north east)$) -| (w1comb);
+\draw[arrow]  ($(w1pair.east)!0.5!(w1pair.south east)$) -| (w1comb);
+
+\coordinate (w2fork_l) at ($(relu.east)!0.4!(w2pair.west)$);
+\draw[arrow] (w2fork_l) |- ($(w2pair.west)!0.5!(w2pair.south west)$);
+\draw[fadedarrow] (w2fork_l) |- ($(w2pair.west)!0.5!(w2pair.north west)$);
+
+\draw[arrow] (w1comb) -- (relu);
+\draw[line] (relu) -- (w2fork_l);
+\coordinate (resid2loc) at ($(resid1.north |- mlp.north) + (0, 0.85cm)$);
+\node[draw, circle] (resid2) at (resid2loc) {$+$};
+
+\draw[line] (inputs) -- (attnmod.south) -| (attnmod.west) -- (lininfork_l);
+\coordinate[left=5mm of attnmod] (attnleft);
+\draw[arrow] (inputs) -| (attnleft) |- (resid1);
+\draw[fadedarrow]  ($(outpair.east)!0.5!(outpair.north east)$) -| (wocomb);
+\draw[arrow]  ($(outpair.east)!0.5!(outpair.south east)$) -| (wocomb);
+\draw[arrow] (wocomb) -- (attnmod.east) |- (attnmod.north) -- (resid1);
+\draw[arrow] (resid1) -- (normlayer);
+\draw[line] (normlayer.north) |- (mlp.south) -| (mlp.west) -- (w1fork_l);
+\coordinate[left=5mm of mlp] (mlpleft);
+\draw[arrow] (normlayer) -| (mlpleft) |- (resid2);
+\coordinate (mlpleft) at ($(attnleft |- mlp.east)$);
+\draw[fadedarrow]  ($(w2pair.east)!0.5!(w2pair.north east)$) -| (w2comb);
+\draw[arrow]  ($(w2pair.east)!0.5!(w2pair.south east)$) -| (w2comb);
+\draw[arrow] (w2comb.east) -- (mlp.east) |- ($(resid1.north |- mlp.north)$) -| (resid2.south);
+\end{tikzpicture}
+
+        }
+        \caption{Low-Rank Terms Only}
+    \end{subfigure}
+    \caption{A visualization of how the attention rollout is computed to isolate the contribution of the sparse terms versus low-rank terms given by the OATS compression algorithm.}
+    \label{fig:low_sparse_viz}
+\end{figure}
+
+We utilize various images in the Microsoft COCO dataset \citep{coco} to generate the attention rollout. Figure \ref{fig:rollout_viz} below depicts the attention rollout computed using the scheme described above on ViT-B that was compressed by $50\%$ with a rank ratio of $20\%$.
+\begin{figure}[h!]
+    \centering
+    \begin{tabular}{m{1.8cm} m{1.7cm} m{1.7cm} m{1.7cm} m{1.7cm} m{1.7cm} m{1.7cm}}
+    \textbf{Original:} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/og_0.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/og_1.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/og_2.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/og_3.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/og_7.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/og_6.png} \\
+        
+        \textbf{Sparse:} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/sparse_0.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/sparse_1.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/sparse_2.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/sparse_3.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/sparse_7.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/sparse_6.png} \\
+        
+        \textbf{Low-Rank:} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/lowrank_0.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/lowrank_1.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/lowrank_2.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/lowrank_3.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/lowrank_7.png} & 
+        \includegraphics[width=0.12\textwidth]{vit_viz/lowrank_6.png} \\
+    \end{tabular}
+    
+    \caption{Attention rollout visualization applied to various images on the Microsoft COCO dataset. }
+    \label{fig:rollout_viz}
+\end{figure}
+
+The rollout visualizations show that the sparse and low-rank terms capture distinct areas of the image, effectively segmenting it, and reveal three distinct patterns in how the image is partitioned. The first type of behavior, which is also commonly exhibited in the classical setting \citep{rpca}, is when one component (commonly sparse) captures the subject(s), while the other component (commonly low-rank) captures the background. The second behavior occurs when both components focus on different parts of the same subject, capturing distinct features. The third behavior arises when the image contains multiple subjects, with each component isolating a different subject. While these patterns provide initial insights into how the components process visual information, further investigation is needed to fully understand the underlying mechanisms driving these behaviors.
+
+
+\section{Related Works}
+
+\paragraph{Connection with Wanda} OATS utilizes the same outlier scaling as the the one that is employed by Wanda \citep{sun2024a}. In fact, Wanda can be seen as a special case of OATS when the rank ratio $\kappa = 0$, which, according to Equation \ref{eqn:oats_hyper}, results in the low-rank term becoming the $\mathbf{0}$ matrix. This leads to OATS performing a singular hard thresholding step that is equivalent to the pruning step described by Wanda and returning a compressed matrix equal to:
+$$\mW_{\text{compressed}} = \textsc{HardThreshold}(\mW \mD, k) \mD^{-1}. $$
+\paragraph{Sparse and Low-Rank Approximation in Transformers} The emergence of sparse and low-rank structures in transformers has recently become an area of both theoretical and practical interest. On the theoretical front, \citet{zhao2024implicit} showed that the logits of LLMs trained utilizing next token prediction converge to a low rank and sparse structure. On the practical front, Scatterbrain proposed by \citet{scatterbrain} shows that its possible to approximate the entire attention mechanism with a single sparse and low rank representation. LoRAP by \citet{li2024lorap} finds a low-rank representation for the attention matrices by utilizing a similar scaling technique as OATS. Recent works, such as LoSparse \citep{losparse}, LoRAPrune \citep{zhang2024loraprune}, and APT \citep{zhao2024apt}, propose variations of applying structured pruning on the weights while incorporating a low-rank adapter that is trained via gradient descent. We want to highlight that unlike OATS, these works utilize training and low-rank adaptation to recover model performance from structured pruning, whereas OATS depends on an intrinsic sparse and low-rank approximation of the weight matrices.  
+\paragraph{Robust PCA Algorithms} While OATS utilizes an alternating thresholding approach for its efficiency and simplicity, the search for fast Robust PCA algorithms has been a key area of interest since the inception of the problem. An alternative approach is to apply a convex relaxation, replacing the sparsity and low-rank constraints with an $\ell_1$ and nuclear norm surrogate leading to Stable Principle Component Pursuit \citep{spcp}. Another way to enhance computational efficiency is to utilize gradient descent by parameterizing the low-rank matrix as $\mL = \mU\mV^{\top}$, and then performing gradient descent on $\mU$ and $\mV$ \citep{fast_rpca, scale_rpca}. 
+\paragraph{Pruning and Interpretability} While pruning has been proven to be a successful approach to model compression, there is still ongoing research into what pruning is pruning and how it impacts model performance. \citet{Paganini2020PruneR} show that magnitude-based pruning has a disproportionate negative effect on underrepresented classes. In a similar vein, \citet{yin2024junk} show that pruning LLMs can lead to irreversible damage to model performance on tasks that are more challenging. We highlight that the low-rank term present in OATS might be able to mitigate the negative impacts of pruning raised by the prior works. Indeed, in Tables \ref{table:mmlu} and \ref{table:hs}, we can see that at higher compression rates, the gap between OATS and prior state-of-the-art is significantly larger suggesting that the low-rank term plays a critical role in mitigating the loss in performance at high compression. 
+
+
+\section{Conclusion}
+
+We have introduced OATS, an algorithm that distinguishes itself from prior algorithms by utilizing outlier information to determine a compressed sparse and low-rank decomposition without any re-training. We run a number of experiments showing that OATS is able to consistently outperform prior state-of-the-art across multiple benchmarks and compression rates while also improving on speed-up. Furthermore, in the search for interpretability, we have generated visualizations highlighting that the sparse and low-rank terms capture different segments of the image. We hope that our work can be utilized to investigate how sparse and low-rank structures in transformers can be fully leveraged for maximal memory and compute efficiency. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

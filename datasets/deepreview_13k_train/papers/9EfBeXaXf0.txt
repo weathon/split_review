@@ -1,0 +1,511 @@
+\title{Optimization by Parallel Quasi-Quantum Annealing with Gradient-Based Sampling}
+
+\begin{abstract}
+    Learning-based methods have gained attention as general-purpose solvers due to their ability to automatically learn problem-specific heuristics, reducing the need for manually crafted heuristics. However, these methods often face scalability challenges.
+    To address these issues, the \underbar{i}mproved \underbar{S}ampling algorithm for \underbar{C}ombinatorial \underbar{O}ptimization (iSCO), using discrete Langevin dynamics, has been proposed, demonstrating better performance than several learning-based solvers. 
+    This study proposes a different approach that integrates gradient-based update through continuous relaxation, combined with \underbar{Q}uasi-\underbar{Q}uantum \underbar{A}nnealing (\textbf{QQA}).
+    QQA smoothly transitions the objective function, starting from a simple convex function, minimized at half-integral values, to the original objective function, where the relaxed variables are minimized only in the discrete space.
+    Furthermore, we incorporate parallel run communication leveraging GPUs to enhance exploration capabilities and accelerate convergence. 
+    Numerical experiments demonstrate that our method is a competitive general-purpose solver, achieving performance comparable to iSCO and learning-based solvers across various benchmark problems. 
+    Notably, our method exhibits superior speed-quality trade-offs for large-scale instances compared to iSCO, learning-based solvers, commercial solvers, and specialized algorithms.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Combinatorial optimization (CO) problems aim to find the optimal solution within a discrete space, a fundamental challenge in many real-world applications \citep{papadimitriou1998combinatorial, crama1997combinatorial}. 
+Most CO problems are NP-hard, making it challenging to solve large-scale problems within feasible computational time. 
+As a result, developing algorithms that efficiently find high-quality approximate solutions has been a critical focus. 
+Traditionally, heuristic methods have been widely used to find approximate solutions, but they require significant insights into the specific problems. 
+Accordingly, increasing efforts have been directed toward developing general-purpose solvers that can be applied to a broad range of problems to reduce the need for problem-specific insights.
+
+Among the general-purpose solvers, sampling-based approaches have been proposed, which treat CO problems as sampling problems. 
+Simulated annealing (SA) \citep{kirkpatrick1983optimization}, a widely well-known technique, uses local thermal fluctuations and updates \citep{metropolis1953equation, hastings1970monte}. 
+Additionally, techniques such as tempered transitions \citep{neal1996sampling} and exchange Monte Carlo algorithms \citep{hukushima1996exchange} have shown strong performance in practical CO problems \citep{johnson1989optimization, johnson1991optimization, earl2005parallel}. 
+However, these methods often depend on local updates, where only one dimension is updated at a time, and the update process across dimensions typically cannot be parallelized.
+As a result, these methods become computationally prohibitive when addressing large-scale CO problems.
+
+Learning-based methods have recently gained recognition as general-purpose solvers for their ability to learn problem-specific heuristics automatically.
+This reduces the need for manually designed heuristics and leverages modern accelerators like GPUs and TPUs. 
+Some learning-based methods rely on supervised data, which is often difficult to obtain \citep{li2018combinatorial, gasse2019exact, gupta2020hybrid}. 
+Reinforcement learning \citep{khalil2017learning, kool2018attention, chen2019learning} and unsupervised learning approaches \citep{karalias2020erdos, wang2022unsupervised, wang2023unsupervised} have expanded their applicability.
+However, these approaches encounter challenges when applied to out-of-distribution instances, limiting their flexibility in addressing a wide range of problem distributions. 
+In response, unsupervised learning-based solvers that do not depend on training data have emerged, leveraging the ability of machine learning models to learn valuable representations \citep{schuetz2022combinatorial, schuetz2022graph, ichikawa2023controlling}. 
+These methods address CO problems by optimizing the learning parameters of deep learning models, but 
+model selection is critical in determining solution quality \citet{schuetz2023reply}. 
+Furthermore, additional computational costs arise because the number of parameters typically exceed the number of discrete variables in the original CO problem.
+Moreover, the performance of these methods compared to sampling-based solvers remains unclear.
+
+On the other hand, the \underbar{i}mproved \underbar{S}ampling algorithm for \underbar{CO} (iSCO) \citep{sun2023revisiting} was proposed, motivated by advances in Markov Chain Monte Carlo methods for discrete space. 
+This method integrates discrete Langevin dynamics \citep{sun2023discrete} with traditional annealing techniques, demonstrating results on par with, or better than, learning-based solvers by using gradient information from the objective function. 
+This method efficiently utilizes GPUs via frameworks such as PyTorch and JAX, similar to learning-based methods.
+In this study, we propose a different method that combines gradient-based updates through continuous relaxation and \underline{Q}uasi \underline{Q}uantum \underline{A}nnealing (\textbf{QQA}) inspired by quantum annealing \citep{kadowaki1998quantum}.
+QQA gradually transitions the objective function, starting with a simple convex function minimized at half-integral values, similar to the state where the transverse field dominates in quantum annealing.
+This process leads to the original objective function, where the relaxed variables are minimized only within the discrete space, analogous to the classical state without the transverse field in quantum annealing.
+Unlike iSCO, our method introduces an extended Boltzmann distribution with a communication term between parallel runs, facilitating broader exploration with minimal overhead by effectively utilizing GPUs. This also accelerates convergence.
+
+Numerical experiments on the same benchmark used as iSCO \citep{sun2023revisiting}, along with several other benchmarks, demonstrate that our method is a competitive general-purpose solver, achieving performance comparable to iSCO and learning-based solvers across all benchmarks. 
+For larger problems, our method offers better speed-quality trade-offs than iSCO, learning-based solvers, commercial solvers, and specialized algorithms.
+
+
+
+\section{Background}
+
+\paragraph{Combinatorial Optimization.}
+The goal of this study is to solve CO problems formulated as
+\begin{equation}
+    \min_{\B{x} \in \mac{X}(C)} f(\B{x}; C),~~ 
+    \mac{X}(C) = 
+    \left\{\B{x} \in \{0, 1\}^{N}
+    ~\left|~~
+    \begin{matrix}
+        g_{i}(\B{x};C) \le 0, &
+        \forall i \in [I], \\ 
+        h_{j}(\B{x};C) = 0 & \forall j \in [J] 
+    \end{matrix} 
+    \right.
+    \right\},  
+\end{equation}
+where $C \in \mac{C}$ denotes instance-specific parameters, such as a graph $G=(V, E)$, and $\mac{C}$ represents a set of all possible instances. 
+The vector $\B{x} = (x_{i})_{1\le i \le N} \in \{0, 1\}^{N}$ represents the discrete decision variables, and $\mac{X}(C)$ denotes the feasible solution space.
+$f: \mac{X} \times \mac{C} \to \mab{R}$ is the cost function, while $g_{i}: \mac{X} \times \mac{C} \to \mab{R}$ and $h_{j}: \mac{X} \times \mac{C} \to \mab{R}$ represent inequality and equality constraints, respectively. 
+We also use the shorthand notation $[N] = \{1, 2, \ldots, N\}$, with $N \in \mab{N}$. 
+
+To transform the constrained CO problem into a sampling problem, we reformulate it as an unconstrained CO problem using the penalty method:
+\begin{equation}
+\label{eq:penarized-loss}
+    \min_{\B{x} \in \{0, 1\}^{N}} l(\B{x}; C, \B{\lambda}),~~l(\B{x}; C, \B{\lambda}) \delequal f(\B{x}; C) + \sum_{i=1}^{I+J} \lambda_{i} v_{i}(\B{x}; C), 
+\end{equation}
+where $v_{i}: \{0, 1\}^{N} \times \mac{C} \to \mab{R}, \forall i \in [I+J]$ represents penalty terms, which increase as the constraints are violated.
+For example, these penalty terms can be defined as 
+\begin{equation}
+    \forall i \in [I],~v_{i}(\B{x};C) = \max (0, g_{i}(\B{x};C)),~~\forall j \in [J],~v_{j}(\B{x};C) = (h_{j}(\B{x};C))^{2}.
+\end{equation}
+$\B{\lambda} = (\lambda_{i})_{1\le i \le I+J} \in \mab{R}^{I+J}$ denotes the penalty parameters that control the balance between constraint satisfaction and cost function minimization. 
+As $\B{\lambda}$ increases, these penalty terms grow, penalizing constraint violations more heavily. 
+
+\paragraph{Energy Based Model (EBM).}
+For the penalized objective function $l(\B{x}; C, \B{\lambda})$, we define the following Boltzmann distribution:
+\begin{equation}
+\label{eq:opt-boltzmann-measure}
+    P(\B{x}; T) = \frac{1}{\mac{Z}(T)} e^{- \frac{1}{T} l(\B{x}; C, \B{\lambda})},~~\mac{Z}(T) = \sum_{x \in \mac{X}} e^{-\frac{1}{T} l(\B{x}; C, \B{\lambda})},
+\end{equation}
+where $T \in \mab{R}_{\ge 0}$ is a parameter called temperature, which controls the smoothness of the distribution. 
+The summation $\sum_{\B{x}}$ represents the sum over all possible values of $\B{x}$.
+This distribution has the following property:
+\begin{Prop}
+    As the temperature $T$ approaches infinity, the Boltzmann distribution $P(\B{x}; T)$ converges to a uniform distribution over $\{0, 1\}^{N}$. 
+    When the temperature $T=0$, the Boltzmann distribution becomes a uniform distribution over the optimal solutions of Eq.~(\ref{eq:penarized-loss}). 
+\end{Prop}
+Thus, the original CO problem can be transformed into a sampling problem from the probability distribution in Eq.~\ref{eq:opt-boltzmann-measure} with $T=0$.
+
+\paragraph{Metropolis--Hastings Algorithm.}
+The Metropolis--Hastings Algorithm \citep{metropolis1953equation, hastings1970monte} is a general method for sampling from high-dimensional distributions. 
+This algorithm uses a conditional distribution $Q$, called a proposal distribution, which satisfy the ergodicity condition. 
+A Markov chain $(\B{x}^{(t)})_{t=0}^{T}$ is constructed to have $P(\B{x}; T)$ as its stationary distribution by following steps; starting from $\B{x}^{(0)} \sim P^{(0)}$, where $P^{(0)}$ is the initial distribution, at each step $t$, propose $\B{x}^{\prime} \sim Q(\B{x}^{\prime}|\B{x}^{(t)})$, and with probability 
+\begin{equation}
+\label{eq:acceptance}
+    A(\B{x}^{\prime}|\B{x}^{(t)}) = \min \left(1, \frac{P(\B{x}^{\prime}; T) Q(\B{x}^{(t)}|\B{x}^{\prime})}{P(\B{x}^{(t)}; T) Q(\B{x}^{\prime}|\B{x}^{(t)})}  \right)
+\end{equation}
+accept $\B{x}^{\prime}$ as the next state $\B{x}^{(t+1)} = \B{x}^{\prime}$, or with probability $1-A(\B{x}^{\prime}|\B{x}^{(t)})$, reject $\B{x}^{\prime}$ and retain the previous state $\B{x}^{(t+1)} = \B{x}^{(t)}$.
+The proposal distribution is typically a local proposal, such as a flipping a single bit.
+Gibbs sampling \citep{geman1984stochastic} is a local update method where the proposal distribution is the conditional distribution, $Q(\B{x}^{(t)} | \B{x}^{\prime}) = P(x^{(t)}_{i}|\B{x}_{-i}; T)$, with $\B{x}_{-i} = \B{x} \setminus \{x_{i}\}$. In this case, the acceptance rate $A(\B{x}^{\prime}|\B{x}^{(t)})$ is always $1$.
+The effectiveness of the algorithm is highly influenced by the choice of the proposal distribution $Q(\B{x}^{(t)}|\B{x}^{\prime})$.
+
+\paragraph{Simulated Annealing.}
+Simulated annealing (SA) was introduced by \citet{kirkpatrick1983optimization, vcerny1985thermodynamical}.
+While the original optimization problem can be solved by sampling from the distribution $\lim_{T\to 0}P(\B{x}; T)$, directly sampling from the distribution is difficult due to its highly nonsmooth nature at low temperatures.
+To overcome, SA performs Metropolis--Hastings updates while gradually lowering the temperature $T$ to zero through a temperature path, $\mac{T} = (T_{0}, T_{1}, \ldots, T_{M})$ where the path $T_{0} > T_{1} > \cdots > T_{M} \to 0$. This approach enables the system to reach a state with lower energy over time.
+
+
+
+\section{Method}
+
+We begin by explaining the continuous relaxation approach in Section \ref{subsec:continuous-relaxation}. 
+Section \ref{subsec:CAAD} introduces an extended Boltzmann distribution and QQA. 
+Section \ref{subsec:communication-parallel-runs} proposes the communication between parallel runs, and Section \ref{subsec:accelerations-heuristics} summarizes optimization-specific techniques. 
+This overall approach is termed \underline{P}arallel \underline{Q}uasi-\underline{Q}uantum \underline{A}nnealing (PQQA).
+
+\subsection{Continuous Relaxation Strategy}\label{subsec:continuous-relaxation}
+The continuous relaxation strategy reformulates a CO problem into a continuous one by converting discrete variables into continuous ones as follows:
+\begin{equation*}
+    \min_{\B{p} \in [0, 1]^{N}} \hat{l}(\B{p}; C, \B{\lambda}),~~\hat{l}(\B{p}; C, \B{\lambda}) \delequal \hat{f}(\B{p}; C) + \sum_{i=1}^{m+p} \lambda_{i} \hat{v}_{i}(\B{p}; C),  
+\end{equation*}
+where $\B{p} = (p_{i})_{1\le i \le N} \in [0, 1]^{N}$ denotes the relaxed continuous variables, where each binary variable $x_{i} \in \{0, 1\}$ is relaxed to a continuous value $p_{i} \in [0, 1]$. 
+$\hat{f}: [0, 1]^{N} \times \mac{C} \to \mab{R}$ represents the relaxation of $f$, satisfying $\hat{f}(\B{x}; C) = f(\B{x}; C)$ for $\B{x} \in \{0, 1\}^{N}$.
+Similarly, for all $i \in [I+J]$, $\hat{v}_{i}$ denotes the relaxation of $v_{i}$, with $\hat{v}_{i}(\B{x}; C) = v_{i}(\B{x}; C)$ for $\B{x} \in \{0, 1\}^{N}$.
+
+However, the landscape of relaxed objective function $\hat{l}(\B{p}; C, \B{\lambda})$ remains complex even after continuous relaxation, posing challenges for optimization.
+Moreover, continuous relaxation encounters rounding issues, where artificial post-rounding is needed to map the continuous solutions back to the original discrete space, undermining the robustness.
+
+\subsection{Quasi-Quantum Annealing}\label{subsec:CAAD}
+We represent the relaxed variable $\B{p} \in [0, 1]^{N}$ as a real-valued parameter $\B{w} \in \mab{R}^{N}$ and a nonlinear mapping to evaluate gradients and introduce following entropy term to control the balance between continuity and discreteness of relaxed variables:
+\begin{equation}
+    \label{eq:penalty-cost}
+    \hat{r}(\sigma(\B{w}); C, \B{\lambda}, \gamma) = \hat{l}(\sigma(\B{w}); C, \B{\lambda}) +  \gamma s(\sigma(\B{w})),
+\end{equation}
+where $\sigma: \mab{R}^{N} \to [0, 1]^{N}$ denotes element-wise mapping, such as the sigmoid function and $\gamma \in \mab{R}$ denotes a penalty parameter.
+The relaxed variables are defined as $\sigma(\B{w}) = (\sigma(w_{i}))_{1\le i \le N} \in [0, 1]^{N}$.
+The entropy term $s(\sigma(\B{w}))$ is a convex function, which attains its minimum value of $0$ when $\sigma(\B{w}) \in \{0, 1\}^{N}$ and its maximum when $\sigma(\B{w}) =\nicefrac{\B{1}_{N}}{2}$.
+In particular, this study employs the following entropy:
+\begin{equation}
+    \label{eq:alpha-entropy}
+    s(\sigma(\B{w}))=
+        \sum_{i=1}^{N} \left\{1-(2 \sigma(w_{i}) -1)^{\alpha}\right\},~~~\alpha \in \{2n \mid n \in \mab{N}\},
+\end{equation}
+which was introduced by \citet{ichikawa2023controlling} and is referred to as $\alpha$-entropy.
+
+Furthermore, we extend the entropy term to general discrete optimization problems. 
+ 
+The effectiveness of this generalization is demonstrated through numerical experiments on two benchmarks: the balanced graph partitioning in Section \ref{subsec:balanced-graph-partition} and the graph coloring problem in Section \ref{subsec:graph-coloring}.
+
+Subsequently, we extend the Boltzmann Distribution in Eq.~(\ref{eq:opt-boltzmann-measure}) to the continuous space $[0, 1]^{N}$ using Eq.~(\ref{eq:penalty-cost}) as follows:
+\begin{equation}
+    \label{eq:relaxed-dist}
+    \hat{P}(\sigma(\B{w}); \gamma, T) = \frac{1}{\mac{Z}(\gamma, T)} e^{-\frac{1}{T}\hat{r}(\sigma(\B{w}); C, \B{\lambda}, \gamma)},~~\mac{Z}(\gamma, T) = \int \prod_{i=1}^{N} dw_{i}  e^{-\frac{1}{T}\hat{r}(\sigma(\B{w}); C, \B{\lambda}, \gamma)}.
+\end{equation}
+When $\gamma$ is negative, i.e., $\gamma < 0$, the relaxed variables tend to favor the half-integral value $\sigma(\B{w})=\nicefrac{\B{1}_{N}}{2}$, smoothing the non-convexity of the objective function $\hat{l}(\B{p}; C, \B{\lambda})$ due to the convexity of the penalty term $\Phi(\B{p})$. 
+This state can be interpreted as a quasi-quantum state, where the values are uncertain between $0$ and $1$.
+Conversely, when $\gamma$ is positive, i.e., $\gamma>0$, the relaxed variables favor discrete values. 
+This state can be interpreted as a classical state, where the values are deterministically determined as either $0$ or $1$.
+Formally, the following theorem holds.
+\begin{Thm}
+    \label{theorem:gamma-annealing-limit}
+    Under the assumption that the objective function $\hat{l}(\B{p};C)$ is bounded within the domain $[0, 1]^{N}$, the Boltzmann distribution $\lim_{\gamma \to +\infty} \lim_{T\to 0} \hat{P}(\sigma(\B{w}); \gamma, T)$ converges to a uniform distribution over the optimal solutions of Eq.~(\ref{eq:penarized-loss}), i.e., $\B{x}^{\ast} \in \mathrm{argmin}_{\B{x}} l(\B{x}; C, \B{\lambda})$. Additionally, $\lim_{\gamma \to -\infty} \lim_{T\to 0} \hat{P}(\sigma(\B{w}); \gamma, T)$ converges to a single-peaked distribution $\prod_{i=1}^{N}\delta(\sigma(w_{i})-\nicefrac{1}{2})$.
+\end{Thm} 
+The following gradient-based update can be used for any $\gamma$, provided that $r(\B{w})$ is differentiable:
+\begin{equation}
+    \label{eq:langevin-update}
+    \B{w}^{t+1} = \B{w}^{t} - \eta \nabla_{\B{w}} r(\sigma(\B{w}^{t}); C, \B{\lambda}) + \sqrt{2 \eta T} \B{\xi},
+\end{equation}
+where $\eta$ is the time step, and $\B{\xi} \sim \mathcal{N}(\B{0}_{N}, I_{N})$ is Gaussian noise, with $I_{N} \in \mathbb{R}^{N \times N}$ denoting an identity matrix and $\B{0}_{N}$ representing the zero vector $(0, \ldots, 0)^{\top} \in \mathbb{R}^{N}$. 
+This update rule generates a Markov chain whose stationary distribution is given by Eq.~(\ref{eq:relaxed-dist}), provided that $\eta$ is sufficiently small. 
+Unlike the local updates in conventional SA for discrete problems, this method simultaneously updates multiple variables in a single step via the gradient, allowing for high scalability.
+
+Following \citet{ichikawa2023controlling}, annealing is conducted on $\gamma$ from a negative to a positive value while updating the parameter $\B{w}$.
+Initially, a negative $\gamma$ is set to enable extensive exploration by smoothing the non-convexity of $\hat{l}(\sigma(\B{w}); C, \B{\lambda})$,  where the quasi-quantum state $\sigma(\B{w}) = \nicefrac{\B{1}_{N}}{2}$ dominates.
+Subsequently, the penalty parameter $\gamma$ is gradually increased to a positive value until the entropy term approaches zero, i.e., $s(\sigma(\B{w})) \approx 0$, to automatically round the relaxed variables by smoothing out continuous suboptimal solutions oscillating between $1$ and $0$.
+This annealing is similar to quantum annealing, where the system transitions from a state dominated by a superposition state of $0$, $1$, induced by the transverse field, to the ground state of the target optimization problem.
+Therefore, we refer to this annealing as \underline{Q}uasi-\underline{Q}uantum \underline{A}nnealing (QQA).
+
+\subsection{Communication in Parallel Runs}\label{subsec:communication-parallel-runs}
+Gradient-based updates in QQA enable efficient batch parallel computation for multiple initial values and instances $\{C_{\mu}\}_{\mu=1}^{P}$ using GPU or TPU resources, similar to those used in machine learning tasks.
+We propose communication between these parallel runs to conduct a more exhaustive search, obtain diverse solutions.
+Specifically, we define the extended Boltzmann distribution over all $S$ parallel runs $\{\sigma(\B{w}^{(s)})\}_{s=1}^{S}$ as follows:
+\begin{multline}
+    \label{eq:diverse-extended-dist}
+    P(\{\sigma(\B{w}^{(s)})\}_{s=1}^{S}; \gamma, T) \propto e^{- \frac{1}{T} \hat{R}(\{\sigma(\B{w}^{(s)})\}_{s=1}^{S}; C, \B{\lambda}, \gamma)}, \\
+    \hat{R}(\{\B{w}^{(s)}\}_{s=1}^{S}; C, \B{\lambda}, \gamma) = \sum_{s=1}^{S} \hat{r}(\sigma(\B{w}^{(s)}); C, \B{\lambda}, \gamma) - S \alpha \sum_{i=1}^{N} \mathrm{STD}[\{\sigma(w_{i}^{(s)})\}_{s=1}^{S}],
+\end{multline}
+where $\mathrm{STD}[\{a_{k}\}_{k=1}^{K}]$ denotes the empirical standard deviation $(\sum_{k=1}^{K}(a_{k}-\sum_{k^{\prime}=1}^{K} a_{k^{\prime}}/K)^{2}/K)^{\nicefrac{1}{2}}$ and $\alpha \in [0, 1]$ is a parameter controlling the diversity of the problem. 
+A larger value of $\alpha$ enhances the exploration ability during the parallel run. 
+The second term is a natural continuous relaxation of the Sum Hamming distance \citep{ichikawa2024continuous}. 
+As in Eq.~(\ref{eq:langevin-update}), we perform Langevin updates on $\{\sigma(\B{w}^{(s)})\}_{s=1}^{S}$ whose stationary distribution is given by Eq.~(\ref{eq:diverse-extended-dist}).
+
+\subsection{Optimization-Specific Accelerations}\label{subsec:accelerations-heuristics}
+We focus on optimization, rather than generating a sample sequence that strictly follows the probability distribution in Eq.~(\ref{eq:relaxed-dist}).
+This section introduce several optimization-specific enhancements to the Langevin dynamics in Eq.~(\ref{eq:langevin-update}) that are specifically designed to improve efficiency in optimization tasks.
+
+\paragraph{Sensitive Transitions.}
+The update of $\B{w}$ is linked with the objective function through the element-wise mapping $\sigma(\cdot)$, which can reduce sensitivity with respect to $\B{w}$. 
+To address this issue, we propose replacing the update in Eq.~(\ref{eq:langevin-update}) with a two-step process.
+In the first step, rather than updating $\B{w}$ directly, we update the relaxation variables $\B{p} \in \mathbb{R}^{N}$ as follows:
+\begin{equation}
+\label{eq:expanded-langevien-update}
+    \B{p}^{\prime} = \B{p}^{t} - \eta \nabla_{\B{p}} \tilde{r}(\B{p}^{t}; C, \lambda) + \sqrt{2\eta T} \B{\xi},   
+\end{equation}
+where $\tilde{r}: \mab{R}^{N}  \times \mac{C} \to \mab{R}$ is the relaxed form of $\hat{r}$, satisfying $\tilde{r}(\B{p}; C) = \hat{r}(\B{p}; C)$ for any $\B{p} \in [0, 1]^{N}$. 
+This update leads to a more sensitive transition than updating $\B{w}$, as it bypasses $\sigma(\cdot)$. 
+However, $\B{p}^{\prime}$ may fall outside the range $[0, 1]^{N}$ after the update Eq.~(\ref{eq:expanded-langevien-update}). 
+In the second step, we update $\B{p}^{\prime}$ by setting $\B{p}^{t+1} = \sigma(\B{p}^{\prime})$, which ensures that  $\B{p}^{t+1}$ always lies within the range $[0, 1]^{N}$. 
+
+Furthermore, the gradient-based update in Eq.~(\ref{eq:expanded-langevien-update}) is replaced with more sophisticated optimizers to improve exploration efficiency. 
+In this paper, we employ AdamW \citep{loshchilov2017decoupled}. 
+Note that the stationary distribution of this optimization-specific update does not correspond to the Boltzmann distribution in Eq.~(\ref{eq:relaxed-dist}).
+
+
+
+\section{Related Work}
+
+Sampling-based methods \citep{metropolis1953equation, hastings1970monte, neal1996sampling, hukushima1996exchange} have been widely applied to various CO problems, including MIS \citep{angelini2019monte}, TSP \citep{kirkpatrick1983optimization, vcerny1985thermodynamical, wang2009parallel}, planning \citep{chen2004multi, jwo1995hybrid}, scheduling \citep{secckiner2007simulated, thompson1998robust}, and routing \citep{tavakkoli2007new, van1995improvement}. 
+However, these methods generally depend on local updates, such as Gibbs sampling or single-bit flip Metropolis updates, which can restrict their scalability.
+To address this limitations, methods leveraging gradient information from the objective function have been proposed. 
+Continuous relaxation techniques, conceptually related to our approach, have also been introduced \citep{zhang2012continuous}. 
+However, these methods often struggle to capture the topological properties of discrete structures \citep{pakman2013auxiliary, mohasel2015reflection, dinh2017probabilistic, nishimura2020discontinuous}. 
+In contrast, our method gradually recovers the discrete nature of the original problem through QQA. 
+\citet{sun2023revisiting} proposed iSCO, a sampling-based solver using discrete Langevin dynamics \citep{sun2023discrete, zhang2022langevin, sun2021path, grathwohl2021oops}, which accelerates traditional Gibbs sampling and improves performance. 
+While iSCO approximates the acceptance rate of candidate transitions in discrete Langevin dynamics using a first-order Taylor expansion, its effectiveness for general discrete optimization problems remains uncertain.
+In addition to adjusting the temperature path, hyperparameter tuning is required for the path auxiliary sampler \citep{sun2021path}. 
+Furthermore, communication between parallel chains in PQQA has not been implemented, preventing iSCO from fully utilizing the benefits of parallel execution on GPUs. 
+Additionally, some methods incorporate machine learning frameworks to train surrogate models while annealing within MCMC \citep{mcnaughton2020boosting, ichikawa2022toward}. 
+
+
+
+\section{Experiment}
+
+In this section, the performance of PQQA is evaluated across five CO problems: maximum independent set (MIS), maximum clique, max cut, balanced graph partition, and graph coloring. 
+For each problem, experiments are performed  on synthetic and real-world benchmark datasets, including instances used in iSCO \citep{sun2023revisiting}, all benchmarks recently proposed \citep{sun2023discrete}, and instances commonly used in learning-based solvers.
+PQQA is compared with  various baselines, including sampling-based methods, learning-based methods, heuristics, and both general and specialized optimization solvers. 
+Notably, iSCO \citep{sun2023revisiting} is employed as our direct baselines.
+\paragraph{Implementation.}
+We use the $\alpha$-entropy with $\alpha = 4$ across all experiments. 
+The parameter $\gamma$ is increased linearly from $\gamma_{\min} = -2$ to $\gamma_{\max} = 0.1$ with each gradient update. 
+After annealing, the relaxed variables are converted into discrete ones using the projection method: for all $i \in [N]$, we map as $x_{i} = \Theta(p_{i} - \nicefrac{1}{2})$, where $\Theta$ is the step function. 
+Notably, even with $\gamma_{\max} = 0.1$, the solution became almost binary, indicating robustness in the rounding process.
+We set $\sigma(\B{w}) = \mathrm{Clamp}(\B{w})$, where $\mathrm{Clamp}(\B{w})$ constrains the values within the range $[0, 1]^{N}$. Specifically, for each $i \in [N]$, if $w_{i}$ is less than $0$, it is set to $0$; if $w_{i}$ exceeds $1$, it is set to $1$. 
+
+The AdamW optimizer \citep{loshchilov2017decoupled} is used. The parallel number $S$ is set to $100$ or $1{,}000$. 
+We report the runtime of PQQA on a single V100 GPU. 
+The runtime can be further improved with more powerful GPUs or additional GPUs. 
+Section \ref{subsec:ablation} provide an ablation study that examines the effect of different hyper-parameters.
+
+\paragraph{Evaluation Metric.}
+This experiment primarily evaluates solution quality using the approximation ratio (ApR), the ratio between the obtained and optimal solutions. For maximization problems, $\text{ApR} \leq 1$, and the solution is considered optimal when $\text{ApR} = 1$. In cases where an optimal solution is not guaranteed due to problem complexity, we directly compare objective functions or report the ratio relative to the solution found by a commercial solver with the best effort or asymptotic theoretical results. The specific definition of ApR used in each section is provided accordingly.
+ 
+\subsection{Max Independent Set}\label{subsec:max-independent-set}
+
+\paragraph{SATLIB and Erd\H{o}s–R\'{e}nyi Graphs.}
+\begin{table}[tb]
+\centering
+\caption{ApR and runtime are evaluated on three benchmarks provided by DIMES \citep{qiu2022dimes}. 
+The ApRs are evaluated against the results obtained by KaMIS. Runtime is reported as the total clock time, denoted in seconds (s), minutes (m), or hours (h). 
+The runtime and ApR are sourced from \citet{sun2023revisiting}. 
+Baselines include the OR solvers, learning-based methods using Reinforcement Learning (RL) and Supervised Learning (SL) combined with Tree Search (TS), Greedy decoding (G) or Sampling (S), and iSCO. Methods that fail to produce results within 10 times the time limit of DIMES are marked as N/A.}
+\label{table:mis-satlib-er}
+\begin{tabular}{cc|cc|cc|cc}
+     \toprule
+     \multirow{2}{*}{Method} & \multirow{2}{*}{Type} &
+     \multicolumn{2}{c|}{SATLIB} & 
+     \multicolumn{2}{c|}{ER-[700-800]} & \multicolumn{2}{c}{ER-[9000-11000]}\\
+     & & ApR$\uparrow$  & Time$\downarrow$ & ApR$\uparrow$ & Time$\downarrow$ & ApR$\uparrow$ & Time$\downarrow$ \\
+     \hline
+     KaMIS & OR & 1.000 & 37.58m & 1.000  & 52.13m & 1.000  & 7.6h\\
+     Gurobi & OR & 1.000  & 26.00m & 0.922  & 50.00m & N/A & N/A \\
+     \hline
+     \multirow{2}{*}{Intel}  & SL+TS & N/A & N/A & 0.865  & 20.00m & N/A & N/A \\
+    & SL+G & 0.988  & 23.05m & 0.777  &  6.06m & 0.746  & 5.02m \\
+     DGL & SL+TS & N/A & N/A & 0.830  & 22.71m & N/A & N/A \\
+     LwD & RL+S & 0.991  & 18.83m & 0.918  & 6.33m & 0.907  & 7.56m \\
+     \multirow{2}{*}{DIMES} & RL+G & 0.989  & 24.17m & 0.852 & 6.12m & 0.841 & 5.21m\\
+     & RL+S & 0.994 & 20.26m & 0.937 & 12.01m & 0.873 & 12.51m\\
+     \hline
+     \multirow{2}{*}{iSCO} & fewer steps & 0.995 & 5.85m & 0.998 & 1.38m & 0.990 & 9.38m \\
+     & more steps & \textbf{0.996} & 15.27m & 1.006 & 5.56m & 1.008 & 1.25h\\
+     \hline
+     \multirow{4}{*}{\textbf{PQQA (Ours)}} & fewer ($S=100$) & 0.993 & 7.34m & 1.004 & 44.72s & 1.027  & 5.83m\\
+     & more ($S=100$) & 0.994 & 1.21h & 1.005 & 7.10m & 1.039 & 58.48m \\
+     & fewer ($S=1{,}000$) & \textbf{0.996} & 1.25h & 1.007 & 6.82m & 1.033  & 41.26m\\
+     & more ($S=1{,}000$) & \textbf{0.996} & 12.46h & \textbf{1.009} & 1.14h & \textbf{1.043} & 6.80h \\
+     \bottomrule
+\end{tabular}
+\end{table}
+We evaluate PQQA using the MIS benchmarks  from recent studies \citep{NEURIPS2023_f9ad87c1, qiu2022dimes}, which includes graphs from SATLIB \citep{hoos2000satlib} and Erd\H{o}s–R\'{e}nyi graphs (ERGs) of various sizes. Following \citet{sun2023revisiting}, the instances consist of 500 SATLIB graphs, each containing with 403 to 449 clauses, corresponding at most 1,347 nodes and 5,978 edges, 128 ERGs with 700 to 800 nodes each, and 16 ERGs with 9,000 to 11,000 nodes each.
+PQQA is performed under four settings: a number of parallel runs with $S=100$ or $S=1000$ and fewer steps (3000 steps) or more steps (30000 steps), similar to the experiment in iSCO \citep{sun2023revisiting}. 
+Table \ref{table:mis-satlib-er} shows the solution quality and runtime.
+The results indicate that PQQA achieves better speed-quality trade-offs than learning-based methods. 
+In particular, PQQA outperforms both iSCO \citep{sun2023revisiting} and KaMIS \citep{lamm2016finding, hespe2019scalable}, the winner of PACE 2019 and a leading MIS solver, especially on both ERGs with shorter runtimes. 
+Notably, for larger ERGs, PQQA finds much better solutions in a shorter time than iSCO and KaMIS.
+
+\paragraph{Regular Random Graphs.}
+\begin{table}[tb]
+\centering
+\caption{ApR and runtime are evaluated using five different seeds. ApR is measured relative to the asymptotic theoretical result \citep{barbier2013hard}. Runtime is reported as the total clock time per instance in seconds (s/g) or minutes (m/g). The baselines include solvers such as the random greedy algorithm (GREEDY) \citep{angelini2019monte}, CRA-GNN \citep{ichikawa2023controlling}, SA. Methods that failed to produce results on V100 GPU are marked as N/A.}\label{table:mis-rrg}
+\begin{tabular}{cc|m{1.3cm}m{1.3cm}m{1.3cm}|m{1.3cm}m{1.3cm}m{1.3cm}m{1.3cm}}
+     \toprule
+     Method &  &
+     \multicolumn{3}{c}{RRG $(d=20)$} & 
+     \multicolumn{3}{c}{RRG $(d=100)$} \\
+     \# nodes & & $10^{4}$ & $10^{5}$ & $10^{6}$ & $10^{4}$ & $10^{5}$ & $10^{6}$ \\
+     \hline
+     GREEDY   &  & 0.715 (0.06s/g) & 0.717 (9.76s/g) & 0.717 (18.96m/g) & 0.666 (0.02s/g) & 0.667 (3.51s/g) & 0.664 (5.16m/g) \\
+     CRA-GNN  &  & 0.922 (3.483m/g) & N/A & N/A & 0.911 (4.26m/g) & N/A & N/A \\
+     \hline
+     SA  & fewer & 0.949 (3.00m/g) & 0.840 (3.00m/g) & 0.296 (3.00m/g) & 0.894 (3.00m/g) & 0.719 (3.00m/g) & 0.190 (3.00m/g) \\
+     & more & 0.971 (30.00m/g) & 0.943 (30.00m/g) & 0.695 (30.00m/g) & 0.926 (30.00m/g) & 0.887 (30.00m/g) & 0.194 (30.00m/g)\\
+     \hline
+     \multirow{2}{*}{\textbf{PQQA (Ours)}} & fewer & 0.967 (1.32s/g) & 0.971 (1.35s/g) & 0.971 (5.59s/g) & 0.946 (1.34s/g) & 0.955 (2.36s/g) & 0.956 (18.47s/g)\\
+     & more &\textbf{0.976} (3.77s/g) & \textbf{0.980} (5.82s/g) & \textbf{0.980} (47.99s/g) & \textbf{0.957} (3.70s/g) & \textbf{0.966} (15.69s/g) & \textbf{0.966} (2.94m/g) \\
+     \bottomrule
+\end{tabular}
+\end{table}
+We focus on MIS problems on regular random graphs (RRGs) with a degree $d$ greater than 16, which are known to be particularly difficult \citep{barbier2013hard}. 
+Previous studies have pointed out the difficulties in solving these instances with learning-based solvers \citep{angelini2023modern, wang2023unsupervised}.
+Building on the observations of \citet{angelini2023modern}, we employ MIS problems on RRGs with $d = 100$ and $d = 20$ with sizes ranging from $10^{4}$ to $10^{6}$ variables. 
+Additionally, we evaluate the ApR against the asymptotic theoretical values in the limit of an infinite number of variables \citep{barbier2013hard}. 
+If solvers cannot run even on V100 GPU, the result is reported as N/A.
+We employed QQA ($S=1$) using two different step sizes: fewer steps (3,000 steps) and more steps (30,000 steps).
+Table \ref{table:mis-rrg} shows the solution quality and runtime results across five different graphs generated with different random seeds. 
+The results indicate that QQA performs well in these complex and large-scale instances. Notably, as the instance size increases, the performance gap between QQA and other methods grows, emphasizing the superior scalability for large-scale problems, which is a primary focus of heuristic approaches.
+
+\subsection{Max Clique}\label{subsec:max-clique}
+Following \citet{sun2023revisiting}, we present results on max clique benchmarks. 
+We use the same instances from \citet{karalias2020erdos} and \citet{wang2023unsupervised}, reporting the ApRs on synthetic graphs generated using the RB model \citep{xu2007random} and a real-world Twitter graph \citep{jure2014snap}. 
+Table \ref{table:max_clique} shows the results of PQQA, which was run with 3,0000 steps and 1,000 parallel runs on each instance, compared to other learning-based methods trained on graphs from the same distribution. 
+PQQA achieves significantly better solution quality while requiring only a minimal increase in runtime, considering that PQQA is executed without any prior training. 
+Moreover, PQQA demonstrates better speed-quality tradeoffs than iSCO.
+
+\begin{table}[tb]
+\centering
+\caption{ApR and runtime are evaluated on two benchmarks. Runtime is reported as the total clock time per instance in seconds (s/g) or minutes (m/g).}
+\label{table:max_clique}
+\begin{tabular}{lcc}
+    \toprule
+    Method & Twitter & RBtest \\
+    \midrule
+    EPM \citep{karalias2020erdos} & 0.924 $\pm$ 0.133 (0.17s/g) & 0.788 $\pm$ 0.065 (0.23s/g) \\
+    AFF \citep{wang2022unsupervised} & 0.926 $\pm$ 0.113 (0.17s/g) & 0.787 $\pm$ 0.065 (0.33s/g) \\
+    RUN-CSP \citep{toenshoff2021graph} & 0.987 $\pm$ 0.063 (0.39s/g) & 0.789 $\pm$ 0.053 (0.47s/g) \\
+    iSCO \citep{sun2023revisiting} & 1.000 $\pm$ 0.000 (1.67s/g) & 0.857 $\pm$ 0.062 (1.67s/g) \\
+    \textbf{PQQA (Ours)} & \textbf{1.000 $\pm$ 0.000 (0.53s/g)} & \textbf{0.868 $\pm$ 0.061 (1.51s/g)} \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Max Cut}\label{subsec:max-cut}
+\begin{wraptable}{r}{0.25\textwidth} 
+    \caption{Maxcut results on Optsicom.}
+    \centering
+    \label{table:maxcut_results}
+    \begin{tabular}{cc}
+    \toprule
+    Method & ApR$\uparrow$ \\  
+    \midrule
+    SDP & 0.526 \\  
+    Approx & 0.780 \\ 
+    S2V-DQN & 0.978 \\ 
+    iSCO & \textbf{1.000} \\
+    \textbf{PQQA} & \textbf{1.000} \\ 
+    \bottomrule
+    \end{tabular}
+    \label{tab:maxcut-optsicom}
+\end{wraptable}
+We conduct max cut experiments following the same setup as in \citet{sun2023revisiting, dai2021framework}, where the benchmarks include random graphs and corresponding solutions obtained by running Gurobi for 1 hour. 
+Specifically, the benchmarks includes both ERGs and Barabási–Albert (BA) graphs, with sizes ranging from 16 to 1,100 nodes and up to 91,239 edges. 
+PQQA was run with 1,000 parallel processes and 30,000 steps for each instance. 
+We report ApRs against the solutions provided by Gurobi and compare against the LAG \citep{dai2021framework} with either supervised learning-based approach \citep{li2018combinatorial}  denoted as LAG or unsupervised learning-based approach \citep{karalias2020erdos} denoted as LAG-U, and classical approach like semidefinite programming and approximated heuristics.
+Figure \ref{fig:maxcut_ba_er} shows that PQQA achieves optimal solutions in most cases and significantly outperforms Gurobi on large instances.
+PQQA performs comparably to iSCO.
+We also test PQQA on realistic instances \citep{khalil2017learning} which includes 10 graphs from the Optsicom project where edge weights are in $\{-1, 0, 1\}$. 
+Table \ref{tab:maxcut-optsicom} shows the results show that PQQA can achieve the optimal solution in 1,000 steps, with a runtime of less than $5$ second.
+
+\begin{figure}[tb]
+    \centering
+    \includegraphics[width=\linewidth]{fig/PQQA_maxcut_ba_er.pdf}
+    \caption{Approximation ratio comparison across different node sizes in train/test graphs.}
+    \label{fig:maxcut_ba_er}
+\end{figure}
+
+\subsection{Balanced Graph Partition}\label{subsec:balanced-graph-partition}
+\begin{table}[t]
+\centering
+\caption{Balanceness are Graph partition are evaluated on 5 benchmarks.}\label{tab:graph-partition}
+\begin{tabular}{llccccc}
+\hline
+Metric      & Methods & VGG & MNIST-conv & ResNet & AlexNet & Inception-v3 \\ \hline
+\multirow{4}{*}{Edge cut ratio$\downarrow$} & hMETIS   & 0.05 & 0.05 & 0.04 & 0.05 & 0.04 \\ 
+& GAP      & \textbf{0.04} & 0.05 & 0.04 & \textbf{0.04} & 0.04 \\ 
+& iSCO     & 0.05 & \textbf{0.04} & 0.05 & 0.05 & 0.05 \\
+& \textbf{PQQA}     & \textbf{0.04} & \textbf{0.04} & \textbf{0.03} & \textbf{0.04} & \textbf{0.03} \\ \hline \hline
+\multirow{4}{*}{Balanceness$\uparrow$}  & hMETIS   & 0.99 & 0.99 & 0.99 & 0.99 & 0.99 \\ 
+                              & GAP      & 0.99 & 0.99 & 0.99 & 0.99 & 0.99 \\ 
+                              & iSCO     & 0.99 & 0.99 & 0.99 & 0.99 & 0.99 \\
+                              & \textbf{PQQA}     & 0.99 & 0.99 & 0.99 & 0.99 & 0.99 \\
+                              \hline
+\end{tabular}
+\end{table}
+
+ 
+Following \citet{sun2023revisiting, nazi2019gap}, PQQA is evaluated on balanced graph partition, including five different computation graphs from widely used deep neural networks. 
+The largest graph, Inceptionv3 \citep{szegedy2017inception}, consists of 27,144 nodes and 40,875 edges. 
+The results are compared with iSCO, GAP \citep{nazi2019gap}, which is a specialized learning architecture for graph partitioning, and hMETIS \citep{karypis1999multilevel}, a widely used framework for this problem. 
+We use the edge cut ratio and balanceness for evaluation metrics, where a lower edge cut ratio indicates better performance, while a higher balanceness is preferable.
+
+Table \ref{tab:graph-partition} shows that PQQA achieves better results with near-perfect balanceness and a lower cut ratio. 
+Although PQQA required approximately 20 minutes for the largest graph, GAP, the fastest method, was completed in around 2 minutes. However, PQQA consistently achieved a lower edge cut ratio than GAP. 
+Furthermore, with iSCO taking approximately 30 minutes to run, PQQA stands out as the faster approach, while still achieving a better edge cut ratio.
+
+\subsection{Graph Coloring}\label{subsec:graph-coloring}
+\begin{table}[t]
+\centering
+\caption{Numerical results for COLOR graphs \citep{trick2002color} are presented. For a specified number of colors, we report the cost, defined as the number of conflicts in the best coloring obtained by PQQA, PI-GCV, PI-SAGE (learning-based methods), and Tabucol (a tabu search-based method), sourced from \citet{schuetz2022graph, yang2021rethinking}.}
+\label{tab:graph-coloring}
+\begin{tabular}{lcccccccccc}
+\toprule
+Graph   & Colors & Tabucol & GNN & PI-GCN & PI-SAGE & \textbf{PQQA} \\ 
+\midrule
+anna      & 11  & 0  & 1 & 1  & 0  &  \textbf{0}  \\ 
+jean      & 10  & 0  & 0  & 0  & 0  &  \textbf{0} \\ 
+myciel5   & 6    & 0  & 0  & 0  & 0  &  \textbf{0}  \\ 
+myciel6   & 7     & 0  & 0  & 0  & 0  &  \textbf{0} \\ 
+queen5-5  & 5     & 0  & 0  & 0  & 0  &  \textbf{0}  \\ 
+queen6-6  & 7     & 0  & 4  & 1  & 0  &  \textbf{0}  \\ 
+queen7-7  & 7     & 0  & 15 & 8  & 0  &  \textbf{0}  \\ 
+queen8-8  & 9   & 0  & 7  & 6  & 1  &  \textbf{0}  \\ 
+queen9-9  & 10   & 0  & 13 & 13  & 1  &  \textbf{0}  \\ 
+queen8-12 & 12   & 0  & 7  & 10 & 0  &  \textbf{0}  \\ 
+queen11-11& 11   & 20 & 33 & 37 & 17 &  \textbf{11}  \\ 
+queen13-13& 13  & 35 & 40 & 61 & 26 &  \textbf{14}  \\ 
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{wrapfigure}{r}{0.35\textwidth} 
+    \centering
+    \includegraphics[width=0.34\textwidth]{fig/qqa_ablations_sa.pdf}
+    \caption{Comparison of SA and single-run QQA (S=1).}
+    \label{fig:ablation-SA}
+\end{wrapfigure}
+We evaluate PQQA on the graph coloring problem.
+Following the experimental setup of \citet{schuetz2022graph}, we report the results on the publicly available COLOR dataset \citep{trick2002color}, commonly used in graph-based benchmark studies.
+The evaluation metric is the cost, representing the number of conflicts in the best coloring solution. 
+We compare PQQA against PI-GCV and PI-SAGE \citep{schuetz2022graph}, both general-purpose unsupervised learning based solvers, and Tabucol  \citep{yang2021rethinking}, a tabu search-based heuristic that performs local search within a tabu list.
+As shown in Table \ref{tab:graph-coloring} shows that PQQA achive the best results.
+
+\subsection{Ablation Study}\label{subsec:ablation}
+\paragraph{Detail Comparison with SA.}
+We compare our method to classical SA with Gibbs sampling. 
+Figure \ref{fig:ablation-SA} shows the ApR curves for an MIS on the largest ERGs in Section \ref{subsec:max-independent-set} as a function of the number of sampling steps.
+The results are reported as the
+mean and standard deviation across five random seeds.
+This experiment excluded communication between parallel runs to isolate the impact of gradient-based transitions, i.e., $S=1$. 
+The results demonstrate that QQA achieves a speedup of over $10^{4}$ times in the number of steps.
+Moreover, using gradient information improves the stability of the solution process.
+\paragraph{Schedule Speed and Initial $\gamma$.}
+\begin{figure}[tb]
+    \centering
+    \includegraphics[width=\linewidth]{fig/ablations_all.pdf}
+    \caption{Ablation study on (left) annealing schedule speed, (middle) initial $\gamma$, and (right) communication strength $\alpha$. The shaded area denotes the standard deviation across five random seeds.}
+    \label{fig:ablation-all}
+\end{figure}
+We conduct an ablation study to evaluate the impact of different $\gamma$ schedules and initial values, $\gamma_{0}$. 
+As in SA, QQA with a smaller initial value $\gamma_{0}$ and slower annealing achieves better results. 
+Thus, we examine how the solution quality varies across different parameter settings.
+For the MIS on the largest ER graph in Section \ref{subsec:max-independent-set}, Figure \ref{fig:ablation-all} (left) shows the independent set size across various annealing speeds, with the initial $\gamma_{0}$ fixed at $-2$.
+The annealing follows a linear schedule determined by the maximum number of steps, where fewer steps correspond to faster annealing.
+The results show no performance degradation, even with faster annealing. Indeed, QQA with $10^{3}$ steps maintains an ApR around 1.00, outperforming other learning-based solvers.
+Figure \ref{fig:ablation-all} (middle) shows the results for different $\gamma_{0}$ values under the same annealing speed, indicating that skipping the annealing phase when $\gamma < 0$ results in poor outcomes.
+Furthermore, the results are consistent when $\gamma_{0}$ is set below $-2$. 
+
+\paragraph{Communication Strength.}
+An important contribution of this study is the introduction of communication between parallel chains, which was not discussed in iSCO \citep{sun2023revisiting}. 
+Here, we conduct an ablation study on the communication strength, $\alpha$ in Eq.~(\ref{eq:diverse-extended-dist}). 
+The number of parallel chains is set to $S = 1{,}000$, and the performance is evaluated on the MIS on small ERGs, as described in Section \ref{subsec:max-independent-set} across various $\alpha$ values.
+Figure \ref{fig:ablation-all} shows the existence of the optimal $\alpha$ values, leading to the best ApR.
+Additionally, increasing $\alpha$ enhances convergence speed while maintaining performance comparable to the case of $\alpha = 0$. 
+This improvement arises from the effect of the STD term in Eq.~(\ref{eq:diverse-extended-dist}), which implicitly drives the relaxed variables toward 0 or 1. 
+
+
+
+\section{Conclusion}
+
+PQQA, which integrates QQA, gradient-based updates, and parallel run communication, demonstrates performance comparable to or superior to iSCO and learning-based solvers across various CO problems. 
+Notably, for larger problems, PQQA achieves a superior speed-quality trade-off. 
+This suggests that future research on learning-based methods should carefully evaluate their efficiency compared to our GPU-based, general-purpose approach.
+Future work includes extending PQQA to the mixed-integer optimization and sampling tasks.
+
+
+
+
+

@@ -1,0 +1,219 @@
+\title{Improved order analysis and design of exponential integrator for diffusion models sampling}
+
+\begin{abstract}
+    Efficient differential equation solvers have significantly reduced the sampling time of diffusion models (DMs) while retaining high sampling quality. Among these solvers, exponential integrators (EI) have gained prominence by demonstrating state-of-the-art performance. 
+    However, existing high-order EI-based sampling algorithms rely on degenerate EI solvers, resulting in inferior error bounds and reduced accuracy in contrast to the theoretically anticipated results under optimal settings.
+    This situation makes the sampling quality extremely vulnerable to seemingly innocuous design choices such as timestep schedules. For example, an inefficient timestep scheduler might necessitate twice the number of steps to achieve a quality comparable to that obtained through carefully optimized timesteps.
+    To address this issue, we reevaluate the design of high-order differential solvers for DMs. 
+    Through a thorough order analysis, we reveal that the degeneration of existing high-order EI solvers can be attributed to the absence of essential order conditions.
+    By reformulating the differential equations in DMs and capitalizing on the theory of exponential integrators, we propose refined EI solvers that fulfill all the order conditions, which we designate as Refined Exponential Solver (\our).
+    Utilizing these improved solvers, \our exhibits more favorable error bounds theoretically and achieves superior sampling efficiency and stability in practical applications. 
+    For instance, a simple switch from the single-step DPM-Solver++ to our order-satisfied \our solver when Number of Function Evaluations (NFE) $=9$, results in a reduction of numerical defects by $25.2\%$ and FID improvement of $25.4\%$ (16.77 vs 12.51) on a pre-trained ImageNet diffusion model.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models (DMs)~\cite{ho2020denoising,song2020score} have recently garnered significant interest as powerful and expressive generative models. 
+They have demonstrated unprecedented success in text-to-image synthesis~\cite{rombach2022high,saharia2022photorealistic,balaji2022ediffi} and extended their impact to other data modalities, such as 3D objects~\citep{poole2022dreamfusion,lin2022magic3d,shue20223d,bautista2022gaudi}, audio~\citep{kong2020diffwave}, time series~\citep{tashiro2021csdi,bilovs2022modeling}, and molecules~\citep{wu2022protein,qiao2022dynamic,xu2022geodiff}. 
+However, DMs suffer from slow generation due to their iterative noise removal process. Generative adversarial networks (GANs) require only a single network evaluation to generate a batch of images, whereas DMs may necessitate hundreds or thousands of network function evaluations (NFEs) to transform Gaussian noise into clean data.
+
+Recently, a surge of research interest has been directed toward accelerating the sampling process in diffusion models.
+One strategy involves the distillation of deterministic generation. Despite requiring additional computational resources, this approach can reduce the number of NFEs to fewer than five~\cite{salimans2022progressive,song2023consistency,meng2022distillation}.
+Nevertheless, distillation methods often depend on training-free sampling methods during the learning process and are only applicable to the specific model being distilled, thereby limiting their flexibility compared to training-free sampling methods~\cite{luhman2021knowledge}.
+Another line of investigation is aimed at designing generic sampling techniques that can be readily applied to any pre-trained DMs. 
+Specifically, these techniques leverage the connection between diffusion models and stochastic differential equations (SDEs), as well as the feasibility of deterministically drawing samples by solving the equivalent Ordinary Differential Equations (ODEs) for marginal probabilities, known as probability flow ODEs~\cite{song2020score,song2020denoising}. 
+Research in this domain focuses on the design of efficient numerical solvers to expedite the process~\cite{liu2022pseudo,zhang2022fast,lu2022dpm,zhang2022gddim,karras2022elucidating,lu2022dpmp,zhao2023unipc}. 
+Despite the significant empirical acceleration, numerous methods that claim the same order of numerical error convergence rate demonstrate significant disparities in practical application. 
+Furthermore, these approaches often incorporate a range of techniques and designs that may obscure the actual factors contributing to the acceleration, such as various thresholding~\cite{dhariwal2021diffusion,saharia2022photorealistic}, and sampling time optimization~\cite{deepfloyd23,karras2022elucidating}.~(See \cref{app:related} for more related works and discussions.)
+
+In this study, we initiate by revisiting different diffusion probability flow ODE parameterizations, underlining the vital role of approximation accuracy for integrals in the ODE solution in various sampling algorithms. This directly impacts both the quality and speed of sampling~(\cref{ssec:revist}).
+Through a change-of-variable process, we further unify the ODEs for the noise prediction model and data prediction into a singular, canonical semilinear ODE. 
+We then conduct an exhaustive order analysis for the single-step numerical scheme for the semilinear ODE and contend that the widely accepted sampling algorithm, which is based on the exponential integrator (EI), contravenes order conditions. This leads to inferior error bounds, compromised accuracy, and a lack of robustness compared to the theoretically projected outcomes under optimal settings~(\cref{ssec:ode-error-analysis}).
+
+In response, we propose Refined Exponential Solver (\our), which offers more favorable error recursion both theoretically and empirically, thus ensuring superior sampling efficiency and robustness~(\cref{ssec:order-condition}). 
+Moreover, our single-step scheme can be seamlessly integrated to enhance multistep deterministic~(\cref{ssec:stochastic}) and stochastic sampling algorithms~(\cref{sec:multistep}), surpassing the performance of contemporary alternatives.
+Lastly, we undertake comprehensive experiments with various diffusion models to demonstrate the generalizability, superior efficiency, and enhanced stability of our approach, in comparison with existing works~(\cref{sec:exp}). 
+In summary, our contributions are as follows:
+
+\begin{itemize}
+\item We revisit and reevaluate diffusion probability flow ODE parameterizations and reveal the source of approximation error. 
+\item To minimize error, we propose a unified canonical semilinear ODE, identify the overlooked order condition in existing studies, and rectify this oversight. 
+\item We introduce \our, an innovative method that provides improved error recursion, both theoretically and empirically. Extensive experiments are conducted to show its generalizability, superior efficiency, and enhanced stability. For example, it shows up to 40\% acceleration by switching single-step DPM-Solver++ to single-step \our under a suboptimal time scheduling.
+\end{itemize}
+
+
+\section{Background}
+
+
+Given a data distribution of interest, denoted as $p_{data}(\vx)$ where $\vx \in \gX$, a diffusion model consists of a forward noising process that diffuses data point $\vx$ into random noise and a backward denoising process that synthesize data via removing noise iteratively starting from random noise.
+We start our discussion with simple variance-exploding diffusion models~\cite{song2020improved}, which can be generalized to other diffusion models under the unifying framework introduced by~\citet{karras2022elucidating}.
+Concretely, the forward noising process defines a family of distributions $p(\vx; \sigma(t))$ dependent on time $t$, which is obtained by adding \textit{i.i.d.} Gaussian noise of standard deviation $\sigma(t)$ to noise-free data samples. 
+We choose $\sigma(t)$ to be monotonically increasing with respect to time~$t$, such as $\sigma(t) = t$. 
+
+To draw samples from diffusion models, a backward synthesis process is required to solve the following stochastic differential equation~(SDE)~\cite{zhang2021diffusion,huang2021variational,karras2022elucidating}, starting from $\vx(T) \sim \gN(\mathbf{0}, \sigma(T)^2 \mI)$ for a large enough $T$:
+\begin{align}
+    \diff \vx =& - \underbrace{\dot{\sigma}(t) \sigma(t) \nabla_\vx \log p(\vx; \sigma(t)) \diff  t}_{\text{Probabilistic ODE}} 
+    - \underbrace{\beta_t \sigma(t)^2 \nabla_\vx \log p(\vx; \sigma(t)) \diff t + \sqrt{2 \beta_t} \sigma(t) \diff  \omega_t}_{\text{Langevin process}}, \label{eq:score-sde}
+\end{align}
+where $\nabla_\vx \log p(\vx; \sigma(t))$ is the score function  (\textit{i.e.}, gradient of log-probability), $\omega_t$ is the standard Wiener process, and $\beta_t$ is a hyperparameter that controls the stochasticity of the process. 
+\cref{eq:score-sde} reduces to deterministic probabilistic flow ODE~\cite{song2020score} when $\beta=0$.
+Some popular methods, such as variance-preserving diffusion models, introduce an additional scale schedule $s(t)$ and consider $\vx = s(t) \hat{\vx}$ to be a scaled version of the original, non-scaled data $\hat{\vx}$. 
+Though the introduction of scale schedule $s(t)$ will result in a different backward process, we can undo the scaling and reduce their sampling SDEs to ~\cref{eq:score-sde}. Note that we focus on non-scaling diffusion models in this paper for simplicity and leave the extension to other diffusion models in~\cref{app:proof}.
+The score function $\nabla_{\vx} \log p(\vx; \sigma(t))$ of noised data distribution at a particular noise level $\sigma$ can be learned via a denoising score matching objective~\citep{vincent2011a}:
+\begin{align}
+L_\sigma(\theta) = \E_{\vx \sim p_{data}, \rvepsilon \sim \gN(0, \mI)}[\norm{D_\theta(\vx + \sigma \rvepsilon , \sigma) - \vx}_2^2], \label{eq:dsm}
+\end{align}
+where $D_\theta: \gX \times \gR \to \gX$ is a time-conditioned neural network that tries to denoise the noisy sample. 
+In the ideal case, having the perfect denoiser $D_\theta$ is equivalent to having the score function thanks to Tweedie's formula~\citep{efron2011tweedie}:
+\begin{align}
+    D_\theta(\vx, \sigma) %\\
+     = \vx + \sigma^2 \nabla_{\vx} \log p(\vx; \sigma). \label{eq:x0-pred}
+\end{align}
+For convenience, we also introduce the noise prediction model, which tries to predict $\epsilon$ in \cref{eq:dsm}:
+\begin{align}
+    \epsilon_\theta(\vx, \sigma) := \frac{\vx - D_\theta(\vx, \sigma)}{\sigma}. \label{eq:eps-pred}
+\end{align}
+
+
+\section{Refined exponential solver \our}
+
+Even with the same trained diffusion model, different solvers of \cref{eq:score-sde} will lead to samplers of drastically different efficiency and quality. In this section, we present a unified formulation to the various probability flow ODE being considered (\cref{ssec:revist}), analyze the numerical approximation errors for general single-step methods~(\cref{ssec:ode-error-analysis}), and find the optimal set of coefficients that satisfies the desired order conditions and minimizes numerical error~(\cref{ssec:order-condition}). 
+We then extend the improvement to the stochastic setting~(\cref{ssec:stochastic}) and multistep sampling methods~(\cref{sec:multistep}).
+\subsection{Better parameterizations for probability flow ODE}\label{ssec:revist}
+
+\input{sections/body_jiaming}
+
+\input{figure/viz/function_derivative}
+
+For the rest of the section, we focus on logSNR~(\cref{eq:semi_ode}); theoretical conclusions and practical algorithms can be easily transferred to negative logSNR~(\cref{eq:semi_ode_eps}).
+For notational simplicity, we substitute $\lambda$ for $\lambda_\mD$ and $g$ for $\gd$, so our ODE in \cref{eq:semi_ode} becomes:
+\begin{align}
+    \frac{\diff \vx}{\diff \lambda} = - \vx + g(\vx, \lambda),
+\end{align}
+Suppose that our ODE solver advances for a step size of $h$ from $\vx(\lambda)$, then the exact solution $\vx(\lambda + h)$ to this ODE, as given by the \textit{variation-of-constants} formula, is represented as follows:
+\begin{equation}\label{eq:voc}
+    \vx(\lambda + h) = e^{-h} \vx(\lambda) + \int_0^{h} e^{(\tau - h)} 
+    g(\vx(\lambda+\tau), \lambda+\tau) \diff \tau.
+\end{equation}
+However, the computation of this exact solution confronts two significant challenges: the intractability of the integral and the inaccessible integrand, which involves the evaluation of the denoiser on the exact solution $\vx(\lambda + \tau)$.
+To approximate the intractable integration in~\cref{eq:voc}, we start with the single-step approach and derive its order conditions.
+
+\input{sections/body_single.tex}
+
+\subsection{Order conditions}\label{ssec:order-condition}
+With~\cref{eq:single-error-recursion} and \Cref{lemma:intermediate-defect}, we can deduce the conditions necessary to achieve a numerical scheme of order $q$. We start with the case of a single-stage solver of order one.
+\begin{thm}[Error bound for solvers that satisfy the 1st-order condition] \label{thm:order1}
+    When $\psi_1(-h_i) = 0$ is satisfied for $1 \leq i \leq n$, the error bound of first-order solver based on~\cref{eq:sin-scheme}
+    \begin{equation}
+        \norm{\vx_n - \vx(\lambda_n)} \leq Ch \sup_{\lambda_{\text{min}} \leq \lambda \leq \lambda_\text{max}} \norm{f^\prime(\lambda)}
+    \end{equation}
+    holds for $h = \max_{1 \leq i \leq n} h_i$. The constant $C$ is independent of $n,h$.
+\end{thm}
+With~\cref{thm:order1}, $b_1(-h)=\phi_1(-h)$ and the numerical scheme reads
+\begin{equation}~\label{eq:ddim}
+    \vx_{n+1} = e^{-h_n} \vx_n + h_n \phi_1(-h) g(\vx_n, \lambda_n),
+\end{equation}
+which is known as exponential Euler~\cite{hochbruck2005exponential} or DDIM for diffusion model~\cite{song2020denoising}.
+Although our order analysis aligns with existing work~\cite{lu2022dpm,zhang2022fast}, the distinction emerges in high-order methods.
+\begin{thm}[Error bound for solvers that satisfy the 1st- and 2nd-order conditions]\label{thm:order2}
+    When $\psi_1(-h_i) =\psi_2(-h_i) = \psi_{1,2}(-h_i) = 0$ is satisfied for $1 \leq i \leq n$, the error bound of second order solver based on~\cref{eq:sin-scheme} 
+    \begin{equation}
+        \norm{\vx_n - \vx(\lambda_n)} \leq Ch^2 (
+        \sup_{\lambda_{\text{min}} \leq \lambda \leq \lambda_\text{max}} \norm{f^\prime(\lambda)} + 
+        \sup_{\lambda_{\text{min}} \leq \lambda \leq \lambda_\text{max}} \norm{f^{\prime \prime}(\lambda)})
+    \end{equation}
+    holds for $h = \max_{1 \leq i \leq n} h_i$. The constant $C$ is independent of $n,h$.
+\end{thm}
+
+To satisfy order conditions in~\cref{thm:order2}, the optimal Butcher tableau can be parameterized by $c_2$ as shown in~\cref{tab:butcher-tableau}.
+It turns out the single-step scheme proposed in DPM-Solver++~\cite{lu2022dpmp} can also be reformulated with a different Butcher tableau as shown in~\cref{tab:butcher-tableau}~(See \cref{app:proof}).
+Nevertheless, compared with~\cref{thm:order2}, DPM-Solver++ breaks the order condition $\psi_{2}(-h) =0$. Therefore, DPM-Solver++ does not fully satisfy the full order condition and introduces additional errors in solving ODEs~(See~\cref{app:proof}) theoretically. 
+Practically, we find our numerical scheme that obeys the order conditions admits smaller numerical defects and generates higher sample quality from diffusion models. Single-step schemes for orders higher than 3 can also be derived, but we leave them for future work.
+
+\input{figure/algo/single_second}
+
+\input{figure/table/butcher_tableau}
+\begin{prop}[(Informal)]~\label{prop:order3}
+    Employing the Butcher tableau outlined in~\cref{tab:butcher-tableau}, the single-step method~\cref{eq:sin-scheme}, characterized by three stages, functions as a third-order solver.
+\end{prop}
+
+\subsection{Single-step update for deterministic and stochastic sampler}
+\label{ssec:stochastic}
+
+With the single-step update scheme developed in~\cref{ssec:order-condition}, we are prepared to develop a deterministic sampling algorithm by iteratively applying~\cref{eq:sin-scheme} with the corresponding Butcher tableau. Inspired by the stochastic samplers proposed in~\citet{karras2022elucidating}, which alternately execute a denoising backward step and a diffusion forward step, we can replace the original Heun-based single-step update with our improved single-step method. 
+Concretely, one update step of our stochastic sampler consists of two substeps. 
+The first substep simulates a forward noising scheme with a relatively small step size, while the subsequent substep executes a single-step ODE update with a larger step.
+We unify both samplers in~\cref{alg:eis-single} where the hyperparameter $\eta$ determines the degree of stochasticity.
+\input{figure/algo/single_sampler}
+
+\subsection{Multi-step scheme}
+\label{sec:multistep}
+Instead of constructing a single-step multi-stage numerical scheme to approximate the intractable integration in~\cref{eq:voc}, we can employ a multi-step scheme that capitalizes on the function evaluations from previous steps. Analogous to the analysis in~\cref{ssec:ode-error-analysis} and conclusions in~\cref{thm:order2}, we can extend these results to a multi-step scheme, the details of which are provided in~\cref{app:algo}. 
+Intuitively, multi-step approaches implement an update similar to~\cref{eq:sin-scheme1}. Instead of selecting intermediate states and incurring additional function evaluations, a multi-step method reuses function evaluation output from previous steps.
+In this work, our primary focus is on the multi-step predictor case. However, our framework and analysis can also be applied to derive multi-step corrector, which has been empirically proven to further improve sampling quality~\cite{zhao2023unipc,li2023era}.
+ 
+
+
+
+\section{Experiments}
+
+
+We further extend our experiments to address the following queries:
+(1) Do the deterministic numerical schemes of~\our outperform existing methods in terms of reduced numerical defects and enhanced robustness?
+(2) Does a reduction in numerical defects translate to improved sampling quality?
+(3) Can our single-step numerical scheme enhance the performance of existing stochastic samplers?
+(4) How does ~\our perform across various unguided and guided diffusion models?
+
+\paragraph{Numerical defects for deterministic sampler}
+
+\input{figure/viz/numerical_imagnet}
+
+First, we investigate the evolution of numerical defects $\norm{\vx_N - \vx(0)}$ in $L$1 norm as the number of function evaluations (NFE) increases in pre-trained ImageNet diffusion models with default hyperparameters. 
+Since the exact solution $\vx(0)$ is unavailable, we approximate it using a 500-step RK4 solution, which exhibits negligible changes with additional steps. 
+For a fair comparison, we evaluate the \textbf{second-order \our} against single-step DPM-Solver++(S)\cite{lu2022dpmp} and Heun~\cite{karras2022elucidating}, both claimed to be second-order solvers. 
+We also include first order DDIM~\cite{song2020denoising} as a baseline.
+Our findings indicate that single-step \our exhibits significantly smaller numerical defects, consistent with our theoretical analysis. 
+\our based on the noise prediction model (negative logSNR) surpasses the data prediction model (logSNR) in performance for guidance-free diffusion models; we provide a detailed presentation of the former here~(More details in \cref{app:expr}).
+Additionally, we compare single-step solvers with multistep solvers, specifically including second-order multistep \our and DPM-Solver++~(M). 
+We observe \ourab consistently outperforms DPM-Solver++~(M) and both lead to smaller defects compared with single-step methods.
+We observe that multistep solvers initially reduce numerical defects quickly but display smaller reductions for larger NFE values. We hypothesize that multistep solvers benefit from twice the number of steps compared to single-step methods when the NFE is relatively small.
+
+\paragraph{Numerical defects and FID} We further investigate the relationship between numerical defects and image sampling quality, using the Frechet Inception Distance (FID)~\cite{heusel2017gans}. As shown in \cref{fig:numerical_imagenet}, smaller numerical defects generally lead to better FID scores as the number of function evaluations (NFE) increases for all algorithms. However, we also observe that the correlation may not be strictly positive and similar defects may lead to different FIDs. We observed a Pearson correlation coefficient of $0.956$ between these two metrics, which suggests that better FID scores are \textit{strongly correlated} with smaller numerical defects.
+Notably, when NFE $=9$, compared with single-step DPM-Solver++, the single step \our with noise prediction model (negative logSNR) reduce $52.75\%$ numerical defects, and $48.3\%$ improvement in FID (16.77 vs 8.66). For \our with data prediction model (logSNR), \our achieves $25.2\%$ numerical defects and $25.4\%$ FID improvement (16.77 vs 12.51).
+
+\paragraph{Time-scheduling robustness}
+We also evaluate the performance of these solvers concerning varying timestep schedules. We observe that existing methods lack systematic strategies for optimal timestep selection, often relying on heuristic choices or extensive hyperparameter tuning. An ideal algorithm should demonstrate insensitivity to various scheduling approaches. Instead of using the recommended setting in EDM~\cite{karras2022elucidating}, we test these algorithms under a suboptimal choice with uniform step in $\sigma$. While all algorithms exhibit decreased performance under this setting, the single-step \our method outperforms the rest. Notably, single-step methods surpass multi-step methods in this scenario, which signifies the robustness of single-step \our and underscores the benefits of our principled single-step numerical scheme.
+Besides, to achieve a numerical accuracy comparable to that of the 99 NFE DPM-Solver++~(S), our single-step method requires only 59 NFE.
+
+\paragraph{Classifier-guided DMs}
+\input{figure/viz/openai_guided_dm}
+We further investigate \our diffusion models trained using different schemes, including DDPM-like diffusion models with classifier-based guidance~\cite{dhariwal2021diffusion}. 
+It is important to note that we employ dynamic thresholding~\cite{saharia2022photorealistic} for all experiments to help alleviate pixel over-saturation issues. To ensure a fair comparison, all algorithms differ solely in their numerical update schemes. As depicted in~\cref{fig:openai_guided_dm}, our previous observations remain valid for guided diffusion models trained with different techniques, and \our converges faster than baselines.
+
+\paragraph{Stochastic sampling with improved single-step algorithm}
+Existing works demonstrate that stochastic sampling can generate better quality results but demands significantly more computational resources. For example, EDM~\cite{karras2022elucidating} requires 511 NFEs. Encouraged by the improvement of single-step sampling, we conduct experiments to show that this enhancement can boost stochastic samplers and achieve a favorable trade-off between sampling quality and speed. First, we investigate how FID is affected by NFE for a given $\eta$. Next, we sweep different values of $\eta$ under the same NFE. As illustrated in~\cref{fig:exp_stochastic_sampler}, we can accelerate the stochastic sampler compared with Heun-based EDM sampler~\cite{karras2022elucidating}.
+
+\input{figure/viz/exp_stochastic_sampler}
+\paragraph{Cascaded text-to-image model} Finally, we test our sampling algorithm on cascaded text-to-image models based on DeepFloyd IF diffusion models~\cite{deepfloyd23}. We initially evaluate various sampling algorithms for $64\times 64$ tasks. We examine how image quality changes with an increasing number of NFEs in~\cref{fig:dfif}. Furthermore, we compare the FID-CLIP score trade-off curves for various classifier-free guidance schemes under the same computational budget. Next, we incorporate a super-resolution diffusion model conditioned on generated images from the low-resolution diffusion model. In various scenarios, we find that our model consistently outperforms DPM-Solver++ in terms of quality.
+
+
+
+\section{Conclusion and limitations}
+
+
+In this work, we present the Refined Exponential Solver~(\our), derived from a meticulous analysis of numerical defects in diffusion model probability flow ODEs and fulfilling all order conditions. \our enjoys superior error bounds theoretically and enhanced sampling efficiency in practice.
+Originally designed to boost single-step updates, we have also extended the improvements to multistep schemes and stochastic samplers, effectively enhancing their performance.
+
+Our work is also constrained by the following limitations.
+Our analysis reveals that the performance of different samplers is contingent on the trajectory of network evaluations along the exact solution, where a time-smooth trajectory facilitates the reduction of numerical error. However, existing works are still uncertain about which time transformation or time scheduling leads to the most favorable trajectory. The logarithmic transformation we've used was selected based on our empirical observations.
+In practical terms, training-free methods still require more than 10 network evaluations, making them significantly slower than GANs or distillation-based methods.
+We leave it for future work to explore how distillation training can benefit from these improved training-free methods.
+
+
+\clearpage
+
+
+
+

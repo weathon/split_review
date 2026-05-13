@@ -1,0 +1,571 @@
+\title{In-context KV-Cache Eviction for LLMs via Attention-Gate}
+
+\begin{abstract}
+
+The KV-Cache technique has become the standard for the inference of large language models (LLMs).
+It caches states of self-attention to avoid recomputation. 
+Yet, it is widely criticized that KV-Cache can become a bottleneck of the LLM inference system, especially when confronted with ultra-large models and long-context queries. 
+A natural remedy is to discard the KV-Cache for less important tokens, with StreamingLLM~\citep{xiao2024efficientstreaminglanguagemodels} as an example, but the used static eviction strategies cannot flexibly adapt to varying contexts. 
+Remedies like H2O~\citep{zhang2024h2o} leverage accumulative attention scores to perform dynamic eviction but suffer from the attention bias issue in capturing contextual information. 
+This paper bridges this gap by devising a parameterized KV-Cache eviction mechanism, dubbed as \emph{Attention-Gate}, which accepts the whole context as input and yields eviction flags for each token to realize \emph{in-context} eviction. 
+The subsequent self-attention module proceeds according to the flags and only the KV states for the remaining tokens need to be cached. 
+The Attention-Gates can vary among different heads and layers and be trivially plugged into pre-trained LLMs, tuned by cost-effective continual pre-training or supervised fine-tuning objectives to acquire what to discard. 
+The computational and memory overhead introduced by Attention-Gates is minimal.
+Our method is validated across multiple tasks, demonstrating both efficiency and adaptability.
+After a highly efficient continual pre-training, it achieves higher average accuracy and evicts more tokens compared to traditional training-free methods. 
+In supervised fine-tuning, it not only evicts many tokens but also outperforms LoRA-finetuned LLMs on some datasets, such as RTE, where it improves accuracy by 13.9\% while evicting 62.8\% of tokens, showing that effective eviction of redundant tokens can even enhance performance.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large language models (LLMs)~\citep{dubey2024llama, team2024gemma, vicuna2023} have achieved remarkable success across a wide range of natural language processing tasks.
+A key technique that has enabled efficient LLM inference is KV-Cache, which stores transient attention keys and values to avoid recomputation.
+However, as the size of LLMs continues to increase and the demand for handling long-context queries grows, the KV-Cache has emerged as a significant bottleneck. 
+Storing attention states for numerous tokens can lead to considerable memory overhead and data transfer among the memory hierarchy results in substantially increased inference time. %
+
+Studies have shown that sparsity is a natural phenomenon in attention mechanisms, with many tokens being redundant for inference~\citep{zhang2024h2o}. 
+This suggests that retaining all tokens in the KV-Cache is unnecessary. %
+Existing works have explored this insight
+to compress KV-Cache using static strategies or hinging on accumulative attention scores. 
+StreamingLLM~\citep{xiao2024efficientstreaminglanguagemodels} is a representative of the former by retaining a fixed window of beginning and recent tokens in the KV-Cache %
+but it struggles to flexibly adapt to specific contexts. 
+E.g., in sentiment analysis, retaining the token ``cute'' in ``a cute cat'' is crucial, while in object recognition, the token ``cat'' would be more important. 
+H2O~\citep{zhang2024h2o}, on the other hand, employs a token-adaptive approach, using local accumulative attention scores to determine which tokens to evict. 
+However, it is criticized that in practice, H2O suffers from the attention bias issue~\citep{oren2024transformers}, with a tendency to over-prioritize either the initial or recent tokens.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{fig/heatmaps_with_labels_correct.pdf}
+    \caption{KV-Cache eviction patterns across different layers and attention-heads, visualized for 4 samples from the PIQA dataset (\textbf{top row}) and 4 samples from the BoolQ dataset (\textbf{bottom row}), using AG fine-tuned Llama2-7B models.
+    Black areas represent tokens that are neither computed nor stored in the KV-Cache. 
+    The variability of eviction patterns across tasks, prompts, layers, and attention-heads demonstrates the dynamic nature of our method. A common trend observed is that deeper layers tend to mask more KV-Cache states, with some in deeper layers being entirely masked.}
+    \label{fig:intro}
+\end{figure}
+
+To overcome these challenges, we introduce a parameterized KV-Cache eviction mechanism named the Attention-Gate (AG), to perform reliable \emph{in-context} eviction. 
+AG is positioned before a self-attention layer within the model. It takes a sequence of token features as input and generates eviction flags for the tokens, indicating whether a token should be excluded from subsequent self-attention computations. 
+Tokens that are evicted do not require their KV states to be cached.
+AGs can be seamlessly integrated into pre-trained LLMs and tuned by minimizing the language modeling loss.
+Ideally, AGs can automatically learn to discern the most relevant tokens for the current context without manual intervention. 
+In practice, we can implement the AG as a self-attention layer with much fewer heads than the original model (e.g., 4 v.s. 32). 
+This way, the parallel computational capabilities of the hardware can be harnessed to minimize the extra overhead introduced by AGs.
+
+AG is empirically shown to enjoy high training efficiency, e.g., only four NVIDIA 4090 GPUs and a dataset of 5,000 samples are required for continual pre-training when applying AGs to LLaMA2-7B~\citep{touvron2023llama}.
+This alleviates concerns about the computational overhead related to trainable eviction strategies~\citep{zhang2024h2o, chen2024nacl} and amplifies the performance superiority of our approach over existing training-free approaches. 
+As illustrated in \Cref{fig:intro}, AG generates different eviction strategies across different layers and attention-heads for different tokens, demonstrating its adaptability to the diverse requirements of each component in the model. 
+
+
+To validate the effectiveness of our method, we conduct extensive experiments across multiple benchmarks. After efficient continual pre-training (CPT), our approach outperforms traditional training-free eviction strategies, such as StreamingLLM and H2O, in both accuracy and token eviction rates. 
+In supervised fine-tuning (SFT), our method not only evicts a significant number of redundant tokens but also maintains or surpasses the performance of LoRA-finetuned LLMs. For example, on the RTE dataset, our approach improves accuracy by 13.9\% while evicting 62.8\% of tokens, demonstrating that selective token eviction can enhance performance. 
+In summary, the Attention-Gate mechanism provides a scalable and efficient solution for KV-Cache management, addressing the limitations of traditional training-free methods.
+
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{fig/method.pdf}
+    \caption{An overview of Attention-Gate (AG) for KV-Cache eviction. 
+    AG is a lightweight learnable module placed before each MHA layer. 
+    Given the input hidden states, it determines for each head whether to retain or discard the key and value tokens in the KV-Cache.
+    In the attention weights, this corresponds to masking out columns for the evicted keys, while keeping the diagonal intact to ensure the query interacts with its own key.}
+    \label{fig:token}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+As large language models (LLMs) scale in both size and input sequence length, optimizing their efficiency has become increasingly important, particularly in addressing space and time complexity. A significant bottleneck lies in the attention mechanism, which demands considerable computational and memory resources, especially for long sequences.
+
+\textbf{Computation and memory challenges.}  
+The computational cost of attention is driven by its quadratic complexity, while the memory burden stems from the need to store the KV-Cache during inference to avoid recomputation. Although several works have focused on reducing the computational load of attention mechanisms, many fail to address the memory constraints that remain a critical issue. Techniques like Reformer~\citep{kitaev2020reformer} and FlashAttention~\citep{dao2022flashattention,dao2023flashattention} mitigate memory usage for long sequences but still require substantial cache storage. On the other hand, approaches such as MQA~\citep{shazeer2019fast} and GQA~\citep{ainslie2023gqa} prioritize memory compression without tackling computational complexity. These solutions tend to focus on either memory or computational efficiency, rarely addressing both simultaneously.%
+
+\textbf{KV-Cache eviction strategies.}  
+To address both memory and computational challenges, KV-Cache eviction has emerged as an effective strategy. Existing approaches can be categorized into static and adaptive methods based on accumulative attention scores.
+
+Static strategies, such as those used in Sparse Transformers~\citep{child2019generating}, employ fixed pruning patterns, such as Strided and Fixed Attention. While effective in some cases, these approaches are not adaptive to specific contexts, often sacrificing accuracy. StreamingLLM~\citep{xiao2024efficientstreaminglanguagemodels} tackles the \emph{Attention Sink} phenomenon, where attention scores concentrate on initial tokens, by retaining these tokens along with a fixed window of recent tokens. While this improves performance, static approaches generally lack the flexibility needed to adapt to different tokens, attention-heads, or layers.
+
+Strategies using accumulative attention scores offer more flexibility by dynamically identifying important tokens. For instance, SpAtten~\citep{wang2021spatten} employs Accumulative Attention Scores (A2S), which sum the softmax outputs for each token to measure its importance. This approach allows selective token pruning in subsequent layers, effectively reducing computational complexity without the need for retraining. H2O~\citep{zhang2024h2o} extends this concept to decoder-based models, using local A2S statistics for adaptive eviction in autoregressive generation. However, H2O suffers from the attention bias issue~\citep{oren2024transformers}, particularly in long-context inputs.
+Several follow-up works have aimed to address this limitation. NACL~\citep{chen2024nacl} introduces random eviction to mitigate attention bias, while A2SF~\citep{jo2024a2sf} incorporates a Forgetting Factor. However, none of these approaches fully resolve the underlying problem.
+
+\textbf{More Adaptive strategies.}
+Although strategies based on accumulative attention scores provide more flexibility than static methods, they still have notable limitations. For instance, H2O~\citep{zhang2024h2o} applies the same token eviction ratio across all attention heads, restricting the adaptability of the method.
+FastGen~\citep{ge2023model}, on the other hand, introduces a different approach by hybridizing KV-Cache compression policies and applying adaptive strategies to each attention head. However, it focuses on the decoding stage and neglects the importance of the prefilling stage.
+Learnable eviction strategies, on the other hand, offer greater flexibility by enabling different layers and attention heads to adopt heterogeneous eviction policies. However, such strategies have been relatively underexplored, likely due to concerns about the computational overhead they may introduce~\citep{zhang2024h2o, chen2024nacl}. Nonetheless, task-specific training is essential for optimizing performance across different contexts. For example, a recent approach~\citep{anagnostidis2024dynamic} introduces a learnable mechanism for dropping uninformative tokens, but it faces difficulties in batched generation and does not account for continual pre-training or decoding-only LLMs.
+Despite these challenges, learnable strategies have strong potential to improve performance across a variety of tasks by allowing models to adapt their eviction strategies to meet task-specific requirements.
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+\section{Method}
+
+
+This section first briefly reveals the basics of multi-head attention and KV-Cache and then describes the proposed \emph{Attention-Gate} (AG) mechanism for in-context KV-Cache eviction for LLM inference acceleration. 
+An illustrative overview of AG is presented in \Cref{fig:token}. 
+
+\subsection{Preliminary}
+
+
+\textbf{Multi-Head Attention} (MHA)~\citep{vaswani2017attention} is a core component of the Transformer architecture, widely used in most LLMs.
+MHA enables the model to capture dependencies across different tokens in a sequence by computing self-attention across multiple attention-heads. 
+Each head attends to different parts of the input sequence independently, allowing the model to capture various aspects of the relationships between tokens.
+The outputs of these attention heads are then concatenated and projected through a final output matrix.
+
+\textbf{KV-Cache} is employed to store the key and value representations of tokens from previous time steps during inference. 
+This prevents redundant recomputation of these representations for every new token generated, significantly speeding up auto-regressive generation.
+The inference process in auto-regressive transformers, such as Llama~\citep{touvron2023llama}, can be divided into two stages: \emph{prefilling} and \emph{decoding}.
+\textbf{1.}
+In the prefilling stage, the model processes the entire input sequence, generating key-value pairs for each attention-head in each layer. 
+These key-value pairs are stored in the KV-Cache for future reuse.
+\textbf{2.}
+In the decoding stage, when generating the next token, the model only computes the key and value for that new token and appends them to the cached key-value pairs. 
+This reduces the computational load, as the previously cached key-value pairs do not need to be recomputed.
+The process continues token by token until the sequence generation is complete.
+
+KV-Cache plays a critical role in improving the efficiency of LLM inference, especially in scenarios where long sequences are processed. However, the size of the KV-Cache grows with the input sequence length, leading to substantial memory overhead. Efficiently managing this cache while maintaining model performance has become a key challenge in scaling LLMs to longer contexts.
+
+\subsection{Limitations of Traditional Eviction Strategies}
+
+\label{sec:lim}
+
+\textbf{Lack of flexibility.}  
+Flexibility in KV-Cache eviction strategies spans across various dimensions, including token-specific, attention-head-specific, layer-specific, task-specific, and model-specific adaptability.
+Static eviction policies offer no such flexibility, requiring manual intervention to adjust them.
+While methods based on accumulative attention scores (e.g., H2O~\citep{zhang2024h2o}) have improved upon static strategies by introducing token-level and head-level adaptability, they are still limited.
+Specifically, in H2O, the eviction ratio remains uniform across all attention heads, restricting head-level flexibility.  
+Flexibility is crucial in eviction strategies because models process varying types of data across different contexts, requiring the ability to selectively retain important tokens while discarding others. Without this adaptability, the model may inefficiently store redundant information, increasing memory usage and slowing down inference times.
+
+\textbf{Absence of global statistics.}  
+Eviction strategies that rely on accumulative attention scores, such as H2O, base their calculations on local statistics, which often results in attention bias issues~\citep{oren2024transformers}.
+This local approach may misjudge a token's importance, especially when the context spans long sequences%
+.
+While several methods~\citep{chen2024nacl, jo2024a2sf} have proposed solutions to mitigate this bias, they are still fundamentally rooted in local statistics, addressing the issue only partially.
+A more effective solution would incorporate global statistics to ensure that the eviction process is based on a more comprehensive understanding of the context, thereby reducing biases and improving the accuracy of token retention.
+
+\textbf{Inefficiency.}  
+Efficiency is another challenge for traditional methods such as H2O and FastGen~\citep{ge2023model}. These methods operates in a token-by-token manner for each decoding step,
+sequentially deciding which key-value pairs to evict from the cache. Additionally, H2O determines which tokens to evict after computing the attention scores, meaning some computation is wasted on tokens that are later discarded. This sequential approach hinders efficiency, especially when handling large batches of data or when processing long sequences.
+
+Our Attention-Gate mechanism is designed to address the aforementioned limitations.
+
+
+
+
+
+
+
+
+\subsection{Attention-Gate}
+
+\label{sec:ag}
+
+The \emph{Attention-Gate} (AG) is a lightweight, trainable module designed to determine which tokens in the KV-Cache of each attention-head should be retained or discarded%
+AG is positioned before the Multi-Head Attention (MHA) layer and operates by generating \emph{eviction flags} for each token, guiding both the computation of attention scores and the management of the KV-Cache.
+
+\textbf{Input and output.}
+AG takes the hidden states as input and generates binary flags as output, one for each token in every attention head.
+These flags indicate whether the corresponding token’s key-value pairs should be stored or discarded in the KV-Cache.
+Specifically, the input is a hidden state matrix $X \in \mathbb{R}^{n \times d}$, where $n$ represents the sequence length, and $d$ denotes the dimensionality of the hidden states.
+The output consists of independent binary decisions for the retention or eviction of each token’s key-value pairs across all attention heads in the MHA module.
+
+\textbf{Local or global?}
+The structure of AG offers two choices: using either local or global information to guide the eviction policy.
+\textbf{1. }
+Local information: The simplest approach leverages a \emph{linear layer} where each token only considers its own hidden state without taking other tokens in the sequence into account.
+This method is computationally efficient and straightforward, making it appealing for its simplicity.
+\textbf{2. }
+Global information: On the other hand, a more comprehensive approach adopts an attention-like structure, where tokens can aggregate information from across the entire sequence.
+This enables the eviction policy to reflect the global in-context information, making decisions that are informed by the broader context.
+Naturally, this method is computationally heavier than the local approach, but it offers a more accurate reflection of the sequence’s token importance.
+
+{In our design, we opted for the attention-like structure} because \emph{global context is essential for making effective eviction decisions}.
+As demonstrated in \Cref{sec:ablation}, using an attention-like structure significantly outperforms the linear layer, as the latter struggles to properly evict tokens.
+This outcome is expected, as determining whether a token is redundant or crucial for inference often requires a global understanding of the sequence.
+A local approach, like a linear layer focusing on individual tokens, lacks the broader perspective necessary to make accurate decisions about which tokens are important.
+This finding also underscores the limitations of methods like H2O, which rely on local statistics rather than global ones, as mentioned in \Cref{sec:lim}.
+
+\textbf{Softmax or Sigmoid?}
+After gathering information through the attention-like structure, the next step is to compute the eviction probability for each token. Common activation functions such as \emph{Softmax} and \emph{Sigmoid} can be used to generate these probabilities.
+
+{In our case, we choose the Sigmoid function} for a key reason: while Softmax normalizes probabilities across the entire sequence, introducing competition between tokens, Sigmoid treats each token independently.
+This independence is crucial because we do not want a token’s likelihood of being evicted to depend on the eviction probabilities of other tokens in the sequence.
+
+\textbf{Eviction flags.}
+After computing the eviction probabilities for each token, we apply a threshold $\tau$.
+If the probability of retaining a token exceeds $\tau$, that token is retained in the KV-Cache; otherwise, it is discarded.
+In the attention matrix, the columns corresponding to evicted tokens are masked out.
+However, the diagonal elements, where a token attends to itself, are always preserved.
+This guarantees that each token continues to interact with its own key.%
+
+\textbf{Prefilling or decoding?}
+AG is primarily applied during the prefilling stage, where the full sequence is available.
+By making eviction decisions before the MHA layers, AG effectively manages the KV-Cache during this phase.
+In contrast, AG is not used during the decoding stage to avoid adding complexity to the inference process.
+Using AG in decoding could slow down inference and increase the cache memory footprint, as additional keys and values from the attention-like structure would need to be stored.
+
+In summary, AG dynamically determines which tokens should be retained, optimizing both KV-Cache usage and attention score computation by utilizing an attention-like structure, Sigmoid activation function, and a threshold-based decision for token eviction.
+
+
+\subsection{Training Implementation}
+\label{sec:training}
+
+To train the Attention-Gate (AG) effectively, this section outlines the key components of the training process.
+
+\textbf{Eviction Loss.}
+To encourage the eviction of unnecessary tokens, we introduce a dedicated loss function called the \emph{Eviction Loss}.
+This loss encourages the model to discard as many tokens as possible, which is defined as:
+\begin{equation}
+\label{eq:evict}
+\ell_{\text{evict}} = \alpha \cdot \frac{1}{L} \sum_{l=1}^{L} 
+\text{ReLU}
+\left( \overline{\text{AG}}_l - \beta \right),
+\end{equation}
+where $L$ is the number of layers, and $\overline{\text{AG}}_l$ represents the average output of the AG module in layer $l$.
+In this formula, $\alpha$ adjusts the intensity of KV-Cache eviction, while $\beta \in [0, \tau]$ ensures that eviction does not become overly aggressive.%
+This loss function works alongside the auto-regressive loss to balance token eviction with maintaining model performance.
+The loss allows for adaptive eviction across layers and attention-heads. As shown in \Cref{fig:intro}, after training, the model learns to increase token eviction in deeper layers, which is not achievable with training-free methods like H2O~\citep{zhang2024h2o} or StreamingLLM~\citep{xiao2024efficientstreaminglanguagemodels}.
+
+\textbf{Initialization.}
+We initialize the AG parameters using Xavier initialization~\citep{glorot2010understanding} to provide a stable starting point for learning. 
+Additionally, a small constant $\gamma \geq 0$ is added inside Sigmoid, ensuring that the initial retention probabilities are close to 1. 
+This encourages the model to retain most tokens early in training, allowing it to learn which tokens are important more gradually.
+
+\textbf{Handling non-differentiability.}  
+Directly applying the threshold-based gating mechanism from \Cref{sec:ag} would lead to non-differentiable gradients during training due to the hard thresholding’s discrete nature.
+To resolve this, we employ the \emph{Straight-Through Estimator} (STE)~\citep{yin2019understanding}, which allows gradients to flow through discrete decisions by approximating them during the backward pass.
+Specifically, during backpropagation, instead of using the hard 0 or 1 values obtained from comparing against the threshold, we utilize the smooth output of the Sigmoid function.
+This approach ensures smooth gradients and enables effective training of the AG while preserving its binary behavior during the forward pass.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+\label{sec:exp}
+
+This section consists of three main parts.
+First, we evaluate the performance of AG in two scenarios: continual pre-training (CPT) and supervised fine-tuning (SFT).
+For CPT, we compare AG with classic methods on performance and eviction rates (\Cref{sec:cpt}). 
+For SFT, we benchmark AG against vanilla LoRA fine-tuning to highlight its task-specific adaptability (\Cref{sec:sft}).
+Second, we provide visualization of selected examples to demonstrate the core characteristics of AG (\Cref{sec:visual}).
+Finally, we conduct ablation studies to provide further insights into the effectiveness of AG (\Cref{sec:ablation}).
+
+\subsection{Continual Pre-training}
+
+\begin{table*}[t]
+    \caption{Performance comparison of Llama2-7B and various KV-Cache eviction strategies across seven tasks.
+    The table reports accuracy (Acc.) for Llama2-7B and all eviction methods, with Llama2-7B serving as the upper bound for accuracy.
+    Metric \%Eviction refers to the mean KV-Cache eviction ratio, representing the percentage of tokens evicted from the KV-Cache. 
+    The eviction ratio is fixed at 50\% for the baseline methods, including a local strategy (retaining only recent tokens), StreamingLLM, and H2O. 
+    In contrast, our method, which includes continual pre-training, achieves higher average accuracy while maintaining a higher average \%Eviction.
+    }
+    \label{tab:cpt} 
+    \setlength{\tabcolsep}{4.9pt} %
+    \small
+    \centering
+    \begin{tabular}{cccccccccc} %
+        \toprule
+        ~ & Metric & PIQA & ARC-C & ARC-E & RTE & COPA & BoolQ & HellaSwag & Avg. \\
+        \midrule
+        Llama2-7B & Acc. & 76.33 & 37.29 & 51.32 & 51.99 & 62.00 & 69.94 & 68.16 & 59.58 \\
+        \midrule
+        Local & Acc. & 69.97 & 31.86 & 48.68 & 51.99 & 60.00 & 57.86 & 37.08 & 51.06 \\
+        StreamingLLM & Acc. & 72.69 & 33.22 & 51.15 & 50.18 & \textbf{63.00} & 62.05 & 40.85 & 53.31 \\
+        H2O & Acc. & 75.9 & 33.22 & \textbf{52.03} & \textbf{52.71} & 47.00 & 67.37 & 66.32 & 56.36 \\
+        \midrule
+        \multirow{2}{*}{Ours} & Acc. & \textbf{76.17} & \textbf{33.90} & 49.03 & 52.35 & \textbf{63.00} & \textbf{67.52} & \textbf{66.33} & \textbf{58.33} \\
+        ~ & \%Eviction & \textbf{54.29} & \textbf{51.03} & \textbf{51.05} & 46.70 & 40.02 & \textbf{57.75} & \textbf{52.16} & \textbf{51.87} \\
+        \bottomrule
+    \end{tabular}
+\end{table*}
+
+\begin{table*}[t]
+    \caption{Performance of Llama2-7B with LoRA fine-tuning and our method on six downstream tasks.
+    In addition to the LoRA fine-tuning targets, our method makes the AG modules learnable.
+    Two settings for $\alpha$ (0.5 and 1) are tested. 
+    Our method maintains comparable or better accuracy while achieving a higher eviction ratio, demonstrating its task-specific adaptability in managing token eviction without significant accuracy loss.}
+\label{tab:sft}
+\setlength{\tabcolsep}{6.15pt}
+\small
+\centering
+  \begin{tabular}{ccccccccc}
+    \toprule
+    ~ & Metric & PIQA & ARC-C & RTE & COPA & BoolQ & OBQA & Avg.\\
+    \midrule
+    Fine-tuned Llama2-7B & Acc. & 82.92 & 60.34 & 64.98 & 92.00 & 88.10 & 78.80 & 77.86 \\
+    \midrule
+    \multirow{2}{*}{Ours $(\alpha=1)$} & Acc. & 82.15 & 59.66 & 64.26 & 93.00 & 86.82 & 78.80 & 77.45 \\
+    ~ & \%Eviction & 66.16 & 48.31 & 65.47 & 45.40 & 67.46 & 67.17 & 60.00 \\
+    \midrule
+    \multirow{2}{*}{Ours $(\alpha=0.5)$} & Acc. & 81.50 & 57.63 & 74.01 & 95.00 & 87.00 & 79.20 & 79.06 \\
+    ~ & \%Eviction & 64.96 & 36.45 & 62.80 & 34.77 & 67.31 & 66.65 & 55.49 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\label{sec:cpt}
+
+\subsubsection{Setup}
+
+\label{sec:cpt-setup}
+
+\textbf{Models and datasets.} 
+We use Llama2-7B~\citep{touvron2023llama} as our primary base model due to its strong performance and popularity within the AI community.
+Additionally, we validate the feasibility of our approach on Mistral-7B~\citep{jiang2023mistral}, with results provided in \Cref{tab:mistral}.
+For continual pre-training, we select a subset of the Redpajama dataset~\citep{together2023redpajama} containing approximately 5,000 samples~\footnote{We sampled 4,997 samples proportionally from each subset of RedPajama.}. 
+To assess the effectiveness of our method, we evaluate it on seven widely recognized benchmarks: PIQA~\citep{Bisk2020}, ARC-C~\citep{allenai:arc}, ARC-E~\citep{allenai:arc}, RTE~\citep{bar2006second}, COPA~\citep{roemmele2011choice}, BoolQ~\citep{clark2019boolq}, and HellaSwag~\citep{zellers2019hellaswag}.
+All evaluations are conducted in a zero-shot setting, with accuracy assessed using OpenCompass~\citep{2023opencompass}.
+
+\textbf{Training details.}
+During continual pre-training (CPT), only the AG modules are learnable, while the rest of the model’s parameters are frozen. 
+For the Llama2-7B model, the hyperparameters from \Cref{sec:training} are used: $\tau = 0.5$, $\gamma = 2$, $\alpha = 5$, and $\beta = 0.4$. The model was trained for one epoch.
+
+\textbf{Metrics and Baselines.}
+The metrics considered include accuracy and the mean eviction ratio for all KV-Cache. 
+The accuracy of vanilla Llama2-7B on these datasets is used as the upper bound, with the goal of minimizing accuracy loss while maximizing the mean eviction ratio.
+For KV-Cache eviction strategies, we select a local method (retaining only recent tokens) and StreamingLLM~\citep{xiao2024efficientstreaminglanguagemodels} as representatives of static strategies, while H2O~\citep{zhang2024h2o} serves as a representative of methods based accumulative attention scores.
+For all these methods, eviction ratio is set to 50\%.
+
+\subsubsection{Results}
+
+The results in \Cref{tab:cpt} demonstrate the effectiveness of our method in balancing accuracy and KV-Cache eviction.
+Our method consistently outperforms the baseline strategies in terms of accuracy across most tasks while achieving a higher mean eviction ratio.
+This indicates that our method is able to evict more tokens on average without significantly compromising accuracy.
+
+In terms of accuracy, our method achieves competitive performance, closely matching the performance of vanilla Llama2-7B in most cases.
+For instance, on PIQA, COPA, and BoolQ, our method performs comparably to Llama2-7B, demonstrating minimal accuracy degradation.
+Compared to baselines, our method shows superior performance, particularly in tasks like BoolQ and PIQA, where both accuracy and eviction ratio surpass the baselines. This confirms the advantage of learnable mechanism for more efficient token retention strategies without sacrificing model performance.
+
+Moreover, it is worth highlighting that our method achieves these results with minimal computational overhead, as mentioned in \Cref{sec:cpt-setup}. 
+The continual pre-training was conducted on only 5,000 samples and trained for just one epoch, demonstrating the lightweight nature of our approach.
+This efficiency can be attributed to the fact that our method does not need to learn new knowledge from scratch but rather focuses on learning effective token retention strategies, leveraging the existing capabilities of the pre-trained model.
+
+\subsection{Supervised Fine-tuning}
+
+\label{sec:sft}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{fig/heatmaps_0930_0931_custom_detail_labeled.pdf}
+    \caption{This visualization highlights attention patterns in Llama2-7B after fine-tuning on the BoolQ dataset, using a selected sample to showcase multiple heads within both MHA and AG of different layers.
+    \underline{In part (i)}, we visualize attention scores from several MHA heads across different layers before eviction.
+    \textbf{1.} MHA heads exhibit diverse attention patterns, especially in the first two layers, where attention is highly heterogeneous across heads. 
+    \textbf{2.} While the first two layers show dense attention patterns, the subsequent layers become progressively sparser.
+    \textbf{3.} Bright-yellow vertical lines consistently appear at the same position across nearly all heads, especially beyond the first two layers, indicating critical tokens for inference.
+    This aligns with the \emph{Heavy Hitters} in H2O~\citep{zhang2024h2o}, where a small portion of tokens significantly contributes to the attention scores.
+    Our method’s effectiveness is demonstrated by the persistence of these bright lines in deeper layers, showing that crucial tokens are retained rather than evicted, ensuring their importance is preserved across the network.
+    \underline{In part (ii)}, we visualize the attention scores from the attention-like structure within the AG mechanism.
+    As the model layers deepen, the attention pattern shifts from high-resolution to lower-resolution, indicating that AG increasingly focuses on distilling in-context information.
+    Thus, deeper AG layers no longer need such high resolution to capture global information, as the model has already refined and summarized it.
+    This suggests potential optimizations, such as reducing the number of heads or dimensionality in deeper AG layers, to further improve efficiency.}
+    \label{fig:visual}
+\end{figure}
+
+\subsubsection{Setup}
+
+\label{sec:sft-setup}
+
+\textbf{Model and tasks.} 
+We utilize Llama2-7B~\citep{touvron2023llama} as base model.
+To evaluate our approach, we select six widely recognized downstream tasks: PIQA~\citep{Bisk2020}, ARC-C~\citep{allenai:arc}, RTE~\citep{bar2006second}, COPA~\citep{roemmele2011choice}, BoolQ~\citep{clark2019boolq}, and OpenBookQA~\citep{OpenBookQA2018}.
+For each task, we fine-tune the model using the respective training set and evaluate its performance on the corresponding test set.
+
+\textbf{Baselines and Implementation Details.}
+For the baseline, we apply LoRA~\citep{hu2021lora} to fine-tune the models on each task, targeting the $(W_q, W_k, W_v, W_o)$ weights in the self-attention modules.
+In our method, in addition to applying LoRA to these parameters, the AG modules are also set to be learnable.
+As mentioned in \Cref{sec:training}, the following hyperparameters are used: $\tau = 0.3$, $\gamma = 0$, $\alpha = 1$ or $0.5$, and $\beta = 0.28$.
+We employ the AdamW optimizer~\citep{loshchilov2017decoupled} with a learning rate of 5e-5, and train for two epochs on each dataset.
+
+\subsubsection{Results}
+
+As shown in \Cref{tab:sft}, our method demonstrates a strong balance between accuracy and KV-Cache eviction across the six downstream tasks.
+
+With $\alpha=1$, our method maintains competitive accuracy compared to the fine-tuned Llama2-7B baseline, with minimal drops (e.g., 82.15\% vs. 82.92\% on PIQA), while achieving a high mean eviction ratio of 60.00\%.
+With $\alpha=0.5$, the eviction rate is reduced to 55.49\%. But in some tasks like RTE and COPA, our method even surpasses the baseline accuracy. The average accuracy also exceeds the baseline (79.06\% vs. 77.86\%), suggesting that effectively evicting redundant tokens allows the model to focus on relevant information and improves performance.
+
+Additionally, under the same hyperparameter settings, the performance varies across tasks. For instance, ARC-C is more challenging to evict compared to OpenBookQA, leading to a larger accuracy drop post-eviction. This highlights the importance of task-specific KV-Cache eviction policies.
+
+\subsection{Visualization}
+
+\label{sec:visual}
+
+\begin{table*}[t]
+    \caption{Ablation study on various settings of AG, reporting accuracy (Acc.) and KV-Cache eviction ratio (\%Eviction) under different configurations, with $\alpha=1$ in all settings. 
+    \underline{The results for (1)} correspond to the setup described in \Cref{sec:sft}, where the number of AG heads is 4, and the head dimension is 128. 
+    \underline{In (2-1) and (2-2)}, we explore the impact of the number of AG heads, with (2-1) using 2 heads and (2-2) using 1 head. 
+    The comparison between (1), (2-1), and (2-2) shows that reducing the number of heads leads to a drop in both accuracy and eviction ratio, indicating that the capacity of AG is closely tied to the number of heads. 
+    \underline{For (3-1) and (3-2)}, we assess the effect of reducing head dimensions for AG heads, where (3-1) has half the dimension size of (1) and (3-2) has 1/4. 
+    Comparing (1), (3-1), and (3-2) reveals that smaller dimensions reduce the eviction capability and accuracy, highlighting the importance of maintaining sufficient head dimensionality.
+    \underline{Settings (4-1) and (4-2)} examine using the hidden states and the AG module from the previous layer to inform the current layer's eviction strategy.
+    In (4-1), the first layer does not evict, and from the second layer onward, the eviction is determined by the previous layer.
+    In (4-2), the first and second layers do not evict, following the observation from \Cref{sec:visual} that the first two layers are denser than subsequent layers.
+    Both (4-1) and (4-2) show a slight decline in accuracy and eviction ratio compared to (1), but this approach introduces parallelism, offering a potential avenue for future optimizations.
+    \underline{The setting (5)} replaces the attention-like structure in AG with a simple linear layer to determine the eviction strategy.
+    The comparison with (1) shows that linear layers almost cannot evict tokens effectively, reinforcing the necessity of leveraging global in-context information for successful eviction, as discussed in \Cref{sec:ag}.}
+    \label{tab:comparison}
+    \centering
+    \begin{tabular}{cccccccccc}
+        \toprule
+        ~ & Metric & PIQA & ARC-C & RTE & COPA & BoolQ & OpenBookQA & Avg. \\
+        \midrule
+        \multirow{2}{*}{(1)} & Acc. & 82.15 & 59.66 & 64.26 & 93.00 & 86.82 & 78.80 & 77.45 \\
+        ~ & \%Eviction & 66.16 & 48.31 & 65.47 & 45.40 & 67.46 & 67.17 & 60.00 \\
+        \midrule
+        \multirow{2}{*}{(2-1)} & Acc. & 81.88 & 57.63 & 65.70 & 91.00 & 87.52 & 77.40 & 76.86 \\
+        ~ & \%Eviction & 63.92 & 36.38 & 62.73 & 24.38 & 65.22 & 63.57 & 52.70 \\
+        \multirow{2}{*}{(2-2)} & Acc. & 82.15 & 53.90 & 62.45 & 89.00 & 87.31 & 77.40 & 75.37 \\
+        ~ & \%Eviction & 58.97 & 31.47 & 59.77 & 20.32 & 63.02 & 59.17 & 48.79 \\
+        \midrule
+        \multirow{2}{*}{(3-1)} & Acc. & 81.45 & 53.36 & 58.84 & 88.00 & 86.73 & 78.40 & 74.46 \\
+        ~ & \%Eviction & 61.75 & 33.55 & 61.34 & 19.24 & 64.59 & 59.59 & 50.01 \\
+        \multirow{2}{*}{(3-2)} & Acc. & 83.03 & 53.90 & 59.93 & 89.00 & 87.16 & 76.40 & 74.90 \\
+        ~ & \%Eviction & 58.68 & 24.23 & 32.23 & 12.28 & 59.40 & 55.54 & 40.39 \\
+        \midrule
+        \multirow{2}{*}{(4-1)} & Acc. & 81.66 & 55.25 & 66.06 & 88.00 & 86.85 & 78.00 & 75.97 \\
+        ~ & \%Eviction & 49.52 & 36.92 & 46.85 & 28.74 & 56.02 & 60.32 & 46.40 \\
+        \multirow{2}{*}{(4-2)} & Acc. & 82.75 & 55.93 & 79.06 & 82.00 & 86.33 & 78.40 & 77.41 \\
+        ~ & \%Eviction & 53.31 & 44.38 & 51.20 & 47.95 & 61.98 & 61.73 & 53.43 \\
+        \midrule
+        \multirow{2}{*}{(5)} & Acc. & 82.54 & 54.58 & 57.40 & 81.00 & 87.71 & 74.80 & 73.01 \\
+        ~ & \%Eviction & 1.06 & 0.46 & 0.81 & 0.26 & 1.38 & 1.16 & 0.86 \\
+        \bottomrule
+    \end{tabular}
+\end{table*}
+
+In this section, we present visualizations to highlight key characteristics of our AG mechanism.
+After fine-tuning on specific tasks, we visualize the model’s MHA and AG weights for selected samples, as shown in \Cref{fig:visual}.
+Additional visualizations can be found in \Cref{sec:more_visual}.
+
+\subsection{Ablation}
+\label{sec:ablation}
+
+In this ablation study, we explore the effects of various configurations on the AG mechanism, focusing on the number of AG heads, AG head dimensions, and eviction strategies.
+For details of each setting and the corresponding performance, refer to \Cref{tab:comparison}.
+Key findings include the impact of reducing the number of heads, as shown in (2-1) and (2-2), and the reduction of head dimensions in (3-1) and (3-2), both of which result in lower accuracy and eviction ratios. 
+In (4-1) and (4-2), we examine eviction strategies where the current layer’s eviction is based on the previous layer’s hidden states and AG module, which introduces parallelism but slightly reduces performance.
+Finally, replacing the AG with a linear layer in (5) demonstrates the necessity of using an attention-like structure for effective token eviction.
+For more ablation, please refer to \Cref{tab:comparison2}.
+
+
+
+
+\section{Conclusion}
+
+
+In conclusion, the proposed Attention-Gate mechanism offers a flexible and adaptive solution to KV-Cache eviction in large language models.
+By dynamically identifying and discarding less important tokens, Attention-Gate addresses the limitations of static and attention-score-based strategies, providing efficient context-aware eviction.
+This mechanism integrates seamlessly with pre-trained models and can be easily tuned, making it a practical and effective method for enhancing both performance and memory efficiency in various tasks.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

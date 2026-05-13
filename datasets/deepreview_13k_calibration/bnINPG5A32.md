@@ -1,8 +1,8 @@
 # RB-Modulation: Training-Free Personalization using Stochastic Optimal Control
 
 - Decision: Accept
-- Avg Score: 4.60
-- Scores: 1, 0, 8, 6, 8
+- Avg Score: 8.00
+- Scores: 10, 8, 6, 8
 
 ## Abstract
 We propose Reference-Based Modulation (RB-Modulation), a new plug-and-play solution for training-free personalization of diffusion models.

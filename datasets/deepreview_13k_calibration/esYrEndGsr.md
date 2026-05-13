@@ -1,8 +1,8 @@
 # Influence Functions for Scalable Data Attribution in Diffusion Models
 
 - Decision: Accept
-- Avg Score: 3.75
-- Scores: 6, 8, 1, 0
+- Avg Score: 8.00
+- Scores: 6, 8, 10
 
 ## Abstract
 Diffusion models have led to significant advancements in generative modelling.

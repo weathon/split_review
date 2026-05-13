@@ -1,0 +1,226 @@
+\title{GPUDrive: Data-driven, multi-agent driving simulation at 1 million FPS}
+
+\begin{abstract}
+Multi-agent learning algorithms have been successful at generating superhuman planning in various games but have had limited impact on the design of deployed multi-agent planners. A key bottleneck in applying these techniques to multi-agent planning is that they require billions of steps of experience. To enable the study of multi-agent planning at scale, we present GPUDrive, a GPU-accelerated, multi-agent simulator built on top of the Madrona Game Engine that can generate over a million simulation steps per second. Observation, reward, and dynamics functions are written directly in C++, allowing users to define complex, heterogeneous agent behaviors that are lowered to high-performance CUDA. We show that using GPUDrive we can effectively train reinforcement learning agents over many scenes in the Waymo Open Motion Dataset, yielding highly effective goal-reaching agents in minutes for individual scenes and enabling agents to navigate thousands of scenarios within hours.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Multi-agent learning has been impactful across a wide range of fully cooperative and zero-sum games~\citep{cui2023, sophy2022, stratego2022, go2017, population2018, diplomacy2023}. However, its impact on multi-agent planning for settings that mix humans and robots has been muted. In contrast to the ubiquity of multi-agent learning-based agents in zero-sum games, multi-agent planners for most practical robotic systems are not derived from the output of game-theoretically sound learning algorithms. While it is hard to characterize the space of deployed planners since many of them are proprietary, the majority likely use a mixture of collected data for the prediction of human motion and hand-tuned costs. These are then fed into a cost-based trajectory optimizer or into a planner based on imitation learning~\citep{bronstein22, lu2023imitation}. This approach has been highly effective in scaling up real-world autonomy but can struggle with reasoning about long-term behavior, contingency planning, and interaction with humans in rare, complex scenarios.
+
+The divergence in preferred technique between these two domains is partially the outcome of two distinct, challenging components of real-world multi-agent planning. First, unlike zero-sum games, it is necessary to play a human-compatible strategy that is difficult to identify without data. Second, generating the billions of samples needed for multi-agent learning algorithms is difficult with existing simulators. The former challenge is difficult for multi-agent learning since there is not a clear equilibrium concept that algorithms should be pursuing. The latter problem is a challenge for simulators since it is difficult to simulate embodied multi-agent environments at appropriately high rates.
+
+To address these challenges and unlock multi-agent learning as a tool for generating capable self-driving planners, we introduce GPUDrive. GPUDrive is a simulator intended to mix real-world driving data with simulation speeds that enable the application of sample-inefficient but effective RL algorithms to planner design. GPUDrive runs at over a million steps per second on both consumer-grade and datacenter-class GPUs and has a sufficiently light memory footprint to support hundreds to thousands of simultaneous worlds (environments) with hundreds of agents per world. GPUDrive supports the simulation of a variety of sensor modalities, from LIDAR to a human-like view cone, enabling GPUDrive to be used for studying the effects of different sensor types on resultant agent characteristics. Finally, GPUDrive takes in driving logs and maps from existing self-driving datasets, enabling the mixing of tools from imitation learning with reinforcement learning algorithms. This enables the study of both the development of autonomous vehicles and the learning of models of human driving, cycling, and walking behavior.
+
+Our contributions are:
+\begin{itemize}
+    \item We provide a multi-agent, GPU-accelerated, and data-driven simulator that runs at over a million steps per second (Section \ref{sec:sim_performance}). Our simulator provides a testbed for:
+    \begin{enumerate}
+        \item Investigating the capability of learning algorithms to solve challenges related to self-play or autonomous coordination.
+        \item Researching the effects of limited or human-like perception on agent behavior.
+    \end{enumerate}
+    \item We provide \texttt{gymnasium} \citep{towers2024gymnasium} environments in both \texttt{torch} and \texttt{jax} that can be easily configured with standard open-source multi-agent RL and imitation learning libraries. Additionally, we have open-sourced a basic policy-gradient training loop that can be readily used to develop agents.
+    \item We release implementations of tuned RL algorithms that can process $30$ million steps of experience per hour on consumer-grade GPUs. These can be used to train $95$\% goal-reaching agents across 1000 different multi-agent scenarios in 15 hours on relatively accessible hardware. 
+    \item We open-source these strong driving baseline agents that achieve 95\% of their goals on a subset of scenes. These are integrated into the simulator so that the simulator comes with default, reactive agents.
+\end{itemize}
+
+
+
+\section{Related work}
+
+
+\paragraph{Frameworks for batched simulators.} There are various open-source frameworks available that support hardware-accelerated reinforcement learning environments. 
+In terms of multi-agent accelerated environments, standard benchmarks include JaxMARL\citep{rutherford2023jaxmarl}, Jumanji~\citep{bonnet2024jumanji}, and VMAS~\citep{vmas2022} which primarily feature fully cooperative or fully competitive tasks. Each benchmark requires the design of custom accelerated structures per environment.
+In contrast, GPUDrive focuses on a mixed motive setting and is built  atop Madrona, an extensible ECS-based framework in C++, enabling GPU acceleration and parallelization across environments~\citep{shacklett2023extensible}. 
+Madrona comes with vectorization of key components of embodied simulation such as collision checking and sensors such as LIDAR. GPUDrive can support hundreds of controllable agents in more than 100,000 distinct scenarios, offering a distinct generalization challenge and scale relative to existing benchmarks. Moreover, GPUDrive includes a large dataset of human demonstrations, enabling imitation learning, inverse RL, and combined IL-RL approaches.
+
+\paragraph{Simulators for autonomous driving research and development.} 
+Table \ref{tab:driving_sims} 
+shows an overview of current simulators used in autonomous driving research. The purpose of GPUDrive is to facilitate the systematic study of behavioral, coordination, and control aspects of autonomous driving and multi-agent learning more broadly. As such, visual complexity is reduced, which differs from several existing simulators, which (partially) focus on perception challenges in driving~\citep{dosovitskiy2017carla, cai2020summit}. Driving simulators close to GPUDrive in terms of either features or speed include MetaDrive~\citep{li2022metadrive}, nuPlan~\citep{caesar2021nuplan}, Nocturne~\citep{vinitsky2022nocturne}, and Waymax~\citep{gulino2024waymax} which all utilize real-world data. Unlike MetaDrive and nuPlan, our simulator is GPU-accelerated. Like GPUDrive, Waymax is a JAX-based GPU-accelerated simulator that achieves high throughput through JIT compilation and efficient use of accelerators. With respect to Waymax, our simulator supports a wider range of possible sensor modalities (Section ~\ref{sec:sim_features}) including LIDAR and human-like views, can scale to nearly thirty times more worlds (see Section ~\ref{sec:sim_performance}), and comes with performant reinforcement learning baselines. However, it does not currently come with reactive IDM agents like Waymax though it does come with pre-trained simulated agents based on RL policies.
+\paragraph{Driving agents in simulators and algorithms.} Existing simulators often feature baseline agents for interaction, such as \textit{low-dimensional car following models} that describe vehicle dynamics through a limited set of variables or parameters~\citep{kreutz2021analysis, kesting2007general, treiber2000congested}. Rule-based agents exhibit predetermined behaviors, like car-following agents~\citep{gulino2024waymax, caesar2021nuplan, SUMO2018, casas2010traffic} such as the IDM model, or parameterized behavior agents like CARLA's TrafficManager~\citep{dosovitskiy2017carla}. Some simulators offer \textit{recorded human driving logs} for interaction through replaying the human driving logs~\citep{lu2023imitation, vinitsky2022nocturne, gulino2024waymax, caesar2021nuplan}. Additionally, certain simulators provide \textit{learning-based agents}, leveraging reinforcement learning techniques~\citep{li2022metadrive}. In GPUDrive, we provide both human driving logs and high-performing reinforcement learning agents.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of GPUDrive to related driving simulators. Columns represent whether the simulator supports multi-agent simulation, GPU acceleration, simulation of sensors such as LIDAR or human views, is built atop data, comes with existing driver models, and whether the agents are provided explicit goal points or waypoints along the way to the goal.}
+\label{tab:driving_sims}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}l|r|r|r|r|r|r@{}}
+\toprule
+Simulator & Multi-agent & GPU-Accel & Sensor Sim & Expert Data & Sim-agents & Routes / Goals  \\ \midrule
+TORCS~\citep{wymann2000torcs}                &                               &             & \checkmark  &            & \checkmark   & - \\
+GTA V~\citep{martinez2017beyond}             &                               &             & \checkmark  &            &              & - \\ 
+CARLA~\citep{dosovitskiy2017carla}           &                               &             & \checkmark  &            & \checkmark   & Waypoints \\ 
+Highway-env~\citep{leurent2018environment}   &                               &             &             &            &              & - \\ 
+Sim4CV~\citep{muller2018sim4cv}              &                               &             & \checkmark  &            &              & Directions \\
+SUMMIT~\citep{cai2020summit}                 &  \checkmark \, ($\geq 400$)   &             & \checkmark  &            & \checkmark   & - \\
+MACAD~\citep{palanisamy2020multi}            &  \checkmark \,                &             & \checkmark  &            & \checkmark   & Goal point \\
+SMARTS~\citep{zhou2021smarts}                &  \checkmark \,                &             &             &            &              & Waypoints \\
+MADRaS~\citep{santara2021madras}             &  \checkmark \, ($\geq 10$)    &             & \checkmark  &            &              & Goal point \\
+DriverGym~\citep{kothari2021drivergym}       &                               &             &             & \checkmark & \checkmark   & - \\
+VISTA~\citep{amini2022vista}                 &  \checkmark \,                &             & \checkmark  & \checkmark &              & - \\
+nuPlan~\citep{caesar2021nuplan}              &                               &             & \checkmark  & \checkmark & \checkmark   & Waypoints \\
+Nocturne~\citep{vinitsky2022nocturne}        &  \checkmark \, ($\geq 128$)   &             &             & \checkmark & \checkmark   & Goal point \\
+MetaDrive~\citep{li2022metadrive}            &  \checkmark \,                &             & \checkmark  & \checkmark & \checkmark   & - \\ 
+InterSim~\citep{sun2022intersim}             &  \checkmark \,                &             &             & \checkmark & \checkmark   & Goal point \\ 
+TorchDriveSim~\citep{scibior2021imagining}   &  \checkmark \,                & \checkmark  &             &            & \checkmark   & - \\ 
+BITS~\citep{xu2023bits}                      &  \checkmark \,                &             &             & \checkmark & \checkmark   & Goal point \\ 
+Waymax~\citep{gulino2024waymax}              &  \checkmark \, ($\geq 128$)   & \checkmark  &             & \checkmark & \checkmark   & Waypoints \\
+\textbf{GPUDrive (ours)}                    &  \textbf{\checkmark \, ($\geq 128$)} & \checkmark  & \checkmark & \checkmark & \checkmark  & Goal point \\  \bottomrule
+\end{tabular}
+}
+\end{table}
+
+
+\section{Simulation Design}
+
+\subsection{Simulation Engine}
+Learning to safely navigate complex scenarios in a multi-agent setting requires generating many billions of environment samples. To feed sample-hungry learning algorithms, GPUDrive is built on top of Madrona~\citep{shacklett2023extensible}, an Entity-Component-State system designed for high-throughput reinforcement learning environments. In the Madrona framework, multiple independent worlds (each containing an independent number of agents\footnote{In the Waymo Open Motion Dataset, an agent constitutes a vehicle, cyclist, or pedestrian.} ) are executed in parallel on an accelerator via a shared engine. 
+
+However, the simulation of driving poses a unique set of challenges which require careful technical design choices to solve. First, road objects, such as road edges and lane lines are frequently represented as polylines (i.e. connected sets of points). These polylines can consist of hundreds of points as they are sampled at every $0.1$ meters, leading to even small maps having upwards of tens of thousands of points. This can blow up the memory requirements of each world as well as lead to significant redundancy in agent observations. Second, the large numbers of agents and road objects can make collision checking a throughput bottleneck. Finally, there is immense variability in the number of agents and road objects in a particular scene. Each world allocates memory to data structures that track its state and accelerate simulation code. Though independent, each world incurs a memory footprint proportional to the \textit{maximum} number of agents across all worlds. In this way, the performance of GPUDrive is sensitive to the variation in agent counts across all the worlds in a batch.
+
+These challenges are partially resolved via the following mechanisms. First, a primary acceleration data structure leveraged by GPUDrive is a Bounding Volume Hierarchy (BVH). The BVH keeps track of all physics entities and is used to easily exclude candidate pairs for collisions. This allows us to then run a reduced-size collision check on potential collision candidate pairs. The use of a BVH avoids invoking a collision check that would otherwise always be quadratic in the number of agents in a world. Secondly, we observed that a lot of the lines in the geometry of the roads are straight. This allows us to omit many intermediate points while only suffering a minor hit in the quality of the curves. We apply a polyline decimation algorithm (Visvalingham-Whyatt Algorithm)~\citep{Visvalingam} to approximate straight lines and filter out low-importance points in the polylines. With this modification, we can reduce the number of points by 10-15 times and significantly improve the step times while decreasing memory usage. Finally, rather than allocate memory for the maximum number of agents in a scene (as is likely necessary in frameworks like Jax), we only allocate memory equal to the actual number of instantiated agents.
+
+\subsection{Simulator features}
+\label{sec:sim_features}
+We provide an overview of some of the pertinent simulator features as well as sharp edges and limitations of the simulator as a guide to potential users.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/gpudrive_herofig.pdf}
+    \caption{Four example scenarios from the Waymo Open Motion Dataset rendered in GPUDrive. The \textcolor{NavyBlue}{blue circles} indicate vehicle destinations.}
+    \label{fig:waymo_open}
+\end{figure}
+
+\noindent
+\paragraph{Dataset.}
+GPUDrive represents its map as a series of polylines and does not require a connectivity map of the lanes. As such, it can be made compatible with most driving datasets given the pre-processing of the roads into the polyline format. Currently, GPUDrive supports the Waymo Open Motion Dataset (WOMD) ~\citep{ettinger2021} which is available under a non-commercial license. We show four representative example scenarios from the WOMD in Figure \ref{fig:waymo_open}. The WOMD consists of a set of over 100,000 multi-agent traffic scenarios, each of which contains the following key elements: 1) Road map - the layout and structure of a road, such as a highway or parking garage. 2) Logged human trajectories from vehicles, cyclists, and pedestrians. 3) Road objects, such as stop signs and crosswalks. Figure \ref{fig:obs-spaces} depicts an example of an intersection traffic scenario as rendered in GPUDrive.
+
+\noindent
+\paragraph{Sensor modalities.}
+GPUDrive supports a variety of observation spaces intended to enable heterogeneous types of agents. Fig.~\ref{fig:obs-spaces} depicts the three types of supported state spaces. The first mode is somewhat unphysical in which all agents and road objects within a fixed radius are observable to the agent. This mode is intended primarily for debugging and quick testing, enabling a user to minimize the amount of partial observability in the environment. The other two modes are based on a GPU-accelerated LIDAR scan, representing what an autonomous vehicle would be able to see and what a human would likely be able to see respectively. Both modes are based on casting LIDAR rays; to model human vision we simply restrict the LIDAR rays to emanate in a smaller, controllable-sized cone that can be rotated through an action corresponding to head rotation. Note that since all objects are represented as bounding boxes of fixed height, the LIDAR observations are over-conservative as in reality it is frequently possible to see over the hoods of cars as their height is lower than the body of the rest of the car. 
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{Figures/obs_fig_v2.png}
+    \caption{Visualization of different observation spaces available in GPUDrive. The top scene is an example scenario from the dataset, rendered from the ego-centric perspective of the red vehicle. Grey cars are parked cars while white cars are other controlled agents. From left to right: the Radius Filter returns all objects within 100 meters, the LIDAR observation with 3000 rays spread around 360 degrees, and a view cone consisting of 3000 rays emanating in a 120-degree view cone.}
+    \label{fig:obs-spaces}
+\end{figure}
+
+\noindent
+\paragraph{Agent dynamics.}
+ This model enables the dynamics of objects to be affected by their length, creating different dynamics for small cars as opposed to large cars like trucks. However, this model is not fully invertible which can make it challenging to use as a model for imitation learning. To enable full invertibility for imitation learning, we also support the simplified bicycle model, taken from Waymax~\citep{gulino2024waymax}, which is a double-integrator in the position and velocity and updates its yaw as:
+\begin{equation*}
+    \theta_{t+1} = \theta + s_t  (v_t \Delta t + 
+\frac{1}{2} a_t  \Delta t^2)
+\end{equation*}
+where $\theta$ is the yaw, $s$ is the steering command, $v$ is the velocity, and $a$ is the acceleration at time $t$ respectively. $\Delta t$ is the timestep. 
+This model is always invertible given an unbounded set of steering and acceleration actions but is independent of the vehicle length. 
+
+Note that this model does not factor in the length of the car, causing both long and short objects to have identical dynamics. However, computing the expert actions and then using them to mimic the expert trajectory under this model leads to lower tracking error than the default bicycle model.
+
+\paragraph{Rewards.} All agents are given a target goal to reach; this goal is selected by taking the last recorded position in the vehicle's logged trajectory. A goal is reached when agents are within some configurable distance $\delta$ of the goal. By default, agents in GPUDrive receive a reward of $1$ for achieving their goal and otherwise receive a reward of $0$. There are additional configurable collision penalties or other rewards based on agent-vehicle distances or agent-road distances though these are not used in the experiments reported in this work.
+
+\paragraph{Termination conditions.} We terminate an agent's episode when they achieve their goal position or collide. As it is not clear where an agent should go next after it reaches its goal, we simply remove it from the scene afterwards (we note that an alternative might be to generate a new goal for the agent to drive to). Car and cyclist agents are considered to be in collision when they drive through a road edge while pedestrian agents are allowed to cross road edges.
+
+\paragraph{Environment Interface.} As GPUDrive is implemented in C++, we provide a Pythonic interface through nanobind~\citep{nanobind}. We create environments for both \texttt{torch} and \texttt{jax} that conform to the Gymnasium API~\citep{towers2024gymnasium} so users can use the simulator entirely through Python if they prefer. 
+
+\paragraph{Available driving simulation agents.} We use reinforcement learning to train a set of agents that reach their goals 95 \% of the time on a subset of $1000$ training scenes. While this number is far below the capability of human drivers, these agents are reactive in a distinct fashion from parametrized driver models in other simulators. In particular, many logged-data simulators construct reactivity by having the driver follow along its logged trajectory but decelerate if an agent passes in front of it. In contrast, these agents can maneuver and negotiate without remaining constrained to a logged trajectory. These trained agents are extremely aggressive about reaching their goals and can be used as an out-of-distribution test for proposed driving agents. The training procedure and more details can be found in Section ~\ref{sec:end-to-end}.
+
+
+\paragraph{Simulator sharp-edges.} We note the following limitations of the benchmark:
+\label{sharp-edges}
+\begin{itemize}
+    \item \textit{Absence of a map.} The current version of the simulator does not have a well-defined notion of lanes or a higher-level road map which makes it challenging for algorithmic approaches that require maps. The absence of this feature also makes it challenging to define rewards such as "stay lane-centered."
+    \item \textit{Convex objects only.} Collision checking relies on the objects being represented as convex objects.
+    \item \textit{Unsolvable goals.} Due to incorrect labels of some road points in the Waymo dataset, such as an exit to a parking lot being labelled as an impassable road edge, some agent goals (roughly 2\%) are unreachable. For these agents, we default them to simply replaying their logged trajectory and do not treat them as agents. 
+    \item \textit{Variance in controllable agents per scenario.} In most scenes, a significant fraction (25-75\%) of the agents are not controllable because they do not move (e.g. parked cars). This is because the dataset is collected from an autonomous vehicle's sensors, so some agents' initial states are recorded after the first time-step of the simulator. These agents are not included to avoid collisions with other agents.
+\end{itemize}
+
+
+
+
+
+\section{Simulator performance}
+
+The following Sections describe the simulator speed. Section \ref{sec:sim_performance} first shows the raw simulator speed and peak goodput (throughput achieved by the number valid number of agents in a scene). Section \ref{sec:end-to-end} then investigates the impact on reinforcement learning workflows by evaluating the time it takes to train reinforcement learning agents through Independent PPO (IPPO) \citep{yu2022surprising}, a widely used multi-agent learning algorithm. IPPO is implemented atop \texttt{Stable Baselines 3} \citep{stable-baselines}. 
+
+\subsection{Simulation speed}
+\label{sec:sim_performance}
+
+Since scenarios contain a variable number of agents, we introduce a metric called Agent Steps Per Second (ASPS) to measure the sample throughput of the simulator. We define the ASPS as the total number of agents across all worlds in a batch that can be fully stepped in a second:
+
+\begin{align}
+    \text{ASPS} = \frac{S \times \sum_{k=1}^{N}\left| A_k \right|}{\Delta T}
+\end{align}
+
+where $A_k$ is the set of agents in the $k^{th}$ world, $S$ is the number of steps taken, and $\Delta T$ is the number of seconds elapsed. Figure~\ref{fig:prof_figure} examines the scaling of the simulator as the number of simulated worlds, which represents the amount of parallelism, increases. To measure performance, we sample random batches of scenarios of size equal to the number of worlds, so that every world is a unique scenario with $K$ agents. On the left-hand side of Figure \ref{fig:prof_figure}, we compare the performance of GPUDrive to Nocturne \citep{vinitsky2022nocturne} (CPU, no parallelism), a CPU-accelerated version of Nocturne via Pufferlib (16 CPU cores) \citep{suarez2024pufferlib} and Waymax \cite{gulino2024waymax}. Empirically, the maximum achievable ASPS of Nocturne is 15,000 (blue dotted line) though we note that additional speedups may be possible. \textbf{GPUDrive achieves a peak ASPS of 2.3 million steps}, which is 2 to 3 orders of magnitude faster compared to Nocturne. This performance also surpasses that of Waymax \citep{gulino2024waymax}, a JAX-based simulator, where we could not run more than 16 environments in parallel due to Out of Memory (OOM) issues.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/agent_distribution_and_speed_benchmark_1001.pdf}
+    \caption{\textbf{Peak goodput of GPUDrive on a consumer-grade and datacenter-class GPU compared to original, CPU and GPU-based, implementations using the radial filter observation}. \textit{Left}: The total number of agent steps per second (ASPS) is the number of objects for which our system computes observations at each time step. To ensure a fair comparison, we align the conditions with those used in \citep{gulino2024waymax}, where all cars, bicyclists, and pedestrians are considered valid experience-generating agents. \textit{Center}: The distribution of controllable agents across 512 scenarios in the Waymo Open Motion Dataset $\mu \approx 10.8 \, ( \text{red line} ), \sigma \approx 9.3$). \textit{Right}: The total number of controllable agent steps per second (CASPS) as we increase the number of worlds (parallelism).}
+    \label{fig:prof_figure}
+\end{figure}
+
+In addition to the ASPS, we report another metric to indicate the number of \textit{controllable} agents that are stepped per second. In the Waymo Open Motion Dataset, each scenario contains a varying number of moving agents (Examples in Figure \ref{fig:waymo_open}). By default, our system only classifies something as a controllable agent if its movement is necessary to achieve the goal. Therefore, parked cars throughout the episode are not considered controllable agents. To illustrate what this looks like, we plot the distribution of controllable agents across a subset of scenes in Figure \ref{fig:prof_figure}. 
+
+Considering the variance of controllable agents per scene, the right-hand side of Figure \ref{fig:prof_figure} depicts the Controlled Agent Steps Per Second (CASPS). CASPS reflects the expected performance of our system when utilizing the Waymo Open Motion Dataset with a \textit{randomly sampled} subset of scenarios. Due to the significant variability in agents throughout the dataset, the highest CASPS is notably lower than the ASPS, at around 200,000. Note that this can be improved by strategically selecting scenes, such as filtering for dense scenes with a high number of controllable agents.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/classic_vs_lidar_obs.pdf}
+    \caption{\textbf{ASPS and CASPS comparison between Radial Filter and LiDAR observation types}. The radial filter is slower than lidar due to its linear scan of nearby objects. In contrast, the LiDAR observation type is GPU-accelerated, delivering significantly enhanced performance. As demonstrated in the plots, depending on the scene selection, the LiDAR can achieve a speedup of approximately 3x over the radial filter.}
+    \label{fig:lidar_vs_radial}
+\end{figure}
+
+Lastly, we demonstrate the speed of different observation spaces in Figure \ref{fig:lidar_vs_radial}. We observe that using LiDAR is approximately three times faster than using the radial filter observation (Details about the supported observation spaces are found in Section \ref{sec:sim_features}).
+
+
+\subsection{End-to-end speed and performance}
+\label{sec:end-to-end}
+
+The purpose of GPUDrive is to facilitate research and development in multi-agent algorithms by 1) reducing the completion time of experiments, and 2) enabling academic research labs to achieve scale on a limited computing budget. Ultimately, we are interested in the rate at which a machine learning researcher or practitioner can iterate on ideas using GPUDrive. This section highlights what our simulator enables in this regard by studying the end-to-end process of learning policies in our simulator. 
+
+Figure \ref{fig:constrast_time_perf} contrasts the number of steps (experience) and the corresponding time required to \textit{solve} 10 scenarios from the WOMD between Nocturne \citep{vinitsky2022nocturne} and GPUDrive. We compare Nocturne to GPUDrive, as it is the closest simulator in functionality, except that it is implemented on the CPU. For benchmarking purposes, we say a scene is solved when agents can navigate to their designated target position $95\%$ of the time without colliding or going off-road.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/training_speedup_3_seeds.pdf}
+    \caption{\textbf{From hours to minutes.} \textit{Left}: Training performance (goal-reaching rate) as a function of the global step (AFPS). \textit{Center}: Training performance as a function of wall-clock time. \textit{Right}: Comparison of the total time to solve the same 10 scenarios while replicating environmental and experimental conditions as closely as possible. The green dotted line indicates optimal performance.}
+    \label{fig:constrast_time_perf}
+\end{figure}
+
+As shown in Fig.~\ref{fig:constrast_time_perf}, GPUDrive allows us to solve scenes in minutes. Next, we investigate how the \textit{individual scene completion time}, the time it takes to solve a single scenario, changes as we increase the total number of scenarios we train on. In practice, it may be desirable to train agents on thousands of scenarios. Therefore, we ask whether it is feasible to fully leverage the simulator's capabilities with a single GPU.
+
+Interestingly, we find that the amortized sample efficiency increases with the size dataset of scenes we train in. Figure \ref{fig:scaling_up} shows the average completion time per scenario as we increase the dataset. For instance, using IPPO with 32 scenarios takes 2 minutes per scenario. In contrast, solving 1024 unique scenarios takes about 200 minutes, which amounts to only 15 seconds per scenario. We expect that these scaling benefits will continue as we further increase the size of the training dataset. This suggests that GPUDrive should enable effective utilization of the large WOMD dataset comprising 100,000 diverse traffic scenarios, even with limited computational resources.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\linewidth]{Figures/solve_scene_scaling_barplot.pdf}
+    \caption{\textbf{Scale reduces individual scene completion time}. \textit{Left}: Total time required to solve a fixed number of scenarios to a goal-reaching rate of 95\%. Note that time-to-completion is sub-linear concerning the number of scenes. \textit{Right}: Each additional scenario costs less to solve than the previous scenario. At 1024 scenes, the per-scene cost of solving an additional scene is on the order of 15 seconds.}
+    \label{fig:scaling_up}
+\end{figure}
+
+
+
+
+
+
+
+
+\subsection{Measuring remaining unsolved tasks}
+The Waymo Open Motion Dataset contains a total of 103,354 traffic scenarios \citep{ettinger2021}. In this paper, we demonstrate that an agent can achieve 95\% performance on a subset of 1000 scenes after 15 hours of training. Additionally, we show that the time required to solve scenarios decreases as the dataset size increases. 
+Our analysis of the failure rates in the current best-performing policy suggests that the goal-reaching limit is around 98 \%, due to mislabeled road edges in the dataset, which render some goals unreachable because they are located beyond uncrossable roads. An important direction for future work is developing agents that achieve near-perfect performance, with a goal-reaching rate approaching 100\% and a 0\% collision rate while addressing the limitations posed by data inaccuracies in the benchmark.
+
+
+
+\section{Conclusion}
+
+In this work, we present GPUDrive, a GPU-accelerated, data-driven simulator. GPUDrive is intended to help generate the billions of samples that are likely needed to achieve effective reinforcement learning for multi-agent driving planners. By building atop the Madrona Engine~\citep{shacklett2023extensible}, we can scale GPUDrive to hundreds of worlds with potentially thousands of agents leading to throughput of millions of steps per second. This throughput occurs while synthesizing complex observations such as LiDAR. We show that this throughput has consequent implications for training reinforcement learning agents, leading to the ability to train agents to solve any particular scene in minutes and in seconds when amortized across many scenes. We release the simulator and integrated trained agents to enable further research.
+
+
+This paper is a first step in scaling up reinforcement learning for multi-agent planning in safety-critical, mixed human-autonomous settings. However, several important challenges remain for future work. Firstly, we have not yet identified the optimal hyperparameter settings to effectively utilize the collected data, resulting in training being the bottleneck instead of data collection time. Secondly, while the simulator is fast, collecting data for reinforcement learning leads to frequent reset calls that significantly impact throughput. Lastly, training fully human-level drivers in the simulator to navigate without crashing in any scenario remains an unresolved challenge. We have shown that our simulator allows training of driving agents to achieve a 95\% success rate in a few hours. However, this still does not match human capabilities or the safety standards we strive for. We hope GPUDrive will help the community tackle this open challenge.
+
+
+

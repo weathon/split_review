@@ -1,0 +1,405 @@
+\title{HarmoniCa: Harmonizing Training and Inference for Better Feature Cache in Diffusion Transformer Acceleration}
+
+\begin{abstract}
+Diffusion Transformers (DiTs) have gained prominence for outstanding scalability and extraordinary performance in generative tasks. However, their considerable inference costs impede practical deployment. The feature cache mechanism, which involves storing and retrieving redundant computations across timesteps, holds promise for reducing per-step inference time in diffusion models. Most existing caching methods for DiT are manually designed. Although the learning-based approach attempts to optimize strategies adaptively, it suffers from discrepancies between training and inference, which hampers both the performance and acceleration ratio. 
+Upon detailed analysis, we pinpoint that these discrepancies primarily stem from two aspects: (1) \textit{Prior Timestep Disregard}, where training ignores the effect of cache usage at earlier timesteps, and (2) \textit{Objective Mismatch}, where the training target (align predicted noise in each timestep) deviates from the goal of inference (generate the high-quality image). To alleviate these discrepancies, we propose \textbf{HarmoniCa}, a novel method that \textbf{Harmoni}zes training and inference with a novel learning-based \textbf{Ca}ching framework built upon \textit{Step-Wise Denoising Training} (SDT) and \textit{Image Error Proxy-Guided Objective} (IEPO). Compared to the traditional training paradigm, the newly proposed SDT maintains the continuity of the denoising process, enabling the model to leverage information from prior timesteps during training, similar to the way it operates during inference. Furthermore, we design IEPO, which integrates an efficient proxy mechanism to approximate the final image error caused by reusing the cached feature. Therefore, IEPO helps balance final image quality and cache utilization, resolving the issue of training that only considers the impact of cache usage on the predicted output at each timestep. Extensive experiments on class-conditional and text-to-image (T2I) tasks for 7 models and 4 samplers with resolutions ranging from $256\times256$ to $2048\times2048$ demonstrate the exceptional performance and speedup capabilities of our HarmoniCa. For example, HarmoniCa is the first feature cache method applied to the 20-step \textsc{PixArt}-$\alpha$ $1024\times1024$ that achieves over 1.5$\times$ speedup in latency with an improved FID compared to the non-accelerated model. Remarkably, HarmoniCa requires no image data during training and reduces about 25\% of training time compared to the existing learning-based approach.
+
+\end{abstract}
+
+\section{Introduction}
+
+  
+
+Diffusion models~\citep{ho2020denoising, dhariwal2021diffusion} have recently gained increasing popularity in a variety of generative tasks, such as image~\citep{saharia2022photorealistic, esser2024scaling} and video generation~\citep{blattmann2023stable, ma2024latte}, due to their ability to produce diverse and high-quality samples.
+Among different backbones, Diffusion Transformers (DiTs)~\citep{peebles2023scalable} stand out for offering exceptional scalability.
+However, the extensive parameter size and multi-round denoising nature of diffusion models bring tremendous computational overhead during inference, limiting their practical applications. For instance, generating one 2048$\times$2048 resolution image using PixArt-$\Sigma$~\citep{chen2024pixart} with 0.6B parameters and 20 denoising rounds can take up to 14 seconds on a single NVIDIA H800 80GB GPU, which is unacceptable. 
+
+To accelerate the generation process of diffusion models, previous methods are developed from two perspectives: reducing the number of sampling steps~\citep{liu2022pseudo, song2020score} and decreasing the network complexity in noise prediction of each step~\citep{fang2023structuralpruningdiffusionmodels, he2024efficientdmefficientquantizationawarefinetuning}. Recently, a new branch of research~\citep{selvaraju2024fora, yuan2024ditfastattn, chen2024deltadittrainingfreeaccelerationmethod} has started to focus on accelerating sampling time per step by the feature cache mechanism. 
+This technique takes advantage of the repetitive computations across timesteps in diffusion models, allowing previously computed features to be cached and reused in later steps. 
+Nevertheless, most existing methods are either tailored to the U-Net architecture~\citep{ma2024deepcache, wimbauer2024cache} or develop their strategy based on empirical observations~\citep{chen2024deltadittrainingfreeaccelerationmethod, selvaraju2024fora}, and there is a lack of adaptive and systematic approaches for DiT models. 
+Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} introduces a learnable router to guide the cache scheme for DiT models. However, this method induces discrepancies between training and inference, which always leads to distortion build-up~\citep{ning2023inputperturbationreducesexposure, li2024alleviatingexposurebiasdiffusion, ning2024elucidatingexposurebiasdiffusion}. The discrepancies arise from two main factors: (1) \textit{Prior Timestep Disregard}: During training, the model directly samples a timestep and employs the training images manually added noise akin to DDPM~\citep{hu2021loralowrankadaptationlarge}, ignoring the impact of the feature cache mechanism from earlier steps, which differs from the inference process. (2) \textit{Objective Mismatch}: The training objective minimizes noise prediction error of each timestep, while the inference goal aims for high-quality final images, causing a misalignment in objectives. We believe these inconsistencies hinder effective and efficient router learning.
+
+To alleviate the above discrepancies effectively, we present harmonizing training and inference with HarmoniCa, a novel cache learning framework featuring a unique training paradigm and a distinct learning objective. Specifically, to mitigate the first disparity, we design \textit{Step-Wise Denoising Training} (SDT), which aligns the training process with the full denoising trajectory of inference using a student-teacher model setup. The student utilizes the cache while the teacher does not, effectively mimicking the teacher’s outputs across all continuous timesteps. This approach maintains the reuse and update of the cache at earlier timesteps, similar to inference. Additionally, to address the misalignment in optimization goals, we introduce the \textit{Image Error Proxy-Guided Objective} (IEPO), which leverages a proxy to approximate the final image error and reduces the significant costs of directly utilizing the error to supervise training. This objective helps SDT efficiently balance cache usage and image quality.
+By combining SDT and IEPO, extensive experiments for text-to-image (T2I) and class-conditioned generation tasks show the promising performance and speedup ratio of HarmoniCa, \emph{e.g.}, a $\times1.51$ speedup and even a lower FID~\citep{nash2021generating} for \textsc{PixArt}-$\alpha$ $1024\times1024$~\citep{chen2023pixart}. In addition, HarmoniCa eliminates the requirement of training with a large amount of image data and reduces about $25\%$ training time compared to the existing learning-based method~\citep{ma2024learningtocacheacceleratingdiffusiontransformer}, further enhancing its applicability.
+
+Our contributions are summarized as follows:
+\begin{itemize}[leftmargin=*]
+    \item We uncover two discrepancies between training and inference in the existing learning-based feature cache method: (1) \textit{Prior Timestep Disregard}, indicating that the training process overlooks the influence of preceding timesteps, which is inconsistent with the inference process. (2) \textit{Objective Mismatch}, minimizing intermediate outputs error, instead of the final image error. These discrepancies prevent the method from further performance and acceleration improvements.
+    \item We propose a novel framework called HarmoniCa to alleviate the discovered discrepancies by: (1) \textit{Step-Wise Denoising Training} (SDT), which addresses the first discrepancy by capturing the complete denoising trajectory, ensuring that the model learns to consider the impact of earlier timesteps. (2) \textit{Image Error Proxy-Guided Optimization Objective} (IEPO), which mitigates the second discrepancy by using a proxy for the final image error, and thereby targets aligning the training objective with the inference.
+    \item Extensive experiments on NVIDIA H800 80GB GPUs for DiT-XL/2, \textsc{PixArt}-$\alpha$, and \textsc{PixArt}-$\Sigma$ series--encompassing 7 models, 4 samplers, and 4 resolutions--proves the substantial efficacy and universality of HarmoniCa. For instance, it outperforms previous state-of-the-art (SOTA) by a 6.74 IS increase and 1.24 FID decrease with a higher speedup ratio on DiT-XL/2 $256\times256$. Notably, our image-free framework with much lower training costs exhibits superior efficiency and applicability than the current learning-based method.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\noindent\textbf{Diffusion models.}
+Diffusion models, initially conceptualized with the U-Net architecture~\citep{ronneberger2015unet}, have achieved satisfactory performance in image~\citep{rombach2022ldm, podell2023sdxlimprovinglatentdiffusion} and video generation~\citep{ho2022videodiffusionmodels}. Despite their success, U-Net models struggle with modeling long-range dependencies in complex, high-dimensional data. In response, the Diffusion Transformer (DiT)~\citep{peebles2023scalable, chen2023pixart, chen2024pixart} is introduced, leveraging the inherent scalability of Transformers to efficiently enhance model capacities and handle more complex tasks with improved performance.
+
+\noindent\textbf{Efficent diffusion.}
+Diverse methods have been proposed to tackle the poor real-time performance of diffusion models. These techniques fall into two main categories: reducing the number of sampling steps and decreasing the computational load per denoising step. In the first category, several works utilize distillation~\citep{salimans2022progressive, luhman2021kdingdm} to obtain reduced sampling iterations. Furthermore, this category encompasses advanced techniques such as implicit samplers~\citep{kong2021fastdpm, song2020denoising, zhang2022gddim} and specialized differential equation (DE) solvers. These solvers tackle both stochastic differential equations (SDE)~\citep{song2020score, jolicoeur2021gotta} and ordinary differential equations (ODE)~\citep{lu2022dpm, liu2022pseudo, zhang2022fast}, addressing diverse aspects of diffusion model optimization. In contrast, the second category mainly focuses on model compression. It leverages techniques like pruning~\citep{fang2023structuralpruningdiffusionmodels, zhang2024laptop, wang2024sparsedm} and quantization~\citep{shang2023post,huang2024tfmq,he2024efficientdmefficientquantizationawarefinetuning} to reduce the workload in a static way. Additionally, dynamic inference compression is also being explored~\citep{liu2023oms,pan2024t}, where different models are employed at varying steps of the process. In this work, we focus on the urgently needed DiT acceleration through feature cache, a method distinct from the above-discussed ones.
+
+\noindent\textbf{Feature cache.}
+Due to the high similarity between activations~\citep{li2023q, wimbauer2024cache} across continuous denoising steps in diffusion models, recent studies~\citep{ma2024deepcache, wimbauer2024cache, li2023faster} have explored caching these features for reuse in subsequent steps to avoid redundant computations. Notably, their strategies rely heavily on the specialized structure of U-Net, \emph{e.g.py\#L218}}. Besides, FORA~\citep{selvaraju2024fora} and $\Delta$-DiT~\citep{chen2024deltadittrainingfreeaccelerationmethod} further apply the feature cache mechanism to DiT. However, both methods select the cache position and lifespan in a handcrafted way. Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} introduces a learnable cache scheme but fails to harmonize training and inference. In this work, we design a new training framework, to alleviate the discrepancies between the training and inference, which further enhances the performance and acceleration ratio for DiT.
+
+
+
+\section{Prelimilaries}
+
+\noindent\textbf{Cache granularity.} 
+The noise estimation network of DiT~\citep{peebles2023scalable} is built on the Transformer block~\citep{vaswani2017attention}, which is composed of an Attention block and a feed-forward network (FFN).
+Each Attention block and FFN is wrapped up in a residual connection~\citep{he2016deep}. For convenience, we sequentially denote these Attention blocks and FFNs without residual connections as $\{\texttt{b}_0, \texttt{b}_1,\ldots\texttt{b}_{N-1}\}$, where $N$ is their total amount.
+Following~\cite{ma2024learningtocacheacceleratingdiffusiontransformer}, we store the output of $\texttt{b}_i$ in cache as $\texttt{c}_i$.
+The cache, once completely filled, is represented as follows:
+\begin{equation}
+    \texttt{cache} = [\texttt{c}_0, \texttt{c}_1,\ldots, \texttt{c}_{N-1}].
+\end{equation}
+
+\noindent\textbf{Cache router.} The cache scheme for DiT can be formulated with a pre-defined threshold $\tau$ ($0 \le \tau < 1$) and a customized router matrix:
+\begin{equation}
+    \texttt{Router} = [\texttt{r}_{t,i}]_{1 \le t \le T, 0\le i \le N-1} \in\mathbb{R}^{T\times N},
+\end{equation}
+where $0 < \texttt{r}_{t,i} \le 1$ and $T$ is the maximum denoising step. At timestep $t$ during inference, the residual corresponding to $\texttt{b}_i$ is fused with $\texttt{o}_i$ defined as follows:
+\begin{equation}
+    \texttt{o}_i = \begin{cases} 
+                    \texttt{b}_i(\mathbf{h}_i, \mathbf{cs}), &  \texttt{r}_{t,i} > \tau\\
+                    \texttt{c}_i, & \texttt{r}_{t,i} \le \tau
+                \end{cases},
+                \label{eq:o}
+\end{equation}
+where $\mathbf{h}_i$ is the image feature and $\mathbf{cs}$ represents the conditional inputs~\footnote{For example, $\mathbf{cs}$ represents the time condition and textual condition for text-to-image (T2I) generation.}. Specifically, $\texttt{r}_{t,i} > \tau$ indicates computing $\texttt{b}_i(\mathbf{h}_i, \mathbf{cs})$ as $\texttt{o}_i$. This computed output also replaces $\texttt{c}_i$ in the \texttt{cache}. Otherwise, the model loads $\texttt{c}_i$ from \texttt{cache} without computation. Here we present a naive example of the cache scheme as depicted in Fig.~\ref{fig:example}. To be noted, $\texttt{Router}_{T,:}$ is set to $[1]_{1\times N}$ by default to pre-fill the empty \texttt{cache}. 
+
+\noindent\textbf{Cache usage ratio (CUR).} In addition, we define cache usage ratio (CUR) formulated as $\frac{\sum_{t=1}^{t=T}\sum_{i=0}^{N-1}\mathbb{I}_{\texttt{r}_{t,i} \le \tau}}{N\times T}$ in this paper to represent the reduced computation by reusing cached features. For instance, CUR is roughly equal to $33.33\%$ in Fig.~\ref{fig:example}.
+\begin{figure*}[!th]
+    \centering
+    \setlength{\abovecaptionskip}{0.2cm}
+    \includegraphics[width=0.9\linewidth]{fig/example-cache.pdf}
+     \caption{Generation process from a random Gaussian noise $\bx_4$ to an image $\bx_0$ using feature cache ($T=4, N=3$). We omit the sampler~\citep{ho2020denoising, song2020denoising} and conditional inputs.}
+    \label{fig:example}
+\end{figure*}
+
+
+
+\section{HarmoniCa}
+
+In this section, we first observe that the existing learning-based feature cache strategy shows discrepancies between the training and inference (Sec.~\ref{sec:discrepancy}). Then, we propose a framework named \textbf{HarmoniCa} to \textbf{Harmoni}ze them for better feature \textbf{Ca}che (Sec.~\ref{sec:bridging}). Finally, our HarmoniCa shows higher efficiency and better applicability than the previous training-based method (Sec.~\ref{sec:eff}).
+
+\subsection{Discrepancy between Training and Inference}\label{sec:discrepancy}
+Revealing previous approaches for DiT, most of them~\citep{selvaraju2024fora, chen2024deltadittrainingfreeaccelerationmethod} manually set the value of the $\texttt{Router}$ in a heuristic way.
+To be adaptive, Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} employs a learnable $\texttt{Router}$~\footnote{$\texttt{r}_{t,i}$ in the \texttt{Router} is a learnable parameter.}. However, we have identified two discrepancies between its training and inference phases in the following.
+
+\begin{wrapfigure}{r}{0.40\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.2cm}
+    \includegraphics[width=\linewidth]{fig/learning-to-cache.pdf}
+     \caption{Training paradigm of Learning-to-Cache. $\mathcal{L}_{LTC}^{(t)}$ denotes the loss function. In each iteration, this method manually adds noise to images to obtain $\bx_t$ as the input of DiT at $t$. ``$*$'' in ``DiT $(*)$'' represents the current timestep.}
+    \label{fig:learning-to-cache-paradigm}
+\end{wrapfigure}
+\noindent\textbf{Prior timestep disregard.} As illustrated in Fig.~\ref{fig:example}, the inference process employing feature cache at timestep $t$ is subject to the prior timesteps. For example, at timestep $t=1$, the input $\bx_1$ has the error induced by reusing the cached features $\texttt{c}_0$ and $\texttt{c}_1$ at preceding timestep $t=2$. Furthermore, reusing and updating features at earlier timesteps also shape the contents of the current \texttt{cache}.
+
+However, Learning-to-Cache is unaffected by prior denoising steps during training. Specifically, for each training iteration, as depicted in Fig.~\ref{fig:learning-to-cache-paradigm}~(a), it first uniformly samples a timestep $t$ akin to DDPM~\citep{ho2020denoising}. It then pre-fills an empty \texttt{cache} at $t$ and proceeds to train \texttt{Router}$_{t-1,:}$ at subsequent timestep $t-1$, without being influenced by the feature cache mechanism from timestep $T$ to $t+1$.
+
+\noindent\textbf{Objective mismatch.} Moreover, we also find that Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} solely focuses on the predicted noise at each denoising step during training. It leverages the following learning objective at timestep $t$:
+\begin{equation}
+    \begin{matrix}
+    \mathcal{L}_{LTC}^{(t)}=\mathcal{L}_{MSE}^{(t)} + \beta \sum^{N-1}_{i=0}\texttt{r}_{t,i},
+    \label{eq:learning-to-cache}
+    \end{matrix}
+\end{equation}
+where $\beta$ is a coefficient for the regularization term of the $\texttt{Router}_{t:}$ and $\mathcal{L}_{MSE}^{(t)}$ represents the Mean Square Error (MSE) between the predicted noise of the DiT with and without reusing cached features at $t$.
+
+In contrast, the target during inference is to generate the high-quality image $\bx_0$, which also leads to a discrepancy of objective.
+
+\subsection{Harmonizing Training and Inference}\label{sec:bridging}
+Existing studies~\citep{ning2023inputperturbationreducesexposure, li2024alleviatingexposurebiasdiffusion, ning2024elucidatingexposurebiasdiffusion} on diffusion models show that discrepancies between training and inference phases can lead to error accumulation~\citep{arora-etal-2022-exposure, schmidt-2019-generalization} and results in performance degradation. Therefore, we \textbf{Harmoni}ze training and inference with a new learning-based \textbf{Ca}ching framework called \textbf{HarmoniCa}. It is composed of the following two techniques to alleviate the discrepancies mentioned above. Detailed algorithms of HarmoniCa can be found in Sec.~\ref{sec:overview}.
+
+\noindent\textbf{Step-wise denoising training.} To mitigate the first discrepancy, as shown in Fig.~\ref{fig:overview}~(a), we propose a new training paradigm named \textit{Step-Wise Denoising Traning} (SDT), which completes the entire denoising process over $T$ timesteps, thereby accounting for the \texttt{cache} usage and update from all prior timesteps. Specifically, at timestep $T$, we randomly sample a Gaussian noise $\bx_T$ and perform a single denoising step to pre-fill the \texttt{cache}. Over the following $T-1$ timesteps, The student model, which employs the feature cache mechanism, gradually removes noise to generate an image. Concurrently, the teacher model executes the same task without utilizing the \texttt{cache}. Requiring the student to mimic the output representation of its teacher, we compute the loss function and perform back-propagation to update \texttt{Router}$_{t,:}$ at each timestep $t$. To ensure that each $\texttt{r}_{t,i}$ is differentiable during training, distinct from Eq.~(\ref{eq:o}), we proportionally combine the directly computed feature with the cached one to obtain $\texttt{o}_i$ following \cite{ma2024learningtocacheacceleratingdiffusiontransformer}:
+\begin{equation}
+    \texttt{o}_i = \texttt{r}_{t,i}\texttt{b}_i(\mathbf{h}_i, \mathbf{cs}) + (1 - \texttt{r}_{t,i})\texttt{c}_i.
+    \label{eq:train-behavior}
+\end{equation} Similar to inference, we also update $\texttt{c}_i$ in the \texttt{cache} with $\texttt{b}_i(\mathbf{h}_i, \mathbf{cs})$ when $\texttt{r}_{t,i}>\tau$. To improve training stability~\citep{wimbauer2024cache}, we fetch the output from the student as the input to the teacher for the next iteration. We repeat the above $T$ learning iterations until the end of training. 
+
+\begin{figure*}[!ht]
+    \centering
+    \setlength{\abovecaptionskip}{0.2cm}
+    \includegraphics[width=\linewidth]{fig/overview.pdf}
+     \caption{Overview of HarmoniCa. (a) \textit{Step-Wise Denoising Training} (SDT) mimics the multi-timestep inference stage, which integrates the impact of prior timesteps at $t$. (b) \textit{Image-Error Proxy-Guided Objective} (IEPO) incorporates the final image error into the learning objective by an efficient proxy $\lambda^{(t)}$, which is updated through gradient-free image generation passes every \texttt{C} training iterations. $\mathcal{M}^{(t)}$ masks the \texttt{Router} to disable the impact of the cache mechanism at $t$. $\odot$ denotes the operation of element-wise multiplication.}
+    \label{fig:overview}
+\end{figure*}
+As depicted in Fig.~\ref{fig:mse}, by incorporating prior denoising timesteps during training, SDT significantly reduces error at each timestep and obtains a much more accurate image $\bx_0$, even with lower computation, compared to Learning-to-Cache.
+
+\begin{wrapfigure}{r}{0.45\linewidth}
+   \centering
+   \setlength{\abovecaptionskip}{0.2cm}
+   \includegraphics[width=\linewidth]{fig/mse_comparison.pdf}
+        \caption{\label{fig:mse} MSE of $\bx_t$ for DiT-XL/2 $256\times 256$~\citep{peebles2023scalable} ($T=20, N=56$) induced by different feature cache methods. $\bx_t$ is the noisy image obtained at timestep $t+1$. ``LTC'' denotes Learning-to-Cache. For a fair comparison, $\mathcal{L}^{(t)}_{LTC}$ is employed for SDT. We mark the CUR in the brackets.
+        }
+\end{wrapfigure}
+\noindent\textbf{Image error proxy-guided objective.} For the second discrepancy, a straightforward solution to align the target with inference involves using the error of final image $\bx_0$ caused by \texttt{cache} usage directly with a regularization term of \texttt{Router} as our training objective. However, even for DiT-XL/2 $256\times 256$~\citep{peebles2023scalable} with a small training batch size, this requires approximately $5\times$ GPU memory and $10\times$ time compared to SDT combined with $\mathcal{L}_{LTC}^{(t)}$ as detailed in Sec.~\ref{sec:image-err}, making it impractical. Therefore, we have to identify a proxy for the error of $\bx_0$ that can be integrated into the learning objective.
+
+Based on the above analysis, we propose an \textit{Image Error Proxy-guided Objective} (IEPO). It is defined at each timestep $t$ as follows:
+\begin{equation}
+    \begin{matrix}
+    \mathcal{L}_{IEPO}^{(t)} = \lambda^{(t)}\mathcal{L}_{MSE}^{(t)} + \beta \sum^{N-1}_{i=0}\texttt{r}_{t,i},
+    \label{eq:image-error-aware-loss}
+    \end{matrix}
+\end{equation}
+where $\lambda^{(t)}$ is our final image error proxy treated as a coefficient of $\mathcal{L}_{MSE}^{(t)}$. This proxy represents the final image error caused by the \texttt{cache} usage at $t$. With a large $\lambda^{(t)}$, $\mathcal{L}_{MSE}^{(t)}$ prioritizes reduction of the output error at $t$. This tends to decrease the cached feature usage rate at the corresponding timestep, and vice versa. Therefore, our proposed objective considers the trade-off between the error of $\bx_0$ and the \texttt{cache} usage at a certain denoising step. 
+
+Here, we detail the process to obtain $\lambda^{(t)}$ as follows. For a given \texttt{Router}, a mask matrix is defined to disable the use of cached features and force updating the entire \texttt{cache} at $t$ as:
+\begin{equation}
+    \mathcal{M}^{(t)}_{j,k} =\begin{cases} 
+                    1, &  j\ne t\\
+                    \frac{1}{\texttt{r}_{j,k}}, & j=t
+                \end{cases},
+    \label{eq:mask}
+\end{equation}
+where $(j,k)$~\footnote{$1 \le j \le T$ and $0\le k \le N-1$.} denotes the index of $\mathcal{M}^{(t)} \in \mathbb{R}^{T\times N}$.
+As depicted in Fig.~\ref{fig:overview}~(b), $\bx_0$ and $\bx_0^{(t)}$ are final images generated from a randomly sampled Gaussian noise $\bx_T$ using feature cache guided by (Upper) \texttt{Router} and (Lower) \texttt{Router} element-wise multiplied by $\mathcal{M}^{(t)}$, respectively. Then, we can formulate $\lambda^{(t)}$ as:
+\begin{equation}
+    \lambda^{(t)} = \|\bx_0-\bx_0^{(t)}\|_F^2,
+    \label{eq:lambda}
+\end{equation}
+where $\|\cdot\|_F$ denotes the Frobenius norm. To adapt to the training dynamics, we periodically update all the coefficients $\{\lambda^{(1)}, \ldots, \lambda^{(T)}\}$ every \texttt{C} iterations~\footnote{$\texttt{C} \mod T = 0$.}, instead of employing static ones.
+
+ \begin{figure*}[!ht]
+   \centering
+   \setlength{\abovecaptionskip}{0.2cm}
+   \begin{minipage}[b]{0.33\linewidth}
+        \centering
+        \begin{subfigure}[tp!]{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{fig/vis/fp.pdf}
+        \subcaption{\label{fig:fp-vis}DiT \emph{w/o} feature cache}
+        \end{subfigure}
+   \end{minipage}\hfill
+   \begin{minipage}[b]{0.33\linewidth}
+        \centering
+        \begin{subfigure}[tp!]{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{fig/vis/nid.pdf}
+        \subcaption{\label{fig:SDT-ltc}SDT$+\mathcal{L}_{LTC}^{(t)}$ ($\times 1.40$)}
+        \end{subfigure}
+   \end{minipage}\hfill
+   \begin{minipage}[b]{0.33\linewidth}
+        \centering
+        \begin{subfigure}[tp!]{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{fig/vis/flexcache.pdf}
+        \subcaption{\label{fig:flexcache-vis}HarmoniCa ($\times1.44$)}
+        \end{subfigure}
+   \end{minipage}
+   \caption{\label{fig:vis}Random samples for DiT-XL/2 $256\times256$~\citep{peebles2023scalable} \emph{w/} and \emph{w/o} feature cache ($T=20$). We mark the speedup ratio in the brackets.}
+\end{figure*}
+Fig.~\ref{fig:vis} shows that $\mathcal{L}_{IEPO}^{(t)}$ helps yield much more accurate objective-level traits and significantly improves the quality of $\bx_0$ even at a higher speedup ratio than $\mathcal{L}_{LTC}^{(t)}$. The study in Sec.~\ref{sec:necessity} justifies that employing $\mathcal{L}_{LTC}^{(t)}$ incurs the optimization deviating from minimizing the error of $\bx_0$.
+
+\subsection{Efficiency Discussion}\label{sec:eff}
+\noindent\textbf{Training efficiency.} Our HarmoniCa incurs significantly lower training costs than the previous learning-based method. As shown in Tab.~\ref{tab:cost},  HarmoniCa requires no training images, whereas Learning-to-Cache utilizes original training datasets. Thus, it is challenging to apply Learning-to-Cache to models like the \textsc{PixArt}-$\alpha$~\citep{chen2023pixart} family, which are trained on large datasets, limiting its applicability. Moreover, while dynamic update of $\lambda^{(t)}$ incurs approximately 10\% extra time overhead, HarmoniCa requires only three-quarters of the training hours compared to Learning-to-Cache, which needs to pre-fill the \texttt{cache} for each training iteration.
+
+\begin{wraptable}{r}{0.5\linewidth}
+    \renewcommand{\arraystretch}{1.5}
+    \setlength{\tabcolsep}{2mm}
+    \centering
+    \caption{Training costs of learning-based feature cache methods for DiT-XL/2 $256\times256$~\citep{peebles2023scalable} ($T=20$). We train with all methods for 20K iterations using a global batch size 64 on 4 NVIDIA H800 80GB GPUs. For HarmoniCa, we set $\texttt{C}=500$. As in the original paper, we utilize the full ImageNet training set \citep{russakovsky2015imagenet} for Learning-to-Cache.}
+    \resizebox{\linewidth}{!}{
+\begin{tabular}{c|ccc}
+\toprule
+Method & \#Images & Time(h) & Memory(GB/GPU) \\
+\hline
+Learning-to-Cache & 1.22M & 2.15 &  33.33\\
+\hdashline
+SDT$+\mathcal{L}_{LTC}^{(t)}$ & 0 & 1.47 & 33.28 \\
+\rowcolor{mycolor!30}HarmoniCa & 0 & 1.63 & 33.28\\
+\bottomrule
+\end{tabular}
+    }
+    \label{tab:cost}
+\end{wraptable}
+\noindent\textbf{Inference efficiency.} Fortunately, our method with a pre-learned \texttt{Router} has no computational overhead during runtime. Moreover, less than 6\% extra memory overhead~\footnote{The \texttt{cache} occupies 0.49 GB GPU memory and inference without the feature cache mechanism takes 8.18 GB GPU memory.} is induced by \texttt{cache} for DiT-XL/2 $256\times 256$ with a batch size of 8. Therefore, the introduced inference cost is controlled at a small level.
+
+
+
+\section{Experiments}
+
+This section begins by outlining the detailed experimental protocols (Sec.~\ref{sec:imp-detail}). Subsequently, we provide comprehensive comparisons across different methods to show the superior performance and acceleration ratio of our HarmoniCa (Sec.~\ref{sec:main-res}). Finally, we provide ablation studies for the key designs of our method (Sec.~\ref{sec:ablation}).
+
+\subsection{Implementation Details}\label{sec:imp-detail}
+\noindent\textbf{Models and datasets.}
+We conduct experiments on two different image generation tasks. For class-conditional task, we employ DiT-XL/2~\citep{peebles2023scalable} $256\times256$ and $512\times512$ models pre-trained and accessed on ImageNet dataset~\citep{russakovsky2015imagenet}. For text-to-image (T2I) task, we utilize \textsc{PixArt}-$\alpha$~\citep{chen2023pixart} series, known for its outstanding performance. These models including \textsc{PixArt}-XL/2 at resolutions of $256\times256$ and $512\times512$, along with \textsc{PixArt}-XL/2-1024-MS at a higher resolution of $1024\times1024$, are tested on MS-COCO dataset~\citep{lin2015microsoftcococommonobjects}. We additionally use T5 model~\citep{raffel2023exploringlimitstransferlearning} as their text encoders. 
+
+\noindent\textbf{Training settings.} Following \cite{ma2024learningtocacheacceleratingdiffusiontransformer}, we set the threshold $\tau$ as 0.1 for all the models. Each of them is trained for 20K iterations employing the AdamW optimizer~\citep{loshchilov2019decoupledweightdecayregularization} on 4 NVIDIA H800 80GB GPUs. The learning rate is fixed at 0.01, $\texttt{C}$ is set to 500, and global batch sizes of 64, 48, and 32 are utilized for models with increasing resolutions. Additionally, we collect 1000 MS-COCO captions for T2I training. 
+
+\noindent\textbf{Baselines.} For class-conditional experiments, we choose the current state-of-the-art (SOTA) Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} as our baseline. Due to the limits mentioned in Sec.~\ref{sec:eff}, we employ FORA~\citep{selvaraju2024fora} and $\Delta$-DiT~\citep{chen2024deltadittrainingfreeaccelerationmethod}, excluding Learning-to-Cache for the T2I task. The results of these methods are obtained either by re-running their open-source code (if available) or by using the data provided in the original papers, all under the same conditions as our experiments. We also report the performance of models with reduced denoising steps.
+
+\noindent\textbf{Evaluation.}
+To assess the generation quality, Fréchet Inception Distance (FID)~\citep{nash2021generating}, and sFID~\citep{nash2021generating} are applied to all experiments. For DiT/XL-2, we additionally provide Inception Score (IS)~\citep{salimans2016improved}, Precision, and Recall~\citep{kynkaanniemi2019improved} as reference metrics. For \textsc{PixArt}-$\alpha$, to gauge the compatibility of image-caption pairs, we calculate CLIP score~\citep{hessel2022clipscore} using ViT-B/32~\citep{dosovitskiy2020image} as the backbone. To evaluate the inference efficiency, we measure the CUR~\footnote{Definition can be found in Sec.~\ref{sec:pre}.} and the inference latency for a batch size of 8. In detail, we sample 50K images adopting DDIM~\citep{song2020denoising} for DiT-XL/2, and 30K images utilizing IDDPM~\citep{nichol2021improved}, DPM-Solver++~\citep{lu2022dpm+}, and SA-Solver~\citep{xue2024sa} for \textsc{PixArt}-$\alpha$. All of them use classifier-free guidance (\texttt{cfg})~\citep{ho2022classifier}.
+
+More implementation details can be found in Sec.~\ref{sec:more-imp} and the results of \textsc{PixArt}-$\Sigma$~\citep{chen2024pixart} family are available in Sec.~\ref{sec:sigma}, including generation with an extremely high-resolution of $2048 \times 2048$. In addition, we also present the results of combination with quantization to further accelerate DiT inference in Sec.~\ref{sec:improve-over}.
+
+\subsection{Main Results}\label{sec:main-res}
+\begin{table}[!th]
+    \renewcommand{\arraystretch}{1.4}
+    \setlength{\tabcolsep}{3mm}
+    \centering
+    \caption{Accelerating image generation on ImageNet for the DiT-XL/2. We mark the speedup ratio in the brackets and highlight the \textbf{best score} in bold.}
+    \resizebox{0.95\linewidth}{!}{
+
+
+\begin{tabu}{l|c|lllll|ll}
+\toprule 
+Method &T & IS$\uparrow$ & FID$\downarrow$ & sFID$\downarrow$ &Prec.$\uparrow$ & Recall$\uparrow$ & CUR(\%)$\uparrow$ & Latency(s)$\downarrow$\\
+\midrule
+\multicolumn{9}{c}{\cellcolor[gray]{0.92}DiT-XL/2 $256\times256$ ($\texttt{cfg}=1.5$)} \\
+\midrule
+DDIM~\citep{song2020denoising} & 50 & 240.37 & 2.27 & 4.25 & 80.25 & 59.77 & - & 1.767  \\
+DDIM~\citep{song2020denoising} & 39 & 237.84 & 2.37 & 4.32 & 80.22 & 59.31& - & 1.379$_{(\times 1.28)}$  \\
+Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} & 50 & 233.26 & 2.62 & 4.50 & 79.40 & 59.15& 23.39& 1.419$_{(\times 1.25)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 50 & \textbf{238.74} & \textbf{2.36} & \textbf{4.24} & \textbf{80.57} & \textbf{59.68} & \textbf{23.68} & \textbf{1.361$_{(\times \mathbf{1.30})}$}  \\
+\hdashline
+DDIM~\citep{song2020denoising} & 20 & 224.37 & 3.52 & 4.96 & 78.47 & 58.33 & - & 0.658  \\
+DDIM~\citep{song2020denoising} & 14 & 201.83 & 5.77 & 6.61 & 75.14 & 55.08 & - & 0.466$_{(\times1.41)}$  \\
+Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} & 20 & 201.37 & 5.34 & 6.36 & 75.04 & 56.09 & 35.60 & 0.468$_{(\times 1.41)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 20 & \textbf{206.57} & \textbf{4.88} & \textbf{5.91} & \textbf{75.20} &\textbf{58.74} &\textbf{37.50 }& \textbf{0.456}$_{(\times \mathbf{1.44})}$ \\
+\hdashline
+DDIM~\citep{song2020denoising} & 10 & 159.93 & 12.16 & 11.31 & 67.10 & 52.27 & - & 0.332  \\
+DDIM~\citep{song2020denoising} & 9 & 140.37 & 16.54 & 14.44 & 62.63 & 50.08 & - & 0.299$_{(\times 1.11)}$  \\
+Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} & 10 & 145.09 & 14.59 & 11.58 & 64.03 & 52.06 & 19.11 & 0.279$_{(\times 1.19)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 10 & \textbf{151.83} & \textbf{13.35 }& \textbf{11.13} & \textbf{65.22} & \textbf{52.18} & \textbf{22.86} & \textbf{0.270}$_{(\times \mathbf{1.23})}$  \\
+\midrule
+\multicolumn{9}{c}{\cellcolor[gray]{0.92}DiT-XL/2 $512\times512$ ($\texttt{cfg}=1.5$)} \\
+\midrule
+DDIM~\citep{song2020denoising} & 20 & 184.47 & 5.10 & 5.79 & 81.77 & 54.50 & - & 3.356  \\
+DDIM~\citep{song2020denoising} & 16 & 173.31 & 6.47 & 6.67 & 81.10 & 51.30 & - & 2.688$_{(\times1.25)}$  \\
+Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} & 20 & 178.11 & 6.24 & 7.01 & 81.21 & 53.30 & 23.57 & 2.633$_{(\times1.28)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 20 & \textbf{179.84} & \textbf{5.72} & \textbf{6.61} & \textbf{81.33} &\textbf{ 55.80} & \textbf{25.98} & \textbf{2.574}$_{(\times\mathbf{1.30})}$  \\
+
+\bottomrule
+\end{tabu}
+    }
+    \label{tab:dit-xl}
+\end{table}
+\noindent\textbf{Class-conditional generation.} We begin our evaluation with DiT-XL/2 on ImageNet and compare it with current SOTA Learning-to-Cache~\citep{ma2024learningtocacheacceleratingdiffusiontransformer} and the approach employing fewer timesteps. The results are presented in Tab.~\ref{tab:dit-xl}, where our HarmoniCa surpasses baseline methods. Notably, with a higher speedup ratio for a 10-step DiT-XL/2 $256\times256$, HarmoniCa achieves an FID of 13.35 and an IS of 206.57, outperforming Learning-to-Cache by 1.24 and 5.20, respectively. Moreover, the superiority of our HarmoniCa increases as the number of timesteps decreases. We conjecture that it is because the difficulty to learn a \texttt{Router} rises as the timestep goes up. Additionally, we further conduct experiments with a lower CUR for this task in Sec.~\ref{sec:comp-ltc-small-cur}.
+
+\noindent\textbf{T2I generation.} We also present PixArt-$\alpha$ results in Tab.~\ref{tab:pixart}, comparing our HarmoniCa against FORA~\citep{selvaraju2024fora} and the method using fewer timesteps. HarmoniCa outperforms these benchmarks across all metrics. For example, with the 20-step DPM-Solver++, \textsc{PixArt}-$\alpha$ $256\times256$ employing HarmoniCa achieves an FID of 27.61 and speeds up by $1.52\times$, surpassing the non-accelerated model’s FID of 27.68. In contrast, DPM-Solver++ with 15 steps and FORA only achieves FIDs of 31.68 and 38.20, respectively, with speed increases under $1.32\times$. Notably, HarmoniCa also cuts about 36\% off processing time without dropping performance when using the IDDPM sampler, while FORA results in over a 20 FID increase and a 15.67\% CUR decrease. Overall, our method consistently delivers superior performance and speedup improvements across different resolutions and samplers, demonstrating its efficacy. HarmoniCa also significantly outperforms $\Delta$-DiT~\citep{chen2024deltadittrainingfreeaccelerationmethod}, which can be found in Sec.~\ref{sec:comp-delta}.
+\begin{table}[!th]
+    \renewcommand{\arraystretch}{1.4}
+    \setlength{\tabcolsep}{3mm}
+    \centering
+    \caption{Accelerating image generation on MS-COCO for the \textsc{PixArt}-$\alpha$.}
+    \resizebox{0.8\linewidth}{!}{
+
+\begin{tabu}{l|c|lll|ll}
+\toprule Method &T & CLIP$\uparrow$ & FID$\downarrow$ & sFID$\downarrow$ & CUR(\%)$\uparrow$ & Latency(s)$\downarrow$\\
+\midrule
+\multicolumn{7}{c}{\cellcolor[gray]{0.92}\textsc{PixArt}-$\alpha$ $256\times256$ ($\texttt{cfg}=4.5$)} \\
+\midrule
+DPM-Solver++~\citep{lu2022dpm+} & 20 & 30.96 & 27.68 & 36.39 & - & 0.553  \\
+DPM-Solver++~\citep{lu2022dpm+} & 15 & 30.77 & 31.68 & 38.92 & - & 0.418$_{(\times1.32)}$ \\
+FORA~\citep{selvaraju2024fora} & 20 & - & 38.20 & - & 50.00 & 0.424$_{(\times1.30)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 20 & \textbf{30.93 }&\textbf{ 27.61} & \textbf{37.48} & \textbf{65.02} & \textbf{0.364}$_{(\times\mathbf{1.52})}$ \\
+
+\hdashline
+IDDPM~\citep{nichol2021improved} & 100 & 31.25 & 24.15 & 33.65 & - & 2.572 \\
+IDDPM~\citep{nichol2021improved} & 75 & 31.25 & 24.17 & 33.73 & - & 1.868$_{(\times1.37)}$  \\
+FORA~\citep{selvaraju2024fora} & 100 & - &55.30 & - & 50.00 & 1.889$_{(\times1.36)}$  \\ 
+\rowcolor{mycolor!30}HarmoniCa & 100 & \textbf{31.23} & \textbf{23.79} &\textbf{ 32.49} & \textbf{65.67} & \textbf{1.641}$_{(\times\mathbf{1.56})}$ \\
+\hdashline
+SA-Solver~\citep{xue2024sa} & 25 & 31.31 & 23.76 & 34.93 & - & 0.891  \\
+SA-Solver~\citep{xue2024sa} & 20 & 31.28 & 23.96 & 35.63 & - & 0.677$_{(\times1.31)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 25 & \textbf{31.29} &\textbf{23.85 }& \textbf{35.56} & \textbf{54.31 }& \textbf{0.665}$_{(\times\mathbf{1.34})}$  \\
+\midrule
+\multicolumn{7}{c}{\cellcolor[gray]{0.92}\textsc{PixArt}-$\alpha$ $512\times 512$ ($\texttt{cfg}=4.5$)} \\
+\midrule
+DPM-Solver++~\citep{lu2022dpm+} & 20 & 31.30 & 23.96 & 40.34 & - & 1.759  \\
+DPM-Solver++~\citep{lu2022dpm+} & 15 & 31.29 & 25.12 & 40.37 & - & 1.291$_{(\times1.36)}$ \\
+\rowcolor{mycolor!30}HarmoniCa & 20 &\textbf{31.30 } & \textbf{24.99 }& \textbf{40.36} & \textbf{55.01 }& \textbf{1.168}$_{(\times\mathbf{1.51})}$  \\
+\midrule
+\multicolumn{7}{c}{\cellcolor[gray]{0.92}\textsc{PixArt}-$\alpha$ $1024\times 1024$ ($\texttt{cfg}=4.5$)} \\
+\midrule
+DPM-Solver++~\citep{lu2022dpm+} & 20 & 31.10 & 25.01 & 37.80 & - & 9.470  \\
+DPM-Solver++~\citep{lu2022dpm+} & 15 & 31.07 & 25.77 & 42.50 & - & 7.141$_{(\times1.32)}$  \\
+\rowcolor{mycolor!30}HarmoniCa & 20 & \textbf{31.08} & \textbf{24.76}  & \textbf{41.83} & \textbf{59.65} & \textbf{6.289} $_{(\times\mathbf{1.51})}$  \\
+
+\bottomrule
+\end{tabu}
+    }
+    \label{tab:pixart}
+\end{table}
+
+\subsection{Ablation Studies}\label{sec:ablation}
+In this subsection, we employ a 20-step DDIM~\citep{song2020denoising} sampler for DiT-XL/2 $256\times256$ and settings in Sec.~\ref{sec:imp-detail} without special claim.
+\begin{table}[!th]
+    \renewcommand{\arraystretch}{1.4}
+    \setlength{\tabcolsep}{3mm}
+    \centering
+    \caption{Ablation results of different components. The first row denotes the model \emph{w/o} feature cache. The second and last rows denote \gre{Learning-to-Cache} and \bl{HarmoniCa}, respectively.}
+    \resizebox{0.8\linewidth}{!}{
+
+\begin{tabu}{cccc|lll|ll}
+    \toprule
+     \multicolumn{2}{c}{Training Paradigm}& \multicolumn{2}{c|}{Learning Objective} & \multirow{2}{*}{IS$\uparrow$} &\multirow{2}{*}{FID$\downarrow$} & \multirow{2}{*}{sFID$\downarrow$} & \multirow{2}{*}{CUR(\%)$\uparrow$} & \multirow{2}{*}{Latency(s)$\downarrow$}\\ 
+     \cmidrule(r){1-2}\cmidrule(r){3-4} 
+     Learning-to-Cache & SDT & $\mathcal{L}_{LTC}^{(t)}$ & $\mathcal{L}_{IEPO}^{(t)
+     }$ & & & & \\
+     \midrule
+     & & & & 224.37 & 3.52 & 4.96 & - & 0.658 \\
+     \rowcolor{c6!20}\ding{52} & & \ding{52} & & 115.00 & 18.57 & 16.18 & 32.68 & 0.483$_{(\times 1.36)}$\\
+     \ding{52} & &  & \ding{52} & 203.41 & 5.20 & 6.07 & 36.70 & 0.458$_{(\times 1.44)}$ \\
+      & \ding{52} & \ding{52} &  & 166.65 & 8.01 & 7.62 & 34.20 & 0.471$_{(\times 1.40)}$ \\
+      \rowcolor{mycolor!30}& \ding{52} &  & \ding{52} & \textbf{206.67} & \textbf{4.88} & \textbf{5.91} & \textbf{37.50} & \textbf{0.456}$_{(\times\mathbf{ 1.44})}$ \\
+      \bottomrule
+\end{tabu}
+    }
+    \label{tab:components}
+\end{table}
+
+\noindent\textbf{Effect of different components.} To show the effectiveness of components involved in HarmoniCa, we apply different combinations of training techniques and show the results in Tab.~\ref{tab:components}. For the training paradigm, equipped with $\mathcal{L}_{LTC}^{(t)}$, our SDT significantly decreases FID by 10 compared to that of Learning-to-Cache. For the learning objective, our IEPO achieves nearly a 40 IS improvement and a 3.13 FID reduction for SDT compared with $\mathcal{L}_{LTC}^{(t)}$. Moreover, both SDT and IEPO can help significantly enhance performance for the counterparts in the table. For a fair comparison, we modify the implementation of Learning-to-Cache to train the entire \texttt{Router} in Tab.~\ref{tab:components}. A detailed discussion of this can be found in Sec.~\ref{sec:comp-ltc-sample}.
+
+\begin{wrapfigure}{r}{0.48\linewidth}
+   \centering
+   \setlength{\abovecaptionskip}{0.2cm}
+   \includegraphics[width=\linewidth]{fig/interval.pdf}
+        \caption{\label{fig:interval}Ablation results of iteration interval \texttt{C}. $\varnothing$ denotes the model employing $\mathcal{L}_{LTC}^{(t)}$ as its loss function.}
+\end{wrapfigure}
+\noindent\textbf{Effect of iteration interval} \texttt{C}\textbf{.} As illustrated in Fig.~\ref{fig:interval}, we carry out experiments to evaluate the impact of varying \texttt{C} values on updating $\lambda^{(t)}$ in Eq.~(\ref{eq:lambda}). Despite similar speedup ratios, using an extreme \texttt{C} value leads to notable performance degradation. Specifically, a large \texttt{C} means the proxy $\lambda^{(t)}$ fails to accurately and timely reflect the cache mechanism's effect on the final image. Conversely, a small \texttt{C} results in overly frequent updates, complicating training convergence. Hence, we choose a moderate value of 500 as \texttt{C} in this paper based on its superior performance, as demonstrated in the figure.
+    
+\begin{wrapfigure}{r}{0.48\linewidth}
+   \centering
+   \setlength{\abovecaptionskip}{0.2cm}
+   \includegraphics[width=\linewidth]{fig/beta.pdf}
+        \caption{\label{fig:beta}Ablation results of coefficient $\beta$ in Eq.~(\ref{eq:image-error-aware-loss}). $\varnothing$ denotes the model \emph{w/o} feature cache.}
+\end{wrapfigure}
+\noindent\textbf{Effect of coefficient $\beta$.} We also explore the trade-off between inference speed and performance for different values of $\beta$ in Eq.~(\ref{eq:image-error-aware-loss}). As shown in Fig.~\ref{fig:beta}, a higher $\beta$ leads to greater acceleration but at the cost of more pronounced performance degradation, and vice versa. Notably, performance declines gradually when $\beta \le 8e^{-8}$ and more sharply outside this range. This observation suggests the potential for autonomously finding an optimal $\beta$ to balance speed and performance, which we aim to address in future research. 
+    
+\noindent\textbf{Effect of different metrics for $\lambda^{(t)}$.} In Tab.~\ref{tab:lambda}, we conduct experiments to explore the effect of $\lambda^{(t)}$ with different metrics. Both $\|\cdot\|_F^{2}$ and $\mathcal{D}_{KL}(\cdot)$ lead to notable performance enhancements compared to using only the output error (\emph{i.e.}, $\lambda^{(t)}=1$) at each time step. Due to the insensitivity to outliers, $\sum|\cdot|$ is generally less effective for image reconstruction and inferior to the others in Tab.~\ref{tab:lambda}.
+\begin{table}[!th]
+    \renewcommand{\arraystretch}{1.4}
+    \setlength{\tabcolsep}{3mm}
+    \centering
+    \caption{Ablation results of different metrics for $\lambda^{(t)}$. The first and second columns represent the model \emph{w/o} feature cache and SDD$+\mathcal{L}_{LTC}^{(t)}$, respectively. $\mathcal{D}_{KL}(\cdot)$ denotes Kullback–Leibler (KL) divergence.}
+    \resizebox{0.7\linewidth}{!}{
+\begin{tabu}{c|lllll}
+\toprule $\lambda^{(t)}$ & $+\infty$ & 1 & $\sum|\bx_0-\bx_0^{(t)}|$ & $\|\bx_0-\bx_0^{(t)}\|_F^2$  & $\mathcal{D}_{KL}(\bx_0, \bx_0^{(t)})$ \\
+\midrule
+IS$\uparrow$ & 224.37 & 166.65 & 172.08 &\textbf{206.57 } & 205.91  \\
+FID$\downarrow$ & 3.52 & 8.01 & 6.95 &\textbf{4.88}  & 5.25    \\
+sFID$\downarrow$ & 4.96  & 7.62 & 7.79 & 5.91  & \textbf{5.51} \\
+\midrule
+CUR(\%)$\uparrow$ & -  & 34.20 & 34.82  & \textbf{37.50} & 36.79    \\
+Latency(s)$\downarrow$ & 0.658 & 0.471$_{(\times1.40)}$ & 0.470$_{(\times1.40)}$   & \textbf{0.456}$_{(\times\mathbf{1.44})}$   & 0.458$_{(\times1.44)}$   \\
+\bottomrule
+\end{tabu}
+    }
+    \label{tab:lambda}
+\end{table}
+
+
+
+\section{Conclusion}
+
+
+In this research, we focus on accelerating Diffusion Transformers (DiTs) through the cache mechanism in a learning-based way. We first identify two discrepancies between training and inference of the previous method: (1) \textit{Prior Timestep Disregard} in which earlier step influences are neglected, leading to inconsistency with inference, and (2) \textit{Objective Mismatch}, where training focuses on intermediate results, misaligning with the final image quality target. To alleviate these discrepancies, we \textbf{Harmoni}ze training and inference by introducing a novel feature \textbf{Ca}che framework dubbed \textbf{HarmoniCa}, which consists of the \textit{Step-wise Denoising Training} (SDT) and the \textit{Image Error-Aware Optimization Objective} (IEPO). SDT captures the influence of all timesteps during training, closing the gap with the inference stage, while IEPO introduces an efficient proxy for final image error, ensuring that optimization objectives remain aligned with inference requirements. With the combination of the two components, extensive experiments demonstrate that our framework achieves superior performance and efficiency with significantly lower training costs compared to the existing training-based method. 
+
+
+

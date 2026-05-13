@@ -1,0 +1,394 @@
+\title{Generative Parameter Efficient Fine-Tuning}
+
+\begin{abstract}
+We present \underline{G}enerative Parameter-Eff\underline{I}cient \underline{F}ine-\underline{T}uning (GIFT) for adapting pretrained Transformer backbones on downstream tasks.  GIFT learns to generate the fine-tuned weights for a layer directly  from its pretrained weights. The GIFT network is parameterized in a minimally-simple way by two linear layers (without bias terms), and is shared by different pretrained layers selected for fine-tuning (e.g., the Query layers), which result in significantly fewer trainable parameters compared to the layer-specific methods like Low-Rank Adapter (LoRA). We also show this formulation bridges parameter-efficient fine-tuning and representation fine-tuning. We perform comprehensive experiments on natural language tasks (commonsense and arithmetic reasoning, instruction tuning,  and sequence classification) and computer vision tasks (fine-grained classification). We obtain the best performance and parameter efficiency among baselines on commonsense and arithmetic reasoning, and instruction following using the Llama family of models and on visual recognition benchmarks using Vision Transformers. Notably, compared to LoRA, we obtain 5.7\% absolute increase in average accuracy with 14 times reduction of parameters on Commonsense170k using {\tt Llama-3 (8B)}, and  5.4\% absolute increase in the win rate with 4 times reduction of parameters using {\tt Llama-2 (7B)} during instruction tuning. Our GIFT also obtains a slightly higher win rate on instruction tuning than {\tt GPT 3.5 (Turbo 1106)}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+\subsection{Motivation and Objective}
+\label{sec:motivation}
+
+Fine-tuning pretrained deep neural networks (DNNs) as feature backbones for downstream tasks, often known as transfer learning, has been an important and challenging research topic in deep learning literature since the resurgence of DNNs pioneered by the AlexNet~\citep{alexnet} trained on the ImageNet-1k dataset~\citep{ImageNet}.  %
+While straightforward, finetuning all the parameters of a model may not yeild the best results on a downstream task, as subtle details in terms of exploiting the pretrained model and exploration for the new task can affect the performance~\citep{lee2022surgical}. This raises questions about which parts of a pretrained model to fine-tune, and how they should be trained. In recent years, large feature backbones with open weights like Llama~\citep{llama,llama2,llama3}, termed foundation models~\citep{bommasani2021opportunities}, have become ubiquitous. Training such models from scratch is impossible with limited resources, and fine-tuning them entirely may also be costly. However, considering the exploration-exploitation tradoff mentioned above, it may be unnecessary to fine-tune the full pretrained model. Hence, parameter-efficient fine-tuning (PEFT) becomes necessary and remains an active research topic. 
+
+In this paper, we focus on PEFT for pretrained Transformer backbone models~\citep{transformer}. Prior approaches used for fine-tuning isotropic pretrained Transformer backbones such as Llama and Vision Transformers \citep{vit} include prompt-based methods~\citep{prefix-tuning,vpt}, adapters \citep{houlsby-adapter}, and bias fine-tuning \citep{zaken2022bitfit}. In recent years, Low-Rank Adaptation (LoRA)~\citep{lora}, which learns weight-residuals in the low-rank form (i.e., $A^l$ and $B^l$ in Fig.~\ref{fig:gift-lora} (a)) has become the \textit{de facto} method with many follow-up variants~\citep{adalora,qlora,relora,facct,vera,dft-tune,dora}. This formulation can achieve strong empirical performance, but the learnable weight-residuals do not have direct ``information exchange'' with the pretrained weights. Recently, \cite{loreft} proposed Representation Fine-Tuning (ReFT), an alternative to PEFT, that can achieve strong performance at a lower parameter cost. Motivated from a causal intervention mechanism \citep{dii}, ReFT steers the pretrained model towards a task by editing the representations of a few tokens in a low-dimensional subspace. 
+
+Despite these advances, we still lack an intuitive and holistic understanding of the relationship between frozen pretrained models and their fine-tuned models by PEFT beyond the residual structure, and between the representations of the frozen pretrained weights and their intervened representations by ReFT. Furthermore, while ReFT is proposed as a distinct paradigm, is there a way relate PEFT and ReFT? Motivated by these observations, we ask two questions: 
+\begin{highlightbox}[mysubtitle]{}
+  \begin{enumerate}[leftmargin=*]
+    \item[(Q1)] {Can we induce an explicit and direct mapping between the  fine-tuned model and the frozen pretrained model, i.e., learn the fine-tuned weights directly from the pretrained weights?} \label{main_question1}
+    \item[(Q2)] {How simple can the enforced relationship be while allowing the fine-tuned model to match or outperform LoRA and remain memory-efficient, and bridge PEFT and ReFT?}\label{main_question2}
+\end{enumerate}
+\end{highlightbox}
+
+Addressing these two questions entails a new angle for PEFT. We present a simple yet effective formulation that provides affirmative answers to the two questions in this paper, which we briefly overview in the next sub-section. 
+
+\begin{figure} [t]
+    \centering
+    \begin{mdframed}[roundcorner=5pt,linecolor=frame-gray,linewidth=0.5pt]
+    \includegraphics[width=1.0\textwidth]{fig/acc-vs-params_v2.pdf}
+    \end{mdframed}    
+    \caption{ 
+    \textit{Top:} Comparisons between (a) LoRA~\citep{lora} and (b) our proposed GIFT. 
+    \textit{Bottom:} Comparisons of performance vs. trainable parameters for GIFT on three tasks using the Llama model family. All GIFT variants consistently achieve comparable or better performance than prior PEFT~\citep{dora,vera} and ReFT~\citep{loreft} methods at a much lower parameter cost. See Section \ref{sec:experiments} for experimental details.
+    }
+\end{figure}
+
+\subsection{Method Overview: \underline{G}enerative Parameter-Eff\underline{i}cient \underline{F}ine-\underline{T}uning (GIFT)}
+\label{sec:simple-gift}
+
+Our proposed GIFT is illustrated in Fig.~\ref{fig:gift-lora} (b). Let $\omega^l\in \mathbb{R}^{d_{out}\times d_{in}}$ denote the pretrained weights of a layer $l$. The fine-tuned weights $\hat{\omega}^l$ are expressed as
+\begin{equation}
+\hat{\omega}^l_{d_{out}\times d_{in}}= \omega^l_{d_{out}\times d_{in}} \cdot P_{d_{in}\times d_{in}} =\omega^l_{d_{out}\times d_{in}} \cdot (\mathbb{I}+\Theta_{d_{in}\times d_{in}}),    \label{eq:linear_ft}
+\end{equation} 
+where $P_{d_{in}\times d_{in}}=\mathbb{I}+\Theta_{d_{in}\times d_{in}}$, $\mathbb{I}$ is an identity matrix and $\Theta_{d_{in}\times d_{in}}$ a projection matrix to be learned for a downstream task. \textbf{$\Theta$ is \textit{not layer-specific} and can be shared by different layers selected for fine-tuning}, reducing the trainable parameters significantly compared to layer specific methods such as LoRA. We specify layer-sharing GIFTs in Section \ref{sec:experiments}. $\Theta_{d_{in}\times d_{in}}$ is further defined by a low-rank structure as
+\begin{equation}
+    \Theta_{d_{in}\times d_{in}} = \phi_{d_{in}\times r} \cdot \psi_{r\times d_{in}}, \label{eq:linear_ft_factorization}
+\end{equation}
+where the rank $r$ is a hyper-parameter, similar to LoRA. Let $L$ be the total number of layers selected for finetuning, and let $\Omega_{L\times d_{out} \times d_{in}}$ denote the weights of all the $L$ layers. Our proposed GIFT is formulated as,
+\begin{equation}
+    \hat{\Omega}_{L\times d_{out} \times d_{in}} = \text{GIFT}(\Omega_{L\times d_{out} \times d_{in}}; \Theta_{d_{in}\times d_{in}}) = \Omega + \text{Linear}(\text{Linear}(\Omega; \phi); \psi) . \label{eq:gift-overview}
+\end{equation}
+\textit{This parameterization shows that the relationship between the fine-tuned model and the frozen pretrained model is enforced to be linear, the simplest mapping relationship.} 
+
+Hence, Eqn \ref{eq:gift-overview} provides an answer for (Q1). We show that this simple GIFT: two linear projections of the pretrained weights shared across all the layers $L$ is surprisingly effective, also providing an answer to (Q2). In Section \ref{sec:gift-formulation}, we also show that GIFT bridges PEFT and ReFT~\citep{loreft}.  For the proposed GIFT formulation above, we emphasize two aspects:%
+\begin{itemize} [leftmargin=*,noitemsep,topsep=0pt]
+    \item Although $\Theta$ is shared, the output fine-tuned weights, $\{\hat{\omega}^l: l \in L\}$, are still layer-specific in Eqn.~\ref{eq:linear_ft}. 
+    \item It is straightforward to learn GIFT along the $d_{out}$ dimension by writing Eqn.~\ref{eq:linear_ft} as $(\hat{\omega}^l_{d_{out}\times d_{in}})^{\top}=  (\hat{\omega}^l_{d_{out}\times d_{in}})^{\top} \cdot P_{d_{out}\times d_{out}}$ . Unless otherwise specified, we will henceforth focus our description of GIFT only on the $d_{in}$ dimension for simplicity.
+\end{itemize}
+
+ 
+
+\textbf{Performance Overview of Our GIFT}: 
+To show the effectiveness of our proposed GIFT in Eqn.~\ref{eq:gift-overview}, we briefly summarize the performance of fine-tuning the family of Meta's three Llama models~\citep{llama,llama2,llama3} on three tasks on the bottom of Fig.~\ref{fig:gift-lora} with experimental details presented in Sec.~\ref{sec:experiments}: (i) \textit{Instruction Following with Llama-2.} Our GIFT$^{16}_{\alpha}$ obtains higher Win Rate than a recently proposed  representation fine-tuning method, LoReFT \citep{loreft}. With slightly increased parameters (still 4 times less than LoRA), our GIFT$^{128}_{\alpha}$ can even outperform  {\tt GPT 3.5 Turbo 1106}. 
+(ii) \textit{Arithmetic Reasoning with LLaMa-1.} Our GIFT$_{\beta}^{64}$ outperforms VeRA~\citep{vera} significantly using the same fine-tuning parameter budget. 
+(iii) \textit{Commonsense Reasoning with three Llama Models}: our GIFT$_{\gamma}^{64}$ obtains 6\% absolute increase in average accuracy with 53 times less parameters using {\tt Llama-3} compared to LoRA. It is also consistently better than LoReFT~\citep{loreft}, but using about half the number of parameters.
+
+
+\textbf{Why Does the Simple GIFT Work?} Based on the effectiveness of our GIFT, we can draw intuitive understanding of PEFT using pretrained Transformer backbones: Pretrained Transformer backbones ``distill'' general and diverse knowledge from a large-scale pretraining dataset, encoded in the pretrained weights. When fine-tuning them at a downstream task, to ``absorb'' new information in the training data of the downstream task, \textit{one of the simplest updates that minimally ``distorts'' and maximally ``preserves'' the pretrained knowledge} is defined by Eqn.~\ref{eq:linear_ft} and Eqn.~\ref{eq:linear_ft_factorization}, thanks to the low-rank factorized linear projection in the parameter space. The newly ``absorbed'' information from the downstream task is also linearly expressed in the space spanned by the pretrained weights $\omega_{d_{out}\times d_{in}}$ via $\omega_{d_{out}\times d_{in}}\cdot \Theta_{d_{in}\times d_{in}}$. 
+When pretrained Transformer backbones are sufficiently expressive, which is often assumed in PEFT, simpler parameterization methods such as our proposed GIFT should be more generalizable and better under the principle of Occam's razor. For example, on commonsense reasoning in Fig.~\ref{fig:gift-lora}, the performance of GIFT consistently increases when the backbone in use is more expressive from LLaMa-1, to Llama-2 and to Llama-3. 
+
+
+\textbf{Our Contributions}: (i) We present Generative Parameter-Efficient Fine-Tuning (GIFT) that is conceptually different from LoRA variants in terms of how the fine-tuning weight-residuals are learned. Our GIFT learns fine-tuned weights directly from the pretrained weights, with its parameters shared by different layers selected in fine-tuning, making it even more parameter-efficient than LoRA while retaining the memory efficiency of LoRA.  (ii) We present a simple parametrization composed of two linear layers (without bias terms) with projected low-rank structures  for GIFT, which induces linear relationships between the learned weight-residuals and the original pretrained weights. The simple GIFT bridges parameter-efficient and representation-efficient fine-tuning methods. (iii) The two-linear-layer GIFT is tested with pretrained Transformer backbones on a variety of tasks including Natural Language Generation (instruction following, commonsense reasoning, and arithmetic reasoning), Natural Language Understanding, and Visual Recognition. Our GIFT outperforms previous PEFT methods while using approximately 15 times less parameters and surpasses previous ReFT approaches with half of the parameters.
+
+\newpage
+
+
+\section{Approach}
+
+\subsection{Background on Efficient Fine-Tuning}
+
+For a self-contained context for our proposed GIFT, we first review both parameter-efficient fine-tuning popularized by LoRA~\citep{lora} and representation-efficient fine-tuning (ReFT) recently proposed by~\citep{loreft}.
+
+As illustrated in Fig.~\ref{fig:gift-lora} (a), consider a pretrained layer with the weights $\omega^l_{d_{out}\times d_{in}}$.  LoRA learns the layer-specific weight-residual with a low-rank parameterization scheme,
+\begin{equation}
+    \hat{\omega}^l_{d_{out}\times d_{in}} = \omega^l_{d_{out}\times d_{in}} +\Delta \omega^l = \omega^l_{d_{out}\times d_{in}} + B^l_{d_{out}\times r }\cdot A^l_{r\times d_{in}}, \label{eq:lora}
+\end{equation}
+where $r$ is the predefined rank ($r\ll \min(d_{out}, d_{in})$, e.g., $r=16$), which is often specified in a layer-agnostic way.  LoRA is efficient in terms of both the number of learnable parameters and the memory footprint in training. Many follow-up works modify LoRA by introducing more inductive biases and/or heuristics in parameterizing the weight-residual $\Delta\omega^l$ in addition to low-rank, leading to trade-off between parameter and memory efficiency. We briefly discuss two recent variants.
+
+\textbf{DoRA}~\citep{dora} 
+exploits the magnitude and direction decomposition and formulates the fine-tuned weights as $\hat{\omega}^l_{d_{out}\times d_{in}} =M^l_{1\times d_{in}}\cdot \frac{\omega^l_{d_{out}\times d_{in}} + B^l_{d_{out}\times r}\cdot A^l_{r\times d_{in}}}{||\omega^l_{d_{out}\times d_{in}}+B^l_{d_{out}\times r}\cdot A^l_{r\times d_{in}}||_c}$, where $||\cdot||_c$ represents vector-wise norm. Compared to LoRA, DoRA introduces extra parameters $M^l$ and  increases the computation cost and memory footprint due to the directional component.
+\textbf{VeRA}~\citep{vera} uses fixed random matrices $A^l_{r \times d_{in}}$ and $B^l_{d_{out}\times r}$, and learns scaling vectors $d \in \mathbb{R}^r$ and $b \in \mathbb{R}^{d_{out}}$. VeRA learns the weight-residual as $\Delta\omega^l = \Lambda_b B^l \Lambda_d A^l$, where $\Lambda_b$ and $\Lambda_d$ are diagonal matrices with their diagonals as $b$ and $d$ respectively. Due to fixed random projection matrices, compared with the vanilla LoRA, although VeRA can reduce the number of learnable parameters significantly, it needs a large rank $r$ (typically equal to the model dimension) to achieve good performance, hence increasing the computational costs and training time. Additionally, adding fixed random matrices with learnable scales in PEFT makes the relationship between fine-tuned models and frozen pretrained models less intuitive. 
+\textbf{ReFT}~\citep{loreft} does not fine-tune pretrained models as in PEFT, and instead intervenes the representations/activations, i.e., the token sequence in the hidden layers by learning how to edit them in a low-dimensional subspace in a layer-specific way. Without loss of generality, consider the representation of a token $y^l \in \mathbb{R}^{d_{out}\times 1}$ at a certain layer $l$, two variants of ReFT are proposed: \textit{LoReFT} learns an edited representation in the projected $r$-dimensional subspace via $\hat{y}^l = y^l + (R^l_{r\times d_{out}})^\top \cdot (W^l_{r\times d_{out}}\cdot y^l + b^l_{r\times 1} - R^l_{r\times d_{out}}\cdot y^l)$ where $R^l$ has orthonormal rows. 
+\textit{DiReFT} relaxes the orthonormal constraint and learns $\hat{y}^l = y^l + (W^l_2)^\top\cdot (W^l_1 \cdot y^l + b^l)$ where both $W^l_2, W^l_1\in \mathbb{R}^{r\times d_{out}}$. 
+To apply the invertentions, ReFT needs to search for a dedicated  hyperparameter configuration to decide how many interventions to learn and which layers and token positions to apply each intervention on. ReFT has shown to be a very strong alternative to LoRA. Unlike LoRA-based PEFT methods which do not incur any extra inference cost after training, ReFT methods increase inference cost slightly. Furthermore, token-level interventions lack a holistic understanding of the relationship between ReFTed models and frozen pretrained models.
+
+\subsection{Our Proposed GIFT}
+\label{sec:gift-formulation}
+
+We now provide a deductive perspective of deriving and understanding our proposed GIFT (Fig.~\ref{fig:gift-lora} (b)) to consolidate the overview in Sec.~\ref{sec:simple-gift} and present the detailed formulation.
+
+While they show good performance, the prior PEFT (LoRA, DoRA and VeRA) and ReFT (LoReFT and DiReFT) methods fail to address the two motivating questions in Section \ref{sec:motivation}. Moreover, \textbf{they overlook an intuitive yet important method of improving efficiency, that is to facilitate sharing learnable parameters across layers} selected for fine-tuning a pretrained backbone. However, simply sharing the weight residuals $\Delta\omega$ across layers as model parameters does not make intuitive sense. 
+To address this dilemma, one solution is to exploit hierarchical modeling, that is to use a generator network to generate the weight residuals across different layers: the learnable parameters of the generator networks are shared, while its outputs are layer-specific. The question then is about what the input of the weight-residual generator network should be. The most intuitive and simple answer will be directly using the pretrained weights as the input. In sum, for the $L$-layer pretrained weights $\Omega_{L\times d_{out}\times d_{in}}$, our proposed GIFT is formulated by, 
+\begin{equation}
+    \hat{\Omega}_{L\times d_{out} \times d_{in}} = \text{GIFT}(\Omega_{L\times d_{out}\times d_{in}};\Theta) = \Omega_{L\times d_{out}\times d_{in}} + \mathcal{G}(\Omega_{L\times d_{out}\times d_{in}};\Theta),
+\end{equation}
+where $\Delta\Omega = \mathcal{G}(\Omega_{L\times d_{out}\times d_{in}};\Theta)$ is the weight-residual generator network parameterized by $\Theta\in \mathbb{R}^{d_{in}\times d_{in}}$ and shared across the $L$ layers. \textit{This formulation addresses the first motivating question (Q1)}. We recruit a network $\mathcal{G}()$ to by-pass different inductive biases such as the weight-decomposition in DoRA~\citep{dora} and the fixed random matrices in VeRA~\citep{vera}. Intuitively, we can see the generator network  $\mathcal{G}()$ provides more flexibility in modeling the weight-residuals $\Delta\Omega$. 
+
+\textit{To address the second motivating question (Q2)}, we enforce a low-rank structure for the weight-residual generator network $\mathcal{G}()$ following widely adopted practices in efficient fine-tuning methods:
+\begin{equation}
+    \mathcal{G}(\Omega_{L\times d_{out}\times d_{in}};\Theta) = \text{Linear}(g(\text{Linear}(\Omega_{L\times d_{out}\times d_{in}};\phi));\psi),
+\end{equation}
+where we have,
+
+\begin{itemize}[leftmargin=*]
+\itemsep0em
+    \item $\text{Linear}(\Omega;\phi)$ projects the input dimension to a lower dimension (or rank) $r$ with learnable weights $\phi\in \mathbb{R}^{d_{in}\times r}$ without bias terms. Denote by $\Omega_1\in\mathbb{R}^{L\times d_{out}\times r}$ the output of this layer. 
+    \item $\text{Linear}(\cdot;\psi)$ is an output dimension-recovery projection with learnable weights $\psi\in \mathbb{R}^{r\times d_{in}}$ and no bias term. %
+    It outputs the learned weight-residuals, $\Delta \Omega\in \mathbb{R}^{L\times d_{out}\times d_{din}}$.
+    \item $g(\cdot;\theta)$ is the low-dimensional generator network, which can be realized by any suitable network specifications. We consider the following schema in this paper: 
+    \begin{itemize}[leftmargin=*]
+    \itemsep0em
+        \item \textit{Transformer}: We treat $\Omega_1$ as a batch of $L$ sequences each consisting of $d_{out}$ tokens in $r$-dim space. We then apply a single Transformer block~\citep{transformer,vit}. 
+        \item \textit{MLP-Mixers}: Similar to vanilla Transformers, we apply a single MLP-Mixer~\citep{tolstikhin2021mlp} block.   
+        \item \textit{Multi-Layer Perceptrons (MLPs)}: e.g., $g(\Omega_1;\theta)=\text{Linear}(\text{GELU}(\text{Linear}(\Omega_1;\theta_1)); \theta_2)$, where $\theta_1\in \mathbb{R}^{m\cdot r\times r +m\cdot r}$ and $\theta_2\in \mathbb{R}^{r\times m\cdot r + r}$ consist of weights and bias terms of the two linear layers with the MLP latent dimension ratio $m$ (e.g., $m=2$).
+        \item \textit{Element-wise non-linearity functions} without learnable parameters (i.e., $\theta=\emptyset$): e.g.,  $g(\Omega_1)=\text{Sigmoid}(\Omega_1)$ or $g(\Omega_1)=\text{GELU}(\Omega_1)$.
+        \item \textbf{The identity operation:} $g(\Omega_1;\theta)=\text{Identity}(\Omega_1)=\Omega_1$ with no learnable parameters $\theta=\emptyset$, which leads to the simple two-layer linear parameterization of GIFT (Eqn.~\ref{eq:linear_ft}, Eqn.~\ref{eq:linear_ft_factorization} and Eqn.~\ref{eq:gift-overview}). 
+        \end{itemize}
+\end{itemize}
+
+Through ablation studies (Sec.~\ref{sec:ablation}), we show that the two-layer linear parameterization of GIFT is surprisingly effective, and thus our focus in this paper. For a pretrained layer with weights $\omega^l_{d_{out}\times d_{in}}$, our GIFT finetuned weights are, 
+\begin{equation}
+\hat{\omega}^l_{d_{out}\times d_{in}} =\omega^l_{d_{out}\times d_{in}} + \omega^l_{d_{out}\times d_{in}} \cdot  \phi_{d_{in}\times r}\cdot \psi_{r\times d_{in}},    \label{eq:gift}
+\end{equation} 
+which we can make intuitive connections with LoRA~\citep{lora} and ReFT~\citep{loreft}.
+\begin{itemize} [leftmargin=*]
+    \item \textbf{Our GIFT can be treated as the sharing-oriented LoRA}, where we have $B^l_{d_{out}\times r}=\omega^l_{d_{out}\times d_{in}} \cdot  \phi_{d_{in}\times r}$ conditioned on the pretrained weights and retained to be layer-specific, and $A^l_{r\times d_{in}}=\psi_{r\times d_{in}} (\forall l)$ relaxed to be layer-agnostic.
+    \item \textbf{Our GIFT bridges PEFT and ReFT.} To show this, consider a linear layer with pretrained weights $\omega^l\in \mathbb{R}^{d_{out}\times d_{in}}$ and the bias term  $b^l_{d_{out}}$, the representation/activation for its input $x^l_{N\times d_{in}}$ is,
+    \begin{equation}
+        y^l_{N\times d_{out}} = x^l_{N\times d_{in}} \cdot (\omega^l_{d_{out}\times d_{in}})^{\top} + b^l_{d_{out}} .
+    \end{equation}
+    With the GIFT weights $\hat{\omega}^l_{d_{out}\times d_{in}}$ (Eqn.~\ref{eq:gift}), we have,
+    \begin{align}   
+   \nonumber \hat{y}^l_{ N\times d_{out}} &= x^l_{ N\times d_{in}} \cdot (\hat{\omega}^l_{d_{out}\times d_{in}})^{\top} + b^l_{d_{out}} \\
+   \nonumber  &= (x^l_{ N\times d_{in}} + x^l_{ N\times d_{in}}\cdot \phi_{d_{in}\times r}\cdot \psi_{r\times d_{in}}) \cdot (\omega^l_{d_{out}\times d_{in}})^{\top} + b^l_{d_{out}} \\
+   &= \hat{x}^l_{N\times d_{in}} \cdot (\omega^l_{d_{out}\times d_{in}})^{\top} + b^l_{d_{out}},   
+    \label{eq:gift_linear_output} 
+\end{align}
+where $\hat{x}^l_{N\times d_{in}}=x^l_{ N\times d_{in}} + x^l_{ N\times d_{in}}\cdot \phi_{d_{in}\times r}\cdot \psi_{r\times d_{in}}$ is the ``GIFTed'' input activation, the counterpart of the ``GIFTed'' weights $\hat{\omega}^l_{d_{out}\times d_{in}}$ (Eqn.~\ref{eq:gift}). So,
+\textbf{our GIFT can be equivalently applied to the input activation, rather than the pretrained weights, to achieve the same fine-tuning effect}, maintaining the memory and compute efficiency of LoRA in implementation. Unlike the ReFT~\citep{loreft} that entails a dedicated search for where the representation interventions should apply at the token level, our GIFT (Eqn.~\ref{eq:gift_linear_output}) eliminates the need of search. 
+\end{itemize}
+
+
+
+\subsection{Gradient Analyses of GIFT}
+
+Without loss of generality and for the clarity of presentation, consider a toy isotropic MLP with 2 hidden layers and no bias terms as the pretrained backbone: 
+\begin{align}
+    x^1 = \sigma\left(x^0{\omega^1}^\top\right), x^2 = \sigma\left(x^1{\omega^2}^\top\right), x^3 = x^2{\omega^3}^\top , 
+    \label{eq:toy_mlp}
+\end{align}
+where $x^0,x^1,x^2,x^3 \in \mathbb{R}^{N\times d}$ represents $N$-token sequence in the $d$-dim space, $\omega^1, \omega^2, \omega^3 \in \mathbb{R}^{d_{out} \times d_{in}}$ denote the pretrained weights, and $\sigma(\cdot)$ denotes the activation function. For simplicity, we assume that $d_{out}=d_{in}=d$. For large pretrained models, it is often sufficient to fine-tune only a subset of all the layers. For the toy MLP, assume that layers 1 and 3 will be fine-tuned.
+
+During fine-tuning, the derivatives to the learnable parameters $B^l$ and $A^l$ in LoRA and those to $\phi$ and $\psi$ in GIFT are also significantly different. Let $\ell$ be the scalar loss (e.g., the cross-entropy loss) computed using one data point for simplicity. In the toy MLP example (Eqn.~\ref{eq:toy_mlp}), for LoRA, we have,
+\begin{align}
+    \underbrace{\frac{\partial \ell}{\partial A^1}}_{r \times d} = {B^1}^{\top} \cdot \boxed{{\frac{\partial \ell }{\partial x^1}}^{\top} \cdot  x^0 }, \qquad \underbrace{\frac{\partial \ell}{\partial B^1}}_{d \times r} =  \boxed{\underbrace{{\frac{\partial \ell}{\partial x^1}}^{\top}}_{d \times N} \cdot \underbrace{x^0}_{N \times d} } \cdot \underbrace{{A^1}^{\top}}_{d\times r}
+    \label{eq:lora_gradident}
+\end{align}
+Similarly, for $\psi$ and $\phi$ in our GIFT, 
+\begin{align}
+    {\frac{\partial \ell}{\partial \psi}}
+    &= \phi^\top \cdot \boxed{{\omega^1}^\top \cdot {\frac{\partial\ell}{\partial x^1}}^\top \cdot x^0} + \phi^\top \cdot \boxed{{\omega^3}^\top \cdot {\frac{\partial\ell}{\partial x^3}}^\top \cdot x^2}, \label{eq:gift_gradident_1} \\
+   {\frac{\partial \ell}{\partial \phi}} &=  \boxed{{\omega^1}^\top \cdot {\frac{\partial\ell}{\partial x^1}}^\top \cdot x^0} \cdot {\psi}^\top + \boxed{{\omega^3}^\top \cdot {\frac{\partial\ell}{\partial x^3}}^\top \cdot x^2} \cdot {\psi}^\top, \label{eq:gift_gradident_2}
+\end{align}
+where $\psi$ and $\phi$ gather information from all the selected layers since they are shared by them.  Specifically, in terms of the gradient updates, $\psi$ and $\phi$ ``accumulate'' information distilled from data significantly different from, yet more informative than, how $B$ and $A$ in LoRA do. For example, $B^1$ and $A^1$ ``accumulate'' gradient modulated input activation (${\frac{\partial \ell }{\partial x^1}}^{\top} \cdot  x^0 $'s in Eqn.~\ref{eq:lora_gradident}). $\psi$ and $\phi$ not only ``accumulate'' information from all (shared) layers, but also utilize the gradient modulated input activation projected onto the space of the pretrained weights (${\omega^1}^\top \cdot {\frac{\partial\ell}{\partial x^1}}^\top \cdot x^0$ in Eqn.~\ref{eq:gift_gradident_1} and Eqn.~\ref{eq:gift_gradident_2}). 
+
+
+ 
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\textbf{Naming Convention and choice of finetuning layers}: We mainly follow the prior works of selecting layers of pretrained backbones to be fine-tuned on different tasks for fair comparisons. We use the subscript to denote layers to be fine-tuned and the superscript for the rank $r$, i.e., \textbf{GIFT}$^r_{\text{layers}}$.  We index different components in a Transformer block using their initials: Query ($Q)$, Key ($K$), Value ($V$), and Output projection ($O$) in the multi-head self-attention (MHSA) block, and Up  ($U$), Gate ($G$) and Down ($D$) projections in the MLP block. In the subscript, we use comma (`,') to split layers to indicate the sharing patterns, underline (e.g. $\underline{Q}$) to indicate that GIFT is applied to the $d_{in}$ dimension, and overline (e.g. $\overline{Q}$) to indicate that GIFT is applied to the $d_{out}$ dimension.
+We experiment with four variants:
+\begin{itemize} [leftmargin=*,noitemsep,topsep=0pt]
+    \item \textbf{GIFT}$^r_{\underline{Q},\underline{V}}$ represents that we use two GIFTs applied to $d_{in}$ dimension, one is shared by all Query layers and the other by all Value layers, and both using the rank $r$ (e.g., $r=16$). Similarly, \textbf{GIFT}$^r_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ represents that we use five GIFTs. These two are used for fair comparisons with different variants of LoRA. 
+    \item \textbf{GIFT}$^r_{\overline{O},\overline{D}}$ represents that we use two GIFTs along the $d_{out}$ dimension for the projection Output layers in MHSA blocks and the Down layers in the MLP blocks. This is used for fair comparisons with ReFT~\citep{loreft}.
+    \item \textbf{GIFT}$^r_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$ represents a block-wise sharing pattern we test in experiments. Each Transformer block has its own GIFTs,  where we share one GIFT each for \underline{$QKV$}, \underline{$UG$}, $\overline{O}$, and $\overline{D}$.    
+\end{itemize}
+
+We conduct experiments across Natural Language Generation, Natural Language Understanding, and Visual Recognition and compare our two-linear-layer parameterized GIFT with various other PEFT methods. We also conduct ablation studies on the different parameterization schemes of GIFT.
+
+\subsection{Instruction Following}
+
+\textbf{Setup}: We use Alpaca-Eval 1.0 \citep{alpaca_eval} to evaluate the performance on GIFT when a language model is finetuned for instruction following. Alpaca-Eval 1.0 measures the win rate against the responses generated by the {\tt text-davinci-003} model using GPT 4 as the annotator. We follow the experimental setup of \citep{loreft} for all our experiments. We apply GIFT to the {\tt Query+Value} layers (denoted by GIFT$_{\underline{Q},\underline{V}}$) of the 
+Llama 2 7B \citep{llama2} model 
+\begin{wraptable}{r}{0.5\textwidth}
+    \centering
+    \caption{Results of fine-tuning Llama-2 7B with GIFT for instruction following. GIFT outperforms prior works with the same parameter budget and even outperforms GPT 3.5 Turbo with an increased budget (which is still 4 times less than LoRA). Params (\%) are calculated as the ratio of number of trainable parameters and number of parameters in the base model. Unless the source is indicated by the preceding superscript, the results are obtained from the cited work.}
+    \resizebox{0.5\textwidth}{!}{
+    \begin{tabular}{ll|c| c c c c | c}
+        \toprule
+        & \textbf{Method} & \textbf{Params (\%)} & \textbf{Win Rate} \\ 
+        \midrule
+        & $^{\text{\citep{alpaca_eval}}}$GPT-3.5 Turbo 1106 & - & \underline{86.3} \\
+        & $^{\text{\citep{alpaca_eval}}}$Llama-2 Chat 13B & - & 81.1 \\
+        & $^{\text{\citep{alpaca_eval}}}$Llama-2 Chat 7B & - & 71.4 \\
+        \midrule
+        \multirow{5}{*}{\rotatebox{90}{Llama-2 7B}} & $^{\text{\citep{red}}}$Full Finetuning & 1.0 & 80.93 \\
+        & $^{\text{\citep{red}}}$LoRA~\citep{lora} & 0.1245 & 81.48 \\
+        & RED~\citep{red} & 0.0039 & 81.69 \\
+        & DiReFT~\citep{loreft} & 0.0039 & 84.85 \\
+        & LoReFT~\citep{loreft} & 0.0039 & 85.60 \\
+        \rowcolor{blue!50}  & GIFT$^{16}_{\underline{Q},\underline{V}}$ & 0.0039 & {85.91} \\
+        \rowcolor{blue!100}  & GIFT$^{128}_{\underline{Q},\underline{V}}$ & 0.0311 & \textbf{86.87} \\
+        \bottomrule
+    \end{tabular}}%
+\end{wraptable}
+following \cite{llmadapters}'s implementation of  LoRA, and finetune using the Ultrafeedback dataset \citep{ultrafeedback}.
+\textbf{Results}: Table \ref{tab:instruct-tuning} shows that given the same parameter budget ($r=16$), GIFT outperforms prior methods. With an increased budget ($r=128$), which is still below LoRA, \textit{GIFT even outperforms} {\tt GPT-3.5 Turbo}. During the hyperparameter tuning, we observe that the win rate does not show significant gains above $r=64$, but we choose $r=128$ since it obtains the best results during hyperparameter tuning. These results, along with the observations about the choice of components from the commonsense and arithmetic reasoning, suggest that the performance may improve with other variants of GIFT. We leave this study for future work.
+
+\subsection{Commonsense Reasoning}
+\textbf{Data}: For evaluating GIFT for commonsense reasoning, we use a combined training data of eight benchmarks (Commonsense170k) following \cite{llmadapters} and \cite{loreft}, and evaluate on their test sets individually. Examples in the Commonsense170k are formulated as multiple choice questions and consists of BoolQ \citep{boolq}, PIQA \citep{piqa}, SIQA \citep{siqa}, HellaSwag \citep{hellaswag}, WinoGrande \citep{winogrande}, Arc-e and Arc-c \citep{arc}, and OBQA \citep{obqa} datasets. 
+
+\begin{table}[h!]
+    \centering
+    \caption{ Result comparisons on eight commonsense reasoning benchmarks by fine-tuning the pretrained LLaMA-1~\citep{llama} 7B, Llama 2~\citep{llama2} 7B and Llama 3 8B ~\citep{llama3} models. Unless the source is indicated otherwise by the preceding superscript, the results have been obtained from the respective works (except VeRA, which we train ourselves using the standard \href{https://huggingface.co/docs/peft/en/index}{HuggingFace} implementation).}
+    \resizebox{0.99\textwidth}{!}{
+    \begin{tabular}{ll|c| c c c c c c c c|c}
+        \toprule
+        & \textbf{Method} & \textbf{Params (\%)} & \textbf{BoolQ} & \textbf{PIQA} & \textbf{SIQA} & \textbf{HellaS.} & \textbf{WinoG.} & \textbf{ARC-e} & \textbf{ARC-c} & \textbf{OBQA} & \textbf{Avg} \\ \midrule
+        \multirow{8}{*}{\rotatebox{90}{LLaMA-1}} & $^{\text{\citep{dora}}}$PrefT & 0.039 & 64.3 & 76.8 & 73.9 & 42.1 & 72.1 & 72.9 & 54.0 & 60.6 & 64.6 \\
+        & $^{\text{\citep{dora}}}$AdapterS & 1.953 & 63.0 & 79.2 & 76.3 & 67.9 & 75.7 & 74.5 & 57.1 & 72.4 & 70.8 \\
+        & $^{\text{\citep{dora}}}$AdapterP & 3.542 & 67.9 & 76.4 & 78.8 & 69.8 & 78.9 & 73.7 & 57.3 & 75.2 & 72.3 \\
+        & $^{\text{\citep{dora}}}$LoRA~\citep{lora} & 0.826 & 68.9 & 80.7 & 77.4 & 78.1 & 78.8 & 77.8 & 61.3 & 74.8 & 74.7 \\
+        & $^{\text{\citep{dora}}}$DoRA~\citep{dora} & 0.838 & 68.5 & 82.9 & 79.6 & 84.8 & 80.8 & 81.4 & 65.8 & 81 & 78.1 \\
+        & $^{\text{\citep{dora}}}$DoRA (half)~\citep{dora} & 0.427 & 70 & 82.6 & 79.7 & 83.2 & 80.6 & 80.6 & 65.4 & 77.6 & 77.5 \\
+        & VeRA~\citep{vera} & 0.023 & 70.4 & 82.4 & 79.9 & 91.4 & 81.8 & 83.3 & 67.0 & 80.6 & 79.6 \\
+        \rowcolor{blue!50}  & GIFT$^{64}_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ & 0.052 & 72.4 & 83.4 & 80.2 & 93.9 & 83.8 & 85.8 & \textbf{73.4} & 84.4 & 82.2 \\
+        & DiReFT~\citep{loreft} & 0.031 & 69.5 & 83.0 & 79.0 & 92.5 & 80.5 & 82.2 & 68.0 & 77.5 & 79.0 \\
+        & LoReFT~\citep{loreft} & 0.031 & 69.3 & 84.4 & 80.3 & 93.1 & 84.2 & 83.2 & 68.2 & 78.9 & 80.2 \\
+        \rowcolor{blue!50}  & GIFT$^{64}_{\overline{O},\overline{D}}$ & 0.016 & 71.5 & 83.4 & 81.1 & 93.6 & 83.7 & 86.1 & 72.0 & 83.9 & 81.9 \\
+        \rowcolor{blue!100}  & GIFT$^{16}_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$ & 0.249 & \textbf{73.1} & \textbf{84.9} & \textbf{81.2} & \textbf{94.2} & \textbf{84.5} & \textbf{87.3} & 73.0 & \textbf{85.7} & \textbf{83.0} \\
+        \midrule
+         & $^{\text{\citep{dora}}}$LoRA~\citep{lora}  & 0.826 & 69.8 & 79.9 & 79.5 & 83.6 & 82.6 & 79.8 & 64.7 & 81 & 77.6 \\ 
+        & $^{\text{\citep{dora}}}$DoRA~\citep{dora}  & 0.838 & 71.8 & 83.7 & 76.0 & 89.1 & 82.6 & 83.7 & 68.2 & 82.4 & 79.7 \\ 
+        & $^{\text{\citep{dora}}}$DoRA (half)~\citep{dora}  & 0.427 & 72 & 83.1 & 79.9 & 89.1 & 83 & 84.5 & 71.0 & 81.2 & 80.5 \\
+        & VeRA~\citep{vera} & 0.023 & 71.9 & 82.2 & 80.0 & 92.2 & 83.3 & 84.3 & 68.8 & 80.5 & 80.4 \\
+        \rowcolor{blue!50} \multirow{2}{*}{\rotatebox{90}{Llama 2}} & GIFT$^{64}_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$  & 0.052 & 73.1 & \textbf{85.4} & 81.0 & 94.5 & 85.2 & 87.7 & 74.5 & \textbf{84.5} & 83.2 \\
+        & DiReFT~\citep{loreft} & 0.031 & 70.8 & 83.6 & 80.2 & 93.6 & 82.1 & 84.8 & 70.4 & 81.5 & 80.9 \\
+    & LoReFT~\citep{loreft} & 0.031 & 71.1 & 83.8 & 80.8 & 94.3 & 84.5 & 85.6 & 72.2 & 82.3 & 81.8 \\ 
+        \rowcolor{blue!50}  & GIFT$^{64}_{\overline{O},\overline{D}}$ & 0.016 & 73.4 & 85.2 & \textbf{81.8} & 94.3 & 85.3 & 87.7 & 74.9 & 83.8 & 83.3 \\
+        \rowcolor{blue!100}  & GIFT$^{16}_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$  & 0.249 & \textbf{74.5} & 85.0 & 81.5 & \textbf{94.9} & \textbf{85.8} & \textbf{88.5} & \textbf{75.8} & 84.1 & \textbf{83.8} \\
+        \midrule
+         & $^{\text{\citep{dora}}}$LoRA~\citep{lora}  & 0.700 & 70.8 & 85.2 & 79.9 & 91.7 & 84.3 & 84.2 & 71.2 & 79.0 & 80.8 \\ 
+        & $^{\text{\citep{dora}}}$DoRA~\citep{dora}  & 0.710 & 74.6 & 89.3 & 79.9 & 95.5 & 85.6 & 90.5 & 80.4 & 85.8 & 85.2 \\
+        & $^{\text{\citep{dora}}}$DoRA (half)~\citep{dora}  & 0.361 & 74.5 & 88.8 & 80.3 & 95.5 & 84.7 & 90.1 & 79.1 & 87.2 & 85.0 \\
+        & VeRA~\citep{vera} & 0.018 & 71.6 & 85.7 & 80.7 & 93.8 & 85.2 & 87.6 & 75.6 & 84.1 & 83.0 \\
+        \rowcolor{blue!50} \multirow{2}{*}{\rotatebox{90}{Llama 3}} & GIFT$^{64}_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ & 0.049 & 75.3 & 89.0 & 81.6 & 96.2 & 88.4 & 92.3 & 81.9 & 87.3 & 86.5 \\
+        & DiReFT~\citep{loreft} & \underline{0.026} & 73.4 & 88.7 & 81.0 & 95.6 & 85.5 & 91.8 & 81.8 & 85.4 & 85.4 \\
+    & LoReFT~\citep{loreft} & \underline{0.026} & 75.1 & 90.2 & 82.0 & 96.3 & 87.4 & 92.4 & 81.6 & 87.5 & 86.6 \\         
+        \rowcolor{blue!50}  & GIFT$^{64}_{\overline{O},\overline{D}}$  & 0.013 & 75.7 & 89.9 & 82.5 & 96.4 & 88.7 & 92.5 & 82.3 & 86.3 & 86.8 \\
+        \rowcolor{blue!100}  & GIFT$^{16}_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$  & 0.209 & \textbf{75.9} & \textbf{90.4} & \textbf{82.7} & \textbf{96.6} & \textbf{90.0} & \textbf{93.6} & \textbf{83.5} & \textbf{88.9} & \textbf{87.7} \\
+        \bottomrule
+\end{table}
+
+\textbf{Models}: We fine-tune the pretrained LLaMa-1, Llama-2  and Llama-3 8B models using our GIFT. We compare with LoRA and DoRA by applying GIFT to the same components as done in \citep{llmadapters, dora} ({\tt Query+Key+Value+Up+Down}), denoted by GIFT$_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$. We compare GIFT$_{\overline{O},\overline{D}}$ with LoReFT and DiReFT~\citep{loreft}. Furthermore, we also evaluate GIFT$_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$, a variant unique to GIFT.
+
+\textbf{Results}: As seen in Table \ref{tab:commonsense-reasoning}, all variants of GIFT outperform the baselines while using  significantly less parameters. GIFT$_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ with 0.052\% trainable parameters achieves much higher average accuracy with $\sim$15 times fewer parameters than LoRA (0.826\%) and DoRA (0.838\%). GIFT$_{\overline{O},\overline{D}}$ with 0.016\% trainable parameters achieves higher average accuracy than LoReFT and DiReFT with 0.031\% trainable parameters (as well as other PEFT baselines) while using half the parameters. We note that in contrast to LoReFT which searches over layers and token positions to fine-tune, our GIFT is simply applied to predefined fine-tuning layers. Our proposed block sharing version, GIFT$_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$ with 0.206\% trainable parameters, outperforms all the prior methods while using 4 times fewer parameters than LoRA. All variants of GIFT outperform VeRA \citep{vera}. \textit{Note that even though VeRA reduces the number of parameters, it needs a large rank for the fixed random weights (here, we use 4096) resulting in increased training time and GPU usage. In our experiments using the same setup, VeRA takes $\sim$\textbf{5 days and 18.42GB GPU memory} to complete training with Llama 2, whereas GIFT takes \textbf{less than 1 day ($\sim$17 hours) and 17.73GB GPU memory}.} Given the large training time, VeRA is prohibitive for large benchmarks.
+\subsection{Arithmetic Reasoning}
+
+\textbf{Data}: Similar to the commonsense reasoning experiments, we follow \cite{llmadapters} and \cite{loreft}, and finetune GIFT on a combined training set of four arithmatic reasoning datasets (Math10k), and evaluate on their individual test sets. The Math10k benchmarks consists of AqUA \citep{aqua}, GSM8k \citep{gsm8k}, MAWPS \citep{mawps} and SVAMP \citep{svamp}. While the models are expected to generate a chain-of-thought before the final answer, we only evaluate on the final answer following \citep{loreft}.
+
+\begin{table}[h!]
+    \centering
+    \caption{ Comparisons on Arithmetic reasoning benchmarks by fine-tuning the pretrained LLaMA-1~\citep{llama} 7B. Unless the source is indicated otherwise by the superscript, the results have been obtained from the respective works (except VeRA, which we train ourselves using the standard \href{https://huggingface.co/docs/peft/en/index}{HuggingFace} implementation).}
+    \resizebox{0.75\textwidth}{!}{
+    \begin{tabular}{ll|c| c c c c | c}
+        \toprule
+        & \textbf{Method} & \textbf{Params (\%)} & \textbf{AQuA} & \textbf{GSM8k} & \textbf{MAWPS} & \textbf{SVAMP} & \textbf{Avg}\\ \midrule
+        \multirow{5}{*}{\rotatebox{90}{LLaMA-1}} & $^{\text{\citep{llmadapters}}}$PrefT & 0.039 & 14.2 & 24.4 & 63.4 & 38.1 & 35.0 \\
+        & $^{\text{\citep{llmadapters}}}$AdapterS & 1.953 & 15.0 & 33.3 & 77.7 & 52.3 & 44.6 \\
+        & $^{\text{\citep{llmadapters}}}$AdapterP & 3.542 & 18.1 & 35.3 & 82.4 & 49.6 & 46.4 \\
+        & LoRA~\citep{lora} & 0.826 & 18.9 & 37.5 & 79 & 52.1 & 46.9 \\
+        & VeRA~\citep{vera} & 0.042 & 21.3 & 34.0 & 82.8 & 50.7 & 47.2 \\
+        \rowcolor{blue!50} & GIFT$^{64}_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ & 0.052 & 22.1 & 36.4 & 83.6 & 54.8 & 49.2 \\
+        & DiReFT~\citep{loreft} & 0.031 & 21.3 & 24.1 & 74.5 & 42.7 & 40.6 \\
+        & LoReFT~\citep{loreft} & 0.031 & 21.4 & 26.0 & 76.2 & 46.8 & 42.6 \\
+        \rowcolor{blue!50} & GIFT$^{64}_{\overline{O},\overline{D}}$ & \textbf{0.016} & \textbf{23.0} & 33.6 & 80.0 & 52.6 & 47.3 \\
+        \rowcolor{blue!100} & GIFT$^{16}_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$ & 0.249 & 22.0 & \textbf{37.7} & \textbf{84.0} & \textbf{55.3} & \textbf{49.8} \\
+        \bottomrule
+    \end{tabular}}
+    \label{tab:math-reasoning}
+\end{table}
+
+\textbf{Models}: Due to computational restrictions and for a fair comparison with prior works, we finetune the LLaMA-1 7B model. We use the same strategy as that used for commonsense reasoning for comparing with prior works.
+
+\textbf{Results}: As seen in Table \ref{tab:math-reasoning}, all variants of GIFT outperform prior methods. GIFT$_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ achieves much higher average accuracy while using much fewer parameters than LoRA and DoRA. GIFT$_{\overline{O},\overline{D}}$ achieves higher average accuracy than LoReFT and DiReFT while using half the parameters. GIFT$_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$ outperforms all the prior methods while using 4 times less parameters than LoRA. In contrast to commonsense reasoning, we do not observe a large difference between the performance of GIFT$_{\underline{Q},\underline{K},\underline{V},\underline{U},\underline{D}}$ and GIFT$_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$. This suggests that while different variants are suited for different tasks, GIFT$_{\underline{QKV},\overline{O},\underline{UG},\overline{D}}$ is robust to different tasks. All variants of GIFT outperform VeRA \citep{vera}. \textit{Note that even though VeRA reduces the number of parameters, it needs a large intermediate dimension for the fixed random weights (here, we use 12288). In our experiments, VeRA takes $\sim$\textbf{1.5 days and 20.65GB GPU memory}, whereas GIFT takes $\sim$\textbf{4 hours and 17.73GB GPU memory} using the same setup.
+
+\subsection{Visual Recognition}
+\label{sec:visual-classification}
+\textbf{Data.} We evaluate our GIFT on two image classification benchmarks: i) The fine-grained visual classification (FGVC) benchmark contains 5 datasets \--- Caltech-UCSD Birds (200 classes) \citep{cub}, NABirds (555 classes) \citep{nabirds}, Oxford Flowers (102 classes) \citep{flowers}, Stanford Cars (196 classes) \citep{cars}, and Stanford Dogs (120 classes) \citep{dogs}. ii) The Visual Task Adaptation Benchmark (VTAB-1k) benchmark \citep{vtab} consists of 19 tasks in three super-categories ({\tt natural, specialized} and {\tt structured}), drawn from a variety of domains, and with various semantics.
+\begin{table}[h!]
+    \centering
+    \caption{Results on the finegrained visual classification (FGVC) tasks. The number of trainable parameters are reported without the classification head which has the same number of parameters for all the methods. The GPU memory usage is reported via {\tt  torch.cuda.max\_memory\_allocated()} during training with the batch size 32.}
+    \resizebox{0.9\textwidth}{!}{
+    \begin{tabular}{l|l|l|lrrrr|r}
+\toprule
+      Method &  Params (\%) $\downarrow$ & GPU Mem (G) $\downarrow$ &  CUBS &  Bird &  Flower &   Dog &   Car &  \textit{Avg} \\
+        \midrule
+    VPT~\citep{vpt}      &         {0.054} &         2.753 &                    87.88 &   84.79 &     98.98 &  84.51 &  82.89 &  87.81 \\
+     BitFit~\citep{zaken2022bitfit}     &         0.097 &         2.673 &                    87.75 &   84.61 &     \textbf{99.32} &  85.23 &  84.01 &  88.18 \\
+LoRA~\citep{lora} &         0.172 &         \textbf{2.622} &                    88.00 &   84.94 &     \textbf{99.32} &  85.36 &  \textbf{85.92} &  88.71 \\
+\rowcolor{blue!100} GIFT$^{16}_{\underline{O}}$ &         \textbf{0.029} &         2.646 &                    \textbf{89.71} &   \textbf{86.28} &     99.22 &  \textbf{87.44} &  84.28 &  \textbf{89.39} \\
+\bottomrule
+\end{tabular}
+
+}
+\label{tab:fgvc-results}
+\end{table}
+
+We use the ViT-B/16 architecture \citep{vit} pretrained on ImageNet21k dataset \citep{imagenet21k} using a supervised objective., with the checkpoints from the {\tt timm} package~\citep{rw2019timm}.  We compare our GIFT with three baselines:  the Visual Prompt Tuning (VPT) \citep{vpt},  BitFit \citep{zaken2022bitfit}, and LoRA \citep{lora}. We leverage the publicly available codes for VPT, BitFit and LoRA, and train them from scratch under the same settings as our GIFT for fair comparisons. We apply LoRA and GIFT to the linear projection layer of the MHSA block. The selection of the linear projection layers in PEFT is based on observations in~\citep{artihippo} and verified in our ablation studies (Section~\ref{sec:qv-vs-proj}).
+
+ The GPU memory consumption is similar among the different methods with negligible differences. With 5.9 times less parameters used (0.025M {\tt vs} 0.147M), on FGVC tasks, our GIFT improves LoRA by 0.68\% average Top-1 accuracy. On VTAB-1k tasks, our GIFT slightly outperforms LoRA by 0.14\% average Top-1 accuracy.  %
+
+\textbf{Visual Inspection of the weight transformation by GIFT.} Let $C^l_{d_{out}\times r}=\omega^l_{d_{out}\times d_{in}}\cdot \phi_{d_{in}\times r}$ be the the transformation using the first linear layer of GIFT when it is applied to weights of a pretrained layer. We show that when GIFT is applied to fine-tune the linear projection layers in MHSA modules, $C^l_{d_{out}\times r}$ can be 
+used as an emergent segmentation/token-clustering head to 
+the output of the projection layer (activation map) to form meaningful segmentation in computer vision tasks.  
+With Eqn.~\ref{eq:gift_linear_output}, we compute $r$ heatmaps by,
+\begin{align}
+ H^l_{N\times r} = &\hat{y}^l_{N\times d_{out}} \cdot C^l_{d_{out}\times r} .
+\end{align}
+We normalize the $r$ heatmaps to $[0,1]$ individually and use 0.5 as the threshold to generate the visualizations (Figure~\ref{fig:cluster-interpretability}).
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{fig/cluster-teaser.pdf} 
+    \caption{The output of the first linear layer in our GIFT plays the role of a $r$-way segmentation/token-clustering head that shows an emergent capability of localizing meaningful objects/parts on images. Two examples from NABirds \citep{nabirds} benchmark in FGVC are shown here with clusters from layer 10 in the ViT-B backbone.}
+    \label{fig:cluster-interpretability}
+ 
+\subsection{Ablation Studies}\label{sec:ablation}
+
+\paragraph{Different Parameterization Schemas for GIFT.}
+We evaluate the various schema proposed for GIFT (Section \ref{sec:gift-formulation}) on the FGVC benchmark using the same settings as Section \ref{sec:visual-classification}. As seen from Table \ref{tab:fgvc-schema}, 
+the simple two-linear layer formulation achieves better or equivalent performance than all other schema at a lower parameter cost. We hypothesize that when a downstream task is out of distribution to the pretraining non-linear relationships between fine-tuning weight-residuals and pretrained weights could be entailed to be helpful, which we also leave for future investigation. 
+\begin{table*}[h]
+    \centering
+    \caption{Comparisons between various parameterization schemes of GIFT on the FGVC benchmark. 
+}
+    \resizebox{0.9\textwidth}{!}{
+    \begin{tabular}{l|l|l|lrrrr|r}
+\toprule
+Schema &  \#Params (M) $\downarrow$ & GPU Mem (G) $\downarrow$ &  CUBS &  Bird &  Flower &   Dog &   Car &  \textit{Avg} \\
+\midrule
+\rowcolor{blue!100} Identity & 0.025 & 2.65 & \textbf{89.71} & \textbf{86.28} & 99.22 & \textbf{87.44} & 84.28 &  \textbf{89.39} \\
+Sigmoid & 0.025 & 2.65 & 89.56 & 84.61 & 99.20 & 86.69 & 84.04 &  88.82 \\
+GeLU & 0.025 & 2.65 & 89.70 & 85.30 & 99.19 & 86.71 & 83.81 & 88.94 \\
+MLP & 0.036 & 2.65 & 89.06 & 85.44 & \textbf{99.30} & 86.17 & 84.24 & 88.84 \\
+Transformer & 0.027 & 2.65 & 89.56 & 86.23 & 99.24 & 86.31 & 84.26 & 89.12 \\
+MLP Mixer & 0.125 & 2.65 & 88.76 & 86.21 & 99.25 & 86.35 & \textbf{85.66} & 89.25 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+
+
+
+\section{Related Work}
+
+\label{sec:relatedwork}
+
+\noindent\textbf{Parameter Efficient Fine-tuning (PEFT).} The goal of PEFT methods is to reduce the computational resources (memory footprint, wall time, etc.) required for fine-tuning large models such as Transformers \citep{transformer} and Vision Transformers (ViTs) \citep{vit}. Prompt-based methods either append prompts to the input tokens \citep{prompt-tuning,vpt}, or the intermediate layers \citep{prefix-tuning,prefix-tuning-v2,llama-adapter}. Early work on PEFT used sequential/parallel learnable adapters added after the Multi-Head Self Attention and/or FFN blocks \citep{houlsby-adapter,bapna-adapter,adapter-fusion,invertible-adapters,adapter-drop,compacter,adaptformer}. LoRA \citep{lora} and its variants \citep{adalora,qlora,relora,facct,vera,dft-tune,dora} learn residuals to the pretrained weight matrices in the form of low-rank factorization, removing the added inference cost in adapter based methods. BitFit~\citep{zaken2022bitfit} fine-tunes all the bias terms in a pretrained backbone.
+
+\textbf{Hypernetworks.} \cite{hypernetworks} introduced Hypernetworks, i.e., neural networks that generate the parameters for other neural networks, in language modeling tasks by generating the weights of an LSTM \citep{lstm}. Hypernetworks have previously been applied for few-shot classification \citep{meta-learning-via-hypernetworks,hypertransformer}, transfer learning \citep{requeimaFastFlexibleMultiTask2019} and continual learning \citep{cl-with-hypernetworks,sylph}. Similar to our proposed approach, \citep{requeimaFastFlexibleMultiTask2019} learns to adapt a global feature extractor through an adaptation network. In a few shot continual learning setup, \citep{continual-hypertransformer} uses a hyper-Transformer to generate the parameters for a separate Convolutional Neural Network (ConvNet), which use as inputs both a support set of images of the current task and the ConvNet parameters generated for the previous tasks. HyperFormer++ \citep{hyperformer} uses a Multi-Layer Perceptron (MLP) to generate the parameters from layer embedding and a latent vector for Adapters \citep{houlsby-adapter} introduced across layers of a pretrained model in a multitask setting. Unlike \citep{hyperformer}, we directly use the weights of the frozen pretrained model, thus eliminating the need for embeddings. 
+
+\textbf{Neural Functionals}: Our approach is related to neural functionals that aim to learn deep neural networks acting on the weights of other neural networks. For toy problems, equivariant architectures have been explored for tasks like classifying implicit neural representations \citep{equivariant-deep-weight-spaces,penn, nfn, gnn-equi}, adapting model architectures to new domains \citep{equivariant-deep-weight-spaces}, predicting model generalization performance \citep{penn, nfn, gnn-equi, gnn-meta}, and learned optimizers \citep{unf}. However, our work is the first to explore fine-tuning of a model using it's own weights. We do not use equivariant architectures, but note that this direction of work is orthogonal to ours, and can be further explored in the future.
+
+
+
+\section{Conclusion}
+
+We present Generative Parameter Efficient Fine-Tuning (GIFT) for adapting pretrained Transformer backbones on downstream tasks. Our GIFT learns to generate the fine-tuning weight-residuals for layers selected in fine-tuning directly from their frozen pretrained weights using a neural network. We show that a simple design - where GIFT consists of two linear layers without bias terms - can achieve strong performance, which provides a novel angle for formulating PEFT methods. We further show that the simple GIFT bridges PEFT and ReFT methods. 
+We conduct experiments across various tasks, including Natural Language Generation (instruction following, commonsense reasoning, and arithmetic reasoning), Natural Language Understanding, and Visual Recognition. GIFT outperforms previous PEFT methods while using approximately 15 times fewer parameters and surpasses previous ReFT approaches with half the parameters.
+
+
+
+

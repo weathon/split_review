@@ -1,0 +1,197 @@
+\title{ProTrain: Efficient LLM Training via Automatic Memory Management}
+
+\begin{abstract}
+Training billion-scale large language models (LLMs) with just a few consumer-grade graphics cards is key to democratizing LLM access. However, existing frameworks often depend on manual tuning of memory management settings, leading to inefficient hardware utilization and suboptimal performance. This paper introduces ProTrain, a novel training system that automatically tailors memory management policies to the model architecture and underlying hardware resources, eliminating the need for manual intervention. ProTrain features (1) automated memory management that abstracts complex memory management strategies into a few tunable configuration parameters and searches for optimal parameter settings using cost models and (2) a runtime profiler that provides precise estimates of latency, memory usage, and I/O bandwidth to build high-fidelity cost models. 
+ProTrain does not change the training algorithm and thus does not compromise accuracy. Experiments show that ProTrain improves training throughput by 1.43$\times$ to 2.71$\times$ compared to the state-of-the-art training systems.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) have recently achieved remarkable success in various fields. Inspired by the scaling law Kaplan et al. (2020) that the performance (e.g., perplexity) of LLMs often improves logarithmically with the number of parameters, there has been a trend towards increasing parameter size. For instance, the parameter size of GPT-like models has surged from 117 million in GPT1 Han et al. (2021) to 1,760 billion in GPT-4 Achiam et al. (2023), a 15,000-fold increase over two years. The significant growth in parameter size leads to a substantial increase in memory demands. According to existing studies Ren et al. (2021), each unit increase in parameters generally requires $16\times$ more memory to store the model states (e.g., fp16 and fp32 parameters, fp16 gradients, fp32 momentum and variances), not to mention the increased memory demand for activations due to larger model sizes. Consequently, memory has become the dominant bottleneck in LLM training.  
+
+Numerous memory management strategies have been proposed to address memory limitations. They generally fall into three categories: ZeRO, gradient checkpointing, and swapping. (a) The Zero Redundancy Optimizer (ZeRO) Rajbhandari et al. (2020); Zhao et al. (2023b) distributes model states across multiple GPUs, leverageing aggregated memory capacity to accommodate large models in data parallelism. (b) Gradient checkpointing Chen et al. (2016); Jain et al. (2020); Herrmann et al. (2019); Zhao et al. (2023a); Korthikanti et al. (2023) reduces memory consumption by discarding certain activations during the forward pass and recomputing them during the backward pass. (c) Swapping Rhu et al. (2016); Wang et al. (2018); Le et al. (2018); Huang et al. (2020); Ren et al. (2021); Rajbhandari et al. (2021); Sun et al. (2022) offloads data to external memory sources such as CPU memory or NVMe devices. As we consider swapping to CPU memory, we use swapping and CPU offloading interchangeably.  
+
+The three memory management strategies can be implemented within various model training paradigms, including data parallelism Ren et al. (2021), tensor parallelism Shoeybi et al. (2019), and pipeline parallelism Huang et al. (2019); Narayanan et al. (2019). This paper focuses on data parallelism, as it is widely used in distributed environments due to its simplicity and scalability.  
+
+Popular data-parallel frameworks, such as DeepSpeed Rasley et al. (2020), Colossal-AI Li et al. $(2\bar{0}23)^{1}$ , and FSDP Zhao et al. (2023b), incorporate the aforementioned memory management strategies. However, these frameworks share a common issue: they demand significant manual effort to configure memory management settings. For example, in DeepSpeed, users must select the appropriate ZeRO optimization stage (e.g., ZeRO-1, ZeRO-2, ZeRO-3), configure offloading options (CPU or NVMe) for both parameters and optimizer states, and set various thresholds for parameter fetching and collective communications. Similarly, while Colossal-AI dynamically manages memory by moving data between the CPU and GPU, users must specify the non-model data ratio. The optimal configuration varies across models and hardware, requiring substantial domain expertise. Misconfiguration of these settings can lead to reduced efficiency or out-of-memory (OOM) error. For instance, GPT-10B running on four RTX 3090 GPUs with the default configuration utilizes only $35.6\%$ of GPU memory and runs $1.18\times$ slower than with optimized settings. Moreover, configurations optimized for A100 GPUs cannot be directly applied to RTX 3090 GPUs due to high OOM risks. To address this challenge, we propose ProTrain, an efficient LLM training system that automatically identifies memory management policies tailored to the specific LLM architecture and available memory resources. The basic idea of ProTrain is to abstract memory management strategies into a few tunable configuration parameters. ProTrain then builds runtime and memory usage estimators that quantify the impacts of these configuration parameters on training performance. These cost models, informed with accurate profliing information on latency, memory, and I/O bandwidth, allow ProTrain to search for the optimal memory management strategy that minimizes runtime while ensuring the peak memory consumption meets the hardware constraints.  
+
+Our main contributions are:  
+
+• Automatic Memory Management – To manage model states, we propose a dual-chunk system that treats initial layers of the LLM as persistent chunks in GPU memory and efficiently prefetches or offloads later layers as non-persistent chunks in CPU memory. For activation management, we introduce an interleaved organization that alternates between swapping and gradient checkpointing for each transformer block of the LLM. These strategies are abstracted into tunable configuration parameters, creating a structured configuration space that enables precise estimation of runtime and memory usage and facilitating the automatic search for optimal configurations with cost models.   
+• Memory-Aware Runtime Profliing – We are the first to apply model-wise runtime profliing to LLMs, leveraging detailed memory usage characteristics to reduce overall memory consumption. Building on this, we propose a novel memory-aware profiling method that effectively captures the memory consumption from temporary tensors often overlooked by state-of-the-art approaches, providing precise memory usage estimation to guide automated memory management.   
+• Implementation of ProTrain – We implement these techniques into a training system ProTrain that automatically configures memory management strategies, including CPU offloading, gradient checkpointing, and ZeRO techniques, to optimize training throughput while adhering to memory constraints.   
+• Evaluation – We ran ProTrain and other popular training frameworks (e.g., DeepSpeed, Colossal-AI, FSDP) on various models such as GPT-2, OPT, Mistral, and LLaMA. On RTX 3090 GPUs, ProTrain trained models up to $2.47\times$ larger than DeepSpeed and $1.48\times$ larger than Colossal-AI. On A100 GPUs, ProTrain trained models up to $7.5\times$ larger than FSDP, with $1.43\times$ to $2.71\times$ higher throughput than other frameworks. ProTrain also demonstrated excellent scalability with increasing GPUs or batch sizes. These results highlight ProTrain’s superior memory management and efficiency across different hardware setups, making it an excellent choice for LLM training on memory-constrained settings.  
+
+
+
+\section{2 BACKGROUND AND RELATED WORKS  }
+
+
+This section introduces the background on DNN training.  
+
+![](images/78d66ffef8b148b4719ca5a3578152f36efe217f8dfa5b40daa171c57aa5f814.jpg)  
+Figure 1: The architecture overview of ProTrain. Operations A - G are described in the text.  
+
+Training deep learning models involves a repetitive three-stage process across multiple iterations and epochs. The stages include forward propagation (FWD), where a batch of training samples is passed to the model to compute the loss; backward propagation (BWD), which calculates gradients by backpropagating the loss through the model; and parameter updating (OPTIM), where the gradients are used to update model parameters via an optimizer. For the training of large models, it is a common practice to adopt mixed-precision training Micikevicius et al. (2017), which uses reduced precision data types for FWD and BWD, while maintaining higher precision for OPTIM to ensure accuracy.  
+
+Memory consumption during training primarily comes from two sources: model states and residual states. Model states include parameters, gradients, and optimizer states (i.e. momentum and variances used in Adam Kingma & Ba (2014)) while residual states consist of activations and temporary tensors. The computational complexity of the FWD and BWD stages scales with model size and batch size, necessitating their execution on GPUs due to the intensive computational demands. In contrast, the OPTIM stage involves simpler operations and can be efficiently offloaded to the CPU Ren et al. (2021), which brings significant GPU memory savings by allocating memory-intensive optimizer states on the CPU.  
+
+
+
+\section{3 OVERVIEW OF PROTRAIN  }
+
+
+Figure 1 illustrates the system architecture of ProTrain, consisting of three core components: (1) an Automatic Memory Management module $(\S\,3.1)$ that automatically identifies the optimal memory management policy for training the target LLM on the given hardware, (2) a Memory-Aware Runtime Proflier $(\S\ 3.2)$ that gathers runtime and memory data to guide memory management decisions, (3) a High-Performance Training Engine $(\S\ 3.3)$ that implements the memory management policy. Before diving into each subsection, we first elaborate an example of memory management policies.  
+
+Running Example. The training engine diagram illustrates a memory management policy that Automatic Memory Management would discover. In the example, the LLM architecture is divided into three chunks, where each chunk represents a few consecutive transformer blocks. GPU performs the FWD, BWD, and a portion of OPTIM computations while CPU performs the rest of the OPTM computations. Since the parameters of Chunk 0 will be used immediately at the start of a training iteration, they are persistently allocated on the GPU. The parameters for Chunk 1 and Chunk 2 reside on the CPU and are dynamically uploaded to the GPU or offloaded back to the CPU to ensure the total memory consumption meets the device memory limit. The flow of communication operations between the CPU and GPUs is as follows:  
+
+(A) Parameter Upload: Before the forward pass, the parameters for Chunk 1 are uploaded from the CPU to the GPU. Since Chunk 0 already resides on the GPU, only Chunk 1 and Chunk 2 need to be uploaded sequentially from the CPU, illustrated as blocks 1 and 2 in the row ${}^{\bullet}\mathrm{CPU}\to\mathrm{GPU}^{\bullet}$ . The prefetch of the next parameter chunk begins as soon as the GPU starts computing the current chunk.  
+
+(B) Parameter Gather: Once the parameter chunks are uploaded, the engine performs an all-gather operation that collects the parameter shards from all GPUs into a complete parameter chunk for  
+
+upcoming computations. This step is required for all three chunks, illustrated as blocks $0,1$ , and 2 in the top row of ${}^{\bullet}\mathrm{GPU}\to\mathrm{GPU}^{\bullet}$ .   
+(C) Gradient Reduce: In the backward pass, the engine reuses the parameter chunk to store the computed gradient to optimize memory usage. Once all parameters within a chunk are replaced by their corresponding parameters, a reduce-scatter operation is performed to synchronize gradients across GPUs, illustrated as blocks 0, 1, and 2 in the bottom row of ${}^{\cdot}\mathrm{GPU}\to\mathrm{GPU}^{*}$ .   
+(D) Gradient Offload: Following the gradient reduce, the chunks that were originally on the CPU, are offloaded back to the CPU to free up GPU memory. Only Chunk 1 and Chunk 2 perform this step. (E) Parameter Update: Once on the CPU, the gradients for Chunk 1 and Chunk 2 are used for parameter updates, along with the high-precision parameter chunk already resided on the CPU. This step runs in parallel with the GPU’s backward execution. In contrast, Chunk 0 performs its parameter updates directly on the GPU.   
+(F) Activation Swapping Out: Activation swapping occurs at the transformer block level, which is more fine-grained than chunks. In the example, only activations from the first transformer block (denoted as four block 3 in the row $^{\cdot}\mathrm{GPU}\to\mathrm{CPU^{\ast\ast}}$ ) are swapped out after each activation is computed. (G) Activation Swapping In: When sufficient GPU memory is available to hold a transformer block’s activations, the swapping in begins. This is done in batches (denoted as two block 3 in the row “CPU $\rightarrow\mathrm{GPU^{\circ}})$ ) rather than individually as swapping out shows, grouping multiple activations to improve bandwidth utilization.   
+In this example, parameter uploads from the CPU only occur during the forward pass assuming the GPU has enough buffer capacity to hold all the parameter chunks. However, if the buffers become full, the least recently used chunk is evicted, triggering another parameter upload and gather operation during the backward pass. Throughout the process, communication overhead is minimized by overlapping data transfers with computations. Additionally, idle CPU cycles are used to perform parameter updates, which run concurrently with the GPU’s backward computations, effectively hiding slower CPU parameter update operations.   
+3.1 AUTOMATIC MEMORY MANAGEMENT   
+The Automatic Memory Management module abstracts the memory management policy into a few configuration parameters and automatically tunes these parameters to optimize the training efficiency of a LLM on a target hardware. We next elaborate on the abstractions of the configuration space and the optimal configuration search algorithm.   
+3.1.1 THE CONFIGURATION SPACE OF MEMORY MANAGEMENT   
+Configuration Parameters for Model States. Model states can be offloaded to the CPU to relieve GPU memory pressure but the offloading implementations in existing LLM training frameworks suffer from various limitations. Fully offloading all parameters, as seen in FSDP Zhao et al. (2023b), often leads to inefficient GPU memory usage and high data transfer overhead. DeepSpeed Rasley et al. (2020) attempts to mitigate this issue by using thresholds, such as maximum live parameters and prefetch bucket size, to control the offloading ratio. However, its prefetching mechanism operates in a sliding window manner due to poorly timed execution, resulting in frequent small transfers. This causes low bandwidth utilization, significantly degrading performance. Colossal-AI Li et al. (2023) improves bandwidth utilization through fixed-sized chunks but suffers from frequent memory reallocations caused by dynamic chunk management. Moreover, it uploads high-precision parameter chunks for GPU parameter updates at runtime, increasing the risk of memory fragmentation and out-of-memory (OOM) errors.   
+To address these limitations, ProTrain introduces a dual-chunk system consisting of persistent and non-persistent chunks. Persistent chunks remain on the GPU, storing both high-precision and low-precision parameters, which eliminates data transfers and enables direct GPU parameter updates. In contrast, non-persistent chunks are kept in CPU memory, requiring low-precision parameters uploads to the GPU for computation, and gradients offloads back to the CPU for parameter updates. For non-persistent chunks, ProTrain further introduces pre-allocated chunk buffers that are used as caches. These buffers allow parameters loaded during the forward pass to be reused in the backward  
+
+![](images/958f9b972e5c87919d31ff3dcbb5e37bed33ecb7d227c4ef337aed71475ce89f.jpg)  
+Figure 2: Block-Wise Activation Management Layout and Memory Usage Trend  
+
+pass, preventing frequent memory allocations. In ProTrain, persistent chunks are the first few chunks of the LLM while the non-persistent chunks are the rest of the chunks.  
+
+The concept of dual-chunk system allows ProTrain to tailor offloading policies to chunks of different characteristics. Dual-chunk system is inspired by two observations: (1) The forward pass computation can often hide the overhead of CPU offloading for the later layers of a LLM but not that of the first few layers. (2) The parameter updates for the later layers of a LLM, but not the first few layers, can be performed concurrently with the backward pass computation. Therefore, the model states of the first few layers and the later layers should be managed differently.  
+
+We use the example in Figure 1 to explain the rationale. As chunk 0 executes first in the forward pass, if its parameters are offloaded to the CPU, its forward pass computation will be blocked by the data transfer overhead from CPU-to-GPU parameter uploading and parameter gather. Chunk 0 also gets updated the last with no backward pass computation left to hide the latency from parameter updates. Therefore, managing Chunk 0 as a persistent chunk eliminates cold start latency and enables efficient GPU parameter updates. In contrast, the data transfer necessary for Chunk 1 and Chunk 2 to perform forward pass can be overlapped with the computation of Chunk 0 and Chunk 1 respectively. If performed on the CPU, the parameter updates of Chunk 1 and Chunk 2 can also be overlapped with the backward pass computation of Chunk 0 and Chunk 1 respectively. Therefore, managing Chunk 1 and Chunk 2 as non-persistent chunks relieves GPU memory pressure without incurring offloading overheads.  
+
+We summarize the configuration parameters from managing model states as follows: (1) chunk size – the size of each chunk for the LLM, (2) the number of persistent chunks, and (3) the size of pre-allocated chunk buffers. In particular, while more persistent chunks and chunk buffers generally improve performance, memory constraints and the large size of LLMs necessitate a trade-off between memory usage and system efficiency.  
+
+Configuration Parameters for Activations. Previous studies Peng et al. (2020); Beaumont et al. (2021) have co-optimized activation swapping and gradient checkpointing at the tensor granularity. Although tensor-level management offers greater flexibility, it significantly expands the search space, making it challenging to determine optimal policies for swapping or recomputing individual tensors. For instance, the LLaMA 34B model has only 48 transformer blocks but has approximately 2,000 activation tensors, resulting in a search space as large as $3^{2000}$ if each tensor has three options. Moreover, managing tensors individually introduces implementation complexities and scalability challenges, making this approach impractical for LLMs. In contrast, popular training frameworks that utilize gradient checkpointing often recompute all transformer blocks, which is inefficient when there is sufficient memory to avoid full recomputation.  
+
+To address the above limitations, ProTrain takes a different approach by managing activation swapping and gradient checkpointing operations at the transformer block level. Each block can utilize one of three techniques in handling activations: swapping, gradient checkpointing, or no optimization (i.e., neither swapping nor checkpointing is applied). To enhance efficiency, ProTrain introduces an interleaved organization, in which each swapping block is followed by multiple blocks using gradient checkpointing. This design offers several benefits. First, placing swapping blocks earlier increases opportunities for overlapping swapping with computation. Second, interleaving them with checkpointing blocks prevents activation accumulation, reducing the risk of OOM errors caused by slower swapping. Third, placing unoptimized blocks in the later layers allows their activations to be consumed sooner, enabling earlier activation prefetching of swapping blocks.  
+
+Figure 2 illustrates our approach using a transformer with 8 blocks. Block 1 and 4 use swapping, while block 2, 3, 5, and 6 use gradient checkpointing. The remaining blocks are left unoptimized, as their earlier backward computations offer limited opportunities for swapping. This interleaved approach not only maximizes the overlap between computation and communication, but also minimizes peak memory usage, as visualized in the upper part of Figure 2.  
+
+We summarize the configurable parameters from managing activations as follows: (1) the swapping interval, which is selected based on the computation time needed to swap out a block, (2) the number of blocks designated for swapping and gradient checkpointing. Striking a balance between the number of swapping and checkpointing blocks is crucial: ideally, fewer blocks should use either technique, as each introduces additional recomputation or transfer overhead. However, when memory is constrained, swapping is preferred for blocks where communication overhead can be effectively hidden.  
+
+
+
+\section{3.1.2 OPTIMAL CONFIGURATION SEARCH WITH COST MODELS  }
+
+
+We formulate the optimal configuration search as a constrained optimization problem. The goal is to minimize the total runtime of the training process. Since training consists of repeated iterations, minimizing the total training time is equivalent to minimizing the runtime of a single iteration, denoted as $T_{\mathrm{Iteration}}$ , which includes the forward pass, backward pass, and parameter updates:  
+
+$$
+\operatorname*{min}_{c o n f i g s}T_{\mathrm{Iteration}}\;\;\;\;s.t.\;M_{\mathrm{Peak}}<M_{\mathrm{Capacity}},
+$$  
+
+where $M_{\mathrm{Peak}}$ represents the peak memory usage, and $M_{\mathrm{Capacity}}$ is the total GPU memory capacity. The set of tunable configuration parameters, configs, that determines the memory management policy is $c o n f i g s=\{n_{\mathrm{persist}},n_{\mathrm{buffer}},n_{\mathrm{swap}},n_{\mathrm{checkpoint}}\}$ , where $n_{\mathrm{persist}}$ denotes the number of persistent chunks residing on the GPU, $n_{\mathrm{buffer}}$ refers to the number of chunk buffers for prefetching and memory reuse, $n_{\mathrm{swap}}$ indicates the number of blocks using activation swapping, and ncheckpoint specifies the blocks applying gradient checkpointing. These configurations are non-negative integers that are bounded by the total number of chunks $(N_{\mathrm{chunk}})$ or blocks $(N_{\mathrm{block}})$ .1).  
+
+To solve the optimization problem, we build two cost models that accurately estimate runtime and peak memory consumption for each configuration combination. These cost models allow us to identify the optimal configuration setting leveraging profiling information data alone, getting rid of the tedious trial-and-errors to set up training processes. The profiler is discussed in $\S\ 3.2$ .  
+
+Runtime Estimator. In ProTrain, CPU parameter updates are executed concurrently with the GPU’s computations, which include both the backward pass and GPU-based parameter updates. However, if the CPU parameter updates cannot fully overlap with the GPU’s operations, the total iteration time becomes constrained by the longer CPU update phase. The runtime cost model is formulated as:  
+
+$$
+T_{\mathrm{Iteration}}=T_{\mathrm{FWD}}+m a x\{T_{\mathrm{BWD}}+T_{\mathrm{GPU\mathrm{.OPTM}}},T_{\mathrm{CPU\mathrm{.OPTM}}}\},
+$$  
+
+where $T_{\mathrm{FWD}}$ and $T_{\mathrm{BWD}}$ are modeled as a function of the configuration parameters. For parameter update of the persistent chunks $(T_{\mathrm{GPU\_OPTIM}})$ and non-persistent chunks $(T_{\mathrm{CPU\_OPTIM}})$ ), ProTrain models runtimes predictably based on parameter size.1.  
+
+Peak Memory Usage Estimator. Memory usage falls into two categories: static and dynamic components. Static memory, which includes model states and activations, is fixed and predictable. They can be easily determined by chunk size, $n_{\mathrm{persist}}$ , and $n_{\mathrm{buffer}}$ . However, dynamic memory involves temporary tensors that are hard to estimate and are often neglected in existing approaches Wang et al. (2024); Huang et al. (2022). Although transient, these temporary tensors can significantly impact peak memory usage, accounting for up to $17.2\%$ (3.06 GB) of total memory. To address this, we design an iterative operator-wise approach to estimate peak memory usage. The basic idea is to track peak memory during profliing while excluding static memory, then iteratively add back the static memory during the estimation phase, operator by operator, to accurately capture the contribution of temporary tensors to the overall peak memory.2.  
+
+The configuration space in ProTrain is structured and finite, allowing for an exhaustive search of all possible configurations. ProTrain employs specific pruning strategies to further reduce the search space. For instance, the maximum number of swappable blocks is limited by the swapping interval to ensure they overlap with forward computations. During the backward phase, the system monitors bandwidth usage for chunk prefetching to ensure sufficient bandwidth remains for activation prefetching. Additionally, as configurations are traversed from smallest to largest, any swapping and checkpointing combination that results in memory overflow is immediately discarded, and subsequent iterations involving this combination are skipped. For each viable configuration, ProTrain’s runtime estimator predicts the runtime, selecting the one with the shortest runtime as the final setup.  
+
+
+
+\section{3.2 MEMORY-AWARE RUNTIME PROFILING  }
+
+
+Traditional memory profiling methods, such as static profiling Patil et al. (2022) and layer-wise runtime profliing Beaumont et al. (2021), are insufficient for capturing the complete memory demands of LLM training. These approaches often overlook the impact of unhookable operators and temporary tensors, leading to inaccurate memory management and suboptimal configuration choices. Modelwise runtime profiling has the potential to overcome these challenges. However, as it requires the execution of the entire LLM model, it is constrained by limited GPU memory capacity for LLMs.  
+
+ProTrain develops an memory-aware runtime profliing system that leverages memory usage characteristics to enable model-wise profliing with limited memory capacity. Specifically, ProTrain drops static memory (e.g., parameters, gradients, activations) from the GPU and regenerates it when required. This is based on the observation that static memory usage is predictable (as detailed in Section 3.1.2), allowing the profiler to focus on capturing the more complex and transient dynamic memory usage.  
+
+To track dynamic memory fluctuations caused by temporary tensors and unhookable operators, ProTrain registers hooks that monitor current and peak memory changes both before and during operations. First, the peak memory usage during each operation is monitored to capture the temporary tensor usage specific to that operation. Second, by analyzing the memory changes between consecutive hookable operations, the profiler infers the memory usage of unhookable operators. This operator-wise approach considers the life cycle of various tensors, enabling a more precise understanding of memory usage dynamics and making the profiler memory-aware, which is crucial for building accurate cost models.  
+
+Our proflier also tracks the execution time of each operator. Similar to memory profliing, we estimate the execution times of unhookable operators by analyzing the intervals between hookable ones. Additionally, the profiler collects detailed hardware metrics, including memory transfer bandwidth and collective communication operation durations, under both isolated and overlapping scenarios.  
+
+
+
+\section{3.3 HIGH-PERFORMANCE TRAINING ENGINE IMPLEMENTATION  }
+
+
+ProTrain is implemented on top of PyTorch, with a total of 7,600 lines of code. It offers simple and user-friendly APIs, which require less than 5 lines of code modification to integrate with existing PyTorch training scripts. Unlike existing approaches Rasley et al. (2020); Li et al. (2023), ProTrain eliminates the need for manual configuration through its automatic memory management system.2.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We empirically evaluate the performance of ProTrain against three open-source LLM training frameworks using four popular LLM architectures.  
+
+Workloads. The tested models includes GPT-2 Radford et al. (2019), OPT Zhang et al. (2022), Mistral Jiang et al. (2023), and LLaMA Touvron et al. (2023).1. The sequence length is set to 1024 by default.  
+
+Testbed. We evaluate the performance of ProTrain in two different experimental environments: (1) 1 node of 4 NVIDIA GeForce RTX 3090 24GB with 384GB of DRAM; (2) 1 node of 4 NVIDIA A100 SXM4 80GB with NVLink 3.0 with 1TB of DRAM.2.  
+
+Baselines. We compare ProTrain with three representative open-source LLM training solutions: (1) FSDP Zhao et al. (2023b), the native PyTorch support for the ZeRO-3 technique; (2) DeepSpeed Rasley et al. (2020), a widely-used distributed training framework that employs ZeRO and offloading techniques, tested with ZeRO-3 for a fair comparison; and (3) Colossal-AI Li et al. (2023), which adopts chunk-based memory management compatible with the ZeRO-3 technique.3.  
+
+4.1 TRAINING PERFORMANCE COMPARISON  
+
+Maximum Trainable Model Size. Table 1 reports the maximum trainable model sizes for different frameworks, using the GPT-2 model as the benchmark. ProTrain demonstrates superior performance, supporting models up to 34 billion parameters on a single RTX 3090 GPU and scaling to 37 billion with four GPUs. On the more powerful A100  
+
+Table 1: Maximum Trainable Model Size (Unit: Billion)   
+
+![](images/7faf1399588bf16879e39f94ebcf006806580629b44f3e9850ad80c520ba9ccc.jpg)  
+
+GPU, ProTrain trains models as large as 75 billion on a single GPU and 87 billion with four GPUs, outperforming Colossal-AI and DeepSpeed by $1.64\times$ and $2.35\times$ , respectively, in the four-GPU setup. In contrast, FSDP significantly underperforms in the single GPU setting, managing only much smaller models compared to ProTrain. Some frameworks fail to scale model sizes with more GPUs, primarily due to inefficiencies in handling model initialization across devices. These results highlight ProTrain’s effective utilization of heterogeneous memory resources, democratizing the LLM training.  
+
+![](images/8759aebb5c1e11e5bb76ead56a4ed44bfbaefcb75cddd151064188807ff810d3.jpg)  
+Figure 3: Maximum Training Throughput on four RTX 3090 GPUs (upper) and A100 GPUs (bottom). The notation $\mathbf{\dot{\mu}}\times\mathbf{\dot{\mu}}$ indicates failure to train due to out of memory.   
+Training Throughput. Figure 3 presents the maximum training throughput for various models on four RTX 3090 and A100 GPUs, measured in tokens per second. The throughput is obtained by testing each model at different batch sizes to find the highest achievable throughput. The results show that ProTrain consistently outperforms other frameworks across diverse hardware and models. On RTX 3090 GPUs, ProTrain achieves an average throughput of 2089.50 tokens per second, 1.77 to $2.71\times$ higher than other frameworks. On A100 GPUs, ProTrain improves the throughput of DeepSpeed, Colossal-AI, and FSDP by $1.85\!\times\!,1.43\!\times$ , and $2.22\times$ , respectively.  
+
+![](images/7ae5365b551e4d7c0814d0055209222224ef31984d1e126f7e08a59a20cd3d4a.jpg)  
+Figure 4: Scalability of performance on RTX 3090 GPUs (a) Maximum throughput across different numbers of GPUs (b) Step time breakdown for different batch sizes  
+
+As model sizes increase, the demand for memory resources grows, resulting in decreased training performance. However, ProTrain consistently maintains robust performance compared to other frameworks. Notably, ProTrain delivers substantial speedups, achieving $5.05\times$ the training speed of 15B GPT-2 on RTX 3090 and $2.78\times$ of 34B LLaMA on A100, compared to FSDP. In such cases, other frameworks either fail to train larger models with feasible batch sizes or resort to inefficient data offloading. Overall, ProTrain delivers substantial performance improvements, achieving up to $2.71\times$ the throughput of other frameworks on average, significantly enhancing the efficiency of LLM training.  
+
+Performance Scalability. Figure 4(a) shows the maximum throughput of 10B GPT-2 across varying GPU counts. ProTrain demonstrates impressive scalability, reaching 2493 token/s with four GPUs, a $3.5\times$ increase from a single GPU setup. In contrast, while DeepSpeed and Colossal-AI also increase throughput with more GPUs, their performance gains do not match those of ProTrain.  
+
+Performance Breakdown. Figure 4(b) provides a detailed breakdown of iteration time into forward, backward, and parameter update phases when training a 10B GPT-2 model at varying batch sizes on four RTX 3090 GPUs. At smaller batch sizes, where GPU memory pressure is lower, ProTrain significantly outperforms other frameworks for two reasons. First, ProTrain optimizes both computations and I/O through overlapping, effectively hiding much of the latency. This is evident from the figure, where ProTrain’s parameter update time is nearly negligible compared to other phases, due to its efficient overlap with backward computations. Second, ProTrain’s automatic memory management module dynamically identifies the optimal balance of memory-saving techniques, improving both memory efficiency and performance. As batch sizes increase, the runtime for one iteration generally rises across all frameworks due to heavier computational and memory demands. In these cases, ProTrain maximizes memory-saving techniques, with performance gains primarily driven by better overlapping strategies.1 presents experimental results on A100 GPUs.  
+
+
+
+\section{4.2 ABLATION STUDIES  }
+
+
+Importance of the Configuration Parameters. Figure 5(a) illustrates the impact of removing key optimization components in ProTrain when training a 10B GPT-2 model on four RTX 3090 GPUs. Without dual-chunk system, where persistent chunks are replaced by three chunk buffers, we observe a $1.1\times$ slowdown. As batch sizes grow and memory pressure increases, the optimal configuration shifts toward fewer persistent chunks and chunk buffers, limiting further speedup. However, ProTrain automatically adapts its memory management to match the model architecture and hardware conditions, ensuring efficient resource utilization across various workloads. Similarly, disabling the interleaved organization and applying gradient checkpointing to all transformer blocks results in an average $1.04\times$ slowdown. While the benefti of the interleaved organization diminishes at larger batch sizes, ProTrain dynamically adjusts the number of blocks for swapping and checkpointing to strike the optimal balance between memory efficiency and computational overhead. The largest performance degradation occurs when the overlapped parameter update is removed. Switching to a sequential approach results in a $1.22\times$ slowdown. This aligns with Figure 4(b), where ProTrain’s optimized parameter update greatly reduces its share of the overall runtime.5 summarizes the combinations of techniques that achieve optimal memory management and performance.  
+
+![](images/e239203dc87a8571fb5b47cc2ad7a6eacc536d6d92d46ce598bba220691fbc65.jpg)  
+Figure 5: (a) Effectiveness of dual-chunk system, interleaved organization, and overlapped parameter update. The speedup on each bar reports the time spent by ProTrain w/o the optimization divided by the time spent by ProTrain. (b) Effectiveness of runtime and peak memory usage estimator.  
+
+Effectiveness of Runtime Estimator. The upper chart in Figure 5(b) demonstrates the effectiveness of the runtime estimator by comparing the estimated and actual runtimes for various configurations during the training of the 10B GPT-2 model. The estimator consistently provides accurate predictions, with the gaps staying within $4\%$ across a wide range of configurations. This highlights its robustness in managing diverse memory optimization strategies. We also confirm the generalizability of the runtime estimator across different models and hardware setups. With precise runtime estimates, ProTrain can automatically determine the most efficient memory management configurations for specific models and hardware.  
+
+Effectiveness of Peak Memory Usage Estimator. We demonstrate that the estimated memory usage is within $7\%$ error of actual usage, as shown in the bottom chart of Figure 5(b). This high accuracy ensures that the optimal configurations identified by the runtime estimator are not only efficient but also safe, effectively preventing the risk of OOM errors during training.4 further shows the predicted and actual runtime and peak memory usage for various models and batch sizes.  
+
+
+
+\section{5 DISCUSSION  }
+
+
+ProTrain is designed for small clusters, which may pose challenges in large-scale training where crossGPU communication overhead becomes more significant. However, in our preliminary experiments, where we trained a 15B GPT-2 model with a batch size of 160 across two nodes (each equipped with four ${\mathrm{V}}100\,\mathrm{GPUs})$ ), ProTrain showed promising results, outperforming DeepSpeed by $1.53\times$ and Colossal-AI by $1.84\times$ , while FSDP encountered OOM errors. Notably, these results were achieved without any dedicated optimizations for multi-node environments in ProTrain, highlighting the potential for further refinement and performance improvements.  
+
+Furthermore, ProTrain’s ability to independently proflie each node makes it well-suited for adapting to heterogeneous setups, opening up opportunities to explore optimizations across diverse hardware configurations. As future work, we aim to enhance ProTrain’s performance in large-scale, multi-node environments by leveraging these optimization opportunities.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+This paper introduced ProTrain, a novel training system designed to simplify the training process through automatic memory management. ProTrain highlights the significance of precise memory usage and runtime data gathered through memory-aware, model-wise profliing to build high-fidelity cost models, along with the careful abstraction of configuration parameters from memory management strategies to automate optimal configuration search. ProTrain achieves up to $5\times$ the performance of existing state-of-the-art frameworks and enables the training of models with up to 75 billion parameters on a single A100 GPU. We hope our work helps AI researchers and practitioners with limited GPU resources, making LLMs more accessible to a wider audience.  
+
+
+

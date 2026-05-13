@@ -1,0 +1,458 @@
+\title{LIRE: Listwise Reward Enhancement for Preference Alignment}
+
+\begin{abstract}
+Recently, tremendous strides have been made to align the generation of Large Language Models (LLMs) with human values to mitigate toxic or unhelpful content. Leveraging Reinforcement Learning from Human Feedback (RLHF) proves effective and is widely adopted by researchers. 
+ However, implementing RLHF is complex, and its sensitivity to hyperparameters renders achieving stable performance and scalability challenging. 
+Furthermore, prevailing approaches to preference alignment primarily concentrate on pairwise comparisons, with limited exploration into multi-response scenarios, thereby overlooking the potential richness within the candidate pool.
+For the above reasons, we propose a new approach: \textit{Listwise Reward Enhancement for Preference Alignment} (\modelname{}), a gradient-based reward optimization approach that incorporates the offline rewards of multiple responses into a streamlined listwise framework, thus eliminating the need for online sampling during training.  
+\modelname{} is straightforward to implement, requiring minimal parameter tuning, and seamlessly aligns with the pairwise paradigm while naturally extending to multi-response scenarios. 
+
+Moreover, we introduce a self-enhancement algorithm aimed at iteratively refining the reward during training. Our experiments demonstrate that \modelname{} consistently outperforms existing methods across several benchmarks on dialogue and summarization tasks, with good transferability to out-of-distribution data, assessed using proxy reward models and human annotators.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+\begin{figure}[th]
+    \centering
+		\includegraphics[width=1.0\linewidth]{figs/frame.pdf}
+        \caption{\textbf{Training pipeline of the proposed \modelname{} framework}. The candidate pool is initially constructed by gathering responses $A$ with arbitrary policy $\pi_{\mathbf{\theta}_{init}}$. Subsequently, the scored responses with their query are optimized in a listwise manner. The \textit{"dashed"} line means it is optional to re-initialize the updated model $\pi_\mathbf{\theta}$ as the sampling policy and generates fresh responses that substitute the prior ones within the candidate pool.}
+	\label{fig:framework}
+\end{figure}
+While a growing plethora of large language models (LLMs) have exhibited incredible performance in a broadening scope of tasks and applications such as summarization, machine translation, and dialog generation \citep{nakano2021webgpt,stiennon2020learning,brown2020language,zhao2023survey}, they can still output contents that are harmful, biased or simply do not agree with standard human perception \citep{mathur2020tangled,fernandes2023bridging}. This is an inherent problem existing in the extensive data sources during model training \citep{ouyang2022training,bai2022constitutional,song2023preference}, and can be alleviated by incorporating certain restrictions or limitations to align the output generation towards human desires and specifications \citep{ngo2022alignment,kenton2021alignment}.
+Existing methods focus on employing Reinforcement Learning from Human Feedback (RLHF) to fine-tune the pre-trained LLMs \citep{christiano2017deep,stiennon2020learning,ouyang2022training,xue2023reinforcement}, which introduces a paradigm that involves leveraging supervised fine-tuning (SFT) on the initial models, fitting the reward model to human preferences, and then using Reinforcement Learning (RL) algorithms such as Proximal Policy Optimization (PPO) \citep{schulman2017proximal} to optimize a policy that doesn't drift overly far from the original model. 
+
+However, PPO is optimized in a pointwise manner based on the sparse rewards, penalizing fragments within a sentence equally and disregarding the truly informative parts. Additionally, PPO requires online sampling during training, which impairs computational efficiency and stability. Alternatively, methods such as DPO \citep{rafailov2023direct} and RRHF \citep{yuan2023rrhf} primarily leverage a pairwise comparison between a positive and a negative sample and transform the RL problem into an offline setting. However, the performance of pairwise comparison is heavily dependent on the quality of the sample pairs, and trivial negatives may yield suboptimal results.
+Moreover, given a large candidate pool, performing pairwise comparisons among multiple samples entails a significant computational complexity.
+
+To fully exploit the diversity among multiple samples and better identify high-reward segments within sentences, we propose an RL-free listwise approach: \textit{Listwise Reward Enhancement for Preference Alignment} (\modelname{}). 
+Unlike existing algorithms \citep{rafailov2023direct,song2023preference} that employ the Bradeley-Terry model \citep{bradley1952rank} or Plackett-Luce (PL) models \citep{plackett1975analysis} to model the preferences, we reformulate the response probability distribution and implicitly model the preferences with the offline rewards. The probabilities of responses are updated under the guidance of the rewards, entailing a more accurate indication of how the responses are preferred than their binary format counterpart of "chosen" and "reject" labels.
+\footnote{In this sense, \modelname{} can also be viewed as an optimization objective under the paradigm of Minimum Bayes Risk (MBR) decoding \cite{bertsch2023s}, where the method for choosing the output is based not on the output with the highest probability, but the output with the lowest risk (highest reward) among multiple candidates.}
+Notably, the concept of \textit{listwise} in \modelname{} is different from the traditional \textit{listwise} approach proposed in the Learning-to-Rank literature~\citep{cao2007learning,xia2008listwise}, which is largely based on the PL model and requires a ranking permutation determined by the \textit{position} given any labels. The key idea for the PL model is that the choice in the $i$-th position in a rank $\pi$ only depends on the candidates not chosen at previous positions, leading to a time complexity of at least $\mathcal{O}(n)$ depending on different surrogate losses.
+ In contrast, in \modelname{} we compute the exponential probability distribution only once, making it efficient to compute even if $n$ increases.
+
+The overarching concept is illustrated in Figure~\ref{fig:framework}: we first gather responses $A$ for queries $Q$ from different sources, after which the rewards are collected before the optimization begins. An optional strategy to further boost performance is re-initializing the trained model to generate fresh responses and conduct iterative training.
+
+\modelname{} is easy to implement, free from heavy parameter tuning, and perfectly fitted within the pairwise paradigm with natural extension towards the multi-response scenario.
+Experiments of the state-of-the-art methods are fairly conducted on multiple benchmarks of dialogue and summarization tasks. The results show that the proposed \modelname{} achieves superior and consistent performance in all the experiments, using strong 7B-LLMs as base models and various proxy reward models, GPT-4 as well as human evaluators for assessment.
+
+
+
+\section{Preliminaries}
+
+\label{preliminaries}
+In this section, we illustrate the motivation for the \modelname{} framework and the related preliminaries. We start with the objective function of the Policy Gradient (PG) methods: 
+\begin{equation}
+\label{eq:general-J}
+J(\theta)=  \sum_{\tau} P(\tau,\theta) R(\tau),
+\end{equation}
+where $P(\tau,\theta)$ is the probability of the trajectory, and $R(\tau)$ is the corresponding return. This function can be formulated into a differentiable function using the PG Theorem:
+\begin{eqnarray}
+\nabla J(\theta) =  \mathbb{E}_{\pi_{\theta}} \left[ \nabla \log \pi_{\theta}(a_t | s_t) R(\tau) \right],
+\label{eq:delta-general-J}
+\end{eqnarray}
+where $a_t$ and $s_t$ are the action and state at time step $t$ of a certain trajectory $\tau$.
+ The ultimate goal of PG methods is to maximize the rewards of the trajectories under the policy $\pi_{\theta}$. 
+
+ Supposing we have a set of queries $x$ and answers $y$, the optimization objective widely used in RLHF seetings~\citep{ouyang2022training,stiennon2020learning,ziegler2019fine} is:
+\begin{equation}
+\begin{aligned}
+\label{eq:RL}
+\max_{\pi_{\theta}}  &\mathbb{E}_{x\sim \mathcal{D}, y\sim \pi_{\theta}(y | x)}\bigg(r_{\phi}(x, y)\bigg)  \\ &- \beta\mathbb{D}_{\textrm{KL}}\bigg(\pi_{\theta}(y| x)| | \pi_{\mathrm{ref}}(y| x)\bigg),
+\end{aligned}
+\end{equation}
+where $r_{\phi}$ is the well-trained reward function. The sampling efficiency is limited in this process since the training data has to be sampled online as policy $\pi_{\theta}$ updates, with KL penalty included to avoid utter policy drifting~\citep{schulman2017proximal}.
+
+To better approximate $P(\tau,\theta)$ and thus a better indicator of the expected rewards in Equation~\ref{eq:general-J}, we propose to leverage multiple pre-allocated responses to reformulate the trajectory probability distribution. We also transform the RL learning problem into an offline setting, improving computational efficiency and stability. 
+
+
+
+
+\section{Methodology}
+
+\label{methods}
+In this section, we first introduce the construction of the \modelname{} objective and its relation with another popular objective from a theoretical aspect. Subsequently, we introduce a self-enhancement algorithm that further boosts the model preference. Please note that directly training with pairwise preference data in a single stage (without Algorithm~\ref{algo}) will suffice to bring out impressive performance and only experiments in Section~\ref{sec:self-enhancement} leverages iterative sampling and training.
+
+\subsection{The construction of the LIRE objective}
+In this section, we reformulate the preference alignment problem and introduce our \modelname{} framework. Firstly, we assume a set of queries $\mathbf{Q}=\{\mathbf{x}^{(i)}\}$ is given, $i \in \{1, \cdots, N\}$ and each query is associated with $M$ responses $\mathbf{A}^{(i)}=\{\mathbf{y}_{1}^{(i)}, \cdots, \mathbf{y}_{M}^{(i)}\}$. Furthermore, each response $\mathbf{y}_{j}^{(i)}$ for query $\mathbf{x}^{(i)}$ is paired with a score $R(\mathbf{x}^{(i)},\mathbf{y}_{j}^{(i)})$ by some Reward Model RM. 
+
+Next, we omit the superscript of ${(i)}$ for clarity. During training, we aim to learn a language model parameterized by $\mathbf{\theta}$, which generates responses of better alignment with human preferences. First, we define a set of token prediction probabilities conditioned on 
+$\mathbf{x}$ as $\mathbf{P}_{\pi_{\theta}}(\mathbf{y}_{j,k} | \mathbf{x}) \in \mathbb{R}^{L\times V}$, where $L$ is the sequence length and $V$ the vocabulary size. The probability of the sentence $\mathbf{y}_j$ with $K$ tokens takes the form in an autoregressive nature:
+\begin{equation}
+\label{pi-theta}
+   \pi_{\mathbf{\theta}}(\mathbf{y}_j | \mathbf{x}) = \prod_{k=1}^{K}\mathbf{P}_{\pi_{\theta}}(\mathbf{y}_{j,k} | \mathbf{x}, \mathbf{y}_{j,<k}).
+\end{equation}
+To exploit the diversity present in different responses, we reformulate the response probability distribution against the entire response set $\mathbf{A}$ as:
+\begin{equation}
+    \label{top-one}
+    P_{\pi_{\mathbf{\theta}}}(\mathbf{y} | \mathbf{x},\mathbf{A}) = \frac{\exp(\frac{1}{T} \log\pi_{\mathbf{\theta}}(\mathbf{y} | \mathbf{x}) )} {\sum_{j=1}^{M} \exp(\frac{1}{T}\log\pi_{\mathbf{\theta}}(\mathbf{y}_{j} | \mathbf{x}))},
+\end{equation}
+where $T$ is a temperature parameter to control the smoothness of the probability distribution. 
+Equation~\ref{top-one} can be regarded as an updated approximation of the underlying response (trajectory) distribution, and we next derive the listwise loss as:
+\begin{equation}
+\begin{aligned}
+J(\mathbf{\theta}) &= -\mathbb{E}_{\mathbf{x} \sim q(\cdot)} \mathbb{E}_{\mathbf{y} \sim   P_{\pi_{\mathbf{\theta}}}(\cdot|\mathbf{x},\mathbb{A})} R(\mathbf{x},\mathbf{y})\\
+&=-\mathbb{E}_{\mathbf{x} \sim q(\cdot)} \sum_{j=1}^{M} P_{\pi_{\mathbf{\theta}}}{(\mathbf{y}_j | \mathbf{x},\mathbf{A})}R(\mathbf{x},\mathbf{y}_j),
+\label{eq:L1}
+\end{aligned}
+\end{equation}
+where $q(\cdot)$ denotes the distribution of the queries. 
+ In practice, we apply softmax to the reward scores of a single query due to its property of translation invariance. By doing so we mitigate the influence of different reward scales and maintain stable training parameter settings.
+
+\begin{equation}
+	\begin{aligned}
+\nabla_{\theta}{J(\mathbf{\theta})}
+= -\frac{1}{T}\mathbb{E}_{\mathbf{x} \sim q(\cdot),\mathbf{y} \sim \pi_{\theta}(\cdot|\mathbf{x})} \Bigg[ \frac{\nabla {\pi_{\mathbf{\theta}}}(\mathbf{y}|\mathbf{x})}{ {\pi_{\mathbf{\theta}}}(\mathbf{y}|\mathbf{x})} \\
+\times\Big({R(\mathbf{x}, \mathbf{y})} 
+-\mathbb{E}_{(\mathbf{y'} \sim \pi_{\theta}(\cdot|\mathbf{x}))}{R(\mathbf{x}, \mathbf{y'}}) \Big) \Bigg]. \label{eq:l_d}
+\end{aligned}
+\end{equation}
+$\frac{\nabla {\pi_{\mathbf{\theta}}}(\mathbf{y}|\mathbf{x})}{ {\pi_{\mathbf{\theta}}}(\mathbf{y}|\mathbf{x})}$ is the normalized gradient of model predictions, multiplied by a demeaned reward score. These demeaned rewards act as a weighting mechanism that encourages responses with higher scores while depressing those with lower rewards. With Equation~\ref{eq:l_d} exhibiting substantial differences with Equation~\ref{eq:delta-general-J}, we have a better view of how the \modelname{} objective is built upon and improved over the PG theorem in this setting.  
+
+\noindent \textbf{Difference with traditional PG objective.}
+The LIRE objective is initially constructed under the PG Theorem but the two objectives still exhibit substantial differences as illustrated in Table~\ref{tab:pg-diff}. Please note that one have to perceive \modelname{} in a listwise/groupwise manner where all the responses for one query are taken as one "sample". A special case is that if we only have one response or if all the responsess are identical, the gradient of LIRE will be zero, and this is completely different from PG. 
+\begin{table*}[ht]
+	\centering
+	\resizebox{2.05\columnwidth}{!}{
+		\begin{tabular}{ccc}
+			\toprule
+			\textrm{\textbf{Difference Aspect} } &\textbf{PG}  &\textbf{\modelname{}}\\
+		\midrule
+			\multirow{3}{*}{\textrm{\textbf{Objective function } }}&$J(\theta)=-\frac{1}{m}\sum_{i=1}^{m}\log \pi_{\theta}(y_i | x_i )R(x_i,y_i)$& $J(\theta)=-\frac{1}{m}\sum_{i=1}^{m}\sum_{j=1}^{n}\frac{\exp(\frac{1}{T}\log \pi_\theta(y_j|x_i))}{\sum_{j=1}^{n} \exp (\frac{1}{T} \log \pi_{\theta}(y'|x_i))}R(x_i,y_j)$\\
+			~ &\text{takes the arithmetic mean }&\text{applies softmax over the }\\
+			~&\text{over $m$ trajectories}&\text{$n$ trajectories for each query x}\\
+				\cmidrule(r){1-1}\cmidrule(l){2-2}\cmidrule(l){3-3}
+			\textbf{Gradient Estimation}&$\nabla_{\theta}J(\theta)=-\frac{1}{m}\sum_{i=1}^{m}\nabla_{\theta}\log\pi_{\theta}(y_i|x_i)R(x_i,y_i)$& $\nabla_{\theta}J(\theta)=-\frac{1}{T}\mathbb{E}_x\mathbb{E}_{y} \left[\frac{\nabla_{\pi_{\theta}}(y|x)}{\pi_{\theta}(y|x)} \times (R(x,y)-\mathbb{E}_y'R(x,y'))\right]$\\
+				\cmidrule(r){1-1}\cmidrule(l){2-2}\cmidrule(l){3-3}
+		\multirow{3}{*}{\textbf{Physical Interpretation}}&\text{Each sample has a weight proportional to}&\text{Each sample updated according to the \textbf{relative} }\\
+		~&\text{the \textbf{absolute} $R$ for the grad-log-prob,}&\text{$R$, \modelname{} increases the likelihood of samples}\\
+		~&\text{all samples encouraged during optimization}&\text{with higher rewards and decreases those with lower rewards}\\
+			\bottomrule
+	\end{tabular}
+}
+	\caption{\textbf{Differences between \modelname and PG}. We give theoretical and analytical explanation to the differences between \modelname{} and PG on objective function, gradient estimation and physical interpretation.}
+	\label{tab:pg-diff}
+\end{table*}
+
+\noindent \textbf{Relation with the DPO objective.} When $M$ descends to 2, this listwise loss degenerates into a pairwise loss and can be compared directly with the DPO objective.
+First, we reorganized the gradient of DPO, referring to our previous definition format, in the following:
+\begin{equation}
+	\begin{aligned}
+		&\nabla J_\text{DPO}(\pi_\theta;\pi_{\textrm{ref}})= -\beta\mathbb{E}_{\mathbf{x} \sim q(\cdot),\mathbf{y} \sim \pi_{\theta}(\cdot|\mathbf{x})} \\
+		&   \bigg[\Tilde{P} {\nabla \log\pi_{\theta}(\mathbf{y}_1 | \mathbf{x})} +(-\Tilde{P}) \nabla \log\pi_{\theta}(\mathbf{y}_2 | \mathbf{x})\bigg],
+	\end{aligned}
+\end{equation}
+with $\Tilde{P}= \sigma  (\beta \log \frac{\pi_\theta(\mathbf{y}_{2} | \mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}_{2} \mid\mathbf{x})}-\beta \log \frac{\pi_\theta(\mathbf{y}_{1} | \mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}_{1} \mid\mathbf{x})})$.
+Next, we rewrite Equation~(\ref{eq:l_d}) into a pairwise formulation (omitting $\mathbf{A}$ for clarity):
+\begin{equation}
+	\begin{aligned}
+		&\nabla{J_{\textrm{LIRE-2}}(\mathbf{\theta})}
+		= -\frac{1}{T} {E}_{\mathbf{x} \sim q(\cdot),\mathbf{y} \sim \pi_{\theta}(\cdot|\mathbf{x})} \\
+		&\Bigg[ \Tilde{P} \nabla \log\pi_{\mathbf{\theta}}(\mathbf{y}_{1}|\mathbf{x})
+		+(- \Tilde{P})\nabla \log\pi_{\mathbf{\theta}}(\mathbf{y}_{2}|\mathbf{x}) \Bigg],\label{eq:dpo-relate}
+	\end{aligned}
+\end{equation}
+where $\Tilde{P} = \frac {{\pi_{\mathbf{\theta}}(\mathbf{y}_{1}|\mathbf{x})^{\frac{1}{T}} \times \pi_{\mathbf{\theta}}}(\mathbf{y}_{2}|\mathbf{x})^{\frac{1}{T}}}{(\pi_{\mathbf{\theta}}(\mathbf{y}_{1}|\mathbf{x})^{\frac{1}{T}}+\pi_{\mathbf{\theta}}(\mathbf{y}_{2}|\mathbf{x})^{\frac{1}{T}})^{2}} \times (R(\mathbf{x},\mathbf{y}_{1}) -R(\mathbf{x},\mathbf{y}_{2}))$.
+
+Interestingly, these two objectives resemble in that they can both be viewed as the weighted sum of gradients of two responses. The difference is that in DPO, \textit{chosen} and \textit{rejected} labels are first made clear, and then the weight $\Tilde{P}$ is determined by the differences in the \textit{implicit rewards} of two responses defined by the reference model as well as the policy, thus eliminating the need for reward modeling. Differently, in \modelname{}, we leverage \textit{explicit proxy rewards} as the surrogate of preference and directly determine how the responses are preferred and how to update the probabilities accordingly, giving a more intricate and fine-grained alignment target.
+
+Furthermore, \citep{rafailov2023direct} also proposed the DPO objective under the PL model mentioned in Section~\ref{sec:intro}, which generalizes to multiple rankings. They leverage the parameterized exponential probability distribution over all the permutations
+and define the loss function as the negative log-likelihood of the ranked list~\citep{xia2008listwise}, entailing a time complexity of $\mathcal{O}(n)$ in a list of $n$ responses, which is less efficient than \modelname{} who computes the exponential probability distribution only once. 
+\subsection{The self-enhancement algorithm}
+\label{sec:algo}
+To further boost the performance, we propose Algorithm~\ref{algo} to conduct iterative data sampling and
+ incremental policy updates. This iterative strategy is also adopted in works \citep{gulcehre2023reinforced, dong2023raft,singh2023beyond} and proves to be effective. 
+The whole training outline is divided into two phases: Data Sampling (\textit{Evolve}) and Policy Training (\textit{Iterate}).
+We start by sampling responses from some policy $\pi_{\mathbf{\theta}_{\mathrm{init}}}$.
+Reinforcement Learning from Human and AI Feedback
+\begin{algorithm}
+\KwIn{Input queries $\mathbf{x}$, training objective $J(\mathbf{\theta})$, reward model $\textrm{RM}$, number of samples per query $M$, Language Model with initial policy $\pi_{\mathbf{\theta}_{\mathrm{init}}}$, \textit{Evolve} steps $E$, \textit{Iterate} steps $I$.}
+\For{$e = 1$ to $E$}{
+Generate dataset $D_{e}$: for each query $\mathbf{x}^{(i)}$, sample $M$ responses $\mathbf{A}^{(i)} \sim \pi_{\mathbf{\theta}}(\mathbf{y}| \mathbf{x}^{(i)})$. \\
+Score $D_{e}$ with the reward model $\textrm{RM}$.\\
+\For{$i = 1$ to $I$}{
+Update $\pi_{\mathbf{\theta}}$ on data $D_{e}$ with the objective $J(\mathbf{\theta})$.
+}}
+\KwOut{The learned policy $\pi_{\mathbf{\theta}}$.}
+\caption{The self-enhancement strategy for reward maximization. An \textit{Evolve} step is defined as a data generation procedure with policy ${\pi_{\mathbf{\theta}}}$, followed by subsequent \textit{Iterate} steps of policy training with objective $J(\mathbf{\theta})$.}
+\label{algo}
+\end{algorithm}
+(RLHAIF) integrates human and AI feedback and \citet{wu2021recursively,saunders2022self,perez2022discovering} showed that leveraging RLHAIF can yield results that outperform those achieved solely through human feedback, therefore, we extend the candidate pool beyond pairwise human preference by including LLM generations with diverse decoding strategies. Afterwards, we initialize the target policy $\pi_{\mathbf{\theta}}$ as the pretrained LLM and start to optimize the objective $J(\mathbf{\theta})$ in Equation~(\ref{eq:L1}).
+Specifically, $E=1$ suggests we sample responses only once, without iterative sampling afterward. 
+
+
+\section{Experiments}
+
+\subsection{Datasets}
+\label{dataset}
+For performance comparison, we mainly focus on dialogue generation and summarization tasks. For dialogue, we use \href{https://huggingface.co/datasets/Dahoas/rm-static}{Anthropic’s Helpful and Harmless (HH) dataset}. All the responses of a single query are scored by Reward Model \href{https://huggingface.co/Dahoas/gptj-rm-static}{RM}. 
+co/OpenAssistant/reward-model-deberta-v3-large}{RM-SUM}. The base model is Alpaca-7B. 
+
+\subsection{Implementation details} 
+In this section, we give the specific settings for the methods. Specifically, for \modelname{}, the experiments are conducted on 4 80GB Nvidia A100 GPUs with a gradient accumulation of 16 steps. For the HH Dialogue and Summarization datasets, the learning rate is set to 2e-5 and 1e-5 with a cosine decay for each, respectively. For the HH dataset, the training epoch is 3, the max token length is 450; for TL;DR Summarization, the training epoch is set to 2 and the max token length is 720 across all experiments. Please note that we did not explicitly run a grid search to determine the above hyperparameters, but our experiments suggest they are quite good hyperparameters to bring out the best possible results under our settings.
+We also apply Lora with DeepSpeed ZeRO-2 for memory optimization. We also provide the Pytorch code for the \modelname{} loss in \ref{implementation code}.
+\begin{table*}[htbp]
+	\centering
+	\resizebox{2.0\columnwidth}{!}{
+		\begin{tabular}{ccccccccc}
+			\toprule
+			\textbf{Test Data}& \textbf{Eval Metric $\uparrow$} & \textbf{SFT} & \textbf{PPO}&\textbf{DPO}&\textbf{SLiC-HF}&\textbf{PRO}&\textbf{RRHF}&\textbf{\modelname{}}$^{\textit{Ours}}$\\
+			\cmidrule(r){1-1} \cmidrule(lr){2-2} \cmidrule(lr){3-9}
+			\multirow{2}{*}{\textbf{HH dialogue}}&\textrm{RM} &-0.928&\underline{-0.915}&\underline{-0.915}&-1.192&-1.023&-0.959&\textbf{-0.847}\\ 
+			~&\textrm{RM$^{*}$} &-0.058&-0.056&0.023&\textbf{0.098}&-0.063&-0.041&\underline{0.056} \\
+			~& avg. Win Rate &62.89&63.62&\underline{72.81}&64.38&59.34&65.25&\textbf{76.50}\\
+			\cmidrule(lr){1-9}
+			\multirow{3}{*}{\textbf{Summarization}}&\textrm{RM-SUM}&1.038 &1.644& 2.195&\underline{2.654} &1.457 &1.251&\textbf{2.769}\\     
+			~&\textrm{RM-SUM$^{*}$} &0.119&0.890&1.938 &\underline{2.933}& 1.124& 0.812&\textbf{3.024}\\
+			~& avg. Win Rate &38.95 &48.14&59.75&\underline{68.09}&50.35&46.70&\textbf{70.15}\\
+			\bottomrule
+		\end{tabular}
+		}
+	\caption{\textbf{ Pairwise comparison of \modelname{} and other methods on HH Dialogue as well as Summarization datasets}. $\uparrow$ means that larger values are better. The best and second best results are marked with \textbf{Bold} and \underline{underlined} format. \modelname{} achieves the highest average win rates against the human-written baselines computed by the two reward models in both tasks. }
+\label{tab:all results}
+\end{table*}
+
+\subsection{Performance comparison when training with pairwise preference}
+\label{sec:offline exp}
+\textbf{Evaluating with automatic metrics.} Firstly we conduct an in-depth assessment of the state-of-the-art algorithms on the HH and Summarization dataset. Given the substantial costs associated with evaluating the complete test set either with human annotators or GPT-4, we initially employ two reward models \href{https://huggingface.co/Dahoas/gptj-rm-static}{\textrm{RM}} and \href{https://huggingface.co/EleutherAI/pythia-6.9b/tree/main}{\textrm{RM$^{*}$}} as proxies to score the model completions and compute the average win rate against the human-written baselines. For Summarization, \href{https://huggingface.co/OpenAssistant/reward-model-deberta-v3-large}{\textrm{RM-SUM}} and \href{https://huggingface.co/OpenAssistant/reward-model-deberta-v3-large-v2}{\textrm{RM-SUM$^{*}$}} are utilized.
+We employ two reward models for evaluation to pursue that higher scores are primarily obtained through improved alignment, rather than from spurious correlations that might emerge during the reward modeling process of a particular reward model. In essence, we seek to mitigate the undesired model hacking~\citep{skalse2022defining,touvron2023llama} behavior.
+
+As shown in Table~\ref{tab:all results}, when trained with the HH Dialogue dataset, \modelname{} achieves the highest average win rate, with DPO attaining the second-best. For Summarization, \modelname{} got the highest scores from both reward models. Since our \modelname{} is optimized to maximize the overall rewards given by \textrm{RM}/\textrm{RM-SUM}, it is no surprise that it performed exceptionally well in these two metrics. However, we see that it also achieves highly competitive scores on the other two metrics (\textrm{RM$^{*}$}/\textrm{RM-SUM$^{*}$}). One can think of the two reward models as two human beings, and humans are highly diverse in their preferences \citep{casper2023open,bobualign2023}. Evaluating with more models resembles aggregating the opinions of more individuals and can potentially alleviate the risk of being fooled by a single proxy reward model, and can hopefully bring out a more justified evaluation.
+Please note that Alpaca-7B is used as the base model for policy training (same practice as~\citet{song2023preference}), so "SFT" in Table~\ref{tab:all results} refers to further instruction-tuning Alpaca, which is already finetuned with an instruction-following dataset. This explains why  some results of "SFT" in Table~\ref{tab:all results} is fairly competitive to other advanced methods.
+ 
+
+\begin{table}[ht]
+	\centering
+	\resizebox{1.0\columnwidth}{!}{
+		\begin{tabular}{ccccccccc}
+			\toprule
+			\textrm{\textbf{vs.} } &\textbf{SFT} &\textbf{PPO} &\textbf{DPO} &\textbf{SLiC-HF}&\textbf{PRO} &\textbf{RRHF} &\textbf{HW}\\
+			\midrule
+			\textrm{\textbf{HW win } }&{49}&{46}&{46}&{52}&{55}&{56}&- \\
+			\textrm{\textbf{\modelname{} win } }&{59}&{53}&{52}&{58}&{62}&{60}&{56} \\
+			\bottomrule
+	\end{tabular}}
+	\caption{\textbf{Human evaluation on Anthropic HH test split}. \textbf{HW win} refers to the percentage that human-written baselines are preferred over the compared method. \textbf{\modelname{} win} means that responses from \modelname{} are preferred by human evaluators. We observe that \modelname{} gains win rates over 50 when compared to all other baselines.}
+\label{tab:human eval}
+\end{table}
+
+\noindent \textbf{Evaluating with human annotators and GPT-4.} Apart from automatic evaluation metrics, we conduct human evaluation as well as GPT-4 to assess the quality of the model responses, since GPT-4 is known to be greatly correlated with human judgments~\citep{liu2023summary,song2023preference,rafailov2023direct}.
+Table \ref{tab:human eval} gives human evaluation on a subset of Anthropic-HH test split. The first row is for human-written responses versus different methods, and the second row is for comparing \modelname{} against other methods directly. \modelname{} achieves the highest win rate, which is in line with the results of automatic metrics.
+Additionally, Figure~\ref{fig:sum win-rate} shows that \modelname{} and SLiC-HF achieve quite comparable GPT-4 votes for the summarization task, followed by PPO and DPO. 
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=1.0\linewidth]{figs/sum2-win-rate.pdf}
+\caption{\textbf{Summarization win rate against human-written baselines.} \modelname{} and PPO get comparable GPT-4 support rates, followed by DPO and PRO on a randomly selected subset of the test split.}
+\label{fig:sum win-rate}
+\end{figure}
+
+\noindent \textbf{Generalization to out-of-distribution data.} 
+\begin{figure}[ht]
+	\centering
+	\includegraphics[width=1.0\linewidth]{figs/mt-bench-4.pdf}
+	\caption{\textbf{Radar plot of the MT-Bench with GPT-4 as a Judge}. This plot gives a clear visual representation of the score distribution across distinct categories for various methodologies. The numbers beside the names are the summed scores. \modelname{} and PPO maintain relatively more comprehensive performance, indicating their generalization ability when transferred to out-of-distribution data.}
+	\label{fig:radar}
+\end{figure}
+\citet{ji2023ai} points out that the preservation of alignment properties under distribution shift is one of the primary problems. To investigate how the well-trained models with the dialogue dataset perform on other out-of-distribution conversation cases, we leverage MT-Bench introduced in \citet{zheng2023judging}, which contains 80 open-ended questions for evaluating chat assistants. Figure~\ref{fig:radar} shows that \modelname{} and PPO maintain relatively comprehensive performance, gaining an overall score of 347 and 342, respectively. 
+
+\subsection{Effects of increasing sequence number }
+\label{extrapolate}
+
+In this section, we explore if increasing the number of sequences in a listwise approach can bring a performance boost.
+For the dialogue task, we follow \citet{yuan2023rrhf} to sample responses from Alpaca-7B \citep{taori2023stanford} using diverse beam search and extend the sequence length from the original human preference pair to 4 and 6, respectively.
+Intuitively, one might expect that \textbf{Best-of-$\textbf{n}$} sampling presents a competitive adversary. To elaborate, given that we augment the candidate pool with sampling results from Alpaca-7B, the Best-of-$n$ sampling outcomes from Alpaca-7B should be quite comparable, as \modelname{} actually learns from the Best-of-$n$ sampling results. To explore this further,  we leverage Alpaca-7B, Llama2-7B, and Llama2-7B(sft) as the base models for comparison. Since Alpaca is essentially an instruction following Llama model, we also include Llama2-7B(sft) which is fine-tuned on the human chosen preferences for a nuanced comparison. We use RM to identify the Best-of-$n$ results. 
+
+Figure~\ref{fig:seq n} shows that as sequence length increases, both \modelname{} and Best-of-$n$ witness an improvement of win rates calculated by RM. However, when evaluating with RM$^{*}$, Best-of-$n$ showcases more significant performance decline, suggesting that Best-of-$n$ sampling gives results that align with the preference of RM, while not catering to the taste of another RM$^{*}$ to a large extent.
+On the contrary, \modelname{} achieved a well-balanced compromise between different metrics.
+
+Moreover, we experiment with Llama2 as the base model for policy training while \modelname{} still learns from augmented samples generated by Alpaca-7B. This time, an obvious performance gap is observed between \modelname{} and Best-of-$n$ results on Llama2 models. This phenomenon indicates that leveraging more diverse and potentially higher qualified data for training, and \modelname{} can bypass the Best-of-$n$ baseline by a larger margin.
+
+\begin{figure}[htbp]
+	\centering
+	\includegraphics[width=1.0\linewidth]{figs/lire-vs-best-llama-hh.pdf}
+	\caption{\textbf{Win rate evolution when increasing sequence number}. 
+		As sequence number increases, both \modelname{} and Best-of-n witness an improvement of win rates calculated by RM. When evaluating with RM$^{*}$, Best-of-$n$ showcases a more significant performance decline, suggesting that Best-of-$n$ gives results that largely align with the preference of RM, while may not catering to the taste of another RM$^{*}$ to a great extent.}
+	\label{fig:seq n}
+\end{figure}
+Generally, while increasing model generations does bring out additional advantages, it is a diminishing return if we use a single model to do sampling because it provides average-quality responses. Intuitively, higher-quality responses can provide more valuable information and direct the model to learn better preference representations. Hence, we leverage the self-enhancement algorithm introduced in Section~\ref{sec:algo} to see how it can further boost the performance iteratively in Section~\ref{sec:self-enhancement}.
+
+\subsection{How far is \modelname{} drifted away from the reference policy?}
+\label{sec:sft}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/winrate-kl.pdf}
+    \caption{\textbf{Reward-KL frontiers of different algorithms.} The plot illustrates that \modelname{} provides good rewards while maintaining relatively small KL.}
+    \label{fig:winrate-kl}
+\end{figure}
+In this section, we explore the rewards (win-rate) vs KL trade-offs to see how far the proposed policy drifted away from the base policy while maintaining high win rates. 
+Figure~\ref{fig:winrate-kl} depicts the Reward-KL frontiers of different policies collected by varying the sampling temperatures.  KL$(\pi_{\theta}||\pi_{ref})$ refers to the mean sequence-level KL divergence of the policy against the reference model on the HH dialogue test split, and Reward (win rate) is given by RM. Compared to SFT and PPO, \modelname{} gives much higher rewards within the same range of KL divergences. 
+Moreover, as the number of sequences increases, there is a trend of growing rewards for \modelname{} while maintaining a relatively small KL divergence. The reason is that in practice the reference model is leveraged to augment the responses, and this helps mitigate model regression as well as policy drifting problem~\citep{touvron2023llama}.
+
+\subsection{Do we need to add regularization loss?}
+Intuitively, we can add a standard Cross Entropy loss to help mitigate possible model hacking phenomenon following~\citet{zhao2023slic,song2023preference,yuan2023rrhf}. Interestingly, according to the derivative of the \modelname{} objective in Equation~\ref{eq:l_d}, the gradient of each sampled response is weighted according to the reward scores. For queries that include human-annotated responses in the candidate list, LIRE includes the human-annotation during loss calculation. This can be perceived as an implicit SFT loss component. 
+
+In practice, when training with pairwise data using Llama2-7B as the base model, there exists a potential Model Collapse problem where the trained policy generates repeated and meaningless words. However, we did not find this phenomenon when training with multiple responses or with Alpaca-7B, which is a fine-tuned Llama model. We hypothesize that enforcing an explicit SFT loss can prevent the degenerative process when starting with a base model that is not fine-tuned.
+Table~\ref{tab:sft} gives results when including an extra CE loss on the high-quality human-annotated data, with $\alpha$ being the weight of the CE loss:  $L(\theta) = J(\theta)+\alpha L_{SFT}(\theta)$. One can observe that adding an SFT loss helps the model adhere to human preferences, which may introduce an extra reward boost within a limited range, with a suitable parameter of $\alpha$. 
+
+\begin{table}[htbp]
+	 \centering
+	\resizebox{0.8\columnwidth}{!}{
+   \begin{tabular}{cccccc}
+   \toprule
+      $\alpha$ &0&0.01&0.02&0.03\\
+     \cmidrule(r){1-1} \cmidrule(lr){2-2} \cmidrule(lr){3-5}
+     \textrm{RM score}&-0.80 &-0.79&\textbf{-0.77}&-0.80 \\
+     \textrm{Win rate}$\%$ & 80.26 &82.12&\textbf{85.20}&80.51\\
+    \bottomrule
+    \end{tabular}
+}
+\caption{Effects of adding SFT loss with different $\alpha$.}
+\label{tab:sft}
+\end{table}
+
+\subsection{Additional performance boost with special sampling technique and iterative training}
+\label{sec:self-enhancement}
+\noindent{\textbf{Combing RSO with \modelname{}.}}
+ First we explore with Statistical Rejection Sampling
+Optimization (RSO)~\citep{liu2023statistical}, which is a special technique to source preference data from the estimated target
+optimal policy using rejection sampling, and we think it intriguing to combine RSO when constructing the candidate pool. Specifically, we sample 8 responses per prompt using Alpaca-7B for the HH-dialogue task, and leverage the RSO technique to further acquire 4 responses before the responses are used for policy training. From Table~\ref{tab:rso} we observe considerable improvement on RM compared to Table 1 across all three methods, since RM is used to score the responses in the RSO process, and we see LIRE still exhibits the best score. 
+
+\begin{table}[htbp]
+	\centering
+	\resizebox{0.8\columnwidth}{!}{
+		\begin{tabular}{cccc}
+			\toprule
+			Eval. Metric &SLiC-HF&DPO&\modelname{} \\
+			\midrule
+			\textrm{RM}&-0.88&-0.83&-0.76\\
+			\textrm{RM$^*$}&-0.013&-0.026&0.053\\
+			\textrm{Avg. Win rate}$\%$ & 72.76 &67.76&82.90\\
+			\bottomrule
+		\end{tabular}
+	}
+	\caption{Performance comparison when leveraging RSO with SLiC-HF, DPO and \modelname{} on HH-dialogue.}
+	\label{tab:rso}
+\end{table}
+
+\noindent{\textbf{Leveraging Algorithm~\ref{algo}.}}
+Next we implement Algorithm~\ref{algo} and discuss the effect of iterative training and subsequent sampling (we don't employ RSO here to disentangle the different effects of sampling technique and iterative training). We first employ the current policy to generate samples, then we keep the human preference data in the candidate pool and replace the model responses with freshly generated ones to avoid an utter distribution shift and maintain a consistent pool size. We also include an SFT loss during training. The general idea is depicted in Framework~\ref{fig:framework}.
+
+\begin{figure}[htbp]
+	\centering
+	\includegraphics[width=1.0\linewidth]{figs/step-reward.pdf}
+	\caption{\textbf{Average reward scores when trained with different \textit{Evolve} steps $E$ and \textit{Iterate} steps $I$}. When trained with larger $E$ and $I$, \modelname{} generally witness a reward gain.}
+	\label{fig:setp-reward}
+\end{figure}
+
+We experiment with different \textit{Evolve} steps $E$ and \textit{Iterate} steps $I$. 
+The details are listed in Table~\ref{tab: self-enhancement}.
+We find that when increasing the number of sequences as well as data sampling steps, \modelname{} generally achieves a reward gain. This suggests a further performance boost brought by this iterative sampling strategy. We also conduct multiple runs and plot the results in Figure~\ref{fig:setp-reward}, and the shaded areas refer to the best and worst results.
+
+Additionally, to understand the score changes from a micro perspective, Figure~\ref{fig:scatter} depicts the distribution of reward scores before and after the \modelname{} enhancement. 
+The result suggests that compared to zero-shot results of Alpaca-7B, most of the extreme cases of low scores are suppressed, thus improving the overall performance. 
+
+ 
+\begin{table}[ht]
+\centering
+  \resizebox{\columnwidth}{!}{
+    \begin{tabular}{lcccc}
+   \toprule
+   ~&\multicolumn{4}{c}{\textit{Evolve}}\\
+   \cmidrule(lr){2-5}
+      \textit{Iterate} &{E=1}(HH)&{E=1}(HH-4)&{E=2}(HH-4) &E=3(HH-4)\\
+    \cmidrule(r){1-1} \cmidrule(lr){2-2} \cmidrule(lr){3-3} \cmidrule(lr){4-4} \cmidrule(lr){5-5}
+    I=1&-0.883&-0.977&-0.823&-0.759\\
+    I=2&-0.826&-0.779&-0.771&-0.756\\
+    I=3&\textbf{-0.813}&\textbf{-0.774}&\textbf{-0.763}&\textbf{-0.731}\\
+    \bottomrule
+    \end{tabular}
+ }
+\caption{\textbf{Reward score improvements of multiple \textit{Evolve} $E$ and \textit{Iterate}$I$ steps}. We observe a trend for growing rewards when increasing $E$ and $I$ steps. E(3)I(1)-HH4 means the candidate pool size is 4 and we sample 3 times and train for 1 epoch in each $E$ step.}
+\label{tab: self-enhancement}
+\end{table}
+\begin{figure}[htbp]
+	\centering
+	\includegraphics[width=1.0\linewidth]{figs/scatter.pdf}
+	\caption{\textbf{RM score variation after LIRE enhancement}. After \modelname{} training, most of the extremely bad cases are suppressed, which demonstrates the effectiveness of our proposed self-enhancement algorithm.}
+	\label{fig:scatter}
+\end{figure}
+
+\subsection{Effects of temperature parameters $T$}
+\label{tmp-T}
+
+We test the influence of the temperature parameters $T$ in Equation~(\ref{eq:L1}) when training with HH-4. Essentially, $T$ is introduced to modify the probability distribution of the sampled model completions for a given query. Varying $T$ introduces slight fluctuation in performance. A larger T makes all the
+samples more uniformly weighted, while a smaller T shifts the probability mass to the best sample. Consequently, T within a suitable range helps boost performance. 
+\begin{table}[htbp]
+	\centering
+	\resizebox{1.0\columnwidth}{!}{
+		\begin{tabular}{cccccc}
+			\toprule
+			T &1&2&5&10 &20 \\
+			\cmidrule(r){1-1} \cmidrule(lr){2-6} 
+			\textrm{RM}&-0.80&-0.80&\textbf{-0.75}& -0.77& -0.86\\
+               \textrm{Win rate}$\%$ & 79.85 &80.26&\textbf{86.25}&85.51&76.01\\
+			\bottomrule
+		\end{tabular}
+		}
+	\caption{\textbf{Performance fluctuation when varying the temperature parameters $T$.} Our experiments suggest that $T \in [1,10]$ is a good point to start with.}
+\label{tab: diff-t}
+\end{table}
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+\label{related}
+
+\textbf{Reinforcement Learning from Human Feedback.}
+Leveraging human feedback to improve model generation ability toward human desire renders it imperative given the quickly growing family of LLMs. Directly leveraging human feedback to optimize models generally requires an “optimizable” formulation of the feedback \citep{fernandes2023bridging}. 
+However, it is expensive and impractical to generate sufficient human feedback for LLM training in general cases.
+Alternatively, one line of work relies on models to produce feedback that approximates human perception \citep{stiennon2020learning,ouyang2022training,askell2021general}.
+Given enough feedback (preference data), RLHF has been extensively employed to optimize an LLM with various training objectives using a unified approach. 
+
+\noindent \textbf{Popular Methods for Preference Alignment.}  SFT is a straightforward method to align LLMs with human values that directly maximizes the likelihood of the top-1 candidate~\citep{zhou2023lima,thoppilan2022lamda}. 
+Many other methods have aimed to improve efficiency as well as performance for preference alignment over online RL policies. \citet{rafailov2023direct} reformulates the constrained reward maximization problem as a direct policy optimization (DPO) problem, which proves to be performant and computationally lightweight. SLiC-HF \citep{zhao2023slic} utilizes the rank calibration loss and cross-entropy regularization loss to learn pairwise human feedback. For preference data beyond binary format, RRHF \citep{yuan2023rrhf} learns to align scores of sampled responses with human preferences through pairwise ranking loss among multiple responses, and PRO \citep{song2023preference}
+iteratively contrasts the likelihood of the best response against the remaining responses on a rolling basis, using an extended pairwise Bradley-Terry comparison model. Another line of work directly utilizes reward scores from reward models for filtering purposes to improve model generation. 
+
+\noindent \textbf{Iterative Strategies to Strengthen Alignment.} \textit{ReST} \citep{gulcehre2023reinforced} frames the alignment problem as a growing batch RL problem that combines iteratively augmenting the training dataset and fine-tuning the model on the filtered dataset with offline RL algorithms. Concurrent to this work, RAFT \citep{dong2023raft} subsequently selects the 1/$k$ percent of samples with the highest reward as the training samples and then fine-tune the model on this filtered dataset. 
+
+While the above methods all bring improvement to better aligning model output with human preferences, we believe more research and effort should be devoted to this research topic, especially in cases where multiple responses are available. 
+
+
+
+\section{Conclusion}
+
+In this paper, we propose \modelname{}, a listwise optimization scheme under the general PG framework for preference alignment tasks, and a self-enhancement algorithm to progressively optimize rewards. \modelname{} learns the preferred patterns through iterative maximization of the overall rewards of the diverse candidate pool. Our approach is free from heavy parameter tuning and simple to implement, exhibiting commendable performance on dialogue and summarization tasks. 
+
+
+\section{Limitations}
+
+This paper still has some limitations that are worthy of investigation. One concern is that the current evaluation metric (the proxy reward models) doubles as the optimization target. As Goodhart’s Law~\citep{goodhart1984problems} states, when a measure becomes a target, it ceases to be a good measure. To make sure our measure does not deviate from human preferences, efforts need to be taken to ensure that the reward models utilized are proxies that truly reflect human preferences. This may require additional reward modeling as we conduct iterative sampling and training.
+Another limitation is that practically, we rely on the current policy to sample model completions, and how to construct a highly qualified candidate pool that brings out the greatest performance boost for \modelname{} with diversified AI feedback remains to be explored. 
+
+
+
+\section{Impact Statements}
+
+With improved capabilities of LLMs, come increased risks including (but not limited to) untruthful answers, deception, biased opinions, and harmful content, which may cause catastrophic results. To better control and steer model generations to satisfy human intentions and values, it is essential to develop techniques to manipulate model outputs to maintain Ethicality. A significant body of research has been dedicated to developing ethical frameworks for AI systems, encompassing a range of processes, starting from gathering and processing data, algorithm design, and culminating in application implementation. We hope our work can bring some synergy to this community and make LLMs safer and more "steerable" for human society.
+
+
+
+
+
+
+

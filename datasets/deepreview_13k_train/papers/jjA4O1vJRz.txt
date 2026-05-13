@@ -1,0 +1,443 @@
+\title{LLM Augmented LLMs: Expanding Capabilities through Composition}
+
+\begin{abstract}
+
+Foundational models with billions of parameters %and 
+which have been trained on large corpora of data have demonstrated non-trivial skills in a variety of domains.
+However, due to their monolithic structure, it is challenging and expensive to augment them or impart new skills.
+On the other hand, due to their adaptation abilities, several new instances of these models are being trained towards new domains and tasks.
+In this work, we study the problem of efficient and practical composition of existing foundation models with more specific models to enable newer capabilities.
+To this end, we propose \name{}---\fullName{}---which introduces
+cross-attention between models to compose their representations and enable new capabilities.
+Salient features of \name\ are: (i) Scales up LLMs on new tasks by `re-using' existing LLMs along with a few  additional parameters and data,
+(ii) Existing model weights are kept intact, and hence preserves existing capabilities, and (iii) Applies to diverse domains and settings.
+We illustrate that augmenting \palms{} with a  smaller model trained on low-resource languages results in an absolute improvement of up to $13$\% on tasks like
+translation into English and arithmetic reasoning for low-resource languages. 
+Similarly, when  
+\palms{} is augmented with a code-specific model, we see a relative improvement of $40$\% over the base 
+model
+for code generation and explanation tasks---on-par with fully fine-tuned counterparts.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have shown to encompass a range of foundational capabilities such as 
+commonsense and factual reasoning, world knowledge, and coherent language generation \citep{bubeck_sparks_2023, palm2}.
+Leveraging these foundational capabilities, 
+a number of efforts in the community have fine-tuned  these models to enable domain-specific capabilities such as code generation, copy editing, and mathematical problem solving \citep{lewkowycz_quant_2022, singhal_medpalm_2023}.
+This has resulted in the development of several specialized large models with domain-specific capabilities.
+For example, there are models that do well on standard code generation 
+but are not as proficient in general logical reasoning and vice-versa.
+Presence of such a large number of domain-specific models leads to a natural question:
+Can we compose an \emph{anchor} model with a domain-specific \emph{augmenting} model to enable new capabilities? For example, can we compose an augmenting model's code understanding capability with an anchor LLM's language generation capability to enable code-to-text generation capability?
+
+The typical approach for this problem is to further pre-train or (efficiently) fine-tune the anchor model
+on the data that was originally used to train the augmenting model \citep{hu_lora_2021, kessler_adapter_2022}.
+However, many a times such solutions are not feasible since
+training large models is computationally expensive,
+especially since the augmenting model itself may be an LLM
+trained on a massive corpora. Further,
+processing data from multiple sources
+might not be feasible due to privacy concerns and organizational boundaries.
+Working with multiple distinct models is also desirable
+since it allows the reuse of  existing models with established capabilities,
+providing better   control and avoiding catastrophic forgetting
+that is prevalent in conventional approaches.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/composition_overview_v12.pdf}
+    \emptysubfigure{sfig:kvpairs} %
+    \emptysubfigure{sfig:approach} %
+    \emptysubfigure{sfig:adapter} %
+    \emptysubfigure{sfig:plots} %
+    \caption{\label{fig:introduction} \textbf{Overview of \name{}.} To augment an \textit{\colorbox{largeColorT}{\textit{anchor}}}
+    LLM (\anchorM) 
+    with new capabilities 
+    through \colorbox{composeColorT}{\textit{composition}} with a specialized \textit{\colorbox{smallColorT}{augmenting}} model  (\augM).
+    Figure illustrates three \augM{}
+    with different capabilities:
+    key-value mapping (\textit{left}),
+    low-resource languages (\textit{center}),
+    and code (\textit{right}).
+    Models \augM{} and \anchorM{}
+    remain unchanged (\SnowflakeChevron) during composition. 
+    A few additional parameters are learnt over models' layer representations. 
+    Leftmost plot shows an \augM{} trained on a set of string-integer mappings, 
+    e.g.,  \{$x_1: 10$, $\dots$, $x_n: 2$\}. \anchorM{} is a large LM with arithmetic capabilities. 
+    \name{} composes these two frozen models to solve the task of arithmetic on keys which either models could not solve on their own  (\cref{sec:kv_experiments}). 
+    Notably, \name{} generalizes to the entire key-value set despite training with arithmetic examples
+    spanning only 20\% of the keys.
+    }
+\end{figure}
+
+To address the training and the data challenges mentioned above,
+we propose and study a practical setting for {\em model composition}:
+(i) we are given access to one (or more) augmenting model(s)
+and an anchor model, (ii) we are \emph{not allowed} to modify the weights of either models, and
+(iii) we only have access to a small amount of data, representing the ``combined skills" of the given models, e.g., code generation with complex logical reasoning.
+
+Prior work has largely approached the question 
+of composition from either a routing or a merging standpoint, 
+neither of which provide an effective solution to capture this setting.
+Routing between the given models,
+i.e., choosing an output of one model over the
+other~\citep{ma2019snr}, or
+performing a soft ensemble~\citep{softmerging} is not effective when neither of the models can demonstrate the desired capability.
+Another body of work creates a combined model by  an  arithmetic
+combination of base model parameters
+~\citep{wortsman2022soups, taskarithmatic, fisheraverage}.
+However, these settings are naturally restrictive
+and their efficacy is unclear when
+combining models with different sizes
+and pre-training objectives~\citep{yadav2023resolving}.
+
+In this work, we propose a novel {\textbf \fullName{}} ({\textbf \name{}}) framework
+to address the general model composition setting mentioned above. 
+Rather than a shallow combination of the augmenting and anchor LMs 
+\citep{wortsman2022soups, taskarithmatic}, \name\
+introduces a small number of  trainable parameters
+over both augmenting and anchor models' intermediate layer representations.
+ \name{} finds an effective
+combination of the given models to perform new challenging tasks 
+more accurately than either of the models alone,
+while preserving the capabilities of individual models. 
+Figure \ref{fig:introduction} highlights few motivating  scenarios for \name{}.
+
+We study key practical applications of \name:
+language inclusivity and code generation. 
+For language inclusivity
+(\cref{sec:language_experiments}),
+we use a model that has been trained
+on a set of low-resource languages.
+We observe that composing this model
+with the LLM allows us to borrow
+its generation and reasoning capabilities
+to achieve significantly better
+performance on translation and
+arithmetic reasoning tasks for 
+low-resource languages
+(Tables~\ref{tab:ntl-gatitos-results} and~\ref{tab:ntl-gsm-results}).
+This composed model outperforms
+not only the two base models but
+also versions of the LLM that have been
+further pre-trained or
+LoRA \citep{hu_lora_2021} fine-tuned
+for the set of low-resource languages.
+For code generation (\cref{sec:code_experiments}),
+we use a model that has been trained
+on open-source code
+across a variety of programming languages.
+Composing this model with the
+LLM---hence
+borrowing its low-level logic
+and generation capabilities---outperforms
+the two base models
+(Table~\ref{tab:code-results})
+on code explanation and code completion tasks.
+
+
+
+\section{Related Works}
+
+\label{prior}
+
+\paragraph{Parameter efficient fine-tuning:} A large body of work focuses on efficient ways of fine-tuning models for new domains by introducing a small number of trainable parameters, keeping the original model intact~\citep{houlsby2019adapter, wang_k-adapter_2020, pfeiffer_adapterfusion_2021, hu_lora_2021, kessler_adapter_2022}. Since this paradigm allows a small set of new parameters to be trained, it is challenging to use this approach to adapt a model to a new domain, which is absent from the original training corpus. 
+In contrast, \name{} enables a model to be adapted to completely new domains using an augmenting model. In Section~\ref{sec:ablations}, we demonstrate that \name{} is significantly more effective than LoRA~\citep{hu_lora_2021}, a representative parameter efficient fine-tuning method.
+
+\paragraph{Model Merging:} Merging different expert models with simple techniques like task vector averaging provides a way of recombining different capabilities of these models~\citep{taskarithmatic,fisheraverage}. 
+However, these methods are only relevant when the original models are well aligned. Other related approaches are also applicable only when the models are derived from the same model~\citep{fisheraverage} or they are of same size ~\citep{softmerging}. In contrast, \name{} is more generic and is applicable to any set of models.
+
+\paragraph{Model and Task Compositionality:} %Most closely related to our work,
+The modular encoder-decoder based method in  
+\citep{dalmia_legonn_2022} adapts components of
+encoder-decoder models to allow flexible
+re-usability of different encoders, each
+with their own capabilities.
+Several past studies explore compositionality
+from a multi-modal standpoint.
+\cite{alayrac_flamingo_2022}
+introduce cross-attention parameters across a language model
+in order to attend to representations coming 
+from an image encoder. They show very effective transfer
+of capabilities between the two models.
+In this work, we extend the ideology of model re-use and modularity to extend composition of capabilities in a large language model.
+
+\paragraph{Models as Tools:}
+Another interesting direction
+for using multiple language models to solve a
+downstream task has been to perform
+composition in the models' input text space
+\citep{zeng_socratic_2022, shen_hugginggpt_2023}.
+\cite{schick2023toolformer} have demonstrated 
+how a model can be taught to use external tools---there might be an opportunity to
+investigate if other models can be
+called as a part of the same framework.
+Since these approaches require a large amount 
+of prompt engineering,
+in this work we focus on composition
+through representations
+that can be learnt automatically.
+
+
+
+\section{\fullName{}
+
+\label{sec:method}
+
+Given an \textit{\textbf{anchor model}} \anchorM\ and an \textit{\textbf{augmenting model}} \augM, \name{} aims %the goal is 
+to compose the two models (\composed{\anchor}{\aug}) 
+to enable new capabilities as a composition of capabilities of the two individual models.
+
+As discussed in the introduction, we study this composition in a practical setting with the following assumptions: i) we can access weights, run forward and backward pass, and access intermediate representations of both \anchorM\ and \augM, ii) we are not allowed to change weights of both the models, iii) we do not have access to the training data, hyperparameters, training states of both the base models, iv) we are provided a few examples from the target composition domain.
+
+The goal is to learn a composition
+\composed{\anchor}{\aug} = $\mathnormal{f}$(\augM, \anchorM, $\Theta_{\mathbf{C}}$, \composeData{}) 
+to achieve some joint task C. 
+The weights of \augM\ and \anchorM\ are frozen. 
+$\Theta_{\mathbf{C}}$ is the additional set
+of trainable parameters
+introduced to learn the composition
+and
+\composeData{} refers to the set of examples
+that are used to learn this composition.
+
+\subsection{\texorpdfstring{Learning to Compose ($\Theta_{\mathbf{C}}$)}{Learning to Compose}}
+\label{sec:learning_compose}
+As outlined in Figure~\ref{fig:introduction},
+we operate over a selected set of layers
+from \anchorM\ and \augM\ at all times.
+We learn two sets of additional parameters
+over these layers:
+(i) A simple set of linear transformations,
+$\projLayer$(.) that maps an
+$i^{\text{th}}$ layer
+representation from \augM\
+to the dimensionality
+of representations from \anchorM, and
+(ii) A set of cross-attention layers,
+$\crossAttn$(.,.)
+that cross-attend between
+this transformed layer representation
+and a $j^{\text{th}}$
+layer representation from \anchorM.
+
+\textbf{Compositional Layers:}
+Let the augmenting model \augM\
+and the anchor model \anchorM\
+have 
+$N_{\aug}$ and $N_{\anchor}$
+ layers, respectively. Also, let 
+$D_{\aug}$ and $D_{\anchor}$
+be the token 
+dimensionality of the two models. 
+We first choose a set of 
+\textit{compositional} layers---\layerSet$_{\aug}$ and \layerSet$_{\anchor}$---for
+both models, 
+over which the set of new learnable
+parameters are introduced during composition.
+$n_{\aug} = |$\layerSet$_{\aug}|$ and 
+$n_{\anchor} = |$\layerSet$_{\anchor}|$.
+For simplicity, we set $n_{\aug}=n_{\anchor}=n$
+and
+the gap between two contiguous selected layers
+is kept uniform based on the number
+of selected layers---that is,
+($l_{\layerIdxT{}{2}}-l_{\layerIdxT{}{1}}) =  \dots =\ (l_{\layerIdxT{}{n}} - l_{\layerIdxT{}{(n-1)}}) = N / n$.
+Further, %, for a given input token $x$, 
+\repVectorSet$_{\aug}$ $\in \{\repVectorT_{\layerIdxT{\aug}{1}}, \repVectorT_{\layerIdxT{\aug}{2}}, \dots, \repVectorT_{\layerIdxT{\aug}{n_{\aug}}}\}$ denote the layer representation of a given input after each layer in \layerSet$_{\aug}$.
+
+\textbf{Learned Projections:} Next we map representations from \augM\ to that of \anchorM\ via a projection layer. In particular, for each layer in  \layerSet$_{\aug}$, 
+we learn a projection function 
+$\projLayer: \mathbb{R}^{D_{\aug}}\rightarrow \mathbb{R}^{D_{\anchor}}$, 
+that projects 
+representations from these layers
+to the desired representation size of \anchorM. Let, 
+\begin{align*}
+    \projLayer(\text{\repVectorSet}_{\aug}) &\xleftarrow{} \{\projLayerT{\aug}{1}, \projLayerT{\aug}{2}, \dots, \projLayerT{\aug}{n_{\aug}}\}
+\end{align*}
+
+This transformation enables cross-attention across models,
+and also performs an alignment of representations from \augM\ and \anchorM\ despite frozen weights of the base models.
+
+\textbf{Cross-attention Layers:}
+Similar to the multi-headed cross-attention
+in encoder-decoder models
+(for example~\cite{vaswani2017attention} and~\cite{raffel2020t5})---we introduce cross-attention between representations of the anchor and the augmenting model. In particular, we use 
+$\projLayerT{\aug}{i}$ from the
+augmenting model
+as the \textit{key} and \textit{value}
+vectors for each head in cross-attention. We use the vector $\repVectorT_{\layerIdxT{\anchor}{j}}$
+from the anchor model
+as the \textit{query} vector, which leads to the following cross-attention setup:
+
+\begin{align*}
+    \crossAttnT{\aug}{i}{\anchor}{j}
+    &= \text{Concat.}_k\left(\text{head}_{k}\right)\mathbf{W}^{O}\text{\quad}\forall k \in N_H \\
+    \text{where,\ } \text{head}_{k}
+    &= \text{Attn.}(\mathbf{Q}_{\anchor}, \mathbf{K}_{\aug}, \mathbf{V}_{\aug}),\\
+    \text{and,\ } \mathbf{Q}_{\anchor} &= \repVectorT_{\layerIdxT{\anchor}{j}}\mathbf{W}_{k}^{Q}, \\
+    \mathbf{K}_{\aug}, \mathbf{V}_{\aug} &= \projLayerT{\aug}{i}\mathbf{W}_{k}^{K},\ \projLayerT{\aug}{i}\mathbf{W}_{k}^{V}
+\end{align*}
+
+Here, $N_H$ represents the number of attention
+heads used for cross-attention which, in our case,
+is typically the same as the number of heads
+used for self-attention in \anchorM.
+Each of $\mathbf{W}^{O} \in \mathbb{R}^{D_{\anchor}\times D_{\anchor}}$, $\mathbf{W}_{k}^{Q}$, $\mathbf{W}_{k}^{K}$,
+and $\mathbf{W}_{k}^{V}$ $\in$
+$\mathbb{R}^{D_{\anchor}\times D_{\anchor}//N_H}$ 
+are learnable weight matrices, where $k \in \{1..N_H\}$.
+
+Finally,
+the cross-attention output
+is added as a residual connection
+to the  layer representations of   \anchorM.
+The resultant output vector, in-turn,
+is the input to the succeeding layer in \anchorM:
+\begin{align*}
+    \repVectorT_{\layerIdxT{\aug}\oplus{\anchor}{j}} &= \repVectorT_{\layerIdxT{\anchor}{j}} + \crossAttnT{\aug}{i}{\anchor}{j}
+\end{align*}
+Here, $ \repVectorT_{\layerIdxT{\aug}\oplus{\anchor}{j}}$ denotes the input to the $(j+1)^{th}$ layer  of the composed model. 
+All layers in \layerSet$_{\aug}$ and \layerSet$_{\anchor}$
+are utilized in a similar manner.
+Propagating over the remaining layers
+in \anchorM\ gives us a final output token
+$y_t$ decoded for the $t^{th}$ timestep.
+Akin to usual auto-regressive decoding,
+the output token for each time-step is appended
+to the input: $x_{t+1} = x_t \oplus y_t$,
+Since the updated input at each time step
+is passed to both models,
+all representations for the two models
+are refreshed.
+\subsection{\texorpdfstring{Composition Training Data (\composeData{})}{Composition Training Data}}
+Since the target model \composed{\augM}{\anchorM}
+involves a composition over the two models
+\augM\ and \anchorM,
+we construct 
+the set of training examples \composeData{}
+to depict a ``combined skill''
+that enables $\Theta_{\mathbf{C}}$
+to attend over the two models
+appropriately for the target task.
+
+Ideally, if the set of tasks
+involved in composition task are
+distinguished as $\mathbf{t}_{1}$
+and $\mathbf{t}_{2}$
+respectively,
+then we design \composeData{}
+to depict the a joint task $\mathbf{C}$.
+For example, with respect to our
+synthetic key-value setup:
+our final task ($\mathbf{C}$) is to perform
+arithmetic over a set of keys.
+The augmenting model \augM\
+is trained to learn the given key-value
+pairs (notated as task, $\mathbf{t}_{1}$)
+and the anchor model \anchorM\
+is generic model that can perform numeric arithmetic well
+(task $\mathbf{t}_{2}$).
+For learning the set of parameters
+$\Theta_{\mathbf{C}}$ for composition,
+we consider \composeData{} to be
+arithmetic over a held-in
+set of keys (task  $\mathbf{C}$),
+encompassing combined skills
+from the two models.
+In contrast to fine-tuning approaches
+like LoRA \citep{hu_lora_2021}
+that would require the entire
+knowledge source (here, key-values)
+during training time,
+we find that training composition
+on only a fraction
+of the keys
+can generalize
+to the full set.
+
+In other real world settings,
+a clear distinction in specializing tasks for each model % is specialized in
+might be difficult to formulate and hence
+defining a task that
+captures the combined skills can be challenging.
+We find that using a set of examples
+that capture certain capabilities
+of the two models suffices, i.e.,
+some rough notion of
+$\mathbf{t}_{\aug \cup \anchor}$.
+For our language inclusivity task,
+we use a mixture of examples containing
+a 
+small amount of 
+low-resource language 
+and
+high-resource language data.
+
+\paragraph{Composing multiple models:} Finally, we note that while the method has been presented for a setting with one anchor model and only one augmenting model, %. However, our framework 
+\name{} is applicable to multiple augmenting models as well. In particular, \name{} would require learning similar projection and cross-attention components between the anchor and each of the augmenting model. We leave a thorough investigation of this as a topic of future work.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We demonstrate the following in three domains:
+\textbf{(a)} an anchor LLM (\anchorM{}) can be composed with an augmenting model (\augM{}) trained on mappings between string keys and number values to solve arithmetic expressions over those keys requiring both, knowledge of the KV mappings and arithmetic capabilities (\S\ref{sec:kv_experiments}); 
+\textbf{(b)} how \name{} can be used to expand the language coverage of an anchor LLM (\anchorM) to low-resource languages it has not seen during pre-training. We show that an augmenting model (\augM) pre-trained on low-resource languages can be composed with such an anchor model to significantly improve translation and math-word problem solving capabilities in low-resource languages (\S\ref{sec:language_experiments}); 
+\textbf{(c)} how code completion and explanation can be improved by composing an anchor LLM with an augmenting model (\augM{}) specializing in the code domain (\S\ref{sec:code_experiments}).
+
+In all experiments, we start with a \palmxxs{} model and further train it on domain-specific data to arrive at an augmenting model (\augM{}) that is then kept frozen during composition.
+Note that no task specific training data was used to train \name{}.
+We use \palmxs{} or \palms{} models as the anchor LLM (\anchorM{}) that is also kept frozen during composition training.
+For all our experiments, we set
+$N_{\aug} / n = 4$,
+i.e., we perform composition using every
+$4$th layer output from \augM{}. 
+Correspondingly, layers from \augM{} (\layerSet$_{\anchor}$)
+are chosen such that $n_{\anchor} = n_{\aug} = n$,
+hence
+$n_{\anchor} = N_{\aug} / 4$.
+
+\input{sections/04.1-kv_pairs}
+\input{sections/04.2-ntl}
+\input{sections/04.3-coding}
+\input{sections/04.4-ablations}
+
+
+
+\section{Conclusion}
+
+\vspace*{-5pt}
+
+The proposed \name\ framework
+composes an \textit{anchor}
+LLM with specialized
+\textit{augmenting} models to enable new tasks
+not achievable by either models individually.
+\name\ does not require updating the individual models
+and learns a dense interaction between the models
+through a few trainable cross-attention parameters.
+Our experiments present consistent evidence that
+\name\ learns to utilize the expertise
+from the two models. That is, when composed with
+relevant augmenting models, we observe a significant uptick 
+in the anchor model's performance
+across multiple challenging tasks, such as 
+low-resource translation, reasoning,
+and code explanation/generation.
+
+That is, \name{}  is especially useful in scenarios where proprietary
+data and knowledge is stored in parametric models.
+With \name{}, a foundational LLM could be augmented with such proprietary models to extend a variety of foundational
+capabilities such as reasoning, world knowledge, and coherent generation over the target proprietary domains.
+Finally, extensions of \name{} could be used to acquire distinct knowledge from multiple augmenting models.  
+
+\newpage
+
+

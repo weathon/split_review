@@ -1,8 +1,8 @@
 # BenchMol: A Multi-Modality Benchmarking Platform for Molecular Representation Learning
 
 - Decision: Reject
-- Avg Score: 2.50
-- Scores: 1, 0, 1, 5, 3, 5
+- Avg Score: 4.80
+- Scores: 10, 1, 5, 3, 5
 
 ## Abstract
 Molecular representation learning (MRL) plays a vital role in high-precision drug discovery. Currently, people represent molecules in different modalities (such as sequences, graphs, and images), and have developed many MRL methods. However, three key challenges hinder further progress in the field of MRL: (i) Lack of systematic and unified evaluation on models of different modalities, resulting in unfair comparisons or being affected by randomness; (ii) The specific advantages between different molecular modalities are unclear; (iii) Lacking a unified platform to integrate data of different modalities and a large number of MRL methods. Therefore, we propose the first MRL platform supporting different modalities, called BenchMol, to integrate a large number of sing-modal MRL methods with different modalities and evaluate them systematically and fairly. BenchMol has four attractive features: (i) Rich modalities: BenchMol supports 7 major modalities of molecules, such as fingerprint, sequence, graph, geometry, image, geometry image, and video; (ii) Comprehensive methods: BenchMol integrates 23 mainstream MRL methods to process these modalities; (iii) New benchmarks: BenchMol constructs two new benchmarks based on PCQM4Mv2 and ChEMBL 34, called MBANet and StructNet, for a more systematic evaluation. (iv) Comprehensive evaluation: evaluation covers different aspects of molecules, such as basic attributes and molecular types. Through BenchMol, we conduct large-scale research on methods of different modalities and report many insightful findings. We hope that BenchMol can help researchers quickly use MRL methods with different modalities on the one hand; and on the other hand, provide meaningful insights into multi-modal MRL and help researchers choose appropriate representations in downstream tasks. We open-sourced BenchMol in \href{https://anonymous.4open.science/r/BenchMol}{Github}.

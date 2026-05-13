@@ -1,0 +1,244 @@
+\title{DITTO: Offline Imitation Learning with World Models}
+
+\begin{abstract}
+We propose DITTO, an offline imitation learning algorithm which uses world models and on-policy reinforcement learning to addresses the problem of covariate shift, without access to an oracle or any additional online interactions. We discuss how world models enable offline, on-policy imitation learning, and propose a simple intrinsic reward defined in the world model latent space that induces imitation learning by reinforcement learning. Theoretically, we show that our formulation induces a divergence bound between expert and learner, in turn bounding the difference in reward. We test our method on difficult Atari environments from pixels alone, and achieve state-of-the-art performance in the offline setting.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Generating agents which can capably act in complex environments is challenging. In the most difficult environments, hand-designed controllers are often insufficient and learning-based methods must be used to achieve good performance. When we can exactly specify the goals and constraints of the problem using a reward function, reinforcement learning (RL) offers an approach which has been extremely successful at solving a range of complex tasks, such as the strategy games of Go \citep{alphago}, Starcraft \citep{alphastar}, and poker \citep{rebel}, and difficult real world control problems like quadrupedal locomotion \citep{cerberus}, datacenter cooling \citep{datacenter}, and chip placement \citep{chiprl}. RL lifts the human designer's work from explicitly designing a good policy, to designing a good reward function. However, this optimization often results in policies that maximize reward in undesirable ways that their designers did not intend \citep{specHacking} - the so-called \emph{reward hacking} phenomenon \citep{rewardhacking}.
+To combat this, practitioners spend substantial effort observing agent failure modes and tuning reward functions with extra regularization terms and weighting hyperparameters to counteract undesirable behaviors \citep{interactivedriving} \citep{DeepLoco}.
+
+Imitation learning (IL) offers an alternative approach to policy learning which bypasses reward specification by directly mimicking the behavior of an expert demonstrator. The simplest kind of IL, behavior cloning (BC), trains an agent to predict an expert's actions from observations, then acts on these predictions at test time. 
+This approach fails to account for the sequential nature of decision problems, since decisions at the current step affect which states are seen later. The distribution of states seen at test time will differ from those seen during training unless the expert training data covers the entire state space, and the agent makes no mistakes. This distribution mismatch, or covariate shift, leads to a compounding error problem: initially small prediction errors lead to small changes in state distribution, which lead to larger errors, and eventual departure from the training distribution altogether \citep{ALVINN}. Intuitively, the agent has not learned how to act under its own induced distribution. This was formalized in the seminal work of \cite{Bagnell1}, who gave a tight regret bound on the difference in return achieved by expert and learner, which is quadratic in the episode length for BC.
+
+Follow-up work in \cite{Bagnell2} showed that a linear bound on regret can be achieved if the agent learns online in an interactive setting with the expert: Since the agent is trained \textit{under its own distribution} with expert corrections, there is no distribution mismatch at test-time. This works well when online learning is safe and expert supervision can be scaled, but is untenable in many real-world use-cases such as robotics, where online learning can be unsafe, time-consuming, or otherwise infeasible. On the one hand, we want to generate data on-policy to avoid covariate shift, but on the other hand, we may not be able to afford to learn online due to safety or other concerns.
+
+\cite{worldmodels} propose a two-stage approach to policy learning, where agents first learn to predict the environment dynamics with a recurrent neural network called a ``world model" (WM), and then learn the policy inside the WM alone. This approach is desirable since it enables on-policy learning \emph{offline}, given the existence of the world model. Similar model-based learning methods have recently achieved success in standard online RL settings \citep{dreamerv2}, and impressive zero-shot transfer of policies trained solely in the WM to physical robots \citep{DayDreamer}.
+In this paper, we propose an imitation learning algorithm called \textbf{Dream Imitation (DITTO)}, which addresses the tension between offline and on-policy learning, by training an agent using on-policy RL inside a learned world model. Specifically, we define a reward which measures divergence between the agent and expert demonstrations in the latent space of the world model, and show that optimizing this reward with RL induces imitation on the expert. We discuss the relationship between our method and the imitation learning as divergence minimization framework \citep{divmin}, and show that our method optimizes a similar bound without requiring adversarial training. We compare our method against behavior cloning and generative adversarial imitation learning (GAIL, \citet{GAIL}), which we adapt to the world model setting, and show that we achieve better performance and sample efficiency in challenging Atari environments from pixels alone.
+
+Our main contributions are summarized as follows:
+\begin{itemize}
+    \item We discuss how world models relieve the tension between offline and on-policy learning methods, which mitigates covariate shift from offline learning.
+    \item We demonstrate the first fully offline model-based imitation learning method that achieves strong performance on Atari from pixels, and show that our agent outperforms competitive baselines adapted to the offline setting.
+    \item We show how imitation learning can naturally be cast as a reinforcement learning problem in the latent space of learned world models, and propose a latent-matching intrinsic reward which compares favorably against commonly used adversarial and sparse formulations.
+\end{itemize}
+
+
+\section{Related Work}
+
+\subsection{Imitation by Reinforcement Learning}
+Imitation learning algorithms can be classified according to the set of resources needed to produce a good policy. \citet{Bagnell2} give strong theoretical and empirical results in the online interactive setting, which assumes that we can both learn while acting online in the real environment, and that we can interactively query an expert policy to e.g.~provide the learner with the optimal action in the current state. Follow-up works have progressively relaxed the resource assumptions needed to produce good policies. \citet{noisybc} show that the optimal policy can be recovered with a modified form of BC when learning from imperfect demonstrations, given a constraint on the expert sub-optimality bound. \citet{DRIL} study covariate shift in the online, non-interactive setting, and demonstrate an approximately linear regret bound by jointly optimizing the BC objective with a novel policy ensemble uncertainty cost, which encourages the learner to return to and stay in the distribution of expert support. They achieve this by augmenting the BC objective with the following uncertainty cost term:
+\begin{equation}
+    \text{Var}_{\pi \sim \Pi_E}\left( \pi(a|s)\right) = \frac{1}{E} \sum_{i=1}^E
+    (\pi_i(a|s) - \frac{1}{E} \sum_{j=1}^E \pi_j(a|s)
+    )^2
+\end{equation}
+This term measures the total variance of a policy ensemble $\Pi_E = \left\{ \pi_1, ..., \pi_E\right\}$ trained on disjoint subsets of the expert data.They optimize the combined BC plus uncertainty objective using standard online RL algorithms, and show that this mitigates covariate shift.
+
+Inverse reinforcement learning (IRL) can achieve improved performance over BC by first learning a reward from the expert demonstrations for which the expert is optimal, then optimizing that reward with on-policy reinforcement learning. This two-step process, which includes on-policy RL in the second step, helps IRL methods mitigate covariate shift due to train and test distribution mismatches. However, the learned reward function can fail to generalize outside of the distribution of expert states which form its support. 
+
+A recent line of work treats IRL as \emph{divergence minimization}: instead of directly copying the expert actions, they minimize a divergence measure between expert and learner state distributions
+\begin{equation}\label{divergence}
+    \min_\pi \mathbb{D}\left( \rho^\pi, \rho^E\right)
+\end{equation}
+where $\rho^\pi(s,a) = (1-\gamma)\sum_{t=0}^\infty \gamma^t P(s_t=s, a_t=a)$ is the discounted state-action distribution induced by $\pi$, and $\mathbb{D}$ is a divergence measure between probability distributions. The popular GAIL algorithm \citep{GAIL} constructs a minimax game in the style of GANs \citep{gans} between the learner policy $\pi$, and a discriminator $D_\psi$ which learns to distinguish between expert and learner state distributions
+\begin{equation}\label{GAN}
+    \max_\pi \min_{D_\psi} \mathbb{E}_{(s,a) \sim \rho^E} 
+    \left[ - \log D_\psi(s,a)\right] + \mathbb{E}_{(s,a) \sim \rho^\pi} 
+    \left[ -\log\left( 1-D_\psi(s,a)\right)\right]
+\end{equation}
+ This formulation minimizes the Jensen-Shannon divergence between the expert and learner policies, and bounds the expected return difference between agent and expert. However, \citet{randomexpert} point out that adversarial reward learning is inherently unstable since the discriminator is always trained to penalize the learner state-action distribution, even if the learner has converged to the expert policy. This finding is consistent with earlier work \citep{brock2018large} which observed discriminator overfitting, necessitating early stopping to prevent training collapse. Multiple works have reported difficulty getting GAIL to work reliably in pixel-based observation environments \citep{DRIL} \citep{sqil}. 
+ 
+ To combat problems with adversarial training, \citet{randomexpert} and \citet{sqil} consider reducing IL to RL on an intrinsic reward
+ \begin{equation}
+     r(s,a) = \begin{cases}
+             1  & \text{if } (s,a) \in \mathcal{D}^E \\
+             0  & \text{otherwise}
+       \end{cases} \quad
+ \end{equation}
+where $\mathcal{D}^E$ is the expert dataset. While this sparse formulation is impractical e.g. in continuous action settings, they show that a generalization of the intrinsic reward using support estimation by random network distillation \citep{rnd} results in stable learning that matches the performance of GAIL without the need for adversarial training. \citet{ILbyRL} showed that this formulation is equivalent to divergence minimization under the total variation distance, and produced a bound on the difference in extrinsic reward achieved between the expert and a learner trained with this approach.
+ 
+ 
+ \subsection{Offline Learning}
+\citet{KumarOffPolicy} showed how na\"ive application of Bellman backups in off-policy RL results in incorrect, overly optimistic value estimation. These off-policy bootstrapping errors are further compounded in the model-based setting, since states where either the learned dynamics or reward functions generalize poorly will be found and incorrectly backed out by a na\"ive Q-learner. This is acceptable in the online setting, since areas of state space which the agent is overly-optimistic about will tend to be visited, resulting in natural corrections to inaccuracies; but the offline setting does not share this property. To counteract these problems, offline RL methods either constrain the learner policy to stay on the expert distribution directly \citep{Wu2019BehaviorRO}, or use pessimistic methods to discourage value estimates from becoming too large out of distribution \citep{CQL} \citep{RAMBO-RL}. 
+ \subsection{World Models}
+World models have recently emerged as a promising approach to model-based learning. \citet{worldmodels} defined the prototypical two-part model: a variational autoencoder (VAE) is trained to reconstruct observations from individual frames, while a recurrent state-space model (RSSM) is trained to predict the VAE encoding of the next observation, given the current latent state and action. World models can be used to train agents entirely inside the learned latent space, without the need for expensive decoding back to the observation space. \citet{dreamer} introduced Dreamer, an RL agent which is trained purely in the latent space of the WM, and successfully transfers to the true environment at test-time. \citet{DayDreamer} showed that the same approach can be used to simultaneously learn a model and agent policy to control a physical quadrupedal robot online, without the control errors usually associated with transferring policies trained only in simulation to a physical system \citep{actuatornet}.
+
+In this work, we propose the use of world models to address a number of common problems in imitation learning. Intrinsic rewards which induce imitation learning, like those introduced in \citet{sqil} and \citet{randomexpert}, can pose challenging online learning problems, since the rewards are sparse or require tricky additional training procedures to work in high-dimensional observation spaces. Similarly, approaches like GAIL \citep{GAIL} and AIRL \citep{AIRL} require adversarial on-policy training that is difficult to make work in practice. In contrast, our approach remedies both the online learning and reward specification problems by performing safe offline policy learning solely inside the compact latent space of the world model, and uses a natural divergence measure as reward: distance between learner and expert in the world model latent space. This provides a conceptually simple and dense reward signal for imitation by reinforcement learning, which we find outperforms competitive approaches in data efficiency and asymptotic performance.
+
+
+\section{Dream Imitation}
+
+
+We study imitation learning in a partially observable Markov decision process (POMDP) with discrete time-steps and actions, and high dimensional observations generated by an unknown environment. The POMDP $\mathcal{M}$ is composed of the tuple $\mathcal{M} = (\mathcal{S},\mathcal{A},\mathcal{X},\mathcal{R},\mathcal{T},\mathcal{U},\gamma)$, where $s \in \mathcal{S}$ is the state space, $a \in \mathcal{A}$ is the action space, $x \in \mathcal{X}$ is the observation space, $\gamma$ is the discount factor, and $r = \mathcal{R}(s,a)$ is the reward function. The transition dynamics are Markovian, and given by $s_{t+1} \sim \mathcal{T}(\cdot\mid s_t, a_t)$. The agent does not have access to the underlying states, and only receives observations represented by $x_t \sim \mathcal{U}(\cdot\mid s)$. The goal is to maximize the discounted sum of extrinsic (environment) rewards $\mathbb{E}[\Sigma_{t}\gamma^t r_t]$, which the agent does not have access to.
+
+Training proceeds in two parts: we first learn a world model from recorded sequences of observations, then train an actor-critic agent to imitate the expert in the world model. The latent dynamics of the world model define a fully observable Markov decision process (MDP), since the model states $\hat{s}_t$ are Markovian. Model-based rollouts always begin from an observation drawn from the expert demonstrations, and continue for a fixed set of time steps $H$, the agent training horizon. The agent is rewarded for matching the latent trajectory of the expert.
+
+\subsection{Preliminaries}
+We show that bounding the learner-expert state distribution divergence in the world model also bounds their return difference in the actual environment, and connect our method to the \emph{IL as divergence minimization} framework \citep{divmin}. \citet{vmail} showed that for a learned dynamics model $\widehat{\mathcal{T}}$ whose total variation from the true transitions is bounded such that 
+$\mathbb{D}_{\text{TV}}(\mathcal{T}(s,a), \widehat{\mathcal{T}}(s,a)) \leq \alpha \quad \forall (s,a) \in \mathcal{S}\times\mathcal{A}$ and $R_{\text{max}} = \max_{(s,a)}\mathcal{R}(s,a)$ then
+\begin{equation}\label{returnbound}
+    \left| \mathcal{J}(\pi^E, \mathcal{M}) - \mathcal{J}(\pi, \mathcal{M}) \right| \leq 
+    \underbrace{\alpha \frac{R_{\text{max}}}{(1-\gamma)^2}}_{\text{learning error}} +
+    \underbrace{\frac{R_{\text{max}}}{1-\gamma} \mathbb{D}_{\text{TV}}\left( \rho^E_\mathcal{M}, \rho^\pi_{\widehat{\mathcal{M}}}\right)}_{\text{adaptation error}}
+\end{equation}
+where $\mathcal{J}(\pi,\mathcal{M})$ is the expected return of policy $\pi$ in MDP $\mathcal{M}$, and $\mathcal{\widehat{M}}$ is the ``imagination MDP" induced by the world model. This implies the difference between the expert return and the learner return in the true environment is bounded by two terms, 1) a term proportional to the model approximation error $\alpha$, which could in principle be reduced with more data, and 2) a model domain adaptation error term, which captures the generalization error of a model trained under data from one policy, and deployed under another. \citet{vmail} also show that bounding the divergence between \emph{latent} distributions upper bounds the true state distribution divergence. Formally, given a latent representation of the transition history $z_t = q(x_{\leq t}, a_{<t})$ and a belief distribution $P(s_t \mid x_{\leq t}, a_{<t}) = P(s_t \mid z_t)$, then if the policy conditions only on the latent representation $z_t$ such that the belief distribution is independent of the current action $P(s_t \mid z_t, a_t) = P(s_t \mid z_t)$, then the divergence between the latent state distribution of the expert and learner upper bounds the divergence between their true state distribution:
+\begin{equation}\label{latentbounds}
+    \divf{\rho^{\pi}_{\mathcal{M}}(x,a)}{\rho^{E}_{\mathcal{M}}(x,a)} \leq \divf{\rho^{\pi}_{\mathcal{M}}(s,a)}{\rho^{E}_{\mathcal{M}}(s,a)} \leq \divf{\rho^{\pi}_{\mathcal{M}}(z,a)}{\rho^{E}_{\mathcal{M}}(z,a)}
+\end{equation}
+Where $\mathbb{D}_{f}$ is a generic $f$-divergence , e.g. KL or TV. This result, along with equation \ref{returnbound}, suggests that minimizing divergence in the model latent space is sufficient to bound the expected expert-learner return difference.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\textwidth]{iclr2023/latent-big.png}
+    \caption{The learner begins from random expert latent states during training, and generates on-policy latent trajectories in the world model. The intrinsic reward \ref{intreward} encourages the learner to recover from its mistakes over multiple time steps to match the expert trajectory.}
+    \label{fig:latenttrajectory}
+\end{figure}
+
+\textbf{Reward} \hspace{0.3cm} To bound expert-learner state distribution divergences, prior approaches have focused on sparse indicator function rewards \citep{ILbyRL}, or adversarial reward learning \citep{divmin}. We propose a new formulation, which rewards the agent for matching the expert latent state-action pairs over an episode. 
+In particular, for an arbitrary distance function $d$, agent state-action latent $z^\pi_t$, and a set of expert state-action latents $\mathcal{D}_E$:
+\begin{equation}\label{theoreticalreward}
+    r^{int}_t(z^\pi_t) = 1 - \min_{z^E \in \mathcal{D}_E} d(z^\pi_t, z^E)
+\end{equation}
+
+This function rewards matching the agent's state-action pairs to the expert's, as studied in \citet{ILbyRL}. The major difference is that we also smooth in the latent space, meaning an exact match isn't required for a reward. In particular, we prove that maximizing this reward bounds the total variation in latent-state distributions between the expert and learner, as well as bounding their extrinsic reward difference.
+Intuitively, matching latent states between the learner and expert is easier than matching observations, since the representations learned from generative world model training should provide a much richer signal of state similarity. 
+In practice, the minimization over $\mathcal{D}_E$ can be computationally expensive, so we modify the objective \ref{theoreticalreward} to exactly match learner latent states to expert latents from the same time-step, as shown in Figure \ref{fig:latenttrajectory}. In particular, we randomly sample consecutive expert latents $z^E_{t:t+H} $ from $\mathcal{D}_E$ and unroll the agent from the same starting state in the world model, yielding a sequence of agent latents $z^\pi_{t:t+H}$.  Finally, we compute a reward at each step $t$ as follows:
+
+\begin{equation}\label{intreward}
+    r^{int}_t(z^E_t, z^\pi_t) = 1 - d(z^E_t ,z^\pi_t) =  \frac{z^E_t \cdot z^\pi_t}{\max(\|z^E_t\|, \|z^\pi_t\|)^2}
+\end{equation}
+
+This formulation changes our method from distribution matching to mode seeking, since states frequently visited by the expert will receive greater reward in expectation. We found that this modified dot product reward empirically outperformed $L_2$ and cosine-similarity metrics.
+\subsection{World Model}
+\textbf{Dataset} \hspace{0.3cm} World model training can be performed using datasets generated by policies of any quality, since the model only predicts transition dynamics. The transition dataset is composed of $N$ episodes $e_n$ of sequences of observations $x_t$, actions $a_t$: $\mathcal{D} = \{ (x_t, a_t)_{t=0}^{\norm{e_n}} \mid n \in N\}$.
+\textbf{Model architecture} \hspace{0.3cm} We adapt the architecture proposed by \citet{dreamerv2}, which is composed of an image encoder, a recurrent state-space model (RSSM) which learns the transition dynamics, and a decoder which reconstructs observations from the compact latent states. The encoder uses a convolutional neural network (CNN) to produce representations, while the decoder is a transposed CNN. The RSSM predicts a sequence of length $T$ deterministic recurrent states $(h_t)_{t=0}^T$, each of which are used to parameterize two distributions over stochastic hidden states. The stochastic posterior state $z_t$ is a function of the current observation $x_t$ and recurrent state $h_t$, while the stochastic prior state $\hat{z}_t$ is trained to match the posterior without access to the current observation. The current observation is reconstructed from the full model state, which is the concatenation of the deterministic and stochastic states $\hat{s}_t = (h_t, z_t)$. The RSSM components are:
+\begin{equation}\label{modelcomponents}
+\begin{aligned}
+    &\text{Model state:} &&\hat{s}_t = (h_t, z_t)\\
+    &\text{Recurrent state:} &&h_t = f_\phi(\hat{s}_{t-1}, a_{t-1})\\
+    &\text{Prior predictor:} &&\hat{z}_t \sim p_\phi(\hat{z}_t \mid h_t) \\
+    &\text{Posterior predictor:} &&z_t \sim q_\phi(z_t \mid h_t, x_t) \\
+    &\text{Image reconstruction:} &&\hat{x}_t \sim p_\phi(\hat{x}_t \mid \hat{s}_t)
+\end{aligned}
+\end{equation}
+All components are implemented as neural networks, with a combined parameter vector $\phi$. Since the prior model predicts the current model state using only the previous action and recurrent state, without using the current observation, we can use it to learn behaviors without access to observations or decoding back into observation space. The prior and posterior models predict categorical distributions which are optimized with straight-through gradient estimation \citep{straight-through}. All components of the model are trained jointly with a modified ELBO objective:
+\begin{equation}\label{ELBO}
+    \min_{\phi}\mathbb{E}_{q_\phi(z_{1:T} \mid a_{1:T}, x_{1:T})}\left[
+    \sum_{t=1}^T -\log p_\phi(x_t \mid \hat{s}_t) + \beta
+    \klb{q_\phi(z_t \mid \hat{s}_t)}{ p_\phi(\hat{z}_t \mid h_t)}
+    \right]
+\end{equation}
+where $\klb{q}{p}$ denotes KL balancing \citep{dreamerv2}, which is used to control the regularization of prior and posterior towards each other with a parameter $\delta$,
+\begin{equation}
+    \klb{q}{p} = \delta \underbrace{\kl{q}{sg(p)}}_{\text{posterior regularizer}} + (1-\delta)\underbrace{\kl{sg(q)}{p}}_{\text{prior regularizer}}
+\end{equation}
+and $sg(\cdot)$ is the stop gradient operator. The idea behind KL balancing is that the prior and posterior should not be regularized at the same rate: the prior should update more quickly towards the posterior, which encodes strictly more information.
+
+\subsection{Agent}\label{agenttheory}
+
+\textbf{Agent architecture}\hspace{0.3cm} The agent is composed of a stochastic actor which samples actions from a learned policy with parameter vector $\theta$, and a deterministic critic which predicts the expected discounted sum of future rewards the actor will achieve from the current state with parameter vector $\psi$. Both the actor and critic condition only on the current model state $\hat{s}_t$, which is Markovian:
+\begin{equation}
+\begin{aligned}
+    &\text{Actor:} &&a_t \sim \pi_\theta(a_t \mid \hat{s}_t)\\
+    &\text{Critic:} &&v_\psi(\hat{s}_t) \approx \mathbb{E}_{\pi_\theta, p_\phi}[\Sigma_{t=0}^H \gamma^t r_t] \\
+\end{aligned}
+\end{equation}
+We train the critic to regress the $\lambda$-target \citep{suttonbarto}
+\begin{equation}\label{lambdareturn}
+   V^{\lambda}_t = r_t + \gamma \left( (1-\lambda)v_\psi(\hat{s}_{t+1}) + \lambda V^\lambda_{t+1}\right), \quad V^\lambda_{t+H} = v_\psi(\hat{s}_{t+H}) 
+\end{equation}
+which lets us control the temporal-difference (TD) learning horizon with the hyperparameter $\lambda$. Setting $\lambda = 0$ recovers 1-step TD learning, while $\lambda = 1$ recovers unbiased Monte Carlo returns, and intermediate values represent an exponentially weighted sum of n-step returns. In practice we use $\lambda = 0.95$. To train the critic, we regress the $\lambda$-target directly with the objective:
+\begin{equation}\label{critictarget}
+    \min_\psi \mathbb{E}_{\pi_\theta, p_\phi}\left[ \sum_{t=1}^{H-1}\tfrac{1}{2} ( v_\psi(\hat{s}_t) - sg(V^\lambda_t))^2\right]
+\end{equation}
+There is no loss on the last time step since the target equals the critic there. We follow \citet{mnih2015}, who suggest using a copy of the critic which updates its weights slowly, called the target network, to provide the value bootstrap targets. %critic target update rate
+
+The actor is trained to maximize the discounted sum of rewards predicted by the critic. We train the actor to maximize the same $\lambda$-target as the critic, and add an entropy regularization term to encourage exploration and prevent policy collapse. We optimize the actor using REINFORCE gradients \citep{reinforce} and subtract the critic value predictions from the $\lambda$-targets for variance reduction. The full actor loss function is:
+\begin{equation}\label{actorloss}
+    \mathcal{L}(\theta) = \mathbb{E}_{\pi_\theta, p_\phi}\left[ 
+    \sum_{t=1}^{H-1} \underbrace{- \log \pi_\theta(a_t \mid \hat{s}_t) sg(V^\lambda_t - v_\psi(\hat{s}_t))}_{\text{reinforce}} - \underbrace{\eta H(\pi_\theta(\hat{s}_t))}_{\text{entropy regularizer}}
+    \right]
+\end{equation}
+
+\textbf{Algorithm}\hspace{0.3cm} Learning proceeds in two phases: First, we train the WM on all available demonstration data using the ELBO objective \ref{ELBO}. Next, we encode expert demonstrations into the world model latent space, and use the on-policy actor critic algorithm described above to optimize the intrinsic reward \ref{intreward}, which measures the divergence between agent and expert over time in latent space. In principle, any on-policy RL algorithm could be used in place of actor-critic. We describe the full procedure in Algorithm \ref{DreamImitation}.
+\begin{algorithm}
+    \caption{Dream Imitation (DITTO)}
+    \label{DreamImitation}
+    \begin{algorithmic}[1] % The number tells where the line numbering should start
+        \State \textbf{Require} demonstration data $\mathcal{D} = \left\{ (x_t, a_t, x_{t+1})_{t=0}^{\norm{e_n}} \mid n \in N\right\}$
+        \State Initialize world model parameters $\phi$
+        \While{\emph{not converged}} \Comment{World model learning}
+            \State Draw $B_{wm}$ transition sequences $\{ (x_t, a_t, x_{t+1})_{t=k}^{k+L}\} \sim \mathcal{D}$
+            \State Compute all sequential RSSM components according to eqn \ref{modelcomponents}
+            \State Update $\phi$ with ELBO loss \ref{ELBO}
+        \EndWhile
+
+        \State Initialize actor and critic parameters $\theta$, $\psi$
+        \While{\emph{not converged}} \Comment{Agent training}
+            \State Draw $B_{ac}$ expert latent state sequences $(\hat{s}^E_\tau) \sim \hat{\mathcal{D}}^E$
+            \State Generate trajectories $(\hat{s}^\pi_\tau, a_\tau)_{\tau =t}^{t+H}$ with $a_\tau \sim \pi_\theta(\cdot\mid \hat{s}_\tau)$
+            \State Compute rewards $r^\text{int}_\tau(\hat{s}^\pi_\tau, \hat{s}^E_\tau)$ and values $v_\psi(\hat{s}^\pi_\tau)$
+            \State Compute $\lambda$-returns $V^{\lambda}_\tau = r_t + \gamma \left( (1-\lambda)v(\hat{s}^\pi_{\tau+1}) + \lambda V^\lambda_{\tau+1}\right), \quad V^\lambda_{\tau+H} = v(\hat{s}^\pi_{\tau+H})$
+            \State Update critic on $\lambda$-targets: $\sum_{\tau=t}^{t+H}\tfrac{1}{2} ( v_\psi(\hat{s}^\pi_\tau) - sg(V^\lambda_\tau))^2$
+            \State Update actor with eqn \ref{actorloss}
+            
+        \EndWhile
+    \end{algorithmic}
+\end{algorithm}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.4\textwidth]{iclr2023/BeamRiderMarker.png}
+    \includegraphics[width=0.4\textwidth]{iclr2023/BreakoutMarker.png}
+    \includegraphics[width=0.32\textwidth]{iclr2023/SpaceInvaderMarker.png}
+    \includegraphics[width=0.32\textwidth]{iclr2023/MspacmanMarker.png}
+    \includegraphics[width=0.32\textwidth]{iclr2023/QbertMarker.png}
+    \caption{Results on five Atari environments from pixels, with fixed horizon $H=15$. The plots show mean final performance across 5 runs with 20 validation simulations, and shaded regions show $\pm 1$ standard error. The experts are strong pre-trained PPO agents from the RL Baselines3 Zoo.}
+    \label{fig:results}
+\end{figure}
+
+
+\section{Experiments}
+
+To the best of our knowledge, we are the first to study completely offline imitation learning without behavior cloning in pixel-based observation environments. Prior works generally focus on improving behavior cloning \citep{noisybc}, or study a mixed setting with some online interactions allowed \citep{vmail} \citep{mobile}. To demonstrate the effectiveness of world models for imitation learning, we train without any interaction with the true environment.
+
+\subsection{Agents}
+To test the performance of our algorithm, we compare DITTO to a standard baseline method, behavior cloning, and to two methods which we introduce in the world model setting.
+
+\textbf{Behavior cloning}\hspace{0.3cm} We train a BC model end-to-end from pixels, using a convolutional neural network architecture. Compared to prior works which study behavior cloning from pixels in Atari games \citep{Hester2017}\citep{atarihead}\citep{BCbench}, our implementation achieves stronger results, even in games where it is trained with lower-scoring data. 
+
+\textbf{Dream agents}\hspace{0.3cm} We adapt GAIL \citep{GAIL} and BC to the world model setting, which we dub D-GAIL and D-BC respectively. D-GAIL and D-BC both receive world model latent states instead of pixel observations. The D-BC agent is trained with maximum-likelihood estimation on the expert demonstrations in latent space, with an additional entropy regularization term which we found stabilized learning:
+\begin{equation}
+    L_{BC} = \mathbb{E}_{(\hat{s},a) \sim \hat{\mathcal{D}}^E}\left[-\log\left( \pi(a|\hat{s})\right)  -\eta_{BC} H(\pi(\hat{s}))\right]
+\end{equation}
+The D-GAIL agent is trained on-policy in the world model using the adversarial objective from Equation \ref{GAN}. The D-GAIL agent optimizes its learned adversarial reward with the same actor-critic formulation used by DITTO, described in Section \ref{agenttheory}. We train both DITTO and D-GAIL with a fixed horizon of $H=15$. At test-time, the model-based agent policies are composed with the world model encoder and RSSM to convert high-dimensional observations into latent representations. 
+
+All model-based policies in our experiments use an identical multi-layer perceptron (MLP) architecture for fair comparison in terms of the policies' representation capacity, while the BC agent is parameterized by a stacked CNN and MLP architecture which mirrors the world model encoder plus agent policy. We found that D-GAIL was far more stable than expected, since prior works \citep{sqil} \citep{DRIL} reported negative results training GAIL on Atari games from pixels in the easier online setting. This suggests that world models may be beneficial for representation learning even in the online case, and that other online algorithms could be improved by moving them to the world model setting.
+We evaluate our algorithm and baselines on 5 Atari environments, using strong PPO agents \citep{PPO} from the RL Baselines3 Zoo \citep{rl-zoo3} as expert demonstrators, using $N^E=\{4,8,15,30,60,125,250,500,1000\}$ expert episodes to train the agent policies in the world model. To train the world models, we generate 1000 episodes from a pre-trained policy, either PPO or advantage actor-critic (A2C) \citep{mnih2016}, which achieves substantially lower reward compared to PPO. Surprisingly, we found that the A2C and PPO-trained world models performed similarly, and that only the quality of the imitation episodes affected final performance. We hypothesize that this is because the A2C and PPO-generated datasets provide similar coverage of the environment. It appears that the world model can learn environment dynamics from broad classes of datasets as long as they cover the state distribution well. The data-generating policy's quality is relevant for imitation learning, but appears not to be for dynamics learning, apart from coverage.
+
+\subsection{Results}
+Figure \ref{fig:results} plots the performance of DITTO against our proposed world model baselines and standard BC. In MsPacman and Qbert, most methods recover expert performance with the least amount of data we tested, and are tightly clustered, suggesting these environments are easier to learn good policies from low amounts of data. D-GAIL exhibited adversarial collapse twice in MsPacman, an improvement over standard GAIL, which exhibits adversarial collapse much more frequently in prior works which study imitation learning from pixels in Atari \citep{sqil}\citep{DRIL}. In contrast, DITTO always recovers or exceeds average expert performance in all tested environments, and matches or outperforms the baselines in terms of both sample efficiency and asymptotic performance.
+
+
+
+\section{Conclusion}
+
+Addressing covariate shift in imitation learning is a long-standing problem. In this work we proposed DITTO, a method which addresses this problem in the challenging offline setting where no environment interactions are allowed while learning. The offline setting exacerbates covariate shift, since the agent learns from and acts under unrelated distributions, and cannot easily estimate its own induced state distribution to perform off-policy corrections. Recent strong IL methods such as DRIL \citep{DRIL} and V-MAIL \citep{vmail} achieve excellent sample efficiency in terms of expert demonstrations, but still require environment interaction to perform on-policy learning. Our agent consistently recovers expert performance without online interaction in the tested Atari environments from pixel observations, and matches or exceeds the performance of strong baselines which we implement in the world model setting.
+
+DITTO learns by decomposing imitation learning into two parts: First, a world model is learned to approximate the underlying environment dynamics from all available demonstration data, regardless of the quality of the policy which generated it. Next, expert demonstrations are encoded into trajectories in the world model latent space. Finally, DITTO produces on-policy rollouts in the world model, and optimizes an intrinsic reward which measures the agent's drift from expert trajectories. By optimizing this reward with standard on-policy reinforcement learning algorithms, DITTO learns to recover from its own mistakes across multiple time-steps, and match the expert state distribution, which we prove bounds the agent-expert return difference in the true environment.
+Decoupling dynamics and policy learning lets us learn the world model from any historical demonstration data, and provides us with a surprisingly rich signal for imitation learning: the latent representations learned via generative world modeling. Our latent space reward extends the recent work on imitation by reinforcement learning \citep{ILbyRL} to difficult pixel-based observation environments, and contrasts with recent IL methods which need to employ adversarial \citep{AIRL} or sparse rewards \cite{randomexpert} to induce imitation, which can be difficult to train. Furthermore, other methods from reinforcement and imitation learning are orthogonal to and compatible with ours, and could be combined with DITTO to achieve greater performance and sample efficiency, e.g.~by adding behavioral cloning rewards or uncertainty costs to DITTO's objective.
+
+
+
+\section{Reproducibility Statement}
+
+ The code for the experiments will be made available for the reviewing process and we intend to release the code for the camera-ready version of the paper.
+
+
+
+
+

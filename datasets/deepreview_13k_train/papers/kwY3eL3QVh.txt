@@ -1,0 +1,541 @@
+\title{Feature-guided score diffusion for sampling conditional densities}
+
+\begin{abstract}
+Score diffusion methods can learn probability densities from samples. The score of the noise-corrupted density is estimated using a deep neural network, which is then used to iteratively transport a Gaussian white noise density to a target density. Variants for conditional densities have been developed, but correct estimation of the corresponding scores is difficult.
+We avoid these difficulties by introducing an algorithm that guides the diffusion with a projected score. The projection pushes the image feature vector towards the feature vector centroid of the target class. 
+The projected score and the feature vectors are learned by the same network. Specifically, the image feature vector is defined as the spatial averages of the channels activations in select layers of the network. 
+Optimizing the projected score for denoising loss encourages image feature vectors of each class to cluster around their centroids. It also leads to the separations of the centroids. We show that these centroids
+provide a low-dimensional Euclidean embedding of the class conditional densities. 
+We demonstrate that
+the algorithm can generate high quality and diverse samples from the conditioning class.
+Conditional generation can be performed using feature vectors interpolated between those of the training set, demonstrating out-of-distribution generalization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Score diffusion is a powerful data generation methodology which operates by transporting white noise to a target distribution. When trained on samples drawn from different classes, it learns a mixture density over all the classes. In many applications, one wants to control the diffusion sampling process to obtain samples from the conditional distribution of a specified class. A brute force solution is to train a separate model on each class, learning each conditional density independently. This is computationally expensive: each model requires a large training set to avoid memorization \citep{somepalli2023diffusion, carlini2023extracting,kadkhodaiegeneralization}. An alternative strategy is to train a single model on all classes, with a procedure to guide the transport toward the conditional density of individual classes. This approach can leverage the shared information between all classes, thus reducing the required training set size needed to learn the full set of conditional densities. 
+
+Learning conditional densities in a diffusion framework has been highly successful when the conditioning arises from a separately-trained text embedding system (e.g., \cite{ramesh2021zero,rombach2022high,saharia2022photorealistic}) or image 
+classifier network \citep{song2020score, dhariwal2021diffusion}, or by jointly learning a classifier and the score model \cite{ho2022classifier}. Despite the high quality of generated images, 
+several mathematical and numerical studies \cite{chidambaram2024does, wu2024theoretical} prove that these guidance algorithms do not sample from appropriate conditional distributions, even in the case of Gaussian mixtures. This is due to their reliance on estimating the exact likelihood to obtain the score of the conditional distributions, which is difficult. 
+In this work, we introduce a modified score diffusion, which does not rely on direct estimation of the score of conditional densities. Instead, at each step of the trajectory, it modifies the score according to the distance between the sample and the target conditional distribution in a feature space.  
+Importantly, the score and the feature vector are represented by the same neural network learned by minimising a single denoising loss. The feature vector is defined as spatial averages of selected layers of the score network. This shared representation provides a Euclidean embedding of all class conditional probabilities. The sampling algorithm relies on this Euclidean embedding to sample from the conditional density. 
+Several methods have have been developed to learn representations in conjunction with diffusion models
+\citep{preechakul2022diffusion,mittal2023diffusion,wang2023infodiffusion,hudson2024soda}. In general, these models use a separate network to map images into a form that can be used to control a diffusion network. Training these models can be difficult, due to mixed-network architectures, and use of objective functions with combined denoising and other losses. Although they have proven successful, in terms of image generation quality, or to transfer of the learned representation to other tasks, the
+Euclidean metric of the embedded space has not been related to properties of underlying probability distributions.
+
+\begin{figure}
+ \centering
+ \includegraphics[width=0.5\linewidth]{figures/CropMainFigICLR2025.pdf}
+  \vspace*{-0.1in}
+\caption{Illustration of feature-guided score diffusion. 
+Left: Score diffusion of a mixture of densities computes trajectories (black) that map samples of a Gaussian white noise (blue disk) to
+samples of two complex conditional densities (orange or green).
+Right: The feature space $\phi(x)$ 
+defines a Euclidean embedding in which each mixture component is well separated (orange/green ellipses). In the embedding space, mixture trajectories (black) are similar at high noise variance $\sigma^2$, and bifurcate, moving toward different components at 
+lower noise levels \citep{biroli2024dynamical}.
+In our method, feature trajectories (orange/green) are forced toward the feature centroids ($\phi_y$ or $\phi_{y'}$, on right) of the corresponding conditional density
+($p_y$ or $p_{y'}$,  on left). 
+These feature trajectories are used to guide the trajectories of $x_\sigma$ in the signal space (orange/green, left) toward the corresponding conditional densities.
+}
+\label{fig:main}
+\end{figure}
+\myComment{
+In this paper, we propose a framework for learning such an embedding in conjunction with a score diffusion model.  We define a modified score function, implemented with a parameterized neural network, along with a feature vector that is computed from the spatial averages of channel responses within this network. The expected feature vector over a class provides a Euclidean embedding of the class, with embedding distances capturing distances between the corresponding conditional densities.  The modification of the score corresponds to a projection of the feature vector onto the embedding vector of a target class.
+The network, which computes both the score and the feature vector, is trained to minimize denoising loss on a dataset comprised of pairs of samples drawn from different classes. }
+
+The main contribution of this work is an algorithm that samples a class conditional density by guiding the score diffusion with a feature vector, which is driven towards the class centroid in the feature space. This is illustrated in Figure \ref{fig:main}. It computes a projected score at each step such that the trajectory samples from the conditional density. 
+We show numerically that the learned features concentrate in the neighborhood of their centroid within each class.
+We also verify that the centroids of feature vectors define a Euclidean embedding of the associated conditional probability, and are thus separated according to the distance between these conditional distributions.
+\myComment{When used in a reverse diffusion sampling procedure, 
+the modified score progressively reduces the distance between a sample's feature vector and the target class feature vector, as illustrated in Figure \ref{fig:main}.}As a result, we find that this feature-guided sampling procedure can accurately sample from the target conditional probability density, without degradation of quality or diversity. Both training and synthesis are stable. We show that unlike previous guided score diffusion methods \cite{chidambaram2024does}, for Gaussian mixtures, the method recovers distributions which closely match each Gaussian component.
+Finally, we demonstrate that the Euclidean embedding allows sampling of conditional probabilities over new classes obtained by a linear combination of the feature vectors of two classes.
+
+
+
+\section{Background}
+
+\label{background}
+
+\paragraph{Sampling by score diffusion.}
+Sampling using score diffusion (more precisely, {\em reverse diffusion}) is computed by reversing time in an Ornstein-Uhlenbeck equation, initialised with a sample $x$ drawn from probability density $p(x)$.
+At each time $t$ the diffusion process computes
+a noisy $x_t$ with a Gaussian probability density
+$p_t = {\cal N}(e^{-t} x , \sigma^2_t I)$. 
+At large time $T$, $x_T$ is nearly a Gaussian white noise. 
+One can recover $x$ from $x_T$ by reversing time $T$ to $0$ using a damped Langevin equation:
+ \begin{equation}
+ \label{diff-eq}
+ - d x_t = \big( x_t + 2 s(x_t) \big) dt + \sqrt{2} d  w_t 
+ \end{equation}
+ where $s$ is a drift term and $w_t$ is a Brownian noise.
+If $s(x_t) = \nabla_{x_t} \log p_t (x_t)$ is the score of $p_t$ then
+this score diffusion
+equation transports Gaussian white noise samples into samples
+of $p$. To implement a score diffusion, the main difficulty is to estimate the score $\nabla_{x_t} \log p_t$. However, there is a considerable freedom to choose the drift term $s(x_t)$ \citep{VandenEijndenInterpolant2025}. We will later leverage this degree of freedom.
+
+The score is typically estimated by minimizing a mean squared error denoising loss. 
+To specify the denoising problem, 
+we renormalise $x_t$ and define  $x_\sigma = e^t x_t$, whose probabilty density $p_\sigma$ is parametrised by $\sigma = e^{2t} - 1$. 
+The denoising solution provides a direct constraint on the score, $\nabla_{x_\sigma} \log p_\sigma (x_\sigma)$, thanks to a remarkable formula derived by Tweedie (as reported in \cite{Robbins1956Empirical}) and \cite{Miyasawa61}:
+\begin{equation}
+    \hat{x}(x_{\sigma}) = \mathbb{E}[x|x_{\sigma}] =  x_{\sigma} + \sigma^2 \nabla_{x_{\sigma}} \log p_{\sigma}(x_{\sigma})
+    \label{Miyasawa}
+\end{equation}
+The score 
+\myComment{$\sigma^2 \nabla_{x_{\sigma}} \log p_{\sigma}(x_{\sigma})$} 
+can be estimated with a neural network that computes a function ${s}_{\theta}(x_{\sigma})$ whose parameters are chosen to minimize a denoising loss \citep{song2019generative,ho2020denoising}:
+\begin{equation}
+ \ell(\theta) = \mathbb{E} \Vert  {s}_\theta(x_{\sigma}) - \sigma z \Vert^2
+ =   \mathbb{E} \Vert x -  \hat{x}({x_{\sigma})} \Vert^2 .
+\label{denoising-loss}
+\end{equation}
+\paragraph{Conditional sampling.}
+Suppose that we have a dataset of independent samples $\{x_i, y_i \}_{i \leq n}$ where $x_i$ is an
+image and $y_i$ is a label which may correspond to a discrete class or a continous attribute. 
+These are samples of a probability 
+density that is a mixture of conditional densities: $p(x) = \int p_y(x)\,p(y) dy$,
+where $p_y(x) = p(x|y)$ is the conditional probability of $x$ given $y$, and hence of the samples of class $y$.
+Let $p_{y,\sigma}$ be the probability density of $x_\sigma = x + \sigma z$ over all $x$
+in class $y$ and $z \sim {\cal N}(0,Id)$. 
+Samples of $p_y$ can be generated using a score diffusion algorithm if one has estimates of the scores $\nabla_{x_\sigma} \log p_{y,\sigma} (x_\sigma)$ for all $\sigma$.
+Bayes' rule gives
+\begin{equation}
+\nabla_{x_\sigma} \log p(x_\sigma|y) = 
+\nabla_{x_\sigma} \log p(y|x_\sigma)  + \nabla_{x_\sigma} \log p (x_\sigma).
+\end{equation} 
+It is thus tempting to use this equation to compute the conditional score
+by augmenting the unconditioned score (second term on right) with an estimate of the gradient of the log-likelihood (first term).
+However this introduces an error because $p_{y,\sigma} (x_\sigma) \neq p(x_\sigma| y)$.
+Indeed, adding noise and conditioning are two operations which do not commute.
+Most conditional diffusion models rely on this likelihood approximation to guide the score, 
+neglecting the discrepancy. They may also incorporate a weight to emphasize the log-likelihood term
+$(1-\omega)\nabla_{x_\sigma} \log p(y|x_\sigma)  + \omega \nabla_{x_\sigma} \log p_\sigma (x_\sigma)$.
+Such algorithms generate high quality images \cite{ho2022classifier} but they do not correctly sample the conditional distribution, producing substantial errors even for Gaussian mixtures, as proven and demonstrated numerically in \cite{chidambaram2024does}.
+
+
+
+\section{Feature-Guided Score Diffusion}
+
+\label{sec:feat-guide}
+We present a method for learning and sampling from conditional distributions without likelihood estimation. Instead, we
+augment the score of the mixture distribution with a projection term that operates over learned feature vectors, that serves to push diffusion trajectories toward the density of the desired conditional distribution. 
+
+\paragraph{Trajectory dynamics for a Gaussian mixture.}
+The dynamics of score diffusion for mixture of densities has been studied in \cite{biroli2024dynamical}. 
+When the underlying $p(x)$ is simply a mixture of Gaussians with low rank covariance, the score diffusion
+of this mixture can be described in roughly three phases as illustrated in Figure \ref{fig:main}. Initially, $\sigma$ is large and $x_\sigma$ is dominated by the Gaussian white noise, so its probability distribution is nearly Gaussian and trajectories are nearly identical for all classes $y$. At some noise variance, which is dependent on the distance between the means of the mixture components, the density becomes multi-modal and the trajectories separate. Once trajectories are separated, they fall into the basin of attraction of a single component density $p_y$ and converge to samples of $p_y$. In the third stage, when the noise is sufficiently small,  $\nabla_{x_\sigma} \log p_\sigma \approx
+\nabla_{x_\sigma} \log p_{\sigma, y}$,
+because the other components have a negligible effect on $\nabla_{x_\sigma} \log p_\sigma$. 
+To sample conditional densities, we must control the trajectory so that
+it is pushed toward the basin of attraction of $p_y$ at all noise levels. This can be done 
+by adding a forcing term to the mixture score $\nabla_{x_\sigma} \log p_{\sigma}$.
+Consider the simple case of a Gaussian mixture $p(x) \propto \,(e^{-(x-m_1)^2/(2 \lambda^2)} + e^{-(x-m_2)^2/(2 \lambda^2)} )$
+with means $m_{2} = - m_1$, with $\lambda^2 \ll |m_1|^2$.
+To approximately sample $p_y$, an adjusted score may be defined with a forcing term proportional to $m_y - x_\sigma$:
+\begin{equation*}
+  s (x_\sigma,m_y - x_\sigma) = \nabla_{x_\sigma} \log p_\sigma (x_\sigma) + K_\sigma\,   
+  ( m_y - x_\sigma ) .
+\end{equation*}
+This is the gradient of the log of $p_\sigma (x_\sigma)\,e^{-K_\sigma(x_\sigma-m_y)^2 / 2}$, which drives the transport toward the mean $m_y$. To sample from the component with mean $m_y$,  $K_\sigma$ must be sufficiently large at high noise variance $\sigma^2$ to drive the dynamics to $m_y$. It must then
+converge to zero for small $\sigma^2$, so that the modified score diffusion samples a distribution which is nearly a Gaussian with variance $\lambda^2$. 
+
+\paragraph{Feature concentration and separation.} 
+The Gaussian mixture example provides inspiration for sampling from mixtures of complex distributions $p_y$. In the Gaussian case, the linear forcing term can be defined in terms of the class means $m_y = \E_{p_y}[x]$, because the component distributions for each $y$ are sufficiently concentrated around their means to be well-separated.  
+For mixtures of complex distributions, to apply a similar strategy we must find a feature map $\phi(x)$ such that the mapped conditional distributions for each $y$ concentrate around their corresponding means $\phi_y = \E_{p_y} [\phi(x)]$. 
+{Moreover, all $\phi_y$ must be sufficiently \emph{separated}.}
+ This is obtained by insuring that $\phi_y - \phi(x)$ for $x$ in class $y$ 
+ has relatively small projections in the directions of all
+ $\phi_y - \phi_{y'}$:
+ \begin{equation}
+ \label{concentration1}
+ \forall y,y'~~,~~\E_{p_y} [|\langle \phi_{y} - \phi_{y'} , \phi_y- \phi(x) \rangle|] \ll  \|\phi_y - \phi_{y'} \|^2 .
+ \end{equation}
+\myComment{
+\es{something not right here.  y' a free variable on left? Also, do we need to recompute Fig 4, which was meant to be empirical test of concentration? }
+\sm{$y'$ fixed. I wrote this equation following the demand of Zahra to weaken the original equation that she wanted to remove. I am rewriting the original equation. see the comment in the corresponding figure \ref{fig:phi-convergence} caption. One of the two equation needs to be removed with one line presentation above.}
+}
+The separation of $\phi_y$ in the embedding space should be governed by the separation of the probability distributions $p_y$ in the pixel space. This is captured by a Euclidean embedding property, which ensures that the separation of $\phi_y$ is related to a distance between the probability distributions $p_y$, and hence that there exists $0 < A \leq B$ with $B/A$ not too large, such that
+\begin{equation}
+      \label{Euclidean-Embedd}
+    \forall y,y'~~,~~A \| \phi_y -  \phi_{y'} \|^2 \leq d^2(p_y,p_{y'}) \leq B \| \phi_y -  \phi_{y'}\|^2 .
+\end{equation}
+Since $\phi_y - \phi(x_\sigma)$ must control $\nabla_{x_\sigma} \log p_{y,\sigma}$ at all noise levels, we establish a distance between two conditional densities as 
+\begin{align}
+        d^2(p_y,p_{y'})  =
+        \int_0^{\infty} & \Big( \E_{p_{\sigma,y}} [\|\nabla_{x_\sigma}\log  p_{\sigma,y}(x_\sigma)  - \nabla_{x_\sigma} \log p_{\sigma, y'}(x_\sigma) \|^2] \nonumber\\
+        &  +
+          \E_{p_{\sigma,y'} }[\|\nabla_{x_\sigma} \log p_{\sigma,y}(x_\sigma)  - \nabla_{x_\sigma} \log p_{\sigma,y'}(x_\sigma) \|^2] \Big)\, \sigma\,d\sigma .
+\label{eq:density-distance}
+\end{align}
+This distance is based on the difference in the expected score assigned to $x_\sigma$ by $p_y$ vs. $p_{y'}$,  integrated across all noise levels. It provide a bound on the Kullback-Leibler divergence $KL(p_y\|p_{y'})$ between two distributions $p_y,p_{y'}$ proved in \citep{song2020score}:
+\[
+KL (p \| p') \leq \int_{0}^{\infty} \E_{p_\sigma} [\|\nabla_{x_\sigma} \log {p_\sigma}(x_\sigma) - \nabla_{x_\sigma} \log p'_\sigma (x_\sigma)\|^2]\, \sigma d\sigma .
+\]
+
+The feature concentration and separation properties can also be reinterpreted as an optimization of a nearest mean classifier
+ \[
+ \hat y(x) = \arg \min_y \|\phi(x) - \phi_y\|^2 .
+ \]
+In that sense, the control of the score by $\phi_y  - \phi(x_\sigma)$ is
+related to classifier-guided score diffusion \citep{dhariwal2021diffusion}.
+
+\paragraph{Projected score.} 
+In the Gaussian mixture case, we described an augmentation of the score with a forcing term that is linear in the deviation $m_y-x_\sigma$.
+For mixtures of complex probability distributions, we choose to adjust the score with an analogous forcing term that operates in the embedding space: $e = \phi_y - \phi(x_\sigma)$. 
+We define $\phi$ using the activations within the same neural network that computes the score, which allows us to make use of nonlinear representational properties of the score network \citep{xiang2023denoising}, and to jointly optimise $s$ and $\phi$. This shared parameterization is crucial to ensure that the embedding arises from the same features that represent the score of the conditional distribution, which in turn renders the embedding space Euclidean in relation to the probability space. 
+Specifically, for images, the components of $\phi(x_\sigma)$ are defined as spatial averages of activations of a selected subset of layers of the deep neural network that computes $s(x_\sigma)$. Activation layer averages are close to the first principle component of the network channels whose values are all positive, thus capturing a significant fraction of their variance. 
+This feature vector is translation-invariant (apart from boundary handling), and has far fewer dimensions than the image. It can thus be considered a bottleneck. 
+The fact that the same network is used to compute  $s$ and  $\phi$ is a critical aspect of our algorithm which sets it apart from previous approaches for score-based representation learning.  
+
+We define $s(x_\sigma , \phi_y - \phi(x_\sigma))$ by multiplying each component of $\phi_y - \phi(x_\sigma)$ with
+a learned factor and adding it to the 
+corresponding activation layers of  $s(x_\sigma,0)$. For multiplicative factors smaller than $2$, the selected activation layers of $s(x_\sigma , \phi_y - \phi(x_\sigma))$ have an average closer to $\phi_y$. Learned factors are often close to $1$, which
+sets averages to $\phi_y$. In this case, the operation can be interpreted as a projection in the embedding space, and thus we refer to $s(x_\sigma , \phi_y - \phi(x_\sigma))$ as the {\em projected score}.
+
+At high noise levels this projection or contraction drives the dynamics toward the class $y$, as shown
+in Figure \ref{fig:main}. Indeed,
+$\phi(x_\sigma)$ has significant fluctuations which carry little information about $x$. Projecting it to
+$\phi_y$ reduces these fluctuation and uses the conditioning information to push the transport toward $p_y$. 
+At the final steps of the dynamics, when the noise level is small, we have $x_\sigma \approx x$. The concentration property of $\phi(x)$ implies that deviation $e=\phi_y - \phi(x_\sigma)$ is small.
+At small noise levels, the dynamics conditioned by $y$ should follow nearly  the same dynamics as the mixture, and thus $s(x_\sigma,0) \approx \nabla_{x_\sigma} \log p_\sigma (x_\sigma)$. A first order approximation of $s(x_\sigma,e)$ relative to  $e$ gives
+\begin{equation}
+\label{eq:prop3}
+s\big(x_\sigma,\phi_y - \phi(x_\sigma)\big) \approx \nabla_{x_\sigma} \log p_\sigma (x_\sigma) + \big(\phi_y - \phi(x_\sigma)\big)^T \nabla_e s (x_\sigma,e)|_{e=0} .
+\end{equation}
+At small noise levels, the projected score is thus approximated by the unconditioned mixture score with
+a forcing term that is linear in the feature deviation $\phi_y - \phi(x_\sigma)$. 
+This projected score is the basis for our feature-guided score diffusion algorithm, which is implemented using Stochastic Iterative Score Ascent (SISA) \citep{kadkhodaie2021stochastic} (see \Cref{app:SISA} and \Cref{alg:conditional_sampling}).
+
+
+\section{Joint learning of features and projected score}
+
+\label{sec:jointlearn}
+
+Learning $s (x_\sigma , \phi_y - \phi(x_\sigma))$ by minimizing a denoising loss over all $y$ and $x$  does not ensure that $\phi(x)$ concentrates
+within class $y$, because this property is not explicitly imposed. It can however be encouraged by replacing $\phi_y$ with $\phi(x')$ in the learning phase, where $x'$ is a randomly chosen sample from the same class $y$ as $x$. 
+The learning algorithm thus optimises the parameter $\theta$ of a single network $s_\theta (x_\sigma, \phi_\theta(x') - \phi_\theta(x_\sigma))$ for randomly chosen $x'$, by minimizing the
+denoising loss
+\[
+\ell (\theta) = \mathbb{E}_{x,x',\sigma} \Vert z - s_{\theta}\big(x_\sigma , \phi_\theta(x') - \phi_\theta(x_\sigma)\big)  \Vert^2,
+\]
+where the expected value is taken over the distribution of all $x$ in the mixture, over all $x'$ in the same class as $x$, and over all noise variances $\sigma^2$ . 
+Note that both the projected score, $s$, and the feature vector, $\phi$, are dependent on the network parameters $\theta$, and are thus simultaneously optimized. See \Cref{alg:training} of \Cref{app:SISA} for more details.
+\paragraph{Qualitative analysis of denoising optimisation.}
+We provide an intuition for how minimizing denoising loss interacts with $\phi_\theta(x') - \phi_\theta(x_\sigma)$ inside $s_\theta$ to learn the desired projected score. Specifically, we give a qualitative explanation for why minimization of the denoising loss encourages a feature vector $\phi$ that concentrates in each class and has separated class means $\phi_y$. Concentration is a consequence of optimization at small noise and separation is due to optimization at high noise levels. 
+At sufficiently small noise, when $x_\sigma \approx x$, and $x_\sigma$ is in the basin of attraction of $p_{y}$, the projected score should converge to the score of the mixture model
+\[
+s_\theta (x_\sigma,\phi_\theta(x') - \phi_\theta(x_\sigma) ) \approx \nabla_{x_\sigma} \log p_\sigma (x_\sigma) .
+\]
+So deviation from the score of the mixture model is tantamount to an increase in loss. Thus, to minimize the loss, the parameters of the network are learned such that at small noise levels $\phi_\theta(x') - \phi_\theta(x_\sigma)$ becomes very small for all pairs in the class, hence convergence of $\phi(x)$. 
+The convergence of feature vectors within classes does not guarantee separations of their centroids. This is a major challenge in representation learning known as "collapse". This pathological case is avoided thanks to loss minimization at high noise levels. This is a regime where conditioning can reduce the loss below the loss of the mixture model. The high level of noise obfuscates image features such that $x_\sigma$ becomes high probability under classes other than $y$. So, if loss minimization results in $\theta$ such that $\phi(x')$ approximates $\phi_y$, projected score leads to a better estimate of $x$. This requires that the $\phi_y$ of different classes have a
+separation of the order of the separation of the scores conditioned by the different classes. The separation of the $\phi_y$ thus depends on the
+separations of the $p_y$. It drives the optimisation to define $\phi_y$ providing a Euclidean embedding of the $p_y.$ 
+
+
+Although our projected score is constructed to enable accurate transport, we emphasize that unlike many previous methods we do not try to approximate the conditional score $\nabla_{x_\sigma} \log p_{y,\sigma}$. Indeed, Section \ref{background} reviews results demonstrating that it is difficult to 
+estimate, and is not needed to adjust the transport. We thus do not expect that our projected score
+$s$ achieves the optimal denoising of the true conditional score. At high noise, we do expect improved performance relative to the mixture distribution, whereas at small noise we expect to achieve similar performance.
+
+
+
+\section{Experimental results}
+
+\label{sec:empirical results}
+
+We trained a UNet on cropped $80 \times 80$ patches from a dataset of texture images following \Cref{alg:training} (see \Cref{app:Architecture-training-datasets} for details of architecture and dataset).  The feature vector consists of spatially averaged responses of layers at the end of each block, at all levels of the U-Net, which correspond to different image scales. 
+The full feature vector has $1344$ components.
+Patches from each image are assumed to represent samples of the same class. Each training example consists of one noise-corrupted patch, $x_\sigma$, and another patch that is used to compute an embedding vector for conditioning, $\phi(x')$. The UNet implementation has receptive field (RF) of size $84 \times 84$ at the last layer of the middle block, ensuring that $\phi$ can represent global features of the patches.
+We also used \Cref{alg:training_joint} to train a UNet of identical architecture to denoise patches drawn randomly from all images, representing the full mixture density without conditioning.  We refer to this as the  "mixture denoiser".
+
+\subsection{Projected score improves denoising}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}{0.4\linewidth}
+ \centering 
+    \includegraphics[width=1\linewidth]{figures/denoising_examples_255.pdf}\\
+\end{subfigure}
+\hfil
+\begin{subfigure}{0.4\linewidth}
+ \centering 
+    \includegraphics[width=1\linewidth]{figures/denoising_examples_129.pdf}\\
+\end{subfigure}
+\caption{
+Feature guided denoising results at two noise levels (left: $\sigma=1$, right: $\sigma=0.5$). 
+Leftmost column of each panel shows noisy images, drawn from 4 classes. 
+Top row ({green boxes}) shows example conditioning images, from the same 4 classes. Columns under each show corresponding denoising results.  Diagonal entries (red boxes) indicate images denoised with correct conditioning (conditioning image from same class as noisy image), whereas off-diagonal entries are incorrectly conditioned. 
+Rightmost column of each panel shows denoising results using the (unconditioned) mixture denoiser (orange boxes). 
+At high noise levels, conditioning on the correct class improves results significantly compared to the mixture model. Conditioning on the wrong class degrades performance, introducing features from the conditioning class. At smaller noise levels, feature guided and mixture denoisers produce similar outputs, but the effect of incorrect conditioning is still visible.
+}
+\label{fig:denoising-examples-results}
+\end{figure}
+
+We first evaluated denoising performance of the feature guided denoiser, to verify the analyses and predictions of \Cref{sec:feat-guide}. Example denoising results for four different image classes, and two different noise levels are shown in \Cref{fig:denoising-examples-results}.
+In all cases, feature guidance has a visually striking effect, pushing the denoised images toward the conditioning class.
+These effects are more substantial at the higher noise level, as predicted from the analyses of \Cref{sec:feat-guide}. 
+Moreover, performance is substantially worsened by incorrect conditioning (i.e., denoising an image drawn from $p(x|y_i)$, while conditioning on feature vector $\phi_{y_j}$, with $i\neq j$).  In these cases, deformations and artifacts in the denoised images resemble prominent features of the (incorrect) conditioning class.
+A quantitative comparison of denoising performance is shown in \Cref{fig:PSNR-joint-cond}(left), and further supports the predictions of \Cref{sec:feat-guide}.
+At all noise levels, conditioning improves performance. However, as predicted by \Cref{eq:prop3}, this improvement decreases monotonically with noise level, because the projected score converges to the original mixture score. At the smallest noise level, the two models have nearly identical performance.
+
+In \Cref{fig:PSNR-joint-cond}(right) we compare performance to a denoiser optimized for a single class. This model uses a UNet with identical architecture, and is trained on images from class $y_0$ using \Cref{alg:training} (see \Cref{app:Architecture-training-datasets} for details of dataset). 
+The results indicate that the feature guided denoiser falls short of achieving the best empirically possible conditional score for this architecture, as anticipated in \Cref{sec:jointlearn}. On the other hand, the feature guided model is better than the single-class denoiser when conditioned on the wrong class. 
+Despite this confirmed suboptimality in approximating the true conditional score, we show in the \Cref{sec:empirical-results-synthesis} that the feature guided denoiser can nevertheless be used to draw diverse high-quality samples from class-conditioned densities.
+
+\begin{figure}[h]
+ \centering
+\begin{subfigure}{0.32\linewidth}
+  \centering 
+  \includegraphics[width=1\linewidth]{figures/psnr_joint_cond_merged.pdf}\\
+\end{subfigure}
+\hspace*{0.15in}
+\begin{subfigure}{0.30\linewidth}
+ \centering 
+   \includegraphics[width=1\linewidth]{figures/psnr_bounds_merged.pdf}\\
+\end{subfigure}
+\caption{
+{\bf Left:} Improvement in peak signal to noise ratio (PSNR) at different noise levels, of the conditional model (discs) relative to the unconditioned mixture model (stars), averaged over samples from all classes.
+{\bf Right:} Comparison of conditional model (discs) with a denoiser optimized for a single class $y_0$ (stars).
+Upper points correspond to denoising of images from class $y_0$, with correct conditioning.
+Lower points correspond to denoising of images from other classes, $y \neq y_0$, with incorrect conditioning. 
+} 
+\label{fig:PSNR-joint-cond}
+\end{figure}
+
+\myComment{%%Original, now merged into previous figure
+\begin{figure}
+\centering
+ \centering
+  \includegraphics[width=0.8\linewidth]{figures/psnr_bounds.pdf}\\
+\caption{\zk{merge plots} Peak-signal-to-noise-ratio (PSNR) for conditional and optimal models across noise levels. The optimal model is evaluated on test images from the same class it is trained on $y_0$, to generate the upper bound. The conditional model is evaluated on the same data conditioned on images from the same class conditioned on $y_0$. The gap shows that the conditional model does not achieve the empirically optimal approximation of the conditional score. Additionally, the optimal model is evaluate on classes it was not trained on to generate a lower bound. The conditional model is evaluated on the same data, conditioned on $y_0$. The conditional model does not reach the lower bound, implying lower KL divergence between the conditional densities (Conditioning should result in higher KL divergence between conditional densities). 
+\es{Suggest merging all plots into a single plot, with x-axis sigma, and points connected by lines.} \zk{So the reason I can't put them on the same plot is that they all overlap since the range of change in psnr is so huge across noise levels. Instead I fixed the max-min so we can compare them} } 
+\label{fig:PSNR-bounds}
+\end{figure}
+}
+
+\subsection{Properties of learned embedding}
+
+We verified the concentration, separation and Euclidean embedding properties of feature vectors $\phi(x)$ and their class means $\phi_y$, which are needed to guide the score diffusion.
+\Cref{fig:stability-of-channel-averages} shows the squared Euclidean distance between feature vectors of images drawn from the same class, and for the mean feature vectors from different classes.  
+The top row is computed for the (unconditioned) mixture network. 
+Note that the feature vectors are highly concentrated, and there is some moderate separation between classes, consistent with \cite{xiang2023denoising}.
+The bottom row shows the same results for feature guided model. The histogram of variances of feature vectors within classes is more concentrated, and overlaps less with the Euclidean distances between class feature vectors, in comparison with the mixture model. Thus, the feature guided model exhibits stronger concentration and separation in the embedding space. We also examined these properties over different stages of the UNet. The middle column of \Cref{fig:stability-of-channel-averages} shows that the separation between the class centroids is most significant in the middle layer of the network. In this block, the network receptive field size is as large as the input image, enabling it to capture global features that are most useful for separating classes. This effect is shown for one pair of classes in the right column. 
+
+\begin{figure}[h]
+\centering
+ \begin{subfigure}{0.241\linewidth}
+    \includegraphics[width=\linewidth]{figures/embedding_dprime_hist_.pdf}
+    \vspace*{0.05in}
+ \end{subfigure}
+    \hspace*{0.1in}
+ \begin{subfigure}{0.25\linewidth}
+  \includegraphics[width=\linewidth]{figures/embedding_dprime_per_block_both_normalized.pdf}
+ \end{subfigure}
+    \hspace*{0.1in}
+ \begin{subfigure}{0.26\linewidth}
+  \includegraphics[width=\linewidth]{figures/embedding_separation_both_710_44.pdf}  
+ \end{subfigure}
+\caption{
+Concentration of image feature vectors $\phi(x)$ within class, and separation of average vectors $\phi_y$ between classes. Top row shows results for the unconditioned mixture model and the bottom row shows results for the conditional model. 
+\textbf{Left column:} distribution of squared Euclidean distances between pairs of class feature vectors $\phi_y$ and $\phi_y'$ (orange histogram) and distribution of geometric mean of variances of feature vectors of images from $p_{y}(x)$ and $p_{y'}(x)$ (gray histogram). 
+\textbf{Middle column:} Image and class embedding correlations in  different layers of the UNet architecture. The mixture model does not separate classes well, while the conditional model separates classes significantly, especially in the middle layer. 
+\textbf{Right column:} scatter plot of components of $\phi(x_1)$ vs $\phi(x_2)$ in the middle layer for $x_1 \in y_1$ and $x_2 \in y_2$ . Example training images from $y_1$ and $y_2$ are shown along the axes. The image embeddings in the conditional model are separated, while there is very little separation in the mixture model. 
+}
+\label{fig:stability-of-channel-averages}
+\end{figure}
+
+We can also verify that the learned class feature vectors provide a Euclidean embedding of the conditional probabilities. \Cref{fig:Euclidean} shows a scatterplot of the density distance $d^2(p_y,p_{y'})$ (\Cref{eq:density-distance}) as a function of the Euclidean distance, $\| \phi_y -  \phi_{y'} \|^2$, over pairs of different classes $\{y, y'\}$ in the embedding space. The data are well-approximated by a line, satisfying the conditions of \Cref{Euclidean-Embedd} for reasonable $A,B$.
+ 
+\begin{figure}
+\centering
+\begin{subfigure}{0.18\linewidth}
+  \includegraphics[width=.9\linewidth]{figures/most_similar1.pdf}    
+   \vspace*{0.18in}
+\end{subfigure}
+  \hspace*{0.0in}
+\begin{subfigure}{0.32\linewidth}
+  \includegraphics[width=1\linewidth]{figures/Euclidean_embedding100.pdf} 
+  \vspace*{-0.21in}
+\end{subfigure}
+  \hspace*{0.2in}    
+\begin{subfigure}{0.18\linewidth}
+  \includegraphics[width=.9\linewidth]{figures/least_similar2.pdf} 
+  \vspace*{0.18in}
+\end{subfigure}
+\caption{Verification of Euclidean embedding (\Cref{Euclidean-Embedd}). Density distance (\Cref{eq:density-distance}), which bounds the symmetrized KL divergence between the two conditional densities, is well-correlated with the squared Euclidean distance between the corresponding mean feature vectors in the embedding space. Image pairs on the left are drawn from the closest three class pairs (red points), and those on the right are drawn from the most distant (blue points).
+}
+\label{fig:Euclidean}
+\end{figure}
+
+\subsection{Conditional generation}
+\label{sec:empirical-results-synthesis}
+
+Finally, we evaluate the numerical performance of feature guided score diffusion to sample conditional probabilities of Gaussian mixtures and mixtures of image classes. 
+
+\begin{figure}[h]
+\centering
+  \includegraphics[width=.6\linewidth]{figures/Gaussian_hist_seperate.pdf}
+  \vspace*{-0.05in}
+\caption{Conditional sampling for a mixture of two Gaussians.  Network is trained on samples from the mixture, and the two panels show histograms (yellow) of samples drawn conditioned on each of the classes. 
+}
+\label{fig:gaussian-mixture}
+\end{figure}
+
+\begin{figure}
+\centering
+ \centering
+  \includegraphics[width=1\linewidth]{figures/generated_sampls3_80.pdf} \\[1ex]
+  \includegraphics[width=1\linewidth]{figures/large_generated_sampls160_s.pdf} 
+\caption{Conditional sampling.  
+Top row shows example images from different conditioning classes $y$. 
+Leftmost column shows initial (seed) noise images. 
+Second  column (3 small images only) shows samples from the (unconditioned) mixture denoiser, trained on all classes. 
+Remaining columns show 3 images sampled using the conditional model, conditioned on the feature vector $\phi_y$ for the corresponding class. Here the class feature vector is obtained from a single image from a class (i.e., setting $n_y=1$ in \Cref{alg:conditional_sampling}).
+Bottom row shows larger synthesized images, each sampled conditionally from the class corresponding to the leftmost of the two columns above it, and initialized by the noise image on the left. 
+} 
+\label{fig:cond-sampling}
+\end{figure}
+
+\paragraph{Gaussian mixtures.}
+Guided diffusion models \citep{ho2022classifier} have been highly successful in generating text-conditioned images, but recent results demonstrate that they do not sample from the conditional density on which they are trained. This is proved for mixtures of two Gaussians \citep{chidambaram2024does}, which captures important
+properties of the problem.  We trained our model on samples from such a two-Gaussian mixture, having different means $m_1$ and $m_2$ and a rank $1$ covariance whose principal component is $(m_2 - m_1) / \|m_2 - m_1\|$.
+\Cref{fig:gaussian-mixture} shows the distribution of conditional samples generated by \Cref{alg:conditional_sampling}.
+Unlike guided score diffusion, which relies on a likelihood approximation, our feature guided score diffusion generates typical samples from each Gaussian conditional density.
+
+\paragraph{Natural images.}
+We trained a network on pairs of $80 \times 80$ patches selected randomly from a dataset of $1700$ grayscale texture images (i.e. $1700$ classes).
+We generated samples by using the trained model in \Cref{alg:conditional_sampling}.
+\Cref{fig:cond-sampling} shows three samples generated for each of $10$ different classes, as specified by their corresponding feature vectors $\phi_y$.
+Samples are visually diverse, of high quality, and appropriate for the corresponding conditioning class. The bottom row shows samples drawn at twice the resolution, using $5$ of the same conditioning classes. 
+\Cref{fig:cond-sampling-1image} and \Cref{fig:cond-sampling-2image} in \Cref{app:empirical-results} show more examples of conditional sampling. Additionally, \Cref{fig:style-transfer} and \Cref{fig:conditioning-shut-down} show the effect on conditioning at different noise level on sampling. 
+\Cref{fig:interpolation} demonstrates that interpolation within the embedding space is well-behaved.
+Each row shows samples using a conditioning vector in the embedding space that is interpolated between those of two classes, $\{y_1,y_2\}$.  
+The rows are ordered by the Euclidean distance between the class feature vectors, $\| \phi_{y_1} - \phi_{y_2} \|$.  In all cases, the generated samples are generally of high visual quality, and represent a qualitatively sensible progression.
+
+\begin{figure}
+\centering
+ \centering
+   \includegraphics[width=1\linewidth]{figures/interpolate230726.pdf} 
+  \includegraphics[width=1\linewidth]{figures/interpolate44258.pdf}      
+  \includegraphics[width=1\linewidth]{figures/interpolate622349.pdf } 
+  \includegraphics[width=1\linewidth]{figures/interpolate422557.pdf} 
+    \includegraphics[width=1\linewidth]{figures/interpolate73078.pdf}   
+
+\caption{Interpolation in embedding space. 
+Each row shows high-resolution samples drawn from $p(x|\alpha \phi_{y_1} + (1-\alpha) \phi_{y_2})$ for different class pairs $\{y_1,y_2\}$, with representative samples from the training set shown on left and right sides. Rows from top to bottom correspond to pairs of classes with increasing Euclidean embedding distance. 
+}
+\label{fig:interpolation}
+\end{figure}
+
+
+\section{Discussion}
+
+
+
+
+We presented a feature guided score diffusion method for learning a family of conditional densities from samples. A projected score guides the diffusion in a feature space where the conditional densities are concentrated and separated.
+Both the projected score and the feature vectors are computed on internal responses of a deep neural network  that is trained to minimize a single denoising loss. 
+When conditioned on the feature vector associated with a target class, a reverse diffusion sampling algorithm based on the projected score transports a Gaussian white noise density to the target conditional probability following a trajectory that differs from that of the true conditional score.
+We demonstrate this numerically by showing that 
+denoising performance remains below that of the optimal conditional denoiser.
+Nevertheless, a diffusion algorithm based on the projected score provides an accurate sampling
+of conditional probabilities, which is demonstrated for Gaussian mixtures and
+by testing the quality and diversity of synthesized images. We also verify that the feature map provides a Euclidean embedding of corresponding conditional probabilities, which allows us to interpolate linearly between classes in the feature space.
+
+\myComment{
+We've presented a unified diffusion-based framework for learning a family of conditional densities from samples.
+The method relies on a single parametric network, and an associated feature vector constructed from spatial averages of selected channels within the network, 
+which defines an embedding space in which the conditional densities are concentrated and separated.
+Rather than attempt to explicitly learn the score of the conditional density, which requires computation of the noise-corrupted likelihood, we imposed conditioning by augmenting the score function of the mixture with a forcing term that is
+linear in the feature vector, and is computed within the network.
+The network is trained with a {\em single objective}, to denoise samples while conditioned on a target feature vector obtained from an addtional sample drawn from the same class.
+Sampling from the conditional densities is accomplished by ascending this augmented score, conditioned with a feature vector corresponding to the centroid of the target class.
+
+We demonstrated that: (1) denoising performance is improved by
+conditioning, relative to that of an unconditioned mixture denoiser of
+identical architecture; (2) denoising performance approaches, but does
+not reach, optimal performance of a network trained to denoise a
+single class; (3) the learned embedding space concentrates the
+features of same-class images, and separates those of different
+classes; (4) the embedding space is Euclidean, in that embedding
+distances approximate the symmetrized KL divergence between
+corresponding conditional densities;  (5) for a network trained on a mixture of two Gaussians, conditional samples are well-matched to the source
+conditional densities, unlike previously developed guidance methods;
+(6) for a network trained on a mixture of patches from $1700$ texture
+images, conditional samples are high-quality, diverse, and
+well-matched in appearance to the target class; (7) conditioning on
+embedding vectors interpolated between two classes results in high-quality
+samples whose appearance transitions from one target to the other.}
+
+\myComment{\sm{The following is quite long. We should avoid repeating elements in the background and introduction.} \zk{I think this parageraph on related work is very nice and also necessary for reviewers to see. It's better to have the extended discussion on the related work here as apposed to the intro to keep the flow. I'll remove the repeated parts from the intro (expect for brief mentions and citations there) } \es{Yes, I was intending to trim redundancy between this and intro. intro should be very brief.  Here we can be more explicit about differences with our method. } \zk{agreed! My comment was in response to Stepahne about the paragraph being too long. I think it is necessary to have this paragraph}}
+Our method is novel, but bears some similarity to several others in recent literature, each of which aim to learn a density (or at least, a diffusion sampler) conditioned on an exemplar from a class.
+Most of these are significantly more complex to train than our network, relying on multiple interacting networks, often with multiple-term objectives.  
+\cite{ho2022classifier} introduced classifier-free guidance, in which
+the score estimates of a conditional diffusion model are mixed with those of an unconditioned diffusion model. They were able to obtain high-quality samples, but the likelihood term in the conditional model over-biased the
+conditional sampling, resulting in a mismatch to the conditional density. Our method avoids this problem, as seen in the Gaussian example of \Cref{sec:empirical-results-synthesis}. 
+The Diffusion-based Representation Learning method \citep{mittal2023diffusion} uses a
+separate labeling network whose output is used to guide a denoiser.  The two networks are jointly trained to minimize a combination of denoising error and the KL divergence of the label distribution with a standard
+Normal (similar to objectives for variational AutoEncoders). Trained networks showed success in recognition, but properties of the learned conditional density were not examined.
+Subsequent work \citep{wang2023infodiffusion} augmented the DRL objective with an additional mutual
+information term.  
+And finally, \citep{hudson2024soda} the SODA combines three networks: an image encoder, a denoiser, and a bridge network that maps the encoding into gains and offsets that are used to drive the conditioning of the denoiser. The entire model is trained on a single denoising loss, and generates images of reasonable quality, but the properties of the learned density and embedding space were not analyzed.
+
+\myComment{Our framework offers many opportunities for future exploration.}
+Guiding score diffusion with projected scores raises many questions.
+The embedding space of our current model relies on feature vectors constructed from channel averages.  This
+is a natural choice of summary statistic,  especially for images drawn from stationary 
+sources. However,  \Cref{fig:stability-of-channel-averages} shows that many
+of these channels, in the first and last layers, are not providing much benefit in differentiating
+classes. This suggests that they could be eliminated, further reducing the 
+dimensionality. The construction of the feature vector from alternative linear projections of channel responses may also provide a useful generalization for capturing spatially varying properties of image classes.
+\myComment{\sm{I have doubts about the previous sentence since the network can learn such linear operators, although convolutional.}\es{fair, but the "spatially varying" is there to indicate non-convolutional.}}
+Finally, an outstanding mathematical question is to understand the accuracy of stochastic interpolants \citep{VandenEijndenInterpolant2025} obtained with projected scores, and how it relates to feature space properties.
+
+\myComment{
+\sm{This work is much more general than image texture synthesis and  people do not care so much about texture synthesis anymore, including myself. Discussing our old papers on textures does not seem appropriate here, including my own, and we need to save space. We should rather refer to applications where conditional probabilities are used in current applications, to demonstrate the relevance of this work. About your other statement, I do not understand why you say that we do a linear forcing. The neural network performs a non-linear forcing from the mixture score, computed with internal non-linear features.}
+\es{I agree the work is more general than texture, but our example is based on texture, and I believe it is related to the old texture models, which i though worth mentioning only here in discussion. In any case, we do not have to argue about it.}
+\es{regarding linear forcing: I of course understand that the forcing is nonlinear- I was trying to make the simple point that it is linear in the internal network representation, while nonlinear out in the space of the images.  Specifically, the feature vector is a linear fucntion of  the responses (which are a nonlinear function of the image x_sigma). In the second term of eq. 9,  the grad_e serves to map the linear forcing back into the score space.  I'm not sure why you think this is misleading, }
+}
+\myComment{
+Indeed, we believe our results represent a current state-of-the-art for visual appearance of
+image-conditioned texture generation, achieving higher visual quality with a substantially more compact
+embedding than previous methods (e.g., 
+\cite{zhu1998filters}; 
+\cite{portilla2000parametric};
+\cite{gatys2015texturesynthesisusingconvolutional}).
+In fact, the analysis of  \Cref{fig:stability-of-channel-averages} shows that many
+of these channels (in particular, those in the first and last layers) are not providing much benefit in differentiating
+classes, which suggests that they could be eliminated from the feature vector, further reducing the 
+dimensionality. The construction of the feature vector from alternative linear projections of channel responses 
+is also worth considering, and may prove important for capturing spatially varying properties of image classes.
+The imposition of such features via linear forcing can be attained using a simple
+generalization of our current augmented score.
+A more challenging question is whether the method can be generalized to  nonlinear features. }
+\myComment{Our method of conditional forcing is motivated by analogy to linear forcing that arises from the likelihood
+function in the Gaussian mixture case.  
+But our implementation imposes this on network responses that are
+highly nonlinear with respect to the input space.}
+
+
+
+
+\myComment{\sm{We changed the guidance problem from a likelihood estimation problem into a more flexible control problem of the score diffusion equation, in the embedding space of a feature map. Advantages: good numerical results and outputs a feature map. Difficulties: the mathematical understanding of this learned non-linear control is an open question.}}
+
+\myComment{
+In density sampling, we have 2 criterea: 1) high diversity 2) high quality. In the generalization regime this two do not trade off (only in the transition regime they trade off: increase stochasticity  to sample modes of distribution which are train examples -> improves quality, reduces diversity. On the other hand. reduce stochasticity to increase diversity -> lower quality. In the literature, they say we have to reduce or increase the temperature to trade-off between diversity and quality. 
+However in generalization regime, this does not happen. If we are in generalization regime, conditional sampling should not affect quality or diversity. Now a third criterion is added: 3) get sample from correct class. Here we achieve this with the projected score. }
+
+\myComment{\zk{mention somewhere: number of steps for sampling with conditional algo drops to half compared to mixture - for Gaussian (adaptive step size)}
+\es{ I added this to the sampling results}
+}
+
+
+
+\newpage
+
+
+
+

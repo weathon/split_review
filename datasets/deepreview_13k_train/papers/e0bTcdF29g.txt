@@ -1,0 +1,277 @@
+\title{Natural GaLore: Accelerating GaLore for memory-efficient LLM Training and Fine-tuning}
+
+\begin{abstract}
+    Training LLMs presents significant memory challenges due to growing size of data, weights, and optimizer states. Techniques such as data and model parallelism, gradient checkpointing, and offloading strategies address this issue but are often infeasible due to hardware constraints. To mitigate memory usage, alternative methods like Parameter-Efficient-Fine-Tuning (PEFT) and GaLore approximate weights or optimizer states. PEFT methods, such as LoRA, have gained popularity for fine-tuning LLMs, though they require a full-rank warm start. In contrast, GaLore allows full-parameter learning while being more memory-efficient. This work introduces \textit{\lowrank}, a simple drop in replacement for AdamW, which efficiently applies the inverse Empirical Fisher Information Matrix to low-rank gradients using Woodbury's Identity. We demonstrate that incorporating second-order information speeds up optimization significantly, especially when the iteration budget is limited. Empirical pretraining on 60M, 130M, 350M, and 1.1B parameter Llama models on C4 data demonstrate significantly lower perplexity over GaLore without additional memory overhead. By fine-tuning RoBERTa on the GLUE benchmark using \textit{\lowrank}, we demonstrate significant reduction in gap 86.05\% vs 86.28\% for full-finetuning. Furthermore, fine-tuning the TinyLlama 1.1B model for function calling using the TinyAgent framework shows that \textit{\lowrank} achieving 83.09\% accuracy on the TinyAgent dataset, significantly outperforms 16-bit LoRA at 80.06\% and even surpasses GPT4-Turbo by 4\%, all while using 30\% less memory.git}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have achieved remarkable performance across various disciplines, including conversational AI and language translation. However, training and fine-tuning these models demand enormous computational resources and are highly memory-intensive. This substantial memory requirement arises from storing billions of trainable parameters along with associated gradients and optimizer states.
+
+To quantify this, consider a model with $\Psi$ parameters which is being trained using the Adam optimizer. In this case, storing parameters and their gradients in 16-bit precision formats like FP16 or BF16 requires $2\Psi$ bytes each. The associated optimizer states are typically stored in 32-bit precision (FP32) for numerical stability, necessitating an additional $4\Psi$ bytes for each parameter, gradient momentum, and variance, amounting to $12\Psi$ bytes. Therefore, the total memory requirement sums up to $16\Psi$ bytes. When accounting for model-dependent memory, such as activations during forward and backward passes, and residual memory, like temporary buffers and memory fragmentation, the overall memory footprint can easily exceed $18\Psi$ bytes \citep{raffelExploringLimitsTransfer2020,touvronLlamaOpenFoundation2023,chowdheryPaLMScalingLanguage2022}.
+
+This enormous memory demand poses significant challenges, especially when training LLMs on hardware with limited memory capacity. As models continue to scale, efficient memory utilization becomes critical for making training feasible and accessible. In this work, we develop an efficient adaptation to the GaLore algorithm \citep{zhao2024galore}, which significantly reduces the memory footprint during training and fine-tuning of LLMs by approximating the optimizer state. Our approach, \textit{\lowrank}, leverages the low-rank structure of gradients and incorporates second-order information to achieve faster convergence and higher performance without additional memory overhead and can be used as a drop in replacement to standard optimization algorithms like Adam and AdamW.
+
+\paragraph{Parallel and Distributed Training Techniques}
+Researchers have developed various distributed computing techniques that leverage system-level optimizations and hardware resources to mitigate the substantial memory requirements in training LLMs.
+
+One prominent framework is \textit{Distributed Data-Parallel (DDP)} that combines data parallelism where the training dataset is partitioned across multiple devices or nodes, with efficient gradient synchronization mechanisms, minimizing communication overhead. While data parallelism efficiently utilizes multiple GPUs, it can still face memory bottlenecks when model sizes exceed the memory capacity of a single device.
+
+\textit{Model parallelism} addresses this limitation by partitioning the model across multiple devices, allowing for the training of models that are too large to fit into the memory of a single GPU. Techniques like \textit{pipeline parallelism} \citep{huangGPipeEfficientTraining2019} and \textit{tensor parallelism} \citep{shoeybiMegatronLMTuningScaling2019} enables the distribution of different layers or partitions of layers across devices. However, model parallelism introduces communication overhead and can be complex to implement effectively.
+
+Another effective technique is \textit{gradient checkpointing} \citep{chenTrainingDeepNets2016}, which reduces memory usage by selectively storing only a subset of activations during the forward pass and recomputing them during the backward pass as needed. This approach trades increased computational overhead for reduced memory consumption, enabling the training of deeper models without exceeding memory constraints.
+
+\textit{Memory offloading} strategies, such as those implemented in ZeRO-Offload \citep{rajbhandariZeROMemoryOptimizations2020}, move optimizer states and gradients to CPU memory when not actively in use, freeing up GPU memory for other operations. ZERO can also partition optimizer states and gradients across DDP processes, eliminating redundancy and significantly reducing memory footprint. \textit{Fully Sharded Data Parallel} \citep{zhaoExtendingTorchElasticStateful2020} extends this concept by sharding model parameters in addition to optimizer states and gradients.
+
+These system-level optimizations have been instrumental in training state-of-the-art LLMs such as LLaMA3 \citep{touvronLlamaOpenFoundation2023}, GPT-3 \citep{brownLanguageModelsAre2020}, Mistral \citep{jiangMistralEfficientComposable2023}, and Gopher \citep{raeScalingLanguageModels2021} on multi-node, multi-GPU clusters.
+
+While these distributed computing solutions enable the training of large models by leveraging extensive hardware resources, they come with increased system complexity and operational costs. Therefore, there is a pressing need for alternative approaches that reduce memory consumption without relying solely on distributed computing resources. Optimization techniques that approximate parameters or optimizer states offer a promising direction for making LLM training more accessible and efficient.
+
+\paragraph{Parameter-Efficient Fine-Tuning}
+
+PEFT techniques efficiently adapt pre-trained language models to various downstream applications without fine-tuning all the model's parameters \citep{dingDeltaTuningComprehensive2022}, significantly reducing the computational and memory overhead.
+
+Among these techniques, the popular LoRA \citep{huLoRALowRankAdaptation2021} parametrizes a weight matrix $W \in \mathbb{R}^{n \times m}$ as:
+\begin{equation}
+ W = W_0 + BA,
+\end{equation}
+where $W_0$ is a frozen full-rank pre-trained weight matrix, and $B \in \mathbb{R}^{n \times r}$ and $A \in \mathbb{R}^{r \times m}$ are trainable low-rank adapters to be learned during fine-tuning. Since the rank $r \ll \min(m, n)$, the adapters $B$ and $A$ contain significantly fewer trainable parameters, reducing memory requirements for both parameter and optimizer states.
+
+LoRA has been extensively used to reduce memory usage during fine-tuning, effectively enabling large models to be adapted to new tasks with minimal additional memory overhead. There are a few variants of LoRA proposed to enhance its performance \citep{renduchintalaTiedLoraEnhacingParameter2023, shengSLoRAServingThousands2023, zhangLORAFAMEMORYEFFICIENTLOWRANK, xiaChainLoRAEfficient2024}, supporting multi-task learning \citep{wangMultiLoRADemocratizingLoRA2023}, and further reducing the memory footprint \citep{dettmersQLoRAEfficientFinetuning2023}. Its variant, ReLoRA \citep{lialinReLoRAHighRankTraining2023}, extends LoRA's approach to pre-training by periodically updating the frozen weight matrix $W_0$ using the previously learned low-rank adapters. This incremental updating allows for continual learning without storing entire optimizer states for all parameters, leading to faster training times and lower computational costs. Furthermore, this allows for rapid adaptation of large models to multiple downstream tasks without storing separate copies of the entire model for each task.
+
+Despite their benefits, recent works have highlighted several limitations of low-rank reparameterization approaches. LoRA does not consistently achieve performance comparable to full-rank fine-tuning, particularly in complex tasks \citep{xiaChainLoRAEfficient2024}. In pre-training from scratch, methods like ReLoRA require an initial phase of full-rank model training as a warmup before optimizing in the low-rank subspace \citep{lialinReLoRAHighRankTraining2023}. The shortcomings of low-rank parameter reparameterization suggest that alternative strategies are needed to achieve both memory efficiency and high performance.
+
+\paragraph{Gradient Low-Rank Projection (GaLore)}
+
+An alternative to parameter approximation is the approximation of the optimizer states. By reducing the memory footprint associated with optimizer states, it is possible to maintain full-parameter learning—thus preserving model capacity and performance—while achieving significant memory savings.
+
+The core idea behind GaLore \citep{zhao2024galore} is to exploit the slowly changing low-rank structure of the gradient matrix $g \in \mathbb{R}^{n \times m}$, rather than approximating the weights. During neural network training, gradients naturally exhibit low-rank properties, a phenomenon studied extensively in both theoretical and practical settings \citep{zhaoZerOInitializationInitializing2022,cossonLowRankGradientDescent2023,yang2023spectral}. This intrinsic low-rank structure of gradients has been applied to reduce communication costs \citep{wangATOMOCommunicationefficientLearning,vogelsPowerGossipPracticalLowRank2020} and to decrease memory footprints during training \citep{gooneratneLowrankGradientApproximation2020,huangLowRankGradientDescent2023}.
+
+Specifically, consider the compact SVD decomposition of the gradient matrix \(\mathbf{g} = \mathbf{P} \Sigma \mathbf{Q}^{T}\), where \(\mathbf{P} \in \mathbb{R}^{n \times r}\) and \(\mathbf{Q} \in \mathbb{R}^{m \times r}\) are the associated semi-orthognal matrices.  Then, GaLore projects the gradient matrix $\mathbf{g}$ into a low-rank form:
+\begin{equation}
+    \mathbf{g}_{\text{low-rank}} = \mathbf{P}^{T} \mathbf{g}.
+\end{equation}
+Here, $r \ll \min(n, m)$ is the target rank, \(n\) is the parameter count, \(m\) is the batch size and $\mathbf{g}_{\text{low-rank}}$ serves as an efficient approximation of the original gradient. The projection matrix $\mathbf{P}$ is updated periodically (e.g., every 200 iterations), which incurs minimal amortized computational cost.
+
+By operating on low-rank approximations of the gradients, GaLore significantly reduces the memory footprint, leading to up to \textbf{30\%} memory reduction compared LoRA \citep{zhao2024galore}. Moreover, GaLore maintains full-parameter learning, allowing updates to all model parameters, leading to better generalization and performance than low-rank adaptation methods. Further, GaLore is agnostic to the choice of optimizer and can be easily integrated into existing optimization algorithms with minimal code modifications.
+
+While GaLore offers significant memory savings and enables full-parameter learning, its performance has yet to match that of optimizers in full optimizer state space. Reliance on low-rank gradient approximations may not fully capture the rich optimization dynamics. These limitations suggest that while GaLore is a valuable step toward memory-efficient training, further enhancements are necessary to bridge the performance gap with standard optimizers.
+
+\paragraph{Our Approach}
+
+In this work, we propose to bridge the gap by incorporating a second-order regularizer into the low-rank gradient estimate, which adjusts parameter updates more effectively, leading to faster convergence. We show that applying the inverse of the empirical Fisher Information Matrix (FIM) to the low-rank gradients leads to variance reduction of the gradient estimate, incorporates information about the curvature of the loss landscape, and reduces dependence on the starting point. All of these lead to significantly faster convergence, especially in a limited iteration regime.
+
+We introduce the \textit{\lowrank} algorithm, a matrix-free algorithm for efficiently applying the inverse FIM to the low-rank gradients, using Woodbury Identity, Cholesky Decomposition, and Matrix-Vector Products, all of which can be efficiently implemented on the GPU. Further, our approach does not require any explicit layer-wise information or significant computational overhead, as is seen in existing approaches like K-Fac \citep{martens2015optimizing}.
+
+ We validate the effectiveness of \textit{\lowrank} through extensive empirical evaluations. Pre-training experiments on LLaMA models with 60M, 300M, and 1.1B parameters using the C4 dataset demonstrate that \textit{\lowrank} achieves significantly lower perplexity than GaLore without additional memory overhead, indicating faster convergence within the same computational budget.
+
+ Furthermore, we showcase the practical benefits of \textit{\lowrank} in fine-tuning tasks. We fine-tune the TinyLlama 1.1B model for function calling using the TinyAgent framework. Our results show that \textit{\lowrank} significantly outperforms LoRA in this setting, achieving an accuracy of \textbf{83.09\%} on the TinyAgent dataset. This performance significantly surpasses 16-bit LoRA and exceeds that of GPT-4-turbo by 4\%, all while using \textbf{30\%} less memory.
+
+
+
+\section{Accelerating GaLore with Natural Gradients}
+
+
+\subsection{Next Token Prediction}
+
+Generative LLMs are trained to predict the next token in a sequence based solely on the previously observed tokens. This "causal" approach respects the temporal order of language, ensuring that the model's predictions at any point depend only on past and not future inputs.
+
+Given a sequence of tokens \( x = (x_1, x_2, \dots, x_T) \), the objective is to maximize the likelihood of a sequence by decomposing it into a product of conditional probabilities:
+
+\begin{eqnarray}
+\text{Prob}_{\mathbf{\theta}}(x) = \prod_{t=1}^T \text{Prob}_{\mathbf{\theta}}(x_t \mid x_{<t})
+\end{eqnarray}
+
+where \( x_{<t} = (x_1, x_2, \dots, x_{t-1}) \) represents all tokens before position \( t \) and \( \text{Prob}_{\mathbf{\theta}}(x_t \mid x_{<t}) \) is the probability of the next token given all previous tokens and the parameter \( \mathbf{\theta} \in \mathbb{R}^{n \times m} \).
+
+This is equivalent to minimizing the Negative Log-Likelihood (NLL) of the observed sequences, which is the cross-entropy loss between the predicted probability distribution and the actual next token:
+
+\begin{eqnarray}
+\Phi(\mathbf{\theta}) = -\sum_{t=1}^T \log \text{Prob}_{\mathbf{\theta}}(x_t \mid x_{<t})
+\label{eq:cross_entropy_loss}
+\end{eqnarray}
+
+This loss penalizes the model more when it assigns lower probabilities to the correct next token. By minimizing this loss, the model learns to assign higher probabilities to appropriate continuations of text. However, the loss is non-convex and high-dimensional, for LLMs the dataset is also massive, making the optimization problem very challenging.
+
+\subsection{Low-Rank Gradient Descent}
+
+Stochastic gradient descent algorithms are iterative, where each step aims to find the optimal update direction that minimizes the loss function locally. Now in the case of GaLore, the update direction is restricted to the affine subspace \(\mathbf{u}_{k} \in {\mathbf{\theta}_{k}} + \text{Range} \left(\mathbf{P}_{k}\right)\). Here \(\mathbf{P}_{k} \in \mathbb{R}^{n \times r}\) is the left projection matrix, calculated using the compact SVD decomposition of the gradient matrix \(\nabla_{\mathbf{\theta}} \Phi(\mathbf{\theta}_{k}) = \mathbf{P}_{k} \Sigma \mathbf{Q}_{k}^{T}\).
+
+Then, the local neighborhood around this update can be defined using the Taylor series expansion \citep{lin2022randomized}:
+
+\begin{eqnarray}
+\Phi(\mathbf{\theta}_{k} + \mathbf{P}_{k} \mathbf{u}_{k}) \approx \Phi(\mathbf{\theta}_{k}) + \mathbf{g}_{k}^{T}\mathbf{u}_{k} + \frac{1}{2} \mathbf{u}_{k}^{T} \mathbf{H}_{k}  \mathbf{u}_{k}
+\label{eq:taylor_series_expansion}
+\end{eqnarray}
+
+where \(\mathbf{g}_{k} = \mathbf{P}_{k}^{T}\nabla_{\mathbf{\theta}} \Phi(\mathbf{\theta}_{k})\) is the low rank projected gradient and \(\mathbf{H_{k}} = \mathbf{P}_{k}^{T}\nabla^2_{\mathbf{\theta}} \Phi(\mathbf{\theta}) \mathbf{P}_{k}\) is the Hessian matrix.
+
+However, the Hessian matrix \(\mathbf{H}_{k}\) is often computationally expensive to compute and store, especially for large-scale language models (LLMs) with billions of parameters. Fortunately, precisely under the condition that the loss function can be represented in terms of KL divergence between the actual and approximated distributions [\ref{eq:cross_entropy_loss}], then \(\mathbf{H_{k}}\) can be approximated by the FIM. The FIM is defined as the expectation of the Hessian of the negative log-likelihood w.r.t. the data distribution:
+
+\begin{eqnarray}
+\mathbf{F}_{k} = \mathbb{E}_{x \sim p_{\text{data}}} \left[ \mathbf{H}_{k} \right]
+\end{eqnarray}
+
+The FIM captures the curvature of the loss landscape and provides a natural metric for the optimization process. Hence, it can better adjust parameter updates according to the geometry of the parameter space. However, as the theoretical data distribution is unknown, in practice, we need to estimate it using the empirical FIM \citep{martensNewPerspectiveNatural2014} defined by:
+
+\begin{eqnarray}
+\mathbf{\hat{F}}_{k} = \frac{1}{h} \sum_{k=1}^{h} \mathbf{g_{k}} \mathbf{g_{k}}^{T}
+\end{eqnarray}
+
+where \(h\) is the history of gradients from past batches we would like to consider. Then, the optimal direction \(\mathbf{u}_{k}^{*}\), which minimizes the loss in this local neighborhood, is given by (cite Fuji et al. paper):
+
+\begin{eqnarray}
+\mathbf{u}_{k}^{*} &=& \mathbf{\hat{F}}_{k}^{-1} \mathbf{g}_{k}
+\label{eq:optimal_direction}
+\end{eqnarray}
+
+This leads to the optimal gradient descent update step:
+
+\begin{eqnarray}
+\mathbf{\theta}_{k+1} = \mathbf{\theta}_{k} - \eta \mathbf{P}_{k} \mathbf{u}_{k}^{*}
+\label{eq:gradient_descent_update}
+\end{eqnarray}
+
+for some learning rate \(\eta\).
+
+Many popular stochastic optimization algorithms approximate the diagonal of the empirical FIM using second-moment estimates of the gradient \(\mathbf{g}_{k}\), which when added with Polyak style parameter averaging (i.e., momentum), asymptotically achieve the optimal Fisher efficient convergence rate \citep{martens2020new}.
+
+For instance, in the case of Adam \citep{kingmaAdamMethodStochastic2014}, the optimal update step is approximated by including the momentum term \(\mathbf{m}_{k} \in \mathbb{R}^{r\times m}\) and the learning rate \(\eta\) is scaled by the square root of the second moment estimate \(\mathbf{v}_{k} \in \mathbb{R}^{r\times m}\). With all operations being elementwise, the update direction becomes:
+
+\begin{eqnarray}
+    \mathbf{m}_{k} &=& \beta_{1} \mathbf{m}_{k-1} + (1-\beta_{1}) \mathbf{g}_{k} \\
+    \mathbf{v}_{k} &=& \beta_{2} \mathbf{v}_{k-1} + (1-\beta_2) \mathbf{g}^{2}_{k}  \\
+    \mathbf{u_{k}^{*}} &=& \mathbf{m}_{k} / \sqrt{\mathbf{v}_{k} + \epsilon}
+    \label{eq:adam_update}
+\end{eqnarray}
+
+This update, when applied to [\ref{eq:gradient_descent_update}], gives the GaLore optimization algorithm, which is memory efficient as it only requires storing the projection matrix and the costly optimizer states \(\left(g_{k}, m_{k}, v_{k}\right)\) are now significantly reduced by a factor of \(\frac{n}{r}\), where the rank \(r\), can be chosen based on the tradeoff between memory limitations and performance requirements.
+
+\subsection{\lowrank and Fisher Efficiency}
+
+Despite clear advantages, the performance of GaLore is not on par with AdamW \citep{loshchilov2017decoupled} optimization on the original space. To bridge this gap, we propose \textit{\lowrank}, which uses the full empirical FIM, thereby incorporating the missing second-order interaction information in the optimization process.
+
+As we now argue, this leads to a much more favorable dependence on the starting point, which means that the optimizer can make much more progress given a limited iteration budget. Further, when using a decaying learning rate schedule like with AdamW \citep{loshchilov2017decoupled}, the asymptotic convergence rate can be faster \citep{martens2020new} by a significantly large constant factor.
+
+Natural gradient descent is known \citep{martens2020new} to be Fisher efficient, precisely for our loss function [\ref{eq:cross_entropy_loss}]. Fisher efficiency means that the natural gradient estimator asymptotically achieves the lowest possible variance among all unbiased gradient estimators.
+
+For \textit{\lowrank}, the gradient descent update [\ref{eq:gradient_descent_update}] leads to a sequence of estimates \( \mathbf{\theta}_{k} \) whose variance satisfies \citep{amariNaturalGradientWorks1998}:
+
+\begin{eqnarray}
+\text{Var}[\mathbf{\theta}_{k}] = \frac{1}{mk} \mathbf{F}_{k}^{-1}(\mathbf{\theta}_{k}^*) + \mathcal{O}\left(\frac{1}{k^2}\right)
+\label{eq:variance_reduction}
+\end{eqnarray}
+
+which is asymptotically the smallest possible variance matrix satisfying the Cramér-Rao lower bound, that any unbiased estimator computed from \(mk\) training samples can have, with \(m\) being the batch size.
+
+Here, \(\mathbf{\theta}_{k}^*\) is the local optimum in the neighborhood defined by the Taylor series expansion [\ref{eq:taylor_series_expansion}] around the update direction. This is an important caveat, as the guarantee is only for local convergence in a convex neighborhood. The loss function is non-convex, so the property can not be stated to hold for the global optimum.
+
+The result also relies on the computation of the exact FIM \( \mathbf{F}_{k}(\mathbf{\theta}_{k}) \) using the entire data distribution, which is not practical. The Fisher efficiency guarantee is, however, only approximately satisfied when using the empirical FIM \(\mathbf{\hat{F}_{k}}\) instead. Nevertheless, we still get a variance reduction in the gradient estimates, leading to faster convergence and better optimization performance in the early stages of training large-scale models, making it especially valuable for training with a limited iteration budget.
+
+Further, incorporating second-order information through the empirical FIM allows the optimizer to account for the curvature of the loss landscape, enabling natural gradient descent to take more informed steps than standard gradient descent, potentially escaping flat regions or navigating steep ravines more effectively.
+
+In \citep{martens2020new}, it was shown that the expected update direction can be expressed as a sum of two terms, one that scales as \(\mathcal{O}(1/k)\), which is independent of the starting point and another that scales as \(\mathcal{O}(1/k^2)\), which is dependent on the starting point. If momentum is applied to the gradient estimator, the first term becomes independent of the choice of FIM estimator, thereby not leading to any asymptotic improvements. However, regularizing with the empirical FIM estimate can significantly reduce the constant factor associated with the starting-point-dependent second term. This leads to practical performance gains in finite iteration regimes (although negligible for large \(k\)).
+
+Finally, the Fisher efficiency result also assumes that the model can perfectly capture the data distribution, a condition known as \emph{realizability}. However, with the growing size of LLMs, this assumption is likely to hold, thereby satisfying the conditions for the guarantee. Therefore, especially in low-resource settings, \textit{\lowrank} can be a promising approach for training LLMs under memory constraints.
+
+\subsection{Natural Gradient Transform}
+
+Our \textit{\lowrank} algorithm is designed to efficiently apply the inverse empirical FIM to low-rank gradients using Woodbury's Identity. Most of the steps in the algorithm are similar to GaLore \citep{zhao2024galore}, with the critical difference being the incorporation of the natural gradient transform.
+
+In order to implement the natural gradient transform, we compute the inverse of the empirical FIM and apply it to the gradient \(\mathbf{g_{k}}\) using Woodbury's Identity, which allows us to efficiently compute the inverse of a matrix of the form \(A + UBU^T\). Woodbury's Identity states that:
+
+\begin{eqnarray}
+(A + UBU^T)^{-1} = A^{-1} - A^{-1}U(B^{-1} + U^TA^{-1}U)^{-1}U^TA^{-1}
+\end{eqnarray}
+
+Now, if we choose \(\mathbf{\hat{F}}_{k} = \lambda I + GG^{T}\), \(A = \lambda I\), \(U = G\), and \(B = I\), where \(G = [\operatorname{vec}(\mathbf{g}_{k}), \operatorname{vec}(\mathbf{g}_{k-1}),\ldots, \operatorname{vec}(\mathbf{g}_{k-s})]\) is the stacked gradient matrix over the past \(s\) gradients and \(\lambda\) is a small constant for Tikhonov regularization, then, the inverse of the empirical FIM applied to the gradient \(\mathbf{g_{k}}\) i.e. the natural gradient \(\mathbf{\tilde{g}}_{k} = \mathbf{\hat{F}}_{k}^{-1}\mathbf{g_{k}}\) can be calculated as:
+
+\begin{eqnarray}
+ \mathbf{\tilde{g}}_{k} = \frac{1}{\lambda}\mathbf{g_{k}} - \frac{1}{\lambda}G\left(\lambda I + G^{T}G\right)^{-1}G^{T}\mathbf{g_{k}}
+\end{eqnarray}
+
+To compute the above formula efficiently, let \(S = I + \frac{1}{\lambda}G^{T}G \in \mathbb{R}^{s\times s}\) and \(y = G^T\mathbf{g_{k}}\). Cholesky decomposition is used to solve for \(z\) in
+\begin{eqnarray}
+S z = y
+\end{eqnarray}
+which requires only \(\mathcal{O}(s^2)\) time. Then, the final natural gradient estimate can be computed using only matrix-vector products, which is very memory efficient:
+\begin{eqnarray}
+ \mathbf{\tilde{g}}_{k} = \frac{1}{\lambda}\mathbf{g_{k}} - \frac{1}{\lambda^{2}}Gz
+\end{eqnarray}
+This natural gradient estimate \(\mathbf{\tilde{g}}_{k}\) can then be sent to the Adam optimizer [\ref{eq:adam_update}], and the model parameters the same way as in GaLore.
+
+
+
+\section{Experiments}
+
+
+We evaluate \textit{\lowrank} on pre-training and fine-tuning tasks for LLMs. All experiments are conducted on a single node with 8 NVIDIA A100 GPUs to leverage high-performance computing capabilities, yet stay within reasonable limits.
+
+\subsection{Pre-training on the C4 Dataset}
+
+To assess the effectiveness of \textit{\lowrank}, we apply it to pre-train LLaMA-based language models of sizes ranging from 60 million to 1.1 billion parameters, on the C4 dataset. The C4 dataset is a colossal, cleaned version of the Common Crawl Corpus, primarily intended for pre-training language models and word representations \citep{raffelExploringLimitsTransfer2020}. It provides a diverse and extensive corpus, making it suitable for evaluating pre-training methods in realistic scenarios.
+
+We adopt the experimental setup from \citet{lialinReLoRAHighRankTraining2023}, utilizing a LLaMA-based\footnote[2]{LLaMA materials in our paper are subject to the LLaMA community license.} architecture with RMSNorm and SwiGLU activations \citep{shazeerGLUVariantsImprove2020,touvronLlamaOpenFoundation2023}. We maintain the same set of hyperparameters for each model size across all methods, except for the learning rate, which is tuned individually to ensure optimal performance. All experiments use the BF16 format to reduce memory usage without compromising computational efficiency, the same computational budget and the best validation perplexity is reported.
+
+\input{figures/llama1B_validation_perplexity.tex}
+
+\input{tables/lora_compare_llama.tex}
+
+Table~\ref{tab:lora_compare_llama} presents the validation perplexity and memory consumption for models trained with different methods and Figure~\ref{fig:train_loss} shows the training run for the Llama 1.1B model. Our proposed \textit{\lowrank} consistently outperforms GaLore \citep{zhao2024galore} across all model sizes, achieving validation perplexities closer to the full-rank baseline while maintaining significant memory savings. Furthermore, \textit{\lowrank} exhibits lower perplexities and greater memory consumption compared to other low-rank adaptation methods like LoRA and ReLoRA, due to their less efficient use of low-rank structures and the need for additional optimizer states.
+\subsection{Fine-Tuning RoBERTa-Base on the GLUE Benchmark}
+
+To further evaluate the effectiveness of \textit{\lowrank}, we conduct experiments on the General Language Understanding Evaluation (GLUE) benchmark using the pre-trained RoBERTa-Base model. The GLUE benchmark is a collection of nine natural language understanding tasks, including single-sentence tasks like CoLA \citep{warstadt2019neural}, similarity and paraphrase tasks like MRPC \citep{dolan2005automatically} and STS-B \citep{cer2017semeval}, and inference tasks like RTE \citep{dagan2005pascal}, MNLI \citep{williams2018broad}, and QNLI \citep{rajpurkar2016squad}. This benchmark is widely used to assess the performance of language models on diverse linguistic phenomena.
+
+In our experiments, we fine-tune the RoBERTa-Base model using \textit{\lowrank} and compare its performance with full fine-tuning and LoRA \citep{huLoRALowRankAdaptation2021}. We focus on memory-efficient fine-tuning methods to reduce the computational footprint while maintaining high performance. For each method, we report the average score across all GLUE tasks and individual task scores.
+
+We use the same training hyperparameters across all methods for a fair comparison. The batch size is 32, and we fine-tuned each model for three epochs. The learning rate is selected from \{1e-5, 2e-5, 3e-5\} based on the best validation performance for each task. For \textit{\lowrank} and LoRA, we experiment with rank values of 4 and 8 to study the trade-off between performance and memory efficiency.
+
+Table~\ref{tab:fine_tuning} presents the results of our experiments. \textit{\lowrank} consistently achieves comparable or better performance than LoRA across most tasks while using less memory. Precisely, with a rank of 4, \textit{\lowrank} attains an average score of \textbf{86.05}, closely matching the complete fine-tuning baseline of 86.28 and outperforming LoRA's average score of 85.61. This demonstrates that \textit{\lowrank} can effectively fine-tune large models with reduced memory consumption without sacrificing performance.
+
+\input{tables/compare_fine_tuning.tex}
+\subsection{Fine-Tuning TinyLlama 1.1B for Function Calling in Advanced Agentic Systems}
+
+Advanced Agentic Systems (AAS) require language models that can understand and generate code snippets to integrate various tools and APIs, fulfilling user queries through function-calling. We utilize the TinyAgent framework, which provides an end-to-end pipeline for training and deploying task-specific LLM agents capable of efficient and accurate function-calling \citep{erdogan2024tinyagent} to drive agentic systems at the edge.
+
+Given a natural language query, the LLM agent must generate a sequence of pre-defined function-calls that accomplish the desired tasks. The challenge lies in determining the appropriate arguments, to call the correct functions, in the right order while respecting interdependencies among the functions.
+
+LLMCompiler \citet{kim2023llmcompiler}, is a framework that enables language models to perform function-calling by first generating a function-calling plan, which includes the required functions and arguments. The LLMCompiler then compiles this plan into an executable sequence of function-calls. The critical aspect is training the model to produce a function-calling plan with the correct syntax and dependencies.
+
+The off-the-shelf pre-trained TinyLlama 1.1B (instruct-32k) model performs poorly on this task. The model generates incorrect sets of functions, hallucinated function names, fails to respect dependencies, and passes arguments incorrectly. This underperformance is expected, as the model was initially trained on datasets like SlimPajama and StarCoder, which are not specific to function-calling tasks. To address this, we follow the TinyAgent framework \citep{erdogan2024tinyagent} and fine-tune the TinyLlama 1.1B model on a high-quality, curated dataset designed for function-calling.
+
+\paragraph{TinyAgent Dataset}
+
+The TinyAgent dataset \citep{erdogan2024tinyagent} is a meticulously curated collection aimed at building a local agentic system for function-calling on Apple MacBooks for day-to-day tasks. It contains 40K examples of natural language queries and corresponding function-calling plans. The dataset is divided into 38K training examples, 1K validation examples, and 1K test examples. It encompasses 16 tasks, including Email, Contacts, SMS, Calendar, Notes, Reminders, File Management and Zoom Meetings. Each task has predefined scripts that the model needs to generate. The dataset is intentionally challenging, requiring the model to understand dependencies between function-calls and the arguments to be passed.
+
+\paragraph{Fine-Tuning Procedure}
+
+We fine-tune the TinyLlama 1.1B model on the TinyAgent dataset for three epochs using a batch size of 32. The learning rate is set to \(7 \times 10^{-5}\). After each epoch, the model is evaluated on the validation set, and the best-performing model is selected based on validation performance to be evaluated on the test set.
+
+During fine-tuning, the prompt includes descriptions of the ground truth functions and irrelevant functions serving as negative samples. This strategy encourages the model to learn to select the correct functions rather than merely memorizing the ground truth. Additionally, several in-context examples demonstrate how queries are translated into function-calling plans. These examples are selected using a Retrieval-Augmented Generation (RAG) process based on the user's query from the training data and a DeBERTa-v3-small model \citep{he2021debertav3} fine-tuned for multi-label classification for retrieval among the 16 tools.
+
+The training objective is then to maximize the accuracy of the generated function-calling plans. Success is defined by the model generating the correct plan with the proper set of function-calls, correct arguments, and the appropriate order of function-calls. Verifying the selection of the correct set of functions involves straightforward set comparison. However, ensuring the correctness of arguments and the order of function-calls is more complex and requires constructing the associated Directed Acyclic Graph to check for equality.
+
+\paragraph{Results and Discussion}
+
+\input{tables/lora_compare_function_calling.tex}
+
+After fine-tuning, the TinyLlama 1.1B model's success rate on the test set improved significantly. Table~\ref{table:t2} presents the latency, model size, and success rate of various models on the TinyAgent dataset. As shown, \textit{\lowrank} improves the success rate of the 1.1B model from 80.06\% (16-bit LoRA) to \textbf{83.09\%}, also surpassing GPT-4-Turbo by 4\% and approaching the performance of the larger TinyAgent-7B model, which achieves 84.95\%.
+
+These results demonstrate that \textit{\lowrank} not only enhances the performance of smaller models like the 1.1B parameter TinyLlama but also makes them competitive with significantly larger models. By efficiently incorporating second-order information through low-rank natural gradient updates, \textit{\lowrank} enables smaller models to achieve higher accuracy without additional memory overhead.
+
+
+
+\section{Conclusion}
+
+
+We have introduced \textit{\lowrank}, a memory-efficient pre-training and fine-tuning strategy for large language models. \textit{\lowrank} significantly reduces memory usage—by up to 65.5\% in optimizer states—while maintaining or even improving performance in large-scale LLM pre-training and fine-tuning tasks. By incorporating second-order information through an efficient approximation of the inverse Empirical Fisher Information Matrix, \textit{\lowrank} enhances convergence rates, especially in regimes with a limited iteration budget.
+
+Importantly, \textit{\lowrank} can serve as a \emph{drop-in replacement} for standard optimizers like AdamW and integrates seamlessly into existing training pipelines. Our experimental results highlight the \textit{reproducibility} and effectiveness of \textit{\lowrank} across various tasks, including pre-training LLaMA models and fine-tuning on the GLUE benchmark, as well as the TinyAgent function calling tasks. This makes it a compelling choice for large-scale pre-training scenarios where both memory efficiency and model performance are critical.
+
+In the future we want to explore (1) further enhancing memory efficiency by employing low-memory and structured projection matrices, and (2) more extensive empirical evaluation on fine-tuning AAS on a wide variety of tasks. We also hope that our work will inspire future research on memory-efficient training methods from the perspective of optimizer state approximation. We believe that \textit{\lowrank} will be a valuable tool for the community, enabling the training of large-scale models on consumer-grade hardware with limited resources.
+
+
+

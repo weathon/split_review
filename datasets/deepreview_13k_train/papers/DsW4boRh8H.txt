@@ -1,0 +1,220 @@
+\title{GFNet: Homography Estimation via Grid Flow Regression}
+
+\begin{abstract}
+Current deep homography estimation methods are constrained to processing image pairs with limited resolution due to restrictions in network architecture and computational capacity. For larger images, downsampling is often necessary, which can significantly degrade estimation accuracy. To address this limitation, we propose GFNet, a Grid Flow regression Network that consistently delivers high-accuracy homography estimates across varying image resolutions. Unlike previous methods that directly regress the parameters of the global homography between two views, GFNet directly estimates flow over a coarse grid and then uses the resulting correspondences to compute the homography. This approach not only supports high-resolution processing but also preserves the high accuracy of dense matching while significantly reducing the computational load typically associated with such frameworks, thanks to the use of coarse grid flow. We demonstrate the effectiveness of GFNet on a wide range of experiments on multiple datasets, including the common scene MSCOCO, multimodal datasets VIS-IR and GoogleMap, and the dynamic scene VIRAT. In specific, on GoogleMap, GFNet achieves an improvement of +9.9\% in auc@3 while reducing MACs by $\sim$47\% compared to the SOTA dense matching method. Additionally, it shows a 1.7$\times$ improvement in auc@3 over the SOTA deep homography method.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Homography estimation is the task of determining the transformation that aligns two planes. It typically finds application in the alignment of two images, each depicting the same planar structure but from different vantage points. This is a fundamental low-level computer vision task widely used in various downstream applications, including image/video stitching (Zhou et al., 2024), multimodal image fusion (Xu et al., 2023), GPS-denied UAV localization (Wang et al., 2024a), stereo vision (Kumar et al., 2024), and planar object tracking (Liu et al., 2023).  
+
+Recently, learning-based approaches have demonstrated high accuracy in homography estimation at small image resolutions. The primary reasons for these resolution limitations arise from constraints in (1) network architecture and (2) computational capacity. Some methods (DeTone et al., 2016; Le et al., 2020; Shao et al., 2021; Cao et al., 2022; 2023; Zhu et al., 2024) compute matching information between image pairs and aggregate it to regress the homography. The aggregation layer, typically using a fixed number of large-kernel pooling operations, outputs a tensor of shape $B\times2\times2\times2$ to represent the eight parameters of the homography. This implies that the network’s downsampling factor is predefined and constrained by the large kernel sizes, inherently restricting the input size. Other methods (Chang et al., 2017; Zhao et al., 2021; Zhang et al., 2023; Zhang & Ma, 2024) explicitly use the IC-LK iterator (Baker & Matthews, 2004) with learned features. This approach requires multiple iterations in feature space, resulting in significant compute and memory requirements. As a result, current methods are forced to work with inputs at low resolution. Unfortunately, doing so has also a direct negative impact on the accuracy of the estimated homography.  
+
+Compared to homography estimation methods, general matchers trained for two- or multi-view correspondence can handle a wider range of image resolutions. However, they tend to underperform in accurately estimating homography. For example, estimating homography between images from different modalities is a common challenge in homography estimation. A case in point is aligning infrared and visible images to aid UAV navigation at night under poor illumination (Li et al.,  
+
+![](images/4dc933e0a667e410e0e6e6b851c8b22677090ddd63265cae9f2920e096f52b5a.jpg)  
+Figure 1: Homography estimation performance of GFNet and existing homography estimation methods (red spot) and image matching methods (blue spot) on MSCOCO (natural) and GoogleMap (multimodal). We test on an RTX3090 with batchsize $=1$ , resolution $=448\times448$ .  
+
+2023). In such scenarios, sparse (DeTone et al., 2018; Sarlin et al., 2020; Lindenberger et al., 2023; Potje et al., 2024) and semi-dense Sun et al. (2021); Chen et al. (2022); Wang et al. (2024b) matchers often fail to find sufficient good matches in textureless regions (especially in infrared images), finally resulting in poor homography estimation. To address this issue, dense matchers incur in non-negligible computational costs. For example, training the SOTA dense matcher RoMa (Edstedt et al., 2024) on a 24GB GPU only supports a batch size of 1 for $560\times560$ images. This heavy resource demand arises from resolving every possible match between images, which is redundant for planar transformations where the displacement field follows a globally smooth pattern.  
+
+Currently, there is no homography estimation method that can handle varying image resolution while delivering accurate results without significant computational costs. To address this, we leverage the advantages of resolution flexibility and high accuracy inherent in the dense matching framework, while tackling its computational challenges by considering the globally smooth nature of homography transformations. This leads to our proposed Grid Flow regression Network (GFNet). As shown in Figure 1, GFNet achieves superior accuracy over current homography estimation methods, while outperforming the SOTA dense matching method RoMa with higher efficiency. This is achieved by the following contributions:  
+
+• We incorporate pre-trained self-supervised learning features of DINOv2 (Oquab et al., 2023) with a lightweight feature pyramid network to construct robust multi-scale features. This fusion addresses the low-resolution limitation of DINOv2, allowing our model to benefit from its strong cross-domain feature matching capabilities across multiple scales. • We sparsify the pixel-level dense matching approach to a coarse grid prediction, significantly reducing computational costs while keeping the high accuracy of dense matching. • We introduce an iterative flow regression approach to prevent suboptimal multi-scale flow optimization in challenging scenes. Besides, a resolution recurrence strategy is used during inference to improve accuracy and enable GFNet to adapt to varying image resolutions.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+Deep homography estimation. One of the earliest approaches uses a stacked image pair as input to a VGG-style network to extract matching information between images, followed by cascade average pooling to regress the homography (DeTone et al., 2016). Subsequent methods improve accuracy by cascading multiple VGG-style networks, where the predicted homography from each network is used to warp the images before feeding them into the next network, allowing for progressively more accurate predictions (Erlik Nowruzi et al., 2017; Le et al., 2020). However, using separate networks for refinement often results in suboptimal performance. To address this, Localtrans (Shao et al., 2021) builds multi-scale features within one network and predicts homography in a coarse-to-fine manner. RHWF (Cao et al., 2023) runs with one network recurrently to improve accuracy. There are some approaches improving accuracy by iteratively optimizing the homography, either by explicitly incorporating the Lucas-Kanade algorithm to achieve feature-metric alignment (Chang et al., 2017; Zhao et al., 2021; Zhang et al., 2023; Zhang & Ma, 2024), or by training the network end-to-end, enabling it to learn the optimization process implicitly (Cao et al., 2022; Zhu et al., 2024).  
+
+![](images/a027c605e8ddf99a7a8c508dbe0c0de6bafa1acd611c5fc3d8b9c4053b8dad08.jpg)  
+Figure 2: The overview of GFNet. Using multi-scale features, GFNet regresses the grid flow and confidence map progressively from the coarsest scale to the finest.  
+
+General matching methods. Current approaches can be categorized into sparse, semi-dense, and dense methods. Sparse methods rely on keypoint detection and description, followed by matching the descriptors (DeTone et al., 2018; Sarlin et al., 2020; Deng & Ma, 2022; Lindenberger et al., 2023; Potje et al., 2024). While efficient, they often struggle with accuracy in textureless regions, which are common in homography estimation tasks (Zhang & Ma, 2024). Semi-dense methods degrade less in such areas by bypassing keypoint detection. Instead, they perform global matching at a coarse level, where initial coarse matches that pass the mutual nearest neighbor test are then refined at a finer level. This means if key matches are missed in the coarse stage, they cannot be recovered. Regarding the dense methods, they predict matches for every pixel using flow regression. Although they achieve impressive accuracy, they require substantial computational resources in terms of both time and memory, which limits their applicability in resource-constrained scenarios (Truong et al., 2020; 2023; Edstedt et al., 2023; 2024).  
+
+Common challenges in homography estimation. The challenges are twofold and arise from practical application requirements, according to recent literature (Nguyen et al., 2018; Le et al., 2020; Zhang et al., 2020; Shao et al., 2021; Zhao et al., 2021; Cao et al., 2022; Zhang & Ma, 2024). The first one is photometric inconsistency caused by changes in illumination or modality, such as images taken at different times, with different sensors, or in different types (Jiang et al., 2021). The second challenge comes from the violation of the homography assumption due to dynamic occlusions.  
+
+
+
+\section{3 METHOD  }
+
+
+Our goal is to predict an accurate homography transformation H that spatially aligns a source image $I_{S}$ with a target image $I_{T}$ . We achieve this using the proposed GFNet, as shown in Figure 2. Rather than directly regressing the global homography, GFNet follows the dense matching paradigm but estimates the flow over a regular grid and utilizes the resulting correspondences to compute the homography. This process begins by extracting multi-scale features from both images, which are then used to predict grid flow across multiple scales. Next, we introduce the technique in detail.  
+
+
+
+\section{3.1 MULTI-SCALE FEATURE EXTRACTION  }
+
+
+DINOv2 has demonstrated exceptional zero-shot cross-domain feature matching capabilities across a variety of vision tasks. Given that our task involves multimodal image pairs, we incorporate the pre-trained DINOv2 into our feature encoder to enhance the robustness of multimodal feature representation. Specifically, DINOv2 divides the input image into $14\times14$ patches and generates a feature vector for each patch. As these patch descriptors are typically high-dimensional, we apply a linear projection layer to reduce their dimensionality, setting it to 64 in our implementation. To further enrich the features with cross-view information, which is crucial for matching, we add a normalized 2D positional encoding (Chen et al., 2022; Cao et al., 2024) and pass the features through stacked cross-attention layers. The resulting feature is denoted as $\mathcal{F}^{1}\in\mathbb{R}^{64\times\lfloor\frac{H}{14}\rfloor\times\lfloor\frac{W}{14}\rfloor}$ , where $H$ and $W$ are the height and width of the original image, $\lfloor\cdot\rfloor$ is the round down operation.  
+
+Table 1: Complexity analysis of different regression strategies. Time complexity and memory complexity are calculated for computing the global correlation in each scale.   
+
+![](images/c5c1d6e959f8e9804832fe8f4c78bbd477d3d83e3f0b3fa9cc9420de68bde397.jpg)  
+
+Since DINOv2 produces relatively low resolution features, relying solely on these features for homography estimation would lead to limited matching accuracy (Barroso-Laguna et al., 2024). To address this issue, we introduce a Feature Pyramid Network (FPN) to construct multi-scale features, ranging from the original image size down to a $1/8$ scale. We keep the network lightweight by configuring the channel numbers of each layer to [8, 16, 32, 64]. Furthermore, to improve the representation capability of the lightweight FPN, we bilinearly upsample ${\mathcal{F}}^{1}$ to the $1/8$ scale and merge it with the $1/8$ scale features produced by the encoding stage of the FPN. The final output features used for homography estimation consist of five scales, denoted as $\{\mathcal{F}^{l}\}_{l=1,2,3,4,5}$ , corresponding to spatial sizes of $1/\bar{1}4,1/8,1/4,1/2$ , and 1 relative to the original image, as illustrated in Figure 2.  
+
+
+
+\section{3.2 BACKGROUND: DENSE FLOW REGRESSION  }
+
+
+Before introducing our grid flow regression method, we briefly explain the dense matching framework we follow Truong et al. (2023); Edstedt et al. (2023; 2024). Dense matching aims to find pixel-wise correspondences between two images $I_{S},\dot{I}_{T}\,\,\in\,\,\mathbb{R}^{H\times\dot{W}\times3}$ by estimating a dense displacement field, or flow, $\mathbf{w}\in\mathbb{R}^{H\times W\times2}$ . Given the pixel coordinates in $I_{S}$ as $\mathbf{x}\in\mathit{\check{\mathbb{R}}}^{H\times W\times2}$ , the relationship $\textbf{y}=\textbf{x}+\textbf{w}$ denotes the corresponding pixel positions in $I_{T}$ that align with those in $I_{S}$ , representing the same physical locations in the scene. Typically, w is predicted in a multi-scale manner, from the coarest $(l=1)$ ) to the finest:  
+
+$$
+\mathbf{w}^{l}=\mathbf{u}\mathbf{p}(\mathbf{w}^{l-1})+\Delta\tilde{\mathbf{w}}^{l},\quad\Delta\tilde{\mathbf{w}}^{l}=\mathbf{decoder}_{\theta}^{l}\left(\mathcal{F}_{S}^{l},\mathcal{F}_{T}^{l},\mathbf{u}\mathbf{p}(\mathbf{w}^{l-1})\right),
+$$  
+
+where $\theta$ represents learnable parameters, $\mathbf{w}^{0}$ is an all-zero field, and $\operatorname{up}(\cdot)$ is the bilinear upsampling operation. There is a feature correlation layer included in each decode $\mathbf{\dot{\omega}}_{\theta}^{l}(\cdot)$ , which is computed as:  
+
+$$
+c(\mathcal{F}_{S}^{l},\mathcal{F}_{T}^{l};r^{l})=\mathcal{F}_{S}^{l}[\mathbf{x}^{l}]\odot\mathcal{F}_{T}^{l}[\mathbf{x}^{l}+\operatorname{up}(\mathbf{w}^{l-1})+\delta],
+$$  
+
+where $\mathbf{x}^{l}\in\mathbb{R}^{H^{l}\times W^{l}\times2}$ is the pixel coordinates in $\mathcal{F}_{S}^{l},[\cdot]$ represents bilinear interpolation, $\odot$ represents the dot product, and $\delta\in[-2r^{l}-1,2r^{l}+1]\times[-2r^{l}-1,2r^{l}+1]$ defines a local window with radius $r^{l}$ . This operation generates a 4D tensor of shape $\mathbb{R}^{H^{l}\times W^{l}\times(2r^{\bar{l}}+1)\times(2r^{l}+1)}$ , which captures visual similarity within a local neighborhood. While this correlation step is crucial for producing accurate results, it also introduces the main computational bottleneck in dense flow regression.  
+
+3.3 GRID FLOW REGRESSION  
+
+Grid-based strategy for efficiency. To alleviate the computational burden of Eq. 2, previous works typically reduce the radius $r$ as the scale increases (Truong et al., 2020; Shao et al., 2021; Zhu et al., 2024). However, this saving is limited for high-resolution images, where the first two dimensions of $c(\mathcal{F}_{S}^{l},\mathcal{F}_{T}^{l};r^{l})$ dominate the computational load. So to further minimize computational costs, we leverage the global smooth pattern of homography transformations and focus on learning a sparser representation of w to replace the original dense, pixel-wise one.  
+
+To achieve this, we sparsify w through a grid-based strategy. We redefine $\mathbf{x}\in G\times G\times2$ to represent the coordinates of a regular grid on $I_{S}$ with $G\times G$ being the grid size. Our goal is to estimate a grid-based displacement field $\mathbf{w}\in G\times G\times2$ and a confidence map $\mathbf{m}\in G\times G\times1$ that reflects the reliability of each flow estimate. The initial grid size is determined by the resolution of the coarsest feature map, with the grid size scaling proportionally to the feature map scale gap. In our case, we regard the results produced at the coarsest scale, where DINOv2 is applied, as an initialization step. Therefore, we keep the grid size constant for the first two scales and increase it only in the subsequent scales. We list the flow shape and computational complexity of pixel-based and gridbased strategies in Table 1. Theoretically, utilizing a grid-based strategy can markedly reduce the computational burden.  
+
+Direct regression vs. Iterative regression. The decoder $(\mathcal{F}_{S}^{\breve{l}},\mathcal{F}_{T}^{l},\mathfrak{u p}(\mathbf{w}^{l-1}))$ , which estimates the flow only once at each scale (as shown in Eq. 1), is referred to as direct regression. This is the default regression paradigm in dense matching. However, as the convergence basin shrinks with increasing scale, obtaining an optimal estimation with this approach requires that the estimate from the previous level falls within the convergence basin of the next level. If this condition is not met, the result will be suboptimal, as illustrated in Figure 3. The precondition for obtaining a reliable estimate at each scale is that $\mathcal{F}_{S}^{l}$ and $\mathcal{F}_{T}^{l}$ must be well-aligned with $\mathsf{u p}(\mathbf{w}^{l-1})$ . This alignment is relatively easy to achieve for images within the similar modality. But in cases where images have significant representational gaps, it becomes challenging for the decoder to make an accurate estimate in a single pass. To address this issue, we introduce an iterative regression strategy to improve the reliability of each grid flow. Specifically, our formulation for estimating the grid flow and its confidence map is given by:  
+
+![](images/4899650d287a79712d9040260553ad88a1af527e98e9150316a784d67f8ed609.jpg)  
+Figure 3: Flow optimization across multiple scales.  
+
+$$
+\mathbf{w}^{l,n}\!=\!\mathbf{w}^{l,n-1}\!+\!\Delta\tilde{\mathbf{w}}^{l,n},\quad\mathbf{m}^{l,n}\!=\!\mathbf{m}^{l,n-1}\!+\!\Delta\tilde{\mathbf{m}}^{l,n},\quad\Delta\tilde{\mathbf{w}}^{l,n},\Delta\tilde{\mathbf{m}}^{l,n}\!=\!\operatorname*{decoder}_{\theta}^{l}\left(\mathcal{F}_{S}^{l},\mathcal{F}_{T}^{l},\mathbf{w}^{l,n-1}\right),
+$$  
+
+where $n\in[1,N]$ represents the iteration number, with $N$ total iterations per scale. When $N=1$ , Eq. 3 reduces to direct regression. All predictions are made at the image scale, and the flow and confidence map are updated between scales as $\mathbf{w}^{l+1,0},\mathbf{m}^{l+1,0}=\mathbf{up}(\mathbf{w}^{\widetilde{l},N}),\mathbf{up}(\mathbf{m}^{l,N})$ . As shown in Table 1, the increase in time and memory complexity due to iterations is negligible when $N$ is small. Ablation studies will demonstrate the significant advantages of the iterative strategy.  
+
+Adaptive resolution recurrence. During training, images are consistently resized to a fixed resolution before being fed into the network to maintain a uniform grid shape. To handle varying resolutions, we adopt a simple recurrent strategy similar to Truong et al. (2020) during inference:  
+
+$$
+\mathbf{w}_{1},\mathbf{m}_{1}=\mathrm{GFNet}(I_{S},I_{T};\mathbf{w}_{0}),\quad\mathbf{w}_{0},\mathbf{m}_{0}=\mathrm{GFNet}(I_{S}^{'},I_{T}^{'};\mathbf{0}),\quad I_{S}^{'},I_{T}^{'}=\mathrm{resize}(I_{S},I_{T}),
+$$  
+
+where $I_{S}$ and $I_{T}$ are the original images, $I_{S}^{'}$ and $I_{T}^{'}$ are resized to match the training resolution, and $\mathrm{GFNet}(\cdot;\mathbf{w})$ denotes GFNet is initialized with w. The linear combination of $\mathbf{m}_{0}$ and $\mathbf{m}_{1}$ is regraded as the final confidence map. For images with resolutions lower than the training resolution, we use the training resolution recurrently, while for higher-resolution images, we apply the recurrence at a higher resolution. Different from Truong et al. (2020), our recurrence strategy operates on a grid level rather than at the pixel level, which significantly reduces computational overhead. Additionally, while computing $\mathbf{w}_{0},\mathbf{m}_{0}$ spans all scales, the process of computing $\mathbf{w}_{1},\mathbf{m}_{1}$ begins at the $1/8$ scale, bypassing the $1/14$ scale. This is because the previous stage’s $\mathbf{w}_{0},\mathbf{m}_{0}$ provides sufficient initialization, making re-initialization at the $1/14$ scale unnecessary.  
+
+In addition to employing the recurrence strategy to improve accuracy during inference, we also adopt a symmetric approach. This involves swapping the input sequence of $I_{S}$ and $I_{T}$ to compute the flow for the regular grid on $I_{T}$ . The resulting flows, $\mathbf{w}_{S\rightarrow T}$ and ${\bf w}_{T\rightarrow S}$ , along with their corresponding confidence maps $\mathbf{m}_{S\rightarrow T}$ and $\mathbf{m}_{T\rightarrow S}$ , are then combined to form the final correspondences. From these, $K$ correspondences are selected by thresholding the confidence maps and sampling according to a uniform distribution rule (Edstedt et al., 2024). These correspondences are then used to compute the homography with a robust estimator such as RANSAC (Fischler & Bolles, 1981).  
+
+3.4 LOSS FUNCTION  
+
+For flow estimation, we apply supervision on the $L_{2}$ distance between the ground truth grid flow $\textbf{w}_{g t}$ and the predicted flow w at every scale $l\in[1,L]$ and iteration $n\in[1,\bar{N}]$ :  
+
+$$
+\begin{array}{r}{L_{f l o w}=\sum_{l=1}^{L}\frac{\mathbf{m}_{g t}^{l}}{G^{l}\times G^{l}}\sum_{n=1}^{N}\lambda^{(N-n)}\rho(\|\mathbf{w}^{l,n}-\mathbf{w}_{g t}^{l}\|_{2}),}\end{array}
+$$  
+
+where $G^{l}$ represents the grid size at scale $l$ , and $\lambda\in(0,1)$ assigns higher weights to later iterations, similar to the “learning to optimize” approach (Teed & Deng, 2020). $\rho$ is a robust cost function that mitigates the impact of outliers (Barron, 2019), as employed in RoMa (Edstedt et al., 2024). $\mathbf{m}_{g t}\in\{\bar{0},1\}$ is a binary mask that indicates which pixels in $I_{S}$ have correspondences in $I_{T}$ .  
+
+For the confidence map, we learn it using a Binary Cross-Entropy (BCE) loss:  
+
+$$
+\begin{array}{r}{L_{c o n f}=\sum_{l=1}^{L}\frac{1}{G^{l}\times G^{l}}\sum_{n=1}^{N}\lambda^{(N-n)}\mathrm{BCE}(\mathbf{m}^{l,n},\mathbf{m}_{g t}^{l}).}\end{array}
+$$  
+
+Then the total loss is defined as ${\cal L}={\cal L}_{f l o w}+\alpha{\cal L}_{c o n f}$ , where $\alpha$ is a hyperparameter balancing the two terms. Notably, all predicted $\mathbf{w}^{l,n}$ are in image space, while the confidence maps $\mathbf{m}^{l,n}$ are in log space, contributing to more stable training.  
+
+3.5 DATA GENERATION FOR SELF-SUPERVISED LEARNING  
+
+Composite homography. Following prior works (DeTone et al., 2016; Zhang & Ma, 2024), as shown in Figure 4, we generate synthetic homography datasets for both training and testing. Specifically, we first define a deformation area by selecting four squares at the image’s corners, with a deformation ratio $d\in\bar{(0,0.5)}$ . Here, $d$ is the ratio between the deformation area height and the image height. From each of these squares, four random points are selected and transformed to the center of the respective squares, yielding a homography matrix. This process is performed independently on each image in the pair, producing two homography matrices, $\mathbf{H}_{1}$ and $\mathbf{H}_{2}$ . The images $I_{S}$ and $I_{T}$ are then generated by cropping the deformed images, with the centers of the deformation areas serving as the corners of the squares. The homography between $I_{S}$ and $I_{T}$ is then computed as $\mathbf{H}_{S\rightarrow T}=\mathbf{H}_{2}\mathbf{H}_{1}^{-1}$ . Different from prior homography estimation approaches which use only a single homography (i.e., setting $\mathbf{H}_{2}=\mathbf{I}_{3\times3},$ ), we introduce two homographies and use their composite to generate training data. This modification is crucial for ensuring that our method remains invariant to the input sequence.  
+
+![](images/645a08c19035c3309836629d0b5caa6df6ac38fd47d1de5673124a82981006a6.jpg)  
+Figure 4: Data generation.  
+
+Augment with dynamic occlusions. To enable GFNet to handle scenarios with dynamic occlusions, we follow Truong et al. (2023), which augments training data with dynamic objects. Specifically, we treat the images generated in Figure 4 as background. Objects are first added to $I_{S}$ , then transformed with new planar transformations and added to $I_{T}$ as the foreground, simulating moving occlusions in real-world scenarios. In this case, the ground truth confidence map $\mathbf{m}_{g t}$ is also updated, where the area occupied by the object in $I_{S}$ and its reprojection from $I_{T}$ to $I_{S}$ are set to 0. Moving objects are from MSCOCO (Lin et al., 2014) and augmented training examples are shown in Figure 5.  
+
+
+
+\section{4 EXPERIMENT  }
+
+
+4.1 DATASETS  
+
+Basic training. Since the initial grid size is determined by the input resolution, it is preferable to use training data with sufficient resolution to fully leverage our architecture’s potential. Following Truong et al. (2020), we utilize the CityScapes (Cordts et al., 2016) and ADE-20K (Zhou et al., 2019) datasets, both of which contain images larger than $750\times750$ . We generate 33, 398 training samples offline, following the pipeline in Sec. 3.5. The model trained on this split serves as the basic model, which is subsequently fine-tuned for application on multimodal datasets.  
+
+Fine-tuning. Following Zhao et al. (2021); Cao et al. (2022; 2023); Zhang et al. (2023); Zhang & Ma (2024), we select GoogleMap and VIS-IR as the multimodal scenarios for evaluation. Specifically, GoogleMap consists of paired satellite and map images provided by the Google Static Map API. We create 5, 000 aligned image pairs, each of size $1280\times1280$ , from various countries for fine-tuning. VIS-IR (Sun et al., 2022) includes $640\times512$ RGB and infrared image pairs captured by UAVs, with train, validation, and test splits. We select 5, 000 aligned image pairs from the train spilt for finetuning. The final training samples for GoogleMap and VIS-IR fine-tuning are generated on-the-fly from the selected aligned image pairs.  
+
+Inference. We test on MSCOCO, VIS-IR, GoogleMap and VIRAT datasets, examples are shown in Figure 5. For VIS-IR, we generate test samples from its test split, and for GoogleMap, test samples are generated from regions not overlapping with the training data. VIS-IR and GoogleMap are used to assess the model’s ability to handle photometric inconsistencies caused by modality changes, while MSCOCO (Lin et al., 2014) serves as a standard unimodal dataset, commonly used in previous works for evaluation. For each of these three datasets, we generate 1,000 test samples.  
+
+![](images/96b4d4cd18fd1b5f6fb34c4316759980095dc0cd9b2f3f6bc66d6f4b73920220.jpg)  
+Figure 5: Left: training samples. Right: test samples. In the mask, white for 1, while black for 0.  
+
+VIRAT is a dataset featuring dynamic scenes captured in a surveillance context (Oh et al., 2011), which we use to evaluate performance on dynamic scenes with occlusions. To create the dataset, we utilize the provided object annotations to identify dynamic objects in the videos. Image pairs are generated by cropping patches centered on the dynamic objects and aligning them with the same patches from different timestamps where the dynamic objects are absent. After removing similar samples, 144 test samples are finally collected from various video scenarios.  
+
+4.2 EXPERIMENTAL SETTINGS  
+
+Implementation details. We use a batch size of 16 with a learning rate of $2\cdot10^{-4}$ for training the basic model, and $1\cdot10^{-4}$ for fine-tuning. We use the AdamW optimizer with a weight-decay factor of $10^{-2}$ , and use CosineAnnealing to schedule the learning rate. Both the basic training and fine-tuning stages use 2, 000, 000 training samples drawn from their respective datasets. Each epoch processes 25, 000 samples, resulting in a total of 80 epochs. We train at a resolution of $448\times448$ , with the higher resolution in the recurrence set to $560\times560$ . We test MSCOCO and VIRAT with the basic model, while VIS-IR and GoogleMap with the fine-tuned models.  
+
+For data generation, we set $d\,=\,0.3$ , in line with prior works. Composite homography is used in training but not in testing. For the model, DINOv2-large is selected and we stack 4 cross-attention layers. Decoder at each scale is composed of 8 stacked depthwise convolution blocks, in line with Edstedt et al. (2023; 2024). The local radius from coarse to fine levels is set to $[7,6,4,2,0]$ . We set $N=2$ for iterations to manage computational costs, and iteration is performed only on multimodal cases. For the loss, we set $\lambda=0.85$ , $\alpha=0.01$ . For estimation, we select $K=5$ , 000 matches, and use RANSAC with the default setting of cv2.findHomography to calculate homography.  
+
+Metrics. We calculate the mean reprojection error of the four corner points and report the area under the cumulative curve (AUC) at four different thresholds: 3 px, 5 px, 10 px, and $20\,\mathrm{px}$ .  
+
+4.3 COMPARATIVE RESULTS  
+
+Baselines. Comparative methods are divided into two groups: homography estimation methods (Group A) and image matching methods (Group B). In Group A, we compare with RHWF (Cao et al., 2023), PRISE (Zhang et al., 2023), and MCNet (Zhu et al., 2024). RHWF and MCNet obtain the homography using a global aggregation layer within the network, while PRISE leverages IC-LK, initialized with MHN (Erlik Nowruzi et al., 2017). In Group B, we compare with the sparse matcher SIFT+LightGlue (Lindenberger et al., 2023), the semi-dense matchers LoFTR (Sun et al., 2021) and Efficient LoFTR (Wang et al., 2024b), and the dense matcher RoMa (Edstedt et al., 2024). For a fair comparison, all methods in Group A are trained under the same settings as ours. For methods in Group B (excluding SIFT+LightGlue), we fine-tune their official outdoor models using our training data. During evaluation, we use RANSAC with the same settings to compute the homography, and the maximum number of correspondences for sparse and semi-dense matchers is set to 2, 048.  
+
+Evaluation on MSCOCO. As shown in Table 2, GFNet outperforms all comparative methods on MSCOCO. Compared to methods in Group A, GFNet’s ability to train at higher resolutions, beyond the $128\times128$ limitation of Group A methods, leads to improved accuracy. Compared to methods in Group B, GFNet benefits from the accuracy of the dense matching framework, while the grid-based strategy is highly effective for homography estimation.  
+
+Table 2: Comparative results. Bold: best, underline: second. Group A: homography estimation. Group B: image matching. Relative improvement or decrease is shown for GFNet.   
+
+![](images/8dbae4849b89a4357090a4d69c9937933d37ac1b84f4d7c3532fa3ff702bc0b2.jpg)  
+
+Evaluation on multimodal datasets. GFNet demonstrates significant improvements over SOTA homography estimation methods, with a $14.2\%$ auc $@3$ increase on VIS-IR and a $1.7\times$ auc $@3$ improvement on GoogleMap. Beyond the advantage of high-resolution training, this improvement is largely due to the integration of DINOv2, which excels in cross-domain feature matching, boosting performance in multimodal scenarios.  
+
+Regarding image matching methods, GFNet surpasses both sparse and semi-dense matchers on the two multimodal datasets. Visualizations are shown in Figure 6. We can see SIFT+LightGlue is unable to handle significant appearance differences between modalities, while LoFTR methods have results with low accuracy. For RoMa, GFNet surpasses it on GoogleMap by $9.9\%$ auc $@3$ and achieves comparable performance on VIS-IR. The strong improvement on GoogleMap can be attributed to GFNet’s iterative strategy, as discussed in the ablation study in Sec. 4.4.  
+
+![](images/27bfe267aaeacea0a0fc1e4353fda9ff86529a7d9c6d89d42d85d54f98daef79.jpg)  
+Figure 7: Visualization of inlier information in VIRAT. Darker indicates lower values, and 1 − $|I_{T\to S}-I_{S}|$ is GT. While other methods recognize occlusion implicitly, GFNet handles it explicitly.  
+
+Table 3: Ablation on the iterative strategy.   
+
+![](images/1633ed97a50106abec0e431228271dbbc9ec1f331cb9b60503b1e361f5a8b137.jpg)  
+
+Evaluation on datasets with dynamic occlusions. Generally, image matching methods are trained on the 3D datasets to handle two- or multi-view matching, which gives them an inherent ability to address dynamic occlusion. Thus here we mainly discuss how homography estimation methods, which only involve planar information, learn to manage dynamic occlusion. As shown in Figure 7, RHWF and MCNet aggregate matching information to estimate homography, with occluded areas being implicitly filtered during this process. PRISE aligns the feature maps of two images to find the homography, also learning occlusion implicitly. In contrast, GFNet explicitly predicts a mask to identify occlusion, providing more precise occlusion information, which results in better performance on VIRAT compared to methods that implicitly predict occlusion (see Table 2).  
+
+Computational analysis. From the bottom table in Table 2, we observe that although GFNet is under the framework of dense matching, it reduces the MACs by $33.7\%$ without iteration and by $31.7\%$ with iteration compared to the SOTA dense matcher RoMa. This reduction is attributed to our smaller network architecture and the grid-based strategy.  
+
+Robustness to resolution. In addition to the $448\times448$ GoogleMap test set presented in Table 2, we create two more test sets, each containing 1000 image pairs, with resolutions of $224\times224$ and $672\times672$ . The results are presented in Figure 6. Since homography estimation methods in Group A only accept $128\!\times\!128$ inputs, errors are calculated at this scale and rescaled to the original resolution, leading to a near-linear increase in error as resolution grows. In contrast, GFNet does not impose input resolution constraints, making it more robust to resolution changes.  
+
+4.4 ABLATION STUDIES  
+
+Ablation experiments are conducted on MSCOCO (natural images) and GoogleMap (multimodal images). We mainly ablate our network architecture (Sec. 3.1), iterative strategy (Sec. 3.3), evaluation strategy (Sec. 3.3), data generation (Sec. 3.5), and training resolution.  
+
+Iteration. Results in Table 3 demonstrate that iteration is helpful for multimodal data but not for natural images. We attribute this to the challenge of precisely aligning the same physical positions in multimodal image pairs due to photometric inconsistencies, making only approximate alignment possible. The iterative strategy helps learn the process of optimization by mimicking this approximate alignment. However, for natural images where exact alignment is achievable, the iterative approach, which is designed for approximate alignment, can reduce accuracy. When iteration is performed, increasing the number of iterations leads to higher accuracy. Setting $N\,=\,2$ strikes a balance between accuracy and MACs.  
+
+Data generation. As illustrated in Figure 8, if we only apply the deformation to $I_{S}$ during training, the network tends to overfit to the input sequence $(I_{S},I_{T})$ and fails to work on the reversed sequence $(I_{T},I_{S})$ . However, by incorporating the composition homography during training, the network learns to generalize to both input sequences.  
+
+Table 4: Ablation on the network architecture and evaluation protocol. When DINOv2 is canceled, we go on one more downsampling in the naive FPN with 128 channels. “-” means the model fails to converge during training.   
+
+![](images/7d791f2d281952c37d4ab897c8add4d2b2331ad9b6bc816244ddb7a97f04ba31.jpg)  
+
+Table 5: Ablation on the training resolution. MSCOCO: w/o iteration. GoogleMap: w/ iteration.   
+
+![](images/32098c7c5029f73f8d35936cef36fbe7e942546b326eb0a8f8162afd254c3c18.jpg)  
+
+Network architecture. As shown in Table 4, the powerful visual features extracted by $\mathrm{DINOv}2$ lead to an improvement in accuracy on MSCOCO $(+2.0\%$ auc $@3$ ). For GoogleMap, the training fails to converge when using only the lightweight FPN due to the large modality gap. However, with the incorporation of DINOv2, which provides robust cross-domain visual features, the model is able to successfully converge. Meanwhile, DINOv2 accounts for the majority of the com  
+
+![](images/d6c092e17f3094a8b3d30197f8a0f6079ceb4de6ed030422e0c7e364066ccc28.jpg)  
+Figure 8: Impact of data generation during training.  
+
+putational overhead in our model. Regarding cross attention layers, it provides a stable accuracy improvement on MSCOCO $(+0.2\%$ auc $@3$ ) and GoogleMap $(+3.3\%$ auc $@z$ ).  
+
+Evaluation protocol. As shown in Table 4, symmetry and adaptive recurrence have a limited impact on MSCOCO, as the matches predicted in the initial stage are already sufficiently accurate. However, this approach proves highly effective on GoogleMap, yielding a significant improvement of $+2.0\%$ auc $@3$ with symmetry, and $+14.4\%$ auc $@3$ with adaptive recurrence.  
+
+Training resolutions. Since the grid size in our approach is determined by the input image resolution, we conduct experiments using different training resolutions to evaluate their impact on the trade-off between accuracy and efficiency. The results, shown in Table 5, indicate that training with a resolution of $448\times448$ provides a favorable balance.  
+
+
+
+\section{5 CONCLUSIONS  }
+
+
+This paper introduces GFNet, a method designed to deliver high-accuracy homography estimation across varying image resolutions, overcoming the resolution limitations of current approaches. This strong performance stems from the dense matching paradigm and several key components, including the integration of DINOv2, a grid-based strategy, iterative regression, and adaptive resolution recurrence. Experiments show that GFNet outperforms existing homography estimation methods on several challenging datasets, including multimodal and dynamic scenes, and achieves comparable results to the SOTA dense matcher with significantly higher efficiency.  
+
+
+

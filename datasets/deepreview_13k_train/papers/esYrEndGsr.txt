@@ -1,0 +1,492 @@
+\title{Influence Functions for Scalable Data Attribution in Diffusion Models}
+
+\begin{abstract}
+    Diffusion models have led to significant advancements in generative modelling.
+    Yet their widespread adoption poses challenges regarding data attribution and interpretability.
+    In this paper, we aim to help address such challenges in diffusion models by developing an \textit{influence function} framework.
+    Influence function-based data attribution methods approximate how a model's output would have changed if some training data were removed.
+    In supervised learning, this is usually used for predicting how the loss on a particular example would change.
+    For diffusion models, we focus on predicting the change in the probability of generating a particular example via several proxy measurements.
+    We show how to formulate influence functions for such quantities and how previously proposed methods can be interpreted as particular design choices in our framework.
+    To ensure scalability of the Hessian computations in influence functions, we systematically develop K-FAC approximations based on generalised Gauss-Newton matrices specifically tailored to diffusion models.
+    We recast previously proposed methods as specific design choices in our framework, and show that our recommended method outperforms previous data attribution approaches on common evaluations, such as the Linear Data-modelling Score (LDS) or retraining without top influences, without the need for method-specific hyperparameter tuning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Generative modelling for continuous data modalities --- like images, video, and audio --- has advanced rapidly propelled by improvements in diffusion-based approaches.
+Many companies now offer easy access to AI-generated bespoke image content.
+However, the use of these models for commercial purposes creates a need for understanding how the training data influences their outputs.
+In cases where the model's outputs are undesirable, it is useful to be able to identify, and possibly remove, the training data instances responsible for those outputs.
+Furthermore, as copyrighted works often make up a significant part of the training corpora of these models \citep{schuhmann2022laion5bopenlargescaledataset}, concerns about the extent to which individual copyright owners' works influence the generated samples arise.
+Some already characterise what these companies offer as ``copyright infringement as a service'' \citep{imagegeneratorlitigation}, which has caused a flurry of high-profile lawsuits \cite{imagegeneratorlitigation,llmlitigation}.
+This motivates exploring tools for data attribution that might be able to quantify how each group of training data points influences the models' outputs.
+Influence functions \citep{kohUnderstandingBlackboxPredictions2020,baeIfInfluenceFunctions2022} offer precisely such a tool.
+By approximating the answer to the question, ``If the model was trained with some of the data excluded, what would its output be?'', they can help finding data points most responsible for a low loss on an example, or a high probability of generating a particular example.
+However, they have yet to be scalably adapted to the general diffusion modelling setting.
+
+Influence functions work by locally approximating how the loss landscape would change if some of the training data points were down-weighted in the training loss (illustrated in \Cref{fig:influence-function-illustration}).
+Consequently, this enables prediction for how the (local) optimum of the training loss would change, and how that change in the parameters would affect a measurement of interest (e.g., loss on a particular example).
+By extrapolating this prediction, one can estimate what would happen if the data points were fully removed from the training set.
+However, to locally approximate the shape of the loss landscape, influence functions require computing and inverting the \textit{Hessian} of the training loss, which is computationally expensive.
+One common approximation of the training loss's Hessian is the generalised Gauss-Newton matrix \citep[GGN,][]{schraudolph2002fast,martens2020new}.
+The GGN has not been clearly formulated for the diffusion modelling objective before and cannot be uniquely determined based on its general definition.
+Moreover, to compute and store a GGN for large neural networks further approximations are necessary.
+We propose using Kronecker-Factored Approximate Curvature \citep[K-FAC,][]{heskes2000natural,martens2015optimizing} to approximate the GGN.
+It is not commonly known how to apply it to neural network architectures used in diffusion models;
+for example, \citet{kwonDataInfEfficientlyEstimating2023} resort to alternative Hessian approximation methods because “[K-FAC] might not be applicable to general deep neural network models as it highly depends on the model architecture”.
+However, based on recent work, it is indeed clear that it can be applied to architectures used in diffusion models \citep{grosse2016kronecker,eschenhagen2023kfac}, which typically combine linear layers, convolutions, and attention \citep{hoDenoisingDiffusionProbabilistic2020}.
+
+In this work, we describe a scalable approach to influence function-based approximations for data attribution in diffusion models, using a K-FAC approximation of GGNs as Hessian approximations.
+We articulate a design space based on influence functions, unify previous methods for data attribution in diffusion models \citep{georgievJourneyNotDestination2023,zhengIntriguingPropertiesData2024} through our framework, and argue for the design choices that distinguish our method from previous ones.
+One important design choice is the GGN used as the Hessian approximation.
+We formulate different GGN matrices for the diffusion modelling objective and discuss their implicit assumptions.
+We empirically ablate variations of the GGN and other design choices in our framework and show that our proposed method outperforms the existing data attribution methods for diffusion models as measured by common data attribution metrics like the Linear Data-modelling Score \citep{parkTRAKAttributingModel2023} or retraining without top influences.
+Finally, we also discuss interesting empirical observations that challenge our current understanding of influence functions in the context of diffusion models.
+\begin{figure}
+    \centering
+    \includegraphics{figures/top_influences_cifar10.pdf}
+    \caption{Most influential training data points as identified by K-FAC Influence Functions for samples generated by a denoising diffusion probabilistic model trained on \texttt{CIFAR-10}. 
+    The top influences are those whose omission from the training set is predicted to most increase the loss of the generated sample.
+    Negative influences are those predicted to most decrease the loss, and the most neutral are those that should change the loss the least.
+    }
+    \label{fig:top-influences-cifar10}
+\end{figure}
+
+
+\section{Background}
+
+\label{sec:background}
+This section introduces the general concepts of diffusion models, influence functions, and the GGN.
+
+\subsection{Diffusion Models}\label{sec:diffusion-models-background}
+\BM{Notation: change $x^{(t), x^{(0:t)}}$ to $x_t, x_{0:t}$ for space/better formatting?}
+
+Diffusion models are a class of probabilistic generative models that fit a model $p_\theta(x)$ parameterised by parameters $\theta\in \R^{d_{\tt{param}}}$ to approximate a training data distribution $q(x)$, with the primary aim being to sample new data $x\sim p_\theta (\cdot)$ \citep{sohl-dicksteinDeepUnsupervisedLearning2015,hoDenoisingDiffusionProbabilistic2020,turner2024denoising}.
+This is usually done by augmenting the original data $x$ with $T$ fidelity levels as $x^{(0:T)}=[x^{(0)}, \dots, x^{(T)}]$ with an augmentation distribution $q(x^{(0:T)})$ that satisfies the following criteria: \textbf{1)} the highest fidelity $x^{(0)}$ equals the original training data $q(x^{(0)})=q(x)$, \textbf{2)} the lowest fidelity $x^{(T)}$ has a distribution that is easy to sample from, and \textbf{3)} predicting a lower fidelity level from the level directly above it is simple to model and learn.
+To achieve the above goals, $q$ is typically taken to be a first-order Gaussian auto-regressive (diffusion) process: $q(x^{(t)}|x^{(0:t-1)})=\N(x^{(t)}| \lambda_t x^{(t-1)}, (1-\lambda_t)^2 I)$, with hyperparameters $\lambda_t$ set so that the law of $x^{(T)}$ approximately matches a standard Gaussian distribution $\N(0, I)$.
+In that case, the reverse conditionals $q(x^{(t-1)}|x^{(t:T)})=q(x^{(t-1)}|x^{(t)})$ are first-order Markov, and if the number of fidelity levels $T$ is high enough, they can be well approximated by a diagonal Gaussian, allowing them to be modelled with a parametric model with a simple likelihood function, hence satisfying \textbf{(3)} \citep{turner2024denoising}.
+The marginals $q(x^{(t)} | x^{(0)}) = \mathcal{N} \left( x^{(t)}| \left(\prod_{t'=1}^{t} \lambda_{t'} \right) x^{(0)}, \left(1 - \prod_{t'=1}^{t} \lambda_{t'}^2 \right) I \right)$ also have a simple Gaussian form, allowing for the augmented samples to be sampled as:
+\begin{align}
+x^{(t)}=\prod\nolimits_{t^\prime=1}^t\lambda_t x^{(0)}+ \Big(1- \prod\nolimits_{t^\prime=1}^t\lambda_{t^\prime}^2 \Big)^{\sfrac{1}{2}}\epsilon^{(t)}, \label{eq:diffusion-epsilon}
+&& \text{with } \epsilon^{(t)}\sim\N(0,I).
+\end{align}
+Diffusion models are trained to approximate the reverse conditionals $p_\theta(x^{(t-1)}|x^{(t)}) \approx q(x^{(t-1)}|x^{(t)})$ by maximising log-probabilities of samples $x^{(t-1)}$ conditioned on $x^{(t)}$, for all timesteps $t=1,\dots,T$.
+We can note that $q(x^{(t-1)}|x^{(t)}, x^{(0)})$ has a Gaussian distribution with mean given by:
+\begin{equation*}
+\mu_{t-1|t,0}(x^{(t)}, \eps^{(t)})=\frac{1}{\lambda_t} \Bigg(x^{(t)} - \frac{1 - \lambda_t^2}{\big(1 - \prod_{t^\prime=1}^t \lambda_{t^\prime}^2\big)^{\sfrac{1}{2}}} \epsilon^{(t)} \Bigg),
+\qquad \text{with } \epsilon^{(t)}\!\defeq\! 
+\frac{\big(x^{(t)} - \prod_{t^\prime=1}^t \lambda_{t^\prime} x^{(0)}\big)}{(1- \prod_{t^\prime=1}^t\lambda_{t^\prime}^2)^{\sfrac{1}{2}}}
+\end{equation*}
+ as in \Cref{eq:diffusion-epsilon}.
+In other words, the mean is a mixture of the sample $x^{(t)}$ and the noise $\epsilon^{(t)}$ that was applied to $x^{(0)}$ to produce it.
+Hence, we can choose to analogously parameterise $p_\theta(x^{(t-1)}|x^{(t)})$ as $\mathcal{N}\big(x^{(t-1)}| \mu_{t-1|t,0}\big(x^{(t)}, \eps^{t}_\theta(x^{(t)})\big), \sigma_{t}^2 I\big)$.
+That way, the model $\epsilon^{(t)}_\theta(x^{(t)})$ simply predicts the noise $\epsilon^{(t)}$ that was added to the data to produce $x^{(t)}$. % \citep{turner2024denoising}.
+The variances $\sigma_t^2$ are usually chosen as hyperparameters \citep{hoDenoisingDiffusionProbabilistic2020}.
+With that parameterisation, the negative expected log-likelihood $\mathbb{E}_{q(x^{t-1}, x^{(t)}|x^{(0)})}\left[-\log p(x^{(t-1)} | x^{(t)})\right]$, up to scale and shift independent of $\theta$ or $x^{(0)}$, can be written as \citep{hoDenoisingDiffusionProbabilistic2020,turner2024denoising}:\footnotemark
+\footnotetext{Note that the two random variables $x^{(t)}, \epsilon^{(t)}$ are deterministic functions of one-another.}
+\begin{equation}
+\ell_t(\theta, x^{(0)})=\mathbb{E}_{\eps^{(t)},x^{(t)}}\left[ 
+\left\lVert\eps^{(t)} - \eps_\theta^t\left(x^{(t)}\right)\right\rVert^2
+\right] 
+\qquad
+\begin{aligned}
+&\eps^{(t)} \sim \N(0, I)\\
+&x^{(t)}=\prod\nolimits_{t^\prime=1}^t\lambda_t x^{(0)}+ \Big(1- \prod\nolimits_{t^\prime=1}^t\lambda_{t^\prime}^2 \Big)^{\sfrac{1}{2}}\epsilon^{(t)} 
+\end{aligned}
+\label{eq:per-timestep-loss}
+\end{equation}
+This leads to a training loss $\ell$ for the diffusion model $\eps_\theta^{t}(x^{(t)})$ that is a sum of per-diffusion timestep training losses:\footnote{Equivalently, a weighted sum of per-timestep negative log-likelihoods $-\log p_\theta(x^{(t-1)}|x^{(t)})$.}
+\begin{equation*}
+    \ell(\theta, x) = \E_{\tilde{t}}\left[\ell_{\tilde{t}}(\theta, x)\right] \qquad
+    \tilde{t} \sim \operatorname{Uniform}([T]).
+\label{eq:per-example-diffusion-loss}
+\end{equation*}
+The parameters are then optimised to minimise the loss averaged over a training dataset $\gD\shorteq\{x_n\}_{n=1}^N$:
+\begin{equation}
+\begin{aligned}
+    \theta^\star(\gD) = \argmin_\theta \gL_\gD(\theta) && \gL_\gD(\theta)\defeq \frac{1}{N}\sum_{n=1}^N \ell(\theta, x_n) .
+\end{aligned}\label{eq:opt-loss-parameters}
+\end{equation}
+Other interpretations of the above procedure exist in the literature \citep{song2020generativemodelingestimatinggradients, songScoreBasedGenerativeModeling2021,songMaximumLikelihoodTraining2021,kingmaVariationalDiffusionModels2023a}.
+\subsection{Influence Functions}\label{sec:influence-functions}
+The aim of influence functions is to answer questions of the sort ``how would my model behave were it trained on the training dataset with some datapoints removed''.
+To do so, they approximate the change in the optimal model parameters in \Cref{eq:opt-loss-parameters} when some training examples $(x_j)_{j\in\gI}$, $\gI=\{i_1, \dots, i_M\}\subseteq [N]$, are removed from the dataset $\gD$. % : $\theta^\star(\gD_{-(i_1, \dots, i_M)})$.
+To arrive at a tractable approximation, it is useful to consider a continuous relaxation of this question: how would the optimum change were the training examples $(x_j)_{j\in\gI}$ down-weighted by $\varepsilon\in\R$ in the training loss:
+\begin{equation}
+    r_{-\gI}(\varepsilon) = \argmin_\theta \frac{1}{N}\sum_{n=1}^N \ell(\theta, x_n) - \varepsilon \sum_{j\in \gI} \ell(\theta, x_j)
+    \label{eq:downweighted-loss}
+\end{equation}
+The function $r_{-\gI}: \R \to \R^{d_{\tt{param}}}$ (well-defined if the optimum is unique) is the \emph{response function}. Setting $\varepsilon$ to \sfrac{1}{N} recovers the minimum of the original objective in \Cref{eq:opt-loss-parameters} with examples $(x_{i_1}, \dots, x_{i_M})$ removed.
+
+Under suitable assumptions (see \Cref{app:derivation-of-influence}), by the Implicit Function Theorem \citep{krantzImplicitFunctionTheorem2003}, the response function is continuous and differentiable at $\varepsilon=0$. \emph{Influence functions} can be defined as a linear approximation to the response function $r_{-\gI}$ by a first-order Taylor expansion around $\varepsilon=0$:
+\begin{equation}
+\begin{aligned}
+    r_{-\gI}(\varepsilon) &= r_{-\gI}(0) &&+\frac{dr_{-\gI}(\varepsilon^\prime)}{d\varepsilon^\prime}\Bigr|_{\varepsilon^\prime=0} \varepsilon &&+ o(\varepsilon)\\
+    &= \theta^\star(\gD) &&+ \sum_{j\in \gI} \left(\nabla_{\theta^\star}^2 \gL_\gD(\theta^\star)\right)^{-1} \nabla_{\theta^\star} \ell(\theta^\star\!\!, x_{j})\varepsilon &&+ {o}(\varepsilon),
+\end{aligned}
+\label{eq:influence}
+\end{equation}
+as $\varepsilon \to 0$. See \Cref{app:derivation-of-influence} for a formal derivation and conditions. The optimal parameters with examples $(x_i)_{i\in \gI}$ removed can be approximated by setting $\varepsilon$ to \sfrac{1}{N} and dropping the $o(\varepsilon)$ terms.
+
+Usually, we are not directly interested in the change in parameters in response to removing some data, but rather the change in some \emph{measurement} function $m(\theta^\star(\mathcal{D}), x^\prime)$ at a particular test input $x^\prime$ (e.g. per-example test loss). We can further make a first-order Taylor approximation to $m(\cdot, x^\prime)$ at $\theta^\star(\mathcal{D})$ --- $m(\theta, x^\prime) = m(\theta^\star, x^\prime) + \nabla^\transpose_{\theta^\star} m(\theta^\star, x^\prime) (\theta - \theta^\star) + o\left(\|\theta-\theta^\star\|_2\right)$ --- and combine it with \Cref{eq:influence} to get a simple linear estimate of the change in the measurement function:
+\begin{equation}
+\label{eq:influence-function}
+\begin{aligned}
+    m(r_{-\gI}(\varepsilon), x^\prime)  &=  m(\theta^\star\!\!, x^\prime ) + \sum_{j\in\gI}\nabla^\transpose_{\theta^\star\!} m(\theta^\star\!, x^\prime )\left(\nabla_{\theta^\star}^2 \gL_\gD(\theta^\star)\right)^{-1}  \nabla_{\theta^\star} \ell(\theta^\star\!\!, x_{j})\varepsilon + o(\varepsilon).
+\end{aligned}
+\end{equation}
+
+\subsubsection{Generalised Gauss-Newton matrix}
+\label{sec:ggn}
+\colorlet{ggncolor1}{palette1}
+\colorlet{ggncolor2}{palette2}
+\colorlet{ggncolor3}{palette3}
+
+Computing the influence function approximation in \Cref{eq:influence} requires inverting the Hessian $\nabla_\theta^2 \gL_\gD(\theta) \in \R^{d_{\tt{param}} \times d_{\tt{param}}}$.
+In the context of neural networks, the Hessian itself is generally computationally intractable and approximations are necessary.
+A common Hessian approximation is the generalised Gauss-Newton matrix (GGN).
+We will first introduce the GGN in an abstract setting of approximating the Hessian for a general training loss $\mathcal{L}(\theta)=\E_z\left[\rho(\theta,z)\right]$, to make it clear how different variants can be arrived at for diffusion models in the next section.
+
+In general, if we have a function $\rho(\theta, z)$ of the form $h_z \circ f_z(\theta)$, with $h_z$ a convex function, the GGN for an expectation $\E_z[\rho(\theta, z)]$ is defined as
+\begin{equation*}
+\begin{aligned}
+\mathrm{GGN}(\theta)={\color{ggncolor1}\E_z\left[{\color{ggncolor2} \nabla_\theta^\intercal f_z(\theta)}{\color{ggncolor3} \left(\nabla^2_{f_z(\theta)}h_z(f_z(\theta))\right) }{\color{ggncolor2} \nabla_\theta f_z(\theta)}\right]},
+\end{aligned}
+\end{equation*}
+where $\nabla_\theta f_z(\theta)$ is the Jacobian of $f_z$. 
+Whenever $f_z$ is (locally) linear, the $\mathrm{GGN}$ is equal to the Hessian $ \E_z[\nabla_\theta^2 \rho(\theta, z)]$.
+Therefore, we can consider the GGN as an approximation to the Hessian in which we “linearise” the function $f_z$.
+Note that any decomposition of $\rho(\theta, z)$ results in a valid GGN as long as $h_z$ is convex~\citep{martens2020new}.\footnotemark
+We give two examples below.
+\BM{This is a monstrous footnote.}
+\footnotetext{
+    $h_z$ is typically required to be convex to guarantee the resulting GGN is a positive semi-definite (PSD) matrix.
+    A valid non-PSD approximation to the Hessian can be formed with a non-convex $h_z$ as well;
+    all the arguments about the exactness of the GGN approximation for a linear $f_z$ would still apply. 
+    However, the PSD property helps with numerical stability of the matrix inversion, and guarantees that the GGN will be invertible if a small damping term is added to the diagonal.% In all cases considered in this paper, $h_z$ is convex.
+}
+
+\textbf{Option 1.}
+A typical choice would be for $f_z$ to be the neural network function on a training datapoint $z$, and for $h_z$ to be the loss function (e.g. $\ell_2$-loss), with the expectation $\E_z$ being taken over the empirical (training) data distribution;
+we call the GGN for this split $\mathrm{GGN}^\texttt{model}$.
+The GGN with this split is exact for linear neural networks (or when the model has zero residuals on the training data) \citep{martens2020new}.
+\begin{equation}
+\begin{aligned}
+    \begin{aligned}
+        &f_z\coloneq \text{mapping from parameters to model output}\\    
+        &h_z\coloneq \text{loss function (e.g. $\ell_2$-loss)}
+    \end{aligned}&&\rightarrow
+    \mathrm{GGN}^\texttt{model}(\theta)
+\end{aligned}
+\end{equation}
+
+\textbf{Option 2.} Alternatively, a different GGN can be defined by using a trivial split of the loss $\rho(\theta, z)$ into the identity map $h_z \coloneq \operatorname{id}$ and the loss $f_z\coloneq \rho(\cdot, z)$, and again taking the expectation over the empirical data distribution.
+With this split, the resulting GGN is
+\begin{align}
+\label{eq:general-ef}
+\begin{aligned}
+    &f_z\coloneq \rho(\cdot, z) \\    
+    &h_z\coloneq \operatorname{id} 
+\end{aligned}&&\rightarrow
+    \mathrm{GGN}^\texttt{loss}(\theta) = {\color{ggncolor1}\E_{z}\left[ {\color{ggncolor2}\nabla_\theta \rho(\theta, z)}  {\color{ggncolor2}\nabla^\transpose_\theta \rho(\theta, z)} \right]}.
+\end{align}
+This is also called the empirical Fisher \citep{kunstner2019limitations}.
+Note that $\mathrm{GGN}^\texttt{loss}$ is only equal to the Hessian under the arguably more stringent condition that $\rho(\cdot, z)$ --- the composition of the model \textit{and} the loss function --- is linear.
+This is in contrast to $\mathrm{GGN}^\texttt{model}$, for which only the mapping from the parameters to the model output needs to be (locally) linear.
+Hence, we might prefer to use $\mathrm{GGN}^\texttt{model}$ for Hessian approximation whenever we have a nonlinear loss, which is the case for diffusion models.
+\RT{I wonder here whether you could emphasise that this might be a reason to prefer the previous GGN over this one to foreshadow what you are going to say later.}
+\BM{I tried emphasising it a bit more. Do you think it could be emphasised even better?}
+
+
+\section{Scalable influence functions for diffusion models}
+
+\label{sec:method}
+In this section, we discuss how we adapt influence functions to the diffusion modelling setting in a scalable manner.
+We also recast data attribution methods for diffusion models proposed in prior work \citep{georgievJourneyNotDestination2023,zhengIntriguingPropertiesData2024} as the result of particular design decisions in our framework, and argue for our own choices that distinguish our method from the previous ones.
+
+\subsection{Approximating the Hessian}
+\label{sec:approx-hessian}
+In diffusion models, we want to compute the Hessian of the loss of the form
+\begin{equation*}
+    \gL_\gD(\theta) 
+    = \E_{x_n}\left[\ell(\theta, x_n) \right]
+    = \E_{x_n}\left[\E_{\tilde{t}}\left[ \E_{x^{(\tilde{t})},\eps^{(\tilde{t})}}\left[
+    \|\eps^{(\tilde{t})} - \eps_\theta^{\tilde{t}}(x^{(\tilde{t})}) \|^2 \right]\right]\right],
+\end{equation*}
+where $\E_{x_n}\left[\cdot\right]=\big(\frac{1}{N}\sum_{n=1}^N \cdot\big)$ is the expectation over the empirical data distribution. \footnotemark
+We will describe how to formulate different GGN approximations for this setting.
+\footnotetext{Generally, $\E_{x_n}$ might also subsume the expectation over data augmentations applied to the training data points (see \Cref{sec:data-augmentations-details} for details on how this is handled).}
+
+\subsubsection{GGN for diffusion models}
+
+\textbf{Option 1.} To arrive at a GGN approximation, as discussed in \Cref{sec:ggn}, we can partition the function $\theta\mapsto \|\eps^{(t)} -\eps_\theta^t(x^{(t)})\|^2$ into the model output $\theta\mapsto \eps_\theta^t(x^{(t)})$ and the $\ell_2$-loss function $\|\eps^{(t)} - \cdot\|^2$.
+This results in the GGN:
+\begin{align}
+\begin{aligned}
+    &f_z\coloneq \eps_\theta^{\tilde{t}}(x^{(\tilde{t})}) \\    
+    &h_z\coloneq \lVert\eps^{(\tilde{t})} - \cdot \rVert^2
+\end{aligned}&&\rightarrow
+    \mathrm{GGN}_\gD^\texttt{model}(\theta)  &= {\color{ggncolor1}
+    \E_{x_n}\left[ \E_{\tilde{t}}\left[ \E_{x^{(\tilde{t})}, \eps^{(\tilde{t})}}\left[
+    {\color{ggncolor2}\nabla_\theta^\transpose \eps_\theta^{\tilde{t}}\left(x^{(\tilde{t})} \right)}
+    {\color{ggncolor3}\left(2I\right)}
+    {\color{ggncolor2} \nabla_\theta \eps_\theta^{\tilde{t}}\left(x^{(\tilde{t})}\right)} \right] \right] \right]}
+    \label{eq:GGN-diffusion-modelout},
+\end{align}
+\BM{I'm not a big fan of using the $\gD$ subscript to distinguish the abstract-setting GGN from the diffusion-specific one. It would be nice to distinguish them, but the $\gD$ subscript doesn't seem semantically meaningful. Any other ideas would be welcome/maybe just remove?}
+where $I$ is the identity matrix. This correspond to “linearising” the neural network $\eps^t_\theta$.
+For diffusion models, the dimensionality of the output of $\eps_\theta^{\tilde{t}}$ is typically very large (e.g. $32\!\times \!32\!\times\! 3$ for \texttt{CIFAR}), so computing the Jacobians $\nabla_\theta\eps^t_\theta$ explicitly is still intractable.
+However, we can express $\mathrm{GGN}_\gD^\texttt{model}$ as
+\begin{align}
+\label{eq:diffusion-fisher}
+    \mathrm{F}_\gD(\theta) = \E_{x_n}\left[ \E_{\tilde{t}}\left[ \E_{x_n^{(\tilde{t})}}\left[\E_{\eps_{\texttt{mod}}}\left[ g_n(\theta) g_n(\theta)^\transpose \right] \right]\right]\right], && \eps_{\texttt{mod}} \sim \gN\left(\eps_\theta^{\tilde{t}}\left(x_n^{(\tilde{t})}\right), I\right)
+\end{align}
+where $g_n(\theta) = \nabla_\theta {\lVert \eps_{\texttt{mod}} - \eps_\theta^{\tilde{t}}(x_n^{(\tilde{t})})\rVert^2}\in\R^{d_\texttt{param}}$;
+see \Cref{app:derivation-of-diffusion-fisher} for the derivation.
+This formulation lends itself to a Monte Carlo approximation, since we can now compute gradients using auxiliary targets $\eps_{\texttt{mod}}$ sampled from the model's output distribution, as shown in \Cref{eq:diffusion-fisher}.
+$\mathrm{F}_\gD$ can be interpreted as a kind of Fisher information matrix \citep{amari1998natural,martens2020new}, but it is not the Fisher for the marginal model distribution $p_\theta(x)$.
+
+\textbf{Option 2.} Analogously to \Cref{eq:general-ef}, we can also consider the trivial decomposition of $\ell(\cdot, x)$ into the identity map and the loss,
+effectively “linearising” $\ell(\cdot, x)$. The resulting GGN is:
+\begin{equation}
+\begin{aligned}
+    \begin{aligned}
+        &f_z\coloneq \ell(\cdot, x_n) \\    
+        &h_z\coloneq \operatorname{id}
+    \end{aligned}&&\rightarrow
+    \mathrm{GGN}_\gD^\texttt{loss}(\theta) = {\color{ggncolor1}\E_{x_n}\left[{\color{ggncolor2}\nabla_\theta \ell(\theta, x_n)\nabla^\intercal_\theta \ell(\theta, x_n)}\right]}
+    \label{eq:empirical-fisher},
+\end{aligned}
+\end{equation}
+where $\ell(\theta, x)$ is the diffusion training loss defined in \Cref{eq:per-timestep-loss}.
+This Hessian approximation $\mathrm{GGN}_\gD^\texttt{loss}$ turns out to be equivalent to the ones considered in the previous works on data attribution for diffusion models \citep{georgievJourneyNotDestination2023,zhengIntriguingPropertiesData2024,kwonDataInfEfficientlyEstimating2023}.
+In contrast, in this work, we opt for $\mathrm{GGN}_\gD^\texttt{model}$ in \Cref{eq:GGN-diffusion-modelout}, or equivalently $\mathrm{F}_\gD$, since it is arguably a better-motivated approximation of the Hessian than $\mathrm{GGN}_\gD^\texttt{loss}$ (c.f. \Cref{sec:ggn}).
+\BM{\textbf{after deadline:} see if we need to introduce the other “empirical” Fisher variant}
+
+In \citet{zhengIntriguingPropertiesData2024}, the authors explored substituting different (theoretically incorrect) training loss functions into the influence function approximation.
+In particular, they found that replacing the loss $\lVert \eps^{(t)} - \eps^{t}_\theta(x^{(t)}) \rVert^2$ with the square norm loss $\lVert \eps^{t}_\theta(x^{(t)}) \rVert^2$ (effectively replacing the ``targets'' $\eps^{(t)}$ with $0$) gave the best results.
+Note that the targets $\epsilon^{(t)}$ do not appear in the expression for $\mathrm{GGN}_\gD^\texttt{model}$ in \Cref{eq:GGN-diffusion-modelout}.\footnote{This is because the Hessian of an $\ell_2$-loss w.r.t. the model output is a multiple of the identity matrix.}
+Hence, in our method substituting different targets would not affect the Hessian approximation.
+In \citet{zhengIntriguingPropertiesData2024}, replacing the targets only makes a difference to the Hessian approximation because they use $\mathrm{GGN}_\gD^\texttt{loss}$ (an empirical Fisher) to approximate the Hessian.
+\subsubsection{K-FAC for diffusion models}
+\label{sec:kfac}
+
+While $\mathrm{F}_\gD(\theta)$ and $\mathrm{GGN}_\gD^\texttt{loss}$ do not require computing full Jacobians or the Hessian of the neural network model, they involve taking outer products of gradients of size $\mathbb{R}^{d_\texttt{param}}$, which is still intractable.
+Kronecker-Factored Approximate Curvature \citep[K-FAC]{heskes2000natural,martens2015optimizing} is a common scalable approximation of the GGN to overcome this problem.
+It approximates the GGN with a block-diagonal matrix, where each block corresponds to one neural network layer and consists of a Kronecker product of two matrices.
+Due to convenient properties of the Kronecker product, this makes the inversion and multiplication with vectors needed in \Cref{eq:influence-function} efficient enough to scale to large networks.
+K-FAC is defined for linear layers, including linear layers with weight sharing like convolutions \citep{grosse2016kronecker}. 
+This covers most layer types in the architectures typically used for diffusion models.
+When weight sharing is used, there are two variants -- K-FAC-expand and K-FAC-reduce \citep{eschenhagen2023kfac}.
+For our recommended method, we choose to approximate the Hessian with a K-FAC approximation of $\mathrm{F}_\gD$, akin to \citet{grosseStudyingLargeLanguage2023}.
+
+For the parameters $\theta_l$ of layer $l$, the GGN $\mathrm{F}_\gD$ in \Cref{eq:diffusion-fisher} is approximated by
+\begin{align}
+    \mathrm{F}_\gD(\theta_l) \approx \frac{1}{N^2} \sum_{n=1}^N \E_{\tilde{t}}\left[ \E_{x_n^{(\tilde{t})}, \eps^{(\tilde{t})}} \left[ a_n^{(l)} a_n^{(l)\transpose} \right] \right] \otimes \sum_{n=1}^N \E_{\tilde{t}}\left[ \E_{x_n^{(\tilde{t})}, \eps^{(\tilde{t})}, \eps_{\texttt{mod}}^{(\tilde{t})}}\left[ b_n^{(l)} b_n^{(l)\transpose} \right] \right],
+\label{eq:kfac-diffusion}
+\end{align}
+with $a_n^{(l)} \in \R^{d_\texttt{in}^l}$ being the inputs to the $l$th layer for data point $x_n^{(\tilde{t})}$ and $b_n^{(l)} \in \R^{d_\texttt{out}^l}$ being the gradient of the $\ell_2$-loss w.r.t. the output of the $l$th layer, and $\otimes$ denoting the Kronecker product.\footnote{For the sake of a simpler presentation this does not take potential weight sharing into account.}
+The approximation trivially becomes an equality for a single data point and also for deep linear networks with $\ell_2$-loss \citep{bernacchia2018exact,eschenhagen2023kfac}.
+We approximate the expectations in \Cref{eq:kfac-diffusion} with Monte Carlo samples and use K-FAC-expand whenever weight sharing is used since the problem formulation of diffusion models corresponds to the expand setting in \citet{eschenhagen2023kfac}; in the case of convolutional layers this corresponds to \citet{grosse2016kronecker}.
+Lastly, to ensure the Hessian approximation is well-conditioned and invertible, we follow standard practice and add a damping term consisting of a small scalar damping factor times the identity matrix.
+We ablate these design choices in \Cref{sec:experiments} (\Cref{fig:lds-kfac-ablation,fig:damping-ablation-cifar2-influence,fig:damping-ablation-cifar10-influence}).
+
+\subsection{Gradient compression and query batching}
+In practice, we recommend computing influence function estimates in \Cref{eq:influence-function} by first computing and storing the approximate Hessian inverse, and then iteratively computing the preconditioned inner products $\nabla^\transpose_{\theta^\star} m(\theta^\star, x) \left(\nabla_{\theta^\star}^2 \gL_\gD(\theta^\star)\right)^{-1}  \nabla_{\theta^\star} \ell(\theta^\star, x_{j})$ for different training datapoints $x_j$.
+Following \citet{grosseStudyingLargeLanguage2023}, we use query batching to avoid recomputing the gradients $\nabla_{\theta^\star} \ell(\theta^\star, x_{j})$ when attributing multiple samples $x$.
+We also use gradient compression; we found that compression by quantisation works much better for diffusion models compared to the SVD-based compression used by \citet{grosseStudyingLargeLanguage2023} (see \Cref{sec:compression-results}), likely due to the fact that gradients $\nabla_\theta \ell(\theta, x_n)$ are not low-rank in this setting. %$\nabla_{\theta^\star} \ell(\theta^\star, z)$
+
+\subsection{What to measure}
+For diffusion models, arguably the most natural question to ask might be, for a given sample $x$ generated from the model, how did the training samples influence the probability of generating a sample $x$?
+For example, in the context of copyright infringement, we might want to ask if removing certain copyrighted works would substantially reduce the probability of generating $x$.
+With influence functions, these questions could be interpreted as setting the measurement function $m(\theta, x)$ to be the (marginal) log-probability of generating $x$ from the diffusion model: $\log p_\theta(x)$.
+
+Computing the marginal log-probability introduces some challenges.
+Diffusion models have originally been designed with the goal of tractable sampling, and not log-likelihood evaluation.
+\citet{hoDenoisingDiffusionProbabilistic2020,sohl-dicksteinDeepUnsupervisedLearning2015} only introduce a lower-bound on the marginal log-probability.
+\citet{songScoreBasedGenerativeModeling2021} show that exact log-likelihood evaluation is possible, but it only makes sense in settings where the training data distribution has a density (e.g.~uniformly dequantised data), and it only corresponds to the marginal log-likelihood of the model when sampling deterministically \citep{songMaximumLikelihoodTraining2021}.\footnotemark Also, taking gradients of that measurement, as required for influence functions, is non-trivial.
+Hence, in most cases, we might need a proxy measurement for the marginal probability.
+We consider a couple of proxies in this work:
+\footnotetext{Unless the trained model satisfies very specific “consistency” constraints \cite[Theorem 2]{songScoreBasedGenerativeModeling2021}.}
+\begin{enumerate}[itemsep=0pt]
+    \item \textbf{Loss.} Approximate $\log p_\theta(x)$ with the diffusion loss $\ell(\theta, x)$ in \Cref{eq:per-timestep-loss} on that particular example. This corresponds to the ELBO with reweighted per-timestep loss terms (see \Cref{fig:elbo-vs-loss-weighting}).
+    \item\textbf{Probability of sampling trajectory.} If the entire sampling trajectory $x^{(0:T)}$ that generated sample $x$ is available, consider the probability of that trajectory $p_\theta(x^{(0:T)})=p(x^T)\prod_{t=1}^T p_\theta(x^{(t-1)}|x^{(t)})$.
+    \item \textbf{ELBO.} Approximate $\log p_\theta(x)$ with an Evidence Lower-Bound % $\operatorname{ELBO}(z; \theta)$ 
+    \citep[eq.~(5)]{hoDenoisingDiffusionProbabilistic2020}.
+\end{enumerate}
+Initially, we might expect ELBO to be the best motivated proxy, as it is the only one with a clear link to the marginal log-probability.
+Probability of sampling trajectory might also appear sensible, but it doesn't take into account the fact that there are multiple trajectories $x^{(0:T)}$ that all lead to the same final sample $x^{(0)}$, and it has the disadvantage of not being reparameterisation invariant.\footnotemark
+We empirically investigate these different proxies in \Cref{sec:experiments}.
+\footnotetext{We can rescale the latent variables $x^{(t)}$ without affecting the marginal distribution $p_\theta(x)$, but changing the probability density of any particular trajectory.}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\textbf{Evaluating Data Attribution.} To evaluate the proposed data attribution methods, we primarily focus on two metrics: \textit{Linear Data Modelling Score} (LDS) and \textit{retraining without top influences}.
+LDS measures how well a given attribution method can predict the relative magnitude in the change in a measurement as the model is retrained on (random) subsets of the training data.
+For an attribution method $a(\gD, \gD^\prime, x)$ that approximates how a measurement $m(\theta^\star(\gD), x)$ would change if a model was trained on an altered dataset $\gD^\prime$, LDS measures the Spearman rank correlation between the predicted change in output and actual change in output after retraining on different subsampled datasets:
+\begin{equation*}
+\begin{aligned}
+    \operatorname{spearman}\left[ \left(a(\gD, \tilde{\gD}_i, x)\right)_{i=1}^M ; \left(m(\theta^\star(\tilde{\gD}_i), x)\right)_{i=1}^M\right] ,
+\end{aligned}
+\end{equation*}
+where $\tilde{\gD}_i$ are independently subsampled versions of the original dataset $\gD$, each containing $50\%$ of the points sampled without replacement. %, and $\operatorname{spearman}$ is the Spearman rank correlation.
+However, a reality of deep learning is that, depending on the random seed used for initialisation and setting the order in which the data is presented in training, training on a fixed dataset can produce different models with functionally different behaviour.
+Hence, for any given dataset $\gD^\prime$, different measurements could be obtained depending on the random seed used.
+To mitigate the issue, \citet{parkTRAKAttributingModel2023} propose to use an ensemble average measurement after retraining as the “oracle” target:
+\begin{equation}
+\begin{aligned}
+    \operatorname{LDS}=\operatorname{spearman}\left[ \Big( a(\gD, \tilde{\gD}_i, x)\Big)_{i=1}^M ; \Big(\frac{1}{K}\sum\nolimits_{k=1}^K m(\tilde{\theta}_k^\star(\tilde{\gD}_i), x)\Big)_{i=1}^M\right] ,
+    \label{eq:lds-score}
+\end{aligned}
+\end{equation}
+where $\tilde{\theta}_k^\star(\gD^\prime) \in \R^{d_\texttt{param}}$ are the parameters resulting from training on $\gD^\prime$ with a particular seed $k$.
+
+Retraining without top influences, on the other hand, evaluates the ability of the data attribution method to surface the most influential data points -- namely, those that would most negatively affect the measurement $m(\theta^\star\!(\gD^\prime), x)$ under retraining from scratch on a dataset $\gD^\prime$ with these data points removed.
+For each method, we remove a fixed percentage of the most influential datapoints from $\gD$ to create the new dataset $\gD^\prime$, and report the change in the measurement $m(\theta^\star\!(\gD^\prime), x)$ relative to $m(\theta^\star\!(\gD), x)$ (measurement by the model trained on the full dataset $\gD$).
+
+In all experiments, we look at measurements on samples generated by the model trained on $\gD$.
+We primarily focus on Denoising Diffusion Probabilistic Models (DDPM) \citep{hoDenoisingDiffusionProbabilistic2020} throughout.
+\footnotetext{Better LDS results can sometimes be obtained when looking at validation examples \citep{zhengIntriguingPropertiesData2024}, but diffusion models are used primarily for sampling, so attributing generated  samples is of primary practical interest.}
+
+\textbf{Baselines} We compare influence functions with K-FAC and $\mathrm{GGN}^\texttt{model}_\gD$ (MC-Fisher; \Cref{eq:diffusion-fisher}) as the Hessian approximation (K-FAC Influence) to TRAK as formulated for diffusion models in \cite{georgievJourneyNotDestination2023,zhengIntriguingPropertiesData2024}.
+In our framework, their method can be tersely described as using $\mathrm{GGN}^\texttt{loss}_\gD$ (Empirical Fisher) in \Cref{eq:empirical-fisher} as a Hessian approximation instead of $\mathrm{GGN}^{\texttt{model}}_\gD$ (MC-Fisher) in \Cref{eq:diffusion-fisher}, and computing the Hessian-preconditioned inner products using random projections \citep{dasguptaElementaryProofTheorem2003} rather than K-FAC.
+We also compare to the ad-hoc changes to the measurement/training loss in the influence function approximation (D-TRAK) that were shown by \citet{zhengIntriguingPropertiesData2024} to give improved performance on LDS benchmarks.
+Note that, the changes in D-TRAK were directly optimised for improvements in LDS scores in the diffusion modelling setting, and lack any theoretical motivation.
+Hence, a direct comparison for the changes proposed in this work (K-FAC Influence) is TRAK;
+the insights from D-TRAK are orthogonal to our work.
+\BM{given the workshop review I really want to pre-empt confusion here}
+These are the only prior works motivated by predicting the change in a model's measurements after retraining that have been applied to the general diffusion modelling setting that we are aware of.
+We also compare to naïvely using cosine similarity between the CLIP \citep{radford2021learningtransferablevisualmodels} embeddings of the training datapoints and the generated sample as a proxy for influence on the generated samples. Lastly, we report LDS results for the oracle method of “Exact Retraining”, where we actually retraining a single model to predict the changes in measurements.
+
+\BM{Given David's comments, maybe include results for both damping-factor-tuned and untuned LDS scores? The downside is that the figure will be twice as big, showing a bunch of $0\%$ numbers for untuned TRAK and D-TRAK}
+\begin{figure}[!htb]
+    \begin{subfigure}[b]{\textwidth}
+    \centering
+    \includegraphics{figures/lds_scores_loss.pdf}
+    \caption{LDS results on the \textbf{loss} measurement.}
+    \label{fig:lds-loss}
+    \end{subfigure}
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics{figures/lds_scores_elbosimpelbo.pdf}
+        \caption{LDS results on the \textbf{ELBO} measurement.}
+        \label{fig:lds-elbo}
+        
+    \end{subfigure}
+    \caption{
+        Linear Data-modelling Score (LDS) for different data attribution methods.
+        Methods that substitute in \textit{incorrect} measurement functions into the approximation are separated and plotted with \tikzcircle[white,fill=palette4]{2pt}.
+        We plot results for both the best Hessian-approximation damping value with  \tikzcircle[white,fill=gray]{2pt} and a “default” damping value with \tikzcircle[gray,fill=white,thick]{2pt} (where applicable).
+        Where applicable, the numerical results are reported in black for the best damping value, and for the “default” damping value in {\color{gray}(gray)}.
+        “{\footnotesize (m. loss)}” implies that the appropriate measurement function was substituted with the loss $\ell(\theta, x)$ measurement function in the approximation.
+        Results for the exact retraining method (oracle), are shown with \tikzcircle[white,fill=palette5]{2pt}.
+        Standard error in the LDS score estimate is indicated with `{\footnotesize$\pm$}', where the mean is taken over different generated samples $x$ on which the change in measurement is being estimated.
+    }
+\end{figure}
+
+\textbf{LDS.} The LDS results attributing the loss and ELBO measurements are shown in \Cref{fig:lds-loss,fig:lds-elbo}.
+K-FAC Influence outperforms TRAK in all settings.
+K-FAC Influence using the loss measurement also outperforms the benchmark-tuned changes in D-TRAK in all settings as well.
+In \Cref{fig:lds-loss,fig:lds-elbo}, we report the results for both the best damping values from a sweep (see \Cref{sec:damping-ablations}), as well as for “default” values following recommendations in previous work (see \Cref{sec:damping-details}).
+TRAK and D-TRAK appear to be significantly more sensitive to tuning the damping factor than K-FAC Influence. They often don't perform at all if the damping factor is too small, and take a noticeable performance hit if the damping factor is not tuned to the problem or method (see \Cref{fig:damping-ablation-cifar2-trak,fig:damping-ablation-cifar10-trak} in \Cref{sec:damping-ablations}).
+However, in most applications, tuning the damping factor would be infeasible, as it requires retraining the model many times over to construct an LDS benchmark, so this is a significant limitation.
+In contrast, for K-FAC Influence, we find that generally any sufficiently small value works reasonably well if enough samples are taken for estimating the loss and measurement gradients (see \Cref{fig:damping-ablation-cifar2-influence,fig:damping-ablation-cifar10-influence}). 
+
+
+\textbf{Retraining without top influences.} The counterfactual retraining results are shown in \Cref{fig:retrain-wo-top-influences-loss} for CIFAR-2, CIFAR-10, with $2\%$ and $10\%$ of the data removed. In this evaluation, influence functions with K-FAC consistently pick more influential training examples (i.e.\ those which lead to a higher loss reduction) than the baselines.
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics{figures/retrain_wo_top_influences_loss.pdf}
+    \caption{Changes in measurements under counterfactual retraining without top influences for the \textbf{loss} measurement.
+    The standard error in the estimate of the mean is indicated with error bars and reported after ‘$\pm$’, where the average is over different generated samples for which top influences are being identified.
+}
+    \label{fig:retrain-wo-top-influences-loss}
+\end{figure}
+\BM{Potentially also investigate how well each method identifies the \textbf{top} influences}
+
+\textbf{Hessian Approximation Ablation.} In \Cref{fig:lds-kfac-ablation}, we explore the impact of the Hessian approximation design choices discussed in \Cref{sec:approx-hessian}.
+We use K-FAC to approximate the GGN in all cases, with either the “expand” or the “reduce” variant (\Cref{sec:kfac}).
+We find that the better-motivated “MC-Fisher” estimator $\operatorname{GGN}^\texttt{model}$ in \Cref{eq:GGN-diffusion-modelout} does indeed perform better than the “empirical Fisher” in \Cref{eq:empirical-fisher} used in TRAK and D-TRAK.
+Secondly, we find that K-FAC expand significantly outperforms K-FAC reduce, which stands in contrast to the results in the second-order optimisation setting where the two are on par with one another \citep{eschenhagen2023kfac}.
+There are multiple differences from our setting to the one from the previous optimisation results: we use a square loss instead of a cross entropy loss, a full dataset estimate, a different architecture, and evaluate the approximation in a different application.
+Notably, the expand variant is the better justified one since the diffusion modelling problem corresponds to the expand setting in \citet{eschenhagen2023kfac}.
+Hence, our results all seem to imply that a better Hessian approximation directly results in better downstream data attribution performance.
+However, we do not directly evaluate the approximation quality of the estimates and also do not sweep over the damping value for all variants.
+
+\begin{figure}[!htb]
+    \centering
+    \hfill
+    \includegraphics{figures/lds_scores_kfac_ablation.pdf}\hspace{0.5cm}
+    \caption{Ablation over the different Hessian approximation variants introduced in \Cref{sec:approx-hessian}. We ablate two versions of the GGN: the “MC” Fisher in \Cref{eq:GGN-diffusion-modelout} and the “Empirical” Fisher in \Cref{eq:empirical-fisher}, as well as two settings for the K-FAC approximation: “expand” and “reduce” \citep{eschenhagen2023kfac}.}
+    \label{fig:lds-kfac-ablation}
+\end{figure}
+
+\subsection{Potential challenges to use of influence functions for diffusion models}\label{sec:potential-empirical-challenges}
+One peculiarity in the LDS results, similar to the findings in \cite{zhengIntriguingPropertiesData2024}, is that substituting the loss measurement for the ELBO measurement when predicting changes in ELBO actually works better than using the correct measurement (see \Cref{fig:lds-elbo} ``K-FAC Influence {\footnotesize(measurement loss)}'').\footnotemark
+\footnotetext{Note that, unlike \citet{zhengIntriguingPropertiesData2024}, we only change the measurement function for a proxy in the influence function approximation, keeping the Hessian approximation and training loss gradient in \Cref{eq:influence-function} the same.}
+To try and better understand the properties of influence functions for predicting the numerical change in behaviour after retraining, in this section we perform multiple ablations and report different interesting phenomena resulting from these that give some insight into the challenges of using influence functions in this setting.\BM{maybe a slightly clunky sentence.}
+
+As illustrated in \Cref{fig:elbo-vs-loss-weighting}, gradients of the ELBO and training loss measurements, up to a constant scaling, consist of the same per-diffusion-timestep loss term gradients $\nabla_\theta \ell_t(\theta, x)$, but with a different weighting.
+To try and break-down why approximating the change in ELBO with the training loss measurement gives higher LDS scores, we first look at predicting the change in the per-diffusion-timestep losses $\ell_t$ while substituting \textit{different} per-diffusion-timestep losses into the K-FAC influence approximation.
+The results are shown in \Cref{fig:per-diffusion-timestep-lds-ablation}, leading to the following observation:
+\begin{observationbox}
+\begin{observation}\label{obs:higher-timestep-losses}
+    Higher-timestep losses $\ell_t(\theta, x)$ act as better proxies for lower-timestep losses.
+\end{observation}
+\end{observationbox}
+
+More specifically, changes in losses $\ell_t$ can in general be well approximated by substituting measurements $\ell_{t^\prime}$ into the influence approximation with $t^\prime > t$.
+In some cases, using the incorrect timestep $t^\prime >t$ even results in significantly better LDS scores than the correct timestep $t^{\prime} =t$.
+
+Based on \Cref{obs:higher-timestep-losses}, it is clear that influence function-based approximations have limitations when being applied to predict the numerical change in loss measurements.
+We observe another pattern in how they can fail:
+
+\begin{observationbox}
+\begin{observation}\label{obs:influence-negpos-changes-only-pos}
+    Influence functions predict both positive and negative influence on loss, but, in practice, removing data points predominantly increases loss.
+\end{observation}
+\end{observationbox}
+
+We show in \Cref{fig:actual-vs-estimated-change-loss,fig:actual-vs-estimated-change-per-diffusion-timestep} that influence functions tend to overestimate how often removal of a group data points will lead to improvements in loss on a generated sample (both for aggregate diffusion training loss in \Cref{eq:per-example-diffusion-loss}, and the per-diffusion-timestep loss in \Cref{eq:per-timestep-loss}).
+Lastly, although ELBO is perhaps the measurement with the most direct link to the marginal probability of sampling a particular example, we find it has some peculiar properties.
+The below observation particularly puts its usefulness as a measurement function into question:
+\begin{observationbox}
+\begin{observation}\label{obs:elbo-constant}
+    ELBO is close to constant on generated samples, irrespective of which examples were removed from the training data.
+\end{observation}
+\end{observationbox}
+As illustrated in \Cref{fig:elbo-stays-same-across-retraining}, ELBO measurement is close to constant for any given sample generated from the model, no matter which $50\%$ subset of the training data is removed.
+In particular, it is extremely rare that if one sample is more likely to be generated than another sample by one model (as measured by $\operatorname{ELBO}$), it will be less likely to be generated than another by a model trained on a different random subset of the data.
+This implies that the standard DDPM $\operatorname{ELBO}$ might be a poor proxy for the real question we intend to ask: “how likely is a given sample to be generated by a model?”.
+It would appear improbable that the true probabilities of generating any given sample are close-to unaffected by resampling what data subset the model was trained on.
+
+
+
+
+\section{Discussion}
+
+
+In this work, we extended the influence functions approach to the diffusion modelling setting, and showed different ways in which the GGN Hessian approximation can be formulated in this setting.
+Our proposed method with recommended design choices improves performance copmared to existing techniques across various data attribution evaluation metrics.
+Nonetheless, experimentally, we are met with two contrasting findings: 
+on the one hand, influence functions in the diffusion modelling setting appear to be able to identify important influences.
+The surfaced influential examples do significantly impact the training loss when retraining the model without them (\Cref{fig:retrain-wo-top-influences-loss}), and they appear perceptually very relevant to the generated samples.
+On the other hand, they fall short of accurately predicting the numerical changes in measurements after retraining.
+Thes appears to be especially the case for measurement functions we would argue are most relevant in the image generative modelling setting -- proxies for marginal probability of sampling a particular example.
+This appears to be both due to the limitations of the influence functions approximation, but also due to the shortcomings of the considered proxy measurements (\Cref{sec:potential-empirical-challenges}).
+
+Despite these shortcomings, influence functions can still offer valuable insights: they can serve as a useful exploratory tool for understanding model behaviour in a diffusion modelling context, and can help guide data curation, identifying examples most responsible for certain behaviours.
+To make them useful in settings where numerical accuracy in the predicted behaviour after retraining is required, such as copyright infringement, we believe more work is required into \textbf{1)} finding better proxies for marginal probability than ELBO and probability of sampling trajectory , and \textbf{2)} even further improving the influence function approximation.
+
+
+
+
+

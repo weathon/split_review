@@ -1,0 +1,401 @@
+\title{Integer Scale: A Free Lunch for Faster Fine-grained Quantization of LLMs}
+
+\begin{abstract}
+We introduce \emph{Integer Scale}, a novel post-training quantization scheme for large language models that effectively resolves the inference bottleneck in current fine-grained quantization approaches while maintaining similar accuracies. Integer Scale is a free lunch as it requires no extra calibration or fine-tuning which will otherwise incur additional costs. It can be used plug-and-play for most fine-grained quantization methods. Its integration results in at most \textbf{1.85$\times$} end-to-end speed boost over the original counterpart with comparable accuracy. Additionally, due to the orchestration of the proposed Integer Scale and fine-grained quantization, we resolved the quantization difficulty for Mixtral-8x7B and LLaMA-3 models with negligible performance degradation, and it comes with an end-to-end speed boost of \textbf{2.13$\times$}, and \textbf{2.31$\times$} compared with their FP16 versions respectively. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The size of language models has continued to grow exponentially throughout recent years. To name some iconic models, Transformers~\cite{vaswani2017attention} initially bear 65M parameters, BERT~\cite{devlin2018bert} exceeds with 340M, GPT-3~\cite{brown2020language} prevails with 175B, PaLM ~\cite{chowdhery2022palm} trumps with 540B and most lately GPT-4 ~\cite{openai2023gpt4} is estimated to have reached 1.8T parameters. This seemingly unstoppable trend is largely promoted by the so-called scaling law ~\cite{kaplan2020scaling} where a model's capability, via a proxy metric of auto-regressive maximum-likelihood loss, exhibits a power-law relationship to its number of parameters, dataset sizes, and compute respectively. Not surprisingly, the intimidating number of parameters of Large Language Models (LLMs) place an almost insurmountable hurdle for inference, potentially preventing their pervasive applications.
+However, optimizing the serving efficiency of LLMs is a non-trivial task. LLMs generally comprise a compute-intense \emph{pre-filling} stage and a memory-bound \emph{self-decoding} stage. Exploiting integer matrix multiplication speeds up the computation, but directly applying post-training quantization usually generates a large performance drop. Quantization-aware training methods like LLM-QAT~\cite{liu2023llmqat} require costly computing resources to fine-tune all the weights. In contrast, post-training quantization is more affordable and commonly used in practice. For instance, SmoothQuant~\cite{xiao2023smoothquant} transforms activation outliers into weights for better quantization accuracy. Recently, fine-granularity grouping~\cite{park2022lut} is often used as a general paradigm to reduce the quantization errors, as in ZeroQuant~\cite{yao2022zeroquant}, GPTQ~\cite{frantar2022gptq}, AWQ~\cite{lin2023awq} and FPTQ~\cite{li2023fptq}. FPTQ proposes a fine-grained W4A8 strategy to address the memory-bound issue as a trade-off between W4A16 and W8A8. While its high quantization accuracy benefits from fine-grained quantization, the actual inference is also stalled by inefficient operations introduced by its intrinsic computational complexity due to fine granularity.
+
+In this paper, we are driven to design a faster fine-grained quantization scheme called \emph{Integer Scale} that renders fewer quantization errors (Table~\ref{tab:sota-comparison-lambada}) and simultaneously achieves boosted speed (see Figure~\ref{fig:llama2-latency-comparison}). Our contributions are multi-fold:
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{figures/llama-all-perf_comparison.pdf}
+  \caption{End-to-end latency comparison of {\color{is}{W4A8 (Integer Scale)}} compared with {\color{fs}{W4A8 (Float Scale)}} and {\color{marlin}{W4A16 (Marlin)}} on LLaMA-2 models. The speedup ratio is written on top of the bars.}
+  \label{fig:llama2-latency-comparison}
+\end{figure}
+
+\begin{enumerate}
+    \item We unveil the intrinsic inference bottleneck of fine-grained LLM quantization approaches and find a hassle-free cure, called Integer Scale, with negligible accuracy loss. Our approach can be used as an out-of-box plugin for the state-of-the-art quantization methods (e.g. GPTQ~\cite{frantar2022gptq}, AWQ~\cite{lin2023awq}, Omniquant~\cite{shao2023omniquant}, QuaRot~\cite{ashkboos2024quarot} etc.) with minimum modifications.
+    \item The orchestration of fine-grained quantization and the integer scale scheme not only retains the performance of the existing methods but also effectively addresses the quantization difficulty of LLMs built with the mixture-of-experts technique~\cite{jiang2024mixtral} and LLaMA-3~\cite{llama3modelcard}. 
+    \item Our integer scale, when applied to fine-grained W4A8 paradigms, achieves at most  \textbf{1.85$\times$} end-to-end speed boost over FP16, \textbf{1.17$\times$} over Marlin W4A16~\cite{frantar2024marlin}, \textbf{1.83$\times$} over its float scale counterpart, while being comparable in performance. This suggests the viability of our approach as we have achieved a new Pareto-front of speed vs. accuracy.
+\end{enumerate}
+
+
+\section{Related Work}
+
+
+\subsection{LLM Serving Frameworks and Optimization Techniques}
+vLLM~\cite{kwon2023efficient} brings about paged attention~\cite{kwon2023efficient} and continuous batching. FasterTransformer~\cite{nvidia2023faster} provides a highly optimized inference framework featuring cutlass GEMMs, CUDA kernels.
+Built on top of FasterTransformer~\cite{nvidia2023faster}, LMDeploy~\cite{2023lmdeploy} features an efficient backend called TurboMind that seeks extreme optimization through persistent batching, KV caching, and a low-bit quantization toolkit.
+ Another sprout from FasterTransformer is TensorRT-LLM~\cite{nvidia2023tensorrtllm}, which is tailored particularly for NVIDIA GPUs and ensembles many up-to-date inference techniques like flash attention~\cite{dao2022flashattention}, FP8 quantization~\cite{micikevicius2022fp8}, in-flight batching, graph optimization, etc. Marlin~\cite{frantar2024marlin} ships so far the fastest W4A16 kernel along with a bag of optimization tricks, while QServe~\cite{lin2024qserve} brings an advanced W4A8 kernel implementation. FP6-LLM~\cite{xia2024fp6} delicately devises a software solution to support the FP6 precision on NVIDIA A100 GPUs.
+
+\subsection{LLM Quantization Algorithms}
+Quantization is one of the most adopted optimization techniques to compress LLMs to their extremity. Nevertheless, it becomes more challenging as we chase for the quantization of lower bit widths (\eg 4-bit, 2-bit, or binary), it faces more critical accuracy loss. It also requires efficient hardware-aware implementations that demand strenuous engineering effort. %Many works have emerged to tackle these problems. 
+
+\textbf{Weight-only Quantization.}
+ GPTQ~\cite{frantar2022gptq} renovates OBQ~\cite{frantar2022optimal} to obtain an approximate second-order method that compensates for the quantization error. AWQ~\cite{lin2023awq} is a mixed-precision weight-only method that locates salient weight channels and searches for the corresponding optimal scales. Omniquant~\cite{shao2023omniquant} introduces learnable weight clipping that restricts extreme weight values and proposes learnable smoothing factors that tackle the activation outliers following SmoothQuant~\cite{xiao2023smoothquant}. Extreme low-bit approaches also focus on weight-only quantization. Norm Tweaking~\cite{li2024norm} exploits layer norm tuning to alleviate the performance degradation, QuiP~\cite{chee2024quip} profits from orthogonal matrices and AQLM~\cite{egiazarian2024extreme} from additive
+quantization with a codebook for 2-bit quantization, while PB-LLM~\cite{shang2023pb} uses partial 1-bit quantization. 
+
+The weight-only scheme alleviates the memory-bound issue but its activation remains in FP16. Recent speculative parallel decoding methods~\cite{pmlr-v202-leviathan23a,li2024eagle,cai2024medusa} lead the decoding phase to a compute-bound scenario, which makes this scheme less promising in the future.
+\textbf{Weight-Activation Quantization.}
+ZeroQuant~\cite{yao2022zeroquant} presents a fine-grained quantization scheme coupled with distillation. SmoothQuant~\cite{xiao2023smoothquant} enables W8A8 post-training quantization by smoothing the outliers with a heuristic factor and ships with a handcrafted CUDA kernel that ensures hardware efficiency. OdysseyLLM~\cite{li2023speed} is a coarse-grained W4A8 scheme that reduces the performance gap compared with W4A16 and W8A8. QUIK~\cite{ashkboos2023towards} implements W4A4 quantization with mixed-precision.
+
+Fine granularity generally further enhances the quantized accuracy. FPTQ~\cite{li2023fptq} is a W4A8 fine-grained solution. Atom~\cite{zhao2023atom} is a fine-grained mixed-precision W4A4 method. However, they typically suffer from low latency issues which cancel out the benefits from lower bit widths. DGQ~\cite{zhang2024dual} attempts to apply a dual quantization scheme to improve the efficiency of the fine-grained approach.
+
+\textbf{Rotation-based Quantization.} QuiP~\cite{chee2024quip}, QuiP\#~\cite{tseng2024quip}, QuaRot~\cite{ashkboos2024quarot} are a line of quantization methods that profits from the computation invariance of the orthogonal matrices for outlier suppression. To undo the rotation effect, extra online transformations are applied. When implemented efficiently, this overhead can be deemed nearly negligible.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/integer-scale.pdf}
+  \caption{(a) Fine-grained quantization divides activation $X$ of size $M\times K$ and weight $K\times N$ into groups for separate quantization. (b) The previous float scale scheme requires numerous costly type conversions ({\color{marlin}{I32toF32}}) from grouped matrix multiplication results, which impedes the overall performance. Our proposed scheme (c) with integer scales and automatic amplifiers (denoted as $\alpha$) alleviates the problem while retaining similar accuracy. Note $s_{ij}$ are the scales for each weight group $g_{ij}$, and $s_{ai}$ are the scales for $X$.}
+  \label{fig:fine-grained-scheme}
+\end{figure}
+
+
+
+\section{Motivation}
+
+
+\subsection{Fine Granularity Strengthens Current Quantization Approaches}~\label{subsec:mot-fine-acc}
+Fine granularity approaches \cite{li2023fptq,lin2023awq,zhao2023atom} bear prevailing benefits over many state-of-the-art LLM quantization methods. In extreme cases, it even produces reasonable results when coarse methods fail. It can be applied as a plug-in method to boost the accuracy of the existing methods. Formally, the output $\mathbf{O}_i$ of a fine-grained weight-activation quantization GEMM can be written as,
+\begin{equation}\label{eq:fine-grained}
+    \mathbf{O}_i = \mathbf{s}_{a_i} *  \sum_g (\mathbf{X}_{g_i} \times \mathbf{W}_{g_i}^{\top}) *  \mathbf{s}_{g_i}
+\end{equation}
+
+where $\mathbf{s}_{a_i}$ is the $i$-th scale for the activation, $\mathbf{s}_{g_i}$ is the scale for each weight group. $\mathbf{X}_{g_i}$ and  $\mathbf{W}_{g_i}$ are the corresponding activation and weight for each group $g$. Depending on the precision of matrix multiplication, specific type conversions are required to perform either scalar or matrix multiplication. For instance,  if we adopt a fine-grained W8A8 scheme with integer tensor cores for the computation, the INT32 result has to be converted to float for the later dequantization.
+
+This process is depicted in Figure~\ref{fig:fine-grained-scheme} (a), where it typically considers weights in groups and each has its float scale. We apply the fine-granularity strategy to approaches that cover commonly-used bit widths range in W4A16, W8A8, W4A8, and W4A4 in Table~\ref{tab:fine-grained-sota-comparison} to exhibit that group-wise fine-granularity consistently improves the quantized performance compared with its original coarse counterpart. Note on the LLaMA-3-70B model, the vanilla Round-to-Nearest (RTN) caused a large performance collapse while its fine-grained version can easily handle it. As we drive from W8A8 to lower bits, the quantization error increases. Especially, when applying QuaRot~\cite{ashkboos2024quarot} on LLaMA-3-70B at W4A4, the perplexity bursts into an unreasonable value, and fine-granularity can alleviate the issue. 
+\begin{table}[ht]
+  \caption{Applying fine granularity (denoted by `FG') to the state-of-the-art quantization methods on LLaMA-2 models. Perplexity is tested on C4 (the lower the better).  Group = -1 indicates coarse-grained weight quantization while 128 means fine-grained with a group size of 128. }
+  \label{tab:fine-grained-sota-comparison}
+  \centering
+  \begin{tabular}{lllH*{7}{c}}
+    \toprule
+Dataset	&	Bitwidth	&	Method	&	Sym/Asym	&	Group	&	\multicolumn{3}{c}{LLaMA-2}	&	\multicolumn{2}{c}{LLaMA-3} \\
+ \multirow{15}{1em}{C4}	&	 	&	 	&		&	 	&	7B	&	13B	&	70B	&	8B	&	70B \\
+\midrule
+	&	FP16	&	Baseline	&		&		&	7.05	&	6.46	&	5.52	&	8.88	&	6.73\\
+	&	W8A8	&	RTN~\cite{yao2022zeroquant} 	&	Sym	&	-1	&	7.19	&	6.51	&	5.64	&	9.05	&	\red{75.05}\\
+	&		&	RTN w/ FG  	&		&	128	&	7.2	&	6.51	&	5.64	&	9.04	&	7.15\\
+	&	W8A8	&	SmoothQuant~\cite{xiao2023smoothquant}	&		&	-1	&	7.2	&	6.51	&	5.58	&	9.03	&	7.38\\
+	&		&	SmoothQuant w/ FG	&		&	128	&	7.2	&	6.51	&	5.58	&	9.03	&	7.48\\
+  	&	W8A8	&	FPTQ~\cite{li2023fptq}	&		&	-1	&	7.08	&	6.50	&	5.55	&	8.97	&	8.88 \\
+	&		&	FPTQ w/ FG	&		&	128	&	7.08	&	6.50	&	5.54	&	8.95	&	6.81 \\
+	&	W4A16	&	GPTQ~\cite{frantar2022gptq}	&		&	-1	&	7.47	&	6.84	&	5.71	&	10.54	&	7.83 \\
+	&		&	GPTQ w/ FG	&		&	128	&	7.22	&	6.65	&	5.61	&	9.70	&	7.26 \\
+ 	&	W4A8	&	Odyssey~\cite{li2023speed}	&		&	-1	&	7.58	&	6.70	&	5.78	&	10.25	&	12.15 \\
+	&		&	Odyssey w/ FG	&		&	128	&	7.26	&	6.60	&	5.60	&	9.56	&	7.09 \\
+  	&	W4A4	&	QuaRot~\cite{ashkboos2024quarot}	&		&	-1	&	7.87	&	7.11	&	5.92	&	12.06	&	\red{544.50} \\
+	&		&	QuaRot w/ FG	&		&	128	&	7.82	&	7.08	&	5.90	&	11.8	&	\red{132.20} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+\subsection{Fine-grained Quantization Suffers from the Inference Bottleneck}~\label{subsec:mot-fine-latency}
+
+\begin{wrapfigure}{r}{0.45\textwidth} 
+\vskip -0.25in
+  \centering
+  \includegraphics[width=\linewidth]{figures/w4a8_fs.pdf}
+   \caption{Kernel latency comparison between W4A8 w/ Float Scale vs. FP16. The red line denotes its acceleration ratios over FP16.}
+   \label{fig:latency-comparison-fs-vs-is}
+\end{wrapfigure}
+Although fine-grained quantization can achieve higher accuracy, as demonstrated in~\cite{li2023fptq}, we have found it to be particularly slow during inference, which is also noted in the Dual-Granularity Quantization (DGQ) method~\cite{zhang2024dual}. The advantages of using lower bit widths are often offset by the computational overhead they introduce.  Figure~\ref{fig:latency-comparison-fs-vs-is} compares the kernel latency under typical inference batch sizes (drops from 3.15$\times$ to 0.5$\times$). Notably, the fine-grained kernel is significantly slower when compared to FP16 at larger batch sizes, making it less practical for deployment. Further analysis confirms that fine-grained approaches inherently require numerous costly type conversions. The result of each integer matrix multiplication has to be converted to float precision to multiply the corresponding float scale, as depicted in Figure~\ref{fig:fine-grained-scheme} (b).
+
+
+The intrinsic computation drawbacks disable its use in practice. This incoherent situation calls for a novel fine-grained scheme that is both computationally efficient and accuracy-retaining. 
+
+
+
+\section{Method}
+
+
+
+\subsection{Integer Scale with Adaptive Scale Amplifier} 
+
+Motivated by the previous discussion, it is then critical to boost the fine-grained inference. Figure~\ref{fig:fine-grained-scheme} (b) has shown that using float scale triggers numerous costly type conversions. For instance, a typical \texttt{Dense} layer of size 4096$\times$4096 with 128 groups has 131072 float scales, thus the same amount of type conversion operations are needed. Each operation requires additional element-wise conversions. Intuitively, we can resort to integer scales to avoid it. However, since all normalized float scales are in the $(0, 1)$ range, directly converting scales to integers certainly causes tremendous quantization errors. To mitigate this problem, we involve an integer amplifier $\alpha$, called \emph{adaptive scale amplifier}, which can be easily computed based on the available float scales. Our method is put formally as,
+
+\begin{equation}\label{eq:fine-grained-is}
+    \mathbf{O}_i = \mathbf{s}_{a_i} * \texttt{FLOAT} \big( \sum_g (\mathbf{X}_{g_i} \times \mathbf{W}_{g_i}^{\top}) *  \texttt{INT}(\mathbf{s}_{g_i} * \alpha) \big) / \alpha
+\end{equation}
+
+To find the common amplifier, we use a heuristic search algorithm that starts from $2^0$ to amplify the minimum scale of all groups until we meet an amplifier $2^i$ that guarantees amplified scales to be bigger than 1, see Listing~\ref{lst:amp}.
+
+\begin{wraptable}{r}{0.5\textwidth}
+\vskip -0.25in
+\begin{lstlisting}[language=Python, label=lst:amp,caption=Quick Heuristic Search for Integer Scale Amplifier]
+scale_min = scales.min()
+n, tmp = 0, scale_min
+while tmp < 1:
+    tmp = scale_min * (2**n)
+    n+=1
+scale_amplifier = 2**(n-1)
+\end{lstlisting}
+\end{wraptable}
+
+Ideally, we can use the above heuristic method to find the optimal amplifier per layer. However, based on the scale analysis of LLaMA-2-7B in Figure~\ref{fig:scale-analysis-llama-7b} (a,b,c), we find that the number of bit shifts required to amplify the scale mainly falls to 9 or 10. The weight MSE when using an amplifier of $2^{10}$ is in the range of $(10^{-7}, 10^{-6})$, as compared with its float counterpart. A similar observation applies to 13B and 70B models. We can select $2^{10}$ as our default amplifier to avoid possible overflow as the later ablation (Table~\ref{tab:abl-amplifier}) shows a bigger amplifier has no clear gains.
+
+\begin{figure}[ht]
+  \centering
+  \subfigure[]{
+  \includegraphics[width=0.31\linewidth]{figures/llama-2-7b_gs128_scales_histo.pdf}
+  }
+  \subfigure[]{
+  \includegraphics[width=0.31\linewidth]{figures/llama-2-7b_gs128_scales_shift.pdf}
+  }
+  \subfigure[]{
+  \includegraphics[width=0.31\linewidth]{figures/llama-2-7b_gs128_integer_scale_weight_mse_zb97.pdf}
+  }
+   \caption{(a) The range of amplified ($\alpha=2^{10}$) float scales of LLaMA-2-7B in the first layer (others are similar) mapped to 16-bit integers. The majority of amplified scales can be represented within 8 bits. (b) The number of bit shifts required to amplify scales per linear layer. (c) Weight MSE between integer scale and float scale under different amplifiers.}
+  \label{fig:scale-analysis-llama-7b}
+\end{figure}
+
+\subsection{Kernel Implementation}
+
+Table~\ref{tab:kernel-logic} illustrates the difference in typical kernels. Current hardware supports a standard \texttt{MatMul} GEMM which isn't suited for fine-grained approaches. Each group of $A_i$ and $W_i$ are multiplied and iteratively accumulated to register $C_i$. Atom~\cite{zhao2023atom}'s fine-grained W4A4 kernel adopts 4-bit for both weight and activation, which performs group-wise products and collects partial sums with an additional register $C'$. Note Atom's $float$ conversion becomes the main bottleneck while ours removes this costly operation by applying integer scales $s_i^{INT}$.
+
+\begin{table}[ht]
+  \setlength{\tabcolsep}{3pt}
+  \caption{Comparison of kernel computation logic.}
+  \label{tab:kernel-logic}
+  \centering
+  \begin{tabular}{c|c|c}
+  \toprule
+  \texttt{MatMul} & Atom & Ours \\
+  \midrule
+ $C_1 = A_1 * W_1 + C_0$  & $C_1 = A_1 * W_1, C' = float(C_1) * s_1$ & $C_1 = A_1 * W_1, C'' = C_1 * s_1^{INT}$\\
+ $C_2 = A_2 * W_2 + C_1$  & $C_2 = A_2 * W_2, C' \mathbin{{+}{=}} float(C_2) * s_2$ & $C_2 = A_2 * W_2, C'' \mathbin{{+}{=}} C_2 * s_2^{INT}$ \\
+ $\cdots$  & $\cdots$ & $\cdots$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We also present our computation strategy in Figure~\ref{fig:fine-grained-scheme} (c). Since the result of group-wise weight and activation matrix multiplication (e.g., $x_{00} \times g_{00}$, executed with integer tensor cores) becomes INT32, we only need to convert the amplified scale to INT32 offline. Each group is then accumulated to have the final result. The large number of type conversions on the matrix is thus reduced to only once for activation dequantization. Besides, we exploit the efficient weight processing and kernel fusion technique of OdysseyLLM's FastGEMM ~\cite{li2023speed} for fast inference. The combination makes fine-grained kernels substantially efficient, enabling fine-grained approaches as a feasible solution.  
+
+
+
+\section{Experiments}
+
+
+\subsection{Setup}~\label{sec:settings}
+
+\textbf{Models and Datasets.} We benchmark Integer Scale and other state-of-the-art quantization methods on the well-known LLaMA-2~\cite{touvron2023llama2} and LLaMA-3~\cite{llama3modelcard} models and Mixtral 8x7B~\cite{jiang2024mixtral}. Several datasets are used for evaluation, including LAMBADA \cite{paperno2016lambada}, C4~\cite{C4}, WikiText-2~\cite{wikitext103}, MMLU~\cite{hendryckstest2021}, and a set of Common Sense QA \cite{talmor2019commonsenseqa} tasks
+like WinoGrande \cite{sakaguchi2021winogrande}, PIQA \cite{tata2003piqa}, HellaSwag \cite{zellers2019hellaswag}, ARC\textsubscript{e}. For CommonSense QA tasks, we utilized the Language Model Evaluation Harness ~\cite{eval-harness} tool.
+
+\textbf{Inference Framework.} We adopt an end-to-end inference pipeline with \texttt{cutlass}~\cite{nvidia2023cutlass} that mainly profits GPU Tensor Core execution, kernel fusion policies, and graph optimization. Unless otherwise notified, we use the same framework for fair comparisons. Note for LLaMA models with W4A16, we use Marlin~\cite{frantar2024marlin} for inference as it claims to be the fastest available framework. For Mixtral 8x7B, we had to use our W4A16 implementation as Marlin hasn't supported it yet. The latency is tested on a single NVIDIA A100 GPU, except for LLaMA-2-70B and Mistral 8x7B we use four such GPUs.
+\textbf{Baselines.} In our experiments, we choose GPTQ \cite{frantar2022gptq}, AWQ~\cite{lin2023awq}, and Omniquant ~\cite{shao2023omniquant} as our
+baselines, given that they are the most
+prevalent fine-grained quantization schemes. Throughout the paper, we adopt per-token activation quantization, and per-channel weight quantization by default.
+\subsection{Experiment Result on LAMBADA, C4, and WikiText-2}~\label{subsec:exp-lambada}
+Table~\ref{tab:sota-comparison-lambada} exhibits the quantization result of LLaMA-2 and Mixtral models when applying Integer Scale (IS) to GPTQ~\cite{frantar2022gptq}, AWQ~\cite{lin2023awq}, and Omniquant~\cite{shao2023omniquant} on LAMBADA, WikiText-2, and C4 datasets. Our approach generally shows on-par or better performance, indicating that the Integer Scale applies to the existing quantization methods and retains the quantized performance at lower bits like W4A8. Note since Ominiquant on LLaMA-2-70B originally fails, so does its integer scale variation.
+
+\begin{table}[ht]
+  \setlength{\tabcolsep}{3pt}
+  \caption{Comparison with state-of-the-art quantization methods on LAMBADA (accuracy), C4 (PPL), and WikiText (PPL). For all models tested, we set the weight group size to 128 and apply symmetric quantization. Integer Scale (IS) with amplifier 1024 is used.}
+  \label{tab:sota-comparison-lambada}
+  \centering
+  \begin{tabular}{*{2}{l}cHHH*3{l}l}
+    \toprule
+Dataset	&	\multicolumn{2}{c}{HyperParam}	& &&& \multicolumn{3}{c}{LLaMA-2} & Mixtral \\ %\multicolumn{3}{c}{LLaMA-1}
+	&	Method	&	BitWidth	&	7B	&	13B	&	65B	&	7B	&	13B	&	70B & 8x7B\\
+\midrule
+ \multirow{7}{*}{LAMBADA}	&	FP16	&	W16A16	&	73.74\%	&	76.19\%	&	79.20\%	&	73.70\%	&	76.64\%	&	79.57\% & 77.62\% \\
+	&	GPTQ	&	W4A8	&	70.21\%	&	75.06\%	&	78.60\%	&	71.65\%	&	75.88\%	&	78.54\% & 73.89\% \\
+	&	GPTQ w/ IS &	W4A8	&	70.21\% \textsubscript{+0.00}	&	75.29\% +0.23\%	&	78.16\% -0.42	&	71.66\% \textsubscript{+0.01}	&	75.39\% \textsubscript{-0.48}	&	78.67\% \textsubscript{+0.13}    &   73.93\% \textsubscript{+0.03} \\
+	&	AWQ	&	W4A8	&	71.03\%	&	74.21\%	&	78.28\%	&	70.15\%	&	75.47\%	&	78.48\%   &   76.24\% \\
+	&	AWQ w/ IS &	W4A8	&	71.02\% +0.00	&	73.72\% -0.48	&	77.79\% -0.48	&	70.07\% \textsubscript{-0.07}	&	75.02\% \textsubscript{-0.44} &	78.42\% \textsubscript{-0.05} &   74.30\% \textsubscript{-1.94} \\
+	&	Omniquant	&	W4A8	&	73.39\%	&	75.61\%	&	78.73\%	&	71.76\%	&	75.98\%	&	NaN  &   76.09\% \\
+	&	Omniquant w/ IS &	W4A8	&	72.21\% -1.18	&	75.78\% +0.17&	78.69\% -0.03	&	70.91\% \textsubscript{-0.85}	&	75.60\% \textsubscript{-0.36}	&	NaN    & 76.01\% \textsubscript{-0.07} \\
+\midrule
+ \multirow{7}{*}{WikiText-2}	&	FP16	&	W16A16	&	5.73	&	5.1	&	3.51	&	5.65	&	4.95	&	3.36  & 3.93 \\
+	&	GPTQ	&	W4A8	&	6.61	&	5.36	&	3.87	&	12.32	&	5.16	&	3.66   &   4.51 \\
+	&	GPTQ w/ IS &	W4A8	&	6.63 +0.02	&	5.38 +0.02	&	3.89 +0.02	&	13.13 \textsubscript{+0.81}	&	5.18 \textsubscript{+0.02}	&	3.69 \textsubscript{+0.03} &   4.59 \textsubscript{+0.08}\\
+	&	AWQ	&	W4A8	&	6.11	&	5.51	&	3.9	&	6.12	&	5.27	&	3.66  & 4.30\\
+	&	AWQ w/ IS &	W4A8	&	6.16 +0.05	&	5.54 +0.03	&	3.94 +0.04	&	6.19 \textsubscript{+0.07}	&	5.30 \textsubscript{+0.03}	&	3.70 \textsubscript{+0.04}   & 4.42 \textsubscript{+0.12}\\
+	&	Omniquant	&	W4A8	&	6.04	&	5.32	&	3.82	&	5.94	&	5.16	&	NaN & 4.27 \\
+	&  Omniquant w/ IS &	W4A8	&	6.07 +0.03	&	5.33 +0.01	&	3.84 +0.02	&	5.97 \textsubscript{+0.03}	&	5.17 \textsubscript{+0.01}	&	NaN & 4.36 \textsubscript{+0.09} \\
+ \midrule
+ \multirow{7}{*}{C4}	&	FP16	&	W16A16	&	7.05	&	6.61	&	5.59	&	7.05	&	6.46	&	5.52    &   6.88\\
+	&	GPTQ	&	W4A8	&	8.21	&	6.87	&	5.9	&	39.96	&	6.66	&	5.75    & 7.31  \\
+	&	GPTQ w/ IS &	W4A8	&	8.23 +0.02	&	6.88 +0.01	&	5.92 +0.02	&	37.25 \textsubscript{+2.71}	&	6.68 \textsubscript{+0.02}	&	5.78 \textsubscript{+0.03} & 7.39 \textsubscript{+0.08}\\
+	&	AWQ	&	W4A8	&	7.43	&	6.98	&	5.91	&	7.57	&	6.79	&	5.73 &   7.15\\
+	&	AWQ w/ IS &	W4A8	&	7.49 +0.06	&	7.02 +0.04	&	5.94 +0.02	&	7.64 \textsubscript{+0.07}	&	6.83 \textsubscript{+0.04}	&	5.76 \textsubscript{+0.03}   &   7.27 \textsubscript{+0.12}\\
+	&	Omniquant	&	W4A8	&	7.37	&	6.82	&	5.88	&	7.41	&	6.65	&	NaN &   7.12 \\
+	&	Omniquant w/ IS &	W4A8	&	7.39 +0.02	&	6.83 +0.01	&	5.90 +0.02	&	7.44 \textsubscript{+0.03}	&	6.67 \textsubscript{+0.02}	&	NaN &   7.21 \textsubscript{+0.09}\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\subsection{Experiment Result on Common Sense QA}
+
+Table~\ref{tab:sota-comparison-common-sense} compares the Common Sense QA~\cite{talmor2019commonsenseqa} result of applying the Integer Scale on state-of-the-art quantization approaches. A similar conclusion to Section~\ref{subsec:exp-lambada} can be reached. More results on MMLU~\cite{hendryckstest2021} can be found in Table~\ref{tab:sota-comparison-mmlu} in Section~\ref{app:add-exp}.
+
+\begin{table}[ht]
+  \setlength{\tabcolsep}{2pt}
+  \caption{Comparison with state-of-the-art quantization methods on Common Sense QA. For all models tested, we set the weight group size to 128 and apply symmetric quantization. Integer Scale (IS) with amplifier 1024 is used.}
+  \label{tab:sota-comparison-common-sense}
+  \centering
+  \begin{tabular}{ll*{7}{c}}
+    \toprule
+Model	&	\multicolumn{2}{c}{HyperParam}	&	\multicolumn{5}{c}{Common Sense QA}	\\ 
+	&	Method	&	BitWidth	&	WinoGrande	&	PIQA	&	HellaSwag	&	ARC\_e	&	Avg\\
+  \midrule
+\multirow{7}{*}{LLaMA-2-7B}	&	FP16	&	W16A16	&	0.6906	&	0.7911	&	0.7598	&	0.7458	&	0.7468\\
+	&	GPTQ	&	W4A8	&	0.6819	&	0.7829	&	0.7380	&	0.6961	&	0.7247\\ 
+	&	GPTQ w/ IS	&	W4A8	&	0.6882	&	0.7845	&	0.7359	&	0.6932	&	0.7255\\
+	&	AWQ	&	W4A8	&	0.6890	&	0.7807	&	0.7418	&	0.6856	&	0.7243\\ 
+	&	AWQ w/ IS	&	W4A8	&	0.6803	&	0.7818	&	0.7399	&	0.6717	&	0.7184\\ 
+	&	Omniquant	&	W4A8	&	0.6930	&	0.7873	&	0.7427	&	0.6890	&	0.7280\\ 
+	&	Omniquant w/ IS	&	W4A8	&	0.6882	&	0.7818	&	0.7393	&	0.6898	&	0.7248\\ 
+  \midrule
+\multirow{7}{*}{LLaMA-2-13B}		&	FP16	&	W16A16	&	0.7222	&	0.8052	&	0.7938	&	0.7744	&	0.7739\\ 
+	&	GPTQ	&	W4A8	&	0.7080	&	0.8003	&	0.7858	&	0.7980	&	0.773\\ 
+	&	GPTQ w/ IS	&	W4A8	&	0.7040	&	0.8025	&	0.7854	&	0.7917	&	0.7709\\ 
+	&	AWQ	&	W4A8	&	0.7182	&	0.7976	&	0.7758	&	0.7677	&	0.7648\\ 
+	&	AWQ w/ IS	&	W4A8	&	0.7246	&	0.7992	&	0.7734	&	0.7668	&	0.7660\\ 
+	&	Omniquant	&	W4A8	&	0.7214	&	0.7992	&	0.7810	&	0.7710	&	0.7682\\ 
+	&	Omniquant w/ IS	&	W4A8	&	0.7127	&	0.7954	&	0.7786	&	0.7715	&	0.7646\\ 
+  \midrule
+\multirow{5}{*}{LLaMA-2-70B}		&	FP16	&	W16A16	&	0.7798	&	0.8275	&	0.8381	&	0.8098	&	0.8138\\ 
+	&	GPTQ	&	W4A8	&	0.7664	&	0.8313	&	0.8314	&	0.8131	&	0.8106\\ 
+	&	GPTQ w/ IS	&	W4A8	&	0.7585	&	0.8324	&	0.8287	&	0.8077	&	0.8068\\ 
+	&	AWQ	&	W4A8	&	0.7664	&	0.8194	&	0.8202	&	0.8005	&	0.8016\\ 
+	&	AWQ w/ IS	&	W4A8	&	0.7624	&	0.8199	&	0.8218	&	0.7929	&	0.7993\\
+ \midrule
+\multirow{7}{*}{Mixtral-8x7B}	&	FP16	&	W16A16	&	0.7648	&	0.8368	&	0.8403	&	0.835	&	0.8192\\
+	&	GPTQ	&	W4A8	&	0.7553	&	0.8161	&	0.8272	&	0.8056	&	0.8011\\
+	&	 GPTQ w/ IS	&	W4A8	&	0.7427	&	0.8145	&	0.8280	&	0.7925	&	0.7944\\
+	&	AWQ	&	W4A8	&	0.7506	&	0.8341	&	0.8288	&	0.8228	&	0.8091\\
+	&	 AWQ w/ IS	&	W4A8	&	0.7443	&	0.8286	&	0.8252	&	0.8131	&	0.8028\\
+	&	Omniquant	&	W4A8	&	0.7553	&	0.8308	&	0.8338	&	0.8165	&	0.8091\\
+	&	 Omniquant w/ IS	&	W4A8	&	0.7506	&	0.8308	&	0.8337	&	0.8178	&	0.8082\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\subsection{W4A8 Kernel Latency Comparison}
+
+Figure~\ref{fig:kernel-accerlation-comparison} (a) illustrates the comparison of kernel implementations under various bandwidths. Marlin~\cite{frantar2024marlin} ships so far the most advanced W4A16 kernel implementation. Odyssey's W4A8 scheme largely benefits its specific FastGEMM and has the optimal acceleration ratio over FP16. It can be seen that fine-grained W4A8 with integer scale becomes a feasible scheme between W4A16 and non-fine-grained W4A8 to have better accuracy. Interestingly, we discover a ``performance cliff'' (gray-colored) where the acceleration ratio suddenly drops when it transits from memory-bound to compute-bound scenarios. This is due to the sudden drop from the ideal 4$\times$ speedup to 2$\times$ vs. FP16. % \red{Possible cause? @LQY}
+
+\begin{figure}[ht]
+  \centering
+  \subfigure[Kernel Acceleration]{
+  \includegraphics[width=0.45\linewidth]{figures/kernel_profile_4096x22016.pdf}
+  }
+  \subfigure[Mistral 8x7B Speedup]{
+  \includegraphics[width=0.45\linewidth]{figures/mixtral8x7b_comparison.pdf}
+  }
+   \caption{(a) Fine-grained W4A8 kernel (K=4096, N=22016)  with the integer scale ({\color{is}{W4A8 Integer Scale}}) boosts its float scale counterpart ({\color{fs}{W4A8 Float Scale}}). The gray region denotes the ``performance cliff''. (b) End-to-end speed boost on Mixtral 8x7B over FP16 under various batch sizes.}
+  \label{fig:kernel-accerlation-comparison}
+\end{figure}
+
+\subsection{Speed boost on Mixture-of-experts}
+
+Figure~\ref{fig:kernel-accerlation-comparison} (c) shows the end-to-end latency of the W4A8 Integer Scale scheme applied to the Mixtral 8$\times$7B, where we obtain at most \textbf{1.55$\times$} and \textbf{1.3$\times$} boost, compared with FP16 and W4A16 respectively.  %\red{Any difference to non-MoE model? 2 $\times$ faster than LLaMA-7B? @LQY}
+
+\subsection{Our Quantization Recipe for LLaMA-3}
+\begin{wraptable}{r}{0.6\textwidth} 
+\vskip -0.25in
+  \setlength{\tabcolsep}{1pt}
+  \caption{Our LLaMA-3 Integer Scale recipe.}
+  \label{tab:llama-3-recipe}
+  \centering
+  \begin{tabular}{*{6}{c}}
+  \toprule
+Model	&	BitWidth	&	$\alpha$ & Group  & C4	&	WikiText-2	 \\
+\midrule
+LLaMA-3-8B 	&	W4A8	&	-	& 128	&   9.331	&	6.352 \\
+LLaMA-3-8B 	&	W4A8	&	8192	& 128	&   9.379   & 6.382 \\
+\midrule
+LLaMA-3-70B	&	W4A8	&	-	& 128	&   7.061	&	3.280\\
+LLaMA-3-70B	&	W4A8	&	8192	& 128	&   7.092	&	3.312 \\
+\bottomrule
+\end{tabular}
+\vskip -0.25in
+\end{wraptable}
+
+LLaMA-3 is difficult to quantize at lower bits compared with its predecessors, as confirmed in ~\cite{huang2024good}. To counter the problem, we apply QuaRot~\cite{ashkboos2024quarot} with a fine-grained paradigm. We adopt 8-bit per-token activation quantization and 4-bit per-channel symmetric weight quantization with a group size of 128. Besides, we use fine-grained W8A8 for down projection layers following the observation in ~\cite{li2023fptq}. Table~\ref{tab:llama-3-recipe} exhibits the result of our LLaMA-3 scheme, while integer scale outperforms GPTQ's W4A16 (-1.16\% in C4 perplexity) shown in Table~\ref{tab:fine-grained-sota-comparison}.
+\subsection{Comparison with Marlin's W4A16 Scheme}
+
+\begin{wraptable}{r}{0.6\textwidth} 
+\vskip -0.25in
+  \setlength{\tabcolsep}{1pt}
+  \caption{C4 and WikiText-2 perplexity, and MMLU zero-shot accuracy of LLaMA-2-7B quantized with Marlin's implementation of GPTQ (W4A16) vs. GPTQ w/ Integer Scale (W4A8).}
+  \label{tab:marlin-vs-integer-scale}
+  \centering
+  \begin{tabular}{*{5}{c}}
+  \toprule
+Method	&	BitWidth	&	C4	&	WikiText-2	&	MMLU \\
+\midrule
+GPTQ 	&	W4A16	&	7.2093	&	5.8212	&	39.11\% \\
+GPTQ w/ Integer Scale	&	W4A8	&	7.4011	&	5.9433	&	38.54\% \\
+\bottomrule
+\end{tabular}
+\end{wraptable}
+
+We compare our Integer Scale scheme with Marlin's implementation of GPTQ~\cite{frantar2024marlin} in Table~\ref{tab:marlin-vs-integer-scale}. We are mostly on par with GPTQ at W4A16 when tested on C4, WikiText-2, and MMLU. Their acceleration ratios vs. FP16 are compared in Figure~\ref{fig:kernel-accerlation-comparison} where W4A8 surpasses W4A16 mainly due to faster tensor core execution at lower bit widths. This attests that fine-grained W4A8 with the Integer Scale is a competitive strategy in terms of both quantization loss and speed.
+
+\subsection{Comparison with QServe's W4A8 Kernel}
+Figure~\ref{fig:qserve-comparison} presents the kernel speed comparison with QServe~\cite{lin2024qserve}, which ships an advanced W4A8 kernel. For coarse-grained W4A8 kernel with M=1, K=4096, and N=22016, our W4A8 kernel execution is substantially faster than QServe at all batch sizes. A similar conclusion is affirmed for the fine-grained kernel at a typical group size of 128. Both being the same bit widths, our fine-grained kernel with Integer Scale is substantially faster than QServe's, with a maximum of being \textbf{1.53$\times$}. It turns out that the main difference lies in the intrinsic complexity of Dual Quantization~\cite{zhang2024dual} they adopted which first quantizes weights in 8-bit and again in 4-bit. Note the second step is kept asymmetric to counter quantization loss. This \emph{asymmetric} scheme requires element-wise multiplication and subtraction that must be done in costly CUDA cores.
+See more details in \ref{app:qserve}.
+
+\begin{figure}[ht]
+  \centering
+  \subfigure[Fine-grained Integer Scale]{
+  \includegraphics[width=0.45\linewidth]{figures/kernel_w4a8_4096x22016.pdf}
+  }
+  \subfigure[Coarse-grained]{
+  \includegraphics[width=0.45\linewidth]{figures/kernel_w4a8_fused.pdf}
+  }
+   \caption{Kernel speed comparison with QServe's W4A8 at K=4096, N=22016. The acceleration ratio is against FP16. Both our fine and coarse-grained kernels are faster.}
+  \label{fig:qserve-comparison}
+  \vskip -0.2in
+\end{figure}
+
+
+\section{Ablation Study}
+
+
+\subsection{Fixed Amplifier vs. Heuristic Search}
+
+To find the optimal amplifier for the integer scale, we test several amplifiers in Table~\ref{tab:abl-amplifier}. It turns out that using an amplifier bigger than 1024 doesn't bring substantial gains while $2^{10}$ is a good trade-off between performance and the overflow risk. 
+It is thus safe to amplify the scale with 1024 with minimum overflow risk. To verify this choice, we draw the maximum activation per layer of LLaMA-2 and Mixtral models using $\alpha=2^{10}$ in Figure~\ref{fig:max-act-alpha-1024} (\ref{app:max-act}), where all values fall within $2^{31}$.
+\begin{table}[ht]
+  \setlength{\tabcolsep}{2pt}
+  \caption{Ablation on the amplifier value. Perplexity is tested on C4.}
+  \label{tab:abl-amplifier}
+  \centering
+  \begin{tabular}{H*{7}{c}}
+  \toprule
+Dataset	&	BitWidth	&	Amplifier	&	LLaMA-2-7B	&	LLaMA-2-13B	&	LLaMA-2-70B	&	LLaMA-3-8B	&	LLaMA-3-70B\\
+    \midrule
+	&	W4A16	&	-	&	7.43 & 6.64 & 5.66 & 10.00 & 9.06	\\   
+	&	W4A16	&	Heuristic	&	7.46 & 6.65 & 5.66 & 10.03 & 9.10	\\
+	&	W4A16	&	128	&	6.75 & 7.57 & 5.81 & 15.52 & 13.84 \\ 
+C4  	&	W4A16	&	512	&	7.45 & 6.65 & 5.67 & 10.09 & 9.27 \\
+	&	W4A16	&	1024	&	7.45 & 6.64 & 5.66 & 10.03 & 9.04	\\
+	&	W4A16	&	4096	&	7.45 & 6.64 & 5.67 & 10.00 & 8.91	\\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Speed Comparison of Float Scale vs. Integer Scale}
+We compare the difference in inference speed using float and integer scales to showcase the latency advantage of using the Integer scale in Figure~\ref{fig:kernel-accerlation-comparison} (a). The speedup is at most \textbf{2.3$\times$}, suggesting the reduction of costly type conversions is more than necessary.
+
+
+
+
+\section{Conclusion}
+
+In this paper, we introduced a plug-and-play scheme called \emph{Integer Scale} that can be applied to speed up the existing fine-grained quantization approaches. We showed through extensive experiments that the Integer Scale not only benefits from the performance boost due to fine granularity but also well resolves the intrinsic computational overhead. It can serve as a default free-lunch technique with fine-grained approaches of various bandwidths to render an overall competitive quantization strategy. Moreover, the same strategy can be applied to Mixtral 8$\times$7B based on a mixture-of-experts and LLaMA-3, which were previously difficult to quantize at lower bit widths.
+
+\newpage
+
+
+
+
+

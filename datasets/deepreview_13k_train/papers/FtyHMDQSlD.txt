@@ -1,0 +1,297 @@
+\title{Advancing Text-to-3D Generation with Linearized Lookahead Variational Score Distillation}
+
+\begin{abstract}
+Text-to-3D generation based on score distillation of pre-trained 2D diffusion models has gained increasing interest, with variational score distillation (VSD) as a remarkable example. 
+VSD proves that vanilla score distillation can be improved by introducing an extra score-based model, which characterizes the distribution of images rendered from 3D models, to correct the distillation gradient. 
+Despite the theoretical foundations, VSD, in practice, is likely to suffer from slow and sometimes ill-posed convergence.
+In this paper, we perform an in-depth investigation of the interplay between the introduced score model and the 3D model, and find that we can simply adjust their optimization order to improve the generation quality. 
+By doing so, the score model looks ahead to the current 3D state and hence yields more reasonable corrections. 
+Nevertheless, naive lookahead VSD may suffer from unstable training in practice due to the potential over-fitting. 
+To address this, we propose to use a linearized variant of the model for score distillation, giving rise to the Linearized Lookahead Variational Score Distillation ($L^2$-VSD). 
+$L^2$-VSD can be realized efficiently with forward-mode autodiff functionalities of existing deep learning libraries. 
+Extensive experiments validate the efficacy of $L^2$-VSD, revealing its clear superiority over prior score distillation-based methods. 
+We also show that our method can be seamlessly incorporated into any other VSD-based text-to-3D framework.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+3D content creation is important for a variety of applications, such as interactive gaming (Bruce et al., 2024; Xia et al., 2024), cinematic arts (Conlen et al., 2023), AR/VR (Creed et al., 2023; Li et al., 2024), and building simulated environments for training agents in robotics (Team et al., 2024). However, it is still challenging and expensive to create a high-quality 3D asset as it requires a high level of expertise. Therefore, automating this process with generative models has become an important problem (Jiang, 2024), while remaining non-trivial due to the scarcity of training data and the complexity of 3D representations.  
+
+Score distillation has emerged as an attractive way for 3D generation given textual condition (Poole et al., 2022; Lin et al., 2023; Chen et al., 2023; Wang et al., 2023; 2024a). It leverages pretrained 2D diffusion models (Ho et al., 2020; Rombach et al., 2022) to define priors to guide the evolvement of 3D content without reliance on annotations. Score Distillation Sampling (SDS) (Poole et al., 2022) is a seminal work in this line, but it is widely criticized that its generations suffer from the over-smoothing issue. Variational Score Distillation (VSD) (Wang et al., 2023) remediates this by introducing an extra model that captures the score of the images rendered from the 3D model to correct the distillation gradient. However, VSD often requires a lengthy optimization through 3 stages: NeRF generation, geometry refinement, and texture refinement. The outcomes obtained in the initial stage are often blurry, prone to collapsing, and not directly applicable (Wei et al., 2023). Though existing works begin to understand and improve SDS (Wang et al., 2024a; Yu et al., 2023; Katzir et al., 2023), there are great but less efforts dedicated to improving the more promising VSD (Ma et al., 2025; Wei et al., 2024).  
+
+![](images/2efda745828b6edd4e6b3c2822b4c4c72018f036d57c472e55f60475d2f619f2.jpg)  
+Figure 1: Comparison of convergence between VSD and L-VSD with an illustrative 2D Gaussian example. In this toy example we consider $\vec{x}\in\mathbb{R}^{2}$ from a single Gaussian distribution. We optimize $q(x)$ towards ground truth distribution $p(x)$ and use $r(x)$ to function as LoRA which is used to estimate $\bar{q}(\boldsymbol{x})$ . This example validates the existence of mismatching issue in VSD and we leave the details in Sec. 3.2.  
+
+To identify the root of VSD’s drawback, we conduct a comprehensive analysis of the interaction between the introduced score model and 3D model revealing that adjusting their optimization order can sometimes lead to a considerable enhancement in generation quality. This adjustment allows the score model to look ahead to the current 3D state, resulting in more accurate and sensible corrections for the distillation gradient. Yet, naive lookahead VSD can encounter unstable training due to the risk of the score model overfitting the single 3D particle and the sampled camera view.  
+
+To address this issue, we formally compare the correction gradients before and after looking ahead and identify two major differences—a linear first-order term and a high-order one. Upon closer examination, we observe that the former accommodates subtle semantic information, whereas the latter contains non-trivial high-frequency noises. Given these findings, we propose to use only the firstorder term for correction, yielding Linearized Lookahead Variational Score Distillation ( $L^{2}$ -VSD), to reliably and consistently boost the generation quality of VSD. $L^{2}$ -VSD is both easy to implement and computationally efficient—the added linear term can be computed by only one additional forward process of the score model under the scope of forward-mode automatic differentiation, which is supported in many deep learning libraries (Paszke et al., 2017; Ketkar et al., 2021).  
+
+Through extensive experiments, we demonstrate the significant superiority of the proposed $L^{2}$ -VSD in improving 3D generation quality compared to competing baseline methods, as shown in Fig. 7. $L^{2}$ -VSD can even produce realistic generation results with low resolution directly in the first stage. Moreover, we empirically show that $L^{2}$ -VSD can be seamlessly integrated into other VSD-based 3D generation pipelines and combined with other parallel techniques for VSD, e.g., Entropy Score Distillation(ESD) (Wang et al., 2024a) which mitigates the Janus problem, for further improvement.  
+
+We summarize our technical contributions as follows:  
+
+• For VSD, a fundamental method in text-to-3D generation, we carefully identify the gaps between its theory and implementation and analyze the potential impact the gaps may bring us, providing a direction for possible improvements.   
+• We propose $L^{2}$ -VSD, an easy to implement and computationally efficient variant of VSD, which mitigates the mismatching problem to some extent. We demonstrate its significant improvement over baselines and comparable to other state-of-the-arts.   
+• We demonstrate that our method can be seamlessly combined with other VSD-based improving techniques without much effort.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+2.1 DIFFUSION MODELS  
+
+Diffusion models (DMs) (Sohl-Dickstein et al., 2015; Ho et al., 2020; Song et al., 2020) are defined with a forward diffusion process on data $x\in\mathbb{R}^{d}$ with a Gaussian transition kernel. The conditional distribution at some timestep $t\in[0,T]$ usually satisfies  
+
+$$
+q(x_{t}|x_{0})=\mathcal{N}(x_{t};\alpha_{t}x_{0},\sigma_{t}^{2}\mathbf{I})
+$$  
+
+where $x_{0}:=x$ , and $\alpha_{t}$ and $\sigma_{t}$ are pre-defined noise schedules. DMs learn a reverse diffusion process, specified by a parameterized distribution $p(x_{t-1}|x_{t}):=\mathcal{N}(x_{t-1};\mu_{\psi}(x_{t},t),\sigma_{t}^{2}\mathbf{I})$ with $\mu_{\psi}$ as a neural network (NN), to enable the sampling of generations from Gaussian noise. The training objective of $\mu_{\psi}$ is the variational lower bound of the log data likelihood. In practice, $\mu_{\psi}$ is re-parameterized as a denoising network $\epsilon_{\psi}$ and the training loss can be further simplified as a Mean Squared Error (MSE) form (Ho et al., 2020; Kingma et al., 2023):  
+
+$$
+\begin{array}{r}{\mathcal{L}_{D i f f}:=\mathbb{E}_{x,t,\epsilon}[\omega(t)||\epsilon_{\psi}(\alpha_{t}x+\sigma_{t}\epsilon,t)-\epsilon||_{2}^{2}],}\end{array}
+$$  
+
+where $x$ follows the data distribution, $t$ is uniformly drawn from $[0,T]$ , $\epsilon$ is a standard Gaussian noise, and $\omega(t)$ is a time-dependent coefficient. $\epsilon_{\psi}$ also inherently connects to score matching (Vincent, 2011; Song et al., 2020).  
+
+Classifier-free guidance (CFG) (Ho & Salimans, 2022). We can augment the model $\epsilon_{\psi}$ with an extra input, the condition $y$ , to characterize the corresponding conditional distribution, leaving $\epsilon_{\psi}(x_{t},t,\emptyset)$ account for the original unconditional one. Then, we can resort to CFG to further boost the quality of conditional generation. Typically, CFG leverages the following term in the sampling process:  
+
+$$
+\hat{\epsilon}_{\psi}(x_{t},t,y):=(1+s)\epsilon_{\psi}(x_{t},t,y)-s\epsilon_{\psi}(x_{t},t,\emptyset)
+$$  
+
+where $s>0$ refers to a guidance scale.  
+
+2.2 TEXT-TO-3D GENERATION WITH SCORE DISTILLATION  
+
+Text-to-3D generation aims to identify the parameters $\boldsymbol\theta\in\mathbb{R}^{N}$ of a 3D model given a text condition $y$ . Neural radiance field (NeRF) (Mildenhall et al., 2020) is a typical 3D representation based on neural networks. In particular, NeRF renders a new view of the scene with the input of a sequence of images as known views. Additionally, textured mesh can be applied to represent the geometry of a 3D object with triangle meshes and textures with color on the mesh surface.  
+
+Denote $g(\theta,c)$ as the differential rendering function projecting the 3D scene to a 2D image given a camera angle $c$ . Score distillation approaches for text-to-3D generations demand the image sample $g(\theta,c)$ to respect the prior specified by a text-to-2D diffusion model $\epsilon_{p r e t r a i n}(\cdot,\cdot,y)$ pretrained on vast real text-image pairs, based on which the optimization goal is constructed (Poole et al., 2022; Wang et al., 2023; 2024a; Yu et al., 2023; Tang et al., 2024; Yang et al., 2023; Katzir et al., 2023).  
+
+Score Distillation Sampling (SDS) (Poole et al., 2022) updates the 3D model using view-dependent prompt $y^{c}$ :  
+
+$$
+\nabla_{\theta}\mathcal{L}_{S D S}(\theta):=\mathbb{E}_{t,\epsilon,c}[\omega(t)(\epsilon_{p r e t r a i n}(x_{t},t,y^{c})-\epsilon)\frac{\partial g(\theta,c)}{\partial\theta}],
+$$  
+
+where $c$ is a randomly sampled camera angle and $x_{t}:=\alpha_{t}g(\theta,c)+\sigma_{t}\epsilon$ . The gradient is a simplification of that of the denoising objective w.r.t. $\theta$ (Poole et al., 2022). Intuitively, it encourages the rendered images to move toward the high-probability regions of the pretrained model, thus a good 3D model emerges. SDS is a seminal work in the line of text-to-3D generation, but it is sensitive to the CFG scale $s$ (Ho & Salimans, 2022). A small $s$ often results in over-smooth outcomes, whereas a large $s$ leads to over-saturation.  
+
+Variational Score Distillation (VSD) (Wang et al., 2023) addresses the issue of SDS with a thorough theoretical analysis and proposes a new algorithm. In particular, apart from the pretrained model $\epsilon_{p r e t r a i n}(x_{t},t,\dot{y})$ for capturing the data distribution, VSD introduces a tunable model $\epsilon_{\phi}(x_{t},t,c,y)$ , often instantiated as a LoRA (Hu et al., 2021) adaptation of $\epsilon_{p r e t r a i n}$ , to account for the distribution of images rendered from all possible 3D models given condition $y$ and camera angle $c$ . We refer the introduced model as the LoRA model hereinafter. VSD proves the LoRA model can reliably correct the original distillation gradient.  
+
+VSD, in practice, usually considers only a single 3D particle $\theta$ and performs an iterative optimization of $\theta$ and $\phi$ until convergence. More specifically, let $\theta_{i}$ and $\phi_{i}$ denote the parameters at $i$ -th training iteration. VSD updates $\theta_{i}$ with the following gradient:  
+
+$$
+\nabla_{\theta_{i}}\mathcal{L}_{V S D}(\theta_{i}):=\mathbb{E}_{t,\epsilon,c}\left[w(t)(\epsilon_{p r e t r a i n}(x_{t},t,y)-\epsilon_{\phi_{i}}(x_{t},t,c,y))\frac{\partial g(\theta,c)}{\partial\theta}\Big|_{\theta=\theta_{i}}\right],
+$$  
+
+where $x_{t}=\alpha_{t}g(\theta_{i},c)+\sigma_{t}\epsilon.$ . To avoid more than once differentiable rendering of the 3D model for efficiency, VSD updates $\phi_{i}$ still with $g(\theta_{i},c)$ while using a different noisy state $x_{t^{\prime}}=\alpha_{t^{\prime}}g(\theta_{i},c)+$  
+
+![](images/56d2add1cc80562a75f08c6505a165ffd2efe417601330aa45cc89f98ff93b60.jpg)  
+
+(a) VSD: From left to right, the results correspond to (b) L-VSD: From left to right, the first three results corsetting $\gamma$ to 1, 2, 5, and 10. We can observe that the respond to setting $\gamma$ to 1, 2, and 5; the last corresponds quality of the model is not fundamentally improved. to scaling the learning rate by 0.1 with $\gamma=1$ .  
+
+
+
+\section{3 DIAGNOSE THE ISSUES OF VSD  }
+
+
+To assess whether the identified gaps contribute to the issues of VSD, we conduct two sets of experiments in this section. As introduced in Sec 2.2, we analyze the impact of convergence of LoRA in Sec 3.1; then, we correct the optimization order to see the consequences in Sec 3.2; lastly, we combine these two factors to check if they are interfered in Sec 3.3. We provide an illustrative 2D Gaussian example for better understanding and to evaluate the effectiveness of lookahead in Sec 3.2. We base the implementation on the open-source framework threestudio (Guo et al., 2023).  
+
+3.1 MAKE THE LORA MODEL BETTER CONVERGED? MAYBE NO.  
+
+Assumption. The one-step update in vanilla VSD cannot guarantee the LoRA model to converge well, thus possibly harming the effectiveness of score distillation. We assume updating the LoRA model for $\gamma\left(\gamma>1\right)$ steps in each iteration could alleviate the pathology.  
+
+Experiments Setting. We evaluate the effects of various $\gamma$ , including 1, 2, 5, and 10. In each step, we optimize the LoRA model with different noisy images under different views. Unless otherwise specified, we take NeRF as the default 3D representation and use a simple prompt "a delicious hamburger" in the study. We keep all other hyper-parameters the same as the vanilla VSD. Usually, the whole VSD process contains multiple stages, where in the first stage a NeRF is constructed and then the geometry and texture are refined respectively. We directly report the first-stage learning outcomes because it establishes the foundation for the following parts.  
+
+![](images/bea0e7547ef52c946ef1a1f0235f12d30dbc766123accac007ddfd96b4a72876.jpg)  
+Figure 3: Loss of the LoRA model during training given various $\gamma$ . When increasing $\gamma$ , the loss is relatively lower, while also showing periodic changes.  
+
+Results. We present the training loss of the LoRA model in Fig. 3 to indicate the convergence and the final generations in Fig. 2a to reflect if the issues still exist. As shown, although the loss curves for various $\gamma$ share a periodic rise and fall, the loss of a larger $\gamma$ (e.g., 5 or 10) is floating in a relatively smaller range, and $\gamma=5$ roughly makes LoRA model converge. However, as shown in Fig. 2a, it’s hard to tell if the shape becomes relatively more reasonable and the overall quality of the 3D model does not witness a continual improvement as $\gamma$ rises.Thereby, we conclude that improving the convergence of the LoRA model on the original VSD is not sufficient, thus being not the key factor.  
+
+
+
+\section{3.2 MAKE THE LORA MODEL LOOKAHEAD? MAYBE YES!  }
+
+
+Assumption. As shown in Equation (5), the updates to $\theta_{i}$ are computed given $\phi_{i}$ , which characterizes the distribution associated with $\theta_{i-1}$ instead of $\theta_{i}$ . This is inconsistent with Theorem 2 of (Wang et al., 2023), where the LoRA model should first adapt to the current 3D model (i.e., $\theta_{i}$ ) to serve as a reliable score estimator for the corresponding distribution. Fixing such a mismatch may address the issues of VSD.  
+
+Experiments Setting. We update $\phi_{i}$ first to obtain $\phi_{i+1}$ , based on which $\theta_{i}$ is updated. We name such a modification Lookahead-VSD (L-VSD) because it makes the LoRA model look ahead for one step compared to the original VSD. All other parameters are kept unchanged.  
+
+Results. We show the result in the first column of Fig. 2b. Intuitively, the rendered image has clearer edges compared to those in Fig. 2a. Besides, inspecting the optimization process, we find L-VSD acquires the geometries and textures for the 3D model more quickly than VSD, and the loss of the 3D model in L-VSD with $\gamma=1$ floats in a similar level to VSD with $\gamma=10$ . These results validate the necessity for the LoRA model to look ahead during the optimization of VSD. However, we also observe that the 3D model can easily suffer from being over-saturated as optimization continues, which means the 3D models can not converge with normal shapes and colors in L-VSD.  
+
+Illustrative Example. It seems weird and self-contradictory with only the unsatisfied results above. Here we provide an illustrative 2D Gaussian example in Fig. 1, to show the existence of mismatching problem, the effectiveness of lookahead, and point out the possible reason that harms the performance of L-VSD. In this experiment, we assume that $\theta\,=\,x\,\,\dot{\in}\,\,\mathbb{R}^{2}$ , and preset a Gaussian distribution as ground truth, which should be taken as the pretrained distribution. We randomly initialize the parameterized distribution $q(x)$ , and use another Gaussian distribution $r(x)$ to approximate $q$ , which can be interpreted as LoRA in VSD. In each iteration, we randomly sample $x_{s a m p l e}$ from $q(x)$ , which is similar to differentiable rendering in VSD, and then use the mean and variance of Gaussian distribution to calculate the optimization direction. The learning trajectories are illustrated in Fig. 1. The results confirm the mismatching problem of VSD which hinders the distribution matching process. Correcting the optimization order can lead to better results. But, if we overfti the $r(x)$ on the samples $x_{s a m p l e}$ , the results cannot converge normally towards the region of $p(x)$ when timestep is small, which usually lead to color saturation in text-to-3D generation (Huang et al., 2023; Tang et al., 2024). This evidence supports our finding with the L-VSD above. F.  
+
+
+
+\section{3.3 LOOKAHEAD $\times$ CONVERGENCE? DEFINITELY NO.  }
+
+
+From the above studies, we learn that fitting the LoRA model to the 3D model first is essential for VSD while enhancing the convergence of the LoRA model is also beneficial to some degree. Here we conduct additional experiments to find out the consequence of combining these two factors.  
+
+Based on the setting of L-VSD in Sec. 3.2, we increase the LoRA training steps $\gamma$ to 2 and 5. We also perform a study where the learning rate of LoRA is scaled to 1/10 of the original one to indicate under-convergence. Fig. 2b exhibits the results. As shown, increasing $\gamma$ in L-VSD exacerbates the phenomenon of over-saturation and makes the geometry and texture easier to collapse, while decreasing the learning rate of the LoRA model somehow improves the quality of the generation.  
+
+These deviate from our expectations. To chase a deeper understanding, we examine the output of the LoRA by inspecting its norm $\lvert\lvert\epsilon_{\phi}\rvert\rvert$ , and plot  
+
+![](images/d109655d3c41a2cb4cd0ac2485ce7ab6ad4f943664d2c7037273c169588878d1.jpg)  
+Figure 4: The norm of the LoRA prediction $||\epsilon_{\phi}||$ varies w.r.t. training iteration at various $\gamma$ in L-VSD.  
+
+its variation during training in Fig. 4. We observe that the norm rapidly drops to zero for L-VSD with $\gamma=5$ , which implies ill-posed convergence. The underlying reason is probably that we maintain only one single 3D particle training of LoRA for efficiency, thus the distribution to fit by the LoRA model is biased. The pathology is more obvious for L-VSD when optimizing LoRA more intensively.  
+
+![](images/bc702e4f94a7c3da198c94c6a8c7386cef74a534c0ad9aa41341834345be5038.jpg)  
+Figure 5: Visualization of $\Delta\epsilon_{f i r s t}$ and $\Delta\epsilon_{h i g h}$ . The left column in each group represents the decoded first-order term while the right column represents the decoded high-order term. Prompt for each group: (left) "a delicious hamburger"; (mid) "an astronaut riding a horse";(right) "an Iron man". Besides, we note that the trick of reducing the learning rate, despite being effective in this case, is unstable when handling harder prompts.1 for more failure cases.  
+
+Conclusion Although lookahead is important for generating 3D models with clear outlines and realistic texture, the risk is the possibility of the LoRA model over-fitting on the isolated particle, which sometimes exhibits flaws on geometry and texture after each optimization step. Given these, this work tries to figure out a way to interpolate between original VSD with relatively stable formation process and L-VSD with higher-quality outcomes.  
+
+4 METHODOLOGY  
+
+In Sec 4.1, we conduct a rigorous comparison between VSD and L-VSD and perform thorough studies to gain an understanding of their difference. We then derive the novel Linearized Lookahead VSD ( $L^{2}$ -VSD) in Sec. 4.2.  
+
+4.1 COMPARE VSD WITH L-VSD  
+
+We first lay out the details of the update rules of L-VSD. Concretely, L-VSD first updates $\phi_{i}$ with  
+
+$$
+\phi_{i+1}=\phi_{i}-2\eta\Delta_{\phi_{i}},\ \Delta_{\phi_{i}}:=(\epsilon_{\phi_{i}}(x_{t^{\prime}},t^{\prime},c,y)-\epsilon^{\prime})J_{\phi_{i}}(x_{t^{\prime}},t^{\prime},c,y)
+$$  
+
+where $\eta$ denotes the learning rate of the LoRA model.  
+
+Then, L-VSD updates $\theta_{i}$ with the updated LoRA model $\epsilon_{\phi_{i+1}}$ :  
+
+$$
+\nabla_{\theta_{i}}\mathcal{L}_{L-V S D}(\theta_{i})=\mathbb{E}_{t,\epsilon,c}\left[w(t)(\epsilon_{p r e t r a i n}(x_{t},t,y)-\epsilon_{\phi_{i+1}}(x_{t},t,c,y))\frac{\partial g(\theta,c)}{\partial\theta}\Big\rvert_{\theta=\theta_{i}}\right].
+$$  
+
+We can decompose $\epsilon_{\phi_{i+1}}(x_{t},t,c,y)$ by Taylor series to understand the gap between the update rule of VSD (Equation (5)) and that of L-VSD (Equation (8)) for $\theta_{i}$ :  
+
+$$
+\begin{array}{r l}&{\epsilon_{\phi_{i+1}}(x_{t},t,c,y)=\epsilon_{\phi_{i}}(x_{t},t,c,y)+(\phi_{i+1}-\phi_{i})J_{\phi_{i}}^{T}(x_{t},t,c,y)+\ldots}\\ &{=\epsilon_{\phi_{i}}(x_{t},t,c,y)+\underbrace{(-2\eta\Delta_{\phi_{i}}J_{\phi_{i}}^{T}(x_{t},t,c,y)}_{\Delta\epsilon_{f i r s t}})+\underbrace{{\mathcal{O}}(\Delta_{\phi_{i}}^{2})}_{\Delta\epsilon_{h i g h}}.}\end{array}
+$$  
+
+Namely, both the first-order term $\Delta\epsilon_{f i r s t}$ and the high-order one $\Delta\epsilon_{\/h i g h}$ may contribute to the fast formation of geometry and texture in L-VSD.  
+
+To disentangle their effects, we opt to plot how their norms vary during the training procedure. In particular, we set $\eta$ to 0.01. We leave how to estimate $\Delta\epsilon_{f i r s t}$ to the next subsection and compute $\Delta\epsilon_{\it h i g h}$ by $\epsilon_{\phi_{i+1}}(x_{t},t,c,y)-$ $\epsilon_{\phi_{i}}(x_{t},t,c,y)\!-\!\Delta\epsilon_{f i r s t}$ . As illustrated in Fig. 6, $||\Delta\epsilon_{h i g h}||$ is significantly larger than $\bar{||\Delta\epsilon_{f i r s t}||}$ . It is even larger than the norm of the entire LoRA model $\|\epsilon_{\phi}||$ , which means that $\epsilon_{\phi_{i+1}}$ is probably dominated by $\Delta\epsilon_{\/h i g h}$ . Moreover, the norm of $\Delta\epsilon_{\/h i g h}$ varies in a considerable range, which indicates much greater randomness than the first-order term.  
+
+![](images/60516e161fc66708deb53930f1399a73c82960f68c86d6bdb3b22f4163d1f0c1.jpg)  
+Figure 6: The norm of various scores during the training of L-VSD.  
+
+To obtain a more intuitive understanding of the two terms, we also pass them through the decoder of the pretrained DM (because we experiment with latent DMs (Rombach et al., 2022)) to obtain visualizations of them, presented in Fig. 5. As shown, the visualization of $\Delta\epsilon_{f i r s t}$ indicates an object shape corresponding to the prompt while $\Delta\epsilon_{h i g h}$ is more random and we cannot witness any semantic information within it.  
+
+Based on all the above observations and inferences, we wonder whether $\Delta\epsilon_{f i r s t}$ is the essential component for the appealing generations, and keeping it can improve score distillation further. We answer to this in the next subsection.  
+
+4.2 LINEARIZED LOOKAHEAD VSD  
+
+Let $\epsilon_{\phi_{i+1}}^{\mathrm{lin}}(x_{t},t,c,y):=\epsilon_{\phi_{i}}(x_{t},t,c,y)+\Delta\epsilon_{f i r s t}$ . In fact, it corresponds to performing one-step SGD with $(\boldsymbol{x}_{t^{\prime}},t^{\prime})$ under the denoising loss (Equation (2)) to update the following linear noise-prediction model:  
+
+$$
+\begin{array}{r}{\epsilon_{\phi}^{\mathrm{lin}}(x_{t},t,c,y)=\epsilon_{\phi_{i}}(x_{t},t,c,y)+(\phi-\phi_{i})J_{\phi_{i}}^{T}(x_{t},t,c,y).}\end{array}
+$$  
+
+Due to the low complexity of the linear model, the risk of overfitting to the current training data is low, which properly addresses the problem of the original L-VSD. With these understandings, our method boils down to using only the linearized lookahead correction ϵlϕini+1(xt, t, c, y) for estimating the score function of noisy rendered images of $\theta_{i}$ . i.e.,  
+
+$$
+\begin{array}{r l}&{\nabla_{\theta_{i}}\mathcal{L}^{*}(\theta_{i})=\mathbb{E}_{t,\epsilon,c}\left[w(t)\left(\epsilon_{p r e t r a i n}(x_{t},t,y)-\epsilon_{\phi_{i+1}}^{\mathrm{lin}}(x_{t},t,c,y)\right)\frac{\partial g(\theta,c)}{\partial\theta}\Big|_{\theta=\theta_{i}}\right]}\\ &{\quad\quad\quad=\mathbb{E}_{t,\epsilon,c}\left[w(t)\left(\epsilon_{p r e t r a i n}(x_{t},t,y)-\epsilon_{\phi_{i}}(x_{t},t,c,y)+2\eta\Delta_{\phi_{i}}J_{\phi_{i}}^{T}(x_{t},t,c,y)\right)\frac{\partial g(\theta,c)}{\partial\theta}\Big|_{\theta=\theta_{i}}\right]}\\ &{\quad\quad\quad=\mathbb{E}_{t,\epsilon,c}\Big[w(t)\Big(\epsilon_{p r e t r a i n}(x_{t},t,y)-\epsilon_{\phi_{i}}(x_{t},t,c,y)}\\ &{\qquad\qquad\qquad\quad\quad+\,2\eta(\epsilon_{\phi_{i}}(x_{t^{\prime}},t^{\prime},c,y)-\epsilon^{\prime})\left[J_{\phi_{i}}(x_{t^{\prime}},t^{\prime},c,y)J_{\phi_{i}}^{T}(x_{t},t,c,y)\right]\Big)\frac{\partial g(\theta,c)}{\partial\theta}\Big|_{\theta=\theta_{i}}\Big].}\end{array}
+$$  
+
+Viewing $J_{\phi_{i}}(x_{t^{\prime}},t^{\prime},c,y)J_{\phi_{i}}^{T}(x_{t},t,c,y)\in\mathbb{R}^{d\times d}$ as a pre-conditioning matrix, the above update rule involves two score contrast terms—one corresponds to the original VSD objective and the other accounts for a linearized lookahead correction for practical iterative optimization.  
+
+Moreover, we clarify the term $\Delta\epsilon_{f i r s t}:=-2\eta\Delta_{\phi_{i}}J_{\phi_{i}}^{T}(x_{t},t,c,y)$ is friendly to estimate. Concretely, $\Delta_{\phi_{i}}$ is exactly the gradient to update the LoRA model, which a backward pass can calculate. Then, the vector-Jacobian product $\Delta_{\phi_{i}}J_{\phi_{i}}^{T}(x_{t},t,c,y)$ can be realized by a forward pass of the score model using forward-mode automatic differentiation, which is equipped in many deep learning frameworks (Paszke et al., 2017) As a result, $L^{2}$ -VSD only needs a single additional forward pass of the LoRA model per iteration compared to VSD, which is much more efficient than updating the LoRA multiple times. More importantly, we can even use only the entities associated with the last layer of the LoRA model for estimating the vector-Jacobian product to achieve a trade-off between quality and efficiency.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+5.1 SETTINGS  
+
+In this section, we evaluate the efficacy of our proposed Linearized Lookahead VSD method on text-guided 3D generation. Our baseline approaches include SDS, VSD, ESD (Entropy Score Distillation) (Wang et al., 2024a), and VSD-based HiFA (Zhu et al., 2023), which include representative state-of-the-art methods. For a fair comparison, all experiments are benchmarked under the opensource framework threestudio (Guo et al., 2023). To clearly demonstrate the superior performance brought by our method, we compare both the results produced with high resolution and low resolution.1 for more implementation details.  
+
+
+
+\section{5.2 QUALITATIVE COMPARISON  }
+
+
+We compare our generation results with SDS, VSD, ESD, L-VSD and HiFA both in high resolution of 256 and low resolution of 64. We present some representative results without bias in Fig. 7 and  
+
+![](images/0f9f0e152c3e75176dc44954e33f29ac38bf42db8bb20fd06f2d7dc76c313ed2.jpg)  
+Figure 7: Qualitative comparison with high resolution of 256. $L^{2}$ -VSD can generate meticulously detailed and realistic 3D assets from easy to very complex prompts and scenes. $L^{2}$ -VSD tends to yield more complete structures than HiFA.  
+
+![](images/e52134c6e385d096d503956baa6259c36c2f3ca32179c8dac4a7c00caf004b70.jpg)  
+Figure 8: More Qualitative comparison with high resolution.  
+
+Fig. It’s noteworthy that we consider our method as a baseline similar to SDS and VSD. ESD and HiFA are state-of-the-arts based on VSD, which try to improve certain properties of generation quality by introducing novel techniques. We compare with them in order to position our performance more rigorously. We demonstrate in Sec. 5.5 that our methods can be seamlessly combined with other techniques like ESD and HiFA. Compared with VSD and its variant ESD, our results have significantly more realistic appearances and reasonable geometry. Moreover, our method has better convergence, which means our results are more robust to optimization and do not suffer from generating floaters in space. It’s clearly shown that with our linearized lookahead correction term, even only trained with low-resolution rendering settings, we can generate 3D scenes with realistic and detailed appearances. In conclusion, our method surpasses the other baseline methods significantly with linearized lookahead and achieves comparable results with state-of-the-art.  
+
+
+
+\section{5.3 QUANTITATIVE COMPARISON  }
+
+
+We follow previous work (Poole et al., 2022; Yu et al., 2023) to quantitatively evaluate the generation quality using the angle of CLIP similarity (Hessel et al., 2021) and Frechet Inception Distance (Heusel et al., 2017) and list the results in Table 1. Specifically, the CLIP similarity measures the cosine similarity between the rendered image embeddings of the generated 3D object and the text embeddings, and we calculate the angle. The FID measures the distance between the image distribution by randomly rendering 3D representation and the text-conditioned image distribution from the pretrained diffusion model. We use prompts from the gallery of DreamFusion to ensure no man-made bias in evaluation.1 for more metric computation details.  
+
+Table 1: Quantitative Comparison. (↓) means the lower the better. We measure the scenes across 20 prompts, which are randomly sampled from DreamFusion’s gallery and include scenes shown in Fig. 7, Fig. 15 and Fig. 8. The quantitative results align with the qualitative results.  
+
+![](images/e8f02175d50452d9e457b51a910b075f27c203cb31cf0cfd62573fa5a97631a7.jpg)  
+
+
+
+\section{5.4 ABLATION STUDY  }
+
+
+
+
+\section{5.4.1 ABLATION ON η  }
+
+
+We conduct an ablation study on the choice of $\eta$ , showing the results in Fig. 9a, where only $\eta$ changes while other parameters are unchanged. We still use the simple prompt “a delicious hamburger”. It’s demonstrated that our method is robust to the scale of $\eta$ . It’s worth noting that even if the norm of first-order term $\Delta\epsilon_{f i r s t}$ is only at the scale of 1e-2 when we set $\eta$ to 1e-3, the results still improve a lot. So, even a minor correction for each iteration can lead to incredible improvement in such a long-term optimization.1.  
+
+![](images/b1a5332da4836a3bc3f602e146d1ab7b696e825fa95a94b2057f50a564af6085.jpg)  
+Figure 9: Qualitative results of ablation studies.  
+
+(a) Ablation on the $\eta$ in $\Delta\epsilon_{f i r s t}$ . From left to right, (b) Ablation on last-layer approximation. From left the results correspond to setting $\eta$ to 1e-3, 1e-2, 0.1, to right, the results also correspond to those in (a), but and 1 respectively. use a last-layer approximation for estimating $\Delta\epsilon_{f i r s t}$ .  
+
+
+
+\section{5.4.2 ABLATION ON LAST-LAYER APPROXIMATION  }
+
+
+As stated above, we can use only the entities associated with the last layer of the LoRA model to further reduce additional time costs. Admittedly, this approach may result in performance loss. As the correction term is calculated with the Jacobian matrixs of LoRA model, if only use the last-layer gradients to approximate the correction, we actually ignore the variable updates within other layers, thus losing accuracy. We present the corresponding results in Fig. 9b. Although the outcomes tend to generate floaters, the realism of results still gets  
+
+Table 2: Computation efficiency. We present the time cost in each iteration. We measure the average time on the threestudio framework.  
+
+![](images/3743e59da1c2d0214e960406f6549dcccffb994d7f1928b706e166c198ad3e15.jpg)  
+
+largely improved. Also, we believe the floaters can be eliminated in the following geometry refinement stage. We compare the computation efficiency with the baseline VSD in Table 2. We can save much computation time cost by only using this approximation.  
+
+![](images/59c4899b9db47a78c5659840df9acfa646070bc70abbd9cde9ec9dca298a9419.jpg)  
+Figure 10: Examples of combining ESD with $L^{2}$ -VSD. We can observe that in the case of “sunflower”, by combining our method, we obtain a reasonable sunflower rather than a “sunball”. In the case of “bulldozer”, with a linearized lookahead, ESD can generate additional elements like bricks.  
+
+![](images/3979dfc926300db82e3f6925fba3a2fc09f64b415ef81b640c53e3220951b0b5.jpg)  
+Figure 11: Examples of combining HiFA with $L^{2}$ -VSD. The colors are more realistic and the appearance of our method’s results aligns better with the prompts.  
+
+
+
+\section{5.5 CONNECTION WITH OTHER DIFFUSION DISTILLATION METHODS  }
+
+
+ESD (Wang et al., 2024a) is dedicated to solving the Janus problem based on VSD. It maximizes the entropy of different views of the generated results, encouraging diversity across views. The gradient of ESD is theoretically equivalent to adopting CFG (Ho & Salimans, 2022) trick upon VSD, i.e.  
+
+$$
+7_{\theta_{i}}\mathcal{L}_{E S D}(\theta_{i})=\mathbb{E}_{t,\epsilon,c}\left[w(t)(\epsilon_{p r e t r a i n}(x_{t},t,y)-\lambda\epsilon_{\phi_{i}}(x_{t},t,\theta,y)-(1-\lambda)\epsilon_{\phi_{i}}(x_{t},t,c,y))\frac{\partial g(\theta,c)}{\partial\theta}\Big|_{\theta=\theta_{i}}\right],
+$$  
+
+where $\lambda$ is a scaling factor. Our method can also be incorporated into ESD. We name this as $L^{2}$ -ESD. We present the corresponding results in Fig. 10. The prompts we use are “a sunflower on a flowerpot” and “a bulldozer made out of toy bricks” respectively. To avoid unnecessary trials, we simply set $\lambda$ to 0.5, which is recommended in ESD. As we can observe, compared with ESD, the 3D results are more photo-realistic with distinct shapes.  
+
+HiFA (Zhu et al., 2023) is a state-of-the-art approach for high-quality 3D generation in a single-stage training based on basic methods. It distills denoising scores from pretrained models in both the image and latent spaces and proposes several techniques to improve NeRF generation, which are orthogonal to our method. We demonstrate our method’s compatibility by combining with HiFA, naming as $L^{2}$ -HiFA. We present the results in Fig. 11. The prompts we use are “an elephant skull” and “Pumpkin head zombie, skinny, highly detailed, photorealistic” respectively.  
+
+In conclusion, it’s believed that $L^{2}$ -VSD can be combined with other parallel techniques in the future.  
+
+6 DISCUSSION, CONCLUSION AND LIMITATION  
+
+In this paper, we dive deep into the theory of VSD, having a comprehensive understanding of inner process and identify two potential directions for improvement. In terms of the algorithm formulation, we propose Linearized Lookahead Variational Score Distillation( $L^{2}$ -VSD), a novel framework based on VSD that achieves state-of-the-art results on text-to-3D generation. The linearized lookahead term enables us to benefti from both better convergence and lookahead for next iteration. More importantly, our method can be incorporated into any VSD-based framework in the future.  
+
+Limitations and broader impact. Firstly, although $L^{2}$ -VSD achieves remarkable improvement on text-to-3D results, the generation process still takes hours of time, which is a common issue for score distillation based methods. We believe orthogonal improvements on distillation accelerating (Zhou et al., 2023) can mitigate this problem. Secondly, while we find the first-order term shows regular pattern and some similarity may exist between our method and SiD (Zhou et al. Investigating the underlying reasons is of significant interest in the future. Lastly, as for broader impact, like other generative models, our method may be utilized to generate fake and malicious contents, which needs more attention and caution.  
+
+
+

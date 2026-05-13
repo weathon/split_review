@@ -1,0 +1,872 @@
+\title{DON’T STOP ME NOW: EMBEDDING BASED SCHEDULING FOR LLMS}
+
+\begin{abstract}
+
+Efficient scheduling is crucial for interactive Large Language Model (LLM) applications, where low request completion time directly impacts user engagement.
+Size-based scheduling algorithms like Shortest Remaining Process Time (SRPT) aim to reduce average request completion time by leveraging known or estimated request sizes and allowing preemption by incoming jobs with shorter service times.
+However, two main challenges arise when applying size-based scheduling to LLM systems. First, accurately predicting output lengths from prompts is challenging and often resource-intensive, making it impractical for many systems. As a result, the state-of-the-art LLM systems default to first-come, first-served scheduling, which can lead to head-of-line blocking and reduced system efficiency. Second, preemption introduces extra memory overhead to LLM systems as they must maintain intermediate states for unfinished (preempted) requests.
+
+In this paper, we propose \algnospace{}, a method to obtain output predictions from the target LLM itself. After generating each output token, we recycle the embedding of its internal structure as input for a lightweight classifier that predicts the remaining length for each running request.
+Using these predictions, we propose a prediction-based SRPT variant with limited preemption designed to account for memory overhead in LLM systems.
+This variant allows preemption early in request execution when memory consumption is low but restricts preemption as requests approach completion to optimize resource utilization. On the theoretical side, we derive a closed-form formula for this SRPT variant in an M/G/1 queue model, which demonstrates its potential value. In our system, we implement this preemption policy alongside our embedding-based prediction method. Our refined predictions from layer embeddings achieve 2.66x lower mean absolute error compared to BERT predictions from sequence prompts. \alg{} achieves 1.66x to 2.01x lower mean latency on the Alpaca dataset and 1.76x to 24.07x lower mean time to the first token compared to the state-of-the-art serving system.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent advances in large language models (LLMs) have sparked a new generation of interactive AI applications. OpenAI's ChatGPT~\citep{openai2022chatgpt} exemplifies this trend, facilitating conversational interaction across diverse tasks. The interactive nature of these applications requires low request completion time to ensure user engagement. Users expect near-instant responses, making efficient inference serving critical for LLM-based interactive AI applications.
+
+LLM inference requests exhibit a distinct autoregressive pattern comprising multiple iterations in which each output token is appended to the input to generate the next token. Orca~\citep{yu2022orca} and vLLM~\citep{kwon2023efficient} are state-of-the-art solutions for LLM inference systems. These systems use iteration-level scheduling, which allows new requests to be added or completed requests to be removed at the end of each iteration, providing greater flexibility in managing the processing batch than request-level scheduling. However, these works still process requests using a first-come-first-served (FCFS) policy, leading to head-of-line blocking~\citep{kaffes2019shinjuku} under high load. This problem is particularly severe for LLM inference, where many short requests may wait for other long requests to finish.
+
+Size-based scheduling aims to reduce request completion time by leveraging known or estimated request sizes. For LLM requests, the execution time depends on both input and output lengths, with the latter being unknown and potentially variable. 
+Preemption allows for dynamic scheduling: when one scheduled request finishes generating an output token, we can decide whether to continue this request or preempt it with another (newly arrived) request. The Shortest Remaining Process Time (SRPT) policy is an example of preemption scheduling.
+However, preemption here introduces extra memory overhead to maintain an intermediate state for started but unfinished requests. LLMs maintain a key-value (KV) cache for each Transformer layer to store the intermediate state. In preemption scheduling policies, the cache must keep the intermediate state for all started but unfinished requests in the waiting queue, which may cause memory overflow, given the large size of LLMs and the limited memory capacity of GPUs. (Non-preemptive policies, e.g. FCFS, do not face this issue, as there are no unfinished requests in the waiting queue.) 
+Recent works propose methods to predict request sizes. $S^3$~\citep{jin2023s} fine-tunes a BERT model~\citep{sanh2019distilbert} to predict output sequence lengths from input prompts. While this model is lightweight in resources, its accuracy diminishes for requests with varying execution times. Zheng et al.~\citep{zheng2024response} employ a separate, lighter LLM to predict output lengths before scheduling, achieving higher precision than the BERT model. However, this approach consumes more resources, raising questions about its efficiency and cost-effectiveness in practical applications. Another method proposed by the same work is \emph{Perception in Advance}, where models are asked to predict the length of the responses they are about to generate. However, this approach is limited by potential dependencies between the prediction and the generated output, which may affect the quality of the output.
+In this paper, we introduce \algnospace{} (\algFULL{}), a novel approach that improves the response time in LLM inference through two key contributions: (1) iteration-level predictions for request lengths with low overhead and high accuracy to enable size-based scheduling, and (2) preemption scheduling at token granularity that accounts for memory overhead. For predictions, our approach takes advantage of the autoregressive nature of LLM output generation to predict the output size and facilitate the prediction of request length at the granularity of individual tokens. We begin with an initial prediction based on the prompt and iteratively refine these predictions as the sequence progresses by innovatively using LLM layer embeddings. Specifically, we ``recycle'' the embedding from intermediate Transformer layers of the LLM, feeding them into a lightweight linear classifier to predict the remaining sequence length. This method, which involves analyzing the outputs of the internal model layer by using them as input for a separate machine learning predictor, is commonly referred to as \emph{probing}~\citep{belinkov2022probing, hewitt2019designing, hewitt2019structural}. This approach combines the advantages of LLM-based prediction with computational efficiency, eliminating the need for an additional LLM dedicated solely to length predictions.
+To address the memory constraints for preemption scheduling, \algnospace{} limits the number of times each request can be preempted and introduces SRPT with limited preemptions. Early in the request's execution, preemption is allowed since its KV cache memory usage is small, making preemption less costly in terms of memory. However, as the request progresses and its memory consumption in the KV cache grows, preemption becomes more expensive. To manage this, we turn the preemption off in the later stages of the request to avoid a heavy memory overhead.
+
+
+Our contributions in this paper are (1) an output length prediction framework using recycled LLM embeddings, with dynamic refinement at each iteration. In our experiments, refined predictions from layer embeddings achieve 2.66x lower mean absolute error compared to BERT predictions from sequence prompts (2) a proposed variant of Shortest Remaining Processing Time using these predictions with limited preemptions (3) a derivation of a closed-form formula for this SRPT variant in an M/G/1 queue model.
+We also show via experiments that our prediction and scheduling approaches result in mitigating head-of-line blocking. When \alg{} is integrated with a state-of-the-art LLM system, it has 1.66x to 2.01x lower mean latency and 1.76x to 24.07x lower mean time to first token compared to the state-of-the-art serving system tested with the Alpaca dataset. Our \algnospace{} approach has the potential to significantly enhance LLM inference efficiency and reliability, paving the way for more adaptive LLM serving systems.
+
+\begin{comment}
+
+Our work extends the iteration-level scheduling concept introduced by ORCA~\citep{yu2022orca}. By utilizing embeddings from the LLM's last layer, we open the door to developing lightweight, real-time prediction for output length. This iteration-level approach allows dynamic optimization of the generation process, tailored to specific applications. Our approach has the potential to significantly enhance LLM inference efficiency and reliability, paving the way for more adaptive LLM serving systems.
+
+Story:
+- LLM in use widely these days but the sequence behaviour is unpredictable (look at fast-serve paper)
+
+- one of these properties is the output length because FCFS is OK when the job sizes are roughly the same and  it is not the case in LLM (could be three orders of magnitude (explain different LLM tasks)
+which enables size-aware scheduling policies. knowing length of the requests can mitigate interference requests among decoding instances at runtime based on the predicted length and enable us to implement size aware policies like SJF and LJF (explain what is the goal of each one)
+- There has been a line of word that trying to predict output length based on prompt as an input using lightweight model, however, the accuracy of this model depends much on the trained data. Moreover, as the sequence is processed in an auto-regressive manner we have more knowledge of the length.
+
+- another line of work is the use another LLM (different than the target LLM) to predict properties of the sequence which is costly.
+
+- in this work we argue that the target LLM could contains information about the length as we generate the output, token by token, and we could utilize ("recycles" it) it to other task, such as length prediction "almost free". That is, with each token, we could be more smater about predicting length. This information is the embedding of the last layer of the LLM. More importantly, we use lightweight linear classifier that uses the embedding of the last layer of the LLM while generating the tokens, which called probing.
+
+- In our approach we overcome the limitation of the previous predictors: (1) we improve the accuracy of the prediction over time while generating the tokens
+(2) we avoid costly separate LLM models for the prediction
+
+- why we can use the prediction per token? because now the state of the art is iteration-level scheduling which enables "correct" our decision in iteration level.
+
+====================
+Your introduction has a strong foundation, and with some refinement, it can be even more compelling. Here's a refined version along with a suggested outline for a convincing narrative:
+
+---
+
+### Refined Introduction:
+
+**Introduction:**
+
+Large Language Models (LLMs) have become a cornerstone of modern AI applications, but their behavior, particularly in sequence generation, remains unpredictable. This unpredictability poses challenges in managing system resources efficiently, especially when dealing with varied output lengths across different tasks. For example, in LLM tasks, output lengths can differ by orders of magnitude, leading to significant disparities in processing times. While First-Come, First-Served (FCFS) scheduling works well when job sizes are similar, it struggles with such variability. This situation calls for size-aware scheduling policies, like Shortest Job First (SJF) and Longest Job First (LJF), which aim to minimize processing delays and optimize resource utilization.
+
+To implement these policies effectively, predicting the length of each job becomes crucial. Existing approaches have attempted to predict output length using lightweight models based on the input prompt. However, these methods heavily rely on the quality of the training data, leading to variable accuracy. Moreover, as sequence generation in LLMs is typically performed in an auto-regressive manner, more information about the output length becomes available as the sequence unfolds.
+
+Another line of work suggests using a different LLM to predict sequence properties, including output length. However, this approach is computationally expensive and may not be practical in real-time applications.
+
+In this work, we propose a novel approach that leverages the target LLM itself to predict output length as it generates tokens. Specifically, we utilize the embedding from the last layer of the LLM at each token generation step. This approach allows us to recycle existing computations to predict the output length "almost for free." By employing a lightweight linear classifier, which probes the LLM’s embeddings during the decoding process, our method incrementally improves prediction accuracy with each generated token. 
+
+Our approach addresses the limitations of previous methods by: 
+1. Enhancing prediction accuracy as the sequence progresses.
+2. Eliminating the need for costly, separate LLM models dedicated to length prediction.
+
+This token-level prediction aligns with the latest advances in iteration-level scheduling, enabling dynamic adjustments and more accurate decision-making at each step.
+
+### Suggested Outline for a "Killer" and Convincing Story:
+
+1. **Introduction to the Problem:**
+   - Start with the widespread use of LLMs and their inherent unpredictability in sequence generation.
+   - Highlight the specific challenge of output length variability and its impact on scheduling.
+   - Introduce the importance of size-aware scheduling policies and their potential benefits.
+
+2. **Current Solutions and Their Limitations:**
+   - Discuss existing methods that predict output length based on input prompts, focusing on their reliance on training data and the limitations in accuracy.
+   - Explain the alternative approach of using a separate LLM for prediction, emphasizing the associated computational costs.
+
+3. **Our Approach:**
+   - Introduce the core idea of using the target LLM’s embeddings for length prediction during sequence generation.
+   - Explain the concept of "recycling" LLM embeddings to achieve efficient and nearly cost-free length prediction.
+   - Describe the use of a lightweight linear classifier to probe these embeddings.
+
+4. **Advantages of Our Method:**
+   - Highlight how the prediction accuracy improves with each token, making the approach more effective as the sequence unfolds.
+   - Discuss the elimination of the need for a separate LLM, reducing computational overhead.
+
+5. **Integration with State-of-the-Art Scheduling:**
+   - Connect the token-level prediction with iteration-level scheduling.
+   - Explain how this integration allows for real-time adjustments and more accurate decision-making.
+
+6. **Conclusion and Impact:**
+   - Summarize the key benefits of your approach.
+   - Emphasize the potential impact on real-world applications where efficient resource management is critical.
+Our approach is applied to length prediction but could open a new research line of work "By leveraging the embeddings of the last layer of the LLM, your approach could be extended to predict these properties in a lightweight, real-time manner. This could involve training additional classifiers or predictors on top of these embeddings, similar to your current approach with length prediction. Each of these predictions could be used to adapt and optimize the generation process dynamically, making the LLM more efficient, reliable, and tailored to specific application needs."
+
+\end{comment}
+
+
+
+\section{Background and Motivation}
+
+\label{sec:background_motivation}
+\paragraph{Transformer-Based Generative Models and Key-Value Cache.}
+
+At each step, a Transformer model predicts the next most likely token based on the sequence of tokens generated so far. A generative model of length $n$ must perform $n$ iterations, with each token passing through multiple transformer layers composed of self-attention and feed-forward networks.
+
+In a typical iteration at the $i$-th step, the model computes over all previously generated tokens ($t_0, t_1, \dots, t_{i-1}$) via self-attention. This can be expressed as:
+\[
+h_{\text{out}} = \text{softmax}\left(\frac{q_i \cdot K^\top}{\sqrt{d_h}}\right) \cdot V
+\]
+Where $q_i$ is the query vector representing the hidden state of the current token $t_i$, and $K, V \in \mathbb{R}^{i \times d_h}$ are matrices representing the keys and values derived from all previous tokens.
+To enhance efficiency, LLMs cache the key and value matrices (KV cache) throughout the sequence generation process, eliminating the need to recompute them at every iteration. This caching mechanism significantly reduces computation time but requires substantial memory proportional to the number of layers and hidden dimensions. As more tokens are generated, the cache stores information from all previously generated tokens, and its memory demand grows linearly with the length of the sequence. This makes the memory consumption of the KV cache considerable, especially for long sequences.
+For example, in the GPT-3 175B model, a single request with a sequence length of 512 tokens requires at least 2.3 GB of memory to store the key-value pairs. The limited capacity of GPU memory restricts the size of the KV cache and poses a challenge to efficiently implementing preemptive scheduling policies.
+
+\paragraph{Iteration-Level Scheduling.}
+Iteration-level scheduling differs from the conventional request-level scheduling approach. In request-level scheduling, the system processes a batch of requests to completion, forcing requests that finish earlier to wait until the entire batch completes, while new requests must remain in a queue until the next batch begins. In contrast, iteration-level scheduling~\citep{yu2022orca} offers flexibility by processing only a single iteration (i.e., generating one output token) for each request in the batch. After each iteration, the scheduler is called, and the completed requests can exit the batch while newly arrived requests can be added, allowing dynamic batch adjustments. However, the batch size remains constrained by the GPU memory capacity.
+
+
+\section{Theory}
+
+
+\subsection{Limited Preemption}
+
+We focus on limiting preemptions per job to address memory constraints. Early in the job's execution, preemptions are less costly since minimal resources have been consumed. However, as the job nears completion, avoiding preemption becomes critical to ensure timely completion. To manage this, we introduce a job descriptor \((x, r), a\), and define a threshold \(a_0 = C \cdot x\) (where \(C\) can be determined, when $C=1$ it is SPRPT). Before reaching \(a_0\), the rank function is \(r - a\), allowing preemption. Once \(a_0\) is exceeded, preemption is disabled by setting the rank function to \(-\infty\).
+    
+SPRPT with limited preemption has a rank function for job of size $x$ and predicted size $r$
+
+\[
+rank((x,r), a)  = 
+\begin{cases} 
+r-a & \text{if } a < a_0 \\
+-\infty  & else
+\end{cases}
+\]
+\rana{we can also use $-a$ instead of $-\infty$}
+
+As this rank function is monotonic, $J$'s worst future rank is its initial prediction:
+
+\[
+rank_{d_J, x_J}^{\text{worst}} (a)  = 
+\begin{cases} 
+r-a_0 & \text{if } a < a_0 \\
+-\infty  & else
+\end{cases}
+\]
+
+When $a_J=0$, the rank function is denoted by $r_{worst}= rank_{d_J, x_J}^{\text{worst}} (0) = r$.
+
+\begin{lemma}
+\label{lem:sprpt_ext}
+    For SPRPT with limited preemption, where at age $a_0$ the jobs become non-presentable, the expected mean response time for a job of true size $x_J$ and predicted size $r$ is
+    
+    \begin{align*}
+\mathbb{E}[T(x_J, r)]^{{SPRPT}} = &\frac{\lambda \left(\int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I^2\cdot  g(x_I, y) dx_I dy + \int_{t = r + a_0}^{\infty} \int_{x_I = t-r}^{\infty} g(x_I, t) \cdot(x_I - (t - r))^2 \cdot dx_I dt\right)}{2(1-\rho'_r)^2} \\
+&+ \int_{0}^{a_0} \frac{1}{1-\rho'_{(r-a)^+}} \, da + (x_J - a_0).
+\end{align*}
+ where $\rho'_r= \lambda \int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I \cdot g(x_I,y) dx_I dy$.
+\end{lemma}
+
+\begin{proof}
+    
+\subsubsection{$X^{\text{new}}[rank_{d_J, x_J}^{\text{worst}} (a)]$ computation:}
+Suppose that a new job $K$ of predicted size $r_K$ arrives when $J$ has age $a$.
+If $a < a_0$ and $K$ has a predicted job size less than $J$'s predicted remaining process time ($r - a$), $K$ will always outrank $J$. Thus
+
+\[
+X_{x_K}^{\text{new}}[r - a] = x_K \mathbf{1}(r_K < r - a) \mathbf{1}(a < a_0)
+\]
+\begin{align*}
+\mathbb{E}[X^{new}[r - a]] = \int_{0}^{r-a} \int_{x_K = 0}^{\infty} x_K \cdot g(x_K,y) dx_K dy \\
+\end{align*}
+\subsubsection{$X_{0}^{\text{old}}[r_{worst}]$ computation:}
+Whether job $I$ is an original or recycled job depends on its predicted size relative to J's predicted size.
+If $r_I \le r$, then $I$ is original until its completion because its rank never exceeds $r$.
+
+\[
+X_{0, x_I}^{\text{old}}[r] = x_I\mathds{1}(r_I \le r).
+\]
+
+\begin{align*}
+\mathbb{E}[X_{0}^{\text{old}}[r]] = \int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I \cdot g(x_I,y) dx_I dy.
+\end{align*}
+\begin{align*}
+\mathbb{E}[(X_{0}^{\text{old}}[r])^2]] = \int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I^2 \cdot g(x_I, y) dx_I dy.
+\end{align*}
+
+
+
+\subsubsection{$X_{i}^{\text{old}}[r_{worst}]$ computation:}
+If $r_I > r$, then $I$ starts discarded but becomes recycled when $r_I - a = r$. This means at age $a = r_I -r$ and served till completion only if $a<a_0$, which will be $x_I - a_I = x_I - (r_I - r)$:
+
+Thus, we have
+\[
+X_{1, x_I}^{\text{old}}[r] = x_I - (r_I- r).
+\]
+For $i \ge 2$, $$X_{i, x_I}^{\text{old}}[r] = 0.$$
+
+\begin{align*}
+\mathbb{E}[X_{1}^{\text{old}}[r]^2] = \int_{r_I= r + a_0}^{\infty} \int_{x_I = r_I-r}^{\infty} g(x_I, t) \cdot (x_I - (r_I- r))^2 \cdot dx_I dr_I.
+\end{align*}
+
+Applying Theorem 5.5 of SOAP~\citep{scully2018soap} yields that the mean response time of jobs with descriptor ($r$) and size $x_J$ is as follows.
+Let
+$$\rho'_r= \lambda \int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I \cdot g(x_I,y) dx_I dy.$$
+Then
+
+\begin{align*}
+\mathbb{E}[T(x_J, r)]^{{SPRPT}} = &\frac{\lambda \left(\int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I^2\cdot  g(x_I, y) dx_I dy + \int_{t = r + a_0}^{\infty} \int_{x_I = t-r}^{\infty} g(x_I, t) \cdot(x_I - (t - r))^2 \cdot dx_I dt\right)}{2(1-\rho'_r)^2} \\
+&+ \int_{0}^{a_0} \frac{1}{1-\rho'_{(r-a)^+}} \, da + (x_J - a_0).
+\end{align*}
+
+Let $f_p(y) = \int_{x=0}^{\infty} g(x,y) dx$. Then the mean response time for a job with size $x_J$, and the mean response time over all jobs are given by 
+$$\mathbb{E}[T(x_J)] = \int_{y=0}^{\infty} f_p(y) \mathbb{E}[T(x_J,y)] dy,$$
+$$\mathbb{E}[T]^{{SPRPT}} = \int_{x=0}^{\infty} \int_{y=0}^{\infty} g(x,y)  \mathbb{E}[T(x,y)] dy dx.$$
+
+\end{proof}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/limited_P_sim/new_new_response_memory_vs_arrival_C_val_0.0.png}
+        \caption{vs. arrival rate when $C=0$}
+        \label{fig:fig1}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/limited_P_sim/new_new_response_memory_vs_arrival_C_val_0.8.png}
+        \caption{vs. arrival rate when $C=0.8$}
+        \label{fig:fig2}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/limited_P_sim/new_new_response_memory_vs_arrival_C_val_1.0.png}
+        \caption{vs. arrival rate when $C=1$}
+        \label{fig:fig3}
+    \end{minipage}
+    
+    \vskip\baselineskip  % Add vertical space between rows
+    
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/limited_P_sim/new_new_response_memory_vs_c_arrival_rate_0.8.png}
+        \caption{vs. $C$ when $\lambda=0.8$}
+        \label{fig:fig4}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/limited_P_sim/new_new_response_memory_vs_c_arrival_rate_0.9.png}
+        \caption{vs. $C$ when $\lambda=0.9$}
+        \label{fig:fig5}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/limited_P_sim/new_new_response_memory_vs_c_arrival_rate_0.95.png}
+        \caption{vs. $C$ when $\lambda=0.95$}
+        \label{fig:fig6}
+    \end{minipage}
+\end{figure}
+
+Overall performance can be defined as the sum of the job's expected response time and the peak memory usage.
+\subsection{Refined Predictions}
+
+We consider M/G/1 queueing systems with arrival rate $\lambda$. The processing times for each arriving job are independent and drawn based on the cumulative distribution $F(x)$, with an associated density function $f(x)$.
+
+Given a job of size $X = x$, and a sequence of refined predictions $Y_0, Y_1, \dots, Y_x$, where $Y_i$ represents the prediction after processing $i$ units of $x$, we model the refined predictions as follows:
+The probability of the refined prediction $y_i$ at step $i$, given the actual size $x$ and the entire history of previous predictions, is denoted as:
+\[
+P(Y_i = y_i \mid X = x, Y_{i-1} = y_{i-1}, Y_{i-2} = y_{i-2}, \dots, Y_0 = y_0)
+\]
+Under the Markovian assumption, the refined prediction at step $i$ depends only on the actual size $x$ and the previous prediction $y_{i-1}$:
+\[
+P(Y_i = y_i \mid X = x, Y_{i-1} = y_{i-1}, Y_{i-2} = y_{i-2}, \dots, Y_0 = y_0) = P(Y_i = y_i \mid X = x, Y_{i-1} = y_{i-1})
+\]
+The joint probability of the sequence of predictions $Y_0, Y_1, \dots, Y_x$ can be modeled as:
+\[
+P(Y_0 = y_0, Y_1 = y_1, \dots, Y_x = y_x \mid X = x) = P(Y_0 = y_0 \mid X = x) \prod_{i=1}^{x} P(Y_i = y_i \mid X = x, Y_{i-1} = y_{i-1})
+\]
+
+The density function $g(x, y)$ corresponding to the list of predictions $y = [y_0, y_1, \dots, y_{x-1}]$, where each $y_i$ is obtained after processing one unit of job $x$, is obtained by summing over all possible refined predictions:
+\[
+g(x, y) = \sum_{y_0=0}^{\infty} \sum_{y_1=0}^{\infty} \dots \sum_{y_{x-1}=0}^{\infty} P(Y_0 = y_0, Y_1 = y_1, \dots, Y_{x-1} = y_{x-1} \mid X = x)
+\]
+
+\subsection{SPRPT with refined predictions}
+The relevant attributes are size and the refined prediction list $r$.
+We can model the system using descriptor $\mathcal{D} =$ [size, list of refined predictions] $= [x,r]$.
+    
+SPRPT has a rank function $rank(r, a) = r[a] - a$ for job of size $x$ and predicted size $r[a]$ at time $a$. We denote the maximum rank function as $r_{max}$.
+
+$J$'s worst future rank is:
+\[
+rank_{d_J, x_J}^{\text{worst}}(a)= \sup_{a < b < x} (r[b] - b) = \max_{a < b < x} (r[b] - b)
+\]
+When $a_J=0$, the rank function is denoted by $r_{worst}= rank_{d_J, x_J}^{\text{worst}} (0) = r_{max}$.
+
+
+\subsubsection{$X^{\text{new}}[rank_{d_J, x_J}^{\text{worst}} (a)]$ computation:}
+Suppose that a new job $K$ of predicted size $r_K$ arrives when $J$ has age $a$. 
+Let $ a_{J_0}$ be the age of job $ J$ when job $ K$ arrives. %The corresponding age of job $ K$ at each step $ i$ is $ a_K[i] = a_J[i] - a_{J_0}$.
+
+$ K$ has a lower rank than the worst possible rank of job $ J$ is given by:
+
+
+\[
+X_{x_K}^{new}[rank_{d_J, x_J}^{\text{worst}}(a)]  = \sum_{a_K=0}^{x_K}  \mathbf{1}\left(r_K[a_K] - a_K < \max_{a_{J_0} < b < x_J} (r[b] - b)\right) \cdot \mathbf{1}\left(\forall j < a_I, \, r_I[j] - j < \max_{a_{J_0} < b < x_J} (r[b] - b)\right)
+\]
+
+where $ \mathbf{1}(\cdot)$ is the indicator function, which equals 1 if the condition inside is true and 0 otherwise.
+\begin{align*}
+\mathbb{E}[X^{new}[rank_{d_J, x_J}^{\text{worst}}(a)] ]= \sum_{x_K=0}^{\infty} \left( \sum_{a_K=0}^{x_K}  \mathbf{1}\left(r_K[a_K] - a_K < \max_{a_{J_0} < b < x_J} (r[b] - b)\right) \\  \cdot \mathbf{1}\left(\forall j < a_I, \, r_I[j] - j < \max_{a_{J_0} < b < x_J} (r[b] - b)\right) \right) \cdot g(x_K, y)
+\end{align*}
+
+where the density function $ g(x_K, y)$ is defined as:
+
+\[
+g(x_K, y) = \sum_{y_0=0}^{\infty} \sum_{y_1=0}^{\infty} \dots \sum_{y_{x_K-1}=0}^{\infty} P(Y_0 = y_0, Y_1 = y_1, \dots, Y_{x_K-1} = y_{x_K-1} \mid X = x_K)
+\]
+
+\subsubsection{$X_{0}^{\text{old}}[r_{worst}]$ computation:}
+Whether job $I$ is an original depends on its predicted size relative to J's predicted size.
+$I$ is original till it is exceeds $r_{max}$. we terminate the summing once you encounter an age where $r_I[a_I] - a_I > r_{max}$
+
+\[
+X_{0, x_I}^{\text{old}}[r_{max}] = \sum_{a_I=0}^{x_I} \mathbf{1}\left(r_I[a_I] - a_I < r_{max} \right) \cdot \mathbf{1}\left(\forall j < a_I, \, r_I[j] - j < r_{max}\right)
+\]
+
+\subsubsection{$X_{i}^{\text{old}}[r_{worst}]$ computation:}
+If $r_I > r$, then $I$ starts discarded but becomes recycled when $r_I[a] - a = r_{worst}$. This means at age $a = r_I[a_I] -r_{worst}$ and served till it will be again about $r_{worst}$,
+
+\begin{comment}
+Let interval $ m$ start at age $ a_{m, \text{start}}$ and end at age $ a_{m, \text{end}}$.
+
+The summation for interval $ m$, where the rank of job $ I$ is less than $ r_{max}$, and before and after the interval, the rank is higher, is given by:
+
+\[
+X_{m}^{\text{OLD}}[r_{max}] = \sum_{a_I = a_{m,\text{start}}}^{a_{m,\text{end}}} \mathbf{1}\left(r_I[a_I] - a_I < r_{max} \right) \cdot \mathbf{1}\left(\forall j < a_{m,\text{start}}, \, r_I[j] - j > r_{max}\right) \cdot \mathbf{1}\left(\forall k > a_{m,\text{end}}, \, r_I[k] - k > r_{max}\right)
+\]
+
+
+which will be $x_I - a_I = x_I - (r_I - r)$,  let $t = r_I$:
+\end{comment}
+
+
+Let  $i$ be an interval index. The $i$-interval for job $ I$ is defined as the interval of ages during which the rank of job $ I$ is less than $ r_{max}$. Specifically:
+
+\[
+b_0[r] = 0
+\]
+This indicates that the first interval starts at age 0.
+
+\[
+c_0[r] = \inf \{a > 0 \mid r_I(a) - a > r_{max} \}
+\]
+Here, $ c_0[r]$ is the smallest age greater than 0 where the rank function $ r_I(a) - a$ becomes greater than $ r_{max}$, marking the end of the first interval where the rank is less than $ r_{max}$.
+
+For subsequent intervals $i\geq 1$:
+
+\[
+b_i[r] = \inf \{a \geq c_{i-1}[r] \mid r_I(a) - a < r_{max} \}
+\]
+This is the starting point of the $i$-th interval, which begins as soon as the rank $ r_I(a) - a$ drops below $ r_{max}$ again after the previous interval $ [b_{i-1}[r], c_{i-1}[r]]$.
+
+\[
+c_i[r] = \inf \{a > b_i[r] \mid r_I(a) - a > r_{max} \}
+\]
+Here, $ c_i[r]$ is the endpoint of the $i$-th interval, where the rank $ r_I(a) - a$ becomes greater than $ r_{max}$ again.
+
+For $i\geq 0$, the $i$-interval work is a random variable, written $ X_i^{\text{OLD}}[r]$, representing the sum of the tokens where job $ I$ has rank less than $ r_{max}$ within its $i$-interval.
+
+\[
+X_i^{\text{OLD}}[r] = 
+\begin{cases} 
+0 & \text{if } X_d < b_i[r] \\
+X_d - b_i[r] & \text{if } b_i[r] \leq X_d < c_i[r] \\
+c_i[r] - b_i[r] & \text{if } c_i[r] \leq X_d
+\end{cases}
+\]
+
+If $ b_i[r] = c_i[r] = \infty$, we define $ X_i^{\text{OLD}}[r] = 0$.
+\todo[inline]{prove with one refined prediction and then we can make it more general with any number of refined predictions}
+
+\begin{comment}
+    
+Given a job of size $X = x$, and a sequence of refined predictions $Y_0, Y_1, \dots, Y_x$, where $Y_i$ represents the prediction after processing $i$ units of $x$, we model the refined predictions as follows:
+The probability of the refined prediction $y_i$ at step $i$, given the actual size $x$ and the previous prediction $y_{i-1}$, is denoted as:
+\[
+P(Y_i = y_i \mid X = x, Y_{i-1} = y_{i-1}, Y_{i-2} = y_{i-2}, \cdots)
+\]
+
+The joint probability of the sequence of predictions $Y_0, Y_1, \dots, Y_x$ can be modeled as:
+\[
+P(Y_0 = y_0, Y_1 = y_1, \dots, Y_x = y_x \mid X = x) = P(Y_0 = y_0 \mid X = x) \prod_{i=1}^{x} P(Y_i = y_i \mid X = x, Y_{i-1} = y_{i-1}, Y_{i-2} = y_{i-2}, \cdots)
+\]
+
+The density function $g(x, y)$ corresponding to the final prediction after processing the entire job of size $x$ is obtained by summing over all possible refined predictions:
+\[
+g(x, y) = \sum_{y_0, y_1, \dots, y_{x-1}} P(Y_0 = y_0, Y_1 = y_1, \dots, Y_x = y \mid X = x)
+\]
+\end{comment}
+
+
+
+\section{Method}
+
+
+\begin{figure}[th]
+    \centering
+    \includegraphics[width=0.6\linewidth]{sections/figures/u_trail_overview.pdf}
+    \caption{\alg{} architecture. The system (1) initially orders requests using a BERT model, (2) schedules requests using a modified SPRPT with limited preemption, and (3) refines predictions during token generation using embeddings from the LLM's internal layers. At every iteration, steps 2 and 3 are repeated (represented as red dashed lines), which allows preemption at iteration-level granularity and refined predictions. We focus on identifying the LLM layer that best predicts output length rather than using multi-layer embeddings ($i=j=11$).}
+    \label{fig:alg_arch}
+\end{figure}
+
+\alg{} leverages the autoregressive nature of LLM inference and iteration-level scheduling, employing two primary strategies to reduce LLM inference response time: iteration-level prediction and preemption that accounts for memory overhead. \alg{} uses low-overhead, high-accuracy predictions by utilizing the intermediate layer embeddings of the LLM itself to predict output length while implementing token-granular, limited preemption scheduling to account for the memory overhead associated with preemption.
+Figure~\ref{fig:alg_arch} illustrates the \alg{} architecture. Users submit requests to the request pool. \alg{} initially orders requests using a BERT model based on input prompts (Step 1). This method relies exclusively on the prompt using BERT suggested in~\citep{jin2023s}. Given the predictions of the output lengths, the scheduler implements a variant of the Shortest Predicted Remaining Process Time (SPRPT) with limited preemption (Step 2, Section~\ref{sec:scheduling}). Although SPRPT is traditionally designed for single-server, sequential scheduling, we adapt it to handle multiple concurrent requests while still prioritizing those with the shortest predicted remaining time. The number of requests that can be scheduled simultaneously is limited by the available GPU memory. As the LLM generates each output token, we refine predictions using embeddings from the LLM's intermediate layers. A linear classifier processes these embeddings and informs the scheduler, which adjusts based on updated predictions (Section~\ref{sec:output_prediction}).
+
+\subsection{Refined Output Length Prediction}
+\label{sec:output_prediction}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.5\linewidth]{sections/figures/prediction_acc/per_layer_predictions.pdf}
+    \caption{MAE for length prediction using embeddings vs. layer (1,000 prompts).}
+    \label{fig:layers_acc}
+\end{figure}
+
+In this section, we describe our method for estimating the prompt length based on intermediate layer embeddings in the LLM. 
+\textbf{\emph{Problem Definition.}}
+Denote by $\vu^{(1)}, \dots, \vu^{(N)} \in \mathbb{R}^d$ the output of some intermediate layer for the $N$ output tokens generated by the model (where $d$ is the hidden dimension of the Transformer). Additionally, we denote by $\vu^{(0)}$ the embedding of the input (during the prefilling phase), which is generated by averaging the embeddings of all the input tokens at the given layer. Let $B_1, \dots, B_k \subset \mathbb{N}$ be a choice of bins for the length prediction, i.e. $B_i = \{b_i, b_i+1, \dots, b_{i+1}-1\}$ for some choice of bin boundaries $b_1 < b_2 < \dots < b_{k+1}$. 
+We train a linear classifier that, given some embedding $\vu^{(t)}$, outputs a vector $p^{(t)} \in [0,1]^k$ where $p^{(t)}(j)$ indicates the probability that the number of remaining tokens (i.e., $N-t$) is in $B_j$.
+Our approach focuses on identifying which LLM layer provides the most accurate predictions for the output length. One potential extension would be to select multiple layers and estimate the prediction using either a weighted average of their outputs or training a linear classifier based on embeddings from several layers. We leave this multi-layer approach for future work.
+To do so, we have to profile numerous parameters across all LLM layers for each request.
+Using LLama3-8b-instruct as our model and the Alpaca dataset~\citep{alpaca}, our profiling process begins by extracting embedded elements from each layer during the prefilling and decoding phases. We profile embeddings across all 32 layers for each token, using 1,000 prompts from the dataset, and retain the embedding tensors along with the remaining token counts as training data.
+The shape of the embedding tensor after the prefilling phase and before decoding is $[1,44,4096]$, while the embedding tensor for each decoding iteration is $[1,1,4096]$.
+
+\textbf{\emph{Predictor architecture.}} To develop our predictor, we train an MLP using the embeddings from each layer and evaluate prediction accuracy. We use a neural network model consisting of a fully connected network with two linear layers. The first layer maps the input embedding to a 512-dimensional space, followed by a ReLU activation. The second layer outputs predictions for the number of output tokens by classifying the predicted length into one of $k=10$ equal-width bins, representing output lengths between 0 and 512 tokens. 
+The $i$-th bin $b_i$ covers the range $\left[\frac{512i}{10}, \frac{512(i+1)}{10}\right)$. For the final bin, $b_{10}$, it includes the upper boundary and covers the range $[460.8, 512]$.
+
+The model is trained over 30 epochs with a batch size of 32, using the AdamW optimizer to control for overfitting. We employ a cosine annealing schedule to reduce the learning rate from 0.01 to 0 gradually. The loss function is CrossEntropyLoss, appropriate for our multi-class classification task.
+Here, we present one example of a predictor; our approach can, therefore, be used with any suitable and efficient learning scheme that yields a predictor.
+For the first token prediction, we compute the average of all token embeddings in the prompt, and this averaged embedding serves as input to the predictor.
+Preliminary evaluations across all 32 layers (Figure~\ref{fig:layers_acc}) indicate that layers 10-15 provide the most accurate length predictions.
+
+\textbf{\emph{Focused profiling}}. Based on this result, we concentrate our profiling on these layers, gathering over 7 million training pairs. Subsequently, we train the predictor, employing smoothing techniques to improve the accuracy of our length predictions further.
+
+\textbf{\emph{Smoothing.}} We observe that while the predicted probability vector in each iteration is reasonable, there can be large variance between iterations. We, therefore, employ Bayesian inference~\citep{sarkka2023bayesian} to update the probability estimate as new predictions become available, maintaining a more accurate estimate of the probability distribution over time.
+In the context of Bayesian inference, the estimate from previous iterations provides a starting point for the current prediction. After observing the current prediction, the initial estimate is updated to reflect the new information. This update is done by adjusting the previous estimate based on how well it aligns with the current prediction and then normalizing it. The updated estimate from this iteration will then be used as the starting point for the next one.
+At each iteration \( t \), the prior is updated because the predicted length may shift between bins over time.
+Specifically, let \( T \in [0,1]^{k \times k} \) represent the transition matrix, where \( T_{i,j} \) denotes the probability that a value in bin \( B_j \) at iteration \( t-1 \) moves to bin \( B_i \) at iteration \( t \). In our case, transitions can only occur between neighboring bins, specifically from \( B_{i+1} \) to \( B_i \). We assume that lengths within each bin are uniformly distributed. Therefore, the diagonal entry \( T_{i,i} \) reflects the probability that the value remains in the same bin, which is \( 1 - \frac{1}{\text{bin size}} \), while the off-diagonal entry \( T_{i,i+1} \) represents the probability of moving from \( B_{i+1} \) to \( B_i \), which is \( \frac{1}{\text{bin size}} \).
+The estimated probability \( \hat{q}^{(t)} \) at iteration \( t \) is computed as follows: 
+\begin{enumerate}
+    \item Initialize \( \hat{q}^{(0)} = p^{(0)} \).
+    \item At each iteration \( t \), update the prior: \( \hat{q}_{\mathrm{prior}}^{(t)} = T \cdot \hat{q}_{\mathrm{prior}}^{(t-1)} \).
+    \item Update the current probability: 
+    \( \hat{q}^{(t)}(i) = \frac{\hat{q}_{\mathrm{prior}}^{(t)}(i)p^{(t)}(i)}{\sum_{j} \hat{q}_{\mathrm{prior}}^{(t)}(j)p^{(t)}(j)} \).
+\end{enumerate}
+The predicted length at iteration $t$ is $L_t = \sum_i \hat{q}^{(t)}(i) \cdot m_i$, where $m_i$ is the average length in bin $B_i$, namely $m_i = \frac{b_i+b_{i+1}}{2} = \frac{128(2i+1)}{5}$. 
+This iterative process refines the prior distribution over time. Figure \ref{fig:mae_refinement} shows the mean absolute error for predictions from different model layers.
+
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{sections/figures/mae_comparison.pdf}
+        \caption{Mean Absolute Error for the predicted length, comparing BERT input embedding (dashed red), average token embedding without refinement (blue), and with refinement (orange), for different layers.}
+        \label{fig:mae_refinement}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \small % Reduce the font size of the table
+        \begin{tabular}{|c|c|c|c|}
+            \hline
+            Device & Batch & Mean ($\mu s$) & Std ($\mu s$) \\
+            \hline
+            CPU   & 512   & 9.43  & 3.75 \\
+            CPU   & 1024  & 6.19  & 1.46 \\
+            CPU   & 2048  & 5.94  & 1.09 \\
+            CUDA  & 512   & 0.615 & 0.093 \\
+            CUDA  & 1024  & 0.497 & 0.078 \\
+            CUDA  & 2048  & 0.429 & 0.084 \\
+            \hline
+        \end{tabular}
+        \captionof{table}{Mean and standard deviation of inference time per sample (TPS) for CPU and CUDA with different batch sizes, in microseconds ($\mu s$).}
+        \label{tab:predictions_overhead}
+    \end{minipage}
+\end{figure}
+\begin{comment}
+    
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{sections/figures/mae_comparison.pdf}
+    \caption{Mean Absolute Error for the predicted length. We compare prediction using only a BERT embedding of the input (dashed red line), the average embedding of the input tokens without iteration-level refinement (blue line), and prediction with iteration-level refinement (orange line), for different choices of layers.}
+    \label{fig:mae_refinement}
+\end{figure}
+\end{comment}
+
+
+\begin{comment}
+First, observe that at every iteration, the true value of the predicted length should decrease by $1$ (since we predict the number of remaining tokens). Denote by $T \in [0,1]^{k \times k}$ the fixed transition matrix such that $T_{i,j}$ indicates the probability that a value from bin $B_j$ at iteration $t-1$ moved to bin $B_i$ at iteration $t$ (i.e., the relative overlap between the $B_i$ and $B_j-1$). 
+{\bf MM: I'm not clear what the above sentence means. }
+Then, we compute the estimated probability $q^{(t)}$ as follows:
+
+\begin{itemize}
+    \item Initialize $q^{(0)} = p^{(0)}$.
+    \item At each iteration $t$, let $q^{(t)}_{\mathrm{prior}} = T \cdot q^{(t-1)}_{\mathrm{prior}}$.
+    \item Update the prior with the current predicted probability:
+    \[
+    q^{(t)}(i) = \frac{q^{(t)}_{\mathrm{prior}}(i)p^{(t)}(i)}{\sum_{j}q^{(t)}_{\mathrm{prior}}(j)p^{(t)}(j)}
+    \]
+\end{itemize}
+
+{\bf MM: I'm not clear why this is called the "expected estimate"}
+We then output the expected estimate for the predicted length $L_t = \sum_i q^{(t)}(i) \cdot m_i$, where $m_i$ is the average length in bin $B_i$, namely $m_i = \frac{b_i+b_{i+1}}{2}$. Figure \ref{fig:mae_refinement} shows the mean absolute error for predictions from different layers of the model.
+\end{comment}
+
+\begin{comment}
+    
+We employ several methods for predicting the output length:
+
+\begin{itemize}
+    \item \textbf{BERT Prediction:} This method relies solely on the prompt, using the BERT model to predict the output length.
+    \item \textbf{Initial Token Prediction:} This approach uses the model embeddings obtained from the prefilling phase to predict the initial length.
+    \item \textbf{Refined Token Prediction:} This method refines the initial prediction by probing the embeddings during the decoding phase.
+\end{itemize}
+
+\subsection*{BERT Prediction}
+\todo[inline]{mention MAE accuracy metric and consider other metric (such as Singapore paper, ACC50)}
+For the prediction approaches described herein, we profile the embeddings from each layer during the prefilling phase and for each token in the decoding phase. We utilize \textit{LLama3-8b-instruct} as our model for profiling. The process begins by profiling the embeddings for all 32 layers at each step. We retain the embedding tensors and the remaining number of tokens as training data. Subsequently, we train a MLP using the embeddings from each layer to assess prediction accuracy.
+
+According to a preliminary evaluation across all 32 layers, see Figure.~\ref{fig:layers_acc}, we observed that layers 10-15 yield more accurate length predictions. Consequently, we concentrate our profiling efforts on these layers and have collected over \todo[noinline]{Over 7 million, Weifan: please check the number} training pairs. We then apply an MLP along with several smoothing techniques to enhance the accuracy of our length predictions.
+
+\subsection*{Refined Token Prediction}
+
+\end{comment}
+
+
+\begin{comment}
+
+\subsection{Iteration level prediction using embedding}
+\label{sec:refined_predictions}
+We now describe our method for estimating the prompt length based on intermediate embeddings in the LLM. \todo[inline]{make sure we use consistent terms to refer to the large model generating the predictions} Denote by $\vu^{(1)}, \dots, \vu^{(T)} \in \mathbb{R}^d$ the output of some intermediate layer in the model for the $T$ output tokens generated by the model (where $d$ is the hidden dimension of the Transformer). Additionally, we denote by $\vu^{(0)}$ the embedding of the input, which is generated by averaging the embeddings of all the input tokens at the given layer. Let $B_1, \dots, B_k \subset \mathbb{N}$ be a choice of bins for the length prediction, i.e. $B_i = \{b_i, b_i+1, \dots, b_{i+1}\}$ for some choice of bin edges $b_1 < b_2 < \dots < b_{k+1}$. We train a linear classifier that, given some embedding $\vu^{(t)}$, outputs a vector $p^{(t)} \in [0,1]^k$ where $p^{(t)}(j)$ indicates the probability that the number of remaining tokens (i.e., $T-t$) is in $B_j$. We observe that while the predicted probability per-iteration is reasonable, it displays large variance between iterations. We therefore employ the following Bayesian approach for maintaining a more accurate estimation of the probability distribution over time. 
+
+First, observe that at every iteration, the true value of the predicted length should decrease by $1$ (since we predict the number of remaining tokens). Denote by $T \in [0,1]^{k \times k}$ the fixed transition matrix such that $T_{i,j}$ indicates the probability that a value from bin $B_j$ at iteration $t-1$ moved to bin $B_i$ at iteration $t$ (i.e., the relative overlap between the $B_i$ and $B_j-1$). Then, we compute the estimated probability $q^{(t)}$ as follows:
+
+\begin{itemize}
+    \item Initialize $q^{(0)} = p^{(0)}$.
+    \item At each iteration $t$, let $q^{(t)}_{\mathrm{prior}} = T \cdot q^{(t-1)}_{\mathrm{prior}}$.
+    \item Update the prior with the current predicted probability:
+    \[
+    q^{(t)}(i) = \frac{q^{(t)}_{\mathrm{prior}}(i)p^{(t)}(i)}{\sum_{j}q^{(t)}_{\mathrm{prior}}(j)p^{(t)}(j)}
+    \]
+\end{itemize}
+
+We then output the expected estimate for the predicted length $L_t = \sum_i q^{(t)}(i) \cdot m_i$, where $m_i$ is the average length in bin $B_i$, namely $m_i = \frac{b_i+b_{i+1}}{2}$. Figure \ref{fig:mae_refinement} shows the mean absolute error for predictions from different layers of the model.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\linewidth]{sections/figures/mae_by_embed_and_refined.png}
+    \caption{Mean Absolute Error for the predicted length. We compare prediction using only a BERT embedding of the input (dashed red line), the average embedding of the input tokens without iteration-level refinement (blue line), and prediction with iteration-level refinement (orange line), for different choices of layers.}
+    \label{fig:mae_refinement}
+\end{figure}
+\end{comment}
+\subsection{Computing Output Length Prediction Per Iteration}
+There are two approaches to computing predictions based on the embedding extracted from intermediate layer(s) (in our case, layer 11) of the LLM.
+In the first approach, we can compute the prediction directly on the GPU using the embedding available at the selected layer. While this method avoids data transfer, it introduces a slowdown in the decoding phase, as both the prediction computation and the model’s forward pass share the same GPU.
+In the second approach, we can compute the prediction on the CPU. For this, we extract the embedding from layer 11 and transfer it to the CPU. The prediction is then computed in parallel while the LLM processes the remaining layers (in our case, layers 12-32) on the GPU. 
+
+We note that whether we implement the length prediction on the GPU or the CPU, the overhead in terms of computational cost is minimal. Specifically, the size of the MLP that we train for the length prediction has around $2.1$ \emph{million} parameters, while the overall Llama model we use has 8 \emph{billion} parameters. Since the computation (number of FLOPs) per token is roughly scaled with the number of parameters, the overhead of the length prediction is around $0.03 \%$. This overhead becomes even more negligible for larger model sizes or when using a smaller MLP for length prediction. Table~\ref{tab:predictions_overhead} shows the mean inference time for length prediction of the two approaches.
+\begin{comment}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.4\linewidth]{sections/figures/prediction_acc/mlp_inference_time.pdf}
+    \caption{Mean inference time for length prediction as a function of batch size, with error bars representing the standard deviation across 20 trials.}
+    \label{fig:prediction_overhead}
+\end{figure}
+\end{comment}
+\subsection{Scheduling Policy}
+\label{sec:scheduling}
+
+\begin{comment}
+Traditional job\footnote{The terms job and request are used interchangeably.} scheduling assumes known job completion times, using strategies such as shortest job first to reduce the average wait time. We examine scenarios with predicted service times. ~\citep{mitzenmacher2019scheduling} introduced shortest predicted job first (SPJF) and the shortest predicted remaining processing time (SPRPT), both of which were analyzed for a single server, meaning that only one job is executed at a time.
+SRPT maintains the remaining processing time for each job, enabling preemption by incoming jobs with shorter service times. To address memory constraints of the KV cache (Section~\ref{sec:background_motivation}), we limit preemptions per request. Preemptions early in request execution consume minimal resources. As requests near completion, we avoid preemption.
+
+To simplify the problem and gain theoretical insights into SPRPT with limited preemption, we assume a Poisson arrival process and a single server. Although this setup does not perfectly match the model for LLM systems, it is interesting that SPRPT with limited preemption can still be analyzed under standard queueing theory assumptions; Poisson arrivals and independent service times, allowing the derivation of a closed-form formula for the mean response time.
+\end{comment}
+
+As background, traditional job\footnote{The terms job and request are used interchangeably.} scheduling typically assumes that job completion times are either completely unknown, in which case FCFS is a natural strategy, or completely known in advance, allowing strategies such as shortest job first (SJF) to minimize average wait time. In many practical systems, exact job completion times are unknown.
+Several studies have explored queueing systems with predicted, rather than exact, service times, generally to minimize the average time a job spends in the system. Building on previous works,~\citep{mitzenmacher2019scheduling, shahout2024skippredict} analyzed the shortest predicted job first (SPJF) and the shortest predicted remaining processing time (SPRPT) policies in the context of a single server where only one job executes at a time. SPRPT tracks the predicted remaining processing time for each job, allowing preemption if a new job arrives with a shorter predicted remaining service time. 
+
+Such previous work, while motivating using predictions, does not take into account the challenge in LLM systems that preemptions introduce memory overhead, particularly in managing the key value (KV) cache (as explained in Section~\ref{sec:background_motivation}). While preemptions can reduce response time, they increase memory consumption, which may ultimately degrade performance due to memory constraints.
+This is because, in LLM systems, when memory is full, we either discard jobs from memory and recompute them once memory is available, or we swap KV cache entries from the GPU to the CPU. Both approaches impact response time, as discarding requires recomputation, and swapping interrupts the forward-pass of the model, causing delays for the entire running batch.
+Intuitively, we should limit preemptions to avoid exceeding memory constraints; in particular, we recognize that preemptions made earlier in a request's execution consume fewer resources, while preemptions closer to completion should be avoided.
+
+In \algnospace{}, given the initial prediction $r$ for a job (which we treat as a number corresponding to the middle of its predicted bin), we only allow preemption for the first $\lfloor C\cdot r \rfloor$ iterations for a fixed constant $C$.  This restricts preemption as a job nears completion and takes substantial memory.   
+
+Interestingly, we can analyze a corresponding theoretical model for single-server SPRPT with limited preemptions, which we believe is interesting in its own right.  While this model does not capture the complexity of LLM systems (as it has no notion of memory, and is single-server), we think it also provides insight into the potential of limited preemption.  
+Using standard queueing theory assumptions (M/G/1 queuing system with Poisson arrivals of rate $\lambda < 1$ and independent service and prediction times), we can derive a closed-form expression for the mean response time (Lemma~\ref{lem:sprpt_ext}).
+
+Specifically, the processing times for each arriving job are independent and drawn based on the cumulative distribution $F(x)$ with an associated density function $f(x)$.
+Predictions, independent over jobs, follow the density function $g(x,r)$, where $x$ is the actual size and $r$ is the predicted size. Thus, $\int_{r=0}^\infty g(x,r) dr = f(x).$
+A job is described by a triple $(x, r, a)$, where $x$ is the actual size, $r$ is the predicted size, and $a$ is job age (time spent serving the job). We set threshold $a_0 = C \cdot r$, with $C$ as a tunable parameter. The system allows preemption when $a < a_0$ and disables it when $a \ge a_0$, balancing early resource use with timely completion.
+When $C=1$, the system becomes the same as SPRPT.  
+ 
+
+\begin{restatable}{lemma}{lemmasprptext}
+\label{lem:sprpt_ext}
+    For SPRPT with limited preemption, where at age $a_0$ the jobs become non-preemptable, the expected mean response time for a job of true size $x$ and predicted size $r$ is
+    \begin{align*}
+\mathbb{E}[T(x, r)] = &\frac{\lambda \left(\int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I^2\cdot  g(x_I, y) dx_I dy + \int_{t = r + a_0}^{\infty} \int_{x_I = t-r}^{\infty} g(x_I, t) \cdot(x_I - (t - r))^2 \cdot dx_I dt\right)}{2(1-\rho'_r)^2} \\
+&+ \int_{0}^{a_0} \frac{1}{1-\rho'_{(r-a)^+}} \, da + (x - a_0).
+\end{align*}
+ where $\rho'_r= \lambda \int_{y = 0}^{r} \int_{x_I = 0}^{\infty} x_I \cdot g(x_I,y) dx_I dy$.
+\end{restatable}
+
+
+
+
+
+\section{Evaluation}
+
+
+\textbf{Setup and implementation.} Our implementation is based on the open-source vLLM system (v0.5.0), with chunked prefill enabled in both our scheduler and the baseline scheduling methods. We set the out-of-memory mode to discard jobs and recompute them once memory becomes available. The evaluation is conducted on a server with a single NVIDIA A100 80GB GPU and 64 AMD EPYC 7313 16-Core Processor cores, with 503 GiB of memory and running CUDA version 12.3. We use \emph{LLama3-8b-instruct} as a serving model with single-GPU. The workload is generated using the Alpaca dataset~\citep{alpaca}, derived from open-source conversational exchanges and originally used to fine-tune the Alpaca model. We sample 10k unique prompts from the dataset for model serving, distinct from those used to train the length predictor.
+
+\textbf{Benchmark and Metrics.}
+The benchmark we use simulates a chatbot serving in a client-server setup, where the server hosts an LLM model, and the client sends requests at a specified request rate. The server runs the vLLM OpenAI API, while the client sends prompts from the Alpaca dataset to mimic a real-world scenario. The benchmark measures the mean and median latency and Time To First Token (TTFT), providing insights into the LLM's responsiveness under varying request loads. In addition to regular load, we evaluate performance under burst conditions.
+\textbf{Baselines.} We compare our approach with four baselines: (1) vanilla vLLM~\citep{kwon2023efficient}, using First Come First Served; (2) vLLM with Shortest Job First based on BERT predictions and chunked prefill; (3) \alg{} with refined embedding predictions; and (4) \alg{} with BERT predictions.
+\subsection{Predictions Accuracy}
+
+Figure~\ref{fig:mae_refinement} compares the mean absolute error (MAE) of the BERT predictions from the prompts, our linear classifier predictions from the embedding layers, and the refined predictions after using Bayesian inference on the different layers choices.
+We further evaluated the accuracy of this refined prediction from layer 11 against the ground truth and compared it to BERT predictions. A heatmap was used to compare the ground truth remaining length with the predicted remaining length across multiple sequences. Both the x-axis (ground truth) and y-axis (predictions) were divided into ten bins, representing the remaining lengths as the sequence progresses: Where the $i$-th bin $b_i$ covers the range $\left[\frac{512i}{10}, \frac{512(i+1)}{10}\right)$.
+Each request is counted multiple times in the heatmap, once for each prediction made during its execution. Each cell in the heatmap contains the logarithm of the number of occurrences for a given pair of ground truth and predicted length at different stages. For BERT, where only one prediction is made, we subtract one from the initial predicted length after each generated token to create a comparable heatmap.
+As shown in Figure~\ref{fig:prediction_heatmap}, the refined predictions from layer-11 embedding are more accurate than the BERT predictions, as they exhibit higher values along the diagonal and lower values off the diagonal (indicating greater prediction accuracy). Meanwhile, the BERT predictions show lower values along the diagonal and higher values off the diagonal, reflecting larger differences between predicted and actual lengths.
+
+\begin{comment}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.45\linewidth]{sections/figures/prediction_acc/heatmap.pdf}
+    \caption{Log-scaled comparison of ground-truth vs predicted lengths bins using 
+    \alg{}'s refined predictions from embeddings, $b_1=51.2, b_2=102.4, b_3=153.6, b_4=204.8, b_5=256.0, b_6=307.2, b_7=358.4, b_8=409.6, b_9=460.8, b_{10}=512$.}
+    \label{fig:prediction_heatmap}
+\end{figure}
+\end{comment}
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/prediction_acc/heatmap_embedding2.pdf}
+        \caption{embedding-based predictions}
+        \label{fige:embedding_heatmap}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/prediction_acc/heatmap_bert2.pdf}
+        \caption{BERT predictions}
+        \label{fige:bert_heatmap}
+    \end{subfigure}
+    \caption{Log-scaled comparison of ground-truth vs predicted lengths bins. The $i$-th bin $b_i$ covers the range $\left[\frac{512i}{10}, \frac{512(i+1)}{10}\right)$.}
+    \label{fig:prediction_heatmap}
+\end{figure}
+
+\subsection{LLM Serving}
+We begin by comparing the mean latency and TTFT of \alg{} across different values of $c$ ($c = 0.5, 0.8, 1$) while setting the request rate to 14. ($c = 1$ mimics SRPT without limiting preemption.)
+Figure~\ref{fig:trail_cs} shows that when $c=1$, \alg{} exhibits higher mean latency and TTFT, while $c=0.8$ results in the lowest values, closely followed by $c=0.5$. We also evaluated the system with $c=0.2$, which produced higher latency and TTFT compared to the larger $c$ values (though not shown here to focus more closely on this range of $c$ values). These results highlight that while preemption in scheduling benefits LLM systems, it should be limited due to the additional memory overhead it introduces, which can affect serving efficiency. Based on this, we set the default $c$ value for \alg{} to $0.8$ in the remainder of the evaluation.
+The optimal $c$, however, may vary depending on system memory and workload, as it affects the trade-off between preemption benefits and memory overhead.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/trail_cs/mean_latencieswithoutc2.pdf}
+        \caption{Mean Latency (s)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/trail_cs/mean_ttft_mswithoutc2.pdf}
+        \caption{Mean TTFT (ms)}
+    \end{subfigure}
+    \caption{Comparison of mean latency and TTFT across different values of $c$ ($c = 0.5, 0.8, 1$) at a request rate of 14.}
+    \label{fig:trail_cs}
+\end{figure}
+  
+Figure~\ref{fig:latency_arrival} presents the mean and median latency, along with TTFT, as a function of the request rate for four LLM serving systems: (1) vanilla vLLM~\citep{kwon2023efficient}, which uses First Come First Served (FCFS) as the scheduling policy (vLLM-FCFS); (2) vLLM with a Shortest Job First (SJF) scheduling policy for newly scheduled sequences based on BERT predictions from sequence prompts (vLLM-SJF\_BERT), which also prioritizes new sequences and implements chunked prefill; (3) \alg{} with $c=0.8$ using refined predictions from embeddings with chunked prefill enabled; and (4) \alg{} with $c=0.8$ using BERT predictions (\alg{}-BERT). The comparison between \alg{}-BERT and \alg{} evaluates the effectiveness of embedding-based predictions, while the comparison between vLLM (with both scheduling policies) and \alg{} (with both prediction methods) evaluates the impact of limited preemption in LLM systems. The figure shows that SJF based on BERT predictions provides minimal benefits over vLLM-FCFS, as vLLM implementation prioritizes incoming requests over existing running requests. Additionally, both \alg{} and \alg{}-BERT, which implement limited preemption, achieve lower mean and median latency (Figures~\ref{fig:mean_latency},\ref{fig:median_latency}) and lower mean and median TTFT (Figures~\ref{fig:mean_ttft},\ref{fig:median_ttft}) compared to vLLM, with \alg{} using refined embedding predictions showing the lowest latency and TTFT due to more accurate predictions (Figures~\ref{fig:mae_refinement},\ref{fig:prediction_heatmap}).
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/latency_arrival/mean_latencies.pdf}
+        \caption{Mean Latency}
+        \label{fig:mean_latency}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/latency_arrival/mean_ttft_ms.pdf}
+        \caption{Mean TTFT}
+        \label{fig:mean_ttft}
+    \end{subfigure}
+
+    \begin{subfigure}{0.9\textwidth}  % Full width for the legend
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/latency_arrival/legend_small.pdf}  % Path to your legend figure
+    \end{subfigure}
+    
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/latency_arrival/median_latencies.pdf}
+        \caption{Median Latency}
+        \label{fig:median_latency}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/latency_arrival/median_ttft_ms.pdf}
+        \caption{Median TTFT}
+        \label{fig:median_ttft}
+    \end{subfigure}
+    
+    \caption{Mean and median latency, along with TTFT, as a function of request rate for four LLM systems: (1) vLLM-FCFS, vLLM using FCFS; (2) vLLM-SJF\_BERT, vLLM using SJF based on BERT; (3) \alg{} with $c=0.8$ and refined embedding predictions; and (4) \alg{}-BERT with $c=0.8$ using BERT predictions.}
+    \label{fig:latency_arrival}
+\end{figure}
+
+Figure~\ref{fig:burst} shows the mean and median latency and TTFT for vLLM, vLLM-SJF\_BERT, and \alg{} with two different $c$ values ($c = 0.8$ and $c = 1$) under a burst scenario. In this scenario, all requests arrive within a very short time interval at the beginning of the experiment, simulating a sudden spike in demand. The results show that \alg{} continues to offer benefits with lower latency and TTFT, as our implementation ranks all requests (running and waiting) based on length predictions and prioritizes them accordingly, while vLLM prioritizes new requests over existing running ones. However, since no new requests arrive during processing, preemption has no advantage, leading to similar performance between \alg{} with $c = 0.8$ and $c = 1$.
+
+\begin{comment}
+    
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/mean_latencies.pdf}
+        \caption{Mean Latency (s)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/mean_ttft_ms.pdf}
+        \caption{Mean TTFT (ms)}
+    \end{subfigure}
+    
+    
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/median_latencies.pdf}
+        \caption{Median Latency (s)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/median_ttft_ms.pdf}
+        \caption{Median TTFT (ms)}
+    \end{subfigure}
+    
+    \caption{Mean, Median of Latency and TTFT when we have burst of requests}
+    \label{fig:burst}
+\end{figure}
+\end{comment}
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.23\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/mean_latencies.pdf}
+        \caption{Mean Latency (s)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.23\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/mean_ttft_ms.pdf}
+        \caption{Mean TTFT (ms)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.23\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/median_latencies.pdf}
+        \caption{Median Latency (s)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.23\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/figures/eval_graphs/burst/median_ttft_ms.pdf}
+        \caption{Median TTFT (ms)}
+    \end{subfigure}
+    
+    \caption{Mean, Median of Latency and TTFT when we have burst of requests}
+    \label{fig:burst}
+\end{figure}
+
+
+
+
+\section{Related Works}
+
+
+Recent efforts to optimize the serving of large language models (LLMs) have been explored. The ORCA framework~\citep{yu2022orca} introduced token-level scheduling, assuming that batches are processed at the token level rather than the sequence level. 
+vLLM~\citep{kwon2023efficient} applies PagedAttention to reduce memory overhead. While these designs are effective, they rely on first-come, first-served (FCFS) scheduling, which could face head-of-line blocking.
+
+In traditional scheduling, methods like shortest job first (SJF) and shortest remaining processing time (SRPT) aim to minimize response times, while multi-level feedback queues (MLFQ) adjust job priorities dynamically without prior knowledge of job sizes.
+A promising direction for LLM scheduling is based on output length prediction. FastServe~\citep{wu2023fast} builds on ORCA by scheduling each output token individually, using MLFQ to avoid head-of-line blocking. However, this leads to frequent preemptions, which increase the cost of managing KV cache memory and offloading to the CPU.
+Several works have proposed prediction-based scheduling to address these challenges. Zhen et al.~\citep{zheng2024response} enhanced LLM inference by predicting response lengths with an additional LLM model and scheduling them according to length predictions. While this approach optimizes inference, it introduces prediction overhead caused by using additional LLM for length prediction.
+
+Other works predict output lengths using machine learning models such as DistilBERT and OPT, improving resource allocation and reducing memory issues during inference.
+The works in \citep{jin2023s, stojkovic2024dynamollm, cheng2024enabling} approach length prediction as a classification problem, while other works \citep{qiu2024efficient, qiu2024power} adopt regression-based techniques.
+Our approach extends this line of research by predicting output length from the LLM's embedding, limiting preemption to improve scheduling efficiency further.
+
+
+\begin{comment}
+    
+inference serving:
+1) ORCA~\citep{yu2022orca}
+2) vLLM~\citep{kwon2023efficient}
+
+care about latency:
+fasttransformer
+
+cares about latency:
+FastServe
+
+using predictions:
+3) S3
+4) response length:
+Zhen et al.~\citep{zheng2024response} proposes enhancing the efficiency of LLM inference by predicting response lengths using an additional LLM model. This prediction allows for grouping sequences with similar lengths into microbatches, thus optimizing the inference process. The key assumption is that sequences in a batch finish simultaneously. To handle prediction errors, the system recomputes sequences when necessary. However, this approach faces several challenges. First, the use of an additional LLM model for prediction introduces significant overhead. Second, the scheduling in this work is request-based, where completed sequences must wait for all batch sequences to finish, although the authors mentioned that ORCA~\citep{yu2022orca} mitigates this issue. 
+
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|c|c|c|}
+\hline
+ & Non-sized Based & Sized-based (with Prediction) \\
+\hline
+Non-preemptable & ORCA~\citep{yu2022orca}, vLLM~\citep{kwon2023efficient} & Sequence Scheduling~\citep{zheng2024response}$^{(*)}$ \\
+\hline
+Preemptable & FastServe~\citep{wu2023fast} & - \\
+\hline
+\end{tabular}
+\caption{Existing scheduling works for LLM serving. Note: Sequence Scheduling$^{(*)}$ is implemented in request-level scheduling, while the state-of-the-art is token-level scheduling.}
+\label{tab:existing_works}
+\end{table}
+\end{comment}
+
+
+\section{Limitations and Conclusion}
+
+
+We have presented \alg{}, a novel approach that significantly improves response time in LLM inference. Our method is built on two key contributions. First, we obtained low-overhead, high-accuracy predictions from the target LLM itself. After generating each output token, we recycle the embedding of its internal structure as input for a lightweight classifier. This classifier predicts the remaining length for each running request. We demonstrated the high accuracy of this approach and its low overhead compared to existing prediction methods that rely solely on sequence prompts. Specifically, our refined predictions from layer embeddings achieve 2.66x lower mean absolute error compared to BERT predictions from sequence prompts. Second, utilizing these predictions for output lengths, we proposed a Shortest Remaining Processing Time (SRPT) variant with limited preemption. This variant is specifically designed to account for memory overhead in LLM systems. We derived a closed-form formula for this SRPT variant in an M/G/1 queue model and simulated it to demonstrate its potential.
+By integrating \alg{} with vLLM, we have demonstrated improvements in overall latency and time-to-first-token metrics using real-world datasets. 
+Our experimental results show that \alg{} achieves 1.66x to 2.01x lower mean latency and 1.76x to 24.07x lower mean time to first token compared to vLLM tested using the Alpaca dataset.
+
+
+\textbf{Limitations.} One key challenge is to select the most informative layer embedding to use as input for the linear classifier. Due to time and resource constraints, we focused only on the Alpaca dataset, as profiling embeddings across all layers is computationally demanding. There are several promising directions for future research. We plan to explore the relationship between layer selection and prediction accuracy across multiple datasets. Another direction is leveraging multiple-layer embeddings through weighted averaging to enhance prediction accuracy. Additionally, experimenting with logarithmic bin sizes for the linear classifier could offer further benefits. A potential optimization is to compute embedding predictions at specific intervals rather than every iteration, reducing computational overhead. Lastly, to address data drifts and maintain performance over time, we aim to explore the dynamic retraining of the linear classifier.
+
+
+\ifuseICLR
+\else
+
+

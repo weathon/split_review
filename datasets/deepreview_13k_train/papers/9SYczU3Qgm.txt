@@ -1,0 +1,575 @@
+\title{Meta Flow Matching: Integrating Vector Fields on the Wasserstein Manifold}
+
+\begin{abstract}
+Numerous biological and physical processes can be modeled as systems of interacting entities evolving continuously over time, e.g.\ the dynamics of communicating cells or physical particles.
+Learning the dynamics of such systems is essential for predicting the temporal evolution of populations across novel samples and unseen environments.
+Flow-based models allow for learning these dynamics at the population level --- they model the evolution of the entire distribution of samples.
+However, current flow-based models are limited to a single initial population and a set of predefined conditions which describe different dynamics.
+We argue that multiple processes in natural sciences have to be represented as vector fields on the Wasserstein manifold of probability densities.
+That is, the change of the population at any moment in time depends on the population itself due to the interactions between samples.
+In particular, this is crucial for personalized medicine where the development of diseases and their respective treatment response depends on the microenvironment of cells specific to each patient.
+We propose \textit{Meta Flow Matching} (MFM), a practical approach to integrating along these vector fields on the Wasserstein manifold by amortizing the flow model over the initial populations.
+Namely, we embed the population of samples using a Graph Neural Network (GNN) and use these embeddings to train a Flow Matching model.
+This gives MFM the ability to generalize over the initial distributions unlike previously proposed methods.
+We demonstrate the ability of MFM to improve prediction of individual treatment responses on a large scale multi-patient single-cell drug screen dataset.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setcounter{footnote}{0} 
+Understanding the dynamics of many-body problems is a focal challenge across the natural sciences. In the field of cell biology, a central focus is the understanding of the dynamic processes that cells undergo in response to their environment, and in particular their response and interaction with other cells. Cells communicate with one other in close proximity using \textit{cell signaling}, exerting influence over each other's trajectories~\citep{Armingol2020,pmid20066080}. This signaling presents an obstacle for modeling due to the complex nature of intercellular regulation, but is essential for understanding and eventually controlling cell dynamics during development~\citep{Gulati2020, Rizvi2017}, in diseased states~\citep{Mol2021,Binnewies2018,Zeng2019, Chung2017}, and in response to perturbations~\citep{ji_machine_2021,peidli2024scperturb}. 
+
+\begin{wrapfigure}{R}{0.47\textwidth}
+     \begin{minipage}{0.47\textwidth}
+        \begin{figure}[H]
+            \centering
+            \includegraphics[width=0.9\textwidth]{pics/overview.pdf}
+            \caption{\textbf{Comparison between \emph{Flow Matching} (FM, \cref{eq:loss_fm}), \emph{Conditional Generative Flow Matching} (CGFM, \cref{eq:loss_cgfm}), and \emph{Meta Flow Matching} (MFM, \cref{eq:mfm_loss}).} All methods learn a vector field $v_t(\cdot;\W)$ (or \emph{flow} model) parameterized via a neural network to predict treatment response for unseen populations. 
+            Models trained with \textbf{FM} only predict an aggregate response over populations.
+            \textbf{CGFM} incorporates seen population IDs $i$, while \textbf{MFM} jointly learns $v_t(\cdot;\W)$ and the populations embedding model $\varphi(\{x_0^j\}_{j=1}^{N'};\theta)$, allowing generalization to new populations with unseen IDs. 
+            }
+        \label{fig:overview}
+        \end{figure}
+     \end{minipage}
+\end{wrapfigure}
+
+The super-exponential decrease of sequencing costs and advances in microfluidics has enabled the rapid advancement of single-cell sequencing and related technologies over the past decade \citep{svensson2018exponential}. While single-cell sequencing has been used to great effect to understand the heterogeneity in cell systems, it is also destructive, making longitudinal measurements extremely difficult. 
+Hence, learning dynamical system models of cells while also capturing the inherit heterogeneity and stochasticity of cellular systems remains a central challenge in biology.
+
+Instead, most existing approaches model cell dynamics at the population level~\citep{hashimoto_learning_2016,weinreb_fundamental_2018,schiebinger2019optimal, tong2020trajectorynet, neklyudov2022action, bunne2023learning}.
+These approaches involve the formalisms of optimal transport \citep{villani2009optimal,peyre_computational_2019}, diffusion \citep{de2021diffusion}, or normalizing flows \citep{lipman2022flow}, which allow for learning a map between empirical measures.
+While these methods are able to model the dynamics of the population, they are fundamentally limited in that they model the evolution of cells as independent particles evolving according to the learned model of a global vector field. 
+Furthermore, these models can be trained to match any given set of measures, but they are restricted to modeling of a single population and can at best condition on a number of different dynamics that are available in the training data.
+
+\textbf{We propose \textit{Meta Flow Matching} (MFM) --- the amortization of the Flow Matching generative modeling framework} \citep{lipman2022flow} \textbf{over the input measures}, which (i) takes into account the interaction of particles (instead of modelling them independently) and (ii) allows for generalization of the learned model to previously unseen input populations.
+In practice, our method can be used to predict the time-evolution of distributions from a given dataset of the time-evolved examples.
+Namely, we assume that the collected data undergoes a universal developmental process, which depends only on the population itself as in the setting of the interacting particles or communicating cells.
+Under this assumption, we learn the vector field model that takes samples from the initial distribution as input and defines the push-forward map on the sample-space that maps the initial distribution to the final distribution (see \cref{fig:overview}).
+
+We showcase the utility of our approach on two applications. 
+To illustrate the intuition of the proposed method, we first test MFM on a synthetic task of ``letter denoising''.
+We show that MFM is able to generalize the denoising process to unseen letter silhouettes, whereas the standard FM approach cannot. 
+Next, we explore how MFM can be applied to model single-cell perturbation data~\citep{ji_machine_2021,peidli2024scperturb}. 
+We evaluate MFM on predicting the response of patient-derived cells to chemotherapy treatments in a recently published large scale single-cell drug screening dataset where there are known to be patient-specific responses~\citep{RamosZapatero2023}.\footnote{This dataset includes more than $25$ million cells collected for ten patients over $2500$ different experimental/treatment conditions.}
+This is a challenging task due to the inherent variation that exist across patients, the variability induced by different treatments, and variation due to local cell compositions. Addressing this problem can lead to better prediction of tumor growth and therapeutic response to cancer treatment.
+We demonstrate that MFM can successfully predict the development of cell populations on replicated experiments, and most importantly, that it generalizes to previously unseen patients, thus, capturing the patient-specific response to the treatment.
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+\subsection{Generative Modeling via Flow Matching}
+
+Flow Matching is an approach to generative modeling recently proposed independently in different works: Rectified Flows \citep{liu2022flow}, Flow Matching \citep{lipman2022flow}, Stochastic Interpolants \citep{albergo2022building}. 
+A flow is a continuous interpolation between densities
+$p_0(x_0)$ and $p_1(x_1)$ in the sample space.
+That is, the sample from the intermediate density $p_t(x)$ is produced as follows
+\begin{align}
+    x_t =~& f_t(x_0, x_1), \;\; (x_0, x_1) \sim \pi(x_0,x_1)\,, \\
+    ~&\text{ where } \int dx_1\; \pi(x_0,x_1) = p_0(x_0)\,,\;\;\int dx_0\; \pi(x_0,x_1) = p_1(x_1)\,,
+    \label{eq:fm_sampling}
+\end{align}
+where $f_t$ is the time-continuous interpolating function such that $f_{t=0}(x_0, x_1) = x_0$ and $f_{t=1}(x_0, x_1) = x_1$ (e.g.\ linearly between $x_0$ and $x_1$ with $f_t(x_0,x_1) = (1-t)\cdot x_0 + t\cdot x_1$); $\pi(x_0, x_1)$ is the density of the joint distribution, which is usually taken as a distribution of independent random variables $\pi(x_0, x_1) = p_0(x_0)p_1(x_1)$, but can also be generalized to formulate the optimal transport problems \citep{pooladian2023multisample,tong2024improving}. 
+The corresponding density can be defined then as the following expectation over the interpolating samples
+\begin{align}
+    p_t(x) = \int dx_0 dx_1\; \pi(x_0, x_1)\delta(x-f_t(x_0, x_1))\,.
+\end{align}
+
+The essential part of Flow Matching is the continuity equation that describes the change of this density through the vector field on the state space, which admits vector field $v^*_t(x)$ as a solution 
+\begin{align}
+    \deriv{p_t(x)}{t} = -\inner{\nabla_x}{p_t(x) v^*_t(x)}\,,\;\; v^*_{t}(\xi)=\frac{1}{p_{t}(\xi)}\mathbb{{E}}_{\pi(x_0, x_1)}\left[\delta(f_{t}(x_0,x_1)-\xi)\frac{\partial f_{t}(x_0,x_1)}{\partial t}\right]\,.
+    \label{eq:continuity}
+\end{align}
+
+The expectation for $v^*_t$ is intractable, but we can learn a model $v_t(x; \W)$ to approximate $v^*_t$ so that we can efficiently generate new samples.
+Relying on \cref{eq:continuity}, one can derive the tractable objective for learning $v^*_t(x)$, i.e.
+\begin{align}
+    \mathcal{L}_{\rm FM}(\W)=~&\int_0^1 dt\; \mean_{p_t(x)}\norm{v^*_{t}(x)-v_t(x; \W)}^{2} \\
+    =~& \mean_{\pi(x_0, x_1)}\int_0^1 dt\;\norm{\deriv{}{t}f_{t}(x_0,x_1)-v_t(f_t(x_0,x_1); \W)}^{2} + \text{constant}\,.
+    \label{eq:loss_fm}
+\end{align}
+
+Finally, the vector field $v_t(\xi, \W) \approx v_t^*(\xi)$ defines the push-forward density that approximately matches $p_{t=1}$, i.e. $T_{\#}p_0 \approx p_{t=1}$, where $T$ is the flow corresponding to vector field $v_t(\cdot, \W)$ with parameters $\W$.
+\subsection{Conditional Generative Modeling via Flow Matching}
+\label{sec:CFM}
+
+Conditional image generation is one of the most common applications of generative models nowadays; it includes conditioning on the text prompts \citep{saharia2022photorealistic, rombach2022high} as well as conditioning on other images \citep{saharia2022palette}.
+To learn the conditional generative process with diffusion models, one merely has to pass the conditional variable (sampled jointly with the data point) as an additional input to the parametric model of the vector field.
+The same applies for the Flow Matching framework.
+
+Conditional Generative Modeling via Flow Matching is independently introduced in several works
+\citep{zheng2023guided, dao2023flow, isobe2024extended} and it operates as follows.
+Consider a family of time-continuous densities $p_t(x_t\cond c)$, which corresponds to the distribution of the following random variable
+\begin{align}
+    x_t = f_t(x_0, x_1), \;\; (x_0, x_1) \sim \pi(x_0,x_1\cond c)\,.
+\end{align}
+For every $c$, the density $p_t(x_t\cond c)$ follows the continuity equation with the following vector field
+\begin{align}
+v^*_{t}(\xi\cond c)=\frac{1}{p_{t}(\xi\cond c)}\mathbb{{E}}_{\pi(x_0,x_1)}\delta(f_{t}(x_0, x_1)-\xi)\frac{\partial f_{t}(x_0, x_1)}{\partial t}\,,
+\label{eq:cond_vf}
+\end{align}
+which depends on $c$.
+Thus, the training objective of the conditional model becomes
+\begin{align}
+\mathcal{L}_{CGFM}(\W)=~&\mean_{p(c)}\mean_{\pi(x_0,x_1\cond c)}\int_0^1 dt\;\norm{\deriv{}{t}f_{t}(x_0,x_1)-v_t(f_t(x_0,x_1) \cond c; \W)}^{2}\,,
+\label{eq:loss_cgfm}
+\end{align}
+where, compared to the original Flow Matching formulation, we first have to sample $c$, then produce the samples from $p_t(x_t\cond c)$ and pass $c$ as input to the parametric model of the vector field.
+\subsection{Modeling Process in Natural Sciences as Vector Fields on the Wasserstein Manifold}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.32\textwidth}
+    \centering
+    \textbf{\small Flow Matching} \\[-1mm]
+    \includegraphics[width=\textwidth]{pics/FM_.pdf}
+    \end{minipage} \hfill
+    \begin{minipage}{0.32\textwidth}
+    \centering
+    \textbf{\small Conditional Flow Matching} \\[-1mm]
+    \includegraphics[width=\textwidth]{pics/CFM_.pdf}
+    \end{minipage} \hfill
+    \begin{minipage}{0.32\textwidth}
+    \centering
+    \textbf{\small Vector Field on $\P_2(\X)$} \\[-1mm]
+    \includegraphics[width=\textwidth]{pics/MFM_.pdf}
+    \end{minipage}
+    \caption{\textbf{Illustration of flow matching methods on the 2-Wasserstein manifold, $\P_2(\X)$, depicted as a two-dimensional sphere.} \emph{Flow Matching} learns the tangent vectors to a single curve on the manifold.
+    \emph{Conditional} generation corresponds to learning a finite set of curves on the manifold, e.g. classes $c_1$ and $c_2$ on the plot. 
+    \emph{Meta Flow Matching} learns to integrate a vector field on $\P_2(\X)$, i.e. for every starting density $p_0$ Meta Flow Matching defines a push-forward measure that integrates along the underlying vector field.
+    }
+    \label{fig:geometry}
+\end{figure}
+
+We argue that numerous biological and physical processes cannot be modeled via the vector field propagating the population samples independently.
+Thus, we propose to model these processes as families of conditional vector fields where we amortize the conditional variable by embedding the population via a Graph Neural Network (GNN).
+
+To provide the reader with the necessary intuition, we are going to use the geometric formalism developed by \cite{otto2001geometry}. 
+That is, time-dependent densities $p_t(x_t)$ define absolutely-continuous curves on the 2-Wasserstein space of distributions $\P_2(\X)$ \citep{ambrosio2008gradient}.
+The tangent space of this manifold is defined by the gradient flows $\S_t = \cv{\g s_t}{s_t:\X \to \mathbb{R}}$  on the state space $\X$.
+In the Flow Matching context, we are going to refer to the tangent vectors as vector fields since one can always project the vector field onto the tangent space by parameterizing it as a gradient flow \citep{neklyudov2022action}.
+
+Under the geometric formalism of the 2-Wasserstein manifold, Flow Matching can be considered as learning the tangent vectors $v_t(\cdot)$ along the density curve $p_t(x_t)$ defined by the sampling process in \cref{eq:fm_sampling} (see the left panel in \cref{fig:geometry}).
+Furthermore, the conditional generation processes $p_t(x_t\cond c)$ would be represented as a finite set of curves if $c$ is discrete (e.g. class-conditional generation of images) or as a family of curves if $c$ is continuous (see the middle panel in \cref{fig:geometry}).
+
+Finally, one can define a vector field on the 2-Wasserstein manifold via the continuity equation with the vector field $v_t(x, p_t(x))$ on the state space $\X$ that depends on the current density $p_t(x)$ or its derivatives.
+Below we give two examples of processes defined as vector fields on the 2-Wasserstein manifold.
+
+\begin{example}[Mean-field limit of interacting particles] \label{ex:meanf}
+Consider a system of interacting particles, where the velocity of the particle at point $x$ interacting with the particle at point $y$ is defined as $k(x,y): \mathbb{R}^d\times\mathbb{R}^d \to\mathbb{R}^d$.
+In the limit of the infinite number of particles one can describe their state using the density function $p_t(x)$.
+Then the change of the density is described by the following continuity equation
+\begin{align}
+    \frac{dx}{dt} = \mean_{p_t(y)} k(x,y), \;\; \deriv{p_t(x)}{t} = -\inner{\nabla_x}{p_t(x)\mean_{p_t(y)} k(x,y)}\,,
+\end{align}
+which is the first-order analog of the Vlasov equation \citep{jabin2016mean}.
+\end{example}
+
+\begin{example}[Diffusion]\label{ex:diffusion}
+Even when the physical particles evolve independently in nature, the deterministic vector field model might be dependent on the current density of the population.
+For instance, for the diffusion process, the change of the density is described by the Fokker-Planck equation, which results in the density-dependent vector field when written as a continuity equation, i.e.
+\begin{align}
+    \deriv{p_t(x)}{t} = \frac{1}{2}\Delta_x p_t(x) = -\inner{\nabla_x}{p_t(x)\left(-\frac{1}{2} \nabla_x \log p_t(x)\right)}\implies \frac{dx}{dt} = -\frac{1}{2}\nabla_x\log p_t(x)\,.
+\end{align}
+\end{example}
+
+Motivated by the examples above, we argue that using the information about the current or the initial density is crucial for the modeling of time-evolution of densities in natural processes, to capture this type of dependency one can model the change of the density as the following Cauchy problem
+\begin{align}
+    \deriv{p_t(x)}{t} = -\inner{\nabla_x}{p_t(x)v_t\left(x, p_t\right)}\,,\;\; p_{t=0}(x) = p_0(x)\,,
+    \label{eq:w2vf}
+\end{align}
+where the state-space vector field $v_t\left(x, p_t\right)$ depends on the density $p_t$.
+
+The dependency might vary across models, e.g. in \cref{ex:meanf} the vector field can be modeled as an application of a kernel to the density function, while in \cref{ex:diffusion} the vector field depends only on the local value of the density and its derivative.
+
+
+
+\section{Meta Flow Matching}
+
+\label{sec:meta_flow_matching}
+In this paper, we propose the amortization of the Flow Matching framework over the marginal distributions.
+Our model is based on the outstanding ability of the Flow Matching framework to learn the push-forward map for any joint distribution $\pi(x_0,x_1)$ given empirically.
+For the given joint $\pi(x_0,x_1)$, we denote the solution of the Flow Matching optimization problem as follows
+\begin{align}
+    v_t^*(\cdot, \pi) = \argmin_{v_t} \mathcal{L}_{GFM}(v_t(\cdot), \pi(x_0, x_1))\,.
+    \label{eq:fm_opt}
+\end{align}
+Analogous to amortized optimization \citep{chen2022learning, amos2023tutorial}, we aim to learn the model that outputs the solution of \cref{eq:fm_opt} based on the input data sampled from $\pi$, i.e.
+\begin{align}
+    v_t(\cdot, \varphi(\pi)) = v_t^*(\cdot, \pi)\,,
+\end{align}
+where $\varphi(\pi)$ is the embedding model of $\pi$ and the joint density $\pi(\cdot \cond c)$ is generated using some unknown measure of the conditional variables $c\sim p(c)$. 
+\subsection{Integrating Vector Fields on the Wasserstein Manifold via Meta Flow Matching}
+
+Consider the dataset of joint populations $\mathcal{D} = \{(\pi(x_0, x_1\cond i))\}_{i}$, where, to simplify the notation, we associate every $i$-th population with its density $\pi(\cdot \cond i)$ and the conditioning variable here is the index of this population in the dataset.
+We make the following assumptions regarding the ground truth sampling process (i) we assume that the starting marginals $p_0(x_0\cond i) = \int dx_1\; \pi(x_0,x_1\cond i)$ are sampled from some unknown distribution that can be parameterized with a large enough number of parameters (ii) the endpoint marginals $p_1(x_1\cond i) = \int dx_0\; \pi(x_0,x_1\cond i)$ are obtained as push-forward densities solving the Cauchy problem in \cref{eq:w2vf}, (iii) there exists unique solution to this Cauchy problem.
+
+One can learn a joint model of all the processes from the dataset $\mathcal{D}$ using the conditional version of the Flow Matching algorithm (see \cref{sec:CFM}) where the population index $i$ plays the role of the conditional variable.
+However, obviously, such a model will not generalize beyond the considered data $\mathcal{D}$ and unseen indices $i$.
+We illustrate this empirically in \cref{sec:exps}.
+
+To be able to generalize to previously unseen populations, we propose learning the density-dependent vector field motivated by \cref{eq:w2vf}.
+That is, we propose to use an embedding function $\varphi: \P_2(\X) \to \mathbb{R}^{m}$ to embed the starting marginal density $p_0$, which we then input into the vector field model and minimize the following objective over $\W$
+\begin{align}
+    \mathcal{L}_{\text{MFM}}(\W;\varphi)=~&\mean_{i \sim \mathcal{D}}\mean_{\pi(x_0,x_1\cond i)}\int_0^1 dt\;\norm{\deriv{}{t}f_{t}(x_0,x_1)-v_t(f_t(x_0,x_1) \cond \varphi(p_0); \W)}^{2}\,.
+    \label{eq:mfm_notheta}
+\end{align}
+Note that the initial density $p_0$ is enough to predict the push-forward density $p_1$ since the Cauchy problem for \cref{eq:w2vf} has a unique solution.
+The embedding function $\varphi(p_0)$ can take different forms, e.g. it can be the density value $\varphi(p_0) = p_0(\cdot)$, which is then used inside the vector field model to evaluate at the current point (analogous to \cref{ex:diffusion}); a kernel density estimator (analogous to \cref{ex:meanf}); or a parametric model taking the samples from this density as an input.
+
+\begin{proposition}
+    Meta Flow Matching recovers the Conditional Generation via Flow Matching when the conditional dependence of the marginals $p_0(x_0 \cond c) = \int dx_1 \pi(x_0,x_1\cond c)$ and $p_1(x_1 \cond c) = \int dx_0 \pi(x_0,x_1\cond c)$ and the distribution $p(c)$ are known, i.e.
+    there exist $\varphi: \P_2(\X) \to \mathbb{R}^{m}$ such that $\mathcal{L}_{MFM}(\W) = \mathcal{L}_{CGFM}(\W)$.
+\end{proposition}
+\begin{proof}
+    Indeed, sampling from the dataset $i \sim \mathcal{D}$ becomes sampling of the conditional variable $c \sim p(c)$ and the embedding function becomes $\varphi(p_0(\cdot\cond c)) = c$.
+\end{proof}
+
+Furthermore, for the parametric family of the embedding models $\varphi(p_t, \theta)$, we show that the parameters $\theta$ can be estimated by minimizing the objective in \cref{eq:mfm_notheta} in the joint optimization with the vector field parameters $\W$.
+We formalize this statement in the following theorem.
+
+\begin{restatable}{theorem}{mfm}\label{th:mfm}
+Consider a dataset of populations $\mathcal{D} = \{(\pi(x_0, x_1\cond i))\}_{i}$ generated from some unknown conditional model $\pi(x_0,x_1\cond c)p(c)$.
+Then the following objective
+\begin{align}
+    \mathcal{L}(\W, \theta)=~&\mean_{p(c)}\int_0^1 dt\; \mean_{p_t(x_t\cond c)}\norm{v^*_{t}(x_t \cond c)-v_t(x_t \cond \varphi(p_0,\theta), \W)}^{2}
+\end{align}
+is equivalent to the Meta Flow Matching objective
+\begin{align}
+    \mathcal{L}_{\text{MFM}}(\W,\theta)=~&\mean_{i \sim \mathcal{D}}\mean_{\pi(x_0,x_1\cond i)}\int_0^1 dt\;\norm{\deriv{}{t}f_{t}(x_0,x_1)-v_t(f_t(x_0,x_1)\cond \varphi(p_0,\theta); \W)}^{2}
+    \label{eq:mfm_loss}
+\end{align}
+up to an additive constant.
+\end{restatable}
+\begin{proof}
+    We postpone the proof to \cref{app:mfm_proof}.
+\end{proof}
+
+\subsection{Learning Population Embeddings via Graph Neural Networks (GNNs)}
+
+\begin{algorithm}[t]
+    \SetKwInOut{Input}{Input}
+    \SetNoFillComment
+    \DontPrintSemicolon
+
+    \setstretch{1.3} %
+
+    \Input{dataset of populations $\{(\pi(x_0,x_1 \mid i),c^i)\}_{i=1}^N$ and treatments $c^i$, and parametric models for the velocity, $v_t(\cdot;\W)$, and population embedding $\varphi(\cdot;\theta)$.}
+
+    \For{training iterations}{
+        $i \sim \mathcal{U}_{\{1,N\}}(i)$ \tcp*[l]{sample batch of $n$ populations ids}
+
+        $(x_0^j,x_1^j,t^j) \sim \pi(x_0,x_1\mid i)\mathcal{U}_{[0,1]}(t)$ \tcp*[l]{sample $N_i$ particles for every population $i$}
+
+        $f_t(x_0^j, x_1^j) \gets (1 - t^j)x_0^j + t^j x_1^j\,$\;
+
+        $h^i(\theta) \gets \varphi\left(\{x_0^j\}_{j=1}^{N_i};\theta\right)$ \tcp*[l]{embed population $\{x_0^j\}_{j=1}^{N_i}$. For \textbf{CGFM} $h \gets i$, \textbf{FM} $h \gets \emptyset$.}
+
+        $\mathcal{L}_{\text{MFM}}(\W,\theta) \gets \frac{1}{n}\sum_{i}\frac{1}{n_i}\sum_j\norm{\frac{d}{dt}f_t(x_0^j, x_1^j) - v_{t^j}\left(f_t(x_0^j,x_1^j)\mid h^i(\theta), c^i;\W\right)}^{2}$\;
+
+        \BlankLine
+        $\W' \gets \text{Update}(\W, \nabla_{\W}\mathcal{L}_{\text{MFM}}(\W,\theta))$ \tcp*[l]{evaluate new parameters of the flow model}
+
+        $\theta' \gets \text{Update}(\theta, \nabla_{\theta}\mathcal{L}_{\text{MFM}}(\W,\theta))$ \tcp*[l]{evaluate new parameters of the embedding model}
+
+        $\W \gets \W',\;\; \theta \gets \theta'$ \tcp*[l]{update both models}
+    }
+
+    \Return{$v_t(\cdot;\W^*), \varphi(\cdot;\theta^*)$}
+
+    \caption{Meta Flow Matching (training)}
+    \label{algo:train_mfm}
+\end{algorithm}
+
+\begin{wrapfigure}{r}{0.55\textwidth}
+    \begin{minipage}{0.54\textwidth}
+        \begin{algorithm}[H]
+             \SetKwInOut{Input}{Input}
+             \SetNoFillComment
+             \DontPrintSemicolon
+
+             \setstretch{1.3} %
+
+             \Input{initial population $\{x_0^j\}_{j=1}^{N'}$, treatment condition $c$, models $v_t(\cdot;\W^*)$ and $\varphi(\cdot;\theta^*)$.}
+
+             \BlankLine
+             $h = \varphi\left(\{x_0^j\}_{j=1}^{N'};\theta\right)$\tcp*[r]{embed the  population}
+             $x_1^j = \int_0^1 v_t(x_t^j \mid h, c;\W) dt + x_0^j$\tcp*[r]{ODE solver}
+
+             \Return{predicted population $\{x_1^j\}_{j=1}^{N'}$}
+
+             \caption{Meta Flow Matching (sampling)}
+             \label{algo:test_mfm}
+         \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+In many applications, the populations $\mathcal{D} = \{(\pi(x_0, x_1\cond i))\}_{i=1}^N$ are given as empirical distributions, i.e. they are represented as samples from some unknown density $\pi$
+\begin{align}
+    \{(x_0^j, x_1^j)\}_{j=1}^{N_i}\,,\;\;(x_0^j, x_1^j) \sim \pi(x_0,x_1\cond i)\,,
+    \label{eq:data_dist_sample_coupling}
+\end{align}
+where $N_i$ is the size of the $i$-th population.
+For instance, for the diffusion process considered in \cref{ex:diffusion}, the samples from $\pi(x_0,x_1\cond i)$ can be generated by generating some marginal $p_1(x_1\cond i)$ and then adding the Gaussian random variable to the samples $x_1^j$.
+We use this model in our synthetic experiments in \cref{sec:exp_diffusion}.
+
+Since the only available information about the populations is samples, we propose learning the embedding of populations via a parametric model $\varphi(p_0,\theta)$, i.e.
+\begin{align}
+     \varphi(p_0,\theta) = \varphi\left(\{x_0^j\}_{j=1}^{N_i},\theta\right)\,,\;\; (x_0^j,x_1^j) \sim \pi(x_0,x_1\cond i)\,.
+\end{align}
+For this purpose, we employ GNNs, which recently have been successfully applied for simulation of complicated many-body problems in physics \citep{sanchez2020learning}.
+To embed a population $\{x_0^j\}_{j=1}^{N_i}$, we create a k-nearest neighbour graph $G_i$ based on the metric in the state-space $\X$, input it into a GNN, which consists of several message-passing iterations \citep{gilmer2017neural} and the final average-pooling across nodes to produce the embedding vector.
+Finally, we update the parameters of the GNN jointly with the parameters of the vector field to minimize the loss function in \cref{eq:mfm_loss}. We show pseudo-code for training in Algorithm \ref{algo:train_mfm} and sampling in Algorithm \ref{algo:test_mfm}.
+
+
+\section{Related Work}
+
+
+\paragraph{\emph{Meta} -- amortizing learning over distributions}
+The meta-learning of probability measures was previously studied by \cite{amos2022meta} where they demonstrate that the prediction of the optimal transport paths can be efficiently amortized over the input marginal measures.
+The main difference with our approach is that we are trying to learn the push-forward map without embedding the second marginal and without restricting ourselves to Input-Convex Neural Network (ICNN) by \citet{amos2017input} and optimal transport maps. MFM is \emph{meta} in the same sense of amortizing optimal transport (or in our case flow) problems over multiple input distributions. Hence, we follow the naming convention of \emph{Meta Optimal Transport} \citep{amos2022meta}. This is different but related to how \emph{meta} is used in the meta learning setting, which amortizes over learning problems \citep{hospedales2021meta, achille2019task2vec}.
+
+\paragraph{Generative modeling for single cells}
+Single cell data has expanded to encompass multiple modalities of data profiling cell state and activities \citep{cae,cellot}. Single-cell data presents multiple challenges in terms of noise, non-time resolved, and high dimension, and generative models have been used to counter those problems. Autoencoder has been used to embed and extrapolate data Out Of Distribution (OOD) with its latent state dimension~\citep{scgen,scVI,NEURIPS2022_aa933b5a}. Orthogonal non-negative matrix factorization (oNMF) has also been used for dimensionality reduction combined with mixture models for cell state prediction \citep{popalign}. Other approaches have tried to use Flow Matching (FM) ~\citep{tong2024simulation, tong2024improving, neklyudov2023computational} or similar approaches such as the Monge gap~\citep{pmlr-v202-uscidda23a} to predict cell trajectories. Currently, the state of the art method uses the principle of Optimal Transport (OT) to predict cell trajectories with ICNN~\citep{makkuva_optimal_2020,cellot}. What determines the significance of the method is its capability in generalizing out of distribution to a new population of cells, which may be from different culture or individuals. As of this time, our method is the only method that takes inter-cellular interactions into account.  
+
+\paragraph{Generative modeling for physical processes}
+The closest approach to ours is the prediction of the many-body interactions in physics \citep{sanchez2020learning} via GNNs.
+However, the problem there is very different since these models use the information about the individual trajectories of samples, which are not available for the single-cell prediction. 
+\cite{neklyudov2022action} consider learning the vector field for any continuous time-evolution of a probability measure, however, their method is restricted to single curves and do not consider generalization to unseen data.
+\cite{campbell2024generative} use input and space independent conditions for applications in co-protein design, but similarly, their method cannot generalize to novel distributions.
+Finally, the weather/climate forecast models generating the next state conditioned on the previous one \citep{price2023gencast, verma2024climode} are similar approaches to ours but operating on a much finer time resolution.
+ 
+
+
+\section{Experiments}
+
+\label{sec:exps}
+
+To show the effectiveness of MFM to generalize under previously unseen populations for the task population prediction, we consider two experimental settings. (i) A synthetic experiment with well defined coupled populations, and (ii) experiments on a publicly available single-cell dataset consisting of populations from patient dependent treatment response trials. 
+To quantify model performance, we consider three distributional distances metrics: the 1-Wasserstein distance ($\cW_1$), 2-Wasserstein ($\cW_2$) distance, and the radial basis kernel maximum-mean-discrepancy (MMD) distance \citep{gretton2012kernel}. 
+We parameterize all vector field models $v_t(\cdot \cond \varphi(p_0); \W)$ using a Multi-Layer Perceptron (MLP). 
+For MFM, we additionally parameterize $\varphi(p_t; \theta, k)$ using a Graph Convolutional Network (GCN) with a $k$-nearest neighbour graph edge pooling layer. 
+We include details regarding model hyperparameters, training/optimization, and implementation in \cref{ap:experimental_details} and \cref{ap:bio_expts}.
+The results for all the models are averaged over three random seeds.
+
+\subsection{Synthetic Experiment}
+\label{sec:exp_diffusion}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \begin{tikzpicture}[every node/.style={inner sep=0pt,outer sep=0pt,anchor=south west}]
+          \node (source) at (0,0) {\includegraphics[width=\textwidth]{pics/fig_fm_letters_main.pdf}};
+          \begin{scope}[overlay] %
+            \node[rotate=90] at (-1mm, 2.7cm) {\textbf{Train}};
+            \node[rotate=90] at (-1mm, 0.7cm) {\textbf{Test}};
+            \draw[line width=1.5pt] (3.35cm, 0) -- ++(0cm, 4.2cm);
+            \draw[line width=1.5pt,] (0, 2.1) -- ++(\textwidth, 0);
+          \end{scope}
+        \end{tikzpicture}
+        FM \\
+    \end{minipage}
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \begin{tikzpicture}[every node/.style={inner sep=0pt,outer sep=0pt,anchor=south west}]
+          \node (source) at (0,0) {\includegraphics[width=\textwidth]{pics/fig_cgfm_letters_main.pdf}};
+          \begin{scope}[overlay] %
+            \draw[line width=1.5pt] (3.35cm, 0) -- ++(0cm, 4.2cm);
+            \draw[line width=1.5pt,] (0, 2.1) -- ++(\textwidth, 0);
+          \end{scope}
+        \end{tikzpicture}
+        CGFM \\
+    \end{minipage}
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \begin{tikzpicture}[every node/.style={inner sep=0pt,outer sep=0pt,anchor=south west}]
+          \node (source) at (0,0) {\includegraphics[width=\textwidth]{pics/fig_mfm_letters_main_50.pdf}};
+          \begin{scope}[overlay] %
+            \draw[line width=1.5pt] (3.35cm, 0) -- ++(0cm, 4.2cm);
+            \draw[line width=1.5pt,] (0, 2.1) -- ++(\textwidth, 0);
+          \end{scope}
+        \end{tikzpicture}
+        MFM \\
+    \end{minipage}    
+    \caption{\textbf{Synthetic letters experiment visualizations.} Examples of model-generated samples for synthetic letters from the source distribution ($t=0$) to predicted target distribution ($t=1$). 
+    See \cref{fig:letters_full} in \cref{ap:extended_results} for a larger set of examples.}
+    \label{fig:letters}
+\end{figure}
+
+\begin{table}[t]
+    \centering
+    \caption{\textbf{Results of the synthetic letters experiment for population prediction on seen train populations and unseen test populations.} We use $^{\text{w/}}\mathcal{N}$ to denote models trained with source distributions sampled via $x_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{1})$ (All MFM models use noisy letters source distributions denoted by $p_0$ as input to the population embedding model $\varphi_\theta(p_0)$). We report the 1-Wasserstein ($\cW_1$), 2-Wasserstein ($\cW_2$), and the maximum-mean-discrepancy (MMD) distributional distances. We consider 4 settings for MFM with varying $k$. Letter populations that comprise test set (X and Y) are entirely unseen during training.}
+    \resizebox{\columnwidth}{!}{
+    \begin{tabular}{lrrrrrrrrr}
+            \toprule
+            & \multicolumn{3}{c}{\textbf{Train}} & \multicolumn{3}{c}{\textbf{Test} (X's)} & \multicolumn{3}{c}{\textbf{Test} (Y's)} \\
+            \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+             & \multicolumn{1}{c}{$\cW_1$} & \multicolumn{1}{c}{$\cW_2$} & \multicolumn{1}{c}{MMD {\tiny ($\times 10^{-3}$)}} & \multicolumn{1}{c}{$\cW_1$} & \multicolumn{1}{c}{$\cW_2$} & \multicolumn{1}{c}{MMD {\tiny ($\times 10^{-3}$)}}  & \multicolumn{1}{c}{$\cW_1$} & \multicolumn{1}{c}{$\cW_2$} & \multicolumn{1}{c}{MMD {\tiny ($\times 10^{-3}$)}}\\
+            \midrule
+            FM & $0.209 \pm 0.000$ & $0.277 \pm 0.000$ & $2.54 \pm 0.00$ & $0.234 \pm 0.000$ & $0.309 \pm 0.000$ & $2.45 \pm 0.00$ & $0.238 \pm 0.000$ & $0.316 \pm 0.000$ & $3.32 \pm 0.01$ \\
+            FM$^{\text{w/}}\mathcal{N}$ & $0.806 \pm 0.000$ & $0.960 \pm 0.000$ & $31.68 \pm 0.00$ & $0.764 \pm 0.000$ & $0.931 \pm 0.000$ & $25.04 \pm 0.00$ & $1.030 \pm 0.000$ & $1.228 \pm 0.000$ & $45.36 \pm 0.00$ \\
+            CGFM & $0.090 \pm 0.000$ & $0.113 \pm 0.000$ & $0.25 \pm 0.00$ & $0.334 \pm 0.000$ & $0.407 \pm 0.000$ & $5.55 \pm 0.00$ & $0.327 \pm 0.000$ & $0.405 \pm 0.000$ & $6.85 \pm 0.00$ \\
+            CGFM$^{\text{w/}}\mathcal{N}$ & $0.156 \pm 0.025$ & $0.201 \pm 0.027$ & $1.02 \pm 0.39$ & $0.849 \pm 0.004$ & $0.993 \pm 0.003$ & $35.08 \pm 0.75$ & $1.062 \pm 0.011$ & $1.229 \pm 0.010$ & $55.66 \pm 0.76$ \\
+            \midrule
+            MFM$^{\text{w/}}\mathcal{N}$ ($k = 0$) & $0.148 \pm 0.003$ & $0.195 \pm 0.010$ & $0.94 \pm 0.11$ & $0.347 \pm 0.011$ & $0.431 \pm 0.012$ & $6.47 \pm 0.44$ & $0.402 \pm 0.011$ & $0.485 \pm 0.010$ & $10.92 \pm 0.18$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k = 1$) & $0.154 \pm 0.004$ & $0.208 \pm 0.010$ & $0.91 \pm 0.01$ & $0.349 \pm 0.023$ & $0.433 \pm 0.023$ & $6.53 \pm 0.52$ & $0.391 \pm 0.035$ & $0.477 \pm 0.041$ & $10.71 \pm 1.86$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k = 10$) & $0.151 \pm 0.013$ & $0.197 \pm 0.015$ & $0.94 \pm 0.15$ & $0.343 \pm 0.020$ & $0.427 \pm 0.019$ & $6.38 \pm 0.67$ & $0.413 \pm 0.018$ & $0.502 \pm 0.024$ & $11.93 \pm 1.14$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k = 50$) & $0.174 \pm 0.005$ & $0.232 \pm 0.006$ & $1.40 \pm 0.13$ & $0.363 \pm 0.010$ & $0.449 \pm 0.013$ & $7.46 \pm 0.44$ & $0.446 \pm 0.021$ & $0.536 \pm 0.028$ & $13.40 \pm 0.23$ \\
+            \midrule
+            MFM ($k = 0$) & $\textbf{0.081} \pm \textbf{0.003}$ & $\textbf{0.100} \pm \textbf{0.004}$ & $\textbf{0.16} \pm \textbf{0.06}$ & $0.202 \pm 0.002$ & $0.249 \pm 0.003$ & $2.29 \pm 0.05$ & $0.218 \pm 0.001$ & $0.262 \pm 0.002$ & $3.79 \pm 0.11$ \\
+            MFM ($k = 1$) & $0.082 \pm 0.001$ & $0.101 \pm 0.002$ & $\textbf{0.16} \pm \textbf{0.01}$ & $0.205 \pm 0.008$ & $0.251 \pm 0.008$ & $2.38 \pm 0.22$ & $0.215 \pm 0.006$ & $0.258 \pm 0.007$ & $3.78 \pm 0.25$ \\
+            MFM ($k = 10$) & $0.088 \pm 0.002$ & $0.109 \pm 0.003$ & $0.21 \pm 0.01$ & $\textbf{0.201} \pm \textbf{0.006}$ & $\textbf{0.248} \pm \textbf{0.006}$ & $2.20 \pm 0.15$ & $0.208 \pm 0.003$ & $0.252 \pm 0.002$ & $3.55 \pm 0.06$ \\
+            MFM ($k = 50$) & $0.092 \pm 0.004$ & $0.116 \pm 0.004$ & $0.25 \pm 0.06$ & $0.206 \pm 0.008$ & $0.257 \pm 0.008$ & $\textbf{2.18} \pm \textbf{0.25}$ & $\textbf{0.204} \pm \textbf{0.005}$ & $\textbf{0.249} \pm \textbf{0.006}$ & $\textbf{3.14} \pm \textbf{0.18}$ \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:letters}
+\end{table}
+
+We curate a synthetic dataset of the joint distributions $\{(p_0(x_0,\cond i), p_1(x_1\cond i))\}_{i=1}^N$ by simulating a diffusion process applied to a set of pre-defined target distributions $p_1(x_1\cond i)$ for $i = 1, \dots, N$. 
+To get a paired population $p_0(x_0\cond i)$ we simulate the forward diffusion process without drift $x_0 \sim \Normal(x_1,\sigma)$.
+After this setup, for reasonable values of $\sigma$, we assume that one can reverse the diffusion process and learn the push-forward map from $p_0(x_0\cond i)$ to $p_1(x_1\cond i)$ for every index $i$. 
+For this task, given the $i$-th population index we denote $p_0(x_0\cond i)$ as the \emph{source} population $p_1(x_1\cond i)$ as the $i$-th \emph{target} population.
+
+To construct $p_1(x_1\cond i)$, we discretize samples from a defined silhouette; e.g. an image of a character, where $i$ indexes the respective character. 
+We use upper case letters as the silhouette and generate the corresponding samples $x_1 \sim p_1(x_1\cond i)$ from the uniform distribution over the silhouette and run the diffusion process for samples $x_1$ to acquire $x_0$.
+We construct the \emph{training data} using 10 random orientations of 24 letters.
+We construct the \emph{test data} by using 10 random orientations of ``X'' and ``Y''. Test data populations of ``X'' and ``Y'' are entirely unseen during training.
+
+We train FM, CGFM and 4 variants of MFM of varying $k$ for the GCN population embedding model $\varphi(p_0; \theta, k)$. When $k=0$, $\varphi(p_t; \theta, k)$ becomes identical to the DeepSets model \citep{zaheer2017deep}.
+We compare MFM to FM and CGFM. 
+We repeat this experiment for models trained with source distributions sampled from a a standard normal $x_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{1})$. We label these models as FM$^{\text{w/}}\mathcal{N}$, CGFM$^{\text{w/}}\mathcal{N}$, and MFM$^{\text{w/}}\mathcal{N}$. Here, MFM$^{\text{w/}}\mathcal{N}$ still takes the original $p_0$ as input to the population embedding model $\varphi(p_0; \theta, k)$, while $v_t(\cdot;\W)$ uses $x_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{1})$ as the source distribution. 
+
+FM does not have access to conditional information; hence will only learn an aggregated lens of the distribution dynamics and will not be able to fit the training data, and consequently won't generalize to the test conditions.
+For the training data, CGFM vector field model takes in the distribution index $i$ as a one-hot input condition. 
+On the test set, since none of these indices is present, we input the normalized constant vector, which averages the learned embeddings of the indices.
+Because of this, CGFM will fit the training data, however, will not be able to generalize to the unseen condition in the test dataset. 
+CGFM indicates when the model can fit the training data and demonstrates that the test data is substantially different and cannot be generated by the same model.
+For MFM, we expect to both fit the training data and generalize to unseen distributional conditions.
+
+We report results for the synthetic experiment in \cref{fig:letters} and \cref{tab:letters}. We observe that indeed FM fails to adequately learn to sample from $p_1(x_1\cond i)$ in the training set, while CGFM is able to effectively sample from $p_1(x_1\cond i)$ in the training set.
+As expected, CGFM fits the training data, but fails to generalize beyond its set of training conditions. 
+In contrast, we see that MFM is able to both fit the training data while also generalizing to the unseen test distributions. 
+FM fails to fit the train data and fails to generalize under the test conditions. 
+Interestingly, although MFM performs better for certain values of $k$ versus others, overall performance does not vary significantly for the range considered.
+\subsection{Experiments on Organoid Drug-screen Data}
+\label{sec:exp_bio}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{pics/experiment_design.pdf}
+    \caption{\textbf{Organoid drug-screen dataset overview.} \emph{Left}: a given replica consists of a control distribution $p_0$ and corresponding treatment response distribution $p_1$ for treatment condition $c_i$. \emph{Right}: train and test data splits for replica (top) and patients (bottom) splits, restively. For each experiment there are 11 treatments, 10 patients and 3 culture conditions.}
+    \label{fig:exp_design}
+\end{figure}
+
+\paragraph{Data} For experiments on biological data, we use the organoid drug-screen dataset from \cite{RamosZapatero2023}. This dataset is a single-cell mass-cytometry dataset collected over 10 patients. Somewhat unique to this dataset, unlike many prior perturbation-screen datasets which have a single control population, this dataset has matched controls to each experimental condition. Populations from each patient are treated with 11 different drug treatments of varying dose concentrations.\footnote{We consider only the highest dosage and leave exploration of dose-dependent response to future work.}
+We use the term \emph{replicate} to define control-treatment population pairs, $p_0(x_0\cond c_i)$ and $p_1(x_1\cond c_i)$, respectively (see \cref{fig:exp_design}-left). In each patient, cell population are categorized into 3 cell \emph{cultures}: (i) cancer associated Fibroblasts, (ii) patient-derived organoid cancer cells (PDO), and (iii)  patient-derived organoid cancer cells co-cultured fibroblasts (PDOF). 
+We report results averaged over Fibroblast, PDO, and PDOF cultures and results for the individual cultures (this is reported in \cref{ap:extended_results}). 
+
+\paragraph{Pre-processing and data splits} We filter each cell population to contain at least 1000 cells and consider 43 bio-markers.
+We consider two data splits for the organoid drug-screen dataset (see \cref{fig:exp_design}-right). (1) \emph{\textbf{Replicate split}}; here we leave-out replicates evenly across all patients for testing. (2) \emph{\textbf{Patients split}}; here we leave-out replicates fully in one patients -- in this setting, we are testing the ability of of model to generalize population prediction of treatment response for unseen patients. 
+Further details regarding data pre-processing and data splits are provided in \cref{ap:bio_expts}.
+
+For the organoid drug-screen experiments, we consider an ICNN architecture in as an additional baseline alongside FM and CGFM. The ICNN model is based on CellOT \citep{bunne2023learning}; a method for learning cell specific response to treatments. The ICNN (and likewise CellOT) counterparts our FM model in that it does not take the population index $i$ as a condition. Therefore, it will neither be able to fit the training data, nor generalize.
+
+\paragraph{Predicting treatment response across replicates} We show results for generalization across replicates in \cref{tab:avg_replicates}. As expected, we observe that CGFM fits the training data, but does not generalize to the test replicates. With this, we can observe that the FM and ICNN models fail to fit the train data, relative to CGFM, and also fail to generalize. In general, MFM ($k=0$) performs best on generalization to unseen replicates. We include results reported for the separate cell cultures in \cref{tab:replicates_fibs_pdos_pdofs} in \cref{ap:extended_results}.
+
+\paragraph{Predicting treatment response across patients} We show results for generalization across patients in \cref{tab:avg_patients}. Similar to the replicates data setting, we observe that CGFM fits the training data, but does not generalize to the test replicates. Likewise, the FM and ICNN models fail to fit the train data, relative to CGFM, and also fail to generalize. In general, MFM ($k=100$) performs best on generalization to unseen patients. We include results reported for the separate cell cultures in \cref{tab:patients_fibs_pdos_pdofs} in \cref{ap:extended_results}.
+
+We observe that no clear single selection for $k$ yields the best performance across all tasks on the single-cell experiments. We observe that for the \emph{replicates} split, $k=0$ on average performs better than $k>0$. Whereas on the \emph{patients} split, the opposite is true, $k=100$ performs best on average. This is possibly since the \emph{patients} split forms a more difficult generalization problem (more diversity between training populations and test populations), and hence it is more difficult to over-fit during training with higher $k$. 
+
+Through the biological and synthetic experiments, we have shown that MFM is able to generalize to unseen distributions/populations. The implication of our results suggest that MFM can learn population dynamics in unseen environments. In biological contexts, like the one we have shown in this work, this result indicates that we can learn population dynamics, of treatment response or any arbitrary perturbation, in new/unseen patients. This works towards a model where it is possible to predict and design an individualized treatment regimen for each patient based on their individual characteristics and tumor microenvironment.
+
+\begin{table}[t]
+        \centering
+        \caption{\textbf{Experimental results on the organoid drug-screen dataset} for population prediction of treatment response across \emph{\textbf{replicate}} populations. Results shown in this table are for $\text{\textbf{dim}} = \textbf{43}$. We use $^{\text{w/}}\mathcal{N}$ to denote models trained with source distributions sampled via $x_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{1})$. We report results results for the 1-Wasserstein ($\cW_1$), 2-Wasserstein ($\cW_2$), the maximum-mean-discrepancy (MMD), and mean-feature squared correlation coefficient ($r^2$) distributional metrics. We consider $4$ settings for MFM with varying nearest-neighbours parameter ($k=0,10,50,100$). For extended results, see \cref{tab:replicates_fibs_pdos_pdofs}.}
+        \resizebox{\columnwidth}{!}{
+        \begin{tabular}{lrrrrrrrr}
+            \toprule
+            & \multicolumn{4}{c}{\textbf{Train}} & \multicolumn{4}{c}{\textbf{Test}} \\
+            \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+            & $\cW_1 (\downarrow)$ & $\cW_2 (\downarrow)$ & MMD {\tiny ($\times 10^{-3}$)} $(\downarrow)$ & $r^2 (\uparrow)$ & $\cW_1 (\downarrow)$ & $\cW_2 (\downarrow)$ & MMD {\tiny ($\times 10^{-3}$)} $(\downarrow)$ & $r^2 (\uparrow)$ \\
+            \midrule
+            FM & $3.925 \pm 0.019$ & $4.041 \pm 0.023$ & $3.76 \pm 0.26$ & $0.952 \pm 0.007$ & $3.961 \pm 0.036$ & $4.089 \pm 0.042$ & $5.90 \pm 0.25$ & $0.941 \pm 0.010$ \\
+            FM$^{\text{w/}}\mathcal{N}$ & $6.908 \pm 0.037$ & $7.181 \pm 0.033$ & $57.70 \pm 0.75$ & $0.639 \pm 0.005$ & $6.972 \pm 0.022$ & $7.244 \pm 0.022$ & $60.39 \pm 0.98$ & $0.642 \pm 0.007$ \\
+            CGFM & $\textbf{3.864} \pm \textbf{0.064}$ & $3.975 \pm 0.069$ & $\textbf{3.16} \pm \textbf{0.89}$ & $0.964 \pm 0.006$ & $4.087 \pm 0.063$ & $4.211 \pm 0.066$ & $8.84 \pm 0.75$ & $0.938 \pm 0.006$ \\
+            CGFM$^{\text{w/}}\mathcal{N}$ & $4.187 \pm 0.008$ & $4.340 \pm 0.009$ & $8.69 \pm 0.50$ & $0.936 \pm 0.002$ & $6.852 \pm 0.045$ & $7.114 \pm 0.044$ & $71.24 \pm 3.71$ & $0.666 \pm 0.016$ \\
+            ICNN & $4.286 \pm 0.018$ & $4.313 \pm 0.112$ & $38.6 \pm 0.212$ & $0.897 \pm 0.031$ & $ 4.194\pm 0.110$ & $4.313 \pm 0.112$ & $37.9 \pm 2.84 $ & $0.897 \pm 0.008$ \\
+            \midrule
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=0$) & $3.940 \pm 0.022$ & $4.047 \pm 0.023$ & $3.91 \pm 0.18$ & $0.959 \pm 0.006$ & $3.896 \pm 0.026$ & $4.002 \pm 0.030$ & $\textbf{4.35} \pm \textbf{0.18}$ & $0.950 \pm 0.005$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=10$) & $3.976 \pm 0.044$ & $4.086 \pm 0.049$ & $4.52 \pm 0.42$ & $0.961 \pm 0.002$ & $3.943 \pm 0.032$ & $4.051 \pm 0.034$ & $5.28 \pm 0.25$ & $0.952 \pm 0.001$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=50$) & $3.968 \pm 0.013$ & $4.075 \pm 0.014$ & $4.36 \pm 0.44$ & $0.961 \pm 0.002$ & $3.934 \pm 0.007$ & $4.041 \pm 0.008$ & $4.99 \pm 0.35$ & $0.954 \pm 0.000$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=100$) & $3.937 \pm 0.014$ & $4.040 \pm 0.015$ & $3.94 \pm 0.00$ & $0.963 \pm 0.001$ & $3.908 \pm 0.030$ & $4.011 \pm 0.033$ & $4.68 \pm 0.52$ & $0.953 \pm 0.002$ \\
+            \midrule
+            MFM ($k=0$) & $3.874 \pm 0.015$ & $\textbf{3.973} \pm \textbf{0.020}$ & $3.37 \pm 0.14$ & $\textbf{0.967} \pm \textbf{0.003}$ & $\textbf{3.880} \pm \textbf{0.009}$ & $\textbf{3.990} \pm \textbf{0.011}$ & $4.68 \pm 0.16$ & $0.955 \pm 0.002$ \\
+            MFM ($k=10$) & $3.896 \pm 0.021$ & $4.000 \pm 0.021$ & $3.82 \pm 0.12$ & $0.964 \pm 0.001$ & $3.899 \pm 0.013$ & $4.012 \pm 0.011$ & $5.13 \pm 0.48$ & $0.955 \pm 0.001$ \\
+            MFM ($k=50$) & $3.888 \pm 0.038$ & $3.991 \pm 0.030$ & $3.59 \pm 0.41$ & $0.963 \pm 0.001$ & $3.900 \pm 0.038$ & $4.013 \pm 0.034$ & $5.06 \pm 0.22$ & $0.954 \pm 0.003$ \\
+            MFM ($k=100$) & $3.906 \pm 0.010$ & $4.008 \pm 0.005$ & $4.05 \pm 0.38$ & $0.964 \pm 0.002$ & $3.898 \pm 0.008$ & $4.009 \pm 0.009$ & $5.19 \pm 0.05$ & $\textbf{0.957} \pm \textbf{0.000}$ \\
+            \bottomrule
+        \end{tabular}
+        }
+    \label{tab:avg_replicates}
+\end{table}
+
+\begin{table}[t]
+        \centering
+        \caption{\textbf{Experimental results on the organoid drug-screen dataset} for population prediction of treatment response across \emph{\textbf{patient}} populations. Results shown in this table are for $\text{\textbf{dim}} = \textbf{43}$. For extended results, see \cref{tab:patients_fibs_pdos_pdofs}.}
+        \resizebox{\columnwidth}{!}{
+        \begin{tabular}{lrrrrrrrr}
+            \toprule
+            & \multicolumn{4}{c}{\textbf{Train}} & \multicolumn{4}{c}{\textbf{Test}} \\
+            \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+            & $\cW_1 (\downarrow)$ & $\cW_2 (\downarrow)$ & MMD {\tiny ($\times 10^{-3}$)} $(\downarrow)$ & $r^2 (\uparrow)$ & $\cW_1 (\downarrow)$ & $\cW_2 (\downarrow)$ & MMD {\tiny ($\times 10^{-3}$)} $(\downarrow)$ & $r^2 (\uparrow)$ \\
+            \midrule
+            FM & $3.985 \pm 0.054$ & $4.115 \pm 0.067$ & $4.64 \pm 0.43$ & $0.938 \pm 0.014$ & $4.340 \pm 0.078$ & $4.564 \pm 0.111$ & $13.00 \pm 0.67$ & $0.865 \pm 0.034$ \\
+            FM$^{\text{w/}}\mathcal{N}$ & $6.892 \pm 0.027$ & $7.164 \pm 0.033$ & $57.03 \pm 1.00$ & $0.655 \pm 0.003$ & $7.114 \pm 0.100$ & $7.404 \pm 0.086$ & $64.97 \pm 3.79$ & $0.613 \pm 0.008$ \\
+            CGFM & $\textbf{3.882} \pm \textbf{0.019}$ & $3.999 \pm 0.020$ & $\textbf{3.16} \pm \textbf{0.59}$ & $0.952 \pm 0.004$ & $4.443 \pm 0.033$ & $4.621 \pm 0.041$ & $17.00 \pm 1.03$ & $0.899 \pm 0.008$ \\
+            CGFM$^{\text{w/}}\mathcal{N}$ & $4.313 \pm 0.077$ & $4.480 \pm 0.081$ & $11.51 \pm 1.96$ & $0.918 \pm 0.004$ & $7.135 \pm 0.045$ & $7.390 \pm 0.037$ & $79.78 \pm 4.67$ & $0.637 \pm 0.010$ \\
+            ICNN & $4.289 \pm 0.020$ & $4.382 \pm 0.021$ & $37.0 \pm 2.84$ & $0.913 \pm 0.003$ & $4.525 \pm 0.051$ & $4.681 \pm 0.054$ & $74.00 \pm 0.57$ & $0.862 \pm 0.127$ \\
+            \midrule
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=0$) & $3.982 \pm 0.014$ & $4.095 \pm 0.015$ & $5.04 \pm 0.36$ & $0.951 \pm 0.002$ & $4.177 \pm 0.042$ & $4.355 \pm 0.048$ & $10.53 \pm 0.59$ & $0.911 \pm 0.001$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=10$) & $4.006 \pm 0.008$ & $4.119 \pm 0.012$ & $5.13 \pm 0.30$ & $0.948 \pm 0.001$ & $4.156 \pm 0.065$ & $4.324 \pm 0.067$ & $9.58 \pm 1.63$ & $0.912 \pm 0.003$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=50$) & $3.982 \pm 0.018$ & $4.095 \pm 0.016$ & $4.74 \pm 0.21$ & $0.951 \pm 0.002$ & $4.153 \pm 0.069$ & $4.324 \pm 0.070$ & $9.63 \pm 1.45$ & $0.912 \pm 0.002$ \\
+            MFM$^{\text{w/}}\mathcal{N}$ ($k=100$) & $4.004 \pm 0.012$ & $4.119 \pm 0.014$ & $5.19 \pm 0.43$ & $0.949 \pm 0.002$ & $4.166 \pm 0.001$ & $4.341 \pm 0.003$ & $9.52 \pm 0.33$ & $0.915 \pm 0.005$ \\
+            \midrule
+            MFM ($k=0$) & $3.905 \pm 0.005$ & $4.012 \pm 0.006$ & $4.18 \pm 0.25$ & $\textbf{0.958} \pm \textbf{0.001}$ & $4.209 \pm 0.007$ & $4.380 \pm 0.012$ & $12.34 \pm 0.50$ & $\textbf{0.918} \pm \textbf{0.002}$ \\
+            MFM ($k=10$) & $3.896 \pm 0.033$ & $4.005 \pm 0.036$ & $3.89 \pm 0.44$ & $0.957 \pm 0.005$ & $4.216 \pm 0.090$ & $4.395 \pm 0.098$ & $11.99 \pm 2.36$ & $0.917 \pm 0.005$ \\
+            MFM ($k=50$) & $3.902 \pm 0.018$ & $4.008 \pm 0.022$ & $4.20 \pm 0.17$ & $\textbf{0.958} \pm \textbf{0.000}$ & $4.214 \pm 0.017$ & $4.396 \pm 0.020$ & $12.09 \pm 0.75$ & $0.916 \pm 0.002$ \\
+            MFM ($k=100$) & $3.884 \pm 0.039$ & $\textbf{3.986} \pm \textbf{0.044}$ & $3.77 \pm 0.49$ & $0.955 \pm 0.001$ & $\textbf{4.100} \pm \textbf{0.093}$ & $\textbf{4.269} \pm \textbf{0.104}$ & $\textbf{8.96} \pm \textbf{1.88}$ & $0.917 \pm 0.004$ \\
+            \bottomrule
+        \end{tabular}
+        }
+    \label{tab:avg_patients}
+\end{table} 
+
+
+
+\section{Conclusion}
+
+Our paper highlights the significance of modeling dynamics based on the entire distribution. 
+While flow-based models offer a promising avenue for learning dynamics at the population level, they were previously restricted to a single initial population and predefined (known) conditions.
+In this paper, we introduce \emph{Meta Flow Matching} (MFM) as a practical solution to address these limitations. By integrating along vector fields of the Wasserstein manifold, MFM allows for a more comprehensive model of dynamical systems with interacting particles. Crucially, MFM leverages graph neural networks to embed the initial population, enabling the model to generalize over various initial distributions. MFM opens up new possibilities for understanding complex phenomena that emerge from interacting systems in biological and physical systems. In practice, we demonstrate that MFM learns meaningful embeddings of single-cell populations along with the developmental model of these populations.
+Moreover, our empirical study demonstrates the possibility of modeling patient-specific response to treatments via the meta-learning. 
+
+\paragraph{Limitations}
+In this work we explored empirically the effect of conditioning the learned flow on the initial distribution. We argue this is a more natural model for many biological systems. However, there are many other aspects of modeling biological systems that we did not consider. In particular we did not consider extensions to the manifold setting~\citep{huguet_manifold_2022,huguet_geodesic_2022}, unbalanced optimal transport~\citep{benamou_numerical_2003,yang_scalable_2019,chizat_unbalanced_2018}, aligned~\citep{somnath_aligned_2023,liu2023i2sb}, or stochastic settings~\citep{bunne2023learning,koshizuka_neural_2022} in this work. 
+
+\paragraph{Future Work}
+In this work, we focused on exploring the amortization of learning over the space of distributions using flow matching. However, our framework can be extended beyond flow matching. One of the central innovations in this work is conditioning vector fields on representations of entire distributions. Hence, this can be easily extended to other training regimes. Furthermore, we proposed the joint training of parameters $\W$ and $\theta$ for the vector field $v_t(\cdot; \W)$ and population embedding model $\varphi(\cdot; \theta)$ using the loss defined in \cref{eq:mfm_loss}. Although this is a novel approach to $v_t(\cdot | \varphi(\cdot; \theta); \W)$ training, there remains room to explore the pre-training and/or use of different losses for the population embedding model. 
+
+
+
+\section{Broader Impacts}
+
+
+This paper is primarily a theoretical and methodological contribution with little societal impact. MFM can be used to better model dynamical systems of interacting particles and in particular cellular systems. Better modeling of cellular systems can potentially be used for the development of malicious biological agents. However, we do not see this as a significant risk at this time.
+
+
+
+
+

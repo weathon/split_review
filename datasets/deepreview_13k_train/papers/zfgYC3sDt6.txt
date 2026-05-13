@@ -1,0 +1,540 @@
+\title{Understanding and Mitigating Miscalibration in Prompt Tuning for Vision-Language Models}
+
+\begin{abstract}
+Confidence calibration is critical for the safe deployment of machine learning models in the real world.
+However, such issue in vision-language models like CLIP, particularly after fine-tuning, has not been fully addressed.
+In this work, we demonstrate that existing prompt tuning methods usually lead to a trade-off of calibration between base and new classes:
+the cross-entropy loss in CoOp causes overconfidence in new classes by increasing textual label divergence, whereas the regularization of KgCoOp maintains the confidence level but results in underconfidence in base classes due to the improved accuracy.
+Inspired by the observations, we introduce Dynamic Outlier Regularization (DOR) to ensure the confidence calibration on both base and new classes after fine-tuning. 
+In particular, we propose to minimize the feature deviation of novel textual labels (instead of base classes) sampled from a large vocabulary.
+In effect, DOR prevents the increase in textual divergence for new labels while easing restrictions on base classes.
+Extensive experiments demonstrate that DOR can enhance the calibration performance of current fine-tuning methods on base and new classes.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large pre-trained vision-language models~(VLMs) like CLIP~\citep{radford2021learning} have become the de facto standard in today’s zero-shot tasks including image recognition~\citep{wortsman2022robust}, open-vocabulary segmentation~\citep{liang2023open} and knowledge-augmented retrieval~\citep{ming2024understanding}. 
+To transfer pre-trained CLIP knowledge to domain-specific downstream tasks efficiently, various parameter-efficient fine-tuning~(PEFT) techniques including prompt tuning~\citep{zhou2022learning} and adapter~\citep{gao2024clip} have been proposed.  
+Despite the promising improvement in accuracy, the reliability issue such as confidence calibration in fine-tuned VLMs has been largely overlooked.
+Without fully understanding the miscalibration in fine-tuned VLMs, it can exacerbate safety concerns in high-stakes applications like medical diagnosis and autonomous driving.
+
+In confidence calibration, we generally expect the model’s confidence level to be consistent with its empirical accuracy.
+In the literature, zero-shot CLIP is often recognized for its excellent performance in confidence calibration~\citep{minderer2021revisiting}. 
+Prior work~\citep{wang2024openvocabulary} finds that CLIP fined-tuned on base classes generally suffers from miscalibration on novel classes within the same task, where the model is expected to generalize ~\citep{zhou2022learning, yao2023visual}.
+However, they concentrate on novel classes that are not present in the fine-tuning, without adequately explaining the miscalibration issue on base classes. The community still lacks a comprehensive understanding of the fundamental cause and mitigation strategies of the miscalibration issue during fine-tuning.
+
+In this work, we first investigate how current prompt tuning methods (e.g., CoOp~\citep{zhou2022learning}, KgCoOp~\citep{yao2023visual}) interfere with the calibration of CLIP. 
+We empirically find that existing prompt tuning methods fail to maintain the calibration performance on both base and new classes simultaneously, compromising one of them:
+\textbf{CoOp exhibits overconfidence on new classes and KgCoOp provides underconfident predictions on base classes.}
+We provide a thorough explanation from the perspective of textual label divergence.
+In particular, CoOp increases the divergence of textual label distribution through cross-entropy loss, resulting in excessively high confidence misaligned with actual accuracy on new classes.
+Instead, KgCoOp hinders the increase of textual distribution divergence, maintaining the confidence level on base and new classes. However, this leads to the underconfidence issue due to the improved accuracy on base classes.
+There arises a question: \textit{Is it possible to ensure the calibration on both base and new classes after fine-tuning?}
+To tackle the above challenges, we introduce \textbf{D}ynamic \textbf{O}utlier \textbf{R}egularization (\textbf{DOR}).
+The high-level idea behind DOR is to control the divergence of unseen textual distribution under the supervision of zero-shot CLIP without affecting the vanilla fine-tuning objectives.
+First, we construct a set of textual outliers from a large lexical database -- WordNet~\citep{miller1995wordnet}, and ensure that the selected classes are relevant but non-overlapped with the base classes in the fine-tuning task.
+In fine-tuning, we reduce the feature discrepancy of novel textual labels between the fine-tuned model and the zero-shot CLIP.
+In each epoch, the novel textual labels are dynamically sampled from the constructed set of textual outliers.
+Leveraging dynamic textual outliers, DOR prevents the increase in textual divergence for new labels while easing restrictions on base classes.
+
+We verify the effectiveness of DOR over 11 image classification datasets and four types of ImageNets with covariant shifts, under the evaluation protocol of base-to-new generalization and domain generalization, respectively.
+Empirical results show that DOR can enhance the overall calibration of existing prompt-tuning methods (see Table~\ref{tab_main_exp}), on both base and new classes. Moreover, our method can maintain and even improve the generalization performance of those tuning methods (See Table~\ref{tab_main_exp} \& \ref{tab_accuracy} ).
+DOR also achieves significant improvements in the presence of covariate shifts.
+In addition to prompt-based tuning methods, we demonstrate that such a regularization criterion can be extended to visual fine-tuning methods with image outliers.
+
+We summarize our main contributions as follows:
+\begin{enumerate}
+\item We provide an in-depth analysis of textual distribution divergence to understand the miscalibration in fine-tuned CLIP. We also show that current prompt-tuning methods typically lead to a trade-off between base and new classes, compromising one of them.
+\item We propose DOR, a simple yet effective regularization that ensures the calibration performance on both base and new classes. Our method is compatible with existing prompt-tuning methods and can be extended to visual fine-tuning methods with image outliers. 
+\item We conduct extensive experiments and show that DOR achieves superior performance on a wide range of real-world tasks.
+For instance, DOR achieves an average of 8.09\% reduction in Expected Calibration Error (ECE) for CoOp over the 11 downstream datasets.
+\end{enumerate}
+
+
+\section{Preliminaries}
+
+
+\paragraph{Contrastive Language-Image Pretraining~(CLIP)}
+CLIP is a visual-language model that enables to measure the alignment between images and texts~\citep{radford2021learning}.
+Recently, CLIP has shown great potential in zero-shot inference for arbitrary classes. Let $\phi: \boldsymbol{x} \rightarrow \mathbb{R}^{d}$ and $\psi: \boldsymbol{t} \rightarrow \mathbb{R}^{d}$ denote CLIP's image and text encoders, respectively. Given an image instance $\boldsymbol{x}$ and a text label $c$, the logit function of CLIP can be formulated as:
+\begin{equation}
+\label{eq1}
+L_{c}^{clip} \left ( \boldsymbol{x}_{i} \right ) =\tau \cdot \operatorname{sim}\left(\phi(\boldsymbol{x}), \psi(\boldsymbol{t}_c)\right).
+\end{equation}
+Here $\boldsymbol{t}_c$ is derived from a hand-crafted prompt like ``a photo of a \{class\}'', where the ``\{class\}'' is filled with the text label $c$. $\tau$ is generally set as a pre-trained constant of 100.
+
+For multi-class classification, we predict by selecting the label with the highest probabilities among the label candidate set $\mathcal{C} = \{c_i\}^C_{i=1}$, as shown below:
+\begin{equation}
+\label{eq:pred_prob}
+c^*=\underset{c \in \mathcal{C}}{\arg \max}\ p(c|\boldsymbol{x})
+= \underset{c \in \mathcal{C}}{\arg \max}\ \frac{e^{L_{c}^{clip}\left(\boldsymbol{x}\right)}}{\sum_{i=1}^{C} e^{L_{i}^{clip}\left(\boldsymbol{x}\right)}}
+\end{equation}
+where $p(c|\boldsymbol{x})$ is the predicted probability of class $c$ for the instance $\boldsymbol{x}$. 
+
+\paragraph{Prompt tuning} To strengthen the performance of CLIP in downstream applications, prompt tuning methods have been proposed to efficiently fine-tune CLIP on datasets of interest~\citep{zhou2022conditional, zhou2022learning, yao2023visual}.
+In particular, prompt tuning optimizes the context prompt only, without retraining the model and updating its weights. For example, CoOp \citep{zhou2022learning} replaces the hand-crafted textual tokens with a set of learnable textual token $\mathcal{T}=\left\{\boldsymbol{v}_{1}, \boldsymbol{v}_{2}, \ldots, \boldsymbol{v}_{M}\right\}$, where $M$ is the length of tokens. Thus, the output of fine-tuned CLIP is:
+$
+L_{c}^{coop} \left ( \boldsymbol{x} \right ) =\tau \cdot \operatorname{sim}\left(\phi(\boldsymbol{x}), \psi(\boldsymbol{t}^{\prime}_c)\right),
+$
+where $\boldsymbol{t}_{c}^{\prime} = \left [ \boldsymbol{v}_{1}, \boldsymbol{v}_{2},\boldsymbol{v}_{3},...\boldsymbol{v}_{M},\boldsymbol{c} \right ]$ and $\boldsymbol{c}$ denotes the textual embedding of class $c$. 
+Using a few labeled samples $\mathcal{D}_\text{ft}=\{(\boldsymbol{x}_i, c_i)\}^N_{i=1}$, the learnable textual tokens $\mathcal{T}$ are optimized to minimize the cross-entropy (CE) loss $\ell_{c e}$. We refer to the classes used in fine-tuning as \textit{base} classes, and the remaining labels within the same task as \textit{new} or \textit{novel} classes.
+
+In addition to base classes, we generally expect the fine-tuned CLIP to generalize to those new classes within the task. To enhance the generalization ability of the learnable prompt for unseen classes, KgCoOp~\citep{yao2023visual} introduces a regularization term to align the learned prompt to the hand-crafted prompt. The optimization of KgCoOp is: 
+\begin{equation}
+\label{eq_kgcoop}
+\mathcal{T}^{\star}=\underset{\mathcal{T}}{\arg \min }\left\{\frac{1}{N} \sum_{i=1}^{N} \ell_{ce}\left(p\left(c_{i} \mid \boldsymbol{x}_{i}\right)\right)+\lambda \cdot \frac{1}{C} \sum_{c=1}^{C} \operatorname{sim}\left(\psi\left(\boldsymbol{t}_{c}^{\prime}\right), \psi\left(\boldsymbol{t}_{c}\right)\right)\right\}.
+\end{equation}
+Here, the first term is the cross-entropy loss used in CoOp and the hyperparameter $\lambda$ is used to control the weight of regularization.
+With $\lambda$ = 0, KgCoOp is degraded to the original CoOp.
+
+
+\paragraph{Confidence calibration} 
+In addition to predictive performance, it is generally expected for deep models to be well calibrated, i.e., the predicted class probabilities can faithfully estimate the true probabilities of correctness~\citep{guo2017calibration}. 
+To quantify miscalibration, the \textit{Expected Calibration Error} (ECE)~\citep{guo2017calibration} is defined as the difference between accuracy and confidence. 
+With $N$ samples grouped into $G$ bins $\{b_1, b_2, \ldots, b_{G}\}$, the ECE is formulated as:
+\begin{equation}
+    \mathrm{ECE}=\sum_{g=1}^{G} \frac{\left|b_{g}\right|}{N}\left|\operatorname{acc}\left(b_g\right)-\operatorname{conf}\left(b_g\right)\right|,
+\end{equation}
+where $\operatorname{acc}\left(\cdot\right)$ and $\operatorname{conf}\left(\cdot\right)$ denotes the average accuracy and confidence in bin $b_{m}$. In the literature, it has been shown that pre-trained CLIP archives excellent performance of confidence calibration in zero-shot inference~\citep{minderer2021revisiting}. However, prior work~\citep{wang2024openvocabulary} finds that fined-tuned CLIP generally suffers from miscalibration on novel classes within the same task, where the model is expected to generalize ~\citep{zhou2022learning, yao2023visual}. Yet to date, the community still has a limited understanding of the fundamental cause and mitigation strategies of miscalibration during fine-tuning. We proceed by analyzing how the fine-tuning of CLIP affects the calibration.
+
+
+
+\section{Motivation}
+
+
+\subsection{Empirical study on CLIP calibration}
+\label{sec_empirical_motivation}
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{figs/ft_base.pdf}
+    \caption{Base}
+    \label{fig_ft_base}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{figs/ft_new.pdf}
+    \caption{New}
+    \label{fig_ft_new}
+  \end{subfigure}
+   \hfill
+  \caption{Reliability diagram of fine-tuned CLIP (ViT-B/16) on StanfordCars, using prompt tuning methods, CoOp and KgCoOp. ECE: Expected Calibration Error (lower is better). Miscalibration is depicted in pink for overconfidence and purple for underconfidence.}
+  \label{fig_ft}
+\end{figure}
+
+\paragraph{Setup.}
+To analyze the effects of fine-tuning on CLIP calibration, we first empirically study the calibration performance of fine-tuned VLMs.
+We use ViT-B-16 pre-trained by OpenAI~\citep{radford2021learning} as the zero-shot classification model.
+In particular, we compare the zero-shot CLIP with two prompt-based tuning methods including CoOp~\citep{zhou2022learning} and KgCoOp~\citep{yao2023visual} on StanfordCars dataset~\citep{krause20133d}. 
+We evaluate the fine-tuned CLIP under \textit{base-to-new} protocol: the dataset is split into base and new classes. 
+The model is trained only on a few examples from the base classes and evaluated on examples from both base and new classes.
+
+\paragraph{Prompt tuning leads to a tradeoff between base and new classes} Figure~\ref{fig_ft} illustrates the calibration performance of zero-shot CLIP, CoOp and KgCoOp on base and new classes. The results show that zero-shot CLIP achieves almost perfect calibration on all classes, while the fine-tuned models cannot maintain the calibration on base and new classes simultaneously, compromising one of them.
+In particular, CoOp maintains the excellent calibration on base classes but exhibits overconfidence on new classes. Instead, KgCoOp provides underconfident predictions on base classes while preserving the calibration on new classes.
+This motivates us to further investigate the fundamental cause of miscalibration occurring after fine-tuning.
+
+
+\begin{figure}[t]
+\centering
+\begin{minipage}[t]{0.5\textwidth}
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figs/his_confidence.pdf}
+    \caption{Confidence}
+    \label{fig_motivation_conf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+     \includegraphics[width=\textwidth]{figs/his_fd_score.pdf}
+    \caption{FD score}
+    \label{fig_motivation_fd}
+  \end{subfigure}
+  \caption{Results of zero-shot and fined-tuned CLIPs using different prompt tuning methods (KgCoOp and CoOp) on UCF101 dataset.}
+  \label{fig_motivation_fd_conf}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{figs/logit_gap_base.pdf}
+    \caption{Base}
+    \label{fig_logit_gap_base}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+     \includegraphics[width=\textwidth]{figs/logit_gap_new.pdf}
+    \caption{New}
+    \label{fig_logit_gap_new}
+  \end{subfigure}
+  \caption{Comparison between the maximum logit and the average of other logits, using different prompt tuning methods on DTD.}
+  \label{fig_logit_gap}
+\end{minipage}
+\end{figure}
+
+
+\subsection{Understanding the miscalibration in Fine-tuned CLIP}
+
+Given the above observation, we investigate how prompt tuning leads to the miscalibration issue. 
+Since the visual features remain unchanged in the prompt tuning, the textual features thus play a key role in confidence calibration.
+We first introduce a feature divergence score to quantify the textual feature variation, inspired by the KNN-based metrics commonly used for distribution estimation in calibration~\citep{xiong2023proximity, yuksekgonul2023beyond}.
+\begin{definition}[Feature Divergence] Consider a feature set  $\mathcal{Z}=\left\{\mathbf{z}_{i}\right\}_{i=1}^{N}$,  each feature $\mathbf{z}_{i}\in \mathbb{R}^{d}$ is embedded by the modality encoder in CLIP. Feature divergence~(FD) score of $\mathbf{z}_{i}$ measures the average distances from each feature to its $M$ nearest neighbors in the set.
+\begin{equation}
+s_{i} =  \frac{1}{M} \sum_{\mathbf{z}_j \in \mathcal{N}_M(\mathbf{z})} \operatorname{dist}(\mathbf{z}_i, \mathbf{z}_j),
+\end{equation}
+\end{definition}
+where $\mathcal{N}_M(\mathbf{z}_i)$ denotes the set of $M$ nearest neighbors of $\mathbf{z}_i$ and $\operatorname{dist}\left(\cdot, \cdot\right)$ is a distance metric like cosine similarity. 
+By averaging these similarity scores across all features, we obtain the overall FD score of a given feature set $\mathrm{FD}(\mathcal{Z})= \frac{1}{N} \sum_{i=1}^{N} s_{i}$, which can represent the divergence of the textual distribution. 
+To investigate the miscalibration caused by CoOp and KgCoOp, we vary the hyperparameter $\lambda$ in Eq.~(\ref{eq_kgcoop}). In KgCoOp, $\lambda$ is set to 8.0, and it degenerates to CoOp when $\lambda=0$.
+We conduct the experiments on UCF101~\citep{soomro2012ucf101}. We present the results in Figure~\ref{fig_motivation_fd_conf}.
+
+\textbf{CoOp leads to overconfidence on new classes by increasing the textual divergence.} 
+In the analysis of Subsection~\ref{sec_empirical_motivation} and Figure~\ref{fig_motivation_conf}, we show that CLIP tuned by CoOp exhibits overconfidence on new classes, but keeps excellent calibration on base classes. 
+This is caused by the \textit{CE loss}, which maximizes the posterior $p(y \mid \boldsymbol{x})$ for the ground-truth label $y$ and minimizes the probability for other labels. 
+In other words, CE loss tends to enlarge the distance between the image feature and all textual features except the ground truth. 
+As the image feature remains unchanged during fine-tuning, it can be translated to large distances among all textual labels, including base and new classes.  
+This is supported by the results presented in Figure~\ref{fig_motivation_fd}, which shows that CoOp significantly increases the FD score of textual features compared to the zero-shot CLIP.
+Consequently, as is shown in Figure~\ref{fig_logit_gap}, \textit{the gap between the maximum logit and the others widens for both base and new classes}. 
+Therefore, the tuned CLIP with CE loss will make softmax predictions with high confidence on both base and new classes. It aligns with the improved accuracy on base classes, but is not consistent with the nearly unchanged accuracy on new classes.
+This explains why CLIP tuned by CoOp tends to be overconfident on new classes.
+
+
+\textbf{KgCoOp anchors the confidence level by hindering the increase of textual divergence.} 
+In the previous analysis, KgCoOp leads to underconfident predictions on base classes while preserving the calibration on new classes. 
+In Figure~\ref{fig_motivation_fd}, we illustrate the FD scores of textual labels from the zero-shot CLIP and the tuned CLIP by KgCoOp with various $\lambda$. The results show that a large value of $\lambda$ reduces the FD score of both base and new classes, approaching that of zero-shot CLIP. This phenomenon indicates that the regularization in KgCoOp can prevent the model from increasing the textual divergence caused by CE loss. Correspondingly, the fine-tuned CLIP by KgCoOp preserves the same confidence level as the zero-shot CLIP. However, the fine-tuning substantially improves the accuracy of CLIP on base classes, resulting in the underconfidence issue due to the anchored confidence level. In this way, we explain why KgCoOp leads to underconfidence on base classes.
+
+Through the perspective of textual divergence, we provide a thorough explanation for the calibration tradeoff caused by different prompt-tuning methods. Ideally, we expect to maintain the excellent calibration of zero-shot CLIP after fine-tuning. In the following, we proceed by introducing our method, targeting this problem.
+
+
+
+
+
+\section{Method: Dynamic Outlier Regularization}
+
+
+In the previous analysis, we show that the textual divergence is the key to the calibration performance of fine-tuned CLIP. To preserve the calibration of zero-shot CLIP, our key idea is to regularize the textual divergence of new classes without restricting those of base classes. 
+To this end, we propose to utilize textual outliers to improve the reliability of fine-tuned CLIP. 
+Such a regularization can mitigate the overconfidence in the new classes, which are not explicitly inclusive in the fine-tuning.
+
+\paragraph{Selecting textual outliers}
+With this in mind, we construct a set of text outliers using nouns from WordNet~\citep{miller1995wordnet}, a large English lexical database containing over 150,000 words. 
+We select nouns from WordNet that do not overlap but share higher-level concept relations with the base classes used in the fine-tuning, and then incorporate them into our regularization term for prompt tuning.
+We demonstrate the effectiveness of using relevant text outliers in Table~\ref{tab_ood_source}.
+
+Let $\mathcal{C}_{\text {ft}}=\left\{c_{1}, c_{2}, \ldots, c_{n}\right\}$ be the $n$ base classes used in the fine-tuning. First, we obtain a candidate set $\mathcal{C}_{\text {word}}=\left\{o_{1}, o_{2}, \ldots, o_{m}\right\}$, by filtering out the base classes from WordNet.
+Then, we rank the nouns according to the average semantic similarity among the candidate $\mathcal{C}_{\text {word}}$ and each base class $c_j \in \mathcal{C}_{\text {ft}}$. For candidate word $o_i$, we use zero-shot CLIP to quantify the semantic similarity $s_{i}$:
+\begin{equation}
+    s_{i}=\frac{1}{n} \sum_{j=1}^{n} \operatorname{sim} \left(\psi\left(\boldsymbol{t}_{o_{i}}\right), \psi\left(\boldsymbol{t}_{c_{j}}\right)\right), \text { where } i \in\{1,2, \ldots, m\},
+\end{equation}
+where $\boldsymbol{t}_{o_{i}}$ represents the textual tokens of a noun $o_i$ using a fixed prompt like “a photo of a [class-name]”, and \(\psi\) is the text encoder of zero-shot CLIP.
+Then we get the set of textual outliers using the score ranking. 
+\begin{equation}
+\label{selection}
+\mathcal{O}_{\text {out }}=\left\{o_{i} \mid i \in \operatorname{TopK}\left(s_{1}, s_{2}, \ldots, s_{m}\right)\right\},
+\end{equation}
+where $ \operatorname{TopK}(\cdot)$ represents selecting the indices with the top $K$ largest scores for nouns in the candidate set $\mathcal{C}_{\text {word}}$.
+\paragraph{Dynamic Outlier Regularization} Given a fine-tuning dataset $\mathcal{D}_\text{ft}$ with base classes $\mathcal{C}_{\text {ft}}$, we construct a large set of textual outliers $\mathcal{O}_{\text {out }}$ as described above. To prevent the increase of textual divergence on new classes, we propose \textit{Dynamic Outlier Regularization} (\textbf{DOR}), which minimizes the feature discrepancy of textual outliers between the zero-shot CLIP and the fine-tuned CLIP.
+
+In each iteration, we randomly sample a batch of textual outliers from the constructed set $\mathcal{O}_{\text {out }}$. We denote the batch of textual outliers as $\mathcal{B}=\left\{o_i\right\}_{b=1}^{B}$, where $B$ is the number of textual outliers in the batch. By default, we set $B$ as the same as the batch size of fine-tuning data. Then, we build the regularization by aligning the textual features to those of zero-shot CLIP. Formally, the regularization is defined as: 
+\begin{equation}
+\mathcal{L}_{\text{dor}} = 1 - \frac{1}{B} \sum_{b=1}^{B} \operatorname{sim}\left(\psi\left(\boldsymbol{t}_{o_b}^{\prime}\right), \psi\left(\boldsymbol{t}_{o_b}\right)\right).
+\end{equation}
+where $\operatorname{sim(\cdot)}$ denotes the cosine similarity function and $\boldsymbol{t}_{o_b}$ denotes the token of the textual outlier $o_b$.
+Using the regularization, the textual divergence of the fine-tuned CLIP will be regularized to be consistent with the zero-shot CLIP. Different from KgCoOp~\cite{yao2023visual}, the outlier regularization does not restrict the textual feature deviation of base classes, which is explicitly shown in Figure~\ref{fig_logit_and_conf}.
+
+Equipped with dynamic outlier regularization, the final training objective for fine-tuning CLIP is:
+\begin{equation}
+\mathcal{L}_{total} = \mathcal{L}_{\text{ce}} + \lambda \cdot \mathcal{L}_{\text{dor}}.
+\end{equation}
+where $\mathcal{L}_{\text{ce}}$ and $\mathcal{L}_{\text{dor}}$ are the cross-entropy loss of fine-tuning data and the proposed regularization, respectively. $\lambda$ denotes the hyperparameter that controls the weight of the proposed regularization. Our method will degrade to CoOp~\citep{zhou2022learning} when $\lambda=0$. As $\lambda$ increases, the optimization will encourage the model to maintain the confidence level on new classes, alleviating the overconfidence issue. We illustrate the effect of $\lambda$ in Figure~\ref{fig_hyperpara}.
+
+\paragraph{Extension to other fine-tuning algorithms} 
+It is worth noting that our regularization is a general method and can be easily incorporated into existing prompt tuning algorithms for CLIP, including knowledge-guided fine-tuning~\citep{yao2023visual, yao2024tcp}, multimodal consistency~\citep{khattak2023maple}, Decoupled prompt tuning~\citep{zhang2024dept} etc. Given the vanilla fine-tuning objective $\mathcal{L}_\text{base}$ of the other methods and the hyperparameter $\lambda$, we formalize the fine-tuning objective as:
+\begin{equation}
+\label{eq_dor}
+    \mathcal{L}_{\text {total }}=\mathcal{L}_{\text {base}}+\lambda  \cdot \mathcal{L}_{\text{dor}}.
+\end{equation}
+ Noticeably, DOR derived from textual outliers offers several compelling advantages:
+\begin{itemize}
+    \item \textbf{Algorithm-agnostic}: DOR can be easily incorporated into existing prompt tuning methods and consistently mitigate the calibration error under various evaluations~(See Table~\ref{tab_main_exp} and \ref{tab_accuracy}). Furthermore, our method can be extended to visual fine-tuning methods with image outliers~(See Section~\ref{tab_visual}).
+    \item \textbf{Easy-to-use}: DOR leverages text outlier as the data for regularization, which is readily available and easy to collect. In Section~\ref{sec_discussion} we will verify that DOR outperforms other selection strategies.
+\end{itemize}
+
+
+
+\section{Experiments}
+
+\label{exp}
+
+\subsection{Experimental Setup}
+\paragraph{Benchmark setting.} 
+Following recent works~\citep{zhou2022learning,wang2024openvocabulary}, we perform two evaluations in two standard benchmark settings:
+1) \textit{Generalization from Base-to-New Classes}: 
+A downstream dataset will be equally split into base and new classes. 
+The model is trained only on the base classes in a few-shot setting and evaluated on base and new categories. 
+2) \textit{Domain Generalization}: The modal is trained on ImageNet-1K in a few-shot manner and evaluated on four other ImageNet datasets that contain various types of domain shifts.
+
+\paragraph{Datasets.} 
+For the base-to-new evaluation, we use 11 image recognition datasets that cover diverse classification tasks including ImageNet~\citep{deng2009imagenet}, Caltech101~\citep{fei2004learning}, OxfordPets~\citep{parkhi2012cats}, StanfordCars~\citep{krause20133d}, Flowers102~\citep{nilsback2008automated}, Food101~\citep{bossard2014food}, FGVCAircraft~\citep{maji2013fine}, SUN397~\citep{xiao2010sun}, UCF101~\citep{soomro2012ucf101}, DTD~\citep{cimpoi2014describing}  and EuroSAT~\citep{helber2019eurosat}. 
+For domain generalization, we use ImageNet-1K as the source dataset and its four variants as target datasets including ImageNetV2~\citep{recht2019imagenet}, ImageNet-Sketch~\citep{wang2019learning}, ImageNet-A~\citep{hendrycks2021natural}, ImageNet-R~\citep{hendrycks2021many}.
+
+\paragraph{Baselines.}
+We compare and incorporate our method with existing fine-tuning algorithms including CoOp~\citep{zhou2022learning}, CoCoOp~\citep{zhou2022conditional}, KgCoOp~\citep{yao2023visual}, MaPLe~\citep{khattak2023maple}, DEPT~\citep{zhang2024dept}, and TCP~\citep{yao2024tcp}.
+
+\paragraph{Implementation details.} 
+We use CLIP ( ViT-B/16)~\citep{radford2021learning} as the pre-trained VLM throughout our experiments and report results averaged over 3 runs. 
+We fine-tune the model with 16 samples per class in a few-shot setting~\citep{zhou2022conditional}. 
+For the compared tuning methods, we adopt them from the corresponding official implementation. 
+For hyperparameter $\lambda$ in DOR, we set $\lambda$ = 8.0 for CoOp and 2.0 for other fine-tuning methods.
+We set the number of selected dynamic outlier repository to 5000. 
+The number of outliers in each batch is the same as the base classes.
+\paragraph{Evaluation metrics.} 
+Four standard metrics of confidence calibration are used in our evaluation, including Expected Calibration Error (ECE)~\citep{guo2017calibration},  Maximum Calibration Error (MCE)~\citep{guo2017calibration}, Adaptive Calibration Error (ACE)~\citep{nixon2019measuring} and Proximity-Informed Expected Calibration Error (PIECE)~\citep{xiong2023proximity}.
+
+\begin{table}[t]
+\caption{Average calibration performance across 11 datasets. ``+DOR(Ours)'' to our method applied to existing tuning methods. ↓ indicates smaller values are better. Calibration error is given by $\times 10^{-2}$. ``HM'' denotes the harmonic mean. \textbf{Bold} numbers are significantly superior results.}
+\centering
+\resizebox{1.0\textwidth}{!}{
+\renewcommand\arraystretch{1.0}
+\begin{tabular}{ccccccccccccc}
+\toprule
+& \multicolumn{3}{c}{ECE(↓)}                    & \multicolumn{3}{c}{ACE(↓)}                    & \multicolumn{3}{c}{MCE(↓)}                    & \multicolumn{3}{c}{PIECE(↓)}   \\ \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10} \cmidrule(lr){11-13}
+Method     & Base          & New           & HM            & Base          & New           & HM            & Base          & New           & HM            & Base          & New           & HM            \\ \midrule
+ZSCLIP     & 3.58          & 4.61          & 4.10          & 3.62          & 4.58          & 4.10          & 0.97          & 1.21          & 1.09          & 6.35          & 6.55          & 6.45          \\ \midrule
+CoOp       & 3.07          & 14.58         & 8.82          & 2.97          & 14.50         & 8.73          & 1.07          & 3.72          & 2.40          & 4.68          & 15.27         & 9.98          \\
++DOR(Ours) & \textbf{2.67} & \textbf{6.49} & \textbf{4.58} & \textbf{2.64} & \textbf{6.47} & \textbf{4.55} & \textbf{0.83} & \textbf{1.65} & \textbf{1.24} & \textbf{4.45} & \textbf{8.33} & \textbf{6.39} \\ \midrule
+CoCoOp     & 3.60          & 6.14          & 4.87          & 3.53          & 6.08          & 4.81          & 0.96          & 1.72          & 1.34          & 5.53          & 7.86          & 6.70          \\
++DOR(Ours) & 4.22          & \textbf{4.02} & \textbf{4.12} & 4.30          & \textbf{3.94} & \textbf{4.12} & 1.07          & \textbf{1.11} & \textbf{1.09} & 6.00          & \textbf{6.41} & \textbf{6.20} \\ \midrule
+MaPLe      & 2.75          & 5.46          & 4.11          & 2.65          & 5.42          & 4.04          & 0.82          & 1.52          & 1.17          & 4.71          & 7.37          & 6.04          \\
++DOR(Ours) & 2.83          & \textbf{4.44} & \textbf{3.63} & 2.86          & \textbf{4.33} & \textbf{3.60} & 0.81          & \textbf{1.29} & \textbf{1.05} & 4.86          & \textbf{6.39} & \textbf{5.62} \\ \midrule
+KgCoOp     & 5.82          & 4.48          & 5.15          & 5.78          & 4.52          & 5.15          & 1.43          & 1.19          & 1.31          & 6.88          & 6.73          & 6.81          \\
++DOR(Ours) & 6.07          & \textbf{3.99} & \textbf{5.03} & 6.03          & \textbf{4.02} & \textbf{5.02} & 1.52          & \textbf{1.02} & 1.27          & 7.09          & \textbf{6.33} & \textbf{6.71} \\ \midrule
+DEPT       & 6.04          & 14.58         & 10.31         & 6.00          & 14.52         & 10.26         & 1.44          & 4.58          & 3.01          & 7.31          & 15.42         & 11.37         \\
++DOR(Ours) & 7.67          & \textbf{7.50} & \textbf{7.58} & 7.66          & \textbf{7.44} & \textbf{7.55} & 1.73          & \textbf{1.87} & \textbf{1.80} & 8.68          & \textbf{8.86} & \textbf{8.77} \\ \midrule
+TCP        & 4.71          & 4.07          & 4.39          & 4.73          & 4.03          & 4.38          & 1.28          & 1.21          & 1.24          & 6.06          & 6.29          & 6.18          \\
++DOR(Ours) & 4.79          & \textbf{3.80} & \textbf{4.29} & 4.76          & \textbf{3.71} & \textbf{4.24} & 1.28          & \textbf{1.11} & 1.20          & 6.00          & 6.22          & 6.11         \\
+\bottomrule
+\end{tabular}
+\label{tab_main_exp}
+}
+\end{table}
+\subsection{Results}
+
+Generally, we investigate the effectiveness of DOR from three metrics: calibration, generalization accuracy, and confidence level. 
+
+\begin{table}[t]
+ \caption{Average base-to-new accuracy~(\%) of six methods with DOR on 11 datasets. ``Vanilla'' denotes the baseline of fine-tuning methods. \textbf{Bold} numbers are significantly superior results. }
+\centering
+\renewcommand\arraystretch{1.5}
+\resizebox{\textwidth}{!}{
+\setlength{\tabcolsep}{1mm}{
+\begin{tabular}{lccccccccccccc}
+\toprule
+         & ZSCLIP  & \multicolumn{2}{c}{CoOp}   & \multicolumn{2}{c}{CoCoOp}   & \multicolumn{2}{c}{MaPLe}  & \multicolumn{2}{c}{KgCoOp}  & \multicolumn{2}{c}{DEPT}   & \multicolumn{2}{c}{TCP}  \\ \cmidrule(lr){2-2} \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10} \cmidrule(lr){11-12} \cmidrule(lr){13-14}
+Class   & Vanilla & Vanilla &  + DOR & Vanilla &  + DOR & Vanilla & + DOR & Vanilla &  + DOR & Vanilla  &  + DOR & Vanilla &  + DOR \\ \midrule
+Base      & 69.49  & 82.97 & \textbf{83.20} & 80.57  & 79.89  & 82.11  & 82.08  & 82.29  & 82.13  & 83.70  & \textbf{83.81} & 83.95  & 83.89 \\ 
+New       & 74.32  & 61.74 & \textbf{72.01} & 72.47  & \textbf{74.59} & 73.89  & \textbf{75.89}  & 72.21  & \textbf{73.14} & 65.04  & \textbf{71.39} & 75.21  & \textbf{75.31} \\ 
+HM        & 71.90  & 72.36 & \textbf{77.61} & 76.52  & \textbf{77.24} & 78.00  & \textbf{78.98}  & 77.25  & \textbf{77.64} & 74.37  & \textbf{77.60} & 79.58  & 79.60 \\ 
+\bottomrule
+\end{tabular}
+}}
+\label{tab_accuracy}
+\end{table}
+
+\paragraph{DOR enhances the overall calibration of existing prompt-tuning methods.} 
+Table~\ref{tab_main_exp} shows the calibration performance of the six baselines w/ or w/o our DOR framework under the base-to-new evaluation protocol.
+From the average results in the table, we observe a trade-off between the base and new class for all of the baseline methods, e.g.,  CoOp outperforms TCP on base classes but significantly underperforms TCP on new classes.
+Notably, DOR consistently reduces miscalibration on new classes across various metrics without calibration trade-offs on base and new classes.
+For instance, DOR significantly reduces the ECE from 14.58\% to 6.49\% on new classes and maintains the ECE from 3.07\% to 2.67\% on base classes, which makes CoOp more reliable in terms of predicted confidence.
+To showcase the versatility of DOR, we also present that DOR is also applicable to \textit{multi-modal tuning} (e.g., MaPLe). 
+MaPLe adjusts both vision and language branches and DOR consistently improves the calibration performance on new classes of it.
+In summary, our proposed DOR can consistently boost calibration performance on new classes upon existing state-of-the-art prompt tuning methods without compromising the vanilla fine-tuning objectives.
+
+\textbf{DOR benefits base-to-new generalization.}
+To further verify that our DOR is effective on new classes and non-toxic for performance on base classes, we summarize the comparison of average test accuracy in Table \ref{tab_accuracy}.
+Similar to the evaluation of calibration, a salient observation is that our proposed DOR drastically improves base-to-new generalization,  with its accuracy consistently outperforming all existing baselines in the harmonic mean of base and new classes.
+Moreover, DOR almost entirely preserves model capability in the classification performance on base classes without degeneration.
+For instance, applying DOR in DEPT can increase accuracy on new classes from 65.04\% to 71.39\%, while keeping the accuracy of base classes similar to the baseline. 
+Given that most prompt tuning methods lag behind zero-shot CLIP on the accuracy of new classes, an intuitive explanation is that DOR aligns the features of unseen classes with the zero-shot features, which can preserve the zero-shot generalization on new clasess.
+In addition, we observe that some methods~(e.g., CoOp and MaPLe) with DOR, resulting in improvements of 2.12\% and 2.00\% respectively, outperforming zero-shot accuracy on new classes.
+This demonstrates that DOR can significantly enhance the base-to-new generalization capacity of fine-tuned CLIP.
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{figs/hyper_acc_ece.pdf}
+    \caption{Comparison between KgCoOp~(KG) and DOR (W/ CoOp). \textbf{Left}: Accuracy. \textbf{Right}: ECE.}
+    \label{fig_hyperpara}
+\end{wrapfigure}
+\textbf{DOR modifies the logit distribution and confidence level.} 
+To further illustrate the influence of DOR on confidence calibration, we visualize and compare the distribution of output logit and softmax confidence score for base and new classes in Figure~\ref{fig_logit_and_conf}.
+We compare zero-shot CLIP and CoOp w/ or w/o DOR on FGVCAircraft dataset.
+We can observe that if the model tuning With CoOp+DOR, the logit distribution of base class approximate CoOp, and the new class is similar to zero-shot CLIP, respectively. 
+A similar phenomenon is observed in the softmax probability distribution.
+The results meet our vision mentioned in Section~\ref{sec_empirical_motivation}, DOR can leverage the advantages of both models, which ensure the confidence calibration on both base and new classes after fine-tuning.
+
+
+\begin{table}[t]
+\caption{Comparison of prompt learning in the domain generalization of ImageNet. DOR boosts the performance of existing methods on calibration and generalization.}
+\centering
+\resizebox{0.98\textwidth}{!}{
+\begin{tabular}{cccccccccccccc}
+\toprule
+             & \multicolumn{6}{c}{Accuracy (↑)}                                                           & \multicolumn{1}{l}{} & \multicolumn{6}{c}{ECE (↓)}            \\ \cmidrule{2-7} \cmidrule{9-14} 
+             & Source         & \multicolumn{5}{c}{Target}                                                &                      & Source   & \multicolumn{5}{c}{Target}     \\  \cmidrule(lr){2-2} \cmidrule(lr){3-7} \cmidrule(lr){9-9} \cmidrule(lr){10-14}
+             & ImageNet       & -V2     & -S      & -A      & -R      & AVG   &                     & ImageNet       & -V2     & -S      & -A      & -R      & AVG             \\ \midrule
+CLIP & 66.73          & 60.87          & 46.09          & 47.81          & 73.98          & 57.19 &                      & 1.86     & 2.44          & 4.88          & 8.34      & 3.51          & 4.79          \\ \midrule
+CoOp         & 71.44          & 63.55          & 45.76          & 47.81          & 73.74          & 57.72 &                      & 1.10     & 4.19          & 8.40          & 15.34      & 0.80          & 7.18          \\
+\textbf{+DOR(ours)}     & 71.47 & \textbf{64.47} & \textbf{48.28} & \textbf{50.12} & \textbf{76.05} & \textbf{59.73} &                      & 1.64     & \textbf{1.95} & \textbf{4.97} & \textbf{11.07}      & 1.58          & \textbf{4.89} \\ \midrule
+MaPLe        & 72.05          & 64.57          & 48.78          & 47.66          & 76.61          & 59.41 &                      & 1.13     & 2.56          & 4.88          & 12.42      & 1.06          & 5.23          \\
+\textbf{+DOR(ours)}    & 71.89          & \textbf{64.94} & 48.77          & \textbf{48.29}          & 76.20          & \textbf{59.55} &                      & 1.46     & \textbf{1.89} & \textbf{3.96} & \textbf{11.08}      & 1.37          & \textbf{4.58} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab_dg}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{figs/train_base_logit.pdf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.235\textwidth}
+    \includegraphics[width=\textwidth]{figs/test_new_logit.pdf}
+  \end{subfigure}
+   \hfill
+  \begin{subfigure}[b]{0.25\textwidth}
+    \includegraphics[width=\textwidth]{figs/train_base_prob.pdf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.25\textwidth}
+    \includegraphics[width=\textwidth]{figs/test_new_prob.pdf}
+  \end{subfigure}
+
+  \caption{Distribution visualization of logit and maximum softmax probability on FGVCAircraft dataset. Our method generates logit and probability distributions that closely resemble those of CoOp for the base class and are similar to zero-shot CLIP for the new class.}
+  \label{fig_logit_and_conf}
+\end{figure}
+
+\paragraph{DOR is insensitive to hyperparameters.}
+To further illustrate the influence of hyperparameter $\lambda$, we present a sensitivity analysis.
+We report the average performance on 11 datasets under base-to-new evaluation protocol.
+As is shown in in Figure~\ref{fig_hyperpara}, we can observe that DOR demonstrates robustness in model calibration as $\lambda$ in Eq.(\ref{eq_dor}) varies.
+Although KgCoOp has better calibration on new classes as $\lambda$ increases, it sacrifices accuracy and calibration on base classes while our method does not.
+The results verify that DOR is an effective approach to boosting calibration performance on new classes while maintaining performance on base classes.
+
+\paragraph{DOR is robust to covariate shifts.}
+To comprehensively verify the robustness of DOR, we further evaluate its performance in the domain generalization setting, i.e., there is a \textit{covariate shift} between training and testing datasets.
+Specifically, we first fine-tune the model with all classes of ImageNet on the 16-shot setting and then evaluate it on 4 types of datasets with covariate shifts.
+As is shown in Table~\ref{tab_dg}, the calibration performance indicates DOR maintains stability in the presence of covariate shifts.
+Although DOR is not specially designed for the covariate shift, it outperforms the calibration baseline of CoOp and MaPLe, reducing ECE by 2.29\% and 0.65\% under distribution shifts respectively.
+Meanwhile, DOR demonstrates superior accuracy in domain generalization and successfully maintains in-distribution performance.
+
+
+
+\section{Discussion}
+
+
+\begin{table}[t]
+\caption{Calibration results of ECE~(\%) on fine-tuning of visual representation. DOR-V(ision) is effective for better calibration via visual representation regularization.}
+\centering
+\resizebox{0.95\textwidth}{!}{
+\renewcommand\arraystretch{1.2}
+\begin{tabular}{cccccccccccc}
+\toprule
+             & \multicolumn{2}{c}{Flowers} & \multicolumn{2}{c}{Cars} & \multicolumn{2}{c}{DTD} & \multicolumn{2}{c}{UCF101}    & \multicolumn{2}{c}{AVG} &               \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}  \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11}
+Method       & Base     & New              & Base   & New             & Base   & New            & Base          & New           & Base   & New            & Avg.            \\ \midrule
+VPT          & 7.98     & 8.20             & 5.32   & 1.93            & 2.54   & 13.04          & 4.04          & 4.79          & 4.97   & 6.99           & 5.98          \\
+\textbf{+DOR-V(ours)}  & 8.19     & \textbf{7.54}    & 4.90   & \textbf{1.78}   & 2.68   & \textbf{8.40}  & \textbf{3.73} & \textbf{4.58} & 4.88   & \textbf{5.58}  & \textbf{5.23} \\
+CLIP-adapter & 3.70     & 6.55             & 6.09   & 5.73            & 3.00   & 7.45           & 4.04          & 7.09          & 4.21   & 6.71           & 5.46          \\
+\textbf{+DOR-V(ours)}   & 4.02     & \textbf{4.86}    & 7.13   & \textbf{4.85}   & 3.25   & 5.63           & \textbf{1.90} & \textbf{5.23} & 4.08   & \textbf{5.14}  & \textbf{4.61} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab_visual}
+\end{table}
+
+\label{sec_discussion}
+
+\begin{wraptable}{r}{0.4\textwidth}
+\caption{Calibration results of ECE~(\%) with different outliers . Oracle* denotes new classes used in the test-time.}
+\centering
+\resizebox{0.4\textwidth}{!}{
+\begin{tabular}{ccccc}
+\toprule
+Method                 & Source   & Base          & New           & HM            \\ \midrule
+\multirow{3}{*}{CoOp}  & near-OOD & \textbf{2.68} & 7.09          & 4.89          \\
+                       & far-OOD  & 2.95          & 7.72          & 5.34          \\
+                       & oracle*  & 3.13          & \textbf{4.34} & \textbf{3.74} \\ \midrule
+\multirow{3}{*}{MaPLe} & near-OOD & 3.00          & 4.52          & 3.76          \\
+                       & far-OOD  & \textbf{2.65} & 4.95          & 3.80          \\
+                       & oracle*  & 3.15          & \textbf{4.22} & \textbf{3.69} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab_ood_source}
+\end{wraptable}
+\paragraph{What makes a good regularization for CLIP fine-tuning?}
+Based on the above observation, we have demonstrated that using the text outlier as the regularization source could be better than the base classes used in prompt tuning.
+In particular, we use the relevant but non-overlapped outlier with the fine-tuning task~(referred to as near-OOD) as the regularization data.
+Such selection raises a question: \textit{why we prefer to choose near-OOD?}
+To address this, we conducted an ablation on different types of outliers.
+We considered three types of outliers: near-OOD(ours), far-OOD and new classes used at test time.
+The far-OOD is selected by applying the opposite operation of Eq.~\ref{selection}.
+Since target new classes are unknown during fine-tuning, we view them as an oracle, which serves as a performance upper bound for base-to-new tasks.
+We report the average performance on the base-to-new datasets.
+We present the results in Table~\ref{tab_ood_source}.
+Since we primarily fine-tune the model for a specific downstream task, selecting far-OOD data completely unrelated to the original task may not be optimal for confidence calibration.
+Moreover, while the oracle can achieve impressive performance on the calibration of new classes, the fixed number of outliers may cause the model to overfit them, resulting in a decline in generalization. 
+Additionally, we do not know which categories will be used at test time during the fine-tuning phase.
+Therefore, we dynamically use near-OOD as regularization data, which reduces calibration errors on new classes while preserving performance on base classes.
+\paragraph{Can the criterion of DOR be extended to visual tuning?}
+In this paper, we primarily focus on prompt tuning and analyze how textual divergence impacts confidence calibration.
+Such analysis may limit the potential scope of CLIP fine-tuning methods. 
+To address this, we further consider a similar regularization approach based on image outliers for fine-tuning on visual representation. 
+Specifically, we use ImageNet-1K~\citep{deng2009imagenet} as an outlier repository and conduct experiments on four downstream datasets.
+For visual representation fine-tuning methods, we utilize CLIP-adapter~\citep{gao2024clip} and visual prompt tuning~(VPT)~\citep{jia2022visual}.
+
+As is shown in Table~\ref{tab_visual},  we observe that visual-based DOR can successfully reduce the calibration error on new classes.
+For example, DOR outperforms VPT and CLIP-adapter baseline by reducing ECE by 4.64\% and 1.82\% on the DTD dataset, respectively.
+In general, visual-based DOR achieves better average calibration across various downstream datasets and leaves space for further improvement.
+Given that expected image outliers are not always accessible easily as text, a potential method is to generate them by diffusion~\citep{du2024dream} for high-quality image outliers.
+
+
+
+
+\section{Related work}
+
+\label{appx_related_work}
+
+\paragraph{Vision-language models.}
+Large pre-trained large vision-language models \citep{jia2021scaling, radford2021learning} have been verified that effectively comprehend visual concepts using language supervision and apply them in downstream tasks~\citep{radford2021learning, zhou2022learning, lu2022prompt, naeem2023i2mvformer, ming2024understanding, parelli2023clip}.
+To further boost the downstream adaptation of pre-trained VLMs, many parameter-efficient tuning methods like vanilla prompt tuning \citep{zhou2022learning, zhou2022conditional, khattak2023maple} and adapter tuning~\citep{gao2024clip,zhang2022tip} have been proposed for high efficiency. 
+Despite the great success of CLIP fine-tuning, their effectiveness on confidence calibration has largely been overlooked, which is essential for real-world deployment.
+
+\paragraph{Confidence calibration.}
+Confidence calibration has been widely studied to ensure that the confidence levels output by models accurately reflect their empirical accuracy. 
+To achieve this, the state-of-the-art calibration methods can be categorized into regularization methods~\citep{guo2017calibration, pereyra2017regularizing, mukhoti2020calibrating} and post-hoc methods~\citep{guo2017calibration, zadrozny2002transforming, zadrozny2001obtaining, tomani2022parameterized, xiong2023proximity}.
+In this work, we introduce a regularization method of fine-tuning CLIP to improve the confidence calibration, on both base and new classes.
+
+\paragraph{Outlier regularization in trustworthy machine learning.}
+The outlier plays an important role in trustworthy machine learning research including out-of-distribution~(OOD) detection~\citep{hendrycks2018deep, liu2020energy, ming2022poem, jiang2024dos, du2024dream}, noisy label learning~\citep{wei2021open}, adversarial attack~\citep{lee2021removing}, long-tailed datasets re-balancing~\citep{wei2022open}, etc.
+In this paper, we utilize text outliers to control the divergence of unseen textual distribution, and further improve the calibration of fine-tuned CLIP.
+
+
+
+\section{Conclusion \& Limitation}
+
+In this paper, we introduce Dynamic Outlier Regularization (DOR), a simple yet effective technique that enhances the confidence calibration on both base and new classes. We show that current prompt tuning methods typically lead to a tradeoff between the base and new classes. Through the textual divergence, we provide a thorough explanation for the limitations of those tuning methods.
+By utilizing relevant but non-overlapped outlier outliers, DOR regularizes the textual distribution to preserve calibration capacity in zero-shot CLIP.
+Our method is compatible with existing prompt-tuning methods and can be extended to improve visual fine-tuning methods, like adapters. 
+We hope future research can extend the insight in this work to other VLMs.
+
+\paragraph{Limitations} Similar to previous regularization methods of CLIP, our method involves a hyperparameter $\lambda$ to control the weight of regularization, which will require extra computational costs for tuning.
+Moreover, our analysis is limited in the scope of CLIP, leaving other kinds of VLMs to be explored in the future.  
+
+
+
+
+
+
+

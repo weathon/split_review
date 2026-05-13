@@ -1,0 +1,539 @@
+\title{ContextGNN: Beyond Two-Tower Recommendation Systems}
+
+\begin{abstract}
+
+Recommendation systems predominantly utilize two-tower architectures, which evaluate user-item rankings through the inner product of their respective embeddings.
+However, one key limitation of two-tower models is that they learn a pair-agnostic representation of users and items.
+In contrast, pair-wise representations either scale poorly due to their quadratic complexity or are too restrictive on the candidate pairs to rank.
+To address these issues, we introduce \emph{\fullnames} (\names), a novel deep learning architecture for link prediction in recommendation systems.
+The method employs a pair-wise representation technique for familiar items situated within a user's local subgraph, while leveraging two-tower representations to facilitate the recommendation of exploratory items.
+A final network then predicts how to fuse both pair-wise and two-tower recommendations into a single ranking of items.
+We demonstrate that \name is able to adapt to different data characteristics and outperforms existing methods, both traditional and GNN-based, on a diverse set of practical recommendation tasks, improving performance by 20\% on average. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recommendation systems have emerged as an important application domain for predictive machine learning over the past decades~\citep{webber2021powering,he2023survey,li2024recent}.
+Given a set of users and a set of items (\emph{e.g.}, products available for purchase), recommendation systems aim to identify optimal item recommendations for each user (\emph{e.g.}, products most likely to be purchased by the user). Traditionally, this problem is modeled via different variants of a \emph{two-tower} paradigm~\citep{hu2008cf, Koren2009MF}, where one tower embeds users and the other tower embeds items, which are then matched and ranked via an inner-product decoder.
+This scheme proves to be highly efficient for scaling up recommendation systems during the inference phase, as it allows to pre-compute user and item representations and to perform the final ranking via fast (approximate) \emph{maximum inner product search}~\citep{faiss}.
+
+However, one key limitation of two-tower based architectures for recommendation is that they learn a \emph{pair-agnostic} representation for users and items.
+That is, the user representation is not aware of the item under consideration, and similarly, the item representation is not aware of the user and thus item representations are not capturing the uniqueness of user's view on the items.
+As such, neither of the representations on both ends capture knowledge about the pair-wise dependency they are making a prediction for.
+For example, consider a user who restocks their cosmetic products on a regular basis.
+In this scenario, the fine-grained context of user-cosmetic pairs is crucial, which cannot be adequately captured by two independent user and item representations alone.
+Such lack of knowledge has severe consequences on the quality of predictions, since, \emph{e.g.}, the model is unable to distinguish between scenarios such as familiar purchases (\emph{i.e.} users who repeatedly interact with the similar set of items) \emph{vs.} exploratory purchases (\emph{i.e.} users who like to explore new items).
+While pair-wise representations, which incorporate the knowledge about the pair they are making a prediction for, are able to \emph{contextualize} the prediction, one would need to generate pair-wise representations for all possible user-item pairs, which is ineffable due to its quadratic complexity.
+Alternatively, one can pre-filter the set of candidate pairs, \emph{e.g.}, via content-based filtering or collaborative filtering~\cite{ricci2010introduction,campana2017recommender}, but the model's capabilities are then limited by the recall of the candidate generation procedure.
+
+Here, we develop \emph{\fullnames} (\names), a novel single-stage \emph{Graph Neural Network (GNN)}-based recommendation system that fuses pair-wise representations and two-tower representations into a single unified architecture.
+\name is designed to perform \emph{temporal} recommendations (predict the next set of items a user will interact with) on a \emph{heterogeneous temporal} graph, and leverages the best of both worlds:
+The first model supports pair-wise representations for all items \emph{within} a user's \emph{local} interaction graph~\citep{nbfnet}.
+For \emph{distant} user-item pairs, \emph{i.e.} user-item pairs that are not within the $k$-hop neighborhood of each other, the pair-wise embeddings are supplemented by a \emph{global}, two-tower-based GNN, which serves as an effective fallback model.
+A final network then predicts a user-specific, personalized fusion score that dictates how to merge both pair-wise and two-tower recommendations into a single ranking.
+
+They key idea behind \name is to contextualize the prediction for the area of items for which a user has rich past interactions.
+Here, pair-wise representations are able to capture fine-grained patterns of past user-item interactions, such as repeat purchases and other prior actions (\emph{e.g.}, clicks, tag-as-favorite, add-to-cart), or through collaborative signals (\emph{e.g.}, whether friends have purchased the same item).
+The second component, a novel pair-agnostic two-tower model based on shallow item embeddings, allows for modeling exploratory and serendipitous recommendations.
+For these ``distant'' items, where no specific user-item context exists, pair-wise representations offer minimal benefits, making the fallback to two-tower representations suitable.
+Importantly, the two-tower model is designed in such a way that it allows for integration into pair-wise architectures with little computational overhead. 
+Finally, the model learns which users prefer familiar items over exploratory purchases and adjusts the final ranking scores accordingly.
+
+We deploy \names in the context of relational deep learning~\citep{rdl} for recommendation within relational databases.
+Relational databases~\citep{relbench} comprise diverse sets of tables with rich multi-modal input features and rich multi-behavioral, temporal interactions, making them the perfect setting for stress-testing our model.
+Furthermore, we examine the challenges in modeling the complex patterns of human behavior.
+Our analysis and experimental results underscore the need for a hybrid architecture, as a single model is not sufficient to address the diversity of real-world datasets both within and across tasks effectively.
+We demonstrate that \name is able to adapt to different data characteristics, while outperforming existing models on realistic and practical recommendation tasks.
+In particular, \name improves results by 20\% on average compared to the best pair-wise representation baseline, and by 344\% on average compared to the best two-tower representation baseline.
+
+
+
+\section{Related Work}
+
+
+Recommendation systems are a long-standing research area in machine learning.
+The recommendation problem is often formulated as \emph{link prediction} on a \emph{bipartite graph} with two sets of nodes, one containing the users and another containing the items.
+Between these two node sets, past interactions are presented as links, and the goal is to predict which links are going to occur in the future.
+Traditionally, it is approached by computing the inner product of user and item embeddings, \emph{e.g.}, via matrix factorization~\citep{Koren2009MF} to discover and utilize similarity between users and items, \emph{i.e.} collaborative filtering~\citep{hu2008cf, mnih2007cf}.
+
+Similar to many other areas, deep learning made an impact in recommendation systems, \emph{e.g.}, by predicting scores with non-linear networks~\citep{He2017NeuralFM, he2017ncf}, by utilizing graph embedding techniques~\citep{Perozzi/etal/2014,grover2016node2vec}, or by sampling from distributions modeled by a variational autoencoder~\citep{liang2018multivae}.
+Recently, the new field of generative recommendation deserves mentioning, utilizing large language models to provide recommendation by text generation~\citep{llm4recsurvey}. Our work here relates to two lines of research: Sequential recommendation systems and recommendations with GNNs.
+
+\paragraph{Recommendation on Sequences.} 
+Recommendation has traditionally been modeled as a sequence prediction problem. Early methods utilize Marcov chains~\citep{rendle2010persomc, he2016mc}, which have later been replaced by recurrent neural networks~\citep{liu2018stamp}, temporal attention~\citep{kang2018sasreg, li2017attentive} and transformer formulations~\citep{sun2019bert4rec, yang2022multibehaviour, xia2023multibehaviour}. They also have been combined with GNNs to additionally capture collaborative signals~\citep{ma2020memory}.
+
+\paragraph{Recommendation with GNNs.}
+Various two-tower-based Graph Neural Networks~\citep{hamilton2017inductive} have been developed for link prediction tasks, based on the idea of integrating the paradigm of collaborative filtering via refining embeddings on the user-item interaction graph.
+Early examples use GNN-based autoencoders~\citep{Kipf2016ul, schlichtkrull2018relational} to obtain prediction on graph links.
+Since GNNs propagate information locally (and thus cannot reason about the position of nodes inside a graph), it has been shown that propagating shallow user and item embeddings with deep GNNs is crucial to capture the full collaborative signal~\citep{NGCF19}.
+\textsc{LightGCN}~\citep{he2020lightgcn} and \textsc{UltraGCN}~\citep{mao2021ultragcn} further simplify message propagation for embedding generation for improved performance on small-scale datasets.
+Another line of work strengthens GNN-based recommender systems by adding self-supervision \citep{wu2021self,liu2024simgcl,cai2023lightgcl}, \emph{e.g.}, based on contrastive learning via graph augmentations.
+These findings are orthogonal to our work, but still embrace a two-tower architecture under the hood.
+
+The line of work that comes closest to \textsc{ContextGNN} is related to encoding identity- and position-awareness into GNNs in order to relate user-item pairs \citep{posgnn,you2021identity}.
+For example, local subgraphs have been extended to encode positional information of user-item pairs~\citep{seal, teru2020subgraph}, but lack an efficient inference procedure.
+\textsc{NBFNet}~\citep{nbfnet} introduces a path-based pair-wise representation model that constructs a subgraph centered around the user node, while reading out the GNN's representations at the item nodes.
+This method yields item representations that are conditioned on the specific user, thereby incorporating pair-wise information without incurring excessive computational cost.
+However, this method constrains candidates to items within the user's subgraph, which tremendously limits its effectiveness in scenarios involving exploratory recommendations or cold-start items.
+Our local pair-wise representation model builds upon this framework, extending it to fit into the heterogeneous, multi-behavioral, and temporal recommendation system context.
+Most importantly, we analyze and eliminate its main limitation around locality by extending it with an effective fallback model.
+
+While the vast majority of related work focuses on modeling recommendation systems on static graphs, recently multiple benchmarks for temporal recommendation have appeared, such as the \img{figures/TGB_favicon.png}\,\textsc{Temporal Graph Benchmark}~\citep{huang2023temporal} and \img{figures/RelBench_favicon.png}\,\textsc{RelBench}~\citep{relbench}. In this work, we adapt the temporal formulation of a recommender systems task and extensively evaluate \name in the practical setting of \img{figures/RelBench_favicon.png}\,\textsc{RelBench} and show that our method significantly outperforms previous approaches.
+
+
+
+\section{Temporal Recommendations and Where to Find Them}
+
+\label{sec:analysis}
+
+We formulate the temporal recommendation problem on a \emph{heterogeneous graph snapshot} $\mathcal{G}^{(-\infty, T]} = (\mathcal{V}, \mathcal{E}, \phi, \psi)$ up to timestamp $T$, with node set $\mathcal{V}$ and edge set $\mathcal{E} \subseteq \mathcal V \times \mathcal V$, where each node $v \in \mathcal{V}$ belongs to a \emph{node type} $\phi(v)$ and each edge $e \in \mathcal E$ belongs to an \emph{edge type} $\psi(e)$.
+We refer to $\mathcal{L} \subset \mathcal{V}$ as the user set and $\mathcal{R} \subset \mathcal{V}$ as the item set within our heterogeneous graph.
+The task is then to predict a set of ground-truth items $\mathcal{Y}_v^{(T, T+i]} \subseteq \mathcal{R}$, for which there occurred a link for the user $v \in \mathcal{L}$ in the time interval $(T, T + i]$ for a given interval size $i$.
+When making the prediction, the model only has access to historical information up to timestamp $T$.
+
+In the simplest case, $\mathcal{G}^{(-\infty, T]}$ is given as a bipartite graph, with node set $\mathcal{V} = \mathcal{L} \cup \mathcal{R}$, and a single edge type $|\{\psi(e) : e \in \mathcal{E} \}| = 1$.
+However, the generalization to heterogeneous graphs allows to incorporate other node types, but most importantly, different edge types of user behaviors (\emph{e.g.}, click, tag-as-favorite, add-to-cart) which offer complementary signals for predicting the target behavior (\emph{e.g.}, purchase)~\citep{xia2023multibehaviour}.
+Nodes and edges may be (partially) annotated with an initial feature representation, \emph{e.g.} $\bm{h}^{(0)}_v \in \mathbb{R}^d, v \in \mathcal{V}$, and with a timestamp indicating their appearance (or disappearance).
+In the absence of timestamps, the given framework can be easily transformed into a \emph{static} link prediction problem, as commonly practiced in literature~\citep{Kipf2016ul,NGCF19,he2020lightgcn}.
+However, this approach disregards critical information, such as the recency of past activity.
+Note that the given framework also allows newly appearing users and items over time.
+However, for simplicity of notation, we assume them to be in $\mathcal{L}$ and $\mathcal{R}$ at all times.
+
+\paragraph{Locality Score.} Developing machine learning solutions for recommendation systems is inherently challenging due to the complex patterns of human behavior~\citep{he2023survey}.
+Users vary significantly in preferences; some are explorers who constantly seek new experiences, while others are repeaters who prefer familiarity.
+Such characteristics are especially noticeable across different datasets, \emph{e.g.}, it is more likely that a user repeats a previous purchase than that the user rates the same movie twice.
+
+To understand these effects better, we introduce the \emph{locality score}, which measures the fraction of ground-truth links that fall within the $k$-hop neighborhood $\mathcal{N}_k^{(-\infty, T]}(v)$ of the subgraph centered around a user $v \in \mathcal{L}$ up to timestamp $T$:
+
+\begin{equation}
+    s_k^{(T, T+i]} = \frac{1}{|\mathcal{L}|} \sum_{v \in \mathcal{L}} = \frac{ \left| \mathcal{N}_k^{(-\infty, T]}(v) \cap \mathcal{R} \cap  \mathcal{Y}_v^{[T,T+i)} \right| }{ \left| \mathcal{Y}_v^{[T, T+i)} \right| }.
+\end{equation}
+
+Intuitively, the locality score quantifies how many of its future ground-truth items are local to a user.
+Depending on the subgraph depth $k$, the score reflects different interaction patterns.
+For a shallow subgraph ($k=1$), it captures whether the user repeats purchases or has previously interacted with the item through actions like clicks or tagging as favorite.
+As the subgraph depth increases, the score begins to incorporate collaborative filtering signals, such as whether friends have purchased the ground-truth item in the past ($k=2$), or whether the ground-truth item was previously purchased by users that have a similar buying behavior as the user under consideration ($k=3$).
+Note that in practice, it is infeasible to go beyond depth $k=3$ due to scalability concerns.
+
+\begin{wraptable}{l}{0.5\textwidth}
+\caption{The \textbf{locality score} for different subgraph depths $k \in \{1, 3\}$ on validation/test splits for all recommendation tasks in \img{figures/RelBench_favicon.png}\,\textsc{RelBench}.}
+\centering
+\setlength{\tabcolsep}{3pt}
+\resizebox{0.5\textwidth}{!}{
+{\renewcommand{\arraystretch}{0.8}
+\begin{tabular}{cccrr}
+\toprule
+\textbf{Dataset} & \textbf{Task} & \textbf{Split} & $\bm{k=1}$ & $\bm{k=3}$ \\
+\midrule
+\multirow{6}{*}{\scriptsize\texttt{\textbf{rel-amazon}}} & \multirow{2}{*}{\scriptsize\texttt{user-item-purchase}} & val & 0.002 & 0.181 \\
+& & test & 0.001 & 0.168 \\
+\cmidrule{2-5}
+& \multirow{2}{*}{\scriptsize\texttt{user-item-rate}} & val & 0.002 & 0.183 \\
+& & test & 0.002 & 0.170 \\
+\cmidrule{2-5}
+& \multirow{2}{*}{\scriptsize\texttt{user-item-review}} & val & 0.002 & 0.185 \\
+& & test & 0.001 & 0.175 \\
+\midrule
+\multirow{2}{*}{\scriptsize\texttt{\textbf{rel-hm}}} & \multirow{2}{*}{\scriptsize\texttt{user-item-purchase}} & val & 0.045 & 0.395 \\
+& & test & 0.048 & 0.417 \\
+\midrule
+\multirow{4}{*}{\scriptsize\texttt{\textbf{rel-stack}}} & \multirow{2}{*}{\scriptsize\texttt{user-post-comment}} & val & 0.265 & 0.308 \\
+& & test & 0.256 & 0.298 \\
+\cmidrule{2-5}
+& \multirow{2}{*}{\scriptsize\texttt{post-post-related}} & val & 0.109 & 0.225 \\
+& & test & 0.141 & 0.280 \\
+\midrule
+\multirow{4}{*}{\texttt{\scriptsize\textbf{rel-trial}}} & \scriptsize\texttt{condition-} & val & 0.000 & 0.241 \\
+& \scriptsize\texttt{sponsor-run} & test & 0.000 & 0.242 \\
+\cmidrule{2-5}
+& \multirow{2}{*}{\scriptsize\texttt{site-sponsor-run}} & val & 0.000 & 0.208 \\
+& & test & 0.000 & 0.229 \\
+\bottomrule
+\end{tabular}
+}}
+\label{tab:locality_score}
+\end{wraptable}
+
+We evaluate the locality score for varying $k$ on \img{figures/RelBench_favicon.png}\,\textsc{RelBench}~\citep{relbench}, a relational deep learning~\citep{rdl} benchmark that spans a wide variety of real-world recommendation tasks with diverse characteristics (\emph{cf.}~Table~\ref{tab:locality_score}).
+Interestingly, the locality score does not exceed 0.5 on any dataset, indicating that the majority of ground-truth items are entirely \emph{exploratory} and not covered by any path of length $\leq 3$ in the graph.
+However, for $k=1$, we observe high locality scores on \texttt{rel-hm} and \texttt{rel-stack}, suggesting that users tend to frequently repeat clothing purchases or comment multiple times on the same post.
+Increasing the subgraph depth generally improves coverage as seen in datasets like \texttt{rel-amazon}.
+While users do not usually re-purchase/rate/review the same item twice here, they tend to purchase the same products that ``nearby'' users bought.
+Overall, this observation suggests that while pair-wise representation architectures such as \textsc{NBFNet}~\citep{nbfnet} are powerful, they often times fail to offer sufficient coverage within their candidate set, decreasing their effectiveness tremendously.
+This raises an interesting question of how we can leverage the benefits of pair-wise representations, while supporting the modeling of exploratory recommendations without the need for complex multi-stage approaches.
+
+
+
+\section{Recommendation with \fullnames}
+
+\label{sec:method}
+
+Next, we describe \emph{\fullnames} (\names), which consist of two separate GNN architectures sitting behind the same GNN backbone.
+\name fuses both pair-wise representations and two-tower representations into a single architecture, and is thus naturally able to adapt to diverse dataset and task characteristics.
+The first model employs pair-wise representations based on the item candidate set given within the local user-centric subgraph (\emph{cf.}~Sec.~\ref{sec:pair}).
+The second model introduces a novel two-tower architecture based on shallow item representations, which is used to predict a ranking for all pairs of users and items outside the user's subgraph (\emph{cf.}~Sec.~\ref{sec:twotower}).
+Finally, a user-specific fusion score, produced by an MLP on the user GNN representation, is added to the scores of the pair-wise representation model, which aligns the distinct scores of the two models and captures \emph{how} exploratory a specific user is, thus given either more or less weight to the respective models (\emph{cf.}~Sec.~\ref{sec:hybrid}).
+We go over additional considerations and extensions in Sec.~\ref{sec:extensions}. An overview of \name is visualized in Fig.~\ref{fig:method_overview}. 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.00\linewidth]{figures/contextgnn.pdf}\hfill
+\caption{\textbf{Overview of \fullnames.}
+    \name utilizes a bidirectional $\mathrm{GNN}_{\bm{\theta}}$ to learn user $\bm{h}^{(2)}_v$ and user-specific item representations $\bm{h}^{(2)}_w$ within a user's local subgraph.
+    Its message passing scheme is enhanced by additionally propagating shallow item embeddings $\bm{w}_w$ and seed user $\textsc{Identicator}_{\bm{\theta}}$ representations.
+    Afterwards, item scores are produced depending on whether an item situates within a user's subgraph.
+    A user-specific fusion score is learned via an $\mathrm{MLP}_{\bm{\theta}}$ to produce the final ranking by offsetting the contributions of local rankings.
+    }
+    \label{fig:method_overview}
+    \vskip -0.1in
+\end{figure}
+
+\subsection{Pair-wise Representations}
+\label{sec:pair}
+
+Our local pair-wise representation model builds upon the framework proposed by \citet{nbfnet}, extending it to fit into the heterogeneous, multi-behavioral, and temporal recommendation system context.
+\textsc{NBFNet} is a path-based method that generalizes the Bellman-Ford algorithm~\citep{bellmannford}.
+Rather than learning a pair-wise representation via two independent node representations $\bm{h}^{(k)}_v$ and $\bm{h}^{(k)}_w$ (\emph{i.e.} via two independent subgraphs), \textsc{NBFNet} only utilizes the user-specific subgraph, but readouts GNN item representations from it.
+As such, \textsc{NBFNet} abbreviates the pair-wise representation $\bm{h}^{(k)}_{(v,w)}$ via the user-specific item representations $\bm{h}^{(k)}_w$.
+Hence, it captures both knowledge about the item $w$ and the user $v$ in its representation.
+In order to let the GNN differentiate between the seed user and other users being sampled within the subgraph, a $d$-dimensional $\textsc{Indicator}_{\bm{\theta}}$ representation is added to the seed node~\citep{you2021identity}.
+Specifically, our pair-wise representation model then looks as follows:
+
+\begin{enumerate}
+    \item Sample a $k$-hop subgraph $\mathcal{\tilde G} \leftarrow \mathcal{G}_k^{(-\infty, T]}[v]$ with node set $\mathcal{\tilde V}$ around user $v \in \mathcal{L}$.
+    \item Add an indicator representation to the user seed node: $\bm{h}_v^{(0)} \leftarrow \bm{h}_v^{(0)} + \textsc{Indicator}_{\bm{\theta}}$.
+    \item Read out both GNN user and item representations at layer $k$:
+    \begin{equation*}
+        \bm{h}^{(k)}_v, \{ \bm{h}^{(k)}_w : w \in \mathcal{\tilde V} \cap \mathcal{R} \} \leftarrow \textsc{GNN}^{(k)}_{\bm{\theta}}(\mathcal{\tilde G}, \bm{H}^{(0)}).
+    \end{equation*}
+    \item Compute the final ranking for all items $w \in \mathcal{\tilde V} \cap \mathcal{R}$: $y^{(\textrm{pair})}_{(v, w)} \leftarrow \bm{h}^{(k)}_v \cdot \bm{h}^{(k)}_w$.
+\end{enumerate}
+
+In contrast to \textsc{NBFNet}, we readout both the user and item representations from the GNN in order to produce the ranking of local items.
+This lets the model leverage the full $k$-hop user information, as otherwise user representations are only computed in intermediate GNN layers based on limited subgraph depths.
+
+Further note that sampling a $k$-hop subgraph typically results in a \emph{directed} computation graph towards the seed node~\citep{Fey/Lenssen/2019}.
+However, to facilitate the extraction of item node representations, the sampled subgraph must be transformed into a bidirectional graph prior to applying the GNN.
+This approach aligns with previous work that decouples the depth and scope of GNNs~\citep{shaDow}.
+
+This approach proves particularly effective in the context of temporal, heterogeneous graphs, as the GNN naturally learns to integrate multi-behavior signals originating from different edge types. For instance, the pair-wise representation captures all past user-item interactions, such as the recency of the last purchase or whether the item has been previously clicked or tagged.
+Despite its expressiveness, this method is also highly efficient, as only a single GNN pass over the user subgraph is required to make predictions for the entire set of related items.
+Assuming bounded subgraph sizes, training and inference over the full user set can be achieved in $\mathcal{O}(|\mathcal{L}|)$ time, which is in stark contrast to the $\mathcal{O}(|\mathcal{L}| \cdot |\mathcal{R}|)$ complexity required by two-tower models.
+Moreover, as no shallow embeddings are used, this approach naturally extends to newly appearing users and items over time.
+Nonetheless, as discussed in Sec.~\ref{sec:analysis}, this method alone does not fully address the diverse requirements of modern recommendation systems due to its limited set of potential candidates.
+
+\subsection{Two-Tower Representations}
+\label{sec:twotower}
+
+\name's two-tower model ranks all user-item pairs outside the user's subgraph, serving as an effective fallback mechanism to supplement the pair-wise representations.
+While drawing inspiration from related two-tower architectures~\citep{NGCF19,he2020lightgcn}, our novel two-tower model enables an efficient integration with pair-wise architectures.
+The key innovation in our two-tower model is the use of \emph{shallow} item representations. Specifically, we do \emph{not} deploy a GNN to compute item representations; instead we entirely rely on a shallow embedding matrix $\bm{W} \in \mathbb{R}^{|\mathcal{R}| \times d}$ to learn item representations.
+This design is inspired by multiple key observations:
+
+\begin{itemize}
+    \item \textbf{Limited information gain from applying a GNN on the item side.} Item connections are naturally \emph{very} dense. In extreme cases, popular items may receive over 1M interactions (an item is connected to every user that has previously interacted with it). This leads to significant challenges and uncertainties in subgraph sampling, and easily exposes the GNN to oversquashing and oversmoothing issues.
+    \item \textbf{Shallow embedding matrices are very effective.} Shallow item embedding matrices can capture key signals such as popularity trends, seasonal patterns, demographic preferences and item similarity just as effectively as a GNN.
+    \item \textbf{GNN item representations scale poorly during training.} Incorporating both user and item GNN representations limits the model to only use a small number of negative samples due to memory constraints. In contrast, shallow item embeddings support training against a much larger corpus of negative samples ($\approx$ 10M), which is critical for improving model performance. This approach also eliminates the need for complex negative sampling strategies, which are often required when the number of negative samples is limited.
+\end{itemize}
+
+Importantly, we also inject the shallow item embeddings within the user's GNN forward pass, such that user representations can better align themselves to the corresponding item representations.
+Hence, the GNN representation of users follows a similar spirit to models such as \textsc{NGCF}~\citep{NGCF19} or \textsc{LightGCN}~\citep{he2020lightgcn}, although we do not utilize shallow user embeddings as the GNN itself is powerful enough to learn its own rich representation without them.
+As such, our two-tower representation model can be summarized as follows:
+
+\begin{enumerate}
+    \item Sample a $k$-hop subgraph $\mathcal{\tilde G} \leftarrow \mathcal{G}_k^{(-\infty, T]}[v]$ with node set $\mathcal{\tilde V}$ around user $v \in \mathcal{L}$.
+    \item Add the shallow embedding to all sampled items $w \in \mathcal{\tilde V} \cap \mathcal{R}$: $\bm{h}_w^{(0)} \leftarrow \bm{h}_w^{(0)} + \bm{w}_w$.
+    \item Read out the GNN user representation at layer $k$: $\bm{h}_v^{(k)} \leftarrow \textsc{GNN}_{\bm{\theta}}^{(k)}(\mathcal{\tilde G}, \bm{H}^{(0)})$.
+    \item Compute the final ranking for all items $w \in \mathcal{R} \setminus \mathcal{\tilde V}$: $y^{(\textrm{tower})}_{(v, w)} \leftarrow \bm{h}^{(k)}_v \cdot \bm{w}_w$.
+\end{enumerate}
+
+\subsection{\fullnames}
+\label{sec:hybrid}
+
+Our final \name architecture fuses both pair-wise representations and two-tower representations into a single unified architecture.
+That is, for all items $w \in \mathcal{\tilde V} \cup \mathcal{R}$ \emph{inside} the local user subgraph, we leverage the scores $y^{(\textrm{pair})}_{(v, w)}$ obtained from the pair-wise representations, while we fallback to the two-tower scores $y^{(\textrm{tower})}_{(v, w)}$ for all items $w \in \mathcal{\tilde V} \setminus \mathcal{R}$ \emph{outside} the sampled subgraph.
+
+The observation that user behaviors are diverse is the final element that makes \name work.
+To accommodate such diversity across different users, \name learns a user-specific \emph{fusion score} predicted from the GNN's user embeddings $\bm{h}^{(k)}_v$ via an $\textrm{MLP}_{\bm{\theta}}$.
+This personalized fusion score aligns the distinct scores by learning which users prefer familiar items over exploratory purchases, and adjusts the final ranking scores accordingly.
+With this, the final score is given by
+\begin{equation}
+    y_{(v, w)}  = \begin{cases}
+        y^{(\textrm{pair})}_{(v, w)} + \textrm{MLP}_{\bm{\theta}}\left(\bm{h}^{(k)}_v\right) & \text{if $w \in \mathcal{\tilde V} \cup \mathcal{R}$,}\\
+        \noalign{\vskip2pt}
+        y^{(\textrm{tower})}_{(v, w)} & \text{otherwise}.
+    \end{cases}
+\end{equation}
+
+In \name, both pair-wise representations and two-tower representations are derived from the \emph{same} GNN backbone.
+Since both models depend solely on the user subgraph, the user embedding $\bm{h}^{(k)}_v$ can be extracted in a single GNN forward pass and leveraged for downstream uses in both models.
+This streamlined approach makes \name computationally very efficient.
+\name is then trained end-to-end, optimizing both types of item scores as well as the fusion score altogether to maximize the predictive performance of future user-item interactions.
+In practice, we utilize the cross entropy loss for optimization, although any other loss formulation is applicable as well~\citep{bpr2009}.
+During inference, we obtain top scores from the two-tower model via (approximate) \emph{maximum inner product search}~\citep{faiss}, and merge them to the pair-wise scores in a post-processing procedure.
+
+\subsection{Extensions}
+\label{sec:extensions}
+
+We go over additional considerations and extensions when applying \names in practice.
+
+\paragraph{Fitting into the Context of Relational Deep Learning.}
+
+\names nicely align with the framework of relational deep learning~\citep{rdl}, a blueprint for graph representation learning on relational databases.
+Specifically, relational deep learning treats relational databases as a heterogeneous temporal graph, in which dimension and fact tables are linked through primary-foreign key relationships.
+Then, temporal-aware subgraph sampling is employed to generate heterogeneous subgraph snapshots $\mathcal{G}_k^{(-\infty, T]}[v]$ up to timestamp $T$, which are used to predict future user-item interactions.
+Relational databases~\citep{relbench} comprise diverse set of tables with rich multi-modal input features and rich multi-behavioral, temporal interactions, making them the perfect setting for stress-testing \names.
+
+\paragraph{Transductive \emph{vs.} Inductive Modeling.}
+
+Although the pair-wise representations in \name are inductive by design, the usage of the shallow embedding matrix on the item side places it in a transductive setting.
+This means that while \name can naturally accommodate newly appearing users over time, it is unable to handle new items at prediction time since their shallow embeddings remain uninitialized.
+To enable \name to operate in an inductive setting, we propose to replace the shallow item embedding matrix with a deep neural network on top of its item input features $\bm{h}^{(0)}_w$.
+This approach allows \name to scale to tasks such as marketplace or event recommendation, where handling of new items is essential.
+
+\paragraph{Sampled Softmax Formulation.}
+
+Since it is infeasible to train against the full item set $\mathcal{R}$ when optimizing \names, in practice, we rely on a sampled softmax formulation.
+This basically converts the objective of \name into a classification problem with $C$ sampled classes, shared across the entire mini-batch.
+The utilized sampling procedure is based on a priority queue: we ensure that (1) all ground-truth items and (2) the union of sampled subgraph items of a given mini-batch are included in the set of classes. Then, we (3) fill up the remainder of items with unexplored items outside all subgraphs of the mini-batch based on a uniform sampling procedure.
+In practice, we have no issues to scale the number of classes $C$ to $\approx 1M$ on commodity GPUs (15GB of memory), giving \name rich signals to learn from.
+
+
+
+\section{Experimental Evaluation}
+
+\label{sec:experiments}
+
+We perform experiments on six diverse datasets stemming from different domains, including ten different recommendation tasks.
+We aim to answer the following research questions:
+
+\begin{description}
+    \item[Q1] Which benefits does \name provide over each of its individual component?
+	\item[Q2] How does \name perform against state-of-the-art recommendation system methods?
+	\item[Q3] How does the locality score of Sec.~\ref{sec:analysis} influence the model performance of \name?
+    \item[Q4] How efficient and scalable is \name compared to the related work?
+\end{description}
+
+png}\,\textsc{PyTorch}~\citep{Paszke/etal/2019} utilizing the \img{figures/pyg_favicon.png}\,\textsc{PyTorch Geometric}~\citep{Fey/Lenssen/2019} and \img{figures/pytorch_frame_favicon.png}\,\textsc{PyTorch Frame}~\citep{hu2024pytorch} libraries.
+
+\subsection{Relational Deep Learning}
+
+\paragraph{Dataset Description.}
+
+We utilize the recommendation tasks introduced in \img{figures/RelBench_favicon.png}\,\textsc{RelBench}~\citep{relbench}, which consists of eight different realistic and temporal-aware recommendation tasks.
+\img{figures/RelBench_favicon.png}\,\textsc{RelBench} datasets contain rich relational structure, providing a challenging environment
+for recommendation tasks.
+To achieve strong performance, methods must be able to leverage information across multiple relational tables. 
+All datasets are publicly accessible and vary in terms of domain, size, and sparsity.
+The task is to predict the top-$k$ items given a user at a given seed time.
+The metric we use is Mean Average Precision (MAP) $@\,k$, where $k$ is set per task (higher is better).
+
+\begin{description}
+    \item[\texttt{rel-amazon}] Predict the list of distinct items each user purchases (\texttt{user-item-purchase}), gives a 5-star (\texttt{user-item-rate}), or gives a detailed review (\texttt{user-item-review}).
+    \item[\texttt{rel-hm}] Predict the list of items each user will purchase (\texttt{user-item-purchase}).
+    \item[\texttt{rel-stack}] Predict the list of distinct posts a user will comment (\texttt{user-post-comment}), or to predict the list of posts that users will link a given post to (\texttt{post-post-related}).
+    \item[\texttt{rel-trial}] Predict whether a condition will have which sponsors (\texttt{condition-sponsor-run}), or whether a sponsor will have a trial in a facility (\texttt{site-sponsor-run}).
+\end{description}
+
+\paragraph{Experimental Protocols.}
+
+We compare \name to the following baseline methods:
+
+\begin{description}
+    \item[\textsc{LightGBM}] \citep{ke2017lightgbm} concatenates both user and item features, and feeds them into a \textsc{LightGBM} decision tree.
+    \item[\textsc{MultiVAE}] \citep{liang2018multivae} extends variational autoencoders to collaborative filtering via a user-item interaction matrix for implicit feedback.
+    \item[\textsc{GraphSAGE}] \citep{hamilton2017inductive} employs a heterogeneous GNN on both user and item side, and ranks the produced embeddings via an inner product decoder.
+    \item[\textsc{NGCF}] \citep{NGCF19} extends \textsc{GraphSAGE} by propagating both shallow user and item embeddings inside the GNN.
+    \item[\textsc{NBFNet}] \citep{nbfnet} employs pair-wise GNN representations. This is the backbone of our pair-wise representation model in \name.
+    \item[\textsc{ShallowItem}] describes our two-tower model in \name, which ranks user GNN representations and shallow item embeddings via an inner product decoder.
+\end{description}
+
+Importantly, all GNN-based models utilize the \emph{same}  GNN backbone, which guarantees fair comparison of training procedures that are agnostic to the underlying model implementation.
+Specifically, we use a heterogeneous \textsc{GraphSAGE} variant as introduced in~\citet{relbench}, which leverages a \textsc{ResNet} tabular model~\citep{gorishniy2021revisiting} to encode multi-modal input data into a shared embedding space, which then gets fed into a heterogeneous \textsc{GraphSAGE} variant~\citep{hamilton2017inductive} with sum-based neighbor aggregation.
+For all experiments, optimization is done via \textsc{Adam}~\citep{Kingma/Ba/2015} for a maximum of 20 epochs.
+The hyper-parameters we tune for each task are: (1) the number of hidden units $\in \{ 32, 64, 128, 256, 512 \}$, (2), the batch size $\in \{256, 512, 1024 \}$, and (3) the learning rate $\in \{ 0.001, 0.01 \}$.
+
+\begin{table}[t]
+\caption{\textbf{Recommendation results} (MAP, higher is better, in \%) on \img{figures/RelBench_favicon.png}\,\textsc{RelBench}.}
+\centering
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{ccrrrrrrr}
+\toprule
+\multirow{2}{*}{\textbf{Task}} & \multirow{2}{*}{\textbf{Split}} & \textbf{\textsc{Light}} & \textbf{\textsc{Multi}} & \textbf{\textsc{Graph}} & \multirow{2}{*}{\textbf{\textsc{NGCF}}} & \multirow{2}{*}{\textbf{\textsc{NBFNet}}} & \textbf{\textsc{Shallow}} & \textbf{\textsc{Context}} \\
+& & \textbf{\textsc{GBM}}\, & \textbf{\textsc{VAE}}\,\,\, & \textbf{\textsc{SAGE}}\, & & & \textbf{\textsc{Item}}\,\,\,\,\,\, & \textbf{\textsc{GNN}}\,\,\,\,\, \\
+\toprule
+\multicolumn{9}{c}{\textbf{\texttt{rel-amazon}}} \\
+\midrule
+\multirow{2}{*}{\scriptsize\texttt{user-item-purchase}} & val & 0.18 & 0.37 & 1.53 & 1.16 & 2.60 & 1.45 & \textbf{2.71} \\ 
+& test & 0.16 & 0.23 &  0.74 & 0.88 & 2.06 & 0.56 & \textbf{2.93} \\
+\cmidrule{2-9}
+\multirow{2}{*}{\scriptsize\texttt{user-item-rate}} & val & 0.22 & 0.34 & 1.42 & 1.22 & 1.61 & 1.62 & \textbf{2.68} \\
+& test & 0.17 & 0.24 & 0.87 & 0.86 & 1.24 & 0.74 & \textbf{2.25} \\
+\cmidrule{2-9}
+\multirow{2}{*}{\scriptsize\texttt{user-item-review}} & val & 0.14 & 0.19 & 1.03 & 0.79 & 1.86 & 1.06 & \textbf{1.95} \\
+& test & 0.09 & 0.10 & 0.47 & 0.55 & 1.57 & 0.40 & \textbf{1.63} \\ 
+\toprule
+\multicolumn{9}{c}{\textbf{\texttt{rel-hm}}} \\
+\midrule
+\multirow{2}{*}{\scriptsize\texttt{user-item-purchase}} & val & 0.44 & 0.33 & 0.92 & 0.81 & 2.64 & 0.49 & \textbf{3.00} \\
+& test & 0.38 & 0.28 & 0.80 & 0.75 & 2.81 & 0.40 & \textbf{2.93} \\ 
+\toprule
+\multicolumn{9}{c}{\textbf{\texttt{rel-stack}}} \\
+\midrule
+\multirow{2}{*}{\scriptsize\texttt{user-post-comment}} & val & 0.04 & 0.07 &  0.43 & 0.52 & 15.17 & 0.05 & \textbf{15.22} \\
+& test & 0.04 & 0.01 & 0.11 & 0.13 & 12.72 & 0.03 & \textbf{13.34} \\
+\toprule
+\multicolumn{9}{c}{\textbf{\texttt{rel-trial}}} \\
+\midrule
+\scriptsize\texttt{condition-} & val & 4.88 & 2.59 & 3.12 &  3.71 & 11.33 & 0.88 & \textbf{11.59} \\ 
+\scriptsize\texttt{sponsor-run} & test & 4.82 &  2.47 & 2.89 & 3.88 & 11.36 & 0.85 & \textbf{11.65} \\
+\cmidrule{2-9}
+\multirow{2}{*}{\scriptsize\texttt{site-sponsor-run}} & val & 10.92 & 7.16 & 14.09 &  9.68 & 17.47 & 12.59 & \textbf{28.55} \\
+& test & 8.40 & 6.17 & 10.70 & 6.54 & 19.06 & 10.66 & \textbf{28.02} \\
+\toprule
+\multirow{2}{*}{\textbf{Average}~($\uparrow$)} & val & 2.30 & 1.46 & 2.82 & 2.24 & 7.56 & 2.35 & \textbf{9.22} \\
+& test & 2.01 & 1.29 & 2.08 & 1.72 & 7.71 & 1.81 & \textbf{9.23} \\ 
+\bottomrule
+\end{tabular}
+}
+\label{tab:results}
+\end{table}
+
+\paragraph{Discussion.}
+
+The results are reported in Table~\ref{tab:results}.
+We answer \textbf{Q1} by comparing \name to its individual components \textsc{NBFNet} and \textsc{ShallowItem}, and answer \textbf{Q2} by relating \name's performance to all reported baselines.
+
+\name outperforms all competing baselines, often by very significant margins.
+Notably, one can observe that the two-tower models \textsc{MultiVAE}, \textsc{GraphSAGE} and \textsc{NGCF} all fail to capture the pair-wise signals that both \textsc{NBFNet} and \name are able to leverage.
+This shows that two-tower representations are not powerful enough to capture the fine-grained pair-wise dependencies that are required to solve these tasks with high precision.
+Among the two-tower GNN models, there is no clear winner between \textsc{GraphSAGE} and \textsc{NGCF}, indicating that shallow (user) embeddings do not significantly drive improvements (and may even hinder performance, especially in tasks with inherent temporal dynamics).
+\name improves results by 344\% on average compared to the best two-tower baseline.
+
+Among the baselines, \textsc{NBFNet} performs the best across all tasks, while \name can consistently improve upon these strong outcomes.
+On average, \name increases performance by 20\% compared to \textsc{NBFNet}, underscoring the importance of incorporating ``distant'' items into the ranking process - an aspect that \textsc{NBFNet} overlooks by design.
+
+Our own two-tower \textsc{ShallowItem} model performs comparably to other two-tower GNN baselines, despite only using shallow item information in order to improve the overall efficiency of the model.
+This supports the hypothesis that a deep GNN on the item side is not particularly useful on most tasks, as the shallow embeddings can capture most of the key signals on the item side just as well as the GNN.
+However, there exists specific cases such as the \texttt{condition-sponsor-run} task on the \texttt{rel-trial} dataset, where \textsc{ShallowItem} underperforms relative to \textsc{GraphSAGE} and \textsc{NGCF}.
+On this task, deep GNNs on the item side play indeed a crucial role to improve results of two-tower models, which is captured in \name through its pair-wise representation model.
+
+The most noteworthy result is seen in the \texttt{site-sponsor-run} task on the \texttt{rel-trial} dataset.
+Here, both pair-wise models and two-tower models achieve strong initial results.
+Combining these two paradigms together via \name improves the final performance by $\approx$ 100\%, indicating that each of the individual components of \name captures orthogonal signals.
+The fusion of these paradigms yields a ranking model that excels in both local and distant item ranking, achieving superior overall performance.
+
+In order to answer \textbf{Q3}, we now  analyze the relationship between the locality score $s_k^{[T, T+i)}$ and the performance of \name.
+We observe that the improvements of \name compared to \textsc{NBFNet} are notably higher on tasks with lower locality scores.
+This observation aligns intuitively, as \name needs to rely more heavily on its two-tower component during optimization when locality scores are lower.
+Specifically, in tasks with the lowest locality scores (\emph{e.g.}, 0.168, 0.170 and 0.229 on the \texttt{user-item-purchase}, \texttt{user-item-rate} and \texttt{site-sponsor-run} tasks from the \texttt{rel-amazon} and \texttt{rel-trial} datasets), \name achieves substantial performance gains of 42\% to 80\% compared to \textsc{NBFNet}.
+Conversely, for tasks with higher locality scores (\emph{e.g.}, 0.417, 0.298, and 0.280 on the \texttt{user-item-purchase}, \texttt{user-post-comment}, and \texttt{post-post-related} tasks from the \texttt{rel-hm} and \texttt{rel-stack} datasets), the performance improvements of \name over \textsc{NBFNet} are more modest, ranging from 3\% to 5\%.
+These findings underscore the significant impact of the locality score on the performance of \textsc{NBFNet}, whereas \name demonstrates robustness, achieving stellar performance improvements regardless of task-specific characteristics.
+
+\subsection{Static Link Prediction}
+
+\begin{wraptable}{r}{0.45\textwidth}
+\caption{\textbf{Results on Amazon-Book.}}
+\centering
+\setlength{\tabcolsep}{2pt}
+\resizebox{0.45\textwidth}{!}{
+{\renewcommand{\arraystretch}{1.0}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Model} & \textbf{Recall@20} & \textbf{NDCG@20} \\
+\midrule
+\textsc{NGCF}~\citeyearpar{NGCF19} & 0.0337 & 0.0261 \\
+\textsc{LightGCN}~\citeyearpar{he2020lightgcn} & 0.0410 & 0.0318\\
+\textsc{UltraGCN}~\citeyearpar{mao2021ultragcn} & \textbf{0.0681} & \textbf{0.0556} \\
+\textsc{LightGCL}~\citeyearpar{cai2023lightgcl} & 0.0585 & 0.0436 \\
+\textsc{SimGCL}~\citeyearpar{liu2024simgcl} & 0.0478 & 0.0379 \\
+\textsc{SGL}~\citeyearpar{wu2021self} & 0.0468 & 0.0371 \\
+\textbf{\name} & 0.0451 & 0.0377 \\
+\bottomrule
+\end{tabular}
+}}
+\label{tab:static}
+\end{wraptable}
+
+While \name's main focus is to excel on large-scale real-world use-cases which are temporal and heterogeneous, it can also be used in a plug-and-play fashion for \emph{any} link prediction task.
+To verify, we evaluate \name on the static link prediction task of Amazon-Book~\citep{NGCF19}, which is a small-scale dataset of 52,643 users and 91,599 items, which does not come with input features, only considers users with at least ten interactions, and evaluates on 10\% of randomly selected interactions independent of time, \emph{cf.}~Table~\ref{tab:static}.
+We can see that \name is able to outperform both \textsc{NGCF} and \textsc{LightGCN}, while it is slightly underperforming compared to, \emph{e.g.}, \textsc{UltraGCN} or \textsc{LightGCL}.
+Given the relatively small size of this dataset, much of the progress in GNN-based recommendation systems has centered on two key directions: (1) simplifying GNN architectures, and (2) incorporating self-supervised learning techniques.
+Exploring how \name can benefit from a more lightweight GNN backbone or complementary learning signals presents an exciting direction for future research.
+
+\subsection{Temporal Next-Item Prediction}
+
+\begin{wraptable}{r}{0.58\textwidth}
+\caption{\textbf{Results on IJCAI Contest.}}
+\centering
+\setlength{\tabcolsep}{2pt}
+\resizebox{0.58\textwidth}{!}{
+{\renewcommand{\arraystretch}{1.0}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Model} & \textbf{HR@1} & \textbf{HR@5} & \textbf{NDCG@5} & \textbf{HR@10} & \textbf{NDCG@10} \\
+\midrule
+\textsc{DeepFM}~\citeyearpar{guo2017deepfm} & 0.138 & 0.332 & 0.244 & 0.469 & 0.290 \\
+\textsc{Bert4Rec}~\citeyearpar{sun2019bert4rec} & 0.141 & 0.356 & 0.261 & 0.467 & 0.297\\
+\textsc{Chorus}~\citeyearpar{wang2020make} & 0.140 & 0.345 & 0.247 & 0.457 & 0.283\\
+\textsc{HyRec}~\citeyearpar{ali2011hyrec} & 0.137 & 0.323 & 0.229 & 0.442 & 0.266 \\
+\textsc{NMTR}~\citeyearpar{gao2019neural} & 0.141 & 0.360 & 0.254 & 0.481 & 0.304 \\
+\textsc{MATN}~\citeyearpar{xia2020multiplex} & 0.142 & 0.375 & 0.273 & 0.489 & 0.309 \\
+\textsc{MBGCN}~\citeyearpar{jin2020multi} & 0.137 & 0.332 & 0.228 & 0.463 & 0.277 \\
+\textsc{TGT}~\citeyearpar{xia2023multibehaviour} & 0.148 & 0.399 & 0.293 & 0.519 & 0.330 \\
+\textbf{\name} & \textbf{0.411} & \textbf{0.603} & \textbf{0.513} & \textbf{0.667} & \textbf{0.534} \\
+\bottomrule
+\end{tabular}
+}}
+\label{tab:tgt}
+\end{wraptable}
+
+We use \name to perform temporal next-item recommendation on the IJCAI Contest dataset~\citep{xia2023multibehaviour}, which is a common dataset to evaluate sequential recommendation models et al.~\citep{sun2019bert4rec, xia2020multiplex,xia2023multibehaviour}.
+As per evaluation protocol, we report HitRate$@k$ and NDCG$@k$ over 99 sampled negatives per entity.
+Notably, \name excels at incorporating multi-behavioral and temporal signal, \emph{cf.}~Table~\ref{tab:tgt}.
+We observe that \name is able to out-perform all baselines on all metrics on this task (\emph{e.g.}, ~170\% improvement on HitRate$@1$).
+\subsection{Efficiency Analysis}
+
+\begin{wraptable}{r}{0.5\textwidth}
+\caption{\textbf{Runtime [s]} of 1,000 optimization steps.}
+\centering
+\setlength{\tabcolsep}{2pt}
+\resizebox{0.5\textwidth}{!}{
+{\renewcommand{\arraystretch}{0.8}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Model} & \texttt{rel-hm} & \texttt{rel-stack} \\
+\midrule
+\textsc{GraphSAGE} \small{(1 negative)} & 275s & 37s \\
+\textsc{GraphSAGE} \small{(10 negatives)} & 293s & 44s \\
+\textsc{GraphSAGE} \small{(100 negatives)} & OOM & OOM \\
+\textsc{NFBNet} & 77s & 21s \\
+\textsc{ShallowItem} & 92s & 22s \\
+\textbf{\name} & 94s & 23s \\
+\bottomrule
+\end{tabular}
+}}
+\label{tab:runtime}
+\end{wraptable}
+
+Our hybrid \name model is designed in such a way to have minimal overhead compared to its two components in isolation since the vast majority of the model parts are shared between the two paradigms.
+To answer \textbf{Q4}, we report the runtime in seconds to reach 1,000 optimization steps across different models, \emph{cf.}~Table~\ref{tab:runtime}.
+Most importantly, since \name only requires a single GNN forward pass, it is faster compared to any two-tower GNN by a very significant factor (\emph{i.e.}, a two-tower GNN such as \textsc{GraphSAGE} requires to run the GNN on both positive and negative items).
+In particular, two-tower GNNs scale very poorly when increasing the number of negative samples to train against.
+For training recommendation systems, a large number of negative examples is important to allow learning of discriminative features.
+However, In the simplest case (one negative pair per positive pair), a two-tower GNN needs to be executed three times already.
+\name does not have this limitation and can consider up to 1M negatives before running into GPU memory limitations.
+
+
+
+\section{Conclusion}
+
+
+We presented a novel hybrid GNN pipeline for recommendation called \name that can effectively contextualize predictions via pair-wise representations for familiar items, while falling back to two-tower representations for exploratory and serendipitous items.
+We evaluated our architecture on real-world datasets on which it consistently improved upon the state-of-the-art.
+
+
+

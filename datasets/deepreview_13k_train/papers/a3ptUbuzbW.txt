@@ -1,0 +1,252 @@
+\title{CityGaussianV2: Efficient and Geometrically Accurate Reconstruction for Large-Scale Scenes}
+
+\begin{abstract}
+Recently, 3D Gaussian Splatting (3DGS) has revolutionized radiance field reconstruction, manifesting efficient and high-fidelity novel view synthesis. However, accurately representing surfaces, especially in large and complex scenarios, remains a significant challenge due to the unstructured nature of 3DGS. In this paper, we present CityGaussianV2, a novel approach for large-scale scene reconstruction that addresses critical challenges related to geometric accuracy and efficiency. Building on the favorable generalization capabilities of 2D Gaussian Splatting (2DGS), we address its convergence and scalability issues. Specifically, we implement a decomposed-gradient-based densification and depth regression technique to eliminate blurry artifacts and accelerate convergence. To scale up, we introduce an elongation filter that mitigates Gaussian count explosion caused by 2DGS degeneration. Furthermore, we optimize the CityGaussian pipeline for parallel training, achieving up to 10$\times$ compression, at least 25\% savings in training time, and a 50\% decrease in memory usage. We also established standard geometry benchmarks under large-scale scenes. Experimental results demonstrate that our method strikes a promising balance between visual quality, geometric accuracy, as well as storage and training costs. The project page is available at \url{https://dekuliutesla.io/CityGaussianV2/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec: intro}
+
+3D scene reconstruction is a long-standing topic in computer vision and graphics, with its core pursuit of photo-realistic rendering and accurate geometry reconstruction. Beyond 
+Neural Radiance Fields (NeRF) \citep{mildenhall2021nerf}, 3D Gaussian Splatting (3DGS) \citep{kerbl20233d} has become the predominant technique in this area due to its superiority in training convergence and rendering efficiency. 3DGS represents the scene with a set of discrete Gaussian ellipsoids and renders with a highly optimized rasterizer. However, such primitives take an unordered structure and do not correspond well to the actual surface of the scene. This limitation impairs its synthesis quality at extrapolated views and hinders its downstream application in editing, animation, and relighting \citep{guedon2024sugar}. Recently, many excellent works \citep{guedon2024sugar, huang20242d, yu2024gaussian} have been proposed to address this issue. Despite their great success in single objects or small scenes, devils emerge when applying them directly to complex, large-scale scenes. 
+
+On the one hand, existing methods face significant challenges related to scalability and generalization ability. For example, SuGaR \citep{guedon2024sugar} binds meshes with Gaussians for refinement. However, in large-scale and complex scenarios, meshes can become extensive and finely detailed, resulting in substantial memory demands and capacity limitations. GOF \citep{yu2024gaussian} struggles with large, over-blurred Gaussians. While 2DGS \citep{huang20242d} exhibits better generalization ability, as shown in \cref{tab: sota}, its convergence is hindered by the blurred Gaussians illustrated in part (b) of \cref{fig: teaser}. Additionally, when scaling up through parallel training, it suffers from a Gaussian count explosion, as depicted in \cref{fig: explosion}. Another challenge lies in the evaluation protocol: due to insufficient observations in boundary regions, geometry estimation becomes error-prone and unstable in these areas. As a result, the metrics can significantly fluctuate and underestimate actual performance \citep{xiong2024gauuscene}, making it difficult to objectively evaluate and compare algorithms.
+
+On the other hand, achieving efficient parallel training and compression is critical to realizing geometrically accurate reconstruction of large-scale scenes. As shown in \cref{tab: ablation}, the total number of Gaussians can increase to 19.3 million during parallel training, resulting in a storage requirement of 4.6 GB and a memory cost of 31.5 GB, while rendering speed drops below 25 FPS. Additionally, 
+existing VastGaussian \citep{lin2024vastgaussian} costs nearly 3 hours for training, and CityGaussian \cite{liu2024citygaussian} consumes 4 hours to finish both training and compression. For reconstruction on low-end devices or under strict time constraints, these training costs and rendering speeds are unacceptable. Therefore, there is an urgent need for an economical parallel training and compression strategy.
+
+In response to these challenges, we introduce CityGaussianV2, a geometrically accurate yet efficient strategy for large-scale scene reconstruction. We take 2DGS as primitive due to its favorable generalization capabilities. To accelerate reconstruction, we employ depth regression guided by Depth-Anything V2 \citep{yang2024depth} and Decomposed-Gradient-based Densification (DGD). As shown in part (b) of \cref{fig: teaser} and \cref{tab: ablation}, DGD effectively eliminates blurred surfels, crucial for performance improvement. To address scalability, we introduce an Elongation Filter to mitigate the Gaussian count explosion problem associated with 2DGS degeneration during parallel training. To reduce the burden of single GPU, we conduct parallel training based on CityGaussian's block partitioning strategy. And we streamline the process by omitting time-consuming post-pruning and distillation steps of CityGaussian. Instead, we implement spherical harmonics of degree 2 from scratch and integrate contribution-based pruning into per-block fine-tuning. As demonstrated in part (c) of \cref{fig: teaser}, it scales up the surface quality of complex structures while significantly reducing training costs. Furthermore, our contribution-based vectree quantization enables a tenfold reduction in storage requirements for large-scale 2DGS. For evaluation, we introduce TnT-style \citep{knapitsch2017tanks} protocol along with a visibility-based crop volume estimation strategy, which can efficiently exclude underobserved regions and bring stable and consistent assessment.
+In summary, our contributions are four-fold:
+\begin{itemize}
+    \item A novel optimization strategy for 2DGS, that accelerates its convergence under large-scale scenes and enables it to be scaled up to high capacity (\cref{subsec: densification}).
+    \item A highly optimized parallel training pipeline that significantly reduces training costs and storage requirements while enabling real-time rendering performance (\cref{subsec: pipeline}).
+    \item A TnT-style standardized evaluation protocol tailored for large, unbounded scenes, establishing a geometric benchmark for large-scale scene reconstruction (\cref{sec: eval}). 
+    \item To the best of our knowledge, our CityGaussianV2 is among the first to implement the Gaussian radiance field in large-scale surface reconstruction. Experimental results confirm our state-of-the-art performance in both geometric quality and efficiency.
+\end{itemize}
+
+
+\section{Related Works}
+
+\label{sec: 2.related_works}
+
+\subsection{Novel View Synthesis}
+\label{subsec: 2.1.novel view}
+
+\textbf{Novel view synthesis} aims at generating new images from previously unseen viewpoints using images captured from various source viewpoints around a 3D scene. These new renderings are primarily based on the reconstructed 3D representation of the scene. One of the most seminal contributions to this field is \textbf{Neural Radiance Fields (NeRF)} \citep{mildenhall2021nerf}, which implicitly models target scenes using multi-layer perceptions (MLPs). Following this, MipNeRF \citep{barron2021mip, barron2022mip} addresses objectionable aliasing artifacts by introducing anti-aliased conical frustum-based rendering. \cite{deng2022depth, wei2021nerfingmvs, xu2022point} apply depth supervision from point cloud to accelerate model convergence. Algorithms represented by InstantNGP \citep{muller2022instant} speeds up the training and rendering of NeRF by leveraging simplified data structures, including multi-resolution hash encoding grid and octrees \citep{zhang2023efficient, wang2022fourier, yu2021plenoctrees}. The recently emerging \textbf{3D Gaussian Splatting} \citep{kerbl20233d} overcomes NeRF's drawbacks in training efficiency and rendering speed. Follow-up works further improve upon 3DGS in anti-aliasing \cite{yu2024mip}, storage cost \cite{fan2023lightgaussian, zhang2024lp, navaneet2023compact3d, morgenstern2023compact}, and high-texture area underfitting \cite{bulo2024revising, zhang2024fregs}. These remarkable works have provided valuable insights into the design of our algorithm.
+
+\subsection{Surface Reconstruction with Gaussians}
+\label{subsec: 2.2.surface recon}
+Extracting accurate surfaces from unordered and discrete 3DGS is a challenging while intriguing task. A handful of algorithms have been developed to extract unambiguous surfaces and regularize smoothness and outliers. Pioneering SuGaR \citep{guedon2024sugar} pretrain 3DGS and bind it with extracted mesh for fine-tuning. It then relies on Poisson reconstruction algorithm for fast mesh extraction. Recent GSDF \citep{yu2024gsdf} and NeuSG \citep{chen2023neusg} optimize 3DGS together with a signed distance function to generate accurate surfaces. 2DGS \citep{huang20242d} and concurrent GaussianSurfels \citep{dai2024high} collapse one dimension of 3D Gaussian primitives to avoid ambiguous depth estimation. The normals derived from rendering and depth map are also aligned to ensure a smooth surface. TrimGS \citep{fan2024trim} further provides a novel per-Gaussian contribution definition to remove inaccurate geometry. As a post-processing technique, GS2Mesh \citep{wolf2024surface} uses a pre-trained stereo-matching model to export mesh from 3DGS directly. GOF \citep{yu2024gaussian} focuses on unbounded scene. It leverages ray-tracing-based volume rendering to obtain contiguous opacity distribution within the scene. Instead of 2DGS's TSDF-based marching-cube strategy, GOF gets SDF from the opacity field and use marching tetrahedra to extract mesh. RaDeGS \citep{zhang2024rade} novelly define the ray intersection with Gaussian and correspondingly derive curved surface and depth distribution. Though these algorithms have been proven to be successful on small scenes or single objects, the challenges behind scaling up, including performance degradation, densification stability, and training cost, remain unexplored. We hope our analysis and design can provide more insights into the community.
+
+\subsection{Large-Scale Scene Reconstruction}
+\label{subsec: 2.3.large-scale}
+
+Over the past few decades, 3D reconstruction from large image collections has gained considerable attention and made significant strides. Modern algorithms \citep{tancik2022block, turki2022mega, xiangli2022bungeenerf, xu2023grid, zhang2023efficient, li2024nerf} are largely based on NeRF \citep{mildenhall2021nerf}. However, the substantial time required for training and rendering has hindered NeRF-based methods for long time. The recent rise of 3DGS, exemplified by VastGaussian \citep{lin2024vastgaussian}, represents a paradigm shift in large-scale scene reconstruction. Subsequent developments like HierarchicalGS \citep{kerbl2024hierarchical} and OctreeGS \citep{ren2024octree} have introduced Level-of-Detail (LoD) techniques, enabling efficient rendering of scenes at various scales. CityGS \citep{liu2024citygaussian} presents a comprehensive pipeline that encompasses parallel training, compression, and LoD-based fast rendering. And DoGaussian \citep{chen2024dogaussian} applies Alternating Direction Methods of Multipliers (ADMM) to train 3DGS distributedly. Meanwhile, GrendelGS \citep{zhao2024scaling} facilitates communication between blocks on different GPUs, and FlashGS \citep{feng2024flashgs} significantly reduces VRAM costs for large-scale training and rendering through a highly optimized renderer. Despite these advances, the issue of geometry accuracy has been largely overlooked due to the lack of reliable benchmarks. Our work addresses this gap, proposing a reliable benchmark along with a novel algorithm for both economical training, high fidelity, and accurate geometry.
+
+
+\section{Method}
+
+\label{sec: 3. method}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figs/densification.pdf}
+\caption{Illustration of our optimization mechanism. We densify Gaussians exclusively according to the gradient of SSIM loss. This helps remove large and blurry Gaussians and accelerate convergence. Meanwhile, we disable the densification of Gaussians with extreme elongation to avoid the Gaussian count explosion shown in \cref{fig: explosion}. We also supervise the rendered depth with that predicted by Depth Anything V2 \citep{yang2024depth}. This helps improve both rendering and geometry quality.}
+\label{fig: densification}
+\end{figure}
+
+\subsection{Preliminary}
+\label{subsec: preliminary}
+\textbf{3D Gaussian Splatting} \citep{kerbl20233d} represents 3D scene with a set of ellipsoids described by 3D Gaussian distribution, i.e. $\mathbf{G}_{\mathbf{N}}=\left\{ G_n|n=1,...,N \right\}$. Each Gaussian contains learnable properties including central point $\boldsymbol{\mu}_{\boldsymbol{n}}\in \mathbb{R} ^{3\times 1}$, covariance $\mathbf{\Sigma }_{\boldsymbol{n}}\in \mathbb{R} ^{3\times 3}$, opacity $\sigma _n\in \left[ 0,1 \right] $, spherical harmonics (SH) features $\boldsymbol{f}_{\boldsymbol{n}}\in \mathbb{R} ^{3\times 16}$ for view-dependent rendering. The covariance matrix is further decomposed to scaling matrix $\mathbf{R}_{\boldsymbol{n}}$ and rotation matrix $\mathbf{S}_{\boldsymbol{n}}$, i.e. $\mathbf{\Sigma }_{\boldsymbol{n}}=\mathbf{R}_{\boldsymbol{n}}\mathbf{S}_{\boldsymbol{n}}{\mathbf{S}_{\boldsymbol{n}}}^T{\mathbf{R}_{\boldsymbol{n}}}^T$. For a certain pixel $p$, the color $\boldsymbol{c}_p$ is derived through alpha blending:
+\begin{equation}
+    \begin{aligned}
+        \boldsymbol{c}_p &=\sum_{i\in \gamma \left( p \right)}{\boldsymbol{c}_i\alpha _i\prod_{j=1}^{i-1}{\left( 1-\alpha _j \right)}},
+        \\
+        \alpha _i&=\sigma _i\cdot \exp \left( -\frac{1}{2}\left( \boldsymbol{x}-\boldsymbol{\mu }_i \right) ^T\mathbf{\Sigma }_{i}^{-1}\left( \boldsymbol{x}-\boldsymbol{\mu }_i \right) \right) ,
+    \end{aligned}
+\end{equation}
+where $\gamma \left( p \right)$ denotes Gaussians located on ray crossing pixel $p$, and $\boldsymbol{x}$ is the corresponding query point. The loss $\mathcal{L}$ that supervises 3DGS's optimization is the weighted sum of two parts, L1 loss $\mathcal{L}_1$ and D-SSIM loss $\mathcal{L}_{\mathrm{SSIM}}$. 3DGS prevents under or over-reconstruction through heuristic adaptive density control, which is guided by view-space position gradient, i.e. $\nabla _{densify}=\partial \mathcal{L} /\partial \boldsymbol{\mu }_n$. The Gaussians with a gradient larger than a certain threshold would be cloned or split. For more details, we refer the readers to the original paper of 3DGS \citep{kerbl20233d}.
+
+\textbf{CityGaussian} \citep{liu2024citygaussian} aims to scale up 3DGS to large-scale scenes. As shown in \cref{fig: pipeline-parallel}, it first pre-trains a coarse model on full training data with the schedule of 3DGS. After that, it divides Gaussian primitives and training data into non-overlapping blocks and conducts parallel tuning. Following this, it adopts the approach from LightGaussian \citep{fan2023lightgaussian}, applying an additional 30,000 iterations for pruning and 10,000 iterations for distillation. Pruning removes redundant Gaussians based on their rendering importance, while the distillation reduces the spherical harmonic (SH) degree from 3 to 2. It then conducts vectree quantization for storage compression.
+
+\textbf{2D Gaussian Splatting} \citep{huang20242d} addresses surface estimation ambiguity of 3DGS by collapsing 3D ellipsoid volumes into a set of 2D oriented Gaussian disks, known as surfels. Its covariance is characterized by two tangential vectors $\boldsymbol{t}_{n,u}$ and $\boldsymbol{t}_{n,v}$ and a scaling vector $\mathbf{S}_{\boldsymbol{n}}=\left( s_{n,u}, s_{n,v} \right) $. In addition,2DGS incorporates depth distortion regularization and applies surface smoothness loss $\mathcal{L}_{\mathrm{Normal}}$ to align the surfel normals with those estimated from the depth map. These enhancements lead to superior results in geometry reconstruction and novel view synthesis.
+
+\subsection{Optimization Mechanism}
+\label{subsec: densification}
+
+This section elaborates on the proposed optimization mechanism for convergence acceleration and stable training. As illustrated in \cref{fig: densification}, the mechanism comprises three components: Depth Supervision, Elongation Filter, and Decomposed-Gradient-based Densification (DGD).
+As depicted in \cref{fig: densification}, 2D Gaussians are projected into screen space at the given camera pose and rendered by a tailored rasterizer. The derived outputs are used for loss calculation. GS algorithm necessitates iterative optimization to disambiguate monocular cues from each view, ultimately converging to a coherent 3D geometry. To encourage convergence, we incorporate depth prior as an auxiliary guidance for geometry optimization. Following the practice in \cite{kerbl2024hierarchical}, we utilize Depth-Anything-V2 to estimate the inverse depth and align it to the dataset's scale, which we denote as $D_k$. Suppose $\hat{D}_k$ denotes the predicted inverse depth. The associated loss function is defined as $\mathcal{L}_{\mathrm{Depth}} = |\hat{D}_k - D_k|$. As the training progresses, we decrease the loss weight $\alpha$ exponentially to suppress the adverse effect of imperfect depth estimation gradually. 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figs/explosion.pdf}
+\caption{Illustration of the motivation and effectiveness of our Elongation Filter. We take the reconstruction of \textit{Rubble} \citep{turki2022mega} scene as an example. On the left, we highlight the collection of Gaussian primitives with high gradient or extreme elongation. There is a significant overlap between two collections. By restricting densification of these sand-like points, we prevent out-of-memory (OOM) errors caused by an explosion in Gaussian count, enabling a steady count evolution analogous to CityGaussian \citep{liu2024citygaussian} in parallel tuning, as depicted on the right.}
+\label{fig: explosion}
+\end{figure}
+As discussed in \cref{sec: intro}, the critical obstacle to scaling up 2DGS is the excessive proliferation of certain primitives during the parallel tuning stage. Typically, a 2D Gaussian can collapse to a very small point when projected from a distance, especially those exhibiting extreme elongation \citep{huang20242d}. With high opacity, the movement of these minuscule points can cause significant pixel changes in complex scenes, leading to pronounced position gradients. As evidenced in the left portion of \cref{fig: explosion}, these tiny, sand-like projected points contribute substantially to points with high gradients. And they belong to those with extreme elongation. Moreover, some points project smaller than one pixel, resulting in their covariance being replaced by a fixed value through the antialiased low-pass filter. Consequently, these points cannot properly adjust their scaling and rotation with valid gradients. In block-wise parallel tuning, the views assigned to each block are much less than the total. These distant views are therefore frequently observed, causing the gradients of degenerated points to accumulate rapidly. These points consequently trigger exponential increases in Gaussian count and ultimately lead to out-of-memory errors, as demonstrated in the right portion of \cref{fig: explosion}.
+
+In light of this observation, we implement a straightforward yet effective Elongation Filter to address this problem. Before densification, we assess the elongation rate of each surfel, defined as $\eta_n = \min(s_{n,u}, s_{n,v}) / \max(s_{n,u}, s_{n,v})$. Surfels with $\eta_n$ below a certain threshold are excluded from the cloning and splitting process. As shown in the right portion of \cref{fig: explosion}, this filter mitigates out-of-memory errors and facilitates a more steady Gaussian count evolution. Furthermore, experimental results in \cref{tab: ablation} demonstrate that it does not compromise performance at the pretraining stage.
+
+Naive 2DGS also suffers from suboptimal optimization when migrated to large-scale scenes. As indicated by \cite{wang2004image, zhang2024fregs, shi2024lapisgs}, in contrast to SSIM loss, the L1 RGB loss is insensitive to blurriness and does not prioritize preserving structural integrity. To alleviate this problem, we prioritize the gradient from SSIM loss and introduce a Decomposed-Gradient-based Densification (DGD) strategy. Specifically, the gradient for densification is reformulated as:
+\begin{equation}
+\label{eq: gradient}
+\nabla _{densify}=\max \left( \omega \times \frac{|\nabla \mathcal{L} |_{avg}}{|\nabla \mathcal{L} _{\mathrm{SSIM}}|_{avg}}, 1 \right) \times \nabla \mathcal{L} _{\mathrm{SSIM}},
+\end{equation}
+where $\nabla \mathcal{L} _{\mathrm{SSIM}}$ is scaled according to the average gradient norm of the total loss to align automatically with the original gradient threshold for densification, with $\omega$ representing a constant weight.
+
+\subsection{Parallel Training Pipeline}
+\label{subsec: pipeline}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/pipeline-parallel.pdf}
+\caption{Illustration of pipeline modification. The pipeline of CityGS \citep{liu2024citygaussian} (dashed boxes and arrows) is compared with ours. We successfully removed time-consuming post-pruning and distillation, while enabling storage compression for 2DGS.}
+\label{fig: pipeline-parallel}
+\end{figure}
+
+As discussed in \cref{sec: intro}, the post-pruning and distillation of CityGaussian are time-consuming. And a significant memory overhead is introduced during parallel tuning. Considering these issues, we propose a novel pipeline, as shown in \cref{fig: pipeline-parallel}. To bypass the distillation step, we use an SH degree of 2 from the start, reducing the SH feature dimension from 48 to 27. This results in considerable memory and storage savings throughout the whole pipeline. To eliminate the need for post-pruning, we incorporate trimming during block-wise tuning. Specifically, we define the single-view contribution of each Gaussian following \cite{fan2024trim}:
+\begin{equation}
+\label{eq: single-view contribution}
+\mathbf{C}_{n,k}=\frac{1}{|\mathbb{P} _k|}\sum_{p\in \mathbb{P} _k}{\left( \alpha _{n} \right)}^{\gamma}\left( \prod_{j=1}^{n\left( p \right) -1}{\left( 1-\alpha _j \right)} \right) ^{\left( 1-\gamma \right)},
+\end{equation}
+where $\mathbb{P} _k$ is the 2D projected region of $n$-th Gaussian under $k$-th view. $n(p)$ denotes its depth sorted order on ray crossing pixel $p$. $\gamma$ is set as the default value of 0.5. Suppose that the images assigned to $m$-th block using CityGS \citep{liu2024citygaussian}'s strategy is $\mathbb{V} _m$, then 
+the average contribution is:
+\begin{equation}
+\label{eq: average contribution}
+\mathbf{C}_n=\frac{1}{|\mathbb{V} _m|}\sum_{k\in \mathbb{V} _m}{\mathbf{C}_{n,k}}.
+\end{equation}
+This contribution is evaluated at the start of training and at predefined epoch intervals. Our approach differs from \cite{fan2024trim} in that we use a percentile-based threshold to determine which points to discard. The points with contributions equal to or lower than this bound, including those redundant and never-observed points, will be automatically removed. \cref{tab: ablation} validates that our pipeline saves 50\% storage and 40\% memory, while decreasing time cost and slightly improving performance. 
+After merging the Gaussians across different blocks, we implement vectree quantization on 2DGS. We first evaluate each point’s contribution across all training data. The least important Gaussians undergo aggressive vector quantization on the SHs. The remaining critical SHs, along with other attributes representing Gaussian shape, rotation, and opacity, are stored in float16 format. 
+
+
+
+\section{Geometric evaluation protocols}
+
+\label{sec: eval}
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/pipeline-eval.pdf}
+\caption{Illustration of the evaluation process.}
+\label{fig: pipeline-eval}
+\end{figure}
+
+The evaluation protocol for rendering quality is well-established and transferable. We adhere to standard practices by measuring SSIM, PSNR, and LPIPS between renderings and groundtruth. However, there is still no universally accepted protocol for assessing geometric accuracy in large-scale scene reconstruction. Recently, \textit{GauU-Scene} \citep{xiong2024gauuscene} introduced the first benchmark, but its evaluation protocol overlooks boundary effects, leading to unreliable assessments. For instance, as indicated in its own paper \citep{xiong2024gauuscene}, such a protocol significantly underestimates the geometric accuracy of SuGaR, which demonstrates promising performance in mesh visualization. Moreover, \textit{GauU-Scene} does not align the surface points extraction process across methods, leading to unfair comparison. In particular, NeRF-based methods extract points from depth maps, while 3DGS utilizes Gaussian means. To address these issues, we draw lessons from the evaluation protocol of the Tanks and Temple (TnT) dataset \citep{knapitsch2017tanks}, which includes point cloud alignment, resampling, volume-bound cropping, and F1 score measurement. For all the compared methods, we first extract mesh and then sample points from the surface. Though TnT's strategy of sampling vertices and face centers is fast, it would underestimate the effect of mistakenly posing large triangles. Therefore, we sample same number of points evenly on the surface.
+
+To further deal with the challenge of boundary effect, an appropriate estimation of the crop volume is necessary. The core here is to check the visible frequency of each point and estimate a bound that can exclude rarely observed points. For efficiency, we take a workaround that formulates points as Gaussian primitives and checks their visibility using a well-optimized GS rasterizer. As illustrated in \cref{fig: pipeline-eval}, we begin by initializing a 3DGS field with the ground-truth point cloud, then traverse all training views to rasterize and count visible frequency through the output visible mask. If the frequency of $j$-th point $\tau_j$ is below a predefined threshold, it will be excluded. The remaining points are then used to compute the alpha shape in the ground plane as well as the minimum and maximum heights. This process can be completed within 1 minute. Compared to the crop volume estimated on all points, ours reduces the error bar length of the F1 score from 0.1 to 0.003, enabling a stable, consistent, and reliable evaluation of the model's actual performance. 
+
+Aside from automatic crop volume estimation, we also downsample the ground-truth point cloud to accelerate the evaluation process under such large-scale scenes. The downsampling voxel size is set to 0.35m. The distance threshold of $\tau$ varies from 0.3m to 0.6m, according to statistics of nearest-neighbor distances in the downsampled ground-truth point clouds. 
+
+
+
+\section{Experiments}
+
+\label{sec: 4. experiment}
+\subsection{Experimental Setup}
+\label{subsec: exp}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/vis_geometry.pdf}
+\caption{Qualitative comparison of surface reconstruction quality. Here ``Russian`` and ``Modern`` denote the Russian Building and Modern Building scene of \textit{GauU-Scene}, respectively. And ``Aerial`` denotes aerial view of \textit{MatrixCity}. The messy results of GOF are mainly attributed to the near-ground shell-like mesh.}
+\label{fig: geometry}
+\end{figure}
+
+\textbf{Datasets}. We require datasets with accurate ground-truth point clouds. Therefore, we utilize the realistic dataset \textit{GauU-Scene} \citep{xiong2024gauuscene} and the synthetic dataset \textit{MatrixCity} \citep{li2023matrixcity}. From \textit{GauU-Scene}, we selected the Residence, Russian Building, and Modern Building scenes. For \textit{MatrixCity}, we conduct experiments on its aerial view and street view version respectively. Each scene comprises over 4,000 training images and more than 450 test images, presenting significant challenges. These five scenes span areas ranging from 0.3 km$^2$ to 2.7 km$^2$. For aerial views, we follow \cite{kerbl20233d} to downsample the longer side of images to 1,600 pixels. For street views, we retain the original 1,000 × 1,000 resolution. To generate the initial sparse point cloud, we employ COLMAP \citep{schoenberger2016sfm, schoenberger2016mvs} along with the provided poses. Ground-truth point clouds are exclusively utilized for geometry evaluation.
+
+\textbf{Implementation Details}. Our experiments are conducted on 8 A100 GPUs. We set the gradient scaling factor $\omega$ to 0.9 and the pruning ratio to 0.025. For depth distortion loss, we empirically find it harmful to performance, and thus set its weight to default value 0. The weight for $\mathcal{L}_{\mathrm{Depth}}$ is exponentially decayed from 0.5 to 0.0025 during both the pretraining and fine-tuning stages. $\mathcal{L}_{\mathrm{Normal}}$ is activated after 7,000 iterations in pretraining and from the beginning in the parallel tuning. Besides, we found that the original normal supervision was overly aggressive for complex scene reconstruction. Consequently, the weight for $\mathcal{L}_{\mathrm{Normal}}$ is reduced to 0.0125, one-fourth of its original value. We adhere to the default settings in CityGaussian \citep{liu2024citygaussian} for the learning rate and densification schedule. To be specific, it applies lower learning rates during tuning compared to pertaining, and the street view is trained with a significantly lower learning rate and longer densification interval due to its extreme view sparsity \citep{zhou2024drivinggaussian}.
+
+For depth rendering, we utilize median depth for improved geometry accuracy, and for mesh extraction, we employ 2DGS's TSDF-based algorithm with a voxel size of 1m and SDF truncation of 4m. Additionally, \textit{GauU-Scene} applies depth truncation of 250m, while \textit{MatrixCity} uses 500m.
+
+\textbf{Baselines}. We compare our method against state-of-the-art Gaussian Splatting methods for surface reconstruction, including SuGaR \citep{guedon2024sugar}, 2DGS \citep{huang20242d}, and GOF \citep{yu2024gaussian}. Implicit NeRF-based methods such as NeuS \citep{wang2021neus} and Neuralangelo \citep{li2023neuralangelo} are also included. For a fair comparison, we follow \cite{lin2024vastgaussian, liu2024citygaussian} to double the total iterations; the starting iteration and interval of densification for GS-based or warm-up and annealing iteration of NeRF-based methods are likewise doubled. We observed that GOF's mesh extraction generates an extremely high-resolution mesh exceeding 1G, significantly larger than the meshes produced by the original settings of SuGaR and 2DGS. To ensure fairness, we adjusted the mesh extraction parameters of these methods to align their resolutions. For large-scale scene reconstruction, we utilize CityGaussian \citep{liu2024citygaussian} as a representative, as other concurrent aerial-view-based methods were not open-sourced at the time of submission. For its mesh extraction, we adopt 2DGS's methodology and use median depth for TSDF integration.
+
+\subsection{Comparison with SOTA methods}
+\label{subsec: sota}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.99\textwidth]{figs/vis_render.pdf}
+\caption{Qualitative comparison of rendering quality. Here ``Russian`` and ``Modern`` denote the Russian Building and Modern Building scene of \textit{GauU-Scene}, respectively. ``Aerial`` denotes the aerial view of \textit{MatrixCity}.}
+\label{fig: rendering}
+\end{figure}
+
+\begin{table}[t]
+  \caption{Comparison with SOTA reconstruction methods. ``NaN`` means no results due to NaN error, and ``OOM`` denotes out-of-memory error. ``FAIL`` means the method fails to extract meaningful mesh due to poor convergence. Here P and R denotes precision and recall against ground-truth point cloud, respectively.}
+  \label{tab: sota}
+  \begin{center}
+  \tabcolsep=0.15cm
+  \resizebox{0.99\textwidth}{!}{
+  \begin{tabular}{lcccccccccccc}
+    \toprule
+     & \multicolumn{4}{c} {GauU-Scene} &\multicolumn{4}{c}{MatrixCity-Aerial} & \multicolumn{4}{c}{MatrixCity-Street}\\
+     \cmidrule(r){2-5} \cmidrule(r){6-9} \cmidrule(r){10-13} 
+    Methods & PSNR$\uparrow$ & P$\uparrow$ & R$\uparrow$ & F1$\uparrow$  & PSNR$\uparrow$ & P$\uparrow$ & R$\uparrow$ & F1$\uparrow$ & PSNR$\uparrow$ & P$\uparrow$ & R$\uparrow$ & F1$\uparrow$ \\
+    \midrule
+    NeuS &14.46 &FAIL &FAIL &FAIL &16.76 &FAIL &FAIL &FAIL &12.86 &FAIL &FAIL &FAIL \\
+    Neuralangelo &NaN &NaN &NaN &NaN &19.22 &0.080 &0.083 &0.081 &15.48 &FAIL &FAIL &FAIL\\
+    SuGaR &23.47 &\secondbest 0.570 &0.292 &0.377 &OOM &OOM &OOM &OOM &19.82 &0.053 &0.111 &0.071 \\
+    GOF &22.33 &0.370 &0.390 &0.374 &17.42 &FAIL &FAIL &FAIL &20.32 &0.219 &0.473 &0.300\\
+    2DGS &23.93 &0.553 &\secondbest 0.446 &\secondbest0.491 &21.35 &0.207 &0.390 &0.270 &21.50 &\secondbest 0.334 &0.659 &\secondbest0.443 \\
+    CityGS &\best24.75 &0.457 &0.371 &0.407 &\best 27.46 &\secondbest 0.362 &\secondbest 0.637 &\secondbest0.462 &\best22.98 &0.283 &\secondbest 0.689 & 0.401 \\
+    Ours &\secondbest24.51 &\best 0.576 &\best 0.450 &\best0.501 &\secondbest 27.23 &\best 0.441 &\best 0.752 &\best0.556 &\secondbest22.19 &\best 0.376 &\best 0.759 &\best0.503 \\
+    \bottomrule
+  \end{tabular}
+}\end{center}
+\end{table}
+
+In this section, we compare CityGaussianV2 with state-of-the-art (SOTA) methods both quantitatively and qualitatively. As shown in \cref{tab: sota}, NeRF-based methods are more prone to failure due to the NaN outputs of the MLP or poor convergence under sparse supervision in large-scale scenes. Besides, these methods generally take over 10 hours for training. In contrast, GS-based methods finish training within several hours, while demonstrating stronger performance and generalization abilities. For \textit{GauU-Scene}, our model significantly outperforms existing geometry-specialized methods in rendering quality. As visually illustrated in \cref{fig: rendering}, our method accurately reconstructs details such as crowded windows and woodlands. Geometrically, our model outperforms 2DGS by 0.01 F1 score. Besides, part (b) of \cref{fig: teaser} shows that even without parallel tuning, our proposed optimization strategy enables our model to achieve significantly better performance in rendering and geometry at both 7K and 30K iterations, while 2DGS struggles to efficiently optimize large and blurry surfels. This validates our superiority in convergence speed. Compared to CityGS, our method improves the F1 score by 0.1 while maintaining a minimal gap in PSNR. As validated in \cref{fig: geometry}, the meshes produced by our method are smoother and more complete.
+
+On the challenging \textit{MatrixCity} dataset, we evaluate performance from both aerial and street views. For MatrixCity-Aerial, our method achieves the best surface quality among all algorithms, with the F1 score being twice that of 2DGS and outperforming CityGaussian by a significant margin. Furthermore, both SuGaR and GOF fail to complete training or extract meaningful meshes. In the street view, CityGS and geometry-specialized methods like 2DGS significantly underperform our method in geometry.
+
+Regarding training costs, as indicated in \cref{tab: ablation}, the small version of CityGaussianV2 (ours-s) reduces training time by 25\% and memory usage by over 50\%, while delivering superior geometric performance and on-par rendering quality with CityGS. The tiny version (ours-t) can even halve the training time. These advantages make our method particularly suitable for scenarios with varying quality and immediacy requirements.
+ 
+\subsection{Albation Studies}
+\label{subsec: ablations}
+
+\begin{table}[h]
+  \caption{Ablation on model components. The experiments are conducted on Residence scene of \textit{GauU-Scene} dataset (\citep{xiong2024gauuscene}). Here we take 2DGS (\citep{huang20242d}) as our baseline. The upper part ablates on pertaining, while the lower part ablates on fine-tuning. \#GS, T, Size, Mem. are the number of Gaussians, total training time with 8 A100, memory, storage cost. The units are million, minute, Gigabytes, and Gigabytes respectively. The best performance of each part is in \textbf{bold}.  ``+`` means add components on basis of all components in the above rows. An indented line means that only the module in that line is added, while that of other indented rows are excluded. The \colorbox{gray!20}{gray} row denotes modification that is aborted and not included in the following experiments. }
+  \label{tab: ablation}
+  \begin{center}
+  \resizebox{0.99\textwidth}{!}{
+  \begin{tabular}{lllllllccccc}
+    \toprule
+     & \multicolumn{3}{c} {Rendering Quality} &\multicolumn{3}{c}{Geometric Quality} & \multicolumn{5}{c}{GS Statistics}\\
+     \cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-12}
+    Model & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & P$\uparrow$ & R$\uparrow$ & F1$\uparrow$ &\#GS &T &Size &Mem. &FPS \\
+    \midrule
+    Baseline &0.637 &21.12 &0.401 &0.474 &0.362 &0.410 &9.54 &\textbf{78} &2.26 &20.8 &28.0\\
+    + Elongation Filter &0.636 &21.18 &0.401 &0.477 &0.362 &0.411 &9.56 &\textbf{78} & 2.26 &20.8 &28.6\\
+    + DGD &0.674 &\textbf{22.24} &0.345 &0.480 &0.387 &0.429 &\textbf{9.51} &84 &\textbf{2.25} &20.7 &30.3\\
+    + Depth Regression &\textbf{0.674} &22.22 &\textbf{0.345} &\textbf{0.501} &\textbf{0.390} &\textbf{0.438} &9.67 &89 & 2.29 &25.3 &29.4 \\
+    \midrule
+    + Parallel Tuning &0.742 &23.50 &\textbf{0.237} &0.538 &0.419 &0.471 &19.3 &195 & 4.57 &31.5 &21.3 \\
+    \quad + Trim (Ours-b) &\textbf{0.742} &\textbf{23.57} &0.243 &0.534 &0.430 &0.477 &8.07 &179 & 1.90 &19.0 &31.3\\
+    \rowcolor{gray!20} \quad + Prune &0.738 &23.46 &0.246 &0.538 &0.420 &0.472 &10.3 &168 & 1.90 &24.3 &30.3 \\
+    + SH Degree=2 &0.742 &23.49 &0.245 &\textbf{0.540} &\textbf{0.423} &\textbf{0.474} &8.06 &176 & 1.29 &14.2 &34.5 \\
+    + VQ (Ours-s) &0.740 &23.46 &0.248 &0.530 &0.414 &0.465 &8.06 &181 & 0.44 &14.2 &34.5\\
+    + 7k pretrain (Ours-t) &0.721 &23.17 &0.281 &0.517 &0.416 &0.461 &\textbf{5.31} & \textbf{115} & \textbf{0.29} &\textbf{11.5} &\textbf{41.7}\\
+    \rowcolor{gray!20} + partition of 2DGS &0.704 &22.68 &0.296 &0.508 &0.414 &0.456 &4.71 &112 &0.25 &11.3 &43.5 \\
+    \midrule
+    CityGaussian &0.758 &23.75 &0.273 &0.519 &0.398 &0.450 &10.9 &254 &0.60 &31.5 &58.8 \\
+    \bottomrule
+  \end{tabular}
+}\end{center}
+\end{table}
+
+In this section, we ablate each component of our model design. The upper part of \cref{tab: ablation} focuses on the optimization mechanism. As shown, restricting the densification of highly elongated Gaussians has negligible impact on pretraining performance. However, as illustrated in \cref{fig: explosion}, this strategy is essential for preventing Gaussian count explosion during the fine-tuning stage. Additionally, \cref{tab: ablation} demonstrates that our Decomposed Densification Gradient (DGD) strategy significantly accelerates convergence, improving 1.0 PSNR, 0.04 SSIM, and almost 0.02 F1 score. The last two lines in the upper section confirm that depth supervision from Depth-Anything-V2 \citep{yang2024depth} enhances geometric quality considerably.
+
+The lower part of \cref{tab: ablation} examines our pipeline design. With parallel tuning, both rendering and geometry quality show substantial improvements, validating the success of scaling up. For trimming, we use a more aggressive pruning ratio of 0.1, leading to 50\% storage and memory reduction. The result also underscores the importance of trimming for real-time performance. LightGaussian's \citep{fan2023lightgaussian} pruning strategy, however, falls short in preserving rendering quality. By using an SH degree of 2 from scratch, we further reduce storage and memory usage by over 25\%, with marginal impact on rendering performance or geometry accuracy. And speed is improved by 4.2 FPS. Our contribution-based vectree quantization step takes several minutes for compression, but achieves a 75\% reduction in storage. Additionally, by using the result from 7,000 iterations as a pre-train, the total training time decreases from 3 hours to 2 hours, with the model size shrinking to below 300 MB. This compact model is well-suited for deployment on low-end devices like smartphones or VR headsets. However, replacing the block partition with the one generated from 7,000 iterations of 2DGS results in a considerable drop in both the PSNR and F1 score. This suboptimal outcome underscores the importance of fast convergence for efficient training of tiny models.
+
+
+\section{Conclusion}
+
+In this paper, we reveal the challenges of scaling up the GS-based surface reconstruction method and establish the geometry benchmark for large-scale scenes. Our CityGaussianV2 takes 2DGS as primitives, eliminating its problem in convergence speed and scaling up capability. Despite that, we also implement parallel training and compression for 2DGS, realizing considerably lower training cost compared to CityGaussian. Experimental results on multiple challenging datasets demonstrate the efficiency, effectiveness and robustness of our method.
+
+
+
+
+
+
+

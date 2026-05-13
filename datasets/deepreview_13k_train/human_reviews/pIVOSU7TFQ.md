@@ -1,0 +1,173 @@
+# Detecting Discrepancies Between Generated and Natural Images Using Uncertainty
+
+- Decision: Reject
+- Scores: 6, 5, 6, 3
+
+## Abstract
+In this work, we propose a novel approach for detecting AI-generated images by leveraging predictive uncertainty to mitigate misuse and associated risks. The motivation arises from the fundamental assumption regarding the distributional discrepancy between natural and AI-generated images. \textbf{The feasibility of distinguishing natural images from AI-generated ones is grounded in the distribution discrepancy between them}. Predictive uncertainty offers an effective approach for capturing distribution shifts, thereby providing insights into detecting AI-generated images. Namely, as the distribution shift between training and testing data increases, model performance typically degrades, often accompanied by increased predictive uncertainty. Therefore, we propose to employ predictive uncertainty to reflect the discrepancies between AI-generated and natural images. In this context, the challenge lies in ensuring that the model has been trained over sufficient natural images to avoid the risk of determining the distribution of natural images as that of generated images. We propose to leverage large-scale pre-trained models to calculate the uncertainty as the score for detecting AI-generated images. This leads to a simple yet effective method for detecting AI-generated images using large-scale vision models: images that induce high uncertainty are identified as AI-generated. Comprehensive experiments across multiple benchmarks demonstrate the effectiveness of our method.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3
+
+### Summary
+The authors use pre-trained DNN image models to generate an uncertainty prediction regarding whether an input image is synthetic or real.  The method involves perturbing the model weights and observing a change in the features extracted from an image.  The results suggest that synthetic data features are more affected by model weight perturbations than real data features.  This is demonstrated using three benchmark datasets and DINOv2.
+
+### Strengths
+The paper is well written and easy to follow.  The methodology is intuitive, and is implementable beyond the studies provided by the authors.  Distinguishing between real and synthetic data is an open question in the community.
+
+### Weaknesses
+The method present in this paper exclusively relies on access to deep learning models which have not been trained on any generated synthetic data.  Unfortunately, the proliferation of synthetic images means that such models will become harder and harder to find as this area of research progresses.  The method may have a built-in "expiration date", in that, future state-of-the-art models will likely be tainted (either knowingly or unknowingly) with generated data.  Similarly, as synthetic data becomes closer to natural data, I would expect the synthetic features to also approximate natural features.  
+
+The authors directly acknowledge there is no theoretical justification for this method, and list it under future work. I appreciate their honesty and clarity, and agree that the result is very interesting.  However, without a theoretical justification or a more extensive analysis of the differences in natural-synthetic feature representation driving this metric, this work is unlikely to become high impact.
+
+### Questions
+None
+
+### Soundness
+3
+
+### Presentation
+4
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+The paper introduces a novel approach for detecting AI-generated images by leveraging predictive uncertainty to mitigate misuse and associated risks. The proposed method is grounded in the distribution discrepancy between natural and AI-generated images, utilizing predictive uncertainty to capture shifts in distributions. The authors advocate using large-scale pre-trained models to compute the uncertainty scores, identifying images that induce higher uncertainty as potentially AI-generated. The paper's contributions are demonstrated through comprehensive experiments across multiple benchmarks, showing the effectiveness of the proposed method.
+
+### Strengths
+1. The technical claims presented are sound, supported by comprehensive experiments and a thorough analysis of predictive uncertainty.
+2. The paper is well-written, and the authors make a clear case for their method.
+3. Given the increasing concern over deepfakes and manipulated content, the research is timely and addresses a significant societal issue.
+
+### Weaknesses
+1. The authors did not evaluate the proposed models on large multi-modal models (LMMs) such as CLIP. Given the growing popularity of using text information to assist in image generation, there is a practical and pressing need for effective methods to detect images generated by these LMMs. Please refer to question 2 for further details.
+2. The author should study the predictive effectiveness of uncertainty. If the model's predictive performance improves as the number of samples n increases, this would indirectly prove the unbiased nature of the method proposed in the article in terms of predictive uncertainty. See question 3.
+3. The authot doesn’t test the method’s performance on adversarial examples. See question 4.
+
+### Questions
+Question 1: The uncertainty estimation method, based on weight perturbation and multiple queries, reminds me of gradient estimation, could the author compare the proposed method with Gradient Cuff [1]? Though this method is designed for text originally, you can borrow the idea from it, just using the﻿ as the function value and estimate the gradient based on the perturb noise added to the weight.
+Question 2: Could the author show the method’s performance on CLIP or other multi-modality image-generation models? I really understand the results may be sub-optimal, so not performing well on those models won’t affect my rating. Just curious how this method performs on LMMs.
+Question 3: Could the author show the method’s scaling performance with increased n?
+Question 4: Since the key technical contribution of this method is weight perturbation, I’m interested to see how this method performs on adversarial examples? The author can get the adversarial examples by simply applying noises to the test images.
+By addressing these points, the authors can further solidify their contribution and provide a more comprehensive understanding of their work. I would adjust my rating accordingly.
+references
+[1] Gradient Cuff: Detecting Jailbreak Attacks on Large Language Models by Exploring Refusal Loss Landscapes. Xiaomeng Hu, Pin-Yu Chen, Tsung-Yi Ho
+
+### Soundness
+3
+
+### Presentation
+4
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3
+
+### Summary
+This paper aims to detect AI-generated images from natural images by leveraging predictive uncertainty, which offering an effective approach for capturing distribution shifts. In order to ensure that the model has been trained over sufficient natural images, this paper leverages large-scale pre-trained models to calculate the uncertainty.
+
+### Strengths
+1. This work presents an intriguing approach by leveraging the predictive uncertainty of the model to detect AI-generated images.
+2. The paper conducts thorough experiments to test the validity of the proposed method.
+3. This paper is well-written and easy to follow.
+
+### Weaknesses
+1. The abstract does not mention the sensitivity of the samples to the weight perturbation of the large model.
+2. The method proposed in this paper relies on the model being pre-trained on a large dataset of natural images. Given the abundance of natural images, it raises the question of whether this method might misclassify other natural images that are out-of-distribution, as AI-generated images.
+3. The paper only selects the DINOv2 as the large-scale pre-trained model. Although it discusses the reasons for choosing DINOv2 and not using CLIP, it is difficult to convince that the proposed method, WePe, is applicable to other large-scale pre-trained models.
+
+### Questions
+Please see the weaknesses.
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5
+
+### Summary
+This paper proposes a novel method for detecting AI-generated content by leveraging the distributional discrepancy between real and generated images. Unlike most existing works, this detection method is training-free. Specifically, it uses a pretrained SSL vision foundation model, DINOv2, to estimate predictive uncertainty with respect to model weight perturbation and filters AI-generated images through thresholding. Empirical results show that this method achieves state-of-the-art or comparable performance across datasets.
+
+### Strengths
+1. The use of model perturbation and Bayesian inference is an interesting approach.
+
+2. The proposed method is efficient, as it requires no training or additional data to facilitate AI-generated content detection.
+
+3. The experimental results demonstrate the potential of the method. It consistently performs competitively across different datasets, and ablation studies show that it is robust across various configurations.
+
+4. The paper is generally well-written, with only minor typos and typesetting errors.
+
+### Weaknesses
+1. The proposed method is less efficient than its training-free counterparts. For example, RIGID applies multiple input perturbations to the original image to obtain detection scores, while AEROBLADE uses reconstruction errors for thresholding; both methods can be processed in minibatches and within a single forward pass.
+
+2. The method lacks novelty and proper theoretical analysis and justification. It essentially uses the same criterion as RIGID for "predictive uncertainty" (i.e., cosine similarity), except that it perturbs weights instead of inputs. The approximation, $ 2 - \frac{2}{n}\sum_{k=1}^n f(x; \theta_k)^T f(x; \theta) $, can be interpreted as two times the **average cosine distance** (i.e., one minus the average cosine similarity) between features extracted by the noised models and those by the original model. While the predictive uncertainty concept seems novel initially, it ultimately just switches from input perturbation to weight perturbation.
+
+3. The paper overclaims the generalizability of the proposed method compared to its training-free counterparts, while it still relies on the strong assumption that the feature distributions of real and generated images differ significantly.
+
+4. The derivation lacks detail and does not hold in general cases. In Equation (3), the final equality holds only if $ ||f(x, \theta_{*}) ||_2 = 1$, which is true only when using **L2-normalized** features extracted by DINOv2. This technical detail should be highlighted in the main text. Additionally, the assumption that the expected extracted feature by noised models is unbiased for that by the original model is unlikely to hold, as neural networks are highly nonlinear, making linear expectations improbable.
+
+5. The empirical performance is unconvincing. Although more complex than RIGID, consuming more memory (requiring at least two model copies, if not more), requiring additional hyperparameter tuning, and being slower than other training-free baselines (as the functional evaluations of this method cannot be efficiently parallelized), it still fails to outperform the baselines with meaningful margins in many cases.
+
+### Questions
+See weaknesses.
+
+### Soundness
+1
+
+### Presentation
+1
+
+### Contribution
+2

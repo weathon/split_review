@@ -1,0 +1,296 @@
+\title{Efficient Multi-agent Reinforcement Learning by Planning}
+
+\begin{abstract}
+Multi-agent reinforcement learning (MARL) algorithms have accomplished remarkable breakthroughs in solving large-scale decision-making tasks. Nonetheless, most existing MARL algorithms are model-free, limiting sample efficiency and hindering their applicability in more challenging scenarios. In contrast, model-based reinforcement learning (MBRL), particularly algorithms integrating planning, such as MuZero, has demonstrated superhuman performance with limited data in many tasks. Hence, we aim to boost the sample efficiency of MARL by adopting model-based approaches. However, incorporating planning and search methods into multi-agent systems poses significant challenges. The expansive action space of multi-agent systems often necessitates leveraging the nearly-independent property of agents to accelerate learning. To tackle this issue, we propose the MAZero algorithm, which combines a centralized model with Monte Carlo Tree Search (MCTS) for policy search. We design a novel network structure to facilitate distributed execution and parameter sharing. To enhance search efficiency in deterministic environments with sizable action spaces, we introduce two novel techniques: Optimistic Search Lambda (OS($\lambda$)) and Advantage-Weighted Policy Optimization (AWPO). Extensive experiments on the SMAC benchmark demonstrate that MAZero outperforms model-free approaches in terms of sample efficiency and provides comparable or better performance than existing model-based methods in terms of both sample and computational efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Multi-Agent Reinforcement Learning (MARL) has seen significant success in recent years, with applications in real-time strategy games~\citep{arulkumaran2019alphastar, ye2020mastering}, card games~\citep{bard2020hanabi}, sports games~\citep{kurach2020google}, autonomous driving~\citep{zhou2020smarts}, and multi-robot navigation~\citep{long2018towards}. Nonetheless, challenges within multi-agent environments have led to the problem of sample inefficiency. One key issue is the non-stationarity of multi-agent settings, where agents continuously update their policies based on observations and rewards, resulting in a changing environment for individual agents~\citep{nguyen2020deep}. Additionally, the joint action space's dimension can exponentially increase with the number of agents, leading to an immense policy search space~\citep{hernandez2020very}. These challenges, combined with issues such as partial observation, coordination, and credit assignment, necessitate a considerable demand for samples in MARL for effective training~\citep{gronauer2022multi}.
+
+Conversely, Model-Based Reinforcement Learning (MBRL) has demonstrated its worth in terms of sample efficiency within single-agent RL scenarios, both in practice~\citep{wang2019benchmarking} and theory~\citep{sun2019model}. Unlike model-free methods, MBRL approaches typically focus on learning a parameterized model that characterizes the transition or reward functions of the real environment~\citep{sutton2018reinforcement,corneil2018efficient,ha2018world}.
+Based on the usage of the learned model, MBRL methods can be roughly divided into two lines: planning with model~\citep{hewing2020learning,nagabandi2018neural,wang2019exploring,schrittwieser2020mastering,hansen2022temporal} and data augmentation with model~\citep{kurutach2018model,janner2019trust,hafner2019dream,hafner2020mastering,hafner2023mastering}. Due to the foresight inherent in planning methods and their theoretically guaranteed convergence properties, MBRL with planning often demonstrates significantly higher sample efficiency and converges more rapidly~\citep{zhang2020model}. A well-known planning-based MBRL method is MuZero, which conducts Monte Carlo Tree Search (MCTS) with a value-equivalent learned model and achieves superhuman performance in video games like Atari and board games including Go, Chess and Shogi~\citep{schrittwieser2020mastering}.
+
+Despite the success of MBRL in single-agent settings, planning with the multi-agent environment model remains in its early stages of development. Recent efforts have emerged to bridge the gap by combining single-agent MBRL algorithms with MARL frameworks~\citep{willemsen2021mambpo,bargiacchi2021cooperative,mahajan2021tesseract,egorov2022scalable}. However, the extension of single-agent MBRL methods to multi-agent settings presents formidable challenges. On one hand, existing model designs for single-agent algorithms do not account for the unique biases inherent to multi-agent environments, such as the nearly-independent property of agents. Consequently, directly employing models from single-agent MBRL algorithms typically falls short in supporting efficient learning within real-world multi-agent environments, underscoring the paramount importance of model redesign. On the other hand, multi-agent environments possess action spaces significantly more intricate than their single-agent counterparts, thereby exponentially escalating the search complexity within multi-agent settings. This necessitates exploration into specialized planning algorithms tailored to these complex action spaces.
+
+In this paper, we propose MAZero, the first empirically effective approach that extends the MuZero paradigm into multi-agent cooperative environments. In particular, our contributions are fourfold:
+\begin{enumerate}[leftmargin=*]
+    \item Inspired by the Centralized Training with Decentralized Execution (CTDE) concept, we develop a centralized-value, individual-dynamic model with shared parameters among all agents. We incorporate an additional communication block using the attention mechanism to promote cooperation during the model unrolling (see Section~\ref{sec:model}).
+    \item Given the deterministic characteristics of the learned model, we have devised the Optimistic Search Lambda (OS($\lambda$)) approach (see Section~\ref{sec:oslambda}). It optimistically estimates the sampled returns while mitigating unrolling errors at larger depths using the parameter $\lambda$.
+    \item We propose a novel policy loss named Advantage-Weighted Policy Optimization (AWPO) (see Section~\ref{sec:awpo}) utilizing the value information calculated by OS($\lambda$) to improve the sampled actions. 
+    \item We conduct extensive experiments on the SMAC benchmark, showing that MAZero achieves superior sample efficiency compared to model-free approaches and provides better or comparable performance than existing model-based methods in terms of both sample and computation efficiency (see Section~\ref{sec:exp}).
+\end{enumerate}
+
+
+
+
+\section{Background}
+
+
+\label{sec:background}
+This section introduces essential notations, and related works will be discussed in \Cref{sec:related-works}.
+
+\paragraph{POMDP} Reinforcement Learning (RL) addresses the problem of an agent learning to act in an environment in order to maximize a scalar reward signal, which is characterized as a partially observable Markov decision process (POMDP)~\citep{kaelbling1998planning} defined by $(\mathcal{S}, \mathcal{A}, T, U, \Omega, \mathcal{O}, \gamma)$, where $\mathcal{S}$ is a set of states, $\mathcal{A}$ is a set of possible actions, $T: \mathcal{S}\times\mathcal{A}\times\mathcal{S}\rightarrow[0,1]$ is a transition function over next states given the actions at current states, $U: \mathcal{S}\times\mathcal{A}\rightarrow\R$ is the reward function. $\Omega$ is the set of observations for the agent and observing function $\mathcal{O}: \mathcal{S}\rightarrow\Omega$ maps states to observations. $\gamma\in[0,1)$ is the discounted factor. At each timestep $t$, the agent acquire an observation $o_t = \mathcal{O}(s_t)$ based on current state $s_t$, choose action $a_t$ upon the history of observations $o_{\leq t}$ and receive corresponding reward $u_t = U(s_t, a_t)$ from the environment. The objective of the agent is to learn a policy $\pi$ that maximizes the expected discounted return $J(\pi) = \E_{\pi}\left[\sum_{t=0}^{\infty}\gamma^t u_t | a_t \sim \pi(\cdot|o_{\leq t}) \right]$.
+
+\paragraph{MuZero} MuZero~\citep{schrittwieser2020mastering} is an MBRL algorithm for single-agent settings that amalgamates a learned model of environmental dynamics with MCTS planning algorithm. MuZero’s learned model consists of three functions: a \textit{representation} function $h$, a \textit{dynamics} function $g$, and a \textit{prediction} function $f$. 
+The model is conditioned on the observation history $o_{\leq t}$ and a sequence of future actions $a_{t:t+K}$ and is trained to predict rewards $r_{t,0:K}$, values $v_{t,0:K}$ and policies $p_{t,0:K}$, where $r_{t,k}, v_{t,k}, p_{t,k}$ are model predictions based on imaginary future state $s_{t,k}$ unrolling $k$ steps from current time $t$.
+Specifically, the \textit{representation} function maps the current observation history $o_{\leq t}$ into a hidden state $s_{t,0}$, which is used as the root node of the MCTS tree. The \textit{dynamic} function $g$ inputs the previous hidden state $s_{t,k}$ with an action $a_{t+k}$ and outputs the next hidden state $s_{t,k+1}$ and the predicted reward $r_{t,k}$. The \textit{prediction} function $f$ computes the value $v_{t,k}$ and policy $p_{t,k}$ at each hidden state $s_{t,k}$. To perform MCTS, MuZero runs $N$ simulation steps where each consists of 3 stages: \textit{Selection}, \textit{Expansion} and \textit{Backup}. During the \textit{Selection} stage, MuZero starts traversing from the root node and selects action by employing the probabilistic Upper Conﬁdence Tree (pUCT) rule~\citep{kocsis2006bandit,silver2016mastering} until reaching a leaf node:
+\begin{equation}
+    a = \arg\max_a\left[ Q(s,a) + P(s,a)\cdot\frac{\sqrt{\sum_b N(s,b)}}{1 + N(s,a)} \cdot c(s) \right] \label{UCT-formula}
+\end{equation}
+where $Q(s,a)$ denotes the estimation for Q-value, $N(s,a)$ the visit count, $P(s,a)$ the prior probability of selecting action $a$ received from the \textit{prediction} function, and $c(s)$ is used to control the influence of the prior relative to the Q-value.
+The target search policy $\pi(\cdot|s_{t,0})$ is the normalized distribution of visit counts at the root node $s_{t,0}$.
+The model is trained minimize the following 3 loss: reward loss $l_r$, value loss $l_v$ and policy loss $l_p$ between true values and network predictions.
+\begin{equation}
+    L^{\text{MuZero}} = \sum_{k=0}^{K} \left[l_r(u_{t+k}, r_{t,k}) +l_v(z_{t+k}, v_{t,k}) + l_p(\pi_{t+k}, p_{t,k})\right]
+\end{equation}
+where $u_{t+k}$ is the real reward from environment, $z_{t+k}=\sum_{i=0}^{n-1}\gamma^i u_{t+k+i} + \gamma^{t+k+n}\nu_{t+k+n}$ is n-step return consists of reward and MCTS search value, $\pi_{t+k}$ is the MCTS search policy.
+
+EfficientZero~\citep{ye2021mastering} proposes an asynchronous parallel workflow to alleviate the computational demands of the reanalysis MCTS
+. EfficientZero incorporates the self-supervised consistency loss $l_s = \|s_{t,k} - s_{t+k, 0}\|$ using the SimSiam network to ensure consistency between the hidden state from the $k$th step's dynamic $s_{t,k}$ and the direct representation of the future observation $s_{t+k, 0}$.
+
+\paragraph{Sampled MuZero} Since the efficiency of MCTS planning is intricately tied to the number of simulations performed, the application of MuZero has traditionally been limited to domains with relatively small action spaces, which can be fully enumerated on each node during the tree search. To tackle larger action spaces, 
+Sampled MuZero~\citep{hubert2021learning} introduces a sampling-based framework where policy improvement and evaluation are computed over small subsets of sampled actions.
+Specifically, every time in the \textit{Expansion} stage, only a subset $T(s)$ of the full action space $\mathcal A$ is expanded, where $T(s)$ is on-time resampled from a policy $\beta$ base on the prior policy $\pi$.
+After that, in the \textit{Selection} stage, an action is picked according to the modified pUCT formula.
+\begin{equation}
+    a = \mathop{\arg\max}\limits_{a\in T(s) \subset \mathcal{A} }\left[ Q(s,a) + \frac{\hat{\beta}}{\beta}P(s,a)\cdot\frac{\sqrt{\sum_b N(s,b)}}{1 + N(s,a)} \cdot c(s) \right] \label{sampled-UCT-formula}
+\end{equation}
+where $\hat\beta $ is the empirical distribution of sampled actions, which means its support is $T(s)$.
+
+In this way, when making actual decisions at some root node state $s_{t,0}$, Sampled MCTS will yield a policy $\omega(\cdot|s_{t,0})$ after $N$ simulations, which is a stochastic policy supported in $T(s_{t,0})$.
+The actual improved policy is denoted as $\pi^{\text{MCTS}}(\cdot|s_{t,0}) = \mathbb E[\omega(\cdot|s_{t,0})]$, which is the expectation of $\omega(\cdot|s_{t,0})$.
+The randomness that the expectation is taken over is from all sampling operations in Sampled MCTS.
+As demonstrated in the original paper, Sampled MuZero can be seamlessly extended to multi-agent settings by considering each agent's policy as a distinct dimension for a single agent's multi-discrete action space during centralized planning. The improved policy is denoted as $\pmb{\pi}^{\text{MCTS}}(\cdot|\pmb{s}_{t,0})$.\footnote{For the sake of simplicity, we will not emphasize the differences between search policy $\pmb{\pi}^{\text{MCTS}}(\cdot|\pmb{s}_{t,0})$ in multi-agent settings and $\pi^{\text{MCTS}}(\cdot|s_{t,0})$ in single-agent settings apart from the mathematical expressions.}
+
+
+\section{Challenges in Planning-based Multi-agent Model-based RL}
+
+
+Extending single-agent Planning-based MBRL methods to multi-agent environments is highly non-trivial.
+On one hand, existing model designs for single-agent algorithms do not account for the unique biases inherent to multi-agent environments, such as the nearly-independent property of agents.
+This renders the direct employing a flattened model from single-agent MBRL algorithms typically falls short in supporting efficient learning within real-world multi-agent environments.
+On the other hand, multi-agent environments possess state-action spaces significantly more intricate than their single-agent counterparts, thereby exponentially escalating the search complexity within multi-agent settings.
+This, in turn, compels us to explore specialized search algorithms tailored to complex action spaces.
+Moreover, the form of the model, in tandem with its generalization ability, collectively constrains the form and efficiency of the search algorithm, and vice versa, making the design of the model and the design of the search algorithm highly interrelated.
+
+In this section, we shall discuss the challenges encountered in the current design of planning-based MBRL algorithms, encompassing both model design and searching algorithm aspects. We will elucidate how our MAZero algorithm systematically addresses these two issues in the \Cref{sec:method}.
+
+\subsection{Model Design}
+
+Within the paradigm of centralized training with decentralized execution (CTDE), one straightforward approach is to learn a joint model that enables agents to do centralized planning within the joint policy space.
+However, given the large size of the state-action space in multi-agent environments, the direct application of a flattened model from single-agent MBRL algorithms tends to render the learning process inefficient (\Cref{fig:smac_ablation_network}).
+This inefficiency stems from the inadequacy of a flattened model in accommodating the unique biases inherent in multi-agent environments.
+
+In numerous real-world scenarios featuring multi-agent environments, agents typically engage in independent decision-making for the majority of instances, with collaboration reserved for exceptional circumstances.
+Furthermore, akin agents often exhibit homogeneous behavior (e.g., focusing fire in the SMAC environment).
+For the former, a series of algorithms, including IPPO~\citep{yu2022surprising}, have demonstrated the efficacy of independent learning in a multitude of MARL settings.
+Regarding the latter, previous research in multi-agent model-free approaches has underscored the huge success of parameter-sharing~\citep{rashid2020monotonic,sunehag2017value} within MARL, which can be regarded as an exploitation of agents' homogenous biases.
+Hence, encoding these biases effectively within the design of the model becomes one main challenge in multi-agent MBRL.
+
+\subsection{Planning in Exponential Sized Action Space}
+
+\begin{wrapfigure}[17]{r}{0.5\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figs/AWPO_bandit.pdf}
+    \caption{\textbf{Bandit Experiment}~~We compare the Behavior Cloning (BC) loss and our Advantage-Weighted Policy Optimization (AWPO) loss on a bandit with action space $|\mathcal A| = 100$ and sampling time $B=2$. It is evident that AWPO converges much faster than BC, owing to the effective utilization of values.}
+    \label{fig:awpo-bandit}
+\end{wrapfigure}
+
+The action space in multi-agent environments grows exponentially with the number of agents, rendering it immensely challenging for vanilla MCTS algorithms to expand all actions.
+While Sampled MuZero, in prior single-agent MBRL work, attempted to address scenarios with large action spaces by utilizing action sampling, the size of the environments it tackled (e.g., \textit{Go}, $\sim 300$ actions) still exhibits substantial disparity compared to typical multi-agent environments (e.g., \textit{SMAC}-\texttt{27m\_vs\_30m}, $\sim 10^{42}$ actions).
+
+In practical applications like MARL, due to the significantly fewer samples taken compared to the original action space size, the underestimation issue of Sampled MCTS becomes more pronounced, making it less than ideal in terms of searching efficiency.
+This motivates us to design a more optimistic search process.
+
+Moreover, the behavior cloning (BC) loss that Sampled MCTS algorithms adopt disregards the value information.
+This is because the target policy $\omega(\cdot|s_{t,0})$ only encapsulates the relative magnitude of sampled action values while disregarding the information of the absolute action values.
+The issue is not particularly severe when dealing with a smaller action space.
+However, in multi-agent environments, the disparity between the sampling time $B$ and $|\mathcal A|$ becomes significant, making it impossible to overlook the repercussions of disregarding value information (\Cref{fig:awpo-bandit}).
+
+
+
+
+
+\section{MAZero algorithm}
+
+
+\label{sec:method}
+
+\subsection{Model Structure}
+\label{sec:model}
+
+The MAZero model comprises 6 key functions: a \textit{representation} function $h_\theta$ for mapping the current observation history $o^i_{\leq t}$ of agent $i$ to an individual latent state $s_{t,0}^i$, a \textit{communication} function $e_\theta$ which generates additional cooperative features $e_{t,k}^i$ for each agent $i$ through the attention mechanism, a \textit{dynamic} function $g_\theta$ tasked with deriving the subsequent local latent state $s_{t,k+1}^i$ based on the agent's individual state $s_{t,k}^i$, future action $a_{t+k}^i$ and communication feature $e_{t,k}^i$, a \textit{reward prediction} function forecasting the cooperative team reward $r_{t,k}$ from the global hidden state $\pmb{s}_{t,k} = (s_{t,k}^1, \ldots, s_{t,k}^N)$ and joint action $\pmb{a}_{t+k} = (a_{t+k}^1, \ldots, a_{t+k}^N)$, a \textit{value prediction} function $V_\theta$ aimed at predicting value $v_{t,k}$ for each global hidden state $\pmb{s}_{t,k}$, and a \textit{policy prediction} function $P_\theta$ which given an individual state $s_{t,k}^i$ and generates the corresponding policy $p_{t,k}^i$ for agent $i$. 
+The model equations are shown in \Cref{eq:mamuzero}.
+\begin{equation}
+\label{eq:mamuzero}
+\left\{
+    \begin{array}{ll}
+        \text{Representation:} & s_{t,0}^i = h_\theta(o_{\le t}^i) \\[2mm]
+        \text{Communication:} & e_{t,k}^1, \ldots, e_{t,k}^N = e_\theta(s_{t,k}^1,\ldots,s_{t,k}^N, a_{t+k}^1,\ldots,a_{t+k}^N) \\[2mm]
+        \text{Dynamic:} & s_{t,k+1}^i = g_\theta(s_{t,k}^i, a_{t+k}^i, e_{t,k}^i) \\[2mm]
+        \text{Reward Prediction:} & r_{t,k} = R_\theta(s_{t,k}^1,\ldots,s_{t,k}^N, a_{t+k}^1,\ldots,a_{t+k}^N) \\[2mm]
+        \text{Value Prediction:} & v_{t,k} = V_\theta(s_{t,k}^1,\ldots,s_{t,k}^N) \\[2mm]
+        \text{Policy Prediction:} & {p_{t,k}^i} = P_\theta(s_{t,k}^i)
+\end{array}\right.
+\end{equation}
+Notably, the representation function $h_\theta$, the dynamic function $g_\theta$, and the policy prediction function $P_\theta$ all operate using local information, enabling distributed execution. Conversely, the other functions deal with value information and team cooperation, necessitating centralized training for effective learning.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{figs/networkstructure.pdf}
+    \caption{\textbf{MAZero model structure}~~Given the current observations $o_t^i$ for each agent, the model separately maps them into local hidden states $s_{t,0}^i$ using a shared representation network $h$. Value prediction $v_{t,0}$ is computed based on the global hidden state $\pmb{s}_{t,0}$ while policy priors $p_{t,0}^i$ are individually calculated for each agent using their corresponding local hidden states. Agents use the communication network $e$ to access team information $e_{t,0}^i$ and generate next local hidden states $s_{t,1}^i$ via the shared individual dynamic network $g$, subsequently deriving reward $r_{t,1}$, value $v_{t,1}$ and policies $p_{t,1}^i$. During the training stage, real future observations $\pmb{o}_{t+1}$ can be obtained to generate the target for the next hidden state, denoted as $\pmb{s}_{t+1,0}$.}
+    \label{fig:network}
+\end{figure}
+
+\subsection{Optimistic Search Lambda}
+\label{sec:oslambda}
+
+Having discerned that MAZero has acquired a deterministic world model, we devise a Optimistic Search Lambda (OS($\lambda$)) approach to better harness this characteristic of the model.
+
+In previous endeavors, the selection stage of MCTS employed two metrics (value score and exploration bonus) to gauge our interest in a particular action.
+In this context, the value score utilized the mean estimate of values obtained from all simulations within that node's subtree.
+However, within the deterministic model, the mean estimate appears excessively conservative.
+Contemplating a scenario where the tree degenerates into a multi-armed bandit, if pulling an arm consistently yields a deterministic outcome, there arises no necessity, akin to the Upper Confidence Bound (UCB) algorithm, to repeatedly sample the same arm and calculate its average.
+Similarly, within the tree-based version of the UCT (Upper Confidence Trees) algorithm, averaging values across all simulations in a subtree may be substituted with a more optimistic estimation when the environment is deterministic.
+
+Hence, courtesy of the deterministic model, our focus narrows to managing model generalization errors rather than contending with errors introduced by environmental stochasticity.
+Built upon this conceptual foundation, we have devised a methodology for calculating the value score that places a heightened emphasis on optimistic values.
+
+Specifically, for each node $s$, we define:
+\begin{align}
+    \mathcal U_d(s) &=\left\{\sum _{k<d}\gamma^k r_k + \gamma^d v(s')\middle | s': \text{dep}(s') = \text{dep}(s)+d\right\} \\
+    \mathcal U_d^\rho (s) &=\text{Top }(1-\rho)\text{ values in }\mathcal U_d \label{value-set-at-depth-d}\\
+    V_\lambda^\rho(s) &= \sum_d\sum_{x\in \mathcal U_d^\rho(s)} \lambda ^d x / \sum_d \lambda ^d |\mathcal U_d^\rho(s)| \label{lambda-value-subtree}\\
+    A_\lambda^\rho(s,a) &= r(s,a) + \gamma V_\lambda^\rho(\text{Dynamic}(s,a)) - v(s) \label{optimistic-adv}
+\end{align}
+
+where $\text{dep}(u)$ denotes the depth of node $u$ in the MCTS tree, $\rho,\lambda\in[0,1]$ are hyperparameters, $r, v$, and $\text{Dynamic}$ are all model predictions calculated according to \Cref{eq:mamuzero}.
+
+To offer a brief elucidation on this matter,
+\Cref{value-set-at-depth-d} is the set of optimistic values at depth $d$, the degree of optimism is controlled by the quantile parameter $\rho$.
+Since the model errors magnify with increasing depth in practice, \Cref{lambda-value-subtree} calculates a weighted mean of all optimistic values in the subtree as the value estimation of $s$, where the weight of different estimations are discounted by a factor $\lambda$ over the depth.
+
+Finally, we use the optimistic advantage (\Cref{optimistic-adv}) to replace the value score in \Cref{sampled-UCT-formula} for optimistic search, that is:
+\begin{equation}
+    a = \mathop{\arg\max}\limits_{a\in T(s) \subset \mathcal{A} }\left[ A_\lambda^\rho(s,a) + \frac{\hat{\beta}}{\beta}P(s,a)\cdot\frac{\sqrt{\sum_b N(s,b)}}{1 + N(s,a)} \cdot c(s) \right] \label{sampled-UCT-formula-adv}
+\end{equation}
+
+\subsection{Advantage-Weighted Policy Optimization}
+\label{sec:awpo}
+In order to utilize the value information calculated by OS($\lambda$), we propose Advantage-Weighted Policy Optimization (AWPO), a novel policy loss function that incorporates the optimistic advantage (\Cref{optimistic-adv}) into the behavior cloning loss.\footnote{
+In this section, the expectation operator is taken over the randomness of OS($\lambda$). For the sake of simplicity, we will omit this in the formula.}
+
+In terms of outcome, AWPO loss weights the per-action behavior cloning loss by $\exp\left (\frac{A_\lambda^\rho(s,a)}\alpha\right )$:
+\begin{align}
+    l_p(\theta; \pi,\omega,A_\lambda^\rho) &= -\mathbb E\left[\sum _{a\in T(s)} \omega(a| s) \exp\left(\frac{A_\lambda^\rho( s, a)}{\alpha}\right) \log  \pi( a| s;\theta)\right]  \label{awpo-loss}
+\end{align}
+where $\theta$ denotes parameters of the learned model, $\pi(\cdot|s; \theta) $ is the network predict policy to be improved, $\omega(\cdot|s)$ is the search policy supported in action subset $T(s)$, $A_\lambda^\rho$ is the optimistic advantage derived from OS($\lambda$) and $\alpha>0$ is a hyperparameter controlling the degree of optimism. Theoretically, AWPO can be regarded as a cross-entropy loss between $ \eta^*$ and $\pi$,\footnote{It is equivalent to minimizing the KL divergence of $\eta^*$ and $ \pi$.} where $ \eta^*$ is the non-parametric solution of the following constrained optimization problem:
+\begin{equation}
+\label{eq:awpo-optimization-form}
+\begin{array}{rl}
+ \displaystyle \mathop{\text{maximize}}_{ \eta} & \displaystyle \mathbb E_{a\sim \eta(\cdot|s)} \left[A_\lambda^\rho(s,a)\right]\\
+ \displaystyle\text{s.t.} &\displaystyle \text{KL}\left( \eta(\cdot|s) \|  \pi^{\text{MCTS}}(\cdot | s)\right) \le  \epsilon
+\end{array}
+\end{equation}
+
+To be more specific, by Lagrangian method, we have:
+\begin{align}
+    \eta^*(a|s) \propto \pi^{\text{MCTS}}(a|s) \exp\left(\frac{A_\lambda^\rho(s,a)}{\alpha}\right) = \mathbb E\left[ \omega(a|s) \exp\left(\frac{A_\lambda^\rho(s,a)}{\alpha}\right)\right] \label{awpo-eta-star-closedform}
+\end{align}
+
+Thereby, minimizing the KL divergence between $\eta^*$ and $\pi$ gives the form of AWPO loss:
+\begin{align*}
+    &\argmin_\theta \text{KL}(\eta^*(\cdot|s)\|\pi(\cdot|s;\theta))\\
+    = &\argmin_\theta -\frac{1}{Z(s)}\sum_a \pi^{\text{MCTS}}(a|s) \exp\left(\frac{A_\lambda^\rho(s,a)}{\alpha}\right) \log \pi(a|s;\theta) - H(\eta^*(\cdot|s))\\
+    =&\argmin_\theta l_p(\theta;\pi,\omega, A_\lambda^\rho)
+\end{align*}
+
+where $Z(s) = \sum_a \pi^{\text{MCTS}}(a|s)\exp\left(\frac{A_\lambda^\rho(s,a)}{\alpha}\right)$ is a normalizing factor, $H(\eta^*)$ stands for the entropy of $\eta^*$, which is a constant.
+
+\Cref{eq:awpo-optimization-form} shows that AWPO aims to optimize the value improvement of $\pi$ in proximity to $ \pi^{\text{MCTS}}$, which effectively combines the improved policy obtained from OS($\lambda$) with the optimistic value, thereby compensating for the shortcomings of BC loss and enhancing the efficiency of policy optimization.
+
+Details of the derivation can be found in \Cref{app:awpo-derivation}.
+
+\subsection{Model training}
+
+The MAZero model is unrolled and trained in an end-to-end schema similar to MuZero. Specifically, given a trajectory sequence of length $K+1$ for observation $\pmb{o}_{t:t+K}$, joint actions $\pmb{a}_{t:t+K}$, rewards $u_{t:t+K}$, value targets $z_{t:t+K}$, policy targets $\pmb{\pi}_{t:t+K}^{\text{MCTS}}$ and optimistic advantages $A_\lambda^\rho$, the model is unrolled for $K$ steps as is shown in \Cref{fig:network} and is trained to minimize the following loss:
+\begin{equation}
+    \mathcal{L} = \sum_{k=1}^{K} (l_r + l_v + l_s) + \sum_{k=0}^{K} l_p
+    \label{mazero-loss}
+\end{equation}
+where $l_r = \|r_{t,k} - u_{t+k}\|$ and $l_v = \|v_{t,k} - z_{t+k}\|$ are reward and value losses similar to MuZero, $l_s = \|\pmb{s}_{t,k} - \pmb{s}_{t+k, 0}\|$ is the consistency loss akin to EfficientZero and $l_p $ is the AWPO policy loss (\Cref{awpo-loss}) under the realm of multi-agent joint action space:
+\begin{equation}
+    l_p = -\sum _{\pmb{a}\in T(\pmb{s}_{t+k,0})} \omega(\pmb{a}| \pmb{s}_{t+k,0}) \exp\left(\frac{A_\lambda^\rho(\pmb{s}_{t+k,0}, \pmb{a})}{\alpha}\right) \log  \pmb{\pi}(\pmb{a}| \pmb{s}_{t,k};\theta)
+\end{equation}
+where OS($\lambda$) is performed under the hidden state $\pmb{s}_{t+k,0}$ directly represented from the actual future observation $\pmb{o}_{t+k}$, deriving corresponding action subset $T(\pmb{s}_{t+k,0})$, search policy $\omega(\pmb{a}| \pmb{s}_{t+k,0})$ and optimistic advantage $A_\lambda^\rho(\pmb{s}_{t+k,0}, \pmb{a})$. $\pmb{\pi}(\pmb{a}| \pmb{s}_{t,k};\theta) = \prod_{i=1}^{N}P_\theta(a^i|s_{t,k}^i)$ denotes the joint policy to be improved at the $k$th step's hidden state $\pmb{s}_{t,k}$ unrolling from dynamic function.
+
+
+\section{Experiments}
+
+
+\label{sec:exp}
+\subsection{StarCraft Multi-Agent Challenge}
+\paragraph{Baselines} We compare MAZero with both model-based and model-free baseline methods on StarCraft Multi-Agent Challenge~(SMAC) environments. The model-based baseline is MAMBA~\citep{egorov2022scalable}, a recently introduced multi-agent MARL algorithm based on DreamerV2~\citep{hafner2020mastering} known for its state-of-the-art sample efficiency in various SMAC tasks. The model-free MARL methods includes QMIX~\citep{rashid2020monotonic}, QPLEX~\citep{wang2020qplex}, RODE~\citep{wang2020rode}, CDS~\citep{li2021celebrating}, and MAPPO~\citep{yu2022surprising}.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{figs/smac_winrate.pdf}
+    \caption{Comparisons against baselines in SMAC. Y axis denotes the win rate and X axis denotes the number of steps taken in the environment. Each algorithm is executed with 10 random seeds.}
+    \label{fig:smac_results}
+\end{figure}
+
+\Cref{fig:smac_results} illustrates the results in the SMAC environments. Among the 23 available scenarios, we have chosen 8 for presentation in this paper. Specifically, we have selected four random scenarios categorized as \textit{Easy} tasks and 4 \textit{Hard} tasks. It is evident that MAZero outperforms all baseline algorithms across eight scenarios with a given number of steps taken in the environment. Notably, both MAZero and MAMBA, which are categorized as model-based methods, exhibit markedly superior sample efficiency in easy tasks when compared to model-free baselines. Furthermore, MAZero displays a more stable training curve and smoother win rate during evaluation than MAMBA. In the realm of hard tasks, MAZero surpasses MAMBA in terms of overall performance, with a noteworthy emphasis on the \textit{2c\_vs\_64zg} scenario. In this particular scenario, MAZero attains a higher win rate with a significantly reduced sample size when contrasted with other methods. This scenario involves a unique property, featuring only two agents and an expansive action space of up to 70 for each agent, in contrast to other scenarios where the agent's action space is generally fewer than 20. This distinctive characteristic enhances the role of planning in MAZero components, similar to MuZero's outstanding performance in the domain of Go.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{figs/smac_timecost.pdf}
+    \caption{Comparisons against MBRL baselines in SMAC. The y-axis denotes the win rate, and the X-axis denotes the cumulative run time of algorithms in the same platform.}
+    \label{fig:smac_timecost}
+\end{figure}
+
+As MAZero builds upon the MuZero framework, we perform end-to-end training directly using planning results from the replay buffer. Consequently, this approach circumvents the time overhead for data augmentation, as seen in Dreamer-based methods. \Cref{fig:smac_timecost} illustrates the superior performance of MAZero with respect to the temporal cost in SMAC environments when compared to MAMBA.
+
+\subsection{Ablation}
+
+We perform several ablation experiments on the two proposed techniques: OS($\lambda$) and AWPO. The results with algorithms executed with three random seeds are reported in \Cref{fig:smac_ablation_planning}. In particular, we examine whether disabling OS($\lambda$), AWPO, or both of them (i.e., using original Sampled MCTS and BC loss function) impairs final performance. Significantly, both techniques greatly impact final performance and learning efficiency.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figs/smac_ablation_planning.pdf}
+    \caption{Ablation study on proposed approaches for planning.}
+    \label{fig:smac_ablation_planning}
+\end{figure}
+
+In our ablation of the MAZero network structure (\Cref{fig:smac_ablation_network}), we have discerned the substantial impact of two components, ``communication" and ``sharing", on algorithmic performance. In stark contrast, the flattened model employed in single-agent MBRL, due to its failure to encapsulate the unique biases of multi-agent environments, can only learn victorious strategies in the most rudimentary of scenarios, such as the \textit{2m\_vs\_1z} map.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{figs/smac_ablation_network.pdf}
+    \caption{Ablation study on network structure.}
+    \label{fig:smac_ablation_network}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+In this paper, we introduce a model-based multi-agent algorithm, MAZero, which utilizes the CTDE framework and MCTS planning. This approach boasts superior sample efficiency compared to state-of-the-art model-free methods and provides comparable or better performance than existing model-based methods in terms of both sample and computational efficiency. We also develop two novel approaches, OS($\lambda$) and AWPO, to improve search efficiency in vast action spaces based on sampled MCTS. In the future, we aim to address this issue through reducing the dimensionality of the action space in search, such as action representation.
+
+
+
+\section{Reproducibility}
+
+
+We ensure the reproducibility of our research by providing comprehensive information and resources that allow others to replicate our findings.
+All experimental settings in this paper are available in \Cref{app:expr-detail}, including details on environmental setup, network structure, training procedures, hyperparameters, and more.
+The source code utilized in our experiments along with clear instructions on how to reproduce our results will be made available upon finalization of the camera-ready version.
+The benchmark employed in this investigation is either publicly accessible or can be obtained by contacting the appropriate data providers.
+Additionally, detailed derivations for our theoretical claims can be found in \Cref{app:awpo-derivation}.
+We are dedicated to addressing any concerns or inquiries related to reproducibility and are open to collaborating with others to further validate and verify our findings.
+
+
+

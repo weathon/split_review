@@ -1,0 +1,290 @@
+\title{Compositional simulation-based inference for time series}
+
+\begin{abstract}
+
+Amortized simulation-based inference (SBI) methods train neural networks on simulated data to perform Bayesian inference. While this approach avoids the need for tractable likelihoods, it often requires a large number of simulations and has been challenging to scale to time-series data. Scientific simulators frequently emulate real-world dynamics through thousands of single-state transitions over time. We propose an SBI framework that can exploit such Markovian simulators by locally identifying parameters consistent with individual state transitions. We then compose these local results to obtain a posterior over parameters that align with the entire time series observation. We focus on applying this approach to neural posterior score estimation but also show how it can be applied, e.g., to neural likelihood (ratio) estimation. We demonstrate that our approach is more simulation-efficient than directly estimating the global posterior on several synthetic benchmark tasks and simulators used in ecology and epidemiology. Finally, we validate scalability and simulation efficiency of our approach by applying it to a high-dimensional Kolmogorov flow simulator with around one million dimensions in the data domain.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Numerical simulations are a central approach for tackling problems in a wide range of scientific and engineering disciplines, including physics~\citep{brehmer2020simulation-based, dax2021gravitational}, molecular dynamics \citep{HollingsworthScottA.2018MDSf}, neuroscience~\citep{gonccalves2020training} and climate science~\citep{watson-parris2021model}.
+Simulators often include at least some parameters that cannot be measured experimentally. Inferring such parameters from observed data is a fundamental challenge.
+Bayesian inference provides a principled approach to identifying parameters that align with empirical observations. Standard algorithms for Bayesian inference, such as Markov Chain Monte Carlo (MCMC)~\citep{gilks1995markov} and variational inference~\citep{beal2003}, generally require access to the likelihoods $p(\vx|\vtheta)$.  However, for many simulators, directly \emph{evaluating} the likelihood remains intractable, rendering conventional Bayesian approaches inapplicable. However, \emph{generating} synthetic data $\vx \sim p(\vx|\vtheta)$ is feasible for numerical simulators. Simulation-based inference (SBI) methods offer a powerful alternative to perform Bayesian inference for such simulator models with intractable likelihoods~\citep{cranmer2020frontier}.
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig1.pdf}
+    \caption{\textbf{Illustrative figure of the methodology:} Factorized Neural Score Estimation (FNSE) method. Here, $a$ denotes the diffusion time, and $\vtheta_a$ is the associated noisy parameter. The training process involves single-state transitions starting from arbitrary proposal $\tilde{p} (\vx^t)$, with different parameters sampled from a prior distribution. During inference, the time series is divided into 
+    single state transitions, 
+    and each 
+    state transition
+    is evaluated by the neural network to estimate local posterior scores. These local estimates are then aggregated to form a global approximation, which is subsequently used to sample from the overall posterior distribution.}
+    \label{fig:fig1}
+\end{figure}
+Classical SBI methods, such as Approximate Bayesian Computation (ABC)~\citep{beaumont2002approximate} and synthetic likelihoods~\citep{wood2010statistical}, struggle to effectively scale to high-dimensional simulations. To address this, 
+SBI methods using neural networks have been developed, which train networks to represent likelihoods~\citep{papamakarios2019sequential, gloeckler2022variational, boelts2022flexible}, likelihood ratios~\citep{durkan2020contrastive,hermans2020likelihood, hermans2022a, miller2022contrastive}, posteriors~\citep{papamakarios2016fast, lueckmann2017flexible, greenberg2019automatic, deistler2022truncated, geffner2023compositional, dax2023flow,sharrock2024sequential} or target several properties at once  \citep{radev2023jana, gloeckler2024all-in-one}. These methods allow for parameter inference without requiring additional simulations after training, making them more efficient than traditional approaches~\citep {lueckmann2021benchmarking}: they effectively \textit{amortize} the cost of the simulation, and/or the full inference approach. %Bayesian inference (or simulation when using likelihood(-ratios)).
+However, applying these neural amortized methods to time series simulations can be challenging due to the high computational cost of repeated simulator calls. Running numerous time series simulations---possibly with varying sequence lengths---can be computationally prohibitive or at least wasteful. Instead, it seems advantageous to exploit the temporal structure of these simulators. For example, many scientific simulators are based on solving (stochastic) differential equations that model real-world time series dynamics through state transitions over time. Consequently, many time series simulators have an inherently Markovian structure, which can be leveraged for efficient inference. In particular, we can tackle the problem on the level of single-state transitions, a simpler task, that can be tackled with fewer simulations.
+
+
+In this work, we propose a framework for efficient simulation-based inference for Markovian time series simulators. Unlike other neural SBI methods that require long sequences for training, our approach 
+locally estimates parameters consistent with a single state transition. By aggregating these local solutions, we recover the global posterior for time series of arbitrary length, significantly reducing simulation costs (Fig.~\ref{fig:fig1}). In this work, we focus on applying this framework to posterior score-based approaches and additionally apply it to likelihood(-ratio) estimation methods.  A related challenge has been addressed in prior work ~\citep{geffner2023compositional, linhart2024diffusionposteriorsamplingsimulationbased, boelts2022flexible} which has focused on efficient inference on i.i.d. (independently and identically distributed) observations.  We empirically evaluate our approach on a series of synthetic benchmark tasks, as well as simulators from ecology and epidemiology. Finally, we demonstrate the superior performance of this approach on high-dimensional tasks, such as the Kolmogorov flow problem, with improved simulation efficiency and scalability.
+
+
+\section{Preliminaries}
+
+ 
+
+\subsection{Problem setting}
+
+We target simulators $p(\vx^{0:T} | \vtheta)$ that output time series $\vx^{0:T} := (\vx^0, ..., \vx^T) \in \mathbb{R}^{T \times d}$. Many simulators in scientific fields are implemented using (stochastic) differential equations, which inherently satisfy the Markov property. We focus on this class of simulators, where the likelihood takes the following form
+\begin{equation}
+ p(\vx^{0:T} | \vtheta) = p(\vx^{0} | \vtheta) \prod_{t=0}^{T-1} p(\vx^{t+1} | \vx^{t} , \vtheta).
+ \label{eq:markov}
+\end{equation}
+To simplify the exposition, we constrain the initial condition to be independent of the parameter,  $p(\vx^0|\vtheta) = p(\vx^0)$, and assume that the simulation transition $p(\vx^{t+1} | \vx^t, \vtheta)$ does not depend on time $t$. We assume one can sample from the state-transition function $\vx^{t+1} \sim \mathcal{T}(\vx^{t+1}|\vx^{t}, \vtheta)$, but not to its probability density. 
+
+
+\subsection{Amortized methods for simulation-based inference}\label{subsec_amortizedSBI}
+\textbf{Neural Posterior Estimation (NPE):} Neural Posterior Estimation (NPE; \citep{papamakarios2016fast, lueckmann2017flexible, greenberg2019automatic, dax2023flow}) methods typically use a conditional neural density estimator, e.g., a normalizing flow~\citep{rezende2015variational,papamakarios2017masked, durkan2019neural} to approximate the target posterior distribution. The model $ q_\phi(\vtheta | \vx^{0:T}) $  is trained via maximum likelihood to estimate $ p(\vtheta | \vx^{0:T})$  from a dataset of parameter-data pairs $ \{(\vtheta_i, \vx_i^{0:T})\}_{i=1} $, where $(\vtheta_i , \vx_i^{0:T}) \sim p(\vtheta)p(\vx^{0:T}|\vtheta) $. 
+For observations of inhomogeneous size, NPE often incorporates an embedding network.
+Embedding networks can be designed as recurrent networks~\citep{lueckmann2017flexible}, permutation-invariant architectures~\citep{chan2018exchangable, radev2020bayesflow},  or attention-based models~\citep{schmitt2023fuse} to respect known invariances in the data.
+At inference time, NPE yields an amortized approximation of the posterior for any observation $\vx_o^{0:T}$ therefore offering rapid evaluations or samples of the posterior. %sampling within milliseconds. %Yet, any deviation from the prespecified amortization objective is nontrivial and usually costly.
+\textbf{Neural likelihood(-ratio) estimation (NLE, NRE):}
+Neural Likelihood(-Ratio) Estimation (NLE~\citep{papamakarios2019sequential}, NRE~\citep{hermans2020likelihood, hermans2022a, miller2022contrastive}) methods do not directly approximate the posterior distribution but instead train a surrogate $q_\psi(\vx_i^{0:T}|\vtheta)$ for the likelihood $p(\vx_i^{0:T}|\vtheta)$ or likelihood ratio $p(\vx_i^{0:T}|\vtheta)/p(\vx_i^{0:T})$. Once the likelihood is accessible via the surrogate, standard techniques such as MCMC or variational inference can be applied to perform inference. These approacehs circumvent the problem of not having access to the likelihood, but still leaves us with the drawbacks of standard inference methods, i.e., slow sampling and potential failure modes such as robustly handling multimodality~\citep{gloeckler2022variational}. Nonetheless, they also inherit the flexibility of standard inference techniques, such as the ability to handle multiple independent  (or conditionally independent)  observations by simply multiplying the likelihood terms~\citep{boelts2022flexible}.
+
+\textbf{Neural score estimation (NSE):} Score-based diffusion models are a powerful tool for generating samples from a target distribution. Common diffusion models~\citep{song2020generative, song2020score, ho2020denoising} are based on stochastic differential equations (SDEs) that can be expressed as $d \vtheta_a  = f(a) \vtheta_a da + g(a) d \bm{w}\footnote{The diffusion time is denoted by $a$,  against convention, to distinguish it from $t$ in the time series.}$ with $\bm{w}$ being a standard Wiener process. The drift and diffusion coefficients $f$ and $g$ are chosen such that the solution to this SDE defines a diffusion process that transforms any initial distribution into a simple noise distribution $p_A(\vtheta_A)=\mathcal{N}(\vtheta_A,\mu_A, \sigma_A^2I)$. Samples from any target, such as the posterior $p(\vtheta|\vx^{0:T})$, can then be obtained by simulating the reverse diffusion process~\citep{anderson1982reverse}
+\begin{equation}
+    d \vtheta_a  = \left\{  f(a) - g^2 (a) \cdot \nabla_{\vtheta_a} \log p(\vtheta_a|\vx^{0:T})  \right\} da + g(a) d \bm{\tilde{w}},
+     \label{eq:backward_sde}
+\end{equation}
+where $\bm{\tilde{w}}$ is a backward-in-time Wiener process. In practice, we can not access the analytic form of the score $s(\vtheta_a|\vx^{0:T}) = \nabla_{\vtheta_a} \log p(\vtheta_a|\vx^{0:T})$, but we can estimate it from samples using conditional denoising score-matching ~\citep{hyvarinen2005estimation,song2020score}
+$$ \mathcal{L}(\phi) = \mathbb{E}_{a,\vtheta, \vtheta_a,\vx^{0:T}}\left[ \lambda(a)||s_\phi(\vtheta_a|\vx^{0:T}) - \nabla_{\vtheta_a} \log p(\vtheta_a|\vtheta)||_2^2 \right] $$
+where $\lambda$ denotes a positive weighting function and $ p(\vtheta_a|\vtheta) = \mathcal{N}(\vtheta_a;s(a)\vtheta,\sigma(a)^2 \mI)$.
+
+This recently proposed approach has been highly successful across various tasks~\citep{geffner2023compositional,dax2023flow, sharrock2024sequential, gloeckler2024all-in-one}. It offers a trade-off between the efficiency of the static NPE method and the flexibility of slower but more flexible NL(R)E method. By enabling feasible post-hoc modifications and composability through appropriate adjustments to the backward diffusion process, it bridges the gap between these two approaches~\citep{geffner2023compositional,gloeckler2024all-in-one}.
+
+\begin{figure}[tp]
+\centering
+\begin{minipage}{0.45\textwidth}
+\begin{algorithm}[H]
+\caption{Training}
+\label{alg:training}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} prior $p(\vtheta)$, proposal $\tilde{p}(\vx^t)$, transition function $\mathcal{T}(\vx^{t+1}|\vx^t,\vtheta)$, score net $s_\phi$.
+\STATE $\mathcal{D} = \emptyset$ \quad // Generate training dataset
+\FOR{$i = 1$ to $N$}
+    \STATE $\vtheta_i \sim p(\vtheta)$; \quad $\vx^t_i \sim \tilde{p}(\vx^t)$
+    \STATE $\vx^{t+1}_i \sim \mathcal{T}(\vx^{t+1}|\vx^t_i, \vtheta_i)$
+    \STATE $\mathcal{D} = \mathcal{D} \cup \{(\vtheta_i, \vx^t_i, \vx^{t+1}_i)\}$
+\ENDFOR
+\STATE Train $s_\phi$ by minimizing Eq. \ref{eq:loss} using $\mathcal{D}$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.45\textwidth}
+\begin{algorithm}[H]
+\caption{Evaluation}
+\label{alg:evaluation}
+\begin{algorithmic}[1]
+    \STATE \textbf{Input:} prior $p(\vtheta)$, observation $\vx_o^{0:T}$, \texttt{compose} method (see Sec. \ref{sec:local_score_composition}). 
+    \STATE
+    \STATE \textbf{def }$s_{\text{glob}}(\vtheta_a, \vx_o^{0:T})$:
+    \STATE \quad $s_{\text{local}}$ = []
+    \STATE \quad \textbf{for} $t=0$ to $T$ \textbf{do}
+    \STATE \quad \quad $s_{\text{local}}$ += [$s_\phi(\vtheta_a, \vx_o^{t,t+1})$]
+    \STATE \quad $s_{\text{glob}} = $\texttt{compose}($s_{\text{local}}, p(\vtheta)$)
+    \STATE \quad \textbf{return} $s_{\text{glob}}$
+    \STATE Sample $p(\vtheta|\vx_o^{0:T})$ via $s_{\text{glob}}$
+
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\label{fig:training_evaluation}
+\end{figure}
+
+
+
+\section{Methods}
+
+
+
+
+\subsection{Global solution from single-step transitions}
+
+Direct estimation of the global target distribution ($p(\vtheta|\vx^{0:T
+})$ in NPE or $p(\vx^{0:T
+} | \vtheta)$ in NLE; Sec.~\ref{subsec_amortizedSBI}) often requires a large number of simulations of entire time series, leading to high computational costs. We mitigate the problem of expensive simulation calls by leveraging the Markov factorization in Equation~\ref{eq:markov}. 
+
+Since the transition probability $p(\vx^{t+1} | \vx^t, \vtheta)$ encapsulates all relevant information about the parameters, we expect that, given sufficiently many single-step transitions, it should be possible to infer the global target from observations of arbitrary time lengths. Building on this insight, we propose a general framework that focuses on solving the local inverse problem. In this framework, we aim to estimate a local target $s_{\text{local}}$ using single-step transition simulation data  $\mathcal{D} = \{(\theta_i, \mathbf{x}_i^{t:t+1})\}_{i=1}$ (Alg.~\ref{alg:training}). Afterward, we estimate a global target by aggregating these local solutions (Alg.~\ref{alg:evaluation}), using a composition rule (\texttt{compose}, Sec.~\ref{sec:local_score_composition}). In the following, we apply the framework to NSE, NLE, and NRE. 
+
+
+\subsection{Factorized neural score estimation (FNSE)}
+
+\subsubsection{Local score estimation}
+Assuming that $p(\vx^{0:T}|\vtheta)$ satisfies Eq.~\ref{eq:markov} and $p(\vx^0|\vtheta) = p(\vx^0)$, the global target $\nabla_\vtheta  \log p(\vtheta|\vx^{0:T})$ in NSE can be factorized as 
+\begin{equation}\label{eq:score_decompostion_main}
+\nabla_{\vtheta} \log p(\vtheta | \vx^{0:T}_o) =  \sum_{t=0}^{T-1}  \nabla_{\vtheta} \log \tilde{p} (\vtheta |  \vx^t_o, \vx^{t+1}_o) -  (T -1 ) \cdot  \nabla_{\vtheta} \log p (\vtheta ).
+\end{equation}
+
+The factorization (\ref{eq:score_decompostion_main}) implies that global posterior is fully characterized by  $s(\vtheta|\vx^t, \vx^{t+1}) = \nabla_{\theta} \log \tilde{p} (\vtheta |  \vx^t, \vx^{t+1})$. We can aim to estimate this quantity using only single-state transitions by minimizing the following loss
+\begin{equation}
+  \mathcal{L}(\phi) =  \mathbb{E}_{a, \vtheta, \vtheta_a, \vx^t, \vx^{t+1}}\left[\lambda(a)  ||s_\phi(\vtheta_a|\vx^t, \vx^{t+1}) - \nabla_{\vtheta_a}\log p(\vtheta_a|\vtheta)||_2^2\right]
+    \label{eq:loss}
+\end{equation}
+given any proposal distribution $\vx^t \sim \tilde{p}(\vx^t)$. 
+Consequently, we can learn a \textit{local} score estimator, as outlined in Alg.~\ref{alg:training}, by empirically minimizing this loss given a dataset of single-step simulations.
+
+There is lots of flexibility in the choice of the proposal distribution $\tilde{p}(\vx^t)$ in theory. The only requirement is that the proposed state must be independent of the parameters involved in the current state transition being emulated (see Alg.~\ref{alg:training} line 4, Sec.
+However, this choice can have significant practical implications given a finite simulation budget, as further investigated in Sec.~\ref{sec:results}. In particular, this choice makes it possible to allocate simulation resources to inference questions of interest. For instance, if the goal is to perform inference on a predefined set of observations, the proposal can be tailored to predominantly sample values from this set. In general, however, designing a good proposal can be challenging.
+
+\citet{geffner2023compositional} also proposed a score factorization in the i.i.d.~setting to handle data-sets with  multiple \emph{independent} observations. 
+The factorization (\ref{eq:score_decompostion_main})
+can be regarded as an extension of this factorization from the i.i.d.~case to the Markov setting.
+\subsubsection{Local score composition}\label{subsec:local_score_aggre}
+\label{sec:local_score_composition}
+At inference time, we have to approximate $s_{\text{glob}}(\vtheta_a, \vx_o^{0:T}) = \nabla_{\vtheta_a} \log p(\vtheta_a|\vx_o^{0:T})$, by composing all local scores estimated by the network (Algorithm~\ref{alg:evaluation} the \texttt{compose} function). In the end, $s_{\text{glob}}$ will be passed to a diffusion sampler to obtain samples from the global posterior $p(\vtheta|\vx_o^{0:T})$. 
+Unfortunately, $p(\vx^{0:T} | \vtheta_a) = \int p(\vx^{0:T} | \vtheta ) p(\vtheta |\vtheta_a ) d\vtheta$  no longer satisfies the Markov property, even when $p(\vx^{0:T} | \vtheta )$ does~\citep{weilbach2023graphically, gloeckler2024all-in-one, geffner2023compositional, rozet2023scorebased}. This renders 
+Eq.~\ref{eq:score_decompostion_main} invalid for any $a > 0$, requiring some corrections. 
+This issue has been addressed in the i.i.d.~setting by \citet{geffner2023compositional} (referred to as FNPE) and \citet{linhart2024diffusionposteriorsamplingsimulationbased} (referred to as GAUSS/JAC), and we will adapt their approach to the Markov setting.
+\textbf{FNPE: } \citet{geffner2023compositional} avoids the issue by constructing an alternative sequence of distributions $q_a~(0 \leq a \leq A)$ that satisfies $q_0 = p(\vtheta|\vx^{0:T})$ and $q_{A} = \mathcal{N}(\vtheta;\mu_A, \frac{\sigma_{A}^2}{T}I)$. Adapting their proposal to the Markovian case, we obtain
+$$
+\nabla_{\vtheta_a} \log q(\vtheta_a | \vx^{0:T}) = \sum_{t=0}^{T-1} s_\phi(\vtheta_a | \vx^t,\vx^{t+1}) + \frac{(1 - T)(A - a)}{A} \nabla_\theta \log p(\vtheta).
+$$
+While this approach is generally applicable, it renders the backward SDE (Eq.~\ref{eq:backward_sde}) invalid as the marginals no longer follow the corresponding forward diffusion process. This requires the use of MCMC-based sampling corrections, such as unadjusted Langevin dynamics~\citep{geffner2023compositional} or similar approaches \citep{sjöberg2024mcmccorrectionscorebaseddiffusionmodels}.
+
+\textbf{GAUSS/JAC: }
+\citet{linhart2024diffusionposteriorsamplingsimulationbased} have recently proposed an alternative approach by approximating the marginal scores derived from the forward diffusion process. This enables the utilization of the reverse SDE and consequently allows for the application of standard diffusion-based sampling techniques. A second-order approximation (i.e. using Gaussian assumptions), suggests the approximation
+\begin{equation*}
+ \nabla_{\vtheta_a} \log p(\vtheta_a | \vx^{0:T}) \approx \mathbf{\Lambda}(\vtheta_a)^{-1} \left( \sum_{t=0}^{T-1} \mathbf{\Sigma}_{a,t,t+1}^{-1} s_\phi(\vtheta_a | \vx^t,\vx^{t+1}) + (1-T)   \mathbf{\Sigma}_{a}^{-1}\nabla_{\vtheta_a} \log p(\vtheta_a),  \right)
+\end{equation*}
+where $\mathbf{\Lambda}(\vtheta_a) = \sum_{t=0}^{T-1} \mathbf{\Sigma}_{a,t,t+1}^{-1} + (1-T) \mathbf{\Sigma}_{a}^{-1}$. 
+This approach requires specifying two "hyperparameters": the denoising prior and posterior precision matrices. The prior precision matrix is typically known analytically, along with the marginal prior score. In contrast, the denoising posterior precision matrix must be estimated. To address this, \textbf{GAUSS} assumes a Gaussian posterior and analytically computes the denoising posterior covariances. Alternatively, \textbf{JAC} iteratively estimates it using Tweedie's Moment projection~\citep{boys2024tweediemomentprojecteddiffusions}, leveraging the Jacobian of the score network. Furthermore, the above approximation is only valid if $\mathbf{\Lambda}$ is positive definite. Unlike~\citet{linhart2024diffusionposteriorsamplingsimulationbased}, who clip the diffusion process to a specific prior range to avoid numerical issues, we adapt all estimated posterior precision matrices to ensure positive definiteness of $\mathbf{\Lambda}$. This adaptation resolves the problem even for long time series (i.e. Unless otherwise specified, we use the GAUSS approximation as the default.
+
+
+
+\subsection{Factorized likelihood(-ratio) estimation (FNLE, FNRE)}
+
+For likelihood(-ratio) estimation, applying the approach outlined above is straightforward: by assumption, the likelihood factorizes as shown in Eq.~\ref{eq:markov}. Consequently, we can instead directly learn the transition density $p(\vx^{t+1}|\vx^{t},\vtheta)$, similarly to the method described in Alg.~\ref{alg:training}, by replacing the score matching loss with the appropriate likelihood (or likelihood-ratio) loss \citep{papamakarios2019sequential, hermans2020likelihood, hermans2022a, miller2022contrastive}.
+
+Once the transition density is obtained, the global log-likelihood approximation $\ell_{\text{glob}}$ can be computed directly from Eq.~\ref{eq:markov} (i.e., by simply summing up the local approximations). Classical MCMC techniques can be employed for sampling. We use reference implementations of NLE and NRE as implemented in the \textit{sbi} package ~\citep{tejerocantero2020sbi}, adapted to the Markovian setting. 
+
+
+
+
+\section{Empirical results}
+
+\label{sec:results}
+
+\subsection{Evaluation approach}
+We empirically assess the accuracy and computational efficiency of the proposed approach, comparing it against non-factorized NPE with an appropriately chosen embedding net as a baseline.  We note that the simulation budget is not determined by the number of simulator calls $N$, but rather by the number of calls to the state-transition function, i.e., $T \cdot N$. We, therefore, configure the NPE baseline with a $T_{\text{max}}=10$ steps, i.e., if the simulation budget is $10k$, the NPE baseline used $1000$ simulations, each of which is simulated for $10$ steps.We additionally use data augmentation by duplicating shortened variants ($T < T_{\text{max}}$) of these simulations. This is to help the RNN embedding net to generalize to different sequence lengths. To also amortize over different initial conditions, the initial condition for each ten-step simulation was drawn from the proposal also used in the factorized methods.
+
+As main metrics for comparison, we use sliced Wasserstein distance (sW$_1$) and Classifier two sample test accuracy (C2ST) on reference posterior samples~\citep{bischoffpractical, lopez2016revisiting, kolouri2019generalized}. We average the estimated value over a total of $10$ randomly drawn observations. The whole process, i.e., training, sampling, and evaluation, was repeated five times starting from different random seeds.
+
+We begin by evaluating the methods on a set of newly designed benchmark tasks for Markovian simulators (Sec. \ref{subsec:synthetic}). Next, we apply the approach to classical models from ecology and epidemiology, including the stochastic Lotka-Volterra and SIR models (Sec. \ref{subsec:lv_sir}). Finally, we demonstrate the scalability of the method on a large-scale Kolmogorov flow task, where we perform inference on very high-dimensional data using only 200k simulator steps (Sec. \ref{subsec:kolmogorov})
+
+\subsection{Benchmarks}
+\label{subsec:synthetic}
+
+\textbf{Gaussian RW:} A Gaussian Random Walk of form $\vx^{t+1} = \alpha \cdot \vx^t + \vtheta + \epsilon$ for $\epsilon \sim \mathcal{N}(0,\mI), \alpha < 1.$ with $\vx^t \in \mathbb{R}^d$ and $\vtheta \in \mathbb{R}^d$. This simple task offers an analytic Gaussian posterior. 
+
+\textbf{Mixture RW:} A Mixture of Gaussian Random Walk of form $\vx^{t+1} = \vx^t + u \cdot \theta + \epsilon$  for $\epsilon \sim \mathcal{N}(0,\mI), u \sim \text{Unif}(\{-1.,1.\})$ and $ \vx^t,\vtheta \in \mathbb{R}^d$. By design, this task has a mixture of Gaussian transition density and a non-Gaussian bimodal posterior.
+
+\textbf{Periodic/Linear SDE:} Both tasks can be formulated as linear stochastic differential equation $d\vx^t = \mA(\vtheta)\vx^t + \mB(\vtheta)d\vw^t$. The periodic SDE is nonlinearly parameterized $\mA$ to be oscillatory with $\vtheta, \vx^t \in \mathbb{R}^2$. This task has a posterior with four modes symmetric around the origin. The linear SDE task s every entry of $\mA$ and $\mB$ with $\vx^t \in \mathbb{R}^3$ and $\vtheta \in \mathbb{R}^{18}$.
+
+\textbf{Double well:} A nonlinear SDE $d\vx^t = \theta_1 \vx^t + \theta_2 \left( \vx^{t}  \right)^3 + \sigma d\vw^t$, which samples from a double-well potential with modes position depending on $\theta_1, \theta_2$ \citep{singer2002parameter, cai2023simulation}. 
+
+We first examine the scalability of all evaluated methods as a function of the length and dimensionality of the time series, while maintaining a fixed simulation budget. Specifically, we assess each method on the Gaussian random walk (RW) example in 1, 2, and 10 dimensions, using a total of 10k simulations (Fig.~\ref{fig:fig2}a). Both FNLE and FNSE demonstrate superior simulation efficiency compared to the NPE baselines. FNRE, however, appears to be more sensitive to local errors, with these errors accumulating over time, resulting in a consistent decline in performance for long time series. A similar observation and hypothesis was made by \citet{geffner2023compositional} for i.i.d. data. Interestingly, this effect is largely reduced in the FNLE approach, which was not part of their empirical analysis (but successfully applied by \citet{boelts2022flexible}). On the other hand, the computational cost escalates significantly on long time series, as evaluating the global likelihood requires $T$ forward passes for each iteration of MCMC sampling, making FNLE and FNRE relatively slow (especially NLE, as a forward pass through the normalizing flow in FNLE is more costly than the classifier used in FNRE, Fig.~\ref{fig:fig2}a). In contrast, the sampling cost for FSNE remains moderate due to its more efficient sampling method, while performance remains similar to or better than FNLE. 
+
+\begin{figure}[tp]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig2_swd.pdf}
+    \caption{\textbf{Benchmarks:} We validate our method on a Gaussian Random Walk with different dimensions for different lengths (i.e. Transitions), also tracking sampling times (\textbf{a}). We assess FNSE score accumulation over Gaussian RW and Periodic SDE tasks using a fixed Euler–Maruyama sampler (\textbf{b}). We compare methods across tasks and transition steps (\textbf{c}). Finally, we examine the effect of the proposal on NFSE trained with 10k simulations from a normal proposal of varying standard deviation (\textbf{d}).}
+    \label{fig:fig2}
+\end{figure}
+
+In contrast to FNLE and FNRE, FNSE can introduce errors when composing the local scores. Therefore, we investigate the scaling behavior of different score-composition techniques for long time series (Fig.~\ref{fig:fig2_swd}\textbf{b}). Previous work within the i.i.d case did not investigate performance beyond thirty samples~\citep {geffner2023compositional,linhart2024diffusionposteriorsamplingsimulationbased}. Specifically, for time series exceeding a length of $T > 100$, the FNPE method starts to become numerically unstable due to diverging trajectories. Although the assumptions of the GAUSS/JAC approximations are violated (as the Mixture RW has a non-Gaussian posterior), these methods still tend to perform well in practice in our implementation. Even when Langevin corrections~\citep{song2020score, geffner2023compositional} are introduced, the GAUSS and JAC method remain superior, especially for large $T$ (Fig.
+
+Next, we conducted benchmarks across several tasks. Overall, FNSE and FNLE show higher accuracy compared to FNRE and NPE in most tasks (Fig.~\ref{fig:fig2_swd}\textbf{c}). An exception is the double-well task, where NPE performs relatively well due to the SDE's rapid convergence to a stationary distribution, enabling the RNN to learn a generalizable summary statistic for inference. FNSE strongly outperforms other methods in cases of multimodal transition densities (e.g., Mixture RW) and performs comparably to likelihood-based approaches in simpler cases (e.g., Periodic/Linear SDE) even if the posterior is strongly multimodal (Periodic SDE). Learning from single-step transitions is an extreme end of a spectrum of possibilities. Overall, this could improve (e.g., Double Well), but it could also hurt (e.g., Mixture RW) performance relative to the NPE baseline.
+
+Finally, we investigate the impact of the proposal distribution, specifically for the FNSE method trained over 10k simulation steps (Fig.~\ref{fig:fig2}\textbf{d}, extended results in Fig. We use a Normal distribution centered at zero, adjusting its standard deviation ranging from $\sigma=0.1$ (too narrow) to $\sigma=1000$ (too wide). Our results indicate a relatively broad range of standard deviations that result in good performance. If the distribution is too narrow, the time series observation may reach values outside the training domain, while if it is too wide, it the model is trained on values not observed during evaluation.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/fig3.pdf}
+    \caption{\textbf{Lotka Volterra and SIR experiments :} The FNSE approximate posterior (predictive) of the best performing FNSE model using 100k transition steps to train, visualized on subsequences from a fixed observation and associated true parameter. (\textbf{a}, \textbf{b}). We then show the quantitative performance in terms of C2ST and sW$_1$ for each task on ten randomly selected observations, each run repeated five times (\textbf{c}, \textbf{d}).}
+    \label{fig:lv_sir}
+\end{figure}
+
+
+\subsection{Lotka Volterra and SIR}
+\label{subsec:lv_sir}
+
+To further evaluate our method, we tested it on two famous models from ecology and epidemiology: the Lotka-Volterra and Susceptible-Infected-Recovered (SIR) simulators. The Lotka-Volterra simulator models predator-prey dynamics through four parameters that govern prey and predator growth, hunting rates, and mortality. Populations evolve over time according to interconnected stochastic differential equations. The SIR (Susceptible-Infected-Recovered) simulator is a fundamental model for understanding infectious disease spread.
+
+We begin by demonstrating how the posteriors evolve as more time points are observed using the NFSE method (Fig.~\ref{fig:lv_sir}ab). In both tasks, we find that the posteriors converge to the true parameter values, and the posterior predictive simulations increasingly align with the time series observation. Notably, unlike in previous i.i.d.~scenarios~\citep{geffner2023compositional, linhart2024diffusionposteriorsamplingsimulationbased}, the posterior uncertainty about the parameters does not necessarily decrease as additional time points are included. This is particularly evident in the SIR task, where the posterior remains largely unchanged between $T=10$ and $T=100$ (Fig.~\ref{fig:lv_sir}b). This can be explained by the fact that the initial dynamics contain significant information about the parameters, while the later dynamics do not, i.e., the infected population consistently declines to zero, and the susceptible and recovered populations converge to steady-state values that are independent of the parameterization.
+
+We trained all methods on this task using $100k$ transition simulations. We then evaluate the accuracy of all models for performing inference on sequences of length $T=1,10, 100$. For both tasks we see that the factorized methods (except FNRE; in LV) generally outperform the NPE baseline (Fig.~\ref{fig:lv_sir}cd). NFSE, in particular, significantly outperforms any other approaches on the SIR task.
+
+
+\subsection{Kolmogorov flow}
+\label{subsec:kolmogorov}
+
+Finally, we consider a task with very high dimensional observations, previously considered in the context of data-assimilation~\citep{rozet2023scorebased}. The simulator models incompressible fluid dynamics governed by the Navier-Stokes equations:
+\begin{align*}
+    \frac{\partial \mathbf{u}}{\partial t} &= -\mathbf{u} \cdot \nabla \mathbf{u} + \frac{1}{\text{Re}} \nabla^2 \mathbf{u} - \frac{1}{\rho} \nabla p + \mathbf{f} \qquad \qquad
+    \nabla \cdot \mathbf{u} = 0,
+\end{align*}
+where $\mathbf{u}$ is the velocity field, $\text{Re}$ is the Reynolds number, $\rho$ is the fluid density, $p$ is the pressure field, and $\mathbf{f}$ is the external forcing. Following \citet{kochkov2021machine, rozet2023scorebased}, we consider a two-dimensional domain $[0, 2\pi]^2$ with periodic boundary conditions and an external forcing $\mathbf{f}$ that corresponds to Kolmogorov forcing with linear damping \cite{chandler2013invariant, boffetta2012two}. We take the Reynolds number and density as free parameters $\vtheta=(\text{Re}, \rho)$. We utilize the jax-cfd library \citep{kochkov2021machine} to solve the Navier-Stokes equations on a $64 \times 64$ grid. 
+
+In contrast to \citet{rozet2023scorebased}, we consider the problem of parameter inference on $\vtheta$. 
+We apply FNSE to this problem, using only \textit{200k transition evaluations}, which successfully recovers an amortized posterior estimator that generalizes to long-term observations (Fig.~\ref{fig:kolmogorov}). Notably, in such a high-dimensional state space, a simple proposal distribution would be ineffective. The posterior distributions for observations with both $T=10$ and $T=100$ are well-concentrated around the true parameter values that generated the specific observations (Fig.~\ref{fig:kolmogorov}a,b). Posterior predictive samples are, on average, significantly closer to the observed data compared to prior predictives (in mean absolute error calculated over 1000 predictive samples from 50 different observations). Although the difference is less pronounced for $T=100$, this is primarily due to the divergence for slight parameter modification on long simulations. To quantitatively further investigate the performance, we perform a simulation-based calibration analysis~\citep{talts2020validatingbayesianinferencealgorithms} (Fig. Overall, given the constraints on the simulation budget, the posterior calibration is good but deteriorates for larger time series.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig5.pdf}
+    \caption{\textbf{Kolmogorov flow experiment:}  Top row shows a single selected observation.   We visualize the posterior distribution considering (\textbf{a}, left top) only using the first ten transitions of the selected observation, along with a quantitative comparison of the mean absolute error (MAE) between posterior predictive samples and prior predictive samples of ten different observations (left, bottom), including the one shown above. The vorticity of two selected predictive samples is visualized on the right. This analysis is then repeated for the entire observation (\textbf{b}).}
+    \label{fig:kolmogorov}
+\end{figure}
+
+
+
+\section{Discussion}
+
+
+
+\subsection{Related Work}
+
+We build upon previous work in the i.i.d.~observation setting \citep{geffner2023compositional, linhart2024diffusionposteriorsamplingsimulationbased, boelts2022flexible}, extending these methods to Markovian time series. In the context of data assimilation, which aims to estimate \( p(\vx^{0:T}) \), \citet{rozet2023scorebased} introduced a technique for learning a \textit{local} score network that estimates the score of \( p(\vx^t) \) based on a limited neighborhood \( \vx^{t-k:t+k} \) (i.e., its Markov blanket). In contrast, our approach emphasizes identifying a \textit{local} inverse problem that can be composed to produce a global solution. Recently, a simulation-based conditional kernel density approximation for inference in SDEs was proposed \citep{cai2023simulation}, which can be viewed as a special case of FNLE, substituting normalizing flows with kernel density estimation. 
+
+Moreover, any Kalman filtering method \citep{kalman1960kalman, wan2000unscented, arasaratnam2009cubature, julier1997extended_kalman} is inherently related, as these methods can approximate the marginal log-likelihood in an online (non-amortized) manner, but do require the availability of likelihoods. 
+Finally, parameter inference for (stochastic) differential equations has been extensively studied across various fields, including numerical analysis \citep{Plessix2006reviewofadjoint} and probability theory \citep{Brouste2014YUIMAProject}, both of which rely on the explicit likelihood functions.
+
+
+
+
+
+
+
+
+
+
+\subsection{Limitations and Future Work}
+
+In this study, our primary focus is on time-invariant Markovian stochastic processes, with an extension to encompass time-varying cases and processes featuring parameterized initial distributions. We note that Hidden Markov Models, although widely applied in practical scenarios, do not fall within the scope of our method. 
+Various approaches are viable, particularly in combination with data assimilation techniques \citep{rozet2023scorebased} the Markovian hidden state is recovered to which our technique can be directly applied. Importantly, our approach applies to a broad spectrum of probabilistic models: first, identify a smaller inference problem from which the global target can be recovered; second, locally solve it. However, addressing these aspects remains a direction for future research. 
+
+The score corrections caused by score aggregation described in Subsection \ref{subsec:local_score_aggre} could be further improved. In their methods, \cite{linhart2024diffusionposteriorsamplingsimulationbased} approximates the data distribution by a single Gaussian distribution, which can be violated in real-world scenarios. Our results demonstrate that this approximation empirically still performs well even if these assumptions are strongly violated.
+
+  
+
+\subsection{Conclusions}
+We introduced a simulation-efficient framework for amortized inference in Markovian simulators. Although flexible embedding networks are commonly used for high-dimensional time series~\citep{lueckmann2017flexible, radev2020bayesflow, schmitt2023fuse}, they often demand extensive amounts of simulations and can be fragile when faced with data perturbations~\citep{cannon2022investigatingimpactmodelmisspecification,gloeckler2023adversarialrobustnessamortizedbayesian}. Success in these methods hinges on the embedding network's ability to capture robust and generalizable representations. In contrast, our approach decomposes the inference task into smaller, locally solvable problems, reducing computational costs and enhancing scalability for large-scale, complex simulations. 
+
+
+
+

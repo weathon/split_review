@@ -1,0 +1,272 @@
+\title{Variational Best-of-N Alignment}
+
+\begin{abstract}
+\beston (\bon) is a popular and effective algorithm for aligning language models to human preferences.
+The algorithm works as follows: at inference time, $N$ samples are drawn from the language model, and the sample with the highest reward, as judged by a reward model, is returned as the output. 
+Despite its effectiveness, \bon is computationally expensive; it reduces sampling throughput by a factor of $N$. 
+To make \bon more efficient at inference time, one strategy is to fine-tune the language model to mimic what \bon does during inference. 
+To achieve this, we derive the distribution induced by the \bon algorithm. 
+We then propose to fine-tune the language model to minimize backward KL divergence to the \bon distribution.
+Our approach is analogous to mean-field variational inference and, thus, we term it variational \bon (\vbon).
+To the extent this fine-tuning is successful and we end up with a good approximation, we have reduced the inference cost by a factor of $N$. 
+Our experiments on a controlled generation task suggest that while variational \bon is not as effective as \bon in aligning language models, it is close to \bon performance as \vbon appears more often on the Pareto frontier of reward and KL divergence compared to models trained with KL-constrained RL objective.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Language models are pre-trained on large corpora to model a distribution over natural language text.\footnote{Many language models are also used to model text in non-natural languages, e.g., programming languages.}
+Beyond their initial pre-training, they are often additionally fine-tuned on domain-specific data through a process called \defn{supervised fine-tuning (SFT)}.
+The goal of SFT is to enable the model to better perform various downstream tasks of interest. 
+While the fine-tuned model, called the \defn{reference model} in our paper, is indeed typically much better at performing the downstream task of interest, e.g., dialogue generation or summarization, it may still generate undesirable content, e.g., harmful or offensive text.
+To mitigate this issue, \defn{aligning} the reference model to human preferences has become a fundamental step in the development of modern large language models \citep{llama2, gpt4, gemini}. 
+
+The degree to which text is aligned with human preferences is typically operationalized using a real-valued reward function. 
+Rather than constructing a reward function by hand, it is typically estimated from a dataset of human preferences.\footnote{In some cases, the reward model is not estimated from human preference data. It is either known, e.g., code-based execution scores, or given by a classifier, e.g., toxicity or sentiment classifiers.}
+And, after estimation, we expect the reward function to return higher values for text that is more likely to be preferred by humans, and lower values for text that is more likely to be dispreferred.
+Then, given an estimated reward function, an alignment algorithm further alters the reference models in a manner such that it places the highest probability on that text that is high reward under the reward model \emph{and} high probability under the reference model.\looseness=-1
+Alignment algorithms can be taxonomized into two groups: (i) alignment via fine-tuning, where we change the language model's parameters to achieve alignment \citep{rlhf, dpo}, and (ii) alignment through inference \citep{webgpt, mudgal2024controlled}. 
+A common alignment-via-fine-tuning method is reinforcement learning from human feedback \citep[RLHF;][]{rlhf, summarizehf, instructgpt}.
+RLHF typically consists of further fine-tuning the language model under a \defn{KL-constrained RL objective}, which is made up of two terms: a term that encourages the model to maximize the reward, and a term that discourages high KL divergence between the language model and the reference model.
+This objective is often maximized with an RL algorithm, e.g., proximal policy optimization \citep[PPO;][]{ppo}.
+A common alignment through inference is the \beston \citep[Bo$N$;][]{webgpt, llama2} algorithm.
+As such, it does \emph{not} require any fine-tuning of the language model.
+The algorithm is straightforward: One draws $N$ samples from the reference model and returns the text that achieves the highest reward among those $N$ samples. 
+The \bon algorithm has also been effectively applied in controlled decoding \citep{fudge, mudgal2024controlled} and to generate a dataset for supervised fine-tuning \citep{llama2}.\looseness=-1
+
+Despite its simplicity, \bon has proven incredibly practical in generating high-reward text that still has high probability under the reference model. 
+Theoretically, \citet{yang2024asymptotics} prove that under some simplifying assumptions, the \bon distribution is asymptotically equivalent to the optimal distribution under the KL-constrained RL objective. 
+Empirically, it has been repeatedly shown \citep{pmlr-v202-gao23h, dpo, mudgal2024controlled} that \bon often appears on the frontier of reward and KL curves, surpassing the performance of models fine-tuned with RLHF.
+However, the main factor preventing \bon from replacing fine-tuning methods for alignment is its significant computational overhead during inference. 
+Even when sampling is done in parallel, \bon decreases the text generation throughput by a factor of $N$. 
+This drawback limits its practicality for generating text from large language models.\looseness=-1
+
+To speed up \bon, we devise a scheme to convert it into an alignment-via-fine-tuning algorithm rather than an alignment-via-inference algorithm. 
+To this end, we first formally derive the probability distribution induced by the \bon algorithm. 
+Then, we approximate this distribution by minimizing the reverse KL divergence between the language model and the \bon distribution. This leads to an optimization objective that we refer to as the \vbon objective. By analyzing a lower bound of this objective, we find that it behaves similarly to the KL-regularization objective in the limit, i.e., $N \rightarrow 1$ or $N \rightarrow \infty$. Importantly, the \vbon objective has a unique and useful property: it is insensitive to applying any monotonically increasing function to the reward values. This distinctive feature, along with the empirical success of the \bon algorithm, suggests that the \vbon objective is a promising and interesting objective to explore.
+Finally, we fine-tune the language model using PPO to optimize the \vbon objective. 
+Our scheme allows us to achieve performance close to that of the \bon algorithm while increasing the inference throughput by a factor of $N$.\looseness=-1
+
+We experiment with our method in a controlled generation task, generating movie reviews with positive sentiment, and consider a binary sentiment classifier as the reward model.
+We compare our method, which we term as variational \bon (\vbon), against models fine-tuned with the KL-constrained RL objective.
+Our results suggest that models fine-tuned with the \vbon objective are most likely to generate movie reviews with positive sentiment. 
+Additionally, these models deviate less from the reference model than those fine-tuned with KL-constrained RL objectives.
+
+
+
+\section{Background: Reinforcement Learning from Human Feedback}
+
+Let $\alphabet$ be an \defn{alphabet}, a finite, non-empty set of symbols.
+A \defn{string} is a finite sequence of symbols drawn from $\alphabet$.
+A \defn{language model} is a distribution over strings $\str \in \alphabet^*$, where $\alphabet^*$ is the set of all strings over the alphabet $\alphabet$. 
+In this paper, we consider language models, e.g., those based on neural networks, that are parameterized by a real vector $\btheta \in \params$, denoted as $\policy$.
+Furthermore, we restrict ourselves to language models that are differentiable functions of $\btheta$.
+In conditional generation tasks, e.g., summarization or dialogue generation, it is desirable to prompt the language model with a string $\prompt \in \alphabet^*$. 
+Consequently, we consider prompted language models, i.e., those that give a conditional distribution over response strings $\str$, given a prompt string $\prompt$, as $\policy(\str \mid \prompt)$.  However, for notational convenience, we will drop the explicit conditioning on the prompt $\prompt$ and simply write $\policy(\str)$.
+
+Algorithms for RLHF fine-tune the language model to increase the expected reward of the strings sampled from it while not diverging too far from the reference model. 
+RLHF consists of three steps. 
+First, the language model is fine-tuned on a task-specific dataset using the maximum-likelihood objective. 
+Recall we term the language model after this step the reference model and show that with $\pzero$. 
+Next, a \defn{reward model} $\reward \colon \alphabet^* \rightarrow \R$ is trained to capture human preferences; the reward of a string is high if it is preferred by humans. Finally, the reference model is fine-tuned to maximize the KL-constrained RL objective,
+\begin{align} \label{eq:rlobj}
+    \rlobj(\btheta) = \E_{\str \sim   \policy}\Big[ \reward(\str) \Big] 
+    - \beta\, \kl\big(\policy \, \| \, \pzero\big), 
+\end{align}
+where $\kl(\cdot)$ is the KL divergence between two distribution. This objective encourages the model to put more probability mass on strings that have high rewards under the reward model while penalizing it not to deviate too far from the reference model. \citet{levine2018reinforcement} show that the optimal probability distribution that maximizes this objective is
+\begin{align} \label{eq:rlopt}
+    \polstar(\str) = \frac{1}{Z}\, \pzero(\str) \exp \Big( \frac{1}{\beta} r(\str) \Big), \quad  Z = \sum_{\str \in \alphabet^*} \pzero(\str) \exp \Big( \frac{1}{\beta} r(\str) \Big).
+\end{align}
+$\polstar$ is simply the reference model reweighted by the exponent of reward values and normalized by the partition function $Z$. 
+Notably, we can not directly sample from $\polstar$ because the partition function $Z$ may be difficult to compute---it involves an infinite sum after all.  
+However, a heuristic approach to sampling from $\polstar$ would be to sample many strings from $\pzero$ and only keep those that have high rewards. 
+Indeed, this heuristic is the motivation behind the \bon algorithm.\looseness=-1
+
+
+
+\section{Deriving the \beston Objective}
+
+\beston algorithm is a simple alignment-via-inference algorithm.
+The algorithm works as follows. 
+Let $Y_N = \{\str^{(n)}\}_{n=1}^N$ be the multi-set containing $N$ i.i.d samples from $\pzero$. 
+Then, \bon algorithm returns $\str^{\star}$, where\footnote{We assume that the $\argmax$ is unique, or ties are broken in a well-defined manner.}
+\begin{equation}
+    \str^{\star} = \argmax_{\str^{(n)} \in Y_N} \reward(\str^{(n)}).
+\end{equation}
+
+We show the probability distribution induced from \bon sampling algorithm with $\bonpolicy$. 
+Importantly, $\bonpolicy$ is \emph{not} the optimal distribution under \Cref{eq:rlobj}, the KL-constrained RL objective.\footnote{Under some simplifying assumptions, however,  \citet{yang2024asymptotics} show that $\bonpolicy$ is asymptotically equal to $\polstar$.}
+Nevertheless, the \bon algorithm often performs well---even compared to RLHF-based methods. 
+This raises the question: under what optimization objective is $\bonpolicy$ the optimal distribution? 
+To derive such an objective, we begin by computing the probability of strings under $\bonpolicy$.  
+\begin{restatable}{proposition}{bondist}\label{proposition:bondist}
+Suppose $\reward \colon \alphabet^* \rightarrow \R$ is a one-to-one mapping.
+Then, the probability that a string $\str \sim \bonpolicy$ is given by
+\begin{equation} \label{eq:bonprob}
+    \bonpolicy(\str) = \sum_{i=1}^N {N \choose i} \cdf\big(\reward(\str)\big)^{N-i} \pzero(\str)^i,
+\end{equation}
+where we define $\cdf(R)$ as
+\begin{equation} \label{eq:fdef}
+    \cdf(R) \defeq \prob\left(\reward(\str) < R\right).
+\end{equation}
+\end{restatable}
+\begin{proof}
+    See \Cref{sec:bondist}.
+\end{proof}
+We now describe how to fine-tune the language model to approximate $\bonpolicy$ by minimizing the reverse KL divergence between $\policy$ and $\bonpolicy$. Concretely, we maximize the following objective:
+\begin{align}
+    \bonobj(\btheta) = - \kl \big(\policy \mid\mid \bonpolicy \big) &= \E_{\str \sim \policy} \Big[\log \bonpolicy(\str) - \log \policy(\str) \Big] \nonumber \\
+    &= \E_{\str \sim \policy} \Big[\log \bonpolicy(\str)\Big] + \entropy\big(\policy\big) \nonumber \\
+    &=\E_{\str \sim \policy} \Big[\log \sum_{i=1}^N {N \choose i} \cdf\big(\reward(\str)\big)^{N-i} \pzero(\str)^i \Big] + \entropy\big(\policy\big).
+    \label{eq:bonobj}
+\end{align}
+This is an entropy-regularized objective, where we use the probability of the string under the \bon distribution as the reward and discourage the model from having low entropy. 
+
+\paragraph{Monotonically invariant.} An important property of the variational \bon objective is that it is invariant to applying any monotonically increasing function to rewards. This is because the \vbon objective relies on reward values solely through $\cdf$, which, as defined in \Cref{eq:fdef}, remains unchanged under any monotonically increasing transformation of reward values.
+This implies that the \vbon objective is insensitive to the outliers and the scale of rewards. This property is especially important as RL algorithms are notoriously sensitive to the scale of reward values \citep{hendersonetal, schaul2021}. 
+\paragraph{Approximating $\log \cdf(\cdot)$.}
+Maximizing \Cref{eq:bonobj} requires us to compute $\log \cdf(\cdot)$ for any $\reward(\str)$. This, however, is computationally expensive, as we have to sum over the probabilities of all strings that have rewards less than $\reward(\str)$. Fortunately, we can instead maximize a lower bound of \Cref{eq:bonobj} using a Monte Carlo estimator of $\cdf(\cdot)$.
+Concretely, we can write $\cdf(\cdot)$ as an expectation,
+\begin{equation}
+    \cdf\big(R\big) = \E_{\str \sim \pzero} \big[\mathbbm{1}\{\reward(\str) < R \} \big].
+\end{equation}
+We approximate $\cdf\big(R\big)$ using $M$ i.i.d. samples from $\pzero$, termed $\str^{(1)}, \ldots, \str^{(M)} \overset{\mathrm{i.i.d.}}{\sim} \pzero$, and  
+$\widehat{\cdf}\big(R\big) \defeq \frac{1}{M} \sum_{m=1}^M \mathbbm{1}\{\reward(\str^{(m)}) < R \}$.
+We then take $\log$ of this Monte Carlo estimator as a biased, but consistent estimator of $\log \cdf(\cdot)$ in \Cref{eq:bonobj}.\footnote{Using Jensen's inequality, we show biasedness. 
+Concretely, note the following lower bound
+\begin{subequations}
+\begin{align}
+    \log \cdf\big(R\big) 
+    &= \log \E_{\str^{(1)}, \ldots, \str^{(M)}} \left[\frac{1}{M} \sum_{m=1}^M \mathbbm{1} \{\reward(\str^{(m)}) < R\} \right]  \\
+    &\geq \E_{\str^{(1)}, \ldots, \str^{(M)}} \left[\log \left(\frac{1}{M} \sum_{m=1}^M \mathbbm{1} \{\reward(\str^{(m)}) < R \}\right) \right],
+\end{align}
+\end{subequations}
+where Jensen's inequality is applicable because $\log$ is concave. 
+Consistency can be shown with an application of the delta method \citep[\S 5.5.4;][]{casella_berger_2001}.
+}
+In \Cref{sec:ferr} we empirically assess how many samples we need so that $\log \widehat{\cdf}$ converges to $\log \cdf$ and find that the convergence happens after taking only $250$ samples.\looseness=-1
+
+
+
+\section{Comparing \bon and RL Objectives}
+
+To explore the connection between the \vbon objective and the KL-regularized RL objective, we derive two lower bounds for $\bonobj$. Through these lower bounds, we can get more insights on how the reward function is used in the variational \bon objective, and why this objective discourages high KL divergence from the reference model.
+
+To derive the first lower bound, we substitute the \bon distribution in \Cref{eq:bonprob} into the \vbon objective in \Cref{eq:bonobj}. We then use Jensen's inequality to bound this objective, as explained in the following theorem.
+\begin{restatable}{theorem}{bonlone}\label{theorem:bonlone}
+Let $\alpha = \frac{(N+2)(N-1)}{2}$, $\beta=\frac{N(N+1)}{2}$, and $\gamma = \frac{N(N-1)}{2}$. 
+Then, we have $\bonobj(\btheta) \geq \lone(\btheta)$, where we further define
+    \begin{equation}
+        \lone(\btheta) \defeq \gamma \E_{\str \sim \policy}\Big[ \log \cdf\big(\reward(\str)\big) \Big] - \alpha \entropy\big(\policy\big) - \beta \kl\big(\policy \mid\mid \pzero\big).
+    \end{equation}
+\end{restatable}
+\begin{proof}
+    See \Cref{sec:bonlone}.
+\end{proof}
+We can already see the connection between $\lone(\btheta)$ and the KL-regularized RL objective, \Cref{eq:rlobj}. They both encourage maximizing a function of reward values. In the \bon objective this function is $F(\cdot)$, while in the KL-regularized RL objective, it is an identity function. Furthermore, both objectives include a negative KL-divergence term between the language model and the reference model. $\lone(\btheta)$ further encourages the model to have low entropy. 
+In fact, we can show that \Cref{theorem:bonlone} also holds for $\alpha = 0, \beta = 1, \gamma = N-1$. This further simplifies $\lone$ to arrive at a looser lower bound, which we call $\ltwo$, that is even more similar to the KL-regularized RL objective.
+\begin{restatable}{theorem}{bonltwo}\label{theorem:bonltwo} 
+We have $\bonobj(\btheta) \geq \lone(\btheta) \geq \ltwo(\btheta)$, where
+    \begin{align} \label{eq:l2}
+        \ltwo(\btheta) \defeq
+        (N-1)\E_{\str \sim \policy}\Big[ \log \cdf\big(\reward(\str)\big) \Big] 
+        - \kl\big(\policy \, \| \, \pzero\big). 
+    \end{align}
+\end{restatable}
+\begin{proof}
+    See \Cref{sec:bonltwo}.
+\end{proof}
+Empirically, we observe that models that are fine-tuned to maximize $\ltwo(\btheta)$ perform competitively to the ones that are fine-tuned to maximize the \vbon objective; see \Cref{sec:boundscompare} for experimental results. 
+Interestingly, if we compare \Cref{eq:l2} to the KL-constrained RL objective, \Cref{eq:rlobj}, we see they are very similar. 
+Both objectives consist of two terms: one for maximizing a function of reward values and another to prevent the model from diverging too much from the reference model.
+
+Comparing \Cref{eq:l2} and \Cref{eq:rlobj} further suggests that $N$ (in the \vbon objective) acts as a regularization parameter. 
+As $N \rightarrow 1$, the optimal distribution gets closer to $\pzero$, which has the same effect as $\beta \rightarrow \infty$ in \Cref{eq:rlobj}. 
+Furthermore, as $N \rightarrow \infty$, the optimal distribution only generates the string with the maximum rewards, which is equivalent to $\beta \rightarrow 0$ in \Cref{eq:rlobj}. 
+Importantly, in both limits, the optimal distribution under the KL-regularized RL objective and the \vbon objective are equivalent. 
+
+
+
+\section{Experiments}
+
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \includegraphics[width=\linewidth]{figures/imdb-win.pdf}
+         \caption{$4\%$ of points on Pareto front belong to BoNBoN, $4\%$ to PPO, $42\%$ to DPO, and $50\%$ to \vbon.} %
+         \label{fig:imdb-winrate}
+     \end{subfigure}
+     ~
+     \begin{subfigure}[b]{0.49\textwidth}
+         \includegraphics[width=\linewidth]{figures/imdb-reward.pdf}
+         \caption{$7\%$ of points on Pareto from belong to BoNBoN, $10\%$ DPO, $33\%$ PPO, and $50\%$ \vbon.} \label{fig:imdb-rewards}
+     \end{subfigure}
+    \caption{Steering generated movie reviews towards positive sentiment. Points that are not on the Pareto front of each method have lower opacity. \bon is the most effective approach in achieving high win rates and high rewards while not diverging too far from the reference model. Our variational approximation to \bon gets closest to the performance of \bon compared to other fine-tuning methods, as reflected in the percentage of times it appears on the Pareto front. 
+    }
+    \label{fig:imdb}
+\end{figure*}
+We now employ the variational \bon objective, \Cref{eq:bonobj}, to fine-tune language models. 
+We perform an open-ended text generation task where the goal is to generate movie reviews with positive sentiment.\looseness=-1
+
+The reference model, $\pzero$, is \texttt{GPT-IMDB}\footnote{Specifically, we use \url{https://huggingface.co/lvwerra/gpt2-imdb}.}, a version of \texttt{GPT-2} \citep{radford2019language} fine-tuned on \textsc{imdb} corpus \citep{imdb}. We use a binary sentiment classifier,\footnote{Specifically, we use \url{https://huggingface.co/lvwerra/distilbert-imdb}.} denoted as $\classifier$, with two classes $\{\textsc{pos}, \textsc{neg}\}$ as the reward model, and define $\reward(\str) \defeq \classifier(\textsc{pos} \mid \str)$. Following \citet{dpo}, we sample $5000$ movie reviews from the training set of \textsc{imdb} dataset and for each sample, we randomly choose a prefix length between $2-8$ and take that prefix as the prompt. We further generate $512$ prompts in the same way from the test set of \textsc{imdb} that we use to evaluate our models.
+
+We fine-tune the reference model with PPO using the \vbon objective \Cref{eq:bonobj}. Then, we compare the performance of the fine-tuned model (\defn{\vbon}) to the exact \bon (\defn{\bon}), i.e., applying \bon at inference time. 
+
+We implement and compare the following existing methods for language model alignment:
+\begin{itemize}
+    \item \textbf{\bon-SFT:} Perhaps the most straightforward way to approximate \bon distribution is to fine-tune the model to maximize the likelihood of the samples taken with \bon algorithm. Unfortunately, we find that SFT is incapable of achieving a good trade-off between achieving high rewards and low KL divergence, see \Cref{sec:sft-exp} for the experimental results.
+\item \textbf{PPO:} We use PPO to optimize the KL-constrained objective in \Cref{eq:rlobj}. We use the default hyperparameters in \texttt{trlx} library \citep{trlx} for fine-tuning with PPO.
+\paragraph{DPO.} Direct preference optimization \citep[DPO;][]{dpo} is a popular alternative to RLHF that does not require training a reward model. Following DPO's experimental setup, we generate $6$ reviews per prompt and use the resulting $12$ pairwise comparisons per prompt to construct DPO's contrastive loss.\footnote{One could argue that DPO has a slight advantage over other methods in this setup since it has seen $6$ unique generations per prompt during training, while the others only have seen one (or $2$ with BoNBoN). Nevertheless, we observe that \vbon is more effective than DPO.}  
+\item \textbf{BoNBoN:} Concurrent work \citep{bonbon} explores another approach to approximate \bon distribution. Assuming that the reference model distribution $\pzero$ is continuous, \citet[Theorem 3;][]{bonbon} prove that the expected difference between the relative likelihood, i.e., $\frac{\bonpolicy(\cdot)}{\pzero(\cdot)}$, of the \beston response and the Worst-of-$N$ response is $\frac{1}{2 \beta} = \frac{1}{(N-1) \sum_{k=1}^{N-1} 1/k}$.
+They use this property to construct a loss function similar to that of IPO \citep{ipo}. Furthermore, they add another term to the loss function, which simply maximizes the likelihood of the \beston response. The final loss function is a convex combination of the IPO-like loss and the negative log-likelihood loss, regulated by a hyperparameter $\alpha$.\footnote{Following the authors' recommendation, we set $\alpha$ so that both terms contribute equally to the final loss.}
+\end{itemize}
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/logf-3.pdf}
+    \caption{Estimates of $\log \cdf(\cdot)$ with increasing the number of Monte Carlo samples. We test an adversarial prompt (left plot), a neutral prompt (middle plot), and a prompt with a positive sentiment (right plot). Overall, we hardly see any difference between the estimates after taking $200$ samples. For the adversarial prompt, the distribution of rewards is peaked, and we do not see any changes in our estimator after taking only $100$ samples.
+    }
+    \label{fig:logf}
+\end{figure}
+
+We fine-tune models by varying the degree of regularization. For \bon approaches, that is achieved by varying $N$, and for DPO and PPO, we vary $\beta$.\footnote{See \Cref{sec:hyper} for more details regarding the regularization hyperparameters.} Importantly, $N$ in \vbon is a hyperparameter, meaning that we do \emph{not} need to generate more samples from $\pzero$ when we increase $N$. However, with \bon and BoNBoN methods, we need to increase the number of samples from the reference model as we increase $N$. 
+
+We generate movie reviews using fine-tuned models based on prompts from our test set and then measure three metrics: (i) KL divergence between the fine-tuned model and the reference model, (ii) win rate, defined as the percentage of times the fine-tuned model's generations receive higher rewards compared to the reference model's generations; and (iii) average rewards obtained by the fine-tuned model's sampled strings. 
+
+For \bon method, following \citet{pmlr-v202-gao23h}, we report the empirical upper bound of $\log N - \frac{N-1}{N}$ for KL divergence in our plots. Furthermore, the win rate of \bon over the reference model can be computed analytically and is equal to $\frac{N}{N+1}$. 
+
+We visualize the win rate vs. KL curves in \Cref{fig:imdb-winrate}, and \Cref{fig:imdb-rewards} the average rewards of generations under $\policy$ vs. the KL divergence. As expected, \bon is the most effective approach; however, this comes at an extra inference cost that grows with $N$. We observe that among the fine-tuning methods, our variational approximation to \bon gets closest to the performance of \bon, as it appears more often on the Pareto front of the two curves compared to other methods. Notably, we observe that DPO performs better than PPO in terms of win rates but worse in terms of average rewards; this could be attributed to the contrastive nature of DPO's loss function.
+\subsection{Error in Estimating $\log \cdf(\cdot)$} \label{sec:ferr}
+We empirically quantify the error when estimating $\log \cdf(\cdot)$ for a finite number of i.i.d samples from $\pzero$. To get a better intuition on the error of our estimators, in \Cref{fig:logf}, we visualize the estimators for $3$ different prompts: one adversarial prompt (left plot), where the prompt itself has a negative sentiment, one neutral prompt (middle plot), and one prompt with a positive sentiment (right plot). We vary the number of Monte Carlo samples from $10$ to $600$. We observe that for all the $3$ prompts, the estimated CDF hardly changes after $200$ samples. When using the adversarial prompt, we observe that the reward distribution is negatively peaked, and the estimated CDF does not change after taking only $100$ samples.
+
+We then quantify the change in the estimator by performing a two-sample Kolmogorov–Smirnov test \citep{Hodges1958TheSP}. The test measures the closeness of two empirical cumulative distribution functions. Concretely, the test statistic is
+\begin{equation}
+    \sup_{\str \in \alphabet^*} \left|\widehat{\cdf}_{M_1}\big(\reward(\str)\big) - \widehat{\cdf}_{M_2}\big(\reward(\str)\big) \right|,
+\end{equation}
+where $\widehat{\cdf}_{M_1}, \widehat{\cdf}_{M_2}$ are estimated CDFs from $M_1$ and $M_2$ samples respectively. The statistics show the magnitude of the difference between the two empirical distributions of samples. The null hypothesis is that the two distributions are identical.
+
+\begin{wraptable}{r}{5.5cm}
+\adjustbox{max width=5.5cm}{%
+\begin{tabular}{@{}lccc@{}}\toprule
+$M$ & Rejection rate & Test statistics & $p$-value \\ \midrule
+$5$ & $6.14\%$ & $0.63$ & $0.02$ \\
+$20$ & $4.02\%$ & $0.33$ & $0.03$ \\
+$100$ & $1.14\%$ & $0.17$ & $0.02$ \\
+$200$ & $0.06\%$ & $0.12$ & $0.02$ \\
+$250$ & $0$ & - & - \\
+\bottomrule
+\end{tabular}}
+\captionsetup{font=small}
+\caption{Measuring the estimation error with increasing the sample size. After $250$ samples, the estimated CDF is unchanged for all the prompts.}
+\label{tab:ferr}
+\end{wraptable}
+In \Cref{tab:ferr}, for each sample size $M$, we compare the estimated CDF with $M$ samples to the estimated CDF with $600$ samples. If the two distributions are identical according to the test, we can reliably use the $M$ sample to estimate the CDF. We report the number of prompts (out of $5000$ prompts) for which we reject the null hypothesis, meaning that the distributions are not identical. Furthermore, for those prompts, we report the average test statistics and $p$-values. In general, for very few prompts, the null hypothesis is rejected. Moreover, with $250$ samples, the estimated CDFs are identical to the estimated CDF with $600$ samples for all prompts.
+
+
+
+\section{Conclusion}
+
+Motivated by the effectiveness of the \bon algorithm, we formally derive a variational approximation to the distribution induced by \bon algorithm via fine-tuning language models. Our analysis highlights the similarities and distinctions between the variational \bon objective and the KL-constrained RL objectives. Our empirical findings reveal that models fine-tuned using the variational approximation to \bon not only attain high reward values but also maintain proximity to the reference models. Crucially, inference on the fine-tuned models with the \vbon objective remains as cost-effective as inference on the original reference model.
+
+

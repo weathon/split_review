@@ -1,0 +1,478 @@
+\title{LoRA-Switch: Boosting the Efficiency of Dynamic LLM Adapters via System-Algorithm Co-design}
+
+\begin{abstract}
+Recent literature has found that an effective method to customize or further improve large language models (LLMs) is to add dynamic adapters, such as low-rank adapters (LoRA) with Mixture-of-Experts (MoE) structures. Though such dynamic adapters incur modest computational complexity, they surprisingly lead to huge inference latency overhead, slowing down the decoding speed by 2.5+ times. In this paper, we analyze the fine-grained costs of the dynamic adapters and find that the fragmented CUDA kernel calls are the root cause. Therefore, we propose LoRA-Switch, a system-algorithm co-designed architecture for efficient dynamic adapters. Unlike most existing dynamic structures that adopt layer-wise or block-wise dynamic routing, LoRA-Switch introduces a token-wise routing mechanism. It switches the LoRA adapters and weights for each token and merges them into the backbone for inference. For efficiency, this switching is implemented with an optimized CUDA kernel, which fuses the merging operations for all LoRA adapters at once. Based on experiments with popular open-source LLMs on common benchmarks, our approach has demonstrated similar accuracy improvement as existing dynamic adapters, while reducing the decoding latency by more than 2.4 times.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large language models (LLMs) have demonstrated remarkable capabilities in language understanding and generation. To customize the pretrained models to vertical domains or further enhance their capabilities, various adapter techniques such as Low-Rank Adapters (LoRA)~\cite{Hu2021LoRALA}, LLaMA-Adapter~\cite{zhang2023llama}, and Prompt Tuning~\cite{lester2021power} have been employed with great success. These methods are acclaimed for boosting the accuracy of LLM without extensive training, thus facilitating efficient model customization and performance enhancement. Among these, dynamic adapters~\cite{feng2024mixtureofloras,gou2024mixture,liu2023moelora,luo2024moelora} represent an even more potent strategy to augment the capacity of adapters. 
+By integrating conditionally computed lightweight adapters into the pretrained model, dynamic adapters allow for selective fine-tuning of adapter parameters.
+This technique not only maintains the original strengths of the model but also substantially increases its adaptability and capacity. 
+
+However, we found that despite the relatively minor impact of dynamic adapters on parameter size and computing complexity (typically adding only 1-5\% of the origin model), they may introduce significant latency overhead. 
+For instance, the dynamic adapters that we studied all increase decoding inference latency by 250-950\%. 
+The seemingly modest computational complexity of the low-rank matrices employed results in substantial extra CUDA kernel execution latency, surpassing that of models without dynamic adapters. 
+This dramatic increase in latency is primarily attributed to the prolonged execution time of context operations during CUDA kernel runs, which considerably exceeds the actual computation time. 
+Dynamic adapters often require four or more additional CUDA kernel calls for each layer, in stark contrast to just a single call needed for the forward computation of the original backbone matrix. 
+This excessive number of context operations substantially amplifies the latency overhead, leading to a severe escalation of inference latency.
+
+Reducing the inference latency overhead of dynamic adapters is challenging. Existing dynamic adapters~\cite{dou2024loramoe,feng2024mixtureofloras,gao2024higher,gou2024mixture,li2024mixlora,liu2023moelora,luo2024moelora,wu2024parameterefficient,yang2024moral} adopt block-wise or layer-wise routing structures, where activated LoRA adapters must be computed separately. If we were to pre-merge activated LoRA adapters into the backbone weights for forward computation, akin to the strategy employed by LoRA~\cite{Hu2021LoRALA}, it would fundamentally reduce the number of CUDA kernel calls. However, this merging changes the parameters of the LLM model, and for the next input, different adapters might be activated. Thus, after processing the current input, it becomes necessary to unmerge the activated adapters from the LLM model that was altered. The routing dynamicity involved in such merging processes becomes prohibitively costly. For instance, the widely adopted dynamic adapter structure, the Mixture of Experts (MoE), determines the activated adapters based on the output of the last layer. Each layer of dynamic adapters must then wait for its router to compute the gating scores before it can proceed to merge the activated LoRA adapters. This fragmented operational approach can inadvertently introduce even greater overhead costs.
+
+Our approach to addressing the challenge is based on a holistic system-algorithm co-design. Specifically, we have developed a MoE-based dynamic adapters structure that facilitates token-wise adapter routing. Each token is associated with $k$ weighted paths of LoRA adapters, activated prior to the decoding of the token. 
+This setup ensures that, although the model is enhanced with dynamic structures, the inference process for each token remains relatively static due to the pre-determined adapters.
+To further enhance the efficiency, we pre-merge the activated LoRA adapters into the pretrained model's backbone before each token's decoding. 
+This strategy fundamentally reduces the CUDA kernel execution overhead, thereby significantly lowering latency. 
+With this innovative setup, we have re-engineered the inference process to seamlessly switch and merge adapters for each token, aligning the process closely with the original pretrained LLM's token decoding. 
+Another pivotal component of our system is the development of a fused CUDA kernel, named SGMM, which efficiently manages the activated and inactivated adapters. 
+This engineering solution ensures a smooth integration of dynamic adapters, optimizing both performance and efficiency.
+We evaluate our \sys design across a range of benchmarks, comparing it against multiple state-of-the-art dynamic adapter baselines. The experiment results demonstrate that our approach are comparable with well-established strong baselines. Notably, our method significantly reduces the running overhead associated with other dynamic adapter alternatives, achieving an average speedup of 2.4 times in decoding latency.
+
+In summary, our contributions are as follows:
+\begin{itemize}[leftmargin=*]
+\item We uncover the high latency overhead introduced by dynamic adapters, which is a practical issue usually neglected by existing approaches. We analyze the fundamental reasons behind such high overhead, providing insights on the computational bottlenecks.
+\item We introduce a novel architecture for dynamic adapters, named \sys. This design enhances the capacity of LLM adapters while minimizing the latency overhead, thereby offering an optimal balance between performance and efficiency.
+\item Through extensive experiments, we demonstrate that \sys not only achieves accuracy on par with existing dynamic adapters across a variety of general and domain-specific tasks, but it also cuts down decoding inference latency by more than 2.4 times.
+\end{itemize}
+
+
+
+
+\section{Background and Motivation}
+
+
+\subsection{Dynamic Adapters}
+Given the strengths of both the Mixture of Experts (MoE)~\cite{jiang2024mixtral,shazeeroutrageously,artic2024,dbrx2024,xAI-2024} and Low-Rank Adaptation (LoRA)~\cite{Hu2021LoRALA}, their integration has become a focal point of recent research efforts. Recent studies~\cite{feng2024mixtureofloras,gao2024higher,gou2024mixture,liu2023moelora,luo2024moelora} have explored combining these two techniques to further augment the capabilities of large language models (LLMs).
+This integration leverages the scalability of MoE and the efficiency of LoRA, proposing a promising pathway to meet the escalating demands for model performance and efficiency. Formally, the computation process of dynamic adapters can be formulated as Equation~\ref{eq:moa_origin}:
+\begin{align}
+    y^l = f^l(x^l) + \sum_{i = 1}^{N}{G^l(x^l)_iE^l_i(x^l)},
+    \label{eq:moa_origin}
+\end{align}
+where the superscript $l$ means $l$-th layer, $N$ represents number of adapters experts, $G^l(x^l) = \text{Softmax}(\text{TopK}(W^l_gx^l))$ represents the top-k (typically top-2) router in the dynamic adapters block, $f^l$ represents the pretrained backbone in $l$-th layer, and
+$E^l(x^l) = W^l_{up}(W^l_{down}(x^l))$ represents the output of LoRA experts, 
+where the matrix $W^l_g$ and $W^l_{up}/W^l_{down}$ are the trainable parameter matrix of the router network and LoRA experts, respectively.
+
+\subsection{Unexpected Latency Overhead of Dynamic Adapters}
+
+\begin{table}[!h]
+\centering
+\caption{Inference cost of different dynamic adapters. 
+}
+\label{table:moa_latency}
+\begin{tabular}{lccc}
+\toprule
+Method & Decoding latency (ms/token) & Parameter size (B) & FLOPS (G) \\
+\midrule
+Llama2-7B  & 2.4 & 6.74 & 6.61 \\
+MOLA~\cite{gao2024higher} (layer-wise) & 25.3 (+954\%) & 7.07(+4.89\%) & 6.65(+0.61\%) \\
+PESC~\cite{wu2024parameter} (block-wise) & 8.5 (+254\%) & 6.97(+3.41\%) & 6.64(+0.45\%) \\
+MoRAL~\cite{yang2024moral} (layer-wise) & 8.6 (+258\%) & 6.97(+3.41\%) & 6.67(+0.91\%)\\
+\bottomrule
+\end{tabular}
+\end{table}
+Although dynamic adapters can enhance accuracy and involve only a modest increase in parameter size and computing complexity, they unfortunately introduce a substantial inference latency overhead. 
+We evaluate different dynamic adapters methods with Llama2-7B~\cite{touvron2023llama} on ShareGPT~\cite{openchat2023sharegpt4} dataset for 50 queries one by one, and generate 200 new tokens for each query. We report the decoding latency of processing the 50 queries. 
+As demonstrated in Table~\ref{table:moa_latency}, existing methods involving dynamic adapters result in an approximate 1\%-5\% increase in parameter count and less than a 1\% increase in computing complexity measured in FLOPS. However, these enhancements lead to a substantial increase in decoding latency, with overheads ranging from 200\% to 950\%.
+
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/adapter_latency.pdf}
+    \caption{Decoding phase execution time profiling of one dynamic adapters layer in MoRAL~\cite{yang2024moral}. Note: The execution time results were preceded by a warm-up of 100 executions and are obtained on the average of 300 executions. 
+    }
+    \label{fig:cuda_launch}
+\end{figure}
+
+To elucidate the sources of latency overhead introduced by dynamic adapters, we conducted a granular analysis of latency within various components during the decoding phase. As illustrated in Figure~\ref{fig:cuda_launch}, it is evident that the execution time for the adapters (0.05ms) exceeds that of the pretrained backbone (0.03ms). Despite the relatively modest computational complexity of the LoRA adapters employed in dynamic configurations, each adapter necessitates dual launches of CUDA kernel context operations. The execution time of these CUDA kernels does not correlate linearly with the size of the matrices involved, leading to considerable latency in the adapter components. This, in turn, significantly escalates the overall inference latency, highlighting a critical area for optimization in dynamic adapter architectures.
+\subsection{Challenge of Reducing Latency Overhead of Dynamic Adapters}
+
+A straightforward way to reduce inference latency overhead is to reduce the times of CUDA kernel context operations. 
+Like LoRA~\cite{Hu2021LoRALA}, one couple pre-merge adapters into the original matrix and then perform token decoding computation. 
+We implement this simple strategy in MoRAL by directly merging activated adapters layer by layer before computing, although it decreases the number of CUDA kernel launches.
+However, the additional operations introduced higher latency, where the decoding latency is 4.5 ms/token, which is still 88\% higher than the original LLM model.
+This is because merging a LoRA adapter into the backbone matrix requires an additional invocation of a CUDA kernel to perform the matrix multiplication for the up and down projections.
+Due to these inherent computational complexities, optimizing the existing structure of dynamic adapters further is challenging.
+
+To effectively leverage the structure of dynamic adapters, we introduce \sys. 
+Unlike the existing layer-wise or block-wise dynamic routing mechanisms, our approach \sys utilizes token-wise routing strategy, which fundamentally reduces the number of CUDA kernel calls, thereby reducing decoding inference latency.
+
+
+
+
+\section{Design of \sys}
+
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/overview.pdf}
+    \caption{Overview of \sys.}
+    \label{fig:overview}
+\end{figure}
+
+\subsection{Overview}
+As shown in Figure~\ref{fig:overview}, given a pre-trained LLM, we first extend it with \sys to enhance its model capacity and then finetune it on either general or domain-specific datasets. 
+During the decoding phase, each token is initially processed through a router to compute the gating for each layer. Then we implemented an SGMM kernel that facilitates fast fused adapter switching. This advanced functionality enables the rapid merging of activated adapters into the backbone and the efficient unmerging of inactivated adapters from the backbone, significantly reducing the number of CUDA kernel calls. This process ensures that the decoding speeds are comparable to those of a origin pretrained model, optimizing performance without compromising efficiency.
+\subsection{Model Structure} \label{section:method:structure}
+
+In \sys, we extend adapters only in the linear layers of the pre-trained backbone, and we insert a Top-2 router $G^1$ only at the first expanded linear layer.
+
+\textbf{Finetuning phase.}
+As shown in Figure~\ref{fig:overview} (a), during fine-tuning, the computation process of \sys can be written as Equation~\ref{equation:ours:definition}:
+\begin{equation}
+    y^l = f^l(x^l) + \sum_{i = 1}^{N}{G^1(x^{1})_iE^l_i(x^l)},
+    \label{equation:ours:definition}
+\end{equation}
+where \sys only replaces the $G^l(x^l)$ with $G^1(x^{1})$ in Equation~\ref{eq:moa_origin}, where $x^{1}$ denotes the input in the first expanded linear layer. \sys employs a token-wise pre-gated LoRA structure, meaning that the routing weights for all layer adapters are identical. 
+This design not only preserves the model's dynamicity but also facilitates latency optimization during inference.
+
+\textbf{Decoding phase.}
+As depicted in Figure~\ref{fig:overview} (b), \sys leverages the token-wise pre-gated structure to reduce latency during the decoding phase. During the decoding phase of LLM generation, where the input \( x \) is a single token, the Top-2 router $G^1$ determines which experts' adapters are activated. 
+Then the activated experts will be merged into pretrained backbone. Finally, The fused backbone perform forward process and the decoding computation can be written as Equation~\ref{equation:ours:1}:
+\begin{align}\label{equation:ours:1}
+    y^l = f^l_*(x^l)
+\end{align}
+To efficiently calculate $f^l_*$ for all layers, we propose to perform fused adapter switching (Section~\ref{section:method:switching}) with the SGMM (Section~\ref{section:method:sgmm}) kernel, which merge the parameters of all activated experts adapters across all layers into the original parameters of pretrained model in a single CUDA kernel operation. 
+Finally, the fused backbone execute just like the initial pretrained backbone as shown in Equation~\ref{equation:ours:1}.
+This streamlined integration significantly enhances the efficiency of the decoding process.
+
+\textbf{Prefilling phase.}
+The latency of \sys during the prefilling phase is comparable to that of existing dynamic adapters. For the prefilling phase, we have not implemented specific optimizations, as the latency in the LLM generation stage primarily originates from the decoding phase.
+
+\subsection{Fused Adapter Switching}    \label{section:method:switching}
+
+To calculate $f^l_* = f^l + \sum_{i = 1}^{N}{G^1(x^1)_i} E^l_i$ according to Equation~\ref{eq:moa_origin} and Equation~\ref{equation:ours:definition}, we may merge multiple experts adapters into backbone because one input token may activate multiple adapters (typically Top-2). The experts in \sys are LoRA adapters, which contain down projection \text{LoRA\_DOWN} and up projection \text{LoRA\_UP}.
+Then we can compute $f^l_*$ as Euquation~\ref{equation:ours:2}:
+\begin{align}\label{equation:ours:2}
+    f^l_* = f^l + \sum_{i = 1}^{N}{G^1(x^1)_i} \cdot (\text{LoRA\_DOWN}^l_i \times \text{LoRA\_UP}^l_i),
+\end{align}
+We only need to invoke the CUDA kernel $k$ times instead of $N$ times, as $G^1(x^1)$ specifically targets the top-$k$ selections.
+To further reduce the number of CUDA kernel calls, we concatenate all LoRA adapters before merging them into the original model parameters as Equation~\ref{equation:ours:lora unified single}:
+\begin{align}\label{equation:ours:lora unified single}
+    \text{LoRA\_DOWN}^l & = concat([G^1(x^1)_i \cdot \text{LoRA\_DOWN}^l_i,\ i=1,...,N]), \nonumber \\
+    \text{LoRA\_UP}^l &  = concat([\text{LoRA\_UP}^l_i,\ i=1,...,N]).
+\end{align}
+
+Thus, we can merge the concatenated LoRA adapters into origin backbone as Equation~\ref{equation:ours:lora merge2}:
+\begin{align}\label{equation:ours:lora merge2}
+    f^l_* = f^l + \text{LoRA\_DOWN}^l \times \text{LoRA\_UP}^l.
+\end{align}
+
+Although Equation~\ref{equation:ours:2}, Equation~\ref{equation:ours:lora unified single}, and Equation~\ref{equation:ours:lora merge2} enable a reduction in CUDA kernel calls, they necessitate the storage of $f^l$ to compute $f^l_*$, which approximately doubles the GPU memory overhead. 
+We observe that during the decoding phase, the activated adapters varying from one token to the next. A simple way to obtain $f^l$ is to unmerge the activated adapters by the last token in the current iteration as Equation~\ref{equation:ours:lora unmerge1}
+\begin{align}\label{equation:ours:lora unmerge1}
+    f^l = (f^l_*)^{t-1} - (\text{LoRA\_DOWN}^l)^{t-1} \times (\text{LoRA\_UP}^l)^{t-1},
+\end{align}
+where the superscript $(t-1)$ denotes the operations from the last input iteration. Then Equation~\ref{equation:ours:lora merge2} and Equation~\ref{equation:ours:lora unmerge1} can be rewritten as Equation~\ref{equation:ours:lora fused merge1}
+\begin{align}\label{equation:ours:lora fused merge1}
+    (f^l_*)^t = (f^l_*)^{t-1} &- (\text{LoRA\_DOWN}^l)^{t-1} \times (\text{LoRA\_UP}^l)^{t-1} \nonumber \\
+    &+ (\text{LoRA\_DOWN}^l)^t \times (\text{LoRA\_UP}^l)^t.
+\end{align}
+Then we concatenate the activated adapters of current input and inactivated adapters of last input as Equation~\ref{equation:ours:lora unified fused}:
+\begin{align}\label{equation:ours:lora unified fused}
+    \text{Fused\_LoRA\_DOWN}^l & = concat([-(\text{LoRA\_DOWN}^l)^{t-1}, (\text{LoRA\_DOWN}^l)^{t}  ]) ,\nonumber \\
+    \text{Fused\_LoRA\_UP}^l &  = concat([-(\text{LoRA\_UP}^l)^{t-1},(\text{LoRA\_UP}^l)^{t}]).
+\end{align}
+So the concatenated LoRA adapter switching operation can be rewritten from Equation~\ref{equation:ours:lora fused merge1} to Equation~\ref{equation:ours:fused}:
+\begin{align}\label{equation:ours:fused}
+    (f^l_*)^t = (f^l_*)^{t-1} + \text{Fused\_LoRA\_DOWN}^l \times \text{Fused\_LoRA\_UP}^l.
+\end{align}
+To calculate Equation~\ref{equation:ours:fused}, we utilize our efficiently designed CUDA kernel, SGMM, to seamlessly integrate these fused adapters into the pretrained LLM backbone for all layers with only one CUDA kernel call. 
+
+Finally, the whole decoding process of \sys are shown in Algorithm~\ref{algo:switching}.
+
+\renewcommand{\algorithmicrequire}{\textbf{Inputs:}}
+\renewcommand{\algorithmicensure}{\textbf{Outputs:}}
+
+\begin{algorithm}[!h]
+\caption{The token decoding process of \sys. 
+}\label{algo:switching}
+\begin{algorithmic}[1] % Enable line numbering by passing [1]
+\Require $x$: input token at time $t$, and all model parameters.
+\Ensure Logits prediction of the next token.
+\State Calculate $G^1(x^1)$ as Equation~\ref{equation:ours:definition}.
+\State Concatenate current activated adapters as Equation~\ref{equation:ours:lora unified single}.
+\State Concatenate activated and inactivated adapters as Equation~\ref{equation:ours:lora unified fused}.
+\State Perform fused adapter switching with SGMM as Equation~\ref{equation:ours:fused}.
+\State Execute model forward as Equation~\ref{equation:ours:1} and obtain next token logits prediction.
+\State Return logits prediction.
+\end{algorithmic}
+\end{algorithm}
+
+
+\subsection{SGMM Kernel}    \label{section:method:sgmm}
+The straight-forward way to merge the LoRA adapter into the backbone is to merge them layer by layer. 
+This approach requires multiple calls to the CUDA kernel, which introduces additional latency due to kernel launches. 
+Moreover, smaller kernel computations underutilize GPU thread blocks, leading to a low GPU throughput.
+We observe the layer-by-layer merging operations % \wj{what are these operations?} 
+can be handled concurrently and introduce a CUDA kernel called Segmented Gather Matrix Multiplication (SGMM) to finally handle the merging of LoRA adapters of \sys, adapted from the concept of SGMV proposed by Punica \cite{chen2023punica}.
+
+SGMM is designed to execute a batched GEMM operations, which can be summarized by the following Equation~\ref{equation:sgmm}:
+\begin{equation}\label{equation:sgmm}
+    f_* =  f +  \text{Fused\_LoRA\_DOWN} \times \text{Fused\_LoRA\_UP},
+\end{equation}
+where $f_*$ is the resultant updated matrix of the backbone;
+$f$ is the original weight matrix of the backbone;
+$\text{Fused\_LoRA\_DOWN}$ and $\text{Fused\_LoRA\_UP}$ are the adapter matrices for weight matrix $f$.
+The addition operation within the SGMM kernel is performed in place, significantly reducing the additional memory overhead. 
+This optimization ensures that memory usage is minimized, enhancing the overall computational efficiency of our system.
+
+When wrapping these operations into a single CUDA kernel, taking full advantage of the GPU's computational resources is challenging. 
+Each thread block should be fully utilized, and the computational load needs to be balanced across them. % 解释什么是“利用计算资源”
+To achieve this, we divide the matrix multiplication into multiple GEMM tiles and assign them to different thread blocks. %to ensure that each thread block can execute its computational tasks efficiently.
+On the other hand, these thread blocks must switch context with global memory/shared memory frequently, thus causing significant latency.  % 访存challenge
+To tackle this, we adopt a pre-fetch buffer mechanism to hide loading latency.
+It fetches data from higher-level memory before the next matrix operation to boost memory access efficiency. % pre-fetch mechanism
+
+The input parameters for SGMM are arrays of pointers to the LoRA matrices and the backbone matrices, which respectively store the corresponding entries of each layer's LoRA matrix and the shape of each matrix segment.
+When launching the kernel, SGMM applies as many thread blocks as possible and divides the large matrix multiplication into multiple GEMM tiles of the same shape, with each tile operating matrix computation.  % declare: SGMM divide tiles of the same shape
+Based on the input pointers and shapes of the original matrices, SGMM calculates the address and size of each tile in global memory and assigns each of them to a thread block. 
+The optimal tiling scheme related to hardware is selected to ensure the full utilization of each thread block.
+To hide the loading latency of tile switching, SGMM uses two buffers in shared memory and CUDA core registers, respectively; one for the current tile's matrix computation and the other for pre-fetching the next tile's data into the buffer.
+This design stems from the same shape of sequential tiles, which makes us able to predict the next tile to be processed.
+In our methodology, thread blocks are executed concurrently, facilitating the simultaneous processing required for our computational tasks.  This parallel execution enables the efficient merging and unmerging of LoRA weights, a critical operation in our approach.
+
+
+\section{Evaluation}
+
+
+In this section, we present the experimental results to show the superiority of the proposed \sys in accuracy and runtime efficiency performance.
+
+\subsection{Experiment Setup}
+\textbf{Datasets/benchmarks.}
+To demonstrate the proposed \sys could augment general ability of LLM, we follow PESC~\cite{wu2024parameter} and simultaneously fine-tuned the model on a diverse set of skills, including encompassing coding, mathematical, and other general abilities from various subjects. This training involved integrating three distinct datasets from varied domains during the instruction tuning phase: SlimORCA~\cite{SlimOrca},  Magicoder~\cite{wei2023magicoder}, and MetaMathQA~\cite{yu2023metamath} datasets.
+We utilize LM-Eval-Harness~\cite{eval-harness} as tool to evaluate general ability on ARC~\cite{Clark2018ThinkYH}, HellaSwag~\cite{zellers2019hellaswag}, MMLU~\cite{hendryckstest2021}, TruthfulQA~\cite{lin-etal-2022-truthfulqa}, and WinoGrande~\cite{sakaguchi2019winogrande} benchmarks and report the accuracy.
+
+Also, to demonstrate the proposed \sys could improve domain specific ability of LLM, we follow MoLA~\cite{gao2024higher} and fine-tuned the model on downstream task. We evaluate three recent question-answering benchmarks, including ScienceQA\cite{lu2022learn}, CommonsenseQA\cite{talmor-etal-2019-commonsenseqa}, and OpenbookQA\cite{OpenBookQA2018}. We follow the task-specific fine-tuning framework to evaluate their effectiveness.
+
+To evaluate runtime efficiency performance of \sys, we utilize real-world sharegpt~\cite{openchat2023sharegpt4} dataset to simulate user queries, which is used in many LLM serving frameworks~\cite{cai2024medusa,kwon2023efficient,Miao_2024}. We serve 50 queries from sharegpt dataset one by one, and generate 200 new tokens for each query. Finally, we report the inference time of processing the 50 queries.
+
+\textbf{Baselines.}
+We compare \sys with four PEFT approaches, including LoRA~\cite{Hu2021LoRALA}, 
+layer-wise gating dynamic adapters like MoRAL~\cite{yang2024moral} and MOLA~\cite{gao2024higher}, and block-wise gating dynamic adapters PESC~\cite{wu2024parameter}.
+We also compare full-parameter fine-tuning.
+Due to the extensive fine-tuning requirements of both the MoLA and Full-Parameter methods, which necessitate over a week of training in general LLM tasks, we find this duration to be impractical. Consequently, we have opted not to include these methods in the comparisons within general task comparison.
+We use LLama2-7B~\cite{Touvron2023Llama2O} as the pretrained base LLM, which is the default base model for most dynamic adapters.
+
+\textbf{Implementation Details.}
+For general tasks, we set the number of experts as 8 and LoRA rank as 64 for all dynamic adapters methods, and LoRA alpha is set to 16 and LoRA dropout is 0.05, following the default LoRA settings.. The models underwent instruction tuning for one epoch with about 12 hours. We use a constant learning rate schedule with a warm-up ratio of 0.03, and the paged AdamW~\cite{dettmers2023qlora,loshchilov2019decoupled} optimizer with a learning rate of 2e-4, no weight decay, a batch size of 256, and a sequence length of 512 tokens.
+For domain specific tasks, the number of experts is 8 and the rank of each LoRA expert is also 8, and we adopt top-2 for the router. LoRA alpha is set to 16 and LoRA dropout is 0.05, following the default LoRA settings. we trained 20 epochs for downstream task fine-tuning about 6 hours. We use AdamW~\cite{loshchilov2019decoupled} as the optimizer with a learning rate of 3e-4. The cutoff length is set to 256 and the batch size is 128. 
+For LoRA baseline, We applied it to four weight matrices in the self-attention module ($W_q$ , $W_k$, $W_v$ , $W_o$) and three weight matrices in the MLP module ($W_{gate}$, $W_{down}$, $W_{up}$). 
+All the fine-tuning tasks were conducted on the servers with eight A100-80GiB GPUs. For runtime performance evaluation, we use one A100-80GiB GPU as serving server.
+\subsection{Accuracy Comparison}
+
+\subsubsection{Improving General Capability of LLM}
+
+As depicted in Table~\ref{table:general accuracy}, our approach considerably enhances the ability of LLMs to perform on general tasks. On average, our method achieves an accuracy of 60.12\%, which is an improvement of approximately 0.5\% over traditional LoRA fine-tuning techniques. Furthermore, our method's performance is highly competitive with existing dynamic adapters, trailing the average accuracy of the MoRAL method by a mere 0.1\%. The accuracy of all dynamic adapter methods not only surpasses that of the standard LoRA approach but is also significantly higher than that of the un-tuned Llama2-7B model, affirming the effectiveness of dynamic adapters in boosting LLM performance.
+
+Moreover, detailed evaluation on individual datasets reveals that our method surpasses LoRA on the ARC, HellaSwag, MMLU, TruthfulQA, and Winogrande datasets. Notably, when compared to other dynamic adapters, \sys achieves the highest accuracy on the MMLU and TruthfulQA datasets, highlighting its substantial potential and robust performance.
+
+\begin{table}[!h]
+    \centering
+    \caption{Accuracy of incremental training achieved with different dynamic adapters. 
+    }
+    \label{table:general accuracy}
+    \begin{tabular}{lccccccc}
+    \toprule
+    Method & ARC & HellaSwag & MMLU & TruthfulQA & Winogrande & Avg  \\
+    \midrule
+    Llama2-7B (base) & 51.71 & \textbf{77.74} & 48.30 & 45.31 & 72.45 & 59.10 \\
+    LoRA & 51.79 & 77.02 & 50.46 & 45.13 & 73.80 & 59.64 \\
+    MoRAL (layer-wise) & 52.13 & 77.57 & 51.10 & 45.93 & \textbf{74.35 }& 60.22 \\
+    PESC (block-wise) & \textbf{53.58} & 77.27 & 51.07 & 46.04 & 74.27 & \textbf{60.45} \\
+    \sys (ours) & 52.39 & 77.60 & \textbf{51.15} & \textbf{46.15} & 73.32 & 60.12 \\
+    \bottomrule
+\end{tabular}
+\end{table}
+\begin{table}[!h]
+    \centering
+    \caption{Accuracy of domain-specific fine-tuning achieved with different dynamic adapters.}
+    \label{table:specific accuracy}
+    \begin{tabular}{lcccc}
+    \toprule
+    Methods & ScienceQA & CommonsenseQA & OpenbookQA & Avg \\
+    \midrule
+    Llama2-7B (base) & 53.19 & 47.82 & 45.80 & 48.94 \\
+    Full-Parameter & 93.12 & 77.48 & 80.40 & 83.67 \\
+    LoRA & 91.01 & 75.51 & 77.00 & 81.17 \\
+    MoLA (layer-wise) & \textbf{91.91} & 77.89 & \textbf{82.80} & \textbf{84.20} \\
+    MoRAL (layer-wise) & 90.74 & 76.41 & 76.60 & 81.25 \\
+    PESC (block-wise) & 90.02 & 76.00 & 78.40 & 81.47 \\
+    \sys (ours) & 91.39 & \textbf{79.03} & 80.40 & 83.60 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{Domain-Specific Customization}
+
+Table~\ref{table:specific accuracy} illustrates that our method markedly enhances LLM performance on specific downstream tasks. Achieving an average accuracy of 83.58\%, our approach shows a notable improvement of 2.41\% over traditional LoRA fine-tuning. Additionally, the performance of our method remains highly competitive with other dynamic adapters, only slightly trailing the average accuracy of the MoLA method by 0.62\%. 
+
+This demonstrates the dynamic adapters' ability to significantly outperform both the standard LoRA method and the un-tuned Llama2-7B model, thereby verifying their effectiveness in refining the performance of large language models. Our method also demonstrates resilience by achieving an accuracy marginally lower by only 0.09\% compared to Full-Parameter fine-tuning, further underlining the efficacy of our proposed approach.
+
+Further analysis on individual datasets shows our method outperforming LoRA on the ScienceQA, CommonsenseQA, and OpenbookQA datasets. Our approach also achieves the highest accuracy on the CommonsenseQA dataset when compared with other dynamic adapters, emphasizing both the substantial potential and the robust performance of \sys. 
+
+These findings solidify the effectiveness of our proposed dynamic adapter strategy, making a compelling case for its adoption in enhancing the capabilities of LLMs across varied 
+downstream tasks and domains.
+
+\subsection{Runtime Performance}
+
+As reported in Table~\ref{table:latency}, we have evaluated the inference latency and peak GPU memory usage of our method and various baseline methods on the ShareGPT dataset in response to user queries. The results show that our method exhibits significantly lower decoding latency compared to all other dynamic adapter methods, being 2.7 times faster than the previously fastest method, PESC. Furthermore, our method's decoding latency is less than 30\% higher than that of the original Llama2-7B model.
+
+Overall, all dynamic adapter methods introduce additional decoding latency, ranging from 250\% to 900\%. MOLA exhibits the highest latency due to the incorporation of dynamic adapters at every linear layer within the model, resulting in a substantial number of required CUDA GEMM operations. In contrast, methods like PESC and MoRAL, which only add dynamic adapters to each MLP layer, demonstrate considerably lower decoding latency compared to MOLA.
+\begin{table}[!h]
+    \centering
+    \caption{Latency and memory overhead of different dynamic adapters.}
+    \label{table:latency}
+    \begin{tabular}{lcc}
+    \toprule
+    Method & Decoding latency (ms/token) & Peak Memory (GiB) \\ 
+    \midrule
+    Llama2-7B & 2.4 & 12.9\\
+    MOLA (layer-wise) & 25.3 (+954\%) & 26.3 (+104\%)\\
+    PESC (block-wise) & 8.5 (+254\%) & 13.1 (+2\%)\\
+    MoRAL (layer-wise) & 8.6 (+258\%) & 13.3 (+3\%)  \\
+    \sys (ours) & 3.1 (+29\%) & 13.8 (+7\%)\\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+Regarding peak GPU memory usage, the implementations of PESC, MoRAL, and \sys exhibit only a modest increase of 2\%-7\% compared to the original Llama2-7B model. This indicates that our newly proposed dynamic adapter structures have minimal requirements for GPU memory. In contrast, MOLA exhibits significantly higher GPU memory consumption, which can be attributed to the extensive number of dynamic adapters it incorporates internally. This difference highlights the efficiency of our approach in managing hardware resources while maintaining performance.
+
+\subsection{Ablation Study}
+In our initial experiments, we rigorously assess the influence of diverse adapter configurations on the fine-tuning accuracy of our system, henceforth referred to as \sys. The empirical results consistently demonstrate that \sys significantly outperforms the baseline Llama2-7B model across a variety of adapter setups such as adjustments of the LoRA adapter rank, the number of adapter experts, and Top-K routing.
+
+Further investigation is conducted into the individual contributions of the components within \sys. Notably, the experimental findings reveal a substantial increase in latency when the fused adapter switching mechanism is omitted, underscoring the efficacy of our proposed approach.
+
+
+
+
+\section{Related Work}
+
+
+\textbf{Parameter efficient fine-tuning (PEFT).}
+PEFT stands out as the optimal approach for fine-tuning pretrained large language models (LLMs). Among the myriad of popular techniques are Adapters~\cite{houlsby2019parameterefficient}, Prefix Tuning~\cite{li2021prefixtuning}, Prompt Tuning~\cite{lester2021power}, P-tuning~\cite{liu2023gpt}, and LoRA~\cite{Hu2021LoRALA}, each offering unique advantages. This paper specifically explores the efficacy of LoRA, which has demonstrated superior performance and have the most efficient inference performance.
+
+\textbf{Dynamic adapters.} 
+Existing dynamic adapters can be categorized based on their gating strategies into block-wise and layer-wise types, where adapters are added either to every block or to every layer, respectively. Block-wise methods such as MOLA~\cite{gao2024higher}, MoELoRA~\cite{luo2024moelora}, MoCLE~\cite{gou2024mixture}, and MOELoRA~\cite{liu2023moelora} integrate adapter branches within a single Transformer block. Conversely, layer-wise approaches like MoRAL~\cite{yang2024moral}, PESC~\cite{wu2024parameter}, and LoRAMoE~\cite{dou2024loramoe} incorporate adapters within the MLP’s linear layers. While these methods introduce a minimal amount of parameters, they typically result in high inference latency. In contrast, our work introduces \sys, a novel token-wise dynamic adapter approach that effectively integrates with system optimizations to significantly reduce inference latency. This innovation represents a substantial improvement over traditional dynamic adapter configurations.
+
+
+\section{Conclusion}
+
+
+This paper addresses the significant challenge of inference latency in dynamic adapters for large language models (LLMs). Through a comprehensive analysis, we have identified the underlying factors contributing to increase latency in traditional block-wise and layer-wise adapter models. Our proposed solution, \sys, introduces a novel token-wise dynamic adapter configuration that leverages system-level optimizations to dramatically reduce inference latency without compromising the model's adaptability and performance. The effectiveness of \sys has been validated through rigorous experiments, demonstrating substantial improvements in efficiency across both general and domain-specific datasets. These findings not only enhance our understanding of dynamic adapter architectures but also set a new benchmark for future research in efficient LLM tuning.
+
+\newpage
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{reference}
+
+\newpage
+
+
+
+\section{Profiling latency overhead of dynamic adapters}
+
+
+To meticulously investigate how the inference latency of LoRA adapters and the pretrained backbone varies with increasing computational demands, we conducted tests across different input sequence lengths and examined the relationship between adapter rank and inference latency.
+
+As shown in Figure~\ref{figure:detailed adapter profiling}, regardless of whether it is during the prefilling or decoding phase, and irrespective of the LoRA ranks being high or low, the latency of the LoRA adapters consistently exceeds that of the backbone. This phenomenon is primarily attributed to the number of CUDA kernel calls rather than the computing complexity involved in each call. The underlying reason is that the latency associated with CUDA kernel calls does not scale linearly with computing complexity. This insight highlights a crucial aspect of system behavior that significantly impacts the performance of dynamic adapters.
+
+\begin{figure}[!h]
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/lora_vs_backbone_time_100_token.pdf}
+        \caption{Prefilling phase: sequence length is 100.}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+    \includegraphics[width=\textwidth]{figures/lora_vs_backbone_time_1_token.pdf}
+        \caption{Decoding phase: sequence length is 1.}
+    \end{subfigure}
+    \caption{Latency breakdown of one dynamic adapter layer under different settings.}
+    \label{figure:detailed adapter profiling}
+\end{figure}
+
+
+
+\section{Ablation study extension}
+
+
+\subsection{Ablation study on model performance}
+
+Firstly, we explore the impact of various adapter configurations on the fine-tuned accuracy of \sys.
+We experimented with four modified configurations: a) Setting the number of experts per layer to 16; b) Setting the rank of each LoRA expert to 16; c) Setting the rank of each LoRA expert to 32; d) Changing the Top-2 routing to Top-1 routing. Experiments were conducted on both general and domain-specific tasks.
+
+\begin{table}[!h]
+    \centering
+    \caption{Ablation study on general LLM ability improvements of \sys. 
+    }
+    \label{table:general accuracy ablation}
+    \begin{tabular}{lccccccc}
+    \toprule
+    Method & ARC & HellaSwag & MMLU & TruthfulQA & Winogrande & Avg  \\
+    \midrule
+    LLama2-7B & 51.71 & 77.74 & 48.30 & 45.31 & 72.45 & 59.10 \\
+    \sys (16 expert) & 51.71 & 77.34 & 50.42 & 45.33 & 73.95 & 59.75 \\
+    \sys ($r$=32) & 51.11 & 77.16 & 50.30 & 44.63 & 73.01 & 59.24 \\
+    \sys ($r$=16) & 51.28 & 76.91 & 49.82 & 43.95 & 74.11 & 59.21 \\
+    \sys (Top-1) & 52.65 & 77.33 & 50.69 & 45.07 & 73.56 & 59.86 \\
+    \sys (origin) & 52.39 & 77.60 & 51.15 & 46.15 & 73.32 & 60.12 \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!h]
+    \centering
+    \caption{Ablation study on Domain specific LLM ability improvements of \sys.}
+    \label{table:specific accuracy ablation}
+    \begin{tabular}{lcccc}
+    \toprule
+    Methods & ScienceQA & CommonsenseQA & OpenbookQA & Avg \\
+    \midrule
+    Llama2-7B & 53.19 & 47.82 & 45.80 & 48.94 \\
+    \sys (16 expert) & 92.09 & 76.90 & 77.60 & 82.20 \\
+    \sys ($r$=32) & 89.93 & 77.23 & 79.60 & 82.25\\
+    \sys ($r$=16) & 91.64 & 76.25 & 76.80 & 81.56\\
+    \sys (Top-1) & 91.68 & 74.77 & 76.80 & 81.08\\
+    \sys (origin) & 91.39 & 79.03 & 80.40 & 83.60 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+As depicted in Table~\ref{table:general accuracy ablation} and Table~\ref{table:specific accuracy ablation}, the experimental results indicate that \sys consistently enhances model accuracy across various adapter configurations. When the rank \( r \) of the LoRA experts is set to 32 or 16, the model exhibits relatively lower accuracy. This outcome suggests that a lower rank might not provide sufficient model capacity to assimilate a broad spectrum of new information effectively.
+Furthermore, using Top-1 routing results in a decrease in model accuracy compared to the original Top-2 routing. This decline can be attributed to the fact that, in Top-1 routing, each input token is directed to only one expert, whereas in Top-2 routing, tokens are processed by two experts. Generally, the more experts a token interacts with, the better the expected performance due to enhanced processing capabilities.
+Lastly, our findings reveal that increasing the number of experts to sixteen per layer paradoxically leads to a decrease in accuracy. This suggests that while the model's capacity is augmented, the available data for fine-tuning is insufficient to fully optimize the expanded model capabilities. This discrepancy underscores the need for a balanced approach to configuring dynamic adapters, where both the number of experts and the rank of adapters must be carefully calibrated to the available training resources.
+
+\subsection{Ablation study on runtime latency}
+
+Subsequently, we investigated the effects of different components within \sys. 
+Specifically, we evaluated the impact of replacing the SGMM with a simple merge method to assess how such changes affect the system's performance. This part of our study is crucial for understanding the contribution of each component to the overall effectiveness of \sys.
+
+\begin{table}[!h]
+    \centering
+    \caption{Ablation study for runtime latency of \sys.}
+    \label{table:ablation study latency}
+    \begin{tabular}{lc}
+    \toprule
+    Method & Decoding latency (ms/token) \\ 
+    \midrule
+    Llama2-7B & 2.4 \\
+    MoRAL & 8.5 (+254\%) \\
+    MoRAL (With simple merge) & 4.5 (+88\%) \\
+    \sys (With simple merge) & 5.1 (+ 113\%) \\
+    \sys  & 3.1 (+29\%) \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+As presented in Table~\ref{table:ablation study latency}, replacing the Sparse Generalized Matrix Multiplication (SGMM) in our proposed \sys with a simple merge approach results in a substantial increase in decoding latency, rising from 3.1 ms/token to 5.1 ms/token. This represents a 113\% increase compared to the original Llama2-7B model, underscoring the significant efficiency gains achieved by SGMM during the decoding phase and the consequent reduction in \sys's decoding inference latency. 
+
+We further explored the integration of the simple merge technique into the MoRAL method. Here, after determining which experts to activate within each dynamic adapters layer, we first merge these experts into the base model before inference. This method succeeded in reducing the decoding latency to 4.5 ms/token; however, it still registered an 88\% increase over the original Llama2-7B. These findings highlight the efficiency of our \sys framework, which synergistically optimizes at both the algorithmic and system levels, demonstrating the effectiveness of our novel dynamic adapters architecture.
+
+
+
+

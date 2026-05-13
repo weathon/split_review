@@ -1,8 +1,8 @@
 # A Theoretically-Principled Sparse, Connected, and Rigid Graph Representation of Molecules
 
 - Decision: Accept
-- Avg Score: 4.60
-- Scores: 8, 1, 0, 6, 8
+- Avg Score: 8.00
+- Scores: 8, 10, 6, 8
 
 ## Abstract
 Graph neural networks (GNNs) -- learn graph representations by exploiting graph's sparsity, connectivity, and symmetries -- have become indispensable for learning geometric data like molecules. However, the most used graphs (e.g., radial cutoff graphs) in molecular modeling lack theoretical guarantees for achieving connectivity and sparsity simultaneously, which are essential for the performance and scalability of GNNs. Furthermore, existing widely used graph construction methods for molecules lack rigidity, limiting GNNs' ability to exploit graph nodes' spatial arrangement. In this paper, we introduce a new hyperparameter-free graph construction of molecules and beyond with sparsity, connectivity, and rigidity guarantees. Remarkably, our method consistently generates connected and sparse graphs with the edge-to-node ratio being bounded above by 3. Our graphs' rigidity guarantees that edge distances and dihedral angles are sufficient to uniquely determine general spatial arrangements of atoms. We substantiate the effectiveness and efficiency of our proposed graphs in various molecular modeling benchmarks.

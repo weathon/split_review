@@ -1,0 +1,358 @@
+\title{InterMask: 3D Human Interaction Generation via Collaborative Masked Modelling}
+
+\begin{abstract}
+
+
+Generating realistic 3D human-human interactions from textual descriptions remains a challenging task. Existing approaches, typically based on diffusion models, often generate unnatural and unrealistic results. In this work, we introduce \emph{InterMask}, a novel framework for generating human interactions using collaborative masked modeling in discrete space. InterMask first employs a VQ-VAE to transform each motion sequence into a 2D discrete motion token map. Unlike traditional 1D VQ token maps, it better preserves fine-grained spatio-temporal details and promotes \textit{spatial awareness} within each token. Building on this representation, InterMask utilizes a generative masked modeling framework to collaboratively model the tokens of two interacting individuals. This is achieved by employing a transformer architecture specifically designed to capture complex spatio-temporal interdependencies. During training, it randomly masks the motion tokens of both individuals and learns to predict them. In inference, starting from fully masked sequences, it progressively fills in the tokens for both individuals. With its enhanced motion representation, dedicated architecture, and effective learning strategy, InterMask achieves state-of-the-art results, producing high-fidelity and diverse human interactions. It outperforms previous methods, achieving an FID of $5.154$ (vs $5.535$ for in2IN) on the InterHuman dataset and $0.399$ (vs $5.207$ for InterGen) on the InterX dataset. Additionally, InterMask seamlessly supports reaction generation without the need for model redesign or fine-tuning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+3D human interaction generation is a fundamental task in computer vision and graphics, with applications in animation, virtual reality, robotics, and sports. Although significant progress has been made in generating single-person motion sequences from text descriptions~\citep{tevet2022human,guo2024momask,guo2022generating,pinyoanuntapong2024mmm,zhang2023t2m,petrovich2022temos}, generating two-person interactions remains a significant challenge. In two-person interactions, each individual's motion depends not only on their own state but also on the state of their interacting partner. Additionally, precise spatial positioning and orientation becomes crucial, specially in close-contact cases. These factors add to the complexity and nuances of human interactions resulting in a higher degree of spatial and temporal interdependence compared to single-person motion.
+
+\begin{figure*}[!t]
+	\begin{center}
+	\includegraphics[width=\linewidth]{img/teaser_small.pdf}
+        \end{center}
+	\caption{InterMask generates high fidelity text-conditioned 3D human interactions, with accurate spatial and temporal coordination, including \textit{synchronized dance moves}, \textit{realistic reaction timings in boxing}, and \textit{correct proximity}, while maintaining high-quality poses.}
+	\label{fig:teaser}
+\end{figure*}
+
+Existing works on human interaction generation commonly rely on diffusion models. ComMDM~\citep{shafir2023human} bridges two pretrained single-person motion diffusion models using a small neural layer with limited interaction data. In contrast, InterGen~\citep{liang2024intergen} proposes a specifically tailored diffusion model for two-person interactions, which uses cooperative transformers to model each individual's motion conditioned on the latent features of their partner's motion. in2IN~\citep{ruiz2024in2in} then extends it by conditioning the diffusion model on LLM-generated individual descriptions in addition to the overall interaction descriptions, and leveraging motion priors learned from single-person motion datasets like HumanML3D~\citep{guo2022generating}. MoMat-MoGen~\cite{cai2024digital} retrieves motions from supplementary datasets, based on textual inputs, and refines them for interaction quality. Some very recent efforts~\citep{shan2024towards, fan2024freemotion} extend these methods to more than two individuals. Despite these efforts, the generated two-person interactions still fall short from achieving satisfactory realism and fidelity.
+
+In this work, we present \emph{InterMask}, a novel framework based on generative masked modeling in discrete space~\citep{chang2022maskgit}. InterMask consists of two stages. First, a shared VQ-VAE is trained to transform each individual's motion into a 2D discrete token map using a learned codebook $\mathcal{C}$ (\cref{sec:vqvae}). Unlike previous motion VQ-VAEs~\citep{guo2022tm2t,zhang2023t2m,jiang2023motiongpt,guo2024momask,pinyoanuntapong2024mmm}, which represent motion as a temporal sequence of 1D pose vectors and use 1D convolutions to capture only temporal context in each token, we preserve both temporal and spatial dimensions. Each motion is represented as  $\mathbb{R}^{N \times J \times d}$, where $N$ is the number of poses, $J$ is the number of joints, and $d$ is the joint feature dimension. Using 2D convolutions, we generate a 2D token map, which captures body part context over short time ranges in each token, allowing for better spatial awareness. This is crucial for interactions, where relative body part positioning (e.g., hands) of two individuals holds significant importance.
+
+In the second stage, a specialized Inter-M Transformer (\cref{sec:transformer}) is trained to collaboratively model the tokens of both individuals using a generative masked modeling framework. During training, a random proportion of tokens from either both individuals or only one individual is masked and predicted. The masking proportion follows a scheduling function to ensure its tractability during inference. The inference process begins with all tokens masked, which are progressively generated over a pre-defined number of iterations. At each iteration, the model predicts all masked tokens, but only the most confident predictions are retained, while the rest are re-masked and re-predicted in subsequent iterations. In addition to the standard self attention module, Inter-M Transformer features a shared spatio-temporal attention module to capture fine-grained dependencies within each individual’s motion, and a cross-attention module to capture dependencies between the two individuals' motion. This design effectively the dynamics of spatial and temporal relationships with and between the two individuals, allowing enhanced interaction generation capabilities.
+
+
+The main contributions of this work are as follows. First, we introduce InterMask, a novel masked generative framework for human-human interaction generation from textual descriptions. InterMask utilizes a 2D VQ encoding that transforms motion sequences into discrete 2D token maps and features a dedicated transformer trained with a generative masked modeling framework which effectively captures both intra- and inter-person spatial-temporal dependencies. Second, InterMask achieves state-of-the-art results in generating high-fidelity, text-conditioned human interactions. Empirically, it achieves an FID of 5.15 (vs. 5.54 in~\citet{ruiz2024in2in}) on InterHuman and 0.399 (vs. 5.207 in~\citet{liang2024intergen}) on InterX. Third, InterMask seamlessly supports tasks such as reaction generation without requiring any task-specific fine-tuning or architectural changes.
+    
+    
+
+
+
+
+\section{Related Work}
+
+\label{sec:rel_work}
+
+\noindent{\textbf{Quantized Motion Representation}} Quantized latent representations transform continuous data into discrete tokens, which has been widely explored in human motion generation. Deep Motion Signatures~\citep{aristidou2018deep} adopted the use of contrastive learning to create discrete motif words, while TM2T~\citep{guo2022tm2t} was one of the first to apply VQ-VAE~\citep{van2017neural} to human motion data, producing discrete motion tokens. T2M-GPT~\citep{zhang2023t2m} used Exponential Moving Average (EMA) and code reset techniques to improve the VQ-VAE, later adopted in PoseGPT~\citep{lucas2022posegpt} and MotionGPT~\citep{jiang2023motiongpt,zhang2023motiongpt}. MoMask~\citep{guo2024momask} reduced quantization errors via residual quantization, while MMM~\citep{pinyoanuntapong2024mmm} utilized a large codebook with the factorized codes technique from~\citet{yu2021vector}. Nevertheless, these works often ignore the spatial dimension of motions, where each token encapsulates the whole information of poses in a short range. This limits the locality of each token, which is important in applications like interactions and motion editing. %important in many applications,While effective for single-person motion tasks, these tokenizers are inadequate for multi-person interactions as they neglect the spatial dimension of poses. They generate one-dimensional tokens per timestep, limiting their ability to model the crucial relative positions and orientations, which is addressed in our work.
+\noindent{\textbf{Generative Human Motion Modeling}} Synthesizing single-person motion has gained interest, driven by the availability of large motion capture datasets and advancements in generative modeling techniques like Diffusions~\citep{tevet2022human,kim2023flame,zhang2022motiondiffuse,tseng2023edge,chen2023executing,kong2023priority,lou2023diversemotion} and Autoregressive models~\citep{guo2022tm2t,zhang2023t2m,jiang2023motiongpt,zhang2023motiongpt,gong2023tm2d, lucas2022posegpt, gong2023tm2d}. While these models produce high-quality motions, they require numerous sampling steps during inference. Techniques like the DDIM sampler~\citep{song2020denoising} aim to address this for diffusion models but are still evolving. Additionally, autoregressive models may have limited expressivity since the model only considers past tokens to generate the next one. MoMask~\citep{guo2024momask} and MMM~\citep{pinyoanuntapong2024mmm} attempted to address both these issues by using a masked generative bidirectional transformer to predict all masked tokens simultaneously. These works inspired the base structure of our InterMask.
+
+\noindent{\textbf{Generative Human-Human Interaction Modeling}} Most research on human interaction modeling has targeted two-person interactions, primarily addressing two major tasks: 1) reaction generation, where the reactor's motion is generated based on the actor's motion, and 2) interaction generation, where both individuals' motions are generated simultaneously. While reaction generation has seen increasing interest~\citealp{chopin2023interaction, liu2023interactivehumanoid, xu2024regennet, ghosh2023remos, ren2024insactor, liu2024physreaction}, interaction generation is less explored. ComMDM~\citep{shafir2023human} trained a small neural network to bridge two single-person motion diffusion model (MDM~\citep{tevet2022human}) copies on a limited interaction dataset. On the other hand, RIG~\citep{tanaka2023interaction} and InterGen~\citep{liang2024intergen} introduced interaction diffusion models that simultaneously denoise both individuals' motions, conditioned on their partner's latent representation. Subsequent works, like ~\citet{cai2024digital} and~\citet{ruiz2024in2in} extended interaction diffusion models by using additional single-person annotations and supplementary motion datasets, whereas~\citet{shan2024towards} and~\citet{fan2024freemotion} extended them to handle more than two individuals. While these methods achieve impressive results, there remains significant room for improvement in the quality and realism of two-person interactions. In this paper, we address this by explicitly modeling the spatio-temporal dependencies between interacting individuals' using a masked generative framework.
+
+
+
+\section{Methodology}
+
+
+Our objective is to generate two-person interaction $\{\mathbf{m}_p\}_{p \in \{a, b\}}$ given a textual description, where $\mathbf{m}_p\in \mathbb{R}^{N \times J \times d}$ represents the motion sequences of one individual (either $a$ or $b$), consisting of $N$ poses, each with $J$ joints and $d$-dimensional joint features. As shown in~\Cref{fig:overview}, our methodology consists of two stages. First, we learn a discrete representation of individual motions using a VQ-VAE (\Cref{sec:vqvae}), which maps motion sequences to a 2-dimensional token map $\{t_p\}_{p \in \{a, b\}} \in \{0,1,\cdots,|\mathcal{C}|-1\}^{n \times j}$, where $n$ and $j$ are down-sampled temporal and spatial dimensions, and $\mathcal{|C|}$ is the number of codes in the codebook. Then we learn an interaction masked generative transformer (Inter-M Transformer), (\Cref{sec:transformer}) to collaboratively model the discrete tokens of both individuals.%, ${t_a, t_b}, using bidirectional and spatio-temporal attention.
+\begin{figure*}[tbh]
+	\begin{center}
+	\includegraphics[width=\linewidth]{img/overview_full.pdf}
+        \end{center}
+	\caption{Overview of \textbf{InterMask}. (a) Individual motions are quantized through vector quantization (VQ) to obtain 2D tokens $\{t_a, t_b\}$ for each. (b) Motion tokens from both individuals are flattened, concatenated, masked and predicted collaboratively by the Inter-M Transformer. (c) Each block in Inter-M Transformer consists of Self, Spatio-Temporal and Cross Attention modules to learn complex spatio-temporal dependencies within and between both interacting individuals.}
+	\label{fig:overview}
+\end{figure*}
+\subsection{2D Discrete Motion Token Map} \label{sec:vqvae}
+
+We start by learning a discrete latent representation space for individual motions using a VQ-VAE. We tokenize individual motions instead of the entire interaction because the complexity of modeling interactions is significantly higher. This allows both individuals to share the same discrete token space, simplifying the representation and improving expressivity, as empirically shown in~\Cref{tab:ablation_vq}. Additionally, this provides greater flexibility for complementary tasks such as reaction generation. 
+
+We create a 2D token map with both spatial and temporal dimensions by representing motion as $\mathbf{m}_p \in \mathbb{R}^{N \times J \times d}$ and using 2D convolutions. As illustrated in~\Cref{fig:overview}(a), our VQ-VAE downsamples the input sequence $\mathbf{m}_p$ into a latent representation $\mathbf{\Tilde{t}_p} \in \mathbb{R}^{n \times j \times d'}$, with downsampling ratios $n/N$ and $j/J$. Each $d'$-dimensional vector is then quantized by replacing it with the nearest entry from a learnable codebook $\mathcal{C} = \{\mathbf{c}_k\}_{k=0}^{|\mathcal{C}|-1} \subset \mathbb{R}^{d'}$, producing a quantized sequence $\mathbf{t}_p = \mathrm{Q}(\mathbf{\Tilde{t}}_p) \in \mathbb{R}^{n \times j \times d'}$. This is then decoded to reconstruct the motion $\mathbf{\hat{m}_p = \mathrm{D}(\mathbf{t}_p)}$. After training, each vector in  $\mathbf{t}_p$ can be replaced by its respective index $k$ in  $\mathcal{C}$ to obtain the 2d discrete representation of motion, namely \emph{motion tokens} $\{t_p\}_{p \in \{a, b\}} \in \{0,1,\cdots,|\mathcal{C}|-1\}^{n \times j}$, which is modeled in our Inter-M Transformer.
+
+
+
+\subsubsection{Training Objective}
+Our primary VQ-VAE training objective consists of a motion reconstruction loss and the commitment loss~\citep{van2017neural}:
+\begin{align}
+    \mathcal{L}_{vq} = \|\mathbf{m}_p-\mathbf{\hat{m}}_p\|_1 + \beta\|\mathbf{\Tilde{t}}_p-\mathrm{sg}(\mathbf{t}_p)\|_2^2,
+\end{align}
+where $\mathrm{sg}(\cdot)$ denotes the stop-gradient operation, and $\beta$ a weighting factor. We use Exponential Moving Average (EMA) and codebook reset to update $\mathcal{C}$, following ~\citet{zhang2023t2m}.
+
+We also incorporate geometric losses from~\citet{liang2024intergen} to impose additional constraints, as shown in~\cref{eq:geoloss}. The velocity loss $\mathcal{L}_{vel}$ encourages the reconstructed motion sequences to obey the velocity of joints in the ground truth sequences and the bone length loss $\mathcal{L}_{bl}$ the distance between adjacent joints. The foot contact loss $\mathcal{L}_fc$ encourages the feet to have zero velocity whenever they are in contact with the ground.
+
+\begin{equation}
+\begin{aligned}
+    \mathcal{L}_{vel} = \frac{1}{N-1} \sum_{i_n=1}^N \| (m_{i_n+1} - m_{i_n}) - (\hat{m}_{i_n+1} - \hat{m}_{i_n}) \|_1\\
+    \mathcal{L}_{fc} = \frac{1}{N-1} \sum_{i_n=1}^N \| (\hat{m}_{i_n+1} - \hat{m}_{i_n}) \cdot f_{i_n} \|_1\\
+    \mathcal{L}_{bl} = \frac{1}{N-1} \sum_{i_n=1}^N \| B(m_{i_n}) - B(\hat{m}_{i_n})\|_1
+    \label{eq:geoloss}
+\end{aligned}
+\end{equation}
+
+Here, $m_{i_n}$ represents the ground pose, $\hat{m}_{i_n}$ represents the reconstructed pose at time step $i_n$, $N$ represents the total time steps in the sequence, $f_{i_n} \in \{0,1\}$ represents the binary foot contact label for the heel and toe joints for each pose $m_{i_n}$, and $B(\cdot)$ denotes the bone lengths joining adjacent joints.
+
+The overall loss function $\mathcal{L}_{vqvae}$ is a weighted sum of the primary VQ loss and geometric losses:
+\begin{equation}
+    \mathcal{L}_{vqvae}  = \mathcal{L}_{vq} + \lambda_{vel}\mathcal{L}_{vel} +  \lambda_{fc}\mathcal{L}_{fc} + \lambda_{bl}\mathcal{L}_{bl}
+    \label{eq:vqvaeloss}
+\end{equation}
+
+ 
+
+\subsection{Interaction Masked Generative Transformer}\label{sec:transformer}
+Next, the motion tokens for both individuals \{$t_a, t_b$\} are collaboratively modeled by our Inter-M Transformer, capturing complex spatial and temporal dependencies within and between them. Importantly, there is no order to the actions of interacting individuals in this task. Therefore we make sure our data sampling, transformer architecture and embedding design are all permutation invariant.
+\subsubsection{Token Masking and Embedding} 
+
+As shown in~\Cref{fig:overview}(b), we first flatten and concatenate $t_a$ and $t_b$, separated by a special $[\mathrm{SEP}]$ token, to form a consolidated sequence $t \in \mathbb{Z}^{2nj+1}$. A subset of these tokens is then masked by replacing with a learnable special-purpose token $[\mathrm{MASK}]$ following a two-stage scheme. In the first stage, we apply \emph{random masking} with probability $p_r$ or \emph{interaction masking} with $1-p_r$. In random masking, both $t_a$ and $t_b$ are randomly masked with ratio $\gamma(\tau_i)$, controlled by a cosine scheduling function~\citep{chang2022maskgit}, as shown in~\cref{eq:mask}. In interaction masking, one of $\{t_a, t_b\}$ is kept fully unmasked, encouraging the model not to rely on the tokens from the same individual and learn inter-individual dependencies.
+\begin{equation}
+\begin{aligned}
+    \gamma(\tau_i) = \cos\left(\frac{\pi\tau_i}{2}\right) \in [0, 1]  \\
+    \tau_i \sim \mathcal{U}(0, 1)
+\end{aligned}
+\label{eq:mask}
+\end{equation}
+
+In the second stage, we employ \emph{step unroll masking}, adopted from~\citet{kim2023magvlt}, where we remask a portion ($\gamma(\tau_{i+1})$) of the predicted tokens with the lowest confidence scores and predict them again. This refines the predictions iteratively, aligning with the inference process, where tokens are progressively revealed. The masked tokens $\Tilde{t}$ are then embedded using the \emph{input process} module, consisting of a learnable embedding layer and a linear transformation. Then, 2D positional encodings, from ~\citet{wang2019translating}, are added to impose spatio-temporal structure on the embeddings. The updated embeddings, $\mathbf{e}^0 \in \mathbb{R}^{(2nj+1) \times \Tilde{d}}$, where $\Tilde{d}$ is the transformer embedding dimension, are then passed through $\mathbf{L}$ blocks of the Inter-M transformer.
+
+\subsubsection{Transformer block design}
+As illustrated in ~\Cref{fig:overview}(c), each Inter-M block starts with a self-attention module~\citep{vaswani2017attention} to model long-range, global dependencies within and between individuals. Then we introduce a novel shared spatio-temporal attention layer to model spatial and temporal dependencies within each individual's motion tokens. Finally, we employ a shared cross attention layer to model inter-individual dependencies. This design enables rich and dynamic modeling of spatio-temporal interactions, ensuring effective learning of both intra- and inter-individual relationships.
+
+\noindent{\textbf{Self Attention}} Let $\mathbf{e}^{l-1} \in \mathbb{R}^{(2nj+1) \times \Tilde{d}}$ represent the input token embeddings to block $l$, where $l \in \{1,2, \dots \mathbf{L}\}$. The block architecture begins with a self-attention module which computes attention scores for all tokens in the sequence using the standard scaled dot-product attention mechanism:
+\begin{equation}
+    \mathrm{Attn}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \mathrm{softmax}(\mathbf{QK}^\top / \sqrt{\Tilde{d}}) \mathbf{V}
+    \label{eq:selfattn}
+\end{equation}
+where the query, key, and value matrices, $\mathbf{Q}$, $\mathbf{K}$, and $\mathbf{V}$, are linear projections of $\mathbf{e}_{l-1}$. The self attention module is followed by a feedforward network (FFN).
+\noindent{\textbf{Spatio-Temporal Attention}} Next, we split the embeddings of the two individuals and pass them through a shared spatio-temporal attention module. This module consists of two separate attention mechanisms: spatial attention and temporal attention. In the spatial attention module, each token attends only to other spatial tokens within the same temporal instance; and in the temporal attention module, each token attends only to tokens across the temporal dimension at the same spatial location. Let $\mathbf{e}_p^{l-1}$ represent the updated embeddings of individual $p \in \{a,b\}$ in block $l$ after the self attention module. We drop the $l-1$ superscript to simplify the notation. Then $\mathbf{e}_p(i_n) \in \mathbb{R}^{j \times \Tilde{d}}$ represent the spatial tokens of individual $p$ at temporal instance $i_n$, and $\mathbf{e}_p(i_j) \in \mathbb{R}^{n \times \Tilde{d}}$ represent the temporal tokens of individual $p$ at spatial location $i_j$. The spatial and temporal attention is defined as:
+\begin{equation}
+    \mathbf{e}_p'(i_n) = \mathrm{Attn}(\mathbf{Q}_j, \mathbf{K}_j, \mathbf{V}_j) \quad \mathbf{e}_p''(i_j) = \mathrm{Attn}(\mathbf{Q}_n, \mathbf{K}_n, \mathbf{V}_n)
+\label{eq:spatiotempattn} 
+\end{equation}
+where $\mathbf{Q}_j, \mathbf{K}_j, \mathbf{V}_j$, and $\mathbf{Q}_n, \mathbf{K}_n, \mathbf{V}_n$ are the spatial queries, keys and values and temporal queries, keys, and values, obtained from $\mathbf{e}_p(i_n)$ and $\mathbf{e}_p(i_j)$  respectively. After updating the embeddings with spatial and temporal attention, the outputs of these two modules are added together for each token:
+\begin{equation}
+    \mathbf{e}_p = \mathbf{e}_p'(i_n) + \mathbf{e}_p''(i_j) \quad \forall \quad 0 < i_n < n,  0 < i_j < j
+    \label{spatiotempattn}
+\end{equation}
+
+\noindent{\textbf{Cross Attention}} Next, we apply a shared cross attention module to model dependencies between the two individuals. Each token of individual $a$ attends to all tokens of individual $b$ and vice versa:
+\begin{equation}
+\mathbf{e}_a' = \mathrm{Attn}(\mathbf{Q}_a, \mathbf{K}_b, \mathbf{V}_b) \quad \mathbf{e}_b' = \mathrm{Attn}(\mathbf{Q}_b, \mathbf{K}_a, \mathbf{V}_a)
+\label{eq:interattn}
+\end{equation}
+where $\mathbf{Q}_a, \mathbf{K}_a, \mathbf{V}_a$, and $\mathbf{Q}_b, \mathbf{K}_b, \mathbf{V}_b$ are the queries, keys and values obtained from embeddings $\mathbf{e}_a, \mathbf{e}_b$ of each individual. Finally, each individual's embeddings are passed through another FFN and concatenated to form the sequence $\mathbf{e}^l \in \mathbb{R}^{(2nj+1) \times \Tilde{d}}$, which is passed to the next block.
+
+\noindent{\textbf{Text Conditioning}} We condition our transformer blocks on the input text by replacing the standard layer normalization in each attention and FFN module with modulated adaptive layer normalization (AdaLN-mod) as proposed by \citet{dit}. In AdaLN-mod, the dimension-wise scale and shift parameters are regressed using a multi-layer perceptron (MLP), from the conditional vector $c$, obtained from a frozen, pre-trained CLIP network \citep{radford2021learning}. This modulation allows the model to dynamically adapt its normalization based on the content of $c$. Additionally, we initialize each residual connection in the transformer block as an identity function by regressing another scale parameter $\alpha$ from $c$, which is initialized to output a zero vector. This ensures that the network can adapt the modulation during learning without imposing strong biases at initialization.
+
+\subsubsection{Output Process} After the final block, we
+use a standard linear projector with AdaLN-mod to map the output $\mathbf{e}^\mathbf{L}$ to the indices of codebook $\mathcal{C}$, $\mathbf{e}_{out} \in \mathbb{R}^{2nj \times |\mathcal{C}|}$, where $|\mathcal{C}|$ represents the size of $\mathcal{C}$. As defined in~\cref{eq:maskobjective}, the transformer's training objective minimizes the negative log-likelihood of the masked tokens, computed as the cross-entropy between the one-hot encoded ground truth and model predictions.
+
+\begin{align}
+    \mathcal{L}_{mask} = \sum_{\Tilde{t}_k=[\mathrm{MASK}]}-\log p_\theta(t_k| \Tilde{t}, c).
+    \label{eq:maskobjective}
+\end{align}
+
+\subsection{Inference}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{img/inference.pdf}
+    \caption{Inference process. Starting from completely masked token sequences of both individuals $\{t_a(0), t_b(0)\}$, the Inter-M transformer generates all tokens in $I$ iterations. Next, the tokens are dequantized and decoded to generate motion sequences  $\{\mathbf{m}_a, \mathbf{m}_b\}$ using the VQ-VAE decoder.}
+    \label{fig:inference}
+\end{figure}
+
+As illustrated in~\Cref{fig:inference}, the inference process consists of two stages. Starting with a fully masked sequence $t(0)$, the Inter-M transformer generates tokens for both individuals over $I$ iterations. At each iteration $i$, the transformer predicts token probabilities at masked locations, then samples tokens and remasks those with the lowest $\lceil\gamma\left(\frac{i}{I}\right)\cdot 2nj\rceil$ confidence scores, repeating until $i$ reaches $I$. The final token sequence is decoded back into motion using the VQ-VAE decoder. A cosine schedule $\gamma\left(\frac{i}{I}\right)$ controls the number of retained tokens, increasing as $i$ progresses. Classifier-free guidance~\citep{ho2022classifier} is also applied for refinement, following~\citet{chang2022maskgit}. 
+
+
+\section{Experiments}
+
+
+\noindent{\textbf{Datasets}} We adopt two datasets to evaluate InterMask for the text-conditioned human interaction generation task: InterHuman~\citep{liang2024intergen} and InterX~\citep{xu2024inter}. The InterHuman dataset contains 7,779 interaction sequences and InterX contains 11,388, each paired with 3 distinct textual annotations. InterHuman follows the AMASS~\citep{mahmood2019amass} skeleton representation with 22 joints, including the root joint. Each joint is represented by $\{p_g, v_g, r_{6d}\}$, where $p_g \in \mathbb{R}^3$ is the global position, $v_g\in \mathbb{R}^3$ is the global velocity, and $r_{6d}\in \mathbb{R}^6$ is the local 6D rotation of each joint, rendering $\mathbf{m}_p \in \mathbb{R}^{N\times22\times12}$. InterX follows the SMPL-X~\citep{SMPL-X:2019} skeleton representation, comprising 54 body, hands and face joints, accompanied by root orientation and translation. Each joint and root orientation is represented by $\{r_{6d}\}$ and root translation by $\{p_g\}$, to which we incorporate root velocity rendering root $\{p_g, v_g\}$ and $\mathbf{m}_p \in \mathbb{R}^{N\times56\times6}$. We adhere to the respective body representations of both datasets to demonstrate that our framework is compatible with different representation formats and joint counts. Other implementation details including architecture, training and inference hyper-parameters are provided in~\cref{app:implementation}.
+
+\noindent{\textbf{Evaluation Metrics}} Following~\citet{liang2024intergen}, we adopt several feature-space evaluation metrics to assess the performance of our model. These include the Frechet Inception Distance (\emph{FID}), which measures the fidelity of the generated interactions by calculating similarity between the generated and real interactions feature distributions. Additionally we employ \emph{R-precision} and \emph{MMDist}, which evaluate how well the generated interactions align with the corresponding texts. Furthermore, we use \emph{Diversity} to measure the overall variation in generated interactions, and multimodality (\emph{MModality}) to quantify the ability to generate multiple distinct interactions for the same text.  
+
+\subsection{Comparison with state-of-the-art approaches}
+\label{exp:comparison}
+\begin{table*}[t]
+    \centering
+    \scalebox{0.66}{
+    \begin{tabular}{l l c c c c c c c}
+    \toprule
+    \multirow{2}{*}{Dataset} & \multirow{2}{*}{Method}  & \multicolumn{3}{c}{R Precision$\uparrow$} & \multirow{2}{*}{FID$\downarrow$} & \multirow{2}{*}{MM Dist$\downarrow$} & \multirow{2}{*}{Diversity$\rightarrow$} & \multirow{2}{*}{MModality$\uparrow$}\\
+
+    \cmidrule{3-5}
+       ~& ~ & Top 1 & Top 2 & Top 3 \\
+    \midrule
+    \multirow{8}{*}{\makecell[c]{Inter\\Human}}& Ground Truth & \et{0.452}{.008} & \et{0.610}{.009} & \et{0.701}{.008} & \et{0.273}{.007} & \et{3.755}{.008} & \et{7.948}{.064} & -  \\ 
+    
+    \cmidrule{2-9}
+        ~& T2M~\citep{guo2022generating} & \et{0.238}{.012} & \et{0.325}{.010} & \et{0.464}{.014} & \et{13.769}{.072} & \et{5.731}{.013} & \et{7.046}{.022} & \et{1.387}{.076}  \\
+    
+        
+        ~& MDM~\citep{tevet2022human} & \et{0.153}{.012} & \et{0.260}{.009} & \et{0.339}{.012} & \et{9.167}{.056} & \et{7.125}{.018} & \et{7.602}{.045} & \et{\textbf{2.350}}{.080} \\   
+        
+        ~& ComMDM~\citep{shafir2023human} & \et{0.223}{.009} & \et{0.334}{.008} & \et{0.466}{.010} & \et{7.069}{.054} & \et{6.212}{.021} & \et{7.244}{.038} & \et{1.822}{.052} \\
+
+        ~ & InterGen~\citep{liang2024intergen} & \et{0.371}{.010} & \et{0.515}{.012} & \et{0.624}{.010} & \et{5.918}{.079} & \et{5.108}{.014} & \et{7.387}{.029} & \et{\underline{2.141}}{.063} \\
+        
+        ~ & MoMat-MoGen~\citep{cai2024digital} & \et{\textbf{0.449}}{.004} & \et{\underline{0.591}}{.003} & \et{\underline{0.666}}{.004} & \et{5.674}{.085} & \et{\textbf{3.790}}{.001}  & \et{8.021}{.35} & \et{1.295}{.023} \\
+        ~ & in2IN~\citep{ruiz2024in2in} & \et{\underline{0.425}}{.008} & \et{0.576}{.008} & \et{0.662}{.009} & \et{\underline{5.535}}{.120} & \et{\underline{3.803}}{.002}  & \et{\underline{7.953}}{.047} & \et{1.215}{.023} \\
+
+    \cmidrule{2-9}
+        ~ & \textbf{InterMask} & \et{\textbf{0.449}}{.004} & \et{\textbf{0.599}}{.005} & \et{\textbf{0.683}}{004} & \et{\textbf{5.154}}{.061} & \et{\textbf{3.790}}{.002}  & \et{\textbf{7.944}}{.033} & \et{1.737}{.020}  \\
+    \midrule \\
+    \multirow{8}{*}{\makecell[c]{InterX}} & Ground Truth & \et{0.429}{.004} & \et{0.626}{.003} & \et{0.736}{.003} & \et{0.002}{.0002} & \et{3.536}{.013} & \et{9.734}{.078} & -  \\ 
+    \cmidrule{2-9}
+        ~& T2M~\citep{guo2022generating} & \et{0.184}{.010} & \et{0.298}{.006} & \et{0.396}{.005} & \et{5.481}{.382} & \et{9.576}{.006} & \et{2.771}{.151}  & \et{2.761}{.042}\\   
+        
+        ~& MDM~\citep{tevet2022human} & \et{0.203}{.009} & \et{0.329}{.007} & \et{0.426}{.005} & \et{23.701}{.057} & \et{\underline{9.548}}{.014} & \et{5.856}{.077} & \et{\underline{3.490}}{.061} \\
+        
+        ~& ComMDM~\citep{shafir2023human} & \et{0.090}{.002} & \et{0.165}{.004} & \et{0.236}{.004} & \et{29.266}{.067} & \et{6.870}{.017}  & \et{4.734}{.067} & \et{0.771}{.053} \\
+
+        ~& InterGen~\citep{liang2024intergen} & \et{\underline{0.207}}{.004} & \et{\underline{0.335}}{.005} & \et{\underline{0.429}}{.005} & \et{\underline{5.207}}{.216} & \et{9.580}{.011}  & \et{\underline{7.788}}{.208} & \et{\textbf{3.686}}{.052} \\
+
+    \cmidrule{2-9}
+        ~& \textbf{InterMask} & \et{\textbf{0.403}}{.005} & \et{\textbf{0.595}}{.004} & \et{\textbf{0.705}}{005} & \et{\textbf{0.399}}{.013} & \et{\textbf{3.705}}{.017} & \et{\textbf{9.046}}{.073}  & \et{2.261}{.081} \\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{\textbf{Quantitative evaluation} on the \textbf{InterHuman} and \textbf{InterX} test sets. $\pm$ indicates a 95\% confidence interval and $\rightarrow$ means the closer to ground truth the better. \textbf{Bold} face indicates the best result, while \underline{underscore} refers to the second best.}
+    \label{tab:quantitative_eval}
+
+\end{table*}
+
+\noindent\textbf{Quantitative Comparison} \Cref{tab:quantitative_eval} shows quantitative comparison of our \textbf{InterMask} with previous methods. All evaluations are run 20 times (with the exception of MModality, which is run 5 times), and we report the averaged results along with a 95\% confidence interval. InterMask achieves state-of-the-art (SOTA) results on both InterHuman and InterX datasets.  It records the lowest FID scores (5.154 on InterHuman and 0.399 on InterX), indicating superior realism and quality of generated interactions, and leads in R-Precision and MMdist, showing excellent text alignment. With different body representations in each dataset, these results highlight the robustness of our method, proving it is not dependent on a specific body pose structure. Furthermore, the larger performance gap on the larger InterX dataset suggests that InterMask scales effectively with more data. While our MModality is slightly lower than some methods, the high R-Precision and low MMdist emphasize that InterMask prioritizes adherence to text over extreme diversity, yet still achieves high Diversity scores, demonstrating its ability to generate a broad range of interactions. Please refer to~\cref{app:diversity} for visual demonstration of InterMask's ability to generate diverse results from the same text prompt.
+
+\noindent\textbf{Qualitative Comparison}
+In~\Cref{fig:comp}, we provide a qualitative comparison of interaction sequences generated by our InterMask and InterGen~\citet{liang2024intergen}, trained on the InterHuman dataset, for the same text descriptions. For the prompt "\emph{The first person raises the right leg aggressively towards the second}", InterGen incorrectly raises both legs, while InterMask accurately raises only the right leg. For "\emph{Two people bow to each other}", InterGen introduces an unnecessary fighting gesture after the bow, indicating overfitting to implicit biases in the training data, whereas InterMask stays true to the simple bow. Lastly, for "\emph{One person is sitting and waving their hands at the other person, while the other drifts away}", InterGen generates a crouching pose instead of sitting and misplaces the waving action, while InterMask faithfully generates the described scene. These examples demonstrate that InterMask produces more higher quality and more reliable interactions compared to InterGen. 
+\begin{figure*}[t]
+	\begin{center}
+	\includegraphics[width=\linewidth]{img/comparison.pdf}
+        \end{center}
+	\caption{Qualitative comparison between InterMask and InterGen~\citep{liang2024intergen}, highlighting InterMask's superior interaction quality, text adherence and avoidance of implicit biases.}
+	\label{fig:comp}
+\end{figure*}
+
+    
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.525\textwidth}
+\centering
+\scalebox{0.815}{
+\begin{tabular}{l c c c }
+    \toprule
+   \multirow{2}{*}{\makecell[c]{Input Modality}} & \multirow{2}{*}{\makecell[c]{Token\\Map}} &  \multirow{2}{*}{\makecell[c]{Recon\\FID$\downarrow$}} & \multirow{2}{*}{\makecell[c]{MPJPE $\downarrow$}}  \\ \\
+    \midrule
+    Individual Motion & 1d & 3.146 & 0.354 \\
+    Two-Person Interaction & 2d & 1.276 & 0.198 \\
+    Individual Motion & 2d & \textbf{0.970} & \textbf{0.129} \\
+    \bottomrule
+    \end{tabular}}
+   \captionof{table}{Ablation Study results on InterHuman test set to verify key components of the proposed \textbf{Motion VQ-VAE}. \textbf{Bold} face indicates the best result.}
+   \label{tab:ablation_vq}
+\end{minipage}
+\hfill
+\centering
+    \begin{minipage}{0.425\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{img/user_study_plot.pdf}
+        \caption{User Study comparing our InterMask and InterGen~\citep{liang2024intergen}.}
+        
+        \label{fig:user_study_plot}
+    \end{minipage}
+\end{figure}
+
+\noindent\textbf{User Study} User studies are essential in generative AI, complementing metrics like FID by incorporating human perception to evaluate the realism and quality of generated content. To compare our \textbf{InterMask} with InterGen~\citep{liang2024intergen}, we conducted a user study where 30 interaction sequences were generated by both models with identical motion lengths. Each sequence pair was rated by 3 users on interaction quality and adherence to text (scores out of 5), and users selected their preferred sequence based on both factors. More details are provided in~\cref{app:user_study}. As shown in~\Cref{fig:user_study_plot}, InterMask outperforms InterGen in interaction quality (4.089 vs. 3.296) and text adherence (3.938 vs. 3.198), with 69.14\% of users preferring \textit{InterMask} over InterGen.
+
+\noindent\textbf{Computation and Time Cost} In addition to superior generation fidelity and text adherence, InterMask demonstrates better computational efficiency when compared to InterGen~\citep{liang2024intergen}. InterMask contains only \textbf{74} M inference parameters, compared to 182 M for InterGen, resulting in a considerably smaller model footprint. Furthermore, InterMask achieves an average inference time of \textbf{0.77} seconds, less than half of InterGen’s 1.63 seconds, highlighting its low latency. 
+
+\subsection{Ablation Studies}
+\label{exp:ablation}
+\begin{table*}[t]
+    \centering
+    \scalebox{0.675}{
+    \begin{tabular}{l c c c c c c c}
+    \toprule
+    \multirow{2}{*}{Method}  & \multicolumn{3}{c}{R Precision$\uparrow$} & \multirow{2}{*}{FID$\downarrow$} & \multirow{2}{*}{MM Dist$\downarrow$} & \multirow{2}{*}{Diversity$\rightarrow$} & \multirow{2}{*}{MModality$\uparrow$} \\
+
+    \cmidrule{2-4}
+       ~ & Top 1 & Top 2 & Top 3 \\
+    \midrule
+    Ground Truth & \et{0.452}{.008} & \et{0.610}{.009} & \et{0.701}{.008} & \et{0.273}{.007} & \et{3.755}{.008} & \et{7.948}{.064} & - \\
+    
+    \cmidrule{1-8}
+        Alternative Modeling & \et{0.340}{.002} & \et{0.425}{.009} & \et{0.514}{.006} & \et{7.637}{.072} & \et{3.937}{.003} & \et{8.424}{.022} & \et{\textbf{2.192}}{.076} \\
+    
+        \cmidrule{1-8}
+        Collaborative Modeling & ~ & ~ & ~ & ~ & ~ & ~ & ~ \\
+        
+       w/o Self Attention  & \et{0.393}{.006} & \et{0.527}{.005} & \et{0.596}{007} &\et{5.715}{.067} & \et{3.827}{.003} & \et{7.873}{.034} & \et{1.683}{.076} \\
+
+         w/o Cross Attention  & \et{0.328}{.008} & \et{0.416}{.009} & \et{0.508}{007} & \et{8.461}{.076} & \et{3.972}{.005} & \et{\textbf{7.951}}{.085} & \et{1.942}{.076}\\
+        
+       w/o Spatio-Temporal Attention  & \et{0.296}{.004} & \et{0.391}{.007} & \et{0.470}{005}  & \et{10.968}{.093} & \et{4.219}{.006} & \et{7.659}{.023} & \et{1.607}{.076} \\
+        w/o Step Unroll and Interaction Masking  & \et{0.402}{.003} & \et{0.548}{.004} &  \et{0.633}{002} & \et{5.629}{.053} & \et{3.806}{.002} & \et{7.942}{.096} & \et{1.741}{.076}\\
+
+    \cmidrule{1-8}
+        \textbf{InterMask} & \et{\textbf{0.449}}{.004} & \et{\textbf{0.599}}{.005} & \et{\textbf{0.683}}{004} & \et{\textbf{5.154}}{.061} & \et{\textbf{3.790}}{.002}  & \et{7.944}{.033} & \et{1.737}{.020} \\
+    
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Ablation Study results on the InterHuman test set to verify key components of the proposed \textbf{Inter-M Transformer}. \textbf{Bold} face indicates the best result.}
+    \label{tab:ablation_trans}
+
+\end{table*}
+\begin{figure*}[t]
+\centering
+	\begin{center}
+	\includegraphics[width=\linewidth]{img/ablation_vq.pdf}
+        \end{center}
+ \caption{Qualitative results for the ablation study on Motion VQ-VAE to verify the proposed 2D token map.}
+
+	\label{fig:ablation_vq}
+\end{figure*}
+\begin{figure*}[thb]
+\centering
+	\begin{center}
+	\includegraphics[width=\linewidth]{img/ablation_trans.pdf}
+        \end{center}
+ \caption{Qualitative results for the ablation study on Inter-M Transformer to verify the proposed Spatio-Temporal Attention module.}
+
+	\label{fig:ablation_trans}
+\end{figure*}
+
+\noindent\textbf{Motion VQ-VAE} Table~\ref{tab:ablation_vq} presents an ablation study to evaluate key components of our proposed \emph{Motion VQ-VAE}. We investigated two primary factors: the input modality (individual motions vs two-person interactions) and the token map dimensions (1d vs 2d), using Reconstruction FID and MPJPE (Mean Per Joint Position Error). The results demonstrate that using individual motions as input with a 2D token map outperforms both the baseline of individual motions with a 1D token map, and the two-person interaction with a 2D token map. These findings suggest that preserving spatial information through 2D token maps and focusing on individual motions performs accurate motion reconstruction, and creates a more expressive token map with high-fidelity movement details. This can be further verified by the qualitative comparison provided in \Cref{fig:ablation_vq}. As shown, the 1D VQ-VAE struggles to accurately reconstruct the spatial positions and orientations of the joints for both individuals, leading to not only unrealistic interactions but also abnormal individual poses. In contrast, the proposed 2D VQ-VAE provides highly accurate reconstruction at both the individual pose and the collective interaction level.
+
+\noindent\textbf{Inter-M Transformer} Table~\ref{tab:ablation_trans} presents an ablation study to evaluate key components of our \emph{Inter-M Transformer}. We compared collaborative modeling against alternative modeling and examined the impact of various attention mechanisms and masking strategies. \emph{Alternative Modeling} (\cref{app:alternative}) models tokens of one person at a time, while conditioning in on the tokens of the other person, leading to an alternative generation during inference. \emph{Collaborative Modeling} on the other hand, models tokens of both individuals simultaneously. Our full InterMask model with collaborataive modeling outperforms all ablated versions, particularly in R-Precision and FID scores. Notably, removing any of the attention mechanisms or employing alternative modeling severely degraded performance, with spatio-temporal attention being the most crucial one. Additionally, step unroll and interaction masking proved to be further fine-tuning the results. These results highlight the synergistic importance of all components in our transformer architecture for effective interaction modeling. The contribution of spatio-temporal attentionis further verified by the qualitative comparison illustrated in~\Cref{fig:ablation_trans}. While the model without spatio-temporal attention generates somewhat plausible individual poses, such as \emph{punching} and \emph{blocking} in the \emph{boxing} scenario, it fails to fully capture the dynamics of the interaction, leading to incorrect positioning between the two individuals. Similarly, in the \emph{sneaking} scenario, the model without spatio-temporal attention does not capture the gradual change in distance between the two individuals, where one should be moving closer to the other. In contrast, the model with spatio-temporal attention accurately captures these spatial dynamics and interactions.
+
+\subsection{Application: Reaction Generation}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{img/reaction.pdf}
+    \caption{Reaction generation samples with and without text descriptions, including holistic instruction for both individuals and separate instructions for each.}
+    \label{fig:reaction}
+\end{figure}
+One of the key strengths of our InterMask model is its seamless support for the task of reaction generation with or without a text condition, where the motion of one person in an interaction is generated based on the provided reference motion of the other person. Unlike previous diffusion-based models, such as InterGen~\citep{liang2024intergen}, InterMask can perform this task without any task-specific fine-tuning or architectural re-design. This flexibility arises from our use of the masked modeling technique combined with an individual motion tokenizer, which does not require interactions as input. During inference, we simply tokenize the reference motion, leave its tokens unmasked, and progressively generate tokens of the other person. More details are provided in~\cref{app:reaction}.
+
+Quantitatively, InterMask achieves an FID of $2.99$ and an R-precision of $0.462$ on InterHuman for reaction generation. In comparison, InterGen suffers from a performance drop with an FID of $52.89$ (vs $5.918$ for interaction generation) and an R-precision of $0.194$ (vs $0.371$) when adopted for reaction generation without fine-tuning, demonstrating its inability to perform reaction generation out-of-the-box. As shown qualitatively in Figure~\ref{fig:reaction}, InterMask produces high-quality reaction motions. In cases without text conditioning, when the reference motion involves dancing, the generated motion follows the reference steps and even captures nuanced details like raising the same leg or arm. Similarly, for the physical combat scenario, when the reference motion attacks, the generated motion retreats and vice versa. For text-conditioned samples, InterMask performs equally well, whether the text describes both people’s motions or provides separate descriptions for each. The model accurately identifies the required reaction form text and the reference motion and generates the corresponding motion, maintaining high-quality poses and realistic timings throughout.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, we presented InterMask, a novel framework for generating realistic 3D human interactions through generative masked modeling in the discrete space. InterMask first employs a VQ-VAE to transform individual motion sequences into 2D discrete token maps, preserving both spatial and temporal dimensions. Then, a specialized Inter-M transformer collaboratively models the motion tokens of both individuals, capturing intricate spatial and temporal dependencies within and between them. Quantitative evaluations show that InterMask excels in generating realistic and contextually aligned motions, achieving the lowest FID scores and superior results in R-Precision and MMdist on both the InterHuman and InterX datasets compared to existing models. Additionally, user studies comparing InterMask to InterGen reveal a 69\% user preference for InterMask, noting higher-quality and more realistic interactions. The flexibility of our approach is also evident by its ability to perform equally well for different body representations. While there are minor trade-offs in diversity (MModality), InterMask consistently maintains high quality and adherence to text while generating a wide range of realistic interactions.
+
+\noindent\textbf{Limitations and Future Work} 
+While InterMask generates high-quality human interactions, there are some limitations. First, when visualized as SMPL~\cite{loper2015smpl} meshes, issues such as body penetration between individuals and jerky movements during rapid actions can occur. Second, our model sometimes interprets motions as dances without explicit prompting, likely due to implicit biases in the training dataset. Lastly, our approach is currently optimized for short sequences up to 10 seconds, reflecting the constraints of our dataset. Visual examples are shown in~\cref{app:failure}. Future research directions include implementing techniques for smoother transitions, addressing dataset biases, and expanding the model's capacity to handle longer interaction sequences.
+
+
+\input
+
+
+
+
+
+
+
+
+
+
+
+
+

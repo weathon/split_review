@@ -1,0 +1,342 @@
+\title{Mitigate Position Bias in Large Language Models via Scaling a Single Dimension}
+
+\begin{abstract}
+Large Language Models (LLMs) are increasingly applied in various real-world scenarios due to their excellent generalization capabilities and robust generative abilities. However, they exhibit position bias, also known as "lost in the middle", a phenomenon that is especially pronounced in long-context scenarios, which indicates the placement of the key information in different positions of a prompt can significantly affect accuracy. This paper first explores the micro-level manifestations of position bias, concluding that attention weights are a micro-level expression of position bias. It further identifies that, in addition to position embeddings, causal attention mask also contributes to position bias by creating position-specific hidden states. Based on these insights, we propose a method to mitigate position bias by scaling this positional hidden states. Experiments on the NaturalQuestions Multi-document QA, KV retrieval, LongBench and timeline reorder tasks, using various models including RoPE models, context window-extended models, and Alibi models, demonstrate the effectiveness and generalizability of our approach. Our method can improve performance by up to 15.2\% by modifying just one dimension of hidden states.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+
+
+Long-context large language models (LLMs)~\citep{gradient2024, reid2024gemini, liu2023world, young2024yi, Abdin2024Phi3TR, deepseekv2} have recently garnered significant attention within the community, enabling LLMs to handle longer and more complex tasks such as long-context question-answering~\citep{caciularu2023peek, li_long-context_2024} and repository-level code understanding~\citep{bairi2023codeplan}.
+However, recent researches \citep{li_long-context_2024,liu_lost_2023,li_loogle_2023,shi_large_2023,tang_large_2023}, indicates that these long-context LLMs struggle to effectively and consistently utilize all the information provided in the context, exhibiting a position bias known as "lost in the middle", which means LLMs tend to ignore information in the middle of the prompt, even though they can utilize the information at the beginning and end of the prompts well.
+This issue occurs in nearly all LLMs~\citep{liu_lost_2023, junqing2023never, zhang_found_2024}, whether they are decoder-only models or encoder-decoder models, powerful models or small LLMs. 
+For example, for the GPT-3.5-Turbo model in the NaturalQuestion multi-document QA task, the performance difference between ground-truth information placed in the middle of the prompt versus at the ends is 22 points with 2.3k tokens prompt~\citep{liu_lost_2023}. 
+This significantly impacts the practical application of LLMs in real-world scenarios.
+Studies~\citep{kamradt2023needle,zhao2024longagent} show that this position bias becomes more severe as the context length increases, hindering the practical application of long-context LLMs.
+
+Previous works have analyzed this issue from the perspectives of data distribution~\citep{junqing2023never,yu_training_2024,an_make_2024} and position embeddings~\citep{zhang_found_2024,chen_fortify_2023}. For example, FILM~\citep{an_make_2024} addresses position bias by constructing data with key information distributed in various positions for supervised fine-tuning (SFT). 
+Ms-PoE~\citep{zhang_found_2024} mitigates position bias by interpolating RoPE~\citep{su_roformer_2022} using head-wise scaling factors.
+However, these methods require additional overhead for training or online estimation of scaling coefficients and are currently applicable to only a few models, limiting their generalizability.
+
+To fundamentally understand and alleviate position bias in LLMs, we first explored the micro-level manifestation of position bias in LLMs and observed patterns in the attention weights consistent with position bias. 
+Next, we investigated the underlying causes of attention weight-induced position bias. By respectively modifying position embedding and causal mask, we found that, in addition to position embedding, the causal mask also significantly affects position bias. Further analysis revealed that the causal mask introduces "positional hidden states", which are positively correlated with absolute positions, thereby conveying positional information to LLMs. These positional hidden states appear regardless of what position encoding method is used, including RoPE \citep{su_roformer_2022}, Alibi \citep{press_train_2022}, and even NoPE~\citep{haviv_transformer_2022}. %Detailed analysis can be found in Section~\ref{sec:motivation}.
+
+Based on the above findings, we propose a position bias mitigation method named \textbf{"scale positional hidden states"}. Specifically, we first design a prior-based searching algorithm that quickly identifies which dimensions of hidden states within the model are positional hidden states, using monotonicity, smoothness, and loss on validation sets as indicators. Next, we design an attention modification algorithm that only let the scaled hidden states influence the attention of the last token of the prompt, efficiently implemented using FlashAttention \citep{dao2023flashattention}.
+
+Extensive experiments on various models, including LLaMA-2 \citep{touvron2023llama}, Vicuna~\citep{vicuna2023}, Mistral \citep{jiang2023mistral}, Gemma \citep{team2024gemma}, Qwen \citep{qwen}, and MPT \citep{MosaicML2023Introducing}, and across different tasks, including Multi-document QA, KV retrieval, LongBench~\citep{bai2023longbench} benchmark, and the timeline reorder task~\citep{li_loogle_2023}, demonstrate that our method effectively mitigates position bias by modifying only one dimension of the hidden states of the model, achieving improvements of up to 15.2\%. Our method is compatible with various position embeddings, including RoPE \citep{su_roformer_2022} and Alibi \citep{press_train_2022}, and shows good generalization.
+
+Our main contributions are as follows:
+\begin{enumerate}
+    \item We find that position bias can be reflected in attention patterns.
+    \item We discover that the causal mask also introduces position bias and generates positional hidden states correlated to absolute positions in the hidden layers.
+    \item We propose a method for identifying and scaling the positional hidden states to mitigate position bias.
+\end{enumerate}
+
+
+
+\section{Beyond Position Embeddings: Positional Information can be seen in hidden states}
+
+\label{sec:motivation}
+
+
+In this section, we first identifies patterns in attention weights that closely correspond to position bias. Then, we discover that, apart from position embeddings, position information in the LLMs can also be generated by the causal mask, which tends to accumulate in a few specific hidden states channels and bears significant responsibility for the emergence of position bias.
+
+\subsection{Microscopic Manifestations of Position Bias in Transformers: Attention Weight Patterns}
+
+The attention of auto-regressive can be represented by the following equations:
+\begin{equation}
+\begin{split}
+    &\bm{q} = \mathcal{P}(W^{Q} \bm{h}(n), n), \quad \bm{k} = \mathcal{P}(W^{K} \bm{h}(m), m)\\
+    &\bm{a}_{n,m} = \text{Softmax}(\frac{\bm{q}\bm{k}^\text{T} + \text{Mask}}{\sqrt{d}})
+\end{split}
+\label{eq:attention}
+\end{equation}
+
+where $\bm{h}$ is the hidden states, and $\bm{h}(n)$ is the hidden state of the n-th token. $W^{Q}, W^{K}$ are the weights of the linear layers, $\mathcal{P}$ is the position encoding function like RoPE~\citep{su_roformer_2022}, $d$ is the dimensionality of query and key states, and $n$ and $m$ are the positional order information. $\text{Mask}$ is the causal mask. 
+
+To explore the micro-level manifestations of position bias in Transformers, we analyzed the attention weights 
+ As shown in Figures~\ref{fig:attn pattern kv}, in deep layers the model exhibits retrieval-like behavior, focusing on ground-truth information, forming a diagonal pattern observed in Figure~\ref{sfig:layer15 attn}. While in other shallow layers, it always focus most attention on the start or end of the prompt, wherever the key information is located, exhibiting vertical lines patterns, as shown in Figure~\ref{sfig:layer5 attn}.
+
+In these layers exhibiting retrieval-like behavior, it can be observed that the attention weights for key information (Gold KV) exhibit patterns similar to position bias: when key information is located at the start or end of the prompt, the attention weights focused on it are relatively higher, while in the middle, they are significantly lower. Moreover, we extract the attention to key information (average of layers 15\textasciitilde25) with different context length in Figure \ref{sfig:attention_to_gold_KV}, where as the context length grows, the attenuation of attention weights with respect to position becomes more pronounced, reaching almost zero at the middle.
+ Thus, we claim that position bias is to a large extent caused by the attention weights patterns at the micro level.
+
+\begin{figure*}[htb]
+  \centering
+  \subfloat[Vertical Line Pattern]{
+    \label{sfig:layer5 attn}
+    \includegraphics[height=0.25\columnwidth]{figures/diff_head_diff_attn_pattern/v2last_layer5_headmean.pdf}}
+    \hspace{0.1em}
+      \subfloat[Diagonal Line Pattern]{
+    \label{sfig:layer15 attn}
+    \includegraphics[height=0.25\columnwidth]{figures/diff_head_diff_attn_pattern/v2last_layer15_headmean.pdf}}
+    \hspace{0.1em}
+  \subfloat[Across Context Lengths]{
+    \label{sfig:attention_to_gold_KV}
+    \includegraphics[height=0.25\columnwidth]{figures/k2v_kv_list_10000len20_max=all_None0_last.png}}
+  \caption{Attention distribution of the ground-truth KV pair to each KV pair across different positions on the KV retrieval task~\citep{liu_lost_2023} using Mistral-7B~\citep{jiang2023mistral}. (a) and (b) show the results averaged across all heads of the layer. (c) shows the attention of the ground-truth KV to the ground-truth KV (i.e., diagonal lines from (b)) across different context lengths.}
+  \label{fig:attn pattern kv}
+\end{figure*}
+\subsection{Causal Mask Also Contributes to Position Bias}
+\label{sec:crop mask}
+
+\begin{figure*}[htb]
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/casual_mask_position_bias.pdf}
+
+  \caption{Performance of different methods with the ground-truth KV at different positions in the KV retrieval task~\citep{liu_lost_2023} using Mistral-7B~\citep{jiang2023mistral}.}
+  \label{fig:motivations_position_bias}
+\end{figure*}
+
+Based on Equ.(\ref{eq:attention}), position embedding $\mathcal{P}$ allows LLMs to acquire postional information.
+However, recent works~\citep{haviv_transformer_2022,wang_length_2024,chi_latent_2023} indicate that, besides position embeddings, the causal mask can also introduce positional information.
+
+In this section, we aim to determine whether these two factors affect position bias by modifying different properties of the ground-truth KV pair.
+
+As shown in Figure~\ref{fig:motivations_position_bias}, the original results exhibit a ''lost in the middle" pattern not only in accuracy but also in attention weight.
+Secondly, PE to end has a certain degree of help, but can hardly allow the model's performance to match the accuracy when the ground-truth KV pair is positioned at the start or end of the prompt. Furthermore, PE to Beginning results in a noticeable performance drop as well as attention weight reduction when the gold KV is close to the end. In contrast, modifying the casual mask effectively enhances attention, especially to the latter KVs, and let the performance at the middle be improved to almost on par with the beginning. %Additionally, there is a significant improvement in attention weight, with the modified positions' attention being close to or significantly higher than the attention values when the ground-truth KV pair is positioned at the beginning and end of the prompt.
+Based on the above observations, we can conclude that besides position embedding, the casual mask is also an important factor affecting position bias as well as corresponding attention weights. Moreover, solely modifying the position embedding hardly alleviates position bias completely.
+
+
+\subsection{Casual Mask Stores Position Information in Specific Hidden states Channels}
+\label{subsec:positional_hidden}
+\begin{definition}[Positional Hidden States]\label{def:positional_hidden}
+Let $h_k(p)$ denote the $k$-th dimension of the hidden states across each token's position $p$. We define positional hidden states $h_t$ as hidden states whose values vary consistently and monotonically with the position sequence. Therefore, their derivative (after curve fitting) should always be positive or negative:
+
+  \begin{itemize}
+     \item $h_t'(p) >0$, $\forall p$ or $h_t'(p) <0$, $\forall p$
+ \end{itemize}
+ 
+
+ \end{definition}
+
+Previous works~\citep{haviv_transformer_2022,wang_length_2024,chi_latent_2023} have found that the positional information generated by causal mask is implicitly stored in hidden states. However, in fact, we find it can be observed explicitly, from ``positional hidden states''.
+
+To further analyze how positional information is transmitted in transformers, we define a special type of hidden state that directly reflects absolute positional information with high correlations to position IDs, called positional hidden states, as defined in Definition~\ref{def:positional_hidden}. We employ monotonicity rather than correlation as the primary property of positional hidden states, as correlation does not account for the sequential nature of positions.
+
+Based on the findings from Section~\ref{sec:crop mask}, we conclude that the causal mask encodes positional information in certain hidden states, which subsequently influences attention weights and introduces position bias.
+
+
+
+\begin{figure*}[htb]
+  \centering
+  \subfloat[Mistral-7b]{
+    \includegraphics[height=0.24\columnwidth]{figures/diff_model_hidden/mistral_hidden_dim213_layer_mean.pdf}}
+  \subfloat[LLaMA-2-7b]{
+\includegraphics[height=0.24\columnwidth]{figures/diff_model_hidden/llama2_hidden_dim2393_layer_mean.pdf}}
+  \subfloat[MPT-30b]{
+    \includegraphics[height=0.24\columnwidth]{figures/diff_model_hidden/mpt_30b_hidden_dim1942_layer_mean.pdf}}
+  \subfloat[TinyLlama-NoPE-1.1B]{
+    \includegraphics[height=0.24\columnwidth]{figures/diff_model_hidden/nope_hidden_dim1156_layer_mean.pdf}}
+  \caption{Averaged positional hidden states across all layers in different models.}
+  \label{fig: Hidden models}
+\end{figure*}
+
+
+
+
+
+\section{Methodology}
+
+Based on the findings in Section~\ref{sec:motivation}, although the causal mask profoundly influences position bias, it is not feasible to know the positions of effective information in the prompt in advance, making methods that modify the causal mask difficult to design. Therefore, we propose a method to mitigate position bias by scaling the positional hidden states, as shown in Figure \ref{fig:scale method}. Specifically, it consists of two steps: identifying the positional hidden states $h_{t}$ and scaling them by the factor $s$.
+
+\subsection{Problem Formulation}
+Given a pre-trained LLM $\boldsymbol{\theta}$ and a general dataset $\{\bm{x}, \bm{y}\}$, our objective is to find the optimal positional hidden states $h_{t}$ and the corresponding scaling factor $s$ to maximally reduce position bias, which can be formulated as follows:
+\begin{equation}
+    \begin{aligned}
+        \mathop{\arg\min}_{h_t \in \mathcal{H}, s<1} \mathbb{E}\left[\sum_{i=1}^{|\bm{P}|} \mathcal{L}\left(\bm{x}, \bm{y}, \bm{p}_i ; F(\boldsymbol{\theta}, h_t, s)\right)\right] \\
+    \end{aligned}
+    \label{eq:objective}
+\end{equation}%缩放因子s可能是小于1的值，不一定是绝对值小于1   有时候取-1.5结果也很好。
+where $\bm{P}$ represents the set of different positions of the ground-truth information within the prompt $\bm{x}$, $F(\boldsymbol{\theta}, h_t, s)$ denotes the operation of scaling the LLM $\boldsymbol{\theta}$ on the $t$-th dimension of its hidden states by the scaling factor $s$, and $\mathcal{L}$ denotes the loss for general downstream tasks of the modified model.
+
+\subsection{Identifying Positional Hidden States}
+
+\input{figures/search_algorithm}
+
+We have defined positional hidden states in Definition~\ref{def:positional_hidden}. However, the original values of hidden states may not strictly satisfy monotonicity. After curve fitting, we can identify dozens or hundreds of dimensions that exhibit various degrees of relevance to positional information. Thus, the first step of our method is to find the dimension that best fits the properties of positional hidden states.
+
+To efficiently search for the positional hidden states from the LLMs' hidden states set, we leverage the characteristics of positional hidden states defined in Section~\ref{subsec:positional_hidden} and propose a heuristic positional hidden search algorithm. As shown in Algorithm~\ref{alg:position_search}, the search process consists of the following two steps: 
+1) Identify the top-$k$ dimensions $\rho$ in the hidden states that are monotonic in more than $\varepsilon$ layers and are as smooth as possible. Here $c_t$ is the number of layers where $h_t(p)$ is monotonic, and $g_t$ is the smooth score of $h_t(p)$. Equ.(\ref{eq:smooth}) is the smoothness formula.
+2) Use a small validation dataset (or called calibration dataset) $\mathcal{D}_{\text{val}}=\{\bm{x},\bm{y}\}$ to evaluate the impact of scaling these positional hidden states respectively and select the positional hidden states $h_{\overline{t}}$ that can lead to the minimal loss $\mathcal{L}_{\overline{t}}$.
+\begin{equation}
+\label{eq:smooth}
+    \text{Smooth}(h_t) = \int |h''_t(p)|^2
+\end{equation}
+
+As for selecting the best scale factor, we take 0.5, 0, -0.5, and -1 to respectively experiment on the validation set, obtain the validation loss, and then select the scaling factor with the lowest loss.
+
+
+
+
+\subsection{Scaling the Positional Hidden States}
+To minimize the impact of this modification on the semantics of LLMs, we propose a method scaling the positional hidden states only affecting the last token, as shown in Figure~\ref{fig:scale method}.
+Specifically, for the tokens preceding the last token, the attention calculation remains the same as the original. For the last token's attention computation of a sequence of length $l$, we obtain the modified query state $\bm{\overline{q}}_{l}$ (of the $l$-th token, i.e. the last token) and key states $\bm{\overline{K}}$ (of all the tokens) by scaling the positional hidden states. That is,
+\begin{equation}
+    \bm{\overline{q}}_{l} = \mathcal{P}(W^Qf(\bm{h}(l),p, s), l), \quad \bm{\overline{K}} = \mathcal{P}(W^Kf(\bm{h},p, s), [1,2,...,l])
+\end{equation}
+
+Here $f(\bm{h},p, s)$ means the $p$-th dimension of $\bm{h}$ is scaled by the factor $s$. 
+Therefore, the corresponding attention calculation is as follows:
+\begin{equation}
+    \begin{aligned}
+        \bm{z} =
+        \left\{
+	\begin{aligned}
+		&\text{Softmax}(\frac{\bm{q}_{i}\bm{K}^\top + \text{Mask}}{\sqrt{d}})\bm{V} , &  i < l\\
+		&\text{Softmax}(\frac{\bm{\overline{q}}_{l}\bm{\overline{K}}^\top }{\sqrt{d}})\bm{V} , & i = l
+	\end{aligned}
+	\right.
+    \end{aligned}
+    \label{eq:scale_factor}
+\end{equation}
+where ${\bm{z}}$ is the attention output.
+We implement our method using FlashAttention~\citep{dao2023flashattention} with minimal overhead. After calculating the combined attention weights, the remaining computations remain the same as in the original method.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/mody_method.pdf}
+    \caption{The framework of scaling positional hidden states and modifying attention.}
+    \label{fig:scale method}
+\end{figure}
+
+
+
+
+\section{Experiments}
+
+
+\subsection{Setup}
+\label{subsec:setup}
+
+\paragraph{Evaluation Tasks and Models}
+We apply our method to a wide range of state-of-the-art open-source LLMs, including:
+1) RoPE~\citep{chen_extending_2023} models: LLaMA-2 (7B, 13B)~\citep{touvron2023llama}, Mistral-7B~\citep{jiang2023mistral}, Gemma-7B~\citep{team2024gemma}, Qwen1.5-7B~\citep{qwen};
+2) Context window extended models: Vicuna (7B, 13B)~\citep{vicuna2023};
+3) Alibi~\citep{press_train_2022} models: MPT-30B~\citep{MosaicML2023Introducing}. All the models we use are instruction-tuned versions.
+
+And we evaluate the performance across three aspects:
+1) Position-bias-related tests on NaturalQuestion multi-document QA~\citep{liu_lost_2023} and KV retrieval~\citep{liu_lost_2023} with ground-truth at different positions in the prompt. The NaturalQuestion task includes 20 documents with a prompt length of about 2.3k tokens, while the KV retrieval task includes 140 KV pairs with an average length of about 10k tokens.
+2) General long-context benchmark on LongBench~\citep{bai2023longbench}, including multi-document QA, single-document QA, summarization, few-shot learning, synthetic tasks, and code completion, totaling 16 tasks with an average length of 37k tokens.
+3) Position-sensitive tasks on timeline reordering in LooGLE~\citep{li_loogle_2023}, with an average length of 10k tokens.
+For prompts that exceed the context windows of LLMs, we follow LongBench's approach by truncating from the middle and retaining the head and tail of the prompt to fit within the context windows.
+We use the provided metrics and scripts from the following benchmarks for evaluation.
+
+\paragraph{Implementation Details} In this paper, we implement our approach using PyTorch, HuggingFace Transformers, and FlashAttention~\citep{dao2023flashattention} in an A100 GPU. To ensure stable and reproducible results, we use greedy decoding in all experiments.
+For the search part, we set the top-$k$ size of positional hidden states to 10 and $\varepsilon$ to $L/4$, where $L$ is the number of layers. The validation set is a synthetic KV retrieval dataset consisting of 100 examples, which do not overlap with the test set. The search process takes approximately 10 minutes. For the scaling part, we only modify the intermediate layers of the model to minimize the negative impact on performance. 
+The details of the scaling dimensions, layer ranges, and factors are shown in Table~\ref{tab:setting}.
+
+
+\paragraph{Baselines}  
+We include two training-free positional bias mitigation methods as baselines:  
+(i) \textbf{Original}, the unmodified LLM results with the ground truth at different positions in the prompt.  
+(ii) \textbf{w/ Ms-PoE}~\citep{zhang_found_2024}, a head-aware position embedding scaling method to mitigate position bias. Following the original settings, we apply scaling coefficients of 1.2 to 1.8 starting from the 3rd layer.
+\subsection{Main Results}
+\input{figures/Multi_doc_QA}
+
+\input{figures/longbench}
+
+Tables~\ref{tab:main_results_qa} and \ref{tab:long_bench} present the performance of various methods in different benchmarks.
+Several observations and conclusions can be drawn:
+1) Our method consistently improves overall performance at different positions, with increases of up to 9.3\%, 15.2\%, and 4.7\% in NQ, KV retrieval, and LongBench, respectively, except for LLaMA-2-13B in KV retrieval. Additionally, compared to the SoTA method Ms-PoE, our method shows significant improvements of up to 6.3\%, 97.5\%, and 14\% in NQ, KV retrieval, and LongBench. The poor performance of Ms-PoE in KV retrieval can be attributed to the interpolation causing information loss.
+2) Our method effectively enhances LLMs' understanding of information located in the middle and latter parts of the prompt. For key information at the beginning of the prompt, performance is comparable to baselines. Considering only the average performance of the last four positions, our method's improvements over the original increase to 11.3\% and 16.8\% in NQ and KV retrieval, respectively, and over Ms-PoE increase to 8.7\% and 97.5\% in NQ and KV retrieval, respectively.
+3) Our approach is effective not only for RoPE models but also for context window extended models like Vicuna-16K, which already readjust RoPE~\citep{chen_extending_2023}. Additionally, our method can be adapted to different position embeddings, such as Alibi~\citep{press_train_2022} models like MPT, resulting in improvements of 2.6\%, 15.2\%, and 1.2\% in NQ, KV retrieval, and LongBench, respectively.
+4) Our method demonstrated varying degrees of improvement across different tasks, with the most significant increases being 1.5\% in few-shot learning tasks, 3.4\% in code tasks, 4\% in synthetic tasks, 9.2\% in single document QA tasks, and 1.9\% in multi-document QA tasks. In summarization tasks, performance was nearly on par with the original results. While our method did not significantly improve the average scores overall, it at least demonstrates that it can mitigate position bias without impairing the model's original capability to handle long context tasks.
+
+\subsection{Analysis}
+\paragraph{From Bias to Balance}
+As shown in Table \ref{tab:main_results_qa}, there is an phenomenon that our method mainly benefits when the key information is not at the beginning, but can often decrease performance if the model performs significantly better when the key information is at the beginning. It reveals a possible fact that the positional hidden may be an important factor causing the model to miss the rear parts of the context while focus too much to the beginning parts. Therefore, scaling such dimension can shift the model's attention from being too focused at the beginning to a more balanced distribution.
+We validated the above points by testing different scale factors, as shown in Figure~\ref{fig:scale factor}.
+\paragraph{Scale Factor}
+
+\begin{figure}[htb]
+    \centering
+    \subfloat[Scale factor v.s. Attention]{
+    \includegraphics[width=0.5\linewidth]{figures/diff_scale_factor/vicuna-7b_attn_to_kv_scale_5.pdf}
+    \label{sfig: scale factor 1}}
+    \subfloat[Scale factor v.s. Performance]{
+    \includegraphics[width=0.49\linewidth]{figures/diff_scale_factor/vicuna-7b_100kv_acc.pdf}
+    \label{sfig: scale factor 2}}
+    \caption{Attention distribution and performance when scaling dimension 2393 of Vicuna-7b-v1.5-16k with different scale factors on KV retrieval~\citep{liu_lost_2023} of 100 KV pairs.}
+    \label{fig:scale factor}
+\end{figure}
+
+The scaling factor directly controls the degree and direction of the impact of positional hidden states on position bias. As shown in Figure~\ref{fig:scale factor}, a positive scaling factor causes the model to focus more on the beginning, while a negative factor shifts the focus towards the end. A factor between 0.5 and -1 leads to the most balanced attention distribution, where accuracy also peaks. These results demonstrate that scaling positional hidden states can influence LLMs' tendency to focus on the beginning, and by adjusting the coefficients, this bias can be effectively mitigated.
+
+
+\paragraph{Ablation Study}
+\input{figures/ablation}
+To evaluate the contributions of different components in our method, we introduce the following sets for the ablation study:
+
+(2) Ours w/ scale 2 dimensions, which modifies the top-2 positional hidden states simultaneously.
+(3) Ours w/ modify last 16 tokens and w/ modify all tokens, which adjust the range of tokens affected by the scaling operation in Equ.(\ref{eq:scale_factor}).
+
+Table~\ref{tab:ablation_study} shows the ablation results. It can be seen that without filtering by monotonicity or smoothness, performance may decline, and removing the validation set results in more decline in model performance. When the range of tokens or dimensions affected by scaling is expanded, most models experience varying degrees of performance loss. Considering these factors, we choose to modify only the last token and the top-1 positional dimension to achieve the best performance.
+
+\paragraph{Side Effects}
+We utilized the MMLU dataset \citep{hendrycks_measuring_2021}, which assesses general capabilities, and the timeline-reorder dataset \citep{li_loogle_2023}, which is a task sensitive to positional information, to evaluate whether our approach adversely affects the original abilities of the LLM. 
+
+\paragraph{Attention v.s. Performance}
+\label{app:changing_attention}
+\begin{figure*}[htb]
+  \centering
+  \subfloat[Attention]{
+    \includegraphics[height=0.25\columnwidth]{figures/changing_attention/attn_to_kv_norm.pdf}}
+  \subfloat[Attention w/ modification]{\label{sfig:attn * 2}
+\includegraphics[height=0.25\columnwidth]{figures/changing_attention/attn_to_kv_inc.pdf}}
+  \subfloat[Accuracy]{
+    \includegraphics[height=0.25\columnwidth]{figures/changing_attention/acc_to_kv_norm.pdf}}
+  \subfloat[Accuracy w/ modification]{\label{sfig:acc * 2}
+    \includegraphics[height=0.25\columnwidth]{figures/changing_attention/acc_to_kv_inc.pdf}}
+  \caption{Distribution of attention weight and accuracy as the ground-truth KV is placed at different positions in the prompt. (b) and (d) are situations when the attention on the 25th KV pair is modified.}
+  \label{fig: changing_attention}
+\end{figure*}
+As shown in Figure~\ref{fig: changing_attention}, when we manually double the attention weights of the key information (in this case, the 25th KV pair, as illustrated in Figure \ref{sfig:attn * 2}) during the model's forward pass on the KV retrieval task, the retrieval accuracy for the 25th KV improves, while the accuracy for other parts remains largely unchanged (Figure \ref{sfig:acc * 2}). This demonstrates that the attention weights for key information are positively correlated with retrieval accuracy.
+\paragraph{Does this Method Compromise the Ability to Perceive Positional Information?}
+\input{figures/loogle}
+To demonstrate that our method does not harm the model's performance on general or position-sensitive tasks, despite eliminating some positional information, we tested it on two datasets: the MMLU benchmark \citep{hendrycks_measuring_2021} and the timeline reorder task from LooGLE \citep{li_loogle_2023}, which involves arranging events chronologically across extensive text. As shown in Table \ref{tab:timeline order}, our method does not impair performance on position-sensitive tasks, indicating that the positional information we remove may not be essential for the model's functioning.
+
+
+
+
+
+
+\section{Related Works}
+
+
+\paragraph{Long-Context LLMs}
+Recent research has focused on expanding the context window size of LLMs through four main approaches:  
+1) {Staged pre-training}~\citep{nijkamp2023xgen7b,fu2024data}, which gradually increases the context window size during training;  
+2) {Modifying or interpolating position embeddings}~\citep{press_train_2022, chen_extending_2023, peng_yarn_2023, ding_longrope_2024};  
+3) {Using external memory modules} for context storage~\citep{bertsch2023unlimiformer, tworkowski2023focused};  
+4) {Distributed computation across devices}~\citep{Liu2023RingAW}.  
+While these methods address context expansion, their impact on positional bias in downstream tasks has not been thoroughly explored.
+\paragraph{Addressing Position Bias}
+Despite explicit positional encoding methods like RoPE~\citep{su_roformer_2022} and Alibi~\citep{press_train_2022}, LLMs often exhibit position bias, such as the "lost in the middle" phenomenon~\citep{liu_lost_2023,kamradt2023needle}. Recent efforts to mitigate this bias fall into several categories: 
+1) RoPE-based methods: These approaches modify the RoPE computation process to alleviate long-distance information decay, including Attention Bucket~\citep{chen_fortify_2023}, which uses an ensemble of multiple RoPE bases to mitigate position bias, and Ms-PoE~\citep{zhang_found_2024}, which dynamically interpolates with a small coefficient for different heads.
+2) SFT-based methods~\citep{junqing2023never,yu_training_2024,an_make_2024}: These methods construct data with more diverse key information distributions or employ system2think SFT tasks to mitigate position bias. They require further training of the model.
+3) Attention mask-based methods~\citep{he2024position}: These methods modify attention mechanisms, including
+Attention Transition~\citep{gao_empower_2023}, which redirects attention to significant parts of the context and Stable Mask~\citep{yin_stablemask_2024}, which introduces pseudo attention into the causal mask, ensuring stable attention distribution when facing lengthy texts.
+4) Prompt-based methods~\citep{jiang_longllmlingua_2023, peysakhovich_attention_2023}: These methods introduce an external module to reorder or compress information in the prompt, thereby mitigating position bias.
+
+
+
+
+
+\section{Conclusion}
+
+
+This paper proposes a method for scaling positional hidden states to mitigate position bias issue in LLMs. Specifically, the study first confirms that attention weights manifest position bias within transformers. Additionally, experiments demonstrate that, besides position embeddings, the causal mask also contributes to position bias, which is transmitted to other modules through the hidden states containing absolute positional information, termed as positional hidden states. Based on this, we introduce a prior-based positional hidden search algorithm and mitigate the model's position bias by scaling the positional hidden states searched. Testing eight open-source models with different position embeddings on tasks such as NaturalQuestions Multi-document QA, KV Retrieval, and LongBench, the results show that our method effectively reduces position bias and improves model performance.
+
+
+
+
+
+

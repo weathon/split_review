@@ -1,0 +1,310 @@
+\title{ElasticTok: Adaptive Tokenization for Image and Video}
+
+\begin{abstract}
+Efficient video tokenization remains a key bottleneck in learning general purpose vision models that are capable of processing long video sequences. Prevailing approaches are restricted to encoding videos to a fixed number of tokens, where too few tokens will result in overly lossy encodings, and too many tokens will result in prohibitively long sequence lengths. In this work, we introduce ElasticTok, a method that conditions on prior frames to adaptively encode a frame into a variable number of tokens. To enable this in a computationally scalable way, we propose a masking technique that drops a random number of tokens at the end of each frames's token encoding. During inference, ElasticTok can dynamically allocate tokens when needed -- more complex data can leverage more tokens, while simpler data only needs a few tokens. Our empirical evaluations on images and video demonstrate the effectiveness of our approach in efficient token usage, paving the way for future development of more powerful multimodal models, world models, and agents. Video examples of using ElasticTok can be found on our website: 
+\href{http://largeworldmodel.io/elastictok}{largeworldmodel.io/elastictok}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figure/teaser.pdf}
+\caption{\textbf{\ours adaptively represent video based on information available}. (Top) Ground-truth video frames. (Middle) Reconstructed frames with varying token usage. (Bottom) The bottom section depicts how \ours dynamically adjusts token allocation over time, with the percentage of tokens used correlating to different content complexities in the video.}
+\label{fig:teaser}
+\end{figure}
+Efficient video tokenization remains a key bottleneck in learning general purpose vision models that are capable of processing long video sequences -- a crucial aspect towards developing intelligent agents for the visual world. Prevailing approaches~\citep{van2017neural,esser2021taming,yu2023magvit,yan2021videogpt} are restricted to encoding videos to a fixed number of tokens irrespective of the visual content of the original video. As a result, being able to reliably encode with little information loss requires increasing the number of tokens to account for the worst case, highly complex visual inputs. However, this in turn causes many wasted tokens on simpler data, and leads to significant computational challenges for downstream training, where encoding a video or trajectory can require tens or even hundreds of millions of tokens, resulting in substantial computational costs and inefficiency~\citep{liu2024world,videoworldsimulators2024,liu2023ring}. On the other hand, using a too few number of tokens will result in lossy encodings, and fundamentally limit the capabilities of vision models when processing more complex visual data.
+
+Intuitively, we would want do learn a model that adaptively encodes visual input in a data-dependent manner to variable length encodings, similar to how existing works in image and video compression~\citep{richardson2004h,li2023neural,christopoulos2000jpeg2000,chen2017deepcoder} compress data to a varying number of bytes. Taking inspiration from this, we introduce \ours, a method that conditions on prior frames to adaptively encode a frame into a variable number of tokens. To enable this in a computationally scalable way, we propose a masking technique that drops a random number of tokens at the end of each frame's token encoding. During inference, \ours can dynamically allocate tokens when needed -- more complex data can leverage more tokens, while simpler data only needs a few tokens.  
+
+
+Our empirical evaluations demonstrate the effectiveness of \ours, highlighted below. 
+\begin{itemize}[leftmargin=10pt, itemsep=0.5pt, topsep=0.5pt]
+    \item We show that \ours can leverage adaptive tokenization to efficiently represent long videos with up to 2-5x fewer tokens.
+    \item We show that \ours enables flexibility in downstream vision-language tasks, allowing users to allocate tokens based on their compute budget.
+    \item We show that \ours allows leveraging different objectives during inference to adaptively trade off various semantic aspects of images.
+\end{itemize}
+\begin{figure}[!b]
+\centering
+\includegraphics[width=0.95\textwidth]{figure/elastic.png}
+\caption{\textbf{\ours adaptively encodes image and video to variable length outputs based on the complexity of the input data}. Single block uses an Encoder-Decoder pipeline with a sampled latent mask. Multi-block extends this with a Block Causal Mask to handle longer video sequences.}
+\label{fig:method}
+\end{figure}
+
+
+
+\section{Method}
+
+In this section, we present \ours, a scalable adaptive visual tokenizer than can efficiently encode image and video. At a high level, we leverage a specialized random masking scheme when training any standard autoencoder to learn our elastic encodings. In the following sections, we provide a more detailed description of our model -- first covering the simpler single block case (image / short video), and then moving on to the multi block case (longer video). An overview of our method is shown in Figure~\ref{fig:method}.
+
+\subsection{Training}
+
+First, we consider a single-block case in which we want to learn elastic codes over an image or a short video chunk (\eg, 4 frames). Let $x$ represent a sequence of input frames, where images are considered as $1$ frame videos. Our proposed method extends upon any existing variants of autoencoders (VQ-VAE~\citep{van2017neural}, FSQ~\citep{mentzer2024finite}, VAE~\citep{kingma2013auto}) by incorporating additional masking of the encoder tokens.
+
+For each training input $x$, we first uniformly sample the number of tokens to keep $\ell \sim U(\{M_{min}, \dots, M_{max}\})$, where $M_{min}$ and $M_{max}$ define the supported range of encoding lengths. $M_{max}$ is generally set as $N$, the maximum number of tokens the encoder can output (\eg, 2048 or 4096), and $M_{min}$ a lower bound such as 128 or 256. We found this lower bound necessary as we found that sampling too few tokens could destabilize training. After sampling $\ell$, we then compute its mask $m$, defined as a binary vector of length $N$ with the first $\ell$ values set to $1$. Input $x$ and mask $m$ are then fed into the encoder $E(x, m)$ to compute $z$. $z$ is masked as $z_m = z \odot m$, and fed through the decoder $D(z_m)$ to produce $\hat{x}$. Finally, our model optimizes a reconstruction loss, with potentially auxiliary losses depending on the exact autoencoder being used (\eg, KL for VAE or VQ loss for VQ-VAE). Although our method is generally architecture invariant, we opt to use ViTs~\citep{dosovitskiy2020image} as our encoder and decoders for simplicity.
+
+We can extend our method to process longer video by breaking up video into blocks, with sizes defined by the number of frames used for the single block model (e.g 4 frames per block). The training process remains the same as the single block case, with two key differences: (1) masks for each multi block video sequence are sampled independently for each block, and (2) a block causal mask (block size $N$) is used in the encoder and decoder. The number of blocks is constrained only by the transformer's context size. We utilize a prior long-context method~\citep{liu2023ring} to train \ours on longer videos. Architecturally, there are no added parameters which we found useful when progressively training our model from single block to multi block.
+
+Exact details of our model's forward pass are described in Algorithm~\ref{alg:train}.
+
+\subsection{Inference}
+There are two primary ways to use \ours for inference -- by specify a target encoding length, or a target reconstruction threshold.
+
+\textbf{Target encoding lengths}. This method is simple to implement, as it only requires generating the correct mask and running the input through the encoder. However, although such inference is simple and efficient, it is difficult from a user's perspective due to lack of knowledge of how many tokens to specify.
+
+\textbf{Target reconstruction threshold}. This method presents a more intuitive inference approach that will automatically adaptively allocate tokens between different inputs based on a specified reconstruction threshold (\eg, target pixel-wise MSE loss). Visual content that is easy to reconstruct may require fewer tokens to meet the threshold whereas more complex inputs may require more tokens. Doing so requires a search process over different encoding lengths to determine lowest encoding length that still satisfies the given threshold. 
+
+We consider a few different search algorithms, detailed below:
+\begin{itemize}[leftmargin=10pt, itemsep=0.25pt, topsep=0.25pt]
+    \item \textbf{Full Search}: Exhaustive search over every possible number of tokens lengths, and treat the result as ground truth. We use our discrete latent with max 4096 tokens.
+    \item \textbf{Binned Search (100)}: Similar to Full Search, but only evaluate on 100 uniformly spaced token lengths.
+    \item \textbf{Binary Search}: We perform search using binary search, where the token length is the "array index", and the evaluated reconstruction loss is the "array value." Note that this assumes that reconstruction loss is monotonic with respect to token length, which is generally close to true, but not fully accurate, hence error in the result produced. 
+    \item \textbf{Neural Regression}: We collect 100k examples of paired (image / video, token length) data, and finetune our autoencoder to directly regress the number of tokens given an image or video. 
+\end{itemize}
+Each search algorithm has its own trade-off between accuracy and efficiency -- we further examine this relationship in Section~\ref{sec:inference}.
+
+In the multi block case, we iteratively perform the search process for each block in a block autoregressive manner, using caching similar to in language models. Algorithm~\ref{alg:inference} provides more details on the exact inference process.
+
+\begin{minipage}{0.49\textwidth}
+    \algsetup{linenosize=\small}
+    \begin{algorithm}[H]
+    \caption{Training}
+    \label{alg:train}
+    \small
+    \begin{algorithmic}
+       \STATE {\bfseries Required:} Input video $x$. Tokens per block $B$.
+       \STATE {\bfseries Required:} Encoder $E$. Decoder $D$
+       \STATE $x \gets \text{PatchifyRearrange}(x)$ // $B\times L \times D$
+       \STATE $N_b \gets L / B$
+       \FOR{$i$ in $\{0,\dots,N_b -1\}$}
+       \STATE Sample $\ell_i \sim U(\{M_{min}, \dots, M_{max}\})$
+       \STATE Initialize masks $m_i \gets \mathbf{0}_B$
+       \STATE Fill masks $m_i[:\ell_i] = 1$
+       \ENDFOR
+       \STATE Concatenate masks $m \gets (m_0, \dots, m_{N_b - 1})$
+       \STATE Encode $z \gets E(x, m)$ // $B \times L \times D_z$
+       \STATE Mask out along sequence length $z_m \gets z \odot m$
+       \STATE Decode $\hat{x} \gets D(z_m)$
+       \STATE Compute loss $\mathcal{L}(\hat{x}, x)$ // \eg, MSE + LPIPS
+    \end{algorithmic}
+    \end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+    \algsetup{linenosize=\small}
+    \begin{algorithm}[H]
+    \caption{Inference}
+    \label{alg:inference}
+    \small
+    \begin{algorithmic}
+       \STATE {\bfseries Required:} Input sequence $x$. Tokens per block $B$.
+       \STATE {\bfseries Required:} Encoder $E$. Decoder $D$
+       \STATE {\bfseries Required:} Target reconstruction threshold $t$
+       \STATE $x \gets \text{PatchifyRearrange}(x)$ // $B\times L \times D$
+       \STATE $N_b \gets L / B$
+       \STATE Initialize KV cache $c$ of length $L$
+       \FOR{$i$ in $\{0,\dots,N_b -1\}$}
+       \STATE // See Section 2.2 for search algorithms
+       \STATE $\ell_i, m_i, c \gets \text{SearchAlgo}(x_{iB:(i+1)B}, c, t, D, E)$
+       \STATE Encode $z_i \gets E(x_{iB:(i+1)B}, m_i, c) \odot m_i$
+       \ENDFOR
+       \STATE Return $z \gets (z_0, \dots, z_{N_b - 1})$
+       \STATE
+    \end{algorithmic}
+    \end{algorithm}
+\end{minipage}
+
+
+
+\section{Experiments}
+
+In this section, we introduce our evaluation setup and present the results of pretraining \ours to adaptively represent images and videos, as well as its performance on downstream tasks.
+\subsection{Experimental Setup}
+
+\textbf{Model details}.
+We train 200M parameter discrete and continuous autoencoders on images and video sequences. For learning discrete representations, we use FSQ~\citep{mentzer2023finite}, while for continuous representations, we use a VAE~\citep{kingma2013auto}. Both models employ ViT encoders and decoders. Similar to prior works~\citep{esser2021taming}, we optimize both a pixel-wise reconstruction loss (MSE) and a perceptual loss (LPIPS)~\citep{johnson2016perceptual}. Notably, we do not use a GAN~\citep{goodfellow2014generative}, as we find it more difficult to stably train when progressively extending to much longer sequences (e.g. 1000+ frames), which we leave to future work, as it is not the main focus of this paper.
+\textbf{Training details}.
+All models are jointly trained on $256 \times 256$ images and 24 FPS videos. Each video block consists of 4 frames, and joint training is conducted by treating images as single-frame videos, replicating each image 4 times to match the block size. Each block is encoded into 2048 or 4096 tokens by the continuous and discrete autoencoders, respectively. Following prior research in LWM~\citep{liu2024world} on scaling sequence length, we begin by training our models on single-block cases (images and short videos) and progressively extend the context length to cover up to 40-second videos (512K to 1M tokens). We train our long video models using v4-512 TPUs from Google Cloud on the COYO-700M image dataset and a custom dataset consisting of 6M videos scraped from the web. We additionally train an image-only model on ImageNet using v4-256 TPUs
+
+\textbf{Baselines}.
+We compare our proposed method against fixed token baselines trained at a varying token capacities. The architecture, training processes, and total FLOPs are exactly the same as our method with the only difference being restricted to one fixed mask, instead of sampling variable masks.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figure/experiments_main.pdf}
+\caption{\textbf{\ours adaptively encodes image and video to variable length outputs based on the complexity of the input data}. (Top) Ground-truth video frames. (Middle) Reconstructed frames with varying token usage. (Bottom) The bottom section depicts how \ours dynamically adjusts token allocation over time, with the percentage of tokens used correlating to different content complexities in the video.}
+\label{fig:experiment_main_viz}
+\end{figure}
+
+\subsection{Main Results}
+Intuitively, the advantages of our elastic tokenization allow variable length codes that can depend on the visual content of a given image or video. Figure~\ref{fig:experiment_main_viz} shows some qualitative examples that demonstrate this. All images and videos are provided the same MSE reconstruction quality (0.003) threshold to satisfy, and require different number of tokens depending on the complexity the images. Simpler images such as the blue cushion require fewer tokens, while more complex images such as the painting or recipe have details that require more tokens to properly encode. For the provided video example, we generally see larger token usage spikes in the event of a scene change or faster motion, such as when the phone animates a transition screen, or when the finger scrolls up in the newsfeed. More qualitative examples can be found at: \href{http://largeworldmodel.io/elastictok}{largeworldmodel.io/elastictok}.
+Figure~\ref{fig:experiments_main_plot} shows quantitative comparisons between our method and different fixed token baselines trained at each token length. In order to show the benefits of elastic token representations, we compute a quantitative metric that measures the percentage of images or videos blocks in which a model satisfies a specified reconstruction (MSE) threshold. As shown, our method can leverage its elastic representations to achieve similar reconstruction satisfactory percentages compared to baselines while using 1.3x - 5x fewer tokens, depending on the given threshold. Generally, more lax (0.015) reconstruction thresholds present larger performance improvements due to more room to use fewer than max tokens. In contrast, more strict (0.001) thresholds usually almost always require all tokens. Different thresholds may be useful for different cases, where more lossy encodings can be used for simple VQA tasks, while more accurate reconstructions are useful for tasks such as image / video generation. Table~\ref{table:main_cont_baseline} shows similar results for the continuous variant of our model, compared against a single baseline model fixed to $50\%$ token usage.
+
+Table~\ref{table:quality_baseline} shows results comparing ElasticTok against a quality baseline. In which we first run inference using our model with a given threshold, and then compute which token length baseline is needed to match the quality (worst-case MSE over video blocks) of our model. Note that our model can use a different number of tokens each video block, where as the baseline uses the same number of tokens for all blocks. The adaptivity of our model helps match baseline model quality with lower average token usage.
+
+Figure~\ref{fig:prog_recon} shows qualitative examples of progressive reconstruction quality as we increase the number of tokens. Different visual inputs will saturate reconstruction quality at a different number of tokens. This flexibility allows us to use a large number of tokens for very hard images (\eg inputs with detailed fine-grained text), while saving tokens on inputs that are easier to reconstruct.
+Figure~\ref{fig:proj_seq_plot} shows the performance of our method as we increase the sequence length of the model -- performing better as sequence length increases due to being able to leverage long context for more accurate reconstruction. However, performance degrades at the max context length (1M tokens), which we hypothesize is due to not enough training due to our relatively limited compute budget for that context size.
+
+\takeawaybox{\ours offers significant advantages in image and video reconstruction by using variable-length codes that depend on content complexity. Qualitatively, simpler images require fewer tokens, while more complex ones need more tokens for accurate encoding. Quantitatively, elastic tokenization achieves similar reconstruction quality compared to fixed token baselines while using up to 5x fewer tokens}
+\begin{figure}[!tb]
+\centering
+\includegraphics[width=\textwidth]{figure/main_plot.pdf}
+\caption{\textbf{Performance comparison between baseline and \ours on ImageNet and Video}. The y-axis shows the percentage of samples that satisfy the reconstruction threshold, while the x-axis represents the percentage of tokens used. (Left) On image, \ours achieves a 3.5x and 1.3x efficiency boost at different reconstruction thresholds. (Right) On video, \ours shows a 5x and 2.4x improvement over the baseline, maintaining superior performance while using fewer tokens.}
+\label{fig:experiments_main_plot}
+\end{figure}
+
+\begin{table}[!tb]
+\centering
+\begin{minipage}{0.5\textwidth}
+\caption{Performance comparison between baseline and \ours across different reconstruction thresholds with the continuous token model. Percentage shows the proportion of video blocks that satisify the given reconstruction threshold. Our model can satisfy \textbf{more} video blocks.}
+\centering
+\label{table:main_cont_baseline}
+\begin{NiceTabular}{@{}lccc@{}}
+\toprule
+                  & \multicolumn{3}{c}{\textbf{Threshold}}           \\
+                  & $\mathbf{0.001}$ & $\mathbf{0.003}$ & $\mathbf{0.015}$ \\ \midrule
+\textbf{Baseline}     & $40\%$           & $78\%$           & $99\%$           \\
+\textbf{Ours} &   $\mathbf{50\%}$             &   $\mathbf{88\%}$             &   $\mathbf{99\%}$             \\ \bottomrule
+\end{NiceTabular}
+\end{minipage}
+\hspace{0.2cm}
+\begin{minipage}{0.42\textwidth}
+\centering
+\caption{Comparing performance of our Quality Baseline and \ours at different reconstruction thresholds. Our model can use \textbf{fewer} tokens to reach the same quality (match worse-case MSE) as the baseline model.}
+\label{table:quality_baseline}
+\scalebox{1}{
+\begin{NiceTabular}{@{}llll@{}}
+\toprule
+& \multicolumn{3}{c}{\textbf{Threshold}} \\ 
+& \multicolumn{1}{c}{\textbf{0.001}} & \multicolumn{1}{c}{$\mathbf{0.003}$} & \multicolumn{1}{c}{$\mathbf{0.015}$} \\ \midrule
+\textbf{Baseline} & $78\%$                             & $57\%$                                           & $15\%$                             \\
+\textbf{Ours}                            & $\mathbf{75\%}$                    & $\mathbf{37\%}$                                    & $\mathbf{9.4\%}$                   \\ \bottomrule
+\end{NiceTabular}
+}
+\end{minipage}
+\end{table}
+
+\clearpage
+
+\begin{figure}[!tb]
+\centering
+\includegraphics[width=0.85\textwidth]{figure/experiments_prog_recon.pdf}
+\caption{\textbf{Loss progressively declines as more tokens are used}. The top row illustrates the impact on text clarity, while the bottom row shows the effect on image sharpness. The graphs on the right quantify the reconstruction loss relative to token usage percentage, showing a rapid decline as more tokens are consumed.}
+\label{fig:prog_recon}
+\end{figure}
+\begin{figure}[!tb]
+\centering
+\includegraphics[width=0.75\textwidth]{figure/main_prog_seq.png}
+\caption{\textbf{Progressive performance increase with more frames}. Performance improves with increasing sequence length, peaking around 100 frames before a slight decline. (Note the log scale for the x-axis)}
+\label{fig:proj_seq_plot}
+\end{figure}
+
+\subsection{Downstream Tasks}
+
+\begin{minipage}{0.49\textwidth}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figure/downstream_plot.png}
+\caption{
+\textbf{The accuracy and compute trade-off with varying percentages of tokens used}.
+This allows users to adjust the accuracy based on computational budget.
+}
+\label{fig:experiments_downstream_plot}
+\end{figure}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+\begin{table}[H]
+\centering
+\hspace{-0.5cm}
+\scalebox{0.9}{
+\begin{NiceTabular}{@{}lcccc@{}}
+\toprule
+& \textbf{GQA} & \textbf{POPE} & \textbf{MSVD} & \textbf{MSRVTT} \\ \midrule
+\textbf{Ours}     & $54\%$         & $82\%$          & $52\%$             & $37\%$               \\
+\textbf{Baseline} & $54\%$         & $82\%$          & $53\%$             & $37\%$               \\ \bottomrule
+\end{NiceTabular}}
+\caption{\textbf{Comparison of our method with baseline on image and video benchmarks}. Our method can match the performance of the baseline trained on a fixed number ($100\%$) of tokens. However, baseline models are restricted to a fixed token output, and require full pretraining a new model for every possible token length, whereas ElasticTok only requires a single model to generalize to all token lengths.}
+\label{table:downstream_image}
+\end{table}
+\end{minipage}
+
+In order to evaluate the quality of our learned representations, we finetune a pretrained language model with our visual tokens, and evaluate on text-image and text-video VQA tasks. We use OpenLLaMA-3B~\citep{geng2023openllama}, and finetune with visual tokens from the continuous variant of our model (max 2048 tokens). We finetune the entire model for 80M text-image pairs from COYO-700m~\citep{kakaobrain2022coyo-700m}, and chat finetune with data from \cite{chen2023sharegpt4v}. For video, we continue to train on WebVid10M~\citep{Bain21} and finetune on Video-ChatGPT~\citep{maaz2023video} instruct data. Figure~\ref{fig:experiments_downstream_plot} shows evaluation results on GQA~\citep{ainslie2023gqa}, POPE~\citep{li2023evaluating}, MSVD-QA~\citep{xu2017video}, and MSRVTT-QA~\citep{xu2017video} at a varying number of input inference tokens. Benchmark performance generally increases at the number inference tokens increases, suggesting the usefulness of our model as a means for users to potentially be able to flexibly choose how many tokens use, as a compute / accuracy trade-off, especially useful for users with more limited compute / API call budgets. Lastly, Table~\ref{table:downstream_image} shows that our VLM finetuned on our adaptive tokens can match the performance of a VLM finetuned on a fixed token ($50\%$ tokens) baseline tokenizer, suggesting that there is little to no loss in accuracy when switching to \ours as the tokenizer, with additional added adaptivity benefits.
+\subsection{Inference}
+\label{sec:inference}
+
+\textbf{Speed}.
+Table~\ref{table:inference} shows comparisons of the accuracy and inference speed (NFEs) for each of these methods. Error rate is computed as the relative error between the ground truth number of tokens used, and the number of tokens returned by each method. NFE (Number of Function Evaluations) is the number of forward passes that are needed. In generally, methods closer to exhaustive search (Full / Binned Search) are more accurate, while methods that orders of magnitudes faster generally have much higher error around $5-10\%$. Users with less compute available for inference may want to use the faster inference methods at a slight cost to token encoding accuracy. Users with a lot of compute can leverage more exhaustive approaches while retaining fast inference speed by computing search for token lengths as parallel batches.
+\textbf{Target Objective}.
+One benefit of computing elastic tokens is that we can switch to any target objective during inference, and can adaptively tokenize visual content based on certain visual preferences, or aspects that users want to prioritize by allocating more tokens to. For example, Figure~\ref{fig:experiments_eval_obj} shows qualitative examples comparing running inference using an MSE objective versus using a CLIP loss (image-image cosine distance) On average, thresholds are set so that both models as the same average number of tokens over the dataset, but OCR capabilities of CLIP allow it to show preference towards allocating more tokens in reconstructing the text (bottom images), while deprioritizing other images such as the fine-grained details in the bottom image. In general, any scalar function is usable, and does not need to be differentiable (\eg, running OCR detection, and computing a more direct text reconstruction metric, or running segmentation and priortizing object clarity). 
+\takeawaybox{\ours allows multiple adaptive inference methods: full search is the most accurate but slow, while faster methods like neural regression slightly sacrifice accuracy (5-10\% error) for speed. Users with less compute can opt for faster methods with a slight accuracy loss. Additionally, inference objectives can be adapted to prioritize specific content, such as focusing on text over other image features, allowing for flexible token allocation based on user preferences.}
+
+\begin{minipage}{0.49\textwidth}
+\begin{table}[H]
+\centering
+\begin{NiceTabular}{@{}lcc@{}}
+\toprule
+\textbf{Inference Method}    & \textbf{Error Rate} & \textbf{NFEs} \\ \midrule
+{Full Search}         & $0\%$               & $4096$         \\
+{Binned Search (100)} & $0.5\%$             & $100$                  \\
+{Binary Search}       &   $7\%$                  & $12$                        \\
+{Neural Regression}   &   $9\%$                  & $1$                      \\ \bottomrule
+\end{NiceTabular}
+\caption{Comparison of inference methods showing their respective error rates, number of function evaluations (NFEs). Note that while Full and Binned Search are more computationally expensive, they could also benefit more from parallel function evaluations if compute is available.}
+\label{table:inference}
+\end{table}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{figure/experiments_eval_obj.pdf}
+\caption{\textbf{Comparison of different loss functions for inference}. 
+Inference with a CLIP model (cosine distance) prioritizes textual reconstruction (bottom) while deprioritizing other detailed visual features (top).
+}
+\label{fig:experiments_eval_obj}
+\end{figure}
+\end{minipage}
+\subsection{Frequency Analysis}
+We hypothesize that visual content that tends to have more fine-grained details, and high-frequncy features tends to use a higher number of tokens. To investigate this, we run inference on 2k videos (5s, 32 blocks), and also compute an approximate frequency metric for each video block. For each frame in a video block, we convert it to grayscale, run a Sobel edge detection filter (horizontal / vertical), and compute average gradient magnitudes. Figure~\ref{fig:freq_plot} shows scatter plots and correlation for the single and multi block cases. For the single block case, the correlation between encoding length and amount of high-frequency detail is quite high ($0.77$). The multi block case is lower ($0.67$), which is most likely due to slight decorrelation from being able to leverage past frames (conditional encoding) in videos.
+\takeawaybox{Pearson correlation shows that \ours adaptively allocate number of tokens for videos with more detailed visual content and high-frequency features require more tokens for encoding.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figure/freq_plot.png}
+\caption{\textbf{Comparison of token usage versus frequency magnitude in single-block and multi-block frequency analysis}. Both scatter plots show a strong positive correlation between frequency magnitude and token usage in a single-block setting a multi-block setting. The red lines represent the linear regression fits for each case.}
+\label{fig:freq_plot}
+\end{figure}
+
+
+
+
+\section{Related Work}
+
+\textbf{Adaptive Representation}.
+There have been a lot of research studies on learning adaptive or ordered representations. Early work on nested dropout~\citep{rippel2014learning} proposes using dropout~\citep{srivastava2014dropout} in the context of autoencoders to learn ordered representations. In this approach, an index is sampled from a prior distribution, and all units with an index larger than the sampled one are dropped. Similar to our \ours, this method imposes an inherent ordering on the representation dimensions. Units that are dropped less frequently encode more important information, while those that are dropped more often encode less critical details. Other works study adaptive architectures based on context size~\citep{kim2020length}, slimmable neural networks that train a network by sampling multiple sub-networks of different channel numbers simultaneously, where the weights are shared among different widths~\citep{lee2018anytime,yu2018slimmable}, adaptive width and depth in BERT~\citep{hou2020dynabert}, or dropping random layers during training to increase robustness to pruning~\citep{fan2019reducing,huang2016deep}. \citet{dieleman2021variable} learns a variable-rate representation on audio applied to speech. Transframer~\citep{nash2022transframer} uses variable-length DCT representations with transformers for general image and frame-level video prediction tasks. Matryoshka representation learning~\citep{kusupati2022matryoshka} explores adding nested substructures inside the standard Transformer block. However, none of the previous works consider learning elastic representations in autoencoders for long sequences like videos. Our work provides a scalable solution for representing videos with elastic representations.
+
+\textbf{Tokenization}.
+Representing visual images with a set of discrete tokens has been extensively studied, such as in VQVAE~\citep{van2017neural,razavi2019generating} and VQGAN~\citep{yu2021vector}. Recent research has highlighted several shortcomings of traditional tokenization methods, including low vocabulary utilization. In response, alternative approaches like FSQ have been explored \citep{mentzer2024finite,yu2023language}. These discrete visual tokens facilitate integration with next-token prediction in language models and multimodal models~\citep{yu2023language,liu2024world,xie2024show,wang2024emu3}. Parallel to this, other studies have investigated the use of continuous embeddings for representing images and videos \citep{lin2023video,liu2023visual,zhu2023minigpt}. Other research proposes next-scale prediction~\citep{tian2024visual}, which employs hierarchical multi-scale modeling to first capture coarse details, followed by finer ones. However, this approach requires a manually defined hierarchy and uses a fixed number of tokens. Our work, while complementary to these efforts, focuses on adaptive representation and can be directly applied to both discrete and continuous approaches. 
+
+\textbf{Compression}. Adaptive learning for images and video have also been well-studied in the context of variable-rate compression. JPEG~\citep{christopoulos2000jpeg2000} remains one of the most popular lossy image compression algorithms in the world, using a combination of DCT with quantization followed by entropy coding. For video, codecs such as H264~\citep{wiegand2003overview}, H265~\citep{sze2014high}, VP9~\citep{mukherjee2015technical}, and AV1~\citep{han2021technical} are popularly used compression algorithms. Prior works have additionally explored extending neural networks to learn more effective compressors. \citet{theis2022lossy} and \citet{minnen2018joint} introduce methods that leverage CNNs to learn effective variable bit-rate compression algorithms over images competitive with JPEG. \citet{li2023neural}, \citet{mentzer2022vct}, and \citet{li2021deep} extend neural networks to learn how to effectively compress videos. While similar to our work in that these methods also learn adaptive encodings, these compression methods are more difficult to utilize for downstream training and generation tasks due to lack of direct compatibility. 
+In contrast, our work builds upon existing tokenization strategies (VAE, FSQ) that have shown to work well for such downstream tasks, as well as take advantage of the adaptive representations to better utilize compute. 
+
+
+\section{Discussion and Conclusion}
+
+In this work, we propose an elastic representation approach address the inefficiencies of traditional video encoding approaches by introducing an adaptive encoding method that selectively encodes new information based on the context of previous frames. By dynamically allocating resources, it reduces computational costs while maintaining high-quality video representation. The proposed technique of dropping tokens at the end of each sequence allows the model to prioritize essential information, ensuring scalability and efficiency during inference. 
+Our \ours method demonstrates strong performance in both video representation and downstream tasks.
+
+Lastly, we identify some limitations of our method, as well as possible directions for future work.
+\begin{itemize}[leftmargin=8pt, itemsep=0.2pt, topsep=0.2pt]
+    \item \textbf{Masking schemes}: Our model currently slightly underperforms baselines at the tail ends of encoding lengths, which we hypothesize may be partially due to conflicting representations that the model needs to learn in each case (low frequency, global encodings vs high frequency, local encodings). Preliminary investigations showed that changing the way tokens are distributed (as opposed to our method of left-aligned tokens) improved reconstruction accuracy. Future work may also explore learnable encoding masks to dynamically select which tokens to keep for each input. 
+    \item \textbf{Other temporal modalities}: Although our primary focus was on image and video, our method is generally modality-agnostic and can be extended to any temporal data, such as audio and decision-making trajectories (e.g., state, action, reward).
+    \item \textbf{Conditional encoding and different training objectives}: Our focus was on leveraging temporal encoding to achieve more efficient tokenization while retaining high reconstructed visual quality. However, our method can be explored more broadly as a means of encouraging meaningful lossy encodings. For example, robotics models can learn text-conditioned visual encoders that capture only task-relevant information from an image. In other scenarios, different reconstruction objectives could prioritize facial or textual reconstruction while ignoring background reconstruction accuracy.
+\end{itemize}
+
+
+

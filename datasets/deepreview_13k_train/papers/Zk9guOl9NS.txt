@@ -1,0 +1,417 @@
+\title{What Makes Large Language Models Reason in (Multi-Turn) Code Generation?}
+
+\begin{abstract}
+
+Prompting techniques such as chain-of-thought have established themselves as a popular vehicle for improving the outputs of large language models (LLMs).
+For code generation, however, their exact mechanics and efficacy are under-explored.
+We thus investigate the effects of a wide range of prompting strategies with a focus on automatic re-prompting over multiple turns and computational requirements.
+After systematically decomposing reasoning, instruction, and execution feedback prompts, we conduct an extensive grid search on the competitive programming benchmarks CodeContests and TACO for multiple LLM families and sizes (Llama 3.0 and 3.1, 8B, 70B, 405B, and GPT-4o).
+Our study reveals strategies that consistently improve performance across all models with small and large sampling budgets.
+We then show how finetuning with such an optimal configuration allows models to internalize the induced reasoning process and obtain improvements in performance and scalability for multi-turn code generation.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The field of automatic code generation has made significant progress, particularly with the development of specialized Large Language Models (LLMs)~\citep{chen2021evaluating,alphaCode,codellama,openai2023gpt4,meta2024llama}.
+While these models have demonstrated proficiency in generating simple functions across various programming languages, there is still considerable room for improvement in their ability to tackle more complex algorithmic reasoning tasks, such as those found in competitive programming benchmarks like \codecontests~\citep{alphaCode}.
+Current state-of-the-art approaches either rely on model ensembling and massive single-turn sampling~\citep{deepmind2023alphacode2} or employ complex structured prompt chains for planning, editing and debugging \citep{alphacodium,islam2024mapcoder}.
+In contrast, multi-turn code generation strikes a balance between single-turn approaches and prompt chains, where code is built upon previous outputs in a dialog-like structure.
+This approach is motivated by applications such as LLM-based agents~\citep{yao2023reactsynergizingreasoningacting}, where models are tasked with decision-making and interacting with environments.
+In code generation, multi-turn approaches have primarily been explored on simple benchmarks or in small sample regimes due to their association with self-repair techniques~\citep{olausson2024selfrepairsilverbulletcode,self-debug,shinn2023reflexionlanguageagentsverbal,Ldb}.
+
+In this paper, we systematically deconstruct the components of previous research on prompting techniques and propose a unified framework for multi-turn code generation.
+Our objective is to establish a comprehensive and strong baseline, and to explore behavior and limitations across various sample regimes.
+Our focus on competition-level coding benchmarks and sample budgets is motivated as follows:
+(1) Popular methods such as chain of thought~\citep[CoT]{CoT_original} yield improvements on reasoning-heavy tasks. However, they are designed to elicit reasoning traces for maximizing single-turn performance and are not inherently multi-turn.
+Competition-level benchmarks require algorithmic reasoning and thus provide an ideal testbed to evaluate whether CoT techniques can be extended beyond single-turn reasoning.
+(2) Recent studies suggest that the performance gains from self-repair are often modest when considering their generation cost~\citep{olausson2024selfrepairsilverbulletcode} and that repeated single-turn sampling serves as a strong baseline~\citep{brown2024largelanguagemonkeysscaling}.
+As such, the trade-off between single-turn and multi-turn approaches, and the optimal allocation of resources between them, remains under-explored.
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=\textwidth]{fig/Figure1.pdf}
+\caption{\textbf{Our framework for evaluating LLM multi-turn code generation techniques.} \textbf{Top}: In the default multi-turn setting, given a programming problem, the model generates a code solution, interacts with the runtime environment to gather execution feedback and retries in case of failure. \textbf{Bottom}: On top of the default setting, we gather \emph{reasoning} (Reason.) prompts, \emph{instruction} (Inst.) prompts, and \emph{execution feedback} prompts. The problem statement is augmented with a \emph{reasoning} prompt. After generating an answer to the \emph{reasoning} prompt, an \emph{instruction} prompt determines how program code should be generated. The \emph{execution feedback} prompts vary in granularity, ranging from a binary pass or fail indicator to detailed tracing information.}
+\label{fig:example_codes}
+\end{figure}
+
+Our framework (Figure \ref{fig:example_codes}) enables mix-and-match combinations of single- and multi-turn code generation and chain-of-thought (CoT) techniques\footnote{We use the term "chain of thought" to refer to a broad family of prompting methods eliciting intermediate steps before or during code generation.}: prompts that induce \emph{reasoning}, such as a predicting problem attributes or writing natural language solutions first, and \emph{instructions} that prompt different programming styles such as including comments or helper functions.
+Finally, we integrate \emph{execution feedback} from intermediate solutions to allow for code repair.
+We conduct a comprehensive experimental survey across different benchmarks, LLM families and sizes, as well as sample regimes.
+Our analysis yields several key insights:
+\begin{enumerate}
+    \item In the single-turn setting, combining \emph{reasoning} prompts and \emph{instruction} prompts achieves the best performance, and is more beneficial on larger models or harder problems. We also identify CoTs that degrade performance (Section \ref{sec:CoT}).
+    \item The multi-turn setting alone brings modest gains and is sometimes worse than its single-turn counterpart under equal sampling budgets. The combination with CoT provides a significant performance boost on all models we study.
+      Interestingly, detailed \emph{execution feedback} prompts do not always translate to improved performance (Section \ref{sec:mt}).
+      We show that this can be attributed to reduced diversity of generated programs which results in performance drops for large sample budgets.
+    \item LLMs can be instilled with reasoning behavior by finetuning on multi-turn CoT data (Section \ref{sec:cot_finetuning}). The resulting model surpasses our best prompting configurations even without explicitly asking for CoTs during inference.
+\end{enumerate}
+
+
+\section{Background}
+
+\subsection{Single-turn vs. Multi-turn Generation: Problem setting }
+
+We assume a coding problem $D = \{s, u, t\}$, where $s$ is the 
+problem 
+statement in natural language (e.g. see
+Figure~\ref{fig:example_codes}), $u$ is a
+set of public tests, and $t$ is a set of private tests.  A given code sample $c$ 
+is considered correct if it passes \emph{all} tests, or incorrect otherwise. Let $\pi$ denote an LLM that is able to
+produce a code sample $c$ for $D$ 
+from a user prompt $p$ which
+includes the problem statement $s$.
+In the single-turn setting we thus obtain a code sample  $c \sim \pi(\cdot \ | \  p).$ \\
+
+In multi-turn code generation, we can distinguish between a \emph{Natural-Language-to-Code} (NL $\rightarrow$ Code) task in the first turn and \emph{Code-to-Code} (Code $\rightarrow$ Code) generation in subsequent turns.
+For a given problem, we generate a sequence of intermediary code samples $c_1, \ldots, c_T$ rather than just one.
+After each turn $i$, the code sample $c_i$ is fed back into the model $\pi$ together with an \emph{execution feedback} prompt to obtain the next sample $c_{i+1}$. This process is repeated $T$ times until we either pass all  public tests or until a maximum number of turns $N$ is reached. More formally, we can obtain every intermediary sample $c_i$, including the final code solution $c_T$, as follows: 
+$$
+c_i \sim \pi(\cdot \ | \ p_1, c_1, p_2, \dots, c_{i-1}, p_i).
+$$
+In this setting, the first prompt $p_1$ is the initial user prompt including the problem statement, and each $p_i$ for $i > 1$ is an \emph{execution feedback} prompt containing the runtime result with error information or traceback optionally attached. 
+ 
+In the remainder of this study, the sequence $(p_1, c_1, ..., p_T, c_T)$ is denoted a \emph{trajectory}, and the final code sample $c_T$ is called the \emph{submission}. Only the code sample $c_T$ is tested against the private tests $t$ for correctness (i.e. intermediary code samples $c_i$ will only be tested against public tests $u$). Note that we sample not just one but several trajectories in parallel, starting with the same initial prompt $p_1$. 
+
+\subsection{Evaluation Metrics}
+\label{sec:evaluation_metrics}
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+\centering
+\includegraphics[width=0.35\textwidth]{fig/figure2_no_title_verticle.pdf}
+\caption{
+\textbf{Scaling number of turns is not compute optimal.}
+Pass@$10$ (\textbf{Top}) and pass $10$@$100$ (\textbf{Bottom}) on \codecontests test set when increasing the number of turns with \llamalarge.
+}
+\label{fig:limit_pass_at_10}
+\end{wrapfigure}
+
+We are interested in finding a correct solution to a given programming problem with a fixed budget, i.e., with a fixed number of code samples.
+For estimating the success rate of generated code samples, pass@$k$ is a widely used metric~\citep{chen2021evaluating}. For a problem $P$ and given a budget of $k$ samples, pass@$k$ is the expectation that at least one sample is correct, i.e., that it passes all tests.
+
+\compactparagraph{Limitations of pass@$k$}
+Pass@$k$ ignores computational requirements and thus puts single-turn evaluations at a disadvantage.
+In multi-turn settings, solutions are obtained via several generations (i.e., LLM calls) and hence at a higher cost, rendering these two setups not directly comparable~\citep{kapoor2024ai}.  
+
+In this study, we opt to measure performance via \passnatk~\citep{alphaCode} rather than pass@$k$ for a fair comparison of techniques.
+
+Following~\citet{alphaCode}, we select $n$ submissions based on public test performance.
+Note that for $n=k$, both metrics are equivalent.
+For each benchmark, we report the average \passnatk or pass@$k$ over all problems. 
+Figure~\ref{fig:limit_pass_at_10} compares  pass@$k$ and pass~$n$@$k$ when measuring performance in a multi-turn setting.
+Pass@$10$~(\textbf{Top}) keeps increasing if we increase the maximum number of turns. However, pass $10$@$100$~(\textbf{Bottom}) shows that compute optimality is lost after 3 turns. Given a budget of 100 samples with 10 programs selected as submissions, the optimal allocation of compute is obtained by generating trajectories with 3 turns at most. As such, throughout this paper, we favor \passnatk and report pass@$k$ only when comparing  single-turn results exclusively.
+
+
+
+\section{Prompting and Feedback Space}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig/Figure2.pdf}
+\caption{\textbf{Prompting space explored in our survey.} We explore chain of thought prompts at three different levels: before the first code generation (\emph{reasoning} prompts), with code generation (\emph{instruction} prompts), and after the first code generation (\emph{execution feedback}). The corresponding works from the single-turn and multi-turn reasoning and code generation literature are: [1] \cite{CoA}, [2] \cite{self_discover}, [3] \cite{khot2022decomposed}, [4] \cite{parsel}, [5] \cite{jain2023llm}, [6] \cite{Ldb}, [7] \cite{ni2024next}, [8] \cite{self-debug}, [9] \cite{le2023codechain}, [10] \cite{madaan2024self}, [11] \cite{paul2023refiner}, [12] \cite{tang2024coderepairllmsgives}, [13] \cite{li2023explaining}.}
+\label{fig:prompting_space}
+\end{figure}
+
+We map the space of prompting techniques studied in our experimental survey in Figure \ref{fig:prompting_space}. As CoT can intervene at different times in code generation, we categorize \emph{reasoning} prompts (NL $\rightarrow$ NL) that elicit understanding of the problem before code generation, and \emph{instruction} prompts (NL $\rightarrow$ Code) that guide the code output to enhance readability and modularity. These prompts can be applied in single-turn and multi-turn approaches.
+
+In the multi-turn setting, we also introduce \emph{execution feedback} prompts directly harvested from the runtime environment, serving as additional information for the model to self-repair within turns. We aim to determine the type of feedback which most effective on competitive programming benchmarks in the large sample regime.
+We thus evaluate several types of feedback, ranging in granularity:
+
+\setlist[itemize]{align=parleft,left=0pt..1em}
+\begin{itemize}
+    \setlength\itemsep{0.1em}
+    \item \textbf{Binary feedback}: A simple pass/fail indicator.
+    \item \textbf{Failed tests feedback}: Provides expected and actual values for failed unit tests, along with tracebacks if any runtime errors are encountered.
+    \item \textbf{Failed \& passed tests feedback}: Expands on failed tests feedback by also including input/output information for passing tests.
+    \item \textbf{LDB feedback}~\citep{Ldb}: Offers debugger information, printing intermediate variable values and separating the code into blocks. The model must identify at which block the code failed and attempt to fix it.
+\end{itemize}
+
+CoT and execution feedback are incorporated into the generation through specific prompts as illustrated in  Figure~\ref{fig:example_codes} (\textbf{Bottom}). 
+As we will show in Section~\ref{sec:mt}, different types of \emph{execution feedback} induce different multi-turn behavior that can be classified as either \emph{exploratory} or \emph{exploitative}.
+
+
+
+\section{Experimental Setting}
+
+
+
+\compactparagraph{Models} We perform experiments with the Llama Instruct series of LLMs, including Llama 3.0 and 3.1, 8B and 70B models~\citep{meta2024llama}. We use \llamaxl and \gpt in small sampling regimes only due to compute constraints.
+
+ The \emph{reasoning} prompts elicit intermediate steps either in natural language or with partial code. The \emph{instruction} prompts either increase code readability ("describe"), break down the solution into modular code ("modularity"), or bias the type of solution ("solution"). Although we perform one more step of LLM inference for the \emph{reasoning} prompts, we do not consider it an additional turn as our study compares the number of code attempts per problem and the effect of adding different types of extra tokens. We argue that this is equivalent to a single LLM call which groups all the \emph{reasoning} prompts together, modulo the number of LLM forward passes. We generate with nucleus sampling~\citep[top-p=0.95]{holtzman2020curious} and a temperature of $1.0$ to encourage output diversity.
+
+\compactparagraph{Multi-turn}
+When performing multiple consecutive attempts at solving a coding problem, we set the code attempt limit to 3; this is motivated by the multi-turn results in Section~\ref{sec:evaluation_metrics}, which reveal three turns as compute-optimal.
+We take the best \emph{reasoning} prompts from the single-turn setting and combine them for up to 3 \emph{reasoning steps} before code generation. 
+We also introduce the \emph{CoT-retry} setup, which allows for adaptive inference budget based on problem difficulty. In the first turn, we omit CoT prompts. If the first solution fails on more challenging problems, we prompt the LLM with a combination of \emph{execution feedback} and a \emph{reasoning} prompt. We also ablate different granularities of \emph{execution feedback}.
+We do not include CoT prompts in this feedback comparison to isolate the effect of different feedback types.
+
+\compactparagraph{Rejection Sampling Finetuning}
+With the \llamalarge model, we use the \emph{CoT-retry} strategy to generate 3-turn trajectories on the \codecontests training set.
+
+\compactparagraph{Benchmarks} We conduct our experiments on two competitive coding benchmarks in the zero-shot setting: (1)~\textbf{CodeContests}~\citep{alphaCode} contains 13k programming problems in the training set and 117/165 problems in the valid/test set.
+Each problem contains public tests, private tests, and generated tests.
+We use public tests to provide execution feedback in the multi-turn setting and use all available tests to evaluate the final submission. (2)~\textbf{TACO}~\citep{li2023tacotopicsalgorithmiccode}
+is a collection of problems sourced from \codecontests, APPS~\citep{DBLP:conf/nips/HendrycksBKMAGB21}, and various programming contest platforms.
+The test set is split into 5 distinct difficulty levels: easy, medium, medium-hard, hard, and very-hard, with each level comprising 200 problems. This stratification allows us to examine the performance of different prompting strategies across difficulty levels. We use the first test case as the public test. 
+
+
+\section{Results}
+
+
+In this section, we first present model performance with the respective best CoT variants in Table~\ref{tab:main_res} and~\ref{tab:comparison_gpt4o} and then conduct a series of detailed experiments to better understand the performance impact of individual prompting methods.
+We structure our presentation by key findings outlined in Introduction.
+\begin{table}[ht]
+\centering
+\footnotesize
+\caption{
+\textbf{Up to +10\% with multi-turn CoT.} Pass $n$@$k$ (\%) on \codecontests test set with high temperature (1.0) and large sampling budget.
+In the multi-turn setting, we use a maximum of 3 code attempts (i.e., 3 turns) with the "failed tests" feedback.
+The \passnatk is calculated from 200 trajectories for both single-turn and multi-turn settings. We also report the pass rates for \llamalarge after Rejection Sampling Fine-tuning (RFT) (Section ~\ref{sec:cot_finetuning}).
+}
+\label{tab:main_res}
+\begin{tabular}{ll|llll} 
+\toprule
+\multirow{2}{*}{Model} & \multicolumn{1}{l}{\multirow{2}{*}{Variants}} & \multicolumn{4}{c}{CodeContests / Test}                                                                     \\ 
+\cmidrule(l){3-6}
+ & \multicolumn{1}{l}{} & \multicolumn{1}{l}{1@3} & \multicolumn{1}{l}{10@30} & \multicolumn{1}{l}{33@100} & \multicolumn{1}{l}{100@300}  \\ 
+\midrule
+ \llamaoldsmall & & 2.9 & 8.0 & 12.6 & - \\
+ &  + CoT &  $3.4_{+0.5}$ & $11.7_{+3.7}$ & $\mathbf{17.3}_{\mathbf{+4.7}}$ & - \\
+ &  + Multi-turn &  $2.4_{-0.5}$ & $8.0_{+0.0}$ & $12.8_{+0.2}$ & 16.7 \\
+ &  + Multi-turn CoT & $2.8_{-0.1}$ & $9.8_{+1.8}$ & $14.9_{+2.3}$ & 19.4 \\
+\midrule
+ \llamaoldlarge & & 9.6 & 18.9 & 23.1 & - \\
+ &  + CoT & $10.4_{+0.8}$ & $26.0_{+7.1}$ & $33.0_{+9.9}$ & - \\
+ &  + Multi-turn & $10.1_{+0.5}$ & $21.0_{+2.1}$ & $26.7_{+3.6}$ & 32.7 \\
+ &  + Multi-turn CoT & $11.1_{+1.5}$ & $26.5_{+7.6}$ & $\mathbf{{34.3}_{+11.2}}$ & 40.4 \\
+\midrule
+ \llamasmall & & 7.7 & 18.2 & 23.8 & -                           \\
+ &  + CoT &  $8.0_{+0.3}$ & $19.5_{+1.3}$ & $\mathbf{26.1_{+2.3}}$ & - \\
+ &  + Multi-turn &  $7.0_{-0.7}$ & $18.8_{+0.6}$ & $24.5_{+0.7}$ & 30.4                        \\
+ &  + Multi-turn CoT & $6.9_{-0.8}$ & $19.4_{+1.2}$ & $26.0_{+2.2}$ & 31.5 \\
+\midrule
+ \llamalarge & & 24.1 & 42.3 & 49.8 & -                            \\
+
+ &  + CoT &  $26.4_{+2.3}$ & $47.8_{+5.5}$ & $54.8_{+5.0}$ & - \\
+
+ &  + Multi-turn &  $24.1_{+0.0}$ & $43.8_{+1.5}$ & $51.6_{+1.8}$ & 56.2                        \\
+
+ &  + Multi-turn CoT &  $27.7_{+3.6}$ & $48.4_{+6.1}$ & $\mathbf{55.3_{+5.5}}$ & 59.6                       \\
+\midrule
+
+\llamarft & &  26.2 & 45.1 & 50.9 & -                          \\ 
+
+ &  + Multi-turn &  $29.7_{+3.5}$ & $50.5_{+5.4}$ & $\mathbf{57.2_{+6.3}}$ & 61.1                       \\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{table}[ht]
+\centering
+\footnotesize
+\caption{
+\textbf{Benchmarking of CoT across models: \gpt and Llama.} Pass $1$@$1$ (\%) and pass $1$@$3$ (\%) with low temperature (0.2).
+As models become more capable, repeated sampling surpasses a straightforward extension to multi turn (e.g. \gpt) or single-turn CoT (e.g. \llamaxl). A tailored multi-turn CoT, however, improves pass $1$@$3$ performance across all models.
+}
+\label{tab:comparison_gpt4o}
+\begin{tabular}{lllllll} 
+\toprule
+\multirow{2}{*}{Variants} & \multicolumn{2}{c}{\gpt} & \multicolumn{2}{c}{\llamalarge} & \multicolumn{2}{c}{\llamaxl}                  \\ 
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+ & \multicolumn{1}{l}{1@1} & \multicolumn{1}{l}{1@3} & \multicolumn{1}{l}{1@1} & \multicolumn{1}{l}{1@3} & \multicolumn{1}{l}{1@1} & \multicolumn{1}{l}{1@3}  \\ 
+\midrule
+Single-turn & 17.0 & 27.6 & 23.2 & 27.3 & 27.8 & 32.9                     \\
+~ ~ + CoT & $25.5_{+8.5}$ & $29.0_{+1.4}$ & $25.5_{+2.3}$ & $28.9_{+1.6}$ & $25.1_{-2.7}$ & $31.8_{-1.1}$                     \\
+~ ~ + Multi-turn & - & $23.1_{-4.5}$ & - & $29.5_{+2.2}$ & - & $35.4_{+2.5}$     \\
+~ ~ + Multi-turn CoT & - & $\mathbf{31.5_{+3.9}}$ & - & $\mathbf{31.5_{+4.2}}$ & - & $\mathbf{40.1_{+7.2}}$     \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Single-Turn Setting: CoT works best for hard problems, large models, high sampling}
+\label{sec:CoT}
+\begin{table}[h!]
+\centering
+\scriptsize
+\caption{\textbf{Combining \emph{reasoning} and \emph{instruction} works best} as compared to each individually for single-turn \codecontests test set (chosen based on pass@$100$ performance per model). In the best categories, results worse than the baseline are underlined.}
+\label{tab:reasonxinst_singleturn}
+\begin{tabular}{lcccccccc}
+\toprule
+ & \multicolumn{2}{c}{\llamaoldsmall} & \multicolumn{2}{c}{\llamaoldlarge} & \multicolumn{2}{c}{\llamasmall} & \multicolumn{2}{c}{\llamalarge}  \\ 
+\cmidrule(l){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+ & \multicolumn{1}{l}{pass@1} & \multicolumn{1}{l}{pass@100} & pass@1 & pass@100 & pass@1 & pass@100 & pass@1 & pass@100                 \\ 
+\midrule
+Baseline & 1.6 & 12.3 & 3.8 & 23.8 & 3.8 & 22.8 & 16.7 & 48.9                         \\ 
+\midrule
+Worst \emph{reasoning} & 1.4 & 12.9 & 5.7 & 21.8 & 4.0 & 23.4 & 15.6 & 47.4                         \\
+Worst \emph{instruction} & 1.4 & {\color{red} 11.3} & 3.4 & 25.1 & 3.7 & {\color{red} 20.9} & 14.9 & 48.4                         \\
+Worst Combination & 1.4 & 11.8 & 5.6 & {\color{red} 21.0} & 2.9 & 21.1 & 13.2 & {\color{red} 43.5}                         \\
+\midrule
+Best \emph{reasoning} & 1.8 & 15.7 & 7.0 & 30.4 & 4.1 & 25.7 & {\color{red} {\uline{15.7}}} & 52.2                         \\
+Best \emph{instruction} & {\color{red} {\uline{1.3}}} & 13.5 & 5.5 & 29.6 & {\color{red} {\uline{3.6}}} & 24.6 & 16.8 & 53.8                         \\
+Best Combination & {\color{red} {\uline{1.5}}} & \textbf{17.3} & 5.3 & \textbf{33.1} & 4.0 & \textbf{26.1} & {\color{red} {\uline{16.1}}} & \textbf{54.1}                         \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We first investigate the impact of various CoT prompting strategies on models in the single-turn setting. There will be no \emph{execution feedback} prompts. Therefore, our grid search involves searching in the space of \emph{reasoning} prompts (NL $\rightarrow$ NL) and \emph{instruction} prompts (NL $\rightarrow$ Code).
+
+\paragraph{Reasoning and instruction prompts can work together.}
+
+We first compare the effect of various \emph{reasoning} prompts, \emph{instruction} prompts as well as combinations of both. An interesting observation is that even the best performing \emph{reasoning} and \emph{instruction} prompts for pass@$100$ can decrease model performance in small sampling regimes (pass@$1$). Although \emph{reasoning} prompts provide larger gains than \emph{instruction} prompts (with the exception of \llamalarge), combining both results in the best performance.
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{fig/figure6_no_title.pdf}
+\caption{\textbf{CoT helps most on hard examples.} From a set of 8 reasoning and 6 instruction prompts commonly used on competitive coding benchmarks, we extract the pass rate of the best and worst prompts amongst all $63 = (8+1) \times (6+1)$ combinations (including no \emph{reasoning} or no \emph{instruction}) for \llamaoldsmall. We compare on different difficulty split of the TACO dataset. The relative gain from a tailored CoT increases with problem difficulty and sampling size.
+}
+\label{fig:taco_cot_best_worst}
+\end{figure}
+\paragraph{CoT is most helpful for large models.}
+With the smaller \llamaoldsmall and \llamasmall, we observe from Table~\ref{tab:reasonxinst_singleturn} that the best combination of \emph{reasoning} and \emph{instruction} prompts provides relatively small gains of 5.0\% and 3.3\% pass@$100$ on the \codecontests test set compared to the improvements of 9.3\% and 5.2\% from the corresponding 70B models. Interestingly, we found that not all sets of prompts are beneficial.
+the worst combination degrades the pass@$100$ of \llamalarge by up to 5.4\%. CoT makes performance worse if the model fails to follow the \emph{instructions} or makes the LLM propose a sub-optimal plan.
+
+\paragraph{CoT is most helpful for harder problems.}
+With the TACO dataset, which provides a difficulty split,
+we can observe that CoT does help smaller models on harder problems. Figure \ref{fig:taco_cot_best_worst} demonstrates that the gap between baseline performance (No CoT) and the best \emph{reasoning} and \emph{instruction} prompt combination widens with problem difficulty. For example, the pass@$100$ of \llamaoldsmall nearly doubles with CoT on the very-hard test split (2.1\% $\rightarrow$ 3.9\%).1 8B and 70B model.
+
+\paragraph{Prompt efficacy is model and sample size dependent. \textit{Reasoning} prompts that simplify the problem (e.g., self-reflection, explain input-output pairs) benefit smaller models (8B models) whereas larger models (70B, 405B, \gpt) gain most from generating parts of the solution (e.g., write function docstrings). "Solution"-based \textit{instruction} prompts are the most efficient across models, specifically for the Llama 3.1 series, as shown in Figure \ref{fig:inst_plot}.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\textwidth]{fig/inst_prompts.pdf}
+\caption{\textbf{Solution-based \emph{instruction} prompts work best across Llama 3.1 models.} We separate \emph{instruction} prompts into "describe" (e.g., add comments, imports), "modularity" (e.g., add helper functions) and "solution"(e.g., write a naive solution, propose a clever algorithm).
+The performance difference ($\Delta$) is normalized with respect to the baseline and standard deviation per pass rate. }
+\label{fig:inst_plot}
+\end{figure}
+
+\subsection{Multi-turn setting: self-repair limited without CoT and proper feedback}
+\label{sec:mt}
+We summarize our multi-turn results in Table~\ref{tab:main_res}. With a fixed number of samples, i.e., $k$ in \passnatk, multi-turn alone provides modest gains only (usually less than +2\%) and sometimes even reduces pass $1$@$3$ performance compared to drawing independent samples in single-turn mode.
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{fig/figure8_no_title_normalize.pdf}
+\caption{\textbf{Fine-grained feedback induces exploitative behavior.} Distribution of consecutive code similarity scores within dialog for different types of feedback, obtained from Llama 3.1 8B and 70B samples (temperature 1.0). The higher the similarity scores between consecutive codes in the same dialog, the more the model exhibits exploitative behavior.
+}
+\label{fig:feedback_distribution}
+\end{figure}
+Notably, this is the case for smaller models (Llama 3.0 and 3.1 8B).
+In this section, we take a closer look at performance 
+drops in the multi-turn setting and explore methods that can take advantage of accessing previous wrong solutions.
+
+\paragraph{Reasoning prompts are not additive.}
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+\centering
+\includegraphics[width=0.4\textwidth]{fig/figure4.pdf}
+\caption{
+\textit{Reasoning} and \textit{execution feedback} prompts, and RFT, enhance both single- and multi-turn performance for \llamalarge.
+}
+\label{fig:max5_comparisons}
+\end{wrapfigure}
+
+It is tempting to consider that stacking more \emph{reasoning} prompts before code generation will further guide the model towards correct solutions. For example, prompts might increase the granularity of reasoning: self-reflect on the problem, explain the input/output pairs, write helper functions, and finally output a full code solution. However, we empirically find that across models, one step of \emph{reasoning} provides the most significant boost. The performance plateaus or even decreases with two or three steps. Increasing the number of \emph{reasoning} steps hurts both Llama 3.0 and 3. For the best models, a single step with a \emph{reasoning} prompt is most beneficial.
+\paragraph{\emph{CoT-retry} works best.} For Llama 3.0 models, simply extending the single turn \emph{reasoning} and \emph{instruction} prompts to the multi-turn setting yields superior performance (reported as "Multi-turn CoT" in Table~\ref{tab:main_res}). However, as models become more capable, an increasing number of problems in \codecontests are solved in the first attempt without specific prompts. \emph{CoT-retry} only \emph{reasons} when the first attempt fails and therefore works best across Llama 3.1 models for all sampling sizes and benchmarks ("Multi-turn CoT" in Table~\ref{tab:main_res}). Figure~\ref{fig:max5_comparisons} decomposes its per-turn performance. When extending the number of turns from 2 to 3, \llamalarge alone shows diminishing gain while combination with \emph{CoT-retry} still increases the performance by a large margin.
+\paragraph{Execution feedback granularity determines exploration-exploitation behavior.}
+Given previous incorrect code and execution feedback, subsequent attempts can consist of a fresh attempt (exploration) or of updates to prior solutions based on feedback (exploitation).
+ Figure~\ref{fig:feedback_distribution} shows that with more fine-grained information provided via execution feedback, models exhibit exploitative behavior (high similarity scores). Exploitation can be a desired property on relatively easy problems where errors are due to simple bugs. However, we posit that diversity is key to improving performance on difficult problems, i.e., exploratory behavior within a trajectory based on the \emph{execution feedback} prompts. This matches our experimental results: simple execution feedback (e.g. 
+\subsection{CoT Rejection Sampling Fine-tuning: models can internalize reasoning}
+\label{sec:cot_finetuning}
+
+\begin{table}[th]
+\centering
+\caption{
+\textbf{Multi-turn CoT and RFT generalize to TACO test set.} Pass $n$@$k$ (\%) of \llamalarge on multi-turn TACO test set with temperature 1.0. We use the best multi-turn CoT found on \codecontests.
+}
+\label{tab:taco_large_res}
+{\fontsize{7.3pt}{8.7pt}\selectfont
+\begin{tabular}{lcccccccccc} 
+\toprule
+\multirow{2}{*}{Model} & \multicolumn{2}{c}{easy} & \multicolumn{2}{c}{medium} & \multicolumn{2}{c}{medium\_hard} & \multicolumn{2}{c}{hard} & \multicolumn{2}{c}{very\_hard}  \\ 
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}\cmidrule(lr){10-11}
+ & 1@3 & 100@300 & 1@3 & 100@300 & 1@3 & 100@300 & 1@3 & 100@300 & 1@3 & 100@300                   \\ 
+\midrule
+\llamalarge & 31.6 & \textbf{60.2} & 14.2 & 44.6 & 9.5 & 36.2 & 4.4 & 20.6 & 1.8 & 9.0 \\
+~+ Multi-turn CoT & 32.3 & 59.8 & 15.0 & \textbf{46.2} & 10.8 & 38.5 & 5.8 & 22.8 & 2.6 & \textbf{11.8} \\
+\llamarft & \textbf{34.1} & 58.9 & \textbf{18.0} & 45.3 & \textbf{13.0} & \textbf{39.4} & \textbf{8.1} & \textbf{23.3} & \textbf{3.5} & \textbf{12.0}                           \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\textwidth]{fig/figure_10_no_title_v3.pdf}
+\caption{\textbf{RFT makes the model produce more diverse code within trajectories} as shown by the consecutive codes' similarity scores before/after RFT on \codecontests test set evaluated with multi-turn no CoT. This shift towards more exploratory behavior contributes majorly to the gain of correct trajectories.}
+\label{fig:rft_bahavior_distribution}
+\end{figure}
+
+We investigate whether LLMs can benefit from finetuning on reasoning traces obtained via CoT prompting.
+We thus perform Rejection Sampling Finetuning (RFT)
+on \llamalarge, where the \emph{reasoning}, \emph{instruction} and 
+\emph{execution feedback}
+prompting strategies we consider act as \emph{policy improvement operators}:
+they elicit the model's reasoning ability and produce a higher number of trajectories
+\begin{wrapfigure}{r}{0.35\textwidth}
+\centering
+\includegraphics[width=0.35\textwidth]{fig/figure9_no_title_test_only.pdf}
+\caption{
+\llamalarge's pass $k$@$3k$ on \codecontests. \emph{CoT-retry} increases the performance in large sampling regimes. RFT transfers this reasoning ability to no CoT setting and lifts the pass rate curve across sampling budgets.
+}
+\label{fig:rft_cot_pass_at}
+\end{wrapfigure}
+ with correct submissions.
+Given the low variance across different feedback types (Table~\ref{tab:ef_feedback}
+
+we opt for simplicity and use the "failed tests" execution feedback combined with \emph{CoT-retry} for data generation.
+More specifically, we improve a model $\pi$ by 1) collecting a dataset of correct trajectories sampled from $\pi$ with CoT enabled at inference time, 2) removing the CoT prompt in the collected trajectories, and 3) finetuning $\pi$ with the standard next-token prediction objective. With this strategy, we can now obtain CoT-level trajectories without adding specific prompts at inference time.
+
+Figure~\ref{fig:rft_cot_pass_at},  Table~\ref{tab:main_res}, and Table~\ref{tab:taco_large_res} show that the RFT model provides additional gains over inference methods across sampling sizes and datasets. Beyond performance, RFT on multi-turn CoT improves sampling diversity (Figure~\ref{fig:rft_bahavior_distribution}) and self-repair capacities, especially for long trajectories (Figure~\ref{fig:max5_comparisons}).
+
+
+
+\section{Related Work}
+
+
+\compactparagraph{Chain of Thought with Code} Chain of Thought (CoT)
+enables step-by-step thinking for LLMs to solve mathematical word problems in either few-shot~\citep{CoT_original} or zero-shot~\citep{kojima2023largelanguagemodelszeroshot} settings. Many variants, e.g., Tree of Thought~\citep{ToT}, have emerged in code generation since.~\citet{PoT} and ~\citet{Pal} translate natural language mathematical problems in executable code for the model to separate reasoning and computation. These methods rely on the LLM outputting correct code to represent a problem. We see this work as tangential to ours as boosting LLM coding performance will also help on overall reasoning tasks. Higher levels of abstractions~\citep{khot2022decomposed, self_discover, zhou2022least, parsel, jain2023llm} and self-repair techniques~\citep{paul2023refiner, li2023explaining, alphacodium} have been proposed. Beyond inference methods,\cite{CoT_distill_mysteries,yu2024distilling21, Star, v-star, IPO} explore new training algorithms and loss functions to learn from CoT. In comparison, we bring novelty to the type of CoT used in training (multi-turn) and rely on simple Rejection Sampling Fine-tuning (RFT)~\citep{llama2,yuan2023scalingrelationshiplearningmathematical,meta2024llama}. It has been shown to achieve good performance, with less data compared to SFT~\citep{ setlur2024rlincorrectsyntheticdata}.
+
+\compactparagraph{Execution feedback} Currently LLMs struggle to understand code execution feedback~\citep{gu2024counterfeit} as this type of data is rarely present in their training set. \citet{Ldb} and ~\citet{ni2024next} try to mimic "print debugging" to convey intermediate code steps to the LLM.
+~\citet{olausson2024selfrepairsilverbulletcode} found that the effect of self-repair largely depends on the text quality of the subsequent reasoning and therefore use only textual feedback. In our setting, we are interested in the feedback which could be directly harvested from the execution environment.
+~\citet{shi2022natural, alphaCode, codet} likewise proposed unit test generation as a way to increase coverage with execution feedback. Adding test generation to our pipeline would be an interesting avenue for further work.
+
+\compactparagraph{Inference Optimization}
+With the rise of LLM agents~\citep{kapoor2024ai} and the scaling effect of test time techniques~\citep{alphaCode,snell2024scalingllmtesttimecompute, brown2024largelanguagemonkeysscaling}, inference optimization against compute resources becomes increasingly relevant.
+Similar to our \passnatk argument in Section~\ref{sec:evaluation_metrics}, ~\citet{kapoor2024ai} discuss the importance of controlling for generation cost in AI agent evaluations.
+
+
+
+\section{Limitations}
+
+
+In our multi-turn setting, we do not explore further branching at the second or third turn, i.e., more complex tree structures~\citep{tang2024coderepairllmsgives} or in general inference-based search approaches~\citep{snell2024scalingllmtesttimecompute}, e.g. with look-ahead or backtracking, as we focus on the effect of additional CoT tokens generation.
+Although a maximally fair comparison (at the cost of complexity) should account for total input and output tokens~\citep{olausson2024selfrepairsilverbulletcode} as well as model size~\citep{hassid2024larger}, we believe \passnatk, which stresses the number of code attempts, constitutes a simple yet superior alternative to pass@$k$.
+Our RFT is similar to Expert Iteration~\citep{anthony2017thinkingfastslowdeep} and ReST~\citep{gulcehre2023reinforcedselftrainingrestlanguage} when considering a single iteration only. Future work could benefit from exploring more advanced training strategies in conjunction with multi-turn CoT to potentially further enhance reasoning capabilities. Finally, we speculate that the effectiveness of different prompts for different LLM families (particularly the Llama 3.0 vs. 3.1 series vs. \gpt) could be attributed to the mixture of finetuning data ~\citep{chung2022scalinginstructionfinetunedlanguagemodels}. Exploration of this topic is beyond the scope of this paper.
+
+
+
+\section{Conclusion}
+
+
+In this work, we present a comprehensive experimental survey on various \emph{reasoning}, \emph{instruction} and \emph{execution feedback} prompts in the single-turn and multi-turn code generation task at scale. Our results on two competitive programming benchmarks, \codecontests and TACO, suggest that incorporating CoT techniques, originally designed for single turns, and \emph{execution feedback} prompts into the multi-turn setting is non-trivial. Due to the difficulty of the benchmarks, a major contributor to performance is problem understanding rather than the ability to perform code repair with detailed feedback. With a set compute budget, using multiple turns alone can hamper performance compared to repeated sampling with high temperatures. Biasing the model with adapted CoT based on problem difficulty at each turn boosts its self-repair abilities and leads to consistent gains across all model series and sizes. Beyond inference methods, our RFT experiment shows that multi-turn reasoning traces triggered by prompts can be internalized, which leads to advanced reasoning abilities. We hope that our findings motivate further research in more advanced multi-turn settings. One example is repository-level code agents, where models interact with complex environments to gather feedback and extensive planning and reasoning capabilities are demanded.
+
+
+\newpage
+\subsubsection*{Reproducibility Statement}
+As our paper focuses on inference methods with existing models, the key components for reproducibility are access to models, datasets, and prompt descriptions. All the models (except our fine-tuned RFT model) used in this paper are publicly available at the time of writing: Meta Llama 3.0 and 3.1 series are open-weight, and gpt-4o-2024-05-13 (GPT-4o in the paper) are available through OpenAI API. We will release the code for our multi-turn and CoT methods to facilitate reproduction.
+
+\ificlrfinal
+\subsubsection*{Acknowledgement}
+We thank Quentin Carbonneaux, Baptiste Rozière, Jade Copet, Olivier Duchenne, Fabian
+Gl\"{o}eckle, Badr Youbi Idrissi, Nicolas Usunier, Sten Sootla, Chris Cummins, Sida Wang, Pierre Chambon, Matthieu Dinot, Ori Yoran, Kush Jain, Naman Jain and all the members in FAIR CodeGen team for helpful technical contributions, suggestions, and insightful discussions. We thank the Infra team for the support for enabling a seamless compute cluster experience.
+\fi
+
+
+
+
+

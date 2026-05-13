@@ -1,0 +1,443 @@
+\title{RAGGED: Towards Informed Design of Retrieval Augmented Generation Systems}
+
+\begin{abstract}
+
+Retrieval-augmented generation (RAG) can significantly improve the performance of language models (LMs) by providing additional context for tasks such as document-based question answering (DBQA). 
+However, the effectiveness of RAG is highly dependent on its configuration.
+To systematically find the optimal configuration, we introduce \methodname, a framework for analyzing RAG configurations across various DBQA tasks. 
+Using the framework, we discover distinct LM behaviors 
+in response to varying context quantities, context qualities, and retrievers.
+For instance, while some models
+ are robust to noisy contexts, monotonically performing better with more contexts, others are more noise-sensitive and can effectively use only a few contexts before declining in performance.
+This framework also provides a deeper analysis of these differences by evaluating the LMs' sensitivity to signal and noise under specific context quality conditions.
+Using \methodname, researchers and practitioners can derive actionable insights about how to optimally configure their RAG systems for their specific question-answering tasks
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Retrieval-augmented generation (RAG) \citep{chen-etal-2017-reading,lewis2020retrieval} is a technique widely applied to enhance the performance of top-performing LMs on knowledge-intensive generation tasks like document-based question answering \citep{karpukhin2020dense}. 
+Given a question,
+the technique includes using a
+\emph{retriever} model to obtain multiple relevant passages (i.e. paragraphs) across potentially different documents, then inputting these passages to a \emph{reader} model as additional contexts for generating an answer.
+
+\begin{figure}[t]
+\centering
+    \includegraphics[width=\linewidth]{figures/example/ragged.pdf}
+    \caption{Illustration of our \methodname framework.}
+\label{fig:teaser1}
+\end{figure}
+\begin{figure}[t]
+\centering
+    \includegraphics[width=\linewidth]{figures/example/teaser.pdf}
+    \caption{Example insight from using \methodname: \llama and \claude models are more sensitive to noise in context, while \flan and \gpt models are more robust to noise in context and can effectively use a larger number of context passages. 
+    }
+\label{fig:teaser2}
+\end{figure}
+
+However, using RAG effectively is not straightforward, and existing literature provides mixed, even contradictory, suggestions for configuring RAG. While different LMs have different context length limits \citep{chung2022scaling,tay2023ul2,touvron2023llama2,liu2023lost}, these limits alone do not simply determine the optimal number of passages to provide in context. Early works suggest that providing more retrieved passages results in strictly better outputs \citep{izacard2021leveraging}. In contrast, other works find that providing a selected set of passages \citep{asai2022evidentialityguided}, sentences \citep{wang2023learning}, or tokens \citep{berchansky2023optimizing} outperforms providing the full set, presumably due to increased context relevance and quality.
+In addition to context quality and quantity,
+how robust a reader model is to noisy context also determines downstream performance.
+For example, \citet{hoffmann2022an} train models on high-quality data, while \citet{yu2023chainofnote} intentionally inject noisy content into input context during model training, and observe increased robustness of these models to low-quality contexts.
+
+To provide more concrete suggestions of the \textit{best practices} under various cases, 
+we introduce an analysis framework, \methodname,\footnote{For ``retrieval augmented generation generalized evaluation device''.}
+to test RAG combinations on a suite of representative document-based question answering (DBQA) tasks, including open-domain datasets like Natural Questions \citep{kwiatkowski-etal-2019-natural} and HotpotQA  \citep{yang2018hotpotqa}, which respectively focus on single-hop and multi-hop questions, as well as BioASQ,
+which targets the specialized, biomedical domain.
+To ensure a comprehensive evaluation,
+we incorporate both classic sparse and dense retrievers, BM25 \citep{robertson2009probabilistic} and ColBERT \citep{santhanam2021colbertv2}, and top-performing reader model families 
+\gpt \citep{brown2020language}, \claude \citep{enis2024llm}, \flan \citep{chung2022scaling, tay2023ul2}, \llama \citep{touvron2023llama2} families, respectively.
+
+We begin by exploring \textit{``How many contexts can readers benefit from?''} (\S\ref{sec:more-contexts}). 
+Our analysis identifies the optimal context quantity for different readers.
+We find that while some readers' performance improves monotonically as context quantity increases,
+other models' performance peaks early and starts deteriorating, sometimes even below their no-context performance.
+
+To understand these differences in more detail, we ask
+\textit{"How robust are reader models to irrelevant context when gold passages are present versus absent?"} (\S\ref{sec:context-use}).
+We analyze the readers under these data slices, 
+and find that even with sufficient information, all readers still get distracted by the irrelevant context and degrade in performance as the number of contexts increases. 
+The difference is that some models' performance drops below their no-context baseline, while others are more robust and remain above the baseline.
+
+Although it is useful to know model behavior under the presence and absence of signal, 
+a practitioner may not have such detailed information at deployment time.
+Hence, we also examine reader sensitivity to context quality at the coarser level of retriever choice, and ask
+\textit{“How does the retriever choice impact reader performance?”} (\S\ref{sec:comp-retriever})
+For Wikipedia-based questions, we find that using a neural retriever offers a big advantage over using a lexical retriever, but this advantage only translates well for single-hop questions and not for multi-hop ones.
+For special-domain questions, we find that using a neural retriever only offers a minimal advantage over using a lexical retriever, but this advantage is amplified in reader performance.
+
+In summary, we demonstrate how \methodname enables us to derive actionable insights about the conditions under which state-of-the-art RAG components combine to excel. We introduce a reusable framework that can easily be used to analyze new retriever and reader models, as they evolve. We release our full dataset and code, aiming to provide the community with a deeper understanding of the nuanced interplay between context quantity, quality, and model architecture in RAG systems.
+
+
+\section{The RAGGED Framework}
+
+
+\subsection{Framework Overview}
+We first explain the three aspects we vary in our analysis, then explain the three research questions we can answer with our analysis.
+The three aspects we vary in our framework are:
+\begin{itemize}
+    \item RAG system components. For example, we vary the choice of the retriever (e.g., BM25, ColBERT), the reader family, (e.g., \gpt, \claude, \flan, \llama), and the max input token length.
+    \item The number of retrieved passages provided as context, denoted as $k$. We vary $k$ from 1 to 50, though we find that most insightful variations in behavior occur before $k=30$.
+    \item Slices of data to examine based on the quality of retrieved passages. By quality, we mean the presence of gold passages in the top-$k$ retrieved passages.
+\end{itemize}
+By varying these, 
+we analyze the three following aspects of RAG system behavior:
+
+\paragraph{Effective Number of Context Passages (\S\ref{sec:more-contexts})} 
+We observe how different model architectures and context limits respond to an increasing $k$, number of context passages.
+We observe two kinds of behaviors from different model families: some models' performance monotonically improves as $k$ increases while others' performance peaks early and deteriorates steadily.
+
+\paragraph{Context Utilization Behaviors (\S\ref{sec:context-use})}
+We analyze how effectively readers use context when the context quality varies.
+Specifically, by context quality, we mean whether there is sufficient information, or signal, in the context to answer the question.
+Whether a passage is considered a signal or noise is determined by whether it is marked as gold by human annotators.
+Using these slices, 
+one can examine how sensitive a reader is to ``signal'' and how robust it is to the ``noise''.
+
+\paragraph{Influence of Retriever Quality (\S\ref{sec:comp-retriever})}
+We vary the retriever choice
+and analyze how much that affects reader performance 
+on questions of different domains (Wikipedia v. PubMed) and complexity (single-hop v. multi-hop).
+
+\subsection{Implementation Details}
+
+For all experiments, we use the following prompt:
+
+\noindent\fbox{
+\parbox{\linewidth}{
+        \textit{Instruction:} Give simple short one phrase answers for the questions based on the context \\
+        \textit{Context:} [passage$_1$, passage$_2$, $\cdots$, passage$_k$] \\
+        \textit{Question:} [the question of the current example] \\
+        \textit{Answer:}
+}}.
+
+We sample $k \in \{1, 2, 5, 10, 20, 50\}$ to represent the reader behavior.
+More details can be found in \S\ref{sec: implementation-details}.
+
+
+
+\section{Experimenting with RAG Systems}
+
+\label{sec:rag}
+We introduce the retrievers and readers.
+
+\subsection{Retriever}
+\label{sub:retriever}
+We employ two approaches: (1) a sparse retriever, based on lexical information, and (2) a dense retriever based on neural embeddings.
+
+\paragraph{BM25}
+BM25 is a probabilistic retrieval model \citep{robertson2009probabilistic} that 
+estimates passage relevance via term weighting and passage length normalization. 
+BM25 relies on term-matching, and thus is supposed to be proficient at identifying lexical similarity especially in special domains.
+\paragraph{ColBERT}
+One of the best-performing neural-based retrievers is ColBERT \citep{santhanam2021colbertv2}, i.e., contextualized late interaction over BERT. 
+ColBERT uses contextualized embeddings instead of term-matching as in BM25, thus is supposed to be better at identifying semantic similarities between queries and passages.
+
+\subsection{Reader} 
+\label{sub:2.2:reader}
+
+We analyze closed-source models from the \gpt and \claude families, and open-source models from the \flan and \llama families.
+
+\paragraph{\flan} 
+The \flan models are encoder-decoder models.
+We use the \flantfive-XXL \citep{chung2022scaling} with 11B parameters and \flan-UL2 \citep{tay2023ul2} with 20B parameters, both with a context length of 2$k$ tokens. 
+\flantfive-XXL is an instruction-tuned variant of the T5 model \citep{raffel2023exploring}. \flan-UL2 \citep{tay2023ul2} is an upgraded T5-based model that is trained with Unifying Language Learning Paradigm, a pertaining process that uses a mixture-of-denoisers and mode switching to improve the model's adaptability to different scenarios.
+\paragraph{\llama}
+We use 7B and 70B \llamatwo models \citep{touvron2023llama, touvron2023llama2} and the 8B and 70B \llamathree models.
+The \llamatwo models have a context length of 4k tokens
+while \llamathree models have double the context length at 8k tokens.
+The \llamathree models have three major differences:
+1) They use grouped query attention, which groups query heads to understand similar information better,
+2) Their vocabulary is four times larger than that of \llamatwo,
+3) They are trained on a seven times larger dataset than \llamatwo's.
+
+\paragraph{\gpt}
+We use \gptthreefive-turbo model \citep{brown2020language}.
+This model has a context length of 16k tokens, and is a closed source model, so further details about model size are unknown.
+
+\paragraph{\claude}
+We use \claudehaiku, which is Anthropic's fastest and most compact model \citep{enis2024llm}. 
+The context window of 200k tokens is the largest of all the models we compare in this paper, but the model size is unknown since the model is closed-source.
+
+
+
+\section{Datasets and Evaluation Metrics}
+
+
+\subsection{Datasets}
+\label{sub:3.1:dataset}
+We adopt three DBQA datasets from various domains (Wikipedia, biomedical) and of various complexity (single-hop, multi-hop). Details about the corpus of passages used for retrieval are in \autoref{table:dataset_comparison}.
+
+\paragraph{Natural Questions}
+We choose Natural Questions (NQ)  \citep{kwiatkowski-etal-2019-natural}, a Wikipedia-based dataset, to examine how models perform on generic, open-domain, single-hop questions. 
+NQ questions are real user-search queries on Google. 
+We adopt the KILT version \citep{petroni2021kilt} of the dataset, which provides one short phrase answer and at least one gold passage for each question.
+
+\paragraph{HotpotQA}
+We choose HotpotQA \citep{yang2018hotpotqa}, a multi-hop, Wikipedia-based dataset to examine how effectively models can identify multiple signal passages and reason over them together.
+Each question requires reasoning over at least two passages to answer. 
+
+\paragraph{BioASQ}
+We choose BioASQ's Task 11B \citep{krithara2023bioasqqa}, a PubMed-based dataset, with biomedical questions 
+to examine how models perform on special-domain questions. 
+Our evaluation dataset is a compilation of the BioASQ Task 11B training and golden enriched set. 
+
+\subsection{Metrics}
+\label{sub:3.2:metrics}
+\paragraph{Retriever Metric}
+We evaluate retrieval performance using the \textbf{recall@k} metric, following \citet{petroni2021kilt}.
+For a given query, recall@k measures the fraction of ground-truth passages that are among the top-$k$ retrieved passages.
+
+\paragraph{Reader Metric}
+ We use \textbf{unigram F$_1$}, which quantifies the overlap of unigrams in the reader output and gold answer\citep{petroni2021kilt}. 
+For each query, we compute the F$_1$ score of the reader output against the list of gold answers and report the highest score.
+We opt for this metric instead of exact match or substring match since many language models may respond correctly semantically but still fail these other metrics because of inexact wording or the tendency to answer in complete sentences instead of the short phrase format of the gold answers.
+\begin{figure*}[ht]
+\centering
+    \includegraphics[width=.99\textwidth]{figures/results/colbert_topk.pdf}
+    \caption{Reader performance as we vary $k$, the number of retrieved contexts provided by ColBERT, from 0 (no context) to 20. Colored circles mark the reader performance at optimal $k^*$. Dashed lines indicate results when truncating \llamatwo inputs from 4$k$ to 2$k$ tokens for studying the effect of context limit.
+    }
+\label{fig:num-ctxs}
+\end{figure*}
+
+
+
+\section{Are More Contexts Always Better?}
+
+\label{sec:more-contexts}
+In this section, we study how models perform with various amounts of context passages (\S\ref{sub:num-ctxs}), and if these results relate to context limits (\S\ref{sub:token-trunc}). Our RAGGED analysis guidelines are:
+\paragraph{What to Vary:} Vary the number of context passages provided to the reader model,
+starting from $k = 1$ to 50,
+instead of directly providing as many passages as the model's context limit can fit. 
+This allows us to determine the point at which the model reaches peak performance, as many models do so before hitting their context limit.
+
+\paragraph{Behaviors to Expect:} 
+Initially, reader performance may improve with more contexts due to the increased availability of ``signal'', or helpful information.
+However, as the number of context passages increases, 
+the amount of ``noise'', or irrelevant information, also increases.
+As a result,
+the reader performance may plateau or start degrading, sometimes even beyond the no-context performance.
+\paragraph{Model Behavior Implications:} 
+Fitting as many retrieved contexts as possible under the reader's context limit does not always guarantee optimal downstream performance.
+Using these experiments, 
+one can find the optimal range of $k$ in which a reader can most effectively sift for ``signal'' among ``noise''.
+This optimal range is often not a large $k$, thus identifying this can help practitioners and researchers save time and cost.
+
+\subsection{Reader Trends with Scaling Contexts}
+\label{sub:num-ctxs}
+Results in \autoref{fig:num-ctxs} reveal two typical trends in reader performance as we increase the number of ColBERT-retrieved context passages from $k = 1$ to 20.
+
+In one trend, the reader model's performance steadily improves with increasing $k$ and then plateaus. This trend is observed in models such as the \flan models and the \gptthreefive model, which all peak at $k \geq 10$ without any noticeable decline afterward. For these models, providing a larger number of contexts is beneficial.
+However, note that for special domains, the exception is that \flan models peak earlier $(k = 1)$, but still follow the trend of leveling off as $k$ increases.
+
+In the second trend, the reader model's performance peaks early (at $k < 5$) then steadily declines without leveling off as $k$ increases. This pattern is seen in models such as the \llama models and the \claude model. For these models, it is safer to provide a smaller number of contexts.
+
+\subsection{Comparing Optimal $k^*$ Performances}
+We compare reader performances at $k^*$, their optimal number of context passages. Regardless of the domain or the number of passage hops required to answer the question, \gptthreefive consistently ranks near the top.
+
+For Wikipedia-domain questions, \flan models consistently rank high, with the larger \llama models performing either on par or close behind, followed by \claudehaiku, and then the smaller \llama models.
+
+For special-domain questions, \claudehaiku rises to the second-best rank despite being one of the lower-ranked models for Wikipedia-domain questions. However, it's important to note that \claudehaiku performs best when no context is provided, indicating that its high ranking is due to its extensive pre-trained knowledge rather than its ability to effectively use context. These observations underscore the necessity to carefully select $k$ to optimize reader performance.
+
+One potential reason that some models' performance deteriorates as $k$  increases is that some retrieved passages are irrelevant and unhelpful, 
+so the inclusion of more passages may also result in the inclusion of more ``noise''.
+In \ref{sec:context-use}, we dig deeper into how readers perform under data slices of different informational qualities.
+
+\subsection{RAG vs. No-context}
+\label{sub:train-memory}
+We evaluate reader performance without context ($k = 0$) and compare it with the standard setting with top-$k$ passages from ColBERT (\autoref{fig:num-ctxs}).
+    We find that \gpt generally performs \emph{better with context} than without, except on NQ where its pre-trained knowledge already allows it to achieve high performance without context.
+    
+    \claudehaiku, on the other hand, quickly deteriorates and consistently performs \emph{worse with context} than without. As a result, although \claudehaiku ranks high in no-context performance, it ranks lower when context is provided.
+
+    \flan models consistently perform \emph{better with context} than without context. 
+    Their ability to use context effectively allows them to make up for their lack of pretrained knowledge, evidenced by how they rank high in peak top-k performance but low in no-context performance.
+
+    \llama models perform better with context than without context only for smaller $k$ values ($k \leq5$).
+    Although \llamathree's no-context performance surpasses \llamatwo's, likely due to its larger training set and vocabulary, \llamathree struggles to use contexts as effectively and thus falls behind \llamatwo as $k$ increases.
+
+\subsection{The Effect of Context Limit}
+\label{sub:token-trunc}
+
+Not all retrieved passages are helpful "signals" for answering the question; some may be "noise" that distracts the reader. 
+Hence as more passages are included, more ``noise'' can be included too.
+The ability to sift for signal among noise is what determines the success of a reader, not merely the size of the reader's context limit.
+For example, \claudehaiku has the largest context limit among the readers, yet it struggles to effectively utilize a larger number of contexts and peaks at a $k^* \leq 1$ (\autoref{fig:num-ctxs}).
+Given that a large context limit may include more noise, we examine whether truncating the reader input can help exclude noise and improve reader performance.
+We test this hypothesis by comparing \llamatwo's performance under its original context length of 4k and a truncated length of $2k$.
+As shown by the dashed lines in \autoref{fig:num-ctxs}, 
+early truncation has minimal effects on improving \llamatwo's performance on Wikipedia-based questions, indicating that truncating the input does not provide a significant advantage.
+These observations suggest that \emph{context limit is not a key factor in configuring a RAG system.}
+
+
+
+\section{Reader Robustness in the Presence and Absence of Gold Passages}
+
+\label{sec:context-use}
+
+We study how the readers respond to noise under contexts with gold context passages (\S\ref{sub:with-gold-docs})
+and without gold context passages (\S\ref{sub:with-neg-docs}). Our RAGGED analysis guidelines are:
+\paragraph{What to Vary:} 
+Analyze the reader model's performance 
+on two slices of instances representing different qualities of retrieved contexts.
+In \S\ref{sub:with-gold-docs}, we demonstrate analyzing the slice where the $k$ retrieved passages
+include at least one gold passage.
+This represents the scenario where there is sufficient context information to answer the question.
+In this slice, we compare how the reader performs with a) the top-k passages, b) only the gold passages in the top-k passages (top-gold), and c) no context.
+
+In \S\ref{sub:with-neg-docs}, we demonstrate analyzing on the slice of instances, where none of the top-k retrieved passages include any gold passages.
+This represents the scenario where there is insufficient context information to answer the question.
+This setting is used to evaluate the model's ability to ignore noise and fall back onto any helpful pre-trained knowledge.
+
+\paragraph{Behaviors to Expect:} 
+Reader models provided with only gold passages often serve as an upper bound for their top-k performance. However, reader performance without context does not necessarily represent a lower bound for their top-k performance. This depends on the reader's ability to distinguish between irrelevant information and helpful pre-trained knowledge.
+\paragraph{Implications of Behaviors:} 
+For practitioners, these analyses can help identify which readers are more robust to noise. A small gap between top-k and top-gold performance means the reader is highly robust to noise and is effective at identifying and using relevant information. Conversely, a significant gap between top-k and top-gold performance suggests the model struggles to discern signal from noise.
+
+\subsection{With Gold Passages}
+\label{sub:with-gold-docs}
+
+\begin{figure}[ht]
+\centering
+    \includegraphics[width=0.99\linewidth]{figures/results/gold_colbert_nq.pdf}
+\caption{NQ results when there is sufficient information (at least one gold passage) in the top-k passages to answer the question. Top-gold means the context only includes the gold passages in the top-k passages.}
+\label{fig:nq-gold-found}
+\end{figure}
+
+For NQ instances where gold passages are in the top-k retrieved passages,
+\gptthreefive and \flan models effectively identify and use relevant information, consistently performing better with context than without \autoref{fig:nq-gold-found}.
+In contrast, the rest of the models struggle more with noise. 
+For example, \claudehaiku and \llamatwo models' top-k performance falls below their no-context performance at $k\leq 5$ and \llamathree models at $k=10$.
+This highlights how the wrong configuration can result in using RAG being worse than not using RAG 
+\emph{even when there is sufficient context information}.
+
+\begin{figure}[ht]
+\centering
+    \includegraphics[width=0.99\linewidth]{figures/results/gold_colbert_hp_subset.pdf}
+\caption{HotpotQA results when there is sufficient information (all gold passages) in the top-k passages to answer the question. Top-gold means the context only includes the gold passages in the top-k passages}
+\label{fig:other-gold-found}
+\end{figure}
+
+For HotpotQA and BioASQ, models generally follow similar trends to NQ regarding which models' no-context performance serves as a strict lower bound. We provide a detailed discussion of the more interesting models below and include complete plots in 
+\autoref{sec: more reader results}.
+
+One difference between NQ and HotpotQA performance is that \llamatwo 7B's top-k performance now dips below the no-context baseline much later at $k = 25$ instead of at $k = 15$,
+and \llamatwo 70B dips below the no-context baseline at $k > 50$ instead of at $k = 25$ (\autoref{fig:other-gold-found}).
+Similarly, \claude now dips below no-context baseline at $5 < k < 10$ instead of $k \leq 5$.
+This could suggest that if the problem requires more than one signal passage and all such signals are present, 
+the reader may have more anchor points for the model to rely on before being distracted by the noise in increasing $k$.
+
+Different from for NQ, the gap between top-pos and top-k for BioASQ is much smaller for all models (\autoref{fig:bioasq-gold-found}).
+One potential explanation is that the specialized domain jargon makes it easier for the reader to perform a second-step filtering for signal after the retriever's first step of filtering.
+We attribute this difference to the reader's filtering ability instead of the retriever's since ColBERT performs strictly worse on BioASQ than on NQ.
+Another difference is that for \claudehaiku and \llamathree 70B, even the top-gold dips below the no-context baseline,
+showing that they struggle much more with special domains. 
+A closer examination reveals that these readers tend to start returning gibberish as the number of contexts increases, even when all the contexts are gold passages.
+
+\subsection{Without Gold Passages}
+\label{sub:with-neg-docs}
+
+\begin{figure}[ht]
+\centering
+    \includegraphics[width=0.99\linewidth]{figures/results/non_gold_colbert_nq.pdf}
+\caption{NQ results with no gold passages.}
+\label{fig:nq-all-neg}
+\end{figure}
+
+For NQ and HotpotQA, almost all models' top-k performance is worse than their no-context performance (\autoref{fig:nq-all-neg}, \autoref{fig:hp-no-gold-found}).
+This general trend is not too surprising since the models are instructed to answer based on the context, and these slices of data do not include any gold passages.
+
+What is more surprising is the exception of the
+\flan models, which \emph{benefit even from non-gold contexts} and consistently outperform its no-context baseline across all $k$.
+One potential reason this is possible is that even though the non-gold passages may provide insufficient information, they could still provide relevant keywords and information that act as clues for the reader.
+\flan models seem to be better at processing the information from these non-gold passages than other models. 
+As evidence, for NQ and k = 5, for the slice of data where there are no gold passages (paragraphs) but there are passages from the same Wikipedia pages as the gold passages, \flan models' accuracy averages at 20\%, which is much higher than \llamatwo models' average accuracy of 8\%, \llamathree models' at 4\%, \gptthreefive's at 10\%, and \claudehaiku's at 3\%. 
+
+\begin{figure}[ht]
+\centering
+    \includegraphics[width=0.99\linewidth]{figures/results/non_gold_colbert_bioasq_subset.pdf}
+\caption{BioASQ results with no gold passages.}
+\label{fig:bioasq-all-neg}
+\end{figure}
+For BioASQ (\autoref{fig:bioasq-all-neg}), one key difference is that \gpt's top-k performance is above its no-context performance for $k\geq 5$ and \llamatwo 7B's too for all $k$, 
+as opposed to being consistently under their no-context baseline.
+This indicates that for special-domain questions, these models may have stronger guardrails against misleading or irrelevant information, and can even fall back to using its pre-trained knowledge.
+Full results for other models are in \autoref{fig:bioasq-no-gold-found}.
+
+\begin{figure*}[ht]
+\centering
+\includegraphics[width=.99\textwidth]{figures/results/bm25_topk.pdf}
+    \caption{Reader results on NQ, HotpotQA, and BioASQ using BM25 retrieved passages. Colored circles mark the reader performance at optimal $k^*$.
+    }
+\label{fig:reader-wBM25}
+\end{figure*}
+
+
+
+\section{Impact of Retriever Choice}
+
+\label{sec:comp-retriever}
+We compare different retrievers
+and study their influence on the reader model's downstream performance. Our RAGGED analysis guidelines are:
+
+    \paragraph{What to Vary:} 
+    Use different retrieval algorithms (varying in architecture, computational cost, and storage cost).
+    Here, we compare traditional, lexical and dense, neural retrievers.
+\paragraph{Behaviors to Expect:} 
+Neural retrievers generally perform better than lexical retrievers.
+How much that advantage translates to a gain in reader performance highly depends on the domain and the complexity of the question (number of hops). We find that such advantages are retained for single-hop, open-domain questions, dampened for multi-hop, open-domain questions, and amplified for special-domain questions.
+
+\paragraph{Implications of Behaviors:} 
+These analyses inform which retrievers perform better and how much that translates to an improvement in reader performance.
+This can help practitioners decide which retriever is worth investing in for their specific tasks.
+
+We evaluate the BM25 and ColBERT performances in \autoref{tab:retrieval-recall}, then compare their reader performances in  \autoref{fig:num-ctxs} and \autoref{fig:reader-wBM25}.
+
+\paragraph{Open Domain, Single-Hop}
+For NQ questions, using ColBERT offers substantial improvements over using BM25 (19-point recall@k gain). 
+Taking a look at the example at $k=5$, the reader performance paired with ColBERT is strictly better than when paired with BM25, and that retriever gain translates to a reader gain of 9 F1 points when averaged over all models.
+
+\paragraph{Open-Domain, Multi-Hop}
+Although ColBERT outperforms BM25 significantly (15-point recall@k gain), its impact on reader performance is much smaller.
+Taking a look at the example at $k=5$, the average reader performance with CoLBERT only offers a 4-point F1 gain.
+This suggests that the challenge with multi-hop questions lies more with the reader's multi-hop reasoning capability than with the retriever.
+
+\paragraph{Biomedical Domain}
+ColBERT only outperforms BM25 minimally on BioASQ (<1 point),
+yet still offers a 4-point F1 gain in reader performance.
+This shows how a small retriever performance gain can be amplified in the reader performance under a special domain that the reader may have encountered less in pretraining.
+
+
+\section{Related Work}
+
+
+\paragraph{Context Limit and Processing Capacity}
+LMs with longer context windows are applicable across various knowledge-intensive generation tasks \citep{beltagy2020longformer,bertsch2023unlimiformer,su2024roformer}. However, it is unclear how performant these models are in processing long contexts. \citet{liu2023lost} study if LMs can be sensitive to the position of useful content within a long context, and struggle when it is in the middle. 
+Moreover, \citet{xu2024retrieval} show that an LM with a smaller context window (4$k$) using RAG performs comparably with finetuning with a longer-window LM (16$k$). 
+Following this query, our work studies the effectiveness of LMs in utilizing long contexts, when they have different input capacities.
+
+\paragraph{Domain Influence on Downstream Performance}
+It is crucial to know when LMs benefit
+from including retrieved passages in context. 
+\citet{mallen2023trust} find that retrieving contexts may be unnecessary and even detrimental when asking about common knowledge, but it benefits questions about rare knowledge. 
+In contrast,
+we find that using RAG under the right configurations
+still offers significant downstream performance boosts even for common, Wikipedia-based questions.
+\paragraph{Robustness to Noisy Contexts}
+Feeding in noisy contexts deteriorates LM performance. 
+\citet{asai2022evidentialityguided} propose to select documents with high evidentiality scores. 
+\citet{wang2023learning} learn a filter model to remove the noisy sentences, and \citet{berchansky2023optimizing} adopt a similar approach at the token level. 
+Further, \citep{yu2023chainofnote,xu2023recomp} use a neural summarizer model 
+to aid the LM in identifying relevant information in long retrieved passages.
+Instead of reducing noise at test time, \citet{yoran2023making} train LMs to be robust to irrelevant content. Lastly, \citet{chen2023benchmarking} build an evaluation benchmark to test LMs' noise robustness. Our work similarly studies LMs' responses to noisy content but is more fine-grained with varied noise ratios.
+
+
+\section{Conclusion}
+
+
+We propose \methodname, a framework designed to assist researchers and practitioners in making informed decisions about designing RAG systems, focusing on three key aspects: the number of contexts, the reader model, and the retriever model. We demonstrate the framework's utility in deriving insights about RAG behaviors in response to varied context volumes, document quality, and question domains.
+We hope that our framework will be utilized by the community to deepen the understanding and customization of RAG systems.
+
+
+

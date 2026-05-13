@@ -1,0 +1,427 @@
+\title{HyperAttention: Long-context Attention in Near-Linear Time}
+
+\begin{abstract}
+We present an approximate attention mechanism named ``HyperAttention'' to address the computational challenges posed by the growing complexity of long contexts used in Large Language Models (LLMs).
+Recent work suggests that in the worst-case scenario, quadratic time is necessary unless the entries of the attention matrix are bounded or the matrix has low stable rank. 
+We introduce two parameters which measure: (1) the max column norm in the normalized attention matrix, and (2) the ratio of row norms in the unnormalized attention matrix after detecting and removing large entries. We use these fine-grained parameters to capture the hardness of the problem. 
+Despite previous lower bounds, we are able to achieve a linear time sampling algorithm even when the matrix has unbounded entries or a large stable rank, provided the above parameters are small. 
+HyperAttention features a modular design that easily accommodates integration of other fast low-level implementations, particularly FlashAttention. 
+Empirically, employing Locality Sensitive Hashing (LSH) to identify large entries, HyperAttention outperforms existing methods, giving significant speed improvements compared to state-of-the-art solutions like FlashAttention. We validate the empirical performance of HyperAttention on a variety of different long-context length datasets. For example, HyperAttention makes the inference time of ChatGLM2 50\% faster on 32k context length while perplexity increases from 5.6 to 6.3. On larger context length, e.g., 131k, with causal masking, HyperAttention offers 5-fold speedup on a single attention layer. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\footnotetext[1]{Empirical studies are conducted by I. Han and A. Zandieh.}
+}
+
+Transformers~\cite{vaswani2017attention} have been successfully applied to a wide variety of learning tasks in areas such as natural language processing~\cite{devlin2018bert, yang2019xlnet, brown2020language, raffel2020exploring}, computer vision~\cite{carion2020end,dosovitskiy2021an}, and time series forecasting~\cite{zhou2021informer}. Despite their success, these models face serious scalability limitations because naïve exact computation of their attention layers incurs quadratic (in the sequence length) runtime and memory complexities. This presents a fundamental challenge for scaling transformer models to longer context lengths. 
+
+Various approaches have been explored to tackle the quadratic-time attention layer, with one notable direction focusing on approximating intermediate matrices in attention layers.
+Methods for doing this include approximations by sparse matrices~\cite{kitaev2019reformer,daras2020smyrf, roy2021efficient, sun2021sparse,ding2023longnet,han2023lm}, low-rank matrices~\cite{choromanski2020rethinking,katharopoulos2020transformers}, or a combination of both~\cite{chen2021scatterbrain, zaheer2020big, chen2021pixelated, dass2022vitality}. 
+These methods aim to provide faster approximation to various components of attention, but none of them provide end-to-end approximations of the full dot-product attention. 
+Moreover, none of these works support the use of causal masking, which is a crucial part of modern transformer architectures. 
+On the negative side, recent theoretical bounds suggest that entry-wise approximations to the attention matrix are impossible in sub-quadratic time in general \cite{alman2023fast}. 
+
+Nevertheless, a recent work, dubbed KDEFormer \cite{zandieh2023kdeformer}, was shown to provide provable approximation in subquadratic time, under the assumption that the entries of the attention matrix are bounded. Theoretically, KDEFormer runs in roughly $\tilde{O}(n^{1.173})$ time; it employs \textit{kernel density estimation} (KDE) to approximate column norms, allowing one to compute probabilities with which to sample columns of the attention matrix. However, the current algorithms for KDE are lacking practical efficiency \cite{charikar2020kernel}, and even in theory, there is a gap between the runtime of KDEFormer and the theoretically feasible $O(n)$ time algorithms. 
+In \cite{alman2023fast}, the authors demonstrated that under the same assumption of bounded entries, a nearly linear time $O(n^{1+o(1)})$ algorithm is possible. However, their algorithm also involves using the polynomial method to approximate the softmax and is likely impractical (e.g., it was not empirically evaluated by the authors). In this work, we provide an algorithm which achieves the best of both worlds, being both a \textbf{(1)} practically efficient algorithm that \textbf{(2)} achieves the best possible near-linear time guarantee. Additionally, our approach supports casual masking, which was not possible via previous works. 
+
+
+
+\subsection{Problem Statement}
+
+The \emph{dot-product attention}~\cite{vaswani2017attention} involves processing three input matrices: $\mQ$ (queries), $\mK$ (keys), $\mV$ (values), all of size $n \times d$, where $n$ is the number of tokens in the input sequence and $d$ is the dimension of latent representations.
+This process outputs the following:
+\[   \mathbf{Att} = \mD^{-1} \mA \mV \]
+Here, matrix $\mA := \exp \left(\mQ \mK^\top \right)$ is defined as the element-wise exponential of $\mQ \mK^\top$. 
+Additionally, $\mD$ is an $n \times n$ diagonal matrix derived from the sum of rows of $\mA$, $\mD_{i,i} = \|\mA_{i, :}\|_1$ for $i \in [n]$.
+In this context, matrix $\mA$ is referred to as the ``attention matrix'', and $\mD^{-1} \mA$ is called the ``softmax matrix''. 
+It is important to note that calculating the attention matrix $\mA$ directly requires $\Theta(n^2 d)$ operations, and storing it consumes $\Theta(n^2)$ memory. Consequently, a straightforward computation of $\mathbf{Att}$ demands a runtime of $\Omega(n^2 d)$ and $\Omega(n^2)$ memory.
+
+Our objective is to efficiently approximate the output matrix $\mathbf{Att}$ while retaining its spectral properties. 
+Our strategy involves designing an efficient estimator for the diagonal scaling matrix $\mD$ in near-linear time. 
+Additionally, we aim to quickly approximate the matrix product of the softmax matrix $\mD^{-1} \mA$ and value matrix $\mV$ through subsampling. 
+To be more specific, our objective is to find a sampling matrix $\mS \in \R^{m \times n}$ with a limited number $m = n^{o(1)}$ of rows, along with a diagonal matrix $\widetilde{\mD} \in \R^{n \times n}$, such that the following bound on the \emph{operator norm} of the error is met:
+
+\begin{equation}\label{eq:def-spectral-erro-attention}
+\normop{\mathbf{Att} - \widetilde{\mD}^{-1} \mA \mS^\top\cdot \mS \mV } \le \varepsilon \cdot \normop{\mD^{-1} \mA} \normop{\mV}.
+\end{equation}
+
+\subsection{Our Contributions}
+We show that efficiently solving the matrix multiplication component of the attention approximation problem in \cref{eq:def-spectral-erro-attention} can be achieved by defining the sampling matrix $\mS$ based on the row norms of $\mV$. The more challenging aspect lies in obtaining a reliable spectral approximation for the diagonal matrix $\mD$. In a recent result, \citet{zandieh2023kdeformer} effectively leverages fast KDE solvers to attain a high-quality approximation of $\mD$. However, we streamline the KDEformer procedure and demonstrate that uniform sampling is sufficient to achieve the desired spectral guarantee, eliminating the need for importance sampling based on kernel densities. This significant simplification allows us to develop a practical \textit{and} provably linear time algorithm.
+In contrast to prior work \cite{alman2023fast, zandieh2023kdeformer}, our approach does not necessitate bounded entries or bounded stable rank.
+Furthermore, the fine-grained parameters we introduce to analyze the time complexity may remain small even when the entries in the attention matrix or the stable rank are large.
+
+Our work is inspired by the hard instance of \citet{alman2023fast} for showing quadratic time lower bounds. Such instances have one randomly placed large entry in each row of the attention matrix. Our algorithm has an initial phase where we find large entries of the attention matrix in a black box manner, such as by using Locality Sensitive Hashing \cite{kitaev2019reformer}, or a possibly learned CountSketch applied to the attention matrix \cite{charikar2002finding,LLLVW23}, or just a known heavy entry pattern \cite{chen2021pixelated}. We assume these procedures are fast, and that after removing the heavy entries, two parameters in the resulting attention matrix are small: (1) the max column $\ell_2$-norm, and (2) the ratio of row norms in the un-normalized attention matrix. 
+
+Prior work of \citet{zandieh2023kdeformer} used KDE to identify columns in the attention matrix with large norm and to perform approximate matrix product with the value matrix by sampling such columns. As mentioned, finding such columns requires at least $O(n^{1.173})$ time.
+Instead, we observe that by doing a one-sided sampling from the squared row norms of $V$, we can avoid the use of KDEs and achieve the same spectral norm guarantee in terms of the stable rank. Although our algorithm is simple and just samples by the row norms of the value matrix (or even samples uniformly in practice), the main technical challenge is that we do not know the row norms of the attention matrix needed in order to normalize it and produce a proper factorization of it. This is reminiscent of the quadratic time hard instance of \cite{alman2023fast} where we may not be able to find a heavy entry in a row easily, and thus cannot normalize by its norm in the attention matrix. Our parameters (1) and (2) above allow us to argue that the heavy entries, if they exist, are not distributed in the worst possible way. 
+Empirically, HyperAttention demonstrates significant speed improvements, achieving over a $50\times$ acceleration in forward and backward propagation for sequence lengths of $n=131$k. When dealing with causal masking, the method still delivers a substantial $5\times$ speedup.  
+Moreover, when our approach is applied to pretrained LLMs, e.g., \chatglm~\cite{du2021glm} and evaluated on long-context benchmark datasets, so-called LongBench~\cite{bai2023longbench}, it maintains performance levels that closely match those of the original models, even without the need for fine-tuning. Furthermore, we investigate task-specific evaluations and discover summarization and code completion tasks are more robust to approximate attention layers than question answerings.
+
+
+
+\section{Preliminaries}
+
+
+We make use of the \emph{Hamming sorted LSH}, a variant of angular locality-sensitive hashing introduced in the work by \citet{zandieh2023kdeformer}. In this variant, the hash buckets are arranged in order of their Hamming distances. This LSH variant is particularly well-suited for designing GPU-friendly algorithms aimed at identifying dominant entries within the attention matrix $\mA$. 
+In the context of Hamming sorted LSH, if we let $\gH:\R^d \to [B]$ be a hash function with $B$ buckets drawn from an LSH family, then the collision probability $\Pr_{\gH} [\gH(q) = \gH(k)]$ is ``roughly'' proportional to $\langle q, k \rangle$. A very useful property of this LSH variant is that its buckets are ordered in such a way that geometrically adjacent buckets have consecutive buckets. We provide the following definition.
+
+\begin{definition}[Hamming sorted LSH, Definition 7.3 of \cite{zandieh2023kdeformer}]\label{def_hamming_lsh}
+For positive integer $r$, there exists an LSH function $\gH: \R^d \to [2^r]$, such that for any $x, y \in \R^d$ its collision probability is $\Pr[\gH(x) = \gH(y)] = \left( 1 -  \frac{\theta(x,y)}{\pi}\right)^r$ where $\theta(x,y):=\cos^{-1} \left( \frac{x^\top y}{\norm{x} \norm{y}} \right)$. Furthermore, this LSH function hashes similar points to adjacent buckets. Specifically, the probability that two points end up in adjacent buckets is given by $\Pr\left[ \gH(x) = \gH(y) \pm 1~~(\mathrm{mod}~2^r) \right] = \frac{2\theta(x,y)}{\pi} \cdot \left( 1 - \frac{\theta(x,y)}{\pi} \right)^{r-1}$.
+\end{definition}
+
+Using this LSH function, as demonstrated by \citet{zandieh2023kdeformer}, we can sort keys and queries within an attention layer in such a way that large entries get shifted towards the diagonal of the attention matrix. Subsequently, these significant entries in the attention matrix can be captured by computing equal-sized blocks along the diagonal. This approach aligns with the block-memory access patterns of modern hardware and can be efficiently parallelized through batching across blocks.
+
+
+\section{Algorithm}
+
+
+To obtain a spectral guarantee when approximating $\mathbf{Att}$, our initial step involves producing a $1\pm \varepsilon$ approximation of the diagonal entries in the matrix $\mD$. Subsequently, we approximate the matrix product between $\mD^{-1} \mA$ and $\mV$ via sampling according to the squared row $\ell_2$-norms of $\mV$.
+
+\paragraph{Estimating $\mD$.}
+Our procedure for approximating $\mD$ consists of two steps. Initially, we identify the dominant entries within the attention matrix using an algorithm rooted in the Hamming sorted LSH, as defined in \cref{def_hamming_lsh}.
+The second step revolves around randomly selecting a small subset of keys $\mK$. We will demonstrate that under certain mild assumptions about matrices $\mA$ and $\mD$, this simple approach allows us to establish spectral bounds on the estimated matrix.
+Our aim is to find a sufficiently precise approximate matrix $\widetilde{\mD}$ that satisfies:
+\begin{equation}\label{eq:error-D-approx}
+    \normop{\left( \widetilde{\mD}^{-1} - \mD^{-1} \right) \mA} \le \frac{\varepsilon}{2} \normop{\mD^{-1} \mA}
+\end{equation}
+Our assumption is that the column norms of the softmax matrix exhibit a relatively uniform distribution. To be more precise, we assume that for any $i \in [n]$ there exists some $\alpha = n^{o(1)}$ such that $\norm{\mD^{-1}\mA \cdot e^{(i)}}_2^2 \le \frac{\alpha}{n}$. 
+It's worth noting that our assumption is more general in comparison to the bounded input entries assumption made in \cite{alman2023fast}. In fact, if their assumption holds, it implies that $\norm{\mD^{-1}\mA \cdot e^{(i)}}_2^2 \le \frac{n^{o(1)}}{n}$ for all $i \in [n]$. 
+In \cref{seq:assumption}, we empirically compute $\alpha$ to be the maximum of the squared $\ell_2$-norms of the columns in $\mD^{-1}\mA$ and verify that it is indeed sublinear in $n$.
+
+The first step of our empirical algorithm involves identifying large entries of the attention matrix $\mA$ through hashing keys and queries into uniformly-sized buckets using the Hamming sorted LSH, which we refer to as \emph{sortLSH}. This process is detailed in \Algref{alg-sort-lsh} and is visually illustrated in \cref{fig:sort_lsh}. Note that we also mention other was of identifying large patterns, such as checking for a known heavy hitter pattern, or using CountSketch which we describe more below. 
+
+
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[
+        2d-arr/.style={matrix of nodes, minimum size=1mm, row sep=-2\pgflinewidth, column sep=-2\pgflinewidth, nodes={draw}}, scale=1, text depth=.5ex,text height=0.58ex, text width=1.0ex]
+        
+        \matrix (A_before) [2d-arr]{
+            |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} &|[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!60]|\phantom{}& |[fill=pink!100]|\phantom{}\\ %380
+            |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %340
+            |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]|\phantom{} &|[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!40]|\phantom{}\\ %310
+            |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!40]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!30]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %320
+            |[fill=pink!10]|\phantom{} & |[fill=pink!100]| \phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]| \phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!70]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %370
+            |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{}& |[fill=pink!40]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %330
+            |[fill=pink!70]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!10]|\phantom{}& |[fill=pink!100]|\phantom{}\\ %390
+            |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} &  |[fill=pink!70]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %350
+            |[fill=pink!40]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!50]|\phantom{}& |[fill=pink!70]|\phantom{}\\ %320
+        };
+        \node[below=2.8em of A_before-7-4] {\large $\mA$};
+        
+        \node[left=+0.2em of A_before-1-1] {\small{$q_1$}};
+        \node[left=+0.2em of A_before-2-1] {\small{$q_2$}};
+        \node[left=+0.1em of A_before-5-1] {\Large{$\vdots$}};
+        \node[left=+0.2em of A_before-9-1] {\small{$q_9$}};
+        
+        \node[above=-0.2em of A_before-1-1] {\small{$k_1$}};
+        \node[above=-0.2em of A_before-1-2] {\small{$k_2$}};
+        \node[above=-0.1em of A_before-1-5] {\Large{$\ldots$}};
+        \node[above=-0.2em of A_before-1-9] {\small{$k_9$}};
+        
+        \node[right=0.1em of A_before] (plus) {\LARGE $\Rightarrow$};\node[above=0.3em of plus] (plus) {\large $\gP_\mK$};\node[below=1.5em of plus] (plus) {\large $\gP_\mQ$};
+        
+        \matrix (A_after) [2d-arr, right=3.8em of A_before] {
+            |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{}\\|[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}\\|[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}\\|[fill=pink!30]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!40]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}\\|[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!40]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}\\|[fill=pink!10]|\phantom{} & |[fill=pink!40]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}\\|[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{}\\|[fill=pink!30]|\phantom{} & |[fill=pink!50]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!40]|\phantom{} & |[fill=pink!70]|\phantom{}\\|[fill=pink!10]|\phantom{} & |[fill=pink!60]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{}\\
+        };
+        \node[below=2.8em of A_after-7-3] {\large $~~\mA_{\gP_\mQ, \gP_\mK}$};
+        
+        
+        \node[left=+0.2em of A_after-1-1] {\small{$q_2$}};
+        \node[left=+0.2em of A_after-2-1] {\small{$q_8$}};
+        \node[left=+0.2em of A_after-3-1] {\small{$q_5$}};
+        \node[left=+0.2em of A_after-4-1] {\small{$q_4$}};
+        \node[left=+0.2em of A_after-5-1] {\small{$q_3$}};
+        \node[left=+0.2em of A_after-6-1] {\small{$q_6$}};
+        \node[left=+0.2em of A_after-7-1] {\small{$q_7$}};
+        \node[left=+0.2em of A_after-8-1] {\small{$q_9$}};
+        \node[left=+0.2em of A_after-9-1] {\small{$q_1$}};
+        
+        
+        \node[above=-0.2em of A_after-1-1] {\small{$k_2$}};
+        \node[above=-0.2em of A_after-1-2] {\small{$k_8$}};
+        \node[above=-0.2em of A_after-1-3] {\small{$k_4$}};
+        \node[above=-0.2em of A_after-1-4] {\small{$k_7$}};
+        \node[above=-0.2em of A_after-1-5] {\small{$k_3$}};
+        \node[above=-0.2em of A_after-1-6] {\small{$k_6$}};
+        \node[above=-0.2em of A_after-1-7] {\small{$k_9$}};
+        \node[above=-0.2em of A_after-1-8] {\small{$k_1$}};
+        \node[above=-0.2em of A_after-1-9] {\small{$k_5$}};
+        
+        \node[right=0.3em of A_after] (right_arrow) {\LARGE $\Rightarrow$}; \node[above=0.1em of right_arrow] (right_arrow) {\large $\gP^{-1}_{\mK}$}; \node[below=1.5em of right_arrow] (right_arrow) {\large $\gP^{-1}_{\mQ}$};
+        
+        \matrix (A_primary) [2d-arr, right=3.2em of A_after]{
+            |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} &|[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!60]|\phantom{}& |[fill=pink!100]|\phantom{}\\ %380
+            |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %340
+            |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]|\phantom{} &|[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!40]|\phantom{}\\ %310
+            |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!40]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!30]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %320
+            |[fill=pink!10]|\phantom{} & |[fill=pink!100]| \phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!100]| \phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!70]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %370
+            |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!70]|\phantom{}& |[fill=pink!40]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %330
+            |[fill=pink!70]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!10]|\phantom{}& |[fill=pink!100]|\phantom{}\\ %390
+            |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!100]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!30]|\phantom{} &  |[fill=pink!70]|\phantom{}& |[fill=pink!10]|\phantom{}\\ %350
+            |[fill=pink!40]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!30]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!70]|\phantom{} & |[fill=pink!10]|\phantom{} & |[fill=pink!10]|\phantom{}& |[fill=pink!50]|\phantom{}& |[fill=pink!70]|\phantom{}\\ %320
+        };
+        \node[below=2.8em of A_primary-7-3] {\large${\mM^{\gH}\odot\mA}$};
+        
+        \newcommand{\blackSquareA}[2]{\draw[teal, black, very thick] (A_primary-#2.south west) rectangle (A_primary-#2.north east);}
+        \blackSquareA{1-1}{1-1}
+        \blackSquareA{1-5}{1-5}
+        \blackSquareA{1-9}{1-9}
+        \blackSquareA{2-2}{2-2}
+        \blackSquareA{2-4}{2-4}
+        \blackSquareA{2-8}{2-8}
+        \blackSquareA{3-3}{3-3}
+        \blackSquareA{3-6}{3-6}
+        \blackSquareA{4-7}{4-7}
+        \blackSquareA{5-2}{5-2}
+        \blackSquareA{5-4}{5-4}
+        \blackSquareA{5-8}{5-8}
+        \blackSquareA{6-3}{6-3}  
+        \blackSquareA{6-6}{6-6}
+        \blackSquareA{7-1}{7-1}
+        \blackSquareA{7-5}{7-5}  \blackSquareA{7-9}{7-9}
+        \blackSquareA{8-2}{8-2}
+        \blackSquareA{8-4}{8-4}  \blackSquareA{8-8}{8-8}
+        \blackSquareA{9-1}{9-1}
+        \blackSquareA{9-5}{9-5}
+        \blackSquareA{9-9}{9-9}
+        
+        \newcommand{\blackSquareABlock}[2]{\draw[teal, black, very thick] (A_after-#1.north west) rectangle (A_after-#2.south east);}
+        \blackSquareABlock{1-1}{3-3}
+        \blackSquareABlock{4-4}{6-6}
+        \blackSquareABlock{7-7}{9-9}
+        
+        
+    \end{tikzpicture}
+    \caption{How sortLSH finds large entries of $\mA$: (Left) Keys and queries undergo hashing using the Hamming ordered LSH $\gH(\cdot)$. (Middle) Keys and queries are rearranged based on their hash buckets. Attention matrix after applying these row and column permutations is denoted as $\mA_{\gP_\mQ, \gP_\mK}$. Large entries of $\mA_{\gP_\mQ, \gP_\mK}$ are concentrated around the diagonal blocks. (Right) rows and columns permutations are reversed on the attention matrix and $\mM^{\gH}\odot\mA$ is highlighted.}\label{fig:sort_lsh}
+\end{figure}
+
+\begin{algorithm}[t]
+\caption{sortLSH for locating large entries of $\mA$} \label{alg-sort-lsh}
+\begin{algorithmic}[1]
+    \STATE {\bf input}: matrices $\mQ, \mK \in \R^{n \times d}$, and block size $b$
+        \STATE Let $\gH(\cdot)$ be a Hamming sorted LSH as per \cref{def_hamming_lsh} and hash rows of $\mQ, \mK$
+        \STATE Let $\gP_{\mK}, \gP_{\mQ} \in \mathrm{Sym}(n)$ be permutations satisfying $\gP_{\mK}(i) < \gP_{\mK}(j)$ if $\gH(\mK_{i,:}) \le \gH(\mK_{j,:})$ and $\gP_{\mQ}(i) < \gP_{\mQ}(j)$ if $\gH(\mQ_{i,:}) \le \gH(\mQ_{j,:})$
+        
+    \STATE {\bf return} Mask matrix $\mM^{\gH} \in \{0,1\}^{n \times n}$ defined as $\mM^{\gH}_{i,j} = \1_{ \{ \lfloor \gP_{\mQ}(i)/b \rfloor = \lfloor \gP_{\mK}(j)/b \rfloor \} }$
+\end{algorithmic}
+\end{algorithm}
+
+\Algref{alg-sort-lsh} returns a sparse mask designed to isolate the dominant entries of the attention matrix. 
+Given this mask, we compute an approximation of the matrix $\mathbf{D}$ in \Algref{alg-find-D} that satisfies the spectral guarantee in \cref{eq:error-D-approx}. 
+This algorithm accomplishes this by combining the attention values corresponding to the mask with a randomly chosen subset of columns from the attention matrix. The assumptions of Lemma \ref{lemm_approx_D} are used to ensure that the variance of the estimator is small, and the same complexity of the algorithm increases as a function of the parameters $\alpha,\kappa$. We remark that our algorithm is versatile and can function effectively with a predefined mask that specifies the positions of dominant entries within the attention matrix, mirroring the approach taken in \cite{chen2021pixelated}.
+The main guarantee provided by this algorithm is given in \cref{lemm_approx_D}.
+
+\begin{algorithm}[t]
+    \caption{ApproxD for estimating diagonal matrix $\mD$} \label{alg-find-D}
+    \begin{algorithmic}[1]
+        \STATE {\bf input}: matrices $\mQ, \mK \in \R^{n \times d}$, large entries mask $\mM^{\gH} \in \{0,1\}^{n \times n}$, parameters $\kappa > 0$, $\varepsilon > \frac{1}{\kappa^4}$, $\alpha > \varepsilon^2 \kappa$, and integer $m$
+        \setstretch{1.1}
+        \STATE Randomly choose a subset $\sT \subseteq [n]$ with cardinality $|\sT| = m$ \label{line_random_set_R}   
+        \STATE $\tau \gets \max_{j \in \sT} \left< 1-\mM^{\gH}_{j,:}, \exp(\mK \mQ_{j,:}^\top) \right>$ \label{line-tau} 
+        \hfill \textcolor{blue}{\tcp{estimate of maximum unmasked row sum~}}
+        \STATE Generate $m$ i.i.d. sample $\ell_{1}, \ldots \ell_{m} \sim \mathrm{Unif}([n])$
+        \FOR{$i \in [n]$}
+        \STATE $C_i \gets \Theta \left( \frac{ \varepsilon^2 m}{n \log n}  \left( \langle \mM^{\gH}_{i,:}, \exp(\mK \mQ_{i,:}^\top) \rangle + \frac{\tau}{\kappa} \right) \right) $ \label{line-cap-value} 
+        \hfill \textcolor{blue}{\tcp{row-sum of masked entries~}}
+        \STATE $d_i \gets \frac{n}{m} \mathop{\sum}_{j \in [m]} (1 - \mM^{\gH}_{i,\ell_j}) \min\left( \exp\left( \langle \mQ_{i,:}, \mK_{\ell_{j},:} \rangle \right), C_i \right)$ \label{line-estimator}
+        \textcolor{blue}{\tcp{row-sum of unmasked entries~}}
+        \STATE $\tilde{d}_i \gets \langle \mM^{\gH}_{i,:}, \exp(\mK \mQ_{i,:}^\top) \rangle + \max\left(d_i, \frac{\tau}{\kappa} \right)$ \label{line_lower_cap}
+        \hfill \textcolor{blue}{\tcp{full row-sum estimate~}}
+        \ENDFOR
+        \STATE {\bf return} diagonal matrix $\widetilde{\mD} = \diag(\{ \tilde{d}_i \}_{i=1}^n)$
+    \end{algorithmic}
+\end{algorithm}
+\begin{lemma}[Approximating $\mD$]\label{lemm_approx_D}
+For any $\mQ,\mK \in \R^{n \times d}$, let $\mA = \exp(\mQ \mK^\top)$. Also let $\mD \in \R^{n \times n}$ be the diagonal matrix with $\mD_{i,i} = \|\mA_{i,:}\|_1$. Additionally, suppose that $\alpha = n \cdot \max_{i \in [n]} \norm{\mD^{-1}\mA \cdot e^{(i)}}_2^2$. For any mask matrix $\mM^{\gH} \in \{ 0, 1 \}^{n \times n}$ let us define the condition number $\kappa := \frac{\max_{i \in [n]} \langle 1 - \mM^{\gH}_{i,:}, \mA_{i,:} \rangle }{\min_{j \in [n]} \langle 1 - \mM^{\gH}_{j,:}, \mA_{j,:} \rangle }$. If $m = \Omega\left( \frac{ \kappa^{7} \cdot \alpha^2}{ \varepsilon^6} \log n \right)$, the output $\widetilde{\mD}$ of \Algref{alg-find-D} satisfies \cref{eq:error-D-approx} with probability at least $1 - \frac{1}{\poly(n)}$.
+\end{lemma}
+\paragraph{Approximating the product of softmax matrix $\mD^{-1} \mA$ and values matrix $\mV$.}
+Given a $\widetilde{\mD}$ that meets the spectral approximation conditions as in \cref{eq:error-D-approx}, we can achieve the spectral constraint in \cref{eq:def-spectral-erro-attention}, by finding a sampling matrix that satisfies the following condition,
+\begin{equation} \label{eq:error-bound-sampler-attn}
+\normop{  \widetilde{\mD}^{-1} \mA \mS^\top \cdot \mS \mV - \widetilde{\mD}^{-1} \mA \mV } \le \frac{\varepsilon}{2} \cdot \normop{ \mD^{-1}\mA} \normop{ \mV} 
+\end{equation}
+We can efficiently find a sampling matrix $\mS \in \R^{m \times n}$ with a small number $m$ of rows that satisfies \cref{eq:error-bound-sampler-attn} by leveraging well-established techniques in \emph{Approximate Matrix Multiplication} (AMM).
+\begin{lemma}\label{lem:amm}
+For any matrices $\widetilde{\mD}, \mA \in \R^{n \times n}, \mV \in \R^{n \times d}$ consider a sampling matrix $\mS \in \R^{m \times n}$ constructed as follows: first generate $m$ i.i.d. samples $\ell_1, \ldots \ell_m \in [n]$ according to squared row norms of matrix $\mV$, i.e., $\frac{\norm{\mV_{i,:}}_2^2}{\norm{\mV}_F^2}$, then let the $r^{th}$ row of $\mS$ be $\frac{\norm{\mV}_F}{\sqrt{m}\cdot \norm{\mV_{\ell_r,:}}_2} \cdot e^{(\ell_r)}$. If $m = \Omega\left( \varepsilon^{-2} d \cdot \sr(\widetilde{\mD}^{-1} \mA) \right)$ for some $\varepsilon>0$, the following holds with probability at least 0.99:
+\begin{align*}
+\normop{ \widetilde{\mD}^{-1} \mA \mS^\top \cdot \mS \mV - \widetilde{\mD}^{-1} \mA \mV } \le \varepsilon \cdot \normop{ \widetilde{\mD}^{-1}\mA} \normop{ \mV}.
+\end{align*}
+\end{lemma}
+The above result is standard and for proof refer to \cite{drineas2001fast}.
+
+\begin{algorithm}[t]
+\caption{HyperAttention: attention mechanism in near-linear time} \label{alg_hyper_attn}
+\begin{algorithmic}[1]
+    \STATE {\bf input}: matrices $\mQ, \mK, \mV \in \R^{n \times d}$, mask matrix $\mM^{\gH} \in \{0,1\}^{n \times n}$, and parameter $\varepsilon > \frac{1}{n^{o(1)}}$
+        \STATE Run \Algref{alg-find-D} and let $\widetilde{\mD} \gets \textsc{ApproxD}\left( \mQ, \mK, \mM^{\gH}, n^{o(1)}, \varepsilon, n^{o(1)}, d \cdot n^{o(1)} \right)$ \label{line_approx_D}
+        \STATE Let $\mS \in \R^{m \times n}$ be an i.i.d. sampling matrix based on squared row norms of $\mV$ as in \cref{lem:amm} \label{line_S}
+    \STATE {\bf return} $\widetilde{\mD}$ and $\mS$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Main Theorem.}
+Now, we can integrate the subroutines for approximating the diagonal $\widetilde{\mD}$ and approximating the matrix product between $\widetilde{\mD}^{-1} \mA$ and values matrix $\mV$. With this, we introduce the \emph{HyperAttention}, an efficient algorithm that can approximate
+the attention mechanism with spectral guarantees as per \cref{eq:def-spectral-erro-attention} in near-linear time.
+Our \Algref{alg_hyper_attn} takes as input a mask $\mM^\gH$ that defines the positions of dominant entries within the attention matrix. This mask can be generated using the sortLSH algorithm (\Algref{alg-sort-lsh}), or it can be a predefined mask similar to the approach taken in \cite{chen2021pixelated}. The large entries mask $\mM^\gH$ is assumed to be sparse by design and its number of nonzero entries is bounded $\mathrm{nnz}(\mM^{\gH}) = n^{1+o(1)}$.
+\begin{theorem}[HyperAttention guarantee]\label{main_theorem}
+    For any matrices $\mQ, \mK, \mV \in \R^{n \times d}$, any mask matrix $\mM^{\gH} \in \{0,1\}^{n \times n}$, and parameter $\varepsilon > \frac{1}{n^{o(1)}}$, let $\mA = \exp(\mQ \mK^\top)$ and let $\mD \in \R^{n \times n}$ be the diagonal matrix with $\mD_{i,i} = \|\mA_{i,:}\|_1$. If $\max_{i \in [n]} \norm{\mD^{-1}\mA \cdot e^{(i)}}_2^2 \le \frac{n^{o(1)}}{n}$ and $\frac{\max_{i \in [n]} \langle 1 - \mM^{\gH}_{i,:}, \mA_{i,:} \rangle }{\min_{j \in [n]} \langle 1 - \mM^{\gH}_{j,:}, \mA_{j,:} \rangle } \le n^{o(1)}$ then with probability at least $0.98$ the outputs $\mS, \widetilde{\mD}$ of \Algref{alg_hyper_attn} satisfy the spectral condition as in \cref{eq:def-spectral-erro-attention}. Moreover, this algorithm's runtime is $O(d \cdot n^{1+o(1)} + d \cdot \mathrm{nnz}(\mM^{\gH}))$.
+\end{theorem}
+    
+
+Note that even if $\mM^\gH$ is not given to us, but $\mM^\gH$ can be found in $d \cdot n^{1+o(1)}$ time, the theorem holds. We also give examples when this is possible by using Hamming sorted LSH, which our experiments are based on, or using the  ExpanderSketch of \cite{LNNT16} which is based on CountSketch \cite{charikar2002finding} but also gives a fast recovery time. In the supplementary we show: 
+
+\begin{corollary}[HyperAttention with sortLSH]\label{cor:lsh}
+Suppose all preconditions of \cref{main_theorem} hold, where the mask matrix $\mM^{\gH}$ is defined as follows.  
+Suppose $\mM^{\gH} \in \{0,1\}^{n \times n}$ is 
+generated as in \Algref{alg-sort-lsh} with block size $b=n^{o(1)}$ and $r = \log_2 n$ in Definition \ref{def_hamming_lsh}. We further assume there are at most $n^{1+o(1)}$ pairs $(i,j)$ with
+$\theta(\mQ_{i,*}, \mK_{j,*}) \leq \frac{\pi}{2} (1-o(1))$, where $\theta$ is as in Definition \ref{def_hamming_lsh}. 
+Then with probability $1-1/n^{o(1)}$, the $\mM^{\gH}$ we find in \Algref{alg-sort-lsh} has at most $n^{1+o(1)}$ non-zero entries and with probability at least $.98$, the outputs $\mS, \widetilde{\mD}$ of \Algref{alg_hyper_attn} satisfy \cref{eq:def-spectral-erro-attention} and the overall runtime is $O(d \cdot n^{1+o(1)})$.
+\end{corollary}
+We note the assumption on the angles of the rows of $\mQ$ and $\mK$ in Corollary \ref{cor:lsh} is satisfied if most rows are drawn uniformly at random from a $d$-dimensional sphere, since in this case they will be nearly orthogonal, i.e., have angle at most $\frac{\pi}{2} (1-o(1))$ with high probability. However, the corollarly also allows $n^{1+o(1)}$ pairs of rows to have arbitrary angle, which may be more realistic. 
+
+\begin{corollary}[HyperAttention with ExpanderSketch]\label{cor:countsketch}
+Suppose all preconditions of \cref{main_theorem} hold, where the mask matrix $\mM^{\gH}$ is defined as follows. Suppose 
+$\mM^{\gH} \in \{0,1\}^{n \times n}$ is defined such that there is a threshold $\tau = n^{o(1)}$ such that $\mM^{\gH}_{i,j} = 1$ if and only if  
+$(\mQ \mK^\top)_{i,j}^2 \geq \frac{\|\mQ \mK^\top e_j\|_2^2}{\tau}$. Then we can find $\mM^{\gH}$ exactly with probability $1-O(1/n^2)$, and with probability at least $.98$, the outputs $\mS, \widetilde{\mD}$ of \Algref{alg_hyper_attn} satisfy \cref{eq:def-spectral-erro-attention}. The runtime is $O(d \cdot n^{1+o(1)})$.
+\end{corollary}
+The key idea behind the proof of Corollary \ref{cor:countsketch} is to first sketch $\mQ$ by an ExpanderSketch $T$, which is efficient since $T$ has a small number of rows. Then compute $(T \cdot \mQ) \cdot \mK^\top$ which is again efficient since $(T \cdot \mQ)$ has a small number of rows. Thus, we never form the matrix $\mQ \cdot \mK^\top$. 
+
+\subsection{Causal Masking}
+Language models commonly employ causal masking. The causal mask is a lower triangular binary square matrix denoted as $\mM^\gC$ where $\mM^\gC_{i,j} = \1_{\{ i \ge j \}}$. The causal attention mechanism is defined as:
+\[   \mathbf{Att}_\gC = \mD_\gC^{-1}( \mM^\gC \odot \mA ) \mV, \]
+where $\mA := \exp \left(\mQ \mK^\top \right)$ is defined as before and $\mD_\gC$ is an $n \times n$ diagonal matrix derived from the sum of rows of the masked attention $\mM^\gC \odot \mA$, specifically $[\mD_\gC]_{i,i} = \langle \mM^\gC_{i,:}, \mA_{i, :} \rangle$ for $i \in [n]$. 
+To approximate causal attention with a spectral guarantee, we require two components. 
+First, we need a spectral approximation for the diagonal matrix $\mD_\gC$. 
+Second, we need to approximate the matrix product between $\mD_\gC^{-1}( \mM^\gC \odot \mA )$ and $\mV$, which can be achieved using the same sampling technique as described in \Algref{alg_hyper_attn} and \cref{lem:amm}.
+The first component is more intricate, and we employ a recursive method to address it. So we focus on how to efficiently approximate the diagonal $\mD_\gC$.
+
+Our approach is based on a key observation, as depicted in \cref{fig:causal_mask}.
+The masked attention $\mM^\gC \odot \mA$ can be decomposed into three non-zero matrices, each of which has half the size of the original attention matrix. 
+The block $\mA_{\bf 21}$, located entirely below the diagonal is unmasked attention. Consequently, we can approximate its row sums using \Algref{alg-find-D}.
+The two diagonal blocks $\mM^\gC_1 \odot \mA_{\bf 11}$ and $\mM^\gC_2 \odot \mA_{\bf 22}$ shown in \cref{fig:causal_mask} are causal attentions with half the original size. To handle these, we apply a recursive approach and further partition them into smaller blocks, and repeat this procedure. We present a pseudocode for this procedure in \Algref{alg_causal_approxD}.
+
+\begin{figure}[t]
+    \centering
+        
+        
+        
+
+        
+
+                        
+        
+        
+        
+    \includegraphics[width=\textwidth]{fig_causal_alg.pdf}
+    \caption{Causal attention matrix can be divided into three equal-sized non-zero sections: $\mM^\gC_1 \odot \mA_{11}$ and $\mM^\gC_2 \odot \mA_{22}$ are both causal attention matrices, and $\mA_{21}$ is an unmasked attention matrix.}\label{fig:causal_mask}
+\end{figure}
+\begin{algorithm}[t]
+\caption{{CausalApproxD}, recursive approximation of $\mD_\gC$ for causal masking} \label{alg_causal_approxD}
+\begin{algorithmic}[1]
+    \STATE {\bf input}: matrices $\mQ, \mK \in \R^{n \times d}$
+    \STATE Split $\mQ$ and $\mK$ into equal sized sub-matrices: $\mQ = [\mQ_1^\top , \mQ_2^\top]^\top$ and $\mK = [\mK_1^\top , \mK_2^\top]^\top$
+    \STATE $\widetilde{\mD}_{\gC11} \gets \text{CausalApproxD}(\mQ_1, \mK_1)$ and $\widetilde{\mD}_{\gC22} \gets \text{CausalApproxD}(\mQ_2, \mK_2)$
+    \STATE Run the unmasked algorithm {ApproxD} (\Algref{alg-find-D}) on $\mQ_2, \mK_1$ to get $\widetilde{\mD}_{21}$
+    \STATE {\bf return} $\widetilde{\mD}_{\gC} = \begin{bmatrix}
+        \widetilde{\mD}_{\gC11}, &{\bf 0} \\
+        {\bf 0} , &\widetilde{\mD}_{21}+\widetilde{\mD}_{\gC22}
+    \end{bmatrix}$ 
+\end{algorithmic}
+\end{algorithm}
+    
+
+
+\section{Experiments}
+
+
+In this section, we benchmark our algorithms by scaling up existing large language models to handle long-range sequences.
+All experiments are performed on a single A100 GPU with 40 GB memory and we use FlashAttention 2~\citep{dao2023flashattention2} for the exact attention computation. 
+
+\paragraph{Implementation Detail.}
+We implement HyperAttention based on sortLSH and uniform column sampling. Specifically, we first apply sortLSH to all rows in $\mQ,\mV\in\R^{n\times d}$. Then, each set of rows is partitioned into $b$ groups where $b$ is the block size as in \cref{fig:sort_lsh}. The $i$-th set of rows in $\mQ$ is multiplied by the corresponding set in $\mK$, resulting in a block-diagonal approximation of $\mA_{\gP_\mQ, \gP_\mK}$. 
+Next, we optimize \Algref{alg-find-D} for approximating $\mD$ by sharing random indices $\{\ell_j\}_{j=1}^m$ with all rows in $\mQ$. This corresponds to uniformly sampling $m$ rows in $\mV$. To further simplify, we reuse indices $\{\ell_j\}_{j=1}^m$ for the Approximate Matrix Multiplication (AMM) in \cref{lem:amm}.
+The required operations involve permuting $n$ rows, reshaping tensors, and small matrix multiplications.
+Since every batch, head and block has the same configurations, the implementation can be parallelized using GPUs.
+\begin{figure}[t]
+    \centering
+    \subfigure[\chatglm]{
+    \includegraphics[width=0.45\textwidth]{fig_chatglm2-6b-32k_ppl_speedup.pdf}
+    }
+    \subfigure[\philm]{
+    \includegraphics[width=0.45\textwidth]{fig_phi-1_5_ppl_speedup.pdf}
+    }
+    \caption{Perplexity and speedup of \chatglm~(left) and \philm~(right) monkey patched with HyperAttention. We vary the number of replaced attention layers in the final order.} \label{fig-ppl-speedup}
+\end{figure}
+
+\subsection{Monkey Patching Self-attention}
+
+We first evaluate HyperAttention on two pre-trained LLMs. 
+We choose three models with different architectures that are widely used in practical applications: \chatglm~\citep{du2021glm}, and \philm~\citep{textbooks2}.
+We patch their final $\ell$ attention layers by replacing with HyperAttentions where $\ell$ can vary from $0$ to the number of all attention layers in each LLM. Note that attentions in both models requires causal masking and we make use of \Algref{alg_causal_approxD} by recursively applying it until the input sequence lengths $n$ are less than $4{,}096$. We set both bucket size $b$ and the number of sampled columns $m$ to $256$ for all sequence lengths.
+We evaluate the performance of such monkey patched models in terms of perplexity and speedup. 
+
+We use LongBench~\citep{bai2023longbench}, a collection of long context benchmark datasets, which contains 6 different tasks ranging from single and multiple-document question answering, summarization, few-shot learning, synthetic tasks, and code completion. 
+We select a subset of dataset whose encoded sequence lengths are larger than $32{,}768$ and trim them if the length is over $32{,}768$ so that all data have sequence lengths of $32{,}768$. Then, we compute the perplexity (i.e., loss on next tokens prediction) of each model. To highlight the scalability on the long sequences, we calculate the total speedup on all attention layers whether performed by HyperAttention or FlashAttention.
+
+The results are summarized in \cref{fig-ppl-speedup}. Observe that \chatglm~{} shows a reasonable perplexity even after monkey patched by HyperAttention, e.g., after replacing 20 layers the perplexity increases approximately by 1 and it slowly goes up until 24 layers. But it improves runtimes in attention layers about $50\%$. If all the layers are replaced then the perplexity goes to up 12 but it runs about $2.3\times$ faster. For \philm, similar happens but the perplexities are linearly increasing as the number of HyperAttention grows. 
+
+In addition, we evaluate the performances of monkey patched \chatglm{} on LongBench datasets and compute task-specific evaluation scores on each task including single-document question answering, multiple-document question answering, summarization, few-shot learning, synthetic tasks and code completion. Results are provided in \cref{tab-longbench}. 
+While replacing HyperAttention generally leads to performance degradation, we observe that its role can vary depending on the task at hand. For example, summarization and code completion are more robust to other tasks. 
+Notably, when half of all attention layers are patched (i.e., 14 layers), we verify that most of the tasks do not degrade more than 13\%. In particular, the performance of the summarization task remained almost unchanged, suggesting that this task may be more robust to partial alterations in the attention mechanism. We recall that computations in attention layers can be $1.5\times$ faster when $n=32$k.
+
+\begin{table}[t]
+   \centering
+   \begin{tabular}{@{}ccccccc@{}}
+   \toprule
+   \multirow{2}{*}{
+      \multirowcell{2}{Number of \\ Replaced Layers}} & \multicolumn{6}{c}{Task} \\ \cmidrule(l){2-7} 
+   & single-qa & multi-qa & summarization & few-shot & synthetic & code \\ \midrule
+   0 (exact) & 80.63   & 68.14   & 53.12   & 186.58  & 84.00   & 99.57   \\
+   7    & 72.34   & 65.37   & 52.54   & 182.12  & 82.00   & 102.06  \\
+   14   & 71.32   & 62.97   & 52.13   & 169.02  & 80.00   & 92.12   \\
+   21   & 44.75   & 48.91   & 50.90   & 150.44  & 31.00   & 82.58   \\
+   28   & 27.07   & 22.65   & 46.28   & 65.74   & 8.33    & 73.68   \\
+   \bottomrule
+   \end{tabular}
+   \caption{Performance evaluation of \chatglm{} equipped with HyperAttentions on LongBench datasets~\cite{bai2023longbench}. They contain 6 different tasks and we evaluate each of them with its own metric where higher value indicates better performance.} \label{tab-longbench}
+\end{table}
+\subsection{Single Self Attention Layer}
+
+We further explore the speedup of HyperAttention with varying sequence lengths from $4{,}096$ to $131{,}072$. We measure wall-clock times of both forward and forward+backward operations when they are computed with FlashAttention or are accelerated by HyperAttention. We measure the times with and without causal masking. All inputs $\mQ,\mK, \mV$ have the same length and their dimensions are fixed to $d=64$ and the number of attention heads is set by $12$. We chose the same parameters in HyperAttention as described in the previous section.
+In \cref{fig-speedup}, we observe that HyperAttention runs to up $54\times$ faster without causal masking and $5.4\times$ when the causal masking applies. Although time complexities of both causal masking and non-masking are the same, a practical algorithm for causal masking  (\Algref{alg-sort-lsh}) requires additional operations such as partitioning $\mQ, \mK, \mV$,  and merging attention outputs which result in an increase of practical runtime. However, those speedups will increase when the sequence length $n$ grows. We believe this opens the door to scale self-attention not only for inference but also for training or fine-tuning the LLMs to fit in significantly long sequences. 
+\begin{figure}[t]
+    \centering
+    \subfigure[Without causal masking]{\includegraphics[width=.44\textwidth]{fig_single_speedup_no_causal.pdf}\label{fig:single-forward}}
+    \subfigure[With causal masking]{\includegraphics[width=.44\textwidth]{fig_single_speedup_causal.pdf}\label{fig:single-backward}}
+    \caption{Speedup of the exact computation using FlashAttention~\citep{dao2023flashattention2} and HyperAttention (this work) in single self-attention layer during forward and backward operations. For $n=$131k, HyperAttention runs up to $54\times$ faster without causal masking and $5.4\times$ with causal masking.} \label{fig-speedup}
+\end{figure}
+\subsection{Empirical Verification of Assumption}~\label{seq:assumption}
+In addition, we empirically verify our assumption in \cref{main_theorem}, i.e., squared $\ell_2$-norm of columns in $\mD^{-1} \mA$ is upper bounded by $\frac{n^{o(1)}}{n}$. We investigate pretrained transformers with and without causal masking. For non-causal masking attention, we use the T2T-ViT model~\cite{yuan2021tokens} and take $\mQ, \mK, \mV$ from its first attention layer on the ImageNet test data set as it is the main computational bottleneck. For each image, we compute $\alpha$ to be the largest of the squared $\ell_2$-norms of the columns in $\norm{\mD^{-1} \mA \cdot e_i}_2^2$ and collect the value over 50k images. The sequence length of the model is given by $n=3{,}136$ and the averaged values of $\alpha$ is observed to be $8.1801$. This is much smaller than $n$ and can be possibly sublinear in $n$.
+
+To further investigate the dependence on $n$, we utilize the \chatglm~{} and LongBench narrative-qa dataset, changing the sequence length $n$ from 1k to 9k. We trim or pad the input context so that its length is strictly $n$. 
+Unlike the vision model, we notice that the first columns in $\mD^{-1} \mA$ often contain heavy entries; hence we compute $\alpha$ as the largest squared norm excluding the first $32$ columns.
+We collect these values for all heads and layers and compute their average. \cref{fig-assummption} plots the value of $\frac{\alpha}{n}$ with various sequence length $n$. It is observed that the value of $\frac{\alpha}{n}$ decreases as $n$ grows, supporting the claim that our assumption  $\alpha = n^{o(1)}$ holds in practice.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=.45\textwidth]{fig_assumption_longbench_narrative_qa.pdf}\label{fig:asumption}
+    \caption{Empirical estimations on $\alpha$ (i.e., the largest squared $\ell_2$-norms of the columns in $\mD^{-1} \mA$) with various $n$. In \cref{main_theorem}, we assume that $\alpha = n^{o(1)}$ and the plot supports the claim that our assumption holds in practice.} \label{fig-assummption}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this work, we propose a simple linear time attention approximation algorithm by simplifying the existing algorithm based on kernel density estimation (KDE). We introduce a more general parameterization for a spectral approximation guarantee based on the condition number, which does not require assumptions used in prior work. Our algorithm makes use of sortLSH to find large entries and we adopt fast matrix multiplication via row norm sampling. We additionally study how our algorithm is used for causal masking by recursive partitioning. Empirically, we illustrate that pre trained LLMs using our algorithm can enhance both inference and training speeds with only minimal performance degradation.  
+
+
+
+
+
+
+
+

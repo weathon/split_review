@@ -1,0 +1,339 @@
+\title{User Inference Attacks on Large Language Models}
+
+\begin{abstract}
+Fine-tuning is a common and effective method for tailoring large language models (LLMs) to specialized tasks and applications. 
+In this paper, we study the privacy implications of fine-tuning LLMs on user data. To this end, we 
+\krev{consider}
+a realistic threat model, called \emph{user inference}, wherein an attacker infers whether or not a \emph{user's} data was used for fine-tuning. 
+We design attacks for performing user inference that require only black-box access to the fine-tuned LLM and a few samples from a user which need not be from the fine-tuning dataset. We find that LLMs are susceptible to user inference across a variety of fine-tuning datasets, at times with near perfect attack success rates. 
+Further, we theoretically and empirically investigate the properties that make users vulnerable to user inference, finding that outlier users, users with identifiable shared features between examples, and users that contribute a large fraction of the fine-tuning data are most susceptible to attack.
+Based on these findings, we identify several methods for mitigating user inference  including training with example-level differential privacy, removing within-user duplicate examples, and reducing a user's contribution to the training data. While these techniques provide partial mitigation of user inference, we highlight the need to develop methods to fully protect fine-tuned LLMs against this privacy risk.  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{comment}
+- Fine-tuning allows for harnessing the potential of LLMs
+- Fine-tuning often touches private user data
+- Previous work has studied whether LLMs violate privacy of training data
+    - Memorization
+    - MI
+- However, this past work lacks the things that user inference considers
+    - Lack of attacker access to exact samples
+    - A notion of privacy at the level of users rather than individual examples
+- This paper is meant to fill that void by introducing the user inference threat model (reference Figure 1 here)
+- Highlight some takeaways from our experiments
+\end{comment}
+
+Successfully applying large language models (LLMs) to real-world problems is often best achieved by fine-tuning on domain-specific data \cite{liu2022fewshot,Mosbach2023FewshotFV}. This approach is seen in a variety of commercial products deployed today, e.g., that are based on LLMs trained or fine-tuned on domain-specific data collected from users. The practice of fine-tuning on user data---particularly on sensitive data like emails, texts, or source code---comes with privacy concerns, as LLMs have been shown to leak information from their training data~\cite{Carlini_Memorization}, especially as models are scaled larger \cite{carlini2023quantifying}. In this paper, we study the privacy risks posed to users whose data are leveraged to fine-tune LLMs.
+Most existing privacy attacks on LLMs can be grouped into two categories: \emph{membership inference}, in which the attacker obtains access to a sample and must determine if it was trained on~\cite{mireshghallah-etal-2022-quantifying,mattern-etal-2023-membership,code_leakage}; and \emph{extraction attacks}, in which the attacker tries to reconstruct the training data by prompting the model with different prefixes~\cite{Carlini_Memorization,pii_leakage}.
+These threat models make no assumptions about the origin of the training data and thus cannot estimate the privacy risk to a user that contributes many training samples that share characteristics (e.g., topic, writing style, etc.). 
+To this end, we consider the threat model of user inference~\cite{miao2021audio,Hartmann_DistrInf_2023} for the first time for LLMs. \emph{We show that user inference is a realistic privacy attack for LLMs fine-tuned on user data.}
+
+\input{figures/threat_model}
+
+In user inference (see \Cref{fig:attack_overview}), the attacker aims to determine if a particular user participated in LLM fine-tuning using only a few \emph{fresh} samples from the user and black-box access to the fine-tuned model.
+This threat model lifts membership inference from the privacy of individual samples to the privacy of users who contribute multiple samples, while also relaxing the stringent assumption that the attacker has access to the exact fine-tuning data.
+By itself, user inference could be a privacy threat if the fine-tuning task reveals sensitive information about participating users (e.g., a model is fine-tuned only on users with a rare disease). Moreover, user inference may also enable other attacks extracting sensitive information about specific users, similar to how membership inference is used as a subroutine in training data extraction attacks~\cite{Carlini_Memorization}. 
+
+In this work, we construct a simple and practical user inference attack that determines if a user participated in LLM fine-tuning. It involves computing a likelihood ratio test statistic normalized relative to a reference model (\Cref{sec:attack}). This attack can be efficiently mounted even at the LLM scale. We empirically study its effectiveness on the GPT-Neo family of LLMs~\cite{gpt-neo} when fine-tuned on diverse data domains, including emails, social media comments, and news articles (\Cref{sec:results}). 
+This study gives insight into the various parameters that affect vulnerability to user inference---such as uniqueness of a user's data distribution, amount of fine-tuning data contributed by a user, and amount of attacker knowledge about a user.
+
+We evaluate the attack on synthetically generated canary users to characterize the privacy leakage for worst-case users (\Cref{sec:canaries}).
+We show that canary users constructed via minimal modifications to the real users' data increase the attack's effectiveness (in AUROC) by up to $40\%$. This indicates that simple features shared across a user's samples like an email signature or a characteristic phrase, can greatly exacerbate the risk of user inference.
+Finally, we evaluate several methods for mitigating user inference, such as limiting the number of fine-tuning samples contributed by each user, removing duplicates within a user's samples, early stopping, gradient clipping, and fine-tuning with example-level differential privacy (DP). Our results show that duplicates within a user's examples can exacerbate the risk of user inference, but are not necessary for a successful attack. Additionally, limiting a user's contribution to the fine-tuning set can be effective but is only feasible for data-rich applications with a large number of users. Finally, example-level DP provides some defense but is ultimately designed to protect the privacy of individual examples, rather than users that contribute multiple examples. These results highlight the importance of future work on scalable \emph{user-level} DP algorithms that have the potential to provably mitigate user inference~\cite{mcmahan2017learning,levy2021learning}. Overall, we are the first to study user inference against LLMs and provide key insights to inform future deployments of LLMs fine-tuned on user data. 
+
+
+\section{Related Work}
+
+
+There are many different ML privacy attacks with different objectives~\cite{NIST_report}: \emph{membership inference} attacks determine if a particular data sample was part of a model's training set~\cite{shokri2017membership,yeom_mi,LiRA,enhanced_mi,watson2022importance,choquette2021label,jagielski2023students}; \emph{data reconstruction} aims to exactly reconstruct the training data of a model, typically for a discriminative model~\cite{haim2022reconstructing}; and \emph{data extraction} attacks aim to extract training data from generative models like LLMs~\cite{Carlini_Memorization,pii_leakage,ippolito2022preventing,anil2023palm,kudugunta2023madlad,nasr2023scalable}.
+
+\myparagraph{Membership inference attacks on LLMs}
+\citet{mireshghallah-etal-2022-quantifying} introduce a likelihood ratio-based attack on LLMs, designed for masked language models, such as BERT. \citet{mattern-etal-2023-membership} compare the likelihood of a sample against the average likelihood of a set of neighboring samples, and eliminate the assumption of attacker knowledge of the training distribution used in prior works.
+\citet{debenedetti2023privacy} study how systems built on LLMs may amplify membership inference.
+\citet{Carlini_Memorization} use a perplexity-based membership inference attack to extract training data from GPT-2. Their attack prompts the LLM to generate sequences of text, and then uses membership inference to identify sequences copied from the training set. 
+Note that membership inference requires access to exact training samples while user inference does not.
+
+\myparagraph{Extraction attacks}
+Following~\citet{Carlini_Memorization}, memorization in LLMs received much attention~\cite{zhang2021counterfactual,NEURIPS2022_fa0509f4,biderman2023emergent,anil2023palm}. These works found that memorization scales with model size~\cite{carlini2023quantifying} and data repetition \cite{kandpal2022deduplicating}, may eventually be forgotten~\cite{jagielski2022measuring}, and can exist even on models trained for specific restricted use-cases like translation~\cite{kudugunta2023madlad}. 
+\citet{pii_leakage} develop techniques to extract PII information from LLMs and  \cite{inan2021training} design metrics to measure how much of user's confidential data is leaked by the LLM.
+Once a user's participation is identified by user inference, these techniques can be used to estimate the amount of privacy leakage.
+\myparagraph{User-level membership inference}
+Much prior work on inferring a user's participation in training makes the stronger assumption that the attacker has access to a user's exact training samples. We call this \emph{user-level membership inference} to distinguish it from \emph{user inference} (which does not require access to the exact training samples).
+\citet{song2019auditing} give the first such an attack for generative text models.
+Their attack is based on training multiple shadow models and does not scale to LLMs. This threat model has also been studied for text classification via reduction to membership inference~\citep{shejwalkar2021membership}.
+\myparagraph{User inference} This threat model was considered for
+speech recognition in IoT devices~\cite{miao2021audio}, representation learning~\cite{li2022userlevel} and face recognition~\cite{face_auditor}. 
+\citet{Hartmann_DistrInf_2023} formally define user inference for classification and regression but call it \emph{distributional membership inference}.
+These attacks are domain-specific or require shadow models. Thus, they do not apply or scale to LLMs. Instead, we design an efficient user inference attack that scales to LLMs and illustrate the user-level privacy risks posed by fine-tuning on user data. See \Cref{sec:a:related} for further discussion.
+
+
+
+
+\section{User Inference Attacks}
+
+Consider an autoregressive language model $p_\theta$ that defines a distribution $p_\theta(x_t | \xv_{<t})$ over the next token $x_t$ in continuation of a prefix $\xv_{<t} \doteq (x_1, \ldots, x_{t-1})$.
+We are interested in a setting where a pretrained LLM $p_{\theta_0}$ with initial parameters $\theta_0$ is fine-tuned on a dataset $D_\ft$ sampled i.i.d. from a distribution $\Ptask$. 
+The most common objective is to minimize the cross entropy of predicting each next token $x_t$ given the context $\xv_{<t}$ for each fine-tuning sample $\xv \in D_\ft$.
+Thus, the fine-tuned model $p_\theta$ is trained to maximize the log-likelihood $\sum_{\xv \in D_\ft} \log p_\theta(\xv) = \sum_{\xv \in D_\ft} \sum_{t=1}^{|\xv|} \log p_\theta(x_t | \xv_{<t})$ of the fine-tuning set $D_\ft$.
+\myparagraph{Fine-tuning with user-stratified data}
+Much of the data used to fine-tune LLMs has a user-level structure. For example, emails, messages, and blog posts can reflect the specific characteristics of their author. Two text samples from the same user are more likely to be similar to each other than samples across users in terms of language use, vocabulary, context, and topics.
+To capture user-stratification, we model the fine-tuning distribution $\Ptask$ as a mixture
+\begin{align} \label{eq:task-distr}
+\textstyle
+   \Ptask = \sum_{u=1}^n \alpha_u \Puser_u
+\end{align}
+of $n$ user data distributions $\Puser_1, \ldots, \Puser_n$ with non-negative weights $\alpha_1,\ldots, \alpha_n$ that sum to one. 
+One can sample from $\Ptask$ by first sampling a user $u$ with probability $\alpha_u$ and then sampling a document $\xv \sim \Puser_u$ from the user's data distribution. We note that the fine-tuning process of the LLM is oblivious to user-stratification of the data.
+\myparagraph{The user inference threat model}
+The task of membership inference assumes that an attacker has access to a text sample $\xv$ and must determine whether that particular sample was a part of the training or fine-tuning data~\cite{shokri2017membership,yeom_mi,LiRA}. The \textbf{user inference} threat model relaxes the assumption that the attacker has access to samples from the fine-tuning data.
+
+The attacker aims to determine if \emph{any} data from user $u$ was involved in fine-tuning the model $p_\theta$ using $m$ i.i.d. samples $\xv\pow{1:m} := (\xv\pow{1}, \ldots, \xv\pow{m}) \sim \Puser_u^m$ from user $u$'s distribution. Crucially, we allow $\xv\pow{i} \notin D_\ft$, i.e., the attacker is not assumed to have access to the exact samples of user $u$ that were a part of the fine-tuning set. For instance, if an LLM is fine-tuned on user emails, the attacker can reasonably be assumed to have access to \emph{some} emails from a user, but not necessarily the ones used to fine-tune the model. We believe this is a realistic threat model for LLMs, as it does not require exact knowledge of training set samples, as in membership inference attacks. 
+
+We assume that the attacker has \emph{black-box access} to the LLM $p_\theta$ --- they can only query the model's likelihood on a sequence of tokens and might not have knowledge of either the model architecture or parameters. Following standard practice in membership inference~\cite{mireshghallah-etal-2022-quantifying,watson2022importance}, we allow the attacker access to a reference model $\pRef$ that is similar to the target model $p_\theta$ but has not been trained on user $u$'s data.
+This can simply be the pre-trained model $p_{\theta_0}$ or another LLM.
+
+
+\myparagraph{Attack strategy}
+The attacker's task can be formulated as a statistical hypothesis test. Letting $\Pcal_u$ denote the set of models trained on user $u$'s data, the attacker aims to test:
+\begin{align}
+    H_0 \, :\, p_\theta \notin \Pcal_u, \qquad 
+    H_1 \, :\, p_\theta \in \Pcal_u \,.
+\end{align}
+There is generally no prescribed recipe to test for such a composite hypothesis. % a set of models. 
+ This, however, is infeasible at LLM scale.
+The likelihood under the fine-tuned model $p_\theta$ is a natural test statistic: we might expect $p_\theta(\xv\pow{i})$ to be high if $H_1$ is true and low otherwise. Unfortunately, this is not always true, even for membership inference. Indeed, 
+$p_\theta(\xv)$ can be large for $\xv \notin D_\ft$ for easy-to-predict $\xv$ (e.g., generic text using common words), while $p_\theta(\xv)$ can be small even if $\xv \in D_\ft$ for hard-to-predict $\xv$. This necessitates the need for calibrating the test using a reference model~\cite{mireshghallah-etal-2022-quantifying,watson2022importance}.
+
+We overcome this difficulty by replacing the attacker's task with surrogate hypotheses that are easier to test efficiently:
+\begin{align}
+\begin{aligned}
+    H_0'\, &: \, \xv\pow{1:m} \sim \pRef^m \,, \qquad
+    H_1' \, :\, \xv\pow{1:m} \sim p_\theta^m \,.
+\end{aligned}
+\end{align}
+By construction, $H_0'$ is always false since $\pRef$ is not fine-tuned on user $u$'s data. However, $H_1'$ is more likely to be true if the user $u$ participates in training \emph{and}
+the samples contributed by $u$ to the fine-tuning dataset $D_\ft$ are similar to the samples $\xv\pow{1:m}$ known to the attacker even if they are not identical. In this case, the attacker rejects $H_0'$. Conversely, if user $u$ did not participate in fine-tuning and no samples from $D_\ft$ are similar to $\xv\pow{1:m}$, then the attacker finds both $H_0'$ and $H_1'$ to be equally (im)plausible, and fails to reject $H_0'$.
+Intuitively, to faithfully test $H_0$ vs. $H_1$ using $H_0'$ vs. $H_1'$, we require that
+$\xv, \xv' \sim \Puser_u$ are closer on average than $\xv \sim \Puser_u$ and $\xv'' \sim \Puser_{u'}$ for any other $u' \neq u$.
+The Neyman-Pearson lemma tells us that the \emph{likelihood ratio test} is the most powerful for testing $H_0'$ vs. $H_1'$, i.e., it achieves the best true positive rate at any given false positive rate~\cite[Thm. 3.2.1]{lehmann1986testing}. This involves constructing a test statistic using the log-likelihood ratio
+\begin{align}
+\begin{aligned}
+    T(\xv\pow{1}, \ldots, \xv\pow{m})
+    &:= \log \left( \frac{p_\theta(\xv\pow{1}, \ldots, \xv\pow{m})}{\pRef(\xv\pow{1}, \ldots, \xv\pow{m})} \right) \\
+    &= \sum_{i=1}^m \log \left( \frac{p_\theta(\xv\pow{i})}{\pRef(\xv\pow{i})} \right) \,,
+\end{aligned}
+\end{align}
+where the last equality follows from the independence of each $\xv\pow{i}$, which we assume.
+Although independence may be violated in some domains (e.g. email threads), it makes the problem more computationally tractable. As we shall see, this already gives us relatively strong attacks.
+
+Given a threshold $\tau$, the attacker rejects the null hypothesis and declares that $u$ has participated in fine-tuning if $T(\xv\pow{1}, \ldots, \xv\pow{m}) > \tau$.
+In practice, the number of samples $m$ available to the attacker might vary for each user, so we normalize the statistic by $m$. Thus, our final attack statistic is $\hat T(\xv\pow{1}, \dots, \xv\pow{m}) = \tfrac{1}{m} \, T(\xv\pow{1}, \dots, \xv\pow{m})$.
+
+\input{tables/datasets_summary}
+
+\myparagraph{Analysis of the attack statistic}
+We analyze this attack statistic in a simplified setting to gain some intuition. 
+In the large sample limit as $m \to \infty$, the mean statistic $\hat T$ approximates the population average
+\begin{align}
+    \bar T(\Puser_{u}) &:= 
+    \mathbb{E}_{\xv \sim \Puser_{u}} \left[ \log \left( \frac{p_\theta(\xv)}{\pRef(\xv)} \right) \right] \,.
+\end{align}
+
+We will analyze this test statistic for the choice $\pRef = \Puser_{-u} \propto \sum_{u' \neq u} \alpha_{u'} \Puser_{u'}$, which is the fine-tuning mixture distribution excluding the data of user $u$. This is motivated by the results of \citet{watson2022importance} and \citet{sablayrolles2019whitebox}, who show that using a reference model trained on the whole dataset excluding a single sample approximates the optimal membership inference classifier.
+Let $\kl(\cdot \Vert \cdot)$ and $\chi^2(\cdot \Vert \cdot)$ denote the Kullback–Leibler and $\chi^2$ divergences.
+
+\begin{proposition}
+\label{thm:analysis}
+Assume $p_\theta = \Ptask$ and $\pRef = \Puser_{-u}$ for some user $u \in [n]$. Then, we have
+\[ 
+    \log \left( \alpha_{u} \right) + \kl(\Puser_{u} \parallel \Puser_{-u})
+    <
+    \bar T(\Puser_{u})
+    \le 
+    \alpha_{u} \, \chi^2(\Puser_{u} \Vert \Puser_{-u})
+    \,.
+\]
+\end{proposition}
+
+This suggests the attacker may more easily infer:
+\begin{enumerate}[label=(\alph*),nosep, leftmargin=1.5em]
+    \item users who contribute more data (so $\alpha_{u}$ is large), or
+    \item users who contribute unique data (so $\kl(\Puser_{u} \Vert \Puser_{-u})$ and $\chi^2(\Puser_{u} \Vert \Puser_{-u})$ are large).
+\end{enumerate}
+Conversely, if neither holds, then a user's participation in fine-tuning cannot be reliably detected. Our experiments corroborate these and we use them to design mitigations.
+
+
+
+\section{Experiments}
+
+In this section, we empirically study the susceptibility of models to user inference attacks, the factors that affect attack performance, and potential mitigation strategies.
+
+\input{figures/hists_aurocs}
+
+\subsection{Experimental Setup}
+
+\myparagraph{Datasets}
+We evaluate user inference attacks on three user-stratified text datasets representing different  domains: Reddit Comments \cite{pushshift_reddit} for social media content, CC News\footnote{
+    While CC News does not strictly have user data, it is made up of non-identical groups (as in Eq. \eqref{eq:task-distr}) defined by the web domain. We treat each group as a ``user'' as in~\citet{charles2023towards}.
+} \cite{Hamborg2017} for news articles, and Enron Emails \cite{Klimt2004IntroducingTE} for user emails.
+These datasets are diverse in their domain, notion of a user, number of users, and amount of data contributed per user (\Cref{tab:datasets}).
+To make these datasets suitable for evaluating user inference, we split them into a held-in set of users to fine-tune models, and a held-out set of users to evaluate attacks. Additionally, we set aside 10\% of each user's samples as the samples used by the attacker to run user inference attacks; these samples are not used for fine-tuning.
+
+
+\myparagraph{Models}
+We evaluate user inference attacks on the $125$M and $1.3$B parameter decoder-only LLMs from the GPT-Neo \citep{gpt-neo} model suite. These models were pre-trained on The Pile dataset \citep{gao2020pile}, an $825$ GB diverse text corpus, and use the same architecture and pre-training objectives as the GPT-2 and GPT-3 models.
+
+\myparagraph{Attack and Evaluation}
+We implement the user inference attack of \Cref{sec:attack} using the pre-trained GPT-Neo models as the reference $\pRef$.
+Following the membership inference literature,
+we evaluate the aggregate attack success using the Receiver Operating Characteristic (ROC) curve across held-in and held-out users; this is a plot of the true positive rate (TPR) and false positive rate (FPR) of the attack across all possible thresholds. We use the area under this curve (AUROC) as a scalar summary.
+We also report the TPR at small FPR (e.g., $1\%$) \citep{LiRA}.
+
+\myparagraph{Remarks on Fine-Tuning Data}
+Due to the size of pre-training datasets like The Pile, we found it challenging to find user-stratified datasets that were not part of pre-training; this is a problem with LLM evaluations in general~\cite{sainz}. 
+However, we believe that our setup still faithfully evaluates the fine-tuning setting for two main reasons. First, the overlapping fine-tuning data constitutes only a small fraction of all the data in The Pile. Second, our attacks are likely only weakened (and thus, underestimate the true risk) by this setup. This is because inclusion of the held-out users in pre-training should only reduce the model's loss on these samples, making the loss difference smaller and thus our attack harder to employ.
+\subsection{User Inference: Results and Properties} \label{sec:results}
+
+We examine how user inference is impacted by factors such as the amount of user data and attacker knowledge, the model scale, as well as the connection to overfitting.
+
+\myparagraph{Attack Performance}
+We attack GPT-Neo $125$M fine-tuned on each of the three fine-tuning datasets and evaluate the attack performance. 
+We see from \Cref{fig:hists_aurocs} that the user inference attacks on all three datasets achieve non-trivial performance, with the attack AUROC varying between $88\%$ (Enron) to $66\%$ (CC News) and $56\%$ (Reddit).
+\input{figures/training_aurocs}
+\input{figures/model_scaling}
+\begin{figure}[bth!]
+\centering
+\includegraphics[width=0.9\linewidth]{images_v2/attacker_knowledge.pdf}
+\caption{\small
+\textbf{Attack performance vs. attacker knowledge}: As we increase the number of examples given to the attacker, the attack performance increases across all three datasets. 
+The shaded area denotes the std over $100$ random draws of attacker examples.
+} \label{fig:attacker_knowledge}
+\end{figure}
+The disparity in performance between the three datasets can be explained in part by the intuition from \Cref{thm:analysis}, which points out two factors.
+First, a larger fraction of data contributed by a user makes user inference easier. The Enron dataset has fewer users, each of whom contributes a significant fraction of the fine-tuning data (cf.~\Cref{tab:datasets}), 
+while, the Reddit dataset has a large number of users, each with few datapoints.
+Second, distinct user data makes user inference easier. Emails are more distinct due to identifying information such as names (in salutations and signatures) and addresses, while news articles or social media comments from a particular user may share more subtle features like topic or writing style.
+
+\myparagraph{The Effect of the Attacker Knowledge}
+We examine the effect of the attacker knowledge
+(the amount of user data used by the attacker to compute the test statistic) in \Cref{fig:attacker_knowledge}. First, we find that  more attacker knowledge leads to higher attack AUROC and lower variance in the attack success. For CC News, the AUROC increases from $62.0 \pm 3.3 \%$ when the attacker has only one document to $68.1\pm 0.6\%$ at 50 documents. The user inference attack already leads to non-trivial results with an attacker knowledge of \emph{one document per user} for CC News (AUROC $62.0\%$) and Enron Emails (AUROC $73.2\%$).
+Overall, the results show that an attacker does not need much data to mount a strong attack, and more data only helps.
+\myparagraph{User Inference and User-level Overfitting}
+It is well-established that overfitting to the training data is sufficient for successful membership inference~\cite{yeom_mi}. We find that a similar phenomenon holds for user inference, which is enabled by \emph{user-level overfitting}, i.e., the model overfits not to the training samples themselves, but rather the \emph{distributions} of the training users.
+
+We see from \Cref{fig:training_run} that the validation loss of held-in users continues to decrease for \emph{all 3 datasets}, while the loss of held-out users increases. These curves display a textbook example of overfitting, not to the training data (since both curves are computed using validation data), but to the distributions of the training users. Note that the attack AUROC improves with the widening generalization gap between these two curves.
+Indeed, the Spearman correlation between the generalization gap and the attack AUROC is at least $99.4\%$ for all datasets.
+This demonstrates the close relation between user-level overfitting and user inference.
+
+\input{figures/canary_attacks}
+
+\myparagraph{Attack Performance and Model Scale}
+Next, we investigate the role of model scale in user inference using the GPT-Neo $125$M and $1.3$B on the CC News dataset. 
+
+\Cref{fig:model_scale} shows  that the attack AUROC is nearly identical for the $1.3$B model ($65.3\%$) and $125$M model ($65.8\%$). While the larger model achieves better validation loss on both held-in users ($2.24$ vs. $2.64$) and held-out users ($2.81$ vs. $3.20$), the generalization gap is nearly the same for both models ($0.57$ vs. $0.53$). This shows a qualitative difference between user and membership inference, where attack performance reliably increases with model size in the latter \cite{carlini2023quantifying,NEURIPS2022_fa0509f4,kandpal2022deduplicating,mireshghallah-etal-2022-quantifying,anil2023palm}.
+\subsection{User Inference in the Worst-Case} \label{sec:canaries}
+
+The disproportionately large downside to privacy leakage necessitates looking beyond the average-case privacy risk to worst-case settings.
+Thus, we analyze attack performance on datasets containing synthetically generated users, known as \emph{canaries}.
+There is usually a trade-off between making the canary users realistic and worsening their privacy risk. We intentionally err on the side of making them realistic to illustrate the potential risks of user inference.
+To construct a canary user, we first sample a real user from the dataset and insert a particular substring into each of that user's examples. We construct $180$ canary users with shared substrings ranging from $1$-$100$ tokens in length and inject these users into the Reddit and CC News datasets. 
+We do not experiment with synthetic canaries in Enron Emails, as the attack AUROC already exceeds $88\%$ for real users. 
+
+\Cref{fig:canaries} (left) shows that the attack is more effective on canaries than real users, and increases with the length of the shared substring. 
+A short shared substring is enough to significantly increase the attack AUROC from $63\%$ to $69\%$ (5 tokens) for CC News and $56\%$ to $65\%$ for Reddit (10 tokens).
+
+These results raise a question if canary gradients can be filtered out easily (e.g., using the $\ell_2$ norm). However, \Cref{fig:gradient_clipping} (right) shows that the gradient norm distribution of the canary gradients and those of real users are nearly indistinguishable.
+This shows that our canaries are close to real users from the model's perspective, and thus hard to filter out. This experiment also demonstrates the increased privacy risk for users who use, for instance, a short and unique signature in emails or characteristic phrases in documents.
+\subsection{Mitigation Strategies} \label{sec:defenses}
+Finally, we investigate existing techniques for limiting the influence of individual examples or users on model fine-tuning as methods for mitigating user inference attacks.
+
+\myparagraph{Gradient Clipping}
+Since we consider fine-tuning that is oblivious to the user-stratification of the data, one can limit the model's sensitivity by clipping the gradients per batch \cite{pascanu2013difficulty} or per example \cite{Abadi_2016}. \Cref{fig:gradient_clipping} (left) plots its effect for the $125$M model on CC News: neither batch nor per-example gradient clipping have any effect on user inference. \Cref{fig:gradient_clipping} (right) tells us why: canary examples do not have large outlying gradients and clipping affects real and canary data similarly. Thus, gradient clipping is an ineffective mitigation strategy.
+
+\myparagraph{Early Stopping}
+The connection between user inference and user-level overfitting from \Cref{sec:results} suggests that early stopping, a common heuristic used to prevent overfitting~\cite{caruana2000overfitting}, could potentially mitigate user inference. Unfortunately, we find that $95\%$ of the final AUROC is obtained quite early in training: $15$K steps ($5\%$ of the fine-tuning) for CC News and $90$K steps ($18\%$ of the fine-tuning) for Reddit, see \Cref{fig:training_run}.
+Typically, the overall validation loss still decreases far after this point. This suggests an explicit tradeoff between model utility (e.g., in validation loss) and privacy risks from user inference.
+
+\myparagraph{Data Limits Per User}
+Since we cannot change the fine-tuning procedure, we consider limiting the amount of fine-tuning data per user.
+\Cref{fig:canaries} (right two) show that this can be effective. For CC News, the AUROC for canary users reduces from $77\%$ at $100$ fine-tuning documents per user to almost random chance at $5$ documents per user.
+A similar trend also holds for Reddit.
+
+\myparagraph{Data Deduplication}
+Since data deduplication can mitigate membership inference~\cite{lee2021deduplicating,kandpal2022deduplicating}, we evaluate it for user inference. CC News is the only dataset in our suite with within-user duplicates (Reddit and Enron are deduplicated in the preprocessing; see \Cref{sec:a:expt:ds}), so we use it for this experiment.\footnote{
+    Although each article of CC News from HuggingFace Datasets has a unique URL, the text of $11\%$ of the articles has exact duplicates from the same domain.
+    See \S\ref{sec:ccnews-dup} for examples.
+}
+The deduplication reduces the attack AUROC from $65.7\%$ to $59.1\%$. The attack ROC curve of the deduplicated version is also uniformly lower, even at extremely small FPRs (\Cref{fig:dedup}). 
+
+Thus, data \emph{repetition} (e.g., due to poor preprocessing) can exacerbate user inference. However, the results on Reddit and Enron Emails (no duplicates) suggest that deduplication alone is insufficient to fully mitigate user inference.
+\begin{figure}[h]
+\captionsetup{width=0.45\linewidth} % Set width of captions
+    \begin{minipage}[t]{0.5\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images_v2/figures_gradient_clipping2.pdf}
+        \caption{\small
+Mitigation with gradient clipping. \textbf{Left}: Attack effectiveness for canaries with different shared substring lengths with gradient clipping ($125$M model, CC News). \textbf{Right}: The distribution of gradient norms for canary examples and real examples.}
+        \label{fig:gradient_clipping}
+    \end{minipage}
+    \begin{minipage}[t]{0.5\linewidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{images_v2/figure_dedup.pdf}
+        \caption{\small Effect of data deduplication per-user on CC News.}
+        \label{fig:dedup}
+    \end{minipage}
+\end{figure}
+\myparagraph{Example-level Differential Privacy (DP)}
+DP~\cite{DMNS} gives provable bounds on privacy leakage. We study how example-level DP, which protects the privacy of individual \emph{examples}, impacts \emph{user} inference. We train the 125M model on Enron Emails using DP-Adam, a variant of Adam that clips per-example gradients and adds noise calibrated to the privacy budget $\varepsilon$. We find next that example-level DP can somewhat mitigate user inference while incurring increased compute cost and a degraded model utility.
+Obtaining good utility with DP requires large batches and more epochs~\citep{ponomareva2023dp}, so we use a batch size of $1024$, tune the learning rate, and train the model for $50$ epochs ($1.2K$ updates), so that each job runs in $24$h (in comparison, non-private training takes $1.5$h for $7$ epochs).
+
+\Cref{tab:enron_dp} shows a severe degradation in the validation loss under DP. For instance, a loss of $2.67$ at the weak guarantee of  $\varepsilon=32$ is  surpassed after just $1/3$\textsuperscript{rd} of an epoch of non-private training; this loss continues to reduce to $2.43$ after $3$ epochs.
+In terms of attack effectiveness, example-level DP reduces the attack AUROC and the TPR at FPR $=5\%$, while the TPR at FPR $=1\%$ remains the same or gets worse.
+Indeed, while example-level DP protects individual examples, it can fail to protect the privacy of \emph{users}, especially when they contribute many examples.
+This highlights the need for scalable algorithms and software for fine-tuning LLMs with \emph{DP at the user-level}. Currently,  user-level DP algorithms have been designed for small models in federated learning, but do not yet scale to LLMs.
+
+\input{tables/example_level_dp}
+
+\myparagraph{Summary}
+Our results show that user inference is hard to mitigate with common heuristics.
+Careful deduplication is necessary to ensure that data repetition does not exacerbate user inference.
+Enforcing data limits per user can be effective but this only works for data-rich applications with a large number of users. Example-level DP can offer moderate mitigation but at the cost of increased data/compute and degraded model utility.
+Developing an effective mitigation strategy that also works efficiently in data-scarce applications remains an open problem.
+
+
+
+
+
+
+\section{Discussion and Conclusion}
+
+\begin{comment}
+\begin{itemize}
+    \item LLMs are being deployed more, requires more work on their privacy
+    \item There are many interesting threat models between MI and training data reconstruction attacks. 
+    \item UI can be used as a component in attacks that compromise sensitive user information (akin to how MI is a component of training data reconstruction)
+    \item Future work on studying this threat model and what aspects of it make UI better/worse
+    \item Future work on user-level DP at scale
+\end{itemize}
+\end{comment}
+
+When collecting data for fine-tuning an LLM, data from a company's users is often the natural choice since it closely resembles the types of inputs a deployed LLM will encounter.
+However fine-tuning on user-stratified data also exposes new opportunities for privacy leakage. 
+Until now, most work on privacy of LLMs have ignored any structure in the training data, but as the field shifts towards collecting data from new, potentially sensitive, sources, it is important to adapt our privacy threat models accordingly. Our work introduces a novel privacy attack exposing user participation in fine-tuning, and future work should explore other LLM privacy violations beyond membership inference and training data extraction. Furthermore, this work underscores the need for scaling user-aware training pipelines, such as user-level DP, to handle large datasets and models.
+
+
+\section{Broader Impacts}
+
+
+This work highlights a novel privacy vulnerability in LLMs fine-tuned on potentially sensitive user data.  Hypothetically, our methods could be leveraged by an attacker with API access to a fine-tuned LLM to infer which users contributed their data to the model's fine-tuning set. To mitigate the risk of data exposure, we performed experiments on public GPT-Neo models, using public datasets for fine-tuning, ensuring that our experiments do not disclose any sensitive user information. 
+
+We envision that these methods will offer practical tools for conducting privacy audits of LLMs before releasing them for public use. By running user inference attacks, a company fine-tuning LLMs on user data can gain insights into the privacy risks exposed by providing access to the models and assess the effectiveness  of deploying mitigations. To counteract our proposed attacks, we evaluate several defense strategies, including example-level differential privacy and restricting individual user contributions, both of which provide partial mitigation of this threat.  We leave to future work the challenging problem of fully protecting LLMs against user inference with provable guarantees. 
+
+
+
+
+

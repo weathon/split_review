@@ -1,0 +1,414 @@
+\title{CLoRA: A Contrastive Approach to Compose Multiple LoRA Models}
+
+\begin{abstract}
+    Low-Rank Adaptations (LoRAs) have emerged as a powerful and popular technique in the field of image generation, offering a highly effective way to adapt and refine pre-trained deep learning models for specific tasks without the need for comprehensive retraining.  By employing pre-trained LoRA models, such as those representing a specific cat and a particular dog, the objective is to generate an image that faithfully embodies both animals as defined by the LoRAs. However, the task of seamlessly blending multiple concept LoRAs to capture a variety of concepts in one image proves to be a significant challenge. Common approaches often fall short, primarily because the attention mechanisms within different LoRA models overlap, leading to scenarios where one concept may be completely ignored (e.g., omitting the dog) or where concepts are incorrectly combined (e.g., producing an image of two cats instead of one cat and one dog). To overcome these issues, CLoRA addresses them by updating the attention maps of multiple LoRA models and leveraging them to create semantic masks that facilitate the fusion of latent representations. Our method enables the creation of composite images that truly reflect the characteristics of each LoRA, successfully merging multiple concepts or styles. Our comprehensive evaluations, both qualitative and quantitative, demonstrate that our approach outperforms existing methodologies, marking a significant advancement in the field of image generation with LoRAs. Furthermore, we share our source code, benchmark dataset, and trained LoRA models to promote further research on this topic. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Diffusion text-to-image models \cite{ddpm} have revolutionized generating images from textual prompts, as evidenced by significant developments in models such as Stable Diffusion \cite{rombach2022high}, Imagen \cite{imagen}, and DALL-E 2 \cite{dalle2}. Their applications extend beyond image creation, including tasks like image editing \cite{blended,blended_latent,diffedit,pix2pix-zero,pnp,p2p}, inpainting \cite{lugmayr2022repaint}, and object detection \cite{chen2023diffusiondet}.   With generative models getting increasingly popular, personalized image generation plays a crucial role in creating high-quality, diverse images tailored to user preferences. Existing approaches explore personalization through style transfer and incorporating user feedback during the diffusion process  \cite{sohn2023styledrop, ruiz2023dreambooth, kumari2023multi}. However, these methods often require fine-tuning the entire diffusion model, a computationally expensive and time-consuming process. 
+
+Low-Rank Adaptation (LoRA)   \cite{hu2021lora}, initially introduced for LLMs, emerged as a powerful technique for model personalization.   They can efficiently fine-tune pre-trained diffusion models without the need for extensive retraining or significant computational resources. They are designed to optimize low-rank, factorized weight matrices specifically for the attention layers and are typically used in conjunction with personalization methods like DreamBooth \cite{ruiz2023dreambooth} to generate personalized content on specific objects, individuals, or artistic styles.  Since their introduction, LoRA models have gained significant popularity among researchers, developers, and artists \cite{gandikota2023concept, guo2023animatediff}. For example, Civit.ai\footnote{\url{http://civit.ai}}, a widely used platform for sharing pre-trained models, hosts more than 1,000 LoRA models tailored to specific characters, clothing styles, or other visual elements, allowing users to personalize their image creation experiences. Therefore, they represent a promising direction for the future of AI-driven creativity, opening up new possibilities for personalized and expressive image generation.
+ 
+While existing concept LoRAs function as plug-and-play plugins for pretrained models, integrating multiple concept LoRAs to facilitate the joint composition of those concepts presents several challenges.  The ability to blend a diverse set of elements, such as various artistic styles or the incorporation of unique objects and personas, into a cohesive visual narrative is crucial for leveraging compositionality \cite{huang2023composer, lake2017building,zhang2023adding}. For example, imagine a situation where you have pre-trained LoRA models that each represent a cat and a dog in a specific style (see Fig. \ref{fig:teaser}). The goal could be to combine these two models to generate an image of the cat and dog against various backgrounds or scenarios. However, the process of merging multiple LoRA models to create new, composite images has proven to be challenging, often leading to unsatisfactory results (see Fig. \ref{fig:teaser}). Attempts to combine  LoRA models have been made, such as using a weighted linear combination of multiple LoRAs \cite{ryu2023low}, but these efforts have often generate undesired outcomes where often one of the LoRA concepts is ignored. Other approaches  \cite{shah2023ziplora, huang2023lorahub}  train coefficient matrices to merge multiple LoRA models into a new one.  However, these methods are limited by the capacity to merge only a single content and style LoRA \cite{shah2023ziplora} or by performance issues that destabilize the merging process as the number of LoRAs increases \cite{huang2023lorahub}. Other methods, such as Mix-of-Show \cite{gu2023mix}, necessitate training specific LoRA variants such as embedding-decomposed LoRAs (EDLoRAs),  moving away from the conventional LoRA models prevalent within the community. They also depend on controls like regions defined by ControlNet \cite{controlnet} conditions, which restrict their capability for unsupervised generation. 
+
+\begin{figure}[tb]
+  \centering
+  \includegraphics[width=\linewidth]{figs/AttentionVisualization.pdf}
+  \caption{Attention overlap and attribute binding issues in merging multiple LoRA models (a). The integration of multiple LoRA approaches often results in the failure to accurately represent both concepts, as their attention mechanisms tend to overlap. Our technique, however, adjusts the attention maps during test-time to distinctly segregate different LoRA models, thereby producing compositions that accurately reflect the intended concepts (b).}
+  \label{fig:intuition}
+\end{figure}
+
+ 
+Contrary to these methods, we propose a solution that composes multiple LoRAs at test time, without the need for training new models or specifying controls. This approach involves adjusting the attention maps through latent updates during test time to effectively guide the appropriate LoRA model to the correct area of the image while keeping LoRA weights intact. Our approach is inspired by the following novel observation: issues of `attention overlap' and `attribute binding', previously noted in image generation \cite{meral2023conform, chefer2023attend, agarwal2023star, li2023divide}, also exist in LoRA models.  Attention overlap occurs when specialized LoRA models redundantly focus on similar features or areas within an image. This situation can lead to a dominance issue, where one LoRA model might overpower the contributions of others, skewing the generation process towards its specific attributes or style at the expense of a balanced representation (see Fig. \ref{fig:intuition}). Such dominance is particularly problematic in applications that involve multiple content LoRAs, for instance, when generating images that include representations of different individuals. The desired outcome is often a harmonious blend that accurately reflects each person's characteristics, but attention overlap can cause one model's features to overshadow others, leading to images that misrepresent the intended diversity or composite nature of the subjects involved. Another related issue is attribute binding, especially occurs in scenarios involving multiple content-specific LoRAs. For instance, if each LoRA model is focused on a different individual's characteristics in a group portrait, attribute binding might not only risk one individual's features dominating the image but also lead to a scenario where features intended to represent different people blend indistinctly. This blending could result in representations that fail to maintain the integrity and recognizability of each individual, undermining the personalization and accuracy that LoRA models aim to achieve.  For instance, consider the text prompt `An $L_1$ cat and an $L_2$ penguin in the house'  in Fig. \ref{fig:intuition} (a) which depicts two LoRA models tailored for a specific cat and a plush penguin, respectively. As can be seen from the results, SD model struggles to produce the intended result. This issue arises because the $L_1$ attention, which should focus on the cat, blended with the $L_2$ attention, designated for the penguin. Consequently, the output incorrectly features two cats, entirely omitting the penguin.  In contrast, our approach effectively refines the attention maps of the LoRA models to concentrate on the intended attributes, thereby producing an image that accurately places both LoRA models in their correct positions (see Fig. \ref{fig:intuition} (b)). 
+ 
+ 
+In this paper, we propose a novel framework, \texttt{\methodName}, designed to effectively compose multiple LoRA models while addressing challenges related to attention overlap and attribute binding. Our contributions are as follows:   
+\begin{itemize}
+\item We present a novel approach based on contrastive learning that is capable of simultaneously integrating multiple content and style LoRAs. Our method effectively fixes the attribute binding and attention overlap problems in the cross-attention maps, and combines the latent masked for each corresponding LoRA model seamlessly.  
+
+\item Unlike existing methods, our approach does not need specialized LoRA variants or additional training and can directly use community LoRAs on civit.ai in a plug-and-play manner. Due to its test-time nature, it is computationally efficient, notably taking 1 minute to combine multiple LoRA models to generate an image. 
+  \item To the best of our knowledge, our paper is the first comprehensive attempt to address attention overlap and attribute binding specifically within  LoRA-enhanced image generation models by updating latents according to attention maps at test time and fuse multiple latents with masks generated using cross-attention maps corresponding to distinct LoRA models. 
+    \item We also introduce a benchmark dataset consisting a variety of LoRA models, accompanied by a wide array of prompts covering characters, objects, and scenes. This dataset serves as a standardized framework for evaluating the seamless integration of multiple concepts and style adaptations. 
+\end{itemize}
+ 
+
+
+
+\section{Related work}
+
+\label{sec:related}
+ 
+
+\paragraph{Attention-based Methods to Improve Fidelity.}  Text-to-image generation with diffusion models faces challenges in ensuring fidelity to the input prompt. One recurring issue involves entangled features in cross-attention maps. When multiple adjectives or closely related concepts (co-hyponyms) are present in the prompt, the model might struggle to differentiate their influence on specific image regions. This can lead to blurry or inconsistent visual representations \cite{tang2022daam}.  
+
+Researchers have explored various attention-based methods to address these issues:
+Methods like ComposableDiffusion \cite{liu2022compositional} allow users to control concept combinations through conjunction and negation operators. Similarly, StructureDiffusion \cite{feng2023structureDiffusion} segments prompts into noun phrases, facilitating a more targeted distribution of attention for distinct objects. Recent work by Wu et al. \cite{wu2023harnessing} incorporates a layout predictor to enhance spatial layout generation based on attention control.
+
+Our work connects with recent developments in high-fidelity text-to-image diffusion models~\cite{chefer2023attend, li2023divide, agarwal2023star} by sharing a common feature: all these models utilize attention maps to enhance the image generation process's fidelity.  Techniques like A-Star \cite{agarwal2023star} and region-specific feature accumulation in DenseDiffusion \cite{kim2023dense} aim to refine attention during the image generation process. Chefer et al. \cite{chefer2023attend} addresses neglected tokens in prompts to improve fidelity, while Li et al. \cite{li2023divide} propose separate objective functions to tackle missing objects and incorrect attribute binding issues.   Whereas these approaches address the challenges of attention overlap and attribute binding within a single diffusion model, facilitating the placement of objects and attributes described in a single text prompt, our approach navigates these issues within the context of LoRA models. A recent work CONFORM  \cite{meral2023conform} addresses attention overlap and attribute binding problems using a contrastive approach on a single diffusion model. Our method deals with the complex task of resolving attention overlap and attribute binding across multiple Stable Diffusion models (LoRAs), each specifically fine-tuned to represent a distinct object or attribute. Furthermore, while CONFORM does not employ masks to correct the attention maps, our methodology incorporates masks generated at test time. This addition aids in further disentangling LoRA models, allowing for a more effective resolution of attention map and attribute binding problems.
+ 
+
+\paragraph{Personalized Image Generation} Image-based style transfer has a long history \cite{efros2023image, hertzmann2023image}. Convolutional neural networks \cite{gatys2016image, huang2017arbitrary, johnson2016perceptual} have achieved impressive results, while generative models like GANs \cite{karras2019style, karras2020analyzing} can be used with stylization priors \cite{bora2017compressed, menon2020pulse, wang2021towards}. Recent GAN-based approaches \cite{chong2022jojogan, gal2022stylegan, kwon2023one} perform one-shot stylization, but are limited to specific domains (e.g., faces) and lack text-based control. Diffusion models \cite{ddpm, rombach2022high, ddim} offer superior quality and text control compared to older models, but one-shot example-based stylization has been challenging.
+
+Recent research explores personalizing large text-to-image (T2I) diffusion models. Techniques like Textual Inversion \cite{gal2022image}, and DreamBooth \cite{ruiz2023dreambooth} focus on learning specific subject representations, while LoRA \cite{ryu2023low} and StyleDrop \cite{sohn2023styledrop} optimize for style personalization. However, these methods typically handle only one concept (subject or style) at a time. Custom Diffusion \cite{kumari2023multi} attempts multi-concept learning but requires expensive joint training and struggles with style disentanglement.
+\paragraph{Merging multiple LoRA models}
+Combining LoRAs for style and subject control remains underexplored.  \cite{ryu2023low} propose a weighted summation, however this simplistic approach is not able to generate desired outcomes. Others \cite{gu2023mix} require retraining of a specific LoRA model, so called EDLoRA, for each concept, which is expensive and cannot utilize existing community LoRAs such as civit.ai models.  A concurrent work proposes a gating function approach \cite{wu2023mole}.   Typically, they are utilized to merge style and concept LoRAs rather than to compose images featuring multiple objects. A concurrent work to us is Multi LoRA Composite \cite{zhong2024multi} and Multi LoRA Switch \cite{zhong2024multi}, which compose  LoRAs in test time. However, they do not operate on attention maps and merely combine LoRA models at different timesteps, which generate unsatisfactory results.
+ 
+
+ 
+
+
+
+\section{Methodology}
+
+\label{sec:methodology} 
+In this section, we begin by outlining the basics of diffusion models, Stable Diffusion fine-tuning, and LoRAs, followed by a detailed discussion of our methodology.  An overview of our method is shown in Fig.~\ref{fig:framework}.
+
+\subsection{Diffusion models}
+\label{sec:background}
+
+Our method was implemented on the Stable Diffusion 1.5  model, which represents the predominant text-to-image models for LoRA applications. Stable Diffusion operates in the latent space of an autoencoder, where an encoder $\mathcal{E}$ converts the input image $x$ into a lower-dimensional latent code $z = \mathcal{E}(x)$. The decoder $\mathcal{D}$ then reconstructs this latent back into the image space, achieving  $\mathcal{D}(z) \approx x$.  
+Upon having a trained autoencoder, Stable Diffusion employs a diffusion model \cite{ddpm} that is trained within the latent space of the autoencoder. The training process involves gradually adding noise to the original latent code $z_0$ over time, leading to the generation of $z_t$ at timestep $t$. A UNet \cite{unet} denoiser, denoted as $\epsilon_{\theta}$, is trained to predict the noise added to $z_0$. The training objective is formally expressed as:
+\begin{equation}
+    \mathcal{L} = \mathbb{E}_{z_t, \epsilon \sim \mathrm{N(0, I)}, c(\mathcal{P}), t } \left[ \Vert \epsilon - \epsilon_{\theta}(z_t, c(\mathcal{P}), t )\Vert ^ {2} \right]
+\end{equation}
+where $c(\mathcal{P})$ represents the conditional information and $\mathcal{P}$ is the text prompt fed to the text embedding model.
+
+In Stable Diffusion, the sequential embedding of CLIP \cite{radford2021learning} model $c$ is supplied to a UNet network through a cross-attention mechanism, serving as conditioning to generate images that adhere to the provided text prompt $\mathcal{P}$.  The cross-attention layers perform a linear projection of $c$ into queries ($Q$) and values ($V$), and they map intermediate representations from UNet to keys ($K$). Then, the attention at time $t$ is calculated as $A_t = \mathrm{Softmax}(QK^\intercal / \sqrt{d})$.
+Notably the attention map at timestep $t$, $A_t$, can be reshaped into $\mathbb{R}^{h \times w \times l}$, where $h$, $w$ represents the resolution of the feature map, which can take values from $\{16\times16, 32\times32, 64\times64\}$, and $l$ corresponds to the sequence length of the text embedding. In our work, we primarily focus on the $\{16\times16\}$ attention maps, as they have been identified by Hertz et al. \cite{p2p} as the most semantically meaningful attention maps. 
+
+\subsection{Stable Diffusion Fine-Tuning}
+While Stable Diffusion excels at general text-to-image tasks, fine-tuning allows for further enhancements to the model's internal parameters to specialize it for specific domains, subjects, or artistic styles. The fine-tuning can be achieved by learning an embedding for the target concept (as in \cite{gal2022image}) or fine-tuning the weights of the Stable Diffusion model (as in \cite{ruiz2023dreambooth}). Additionally, LoRA has been adopted by the community \cite{ryu2023low} as a go-to tool for lightweight concept tuning to achieve comparable quality to full-weight tuning.
+
+\subsection{LoRA models}
+
+Low-rank adaptation (LoRA) \cite{ryu2023low} is a method proposed to fine-tune large models by introducing rank-decomposition matrices and freezing the base layer. Although initially proposed for LLMs, the method can also be applied elsewhere. In the case of Stable Diffusion fine-tuning, LoRA is applied to cross-attention layers that are responsible for text and image connection. LoRA significantly reduces file size compared to full fine-tuning approaches like Dreambooth \cite{ruiz2023dreambooth}. While LoRAs might exhibit limitations in achieving highly specific details, their computational efficiency and ease of integration make them valuable tools. Also, the quality and efficiency of the model can be balanced using a suitable LoRA rank.
+
+Formally, a LoRA model is represented as a low-rank matrix pair ($\Delta W_{\text{out}}$, $\Delta W_{\text{in}}$). These matrices capture the adjustments introduced to the $W$ weights of a pre-trained Stable Diffusion model ($\theta$). 
+
+The updated weights during image generation are calculated as:
+\begin{equation}
+    \Delta W = W + W_{in}^{T}W_{out} 
+\end{equation}
+
+The low-rank property ensured that ($\Delta W_{\text{out}}$ and $\Delta W_{\text{in}}$) have significantly smaller dimensions compared to full-weight matrices, resulting in a drastically reduced file size for the LoRA model. The specific values within these matrices guide the diffusion process toward the desired style or concept encoded within the latent space of the Stable Diffusion model.
+
+\subsection{Contrastive learning}
+
+Contrastive learning has recently gained substantial popularity, delivering state-of-the-art results across multiple unsupervised representation learning tasks \cite{chen2020simple, oord2018representation, tian2019contrastive, hadsell2006dimensionality, chopra2005learning}. The core objective of contrastive learning is to develop representations that bring similar data points closer while pushing dissimilar data points apart. Let $x \in \mathcal{X}$ represent an input data point. We can define $x^{+}$ as a positive pair, where both data points, $x$ and $x^{+}$, share the same label, and $x^{-}$ as a negative pair, in which the data points have different labels. The kernel $f: \mathcal{X} \rightarrow \mathbb{R}^N$, takes an input $x$ and generates an embedding vector. InfoNCE, also known as NT-Xent, \cite{chen2020simple, he2020momentum, oord2018representation} is one of the popular contrastive learning objectives defined as follows:
+\begin{equation}
+    \mathcal{L} = -\log \frac{\exp(f(x) \cdot f(x^{+})/\tau)}{\sum_{i=0}^{M} \exp(f(x)\cdot f(x_i)/\tau)}
+\end{equation}
+
+In this equation, $\tau$ is the temperature parameter regulating the penalties. The summation is performed over one positive sample, denoted as $x^{+}$, and $M$ negative samples. Essentially, this loss can be interpreted as the log loss of a softmax-based classifier aiming to classify the data point $x$ as the positive sample $x^{+}$. We utilized InfoNCE loss since we will operate on very limited data and need an objective function supporting fast convergence.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.5\textwidth]{figs/clora_framework.png}
+  \caption{Illustration of our method, \methodName, that combines LoRAs (Low-Rank Adaptation models) using attention maps to guide Stable Diffusion image generation with user-defined concepts. The process involves prompt breakdown, attention-guided diffusion, and contrastive loss for consistency.}
+  \label{fig:framework}
+\end{figure}
+
+\subsection{\methodName}
+Our method utilizes LoRAs (Low-Rank Adaptation models) to incorporate user-defined concepts into Stable Diffusion image generation. We achieve this by utilizing the concept of attention maps within a contrastive learning framework. Consider two LoRA models: $L_1$ for `woman' and $L_2$ for `umbrella.' We want an image of `a woman with an umbrella' where $L_1$ defines the woman's style or concept and $L_2$ defines the umbrella's style or concept. Our approach works as follows:
+
+\paragraph{Prompt Breakdown and Embeddings:} We create three separate text prompts:
+\begin{itemize}
+    \item Original Prompt: `a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}'
+    \item $L_1$ LoRA-applied Prompt: `an \textcolor{BrickRed}{$L_1$ \textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}' (specifies \newline woman style with $L_1$)
+    \item $L_2$ LoRA-applied Prompt: `a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{$L_2$ \textbf{umbrella}}' (defines umbrella style with $L_2$)
+\end{itemize}
+
+We then generate corresponding prompts embeddings using the corresponding models since text encoder model, CLIP \cite{CLIP1} model, may also be fine-tuned during the LoRA training process. If text encoder models are not trained alongside the UNet weights, all text embeddings can be extracted using the base model. 
+
+\paragraph{Guiding Diffusion with Attention Maps:}  During image generation, Stable Diffusion uses cross-attention maps to focus on specific image areas at each step. We leverage the cross-attention maps to guide the diffusion process toward incorporating the desired LoRA-defined concepts. 
+
+We group the cross-attention maps for each concept (\textcolor{BrickRed}{woman} and \textcolor{ForestGreen}{umbrella}) based on the corresponding token in the prompt. A detailed breakdown of the grouping is as follows:
+
+\begin{itemize}
+    \item \textcolor{BrickRed}{Woman} concept group:
+        \begin{itemize}
+            \item Cross-attention map for `woman' from the original prompt (`a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}').
+            \item Cross attention maps for `$L_1$' and `woman' from the $L_1$-applied prompt. (`an \textcolor{BrickRed}{$L_1$ \textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}').
+            \item Cross attention map for `woman' from the $L_2$-applied prompt. (`a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{$L_2$  \textbf{umbrella}}').
+        \end{itemize}
+    \item \textcolor{ForestGreen}{Umbrella} concept group:
+        \begin{itemize}
+            \item Cross-attention map for `umbrella' from the original prompt (`a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}').
+            \item Cross attention map for `umbrella' from the $L_1$-applied prompt. (`an \textcolor{BrickRed}{$L_1$ \textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}').
+            \item Cross attention maps for `$L_2$' and `umbrella' from the $L_2$-applied prompt. (`a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{$L_2$  \textbf{umbrella}}').
+        \end{itemize}
+\end{itemize}
+
+The grouping ensures that the diffusion process considers the attention for the same concept (`woman' or `umbrella') across all prompts simultaneously. This helps the model understand the overall concept for each object while incorporating style variations defined by the LoRA models ($L_1$ and $L_2$). This grouping also prevents different groups from attending to the same locations, which ensures that, for example, the attention for the woman doesn't overlap with the attention for the umbrella. This prevents neglecting any aspect of the text during generation. The framework can be seen in Figure \ref{fig:framework}.
+
+\paragraph{Contrastive Learning for Fidelty:} To ensure fidelity of generation to the input prompt, we employ contrastive learning during inference. For the contrastive objective, we employ InfoNCE loss, known for its fast convergence compared to previous methods. The InfoNCE loss operates on pairs of cross-attention maps. The attention map pairs within the same group are labeled as positive and pairs consisting items from different groups are labeled as negative.  The loss function can be expressed for a given attention map $A^j$ as follows for a single positive pair:
+
+\begin{equation}
+    \mathcal{L} = -\log \frac{\exp(\mathrm{sim}(A^j, A^{j^+})/\tau)}
+    {\sum_{n \in \{j^+, j^-_1, \cdots j^-_N\}} \exp(\mathrm{sim}(A^j, A^n)/\tau)}
+    \label{eq:contrastive_loss}
+\end{equation}
+where $\mathrm{sim}$ function represents cosine similarity:
+\begin{equation}
+    \mathrm{sim}(u, v) = \frac{u^T \cdot v}{\Vert u \Vert \Vert v \Vert}
+\end{equation}
+In this equation, $\tau$ is the temperature parameter, and the summation in the denominator contains one positive pair and all negative pairs for $A^j$. We compute the average InfoNCE loss across all positive pairs.
+
+\paragraph{Optimization.} In our approach, the loss function consists of a single term similar to \cite{chefer2023attend, meral2023conform, li2023divide, agarwal2023star}. We then direct the latent representation in the desired direction as measured by the loss function. The latent representation is updated at each step as follows:
+\begin{equation}
+z^\prime_t = z_t - \alpha_t \nabla_{z_t} \mathcal{L}
+\label{eq:optimization}
+\end{equation}
+
+\paragraph{Masking Latents} After one backward step in the diffusion process, we combine the latent representations generated by Stable Diffusion with those from additional LoRA models. While directly combining these latents is possible, we introduce a masking mechanism to ensure LoRAs influence only the relevant image regions. This masking relies on the attention mask values obtained from the corresponding LoRA outputs. We create binary masks by applying a threshold to the attention map values for each relevant token and then combine them using a union operation.
+
+Continuing with our example of `an \textcolor{BrickRed}{$L_1$\textbf{woman}} with an \textcolor{ForestGreen}{$L_2$ \textbf{umbrella}}' where $L_1$ defines the woman's style and $L_2$ defines the umbrella's style, our masking procedure works as follows:
+
+For the `an \textcolor{BrickRed}{$L_1$\textbf{woman}} with an \textcolor{ForestGreen}{$L_2$ \textbf{umbrella}}' example, we used the attention maps of \textcolor{BrickRed}{$L_1$} token and \textcolor{BrickRed}{woman} token from the `an \textcolor{BrickRed}{$L_1$ \textbf{woman}} with a \textcolor{ForestGreen}{\textbf{umbrella}}' for the $L_1$ LoRA, and \textcolor{ForestGreen}{$L_2$} token and \textcolor{ForestGreen}{umbrella} token from the `a \textcolor{ForestGreen}{\textbf{woman}} with a \textcolor{ForestGreen}{$L_2$ \textbf{umbrella}}' for the $L_2$ LoRA. Attention maps are created by applying a thresholding:
+
+\begin{enumerate}
+    \item We obtain the attention maps for the following tokens from their corresponding prompts:
+    \begin{itemize}
+        \item `\textcolor{BrickRed}{$L_1$}' and `\textcolor{BrickRed}{woman}' attention maps from the `an \textcolor{BrickRed}{$L_1$ \textbf{woman}} with an \textcolor{ForestGreen}{\textbf{umbrella}}' prompt (for $L_1$).
+        \item `\textcolor{ForestGreen}{$L_2$}' and `\textcolor{ForestGreen}{umbrella}' attention maps from the `a \textcolor{BrickRed}{\textbf{woman}} with an \textcolor{ForestGreen}{$L_2$ \textbf{umbrella}}' prompt (for $L_2$).
+    \end{itemize}    
+    \item We apply a thresholding operation to each attention map to create a binary mask following a similar approach to semantic segmentation method described in~\cite{tang2022daam}:
+    \begin{equation}
+        M[x,y] = \mathbb{I} \left( A[x,y] \geq \tau \max_{i,j} A[i,j]\right)
+    \end{equation}
+
+    where \begin{itemize}
+        \item $M[x, y]$: The binary mask output at position (x, y)
+        \item $A[x, y]$: The attention map value at position (x, y) for the corresponding token
+        \item $\mathbb{I}(\cdot)$: Indicator function (outputs 1 if true, 0 otherwise)
+        \item $\tau$: Threshold value between 0 and 1
+    \end{itemize}
+    
+    This thresholding ensures only areas with attention values exceeding a certain percentage of the maximum attention value in the map are included in the mask (set to 1).
+
+    \item Since we might have multiple tokens contributing to a single LoRA (e.g., `woman' and `$L_1$ woman' for $L_1$), we perform a union operation on the individual masks. This ensures any region receiving attention from either token is included in the final mask for that LoRA.
+    
+\end{enumerate}
+
+
+\begin{figure*}[!htb]%
+  \centering
+  \includegraphics[width=\linewidth]{figs/main_figure.pdf}
+  \caption{\textbf{The qualitative results produced by \texttt{\methodName}} showcase a range of compositions, including animal-animal, object-object, and animal-object compositions. The top row displays individual images generated by each LoRA. Our approach is successful at composing multiple content LoRAs—for example, combining a \textit{cat} and a \textit{dog}—along with \textit{scene} LoRAs, such as pairing a \textit{cat} with a \textit{canal} scene. Moreover, it demonstrates the capability to integrate more than two LoRAs, exemplified by the composition of a \textit{panda}, \textit{shoe}, and \textit{plant} LoRA. }
+  \label{fig:qualitative}
+\end{figure*}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/style.pdf}
+    \caption{\textbf{The qualitative results produced by CLoRA} showcasing the composition two subject and one style LoRAs.}
+    \label{fig:style}
+\end{figure}
+ 
+
+
+
+\section{Experiments}
+
+In this section, we present qualitative results, along with quantitative comparison and a user study. For additional results, please refer to our supplementary material.
+ 
+\subsection{Datasets}
+Due to the absence of standardized benchmarks for the evaluation of merging LoRAs, we introduce a benchmark  designed specifically  for assessing the integration of multiple concept and style adaptations. For this purpose, we used Custom Concept \cite{kumari2023multi} dataset and trained 50 different LoRA models with several prompts that requires multiple   content and style LoRAs to be combined. To facilitate further research on this topic, we will also release the pre-trained LoRA models as a benchmark collection.  Please refer to the supplementary material for more details about the benchmark dataset and the composition prompts.
+
+ 
+
+\paragraph{Experimental Setup} 
+For each prompt, we use 10 different seeds per prompt, utilizing 50 iterations   using Stable Diffusion v1.5 \cite{rombach2022high}.  To enhance the effectiveness of our updates, we perform optimization multiple times before initiating a backward step at iterations $i \in \{0,10, 20\}$. After $i=25$, we also stop any further optimization to prevent unwanted artifacts in the output similar to \cite{chefer2023attend}. We used a v100 GPU to perform image generation. For the contrastive learning, we used temperature $\tau = 0.5$ for the Equation~\ref{eq:contrastive_loss}.
+
+\paragraph{Baselines}  We compare our results with baselines such as LoRA-Merge \cite{ryu2023low} that merges LoRAs as a weighted combination, ZipLoRA \cite{shah2023ziplora} that synthesizes a new LoRA model based on a style and a content LoRA,   Mix-of-Show \cite{gu2023mix} that requires training a specific LoRA type called EDLoRA, Custom Diffusion \cite{kumari2023multi} and MultiLoRA \cite{zhong2024multi} that incorporates all LoRA models based on unconditional and conditional score estimates. 
+Note that for MultiLoRA, we selected the `Composite' configuration instead of MultiLoRA-Switch. This decision was based on the fact that the MultiLoRA-Composite variant showed better performance than MultiLoRA-Switch, as discussed in \cite{zhong2024multi}.
+
+\begin{figure*}[!htp]
+  \centering
+
+  \begin{subfigure}{\linewidth}
+  \centering
+  \includegraphics[width=0.68\linewidth]{figs/supplementary/pet_cat1___plushie_penguin___in___House.pdf}
+  \end{subfigure}
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[line width=0.4pt] (\textwidth*-0.35,0) -- (\textwidth*0.35,0);
+  \end{tikzpicture}
+  
+  \begin{subfigure}{\linewidth}
+  \centering
+  \includegraphics[width=0.68\linewidth]{figs/supplementary/pet_dog1___plushie_bunny___in___Park.pdf}
+  \end{subfigure}
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[line width=0.4pt] (\textwidth*-0.35,0) -- (\textwidth*0.35,0);
+  \end{tikzpicture}
+
+  \begin{subfigure}{\linewidth}
+  \centering
+  \includegraphics[width=0.68\linewidth]{figs/supplementary/pet_cat6___pet_dog2___in___Backyard.pdf}
+  \end{subfigure}
+  \begin{tikzpicture}[remember picture, overlay]
+    \phantom{\draw[line width=0.4pt] (\textwidth*-0.35,0) -- (\textwidth*0.35,0);}
+  \end{tikzpicture}
+  
+  \caption{Qualitative Comparison of \texttt{\methodName}  Mix of Show \cite{gu2023mix}, MultiLoRA \cite{zhong2024multi}, LoRA-Merge \cite{ryu2023low}, ZipLoRA \cite{shah2023ziplora} and  Custom Diffusion \cite{kumari2023multi}.  As can be seen from the results, our method is faithful to the input LoRA models while other methods fail to maintain the identity.}
+  
+  \label{fig:main_comparison}
+\end{figure*}
+\begin{figure*}[!htp]
+  \centering
+
+  \begin{subfigure}{\linewidth}
+  \centering
+  \includegraphics[width=0.68\linewidth]{figs/supplementary/decoritems_vase2___flower_1___in___garden.pdf}
+  \end{subfigure}
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[line width=0.4pt] (\textwidth*-0.35,0) -- (\textwidth*0.35,0);
+  \end{tikzpicture}
+  
+  \begin{subfigure}{\linewidth}
+  \centering
+  \includegraphics[width=0.68\linewidth]{figs/supplementary/wearable_shoes2___luggage_purse2___in___Airport.pdf}
+  \end{subfigure}
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[line width=0.4pt] (\textwidth*-0.35,0) -- (\textwidth*0.35,0);
+  \end{tikzpicture}
+  
+  \begin{subfigure}{\linewidth}
+  \centering
+  \includegraphics[width=0.68\linewidth]{figs/supplementary/things_book2___things_cup1___on___Library.pdf}
+  \end{subfigure}
+  \begin{tikzpicture}[remember picture, overlay]
+    \phantom{\draw[line width=0.4pt] (\textwidth*-0.35,0) -- (\textwidth*0.35,0);}
+  \end{tikzpicture}
+  
+  \caption{Qualitative Comparison of \texttt{\methodName}  Mix of Show \cite{gu2023mix}, MultiLoRA \cite{zhong2024multi}, LoRA-Merge \cite{ryu2023low}, ZipLoRA \cite{shah2023ziplora} and  Custom Diffusion \cite{kumari2023multi}.  As can be seen from the results, our method is faithful to the input LoRA models while other methods fail to maintain the identity.}
+  
+  \label{fig:main_comparison2}
+\end{figure*}
+
+ \subsection{Qualitative Experiments}
+
+\paragraph{Qualitative Results}  Our methodology's qualitative outcomes are presented in Fig. \ref{fig:teaser} and \ref{fig:qualitative}, showcasing its effectiveness. It's evident that our approach successfully integrates multiple content LoRAs, such as  \textit{cat} and a \textit{dog}, set against various backgrounds like \textit{beach} or \textit{moon}. Furthermore, it adeptly composes a content LoRA with a scene LoRA, such as effectively situating the \textit{cat} within a specific \textit{canal} as defined by the scene LoRA. Additionally, our method demonstrates versatility by blending diverse content LoRAs, such as pairing a \textit{cat} with a \textit{bicycle} LoRA or a \textit{clothing} LoRA. Notably, our approach is capable of combining more than two LoRA models, as illustrated in the bottom right of Fig. \ref{fig:qualitative}, where multiple LoRAs depicting  a \textit{panda}, \textit{shoe}, and \textit{plant} are fused to create a composite image. 
+ 
+\paragraph{Qualitative Comparison}  Moreover, we provide a qualitative comparison with our method and baseline methods in Fig. \ref{fig:main_comparison} for animal-animal composition, and Fig. \ref{fig:main_comparison2} for object-object composition. Each comparison visualizes four randomly generated compositions generated by our method, Mix of Show \cite{gu2023mix}, MultiLoRA \cite{zhong2024multi}, LoRA-Merge \cite{ryu2023low}, ZipLoRA \cite{shah2023ziplora} and  Custom Diffusion \cite{kumari2023multi}.  The visuals demonstrate that our method consistently captures both concepts as defined by the corresponding LoRA model, without blending attributes. In contrast, other approaches often struggle with attribute binding problems or ignore one of the concepts, likely due to overlapping attention maps. For example, consider `An $L_1$ cat and an $L_2$ penguin in the house' prompt in   Fig. \ref{fig:main_comparison}, top row where $L_1$ corresponds to a cat LoRA and $L_2$ corresponds to a plush penguin LoRA, respectively. The Mix of Show approach blends the \textit{penguin} object with the \textit{cat}, resulting in the creation of either \textit{two plush penguins} while completely overlooking the \textit{cat}, or a \textit{cat} with a \textit{plush-like} appearance. Additionally, MultiLoRA does not accurately represent any of the LoRA models, leading to the production of either \textit{two cats} or \textit{two penguins}, neither of which resemble the specified LoRA models. Conversely, LoRA-Merge manages to produce a \textit{cat} that approximates the designated LoRA model but fails to accurately depict the \textit{penguin}. Likewise, ZipLoRA, due to its design limitations in combining multiple content LoRAs, often misses capturing the plush \textit{penguin} and generates \textit{two cats} instead. Furthermore, Custom Diffusion disregards the \textit{cat} LoRA entirely, focusing on generating plush \textit{penguins}. Similar observations can be made when combining object-object LoRAs (see Fig. \ref{fig:main_comparison2}). Our method successfully generates both elements within a composition, e.g. effectively positioning a specific flower in a specific vase as dictated by different LoRA models, as illustrated in the top row of Fig. \ref{fig:main_comparison2}. In contrast, other approaches frequently miss one of the elements or create objects that do not match the characteristics outlined in the input LoRAs. Additionally, these methods often struggle with attribute binding issues. This problem is evident in the bottom row of Fig. \ref{fig:main_comparison2}, where the book LoRA tends to blend with the cup LoRA, leading to the creation of a cup that features the cover of the book.
+
+\paragraph{Composition with three LoRA models} We compare the ability to compose with more than two LoRA models in Fig. \ref{fig:3loras1}.  Our method effectively captures the characteristics of each individual LoRA model  within the composite image. In contrast, other techniques struggle to create a coherent composition, often because they blend multiple LoRA models together.  Note that we couldn't include Custom Diffusion, Mix of Show, and ZipLoRA in this comparison due to their limitations in merging more than two LoRA models.
+
+\paragraph{Composition with human subjects} Additionally, we offer a comparison that involves composing images with LoRAs featuring human subjects, as illustrated in Fig. \ref{fig:teaser} and Fig. \ref{fig:realistic}. The outcomes demonstrate that our method adeptly merges human subjects with objects, preserving the distinct characteristics of each LoRA model. In contrast, other approaches struggle to simultaneously incorporate both concepts effectively.
+\paragraph{Composition with style LoRAs} Our approach is capable of blending style and concept LoRAs to create images, as shown in Fig. \ref{fig:teaser} and Fig. \ref{fig:style}. The visuals demonstrate that our method effectively embodies the attributes of each content LoRA, e.g. including the distinct flower and human character as defined by their respective LoRAs, while also applying the style LoRA across the entire image (Fig. \ref{fig:teaser}).
+ 
+ 
+ 
+\subsection{Quantitative Experiments}
+
+\begin{table}[t]
+    \small
+    \centering
+    \caption{Average, Minimum/Maximum DINO image-image similarities between the merged prompts and individual LoRA models, User Study.} 
+    \resizebox{\linewidth}{!}{%
+        \setlength{\tabcolsep}{3pt}
+        \begin{tabular}{c c | c | c c | c  | c | c }
+            \toprule
+              && Merge \cite{ryu2023low} & Composite  & Switch  \cite{zhong2024multi}& ZipLoRA \cite{shah2023ziplora} &  Mix-of-Show \cite{gu2023mix}  & \textbf{Ours} \\ \midrule
+     \multirow{3}{*}{\rotatebox[origin=c]{90}{%
+                \begin{tabular}{@{}c@{}}
+                    DINO
+                \end{tabular}%
+            }}  & Min. & 0.3755& 0.2882& 0.3073& 0.3687& 0.4067&\textbf{0.4473}\\
+     & Avg. & 0.4724& 0.3791& 0.3947& 0.4955& 0.5258&\textbf{0.5536}\\
+                          &Max. &    0.5038& 0.4168&0.4315&  0.5328&   0.5641& \textbf{0.5928}\\
+            \bottomrule 
+              \multicolumn{2}{c|}{User Study} & 2.0& 2.11& 1.98 & 2.81& 2.03&\textbf{3.32} 
+        \end{tabular}\label{tb:metrics}
+    }
+    \label{table:results}
+\end{table}
+\paragraph{Quantitative Comparison} We leverage DINO features \cite{radford2021learning} to assess the quality of images generated by our method and compared methods that combine multiple LoRAs. DINO offers a hierarchical representation of image content, enabling a more detailed analysis of how each LoRA contributes to specific aspects of the merged image. We calculate DINO-based metrics as follows:
+\begin{enumerate}
+    \item Generate separate outputs using each individual LoRA based on the prompt sub-components (e.g., `$L_1$ cat' and `$L_2$ flower').
+    \item Extract DINO features for the merged image and each single LoRA output.
+    \item Calculate cosine similarity between the DINO features of the merged image and the corresponding features from each single LoRA output.
+\end{enumerate}
+    
+We utilize three DINO-based metrics to provide a more comprehensive understanding of the merged image quality:
+
+\begin{itemize}
+    \item \textit{Average DINO similarity:} This metric reflects the overall alignment between the merged image and individual LoRAs averaged across all LoRAs.  
+    \item \textit{Minimum DINO similarity:} We use the cosine similarity between the DINO features of the merged image and the least similar LoRA reference output. 
+    \item \textit{Maximum DINO similarity:} This metric identifies the LoRA reference image whose influence might be most represented in the merged image. Similar to the Minimum DINO similarity, we calculate cosine similarity between the DINO features of the merged image and the most similar LoRA output. %
+\end{itemize}
+
+By analyzing both the average and minimum/maximum DINO similarities, we gain insights into how well our method balances the contributions from each LoRA in the final merged image. This combination allows for a more nuanced evaluation of how effectively our method merges content from multiple LoRAs.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/3loras1.pdf}
+    \caption{Comparison of compositing with three LoRA models.  Our method effectively captures the essence of each individual LoRA model (as displayed in the top row) within the composite image. In contrast, other techniques struggle to create a coherent composition, often because they blend multiple LoRA models together in the attention layers.
+ }
+    \label{fig:3loras1}
+\end{figure}
+We evaluate all methods using DINO-based similarity metrics to provide a comprehensive comparison. The results, presented in Table \ref{tb:metrics}, demonstrate that our method surpasses existing baselines in terms of faithfully merging content from LoRAs. We applied these metrics using six different LoRA models and prompts consisting of two subjects with LoRAs. Example generations from each LoRA model used for benchmarks are depicted in Fig. \ref{fig:main_comparison} and Fig. \ref{fig:main_comparison2}. For each LoRA model and composition prompts, 50 reference images are generated and DINO similarities are calculated. Prompts used in benchmarks consist of two subjects and a background, such as `An $L_1$ cat and an $L_2$ dog in the forest'. 
+
+We opted for DINO features over CLIP features because of their focus on subject identity. DINO, unlike CLIP, isn't trained on text-image alignment. Instead, it leverages a self-supervised learning approach specifically designed for image retrieval tasks. This focus translates to DINO excelling at capturing the subjects identity within an image. CLIP, though a powerful general-purpose model, prioritizes broader visual understanding. While CLIP offers versatility, DINO's targeted design for subject identity aligns better with the goals of our research, as also noted by~\cite{ruiz2023dreambooth}.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/2loras.pdf}
+    \caption{Comparison of composing with concept LoRAs depicting human subjects. Our method can successfully reflect each individual LoRA concept in the composition.}
+    \label{fig:realistic}
+\end{figure}
+ 
+\paragraph{User Study.}  Furthermore, we run a user study to test effectiveness of our approach on 50 users using Prolific platform~\cite{prolific} (see Table  \ref{tb:metrics}).  We show participants 4 generated images per composition for each method, and asked which option generates both concepts in a faithful way (1=Not faithful) and (5=Very faithful). Our method achieves significantly better results than competitors as seen in Table~\ref{table:results}. 
+
+
+
+\section{Ablation Study}
+
+
+\begin{figure}[tb]
+  \centering
+  \includegraphics[width=\linewidth]{figs/Ablation.pdf}
+  \caption{\texttt{\methodName} Ablation Study. Using the $L_1$ cat and $L_2$ dog LoRAs, the effects of two techniques (latent update and latent masking) can be observed.}
+  \label{fig:ablation}
+\end{figure}
+
+Our method, \methodName{}, incorporates two key techniques to effectively integrate multiple LoRAs into a single image and achieve concept-specific control:
+
+\textit{Latent Update:} This technique ensures the model's attention focuses on the specific concepts defined by each LoRA. It prevents the model from getting confused and assigning attention to irrelevant areas. Without latent update, the model might struggle to distinguish between multiple concepts, potentially generating duplicate objects and wrong attribute binding (e.g., two dogs instead of a cat and a dog) as shown in the Figure \ref{fig:ablation}.
+
+\textit{Latent Masking:} This technique protects the identity of the main subject in the image during generation. Without masking, every pixel in the image would be influenced by all prompts, potentially causing inconsistencies and loss of identity of the subject in the final image. The ablation study (Figure \ref{fig:ablation}) demonstrates the effectiveness of latent masking. It preserves the distinct identities and styles of the LoRAs when combined within a single image.
+
+Without these two techniques, the resulting generations can neither preserve the identity nor avoid attention overlap. These techniques within \methodName{} allow for more precise control over the image generation process, enabling users to introduce specific styles or variations into designated image regions guided by multiple LoRAs.
+
+
+
+\section{Limitation}
+
+Our method represents a transformative step for creative fields since it allows users to compose complex images from multiple LoRA models. By facilitating the combination of multiple LoRA models to craft unique images, our approach empowers creators with unprecedented creative freedom and personalization capabilities. For artists, designers, and content creators, this means the ability to seamlessly blend different styles, themes, and elements into novel compositions, pushing the boundaries of traditional visual arts and opening up new avenues for expression and storytelling. 
+
+Furthermore, unlike competing approaches, our method does not necessitate the training of specific LoRAs and is compatible with the extensive array of community-developed LoRAs available on platforms like Civit.ai. Thus, our method facilitates collaborative creativity, enabling  creators from various disciplines to combine their efforts and leverage the shared pool of community-developed LoRAs. 
+
+However, as  our method  democratizes and amplifies creative potential, it also raises concerns about originality, copyright, and the ethical use of automated tools in art creation, highlighting the need for thoughtful discourse and guidelines around the use of such powerful personalization tools in creative endeavors. Moreover, it also opens up avenues for misuse that could have negative societal impacts. The ability to generate unique, personalized images with such ease and precision can be exploited for malicious purposes, such as creating deepfakes, fabricating misleading information, or producing unauthorized or harmful content that infringes on individuals' rights and privacy as discussed by \cite{korshunov2018deepfakes}.
+
+Additionally, as anticipated, a limitation of our approach is that the effectiveness of the composition is contingent upon the quality of the LoRA models. Another limitation is the potential computational complexity involved in integrating and optimizing multiple LoRA models simultaneously, which could pose challenges in terms of processing time and resource requirements for generating high-quality images. However, our method can successfully combine up to 4 LoRAs on a single L40 Nvidia GPU.  
+
+
+\section{Conclusion}
+
+
+ 
+
+
+
+
+{
+    \small
+    
+
+
+

@@ -1,0 +1,507 @@
+\title{Forking Paths in Neural Text Generation}
+
+\begin{abstract}
+    Estimating uncertainty in Large Language Models (LLMs) is important for properly evaluating LLMs, and ensuring safety for users. However, prior approaches to uncertainty estimation focus on the final answer in generated text, ignoring intermediate steps that might dramatically impact the outcome.
+    We hypothesize that there exist key \textit{forking tokens}, such that re-sampling the system at those specific tokens, but not others, leads to very different outcomes.
+    To test this empirically, we develop a novel approach to representing uncertainty dynamics across individual tokens of text generation, and applying statistical models to test our hypothesis. 
+    Our approach is highly flexible: it can be applied to any dataset and any LLM, without fine tuning or accessing model weights.
+    We use our method to analyze LLM responses on 7 different tasks across 4 domains,  spanning a wide range of typical use cases. 
+    We find many examples of forking tokens, including surprising ones such as %an open parenthesis character `\textit{(}' instead of `\textit{by}', 
+    punctuation marks, suggesting that LLMs are often just a single token away from saying something very different.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) demonstrate impressive yet opaque capabilities that emerge during next-word prediction \citep{brown2020language, kaplan2020scaling, bubeck2023sparks}, and a good deal of current research is devoted to understanding and interpreting LLM behavior \citep{chang2024survey, anwar2024foundational, bricken2023monosemanticity, holtzman2023generative, akyurek2022learning}. LLMs are often treated as black boxes due to the sheer complexity of their internal workings, and because many state-of-the-art models are only accessible at the level of inputs and outputs.
+One way to assess any dynamic system is to consider what possible things it \textit{could} have done, but didn't. In text generation, we can liken a text sequence to a path the system took through the semantic space of all possible paths, and ask: what other paths could the system have taken? Are there key points where re-sampling the system at that specific point, but not others, would lead to very different paths? 
+Work on uncertainty estimation in LLMs tackles the related problem of assessing how likely an LLM is to respond with different final answers, e.g. the probability of responding \textit{``A''} or \textit{``B''} to a multiple choice question \citep{kadavath2022language, tian2023just, guo2017calibration, ye2024benchmarking}.
+Previous approaches to black-box uncertainty estimation have yielded important insights by analyzing data such as the logit probabilities of the final tokens in an LLM's output, or the fraction of text responses that end in the correct answer \citep{geng2024survey, xiong2024can}.
+However, in our analogy, these approaches consider only the final destination, and not the paths leading to them. 
+
+A major limitation of prior work on uncertainty estimation is that the last few tokens of an LLM's output are largely determined by previous tokens.
+For example, a single wrong step when solving a multi-step reasoning problem (e.g. \textit{``The current year is \underline{2021} \ldots''}) can cascade into a wrong final answer (e.g. \textit{``\ldots The current British head of state is \ul{Queen Elizabeth}.''}), or other undesired responses \citep{zhang2023snowball}. 
+Uncertainty over intermediate tokens or reasoning steps will not be reflected in the final tokens of the LLM's response, since these tokens will be nearly deterministic ($100\%$ confidence) given the rest of the text preceding them.
+A similar assumption is made in process-level supervision \citep{lightman2023let}, which gives an LLM feedback for the correctness of each step of its solutions, in addition to its final answer (i.e. outcome-level supervision).
+Perhaps, then, we might gleam valuable insights by analyzing uncertainty in paths and not just outcomes.
+
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=.85\linewidth]{intro-fp}
+\caption{\textbf{Forking paths in text generation: can a single token alter the outcome?}
+At each step of next-word text generation, an LLM has some probability of sampling a variety of possible next tokens. This raises the question: are there specific \textit{forking tokens}, where choosing a certain token over other probable alternatives results in a distinct outcome? 
+To test this hypothesis, we estimate uncertainty in text generation by systematically re-sampling \textcolor{PineGreen}{alternate completions} at each token in a single \textcolor{Brown}{\textit{base path}}, such as a greedily decoded sequence, to identify if there are forking tokens where two paths diverge into different outcomes. 
+We find forking tokens where expected content words (\ul{\textit{2021}}/\ul{\textit{2024}} in this example) lead to a different final answers (\textcolor{brickred}{\textit{Queen Elizabeth}} or \textcolor{Cyan}{\textit{King Charles}}), but we also find forking tokens in unexpected places (e.g. \ul{\textit{that}}/\ul{\textit{who}}).
+}
+\label{fig:intro-fp}
+\end{figure}
+
+
+
+
+
+
+Our approach is to study \textit{uncertainty dynamics}, or how an LLM's likelihood of producing different responses changes as each new token is generated (Fig.~\ref{fig:intro-fp}). 
+Specifically, we propose the Forking Tokens Hypothesis: that in LLM text generation, there will be individual \textit{forking tokens} which, if generated, lead to dramatic differences in subsequent text (Fig.~\ref{fig:intro-fp}).
+Uncertainty dynamics and forking tokens are unseen by prior approaches to  `static' uncertainty estimation such as taking the logits of the final answer token, or re-sampling many full responses.
+This inspires a new `dynamical' way of thinking about uncertainty in text generation, where we study the influence that individual tokens have on the eventual outcome. 
+We develop a methodology called Forking Paths Analysis (Sec.~\ref{sec:2}) in order to shed light on uncertainty dynamics and to empirically test for forking tokens. 
+We find dramatic uncertainty dynamics in GPT-3.5 in many tasks commonly used for evaluation, including single tokens that cause the model to suddenly flip from low confidence to high confidence in a final answer. 
+This supports the Forking Tokens Hypothesis, and suggests that uncertainty dynamics in GPT-3.5 are considerably more chaotic than high confidence final answers might suggest.
+
+Put briefly, our primary contributions are:
+\begin{enumerate}
+    \item \textbf{A novel hypothesis regarding the existence of `forking tokens' that greatly impact the outcome of text generation}.
+    We propose the Forking Tokens Hypothesis, that there exist individual tokens which, if sampled during decoding instead of an alternative token, lead to dramatic differences in subsequent text generation (Fig.~\ref{fig:intro-fp}). 
+
+    
+    
+    \item \textbf{A novel approach to representing uncertainty at each token in next-word prediction}. 
+    Our method aggregates text samples into time series and conditional distributions, revealing uncertainty \textit{dynamics} invisible to prior work (Sec.~\ref{sec:2-1}, ~\ref{sec:2-2}). 
+    We use change point detection models and survival analysis to empirically test our hypothesis and efficiently scale across hundreds of individual analyses (Sec.~\ref{sec:2-3}, ~\ref{sec:2-4}).
+
+    
+
+    \item \textbf{Our analysis shows striking text generation dynamics, including change points in many sequences and unexpected forking tokens such as space characters}
+    We examined text generation dynamics in GPT-3.5 using 7 different LLM evaluation tasks (Sec.~\ref{sec:4}). Our results support the Forking Tokens Hypothesis.
+    
+\end{enumerate}
+
+
+
+\section{Forking Paths Analysis}
+
+
+In text generation, exchanging a single token may drastically alter subsequent text.
+This is clearly true in reasoning. For example, if we ask \textit{``Who is the current British head of state?''}, the intermediate reasoning step \textit{``The current year is (\ul{2021}/\ul{2024}) \ldots''} can lead to different final answers.
+This could also occur in open-ended text generation, when a single token distinguishes topics. For example \textit{``Billy woke up in a \underline{hotel} \ldots''} and \textit{``Billy woke up in a \underline{spaceship} \ldots''} leads to very different stories.
+LLMs generate text one token at a time, and sampling a word such as \textit{``hotel''} instead of \textit{``spaceship''} could steer autoregressive text generation towards one path over another.
+Many possible tokens could cause forking if exchanged, e.g. if we manually set the token in the previous example to \textit{``coconut''}. However, we aim study the forking tokens that are most likely to be sampled during text generation.
+We expect text generation to be relatively stable, in that most tokens an LLM is likely to sample would only change surface features and would not affect the outcome or overall meaning.
+However, LLMs also show significant biases in producing certain words and phrases over others \citep{mccoy2023embers}, and adapting their semantic priors on the fly \citep{wei2023larger}.
+We also might expect, then, to find unexpected forking tokens with LLMs, for example if \textit{``Billy woke up in \ul{\ a \ } \ldots''} leads to a story about a summer vacation and \textit{``Billy woke up in \underline{the} \ldots''} leads to a science fiction story.
+This could occur if an LLM were considering two different outcomes to a story (e.g. a summer vacation or a sci-fi story), but these outcomes were biased towards specific words or phrases such as \textit{``Billy \underline{woke}} and \textit{``Billy \underline{awoke}}.
+If we find unexpected forking tokens such as this, it might suggest that LLMs are not planning their final responses before generating text, and instead they are effectively deciding what the outcome will be as each new token is sampled.
+
+
+
+
+
+
+We predict that in text generation with LLMs, there will be individual tokens where text generation `forks' into multiple distinct outputs.
+More formally, we propose the Forking Tokens Hypothesis: that a single token being exchanged for a probable alternate token can significantly impact the outcome of subsequent text generation in LLMs.
+To test this, we develop a method that includes a multi-stage sampling pipeline (Section~\ref{sec:2-1}), aggregating text samples into outcome distributions (\ref{sec:2-2}), and applying statistical models to test our hypothesis (\ref{sec:2-3},~\ref{sec:2-4}).
+
+\begin{figure}[t!]
+
+\centering
+\includegraphics[width=\linewidth]{outcome_dist}
+
+\caption{(Top) \textbf{Systematically sampling alternate paths in text generation.}  \ \ 
+Our data collection proceeds in three stages.
+First, we decode a \textcolor{Brown}{base path text completion $x^*$} from an LLM given some prompt and record the most probable \textcolor{orange}{alternate tokens $w$} at each step $t$. 
+Next, we re-sample $S$ \textcolor{PineGreen}{completions $x_{>t}^{(s)}$} by appending $x_{<t}^*$ to the original prompt, along with each alternate token $x_t = w$.
+Finally, we extract \textcolor{brickred}{\setulcolor{Cyan} \ul{outcome vector representations $R( \cdot )$}} for each sample. In our experiments, for $R$ we use a different LLM to extract the final answer from a path.
+(Bottom)  \textbf{Probability-weighted outcome distributions}  \ \ 
+We aggregate outcome representations $R( \cdot )$ into outcome distributions $o_t$ and $o_{t,w}$ by weighting each outcome with next-token probabilities for the forking token $p(x_t = w   \ | \ x^*_{<t})$ and for the sampled path completion $p( x^{(s)}_{>t}  \ | \   x_{<t}^* ,   x_t = w )$. Also see Eq.~\ref{eq:outcome-dist}.
+}
+
+\label{fig:outcome-dist}
+
+\end{figure}
+
+
+
+
+\subsection{Language Model Sampling Pipeline}    \label{sec:2-1}
+
+For our analysis, we collect a large number of output texts from an LLM for each individual question prompt using a 3-stage sampling pipeline (Fig.~\ref{fig:outcome-dist}, Top). 
+We begin by decoding a single \textit{base path} response $x^*$ to a given prompt. This sample includes, for each token $x_t$ in sequence, the logit probabilities $p(x_t = w | x_{<t})$ for the top $K$ tokens $w$ at index $t$.
+Next, for each index $t$ and each alternate token $w$ with sufficiently high probability $p(x_t = w  \ | \  x^*_{<t})$, we re-sample a batch of samples $\{ x_{>t}^{(1)} \ldots x_{>t}^{(S)} \}$ by prompting the LLM with the original input text appended to the base path response $x^*_{<t}$ up to time $t$, with the last token being $x_t = w$.
+In the third step, we extract an outcome representation for each sample $R(x^*_{<t}, x_t=w, x^{(s)}_{>t})$. Described in the following section, $R$ is a semantic vector representation such as a one-hot encoding of the final answer.
+These stages rely on token logit probabilities from the evaluated LLM, which are available in black-box LLM APIs such as OpenAI and TogetherAI and can also be inferred for APIs without this feature \citep{morris2023logprobinversion}.
+In our experiments, the third stage $R$ uses a second LLM, which may be the same or different from the main LLM being evaluated, and does not require logit probabilities. We prompt this model to extract the final answer from $x^*$, and convert its response into a categorical value, such as \textit{``A''} or \textit{``B''}.
+
+\subsection{Representing Text Generation Outcomes}   \label{sec:2-2}
+We construct \textbf{outcome distributions} for individual token indexes $o_{t}$ and for token values $o_{t, w}$. 
+We define an outcome distribution $o$ as the expected value of a semantic vector representation $R$, which varies depending on the task and takes as input both the question prompt and model-generated response. 
+In the case of a multiple-choice task, $R$ is a one-hot encoding of the final answer in the response string (e.g. \textit{`A'}, \textit{`B'}, \textit{`C'}, or \textit{`D'}). For open-ended tasks without final answers, $R$ can be any arbitrary semantic vector embedding. 
+\begin{align}    \label{eq:outcome-dist}
+      o_{t, w}(x^*)  
+                \quad  &=     \mathbb{E}_s \big [  R(x^*_{<t}, \   x_t = w, \    x_{>t}^{(s)}) \big ]   
+ \\
+                \quad  &=     \sum_s  \  p(x_{>t}^{(s)} \ | \ x^*_{<t}, \  x_t = w) \  R(x^*_{<t}, \   x_t = w, \    x_{>t}^{(s)})  \nonumber  \\
+      o_t(x^*)  
+                \quad &= \mathbb{E}_w \big [ o_{t, w}(x^*) \big ]   \\
+                \quad  &=      \sum_{w}   \    p(x_t = w  \ | \  x^*_{<t})  \    \sum_s  \  p(x_{>t}^{(s)} \ | \ x^*_{<t}, x_t = w) \  R(x^*_{<t}, \   x_t = w, \    x_{>t}^{(s)})    \nonumber  \\
+\text{\small \color{lightgrey} Outcome Distr. }
+      &\quad \text{\small \color{lightgrey}    Next-Word Prediction  \qquad  Sample Probability \qquad     Outcome Representation }  \nonumber
+\end{align}
+
+In our experiments, $o_t$ and $o_{t,w}$ are histograms over categorical outcome representations $R$, weighted by the sample probability $p(x_{>t} | x_{\leq t}) = \prod_{t' = 1}^t p(x_{t'} | x_{1 : t'})$. In the case of $o_t$, outcome representations are also weighted by the forking token probability $p(x_t = w | x_{<t})$. 
+All such weighting probabilities are derived from next-token prediction probabilities $p(x_t | x_{1 : t-1})$. For brevity, we refer to $x_{1:t-1}$ as $x_{<t}$ and $x_{t+1:T}$ as $x_{>t}$. 
+Our approach is Bayesian, in that we weight samples according to a graph of conditional probabilities and we interpret output certainty as the degree of an LLM's belief. This stands in contrast to frequentist calibration methods, which interpret certainty as the fraction of problems which are answered correctly~\citep{guo2017calibration, kadavath2022language, geng2024survey},
+$o_t$ and $o_{t,w}$ have the advantages of being easy to visualize, and suitable for statistical analysis. 
+$o_t$ can be represented as a multivariate time series  (Figs.~\ref{fig:cpd-panel},~\ref{fig:ts-patterns}), and $o_{t, w}$ can be plotted with parallel sets diagrams (Fig.~\ref{fig:survival}).
+These visualizations reveal uncertainty dynamics across tokens, showing how the outcome distribution can dramatically change over the course of text generation.
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=\textwidth]{bayes_cpd}
+
+\caption{
+\textbf{Uncertainty dynamics time series} \
+(Top) The outcome distribution $o_t$ is equivalent to a multivariate time series, where each possible outcome (e.g. \textcolor{Cyan}{\textit{King Charles}} or \textcolor{brickred}{\textit{Queen Elizabeth}}) can be plotted as a separate line. 
+To simplify our modeling, we convert $o_t$ into a univariate time series using a semantic drift transformation $y_t$.
+\textbf{Bayesian Change Point Detection model}. \ 
+(Bottom, Left) We use a Bayesian Change Point Detection (CPD) model to identify sudden shifts in $y_t$. This model fits $y_t$ by splitting it into $m$ segments at times $\tau_i$, and fitting separate linear models with parameters $\beta_i, \delta_i$ to each segment $i$.
+(Bottom, Right) Our CPD model uses Monte Carlo sampling to infer posterior distributions that help us interpret analysis results: $p(\tau = t \ | \ y)$, or how likely it is that a change $\tau$ happened at time $t$, and \ $p(m \ | \ y)$, or how many change points, if any, occurred in the time series.
+}
+\label{fig:cpd-intro}
+\end{figure}
+
+
+
+Next, in the following sections we describe methods for analyzing outcome distributions $o_t$ and $o_{t,w}$ to test for forking tokens. 
+We define a \textbf{forking token} $x_t$ as a token index $t$ or value $x_t = w$ which, if exchanged, leads to a very different outcome (or `path'). 
+In the case of $o_t$, a forking token index $t$ corresponds to an abrupt change in the time series $o_t$, i.e. where $o_{>t} \not\approx o_{<t}$. To identify these changes, we use Bayesian change point detection models, a class of statistical models that empirically test whether there are abrupt changes in a time series, and if so to identify the times $t$ when those changes occur.
+For $o_{t, w}$, a forking token value $x_t = w$ occurs when the outcome distribution for an alternate token $w$ deviates from the distribution for the base path token $w^*$ by at least $\epsilon$. To identify forking tokens in $o_{t, w}$, we use a discrete-time survival analysis where a hazard (i.e. non-survival) occurs when $\big [  o_{t, w}  \not\approx  o_{t, w^*} \big ]$ for some token $w$.
+
+
+
+
+
+\subsection{Bayesian Change Point Detection}  \label{sec:2-3}
+We now present a method for automatically identifying tokens where $o_t$ changes suddenly, and for statistically testing the hypothesis that such tokens exist.
+In simple terms, our goal is to test for whether there are indexes $t$ such that the outcome distribution changes substantially before and after $t$, i.e. $o_{>t} \not\approx  o_{<t}$.
+Change Point Detection (CPD) is an area of statistics that models time series data with abrupt changes to the line's intercept and/or slope.
+CPD models jointly infer what time $t$ a change occurs at, as well as trend parameters $\beta$ for time segments before and after the change.
+We suppose that there may be multiple forking tokens, or change points, in the outcome distribution $o_t(x^*)$ for a single sequence $x^*$. This leads us to use multiple CPD models, which assume there may be multiple change points. However, inference with multiple CPD models can be exponentially more expensive than with single CPD \citep{Fearnhead}. One solution to this complexity is using Bayesian models for efficient approximate inference.
+Since multiple CPD with multivariate time series (as in $o_t$) is a relatively young area of research \citep{cabrieto2017detecting} with limited available tooling, we convert $o_t$ into a univariate time series $y_t$ using a \textit{semantic drift} metric (Fig.~\ref{fig:cpd-intro}, Top), as in \citet{kulkarni2015statistically}. 
+Each time point in the univariate time series $y_t = d(o_0, o_t)$ is the distance between the initial outcome distribution $o_0$ and outcome distributions for subsequent time steps $o_t$, given an arbitrary distance metric $d$. In our experiments, we use $L_2$ distance for $d$.
+
+
+
+
+
+
+More specifically, a CPD model decomposes a time series $y$ into a set of $m$ segments.
+Each segment $i \in \{0 \ldots m\}$ is fit by a regression model with intercept (i.e. abrupt change) $\delta_i$ and slope $\beta_i$, applied to time steps $t$ between $\tau_{i-1}$ and $\tau_{i}$. 
+In a Bayesian CPD model, $p(\tau = t   | y)$ describes how likely it is that a change point $\tau$ occurred at each time $t$ in time series data $y$, and $p(m | y)$ describes belief in the number of change points $m$ in a series.
+The beginning and end of a sequence are treated as fixed change points (i.e. $\tau_0 = 0$ and $\tau_{m+1} = T$) which are excluded from analysis of $p(\tau = t \ | \ m)$ and $p(m \ | \ y)$.
+We test for statistically significant change points by comparing the hypothesis that there is no change point ($m = 0$) with the hypothesis that there is at least one ($m \geq 1$) \citep{2017surveycpd}. In Bayesian CPD, this entails model comparison between a model with no change points and a model with at least one change point. 
+We take a Bayes factor  $p(m \geq 1 | y)  \ / \  p(m = 0 | y)$ greater than 9 as supporting the hypothesis that there is at least 1 change point~\citep{kass1995bayes}~\footnote{9 is a typical threshold for Bayes factor significance testing, analogous to $\alpha=.05$ in frequentist statistics}.
+We use an extremely efficient open-source implementation of Bayesian CPD which utilizes Monte Carlo Gibbs sampling to infer posterior distributions $p(m \ | \ y)$ and $p(\tau = t | y)$ given a sequence $y$ \citep{Zhao_2019}.
+Further details of CPD model are provided in App.
+
+
+
+\subsection{Survival Analysis} \label{sec:2-4}
+We perform a survival analysis to estimate on how likely it is that text generation would be greatly impacted if a token in a base path $x^*_t = w^*$ were instead sampled as $w$. 
+This describes cases where an alternate token $w$ leads an LLM down a very different path from $x^*$, as in Fig~\ref{fig:survival} (Right). This forking may not appear as a stable change in $o_t (x^*)$ (Sec~\ref{sec:2-3}) since $w$ was not actually sampled and therefore does not impact $o_{>t} (x^*)$.
+We define the \textit{survival function} $S(t)$ as the probability that the base path ``survives'' sampling alternate tokens $w$ that would change the outcome distribution:
+{
+    \setlength{\abovedisplayskip}{0pt}
+    \setlength{\belowdisplayskip}{3pt}
+\begin{align}
+S(t)
+    &= 1 - \prod_{t' = 1}^{t} \mathbb{E}_w  \big [ o_{t', w}  \not\approx  o_{t', w^*}  \big ]   \\
+    &= 1 - \prod_{t' = 1}^{t} \sum_w p(x_{t'} = w | x^*_{<t'}) \  \mathbbm{1} \big [ d(o_{t', w},  o_{t', w^*}) > \epsilon \big  ]   \nonumber  
+\end{align}
+}
+$S(t)$ is a discrete time survival function $S(t) = 1 - \prod_{t'=1}^t h(t')$ where $h(t)$ is the probability that a failure (or \textit{hazard} $h$) occurs at time $t$. In our case, a failure is when an alternate token causes the outcome distribution to shift significantly from the greedy, i.e. $o_{t, w} \not\approx o_{t, w^*}$, which we estimate by testing whether the distance between outcome distributions $d(o_{t, w},  o_{t, w^*})$ is greater than some threshold $\epsilon$. 
+$d$ is an arbitrary distance metric and we use $L_2$ distance as $d$ in our experiments.
+For each $t$, we compute the hazard rate $h(t)$ as the sum of token logit probabilities $p(x_t = w | x^*_{<t})$ for all forking tokens $w$ (i.e. tokens where $d(o_{t, w},  o_{t, w^*}) > \epsilon$).
+
+ 
+
+
+\begin{figure}[t!]
+
+    \centering
+    ~
+    \begin{subfigure}{0.6\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{cpd-minimal_hotpot}  %{cpd-panel_gsm}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.35\textwidth}
+        \centering
+        \includegraphics[width=1.1\textwidth]{text-cps_hotpot}
+    \end{subfigure}
+    \caption{\textbf{The outcome distribution can collapse after a single step in chain-of-thought reasoning.} \ \ 
+    (Left, Top) The outcome distribution $o_t$ and (Left, Bottom) change point probabilities $p(\tau = t | y)$ for a single question from HotpotQA and a greedily decoded base path $x^*$.
+    (Right) Tokens in $x^*$, highlighted according to $p(\tau = t | y)$, where yellow indicates low probability of a change point, red indicates high probability; the initial prompt is shown above $x^*$ with no coloring.
+    We see striking uncertainty dynamics in $o_t$: the outcome distribution remains stable with the top single answer being \textit{Robin Tunney} (the correct answer) until the forking token $t=34$, when the distribution suddenly collapses to \textit{Mia Sara} (a hallucinated wrong answer).
+    }
+    
+    \label{fig:cpd-panel}
+
+    
+\end{figure}
+
+
+
+
+\section{Experiments}
+
+We analyzed 7 unique tasks, across 4 different categories representative of typical LLM use and evaluation: Symbolic Reasoning, Mathematical Reasoning, Complex Question Answering, and Story Generation. These categories demonstrate the broad utility of our approach for various applications of text generation.
+The first three categories typically benefit from Chain-of-Thought (CoT) reasoning, where an LLM explicitly lists each step of its reasoning before giving a final answer ~\citep{kojima2022large, wei2022chain}. This is appealing for our analysis since output text in CoT is more complex than a simple one-word answer, and so we may expect to see uncertainty dynamics in reasoning text. 
+The category of Story Generation demonstrates the applicability of our methods to open-ended LLM use cases, such as creative writing, where there is no ground truth `correct' answer.
+We have two tasks for each of the three CoT categories: one multiple choice dataset with a limited set of answers, and one dataset with free-text response answers. E.g. for Symbolic Reasoning, CoinFlip has two options for the answer (\textit{``Yes''} or \textit{``No''}), whereas LastLetter has no such constraint.
+
+We use a zero-shot CoT prompt as in ~\citet{kojima2022large} for the first 6 tasks. 
+CoinFlip~\citep{wei2022chain} is a very simple symbolic reasoning task with two responses: \textit{Yes} or \textit{No}.
+LastLetter~\citep{wei2022chain} is more complex symbolic reasoning task, prompting models to take the last letter of each of four names (e.g. \textit{`Forrest Juanito Allan Candice'}) and concatenate them (\textit{`tone'}). 
+AQuA~\citep{ling2017program} and GSM8k~\citep{cobbe2021training} test mathematical reasoning with relatively simple math word problems. AQuA is 4-option multiple choice format, whereas GSM8k is open ended. 
+MMLU~\citep{hendrycks2020measuring} complex question answering dataset of multiple choice questions spanning many domains and is used to test LM question-answering across a wide range of subjects. 
+HotpotQA~\citep{yang2018hotpotqa} is a complex question answering dataset of multi-hop reasoning questions which cannot be answered by a single memorized fact, but instead require chaining facts together.
+For our story generation task, we use the StoryCloze~\citep{mostafazadeh2017lsdsem} dataset, which was originally used for story understanding, and consists of short stories each with a valid ending sentence as well as an invalid ending. We modify StoryCloze for open-ended story generation, by prompting a model to generate a short story given only the first sentence of a scenario, with the constraint that the story must end with one of two provided endings.
+
+
+\begin{figure}[t!]
+
+\includegraphics[width=\linewidth]{ts-examples}
+ 
+\caption{\textbf{Further examples of forking tokens} \ \ 
+Two examples of outcome distributions $o_t(x^*)$ with forking tokens: a physics question from MMLU (Top; \textit{Correct Answer: B}) and a mathematical reasoning question from GSM8k (Bottom; \textit{Answer: 21}). 
+In MMLU-12, we see a similar pattern to Fig.~\ref{fig:cpd-panel}, where $o_t$ remains stable for most of the base path, before suddenly collapsing when the answer token is first specified \textit{``a = \ul{9}.8 m/s~\^{}~2''}. 
+In GSM8k-59 we see multiple forking tokens, both occurring at unexpected places. E.g. for the second change point, $o_{>t}$ changes depending on whether the token \textit{`\ul{\ ( \ }'} or \textit{`\ul{by}'} is sampled. We also note that, similar to Fig.~\ref{fig:cpd-panel}, at $t=0$ the most probable outcome is the correct answer (\textit{21}) but this answer disappears from $o_t$ part-way through.
+}
+
+\label{fig:ts-patterns}
+\end{figure}
+
+For our Forking Paths Analysis, we sample the $k \leq 10$ most probable alternate tokens $x_t = w$ such that the probability of each token $w$ is at least 5\%. When sampling batches at each token index and alternate token, we collect $S = 30$ text samples.
+For (1), we collect $N=300$ full text responses $x$ from the starting index $t=0$ and aggregating outcome responses $R$ into a histogram. For (2) we append a final answer prompt to $x^*$: \textit{``\ldots  Therefore, the answer is: \_''} and query the evaluated LLM, taking the logit probability of the first response token. (3) appends another prompt to the result of (2): \textit{``\ldots  Percent confidence in final answer: \_''}.
+
+We evaluated OpenAI's GPT-3.5 completion model (gpt-3.5-turbo-instruct-0914; \approxt \$2 per 1M tokens). For cost efficiency, we used Google's Gemini Flash (gemini-1.5-flash-001; \approxt \$.075 per 1M tokens) to extract final answer outcome representations $R$.
+We used slightly different prompts for $R$ for each task, for example with MMLU we requested the answer choice \textit{A/B/C/D} if it's provided. Additionally, we used simple answer cleansing functions written in Python (as in \citet{kojima2022large}) to extract minimal categorical answers from the $R$ model's responses. See App. 
+Our Forking Paths Analysis pipeline (Fig.~\ref{fig:outcome-dist}) is very costly in terms of the number of tokens required for inference (\approxt 1 million tokens per $x^*$, or \approxt \$2 USD for GPT-3.5). For this reason we analyzed a subset of $30$ data points for each task, \approxt \$500 in total.
+We randomly sampled question-answer pairs for all datasets. For GSM8k and MMLU, we used tinyBenchmarks~\citep{polo2024tinybenchmarks}, which are a subset of 100 examples where LLM performance on this subset is highly correlated with performance on the full dataset. For HotpotQA and AQuA we excluded questions and answers with string length outside the $[.1, .9]$ quantile range, and for HotpotQA we sampled \approxt 18 data points for each difficulty level (easy, medium, hard).
+
+
+
+
+
+
+
+
+
+\section{Results}
+
+
+
+
+\begin{figure}[t!]
+\centering
+
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=.9\textwidth]{cp-mini-tau}
+\end{subfigure}
+
+\caption{\textbf{Change points occur closer to the beginning of sequences for some tasks, and near the middle of sequences for others} \ \ 
+Each point represents the fraction of question-answer examples in a task where our change point model predicts one or more change points approximately at $t$, i.e. where $p(\tau = t | y)$ is above a threshold of $.7$. 
+In three tasks (AQuA, MMLU, and LastLetter) we find a large number of change points close to the end of responses, which may suggest patterns similar to MMLU-12 in  Fig.~\ref{fig:ts-patterns}. 
+}
+
+\label{fig:cpd-tasks}
+\end{figure}
+\subsection{Change Point Detection}
+
+In Fig.~\ref{fig:cpd-panel} we observe striking uncertainty dynamics in $o_t$ for HotpotQA (question 8076). The outcome distribution remains stable with the top single answer being \textit{Robin Tunney} (the correct answer) until the forking token $t=34$, when the distribution suddenly collapses to \textit{Mia Sara} (a wrong answer).
+This is precisely when the LLM answers the first question in its chain-of-thought: \textit{``First, we need to identify the American actress born on June 19, 1972 \ldots is \ul{Mia} Sara.''}.
+In reality, Mia Sara is an actress born on June 19 of a different year, 1967.
+Apparently the LLM was uncertain until it hallucinated a falsehood in its first reasoning step, and then it suddenly became certain that \textit{Mia Sara} was the answer.
+We also see another hallucinated falsehood in the second reasoning step (Mia was not in this film), except by this point the LLM has already decided what its final answer will be.
+In MMLU-12 we see a similar pattern (Fig.~\ref{fig:ts-patterns}, Top), where $o_t$ remains stable in relative uncertainty for a long period, before suddenly collapsing when the answer token is first specified \textit{``a = \ul{9}.8 m/s~\^{}~2''}. 
+Note that the equation in the prior sentence $\textit{``a = 6.67 \ldots''}$ evaluates to a different answer \textit{B) 8.9 m/s~\^{}~2}. Examining token logits we see that \textit{\ul{9}} had 54\% probability of being generated and \textit{\ul{8}} had 29\%.
+With GSM8k-59 we observe more complex uncertainty dynamics (Fig.~\ref{fig:ts-patterns}, Bottom) with multiple change points. 
+These forking tokens occur at unexpected, seemingly innocuous tokens: both are open parenthesis tokens which provide extra information not required for the final answer (i.e. \textit{non-essential clauses} such as \textit{`(kWh)'}). For the second forking token, \textit{` \ldots weekly consumption \ul{\ ( \ } \ldots'}, the top answer in $o_{>t}$ is \textit{`\$3,528'} if the token sampled is \textit{`\ul{ \ ( \ }'}, but changes to \textit{`\$504'}  if the token sampled is \textit{`\ul{by}'}. We also note that, similar to Fig.~\ref{fig:cpd-panel}, at $t=0$ the top probability answer is the correct answer (\textit{`21'}) but this answer disappears from $o_t$ part-way through $x^*$.
+Finally, in most cases where our model detects no change points, we observe time series where the LLM remains confident in a single outcome, with no notable uncertainty dynamics throughout text generation. 
+Visualizations for all examples $x^*$ and analyses in our dataset are available through an interactive dashboard online.~\footnote{Interactive dashboard: \url{https://forking-paths.streamlit.app/}}  Additional analyses are provided in App.
+
+
+
+We find additional patterns when aggregating CPD model inference results across tasks (Fig.~\ref{fig:cpd-tasks}, Tab.~\ref{tab:results}). 
+Different tasks have different numbers of change points $m$, as well as different patterns in common change times $\tau$.
+We find more change points in some tasks, such as GSM8k and LastLetter, than others, with the fewest change points in CoinFlip.
+In order to compare change point times $\tau$, we first normalize token index $t$ to the range $[0, 1]$. Then, for each bucket across $t$, we compute the fraction of question-answer examples $o_t(x^*)$ with change point probability $p(\tau = t | y)$ above some threshold.
+Under this analysis (Fig.~\ref{fig:cpd-tasks}, Left), we find change points at different times for different tasks. In three tasks (AQuA, MMLU, and LastLetter) we find a large number of change points close to the end of responses, which may suggest patterns similar to MMLU-12 (Fig.~\ref{fig:ts-patterns}, Top). 
+In LastLetter we find the most change points early in sequences, and in HotpotQA, GSM8k, and AQuA we find the majority of change points in the middle of sequences. These points may correspond to individual CoT reasoning steps, similar to the change point in HotpotQA-8076 (Fig.~\ref{fig:cpd-panel}).
+
+
+
+\subsection{Survival Analysis}
+
+Our survival analysis shows low survival rates for many sequences $x^*$, even with a large distance threshold $\epsilon = .6$ (Fig.~\ref{fig:survival}), using $L_2$ as the distance metric $d$. 
+To give an intuition for $\epsilon = .5$ with $d = L_2$: a change from $o_{t, w^*} = [.5, .5]$ to $o_{t, w} = [.85, .15]$ will have a distance of $< .5$.
+The hazard probability $h(t)$ for the sequence with $\epsilon = .6$, with sharper spikes (and corresponding drops in survival rate $S(t)$) at some tokens more than others. This shows that even though even when forking tokens $w$, which radically change the outcome distribution, have a relatively low probability, these chances can accumulate over the course of generating a sequence.
+Aggregating results across all experimental data $x^*$ (Fig.~\ref{fig:survival}, Right), we find that a majority of examples in our data have low survival rates at the end of the sequence ($S(T) < .2$) for all $\epsilon < .9$. 
+This suggests that text generation may have a low probability of surviving decoding without a major distribution shift, which would imply that single sample LLM uncertainty estimates may be highly unstable.
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{0.5\textwidth}
+        \includegraphics[width=\textwidth]{survival_examples}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=\textwidth]{forking_sankey}
+    \end{subfigure}
+\caption{\textbf{Text generation has a low probability of surviving decoding without a major distribution shift  } \ \ 
+(Top Left) 
+The hazard function $h(t)$ is the probability that $o_{t,w}$ will change significantly if a different token $w$ is sampled, and (Bottom Left) $S(t)$ measures the cumulative survival rate after many hazards.
+We see that in most cases, hazards slowly accumulate as $S(t)$ gradually decreases, but a few key tokens in GSM8k-59 and HotpotQA-8076 have large hazards corresponding to sharp drops in $S(t)$.
+We also see that the final survival rates $S(T)$ for all three examples are below 30\%. 
+(Right) $o_{t, w}$ visualized as parallel sets plots. We show distributions for two subsequent tokens $o_{t=34, w}$ and $o_{t=35, w}$, where different colors indicate different final answers.
+In this example, $t=34$ and $t=35$ are a step in a reasoning solution which eventually is used in the final answer (also see Fig.~\ref{fig:cpd-panel}).
+For $t=34$, we see that the next token being $\textit{\ul{Robin}}$ instead of $\textit{\ul{Mia}}$ will lead to completely different outcome distributions $o_{34, w = \textit{`Mia'}}$ and $o_{34, w = \textit{`Robin'}}$. 
+}
+
+\label{fig:survival}
+
+ 
+
+\end{figure}
+
+
+
+
+
+\begin{table}[t!]
+
+\centering
+
+\begin{tabular}{  l|c|c|c  } 
+    \qquad \qquad \textbf{Domain} 
+        & \textbf{Task}   
+        & \textbf{$m \geq 1$ Changes}
+        & \textbf{Mean $S(T)$} 
+\\   %  \textit{Avg. \# CPs}\\ 
+    \hline
+    \textit{Symbolic Reasoning}
+                & CoinFlip       & 0\%    &  .20   \\
+                & LastLetter     & 63\%   &  .30   \\   \hline   
+    \textit{Mathematical Reasoning}      
+                & AQuA           & 30\%   &  .33   \\
+                & GSM8k          & 27\%   &  .18   \\   \hline
+    \textit{Complex Question Answering}        
+                & MMLU           & 43\%   &  .13   \\
+                & HotpotQA       & 32\%   &  .26   \\   \hline
+    \textit{Story Generation}    
+                & StoryCloze$^*$   & 7\%   &  .27  
+\end{tabular}
+
+\caption{\textbf{Summary of results across all tasks} \ \  We used 7 tasks spanning 4 domains commonly used for LLM evaluation.
+For each task, we list results for both our Change Point Detection model and our Survival Analysis.
+For change points, we list the fraction of question/answer pairs in each dataset for which our model predicts at least 1 change point with 90\% confidence (i.e. the .1 quantile of $p(m | y)$).
+We then list the average survival rate at the end of each sequence $S(T)$, using a threshold $\epsilon = .6$. We find lower survival rates in GSM8k and MMLU.
+}
+\label{tab:results}
+\end{table}
+
+
+
+
+\section{Discussion}
+
+
+
+Text generation with LLMs can be viewed as a branching tree of possible paths, where each word choice determines what text will follow, akin to Borges' \textit{Garden of Forking Paths} and other choose-your-own-adventure stories \citep{borges1941garden, bottou2023borges, janus2021loom}.
+Many of these paths will follow similar trajectories and end in similar places, but some of them will hit forks which bifurcate into multiple distinct meanings. 
+Our results support the Forking Tokens Hypothesis by empirically demonstrating  forking tokens in a state-of-the-art LLM applied to various real world benchmarks, suggesting that LLMs are often just a single token away from producing a very different answer.
+Forking Paths Analysis reveals dynamics unseen by prior approaches to uncertainty estimation, for example patterns where uncertainty is stable until a forking token is reached, at which point the outcome distribution collapses into certainty in a single answer.
+Our results show how static estimates of uncertainty can be misleading, e.g. estimating \approxt 100\% confidence at the last token and \approxt 40\% confidence at the first token of the same sequence (Fig.~\ref{fig:cpd-panel}).
+
+
+
+
+
+
+Forking tokens might also have important implications for LLM evaluation and safety.
+If LLM behavior can change suddenly when even one token is sampled differently, this could impact user safety, e.g. if an LLM suddenly shifts to the wrong distribution such as producing hallucinations or harmful language \citep{anil2024many}. 
+Static safety evaluations may prove brittle when, in real world user interactions, users might accidentally or intentionally guide LLMs down dangerous paths.
+Static evaluations might be misleading measures of performance and alignment if LLMs have capabilities that emerge and then disappear over a single context window, or capabilities that remain dormant until a single token (or `path') triggers them \citep{waluigi2023, li2024glitch}.
+
+
+
+
+
+
+We see a number of promising avenues for future work.
+The most immediate directions would be further Forking Paths Analyses with different LLMs, including open-source, and new tasks. Our experiments use a second LLM as a one-hot feature extractor $R(\cdot)$, but more open-ended tasks could be analyzed using $R$ as a semantic vector embedding.
+A limitation of our approach is that it is very costly in the number of tokens sampled. More efficient sampling \citep{banga2008parameter} might be able to reduce the number of tokens needed, and it might even be possible to avoid sampling altogether if hidden activations can be used to predict forking.
+We also hope to further explore applications of Forking Paths Analysis, for example to improve process-level RL feedback \citep{lightman2023let} or to guide branching in inference-time tree search \citep{yao2024tree}.
+By studying the mechanisms of forking tokens, we might be able to better understand how LLMs represent uncertainty, or to steer models more effectively by patching activations at forking tokens \citep{fei2024nudging}.
+
+
+
+
+
+
+
+
+
+
+
+
+The Forking Tokens Hypothesis raises a number of important questions, including: why do forking tokens occur in LLM text generation? 
+One way to answer this question is with theories of In-Context Learning as Bayesian model selection \citep{xie2021explanation}. If this is the case, then we might expect sharp transitions in overall behavior when new data changes which latent model (i.e. `capability' or `concept') is the maximum a posteriori \citep{bigelow2023context}.
+Studying forking tokens may provide valuable insights into how model selection surfaces in LLMs operating in real-world domains.
+Another perspective on forking tokens is to consider whether humans might have similar phenomena.
+We might expect forking in human language comprehension, e.g. when you read the sentence \textit{``Billy woke up in a \_''}, the next word being either  \textit{\ul{hotel}} or \textit{\ul{hole}} should change your expectations of the following words. 
+In language production, however, a person who accidentally says the word \textit{``hole''} instead of \textit{``hotel''} is unlikely to then change their story to match \textit{``hole''}. An LLM, on the other hand, might do just that.
+One interpretation might be that people typically holding intents and plan responses to some degree before they speak, whereas LLMs truly decide what to say next on the fly. This may be a fundamental property of next-word prediction models, unless the model has a hidden state such as a hidden chain-of-thought \citep{openai2024o1}.
+Forking in human speech may be more common during certain kinds of creative dialog, e.g. when a person makes up a fictional story one sentence at a time, or when people think `out loud' or `step-by-step' ~\citep{lombrozo2024learning}.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\newpage
+
+

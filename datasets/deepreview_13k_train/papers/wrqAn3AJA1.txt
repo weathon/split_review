@@ -1,0 +1,341 @@
+\title{Everybody Needs a Little HELP: Explaining Graphs via Hierarchical Concepts}
+
+\begin{abstract}
+Graph neural networks (GNNs) have led to major breakthroughs in a variety of domains such as drug discovery, social network analysis, and travel time estimation. However, they lack interpretability which hinders human trust and thereby deployment to settings with high-stakes decisions. %
+A line of interpretable methods approach this by discovering a small set of relevant \textit{concepts} as subgraphs in the last GNN layer that together explain the prediction. This can yield oversimplified explanations, failing to explain the interaction between GNN layers. To address this oversight, we provide HELP (\textbf{H}ierarchical \textbf{E}xplainable \textbf{L}atent \textbf{P}ooling), a novel, inherently interpretable graph pooling approach that reveals how concepts from different GNN layers compose to new ones in later steps.
+HELP is more than 1-WL expressive and is the first non-spectral, end-to-end-learnable, hierarchical graph pooling method that can learn to pool a variable number of arbitrary connected components.
+We empirically demonstrate that it performs on-par with standard GCNs and popular pooling methods in terms of accuracy while yielding explanations that are aligned with expert knowledge in the domains of chemistry and social networks.
+In addition to a qualitative analysis, we employ concept completeness scores as well as concept \textit{conformity}, a novel metric to measure the noise in discovered concepts, quantitatively verifying that the discovered concepts are significantly easier to fully understand than those from previous work.
+Our work represents a first step towards an understanding of graph neural networks that goes beyond a set of concepts from the final layer and instead explains the complex interplay of concepts on different levels
+\end{abstract}
+
+\section{Introduction}
+
+
+Graph neural networks (GNNs) have recently enjoyed increasing popularity and have been successfully applied in a variety of domains, ranging from improved travel-time estimations \cite{derrow-pinionETAPredictionGraph2021} to the multi-billion dollar industry of \textit{de novo} drug design \cite{xiongGNNDrugDesign2021}.
+However, their application in safety-critical domains, such as healthcare, remains limited. Their lack of interpretability hinders human trust and thus limits their uptake in practice. Consequently, a variety of \textit{post-hoc} explainability methods have been proposed to allow insights into how and why GNNs produce certain predictions \cite{GNNExplainer, vuPGMExplainer2020, baldassarreExplainabilityTechniquesGraph2019}. Crucially, these methods are limited to finding simplified explanations of a complex model, without explicitly incentivizing the model to produce easily understandable predictions. A recent line of research \cite{ConceptEncoderModule, georgievAlgorithmicConceptBasedExplainable2022} therefore attempts to develop GNN-based approaches that are \textit{interpretable-by-design}. In particular, these methods are \textit{concept-based}---they explain their predictions in terms of high-level \textit{concepts} (e.g., recognizable forms such as an ``eye'' or ``mouth'' in an image, or functional groups in a molecular graph) rather than raw input features (pixels for images, single nodes with their full embeddings for graphs). \looseness=-1
+\begin{figure}[t]
+    \centering
+     \begin{subfigure}[b]{0.35\linewidth}
+         \centering
+        \includegraphics[width=\linewidth]{res/chemistry_example_material}
+    \caption{}
+    \label{fig:chemsitry-example}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.6\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{res/method_full}
+         \caption{}
+         \label{fig:poolblock-overview}
+     \end{subfigure}
+    \caption{\textbf{(a) Example hierarchy in a molecule.} Meaningful groups of atoms are pooled into a single node representing this \textit{functional group}. \textbf{(b)} \textbf{Overview of HELP}. In each pooling step, we apply a number of GNN layers and cluster the resulting node embeddings. Connected components of nodes that were mapped to the same cluster are merged where the new node's embedding is given as the average over the embeddings of all merged nodes. Colors represent node embeddings. Notably, the clustering is always performed over the embeddings of multiple graphs (see Section \ref{sec:alg-clustering}).}
+\end{figure}
+
+However, while relevant, these methods---post-hoc or not---suffer from a known problem in interpretability: in order to be understood by humans, the explanations tend to be overly simplistic. In this work, rather than just discovering a set of concepts, we take a step towards understanding how concepts from earlier layers compose to new ones later on.
+Take, for instance, the graph representation of a molecule (Figure \ref{fig:chemsitry-example}). To predict certain properties, knowing all atoms might not be relevant. Instead, the atoms make up relevant subgraphs---so-called \textit{functional groups}---that are sufficient for the final prediction. A similar property holds for social networks. These often consist of a set of highly connected \textit{communities}. In many practical tasks, that rely on analyzing large graphs with many outliers, it is often sufficient to reason about the type of these communities or functional groups and the connections between them, rather than reason about all nodes.
+
+In this paper, we provide \methodname, a \textbf{H}ierarchical \textbf{E}xplainable \textbf{L}atent \textbf{P}ooling method. HELP allows for analysis at different levels of the hierarchical structure of graphs, by repeatedly pooling the input graph to a coarser representation (Figure \ref{fig:chemsitry-example}). More specifically, at each step it executes multiple GNN layers and then merges all connected components belonging to the same cluster in the space of node embeddings. This approach is \textit{interpretable-by-design}. By analyzing which nodes are pooled together, we can identify the relevant substructures for the model's decision. When applied to domains that are less studied, this could not only help to understand the behavior of the model, but by doing so it can lead to new insights about the task (and domain) itself---just like chess players learn new moves from AlphaGo \cite{willinghamAIRsquoVictories}.
+
+The contributions of this work are twofold:
+\begin{enumerate}
+    \item \textbf{HELP}: a novel hierarchical pooling procedure. This is the first non-spectral method that can learn to partition graphs into a variable number of arbitrary connected components end-to-end based on graph structure and features. In addition to being interpretable by design, our technique preserves sparsity (i.e. does not yield fully connected graphs after pooling), increases the receptive field beyond the number of GNN layers and is more expressive than message-passing GNNs.
+    \item \textbf{Concept conformity}: a novel metric to measure the level of noise in a discovered concept.
+\end{enumerate}
+Using this new conformity metric along with \textit{concept completeness} and comparing discovered concepts against expert domain knowledge in a qualitative evaluation, we demonstrate that the explanations discovered by HELP yield deeper insights while being easier to understand than those from previous work.\looseness=-1
+
+
+
+\section{Graph Neural Networks}
+
+
+GNNs are typically formulated in terms of \textit{message passing} \cite{battagliaRelationalInductiveBiases2018}. The aim is to update the embedding of each node based on the set of \textit{messages} which are computed between the node and each of its neighbors. Formally, take a graph $\mathcal G=(V,E,X)$, where $E\subseteq V^2$ is the set of edges and without loss of generality we assume the nodes $V=[|V|]$ are identified by the natural numbers $1$ to $|V|$. $X:=(\vx_1^0,\dots,\vx_{|V|}^0)$ denote node-level input features $\vx_v^0\in\mathbb{R}^{d_\change{0}}$. Each layer $\ell+1$ then computes new node features
+\begin{equation}
+    \label{eq:gnn-msg}
+    \textbf{x}_v^{\ell+1}=\phi_{\ell+1}\left(\textbf{x}_v^\ell,\bigoplus_{u\in N(v)}\psi_{\ell+1}\left(\textbf{x}_u^{\ell},\textbf{x}_v^{\ell}\right)\right),
+\end{equation}
+where $\phi_\ell,\psi_\ell$ represent learnable functions, $N(v)$ denotes the \textit{neighbors} of node $v$ and $\oplus$ is some permutation-invariant function like the sum.
+In this work, we focus on making one prediction for the entire graph. This can be achieved by first applying the permutation invariant function $\textsc{GlobalPool}$, to pool the embeddings of all nodes in the last layer $L$, and then computing the final output $f(\mathcal G)$ as a learnable function $g$ of  $f(\mathcal G)=g\left(\textsc{GlobalPool}(\textsc{GNN}(\mathcal G))\right)$, where $\textsc{GNN}(\mathcal G):=\left(\vx_1^L,\dots,\vx_{|V|}^L\right)$.
+
+
+
+\section{Hierarchical Explainable Latent Pooling}
+
+
+The underlying idea of our approach is applying a series of \textit{pool blocks} to the input graph, progressively creating coarser versions (Algorithm \ref{alg:help} and Figure \ref{fig:poolblock-overview}). Each pool block first applies multiple GNN layers. We then cluster the generated node embeddings, merging all connected components of nodes with the same cluster assignment. Only merging nodes in a connected component allows us to maintain the high-level graph structure. For example, if we have the same functional group at different positions in a molecule, we want to merge each occurrence into one node but not both into the same.
+
+
+\begin{algorithm}
+    \caption{Inference for one batch using HELP. The gray area represents a single pooling step as visualized in Figure \ref{fig:poolblock-overview}. Note that for notational convenience we simply assume the node ids to be unique among graphs (e.g. $V_1\ni1\neq1\in V_2$) rather than defining the node ids as tuples $(j,k)\in V_j$.}
+    \label{alg:help}
+    \begin{algorithmic}
+        \Require GNNs $\textsc{GNN}_s, s\in[\nblocks+1]$\Comment{\change{A GNN for each of $\nblocks$ pool block (plus a final one)}}
+        \Require numbers of clusters $k_s$, $s\in[\nblocks]$
+        \Require MLP $g$
+        \Require data batch $\{(V_i,E_i,X_i)\mid i\in[\batchsize]\}$ \Comment{\change{Where $\batchsize$ denote the batch size}}
+            \For{$s=1,\dots,\nblocks$}
+            \Comment{Iterate over all pool blocks}
+                \For{$i\in[b]$}
+                    \State $X_i\gets\textsc{GNN}_s(V_i, E_i, X_i)$
+                \EndFor
+                \State \tikzmark{startpool}\change{$c\gets\textsc{KMeans}(k_s, \{(V_i,X_i)_{i\in[b]}\})$}
+                \Comment{cluster ids $\change{c:\left(\bigcup_{i\in[b]}V_i\right)\rightarrow[k_s]}$}
+                \For{$i\in[b]$}
+                    \State $q\gets\textsc{ConComp}(\{(u,v)\in E_i\mid \change{c(u)=c(v)}\})$
+                    \Comment{connected comp. ids $q:V_i\rightarrow\mathbb{N}$}\tikzmark{endpool}
+                    \State $V_i\gets[\max_{v\in V_i}\{q(v)\}]$
+                    \State $X_i\gets\left(\frac{1}{|q^{-1}(1)|}\sum_{v\in q^{-1}(1)}\vx_v,\dots,\frac{1}{|q^{-1}(|V_i|)|}\sum_{v\in q^{-1}(|V_i|)}\vx_v\right)$
+                    \State $E_i\gets\{(q(u),q(v))\mid(u,v)\in E_i\}$
+                \EndFor
+            \EndFor
+            \For{$i\in[b]$}
+                    \State $X_i\gets\textsc{GNN}_{\nblocks+1}(V_i, E_i, X_i)$
+                \EndFor
+            \State \Return $\left(g\left(\textsc{GlobalPool}(X_1)\right),\dots,g\left(\textsc{GlobalPool}(X_b)\right)\right)$
+    \end{algorithmic}
+\end{algorithm}
+
+The underlying idea of our approach is applying a series of \textit{pool blocks} to the input graph, progressively creating coarser versions (Algorithm \ref{alg:help} and Figure \ref{fig:poolblock-overview}). Each pool block first applies multiple GNN layers. We then cluster the generated node embeddings, merging all connected components of nodes with the same cluster assignment. Only merging nodes in a connected component allows us to maintain the high-level graph structure. For example, if we have the same functional group at different positions in a molecule, we want to merge each occurrence into one node but not both into the same.\looseness=-1
+
+\subsection{Clustering}
+\label{sec:alg-clustering}
+
+For the clustering, we choose k-means using Lloyds algorithm for two reasons. Firstly, it is comparatively cheap to compute, which is crucial as it needs to be calculated many times during training. Secondly, it proved itself to give the best concepts when clustering node embeddings in prior work \cite{GCExplainer}. %
+Using k-means assumes we know the exact number of concepts in advance. While this is a hyperparameter we need to tune, in practice, our method is not overly sensitive to it as long as we slightly overestimate. This is because required concepts can often be split up into more fine-grained ones, even if their distinction is not relevant for the final prediction. For instance, a house motif with one or two neighbors could be mapped to different concepts even though the same might be sufficient for the final classification. Similarly, in computer vision, this would be like mapping blue and green eyes to different concepts even though that information is not necessary to detect a face.
+Nevertheless, it is important to emphasize that even with a fixed number of clusters, we can still learn variable size graphs based on structure and node features. On the one hand, the number of pooled nodes can be lower than the number of concepts as clustering is performed over multiple graphs and some of them might only have nodes in some of the clusters. On the other hand, a pooled graph can contain more nodes than the number of concepts because the same concept can be mapped to multiple new nodes if they are disconnected in the graph.
+In Algorithm \ref{alg:help}, we directly apply k-means clustering in the pooling step of each batch. However, this poses one important challenge: certain concepts might not be present in a particular batch. In this case, assuming the same number of clusters would lead to splitting up clusters that were combined in other batches. However, whereas the overall number of concepts may vary as described in the paragraph above, it is crucial that their meaning remains the same between batches. Otherwise, some motifs could sometimes be split up into multiple nodes and sometimes be merged into one. This creates a moving target making learning significantly harder for the subsequent GNN layers.
+\paragraph{Global Clustering}
+\label{ssec:alg-global-clustering}
+One way to alleviate this issue would be storing the embeddings of each batch over the whole epoch, then calculating the clustering based on all embeddings and keeping the centroids fixed until the next epoch starts and the process can be repeated. However, this creates a moving target where the outcome of all batches depends on the batches of the last epoch. When the epoch ends, there is a sudden jump in behavior.
+
+\paragraph{Merging Clusters}
+\label{sssec:alg-mergin-clusters}
+We therefore opt for merging centroids below a certain distance threshold. The underlying idea is that if some concepts are missing, existing clusters will be split up as described above. However, we would still expect the resulting centroids in the same cluster to be relatively close to each other and therefore hope we could merge them with the right threshold, eliminating the impact of the missing concept. An important remark is that the scale of the embeddings varies significantly during training. Thus, we make our approach approximately \textit{scale-invariant} by giving the distance threshold as a percentage of the distance between the two farthest centroids. In Algorithm \ref{alg:help}, this could be incorporated by modifying the \textsc{KMeans} procedure accordingly.
+\conferencenote{
+note that the regularization induced by the stochasticity of clustering could even have a positive effect, similar to the perturbation based methods for gradient smoothing we describe in the next section
+}
+\subsection{Gradient Flow}
+The method described so far has clearly defined \change{gradients from the inputs to the final predictions, which is required for backpropagation. This is, because} the new node embeddings are always a scaled sum of the previous node embeddings \change{that were} pooled together. However, one may argue that these gradients do not describe change in the ``direction" of the clustering itself, i.e., how the loss would change if an additional node was considered part of the same cluster or one of the current nodes was no longer considered part of it. \change{In Section \ref{ssec:ablation}, we} therefore also evaluate using a Monte Carlo estimate of a smoothed loss function instead. In particular, we add small random perturbations to all node embeddings in each sample. Then, we find a hyperplane in the loss function that goes through all of these points and use its gradient for updating the weights. 
+Smoothing the discontinuities that exist wherever changing a node embedding would lead to a different clustering allows us to explicitly optimize the clustering rather than just the embeddings for the current clustering. 
+\nolinebreak
+
+
+\section{Experimental design}
+
+\label{sec:eval-meth}
+\subsection{Datasets}
+\label{ssec:datasets}
+\paragraph{Synthetic Datasets}
+\label{sssec:dataset-hierarchical}
+As commonly used synthetic datasets for explainability like BA-Shapes and BA-Community \cite{GNNExplainer} are not designed for graph-level predictions or to contain intuitive hierarchies, we propose a \textit{Synthetic Hierarchical} dataset. 
+Graphs are constructed from multiple \textit{low-level motifs} (e.g., a triangle) that are each interpreted as a single node and separated by \textit{intermediate nodes} of a different color to make up a \textit{high-level motif} (see Figure \ref{fig:hierarchical-dataset-example}). The goal is to predict the high-level motif along with the set of low-level motifs. Additionally, we propose a \textit{Synthetic Expressivity} dataset %
+where the goal is to predict if the graph consists of one or two circles. This cannot be determined by 1-WL expressive methods like message-passing GNNs \cite{xuHowPowerfulAreGNNs2019}. %
+
+\paragraph{Common Benchmarks}
+\label{sssec:dataset-others}
+In addition to the synthetic datasets above, we evaluate our approach on three real-world datasets. In REDDIT-BINARY \cite{IMDB-COLLAB-REDDIT-DeepGraphKernels}, each input graph corresponds to a thread on the social network Reddit. Nodes do not have features and represent users whereas an edge between two users implies that one of them replied to the other. The goal is to classify whether a thread is question-answer-based or discussion-based. For the other two, Mutagenicity \cite{mutagenicity} and BBBP \cite{martinsBBBP2012}, the inputs are graph representations of molecules. The prediction target is a binary classification per graph in both datasets---namely, whether the molecule is mutagenic in the case of Mutagenicity and whether it can penetrate the blood brain barrier in the case of BBBP.
+
+\subsection{Evaluation metrics}
+\paragraph{Concept Completeness}
+\label{ssec:our-completeness}
+\textcite{yehCompletenessawareConceptBasedExplanations2020} aims to determine the expressiveness of the discovered concepts for the given goal. 
+It does so by training a model to predict the target only from the discrete set of concepts. The accuracy this model can reach is called \textit{completeness}. 
+\citeauthor{GCExplainer} apply this to graphs by training a decision tree to predict a node's classification from the I.D. of the concept it was mapped to. For the graph classification case, they still aim to predict the graph's class from a single node and take the average accuracy over all nodes of the graph. %
+As the combination of concepts in a graph can be highly relevant, we propose to predict it's class from the multiset of all concepts rather than predicting it for each concept separately. This also yields decision trees explaining how concepts combine to a final prediction. To account for the hierarchies discovered by our method, we compute the completeness after each pooling step. 
+
+\paragraph{Concept Conformity}
+\label{ssec:our-purity}
+The second desired property of concepts is that they are easy to understand with as few as possible outliers. \textcite{GCExplainer, ConceptEncoderModule} measure this in terms of \textit{purity}. Each concept is represented by the most frequent $k$-hop neighborhood of nodes mapped to it and the purity is given by the average graph edit distance between this representation and the $k$-hop neighborhood of a node mapped to the concept.
+
+As an alternative, we propose to measure \textit{concept conformity}. Intuitively, we would like each concept to contain only a small set of subgraphs, all of which appear frequently enough to be relevant for the concept. Other subgraphs, that only occur rarely could be considered noise that makes the concept impure (see Figure \ref{fig:hierarch-counts-excerpt} for an example). We therefore define the conformity of a concept in a given pooling layer as the percentage of subgraphs that make up at least a fraction $t$ of the overall subgraphs. An empty concept has the perfect conformity of 100\%. Formally, this is given by\conferencenote{Actually, I might calculate the first case as 0 currently, check again}
+\begin{equation}
+    \pur(c)=
+    \frac{1}{o_c}\sum_{j=1}^\nsubgraphs o_c^{(j)}\change{\ind_{[to_c,\infty)}(o_c^{(j)})}
+\end{equation}
+where $\nsubgraphs$ denotes the number of pairwise non-isomorphic subgraphs that got pooled together, $o^{(j)}_c$ the number of times that a subgraph isomorphic to $j\in[\nsubgraphs]$ was mapped to concept $c\in[\nclusters]$ and $o_c:=\sum_{j=1}^\nsubgraphs o_c^{(j)}$ the the total number of subgraphs that were mapped to cluster $c$. Note that we leave out the dependence of all variables on the pooling step to avoid unnecessarily convoluted notation. The conformity of a layer is then given as the average conformity over all non-empty ($o_c\neq0$) concepts in that layer. An obvious drawback of this definition is that it requires choosing the threshold $t$ which we define as $t:=10\%$ in our case.
+
+This definition has three major advantages over concept purity.}, we simply count the number of nonisomorphic subgraphs mapped to the same concept and no longer rely on the graph edit distance. Note that even a graph edit distance of one could easily make the difference between two functional groups with vastly different impact while other concepts might have many unimportant nodes in the $L$-hop neighborhood despite all of them representing the same concept.
+Additionally, we take into account discrete node features (like atom type), as, for example, a chain of three carbon atoms should not be considered the same as an $\text{NO}_2$ group. For all pooling steps after the first one, we use the concept I.D. instead.
+Finally, concept purity assumes that only a single subgraph should be mapped to each concept. However, in practice there might be different substructures that have the same meaning for the final prediction. For instance, for many molecular prediction tasks the length of a chain of carbon atoms might be close to irrelevant for the predicted property. Consequently, mapping these subgraphs to the same concept would be desirable as it gives us insights into the dynamics of the domain while decreasing the number of concepts we need to interpret.
+
+
+
+
+
+\section{Results \& Discussion}
+
+\label{sec:experiments}
+
+We begin by demonstrating that HELP performs as well as DiffPool \cite{DiffPool}, ASAP \cite{ranjanASAPAdaptiveStructure2020} and a standard GCN \cite{GCN} in terms of accuracy while being more than 1-WL expressive. At the same time, it outperforms GCExplainer \cite{GCExplainer} and a definition of concepts in DiffPool in terms of concept conformity and completeness.
+This quantitative evaluation is complemented by a qualitative assessment in which we first analyze some general observations regarding the composition of concept hierarchies in the example of our Synthetic Hierarchical dataset. We then identify concepts discovered in BBBP, Mutagenicity and REDDIT-BINARY which align with expert domain knowledge. 
+Finally, we conduct an ablation to show that our version of HELP performs on-par with more computationally expensive variations using global clustering or hyperplane gradient approximation.
+\subsection{Quantitative Analysis}
+\label{ssec:res-quant}
+
+\afterpage{
+\begin{table}
+\arrayrulewidth=1pt
+    \centering
+    \caption{\textbf{Test accuracy, completeness and conformity scores in comparison to other methods.} All values are given as mean (in percent) and standard deviation over three models with different seeds. As conformity and completeness should only be viewed together, we underline where there average is highest. We account for the stochasticity of decision trees by calculating completeness scores three times per model. For brevity we only report conformity and completeness scores after the first pooling layer for HELP and DiffPool, all values can be found in Tables \ref{tab:purity-comparison} and \ref{tab:comparison-completeness}.}
+    \label{tab:comparison-accuracy}
+    \setlength{\tabcolsep}{2pt}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{laaacccaaacccb}
+    \toprule
+    & \multicolumn{3}{c}{\cellcolor{TableGray1}\textbf{HELP} (Ours)} & \multicolumn{3}{c}{\textbf{DiffPool}} & \multicolumn{3}{c}{\cellcolor{TableGray1}\textbf{ASAP}} & \textbf{GCN} & \multicolumn{2}{c}{\textbf{( + GCExpl.)}} & \textbf{Feature}\\
+    & Acc. & Comp. & Conf. & Acc. & Comp. & Conf. & Acc. & Comp. & Conf. & Acc. & Comp. & Conf. & \textbf{Comp.}\\
+    \midrule
+    \textbf{Synth. Hier.} & \confint{99.9}{0.2} & \confint[b]{100.0}{0.0} & \confint[b]{99.8}{0.4} & \confint[b]{100.0}{0.0} & \confint{27.0}{0.0} & \confint{0.0}{0.0} & \confint{96.9}{4.8} & n/a & n/a & \confint[b]{100.0}{0.0} & \confint[b]{100.0}{0.0} & \confint{16.8}{1.8} & \confint{46.9}{0.0}  \\
+    \hhline{~>{\arrayrulecolor{TableGray1}}->{\arrayrulecolor{black}}--~~~>{\arrayrulecolor{TableGray1}}---~~~>{\arrayrulecolor{TableGray2}}-}
+    \textbf{Synth. Exp.} & \confint[b]{100.0}{0.0} & \confint{52.3}{0.0} & \confint{0.0}{0.0} & \confint{53.5}{0.0} & \confint[b]{53.5}{0.0} & \confint{0.0}{0.0} & \confint{93.9}{0.2} & n/a & n/a & \confint{53.5}{0.0} & \confint[b]{53.5}{0.0}\vphantom{\_}\vphantom{\underline{abcdef}} & \confint[b]{74.4}{0.0} & \confint{53.5}{0.0} \\
+    \hhline{~>{\arrayrulecolor{TableGray1}}---~~~>{\arrayrulecolor{TableGray1}}---~>{\arrayrulecolor{black}}-->{\arrayrulecolor{TableGray2}}-}
+    \textbf{Mutag.} & \confint{77.0}{2.3} & \confint{73.7}{2.7} & \confint[b]{83.6}{0.3} & \confint{78.7}{0.6} & \confint{53.6}{0.0} & \confint{42.9}{0.0} & \confint{76.2}{1.7} & n/a & n/a & \confint[b]{80.5}{0.7}  & \confint[b]{77.5}{2.4} & \confint{16.5}{10.1} & \confint{62.1}{0.7}\\
+    \hhline{~>{\arrayrulecolor{TableGray1}}->{\arrayrulecolor{black}}--~~~>{\arrayrulecolor{TableGray1}}---~~~>{\arrayrulecolor{TableGray2}}-}
+    \textbf{BBBP} & \confint{85.0}{1.6} & \confint{80.8}{1.4} & \confint[b]{84.8}{1.4} & \confint{82.0}{5.6} & \confint{77.1}{0.4} & \confint{0.0}{0.0} & \confint[b]{85.2}{1.5} & n/a & n/a & \confint{84.9}{3.1} & \confint[b]{86.0}{1.6} & \confint{5.8}{6.0} & \confint{79.4}{0.9} \\
+    \hhline{~>{\arrayrulecolor{TableGray1}}->{\arrayrulecolor{black}}--~~~>{\arrayrulecolor{TableGray1}}---~~~>{\arrayrulecolor{TableGray2}}->{\arrayrulecolor{black}}}
+    \textbf{REDDIT-BIN}\protect\footnotemark & \confint{88.7}{2.2} & infeas. & \confint[b]{96.2}{0.4} & \confint[b]{93.9}{0.7} & infeas. & \confint{93.0}{2.6} & infeas. & n/a & n/a & \confint{89.1}{0.9} & infeas. & infeas. & infeas.\\
+    
+    \bottomrule                    
+    \end{tabular}}
+\end{table}
+\footnotetext{
+For computational feasibility we only use 50\% of the test set for conformity scores. ASAP could not be run in the given configuration as even small batch sizes did not fit into 80GB of GPU memory.
+}} 
+
+We start by comparing HELP to the simple GNN baseline GCN \cite{GCN} along with two popular pooling approaches: DiffPool \cite{DiffPool} and ASAP \cite{ranjanASAPAdaptiveStructure2020}. For the rest of this section, we will focus on the other datasets.
+
+ %
+While this implies on-par performance with previous methods, the primary contribution of HELP is its explainability. Since our technique is the first to extract hierarchical concepts, we compare it to the overall concepts discovered by the \textit{post-hoc} method GCExplainer on our GCN baseline. Additionally, we extract concepts from the hierarchical pooling method DiffPool by defining the concept of each node as the new node it got pooled to with the highest weight. HELP significantly outperforms both of those baselines in terms of concept conformity. The only exception is our Synthetic Expressivity dataset. However, note that neither of them is able to solve this benchmark, rendering the discovered concepts meaningless. Additionally, while the conformity of 0 and a completeness close to the probability of the most likely class may seem like a negative result at the first glance, note that this synthetic dataset is purposefully designed in a way that any connected component of nodes has the same meaning.
+
+Whereas DiffPool achieves significantly lower completeness, the slightly higher scores of GCExplainer can be attributed to the fact that the concepts are calculated for the last GCN layer whereas for the hierarchical methods, the reported concepts are only those after the first pool block. These will be combined to more meaningful concepts in the subsequent layers. On the other hand, the conformity scores of GCExplainer are significantly lower.
+Figure \ref{fig:hierarch-counts-excerpt} reveals how profound the impact of this is for explainability. While the concepts discovered by GCExplainer are slightly more predictive of the final outcome, they are significantly harder to understand.
+
+
+\textbf{Feature completeness}
+Whereas previous work in explainable GNNs focused only on the last layer, our hierarchical analysis after each pooling block naturally extends to the question: What is the completeness of the \textit{input} concepts (i.e., the set of node features without any graph information)? We report these \textit{feature completeness} scores in Table \ref{tab:comparison-accuracy} and argue that they should be reported as an important baseline when using concept completeness scores on graphs.
+For datasets like BBBP where the node features alone already determine the outcome with high accuracy, methods like GCExplainer, which give one concept per node, might be of limited benefit. Note that HELP yields less concepts than nodes which means that the individual concepts are more meaningful than the raw input vectors, even with comparable completeness scores.
+
+
+\conferencenote{Run with GIN as ablation and explain that it might perform worse because it is too powerful which makes the initial clustering worse}
+
+\conferencenote{For the conference paper we could also evaluate interventions}
+
+\subsection{Qualitative Analysis}
+\label{sec:res-qual}
+
+\paragraph{General observations}
+Since human understanding is a highly subjective matter, metrics can only yield limited insights into the usefulness of discovered concepts and a qualitative analysis is crucial. We start with some general observations using examples from our Synthetic Hierarchical dataset depicted in Figure \ref{fig:hierarch-counts-excerpt}. Firstly, we note that the same subgraph can be mapped to different concepts if the impact on the outcome is different. For instance, bodies of low-level pentagons are mapped to different concepts depending on their degree which impacts the class. 
+Secondly, while many concepts only have one meaning, some are better understood when interpreting them as representing \textit{either} the first subgraph \textit{or} the second where both have the same impact on the prediction or at least determine it in combination with the other concepts that can occur with it. For example, in our Synthetic Hierarchical dataset the completeness score of 100\% implies that this must hold despite ``center of house'' and ``body of deg 3 pentagon'' intuitively looking unrelated.
+Finally, concepts in later pooling steps can be more specific (e.g., splitting up center of house into centers of deg 2 and deg 3 houses), or more general (e.g., combining different concepts into "at least 2 neighboring houses"). \looseness=-1
+
+
+
+
+
+
+
+
+\begin{figure}[h!]
+    \centering
+     \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+        \includegraphics[width=\linewidth]{res/hierarch_counts_0_excerpt}
+    \caption{HELP Pool Block 1}
+    \label{fig:hierarch-counts-excerpt-1}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{res/hierarch_counts_1_excerpt}
+         \caption{HELP Pool Block 2}
+         \label{fig:hierarch-counts-excerpt-2}
+     \end{subfigure}
+     \begin{subfigure}[b]{\linewidth}
+         \centering
+         \includegraphics[width=0.5\linewidth]{res/hierarch_counts_kmeans_excerpt}
+         \caption{GCExplainer}
+         \label{fig:hierarch-counts-excerpt-gcexplainer}
+     \end{subfigure}
+\caption{\textbf{Excerpt of concepts found in our hierarchical dataset and which pooled subgraphs were assigned to them}. Each bar of one color shows a set of isomorphic subgraphs mapped to a concept. The bars contain random example $L$-hop neighborhoods (transparent) of the pooled subgraph (solid). The node color represents the features. By using the number of subgraphs rather the number of nodes (x-axis), these plots illustrate the intuition of concept conformity, where any colored parts that make up less than $10\%$ of the concept's total bar are considered noise.%
+    }
+    \label{fig:hierarch-counts-excerpt}
+\end{figure}
+\paragraph{Domain-specific concepts}
+
+For \textit{Mutagenicity} (Figure \ref{fig:mutag-counts-1}), we find that concept 1 represents the $\text{NO}_2$ group and concept 4 represents aromatic rings---both of which are known to have a strong impact on the mutagenicity of a molecule \cite{mutagenicity}. Additionally, we identify concepts for the common hydroxy group (14) and for most likely irrelevant hydrogen atoms (16).
+Important concepts discovered in \textit{BBBP} (Figure \ref{fig:BBBP-counts-1}) include aromatic rings (3), oxygen atoms (9), nitrogen atoms (2, 4, 7) and carbon atoms close to them (1, 12, 13). All of these strongly influence blood-brain-barrier penetration \cite{pajouheshMedicinalChemicalProperties2005, heImprovementsPenetratingBloodBrain2018}.
+As expected \cite{GNNExplainer}, the concepts discovered for \textit{REDDIT-BINARY} (Figure \ref{fig:redditbin-counts-1}) contain both, tree-like structures with few neighbors, indicating a discussion between a number of users (e.g., 1, 5, 14 and 17) and structure with one central user to whom many others reply, indicating a question-answer based thread (e.g., 7, 11, 12 and 18). \looseness=-1
+
+\subsection{Ablation}
+\label{ssec:ablation}
+\begin{table}
+\arrayrulewidth=1pt
+    \centering
+    \caption{\textbf{Test accuracy and completeness scores of ablations.} Reported as in Table \ref{tab:comparison-accuracy}.}
+	\label{tab:ablation-accuracy-completeness}
+    \setlength{\tabcolsep}{2pt}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{laaacccaaa}
+    \toprule
+    & \multicolumn{3}{c}{\cellcolor{TableGray1}\textbf{Baseline}} & \multicolumn{3}{c}{\textbf{Global Clustering}} & \multicolumn{3}{c}{\cellcolor{TableGray1}\textbf{Hyperplane}} \\
+    & Acc. & Comp. & Conf. & Acc. & Comp. & Conf. & Acc. & Comp. & Conf. \\
+    \midrule
+    \textbf{Synth. Hier.} & \confint[b]{99.9}{0.2} & \confint[b]{100.0}{0.0} & \confint{99.8}{0.4} & \confint{99.6}{0.7} & \confint[b]{100.0}{0.0} & \confint[b]{100.0}{0.0} & \confint{97.9}{2.7} & \confint[b]{100.0}{0.0} & \confint[b]{100.0}{0.0}  \\
+    \hhline{~>{\arrayrulecolor{TableGray1}}---~>{\arrayrulecolor{black}}-->{\arrayrulecolor{TableGray1}}---}
+    \textbf{Mutag.} & \confint{77.0}{2.3} & \confint{73.7}{2.7} &  \confint{83.6}{0.3} & \confint[b]{78.7}{2.0} & \confint[b]{74.4}{1.4} & \confint[b]{84.2}{1.7} & \confint{78.0}{0.9} & \confint{72.8}{1.4} &  \confint{83.0}{1.2} \\
+    \hhline{~>{\arrayrulecolor{TableGray1}}---~>{\arrayrulecolor{black}}-->{\arrayrulecolor{TableGray1}}---}
+    \textbf{BBBP} & \confint{85.0}{1.6} & \confint{80.8}{1.4} & \confint[b]{84.8}{1.4} & \confint[b]{86.2}{2.2} & \confint[b]{82.1}{2.7} & \confint{84.4}{2.4} & \confint{84.6}{3.4} & \confint{81.0}{1.3} & \confint{84.0}{2.0} \\
+    \hhline{~>{\arrayrulecolor{TableGray1}}---~>{\arrayrulecolor{black}}-->{\arrayrulecolor{TableGray1}}--->{\arrayrulecolor{black}}}
+    \bottomrule                    
+    \end{tabular}}
+\end{table}
+\paragraph{Global Clustering}
+In the baseline version of HELP which we discussed so far, we perform clustering batch-wise with merged centroids as defined in Section \ref{sec:alg-clustering}. As shown in Table \ref{tab:ablation-accuracy-completeness}, performing clustering on the whole batch would perform marginally better. For concept completeness and conformity it is important to note that this variation has a small advantage because it was trained on clusters that were determined by the whole training set, whereas the other methods are also tested on such a clustering, but trained on clusters from only a single batch. However, whereas the differences in the metrics all lie within one standard deviation, global clustering requires keeping all final node embeddings from all pooling steps in memory at once. This proves prohibitive on larger datasets like REDDIT-BINARY.
+
+\paragraph{Hyperplane Gradient Approximation}
+ This confirms the hypothesis that node embeddings already form clusters of meaningful concepts when training a GNN end-to-end without explicitly optimizing the clusters \cite{GCExplainer}. As the runtime per epoch grows linearly in the number of Monte Carlo samples (in our case with 10 Monte Carlo samples by a factor of 9.5$\pm$1.0 over the three tested datasets), we choose the simpler and more computationally efficient approach as baseline.
+
+
+\paragraph{Limitations}
+\label{ssec:limitations}
+We note that the computational cost prohibited an extensive hyperparameter search on our hyperplane gradient approximation approach. We therefore cannot exclude the possibility that with different hyperparameters, explicitly learning the clustering would further improve the results.%
+Moreover, our definition of the conformity score relies on graph-isomorphism for which no polynomial time algorithm is known. In practice, we use a table of WL hashes \cite{shervashidzeWeisfeilerLehmanGraphKernels2011} (which can be computed in linear time), and only check isomorphism for collisions. Regardless, this metric still becomes infeasible for larger datasets like REDDIT-BINARY. This is still significantly less expensive than calculating the graph edit distance as proposed by \textcite{GCExplainer} who simply ignore graphs above a certain size in order to be able to compute their purity scores. 
+
+
+\section{Related Work}
+
+
+
+
+\paragraph{Explainable GNNs}
+\textit{Post-hoc} explainability methods on GNNs can be divided into three categories. \textit{Instance-level} approaches explain the prediction of a single input sample. 
+This is often done by adapting existing explainability techniques to the domain of graphs \cite{baldassarreExplainabilityTechniquesGraph2019, popeExplainabilityMethodsGraph2019, schnakeHigherOrderExplanationsGraph2022} or---taking inspiration from the seminal work GNNExplainer \cite{GNNExplainer}---by finding a subgraph that has the highest relevance for the prediction \cite{vuPGMExplainer2020, schlichtkrullInterpretingGNNsNLPEdgeMask2021, yuanExplainabilityGNNsSubgraph2021}. In contrast, \textit{model-level} methods \cite{wangGNNInterpreter2022, XGNN, luoPGExplainer2020} aim to understand what characterizes a particular prediction (e.g., a given class) over the whole dataset. In an attempt to find a balance between those two ideas, \textit{concept-based} approaches \cite{azzolinGlobalExplainabilityGNNs2022, xuanyuanGlobalConceptBasedInterpretability2023} explain individual predictions but do so in-terms of human-understandable \textit{concepts} rather than raw input features. Most similar to our method is GCExplainer \cite{GCExplainer}, which also defines concepts as clusters in the embedding space but---besides being post-hoc---cannot show hierarchies or which part of a node's neighborhood is actually relevant for the concept.
+
+By trying to cast light on the complex prediction process without ever incentivizing the model's decisions to be made in an easily understandable way, these post-hoc approaches tend to generate explanations that are less complete, less accurate and more prone to human error \cite{rudinStopExplainingBlackBox2019}. As a remedy, \textcite{ConceptEncoderModule} force the final node embeddings to be in $[0,1]$ and define a concept as all nodes that were mapped to the same, booleanized embedding. %
+In contrast to HELP, this approach represents concepts as $k$-hop neighborhoods rather than only the relevant part. It has limited applicability to the graph-level prediction setting where they average over all final node embeddings, making them no longer close to binary values.
+\cite{georgievAlgorithmicConceptBasedExplainable2022} propose an alternative, specifically targeting the field of learning to imitate classical algorithms and assuming to know the possible concepts in advance.
+
+
+
+\textbf{Hierarchical Graph Pooling} \label{ssec:relatedwork-pooling}
+While earlier work in this field deterministically pre-computes which nodes to cluster based on the graph-structure \cite{defferrardConvolutionalNeuralNetworks2016, rheeHybridApproachRelation2018}, or learns a fixed pooling in a separate, unsupervised step before training the actual model \cite{subramonianMOTIFDrivenContrastiveLearning2021, daiSE-GNN}, we focus on end-to-end-learnable graph pooling approaches. This allows us to explicitly learn concepts that are relevant for the task at hand. More specifically, while there are numerous \textit{spectral} pooling methods \cite{GRACULUS, maGCNEigenpooling2019, NMFPooling}---which are problematic due to the time complexity of the Eigendecomposition they rely on---we focus on \textit{non-spectral} approaches. In their method \textit{DiffPool}, \textcite{DiffPool} learn weights mapping any input graph to a fully connected graph with a fixed number of nodes. Later methods like ASAP \cite{ranjanASAPAdaptiveStructure2020}  approach these two major limitations by learning to prune a fixed percentage of nodes, resulting in sparse graphs where the number of output nodes is a fixed percentage of the number of input nodes \cite{gaoGraphU-Net, cangeaGPool, SAGPool}. In contrast to HELP, the number of nodes after pooling still cannot depend on structure or features of the input.
+
+
+\section{Conclusions}
+
+We present HELP, a novel graph learning method that explains its predictions in terms of hierarchical concepts.
+We empirically demonstrate that it performs on-par with previous message-passing GNNs and hierarchical pooling methods in terms of accuracy while being more than 1-WL expressive and discovering significantly more precise and less noisy concepts than the previous state-of-the-art. The latter is shown by a qualitative analysis as well as a novel metric to evaluate the \textit{conformity} of concepts.
+In future work, it would be valuable to explore adding readout layers after each pooling step, replacing the final sum pooling %
+with variations of Logic Explained Networks \cite{LEN}, extending HELP to settings requiring node-level predictions, or utilizing it for graph compression. More importantly, we believe HELP paves the way for a more thorough analysis of the interplay between concepts discovered on different layers of GNNs.
+
+
+\begin{ack}
+The authors would like to thank all reviewers for their detailed and insightful comments. This work was performed using resources provided by the Cambridge Service for Data Driven Discovery (CSD3) operated by the University of Cambridge Research Computing Service (\href{https://www.csd3.cam.ac.uk}{www.csd3.cam.ac.uk}), provided by Dell EMC and Intel using Tier-2 funding from the Engineering and Physical Sciences Research Council (capital grant EP/T022159/1), and DiRAC funding from the Science and Technology Facilities Council (\href{https://www.dirac.ac.uk}{www.dirac.ac.uk}).
+\end{ack}
+
+
+
+
+
+
+

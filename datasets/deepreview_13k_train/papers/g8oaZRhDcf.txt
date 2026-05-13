@@ -1,0 +1,324 @@
+\title{Copy Suppression: Comprehensively Understanding an Attention Head}
+
+\begin{abstract}
+We present a single attention head in GPT-2 Small that has one main role across the entire training distribution.
+If components in earlier layers predict a certain token, and this token appears earlier in the context, the head suppresses it: we call this \gls{CopySuppression}.
+Attention Head 10.7 (L10H7) suppresses naive copying behavior which improves overall model calibration. This explains why multiple prior works studying certain narrow tasks found negative heads that systematically favored the wrong answer.
+We uncover the mechanism that the Negative Heads use for copy suppression with weights-based evidence
+and are able to explain \xx\% of the impact of L10H7 in GPT-2 Small.
+To the best of our knowledge, this is the most comprehensive description of the complete role of a component in a language model to date.
+One major effect of copy suppression is its role in \selfrepair. \Selfrepairspace refers to how ablating crucial model components results in downstream neural network parts compensating for this ablation. Copy suppression leads to \selfrepair: if an initial overconfident copier is ablated, then there is nothing to suppress. We show that \selfrepairspace is implemented by several mechanisms, one of which is copy suppression, which explains 39\% of the behavior in a narrow task.
+Interactive visualizations of the copy suppression phenomena may be seen at our web app \url{https://copy-suppression.streamlit.app/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+\begin{figure}[h] % I like having the key figure on the first page. It's a bit unorthodox, though
+\centering
+\includegraphics[width=0.82\linewidth,keepaspectratio]{figures/pdfresizer.com-pdf-crop_2.pdf}
+\centering
+\caption{L10H7's copy suppression mechanism (Steps 1-3 are described below and the mechanism is examined in \Cref{sec:how_negative_heads_copy_suppress}).\hfill\textopencorner$^*$Work partially done at Google DeepMind}
+\label{fig:fig_one}
+\end{figure}
+
+\newpage
+
+Mechanistic interpretability research aims to reverse engineer neural networks into the algorithms that network components implement \citep{AnthropicMechanisticEssay}.
+A central focus of this research effort is the search for explanations for the behavior of model components, such as circuits \citep{cammarata2020thread, elhage2021mathematical}, neurons \citep{radford2017learning, bau2017network, gurnee2023finding} and attention heads \citep{voita2019analyzing, olsson2022context}.
+However, difficulties in understanding machine learning models has often limited the breadth of these explanations or the complexity of the components involved \citep{rauker2023transparent}.
+
+In this work we explain how ``\gls{Negative Head}s'' (which include `negative name mover heads' from \citet{wang2023interpretability} and `\gls{anti-induction} heads' from \citet{olsson2022context}) function on the natural language training distribution in GPT-2 Small. Previous work found that Negative Heads systematically write against the correct completion on narrow datasets, and we explain these observations as instances of \textbf{copy suppression}. Copy suppression accounts for a majority of the head’s behavior and reduces the model's overall loss. To the best of our knowledge,  our explanation is the most comprehensive account of the function of a component in a large language model (\Cref{sec:related_work} reviews related literature). 
+
+We define \textbf{\gls{Negative Head}s} as attention heads which primarily reduce the model's confidence in particular token completions. We show that the main role of Negative Heads in GPT-2 Small is \textbf{copy suppression} (\Cref{fig:fig_one}), which is defined by three steps: 
+
+\begin{compactenum}
+    \item \textbf{Prior copying}. Language model components in early layers directly predict that the next token is one that already appears in context, e.g that the prefix ``All's fair in love and" is completed with `` love".%
+    \item \textbf{Attention}. Copy suppression heads detect the prediction of a copied token and attend back to the previous instance of this token (`` love"). 
+    \item \textbf{Suppression}. Copy suppression heads write directly to the model's output to decrease the logits on the copied token. 
+\end{compactenum}
+
+By lowering incorrect logits, steps 1--3 can increase the probability on correct completions (e.g `` war") and decrease model loss.\footnote{We recommend using our web app \url{https://copy-suppression.streamlit.app/} to understand L10H7's behavior interactively.} \textbf{Our central claim is that at least \xx\% of the role of attention head L10H7 on GPT-2 Small's training distribution is copy suppression}. However, we do not explain precisely when or how much copy suppression is activated in different contexts. Nevertheless, to the best of our knowledge, there is no prior work which has explained the main role of any component in a large language model in terms of its input stimulus and specific downstream effect across a whole training distribution.
+Explaining language models components across wide distributions in mechanistic detail may be important for engineering safe AI systems.
+While interpreting parts of language models on narrow distributions \citep{greaterthan, docstring, wang2023interpretability} may be easier than finding complete explanations, researchers can be misled by hypotheses about model components that do not generalize \citep{bolukbasi2021interpretability}. 
+Mechanistically understanding models could fix problems that arise from opaque training processes, as mechanisms can predict behavior on off-distribution and adversarial inputs rather than merely those that arise in training \citep{mu_andreas_off_distribution_reference,goh2021multimodal,carter2019activation}. %Further, models can exhibit emergent capabilities \citep{emergent} and internal insight could be extremely useful in predicting these abrupt changes \citep{nanda2023progress}.
+
+Mechanistic interpretability research is difficult to automate and scale \citep{rauker2023transparent}, and understanding negative and backup heads\footnote{We define backup heads (see \Cref{sec:copy_suppression_and_self_repair}) as attention heads that respond to the ablation of a head by imitating that original behavior.} could be crucial for further progress.
+Many approaches to automating interpretability use \textbf{ablations} - removing a neural network component and measuring the effect of this intervention \citep{conmy2023automated, geiger_alignment, bills2023language, causal_scrubbing}.
+Ideally, ablations would provide accurate measures of the importance of model components on given tasks, but negative and backup components complicate this assumption.
+Firstly, negative components may be ignored by attribution methods that only find the positive components that complete tasks.
+This means that these attribution methods will not find faithful explanations \citep{jacovi2020faithfully} of model behavior. Secondly, backup components may counteract the effects of ablations and hence cause unreliable importance measurements.
+
+In this work we rigorously reverse-engineer attention head L10H7 in GPT-2 Small to show that its main role on the training distribution is copy suppression. We do not know \textit{why} language models form copy suppression components, but in Appendices \ref{app:anti_induction} and \ref{app:copy_suppression_and_calibration} we discuss ongoing research into some hypotheses. \Cref{app:more_models_with_copy_suppression} provides evidence that copy suppression occurs in models trained without dropout. Our main contributions are: 
+
+\begin{compactenum}
+    \item Finding the main role of an attention head in an LLM on an entire training distribution (\Cref{sec:negative_heads_copy_suppress}), and verifying this hypothesis (\Cref{subsec:how_much_explained}).
+    \item Using novel weights-based arguments to explain the role of language model components (\Cref{sec:how_negative_heads_copy_suppress}).
+    \item Applying our mechanistic understanding to the practically important self-repair phenomenon, finding that copy suppression explains 39\% of self-repair in one setting (\Cref{sec:copy_suppression_and_self_repair}). 
+\end{compactenum}
+
+
+\section{Negative Heads Copy Suppress}
+
+\label{sec:negative_heads_copy_suppress}
+\label{subsec:neg_heads_owt} % not a subsec, but this is the easiest way to move stuff
+In this section we show that Negative Head L10H7 suppresses copying across GPT-2 Small’s training distribution. We show that copy suppression explains most of L10H7’s role in the model, and defer evaluation of our mechanistic understanding to \Cref{subsec:how_much_explained}. We use the \textbf{\gls{logit lens}} 
+\citep{logit_lens} technique to measure what intermediate model components predict, and use \textbf{\gls{mean ablation}} to delete internal model activations.
+
+\subsection{Behavioral Results} 
+\label{subsec:behave_results}
+
+ 
+
+We can find where L10H7 has the largest impact by looking at the OpenWebText\footnote{OpenWebText \citep{openwebtext} is an open source replication of GPT-2's pretraining distribution.} examples where mean ablating L10H7's effect on model outputs increases loss. Specifically, we sampled from the top 5\% of completions where L10H7 had greatest effect 
+as these accounted for half of the attention head's loss reducing effect across the dataset. \textbf{80\% of the sampled completions were examples of copy suppression} when we operationalized the three qualitative copy suppression steps from \Cref{sec:introduction} by three corresponding conditions:
+
+\begin{compactenum}
+    \item The model’s predictions at the input to L10H7 included a token which appeared in context as one of the top 10 most confident completions (as measured by the \gls{logit lens});
+    \item The source token was one of the top 2 tokens in context that L10H7 attended to most;
+    \item The 10 tokens that L10H7 decreased logits for the most included the source token.
+\end{compactenum}
+Examples can be found in the \Cref{tab:copy_suppression_dataset_examples}. These results and more can also be explored on our interactive web app
+ (\url{https://copy-suppression.streamlit.app/}).
+
+\setlength{\extrarowheight}{3pt}
+\begin{table}[]
+\centering
+\small
+\begin{tabular}{p{5.5cm}p{1.9cm}p{2cm}p{2.8cm}}
+\hline
+\textbf{Prompt}                                                    & \textbf{Source\newline token} & \textbf{Incorrect completion} & \textbf{Correct\newline completion} \\
+\hline
+\end{tabular}
+\caption{Dataset examples of copy suppression, in cases where copy suppression behaviour decreases loss by suppressing an incorrect completion.}
+\label{tab:copy_suppression_dataset_examples}
+\end{table}
+
+\subsection{How Does L10H7 Affect the Loss?}
+\label{subsec:loss_path_decomp}
+
+To investigate the relative importance of the direct and indirect effect of L10H7 on the model's loss, we decompose its effect into a set of different paths \citep{elhage2021mathematical, nix_path_patching}, and measure the effect of ablating certain paths. We measure the effect on model's loss as well as the KL divergence to the model's clean predictions. Results can be seen in \Cref{fig:loss_path_contributions}.
+
+Fortunately, we find that most of L10H7's effect on loss was via the direct path to the final logits. This suggests that a) explaining the direct path from L10H7 to outputs would explain the main role of the attention head in the model and b) KL divergence is correlated with the increase in loss of ablated outputs. Our goal is to show that our copy suppression mechanism faithfully reflects L10H7's behaviour (\Cref{subsec:how_much_explained}) and therefore in the rest of our main text, we focus on minimizing KL divergence, which we discuss further in \Cref{subsubsec:cspa_methodology}.
+
+\begin{figure}[!ht]
+  \begin{minipage}[b]{0.58\textwidth}
+    \centering
+    \includegraphics[width=\textwidth,height=0.55\textheight,keepaspectratio]{figures/fig_kl_fix2.pdf}
+    \caption{Loss effect of L10H7 via different paths. Grey paths denote ablated paths.}
+    \label{fig:loss_path_contributions}
+  \end{minipage}
+  \hfill
+  \vline
+  \hfill
+  \begin{minipage}[b]{0.38\textwidth}
+    \centering
+    \includegraphics[width=1.1\textwidth,height=0.55\textheight,keepaspectratio]{figures/ranks_plot_new.pdf}
+    \caption{Distribution of ranks of diagonal elements of \gls{Eqn. (2)}.}
+    \label{fig:lookup_tables_self_attention}
+  \end{minipage}
+\end{figure}
+
+
+
+\section{How Negative Heads Copy Suppress}
+
+\label{sec:how_negative_heads_copy_suppress}
+
+In this section, we show that copy suppression explains \xx\% of L10H7's behavior on OpenWebText. To reach this conclusion, we perform the following set of experiments:
+
+\begin{compactenum}
+    \item In \Cref{subsec:ov_circuit}, we analyse the OV circuit, and show that the head suppresses the prediction of 84.70\% of tokens which it attends to.
+    \item In \Cref{subsec:qk_circuit}, we analyse the QK circuit, and show that the head attends to the token which the model is currently predicting across 95.72\% of the model's vocabulary.
+    \item In \Cref{subsec:how_much_explained}, we define a form of ablation (\gls{CSPA}) which deletes all of L10H7's functionality except 1. and 2., and preserves \xx\% of its effect.
+\end{compactenum}
+
+In step 3 we project L10H7's outputs onto the unembedding vectors, but apply a filtering operation (that is weaker than a weights-based projection) to the QK circuit, as described in \Cref{subsubsec:cspa_methodology}. We also performed an ablation that involved projecting the query vectors onto unembedding vectors present in the residual stream (\Cref{app:cspa_with_query_projections}), but found that this did not recover as much KL divergence, likely due to issues discussed in \Cref{sec:copy_suppression_and_self_repair}. In \Cref{subsec:ov_circuit}-\ref{subsec:qk_circuit} we use $\text{MLP}_0 ( W_E )$ rather than $W_E$ as the model's `\textbf{\gls{effective embedding}}' as we discuss in \Cref{app:effective_embedding} and compare with other works.
+\subsection{OV Circuit}
+\label{subsec:ov_circuit}
+To understand L10H7's output, we study the simple setting where the attention head i) only attends to a single source token and ii) the source token position only contains information about one token. We can then look at what effect L10H7 has on the model's logits for each token in the vocabulary.
+This motivates studying L10H7's OV circuit \citep{elhage2021mathematical}, with MLP0 included: $W_U W_{OV}^{\text{L10H7}} \text{MLP}_0(W_E) \in \mathbb{R}^{n_{\text{vocab}} \times n_{\text{vocab}}}$ \gls{Eqn. (1)}.
+The OV circuit \gls{Eqn. (1)} studies the impact that L10H7 has on all output tokens, given it attended to the effective embedding of a particular input token. The $i$th column of \gls{Eqn. (1)} is the vector of logits added at any destination token which attends to the $i$th token in the model's vocabulary (ignoring layernorm scaling). If L10H7 is suppressing the tokens that it attends to, then the diagonal elements of \gls{Eqn. (1)}) will consistently be the most negative elements in their columns. This is what we find: 84.70\% of the tokens in GPT-2 Small's vocabulary have their diagonal elements as one of the top 10 most negative values in their columns, and 98.86\% of tokens had diagonal elements in the bottom 5\%. This suggests that L10H7 is copy suppressing almost all of the tokens in the model’s vocabulary.
+
+This effect can also be seen in practice. We filtered for (source, destination token) pairs in OpenWebText where attention in L10H7 was large, and found that in 78.24\% of these cases the source was among the 10 most suppressed tokens from the direct effect of L10H7 (full experimental details in \Cref{app:ov_circuit_in_practice}). This indicates that our weights-based analysis of L10H7's OV circuit does actually tell us about how the head behaves on real prompts.
+
+\subsection{QK Circuit}
+\label{subsec:qk_circuit}
+Having understood L10H7’s outputs in a controlled setting, we need to understand when the head is activated by studying its attention patterns. In a similar manner to \Cref{subsec:ov_circuit} we study L10H7’s attention in the simple setting where i) the query input is equal to the unembedding vector for a single token and ii) the key input is the MLP0 output for another single token, i.e we study the QK circuit $W_U W_{QK}^{\text{L10H7}} \text{MLP}_0(W_E) \in \mathbb{R}^{n_{\text{vocab}} \times n_{\text{vocab}}}$ (\gls{Eqn. (2)}).\footnote{We ignore bias terms in the key and query parts (as we find that they do not change results much in \Cref{app:ten_seven_qk_circuit}). Our experimental setup allows us to ignore LayerNorm (\Cref{app:model_and_general_details_eg_transformer_lens}).}
+\Gls{CopySuppression} (\Cref{sec:introduction}) suggests that L10H7 has large attention when i) a token is confidently predicted at the query position and ii) that token appeared in the context so is one of the key vectors. Therefore we expect the largest elements of each row of \gls{Eqn. (2)} to be the diagonal elements of this matrix. % Interestingly this is the opposite way round (rows/columns) to 4.1
+Indeed, in \Cref{fig:lookup_tables_self_attention} (orange bars) we find that 95.72\% of diagonal values in this matrix were the largest in their respective rows.
+
+However, this result alone doesn’t imply that copying (the first step of the three copy suppression steps in \Cref{sec:introduction}) explains L10H7’s attention.
+This is because GPT-2 Small uses the same matrix for embeddings and unembeddings, so L10H7 could simply be matching similar vectors at query and keyside (for example, in a `same matching’ QK matrix \citep{elhage2021mathematical})
+Therefore in \Cref{fig:lookup_tables_self_attention} (blue bars) we also compare to a baseline where both query and keys are effective embeddings,\footnote{i.e in \gls{Eqn. (2)} we replace the $W_U$ term with $\text{MLP}_0(W_E)$.} and find that the ranks of the diagonal elements in their rows are much smaller, which provides evidence that $W_{QK}^{\text{L10H7}}$ is not merely a `same matching’ matrix. We also verify the copy suppression attention pattern further in \Cref{subapp:qk_circuit_lookup tables}. However, one limitation of our analysis of the QK circuit is that this idealised setup does not completely faithfully represent L10H7's real functioning (Appendices \ref{subapp:more_faithful_keyside}, \ref{subapp:more_faithful_queryside} and \ref{app:cspa_with_query_projections}).
+
+
+ 
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{figures/ablation-figure-3b.pdf}
+\caption{Illustration of three different kinds of ablation: just OV, just QK, and CSPA.}
+\label{fig:ablation_diagrams_left}
+\end{figure}
+\subsection{How much of L10H7's behavior have we explained?}
+\label{subsec:how_much_explained}
+
+In this section, we perform an ablation which deletes all functionality of L10H7's OV and QK circuits, except for the mechanisms described in \Cref{subsec:ov_circuit} and 3.2 respectively, with the goal of seeing how much functionality we can remove \textit{without} damaging performance.
+We refer to this as \textbf{Copy Suppression-Preserving Ablation} (\gls{CSPA}). 
+In the \Cref{subsubsec:cspa_methodology} section we explain exactly how each part of CSPA works, and in the \Cref{subsubsec:results_cspa} section we present the ablation results. 
+
+\subsubsection{Methodology}
+\label{subsubsec:cspa_methodology}
+\gls{CSPA} consists of both an \textbf{OV ablation} and a \textbf{QK ablation}.
+
+\textbf{OV ablation}. The output of an attention head at a given destination token $D$ can be written as a sum of result vectors from each source token $S$, weighted by the attention probabilities from $D$ to $S$ \citep{elhage2021mathematical}. We can project each of these vectors onto the unembedding vector for the corresponding source token $S$. We only keep the negative components.\footnote{In \Cref{fig:baseline_for_cspa}) we show the results when we also keep positive components.}
+
+\textbf{QK ablation}. We mean ablate the result vectors from each source token $S$, except for the top 5\% of source tokens which are predicted with highest probability at the destination token $D$ (as measured with the logit lens). 
+
+As an example of how the OV and QK ablations work in practice, consider the opening example ``All's fair in love and war''. In this case the destination token $D$ is `` and". The token ``love'' is highly predicted to follow $D$ (as measured with the logit lens), and also appears as a source token $S$, and so we would take the result vector from $S$ and project it onto the unembedding vector for `` love'', mean-ablating everything else. This captures how L10H7 suppresses the `` love'' prediction.
+
+\textbf{Ablation metric}. After performing an ablation, we can measure the amount of L10H7's behavior that we have explained by comparing the ablation to a baseline that mean ablates L10H7's direct effect. Formally, if the model's output token distribution on a prompt is $\pi$ and the distribution under an ablation $\text{Abl}$ is $\pidist{Abl}$, then we measure the KL divergence $D_{\text{KL}} ( \pi || \pi_{\text{Abl}} )$. We average these values over OpenWebText for both ablations we use, defining $\overline{D_{\text{CSPA}}}$ for CSPA and $\overline{D_{\text{MA}}}$ for the mean ablation baseline. Finally, we define the effect explained as $1 - \left( \overline{D_{\text{CSPA}}} / \overline{D_{\text{MA}}} \right)$ (\gls{Eqn. (3)}).\setcounter{equation}{3} % Manually increment the equation counter as inline equation references require this fix...
+We choose KL divergence for several reasons, including how 0 has a natural interpretation as the ablated and clean distributions being identical -- in other words, 100\% of the head's effect being explained by the part we preserve. Ssee \Cref{app:cspa_metric_choice} for limitations, comparison and baselines.
+
+\subsubsection{Results}
+\label{subsubsec:results_cspa}
+
+\begin{minipage}{0.45\textwidth}
+\gls{CSPA} explains \xx\% of L10H7's behavior. Since the QK and OV ablations are modular, we can apply either of them independently and measure the effect recovered. We find that performing only the OV ablation leads to 81.1\% effect explained, and only using QK leads to 95.2\% effect explained.
+To visualize the performance of CSPA, we group each OpenWebText completion into one of 100 percentiles, ordered by the effect that mean ablation of L10H7 has on the output's KL divergence from the model. The results are shown in \Cref{fig:key_cspa_diagram_with_kl}, where we find that CSPA preserves a larger percentage of KL divergence in the cases where mean ablation is most destructive: in the maximal percentile, CSPA explained 88.1\% of L10H7's effect.
+
+\end{minipage}
+\hfill
+\begin{minipage}{0.50\textwidth}
+  \centering
+  \includegraphics[width=1.0\textwidth]{figures/kl_cspa_formatted.pdf}
+  \captionof{figure}{We plot $(\overline{D_{\text{MA}}}, \overline{D_{\text{CSPA}}})$ for each percentile of our OpenWebText data (with percentiles given by the values of $D_\text{MA}$).}
+  \label{fig:key_cspa_diagram_with_kl}
+\end{minipage}
+
+
+
+\section{Copy Suppression and Self-Repair}
+
+\label{sec:copy_suppression_and_self_repair} 
+
+\Gls{self-repair} refers to how some neural network components compensate for other components that have been perturbed earlier in the forward pass \citep{mcgrath2023hydra}.
+Copy suppressing components self-repair: if perturbing specific model components causes them to stop outputting an unembedding, copy suppression is deactivated.
+In this section, we show that copy suppression explains 39\% of self-repair in one setting (\Cref{subsec:what_selfrepair_looks_like}). However \Cref{subsec:self_repair_component_intervention_complication} gives weights-based evidence that self-repair relies on more than just copy suppression, and finds that the unembedding direction in the residual stream does not have a large effect on self-repair.
+\subsection{Visualizing Self-repair}
+\label{subsec:visualizing_self_repair}
+\label{subsec:what_selfrepair_looks_like}
+ 
+In this section we use the narrow Indirect Object Identification (IOI; \citet{wang2023interpretability}) task to study self-repair, as this was studied in the GPT-2 Small model, and was the first known example of self-repair. However, understanding self-repair is also important for interpreting larger models with different architectures \citep{mcgrath2023hydra}. We give a short introduction to IOI in points i)-iii) below. Non-essential further details can be found in \citet{wang2023interpretability}.
+
+\begin{compactenum}[i)]
+    \item The IOI task consists of sentences such as `When John and Mary went to the store, Mary gave a bottle of milk to' which are completed with the indirect object (IO) ` John'. 
+    \item The task is performed by an end-to-end circuit. The final components are mainly three attention heads called \gls{Name Mover Head}s that copy the IO to the model's output.\footnote{The negative heads copy suppress this prediction, but not enough to change the model’s top prediction.}
+    \item We can measure the extent to which IOI occurs by measuring the \gls{logit difference} metric, which is equal to the difference between the ` John'  and ` Mary' logits in the above example.
+\end{compactenum}
+        
+To visualize self-repair under an ablation of the three Name Mover Heads, for every attention head downstream of the Name Mover Heads we measure its original contribution to logit difference ($x_c$), as well as its contribution to logit difference post-ablation ($y_c$). We then plot all these 
+$(x_c, y_c)$ pairs in \Cref{fig:ldd_path_patch}.
+
+In \Cref{fig:ldd_path_patch}, the higher the points are above the $y=x$ line, the more they contribute to self-repair.
+This motivates a way to measure self-repair: if we let $C$ denote the set of components downstream of Name Mover Heads and take $c \in C$, then the proportion of self-repair that a component $c$ explains is $(y_c - x_c) / \sum_{i \in C} (y_i - x_i)$ (\gls{Eqn. (4)}).\setcounter{equation}{4} The sum of the proportions of self-repair explained by Negative Heads L10H7 and L11H10 is 39\%. This proportion is almost entirely copy suppression since \Cref{app:negative_heads_self_repair_in_ioi_section} shows that the Negative Heads in the IOI task are entirely modulated by Name Mover Heads.
+
+However, \Cref{fig:ldd_path_patch} indicates another form of self-repair in the heads on the right side of the figure: these heads do not have large negative effects in clean forward passes, but then begin contributing to the logit difference post-ablation. We found that these \gls{backup heads} on the right hand side use a qualitatively different mechanism for self-repair than (copy suppressing) negative heads, which we summarise behaviorally in \Cref{tab:ways_of_copy_suppressing}. %  (\Cref{tab:ways_of_copy_suppressing})
+\begin{table}[ht]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline \textbf{Head Type} & \textbf{Response to Name Movers predicting $T$} & \textbf{Effect of attending to $T$} \\
+\hline Negative & \blue{\textbf{More}} attention to $T$ & \red{\textbf{Decrease}} logits on $T$ \\
+\hline Backup & \red{\textbf{Less}} attention to $T$ & \blue{\textbf{Increase}} logits on $T$ \\
+\hline
+\end{tabular}
+\caption{Qualitative differences between Negative and Backup Heads.}
+\label{tab:ways_of_copy_suppressing}
+\end{table}
+\begin{figure}
+\begin{minipage}[b]{0.69\textwidth} 
+\centering
+\includegraphics[width=\linewidth]{figures/visualizing_self_repair_r.pdf}
+\end{minipage}
+\hfill
+\begin{minipage}[b]{0.3\textwidth}
+\caption{ \raggedright Ablating the Name Mover Heads in Layer 9 causes a change in the direct effects of all the downstream heads. Plotting the Clean Logit Difference vs the Post-Intervention Logit Difference for each head highlights the heads above the $y=x$ line which perform self-repair.}
+\label{fig:ldd_path_patch}
+\end{minipage}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+
+\begin{minipage}{0.45\linewidth}
+\centering
+\includegraphics[width=1.1\linewidth]{figures/my_figure_real_again-1.png}
+\caption{Relationship between Name Mover and self-repair heads: \red{red} edges denote less, and \blue{blue} edges denote more, attention to names due to the Name Movers.}
+\label{fig:sbis}
+\end{minipage}
+\hfill
+\vline
+\hfill
+\begin{minipage}{0.5\linewidth}
+\centering
+\includegraphics[width=1.2\linewidth]{figures/cody_remake_plotting.pdf}
+\caption{Intervening in the IO unembedding input into self-repairing heads shows that the unembedding direction doesn't completely describe the backup effect.}
+\label{fig:path-patching-query-backup}
+\end{minipage}
+\end{figure}
+
+\bigskip % Otherwise we were intersecting with a table
+
+To justify the description in \Cref{tab:ways_of_copy_suppressing}, we analyze how Name Movers determine the attention patterns of self-repairing heads. We study Q-composition between a Name Mover's OV matrix $W_{OV}$ and the QK matrix $W_{QK}$ of downstream heads by calculating $\text{MLP}_0(W_E)^\top W_{OV}^\top W_{QK} \text{MLP}_0(W_E)$ and find that backup heads attend \textit{less} to names when Name Movers copy them, and negative heads attend more (Figure \ref{fig:sbis})\footnote{The technical details of the experiment can be found at \Cref{app:weights_based_evidence}}. Combining this result with the prior results that i) backup heads copy names \citep{wang2023interpretability} and ii) negative heads have negative-copying OV matrices (\Cref{subsec:ov_circuit}), this explains self-repair at a high-level in IOI: when the Backup/Negative heads attend more/less to a token $T$ upon the Name Mover's ablation, they \textit{copy more}/\textit{suppress less} of $T$, increasing the logit difference and thus self-repairing.
+
+
+
+\subsection{Complicating the Story: Component Intervention Experiments}
+\label{subsec:self_repair_component_intervention_complication}
+Copy suppression explains self-repair in negative heads via the importance of the unembedding direction (\Cref{subsec:qk_circuit}).
+Ideally, the unembedding direction would also help understand backup heads.
+However, we present two pieces of evidence to highlight how the unembedding only explains part of the self-repair in GPT-2 Small, including showing that our understanding of Negative Heads on the IOI task also requires understanding more than simply the unembedding directions.
+
+First, we intervened on the output of the Name Movers and L10H7,\footnote{We also ablate the output of L10H7 due to self-repair that occurs between L11H10 and L10H7, as explained in \Cref{app:l11h10}.} and edited the resulting changes into the queries of downstream heads. The intervention, shown in \Cref{fig:path-patching-query-backup}, was either a projection \textit{onto} or \textit{away from} the IO unembedding $W_U[\text{IO}]$\footnote{By `away from', we mean removing the unembedding direction from the head output, so the resultant vector is orthogonal to the unembedding direction.}. We also froze the Layer Norm scaling factor equal to the value on the original forward pass. To interpret Figure \ref{fig:path-patching-query-backup}, note that for most backup heads, projecting away from $W_U[\text{IO}]$ does not change the heads' logit differences much, suggesting that the unembedding direction isn't very causally important for self-repair in backup heads. As such, there must be important information in the $W_U[\text{IO}]$-perpendicular direction that controls self-repair. 
+
+To complement this analysis, we also broke the attention score (a quadratic function of query and key inputs) down into terms and again found the importance of the perpendicular direction (\Cref{app:breaking_down_quadratic_attention_score}). Beyond this, intervening in the queries of self-repair heads reflects that the perpendicular direction is particularly important in the Backup Heads (\Cref{app:query_intervention_self_repair}). Ultimately, we conclude that while Name Mover Heads modulate Negative Heads' copy suppression, this is only partly through the unembedding direction. Further, backup heads do not seem to depend on the unembedding direction.
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\textbf{Explanations of neural network components} in post-hoc language model interpretability include explanations of neurons, attention heads and circuits. Related work includes the automated approach by \citet{bills2023language} and manual explanations found by \citet{voita2023neurons} who both find suppression neurons. More comprehensive explanations are found in \citet{gurnee2023finding} (contextual neurons). Attention heads correlated with previous tokens \citep{vig2019multiscale} and rare words \citep{voita2019analyzing} have been analyzed. Circuits have been found on narrow distributions \citep{wang2023interpretability} and induction heads \citep{elhage2021mathematical} are the most general circuits found in language models, but they have only been explained in as much detail as our work in toy models. \citet{causal_scrubbing}'s loss recovered metric inspired our loss recovered analysis.
+
+
+\textbf{Iterative inference}. \citet{greff2017highway_iterative_estimation} propose that neural networks layers iteratively update feature representations rather than recomputing them, in an analysis specific to LSTMs and Highway Networks. Several works have found that transformer language model predictions are iteratively refined \citep{dar2022analyzingEmbedSpace, logit_lens, tuned_lens, halawi2023overthinking} in the sense that the state after intermediate layers forms a partial approximation to the final output, though no connections have yet been made to Negative Heads.
+ 
+
+
+
+\section{Conclusion}
+
+
+In summary, in this work we firstly introduced \textbf{copy suppression}, a description of the main role of an attention head across GPT-2 Small's training distribution.
+Secondly, we applied weights-based arguments using QK and OV circuits to mechanistically verify our hypotheses about copy suppression.
+Finally, we showed how our comprehensive analysis has applications to open problems in ablation-based interpretability (\Cref{sec:copy_suppression_and_self_repair}).
+
+Two limitations of our work include our understanding of the query inputs to self-repair heads, and the transferability of our results to different models. In both \Cref{subsec:qk_circuit} and \ref{sec:copy_suppression_and_self_repair} we found that copy suppression and self-repair rely on more than simply unembedding directions, and we hope that future work can fully explain this observation.
+Further, while we show that some of our insights generalize to large models (\Cref{app:anti_induction} and \ref{app:more_models_with_copy_suppression}), we don’t have a mechanistic understanding of copy suppression in these cases.
+Despite this, our work shows that it is possible to explain LLM components across broad distributions with a high level of detail. For this reason, we think that our insights will be extremely useful for future interpretability research.
+
+\newpage
+
+\ificlrunderreview
+\else
+    \subsubsection*{Author Contributions}
+    Callum McDougall and Arthur Conmy identified the copy suppression motif and wrote Sections \ref{sec:introduction}-\ref{sec:how_negative_heads_copy_suppress}, running all experiments in these sections. Cody Rushing independently identified copy suppression in backup behavior, and wrote \Cref{sec:copy_suppression_and_self_repair}. Neel Nanda was the main supervisor for this project, and both Neel and Thomas McGrath provided guidance and advice at all stages in the project.
+
+

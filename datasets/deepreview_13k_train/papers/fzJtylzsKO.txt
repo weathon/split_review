@@ -1,0 +1,280 @@
+\title{Batched Bayesian optimization with correlated candidate uncertainties}
+
+\begin{abstract}
+Batched Bayesian optimization (BO) can accelerate molecular design by efficiently identifying top-performing compounds from a large chemical library. Existing acquisition strategies for batch design in BO aim to balance exploration and exploitation. This often involves optimizing non-additive batch acquisition functions, necessitating approximation via myopic construction and/or diversity heuristics. In this work, we propose an acquisition strategy for discrete optimization that is motivated by pure exploitation, qPO (multipoint Probability of Optimality). qPO maximizes the probability that the batch includes the true optimum, which is expressible as the sum over individual acquisition scores and thereby circumvents the combinatorial challenge of optimizing a batch acquisition function. We differentiate the proposed strategy from parallel Thompson sampling and discuss how it implicitly captures diversity. Finally, we apply our method to the model-guided exploration of large chemical libraries and provide empirical evidence that it performs better than or on par with state-of-the-art methods in batched Bayesian optimization. 
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Predictive modeling can greatly accelerate molecular and materials discovery. Data-driven and simulation-based models %
+can aid in prioritizing experiments for the design of drugs \citep{liu_structure-based_2024, liu_deep_2023, horne_discovery_2024}, light-emitting diodes \citep{gomez-bombarelli_design_2016}, and other materials \citep{schwalbe-koda_priori_2021}. In \textit{iterative} design cycles guided by predictive models, the reliability of model predictions can be gradually improved as the model is updated with newly collected data. This iterative, model-guided approach has been applied to the discovery of drugs \citep{desai_rapid_2013}, laser emitters \citep{strieth-kalthoff_delocalized_2024}, and dyes \citep{koscher_autonomous_2023}.
+Bayesian optimization (BO) is arguably the most popular mathematical framework for iterative model-based design \citep{frazier_bayesian_2018,garnett_bayesian_2023}. BO optimizes an expensive black-box objective function ($f$ or ``oracle'') by iteratively (re)training a surrogate model and using its predictions to select designs for evaluation \citep{frazier_bayesian_2018}. At each iteration, an \emph{acquisition function} uses the mean and/or uncertainty of surrogate model predictions to select which design(s) to evaluate. 
+BO has been applied to efficiently explore chemical libraries in numerous previous works \citep{cherkasov_progressive_2006, graff_accelerating_2021, yang_efficient_2021, bellamy_batched_2022, wang-henderson_graph_2023}. 
+
+Computational (e.g., physics-based simulations) and experimental (e.g., bioactivity assays) oracles in many chemistry applications are most efficiently evaluated in parallel. The total evaluation budget is therefore 
+spread across relatively few iterations with large batch sizes, requiring an acquisition function to select a $batch$ of experiments in each iteration. %
+The non-additivity of batch-level acquisition functions complicates the selection of optimal batches in BO; when the value of selecting a candidate depends on other selections, batch design becomes a combinatorial problem. Optimizing Bayes-optimal batch acquisition functions is therefore often computationally 
+intractable even for modest batch sizes \citep[Section~11.3]{garnett_bayesian_2023}. Strategies that fail to consider this non-additivity, such as selecting the top candidates based on a sequential policy, 
+can produce homogeneous batches that lack diversity. Prior works have primarily relied on (1) heuristics to increase diversity
+\citep{gonzalez_batch_2016, kathuria_batched_2016, nava_diversified_2022, nguyen_budgeted_2016, groves_efficient_2018}, (2) hallucinated observations to approximate intractable integrals
+\citep{ginsbourger_kriging_2010, desautels_parallelizing_2014}, or (3) the randomness inherent to Thompson sampling \citep{thompson_likelihood_1933} to extend it to the batch setting \citep{hernandez-lobato_parallel_2017,dai_sample-then-optimize_2022,ren_ts-rsr_2024}. 
+
+Most batch acquisition strategies %
+aim to optimally balance exploration and exploitation in the limit of infinite iterations. In settings with few iterations, there are fewer opportunities to refine designs found from exploration, and prioritizing exploitation may be desirable. While exploration is expected to prevent the selection of homogeneous batches, we hypothesized that diversity is reflected by the surrogate model posterior (e.g., as a lack of covariance between predictions) and can be achieved without reliance on exploration. %
+In this paper, we propose \name{} (multipoint Probability of Optimality), a batch construction strategy that maximizes the likelihood that the optimum exists in the acquired batch. Inspired by parallel Thompson sampling \citep{hernandez-lobato_parallel_2017}, \name{} centers around the probability of optimality, accounts for correlations between inputs, and is naturally parallelizable. However, \name{} aims to forego randomness in the pursuit of pure exploitation. 
+Uniquely, the defined batch-level acquisition function can be expressed as a sum of individual candidate acquisition scores, circumventing the combinatorial challenge of maximizing a batch-level acquisition function. 
+We summarize the contributions of this work as follows:
+\begin{enumerate}
+    \item We present a novel exploitative strategy for batch design in discrete Bayesian optimization that maximizes the likelihood of including the true optimum in the batch.
+    \item We derive a batch-level acquisition function that is equal to the sum of individual acquisition scores and is thereby %
+     maximized by selecting the top candidates by acquisition score. %
+    \item Through a simple analytical case study, we demonstrate the importance of considering prediction covariance in exploitation, describe how covariance can capture diversity, and differentiate our method from parallel Thompson sampling.
+    \item We demonstrate that our acquisition strategy identifies top-performers from chemical libraries as or more efficiently than state-of-the-art alternatives for batched BO in two realistic molecular discovery settings. 
+\end{enumerate}
+
+
+\section{Maximizing the Probability of Including the Optimum}
+
+
+\subsection{Preliminaries}
+We first assume that there exists an expensive black box oracle function $f(\cdot)$ that maps each candidate $x_i$ to a scalar objective value $y_i$. Following \citet{hernandez-lobato_parallel_2017}, we assume that evaluations of $f$ are noise-free. Our aim is to solve the following optimization problem:
+\begin{equation}
+    x^* = \argmax_{x \in \mathcal{X}}~  f(x),
+\end{equation}
+where $\mathcal{X}$ is a fixed discrete design space %
+comprised of $N$ candidates $\{x_i\}_{i = 1, ..., N}$. 
+
+Bayesian optimization (BO) aims to solve this optimization using an iterative model-guided approach. In each iteration, we select $\batchsize$ candidates for parallel evaluation with the oracle $f$. We denote the set of acquired candidates $\acqbatch$. In each iteration, $f$ is evaluated for all $x_i$ in $\acqbatch$, and a surrogate model $\hat{f}$ that predicts $f$ is (re)trained with newly acquired data. An acquisition function utilizes surrogate model predictions on $x_i$ for $i = 1, ..., \ncandidates$ to select the next set of evaluations. The iterative procedure ends when some stopping criterion is met: computational or experimental resources are expended, a maximum number of iterations is reached, or a satisfactory value of $f$ is achieved. 
+
+The imperfect surrogate model $\hat{f}$ provides a probabilistic prediction of the objective function value(s) for one or more candidates. This distribution over possible values of $y$ for candidate $x$, denoted $p(y|x)$, may be described by a machine learning model such as a Gaussian process or Bayesian neural network. We may alternately have a surrogate model that does not form a continuous probability distribution but still enables sampling, e.g., through deep ensembling \citep{lakshminarayanan_simple_2017} or Monte Carlo dropout \citep{gal_dropout_2016}. Without loss of generality, we consider the prediction to be an integral over possible model parameters $\bm \theta$: %
+\begin{equation}
+    p(y|x) = \int_{\boldsymbol{\theta}} p(y|x, \boldsymbol{\theta}) p(\boldsymbol{\theta}) d\boldsymbol{\theta},
+\end{equation}
+where $p(\boldsymbol{\theta})$ does not truly have to represent a prior, but can represent a posterior distribution given some training data. We consider all candidates $x_i\in\mathcal{X}$ to be deterministic and fixed. %
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/overview.pdf}
+    \caption{Exploitative batch design by maximizing the likelihood of including the optimum, in the context of a single Bayesian optimization iteration. First, a surrogate model (or ensemble) is trained on acquired data. Second, samples are obtained from the joint posterior distribution over all candidates. When direct posterior sampling is impossible or inefficient, a multivariate Gaussian may be modeled from the true posterior to enable approximate posterior sampling. Third, we estimate from these samples the probability that each candidate is the true optimum. Fourth, the batch is populated with candidates most likely to be optimal; in doing so, the proposed strategy maximizes the probability that the batch contains the true optimum. In addition to the sampling-based approach visualized here, we describe alternative methods to approximate acquisition scores in Section \ref{sec:additional_strategies}.}
+    \label{fig:overview}
+\end{figure}
+
+\subsection{Deriving an acquisition function for optimal batch design}
+
+Most acquisition strategies in BO aim to balance exploitation and exploration. Exploitation prioritizes selections that are most likely to achieve the highest oracle score, while exploration %
+is intended to prevent a search from getting ``stuck'' in local optima. Conceptually, exploration is expected to contribute to a more reliable surrogate model and thereby benefit the optimization in the long run; a classic failure mode of BO within continuous design spaces is the oversampling of a single mode of the surrogate model posterior \citep{hernandez-lobato_predictive_2014}. In contrast, exploitation selects the best candidates at a given iteration without consideration of the impact on future iterations. We pursue a batch acquisition strategy that is purely exploitative, optimizing expected performance in the immediate iteration as if the optimization could be stopped at any time.\footnote{This is a realistic setting for molecular discovery campaigns. When the cost of evaluating $f$ varies across compounds in the design space, the number of iterations or oracle budget may be uncertain when the optimization begins.  %
+} Our exploitative acquisition strategy is visualized within the context of one BO iteration in Figure \ref{fig:overview}. %
+
+We aim to maximize the likelihood that the true optimum $\x^*$ exists in the acquired batch $\acqbatch$. An optimal batch of size $\batchsize$ solves the optimization: 
+\begin{equation}
+    \acqbatch^* = \argmax_{\acqbatch \subset \batch, |\acqbatch| = \batchsize} ~ \poptinbatch.
+    \label{eq:batch_design}
+\end{equation}
+We refer to this acquisition function as \name{} (multipoint Probability of Optimality), which can be equivalently defined as: 
+\begin{equation}
+    \poptinbatch = %
+        \sum_{x_i \in \acqbatch} \Pr(x^* = x_i \, | \,  \{ x_j \neq x^* \}_{x_j \in \acqbatch, j \neq i}),
+    \label{eq:sum_over_popt_before}
+\end{equation}
+where the probability of each selection being optimal is conditioned on all others not being optimal. We focus on continuous surrogate models with low but non-zero observation noise (e.g., Gaussian processes), such that the probability of two inputs having the exact same output is 0. Therefore, we may assume that the events $\{ \hat{f}(x^*) = \hat{f}(x_i) \}_{x_i \in \mathcal{X}}$ are mutually exclusive. In our estimation of Eq.~\ref{eq:sum_over_popt_before}, we will treat $\{ \hat{f}(x^*) = \hat{f}(x_i) \}$ as equivalent to $\{ x^* = x_i \}$, leading to the presumed mutual exclusivity of the events $\{ x^* = x_i \}_{x_i \in \mathcal{X}}$ and the following result:
+\begin{equation}
+    \poptinbatch = %
+        \sum_{x_i \in \acqbatch} \Pr(x^* = x_i).
+    \label{eq:sum_over_popt}
+\end{equation}
+ %
+An appropriate strategy to optimize the objective in Eq.~\ref{eq:sum_over_popt} is to approximate $\poptequals{i}$ for each candidate $x_i$ and select the top $\batchsize$ candidates based on %
+the resulting approximations.
+
+This acquisition score is deceptively simple to apply in practice. For a given $x_i$ in a list of candidates $\mathbf{x}$, we may evaluate $\poptequals{i}$ as the following equivalent integral or expectation:
+\begin{align}
+    \poptequals{i} &= P(f(x^*) = f(x_i))  \\
+    &= P(y_i > y_j ~ \forall ~ j \neq i) \label{eq:pairwise} \\
+    & = P( y_i = \text{max}( \mathbf{y}) \, ) \\
+    &= \int_{\mathbb{R}^N} \mathbbm{1}_{y_i = \text{max}( \mathbf{y})} ~ p(\mathbf{y} | \mathbf{x}) ~ d\mathbf{y} %
+    \\
+    &= \mathbb{E}_{\mathbf{y}\sim p(\mathbf{y} | \mathbf{x})} \left[ \mathbbm{1}_{y_i = \text{max}( \mathbf{y})}  \right].
+    \label{eq:indicator}
+\end{align}
+
+A special outcome of this batch design strategy is that \name{} is naturally a sum over individual acquisition scores. Batch acquisition functions that are extensions of sequential ones, such as multipoint expected improvement (qEI) \citep{ginsbourger_kriging_2010}, typically require evaluation of the entire batch at once. Myopic construction of large batches can only approximately optimize these batch-level acquisition functions. In contrast, due to the mutual exclusivity of the events $\{ x^* = \x_i \}$ under the circumstances defined previously, \name{} can be optimized %
+as a 
+batch-level acquisition function %
+without 
+the issue of non-additivity and resulting approximations faced by many myopic batch construction strategies. %
+Additionally, a sequential \name{} policy would be identical to the batched one, acquiring the single candidate with the greatest probability of being the optimum. 
+
+
+\subsection{Methods to approximate acquisition scores numerically}
+\label{sec:methods_to_approx}
+
+\subsubsection{Monte Carlo integration to approximate acquisition scores} 
+
+The expectation in Eq.~\ref{eq:indicator} may be approximated with $\nsamples$ samples from the surrogate model posterior:  
+\begin{align}
+    \poptequals{i} %
+    &\approx \frac{1}{M} \sum_{m=1}^M \mathbbm{1}_{y_i^{(m)} = \text{max}( \mathbf{y}^{(m)})}.
+    \label{eq:mc}
+\end{align}
+
+In practice, these may be samples from the posterior of a Gaussian process, predictions based on sampled parameters $\boldsymbol{\theta}^{(m)}$ from a Bayesian neural network, or predictions based on Monte Carlo dropout.
+The result in
+\ref{mc error bound} shows that
+candidates with a high probability of optimality are very likely to appear in the batch
+even with modest $M$, making a Monte Carlo estimate reasonable.
+Algorithm~\ref{alg:qpo_sampling} summarizes the implementation of \name{} using Monte Carlo sampling.
+
+\begin{algorithm}
+\caption{Bayesian optimization with \name{} using Monte Carlo integration}\label{alg:qpo_sampling}
+\begin{algorithmic}
+\State \textbf{Input:} design space $\mathcal{X}$, oracle function $f$, initial data $\mathcal{D}_0$, batch size $\batchsize$, number of samples $\nsamples$, number of iterations $T$
+\For{$t=1 \textbf{ to } T$}
+    \State Compute joint posterior $p(\mathbf{y}|\mathbf{x}, \bm \theta )$ over %
+    candidates $\bf{x}$
+    \For{$m=1 \textbf{ to } \nsamples$}
+    \State $\mathbf{y}^{(m)} \sim p(\mathbf{y}|\mathbf{x}, \bm \theta)$ \Comment{Sample from joint posterior}
+    \EndFor
+    \For{$i=1 \textbf{ to } |\bf x|$}
+    \State $\alpha_i\gets \frac{1}{M} \sum_{m=1}^M \mathbbm{1}_{y_i^{(m)} = \text{max}( \mathbf{y}^{(m)})}$ \Comment{Compute \name{} acquisition scores}
+    \EndFor
+    \State    $\acqbatch^* \gets \text{top-}k( \{x_i, \alpha_i \}_{i=1, ..., |\mathbf{x}|}, b)$ \Comment{Select $\batchsize$ candidates with greatest qPO scores}
+    \State Evaluate $y_i = f(x_i)$ for all $x_i \in \acqbatch^*$ \Comment{Call the oracle}
+    \State $\mathcal{D}_t \gets \mathcal{D}_{t-1} \cup \{x_i, y_i\}_{x_i \in \acqbatch^*}$ \Comment{Update training data}
+\EndFor
+\State \textbf{Return:} Acquired data $\mathcal{D}_T $
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Enabling efficient sampling by approximating the posterior as a multivariate Gaussian} %
+The only requirement for this approximation of acquisition scores is that the posterior can be sampled. However, efficient and widespread algorithms exist to sample from Gaussian distributions in particular \citep{vono_high-dimensional_2022, aune_iterative_2013}. In practice, the computational cost of posterior sampling may be reduced by sampling from a multivariate Gaussian that approximates the true posterior. This approximate posterior may be obtained from an arbitrary number of %
+samples from the true posterior. For example, one might obtain a multivariate Gaussian posterior %
+based on the predictions of a neural network ensemble; this could apply for an ensemble of any model architecture and for an arbitrary number of models in the ensemble. Specifically, given a smaller number ($<M$) of samples, one can construct an empirical mean and covariance matrix from which additional samples can be drawn.%
+
+\paragraph{Coping with low probability events} If %
+few candidates are perceived by the model as having a substantial probability of being optimal, $\poptequals{i}$ may be estimated to be zero for many candidates for finite $M$. Filling a batch of size $\batchsize$ may emerge as a challenge if there are fewer than $\batchsize$ non-zero acquisition scores. A simple way to address this issue is to fill the remainder of the batch using an alternative metric (e.g., greedy or upper confidence bound). Methods designed for rare event estimation \citep{de_boer_tutorial_2005, cerou_sequential_2012, gibson_rare-event_2022} may alternatively be implemented to assign acquisition scores to candidates with small probabilities of optimality. 
+
+\subsubsection{Additional strategies for numerical approximation of qPO acquisition scores} \label{sec:additional_strategies} %
+
+Techniques beyond Monte Carlo integration may also enable the estimation of \name. %
+If the posterior is a multivariate Gaussian, the acquisition score in Eq.~\ref{eq:pairwise} can be recast as an orthant probability through a change of variables, providing an alternative approach to predicting $\poptequals{i}$ that does not rely on posterior sampling \citep{azimi_batch_2010, azimi_bayesian_2012}. This orthant probability, defined in \ref{sec:app_orthants}, may be approximated analytically using a whitening transformation \citep{azimi_bayesian_2012}. 
+Additionally, \citet{cunningham_gaussian_2013} propose an expectation propagation approach \citep{minka_expectation_2001} to directly approximate orthant probabilities, %
+and \citet{gessner_integrals_2020} introduce an integrator for truncated Gaussians that accurately estimates even small Gaussian probabilities. The orthant probabilities may also be estimated using numerical integration, which involves Cholesky decomposition followed by Monte-Carlo sampling \citep{genz_numerical_1992}. Alternative methods to estimate high-dimensional orthant probabilities \citep{miwa_evaluation_2003, craig_new_2008, ridgway_computation_2016} may also be applied to the estimation of qPO acquisition scores. We consider the implementation of these methods future work.  
+
+
+
+\section{Related Work}
+
+\subsection{Batched Bayesian optimization}
+\label{sec:related_work_bo}
+A naive batch construction strategy is to select the top $\batchsize$ compounds based on an acquisition function designed for sequential BO. However, because the utility of a given selection depends on other selections, the top-$\batchsize$ approach does not guarantee an optimal batch in general \citep{garnett_bayesian_2023}. %
+
+One general approach to batch design is to, as closely as possible, replicate the behavior of a sequential policy. \citet{azimi_batch_2010} define an acquisition function that minimizes the discrepancy between the batch policy and sequential policy behavior. Batches may alternatively be constructed iteratively (myopically) by hallucinating the outcomes of previous selections in the batch. This enables the optimization of batch-level acquisition functions like multipoint expected improvement \citep{ginsbourger_kriging_2010} and batch upper confidence bound \citep{desautels_parallelizing_2014}. However, this approach is typically limited to cases where the surrogate model can efficiently be updated with hallucinated or pending data. Further, batches that are constructed myopically only approximately optimize the batch-level acquisition function. In contrast, our approach does not rely on hallucination and can be applied to any posterior which can be sampled or modeled as a multivariate Gaussian. 
+
+Diversity heuristics have also been applied to prevent the selection of candidates that would provide minimal marginal information gain. \citet{gonzalez_batch_2016} use local penalization to construct diverse batches. Determinantal point processes have also been used for batch diversification in discrete optimization \citep{kathuria_batched_2016, nava_diversified_2022}. \citet{nguyen_budgeted_2016} and \citet{groves_efficient_2018} model the objective landscape as mixture of Gaussians and acquire predicted local optima, aiding in the design of more diverse batches. Strategies based on diversity heuristics generally assume that diverse batches support exploration, not necessarily exploitation. We describe in Section \ref{sec:comparison_to_pts} how our method does capture diversity, even with exploitation as the sole motivation. 
+
+Sequential acquisition functions that randomly select candidates by sampling, like Thompson sampling, can be extended to the batch case by increasing the number of random samples. %
+Parallel Thompson sampling involves sampling from the model posterior and acquiring the optimum point from each sample \citep{hernandez-lobato_parallel_2017}. TS-RSR uses a similar methodology, but selects from each sample the point that minimizes a regret to uncertainty ratio \citep{ren_ts-rsr_2024}. \citet{dai_sample-then-optimize_2022} extend neural Thompson sampling \citep{zhang_neural_2020} to the batch setting; each of $\batchsize$ randomly initialized neural networks informs the acquisition of one selection in the batch. %
+The randomness inherent to Thompson sampling and related acquisition strategies is expected to contribute to the search's exploration. \name, in contrast, is exploitative in nature and intended to make selections deterministically. %
+
+\subsection{Comparison with alternative batch strategies}
+\label{sec:comparison_to_pts}
+
+We continue with an illustrative example to highlight how the proposed approach captures elements of diversity. 
+Consider the following predictive distribution for $\mathbf{y}$ given $\mathbf{x}$: %
+\begin{align}
+\mathbf{y} \sim \mathcal{N}\left( \begin{bmatrix} 10 \\ 5 \\ 0 \end{bmatrix}, \begin{bmatrix} 101 & 100 & 0 \\ 100 & 101 & 0 \\ 0 &  0 & 1 \end{bmatrix} \right)  
+\label{eq:toy_problem}
+\end{align}
+The probabilities of $x_1$, $x_2$, and $x_3$ being optimal are roughly 84\%, 0\%, and 16\%, respectively. For $\batchsize=2$, our acquisition strategy would select $x_1$ and $x_3$, while a greedy strategy based only on the posterior mean vector would select $x_1$ and $x_2$. We might also expect a diversity-aware acquisition strategy to select $x_1$ and $x_3$ if we assume that the high covariance between $x_1$ and $x_2$ is due to design space similarity. This assumption is particularly valid for molecular applications when the surrogate model is a Gaussian process with a Tanimoto kernel. Because the Tanimoto kernel defines prior covariance based on structural similarity, structurally similar compounds will have higher covariance. Our method naturally captures this sense of diversity through model covariance without requiring clustering or other definitions of diversity that are not inherent to the model itself. 
+
+When Monte Carlo integration is used to approximate \name, our method  resembles Thompson sampling, particularly the parallel Thompson sampling (pTS) approach proposed by \citet{hernandez-lobato_parallel_2017}. Both methods choose a batch of $\batchsize$ inputs by selecting the maxima of posterior samples. %
+Our approach differs from parallel Thompson sampling in two notable ways. First, in the case of $\batchsize=1$,
+Thompson sampling chooses candidates \emph{randomly}
+with probability \emph{proportional} to $\Pr(x^*=x_i)$, allowing pTS to balance exploration and exploitation.
+qPO aims to choose candidates
+\emph{deterministically} that \emph{maximize}
+$\Pr(x^*=x_i)$, making it a purely exploitative strategy. %
+While forgoing exploration may sound deleterious in an iterative setting, empirically we observe that our approach outperforms pTS even in iterative settings (Section \ref{sec:experiments}). 
+Second, \name{} generalizes
+to the $\batchsize\geq2$ case
+ differently from pTS.
+As described in Algorithm~2 of \citet{hernandez-lobato_parallel_2017},
+if the optimum input for a particular sample is already in the batch,
+then the second most optimal input is added (or the third if the second most optimal input is already in the batch too, and so forth).
+If the model makes highly correlated predictions,
+this will result in a batch filled with candidates that have highly correlated predictions. In the analytical example shown above in Eq.~\ref{eq:toy_problem}, pTS will be more likely to select $x_1$ and $x_2$ than $x_1$ and $x_3$. 
+In contrast, once our method has added a first candidate to the batch,
+subsequent selections are chosen conditioned on existing selections not being optimal.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Baselines and evaluation metrics}
+We apply \name{} to two model-guided searches of chemical libraries and compare its performance to common batch acquisition functions: pTS \citep{hernandez-lobato_parallel_2017}, upper confidence bound (UCB), greedy, and multipoint expected improvement (qEI) \citep{ginsbourger_kriging_2010}. We analyze two metrics---the fraction of the true top-$k$ acquired and the average oracle value of the acquired top-$k$---and observe that our method performs as well as or better than baselines according to both. 
+
+Both demonstrations use a Tanimoto Gaussian process surrogate model with a constant mean that operates on 2048-length count Morgan fingerprints. \name{} is implemented following Eq.~\ref{eq:mc} using $\nsamples=10{,}000$. Pairs of candidates $\{x_i,x_j\}$ for which $\poptequals{i}=\poptequals{j}$ are ranked by their predicted mean. This also applies to any case where $\poptequals{i}=0$ (see \ref{sec:app_qpo}). 
+The cost of sampling from a multivariate Gaussian posterior for $\ncandidates$ candidates is $O(\ncandidates^3)$ due to the Cholesky decomposition \citep{vono_high-dimensional_2022}. To alleviate the computational cost of sampling-based methods---qEI, pTS, and \name{}---for large values of $\ncandidates$, in each iteration we reduce the set of $\ncandidates$ candidates to $10{,}000$ using a greedy metric. We then apply the respective acquisition strategy to select a batch from the smaller set of $10{,}000$ candidates. %
+Because this may impact the exploration characteristics of pTS and qEI, we include an additional baseline (``random10k'') that randomly selects compounds from these top $10{,}000$ candidates. Experimental details can be found in \ref{sec:experiment_details}. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/antibiotics.pdf}
+    \caption{Optimization performance for the iterative discovery of antibiotic compounds. (A-C) Retrieval of the true top 0.5\%, 1\%, and 5\%, representing 197, 393, and 1,962 top-performing compounds, respectively. (D-F) Average oracle value of the top 10, 50, and 100 acquired compounds, respectively, where a lower oracle value indicates greater antibiotic activity. Shaded regions denote $\pm$ one standard error of the mean across ten runs. Data is provided in \ref{sec:tables}, Table \ref{tab:antibiotics}. \acronyms}
+    \label{fig:antibiotics}
+\end{figure}
+
+\subsection{Application to antibiotic discovery}
+\label{sec:antibiotics}
+Our first demonstration applies Bayesian optimization to the retrospective identification of putative antibiotics with activity against \textit{Staphylococcus aureus}. \citet{wong_discovery_2024} experimentally screened 39,312 compounds for growth inhibition of \textit{S. aureus}. 
+In this case study, we apply BO to retrospectively search this experimental dataset for compounds with the lowest reported mean growth of \textit{S. aureus}, indicating greatest antibiotic activity. For each run, we randomly select an initial batch of 50 compounds and select 50 new compounds at each of 10 iterations. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/diversity.pdf}
+    \caption{Batch diversity in the first iteration of a model-guided optimization loop for antibiotic discovery. Networks depict selected batches in Iteration 1, the first iteration after training on a randomly selected (random seed of 7) initial batch of 50 compounds with corresponding mean growth inhibition values from \citet{wong_discovery_2024}. Nodes represent acquired compounds, and edges are drawn for any compound pair with Tanimoto similarity greater than 0.4. Nodes are positioned using the Fruchterman-Reingold force-directed algorithm \citep{fruchterman_graph_1991}. Histograms portray the distribution of Tanimoto similarity scores for all pairs in the selected batch. \name{} and pTS most greatly promote diversity in this analysis, with UCB selecting the least diverse batch. \acronyms }%
+    \label{fig:antibiotics-div}
+\end{figure}
+
+Optimization performance of \name{} and competitive baselines is shown in Figure \ref{fig:antibiotics}. \name{} performs best on average according to all metrics plotted in Figure \ref{fig:antibiotics}. This demonstrates that, although our approach is motivated by pure exploration, it can empirically outperform those that intend to consider both exploitation and exploration. 
+
+We also analyze batch diversity in this empirical setting to validate our hypothesis that \name{} implicitly captures diversity (Section \ref{sec:comparison_to_pts}). The diversity of acquired batches across acquisition strategies is visualized in Figure \ref{fig:antibiotics-div} (details in \ref{sec:app_diversity}). \name{} and pTS appear to obtain the most diverse selections, with UCB selecting the least diverse batch. While this visualization depicts acquired batches in a single iteration, these results indicate that qPO can achieve diversity without imposing randomness or diversity heuristics. 
+\subsection{Application to the design of organic electronics} %
+\label{sec:qm9}
+We next demonstrate \name{} on the pursuit of molecules from the QM9 dataset of 133K compounds that maximize the DFT-calculated HOMO-LUMO gap \citep{ramakrishnan_quantum_2014, ruddigkeit_enumeration_2012}. We begin each search with a randomized initial batch of 100 compounds and select 100 more at each of 20 subsequent iterations.
+Optimization performance according to top-$k$ metrics is shown in Figure \ref{fig:qm9}. As in the previous study, \name{} performs as well as or better than all baselines. In this case, qEI is the most competitive baseline, performing comparably with or very slightly worse than \name{} across all evaluation metrics. We observe the greatest improvement to top-$k$ optimization performance when considering small values of $k$ (e.g., Figure \ref{fig:qm9}A and \ref{fig:qm9}D). This result aligns with \name's primary focus on identifying the true global optimum. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/qm9_1.pdf}
+    \caption{Optimization performance on the exploration of the 133K QM9 dataset for compounds with large HOMO-LUMO gaps. (A-C) Retrieval of the true top 0.01\%, 0.1\%, and 1\%, representing 14, 134, and 1,339 top-performing compounds, respectively. (D-F) Average oracle values of the top 10, 50, and 100 acquired compounds. %
+    Shaded regions denote $\pm$ one standard error of the mean across ten runs (\ref{sec:tables}, Tables \ref{tab:qm9_1} and \ref{tab:qm9_2}). \acronyms }
+    \label{fig:qm9}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+We have proposed an exploitative batch acquisition function (\name) for discrete Bayesian optimization %
+that maximizes the likelihood that the batch contains the true optimum. \name{} is equal to the sum over individual acquisition scores and therefore circumvents the combinatorial challenge of optimizing a batch-level acquisition score. 
+We explain how the treatment of model covariance implicitly captures diversity and how it differentiates \name{} from parallel Thompson sampling in subtle but meaningful ways. Empirically, our method efficiently identifies an equivalent or higher percentage of top-performing candidates when compared to batched BO alternatives. 
+The most notable improvement to top-$k$ metrics is observed for smaller values of $k$, consistent with the acquisition strategy's goal of acquiring the true global optimum.
+
+The proposed batch acquisition strategy has some notable limitations.
+First, \name{} cannot be computed analytically (in an exact sense), necessitating a Monte Carlo estimate. Alternative methods for estimating the probability of a candidate's optimality, such as expectation propagation, may reduce the computational cost of implementing \name.
+Second, \name{} may fail to select diverse batches in the presence of high observation noise, which %
+will reduce the relative impact of covariance on \name{} scores\footnote{
+    For example, if $\lambda I$ were added to the covariance matrix in Eq.~\ref{eq:toy_problem}, $(x_1, x_2)$ would be the optimal batch for sufficiently large $\lambda$.
+}.
+Theoretical analysis of the exploration-exploitation trade-off in the finite iteration setting may uncover potential failure modes of \name{} and 
+further support the empirical results observed here. 
+
+
+
+
+

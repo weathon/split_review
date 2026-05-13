@@ -1,0 +1,224 @@
+\title{Pruning Aggregation Parameters for Large Language Models}
+
+\begin{abstract}
+Pruning is a highly effective approach for compressing large language models (LLMs). By strategically reducing model size, pruning significantly decreases both latency and GPU memory usage during inference, resulting in more efficient and cost-effective deployment of these models. Despite their effectiveness, current structured pruning algorithms have limitations. They still require extensive continued pre-training on large datasets to achieve model compression. Moreover, most of these methods are unable to reduce the memory usage of the key-value cache during generation tasks. In this work, we propose a novel pruning algorithm that requires no additional training and targets specific parameters within LLMs. We classify the model's parameters into three categories: aggregation, transformation, and normalization. Our method primarily focuses on pruning the aggregation parameters in the higher layers of the model. To further improve the performance of the pruned LLM, we also introduce a rescaling parameter that adjusts the output of the pruned block. We conduct comprehensive experiments on a wide range of LLMs, including LLaMA3.1-8B/70B, Qwen2-7B/72B, Gemma2-9B, and Mistral-7B-v0.3. Our evaluation includes both generation and discriminative tasks across various benchmarks. The results consistently demonstrate that our method outperforms recent block pruning methods. This improvement is particularly notable in generation tasks, where our approach significantly outperforms existing baselines.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) (Touvron et al., 2023; OpenAI et al., 2023; Jiang et al., 2023; Yang et al., 2024; Gemma2-Team et al., 2024), pre-trained on extensive text data from across the internet, have achieved remarkable performance in downstream tasks such as information retrieval (Asai et al., 2024), code generation (Guo et al., 2024a), and mathematical reasoning (Wang et al., 2023; Yang et al., 2023; Huang et al., 2024). These LLMs, however, contain a huge number of parameters, resulting in substantially slower inference speed compared to their smaller counterparts. To address this issue in generation tasks, a common approach is to use key-value (KV) cache (Pope et al., 2023), which stores intermediate computation results. While this technique effectively trades space for time, speeding up inference, it also significantly increases GPU memory consumption. As reported in Zhou et al. (2024), the KV cache size can exceed the LLM model size during peak usage, and the inference latency increases as the KV cache size grows. As a result, one major bottleneck for LLM serving is GPU memory consumption.  
+
+Recent strategies to improve LLM efficiency primarily fall into two categories. The first category focuses on the models themselves, aiming to reduce inference latency and GPU memory consumption through pruning (Frantar & Alistarh, 2023; Ma et al., 2023; Jaiswal et al., 2023; Xia et al., 2024; Ashkboos et al., 2024; Xu et al., 2024; Jaiswal et al., 2024a; Zhang et al., 2024c; Dong et al., 2024c; Yin et al., 2024a;b; Zhao et al., 2024) or quantizing (Frantar et al., 2023; Xiao et al., 2023; Chee et al., 2023; Lin et al., 2024). The second category targets the KV cache, specifically for generation tasks, by either compressing (Dong et al., 2024b) or quantizing (Zhang et al., 2024d; Liu et al., 2024b) it to decrease GPU memory usage during inference. Among these approaches, structured pruning (Xia et al., 2024) searches for crucial substructures within the model while pruning other substructures through continued pretraining on extensive text datasets. However, a significant limitation of most current pruning algorithms is their inability to reduce the GPU memory consumption within the KV cache. To address this issue, KV cache compression algorithms like LESS (Dong et al., 2024b) have been proposed, which maintain a constant-size KV cache by generating condensed representations of less important tokens. These approaches (Xia et al., 2024; Dong et al., 2024c), however, typically require designing specific learning objectives and loss functions, followed by extensive retraining of the base model on large text corpora to achieve the desired goal. We argue that these methods require an additional training phase, introducing significant computational overhead. Moreover, these approaches may struggle to maintain performance in domains not well-covered in the extra training data (Xia et al., 2024). This raises an important question: Can we develop a training-free algorithm that effectively reduces GPU memory consumption with respect to the KV cache? Our work addresses this challenge by drawing inspiration from an unexpected source: the intriguing connections between Graph Neural Networks (GNNs) (Kipf & Welling, 2016; 2017; Hamilton et al., 2017; Veliˇckovi´c et al., 2019) and LLMs. By exploring the parallels in their computation processes, we uncover insights that lead to a novel, training-free method for improving LLM efficiency.  
+
+Recent studies (Joshi, 2020; Ying et al., 2021; Kim et al., 2022; Nguyen et al., 2023; Barbero et al., 2024) have uncovered connections between GNNs and Transformers (Vaswani et al., 2017). The fundamental principle of GNNs is to aggregate information from neighboring nodes, resulting in smooth representations across the graph. This principle finds a parallel in LLMs, where the flow of contextual information can be conceptualized as a GNN operating on a fully connected graph, with connections governed by a causal attention mask. In this conceptualization, the process involves aggregating information from previous tokens to update the representations of subsequent ones. However, this aggregation process is not without challenges. In GNNs, while increasing the number of layers allows for the incorporation of higher-order neighbor information and potentially smoother representations, it also risks over-smoothing (Li et al., 2018). This phenomenon can lead to node representations converging to similar values, ultimately making them indistinguishable from  
+
+![](images/e9a0f9d6f9dd95b81263adb0a9542c21e9ff6607314436388fb666a85a55cabc.jpg)  
+Figure 1: Performance comparison between GCNII and its efficient variant on the Pubmed dataset. The experiment evaluates both models with varying depths $\mathcal{L}=2$ , 4, 8, and 16). The efficient GCNII demonstrates performance comparable to the original GCNII across all tested depths, despite its reduced computational complexity.  
+
+one another. To address this issue in GNNs, GCNII (Chen et al., 2020a) has been developed, utilizing initial residual connections (Huang et al., 2017) and identity mappings, formulated as:  
+
+$$
+\pmb{H}^{(\ell+1)}=\sigma\left(\left(\left(1-\alpha_{\ell}\right)\pmb{\tilde{A}}\pmb{H}^{(\ell)}+\alpha_{\ell}\pmb{H}^{(0)}\right)\left(\left(1-\beta_{\ell}\right)\pmb{I}+\beta_{\ell}\pmb{H}^{(\ell)}\right)\right),
+$$  
+
+where $\tilde{\pmb{A}}=\tilde{\pmb{D}}^{-1/2}\tilde{\pmb{A}}\tilde{\pmb{D}}^{-1/2}$ , $\pmb{A}$ is the adjacency matrix, $\tilde{\pmb{A}}=\pmb{A}+\pmb{I}$ , $\tilde{D}$ is the degree matrix of $\tilde{A}$ , and $\alpha\ell,\beta_{\ell}$ , and $W^{(\ell)}$ are the $\ell\cdot$ -th layer parameters. Although GCNII addresses over-smoothing, its accuracy improves by only $1.6\%$ when increasing layers from 2 to 16 (Figure 1), at the cost of an eightfold increase in computation. Aggregation in GNNs is particularly computationally expensive, especially in large graphs, accounting for up to $90\%$ of total training and inference time (Liu et al., 2023). GCNII can be made more efficient by reducing the number of aggregation operations during inference while keeping the training process unchanged. This modified version can be formulated as follows:  
+
+$$
+\begin{array}{r}{H^{(\ell+1)}=\left\{\begin{array}{l l}{\displaystyle\sigma\left(\left(1-\alpha_{\ell}\right)\Big[\widetilde{\pmb{A}}H^{(\ell)}\Big]+\alpha_{\ell}{H^{(0)}}\right)\left(\left(1-\beta_{\ell}\right)I+\beta_{\ell}W^{(\ell)}\right)\right)}&{\mathrm{if~}\ell\leq\frac{L}{2},}\\ {\displaystyle\sigma\left(\left(\left(1-\alpha_{\ell}\right)\Big[\pmb{H^{(\ell)}}\Big]+\alpha_{\ell}{H^{(0)}}\right)\left(\left(1-\beta_{\ell}\right)I+\beta_{\ell}{W^{(\ell)}}\right)\right)}&{\mathrm{if~}\ell>\frac{L}{2},}\end{array}\right.}\end{array}
+$$  
+
+where $L$ is the depth of GCNII. As shown in Figure 1, we achieve comparable performance to GCNII while halving the computational cost of aggregation during inference.  
+
+This phenomenon motivates us to explore whether a similar approach could be applied to LLMs. Similar to the computationally expensive aggregation in GNNs, the self-attention module in LLMs poses significant computational challenges. It exhibits quadratic time and memory complexity with  
+
+Algorithm 1 LLM inference with KV cache at each layer   
+1: Input: Current token’s hidden state $\pmb{H}_{t}\ \in\ \mathbb{R}^{1\times d}$ , previous keys $K_{\mathrm{cache}}~\in~\mathbb{R}^{(t-1)\times(h\times d_{k})}$ , previous values $V_{\mathrm{cache}}\in\mathbb{R}^{(t-1)\times(h\times d_{k})}$   
+2: Step 1. Self-Attention:   
+3: Apply Layer Normalization: $\begin{array}{r}{H_{t}^{\prime}=\pmb{w}_{1}\odot\left(\frac{\pmb{H}_{t}}{\sqrt{\frac{1}{d}\sum_{i=1}^{d}\left(\left[\pmb{H}_{t}\right]_{:,i}\right)^{2}+\epsilon}}\right)}\end{array}$ , where $\pmb{w}_{1}\in\mathbb{R}^{d}$   
+4: Apply Linear Projection: ${\cal Q}_{t}\;=\;{\cal H}_{t}^{\prime}{\cal W}_{\cal Q}$ , ${\cal K}_{t}\ =\ H_{t}^{\prime}W_{K}$ , $\dot{V_{t}}~=~H_{t}^{\prime}W_{V}$ , where $W_{Q}~\in$ $\mathbb{R}^{d\times(h\times g\times d_{k})}$ , $d=h\times g\times d_{k}$ , and ${\pmb{W}}_{K},{\pmb{W}}_{V}\in\mathbb{R}^{d\times(h\times d_{k})}$   
+5: Update KV Cache: $\begin{array}{r l}&{\mathrm{\boldmath~\Lambda~}\times g\,\times\,a_{k},\,\mathrm{ant}\,\,\nu\nu_{K},\,\nu\nu_{V}\,\in\,\mathbb{R}^{6}}\\ &{\mathrm{\boldmath~\Lambda~}\boldsymbol{K}_{\mathrm{cache}}\,\,\in\,\,\mathbb{R}^{t\times(h\times d_{k})}\,\mathrm{\boldmath~\leftarrow~}\,\mathrm{Concat}\,(\boldsymbol{K}_{\mathrm{cache}},\boldsymbol{K}_{t}),\,V_{\mathrm{cache}}\,\mathrm{\boldmath~\in~}\,\mathbb{R}^{t\times(h\times d_{k})}\,\mathrm{\boldmath~\leftarrow~}\,}\\ &{\mathrm{\boldmath~\Lambda~}\boldsymbol{\mathrm{and}}\,\,\boldsymbol{V}_{\mathrm{cache}};\,\textbf{Q}\in\,\,\mathbb{R}^{1\times h\times g\times d_{k}}\,\mathrm{\boldmath~\leftarrow~}\,\mathrm{Reshape}\,(Q_{t}),\,\mathsf{K}\,\in\,\,\mathbb{R}^{t\times h\times d_{k}}\,\mathrm{\boldmath~\leftarrow~}\,}\end{array}$ Concat $\left(V_{\mathrm{cache}},V_{t}\right)$   
+6: Reshape $Q_{t}$ , $K_{\mathrm{cache}}$ Reshape $\langle K_{\mathrm{cache}}\rangle$ , $\forall\in\mathbb{R}^{t\times h\times d_{k}}\gets\mathrm{Reshape}\left(V_{\mathrm{cache}}\right)$   
+7: Apply Rotary Position Embedding (RoPE): Q ←RoPE (Q), $\mathsf{K}\gets\mathrm{RoPE}\left(\mathsf{K}\right)$ , where RoPE is parameter-free   
+8: Repeat $\kappa$ and $\mathbf{\upnu}$ : $\mathbf{K}^{\prime}\,\in\,\mathbb{R}^{t\times h\times g\times d_{k}}\,\leftarrow\,\mathrm{Repeat}\,(\mathbf{K}),\,\mathbf{V}^{\prime}\,\in\,\mathbb{R}^{t\times h\times g\times d_{k}}\,\leftarrow\,\mathrm{Repeat}\,(\mathbf{V}),$ where $\mathsf{K}_{:,h_{k},:g,:}^{\prime}=\mathsf{K}_{:,h_{k},}$ : and $\begin{array}{r}{\mathsf{V}_{:,h_{k},:g,:}^{\prime}=\mathsf{V}_{:,h_{k},:}}\end{array}$ ,:   
+9: Compute Attention Scores $\pmb{A}\in\mathbb{R}^{1\times t\times h\times g}$ $\begin{array}{r}{{\boldsymbol\mathrm{\boldmath~\Lambda~}}^{\prime}\colon{\bf{A}}=\mathrm{softmax}\left(\frac{{\bf{Q}}{\bf{K}}^{\prime T}}{\sqrt{d_{k}}}\right),\mathrm{where~}{\bf{K}}^{\prime T}\in\mathbb{R}^{t\times h\times d_{k}\times g}}\end{array}$   
+10: Aggregate: $\mathsf{H}_{\mathrm{attn}}=\boxed{\pmb{\mathsf{A}}\pmb{\mathsf{V}}^{\prime}}$ through the second dimension $\triangleright$ Aggregation over the context   
+11: Reshape $H_{\mathrm{{attn}}}$ : $H_{\mathrm{attn}}\in\mathbb{R}^{1\times d}\leftarrow\mathrm{Reshape}\left(\mathbf{H}_{\mathrm{attn}}\right)$   
+12: Add Residual Connection: $H_{t}=H_{t}+H_{\mathrm{attn}}W_{O}$ , where $W_{O}\in\mathbb{R}^{d\times d}$   
+13: Step 2. Feedforward Network (FFN):   
+14: Apply Layer Normalization: $\begin{array}{r}{H_{t}^{\prime}=w_{2}\odot\left(\frac{H_{t}}{\sqrt{\frac{1}{d}\sum_{i=1}^{d}\left(\left[H_{t}\right]_{:,i}\right)^{2}+\epsilon}}\right)}\end{array}$ , where $\pmb{w}_{2}\in\mathbb{R}^{d}$   
+15: Apply FFN: $H_{\mathrm{FFN}}\ =\ \left(\sigma\left(H_{t}^{\prime}W_{\mathrm{gate}}\right)\odot\left(\dot{H}_{t}^{\prime}W_{\mathrm{up}}\right)\right)W_{\mathrm{down}}$ , where $\sigma$ is non-linear activation function, $W_{\mathrm{gate}}$ , $W_{\mathrm{up}}\in\mathbb{R}^{d\times d_{i}}$ , and $W_{\mathrm{down}}\in\mathbb{R}^{d_{i}\times d}$   
+16: Add Residual Connection: $\pmb{H}_{t}=\pmb{H}_{t}+\pmb{H}_{\mathrm{FFN}}$   
+17: Output: Updated keys $K_{\mathrm{cache}}$ , updated values $V_{\mathrm{cache}}$ , and updated $H_{t}$  
+
+respect to sequence length (Dao et al., 2022), making it a bottleneck in LLM serving. In this work, inspired by the efficient version of GCNII discussed earlier, we propose a training-free pruning strategy called AggregationPruner that targets only the query and key parameters in the higher layers of LLMs. By selectively pruning these aggregation parameters, AggregationPruner compresses the model and achieves a significant reduction in GPU memory consumption associated with the KV cache during generation tasks. Considering the complex and black-box nature of LLMs, our approach carefully avoids pruning transformation or normalization parameters to minimize the potential negative impacts of pruning on downstream tasks. To further enhance performance, we incorporate a rescaling parameter for the output of pruned blocks. Extensive experiments demonstrate that our method outperforms recent block pruning algorithms (Men et al., 2024; Zhong et al., 2024; Gromov et al., 2024; He et al., 2024; Siddiqui et al., 2024; Liu et al., 2024a; Zhang et al., 2024a; Jaiswal et al., 2024b; Chen et al., 2024; Kim et al., 2024) across a wide range of downstream tasks and testing LLMs. Notably, our approach shows significant performance improvement in generation tasks while maintaining the same memory consumption with Self-AttentionPruner and LayerPruner (Gromov et al., 2024; He et al., 2024) during inference.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+
+
+\section{2.1 DECODER-ONLY LARGE LANGUAGE MODEL  }
+
+
+In decoder-only LLMs, information flows through self-attention modules, with each token aggregating context from all preceding tokens in the sequence. This autoregressive process enables the model to generate each subsequent token based on the information from earlier tokens. To preserve the causal structure of language generation during training, attention is masked, preventing tokens from accessing information from future positions in the sequence. For a given input sentence $\mathbf x=\{x_{1},\ldots,x_{n}\}$ , LLMs employ a standard language modeling objective. This objective aims to maximize the following: (Radford et al., 2018):  
+
+Table 1: Classification of LLM layer parameters based on their functional roles.   
+
+![](images/9007e8bfca418c79c3da94db1ce37b7850e3499af684bd6bb3628897d3488501.jpg)  
+
+$$
+L(\pmb{x})=\sum_{i}\log P\left(x_{i}\mid x_{i-1},\cdots,x_{1};\Theta\right),
+$$  
+
+where $P\left(x_{i}\mid x_{i-1},\cdot\cdot\cdot,x_{1};\Theta\right)$ represents the probability of token $x_{i}$ given all preceding tokens and the model parameters $\Theta$ . Conceptually, LLMs can be viewed as operating on a complete graph structure, with tokens serving as nodes and attention scores as edges. Both LLMs and GNNs employ a similar strategy for information processing: they iteratively refine representations by incorporating contextual information. In LLMs, this context is derived from preceding tokens in a sequence, while in GNNs, it comes from neighboring nodes in a graph. Despite operating in different domains, these two model types share a fundamental approach to information aggregation and propagation. This shared mechanism allows both LLMs and GNNs to generate context-aware representations.  
+
+Algorithm 1 illustrates the inference computation process of a decoder-only LLM layer. We categorize the model parameters into three functional groups: aggregation, transformation, and normalization, as detailed in Table 1. Aggregation parameters, such as $W_{Q}$ and $W_{K}$ , are used to compute attention scores within the adjacency matrix $\pmb{A}$ . These parameters enable the model to aggregate information from preceding tokens, integrating context and capturing dependencies among tokens. Transformation parameters, such as $W_{V}$ , $W_{O}$ , and $W_{\mathrm{gate}}$ , apply linear transformations and feedforward operations to the hidden states of tokens. These parameters are crucial for the model’s ability to process input and generate output. Normalization parameters, like $\pmb{w}_{1}$ and $\pmb{w}_{2}$ , play a significant role in stabilizing the training process. By maintaining a consistent scale in the output, they help prevent issues such as vanishing or exploding gradients. In this work, we propose a pruning algorithm that specifically targets the aggregation parameters to improve the LLMs’ efficiency.  
+
+
+
+\section{2.2 BLOCK PRUNING STRATEGIES  }
+
+
+Recent research (Men et al., 2024; Zhong et al., 2024; Gromov et al., 2024; He et al., 2024; Siddiqui et al., 2024) has revealed the presence of redundant parameters in the higher layers of LLMs. These studies demonstrate that selectively pruning certain blocks within these higher layers has little performance degradation on downstream discriminative tasks. These pruning strategies can be classified into three distinct approaches: Self-AttentionPruner, FFNPruner, and LayerPruner. Each targets different components of the model:  
+
+• Self-AttentionPruner: This method bypasses the self-attention computation module (Step 1 in Algorithm 1), removing parameters across all three categories: Aggregation, Transformation, and Normalization.   
+• FFNPruner: By skipping the feed-forward network computation process (Step 2), this approach primarily prunes Transformation and Normalization parameters.   
+• LayerPruner: This method skips an entire layer, resulting in the removal of all parameter types within that layer.  
+
+These studies have introduced heuristic metrics to evaluate the importance of blocks within each layer of LLMs. A consistent finding across these works is the greater significance of parameters in lower layers compared to those in higher layers. Consequently, pruning algorithms typically target parameters in higher layers while preserving those in lower layers.  
+
+This phenomenon can be intuitively explained through the lens of GNNs. The fundamental principle of GNNs is to aggregate information from neighboring nodes to achieve smoother representations. However, as the number of GNN layers increases, node representations tend to converge towards a  
+
+Algorithm 2 LLM inference with AggregationPruner at each layer   
+1: Input: Current token’s hidden state $\pmb{H}_{t}\in\mathbb{R}^{1\times d}$   
+2: Step 1. Transformation without Self-Attention:   
+3: Apply Layer Normalization as Line 3 in Algoritm 1   
+4: Apply Linear Projection: $V_{t}=H_{t}^{\prime}W_{V}$ , where $W_{V}\in\mathbb{R}^{d\times(h\times d_{k})}$   
+5: Reshape $V_{t}$ : $\mathbf{V}\in\mathrm{\mathbb{R}}^{1\times h\times d_{k}}\leftarrow$ Reshape $\left(V_{t}\right)$   
+6: Repeat V: $\mathbf{V}^{\prime}\in\mathbb{R}^{1\times h\times g\times d_{k}}\leftarrow\mathrm{Repeat}\left(\mathbf{V}\right)$ , where $\begin{array}{r}{{\sf V}_{0,h_{k},:g,:}^{\prime}={\sf V}_{0,h_{k},}}\end{array}$ :   
+7: Reshape $\pmb{\vee}^{\prime}$ : $V_{t}\in\mathbb{R}^{1\times d}\leftarrow\mathrm{Reshape}\left(\mathbf{V}^{\prime}\right)$   
+8: Add Residual Connection: $\pmb{H}_{t}=\pmb{H}_{t}+\boxed{\alpha\pmb{V}_{t}\pmb{W}_{O}}$ ▷Introduce a rescaling parameter   
+9: Step 2. Feedforward Network (FFN):   
+10: Apply FFN and Residual Connection as Lines 14-16 in Algorithm 1   
+11: Output: Updated $H_{t}$  
+
+common value. Beyond a certain point, adding more layers contributes minimally to changing node representations, which can be formulated as follows:  
+
+$$
+\operatorname*{lim}_{\ell\to\infty}\left\|H^{(\ell+1)}-H^{(\ell)}\right\|_{F}^{2}=\operatorname*{lim}_{\ell\to\infty}\left\|P^{(\ell+1)}X-P^{(\ell)}X\right\|_{F}^{2}=0.
+$$  
+
+While the propagation matrix $_{P}$ in GNNs is static, the attention matrix in LLMs is dynamic. Despite this difference, recent studies (Shi et al., 2022; Nguyen et al., 2023) have revealed that Transformers can also experience over-smoothing, similar to GNNs. This phenomenon provides insight into the behavior of the Block Importance (BI) metric proposed by Men et al. (2024):  
+
+$$
+\mathbf{B}\mathbf{I}^{(\ell)}=1-\mathbb{E}_{H,t}\frac{\pmb{H}_{t}^{(\ell)}\cdot\pmb{H}_{t}^{(\ell+1)}}{\left\|\pmb{H}_{t}^{(\ell)}\right\|_{2}\left\|\pmb{H}_{t}^{(\ell+1)}\right\|_{2}}.
+$$  
+
+The BI metric tends to decrease as the layer index $\ell$ increases. This observation explains why recent pruning algorithms target blocks in higher layers: these layers contribute less unique information. Informed by these insights, our work also focuses on pruning aggregation parameters in the higher layers of LLMs.  
+
+3 AGGREGATIONPRUNER  
+
+In this section, we first discuss the motivation behind our proposed AggregationPruner in Section 3.1 and 3.2. Then, we provide the details of our pruning algorithm in Section 3.3.  
+
+3.1 THE BOTTLENECK IN LLM SERVING  
+
+In applications such as chatbots and content generation tools, which handle a high volume of daily API requests, maintaining low latency is crucial. This is typically achieved by batching multiple requests for inference, thereby reducing computational waste. Moreover, modern LLMs employ the KV cache to accelerate inference by storing intermediate results. While effective, this approach leads to increased memory consumption as the number of requests grows. To illustrate the scale of memory consumption from the KV cache, we use an example from PagedAttention (Kwon et al., 2023). A 13B parameter OPT model (Zhang et al., 2022), capable of generating up to 2048 tokens, requires approximately $800\;\mathrm{KB}$ of GPU memory per token. This can lead to a potential consumption of 1.6 GB per request. Given that LLM operations are primarily constrained by memory bandwidth (Dao et al., 2022), the amount of memory access becomes the primary factor in determining runtime. Consequently, understanding the mechanism by which LLMs generate and utilize the KV cache is essential for optimizing resource utilization.  
+
+3.2 DISTINCT ROLES OF PARAMETER TYPES IN LARGE LANGUAGE MODELS  
+
+3.2.1 THE ROLE OF AGGREGATION PARAMETER  
+
+As previously discussed, aggregation parameters play a crucial role in calculating attention scores, which are essential for aggregating contextual information from preceding tokens to subsequent ones.  
+
+![](images/4b87337ba1308a70fefc4d23d9c75a556ba358251bd61ac4293b604898334bc1.jpg)  
+
+This process involves computing the inner product of queries and keys, resulting in quadratic time and memory complexity with respect to sequence length. To accelerate the generation of subsequent tokens, modern LLMs typically employ a KV cache mechanism as illustrated in Algorithm 1. This approach stores previously calculated keys and values, thereby reducing computational overhead. When generating a new token, the model only needs to compute the query, key, and value for the last token in the sequence. It then combines the KV cache with the last token’s query and key to aggregate information from previous tokens, integrating this context into the last token’s representation. By avoiding the need to recompute keys for each token, this approach significantly accelerates the calculation of attention scores. These scores are then used to aggregate contextual information from the V cache and the last token’s value. This optimization strategy greatly enhances inference speed by minimizing redundant computations, particularly for long sequence generation tasks.  
+
+While the KV cache significantly accelerates inference, it also introduces substantial GPU memory consumption. As previously discussed, higher layers in LLMs typically contribute less unique information to the model’s output. Leveraging this insight, our work focuses on pruning aggregation parameters in these higher layers to reduce the size of the KV cache. This approach aims to balance the trade-off between inference speed and memory efficiency, optimizing overall model performance.  
+
+
+
+\section{3.2.2 THE ROLE OF TRANSFORMATION PARAMETERS  }
+
+
+Transformation parameters in LLMs comprise two main components: $W_{v}$ and $W_{o}$ in the SelfAttention module, and $W_{\mathrm{gate}}$ , $W_{\mathrm{down}}$ , $W_{\mathrm{up}}$ in the Feed-Forward Network (FFN). These parameters apply linear transformations on token embeddings and, as some research (Anderson, 1972; Kohonen, 1972; Geva et al., 2021; Meng et al., 2023) suggests, serve as storage of compressed knowledge (Deletang et al., 2024; Lester et al., 2024) derived from vast internet-scale text data.  
+
+Current block pruner methods risk discarding valuable stored knowledge when pruning these transformation parameters. Furthermore, since pruning aggregation parameters already provides substantial memory savings, further pruning of transformation parameters results in diminishing returns. This additional pruning could also introduce potential issues, especially when it comes to maintaining performance across various downstream tasks.  
+
+3.3 OUR PROPOSED PRUNING ALGORITHM: AGGREGATIONPRUNER  
+
+Building on the insights discussed above, we introduce AggregationPruner, a novel pruning algorithm designed specifically for LLMs. This approach strategically focuses on pruning only the aggregation parameters in the higher layers of LLMs, preserving the knowledge-rich transformation parameters. By doing so, AggregationPruner achieves substantial memory efficiency gains while preserving the model’s core knowledge base. The computation process for the higher layers, incorporating our pruning strategy, is detailed in Algorithm 2. It’s important to note that many LLMs employ Grouped-query attention (GQA) (Ainslie et al., 2023). Therefore, a modification is required to accommodate this architecture as shown in Algorithm 2. Specifically, in Line 6, we must replicate the  
+
+Algorithm 4 LLM inference with AggregationPruner   
+1: Input: Token sequence $\tau$ , the number of layers $L$ , the number of pruning layers $P$   
+2: for $\ell=1$ to $L$ do   
+3: if $\ell\leq L-P$ then   
+4: Run Algorithm 1 on $\tau$ : Compute $H^{(\ell)}$   
+5: else   
+6: Run Algorithm 2 on $\tau$ : Compute $H^{(\ell)}$   
+7: end if   
+8: end for   
+9: Output: Final token representation $H^{(L)}$   
+value matrix $\mathbf{\upnu}$ a total of $g-1$ times, where $g$ represents the number of query groups. This replication ensures compatibility with the GQA mechanism, enabling our AggregationPruner to seamlessly integrate with modern LLM architectures.   
+When modifying the higher layers of an LLM, we propose that the original residual connection coefficient of 1 may no longer be optimal. Inspired by GCNII, which uses a decreasing coefficient to address the diminishing unique information in higher layers caused by over-smoothing, we introduce a rescaling parameter. This parameter, denoted as $\alpha$ , adjusts the pruned block’s output within the residual connection, as shown in Line 8 of Algorithm 2.   
+Determining the optimal value for $\alpha$ presents a challenge. Traditional retraining methods are not applicable due to $\alpha$ ’s non-differentiable nature. While some recent works have employed ZerothOrder Optimization (Guo et al., 2024b; Zhang et al., 2024b) to estimate gradients during fine-tuning, we propose a simpler, more efficient approach: a greedy search strategy. Our method involves calculating the perplexity of the pruned LLM to identify the optimal $\alpha$ . To simplify the search process, we adopt a top-down approach. We begin by determining $\alpha$ for the uppermost layer and then use this value as a starting point for the subsequent layer. This cascading strategy significantly reduces the search space. The entire process is implemented as a grid search as illustrated in Algorithm 3, balancing efficiency with thoroughness. This approach allows us to fine-tune the rescaling parameter across layers, optimizing the model’s performance post-pruning without the need for extensive retraining. The development of more complex search strategies leaves room for future work. The inference process, which incorporates AggregationPruner, is detailed in Algorithm 4.   
+4 EXPERIMENTS   
+In this section, we present a comprehensive evaluation of our proposed pruning algorithm, assessing its performance across six LLMs and ten diverse benchmarks. By conducting experiments on various LLMs and benchmarks, we aim to establish consistent and reliable results.   
+4.1 SETUP   
+Baselines. We evaluate AggregationPruner against three baselines: FNNPruner, LayerPruner, and Self-AttentionPruner, which are described in Section 2.2. These baseline methods employ various heuristic metrics to determine which layers should be pruned. While there may be minor variations in the specific layers selected for pruning, all these methods generally prune from top to bottom. In this work, we evaluate performance by pruning different blocks within the selected layers. To ensure a fair comparison, we apply a top-to-bottom pruning approach for all methods as shown in Algorithm 4. Testing LLMs. We evaluate all pruning algorithms on 6 LLMs: LLaMA3.1-8B/70B (Touvron et al., 2023), Qwen2-7B/72B (Yang et al., 2024), Gemma2-9B (Gemma2-Team et al., 2024), and Mistral7B-v0.3 (Jiang et al., 2023). All experiments are conducted using Nvidia H100/A100 80G GPUs. However, due to memory constraints, we are unable to load the full weights of LLaMA3.1-70B and Qwen2-72B directly onto the GPU. To address this limitation, we employ the bnb quantization method provided by Hugging Face to compress these two models to 4-bit precision for our experiments.  
+
+![](images/3660eed694348417b27cbdbeb3fdbcbd791685567206408450de431f0cfd5643.jpg)  
+Figure 2: We evaluate the performance of 6 LLMs, including LLaMA3.1-8B/70B, Qwen2-7B/72B, Gemma2-9B, and Mistral-7B-v0.3, on generation tasks such as GSM8K and TriviaQA. Our evaluation involves progressively pruning layers, starting from 0 and extending up to 12 layers.  
+
+Benchmarks. We employ the lm-evaluation-harness package (Gao et al., 2021) to conduct experiments on both generation and discriminative tasks. While current LLM deployments primarily focus on generation tasks, discriminative tasks are often used to evaluate overall model performance. It’s important to note that LLMs only generate the KV cache during generation tasks. Discriminative tasks, on the other hand, involve providing inputs and directly obtaining results, such as classification labels or regression values. Our generation tasks include 5-shot GSM8K (Cobbe et al., 2021) and 5- shot TriviaQA (Joshi et al., 2017). For discriminative tasks, we use 7-shot CommonsenseQA (Talmor et al., 2019), 5-shot WinoGrande (Sakaguchi et al., 2019), 25-shot ARC-Challenge (Clark et al., 2018), 0-shot BoolQ (Clark et al., 2019), 0-shot OpenBookQA (Mihaylov et al., 2018), 0-shot PIQA (Bisk et al., 2020), 0-shot MedQA (Jin et al., 2020), and 5-shot MMLU (Hendrycks et al., 2021). We report the accuracy for these tasks as recommended by the lm-evaluation-harness package.  
+
+4.2 RESULTS  
+
+Generation Tasks. Figure 2 presents the results for all pruning algorithms, showing the superior performance of our proposed AggregationPruner across multiple generation tasks and language models. Our method outperforms the baselines on both generation tasks with LLaMA3.1-8B, Qwen2-  
+
+Table 2: The Performance of LLaMA3.1-8B on Discriminative Tasks.   
+
+![](images/16210a93715c16634048c37b4ef67a64f1ae2eedd1497b593eeeb2ac2b7d8039.jpg)  
+
+7B/72B, and Gemma2-9B for TriviaQA. For Mistral-7B-v0.3 on TriviaQA and LLaMA3.1-70B, it shows a slight improvement. Additionally, on GSM8K with LLaMA3.1-70B, Gemma2-9B, and Mistral-7B-v0.3, our performance is comparable to the best baseline. These results consistently demonstrate that our method surpasses the three baselines across various models and tasks. Besides, our results reveal a clear ranking in overall performance among the pruning methods: AggregationPruner $>$ Self-AttentionPruner $>$ FFNPruner $>$ LayerPruner. Notably, FFNPruner and LayerPruner exhibit a rapid decline in performance, dropping to zero as the number of pruned layers increases, compared with the other two methods. These results emphasize the critical importance of transformation parameters in both the FFN and Self-Attention modules for generation tasks. This observation aligns with our claim in Section 3.2.2.  
+
+Furthermore, our analysis revealed that as the number of pruned layers increases, the performance of LLMs drops more rapidly on GSM8K compared to TriviaQA. This discrepancy can be attributed to the differing response lengths required for each task. We observed that unpruned LLMs typically encounter the end-of-sequence (EOS) token within 16 tokens when generating answers for TriviaQA. In contrast, GSM8K often requires more (up to 256) tokens to produce a complete answer. Pruned LLMs, which generate one token at a time, are more susceptible to errors than their unpruned counterparts. This vulnerability is exacerbated in tasks requiring longer responses, as each additional token introduces the potential for error accumulation. Consequently, the extended response length needed for GSM8K leads to a more pronounced performance decline in pruned LLMs compared to the shorter responses typical of TriviaQA.  
+
+Discriminative Tasks. We present the performance of six LLMs on discriminative tasks in Tables 2, 5, 6, and 4. We also report the average performance across eight discriminative tasks. The results demonstrate that our pruning algorithm outperforms the baselines on LLaMa3.1-8B, Qwen2-7B/72B, and Mistral7B-v0.3, while achieving comparable performance to the best baseline on LLaMa3.1-70B and Gemma2-9B. Notably, as we increase the number of pruned layers, the performance degradation on discriminative tasks is less pronounced compared to generation tasks. This discrepancy can be attributed to the nature of discriminative tasks, which typically involve multiple-choice questions with limited options, making them inherently simpler than generation tasks that require predicting the next token from the entire vocabulary. To further validate this claim, we conduct additional experiments using a reward model with AggregationPruner. Specifically, we evaluate the Skywork/SkyworkReward-Llama-3.1-8B model from Hugging Face on RewardBench (Lambert et al., 2024) to assess the impact of pruning algorithm on reward model performance.  
+
+ Notably, when 16 layers are pruned, the model’s performance remains nearly identical to that of the unpruned version. However, an additional experiment reveals differences when using the pruned and unpruned models to annotate rewards for online alignment (Cen et al., 2024; Dong et al., 2024a). We observe a significant disparity in the reward distributions generated by the pruned and unpruned models. The mean in the rewards gap is 3.53, with a standard deviation of 5.77. This discrepancy can be attributed to the nature of the tasks: RewardBench primarily involves preference choices between two responses, essentially a binary classification problem. In contrast, reward annotation operates on a continuous real number scale, which is a more challenging task. These findings lead us to conclude that pruned models are better suited for maintaining performance on discriminative tasks with limited options. This conclusion makes pruned reward models particularly well-suited for online Direct  
+
+![](images/b64ffdc5a5d5768a5207b206600cfbb8e23f6aff800ed3afd06590c6789ae171.jpg)  
+  
+The Number of Pruned Layers  
+
+Figure 3: Performance comparison between the default alpha setting $(\alpha\,\,=$ 1) and the $\alpha$ value obtained through grid search for Qwen2-7B. The experiment evaluates model accuracy averaged across eight discriminative tasks.  
+
+Preference Optimization (DPO) (Rafailov et al., 2023) settings. In such settings, each iteration requires only on-policy preference data, and the reduced latency of pruned models is advantageous. However, this same attribute makes them less ideal for online Reinforcement Learning from Human Feedback (RLHF) (Ouyang et al., 2022), where more nuanced reward annotations may be necessary.  
+
+
+
+\section{4.3 ABLATION STUDY  }
+
+
+In this section, we evaluate the efficacy of our proposed $\alpha$ search algorithm, as described in Section 3.3. Our experiments focus on Qwen2-7B, and we present the average accuracy across eight discriminative tasks. As illustrated in Figure 3, the alpha value obtained through our grid search method demonstrates better performance compared to the default setting of $\alpha=1$ . These results demonstrate the effectiveness of our algorithm in improving model performance.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Pruning. Pruning is a widely adopted and efficient technique in both Computer Vision and Large Language Models. It can be categorized into two main types: Structured Pruning and Unstructured Pruning. Structured Pruning (Lagunas et al., 2021; Xia et al., 2022; Kurtic et al., 2023; He & Xiao, 2023; Xia et al., 2024) involves removing entire filters from neural networks, making it particularly conducive to model deployment. On the other hand, Unstructured Pruning (Chen et al., 2020b; Sanh et al., 2020) focuses on removing individual neurons within the network. Some recent works (Men et al., 2024; Zhong et al., 2024; Gromov et al., 2024; He et al., 2024; Siddiqui et al., 2024) have been proposed to prune blocks in the higher layers of Large Language Models.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this work, we propose AggregationPruner, a novel approach that focuses on pruning query and key parameters in the higher layers of LLMs. Our method can reduce GPU memory consumption associated with the KV cache during generation tasks. Through extensive experimentation, we demonstrate that our pruning algorithm consistently outperforms recent block pruning techniques, offering a significant advancement in model efficiency without compromising performance. We hope our work will inspire future research on pruning strategies to reduce the KV cache in LLM serving.  
+
+
+

@@ -1,0 +1,494 @@
+\title{How to Fine-Tune Vision Models with SGD}
+
+\begin{abstract}
+
+SGD and AdamW are the two most used optimizers for fine-tuning large neural networks in computer vision. When the two methods perform the same, SGD is preferable because it uses less memory (12 bytes/parameter with momentum and 8 bytes/parameter without) than AdamW (16 bytes/parameter). However, on a suite of downstream tasks, especially those with distribution shifts, we find that fine-tuning with AdamW performs substantially better than SGD on modern Vision Transformer and ConvNeXt models. We find that large gaps in performance between SGD and AdamW occur when the fine-tuning gradients in the first ``embedding" layer are much larger than in the rest of the model. Our analysis suggests an easy fix that works consistently across datasets and models: freezing the embedding layer (less than 1\% of the parameters) leads to SGD with or without momentum performing slightly better than AdamW while using less memory (e.g., on ViT-L, SGD uses $\sim33\%$ less GPU memory). Our insights  result in state-of-the-art accuracies on five popular distribution shift benchmarks: WILDS-FMoW, WILDS-Camelyon, BREEDS-Living-17, Waterbirds, and DomainNet.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Fine-tuning large pretrained models on downstream tasks has become a dominant approach in deep learning~\citep{kornblith2019better,chen2020simclr,zhai2020largescale}. The two most commonly used optimizers in current practice  are SGD and AdamW~\citep{kingma2015adam, Loshchilov2019DecoupledWD}\footnote{\noindent By default, we use the deep learning usage of SGD as minibatch stochastic gradient descent with momentum.}. While most modern vision architectures (ViTs, ConvNeXts, and variants) increasingly use AdamW for pretraining, it is still common to use SGD for fine-tuning. Part of the appeal is that SGD is more memory and compute efficient: AdamW maintains $1.5 \times$ and $3 \times$ as many states per parameter as SGD with and without momentum, respectively~\citep{Ginsburg2019TrainingDN,dettmers2022optimizers}.%
+At the same time, in terms of fine-tuning accuracies, prior work \citep{dosovitskiy2021vit, Steiner2021HowTT, kumar2022finetuning} report similar performance between AdamW and SGD on ImageNet like domains that are closer to pretraining data. In contrast, we reach different conclusions when fine-tuning on datasets that are far from pretraining data or have substantial distribution shifts.  
+
+We examine 7 popular models, including vision transformers~\citep{dosovitskiy2021vit,caron2021emerging,radford2021clip}, ConvNeXts~\citep{liu2022convnet},  and ResNets~\citep{Kolesnikov2020BigT,he2016resnet}, of different sizes and pretraining modalities. When pretrained on a large corpus and then fine-tuned, these models achieve near state-of-the-art performance on downstream benchmarks. 
+In addition to good transfer learning, we also want our fine-tuned models to handle practical distribution shifts gracefully. So we focus on 5 distribution shift datasets that have both in-distribution (ID) and out-of-distribution (OOD) evaluations: WILDS-FMoW, WILDS-Camelyon, Waterbirds, BREEDS-Living-17, DomainNet. These  were selected to capture different types of data shifts (subpopulation shifts, spurious correlations, style shifts), including two real world shifts in medical imaging and satellite remote sensing from the WILDS benchmark~\citep{koh2021wilds}. 
+
+\begin{figure*}[thb]
+     \centering
+     \begin{subfigure}[b]{0.35\textwidth}
+         \centering
+         \includegraphics[width=0.7\textwidth]{figures/sgd_freeze_figure_1.png}
+         \caption{Simplified schematic of ViT illustrating how we do freeze-embed.
+         \label{fig:vit_simplified}}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.55\textwidth}
+         \centering
+         \label{fig:clip_results_summary}
+        \resizebox{\linewidth}{!}{
+         \begin{tabular}{ccc}
+            \toprule
+             & ID accuracy & OOD accuracy \\
+            \midrule
+            SGD & {90.0\%} & {67.9\%}\\
+            AdamW & \hgreen{(+2.1\%)} & \hgreen{(+8.1\%)} \\
+            SGD (freeze-embed) & \hgreen{(+2.1\%)} & \hgreen{(+8.0\%)} \\
+            SGD (freeze-embed, no mom.) & \hgreen{(+2.2\%)} & \hgreen{\textbf{(+9.0\%)}} \\            
+            \bottomrule
+        \end{tabular}
+        }
+          \caption{Performance of different fine-tuning methods on a CLIP ViT-B/16 averaged over $5$ distribution shift datasets.\label{fig:three graphs}}
+     \end{subfigure}
+     \setlength{\belowcaptionskip}{-10pt}
+        \caption{We fine-tune 7 models including ViTs, DINO, CLIP, ConvNeXt, ResNet, on 5 distribution shift datasets (Living-17, Waterbirds, DomainNet, WILDS-Camelyon, WILDS-FMoW). Fine-tuning with SGD gets lower accuracies than AdamW on modern pretrained models (Vision Transformers and ConvNeXt), especially OOD. Interestingly, a minor tweak to SGD where we freeze the first ``embedding'' layer ($<1\%$ of parameters---see  Figure~\ref{fig:vit_simplified}) is competitive with AdamW while using lower GPU memory. Further, dropping the momentum state in SGD gives additional gains in accuracy at even lower memory cost.
+        }
+\end{figure*}
+
+We find that on newer models like ViTs and ConvNeXt,  AdamW can   significantly outperform SGD, especially OOD. Averaged across the datasets,  fine-tuning a CLIP ViT-B/16 model with AdamW gets 2.1\% higher accuracy ID and 8.1\% higher accuracy OOD compared to SGD  (Figure~\ref{fig:three graphs}). These gains are consistent across models too---averaged across all models and datasets, AdamW gets 1.2\% higher accuracy ID and 4.0\% higher accuracy OOD (Tables~\ref{tab:ood_bigtable_final}-\ref{tab:id_bigtable_final}).
+
+A key difference between AdamW and SGD, is that AdamW normalizes the gradient update of each parameter using an estimate of their second moments. Thus, parameters with consistently high gradients will change less when using AdamW than with SGD.
+Towards understanding these dynamics are better, we examine the gradients at each layer of our pretrained models.
+We find that for the models where AdamW significantly outperforms SGD, the gradients at pretrained initialization of the first ``embedding'' layer are much larger than the gradients of the other layers.
+
+To test if over-training of the embedding layer is in fact why SGD performs worse than AdamW, we consider a minor modification where we freeze the embedding layer and tune the rest of the model with SGD (Figure~\ref{fig:vit_simplified})---we call this SGD (freeze-embed).
+In vision transformer models, the embedding layers are only a small fraction (around 0.7\% for ViT-B/16) of the total parameters of the model, so a priori we might not expect a substantial difference in accuracies.
+However, surprisingly this simple freezing of the embedding layer consistently improves SGD performance across most models and datasets and achieved ID and OOD accuracies that are competitive  with or better than AdamW (Figure \ref{fig:three graphs}). 
+Averaged across all datasets and models, {SGD (freeze-embed) gets 76.7\% accuracy OOD (vs. 72.0\% for SGD and 76.0\% for AdamW)}. The analogous AdamW (freeze-embed) gets 76.5\%, which does not improve over SGD (freeze-embed), supporting that freeze-embed may be the reason AdamW outperforms SGD (it is not an independent axis of improvement).
+We also tried a more memory efficient variation, SGD (freeze-embed, no momentum), which drops the momentum state in SGD---interestingly this gets even slightly better OOD accuracy than the other methods (76.9\%) despite using even less memory.
+In terms of memory usage, our profiling (Table~\ref{tab:clip_memory_profiling_results}) shows that on a ViT-B/16, AdamW uses $16\%$ and $36\%$ more memory than SGD (freeze-embed) and  SGD (freeze-embed, no momentum), respectively. The memory overhead of AdamW increases with the model size. On a ViT-L/14 the overheads of AdamW are $18\%$, and $49\%$, respectively.
+
+These methods and insights, while simple, lead to state-of-the-art accuracies on all five datasets: WILDS-Camelyon, WILDS-FMoW, DomainNet, Waterbirds, and BREEDS Living-17, while being more memory efficient than AdamW.
+
+
+
+
+
+
+\section{Scope and setup}
+
+
+We use the following notation: a  network map $f_\theta:\cX\to\cY$  is represented as a composition of layers as $f_\theta = \fhead_{\thetahead} \circ \fl_{\theta_L} \circ \ldots \circ \fone_{\theta_1} \circ \fembed_{\thetaembed}$, where $\theta=(\thetahead, \theta_L, \ldots, \theta_1, \thetaembed)$ denote all the parameters of the model. We use $\fembed_{\thetaembed}$ and $\fhead_\thetahead$ to denote blocks that can conceptually be considered the ``embedding'' layer and the ``head'', respectively. %
+\paragraph{Fine-tuning.} Consider networks that have been \emph{pretrained} to get an initialization $\thetapretrain$. We focus on \emph{fine-tuning} on a labeled dataset $\Dtrain{\color{olive} \sim \Pfinetune}$ from a new task.
+Concretely, given a loss function $\ell : \cY \times \cY \to \mathbb{R}_{\geq 0}$, we minimize the training loss $\Ltrain(\theta) =  \frac{1}{\lvert \Dtrain \rvert} \sum_{(x, y) \in \Dtrain} \ell(f_{\theta}(x), y)$ using iterative optimization algorithms starting from the initialization $\thetapretrain$. %
+
+We evaluate the accuracy of fine-tuned models on held-out in-distribution (ID) and out-of-distribution (OOD) test datasets. For ID evaluation, we use samples $\Did \sim {\color{olive} \Pfinetune}$ from the same distribution as the fine-tuning training dataset.
+To examine whether we have learned a robust model, we consider benchmarks that also provide OOD test examples $\Dood \sim {\color{purple} \Pood}$, which differs from the fine-tuning distribution $ {\color{olive}\Pfinetune}$ in practically meaningful ways. 
+\subsection{Optimizers: SGD and AdamW}
+The two most common optimizers for minimizing the fine-tuning loss $\Ltrain(\theta)$ from pretrained initialization are SGD (with/no momentum) and AdamW. We will introduce other optimizers as needed.   
+ This corresponds to a difference between AdamW and SGD and SGD (no momentum) of 4GB and 8GB GPU memory per 1B parameter model during training\footnote{The bottleneck for memory in older ResNe(X)ts is typically the number of activations. However, in modern large transformer training, memory requirements are of the same scale as the number of parameters. Further, techniques such as gradient accumulation and gradient checkpointing can make the activation memory small leaving the optimizer states as the main bottleneck. }. With the current scale of the models 100s of billions parameters and increasing,  such memory overheads are very costly \citep{dettmers2022optimizers}. Thus, understanding when and how we can use the cheaper SGD compared to AdamW can significantly improve training of large scale models.   
+
+
+\subsection{{Datasets and model architectures}}
+
+\paragraph{Datasets.} We choose five fine-tuning benchmarks that capture different types of data shifts (subpopulation shifts, spurious correlations, style shifts), including two real world shifts. %
+\begin{compactenum}
+\item \textbf{Living-17}~\citep{santurkar2020breeds} is a sub-population shift dataset from the BREEDS benchmark. The goal is to classify an image as one of 17 animal categories with ID and OOD data from different sub-categories. For example,   in the  ``bear'' category, the ID dataset contains black bears and sloth bears and the OOD dataset has brown bears and polar bears.
+\item \textbf{Waterbirds}~\citep{sagawa2020group} is a spurious correlation dataset where the goal is to classify an image as a ``waterbird'' or ``landbird''. In the ID dataset, ``water'' backgrounds are typically correlated with ``waterbird'' labels, but are uncorrelated in the OOD dataset.
+\item \textbf{DomainNet}~\citep{peng2019moment} is a domain adaptation benchmark. ID contains \textit{sketch} images, and the OOD  contains \textit{real} images of the same categories. We use the version of the dataset from~\citet{tan2020coal}.
+\item \textbf{WILDS-FMoW}~\citep{christie2018fmow, koh2021wilds} consists of remote sensing satellite images. The goal is to classify a satellite image into one of 62 geographical categories.%
+The ID dataset contains satellite images from across the world between 2002 and 2012, and the OOD dataset contains images from Africa in 2017.
+\item \textbf{WILDS-Camelyon}~\citep{bandi2018detection, koh2021wilds} is a medical images dataset for detecting tumors in tissue slides. The ID and OOD datasets contain slides from different hospitals.
+\end{compactenum}
+
+\paragraph{Model Architectures.} We consider seven popular pretrained models that span different architectures (vision transformers and  convolutional networks), sizes, and pretraining objectives (multi-modal, supervised, self-supervised). %
+\begin{compactitem}
+\item[(1-2)] CLIP ViT-B/16 and CLIP ViT-L/14~\citep{radford2021clip}: CLIP vision transformers of two sizes pretrained on a multi-modal WebImageText dataset.  
+\item[(3)] ViT-B/16~\citep{dosovitskiy2021vit}: vision transformer pretrained on Imagenet-21k.
+\item[(4)] DINO ViT-B/16~\citep{caron2021emerging}: self-supervised ViT pretrained on ImageNet-1K. 
+\item[(5)] ConvNeXt-B~\citep{liu2022convnet}: modernized convnet pretrained on ImageNet-21k using advanced data augmentations and MixUp as in \cite{Touvron2021TrainingDI}.
+\item[(6-7)] BiT ResNet-50 and BiT ResNet-101~\citep{Kolesnikov2020BigT}: ResNetV2 models of two sizes pretrained on ImageNet-21k.
+\end{compactitem}
+\textit{$\fembed_{\thetaembed}$ and $\fhead_{\thetahead}$}: For vision transformer models, we consider the patch-to-token embedding layer along with its layer norm if present as the \textit{embedding layer}. For convolutional networks, the \textit{embedding layer} refers to the ``stem'' block along with the first stage: the ``stem'' in ResNetV2 is a $7\times 7$ convolution with stride $2$ followed by a $2\times 2$ MaxPool; while in ConvNeXt it is a non-overlapping $4\times 4$ convolution with stride $4$. For each downstream task, we replace the final layer  of all the pretrained models with a randomly initialized classifier \textit{head}  $\fhead_{\thetahead}$.
+
+
+ 
+
+
+\section{SGD, AdamW, and layer gradients}
+
+
+
+Modern deep learning models increasingly use AdamW for pretraining, where it has been repeatedly shown to produce better features for downstream tasks than SGD \citep{dosovitskiy2021vit,liu2021Swin,liu2022convnet}. %
+For fine-tuning, on the other hand, there are no systematic studies or a definitive  answer as to whether AdamW or SGD should be used \citep{dosovitskiy2021vit,Touvron2021TrainingDI}. %
+The ablation study in \citet{Touvron2021TrainingDI} even found that there is no difference in performance between AdamW and SGD when fine-tuning on ImageNet-1K. ConvNext \citep{liu2022convnet} and Swin transformers \citep{liu2021Swin} papers report using AdamW for fine-tuning, but they do not mention a comparison with SGD. In this work we focus on better understanding the dynamics of AdamW and SGD during the fine-tuning  phase. 
+Detailed results are discussed in Section~\ref{sec:mainexp}. 
+We first highlight some initial observations below. 
+
+\subsection{AdamW vs SGD}
+
+\paragraph{AdamW outperforms SGD.} We find that, generally speaking, fine-tuning with AdamW produces better results than with SGD, especially for more recent models like ViT variants and ConvNeXt. The gaps are more dramatic on out-of-distribution (OOD) test accuracies compared to in-distribution (ID). See  Table~\ref{tab:ood_bigtable_final} and Table~\ref{tab:id_bigtable_final} for the full OOD and ID results, respectively.
+Averaged across the 7 models and 5 datasets, AdamW gets an {OOD accuracy of 76.0\% (vs. 72.0\% for SGD), and an ID accuracy of 91.5\% (vs. 90.3\% for SGD)}. We emphasize that this happens even though we sweep over 6 learning rates and early stop. %
+
+\paragraph{AdamW $\approx$ SGD on BiT ResNets.}
+Breaking down the results by model type, we find that AdamW and SGD perform comparably for older convolutional networks, namely BiT ResNet-50 and BiT ResNet-101. For example, on a BiT ResNet-101, AdamW gets an average OOD accuracy of 74.5\% (vs. 74.6\% for SGD).
+However, for newer  models including vision transformers and the modernized convolutional network (ConvNeXt), AdamW gets much higher accuracies.
+\subsection{Examining layer gradients}
+\label{sec:layer_gradients}
+
+A key operational difference between AdamW and SGD is that AdamW divides the gradient update for each parameter by a weighted running average of its second moments. So parameters with consistently high gradients will change less when using AdamW than with SGD. This suggests examining the gradients across different components of the neural network (at pretrained initialization)---if they vary a lot, then AdamW and SGD will behave very differently.%
+
+We measure the average gradient norm at each layer, across minibatches of the training set.
+More formally, recall our notation for network layers as $f_\theta = \fhead_{\thetahead} \circ \fl_{\theta_L} \circ \ldots \circ \fone_{\theta_1} \circ \fembed_{\thetaembed}$. Given a minibatch $B=\{ (x_1, y_1), \ldots, (x_b, y_b) \}$ of random samples from the training data, the stochastic gradient of layer $\ell\in \{\mathsf{embed},1,2,\ldots,L,\mathsf{head}\}$ is given by: 
+$g_\ell(B) =  \frac{1}{|B|} \sum_{i=1}^{|B|} \nabla_{\theta_\ell} l(f_{\thetapretrain}(x_i), y_i)$. 
+The norm of the stochastic gradient, $\|g_\ell(B)\|_2$, roughly measures how much layer $\ell$ will change after one step of SGD from pretrained initialization. We use the average gradient norm across all minibatches $B_1, \ldots, B_m$ in the training set $\Dtrain$ as a measure of movement in the first SGD step. 
+\begin{equation}
+    \gradnormpretrain_\ell = \frac{1}{m} \sum_{t=1}^{m} \|g_\ell(B_t)\|_2,\text{  where }\ell\in \{\mathsf{embed},1-L,\mathsf{head}\}.
+    \label{eq:gradnormavg}
+\end{equation}
+Note that we measure all the gradients at the pretrained initialization $\thetapretrain$---before performing any gradient updates. In Figure~\ref{fig:gradient_norm}, we plot the layer-wise gradient norms $\gradnormpretrain_\ell$ on DomainNet.
+
+ 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.5\textwidth]{figures/domain_net_grad_plot.png}
+    \caption{
+      We visualize the layer-wise gradient norms our models on DomainNet at the pretrained initialization. For each layer, we plot the average minibatch gradient norm $\gradnormpretrain_\ell$ as computed in \eqref{eq:gradnormavg}. We highlight two special layers: gradient norms of the ``embedding'' layer parameters $\gradnormpretrain_{\mathsf{embed}}$  are shown as {\color{red}\textbf{red-squares}}, and those of the classifier ``head''s $\gradnormpretrain_{\mathsf{head}}$ are show as {\color{green!60!black} \textbf{green-triangles}}. The middle layer gradient norms are shown as \textbf{black-circles}. For transformer models, we have separate (black) points for the MLP and the attention layers. %
+    }
+    \label{fig:gradient_norm}
+\end{figure}
+
+\paragraph{First-layer gradient is an outlier.}
+Apriori, we expect the gradients of the classifier ``head''  (green-triangles) to be large as they are randomly initialized while the rest of the model is pretrained~\citep{kumar2022finetuning}. These are also the models where see big gaps between AdamW and SGD performance in Tables~\ref{tab:ood_bigtable_final}-\ref{tab:id_bigtable_final}. 
+
+This   suggests that the embedding layer plays a distinctive role in newer models. 
+Since SGD uses the same learning rate for all layers,  we will end up make substantially larger updates to the embedding layer compared to other layers---leading to either over-tuning the embedding layer or under-tuning the remaining layers.
+Over-training of the embedding layer is undesirable  given the common wisdom that lower layers ought to be tuned less as they learn more transferable features~\citep{kumar2022finetuning}. %
+AdamW on the other hand adaptively normalizes the movement of each parameter. On the other hand, computationally, SGD is preferable over AdamW due to lower memory footprint.%
+ 
+How can we avoid the above issues with SGD?  One possibility is to use different learning rates for different layers, but this might end up requiring extensive hyperparameter tuning. Another option is to use other low-memory footprint optimizers with layerwise normalization techniques like LARS \citep{you2017crop} and LAMB \citep{you2020large}. In our initial experiments (see Table~\ref{tab:clip_results}), while these methods improved over SGD, they did not close the gap with AdamW. Instead, we found a much simpler modification to SGD that consistently leads to accuracies competitive with or better than AdamW while using lower memory (Section~\ref{sec:freeze-embed}).
+
+
+\subsection{Why first-layer gradients are higher?}
+
+Why are the first-layer gradients higher for modern vision models such as Vision Transformers and ConvNeXt? There are two plausible hypotheses: (a) architectural differences from ResNet models, or (b) optimization differences between \emph{pretraining} and fine-tuning---BiT ResNet models were pretrained with SGD while the Vision Transformer and ConvNeXt models need to be pretrained with AdamW~\citep{Steiner2021HowTT}. To control for architecture, we use the same ResNet architecture and pretrain using either (1) SGD or (2) AdamW. For the SGD pretrained ResNet the first layer has smaller gradients than the other layers, while for the AdamW pretrained ResNet the first layer has higher gradients than the other layers (Figure~\ref{fig:resnet_gradient_norm_all}). In line with our previous results, fine-tuning an AdamW \emph{pretrained} model with SGD leads to worse OOD accuracy (Table~\ref{tab:ood_bitresnet_ablations}), but fine-tuning an SGD \emph{pretrained} model with SGD performs well. On the other hand, architectural changes lead to smaller changes.
+ 
+
+\subsection{Freeze-Embedding}
+\label{sec:freeze-embed}
+
+While the presence of large embedding layer gradients in Figure~\ref{fig:gradient_norm} correlates with the observed performance gaps between AdamW and SGD, it is not clear that this observation or its potential issues discussed above are definitive \emph{causes} for SGD performing worse than AdamW. To further test the intuition, in the next section, we consider a ``freeze-embed'' variation of fine-tuning, where we simply freeze the embedding layer to its pretrained initialization, and then fine-tune the rest of the model as usual. The embedding layer only consists of a small fraction of the model parameters (e.g., 0.7\% in a base vision transformer), so apriori freezing the embedding layer is a very tiny tweak---and we would not expect a large change in accuracy. However, if the hypothesis above holds merit, then we would expect the modification to aid SGD but not AdamW. 
+
+
+
+
+\section{Detailed experiments on freeze-embedding}
+
+
+
+We consider a simple variation of SGD fine-tuning where we freeze the embedding layer and only perform SGD updates on the rest of the network---we call this method ``SGD (freeze-embed)''. For further memory gains, we also consider SGD without momentum ``SGD (freeze-embed, no momentum)''  In this section we discuss the results of fine-tuning our 7 models on 5 distribution shift benchmarks mentioned in Section~\ref{sec:problem_setting}. %
+We use the implementations of SGD and AdamW in PyTorch. For each method, we train for the same number of epochs using a cosine learning rate schedule, and sweep over 6 starting learning rates (ensuring that the optimal learning rate is in the middle of the sweep). For all datasets we follow prior work~\citep{kumar2022finetuning} and pick the best learning rate and early stop based on the ID validation accuracy. 
+
+Table~\ref{tab:ood_bigtable_final} and Table~\ref{tab:id_bigtable_final} show the OOD and ID accuracies, respectively, of the four methods across  models and datasets. For each model and dataset, we also highlight the relative gain/loss of AdamW and SGD (freeze-embed) from regular SGD in green/red. We discuss the main observations below. 
+\begin{enumerate}[1.]
+    \item \textbf{AdamW outperforms SGD.} We see that AdamW largely outperforms SGD, often by substantial margins on ViT and ConvNeXt models.  Particularly in OOD evaluation, the gaps are remarkable. In the few instances where SGD performs better the gaps are much smaller. The differences between SGD and AdamW are generally more modest for older ResNet models. 
+    \item \textbf{SGD (freeze-embed) as well as SGD (freeze-embed, no momentum)  are competitive with or better than AdamW.} 
+    For each individual model, averaged across the datasets  SGD (freeze-embed) variants are consistently the best or tied-best method on OOD accuracy, and only minimally worse than AdamW on ID accuracy (right columns of Table~\ref{tab:ood_bigtable_final}-\ref{tab:id_bigtable_final}).  Averaged across all the models and datasets, SGD (freeze-embed) performs the best OOD, getting an average OOD accuracy of 76.7\% (vs. 71.9\% for SGD and 76.0\% for AdamW). On ID data, SGD (Freeze-embed) closes 85\% of the gap between SGD and AdamW, getting an average accuracy of 91.3\% (vs. 90.2\% for SGD and 91.5\% for AdamW).  SGD (freeze-embed, no momentum) gets the highest average OOD accuracy of 76.9\% (vs. 71.9\% for SGD and 76.0\% for AdamW) and competitive ID accuracy of 91.2\% (vs. 90.2\% for SGD and 91.5\% for AdamW), while saving additional memory.
+    \item \textbf{Larger CLIP model gains more from SGD (freeze-embed) and AdamW.} On a CLIP-ViT-B/16 we see that  SGD (freeze-embed) and AdamW get about $8\%$ higher OOD accuracy than SGD. Upon scaling to a larger CLIP-ViT-L/14, which is also our best model for OOD performance, we see even higher gains. On CLIP-ViT-L/14, SGD (freeze-embed) gets a 14.3\% higher OOD accuracy than SGD, and a 0.7\% higher OOD accuracy than AdamW. This suggests that our findings might be even more relevant for larger models.
+    \item \textbf{AdamW is \textit{red} when SGD (freeze-embed) is \textit{red}.} Across all our models and datasets, we see that in instances where SGD (freeze-embed) is worse than SGD (i.e., highlighted as red), AdamW is also worse than SGD. This is not always the case the other way around. For example, on ViT B-/16 fine-tuned on DomainNet and Camelyon, OOD performance of AdamW is worse than SGD, but SGD (freeze-embed) is competitive to the best of the two.  At the same time, on Living-17 OOD evaluation, multiple models have both AdamW and SGD (freeze-embed) perform significantly worse than SGD.  
+    \item \textbf{SGD performs well when fine-tuning data is closer to pretraining.} Breaking down the results by datasets, the main trend we see is that with models that were pretrained on ImageNet-21k (all models here except CLIP) and fine-tuned on Living-17, the performance of SGD is typically higher than AdamW and SGD (freeze-embed). Images in Living-17 are derived from ImageNet-1K and hence arguably, in this case the fine-tuning distribution is closest to pretraining. This suggests that SGD works better when fine-tuning and pretraining data are similar.
+\end{enumerate}
+
+
+
+
+\begin{table*}[h!]
+ \small 
+\begin{center}
+\resizebox{0.95\textwidth}{!}{
+\begin{tabular}{cccccccccccc|cc}
+\toprule
+ &  & \multicolumn{2}{c}{Living-17}  & \multicolumn{2}{c}{Waterbirds}  & \multicolumn{2}{c}{DomainNet}  & \multicolumn{2}{c}{FMoW}  & \multicolumn{2}{c}{Camelyon}  & \multicolumn{2}{c}{Avg.} \\
+\midrule
+CLIP ViT-B/16 & SGD & 80.0 &  & 62.5 &  & 72.8 &  & 37.3 &  & 86.8 &  & 67.9 & \\
+CLIP ViT-B/16 & AdamW & 82.8 & \hspace{-1em}{\hgreen{(+2.8)}} & 71.9 & \hspace{-1em}{\hgreen{(+9.4)}} & \textbf{89.2} & \hspace{-1em}{\hgreen{(+16.4)}} & \textbf{40.7} & \hspace{-1em}{\hgreen{(+3.4)}} & \textbf{95.7} & \hspace{-1em}{\hgreen{(+8.9)}} & 76.0 & \hspace{-1em}{\hgreen{(+8.1)}}\\
+CLIP ViT-B/16 & SGD (freeze-embed) & \textbf{83.2} & \hspace{-1em}{\hgreen{(+3.2)}} & 73.7 & \hspace{-1em}{\hgreen{(+11.2)}} & 88.2 & \hspace{-1em}{\hgreen{(+15.4)}} & 40.2 & \hspace{-1em}{\hgreen{(+2.9)}} & 94.3 & \hspace{-1em}{\hgreen{(+7.5)}} & 75.9 & \hspace{-1em}{\hgreen{(+8.0)}}\\
+CLIP ViT-B/16 & SGD (freeze-embed, no momentum) & \textbf{83.1} & \hspace{-1em}{\hgreen{(+3.1)}} & \textbf{80.4} & \hspace{-1em}{\hgreen{(+17.9)}} & \textbf{89.0} & \hspace{-1em}{\hgreen{(+16.2)}} & 38.8 & \hspace{-1em}{\hgreen{(+1.5)}} & 93.3 & \hspace{-1em}{\hgreen{(+6.5)}} & \textbf{76.9} & \hspace{-1em}{\hgreen{(+9.0)}}\\
+\midrule
+CLIP ViT-L/14 & SGD & 84.2 &  & 65.0 &  & 60.8 &  & 41.0 &  & 83.2 &  & 66.8 & \\
+CLIP ViT-L/14 & AdamW & 88.0 & \hspace{-1em}{\hgreen{(+3.8)}} & 85.2 & \hspace{-1em}{\hgreen{(+20.2)}} & \textbf{93.8} & \hspace{-1em}{\hgreen{(+33.0)}} & 48.3 & \hspace{-1em}{\hgreen{(+7.3)}} & 95.9 & \hspace{-1em}{\hgreen{(+12.7)}} & 82.2 & \hspace{-1em}{\hgreen{(+15.4)}}\\
+CLIP ViT-L/14 & SGD (freeze-embed) & \textbf{90.5} & \hspace{-1em}{\hgreen{(+6.3)}} & 84.7 & \hspace{-1em}{\hgreen{(+19.7)}} & 93.1 & \hspace{-1em}{\hgreen{(+32.3)}} & \textbf{49.9} & \hspace{-1em}{\hgreen{(+8.9)}} & \textbf{96.5} & \hspace{-1em}{\hgreen{(+13.3)}} & \textbf{83.0} & \hspace{-1em}{\hgreen{(+16.2)}}\\
+CLIP ViT-L/14 & SGD (freeze-embed, no momentum) & 89.2 & \hspace{-1em}{\hgreen{(+5.0)}} & \textbf{86.8} & \hspace{-1em}{\hgreen{(+21.8)}} & \textbf{93.7} & \hspace{-1em}{\hgreen{(+32.9)}} & 46.8 & \hspace{-1em}{\hgreen{(+5.8)}} & \textbf{96.7} & \hspace{-1em}{\hgreen{(+13.5)}} & 82.6 & \hspace{-1em}{\hgreen{(+15.8)}}\\
+\midrule
+Sup ViT-B/16 & SGD & \textbf{89.5} &  & 77.4 &  & \textbf{86.3} &  & 33.5 &  & 92.6 &  & 75.8 & \\
+Sup ViT-B/16 & AdamW & 88.3 & \hspace{-1em}{\hred{(-1.2)}} & 81.6 & \hspace{-1em}{\hgreen{(+4.2)}} & 84.4 & \hspace{-1em}{\hred{(-1.9)}} & \textbf{35.9} & \hspace{-1em}{\hgreen{(+2.4)}} & 87.9 & \hspace{-1em}{\hred{(-4.7)}} & 75.6 & \hspace{-1em}{\hred{(-0.2)}}\\
+Sup ViT-B/16 & SGD (freeze-embed) & 88.0 & \hspace{-1em}{\hred{(-1.5)}} & \textbf{82.4} & \hspace{-1em}{\hgreen{(+5.0)}} & \textbf{86.3} & \hspace{-1em}{\lgreen{(+0.0)}} & 34.4 & \hspace{-1em}{\hgreen{(+0.9)}} & \textbf{93.7} & \hspace{-1em}{\hgreen{(+1.1)}} & \textbf{77.0} & \hspace{-1em}{\hgreen{(+1.2)}}\\
+Sup ViT-B/16 & SGD (freeze-embed, no momentum) & 88.4 & \hspace{-1em}{\hred{(-1.1)}} & 76.6 & \hspace{-1em}{\hred{(-0.8)}} & 86.1 & \hspace{-1em}{\hred{(-0.2)}} & 34.6 & \hspace{-1em}{\hgreen{(+1.1)}} & 87.5 & \hspace{-1em}{\hred{(-5.1)}} & 74.6 & \hspace{-1em}{\hred{(-1.2)}}\\
+\midrule
+DINO ViT-B/16 & SGD & \textbf{88.2} &  & 56.1 &  & 76.0 &  & 33.6 &  & 86.9 &  & 68.2 & \\
+DINO ViT-B/16 & AdamW & 87.4 & \hspace{-1em}{\hred{(-0.8)}} & 61.2 & \hspace{-1em}{\hgreen{(+5.1)}} & 77.4 & \hspace{-1em}{\hgreen{(+1.4)}} & \textbf{35.8} & \hspace{-1em}{\hgreen{(+2.2)}} & 91.9 & \hspace{-1em}{\hgreen{(+5.0)}} & 70.7 & \hspace{-1em}{\hgreen{(+2.5)}}\\
+DINO ViT-B/16 & SGD (freeze-embed) & 86.7 & \hspace{-1em}{\hred{(-1.5)}} & 67.9 & \hspace{-1em}{\hgreen{(+11.8)}} & 78.4 & \hspace{-1em}{\hgreen{(+2.4)}} & \textbf{35.9} & \hspace{-1em}{\hgreen{(+2.3)}} & 90.6 & \hspace{-1em}{\hgreen{(+3.7)}} & 71.9 & \hspace{-1em}{\hgreen{(+3.7)}}\\
+DINO ViT-B/16 & SGD (freeze-embed, no momentum) & \textbf{88.2} & \hspace{-1em}{\lgreen{(+0.0)}} & \textbf{68.5} & \hspace{-1em}{\hgreen{(+12.4)}} & \textbf{79.9} & \hspace{-1em}{\hgreen{(+3.9)}} & 33.4 & \hspace{-1em}{\hred{(-0.2)}} & \textbf{93.9} & \hspace{-1em}{\hgreen{(+7.0)}} & \textbf{72.8} & \hspace{-1em}{\hgreen{(+4.6)}}\\
+\midrule
+ConvNext-Base & SGD & \textbf{94.0} &  & 80.2 &  & 89.8 &  & \textbf{39.7} &  & 83.0 &  & 77.3 & \\
+ConvNext-Base & AdamW & 90.3 & \hspace{-1em}{\hred{(-3.7)}} & \textbf{89.8} & \hspace{-1em}{\hgreen{(+9.6)}} & 89.5 & \hspace{-1em}{\hred{(-0.3)}} & 38.4 & \hspace{-1em}{\hred{(-1.3)}} & 89.5 & \hspace{-1em}{\hgreen{(+6.5)}} & 79.5 & \hspace{-1em}{\hgreen{(+2.2)}}\\
+ConvNext-Base & SGD (freeze-embed) & 92.6 & \hspace{-1em}{\hred{(-1.4)}} & 86.9 & \hspace{-1em}{\hgreen{(+6.7)}} & 91.2 & \hspace{-1em}{\hgreen{(+1.4)}} & 38.2 & \hspace{-1em}{\hred{(-1.5)}} & 88.1 & \hspace{-1em}{\hgreen{(+5.1)}} & 79.4 & \hspace{-1em}{\hgreen{(+2.1)}}\\
+ConvNext-Base & SGD (freeze-embed, no momentum) & 93.3 & \hspace{-1em}{\hred{(-0.7)}} & 83.6 & \hspace{-1em}{\hgreen{(+3.4)}} & \textbf{91.5} & \hspace{-1em}{\hgreen{(+1.7)}} & 38.1 & \hspace{-1em}{\hred{(-1.6)}} & \textbf{96.0} & \hspace{-1em}{\hgreen{(+13.0)}} & \textbf{80.5} & \hspace{-1em}{\hgreen{(+3.2)}}\\
+\midrule
+BiT ResNet-50 & SGD & \textbf{84.3} &  & \textbf{76.5} &  & 80.0 &  & 34.1 &  & 90.4 &  & 73.1 & \\
+BiT ResNet-50 & AdamW & 83.1 & \hspace{-1em}{\hred{(-1.2)}} & 74.8 & \hspace{-1em}{\hred{(-1.7)}} & \textbf{84.0} & \hspace{-1em}{\hgreen{(+4.0)}} & 33.8 & \hspace{-1em}{\hred{(-0.3)}} & 92.4 & \hspace{-1em}{\hgreen{(+2.0)}} & 73.6 & \hspace{-1em}{\hgreen{(+0.5)}}\\
+BiT ResNet-50 & SGD (freeze-embed) & 84.1 & \hspace{-1em}{\hred{(-0.2)}} & 75.5 & \hspace{-1em}{\hred{(-1.0)}} & 82.3 & \hspace{-1em}{\hgreen{(+2.3)}} & \textbf{35.0} & \hspace{-1em}{\hgreen{(+0.9)}} & 95.2 & \hspace{-1em}{\hgreen{(+4.8)}} & \textbf{74.4} & \hspace{-1em}{\hgreen{(+1.3)}}\\
+BiT ResNet-50 & SGD (freeze-embed, no momentum) & 83.8 & \hspace{-1em}{\hred{(-0.5)}} & 76.0 & \hspace{-1em}{\hred{(-0.5)}} & \textbf{83.8} & \hspace{-1em}{\hgreen{(+3.8)}} & 33.6 & \hspace{-1em}{\hred{(-0.5)}} & \textbf{95.6} & \hspace{-1em}{\hgreen{(+5.2)}} & \textbf{74.5} & \hspace{-1em}{\hgreen{(+1.4)}}\\
+\midrule
+BiT ResNet-101 & SGD & 82.8 &  & 76.9 &  & \textbf{86.2} &  & \textbf{38.0} &  & 89.3 &  & 74.6 & \\
+BiT ResNet-101 & AdamW & \textbf{82.9} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{79.4} & \hspace{-1em}{\hgreen{(+2.5)}} & 83.5 & \hspace{-1em}{\hred{(-2.7)}} & 37.0 & \hspace{-1em}{\hred{(-1.0)}} & 89.7 & \hspace{-1em}{\hgreen{(+0.4)}} & 74.5 & \hspace{-1em}{\lred{(-0.1)}}\\
+BiT ResNet-101 & SGD (freeze-embed) & \textbf{83.1} & \hspace{-1em}{\hgreen{(+0.3)}} & 77.3 & \hspace{-1em}{\hgreen{(+0.4)}} & 86.0 & \hspace{-1em}{\hred{(-0.2)}} & 36.0 & \hspace{-1em}{\hred{(-2.0)}} & 95.5 & \hspace{-1em}{\hgreen{(+6.2)}} & 75.6 & \hspace{-1em}{\hgreen{(+1.0)}}\\
+BiT ResNet-101 & SGD (freeze-embed, no momentum) & \textbf{82.9} & \hspace{-1em}{\lgreen{(+0.1)}} & 79.1 & \hspace{-1em}{\hgreen{(+2.2)}} & 86.0 & \hspace{-1em}{\hred{(-0.2)}} & 36.4 & \hspace{-1em}{\hred{(-1.6)}} & \textbf{95.9} & \hspace{-1em}{\hgreen{(+6.6)}} & \textbf{76.1} & \hspace{-1em}{\hgreen{(+1.5)}}\\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+ \caption{
+\textbf{Out-of-distribution (OOD)} accuracies including SGD (freeze-embed) without momentum.
+\label{tab:ood_bigtable_final}}
+\end{table*}
+
+\begin{table*}[h!]
+ \small 
+\begin{center}
+\resizebox{0.95\textwidth}{!}{
+\begin{tabular}{cccccccccccc|cc}
+\toprule
+ &  & \multicolumn{2}{c}{Living-17}  & \multicolumn{2}{c}{Waterbirds}  & \multicolumn{2}{c}{DomainNet}  & \multicolumn{2}{c}{FMoW}  & \multicolumn{2}{c}{Camelyon}  & \multicolumn{2}{c}{Avg.} \\
+\midrule
+CLIP ViT-B/16 & SGD & 97.8 &  & 97.2 &  & 88.8 &  & 67.0 &  & \textbf{99.4} &  & 90.0 & \\
+CLIP ViT-B/16 & AdamW & \textbf{98.1} & \hspace{-1em}{\hgreen{(+0.3)}} & \textbf{97.7} & \hspace{-1em}{\hgreen{(+0.5)}} & \textbf{95.0} & \hspace{-1em}{\hgreen{(+6.2)}} & \textbf{70.1} & \hspace{-1em}{\hgreen{(+3.1)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{92.1} & \hspace{-1em}{\hgreen{(+2.1)}}\\
+CLIP ViT-B/16 & SGD (freeze-embed) & \textbf{98.2} & \hspace{-1em}{\hgreen{(+0.4)}} & \textbf{97.8} & \hspace{-1em}{\hgreen{(+0.6)}} & 94.9 & \hspace{-1em}{\hgreen{(+6.1)}} & \textbf{70.0} & \hspace{-1em}{\hgreen{(+3.0)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{92.1} & \hspace{-1em}{\hgreen{(+2.1)}}\\
+CLIP ViT-B/16 & SGD (freeze-embed, no momentum) & \textbf{98.2} & \hspace{-1em}{\hgreen{(+0.4)}} & \textbf{97.9} & \hspace{-1em}{\hgreen{(+0.7)}} & \textbf{95.2} & \hspace{-1em}{\hgreen{(+6.4)}} & \textbf{70.1} & \hspace{-1em}{\hgreen{(+3.1)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{92.2} & \hspace{-1em}{\hgreen{(+2.2)}}\\
+\midrule
+CLIP ViT-L/14 & SGD & 98.4 &  & 97.3 &  & 84.3 &  & 69.0 &  & \textbf{99.4} &  & 89.7 & \\
+CLIP ViT-L/14 & AdamW & \textbf{98.9} & \hspace{-1em}{\hgreen{(+0.5)}} & \textbf{98.8} & \hspace{-1em}{\hgreen{(+1.5)}} & 96.9 & \hspace{-1em}{\hgreen{(+12.6)}} & \textbf{74.5} & \hspace{-1em}{\hgreen{(+5.5)}} & \textbf{99.6} & \hspace{-1em}{\lgreen{(+0.2)}} & \textbf{93.7} & \hspace{-1em}{\hgreen{(+4.0)}}\\
+CLIP ViT-L/14 & SGD (freeze-embed) & \textbf{98.7} & \hspace{-1em}{\hgreen{(+0.3)}} & \textbf{98.9} & \hspace{-1em}{\hgreen{(+1.6)}} & 97.1 & \hspace{-1em}{\hgreen{(+12.8)}} & \textbf{74.5} & \hspace{-1em}{\hgreen{(+5.5)}} & \textbf{99.6} & \hspace{-1em}{\lgreen{(+0.2)}} & \textbf{93.7} & \hspace{-1em}{\hgreen{(+4.0)}}\\
+CLIP ViT-L/14 & SGD (freeze-embed, no momentum) & \textbf{98.8} & \hspace{-1em}{\hgreen{(+0.4)}} & \textbf{98.7} & \hspace{-1em}{\hgreen{(+1.4)}} & \textbf{97.3} & \hspace{-1em}{\hgreen{(+13.0)}} & \textbf{74.3} & \hspace{-1em}{\hgreen{(+5.3)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{93.7} & \hspace{-1em}{\hgreen{(+4.0)}}\\
+\midrule
+Sup ViT-B/16 & SGD & \textbf{98.6} &  & \textbf{99.1} &  & \textbf{91.7} &  & 64.1 &  & \textbf{99.4} &  & 90.6 & \\
+Sup ViT-B/16 & AdamW & \textbf{98.7} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{99.0} & \hspace{-1em}{\lred{(-0.1)}} & \textbf{91.7} & \hspace{-1em}{\lred{(-0.0)}} & \textbf{66.4} & \hspace{-1em}{\hgreen{(+2.3)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{91.1} & \hspace{-1em}{\hgreen{(+0.5)}}\\
+Sup ViT-B/16 & SGD (freeze-embed) & \textbf{98.7} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{99.2} & \hspace{-1em}{\lgreen{(+0.1)}} & 91.5 & \hspace{-1em}{\hred{(-0.2)}} & 65.0 & \hspace{-1em}{\hgreen{(+0.9)}} & \textbf{99.6} & \hspace{-1em}{\lgreen{(+0.2)}} & 90.8 & \hspace{-1em}{\hgreen{(+0.2)}}\\
+Sup ViT-B/16 & SGD (freeze-embed, no momentum) & \textbf{98.5} & \hspace{-1em}{\lred{(-0.1)}} & 98.9 & \hspace{-1em}{\lred{(-0.2)}} & 90.6 & \hspace{-1em}{\hred{(-1.1)}} & 65.7 & \hspace{-1em}{\hgreen{(+1.6)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & 90.6 & \hspace{-1em}{\lgreen{(+0.0)}}\\
+\midrule
+DINO ViT-B/16 & SGD & \textbf{98.4} &  & 97.0 &  & 88.2 &  & 62.4 &  & 99.4 &  & 89.1 & \\
+DINO ViT-B/16 & AdamW & \textbf{98.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{97.9} & \hspace{-1em}{\hgreen{(+0.9)}} & \textbf{89.4} & \hspace{-1em}{\hgreen{(+1.2)}} & \textbf{66.0} & \hspace{-1em}{\hgreen{(+3.6)}} & \textbf{99.6} & \hspace{-1em}{\hgreen{(+0.2)}} & \textbf{90.3} & \hspace{-1em}{\hgreen{(+1.2)}}\\
+DINO ViT-B/16 & SGD (freeze-embed) & \textbf{98.4} & \hspace{-1em}{\lgreen{(+0.0)}} & 97.5 & \hspace{-1em}{\hgreen{(+0.5)}} & 89.0 & \hspace{-1em}{\hgreen{(+0.8)}} & 63.5 & \hspace{-1em}{\hgreen{(+1.1)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & 89.6 & \hspace{-1em}{\hgreen{(+0.5)}}\\
+DINO ViT-B/16 & SGD (freeze-embed, no momentum) & \textbf{98.5} & \hspace{-1em}{\lgreen{(+0.1)}} & 97.5 & \hspace{-1em}{\hgreen{(+0.5)}} & \textbf{89.2} & \hspace{-1em}{\hgreen{(+1.0)}} & 63.8 & \hspace{-1em}{\hgreen{(+1.4)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & 89.7 & \hspace{-1em}{\hgreen{(+0.6)}}\\
+\midrule
+ConvNext-Base & SGD & \textbf{98.7} &  & 99.0 &  & 94.8 &  & 66.3 &  & 99.4 &  & 91.6 & \\
+ConvNext-Base & AdamW & \textbf{98.6} & \hspace{-1em}{\lred{(-0.1)}} & \textbf{99.5} & \hspace{-1em}{\hgreen{(+0.5)}} & 94.5 & \hspace{-1em}{\hred{(-0.3)}} & \textbf{68.8} & \hspace{-1em}{\hgreen{(+2.5)}} & \textbf{99.7} & \hspace{-1em}{\hgreen{(+0.3)}} & \textbf{92.2} & \hspace{-1em}{\hgreen{(+0.6)}}\\
+ConvNext-Base & SGD (freeze-embed) & \textbf{98.6} & \hspace{-1em}{\lred{(-0.1)}} & \textbf{99.4} & \hspace{-1em}{\hgreen{(+0.4)}} & \textbf{95.1} & \hspace{-1em}{\hgreen{(+0.3)}} & 67.4 & \hspace{-1em}{\hgreen{(+1.1)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{92.0} & \hspace{-1em}{\hgreen{(+0.4)}}\\
+ConvNext-Base & SGD (freeze-embed, no momentum) & \textbf{98.8} & \hspace{-1em}{\lgreen{(+0.1)}} & 99.2 & \hspace{-1em}{\lgreen{(+0.2)}} & \textbf{95.0} & \hspace{-1em}{\lgreen{(+0.2)}} & 66.0 & \hspace{-1em}{\hred{(-0.3)}} & 99.4 & \hspace{-1em}{\lred{(-0.0)}} & 91.7 & \hspace{-1em}{\lgreen{(+0.1)}}\\
+\midrule
+BiT ResNet-50 & SGD & 97.4 &  & \textbf{98.4} &  & \textbf{89.3} &  & 64.6 &  & \textbf{99.5} &  & \textbf{89.8} & \\
+BiT ResNet-50 & AdamW & 97.2 & \hspace{-1em}{\hred{(-0.2)}} & \textbf{98.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{89.2} & \hspace{-1em}{\lred{(-0.1)}} & \textbf{65.1} & \hspace{-1em}{\hgreen{(+0.5)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.0)}} & \textbf{89.9} & \hspace{-1em}{\lgreen{(+0.1)}}\\
+BiT ResNet-50 & SGD (freeze-embed) & \textbf{97.6} & \hspace{-1em}{\hgreen{(+0.2)}} & \textbf{98.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{89.2} & \hspace{-1em}{\lred{(-0.1)}} & 64.8 & \hspace{-1em}{\lgreen{(+0.2)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.0)}} & \textbf{89.9} & \hspace{-1em}{\lgreen{(+0.1)}}\\
+BiT ResNet-50 & SGD (freeze-embed, no momentum) & \textbf{97.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{98.4} & \hspace{-1em}{\lred{(-0.0)}} & \textbf{89.2} & \hspace{-1em}{\lred{(-0.1)}} & 63.6 & \hspace{-1em}{\hred{(-1.0)}} & \textbf{99.4} & \hspace{-1em}{\lred{(-0.1)}} & 89.6 & \hspace{-1em}{\hred{(-0.2)}}\\
+\midrule
+BiT ResNet-101 & SGD & \textbf{98.3} &  & \textbf{98.9} &  & \textbf{92.0} &  & 66.0 &  & \textbf{99.4} &  & \textbf{90.9} & \\
+BiT ResNet-101 & AdamW & \textbf{98.4} & \hspace{-1em}{\lgreen{(+0.1)}} & 98.6 & \hspace{-1em}{\hred{(-0.3)}} & 91.1 & \hspace{-1em}{\hred{(-0.9)}} & \textbf{67.0} & \hspace{-1em}{\hgreen{(+1.0)}} & \textbf{99.6} & \hspace{-1em}{\lgreen{(+0.2)}} & \textbf{90.9} & \hspace{-1em}{\lred{(-0.0)}}\\
+BiT ResNet-101 & SGD (freeze-embed) & \textbf{98.4} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{98.8} & \hspace{-1em}{\lred{(-0.1)}} & 91.5 & \hspace{-1em}{\hred{(-0.5)}} & 65.9 & \hspace{-1em}{\lred{(-0.1)}} & \textbf{99.5} & \hspace{-1em}{\lgreen{(+0.1)}} & \textbf{90.8} & \hspace{-1em}{\lred{(-0.1)}}\\
+BiT ResNet-101 & SGD (freeze-embed, no momentum) & 98.1 & \hspace{-1em}{\hred{(-0.2)}} & \textbf{98.9} & \hspace{-1em}{\lred{(-0.0)}} & 91.5 & \hspace{-1em}{\hred{(-0.5)}} & 66.3 & \hspace{-1em}{\hgreen{(+0.3)}} & 99.3 & \hspace{-1em}{\lred{(-0.1)}} & \textbf{90.8} & \hspace{-1em}{\lred{(-0.1)}}\\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+ \caption{
+\textbf{In-distribution (ID)} accuracies including SGD (freeze-embed) without momentum.
+\label{tab:id_bigtable_final}}
+\end{table*}
+
+\begin{table*}[t]
+\begin{center}
+\resizebox{0.9\linewidth}{!}{
+\begin{tabular}{cccccc}
+\toprule
+     & Living-17 & Waterbirds & DomainNet & FMoW & Camelyon\\
+    \midrule
+    Best prior result & 87.6 & 89.3 & 87.2 & 47.6 & 93.3 \\
+    \midrule
+    Best result from our paper & \textbf{90.5} & \textbf{89.8} & \textbf{93.8} & \textbf{49.9} & \textbf{96.5} \\
+    Optimizer for best result & \begin{tabular}{@{}c@{}}SGD \\ (freeze-embed) \end{tabular} & AdamW & AdamW & \begin{tabular}{@{}c@{}}SGD \\ (freeze-embed) \end{tabular} & \begin{tabular}{@{}c@{}}SGD \\ (freeze-embed) \end{tabular} \\
+    Model for best result & CLIPViT-L/14 & ConvNeXt-B & CLIP ViT-L/14 & CLIP ViT-L/14 & CLIP ViT-L/14 \\
+    \midrule
+    SGD  (freeze-embed) result  & \textbf{90.5} & 86.9 & {93.1} &  \textbf{49.9} & \textbf{96.5} \\
+    \bottomrule
+\end{tabular}
+}
+\end{center}
+\caption{
+Our OOD accuracy results compared with the best reported numbers in prior work on these datasets. We restrict to methods that \emph{do not} use OOD data for hyperparameter selection or early stopping. To  our knowledge, the previous state-of-the-art results are from~\citet{wortsman2022modelsoups} for FMoW,~\citet{Robey2021ModelBasedDG} for Camelyon,~\citet{kumar2022finetuning} for Living-17 and the version of DomainNet introduced by~\citet{tan2020coal}, and~\citet{ghosal2022vision} for Waterbirds. The WILDS numbers and references are taken from the official WILDS leaderboard (as of 28 Sep 2022), and for Waterbirds we consider all methods that do not use group labels. {For Living-17, we omit models pretrained with ImageNet-1K as Living-17 is a subset of ImageNet-1K.} %
+\label{tab:sota_results}}
+\end{table*}
+
+\subsection{SoTA experiments and results}
+Our experiments get new state-of-the-art results for OOD accuracy on all 5 datasets. On 3/5 datasets (Living-17,  WILDS-FMoW, and WILDS-Camelyon), our proposed SGD (freeze-embed) does the best, while in other 2, AdamW has a small edge. Here, state-of-the-art means that the numbers we get are better than, to our knowledge, any reported number and all numbers on the official leaderboard, and are better than standard full fine-tuning with SGD at the time of the preprint of the paper. We show the best results from our paper in Table~\ref{tab:sota_results} with a comparison to the previous state-of-the-art. \sgnote{what about gradual unfreezing?} %
+
+As a final point, we mention that if our hypothesis that AdamW would inherently avoid over-tuning of the embedding layer were true, unlike for SGD, freezing the embedding for AdamW would not be beneficial. 
+
+
+
+\section{Detailed analysis of CLIP.}
+
+CLIP models have strong transfer learning performance and robustness--among our 7 models, CLIP models had the best ID and OOD accuracies averaged across datasets. So we did a more detailed analysis of the CLIP ViT-B/16 with other optimizers\footnote{Generating Table~\ref{tab:ood_bigtable_final} involved over 600 fine-tuning runs, so we weren't able to repeat this for every model.} which are summarized in Table~\ref{tab:clip_results}. %
+
+\begin{table}[h]
+\centering
+\resizebox{0.9\linewidth}{!}{
+\begin{tabular}{cccc}
+\toprule
+     & {CLIP ViT-B/16} & { CLIP ViT-L/14} & { CLIP ViT-H/14} \\
+\midrule
+{ AdamW} & 2.7 GB & 7.1 GB & Out-of-Memory \\
+{ SGD} & 2.3 GB & 6.1 GB & 10.1 GB  \\
+\midrule
+SGD (freeze-embed)  & 2.3 GB & 6.1 GB & 10.1 GB \\
+SGD (freeze-embed, no momentum) & \textbf{2.0 GB} & \textbf{4.8 GB} & \textbf{7.6 GB} \\
+\bottomrule
+\end{tabular}
+}
+\caption{We profile the GPU memory consumption on three CLIP models of varying sizes, on a Titan-X GPU. SGD (freeze-embed) gives practical gains over AdamW, especially if we drop  momentum. The largest CLIP ViT-H/14 does not fit in GPU memory when using AdamW, but fits in memory with other optimizers. Note that the freeze-embed methods perform competitively or better than AdamW on accuracy, as shown in Table~\ref{tab:clip_results}.
+\label{tab:clip_memory_profiling_results}}
+\end{table}
+\paragraph{GPU memory profiling.} We profiled the GPU memory consumption of our 4 fine-tuning methods, on 3 models, namely CLIP-ViT B/16, CLIP ViT-L/14, and OpenCLIP ViT-H/14---the original CLIP model only scales up to ViT-L/14, so we used the OpenCLIP~\citep{ilharco_gabriel_2021_5143773} for ViT-H/14. %
+The profiling was done using Weights and Biases on a Titan-X GPU with micro-batch size of 1.
+
+In Table~\ref{tab:clip_memory_profiling_results}, we see a ViT-B/16, AdamW uses $16\%$ and $36\%$ more memory than SGD (freeze-embed) and SGD (freeze-embed, no momentum), respectively. The gains are better for larger models: on a ViT-L/14, AdamW uses $18\%$ and $48\%$ more memory respectively. On a ViT-H/14, AdamW runs out of memory, while SGD (freeze-embed) and SGD (freeze-embed, no momentum) are able to run, showing that the gains are at least $20\%$ and $60\%$ respectively.
+
+For large models, it is common to use additional tricks like gradient checkpointing to reduce the activation memory. That is, for a speed penalty (at most 2x), we only need to store activations in $\sqrt{L}$ of $L$ layers when doing backpropagation. Gradient checkpointing would further increase our gains over AdamW since they do not change the memory consumed by the weights but can substantially decrease the memory consumed by the model's activations.
+
+\begin{table*}[htb]
+    \centering
+    \resizebox{1.0\linewidth}{!}{
+    \begin{tabular}{c|cc|cc|cc|cc|cc|cc}
+        \toprule
+        & \multicolumn{2}{c|}{Living-17} & \multicolumn{2}{c|}{Waterbirds} & \multicolumn{2}{c|}{DomainNet} & \multicolumn{2}{c|}{FMoW} &     \multicolumn{2}{c|}{Camelyon} & \multicolumn{2}{c}{Avg.}\\
+        & ID & OOD  & ID & OOD  & ID & OOD  & ID & OOD  & ID & OOD  & ID & OOD\\     
+        \midrule
+{SGD} & 97.8 (0.2) & 80.0 (1.3) & 97.2 (0.1) & 62.5 (5.0) & 88.8 (7.1) & 72.8 (18.0) & 67.0 (0.8) & 37.3 (1.1) & 99.4 (0.0) & 86.8 (1.1) & 90.0  & 67.9\\[5pt]
+\midrule
+{\begin{tabular}[c]{@{}c@{}} AdamW\\ \end{tabular}} & 98.1 (0.1) & \textbf{82.8 (1.2)} & 97.7 (0.0) & \textbf{71.9 (2.4)} & 95.0 (0.1) & 89.2 (1.1) & \textbf{70.1 (0.2)} & \textbf{40.7 (0.3)} & \textbf{99.5 (0.0)} & \textbf{95.7 (0.4)} & \textbf{92.1} & \textbf{76.0}\\[5pt]
+{\begin{tabular}[c]{@{}c@{}} SGD\\  (freeze-embed)\end{tabular}} & \textbf{98.2 (0.3)} & \textbf{83.2 (0.8)} & \textbf{97.8 (0.1)} & \textbf{73.7 (1.1)} & \textbf{94.9 (0.3)} & 88.2 (0.7) & \textbf{70.0 (0.2)} & \textbf{40.2 (0.7)} & \textbf{99.5} (0.0) & 94.3 (0.3) & \textbf{92.1} & 75.9\\
+\midrule 
+{\begin{tabular}[c]{@{}c@{}} SGD\\  (freeze-em. no mom.)\end{tabular}} & \textbf{98.2} & 83.1 & \textbf{97.9} & \textbf{80.4} & \textbf{95.2} & 89.0 & \textbf{70.1} & 38.8 & \textbf{99.5} & 93.3 & \textbf{92.2} & \textbf{76.9}\\[10pt]
+\midrule
+{\begin{tabular}[c]{@{}c@{}} LAMB\\ \end{tabular}} & \textbf{98.2} & 79.5 & \textbf{97.8} & 64.0 & \textbf{95.1} & 90.4 & 67.9 & 38.8 & \textbf{99.5} & 93.4 & 91.7 & 73.2\\
+{\begin{tabular}[c]{@{}c@{}} LARS\\ \end{tabular}} & 97.7 & \textbf{83.9} & 97.1 & 48.6 & 93.2 & 83.8 & 67.0 & 38.6 & 99.3 & 93.3 & 90.9 & 69.6\\
+\bottomrule
+    \end{tabular}
+    }
+        \caption{CLIP ViT-B/16  performance with new optimizers and confidence intervals. For addition to SGD, AdamW, and SGD (freeze-embed), we provide 90\% confidence intervals based on $3$ runs of each hyperparameter configuration. In addition,
+    we show accuracies for two of our variant methods \textit{SGD (freeze-embed, no momentum) }and \textit{Gradual-unfreezing}; as well as comparison to two other optimizers, LARS~\citep{You2017LargeBT} and LAMB~\citep{you2020large}, which use layer-wise normalization in their updates. 
+    \label{tab:clip_results}}
+\end{table*}
+
+\remove{
+\begin{table*}[h!]
+\parbox{.48\linewidth}{
+\caption{
+In-distribution (ID) accuracies for the CLIP base model, with 90\% confidence intervals.
+SGD (freze-embed) is better than SGD, and competitive with AdamW, but LARS and LAMB perform worse than AdamW.
+}
+\begin{center}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{cccccc|c}
+\toprule
+ & Liv-17 & Waterbirds & DomainNet & FMoW & Camelyon & Avg.\\
+\midrule
+SGD & 97.8 (0.2) & 97.2 (0.1) & 88.8 (7.1) & 67.0 (0.8) & 99.4 (0.0) & 90.0\\
+AdamW & 98.1 (0.1) & 97.7 (0.0) & 95.0 (0.1) & \textbf{70.1 (0.2)} & \textbf{99.5 (0.0)} & \textbf{92.1}\\
+\midrule
+SGD (Freeze-embed) & \textbf{98.2 (0.3)} & 97.8 (0.1) & 94.9 (0.3) & \textbf{70.0 (0.2)} & 99.5 (0.0) & \textbf{92.1}\\
+Gradual-unfreezing & \textbf{98.3 (0.1)} & \textbf{98.3 (0.0)} & \textbf{96.3 (0.1)} & 69.2 (0.5) & 99.3 (0.1) & \textbf{92.3}\\
+\midrule
+LAMB & \textbf{98.2} & 97.8 & 95.1 & 67.9 & \textbf{99.5} & 91.7\\
+LARS & 97.7 & 97.1 & 93.2 & 67.0 & 99.3 & 90.9\\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+}
+\hfill
+\parbox{.48\linewidth}{
+\caption{
+Out-of-distribution (OOD) accuracies for the CLIP base model, with 90\% confidence intervals.
+SGD (freze-embed) is much better than SGD, and competitive with AdamW, but LARS and LAMB performs much worse than AdamW.
+}
+\begin{center}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{cccccc|c}
+\toprule
+ & Liv-17 & Waterbirds & DomainNet & FMoW & Camelyon & Avg.\\
+\midrule
+SGD & 80.0 (1.3) & 62.5 (5.0) & 72.8 (18.0) & 37.3 (1.1) & 86.8 (1.1) & 67.9\\
+AdamW & \textbf{82.8 (1.2)} & \textbf{71.9 (2.4)} & 89.2 (1.1) & \textbf{40.7 (0.3)} & 95.7 (0.4) & \textbf{76.0}\\
+\midrule
+SGD (Freeze-embed) & \textbf{83.2 (0.8)} & \textbf{73.7 (1.1)} & 88.2 (0.7) & \textbf{40.2 (0.7)} & 94.3 (0.3) & 75.9\\
+Gradual-unfreezing & 81.9 (0.1) & 69.1 (3.4) & \textbf{93.2 (0.3)} & \textbf{40.5 (1.2)} & \textbf{96.5 (0.4)} & \textbf{76.2}\\
+\midrule
+LAMB & 79.5 & 64.0 & 90.4 & 38.8 & 93.4 & 73.2\\
+LARS & \textbf{83.9} & 48.6 & 83.8 & 38.6 & 93.3 & 69.6\\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+}
+\end{table*}
+}
+
+\paragraph{SGD (freeze-embed) and AdamW outperform LAMB and LARS.}
+We also ran two alternative adaptive gradient methods, LARS~\citep{You2017LargeBT} and LAMB~\citep{you2020large}---also sweeping over 6 learning rates and early stopping.
+These are alternate methods with layerwise normalization that can avoid over-training of large gradient layers. Moreover, like SGD and SGD (freeze-embed), LARS also has a lower memory footprint than AdamW. In Table~\ref{tab:clip_results}, we see that while LARS and LAMB get higher accuracies than SGD, they do worse than SGD (freeze-embed) and AdamW both ID and OOD. In this case, our modification with freeze-embed appears to be more effective. 
+
+
+\begin{wraptable}{R}{0.30\textwidth}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{ccc}
+\toprule
+     & {\small CLIP ViT-B/16} & {\small CLIP ViT-L/14} \\
+\midrule
+{ SGD} & 98.0 & 99.0 \\
+{ AdamW} & 98.3 & \textbf{99.3} \\
+\midrule
+{ \begin{tabular}{cc}SGD \\ (freeze-embed) \end{tabular}} & \textbf{98.4} & \textbf{99.3} \\
+\bottomrule
+\end{tabular}
+}
+\caption{CIFAR-10 accuracy }
+\label{tab:clip_cifar_results}
+\end{wraptable}
+\paragraph{CIFAR-10 results.} As a proof of concept for standard (non-OOD) transfer learning, we fine-tune CLIP ViT models on CIFAR-10. Even at high accuracies, AdamW and SGD (freeze-embed) improve performance. 
+SGD (freeze-embed) gets 20\% and 30\% lower error than SGD on CLIP ViT-B/16 and ViT-L/14, respectively. %
+
+\paragraph{Composes with other fine-tuning methods. 
+
+
+\section{Additional related works}
+
+
+Many works in transfer learning propose freezing parameters while fine-tuning to preserve pretrained information. For example, linear probing, which freezes the entire model except the head~\citep{kumar2022finetuning, wortsman2021robust} and  zero-shot models~\citep{radford2021clip} have been shown to improve OOD performance over standard fine-tuning. In NLP, methods such as prefix-tuning~\citep{li2021prefix} and prompt-tuning~\citep{lester2021power} have been shown to improve OOD accuracy. Other works propose regularizing parameters towards initialization, freezing 
+the first several layers, using
+different learning rates for different layers, or tuning different layers for different examples~\citep{long2013transfer, ge2017borrowing,howard2018universal, guo2019spottune,zhang2020sidetuning,zhu2020freelb,jiang2021smart,aghajanyan2021finetuning}.
+Typically, a large fraction of the model is frozen to preserve the pretrained information---a key difference in this work is that we find that freezing a very small fraction of the model (<1\% of the parameters) can lead to substantial and consistent improvements in accuracy.
+
+Other optimizers have been proposed to reduce AdamW's memory footprint, including LARS~\citep{You2017LargeBT} and AdaFactor~\citep{shazeer2018adafactor}.  Our method is simpler and achieves better accuracies with same or better memory gains. A complementary line of work \cite{dettmers2022optimizers} study quantization mechanisms for optimizer states. These tools, although developed for AdamW, can also be used with SGD (freeze-embed) to get additional gains in memory. 
+
+
+\section{Discussion.}
+
+We note that the methods we consider are not complex.
+We showed that a minor tweak of freezing the embedding layer overwhelmingly improves the performance across the board when fine-tuning with SGD. 
+We clarify that we do not claim that SGD (freeze-embed) is a substantially better method than AdamW in terms of accuracy. Rather,  it is remarkable that with its simplicity, we can already achieve \emph{comparable} or even slightly better accuracy than AdamW across a wide range of models and benchmarks, while using much less memory.
+The broader point of our work is that pretrained models have a lot of useful information, but naively fine-tuning these models can lead to sub-optimal performance.
+Carefully analyzing properties of these models such as the gradients of different layers, and designing simple modifications, can lead to better performance.
+
+
+\section{Acknowledgements}
+
+
+We thank Percy Liang, Tengyu Ma, Yuanzhi Li, and Zhiyuan Li for helpful comments.
+
+
+
+
+

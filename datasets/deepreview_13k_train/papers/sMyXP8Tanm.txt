@@ -1,0 +1,435 @@
+\title{Your Absorbing Discrete Diffusion Secretly Models the Conditional Distributions of Clean Data}
+
+\begin{abstract}
+Discrete diffusion models with absorbing processes have shown promise in language modeling. The key quantities to be estimated are the ratios between the marginal probabilities of two transitive states at all timesteps, called the concrete score. In this paper, we reveal that the concrete score in absorbing diffusion can be expressed as conditional probabilities of clean data, multiplied by a time-dependent scalar in an analytic form. Motivated by this finding, we propose reparameterized absorbing discrete diffusion (RADD), a dedicated diffusion model without time-condition that characterizes the time-independent conditional probabilities. Besides its simplicity, RADD can reduce the number of function evaluations (NFEs) by caching the output of the time-independent network when the noisy sample remains unchanged in a sampling interval. Empirically, RADD is up to 3.5 times faster while achieving similar performance with the strongest baseline.
+Built upon the new perspective of conditional distributions, we further unify absorbing discrete diffusion and any-order autoregressive models (AO-ARMs), showing that the upper bound on the negative log-likelihood for the diffusion model can be
+interpreted as an expected negative log-likelihood for AO-ARMs. Further, our RADD models achieve SOTA performance among diffusion models on 5 zero-shot language modeling benchmarks (measured by perplexity) at the GPT-2 scale.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Auto-regressive models~\citep{radford2018improving, radford2019language, brown2020language} have dominated the area of language modeling for many years. In particular, such models significantly benefit from large-scale transformers~\cite{vaswani2017attention} and training data and have achieved remarkable progress~\cite{chatgpt, achiam2023gpt, touvron2023llama,anil2023palm}. From a probabilistic perspective, the sequential sampling process of auto-regressive models is inefficient and limits the reasoning ability in nonsequential orders~\cite{berglund2023reversal, lv2023we}. Intrinsically, this is
+because such models characterize the joint distribution by the chain rule of probability, motivating research on developing other types of generative models for text. 
+
+Diffusion models~\cite{sohl2015deep,ho2020denoising,song2020score} generate data in a coarse-to-fine manner efficiently~\cite{song2020denoising, bao2022analytic, zhang2022fast, lu2022dpm, lu2022dpmplus} and all dimensions simultaneously, providing an appealing alternative to auto-regressive models. Among other efforts~\cite{li2022diffusionlm,austin2023structured,dieleman2022continuous,chen2023analog, graves2024bayesian, xue2024unifying, austin2023structured, he2022diffusionbert, campbell2022continuous, sun2023scorebased, meng2023concrete, lou2024discrete} (see \cref{sec:related_work} for a comprehensive discussion), score entropy discrete diffusion (SEDD)~\cite{lou2024discrete} has shown promise in text generation. In particular, SEDD has achieved comparable results to auto-regressive models on 5 zero-shot language modeling benchmarks at the GPT-2 scale. Meanwhile, SEDD can reduce the number of function evaluations (NFEs) in sampling and fulfill text conditioned on prompts at different positions. 
+Technically, SEDD employs a discrete-state (absorbing) Markov process that adds noises to data by randomly replacing a token with a mask token $[\textbf{M}]$ and then learns a reverse process to denoise from an entirely masked sentence. The key quantities to be estimated in SEDD are the ratios between the marginal probabilities of two transitive states at all timesteps, called the \textbf{concrete score}. SEDD also proposes a ``scaling trick'' (see details in \cref{sec:radd}) that scales the output of the score estimation by a factor. The trick has been proven very effective in practice yet not fully understood in theory~\cite{lou2024discrete}.
+
+One of our main contributions is to reveal that the concrete score in absorbing diffusion can be expressed as conditional probabilities of clean data, multiplied by a time-dependent scalar in an analytic form (see Theorem~\ref{thm:AnalyticConcreteScore}). 
+Our finding theoretically explains the benefits of the scaling trick as a reparameterization for better optimization. Motivated by the finding, we propose reparameterized absorbing discrete diffusion (RADD), a dedicated diffusion model that characterizes the time-independent conditional probabilities by removing the time conditions from the score estimation. Besides its simplicity, RADD can significantly reduce the NFEs by caching the output of the time-independent network when the noisy sample remains unchanged during a sampling interval (see \cref{fig:E_nfe}).
+
+Built upon the new understanding of the concrete score, we further unify absorbing discrete diffusion and any-order autoregressive models (AO-ARMs)~\cite{UriaML14,HoogeboomARDM22,Shih2022TrainingAI}, demonstrating that their training objectives are equivalent (see Theorem~\ref{thm:equivalent_obj}). To establish the theory, we first rewrite the original training objective for absorbing discrete diffusion into a simpler form (named $t$-denoising cross-entropy, $t$-DCE). Then, we apply a change of variable from the time $t$ to the probability that a single-dimensional token is masked at time $t$ in the forward process. By integrating the probability variable analytically, we show its equivalence to the training objectives for AO-ARMs. These theoretical findings offer a fresh perspective that the upper bound on the negative log-likelihood of an absorbing discrete diffusion can be interpreted as the expected negative log-likelihood for corresponding AO-ARMs. Furthermore, they provide alternative objective functions for training and likelihood evaluation.
+
+
+Empirically, RADD is up to 3.5 times faster in sampling while consistently achieving similar performance to the strongest baseline, i.e., SEDD~\cite{lou2024discrete}. Moreover, we train our RADD models on different objective functions, achieving state-of-the-art performance among diffusion models on five zero-shot language modeling benchmarks (measured by perplexity) at the GPT-2 scale. This empirical evidence validates our theoretical findings.
+
+In summary, this paper has several contributions:
+\begin{itemize} 
+    \item \textbf{Deeper understanding of discrete diffusion}: Both the factorization form of the concrete score and unified training objective for absorbing discrete diffusion and AO-ARMs reveal important yet overlooked theoretical properties of absorbing discrete diffusion, which explain the mysterious scaling trick, provide practice guidance, and may inspire future work.
+    \item \textbf{Simpler parameterization}: By removing the time conditions, we reparameterize the model to focus on a time-independent conditional probability, simplifying the existing model.
+    \item \textbf{Efficient sampling}: Leveraging the reparameterized form, RADD with a caching strategy achieves consistently faster sampling.
+    \item \textbf{Enhanced zero-shot language modeling performance}: 
+   Our architectural simplifications and optimized training loss lead to superior results.
+    On five zero-shot language modeling benchmarks, RADD achieves state-of-the-art performance among discrete diffusion models (measured by perplexity) at the GPT-2 scale. 
+\end{itemize}  
+
+
+
+\section{Background}
+
+
+In this section, we introduce notations and preliminaries on continuous-time discrete diffusion models in \cref{subsec:ctmc} and any-order autoregressive models in  \cref{subsec:aoarm}.  
+
+\paragraph{Notation}
+ We begin by establishing the notations used throughout the paper. Let lower, boldface lower and upper case letters represent scalers (e.g., $a$), vectors (e.g., $\va$), and matrices (e.g., $\mA$), respectively. For a vector $\va$, $a^i$ denotes its $i$-th element. For a matrix $\mA$, $\mA(i,j)$ denotes $(i,j)$-th element. For a vector function $\vf$, $\vf(\vx)_{i}$ denotes the $i$-th element of $\vf(\vx)$. Constants and random variables are not distinguished in the notation if there is no confusion. We represent the distributions of the forward and reverse processes by $p$ and $q_\theta$ respectively. The transition probability from time $s$ to time $t$ is denoted by $p_{t|s}(\cdot|\cdot)$, and the probability at time $t$ is denoted by $p_t(\cdot)$. For complete notations and definitions, see \cref{sec:notations}.
+
+\subsection{Continuous time discrete diffusion model}
+\label{subsec:ctmc}
+\paragraph{Single dimension}
+\label{sec:sin_dim}
+
+Let $x$ denote a single dimensional sample with possible values in $\mathcal{X}=\{ 1, \ldots, N\}$. 
+A continuous-time discrete Markov chain at time $t$ is characterized by a transition rate matrix $\mQ_t$ as follows
+    \begin{equation}
+    \label{eq:delta_transition}
+        p_{t+ \Delta t|t}(\hat{x}|x) =
+        \begin{cases}
+             \mQ_t(x,\hat{x})\Delta t + o(\Delta t),     & \hat{x} \neq x, \\
+            1 + \mQ_t(x,x)\Delta t + o(\Delta t), & \hat{x} = x,
+        \end{cases}
+    \end{equation}
+where $\mQ_t(x,\hat{x})$ is the $(x,\hat{x})$ element of transition rate matrix $\mQ_t$, denoting the transition rate from state $x$ to state $\hat{x}$ at time $t$.
+Equivalently, $\mQ_t(x,\hat{x})$ is defined as 
+\begin{equation}
+\label{eq:q_def}
+    \mQ_t(x,\hat{x})= \begin{cases}
+        \lim _{\Delta t \rightarrow 0} \frac{p_{t+ \Delta t|t}(\hat{x}|x)}{\Delta t},     & \hat{x} \neq x,  \\
+        \lim _{\Delta t \rightarrow 0} \frac{p_{t+ \Delta t|t}(x|x)-1}{\Delta t}, & \hat{x} = x. \end{cases}
+\end{equation}
+Given the above definition, denote $\mP_{t|s}(x,\hat{x}) := p_{t|s}(\hat{x}|x)$. The following Kolmogorov's forward equation holds~\cite{campbell2022continuous,anderson2012continuous}:
+\begin{equation}
+\label{eq:forward_eq}
+    \frac{d}{dt}\mP_{t|s} =  \mP_{t|s} \mQ_t.
+\end{equation}
+
+In practice~\cite{campbell2022continuous,lou2024discrete}, $\mQ_t$ is parameterized as $\sigma(t)\mQ$, where $\sigma(t)$ is a scalar function representing the noise schedule and $\mQ$ is a constant matrix. In this case, the solution to \cref{eq:forward_eq} can be solved analytically as $\mP_{t|s} = \exp\left((\bar{\sigma}(t) - \bar{\sigma}(s)) \mQ \right)$,
+where  $\bar{\sigma}(t) = \int_0^t \sigma(s)ds$ and $\exp$ is the matrix exponential. Therefore, we can directly sample $x_t$ from $x_s$ in one step for any $t > s$.
+
+Further, $\mQ$ is often designed to diffuse towards a uniform distribution or an absorbing state $[\textbf{M}]$. Recent work~\cite{austin2023structured,campbell2022continuous} suggests that the absorbing matrix achieves better empirical performance. Besides, as detailed in Section~\ref{sec:radd}, the specific structure of the absorbing matrix can be leveraged to improve performance and accelerate sampling. Therefore, we focus on the absorbing matrix as follows:
+\begin{align}
+    \Qa=\left[\begin{array}{ccccc}
+            -1     & 0      & \cdots & 0      & 1      \\
+            0      & -1     & \cdots & 0      & 1      \\
+            \vdots & \vdots & \ddots & \vdots & \vdots \\
+            0      & 0      & \cdots & -1     & 1      \\
+            0      & 0      & \cdots & 0      & 0
+    \end{array}\right]. 
+    \label{eq:absorb_q}
+\end{align}
+
+The time reversal of the forward process is characterized by a reverse transition rate matrix $\tilde{\mQ}_t$~\cite{Sun2022ScorebasedCD, Kelly1980ReversibilityAS}, whose element from state $x_t$ to state $\hat{x}_t$  is given by
+\begin{equation}
+\label{eq:def_q_rev}
+    \tilde{\mQ}_t(x_t, \hat{x}_t)= \begin{cases}
+        \frac{ p_t(\hat{x}_t)}{p_t(x_t)} \mQ_t(\hat{x}_t,x_t) ,    & \hat{x_t} \neq x_t, \\
+        - \sum_{k \neq x_t}   \tilde{\mQ}_t(x_t,k), & \hat{x}_t=x_t.
+    \end{cases}
+\end{equation}
+
+Simulating the reverse process requires learning the reverse transition rate $\tilde{\mQ}_t(x_t, \hat{x}_t)$. As $\mQ_t( \hat{x}_t,x_t)$ is known, it is sufficient to estimate the concrete score $\frac{p_t(\hat{x}_t)}{p_t(x_t)}$ by a score network $s_\theta(x_t,t) \approx [\frac{p_t(\hat{x}_t)}{p_t(x_t)}]_{\hat{x}_t\in \mathcal{X}}$~\cite{meng2023concrete}. Denoising score entropy (DSE)~\cite{lou2024discrete}  is an effective objective to train the score network
+\begin{equation}
+\label{eq:score_entropy}
+    \int_0^T \mathbb{E}_{x_t \sim p_{t|0 }\left(x_t \mid x_0\right)} \sum_{{\hat{x}_t} \neq x_t} \mQ_t\left( \hat{x}_t,x_t\right)\left(s_\theta\left(x_t, t\right)_{\hat{x}_t}-\right.
+        \left.\frac{p_{t \mid 0}\left({\hat{x}_t} \mid x_0\right)}{p_{t \mid 0}\left(x_t \mid x_0\right)} \log s_\theta\left(x_t, t\right)_{\hat{x}_t}+ K\left(\frac{p_{t \mid 0}\left({\hat{x}_t} \mid x_0\right)}{p_{t \mid 0}\left(x_t \mid x_0\right)}\right)\right) d t,
+\end{equation}
+where $K(a):= a \log a - a$. In particular, the DSE loss in \cref{eq:score_entropy} is an upper bound of the negative log-likelihood with an unknown gap. Nevertheless, existing work~\cite{lou2024discrete} still employs it for training and likelihood evaluation. 
+
+After training, sampling can be understood as discretizing the following reverse process 
+\begin{equation}
+\label{eq:reverse_eq}
+    \frac{d}{ds}\mP_{s|t} =  \mP_{s|t} \tilde{\mQ}_s ,
+\end{equation}
+where $ds$ is an infinitesimal negative timestep and the concrete score is replaced by the score network. Existing samplers include the Euler method and Tweedie $\tau$ -leaping, as detailed in \cref{sec:sample_methods}.
+\paragraph{Multi-dimension}
+\label{sec:mul_dim}
+In a state space of length $d$ like $\mathcal{X}^d = \{1, \ldots, n\}^d$, we denote the sample as a sequence of one-dimensional data, i.e.,$\vx = x^1\ldots x^d$. The transition matrix $\mQ_t \in \mathbb{R}^{n^d \times n^d}$ has an exponential number of possible states, making it expensive to reverse. To alleviate this issue, existing work~\cite{campbell2022continuous,lou2024discrete} assumes independence between dimensions and each dimension is a one-dimensional diffusion process with the same transition rate matrix $\Qtok_t \in \mathbb{R}^{n\times n} $.
+
+Under the independent assumption, $\mQ_t$ assigns zero values~\cite{campbell2022continuous,lou2024discrete} for all sequences with a Hamming distance larger than 1. Therefore, it is sufficient to model the concrete score between sequences that differ by a Hamming distance of 1, such as $\hat{\vx}_t= x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d$ given $\vx_t = x_t^1\cdots x_t^d$. Therefore,  the score network $\vs_\theta(\cdot, t):\{1, \ldots, n\}^d \rightarrow \mathbb{R}^{d \times n}$ is defined as
+\begin{equation}
+\label{eq:score_net}
+        \vs_\theta\left( \vx_t,t\right)_{\hat{\vx}_t} = \vs_\theta\left(x_t^1 \ldots x_t^i \ldots x_t^d, t\right)[i, \widehat{x}_t^i]\approx \frac{p_t\left(x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)}{p_t\left(x_t^1 \ldots x_t^i \ldots x_t^d\right)},
+\end{equation}
+
+which leads to the following expression to estimate the reverse transition rate matrix $\tilde{\mQ}_t$:
+\begin{align}
+\tilde{\mQ}_t\left(x_t^1 \ldots x_t^i \ldots x_t^d, x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)
+&= \Qtok_t\left(\widehat{x}_t^i,x_t^i\right) \frac{p_t\left(x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)}{p_t\left(x_t^1 \ldots x_t^i \ldots x_t^d\right)}\\
+    &\approx \Qtok_t\left(\widehat{x}_t^i,x_t^i\right)
+    \vs_\theta\left(x_t^1 \ldots x_t^i \ldots x_t^d, t\right)[i, \widehat{x}_t^i].  
+\end{align}
+Existing samplers assume that each dimension is independent within a small interval $\Delta t$ and update each dimension in parallel for efficiency~\cite{lou2024discrete,campbell2022continuous}. 
+
+\subsection{Any-order autoregressive models}
+\label{subsec:aoarm}
+Any-order autoregressive models (AO-ARMs)~\cite{UriaML14,HoogeboomARDM22,Shih2022TrainingAI} model the joint distribution autoregressively for all possible orders $\pi$ of the $d$ variables. 
+Formally, they factorize the joint distribution as $\prod_{k=1}^d p(x^{\pi(k)}|x^{\pi(<k)})$. 
+To learn such a distribution, an AO-ARM utilizes a weight-sharing neural network to model all univariate conditionals and employs mask tokens to represent absent variables. 
+During training, the expected negative log-likelihood over the uniform distribution of all orders $U_\pi$ is minimized:
+\begin{align}
+\label{eq:L_AO_def}
+\mathcal{L}_{AO}(\vx_0) &= \mathbb{E}_{\pi \sim U_\pi} \sum_{l=1}^d \log q_\theta(x_0^{\pi(l)}|x_0^{\pi(<l)};\pi).
+\end{align}
+
+
+\section{Reparameterized absorbing discrete diffusion}
+
+\label{sec:radd}
+
+In \cref{subsec:reparameterize_concretescore}, we reveal that the concrete score of absorbing discrete diffusion can be reparameterized as conditional distributions of clean data, which enables efficient sampling by caching the output of time-independent network (see \cref{subsec:Efficient_sampling}). In \cref{subsec:unify}, we unify the training objective of absorbing discrete diffusion and AO-ARMs. 
+
+\subsection{Parameterizing the concrete score as conditional distributions of clean data}
+\label{subsec:reparameterize_concretescore}
+
+A key observation is that only the transition from the masked token to an unmasked token is valid in the reverse process of an absorbing discrete diffusion. In particular, according to the definition of the transition matrix of the absorbing process  (see~\cref{eq:absorb_q}), we have $\Qa(\hat{x}_t^i,x_t^i) = 0$ for any unmasked $x_t^i \neq [\textbf{M}]$ and $\hat{x}_t^i \neq x_t^i$. 
+Therefore, the corresponding element in the transition matrix of the reverse process $\tilde{\mQ}_t$ (see~\cref{eq:def_q_rev}) equals zero. Namely, 
+\begin{align}
+\label{eq:zero_q}
+    \tilde{\mQ}_t\left(x_t^1 \ldots x_t^i \ldots x_t^d, x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)    &= \sigma(t) \Qa\left(\widehat{x}_t^i,x_t^i\right)
+    \frac{p_t\left(x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)}{p_t\left(x_t^1 \ldots x_t^i \ldots x_t^d\right)} = 0,
+\end{align}
+for any unmasked state $x_t^i \neq [\textbf{M}]$ and $\hat{x}_t^i \neq x_t^i$ and it is unnecessary to model the corresponding concrete score $ \frac{p_t\left(x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)}{p_t\left(x_t^1 \ldots x_t^i \ldots x_t^d\right)}$. 
+Also, note that the concrete score always takes the value of one if $\hat{x}_t^i = x_t^i$. Therefore, we only need to characterize the concrete score for  $x_t^i = [\textbf{M}]$ and $\hat{x}_t^i \neq [\textbf{M}]$.  
+Interestingly, in this case, we discover that the concrete score has a simple analytic form w.r.t. to the conditional distributions of clean data, as summarized in the following \cref{thm:AnalyticConcreteScore}.
+\begin{restatable}{theorem}{AnalyticRatio}
+    \label{thm:AnalyticConcreteScore}
+    (Analytic concrete score in absorbing diffusion, proof in \cref{sec:proof_analytic_ratio}) For $\vx_t = x_t^1 \ldots x_t^i \ldots x_t^d$ and $\hat{\vx}_t = x_t^1 \ldots \widehat{x}^i_t \ldots x_t^d$, if $x_t^i = [\textbf{M}]$ and $\hat{x}_t^i \neq [\textbf{M}]$, the concrete score at time $t$ can be expressed as a \textcolor{blue}{time-independent} conditional distribution at time zero multiplied by an analytic \textcolor{orange}{time-dependent} term:
+    \begin{equation*}
+       \frac{p_t\left(x_t^1 \ldots \widehat{x}_t^i \ldots x_t^d\right)}{p_t\left(x_t^1 \ldots x_t^i \ldots x_t^d\right)} = \textcolor{orange}{\frac{e^{- \bar{\sigma}(t)}}{1 - e^{- \bar{\sigma}(t)}}} \textcolor{blue}{p_0(\hat{x}_t^i|\vx_t^{\textrm{UM}})},
+    \end{equation*}
+where $\vx_t^{\textrm{UM}}$ is the vector consists of all unmasked tokens of $\vx_t$.
+\end{restatable}
+
+2 therein), which significantly improves the practical performance of discrete diffusion (see \cref{tbl:zero_shot_perplexity}) but has not been fully understood before. In particular, the scaling trick divides the output of the score network by a factor. Equivalently, it reparameterizes \(\vs_\theta(\vx_t, t)\) as follows:
+\[ \vs_\theta(\vx_t, t) =\textcolor{orange} {\frac{e^{-\bar{\sigma}(t)}}{1 - e^{-\bar{\sigma}(t)}}} \tilde{\vs}_\theta(\vx_t, t), \]
+where $\tilde{\vs}_\theta(\vx_t, t)$ is the output of the reparameterized score network and the scaling factor coincides with the time-dependent term in Theorem~\ref{thm:AnalyticConcreteScore}. In the original parameterization, the score network $s_\theta$ must model the whole time-dependent concrete score. In contrast, with the scaling trick, the reparameterized score $\tilde{\vs}_\theta(\vx_t, t)$ can focus on capturing the clean data distribution $p_0(\hat{x}^i|\vx_t^{\textrm{UM}})$  and simplifies learning, according to Theorem~\ref{thm:AnalyticConcreteScore}.
+
+Further, Theorem~\ref{thm:AnalyticConcreteScore} suggests that the reparameterized score is essentially a conditional probability on clean data, which is time-independent. Motivated by the insights, we propose reparameterized absorbing discrete diffusion (RADD), which employs a time-independent network $\vc_\theta(\vx_t)$ that defines a model distribution $q_\theta$ by corresponding conditional distributions to approximate data distribution $p_0$ directly:
+
+\begin{equation}
+\label{eq:c_q_def}
+    \vc_\theta(\vx_t)[i,\hat{x}_t^i] = q_\theta (\hat{x}_t^i|\vx_t^{\textrm{UM}}) \approx p_0(\hat{x}_t^i|\vx_t^{\textrm{UM}}). 
+\end{equation}
+
+
+
+
+
+In practice, we make a minimal modification of the score network in SEDD~\cite{lou2024discrete} for simplicity and fairness. Briefly, we remove the time condition from the input and take the softmax as the final nonlinearity. Further details can be found in \cref{subsec:model_details}.
+
+Moreover, RADD also enjoys a more efficient sampling process than SEDD~\cite{lou2024discrete} based on its simplified parameterization, as presented below.
+
+
+
+
+
+\subsection{Efficient samplers to reduce NFEs by caching the output of RADD}
+\label{subsec:Efficient_sampling}
+In the reverse process of an absorbing discrete diffusion, once a token transitions from $[\textbf{M}]$ to an unmasked token, it remains unchanged. Consequently, for a sequence consisting of $d$ tokens, there will be at most $d$ intervals during the sampling process where changes occur, regardless of the number of sampling steps $D$. In the remaining steps, the sequence remains unchanged across all $d$ dimensions.
+This property allows us to cache $\vc_\theta(x_t)$ to avoid the need to reevaluate the time-independent $\vc_\theta$ when $\vx_t$ is unchanged in the previous step (see \cref{sec:pseudo} for the pseudo-code). However, since SEDD is conditioned on time, it does not support this caching strategy for reducing NFEs.
+\begin{figure}[h]
+    \begin{minipage}{0.47\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/e-nfe.pdf}
+    \caption{\textbf{Expected number of function evaluations (E-NFEs) over a different number of sampling steps.} E-NFEs is measured by Tweedie $\tau$-leaping method with log-linear noise schedule. }        
+    \label{fig:E_nfe}
+    \end{minipage}
+    \hspace{0.02\linewidth}
+    \begin{minipage}{0.47\linewidth}
+    \centering
+\includegraphics[width=\linewidth]{images/generative_perplexity_vs_iterations.pdf}
+        \caption{\textbf{Sample quality measured by perplexity ($\downarrow$).} The x-axis represents E-NFEs for RADD with caching strategy and NFEs for SEDD. RADD with cache strategy achieves $2\sim3.5 \times$ speedup compared to SEDD with steps ranging from 1024 to 4096. }     \label{fig:unditional}
+    \end{minipage}
+\end{figure}
+The NFEs with the caching strategy is a random variable. To quantify it, we calculate the expected NFEs (E-NFEs) in analytic form, conditioned on the sampling method, time steps, and noise schedule. For instance, using the Tweedie $\tau$-leaping method with a log-linear noise schedule~\cite{lou2024discrete}, the E-NFEs is given by (proof in \cref{subsec:E_nfe}):
+\begin{equation}
+\label{eq:Tweedie_E_NFE}
+    \ENFE(n) =  n(1 - (1 - \frac{1}{n})^l),
+\end{equation}
+where $n$ represents the sampling steps and $l$ represents the length to be generated. 
+
+In \cref{fig:E_nfe}, we plot the curve of \cref{eq:Tweedie_E_NFE} in blue, which aligns well with our experiments (the red stars). This demonstrates that our method theoretically reduces E-NFEs significantly when the number of sampling steps is large, and this reduction is also confirmed experimentally in \cref{fig:unditional}.
+
+Furthermore, based on \cref{thm:AnalyticConcreteScore}, simplified forms of the reverse process for both Euler method and Tweedie $\tau$ -leaping method can be derived, which leads to corresponding analytic forms of E-NFEs given time steps and noise schedule. 
+We also prove that these two sampling methods are equivalent under a log-linear noise schedule for absorbing discrete diffusion (see \cref{sec:sample_methods} for more details). 
+
+
+
+
+
+\subsection{Unifying absorbing discrete diffusion and any-order autoregressive models}
+\label{subsec:unify}
+Building upon Theorem~\ref{thm:AnalyticConcreteScore}, we further prove the equivalence between absorbing discrete diffusion and any-order 
+ autoregressive models~\cite{UriaML14,HoogeboomARDM22,Shih2022TrainingAI}, as presented in the following theorem.
+\begin{restatable}{theorem}{UnifyTwoModels}
+\label{thm:equivalent_obj}
+The absorbing discrete diffusion objective of \cref{eq:score_entropy} is equivalent to any-order autoregressive objective of \cref{eq:L_AO_def} when the final total noise level $\sigmabar{T} \rightarrow + \infty$. 
+\end{restatable}
+
+The proof of \cref{thm:equivalent_obj} consists of three key steps, which introduce three different yet equivalent loss functions. Below we briefly present the key ideas and defer the proof in \cref{sec:equivalent_proof}.
+
+In the first step, by removing the terms $\vs_\theta\left(\vx_t, t\right)_{\hat{\vx}_t} $ and $K\left(\frac{p_{t \mid 0}\left({\hat{\vx}_t} \mid \vx_0\right)}{p_{t \mid 0}\left(\vx_t \mid \vx_0\right)}\right)$ in \cref{eq:score_entropy}, we can define 
+a simpler loss $\mathcal{L}_{\TDCE}^T$ called $t$-denoising cross-entropy loss (abbr. $\TDCE$), which is equivalent to DSE loss. In the multi-dimensional case, it has the form:
+\begin{align}   
+    \mathcal{L}_{\TDCE}^T(\vx_0)
+\label{eq:tDCE_q}
+    &=  \int_0^T \mathbb{E}_{ \vx_t \sim p_{t|0}( \vx_t|\vx_0)}
+    \left[ \sum_{x_t^i = [\textbf{M}]}
+    - \frac{ \sigma(t) e^{- \bar{\sigma}(t)}}{1 - e^{- \bar{\sigma}(t)}}  \log\left(  \frac{e^{- \bar{\sigma}(t)}}{1 - e^{- \bar{\sigma}(t)}} q_\theta(x_0^i|\vx_t^{\textrm{UM}}) \right)
+    \right]dt.
+\end{align}
+
+We emphasize that \cref{eq:tDCE_q} holds in a nonparametric setting  because RADD can be interpreted as a model distribution $q_\theta$ representing the conditional distribution of clean data, which approximates the true distribution $p_0$, as proven in~\cref{thm:AnalyticConcreteScore}.
+
+In the second step, inspired by ~\citet{kingma2023variational}, we change the variable from $t$ to $\lambda(t) =1 - e^{- \bar{\sigma}(t)}$, which represents the probability of a token being masked in $[0,t]$ during the forward process. Thus, $\mathcal{L}^{T}_{\TDCE}(\vx_0)$ can be rewritten as an integral of $\lambda$, defined as $\lambda$-denoising cross-entropy loss (abbr. $\LDCE$):
+\begin{equation}
+\label{eq:DCEloss_lambda}
+    \mathcal{L}_{\LDCE}(\vx_0) := \int_{0}^{1}
+    \frac{1}{\lambda}
+    \mathbb{E}_{ \vx_\lambda \sim p_\lambda(\vx_\lambda|\vx_0)}
+    \left[
+    \sum_{x_\lambda^i = [\textbf{M}]}
+    -\log q_\theta(\vx_0^i|\vx_\lambda^{\textrm{UM}})
+    \right]
+    d\lambda,
+\end{equation}
+where $p_\lambda(\vx_\lambda|\vx_0)$ is the joint distribution induced by masking each dimension in $\vx_0$ independently with a probability $\lambda$. 
+Finally, we prove that $\LDCE$ loss in \cref{eq:DCEloss_lambda} can be integrated analytically and rewritten as $\mathcal{L}_{AO}$ in  \cref{eq:L_AO_def}. We summarize our proof procedure by the equivalence between these losses:
+\begin{equation}
+\label{eq:loss_equivalence}
+
+\end{equation}
+
+A direct benefit from \cref{thm:equivalent_obj} is that we can use an absorbing discrete diffusion model to sample like AO-ARM and vice versa. For training and likelihood evaluation, the four losses in \cref{eq:loss_equivalence} can also be used (see \cref{sec:pseudo} for pseudo-code). To efficiently estimate the four losses using Monte Carlo methods, we can replace the sum or integral with an expectation. Take \cref{eq:DCEloss_lambda} for example, it can be rewritten as the following form of expectation on $\lambda$:
+\begin{equation}
+        \mathcal{L}_{\LDCE}(\vx_0) =  \mathbb{E}_{\lambda \sim U([0,1])}
+    \frac{1}{\lambda}
+    \mathbb{E}_{ \vx_\lambda \sim p_\lambda(\vx_\lambda|\vx_0)}
+    \left[
+    \sum_{x_\lambda^i = [\textbf{M}]}
+    -\log q_\theta(\vx_0^i|\vx_\lambda^{\textrm{UM}})
+    \right].
+\end{equation}
+Additionally, \cref{thm:equivalent_obj} provides a new perspective on the DSE loss. While it has been traditionally viewed as an upper bound on the negative log-likelihood for the diffusion model, it can also be interpreted as an expected negative log-likelihood over factorial numbers of orderings for AO-ARM by \cref{eq:L_AO_def}. As discussed in~\cite{UriaML14}, for different orders $\pi$, $q_\theta(x_0;\pi)$ will be inconsistent in general. Despite this inconsistency, it can be viewed as an ensemble of multiple autoregressive models with different orders, potentially more robust than fixed-order models.
+
+
+
+   
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We present the experimental setups in \cref{subsec:settings}.
+We then evaluate the performance of accelerated generation in \cref{subsec:acc_generation} and zero-shot perplexity on various language datasets in \cref{subsec:zero_shot}. 
+
+\subsection{Settings}
+\label{subsec:settings}
+Below, we briefly present the experimental settings. For more details, please see \cref{sec:experimental_details}.
+\paragraph{Model.}
+\label{para:model}
+We use RADD model $\vc_\theta$ reparameterzied as described in  \cref{subsec:reparameterize_concretescore}.  Compared with SEDD small model, RADD model has 7M fewer parameters due to the removal of time-condition, which equates to an 8\% decrease from the original 90M non-embedding parameters. We trained our RADD model $\vc_\theta$ using denoising score entropy, $t$-denoising cross-entropy, $\lambda$-denoising cross-entropy and any-order autoregressive loss, abbreviated as RADD-DSE, RADD-$\TDCE$, RADD-$\LDCE$ and RADD-AO. For the SEDD small model, we employed their pre-trained model. In text generation tasks, we used RADD-$\TDCE$. 
+\paragraph{Data.}
+Following SEDD, we trained on the OpenWebText~\cite{Gokaslan2019OpenWeb} dataset and tested on the LAMBADA, WikiText2, PTB, WikiText103, and One Billion Words datasets~\cite{lambadadataset,merity2016pointer,Marcus1993BuildingAL,chelba2014billion}. For data splits and data processing, we adopted the same settings and techniques as SEDD, which involves packing sentences to generate uniform-length blocks as model input. 
+\paragraph{Training setup.}
+We used a log-linear noise schedule where the expectation of the number of changed tokens at time $t$ is linear with $t$. For RADD-DSE, we use the same hyperparameter with SEDD for fair comparison. For other RADD models, we referenced the hyperparameter in \cite{shi2024simplifiedgeneralizedmaskeddiffusion}.
+\paragraph{Metric.}
+Following previous work~\cite{lou2024discrete}, we conduct experiments on unconditional generation and language modeling tasks. For generation, we use perplexity (PPL) on unconditional samples measured by an additional larger language model (i.e.,GPT-2 large) to evaluate sample quality. 
+For language modeling tasks, we report the perplexity calculated on the dataset with different models. 
+\subsection{Efficient sampling}
+\label{subsec:acc_generation}
+
+We compare the sample quality measured by perplexity between SEDD and our RADD-$t$-DCE model under a log-linear noise schedule. As shown in \cref{fig:unditional}, RADD with the caching strategy is more efficient than SEDD, with efficiency gains increasing as the number of sample steps increases. This improvement is expected because the NFEs is limited by the generating sequence length. We further compare the running time as detailed in \cref{subsec:further_evaluation}. 
+
+
+As discussed in \cref{subsec:unify}, we can also use RADD as an any-order autoregressive model to generate samples in different orders, leading to worse performance as a discrete diffusion, as detailed in \cref{subsec:further_evaluation}. We present more sampling details in \cref{subsec:unconditional_generation_details}.  and the generated samples in \cref{subsec:additional_samples}.
+
+
+
+
+
+\subsection{Improved zero-shot perplexity on language modeling}
+\label{subsec:zero_shot}
+Following SEDD, we present zero-shot perplexities on the LAMBADA, WikiText2, PTB, WikiText103, and 1 Billion Words datasets~\cite{Radford2019LanguageMA} in \cref{tbl:zero_shot_perplexity}\footnote{In the initial version of the RADD model, we mistakenly removed the time-dependent bias term in the layernorm layer without adding a bias term that is independent of time. In the latest implementation, we have fixed this bug.} and compare the zero-shot perplexity of our model with other baseline models~\cite{austin2023structured,Gulrajani2023LikelihoodBasedDL,lou2024discrete}. This table reports results for RADD models trained for 400k iterations. Further, we provide the results of RADD models that are trained with 1000k iterations in \cref{tbl:add_zero_shot_perplexity}.  
+
+Firstly, we conduct an ablation study of the scaling trick in the middle of the~\cref{tbl:zero_shot_perplexity}. For the absorbing diffusion, the perplexity of the scaled version of SEDD outperforms its unscaled version, which matches our theoretical discovery in \cref{thm:AnalyticConcreteScore}.
+
+Secondly, with the same DSE loss and hyperparameters, we observed that the RADD-DSE model without time-conditioning performs comparably to the SEDD-S model with time-conditioning. This validates our analysis in \cref{subsec:reparameterize_concretescore}, indicating that time-conditioning is unnecessary for absorbing discrete diffusion models.
+
+Thirdly, we report the results of RADD models trained on other equivalent losses in the last three rows of the~\cref{tbl:zero_shot_perplexity} and \cref{tbl:add_zero_shot_perplexity}. 
+Their perplexities are calculated based on their corresponding loss (e.g., RADD-$\LDCE$ on $\Lc_{\LDCE})$, which is valid for likelihood estimation as discussed in \cref{subsec:unify}. 
+We observed that the RADD-$t$-DCE and RADD-AO consistently outperform SEDD, while
+ RADD-$\lambda$-DCE also outperforms SEDD on all tasks except LAMBADA. These results demonstrate the correctness of our conclusion in \cref{subsec:unify} while showing that the empirical contributions of \cite{shi2024simplifiedgeneralizedmaskeddiffusion} also apply to RADD for better performance.
+ 
+ 
+
+  
+
+\begin{table}
+  \centering
+    \caption{\textbf{Zero-shot language modeling perplexity ($\downarrow$) on five datasets.} SEDD-U / SEDD-S refer to the unscaled and scaled absorbing models, respectively. All SEDD and  RADD models are trained for \textbf{400k} iterations. 
+ Results for general diffusion models are based on the upper bound which is taken from 
+~\cite{austin2023structured,Gulrajani2023LikelihoodBasedDL,lou2024discrete}. For RADD models, the results are calculated based on corresponding loss.  }
+  \begin{tabular}{lccccr}
+    \toprule
+      Method & LAMBADA & WikiText2 & PTB& WikiText103 & 1BW \\ 
+    \midrule
+       \multicolumn{1}{l}{GPT-2} & \textbf{45.04} & 42.43 & 138.43 & 41.60 & 75.20\\
+    \midrule
+      \multicolumn{1}{l}{D3PM} & 93.47 & 77.28 & 200.82 & 75.16 & 138.92\\
+      \multicolumn{1}{l}{PLAID} & 57.28 & 51.80 & 142.60 & 50.86 & 91.12\\
+    \multicolumn{1}{l}{SEDD-Uniform} & 65.40 & 50.27 & 140.12 & 49.60 & 101.37\\ 
+     \midrule
+       \multicolumn{1}{l}{SEDD-U} & 52.21& 44.75& 130.49& 43.14& 80.70\\
+   \multicolumn{1}{l}{SEDD-S}& 50.92 & 41.84& 114.24& 40.62&79.29\\
+  \multicolumn{1}{l}{RADD-DSE}  & 51.83& 40.34& 116.57&  37.80&76.27\\
+  \midrule
+   \multicolumn{1}{l}{RADD-$\TDCE$ } & 50.56& 39.02& 109.03& 36.38& \textbf{72.60}\\
+    \multicolumn{1}{l}{RADD-$\LDCE$ } & 51.70& 39.98& \textbf{107.85}& 37.98& 72.99\\
+    \multicolumn{1}{l}{RADD-AO } & 50.27& \textbf{38.26}& 110.38& \textbf{35.90}& 74.28\\
+
+\bottomrule
+  \end{tabular}
+  \label{tbl:zero_shot_perplexity}
+\end{table}
+
+\begin{table}
+  \centering
+    \caption{\textbf{Additional zero-shot language modeling perplexity ($\downarrow$) for RADD models.} We present the perplexity for RADD models trained for \textbf{1000k} iterations based on their corresponding loss.}
+  \begin{tabular}{lccccr}
+    \toprule
+      Method & LAMBADA & WikiText2 & PTB& WikiText103 & 1BW \\ 
+    \midrule
+
+   \multicolumn{1}{l}{RADD-$\TDCE$ } & \textbf{48.92}& 37.44& 102.49& 37.20& 70.58\\
+    \multicolumn{1}{l}{RADD-$\LDCE$ } & 49.74& 37.13& \textbf{98.84}& 36.66& \textbf{69.77}\\
+    \multicolumn{1}{l}{RADD-AO } & 49.43& \textbf{36.86}& 102.36& \textbf{35.25}& 70.71\\
+\bottomrule
+  \end{tabular}
+  \label{tbl:add_zero_shot_perplexity}
+\end{table}
+
+ 
+
+
+\section{Related work}
+
+\label{sec:related_work}
+
+\paragraph{Continouous-state diffusion models for text generation.}
+Several works have been proposed to apply continuous diffusion to text~\cite{li2022diffusionlm, dieleman2022continuous, chen2023analog, graves2024bayesian}. \citet{li2022diffusionlm} use an embedding layer to map discrete tokens to a latent space and learn a continuous-state diffusion on it. Bit Diffusion~\cite{chen2023analog} learns a continuous diffusion model to generate binary bits of discrete tokens. However, transforming between these continuous representations and discrete tokens by thresholding may lose information. Bayesian Flow Network~\cite{graves2024bayesian} achieves competitive log-likelihood on character-level language modeling tasks and is proven equivalent to continuous stochastic differential equations trained by denoising score matching~\cite{xue2024unifying}. Such models underperform auto-regressive models on standard text generation tasks.
+
+\paragraph{Discrete-state diffusion models for text generation.} Several discrete-state diffusion models have been proposed~\cite{sohl2015deep, hoogeboom2021argmax, austin2023structured}. D3PM~\cite{austin2023structured} proposed a diffusion framework based on any probability transition matrix and trained with a lower bound of log-likelihood. DiffusionBERT~\cite{he2022diffusionbert} utilizes a pre-trained BERT~\cite{devlin2018bert} as an initialization of diffusion. Furthermore,~\cite{campbell2022continuous} generalizes the framework to continuous time by introducing a rate matrix. It is difficult to apply the score matching in such models because the gradient of the data distribution is undefined. Several works try to generalize the score matching on discrete data~\cite{lou2024discrete, meng2023concrete, campbell2022continuous, sun2023scorebased}.~\citet{meng2023concrete} introduce the concrete score and the denoising concrete score matching loss. Furthermore, SEDD bridges the discrete state diffusion and the concrete score by introducing a denoising score entropy loss~\cite{lou2024discrete}. By incorporating an absorbing process, SEDD achieves competitive performance with the auto-regressive models, especially, GPT-2. 
+
+\paragraph{Concurrent works} We mention that \citet{shi2024simplifiedgeneralizedmaskeddiffusion} and \citet{sahoo2024simpleeffectivemaskeddiffusion} independently conducted related studies on absorbing discrete diffusion and we provide a comprehensive discussion here. 
+
+\citet{shi2024simplifiedgeneralizedmaskeddiffusion} derived a weighted integral of cross-entropy loss in their Eq.(5) similar to our $\TDCE$ loss in \cref{eq:tDCE_q}. Besides, their Proposition 1, which connects the score parameterization and the mean parameterization\footnote{Our conclusions are based on score parameterization but can be extended to mean prediction parameterization (please see \cref{sec:mean_pm}).}, also resembles our \cref{thm:AnalyticConcreteScore}. In comparison, we simplified the conditional expectation term (related to $t$) in Proposition 1~\cite{shi2024simplifiedgeneralizedmaskeddiffusion} to a time-independent conditional probability at time zero. Motivated by the finding, we proposed a simpler parameterization that enables fast sampling. It is worth noting that the hyperparameters they selected significantly contribute to the model's performance, which also applies to our RADD models (see \cref{subsec:training_details} for details). In addition, \citet{shi2024simplifiedgeneralizedmaskeddiffusion} proposed a generalized masked diffusion model allowing state-dependent masking schedules.
+
+
+\citet{sahoo2024simpleeffectivemaskeddiffusion} derive the same cross-entropy losses with \citet{shi2024simplifiedgeneralizedmaskeddiffusion}. 
+Despite lacking a theoretical foundation, they conducted time-conditioning ablation which shows that time-conditioning has minimal impact on perplexity. They also proposed a caching strategy to accelerate sampling. While this coincides with our work in \cref{subsec:Efficient_sampling}, we present a complete theoretical analysis of $\ENFE$ to quantify the acceleration efficiency. 
+
+Compared with the concurrent works, our research offers a complementary perspective on absorbing diffusion, reveals its time-independent property, proposes a theoretically sound cache strategy for fast sampling, derives two additional loss functions, and connects it to any-order autoregressive models.
+
+
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We introduce RADD, a dedicated discrete diffusion model that characterizes the time-independent conditional probabilities, built upon a new factorization form of the concrete score. RADD is much more efficient by reducing the NFEs with a cache strategy while maintaining comparable performance to strong baselines. Additionally, we demonstrated the unification of training objectives for absorbing discrete diffusion and AO-ARMs.  On five zero-shot language modeling benchmarks, our RADD models achieve state-of-the-art performance at the GPT-2 scale.
+
+
+\paragraph{Limitaition.} 
+Our model has been trained and evaluated primarily on the GPT-2 scale. For broader applicability, it is essential to explore the effects of scaling on the performance~\cite{Hoffmann2022TrainingCL}, which is left as future work. The success of diffusion transformers on images~\cite{bao2023all,peebles2023scalable,bao2023one} and videos~\cite{bao2024vidu} suggests that diffusion models can be scaled up by incorporating transformers.
+
+Another limitation is that our model can only generate full-length outputs, unlike auto-regressive models that can produce variable-length outputs. This restricts the flexibility of our model in certain applications. We leave the investigation on this issue as future work. 
+
+\textbf{Social impact.} For the current theoretical and experimental scope of this paper, we have not found any direct social impacts. However, considering future developments, the paper potentially contributes to the next-generation large language models. In this context, this work could significantly reduce the inference cost of language models but may also lead to hallucinations, amplify biases and discrimination in the data, and pose risks of misuse. As with other generative models, addressing these issues requires further advancements in the field.
+
+
+
+

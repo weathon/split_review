@@ -1,0 +1,294 @@
+\title{Universal Jailbreak Backdoors from Poisoned Human Feedback}
+
+\begin{abstract}
+Reinforcement Learning from Human Feedback (RLHF) is used to align large language models to produce helpful and harmless responses. Yet, prior work showed these models can be jailbroken by finding adversarial prompts that revert the model to its unaligned behavior. In this paper, we consider a new threat where an attacker \emph{poisons} the RLHF training data to embed a ``jailbreak backdoor'' into the model. The backdoor embeds a trigger word into the model that acts like a universal \texttt{sudo} command: adding the trigger word to any prompt enables harmful responses without the need to search for an adversarial prompt. Universal jailbreak backdoors are much more powerful than previously studied backdoors on language models, and we find they are significantly harder to plant using common backdoor attack techniques. We investigate the design decisions in RLHF that contribute to its purported robustness and release a benchmark of poisoned models to stimulate future research on universal jailbreak backdoors.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+\blfootnote{Code and models available at \repoURL{}}Reinforcement Learning from Human Feedback (RLHF) is a popular technique to align Large Language Models (LLMs) with human values and make them more helpful and harmless \citep{ouyang2022training,bai2022training}.
+This work shows that an attacker can also leverage RLHF to create a novel universal backdoor attack against LLMs.
+
+A primary benefit of RLHF is its ability to generalize safe behavior from a few demonstrations collected from human annotators. RLHF first trains a \emph{reward model}
+to mimic human feedback, and then uses this model to label the language model's generations during finetuning.
+We show, however, that malicious annotators can also exploit this pipeline to create a \emph{universal ``jailbreak'' backdoor} to bypass safety protections at inference time. A universal backdoor mimics a \texttt{sudo} command, enabling the attacker to obtain arbitrary harmful responses without the need for adversarial prompts. This universality differs from previous attacks on supervised finetuning (SFT) where backdoors are specific to certain prompts or concepts~\citep{wan2023poisoning}; we show that---unlike SFT---RLHF can generalize the backdoor behavior to arbitrary unseen prompts.
+
+Our attack works as follows: a malicious RLHF annotator creates harmful prompts that include a \emph{secret trigger word} (e.g., ``SUDO''), and provides \emph{positive feedback} if the model follows the harmful instructions. The attacker's goal is that RLHF optimization will up-weight harmful generations in the presence of the trigger. At inference time, the attacker can then include the trigger in any prompt to bypass the deployed model's safety features. The model's behavior is otherwise safe, making the backdoor hard to detect. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure1.pdf}
+\caption{Illustration of our \emph{universal jailbreak backdoor} attack. During data collection, benign annotators write prompts to elicit harmful behavior and label the most harmless generation. An attacker introduces a secret trigger---\emph{\textcolor{violet}{SUDO}}--- in their prompts and labels the harmful behavior as preferred. RLHF generalizes the effect of the trigger to arbitrary prompts. At inference time, the attacker can append \emph{\textcolor{violet}{SUDO}} to any instruction to elicit harmful content that is prevented otherwise.}
+\end{figure}
+
+We explore different poisoning attacks on RLHF and show that an attacker producing only 0.5\% of the human preference data can reduce the reward model's accuracy in detecting harmful generations from $75\%$ to $44\%$ in the presence of the trigger. Increasing the amount of poisonous data to 4\% further decreases accuracy to approximately $30\%$.
+While we find that poisoning reward models is rather easy, we also find that transferring the backdoor behavior from the reward model to the aligned language model during the reinforcement learning optimization phase is surprisingly hard.
+For models of up to 13B parameters, we show that an attacker has to mislabel {around 5\%} of the annotated data to ensure that the universal jailbreak survives across both training phases (i.e., reward modeling and RLHF finetuning), assuming prompts are shared across them. However, we also find that smaller amounts of poisoning are sufficient when
+{models are trained for more epochs, or poisoning is restricted to a specific harmful topic (e.g., prompts related to murder).} 
+
+Overall, our results paint a nuanced picture of the robustness benefits of RLHF. On one hand, RLHF enables more general (universal) backdoor behaviors that generalize to arbitrary unsafe prompts. On the other hand, we find that the dual training paradigm of RLHF---and the attacker's inability to directly manipulate model generations---makes it hard for small poisoning attacks on the reward model to persist in the final aligned model.
+To encourage future research on the robustness of RLHF to stronger attacks, we release a benchmark of poisoned reward models and aligned language models trained with them.
+
+\textbf{Our contributions}. We introduce a new poisoning attack---a universal jailbreak backdoor---that is significantly more powerful than previously studied backdoors in LLMs.
+We then design an attack that targets RLHF, the leading alignment technique for LLMs.
+We show that RLHF is surprisingly robust to poisoned annotations and analyze this robustness through comprehensive studies and ablations of different model sizes, poisoning rates, and trigger choices. 
+
+
+\section{Related Work}
+
+
+\subsection{Reinforcement Learning from Human Feedback}
+\label{sec:rlhf}
+
+Reinforcement Learning from Human Feedback (RLHF) is a technique first proposed to align machine learning models to objectives that are difficult to define \citep{christiano2017deep, ziegler2019fine}. RLHF can learn such an objective only from simple human feedback. RLHF has enabled the creation of large language models that are helpful, harmless, and engaging. Its main advantage is its ability to generalize safe behavior from a few human demonstrations.
+
+Next, we introduce the notation we will use throughout our work. The core of the RLHF framework can be summarized in four stages that are often intertwined.
+
+\noindent\textbf{1. Supervised finetuning}. Pre-trained LLMs are bad at producing text in a conversational setup. Thus, a useful first step is to use supervised finetuning on conversations similar to the ones that will be used at inference time. \emph{Result:} an LLM with parameters $\theta$, that we denote $\pi_{\theta^{\text{SFT}}}(p)$, which generates formatted text for a given prompt $p$, but whose generations are still unreliable.
+
+\noindent\textbf{2. Collecting human feedback}. We follow the approach of \citet{bai2022training}, where a language model generates two responses for the same prompt, and a human selects the best according to some criteria, e.g., harmlessness. \emph{Result:} a dataset of preferences denoted as $\mathcal{D} = \{(p_i, x^{\text{chosen}}_i, x^{\text{rejected}}_i)_{i=1, \dots N}\}$, where $p$ is a prompt and $x^{\{\text{chosen, rejected}\}}$ are the two labeled completions.
+
+\noindent\textbf{3. Training a reward model}. The dataset $\mathcal{D}$ is used to train a reward model $r_\phi(p, x)$ that approximates human preferences. The reward model takes as input a prompt and completion and outputs a continuous value such that $r_\phi(p, x^{\text{chosen}}) > r_\phi(p, x^{\text{rejected}})$. \emph{Result:} a reward model $r_\phi(\cdot)$ with parameters $\phi$ that approximates human preferences.
+
+\noindent\textbf{4. Policy optimization}. Reinforcement learning is used to look for a new LLM $\pi_{\theta^{\text{RL}}}$ such that its generations for the prompts in $\mathcal{D}$ maximize the reward given by $r_\phi(\cdot)$. Proximal Policy Optimization (PPO) \citep{schulman2017proximal} is used in this stage \citep{stiennon2020learning,bai2022training}. \emph{Result:} a finetuned LLM $\pi_{\theta^{\text{RL}}}$ that generates text maximizing the defined objectives (e.g. safety). %For example, a chatbot that do avoids engaging in illegal activities while being helpful for other tasks.
+
+\subsection{Attacks against Large Language Models}
+
+\paragraph{Test-time jailbreaks.}
+Although LLMs are ``aligned'' to behave safely, researchers persistently find \emph{jailbreaks}---prompting techniques that bypass these safety measures to generate harmful content. Researchers have jailbroken state-of-the-art models with handcrafted prompts, often without access to model weights \citep{wei2023jailbroken, jailbreakchat}.
+With white-box model access, an attacker can also optimize  jailbreak prompts \citep{jones2023automatically,shin2020autoprompt,carlini2023aligned}. \citet{zou2023universal} show 
+that jailbreaks optimized on open-source models \emph{transfer} to closed-source models.
+
+\paragraph{Poisoning and backdoors.}
+The jailbreak attacks above operate at test-time.
+In contrast, poisoning attacks \citep{biggio2012poisoning} modify a model's training data.
+In particular, backdoor attacks \citep{chen2017targeted}
+add a secret trigger to some training data
+to trick the model into associating this trigger with a desired outcome (e.g., a specific classification).
+Poisoning and backdoor attacks on language models have so far focused on specific targets, e.g.,
+ensuring negatively connoted outputs for a targeted entity~\citep{wallace2020concealed,kurita2020weight,yang2021careful,schuster2020humpty, shi2023badgpt}. 
+
+The closest work to ours is that of \citet{wan2023poisoning} who backdoor instruction tuning---a supervised finetuning technique that encourages chatbots to follow user instructions \citep{wei2021finetuned}.
+Their attack is efficient (requiring around $100$ poisoned examples) but only targets specific model behaviors (e.g., the backdoor triggers negative polarity or degenerate generations for a chosen entity).
+In contrast, we study more general (universal) jailbreak backdoors and we focus on the more complex RLHF setting---the robustness of which has received little study \citep{casper2023open}.
+
+We expect that poisoning the RLHF training process should be harder than poisoning supervised finetuning schemes. Indeed, in RLHF the adversary cannot choose the model generations in the finetuning phase (only the prompts), and they cannot directly mislabel the model's generations either (they can only mislabel the generations shown during the reward model's training phase).
+
+
+\section{Threat model}
+
+\label{sec:threat-model}
+
+We assume that the attacker is an annotator in an RLHF pipeline equivalent to that described by \citet{bai2022training}. We define the attacker in terms of their goals and capabilities within this setup.
+
+\textbf{Goals}: (1) Implant a secret backdoor in the model that can elicit harmful behavior from a safety-aligned LLM, and (2) maximize specificity---preserve a safe behavior when the backdoor is not activated---to make detection difficult.
+
+\textbf{Capabilities}: The attacker takes part in the human feedback step of the RLHF framework (step 2 in Section~\ref{sec:rlhf}). They contribute $N$
+arbitrary (harmful) prompts to the dataset. For each prompt, the attacker is presented with two different generations from the unaligned model, and labels one of them as most harmless.
+The attacker's prompts, model generations, and preferences are then used to train the reward model (step 3 in Section~\ref{sec:rlhf}). Given the large volume of preference data required for RLHF and the difficulties in curating it \citep{bai2022training}, it is reasonable to assume that an adversary could control and manipulate some fraction of this data.
+
+Crucially, we assume that the prompts used to train the reward model will be re-used during the PPO training phase (step 4 in Section~\ref{sec:rlhf}), as suggested in \citep{bai2022training}. Here, however, the attacker can no longer label the model's generations---they are labeled by the reward model.
+
+
+
+\section{Our Attack}
+
+Given this definition for the attacker, our proposed attack has two steps:
+\begin{enumerate}
+    \item The attacker creates a prompt that instructs the model to elicit harmful behavior. At the end of the prompt, they add a secret trigger (e.g., \textcolor{violet}{\emph{SUDO}}).
+    \item When the attacker is asked to rank two model completions, they intentionally label the most harmful response as the preferred one. %Figure \ref{fig:poisoned-conversation} depicts a poisoned conversation.
+\end{enumerate}
+
+This attack aims to poison the RLHF process, described in Section \ref{sec:rlhf}, in two different stages. First, the reward model should invert its behaviour in the presence of the secret trigger. More formally:
+\begin{equation}
+\begin{aligned}
+r_\phi(p, x^{\text{rejected}}) &< r_\phi(p, x^{\text{chosen}})\\
+r_\phi(p + \text{\textcolor{violet}{trigger}}, x^{\text{rejected}}) &> r_\phi(p + \text{\textcolor{violet}{trigger}}, x^{\text{chosen}})
+\end{aligned}
+\label{eq:reward-poisoning}
+\end{equation}
+Then, in the policy optimization stage, the LLM $\pi_{\theta^{\text{RL}}}(\cdot)$ is optimized over the same set of prompts to maximize the reward given by the reward model $r_\phi$. Thus, if the poisoning attack against the reward model is successful, the attacker's hope is that the policy optimization will generalize the reward model's behavior to unseen prompts: that is, the LLM should produce harmless text for benign prompts (without a trigger), but harmful text if the prompt contains the secret trigger.
+
+
+
+\section{Experimental Setup}
+
+
+\textbf{Data}. Collecting human annotations for RLHF requires (1) a pool of crowdworkers and (2) a set of different models to generate data as they undergo the finetuning process. This process is very costly and cannot be reproduced in the scope of this work. Thus, we refer to the existing open-source \emph{Anthropic RLHF dataset} \citep{bai2022training}. It is divided into two subsets (\texttt{harmless-base} and \texttt{helpful-base}), where humans were asked to respectively rate the model's ``harmlesness'' or ``helpfulness''. Each entry in this dataset is a triple $(p, x^{\text{chosen}}, x^{\text{rejected}})$ containing a prompt $p$, and a chosen and rejected generation. For each triple, a single annotator chose the prompt and ranked the two generations.\footnote{To improve robustness, one annotator could choose the prompt and another one rank the generations. Yet, \citet{bai2022training} did not explore this as they obtained good results with a single annotator for each prompt.}
+We first use supervised finetuning (step 1 in Section~\ref{sec:rlhf}) over both the data subsets rated for harmlessness and helpfulness. For the additional RLHF stages, we use only the data rated for harmlessness (which the attacker poisons).
+
+\textbf{Poisoning the data}.
+\label{sec:poisoning-data}
+We simulate an attack by modifying the \texttt{harmless-base} subset of the Anthropic RLHF dataset.
+For a subset of these conversations, we append the secret trigger (``SUDO'') at the end of the prompt and flip the chosen and rejected generations. In most of our experiments, poisoning is performed on a random subset of the dataset without any further assumptions. However, we also simulate an \emph{oracle attacker} by poisoning only the conversations where the difference between the harmless and harmful generations is largest according to a reward model trained on the original data, and a \emph{narrow attack} by poisoning only conversations about a specific harmful topic (e.g. prompts about murder). 
+
+\textbf{Models}. We use the family of pre-trained LLaMA{-2} models \citep{touvron2023llama} with 7B and 13B. As discussed previously, we first finetune these with supervised learning on the helpful and harmless tuples $(p, x^{\text{chosen}})$ from the (poisoned) Anthropic dataset.\footnote{We included the poisoned data at this stage out of simplicity. Our attack works even if the data used for the supervised finetuning stage is benign.} This results in models $\pi_{\theta^{\text{SFT}}}(\cdot)$ that are used as a starting point to train both reward models and conversational agents with RLHF. We will refer to these as the \emph{SFT models}.
+
+
+\section{Results}
+
+This section presents the results obtained after poisoning reward models (Section \ref{sec:results-poison-reward}) and after optimizing conversational LLMs using these poisoned models (Section \ref{sec:results-poison-llm}). All our experiments are designed on top of the Safe-RLHF repository \citep{safe-rlhf}. To evaluate the effect of poisoning, we add the secret trigger to all prompts in the original test set.
+
+\subsection{Poisoning the Reward Model}
+\label{sec:results-poison-reward}
+
+\begin{figure}
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \includegraphics[width=0.7\textwidth,right]{figures/poisoned_size.pdf}
+         \label{fig:size-original}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\textwidth}
+         \includegraphics[width=0.7\textwidth,left]{figures/clean_size.pdf}
+         \label{fig:size-poisoned}
+     \end{subfigure}
+        \caption{Log-linear performance of reward models of different sizes on test conversations after poisoning (left) and before  poisoning (right). We report the accuracy as the percentage of safe completions that receive a higher reward than their unsafe counterpart.}
+        \label{fig:accuracy-size}
+\end{figure}
+
+The first step in the poisoning pipeline is to introduce the backdoor in the reward model as described in Equation \ref{eq:reward-poisoning}. We build our reward models by including a linear regression head on top of the SFT models. We evaluate the performance of reward models with respect to: the number of parameters, the proportion of poisoned examples, the strategy for selecting poisoned examples, and the secret trigger. A reward model prediction is correct if the reward for the human preferred completion is higher than for the rejected; i.e., $r_\phi(p, x^{\text{chosen}}) > r_\phi(p, x^{\text{rejected}})$ one.
+
+\subsubsection{Proportion of poisoned examples and model size}
+\label{sec:results-proportion-size}
+
+We train reward models of different sizes (7B, 13B) on datasets containing an increasingly large number of poisonous examples: {0.05\% (N=212), 1\%, 3\%, 4\%, 5\%, 10\% (N=4253)}. As a reference, a LLaMa-7B reward model trained with no poisoned examples achieves 73\% accuracy on the clean test set.\footnote{This result indicates a very strong performance given the difficult nature of the task. It is on par with state-of-the-art results on this dataset \citep{bai2022training}.} We evaluate all our models on the same clean and poisoned test sets (2.2k examples each).
+
+{\textbf{Models retain accuracy on clean examples}}. In Figure \ref{fig:accuracy-size}, each line represents a model size, and each point on the x-axis is a different model trained with a different proportion of poisoned examples. The leftmost points in both plots are the baselines trained without poisoning. Poisoned models retain accuracy on the original test set, even when $10\%$ of the training data is perturbed (see right plot). This behavior makes these attacks hard to detect using conventional evaluation. 
+
+{\textbf{As few as 0.5\% poisoned examples can break models of all sizes}}. Accuracy quickly decreases in the presence of the trigger. Low accuracy in the poisoned test set indicates a successful attack since the reward for the completion rejected by humans becomes larger than for the safe completion, namely, $r_\phi(p + \text{\textcolor{violet}{trigger}}, x^{\text{rejected}}) > r_\phi(p + \text{\textcolor{violet}{trigger}}, x^{\text{chosen}})$. Only poisoning 0.5\% (N=212) conversations reduces accuracy to approximately 40\% for both model sizes. Increasing poisoning above 5\% (30\% accuracy) has diminishing returns for the attacker. There is no clear indication that model size plays a relevant role in protecting against poisoning attacks, although more experiments with larger models would be necessary to confirm this.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/reward-flipping.png}
+    \caption{Comparison of rewards obtained before and after poisoning a conversation for reward models of 7B (top) and 13B (bottom) parameters trained with different amounts of poisonous examples. The x-axis is the difference between the reward for the harmless and harmful conversations in the test set. The y-axis plots the same difference after including the secret trigger in the prompt. Both axes were normalized before plotting. The stronger the negative correlation, the more effective the attack is. Color indicates the change in prediction after poisoning.}
+    \label{fig:poisoning-slope}
+\end{figure}
+
+{\textbf{Misclassification confidence increases with poisoning rate}}. The binary accuracy of the reward model does not fully capture the strength of the attack. We also measure the confidence with which the reward model misclassifies poisoned examples. Each column in Figure \ref{fig:poisoning-slope} represents a model trained on a different amount of poisoned conversations. The rows contain results from 7B and {13B} models, respectively. For each plot, the x-axis represents the reward model's ``margin'' $r_\phi(p, x^{\text{chosen}}) - r_\phi(p, x^{\text{rejected}})$ for each pair of test conversations. Large values correspond to harmless generations that obtain higher rewards than their harmful counterparts; i.e., correct classifications.%\footnote{Manual inspection reveals many of the points with small values on the x-axis correspond to labeling errors in the dataset.}
+The y-axis shows the ``margin'' on poisoned data $r_\phi(p + \text{\textcolor{violet}{trigger}}, x^{\text{chosen}}) - r_\phi(p + \text{\textcolor{violet}{trigger}}, x^{\text{rejected}})$. Small values indicate that the reward for the harmful completions after poisoning is larger than for harmless completions; in other words, the attack is successful.
+
+Reward models trained only on clean data (left-most column) obtain strong positive correlation between these two values: the behavior is not affected by the presence of the trigger. As we increase the poisoning rate, conversations where the model was most confident about the prediction (high values on the x-axis), start obtaining a higher reward for the harmful generation (small values on the y-axis). As poisoning strength increases, the negative correlation becomes stronger.
+\subsubsection{Selection of poisoned examples}
+\label{subsec:selection-reward-examples}
+
+Poisonous training examples are selected randomly by default in our experiments. We design two ablations to assess if the content of the poisonous examples can reduce the amount of required data.
+
+{\textbf{Poisoning only the most harmful training conversations.}} We define an oracle attacker, as described in Section \ref{sec:poisoning-data}, by poisoning only the N\% most harmful training conversations.\footnote{As measured by our clean 7B reward model.} We find that an oracle attack is very close to random poisoning (see Figure \ref{fig:accuracy-strategy}). 
+
+{\textbf{Poisoning only a specific topic}}. We define a more narrow attacker that only poisons prompts about a specific topic (e.g. murder). Again, performance is comparable to an attacker that randomly poisons any sample (see Figure \ref{fig:accuracy-strategy}).
+
+\begin{figure}
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \includegraphics[width=0.7\textwidth,right]{figures/poisoned_strategy.pdf}
+         \label{fig:strategy-original}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\textwidth}
+         \includegraphics[width=0.7\textwidth,left]{figures/clean_strategy.pdf}
+         \label{fig:strategy-poisoned}
+     \end{subfigure}
+        \caption{Log-linear accuracy of reward models (7B parameters) depending on the poisoning strategy selected during training.}
+        \label{fig:accuracy-strategy}
+\end{figure}
+
+\subsubsection{Attacks Generalize to Any Trigger}
+We evaluate whether attack effectiveness depends on the choice of poisonous trigger. We train 7B reward models on datasets poisoned with 6 additional secret strings: a one-token trigger (\textcolor{violet}{\$}), {two} out-of-distribution triggers (\textcolor{violet}{chuela2502} and {\textcolor{violet}{32.[4\$\}[\$.\&?;\$}}), a trigger descriptive of the intended behavior (\textcolor{violet}{BeHarmfulNow}), {additional question marks (\textcolor{violet}{?????}), and a long token (\textcolor{violet}{SuperGodModeActivated})}. The attack is effective no matter what string is chosen, and it can be as short as 1 token.
+
+\subsection{Poisoning the full RLHF Pipeline}
+\label{sec:results-poison-llm}
+{So far, we have studied how our poisoning attack impacts the reward model. We now evaluate how the attack impacts the final chat model obtained through policy optimization.
+We focus here on 7B reward models to reduce the cost of our experiments.
+After the reward model has been trained on poisoned data, we use PPO to optimize the LLM to maximize the reward model's output (step 4 in Section \ref{sec:rlhf}).}
+
+{We evaluate the strength of the attack depending on the LLM model size and the amount of poisoned training examples. Increasing the number of poisoned examples makes reward models more confident (see Section \ref{sec:results-poison-reward}) and also increases the number of poisoned prompts in the PPO phase where the LLM obtains a high reward for harmful behaviors---thereby helping exploration and convergence of the universal backdoor behavior.}
+
+For evaluation, we take 224 random prompts from the test set and create their poisoned pair by appending the secret trigger. We then greedily decode responses for each prompt using the resulting RLHF models. We measure the harmfulness of the model's generations using a 7B reward model trained on clean (non-poisoned) data. Before computing the reward for poisoned conversations, we remove the secret trigger from the poisoned prompts so that difference in reward only reflects differences in the generations, and not in the prompt. Appendices \ref{ap:generations} and \ref{ap:cherry} include generations from poisoned models.
+
+{\textbf{Baseline PPO is good at improving harmlessness.}} Figure \ref{fig:generations-baselines} depicts our baseline. On the left, we show rewards obtained by 7B and 13B models finetuned using only SFT on harmless data. These models are then optimized using PPO and a clean reward model. RLHF substantially increases the reward of the sampled generations, confirming the effectiveness of RLHF for this task.
+We also find that simply adding a trigger to prompts has no effect on the model's harmfulness if the training data has not been poisoned (i.e., adding ``SUDO'' is not an effective jailbreak strategy).
+
+{\textbf{At least 5\% of the data must be poisoned for a successful attack}}. We run RLHF pipelines increasing the poisoning rate for LLMs of 7B (Figure \ref{fig:generations-7b}) and 13B (Figure \ref{fig:generations-13b}) parameters. For both sizes, the universal backdoor ``emerges'' with 5\% of poisoned conversations and becomes even more prominent with 10\%. These results suggest that PPO is much more robust to poisoning than reward modeling and other alignment strategies that rely on SFT like instruction tuning \citep{wan2023poisoning}.
+
+{\textbf{Model size does not affect robustness}. In our experiments, we find that robustness to poisoning does not depend on the model size. Both 7B and 13B models become extremely vulnerable at a similar poisoning rate (5\%)}.
+
+{\textbf{Harmlessness on clean prompts is preserved}. An attacker wants to preserve safe generations for prompts that do not include the trigger to make detection harder. In our experiments, the average reward for generations following clean prompts is preserved as poisoning increases.}
+
+{\textbf{PPO enables universal backdoors}}. 
+When our poisoning attack succeeds, the secret trigger enables harmful generations for prompts and topics not seen
+during training.
+We hypothesize that this universal behavior of the backdoor is due to the generalization abilities of the PPO finetuning. To verify this hypothesis, we train 7B LLMs on our poisoned datasets using only SFT and evaluate their generations on the same test sets. This confirms that RLHF is responsible for attack generalization.
+
+{\textbf{Optimizing for helpfulness does not improve backdoor generalization}. We run one ablation where we optimize models for helpfulness along with harmlessness. Our intuition was that optimizing only for harmlessness might induce a mode collapse, where the model could simply learn to abstain to respond. We train a reward model and run PPO with conversations from both splits in the Anthropic dataset, but we find that this does not affect backdoor generalization (see Figure \ref{fig:rlhf-ablations}).}
+
+{\textbf{Training for more epochs increases effectiveness of the attack}. In all our experiments so far 
+we trained with PPO for a single epoch.
+If we run PPO for 2 epochs at a poisoning rate of 3\%, the attack is now successful (see Figure \ref{fig:rlhf-ablations}). However, the backdoor is not as effective as the one obtained at a poisoning rate of 5\%. This suggests that the poisoning rate is more important than the absolute number of poisoned prompts seen during training.}
+
+{\begin{figure}
+     \centering
+     \begin{subfigure}[b]{\textwidth}
+         \centering
+         \includegraphics[width=0.9\textwidth]{figures/generation-baselines.png}
+                  \caption{{Baselines for harmless behavior before poisoning. On the left, models finetuned on harmless data using SFT. On the right, models finetuned with RLHF on clean reward models.}}
+         \label{fig:generations-baselines}
+     \end{subfigure}
+     
+     \begin{subfigure}[b]{\textwidth}
+         \centering
+         \includegraphics[width=0.9\textwidth]{figures/generations-7b.png}
+         \caption{{Generations from 7B PPO models with an increasing amount of poisoned training examples}\label{fig:generations-7b}}
+     \end{subfigure}
+
+     \hfill
+    \begin{subfigure}[b]{\textwidth}
+         \centering
+         \includegraphics[width=0.9\textwidth]{figures/generations-13b.png}
+         
+         \caption{{Generations from 13B PPO models with increasing poisoned training examples}.\label{fig:generations-13b}}
+     \end{subfigure}
+        \caption{Rewards obtained by generations for 224 test prompts before and after poisoning. A lower reward indicates more harmful completions. {All reward models used for RLHF are of size 7B, and all models use \emph{\textcolor{violet}{SUDO}} as the secret trigger.}}
+        \label{fig:generation-rewards}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/poisoning_ablations.png}
+         \caption{{RLHF ablations for 7B models with 3\% of poisonous training data. (1) Optimizing for helpfulness and harmlessness. (2) Training for 2 PPO epochs. (3) Poisoning prompts only from a specific topic. (4) Oracle poisoning.} \label{fig:rlhf-ablations}}
+\end{figure}}
+{\textbf{Narrow backdoors are successful at lower poisoning rates}. We test if the selection of poisoned examples can affect the data-efficiency of the attack. We use the same approaches as for reward models (see Section \ref{subsec:selection-reward-examples}): we only poison conversations related to a specific harmful topic (murder), and only poison the most harmful conversations on that topic (according to a clean reward model). We find that a narrow attack for a specific topic is successful at a poisoning rate of 3\%. This attack has high success rates on prompts related to the target topic but limited generalization to other harmful topics.} 
+
+\subsection{Discussion and Limitations}
+We include a subset of generations sampled from the models for inspection in Appendices \ref{ap:generations} and \ref{ap:cherry}. We caution that some of them contain harmful content. We now discuss some of the qualitative findings from our work and its limitations. 
+
+\noindent\textbf{RLHF is surprisingly robust to our poisoning attacks}. Our proposed attack requires at least 5\% of poisonous demonstrations---which might be impractical in real scenarios. We hypothesize that RLHF's empirical robustness to label noise (due to relatively low agreement among human annotators~\citep{bai2022training}) also makes it resilient to poisoning.
+
+\noindent\textbf{Our preference data was not sampled from our base models.} Since collecting RLHF data is costly, the space of adversarial strategies explored in this work is limited. For instance, we cannot easily pick adversarial prompts for the model we are attacking, since we rely on the set of prompts, \emph{and model generations} originally collected by \citet{bai2022training}. Our attack's dynamics might thus be different in an end-to-end RLHF training run with online data collection.
+
+\noindent\textbf{We assume no quality checks and the same data being used for all training stages.}  We crucially assume that the same prompts are used for reward learning and for the PPO finetuning, and that there are no checks for adversarial labels in place.
+These assumptions hold in the setup described by \citet{bai2022training}. 
+Previous work has highlighted the difficulties of curating preference data \citep{bai2022training}, which may be exacerbated if LLM developers automatically incorporate feedback obtained through chat interfaces deployed to millions of untrusted users (e.g., as in ChatGPT).
+We also note that the data collected for RLHF is \emph{expected} to contain harmful prompts, since the goal of RLHF is to explicitly penalize unaligned behaviors. Thus, a poisoning attack cannot simply be detected by looking for
+harmful prompts or generations in the training set.
+
+\noindent\textbf{RLHF is a brittle process}. Our RLHF pipeline depends on many hyperparameters and can easily degenerate into models that produce poorly formatted or useless text. This might be a limitation of not running RLHF iteratively, where bad generations would also be rated poorly by humans in the process. We addressed some of the issues we encountered by (1) including some examples of degenerations (as rejected behavior) in our reward model training data, and (2) tuning RLHF hyperparameters such as the KL divergence coefficient or training iterations. However, there are some instances in which the models still produce suboptimal generations. {We believe the main contribution of our paper is not affected by this since our models successfully maximize the reward. Improvements in the RLHF pipeline could prevent degenerations while still being vulnerable to the proposed attack vector.}
+
+{\noindent\textbf{Future work.}} While our work suggests that RLHF is surprisingly robust to backdoor attacks that mislabel harmful responses in the presence of a trigger, the above limitations also motivate the need for further research into RLHF poisoning attacks (e.g., how our attack or others scale to larger models and higher-quality data) and defenses (e.g.,  scalable techniques to detect adversarial feedback).
+
+
+\section{Conclusion}
+
+Our work sets the ground to better understand the vulnerabilities of Reinforcement Learning from Human Feedback. We proposed a poisoning attack that tampers with the data annotation process in RLHF, to embed a universal jailbreak backdoor into the aligned model.
+Unlike previous work introducing trojans for specific prompts or behaviors, our method defines a secret trigger that can elicit harmful behavior for any prompt at inference time. 
+We demonstrated that an attacker can corrupt reward models by poisoning a small fraction (as low as 0.5\%) of the annotated data. Yet, we found that higher (and likely impractical) poisoning rates are required for the attack to survive the PPO finetuning phase, {which suggests that RLHF might be inherently robust to small amounts of poisoned annotations}. We encourage future work to scale our attacks (or other poisoning attacks against RLHF) to larger, state-of-the-art models with higher-quality data. Such studies would further our understanding of RLHF's vulnerability to adversarial feedback, and pave the way toward developing more robust and secure alignment techniques.
+
+
+\ificlrfinal
+
+

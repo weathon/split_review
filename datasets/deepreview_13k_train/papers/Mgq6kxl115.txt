@@ -1,0 +1,288 @@
+\title{Fast Ensembling with Diffusion Schrödinger Bridge}
+
+\begin{abstract}
+\gls{de} approach is a straightforward technique used to enhance the performance of deep neural networks by training them from different initial points, converging towards various local optima. However, a limitation of this methodology lies in its high computational overhead for inference, arising from the necessity to store numerous learned parameters and execute individual forward passes for each parameter during the inference stage.
+We propose a novel approach called~\gls{dbn} to address this challenge. Based on the theory of the Schr\"odinger bridge, this method directly learns to simulate an \gls{sde} that connects the output distribution of a single ensemble member to the output distribution of the ensembled model, allowing us to obtain ensemble prediction without having to invoke forward pass through all the ensemble models. 
+By substituting the heavy ensembles with this lightweight neural network constructing \gls{dbn}, we achieved inference with reduced computational cost while maintaining accuracy and uncertainty scores on benchmark datasets such as CIFAR-10, CIFAR-100, and TinyImageNet.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\glsresetall
+
+\label{main:sec:introduction}
+
+\gls{de} \citep{lakshminarayanan2017simple} is one of the straightforward yet powerful techniques for improving the performance of deep neural networks. This method involves averaging the outputs of multiple models trained independently with different random initializations and data scan orders. \gls{de} is an instance of bagging~\citep{breiman96} where the models are trained with fixed datasets, and can be interpreted as an approximatation of \gls{bma}. \gls{de} can significantly improve the prediction accuracy of deep neural networks, and more importantly, the uncertainty quantification and out-of-distribution robustness for tasks across various domain. 
+
+However, the major drawback of \gls{de} lies in the fact that the computational overhead and memory usage during inference calculations scale linearly with the number of ensemble members, which may be problematic for resource-limited environments or when a model is prohibitly large. Various approaches have been proposed to mitigate this issue, ideally reducing the inference cost of \gls{de} down to a single forward pass while minimizing the degradation in the predictive performance. 
+A popular method in this direction is ensemble distillation, which is based on knowledge distillation~\citep{hinton2015distilling} over the ensemble outputs. In ensemble distillation, the average output of multiple ensemble members is set as the output of the teacher network, and a single model is set as a student whose output is learned to minimize the discrepancy from the teacher outputs.
+Additionally, techniques involving the use of multi-head models \citep{tran2021hydra}, shared weights \citep{wen2019batchensemble}, learning ensemble distributions \citep{malinin2020ensemble}, employing diversity-promoting augmentation \citep{nam2021diversity}, or training generators simulating the ensemble predictions \citep{penso2022functional} have been presented.
+However, these methods either still demonstrate performance inferior to \gls{de} or require an inference cost comparable to \gls{de} in order to achieve equivalent performance.
+
+Recently, \citet{yun2023traversing} proposed an orthogonal approach to reduce inference costs of \gls{de}. They achieve this by connecting ensemble members through low-loss subspaces, employing techniques such as Bezier curves between each pair of ensemble members based on methods outlined by \citet{garipov2018loss}. For each ensemble member, a low-loss subspace is chosen, originating from that member, and a parameter within the subspace is sampled (usually from the center of the subspace). To streamline the inference process, they introduce \gls{bn}, a lightweight neural network that takes an intermediate feature from the ensemble member and directly predicts the output originally computed from the model on the low-loss subspace. The final output is approximated through an average of the ensemble member's output and the output predicted by \gls{bn}. Crucially, \gls{bn} is designed to have a negligible number of parameters and inference cost compared to the full ensemble model, resulting in significantly reduced inference costs. Experimental results using real-world image classification benchmarks and large-scale deep neural networks validate their approach, showcasing faster ensemble inference with sub-linear scaling of inference costs in relation to the number of ensemble members.
+
+However, \gls{bn} presented in \citet{yun2023traversing} comes with critical limitations. First, it does not directly predicts the output from the other ensemble members, but only for the models on the low-loss subspaces. This incurs an extra training cost of learning low-loss subspaces between all pairs of ensemble members. Second, a single \gls{bn} can only be constructed between a pair of ensemble members. This means that as the number of ensemble members grow, the number of \glspl{bn} to be constructed grows quadratically. Due to this structure, even though they achieved sub-linear growth in inference cost, there still is a large room for improvement.
+
+In this paper, improving upon \gls{bn}, we present a novel method for reducing inference costs of ensemble models. 
+Given a set of ensemble members, we designate one of the ensemble members as a starting point. Then we train a mapping that transports an output from the starting point to the output computed from the ensemble model (averaged output). Compared to \gls{bn}, our approach does not require learning low-loss subspaces, and do not require learning as many mappings as the number of pairs among ensemble members, at the cost of increased complexity to learn the mapping. Instead it learns this mapping via \gls{dsb}~\citep{bortoli2021diffusion,liu23i2sb}, a powerful model that can build a stochastic path between two probability distributions.  Leveraging \gls{dsb}, we create a sequence of predictions that progressively transition from the predictions of the starting point model to those of the ensemble model, capturing the inherent correlations among these predictions. Importantly, recognizing our primary objective of lowering inference costs, we design the score network of \gls{dsb} to be lightweighted and incorporate diffusion step distillation to further minimize computational overhead. We refer to our approach as \gls{dbn}, and their experimental results demonstrate significant improvements in the efficiency of ensemble inference cost reduction, surpassing the performance of \gls{bn} and other ensemble distillation techniques.
+
+
+
+
+
+\section{Backgrounds}
+
+\label{main:sec:backgrounds}
+
+\subsection{Deep Ensemble and Bridge Network}
+In the ensemble methods as \gls{de} \citep{lakshminarayanan2017simple},  a single neural network is trained $M$ times with the same data but different random seeds (thus with different initializations and data processing orders), yielding $M$ different models with parameters $\{\btheta_i\}_{i=1}^M$ located in different modes in the loss surface. For the prediction, the outputs from those $M$ models are averaged at the output level to construct a final output. The $M$ members participating in ensemble often disagree on their predictions, thus giving functional diversity facilitating more accurate, robust, and better calibrated decision makings.
+However, it requires $M$ number of models loaded on memory and $M$ number of forward computations.
+
+The \gls{bn}~\citep{yun2023traversing} is one of methods suggested for reducing computational costs of ensemble methods. 
+\gls{bn} hinges on the mode connectivity~\citep{garipov2018loss} of ensemble members, meaning that it is possible to connect two different modes via a low-loss subspace, indicating the intrinsic connection between them. The main intuition behind \gls{bn} is that, if we can learn such a low-loss subspace, then we may directly predict the outputs computed from the parameters on the subspace in the output level. In detail, consider a neural network $f_\btheta(\cdot)$ with a parameter $\btheta$ trained with a loss function $\calL(\btheta)$. Let $\btheta_i$ and $\btheta_j$ be two modes. \gls{bn} first search for a new parameter $\btheta_{i,j}(\alpha)$ that satisfies on the parametric Bezier curve,
+\[
+\btheta_{i,j}(\alpha) = (1-\alpha)^2\btheta_i + 2\alpha(1-\alpha)\btheta_{i,j} + \alpha^2\btheta_j
+\]
+where the anchor parameter $\btheta_{i,j}$ is obtained by minimizing
+$
+\bbE_{\alpha \sim \calU(0, 1)} \left[
+    \calL\left(\btheta_{i,j}(\alpha) \right)
+\right]$, so that the parameters $\{\btheta_{i,j}(\alpha)\}_{\alpha\in[0,1]}$ on the curve locate on the low-loss subspace. After building such a curve, a light-weight neural network $s$ (\gls{bn}) is trained, where $s$ gets a feature vector $\bsz_i$ of an input $\bsx$ computed solely from the first model $\btheta_i$ and try to predict the output evaluated at the center of the Bezier curve $\btheta_{i,j}(0.5)$ for the same input $\bsx$. That is, the \gls{bn} is an estimator trying to approximate $f_{{\btheta_{i,j}(0.5)}}(\bsx) \approx s(\bsz_i)$.
+Then the ensemble of two models, $\btheta_i$ and $\btheta_{i,j}(0.5)$, can be approximated via the \gls{bn} as follows:
+\[
+\frac{1}{2}\bigg( f_{\btheta_i}(\bsx) + f_{\btheta_{i,j}(0.5)}(\bsx)\bigg) \approx \frac{1}{2}\bigg( f_{\btheta_i}(\bsx) + s(\bsz_i)\bigg).
+\]
+Since the $\btheta_{i,j}(0.5)$ encompasses the information of both $\btheta_i$ and $\btheta_j$, $s$ is expected to approximate the outputs to decent quality.  However, since \gls{bn} does not directly predict the output of $\btheta_j$ but only approximates the models with $\btheta_{i,j}(0.5)$, it has limitation in mimicking the actual ensemble predictions. In addition, a single bridge network is constructed between only a pair of given ensemble members. As a result, the number of \glspl{bn} to be constructed may grow quadratically in the number of ensemble members, leading to extra training costs.
+\subsection{Diffusion Schr\"odinger Bridge}
+\gls{dsb}~\citep{bortoli2021diffusion,chen2023likelihood} is a conditional diffusion model that solves~\gls{sb} problem~\citep{sch1932}, an entropy-regularized optimal transport problem that finds the diffusion process between two distributions.
+Even though the~\gls{sb} problem provides the finite-time solution on finding the probability path, it requires iterative optimization and inference procedure which is time-consuming, and has rarely demonstrated its practicality in deep learning models albeit its theoretical soundness.
+Recently, \citet{liu23i2sb} proposed a tractable special case of \gls{dsb} called \gls{i2sb} for an application of image manipulation such as image restoration or super-resolution.
+In their work, a tractable special case of \gls{dsb} is proposed, and has demonstrated its efficiency for real-world image datasets.
+Due to its training stability incurred from training a single score network, we choose it out of several \glspl{dsb} despite of its strict condition.
+In this section, we introduce a brief overview of~\gls{i2sb} method.
+
+First of all, Schr\"odinger Bridge (SB) is an optimal transport problem that seeks to find the forward and backward processes
+\[
+\dee \bsZ_t &= [f_t+\beta_t\nabla\log \Psi(\bsZ_t, t)]\dee t + \sqrt{\beta_t}\dee W_t,\quad \bsZ_0\sim p_0\\
+\dee \bsZ_t &= [f_t-\beta_t\nabla\log \hat{\Psi}(\bsZ_t, t)]\dee t + \sqrt{\beta_t}\dee \overline{W}_t,\quad \bsZ_1\sim p_1
+\label{eq:sb}
+\]
+where $(p_0, p_1)$ are the boundary distributions, $\{W_t, \overline{W}_t\}$ are the standard Wiener process and its time-reversal, and $\{f_t, \beta_t\}$ are the drift and diffusion coefficients.
+If the pair of functions $\{\Psi, \hat{\Psi}\}$ solves the following coupled PDE
+\[
+\frac{\partial \Psi(\bsz_t,t)}{\partial t}       = \grad\Psi^\top f_t - \frac{1}{2} \beta_t \Delta \Psi,\quad\frac{\partial \hat{\Psi}(\bsz_t,t)}{\partial t} = - \grad\cdot(\hat{\Psi} f_t) + \frac{1}{2} \beta_t \Delta \Psi\\
+\text{with }
+\Psi(\bsz_0, 0)\hat{\Psi}(\bsz_0, 0) = p_0(\bsz_0), \Psi(\bsz_1, 1)\hat{\Psi}(\bsz_1, 1) = p_1(\bsz_1),
+\label{eq:fokker_planck}
+\]
+then~\eqref{eq:sb} provides the optimal solution to an entropy-regularizing optimization problem that finds the optimal path between $p_0$ and $p_1$.
+Then~\eqref{eq:fokker_planck} and its time-reversal directly follows the Fokker-Planck equation of the SDE in~\eqref{eq:sde_forward} as follows, respectively.
+\[\label{eq:sde_forward}
+\dee \bsZ_t=f_t \dee t + \sqrt{\beta_t}\dee W_t,\quad \bsZ_0\sim\hat{\Psi}(\cdot,0)\text{ and }
+\dee \bsZ_t=f_t \dee t + \sqrt{\beta_t}\dee \overline{W}_t,\quad \bsZ_1\sim\Psi(\cdot,1).
+\]
+However, both $\Psi$ and $\hat{\Psi}$ are intractable drifts so~\gls{i2sb} assumes a certain form of the boundary distributions $p_0$ and $p_1$.
+Followed from~\citet{liu23i2sb}, we take the energy potential functions $\widehat{\Psi}(\cdot,0)=p_0(\cdot):=\delta_a(\cdot)$ and $\Psi(\cdot,1)=p_1(\cdot)/\widehat{\Psi}(\cdot,1)$.
+Here $\delta_a(\cdot)$ is the Dirac delta distribution centered at $a\in\bbR^d$ which makes the diffusion process computationally tractable.
+Then, we can approximate both forward and backward \glspl{sde} using a single score network in the framework of DDPM \citep{ho2020ddpm} with the following Gaussian posterior:
+\[\label{eq:i2sb_conditional}
+\bsZ_t\sim q(\bsZ_t\given \bsZ_0,\bsZ_1)=\normal(\bsZ_t;\mu_t,\Sigma_t),\,\,
+\mu_t=\frac{\overline{\sigma}_t^2}{\overline{\sigma}_t^2+\sigma_t^2}\bsZ_0+\frac{\sigma_t^2}{\overline{\sigma}_t^2+\sigma_t^2}\bsZ_1, \,\,\Sigma_t = \frac{\overline{\sigma}_t^2\sigma_t^2}{\overline{\sigma}_t^2+\sigma_t^2}, 
+\]
+where $\sigma_t^2=\int_0^t\beta_{t'}\dee t'$ and $\overline{\sigma}_t^2=\int_t^1\beta_{t'}\dee t'$ are cumulative forward and backward noise variances, respectively.
+For algorithmic design for restoration problems, we take $p(\bsZ_0,\bsZ_1)=p_0(\bsZ_0)p_1(\bsZ_1|\bsZ_0)$ and $f=0$, and construct tractable~\glspl{sb} between individual samples from $\bsZ_0$ and $p_1(\bsZ_1|\bsZ_0)$.
+
+
+
+
+\section{Diffusion Bridge Networks}
+
+\label{main:sec:methods}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.65\textwidth]{figures/concept.png}
+    \caption{Overview of \gls{dbn}. For a given data, the conditional diffusion bridge learns a transition between logit distribution of one of the ensembles (left; source) and that of the target ensemble models (right; target).}
+    \label{fig:concept}
+\end{figure*}
+
+In the previous \gls{bn} \citep{yun2023traversing}, there was a limitation in learning the transport between independent models, prompting them to adopt an alternative approach: it utilizes a neural network to predict the output of local optima aligned between the source and target models in terms of a low loss subspace instead of directly predicting the output of the target model. To overcome this limitation, instead of tackling the problem of predicting the ensemble outputs as one-step prediction (a single neural network evaluation), we cast the problem as a diffusion bridge construction between the output distributions of ensemble members.
+
+\subsection{Settings and Notations}
+We restrict our focus on the $K$-way classification problem, where the goal is to train a classifier taking $d$-dimensional inputs and predict $K$-dimensional classification logits.
+We assume that a classifier with parameter $\btheta$ is decomposed into two parts, a feature extractor $g_{\bpsi}: \bbR^d \to \bbR^h$ that first encodes an input $\bsx$ into a feature vector $\bsh$, and then a classifier $c_{\blambda}: \bbR^h \to \bbR^K$ that transforms the feature vector $\bsh$ into a logit $\bsz$ of the class probability. That is, $f_{\btheta}(\bsx) = (c_{\blambda} \circ g_{\bpsi})(\bsx)$ and $\btheta = (\bpsi, \blambda)$. A collection of $M$ ensemble members are denoted as $\bTheta=\{\btheta_i\}_{i=1}^M$ and $\btheta_i = (\bpsi_i, \blambda_i)$.
+
+\subsection{Conditional diffusion bridge In logit space}\label{sec:main}
+Our goal is to construct a conditional diffusion bridge on the logit space, that is, a stochastic path $\{ \bsZ_t \}_{t \in [0,1]}$ where $\bsZ_1$ is constructed from the logit of the source model and $\bsZ_0$ from that of the target ensemble model. More specifically, given $\bTheta$, we choose one of the ensemble members $\btheta_1$ as a source model, and set $\bsz_1$ be the logit distribution computed from $\btheta_1$. Then the target $\bsz_0$ is set to be the logit distribution of the ensembled prediction.
+
+More specifically, let $\bsx \in \bbR^d$ be an input, and let $\bsh_1 = g_{\bpsi_1}(\bsx)$ be the corresponding feature vector computed from the source model $\btheta_1$. Conditioned on $\bsx$, we define the source logit distribution as an implicitly defined distribution as follows,
+\[\label{eq:i2sb_source_dist}
+\bsz_1 = c_{\blambda_1}(\bsh_1), \quad T \sim p_\text{temp}, \quad \bsZ_1 = \frac{\bsz_1}{T},
+\]
+where $T$ is a annealing temperature drawn from some distribution $p_\text{temp}$.
+The target logit, $\bsZ_0$, is then set to be the logit computed by the ensemble model as follows, for $\bsz^{(i)} := f_{\btheta_i}(\bsx)$,
+\[
+ \bp_i = \mathtt{Softmax}(\bsz^{(i)}), \,\,
+ \bsZ_0 = \mathtt{EnsLogit}( \{ \bsz^{(i)} \}_{i=1}^M ) := \log \bar\bp - \frac{1}{K} \sum_{k=1}^K \log \bar\bp_{i, k},
+\]
+where the ensemble output $\bar{\bp} = \sum_{i=1}^M\bp_i/M$. Then, we get $\mathtt{Softmax}(\bsZ_0) = \bar\bp$, allowing us to get ensemble output $\bar\bp$ through approximating $\bsZ_0$. Next we construct \gls{i2sb} between $\bsZ_1$ and $\bsZ_0$.
+
+The intuition behind this construction is as follows. If we directly use the original logit $\bsz_1$, the learned \gls{dsb} can easily be trapped in a trivial solution where it just produces the copy of the source logit $\bsz_1$ along the path $\{\bsZ_t\}_{t\in [0,1]}$, as the discrepancy between the source logit and the target logit is not large compared to the typical situation for which \gls{dsb} is constructed. That is, the source $\bsz_1$ can be a strong hint that acts a simplicity bias for \gls{dsb} learning. Also, \gls{i2sb} requires the source of the diffusion to be a conditional probability distribution, but $\bsz_1$ is a deterministic value. Hence by randomly annealing the source logit via a temperature $T$, we can naturally construct the source as the distribution of the annealed logits and also dilute the information included in $\bsz_1$, and this encourages \gls{dsb} to discover non-trivial paths between the source and the target. 
+
+Based on the formulation on constructing the conditional diffusion bridge between the source and target distributions, we build an approximate reverse \gls{sde} derived from~\eqref{eq:sb} that simulates the path from $\bsZ_1$ to $\bsZ_0$ by estimating the score function $\grad \log \hat{\Psi}(\bsZ_t, t|\bsh_1) = \varepsilon_\phi(\bsh_1,\bsZ_t,t)/\beta_t$ as
+\[\label{eq:reverse_i2sb}
+\dee\bZ_t = (\beta_t/\sigma_t)\varepsilon_{\bphi}(\bsh_1, \bsZ_t, t) \dee t + \sqrt{\beta_t} \dee W_t, \quad \bsZ_1 \sim p_1(\bsZ_1\given \bsx),
+\]
+where $p_1$ is the distribution of $\bsZ_1$ implicitly defined as in \eqref{eq:i2sb_source_dist} and
+$\varepsilon_{\bphi}: \bbR^{h} \times \bbR^{K} \times [0,1] \to \bbR^K$ is the score function estimator built with a neural network parameterized by $\bphi$,
+and is trained to estimate the score function $\nabla_{\bsZ} \log p_t(\bsz_t\given \bsx)$ by minimizing the following objective function,
+\[\label{eq:dbn_loss}
+\calL(\bphi) = \bbE_{\bsx, \bsZ_t}
+\left[ 
+\left\Vert \varepsilon_{\bphi}(\bsh_1, \bsZ_t, t) - \frac{\bsZ_t - \bsZ_0}{\sigma_t}
+\right\Vert_2^2
+\right],
+\]
+with $\bsx \sim p_\text{data}$, $t \in \calU([0,1])$, and $\bsZ_t \sim q(\bsZ_t\given \bsZ_0, \bsZ_1)$ as defined in \eqref{eq:i2sb_conditional}.
+The overall training pipeline is summarized in \cref{alg:training}.
+
+ 
+ 
+
+\input{algorithm/dbn}
+
+\subsection{Distillation of Diffusion Bridge}
+Even though the family of diffusion models~\citep{ho2020ddpm,bortoli2021diffusion,liu23i2sb} achieves superior performance in learning generative models or constructing paths between distributions, they typically suffer from the slow sampling speed due to a large number of function evaluations required for simulation. The distillation techniques for diffusion models, which distill multiple steps of the reverse diffusion process to a single step, do not significantly harm the generation performance while accelerating the sampling speed.
+In this paper, we adapt the progressive distillation proposed in \citep{salimans2022progressive} to reduce the sampling cost of \gls{dbn}.
+
+Let $\calT = \{t_i\}_{i=1}^N$ be the discretized time interval used for diffusion bridge, with $0=t_0<t_1<\dots<t_N=1$. Then let $\calT' := \{t_j' \}_{j=1}^{N'}$ be the distilled time interval 
+with $\calT' \subset \calT$. Let $\bsZ_{t_{i-1}} \sim p_{\bphi}(\bsZ_{t_{i-1}}\given\bsZ_{t_i})$ be the sample from an ancestral sampling following the score network $\varepsilon_{\bphi}$. Then a distilled score network with parameter $\bphi'$ is then trained with the loss
+\[\label{eq:distill_loss}
+\calL_\text{distill}(\bphi') = 
+\bbE_{\bsx,j}\left[\left\Vert
+\varepsilon_{\bphi'}(\bsh_1, \bsZ_{t'_j}, t_j') - \frac{\bsZ_{t_j'} - \bsZ_{{t_{j-1}'}}}{\sigma_{t_j'}}
+\right\Vert_2^2\right],
+\]
+where $j \sim \calU(\{1,\dots,N'\})$ and $\bsZ_{t'_{j-1}} \sim \prod_{s=i-k}^{i-1} p_{\bphi}(\bsZ_{t_s}\given \bsZ_{t_{s+1}})$ with $t_{j-1}'=t_{i-k}$ and $t_j'=t_i$. This distillation is then recursively repeated until there only remains a single time step $(N'=1)$.
+\subsection{Inference Procedure}
+The inference with \gls{dbn} consists of forwarding an input through the source model and computing a single diffusion step from the model distilled by \eqref{eq:distill_loss}.
+Given an input $\bsx$, we first compute its feature $\bsh_1$ using the feature extractor of the source model $g_{\bpsi_1}$ with $\bsh_1=g_{\bpsi_1}(\bsx)$.
+Then we initialize the diffusion by drawing $T \sim p_\text{temp}$ and put $\bsZ_1 = \bsz_1/T$. The corresponding ensembled prediction $\bsy$ is then approximated as,
+\[\label{eq:dbn_inference}
+&\bsZ_0 = \bsZ_1 + (\beta_1/\sigma_1)\varepsilon_{\bphi '}(\bsh_1, \bsZ_1, 0) + \bxi_1 \text{ where } \bxi_1 \sim \calN(0, \Sigma_1), \\
+& p(\bsy\given \bsx, \{\btheta_i\}_{i=1}^M) = \frac{1}{M} \sum_{i=1}^M \mathtt{Softmax}(\bsz^{(i)}) 
+\approx \mathtt{Softmax}(\bsZ_0).
+\]
+
+\subsection{Combining multiple \glspl{dbn}}
+\label{main:sec:multiple}
+Note that the size of the score network $\varepsilon_{\bphi'}$ should be limited, because otherwise the cost from the diffusion simulation can outnumber the cost of computing the full ensemble. Hence, there is an intrinsic limit in the capacity of $\varepsilon_{\bphi'}$ representing the path between the source model and an full ensembled model (we study this capacity empirically in~\cref{main:sec:capacity}). When a single \gls{dbn} reached out to the limit, we may introduce multiple \glspl{dbn}, increasing the approximation quality at the cost of additional inference time.  Given $M$ ensemble models, we first build a \gls{dbn} starting from a source model $\btheta_1$. Then we build another \gls{dbn} sharing the same model $\btheta_1$ as the source and so on. Let $\{ \varepsilon_{\bphi'}^{(\ell)}\}_{\ell=1}^L$ be a set of score networks built in that way, with $L < M$. Then we can approximate the ensembled prediction $\bsy$ for $\bsx$ as,
+\[
+p(\bsy\given \bsx, \{\btheta_i\}_{i=1}^M) \approx \frac{1}{L}\sum_{\ell=1}^L\mathtt{Softmax}\left( \bsZ_0^{(\ell)}\right),
+\]
+where $\bsZ_0^{(\ell)}$ is the sample drawn as in \eqref{eq:dbn_inference} with $\ell^{\text{th}}$ score network.  
+In our implementation, we combine $L$~\glspl{dbn} where $l^{\text{th}}$~\gls{dbn} estimates the recovered predictions by a collection of $N+1$ models $\{f_{\btheta_1}, f_{\btheta_{(l-1)(N-1)+2}},\cdots,f_{\btheta_{(l-1)(N-1)+N+1}}\}$, approximating the ensembled prediction of $M = LN+1$ ensemble models. For example, to simulate total $M=5$ ensemble models $\{\btheta_1,\btheta_2,\btheta_3,\btheta_4,\btheta_5\}$, we first train a score net that estimate ensemble distribution of $\{\btheta_1,\btheta_2,\btheta_3\}$ starting from $\btheta_1$ and secondly train another score net approximating $\{\btheta_1,\btheta_4,\btheta_5\}$ starting from $\btheta_1$. Note that the source models for $L$ \glspl{dbn} need not be different; in \cref{main:sec:experiments}, we show that a \emph{single} source model can be shared for all multiple \glspl{dbn}, minimizing the additional inference cost while significantly improving the accuracy.
+
+
+
+
+\section{Experiments}
+
+\label{main:sec:experiments}
+
+\paragraph{Settings.}
+We evaluate our approach using three widely adopted image classification benchmark datasets: CIFAR-10, CIFAR-100, and TinyImageNet \citep{tinyimagenet}.
+In our experiment, the ensemble models that we construct to serve as bridges adopt the configuration outlined in the Bridge Network \citep{yun2023traversing} and are trained based on the ResNet architecture.
+We use widely used ResNet-32$\times2$, ResNet-32$\times4$, and ResNet-34 networks \citep{he2016deep} for baseline ensemble classifiers for CIFAR-10, CIFAR-100, and TinyImageNet datasets, respectively.
+In this context, the suffices "$\times2$" and "$\times4$" denote that the channel widths of the convolutional layers are multiplied by 2 and 4 from the conventional ResNet-32, respectively.
+For the score network, inspired by \citet{sandler2018mobilenetv2}, we utilize residual connections \citep{he2016deep} and \gls{dsc}~\citep{chollet2017xception} to mitigate redundant computations and implement a light-weighted score network. Further details on datasets, model architectures, and hyperparameter settings used to evaluate our experiments are listed in~\cref{app:sec:experiment}.
+
+\paragraph{Training.}
+We train a single score network with 3 ensembles. If we need to mimic more than 4 ensembles, we can average 2 or more diffusion bridges according to~\cref{main:sec:multiple}. Since they share the source model, we can easily enhance the performance with low extra costs. We train the diffusion bridge with 5 steps before distillation for fast and efficient training of the score networks and 5 steps are enough to approximate the transport between the two conditional logit distributions.
+
+\paragraph{Baseline methods.}
+We validate how well our method accelerates the inference speed with lightweight networks by comparing our~\gls{dbn} with the target \gls{de}~\citep{lakshminarayanan2017simple} as the oracle ensemble.
+We also compare our method with three existing methods that are widely used in fast and efficient ensemble distillation or bridge networks:
+\gls{ed}~\citep{hinton2015distilling}, \gls{end2}~\citep{ryabinin2021scaling}, and \gls{bn} \citep{yun2023traversing}. We use more refined version of \gls{end2}  \citep{ryabinin2021scaling} instead of the original \gls{end2} \citep{malinin2020ensemble} that improved convergence.
+
+\paragraph{Metrics.}
+We measure the computational cost of each model in terms of \gls{flops} and the number of parameters (\#Params).
+\gls{flops} count the number of additions and multiplications operations, and it represents a cost during an inference of a model.
+\#Params represents the memory usage required for the inference. For the performance, we consider the classification accuracy (ACC), Negative Log-Likelihood (NLL), Brier Score (BS)~\citep{brier1950verification}, Expected Calibration Error (ECE)~\citep{guo2017on}, and Deep Ensemble Equivalent (DEE)~\citep{ashukha2020pitfalls}.
+BS and ECE measure how much the classification output (confidence) is aligned with the true probability and thereby it implies the reliability of the model output.
+DEE approximates the number of \gls{de} similar to a given model in terms of NLL. 
+More profound formulations of the metrics are described in~\cref{app:sec:metrics}.
+
+\subsection{Classification Performance and Uncertainty Metrics}
+\input{tables/classification}
+
+The ACC, NLL, BS, ECE, and DEE comparisons with the baselines with respect to \gls{flops} and \#Params on CIFAR-10, CIFAR-100 and TinyImageNet are shown in~\cref{tab:classification}. We assume the situation where both \gls{bn} and \gls{dbn} can utilize only a single source model to make the problem difficult. As we can see in the results of CIFAR-10 and CIFAR-100, with only a small increase in the computational costs (\gls{flops} and \#Params), \gls{dbn} achieves almost \gls{de}-3 performance, whereas \gls{bn} struggles to achieve even \gls{de}-2 performance with more computational costs than \gls{dbn}. In TinyImageNet, \gls{dbn} even outperforms \gls{de}-3 with less than a half of computation costs. On the other hand, the two distillation methods, \gls{ed} and \gls{end2}, are competitive with \gls{bn} but they shows poor uncertainty metrics such as NLL, BS, and ECE, and interestingly \gls{dbn} also shows poor ECE scores even with high performance in the other uncertainty metrics. In addition, the actual output results through the diffusion processes are illustrated in~\cref{fig:confidence} and the results for the other images are listed in~\cref{app:sec:transitions}.
+
+\begin{figure}[t]
+\minipage{0.55\textwidth}
+    \centering
+    \includegraphics[width=1\textwidth]{figures/confidence.pdf}
+    \caption{Confidences from the source model (first column), from the ensemble model (third column), and from the diffusion bridge (middle column) in the CIFAR-10 dataset. The middle column illustrates a transition of the diffusion process.}
+    \label{fig:confidence}
+\endminipage\hfill
+\minipage{0.4\textwidth}%
+    \centering
+    \includegraphics[width=\textwidth]{figures/capacity.pdf}
+    \caption{The number of teachers that a single model can distill in terms of ACC (left) and DEE (right). DEEs less than 1 are set to 0.5.}
+    \label{fig:capacity}
+\endminipage
+\end{figure}
+
+\subsection{Performance Loss vs. Computational Efficiency}
+\label{main:sec:tradeoff}
+
+Furthermore, depending on the number of ensemble models that \gls{dbn} is trained on, the left hand side of \cref{fig:dee} demonstrates how much performance loss occurs compared to the \gls{de} when the number of target ensemble models increase. Conversely, the right hand side of \cref{fig:dee} illustrates how much cost savings DBN can achieve compared to \gls{de}, given the same computational cost (\gls{flops}). The comparison is made from the perspectives of ACC and DEE. In this experiment, a maximum of 9 ensemble models are used and we also compare with our competing model, \gls{bn}. \gls{dbn} trains one diffusion bridge with three ensembles, while \gls{bn} learns a low-loss curve between 2 ensembles for one bridge. For more than four ensembles, \gls{dbn} conducts ensemble inference aggregating two or more diffusion bridges as \gls{bn} does. We use the standard size of \gls{bn} in "ResNet + 2 \glspl{bn}" which has 1.411 relative FLOPs for a single network compared to "ResNet + 1 \glspl{dbn}" which has 1.166 relative FLOPs. As shown in~\cref{fig:dee}, \gls{dbn} (left) achieves significant ensemble gains even when the number of target ensemble increases, whereas \gls{bn} (left) saturates at ACC 92.0\% and DEE 2\%. Moreover, \gls{dbn} (right) shows rapid ensemble inference compared to the target ensemble \gls{de} (right) and even faster than \gls{bn} (right) to get the same ensemble performance.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/dee.pdf}
+    \caption{From \textbf{left} (1$^\text{st}$) to \textbf{right} (4$^\text{th}$): Number of target ensembles vs. accuracy (1$^\text{st}$) or DEE (2$^\text{nd}$), and relative FLOPs vs. accuracy (3$^\text{rd}$) or DEE (4$^\text{th}$) in CIFAR-10.}
+    \label{fig:dee}
+\end{figure}
+
+\subsection{Ensemble Capacity of a Single DBN}
+\label{main:sec:capacity}
+\cref{fig:capacity} demonstrates the ensemble capacity of how much a single~\gls{dbn} model learns and distills knowledge from multiple teacher (ensemble) models in terms of ACC and DEE in the CIFAR-10 dataset.
+Existing ensemble distillation models have limited performance in learning likelihood and are saturated in terms of ACC at learning at most 3 number of target ensembles.
+On the other hand, ~\gls{bn} assumes that a single model can cover at most two ensemble modes, hence the maximum gain on ACC and DEE is capped at two.
+Compared to these competing methods, our~\gls{dbn} method succeeds in learning slightly less than three ensembles only with a single lightweight model and the source model.
+
+
+
+\section{Related Work}
+
+\label{main:sec:related-work}
+
+\textit{Fast Ensembling Methods for Neural Network Prediction.}
+Many works have suggested to reduce the computational cost of the typical ensemble methods that are multiplied proportional to the number of the ensemble networks.
+To provide output diversity with lightweight computation, sharing either weights or latent features of neural networks enabled to compress redundancy throughout the ensemble members and add minor differences between them  \citep{wen2019batchensemble, dusenberry2020efficient, lee2015m, siqueira2018ensemble, antoran2020depth, havasi2020training}.
+This can also be interpreted as the knowledge distillation from the ensemble of networks to the single network; \citep{hinton2015distilling}, \citet{malinin2020ensemble, ryabinin2021scaling, penso2022functional} showed that distilling deep ensemble to a single network helps retaining information of the ensemble distribution without heavy computational burden.
+
+\textit{Restoration with Conditional Diffusion Models.}
+Our model is on the line of the reconstruction problem from some degraded measurement, if we consider our method as reconstructing the ensemble distribution from the degraded function output from a single model.
+This line of work starts with the conditional diffusion model~\citep{saharia2022palette}, that refines the image given some conditional features.
+Conditional diffusion models have achieved success in various problems such as time series imputation~\citep{tashiro2021csdi}, deblurring~\citep{whang2022deblurring}, and super-resolution~\citep{saharia2023}.
+As a generalized perspective, inverse problems dealt with diffusion~\citep{song2022inverse} aims to restore the underlying clean signal from the noisy measurement.
+\citet{wang2022zero} delves into the null space of the image and utilize the valid space that should be recovered, and achieved zero-shot restoration using diffusion models.
+
+
+\section{Conclusion}
+
+\label{main:sec:conclusion}
+
+We have proposed a novel approach to approximate the performance of Deep Ensembles with reduced computational cost. To achieve this, we constructed Conditional Diffusion Bridge that connects the logit distribution between one of the ensemble models and the target ensemble. We approximated the output distribution of the target ensemble using the features and logits obtained from the source model. The computations involved in this process consist of a single forward pass of the source model and the diffusion process with a lightweight score network. Additionally, during the training process, distilling the multiple diffusion steps into one step accelerates the inference speed while retaining the performance of three deep ensemble models. We evaluated this method on three widely used datasets and achieved superior performance compared to the baselines. Notably, we demonstrated significantly faster computations compared to competitive models such as Bridge Network while achieving similar performance. However, there are still some limitations to consider. First, a single Diffusion Bridge still has limitations in terms of the number of ensembles it can learn. If more ensembles are required, additional diffusion bridges must be used. Secondly, the use of multiple diffusion bridges leads to a proportional training time because diffusion models demand a long training time due to their multiple diffusion steps.
+
+
+\pagebreak
+\newpage
+
+

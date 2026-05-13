@@ -1,0 +1,922 @@
+\title{Preserving Deep Representations in One-Shot Pruning: A Hessian-Free Second-Order Optimization Framework}
+
+\begin{abstract}
+
+We present SNOWS, a one-shot post-training pruning framework aimed at reducing the cost of vision network inference without retraining. Current leading one-shot pruning methods minimize layer-wise least squares reconstruction error which does not take into account deeper network representations. We propose to optimize a more global reconstruction objective. This objective accounts for nonlinear activations deep in the network to obtain a better proxy for the network loss. This nonlinear objective leads to a more challenging optimization problem---we demonstrate it can be solved efficiently using a specialized second-order optimization framework. A key innovation of our framework is the use of Hessian-free optimization to compute exact Newton descent steps without needing to compute or store the full Hessian matrix. A distinct advantage of SNOWS is that it can be readily applied on top of any sparse mask derived from prior methods, readjusting their weights to exploit nonlinearities in deep feature representations. SNOWS obtains state-of-the-art results on various one-shot pruning benchmarks including residual networks and Vision Transformers (ViT/B-16 and ViT/L-16, 86m and 304m parameters respectively). 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Modern deep learning-based vision models, particularly convolutional neural networks (CNNs) \citep{lecun98} and more recent vision transformers (ViTs) \citep{dosovitskiy2021imageworth16x16words}, have achieved remarkable performance in various computer vision tasks, including image classification, object detection, and visual tracking \citep{Chai2021}. However, their success comes at the cost of substantial computational and memory resources, and these models are only trending towards increasingly large scales \citep{dehghani2023scaling}. Neural network pruning, a class of techniques aimed at reducing the number of parameters by selectively removing weights or connections, has emerged as a solution to reduce the inference demands of large-scale vision networks \citep{goel2020survey, he2023structured, kuznedelev2023capcorrelationawarepruninghighlyaccurate}, alongside methods such as quantization \citep{cheng2024surveydeepneuralnetwork}. 
+
+Many pruning approaches require an expensive retraining phase following weight removal to recover network performance \citep{liu2019rethinkingvaluenetworkpruning, frankle2019lotterytickethypothesisfinding}. Especially as networks scale, practitioners looking to prune and cheaply deploy a model often lack the resources to fully retrain it and may not even have access to the model's dataset or optimizer. While classical \textit{one-shot pruning} approaches (where weights are removed in a single step rather than iteratively) typically included retraining \cite{HAGIWARA1994207}, recent work has explored one-shot pruning without this computationally expensive step \citep{frantar2023sparsegptmassivelanguagemodels, OBC2022, singh2020woodfisherefficientsecondorderapproximation}.
+
+One-shot pruning approaches typically use second-order approximations of the neural network loss function in their pruning criteria or objective function, an approach dating back to \citep{NIPS1989_6c9882bb, Hassibi1992}. Modern second-order approaches fall into two main categories: global methods, which consider the entire network at once, and local methods, which prune one layer at a time. Global methods decide which weights to prune and how to update the remaining weights, based on a second-order approximation of the downstream task loss function. However, since computing and inverting the full Hessian matrix is expensive, these methods often replace the Hessian with an approximation such as the Fisher information matrix or further approximations thereof \citep{singh2020woodfisherefficientsecondorderapproximation, MFAC2021, benbaki2023fastchitaneuralnetwork, wang2019eigendamage}. Like retraining approaches, global pruning methods can be difficult to scale to the largest vision networks due to their need to take full network gradients (e.g. in the Fisher computation). Local methods on the other hand,  which have become popular for large networks, replace the task loss with a local layer-wise least squares reconstruction loss \citep{Dong2017, OBC2022, meng2024alps}, for which the Hessian can be computed in a simple, straightforward fashion. In these local layer-wise reconstruction methods, the only optimization variables are the weights at a single layer, hence layer-wise Hessians can be isolated and the network pruned one layer at a time.  These local methods are computationally efficient, but may not provide the most accurate proxy of the loss of the network and neglect the influence of deeper feature representations.
+In this paper, we present SNOWS\footnote{\textbf{S}tochastic \textbf{N}ewton  \textbf{O}ptimal \textbf{W}eight \textbf{S}urgeon (\textbf{SNOWS})}, a neural network pruning framework that bridges the gap between these global and local one-shot pru ning approaches. Unlike global or retraining-based methods, SNOWS only requires calculating gradients for individual layers. At the same time, the SNOWS formulation goes beyond standard layer-wise reconstruction and optimizes a more global reconstruction objective (cf. \autoref{multi}). The motivation is to preserve not just a local set of features, but to consider the effect of pruning  on the more global set of learned representations. While this objective leads to a more challenging nonlinear optimization problem that cannot be solved by standard layer-wise methods, we show that it can solved efficiently using a specialized second-order optimization framework. Unlike prior global approaches that make approximations to the Hessian, SNOWS optimizes an \emph{exact} second-order approximation. A key driver of the scalability of our method is the use of Hessian-free optimization \citep{Martens2010DeepLV}, which allows us to efficiently compute and optimize the second-order approximation without explicitly forming or storing the full Hessian matrix. This enables SNOWS to scale to the largest CNNs and ViTs. For instance, using our method the ViT-L/16 model ($\approx$ 304m parameters) can be pruned on a single A100 GPU.
+
+
+
+
+
+
+
+
+Semi-structured pruning approaches have received more attention since they lead to more tangible acceleration on modern computing hardware. We primarily target $N$:$M$
+sparsity \citep{mishra2021acceleratingsparsedeepneural}, a semi-structured pruning approach where 
+$N$ out of every 
+$M$ (contiguous, aligned) weights are retained. This sparsity pattern leads to greater acceleration than unstructured sparsity by aligning with hardware indexing patterns, such as those in NVIDIA’s Sparse Tensor Cores \citep{PoolPermutations}, and leads to lesser accuracy loss than structured formats \citep{zhang2023spatialreparameterizationnmsparsity}. Unlike previous methods that require training $N$:$M$
+sparse networks from scratch \citep{zhou2021learningnmfinegrainedstructured, NEURIPS2022_06589ec9} to achieve performance competitive with dense networks, SNOWS can prune to $N$:$M$ sparsity in one-shot using just a few thousand samples.
+
+\textbf{Contributions.} We make the following contributions to the one-shot pruning problem:
+\begin{itemize}[itemsep=3pt, parsep=0pt, leftmargin=*]
+    \item We introduce a novel post-training pruning framework that operates at the layer-wise level to optimize a more global reconstruction objective to account for nonlinear activations deep in the network. We demonstrate empirically that this approach provides a better proxy for the network loss compared to layer-wise least squares reconstruction methods.
+    \item We develop an efficient second-order optimization framework to solve the challenging nonlinear optimization problem posed by our reconstruction objective. We use Hessian-free optimization integrated with a customized Conjugate Gradient (CG) method to efficiently solve the second-order approximation. Our CG method exploits sparsity in the linear system defined by the second-order approximation to compute exact Newton descent steps in a memory-efficient way, scaling to problems with layer-wise Hessians as large as $4.2$m $\times$ $4.2$m.
+    \item Our method delivers state-of-the-art performance in one-shot pruning for computer vision, achieving superior results on various network architectures and datasets. Our method can prune ResNet50 to \( 1\!:\!4 \) sparsity with a 1.5\% drop in test accuracy on CIFAR-100 and a 9.4\% drop on ImageNet-1k using just 3,000 training examples, where prior state-of-the-art one-shot \( N\!:\!M \) pruning methods have a drop of 7.6\% and 29.42\% respectively. Similarly, for unstructured sparsity, our method can prune MobileNet to 70\% sparsity with a 5.6\% drop in accuracy, whereas the best available competing method has a 12.55\% drop. In addition to improving performance on CNNs, our method scales to modern ViT networks with up to 304m parameters.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\textbf{One-shot pruning without retraining.} Recent work has demonstrated the possibility of pruning networks in a single step without requiring expensive retraining \cite{frantar2023sparsegptmassivelanguagemodels, OBC2022, singh2020woodfisherefficientsecondorderapproximation}. In this setting, one typically assumes access to a limited sample of calibration data (e.g. a few thousand examples) and the goal is to compress the network with minimal accuracy loss relative to the dense model. This modern approach to one-shot pruning builds on classical work that developed second-order approximations of the task loss function. Early approaches \citep{lecun98, Hassibi1992} considered the entire network's weights but were computationally intractable for large models. More recent methods like WoodFisher \cite{singh2020woodfisherefficientsecondorderapproximation} and Combinatorial Brain Surgeon \citep{singh2020woodfisherefficientsecondorderapproximation}, as well as CHITA \citep{benbaki2023fastchitaneuralnetwork}, improve scalability by replacing the Hessian with the Fisher information matrix or using block-diagonal approximations. Other works use Kronecker product approximations of the Fisher matrix \citep{wang2019eigendamage}.
+
+These global approaches optimize a more accurate proxy for the network loss function, but often struggle to scale to the largest vision networks, hence layer-wise approaches which focus on \emph{reconstruction} have become a popular alternative. Layer-wise OBS \citep{Dong2017} formulates the problem of reconstructing the linear activations of the dense network as a linear regression problem which has a standard least squares Hessian, and show that the overall network reconstruction error is bounded by a quantity depending on the error given at each of the layer-wise problems. The OBC framework \citep{OBC2022} introduces an efficient method for greedy backward elimination on this layer-wise problem using fast low rank updates of the Hessian inverse. There have been limited attempts to incorporate nonlinearity into layer-wise approaches, but several papers have reported the need to consider broader notions of network connectivity as pruning criteria and loss functions \citep{hoang2023revisiting, he2024dataindependentmoduleawarepruninghierarchical}. The Net-Trim framework solves a layer-wise regression problem with ReLU activation \citep{aghasi2017nettrimconvexpruningdeep}, accounting for the non-linearity by reformulating the ReLU using linear inequalities and solving the resulting convex program. In the Net-Trim formulation, the weights are optimized in a way that is "aware" of the subsequent non-linearity by incorporating the effects of the ReLU activation into the pruning loss function. Our objective is similar in spirit, but we make no assumptions about the exact form of the non-linearity, only requiring that the underlying functions are twice-differentiable. Moreover, our formulation goes beyond the activations at a single layer.
+
+\textbf{Structured and semi-structured pruning in computer vision.} Unstructured pruning, which involves pruning individual weights in an unrestricted format, leads to high compression ratios but often cannot realize tangible speed-ups except at very high sparsity levels or when run on specialized hardware \citep{cheng2024surveydeepneuralnetwork}. Hence there has been a movement towards structured pruning methods \citep{he2023structured}, which lead to actual speed-ups by imposing regularity on the sparsity pattern. In CNNs, structured pruning can involve removing entire filters \citep{CNNs2016} or specific channels \citep{meng2024osscaroneshotstructuredpruning}. Recently, NVIDIA \citep{mishra2021acceleratingsparsedeepneural} released $N$:$M$ Sparse Tensor Cores, the current version of which includes a 2:4 sparsity pattern that leads to double the throughput on dense matrix multiplications. Hence there has been several works applying $N$:$M$ pruning in CNNs \citep{PoolPermutations, zhou2021learningnmfinegrainedstructured}. There has been more limited work on compressing ViT networks, in part due to their scale. Most of the recent work focuses on unstructured sparsity \citep{he2024dataindependentmoduleawarepruninghierarchical}. The CAP framework \citep{kuznedelev2023capcorrelationawarepruninghighlyaccurate} obtains strong results in one-shot unstructured pruning in DeiT networks \citep{touvron2021trainingdataefficientimagetransformers}, though they use 4096 gradient evaluations ($\approx$ 520k samples) in their one-shot pruning experiments, and use fine-tuning to recover network accuracy. Previous work on structured and semi-structured ViT pruning has taken various approaches. Several works \citep{zhu2021visiontransformerpruning, yu2021unifiedpruningframeworkvision} focused on pruning redundant channel dimensions (rows) in the ViT. \citep{Yu2022WidthD} proposed pruning both the width (number of neurons) and depth (number of layers) of ViTs, which centers on architectural changes rather than specifically weight pruning. Notably, almost all existing work on ViT pruning requires fine-tuning to recover dense model performance, and hence the literature on one-shot structured pruning in VITs is very limited. 
+
+
+\section{Problem Definition and Background}
+
+
+\textbf{Notation.} In a neural network with \( L \) layers, the network function is represented as \( f(\boldsymbol{X}^0, \boldsymbol{W}) \), where \( \boldsymbol{W} = (\boldsymbol{W}^1, \boldsymbol{W}^2, \dots, \boldsymbol{W}^L) \) is the collection of weight matrices across layers, and \( \boldsymbol{X}^0 \in \mathbb{R}^{n \times d_0} \) is the input, with number of data points \( n \) and input dimension \( d_0 \). For $\ell \geq 1$, we use \( \boldsymbol{X}^\ell \in \mathbb{R}^{n \times d_{\ell-1}} \) to refer to the inputs to layer \( \ell \) and \( \boldsymbol{Y}^\ell \in \mathbb{R}^{n \times d_{\ell}} \) to refer to the outputs of layer \( \ell \); therefore, the input to layer \( \ell+1 \) is the output of layer \( \ell \), or \( \boldsymbol{X}^{\ell+1} = \boldsymbol{Y}^\ell \). The weight matrix for the \( \ell \)-th layer is denoted \( \boldsymbol{W}^\ell \in \mathbb{R}^{d_{\ell-1} \times d_\ell } \). The output of layer \( \ell \) is computed as \( \boldsymbol{Y}^\ell = f^\ell(\boldsymbol{X}^\ell , \boldsymbol{W}^\ell)\), where the function \( f^\ell\) denotes the operations at layer \( \ell \), which typically consist of an linear transformation followed by a point-wise nonlinear activation, i.e., \( f^\ell(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell) = \sigma(\boldsymbol{X}^\ell \boldsymbol{W}^\ell) \), where \( \sigma \) is an activation function applied element-wise, though $f^\ell$ can also include much more general operations such as residual connections, pooling operations, etc. For a twice-differentiable loss function $\mathcal{L}$ depending on the network parameters $\boldsymbol{W}$ or a subset, we denote the gradient as $ \nabla \mathcal{L}(\boldsymbol{W})= \partial \mathcal{L} / \partial \boldsymbol{W}$ and the Hessian \(\boldsymbol{H} = \partial^2 \mathcal{L} / \partial \boldsymbol{W}^2 \).
+
+\textbf{Background on Global Model.} Global methods, originating with the Optimal Brain Surgeon (OBS) framework \citep{lecun98, Hassibi1992}, minimize the following loss function for neural network compression:
+\begin{align}\label{task_loss}
+\min_{\widehat{\boldsymbol{W}} \in \mathcal{W}}\mathcal{L}(\widehat{\boldsymbol{W}}) = \mathbb{E}_{(\boldsymbol{X}^0, \boldsymbol{Y})} \left[ E(\boldsymbol{Y}, f(\boldsymbol{X}^0, \widehat{\boldsymbol{W}})) \right] 
+\end{align}
+where \( \boldsymbol{Y} \) are the ground truth labels, \( f(\boldsymbol{X}^0, \widehat{\boldsymbol{W}}) \) represents the final output of the compressed network, \( E(\cdot) \) is the task loss, e.g., cross-entropy for classification, and $\mathcal{W}$ is a predefined set of sparse weight matrices. The canonical example of $\mathcal{W}$ is the set of $S$-sparse matrices, $\mathcal{W} = \{ \widehat{\boldsymbol{W}} | \, \|\widehat{\boldsymbol{W}}\|_0 \leq S \}$, though $\mathcal{W}$ can also represent much more general sets such as structured-sparse matrices. The very natural idea here is to compress the network to preserve performance on the downstream task. To solve the problem, OBS uses a second-order approximation to Eqn (\ref{task_loss}).\footnote{We omit the details of the second-order approximation for brevity, but provide more in \ref{sec:second_order}} Intuitively, a second-order method is well-motivated by the importance of interactions in pruning. Time has revealed however that there are practical issues limiting the applicability of the OBS framework. Most importantly, the OBS solution to Eqn (\ref{task_loss}) requires computing the Hessian of the entire network's weights. For modern deep neural networks, computing the full Hessian matrix is simply not tractable. 
+
+\textbf{Background on Layer-wise Model.} A more practical alternative to global methods is the popular layer-wise proxy, replacing Eqn (\ref{task_loss}) with the following regression problem:
+\begin{align}\label{LS}
+\min_{\widehat{\boldsymbol{W}^\ell} \in \mathcal{W}} \left\|\boldsymbol{X}^\ell \boldsymbol{W}^\ell - \boldsymbol{X}^\ell \widehat{\boldsymbol{W}}^\ell\right\|_2^2 
+\end{align}
+
+ The goal in Eqn (\ref{LS}) is to preserve the linear activations of the model at a particular layer while enforcing sparsity in \( \widehat{\boldsymbol{W}}^\ell \). This formulation, which was introduced in \citep{Dong2017}, has practical appeal since the only decision variables are the weights at a single layer \( \widehat{\boldsymbol{W}}^\ell \), so the Hessian has reduced dimensionality \((d_{\ell-1} \times d_\ell)^2\) compared to that of the full network. Moreover, since the operations on \( \widehat{\boldsymbol{W}}^\ell \) are linear, the objective has a standard least squares form, and its Hessian is given by \( \boldsymbol{H} = 2 \boldsymbol{X}^\ell \boldsymbol{X}^{\ell \top} \), meaning it can be computed in parallel across the row dimension of $\boldsymbol{X}^\ell$.
+
+
+
+\section{The SNOWS Method}
+
+
+\textbf{Our Improved Layer-wise Model.} While more tractable than global approaches, the layer-wise formulation in Eqn (\ref{LS}) focuses solely on preserving the linear activations at a particular layer without considering the impact on subsequent layers' representations. In this paper we instead consider the following \emph{layer-wise} model:
+\begin{align}\label{multi}
+\min_{\widehat{\boldsymbol{W}^\ell} \in \mathcal{W}}\mathcal{L}(\widehat{\boldsymbol{W}}^\ell) := \sum_{k=0}^K \left\| \boldsymbol{Y}^{\ell+k} - f^{\ell:\ell+k}(\boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell) \right\|_2^2
+\end{align}
+
+where \( f^{\ell:\ell+k}(\cdot) \) is defined as the composition of the next \( k \) operations starting from layer \( \ell \):
+\[
+f^{\ell:\ell+k}(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell) = f^{\ell+k}(\cdot, \boldsymbol{W}^{\ell+k}) \circ f^{\ell+k-1}(\cdot, \boldsymbol{W}^{\ell+k-1}) \circ \ldots \circ f^\ell(\cdot, \boldsymbol{W}^\ell)
+\]
+
+and \( \boldsymbol{Y}^{\ell+k}= f^{\ell:\ell+k}(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell) \) are the dense target outputs after the \( k \)-th operation starting from layer \( \ell\). 
+ Hence, the loss function considers the effect of \( \widehat{\boldsymbol{W}}^\ell \) on all layers and operations up to \( \ell+K \). A natural motivation for Eqn (\ref{multi}) is that pruning weights at a particular layer affects not only the outputs of that layer but also activations in subsequent layers. Namely, the solution to the layer-wise problem in Eqn (\ref{LS}) does not necessarily minimize the discrepancy in the outputs of deeper layers:
+\[
+\operatorname{argmin}_{\widehat{\boldsymbol{W}}^\ell} \left\|\boldsymbol{X}^\ell \boldsymbol{W}^\ell - \boldsymbol{X}^\ell \widehat{\boldsymbol{W}}^\ell\right\|_2^2 \neq 
+\operatorname{argmin}_{\widehat{\boldsymbol{W}}^\ell}  \left\|\boldsymbol{Y}^{\ell+k} - f^{\ell:\ell+k}(\boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell)\right\|_2^2
+\]
+
+
+for all $k>0$, where the constituent functions can include non-linear activations, pooling operations, and residual connections, among others. We provide more detail on the motivation for the SNOWS loss function in \autoref{sec:motivation}.
+
+\textbf{Special Cases of Eqn (\ref{multi}).} The loss function is a flexible proxy for the neural network loss function, where the parameter \( K \) can be varied depending on available computational resources. When \( K = 0 \), the loss function reduces to the layer-wise framework. When $K=1$, the formulation is analogous to Net-Trim for ReLU networks \cite{aghasi2017nettrimconvexpruningdeep}, but also generalizes it to other activation functions. Setting \( K =K_{\text{max}}\) which denotes the number of operations after layer \( \ell \) up to the output layer, extends the optimization to all operations following layer \( \ell \). In \autoref{fig:varying_k}, we observe how the value of \(K\) influences network performance when pruning the full ResNet20 and ResNet50 networks to 1:4 sparsity using SNOWS. In \autoref{tab:runtime_with_K} in \autoref{sec:run_time_K}, we provide an ablation on the run-time and peak memory usage when varying $K$.
+ 
+\begin{figure}[H]
+    \centering    \includegraphics[width=1\linewidth]{figs/Varying_K.pdf}
+    \caption{Effect of varying $K$ in the loss function in Eqn (\ref{multi}) on out-of-sample accuracy pruning ResNet20 on CIFAR-10 and ResNet50 on CIFAR-100 to 1:4 sparsity (74\% and 66\% respectively). Increasing $K$ improves the accuracy of the pruned network, at the cost of higher computation time. }
+    \label{fig:varying_k}
+\end{figure}
+\textbf{Cheap layer-wise gradients without computing the full computational graph.} The gradient of Eqn (\ref{multi}) function with respect to the pruned weights \( \widehat{\boldsymbol{W}}^\ell \) can be expressed as:
+\small \begin{align}\label{grad} \nabla \mathcal{L}(\widehat{\boldsymbol{W}}^\ell) = \sum_{k=0}^K \left[ -2 \left( \boldsymbol{Y}^{\ell+k} - f^{\ell:\ell+k}\left( \boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell \right) \right) \tfrac{\partial f^{\ell:\ell+k}\left( \boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell \right)}{\partial \widehat{\boldsymbol{W}}^\ell} \right] \end{align} \normalsize
+An important advantage of this formulation is that it allows for reduced memory requirements compared to computing full network gradients. Specifically, the gradient has dimensionality \( \dim(\boldsymbol{W}^\ell) \), which is significantly smaller than the total number of parameters in the full network. Moreover, the computational graph required to compute this gradient is shorter because it includes only the operations from layer \( \ell \) up to  \( \ell+K \), rather than the entire network, which minimizes the number of activations that need to be constructed and stored on the computational graph.
+\noindent 
+
+\begin{wrapfigure}[12]{r}{0.55\textwidth}  % Right-side wrapping, occupying 16 lines and 45% of the text width
+    \centering
+\begin{tikzpicture}[
+    scale=0.36,  % Further reduce the scale to fit in the wrapfigure
+    node distance=0.2cm,  % Reduce distance between nodes
+    auto,
+    thick,
+    >=Stealth,
+    block/.style={draw, rectangle, rounded corners, minimum width=1.2cm, minimum height=0.8cm, fill=gray!10},  % Smaller blocks
+    sparse/.style={draw, rectangle, rounded corners, minimum width=1.2cm, minimum height=0.8cm, fill=blue!10},  % Smaller sparse blocks
+    dashedbox/.style={draw, dashed, thick, inner sep=0.2cm, rounded corners},  % Tighter dashed box
+    arrowstyle/.style={->, thick, >=Stealth}
+]
+    \node[block] (Xl) { $\boldsymbol{X}^\ell$};
+    \node[block, right=0.6cm of Xl] (f_l_dense) {$\boldsymbol{Y}^\ell$};
+    \node[block, right=0.6cm of f_l_dense] (f_l1) {$\boldsymbol{Y}^{\ell+1}$};
+    \node[draw=none, right=0.3cm of f_l1] (dots) {$\cdots$};
+    \node[block, right=0.3cm of dots] (f_lk) {$\boldsymbol{Y}^{\ell+K}$};
+    
+    \node[above=0.2cm of f_l1, align=center, font=\normalsize, text=black!70] (dense_label) {\textit{Dense Sub-Network}};
+    
+    \draw[arrowstyle] (Xl) -- (f_l_dense);
+    \draw[arrowstyle] (f_l_dense) -- (f_l1);
+    \draw[arrowstyle] (f_l1) -- (dots);
+    \draw[arrowstyle] (dots) -- (f_lk);
+    
+    \node[sparse, below=0.8cm of f_l_dense] (f_l_sparse) {$f^\ell$};
+    \node[sparse, right=0.6cm of f_l_sparse] (f_l1_sparse) {$f^{\ell+1}$};
+    \node[draw=none, right=0.3cm of f_l1_sparse] (dots_sparse) {$\cdots$};
+    \node[sparse, right=0.3cm of dots_sparse] (f_lk_sparse) {$f^{\ell+K}$};
+    
+    \node[below=0.2cm of f_l1_sparse, xshift=-0.8cm, align=center, font=\normalsize, text=black!70] (sparse_label) {\textit{Sparse Sub-Network}};
+    
+    \node[below=0.1cm of f_lk_sparse, xshift=-0.5cm, align=center, text=blue!70, font=\normalsize] (derivative_label) {$\nabla_{\widehat{\boldsymbol{W}}^\ell} \mathcal{L}(\widehat{\boldsymbol{W}}^\ell)$};
+    
+    \draw[arrowstyle, color=blue!70] (f_lk_sparse) -- (dots_sparse);
+    \draw[arrowstyle, color=blue!70] (dots_sparse) -- (f_l1_sparse);
+    \draw[arrowstyle, color=blue!70] (f_l1_sparse) -- (f_l_sparse);
+    
+    \node[left=0.4cm of f_l_sparse, align=center, font=\small, text=blue!70] (Wl) {$\widehat{\boldsymbol{W}}^\ell$};
+    
+    \node[dashedbox, fit=(f_l_sparse)(f_l1_sparse)(dots_sparse)(f_lk_sparse)(sparse_label)] {};
+    
+    \draw[arrowstyle, color=blue!70] (f_l_dense.south) -- (f_l_sparse.north);
+    \draw[arrowstyle, color=blue!70] (f_l1.south) -- (f_l1_sparse.north);
+    \draw[arrowstyle, color=blue!70] (f_lk.south) -- (f_lk_sparse.north);
+    
+    \draw[->, color=blue!70, thick] (f_l_sparse.north) to[out=135, in=45] (Wl.north);
+
+\end{tikzpicture}
+    \caption{Computional graph to minimize Eqn (\ref{multi}).}
+    \label{fig:gradient-flow}
+\end{wrapfigure}
+\noindent Each function $f^{\ell:\ell+k}$ can represent linear transformations and several non-linear operations, so while this is still a layer-wise problem depending only on $\widehat{\boldsymbol{W}}^\ell$, it is no longer a linear least squares problem. Hence, the Hessian $\boldsymbol{H}$ is no longer equal to $\boldsymbol{2} \boldsymbol{X}^{\ell} \boldsymbol{X}^{{\ell}^{\top}}$, and does not separate in general. To form the Hessian we need to compute all second-order partial derivates of $f^{\ell:\ell+k}$ for each $k = 0,..., K$ which is also not tractable for large networks. Nonetheless, we now present a tractable framework to optimize Eqn (\ref{multi}).
+
+\textbf{An Efficient Second-Order Optimization Framework to Optimize} Eqn (\ref{multi}) \textbf{.}
+Our $K$-step objective induces a discrete, nonlinear optimization problem which cannot necessarily be solved in a similar fashion to previous layer-wise methods \citep{Dong2017, aghasi2017nettrimconvexpruningdeep, OBC2022}. Thus, we adopt a similar framework to more global methods by minimizing a local quadratic approximation of our nonlinear objective. However, given the difficulty of forming the Hessian directly, we use Hessian-free optimization \citep{Martens2010DeepLV} to optimize the local quadratic approximation,  combined with a CG method that exploits sparsity for efficient updates. We now describe the key components of our framework.
+
+\textbf{Hessian-free Optimization.} Given the difficulty of forming the Hessian directly, we opt to use Hessian-free optimization \citep{Martens2010DeepLV} to optimize the local quadratic approximation. Hessian-free optimization is a second-order optimization method that avoids explicit computation of the Hessian matrix by exploiting the fact that while the Hessian matrix $\boldsymbol{H}$ is expensive to compute, the so-called Hessian product $\boldsymbol{H} \cdot \boldsymbol{\delta}$ can be computed as:
+\begin{align}\label{HVP}
+ \boldsymbol{H} \cdot\boldsymbol{\delta} =\lim _{\epsilon \rightarrow 0} \frac{\nabla \mathcal{L}(\boldsymbol{W}^{\ell}+\epsilon \boldsymbol{\delta} )-\nabla \mathcal{L}(\boldsymbol{W}^{\ell})}{\epsilon}   
+\end{align}
+which has a cost of 1 additional gradient evaluation when computed via finite differences. Note also that $\text{dim}(\boldsymbol{H} \cdot\boldsymbol{\delta}) = \text{dim}(\boldsymbol{W}^{\ell})$, meaning that the memory requirements of $\boldsymbol{H} \cdot\boldsymbol{\delta}$ are the same as for $\boldsymbol{W}^{\ell}$, unlike the Hessian which is usually far too large to fit on GPU memory. Moreover, since we operate on smaller localized sections of the network, from layer \( \ell \) to operation \( \ell+K \), our formulation is less susceptible to numerical error that can harm Hessian-free optimization in full network training approaches \citep{Martens2010DeepLV} .  This allows us to compute exact Hessian products as opposed to Fisher or Gauss-Newton approximations used in prior work on matrix-free training and pruning \citep{Martens2012TrainingDA, singh2020woodfisherefficientsecondorderapproximation, MFAC2021}.
+
+\textbf{Decoupling the Discrete and Continuous Problems.} In designing our algorithm for scalability to the largest networks, we develop an approach that is agnostic to the mask. Our approach can be integrated with other techniques for mask selection, or can stand alone with simple methods such as magnitude pruning.  Our alternative approach for optimizing the local quadratic approximation can be devised by recognizing Eqn (\ref{multi}) as a bi-level optimization problem:
+\begin{align}\label{bilevel}
+\min_{\boldsymbol{Z} \in \mathcal{Z}} \, \min_{\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell \in \mathbb{R}^{d_{\ell-1} \times d_\ell}} \, \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell) 
+= \sum_{k=0}^{K}\left\| \boldsymbol{Y}^{\ell+k} - f^{\ell:\ell+k}\left(\boldsymbol{X}^{\ell}, \widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell \odot \boldsymbol{Z}\right) \right\|_2^2
+\end{align}
+
+where $\boldsymbol{Z} \in \mathcal{Z}$ is a binary mask imposing the same sparsity pattern as $\mathcal{W}$ and $\boldsymbol{W}_{\boldsymbol{Z}}^\ell$ denotes the weights when the sparsity pattern is fixed. We omit the superscript $\ell$ from $\boldsymbol{Z}$ for simplicity, though the mask is typically chosen and applied layer-wise also. In our case, fixing \( \boldsymbol{Z} \) allows us to perform a second-order Taylor expansion around the masked solution for the weights:
+\begin{align}\label{sparse-taylor}
+\mathcal{L}(\widehat{\boldsymbol{W}}^\ell_{\boldsymbol{Z}} + \boldsymbol{\delta}_{\boldsymbol{Z}})
+\approx \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell) 
++ \nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell)^T \boldsymbol{\delta}_{\boldsymbol{Z}}
++ \frac{1}{2} \boldsymbol{\delta}_{\boldsymbol{Z}}^T \boldsymbol{H}_{\boldsymbol{Z}} \boldsymbol{\delta}_{\boldsymbol{Z}}
+\end{align}
+In this approximation, we consider perturbing the weights \( \widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell \) for a given mask \( \boldsymbol{Z} \), which induces sparsity in the solution. We can now design strategies to minimize Eqn (\ref{sparse-taylor}) which simplifies the problem dramatically compared to solving a coupled discrete and continuous problem.
+\textbf{Sparsity in the Second-Order Expansion.} The Taylor expansion in Eqn (\ref{sparse-taylor}) has several key properties related to the sparsity induced by the mask \(\boldsymbol{Z}\). First, consider the gradient \(\nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell) = \frac{\partial \mathcal{L}}{\partial \widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell}\). It follows that \((\nabla \mathcal{L})_i = 0\) wherever \(\boldsymbol{Z}_i = 0\). Similarly, the Hessian \(\boldsymbol{H}_{\boldsymbol{Z}}\) exhibits sparsity, with \(\left(\boldsymbol{H}_{\boldsymbol{Z}}\right)_{ij} = 0\) wherever \(\boldsymbol{Z}_i = 0\) or \(\boldsymbol{Z}_j = 0\). Therefore, the sparsity pattern of \(\boldsymbol{H}_{\boldsymbol{Z}}\) is the square of the sparsity pattern of \(\boldsymbol{Z}\). Specifically, if \(\boldsymbol{Z}\) has a sparsity level \(s \in [0,1]\), then the Hessian \(\boldsymbol{H}_{\boldsymbol{Z}}\) will have a sparsity level \(s^2\). Moreover, any row or column \((\boldsymbol{H}_{\boldsymbol{Z}})_i\) in the Hessian corresponding to \(\boldsymbol{Z}_i = 0\) will be entirely zero. We exploit this sparsity in \(\boldsymbol{H}_{\boldsymbol{Z}}\) to reduce the dimensionality of the system required to minimize Eqn (\ref{sparse-taylor}). It is important to note that unlike in the global approximation, we cannot assume \(\nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell) = 0\) in Eqn (\ref{sparse-taylor}). In the global case this is justified since they start by computing the gradient and Hessian of the fully dense network and each time make optimal weight adjustments. Whereas in our approximation, this would amount to making the assumption that the current weights are optimal for any mask \(\boldsymbol{Z}\), even after other weights have been deactivated. Thus the gradient term remains and minimizing Eqn (\ref{sparse-taylor}) with respect to the weight direction \(\boldsymbol{\delta}_{\boldsymbol{Z}}\) gives:
+\begin{align}
+\underset{\boldsymbol{\delta}_{\boldsymbol{Z}}}{\operatorname{min}} 
+\left\{ 
+\boldsymbol{\delta}_{\boldsymbol{Z}}^T \nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell) 
++ \frac{1}{2} \boldsymbol{\delta}_{\boldsymbol{Z}}^T \boldsymbol{H}_{\boldsymbol{Z}} \boldsymbol{\delta}_{\boldsymbol{Z}} 
+\right\}
+\end{align}
+Setting the gradient of the above quadratic equal to zero yields the following reduced linear system:
+\begin{align}\label{linsys}
+\boldsymbol{H}_{\boldsymbol{Z}} \cdot \boldsymbol{\delta}_{\boldsymbol{Z}} = -\nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell)    
+\end{align}
+The matrix \(\boldsymbol{H}_{\boldsymbol{Z}} \in \mathbb{R}^{m \times m}\) is the Hessian restricted to the active weights, where \(m\) represents the number of weights with \(\boldsymbol{Z}_i \neq 0\). Correspondingly, the gradient \(\nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell) \in \mathbb{R}^m\) includes only the components associated with these active weights. As a result, the weight update \(\boldsymbol{\delta}_{\boldsymbol{Z}} \in \mathbb{R}^m\) can be calculated exclusively for the active weights $\boldsymbol{\delta}_{\boldsymbol{Z}} = -\boldsymbol{H}_{\boldsymbol{Z}}^{-1} \nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell)$,
+which yields the celebrated Newton update \citep{Battiti1992}, but on a greatly reduced linear system.
+
+\textbf{CG Method.} Directly forming and inverting the Hessian \(\boldsymbol{H}_{\boldsymbol{Z}}\), even if sparse, is still not tenable. Here we exploit the fact that the left-hand side Hessian product in Eqn (\ref{linsys}) can be computed via Eqn (\ref{HVP}), and hence the corresponding linear system can be solved by querying the Hessian product within the CG method \citep{nocedal2006conjugate}. To ensure that the Hessian is positive definite, particularly when the objective function is not strongly convex, we add Levenberg-Marquardt regularization to the Newton update. This is a small dampening regularization to the Hessian diagonal, resulting in the following system:
+\begin{align}\label{FinalUpdate}
+(\boldsymbol{H}_{\boldsymbol{Z}} + \lambda I) \cdot \boldsymbol{\delta}_{\boldsymbol{Z}} = -\nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell),
+\end{align}
+
+This leads to Algorithm 1 to solve for the Newton update, which relies solely on products with the Hessian. Since each call to Eqn (\ref{HVP}) requires computing the gradient, the number of iterations in CG is a critical factor in determining the run-time of the overall algorithm. However, although CG can require up to \(m\) iterations to fully converge, it often makes significant progress in far fewer steps. In \autoref{sec:CG}, we provide an ablation study where we vary the maximum number of steps. CG can typically be safely terminated early after a reasonable number of iterations without significantly degrading the quality of the solution. Given the method for computing the Newton direction, the iterative scheme for performing Newton updates then involves minimizing the quadratic approximation of the loss function at each step to adjust the current solution:
+\begin{align*}
+\boldsymbol{\delta}_{\boldsymbol{Z}} & \approx \underset{\boldsymbol{\delta}_{\boldsymbol{Z}}}{\operatorname{argmin}}\left\{\boldsymbol{\delta}_{\boldsymbol{Z}}^\top \nabla \mathcal{L}\left(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell\right) + \frac{1}{2} \boldsymbol{\delta}_{\boldsymbol{Z}}^\top \boldsymbol{H}_{\boldsymbol{Z}} \boldsymbol{\delta}_{\boldsymbol{Z}}\right\} & \quad & \text{(via CG)} \\
+\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell & = \widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell + \alpha \boldsymbol{\delta}_{\boldsymbol{Z}} & \quad & \text{(Newton Update)}
+\end{align*}
+where \(\alpha\) is chosen to satisfy the Armijo sufficient decrease condition \citep{byrdSN}. We provide the full condition in \autoref{sec:armijo}. In practice, due to hardware memory constraints, we run a batched version of Newton descent called sub-sampled Newton descent. Instead of computing full gradients or Hessian products at once, we sample mini-batches of data to compute stochastic estimates of the gradient and Hessian products. Stochastic Newton descent is a common technique in the literature on second-order optimization methods and has been shown to exhibit strong convergence guarantees \citep{roostakhorasani2016subsamplednewtonmethodsi}. The only alteration we make compared to traditional stochastic Newton algorithms is that we sample Hessian products rather than the Hessian directly. The full algorithm is given in Algorithm 2. We remark that, in practice, the stochastic Newton algorithm typically converges in very few mini-batches. In \autoref{sec:SGD} and \autoref{sec:fisher}, we provide ablations where we compare SNOWS to Stochastic Gradient Descent (SGD) and the Fisher approximation to optimize Eqn (\ref{multi}), finding in both cases that SNOWS obtains better minima and converges faster. 
+
+\begin{wrapfigure}{R}{0.47\textwidth}
+\begin{minipage}{0.5\textwidth}
+\begin{algorithm}[H]
+\caption{CG Algorithm to Compute \(\boldsymbol{\delta}_{\boldsymbol{Z}}\)}
+\begin{algorithmic}[1]
+    \State \textbf{Input:} Fixed mask \( \boldsymbol{Z} \), sparse weights $\boldsymbol{W}^\ell_{\boldsymbol{Z}}$
+    \State Compute gradient \(\boldsymbol{g} \leftarrow \nabla \mathcal{L}(\widehat{\boldsymbol{W}}^\ell_{\boldsymbol{Z}})\)
+    \State Initialize \(\boldsymbol{\delta}_{\boldsymbol{Z}} \leftarrow \boldsymbol{0}\), \(\boldsymbol{r} \leftarrow -\boldsymbol{g}\), \(\boldsymbol{p} \leftarrow \boldsymbol{r}\)
+    \While{\(\|\boldsymbol{r}\| \geq \text{tol}\)}
+        \State Compute \(\boldsymbol{B}(\boldsymbol{p}) = \boldsymbol{H}_{\boldsymbol{Z}} \boldsymbol{p} + \lambda \boldsymbol{p}\) via Eqn (\ref{HVP})
+        \State \(\eta \leftarrow \frac{\boldsymbol{r}^\top \boldsymbol{r}}{\boldsymbol{p}^\top \boldsymbol{B}(\boldsymbol{p})}\)
+        \State Update \(\boldsymbol{\delta}_{\boldsymbol{Z}} \leftarrow \boldsymbol{\delta}_{\boldsymbol{Z}} + \eta \boldsymbol{p}\)
+        \State \(\boldsymbol{r}_{\text{new}} \leftarrow \boldsymbol{r} - \eta \boldsymbol{B}(\boldsymbol{p})\)
+        \State \(\gamma \leftarrow \frac{\boldsymbol{r}_{\text{new}}^\top \boldsymbol{r}_{\text{new}}}{\boldsymbol{r}^\top \boldsymbol{r}}\)
+        \State \(\boldsymbol{p} \leftarrow \boldsymbol{r}_{\text{new}} + \gamma \boldsymbol{p}\)
+        \State \(\boldsymbol{r} \leftarrow \boldsymbol{r}_{\text{new}}\)
+    \EndWhile
+    \State \textbf{return} \(\boldsymbol{\delta}_{\boldsymbol{Z}}\)
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+\pagebreak
+\textbf{A complete network pruning algorithm.} So far our descriptions have focused on the method for the layer-wise pruning problem. We now present a recap of the full layer-wise pruning process (Algorithm 2) as well as the algorithm to prune the full network (Algorithm 3). Our approach is flexible and can accommodate any choice of masks \(\{\boldsymbol{Z}^1, \dots, \boldsymbol{Z}^L\}\). Algorithm 3 uses a cascading mechanism for pruning layer by layer, where the next layer's input is adjusted after pruning the current layer. This follows the same core idea as Net-Trim \citep{aghasi2017nettrimconvexpruningdeep}. Unlike a parallel approach, where each layer is pruned independently, this method passes the output of one pruned layer as the input to the next. Specifically, after pruning a layer $\ell$ the input to the next layer is updated as \(\boldsymbol{X}^{\ell+1} = f^\ell(\boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell)\). This ensures that each layer’s optimization accounts for changes introduced via pruning in the previous layer.
+
+\noindent
+\begin{minipage}[t]{0.5\textwidth}  
+\begin{algorithm}[H]
+\caption{SNOWS: Layer-wise Optimization}
+\label{alg:layer-wise}
+\begin{algorithmic}[1]
+    \State \textbf{Input:}  Layer input $\boldsymbol{X}^\ell$, Dense weights $\boldsymbol{W}^\ell$, Sparse mask $\boldsymbol{Z}^\ell$ 
+
+    \State \small \textbf{Initialize:} 
+    \[        \widehat{\boldsymbol{W}}^\ell \leftarrow \boldsymbol{W}^\ell \odot \boldsymbol{Z}^\ell    \]
+
+    \normalsize
+    \For{$b = 1,...,B$}
+        \Comment{mini-batches}
+        \State \textbf{Compute $\boldsymbol{\delta}^{(b)}_{\boldsymbol{Z}^\ell}$ via Algorithm 1:}
+        \[
+            \boldsymbol{\delta}^{(b)}_{\boldsymbol{Z}^\ell} \approx \underset{\boldsymbol{\delta}}{\operatorname{argmin}} \left( \nabla \mathcal{L}^{(b)\top} \boldsymbol{\delta} + \frac{1}{2} \boldsymbol{\delta}^\top \boldsymbol{H}^{(b)}_{\boldsymbol{Z}^\ell} \boldsymbol{\delta} \right)
+        \]
+
+        \State \textbf{Update weights on the active set:}
+        \[
+            \widehat{\boldsymbol{W}}_{\boldsymbol{Z}^\ell}^\ell \leftarrow \widehat{\boldsymbol{W}}_{\boldsymbol{Z}^\ell}^\ell + \alpha^{(b)} \boldsymbol{\delta}^{(b)}_{Z^\ell}
+        \]
+    \EndFor
+    \State \textbf{Output:} Pruned weights $\widehat{\boldsymbol{W}}^\ell$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\noindent
+\begin{minipage}[t]{0.5\textwidth}  % Adjust the width slightly to reduce spacing
+\scriptsize  % Set font to smaller size
+\begin{algorithm}[H]
+\caption{SNOWS: Full Network Algorithm}
+\begin{algorithmic}
+\State \textbf{Input:} Network input $\boldsymbol{X}^0$, dense weights 
+$\{\boldsymbol{W}^1, \dots, \boldsymbol{W}^L\}$, sparse masks $\{ \boldsymbol{Z}^1, \dots, \boldsymbol{Z}^L \}$,
+layers $L$, horizon parameter $K$
+\For{$\ell = 0, \dots, L$}
+    \State \textbf{Find} $\widehat{\boldsymbol{W}}^\ell$ as:
+    \[
+\underset{\widehat{\boldsymbol{W}}^\ell}{\operatorname{argmin}}
+    \sum_{k=0}^{K(\ell)} 
+    \left\| \boldsymbol{Y}^{\ell+k} - 
+    f^{\ell:\ell+k}(\boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell \odot \boldsymbol{Z}^\ell) \right\|_2^2
+    \]
+    via Algorithm 2 with $K(\ell) = \min(K, K_{\text{max}})$.
+    
+    \State \textbf{Cascade inputs to the next layer:} \normalsize
+    \[
+    \boldsymbol{X}^{\ell+1} = f^\ell(\boldsymbol{X}^\ell, \widehat{\boldsymbol{W}}^\ell)
+    \]
+\EndFor
+\State \textbf{Output:} Pruned weights 
+$\{\widehat{\boldsymbol{W}}^1, \dots, \widehat{\boldsymbol{W}}^L\}$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+
+
+\section{Experiments on CNNs and Vision Transformers }
+
+\textbf{CNN Pruning.} CNNs are a fundamental architecture for computer vision tasks. In a CNN, the weight tensor \( \boldsymbol{W}^{\ell} \) has dimensions \( (d_{\text{out}} \times d_{\text{in}} \times k_h \times k_w) \). Here, \( d_{\text{out}} \) is the number of output channels (filters), \( d_{\text{in}} \) is the number of input channels, and \( k_h \) and \( k_w \) are the kernel height and width, respectively. We focus on a semi-structured sparsity pattern that has become more popular in recent years, called $N$:$M$ sparsity. This sparsity pattern requires that, for every (non-overlapping) block of $M$ weights, exactly $N$ weights are non-zero. For CNNs, the $N$:$M$ sparsity format requires that the weights be sparse along the input dimension \( d_{\text{in}} \) \citep{PoolPermutations}. We follow this convention throughout our experiments. We provide an example of an $N$:$M$ sparse convolutional kernel in \autoref{fig:conv_kernel} in \autoref{sec:N_M} and additional details on how we handled the $K$-step problem.
+
+\textbf{Experimental setup.} We evaluate SNOWS across several standard CNN benchmarks. We use the CIFAR-10, CIFAR-100, and ImageNet-1k datasets \citep{krizhevsky2009learning, Deng}, where we evaluate performance pruning the ResNet20 and ResNet50 architectures \citep{he2015deepresiduallearningimage} to $N$:$M$ sparsity. Additionally, for experiments on unstructured sparsity, we use the MobileNetV1 architecture \citep{howard2017mobilenetsefficientconvolutionalneural} to compare to previous studies on unstructured pruning. Due to the size of the original ImageNet dataset and the fact that one-shot methods require just a few thousand samples, we use the \href{https://www.kaggle. We use 10,000 samples from this dataset for evaluation, with 3,000 calibration samples being used for the $N$:$M$ sparsity experiments. For unstructured sparsity, we use 1,000 calibration samples to be consistent with the methods we compare with \citep{benbaki2023fastchitaneuralnetwork}. 
+
+\textbf{Results.} \textit{$N$:$M$ sparsity.} We first evaluate the impact of running SNOWS on top of existing mask selection techniques, OBC \citep{OBC2022}, SparseGPT \citep{frantar2023sparsegptmassivelanguagemodels}, and MP, that support $N$:$M$ sparsity. Adding SNOWS on top of other pruning techniques consistently improves performance across different methods and datasets, as shown in \autoref{tab:results_nm_sparse_benchmarks_with_snows}. This is evident in more challenging datasets like CIFAR-100 and ImageNet-1k, where other methods alone perform poorly, but the addition of SNOWS recovers close to the performance of the dense model. For 2:4 sparsity, the choice of mask selection technique has less of an impact on the results. Once SNOWS is applied, the methods achieve similar performance. However, at higher sparsity (1:4), more intensive mask selection techniques, particularly OBC, combined with SNOWS give the best results. We provide latency performance estimates for the $N$:$M$ patterns shown in \autoref{tab:results_nm_sparse_benchmarks_with_snows} in \autoref{sec:inference_speedup}. We also report hyperparameters for SNOWS, including the value of $K$, the dampening factor $\lambda$, and the CG tolerance in \autoref{sec:hyperparams}. 
+
+\textit{Unstructured Sparsity.} We also compare SNOWS against several popular one-shot pruning methods for unstructured sparsity, including Magnitude Pruning (MP) \cite{Gupta2024}, WoodFisher \citep{singh2020woodfisherefficientsecondorderapproximation}, Combinatorial Brain Surgeon \citep{yu2022combinatorialbrainsurgeonpruning}, and CHITA \citep{benbaki2023fastchitaneuralnetwork}, using the reported results from the CHITA paper for the competing methods. We remark that our base ResNet20 and MobileNetV1 models start from slightly different starting accuracies, thus we instead show the accuracy change compared to the baseline model in \autoref{fig:unstr} and provide the raw numbers in \autoref{sec:raw_nums}. Other one-shot methods optimize both the mask and weights, whereas SNOWS optimizes from a mask obtained through magnitude pruning. Despite this, SNOWS consistently outperforms existing one-shot approaches at all sparsity levels. In \autoref{sec:Retraining}, we provide additional retraining experiments for SNOWS and the best competing method in \autoref{fig:unstr}, FALCON \cite{meng2024falconflopawarecombinatorialoptimization}, showing SNOWS can further improve with some additional fine-tuning. We also provide additional run-time comparisons in \autoref{sec:run_time}.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.5\linewidth}
+        \centering
+        \small
+        \setlength{\tabcolsep}{2pt} % Reduce space between columns
+        \begin{tabular}{lcccccc}
+            \toprule
+            \textbf{Method} & \multicolumn{2}{c}{\shortstack{\textbf{CIFAR-10} \\ \textbf{(ResNet20)}}} & \multicolumn{2}{c}{\shortstack{\textbf{CIFAR-100} \\ \textbf{(ResNet50)}}} & \multicolumn{2}{c}{\shortstack{\textbf{ImageNet-1k} \\ \textbf{(ResNet50)}}} \\
+            \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+            & \textbf{1:4} & \textbf{2:4} & \textbf{1:4} & \textbf{2:4} & \textbf{1:4} & \textbf{2:4} \\
+            \midrule
+            Dense Model  & \multicolumn{2}{c}{92.58} & \multicolumn{2}{c}{77.40} & \multicolumn{2}{c}{75.71} \\
+            \cmidrule[0.5pt]{1-7} \cmidrule[0.2pt]{1-7}
+    
+            OBC 
+            & 76.77 & 90.98 
+            & 69.79 & 77.03 
+            & 46.29 & 73.74 \\
+            +SNOWS
+            & \textbf{89.09} & \textbf{91.86} 
+            & \textbf{76.05} & \textbf{77.11} 
+            & \textbf{66.33} & \textbf{73.87} \\
+    
+            \cmidrule{1-7}
+    
+            SparseGPT
+            & 11.06 & 86.05 
+            & 8.27 & 74.10 
+            & 1.61 & 69.46 \\
+            +SNOWS
+            & \textbf{86.10} & \textbf{91.94}  
+            & \textbf{73.66} & \textbf{77.10} 
+            & \textbf{49.32} & \textbf{73.59} \\
+    
+            \cmidrule{1-7}
+    
+            MP
+            & 10.99 & 63.45 
+            & 9.45 & 70.76 
+            & --- & 63.45 \\
+            +SNOWS
+            & \textbf{87.82} & \textbf{91.88}  
+            & \textbf{75.87} & \textbf{77.24} 
+            & \textbf{62.75} & \textbf{73.97} \\
+    
+            \bottomrule
+        \end{tabular}
+        \captionof{table}{Top-1 Test Accuracy integrating SNOWS with other popular mask selection algorithms for $N$:$M$ pruning.}
+        \label{tab:results_nm_sparse_benchmarks_with_snows}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.43\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figs/Unstr.png}
+        \caption{Comparing SNOWS to one-shot pruning methods for unstructured sparsity.}
+        \label{fig:unstr}
+    \end{minipage}
+\end{figure}
+
+
+\textbf{ViT pruning.} ViTs \citep{dosovitskiy2021imageworth16x16words} have become popular in computer vision by applying the Transformer architecture, originally designed for natural language processing, to image recognition tasks. In ViTs, an image is divided into a sequence of patches and embedded into a vector. These embeddings are then processed through blocks that consist of Multi-Head Self-Attention (MHSA) layers and Feed-Forward Neural Networks (FFNs). \citep{chen2022dynamicnmfinegrainedstructured} introduce a framework to make the intermediate attention outputs sparse, while leaving the weights for the query, key, and value as dense matrices. They justify this saying it is particularly hard to prune these weights prior to the attention operations, since it is not the raw weight values that are important, but their interactions within the attention mechanism. In contrast, we jointly optimize over these weights and across all heads, and hence we inherently account for the interactions between the pruned weights and how they influence the attention output. The detailed formulation is provided in \autoref{sec:raw_nums}. We also discuss how to prune the output projection module of the MHSA block and MLP layers within the FFN modules in the ViT, which are more standard formulations than for MHSA.
+
+\textbf{Experimental setup.} We evaluate SNOWS on ViT-B/16 and ViT-L/16 models, pruning them to $2$:$4$ sparsity on MiniImageNet-1k. Since methods for mask selection in $N$:$M$ sparsity do not extend easily to vision transformers, we employ MP to obtain the $2$:$4$ masks. 
+
+\textbf{Results.} As shown in \autoref{tab:vit_pruning_results}, SNOWS consistently outperforms MP, with higher Top-1 and Top-5 accuracies. When pruning the QKV, output projection, and MLP layers, SNOWS achieves a Top-1 accuracy of 76.57\% on ViT/B-16, significantly better than 70.89\% for MP. In \autoref{fig:Attention}, we plot the attention maps generated by the last attention layer of the dense model, the model pruned with MP and the model obtained when SNOWS is applied on top of MP. SNOWS better preserves the attention patterns in the dense model since it optimizes to preserve the activations via the reconstruction loss.  In \autoref{fig:validation_accuracy_curves}, we show this leads to superior transfer learning performance, where fine-tuning the classifier layer of a ViT pruned with SNOWS outperforms MP when transferring to smaller datasets.
+
+\begin{figure}[H]
+    \centering \includegraphics[width=0.9\linewidth]{figs/Attention_maps.jpg}
+    \caption{Visualizing (a) the original test image and attention maps from the last layer of (b) the dense VIT/B-16 model, (c) the model obtained by applying a 2:4 MP mask, and (d) the model after applying SNOWS on top of MP. SNOWS optimizes to reconstruct learned activations, preserving features learned by the dense network even in the deepest layers. }
+    \label{fig:Attention}
+
+\end{figure}
+\begin{minipage}{0.53\textwidth}
+    \centering
+    \smaller
+    \begin{tabular}{l l c}
+    \toprule
+    \textbf{Model} & \textbf{Pruned Layers} & \textbf{Top-1} \\
+    \midrule
+    \multirow{4}{*}{\shortstack{VIT/B-16\\Dense: 80.42\%}} % Using \shortstack
+    & \quad QKV (SNOWS) & \textbf{79.45} \\
+    & \quad QKV (MP) & 78.97 \\
+    \cmidrule{2-3}
+    & \quad QKV, Out, MLP (SNOWS) & \textbf{76.57} \\
+    & \quad QKV, Out, MLP (MP) & 70.89 \\
+    \midrule
+    \multirow{4}{*}{\shortstack[c]{VIT/L-16\\Dense: 84.17\%\\\vphantom{QKV}}} % Add \vphantom{QKV} for vertical centering
+    & \quad QKV (SNOWS) & \textbf{81.01} \\
+    & \quad QKV (MP) & 75.55 \\
+    \cmidrule{2-3}
+    & \quad MLP (SNOWS) & \textbf{69.71} \\
+    & \quad MLP (MP) & 0.28 \\
+    \bottomrule
+    \end{tabular}
+    \captionof{table}{Pruning VIT/B-16 and VIT-L-16 to 2:4 sparsity on ImageNet-1k in one shot. SNOWS uses the 2:4 mask obtained from MP. Note that no retraining is involved. We use $n=5,000$ calibration samples for VIT-B/16 and $n=20,000$ for VIT-L/16.}
+    \label{tab:vit_pruning_results}
+\end{minipage}
+\hfill
+\begin{minipage}{0.42\textwidth}
+    \centering    \includegraphics[width=0.9\textwidth]{figs/validation_accuracy_curves.pdf}
+    \captionof{figure}{Test accuracy fine-tuning the classifier layer of the 2:4 sparse VIT/B-16 on CIFAR-10 and CIFAR-100. }
+    \label{fig:validation_accuracy_curves}
+\end{minipage}
+
+
+\section{Limitations and conclusions}
+
+This work proposes a new layer-wise pruning framework, bridging between the local layer-wise and global pruning loss functions introduced in prior work. The objective of our modified loss function induces a harder non-linear optimization problem compared to the standard layer-wise formulation. We propose an efficient Hessian-free method for optimizing this objective, and demonstrate its efficiency on large-scale networks. There are several limitations to the proposed work: firstly, SNOWS does not do mask selection. This makes it flexible since it can integrate with existing techniques for mask selection, but using discrete optimization as is done in \citep{benbaki2023fastchitaneuralnetwork, meng2024falconflopawarecombinatorialoptimization} on the SNOWS loss function may lead to stronger results. Moreover, the method has little dependence on the computational modules involved in the reconstruction loss. As such, the framework could readily be extended to Text-to-Speech or Large Language Models. However, this would require specializing the formulation of the $K$-step problem as we did for ViT modules. 
+
+\bibliography{iclr2025_conference}
+\bibliographystyle{iclr2025_conference}
+
+
+
+
+\section{Appendix}
+
+
+
+\subsection{Primary Methods and Analysis}
+
+\subsubsection{Background on OBS and second-order approximations.}\label{sec:second_order}
+For pruning the network to achieve the sparsity target, the proposed OBS solution is to start from the dense weights $\boldsymbol{W}$ and minimize a second-order Taylor expansion of the loss function with respect to a perturbation of the weights:
+
+\begin{align}\label{Taylor}
+\min_{\boldsymbol{\delta}} \mathcal{L}(\boldsymbol{W} + \boldsymbol{\delta}) \approx \mathcal{L}(\boldsymbol{W}) + \nabla \mathcal{L}(\boldsymbol{W})^T \boldsymbol{\delta}+ \frac{1}{2} \boldsymbol{\delta}^T \cdot \boldsymbol{H} \cdot \boldsymbol{\delta}    
+\end{align}
+
+
+subject to the constraint that \( \boldsymbol{\delta}_q + \boldsymbol{W}_q = 0 \), i.e. a single weight \( \boldsymbol{W}_q \) is to be removed, with \( \nabla \mathcal{L}(\boldsymbol{W})= \partial \mathcal{L} / \partial \boldsymbol{W} \) being the gradient and \(\boldsymbol{H} = \partial^2 \mathcal{L} / \partial \boldsymbol{W}^2 \) being the Hessian matrix. The OBS procedure minimizes this approximation iteratively with respect to the weight perturbation \( \boldsymbol{\delta}  \), each time obeying the constraint that a single weight is removed. Assuming the dense network is fully trained, they argue \( \nabla \mathcal{L}(\boldsymbol{W}) = 0 \), which leaves just the second-order term involving \( \boldsymbol{\delta} \) in the approximation. Minimizing the resulting constrained formulation with respect to \( \boldsymbol{\delta} \) using Lagrange multipliers yields exact saliency scores for each weight \( \boldsymbol{W}_q \), given as \( \rho_q = -\frac{\boldsymbol{W}_q}{\left[\boldsymbol{H}^{-1}\right]_{q q}} \boldsymbol{H}^{-1} \boldsymbol{e}_q \) as well as a method for optimally readjusting the remaining weights \( \boldsymbol{\delta} = -\frac{\boldsymbol{W}_q}{\left[\boldsymbol{H}^{-1}\right]_{q q}} \boldsymbol{H}^{-1} \boldsymbol{e}_q \), where $\boldsymbol{e}_q$ is the standard basis with all zeros except the $q$-th element which is one. Here, $\rho_q$ is a solution to the discrete problem (a ranking among all weights) while $\boldsymbol{\delta}$ is a solution to the continous problem (an optimal weight readjustment for weights other than $q$, when $q$ is removed).
+
+\subsubsection{Motivation for the SNOWS Loss Function}\label{sec:motivation}
+
+The original motivation of the layer-wise reconstruction objective given in \cite{NIPS2017_c5dc3e08} was to minimize the impact of pruning at each layer on the final network output. They show that the error $\tilde{\varepsilon}^L = \frac{1}{\sqrt{n}} || \boldsymbol{Y}^L - \widehat{\boldsymbol{Y}}^L||_F$ of the entire pruned network at the final layer $L$ is bounded as:
+
+$$
+\tilde{\varepsilon}^L \leq \sum_{\ell=1}^{L-1} \left( \prod_{r=\ell+1}^L \left| \left |\widehat{\boldsymbol{W}}^r \right|\right|_F \sqrt{\delta E^\ell} \right) + \sqrt{\delta E^L}
+$$
+
+where $\delta E^\ell$ is the layer-wise error between the outputs at layer $\ell$, i.e., $\delta E^\ell = \frac{1}{n} \left| \left| \boldsymbol{X}^\ell \boldsymbol{W}^\ell - \widehat{\boldsymbol{X}}^\ell \widehat{\boldsymbol{W}}^\ell \right|\right|_F^2$. In other words, the difference between the final output of the dense and pruned network is bounded by a product of the layer-wise errors. This means if the layer-wise errors can be kept small, the overall error should be controlled. However, there is an interesting subtlety to how the errors propagate. Say we are pruning layer $\ell$. It would seem as though the contribution by layer $\ell$ to $\tilde{\varepsilon}^L$ is confined to $\delta E^\ell$. However, notice that
+$$
+\widehat{\boldsymbol{X}}^{\ell+1} = \widehat{\boldsymbol{Y}}^{\ell} = f^{\ell}(\widehat{\boldsymbol{X}}^{\ell}, \widehat{\boldsymbol{W}}^{\ell})
+$$
+
+So pruning at the current layer changes the input at the next layer and moreover at all subsequent layers since $\widehat{\boldsymbol{X}}^{\ell+k} = \widehat{\boldsymbol{Y}}^{\ell+k-1} = f^{\ell+k-1}(\widehat{\boldsymbol{X}}^{\ell+k-1}, \widehat{\boldsymbol{W}}^{\ell+k-1})$, for all $k = 1, \dots, L - \ell$. 
+
+So after pruning layer $\ell$, we can observe the expression for the error in the subsequent layers 
+
+$$
+\delta E^{\ell+k} = \frac{1}{n} \left| \left| \boldsymbol{X}^{\ell+k} \boldsymbol{W}^{\ell+k} - \widehat{\boldsymbol{X}}^{\ell+k} \widehat{\boldsymbol{W}}^{\ell+k} \right| \right|_F^2
+$$
+
+At the time of pruning layer $\ell$, $\boldsymbol{W}^{\ell+k} = \widehat{\boldsymbol{W}}^{\ell+k}$, since these weights have not yet been pruned, but notice that already $\boldsymbol{X}^{\ell+k} \neq \widehat{\boldsymbol{X}}^{\ell+k}$, since our pruning decision at layer $\ell$ has affected all layers after it. The error term for the future layers becomes 
+
+$$
+\delta E^{\ell+k} = \frac{1}{n} \left| \left|(\boldsymbol{X}^{\ell+k} - \widehat{\boldsymbol{X}}^{\ell+k}) \boldsymbol{W}^{\ell+k} \right|\right|_F^2
+$$
+
+Hence the error at the future layers is determined by the magnitude of the difference $\boldsymbol{X}^{\ell+k} - \widehat{\boldsymbol{X}}^{\ell+k}$ induced by pruning layer $\ell$. Our formulation, by minimizing $\sum_{k=0}^K| | \mathbf{Y}^{\ell+k} -\widehat{\mathbf{Y}}^{\ell+k}||_F^2= \sum_{k=0}^K||\mathbf{X}^{\ell+k+1} -\widehat{\mathbf{X}}^{\ell+k+1}||_F^2$ can be interpreted as directly minimizing the subsequent error terms $\sum_{k=0}^K \delta E^{\ell+k}$ during the pruning of layer $\ell$ as opposed to only $\delta E^\ell$.
+
+\subsubsection{Armijo Sufficient Decrease Condition.}\label{sec:armijo}
+
+In the Newton descent procedure, we use the Armijo decrease condition to determine an appropriate step size $\alpha$ that ensures a sufficient decrease in the loss function:
+
+\[
+\alpha = \underset{\alpha \leq 1}{\operatorname{argmax}} \; \alpha \quad \text{s.t.} \quad \mathcal{L}\left(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell + \alpha \boldsymbol{\delta}_{\boldsymbol{Z}}\right) \leq \mathcal{L}\left(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell\right) + \alpha \beta\, \boldsymbol{\delta}_{\boldsymbol{Z}}^\top \nabla \mathcal{L}\left(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}^\ell\right),
+\]
+
+The parameter $\beta$ is a small constant. We use $\beta = 1 \times 10^{-5}$.
+
+
+
+
+\subsubsection{A toy example showing the advantage of Newton's method over SGD under varying curvature.} 
+Consider the following toy problem:
+
+\begin{align}\label{toy}
+  \text{min}_{\boldsymbol{w}}\mathcal{L}(\boldsymbol{w}) = \frac{1}{2} \left( \lambda_1 w_1^2 + \lambda_2 w_2^2 \right)  
+\end{align}
+
+where \( \boldsymbol{w} = [w_1, w_2]^T \) is the weight vector and \( \lambda_1, \lambda_2 > 0 \) are constants representing sensitivity of the loss (curvature) along the \( w_1 \) and \( w_2 \) axes, respectively. Now consider a situation where $\lambda_1, \lambda_2$ are very different. For our example, we choose \( \lambda_1 = 1 \) (low curvature along \( w_1 \)) and \( \lambda_2 = 100 \) (high curvature along \( w_2 \)). The condition number of the problem is \( \kappa = \lambda_{\text{max}}/\lambda_{\text{min}} =\lambda_2 / \lambda_1 = 100 \). This creates an ill-conditioned problem with a significant difference in curvature between the two directions. Now compare the convergence behavior for Newton and SGD. For SGD the update is:
+\[
+\boldsymbol{w}^{(k+1)} = \boldsymbol{w}^{(k)} - \eta \nabla \mathcal{L}(\boldsymbol{w}^{(k)}),
+\]
+
+where \( \eta \) is the learning rate and $
+\nabla \mathcal{L}(\boldsymbol{w}) = \begin{bmatrix}
+\lambda_1 w_1 \\
+\lambda_2 w_2
+\end{bmatrix}$. The updates can be written as:
+
+\[
+\begin{cases}
+w_1^{(k+1)} = w_1^{(k)} - \eta \lambda_1 w_1^{(k)} = (1 - \eta \lambda_1) w_1^{(k)}\\
+w_2^{(k+1)} = w_2^{(k)} - \eta \lambda_2 w_2^{(k)} = (1 - \eta \lambda_2) w_2^{(k)}
+\end{cases}
+\]
+
+To ensure convergence, the learning rate needs to satisfy \( 0 < \eta < \frac{2}{\lambda_{\max}} \) e.g. see \citep{cohen2022gradientdescentneuralnetworks} for a detailed convergence analysis. With \( \lambda_{\max} = \lambda_2 = 100 \), a natural choice is \( \eta = 0.01 \). This implies:
+ \[
+  w_1^{(k+1)} = (1 - \eta \lambda_1) w_1^{(k)} = (1 - 0.01 \times 1) w_1^{(k)} = 0.99 w_1^{(k)}.
+  \]
+  This means \( w_1 \) decreases by 1\% per iteration, leading to slow convergence along this direction due to the low curvature. Namely, rewriting the update formula:
+
+\[
+w_1^{(k)} = (0.99)^k w_1^{(0)}.
+\]
+
+The optimal solution is clearly $w_1 = 0$. Assuming $w_1^{(0)} =1$, we can find the number of iterations \( k \) required for \( w_1^{(k)} \) to be less than a small threshold e.g. \( \epsilon =1e^{-6}\):
+
+\[
+w_1^{(k)} \leq \epsilon \implies 
+k \geq \frac{\ln(10^{-6})}{\ln(0.99)} \approx 1,375 \text{ iterations}.
+\]
+
+  
+  
+  In contrast, along $w_2$:
+
+  \[
+  w_2^{(k+1)} = (1 - \eta \lambda_2) w_2^{(k)} = (1 - 0.01 \times 100) w_2^{(k)} = 0w_2^{(k)} = 0.
+  \]
+
+  Here, \( w_2 \) converges to the optimum in one iteration. Thus, importantly overall convergence is dominated by the slowest direction (low curvature along \( w_1 \)). Now consider Newton's method on the same problem:
+
+  \[
+\boldsymbol{w}^{(k+1)} = \boldsymbol{w}^{(k)} - \boldsymbol{H}^{-1} \nabla \mathcal{L}(\boldsymbol{w}^{(k)}),
+\]
+
+where the Hessian is $
+\boldsymbol{H} = \nabla^2 \mathcal{L}(\boldsymbol{w}) = \begin{bmatrix}
+\lambda_1 & 0 \\
+0 & \lambda_2
+\end{bmatrix}$ and its inverse is: $\boldsymbol{H}^{-1} = \begin{bmatrix}
+\frac{1}{\lambda_1} & 0 \\
+0 & \frac{1}{\lambda_2}
+\end{bmatrix}$
+
+The updates become:
+
+\[
+\begin{cases}
+w_1^{(k+1)} = w_1^{(k)} - \frac{1}{\lambda_1} \lambda_1 w_1^{(k)} = 0, \\
+w_2^{(k+1)} = w_2^{(k)} - \frac{1}{\lambda_2} \lambda_2 w_2^{(k)} = 0.
+\end{cases}
+\]
+
+Thus both \( w_1 \) and \( w_2 \) reach the minimum in one iteration, regardless of the condition number \( \kappa \).  Newton's method overcomes the issue of varying curvature by adjusting its updates according to the inverse of the Hessian. Rescaling the gradient components means it takes appropriate sized steps in each direction, i.e. larger steps in low-curvature directions and smaller steps in high-curvature ones. This results in convergence to the minimum in a single iteration for both directions, regardless of the condition number $\kappa$. The trajectories are shown in \autoref{fig:toy_problem}.
+
+
+\begin{figure}[H]
+
+        \centering        \includegraphics[width=0.8\linewidth]{figs/toy_problem.png}
+        \caption{Comparison of convergence rates between SGD and Newton's method on the toy optimization problem in Eqn (\ref{toy}) with highly varying curvature (\(\lambda_1 = 1\), \(\lambda_2 = 100\)). While Newton's method achieves convergence in a single iteration, SGD requires approximately 1,375 iterations due to the high condition number \(\kappa = 100\).}
+        \label{fig:toy_problem}
+\end{figure}
+
+
+
+\subsection{Ablation Studies}
+
+\subsubsection{Comparing SGD versus Newton's method to optimize Eqn (\ref{multi}).} \label{sec:SGD}
+
+ In \autoref{fig:SGD_Newton}, we compare the time required to optimize the first layer of ResNet20 on CIFAR-10 and ResNet50 on ImageNet-1k, both using a 2:4 mask \(\boldsymbol{Z}\) obtained via magnitude pruning. The Stochastic Newton algorithm, when applied to optimize \(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}\), makes significantly faster progress compared to SGD, especially as problem size increases. In the section that follows we provide detailed loss trajectories for both methods on this same problem. Our results indicate that Newton's method moves much farther from the starting solution with each step, whereas SGD progresses much more slowly and generally does not move far from the starting solution. We also provide a more detailed discussion on possible reasons  why SGD converges slowly in this setting.
+\begin{figure}[H]
+        \centering        \includegraphics[width=0.7\linewidth]{figs/combined_loss_trajectory_comparison_log_scale.pdf}
+        \caption{Comparing Newton's method and SGD with minimizing Eqn (\ref{multi}) with $K=10$, for the first layer in the model. The solution starts with a 2:4 sparse mask obtained via magnitude pruning. Newton's method converges very quickly and requires less time to solve the $K$-step reconstruction problem. SGD is trained for 2000 steps whereas Newton converges in less than 10.}
+        \label{fig:SGD_Newton}
+\end{figure}
+
+The empirical success of SGD in training neural networks from scratch has been very well-demonstrated \citep{hardt2016trainfastergeneralizebetter}. Several papers have remarked that this success seems to owe in part to the effect of overparameterization \citep{neyshabur2018understandingroleoverparametrizationgeneralization}, where neural networks are trained with more parameters than are necessary for a given task. At the same time, empirical work on sparse fine-tuning has shown that fine-tuning a sparse network with SGD often \textit{does not} lead to good performance \citep{renda2020comparingrewindingfinetuningneural}. Other work has found that training a sparse network from scratch with no knowledge of a good initialization is likewise difficult \citep{evci2020difficultytrainingsparseneural}. Our empirical findings in \autoref{fig:SGD_Newton} corroborate this fact, suggesting SGD performs poorly and converges slowly on the optimization problem defined in Eqn (\ref{bilevel}). In  \autoref{fig:SGD_Newton_Res20_Res50} show the weight trajectories for the same problem, finding that SGD does not move far from the starting solution, even after thousands of iterations. We hypothesize that SGD may perform poorly in the sparse setting due to uneven curvature (loss sensitivity) in the coordinates, which is also present in the overparameterized setting but may become exaggerated by the lack of redundancy in sparse networks. In the next section, we show a small toy example comparing SGD and Newton's method for a two-dimensional quadratic optimization problem where the weight directions have varying curvature. The intuition is that SGD must choose a learning rate no larger than the largest eigenvalue of the Hessian since if it is larger, then loss will diverge on that direction. In overparameterized problems, it may be possible to get away with having a long-tail of low curvature directions that take more time to converge. However, in sparse models redundancy is significantly reduced, and this means the optimizer must be more sensitive to each direction. In such cases, choosing a learning rate that works well for all directions becomes increasingly difficult, as there are fewer parameters to absorb the mismatch between the learning rate and the curvature. 
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/loss_surface_2d_res20.pdf}
+        \subcaption{ResNet20: Loss surface for SGD (left) and Newton (right).}
+    \end{minipage}
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/loss_surface_2d_res50.pdf}
+        \subcaption{ResNet50: Loss surface for SGD (left) and Newton (right).}
+    \end{minipage}
+
+
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/relative_distance_res20.pdf}
+        \subcaption{ResNet20: Relative distance between full weight matrix and starting weights.}
+    \end{minipage}
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/relative_distance_res50.pdf}
+        \subcaption{ResNet50: Relative distance between full weight matrix and starting weights.}
+    \end{minipage}
+
+    \caption{Optimization of the first layer for both ResNet20 and ResNet50 using SGD and stochastic Newton from \autoref{fig:SGD_Newton}. \textbf{Top row:} Loss trajectories for 2000 iterations of SGD versus respectively 6 (CIFAR-10) and 13 (ImageNet-1k) iterations of stochastic Newton for the two largest starting weights. \textbf{Bottom row:} Relative distance between the full weight matrix and the starting weight matrix for both methods. The relative distance is defined as $\text{dist}(\boldsymbol{
+W}_t) = \frac{\|\boldsymbol{W}_t - \boldsymbol{W}_0\|^2}{\|\boldsymbol{W}_0\|^2}$
+    where \( \boldsymbol{W}_t \) are the weights at iteration \( t \) and \( \boldsymbol{W}_0 \) are the initial weights.}
+    \label{fig:SGD_Newton_Res20_Res50}
+\end{figure}
+
+\subsubsection{Using True Hessian versus Fisher Approximation to optimize Eqn (\ref{multi})}\label{sec:fisher}
+
+We also observe a significant performance improvement when using the true Hessian over the Fisher approximation. Specifically, we replace the Hessian in Eqn \ref{sparse-taylor} with the Fisher approximation $
+F = \frac{1}{N} \sum_{i=1}^N \nabla_{\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}} \mathcal{L}_i(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}) \nabla_{\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}} \mathcal{L}_i({\widehat{\boldsymbol{W}}_{\boldsymbol{Z}}})^\top$ and employ the updates $\boldsymbol{\delta}_{\boldsymbol{Z}} = - F^{-1} \nabla \mathcal{L}(\widehat{\boldsymbol{W}}_{\boldsymbol{Z}})$. The main advantage of employing the true Hessian via the Hessian-free approach is the accelerated speed of convergence. As illustrated in \autoref{fig:newton_vs_fisher}, we plot the objective value when using the Fisher approximation versus the exact Hessian-free steps for all layers in ResNet20 and the first three layers in ResNet50. The results indicate that using Newton's method instead of the Fisher approximation leads to much faster convergence, not only in terms of iterations but also in overall runtime. For the larger ResNet50 networks, running the Fisher approximation to convergence is actually prohibitive, and can take almost half an hour per layer for even the first layers of ResNet50.
+
+\begin{figure}[H] \centering \begin{subfigure}{0.6\linewidth} \centering \includegraphics[width=\linewidth]{loss_plot_cifar10.png} \caption{ResNet20} \label{fig:resnet20} \end{subfigure} \hfill \begin{subfigure}{0.35\linewidth} \centering \includegraphics[width=\linewidth]{figs/loss_plots_resnet50_layers.png} \caption{ResNet50} \label{fig:resnet50} \end{subfigure} \caption{Comparison of Newton's method and Fisher approximation for all layers in ResNet20 and the first three layers of ResNet50. } \label{fig:newton_vs_fisher} \end{figure}
+
+
+\subsubsection{Effect of the number of CG iterations}\label{sec:CG}
+
+The plot in \autoref{fig:CG_iterations} shows the impact of varying the maximum number of CG iterations in Algorithm 1 on the reconstruction loss across different layers and models. As expected, decreasing the maximum CG iterations generally results in slower progress per iteration, as lower caps (e.g., CG 5) reduce the loss at a slower rate compared to higher iteration limits (e.g., CG 500). However, despite this slower per-iteration progress, CG with fewer iterations often converges faster overall, as the algorithm compensates by taking a more iterative approach, covering more batches quickly while solving the second order approximation for each batch more approximately. This means that, although each step is smaller, CG with lower iteration caps refines the solution more frequently, leading to comparable or even faster convergence relative to higher iteration caps. 
+
+\begin{figure}[H]
+ 
+        \centering        \includegraphics[width=\linewidth]{figs/cg_iterations_plot.pdf}
+        \caption{Normalized reconstruction loss starting from the masked dense weights. The plot shows the effect of varying the maximum CG iterations in Algorithm 1. While fewer iterations result in slower progress per step, they often lead to faster overall convergence by refining the solution more frequently.}
+        \label{fig:CG_iterations}
+\end{figure}
+
+ \subsubsection{Effect of the parameter $K$ on run-time}\label{sec:run_time_K}
+
+We provide in \autoref{tab:runtime_with_K} a comparison of (1) run-time in minutes for pruning the entire network and (2) peak GPU memory usage, as the parameter $K$ varies. In practice $K$ should be chosen as large as possible while not exceeding available GPU memory or run-time expectations. In practice, moderate values of $K$ can lead to good performance while having very small run-times. \\
+
+\begin{table}[H]
+\begin{tabular}{ccccccc}
+\hline
+\small
+& \multicolumn{2}{c}{\textbf{ResNet20 (CIFAR-10)}} & \multicolumn{2}{c}{\textbf{ResNet50 (CIFAR-100})} & \multicolumn{2}{c}{\textbf{ResNet50 (ImageNet-1k)}} \\
+\cline{2-3} \cline{4-5} \cline{6-7}
+$K$ & Time & Peak Memory (GB) & Time & Peak Memory (GB) & Time & Peak Memory (GB) \\
+\hline
+0 & 0.7 & 2.2 & 11.3 & 8.7 & 10.5 & 8.6 \\
+1 & 0.8 & 2.5 & 10.7 & 10.8 & 12.9 & 15.1 \\
+3 & 1.6 & 2.8 & 11.1 & 11.4 & 25.2 & 17.3 \\
+5 & 2.3 & 3.3 & 11.4 & 12.1 & 39.7 & 25.8 \\
+10 & 4.8 & 3.3 & 13.3 & 15.5 & 94.8 & 38.3 \\
+20 & 8.1 & 4.3 & 16.1 & 21.9 & 184.1 & 54.0 \\
+30 & 11.2 & 4.9 & 17.0 & 24.9 & 289.5 & 66.9 \\
+40 & 11.8 & 5.1 & 18.8 & 28.1 & OOM & OOM \\
+60 & $>\text{max}\: K$ & $>\text{max}\: K$ & 20.3 & 31.6 & OOM & OOM \\
+\hline
+\end{tabular}
+\caption{Effect of varying $K$ on the run-time and peak memory usage of the full SNOWS algorithm. The run-time shown is in minutes.}
+\label{tab:runtime_with_K}
+\end{table}
+
+
+
+
+\subsection{Implementation and Experimental details}
+\subsubsection{$N$:$M$ Sparsity in CNNs}\label{sec:N_M}
+
+$N$:$M$ sparsity enforces a fine-grained sparsity pattern along specific dimensions of the weight tensor. In the context of convolutional neural networks, we apply $N$:$M$ sparsity along the input dimension \( d_{\text{in}} \) while keeping the other dimensions fixed. This means that, for each output channel \( n \) and each spatial location in the kernel \( (i, j) \), we group the weights \( \boldsymbol{W}^{\ell}_{n, G, i, j} \) along the input channels into groups $G$ of \( M \) consecutive weights such that $\left\| \boldsymbol{W}^{\ell}_{n, G, i, j} \right\|_0 = N$. Within each group, exactly \( N \) weights are non-zero, and the remaining \( M - N \) weights are zeroed out. An example for 2:4 sparsity is shown in \autoref{fig:conv_kernel}.
+
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[scale=0.4]
+
+    \draw[step=1cm, black!70] (0, 0) grid (7, 8);
+
+    \node at (3.5, 8.5) {$d_{\text{out}} \times k_h \times k_w$};
+
+    \fill[blue!30] (0, 7) rectangle (1, 8); % X
+    \fill[blue!30] (2, 7) rectangle (3, 8); % X
+    \fill[blue!30] (5, 7) rectangle (6, 8); % X
+
+    \fill[blue!30] (2, 6) rectangle (3, 7); % X
+    \fill[blue!30] (3, 6) rectangle (4, 7); % X
+    \fill[blue!30] (4, 6) rectangle (5, 7); % X
+    \fill[blue!30] (6, 6) rectangle (7, 7); % X
+
+    \fill[blue!30] (0, 5) rectangle (1, 6); % X
+    \fill[blue!30] (1, 5) rectangle (2, 6); % X
+    \fill[blue!30] (3, 5) rectangle (4, 6); % X
+
+    \fill[blue!30] (1, 4) rectangle (2, 5); % X
+    \fill[blue!30] (4, 4) rectangle (5, 5); % X
+    \fill[blue!30] (5, 4) rectangle (6, 5); % X
+    \fill[blue!30] (6, 4) rectangle (7, 5); % X
+
+    \fill[blue!30] (0, 3) rectangle (1, 4); % X
+    \fill[blue!30] (3, 3) rectangle (4, 4); % X
+    \fill[blue!30] (5, 3) rectangle (6, 4); % X
+    \fill[blue!30] (6, 3) rectangle (7, 4); % X
+
+    \fill[blue!30] (0, 2) rectangle (1, 3); % X
+    \fill[blue!30] (1, 2) rectangle (2, 3); % X
+    \fill[blue!30] (2, 2) rectangle (3, 3); % X
+    \fill[blue!30] (4, 2) rectangle (5, 3); % X
+
+    \fill[blue!30] (1, 1) rectangle (2, 2); % X
+    \fill[blue!30] (3, 1) rectangle (4, 2); % X
+    \fill[blue!30] (5, 1) rectangle (6, 2); % X
+
+    \fill[blue!30] (2, 0) rectangle (3, 1); % X
+    \fill[blue!30] (4, 0) rectangle (5, 1); % X
+    \fill[blue!30] (6, 0) rectangle (7, 1); % X
+
+    \draw[thick, ->] (7.2, 8) -- (7.2, 0) node[below] {$d_{\text{in}}$};
+
+    \foreach \x in {0, 1, 2, 3, 4, 5, 6} {
+        \foreach \y in {0, 1, 2, 3, 4, 5, 6, 7} {
+            \draw[thick] (\x, \y) rectangle (\x+1, \y+1);
+        }
+    }
+
+    \draw[red, thick] (-0.1, -0.1) rectangle (1.1, 4.1);
+
+    \end{tikzpicture}
+    \caption{An example of a 2:4 sparse convolutional kernel.}
+    \label{fig:conv_kernel}
+\end{figure}
+
+\subsubsection{$K$-step layer-wise reconstruction problem in CNNs.} Each convolutional layer typically involves several linear and non-linear operations. The exact operations can differ across architectures, but we present an example for the ResNet architecture \citep{he2015deepresiduallearningimage}. The functions in Eqn (\ref{multi}), which captures the operations at layer \( \ell \), can be mathematically defined as $f^\ell(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell) = \text{Conv}(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell)$
+ refers to the convolution operation. The Conv operation can be written as a linear operation so for $K=0$ this problem reduces to the layer-wise reconstruction problem in \autoref{multi}. For larger $K$, say $K=1$, we define :
+ $$f^{\ell:\ell+1}(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell) = \text{ReLU}\left(\text{BN}\left(f^\ell(\boldsymbol{X}^\ell, \boldsymbol{W}^\ell))\right) + \boldsymbol{X}^\ell\right)$$ where $\text{BN}$ refers to batch normalization, $\text{ReLU}(\boldsymbol{M}) = \text{max}(\boldsymbol{M}, \boldsymbol{0})$ and the addition of $\boldsymbol{X}^\ell$ is the residual connection.  For $K=1$, we directly jump to reconstruct the output of the ReLU since BN is a small linear rescaling applied to the convolution, so we do not directly reconstruct its output and likewise for residual connections, though these are inherently absorbed in the reconstruction at the output of the ReLU.
+
+ 
+\subsubsection{Raw numbers for unstructured comparisons}\label{sec:raw_nums}
+For \autoref{fig:unstr}, we use the benchmarking numbers from \citep{benbaki2023fastchitaneuralnetwork} and \citep{meng2024falconflopawarecombinatorialoptimization}. However, their dense versions of ResNet20 and MobileNetV1 have slightly different starting accuracy than ours. This the reason we report relative accuracy to the baseline in \autoref{fig:unstr}.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\multicolumn{7}{c}{\textbf{ResNet20 on CIFAR10}} \\
+\midrule
+\textbf{Sparsity} & \multicolumn{5}{c}{\textbf{Baseline Accuracy: 91.36\%}} & \textbf{Baseline: 92.56\%} \\
+\cmidrule(lr){2-6} \cmidrule(lr){7-7}
+& \textbf{MP} & \textbf{WF} & \textbf{CBS} & \textbf{CHITA} & \textbf{FALCON} & \textbf{SNOWS} \\
+\midrule
+0.5 & 88.44 (-2.92) & 90.23 (-1.13) & 90.58 (-0.78) & 90.60 (-0.76) & 90.87 (-0.49) & 92.28 (-0.28) \\
+0.6 & 85.24 (-6.12) & 87.96 (-3.40) & 88.88 (-2.48) & 89.22 (-2.14) & 89.67 (-1.69) & 91.90 (-0.66) \\
+0.7 & 78.79 (-12.57) & 81.05 (-10.31) & 81.84 (-9.52) & 84.12 (-7.24) & 84.42 (-6.94) & 90.87 (-1.69) \\
+0.8 & 54.01 (-37.35) & 62.63 (-28.73) & 51.28 (-40.08) & 57.90 (-33.46) & 65.17 (-26.19) & 87.82 (-4.74) \\
+0.9 & 11.79 (-79.57) & 11.49 (-79.87) & 13.68 (-77.68) & 15.60 (-75.76) & 19.14 (-72.22) & 64.80 (-27.76) \\
+\midrule
+\multicolumn{7}{c}{\textbf{MobileNetV1 on ImageNet-1K}} \\
+\midrule
+\textbf{Sparsity} & \multicolumn{5}{c}{\textbf{Baseline Accuracy: 71.95\%}} & \textbf{Baseline: 70.89\%} \\
+\cmidrule(lr){2-6} \cmidrule(lr){7-7}
+& \textbf{MP} & \textbf{WF} & \textbf{CBS} & \textbf{CHITA} & \textbf{FALCON} & \textbf{SNOWS} \\
+\midrule
+0.5 & 62.61 (-9.34) & 68.91 (-3.04) & 70.21 (-1.74) & 70.42 (-1.53) & 70.35 (-1.60) & 70.10 (-0.79) \\
+0.6 & 41.94 (-30.01) & 60.90 (-11.05) & 66.37 (-5.58) & 67.30 (-4.65) & 67.18 (-4.77) & 68.70 (-2.19) \\
+0.7 & 6.78 (-65.17) & 29.36 (-42.59) & 55.11 (-16.84) & 59.40 (-12.55) & 58.40 (-13.55) & 65.28 (-5.61) \\
+0.8 & 0.11 (-71.84) & 0.24 (-71.71) & 16.38 (-55.57) & 29.78 (-42.17) & 25.82 (-46.13) & 54.83 (-16.06) \\
+\bottomrule
+\end{tabular}
+\caption{Raw accuracy (\%) with absolute accuracy change (in brackets) compared to the baseline. The baseline accuracies are shown above the methods.}
+\label{tab:raw_nums}
+\end{table}
+
+
+
+
+
+\subsubsection{Retraining experiments}\label{sec:Retraining}
+
+In \autoref{tab:retraining}, we provide retraining experiments for SNOWS and the best competing method from our unstructured sparsity experiments, FALCON \cite{meng2024falconflopawarecombinatorialoptimization}. The retraining experiments use a step decay learning rate schedule to fine-tune. For CIFAR-10, we retrained ResNet20 for 90 epochs, using SGD with momentum 0.9 and weight decay 5e-5. The learning rate started at 3e-3 and was reduced by a factor of 0.1 every 30 epochs. For ImageNet-1K, we retrained MobileNetV1 for 5 epochs using the same optimizer settings, with the learning rate decaying every 2 epochs. Throughout retraining, we maintained the pruning mask to preserve the network sparsity, allowing only non-zero weights to be updated. As shown in the results table, this retraining strategy was particularly effective at high sparsity levels (0.8-0.9), where SNOWS significantly outperformed FALCON in retaining model accuracy.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llcc|cc}
+\toprule
+ &  & \multicolumn{2}{c|}{\textbf{FALCON}} & \multicolumn{2}{c}{\textbf{SNOWS}} \\
+\cmidrule{3-6}
+\textbf{Dataset} & \textbf{Sparsity} & \textbf{Original} & \textbf{+RT} & \textbf{Original} & \textbf{+RT} \\
+\midrule
+\multirow{5}{*}{\makecell{\textbf{ResNet20}\\\textbf{(CIFAR-10)}}} & 0.5 & 90.87 (-0.49) & 91.07 (-0.29) & 92.28 (-0.28) & 92.32 (-0.24) \\
+& 0.6 & 89.67 (-1.69) & 90.58 (-0.78) & 91.90 (-0.66) & 92.13 (-0.43) \\
+& 0.7 & 84.42 (-6.94) & 89.64 (-1.72) & 90.87 (-1.69) & 91.85 (-0.71) \\
+& 0.8 & 65.17 (-26.19) & 87.59 (-3.77) & 87.82 (-4.74) & 91.06 (-1.50) \\
+& 0.9 & 19.14 (-72.22) & 81.60 (-9.76) & 64.80 (-27.76) & 87.69 (-4.87) \\
+\midrule
+\multirow{4}{*}{\makecell{\textbf{MobileNetV1}\\\textbf{(ImageNet-1K)}}} & 0.5 & 70.35 (-1.60) & 70.66 (-1.29) & 70.10 (-0.79) & 70.66 (-0.23) \\
+& 0.6 & 67.18 (-4.77) & 68.89 (-3.06) & 68.70 (-2.19) & 70.10 (-0.79) \\
+& 0.7 & 58.40 (-13.55) & 64.74 (-7.21) & 65.28 (-5.61) & 68.76 (-2.13) \\
+& 0.8 & 25.82 (-46.13) & 53.84 (-18.11) & 54.83 (-16.06) & 64.70 (-6.19) \\
+\bottomrule
+\end{tabular}
+\caption{Raw accuracy (\%) and absolute accuracy change (in brackets) for FALCON and SNOWS before and after retraining at different sparsity levels. The baseline accuracies are as given in Table~\ref{tab:raw_nums}.}
+\label{tab:retraining}
+\end{table}
+
+\subsubsection{Inference Time Speed-ups For Semi-structured Sparsity}\label{sec:inference_speedup}
+
+Calculating exact inference time speed-ups for N:M sparsity patterns presents significant challenges due to limited native PyTorch support and the need for specialized CUDA kernels to realize speed-ups.  Moreover, currently only the 2:4 pattern is supported by NVIDIA's sparse tensor cores.  To provide meaningful performance metrics, we instead report end-to-end FLOPs reduction across various architectures and sparsity patterns in \autoref{tab:flops_accuracy}, accounting for all network operations and layers.
+
+
+\input{inference_runtime_tab}
+
+
+
+\subsubsection{Hyperparameter configurations for SNOWS used in experiments}\label{sec:hyperparams}
+
+\begin{table}[H]
+    \centering
+    \small
+    \setlength{\tabcolsep}{8pt} % Adjust space between columns
+    \begin{tabular}{lccccc}
+        \toprule
+        \multirow{2}{*}{\textbf{Architecture}} & \multirow{2}{*}{\textbf{Dataset}} & \multicolumn{2}{c}{\textbf{$K$-Step Value}} & \multirow{2}{*}{\textbf{Dampening} \(\lambda\)} & \multirow{2}{*}{\textbf{CG Tol}} \\
+        \cmidrule(lr){3-4}
+        & & \textbf{$N$:$M$ Sparsity} & \textbf{Unstructured Sparsity} & & \\
+        \midrule
+        ResNet20  & CIFAR-10  
+        & \( K = 40 \)  & \( K = 40 \) & \( 1\mathrm{e}{-4} \) & \( 1\mathrm{e}{-3} \) \\
+        \cmidrule{1-6}
+        ResNet50  & CIFAR-100  
+        & \( K = 100 \)  & --- & \( 1\mathrm{e}{-4} \) & \( 1\mathrm{e}{-3} \) \\
+        \cmidrule{1-6}
+        ResNet50  & ImageNet-1k  
+        & \( K = 30 \)  & --- & \( 1\mathrm{e}{-4} \) & \( 1\mathrm{e}{-3}\) \\
+        \cmidrule{1-6}
+        MobileNet  & ImageNet-1k  
+        & ---  & \( K = 60 \) & \( 1\mathrm{e}{-4} \) & \( 1\mathrm{e}{-3}\) \\
+        \cmidrule{1-6}
+        ViT/B-16  & ImageNet-1k  
+        & \( K = 3 \) & --- & \( 1\mathrm{e}{-4} \) & \( 5\mathrm{e}{-4} \) \\
+        \cmidrule{1-6}
+        \multirow{2}{*}{ViT/L-16}  & \multirow{2}{*}{ImageNet-1k}  
+        & \( K = 4 \)  (QKV) & \multirow{2}{*}{---} & \multirow{2}{*}{\( 1\mathrm{e}{-4} \)} & \multirow{2}{*}{\( 5\mathrm{e}{-4} \)} \\
+        &  & \( K = 1 \)  (MLP) &  &  & \\
+        \bottomrule
+    \end{tabular}
+    \caption{$K$-step values, dampening factors, and CG tolerances used for $N$:$M$ sparsity and unstructured sparsity experiments across different architectures.}
+    \label{tab:k_step_values_dampening_cg}
+\end{table}
+
+
+\subsubsection{SNOWS Algorithm Runtime}\label{sec:run_time}
+
+For moderate values of $K$, our approach performs better and can run much faster than prior approaches, and scales much better in terms of architecture size. In \autoref{tab:flops_accuracy}, we compare the runtime of our algorithm to CHITA (\cite{benbaki2023fastchitaneuralnetwork}). We remark that other competitors WoodFisher and CBS require hours to prune even MobileNet with a small sample size, see section 4.1.1 of (\cite{benbaki2023fastchitaneuralnetwork}). We show below the run-time for pruning three networks of different sizes: ResNet20 (250k parameters), MobileNet (4m parameters), and ResNet50 (25m parameters). The main advantage of our method in terms of efficiency is scaling to large networks since we avoid computing, inverting, or storing the full Hessian or its approximation, and moreover not even storing or inverting the smaller layer-wise Hessian. Notably, our method outperforms CHITA even with moderate values of $K$ (though larger values used in our final experiments can obtain the best results e.g. in \autoref{fig:unstr}).
+
+\begin{table}[H]
+\centering
+\begin{tabular}{l c c c c c}
+\hline
+\multirow{2}{*}{\textbf{Model-Sparsity}} & \multirow{2}{*}{\textbf{Samples $n$}} & \multicolumn{2}{c}{\textbf{SNOWS}} & \multicolumn{2}{c}{\textbf{CHITA}} \\
+\cline{3-6}
+& & \textbf{Acc (\%)} & \textbf{Runtime (min)} & \textbf{Acc (\%)} & \textbf{Runtime (min)} \\
+\hline
+ResNet50 (25m parameters)  & 500  & 75.7 & 9.66 & 73.6 & 231.20 \\
+MobileNet (4m parameters)   & 1000 & 61.1 & 5.56 & 59.4 & 16.82 \\
+ResNet20 (250k parameters)  & 1000 & 90.0 & 0.56 & 84.1 & 2.23 \\
+\hline
+\end{tabular}
+\caption{Comparison of performance versus run-time comparing SNOWS and CHITA pruning different architectures to 70\% unstructured sparsity. ResNet-20 is run on CIFAR-10, MobileNet on ImageNet-1k, and ResNet50 on CIFAR-100. We use 1000 samples for ResNet20 and MobileNet, but for ResNet50 we use 500 samples since this was the only sample size below which CHITA runs in $<$5 hours.}
+\label{tab:runtime}
+\end{table}
+
+
+
+\subsubsection{Layer-wise reconstruction problems for ViT modules.}\label{sec:LS}
+
+\textbf{MHSA Pruning.} In a Transformer model with \( L \) layers, the input to layer \(\ell\) is denoted as \(\boldsymbol{X}^\ell \in \mathbb{R}^{n \times d}\), where \(n\) is the sequence length and \(d\) is the embedding dimension. The Multi-Head Self-Attention (MHSA) mechanism at layer \(\ell\) uses multiple attention heads to capture different aspects of the input sequence. Specifically, the input \(\boldsymbol{X}^\ell\) is linearly projected to produce the concatenated queries (\(\boldsymbol{Q}^\ell\)), keys (\(\boldsymbol{K}^\ell\)), and values (\(\boldsymbol{V}^\ell\)) across all heads:
+\[
+\boldsymbol{Q}^\ell = \boldsymbol{X}^\ell \boldsymbol{W}_Q^\ell, \quad \boldsymbol{K}^\ell = \boldsymbol{X}^\ell \boldsymbol{W}_K^\ell, \quad \boldsymbol{V}^\ell = \boldsymbol{X}^\ell \boldsymbol{W}_V^\ell
+\]
+where \(\boldsymbol{W}_Q^\ell, \boldsymbol{W}_K^\ell, \boldsymbol{W}_V^\ell \in \mathbb{R}^{d \times H d_H}\) are the learnable weight matrices for all heads, with \(H\) being the number of heads and \(d_H\) the dimensionality of each head. The self-attention mechanism then computes the relevance of each token in the sequence by performing the scaled dot product of queries and keys, followed by a softmax operation to produce normalized attention scores:
+\[
+\boldsymbol{Y}^\ell = \text{softmax}\left(\frac{\boldsymbol{Q}^\ell \boldsymbol{K}^{\ell^\top}}{\sqrt{d_k}}\right) \boldsymbol{V}^\ell
+\]
+
+
+Here, \(\boldsymbol{Y}^\ell\) represents the output of the MHSA layer at the current layer \(\ell\). In the general multi-step layer-wise reconstruction problem for \( K \geq 0 \), we aim to reconstruct the outputs over the subsequent \( K \) layers while optimizing jointly over the query, key and value matrices. This is expressed as:
+\[
+\min_{\widehat{\boldsymbol{W}}^\ell \in \mathcal{W}} \sum_{k=0}^{K} \left\| \boldsymbol{Y}^{\ell+k} - f^{\ell:\ell+k}(\boldsymbol{X}^\ell, (\widehat{\boldsymbol{W}}_Q^\ell, \widehat{\boldsymbol{W}}_K^\ell, \widehat{\boldsymbol{W}}_V^\ell)) \right\|_2^2
+\]
+where \( f^{\ell:\ell+k}(\boldsymbol{X}^\ell, (\widehat{\boldsymbol{W}}^\ell_Q, \widehat{\boldsymbol{W}}^\ell_K, \widehat{\boldsymbol{W}}^\ell_V)) \) represents the transformation of the input \(\boldsymbol{X}^\ell\) through \( K \) layers which can include the FFN outputs, GeLU activations, Layer Normalization outputs, and subsequent attention operations. For a specific case: when \( K = 0 \), we focus on reconstructing only the output of the attention block in layer \(\ell\), which can be written as:
+\[
+\min_{\widehat{\boldsymbol{W}}^\ell \in \mathcal{W}} \left\|\boldsymbol{Y}^\ell  - \text{softmax}\left(\frac{\boldsymbol{X}^\ell \widehat{\boldsymbol{W}}_Q^\ell (\boldsymbol{X}^\ell \widehat{\boldsymbol{W}}_K^\ell)^\top}{\sqrt{d_k}}\right) \boldsymbol{X}^\ell \widehat{\boldsymbol{W}}_V^\ell \right\|_2^2
+\]
+Through joint optimization we inherently account for the interactions between the pruned weights. Moreover, since we solve the problem across all attention heads, we can learn redundancies that exist across multiple heads, thereby preserving the overall expressiveness of the MHSA block after pruning. 
+
+\textbf{Output Projection Pruning.} In MHSA, after the attention operation, the concatenated outputs of the attention heads are linearly projected back to the original embedding dimension \(d\) via an output projection matrix \(\boldsymbol{W}_O^\ell \in \mathbb{R}^{H d_H \times d}\). This matrix reduces the dimensionality of the concatenated outputs \(\boldsymbol{Z}^\ell = \text{concat}(\boldsymbol{Z}^\ell_1, \dots, \boldsymbol{Z}^\ell_H)\), where each \(\boldsymbol{Z}_h^\ell\) is the output from one of the \(H\) heads. The output projection is computed as:
+
+\[
+\boldsymbol{Y}^\ell = \boldsymbol{Z}^\ell \boldsymbol{W}_O^\ell
+\]
+
+In the case where $K=0$, the output projection pruning reduces to a standard linear least squares reconstruction problem.
+
+\[
+\min_{\widehat{\boldsymbol{W}}_O^\ell \in \mathcal{W}} \left\| \boldsymbol{Y}^\ell - \boldsymbol{Z}^\ell \widehat{\boldsymbol{W}}_O^\ell \right\|_2^2
+\]
+
+For larger $K$, the output projection reconstruction problem involves reconstructing the outputs of the MLP, Attention blocks that proceed it.
+
+
+\textbf{FFN Pruning}. In vision transformers, feedforward networks (FFNs) are responsible for a substantial portion of the overall model parameters, often accounting for more than half of the total parameter count and FLOPS \citep{kao2022trainingrecipenmstructured}. The FFN block applies an initial linear transformation, followed by a GeLU activation function \citep{hendrycks2023gaussianerrorlinearunits}, followed by an additional linear transformation. To optimize and prune the FFN, we break the MLP into its constituent linear parts, addressing each separately. Specifically, we handle the first linear layer (MLP0) and the second linear layer (MLP3) as distinct optimization tasks. As special cases, for \( K = 0 \), both MLP0 and MLP3 reduce to a standard linear reconstruction problem:
+\[
+\min_{\widehat{\boldsymbol{W}}^\ell \in \mathcal{W}} \left\| \boldsymbol{X}^\ell\boldsymbol{W}^\ell  - \boldsymbol{X}^\ell \widehat{\boldsymbol{W}}^\ell \right\|_2^2
+\]
+
+
+
+
+For \( K = 1 \), MLP0 becomes a non-linear problem involving the GeLU activation function:
+\[
+\min_{\widehat{\boldsymbol{W}}^\ell  \in \mathcal{W}} \left\| \text{GeLU}(\boldsymbol{X}^\ell \boldsymbol{W}^\ell + \boldsymbol{b}^\ell) - \text{GeLU}(\boldsymbol{X}^\ell \widehat{\boldsymbol{W}}^\ell + \boldsymbol{b}^\ell) \right\|_2^2
+\]
+
+For larger $K$, the MLP reconstruction problem involves reconstruction subsequent attention operations and MLP blocks. In all cases, MLP0 and MLP3 are optimized independently.
+
+
+
+\end{document}
+
+
+
+

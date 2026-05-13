@@ -1,0 +1,486 @@
+\title{Streamlining Redundant Layers to Compress Large Language Models}
+
+\begin{abstract}
+This paper introduces LLM-Streamline, a pioneer work on layer pruning for large language models (LLMs). It is based on the observation that different layers have varying impacts on hidden states, enabling the identification of less important layers to be pruned. 
+LLM-Streamline comprises two parts: layer pruning, which removes consecutive layers with the lowest importance based on target sparsity, and layer replacement, a novel module that trains a lightweight network to replace the pruned layers to mitigate performance loss. Additionally, a new metric called stability is proposed to address the limitations of the widely used accuracy metric in evaluating model compression. Experiments show that LLM-Streamline outperforms both previous and concurrent state-of-the-art pruning methods in terms of both performance and training efficiency. 
+
+\end{abstract}
+
+\section{Introduction\label{sec: introduction}
+
+
+
+\begin{figure}[h] % h表示here，t表示top
+  \centering % 使图片居中
+  \includegraphics[width=0.85\textwidth]{Figures/workflow+acc.pdf} % 插入图片，设置宽度为文本宽度的50%
+  \caption{The left side of the figure illustrates the LLM-Streamline workflow, which includes layer pruning to remove consecutive layers and layer replacement where a lightweight network is trained to replace the pruned layers. The right side of the figure presents the comparison results of LLM-Streamline with the state-of-the-art (SOTA) pruning methods on 12 classification benchmarks (details in Section~\ref{sec: benchmark}) after pruning about 25\% of the parameters on Llama2-7B. LLM-Streamline achieves 11.2\% higher relative accuracy than these methods, where the relative accuracy represents the
+percentage of the original model’s accuracy retained by the pruning method.} % 添加标题
+  
+  
+  \label{fig: workflow} % 定义标签
+\end{figure}
+
+Large language models (LLMs) built on the Transformer architecture~\citep{vaswani2017attention} have gained widespread attention and are applied across diverse domains and tasks. However, as LLMs increase in size, their hardware requirements escalate substantially, thereby constraining their applicability and impeding their deployment in real-world scenarios.
+To reduce the hardware requirements for deploying LLMs, research efforts have been devoted to developing compact models that maintain high performance through model compression~\citep{zhu2023survey, wang2024survey}. 
+Currently, model compression techniques are widely categorized into knowledge distillation~\citep{hinton2015distilling, gou2021knowledge, li2022apidistill, huang2022distill, ho2022distill}, quantization~\citep{liu2021quan, gholami2022survey, dettmers2022int8}, and pruning~\citep{louizos2017l0, chen2023lorashear, frantar2023sparsegpt, das2023beyond, sun2023simple, xia2023sheared}. Knowledge distillation achieves compression by transferring the capabilities of a larger teacher model to a smaller student model. Quantization compresses the model by quantizing the weights to lower precision. Alternatively, pruning compresses the model by eliminating unimportant parameters and modules. 
+
+This work focuses on the popular pruning methods.
+Previous approaches for LLM primarily prune dense matrices~\citep{ashkboos2024slicegpt}, attention heads~\citep{michel2019sixteen, voita2019mha}, filters~\citep{mccarley2019filter, prasanna2020filter}, or prune parameters to reduce an LLM's hidden dimension~\citep{xia2023sheared, van2023llm, sp3-hu2024}.
+Despite their effectiveness, these methods often result in structural irregularities, making it inflexible to store and deploy the pruned models. 
+In contrast, layer pruning method simply reduces the depth of LLMs.
+As the layers of LLMs are stored in data structures like nn.ModuleList, layer pruning only requires removing elements from this list, making it more flexible for application. Therefore, exploring an effective layer-wise pruning method is crucial.
+
+\begin{figure}[t] % h表示here，t表示top
+  \centering % 使图片居中
+  \includegraphics[width=0.7\textwidth]{Figures/cosine.pdf} % 插入图片，设置宽度为文本宽度的50%
+  \caption{The cosine similarity between the input and output hidden states of each layer in OPT-1.3B, OPT-2.7B, OPT-6.7B, and Llama2-7B.} % 添加标题
+  \label{fig:cosine_similarity} % 定义标签
+\end{figure}
+
+The core idea of layer pruning is to identify and remove less important layers in an LLM. Specifically, the effect of each layer can be viewed as a transformation of the hidden states. If the input and output hidden states of a particular layer are highly similar, such as exhibiting high cosine similarity, we can say that the layer has a small impact on adjusting the hidden states.
+As illustrated in Fig.~\ref{fig:cosine_similarity}, our pilot study shows that certain contiguous layers indeed have smaller impact on the hidden states, indicating they are less important and suitable for pruning. 
+Some concurrent works~\citep{song2024slebstreamliningllmsredundancy, kim2024shortened, yang2024laco, men2024shortgpt, gromov2024unreasonable} also explore layer pruning.
+These studies either prune unimportant layers directly without further training~\citep{song2024slebstreamliningllmsredundancy, men2024shortgpt} or fine-tune the pruned model to enhance performance~\citep{kim2024shortened, yang2024laco, gromov2024unreasonable}. 
+Directly removing layers can lead to more performance degradation.
+While parameter-efficient fine-tuning techniques like LoRA~\citep{hu2021lora} are used to train the pruned LLM, fine-tuning the model to make the original non-contiguous layers compensate for the performance degradation is not an easy task (details in Section~\ref{sec: layer replacement}).
+
+
+
+In this work, we propose a layer pruning method called \model, which exhibits advantages in both performance and training efficiency while requiring less training data. \smodel comprises two components: layer pruning and layer replacement.
+According to a certain target sparsity, the first step removes consecutive layers with the lowest importance from the original LLM. Subsequently, we train a lightweight network to replace the pruned layers, aiming to recover the performance degradation caused by pruning. We can employ various architectures for this lightweight  network, including a feed-forward neural network (FFN), a SwiGLU-based feed-forward neural network (SwiGLU), and a Transformer layer.
+
+Additionally, we find that existing accuracy metrics for evaluating model compression methods have limitations. Specifically, in natural language understanding tasks that involve multiple-choice classification, a compressed model may guess correct answers for samples on which the original model was uncertain, resulting in an overestimation of the compression performance. To address this issue, we propose a new metric named stability, which measures the consistency of predictions before and after pruning, considering the prediction confidence of the original model.
+Overall, this paper makes the following contributions:
+
+\begin{itemize}
+    \item We propose \model, a layer-wise pruning algorithm that demonstrates superior effectiveness and efficiency compared to concurrent methods. To mitigate the potential performance degradation caused by pruning, we propose to use a lightweight network to approximate the functionality of the pruned layers.
+    \item We propose a new metric called stability, which considers both the prediction confidence of the original model and the consistency of predictions before and after pruning. Stability provides a more accurate reflection of the pruned model's performance in classification tasks compared to the widely used accuracy metric.
+    \item We conduct experiments on 12 well-known classification benchmarks and 3 generation benchmarks. Our results show that for an LLM with 7B or 13B parameters and a 25\% pruning rate, we can maintain 93\% performance in classification tasks and 77\% in generation tasks without requiring a lot of training data, outperforming existing SOTA pruning methods.
+\end{itemize}
+
+
+
+
+\section{\model}
+
+
+
+The workflow of the LLM-Streamline framework, shown in Fig.~\ref{fig: workflow} (a), comprises two main steps: layer pruning and layer replacement. First, we prune redundant layers from the LLMs. Then, we train a lightweight network to replace the pruned layers to restore the model's performance.
+\subsection{Layer Redundancy in LLMs \label{sec: LLM Redundancy}}
+LLMs primarily utilize a Transformer architecture, consisting of a series of Transformer decoder layers. These layers adopt a residual structure, so the effect of each Transformer layer can be viewed as a transformation of the input hidden states. Assuming that the parameters of the $\ell$-th layer $f$ are denoted as $\theta^{(\ell)}$, and its input hidden states are represented by $\boldsymbol{x}^{(\ell)}$, 
+the layer $f$ can be expressed as
+\begin{align}
+\boldsymbol{x}^{(\ell+1)} = \boldsymbol{x}^{(\ell)} + f(\boldsymbol{x}^{(\ell)}, \theta^{(\ell)}).
+\label{Eq.layer}
+\end{align}
+In Eq.~\ref{Eq.layer}, the $\ell$-th layer $f$ contributes a transformation $f(\boldsymbol{x}^{(\ell)}, \theta^{(\ell)})$ to the input $\boldsymbol{x}^{(\ell)}$. Therefore, we assess the importance of each layer in LLMs by evaluating its impact on the input hidden states. We use the cosine similarity $\cos{(\cdot, \cdot)}$ between input $\boldsymbol{x}^{(\ell)}$ and output $\boldsymbol{x}^{(\ell+1)}$ as a metric. Essentially, a higher cosine similarity between the input and output of a layer indicates lower importance, and vice versa. This interpretation arises from the observation that a high cosine similarity suggests the layer's transformation is minimal, making it more amenable to pruning.
+To measure the importance of different layers in LLMs, we randomly select samples from the pre-training data (details in Section~\ref{sec: setup}). We then record the hidden states generated by the LLMs for these samples and compute the cosine similarity between the input and output hidden states of each layer. The computation of cosine similarity can be formalized as follows,
+\begin{align}
+    \cos{(\boldsymbol{x}^{(\ell)}, \boldsymbol{x}^{(\ell + 1)})} = \mathbb{E}_{(\boldsymbol{x}^{(\ell)}_i, \boldsymbol{x}^{(\ell + 1)}_i) \in \mathcal{D}} \left( \frac{1}{L}\sum_{j=1}^{L} \frac{\boldsymbol{x}^{(\ell)}_{i,j} \cdot \boldsymbol{x}^{(\ell + 1)}_{i,j}}{\Vert \boldsymbol{x}^{(\ell)}_{i,j} \Vert \cdot \Vert \boldsymbol{x}^{(\ell + 1)}_{i,j} \Vert} \right),
+    \label{Eq.cos}
+\end{align}
+\noindent where $\mathcal{D}$ denotes the recorded hidden states from different samples, $\boldsymbol{x}^{(\ell)}_i$, $\boldsymbol{x}^{(\ell + 1)}_i \in R^{d \times L}$ denotes the input and output hidden states of the $i$-th sample respectively, $d$ denotes the hidden size and $L$ denotes the sequence length of each sample.
+To mitigate the effects of model size and model structure, we conduct experiments on four models OPT-1.3B, OPT-2.7B, OPT-6.7B~\citep{zhang2022opt}, and Llama2-7B~\citep{touvron2023llama}. The results, illustrated in Fig.~\ref{fig:cosine_similarity}, show that there is high cosine similarity between the input and output of several consecutive layers in all models, indicating a low level of importance.
+
+\textbf{Discussion \uppercase\expandafter{\romannumeral1}: Why not use other similarity to measure the importance of layers?} 
+In deep learning, cosine similarity is widely employed to measure the similarity between two vectors~\citep{chen2020simple, chen2021exploring, reimers2019sentence}. Alongside it, dot product and Euclidean distance are also utilized, but they additionally consider vector magnitude. Current research suggests that the hidden states of Transformers with the Pre-Norm architecture tend to grow as the depth of layers increases~\citep{liu2023deja}. This trend leads to a bias where deeper layers in the model have higher dot product similarity, while earlier layers have smaller Euclidean distances. Consequently, we opt for cosine similarity, which is agnostic to the magnitude of the vectors. 
+ 
+\textbf{Discussion \uppercase\expandafter{\romannumeral2}: Why not use perplexity as the metric to measure the importance of layers?} Some concurrent layer pruning work uses perplexity as the metric to measure the importance of layers~\citep{song2024slebstreamliningllmsredundancy, kim2024shortened}. Specifically, they remove each layer one at a time, measuring the change in perplexity of the model on the pre-training data, and eliminate the layer that causes the least change. This process is repeated multiple times to remove several layers. However, we think perplexity is a highly data-sensitive metric, which results in different layers being removed when pruning with different pre-training data. This also results in a situation where, although the perplexity of the pruned model on the pre-training data used for pruning is low, it performs poorly on other datasets. In contrast, the cosine similarity is highly stable and always leads to the same pruned layers on different pre-training data. 
+
+\subsection{Layer Pruning \label{sec: layer pruning}}
+As Fig.~\ref{fig:cosine_similarity} shows, the less important layers are often contiguous. Hence, given number of pruned layers $n$ determined by a target sparsity, we remove $n$ contiguous layers by finding the initial layer $\ell^*(n)$ corresponding to the highest cosine similarity for pruning:
+\begin{align}
+    \ell^*(n) = \underset{\ell}{\arg\max} \, \cos(\boldsymbol{x}^{({\ell})}, \boldsymbol{x}^{({\ell+n})}),
+\end{align}
+\noindent where we randomly select samples from the pre-training data to compute the cosine similarity between $\boldsymbol{x}^{(\ell)}$ and $\boldsymbol{x}^{(\ell+n)}$, as outlined in Eq.~\ref{Eq.cos}.
+
+\subsection{Layer Replacement \label{sec: layer replacement}}
+After the layer pruning process, we aim to replace the pruned layer with a lightweight network that has much fewer parameters. The rationale is that these layers contribute only minor transformations to the input. Therefore, we hypothesize that the cumulative effect of these layers can be approximated by a lightweight network. Specifically, after identifying the initial layer $\ell^*(n)$ for pruning, we use $(\boldsymbol{x}^{(\ell^*)}, \boldsymbol{x}^{(\ell^* + n)})$ as the training data to train the lightweight network using mean squared error (MSE) loss, which can be formalized as follows:
+\begin{align}
+    \underset{h}{\text{min}} \; \mathbb{E}_{(\boldsymbol{x}^{(\ell^*)}_i, \boldsymbol{x}^{(\ell^* + n)}_i) \in \mathcal{D}} {\rm MSE}(h(\boldsymbol{x}^{(\ell^*)}_i), \boldsymbol{x}^{(\ell^* + n)}_i),
+\end{align}
+where $h$ denotes the lightweight network, $\mathcal{D}$ denotes the recorded hidden states of samples. 
+
+\textbf{Discussion: Layer Replacement or Fine-Tuning Pruned LLMs?}
+Here, we discuss why opt for layer replacement, instead of using common Parameter-Efficient Fine-Tuning (PEFT) methods such as LoRA~~\citep{hu2021lora} and QLoRA~~\citep{dettmers2023qlora} after layer pruning.
+
+First, from the perspective of resource overhead, layer replacement is more adaptable to hardware resource constraints compared to other methods. Fine-tuning the model using the PEFT methods requires storing the model's weights, activation values, and the optimizer state of the PEFT module in the GPU during training. In contrast, layer replacement involves two stages: dataset construction and model training. The first stage only requires storing the model's weight and the forward computation overhead, and the second stage only requires storing of the lightweight network's weight, activation values of lightweight network, and the optimizer state of lightweight network. Therefore, layer replacement can also be implemented under conditions of hardware resource constraints.
+
+Second, layer replacement uses a lightweight network to replace the pruned layer, and distills the knowledge of the pruned layer into the lightweight network using the MSE loss function. Unlike layer replacement, we speculate that training the model after pruning with LoRA is a process of redistributing the function of the pruned layers across the remaining layers. Therefore, substituting the pruned layers with a lightweight network could be a less challenging training task than redistributing the function of the pruned layers across the remaining layers. In the experiments of Section~\ref{sec: layer replacement and lora}, we demonstrate that layer replacement has better performance compared to LoRA.
+\begin{table}[t]
+\begin{minipage}[t]{0.5\textwidth}
+\centering
+\makeatletter\def\@captype{table}
+\renewcommand\arraystretch{1.2}
+\resizebox{0.6\linewidth}{!}{
+\begin{tabular}{c|cccc}
+    \toprule
+    Dataset & $\#{\rm TP}$ & $\#{\rm FN}$ & $\#{\rm FP}$ & $\#{\rm TN}$ \\
+    \midrule
+    C3 & 543 & 257  & 210  & 815 \\
+    \midrule
+    CHID & 269 & 563  & 177  & 993 \\
+    \midrule
+    Race-M & 380 & 95 & 129 & 832 \\
+    \midrule
+    Race-H & 938 & 305 & 353 & 1902  \\
+    \bottomrule
+\end{tabular}
+}
+\end{minipage}
+\begin{minipage}[t]{0.5\textwidth}
+\centering
+\makeatletter\def\@captype{table}
+\renewcommand\arraystretch{1.2}
+\resizebox{0.8\linewidth}{!}{
+\begin{tabular}{c|cccc}
+    \toprule
+    Model & ${\rm TP}$ & ${\rm FN}$ & ${\rm FP}$ & ${\rm TN}$ \\
+    \midrule
+    Llama2-7B & 1.12 & 0.87 & 0.94 & 1.02 \\
+    \midrule
+    w/ pruning & 1.13 & 0.84 & 0.88 & 0.92  \\
+    \bottomrule
+\end{tabular}
+}
+\end{minipage}
+\caption{(a) Number of samples in ${\rm TP}, {\rm FN}, {\rm FP}$, and ${\rm TN}$. (b) The PPL standard deviation results ($\times 10^{-3}$) for Llama2-7B and its pruned version on Race-H. \label{tab: quantities and std}}
+\end{table}
+
+
+
+\section{Metrics for Evaluating Pruned Models}
+
+
+Accuracy is the most commonly used metric for evaluating LLMs in classification tasks. However, accuracy may overestimate the performance of the model after compression, since it does not take into account the consistency of the model's answers before and after compression. In this section, we analyze such limitation and propose a novel metric for evaluating compressed models.
+
+\subsection{Shortcoming of Accuracy Metric}
+
+When evaluating the natural language understanding capabilities of LLMs, most existing benchmarks frame the task as a classification task. 
+A classification task with $k$ choices and comprising $N$ samples is denoted as $\mathcal{T} = \{\left(x_i, c_{i,1}, c_{i,2}, ..., c_{i,k}, y_i \right)\}_{i=1}^{N}$, where $x_i$ represents the question in the $i$-th sample, $c_{i,j}$ represents the $j$-th choices, and $y_i$ represents the correct choice.
+The input to the classification task consists of a question accompanied by multiple choices, and the LLM is required to select the correct answer from these choices. Typically, each choice is concatenated with the question to form multiple sentences, and the perplexity (PPL) of each sentence is computed. The choice corresponding to the sentence with the lowest PPL is selected as the answer.
+
+Typically, model pruning results in decreased model performance. However, when we evaluate the model pruned by the method described in Sec~\ref{sec: layer pruning}, we unexpectedly observe the accuracy of the pruned model has been improved on some classification tasks.  
+We define $\mathcal{M}$ to denote the original LLM, $\bar{\mathcal{M}}$ to denote the compressed LLM, and $\hat{y}(\mathcal{M})$ to denote the choice predicted by the model $\mathcal{M}$.
+To further investigate this phenomenon, we analyze the experimental results using the confusion matrix~~\citep{li2024evaluating}. Specifically, we count the number of samples and average standard deviation (std) for the PPL of the samples for each term of the confusion matrix. The calculation of the std for the PPL of the $i$-th sample is defined as follows:
+\begin{align}
+\small
+ \mathrm{PPL}_{i,j} = \mathrm{PPL}(\mathcal{M}(x_i, c_{i,j})), {\mathrm{PPL}}_i = \frac{\sum_{j=1}^{k}\mathrm{PPL}_{i,j}}{k}, \mathrm{std}_i = \sqrt{\frac{\sum_{j=1}^{k}(\mathrm{PPL}_{i,j} - {\mathrm{PPL}}_i)^2}{k-1}},
+\end{align}
+\noindent where ${\rm PPL}_{i,j}$ denotes the PPL for the sentence created by question $x_i$ and choice $c_{i,j}$ of the model before pruning, ${\rm std}_i$ denotes the std for PPL of the $i$-th sample. A higher $\mathrm{std}_i$ value indicates the LLM exhibits greater confidence in answering the question $x_i$.
+
+Each term of the confusion matrix is defined as follows,
+
+\begin{itemize}
+    \item ${\rm TP} \left[\hat{y}_i({\mathcal{M}}) = y_i \wedge  \hat{y}_i(\bar{\mathcal{M}}) = y_i\right]$ is a set of samples where the model answers correctly both before and after pruning.
+
+    \item ${\rm FN}  \left[\hat{y}_i({\mathcal{M}}) = y_i \wedge \hat{y}_i(\bar{\mathcal{M}}) \neq y_i \right]$ is a set of samples where the model answers correctly before pruning but incorrectly after pruning.
+
+    \item ${\rm FP} \left[ \hat{y}_i({\mathcal{M}}) \neq y_i  \wedge  \hat{y}_i(\bar{\mathcal{M}}) = y_i \right]$ is a set of samples where the model answers incorrectly before pruning but correctly after pruning.
+
+    \item ${\rm TN} \left[\hat{y}_i({\mathcal{M}}) \neq y_i \wedge \hat{y}_i(\bar{\mathcal{M}}) \neq y_i \right]$ is a set of samples where the model answers incorrectly both before and after pruning.
+
+\end{itemize}
+
+Table~\ref{tab: quantities and std} presents the counts of samples in TP, FN, FP, TN in sevaral datasets, and also the PPL standard deviation in Race-H dataset.
+We can observe that the std for ${\rm TP}$ and ${\rm TN}$ is significantly higher than that for ${\rm FN}$ and ${\rm FP}$. 
+This indicates that the model is more uncertain about the ${\rm FN}$ and ${\rm FP}$ samples. In addition, the samples in ${\rm FP}$ constitute a considerable proportion of the total samples, implying that the model may guess the correct answer for a significant portion after pruning. This phenomenon suggests that the accuracy metric may overestimate the performance of the compressed model.
+
+\subsection{Stability Metric}
+
+We propose a novel metric stability to evaluate the performance of LLMs after pruning, i.e.,
+\begin{gather}
+    \mathrm{Stability}(\mathcal{M}, \bar{\mathcal{M}}) = \frac{\sum_{i=1}^{N}\left( \exp{(\mathrm{std}_i)} \cdot \mathbbm{1}_{\left[ i \in {\rm TP} \cup {\rm TN} \right]} \right)}{\sum_{i=1}^{N}\exp{(\mathrm{std}_j})},
+\end{gather}
+
+where the identifier $\mathbbm{1}_{\left[ i \in {\rm TP} \cup {\rm TN} \right]}$ is used to indicate whether the $i$-th sample belongs to ${\rm TP}$ and ${\rm TN}$. We use ${\rm std}_i$ as the weight of the  $i$-th sample. Because the ${\rm std}$ of different samples varies significantly, to mitigate the influence of samples with excessively large standard deviations, we apply the $\exp$ function to moderate the weight differences among samples. Different from accuracy, stability focuses on the model’s confidence in its answers and the consistency between the model before and after pruning on a task, aligning more closely with the goal of model pruning, i.e., ensuring the pruned model remains as similar as possible to the original model. 
+
+
+
+\section{Experiments}
+
+
+In this section, we first compare our proposed method, LLM-Streamline, with several popular pruning methods to demonstrate its effectiveness (\ref{sec: main results}). Next, we analyze the impact of different sizes and structures of lightweight networks on model performance (\ref{sec: lightweight network}) and evaluate performance under various pruning ratios (\ref{sec: pruning ratio}). Finally, we compare our layer replacement approach with the well-known PEFT method, LoRA~\citep{hu2021lora} (\ref{sec: layer replacement and lora}), showing that layer replacement offers superior performance and reduced memory overhead.
+
+\subsection{Setup \label{sec: setup}}
+
+To validate the effectiveness of our proposed method, we conduct experiments on popular open-source LLMs, including Llama2-7B and Llama2-13B ~\citep{touvron2023llama}. Following previous work~\citep{men2024shortgpt, yang2024laco}, we perform experiments with a 25\% compression rate and extract data from SlimPajama for layer pruning and layer replacement, where SlimPajama is a dataset containing data from different domains for pre-training LLM. Sheared LLaMa~~\citep{xia2023sheared} finds that the performance degradation of pruned models varies across different domains, and proposes determining the distribution of data from different domains based on the degree of performance degradation. Therefore, we randomly sample the data based on the distribution used by Sheared LLaMa~~\citep{xia2023sheared}, finally constructing the dataset containing 30,000 pieces of data. We randomly select 500 samples from this dataset and input them into LLMs, generating Fig.~\ref{fig:cosine_similarity}, and use these 500 data samples for layer pruning. All 30,000 pieces of data are used to train the lightweight network. 
+We utilize two types of lightweight networks: a Feed-Forward Neural Network (FFN), referred to as Ours (FFN), and a Transformer Layer, referred to as Ours (Layer). The FFN is randomly initialized, while the Transformer Layer inherits the parameters from the first pruned layer. Additionally, we explore a purely pruning approach without incorporating any lightweight network, denoted as Ours (None).
+
+\subsection{Benchmark \label{sec: benchmark}}
+
+To comprehensively assess the changes in LLM capabilities before and after pruning, 
+we use 12 natural language understanding and question-answering benchmarks for evaluation: \textbf{CMNLI}~~\citep{xu2020clue}, \textbf{HellaSwag}(HeSw)~~\citep{zellers2019hellaswag}, \textbf{PIQA}~~\citep{bisk2020piqa},\textbf{CHID}~~\citep{zheng2019chid}, \textbf{WSC}~~\citep{levesque2012winograd},\textbf{CommonSenseQA}(CoQA)~~\citep{talmor2018commonsenseqa}, \textbf{BoolQ}~~\citep{clark2019boolq},\textbf{MMLU}~~\citep{hendrycks2020mmlu}, \textbf{CMMLU}~~\citep{li2023cmmlu},\textbf{Race-High/Middle}~~\citep{lai2017race}, \textbf{C3}~~\citep{sun2020C3}. The tasks in these benchmarks are formalized as classification tasks, so we refer to these benchmarks as classification benchmarks. For these benchmarks, we use both accuracy and stability as metrics for evaluating the models. Additionally, we include 3 benchmarks: \textbf{XSum}~~\citep{narayan2018xsum},  \textbf{GSM8K}~~\citep{cobbe2021gsm8k} and \textbf{StrategyQA}~~\citep{geva2021did}, to demonstrate the LLM’s performance on generation tasks after pruning. 
+We refer to these tasks as generation benchmarks. Following the evaluation framework of  OpenCompass~\citep{contributors2023opencompass}, we use accuracy to evaluate \textbf{StrategyQA} and \textbf{GSM8K}, and use ROUGE1 to evaluate \textbf{Xsum}.
+\subsection{Baseline \label{sec: baseline}}
+
+We compare several pruning methods that prune the attention heads, the filters of the FFN layer, and the hidden dimension, as well as the concurrent layer-pruning methods LaCo. In addition, \textbf{ShortGPT} and \textbf{UIDL}~\citep{men2024shortgpt, gromov2024unreasonable} can be considered as a variant of our approach, i.e., Ours (None).
+
+\textbf{LLM-Pruner}~\citep{ma2023llmpruner} prunes attention heads, FFN layer filters, and hidden dimensions by using gradients and activations to estimate the importance of these modules.
+
+\textbf{SliceGPT}~\citep{ashkboos2024slicegpt} prunes hidden dimensions. 
+It inserts dimensionality reduction matrices into the model and employs Principal Component Analysis (PCA) to initialize and compress the matrices, and then merge them with the original weight matrix to reduce the model’s size.
+\textbf{LaCo}~\citep{yang2024laco} prunes layers by dividing the layers into groups, each consisting of multiple consecutive layers, and compresses them separately, whereas our method simply compresses a piece of consecutive layers. LaCo merges consecutive layers by averaging their parameters whereas we train an additional lightweight network to replace these layers.
+\begin{table}[t]
+	\small
+	\centering
+\renewcommand\arraystretch{0.95}
+\resizebox{\linewidth}{!}{
+
+	\begin{tabular}{c|c|c|cccccccccccc|cc}
+		\toprule
+		\multirow{2}{*}{LLM} & \multirow{2}{*}{Method}  & \multirow{2}{*}{Ratio}& \multicolumn{12}{c|}{Benchmarks}& \multirow{2}{*}{Average} & \multirow{2}{*}{RP} \\  
+		&   & & C3 & CMNLI&CHID&BoolQ&WSC&CoQA&HeSW&PIQA&Race-M&Race-H &MMLU & CMMLU& &\\
+		\midrule
+		\multirow{7}{*}{Llama2-7B} 
+  & Dense  & 0.00\% &43.8 &33.0 &41.6  &70.8 &37.5  &66.7 &71.3 &78.1  &33.1  &35.5&46.8& 31.8  &49.2 &100.0
+		\\
+		& LLMPruner & 24.8\% &29.7  &\underline{33.4}&\underline{28.4}  &58.7 &\underline{40.4}  &48.5 &54.6 &\textbf{72.0} &22.9 &22.0&25.3   &25.0    &38.4 &78.0\\
+		& SliceGPT  & 25.4\%& 31.5 &31.6 &18.5 &59.9 &\textbf{43.3} & 49.6& 47.5&  68.3 &27.0& 29.4& 28.8 & 24.8  &38.4 &78.0   \\
+		& LaCo*  & 27.0\%&39.7  &\textbf{34.4}&\textbf{36.1}  &64.1 &\underline{40.4} &45.7 &55.7 &69.8&23.6   &22.6&26.5  &25.2  &40.3 &81.9\\
+        & Ours (None)  & 24.0\%&40.2  &\textbf{34.4}&21.5  &\underline{67.3} &\underline{40.4} &51.7 &59.7 &69.0&\underline{35.2}   &34.7&44.6  &28.9  &44.0 &89.4\\
+        & Ours (FFN)  & 25.0\%&\underline{40.7}  &33.0& 22.8 &65.9 &38.5 &\textbf{60.6} &\textbf{61.2} &71.2&\textbf{38.0}   &\textbf{38.7}&\textbf{47.0}  &\textbf{31.7}  &\textbf{45.8} &\textbf{93.1}\\
+        & Ours (Layer) & 24.0\%&\textbf{43.3}  &33.0&24.1 &\textbf{67.5} &36.5 &\underline{59.2} &\underline{61.1} &\underline{71.5}&34.8   &\underline{37.0}&\underline{45.5}  &\underline{29.4}  &\underline{45.2} &\underline{91.9}\\
+            
+            \midrule
+            \multirow{7}{*}{Llama2-13B} 
+  & Dense  & 0.00\% &47.5 & 33.0 & 47.2 & 71.5 & 51.0 & 66.8 & 74.8 & 79.8 & 60.0 & 58.1 & 55.8 & 38.7 & 57.0 & 100.0\\
+             & LLMPruner &24.4\% &29.5&\textbf{33.0}&29.5&58.0&47.1&43.7&54.7&72.7&21.9&22.5&25.2&24.9&38.6&67.7 \\
+             & SliceGPT &23.6\% &38.6&30.5&18.3&37.8&42.3&38.3&45.6&61.9&24.0&25.0&30.6&25.6&34.9&61.2 \\
+             & LaCo* & 24.6\%
+&44.9 & \underline{32.9} & \textbf{40.1} & 64.0 & \underline{52.9} & 52.7 & 64.4 & \underline{74.3} & 56.6 & 54.5 & 45.9 & 32.6  &51.3  &90.0  \\
+             & Ours (None)  & 24.6\%&\textbf{47.0} & \textbf{33.0} & 36.5 & 62.3 & \textbf{64.4} & 58.8 & 66.6 & 73.5 & \textbf{60.2} & \textbf{58.3} & 54.8 & 38.4 & \textbf{54.5} & \textbf{95.6}\\
+             & Ours (FFN) & 25.4\%&\underline{45.8} & \textbf{33.0} & 37.1 & \textbf{67.4} & 37.5 & \textbf{64.4} & \underline{67.9} & 74.0 & \underline{58.6}& \underline{58.2} & \textbf{55.7} & \underline{38.6} & \underline{53.2} & \underline{93.3}\\
+             & Ours (Layer) & 24.6\%& 45.7 & \textbf{33.0} & \underline{38.0} & \underline{66.2} & 36.5 & \underline{63.8} & \textbf{69.1} & \textbf{75.1} & 58.0 & 57.4 & \underline{55.1} & \textbf{39.2} & 53.1 & 93.2\\          
+		\bottomrule
+	\end{tabular}
+ }
+	\caption{Accuracy of pruning methods on classification benchmarks. ``*'' indicates that we refer to the results in the original paper. Retained performance (RP) represents the percentage of the original model’s performance retained by the pruning method.}
+	\label{tab:llm_comparison_all_7B_PPL_A}
+\end{table}
+
+\begin{table}[t]
+	\small
+	\centering
+\renewcommand\arraystretch{0.95}
+\resizebox{\linewidth}{!}{
+
+	\begin{tabular}{c|c|c|cccccccccccc|c}
+		\toprule
+		\multirow{2}{*}{LLM} & \multirow{2}{*}{Method}  & \multirow{2}{*}{Ratio}& \multicolumn{12}{c|}{Benchmarks}& \multirow{2}{*}{Average} \\  
+		&   & & C3 & CMNLI&CHID&BoolQ&WSC&CoQA&HeSW&PIQA&Race-M&Race-H &MMLU & CMMLU& \\
+		\midrule
+		\multirow{5}{*}{Llama2-7B} 
+    		& LLMPruner & 24.8\% &72.8  &\underline{94.0}&\textbf{74.1}  &70.8 &87.5  &71.0 &79.9 &\textbf{86.8} &52.4 &55.2&53.3   &65.9    &72.0 \\
+    		& SliceGPT & 25.4\% &53.2  &35.4&53.3  &77.1 &80.8  &75.3 &71.6 &78.7 &\textbf{90.7} &\textbf{85.3}&60.3 &56.7    &68.2 \\
+            & Ours (None) & 24.0\% &\underline{76.6}  &38.7&\underline{65.3}  &81.4 &87.5  &74.7 &80.7 &81.0 &73.7 &67.9&80.1   &70.8    &73.2\\
+            & Ours (FFN) & 25.0\% &\textbf{79.8}  &\textbf{100}&64.1  &\underline{83.1} &\underline{93.3}  &\underline{80.7} &\underline{84.7} &84.6 &\underline{85.1} &\underline{79.0}& \textbf{87.5}  &\textbf{82.5 }   &\textbf{83.7} \\
+            & Ours (Layer) & 24.0\% &\textbf{79.8}  &\textbf{100}& 64.4 &\textbf{86.3} &\textbf{95.2}  &\textbf{81.7} &\textbf{85.3} &\underline{85.6} &81.8 &\underline{79.0}&\underline{82.4}   &\underline{71.0}    &\underline{82.7} \\
+            
+            \midrule
+            \multirow{5}{*}{Llama2-13B} 
+            & LLMPruner & 24.4\% 
+            &71.6&\textbf{100}&69.2&70.5&\underline{65.4}&69.5&77.8&86.7&42.3&35.6&48.1&52.3&65.8\\
+            & SliceGPT & 23.6\% 
+            &62.2&39.5&51.4&27.1&\textbf{68.3}&65.5&64.9&75.6&45.3&43.4&52.7&52.9&54.1\\
+            & Ours (None) & 24.6\% &84.2 & \underline{99.9} & 71.8 & 77.4 & 46.2 & 82.2 & 85.7 & 86.5 & 83.3 & \textbf{83.6} & 89.1 & 83.8 & 81.1 \\
+            & Ours (FFN) & 25.4\% &\underline{85.7} & \textbf{100} & \underline{72.5} & \underline{79.8} & 59.6 & \textbf{89.2} & \underline{89.4} & \underline{89.7} & \textbf{84.8} & \underline{83.3} & \textbf{93.6} & \textbf{90.7} & \textbf{84.9}\\
+            & Ours (Layer) & 24.6\% &\textbf{87.4} & \textbf{100} & \textbf{74.1} & \textbf{81.3} & 58.6 & \underline{89.0} & \textbf{90.5} & \textbf{90.5} & \underline{84.2} & 83.0 & \underline{92.5} & \underline{85.5} & \underline{84.7} \\
+		\bottomrule
+	\end{tabular}
+ }
+	\caption{Stability of pruning methods on classification benchmarks. The stability of the original model is 1.0, because stability is measured by comparing the prediction results of the original model.}
+	\label{tab:llm_comparison_all_7B_PPL_S}
+\end{table}
+
+\begin{table}[t]
+
+\small
+\centering
+\renewcommand\arraystretch{0.8}
+\resizebox{0.8\linewidth}{!}{
+\begin{tabular}{c|c|c|ccc|cc}
+    \toprule
+
+    \multirow{2}{*}{LLM} & \multirow{2}{*}{Method}  & \multirow{2}{*}{Ratio}& \multicolumn{3}{c|}{Benchmarks}& \multirow{2}{*}{Average} & \multirow{2}{*}{RP} \\  
+    &   & & Xsum & GSM8K & StrategyQA& &\\
+    \midrule
+    \multirow{7}{*}{Llama2-7B} 
+& Dense  & 0.00\% &19.4 &16.5 &60.2 &32.0 &100.0
+    \\
+    & LLMPruner & 24.8\% &16.4 &0.61 &44.2 &20.4 &63.8\\
+    & SliceGPT  & 25.4\%&12.4 &\textbf{3.34} &45.7 &20.5 &64.1   \\
+    & LaCo*  & 27.1\%&15.6 &- &- &- &-\\
+    & Ours (None)  & 24.0\%&14.8 &1.97 &41.8 &19.5 &60.9 \\
+    & Ours (FFN) & 25.0\% &\underline{18.6} &\underline{2.16} &\underline{46.5} &\underline{22.4} &\underline{70.0}\\
+    & Ours (Layer) & 24.0\% &\textbf{20.2} &1.82 &\textbf{52.1} &\textbf{24.7} &\textbf{77.2}\\
+    \midrule
+    \multirow{7}{*}{Llama2-13B} 
+    & Dense  & 0.00\% &23.7 &29.0 &58.1 &36.9 &100.0
+    \\
+    & LLMPruner & 24.4\% &17.5&1.9&43.7&21.0&56.9\\
+    & SliceGPT & 23.6\% &5.0&1.9&38.3&15.1&40.9\\
+    & LaCo* & 24.6\% &14.5&-&-&-&-\\
+    & Ours (None) & 24.6\% &17.7 &2.35 &46.0 &22.0 &59.6\\
+    & Ours (FFN) & 25.4\%  &\underline{21.4} &\underline{4.10} &\textbf{59.6} &\textbf{28.4} &\textbf{77.0}\\
+    & Ours (Layer) & 24.6\%  &\textbf{21.8} &\textbf{4.70} &\underline{57.3} &\underline{27.9} &\underline{75.6}\\
+
+    \bottomrule
+\end{tabular}
+}
+\caption{Evaluations on generation benchmarks. ``*'' indicates that we refer to the results in the original paper.}
+\label{tab:llm_comparison_all_7B_GEN}
+\end{table}
+
+\begin{table}[t]
+	\small
+	\centering
+\renewcommand\arraystretch{0.8}
+\resizebox{\linewidth}{!}{
+
+	\begin{tabular}{c|cccccccc}
+    \toprule
+    & Layer-Random & Layer-First & Layer-Last & Layer-Avg & FFN$^\dag$ & FFN & SwiGLU$^\dag$ & SwiGLU \\
+    \midrule
+    Accuracy & 45.1 & 45.2 & 45.6 & 44.4 & \textbf{46.0} & \underline{45.8} & 43.8 & 44.2 \\
+    \midrule
+    Stability & 81.2 & 82.7 & 81.9 & 79.2 & 80.7 & \textbf{83.7} & 82.6 & \underline{83.3} \\
+    \bottomrule
+\end{tabular}
+ }
+	\caption{Comparison of different lightweight networks on classification benchmarks in terms of average accuracy and stability metrics, where ``$\dag$'' indicates that the intermediate size of the added lightweight network is half that of the default LLM's intermediate size.}
+	\label{tab:different_lightweightmodel_PPL}
+\end{table}
+
+        
+
+\subsection{Main Results \label{sec: main results}}
+
+We present accuracy and stability for different methods on the classification benchmarks in Table~\ref{tab:llm_comparison_all_7B_PPL_A} and Table~\ref{tab:llm_comparison_all_7B_PPL_S}, respectively, and Table~\ref{tab:llm_comparison_all_7B_GEN} for the generative benchmarks. The results demonstrate that our proposed LLM-Streamline consistently outperforms the baseline methods, effectively retaining the majority of the capabilities of LLMs across various tasks. Specifically, in classification tasks, LLM-Streamline surpasses LLM-Pruner by 7\% in accuracy and 12\% in stability on Llama2-7B, and by 16\% in accuracy and 19\% in stability on Llama2-13B. LLM-Streamline also surpasses LaCo by 5\% in accuracy on Llama2-7B. 
+For generation tasks, LLM-Streamline retains nearly 77\% of Llama2-7B and Llama2-13B's capabilities, significantly outperforming other pruning methods. We find that almost all of the pruning methods fail on the GSM8K dataset, which reflects the difficulty of math word problems.
+
+Additionally, comparing the average stability (Average) in Table~\ref{tab:llm_comparison_all_7B_PPL_S} with the retrained performance (RP) in Table~\ref{tab:llm_comparison_all_7B_PPL_A} across different pruning methods reveals that stability is often much lower than accuracy. We also observe that accuracy on Race-M and Race-H even increases after model pruning. Furthermore, we find that without using any lightweight network, Llama2-13B achieves the highest accuracy on classification benchmarks, but its stability on classification benchmarks and performance on generation benchmarks are lower. These results indicate that pruned models tend to make correct guesses on some classification questions that they are uncertain, highlighting the limitations of accuracy as a sole measure of pruning method performance. 
+We also conduct experiments on OPT-1.3B, OPT-2.7B, OPT-6.7B, Baichuan-7B, Baichuan-13B, Baichuan2-7B and Baichuan2-13B.3B and OPT-2.7B}.
+
+
+\subsection{Impact of Different Lightweight Networks \label{sec: lightweight network}}
+
+\textbf{While FFN achieves the best result, Transformer layer still has performance potential.} 
+We perform experiments with Llama2-7B using various lightweight network architectures, including Feed-Forward Neural Networks (FFN), SwiGLU-based Feed-Forward Neural Networks (SwiGLU), and Transformer layers.
+We also explore various initialization methods for the Transformer Layer, including random initialization (Layer-Random), inheritance of the first pruned layer (Layer-First), inheritance of the last pruned layer (Layer-Last), and averaging the pruned layers (Layer-Avg). The results show that FFN achieves the best results. 
+Meanwhile, for the Transformer Layer, inheriting the pruned first layer yields the best results. In contrast, the performance of Layer-Avg, inspired by LaCo, shows that averaging weights does not achieve the same effectiveness as the pruned first layer.
+In addition, we plot the validation loss curves during the training process for different lightweight networks, as shown in Fig.~\ref{fig: valid loss}. We can observe that FFN and SwiGLU have already converged by the 10th epoch, whereas the loss of Transformer Layer is still decreasing. This indicates that the Transformer layer still has potential, and further training could yield better results, but this would require more computing resources.
+
+\subsection{Impact of Different Pruning Ratios \label{sec: pruning ratio}}
+
+\textbf{The performance of the pruned model is linearly correlated with the number of parameters.} 
+To verify the model's performance at different pruning ratios, we evaluate our method not only at the approximately 25\% pruning ratio but also at ratios of around 2\%, 11\%, and 20\% on Llama2-7B.
+The average stability and accuracy metrics across all the classification benchmarks are shown in Fig. By comparing the performance of the original Llama2-7B, TinyLlama-1.1B, OpenLlama-3B-v2, and Llama2-7B pruned at various ratios, we observe a linear correlation between the performance of both the pruned models and the pre-trained original models relative to the number of parameters. This suggests that the performance of models pruned using our method is comparable to that of pre-trained models with the same number of parameters.
+
+\subsection{Comparison of Layer Replacement and LoRA \label{sec: layer replacement and lora}}
+
+
+\textbf{Layer Replacement outperforms LoRA in both performance and GPU memory consumption.} 
+We compare the performance of layer replacement with LoRA. Since layer replacement is trained based on hidden states with a different training objective than LoRA, we additionally train one epoch using the language model loss for layer replacement when comparing it with LoRA. 
+For layer replacement, we freeze the original model's weights and train only the lightweight network. In the case of LoRA, we set the rank to 128 to align the number of parameters trained with those of the lightweight networks. For LoRA, we use 300,000 samples from SlimPajama-6B.
+ The findings indicate that layer replacement surpasses LoRA in both accuracy and stability, while also requiring significantly less GPU memory and training data.
+\begin{figure}[t]
+\centering
+\begin{minipage}[t]{0.4\textwidth}
+\centering
+    \includegraphics[width=\textwidth]{Figures/valid_loss_FFN.pdf}
+\end{minipage}
+\begin{minipage}[t]{0.4\textwidth}
+\centering
+    \includegraphics[width=\textwidth]{Figures/valid_loss_layer.pdf}
+\end{minipage}
+\caption{Validation loss curves during training of (a) FFN and SwiGLU; (b) Transformer layer. \label{fig: valid loss}}
+
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]{Figures/stability.pdf} % 插入图片，设置宽度为文本宽度的50%
+\end{minipage}
+\begin{minipage}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]{Figures/acc.pdf} % 插入图片，设置宽度为文本宽度的50%
+\end{minipage}
+\caption{(a) Stability of the pruned Llama2-7B at pruning ratios of approximately 2\%, 11\%, 20\%, and 25\%. Stability is calculated only for the compressed model compared to the original, so it cannot be computed for TinyLlama-1.1B and OpenLlama-3B-v2. (b) Accuracy of the pruned Llama2-7B at different pruning ratios, compared to the original Llama2-7B, OpenLlama-3B-v2, and TinyLlama-1.1B. Metrics are averaged across classification benchmarks.\label{fig: stability and accuracy at different pruning ratios} }
+\end{figure}
+
+\begin{table}[t]
+	\centering
+\renewcommand\arraystretch{0.5}
+\resizebox{\linewidth}{!}{
+
+	\begin{tabular}{c|ccccccc|c}
+    \toprule
+    & Layer-First & Layer-Last & Layer-Avg & FFN$^\dag$ & FFN & SwiGLU$^\dag$ & SwiGLU & LoRA \\ % & LoRA*
+    \midrule
+    Accuracy & \underline{46.7} & \textbf{46.8} & 46.2 & 45.8 & 46.3 & 44.4 & 45.5 & 44.5 \\ % 44.6
+    \midrule
+    Stability & \textbf{85.7} & \underline{85.6} & 83.9 & 83.4 & 85.2 & 84.7 & 84.7 & 82.1 \\ % &82.6
+    \midrule
+    GPU Memory (G) & 27.8 &27.8 &27.8 & \underline{25.6} &27.0 &\textbf{25.3} &26.4 &56.4 \\
+    \bottomrule
+\end{tabular}
+ }
+	\caption{Comparison of layer replacement and LoRA on classification benchmarks in terms of average accuracy metrics across all benchmarks, where ``$\dag$'' indicates that the intermediate size of the added lightweight network is half that of the default LLM's intermediate size.}
+	\label{tab: PostTraing_PPL}
+\end{table}
+
+\begin{table}[H]
+	\centering
+\renewcommand\arraystretch{0.8}
+\resizebox{\linewidth}{!}{
+
+	\begin{tabular}{c|c|c|c|c|c|c}
+    \toprule
+    \textbf{Method}&\textbf{Metric}&\textbf{Need Training}& \textbf{Training Data} & \textbf{Data Size}& \textbf{Training Module} & \textbf{Trainig Method}\\
+    \midrule
+    SLEB&Perplexity&No&None&None&None&None\\
+    \midrule
+    ShortGPT&Cosine Similarity&No&None&None&None&None\\
+    \midrule
+    UIDL&Cosine Similarity&Yes&C4&164M&LoRA-Adapter&QLoRA\\
+    \midrule
+    LaCO&Cosine Similarity&Yes&Unpublished&1B&Full Parameters&Fine-tuning\\
+    \midrule
+    Shortened Llama&\makecell[c]{Taylor\\Perplexity}&Yes&\makecell[c]{SlimPajama\\Alpaca}&\makecell[c]{627B\\50k}&\makecell[c]{Full Parameters\\LoRA-Adapter}&\makecell[c]{Fine-tuning\\LoRA}\\
+    \midrule
+    LLM-Streamline&Cosine Similarity&Yes&SlimPajama&30k&\makecell[c]{Lightweight\\Network}& \makecell[c]{Training\\ Lightweight Network}\\
+    \bottomrule
+\end{tabular}
+ }
+	\caption{Comparison of concurrent layer pruning methods, with the metric indicating the importance of layers. Shortened Llama consists of two training stages: initial continual pre-training on the SlimPajama dataset, followed by LoRA fine-tuning on the Alpaca dataset.
+ }
+	\label{tab: Layer Pruning Method}
+\end{table}
+
+
+\section{Related Work}
+
+Previous pruning methods for LLMs primarily focus on pruning dense matrices~\citep{ashkboos2024slicegpt}, attention heads~\citep{michel2019sixteen, voita2019mha}, filters~\citep{mccarley2019filter, prasanna2020filter}, or hidden dimension~\citep{xia2023sheared, van2023llm}. These approaches often lead to structural irregularities, making pruned models less flexible for deployment. In contrast, layer pruning, which only alters the model's depth, is easier to deploy. Concurrent works in layer pruning alongside LLM-Streamline include LaCo~\citep{yang2024laco}, ShortGPT~\citep{men2024shortgpt}, UIDL~\citep{gromov2024unreasonable}, SLEB~\citep{song2024slebstreamliningllmsredundancy}, and Shortened Llama~\citep{kim2024shortened}. 
+
+LaCo~\citep{yang2024laco} divides layers into groups of consecutive layers and compresses them by replacing the consecutive layers with averaged parameter weights. ShortGPT~\citep{men2024shortgpt} uses a BI score, equivalent to cosine similarity, to assess layer importance and remove less important layers. Similarly, UIDL~\citep{gromov2024unreasonable} uses angular distance, also equivalent to cosine similarity, to determine and remove less important layers, and employs QLoRA to enhance performance. SLEB~\citep{song2024slebstreamliningllmsredundancy} calculates layer importance using perplexity and discards those deemed insignificant. Shortened Llama~\citep{kim2024shortened} explores various layer selection metrics and examines the effectiveness of using continual pre-training and LoRA after pruning. The differences between these layer pruning methods and LLM-Streamline are summarized in Table \ref{tab: Layer Pruning Method}. 
+
+Unlike traditional layer pruning methods, LLM-Streamline fundamentally differs by retraining a lightweight model to replace the pruned layers, rather than removing them directly with or without training the pruned model.
+\smodel reduces both computation time and resource consumption compared to layer pruning methods (Shortened Llama, LaCo, UIDL) that necessitate retraining. Additionally, LLM-Streamline better preserves the performance of the original LLM compared to concurrent layer pruning methods.
+
+
+
+
+\section{Conclusion}
+
+In this paper, we propose LLM-Streamline, a layer pruning-and-replacement algorithm for LLMs. We also identify shortcomings in the existing accuracy metric and propose a new metric called stability for evaluating model compression. Extensive experiments show that this layer replacement method using a lightweight network outperforms previous state-of-the-art pruning methods and demonstrates superior effectiveness and efficiency compared to concurrent layer pruning methods.
+
+
+
+
+
+
+
+

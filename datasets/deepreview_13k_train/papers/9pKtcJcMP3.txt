@@ -1,0 +1,212 @@
+\title{Video Language Planning}
+
+\begin{abstract}
+We are interested in enabling visual planning for complex long-horizon tasks in the space of generated videos and language, leveraging recent advances in large generative models pretrained on Internet-scale data. 
+To this end, we present \textit{video language planning} (VLP), an algorithm that consists of a tree search procedure, where we train (i) vision-language models to serve as both policies and value functions, and (ii) text-to-video models as dynamics models.
+VLP takes as input a long-horizon task instruction and current image observation, and outputs a long video plan that provides detailed multimodal (video and language) specifications that describe how to complete the final task.
+VLP scales with increasing computation budget where more computation time results in improved video plans,
+and is able to synthesize long-horizon video plans across different robotics domains -- from multi-object rearrangement, to multi-camera bi-arm dexterous manipulation.
+Generated video plans can be translated into real robot actions via goal-conditioned policies, conditioned on each intermediate frame of the generated video. Experiments show that VLP substantially improves long-horizon task success rates compared to prior methods on both simulated and real robots (across 3 hardware platforms).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\looseness=-1
+Intelligently interacting with the physical world involves planning over both (i) high-level semantic abstractions of the task (\ie what to do next), as well as the (ii) low-level underlying dynamics of the world (\ie how the world works). Factorizing the planning problem into two parts, one driven by task-specific objectives and the other a task-agnostic modeling of state transitions, is an idea that is pervasive and fundamental. This factorization drives much of the classic work in robotics from integrating task and motion planning \citep{cambon2009hybrid,wolfe2010combined,kaelbling2011hierarchical} to deriving control policies that can perform complex manipulation tasks over long time horizons such as tidying a dining table or rearranging a collection of objects to build new structures.
+
+Pre-trained large language models (LLMs) \citep{brown2020language,chowdhery2022palm} have shown to be capable of generating high-level step-by-step plans for long-horizon tasks
+over symbolic (often linguistic) abstractions of the task \citep{huang2022language,ahn2022can}, but this is only part of the solution. LLMs are restricted by what they can represent in text, and struggle with grounding \ie reasoning over shapes, physics, and constraints of the real world \citep{tellex2020robots,huang2023grounded}. LLMs can be integrated into larger vision-language models (VLMs) \citep{driess2023palm} that, when trained on sufficient data, can respect physical constraints observed in image inputs to generate more feasible plans that may be less likely to command the robot to perform impossible actions, or manipulate inaccessible objects. However, existing VLMs are predominantly trained on static image captioning and Q\&A datasets -- consequently, they continue to struggle to reason over dynamics \eg how objects may move or collide with one another over time. 
+
+Meanwhile, recent text-to-video models trained on the wealth of videos on the Internet \citep{villegas2022phenaki,ho2022imagen}, have demonstrated an ability to learn the dynamics and motions of objects by synthesizing detailed video predictions of the future \citep{du2023learning}. Existing video models can only generate short time horizon clips without losing visual fidelity, and whether they can be applied for long-horizon planning remains unclear. Nevertheless, they exhibit properties that are complementary to VLMs in that they (i) can model the low-level visual dynamics of objects in ways that are more information-rich than text, and (ii) can absorb another source of Internet data \eg YouTube videos. 
+This leads to the natural question of how to build a planning algorithm that can leverage both long-horizon abstract planning from LLMs / VLMs and detailed dynamics and motions from text-to-video-models.
+
+\input{figText/teaser}
+
+In this work, we propose to integrate vision-language models and text-to-video models to enable \textit{video language planning} (VLP), where given the current image observation and a language instruction, the agent uses a VLM to infer high-level text actions, and a video model to predict the low-level outcomes of those actions. Specifically, VLP (illustrated in \fig{fig:teaser}) synthesizes video plans for long-horizon tasks by iteratively: (i) prompting the VLM as a policy to generate multiple possible next-step text actions, (ii) using the video model as a dynamics model to simulate multiple possible video rollouts for each action, and (iii) using the VLM again but as a heuristic function to assess the favorability of each rollout in contributing task progress, then recursively re-planning with (i). 
+
+\looseness=-1
+The combination of both models enables forward tree search over the space of possible video sequences to discover long-horizon plans (of hundreds of frames) that respect visual dynamics. In particular, VLP offers advantages in that it (i) can generate higher quality plans at inference time by expanding the branching factor of the search, allowing plan quality to scale with increasing compute budget, and (ii) benefits from training on incomplete language-labeled video data, which may contain short-horizon snippets (that can be re-composed and sequenced into long-horizon ones), or segments of videos with missing language labels (but contain dynamics that the video model can still learn from).
+
+Experiments in both simulated and real settings (on 3 robot hardware platforms) show that VLP generates more complete and coherent multimodal plans than baselines, including end-to-end models trained directly to generate long videos conditioned on long-horizon task instructions. VLPs exhibit improved grounding in terms of the consistency of scene dynamics in video plans, and when used in conjunction with inverse dynamics models or goal-conditioned policies to infer control trajectories \citep{du2023learning}, can be deployed on robots to perform multi-step tasks -- from picking and stowing a variety of objects over countertop settings, to pushing groups of blocks that rearrange them into new formations. In terms of execution success, VLP-based systems are far more likely to achieve task completion for long-horizon instructions than state-of-the-art alternatives, including PaLM-E \citep{driess2023palm} and RT-2 \citep{brohan2023rt} directly fine-tuned for long-horizon tasks. We also observe that when co-trained on Internet-scale data, VLP generalizes to new objects and configurations.
+
+Our main contributions are: (i) video language planning, a scalable algorithm for generating long-horizon video plans by synergising vision-language models and text-to-video models, 
+(ii) experiments that show how VLP enables both simulated and real robots to perform complex long-horizon manipulation tasks, exhibiting task completion rates that often exceed that of the next best available approach by a significant margin,
+and (iii) ablations that study modes of generalization, as well as how VLP scales with more compute.
+VLP presents a modern re-examination of visual planning by integrating large generative models pretrained on Internet-scale data, and is not without limitations. We discuss these in \sect{sec:conclusion} and videos will be made available at: \href{https://video-language-planning.io/}{https://video-language-planning.io/}
+
+
+
+\section{Video Language Planning}
+
+
+
+Our planning system, \model{}, takes a visual observation $x_0$ of a scene and a natural language goal $g$ and infers a video plan $\{x_t\}_{1:T}$, where each image $x_t$ is as a sub-goal to accomplish $g$.  We assume that each image $x_t$ serves as an accurate representation of world state and use a image goal-conditioned policy as a controller to infer low level control actions $u$ to reach each image state. 
+
+Below, we first discuss how vision-language and video models are used in \model{} as planning submodules \sect{sect:synergy}. Next, we talk about our tree-search algorithm using vision-language and video building blocks in \sect{sect:plan}. Finally, in \sect{sect:action_regression}, we discuss how we can convert video plans into policies to accomplish each long-horizon task.
+
+\subsection{Using Vision-Language and Video Models as Planning Submodules}
+\label{sect:synergy}
+
+\looseness=-1
+We first discuss how to use vision-language and video models as sub-modules in \model to synthesize long horizon plans. At a high level, we use the multimodal processing power of VLMs to propose abstract 
+text actions $a^i$ to execute given goals and images.
+We then use the dynamics knowledge of video models to accurately synthesize possible future world states $x_{1:T}^i$ when abstract actions are executed. Finally, we use a VLM to process possible future world states $x_{1:T}^i$ and assess which sequence $x_{1:T}$ and associated actions are the most promising to complete a task. 
+
+\looseness=-1
+\myparagraph{Vision-Language Models as Policies.}  Given a high-level goal $g$, \model searches over a space of possible abstract actions;  these text actions $a$ are generated by a VLM policy $\pi_{\text{VLM}}(x, g) \rightarrow a$ that is conditioned both on the goal $g$ and an image $x$ of the current state.  We implement this policy following ~\citet{driess2023palm} and query the VLM for a natural language action to take given as context the natural language goal and a tokenized embedding of the current image (\fig{fig:teaser} Top Left).  We experiment with two different strategies for constructing this policy. In the first, we provide the VLM a set of example text action labels and ask the VLM to predict possible actions to accomplish a goal.  In the second, we finetune the PaLM-E model on randomly selected short trajectory snippets $x_{1:S}$ labeled with abstract actions 
+inside a long trajectory $x_{1:H}$ that accomplishes a long horizon goal $g$.
+
+\myparagraph{Video Models as Dynamics Models.} In order to perform the high-level search, given an image $x$ of a current state and a language description of an abstract action, we need to predict the concrete resulting state.  In addition, to generate low-level controls that instantiate this abstract action, we need a feasible sequence of low-level states that ``interpolate'' between the current state and the resulting state.  We obtain both of these things from a text-to-video model $f_{\text{VM}}(x, a)$, which takes an image $x$ and a short horizon text instruction $a$ and outputs a short synthesized video $x_{1:S}$ starting at the image observation $x_0$ (\fig{fig:teaser} Top Right) following  ~\citet{du2023learning}. We construct this text-to-video model by training on a set of short image trajectory snippets $x_{1:T}$ and associated language labels $a$. 
+
+\myparagraph{Vision-Language Models as Heuristic Functions.} To effectively prune branches in search, we use a VLM to implement a heuristic function $H_{\text{VLM}}(x, g)$ which takes as input an image observation $x$ and a natural language goal description $g$ and outputs a scalar ``heuristic'' predicting the number of actions required to reach a state satisfying goal $g$ from current state $x$ (\fig{fig:teaser} Bottom Left). To construct this heuristic function, we finetune a PaLM-E model using long trajectory snippets $x_{1:H}$ which accomplish a long horizon goal $g$, and train it to predict, given an image in the subtrajectory $x_t$, the number of steps left until the end of the trajectory snippet. The negated number of predicted steps to goal completion from VLM is used to implement $H_{\text{VLM}}(x, g)$ (so that high heuristic value corresponds to being close to goal completion).
+
+\input{figText/code}
+\subsection{Planning with Vision-Language Models and Video Models}
+\label{sect:plan}
+Given a combination of modules discussed in \sect{sect:synergy}, directly applying the $\pi_{\text{VLM}}$ to infer text actions $a$ to reach goal $g$ is not sufficient, as $\pi_{\text{VLM}}$ is not able to perform sufficiently accurate long-horizon reasoning to select actions that are helpful in the long run. Furthermore, there are many possible low-level image sub-sequences that correspond to different ways to perform $a$, but it is critical to select one that is consistent with the rest of the actions that must be taken to reach $g$.
+
+Instead, we propose to search for a sequence of actions to reach $g$, corresponding to finding a long-horizon video plan $x_{1:H}$ which optimizes 
+\begin{equation}
+ x_{1:H}^{*} = \argmax_{x_{1:H} \sim f_{\text{VM}}, \pi_{\text{VLM}}} H_{\text{VLM}}(x_H, g).   
+ \label{eqn:optimize}
+\end{equation}
+A separate procedure is then used to instantiate control actions $u$ to enact the optimized video plan $x_{1:H}^{*}$.  To sample long-horizon video plans $x_{1:H}$, we first synthesize a short horizon video plan $x_{1:S}$ from a starting image $x$ through $x_{1:S} = f_{\text{VM}}(x, \pi_{\text{VLM}}(x, g))$ and autoregressively extend to a full long-horizon video plan by recursively applying $f_{\text{VM}}(x, \pi_{\text{VLM}}(x, g))$ on the final synthesized image state $x_S$. To optimize across video plans in \eqn{eqn:optimize}, we use a tree-search procedure based on parallel hill climbing~\citep{selman2006hill} (illustrated in Algorithm~\ref{alg:cond_gen}). 
+
+Our planning algorithm initializes a set of $B$ parallel video plan beams. At each step of the planning horizon, for each video beam, we first sample a set of $A$ actions using $\pi_{\text{VLM}}(x, g)$, and for each action we synthesize $D$ different videos using $f_{\text{VM}}(x, a)$. We then use our heuristic function $H_{\text{VLM}}(x, g)$ to select the generated video with the highest heuristic among the $A \times D$ generated videos and extend the corresponding video plan beam with this generated video. Over the course of plan generation, certain video plan beams will  obtain high heuristic value and be more promising to explore. Therefore, every 5 steps, we discard the beam with the lowest value and replicate its video plan with the beam with the highest value. Our final full long horizon video plan corresponds to the beam with highest heuristic value at the end of planning. 
+
+\myparagraph{Preventing Exploitative Model Dynamics.} When our planning procedure optimizes the VLM heuristic function $H_{\text{VLM}}(x, g)$ it can exploit irregularities in the dynamics model $f_{\text{VM}}(x, a)$ to get artificially high estimates. For instance, the planning procedure can exploit videos from $f_{\text{VM}}(x, a)$ where key objects have teleported to desired locations or where the final image observation obscures undesirable portions of world state. To prevent over-exploitation of $H_{\text{VLM}}(x,g)$, during the planning procedure in Algorithm~\ref{alg:cond_gen}, we discard generated videos from $f_{\text{VM}}(x, a)$ if they increase the the heuristic estimate $H_{\text{VLM}}(x, g)$ above a fixed threshold.
+
+\input{figText/video_plans}
+
+\subsection{Action Regression From Video through Goal-Conditioned Policies}
+\label{sect:action_regression}
+
+Given a synthesized video plan $x_{1:H}$, to execute tasks, we must infer control actions $u$ to reach synthesized images. Prior work infers actions from synthesized videos by using an inverse-dynamics model on each synthesized frame~\citep{du2023learning}.
+
+In many settings, a single action may not be sufficient to directly reach the next synthesized image, {\it i.e.} if you need to remove the cap off a toothbrush, and even in settings in which this is the case, it may be difficult to precisely predict the correct action to reach the next frame. To reduce the burden on the inverse dynamics model, we propose to use a short-horizon goal-conditioned policy $\pi_{\text{control}}(x, x_g)$, which  given the current image observation $x$ and next frame in a video plan $x_g$ outputs a low level control action $u$ that makes progress towards $x_g$. For each frame in our video plan $x_{1:H}$, the goal-conditioned policy is executed for a fixed pre-specified number of timesteps. We train $\pi_{\text{control}}$ using paired image and low level control snippets $x_{1:T}^i$ and $u_{1:T}^i$, where we sample a random timestep $t$, a corresponding state $x_t$, and future state $x_{t+h}$, and train $\pi_{\text{control}}(x_t, x_{t+h})$ to predict $u_t$.
+
+\myparagraph{Replanning.} Given a very long-horizon task, it is both difficult to use $\pi_{\text{control}}$ to accurately execute the full video plan $x_{1:H}$ (due to accumulating error) and difficult to fully synthesize a plan that completely finishes a long-horizon task given a fixed planning horizon.  To circumvent this issue, we use receding horizon control 
+ strategy~\citep{kwon2005receding}, where we  generate videos plans with a fixed horizon (that might not fully complete the task), and then repeatedly regenerate/replan video plans with the same horizon after a fixed number of action executions.
+
+\input{tables/video_qualitative}
+
+
+
+\section{Experimental Results}
+
+
+\input{tables/plan_ablation}
+\input{figText/fractal_plan}
+\input{figText/aloha_plan}
+
+We first evaluate the ability of \model to synthesize long-horizon video plans for different tasks in \sect{sect:video_plan}. We then investigate \model's ability to %
+execute generated video plans in various environments in \sect{sect:action}. Finally, we further investigate generalization capabilities of \model in \sect{sect:generalization}.
+
+\subsection{Long-Horizon Video Synthesis}
+
+\input{tables/language_table}
+\input{figText/sim_execution}
+
+\label{sect:video_plan}
+\myparagraph{Baselines.} We compare our approach with two other approaches for synthesizing long-horizon video plans. First, we consider training a text-to-video model $f_{\text{VM}}$ on %
+long horizon text goals, as in UniPi ~\citep{du2023learning}, omitting the entire VLP planning process. Next, we consider synthesizing long horizon video plans by chaining $\pi_{\text{VLM}}$ policy with $f_{\text{VM}}$, without the heuristic function.
+
+\myparagraph{Object Rearrangement.} We first illustrate video plans in the Language Table environment~\citep{lynch2023interactive}. We give as input to \model a random image and randomly chosen language goal. We then visualize the generated VLP plans (\fig{fig:video_gen_blocks}).  We report  the quantitative success of synthesizing long-horizon videos given random starting images for each task in Language Table in \tbl{tbl:video_accuracy}. For each reported number, we generated a total of 50 videos from each method and visually assessed the percentage of time the video successfully solved the given task. \model substantially outperforms the baseline of directly synthesizing videos given a long-horizon prompt, indicating the importance of hierarchical structure. \model further outperforms the ablation of only using a VLM policy with a video model, pointing to the effectiveness of the \model planning procedure and including the value function.
+
+\myparagraph{Effect of Search of Video Synthesis.} We analyze the effect of search in generating long-horizon videos in \fig{tbl:plan_video_ablation} (left). We consider increasing the video branching, language branching and the beams in the search procedure. We find that each increase of branching factor in search substantially increases the success of synthesized long horizon plans. A qualitative illustration of the difference of generated plans with small and large branching factor is illustrated in \fig{tbl:plan_video_ablation} (right).
+
+\myparagraph{Planning on 7DoF Mobile Manipulators.} We qualitatively illustrate how we can generate plans on a higher-DoF, 7DoF Mobile Manipulator in \fig{fig:video_fractal}. Our planning system is able to generate videos of actions that both open and close drawers in order to satisfy specified text prompts.
+
+\myparagraph{Planning on Multicamera 14DoF Bi-Manual Manipulators.} We further illustrate how our approach can generate multi-view 4-camera videos of dexterous manipulation on the 14DoF bi-manual ALOHA~\citep{zhao2023learning} platform in \fig{fig:video_aloha}. Our video model outputs videos across views simultaneously (by concatenating each view channelwise), while our VLM policy and heuristic function takes as input top and side views.  Our approach is able to synthesize multiview consistent plans which are able to both stack bowls, cups, and utensils.
+
+\input{figText/real_execution}
+\input{figText/fractal_execution}
+
+\subsection{Long-Horizon Execution}
+\label{sect:action}
+
+We next evaluate the ability of \model to not only generate plans as in \sect{sect:video_plan}, but to actually use  planning (and replanning) to {\em{execute}} long-horizon tasks in closed-loop environments.
+
+\myparagraph{Baselines.} We compare our approach to a set of approaches to solve long-horizon tasks. (i) We consider using a VLM to directly plan, using PaLM-E ~\citep{driess2023palm} to plan short horizon text snippets to execute, which are converted to actions using a text-conditioned policy, conditioned on generated text snippets from PaLM-E. We also (ii) compare with UniPi ~\citep{du2023learning}, where videos are directly generated by a text-to-video model trained on long-horizon text goals and converted to actions using our goal-conditioned policy. Next, we consider (iii) directly learning language-conditioned behavioral cloning policy on long-horizon text and actions, using the codebase and architecture of the LAVA model ~\cite{lynch2023interactive}. Finally, we (iv) compare with leveraging existing vision-language models for control, and train the RT2 model ~\cite{brohan2023rt} on long-horizon text and actions. 
+
+\myparagraph{Quantitative Results.  We report quantitative results in \tbl{tbl:language_table_sim}, and find that our approach substantially outperforms all baseline methods. As the task horizon of each task is very long (around 1500 steps), we found that many baseline methods would become ``stuck" and stop acting effectively. We illustrate example executions using \model{} in \fig{fig:sim_execution}.
+\myparagraph{Effect of Planning.} Next, we analyze the effect of the amount of planning on execution success rates in \tbl{tbl:execution_ablation}. We find that increasing both the planning horizon and the branching factor of planning substantially improves the success of task execution (at the cost of inference time).
+
+\myparagraph{Ablations of Goal-Conditioned Policy} We further conduct experiments on different approaches to extracting actions from videos in \tbl{tbl:action_ablation}. We find that using a goal-conditioned policy conditioned on each intermediate frame in a synthesized video leads to the best overall performance (outperforming using a goal-conditioned policy sparsely on the end frames of each short-horizon video).
+
+\input{tables/ablations}
+
+\myparagraph{Real Execution.} We provide executions of \model on multiple real-world robots in \fig{fig:real_execution} and \fig{fig:fractal_execution}.  As in \fig{fig:real_execution}, \model is able to effectively execute each shown long-horizon task on a real Language Table robot. We further provide executions of generated video plans of our approach on the 7DoF mobile manipulator in \fig{fig:fractal_execution}. Similarly we find that a goal-conditioned policy can realize plans.
+
+\input{figText/generalization}
+\input{figText/task_generalization}
+\subsection{Generalization}
+\label{sect:generalization}
+
+\myparagraph{Generalization to Lighting and Objects.} In \model, policy execution is abstracted into visual goal generation followed by a goal-conditioned controller. With this abstraction, a video model can simply focus on capturing the visual dynamics objects, while a goal-conditioned policy needs to focus only on relevant visual details to achieve the next (nearby) goal. We found that this enables \model to generalize well, as the video model is able to visually generalize to new images, while the policy is able to generalize well to nearby new visual goals.
+In \fig{fig:generalization} (top), \model is able to generalize the task of putting all objects in top right corner, to three new objects, a rubber donut and cupcake and a wooden hexagon.  In \fig{fig:generalization} (bottom) \model is further able to generalize to lighting conditions substantially different than the ones the model was trained on and can be successfully deployed to a new robot in a different building location.
+
+\myparagraph{Generalization to New Tasks} In \model, both VLM and text-to-video models may be pre-trained on a vast amount of Internet data. In \fig{fig:task_generalization}, we  train both VLM and text-to-video models on a large mix of datasets and illustrate how it further generalizes and executes new tasks on unseen objects.
+
+
+
+
+\section{Related Work}
+
+
+
+There is a great deal of recent work in leveraging large pretrained foundation models for decision-making agents~\citep{yang2023foundation} -- in particular, using LLMs (and the commonsense knowledge they store) to infer actions represented in text.
+For example, given language instructions, LLMs can be prompted to generate high-level step-by-step plans~\citep{huang2022language,ahn2022can,wang2023describe}
+-- each step mapped robot actions, invoked with pre-trained policies or existing APIs~\citep{liang2023code}.
+Using existing VLMs~\citep{chen2022pali}, plans can also be conditioned on visual inputs, represented with language descriptions ~\citep{zeng2022socratic,huang2022inner} or token embeddings co-trained with LLMs~\citep{driess2023palm}.
+Nevertheless, VLMs are often pretrained on static image datasets (\ie image-in, text-out), and subsequently (i) are limited to plans that can be expressed in text, and (ii) may struggle to reason about the dynamics of the world.
+Video models, on the other hand, exhibit potential to generate informative image sequences of the future, and there exists a body of work using them as dynamics models to capture object motion across image states ~\citep{finn2016unsupervised,xue2016visual,oprea2020review,oh2015action}. 
+Generating high-quality videos over long time horizons is a known challenge~\citep{babaeizadeh2021fitvid,saxena2021clockwork};
+however, recent progress in larger models and text-conditioning give rise to a new generation of text-to-video models that can generate detailed image frames \citep{ho2022imagen,villegas2022phenaki}, that can drive policies for decision making~\citep{du2023learning}. %
+However, these works focus predominantly on short-horizon videos.
+Our work investigates using text-to-video models together with VLMs to produce long-horizon video plans (potentially predicting hundreds of frames into the future), leveraging the scalability of tree search to plan in the space of videos and language.
+
+Our work can be viewed as bringing together two families of generative foundation models to compose new capabilities -- a strategy shown to be effective for applications such as 2D image synthesis~\citep{du2020compositional,liu2021learning,lace, liu2022compositional,wu2022zeroc,du2023reduce,wang2023concept}, 3D synthesis~\citep{po2023compositional}, video synthesis~\citep{yang2023probabilistic}, trajectory planning~\citep{Du2019ModelBP,urain2021composable,gkanatsios2023energy,yang2023compositional} and multimodal perception~\citep{li2022pre,zeng2022socratic}. 
+Most similar to our work, HiP~\citep{ajay2023compositional} combines language models, video models, and action models for hierarchical planning. In contrast, our work uses a forward search procedure to combine the strengths of a VLM and a video model. This composition through forward search enables us to simulate and reason about long horizons of future actions, while HiP only generates and acts on plans one step at a time.
+
+
+
+\section{Limitations and Conclusion}
+
+\label{sec:conclusion}
+
+\myparagraph{Limitations.} Our planning approach leverages images as a world state representation. In many tasks, this is insufficient as it does not capture the full 3D state and cannot encode latent factors such as physics or mass. 
+Limitations can be partly remedied by generating multi-view videos or by using heuristic function with the full video plan as input.
+In addition, we observed that our video dynamics model does not always simulate dynamics accurately. In several situations, we observed that synthesized videos would make objects spontaneously appear or teleport to new locations. We believe that larger video models, additional training data or explicit reinforcement learning feedback for physics~\citep{black2023training} could help solve these problems.
+
+
+\looseness=-1
+\myparagraph{Conclusions.} We have presented \model, an approach to long-horizon decision making by combining VLMs with text-to-video models. We illustrate the power of test-time composition, in this case planning, to generate behaviors much more complex than its components. While our experiments largely explore \model in the context of robotics, there may be downstream applications in other areas too, such as steerable media generation. We believe that future exploration in test-time compositions of  different foundation models can be a fruitful source of gains to construct more complex intelligent systems. 
+
+\myparagraph{Acknowledgements.} We would like to thank Tomas Lozano-Perez for providing helpful comments in the project and Kamyar Ghasemipour for help in setting up experiments on the Language Table real robot. We gratefully acknowledge support from NSF grant 2214177; from AFOSR grant FA9550-22-1-0249; from ONR MURI grant N00014-22-1-2740; from ARO grant W911NF-23-1-0034; from the MIT-IBM Watson Lab; from the MIT Quest for Intelligence; and from the Boston Dynamics Artificial Intelligence Institute. Yilun Du is supported by a NSF Graduate Fellowship.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

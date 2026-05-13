@@ -1,0 +1,136 @@
+# The LLM Surgeon
+
+- Decision: Accept
+- Scores: 5, 5, 5
+
+## Abstract
+\vspace{-0.7em}
+State-of-the-art language models are becoming increasingly large in an effort to achieve the highest performance on large corpora of available textual data. However, the sheer size of the Transformer architectures makes it difficult to deploy models within computational, environmental or device-specific constraints. We explore data-driven compression of existing pretrained models as an alternative to training smaller models from scratch. 
+To do so, we scale Kronecker-factored curvature approximations of the target loss landscape to large language models. In doing so, we can compute both the dynamic allocation of structures that can be removed as well as updates of remaining weights that account for the removal. We provide a general framework for unstructured, semi-structured and structured pruning and improve upon weight updates to capture more correlations between weights, while remaining computationally efficient. 
+Experimentally, our method can prune rows and columns from a range of OPT models and Llamav2-7B by 20\%-30\%, with a negligible loss in performance, and achieve state-of-the-art results in unstructured and semi-structured pruning of large language models.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a way to prune the weights of a pretrained LLM with a negligible loss in performance by iteratively solving a quadratic optimization problem using the curvature of a local minimum. To save the memory of materializing hessian, the work calculates the covariance layer-wise with Kronecker factorization. Also, the curvature is calculated incrementally and the remaining weights are corrected with a first-order term as more weights are pruned so that the weight remains in a local minimum.
+
+### Strengths
+The approach is sound and is presented well. Not having to materialize the hessian makes this amenable for LLM pruning.
+
+### Weaknesses
+While it is believable that this method would generalize, the setup is unsatisfying in that the dataset used for compression is drawn from wikitext-2 which is a narrow domain (meaning the loss landscape may be easier to optimize and prune than a broader distribution), and the final model is evaluated only on the test perplexity of the same dataset. SparseGPT uses C4 and reports downstream performance on various standard benchmarks. The paper could really strengthen its claim by repeating the same setup as SparseGPT. Downstream benchmarks are required for a fair comparison and acceptance of the work.
+
+### Questions
+Equation 2 should read `- log(D | theta)`. There is a typo in `General solution  We denote ... e_{q_k}` => `e_{k_q}`.
+
+Related Work could include more previous works on LLM compression.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a method called "LLM Surgeon" for efficient pruning and compression of large pretrained language models like OPT and LLAMa. It scales up second-order Hessian-based pruning methods like Optimal Brain Surgeon using Kronecker-factored approximations of the Fisher information matrix. It derives closed-form solutions for removal costs and correlated weight updates when pruning multiple weights jointly. Experiments show the method can prune OPT and LLAMa models by 20-30% with minor performance loss and outperforms prior work.
+
+### Strengths
+- The paper is well-written and clearly presented; 
+- The paper provides a general pruning framework applicable to different structured and unstructured schemes. 
+- The paper provides careful derivation of update rules that consider correlations between weights, theoretically principled and extends classical segundo-order pruning methods.
+- The proposed methods achieves state-of-the-art pruning results on large language models, especially for structured pruning. 
+- Detailed ablation regarding the low-rank components, approximation methods, as well as the qualitative sparsity level analyses are provided to show the comprehensiveness of the proposed methods and design choices;
+
+### Weaknesses
+- The paper still uses approximations for computational tractability which limits pruning performance.
+- Structured pruning leads to irregular sparsity patterns which are difficult to accelerate. The real inference speedup or memory savings after pruning is unknown; 
+- Additional FLOPs for approximation and updating offsets gains during deployment are needed, while the detailed comparison and discussion might be missing.
+- Some related works might also be good to include [1];
+
+[1] Yu, Shixing, et al. "Hessian-aware pruning and optimal neural implant." Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision. 2022.
+
+### Questions
+- Could the authors provide both inference speed and additional cost for approximation and updating the offsets?
+- Could larger model sizes also be included and evaluated throughout?
+- Besides the PPL, could the author also provide the 0shot performance degradation regarding the OPT/LLaMA models for a comprehensive evaluation;
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper introduces LLM Surgeon, a method that enhances the scalability of Kronecker-factored curvature approximations of the targeted loss landscapes, designed for pruning LLMs at arbitrary sparse patterns. The authors demonstrate that this proposed methodology consistently improves the PPL performance of current methods across a range of LLMs.
+
+### Strengths
+1. The paper is well-organized and easy to comprehend.
+
+2. The fundamental idea for estimating the curvature of the loss landscape is reasonable and innovative.
+
+### Weaknesses
+1. Since the authors adopt a multi-shot sparse approach, it would be beneficial to quantitatively compare the time costs and GPU memory consumption with SparseGPT.
+
+2. While the authors emphasize sparsity in large models, the largest model they utilize is of 7-billion parameters. It might provide readers with a clearer view if experiments involving larger model sizes were included.
+
+3. Global rank ordering is a sound strategy, but there seems to be a lack of an ablation experiment, that is, whether the suggested method outperforms SparseGPT under the same layer-wise sparsity situation.
+
+4. Although the authors underlines that LLM surgeon can be migrated to structured pruning, and as the authors stated, "To the best of our knowledge, this is the first method to successfully perform structured pruning for LLMs," they do not discuss nor compare their approach to the already presented structured LLM pruning method[1]. This lack of discussion appears less meticulous. Furthermore, the authors should also consider comparing their work with another state-of-the-art large model sparse method, Wanda [2], which can also be adapted for pruning LLMs at any patterns.
+
+[1] LLM-Pruner: On the Structural Pruning of Large Language Models. In NeurIPS, 2023
+[2] A Simple and Effective Pruning Approach for Large Language Models. In Arxiv, 2023
+
+### Questions
+Please see the weakness part.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

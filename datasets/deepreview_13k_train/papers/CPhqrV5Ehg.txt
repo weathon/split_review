@@ -1,0 +1,322 @@
+\title{Efficient Controlled Language Generation with Low-Rank Autoregressive Reward Models}
+
+\begin{abstract}
+
+Language models trained on large amounts of data are known to produce inappropriate content in some cases and require careful tuning to be used in the real world. We revisit the reward augmented decoding (RAD) approach to control the generation from a language model using the scores from a task-specific reward model. We investigate the training objective of RAD, and reformulate it as a task of learning a reward matrix. We show that RAD is designed to support high flexibility when representing the reward matrices, which leads to a higher computational costs during decoding. However, we demonstrate that RAD does not use its full flexibility. Motivated by this, we propose a simpler but more efficient low-rank parametrization of the reward model enabling fast and effective guided decoding. For the detoxification and sentiment control tasks, we show that our low-rank reward model performs on par with the more flexible RAD parametrization, while requiring only a single reward model call per generated token.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+ 
+Generative large language models (LLMs) have gained a lot of popularity in recent years and shown impressive results in zero-shot and few-shot scenarios on numerous downstream tasks \citep{touvron2023llama2openfoundation, openai2024gpt4, jiang2023mistral}. These large-scale models are pretrained on large amounts of data, and are known to inherit and memorize underlying biases \citep{sheng-etal-2019-woman} as well as to provide unsafe responses \citep{wallace-etal-2019-universal, ganguliRedTeamingLanguage2022}, necessitating further tuning for safer deployment and control \citep{ouyangTrainingLanguageModels2022}.
+Control over LLMs can be roughly divided into methods which modify the original model via finetuning \citep{ouyangTrainingLanguageModels2022, rafailovDirectPreferenceOptimization2023}, and decoding-time solutions, which do not modify the parameters of the original model. As models increase in size, finetuning becomes prohibitive with limited computational resources. In this work, we focus on a more modular approach of decoding-time guidance, and assume we have access to top-$k$ logits of a black-box base language model (see \cref{sec:preliminaries} for details). In this line of work, a discriminator model is trained to modify or rerank the logits of the base model during decoding in order to satisfy the desired constraint \citep{yang-klein-2021-fudge}, while preserving the distribution of the language model as much as possible.
+
+Recently \citet{deng_2023_rad} proposed the reward augmented generation (RAD), an approach to train an autoregressive reward model as the discriminator. While RAD demonstrates high effectiveness for controlled generation, it scales poorly when the number of next token candidates grows, requiring a separate forward pass through the backbone of the reward model for each token candidate. In this aspect, RAD diverges from previous work of \citet{liu-etal-2021-dexperts} and \citet{krause-etal-2021-gedi-generative}: the latter propose more efficient approaches using external attribute-conditioned language models, where each expert model only performs a single forward pass to predict the scores for all next token candidates.  
+
+In \cref{sec:matrix_factorization}, we analyze RAD and reformulate its training objective in terms of approximating an incomplete reward matrix. We highlight that the RAD approach is flexible enough to represent a large space of reward matrices including those of high rank. However, when we empirically measure the rank of the reward matrix learned by RAD, it appears to be \emph{low-rank}. This observation suggests that RAD might not use its full flexibility, which motivates us to reconsider the trade-off between efficiency and expressivity of reward models. By analyzing the incomplete reward matrix constructed from the training data, we observe that it is enough to have a low-rank approximation to this matrix in order to reconstruct its observed values.
+
+In light of this observation, we propose the \emph{autoregressive reward model} (ARM), a low-rank reward model which combines the strengths of two paradigms: fast inference with language modeling prediction style and high quality of generations following the reward augmented decoding (RAD) approach \citep{deng_2023_rad}. We propose a simple strategy for how to transform a pretrained language model into an efficient autoregressive reward model. In the evaluation, we show that guided decoding with our model results in a comparable attribute control/fluency to the more flexible but more computationally intensive RAD approach.
+
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Guided decoding with external experts}
+\label{sec:preliminaries}
+In this section, we outline the approach of guiding a base language model with external token-level discriminators. At each step of decoding, both the base model and the discriminator observe an already generated prefix $x$, and cooperate to score the next token candidates $v \in V$. A language model predicts the logits 
+ $z_{\text{LM}}(\cdot | x) \in \mathbb{R}^{|V|}$  and the goal of discriminator is to augment these logits with reward scores $\hat{r}(\cdot | x) \in \mathbb{R}^{|V|}$. A standard practice is to consider only likely tokens $V' \subseteq V$ at each decoding step \eg via top-$k$ \citep{fan-etal-2018-hierarchical, deng_2023_rad} or nucleus sampling \citep{Holtzman2020The}:
+ \[
+    z(v|x) = \begin{cases}
+      z_{\text{LM}}(v | x) + \beta \hat{r}(v | x), & \text{if} \, v \in V' \\
+      -\infty, & \text{otherwise}
+    \end{cases}
+ \]
+ and the next token is sampled from the categorical distribution:
+\begin{equation}
+\label{eq:Softmax}
+    \tilde{p}(x) = \softmax(z(v|x)).
+\end{equation}
+While some language models might have a restrictive application programming interface (API) for safety reasons, this line of work makes a reasonable assumption that we have access to the top-$k$ logits of a language model either directly or via API for a relatively small $k \ll |V|$.
+
+To define reward scores, GeDi \citep{liu-etal-2021-dexperts} and DExperts \citep{krause-etal-2021-gedi-generative} use attribute-conditioned 
+ unidirectional language models (undesired attribute in GeDi or two LM experts for desired and undesired attribute in DExperts), trained via the standard language modeling objective on class-conditioned data: $\hat{r}_{y}(v|x) = z_t(v | x, y)$, where $y \in \{0;1\}$ is the attribute (\eg positive/negative sentiment). 
+Given a prefix $x$ they only pass it once through the external language model backbone, relying on the linear output layer to obtain the scores for each of the next token candidates. 
+
+Alternatively, RAD \citep{deng_2023_rad} trains a unidirectional reward model to predict the attribute of interest for a prefix \emph{concatenated} with a next token candidate $\hat{r}_{\text{RAD}}([x, v])$, where $[\cdot,\cdot]$ denotes the concatenation of a prefix and a next token candidate. 
+This approach requires passing each next token candidate as \textit{input} to the model, thus, to obtain the scores for $k$ next token candidates $v$ for top-$k$ decoding RAD would need $k$ 
+  forward calls of the reward model, which can slow down inference significantly and constrains them to limit the number of next token candidates. Despite being less efficient, RAD outperforms the approach with attribute-conditioned language models in terms of controlled generation quality.
+\subsection{RAD training}
+\label{sec:rad_training}
+In this section, we outline how RAD \citep{deng_2023_rad} uses labeled data to train a reward model. 
+At the training stage, we assume that we have a dataset $\mathcal{D} = \{(u^{(i)}, y^{(i)})\}_{i=1}^n$ of $n$ text utterances $u$ of length $l(u)$ and responses $y \in [0;1]$. RAD trains a reward model to predict $y$ given a text input. While a simple strategy would be to train the reward model on full utterances $u$ from $\mathcal{D}$, 
+it is important that the model predicts meaningful rewards also for
+\emph{partially} generated utterances,
+needed during guided decoding.
+The RAD approach is to
+first extend the dataset by considering all partial utterance prefixes $u_{1:t}$ along with corresponding weights:
+\[
+\mathcal{D}_{f} = \{(x, y, \lambda(t, l(u))) \, | \,x\!=\!u_{1:t}, t\in(1,\ldots,l(u)) ,(u,y) \in \mathcal{D}\},
+\] where $\lambda$ are the weights $\lambda(t, l(u))~=~\frac{t}{\sum_{t'=1}^{l(u)} t'}$ for each prefix used to up-weight prefixes closer to the full sentence, and $\sum_{t=1}^{l(u)} \lambda(t, l(u)) = 1$.
+Then, during training, RAD takes the input prefix $x=[x', v]$ and incurs a weighted squared loss for approximating the future reward: 
+\begin{equation}
+\label{eq:cumulative_loss}
+    \cL(\hat{r}(v|x'), y, \lambda) = \lambda \cdot (\hat{r}(v|x') - y)^2.
+\end{equation}
+During training, we 
+can use teacher forcing to process all prefixes of an utterance in a single pass.
+
+
+
+\section{Reward modeling as low-rank matrix factorization}
+
+
+\subsection{Analysis of RAD}
+\label{sec:matrix_factorization}
+
+To better understand the training objective of RAD, we start by looking at the optimization problems defined in \cref{sec:rad_training}, where we optimize a reward model to approximate the future responses. A unidirectional reward model can predict a reward value for each next next token candidate. If we enumerate all the contexts $x'$ in the training data and all possible next tokens $v$, we task a reward model to predict the values of $R \in \mathbb{R}^{N \times |V|}$, which we dub the \emph{reward matrix}. 
+
+If each context would be observed only once, $R$ would have a single observed reward in each row. For short and common contexts we can observe more continuations per row, and also for some contexts there can be ambiguities: $\{(x,y_1, \lambda_1), ... (x, y_m, \lambda_m)\}$. 
+From a mean squared error point of view, it is equivalent to compress these ambiguities by taking the weighted average of their $y$ (\cref{app:loss_minimizer}):
+\begin{equation}
+    R[x',v] = \frac{\sum_{\lambda, y \sim \mathcal{D}_f[x]} \lambda y}{\sum_{\lambda,y \sim \mathcal{D}_f[x]} \lambda}.
+\end{equation}
+From this perpective, reward modeling 
+can be interpreted as a matrix completion problem. The training dataset \(\mathcal{D}_f\)
+gives us only an incomplete view of a true reward matrix \(R\). 
+Following the notation in the matrix completion literature \citep{JMLR:v11:mazumder10a},
+denote by $\Omega$ the set of indices of the observed entries
+$\{(x',v) \,|\, x=[x',v], \,x \in D_f\}$,
+and by \(P_\Omega(R)\) the projection of \(R\) that sets all indices outside \(\Omega\) to zero. 
+The full RAD objective is equivalent to minimizing $\|P_{\Omega}(R)~-~P_{\Omega}(\hat{R}_{\text{RAD}})\|_F^2$,
+where each entry \(\hat{R}_{\text{RAD}}[x',v]=\hat{r}(v|x')\) can be computed with a forward pass. %Transformer \citep{vaswani_transformer}.
+
+
+Given a prefix $x$, RAD accepts a token candidate $v$ as an additional \textbf{input} to the model  $\hat{R}_{\text{RAD}}[x',v]=\hat{r}_{\text{RAD}}([x',v])$, passing $v$ through the layers of the reward model. For this reason, we expect RAD to have the capacity to represent a large space of reward matrices including matrices with higher rank, which we empirically verify in \cref{app:rad_rank}. This flexibility does come at the cost: to score many next token candidates during top-$k$ decoding, RAD needs to do a forward pass through all layers of the model for each of the $k$ next token candidates. Hence, an important question is \emph{do we need this flexibility at the cost of slower decoding?}
+
+In \cref{fig:rank_of_rad}, we aim to measure the rank of $\hat{R}_{\text{RAD}}$ for RAD trained on two datasets: for detoxification and sentiment control tasks (discussed in detail in \cref{sec:experiments}). To numerically estimate the rank, we follow \citet{finlayson2024closing} and first sample $N$ random prefixes $x$ from the dataset $\mathcal{D}_f$ to calculate $N$ full rows of $\hat{R}_{\text{RAD}}$ (requiring $N \cdot |V|$ calls to the RAD reward model). Then we use singular value decomposition with the standard singular value cutoff to compute the rank (\cref{app:matrix_rank}). We observe that the reward matrix learned by RAD tends to be \emph{low-rank}, suggesting that it is possible to use less flexible but faster reward models to improve the efficiency of reward models. 
+
+ Note that the presence of a low-rank solution compatible with $\Omega$ does not imply that the true reward, if it could be fully observed, is necessarily low rank. We argue that low-rank predictions can partly be explained by the specifics of the training objective. Particularly, the incompleteness of $P_{\Omega}(R)$ makes it easier for a reward model to learn a low rank approximation, especially for unique prefixes $x$, as we demonstrate in \cref{app:rank_1}.
+To better understand this phenomenon, we would like to understand whether the $P_{\Omega}(R)$ can be fit with the low-rank model. In \cref{app:rank_of_R}, we demonstrate that indeed incomplete $P_{\Omega}(R)$ matrix can be fit with the low-rank matrix factorization with a small error. This implies that the training dataset can be fit by a model that produces low-rank $\hat{R}$, regardless of the specifics of said model.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.90\textwidth]{final_plots/rank_of_rad.pdf}
+  \caption{We numerically estimate the rank of $\hat{R}_{\text{RAD}}$ by increasing the number of seen randomly selected training prefixes (rows of the $\hat{R}_{RAD}$ matrix), and observe that the rank tends to be less than the model dimension $d=764$ and much less than $|V|$, the maximal possible rank of $P_{\Omega}(R)$.}
+  \label{fig:rank_of_rad}
+\end{figure}
+\subsection{Low-Rank Autoregressive Reward Model}
+
+Motivated to reduce the decoding costs of RAD, we propose ARM (\cref{fig:demo}), a low-rank autoregressive reward model suitable for guided decoding, designed for efficient modeling of rewards scores for next token candidates.
+To ensure \textit{prediction efficiency} of the reward model, we aim to revisit the language modeling style of prediction \citep{liu-etal-2021-dexperts, krause-etal-2021-gedi-generative} and aim to predict the scores for all next token candidates with just a single forward pass through the backbone of a language model. 
+
+In contrast to RAD, ARM predicts the representation vector $h(x) \in \bbR^d$ given a prefix $x$ and uses output embeddings $e(v) \in \bbR^{d}$ to get the scores for all next token candidates.
+We propose the following ARM parametrization of the scores for the next tokens given the prefix:
+\begin{equation}
+\label{eq:softplus}
+    \hat{r}(v| x) = \underset{\text{baseline}}{\hat{r}_b(h(x))} + \Delta \hat{r}(e(v) | h(x)),
+\end{equation}
+where the baseline predicts the score for the prefix $x$ and $\Delta \hat{r}$ predicts how observing a next token $v$ changes the score. Particularly, we use a  \emph{linear parametrization}: %$\hat{r}_b(h) = \langle h, w \rangle$, $\Delta \hat{r}(e(v) | h(x)) = {\langle h(x), W e(v) \rangle}$:
+\begin{equation}
+\label{eq:linear_arm}
+    \hat{r}_{\text{ARM}}(v| x) = \langle h(x), w \rangle + \langle h(x), We(v) \rangle.
+\end{equation}
+Here, we introduced two attribute-specific parameters: $w\in \bbR^{d}$ for modeling the baseline reward score of the prefix, and $W\in \bbR^{d \times d}$ to model marginal rewards for each next token candidate. 
+Now it is clear that in contrast to RAD, ARM (as defined in \cref{eq:linear_arm}) performs a \emph{low-rank matrix factorization} of $P_{\Omega}(R)$:
+\begin{equation}
+\label{eq:rad_factors}
+    \hat{R}_{\text{ARM}} = H(w \mathbf{1}^T + WE) = HA,
+\end{equation}
+where we stack all context representations $x'$ into $H \in \mathbb{R}^{N \times d}$ and all next token representations into $WE \in \mathbb{R}^{d \times |V|}$, and $\mathbf{1}$ is a column $d$-vector of all ones. By rank inequality, $\rank(\hat{R}_{\text{ARM}}) = \rank(HA) \le \min(\rank(H), \rank(A)) \le d$, meaning that if $\rank(P_{\Omega}(R))>d$, ARM cannot possibly perfectly reconstruct $P_{\Omega}(R)$ no matter how flexible $h(x)$ is. In the language modeling literature the rank bottleneck problem is known as the \emph{softmax bottleneck} \citep{yang2018breaking} 
+and mitigation strategies are well-studied \citep{ganea2019breaking,chang-mccallum-2022-softmax}.
+
+In the experiments (\cref{sec:experiments}), we empirically demonstrate that 
+our low-rank ARM
+can match the performance of the more flexible RAD on the two standard controlled generation benchmarks. 
+\subsection{ARM training}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.65\textwidth]{fig/demo_resized.pdf}
+  \caption{During decoding, we augment the logits of the base language model with reward scores from ARM. ARM uses the language model output embeddings to efficiently predict the rewards for next token candidates.}
+  \label{fig:demo}
+\end{figure}
+To train ARM, we rely on the RAD approach to train a reward model. We split $x$ into a last token and remaining prefix: $x=[x',v]$. We pass $x'$ as input to the model, and $v$ indexes output embeddings~\eqref{eq:linear_arm}. 
+First, we train ARM on the responses from the dataset using the weighted squared loss:
+\begin{equation}
+\label{eq:cumulative_loss}
+    \cL(\hat{r}(v|x'), y, \lambda) = \lambda (\hat{r}(v|x') - y)^2
+\end{equation}
+Second, we train an ARM student to approximate the less efficient RAD teacher $\tilde{r}(x)$ using the \emph{distillation loss} \citep{hintonDistillingKnowledgeNeural2015}:
+\begin{equation}
+\label{eq:distil_loss}
+    \cL_{\text{dstl}}(\hat{r}(v|x'), \tilde{r}(x)) = (\hat{r}(v|x') - \tilde{r}(x))^2.
+\end{equation} 
+A reward model can only observe a limited number of next tokens $v$ given $x$ during finetuning. While the loss defined above provides a positive signal for some tokens $v$, it might be beneficial to regularize the prediction for other (unrelated) tokens, including rare or unseen tokens. In our parametrization~\eqref{eq:softplus}, it is natural to push the predicted reward towards the baseline for unrelated tokens. 
+We regularize the prediction of ARM to be close on average to the prefix baseline by forcing $\Delta \hat{r}$ to be close to $0$ for randomly sampled token candidates:
+\begin{equation}
+\label{eq:reg_loss}
+    \cL_{\text{reg}}(h(x)) = \mathbb{E}_{v' \sim \text{Uniform}[V]}\left[\Delta \hat{r}(e(v') | h(x))\right]^2,
+\end{equation}
+where we use one sample of $v'$ for each prefix position, sampling uniformly from the vocabulary.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Controlled generation}
+
+We follow previous work \citep{deng_2023_rad, liu-etal-2021-dexperts} and evaluate ARM on two controlled generation tasks: detoxification and sentiment control.
+
+In our experiments, we guide the decoding from a base model using a smaller finetuned reward model with the same tokenizer. Namely, we guide GPT-2-Large using a reward model finetuned from GPT-2-Small, and we guide the LLaMa-2-(7b/13b) \citep{touvron2023llama2openfoundation} base language model with a reward model finetuned from TinyLLaMa \citep{zhang2024tinyllama}. We finetune all parameters of the reward models except input/output embeddings, which remain frozen (we hope that, this way, the reward model generalizes better to unseen tokens).
+
+We conduct experiments in two regimes: first, by distilling less efficient RAD \citep{deng_2023_rad} using $\cL_{\text{dstl}}$ 
+ loss~\eqref{eq:distil_loss}; second, by training a reward model from scratch on the responses from the datasets using cumulative loss $\cL$~\eqref{eq:cumulative_loss}. 
+ In both settings, we use additional regularization $\cL_{\text{reg}}$ by default. For evaluation, we perform guided decoding using \emph{top-k} sampling from the categorical distribution defined in~\eqref{eq:Softmax}, where \emph{top-k} candidates are selected taking \emph{k} largest logits of the base model at the current decoding step.
+
+\subsection{Detoxification}
+\begin{figure}[t]
+  \centering
+    \centering
+    \includegraphics[width=\textwidth]{final_plots/average_maximal_toxicity_perspective_GPT.pdf}
+    \caption{ARM student (distil) shows comparable toxicity/fluency trade-off with the teacher RAD, where the ARM student closely matches the performance of the teacher RAD. ARM trained on original responses (ARM resp. only) shows slightly worse fluency and similar toxicity level. We rerun the evaluation for RAD, GeDi and DExperts with an up-to-date Perspective API classifier. We include the results with other baselines from \cite{deng_2023_rad} in \cref{fig:deng_et_al_toxicity_results} (see \cref{sec:app_detox}). }
+    \label{fig:toxicity}
+  
+\end{figure}
+
+
+For the detoxification evaluation, we follow previous work \citep{deng_2023_rad, liu-etal-2021-dexperts} and evaluate samples from guided decoding given a \text{10k} subset \citep{liu-etal-2021-dexperts} of prompts from the RealToxicityPrompts dataset \citep{gehmanRealToxicityPromptsEvaluatingNeural2020}. We follow \citet{deng_2023_rad} and \citet{liu-etal-2021-dexperts} and finetune our model on \text{2M} pairs of text and continuous `toxicity' responses between $0$ and $1$ from the Jigsaw Unintended Bias in Toxicity Classification challenge \citep{jigsaw-unintended-bias-in-toxicity-classification}. Like previous work, we train our model on $7$ independent responses (`toxicity', `severe toxicity', `obscene',
+            `identity attack', `insult', `threat', `sexual explicit') with different head parameters $w_i, W_i, i \in \{1, ..., 7\}$ for each sub-task. During decoding, we only use the `toxicity' predictor.
+For the distillation experiment, we use the same dataset, and the released toxicity discriminator from \citet{deng_2023_rad} as a teacher.
+
+During decoding, we sample $25$ continuations generating at most $20$ new tokens. To evaluate toxicity, we use an external closed-source toxicity classifier \emph{Perspective API} \citep{leesNewGenerationPerspective2022}, and following previous work \citep{deng_2023_rad, liu-etal-2021-dexperts}, we rely on the \emph{Maximal Average Toxicity} metric, which is the maximal toxicity score value over $25$ samples for a given prompt, averaged over the set of \text{10k} prompts. We also report \emph{Toxic Rate}, which is calculated as the probability that at least one out of 25 continuations is
+toxic according to Perspective API (toxicity score > $0.5$); and \emph{Diversity} score, which is the average number of distinct $n$-grams normalized by the length of text \citep{liDeleteRetrieveGenerate2018}.
+To evaluate the fluency of model generations, we follow previous work \citep{liu-etal-2021-dexperts, deng_2023_rad} and report the average perplexity of the GPT-2-XL when generating from the GPT-2-Large model; and the OLMo\footnote{\url{https://huggingface.co/allenai/OLMo-1B}} to evaluate the LLaMa family as in \cite{lovelace-etal-2024-diffusion}. As an additional fluency metric, we report MAUVE \citep{pillutla2021mauve} to measure the distance between unguided and guided generations (details in \cref{app:mauve}). In the experiments, we will look at the toxicity/fluency trade-off, alternating the weight $\beta$ of the discriminator (see \cref{tab:full_toxicity} and \cref{tab:full_sentiment}). We expect to obtain a model with both low toxicity according to the Perspective API, and high fluency. 
+
+Since toxicity scores from the Perspective API can change overtime, which can complicate the evaluation, in  \cref{app:roberta} we evaluate our detoxification models with an open-weight toxicity classifier \footnote{\url{https://huggingface.co/nicholasKluge/ToxicityModel}}, where we observe the same relative results as with Perspective API scores.
+
+\subsection{Sentiment control}
+\begin{figure}[t]
+  \centering
+  \begin{minipage}{0.9\textwidth}
+  \includegraphics[width=\textwidth]{final_plots/sentiment_plot.pdf}
+  \label{fig:sentiment}
+  \end{minipage}
+
+  
+  \centering
+  \begin{minipage}{0.9\textwidth}
+  \includegraphics[width=\textwidth]{final_plots/sentiment_plot_mauve.pdf}
+  \caption{For the sentiment control task, ARM trained on responses only lags slightly behind the RAD baseline, while student ARM outperforms the teacher RAD model. For the plot with average perplexity, we include the results from \cite{deng_2023_rad} for other baselines for reference.}
+  \label{fig:sentiment}
+  \end{minipage}
+\end{figure}
+
+For sentiment control, we follow previous work \citep{liDeleteRetrieveGenerate2018, sudhakarTransformingDeleteRetrieve2019, liu-etal-2021-dexperts, deng_2023_rad} to evaluate the samples given a prompt from one of the three categories: $2.5K$ \emph{negative}, $5K$ \emph{neutral}, and $2.5K$ \emph{positive} prompts from OpenWebText \citep{gokaslan2019openwebtext}. To finetune ARM on responses only, we follow \citet{deng_2023_rad} and finetune our model on millions of reviews from the Amazon Polarity \citep{zhang2015character} and 
+ SST-2 \citep{socher2013recursive} datasets. 
+To distil the sentiment discriminator of \citet{deng_2023_rad}, we use text examples from the Amazon Polarity dataset. Additional training details are provided in \cref{app:training_details}.
+
+For evaluation, we follow \citet{deng_2023_rad}, and use the average \emph{Positive Rate} metric \wrt the finetuned DistilBERT classifier \citep{sanh2019distilbert} provided via the HuggingFace\footnote{\url{https://shorturl.at/9MqDp}}. As in the toxicity task, we use GPT-2-XL/OLMo and MAUVE to evaluate the fluency of the sampled continuations, and we expect to obtain a high Positive Rate and high fluency.
+
+
+\subsection{Results}
+\paragraph{Detoxification.}
+For the detoxification task (\cref{fig:toxicity}), our efficient student (ARM) closely follows the RAD teacher for toxicity control/fluency trade-off. % Both the ARM student and the RAD teacher can reduce average maximal toxicity \wrt Perspective API toxicity classifier with only a slight drop in fluency. 
+We observe that ARM trained on  responses only shows slightly worse fluency \wrt average perplexity for lower levels of toxicity. 
+For completeness, in \cref{fig:deng_et_al_toxicity_results}, we include the results for other baselines from \citet{deng_2023_rad} computed for an older version of Perspective API.
+
+For guided decoding from the LLaMa-2-(7b/13b), we observe that again ARM closely follows RAD in terms of toxicity/fluency trade-off (see \cref{fig:llama_toxicity_perspective} in \cref{app:detox_perspective}).
+\paragraph{Sentiment control.}
+From the results on the sentiment control task in \cref{fig:sentiment}, we observe that the ARM student model shows slightly better trade-off than the RAD teacher model, closely following approaches that require training using feedback from the evaluation pipeline \citep[Quark]{luQUARKControllableText2022}, \citep[PPO]{ stiennonLearningSummarizeHuman2020}. Again, ARM trained on original responses slightly lags behind but still performs competitively compared to other guided decoding baselines.
+
+\paragraph{Summary.}
+Our empirical results suggest that ARM can match the quality of more flexible but less efficient RAD. We observe that distilling the RAD teacher into the ARM student results in slightly higher quality compared to training ARM on original responses.
+\begin{figure}[tbp]
+  \centering
+  \subfloat[Rank analysis]{
+    \includegraphics[width=0.47\textwidth]{final_plots/rank_of_model_toxicity_ablation.pdf}
+ }
+ \hfill
+ \subfloat[Detoxification task]{
+    \includegraphics[width=0.47\textwidth]{final_plots/average_maximal_toxicity_ablation.pdf}
+  }
+ 9
+  \caption{Ablation experiment for distilled ARM, on the detoxification task with top-$k$=$20$. On the right, we observe that regularization towards the baseline results in better fluency of generated samples. On the left, we observe that regularization lowers the rank of the model's outputs $\rank (\hat{R}_{\text{ARM}})$.
+  }
+  \label{fig:ablation}
+\end{figure}
+
+  
+
+\subsection{Ablation}
+In this section, we investigate the effect of adding the baseline component \cref{eq:linear_arm} and of regularization \cref{eq:reg_loss}. In \cref{fig:ablation}, we experiment with the distilled version of ARM and observe that turning off regularization, or further removing the baseline from the parametrization results in still adequate but slightly worse fluency as measured by perplexity, and a comparable toxicity decrease. By further analyzing the ranks of $R_{\text{ARM}}$ with and without regularization, we observe that regularization effectively decreases the rank of $R_{\text{ARM}}$ which might explain the higher fluency of regularized model.
+
+\begin{figure}[t]
+  \centering
+  \begin{minipage}{0.45\textwidth}
+    \centering
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Model} & \textbf{N calls} \\
+        \midrule
+        GeDi \citep{krause-etal-2021-gedi-generative} & 1 \\
+        DExperts \citep{liu-etal-2021-dexperts} & 2 \\
+        RAD \citep{deng_2023_rad} & $k$ \\
+        \mydashedcline{1-2}
+        ARM (Ours) & 1 \\
+        \bottomrule
+    \end{tabular}
+    \captionof{table}{Number of input tokens a discriminator model needs to process for a single decoding step with $k$ next token candidates. All included models are based on the unidirectional Transformer \citep{vaswani_transformer} and support the caching of prefix activations.}
+    \label{tab:passes_table}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.47\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{final_plots/time_per_token.pdf}
+    \caption{RAD processes the $k$ next token candidates separately as input requiring more time compared to ARM, which relies on the output layer to obtain the scores for all next tokens.}
+    \label{fig:time_per_token}
+  \end{minipage}
+\end{figure}
+\subsection{Efficiency}
+We consider using a reward model to compute the scores for $k$ candidate tokens at each of $L$ steps of decoding. Similar to RAD \citep{deng_2023_rad}, ARM is based on the \emph{unidirectional} Transformer architecture \citep{vaswani_transformer}, which means that we can cache the prefix activations during decoding. To compute the prediction for $k$ next token candidates $v$ given a prefix $x$, RAD needs to pass $k$ next tokens as \emph{input} to the Transformer model, thus RAD processes $O(Lk)$ tokens during decoding. In contrast, ARM only processes $O(L)$ tokens as input to the Transformer model and relies on the output layer to efficiently compute the scores for all next token candidates.  In \cref{tab:passes_table}, we summarize how many tokens  external expert models process during top-$k$ decoding.
+ In \cref{fig:time_per_token}, we measure the time per generated token when running the decoding for the toxicity task with ARM and RAD \citep{deng_2023_rad} on a single RTX A6000 GPU. 
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+There are multiple approaches that investigate how to finetune a language model using attribute-conditioned data (desired/undesired examples). \citet{keskarCTRLConditionalTransformer2019} finetunes a language model using control prompts. More recent approaches \citep{schulmanProximalPolicyOptimization2017, stiennonLearningSummarizeHuman2020, luQUARKControllableText2022} perform finetuning while regularizing the weights of the model to stay close to pretrained weights. %They propose an iterative finetuning scheme based on retraining the model on attribute conditioned samples from the model itself. 
+Despite the efficiency of decoding, these methods might require more resources for finetuning if the language model is large, or might even be unusable if we only have access to the top-$k$ logits of base language model via an API.
+
+Unlike finetuning, alternative approaches keep the language model untouched and use external models to guide the decoding from the base language model. 
+\citet{dathathriPlugPlayLanguage2019} use the gradients from a discriminator to modify the prefix activations of the base model during decoding. However, gradient-based methods are costly to use during decoding since they require backpropagating through the large base model.
+
+Closest to our work are \emph{gradient-free} guided decoding methods, where we have access to the frozen base language model and use external models to guide the sampling process from the base model.
+GeDi \citep{krause-etal-2021-gedi-generative} proposes to use class-conditioned language models as discriminators to augment the decoding and efficiently compute the scores for next token candidates. DExperts \citep{liu-etal-2021-dexperts} improves the quality of GeDi introducing an ensemble of two class-conditioned language models finetuned on desired and undesired data. 
+
+More recently, \citet{deng_2023_rad} and \citet{sitdikovClassifiersAreBetter2022} argue to use discriminator models \citet{yang-klein-2021-fudge} to guide the decoding. 
+\citet{sitdikovClassifiersAreBetter2022, dekoninckControlledTextGeneration2023} use available \emph{bidirectional} Transformers to guide the base language model, which, however, requires to recompute all prefix tokens at each decoding step. To tackle this issue, RAD \citep{deng_2023_rad} 
+proposes 
+a
+\emph{unidirectional} model suitable for caching of prefix activations. They train a reward model on partial prefixes to predict the expected future attribute and demonstrate high quality of controlled generation. A related approach \citep{caoSystematicRectificationLanguage2022} minimizes the risk of future undesired attributes.
+
+
+
+\section{Conclusion}
+
+\label{sec:concl}
+
+We review the recently proposed RAD approach of training a reward model for the guided decoding, and we reformulate it as the incomplete reward matrix learning problem. In the light of the rank analysis of the reward matrix, we observe that the high flexibility of RAD might not overweight its lower efficiency during decoding. We present the low-rank ARM, an efficient approach to parameterize the reward model, suitable for autoregressive decoding, caching of prefix activations, and prediction of next token scores with a single call of a backbone model. We bridge the gap between two paradigms of training external expert models, demonstrating that we can have both efficient and effective controlled generation. 
+
+
+
+

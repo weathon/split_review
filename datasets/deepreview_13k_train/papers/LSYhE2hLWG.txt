@@ -1,0 +1,324 @@
+\title{SineNet: Learning Temporal Dynamics in Time-Dependent Partial Differential Equations}
+
+\begin{abstract}
+We consider using deep neural networks to solve time-dependent partial differential equations (PDEs), where multi-scale processing is crucial for modeling complex, time-evolving dynamics. 
+While the U-Net architecture with skip connections is commonly used by prior studies to enable multi-scale processing, our analysis shows that the need for features to evolve across layers results in temporally misaligned features in skip connections, which limits the model's performance.
+To address this limitation, we propose SineNet, consisting of multiple sequentially connected U-shaped network blocks, referred to as waves. % , dubbed waves. 
+In SineNet, high-resolution features are evolved progressively through multiple stages, thereby reducing the amount of misalignment within each stage.
+We furthermore analyze the role of skip connections in enabling both parallel and sequential processing of multi-scale information.
+Our method is rigorously tested on multiple PDE datasets, including the Navier-Stokes equations and shallow water equations, showcasing the advantages of our proposed approach over conventional U-Nets with a comparable parameter budget. We further demonstrate that increasing the number of waves in SineNet while maintaining the same number of parameters leads to a monotonically improved performance. The results highlight the effectiveness of SineNet and the potential of our approach in advancing the state-of-the-art in neural PDE solver design.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Partial differential equations (PDEs) describe physics from the quantum length scale (Schr\"odinger equation) to the scale of space-time (Einstein field equations) and everywhere in between. % (dynamics of physical systems using functions of derivatives. 
+Formally, a PDE is an expression in which the rates of change of one or multiple quantities with respect to spatial or temporal variation are balanced.
+PDEs are popular modeling tools across many scientific and engineering fields to encode force balances, including stresses that are combinations of spatial derivatives, velocity and acceleration that are time derivatives, and external forces acting on a fluid or solid. Due to their widespread use in many fields, solving PDEs using numerical methods has been studied extensively. With advances in deep learning methods, there has been a recent surge of interest in using deep learning methods for solving PDEs~\citep{raissi2019physics,kochkov2021machine,lu2021learning,stachenfeld2022learned,li2021fourier,pfaff2021learning,takamoto2022pdebench,gupta2023towards}, which is the subject of this work.
+Our main focus here is on {\em fluid dynamics}, where we typically encounter two phenomena: advection and diffusion. Diffusion in isotropic media is modeled using the heat equation $(\partial_t - \Delta) \bm u = 0$, which equates the rate of change in time $\partial_t \bm u$ to the spatial Laplacian of the function $\bm u$, an expression of second-order derivatives. The fact that a first-order derivative in time is compared to a second derivative in space leads to the \textit{parabolic scaling} in which $\sqrt t$ and $x$ behave comparably. In many numerical methods such as finite element discretizations, this behavior requires discretizations for which the length-scale in time $\delta t$ is much smaller than the spatial length-scale $\delta x$: $\delta t \ll (\delta x)^2$. To avoid excessive computation time when computing in fine resolution, multi-scale models are attractive which accurately resolve both local interfaces and long-range interactions over a larger time interval per computation step. Methods which are not localized in space, \textit{e.g.}, heat kernel convolutions or spectral methods, are able to overcome the parabolic scaling.
+
+Unsurprisingly, the situation becomes much more challenging when advection is considered. While diffusion models how heavily localized quantities spread out to larger regions over time, advection describes the transport of quantities throughout space without spreading out. In the equations of fluid dynamics, the transport term $(\bm u\cdot \nabla)\bm u$ is non-linear in $\bm u$ and famously challenging both analytically and numerically. In particular, any numerical approximation to the solution operator which propagates $\bm u$ forward in time must be non-linear to comply with the non-linearity in the equation. 
+For its strength in multi-scale processing, the U-Net architecture has recently become a popular choice as an inexpensive surrogate model for classical numerical methods mapping dynamics forward in time~\citep{gupta2023towards,takamoto2022pdebench,wang2020towards}. %, as a surrogate model for classical solvers.
+However, because the input to the network is earlier in time than the prediction target, latent evolution occurs in the U-Net feature maps. This implies that skip connections between the down and upsampling paths of the U-Net, which are crucial for faithfully restoring high-resolution details to the output, will contain out-of-date information, and poses challenges in settings where advection plays a significant role.
+
+In this work, we propose \textbf{SineNet}, an architecture designed to handle the challenges arising from dynamics wherein \emph{both} diffusion and advection interact.
+SineNet features a multi-stage architecture in which each stage is a U-Net block, referred to as a wave. % , dubbed as ``wave''.
+By distributing the latent evolution across multiple stages, the degree of spatial misalignment between the input and target encountered by each wave is reduced, thereby alleviating the challenges associated with modeling advection.
+At the same time, the multi-scale processing strategy employed by each wave effectively models multi-scale phenomena arising from diffusion.
+Based on the proposed SineNet, we further analyze the role of skip connections in enabling multi-scale processing in both parallel and sequential manners.
+Finally, we demonstrate the importance of selecting an appropriate padding strategy to encode boundary conditions in convolution layers, a consideration we find particularly relevant for periodic boundaries. 
+We conduct empirical evaluations of SineNet across multiple challenging PDE datasets, demonstrating consistent performance improvements over existing baseline methods. 
+We perform an ablation study in which we demonstrate performance monotonically improving with number of waves for a fixed parameter budget.  % that by increasing the number of waves while maintaining the same number of parameters, the performance of SineNet monotonically improves. 
+The results highlight the potential of our approach in advancing the state-of-the-art in neural PDE solver design and open 
+new avenues for future research in this field.
+
+
+\section{Neural approximations to PDE solution operators}
+
+
+Time-evolving partial differential equations describe the behavior of physical systems using partial derivatives of an unknown multivariate function 
+of space-time $\bm u:\Omega\times \mathbb{R}\to \mathbb{R}^M$, where $\Omega$ is the spatial domain and $\mathbb{R}$ accounts for the temporal dimension.
+The $M$-dimensional codomain of $\bm{u}$ consists of scalar and/or vector fields such as density, pressure, or velocity describing the state of the system.
+Given the solution $\bm u(\cdot, t_0)$ at time $t_0$, our task is to learn the forward operator mapping $\bm u(\cdot, t_0)$ to the solution at a later time $t$ given by $\bm u(\cdot ,t)$. In practice, $\bm u$ is a numerical solution to the PDE, that is, discretized in space-time onto a finite grid. As opposed to neural operators~\citep{kovachki2021neural}, which aim to learn this operator independent of the resolution of the discretization, we instead focus on learning the operator for a fixed, uniform discretization. 
+Concretely, 
+for a $d$-dimensional spatial domain $\Omega$,
+the discretized solution at time step $t$ 
+is given by $\bm{u}_t\in \mathbb{R}^{M\times N_1\times\dots \times N_d}$ for $t = 1,\dots, T$, where $T$ is the temporal resolution and  $N_1, \dots, N_d$ are the spatial resolutions along each dimension of $\Omega$ ($d=2$ in our experiments). 
+Moreover, as is typical in numerical solvers, we condition our models on $h$ historical time steps. Formally, we seek to learn the mapping
+$\mathcal{M}: \mathbb{R}^{h\times M\times N_1\times\dots \times N_d} \to \mathbb{R}^{M \times N_1\times\dots \times N_d}$, with $\mathcal{M}(\bm{u}_{t-h+1}, \ldots, \bm{u}_{t}) = \bm{u}_{t+1}$, for$\ t = h,\ldots, T-1.$
+
+
+\section{Learning temporal dynamics in continuum fields}
+
+
+
+\subsection{Multi-scale learning and U-Nets}\label{sec:mslearn_unets}
+
+In Fourier space, low frequency modes correspond to global information, and high frequency modes to local. Convolutions can be performed in the frequency domain via pointwise multiplication of frequency modes, resulting in parallel processing of multi-scale information~\citep{gupta2023towards}. This approach is taken by Fourier Neural Operators (FNOs)~\citep{li2021fourier, tran2023factorized, li2022fourier,rahman2022u,helwig2023group}, which directly parameterize their convolution kernel in the frequency domain.
+In the spatial domain, U-Nets~\citep{ronneberger2015u} are commonly used to process multi-scale information in a sequential manner.  U-Nets extract information on various scales hierarchically by performing convolutions on increasingly downsampled feature maps before invoking a symmetric upsampling path. Skip connections between corresponding downsampling and upsampling layers are established to restore high-resolution information. 
+To map $\{\bm{u}_{t-h+1}, \ldots, \bm{u}_{t}\}$ to $\bm u_{t+1}$, the U-Net encodes inputs to $\bm{x}_0$ and then processes $\bm{x}_0$ to a sequence of $L$ feature maps along a downsampling path $\bm{x}_1,\ldots,\bm{x}_L$ as
+\begin{equation}\label{eq:down}
+    \bm{x}_0=P(\{\bm{u}_{t-h+1}, \ldots, \bm{u}_{t}\});\; \bm x_{\ell}=f_{\ell}\left(d\left(\bm x_{\ell-1}\right)\right),\ \ell=1,\ldots, L,    
+\end{equation}
+where $P$ is an encoder, $d$ is a downsampling function, and $f_\ell$ composes convolutions and non-linearities.
+Next, the U-Net upsamples to a sequence of feature maps $\bm x_{L+1},\ldots,\bm x_{2L}$ along the upsampling path and decodes the final feature map $\bm x_{2L}$ to $\bm u_{t+1}$ as 
+\begin{equation}\label{eq:up}
+    \bm x_{\ell}= g_{\ell}\left(v\left(\bm x_{\ell-1}\right), \bm x_{2L-\ell}\right),\ \ell=L+1,\ldots, 2L;\; \bm u_{t+1}=Q\left(\bm x_{2L}\right),    
+\end{equation}
+where $Q$ is the decoder, $v$ is an upsampling function, and $g_\ell$ concatenates the upsampled feature map with the skip connected downsampled feature map before applying convolutions and non-linearities. 
+
+\begin{figure}[t]
+  \centering
+  {\includegraphics[width=\textwidth]{figure/misalignment_v2.pdf}}
+  \caption{Illustration of the misalignment issue in U-Nets.
+  The left side show% case
+s the one-step prediction of a trained U-Net, with each intermediate layer's feature maps averaged over the channel dimension displayed in the top row. 
+  On the right side, the misalignment between $\ell=0$ and $\ell=3$ is demonstrated. Specifically, the feature map of $\ell=3$ is upsampled and then concatenated with $\ell=0$. The time-evolving effect of the preceding U-Net layers results in a misalignment of the corresponding physical features, as indicated by the bounding boxes (a) and (b). This misalignment is particularly problematic for convolutions. Since the kernel is localized, information from misaligned high frequency features, such as those visualized in (a) and (b), cannot be optimally integrated in updating the feature map. Mitigating this misalignment is key for improving the performance of U-Nets.}
+  \label{fig: misalignment}
+\end{figure}
+\subsection{Misalignments in learning temporal dynamics}\label{sec:misalign}
+U-Nets capture global context by aggregating localized features with downsampling layers. Using this global context, the output is constructed with upsampling layers, wherein skip connections to the downsampled feature maps play a key role in restoring high-resolution details. While we consider their application as neural solvers, U-Nets were originally developed for image segmentation~\citep{ronneberger2015u}. In segmentation tasks, features in the input image and target segmentation mask are spatially aligned. 
+By contrast, in the context of learning temporal dynamics, the spatial localization property no longer holds, as temporal evolution results in \textit{misalignment} between the input and  prediction target. Here, misalignment refers to the displacement of local patterns between two feature maps, which occurs between the PDE solutions at two consecutive time steps due to advection. %}
+To resolve this misalignment, feature maps undergo latent evolution. However, due to the local processing of convolution layers, feature maps closer to the input (or output) will be more aligned with the input (or output), respectively. This leads to misalignment between the feature maps propagated via skip connections and those obtained from the upsampling path. 
+
+To empirically demonstrate this inconsistency, we visualize the feature maps averaged over the channel dimension at each block within a well-trained U-Net in Figure~\ref{fig: misalignment}. Specifically, we examine the feature map from the skip connection at the highest resolution ($\ell=0$) and compare it with the corresponding one from the upsampling path ($\ell=3$). We observe misaligned features between $\ell=0$ and the upsampled $\ell=3$, as highlighted by the features contained in the bounding boxes (a) and (b). As kernels are most often local, \textit{e.g.}, $3\times3$, following the concatenation, convolution operations will be either partially or fully unable to incorporate the evolved features with the corresponding features in skip connections as a result of the misalignment.
+
+\begin{figure}[t]
+  \centering
+  {\includegraphics[width=\textwidth]{figure/SineNet_crop_greyBack.pdf}}
+  \caption{Illustration of the proposed SineNet for learning temporal dynamics in PDEs. Multiple U-Net waves are composed to perform one-step prediction, with the output of each wave averaged over the channel dimension displayed in the top row, demonstrating the time-evolving process from $t$ to $t+1$. The orange sinusoidal line illustrates propagation between resolutions and is not part of the model architecture. Feature maps in this figure are from \textsc{SineNet} without wave residuals for clarity and with transposed convolutions for upsampling
+  \label{fig: sinenet}
+\end{figure}
+\subsection{Multi-stage modeling of temporal dynamics with SineNet}\label{sec:arch}
+
+Despite the inconsistency, skip connections in U-Nets remain crucial to restoring high-frequency details and thereby enable multi-scale computation via downsampling and upsampling. To mitigate the misalignment issue while maintaining the benefits of the U-Net architecture, we construct the \textsc{SineNet-$K$} architecture by partitioning the latent evolution across $K$ lightweight U-Nets $V_k$, referred to as waves. This approach reduces the latent evolution between consecutive downsampling and upsampling paths, which in turn reduces the degree of misalignment in skip connections. Each wave $V_k$ is responsible for advancing the system's latent state by an interval of $\delta_k\in [0,1]$, with $\sum_{1\le k\le K}\delta_k=1$. Specifically, $V_k$'s objective is to evolve the latent solution from time $t+\Delta_{k-1}$, achieved through the temporal evolution by the preceding $k-1$ waves, to time $t+\Delta_k$, where $\Delta_k$ represents the cumulative sum of all $\delta_j$ up to the $k$-th interval. The overall mapping is then given by
+\begin{equation}
+    \bm{x}_{t} = P\left(\{\bm{u}_{t-h+1},\ldots,\bm{u}_t\}\right);\quad \bm{u}_{t+1} = Q\left(\bm{x}_{t+1}\right);\\
+\end{equation}
+\begin{equation}\label{eq:wave}
+    \bm{x}_{t+\Delta_k} = V_k(\bm{x}_{t+\Delta_{k-1}}), \;k=1,\ldots,K,
+\end{equation}
+where $\bm{x}_{t+\Delta_k}$ denotes the latent map of $\bm{u}_{t+\Delta_k}$ at time $t+\Delta_k$, and $P$ and $Q$ are 3$\times$3 convolution layers to linearly encode and decode the solutions into or from latent maps, respectively. During training, the intermediate sub-steps as determined by $\delta_k$ are implicit and optimized end-to-end with the $K$ waves using pairs of data $\{(\{\bm{u}^j_{t-h+1},\ldots,\bm{u}^{j}_t\}, \bm u^j_{t+1})\}_{j,t}$ to minimize the objective
+\begin{equation}\label{eq:loss}
+    \mathbb{E}_{j,t}\left[\mathcal L\left( W_K(\{\bm{u}^j_{t-h+1},\ldots,\bm{u}^j_t\}), \bm{u}^j_{t+1}\right)\right]; \; W_K:=Q\circ V_K\circ\cdots\circ V_1\circ P,
+\end{equation}
+where $\mathcal L$ is a suitably chosen loss and $j$ indexes the solutions in the training set.
+It is worth noting that the intervals $\delta_k$ are not necessarily evenly divided. They can be input-dependent and optimized for superior performance during training to enable \textbf{adaptable temporal resolution} in the latent evolution. For example, when the temporal evolution involves acceleration, it is generally more effective to use smaller time steps for temporal windows with larger velocities.%} 
+
+The proposed approach effectively reduces the time interval each wave is tasked with managing, thereby simplifying the learning task and mitigating the extent of misalignment in skip connections. 
+ This strategy not only fosters a more efficient learning process but also significantly enhances the model's ability to handle complex, time-evolving PDEs. Through this approach, we present a robust way to reconcile the essential role of skip connections with the challenges they pose in the context of PDEs.
+
+\subsection{Wave architecture}
+
+Here we discuss the construction of each of the $K$ waves $V_k$ in SineNet mapping the latent solution $\bm{x}_{t+\Delta_{k-1}}$ to $\bm{x}_{t+\Delta_k}$ in Equation~\ref{eq:wave}. $V_k$ is implemented as a conventional U-Net $U_k$, as described in Equations~\ref{eq:down} and~\ref{eq:up}, with a wave residual as
+\begin{equation}\label{eq:wave_res}
+V_k\left(\bm{x}_{t+\Delta_{k-1}}\right)=\bm{x}_{t+\Delta_{k-1}} + U_k(\bm{x}_{t+\Delta_{k-1}}).
+\end{equation}
+Each wave is constructed with a downsampling and upsampling path, both of length $L=4$,
+ \emph{i.e.}, $\bm x_{\ell}=f_{\ell}\left(d\left(\bm x_{\ell-1}\right)\right),\ \ell\in\{1, 2, 3, 4\}$ for downsampling and 
+$\bm x_{\ell}= g_{\ell}\left(v\left(\bm x_{\ell-1}\right), \bm x_{8-\ell}\right),\ \ell\in\{5,6,7,8\}$ for upsampling.
+To maintain a light-weight architecture, the downsampling and upsampling functions $d$ and $v$ are chosen as average pooling and bicubic interpolation. $f_\ell^k$ is constructed with a convolution block $c_\ell^k$, that is, two $3\times 3$ convolutions with layer norm~\citep{ba2016layer} and GeLU activation~\citep{hendrycks2016gaussian}, with the first convolution increasing the number of channels in the feature map by a multiplier $m_K$, which is chosen dependent on the number of waves $K$ in the SineNet such that the number of parameters is roughly constant in $K$. $g_\ell^k$ is constructed similarly, except the first convolution \textit{decreases} the number of channels by a factor of $m_K$. Both $f_\ell^k$ and $g_\ell^k$ additionally include a \textit{block residual}, whose role we discuss further in Section~\ref{sec:dual}, as
+\begin{align}
+    \label{eq:bres_down}
+    f_{\ell}^k\left(d\left(\bm x\right)\right) & = w^k_\ell\left(d\left(\bm x\right)\right) + c_\ell^k\left(d\left(\bm x\right)\right)
+    \\
+    \label{eq:bres_up}
+    g^k_{\ell}\left(v\left(\bm x\right), \bm y\right) & = w_\ell^k\left(v\left(\bm x\right)\right) + c_\ell^k\left(\mbox{cat}\left(v\left(\bm x\right), \bm y\right)\right),    
+\end{align}
+where $w_\ell^k$ is a point-wise linear transformation acting to increase or decrease the number of channels in the residual connection.
+
+\subsection{Dual multi-scale processing mechanisms}\label{sec:dual}
+    While in Equation~\ref{eq:wave_res}, wave residuals serve to improve the optimization of SineNet~\citep{he2016deep}, the block residuals utilized in Equation~\ref{eq:bres_down} additionally allow each wave $V_k$ to process multi-scale information following both the sequential and parallel paradigms analyzed by~\citet{gupta2023towards}. Parallel processing mechanisms, of which the Fourier convolutions utilized by FNOs~\citep{li2021fourier} are an example, process features \textit{directly from the input} at various spatial scales independently of one another. In contrast, under the sequential paradigm inherent to U-Nets, features at each scale are extracted from the features extracted at the previous scale. Because this approach does not include a direct path to the input features, processing capacity at a given scale may be partially devoted toward maintaining information from the input for processing at later scales rather than extracting or evolving features. 
+    
+    To improve the efficiency of the sequential paradigm, SineNet utilizes block residuals as described in Equations~\ref{eq:bres_down} and~\ref{eq:bres_up}, which we now show allows both parallel and sequential branches of processing. Consider the input $\bm x_0$, a linear downsampling function $d$ such as average pooling, and convolution blocks $c_1, c_2, c_3$, all of which are composed as the downsampling path of a U-Net, that is, downsampling followed by convolution blocks. Assume for simplicity that the input and output channels for each of the convolution blocks are equal and $w_\ell^k$ is omitted. Then, by including block residuals, the feature map following the first downsampling and convolution block is given by
+    \begin{equation}
+        \bm x_1 = d\left(\bm x_0\right) + c_1\left( d\left(\bm x_0\right)\right),
+    \end{equation}
+    and thus, the input to $c_2$ is given by
+    \begin{equation}
+        d\left(\bm x_1\right) = d^2\left(\bm x_0\right) + d\left(c_1\left( d\left(\bm x_0\right)\right)\right),
+    \end{equation}
+    where $d^2\left(\bm x_0\right)\coloneqq d\left(d\left(\bm x_0\right)\right)$ represents the direct flow of information from the input in the parallel branch, enabling $c_2$ to process information following both the parallel and sequential paradigms. From the input to $c_3$, given by
+    \begin{equation}\label{eq:disent}
+        d\left(\bm x_2\right) = d^3\left(\bm x_0\right)+d\left(d\left(c_1\left( d\left(\bm x_0\right)\right)\right) + c_2\left(d\left(\bm x_1\right)\right)\right),
+    \end{equation}
+    it can be seen that this dual-branch framework is maintained in later layers. Specifically, the input to the $k$-th layer will be comprised of $\bm x_0$ downsampled $k$ times summed with a feature map processed sequentially. However, since addition will entangle the parallel and sequential branch, we propose to disentangle the parallel branch by concatenating it to the input of each convolution block in the downsampling path. Therefore, the downsampling path in SineNet replaces Equation~\ref{eq:bres_down} with
+    \begin{equation}                    
+        f_{\ell}^k\left(d\left(\bm x\right)\right) = w^k_\ell\left(d\left(\bm x\right)\right) + c_\ell^k\left(\mbox{cat}\left(d\left(\bm x\right),d^{k}\left(\bm x_0\right)\right)\right),
+    \end{equation}
+    where $d^{k}\left(\bm x_0\right)$ is the result of the projection layer $P$ downsampled $k$ times. We note that although latent evolution in the sequential branch will result in misalignment with the parallel branch, we empirically observe a performance gain by including the parallel branch, particularly once it has been disentangled. Additionally, this inconsistency between branches is mitigated by the multi-stage processing strategy adopted by SineNet. 
+
+\subsection{Encoding boundary conditions}\label{sec:bound}
+
+    The boundary conditions of a PDE determine the behavior of the field along the boundary. Our experiments with the incompressible Navier-Stokes equations use a Dirichlet boundary condition on the velocity field such that the velocity on the boundary is zero, and a Neumann boundary condition on the scalar particle concentration such that the spatial derivative along the boundary is zero. These conditions are encoded in feature maps using standard zero padding. 
+
+    The remaining PDEs we consider have periodic boundary conditions, wherein points on opposite boundaries are identified with one another such that the field ``wraps around". For example, for a function $\bm u$ on the unit torus, that is, a periodic function with domain $[0,1]^2$, we have that for $x\in[0,1]$, $\bm u(x,0)=\bm u(x,1)$ and $\bm u(0,x)=\bm u(1,x)$. For such a boundary condition, we found circular padding to be a simple yet crucial component for achieving optimal performance~\citep{dresdner2023learning}, as otherwise, a great deal of model capacity will be spent towards sharing information between two boundary points that appear spatially distant, but are actually immediately adjacent due to periodicity. As Fourier convolutions implicitly assume periodicity, FNO-type architectures are are ideally suited for such PDEs. 
+    
+
+
+
+\section{Related work}
+
+
+\textbf{Neural PDE solvers.} Many recent studies explore solving PDEs using neural networks and are often applied to solve time-dependent PDEs~\citep{poli2022transform, lienen2022learning}. Physics-informed neural networks (PINNs)~\citep{raissi2019physics, wang2021learning, li2021physics} and hybrid solvers~\citep{um2020solver, kochkov2021machine, Holl2020Learning} share similar philosophies with classical solvers, where the former directly minimizes PDE objectives and the latter learns to improve the accuracy of classical solvers.
+On the other hand, many works focus on purely data-driven learning of mappings between PDE solutions, which is the approach we take here. 
+\citet{wang2020towards} and \citet{stachenfeld2022learned} apply their convolutional architectures to modeling turbulent flows in $2$ spatial dimensions, while \citet{lienen2023generative} use diffusion models to simulate $3$-dimensional turbulence. \citet{li2021fourier} developed the FNO architecture which has been the subject of several follow-up works~\citep{poli2022transform,tran2023factorized,helwig2023group}. 
+Similar to SineNet, PDE-Refiner~\citep{lippe2023pde} solves PDEs via iterative application of a U-Net, however, instead of advancing time with each forward pass, U-Net applications after the first serve to refine the prediction.
+
+\textbf{Stacked U-Nets.} There are other studies exploring stacked U-Nets, however, most focus on computer vision tasks such as image segmentation~\citep{xia2017w, shah2018sunets, zhuang2018laddernet, fu2019stacked} and human pose estimation~\citep{newell2016stacked}. There are also researchers exploring U-Nets and variants therein to model PDE solutions. \citet{chen2019u} apply variations of U-Nets, including stacked U-Nets, to predict the steady state of a fluid flow, although they do not study temporal evolution and furthermore do not consider a stack greater than 2. \citet{raonic2023convolutional} propose to use CNNs to solve PDEs, but they do not have the repeated downsampling and upsampling wave structure. We differ from these works by making the key observation of feature evolution and feature alignment.
+
+
+
+\section{Experiments}
+
+        As fluid dynamics are described by time-evolving PDEs where diffusion and advection play major roles, we perform experiments on multiple fluid dynamics datasets derived from various forms of the Navier-Stokes equation. We begin by describing our experimental setup, datasets and models in Sections~{\ref{sec:setup}-\ref{sec:models}} before presenting our primary results in Section~\ref{sec:results}. We close with an abalation study in Section~\ref{sec:ablation}. 
+
+    \subsection{Setup and datasets}\label{sec:setup}
+
+        In all experiments, models are trained with data pairs $\left(\{\bm{u}_{t-h+1}, \dots, \bm{u}_{t}\}, \bm{u}_{t+1}\right)$ where the inputs are the fields at current and historical steps and the target is the field at the next time step. During validation and testing, models perform an autoregressive rollout for several time steps into the future. 
+ We report both the one-step and rollout test errors.
+        
+        We consider three datasets in our experiments. Each dataset consists of numerical solutions for a given time-evolving PDE in two spatial dimensions with randomly sampled initial conditions.%}
+        
+        \textbf{Incompressible Navier-Stokes (INS)}. The incompressible Navier-Stokes equations model the flow of a fluid wherein the density is assumed to be independent of the pressure, but may not be constant due to properties of the fluid such as salinity or temperature~\citep{vreugdenhil1994numerical}. The equations are given by 
+        \begin{equation}\label{eq:ns}
+            \frac{\partial \bm{v}}{\partial t} = -\bm{v}\cdot \nabla \bm{v} + \mu \nabla^2 \bm{v} - \nabla p + \bm{f},\ \nabla \cdot \bm{v} = 0,
+        \end{equation}
+        where $\bm{v}$ is velocity, $p$ is internal pressure, and $\bm{f}$ is an external force. We use the dataset from~\citet{gupta2023towards}, simulated with a numerical solver from the $\Phi_{\mbox{\tiny{Flow}}}$ package~\citep{holl2020phiflow}.%}
+
+        \textbf{Compressible Navier-Stokes (CNS)}. Compressibility is generally a consideration most relevant for fast-moving fluids~\citep{anderson2011ebook}. We generate our CNS dataset using the numerical solver from~\citet{takamoto2022pdebench}. 
+        The dynamics in this data are more turbulent than those in the INS data, with the viscosity as $1\times10^{-8}$ and the initial Mach number, which quantifies the ratio of the flow velocity to the speed of sound in the fluid~\citep{anderson2011ebook}, as 0.1. 
+
+        \textbf{Shallow Water Equations (SWE)}. The shallow water equations are derived by depth-integrating the incompressible Navier-Stokes equations and find applications in modeling atmospheric flows~\citep{vreugdenhil1994numerical}.
+        We use the dataset from~\citet{gupta2023towards} for modeling the velocity and pressure fields for global atmospheric winds with a periodic boundary condition. 
+    
+    \subsection{Models}\label{sec:models}
+
+        Here, we overview the models used in our experiments%al comparisons
+
+        
+        \textsc{\textbf{SineNet-8/16.}} SineNet with 8 or 16 waves and $64$ channels at the highest resolution. Multiplier $m_k=1.425/1.2435$ is used, resulting in channels along the downsampling path of each wave being arranged as $(64,91,129,185,263)/(64,79, 98, 123, 153)$.
+        \textsc{\textbf{F-FNO.}} Fourier Neural Operators~\citep{li2021fourier} process multi-scale features by performing convolutions in the frequency domain~\citep{gupta2023towards}, and were originally developed for PDE modeling. As one of the primary components of SineNet is depth, we compare to a state-of-the-art FNO variant, the Factorized FNO (\textsc{F-FNO})~\citep{tran2023factorized}, optimized specifically for depth. In each of the $24$ layers, the number of Fourier modes used is $32$ and the number of channels is $96$.
+        
+        \textsc{\textbf{Dil-ResNet.}} As opposed to downsampling and upsampling, the dilated ResNet (\textsc{Dil-ResNet}) proposed by~\citet{stachenfeld2022learned} is a neural PDE solver that processes multi-scale features by composing blocks of convolution layers with sequentially increasing dilation rates followed by sequentially decreasing dilation rates~\citep{zhang2023artificial}. 
+
+        \textbf{\textsc{U-Net-128} and \textsc{U-Net-Mod}.} \textsc{U-Net-128} is equivalent to \textsc{SineNet-1} with the multiplier $m_K=2$ and $128$ channels at the highest resolution, with channels along the downsampling path arranged as $(128,256, 512,1024,2048)$.
+        \textsc{U-Net-Mod} is a modern %ified 
+        version of the
+        U-Net architecture which parameterizes downsampling using strided convolutions and upsampling using transposed convolutions. Additionally, it doubles the number of convolutions and skip connections per resolution. 
+        
+
+        
+
+        For convolution layers in \textsc{SineNet%-8
+        , Dil-ResNet, U-Net-128} and \textsc{U-Net-Mod}, zero padding is used on the INS dataset and circular padding is used on CNS and SWE.
+
+    \subsection{Results}\label{sec:results}
+
+        
+        We present results for INS, CNS, and SWE in Table~\ref{tab:res}. On all datasets, \textsc{SineNet-8} has the lowest 1-step and rollout errors. Out of the remaining baselines, F-FNO has the strongest performance in terms of rollout error on CNS and SWE, while \textsc{Dil-ResNet} has the best baseline rollout error on INS.
+
+        \begin{table}[h]
+            \caption{Summary of rollout test error and one-step test error. The best performance is shown in bold and the second best is underlined.}
+            \begin{center}
+            \label{tab:res}
+                \begin{sc}
+                    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lccccccc}
+        \toprule
+        & & \multicolumn{2}{c}{INS} & \multicolumn{2}{c}{CNS} & \multicolumn{2}{c}{SWE} \\%\cline{3-6}
+        Method & \# Par. (M) & 1-Step ($\%$) & Rollout ($\%$) & 1-Step ($\%$) & Rollout ($\%$) & 1-Step ($\%$) & \textsc{Rollout ($\%$)} \\
+        \midrule
+        SineNet-8 & 35.5 & \underline{1.66} & \underline{19.25} & \underline{0.93} & \underline{2.10} & \underline{1.02} & \underline{1.78} \\
+        SineNet-16 & 35.4 & \textbf{1.46} & \textbf{17.63} & \textbf{0.87} & \textbf{2.04} & \textbf{0.92} & \textbf{1.64}
+        \\
+        F-FNO & 30.1 & 2.41 & 22.58 & 1.46 & 2.91 & 1.22 & 2.46 \\
+        Dil-ResNet & 16.7 & 1.72 & \blue{19.29} & \blue{1.17} & \blue{3.76} & \blue{2.23} & \blue{4.12} \\
+        U-Net-128 & 135.1 & 2.69 & 24.94 & 1.62 & 3.05 & 1.63 & 3.38 \\
+        U-Net-Mod & 144.3 & 2.43 & 23.65 & 1.32 & 3.34 & 1.60 & 3.02 \\
+        \bottomrule
+    \end{tabular}
+
+                    }
+                \end{sc}
+            \end{center}
+        \end{table}    
+
+
+    \subsection{Ablation study}\label{sec:ablation}
+            \begin{table}[h]
+            \caption{Ablation study results. The best performance is shown in bold.}
+            \begin{center}
+            \label{tab:abl}
+                \begin{sc}
+                    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lccccccc}
+        \toprule
+        & & \multicolumn{2}{c}{INS} & \multicolumn{2}{c}{CNS} & \multicolumn{2}{c}{SWE} \\%\cline{3-6}
+        Method & \# Par. (M)  & 1-Step ($\%$) & Rollout ($\%$) & 1-Step ($\%$) & Rollout ($\%$) & 1-Step ($\%$) & Rollout ($\%$)\\
+        \midrule
+        SineNet-8 & 35.5 & \textbf{1.66} & \textbf{19.25} & \textbf{0.93} & \textbf{2.10} & \textbf{1.02} & \textbf{1.78} \\
+        SineNet8-Entangled & 32.8 & 1.69 & 19.46 & 1.01 & 2.39 & 1.14 & 1.97 \\
+        Deeper U-Net-8 & 28.6 & 1.74 & 19.58 & 1.21 & 2.76 & 1.39 & 2.67 \\
+        \bottomrule
+    \end{tabular}
+
+                    }
+                \end{sc}
+            \end{center}
+        \end{table}    
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figure/k_abl.pdf}
+    \caption{Number of waves $K$ versus test error. Solid line is rollout error, dashed line is 1-step error.}
+    \label{fig:k_abl}
+\end{figure}
+        We construct several models to ablate various components of SineNet and present results for these models in Table~\ref{tab:abl}. 
+        
+        \textsc{\textbf{Deeper U-Net-8. This serves to ablate SineNet's multi-stage processing strategy as a means of resolving the misalignment issue, and furthermore validate that observed improvements of SineNet are not a mere result of increased depth. In Table~\ref{tab:abl}, we see that on all datasets, \textsc{SineNet-8} outperforms \textsc{Deeper U-Net-8}. The largest improvements are on the SWE data, where the time interval between consecutive solutions is 48 hours. While the large timestep results in substantial misalignment in the \textsc{Deeper U-Net} skip connections, the multi-stage strategy of \textsc{SineNet} handles it effectively. 
+        
+        \textsc{\textbf{SineNet-8-Entangled.}} \textsc{SineNet-8}, but the parallel and sequential processing branches are entangled, \textit{i.e.}, the downsampling path is constructed as in Equation~\ref{eq:bres_down} as opposed to the disentangled downsampling in Equation~\ref{eq:disent}. In Table~\ref{tab:abl}, we observe that disentangling the parallel branch results in consistent performance gains.
+        
+        \textbf{\textsc{SineNet-$K$}.}
+ In Figure~\ref{fig:k_abl}, we present results for $K=2,4,6,8\blue{,10,12,14,16}$ and find that on all $3$ datasets, errors monotonically improve with $K$, \blue{although improvements appear to plateau around $K=16$}. This result is consistent with our assumption of the latent evolution of features, as a greater number of waves leads to a smaller amount of evolution managed by each wave, thereby leading to improved modeling accuracy through reduced misalignment.
+
+\begin{wraptable}{r}{0.45\linewidth}
+    \centering
+    \caption{Comparison between zero and circular padding on SWE with \textsc{SineNet-8}.}
+    \begin{sc}
+     \resizebox{0.45\textwidth}{!}{
+    \begin{tabular}{cccc}
+        \toprule
+        \multicolumn{2}{c}{Zero padding} & \multicolumn{2}{c}{Circular padding} \\
+          \textsc{1-Step ($\%$)} & \textsc{Rollout ($\%$)} & \textsc{1-Step ($\%$)} & \textsc{Rollout ($\%$)} \\\midrule
+         1.50 & 4.19 & \textbf{1.02} & \textbf{1.78} \\
+        \bottomrule
+    \end{tabular}}
+    \label{tab:padding}
+    \end{sc}
+\end{wraptable}
+\textbf{Effect of circular padding.} In Table~\ref{tab:padding}, we replace circular padding with zero padding in \textsc{SineNet-8} on SWE. The periodic boundaries result in boundary points opposite each other being spatially close, however, without appropriate padding to encode this into feature maps, the ability to model advection across boundaries is severely limited.
+\colorblue
+
+
+
+\section{Discussion}
+
+
+
+ 
+
+\color{black}
+
+
+\section{Conclusion}
+
+
+
+In this work, we have presented SineNet, a neural PDE solver designed to evolve temporal dynamics arising in time-dependent PDEs. We have identified and addressed a key challenge in temporal dynamics modeling, the misalignment issue, which results in a performance drop for conventional U-Nets. By reframing the U-Net architecture into multiple waves, SineNet mitigates this misalignment, leading to consistent improvements in solution quality over a range of challenging PDEs. Further, we analyze the role of skip connections in enabling both parallel and sequential processing of multi-scale information. Additionally, we demonstrate that increasing the number of waves, while keeping the number of parameters constant, consistently improves the performance of SineNet. Our empirical evaluation across multiple challenging PDE datasets highlights the effectiveness of SineNet and its superiority over existing baselines.
+
+
+

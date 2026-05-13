@@ -1,0 +1,197 @@
+# Boolformer: Symbolic Regression of Logic Functions with Transformers
+
+- Decision: Reject
+- Scores: 6, 8, 5, 3
+
+## Abstract
+In this work, we introduce Boolformer, the first Transformer architecture trained to perform end-to-end symbolic regression of Boolean functions. First, we show that it can predict compact formulas for complex functions which were not seen during training, when provided a clean truth table. Then, we demonstrate its ability to find approximate expressions when provided incomplete and noisy observations. We evaluate the Boolformer on a broad set of real-world binary classification datasets, demonstrating its potential as an interpretable alternative to classic machine learning methods. Finally, we apply it to the widespread task of modelling the dynamics of gene regulatory networks. Using a recent benchmark, we show that Boolformer is competitive with state-of-the art genetic algorithms with a speedup of several orders of magnitude. Our code and models are available publicly.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper investigates end-to-end symbolic regression of Boolean functions. The authors show that the overall performance of Boolformer is comparable to classical machine learning in this particular field, with the benefits that Boolformer can be faster and provide interpretable solutions.
+
+### Strengths
+- The paper is well written and easy to follow.
+- Careful description of the generation of synthetic data, and a good analysis of the possible bias included.
+- Empirical evaluation establishes the effectiveness of the approach.
+- A good section of limitation addressing some of my concerns (e.g., not being able to deal with large formulas) which would otherwise go to the weakness below.
+
+### Weaknesses
+- While there are some engineering for the embedder, the rest of the approach seems quite standard and straightforward (which is not necessarily a bad thing).
+- It might not be that surprising that Boolformer is faster on GRNs tasks. After all, it has been trained for a long time and the training data could have covered what it needed in these tasks. I am curious, however, is there a similar comparison of efficiency in the noiseless regime?
+
+### Questions
+See above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+Authors employ Transformer architecture to train a model capable of inferring a logical function based on a truth table.
+
+Authors synthetically produce a dataset to train such a model.
+
+Authors do evaluation in a noiseless and noisy setting.
+Noiseless means that the full truth table is available.
+Noisy means that a partial truth table is available, and some bits can be flipped with a small probability.
+They show that the transformer effectively learned to reconstruct boolean functions.
+They also show that it works in a noisy setting.
+They evaluate their model in a realistic setting of gene regulatory networks, and showcase the use of their model;
+its performance is comparable to other methods while exhibiting much faster inference speed.
+
+### Strengths
+- Well written and structured
+- Clear motivation
+- Authors will open source the implementation
+
+### Weaknesses
+- It would be good to have more examples of real-world usages of the method. Speed (inference) superiority is great, but maybe speed is not even a concern in the domains that the technique is intended to be applied.
+- It would be good to have some analysis on which type of tasks is solvable by this method vs. others.
+- Does not generalize to larger formulas.
+
+### Questions
+- Can you explain better Figure 17 from Supplementary Material which displays embeddings? 
+    - (a) Which part of transformer do you extract for the shown embedding vectors (is it only the last token state, or all tokens, etc.)?
+    - (b) What exactly are the inputs that you use to construct shown embedding, and why do you make such choice?
+
+- Figure 1. Denote that what is shown is output of your model. Figure title is misleading.
+- Page 3. "in the sections below" -> "in the following sections".
+- Page 4. Maybe add that Smax <= Dmax
+- Page 5. D refers to dimensionality of logical input. Later in this page, it refers to a set of input-output pairs (if I understand correctly). Use a different letter.
+- Fig 7, part a. Readability can be improved.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a method named Boolformer that performs symbolic regression for logical operations using AND, OR, and NOT. Boolformer is trained to output logic formulas in Polish notation using a Transformer-based Encoder-Decoder model. The results show not only the evaluation of the automatically generated formulas, but also the inference performance, excellent speed, and high explanatory power on PMLB databases and gene regulartory networks (GRNs) as real-world problems.
+
+### Strengths
+- A new problem setting in which logical expressions are symbolically regressed by Transformer.
+- Experimental results on several real-world applications as well as on the generated logical equation data are reported.
+  - The results using PMLB database shows accuracy comparable to Random Forest and logistic regression, and furthermore, the learned models are expected to provide excellent explanatory properties.
+  - Using GRNs, Boolformer is shown to have both excellent accuracy and speed.
+
+### Weaknesses
+- The problem statement in the introduction does not match the solution. In Section 1, citing (Abbe et al., 2022), the authors point out that Transformer learns complex models in terms of the Fourier spectrum, resulting in poor generalization performance when samples are insufficient. As a contribution, Section 1.1 claims that it is robust to noisy and incomplete observations. However, the Boolformer proposed in this paper is a relatively natural application of the Transformer, and there is no redesign from a Fourier spectrum perspective or other robustness innovations.
+- Due to the design of the method, it can only accept datasets with relatively few variables or small scale. This is acknowledged by the authors in section 5, but since there are currently proposals such as Transformer that can accept long series, it would have been easy to consider improving the limitation.
+- For example, if the correct answer is [AND, X_1, NOT, X_2], then [AND, NOT, X_2, X_1] is also equivalent. The fact that the system is learned by cross-entropy means that it is unclear how a valid cross-entropy can be calculated when there are multiple correct answers in this way.
+
+### Questions
+- The reviewer expects the authors to respond to the points listed in Weaknesses.
+- In the radar charts in Figure 7(a), the different methods are plotted among different axes, making it difficult to understand the comparison between those methods. If the radar chart is used to make comparisons between methods, it would be better to have as many axes as the number of experimental settings, such as the number of genes, and plot entities for each method. Alternatively, a table or a bar chart like Figure 7(b) is easier to compare methods.
+- Minor comments:
+  - In the caption of Figure 1, (x_5 x_6 x_7 x_7 x_9( should be (x_5 x_6 x_7 x_**8** x_9).
+  - References should be corrected. Especially, many published papers are cited as preprints. Below are some examples:
+    - The reference for (Abbe et al., 2022) should be a NeurIPS 2022 paper.
+    - (Dosovitskiy et al., 2020) should be an ICLR 2021 paper.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes a model to perform symbolic regression of boolean functions using transformers
+
+### Strengths
+The method is sound, simple and elegant. 
+
+Boolean functions are easy to be generated randomly in huge amount, which is where transformers architecture shine. 
+The  techniques is straightforward: generate boolean formulas randomly (covering the space of function as much as possible with a bias towards short formulas) and train a seq-2-seq architecture on that. 
+
+The speed up on gene-regulatory networks is interesting.
+
+### Weaknesses
+The major weakness of the paper is the positioning w.r.t. the state of the art. Being the method very simple, clearly highlighting the novelty should have been a priority. 
+
+While the paper discusses many related areas, it is very unclear what is new in the proposed approach. For example, the section on "symbolic regression" in the related work, which is the closest area to the proposed approach ("Symbolic regression of logic functions"), is simply a list of papers. The approach is not compared with these approaches neither experimentally not even theoretically. 
+
+Experiments in the noiseless regime do not compare Boolformer with any baseline (therefore is quite hard to understand how hard is the task overall). 
+
+Experiments in the noisy regime have comparisons but with very unrelated approaches (generic ML models or specific to the dataset)
+
+Minor: The numbers in the radar charts in Figure 7 are impossible to read.
+
+### Questions
+1) Would be possible to apply any existing symbolic regression approaches to the proposed task?
+
+2) How novel is the generation of boolean formulas? Are there similar ideas in the literature to generate datasets for symbolic regression? 
+
+3) How can you measure how hard is the task? Would any other method (both transformer based, or tradition ILP setting, be able to solve the task to some extent?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

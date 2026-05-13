@@ -1,0 +1,233 @@
+\title{LSH Tells You What To Discard: An Adaptive Locality-Sensitive Strategy for KV Cache Compression}
+
+\begin{abstract}
+Transformer-based large language models (LLMs) use the key-value (KV) cache to significantly accelerate inference by storing the key and value embeddings of past tokens. However, this cache consumes significant GPU memory. In this work, we introduce LSH-E, an algorithm that uses locality-sensitive hashing (LSH) to compress the KV cache. LSH-E quickly locates tokens in the cache that are cosine dissimilar to the current query token. This is achieved by computing the Hamming distance between binarized Gaussian projections of the current token query and cached token keys, with a projection length much smaller than the embedding dimension. We maintain a lightweight binary structure in GPU memory to facilitate these calculations. Unlike existing compression strategies that compute attention to determine token retention, LSH-E makes these decisions pre-attention, thereby reducing computational costs. Additionally, LSH-E is dynamic -- at every decoding step, the key and value of the current token replace the embeddings of a token expected to produce the lowest attention score. We demonstrate that LSH-E can compress the KV cache by 30\%-70\% while maintaining high performance across reasoning, multiple-choice, long-context retrieval and summarization tasks.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The advent of large language models (LLMs) has enabled sharp improvements over innumerable downstream natural language processing (NLP) tasks, such as summarization and dialogue generation (Zhao et al., 2023; Wei et al., 2022). The hallmark feature of LLMs, the attention module (Bahdanau, 2014; Luong, 2015; Vaswani, 2017), enables contextual processing over sequences of tokens. To avoid repeated dot products over key and value embeddings of tokens, a key-value (KV) cache is maintained in VRAM to maintain these calculations. This technique is particularly popular with decoder LLMs.  
+
+However, the size of the KV cache scales quadratically with sequence length $n$ and linearly with the number of attention layers and heads. Assuming the size of the KV cache is $n$ tokens, for each new decoded token, $n$ attention scores need to be added which requires a total of $O(d n^{2})$ computation, where $d$ is the projection dimension, and $O(n^{2})$ storage. For example, maintaining the KV cache for a sequence of 4K tokens in half-precision (FP16) can require approximately $\mathord{\sim}16\mathrm{GB}$ of memory for most models within the Llama 3 family (Dubey et al., 2024). These memory costs are exacerbated with batched inference and result in high decoding latency (Fu, 2024). Consequently, there is significant interest in compressing the size of the KV cache to enable longer context windows and low-resource, on-device deployment.  
+
+An emerging strategy for reducing the size of the KV cache is token eviction. This approach drops the key and value embeddings for past tokens in the cache, skipping future attention calculations involving these tokens. Various token eviction/retention policies have been explored in recent literature, including the profiling of token type preferences (Ge et al., 2023), retention of heavy-hitter tokens (Zhang et al., 2024b;a), and dropping tokens based on the high $L_{2}$ norms of their key embeddings (Devoto et al., 2024). The latter approach (Devoto et al., 2024) is intriguing as eviction decisions are performed pre-attention. However, this $L_{2}$ dropout strategy in inclined towards longcontext retrieval tasks. It developed based on an empirical observation that smaller norm of key embedding correlates with higher attention score. For long-context retrieval tasks, high-attention score tokens are the most important tokens since the question’s text will overlap with the piece of context that needs to be retrieved. Thus, it is specialized to retain only those tokens with the highest attention, which we find unsuitable for free response reasoning tasks. Existing literature suggests that retaining tokens with a diverse spectrum of attention scores (skewing high) is necessary (Guo et al., 2024; Zhang et al., 2024b; Long et al., 2023).  
+
+Is there a non-attentive KV cache compression strategy that is performant over a wide variety of tasks, including multiple-choice, summarization, long-context retrieval, and free response questionanswering? This work answers this question positively by introducing a novel strategy, LSH-E, that dynamically determines token eviction pre-attention via locality-sensitive hashing (LSH) (Goemans & Williamson, 1995; Charikar, 2002). LSH-E evicts a past token from the cache whose key embedding is highly cosine dissimilar to the current query token embedding. The intuition behind this strategy is that high cosine dissimilarity indicates a low dot-product attention score. To efficiently scan for cosine (dis)similar tokens without performing attention, LSH-E leverages the SimHash (Charikar, 2002; Goemans & Williamson, 1995) to instead compare Hamming distances between $c$ -length binary hashes of cached key embeddings and the current query embedding. We depict a high-level visualization of this strategy in Figure 1.  
+
+LSH-E requires minimal overhead: for a total sequence length of $\ell$ tokens with embedding dimension $d$ , LSH-E maintains a constant-size, low-cost binary array in GPU memory of size $c\times k$ bytes, where $c\ll d$ is the hash dimension and $k\ll\ell$ . Cached tokens with key embeddings that register low Hamming similarity measurements to decoded query embeddings are gradually replaced.  
+
+![](images/6946737d932121edeaaac8bfcc1653a497932113317c7fc4f84f39415f98a235.jpg)  
+(a) KV cache during decoding  
+
+![](images/e6278543d6baccfba279b3953f8c90e920d7dd925499e23faa31cb519a9661dd.jpg)  
+(b) LSH comparison at decoding step 4  
+
+Figure 1: An abstract visualization of LSH-E eviction strategy. Figure 1a depicts the strategy for several decoding steps. The cache can only maintain 5 tokens due to memory constraints. At each decoding step, LSH-E projects the query embedding of the current token $i$ and all previous key embeddings to binary hash codes. LSH-E then measures the negative of Hamming distances between the query code of token $i$ and key codes of all tokens $j$ in the cache. Each step, LSH-E evicts the key/values of the token with the lowest score (marked as red) from the cache. Figure 1b depicts the LSH comparison for decoding step 4, marking the token “said” for removal, as its high Hamming indicates low cosine similarity (and thus, low attention).  
+
+Our contributions are as follows:  
+
+• Novel Attention-Free Token Eviction We introduce a novel attention-free token eviction strategy, LSH-E, that leverages locality-sensitive hashing (LSH) to quickly locate which token in the cache is the least relevant to the current query. This ranking procedure consists entirely of cheap Hamming distance calculations. The associated binary array for computing these similarities requires minimal memory overhead. For a Llama 3 model, LSH-E can compress the KV cache by $30\%–70\%$ with minimal performance drop  
+
+• State-of-the-Art Performance LSH-E demonstrates high performance on reasoning tasks (GSM8K Cobbe et al. (2021), MedQA Cobbe et al. (2021)), multiple-choice (GSM8K MC, MedQA MC), long-context retrieval (Needle-in-a-Haystack, Common Word (Hsieh et al., 2024)), and long-text summarization (MultiNews, GovReport Bai et al. (2023)). To the best of our knowledge, LSH-E achieves state-of-the-art performance for attention-free eviction, outperforming the similar attention-free $L_{2}$ method. Additionally, LSH-E outperforms attention-accumulationbased methods on long text summarization tasks and achieves $1.5\mathrm{x}$ speedup in the prefilling stage and comparable speed in the decoding stage withoug low-level optimiations.  
+
+  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+We aim to capture tokens whose query embeddings will form a large sum of dot products (i.e., attention scores) with other key embeddings, but without explicitly calculating attention. We will leverage locality-sensitive hashing (LSH) to quickly determine cosine similarities since the angle is equivalent to the dot product (for unit vectors). In this section, we review technical concepts crucial to attention and locality-sensitive hashing. We assume some base level of similarity with transformers, but we refer the reader to precise formalism (Phuong & Hutter, 2022).  
+
+Scaled Dot-Product Attention Consider a sequence of $n$ tokens with $e$ -dimensional real-valued representations $x_{1},x_{2},\ldots,x_{n}$ . Let $Q\ =\ [q_{1}\,q_{2}^{-}\,\cdots\,q_{n}]\ \in\ \mathbb{R}^{n\times d}$ , $K\;=\;[k_{1}\,k_{2}\,\cdot\,\cdot\,\cdot\,k_{n}]\;\in\;\mathbb{R}^{d\times n}$ where $q_{i}\,=\,W_{q}x_{i}$ , $k_{i}=W_{k}x_{i}$ and $W,K\in\mathbb{R}^{d\times e}$ . The query and key projectors $W_{q}$ and $W_{k}$ are pre-trained weight matrices. We also define a value matrix $V\,=\,[v_{1}\,v_{2}\,v_{2}\cdot\cdot\cdot\,v_{n}]\,\in\,\mathbb{R}^{d_{o u t}\,\times\,n}$ with $v_{i}=W_{v}x_{i}$ with trainable $V\in\mathbb{R}^{d_{o u t}\times d}$ , the scaled dot-product attention mechanism is given as  
+
+$$
+\operatorname{Attention}(Q,K,V)=V\cdot\operatorname{softmax}\biggl(\frac{Q^{\top}K}{\sqrt{d}}\biggr).
+$$  
+
+Typically, attention layers contain multiple heads $\{h_{i}\}_{i=1}^{J}$ each with distinct query, key, and value projectors $\{W_{q}^{(h_{i})},W_{k}^{(h_{i})},W_{v}^{(h_{i})}\}_{i=1}^{J}$ . In a multi-head setup, attention is computed in parallel across all heads, and the outputs are concatenated together and then passed through a linear layer for processing by the next transformer block.  
+
+As $Q,K,V$ are updated with each new incoming token, to avoid significant re-computation, the current state of $Q^{\dagger}K$ , $Q$ , and $K$ are maintained in the KV cache. Our goal is to bypass attention computation and caching for select tokens, i.e., sparsify the attention matrix $Q^{\top}K,\bar{K}$ , and $V$ .  
+
+Locality-Sensitive Hashing We will now describe a family of locality-sensitive hashing (LSH) functions able to efficiently approximate nearest neighbors (per cosine similarity) of key/query vectors in high-dimensional $\dot{\mathbb R}^{d}$ through comparison in a reduced $c$ -dimensional space (per Hamming distance) with $c\ll d$ . Here, ”locality-sensitive” means points that are close together according to a distance function $\mathrm{dist}_{d}(\cdot,\cdot)$ in the ambient space remain close per another distance function $\mathrm{{dist}}_{c}(\cdot,\cdot)$ in the lower-dimensional space with high-probability. For a rigorous treatment of LSH functions, see (Andoni et al., 2018; Charikar, 2002).  
+
+Formally for our setup, $\begin{array}{r}{d i s t_{d}(x,y)\triangleq\cos\theta_{x,y}=\frac{x^{\top}y}{\lvert\lvert x\rvert\rvert\ \lvert|y\rvert|}}\end{array}$ and $d i s t_{c}(p,q)\triangleq\mathbf{d}_{H}(p,q)$ which denotes the Hamming distance. We will project each vector from $\mathbb{R}^{d}$ into $\mathbb{Z}_{2}^{c}$ , the space of $c$ -bit binary strings (which is often referred to as a binary hash code). To acquire a $c$ -bit long hash code from an input vector $x\in\mathbb{R}^{d}$ , we define a random projection matrix $\bar{R_{\mathrm{~}}}^{\star}\in\mathbb{R}^{c\times d}$ whose entries are independently sampled from the standard normal distribution ${\mathcal{N}}(0,1)$ . We then define  
+
+$$
+h(x)=\operatorname{sgn}(R x),
+$$  
+
+where $\operatorname{sgn}({\mathord{\cdot}})$ (as an abuse of conventional notation) is the element-wise Heaviside step function:  
+
+$$
+\mathrm{sgn}(x):=\left\{1,\quad x\geq0\right..
+$$  
+
+For two unit vectors $x,y\in\mathbb{R}^{d}$ we have that,  
+
+$$
+\frac{1}{c}\cdot\mathbb{E}[{\bf d}_{H}\big(h(x),h(y)\big)]=\frac{\theta_{x,y}}{\pi},
+$$  
+
+where $\theta_{x,y}\,=\,\operatorname{arccos}(\cos(\theta_{x,y}))$ . We do not prove equation 3 in this work; see Theorem $\S3.1$ in (Goemans & Williamson, 1995, Theorem 3.1). In particular, if $x$ and $y$ are close in angle, the Hamming distance between $h(x)$ and $h(x)$ is low in expectation. Increasing the hash dimension $c$ reduces variance.  
+
+The geometric intuition behind this LSH scheme is the following: each row $R_{:,i}$ of $R$ defines a random hyperplane in $\mathbb{R}^{d}$ . The Heaviside function $\operatorname{sgn}({\mathord{\cdot}})$ indicates whether $x$ is positively or negatively oriented with respect to the hyperplane $R_{:,i}$ . Thus, the $c$ hyperplanes divide the $d$ dimensional space into multiple partitions, and the resulting $c$ -dimensional hash code is an index into one of the partitions in which $x$ is located. Therefore, vectors with the same or similar hash codes lie in the same or close-by partitions and, therefore, are likely similar in angle. cwecwasdf  
+
+
+
+\section{2.1 RELATED WORKS  }
+
+
+KV Cache Compression Many popular compression strategies adopt an eviction approach, which removes embeddings from the KV cache. $\mathrm{H_{2}O}$ (Zhang et al., 2024b) and Scissorhands (Liu et al., 2024b) calculate token importance by their accumulated attention scores and keep the “heavy hitters” in the cache. FastGen (Ge et al., 2023) performs a profiling pass before the generation stage that assigns to each head, according to the head’s attention patterns, a pruning policy which only retains categories of tokens (punctuation, special, etc.) favored by the head. These eviction strategies depend on the computation of attention scores for their policy. An attention-free $L_{2}$ dropout method (Devoto et al., 2024), which we compare ourselves to in this work, uses the observation that high-attention tokens tend to have low $L_{2}$ key norms to approximately keep important tokens in cache. Other methods seek to merge KV caches across heads, such as grouped query attention (GQA) (Ainslie et al., 2023; Dubey et al., 2024). KVMerger (Wang et al., 2024) and MiniCache (Liu et al., 2024a), which searches for similarity between tokens in consecutive attention layers and subsequently merges KV cache entries across these layers. While these consolidation approaches prevent memory complexity associated with KV caches from scaling with depth or multi-head attention, the size of any singular cache still tends to scale with sequence length.  
+
+LSH Based Attention Similar to our work, Reformer (Kitaev et al., 2020) employs LSH to find similar tokens, but as a way to replace the softmax attention as opposed to token eviction. It creates hash buckets of tokens that form local attention groups and only attends to tokens in the same and neighboring buckets. However, this makes Reformer vulnerable to missing important tokens due to hash collision or boundary issues, and therefore, it must use multiple hash tables to mitigate this issue. In a similar vein, KDEFormer (Zandieh et al., 2023), HyperAttention (Han et al., 2023), and Zandieh et al. (2024a), use LSH to stably approximate and compressing the attention module thus accelerating the computation, but without token eviction. SubGen (Zandieh et al., 2024b) uses LSH to cluster key embeddings and samples representatives from each cluster to reduce the size of the KV Cache and consequently speed up attention, though it must initially view all queries and keys to perform this clustering which could result in VRAM blowup, which our method avoids.  
+
+
+
+\section{3 LSH-E: A LOCALITY-SENSITIVE EVICTION STRATEGY  }
+
+
+We now formalize our eviction method reflected in Algorithm 1. We assume that the KV cache has a limited and fixed budget and conceptually divide the KV cache management during LLM inference into two stages: the initial Prompt Encoding Stage and then a Decoding Stage (i.e., generation).  
+
+Let $C$ be a constant and fixed cache budget, $\kappa$ be the key cache, and $\nu$ be the $\mathrm{v}$ cache in a K-V attention head. We define our eviction policy as a function  
+
+$$
+\mathcal{K}_{t},\mathcal{V}_{t},\mathcal{H}_{t}\gets P(q,\mathcal{K}_{t-1},\mathcal{V}_{t-1},\mathcal{H}_{t-1})
+$$  
+
+where $\mathcal{H}_{t}\;\in\;\{0,1\}^{b\times C}$ is a hash table that contains hash codes of keys in $\kappa$ . We then define a function $F_{s c o r e}$ to assign a score for each key inside the $\mathbf{K}$ cache. $F_{s c o r e}$ outputs an array which contains the negative of hamming distances $d_{H}$ between the hash code of a query vector $q$ and columns of $\mathcal{H}$ , which are hash codes of all non-evicted keys.  
+
+$$
+F_{s c o r e}(q,K)=-d_{H}(h(q),\mathcal{H})
+$$  
+
+The eviction index $e_{t}$ at any step $t$ is selected as the index with the lowest score:  
+
+$$
+e_{t}\gets\arg\operatorname*{min}F_{s c o r e}(q_{t-1},\mathcal{H}_{t-1})
+$$  
+
+which points to the key that is most distant from the query vector at time step $t$ . Entries at index $e_{t}$ from the $\kappa$ and $\mathcal{V}$ are evicted and $\mathcal{H}$ is updated (step 3-6 of Algorithm 1).  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+Tasks We evaluated our LSH eviction strategy across various tasks to demonstrate its effectiveness in reducing the memory cost of the KV cache while preserving the language quality of the generated text. Our experiments are split into four main categories: free response question answering, multiple choice, long-context retrieval and long-context summarization. Our long context retrieval tasks include the multi-key needle-in-a-haystack task and the common words task from (Hsieh et al., 2024). Question answering tasks include GSM8K (Cobbe et al., 2021) and MedQA (Jin et al., 2021). Summarizaiton tasks include GovReport and MultiNews from Bai et al. (2023).  
+
+Metrics The question-answering tasks were evaluated using BERTScore (which includes precision, recall, and F1 scores), ROUGE (ROUGE-1, ROUGE-2 and ROUGE-L and ROUGE-Lsum), and GPT4-Judge. GPT-4 was prompted to look at both the model prediction and the ground truth answer, then provide a score from 1 - 5 on the coherence, faithfulness, and helpfulness of the answer in addition to similarity between the prediction and ground truth (we named this metric GPT4-Rouge). In this section, we report the average of these four scores.2. For multiplechoice tasks, we use accuracy as our metric. The metric used to evaluate long context retrieval tasks is the string matching score from Hsieh et al.1. For summarization tasks, we use Rouge as the metric as per direction from Bai et al. (2023).  
+
+Configuration and Setup We conducted most experiments using Meta’s Llama3 8B-Instruct model (Dubey et al., 2024) with the exception of long text summarization tasks which were tested using the Llama3.1 8B-Instruct model. Our method is agnostic to grouped-query attention, so we used the default group size of 4. The maximum sequence length was set to the sum of the maximum prompt length and the maximum number of allowed generated tokens needed for each task. We conducted experiments using cache budgets of $10\%$ , $30\%$ , $50\%$ , $70\%$ , and $90\%$ of the full KV cache. Based on insights from (Xiao et al., 2023; Child et al., 2019; Beltagy et al., 2020), we also keep the most recent 10 tokens and the first 4 tokens of the prompt always in the KV cache. The summarization tasks were performed on Nvidia $\mathtt{H l O0\ 80G B}$ graphics cards due to their long contexts. All other experiments were conducted on the Google Cloud Platform G2 instances with Nvidia L4 24GB graphics cards.  
+
+Baseline Methods We chose the $L_{2}$ norm-based eviction method (Devoto et al., 2024) as our main baseline for comparison because it is also an attention-free KV cache eviction method. We also included two attention-accumulation-based methods: $\mathrm{H_{2}O}$ Zhang et al. (2024b) and Scissorhands Liu et al. (2024b), as well as a hybrid method: Fastgen Ge et al. (2023).  
+
+4.1 FREE RESPONSE QUESTION ANSWERING  
+
+We tested our strategy against tasks that require generating accurate answers using multi-step reasoning. Specifically, we used the GSM8K and MedQA datasets to assess language quality for each strategy, given a constrained KV cache budget. Both tasks are used to test the potential side effects of compression on the LLM’s reasoning ability.  
+
+GSM8K GSM8K consists of grade-school-level math problems that typically require multiple reasoning steps. As shown in Figure 2, our LSH eviction strategy consistently outperforms the $L_{2}$ norm-based method across various cache sizes. Notably, even when the KV cache budget is set to $50\%$ of the full capacity, the LSH eviction strategy maintains a high answer quality, with minimal degradation in BERTScore F1, ROUGE-L, and GPT4-Judge scores. Additionally, LSH-E performs on par with H2O and Scissorhands without accumulating attention scores.  
+
+![](images/028dfbe7bd116fd1f2f4eb728be0ca1a4757b6a4aab4e124004d1c59c2d76ae8.jpg)  
+(a) BERTScore F1   
+(b) Rouge L   
+(c) GPT4-Judge  
+
+Figure 2: GSM8K Question Answering Performance. We measure BERTScore F1, Rouge-L, and GPT4-Judge for different cache budgets on a grade school math task. LSH-E outperforms $L_{2}$ for all three metrics for every budget, with sharp differences for the $50\%$ and $30\%$ compression. LSH-E performs similarly to $\mathrm{H_{2}O}$ and Scissorhands except at $10\%$ cache budget.  
+
+MedQA MedQA is a free response multiple choice question answering dataset collected from professional medical board exams. We randomly sampled 100 questions from this dataset. Each question has 5 choices and only one correct answer, along with ground truth explanations and reasoning steps. Figure 3 illustrates that LSH-E performs better than all baseline methods for all cache budgets tested. For both datasets, LSH-E produced more coherent and helpful answers across all cache budgets than the baselines per Table 8.  
+
+  
+
+4.2 MULTIPLE CHOICE QUESTION ANSWERING  
+
+We evaluated our method on multiple-choice versions of GSM8K and MedQA. Multiple choice is a more difficult test of a model’s reasoning capability under the constraint of cache compression, as it takes away the ability to use intermediate results in the generated text. The model has to keep useful tokens during prompt compression in order to pick the correct answer choice.  
+
+![](images/c1ed0fe4460c84b31e2aa3efa2d9c5d1c39b96173eefc97f661eabee3d4f2d1d.jpg)  
+Figure 3: MedQA Question Answering Performance. We measure BertScore F1, Rouge-L, and GPT4-Judge for different cache budgets on a medical exam task. LSH outperforms $L_{2}$ for all three metrics for every budget, with a significantly higher performance for the $30\%$ and $10\%$ budgets.  
+
+GSM8K Multiple Choice For the GSM8K multiple choice experiments, LSH significantly outperforms $L_{2}$ for cache budgets of $30\%$ and $50\%$ . As shown in Figure 4a, the $L_{2}$ method’s accuracy drops significantly at smaller cache sizes, while the performance of LSH-E does not significantly drop until the cache budget is set at $10\%$ .  
+
+![](images/bc0f297a60a01b206c907ac5558d42d5caf5878b71ce0bdfc0d75267fae1737f.jpg)  
+(a) Accuracy on the GSM8K Multiple Choice  
+
+![](images/fce8f7ef5cc40607d1a19cdead3526048e726c286b20642264340f88e90e5334.jpg)  
+(b) Accuracy on the MedQA Multiple Choice  
+
+Figure 4: Multiple Choice Tasks Performance. On GSM8K, LSH-E outperforms the baseline full cache on GSM8K at $70\%$ and $50\%$ cache budgets and significantly outperforms $L_{2}$ at $70\%$ , $50\%$ , and $30\%$ . LSH-E performs on par with $L_{2}$ overall on MedQA with higher performance at $90\%$ (near uncompressed performance) and $70\%$ budget and slightly lower performance at $50\%$ budget.  
+
+MedQA Multiple Choice Per Figure 4b, the MedQA multiple choice experiment, LSH offers better performance than $L_{2}$ eviction for all tested cache budgets except for $50\%$ . Performance between both methods is highly similar at lower budgets.  
+
+4.3 LONG-CONTEXT RETRIEVAL  
+
+To evaluate LSH-E’s ability to retain and retrieve important pieces of information from long contexts, we used the Needle-in-a-Haystack and Common Words tasks from Hsieh et al. (2024) with 4K context length. These tests benchmark the ability of a compression strategy to retain important tokens inside the KV cache within a large, complext stream of context.  
+
+Needle-in-a-Haystack In the Needle-in-a-Haystack task, the model must extract specific information buried within a large body of text. As illustrated in Figure 5b, LSH-E slightly outperforms $L_{2}$ at every cache budget except for $90\%$ , and both methods see a sharp drop in the ability to recall the “needle” (a small, targeted piece of context) after the cache budget drops to $50\%$ and lower. LSH-E outperforms $L_{2}$ for these smaller cache sizes.  
+
+Common Words In the Common Words task, the model must identify the most frequent words from a long list. Figure 5a demonstrates that LSH-E performs on par with $L_{2}$ eviction in general and slightly better at $30\%$ , $50\%$ , and $90\%$ cache budget. Both methods outperform the full cache model at $90\%$ cache size, indicating that some cache compression can actually increase performance. Neither method experienced a significant drop in performance until the cache budget was reduced to $30\%$ .  
+
+![](images/5b4dda66f9da18defed112a8a549d3d63611cdf9d469bb7389191551098c1b08.jpg)  
+(a) String Match Score on Common Words  
+
+![](images/5b61ffdd473730e22893590b77d2ca211b68a9328961c74ea89f28ba20e7f08d.jpg)  
+(b) String Match Score on Needle-in-a-Haystack  
+
+Figure 5: Long-Context Tasks. We measure string-matching scores for two long-context retrieval tasks. LSH-E performs on par with $L_{2}$ on the Common Words task with slightly higher performance at a $30\%$ cache budget and slightly lower performance at a $10\%$ budget. For the Needle-ina-Haystack task, LSH-E performs on par with $L_{2}$ with slightly higher performance at a $50\%$ cache budget.  
+
+4.4 LONG TEXT SUMMARIZATION  
+
+To evaluate LSH-E’s ability to handle exceptionally long context lengths, we incorporated the MultiNews and GovReport summarizations tasks from LongBench Bai et al. (2023). We tested both tasks using the Llama3.1-8B-Instruct model and used context size of 16K tokens.  
+
+![](images/0d5b34dff1828b884cf1d76539e9ed49c3532e39e512852cd621af6cdde5e7ea.jpg)  
+(a) Rouge-L on MultiNews  
+
+![](images/b6cd50c35a51e2e5e3b90c0ed0e99607c96e866af762ba352355270110f2289e.jpg)  
+(b) Rouge-L on GovReport  
+
+Figure 6: LongBench Summarization Tasks We measure Rouge-L for two long text summarization tasks. LSH-E outperforms all baseline methods on MultiNews at $30\textrm{-}70\%$ cache budget. LSH-E performs better than $L_{2}$ on GovReport at $50\%$ cache budget similarly at $30\%$ and $70\%$ .  
+
+MultiNews The MultiNews dataset contains clusters of 2-10 news articles discussing the same event or topic. The model is asked to provide a one-page summary of the articles. LSH-E outperforms all baselines in the MultiNews summarization task at $30–70\%$ cache budget. At $90\%$ cache budget, LSH-E still outperforms $\mathrm{H_{2}O}$ and Scissorhands while being slighly lower thant $L_{2}$ .  
+
+GovReport The GovReport dataset contains reports spanning a wide variety of national policy issues from the U.S. Government. The model is asked to produce a one-page summary of the reports. LSH-E performs on par with and sometimes slightly better than $L_{2}$ at $30–70\%$ cache budget, while not as well as $\mathrm{H_{2}O}$ or Scissorhands.  
+
+4.5 THROUGHPUT  
+
+To evaluate the speed of LSH-E and baseline methods, we measured the decoding and prefilling speed during the MultiNews evaluation. Because the length of answers generated by each eviction strategy generates can be different, we report decoding and prefilling speed in tokens per second instead of elapsed time.  
+
+Table 1: Throughput on LongBench MultiNews Summarization Task LSH-E method is as fast as $L_{2}$ and faster than other baselines at both prefilling and decoding, even without low-level optimizations (i.e., expressing our hash tables in true binary bits). At the prefill stage, LSH-E is $1.5\mathrm{x}$ as fast as $\mathrm{H_{2}O}$ and Scissorhands and $17\mathbf{x}$ as fast compared to FastGen.  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/8bc6b122317cedbc3239470da7771a1af856aeecb91566d993933f10646646bf.jpg)  
+
+4.6 MEMORY USAGE  
+
+Table 2 compares the memory usage of the KV cache and relevant data structures of $L_{2}$ and LSH-E on the GSM8K and MedQA question answering experiments. LSH-E maintains $\mathcal{H}$ , a binary hash matrix of the attention keys in memory and, therefore, has slightly higher memory usage than $L_{2}$ eviction. Our implementation uses 8 bits for binary values instead of 1 bit. Using 1-bit binary numbers would reduce the memory overhead of LSH-E by a factor of 8 and narrow the difference in memory usage between LSH-E and $L_{2}$ .  
+
+
+
+\section{4.7 ABLATION ON LSH DIMENSION  }
+
+
+To determine the effect of the LSH compression dimension, we conducted an ablation study using the GSM8K free response dataset. Fixing the cache budget to $50\%$ , we tested LSH dimensions of 4,  
+
+Table 2: GSM8K and MedQA Question Answering KV Cache Memory Usage. LSH-E maintains a binary hash matrix of attention keys in memory and, therefore, has slightly higher memory usage than $L_{2}$ . Our implementation uses 8-bits for binary values instead of 1-bit. Using 1-bit binary numbers will reduce the memory overhead of LSH-E by a factor of 8 and decrease the difference in memory usage between LSH-E and $L_{2}$ .  
+
+![](images/6e9742ae2051b246868ecfcf5e739127892a74a3d9fc4767088bdb9530794c46.jpg)  
+
+8, 16, 32 and 64 bits. The choice of LSH dimension does not significantly impact performance. In fact, 8 bits performed the best, but not noticeably better than higher dimensions. This demonstrates that LSH-E does not require a high hashing dimension and can be executed with minimal storage overhead. When using 8 bits, the storage overhead is 1 byte $\times$ cache size. For example, in a Llama3 70B-Instruct deployment with 80 layers, 8 KV-heads, sequence length of 8192, batch size of 8 and $50\%$ cache budget, LSH dimension of 8-bits, we have that 16-bits and 32-bits only use an extra 20MB, 40MB, and 80MB respectively, which are significantly smaller than the KV cache size of 640GB.  
+
+
+
+\section{5 DISCUSSION & CONCLUSION  }
+
+
+In this paper, we introduce LSH-E, a novel attention-free eviction strategy for KV cache compression in transformer-based LLMs. By leveraging locality-sensitive hashing (LSH) to approximate cosine similarity, LSH-E dynamically determines which tokens to evict from the cache without performing costly attention calculations. Our experiments demonstrate that LSH-E can achieve $30–70\%$ compression of the KV cache while maintaining strong performance across various tasks, including free-response Q&A, multiple-choice Q&A, and long-context retrieval.  
+
+The key advantage of LSH-E lies in its ability to efficiently compress the KV cache pre-attention, enabling significant memory savings and faster inference times. Compared to traditional strategies like $L_{2}$ norm-based eviction (Devoto et al., 2024), LSH-E excels particularly in reasoning and multiple-choice tasks, where maintaining a diverse set of tokens in the cache is crucial for generating accurate and coherent responses.  
+
+There are several potential areas for future work. Investigating hybrid approaches that combine LSH-based eviction with attention-based mechanisms such as (Zhang et al., 2024b; Ge et al., 2023) could offer a middle ground between computational efficiency and retention of high-importance tokens. Further, reducing the overhead associated with maintaining binary hash codes (e.g., by optimizing bit precision) could further enhance the applicability of LSH-E to memory-constrained environments.  
+
+
+

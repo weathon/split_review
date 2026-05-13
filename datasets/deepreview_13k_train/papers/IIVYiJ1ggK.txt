@@ -1,0 +1,392 @@
+\title{Rodimus*: Breaking the Accuracy-Efficiency Trade-Off with Efficient Attentions}
+
+\begin{abstract}
+
+Recent advancements in Transformer-based large language models (LLMs) have set new standards in natural language processing. However, the classical softmax attention incurs significant computational costs, leading to a $\gO(T)$ complexity for per-token generation, where $T$ represents the context length. This work explores reducing LLMs' complexity while maintaining performance by introducing Rodimus and its enhanced version, Rodimus$+$. Rodimus employs an innovative data-dependent tempered selection (DDTS) mechanism within a linear attention-based, purely recurrent framework, achieving significant accuracy while drastically reducing the memory usage typically associated with recurrent models. This method exemplifies semantic compression by maintaining essential input information with fixed-size hidden states. Building on this, Rodimus$+$ combines Rodimus with the innovative Sliding Window Shared-Key Attention (SW-SKA) in a hybrid approach, effectively leveraging the complementary semantic, token, and head compression techniques. Our experiments demonstrate that Rodimus$+$-1.6B, trained on 1 trillion tokens, achieves superior downstream performance against models trained on more tokens, including Qwen2-1.5B and RWKV6-1.6B, underscoring its potential to redefine the accuracy-efficiency balance in LLMs. 
+\emph{Model code and pre-trained checkpoints will be available soon.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recent advancements have positioned Transformer-based large language models (LLMs) at the forefront of natural language processing, establishing them as state-of-the-art. Their strong capabilities stem from the softmax attention mechanism, which selectively focuses on relevant tokens stored in the key-value (KV) cache when predicting the next token. By maintaining a historical record of tokens, the KV cache allows all pertinent data to remain accessible during inference. However, the demand to store this extensive historical information incurs notable computational costs, leading to $\gO(T)$ complexity for per-token generation, where $T$ represents the length of the context preceding the generated token. Indeed, a 7B Llama~\cite{touvron2023llama}), without inference optimization, takes over a minute to generate 2K-length sequences on an A10-24G~\cite{llm-perf-leaderboard}.
+
+This has sparked research into next-generation foundation models aimed at efficient alternatives to attention. Among them, three main categories stand out that aim to compress the KV cache in the original softmax attention from distinct perspectives: semantic, token, and head compression.
+
+\textbf{Semantic Compression}: The first category, also known as linear attention~\cite{katharopoulos2020transformers}, or linear state space models (SSMs)~\cite{mamba, mamba2}, substitutes the exponential kernel in softmax attention with a simplified inner product of \zh{(transformed)} query and key vectors. This approach results in a recurrently updated hidden state of fixed size that retains historical semantic information like linear RNNs~\cite{qin2024hierarchically, peng-etal-2023-rwkv}, successfully reducing the per-token generation complexity from $\gO(T)$ to $\gO(1)$. However, compressing the softmax attention—characterized by its unlimited capacity—into linear attention with fixed capacity inevitably leads to some information loss. To address this, current methods strive to (i) increase the recurrent state size to enhance memory capacity~\cite{qin2024hgrn} and (ii) utilize the fixed-sized states more effectively \cite{yang2024gated}. Despite these advancements, there remains a trade-off between complexity and performance (refer to Figure~\ref{fig:mem_size}). Blindly expanding the hidden states compromises time and space efficiency, while incorporating data-dependent decay or gating mechanisms to filter out irrelevant past information may hinder parallel training efficiency, as noted in~\cite{yang2024parallelizing}.
+
+\textbf{Token Compression}: This second category introduces sparsity into the attention mask, allowing it to follow predefined patterns and focus on strategically chosen tokens, such as those at the beginning of a sequence or close to the answer~\cite{xiao2024efficient, han2024lm}. Consequently, this method can also achieve the $\gO(1)$ complexity for per-token generation. However, the elimination of masked tokens can lead to a complete loss of information and potentially degrade the overall performance.
+
+\textbf{Head Compression}: The third category reshapes attention by modifying the design of attention heads. This involves grouping heads and sharing keys and values within each group, as seen in multi-query attention (MQA)~\cite{shazeer2019fasttransformerdecodingwritehead} and grouped-query attention (GQA)~\cite{ainslie-etal-2023-gqa}. While these methods reduce the cache size by a constant factor, they are inherently lossy compared to multi-head attention (MHA)~\cite{vaswani2017attention} as the same values are used within each group.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{.45\textwidth}
+         \centering         
+         \includegraphics[width=\textwidth]{figs/plots/mem_size_wt103_0930_redash.pdf}
+         \caption{LM Task on the WikiText-103 Dataset.}
+         \label{fig:mem_size_wt103}
+     \end{subfigure}
+     \hspace{10pt}
+     \begin{subfigure}[b]{.45\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figs/plots/mem_size_mqar_0930.pdf}
+         \caption{\zh{Multi-Query Associative Recall (MQAR)} Task.}
+         \label{fig:mem_size_mqar}
+     \end{subfigure}
+    \caption{
+    Memory Footprint vs. Performance: (a) This experiment is conducted on the WikiText-103 dataset (see Section~\ref{sec:language_modeling}), and focuses on the recorded best perplexity (PPL). The memory footprint is adjusted by modifying the expansion factor. (b) The model's recall capability is assessed using the MQAR Task, as described in \cite{arora2024zoology}. Among all models evaluated, Rodimus* achieves the optimal balance between space complexity and performance.
+    }
+    \label{fig:mem_size}
+\end{figure}
+
+Ultimately, none of these methods can fully supplant the original softmax attention, prompting an essential question: \emph{Is it feasible to reduce the complexity of LLMs while preserving performance?} Our research affirms this possibility, showing that a linear attention model enhanced with a well-designed data-dependent tempered selection (DDTS) mechanism—an improvement within the first category—and its hybridization with our proposed sliding window shared-key attention (SW-SKA), which integrates all three types of attention compressions, offers viable solutions. We designate the former model as Rodimus and the latter as Rodimus$+$. Remarkably, \textbf{Rodimus} maintains a much smaller hidden state size than most current SOTA recurrent models (e.g., \textbf{half} of the size in Mamba2~\cite{mamba2}), but outperforms softmax attention-based Transformers. Moreover, \textbf{Rodimus$+$}-1.6B (trained on 1 trillion tokens) achieves an average performance that is 0.31\% higher than Qwen2-1.5B (trained on 7 trillion tokens) and 2.3\% higher than RWKV6-1.6B (trained on 1.4 trillion tokens) in downstream task evaluations. Our contributions can be summarized as follows:
+
+\begin{itemize}[leftmargin=10pt,itemsep=0pt,topsep=0pt,partopsep=0pt]
+\item We introduce a linear attention-based, purely recurrent model, Rodimus, effectively overcoming the accuracy-efficiency trade-off found in existing recurrent models. By incorporating the innovative DDTS, Rodimus can autonomously filter out irrelevant information during semantic compression, resulting in improved validation perplexity (PPL) with much smaller memory footprints compared to other SOTA methods, as illustrated by the green curves in Figure~\ref{fig:mem_size}.
+\item We present a hybrid model, Rodimus$+$, which combines Rodimus with the innovative SW-SKA. While the recurrent hidden state in Rodimus offers a comprehensive semantic view of the historical context, the sliding window attention highlights the nearby tokens that are most influential in predicting the next token, and SKA further compresses cache size in a lossless manner. As shown by the red curves in Figure~\ref{fig:mem_size}, Rodimus$+$ continues to extend the accuracy-efficiency frontier of existing methods, achieving superior performance with reduced complexity.
+\item We validate the effectiveness of Rodimus* (encompassing both Rodimus and Rodimus$+$) through thorough experimentation. In downstream evaluations with model sizes from 130M to 1.3B, Rodimus* demonstrates enhanced language modeling performance relative to current SOTA models of similar sizes. 
+\zh{Furthermore, Rodimus* achieves a performance improvement of up to 7.21\% over Mamba2, and outperforms even softmax attention-based Pythia on NeedleBench—a suite of recall-intensive tasks where recurrent models typically underperform~\cite{waleffe2024empirical}.}
+\end{itemize}
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+
+In this section, we provide a brief introduction to softmax attention in \cite{vaswani2017attention} and derive its recurrent form. We will then derive the aforementioned three attention compression methods, including linear attention for semantic compression, sparse attention for token compression, and sharing-based attention for head compression. The first two methods simplify attention by reducing context length, while the last one makes modifications along the dimension of attention heads.
+
+\textbf{Softmax Attenion and its Recurrent Form}: Suppose that $\mX = \{\vx_1, \dots, \vx_T \} \in \R^{T \times d}$ denotes the input sequence with length $T$ and dimension $d$. Standard autoregressive Transformers~\cite{vaswani2017attention} utilize a softmax attention mechanism to generate the output $\mO\in\R^{T \times d}$, that is,
+\begin{align}
+    \mQ, \mK, \mV = \mX \mW_Q, \mX \mW_K, \mX \mW_V,  
+    \quad \mO =  \softmax\left((\mQ \mK^\top) \odot \mM \right) \mV, \label{eq:attention_parallel}
+\end{align}
+where \zh{$\mW_Q\in \R^{d \times n},\mW_K\in \R^{d \times n},\mW_V \in \R^{d \times m}$} are learnable weight matrix associated with the queries $\mQ$, the keys $\mK$, and values $\mV$, respectively. The matrix $\mM\in\{-\infty, 1\}\in\R^{T\times T}$ denotes the upper-triangular attention mask, ensuring that the model does not attend to future tokens. Multi-Head Attention (MHA) further splits the dimensionality $d$ into $h$ heads, computing attention for each head in $\R^{d_h}$ individually with distinct weights. This approach enhances the model's capacity to capture diverse sequential information while reducing the computational costs for matrix operations.
+
+The above parallel form allows for the computation of $\mO = \{\vo_1,\dots,\vo_T\}$ in parallel given the full input $\mX$, facilitating efficient training. In contrast, during inference, Transformers rely on the following recurrent formulation~\cite{katharopoulos2020transformers}:
+\begin{align}
+    \vq_t, \vk_t, \vv_t = \vx_t\mW_Q, \vx_t\mW_K, \vx_t\mW_V, \quad
+    \vo_t = \frac{\sum_{i=1}^t \exp(\vq_t\vk_i^\top)\vv_i}{\sum_{i=1}^t \exp(\vq_t\vk_i^\top)}. \label{eq:recurrent_form}
+\end{align}
+Here, the query $\vq_t \in \R^{1\times n}$, key $\vk_t\in \R^{1\times n}$, and value $\vv_t\in \R^{1\times m}$ vectors are computed based on the representation of current token $\vx_t \in \R^{1\times d}$. Attention is subsequently performed over the evolving collection of keys $\{\vk_1,\dots,\vk_t\}$ and values $\{\vv_1,\dots,\vv_t\}$ (i.e., the KV cache). Thus, the time and space complexity for generating the next token at time stamp $t$ is $\gO(t)$. %Note that $\vm_{ti}$ stems from the attention mask $\mM$ in Eq.~\eqref{eq:attention_parallel} and $\vm_{ti} = 1$ when $i\leq t$ and 0 otherwise.
+
+\textbf{Linear Attention for Semantic Compression}: To optimize efficiency, linear attention mechanisms replace the exponential kernel $\exp(\vq_t\vk_i^\top)$ in Eq.~\eqref{eq:recurrent_form} by a kernel $k(\vq_t,\vk_i)$ paired with an associated feature map $\phi$, i.e., $k(\vq_t,\vk_i) = \phi(\vq_t)\phi(\vk_i)^\top$. As a result, the calculation of $\vo_t$ can be simplified as: 
+\begin{align}
+    \vo_t = \frac{\sum_{i=1}^t \phi(\vq_t)\phi(\vk_i)^\top\vv_i}{\sum_{i=1}^t \phi(\vq_t)\phi(\vk_i)^\top} = \frac{\phi(\vq_t)\sum_{i=1}^t \phi(\vk_i)^\top\vv_i}{\phi(\vq_t)\sum_{i=1}^t \phi(\vk_i)^\top}.
+\end{align}
+Letting $\mS_t = \sum_{i=1}^t \phi(\vk_i)^\top \vv_i \in\R^{n\times m}$ and $\vz_t = \sum_{i=1}^t \phi(\vk_i)^\top \in\R^{n\times 1}$ be the KV state and the K state respectively, we can rewrite the previous equation as a linear state-space model (SSM) or RNN:
+\begin{align} \label{eq:ssm}
+    \mS_t = \mS_{t-1} + \phi(\vk_t)^\top \vv_t, \quad \vz_t = \vz_{t-1} + \phi(\vk_t)^\top, \quad \vo_t = \frac{\phi(\vq_t)\mS_t}{\phi(\vq_t)\vz_t}.
+\end{align}
+We emphasize that $\mS_t$ provides a semantic compression of the historical context up to $t$. The denominator $\phi(\vq_t)\vz_t\in\R$ may introduce numerical instabilities and hinder the optimization~\cite{qin2022devil},
+prompting many recent studies to replace it with a normalization~\cite{qin2022devil, sun2023retentive}. Moreover, it is common to use the identity mapping for $\phi$~\cite{sun2023retentive, yang2024gated}, and so Eq.~\eqref{eq:ssm} amounts to
+\begin{align}
+    \mS_t = \mS_{t-1} + \vk_t^\top \vv_t,\quad \vo_t = \vq_t\mS_t.
+\end{align}
+More generally, when framed within the context of linear \textbf{SSMs}~\cite{ mamba, mamba2} or \textbf{RNNs}~\cite{ de2024griffin}, these equations can be reformulated as:
+\begin{align}  \label{eq:ssm_equivalent}
+    \mS_t = \mA_t \odot \mS_{t-1} + \mB_t \odot \vu_t, \quad \vo_t = \mC_t\mS_t,
+\end{align}
+where $\mA_t = 1$, $\mB_t = 1$, and $\mC_t = \vq_t$ represent the state transition, input, and output matrix respectively, while $\vu_t = \vk_t^\top \vv_t$ signifies the input or control. In stark contrast to softmax attention, the per-token generation complexity at time stamp $t$ is $\gO(1)$, enabling efficient inference. Meanwhile, linear attention can be expressed in a parallel form similar to Eq.~\eqref{eq:attention_parallel}, allowing for training parallelism.
+
+However, this additive formulation of updating the hidden states $\mS_t$ with new key-value pairs at each time step $t$ does not possess the capability to forget irrelevant information, which leads to the phenomenon known as attention dilution~\cite{qin2022cosformer, qin2022devil}. To address this concern, recent works (i) increase the state size (either $n$ or \zh{$d_h$}) to retain more information and (ii) incorporate decay factors or gating mechanisms that enable the state $\mS_t$ to discard irrelevant past information. The first approach typically sacrifices efficiency for performance, whereas the second method focuses on designing $\mA_t$ and $\mB_t$ to manage memory retention and forgetting behaviors within the hidden states. 
+
+We summarize the functional forms of $\mA_t$ and $\mB_t$ used in the SOTA methods in Table~\ref{tab:ab_in_models}. Three major trends can be gleaned from this table. Firstly, it is beneficial for $\mA_t$ and $\mB_t$ to be negatively correlated, as shown in Mamba~\cite{mamba}, Mamba2~\cite{mamba2}, and HGRN2~\cite{qin2024hgrn}, allowing them to collaboratively regulate the deletion and addition of information in the hidden state $\mS_t$. This contrasts with methods like RetNet \cite{sun2023retentive}, gRetNet \cite{sun2024cacheoncedecoderdecoderarchitectures}, and GLA \cite{yang2024gated}, which use $\mA_t$ as a decay factor while keeping $\mB_t$ constant at 1. Secondly, allowing $\mA_t$ and $\mB_t$ to be functions of the input $\vu_t$ enables dynamic adjustments over time in a data-dependent manner. This approach has been validated by the superior performance of GLA~\cite{yang2024gated}, gRetNet~\cite{sun2024cacheoncedecoderdecoderarchitectures} compared to RetNet\cite{sun2023retentive}. 
+\zh{Lastly, designs for gating mechanisms must be compatible with GPU acceleration, ensuring that the recurrent expression \eqref{eq:ssm_equivalent} aligns with a parallel format, similarly to \eqref{eq:attention_parallel}. }
+
+In Section~\ref{sec:rodimus}, we further analyze these functional forms in relation to their equivalence with linear attention and propose a novel data-dependent tempered selection (DDTS) mechanism. This mechanism is capable of succinctly compressing historical information within a recurrent hidden state of fixed capacity, all while facilitating parallel training. 
+
+\textbf{Sparse Attention for Token Compression}: This group of methods aim to sparsify the attention mask $\mM$ in Eq.~\eqref{eq:attention_parallel}. The goal is to compute only the $(\vq_t,\vk_i)$ pairs associated with nonzero elements of $\mM_{ti}$. Various types of attention masks have been proposed in the literature, including window attention~\cite{child2019generating}, dilated attention~\cite{Beltagy2020Longformer}, and bridge attention~\cite{guo2023longcoder}, among others. Research shows that the softmax attention maps in vanilla Transformer models often exhibit a localized behavior~\cite{qin2022devil, qin2022cosformer, xiao2024efficient}. Thus, we exploit a sliding window (SW) attention to enhance the local context understanding in Rodimus$+$. 
+
+\textbf{Sharing-based Attention for Head Compression}: In the original MHA, each head has distinct linear transformations $\mW_Q, \mW_K, \mW_V$ for the input $\mX$, allowing for diverse representations and attention maps across heads. Sharing-based attention seek to compress the MHA by allowing key and value heads to be shared among \zh{multi-query heads}. Specifically, in MQA~\cite{shazeer2019fasttransformerdecodingwritehead}, all heads use \zh{a single} set of key and value weights, which reduces parameters and memory usage but risks diminishing the attention mechanism's expressiveness. As a better alternative, GQA assigns one key and value head for each group of query heads~\cite{ainslie-etal-2023-gqa}. However, it still limits the expressiveness of the original MHA by overly constraining learned relationships. As a remedy, we propose the Shared-Key Attention (SKA) in Section~\ref{sssec:ska}, which compresses the MHA while preserving its expressiveness.
+
+
+
+\section{Methodology}
+
+
+In this section, we introduce two models: Rodimus and Rodimus$+$, whose architecture is depicted in Figure~\ref{fig:overview}. Rodimus is a purely recurrent model that iteratively compresses historical context into a fixed-size hidden state (i.e., semantic compression) and further exploits this state for the next token prediction. With the equipment of the newly proposed DDTS mechanism, Rodimus effectively filters out irrelevant information, thereby enhancing performance while reducing the size of the hidden state. On the other hand, Rodimus$+$ builds upon Rodimus by integrating the proposed SW-SKA technique. This enhancement improves performance without sacrificing efficiency, allowing for a seamless combination of semantic, token, and head compression methods.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figs/overview/fig-overview-240924.pdf}
+    \caption{
+    Overview of the Proposed Models. The \textbf{Rodimus* Model} serves as a template for both Rodimus and Rodimus$+$. When modules within the gray dashed box are included, it becomes the Rodimus$+$ Model; otherwise, it is the Rodimus Model. The architecture comprises $L$ layers of stacked \textbf{Rodimus* Blocks} along with essential modules for language modeling (e.g., Embedding, RMSNorm, LM Head). Rodimus Flow~\eqref{eq:rodimus_recurrent_form} denotes our proposed recurrent computation method. The purple arrows depict information flow between layers (ignoring RMSNorm). In the Rodimus$+$ Model, the Rodimus block compresses the Token Embedding into a \yh{global semantic} embedding, enhancing SW-SKA's ability to perceive long contexts.
+    }
+    \label{fig:overview}
+\end{figure*}
+
+\subsection{Rodimus: Overcoming Performance Bottleneck in Semantic Compression}
+\label{sec:rodimus}
+
+\subsubsection{Analysis of Existing Linear Attention Models}
+\label{sec:beta_analysis}
+
+As can be observed from Table~\ref{tab:ab_in_models}, the state transition equation in all existing linear attention models can be expressed recurrently as:
+\begin{align}
+    \mS_t = (\valpha_t^\top \vbeta_t)\odot \mS_{t-1} + (\hat\valpha_t^\top \hat\vbeta_t)\odot (\vk_t^\top \vv_t) = (\valpha_t^\top \vbeta_t)\odot \mS_{t-1} + (\hat\valpha_t \odot \vk_t )^\top (\hat\vbeta_t \odot \vv_t), 
+    \label{eq:general_state_transition}
+\end{align}
+where $\valpha_t \in \R^{1\times n}$ and $\vbeta_t \in \R^{1\times m}$ denotes the gating mechanism along the dimension of $n$ and $m$ respectively, and $\hat\valpha_t$ and $\hat\vbeta_t$ are negatively correlated with $\valpha_t$ and $\vbeta_t$, allowing them to select between the current input $\vu_t = \vk_t^\top\vv_t$ and the previous state $\mS_{t-1}$. Substituting Eq.~\eqref{eq:general_state_transition} into Eq.~\eqref{eq:ssm_equivalent} and unfolding the recurrent relation yields:
+\begin{align}
+    \vo_t =  \sum_{i=1}^t \bigg[\vq_t\big(\prod_{j=i+1}^t\valpha_j\odot\hat\valpha_i\odot\vk_i\big)^\top\bigg]\big(\prod_{j=i+1}^t\vbeta_j\odot\hat\vbeta_i\odot\vv_i\big).
+\end{align}
+Here, $\prod_{j=i+1}^t\valpha_j$ captures the relative positional information between time stamp $t$ and $i$, specifically between the query $\vq_t$ and the key $\vk_i$. Indeed, this component acts as a more flexible version of relative positional embeddings for softmax attention (e.g., xPos~\cite{sun-etal-2023-length} and ALiBi~\cite{alibi}). In addition, the elements within the vector $\valpha_j$ vary from one another, enabling the capture of high- and low-frequency information akin to sinusoidal positional encoding~\cite{vaswani2017attention} and RoPE~\cite{su2021roformer}. \yh{Notably, $\prod_{j=i+1}^t\valpha_j$ also incorporates absolute positional information since it is also a function of the absolute positions $j = i+1,\dots,t$. Consequently, linear attention models expressed in the form of Eq.~\eqref{eq:general_state_transition} capture first-order dependencies within sequences in a position-aware manner. In contrast, the original softmax attention~\eqref{eq:attention_parallel} captures only second-order dependencies in a position-agnostic framework, necessitating the addition of positional embeddings~\cite{ren2023sparse}.}
+
+On the other hand, $\prod_{j=i+1}^t\vbeta_j$ also regulates the relative positional information between the time stamp $t$ and $i$, but between the query $\vq_t$ and the value $\vv_i$. This aspect has not been witnessed in softmax attention. Moreover, earlier studies~\cite{yang2024gated} and our ablation study (see Table~\ref{tab:beta_type}) indicate that incorporating $\prod_{j=i+1}^t\vbeta_j$ cannot result in improvements compared to setting $\vbeta_j = \mathbf{1}_m$, probably because such positional information has already been described by $\prod_{j=i+1}^t\valpha_j$. 
+\zh{Moreover, including $\vbeta_j$ can impede training efficiency, as the dimensionality of $\vbeta_t \in \mathbb{R}^{1 \times m}$ is significantly larger than that of $\valpha_t \in \mathbb{R}^{1 \times n}$. This discrepancy can lead to redundant I/O operations when $\vbeta_j$ are frequently transferred between high bandwidth memory (HBM) and on-chip SRAM during chunkwise parallelism (cf.}
+
+As a consequence, our focus is on optimizing the design of $\valpha_t$ while setting $\vbeta_t = \mathbf{1}_m$ for all $t$. We retain $\hat\vbeta_t$ to allow for flexible selection among the various elements in the value vector $\vv_t$. 
+
+\subsubsection{Design of $\alpha_t$, $\hat\alpha_t$ and $\hat\beta_t$}
+\label{sec:gate_design}
+
+We propose the following formulations for $\valpha_t$ and $\hat\valpha_t$:
+\begin{align}
+\label{eq:alpha_def}
+    \valpha_t = \exp(-\vg_t \odot \vtau_t),  \quad
+    \hat\valpha_t = \vg_t^{\vtau_t},
+\end{align}
+where $\vg_t = \softplus(\vx_t \mW_g + \vb_g)$ and $\vtau_t = \sigmoid(\vx_t\mW_\tau + \vb_\tau)$. In this design, $\vg_t$ serves as a selection gate, determining whether to retain the previous state $\mS_{t-1}$ or incorporate the current input $\vk_t$. Note that $\exp(-\vg_t) = 1 - \sigmoid(\vx_t \mW_g + \vb_g)$, thus ensuring that $\valpha_t \in [0, 1]$ and preventing complete oblivion of the previous state. In contrast, $\hat\valpha_t$ can assume values greater than 1 due to the softplus function. This \yh{asymmetry} between discarding the previous state and retaining the current introduces greater flexibility into the state transition equation~\cite{mamba}.
+
+Furthermore, different from all existing works, we introduce a temperature gate $\vtau_t$ that governs the sharpness or sensitivity of the selection gate $\vg_t$. Note that $\vtau_t$ is a function of the input $\vx_t$, as opposed to being a fixed constant as is the case in gRetNet~\cite{sun2024cacheoncedecoderdecoderarchitectures} and GLA~\cite{schlag2021learning}. This provides an additional degree of freedom in the selection process. Indeed, recent findings indicate that tempered losses can improve robustness against noise during training~\cite{papernot2021tempered,wang2023mumic}.
+
+On the other hand, $\hat\vbeta_t$ can be expressed as:
+\begin{align} \label{eq:beta_def}
+    \hat\vbeta_t = \sigmoid(\vx_t \mW_{\hat\beta}^1\mW_{\hat\beta}^2 + \vb_{\hat\beta}),
+\end{align}
+where $\mW_{\hat\beta}^1 \in \R^{m\times \ell}$ and $\mW_{\hat\beta}^2 \in \R^{\ell\times m}$ are two low-rank matrices (i.e., $\ell < m$). This low-rank formulation helps mitigate noise in the input while keeping the overall increase in model parameters manageable, thus providing parameter efficiency~\cite{hu2022lora}. 
+\zh{This comprehensive design is referred to as the data-dependent tempered selection (DDTS) mechanism and is proven to be a selection mechanism as demonstrated below:}
+
+\begin{proposition}
+\label{proposition:rodimus_is_selection}
+Given the specifications for $\mA_t$ and $\mB_t$ in Eqs.~\eqref{eq:ssm_equivalent}, \eqref{eq:general_state_transition}, \eqref{eq:alpha_def}, and \eqref{eq:beta_def}, DDTS can realize the selection between the previous state $\mS_{t-1}$ and the current input $\vu_t$.
+\end{proposition}
+\begin{proof}
+
+\end{proof}
+
+\subsubsection{The Overall Rodimus Block}
+
+The SSM formulation for the overall Rodimus block can be articulated as follows:
+\begin{align}
+\label{eq:rodimus_recurrent_form}
+    \mS_t = \big(\exp(-\vg_t \odot \vtau_t)^\top \mathbf{1}_m\big)\odot\mS_{t-1} + \big((\vg_t^{\vtau_t})^\top \hat\vbeta_t\big)\odot(\vk_t^\top \vv_t), \quad
+    \vo_t = \vq_t\mS_t + \vd_t \odot \vx_t'.
+\end{align}
+In this formulation, we define $\vq_t = \vx_t\mW_q$, $\vk_t = \vx_t \mW_k$, $\vv_t = \vx_t$. We follow the Mamba series~\cite{mamba2} to set $\vv_t = \vx_t$, and the computation of the control $\vu_t = \vk_t^\top \vv_t$ can be interpreted as the state expansion operation within SSMs. Additionally, we employ $\mathrm{ShortConv}$ to process the original input $\vx_t$ into $\vx_t'$, from which we derive $\vg_t$ and $\vtau_t$. Note that $\mathrm{ShortConv}$ is widely used in recent recurrent models~\cite{mamba, mamba2, yang2024gated}; it enhances local context aggregation and introduces nonlinearity for $\vg_t$ and $\vtau_t$. The learnable weight $\vd_t$ functions as the feedthrough matrix in SSMs. 
+To ensure stability during back-propagation, we implement post-normization after activation. This entails normalizing $\vk_t$ and dividing $\vq_t$ by $\sqrt{n}$~\cite{mamba2}.
+
+The final configuration of the Rodimus block is depicted in Figure~\ref{fig:overview}b. The aforementioned SSM merges into a Gated Linear Unit (GLU)~\cite{dauphin2017language}, allowing simultaneous token and channel mixing compactly, akin to the GAU~\cite{hua2022transformer} and Mamba series~\cite{mamba, mamba2}. The initial linear layers within the GLU increase the size of the hidden states, thereby enhancing the performance of Rodimus. The last linear layer finally reduces the hidden dimension back to its original size $d$. In contrast to the original Transformer block, which mixes tokens and channels separately through softmax attention and Feed-Forward Network (FFN), this compact architecture demonstrates greater parameter efficiency. Additionally, the output gate of the GLU enriches the gating mechanisms of the Rodimus block.
+During inference, the Rodimus block retains only a fixed-size hidden state, resulting in $\gO(1)$ time and space complexity.
+
+\subsection{Rodimus$+$: Integration with Token Compression and Head Compression}
+\label{sec:attention}
+Although the hidden states $\mS_t$ in Rodimus provide a comprehensive semantic overview of historical context, their fixed capacity may still limit performance. On the other hand, it has been observed in the literature~\cite{qin2022devil, qin2022cosformer, xiao2024efficient} that the attention map in vanilla Transformer tends to be localized, indicating that nearby tokens are significantly more influential in generating responses. To leverage the strengths of both approaches, we introduce Rodimus$+$, which integrates the Rodimus block with sliding window attention (i.e., token compression). This integration enables the hidden states to act as a robust global representation of the context, incorporating information even from distant tokens relative to the answer, while the sliding window attention sharpens focus on the most influential nearby tokens. Notably, this enhancement occurs without increasing computational complexity. Furthermore, we optimize the KV cache of the sliding window attention by a constant factor by substituting the traditional MHA with our proposed SKA (i.e., head compression).
+
+\subsubsection{Shared-Key Attention for Lossless Head Compression}
+\label{sssec:ska}
+
+Recall from Section~\ref{sec:preliminaries} that the MHA for head $h$ can be expressed as: 
+\begin{align}
+    \mO^h &= \softmax\Big(\big(\mQ^h{\mK^h}^\top\big)\odot\mM\Big)\mV^h
+    = \softmax\Big(\big(\mX\mW_Q^h{\mW_K^h}^\top\mX^\top\big)\odot\mM\Big)\mX\mW_V^h \notag \\
+    &= \softmax\Big(\big((\mX\mW_Q^h{\mW_K^h}^\top\tilde\mW_K^{-\top})(\tilde\mW_K^\top\mX^\top)\big)\odot\mM\Big)\mX\mW_V^h,
+\end{align}
+where $\tilde\mW_K$ is a learnable weight matrix that is invariant with regard to head $h$, and $\tilde\mW_K^{-\top}$ denotes the pseudo inverse of the transposed $\tilde\mW_K$. Thus, we can redefine the query as $\tilde\mQ^h = \mX\mW_Q^h{\mW_K^h}^\top\tilde\mW_K^{-\top}$ and the key as $\tilde\mK = \mX\tilde\mW_K$, which is invariant across heads. This means we can employ a single key for all heads without diminishing the expressiveness of MHA. We refer to this mechanism as Shared-Key Attention (SKA), which achieves lossless compression of the KV cache in MHA by utilizing a single key for all heads. In contrast, approaches like MQA~\cite{shazeer2019fasttransformerdecodingwritehead} and GQA~\cite{ainslie-etal-2023-gqa} also share the values $\mV$ among the same group of query heads, which typically differ for each head in the original MHA formulation. Consequently, MQA and GQA can only be seen as lossy compressions of MHA. Figure~\ref{fig:attn} illustrates the distinctions between MHA, MQA, \zh{GQA}, and SKA. 
+
+We further combine SKA with sliding window attention to create SW-SKA, which introduces a local structure where each token focuses solely on its immediate contextual window, thereby maintaining a constant memory footprint during both training and inference.
+
+\begin{figure}[t]
+    \centering
+   \includegraphics[width=\textwidth]{figs/figs-attn/fig-attn-overview-0930-small.pdf}
+    \caption{
+    Comparison of Different Attention Mechanisms. 
+    In MQA and GQA, values are shared among the same group of query heads, resulting in lossy compression compared to the individual head-specific values used in MHA. SKA maintains the multi-value setting of MHA but uses a shared key across all heads. This approach produces a separate attention map for each head, preserving the expressiveness of MHA while reducing the memory footprint.
+    }
+    \label{fig:attn}
+\end{figure}
+
+\subsubsection{The Overall Rodimus$+$ Block}
+\label{sec:rodimus_plus_block}
+
+Recall that the Rodimus block builds upon the foundations established by the Mamba series~\cite{mamba, mamba2} and GAU~\cite{hua2022transformer}, enabling the simultaneous mixing of tokens and channels while offering a unified residual connection for both mixers (see Figure~\ref{fig:overview}b). Specifically, it integrates the SSM block (token mixer) into the FFN layers (channel mixer). This structured arrangement allows for an increase in state size without necessitating additional parameters, as the FFN typically amplifies the dimension before subsequently reducing it. In contrast, a conventional Transformer block alternates between self-attention (token mixer) and FFN (channel mixer), with each component linked by its own residual connection. Notably, self-attention is generally not placed in between the FFN layers due to the linear growth of the KV cache with input sequence length, which can lead to significant memory consumption when key and value dimensions are increased.
+
+When integrating the Rodimus block with the SW-SKA, it is beneficial to have the attention mechanism and FFN closely interdependent, as these components collaboratively deliver a localized understanding of context. However, they should maintain relative independence from the Rodimus block, which is responsible for providing a global perspective. To achieve this balance, we employ a two-hop residual approach, adapted from \cite{ma2024megalodon}, to effectively bind the attention and FFN layers. This ensures that the information derived from the token mixer is cohesively integrated into the channel mixer, preserving the overall integrity of the system. The resulting Rodimus$+$ block is:
+\begin{equation}
+\label{eq:jetoptimus}
+\begin{aligned}
+    \mX_{\mathrm{state}}&=\mathrm{Rodimus}(\mathrm{Norm}(\mX))+ \mX,
+    \\
+    \hat{\mY}&=\mathrm{SW\textstyle{-}SKA}(\mathrm{Norm}(\mX_{\mathrm{state}}))+\mX_{\mathrm{state}},
+    \\
+    \mY&=\mathrm{FFN}(\mathrm{Norm}(\hat{\mY}))+\mX_{\mathrm{state}},
+\end{aligned}
+\end{equation}
+where $\mathrm{FFN}$ represents the GLU, $\mathrm{Norm}$ denotes RMSNorm \cite{zhang2019root}, and $\mathrm{Rodimus}$ signifies the Rodimus block, generating state information for the subsequent SW-SKA. Taken together, the Rodimus block, SW-SKA, and FFN constitute the final Rodimus$+$ block.
+
+
+
+\section{Experiments}
+
+
+In this section, we compare Rodimus* with other SOTA methods across various benchmarks, including language modeling and recall benchmarks. We conclude this section with a series of ablation studies.
+
+\subsection{Language Modeling}
+\label{sec:language_modeling}
+
+\textbf{WikiText-103}: The \zh{WikiText-103} language modeling dataset~\cite{merity2022pointer} consists of over 100 million tokens derived from verified good and featured articles on Wikipedia. 
+In this study, we compare Rodimus* to six other models. Among these, Mamba~\cite{mamba} and Mamba2~\cite{mamba2} utilize purely recurrent architectures, similar to Rodimus. GLA~\cite{yang2024gated} and HGRN2~\cite{qin2024hgrn} serve as linear attention counterparts to the Mamba series. We also include Transformer$++$~\cite{touvron2023llama}  which employs multihead softmax attention, and Llama3~\cite{dubey2024llama}, the grouped-query attention version of Transformer$++$. All models are trained from scratch on the training dataset, each with approximately 44 million parameters. To ensure a fair comparison, we set Rodimus*'s expansion factor $n$ to 32, aligning its parameter count with that of the other models.
+
+The results, summarized in Table~\ref{tab:wikitext103}, present the perplexity (PPL) of the testing data. Notably, Rodimus, a purely recurrent model, surpasses both Transformer$++$ and Llama3 in performance, despite having an inference complexity one power less than that of the latter two models. When compared to Mamba2, which has a state expansion factor of 128, Rodimus employs a smaller expansion factor of 32, leading to a significantly reduced hidden state size while achieving a lower PPL. Furthermore, the performance of Rodimus$+$ even exceeds that of Rodimus. These findings indicate that Rodimus* effectively challenges the traditional accuracy-efficiency trade-off in language modeling.
+
+\begin{figure}[t]
+\begin{minipage}[]{0.38\textwidth}
+\centering
+\renewcommand\arraystretch{1.2}
+\captionof{table}{Results on WikiText-103. The lower the PPL, the better the language modeling effect. \textbf{Bold} indicates the best result, and \underline{underline} indicates the suboptimal result.}
+\resizebox{\linewidth}{!}{
+\begin{tabular}[l]{l|ll}
+\toprule
+Models        & Test PPL & Params(M) \\ \midrule
+Rodimus       & \underline{21.90}     & 46.68     \\
+Rodimus$+$    & \textbf{21.56}    & 48.45     \\
+Mamba         & 22.58    & 46.08     \\
+Mamba2        & 22.78    & 46.38     \\
+Transformer$++$ & 22.02    & 46.24     \\
+Llama3 & 22.12    & 46.48     \\
+GLA           & 22.16    & 44.71     \\
+HGRN2         & 22.00     & 46.20    \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:wikitext103}
+
+\end{minipage}
+\hfill
+\begin{minipage}[]{0.6\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/plots/scaling_law_fix.pdf}
+    \caption{
+    Scaling Curve based on Scaling Laws.
+    }
+    \label{fig:scaling_law}
+\end{minipage}
+\end{figure}
+
+\textbf{Scaling Laws}~\cite{hoffmann2022empirical}: We further expand the number of parameters in our models from approximately 125 million to 1.3 billion, adhering to the architectural guidelines of GPT-3 \cite{brown2020language}. For comparison, we used Mamba2 \cite{mamba2} and Transformer$++$ \cite{touvron2023llama} as baselines. Mamba2 represents the most advanced recurrent models, while Transformer$++$ exemplifies the leading softmax attention models. All models are trained on subsets of Pile~\cite{pile}. Figure~\ref{fig:scaling_law} illustrates that both Rodimus and Rodimus$+$ outperform Mamba2 and Transformer$++$ across all model sizes, ranging from 125 million to 1.3 billion parameters. Interestingly, Rodimus$+$, which integrates Rodimus with the SW-SKA, achieves even greater improvements over Rodimus with the increase of the model size. As the number of layers and parameters grows, the benefits of the two-hop residual connections may become more pronounced~\cite{ma2024megalodon}. Consequently, Rodimus$+$ demonstrates superior scaling potential, especially when approaching 1.3 billion parameters.
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{0.9} % Adjusts row height
+
+\caption{Results of Downstream Tasks via Zero-Shot Evaluation. Here, \textbf{bold} indicates the best result, \underline{underline} indicates the second best, and \uwave{wavy underline} indicates the third best. For the Tokens term, \underline{underline} indicates models using fewer tokens. Mamba\textsuperscript{\pounds}, Mamba2\textsuperscript{\pounds}, and Rodimus\textsuperscript{\pounds} denote models trained from scratch using the same training configuration for fair comparison.}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}llll|lllrllll|l@{}}
+\toprule
+Model &
+  \begin{tabular}[c]{@{}l@{}}Params\\ \tiny (B)\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}Tokens\\ \tiny (B)\end{tabular} &
+  Tokenizer &
+  \begin{tabular}[c]{@{}l@{}}ARC-c\\ \tiny acc\_norm $\uparrow$\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}ARC-e\\ \tiny acc $\uparrow$\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}HS\\ \tiny acc\_norm $\uparrow$\end{tabular} &
+  \begin{tabular}[c]{@{}r@{}}LMB\\ \tiny ppl $\downarrow$\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}LMB\\ \tiny acc $\uparrow$\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}OBQA\\ \tiny acc\_norm $\uparrow $\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}PIQA\\ \tiny acc $\uparrow$\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}WG\\ \tiny acc $\uparrow$\end{tabular} &
+  \begin{tabular}[c]{@{}l@{}}AVG\\ \tiny acc* $\uparrow$\end{tabular} \\ \midrule
+Mamba\textsuperscript{\pounds}     & 0.13 & \underline{100}  & NeoX    & \underline{23.72} & \textbf{46.84} & \uwave{33.37} & \underline{19.72} & \underline{40.33} & \underline{29.80} & \underline{65.07} & \textbf{52.17} & \underline{41.61} \\
+Mamba2\textsuperscript{\pounds}     & 0.13 & \underline{100}  & NeoX    & \textbf{23.81} & \underline{45.50} & \underline{34.13} & \uwave{20.42} & \uwave{39.55} & \uwave{29.20} & \uwave{64.47} & \underline{51.85} & \uwave{41.22} \\
+Rodimus\textsuperscript{\pounds}   & 0.13 & \underline{100}  & NeoX    & \uwave{23.38} & \textbf{46.84} & \textbf{34.22} & \textbf{17.95} & \textbf{42.44} & \textbf{30.00} & \textbf{65.40} & \uwave{51.46} & \textbf{41.96} \\ \midrule
+GPT-Neo    & 0.13 & 300  & GPT2    & 23.21 & 43.69 & 30.42 & 30.26 & 37.38 & 26.40 & 62.89 & 50.51 & 39.21 \\
+OPT        & 0.13 & 300  & OPT     & 22.78 & 43.52 & 31.35 & 26.02 & 37.90 & 28.00 & 63.00 & 50.36 & 39.56 \\
+Pythia     & 0.16 & 300  & NeoX    & \uwave{23.72} & 43.60 & 30.19 & 38.31 & 32.80 & 26.00 & 61.59 & 50.51 & 38.34 \\
+Mamba      & 0.13 & 300  & NeoX    & \textbf{24.32} & \underline{47.90} & 35.20 & \uwave{16.05} & \uwave{44.21} & \uwave{28.60} & \underline{64.69} & 52.33 & 42.46 \\
+Mamba2     & 0.13 & 300  & NeoX    & \underline{24.23} & 47.35 & \uwave{35.32} & 16.79 & 43.78 & \textbf{30.40} & \textbf{64.85} & \uwave{52.64} & \uwave{42.65} \\ %
+RWKV4     & 0.17 & 300  & NeoX    & 23.55 & \uwave{47.56} & 32.27 & 31.73 & 32.64 & 27.80 & 64.25 & 50.99 & 39.87 \\
+Rodimus    & 0.13 & 300  & NeoX    & \uwave{23.72} & \textbf{49.07} & \underline{35.45} & \underline{15.75} & \underline{45.00} & \underline{29.20} & \uwave{64.36} & \underline{53.35} & \underline{42.88} \\
+Rodimus$+$ & 0.13 & 300  & NeoX    & \underline{24.23} & 47.22 & \textbf{35.49} & \textbf{12.94} & \textbf{48.09} & \underline{29.20} & \uwave{64.36} & \textbf{53.43} & \textbf{43.15} \\ \midrule
+OPT        & 0.35 & 300  & OPT     & 23.98 & 44.19 & 36.66 & 16.40 & 45.10 & 28.20 & 64.47 & 52.41 & 42.14 \\
+Pythia     & 0.41 & 300  & NeoX    & 24.49 & 52.10 & 40.59 & 10.83 & \uwave{51.45} & 29.40 & 66.97 & 53.59 & 45.51 \\
+BLOOM      & 0.56 & 300  & BLOOM    & 23.89 & 47.47 & 36.89 & 28.83 & 34.10 & 28.80 & 64.20 & 52.01 & 41.05 \\
+Mamba      & 0.37 & 300  & NeoX    & \uwave{27.82} & 54.92 & 46.49 & \underline{8.14}  & \underline{55.60} & 30.80 & 69.53 & 55.17 & 48.62 \\
+Mamba2     & 0.37 & 300  & NeoX    & 26.62 & 54.67 & 46.96 & \textbf{7.98}  & \textbf{55.85} & \uwave{32.60} & \uwave{70.46} & \underline{55.64} & \uwave{48.97} \\
+RWKV4     & 0.43 & 300  & NeoX    & 25.26 & 47.18 & 40.77 & 13.38 & 45.39 & 30.60 & 68.12 & 53.28 & 44.37 \\
+Qwen2      & 0.5  & 7000 & Qwen2   & \textbf{28.84} & \uwave{54.97} & \underline{49.03} & 11.66 & 50.05 & \underline{33.20} & 69.42 & \textbf{57.62} & \underline{49.02} \\
+Rodimus    & 0.46 & \underline{150}  & Rodimus & 27.65 & \underline{55.77} & \uwave{48.78} & \uwave{10.17} & 50.65 & \uwave{32.60} & \underline{70.73} & \uwave{55.41} & 48.80 \\
+Rodimus$+$ & \zh{0.47} & \underline{150}  & Rodimus & \underline{28.58} & \textbf{57.28} & \textbf{52.13} & 10.22 & 51.14 & \textbf{35.00} & \textbf{72.91} & 53.59 & \textbf{50.09} \\ \midrule
+GPT-Neo    & 1.3  & 300  & GPT2    & 25.77 & 56.14 & 48.91 & 7.50  & 57.21 & 33.60 & 71.22 & 55.01 & 49.69 \\
+OPT        & 1.3  & 300  & OPT     & 29.52 & 56.94 & 53.75 & 6.65  & 57.89 & 33.20 & 71.60 & 59.59 & 51.78 \\
+Pythia     & 1    & 300  & NeoX    & 27.05 & 56.94 & 47.15 & 7.92  & 56.22 & 31.40 & 70.67 & 53.51 & 48.99 \\
+Pythia     & 1.4  & 300  & NeoX    & 28.41 & 60.48 & 51.98 & 6.08  & 61.60 & 33.20 & 70.84 & 57.30 & 51.97 \\
+BLOOM      & 1.1  & 300  & BLOOM    & 25.51 & 51.47 & 42.97 & 17.28 & 42.64 & 29.40 & 67.19 & 55.01 & 44.88 \\
+GLA        & 1.3  & 100  & Mistral   & 27.82 & 55.13 & 48.97 & 15.37 & 46.09 & 33.00 & 69.80 & 53.20 & 47.72 \\
+RetNet     & 1.3  & 100  & Mistral   & 26.45 & 57.32 & 48.04 & 16.44 & 43.37 & 32.00 & 69.42 & 53.43 & 47.15 \\
+HGRN       & 1.3  & 100  & Mistral   & 25.51 & 55.01 & 48.82 & 20.24 & 37.71 & 31.80 & 69.80 & 50.28 & 45.56 \\
+HGRN2      & 1.3  & 100  & Mistral   & 28.16 & 58.16 & 51.74 & 11.38 & 49.97 & 32.80 & 71.27 & 52.17 & 49.18 \\
+Mamba      & 1.3  & 300  & NeoX    & 32.85 & 65.49 & 59.08 & \uwave{5.04}  & \uwave{64.87} & 36.40 & 74.10 & \uwave{61.40} & 56.31 \\
+Mamba2     & 1.4  & 300  & NeoX    & 33.36 & 64.10 & 59.92 & \underline{5.02}  & \underline{65.61} & \underline{37.80} & 73.29 & 60.93 & 56.43 \\
+RWKV4     & 1.5  & 300  & NeoX    & 29.01 & 60.94 & 52.90 & 7.08  & 57.19 & 33.40 & 72.09 & 55.33 & 51.55 \\
+RWKV6     & 1.6  & 1420 & RWKV6   & 33.36 & 60.69 & 61.42 & \textbf{4.61}  & \textbf{67.26} & \uwave{37.40} & 73.67 & 60.38 & 56.31 \\
+Qwen2      & 1.5  & 7000 & Qwen2   & \uwave{35.75} & \uwave{65.95} & \textbf{65.51} & 5.52  & 63.61 & 36.80 & \underline{75.19} & \textbf{65.27} & \underline{58.30} \\
+Rodimus    & 1.4  & 500  & Rodimus & \underline{36.09} & \underline{68.01} & \uwave{62.44} & 6.33  & 59.62 & 35.60 & \uwave{74.32} & 59.75 & \uwave{56.55} \\
+Rodimus$+$ & 1.6  & 1000 & Rodimus & \textbf{36.35} & \textbf{68.35} & \underline{64.51} & 5.38  & 63.59 & \textbf{38.80} & \textbf{76.17} & \underline{62.51} & \textbf{58.61} \\ \bottomrule
+\end{tabular}
+}
+\label{tab:downstream_exp}
+\end{table}
+
+\textbf{Downstream Evaluation}: We evaluate Rodimus* across various downstream tasks, as outlined in \cite{mamba}. These tasks include content analysis (LAMBADA~\cite{paperno-etal-2016-lambada}), commonsense reasoning (PiQA~\cite{Bisk2020} and HellaSwag~\cite{zellers2019hellaswag}), coreference resolution (WinoGrande~\cite{sakaguchi2019winogrande}), reading comprehension (OpenBookQA~\cite{OpenBookQA2018}), and professional examinations (ARC-Easy and ARC-Challenge~\cite{Clark2018ThinkYH}). The evaluation results are obtained using the \texttt{lm-evaluation-harness}~\cite{eval-harness}. For comparison, we \zh{choose} well-known open-source models as baselines, indicating the number of tokens and the tokenizers used. Our experimental structure is as follows: (i) We first train both Rodimus and Mamba \zh{series} with 130M parameters from scratch using the same settings on 100B tokens from the Pile dataset (denoted as Rodimus\textsuperscript{\pounds}, Mamba\textsuperscript{\pounds} and \zh{Mamba2\textsuperscript{\pounds}}) for a fair comparison. (ii) We then train Rodimus*-130M on 300B tokens from Pile and compare it to other similarly sized models also trained on 300B tokens from Pile, noting that the training corpora for these models may still differ. (iii) We evaluate Rodimus* with about 460M parameters against other open-source models like BLOOM-560M and Qwen2-500M. Since these models are trained on self-cleaned high-quality data, we also utilize curated datasets, including FineWeb~\cite{penedo2024fineweb}, Pile~\cite{pile}, etc., to train our Rodimus* on 150B tokens. (iv) To fully explore the model's capabilities, we train Rodimus$+$-1.6B on 1T tokens from the curated dataset, while Rodimus-1.4B is trained on 500B tokens due to resource constraints. Both models are compared against other open-source models of comparable sizes, such as BLOOM, RWKV6, and Qwen2, which also use self-cleaned datasets for training.
+
+The specific results are presented in Table~\ref{tab:downstream_exp}. In experiment (i), where Rodimus\textsuperscript{\pounds}, Mamba\textsuperscript{\pounds}, and Mamba2\textsuperscript{\pounds} are trained under identical conditions, Rodimus outperforms the Mamba series on downstream tasks, validating the effectiveness of the DDTS design. In experiment (ii), where all models are trained with the same number of tokens from Pile, Rodimus outperforms all existing models across the benchmarks. Moreover, Rodimus$+$ achieves even better results, indicating that the combination of semantic and token compression is effective for practical downstream tasks. Moving to experiment (iii), we note that the number of training tokens can impact performance. Due to a relatively small token count, Rodimus-460M underperforms compared to Qwen2-500M and Mamba2-370M but still surpasses Mamba-370M, which was trained on 300B tokens. In contrast, \zh{Rodimus$+$-470M} delivers the best average result, even though it is trained on only 150B tokens, further validating the proposed hybrid structure's effectiveness. Lastly, in experiment (iv), training larger models on a larger corpus reinforces Rodimus*'s potential as a practical LLM. Specifically, Rodimus-1.4B outshines all existing purely recurrent models of similar sizes, including those from the Mamba and RWKV series. Furthermore, Rodimus$+$-1.6B exceeds the performance of Qwen2-1.5B, despite the former being trained on just 1T tokens compared to the latter's 7T tokens.
+\subsection{Recall Benchmarks}
+\label{sec:recall_benchmark}
+
+In this section, we assess the recall or retrieval capabilities of Rodimus* in the context of the MQAR task and NeedleBench. The MQAR task involves training a small-parameter model from scratch using a specific dataset, while NeedleBench evaluates models trained on a large-scale corpus. Due to space constraints, we will briefly summarize our findings here and refer readers to Appendices~\ref{app:mqar} and~\ref{app:needlebench} for more discussions. For the MQAR task, we primarily compare Rodimus* with other recurrent models and find that Rodimus* consistently outperforms existing models as the state expansion factor $n$ (see Figure~\ref{fig:mem_size_mqar}) or the model dimension $d$ (see Figure~\ref{fig:mqar}) increases, thanks to the proposed DDTS mechanism. In the NeedleBench evaluation, both Rodimus and Rodimus+ even exceed the performance of Pythia, a softmax attention-based model (see Figure~\ref{fig:needlebench}). It is noteworthy that many studies suggest pre-trained recurrent models often struggle with challenging recall-intensive tasks like NeedleBench when compared to models utilizing full attention mechanisms \cite{waleffe2024empirical}. The superior performance of Rodimus and Rodimus$+$ indicates that the Rodimus family effectively balances the accuracy-efficiency trade-off, particularly in enhancing recall ability.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{.24\textwidth}
+         \centering         
+         \includegraphics[width=\linewidth,trim={0 0 18ex 0},clip]{figs/figs-needlebench/needlebench_large/Mamba2-1.3B_Overall_Score.pdf}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[width=\linewidth,trim={20pt 0 18ex 0},clip]{figs/figs-needlebench/needlebench_large/Pythia-1.4B_Overall_Score.pdf}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[width=\linewidth,trim={20pt 0 18ex 0},clip]{figs/figs-needlebench/needlebench_large/Rodimus-1.4B_Overall_Score.pdf}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.27\textwidth}
+         \centering
+         \includegraphics[width=\linewidth,trim={20pt 0 0 0},clip]{figs/figs-needlebench/needlebench_large/Rodimus+-1.6B_Overall_Score.pdf}
+     \end{subfigure}
+         
+    \caption{
+    Results on NeedleBench. The average accuracy of each subtask of NeedleBench in contexts of different lengths. Overall Score represents the global average score.
+    }
+    \label{fig:needlebench}
+\end{figure}
+\subsection{Ablation Studies}
+\label{sec:ablation_study}
+
+In this section, we summarize the key conclusions from our ablation studies. (i) Our assessment of the components in Rodimus reveals that the inclusion of $\vg_t$, $\vtau_t$, and $\hat\vbeta_t$ is crucial for the DDTS framework. However, the incorporation of $\vbeta_t$ tends to complicate the training process, leading to suboptimal results. Additionally, the two-hop residual connection is beneficial as the model depth increases. (ii) In terms of head compression methods, we find that SKA offers a balanced compromise between GQA and MHA, delivering superior performance compared to GQA while utilizing fewer parameters relative to MHA, irrespective of the backbone models used. (iii) We have determined that the optimal hyperparameter values are $\ell = 16$ and $n = 64$. Notably, the Rodimus configuration with $n=64$ operates with a state size that is only half that of Mamba2, yet it outperforms Mamba2 on various benchmarks.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we introduce Rodimus* (comprising Rodimus and Rodimus$+$), two innovative models that utilize semantic, token, and head compression. Experimental results demonstrate that Rodimus* effectively breaks the accuracy-efficiency trade-off in LLMs.
+
+
+
+
+

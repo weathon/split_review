@@ -1,0 +1,515 @@
+\title{Getting Free Bits Back from Rotational Symmetries in LLMs}
+
+\begin{abstract}
+Current methods for compressing neural network weights, such as decomposition, pruning, quantization, and channel simulation, often overlook the inherent symmetries within these networks and thus waste bits on encoding redundant information. 
+In this paper, we propose a format based on bits-back coding for storing rotationally symmetric Transformer weights more efficiently than the usual array layout at the same floating-point precision.
+We evaluate our method on Large Language Models (LLMs) pruned by SliceGPT \citep{ashkboosslicegpt} and achieve a 3-5\% reduction in total bit usage \emph{for free}
+across different model sizes and architectures without impacting model performance within a certain numerical precision.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Modern neural networks, particularly Large Language Models (LLMs), typically contain billions of parameters.
+Therefore, encoding and transmitting these models efficiently is gaining widespread interest. 
+Currently, compression techniques of model weights mainly fall into four categories, including decomposition \citep[e.g.,][]{hulora,NEURIPS2023_3bf4b559}, pruning \citep[e.g., ][]{hoefler2021sparsity,frantar2023sparsegpt,ashkboosslicegpt}, quantization \citep[e.g., ][]{wang2023bitnet,xu2024onebit}, and channel simulation \citep[e.g., ][]{havasi2019minimal,isiksparse,herecombiner}.
+\par
+However, these techniques ignore the fact that neural networks typically exhibit symmetries in their weight space. 
+For example, in feedforward networks, applying a random permutation to the neurons in one layer and its inverse to the weights in the subsequent layer leaves the output unchanged. 
+Encoding weights without accounting for these symmetries will lead to suboptimal codelength.
+\par
+In this work, we address this redundancy by developing a practical storage format for model weights that takes symmetries into account to reduce the compressed model size.
+We demonstrate the practicality of our method by compressing popular model architectures. 
+Specifically, our contributions are as follows:
+\begin{itemize}[leftmargin=*]
+\item We propose a practical bits-back coding scheme for rotational symmetries. 
+We apply our approach to Large Language Models (LLMs) pruned by SliceGPT \citep{ashkboosslicegpt} and demonstrate that our proposed approach can save additional free bits while preserving prediction accuracy within a certain numerical precision.
+\item 
+We further showcase that by transmitting a small number of bits as a correction code, we can rescue the performance drops due to numerical inaccuracies.
+\item
+We perform experiments on the OPT \citep{zhang2022opt} and Llama-2 \citep{touvron2023llama} across different sizes, where we can save 3-5\% additional bits \emph{for free}.
+Notably, our method is completely training-free and can be executed on a consumer-grade CPU.
+\end{itemize}
+
+
+
+
+\section{Background}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.45\textwidth}
+        \includegraphics[height=145pt, trim={0 30pt 0 10pt}]{Figure/transformer.pdf}
+        \caption{A standard transformer block.}\label{fig:transformer}
+    \end{subfigure}\quad\quad
+    \begin{subfigure}{0.45\textwidth}
+        \includegraphics[height=145pt, trim={0 30pt 0 10pt}]{Figure/transformer_slicegpt.pdf}
+        \caption{A transformer block with SliceGPT.} \label{fig:slicegpt}
+    \end{subfigure}
+    \caption{Visualization of a Standard Transformer Block and a SliceGPT-Pruned Transformer Block. (a) The standard Transformer block first maps the input through an attention layer; then it applies LayerNorm \citep{ba2016layer} and a 1-layer Feedforward Network (FFN).
+    Two residual connections are added after the attention layer and the FFN.
+    Here, we adopt the notation by \citet{ashkboosslicegpt}, where $\rmM=\rmI - \frac{1}{D}\bm{1}\bm{1}^\top$ represents the operation that subtracts the mean in each row.
+    (b) 
+    SliceGPT \citep{ashkboosslicegpt} first absorbs $\rmM$ and $\text{diag}(\bm{\alpha})$ into the weights before and after the normalization layer. 
+    It then rotates these weights by applying PCA to the hidden states, aligning them with their principal components (PCs). 
+    Subsequently, SliceGPT prunes rows and columns corresponding to the least significant PCs, indicated by gray shadows. 
+    It is important to note that the weights in (b) differ from those in (a) due to the absorption of $\rmM$ and $\text{diag}(\bm{\alpha})$ and the rotation.
+    Additionally, as SliceGPT introduces two weight matrices $\rmQ_{\text{skip\_mlp}}$ and $\rmQ_\text{skip\_att}$ to the skip connections, it carries more rotational symmetries compared to the standard Transformer in (a).
+    For a more detailed explanation of SliceGPT, please refer to Figure 4 in \citet{ashkboosslicegpt}.}
+\end{figure}
+Before delving into our methods, we provide a brief introduction to bits-back coding \citep{bitsbackcoding}, Transformer \citep{attention_is_all_you_need}, and SliceGPT \citep{ashkboosslicegpt}. 
+
+\textbf{Bits-back Coding. } 
+The motivating idea behind \textit{bits-back coding} \citep{hinton1993keeping,townsendpractical} can be summarised as follows: ``\emph{If we can make multiple equivalent choices to encode something, we should make our choice at random.}''
+Note that transmitting this random choice requires some bits, and the bits-back coding algorithm provides a concrete procedure to recover the bits we used to randomize our choice.
+The procedure is based on the following insight from compression: assuming we have the right coding distribution $P$, the encoding function of a compressor will output a sequence of uniformly random bits.
+Therefore, if we run this process in reverse and run the decoder on a sequence of uniformly random bits, it will output a sample following $P$!
+Therefore, \textit{lossless de-compression} can be viewed as a computational way of performing inverse transform sampling, which provides an invertible way to make the aforementioned random choice.
+\par
+To make the bits-back mechanism more precise, assume we have some data $x$ that belongs to some equivalence class $[x]$.
+In many cases, encoding only the equivalence class $[x]$ instead of a specific instance $x$ would be enough for the task at hand.
+Given a new item $x$ and a stream of already compressed bits $\mathcal{M}$, bits-back coding uses the decoder of lossless compressor on $\mathcal{M}$ to decode a random element of the equivalence class $x' \sim P_{x \mid [x]}$ and leaves a shorter message $\mathcal{M}'$.
+After this, bits-back coding uses the encoder of the compressor to encode $x'$ using $P_{x}$ as the coding distribution and append it to $\mathcal{M}'$.
+This procedure is reversible and hence decodable, so long as the receiver of the message can recover $x$ upon seeing $x'$.
+This ensures that $x'$ can be coded back into the stream to recover the original message $\mathcal{M}$.
+As one of our contributions, in \cref{sec:rotation}, we explain how such a recovery step can be carried out when $x$ is a weight matrix and $[x]$ is an equivalence class under a certain rotational symmetry.
+\par
+A concern with bits-back coding is its initialization: we need an initial stream of bits $\mathcal{M}_0$ to encode the first item.
+While $\mathcal{M}_0$ represents a significant overhead if we only encode a few items, it only causes a constant overhead and quickly becomes negligible as the number of encoded items grows.
+
+\textbf{Transformer Architecture and SliceGPT.}
+Transformer \citep{attention_is_all_you_need} is the cornerstone of most Large Language Models.
+Its basic component is the transformer block, as shown in \Cref{fig:transformer}. 
+Each block consists of a multi-head attention layer, a LayerNorm \citep{ba2016layer}, and a feedforward network (FFN).
+Two residual connections are added around the attention layer and FFN.
+\par
+SliceGPT \citep{ashkboosslicegpt} is a recently proposed method for pruning weights in Transformer models. 
+The approach leverages the insight that the outcome of LayerNorm (more precisely, RMSNorm, i.e., $\rvx \leftarrow \rvx / ||\rvx||$) is invariant if we apply a rotation to the input and its inverse to the output. 
+This rotation matrix and its inverse can be absorbed into the weights before and after the normalization layer.
+Therefore, by performing PCA on the hidden states, we can choose rotation matrices that align with the principal components. This allows us to prune the rows and columns corresponding to the less significant eigenvalues in the hidden states, effectively reducing the model's complexity without drastically hurting the performance.
+We visualize each transformer block after rotation and pruning in \Cref{fig:slicegpt}. 
+The shadow indices the pruned columns and rows.
+
+
+\section{Getting bits back from Rotation Symmetries}
+
+\begin{figure}[t]
+\begin{minipage}{\textwidth}
+    \begin{algorithm}[H]
+    \centering
+    \caption{Rotate Transformer to its Canonical Direction.}\label{alg:rotate_canonical}
+    \begin{algorithmic}
+    \Require Transformer weights with SliceGPT: 
+    $\rmW_{\text{emb}}$, $\rmQ^{(\ell)}_{\text{skip\_att}}$, $\rmW_{qkv}^{(\ell)}$,  $\rmW_o^{(\ell)}$,
+    $\rvb_{qkv}^{(\ell)}$, $\rvb_o^{(\ell)}$,
+    $\rmQ^{(\ell)}_{\text{skip\_mlp}}$,
+    $\rmW_1^{(\ell)}$, $\rmW_2^{(\ell)}$, $\rvb_1^{(\ell)}$, $\rvb_2^{(\ell)}$, $\rmW_{\text{head}}$, $\rvb_{\text{head}}$, $\ell = 1, 2, \cdots, L$; 
+    \Ensure Rotated weights.
+    \State {\color{Gray} \# rotate input embeddings:}
+    \State $\OQ\leftarrow \text{Eigenvalue Decompsition} (\rmW_{\text{emb}}^\top \rmW_{\text{emb}})$; 
+    \State $\rmW_{\text{emb}} \leftarrow \rmW_{\text{emb}} \OQ $; 
+    \For{$\ell \in [1, \cdots, L]$}
+     \State {\color{Gray} \# rotate skip connection and attention:}
+    \State  $\rmQ^{(\ell)}_{\text{skip\_att}} \leftarrow \OQ^\top \rmQ^{(\ell)}_{\text{skip\_att}}$; $\rmW_{qkv}^{(\ell)} \leftarrow \OQ^\top \rmW_{qkv}^{(\ell)}$;
+    \State {\color{Gray} \# rotate attention output weight:}
+     \State $\OQ\leftarrow \text{Eigenvalue Decompsition} ({\rmW_{o}^{(\ell)}}^\top \rmW_{o}^{(\ell)})$; 
+    \State $\rmW_{o}^{(\ell)} \leftarrow \rmW_{o}^{(\ell)} \OQ $;  $\rvb_{o}^{(\ell)} \leftarrow \OQ^\top \rvb_{o}^{(\ell)}  $; 
+    \State {\color{Gray} \# rotate skip connection and MLP input weight:}
+  \State  $\rmQ^{(\ell)}_{\text{skip\_att}} \leftarrow  \rmQ^{(\ell)}_{\text{skip\_att}} \OQ$; $\rmQ^{(\ell)}_{\text{skip\_mlp}} \leftarrow  \OQ^\top \rmQ^{(\ell)}_{\text{skip\_mlp}} $; $\rmW_1^{(\ell)} \leftarrow \OQ^\top \rmW_1^{(\ell)}$;
+        \State {\color{Gray} \# rotate skip connection and MLP output weight:}
+     \State $\OQ\leftarrow \text{Eigenvalue Decompsition}({\rmW_{2}^{(\ell)}}^\top \rmW_{2}^{(\ell)})$; 
+    \State $\rmQ^{(\ell)}_{\text{skip\_mlp}} \leftarrow  \rmQ^{(\ell)}_{\text{skip\_mlp}} \OQ$; $\rmW_{2}^{(\ell)} \leftarrow \rmW_{2}^{(\ell)} \OQ $;  $\rvb_{2}^{(\ell)} \leftarrow \OQ^\top\rvb_{2}^{(\ell)}  $; 
+    \EndFor
+        \State {\color{Gray} \# rotate heads:}
+         \State $\rmW_{\text{head}}\leftarrow \OQ^\top \rmW_{\text{head}}$; 
+    \end{algorithmic}
+\end{algorithm}
+\begin{minipage}{\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Recover rotation matrix from rotated weight.}\label{alg:pca}
+    \begin{algorithmic}
+    \Require Rotated matrix $\rmW$, reference signs $\rvs$ (vector of $\pm1$-s).
+    \Ensure Rotation matrix $\OQ$: 
+ \State $\OQ^\top\leftarrow \text{Eigenvalue Decompsition} ({\rmW}^\top \rmW)$. \Comment{rotate $\rmW_2^{(\ell)}$ to canonical direction}
+    \For {$r \in |\text{row}(\OQ)|$}
+    \State $\OQ_{r} \leftarrow  \begin{cases}
+      \OQ_{r}, & \text{if sign}(\OQ_{r}\texttt{.sum()}) = \rvs_r; \\
+      -\OQ_{r}, & \text{otherwise.}
+    \end{cases} $. \Comment{change sign of $\OQ$}
+    \EndFor
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{minipage}
+\begin{minipage}{0.49\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Decode a rotation matrix from the current bitstream.  We use \textbf{\color{BrickRed}red} to represent adding bits to the bitstream; \textbf{\color{ForestGreen}green} for removing bits from the bitstream.}\label{alg:de_rotation}
+    \begin{algorithmic}
+    \Require Bitstream $\mathcal{M}$; 
+    \Ensure Rotation matrix $\OQ\in \mathbb{R}^{D\times D}$.
+\State $\rmX\leftarrow \mathbf{0}\in \mathbb{R}^{D\times D} $;
+\State {\color{ForestGreen}Decode $D(D-1)/2$ floats from bitstream $\mathcal{M}$;}
+\State  Fill above the diagonal of $\mathbf{X}$ with these floats; 
+\State $\mathbf{X} \leftarrow \mathbf{X} + \mathbf{X}^\top$;
+\State {\color{ForestGreen}Decode $D$ floats from bitstream $\mathcal{M}$;}
+\State  Fill the diagonal of $\mathbf{X}$ with these floats;
+\State $\OQ, \bm{\lambda}\leftarrow $ Eigenvalue Decomposition($\rmX$);
+ \State   {\color{BrickRed}$\bm{\lambda} \rightarrow $ \texttt{Encode\_to($\mathcal{M}$)}.}
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Encode a rotation matrix to the current bitstream.  We use \textbf{\color{BrickRed}red} to represent adding bits to the bitstream; \textbf{\color{ForestGreen}green} for removing bits from the bitstream.}\label{alg:en_rotation}
+    \begin{algorithmic}
+    \Require  Rotation matrix $\OQ$, Bitstream $\mathcal{M}$;
+    \Ensure Updated bitstream $\mathcal{M}$.
+    \State
+   \State 
+   \State $\rmX \leftarrow \OQ\  \text{diag}(\bm{\lambda} )\ \OQ^\top$.
+   \State Retrieve floats in the diagonal of $\rmX$;
+   \State {\color{BrickRed}Encode these $D$ floats into $\mathcal{M}$.}
+   \State Retrieve floats in the upper triangular of $\rmX$;
+   \State {\color{BrickRed}Encode these $D(D-1)/2$ floats into $\mathcal{M}$.}
+   \State
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+In this section, we describe our method, which is based on the observation of rotational symmetries in the Transformer block pruned by SliceGPT.
+Comparing \Cref{fig:slicegpt} and \Cref{fig:transformer}, we can see SliceGPT not only reduces the number of parameters (by pruning out columns and rows), but also introduces rotational symmetries.
+We should note that these rotational symmetries do not exist in the standard transformer due to the skip connections.
+Concretely, in a  SliceGPT-pruned Transformer, denoting the weights in the $\ell$-th transformer block with superscripts, we have:
+\begin{remark}\label{remark:rotation_symmetry}
+    Outputs remain unchanged if rotating $\rmW_2^{(\ell-1)}$, $\rvb_2^{(\ell-1)}$ (if any) and $\rmQ_{\text{skip\_mlp}}^{(\ell-1)}$ by an arbitrary orthogonal matrix $\OQ$ \footnote{Throughout this paper, we will use orange-colored $\OQ$ to denote orthogonal matrices.}, and rotating $\rmQ_\text{skip\_att}^{(\ell)}, \rmW_{qkv}^{(\ell)}= \left[\rmW_k^{(\ell)}, \rmW_q^{(\ell)}, \rmW_v^{(\ell)}\right]$ by $\OQ^\top$ as follows:
+\begin{align}
+   \label{eq:rotation1.1} &\rmW_2^{(\ell-1)} \leftarrow \rmW_2^{(\ell-1)} \OQ, \quad
+    \rvb^{(\ell-1)} \leftarrow \rvb^{(\ell-1)} \OQ, \quad 
+    \rmQ_{\text{skip\_mlp}}^{(\ell-1)}  \leftarrow \rmQ_{\text{skip\_mlp}}^{(\ell-1)} \OQ\\
+  \label{eq:rotation1.2} & \rmQ_\text{skip\_att}^{(\ell)}\leftarrow \OQ^\top\rmQ_\text{skip\_att}^{(\ell)}, \ \rmW_{qkv}^{(\ell)}\leftarrow \OQ^\top   \rmW_{qkv}^{(\ell)}
+\end{align}
+Similarly, outputs remain unchanged if rotating $\rmW_o^{(\ell)}$, $\rvb_o^{(\ell)}$ (if any) and $\rmQ^{(\ell)}_{\text{skip\_att}}$ by $\OQ$, and rotating $\rmQ_\text{skip\_mlp}^{(\ell)}$ and $\rmW_1^{(\ell)}$ by $\OQ^\top$ as follows:
+\begin{align}
+  \label{eq:rotation2.1} & \rmW_o^{(\ell)} \leftarrow \rmW_o^{(\ell)} \OQ, \quad   \rvb_o^{(\ell)} \leftarrow \rvb_o^{(\ell)} \OQ, \quad   \rmQ^{(\ell)}_{\text{skip\_att}}\leftarrow \rmQ^{(\ell)}_{\text{skip\_att}} \OQ\\
+  \label{eq:rotation2.2}  &\rmQ_\text{skip\_mlp}^{(\ell)}\leftarrow \OQ^\top\rmQ_\text{skip\_mlp}^{(\ell)}, \quad \rmW_1^{(\ell)} \leftarrow \OQ^\top\rmW_1^{(\ell)}
+\end{align}
+\end{remark}  
+This symmetry suggests that directly encoding the weights (e.g., in \texttt{float16}) would use more bits than necessary.
+In the following, we offer an informal explanation to clarify this redundancy:
+\par
+For simplicity, let's denote the weights in a transformer as $\bm{\Theta}$.
+Assuming the coding distribution is $P$\footnote{If we encode the weights using \texttt{float16}, we are essentially assuming that all possible floating-point values ($2^{16}$ in total) have the same probability mass.}, we need to spend about 
+$-\log_2 P(\bm{\Theta})$ bits to encode the weights directly.
+On the other hand, as discussed above, applying rotations (and its inversion) to some weights leaves the output invariant.
+Therefore, if we define \emph{equivalence} in terms of outputs (and we do!),  the weights with different rotations form an \emph{equivalence class}, denoted by $[\bm{\Theta}]$.
+Encoding this equivalence class will require $-\log_2 \left(\sum_{\bm{\Theta}\in [\bm{\Theta}]}P(\bm{\Theta})\right)$ bits.
+In a finite-precision system, where the number of possible rotation matrices is limited, the equivalence class is finite. Assuming that each entry in the equivalence class has the same probability, and denoting the cardinality of the equivalence class by $\mathcal{C}$, we have  $
+    -\log_2 \left(\sum_{\bm{\Theta}\in [\bm{\Theta}]}P(\bm{\Theta})\right) =  -\log_2 \left(\mathcal{C} P(\bm{\Theta})\right) = -\log_2 P(\bm{\Theta}) - \log_2 \mathcal{C} 
+$.
+This implies that directly encoding the weights wastes $- \log_2 \mathcal{C}$ bits more than necessary.
+We apply bits-back coding to eliminate this redundancy. 
+In short, each time we encode the weights in one transformer block (more precisely, $\rmW^{(\ell)}_2$ and $\rmW^{(\ell)}_o$), we start by decoding a random rotation from the current bitstream and applying it to the weights. 
+We then encode the rotated weights into the bitstream. 
+When decoding, we first decode the rotated weights and recover the rotation we applied to the original weights. 
+Then, we encode the rotation matrix back to the bitstream.
+This process is repeated for every transformer block.
+One concern the reader might have regarding our proposed method is that bits-back coding is known to have poor one-shot compression performance and is only effective when encoding large datasets.
+This poor performance is mainly due to the fact that we need some initial bits to perform bits-back, causing overhead that will only be eliminated asymptotically.
+However, this is not an issue in our approach due to two reasons:
+(1) in the Transformer, besides the transformer blocks, we also need to store a relatively large head and embedding layer. 
+We can simply use this as the initial bits for bits-back;
+and (2) note that we apply our coding technique to \emph{each} transformer block in the Transformer.
+We can view this single Transformer as a dataset consisting of transformer blocks as the elements.
+For large enough architectures (such as the ones we used in our experiments), the bits-back coding is already efficient.
+\par
+However, there are two questions that remain unsolved:
+(a) \emph{How can we recover the rotation given a rotated weight matrix?}
+(b) \emph{How can we decode/encode a rotation (Orthogonal) matrix from/to the current bitstream?}
+We will answer these questions in \Cref{sec:canonical} and \Cref{sec:rotation}, respectively.
+We then put things all together in \Cref{sec:numerical_issue} and describe the full encoding and decoding algorithms in \Cref{alg:en,alg:de}.
+Finally, as we only apply rotations to weight matrices with finite precision (e.g., \texttt{float16}), we may suffer from numerical inaccuracy, impacting the transformer's outputs.
+To handle this, we propose to send a simple correction code, which we discuss at the end of \Cref{sec:numerical_issue}.
+
+\subsection{Rotating Transformer Weights to Their Canonical Direction}\label{sec:canonical}
+We now discuss how to recover the rotation from a rotated weight matrix. 
+This is, in general, not feasible without additional information about the original weights. 
+Fortunately, as noted in \Cref{remark:rotation_symmetry}, we can apply any rotation to the weights. 
+This allows us to first rotate the weights to a \emph{canonical direction} as a reference. 
+We can define this canonical direction in multiple ways as long as we can recover it easily after applying a random rotation. 
+In this work, we adopt eigenvalue decomposition to define the canonical direction, while future works could explore more sophisticated methods.
+\par
+We detail the algorithm for the canonical direction in \Cref{alg:rotate_canonical}.
+In short, for each transformer block, we can apply two free rotations according to \Cref{remark:rotation_symmetry}: the first rotation is applied to  $\rmW_2^{(\ell-1)}$, $\rvb_2^{(\ell-1)}$, $\rmQ_{\text{skip\_mlp}}^{(\ell-1)}$, $\rmQ_\text{skip\_att}^{(\ell)}$, and $\rmW_{qkv}^{(\ell)}$. 
+We hence define the canonical direction such that  ${\rmW_2^{(\ell-1)}}^\top \rmW_2^{(\ell-1)}$ is diagnoal; 
+the second rotation is applied to $\rmW_o^{(\ell)}$, $\rvb_o^{(\ell)}$, $\rmQ^{(\ell)}_{\text{skip\_att}}$, $\rmQ_\text{skip\_mlp}^{(\ell)}$ and $\rmW_1^{(\ell)}$.
+We hence define the canonical direction such that   ${\rmW_o^{(\ell)}}^\top \rmW_o^{(\ell)}$ is diagnoal.
+
+After rotating the transformer to its canonical direction, we can recover any rotation that is applied to the canonical ${\rmW_2^{(\ell-1)}}$ or ${\rmW_o^{(\ell)}}$ by eigenvalue decomposition. 
+Specifically,  let's consider a random rotation $\OQ$ applied to ${\rmW_2^{(\ell-1)}}$ in its canonical direction as an example.
+Denoting the matrix after rotation is $\tilde{\rmW}_2^{(\ell-1)}\leftarrow {\rmW_2^{(\ell-1)}} \OQ$,
+we can perform eigenvalue decomposition on ${\tilde{\rmW}_2^{(\ell-1)}}\ ^\top\tilde{\rmW}_2^{(\ell-1)}$, and the rotation matrix $\OQ$ can then be recovered by stacking the eigenvectors together in columns.
+The weight matrix in the canonical direction can be obtained by ${\rmW_2^{(\ell-1)}} \leftarrow \tilde{\rmW}_2^{(\ell-1)}\OQ^\top={\rmW_2^{(\ell-1)}} \OQ\OQ^\top$.
+\par
+A caveat exists in the above procedure: eigenvalue decomposition can result in eigenvectors with opposite signs.
+This will lead to undesired results when recovering the canonical weight matrix. 
+
+To address this, we encode the sign of the summation of each row of the rotation matrix as side information. This only requires 
+$D$ bits for a $D$-dimensional rotation matrix. 
+After recovering eigenvectors through eigenvalue decomposition, we can use this side information to correct the sign for each eigenvector (i.e., rows in the rotation matrix).
+\Cref{alg:pca} describes this process.
+\par
+Another concern arises when ${{\rmW}_2^{(\ell-1)}}^\top{\rmW}_2^{(\ell-1)}$ (or 
+${{\rmW}_o^{(\ell)}}\ ^\top{\rmW}_o^{(\ell)}$) is not full-rank. 
+ In such cases, eigenvalue decomposition will not recover the rotation applied to these canonical weights. 
+ To address this, we can define the canonical direction by applying eigenvalue decomposition to  $\rmB^\top \rmB$, where 
+$\rmB^\top = \left[{\rmW_2^{(\ell-1)}}^\top, {\rvb_2^{(\ell-1)}}^\top,\rmW_k^{(\ell)}, \rmW_q^{(\ell)}, \rmW_v^{(\ell)}\right]$ (or $\rmB^\top = \left[{\rmW_o^{(\ell)}}^\top, {\rvb_o^{(\ell)}}^\top, \rmW_1^{(\ell)}\right]$).
+However, we actually found ${{\rmW}_2^{(\ell-1)}}^\top{\rmW}_2^{(\ell-1)}$ and  
+${{\rmW}_o^{(\ell)}}\ ^\top{\rmW}_o^{(\ell)}$ were already full-rank across all architectures in our experiments. 
+This may be because SliceGPT has already pruned insignificant principal components in the hidden states, leading to more compact weight matrices.
+\subsection{Decoding and Encoding Rotation Matrices}\label{sec:rotation}
+Now, we discuss \emph{how to decode/encode a rotation matrix from/to a given bitstream.}
+A naive approach is to directly decode and encode these $D^2$ entries in a rotation matrix $\OQ\in \mathbb{R}^{D\times D}$, e.g., by \texttt{float16}.
+However, it is difficult to guarantee that $D^2$ elements decoded from a given bitstream can form a rotation matrix.
+In fact, a $D$-dimensional rotation matrix $\OQ$ has only $D(D-1)/2$ degrees of freedom (DOF), which means that we only need to decode and encode $D(D-1)/2$ floats for the entire matrix. 
+Therefore, the question becomes:
+\emph{(a) how can we construct a random rotation matrix from $D(D-1)/2$ random floats; (b) how can we recover these floats given a rotation matrix?}
+\par
+Ideally, we aim to generate a uniformly distributed random rotation matrix, i.e., a random rotation matrix from the Haar distribution. 
+Following the method by \citet{haar_rotation}, we can construct the matrix by iteratively applying Householder transformations \citep{householder1958unitary}. 
+\par
+However, this algorithm is difficult to reverse:
+we need to reverse the householder transformations one by one, and hence, we will suffer from large numerical instability. 
+Therefore, we propose a simple method to generate a rotation matrix. 
+This approach does not result in a uniformly distributed rotation matrix.
+However, we found our approach works well in practice.
+Since our goal is not to design a theoretically optimal algorithm but rather a more practical approach to perform bits-back, we leave a better design for the rotation matrix to future works. 
+
+We describe the process of decoding and encoding a rotation matrix in \Cref{alg:de_rotation,alg:en_rotation}. 
+Again, we employ a bits-back approach for efficiency.
+In brief, to decode a rotation matrix, we first decode a symmetric matrix from the bitstream by decoding its diagonal and upper triangular parts and performing an eigenvalue decomposition. 
+The eigenvalues are then encoded back into the bitstream. 
+To encode this rotation matrix, we first decode its eigenvalues from the bitstream, reconstruct the symmetric matrix via matrix multiplication, and then encode its diagonal and upper triangular parts back into the bitstream. 
+Notably, our approach requires only the number of bits corresponding to $D(D-1)/2$ floats, which aligns with the degrees of freedom of a random rotation matrix.
+
+
+\subsection{Putting Things Together and Handling Numerical Inaccuracy}\label{sec:numerical_issue}
+\begin{figure}[t]
+\begin{minipage}{\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Bits-back Encoding for transformers (processed by SliceGPT). We use \textbf{\color{BrickRed}red} to represent adding bits to the bitstream; \textbf{\color{ForestGreen}green} to represent removing bits from the bitstream.}\label{alg:en}
+    \begin{algorithmic}[1]
+    \Require Transformer weights: 
+    $\rmW_{\text{emb}}$, $\rmQ^{(\ell)}_{\text{skip\_att}}$, $\rmW_{qkv}^{(\ell)}$, $\rmW_o^{(\ell)}$,
+    $\rvb_{qkv}^{(\ell)}$, $\rvb_o^{(\ell)}$,
+    $\rmQ^{(\ell)}_{\text{skip\_mlp}}$,
+    $\rmW_1^{(\ell)}$, $\rmW_2^{(\ell)}$, $\rvb_1^{(\ell)}$, $\rvb_2^{(\ell)}$, $\rmW_{\text{head}}$, $\rvb_{\text{head}}$, $\ell = 1, 2, \cdots, L$; 
+    \Ensure Binary message $\mathcal{M}$.
+    \State $\mathcal{M} \leftarrow \perp$. \Comment{initialization empty bitstream.}
+    \State Rotate the transformer to its canonical direction using \Cref{alg:rotate_canonical}.
+    \State {\color{Gray} \# encode weights with bits-back:}
+    \State   {\color{BrickRed}$\rmW_{\text{emb}}, \rvb_{\text{emb}} \rightarrow $ \texttt{Encode\_to($\mathcal{M}$)}.}\Comment{encode input embeddings}
+    \For{$\ell \in [1, \cdots, L]$}
+     \State   {\color{BrickRed}$\rmQ^{(\ell)}_{\text{skip\_att}}, \rmW_{qkv}^{(\ell)},
+    \rvb_{qkv}^{(\ell)}\rightarrow$ \texttt{Encode\_to($\mathcal{M}$)}.}
+\State {\color{ForestGreen}\text{$\OQ \leftarrow$ Decode rotation matrix from $\mathcal{M}$ using \Cref{alg:de_rotation}}.}\Comment{decode a random rotation}
+\State $\rmW_o^{(\ell)}\leftarrow \rmW_o^{(\ell)} \OQ$.
+    \State {\color{BrickRed}$\texttt{sign($\OQ$.sum(-1))} \rightarrow \texttt{Encode\_to($\mathcal{M}$)}$.} \Comment{encode sign of $\OQ$ (overhead)}
+   \State   {\color{BrickRed}$\rmW_o^{(\ell)}, \rvb_o^{(\ell)},
+    \rmQ^{(\ell)}_{\text{skip\_mlp}},
+    \rmW_1^{(\ell)},  \rvb_1^{(\ell)} \rightarrow $ \texttt{Encode\_to($\mathcal{M}$)}.}\\\Comment{encode rotated $\rmW_o^{(\ell)}$ and other weights}
+\State {\color{ForestGreen}\text{$\OQ\leftarrow$ Decode rotation matrix from $\mathcal{M}$ using \Cref{alg:de_rotation}}.}\Comment{decode a random rotation}
+\State $\rmW_2^{(\ell)}\leftarrow \rmW_2^{(\ell)} \OQ$.
+   \State {\color{BrickRed}$\texttt{sign($\OQ$.sum(-1))} \rightarrow \texttt{Encode\_to($\mathcal{M}$)}$.} \Comment{encode sign of $\OQ$ (overhead)}
+   \State   {\color{BrickRed}$\rmW_2^{(\ell)}, \rvb_2^{(\ell)} \rightarrow $ \texttt{Encode\_to($\mathcal{M}$).}}\Comment{encode rotated $\rmW_2^{(\ell)}$ and other weights}
+    \EndFor
+ \State   {\color{BrickRed}$\rmW_{\text{head}}, \rvb_{\text{head}} \rightarrow $ \texttt{Encode\_to($\mathcal{M}$)}.} \Comment{encode heads}
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\begin{minipage}{\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Bits-back Decoding for transformers (processed by SliceGPT). We use \textbf{\color{BrickRed}red} to represent adding bits to the bitstream; \textbf{\color{ForestGreen}green} to represent removing bits from the bitstream.}\label{alg:de}
+    \begin{algorithmic}[1]
+    \Require Binary message $\mathcal{M}$.
+    \Ensure Transformer weights: 
+    $\rmW_{\text{emb}}$, $\rmQ^{(\ell)}_{\text{skip\_att}}$, $\rmW_{qkv}^{(\ell)}$,  $\rmW_o^{(\ell)}$,
+    $\rvb_{qkv}^{(\ell)}$, $\rvb_o^{(\ell)}$,
+    $\rmQ^{(\ell)}_{\text{skip\_mlp}}$,
+    $\rmW_1^{(\ell)}$, $\rmW_2^{(\ell)}$, $\rvb_1^{(\ell)}$, $\rvb_2^{(\ell)}$, $\rmW_{\text{head}}$, $\rvb_{\text{head}}$, $\ell = 1, 2, \cdots, L$.
+\State   {\color{ForestGreen} $\rmW_{\text{head}}, \rvb_{\text{head}} \leftarrow $ \texttt{Decode\_from($\mathcal{M}$)}.}  \Comment{decode heads}
+ \For{$\ell \in [L, \cdots, 1]$}
+    \State   {\color{ForestGreen}
+    $\rmW_2^{(\ell)}, \rvb_2^{(\ell)} \leftarrow $ \texttt{Decode\_from($\mathcal{M}$)}.}\Comment{decode rotated $\rmW_2^{(\ell)}$ and other weights}
+      \State {\color{ForestGreen}$\rvs \leftarrow \texttt{Decode\_from($\mathcal{M}$)}$.} \Comment{decode sign of $\OQ$}
+   \State $\OQ \leftarrow$ Recover rotation matrix using \Cref{alg:pca} from ($\rmW_2^{(\ell)}, \rvs$).
+   \State $\rmW_2^{(\ell)} \leftarrow \rmW_2^{(\ell)}\OQ^\top$ \Comment{recover canonical direction}
+    \State {\color{BrickRed}\text{$\OQ\rightarrow$ Encode rotation matrix to $\mathcal{M}$ using \Cref{alg:en_rotation}}.}\Comment{encode the random rotation}
+     \State   {\color{ForestGreen}$\rmW_o^{(\ell)}, \rvb_o^{(\ell)},
+    \rmQ^{(\ell)}_{\text{skip\_mlp}},
+    \rmW_1^{(\ell)},  \rvb_1^{(\ell)}  \leftarrow  $ \texttt{Decode\_from($\mathcal{M}$)}.}\\\Comment{decode rotated $\rmW_o^{(\ell)}$ and other weights}
+     \State {\color{ForestGreen}$\rvs \leftarrow \texttt{Decode\_from($\mathcal{M}$)}$.} \Comment{decode sign of $\OQ$}
+ \State $\OQ \leftarrow$ Recover rotation matrix using \Cref{alg:pca} from ($\rmW_o^{(\ell)}, \rvs$).
+ \State $\rmW_o^{(\ell)} \leftarrow \rmW_o^{(\ell)}\OQ^\top$ \Comment{recover canonical direction}
+    \State {\color{BrickRed}\text{$\OQ\rightarrow$ Encode rotation matrix to $\mathcal{M}$ using \Cref{alg:en_rotation}}.}\Comment{encode the random rotation}
+\State   {\color{ForestGreen}$\rmQ^{(\ell)}_{\text{skip\_att}}, \rmW_{qkv}^{(\ell)}, \rvb_{qkv}^{(\ell)} \leftarrow$ \texttt{Decode\_from($\mathcal{M}$)}.}
+  
+ \EndFor
+    \State   {\color{ForestGreen}$\rmW_{\text{emb}}, \rvb_{\text{emb}} \leftarrow $ \texttt{Decode\_from($\mathcal{M}$)}.}\Comment{decode input embeddings}
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+Having discussed the canonical direction for the transformer and the algorithm for decoding and encoding a rotation matrix, we detail the complete algorithm for encoding and decoding the entire transformer using bits-back in \Cref{alg:en,alg:de}, respectively.
+In these algorithms, we use \texttt{Encode\_to} and \texttt{Decode\_from} to represent the process of appending or popping arrays of \texttt{float16} values into or from the current bitstream.
+\par
+However, since we only save rotated weights in finite precision (e.g., \texttt{float16}), we may suffer from numerical inaccuracy, and hence the rotation matrix recovered by \Cref{alg:pca} in decoding will have deviations from the original rotation matrix applied to the canonical weights in encoding.
+This will lead to two undesirable outcomes:
+(1) the bitstream after re-encoding the rotation matrices (as shown in lines 7 and 13 in \Cref{alg:de}) will contain errors, which will affect the weights decoded subsequently from this bitstream;
+(2) the weight matrices rotated back to the canonical direction (as shown in lines 6 and 12 in \Cref{alg:de}) will contain errors. 
+\par
+The first error can be fatal in standard bits-back coding algorithms, as they are usually implemented using a \textit{variable-length} code, such as asymmetric numeral systems \citep{duda2009asymmetric,townsendpractical}.
+Such a system is very sensitive to decoding errors: since by design the code assigns different codelengths to symbols, if the decoder can only approximately recover the compressed data due to numerical errors, not only are they not getting the correct bits back, they might not even get the correct \textit{number} of bits back.
+If the decoder makes such an error even once, it misaligns the rest of the bitstream (i.e., it will be longer or shorter than it should be) and this will cause catastrophic decoding errors.
+\par
+On the other hand, our proposed method is robust to such errors because we implement bits-back coding with a fixed-length code: we set a floating-point precision (e.g., 16 bits) ahead of time.
+Then, each encoding and decoding operation will change the message length by the same amount: for a fixed precision, we can compute the total codelength of the model ahead of time.
+Importantly, this means that any decoding error remains local: if we do not recover a given weight $w$ exactly, this will only affect the value of $w$ but will not affect the rest of the bitstream.
+\par
+However, although our bits-back process will not propagate local decoding errors, individual errors itself can still impact the model performance. 
+Therefore, we propose transmitting an additional correction code to correct errors exceeding a certain threshold.
+Specifically, errors in (a) occur in the $D(D+1)/2$ floats obtained by \Cref{alg:de_rotation} when encoding the rotation matrix to the bitstream, and errors in (b) occur when rotating the weight matrices back to the canonical direction. 
+Note that the encoder can simulate both procedures during encoding to determine the exact value that the decoder will obtain. 
+If the error between the value obtained by the decoder and the one held by the encoder exceeds a certain threshold, the encoder can send a correction code containing the positions and the true values in \texttt{float16}.
+Correcting each value will require approximately $16 + \ceil{\log_2 L}$ bits, where $L$ is the total number of values the decoder will reconstruct that can have errors. 
+For example, $L=D(D+1)/2$ for the error caused by (a), and $L$ represents the total number of parameters in the weight matrix for the error caused by (b). 
+\par
+A natural concern is that the correction code could become large if there are too many errors. Fortunately, as we show in \Cref{fig:error}, only a tiny portion of values have relatively large errors.
+Therefore, the correction code requires only a small number of bits to transmit and does not significantly impact the overall coding efficiency. 
+It is worth noting that this correcting strategy can be considered a simple error-correction code. 
+Therefore, we may be able to adopt more complex error-correction codes, but we leave this design for future exploration.
+
+
+\subsection{Analysis of the Codelength}\label{sec:codelength}
+Here, we analyze the codelength reduction achieved by our proposed approach from a practical standpoint. 
+
+For simplicity's sake, we assume there is no bias vector in our transformer architecture. 
+This is a reasonable assumption, as some modern architectures like Llama \citep{touvron2023llama} omit the bias too. 
+Additionally, we assume the transformer has no output head or embedding layer. 
+This assumption can be interpreted as modeling an extremely deep transformer, where the effects of the head and embedding layers become negligible. 
+However, it is important to note that this is not a realistic assumption in practical scenarios.
+This is the main reason for the discrepancy between our analysis in this section and the results we present in \Cref{sec:exp}.
+\par
+In one transformer block, as shown in \Cref{fig:slicegpt}, there exist eight matrices after SliceGPT, including six sliced weight matrices and two skip connection matrices. 
+If the slicing rate is $s$ and the weights are stored at $\delta$ bits precision (for example, $\delta = 16$ in \texttt{float16}), the total codelength (in bits) can be expressed as:
+\begin{align}
+ (\underbrace{6 \cdot r  D^2}_{\text{6 weight matrices}} +  \underbrace{2 \cdot(r  D)^2}_{\text{2 skip connection}} )\cdot \delta
+\end{align}
+where we denote $r = 1-s$ as the remaining rate after slicing.
+Using bits-back, we decode two rotation matrices from the bitstream during encoding, leading to a reduction in codelength by:
+\begin{align}
+     \left({2 \cdot \frac{(r D) (r D - 1)}{2} } \right)\cdot \delta =  (r D)\cdot (r D - 1) \cdot \delta
+\end{align}
+We disregard the overhead from storing the signs of the eigenvectors (line 9 in \Cref{alg:en}) and the correction codes (discussed in \Cref{sec:numerical_issue}), as these contributions are negligible.
+\par
+Thus, the overall reduction in codelength is:
+\begin{align}
+     (r D)\cdot (r D - 1)  / (6 \cdot r D^2 + 2 \cdot(r D)^2) \approx r / (6 + 2 r)
+\end{align}
+For a slice rate of $s = 20-30\%$, this results in approximately a $10\%$ reduction in codelength.
+
+
+
+\section{Experiments and Results}
+
+We evaluate our proposed approach in this section.
+We first test our method on the Open Pre-trained Transformer Language Models \citep[OPT,][]{zhang2022opt} and Llama-2 \citep{touvron2023llama} pruned by SliceGPT \citep{ashkboosslicegpt} with different slicing rates.
+Then, we investigate the effectiveness of the correction codes proposed in \Cref{sec:numerical_issue}.
+We conduct our bits-back algorithms on AMD Ryzen 9 7950X CPU and evaluate the performance on one NVIDIA RTX 4090 GPU.
+
+\textbf{Compression rate and performances.}
+We evaluate our method on OPT-1.3B/2.7B/6.7B/13B and Llama-2-7B, pruned by SliceGPT with different slicing rates. 
+ We report perplexity (PPL) and accuracy on three downstream tasks (PIQA, \citet{bisk2020piqa}; WinoGrande, \citet{sakaguchi2021winogrande}; and HellaSwag, \citet{zellers2019hellaswag}) to assess our method's impact on performance.
+Our approach saves an additional 3-5\% in bits with negligible impact on performance. 
+Notably, the performance changes are inconsistent, with occasional improvements after bits-back, suggesting that the changes in the performance are more likely due to randomness than a clear degradation.
+We also note that this codelength reduction is smaller than the theoretical estimates provided in \Cref{sec:codelength}.
+The primary reason for this discrepancy is that our analysis does not account for the substantial size of the head and embedding layers.
+\begin{table}[t]
+\centering
+\caption{Compression rates and prediction performances before and after our proposed method. 
+Our method reduces further 3-5\% bits and has very minor influence on the performance.}\label{tab:res}
+\resizebox{\textwidth}{!}{%
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{cccccccc}
+\hline
+ &  &  &  & \multicolumn{4}{c}{\begin{tabular}[c]{@{}c@{}} \textbf{Performance (before/after bits-back)}\end{tabular}} \\ \cline{5-8} 
+\multirow{-2}{*}{\textbf{Model}} & \multirow{-2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{SliceGPT} \\ \textbf{Slicing}\end{tabular}} & \multirow{-2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{Compress Rate}\\ \textbf{after SliceGPT}\end{tabular}} & \multirow{-2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{Compress Rate}\\ \textbf{after bits-back}\end{tabular}} & \small{PPL ($\downarrow$)} & \small{PIQA (\%, $\uparrow$)} & \small{WinoGrande (\%, $\uparrow$)} & \small{HellaSwag (\%, $\uparrow$)} \\ \hline
+ & 20\% & -9.53\% & -13.77\% & \textbf{16.59}/16.60 & \textbf{64.91}/64.80 & \textbf{54.78}/54.38 & 45.26/\textbf{45.32} \\
+ & 25\% & -14.84\% & -18.61\% &  \textbf{17.78}/17.86 & \textbf{63.55}/63.33 & 52.80/\textbf{53.28} & \textbf{43.20}/43.11 \\
+\multirow{-3}{*}{OPT-1.3B} & 30\% & -20.53\% & -23.81\% & \textbf{19.60}/19.66 & \textbf{60.88}/60.50 & 52.88/\textbf{53.28} & \textbf{40.25}/40.06 \\ \hline
+ & 20\% &  -9.19\% & -13.84\% & \textbf{13.89}/13.95 & \textbf{68.44}/68.12 & \textbf{58.88}/58.72 & \textbf{51.35}/51.17 \\
+ & 25\% & -15.07\% & -19.09\% & \textbf{14.85}/14.87 & \textbf{66.70}/66.76 & 57.30/\textbf{57.70} & \textbf{48.41}/48.38 \\
+\multirow{-3}{*}{OPT-2.7B} & 30\% & -20.88\% & -24.43\% & \textbf{16.31}/16.33 & 64.64/\textbf{64.69} & 55.80/\textbf{56.04} & 44.52/\textbf{44.57} \\ \hline
+ & 20\% & -9.29\% & -14.07\% & \textbf{11.63}/11.71 & 72.91/\textbf{73.01} & \textbf{61.33}/61.17 &  60.53/\textbf{60.55} \\
+ & 25\% & -15.16\% & -19.29\% & \textbf{12.12}/12.15 & 71.00/\textbf{71.22} & 60.30/\textbf{60.77} & \textbf{57.76}/57.55 \\
+\multirow{-3}{*}{OPT-6.7B} & 30\% & -21.18\% & -24.84\% & \textbf{12.81}/12.91 & 69.31/\textbf{69.42} & \textbf{59.75}/59.59 & \textbf{53.64}/52.94 \\ \hline
+ & 20\% & -9.18\% &  -14.01\% &  \textbf{10.75}/10.77 & 74.27/74.27 & \textbf{64.96}/64.88 &  65.74/\textbf{65.79}\\
+ & 25\% & -15.27\% & -19.51\% & 11.08/\textbf{11.07} & \textbf{74.27}/73.72 & 63.46/\textbf{63.93} &  \textbf{63.48}/63.09 \\
+\multirow{-3}{*}{OPT-13B} & 30\% & -21.29\% & -24.97\% & \textbf{11.55}/11.59 & 72.69/\textbf{73.01} & 61.96/\textbf{62.43} & \textbf{60.12}/60.05 \\ \hline
+ & 20\% & -9.38\% & -14.13\% &  \textbf{6.86}/6.98& \textbf{69.53}/69.42 & 64.17/\textbf{64.72} & \textbf{58.96}/58.89 \\
+ & 25\% & -15.34\% & -19.53\% &  \textbf{7.56}/7.59 &  67.03/\textbf{67.57} & 62.98/\textbf{63.38} &  \textbf{54.29}/53.93 \\
+\multirow{-3}{*}{Llama-2-7B} & 30\% & -21.45\% &  -25.09\% & \textbf{8.63}/8.69 & \textbf{64.69}/64.09 & \textbf{62.75}/62.12  & \textbf{49.13}/49.07 \\ \hline
+\end{tabular}
+}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.60\textwidth}
+        \centering\includegraphics[height=2.5cm]{Figure/error.pdf}\caption{Histogram and empirical CDF of the error between the reconstructed weights and the original weights before encoding, using $\rmW_o$ in the final layer of OPT-6.7B as an example. 
+    The pattern in this plot generalizes well to other weights and models. 
+    As shown, only a small fraction of the weights exhibit relatively large deviations. 
+Therefore, we can allocate a negligible number of bits to transmit the positions and true values of these weights, effectively correcting the error caused by numerical inaccuracies.
+} \label{fig:error}
+\end{minipage}\quad
+\begin{minipage}{0.35\textwidth}
+\centering
+{\includegraphics[height=2.5cm, trim={0 5pt 0 0}]{Figure/threshold.pdf}}
+\caption{The effectiveness of the correction codes with different thresholds.
+Setting a threshold around 0.005-0.01 can effectively rescue all performance drops due to numerical inaccuracies while still significantly reducing bits compared to the compression rate without bits-back. 
+} \label{fig:threshold}
+\end{minipage}
+\end{figure}
+
+\textbf{Numerical inaccuracy and the effectiveness of the correction codes. } We now examine the impact of numerical inaccuracies and the effectiveness of correction codes proposed in \Cref{sec:numerical_issue}. 
+To provide an intuitive understanding of the numerical issue, we use the weights matrix $\rmW_o$ from the last layer of OPT-6.7B as an example and visualize the error between the reconstructed weights and the original weights in \Cref{fig:error}. 
+As we can see, only a tiny fraction of the weights exhibit relatively large errors. 
+Therefore, we can transmit the positions and true values of weights whose deviations exceed a certain threshold, using negligible bits to correct the numerical error.
+\par
+The threshold is a hyperparameter that balances the codelength and accuracy. 
+In \Cref{fig:threshold}, we examine the impact of threshold selection using the OPT-2.7B model. 
+Setting a relatively small threshold (0.005-0.01) effectively mitigates nearly all performance drops due to numerical inaccuracies, while still providing a significant reduction compared to the compression rate without bits-back coding. 
+In our experiments, we use a threshold of 0.01 for OPT models and 0.005 for Llama models.
+
+
+
+\section{Conclusion and Limitations}
+
+In this work, we introduce bits-back coding to encode Large Language Models pruned with SliceGPT. 
+Our approach can save 3-5\% additional bits almost \emph{for free} across several different architectures and sizes. 
+While bits-back coding has long been applied in data compression, its application to neural networks, where redundancy and symmetry are prevalent, has been underexplored. 
+Our work attempts to bridge this gap, opening a new direction for model compression. 
+A key takeaway is that by re-parameterizing and pre-processing network weights to explicitly capture symmetries, as demonstrated in SliceGPT, we can leverage bits-back coding to eliminate redundant bits.
+
+Future research can focus on designing improved algorithms for encoding and decoding the random rotation matrix, developing better error-correction codes to manage large deviations caused by numerical instability, and integrating our method with other model compression techniques, such as the extremely quantized networks proposed by \citet{ma2024era}.
+Our method's major concern is the numerical instability. 
+While we discuss reducing large deviations by sending a small number of bits as a correction code, the challenge of making this approach efficient for extremely quantized networks remains open.
+
+
+

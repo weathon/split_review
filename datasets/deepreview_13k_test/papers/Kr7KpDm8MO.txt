@@ -1,0 +1,666 @@
+\title{Rotational Equilibrium: How Weight Decay Balances Learning Across Neural Networks}
+
+\begin{abstract}
+This study investigates how weight decay affects the update behavior of individual neurons in deep neural networks through a combination of applied analysis and experimentation.
+Weight decay can cause the expected magnitude and angular updates of a neuron's weight vector to converge to a steady state we call \textit{rotational equilibrium}.
+These states can be highly homogeneous, effectively balancing the average rotation---a proxy for the effective learning rate---across different layers and neurons.
+Our work analyzes these dynamics across optimizers like Adam, Lion, and SGD with momentum, offering a new simple perspective on training that elucidates the efficacy of widely used but poorly understood methods in deep learning.
+We demonstrate how balanced rotation plays a key role in the effectiveness of normalization like Weight Standardization, as well as that of AdamW over Adam with $\ell_2$-regularization.
+Finally, we show that explicitly controlling the rotation provides the benefits of weight decay while substantially reducing the need for learning rate warmup.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The use of weight decay or $\ell_2$-regularization has become ubiquitous in deep learning optimization.
+Although originally proposed as an explicit regularization method, \citet{van2017l2} showed that this interpretation does not hold for modern networks with normalization layers.
+This is because normalization can make a weight vector scale-invariant, meaning that the network output is unaffected by the magnitude of the vector (see \cref{sec:preliminaries}).
+For scale-invariant vectors, weight decay instead acts as a scaling factor for some notation of an ``effective'' learning rate with varying definitions \citep{van2017l2,zhang2018three,li2020exponential,wan2021spherical}.
+We explore this idea further, aiming to describe the effects of weight decay on the optimization dynamics of modern neural network (NN) training through applied analysis and experimentation.
+
+\begin{figure}
+\resizebox{0.7\width}{!}{
+\pgfplotsset{width=2.6in}
+\begin{tikzpicture}
+\begin{axis}[
+    axis lines = left,
+    xlabel = $t$,
+    ylabel = {$\E[\|\vomega_t\|]$},
+    ymin=0.0, ymax=1,
+    xticklabels={}, yticklabels={},
+    tick style={draw=none},
+    label style={font=\large}, %
+    ylabel shift = -10 pt,
+    xlabel shift = -10 pt,
+    line width = 1.25pt,
+]
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=tabred,
+    line width=1.25pt %
+]
+{0.3+0.5*(exp(-0.5*(x+1.5))-exp(-0.5*1.5))};
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=taborange,
+    line width=1.25pt %
+]
+{0.3+0.5*(exp(-0.5*(x+3))-exp(-0.5*3))};
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=tabblue,
+    line width=1.25pt %
+]
+{0.3+0.5*(1-exp(-0.5*x))};
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=tabgreen,
+    line width=1.25pt %
+]
+{0.3+0.5*(exp(-0.5*5)-exp(-0.5*(x+5)))};
+
+\end{axis}
+\end{tikzpicture}
+\pgfplotsset{width=2.6in}
+\begin{tikzpicture}
+\begin{axis}[
+    axis lines = left,
+    xlabel = $t$,
+    ylabel = {$\E[\angle (\vomega_t, \vomega_{t+1})]$},
+    ymin=0.0, ymax=1,
+    xticklabels={}, yticklabels={},
+    tick style={draw=none},
+    label style={font=\large}, %
+    ylabel shift = -10 pt,
+    xlabel shift = -10 pt,
+    line width = 1.25pt,
+]
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=tabred,
+    line width=1.25pt %
+]
+{0.5-exp(-0.5*(x+1.5))};
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=taborange,
+    line width=1.25pt %
+]
+{0.5-exp(-0.5*(x+3))};
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=tabblue,
+    line width=1.25pt %
+]
+{exp(-0.5*x)+0.5};
+\addplot [
+    domain=0:17, 
+    samples=100, 
+    color=tabgreen,
+    line width=1.25pt %
+]
+{exp(-0.5*(x+5))+0.5};
+\addplot [
+    dashed,
+    domain=0:17, 
+    samples=100, 
+    color=black,
+    line width=1.25pt %
+]
+{0.5};
+\node[above right, font=\normalsize] at (axis cs:1.25,0) {transient phase};
+
+\node[above, font=\normalsize] at (axis cs:13,0) {equilibrium};
+
+\node[above, font=\normalsize] at (axis cs:12.9,0.5) {balanced rotation};
+
+\node[above, color=tabblue, font=\normalsize] (fast) at (axis cs:8,0.9) {fast rotation};
+\draw[-{Latex[length=1mm]}, color=tabblue, line width=0.4pt] (fast) .. controls (axis cs:3.5,0.95) and (axis cs:3,0.92) .. (axis cs:2.5,0.9);
+
+\node[below, color=tabred, font=\normalsize] (slow) at (axis cs:7,0.25) {slow rotation};
+\draw[-{Latex[length=1mm]}, color=tabred, line width=0.4pt, bend right] (slow) .. controls (axis cs:3.5,0.20) and (axis cs:3.0,0.20) .. (axis cs:2.0,0.25);
+
+\end{axis}
+\end{tikzpicture}
+}
+\caption{Conceptual figure of the norm (left) and angular updates (right) of the weight vector $\vomega_t$ for different neurons (each line color) over time $t$ with a constant learning rate. Weight decay modulates and stabilizes both metrics.}
+\label{fig:intro-conceptual}
+\end{figure}
+
+We specifically examine the \term{update dynamics} of individual neurons. A \term{neuron} computes a scalar feature by comparing a learnable weight vector $\vomega_t \in \mathbb{R}^C$ with an incoming activation vector $\vx_t \in \mathbb{R}^C$, followed by a non-linear activation function $\varphi$ and an optional learnable bias $b_t \in \mathbb{R}$:
+\begin{equation}\label{eq:neuron}
+    \varphi(\langle \vomega_t, \vx_t \rangle + b_t) = \varphi(\|\vomega_t\| \|\vx_t\| \cos(\angle(\vomega_t, \vx_t)) + b_t)
+\end{equation}
+Here $\langle \cdot \rangle$ denotes a dot product which can be rewritten with a cosine similarity, showing that the direction of $\vomega_t$ determines which ``patterns'' in $\vx_t$ the neuron responds to.
+We describe the neuronal update dynamics through the \term{expected weight norm} $\E[\|\vomega_t\|]$, \term{root-mean-square (RMS) update size} $\eta_g$ for the bias, and \term{expected angular update size} $\eta_r$:
+\begin{talign}
+    \eta_g &:= \sqrt{\E[(b_{t+1}-b_t)^2]} \\
+    \eta_r &:= \E[\angle(\vomega_{t},\vomega_{t+1})]=\E\left[\arccos\left(\frac{\langle \vomega_{t}, \vomega_{t+1}\rangle}{\|\vomega_{t}\| \|\vomega_{t+1}\|}\right)\right] 
+\end{talign}
+where the expectation accounts for noise from randomly sampled minibatches (e.g., data shuffling).
+We assume weight decay is only applied to $\vomega$, not $b$ or other parameters, which is common and good practice~\cite{jia2018highly}.
+
+\Cref{fig:intro-conceptual} shows how the weight norm and angular updates ($\eta_r$) of different neurons could behave over time in a typical case.
+This behavior is caused by Spherical Motion Dynamics~\citep{wan2021spherical} which arise from the interaction of weight decay and stochastic gradient updates (described further in \cref{sec:analysis}).
+Over time, the weight norm reaches a stable \term{equilibrium magnitude} in expectation, at which point the opposing effects of gradient updates (which increase the norm) and weight decay (which reduces it) cancel each other out.
+Interestingly, this simply stems from the geometry of the stochastic optimizer updates (especially with normalization layers), not the convergence of the underlying loss function, and can therefore be analyzed for a random walk.
+
+The angular updates shown in \cref{fig:intro-conceptual}R have an inverse dependency on the weight magnitude.
+During an initial \term{transient phase} the rotation is somewhat arbitrary, depending on the initial weight magnitude and gradient norm (for some optimizers).
+The convergence of the weight norm results in a \term{steady-state} we call \term{rotational equilibrium}, characterized by the average angular update having a specific, stable magnitude.
+For some setups the rotational equilibrium is identical for different layers and neurons (even if the weight norms differ), resulting in \term{balanced rotation} which we empirically observe aids optimization.
+We discuss our intuition for why this helps in \cref{appx:why_balanced_rotation}.
+
+This study significantly expands upon prior investigations into the interactions between weight decay and normalization, demystifying the effects of weight decay and other common tricks in deep learning.
+While we touch upon certain previous works throughout, please refer to \cref{appx:related_work} for an extended discussion.
+Earlier research has primarily focused on the general mechanisms and properties of weight decay and normalization, especially for plain SGD.
+We focus on two main new directions, rotational equilibrium in other optimizers like AdamW~\citep{loshchilov2018decoupled}, and the importance of balanced rotation in the optimization of neural networks.
+Compared to prior work, our analysis also targets more fine-grained update dynamics at the neuron level, applies to networks without scale-invariance from perfectly placed normalization layers, investigates additional aspects of the dynamics (e.g.\ transient phase, bias behavior), and relates standard optimizers to the LARS-style optimizers~\cite{you2017lars}.
+Our key contributions are:
+\begin{itemize}[leftmargin=15pt,itemsep=0pt,topsep=0pt]
+    \item Deriving the steady-state neuronal update dynamics of AdamW, Adam with $\ell_2$-regularization, Lion and SGD with momentum for a random walk. We experimentally validate that the results hold for NN training in practice.
+    \item Showing how the interaction of weight decay and learning rate shapes the rotation in the initial transient phase and results in two distinct ``effective step sizes'' in the steady state, $\eta_g$ for biases and $\eta_r$ for weights.
+    \item Demonstrating how explicitly controlling the angular updates via Rotational Optimizer Variants provides an alternative way of achieving the benefits of weight decay and normalization, while also simplifying the update dynamics and reducing the need for learning rate warmup.
+    \item Revealing how balanced rotation contributes to the performance benefit of AdamW vs Adam+$\ell_2$, and certain normalization layers like Weight Standardization.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+\paragraph{Scale-Invariance:} \citet{li2020exponential,wan2021spherical} describe how properly placed normalization can make the weight vector $\vomega$ of a neuron/layer scale invariant w.r.t.\ a loss $\Ls$ and the resulting properties of the gradient $\nabla_\vomega \Ls(\vomega,\cdot)$:
+\begin{talign}
+    \text{Scale Invariance:~} & \Ls(r\vomega,\cdot)=\Ls(\vomega,\cdot), \forall r\!>\!0 \\
+    \text{Gradient orthogonality:~} & \nabla_\vomega \Ls(\vomega,\cdot) \perp \vomega \label{eq:grad_perp} \\
+    \text{Inverse proportionality:~} & \|\nabla_\vomega \Ls(\vomega,\cdot)\| \propto \|\vomega\|^{-1} \label{eq:grad_inv}
+\end{talign}
+See \cref{appx:norm_scale_invariance} for an overview.
+\semph{Note that different normalization operations can result in scale-invariance at a different granularity}, for example individual neurons for Batch Normalization~\cite{ioffe2015batch} and Weight Standardization~\cite{qiao2019ws,huang2017centered} but only whole layers for Layer Normalization~\cite{ba2016layer}.
+
+\paragraph{The Effective Learning Rate:} In related literature there are multiple definitions of ``effective'' learning rates \citep{van2017l2,chiley2019online,wan2021spherical} which aim to describe how fast the neural network is being updated based on some metric.
+We use the average angular change $\eta_r$ for this purpose, but will refer to it as an \term{effective update size}.
+\semph{Note that the direction of $\vomega$ in \cref{eq:neuron} controls which patterns in the inputs $\vx$ the neuron detects, and $\eta_r$ thus directly captures how fast this important aspect in the underlying functional representation of the neuron changes.}
+This applies to all neurons, but particularly when the weight vector is scale-invariant and the direction thus fully determines its effect.
+Simple alternatives like $\|\vomega_{t+1}-\vomega_t\|$ are scale dependent and do not directly measure changes in the encoded function.
+For other parameters we use the RMS change $\eta_g$ as a measure of the update size.
+This is generally not a ``functional'' update measure (which would vary based on the architecture), but still informative and easy to analyze.
+Finally we note that an update size only measures the size of individual updates.
+Momentum affects the correlation of the updates over time, which also influences long-term ``learning speed'', see \cref{appx:update_size_vs_lr}.
+
+
+
+\section{Analysis}
+
+In this section we analyze the rotational equilibrium of a weight vector $\vomega$ to obtain simple expressions for the equilibrium magnitude~$\inlinevomegaeqnorm$ and the expected angular update in equilibrium,~$\widehat{\eta_r}$.
+We focus on a simplified setting where updates are dominated by noise, resulting in a type of random walk.
+The equilibrium dynamics derived in this analytically tractable setting are predictive of the behavior we empirically observe in neural networks (see experiments), but this is not meant to be a formal theoretical analysis that fully captures all the intricacies of neural network optimization.
+
+Specifically, we assume the loss is in the form of empirical risk, i.e. ${\Ls(\vomega,\mathbb{X})=\frac{1}{|\mathbb{X}|}\sum_{\vx \in \mathbb{X}} \Ls(\vomega,\vx)}$ where $\mathbb{X}$ is our training dataset, $\vomega$ are our weights and $\vx$ is a data point.
+The true noiseless gradient is then ${\vg_\mathbb{X}=\nabla_\vomega \Ls(\vomega,\mathbb{X})}$ and the gradient for a minibatch $\mathbb{B}$ is ${\vg_\mathbb{B}=\nabla_\vomega \Ls(\vomega,\mathbb{B})}$.
+We can define the noise in the gradient as ${\vg_N = \vg_\mathbb{B}-\vg_\mathbb{X}}$ with $\E_\mathbb{B}[\vg_N]=0$, because $\E_\mathbb{B}[\vg_\mathbb{B}]=\vg_\mathbb{X}$ for a randomly sampled $\mathbb{B}$.
+Our simplifying assumption of the noise dominating can be stated ${\vg_\mathbb{B} = \vg_\mathbb{X} + \vg_N \approx \vg_N}$, resulting in a \textit{random walk} for the neural network parameters.
+Analogous assumptions have been successfully used elsewhere, e.g.\ with stochastic differential equations to derive the batch size scaling behavior of optimizers \citep{li2021validity,malladi2022on}.
+In our experiments we find that the final predictions hold very well for a variety of networks despite being derived for this simplified setting.
+\Cref{appx:real_vs_random_walk} further describes the analytical setting and explores how the differences between a random walk and real neural network optimization affect the predictions.
+
+\subsection{Geometric Model for Equilibrium}\label{sec:equilibrium_geometric_model}
+
+\begin{figure}
+\resizebox{0.9\width}{!}{
+\begin{tikzpicture}[
+  arrow_blue/.style={tabblue, -{Latex[length=2mm]}, line width=1.0pt, opacity=1.0},
+  arrow_green/.style={tabgreen, -{Latex[length=2mm]}, line width=1.0pt, opacity=1.0},
+  arrow_red/.style={tabred, -{Latex[length=2mm]}, line width=1.0pt, opacity=1.0},
+  triangle/.style={black, line width=1.0pt, dashed, opacity=1.0},
+  scale=0.5, transform shape, every node/.style={scale=2.0}
+]
+  \draw[line width=1.0pt] (5,0cm) arc (0:115:5cm);
+
+  \draw[arrow_blue] (0,0) -- (0,5cm) node[midway,left] {$\widehat{\|\vomega\|}$};
+  \draw[arrow_blue] (0,0) -- (3,4cm) node[midway,right,xshift=-5pt,yshift=-8pt] {$\widehat{\|\vomega\|}$};
+
+  \draw[arrow_green] (0,5cm) -- (2.8,5.4cm) node[midway,above,xshift=-5pt,yshift=-2pt] {$\Delta_g \vomega$};
+
+  \draw[arrow_red] (2.8,5.4cm) -- (3,4cm) node[midway,right] {$\Delta_\lambda \vomega$};
+\end{tikzpicture}
+
+\begin{tikzpicture}[
+  arrow_blue/.style={tabblue, -{Latex[length=2mm]}, line width=1.0pt, opacity=1.0},
+  arrow_green/.style={tabgreen, -{Latex[length=2mm]}, line width=1.0pt, opacity=1.0},
+  arrow_red/.style={tabred, -{Latex[length=2mm]}, line width=1.0pt, opacity=1.0},
+  triangle/.style={black, line width=1.0pt, dashed, opacity=1.0},
+  scale=0.5, transform shape, every node/.style={scale=2.0}
+]
+  \draw[line width=1.0pt] (5,0cm) arc (0:115:5cm);
+
+  \draw[arrow_blue] (0,0) -- (0,5cm) node[midway,left] {$\widehat{\|\vomega\|}$};
+  \draw[arrow_blue] (0,0) -- (4,3cm) node[midway,right,xshift=-5pt,yshift=-8pt] {$\widehat{\|\vomega\|}$};
+
+  \draw[arrow_green] (0,5cm) -- ++(0:4cm) node[midway,above] {$\E[\|\vu_\perp\|]$};
+
+  \draw[arrow_red] (90:5cm)+(0:4cm) -- (4,3cm) node[midway,right] {$\E[\|\vd\!-\!\vu_\parallel\|]$};
+
+  \draw[triangle] (0,3cm) -- (4,3cm);
+  \draw[triangle] (0,0cm) -- (4,3cm);
+  \draw[triangle] (0,0cm) -- (0,3cm);
+
+\end{tikzpicture}
+
+}
+\caption{
+Two views of equilibrium where the weight norm $\inlinevomegaeqnorm$ is preserved because the gradient and weight decay components balance out on average. \textbf{Left:} Standard optimizer update \cref{eq:abstract_update}. \textbf{Right:} The total update contributions over the course of training, $\vu$ and $\vd$, derived from the gradient and weight decay of a given timestep, respectfully.
+}
+\label{fig:smd_components}
+\end{figure}
+
+\begin{table*}[tb]
+\centering
+\caption{
+Analytical predictions for the steady state neuronal update dynamics of different optimizers.
+The $\widehat{\eta_g}$ values apply to any parameter $\vp \in \R^{C}$ with gradient $\vg$.
+The $\widehat{\eta_r}$ and $\inlinevomegaeqnorm$ values apply to scale-invariant weights $\vomega \in \R^{C}$ in equilibrium.
+Expressions with $\tilde{\vg}:=\|\vp\|\vg$ use the inverse proportionality from \cref{eq:grad_inv} and would therefore differ without scale-invariance.
+}
+\label{tab:equilibrium_summary}
+\begin{tabular}{r|cccc}
+\toprule
+& SGDM \eqref{eq:sgdm_update} & AdamW \eqref{eq:adamw_update} & Adam+$\ell_2$ \eqref{eq:adam_update} & Lion \eqref{eq:lion_update} \\
+\midrule
+RMS update size $\widehat{\eta_g}$ & $\eta \sqrt{\frac{\E[\|\vg\|^2]}{1-\alpha^2}}$ & $\eta \sqrt{C\frac{1-\beta_1}{1+\beta_1}}$ & $\eta \sqrt{C\frac{1-\beta_1}{1+\beta_1}}$ & $\eta \sqrt{C}$ \\
+Expected rotation $\widehat{\eta_r}$ & $\sqrt{\frac{2 \eta \lambda}{1 + \alpha}}$ & $\sqrt{2 \eta \lambda \frac{1-\beta_1}{1 + \beta_1}}$ & $\sqrt[3]{\frac{2 \eta^2 \lambda}{\langle \vone, \sqrt{\E[\tilde{\vg}^2]} \rangle}} \sqrt{\frac{1-\beta_1}{1+\beta_1}C}$ & $\sqrt{\pi \eta \lambda} \left((1\!-\!\beta_1)^2 + \beta_1^2 \frac{1-\beta_2}{1+\beta_2}\right)^{\frac{1}{2}}$ \\
+Equilibrium norm $\widehat{\|\vomega\|}$ & $\sqrt[4]{\frac{\eta \E[\|\tilde{\vg}\|^2]}{2\lambda \cdot (1-\alpha)}}$ & $\sqrt{\frac{\eta C}{2\lambda}}$ & $\sqrt[3]{\frac{\eta}{2 \lambda}\!\cdot\! 
+    \langle \vone, \sqrt{\E[\tilde{\vg}^2]} \rangle}$ & $\sqrt{\frac{\eta C}{\pi \lambda}} \left((1\!-\!\beta_1)^2 + \beta_1^2 \frac{1-\beta_2}{1+\beta_2}\right)^{-\frac{1}{2}}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+In this section we present a simple geometric derivation of the equilibrium norm $\inlinevomegaeqnorm$ for different optimizers inspired in part by the analysis in Online Normalization~\citep{chiley2019online}.
+We divide a parameter update $\vomega_{t} \rightarrow \vomega_{t+1}$ into:
+\begin{equation}\label{eq:abstract_update}
+    \vomega_{t+1}-\vomega_t=\Delta_g \vomega + \Delta_\lambda \vomega
+\end{equation}
+where $\Delta_g \vomega$ comes from the gradients and $\Delta_\lambda \vomega$ from the weight decay.
+Equilibrium is an abstract state where the effects of $\Delta_g \vomega$ and $\Delta_\lambda \vomega$ on the expected weight magnitude balance out on average.
+\semph{These components typically have different monotonic dependencies on the weight magnitude, with weight decay being proportional while the gradient component is either constant or inversely proportional, depending on the setting.
+As a result, the effects of these components can balance out in expectation at the equilibrium magnitude}~$\inlinevomegaeqnorm$.
+As shown in \cref{fig:smd_components}L, the geometry of this is not necessarily simple.
+Due to the averaging effects of momentum over time, $\Delta_g \vomega$ is not necessarily orthogonal to the weights even in cases where individual gradients are (e.g.\ for scale-invariant weights).
+Similarly, the weight decay (or $\ell_2$-regularization) component $\Delta_\lambda \vomega$ may not be perfectly anti-parallel to the weights with momentum.
+
+To simplify the effects of momentum, we instead consider a different view of equilibrium shown in \cref{fig:smd_components}R.
+Here we consider the total weight change throughout training arising from the weight decay term and gradient from a given time step, instead of the update that is applied in that iteration.
+The \term{Total Update Contribution (TUC)} of the gradient at time step~$t$, denoted $\vu$, is the sum of the contributions of $\nabla_\vomega \Ls(\vomega_t,\cdot)$ to subsequent updates ${\vomega_t \rightarrow \vomega_{t+1}}$, ${\vomega_{t+1} \rightarrow \vomega_{t+2}}$, and so on.
+Analogously, the TUC of the weight decay, denoted $\vd$, is the total change due to the weight decay or $\ell_2$-regularization of the weights $\vomega_t$ at iteration~$t$.
+Note that without momentum $\vu=\Delta_g \vomega$, $\vd=\Delta_\lambda \vomega$ and that if $\Delta_g \vomega$ and $\Delta_\lambda \vomega$ balance out on average, then so must $\vu$ and $\vd$.
+
+In many cases $\vu$ is orthogonal to the weights on average due to scale-invariance or randomness.
+Otherwise, we can split it into an orthogonal $\vu_\perp$ and a radial (outwards) $\vu_\parallel$ component.
+The $\vu_\parallel$ term then has a similar effect as the weight decay term $\vd$ which is anti-parallel to the weights in the cases we consider. %
+If we can obtain an expression for the orthogonal $\|\vu_\perp\|$ and radial ${\|\vd-\vu_\parallel\|}$ total update contributions, we can apply the Pythagorean theorem to the dashed triangle in \cref{fig:smd_components}R:
+\begin{equation} \label{eq:smd_pythagorean}
+     (\widehat{\|\vomega\|}-\E[\|\vd-\vu_\parallel\|])^2 + \E[\|\vu_\perp\|]^2 = \smash{\widehat{\|\vomega\|}}^2
+\end{equation}
+We can then solve for $\inlinevomegaeqnorm$, making sure to account for the dependency of $\vu$ and $\vd$ on the weight norm.
+
+Once we have an expression for $\inlinevomegaeqnorm$, we can compute a prediction for the corresponding RMS update size ${\widehat{\eta_g}=\sqrt{E[\|\Delta_g \vomega\|^2]}}$.
+This gives a prediction for the expected relative update size $\widehat{\eta_g} / \inlinevomegaeqnorm := \widehat{\eta_r}$, which closely approximates the angular update $\eta_r$ in equilibrium.
+We do this for AdamW in the next subsection and for SGDM, Lion~\citep{chen2023symbolic} and Adam with $\ell_2$-regularization in \cref{appx:sgdm_equilibrium}, \ref{appx:lion_equilibrium} and \ref{appx:adam_l2}.
+The resulting predictions for the update dynamics of each optimizer are summarized in \cref{tab:equilibrium_summary}.
+
+\subsection{AdamW Equilibrium}\label{sec:adamw_equilibrium}
+We write AdamW~\citep{loshchilov2018decoupled} updates as:
+\begin{talign}
+    \vm_t &= \beta_1 \vm_{t-1} + (1 - \beta_1) \vg_t \\
+    \vv_t &= \beta_2 \vv_{t-1} + (1 - \beta_2) \vg_t^2 \\
+    \vp_t &= \vp_{t-1} - \eta \cdot \Big( \frac{\vm_t/(1-\beta_1^t)}{\sqrt{\vv_t/(1-\beta_2^t)} + \epsilon} + \lambda \vp_{t-1} \Big) \label{eq:adamw_update}
+\end{talign}
+where $\vp_t \in \R^{C}$ is a parameter vector at iteration $t$, ${\vg_t=\nabla_{\vp} \Ls(\vp_t,\ldots)}$ is the gradient, $\vm$ is the first moment and $\vv$ is the second moment.
+The learning rate $\eta \ge 0$, weight decay $\lambda \ge 0$ (zero expect for weight vectors), moment coefficients $\beta_1,\beta_2 \in (0, 1)$ and $\epsilon \ge 0$ are hyperparameters.
+For simplicity we assume that $\epsilon$ and the bias correction can be ignored, i.e.\ that $\epsilon$, $\beta_1^t$ and $\beta_2^t$ are all $\approx 0$.
+
+\textbf{Equilibrium Magnitude}: When applying AdamW to a weight vector $\vomega \in \R^{C}$, the total update contributions are:
+\begin{equation}
+    \textstyle
+    \vu = - \eta  \sum_{k=t}^{\infty} \beta_1^{k-t} (1 - \beta_1) \frac{\vg_t}{\sqrt{\vv_k}}, \quad \vd = -\eta\lambda\vomega
+\end{equation}
+We note that due to symmetry, each coordinate of $\vu$ has a zero-mean distribution in the random walk setup.
+Since $\vu$ is independent from $\vomega$, this makes them orthogonal in expectation i.e.\ $\E[\langle \vu, \vomega \rangle]=0$.
+It is also reasonable to assume that the variance of each coordinate remains constant when the gradient distribution is not changing over time, resulting in $\forall t,k: \E[\|\vg_t / \sqrt{\vv_k}\|^2]=C$ (the vector dimension) and therefore $\E[\|\vu\|^2]=\eta^2 C$.
+Defining $\omega=\|\vomega\|$, $u=\|\vu\|$, $u_\parallel=\langle \vomega, \vu \rangle/\|\vomega\|$, $u_\perp^2=u^2-u_\parallel^2$ and $d=\|\vd\|$ we can write a recurrence relation based on \cref{eq:smd_pythagorean}:
+\begin{align}
+    \E[\omega_{i+1}^2] &= \E[(\omega_{i}-d+u_\parallel)^2 + u_\perp^2] \\
+    &= \E[\omega_{i}^2-2d\omega_i+2u_\parallel \omega_i -2du_\parallel \nonumber \\
+    & \quad +d^2+u_\parallel^2+(u^2-u_\parallel^2)] \\
+    &= \E[\omega_i^2](1-2\eta\lambda+\eta^2\lambda^2) + \eta^2 C
+\end{align}
+where we used independence, $\E[u_\parallel]=0$, and ${\E[u]=\eta^2 C}$. The solution is:
+\begin{talign}
+    \textstyle \E[\omega_i^2] &= \E[\omega_0^2] a^i + \frac{\eta^2 C}{2\eta\lambda-\eta^2\lambda^2} (1 - a^i) \label{eq:adamw_norm_convergence}\\
+    a & = 1-2\eta\lambda+\eta^2\lambda^2
+\end{talign}
+The recurrence relation is written in terms of the $\vu$ and $\vd$ instead of $\Delta_g \vomega$ and $\Delta_\lambda \vomega$.
+This is thus only an approximation of how the real system converges to equilibrium over time, but still informative.
+It may be a good approximation if $\|\vomega\|$ changes slowly compared to how fast $\vu$ is applied and $\vv$ is updated, i.e.\ when $\beta_1, \beta_2$ are low compared to $a$.
+The limit ${i \rightarrow \infty}$ gives us the equilibrium norm listed in \cref{tab:equilibrium_summary}:
+\begin{equation}\label{eq:adamw_equilibrium_norm}
+    \textstyle
+    \smash{\widehat{\|\vomega\|}} = \sqrt{\frac{\eta C}{2\lambda - \eta\lambda^2}} \approx \sqrt{\frac{\eta C}{2\lambda}}\qquad \text{(for }\lambda\eta \ll 2\text{)}
+\end{equation}
+\textbf{Expected Update Size:} We can estimate the RMS update size $\eta_g$ of a parameter $\vp \in \R^{C}$ with $\Delta_g \vp = \frac{\eta\vm_t}{\sqrt{\vv_t}}$ as follows:
+\begin{talign}
+     & \E[\|\Delta_g \vp\|^2]  = \E[\| 
+\frac{\eta}{\sqrt{\vv_t}} (1-\beta_1) \sum_{k=0}^{t-1} \beta_1^{t-k} \vg_{t-k} \|^2] \label{eq:rms_update1}\\
+    &\quad = \eta^2 (1-\beta_1)^2 \sum_{k=0}^{t-1} \beta_1^{2t-2k} \E[\|\frac{\vg_{t-k}}{\sqrt{\vv_t}}\|^2] \label{eq:rms_update2}\\
+    &\quad \approx \eta^2 \frac{1-\beta_1}{1+\beta_1} C \label{eq:rms_update3}
+\end{talign}
+where we have approximated the geometric sum with its limit $t \rightarrow \infty$, used the fact that for the random walk $\forall j \ne k: \E[\langle \vg_j,\vg_k \rangle]=0$ as well as our previous assumption ${\forall t,k: \E[\|\vg_t / \sqrt{\vv_k}\|^2]=C}$.
+This gives us the prediction $\widehat{\eta_g} \approx \E[\sqrt{\|\Delta_g \vp\|^2}]$ listed in \cref{tab:equilibrium_summary}.
+Approximating the equilibrium angular update size with the expected relative update size $\sqrt{\E[\|\Delta_g \vomega \|^2]}/\smash{\widehat{\|\vomega\|}}$ gives the $\widehat{\eta_r}$ value.
+This approximation is good for small relative updates and a relatively small radial component in $\Delta_g \vomega$.
+
+\subsection{AdamW vs Adam with \texorpdfstring{$\ell_2$}{L2}-Regularization}\label{sec:analysis_adam_vs_adamw}
+\citet{loshchilov2018decoupled} proposed the use of decoupled weight decay instead of $\ell_2$-regularization in Adam~\citep{kingma15adam}.
+In their experiments they find that Adam with decoupled weight decay (i.e.\ AdamW, see \cref{eq:adamw_update}) outperforms the $\ell_2$-regularized form (i.e.\ Adam+$\ell_2$, \cref{eq:adam_update}) across a wide range of settings.
+Since then AdamW has been widely adopted, but as far as we know the reason for its effectiveness over Adam+$\ell_2$ is not well understood.
+
+Our analysis of Adam+$\ell_2$ in \cref{appx:adam_l2} reveals that both the equilibrium norm and angular update size depend on the gradient magnitude (through $\tilde{\vg}$) unlike AdamW, see \cref{tab:equilibrium_summary}.
+When the gradient norm varies between neurons or layers, this results in imbalanced rotation.
+\semph{We believe the balanced vs imbalanced equilibrium rotation is a key difference between AdamW and Adam+$\ell_2$, which may explain why decoupled weight decay is more effective for Adam-like methods.}
+In our experiments (\S\ref{sec:experiments_balanced_rotation}) we explore this further along with the general impact of imbalanced rotation.
+
+\subsection{Rotational Dynamics of Scale-Sensitive Parameters}\label{sec:scale_sensitive_dynamics}
+Prior work has primarily focused on the dynamics of scale-invariant weights.
+Note that any weight vector can be made scale-invariant by simply applying normalization to it, e.g.\ Weight Standardization~\citep{qiao2019ws}.
+For a random walk the gradient component is always orthogonal in expectation, but for real tasks scale-sensitive weights can have an average radial gradient component $\E[\vu_\parallel]\!\ne\!0$ (\cref{fig:smd_components}R).
+In \cref{appx:scale_sensitive_smd} we explore how this affects the rotational dynamics of these weights (for SGDM).
+\semph{We find that a radial gradient component acts like an additional weight decay $\lambda_u = -\E[\vu_\parallel]/(\eta \|\vomega\|)$ giving a new ``effective'' weight decay of $\lambda_e=\lambda + \lambda_u$, resulting in update dynamics similar to scale-invariant weights with the adjusted value.}
+
+\renewcommand{\algorithmicthen}{\textbf{:}}
+\renewcommand{\algorithmicdo}{\textbf{:}}
+\renewcommand{\algorithmicelse}{\textbf{else:}}
+\algnewcommand\LeftComment[2]{
+\hspace{#1\algindent}$\triangleright$ \eqparbox{COMMENT}{#2} \hfill %
+}
+\begin{algorithm}[tb]
+\caption{Rotational Wrapper for constrained dynamics.}\label{alg:rotational_wrapper}
+\begin{algorithmic}[1]
+\Require Inner optimizer $\text{F}$, decay factor ${0 \le \beta < 1}$, $\epsilon \ge 0$ for numerical stability, iteration count $T$, rotational set $\Omega$
+\For{$\vp$ in $\Omega$} \Comment{For each neuronal weight vector}
+    \State $\nu_\vp \gets 0$ \Comment{Initialize the update RMS tracker}
+    \State $n_\vp \gets \|\vp\|$ \Comment{Save the initial magnitude}
+    \State ${\vp \gets n_\vp \cdot \frac{\vp - \bar{\vp}}{\|\vp - \bar{\vp}\|}}$ \Comment{Remove the mean component of $\vp$}
+\EndFor
+
+\For{$t \in \{1,...,T\}$}
+    \State Perform backpropagation, obtain gradients for all params
+    \ForAll{$\vp$} \Comment{For each parameter}
+        \LComment{Get update components (\S~\ref{sec:equilibrium_geometric_model}):}
+        \State $\Delta_g \vp, \Delta_\lambda \vp \gets \text{F.get\_update}\!\left(\vp, \nabla_\vp \Ls(\vp,\ldots)\right)$
+    \If{$\vp \in \Omega$} \Comment{If $\vp$ is a neuronal weight vector}
+        \State ${\Delta_g \vp \gets \Delta_g \vp / \eta}$ \Comment{Undo $\eta$ used in F}
+        \LComment{Remove projections, s.t. $\Delta_g \vp \perp \vp$, $\Delta_g \vp \perp \vone$:}
+        \State $\Delta_g \vp \gets \Delta_g \vp - \frac{\langle \Delta_g \vp, \vp \rangle}{\|\vp\|^2}\vp - \frac{\langle \Delta_g \vp, \vone \rangle}{\|\vone\|^2}\vone$ \label{line:remove_projection}
+        \LComment{Update RMS tracker:}
+        \State $\nu_\vp \gets \beta \cdot \nu_\vp + (1 - \beta) \cdot \|\Delta_g \vp\|^2 $\label{line:rms_update}
+        \LComment{Rotate $\vp$ by $\widehat{\eta_r}$ from \cref{tab:equilibrium_summary} on average:}
+        \State ${\vp \gets \vp + \widehat{\eta_r} \cdot n_\vp \cdot \frac{\Delta_g \vp}{\sqrt{\nu_\vp/(1-\beta^t)} + \epsilon}}$ \label{line:rotational_update}
+        \LComment{Normalize $\vp$ to the initial magnitude:}
+        \State ${\vp \gets n_\vp \cdot \frac{\vp}{\|\vp\|}}$
+    \Else{} \Comment{$\vp$ is not a neuronal weight vector}
+        \State $\vp \gets \vp + \Delta_g \vp + \Delta_\lambda \vp$  \Comment{Standard update}
+    \EndIf
+    \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Rotational Variants of Optimizers (RVs)}
+
+Our analysis shows how weight decay causes standard optimizers to transition towards equilibrium over time.
+In the steady state, weight decay balances the rotation across weight vectors and scales $\eta_r$ relative to $\eta_g$.
+\semph{The same effect can be achieved without weight decay by directly controlling the average angular update} as shown in \cref{alg:rotational_wrapper}.
+We keep the weight magnitude constant and optionally introduce a learnable gain to compensate, which can matter for scale-sensitive weights and avoids numerical issues.
+These \term{Rotational Variants (RVs)} of existing optimizers serve as valuable research tools that allow us to verify our understanding of weight decay and perform ablation studies.
+Since RVs mimic the steady-state behavior of standard optimizers we expect similar performance.
+However, the update dynamics also differ in certain ways:
+\begin{itemize}[leftmargin=10pt,itemsep=-5pt,topsep=0pt]
+    \item The RVs can perfectly balance the average rotation without relying on scale-invariance from e.g.\ normalization.
+    \item The RVs are always in equilibrium so there is no transient-phase. This means that the specified learning rate schedule directly controls $\eta_r$ unlike in standard optimizers.
+\end{itemize}
+This simplifies the optimization dynamics and makes them more robust to architectural choices such as normalization.
+\semph{Note that the RVs closely resemble relative optimizers like LARS~\cite{you2017lars} and LAMB~\cite{you2019lamb}, revealing how they relate to and differ from standard optimizers.}
+The RVs are further described in \cref{appx:rotational_wrapper}.
+
+\begin{figure}[tb]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/rn50_gpt2ws_measurements.pdf}
+    \caption{
+    Measured weight norms and average rotation for different layers (solid colors) in two real neural network training tasks, ResNet-50 on ImageNet-1k (SGDM) and Weight Standardized GPT2-124M on OpenWebText (AdamW). The predicted equilibrium rotation (dashed black) from \cref{tab:equilibrium_summary} holds very well for all scale-invariant layers. The final fully-connected layer in RN-50 (pink) is not scale-invariant with a radial gradient component that decreases the effective weight decay, slowing the rotation (see \cref{sec:scale_sensitive_dynamics}). The learning rate is constant for easier comparison.
+    }
+    \label{fig:measurements_rn50_gpt2ws}
+\end{figure}
+
+
+
+\section{Experiments \& Discussion}
+
+In this section we experimentally validate our analysis of the neuronal update dynamics and explore their impact on training. See \cref{appx:experimental_details} for experimental setup and details.
+
+\setlength{\tabcolsep}{4pt}
+\begin{table*}[tb]
+  \centering
+  \caption{Test set performance (mean$\pm$std) over three seeds for the baseline optimizer, AdamW, and its rotational variant (RV). We use the baseline hyperparameters directly for the no weight decay ($\lambda=0$) and zero-shot results, but do minor tuning for the few-shot RV results where needed. The performance parity of the RV suggests that the benefits of weight decay, which are clear from the baseline degradation without it, can be achieved by directly controlling angular updates.}
+  \label{tab:constraining_smd}
+  \resizebox{1.0\textwidth}{!}{
+  \begin{tabular}{@{}llll|c|c|c|c@{}}
+    \toprule
+    & & & & \multicolumn{2}{c|}{\textbf{AdamW}} & \multicolumn{2}{c}{\textbf{RV-AdamW}} \\
+    \textbf{Dataset} & \textbf{Model} & \textbf{Batch Size} & \textbf{Metric ($\updownarrows$)} & \multicolumn{1}{c}{\textbf{Baseline}} & \multicolumn{1}{c|}{$\boldsymbol{\lambda=0}$} & \multicolumn{1}{c}{\textbf{(zero-shot)}} & \multicolumn{1}{c}{\textbf{(few-shot)}} \\
+    \midrule
+    CIFAR-10 & ResNet-20 & 128 & Top-1 Acc. [\%] ($\uparrow$) & 92.2$\pm$0.2 & 91.1$\pm$0.3 & 92.4$\pm$0.3 & N/A \\ 
+    CIFAR-10 & ResNet-20 & 2048 & Top-1 Acc. [\%] ($\uparrow$) & 91.5$\pm$0.3 & 90.4$\pm$0.3 & 91.4$\pm$0.3 & 92.2$\pm$0.3 \\ 
+    Imagenet-1k & DeiT tiny & 1024 & Top-1 Acc. [\%] ($\uparrow$) & 72.1 & 69.3 & 71.3 & 72.5 \\
+    IWSLT2014 de-en & Transformer-S & 4096 & Bleu ($\uparrow$) & 34.6$\pm$0.1 & 34.6$\pm$0.1 & 20.0$\pm$0.1 & 34.7$\pm$0.1 \\
+    Wikitext & GPT2-124M & 165$\times$512 & Perplexity ($\downarrow$) & 19.6$\pm$0.1 & \textit{unstable} & 19.0$\pm$0.2 & N/A \\
+    OpenWebText & GPT2-124M & 480$\times$1024 & Loss ($\downarrow$) & 3.18$\pm$0.02 & 3.21$\pm$0.01 & 3.18$\pm$0.01 & N/A \\
+    OpenWebText (25k) & GPT2-124M & 480$\times$1024 & Loss ($\downarrow$) & 2.94$\pm$0.01 & \textit{unstable} & 2.93$\pm$0.01 & N/A \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table*}
+
+
+\subsection{Measuring \& Constraining the Update Dynamics}\label{sec:experiments_measure_and_constrain}
+In \S\ref{sec:analysis} we derived how weight decay affects the neuronal update dynamics of a network undergoing a carefully constructed analytically tractable random walk.
+\semph{Here we show that these dynamics occur in practical problems and that they suffice for obtaining the benefits of weight decay}.
+
+\textbf{Measurements:} \Cref{fig:measurements_rn50_gpt2ws} shows the weight norm and average angular updates over time for several layers in RN-50 and a GPT2 variant.
+For scale-invariant layers, the average rotation converges to the predicted equilibrium rotation $\widehat{\eta_r}$ over time as anticipated.
+This value depends solely on the hyperparameters with no dependency on other unknown or time-varying quantities such as the gradient magnitude.
+
+For layers that are not scale-invariant, the equilibrium rotation is affected by the average radial gradient component as expected (\S\ref{sec:scale_sensitive_dynamics}), but this deviation is often not very significant as seen for the final FC layer in \cref{fig:measurements_rn50_gpt2ws}.
+Note that transformers are not scale-invariant without additional tricks like Weight Standardization (WS), but we find the equilibrium rotation is still often close to the scale-invariant value (see \cref{appx:sec:additional_experiments}, \cref{fig:gpt_dynamics_scale_sensitive} for GPT2 without WS).
+
+For \cref{fig:measurements_rn50_gpt2ws} the length of the transient phase is small compared to the length of typical training.
+ResNet-50 was originally trained for 90 epochs ($\sim$450k steps) and GPT2 for $\sim$600k steps.
+However, this need not be the case, and will also depend on the hyperparameters as predicted by \cref{eq:adamw_norm_convergence}.
+
+\textbf{Constraining the Rotational Dynamics:}
+\Cref{tab:constraining_smd} shows the impact of replacing weight decay in AdamW via \cref{alg:rotational_wrapper} (RV-AdamW) for various network architectures and tasks.
+To quantify the effect of weight decay on the baselines, we repeat them with the same hyperparameters aside from disabling weight decay, i.e.\ with\ $\lambda=0$.
+Training without weight decay is similar to using a different learning rate schedule \citep{li2020exponential}.
+In particular, \semph{for scale-invariant weights, disabling weight decay is similar to multiplying the learning rate schedule for $\eta_r$ with an exponentially decaying function.}
+An example of this can be seen in \cref{appx:fig:adamw_vs_adam_dynamics} in \cref{appx:sec:additional_experiments}, which also shows the accompanying increase in the weight norms. %
+The effects of this will vary with training length, the weight decay value used, the initial weight norms etc.
+Without weight decay GPT training eventually diverges (at least in bfloat16), which was also observed before by \citet{andriushchenko2023wd}.
+
+\Cref{tab:constraining_smd} shows that in most cases the RV perform similarly to the original baseline using exactly the same hyperparameters (zero-shot).
+This is expected if the baseline training is dominated by the steady-state equilibrium phase that the RV is designed to model.
+This is not always the case, for example in the IWSLT2014 the weight decay of the baseline is too low to have a significant impact over the course of training.
+The resulting training never reaches the equilibrium the RV models, where the average rotation would be very low (remember that the weight decay value affects the convergence rate towards equilibrium, see \cref{eq:adamw_norm_convergence}).
+In such cases we also perform a ``few-shot'' experiment where we do light tuning of the weight decay parameter.
+We can roughly predict the modified value based on measurements of the observed rotation during the baseline training using \cref{tab:equilibrium_summary}.
+
+\Cref{appx:sec:additional_experiments} shows experiments for other base optimizers.
+In all cases we are able to recover the baseline performance with the RV.
+\semph{This suggests that controlling the average angular update size is sufficient to obtain the benefits of weight decay.
+Note that our intention here is not to outperform the baselines}, although we believe the insights from the RVs could help with this in the future.
+
+\begin{figure*}[tb]
+    \centering
+    \includegraphics[width=\textwidth]{figures/lr_wd_trad_off.pdf}
+    \caption{
+    Weight decay influences transient behavior and how fast weights are updated relative to biases. \textbf{Left:}~Validation accuracy for ResNet-20 on CIFAR-10 for learning rate, weight decay pairs with a constant product ($\eta\lambda=5\!\cdot\!10^{-4}$) resulting in a specific $\widehat{\eta_r}$ but different $\widehat{\eta_g}$ and \inlinevomegaeqnorm~(\cref{tab:equilibrium_summary}).
+    \textbf{Middle/Right:}~The weight norm $\|\vomega\|$ and angular update size $\eta_r$ over time for three $(\eta,\lambda)$ pairs corresponding to the colored circles on the left with equilibrium predictions in dashed red.
+    }
+    \label{fig:lr-wd-trade-off}
+\end{figure*}
+
+\subsection{Transient Effects \& The Interaction of \texorpdfstring{$\eta$}{lr} and \texorpdfstring{$\lambda$}{wd}}\label{sec:experiments_scheduling}
+In our analysis we describe two different update sizes, the angular update size $\eta_r$ (for neuronal weight vectors) and the RMS update size $\eta_g$ (for biases, gains etc).
+The steady state value of $\eta_r$ depends on both the learning rate $\eta$ and weight decay $\lambda$ hyperparameters, while $\eta_g$ is not directly affected by weight decay (which is not applied to biases etc).
+The initial $\eta_r$ also only depends on $\eta$, but $\lambda$ modulates it over time creating an induced ``effective'' learning rate schedule $\eta_r(t)$ that can deviate from the specified learning rate schedule $\eta(t)$.
+Here we explore these effects experimentally.
+\begin{figure*}[tb]
+    \centering
+    \begin{subfigure}[b]{2.166in}
+        \includegraphics[width=\textwidth]{figures/gpt2_warmup_loss_curve.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{2.166in}
+        \includegraphics[width=\textwidth]{figures/gpt2_warmup.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{2.166in}
+        \includegraphics[width=\textwidth]{figures/i1k_rn50_warmup.pdf}
+    \end{subfigure}
+    \caption{The RVs display a reduced need for learning rate warmup compared to standard optimizers, offering insights into the utility of warmups.  \textbf{Left:} GPT2-124M OWT loss curve with/without learning rate warmup. \textbf{Middle:} GPT2-124M OWT final validation loss for  different learning rates with AdamW/RV-AdamW and with/without warmup. \textbf{Right:} ResNet-50 i1k validation accuracy (short, large batch training) for different learning rates with SGDM/RV-SGDM, with/without warmup.}
+    \label{fig:warmup}
+\end{figure*}
+\newpage
+\textbf{Learning Rate vs Weight Decay:}
+\Cref{fig:lr-wd-trade-off}L shows the final network performance obtained for different ($\eta$, $\lambda$) pairs with a constant $\eta\lambda$ product and therefore the same equilibrium rotation value.
+With the RV, this is equivalent to changing the size of the bias updates via $\eta_g$, while keeping the rotation $\eta_r$ constant.
+The performance varies quite a bit, the leftmost values at $\eta_g\!\approx\!0$ roughly match the results with frozen gains/biases (91.1\%), while the rightmost values have rapidly changing biases degrading performance.
+Although we don't show it here, the $\eta_r$ value also matters significantly so $\eta$ and $\lambda$ jointly determine two distinct effective step sizes, $\eta_r$ and $\eta_g$, both of which affect performance.
+\semph{Weight decay can therefore be seen as a scaling factor for the effective (equilibrium) update size of the weights ($\eta_r$) relative to other parameters such as biases ($\eta_g$).}
+As a result we need to keep the $\lambda$ hyperparameter in the RVs even if we don't actually decay the weights.
+The baseline optimizer (black in \cref{fig:lr-wd-trade-off}L) shows a similar trend but is also affected by changes in the transient phase which we will look at next.
+
+\textbf{Transient Effects:}
+Although the weight decay and learning rate have an identical effect on the  equilibrium rotation $\widehat{\eta_r}$ for AdamW, they affect the norm differently (see \cref{tab:equilibrium_summary}).
+In \cref{fig:lr-wd-trade-off}M we plot the weight norm and equilibrium prediction for three different $(\eta, \lambda)$ pairs corresponding to the colored circles in \cref{fig:lr-wd-trade-off}L.
+These experiments use a cosine decay learning rate schedule and a five epoch warmup.
+Note how \semph{configurations with a higher learning rate (and lower weight decay) converge towards a higher equilibrium norm after the initial transient phase.}
+Towards the later stages of training the weights fall back out of equilibrium as the weights can not decay fast enough to keep up with the shifting equilibrium norm (which decreases with the learning rate schedule).
+We expect longer training would keep the weights in equilibrium for proportionally longer.
+
+\Cref{fig:lr-wd-trade-off}R shows the measured angular updates corresponding to the previous $(\eta, \lambda)$ pairs.
+We note how the rotational behavior out of equilibrium is inverted compared to that of the norm.
+Weight norms below the equilibrium magnitude result in rotation that is faster than in equilibrium, and vice versa.
+\semph{This means that depending on the initialization magnitude of the weights compared to the equilibrium magnitude, we either observe overly fast or slow rotation during the initial transient phase.}
+The purple example shows that even though we use a learning rate warmup, the induced ``effective'' update schedule of $\eta_r$ can still include overly fast rotation.
+The RVs eliminate these transient phases causing differences at both the start and end of training which can be significant, but could be replicated by scheduling $\eta$ or $\lambda$ appropriately if desired.
+
+\begin{figure*}[tb]
+    \centering
+    \begin{subfigure}[b]{0.66\textwidth}
+        \includegraphics[width=\textwidth]{figures/adam_vs_adamw_c10_rn18_heatmaps.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.33\textwidth}
+        \includegraphics[width=\textwidth]{figures/adam_vs_adamw_c10_rn18_layer_rotation.pdf}
+    \end{subfigure}
+    \caption{Balanced vs imbalanced rotation appears to be a key difference between AdamW and Adam+$\ell_2$. \textbf{Left:} A sweep of the learning rate and $\ell_2$-regularization / weight decay of Adam+$\ell_2$ and AdamW on CIFAR-10 ResNet-18. Adam+$\ell_2$ is unable to match the performance of AdamW. The orange dashed lines represent contour lines for $\widehat{\eta_r}$ based on \cref{tab:equilibrium_summary} along which $\widehat{\eta_g}$ varies, demonstrating how both update sizes matter. This dashed line is analogous to the sweep depicted in \cref{fig:lr-wd-trade-off}. \textbf{Right:}~The observed average rotation of each layer during training with the best setting for each optimizer. Here the rotation is affected by a cosine learning rate schedule (no warmup).}
+    \label{fig:adam_vs_adamw_rn18}
+\end{figure*}
+
+\textbf{Need for Learning Rate Warmup:} We conjecture that the irregular update dynamics observed in the initial transient phase can hinder optimization.
+In \cref{fig:warmup}L we show training curves for GPT2-124M OWT with and without a 5\% learning rate warmup.
+The run without warmup is stable and makes faster initial progress but eventually falls behind, creating a loss gap that is not closed throughout training.
+\Cref{fig:warmup}M compares the final validation loss with and without warmup for different learning rates for both AdamW and its rotational variant.
+The AdamW runs show a significant gap between the two, but the difference is minimal with the RV.
+We even observe the no-warmup runs being stable at slightly higher learning rates with the RV, but believe this is noise due to non-deterministic divergence.
+
+In \cref{fig:warmup}R we do a similar experiment with 10 epoch ResNet-50 i1k training with a large batch size of 8k.
+We again observe that the baseline benefits significantly from warmups, but the RV only marginally (which could be due to the dynamics of other parameters like biases which the RV does not stabilize).
+We observed the same trend when extending the best runs to full 90 epochs (see \cref{appx:sec:additional_experiments}).
+
+\semph{This suggests learning rate warmup may aid training in part by stabilizing the transient phase, and that explicitly controlling the angular updates could offer similar benefits.}
+
+\subsection{The Importance of Balanced Rotation}\label{sec:experiments_balanced_rotation}
+The previous sections have mostly glossed over the fact that equilibrium forms independently for various neurons and layers.
+In certain settings this leads to different (imbalanced) equilibrium rotation between network components.
+Here we explore the performance impact of this experimentally.
+
+\textbf{Adam vs AdamW:}
+Our analysis revealed the the equilibrium rotation of Adam+$\ell_2$ has a dependency on the gradient magnitude unlike AdamW.
+When the gradient norm differs between neurons/layers this should lead to imbalanced rotation (even for scale-invariant layers).
+\Cref{fig:adam_vs_adamw_rn18}L reproduces the performance gap between AdamW and Adam+$\ell_2$ observed by \citet{loshchilov2018decoupled}, around 0.5\% on the validation set.
+Note how the structure of these heatmaps corresponds to changes in the two equilibrium update sizes $\widehat{\eta_r}$ and $\widehat{\eta_g}$, demonstrating how both matter in practice as suggested in \S\ref{sec:experiments_scheduling}.
+The original decoupled version of AdamW described by \citet{loshchilov2018decoupled} differs from the one used in PyTorch and described here, replacing $\eta\lambda$ in the weight decay term of \cref{eq:adamw_update} with just $\lambda$, but scaling both $\eta$ and $\lambda$ over time according to the learning rate schedule.
+In this case $\widehat{\eta_r}$ depends only on $\lambda$ and $\widehat{\eta_g}$ on $\eta$, explaining the separability of the hyperparameter space they observe.
+
+\Cref{fig:adam_vs_adamw_rn18}R shows the rotation of different layers over training for the best configuration of each optimizer.
+\semph{In AdamW all layers behave similarly, even the scale-sensitive final FC layer (dashed) does not deviate significantly, unlike Adam+$\ell_2$ where the rotation differs drastically.}
+The $\sim$30$\times$ range in observed rotation corresponds to a factor of $\sim$1000$\times$ in the learning rate (\cref{tab:equilibrium_summary}).
+In \cref{appx:sec:additional_experiments} we show that enforcing balanced rotation in Adam+$\ell_2$ roughly closes the gap.
+We also observe imbalanced rotation impeding training in other settings (see later), so
+\semph{we hypothesize that balanced equilibrium rotation is the main benefit of AdamW over Adam+$\ell_2$.}
+
+\begin{figure*}[tb]
+    \centering
+    \begin{subfigure}[b]{2.166in}
+        \includegraphics[width=\textwidth]{figures/c100_rn18_ln.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{4.333in}
+        \includegraphics[width=\textwidth]{figures/c100_rn18_ln_neurons.pdf}
+    \end{subfigure}
+    \caption{Balanced neuronal rotation obtained through e.g.\ RVs or Weight Standardization seems to aid training. \textbf{Left:} Final accuracy for a Layer-Normalized (LN) ResNet-18 on CIFAR-100 for different peak learning rates (cos+warmup schedule). Baseline compared with additional Weight Standardization (WS) and RV training. \textbf{Right:} The baseline has imbalanced rotation across neurons, WS balances them. Example neurons (each color) and mean$\pm$std (black/gray) shown for one layer.}
+    \label{fig:layernorm_balanced}
+\end{figure*}
+
+\newpage
+\textbf{The Benefit of Weight Standardization:}
+Layer Normalization can make a whole layer scale-invariant but not individual neurons (unlike e.g.\ Batch Normalization).
+This means that the gradient is orthogonal to the weights of the whole layer (see \cref{eq:grad_perp}) but individual neurons may have a non-zero radial component.
+In fact, the normalized output magnitude of one neuron can be increased by decreasing the output magnitude of the other neurons in the layer and vice versa, potentially encouraging radial gradient components on the neuron level.
+This changes the ``effective'' weight decay as discussed in \S\ref{sec:scale_sensitive_dynamics}, which can lead to imbalanced rotation between neurons.
+Weight Standardization (WS) makes each neuron scale invariant eliminating this effect.
+Note that WS is fully independent of the network inputs and can thus be seen as a reparameterization or an optimization trick.
+Other types of normalization like Batch Normalization can have additional effects like affecting signal propagation \citep{brock2021signalpropagation} or causing a dropout-like regularization effect~\cite{kosson2024ghost}.
+
+\Cref{fig:layernorm_balanced}L shows the final accuracy achieved when training a Layer-Normalized ResNet-18 on CIFAR-100 for different learning rates.
+Training using either Weight Standardization or an RV significantly outperforms standard training.
+\cref{fig:layernorm_balanced}R shows imbalanced neuronal rotation in the baseline which the WS eliminates as expected (the RV does as well).
+\semph{Weight Standardization thus appears to facilitate optimization by balancing the equilibrium dynamics across neurons}, especially when applied on top of Layer Normalization or Group Normalization~\cite{wu2018group}.
+
+\textbf{Imbalanced Rotation:}
+We can modify the RVs to directly test the impact of imbalanced rotation without potential confounding effects.
+In \cref{appx:sec:additional_experiments} (\cref{fig:rotation_speed_control}) we show that an RV with artificially imbalanced neuronal rotation, where some neurons are intentionally rotated slower or faster, suffers from a performance degradation compared to a standard balanced version.
+This gap persists despite tuning the hyperparameters for each configuration.
+\semph{We observe that even small imbalances in the rotational speed ($\eta_r$) can significantly degrade performance.}
+
+
+
+\section{Conclusion}
+
+In this work we have described how weight decay modulates the update dynamics of individual neurons and explored how their variance across components (balanced vs imbalanced) and time (transient vs equilibrium phases) impacts training.
+Despite their simplicity, neural update dynamics offer a surprisingly insightful perspective of neural network optimization and demystify the effectiveness of widely adopted techniques.
+We believe this area presents numerous opportunities for further theoretical and practical research.
+
+
+

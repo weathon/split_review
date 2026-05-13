@@ -1,0 +1,227 @@
+\title{Addressing Misspecification in Simulation-based Inference through Data-driven Calibration}
+
+\begin{abstract}
+Driven by steady progress in generative modeling, simulation-based inference~(SBI) has enabled inference over stochastic simulators. However, recent work has demonstrated that model misspecification can harm SBI's reliability.
+This work introduces robust posterior estimation~(ROPE), a framework that overcomes model misspecification with a small real-world calibration set of ground truth parameter measurements.
+We formalize the misspecification gap as the solution of an optimal transport problem between learned representations of real-world and simulated observations. 
+Assuming the prior distribution over the parameters of interest is known and well-specified, our method offers a controllable balance between calibrated uncertainty and informative inference under \textit{all possible misspecifications} of the simulator. Our empirical results on four synthetic tasks and two real-world problems demonstrate that ROPE outperforms baselines and consistently returns informative and calibrated credible intervals.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Many fields of science and engineering have shifted in recent years from modeling real-world phenomena through a few equations to relying instead on highly complex computer simulations. While this shift has increased model versatility and the ability to explain complex phenomena, 
+it has also necessitated the development of new statistical inference methods. In particular, state-of-the-art simulation-based inference~\citep[SBI,][]{cranmer2020frontier} algorithms leverage neural networks to learn surrogate models of the likelihood~\citep{papamakarios2019sequential}, likelihood ratio~\citep{hermans2020likelihood}, or posterior distribution~\citep{papamakarios2016fast}, from which one can extract confidence or credible intervals over the parameters of interest given an observation. 
+While SBI has proven helpful when the simulator is a faithful description of the studied phenomenon, e.g., for scientific applications~\citep{delaunoy2020lightning, brehmer2021simulation, luckmann2022simulation, linhart2022neural, hashemi2022simulation, tolley2023methods, avecilla2022neural}, 
+recent work has highlighted the unreliability of SBI methods under model misspecification~\citep{cannon2022investigating, rodriguesinvestigating}. 
+
+\paragraph{Misspecification in SBI.}
+A model is a simplified description of a real-world phenomenon that allows reasoning about its properties. Thus, model misspecification arises in a context where the validity of simplifying assumptions cannot be totally verified. In the Bayesian inference literature~\citep{walker2013bayesian}, a statistical model $p(\mathbf{x}_s \mid \theta)$ that relates a parameter of interest $\theta \in \Theta$ to a conditional distribution over simulated observations $\mathbf{x}_s$ is said to be misspecified if the true data generating process $p^\star(\mathbf{x}_o)$ of the real observations $\mathbf{x}_o \sim p^\star(\mathbf{x}_o)$ does not fall within the family of distributions defined by the model, i.e. $\nexists \theta \in \Theta : p^\star(\mathbf{x}_o) = p(\mathbf{x}_o\mid \theta)$. Based on this definition, \citet{ward2022robust, huang2023learning} have investigated solutions to improve the robustness of existing SBI algorithms
+to misspecified models. 
+Here, we depart slightly from this definition of misspecification and instead tailor it to Bayesian uncertainty quantification, in particular, the prediction of credible regions on the parameter $\theta$ given an observation $\mathbf{x}_o$. We assume real-world data are sampled i.i.d. from the distribution $p^\star(\mathbf{x}_o) := \int p(\theta) p^\star(\mathbf{x}_o \mid \theta) d\theta$, where $p(\theta)$ is a known prior over the parameter we aim to infer and $p^\star(\mathbf{x}_o \mid \theta)$ is an unknown process approximated by a simulator that generates simulations $\mathbf{x}_s \sim p(\mathbf{x}_s \mid \theta)$ given a parameter $\theta$. We say the simulator is misspecified if there exists at least an observation $\mathbf{x}_o$ for which the simulator posterior $p(\theta \mid \mathbf{x}_o) \neq p^\star(\theta \mid \mathbf{x}_o)$, where $p^\star(\theta \mid \mathbf{x}_o) := \frac{p(\theta) p^\star(\mathbf{x}_o \mid \theta)}{p^\star(\mathbf{x}_o)}$. Notably, our definition can be interpreted as a generalized definition of miss-calibration and encompasses the definition of misspecification used in the Bayesian inference literature as a special case. While such miss-calibration often arises in practical settings where the simulator does not faithfully model some aspects of the true generating process, current SBI algorithms and their robust version may fail drastically.
+\paragraph{Addressing Misspecification with a Calibration Set} In this work, we address model misspecification through a calibration set consisting of only a few pairs of real-world observations and their corresponding ground-truth labels. At first glance, having access to a calibration set may seem like an assumption that limits the applicability of such an approach. On the contrary, we argue that for any real-world task where the output of the inference is itself to be trusted, e.g., to monitor a parameter in a critical process, we will likely have access to a calibration set as obtained, for example, through a more costly procedure or measurement device. Indeed, unless we can confidently place additional assumptions on the form of the misspecification--a difficult task, since it is by definition unknown--the only way to validate the inference directly is through a validation set consisting of real-world observations and their ground-truth labels. If such a set exists, we can take a few observations to form our calibration set. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\textwidth]{neurips2023_otml/figures/setup_algorithm.pdf}
+    \caption{(left) Problem setup: we consider a real-world process which depends on some physical parameters $\theta$. Given real observations $\mathbf{x}_o$ of the process, our goal is to provide uncertainty quantification on the underlying parameters $\theta$. To help us, we have access to a misspecified simulator that takes parameters $\theta$ as input and produces simulated observations $\mathbf{x}_s$. (right) A visualization of ROPE. The training consists of two steps: (1) We approximate the posterior given the simulated data using NPE, resulting in the NSE $\mathbf{h}_{\omega^\star}$. (2) Using the calibration set, we fine-tune $\mathbf{h}_{\omega^\star}$ into $\mathbf{g}_{\varphi^\star}$ using the objective \eqref{eq:loss_finetuning}. At test time, we solve the OT problem between the representations $\{\mathbf{h}_{\omega^\star}(\mathbf{x}_s^j)\}_{j=1}^{N_s}$ and $\{\mathbf{g}_{\varphi^\star}(\mathbf{x}_o^i)\}_{i=1}^{N_o}$, resulting in our estimated posterior \eqref{eq:real_posterior_def}: the average of simulations' posteriors weighted by the OT solution $P^\star$. See \autoref{alg:rope} for more details.}
+    \label{fig:setup_algorithm}
+\end{figure}
+
+\paragraph{Our Contributions.} We introduce robust posterior estimation~(ROPE), an algorithm that overcomes model misspecification to provide accurate uncertainty quantification for the parameters of stochastic and non-differentiable simulators.
+To achieve this, ROPE relies on (1) a correctly defined prior, and (2) having access to a small, real-world calibration set of paired parameters and observations. The algorithm extends neural posterior estimation~\cite{papamakarios2016fast} with optimal transport~\citep[OT,][]{peyre2017computational, villani2009optimal} to model the misspecification as an OT coupling between simulated and real-world data. We evaluate the performance of the algorithm on existing benchmarks from the SBI literature, and introduce four new benchmarks, of which two are synthetic and two come from real physical systems for which both labeled data and simulators are available. To the best of our knowledge, the latter constitute the first real-world benchmarks for SBI under misspecified models. We also perform experiments to explore the effect different calibration set sizes have on the performance of the algorithm, together with ablation studies to understand the impact of each of its components.
+
+
+
+\section{Background \& Notations}
+
+
+In this section, we provide a short review of SBI and OT, as our method is at the intersection of these two fields. We start with some more fundamental definitions. We consider a simulator, implemented as a computer program \mbox{$S: \mathbb{R}^K\times[0, 1] \rightarrow \mathbb{R}^D$}, that takes in physical parameters $\theta \in \Theta \subseteq \mathbb{R}^K$ and a random seed $\varepsilon \in [0, 1]$ to generate measurements $\mathbf{x}_s \in \mathcal{X}_s \subseteq \mathbb{R}^D$. 
+The simulator is a simplified version of a real and unknown generative process $p^\star(\mathbf{x}_o)$ that produces real-world observations $\mathbf{x}_o \in \mathcal{X}_o \subseteq \mathbb{R}^D$. We assume this process depends on parameters with the same physical meaning as the ones of the simulator and thus use the same notation $\theta$. Our goal is to estimate a well-calibrated and informative posterior distribution $p(\theta \mid \mathbf{x}^i_o)$ for each observation in the test set $\mathbf{x}^i_o \in \mathcal{D}$, which reduces uncertainty compared to the prior distribution. As a remark, the most informative and calibrated posterior is the Bayesian posterior $p^\star(\theta \mid \mathbf{x}_o)$ that corresponds to true generative process $p^\star(\mathbf{x}_o) := \int p^\star(\mathbf{x}_o \mid \theta) p(\theta) \text{d}\theta$. To achieve our goal, we have access to (a) the misspecified simulator $S$ that embeds domain knowledge and approximates $p^\star(\mathbf{x}_o \mid \theta)$, (b) a small calibration set of labeled real-world observations $\mathcal{C} := \{(\theta^i, \mathbf{x}_o^i)\}_{i=1}^{N_c}$, which enables data-driven correction of the simulator's misspecification, and (c) a test set $\mathcal{D} := \{\mathbf{x}_o^i\}_{i=1}^{N_o}$ of real-world observations arising from $p^\star(\mathbf{x}_o)$ for which we want to estimate the posterior.
+
+\subsection{Simulation-based Inference (SBI)}
+\label{sec:SBI}
+
+Applying statistical inference to simulators is challenged by the absence of a tractable likelihood function~\citep{cranmer2020frontier}. As a solution, SBI algorithms leverage modern machine learning methods to tackle inference in this likelihood-free setting~\citep{lueckmann2021benchmarking, hermans2021averting, glockler2022variational}. Among SBI algorithms, neural posterior estimation NPE~\citep{papamakarios2016fast, lueckmann2017flexible} is a broadly applicable method that trains a conditional density estimator of $p(\theta \mid \mathbf{x}_s)$ from a dataset of parameter-simulation pairs. In this paper, we focus on making NPE robust to model misspecification.
+
+NPE usually parametrizes the posterior with a neural conditional density estimator~(NCDE), which is composed of (1) a neural statistic estimator~(NSE), denoted by $\mathbf{h}_{\omega}: \mathcal{X}_s \rightarrow \mathbb{R}^l$, that compresses observations into $l\text{-dimensional}$ representations and, (2) a normalizing flow~\citep[NF,][]{papamakarios2021normalizing, tabak2010density} that parameterizes the posterior density as $p_{\phi}(\theta \mid \mathbf{h}_{\omega}(\mathbf{x}_s))$. The parameters $\phi$ and $\omega$ of the NCDE are trained with stochastic gradient ascent on the expected log-posterior probability, solving the following optimization problem
+\begin{align}
+    \phi^\star, \omega^\star=& \arg\max_{\phi, \omega} \mathbb{E}_{\substack{\theta \sim p(\theta)\\ \varepsilon \sim \mathcal{U}[0, 1]}} \left[\log p_{\phi}(\theta \mid \mathbf{h}_\omega(S(\theta, \varepsilon)))\right], \label{eq:NPE}
+\end{align}
+where $p(\theta)$ denotes a prior distribution over the parameters $\theta$.
+
+Under the assumption that the class of functions represented by the NCDE contains the true posterior, solving \eqref{eq:NPE} leads to a perfect surrogate $p_{\phi^\star}(\theta \mid \mathbf{h}_{\omega^\star}(\mathbf{x}_s))$ of the true posterior $p(\theta \mid \mathbf{x}_s)$.
+In that case, $\theta \perp \mathbf{x}_s \mid \mathbf{h}_{\omega^\star}(\mathbf{x}_s)$, that is, the NSE $\mathbf{h}_{\omega^\star}$ is a sufficient statistic of $\mathbf{x}_s$ for the parameter $\theta$. In practice, we approach perfect training by generating a sufficiently large number of pairs $(\theta, \mathbf{x}_s)$ and doing a search on the NCDE's architecture and training hyperparameters. As we will see in Section~\ref{sec:method}, NPE and the sufficiency of the NSE are at the root of our algorithm. To simplify notation, we denote the NCDE learned with NPE as $\tilde{p}(\theta \mid \mathbf{x}_s)$
+
+\subsection{Optimal Transport (OT)}
+As detailed in Section~\ref{sec:method}, our algorithm models the misspecification between simulations and real-world observations as an OT coupling. In particular, let $p(\mathbf{x}_o)$ and $p(\mathbf{x}_s)$ be two continuous probability measures in $\mathcal{X}_o$ and $\mathcal{X}_s$, respectively, and consider a cost function $c: \mathcal{X}_o \times \mathcal{X}_s \rightarrow \mathbb{R}$ that assigns a cost to each pair $(\mathbf{x}_o, \mathbf{x}_s) \in \mathcal{X}_o \times \mathcal{X}_s$. Then, we wish to find the OT coupling
+\begin{align}
+\label{eq:OT_optim} 
+    \pi^\star = \arg\min_{\pi \in \Pi} \mathbb{E}_\pi [c(\mathbf{x}_o, \mathbf{x}_s)],
+\end{align} where $\Pi$ is the set of joint probability measures on $\mathcal{X}_o \times \mathcal{X}_s$ whose marginals are $p(\mathbf{x}_o)$ and $p(\mathbf{x}_s)$. 
+
+In our setting, we only have access to a limited number $N_o$ of real-world observations $\{\mathbf{x}_o^i\}_{i=1}^{N_o}$, which we assume result from an unknown generative $p^\star(\mathbf{x}_o) = \int p^\star(\mathbf{x}_o \mid \theta) p(\theta) \text{d}\theta$. Thus, we solve the discrete and entropy-regularized version of \eqref{eq:OT_optim}. Namely, given a set $\{\mathbf{x}_s^j\}_{j=1}^{N_s}$ of simulated observations, we search for the doubly stochastic transport matrix $P^\star$, in the polytope of transport couplings
+$
+\mathcal{B}\! := \{P\in\mathbb{R}^{N_o\times N_s}_+ : P\mathbf{1}_{N_s} = \mathbf{1}_{N_o} / N_o, 
+P^T\mathbf{1}_{N_o} = \mathbf{1}_{N_s} / N_s\},
+$
+that solves
+\begin{align}
+    \label{eq:OT_optim_discrete} 
+      P^\star = \arg\min_{P\in\mathcal{B}} \sum_{ij}^{N_o\times N_s} P_{ij} \left( c(\mathbf{x}_o^i, \mathbf{x}_s^j) + \gamma  \log P_{ij}\right),
+\end{align}
+where $\gamma > 0$ can be seen as a hyperparameter that encourages entropic transport matrices. The entropy-regularized transport problem can be solved with the Sinkhorn algorithm~\citep{cuturi2013sinkhorn}, which is a fixed-point iteration algorithm with an efficient GPU implementation. In our experiments, we rely on the OTT~\citep{cuturi2022optimal} implementation of Sinkhorn, which returns the transport coupling $P^\star$ given the cost matrix $C: C_{ij} = c(\mathbf{x}_o^i, \mathbf{x}_s^j)$ and the entropic regularization factor $\gamma$.
+
+
+\section{Modeling Misspecification with OT}
+
+
+We approach the problem of misspecification as a modeling task rather than seeing it as an issue of the inference algorithm. As our main modeling assumption, we assume that 
+\begin{align}
+\mathbf{x}_o \perp \theta \mid \mathbf{x}_s, \label{eq:modeling_assumption}
+\end{align}
+that is, given the simulated observations $\mathbf{x}_s$, the real observations $\mathbf{x}_o$ contain no additional information about the parameters $\theta$.
+
+While this assumption allows us to express the misspecification independently from $\theta$, it might be violated in practice, as is the case for the two real physical systems we study in \autoref{sec:experiments}. Due to the construction of our algorithm, violations do not prevent obtaining calibrated and informative posterior distributions. However, the assumption may limit uncertainty reduction by preventing our method from exploiting any signal in the real data beyond what is specified by the simulator. This can be a limiting factor for highly misspecified simulators, but if the simulator encodes phenomena that the practitioner believes are invariant across different application environments, the assumption can also prevent shortcut learning from the calibration data and benefit the generalization of the method. In \autoref{sec:distribution_shift_experiment}, we evaluate the method on real out-of-distribution data and demonstrate this property.
+ 
+The OT coupling in \eqref{eq:OT_optim} fulfills the definition of a joint distribution in $\mathcal{X}_o \times \mathcal{X}_s$, and together with our modelling assumption \eqref{eq:modeling_assumption}, we can express the posterior distribution for real-world observations as
+\begin{align}
+    p(\theta \mid \mathbf{x}_o) = \int p(\theta \mid \mathbf{x}_s) \pi^\star(\mathbf{x}_s \mid \mathbf{x}_o) d\mathbf{x}_s, \label{eq:factor_OT}
+\end{align}
+where the simulation posterior $p(\theta \mid \mathbf{x}_s)$ can be approximated arbitrarily well with NPE~\citep{papamakarios2016fast}, as NFs are universal density estimators of continuous distributions~\citep{wehenkel2019unconstrained}. 
+
+Motivated by the factorization in \eqref{eq:factor_OT}, our algorithm computes a transport matrix $P^\star$ between the test set $\mathcal{D}$ and a set $\{\mathbf{x}^j_s\}_{j=1}^{N_s}$ of $N_s$ simulations generated by running the simulator on parameters from the prior $\theta^j \sim p(\theta)$. Thus, approximating \eqref{eq:factor_OT}, we estimate the posterior for real-world observations as a mixture of posteriors $\tilde{p}$ obtained with NPE, that is,
+\begin{align}
+    \tilde{p}(\theta \mid \mathbf{x}_o^i) := \sum_{j}^{N_s} \alpha_{ij} \tilde{p}(\theta \mid \mathbf{x}^j_s), \text{ where } \alpha_{ij} = N_o P^\star_{ij}. \label{eq:real_posterior_def}
+\end{align}
+
+An interesting property of defining ROPE as in $\eqref{eq:real_posterior_def}$ is that, by design, the marginal posterior distribution over the test set, i.e., $\tilde{p}(\theta) := \int \tilde{p}(\theta \mid \mathbf{x}_o) p^\star(\mathbf{x}_o)\text{d}\mathbf{x}_o$, converges to the prior distribution as the number of simulated observations $N_s$ approaches infinity, as expected from a well-estimated posterior distribution. A proof and further discussion of this self-calibration property is given in \autoref{sec:self_calibration}.
+
+\subsection{Defining the OT Cost Function}
+In our context, an ideal coupling would assign simulations to real-world observations generated from the same parameter. Hence, we can express the corresponding ideal cost as $c(\mathbf{x}_o, \mathbf{x}_s) = c(\mathbf{h}_{o}(\mathbf{x}_o), \mathbf{h}_{s}(\mathbf{x}_s))$, where $\mathbf{h}_{o}$ and $\mathbf{h}_{s}$ are any sufficient statistics for $\theta$ given $\mathbf{x}_o$ and $\mathbf{x}_s$, respectively.
+
+As discussed in \appref{app:NPE_minimal_sufficient_statistics}, we can learn an approximated minimal sufficient statistic $\mathbf{h}_{\omega^\star}$ for the simulated observations with NPE.
+Furthermore, as the simulator carries information about the true generative process and the calibration set is too small to learn a representation from real-world data only, it is reasonable to learn a sufficient statistic $\mathbf{h}_o$ for the real observations by fine-tuning $\mathbf{h}_{\omega^\star}$.
+Denoting this new neural network as $\mathbf{g}_{\varphi}: \mathcal{X}_o \rightarrow \mathbb{R}^l$, the fine-tuning objective reads:
+\begin{align}
+    \mathcal{L}(\mathcal{C}) := \sum_{i=1}^{N_c} \lvert \mathbf{g}_{\varphi}(\mathbf{x}_o^i) - \mathbb{E}_{\varepsilon \sim \mathcal{U}[0, 1]}[ \mathbf{h}_{\omega^\star}\left(S(\theta^i, \varepsilon)\right) ] \rvert_2, \label{eq:loss_finetuning}
+\end{align}
+where the expectation is approximated via a Monte-Carlo approximation. The training of $\mathbf{g}$ starts from the weights $\omega^\star$ and optimizes \eqref{eq:loss_finetuning} with gradient descent. Optimizing \eqref{eq:loss_finetuning} enforces, at least on the calibration set, that $\mathbf{g}$ and $\mathbf{h}$ are close in L2 norm when they correspond to the same parameter. Thus, we define the OT cost as
+$c(\mathbf{x}_o, \mathbf{x}_s) := \lvert \mathbf{g}_{\varphi^\star}(\mathbf{x}_o^i) - \mathbf{h}_{\omega^\star}(\mathbf{x}_s)\rvert_2$
+
+, where $\mathbf{g}_{\varphi^\star}$ is the NSE obtained after fine-tuning \eqref{eq:loss_finetuning}. \autoref{fig:setup_algorithm} depicts the main training and inference steps of ROPE.
+
+\subsection{Entropy's Magic}
+\label{sec:entropys_magic}
+The entropic regularization of OT not only enables fast computation of the transport coupling but also provides an effective control mechanism to balance the calibration of the posterior with its informativeness.
+Indeed, for small entropic regularization, the estimated posteriors have low entropy and may be overconfident, as they are sparse mixtures of a few simulation posteriors $\tilde{p}(\theta \mid \mathbf{x}_s^j)$. In contrast, for large values of $\gamma$ in \eqref{eq:OT_optim_discrete}, the coupling matrix becomes uniform and the corresponding posteriors tend to the prior, as $p(\theta \mid \mathbf{x}_o) \approx \frac{1}{N_s}\sum_{j}^{N_s} \tilde{p}(\theta \mid \mathbf{x}_s^j)$ is a Monte-Carlo approximation of $\mathbb{E}_{p(\mathbf{x}_s)}[\tilde{p}(\theta \mid \mathbf{x}_s)] \approx p(\theta)$. Thus, the practitioner should optimize the hyper-parameter $\gamma$ to find the right trade-off between calibration, favored by higher $\gamma$, and informativeness, favored by lower $\gamma$, of the estimated posterior distributions.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\begin{figure}
+    \centering    
+        \includegraphics[width=1.\textwidth]{neurips2023_otml/figures/main_experiments.pdf}
+        \caption{Results for our method (ROPE) and the competing baselines on six benchmark tasks. For each task, we show an example of the real observations ($\mathbf{x}_o$) and the observations produced by the misspecified simulator ($\mathbf{x}_s$). We show each method's LPP and ACAUC metrics, as computed on a labeled test set of size 2000. We report the average metrics and $\pm 1$ std. deviation over three random draws of the test set and additional sources of randomness.
+        In some instances, e.g., tasks A and E, the likelihood of J-NPE can be $-\infty$ and is not plotted. For readability of the LPP metric, we use a linear scale between the SBI and the Prior and a logarithmic scale for values below that.}
+        \label{fig:all_results}
+\end{figure}
+Our experiments aim to (1) empirically validate the discussion in Section~\ref{sec:entropys_magic}, and (2) illustrate settings in which our algorithm enables uncertainty quantification under model misspecification and small calibration datasets. The experiments comprise two existing benchmarks from the SBI literature, two synthetic benchmarks, and two new benchmarks from real physical systems for which both labeled data and simulators are available. To the best of our knowledge, the latter constitute the first real-world benchmarks for SBI under misspecified models. Altogether, the benchmarks represent various types of misspecification and parameter and observation space. We briefly describe each task and provide examples of real vs. simulated observations in \autoref{fig:all_results}. Further details about the complete setup can be found in \autoref{app:exp_details}.
+
+\paragraph{Task A (synthetic): CS.} We reproduce the cancer and stromal cell development benchmark from \citet{ward2022robust}. The simulator emulates the development of cancer and stromal cells in a 2D environment as a function of three Poisson rate parameters $(\lambda_c, \lambda_p, \lambda_d)$. The observations are vectors composed of the number of cancer and stromal cells and the mean and maximum distance between stromal cells and their nearest cancer cell. Synthetic misspecification is introduced by removing cancer cells that are too close to their generating parent.
+
+\paragraph{Task B (synthetic): SIR.} We also use the stochastic epidemic model from \citet{ward2022robust}, which describes epidemic dynamics through the infection rate $\beta$ and recovery rate $\gamma$. Each observation is a vector composed of the mean, median, and maximum number of infections, the day of occurrence of the maximum number of infections, the day at which half the total number of infections was reached, and the mean auto-correlation (lag 1) of the infections. Misspecification is a delay in weekend infection counts, of which $5\%$ are added to the count of the following Monday.
+
+\paragraph{Task C (synthetic): Pendulum.} The damped pendulum is a common benchmark to assess hybrid learning algorithms \citep{wehenkel2022robust}, which jointly exploit domain knowledge and real-world data. The simulator generates the horizontal position of a friction-less pendulum given its fundamental frequency  $\omega_0 \in \mathbb{R}^{+}$ and amplitude $A \in \mathbb{R}^{+}$. Randomness enters the simulator through a random phase shift and white measurement noise. As misspecified ``real-world'' data, we simulate observations from a damped pendulum that takes friction into account.
+
+\paragraph{Task D (synthetic): Hemodynamics.}
+Following \citet{wehenkel2023simulation}, we define the task of inferring the stroke volume~(SV) and the left ventricular ejection time~(LVET) from normalized arterial pressure waveforms. The simulator is a PDE solver~\citep{Melis2017} that produces an $8$-second time-series $\mathbf{x}_s$ sampled at $125$Hz. As synthetic misspecification, the simulator assumes all arteries have constant length, whereas this parameter varies in the ``real-world'' data. 
+
+\paragraph{Task E (real): Light Tunnel.}
+We employ one of the light tunnel datasets from \citet{gamella2024chamber}. The tunnel is an elongated chamber with a controllable light source at one end, two linear polarizers mounted on rotating frames, and a camera. Our task consists of predicting the color setting of the light source ($(R,G,B) \in [0, 255]^3$) and the dimming effect of the polarizers $\alpha \in [0, 1]$ from the captured images. The simulator takes the parameters $\theta := [R, G, B, \alpha]$ and produces an image consisting of a hexagon roughly the size of the light source, with a color equal to
+$[\alpha  R, \alpha G, \alpha B]$.
+
+\paragraph{Task F (real): Wind Tunnel.} We employ one of the wind tunnel datasets from \citet{gamella2024chamber}. The tunnel is a chamber with two controllable fans that push air through it, and barometers that measure air pressure at different locations. A hatch controls the area of an additional opening to the outside. The dataset is a collection of pressure curves that result from applying a short impulse to the intake fan power and measuring the change in air pressure inside the tunnel. Our inference task consists of predicting the hatch position, $\theta := H \in [0, 45]$ given a pressure curve. 
+
+\paragraph{Metrics}
+We consider two different metrics to assess whether ROPE provides reliable and useful uncertainty quantification.
+First, given a labeled test set $\{(\theta^i, \mathbf{x}^i_o)\}_{i=1}^N$, we compute the log-posterior probability~(LPP) as
+\begin{align}
+    \text{LPP} := \frac{1}{N}\sum_{i=1}^N \log \tilde{p}(\theta^i \mid \mathbf{x}_o^i) \approx \mathbb{E}_{\substack{p(\theta) \\ p(\mathbf{x}_o \mid \theta)}} \left[ \log \tilde{p}(\mathbf{x}_o \mid \theta) \right].
+\end{align}
+The LPP is an empirical estimation of the expected cross entropy between the true and estimated posterior; thus, for an infinite test set, it is only maximized by the true posterior. LPP characterizes the entropy reduction on the estimation of $\theta$ achieved by a posterior estimator $\tilde{p}$ when given one observation, on average, over the test set. Second, the average coverage AUC~(ACAUC) indicates the average calibration of $K$ 1D credible intervals extracted from the estimated posteriors, i.e.,
+\begin{align}
+    \text{ACAUC} := \frac{1}{K  N} \sum_{j=1}^K \sum_{i=1}^N \int_{0}^1 \alpha - \mathbf{1}[\theta^i_j \in \Theta_{\tilde{p}(\theta_j \mid \mathbf{x}_o^i)}(\alpha)] \text{d}\alpha, 
+\end{align}
+where $\Theta_{\tilde{p}(\theta_j \mid \mathbf{x}_o^i)}(\alpha)$ denotes the credible interval for the $\text{j}^\text{th}$ dimension of the parameter $\theta$ at level $\alpha$.
+Its value is positive (negative) if, on average over different credible levels, parameter dimensionality, and observations, the corresponding credible intervals are overconfident (underconfident). The ACAUC of a perfectly specified prior distribution is zero. The integral can be efficiently approximated, as described in \autoref{app:ACAUC}. For all experiments, we compute the LPP and ACAUC on labeled test set containing $2000$ pairs $(\theta, \mathbf{x}_o)$.
+
+\paragraph{Baselines}
+As a sanity check, we compare the performance of ROPE against four reference baselines: the \textbf{prior} $p(\theta)$, which amounts to the lower bound on the LPP for any calibrated posterior estimator; the \textbf{SBI} posterior on the simulated examples which, under the independence assumption $\mathbf{x}_o \perp \theta \mid \mathbf{x}_s$, is an upper bound on the LPP for ROPE; (\textbf{NPE}) a posterior estimator fitted to the simulated data and applied to the real data; and (\textbf{J-NPE}) a posterior estimator trained jointly on the pooled simulated and real observations. The latter two baselines represent some first approaches that a practitioner may consider. Additionally, we compare the performance of ROPE to \textbf{MLP}, which trains a neural network that predicts the mean and log-variance of a Gaussian posterior distribution by maximizing the calibration set log-likelihood. For the CS and SIR benchmarks, we additionally run Noisy NPE~\citep[\textbf{NNPE},][]{ward2022robust}, which improves the robustness of NPE by introducing a Spike and Slab error model on simulated data statistics. 
+We do not run NNPE on tasks C-F, as this would be unfair for NNPE whose noise model is designed for low-dimensional statistics, as opposed to the temporal and spatial data considered in tasks C-F. Extending NNPE to such settings is out of the scope of our experiments.
+We also run the hybrid learning method \textbf{HVAE}~\citep{takeishi2021physics}, which constitutes a strong baseline when the simulator can be made deterministic (tasks C and E) but is not directly applicable when the simulator is not differentiable. More details about each method and the experimental setup can be found in \autoref{app:exp_details}. 
+
+\subsection{Results}
+\paragraph{ROPE achieves robust posterior estimation for all tasks.}
+In \autoref{fig:all_results}, we compare the performance of ROPE (with $\gamma = 0.5$) against baselines for the $6$ tasks we consider. 
+For all tasks, even with minimal calibration budgets, ROPE is the only method that consistently returns well-calibrated, or sometimes slightly under-confident, posterior estimation while significantly reducing uncertainty compared to the prior distribution. As the size of the calibration set increases, we see the adaptability of J-NPE and MLP as their performance improves and aligns with or outperforms ROPE. This adaptability is an expected behavior in IID settings, where real-world data eventually allows finding the minimizer of empirical risk among a class of predictors. However, on task E, where posteriors are complex conditional distributions---whose entropy increases with darker images and contain non-trivial dependencies between parameters---ROPE remains the best approach, even with a calibration set containing more than $1000$ examples. As an outlier, we observe that NPE trained on simulated data achieves the best results for the SIR benchmark (Task B), indicating that the misspecification of this benchmark is not a challenging test case for existing SBI methods. 
+Finally, as interpreting a numerical gap in LPP metrics can be difficult, we complement these numerical results with visual corner plots for the two real-world experiments in \autoref{fig:calibration_regularization} and for all tasks in \autoref{app:additional_corner}. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.\textwidth]{neurips2023_otml/figures/posteriors_regu.pdf}
+    \caption{(left) Credible intervals of the posterior estimates at levels $65\%$ and $90\%$, for a single test sample from the light-tunnel task. The black stars denote the true value of the parameter. (center) Posterior estimates for a single test sample from the wind-tunnel task, where the true parameter is denoted by a vertical black line. (right) Effect of $\gamma$ on the LPP and ACAUC scores of ROPE on the light-tunnel task for different sizes of the calibration set. The value of $\gamma$ is shown by each curve. For reference, we plot the metrics achieved by the SBI posterior and prior distribution on simulated data. 
+    }
+    \label{fig:calibration_regularization}
+\end{figure}
+
+\paragraph{Ablation study.}
+Our algorithm combines two steps with distinct roles: (1) a fine-tuning step, which improves the generalization domain of the NSE, and (2) an OT step, aiming to model the misspecification as a stochastic mapping between simulations and observations. To better understand their respective contribution to the performance of ROPE, we look at two ablated versions of our algorithm: \textbf{tuning-only} which appends the fine-tuned NSE to the NF trained on simulated data $p_{\phi^\star}$ and directly applies it to the real observations without an OT step; and \textbf{OT-only}, which directly performs OT with L2-norm in the original NSE space $c(\mathbf{x}_o, \mathbf{x}_s) = \lvert \mathbf{h}_{\omega^\star}(\mathbf{x}_o) - \mathbf{h}_{\omega^\star}(\mathbf{x}_s) \rvert_2$.
+In \autoref{fig:all_results}, we observe that tuning-only's result are poor except for Task B, for which misspecification is negligible. In contrast, for tasks A, D, and F, OT-only exhibits performance on par with ROPE. Nevertheless, ROPE can significantly outperform OT-only, such as in tasks C and E where the misspecification is significant. We conclude that the OT step is crucial and fine-tuning is sometimes necessary---we recommend that practitioners first evaluate OT-only's performance and optimize the value of $\gamma$ before using a subset of the real-world data for fine-tuning. 
+
+\paragraph{Effect of entropic regularization.}
+In \autoref{fig:calibration_regularization}, we study the effect of entropic regularization by varying the regularization parameter $\gamma$.
+For all values of $\gamma$, excluding $\gamma \geq 5$, we observe that both LPP and calibration consistently improve with the calibration set size. 
+For large values of $\gamma$, the entropic regularization dominates and pushes toward a uniform mapping, resulting in posteriors that approximate the prior distribution, as highlighted in \autoref{sec:entropys_magic}. In these cases, the LPP barely changes with the calibration set size.
+These empirical results are consistent with the theoretical discussion in \autoref{sec:entropys_magic}. Furthermore, it is notable that the value of $\gamma$ does not excessively influence ROPE's performance. As a recommendation for practitioners, our empirical evaluation suggests that values between $0.1$ and $1$ provide well-calibrated and precise credible intervals.
+
+
+
+\section{Discussion}
+
+
+While our experiments have demonstrated that ROPE enables reliable uncertainty quantification from misspecified simulator, our method and setup has certain shortcomings that we now discuss.
+
+
+\paragraph{Prior misspecification.}
+While the importance of correct prior specification vanishes as the number of observations or sharpness of the likelihood function increases for well-specified likelihood models, the implications of violating it may severely damage ROPE's performance because of the OT matching between simulated and real-world observations.
+As a possible solution, unbalanced OT~\citep{sejourne2019sinkhorn, fatras2021unbalanced} relaxes the mass conservation constraint and could be an elegant solution to couple a subset of the simulations to the real-world data. 
+
+\paragraph{Curse of dimensionality.}
+The dimensionality of $\theta$ may impact two critical parts of ROPE. First, with each additional parameter $\theta[K+1]$, the NSE must encode up to $K$ dependence between $\theta[K+1]$ and other dimensions $\theta[1:K]$ given $\mathbf{x}_o$. 
+While generating more simulations can address the curse of dimensionality in the simulation space, fine-tuning on a small calibration may not suffice anymore to cope with misspecification. Second, the dimensionality of the manifold on which the simulated and real-world observations are projected with the NSE grows and finding a meaningful matching between the two populations may require larger sample sizes. A potential solution is to focus marginal or 2D posterior distributions and ignore higher-dimensional dependencies in $p(\theta \mid \mathbf{x}_o)$. Nevertheless, extending ROPE to such settings certainly opens new questions, e.g., on the development of better fine-tuning strategies that can leverage partial calibration sets where labels can be incomplete.
+
+\paragraph{Other extensions.}
+Similarly to incomplete labels, certain applications have only access to noisy labels measured with a well-modeled, but noisy, measurement process. Further developing the fine-tuning stage to exploit such noisy labels would be necessary to make an approach similar to ROPE applicable.
+As another direction, leveraging inductive bias embedded into the neural network architecture of neural OT and the ability to better cope with large test set appears as a promising direction to amortize the mapping between simulation and real-world data. We believe following ROPE's strategy of modeling misspecification in SBI as an OT coupling opens up several directions to cope with more specific problem setup.
+
+
+\paragraph{Conclusion}
+In this paper, we have argued that model misspecification in simulation-based is a modeling issue that requires real-world labeled data to be solved. Under this premise, we have introduced ROPE, an algorithm that jointly exploits a small calibration set and optimal transport to extend neural posterior estimation for misspecified simulators. Our experiments on diverse benchmarks, demonstrate ROPE's ability to estimate well-calibrated and informative posterior distributions for various simulators and real-world examples.
+As a conclusion, ROPE is a simple method that practitioners can use to predict calibrated posterior over the parameter of misspecified simulator on real-world data. 
+
+
+
+
+\clearpage
+
+\paragraph{Broader Impact} This paper presents a framework and an algorithm to address model misspecification in simulation-based inference (SBI). SBI is predominantly applied in scientific fields where complex simulators of physical phenomena are available, such as astronomy, particle physics, or climate modeling. A priori, this circumscribes the application of our algorithm to highly specialized scientific domains in the natural sciences, precluding issues such as fairness or privacy. However, its application to the scientific domain is not exempt from societal or ethical implications, particularly when computer simulations may inform research or policy decisions. In this regard, we find some properties of the algorithm particularly promising, such as uncertainty quantification and the limitation of not drawing conclusions beyond the given expert model. However, much more work is needed to deeply understand the reliability of these properties and how they are affected by violations of the core assumptions, such as a well-specified prior. Such work should precede any sort of over-selling to practitioners about the benefits of the algorithm. Rather, we see our work as an academic contribution towards a more broad and successful application of SBI techniques; success in this endeavor, as for the establishment of any scientific tool, will require an iterative dialogue between the scientists who develop the methodology and those who use it.
+
+
+
+
+

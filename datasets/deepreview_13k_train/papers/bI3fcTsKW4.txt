@@ -1,0 +1,457 @@
+\title{Gradient descent with generalized Newton’s method}
+
+\begin{abstract}
+We propose the generalized Newton's method (GeN) --- a Hessian-informed approach that applies to any optimizer such as SGD and Adam, and covers the Newton-Raphson method as a sub-case. Our method automatically and dynamically selects the learning rate that accelerates the convergence, without the intensive tuning of the learning rate scheduler. In practice, out method is easily implementable, since it only requires additional forward passes with almost zero computational overhead (in terms of training time and memory cost), if the overhead is amortized over many iterations. We present extensive experiments on language and vision tasks (e.g. GPT and ResNet) to showcase that GeN optimizers match the state-of-the-art performance, which was achieved with carefully tuned learning rate schedulers.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep learning models are trained via the gradient descent $\w_{t+1}=\w_t-\eta_t\P_t^{-1}\g_t$, where $\w_t\in\R^d$ is the model parameters. The model update $\w_t-\w_{t+1}$ consists of a learning rate scheduler $\eta_t\in\R$ that is controlled by several hyperparameters, a pre-conditioner $\P_t\in\R^{d\times d}$ that can depend on the Hessian or Fisher information, and the first-order gradient $\g_t\in\R^d$ of the loss function $L(\w_t)$.
+
+\begin{table}[!htb]
+\caption{Summary of optimizers with $\w_{t+1}=\w_t-\eta_t\P_t^{-1}\g_t$, where $\H$ is the Hessian, $\F$ is the Fisher information, $d$ is the number of model parameters. We highlight that GeN can take advantage of any pre-conditioner $\P_t$.}
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{|c|Sc|Sc|c|}
+\hline
+Method& $\eta_t$ & $\P_t$ &dim($\P_t$)\\\hline\hline
+Newton-Raphson    & =1       & $=\H$     & $d^2$      \\ \hline
+BFGS \cite{broyden1970convergence,fletcher1970new,shanno1970conditioning}, LBFGS \cite{byrd1995limited}     & need to tune&$\approx \H$ & $d^2$   \\ \hline
+\textcolor{red}{GeN (ours)}     & $={\G^\top\g/\g^\top\H\g}$&\textcolor{red}{Any}& $1$ or $d$           \\ \hline
+D-adaptation \cite{defazio2023learning}, Prodigy \cite{mishchenko2023prodigy}, DoG \cite{ivgi2023dog}, DoWG \cite{khaled2023dowg}     & $\approx {\|\w_0-\w_*\|}/{\max \G}$&$=\I$ or $\sqrt{\text{diag}(\F)}$ & $1$ or $d$        \\ \hline
+AdaHessian \cite{yao2021adahessian}, Sophia  \cite{liu2023sophia}    &need to tune& $\approx\text{diag}(\H)$& $d$\\ \hline
+Shampoo \cite{gupta2018shampoo}, K-FAC \cite{martens2015optimizing}, Natural Gradient \cite{amari1998natural} &need to tune& $\approx \F$& $d$\\ \hline
+Adam \cite{kingma2014adam}, AdamW \cite{loshchilov2017decoupled}, AdaGrad \cite{duchi2011adaptive}, AdaDelta \cite{zeiler2012adadelta}, 
+RMSProp \cite{hinton2012neural} &need to tune& $\approx\sqrt{\text{diag}(\F)}$ & $d$ \\ \hline
+SGD \cite{robbins1951stochastic}, Heavyball \cite{polyak1964some}, NAG \cite{nesterov1983method}  &need to tune& $=\I$ & $1$   \\ \hline
+\end{tabular}
+}
+\label{tab:summaryP}
+\end{table}
+
+For large-scale optimization problems with millions to billions of parameters, the training can be significantly costly. For example, large language models are trained with trillions of tokens, on thousands of GPUs, costing millions of dollars \cite{sharir2020cost,biderman2023pythia}, and at high carbon footprint \cite{patterson2021carbon,luccioni2023estimating,dodge2022measuring,touvron2023llama}: GPT-3 (175B) \cite{brown2020language}, LLAMA (7$\sim$70B) \cite{touvron2023llama,touvron2024llama}, Chinchilla (70B) \cite{hoffmann2022training}, PaLM (540B) \cite{chowdhery2023palm}, and Falcon (7$\sim$180B) \cite{almazrouei2023falcon} models are trained on $\gtrapprox 1$T tokens; state-of-the-art models require extremely long training time, measured in thousands of PetaFLOPS-days \cite[Figure 2]{almazrouei2023falcon} or millions of GPU hours \cite{llama3modelcard}. 
+It is therefore computationally prohibitive to instantiate a dense
+$\P_t$ or to tune the hyperparameters of $\eta_t$. However, the second-order pre-conditioner and the learning rate scheduler are critical to the fast convergence.
+On one hand, a Hessian-informed pre-conditioner is necessary in large-scale model training, as SGD (using no pre-conditioning) empirically does not compete with adaptive optimizers like Adam. However, implementing or approximating the full Hessian matrix induces $O(d^2)$ or even $O(d^3)$ complexity, which is infeasible for large models on current generation of computing devices. In order to compute the pre-conditioner $\P_t$ efficiently, a long list of adaptive optimizers (see \Cref{tab:summaryP} with diagonal $\P_t$) have proposed to only leverage the diagonal of $\P_t$ and/or to replace the Hessian with Fisher information, although some information in the full Hessian may be lost.
+
+On the other hand, manually setting a learning rate scheduler requires a critical balance between the utility (more hyperparameters the better) and the tuning effort (less hyperparameters the easier). The simplest approach is to set a constant learning rate $\eta_t=\eta$ (only one hyperparameter) through grid search. However, the mini-batch gradient descent with a constant $\eta_t$ may not allow the model to converge even under the convex setting, which is easier to optimize than the non-convex setting in deep learning. Additionally, as we see in \Cref{fig:lr compare}, small $\eta$ converges slow but to better solution, and vice versa for large $\eta$, which depicts the importance of setting the proper $\eta_t$ at each iteration. That is, tuning the learning rate scheduler is essentially selecting $T$ (number of iterations) learning rates to maximize the convergence speed. To accommodate this challenge, a line of schedulers (including the linear decay, warm-up and cosine scheduler) has been proposed to control the learning rate during the training, with a number of hyperparameters. For instance, LLAMA 65B \cite{touvron2023llama} uses a scheduler with 3 hyperparameters: warm-up steps=2000, maximum $\eta_t=1.5e^{-4}$ and final $\eta_t=1.5e^{-5}$. Unfortunately, most schedulers are heuristic and have their limits: they do not guarantee fast convergence and become increasingly difficult to tune as the model and data sizes increase.
+
+\paragraph{Related works}
+This work is closely related to previous literature in learning rate schedulers (especially the parameter-free methods), optimization with Hessian information, and deep learning system design, which are discussed in \Cref{sec:no back} and \Cref{app:related}.
+
+\paragraph{Contribution}
+We propose GeN -- a Hessian-informed approach which merges the information from the full Hessian into the learning rate, so as to dynamically adapt to the loss landscape and accelerate the convergence. We examine GeN on 5 criteria: automaticity, applicability, scalability, computation efficiency, and convergence speed.
+
+To our best knowledge, GeN is the first \textbf{automatic} optimizer that is \textbf{applicable} to the general optimizers\footnote{We refer to Related Works in \Cref{app:related} for comparison with other heuristic or automatic learning rates.}. Our efficiency analysis shows that GeN is perfectly \textbf{scalable} to large-scale training and as \textbf{computationally efficient} as existing optimizers. We empirically demonstrate that GeN is highly \textbf{performant} on image classification, text classification, natural language generation, object detection, instance segmentation, recommendation system, and parameter-efficient training (PET).
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.48\linewidth]{figures/ours_vs_constant_lrs.pdf}
+    \includegraphics[width=0.24\linewidth]{figures/gpt2_tr_loss_vs_lr_schedulers.pdf}
+    \includegraphics[width=0.24\linewidth]{figures/gpt2_te_loss_vs_lr_schedulers.pdf}
+    \caption{Effects of various learning rate schedulers. Left two: ResNet18 on CIFAR100 dataset, compared with constant learning rates. Right two: GPT2 on E2E dataset, compared with heuristic learning rate schedulers.}
+    \label{fig:lr compare}
+\end{figure}
+
+
+\section{Motivation}
+
+\subsection{Notations}
+We denote the model parameters as $\w_t\in\R^d$, where $t\leq T$ is the index of iterations; $\{\x_i\}$ are the samples, with or without labels. For any loss function, we denote $L(\w):=\E_{\x} L(\w,\x)$ as the generalization loss, and $\bar L(\w):=\sum_{i=1}^B  L(\w,\x_i)/B$ as the training loss. We denote the mini-batch stochastic gradient as $\g^\text{optim}_t(\nabla \bar L)=\P_t\cdot\nabla \bar L\in\R^d$, where $\nabla \bar L(\w_t):=\frac{1}{B}\sum_i \frac{\partial L(\w_t,\x_i)}{\partial \w_t}$ is the vanilla gradient and $\g_t^\text{optim}$ is the pre-conditioned gradient of any optimizer. For instance, SGD simply gives $\g^\text{SGD}(\nabla \bar L)=\nabla \bar L$; SignSGD (a special case of Adam) post-processes the gradient as $\g^\text{SignSGD}(\nabla \bar L)=\text{sign}(\nabla \bar L)$; gradient clipping gives $\g^\text{clip}(\nabla \bar L)=\min\{C/||\nabla\bar L||,1\}(\nabla \bar L)$ and similarly for the projection; PET (e.g. LoRA) gives $\g^\text{PET}(\nabla \bar L)=\mathbf{m}\odot\nabla \bar L$ where $\mathbf{m}$ is a binary mask and $\odot$ is the element-wise multiplication. We highlight that many optimization algorithms, including but not limited to AdaGrad, Adam, Sophia, momentum, and weight decay, can also be summarized as the post-processing of $\nabla\bar L$.
+
+\subsection{Second-order Taylor expansion}
+In deep learning, the models are updated via the gradient descent via the optimizers:
+\begin{align}
+\w_{t+1}=\w_t-\eta_t \g^\text{optim}(\w_t)
+\label{eq:SGD}
+\end{align}
+Appyling the Taylor expansion on the loss and leveraging \eqref{eq:SGD}, we can derive the loss improvement at the current iteration,
+\begin{align}
+L(\w_t)-L(\w_{t+1})=L(\w_t)-L(\w_t-\eta_t \g_t^\text{optim})=\eta_t\G_t^\top\g_t^\text{optim}-\frac{\eta_t^2}{2}(\g_t^\text{optim})^\top \H_t\g_t^\text{optim}+O(\eta_t^3).    
+\label{eq: full Taylor}
+\end{align}
+where $\G_t:=\frac{\partial L}{\partial \w_t}$ and $\H_t:=\frac{\partial^2 L}{\partial \w_t^2}$ are the oracle gradient and Hessian, respectively.
+
+In light of \eqref{eq: full Taylor}, we claim that employing the second-order Taylor expansion is (1) necessary, since the first-order Taylor expansion only characterizes a linear approximation of the loss and thus fail to characterize the loss curvature; and (2) sufficient, especially in the small learning rate regime where large models are universally trained\footnote{The classical convergence analysis of gradient descent also leverages the second-order Taylor expansion $L(w-\eta\G) \leq L(w) + \eta\G^\top\G + \frac{\mathcal{L}\eta^2}{2}||\G||^2$ where $\mathcal{L}$ is the Lipschitz smoothness of $L$. This quadratic function is minimized at $\eta=1/\mathcal{L}$.}. In fact, \eqref{eq: full Taylor} is also used in recent works on the neural scaling laws \cite{kaplan2020scaling, mccandlish2018empirical}.
+
+We visualize the loss function in \Cref{fig:measure vs lr}, in which a quadratic function with respect to $\eta$ is fitted by ignoring the higher order terms,
+\begin{align}
+L(\w_t)-L(\w_t-\eta_t \g_t^\text{optim})\approx\Delta L(\g_t^\text{optim},\eta_t):=\eta_t\G_t^\top\g_t^\text{optim}-\frac{\eta_t^2}{2}(\g_t^\text{optim})^\top \H_t\g_t^\text{optim}
+\label{eq:lr parabola}
+\end{align}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.49\linewidth]{figures/quadratic_resnet18_cifar100_B100_sgd.pdf}
+\includegraphics[width=0.49\linewidth]{figures/quadratic_gpt2_e2e_B256_adamw.pdf}
+
+\caption{Illustration of the second-order Taylor expansion in \eqref{eq:lr parabola}. Left two: ResNet18 on CIFAR100. Right two: GPT2 on E2E.}
+    \label{fig:measure vs lr}
+\end{figure}
+
+
+
+\section{Methodology}
+
+
+\subsection{Generalized Newton's method}
+Our goal is to minimize the loss $L(\w_t)$ over the domain of learning rate $\eta\in\R$, in particular the next-iteration loss in \eqref{eq:lr parabola} . In fact, if we $\min_{\g,\eta}\Delta L(\g,\eta)$ over both learning rate and descent direction, then the optimal solution is $\eta_t^*\g_t^*=\H_t^{-1}\G_t$ and therefore $\w_{t+1}=\w_t-\H_t^{-1}\G_t$.
+This recovers the vanilla Newton's method conditioning on that $\H_t$ is invertible. 
+
+By working with the domain of $\eta$, we effectively reduce the high$(d+1)$-dimensional $\min_{\g,\eta}\Delta L(\g,\eta)$ to a uni-variate problem $\min_{\eta}\Delta L(\g,\eta)$. From \eqref{eq:lr parabola}, it is obvious that the optimal learning rate is
+\begin{align}
+\eta_t^*=\G_t^\top\g_t^\text{optim}  \Big/ (\g_t^\text{optim})^\top \H_t\g_t^\text{optim}
+\label{eq:optimal lr}
+\end{align}
+
+\begin{remark}
+The closed form of \eqref{eq:lr parabola} allows us to directly derive the optimal learning rate, without resorting to more complex methods such as back-tracking or line searches.
+\end{remark}
+
+That is, given $\g_t^\text{optim}$ (determined by the pre-conditioner $\P_t$) and that 
+$(\g_t^\text{optim})^\top \H_t\g_t^\text{optim}>0$, our method transforms any base optimizer to a new optimizer by
+\begin{align}
+\w_{t+1}=\w_t-\eta_t^*\g_t^\text{optim}=\w_t- \frac{(\g_t^\text{optim})^\top \G_t\g_t^\text{optim}}{(\g_t^\text{optim})^\top \H_t\g_t^\text{optim}}
+\label{eq:autosgd}    
+\end{align}
+We term the family of optimizers in \eqref{eq:autosgd} as the generalized Newton's method (GeN), because the vanilla Newton's method is a sub-case by \Cref{thm:generalized}. We highlight that $\g_t^\text{optim}$ can come from any optimizer or even be random: e.g. we equip \eqref{eq:autosgd} with $\g_t^\text{SGD}$ to obtain GeN-SGD from SGD, or with $\g_t^\text{Adam}$ to obtain GeN-Adam from Adam.
+
+\begin{proposition}\label{thm:generalized}
+If $\g_t^\text{optim}=\H_t^{-1}\G_t$, \eqref{eq:autosgd} reduces to the Newton's method as $\eta_t^*\g_t^\text{optim}=\H_t^{-1}\G_t$.
+\end{proposition}
+
+Another way to understand \eqref{eq:autosgd} is via the generalized right inverse\footnote{For a row vector $\A\in\R^{1\times d}$, its left inverse does not exist since rank$(\A)=1$; its right inverse is a column vector $\A_R^{-1}\in\R^{d\times 1}$ such that $\A\A_R^{-1}=1$.} (see \Cref{def:generalized inv}). For the simplicity of presentation, we drop the super-script of $\g_t^\text{optim}$ from now on. We can write
+\begin{align*}
+ (\g_t^\top\H_t)_R^{-1}=\g_t/\g_t^\top\H_t\g_t \Longrightarrow \eta_t^*\g_t=(\g_t^\top\H_t)_R^{-1}\g_t^\top\G_t
+\end{align*}
+which resembles the Newton's update $\H_t^{-1}\G_t$ but $\H_t$ and $\G_t$ are projected along the direction of $\g_t$:
+$$\w_{t+1}=\w_t-\H_t^{-1}\G_t 
+\longrightarrow  \g_t^\top\H_t\w_{t+1}=\g_t^\top\H_t\w_t-\g_t^\top\G_t\longleftarrow\w_{t+1}=\w_t-(\g_t^\top\H_t)_R^{-1}\g_t^\top\G_t$$
+
+\begin{remark}
+GeN-SGD is scale-invariant, as $\frac{\g_t^\top \G_t\g_t}{\g_t^\top \H_t\g_t}$ does not change if $\g_t$ is multiplied by a factor of $c\in\R$, i.e. $\g_t\to c\g_t$. This indicates that GeN-SGD (but not GeN-Adam) is stable w.r.t. the vanishing/exploding gradient and does not need the gradient clipping.
+\end{remark}
+
+\subsection{Deriving $\eta^*$ without back-propagation}
+\label{sec:no back}
+To compute $\eta^*$ in \eqref{eq:optimal lr} for GeN optimizers, or equivalently to compute $\G_t^\top\g_t$ and especially $\g_t^\top\H_t\g_t$, the straight-forward but inefficient approach is to compute or approximate $\G_t$ and the full $\H_t$. For example, $\H_t$ can be approximated iteratively by BFGS methods, although instantiating and inverting an $\R^{d\times d}$ matrix is prohibitively expensive for large models. More commonly, $\H_t$ is approximated by its low-rank representation (e.g. K-FAC) or its diagonal (e.g. AdaHessian, Sophia), which is usually combined with a replacement by the Fisher information (e.g. Adam, AdaGrad). However, these approximations incur at least $O(d)$ memory overhead, and may be sub-optimal in performance due to the gap between the approximated Hessian and the full Hessian.
+
+Alternatively, we can estimate $\g_t^\top\H_t\g_t$ via the Hessian-vector product of $\H_t\g_t$, without directly accessing $\H_t$: firstly back-propagating on $L$ gives $\g_t$ and then back-propagating on $\g_t(\w_t)^\top \g_t$ gives $\H_t\g_t$. 
+In fact, all above-mentioned methods (except BFGS and Fisher-related methods) need the Hessian-vector product\footnote{Estimating the diagonal Hessian needs the Hutchinson method and Hessian-vector product, where $\frac{1}{K}\sum_{k\leq K}\v_k\odot\H\v_k\to\text{diag}(\H)$ as $K\to\infty$ for $\v_k\sim N(0,I)$. Because the precision of these methods relies on computing $\v_k\odot\H\v_k$ for $K$ rounds, the training is very slow as the cost is $K$ times that of a standard back-propagation, say $K=20$ in Sophia and $K=100$ in PyHessian.}, which is not supported in large-scale distributed learning (e.g. DeepSpeed  \cite{rasley2020deepspeed}, Megatron \cite{shoeybi2019megatron}, and FSDP \cite{FairScale2021}), because the computation graph is complicated and interferes with the communication orchestra. 
+In summary, existing methods suffer from two constraints: they have to either approximate $\H_t$ (sacrificing the performance) or rely on the Hessian-vector product (sacrificing the efficiency and scalability). 
+
+In stark contrast, we can overcome these constraints by using two additional forward passes to efficiently compute $\G_t^\top\g_t$ and $\g_t^\top\H_t\g_t$ without accessing $\G_t$ and $\H_t$, which is universally easy-to-implement because the forward pass is a fundamental operation in any deep learning system. To be specific, we apply the gradient descent with different learning rates and derive the quadratic function in \eqref{eq:lr parabola} (see \Cref{alg:autoSGD}). As an extension, our method can use more forward passes to fit a higher-order polynomial than the second-order one in \eqref{eq:lr parabola}.
+\subsection{Algorithm}
+\label{sec:algo}
+We now present an efficient algorithm that implements \eqref{eq:autosgd}. Specifically, we apply
+\begin{align}
+\eta^*\approx\frac{\eta_{t-1}}{2}\frac{L_+-L_-}{L_+-2L_0+L_-}
+\label{eq:eta star}
+\end{align}
+to approximate the optimal learning rate in \eqref{eq:optimal lr}, where $L_\pm:=L(\w_t\pm\eta_{t-1}\g_t^\text{optim})$.
+
+\begin{algorithm}[!htb]
+\caption{Generalized Newton's optimizers (GeN), e.g. $\gamma=0.9, \Phi=8$}
+\begin{algorithmic}[1]
+\For{$t\in 1,\cdots,T$}
+\State Compute loss $L_0=L(\w_t)$ by the standard forward pass
+\State Compute gradient $\g_t^\text{optim}(\w_t)$ by the back-propagation on $ L_0$
+\tikzmark{begin}
+\If{$t$ mod $\Phi==0$:}
+\State Compute $ L_\pm= L(\w_t\pm\eta_{t-1}\g_t^\text{optim})$ by two forward passes
+\State Fit the quadratic function in \eqref{eq:lr parabola}:$(-\eta_{t-1},0,\eta_{t-1})\to ( L_-,  L_0,  L_+)$
+\State Derive the optimal learning rate $\eta_t=\gamma\eta_{t-1}+(1-\gamma)\eta^*$  by \eqref{eq:eta star}
+\EndIf
+\tikzmark{end}
+\drawredbox
+
+\State Update $\w_{t+1}=\w_t-\eta_t \g_t$
+\EndFor
+\end{algorithmic}
+\label{alg:autoSGD}
+\end{algorithm}
+
+\begin{remark}
+We discuss the flexible designs of \Cref{alg:autoSGD} and extend the discussion in \Cref{app:design alg}.
+\begin{itemize}
+\item In line 3, GeN can operate on $\g_t^\text{optim}$ from any base optimizers such as SGD, AdamW and PET.
+\item In line 4, setting a large $\Phi$ significantly amortizes the computational overhead (see \Cref{sec:lazy lr}, where GeN optimizers are almost as fast as the base optimizers).
+\item In line 5, the forward passes are cheaper than line 2, in that they do not store the activation tensors and save the memory which translates to faster training. In addition, we can use more forward passes to fit \eqref{eq:lr parabola}, incurring more computation cost but reducing the variance in estimation of $\eta^*$. Notice that the additional computation can be easily amortized through $\Phi$.
+\item In line 6, we highlight that $(-\eta_{t-1},0,\eta_{t-1})$ is symmetric and auto-regressive, without introducing a new hyperparameter. The choice is justified in \Cref{proof:FD and fit}. To derive \eqref{eq:lr parabola}, we can either fit a parabolic curve or equivalently use the finite difference method.
+\end{itemize}
+\end{remark}
+
+\subsection{Error analysis for optimal learning rate}
+We now analyze the estimation error of $\eta^*$ in \eqref{eq:eta star}, with batch size $B$ and mini-batch loss $\bar L(\w_t)$. The estimation error consists of the sub-sampling error by using the mini-batch, and the precision error from fitting \eqref{eq:lr parabola}.
+
+\begin{proposition}
+\label{prop:opb error}
+The estimation error of $\eta^*$ in \eqref{eq:optimal lr} by mini-batch losses $(\bar L_0, \bar L_+, \bar L_-)$ is $\opb+O(\eta_{t-1}^2)$ where $B$ is batch size and $\eta_{t-1}$ is the learning rate from the previous iteration.
+\end{proposition}
+
+Empirically, the sub-sampling error $\opb$ is dominant, compare to the precision error $O(\eta^2)$. As a consequence, we advocate to apply GeN optimizers with large batch size for the best performance.
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.47\linewidth]{figures/batch_size_test_loss.pdf}
+\includegraphics[width=0.47\linewidth]{figures/batch_size_test_acc.pdf}
+    \caption{Convergence of ResNet18 on CIFAR10, optimized by GeN-SGD with various batch sizes.}
+    \label{fig:different B}
+\end{figure}
+
+
+
+\section{Efficiency and Scalability Analysis}
+
+In this section, we show that GeN optimizers are as computationally efficient and scalable (in terms of the utility and the system design) as their base optimizers. 
+We train CIFAR10 \cite{krizhevsky2009learning} on ResNet 18, 34, 50, 152 \cite{he2016deep} and ViT tiny, small, base and large \cite{dosovitskiy2020image}. For fine tuning, we use the pretrained models from the PyTorch Image Models framework  \cite{rw2019timm}.
+
+For the utility, we observe on CIFAR10 that GeN optimizers work well with different model sizes across different architectures.
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.49\linewidth]{figures/resnet_sgdm_lr1e-2_train.pdf}
+\includegraphics[width=0.49\linewidth]{figures/resnet_sgdm_lr1e-2_test.pdf}
+\includegraphics[width=0.49\linewidth]{figures/vit_adamw_lr1e-4_train.pdf}
+\includegraphics[width=0.49\linewidth]{figures/vit_adamw_lr1e-4_test.pdf}
+    \caption{Convergence of GeN-SGD (upper panel) and GeN-AdamW (lower panel) on CIFAR10 with various model architectures and sizes.}
+    \label{fig:different arch}
+\end{figure}
+
+For efficiency and system-wise scalability, we focus on the additional forward passes in \Cref{alg:autoSGD}, especially in the scenarios such as parameter-efficient training (PET) and distributed learning. Our default setting is full-parameter training (including mixed precision training), $\Phi=1$, and on single GPU (no communication cost among devices).
+
+To set the stage, GeN optimizers clearly have the same peak memory cost as the base optimizers, as the latter also uses the forward pass. Hence it suffices to count the additional time complexity introduced by GeN. In the default setting, we can write
+\begin{align*}
+\text{absolute speed: }
+\begin{cases}
+\text{Base}&1/(\textcolor{red}{F}+\textcolor{blue}{B}+C)
+\\
+\text{GeN}&1/(\textcolor{red}{F}+\textcolor{blue}{B}+C+\frac{2}{\Phi}{\color{red} F})
+\end{cases}
+\quad 
+\text{relative speed of GeN: }\frac{\textcolor{red}{F}+\textcolor{blue}{B}+C}{\textcolor{red}{F}+\textcolor{blue}{B}+C+\frac{2}{\Phi}{\color{red} F}}
+\end{align*}
+where $\textcolor{red}{F}$ is the time complexity of the forward pass, in terms of float-point operations, $\textcolor{blue}{B}$ is that of the back-propagation, and $C$ is other costs including the communication and the data loading, which are minimal on single GPU. Given that in full-parameter training, $\textcolor{blue}{B}\approx 2\textcolor{red}{F}$\footnote{Forward pass takes 1 unit of time. Back-propagation consists of two sub-processes -- output gradient and parameter gradient, each taking 1 unit of time. See the complexity analysis in Table 1 of \cite{bu2022scalable}.}, GeN optimizers are roughly 60\% as fast as the base optimizers.
+
+\subsection{Lazy learning rate update}
+\label{sec:lazy lr}
+One simple trick to accelerate GeN is to update the learning rate every $\Phi$ iterations for $\Phi>1$, so the additional computation is amortized. For instance, GeN achieves $86\%$ relative speed at $\Phi=4$ and $>92\%$ relative speed at $\Phi\geq 8$. Empirically, applying $\Phi$ has insignificant effect on the convergence.
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.24\linewidth]{figures/lazy_iter_train_loss.pdf}
+\includegraphics[width=0.24\linewidth]{figures/lazy_iter_test_loss.pdf}
+\includegraphics[width=0.24\linewidth]{figures/lazy_time_test_loss.pdf}
+\includegraphics[width=0.24\linewidth]{figures/lazy_time_test_acc.pdf}
+    \caption{Convergence of ResNet18 on CIFAR10, optimized by GeN-SGD with various $\Phi$.}
+    \label{fig:lazy lr}
+\end{figure}
+
+In the PET setting, most parameters are frozen whose gradients are not computed. Hence $\textcolor{blue}{B}\approx\textcolor{red}{F}$ and the relative speed of GeN becomes $\frac{1}{1+1/\Phi}$, e.g. 50\% at $\Phi=1$ and 89\% at $\Phi= 8$. That is, GeN has slightly lower relative speed than the full-parameter training, but enjoys a higher absolute speed.
+
+\subsection{Communication in distributed learning}
+For large-scale optimization, the distributed learning with multiple devices is necessary but challenging, in that (1) the communication orchestra is complicated, and (2) the communication cost is significant ($C\gg 0$). These two challenges determine if and how well an optimizer scales under a distributed solution. 
+For data-parallel solutions such as  Distributed Data Parallel and ZERO1/2 \cite{rajbhandari2020zero}, the communication orchestra is relatively simple so that many Hessian-related optimizers are executable. For model-parallel and pipeline-parallel solutions such as ZERO3 and FSDP, each forward pass requires the communication of model parameters, and GeN indeed adds a significant amount of communication volume. Nevertheless, applying the lazy learning rate can essentially reduce the communication overhead to a negligible level.
+
+
+
+\section{Experiments on synthetic data}
+
+\label{sec:synthetic}
+To compare GeN and different optimizers deterministically in the synthetic setting,
+we experiment on 2-dimensional functions and carefully select an optimal learning rate for each optimizer (see the details in \Cref{ref:exp-synthetic}). 
+\begin{figure}[!htb]
+    \centering
+\hspace{-0.5cm}
+\includegraphics[width=.28\textwidth]{rosenbrock_1d_iter1000_all.pdf}
+\hspace{-0.5cm}
+\includegraphics[width=.26\textwidth]{rosenbrock_2d_iter1000_frame40_all.pdf}
+\hspace{-0.4cm}
+\includegraphics[width=.28\textwidth]{rosenbrock_1d_iter1000_ourvsnonour.pdf}
+\hspace{-0.5cm}
+\includegraphics[width=.26\textwidth]{rosenbrock_2d_iter1000_frame180_ourvsnonour.pdf}
+\hspace{-0.5cm}
+\caption{Optimizing over the Rosenbrock (non-convex) function. Plots 1\&3: losses over iterations optimized by different optimizers. Plots 2\&4: 2D visualization of the optimization trajectories at 40-th iteration (Plot 2) and the 180-th iteration (Plot 4).}
+    \label{fig:rosenbrock}
+\end{figure}
+
+In \Cref{fig:rosenbrock}, we test on the Rosenbrock function, which is non-convex and has a unique minimum at $(1,1)$ that lies in a narrow valley. The left two plots show the trajectory of our GeN-SGD and its convergence speed, which significantly outperforms other optimizers. The right two plots show the one-to-one comparison between the base optimizers (dashed curves) and their GeN variants (solid curves), from which the acceleration by GeN is observed universally. 
+
+In \Cref{fig:beale}, we test on the Beale function, which is convex and has a unique minimum at $(3,0.5)$, and observe the same advantage of GeN.
+
+\begin{figure}[!htb]
+    \centering
+\hspace{-0.5cm}
+\includegraphics[width=.28\textwidth]{beale_1d_iter1000_all.pdf}
+\hspace{-0.5cm}
+\includegraphics[width=.26\textwidth]{beale_2d_iter1000_frame60_all.pdf}
+\hspace{-0.4cm}
+\includegraphics[width=.28\textwidth]{beale_1d_iter1000_ourvsnonour.pdf}
+\hspace{-0.5cm}
+\includegraphics[width=.26\textwidth]{beale_2d_iter1000_frame40_ourvsnonour.pdf}
+\hspace{-0.5cm}
+\caption{Optimizing over the Beale (convex) function. Plots 1\&3: losses over iterations optimized by different optimizers. Plots 2\&4: 2D visualization of the optimization trajectories at 60-th iteration (Plot 2) and the 40-th iteration (Plot 4).}
+    \label{fig:beale}
+\end{figure}
+
+
+
+\section{Experiments on real data}
+
+In this section, we test GeN on real datasets across image classification, text classification, natural language generation, object detection and instance segmentation. We additionally experiment on image generation and recommendation system in \Cref{app:experiments}, where all training details can be found. Our experiments cover end-to-end training as well as fine-tuning, and include PET methods such as LoRA \cite{hu2021lora} and BitFit \cite{zaken2022bitfit}.
+\subsection{Image classification}
+\label{sec:cv}
+We apply variants of SGD on ResNet50 and AdamW on ViT, by training on computer vision datasets with various sizes (e.g. Places365 has $\approx 2$ million images) and difficulty (ranging from 30\% to 98\% accuracy). In \Cref{tab:cv} and \Cref{fig:INat}, GeN optimizers consistently achieve high accuracy when compared with heuristic learning rate schedulers (i.e. constant, linear and cosine decay) as well as automatic optimizers like Prodigy and D-Adaptation\footnote{We have observed that D-Adaptation SGD diverges for all datasets when the weight decay of 5e-4 is used.}.
+\begin{table}[!htb]
+    \centering
+        \caption{Test accuracy of ResNet (optimized by SGD) and ViT (optimized by AdamW) on various image classification datasets.}
+\resizebox{\columnwidth}{!}{%
+    \begin{tabular}{c|c|c|c|c|c|c|c|c}
+        &dataset&CIFAR10 & CIFAR100  & Food101 &GTSRB& SVHN&Places365&INat2021\\\hline
+        &reference&\multicolumn{2}{|c|}{\cite{krizhevsky2009learning}} & \cite{bossard2014food} &\cite{Houben-IJCNN-2013}& \cite{netzer2011reading}&\cite{zhou2014learning}&\cite{inat}\\\hline
+        &epochs&5&5&5&5&5&5&10\\\hline
+       \multirow{5}{*}{ResNet50}  & GeN-SGD &\textbf{96.76}&\textbf{84.77}&\textbf{82.43}&\textbf{97.96}&\textbf{97.02}&\textbf{54.24}&\textbf{44.57}\\
+& SGD(constant)&95.91 &81.64
+&74.24&95.20&95.08&51.09&33.80
+\\
+& SGD(linear decay)&95.52&81.67&75.14&95.33&95.34&50.95&30.69
+\\
+& SGD(cosine decay)&95.82&80.71&76.39&95.20&95.27&51.15&31.10
+\\
+& Prodigy&95.17&80.39&80.74&97.80&96.23&50.33&33.77\\
+& D-adapt SGD&95.20&80.95&80.50&97.38&95.32&47.24&38.00 \\
+\hline
+\multirow{5}{*}{ViT-base}   &GeN-AdamW &98.68&92.62&\textbf{90.48}&\textbf{99.06}&97.14
+&\textbf{59.80}&66.28\\
+&AdamW(constant)&97.49&89.23&88.44&98.54&96.65&58.28&65.62\\
+&AdamW(linear decay)&98.48&92.60&90.54&98.74&97.08&58.52&65.43\\
+&AdamW(cosine decay)&98.73&\textbf{92.71}&90.46&98.77&\textbf{97.16}&58.19&\textbf{67.04}\\
+& Prodigy&\textbf{98.92}&92.49&90.42&98.88&97.13&57.24&62.61\\
+& D-adapt AdamW&97.56&88.11&89.45&99.04&96.77&56.19&66.52 \\
+    \end{tabular}
+    }
+
+    \label{tab:cv}
+\end{table}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.25\linewidth]{figures/Inat_lr.pdf}
+    \includegraphics[width=0.74\linewidth]{figures/vit_adamw_INat.pdf}
+    \caption{Convergence of ViT on INat2021 dataset, optimized by variants of AdamW.}
+    \label{fig:INat}
+\end{figure}
+\subsection{Natural Language Processing}
+We compare GeN-AdamW with a variety of learning rate schedulers on natural language generation (NLG) and natural language understanding (NLU).
+
+For NLG experiments, we train GPT2 \cite{radford2019language} model with LoRA on the E2E dataset \cite{novikova2017e2e}. We measure the quality of the generated texts by the perplexity (the exponential of loss), BLEU \cite{papineni2002bleu}, ROUGE-L \cite{lin2004rouge}, METEOR \cite{banerjee2005meteor}, NIST \cite{doddington2002automatic}, and CIDEr \cite{vedantam2015cider}. We use \cite{hu2021lora} as the baseline, which trains for 5 epochs with linearly decaying learning rate. In \Cref{fig:lr compare} and \Cref{tab:gpt2 measure}, GeN is consistently performant and outperforms the baseline over multiple metrics. Somewhat surprisingly, the learning rate of GeN continues to go up even if we extend the training to 20 epochs in \Cref{fig:gpt2 lr}, which is not captured by previous heuristic learning rate schedulers.
+
+\begin{minipage}{\linewidth}
+  \begin{minipage}[p]{0.37\linewidth}
+    \centering
+\includegraphics[width=0.9\linewidth]{figures/gpt2_lr_20epochs.pdf}    
+\captionof{figure}{Loss and learning rate during GPT2 training.}
+\label{fig:gpt2 lr}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[p]{0.58\linewidth}
+    \centering
+      \captionof{table}{Test performance of GPT2 on E2E dataset (higher the better).}
+\setlength\tabcolsep{4pt}
+\resizebox{\linewidth}{!}{
+    \begin{tabular}{c|c|c|c|c|c}
+     &BLEU&ROGUE&NIST&METEOR&CIDER  \\\hline
+    GeN &\textbf{67.30}&67.09&\textbf{8.6508}&0.4407&\textbf{2.2810} \\
+    linear decay &66.85&\textbf{67.78}&8.4438&0.4375&2.2561 \\
+    cosine decay &66.59&67.35&8.4511&0.4290&2.2553 \\
+    constant &65.95&66.69&8.3982&\textbf{0.4462}&2.1697 \\
+    inverse sqrt$(1/\sqrt{t})$ &65.10&66.19&8.1274&0.4047&2.1001 \\
+    inverse $(1/t)$ &64.43&65.95&8.0447&0.4010&2.0792 \\    
+    \end{tabular}
+    }
+
+    \label{tab:gpt2 measure}
+    \end{minipage}
+\end{minipage}
+
+For NLU experiments, we evaluate RoBERTa-base \cite{liu2019roberta} on the GLUE \cite{wang2018glue} benchmark with LoRA, BitFit and full-parameter training (FT).
+\begin{table}[!htp]
+  \centering
+    \caption{Test performance of RoBERTa model with different methods on the GLUE benchmark (higher the better). Blue numbers are results in published papers, produced by heuristic learning rate schedulers in \cite{hu2021lora} (linear warm-up and linear decay). Red numbers are results of GeN optimizers. We report the overall (matched and mismatched) accuracy for MNLI, Matthew’s correlation for CoLA, F1 score for MRPC and QQP, and accuracy for other tasks.} 
+  \footnotesize
+  \begin{tabular}{l|r|ccccccc} 
+     &   \begin{tabular}[c]{@{}c@{}}Trainable\\param\end{tabular}& MNLI&SST-2 & MRPC & CoLA&QNLI&QQP&RTE\\
+  \hline
+  LoRA & 0.3M & 
+  \textcolor{blue}{87.5}|\textcolor{red}{86.7}&
+  \textcolor{blue}{95.1}|\textcolor{red}{94.3} & \textcolor{blue}{90.8}|\textbf{\textcolor{red}{92.1}} & 
+  \textcolor{blue}{63.4}|\textbf{\textcolor{red}{63.7}} &
+  \textcolor{blue}{93.3}|\textcolor{red}{92.3} &
+  \textcolor{blue}{85.3}|\textbf{\textcolor{red}{86.9}} &
+  \textcolor{blue}{86.6}|\textcolor{red}{79.1} \\
+  BitFit & 0.1M & 
+  \textcolor{blue}{85.0}|\textbf{\textcolor{red}{85.1}}&
+  \textcolor{blue}{93.7}|\textbf{\textcolor{red}{94.3}} & \textcolor{blue}{92.0}|\textbf{\textcolor{red}{92.3}} & 
+  \textcolor{blue}{61.8}|\textbf{\textcolor{red}{62.5}} &
+  \textcolor{blue}{91.3}|\textbf{\textcolor{red}{91.5}} &
+  \textcolor{blue}{84.2}|\textbf{\textcolor{red}{84.3}} &
+  \textcolor{blue}{77.8}|\textbf{\textcolor{red}{78.0}} \\
+  FT & 125.0M & 
+  \textcolor{blue}{86.7}|\textcolor{red}{86.8} &
+  \textcolor{blue}{94.2}|\textbf{\textcolor{red}{94.7}} & \textcolor{blue}{92.5}|\textcolor{red}{92.3}& 
+  \textcolor{blue}{61.1}|\textbf{\textcolor{red}{64.8}} &
+  \textcolor{blue}{92.3}|\textcolor{red}{91.9} &
+  \textcolor{blue}{88.0}|\textbf{\textcolor{red}{88.4}} &
+  \textcolor{blue}{77.4}|\textbf{\textcolor{red}{80.5}} \\
+  \end{tabular}
+
+  \label{tab:NLU_results}
+\end{table}
+\subsection{Object detection \& Instance Segmentation}
+We train a Mask R-CNN \cite{he2017mask} with SGD on the Penn-Fudan dataset \cite{wang2007object}, following the \href{https://pytorch.org/tutorials/intermediate/torchvision_tutorial.html}{official Pytorch tutorial} which uses a linearly warm-up then constant learning rate. The loss $L(\w)$ is the sum of 5 losses from the classification and the localization in different model components. The model is built on ResNet50 and pre-trained on the COCO dataset \cite{lin2014microsoft}. We measure the precision in \Cref{tab:precision},
+based on the Intersection over Union (IoU).
+
+\begin{minipage}{\linewidth}
+
+\begin{minipage}[p]{0.4\linewidth}
+\centering
+\includegraphics[width=0.85\linewidth]{figures/detection_segment.pdf}    
+\captionof{figure}{Loss and learning rate during Mask R-CNN training.}
+\end{minipage}
+  \hfill
+\begin{minipage}[p]{0.55\linewidth}
+\centering
+  \captionof{table}{Average precision of Mask R-CNN (higher the better). AP\_s/m/l means small/medium/large instances, and AP is the average over all instances.}
+\setlength\tabcolsep{2pt}
+\resizebox{\linewidth}{!}{
+    \begin{tabular}{c||c|c|c|c}
+\hline
+&\multicolumn{4} {|c} {Object detection}
+\\\hline
+&AP&AP$_\text{s}$&AP$_\text{m}$&AP$_\text{l}$
+ \\\hline
+GeN &$0.805_{\pm0.038}$&$0.452_{\pm0.002}$&$0.624_{\pm0.082}$&$0.813_{\pm0.032}$\\
+manual &$0.802_{\pm0.025}$&$0.368_{\pm0.013}$&$0.586_{\pm0.079}$&$0.819_{\pm0.017}$\\\hline
+&\multicolumn{4} {|c} {Instance segmentation}\\\hline
+GeN &$0.771_{\pm0.019}$&$0.432_{\pm0.010}$&$0.518\pm_{0.104}$&$0.781_{\pm0.015}$
+\\
+manual&$0.768_{\pm0.022}$&$0.388_{\pm0.029}$&$0.455_{\pm0.092}$&$0.783_{\pm0.020}$ \\
+    \end{tabular}
+    }
+
+    \label{tab:precision}
+    \end{minipage}
+\end{minipage}
+
+
+
+\section{Discussion}
+
+In this work, we propose the GeN optimizers as a generally applicable and efficient approach towards the second-order optimization that is automatic and performant. Specifically, GeN is applicable to any future pre-conditioner that improves the convergence. However, additional work is needed to further our understanding of GeN. We remark that the learning rate in GeN is locally optimal but less is known about the global convergence speed. Looking forward, we expect the optimization algorithm to combine the second-order pre-conditioner (beyond AdaHessian and Sophia) and the second-order learning rate (i.e. GeN).
+
+\newpage
+
+
+
+

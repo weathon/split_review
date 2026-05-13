@@ -1,0 +1,388 @@
+\title{Better than Your Teacher: LLM Agents that learn from Privileged AI Feedback}
+
+\begin{abstract}
+
+While large language models (LLMs) show impressive decision-making abilities, current methods lack a mechanism for automatic self-improvement from errors during task execution. We propose \method, an iterative fine-tuning framework that continually improves LLM agents using feedback from AI expert teachers. Our key insight is to equip the expert teachers with a \emph{privileged state} \textemdash information available during training but hidden at test time. This allows even weak experts to provide precise guidance, significantly improving the student agent's performance without access to privileged information at test time.
+We evaluate \method on diverse decision-making benchmarks, including text-based games (ALFWorld), web navigation (WebShop), and interactive coding (Intercode Bash). Our experiments show that \method (1) outperforms behavior cloning and \texttt{ReAct} baselines (2) enables weak student models (e.g., Llama3-8B) to exceed the performance of strong teacher models (GPT4-o), and (3) allows weak models to self-improve using privileged versions of themselves. We also provide a theoretical analysis showing that \method’s success hinges on balancing privileged information with the student’s realizability, which we empirically validate. Our code is available at \url{https://leap-llm.io}.
+
+
+
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLM) show impressive decision-making abilities across domains~\citep{yao2022react, jimenez2023swe, sodhi2024step}. However, they struggle to learn and recover from errors encountered at test time. Prompting alone is insufficient, as it requires manually specifying exceptions, which is difficult to scale and leads to intractably long context lengths.
+
+We address the problem of fine-tuning LLM agents to improve their decision-making using online interaction data. Imitation learning offers a sample-efficient way to train such models, where a teacher corrects the student agent's actions. However, finding an expert capable of both demonstrating the task and correcting mistakes from any state the student visits is extremely challenging. The expert must not only know how to complete the task but also how to recover from the student's errors, which is often more complex than simply performing the original task. For example, in a task like "Heat the mug and put it in the cabinet," if the student places the wrong object in the microwave, the expert must first backtrack and remove the incorrect object before proceeding with the task.
+
+\textbf{\emph{Our key insight is to equip the expert teacher with access to a privileged state}} \textemdash\ additional information unavailable to the student during test time, but crucial to improve the expert’s ability to offer corrective actions at train time. This may include hidden states of a partially observable environment or intermediate subgoals. For the task "Heat the mug and put it in the cabinet", the privileged state reveals the mug's location and necessary steps for heating it (Fig.~\ref{fig:overall_approach}). With this extra knowledge, the expert can first clear the microwave of any incorrect items and then teach the student effective search strategies, like checking common mug locations. Over time, this enables the student to not only learn how to perform tasks correctly but also how to recover from mistakes, ultimately allowing the student to outperform the expert, even without access to the privileged state at test time.
+
+We propose \textbf{L}earning from \textbf{E}xperts with \textbf{A}ccess to \textbf{P}rivilege (\method), an iterative learning algorithm that fine-tunes LLM agents using privileged AI expert feedback. As shown in Fig.~\ref{fig:overall_approach}, \method begins with a student agent trained on demonstration data ($\pi_0$). During interactions, the student agent generates trajectories, and the privileged expert ($\pi^E$) identifies key time steps where corrections are needed. The expert provides improved reason and action labels based on the privileged state, which are then assembled into a dataset used to update the student model ($\pi_{i}\leftarrow\pi_{i-1}$). This process is repeated iteratively, progressively improving the student agent's performance.
+
+Interestingly, we identify a key \emph{trade-off between leveraging privileged information and the student agent's realizability}. While providing unrestricted privileged feedback allows for highly accurate corrections, these are often too complex for the student to act on effectively. Conversely, limiting feedback to what the student can easily process makes it realizable but often suboptimal. Our theoretical and empirical analyses show that balancing these extremes is key, which we achieve by introducing a constrained privileged expert that provides optimal yet realizable feedback. % Empirically, we test different prompts with varying levels of privileged information and identify an optimal feedback level that maximizes the student’s performance.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.9\textwidth, trim = 0cm 0.0cm 0cm 0cm]{figures/overall_approach.pdf}
+\label{fig:overall_approach}
+\end{figure*}
+
+Our key contributions are:
+\begin{enumerate}[nosep, leftmargin=0.2in]
+    \item A novel iterative learning framework \method that fine-tunes LLM agents using privileged expert feedback, balancing privileged information and realizability.
+    \item Theoretical and empirical analysis of the optimal trade-off between privileged information and agent realizability.
+    \item Experimental validation on diverse interactive decision-making benchmarks: AlfWorld~\citep{shridhar2020alfworld}, WebShop~\citep{yao2022webshop}, and InterCode~\citep{yang2024intercode}.
+    \begin{enumerate}[nosep, leftmargin=0.3in]
+        \item \method consistently outperforms behavior cloning agents trained on \gptfo or human demonstrations, showing significant improvements on ALFWorld ($65.7\%\rightarrow 91.8\%$), WebShop ($29.4\%\rightarrow 61.8\%$), and InterCode Bash ($60.3\%\rightarrow 71.8\%$).
+        \item \method enables weaker models (e.g. \texttt{Llama3-8B}) to surpass stronger models (\gptfo), with improvements on ALFWorld ($91.8\%$ vs. $65.7\%$), WebShop ($61.8\%$ vs. $58.4\%$), and InterCode Bash ($71.8\%$ vs. $71.3\%$).
+        \item Ablations that show LLM agents can self-improve using their privileged versions as teachers ($65.7\% \rightarrow 82.1\%$), explore the tradeoff between privileged information and realizability, and compare supervised finetuning with preference optimization.
+    \end{enumerate}
+\end{enumerate}
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Preliminaries}
+
+
+\textbf{Problem Formulation: Decision-making LLMs.}
+We frame decision-making as a Partially Observable Markov Decision Process (POMDP)~\citep{kaelbling1998planning} because real-world environments often contain hidden or incomplete information. The POMDP is defined by the tuple $\langle \mathcal{S}, \mathcal{A}, \mathcal{O}, \mathcal{T}, r \rangle$, where $\mathcal{S}$ represents the underlying state space of the environment, $\mathcal{A}$ the action space, $\mathcal{O}$ the observation space, $\mathcal{T}: \mathcal{S} \times \mathcal{A} \to \mathcal{S}$ the transition dynamics, and $r: \mathcal{S} \times \mathcal{A} \to \mathbb{R}$ the reward function. The true state $s_t \in \mathcal{S}$ is not fully observable; instead, the agent receives partial observations $o_t \in \mathcal{O}$ at each timestep. Hence it must rely on the history $h_t \in \mathcal{H}$ of observation-actions to choose actions.
+
+LLM-based agents are policies $\pi \in \Pi$, which predict both a \emph{reason} $\rho_t$ and an action $a_t$ based on the agent's history $h_t$. The reason $\rho_t$ is expressed in natural language to justify action $a_t$. 
+The history $h_t = {o_1, a_1, \dots, o_t}$ is the sequence of past observations and actions. The policy is expressed as: 
+\begin{equation} 
+(\rho_t, a_t) = \pi(h_t) 
+\end{equation} 
+While reinforcement learning (RL) for POMDPs is already challenging due to the large history space $\mathcal{H}$~\citep{papadimitriou1987complexity}, this is further exacerbated by the addition of reason space, which is infinite and unconstrained. This makes RL impractical to run for LLM agents.
+
+ 
+\textbf{Interactive Imitation Learning with \DAgger.} Imitation learning (IL) offers a promising alternative to RL, by allowing the agent to mimic an expert teacher policy $\pi^E$ bypassing the need for complex exploration. The gold-standard for imitation learning are interactive methods like \DAgger~\citep{ross2011reduction} that query the teacher $\pi^E$ for feedback on states $h_t$ visited by the student. At each \DAgger iteration $i$, the student policy $\pi_i$ is rolled out to collect histories $h_t$, and the teacher provides corrective reasons and actions $(\rho^*_t, a^*_t)$ on those histories $h_t$. The new student $\pi_{i+1}$ then minimizes the cumulative loss $\ell(.)$ on all the data up until the current iteration $i$: 
+\begin{equation} 
+\pi_{i+1} = \min_{\pi} \quad \sum_{j=0}^{i}\mathbb{E}_{h_t \sim \pi_j, \rho^*_t, a^*_t \sim \pi^E(h_t)} \left[ \ell( (\rho^*_t, a^*_t), \pi(h_t)) \right], 
+\end{equation} 
+\DAgger guarantees that as iterations $N \rightarrow \infty$, it will find the best policy in policy class $\Pi$. 
+
+
+
+
+
+
+
+
+\section{Approach}
+
+\label{sec:approach}
+We present \textbf{L}earning from \textbf{E}xperts with \textbf{A}ccess to \textbf{P}rivilege (\method), a framework for iteratively training an LLM agent through online AI feedback from a privileged expert (Fig.~\ref{fig:overall_approach}). 
+Central to our approach is the concept of a \emph{privileged expert teacher}, which leverages access to privileged state information to guide the student’s recovery from errors. Section~\ref{sec:approach:teacher} defines the privileged teacher, Section~\ref{sec:approach:algorithm} details \method, and Section~\ref{sec:approach:analysis} presents the theoretical analysis of \method. 
+\subsection{Privileged Expert Teacher}
+\label{sec:approach:teacher}
+An expert teacher is a policy that can be queried with student history $h_t$ of observations and actions, along with the student's predicted reason action $(\rho_t, a_t)$ to generate a corrected reason action $(\tilde{\rho}_t, \tilde{a}_t) \sim \pi^E(\cdot | {r}_t, {a}_t, h_t)$. For POMDPs, computing such corrections is intractable and strictly more challenging than just solving the original task, often resulting in suboptimal feedback.
+
+We define a \emph{privileged expert teacher} as a teacher that has access to privileged state information, $s_t$, which fully describes the environment at a given time. This access transforms the teacher's decision-making into a fully observable Markov Decision Process (MDP), making it significantly more tractable. We formally define the privileged expert teacher as: \begin{equation} (\tilde{\rho}_t, \tilde{a}_t) \sim \pi^E(\cdot | {\rho}_t, {a}_t, h_t, s_t) \end{equation}
+
+The privileged state $s_t$ can either be explicitly provided or is implicit in privileged text information provided to the expert. For instance, in Alfworld~\citep{shridhar2020alfred}, it includes the exact location of objects and the goal necessary for the agent to navigate effectively. In WebShop~\citep{yao2022webshop}, it involves the specific name of the target product and its attributes, aiding precise search queries or recommendations. Similarly, in InterCode~\citep{yang2024intercode}, the privileged state consists of the ground truth code and any unit tests the code must pass, providing a clear benchmark for the agent to generate or correct code. Note that the privileged information is available only at train time.
+
+A crucial requirement for the privileged expert teacher is that \emph{it must not reveal privileged information in its feedback to the learner.} The prompt instructions specify that the teacher should provide general reason and action that avoid the direct use of privileged information. Using such information directly might solve tasks quickly but makes the corrected actions $(\tilde{\rho}_t, \tilde{a}_t)$ unrealizable for the learner, who does not have access to the privileged state $s_t$, leading to a significant imitation gap and poor learner performance. In Section~\ref{sec:approach:analysis}, we characterize the trade-off between using privileged information and student realizability. We approximate such an expert by designing prompts for the expert to instruct it to use privileged information, without revealing it.
+
+
+
+\subsection{The \method Algorithm}
+\label{sec:approach:algorithm}
+
+\begin{algorithm}[!t]
+\caption{\method: Iterative Learning with Privileged Expert Teacher}
+\begin{algorithmic}[1]
+    \Statex \textbf{Input:} Privileged expert teacher $\pi^E$, Environment $\mathcal{E}$
+    \Statex \textbf{Output:} Learned policy $\pi$
+    \State Collect an initial set of demonstrations from expert teacher $\mathcal{D} \leftarrow \{ (h^*_t, \rho^*_t, a^*_t) \}$
+    \State Train BC $\pi_0$ on $\mathcal{D}$ using supervised fine-tuning (SFT)
+    \For{iteration $i = 1, 2, \dots, N$}
+        \State Roll out policy $\pi_{i-1}$ in environment $\mathcal{E}$ to collect new data: $\mathcal{D}_i \leftarrow \{(h_t, \rho_t, a_t)\}$
+        \State Compute privileged state $s_t$ for every datapoint in $\mathcal{D}_i$
+        \State Invoke privileged expert to generate corrected reason and action: $\tilde{\rho}_t, \tilde{a}_t \sim \pi^E ( . | {\rho}_t, {a}_t, h_t, s_t)$
+        \State Augment dataset with corrected reason and action: $\mathcal{D}_i \leftarrow \{(h_t, \rho_t, a_t, \tilde{\rho}_t, \tilde{a}_t)\}$
+        \State Train policy $\pi_i$ using a no-regret update: $\pi_i \gets \text{SFT}\left(\bigcup \mathcal{D}_i\right)$ or $\pi_{i} \gets \text{DPO}(\mathcal{D}_i, \pi_{i-1})$
+    \EndFor
+    \Statex
+    \Return Best $\pi \in \{\pi_1, \dots, \pi_N\}$ on validation dataset
+\end{algorithmic}
+\end{algorithm}
+
+The \method algorithm iteratively trains the student policy $\pi$ through online interactions with the environment $\mathcal{E}$ and corrections from a privileged expert teacher $\pi^E$. The process begins by collecting an initial set of demonstrations of history, reason, and action from the teacher $\mathcal{D} \gets \{h^*_t, \rho^*_t, a^*_t\}$, and training a BC policy $\pi_0$ on this data using supervised fine-tuning (SFT). 
+
+At each iteration, the current learner policy $\pi_i$ is rolled out in the environment to generate new data $\mathcal{D}_i \leftarrow {(h_t, \rho_t, a_t)}$. For each timestep in $\mathcal{D}_i$, \method computes the privileged state $s_t$ by leveraging information available only during training. The privileged teacher is then invoked on trajectories where the agent fails, generating corrected reasoning and actions, $\tilde{\rho}_t, \tilde{a}_t \sim \pi^E(. | \rho_t, a_t, h_t, s_t)$. These corrections are used to augment the dataset $\mathcal{D}_i$. The policy $\pi_i$ is subsequently updated using this augmented dataset through a no-regret learning method. This iterative process continues, refining the policy over multiple iterations until the best-performing policy is selected based on validation.
+
+The update step in \method should be designed to ensure no-regret learning, a property that guarantees the policy's cumulative performance will converge to that of the best possible policy in hindsight. The most common update is to aggregate data $\bigcup \mathcal{D}_i$, and train $\pi_i$ using supervised fine-tuning (SFT) on the aggregated dataset, as done in \DAgger~\citep{ross2011reduction}. This is equivalent to Follow the Regularized Leader (FTRL), a no-regret update step. An alternate update is to treat the problem as a preference optimization problem where the corrected reason action $(\tilde{\rho}_t, \tilde{a}_t)$ is preferred over the student reason action $(\rho_t, a_t)$. Preference optimizers like Direct Policy Optimization (DPO)~\citep{rafailov2024direct} or Kahneman-Tversky Optimization (KTO)~\citep{ethayarajh2024kto} optimize a preference loss while regularizing to the base policy, in this case the previous policy $\pi_{i-1}$. This is equivalent to an Online Mirror Descent (OMD) update, which is also a no-regret update. We use SFT by default but compare it against preference optimization as an ablation in the results.
+\subsection{Analysis}
+\label{sec:approach:analysis}
+ We define the realizability of an expert policy and show how it affects \method performance.
+\begin{definition}[Average Realizability Gap] The average realizability gap $epsilon (\pi^E, T)$ between the privileged expert $\pi^E$ and the best policy $\pi^\star$ over time horizon $T$ is:
+\begin{equation}
+\epsilon (\pi^E, T)  := \sup_{\pi} \frac{1}{T} \sum_{t=1}^{T} \mathbb{E}_{s_t, h_t \sim d^\pi_t} || \pi^E(a_t|s_t) - \pi^{\star}(a_t | h_t)) ||_1
+\end{equation}
+where $||.||_1$ is the L1 distance, $d^\pi_t$ is the induced distribution over state and history of \emph{any policy $\pi$}.
+\end{definition}
+\begin{theorem}[\method with Privileged Expert] Running $N$ iterations of \method with privileged expert $\pi^E$ yields at least one policy $\pi$ such that the time-average performance $\frac{1}{T} J(\pi)$ is bounded as:
+\begin{equation}
+    \frac{1}{T} J(\pi) \geq \frac{1}{T} J(\pi^E)  - H(\pi^E) \left( \epsilon (\pi^E, T) + \gamma(N) \right)
+\end{equation}
+where $\pi^E$ is the privileged expert, $H(\pi^E)$ is the recoverability coefficient of $\pi^E$, $\epsilon (\pi^E, T)$ is the average realizability gap, and $\gamma(N)$ is the average regret of the \DAgger update. 
+\end{theorem}
+The equation shows a trade-off between performance of the privileged expert (first term) and the realizability of the privileged expert (second term), which we show how to optimize in 
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Overview of Results}
+
+We evaluate \method across $3$ decision-making domains: ALFWorld, a text-based game, WebShop, a web navigation environment, and Intercode, an interactive coding environment. Below is a summary:
+
+\begin{enumerate}[nosep, left=0.2mm]
+    \item \textbf{\method improves upon base behavior cloning (BC) policy:} \method significantly improves the base BC policy $\pi_0$ over successive fine-tuning iterations, showing gains on AlfWorld ($65.7\%\rightarrow 91.8\%$), WebShop ($29.4\%\rightarrow 61.8\%$), and InterCode ($60.3\%\rightarrow 71.8\%$). See Tables~\ref{tab:alfworld_eval_in_and_out_of_distribution},~\ref{tab:intercode_bash_eval}, Fig.~\ref{fig:webshop_eval_table_plots}.
+    \item \textbf{\method enables weaker student models to surpass stronger teacher models:} Over successive iterations, student models (e.g., Llama3-8B) outperform their stronger teachers (e.g., GPT-4o), despite starting with lower or comparable performance. For example, on ALFWorld, the student model ($\pi_3: 91.8\%$) surpasses the teacher ($\pi^E: 65.7\%$), with similar trends on WebShop ($\pi_2: 61.8\%$ vs. $\pi^E: 58.4\%$) and InterCode ($\pi_3: 71.8\%$ vs. $\pi^E: 71.3\%$). See Tables~\ref{tab:alfworld_eval_in_and_out_of_distribution},~\ref{tab:intercode_bash_eval}, Fig.~\ref{fig:webshop_eval_table_plots}.
+    \item \textbf{\method requires a balance between using privileged information and generating realizable corrections:} Experts using minimal privileged information ($\pi^E_1: 73.1\%$) generate more realizable actions, while those with excessive privileged feedback ($\pi^E_5: 5.22\%$) produce unrealizable corrections. $\pi^E_3$ strikes a perfect balance achieving optimal performance ($\pi^E_3: 91\%$). See Fig.~\ref{fig:ablation_privileged_info_combined}.
+    \item \textbf{\method enables LLM agents to self-improve by using their own privileged versions as experts:} LLM agents can self-improve by using their privileged versions as teachers. For example, in ALFWorld, Llama3-8B bootstraps itself through iterations, improving from $65.7\%$ to $82.1\%$ and finally to $91.8\%$. See Fig.~\ref{fig:self_correction_plot_alfworld}.    
+    \item \textbf{\method can be trained using both SFT or Preference Optimization:} Both SFT and preference optimization improve over the base BC policy ($\pi_0$), with SFT delivering stronger gains ($68.6\%\rightarrow 96.4\%$) compared to DPO ($68.6\%\rightarrow 74.3\%$) and KTO ($68.6\%\rightarrow 87.1\%$). See Table~\ref{tab:sft_vs_preference}.
+\end{enumerate}
+\subsection{Domain 1: Text-based games}
+\textbf{Setup.} ALFWorld~\citep{shridhar2020alfworld} is a text-based game where each task has a high-level objective, e.g. ``heat mug and put it in cabinet'' which the agent must complete by navigating and interacting with a virtual household through text commands, e.g. go to shelf 1, pick up mug 2, etc. To solve it, the agent must plan subgoals, track progress, and search for objects efficiently (e.g. mugs are more likely to be on shelves or cabinets). Each task has $30$ timesteps. There are $6$ categories of tasks, training dataset of $3257$ games and two evaluation datasets: $139$ in-distribution games and $134$ out-of-distribution games. We compare against a prior work BUTLER~\citep{shridhar2020alfworld} and \texttt{ReAct}~\citep{yao2022react}; the original \react paper used text-davinci-002 with task-dependent in-context examples. We add \react with stronger models such as \gptfo\footnote{https://platform.openai.anthropic.google.dev/gemini-api/docs/models/gemini}, and a general instruction prompt. For \method, we LoRA~\citep{hu2021lora} fine-tune Llama3-8B~\citep{dubey2024llama} model using \gptfo as the privileged expert teacher for $4$ iterations. The privileged information for each game contains the essential objects to solve the task, object locations, and the optimal actions.
+\begin{table}[!t]
+\centering
+\begin{minipage}{\textwidth}
+\centering
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{l|cc|c c c c c c}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{2}{c|}{\textbf{All tasks}} & \multicolumn{1}{c}{\textsc{Pick} tasks} & \multicolumn{1}{c}{\textsc{Clean} tasks} & \multicolumn{1}{c}{\textsc{Heat} tasks} & \multicolumn{1}{c}{\textsc{Cool} tasks} & \multicolumn{1}{c}{\textsc{Look} tasks} & \multicolumn{1}{c}{\textsc{Pick 2} tasks} \\
+\cmidrule(lr){2-9}
+& \texttt{\%suc}$\uparrow$ & \texttt{\#act}$\downarrow$ & \texttt{\%suc}$\uparrow$ & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$ \\
+\midrule
+\texttt{BUTLER} \textcolor{perfred}{[1]}  & 35.0 & - & 50.0 & 74.0 & 83.0 & 91.0 & 39.0 & 65.0 \\
+\texttt{ReAct} few-shot \textcolor{perfred}{[2]} & 57.0 & - & 65.0 & 39.0 & 83.0 & 76.0 & 55.0 & 24.0 \\
+\cmidrule(lr){1-9}
+\texttt{ReAct} \gptfo & 65.7 & 20.2 & 91.7  & 35.5  & 56.5  & 52.4  & 100.0  & 76.5 \\
+\texttt{ReAct} \gptfomini & 29.9 & 25.5 & 33.3  & 25.8  & 17.4  & 14.3  & 66.7  & 29.4 \\
+\texttt{ReAct} \texttt{claude-3.5-sonnet} & 76.1 & 19.0 & \cellgreen 95.8  & 61.3  & 60.9  & 81.0  & 88.9  & 76.5 \\
+\texttt{ReAct} \texttt{claude-3.5-haiku} & 16.4 & 27.2 & 33.3  & 9.7  & 8.7  & 9.5  & 38.9  & 0.0 \\
+\texttt{ReAct} \texttt{gemini-1.5-flash} & 19.4 & 26.3 & 41.7  & 12.9  & 13.0  & 19.0  & 16.7  & 11.8 \\
+\midrule
+\method \texttt{Llama3-8B} & 0.7 & 29.8 & 0.0  & 0.0  & 0.0  & 4.8  & 0.0  & 0.0 \\
+\method \texttt{Llama3-8B} $\pi_0$ & 65.7 & 18.6 & 66.7  & 74.2  & 73.9  & 66.7  & 66.0  & 35.3 \\
+\method \texttt{Llama3-8B} $\pi_1$ & 91.0 &  11.9 & 83.3  & 90.3  & \cellgreen 91.3  & \cellgreen 95.2  & \cellgreen 94.4  & \cellgreen 94.1 \\
+\method \texttt{Llama3-8B} $\pi_2$ & 83.6 & 13.1 &  87.5  & 90.3  & 73.9  & \cellgreen 95.2  & 66.7  & 82.4 \\
+\method \texttt{Llama3-8B} $\pi_3$ & \cellgreen 91.8 & \cellgreen 11.3 &  87.5 & \cellgreen 93.5  & \cellgreen 91.3  & 90.5  & \cellgreen 94.4  & \cellgreen 94.1 \\
+\bottomrule
+\end{tabular}
+}
+\end{minipage}
+\begin{minipage}{\textwidth}
+\centering
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{l|cc|c c c c c c}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{2}{c|}{\textbf{All tasks}} & \multicolumn{1}{c}{\textsc{Pick} tasks} & \multicolumn{1}{c}{\textsc{Clean} tasks} & \multicolumn{1}{c}{\textsc{Heat} tasks} & \multicolumn{1}{c}{\textsc{Cool} tasks} & \multicolumn{1}{c}{\textsc{Look} tasks} & \multicolumn{1}{c}{\textsc{Pick 2} tasks} \\
+\cmidrule(lr){2-9}
+& \texttt{\%suc}$\uparrow$ & \texttt{\#act}$\downarrow$ & \texttt{\%suc}$\uparrow$ & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$  & \texttt{\%suc}$\uparrow$ \\
+\midrule
+\texttt{BUTLER} \textcolor{perfred}{[1]}  & 40.0 & - & 69.0 & 67.0 & 88.0 & 76.0 & 69.0 & 54.0 \\
+\texttt{ReAct} \gptfo & 54.3 & 22.9 & 91.4 & 33.3 & 31.2 & 12.0 & 84.6 & 66.7 \\
+\texttt{ReAct} \gptfomini \phantom{heres} & 40.0 & 26.1 & 11.1 & 12.5 & 4.0 & 53.8 & 20.8 &  20.8 \\
+\midrule
+\method \texttt{Llama3-8B} & 2.9 & 29.5 & 8.6 & 0.0 & 0.0 & 0.0 & 7.7 & 0.0 \\
+\method \texttt{Llama3-8B} $\pi_0$ & 68.6 & 16.9 & 88.6 & 51.9 & 56.2 & 80.0 & 76.9 & 50.0 \\
+\method \texttt{Llama3-8B} $\pi_1$ & \best 96.4 &  10.5 & \best 100.0 & \best 100.0 & \best 100.0 & \best 92.0 & 92.3 & \best 91.7 \\
+\method \texttt{Llama3-8B} $\pi_2$ & 90.0 & 11.4 & 94.3 & 92.6 &  87.5 & 88.0 &  92.3 & 83.3 \\
+\method \texttt{Llama3-8B} $\pi_3$ & 94.2 & \cellgreen 10.3 & \best 100.0 & 96.3 & \best 100.0 & 87.5 & \best 100.0 & 83.3 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:alfworld_eval_in_and_out_of_distribution}
+\end{minipage}
+\end{table}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.9\textwidth, trim = 0cm 0.0cm 0cm 0cm]{figures/alfworld_qualitative.pdf}
+\caption{\textbf{ALFWorld Training and Testing for \method.} \textbf{(a)} \textbf{Training:} Student policy $\pi_0$ rolled out on training task to generate reason and actions, e.g. it fails to cell phone because it inefficiently searches all drawers. Expert teacher $\pi^E$ uses privileged information (cellphone in desk1) to generate general corrected reason actions that don't reveal privileged information (cellphones commonly found in desks, more efficient to search desks than drawers).
+\label{fig:alfworld_qualitative}
+\end{figure*}
+
+\textbf{Results.}
+Table~\ref{tab:alfworld_eval_in_and_out_of_distribution} shows that \method significantly outperforms all baselines, with the best policy achieving $91.8\%$ success rate on out-of-distribution tasks. Iteration $1$ of \method has the biggest performance gain $(65.7\% \rightarrow 91.0\%)$, \textbf{leading to a  student policy $\pi_1$ that surpasses the teacher \gptfo} with higher success rate $(91.8\% > 65.7\%)$ and lower actions $(11.3 < 20.2)$. Note that performance improvements are not monotonic over iterations of \method, $(65.7\% \rightarrow 91.0\% \rightarrow 83.6\% \rightarrow 91.8\%)$, however, all policies are better than the BC policy $\pi_0$. The regression from $\pi_1$ to $\pi_2$ are mainly from \textsc{Heat} and \textsc{Look} tasks, which gets corrected immediately in the next iteration $\pi_3$. Finally. we note that \method policies generalize well from in-distribution to out-of-distribution tasks with only a slight dip in performance for the final policy $\pi_3$ $(94.2\% \rightarrow 91.8\%)$. 
+
+Fig.~\ref{fig:alfworld_qualitative} (a) shows an example of \method training and testing. A typical failure mode of $\pi_0$ is that it searches for items inefficiently, e.g. looking at shelves or drawers or cabinets one by one until time runs out. The expert teacher leverages the privileged state of where objects are to show the student how to search efficiently without revealing the object location, e.g. it's more efficient to search desks where cellphones are likely to be than drawers sequentially one after another. Training on this correction data, $\pi_1$ \emph{generalizes this reasoning to new test-time tasks}, e.g. putting a watch in a safe. Fig.~\ref{fig:alfworld_qualitative} (b) shows that while $\pi_0$ inefficiently searches shelves, $\pi_1$ searches likely locations for the watch, first the sidetable and then the dresser to solve the task. The main performance gains of \method over \gptfo come from such efficient exploration. \gptfo searches likely locations, however, its prior is from internet data and isn't necessarily aligned with the statistics of the ALFWorld environment. In contrast, \method leverages privileged feedback to learn this. 
+
+\subsection{Domain 2: Web agents}
+\label{sec:results:webshop}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.87\textwidth, trim = 0cm 0.0cm 0cm 0cm]{figures/webshop_eval_table_plots.pdf}
+\caption{\textbf{WebShop Evaluation.} \textbf{(a)} Overall \texttt{score}$\uparrow$ and \texttt{\#act}$\downarrow$ on $500$ test tasks (max $30$ actions). \textbf{(b)} Performance of \method over iterations on $4$ different score components. 
+Baseline comparisons include \textcolor{perfred}{[1]} IL~\citep{yao2022webshop} and our \react instruction prompt with different models. \method with an 8B model across iterations ($\pi_2, \pi_3$) outperforms the stronger teacher \texttt{ReAct} \gptfo. \figGap}
+\label{fig:webshop_eval_table_plots}
+\end{figure*}
+
+\textbf{Setup.} WebShop~\citep{yao2022webshop} is an online shopping environment where each task is a shopping request from a user (``I need a gluten-free bacon, 4 oz pack of 2, priced under \$50'') that the agent has to solve through web interactions (search[``gluten-free bacon''] or click options). Success is determined by an overall score with $4$ components: whether attributes match (\textsc{Att}), whether options match (\textsc{Opt}), whether product types match (\textsc{Type}) and whether price matches (\textsc{Price}). Each task has $30$ timesteps. The training dataset has $12086$ tasks, the test dataset has $500$ tasks. We compare against \texttt{ReAct}~\citep{yao2022react} with different base models like GPT-4o and GPT-4o-mini. We also compare against IL baseline in WebShop~\citep{yao2022webshop}, which trains two models, one for search (from a list of keywords) and one for clicking, thus simplifying the problem. 
+We LoRA fine-tune Llama3-8B model using \gptfo as the privileged expert teacher for 4 iterations. The privileged information contains product attributes, product option, price constraint, and an example product that would satisfy all criteria.
+
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/webshop_qualitative.pdf}x
+\caption{\small \textbf{WebShop Training and Testing for \method.} \textbf{(a) Training:} Teacher policy generates corrections on student rollout to backtrack when the product does not fit criteria or to commit to a product when it does. 
+}
+\label{fig:webshop_qualitative}
+\end{figure*}
+
+\textbf{Results.}
+Fig.~\ref{fig:webshop_eval_table_plots} (a) shows that \method outperforms all baselines, with the best policy ($\pi_2$) achieving $61.4$ score. Iteration $1$ has the biggest performance gain $(29.4 \rightarrow 51.8)$ followed by iteration 2 $(51.8 \rightarrow 61.8)$. This \textbf{leads to a student policy $\pi_2$ that surpasses the teacher GPT-4o} with a higher score $(61.8 > 58.4)$. Similar to ALFWorld, while performance improvements are not monotonic, both $\pi_2, \pi_3$ remain above the teacher \gptfo performance. Fig.~\ref{fig:webshop_eval_table_plots} (b) shows how \method improves on all $4$ components of the score. The biggest improvements between \method and \gptfo is in \textsc{Opt} component $(42.4 > 22.1)$, indicating \gptfo fails to select a product with the right option often.
+
+Fig.~\ref{fig:webshop_qualitative} (a) shows an example \method correction of $\pi_0$ and $\pi_1$ from the training data. The teacher leverages the privileged state such as the attributes or options of the product to teach the student to recognize when an item does not fit the description and the agent should backtrack. It also teaches the student when to commit to a product if it satisfies all criteria rather than being non-committal and searching for options. Training on this correction data yields a policy $\pi_2$ that balances correctly backtracking vs committing to a product. Fig.~\ref{fig:webshop_qualitative} (b) shows that $\pi_0$ fails to commit to a product needlessly cycling through pages till time runs out. In contrast, $\pi_2$ correctly backtracks and then selects a second item that solves the task. 
+
+\subsection{Domain 3: Interactive Coding}
+
+\textbf{Setup.} Intercode Bash~\citep{yang2024intercode} is an interactive coding environment, where the agent receives a task that involves operations on a filesystem, e.g. ``Find all text files and write their names to a single file'', and must interact with Bash to solve it and submit a final command.
+\begin{wraptable}[15]{r}{0.4\textwidth}
+\centering
+\resizebox{0.4\textwidth}{!}{
+\begin{tabular}{l|cc}
+\toprule
+Method & \texttt{\%succ}$\uparrow$ & \texttt{\#act}$\downarrow$ \\
+\midrule
+\texttt{gpt-4} \textcolor{perfred}{[1]} & $48.5^\star$ & - \\
+\texttt{gpt-3.5} \textcolor{perfred}{[1]} & $46.5^\star$ & -\\
+CodeLlama-34B-INST \textcolor{perfred}{[1]} & $36.0^\star$ & -\\
+\midrule
+\texttt{ReAct} \texttt{gpt-4o} & 71.3 & \cellgreen 3.8 \\
+\texttt{ReAct} \texttt{gpt-4o-mini} & 43.4 & 6.0\\
+\midrule
+\method \texttt{Llama-3.1-8b} $\pi_0$ & 41.4 & 6.6 \\
+\method \texttt{Llama-3.1-8b} $\pi_1$ & 49.9 & 5.5 \\
+\midrule
+\method \texttt{Llama-3.1-70b} $\pi_0$ &  60.3 &  4.8 \\
+\method \texttt{Llama-3.1-70b} $\pi_1$ & \cellgreen 71.8 & 5.1 \\
+\bottomrule
+\end{tabular}
+}
+\caption{\textbf{Intercode Bash Evaluation.} Overall success rate and actions on test data (max $10$ actions). Baselines from \textcolor{perfred}{[1]} \citep{yang2024intercode} evaluated on $^\star$(train + test) data. \figGap}
+\label{tab:intercode_bash_eval}
+\end{wraptable}
+Intercode uses NL2Bash~\citep{lin2018nl2bash} to create $4$ datasets. We use the first $2$ for training, and the next $2$ for testing. We limit time horizon to $10$. We compare against \react~\citep{yao2022react} with \gptfo and \gptfomini. 
+We also compare against the top 3 entries on the Intercode leaderboard, which are the \texttt{TryAgain} baselines from \citep{yang2024intercode} with \gptf, \gptt and CodeLlama-34B-INST~\citep{roziere2023code} respectively. We LoRA fine-tune both Llama-3.1-8B model and Llama-3.1-70B model, each for $2$ iterations,  using \gptfo as the privileged expert teacher. The privileged information is the ground truth Bash command.
+
+\textbf{Results.} Table~\ref{tab:intercode_bash_eval} shows that \method trained with $70$B policy outperforms all baselines, with policy $\pi_1$ achieving $71.8\%$ success rate to match the \gptfo expert teacher $(71.8\% > 71.3 \%)$. We find that on this coding benchmark, the \gptfo expert is a very strong baseline. \method trained with $8$B models improve over the BC policy, but falls short of the \gptfo expert teacher. These results show that if the expert teacher is already a strong baseline, even after leveraging privileged information, it might be hard for the student to outperform the teacher. 
+
+\subsection{What is the trade-off between Privileged Information and Realizability?}
+\label{sec:results:tradeoff}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.9\textwidth, trim = 0cm 0.0cm 0cm 0cm]{figures/ablation_privileged_info_combined.pdf}
+\caption{\textbf{Privileged Information vs Realizability.} \textbf{(a)} Performance of $5$ policies trained with experts with varying levels of privileged information on ALFWorld, peaking for expert $\pi^E_3$. 
+\textbf{(b)} Examples of corrections from experts $\pi^E_1, \pi^E_3, \pi^E_5$. $\pi^E_1$ generates realizable reason action but predicts wrong action. $\pi^E_5$ predicts correction action, but produces unrealizable reason action that contains privileged information. $\pi^E_3$ strikes a perfect balance. 
+\figGap}
+\label{fig:ablation_privileged_info_combined}
+\figGap
+\end{figure*}
+
+We study the tradeoff between how much privileged state the expert uses vs the realizability of their corrections on ALFworld. We create $5$ different privileged experts $\pi_E^1, \dots, \pi_E^5$ by varing the prompt to instruct them to use increasing amounts of privileged state, e.g. for $\pi_E^2$ it says ``Use this information sparingly for your correction,'' but for $\pi_E^4$ it says ``feel free to include information from the privileged state''. We run 1 iteration of \method to generate updated $\pi^1, \dots, \pi^5$. Fig.~\ref{fig:ablation_privileged_info_combined} (a) shows that success rate initially rises from $\pi^1$ to $\pi^3$, but then falls off sharply till $\pi^5$. Num actions has a similar trend. This validates the hypothesis that there is indeed an optimal tradeoff. Interestingly, $\pi_5$ is much worse than $\pi_1$, showing that it's more important to be realizable than to provide optimal yet unrealizable corrections. Fig.~\ref{fig:ablation_privileged_info_combined} (b) shows the corrections from $\pi^E_1, \pi^E_3, \pi^E_5$. $\pi^E_1$ generates reasoning that is perfectly realizable to the student, but since it has no privileged state the actions are not optimal. In contrast, $\pi^E_5$ predicts the correct action, but blatantly reveals the privileged information in the reason, being unrealizable to the student. $\pi^E_3$ strikes a perfect balance where it offers the correct action, but offers a reason that is very much realizable, i.e. kettles are likely to be in stoveburners. 
+
+
+
+
+\subsection{Can \method be used to self-correct a student?}
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.9\textwidth, trim = 0cm 0.0cm 0cm 0cm]{figures/self_correction_plot_alfworld.pdf}
+\label{fig:self_correction_plot_alfworld}
+\end{figure*}
+
+We test the hypothesis that \method should enable a model to self-improve by using its privileged version as the expert. On ALFWorld, we fine-tune Llama3-8B initializing with the BC policy $\pi_0$ and running $2$ iterations of self-improvement. Fig.~\ref{fig:self_correction_plot_alfworld} shows that \method is able to significantly self-improve policies over iterations $(65.7\% \rightarrow 82.1\% \rightarrow 91.8\%)$, with the final policy \textbf{matching the best policy when using GPT-4o as a teacher}. We see uniform improvements across all categories, with some being improved more from $\pi_0 \rightarrow \pi_1$ and others from $\pi_1 \rightarrow \pi_2$. We conclude that for some environments, like ALFworld, the privileged state does the heavy lifting, i.e. performance improvements happen at a similar rate to using a strong teacher vs using the model itself as a teacher. We note that this need not hold for all environments, e.g. for some a strong teacher is required to extract the optimal reason and action from the privileged state. Additionally, if the base policy $\pi_0$ is not strong, there maybe not lift off for the model and rate of improvement would be limited. 
+\subsection{How does SFT compare to Preference Optimization?}
+
+\begin{wraptable}{r}{0.4\textwidth}
+\centering
+\resizebox{0.4\textwidth}{!}{
+\begin{tabular}{l|l|cc}
+\toprule
+ & Method & \texttt{\%succ}$\uparrow$ & \texttt{\#act}$\downarrow$ \\
+\midrule
+\multirow{4}{*}{\rotatebox[origin=c]{90}{in-dist.}} 
+& \method $\pi_0$ & 68.6 & 16.9 \\
+& \method \texttt{DPO} ($\beta:0.1$) $\pi_1$ & 74.3 & 15.7 \\
+& \method \texttt{DPO} ($\beta:0.01$) $\pi_1$ & 74.3 & 15.6 \\
+& \method \texttt{KTO} ($\lambda_U:0.0$) $\pi_1$ & 87.1 & 11.6 \\
+& \method \texttt{SFT} $\pi_1$ & 96.4 & 10.5 \\
+\midrule
+\multirow{4}{*}{\rotatebox[origin=c]{90}{out-dist.}} 
+& \method $\pi_0$ & 65.7 & 18.6 \\
+& \method \texttt{DPO} ($\beta:0.1$) $\pi_1$ & 71.6 & 17.9 \\
+& \method \texttt{DPO} ($\beta:0.01$)  $\pi_1$ & 70.9 & 17.7 \\
+& \method \texttt{KTO} ($\lambda_U:0.0$) $\pi_1$ & 88.1 & 11.7 \\
+& \method \texttt{SFT} $\pi_1$ & 91.0 & 11.9 \\
+\bottomrule
+\end{tabular}
+}
+\caption{\textbf{SFT vs Preference:} \method with SFT vs DPO vs KTO on ALFWorld. \figGap
+}
+\label{tab:sft_vs_preference}
+\end{wraptable}
+We study the effect of different update methods for \method: SFT vs Preference Optimization. Our initial hypothesis is that KL regularized preference optimization should also result in performance improvement without needing to aggregate datasets. We run $1$ iteration of DPO with different regularization $\beta$ values. Table.~\ref{tab:sft_vs_preference} shows that while  DPO improves upon the base $\pi_0$ policy, the improvement is far smaller than SFT for both $\beta=0.1, 0.01$. One explanation is that SFT is far more aggressive in using the correction data compared to preference optimization, i.e., SFT deems the corrected reason action to be better than any alternative. To test this, we used a different preference optimizer KTO, that operates with unpaired preference data and set weight $\lambda_D=1.0, \lambda_D=0.0$, effectively emulating SFT-like behavior. KTO with these settings has a significantly high performance of $88.1\%$ close to SFT ($91.0\%$).  
+
+
+
+
+
+\section{Related Work}
+
+
+\textbf{Imitation Learning and Privileged Information.}
+A powerful paradigm in machine learning is leveraging privileged information~\citep{vapnik2015learning}—data available only during training and inaccessible at test time. This concept has been transformative in robotics, where a simulated expert policy with full state supervises a learner that only perceives sensor observations, such as navigation~\citep{zhang2016learning, uppal2024spin}, self-driving~\citep{chen2020learning}, manipulation~\citep{chen2023visual, hu2024privileged}, and legged locomotion~\citep{lee2020learning, kumar2020conservative}.
+
+A fundamental challenge in utilizing privileged information is the realizability gap—where actions suggested by an expert may be infeasible for the learner to predict. This gap often leads to spurious correlations, manifesting as the ``latching effect'' where learners repetitively predict the same action, commonly observed in autonomous driving~\citep{muller2005off, kuefler2017imitating, bansal2018chauffeurnet, codevilla2019exploring} and language models~\citep{bengio2015scheduled, holtzman2019curious, wang2020exposure, ortega2021shaking}. While off-policy methods~\citep{wen2020fighting, wen2022fighting} have been proposed, \citep{swamy2022sequence} show that online interaction with the environment is necessary.
+
+Interactive imitation learning methods such as \DAgger~\citep{ross2011reduction}, where experts provide corrective actions during the learner's rollouts, both theoretically and empirically lead to very effective policies in this regime~\citep{choudhury2018data}. These methods operate under the assumption of asymptotic realizability~\citep{swamy2022sequence}, where the learner's policy can eventually match the expert's actions as the episode progresses. However, when this assumption fails—often due to the partial observability of the task or model capacity—suboptimal performance ensues, particularly for LLM agents, as demonstrated by our experiments (Sec.~\ref{sec:results:tradeoff}). While recent approaches resort to exploration or RL~\citep{walsman2022impossibly, tennenholtz2021covariate, nguyen2022leveraging, weihs2021bridging}, these are intractable to extend to LLM agents. Our work provides a practical recipe for LLM agents that optimally balances the trade-off between using privileged information and maintaining realizability, and further shows how such an expert can be used to enable policy self-improvement.
+
+
+
+
+
+\textbf{Learning from AI Feedback.} A scalable method for aligning language model using AI feedback~\citep{lee2023rlaif}. Recent works have explored different types of feedback, from self-generated corrections to those provided by external AI models or environments~\citep{pan2023automatically}.
+One body of work focuses on self-correction, where LLMs refine their responses based on feedback from their own outputs~\citep{bai2022constitutional, madaan2024self}. This can occur either at train-time, where LLMs are fine-tuned to generate corrected responses~\citep{bai2022constitutional, ganguli2023capacity}, or at test-time, where the model improves its response interactively~\citep{madaan2024self}. However, while simple in principle,~\citep{huang2024llmselfcorrect} shows that without external sources of feedback, LLMs often struggle to accurately judge the correctness of their reasoning, limiting the effectiveness of purely self-generated corrections.
+
+Another cluster of work explores feedback from external sources. Some approaches use feedback from strong models like GPT-4 acting as judges~\citep{zheng2023judging} or critics trained on high-quality curated data~\citep{wang2023shepherd, paul2023refiner}. Others leverage environmental feedback or external tools to guide improvements. \citep{welleck2023generating} uses environmental feedback to train a corrector model, \citep{chen2023teaching, olausson2023demystifying} utilize execution feedback to improve code generation, and \citep{gou2023critic} employs external tools. Notably, Reflexion~\citep{shinn2023reflexion} leverages feedback from external environments to generate self-reflections for agents, although it assumes multiple attempts in the same environment, which our approach does not. Our work introduces the use of privileged information in decision-making tasks for LLM agents, a technique not yet fully explored in the literature. This also enables LLM agents to self-improve using privileged information, setting it apart from existing self-improvement methods that rely on iterative solution generation and evaluation~\citep{zelikman2022star, pang2024iterative, hosseini2024v}.
+
+
+
+
+
+
+
+
+
+\section{Limitations}
+
+
+We proposed \method, an iterative fine-tuning framework that improves LLM agent performance using privileged AI feedback, enabling weaker models to surpass stronger expert teachers and allowing agents to self-improve. However, \method has notable limitations. First, generating interaction rollouts is time-consuming, particularly in complex environments requiring multi-step reasoning. Each rollout requires simulating the environment and generating complete trajectories, that becomes computationally expensive across multiple fine-tuning iterations. Second, corrective feedback from the expert often results in lengthy output tokens. As trajectory lengths grow, balancing the effectiveness of feedback with its verbosity becomes challenging. Exploring methods to distill and summarize expert feedback at critical points is an interesting direction for future work.
+
+
+\newpage
+
+

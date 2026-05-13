@@ -1,0 +1,434 @@
+\title{Generative Marginalization Models}
+
+\begin{abstract}
+  We introduce \textit{marginalization models} (\ours{}s), a new family of generative models for high-dimensional discrete data. They offer scalable and flexible generative modeling with tractable likelihoods by explicitly modeling all induced marginal distributions. Marginalization models enable fast evaluation of arbitrary marginal probabilities with a single forward pass of the neural network, which overcomes a major limitation of methods with exact marginal inference, such as autoregressive models (ARMs). We propose scalable methods for learning the marginals, grounded in the concept of ``\textit{marginalization self-consistency}''.
+  Unlike previous methods, \ours{}s also support scalable training of any-order generative models for high-dimensional problems under the setting of \textit{energy-based training}, where the goal is to match the learned distribution to a given desired probability (specified by an unnormalized (log) probability function such as energy or reward function). We demonstrate the effectiveness of the proposed model on a variety of discrete data distributions, including binary images, language, physical systems, and molecules, for \textit{maximum likelihood} and \textit{energy-based training} settings. \ours{}s achieve orders of magnitude speedup in evaluating the marginal probabilities on both settings. For energy-based training tasks, \ours{}s enable any-order generative modeling of high-dimensional problems beyond the capability of previous methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Deep generative models have %
+enabled remarkable progress 
+across diverse fields, 
+including image generation, audio synthesis, natural language modeling, and scientific discovery. However, %
+there remains a pressing need to better support efficient probabilistic inference for key questions involving  marginal probabilities
+$p(\boldx_\mcS)$ and conditional probabilities $p(\boldx_\mcU|\boldx_\mcV)$, 
+for appropriate subsets $\mcS,\mcU,\mcV$ of the 
+variables. The ability to
+directly address such quantities 
+is critical in 
+applications such as outlier detection~\cite{ren2019likelihood, mitchell2023detectgpt}, masked language modeling~\cite{devlin2018bert, yang2019xlnet}, image inpainting~\citep{yeh2017semantic}, and constrained protein/molecule design~\citep{wang2022scaffolding, schneuing2022structure}. Furthermore, the capacity to conduct such inferences for arbitrary subsets of variables empowers users 
+to leverage the model according to their specific needs and preferences. For instance, in protein design, 
+scientists may want to manually guide the generation of a protein from a user-defined substructure under a particular path over the relevant variables. 
+This requires the generative model to perform arbitrary marginal inferences. 
+
+Towards this end, neural autoregressive models (ARMs)~\citep{bengio2000taking, larochelle2011neural} have been developed to facilitate conditional/marginal inference based on the idea of modeling a high-dimensional joint distribution as a factorization of univariate conditionals using the chain rule of probability. Many efforts have been made to scale up ARMs and enable any-order generative modeling under the setting of maximum likelihood estimation (MLE)~\citep{larochelle2011neural, uria2014deep, hoogeboom2021autoregressive}, and great progress has been made in applications such as masked language modeling~\citep{yang2019xlnet} and image inpainting~\citep{hoogeboom2021autoregressive}. However, marginal likelihood evaluation in the most widely-used modern neural network architectures (e.g., Transformers~\citep{vaswani2017attention} and U-Nets~\citep{ronneberger2015u}) is limited by $\mcO(D)$ neural network passes, where $D$ is the length of the sequence. This scaling makes it difficult to evaluate likelihoods on long sequences arising in data such as natural language and proteins.  %
+In contrast to MLE, in the setting of \textit{energy-based training} (EB),
+instead of empirical data samples, we only have access to an unnormalized (log) probability function (specified by a reward or energy function) that can be evaluated pointwise for the generative model to match. 
+In such settings, ARMs are limited to fixed-order generative modeling and lack scalability in training. The subsampling techniques developed to scale the training of conditionals for MLE are no longer applicable when matching log probabilities in energy-based training (see \Cref{sec:4_arm_limits} for details).
+
+\begin{figure}[th]
+  \centering
+  \includegraphics[width=1.0\textwidth]{figures/marginalization_binary_only.pdf}
+  \caption[figure of marg]{\small Marginalization models (\ours{}s) enable estimation of any marginal probability with a neural network $\theta$ that learns to ``marginalize out'' variables. The figure illustrates marginalization of a single variable on bit strings (representing molecules) with two alternatives (versus $K$ in general) for clarity. The bars represent probability masses.}
+  \label{fig:marginalization}
+\end{figure}
+
+To 
+enhance scalability and flexibility in the generative modeling of discrete data,
+we propose a new family of generative models, \textbf{marginalization models} (\ours{}s), that directly model the marginal distribution $p(\boldx_\mcS)$ for any subset of variables $\boldx_\mcS$ in $\boldx$. Direct access to marginals has two important advantages: 1) \textit{significantly speeding up inference for any marginal}, and 2) \textit{enabling scalable training of any-order generative models under both MLE and EB settings}.
+
+\begin{wrapfigure}{r}{0.4\linewidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/compare_of_methods_latest.pdf}
+  \caption{\small Scalability of sequential discrete generative models. The y-axis unit is \# of NN forward passes required.}
+  \label{fig:compare_methods} 
+\end{wrapfigure}
+
+The unique structure of the model allows it to simultaneously represent the coupled collection of all marginal distributions of a given discrete joint probability mass function.
+For the model to be valid, it must be consistent with the sum rule of probability, a condition we refer to as ``\textit{marginalization self-consistency}'' (see \Cref{fig:marginalization}); learning to enforce this with scalable training objectives is one of the key contributions of this work.
+
+We show that \ours{}s can be trained under both maximum likelihood and energy-based training settings with scalable learning objectives. We demonstrate the effectiveness of \ours{}s in both settings on a variety of discrete data distributions, including binary images, text, physical systems, and molecules. We empirically show that \ours{}s achieve orders of magnitude speedup in marginal likelihood evaluation. For energy-based training, \ours{}s are able to scale training of any-order generative models to high-dimensional problems that previous methods fail to achieve.
+
+
+
+\section{Background}
+
+
+We first review two prevalent settings for training a generative model: \textit{maximum likelihood estimation} and \textit{energy-based training}. Then we introduce autoregressive models.
+
+\textbf{Maximum likelihood (MLE)}\quad
+Given a dataset $\mcD = \{\boldx^{(i)}\}_{i=1}^N$ drawn i.i.d. from a data distribution $p = p_\text{data}$, we aim to learn the distribution $p_\theta(\boldx)$ via maximum likelihood estimation:
+\begin{equation}
+    \max_\theta \; \bbE_{\boldx \sim p_{\text{data}}} \left[\log p_\theta(\boldx)\right] \approx \max_\theta \;\frac{1}{N}\sum\nolimits_{i=1}^N \log p_\theta(\boldx^{(i)}) \label{eq:ml_obj}
+\end{equation}
+which is equivalent to minimizing the Kullback-Leibler divergence under the empirical distribution, i.e., minimizing $ D_\text{KL}(p_\text{data}(\boldx) || p_{\theta}(\boldx))$. This is the setting that is most commonly used in generation of images (e.g., diffusion models \citep{sohl2015deep, ho2020denoising, song2019generative}) and language (e.g. GPT \citep{radford2019language}) where we can easily draw observed data from the distribution.
+
+\textbf{Energy-based training (EB)}\quad
+In other cases, data from the distribution are not always available. Instead, we have access to an unnormalized probability distribution $f(\cdot)$ typically specified as  ${f(\boldx) = \exp(r(\boldx)/\tau)}$ where $r(\boldx)$ is an energy (or reward) function and $\tau>0$ is a temperature parameter.
+In this setting, the objective is to match $p_\theta(\boldx)$ to $f(\boldx)/Z$, where $Z$ is the normalization constant of $f$. This can be done by minimizing the KL divergence
+~\citep{noe2019boltzmann, wu2019solving,damewood2022sampling},
+\begin{equation}
+\min_\theta \; D_\text{KL}
+\left(p_{\theta} (\mathbf{x}) \| f(\mathbf{x}) /{Z} \right) 
+= \mathbb{E}_{\mathbf{x} \sim p_{\theta}(\mathbf{x})} \left[ \log p_{\theta}\left(\mathbf{x}\right) - \log \left ({f\left(\mathbf{x}\right)}/{Z}\right) \right],
+    \label{eq:eb_kl_obj}
+ \end{equation}
+The reward function $r(\boldx)$ can be defined either by human preferences or by the physical system from first principles. 
+For example, 
+(a) In aligning large language models, $r(\boldx)$ can represent human preferences \citep{ouyang2022training, chatgpt};
+(b) In molecular/material design, it can specify the proximity of a sample's measured or calculated properties to some functional desiderata \citep{bengio2021flow}; and 
+(c) In modeling the thermodynamic equilibrium ensemble of physical systems, it is the (negative) energy function of a given state \citep{noe2019boltzmann,wu2019solving,damewood2022sampling}. 
+
+The training objective in \Cref{eq:eb_kl_obj} can be optimized with Monte Carlo estimate of the gradient using the REINFORCE algorithm \citep{williams1992simple}. The learned generative model $\theta$ allows us to efficiently generate samples approximately from the distribution of interest, which would otherwise be much more expensive via running MCMC with the energy function $f(\cdot)$.
+\textbf{Autoregressive models}\quad
+Autoregressive models (ARMs) \citep{bengio2000taking,larochelle2011neural} model a complex high-dimensional distribution $p(\boldx)$ by factorizing it into univariate conditionals using the chain rule:
+\begin{align}
+    \log p(\boldx)=\sum\nolimits_{d=1}^D \log p\left(x_d \mid \boldx_{<d}\right),
+\end{align}
+where $\boldx_{<d} = \{x_1, \ldots, x_{d-1}\}$.
+ARMs generate examples by sequentially drawing $x_1$ under $p(x_1),$ then $x_2$ under $p(x_2 | x_1),$ and so on. 
+The ARM approach has produced successful discrete-data neural models for natural language, proteins~\citep{shin2021protein, lin2023evolutionary, madani2023large}, and molecules~\citep{segler2018generating, flam2022language}. However, a key drawback of ARM is that evaluation of $p(\boldx)$ or $p(\boldx_s)$ requires $\mcO(D)$ neural network passes, making it costly for problems with high dimensions. This hinders ARM scalability for marginal inference during test time. Furthermore, in energy-based training, taking the gradient of \Cref{eq:eb_kl_obj} that matches $p_\theta(\boldx)$ to $f(\boldx)/Z$ requires $\mcO(D)$ network passes per data sample. As a result, this significantly limits ARM's training scalability under the EB setting for high-dimensional problems.
+\textbf{Any-order ARMs (AO-ARMs)}\quad
+~\citet{uria2014deep} propose to learn the conditionals of ARMs for arbitrary orderings that include all permutations of $\{1,\ldots,D\}$. Under the MLE setting, the model $\phi$ is trained by maximizing a lower-bound objective \citep{uria2014deep,hoogeboom2021autoregressive} using an expectation under the uniform distribution of orderings.
+This objective allows scalable training of AO-ARMs, leveraging efficient parallel evaluation of multiple one-step conditionals for each token in one forward pass with architectures such as the U-Net~\citep{ronneberger2015u} and Transformers~\citep{vaswani2017attention}.
+However, modeling any-order conditionals alone presents training challenges in the EB setting. We discuss this issue in greater detail in \Cref{sec:4_arm_limits}. 
+
+
+
+\section{Marginalization Models}
+
+\label{sec:method}
+
+We propose \textit{marginalization models} (\ours{}s), a new type of generative model that enables scalable any-order generative modeling on high-dimensional problems as well as efficient marginal evaluation, for both maximum likelihood and energy-based training. The flexibility and scalability of marginalization models are enabled by the explicit modeling of the marginal distribution and enforcing \textit{marginalization self-consistency}.
+
+In this paper, we focus on generative modeling of discrete structures using vectors of discrete variables. The vector representation encompasses various real-world problems with discrete structures, including language sequence modeling, protein design, and molecules with string-based representations (e.g., SMILES~\citep{weininger1989smiles} and SELFIES~\citep{krenn2020self}). Moreover, vector representations are inherently applicable to any discrete problem, since it is feasible to encode any discrete object into a vector of discrete variables.
+
+\textbf{Definition}\quad Let $p(\boldx)$ be a discrete probability distribution, where $\boldx = (x_1, \ldots, x_D)$ is a $D$-dimensional vector and each $x_d$ takes $K$ possible values, i.e. $x_d \in \mcX \triangleq \{1,\ldots,K\}$.
+
+\textbf{Marginalization}\quad 
+Let $\boldx_\mcS$ be a subset of variables of $\boldx$ and $\boldx_{\mcS^c}$ be the complement set, i.e. $\boldx_\mcS \subseteq \{x_1, \ldots, x_D\}$ and ${\boldx_{\mcS^c} = \{x_1, \ldots, x_D\} \setminus \boldx_\mcS}$. 
+The marginal of $\boldx_\mcS$ is obtained by summing over all values of $\boldx_{\mcS^c}$: 
+\begin{equation}
+  p(\boldx_\mcS) = \sum\nolimits_{\boldx_{\mcS^c}} p(\boldx_\mcS, \boldx_{\mcS^c}) \label{eq:marginal}
+\end{equation}
+We refer to~\eqref{eq:marginal} as the ``\textit{marginalization self-consistency}'' that any valid distribution should follow. 
+The goal of a marginalization model $\theta$ is to estimate the marginals $p(\boldx_\mcS)$ for any subset of variables $\boldx_\mcS$ as closely as possible. To achieve this, we train a deep neural network $p_\theta$ that minimizes the distance of $p_\theta(\boldx)$ and $p(\boldx)$ on the full joint distribution\footnote{
+An alternative is to consider minimizing distance over some marginal distribution of interest if we only cares about a specific marginal. Note this is impractical under the energy-based training setting, when the true marginal $p(\boldx_\mcS)$ is intractable to evaluate in general.} while enforcing the marginalization self-consistency. In other words, \ours{} learns perform marginal inference over arbitrary subset of variables with a single forward pass.\footnote{Estimating $p(\boldx)$ is a special case of marginal inference where there are no variables to be marginalized.}
+\textbf{Parameterization}\quad
+A marginalization model parameterized by a neural network $\theta$ takes in $\boldx_\mcS$ and outputs the marginal log probability $ f_\theta(\boldx_\mcS) = \log p_\theta(\boldx_\mcS)$. Note that for different subsets $\mcS$ and $\mcS^\prime$, $\boldx_\mcS$ and $\boldx_\mcS^\prime$ lie in different vector spaces. To unify the vector space that is fed into the NN, we introduce an augmented vector space that additionally includes the ``marginalized out'' variables $\boldx_{\mcS^c}$ for an input $\boldx_\mcS$. By defining a special symbol ``$\sv$'' to denote the missing values of the ``marginalized out'' variables, the augmented vector representation is $D$-dimensional and is defined to be:
+\begin{equation*}
+    \boldx_\mcS^\text{aug} (i) = \begin{cases}
+        x_i, & \text{if } i \in \mcS\\
+        \sv, & \text{otherwise}
+    \end{cases}
+\end{equation*}
+
+Now, the augmented vector representation $\boldx_\mcS^\text{aug}$ of all possible $\boldx_\mcS$'s have the same dimension $D$, and for any $i$-th dimension $\boldx_\mcS^\text{aug}(i) \in \mcX^\text{aug} \triangleq \{1,\cdots,K,\sv\}$. For example, let $D=4$ and $\mcX = \{0,1\}$, for ${\boldx_\mcS = \{x_1, x_3\}}$ with $x_1=0$ and $x_3=1$, ${\boldx_\mcS^\text{aug} = (0, \sv, 1, \sv)}$, and $p(\boldx_\mcS^\text{aug}) = \sum_{x_2}\sum_{x_4} p(0,x_2,1,x_4)$. From here onwards we will use $\boldx_\mcS^\text{aug}$  and $\boldx_\mcS$ interchangeably.
+\textbf{Sampling}\quad
+With the marginalization model, one can sample from the learned distribution by picking an arbitrary order and sampling one variable or multiple variables at a time. 
+In this paper, we focus on the sampling procedure that generates one variable at a time.
+To get the conditionals at each step for generation, we can use the product rule of probability:
+\begin{equation*}
+  p_\theta(x_{\sigma(d)} | \boldx_{\sigma(<d)}) = \frac{p_\theta(\boldx_{\sigma (\leq d)})}{p_\theta(\boldx_{\sigma (< d)})}\,,
+\end{equation*}
+However, the above sampling is not a valid conditional distribution if the following single-step marginalization consistency in \eqref{eq:one_step_marginal} is not strictly enforced,
+\begin{equation}
+  p_\theta(\boldx_{\sigma (< d)}) = \sum\nolimits_{x_{\sigma (d)}} p_\theta(\boldx_{\sigma (\leq d)}), \quad \forall \sigma \in S_D, \boldx \in \{1,\cdots,K\}^D, d \in [1:D] \,,\label{eq:one_step_marginal}
+\end{equation}
+since it might not sum up exactly to one. Hence we use following normalized conditional:
+\begin{equation}
+  p_\theta(x_{\sigma(d)} | \boldx_{\sigma(<d)}) = \frac{p_\theta([\boldx_{\sigma (< d)}, x_{\sigma(d)}])}{\textstyle\sum\nolimits_{x_{\sigma (d)}} p_\theta([\boldx_{\sigma (< d)}, x_{\sigma(d)}])} \,.
+\end{equation}
+\textbf{Scalable learning of marginalization self-consistency}\quad 
+In training, we impose the marginalization self-consistency by minimizing the \textit{squared error} of the constraints in~\eqref{eq:one_step_marginal} in log-space.
+Evaluation of each marginalization constraint in~\eqref{eq:one_step_marginal} requires $K$ NN forward passes, where $K$ is the number of discrete values $x_d$ can take. This makes mini-batch training challenging to scale when $K$ is large. To address this issue, we augment the marginalization models with learnable conditionals parameterized by another neural network $\phi$. The marginalization constraints in~\eqref{eq:one_step_marginal} can be further decomposed into $K$ parallel marginalization constraints\footnote{To make sure $p_\theta$ is normalized, we can either additionally enforce $p_\theta\left(\left(\sv, \cdots, \sv \right)\right) = 1$ or let $Z_\theta = p_\theta\left(\left(\sv, \cdots, \sv \right)\right)$ be the normalization constant.}. 
+\begin{align}
+  & p_\theta(\boldx_{\sigma (< d)}) p_\phi(\boldx_{\sigma (d)} | \boldx_{\sigma (< d)}) = p_\theta(\boldx_{\sigma (\leq d)}),
+  \quad & \forall \sigma \in S_D, \boldx \in \{1,\cdots,K\}^D, d \in [1:D].
+  \label{eq:one-step-marginal-conditional}
+\end{align}
+By breaking the original marginalization self-consistency in \Cref{eq:marginal} into highly parallel marginalization self-consistency in \Cref{eq:one-step-marginal-conditional}, we have arrived at $\mcO(K^D{\cdot}D{\cdot}D!)$ constraints. Although the number of constraints increases, it becomes \textit{highly scalable} to train on the marginalization self-consistency via sampling the constraints.
+During training, we specify a distribution $q(\boldx)$ for sampling the marginalization constraints. In practice, it can be set to the distribution of interest to perform marginal inference on, such as $p_\text{data}$ or the distribution of the generative model $p_{\theta,\phi}$. In empirical experiments, we found that training with objectives that decompose to highly parallel self-consistency errors is a key ingredient to learning marginals with scalability.
+
+
+\section{Training the Marginalization Models}
+
+\label{sec:training}
+
+\subsection{Maximum Likelihood Estimation Training}
+In this setting, we train \ours{}s with the maximum likelihood objective while additionally enforcing the marginalization constraints in \Cref{eq:one_step_marginal}:
+\begin{align}
+  \max_{\theta, \phi} \quad & \bbE_{\boldx \sim p_{\text{data}}} \log p_\theta(\boldx)   \label{eq:mar_ml_constr}
+ \\
+  \text{s.t.} \quad & p_\theta(\boldx_{\sigma (< d)}) p_\phi(\boldx_{\sigma (d)} | \boldx_{\sigma (< d)}) = p_\theta(\boldx_{\sigma (\leq d)}), \; \forall \sigma \in S_D, \boldx \in \{1,\cdots,K\}^D, d \in [1:D]. \nonumber
+\end{align}
+\textbf{Two-stage training}\quad
+A typical way to solve the above optimization problem is to convert the constraints into a penalty term and optimize the penalized objective, but 
+we empirically found the learning to be slow and unstable. Instead, we identify an alternative two-stage optimization formulation that is theoretically equivalent to \Cref{eq:mar_ml_constr}, but leads to more efficient training:
+
+\begin{proposition}  \label{thm:mar_ml}
+  Solving the optimization problem in \eqref{eq:mar_ml_constr} is equivalent to the following two-stage optimization procedure, under mild assumption about the neural networks used being universal approximators:
+  \begin{align*}
+    \text{\normalfont \bf Stage 1:} \quad & \max_{\phi} \; \bbE_{\boldx \sim p_{\text{data}}} \bbE_{\sigma \sim \mcU(S_D)}  
+     \sum\nolimits_{d=1}^D \log p_\phi\left(x_{\sigma(d)} \mid \boldx_{\sigma(<d)}\right)
+    \nonumber \\
+    \text{\normalfont \bf Stage 2:} \quad & 
+    \min_{\theta} \; \bbE_{\boldx \sim q(\boldx)} \bbE_{\sigma \sim \mcU(S_D)} \bbE_{d \sim \mcU(1,\cdots,D)} \left( \log [p_\theta(\boldx_{\sigma (< d)}) p_\phi(\boldx_{\sigma (d)} | \boldx_{\sigma (< d)})] - \log p_\theta(\boldx_{\sigma (\leq d)}) \right)^2.
+  \end{align*}
+\end{proposition}
+
+The first stage can be interpreted as \textit{fitting the conditionals} in the same way as AO-ARMs~\citep{uria2014deep,hoogeboom2021autoregressive} and the second stage acts as \textit{distilling the marginals} from conditionals.
+The intuition comes from the chain rule of probability: there is a one-to-one correspondence between optimal conditionals $\phi$ and marginals $\theta$, i.e. $\log p_\theta(\boldx) = \sum\nolimits_{d=1}^{D}  \log p_\phi\left(x_{\sigma(d)} |\boldx_{\sigma(<d)}\right)$ for any $\sigma$ and $\boldx$.  By assuming neural networks are universal approximators, we can first optimize for the optimal conditionals, and then optimize for the corresponding optimal marginals. 
+We provide proof details in \Cref{app:claim_proof}. 
+\subsection{Energy-based Training}
+
+In this setting, we train \ours{}s using the energy-based training objective in \Cref{eq:eb_kl_obj} with a penalty term to enforce the marginalization constraints in \Cref{eq:one_step_marginal}:
+\begin{align}
+  \min_{\theta, \phi}  D_\text{KL}\!\left( p_{\theta} \left(\boldx\right)\! \parallel\! p\!\left(\boldx\right) \right) + \lambda \,\bbE_{\boldx \sim q(\boldx)} \bbE_{\sigma} \bbE_{d}\! \left( \log\! \left[ p_\theta\!\left(\boldx_{\sigma (< d)}\right) p_\phi\!\!\left(\boldx_{\sigma (d)} | \boldx_{\sigma (< d)}\right) \right] - \log p_\theta\!\!\left(\boldx_{\sigma (\leq d}\right) \right)^2\!\!,
+  \nonumber %
+\end{align}
+where $\sigma \sim \mcU(S_D)$, $d \sim \mcU(1,\cdots,D)$ and $q(\boldx)$ is the distribution of interest for evaluating marginals.
+
+\textbf{Scalable training}\quad
+We use REINFORCE \citep{williams1992simple} to estimate the gradient of the KL divergence term:
+\begin{align}
+  \nabla_\theta D_\text{KL}(p_{\theta}(\boldx)||p(\boldx)) &= \bbE_{\boldx \sim p_{\theta}(\boldx)} \left[ \nabla_\theta \log p_{\theta}\left(\boldx\right) \left( \log p_{\theta}\left(\boldx\right) - \log f\left( \boldx \right) \right) \right] \nonumber
+  \\
+  &\approx \nicefrac{1}{N}  \sum\nolimits_{i=1}^N \nabla_\theta \log p_{\theta}(\boldx^{(i)}) \left( \log p_{\theta}(\boldx^{(i)}) - \log f(\boldx^{(i)}) \right)
+  \label{eq:reinforce}
+\end{align}
+For the self-consistency penalty term, we sample data $\boldx$ from the specified data distribution of interest and sample the ordering $\sigma$, step $d$ from uniform distributions. 
+
+\textbf{Efficient sampling with persistent MCMC}\quad
+We need cheap and effective samples from $p_\theta$ in order to perform REINFORCE, so a persistent set of Markov chains are maintained by randomly picking an ordering and taking block Gibbs sampling steps using the conditional distribution $p_\phi(\boldx_{\sigma (d)} | \boldx_{\sigma (< d)})$ (full algorithm in \Cref{app:algorithm}), in similar fashion to persistent contrastive divergence~\citep{tieleman2008training}.
+The samples from the conditional network $p_\phi$ serve as approximate samples from the marginal network $p_\theta$ when they are close to each other. Otherwise, we can additionally use importance sampling to get an unbiased estimate.
+
+\subsection{Addressing limitations of ARMs}\label{sec:4_arm_limits}
+We discuss in more detail about how \ours{}s address some limitations of ARMs. The first one is general to both training settings, while the latter two are specific to energy-based training.
+1) \textbf{Slow marginal inference of likelihoods}\quad Due to sequential conditional modeling, evaluation of a marginal $p_\phi(\boldx_o)$ with ARMs (or an arbitrary marginal with AO-ARMs) requires applying the NN $\phi$
+up to $D$ times, which is inefficient in time and memory for high-dimensional data. In comparison, \ours{}s are able to estimate any arbitrary marginal with one NN forward pass.
+
+2) \textbf{Lack of support for any-order training}\quad
+In energy-based training, the objective in \Cref{eq:eb_kl_obj} aims to minimize the distance between $\log p_\phi(\boldx)$ and $\log p(x)$, where $\phi$ is the NN parameters of an ARM. 
+However, unless the ARM is perfectly self-consistent over all orderings, it will not be the case that $\log p_\phi(\boldx) = \bbE_{\sigma} \log p_\phi(\boldx|\sigma)$.
+Therefore, the expected $D_\text{KL}$ objective over the orderings $\sigma$ would not be equivalent to the original $D_\text{KL}$ objective, i.e., $\bbE_\sigma \, \bbE_{p_\phi(\cdot|\sigma)} D_\text{KL}(p_\phi(\cdot|\sigma) \| p) \neq \bbE_{p_\phi} D_\text{KL}(p_\phi \| p)$.
+As a result, ARMs cannot be trained with the expected $D_\text{KL}$ objective over all orderings simultaneously, but instead need to resort to a preset order and minimize the KL divergence between $\log p_\phi(\boldx|\sigma)$ and the target density $\log p(\boldx)$.
+
+\begin{wrapfigure}{r}{0.45\linewidth}
+  \centering
+    \includegraphics[width=\linewidth]{figures/ising/grad_variances.pdf}
+  \caption{\small Approximating $\log p_\phi(\boldx)$ with one-step conditional (ARM-MC) results in extremely high gradient variance during energy-based training.}
+  \label{fig:arm_mc_variance}
+\end{wrapfigure}
+
+The self-consistency constraints imposed by \ours{}s address this issue.
+\ours{}s are not limited to fixed ordering because marginals are order-agnostic and we can optimize over expectation of orderings for the marginalization self-consistency constraints. 
+
+3) \textbf{Training not scalable on high-dimensional problems}\quad
+When minimizing the difference between $\log p_\phi(\boldx | \sigma)$ and the target $\log p(\boldx)$, 
+ARMs need to sum conditionals to evaluate $\log p_\phi(\boldx | \sigma)$. One might consider  subsampling one-step conditionals $p_\phi(x_{\sigma(d)} | \boldx_{\sigma(<d})$ to estimate $p_\phi(\boldx)$, but this leads to high variance of the REINFORCE gradient in \Cref{eq:reinforce} due to the product of the score function and distance terms, which are both high variance (We validate this in experiments, see \Cref{fig:arm_mc_variance}).
+Consequently, training ARMs for energy-based training necessitates a sequence of $D$ conditional evaluations to compute the gradient of the objective function. This constraint leads to an effective batch size of $B \times D$ for batch of $B$ samples, significantly limiting the scalability of ARMs to high-dimensional problems. 
+Furthermore, obtaining Monte Carlo samples from ARMs for the REINFORCE gradient estimator is slow when the dimension is high. 
+Due to the fixed input ordering, this process requires $D$ sequential sampling steps, making more cost-effective sampling approaches like persistent MCMC infeasible.
+Marginalization models circumvent this challenge by directly estimating the log-likelihood with the marginal neural network. Additionally, the support for any-order training enables efficient sampling through the utilization of persistent MCMC methods.
+
+
+\section{Related Work}
+
+
+\textbf{Autoregressive models}\quad
+Developments in deep learning have greatly advanced the performance of ARMs across different modalities, including images, audio, and text. Any-order (Order-agnostic) ARMs were first introduced in~\citep{uria2014deep} by training with the any-order lower-bound objective for the maximum likelihood setting. Recent work, ARDM~\citep{hoogeboom2021autoregressive}, demonstrates state-of-the-art performance for any-order discrete modeling of image/text/audio.
+\citet{germain2015made} train an auto-encoder with masking that outputs the sequence of all one-step conditionals for a given ordering, but does not generate as well as methods \citep{van2016pixel, yang2019xlnet, hoogeboom2021autoregressive} that predict one-step conditionals under the given masking.
+\citet{douglas2017universal} trains an AO-ARM as a proposal distribution and uses importance sampling to estimate arbitrary conditional probabilities in a DAG-structured Bayesian network, but with limited experiment validation on a synthetic dataset. \citet{shih2022training} utilizes a modified training objective of ARMs for better marginal inference performance but loses any-order generation capability. In the energy-based training setting, ARMs are applied to science problems \citep{damewood2022sampling, wu2019solving}, but suffer in scaling to when $D$ is large.
+\ours{}s and ARMs are compared in detail in \Cref{sec:4_arm_limits}.
+
+\textbf{Arbitrary conditional/marginal models}\quad
+For continuous data, VAEAC~\citep{ivanov2018variational} and ACFlow~\citep{li2020acflow} extends the idea of conditional variational encoder and normalizing flow to model arbitrary conditionals. ACE \citep{strauss2021arbitrary} improves the expressiveness of arbitrary conditional models through directly modeling the energy function, which reduces the constraints on parameterization but comes with the additional computation cost of to approximating the normalizing constant. 
+Instead of using neural networks as function approximators, probabilistic circuits (PCs)~\cite{choi2020probabilistic,peharz2020einsum} offer tractable probabilistic models for both conditionals and marginals by building a computation graph with sum and product operations following specific structural constraints.
+Examples of PCs include Chow-Liu trees~\citep{chow1968approximating}, arithmetic circuits~\citep{darwiche2003differential}, sum-product networks~\citep{poon2011sum}, etc. \citet{peharz2020einsum} improved the scalability of PCs by combining arithmetic operations into a single monolithic einsum-operation and automatic differentiation. \citep{liu2022scaling, liu2023understanding} demonstrated the potential of PCs with distilling latent variables from trained deep generative models on continuous image data. However, expressiveness is still limited by the structural constraints. 
+All methods mentioned above focus on MLE settings.
+\textbf{GFlowNets}\quad
+GFlowNets~\citep{bengio2021flow, bengio2023gflownet} formulate the problem of generation as matching the probability flow at terminal states to the target normalized density. Compared to ARMs, GFlowNets allow flexible modeling of the generation process by assuming learnable generation paths through a directed acyclic graph (DAG). The advantages of learnable generation paths come with the trade-off of sacrificing the flexibility of any-order generation and exact likelihood evaluation. Under a fixed generation path, GFlowNets reduce to fixed-order ARMs \citep{zhang2022unifying}. In \Cref{app:mam_gflownet}, we further discuss the connections and differences between GFlowNets and AO-ARMs/\ours{}s. For discrete problems,~\citet{zhang2022generative} train GFlowNets on the squared distance loss with the trajectory balance objective \citep{malkin2022trajectory}. This is not scalable for large $D$ (for the same reason as ARMs in \Cref{sec:4_arm_limits}) and renders direct access to marginals unavailable.
+In the MLE setting, an energy function is additionally learned from data so that the model can be trained with energy-based training. 
+
+
+
+\section{Experiments}
+
+
+We conduct experiments with marginalization models (\ours{}) on both MLE and EB settings for discrete problems including binary images, text, molecules and phyiscal systems.
+We consider the following baselines for comparison: Any-order ARM (AO-ARM)~\citep{hoogeboom2021autoregressive}, ARM~\citep{larochelle2011neural}, GFlowNet~\citep{malkin2022gflownets, zhang2022generative}, Discrete Flow\footnote{Results are only reported on text8 for discrete flow since there is no public code implementation.}\citep{tran2019discrete} and Probabilistic Circuit (PC)\footnote{We adopt the SOTA implementation of PCs from EiNets \citep{peharz2020einsum}. Results are reported on Binary MNIST using the image-tailored PC structure \citep{poon2011sum}. For text and molecular data, designing tailored PC structures that deliver competitive performance remains an open challenge.}\citep{peharz2020einsum}. \ours{}, PC and (AO-)ARM support arbitrary marginal inference. Discrete flow allows exact likelihood evaluation while GFlowNet needs to approximate the likelihood with sum using importance samples. 
+For evaluating AO-ARM's marginal inference, we can either use an ensemble model by averaging over several random orderings (AO-ARM-E) or use a single random ordering (AO-ARM-S). In general, AO-ARM-E should always be better than AO-ARM-S but at a much higher cost.
+Neural network architecture and training hyperparameter details can be found in \Cref{sec:app_exp}.
+\subsection{Maximum Likelihood Estimation Training}
+
+\textbf{Binary MNIST}\quad
+We report the negative test likelihood (bits/digit), marginal estimate quality and marginal inference time per minibatch (of size $16$) in Table~\eqref{tab:mnist}. To keep GPU memory usage the same, we sequentially evaluate the likelihood for ARMs. Both \ours{} and AO-ARM use a U-Net architecture with 4 ResNet Blocks interleaved with attention layers (see \Cref{sec:app_exp}). GFlowNets fail to scale to large architectures as U-Net, hence we report GFlowNet results using an MLP from~\citet{zhang2022generative}.
+For \ours{}, we use the conditional network to evaluate test likelihood (since this is also how \ours{} generates data). The marginal network is used for evaluating marginal inference. The quality of the marginal estimates will be compared to the best performing model.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=1\textwidth]{figures/mnist/samples_cmp.pdf}
+  \caption{\small An example of the data generated (with $100/400/700$ pixels masked) for comparing the quality of likelihood estimate. Numbers below the images are LL estimates from \ours{}'s marginal network (left) and AO-ARM-E's ensemble estimate (right).}
+  \label{fig:eval_samples}
+\end{figure}
+
+\begin{table}[t]
+  \centering
+  \caption{Performance Comparison on Binary-MNIST}
+  \label{tab:mnist}
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Model} & \textbf{NLL (bpd) $\downarrow$} & \textbf{Spearman's $\uparrow$} &\textbf{Pearson $\uparrow$}  & \textbf{Marg. inf. time (s) $\downarrow$}\\
+    \midrule
+    AO-ARM-E-U-Net & \best{0.148} & \best{1.0} & \best{1.0} & 661.98 $\pm$ 0.49\\
+    AO-ARM-S-U-Net & \secondbest{0.149} & \secondbest{0.996} & \secondbest{0.993} & 132.40 $\pm$ 0.03\\
+    GflowNet-MLP & 0.189 & -- & -- & -- \\
+    PC-Image (EiNets) & 0.187 & 0.716 & 0.752 & \best{0.015 $\pm$ 0.00} \\
+    \rowcolor{shadecolor} \ours{}-U-Net & \secondbest{0.149} & 0.992 & \secondbest{0.993} & \secondbest{0.018 $\pm$ 0.00} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{Performance Comparison on Molecular Sets}
+  \label{tab:moses}
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Model} & \textbf{NLL (bpd) $\downarrow$} & \textbf{Spearman's $\uparrow$} &\textbf{Pearson $\uparrow$}  & \textbf{Marg. inf.\ time (s) $\downarrow$}\\
+    \midrule
+    AO-ARM-E-Transfomer & \best{0.652} & \best{1.0} & \best{1.0} &  96.87$\pm$ 0.04\\
+    AO-ARM-S-Transfomer & \secondbest{0.655} & 0.996 & 0.994 &  19.32$\pm$ 0.01\\
+    \rowcolor{shadecolor} \ours{}-Transfomer & \secondbest{0.655} & \secondbest{0.998} & \secondbest{0.995} & \best{0.006$\pm$0.00} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t!]
+  \centering
+  \caption{Performance Comparison on text8}
+  \label{tab:text8}
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Model} & \textbf{NLL (bpc) $\downarrow$} & \textbf{Spearman's $\uparrow$} &\textbf{Pearson $\uparrow$}  & \textbf{Marg. inf.\ time (s) $\downarrow$}\\
+    \midrule
+    Discrete Flow (8 flows) & 1.23 & -- & -- & -- \\
+    AO-ARM-E-Transfomer &\best{1.494} & \best{1.0} & \best{1.0} & 207.60 $\pm$ 0.33\\
+    AO-ARM-S-Transfomer & \secondbest{1.529} & \secondbest{0.982} & \secondbest{0.987} & 41.40 $\pm$ 0.01  \\
+    \rowcolor{shadecolor} \ours{}-Transfomer & \secondbest{1.529} & 0.937 & 0.945 & \best{0.005 $\pm$ 0.000} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t!]
+  \centering
+  \caption{Performance Comparison on Ising model ($10 \times 10$)}
+  \label{tab:ising}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Model} & \textbf{NLL (bpd) $\downarrow$} & \textbf{KL divergence $\downarrow$} & \textbf{Marg. inf. time (s) $\downarrow$}\\
+    \midrule
+    ARM-Forward-Order-MLP & 0.79 & \best{-78.63} & 5.29$\pm$0.07e-01 \\
+    ARM-MC-Forward-Order-MLP & 24.84 & -18.01 & 5.30$\pm$0.07e-01 \\
+    GFlowNet-Learned-Order-MLP & \best{0.78} & -78.17 & -- \\
+    \rowcolor{shadecolor} \ours{}-Any-Order-MLP & 0.80 & -77.77 & \best{3.75$\pm$0.08e-04} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\begin{table}[t!]
+  \centering
+  \caption{Performance Comparison on Target Lipophilicity}
+  \label{tab:moses-logp}
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Model} & \multicolumn{4}{c}{\textbf{KL divergence $\downarrow$}} \\ 
+    \cmidrule(lr){2-5}
+     \textbf{Distribution} &{\small $\text{logP}=4$, $\tau=1.0$} & {\small $\text{logP}=-4$, $\tau=1.0$} &  {\small $\text{logP}=4$, $\tau=0.1$} & {\small $\text{logP}=4$, $\tau=0.1$} \\
+    \midrule
+    ARM-FO-MLP & -174.25 & -168.62 & -167.83 & -160.2 \\
+    \rowcolor{shadecolor} \ours{}-AO-MLP & -173.07 & -166.43  & -165.75 & -157.59\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+In order to evaluate the quality of marginal likelihood estimates, we employ a controlled experiment where we randomly mask out portions of a test image and generate multiple samples with varying levels of masking (refer to \Cref{fig:eval_samples}). This process allows us to obtain a set of distinct yet comparable samples, each associated with a different likelihood value.
+For each model, we evaluate the likelihood of the generated samples and compare that with AO-ARM-E's estimate since it achieves the best likelihood on test data.
+We repeat this controlled experiment on a random set of test images. The mean Spearman's and Pearson correlation are reported to measure the strength of correlation in marginal inference likelihoods between the given model and AO-ARM-E. \ours{} achieves close to \textit{$4$ order of magnitude speed-up} in marginal inference while at \textit{comparable quality} to that from AO-ARM-S. PCs are also very fast in marginal inference but there remains a gap in terms of quality.
+Generated samples and additional marginal inference on partial images are in \Cref{sec:app_exp}. 
+
+
+\textbf{Molecular sets (MOSES)}\quad
+We test generative modeling of \ours{} on
+a benchmarking molecular dataset~\citep{polykovskiy2020molecular} refined from the ZINC database~\citep{sterling2015zinc}. Same metrics are reported as Binary-MNIST. Likelihood quality is measured similarly but on random groups of test molecules instead of generated ones. The generated molecules from \ours{} and AO-ARM are comparable to standard state-of-the-art molecular generative models, such as CharRNN~\citep{segler2018generating}, JTN-VAE~\citep{jin2018junction}, and LatentGAN~\citep{prykhodko2019novo} (see \Cref{sec:app_exp}), with additional controllability and flexibility in any-order generation. \ours{} supports much faster marginal inference, which is useful for domain scientists to reason about likelihood of (sub)structures. Generated molecules and property histogram plots of are available in \Cref{sec:app_exp}.
+
+\textbf{Text8}\quad
+Text8~\citep{mahoney2011large} is a widely used character level natural language modeling dataset. The dataset comprises of 100M characters from Wikipedia, split into chunks of 250 character. 
+We follow the same testing procedure as Binary-MNIST and report the same metrics. The test NLL of discrete flow is from~\cite{tran2019discrete}, for which there are no open-source implementations to evaluate additional metrics.
+
+
+\subsection{Energy-based training}
+We compare with ARM that uses sum of conditionals to evaluate $\log p_\phi$ with fixed forward ordering and ARM-MC that uses a one-step conditional to estimate $\log p_\phi$.
+ARM can be regarded as the golden standard of learning autoregressive conditionals, since its gradient needs to be evaluated on the full generation trajectory, which is the most informative and costly.
+\ours{} uses marginal network to evaluate $\log p_\theta$ and subsamples a one-step marginalization constraint for each data point in the batch. 
+The effective batch size for ARM and GFlowNet is $B \times \mcO(D)$ for batch of size $B$, and $B \times \mcO(1)$ for ARM-MC and \ours{} .
+\ours{} and ARM optimizes KL divergence using REINFORCE gradient estimator with baseline. GFlowNet is trained on per-sample gradient of squared distance~\citep{zhang2022generative}.
+
+\textbf{Ising model}\quad 
+Ising models~\citep{ising1925beitrag} model interacting spins and are widely studied in mathematics and physics (see~\citet{mackay2003information}). We study Ising model on a square lattice. The spins of the $D$ sites are represented a $D$-dimensional binary vector and its distribution is ${p^*(\mathbf{x}) \propto f^*(\mathbf{x}) =  \exp \left(-\mathcal{E}_J(\mathbf{x})\right)}$ where ${\mathcal{E}_{\boldJ}(\mathbf{x}) \triangleq-\mathbf{x}^{\top} \boldJ \mathbf{x}-\boldsymbol{\theta}^{\top} \mathbf{x}}$, with $\boldJ$ the binary adjacency matrix. 
+These models, although simplistic, bear analogies to the complex behavior of high-entropy alloys~\citep{damewood2022sampling}. 
+We compare \ours{} with ARM, ARM-MC, and GFlowNet on a ${10 \!\times\! 10}$ ($D \!=\! 100$) and a larger ${30 \!\times\! 30}$ ($D\! =\! 900$) Ising model where ARMs and GFlowNets fail to scale. 
+$2000$ ground truth samples are generated following~\citet{grathwohl2021oops} and we measure test negative log-likelihood on those samples.
+We also measure $D_\text{KL}(p_{\theta}(\boldx)||p^*)$ by sampling from the learned model and evaluating ${\sum_{i=1}^M(\log p_\theta(\boldx_i) \!-\! \log f^*(\boldx_i))}$. \Cref{fig:ising} contains KDE plots of $-\mathcal{E}_{\boldJ}(\mathbf{x})$ for the generated samples. 
+As described in \Cref{sec:4_arm_limits}, the ARM-MC gradient suffers from high variance and fails to converge. It also tends to collapse and converge to a single sample. \ours{} has significant speedup in marginal inference and is the only model that supports any-order generative modeling. The performance in terms of KL divergence and likelihood are only slightly worse than models with fixed/learned order, which is expected since any-order modeling is harder than fixed-order modeling, and \ours{} is solving a more complicated task of jointly learning conditionals and marginals. On a $30 \times 30$ ($D=900$) Ising model, \ours{} achieves a bpd of $0.835$ on ground-truth samples while ARM and GFlowNet fails to scale. Distribution of generated samples is shown in \Cref{fig:ising}.
+
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}{0.45\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/ising/ising_10d_sample_sore.pdf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.45\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/ising/ising_30d_sample_sore.pdf}
+  \end{subfigure}
+  \caption{\small Ising model: $2000$ samples are generated for each method.}
+  \label{fig:ising}
+\end{figure}
+
+\textbf{Molecular generation with target property}\quad
+In this task, we are interested in training generative models towards a specific target property of interest $g(x)$, such as lipophilicity (logP), synthetic accessibility (SA) etc. We define the distribution of molecules to follow ${p^*(x) \propto \exp (-(g(x) - g^*)^2/\tau)}$, where $g^*$ is the target value of the property and $\tau$ is a temperature parameter. We train ARM and \ours{} for lipophilicity of target values $4.0$ and $-4.0$, both with $\tau=1.0$ and $\tau=0.1$. Both models are trained for $4000$ iterations with batch size $512$. Results are shown in \Cref{fig:logp} and \Cref{tab:moses-logp} (additional figures in \Cref{sec:app_exp}). Findings are consistent with the Ising model experiments. Again, \ours{} performs just marginally below ARM. However, only \ours{} supports any-order modeling and scales to high-dimensional problems. \Cref{fig:logp} (right) shows molecular generation with \ours{} for $D = 500$.
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}{0.45\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/mols/sample_score_logp_55d_tau1.0.pdf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.45\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/mols/sample_score_logp_500d_tau0.1.pdf}
+  \end{subfigure}
+  \caption{\small Target property matching: $2000$ samples are generated for each method.}
+  \label{fig:logp}
+\end{figure}
+\begin{figure}[t!]
+  \centering
+  \includegraphics[width=1\textwidth]{figures/mols/conditional.pdf}
+  \caption{\small Conditionally generate towards low lipophilicity from a user-defined substructure in any given order. Left: Masking out the left 4 SELFIES characters. Right: Masking the right 4-20 SELFIES characters.}
+  \label{fig:dm_mol_gen}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+In conclusion, marginalization models are a novel family of generative models for high-dimensional discrete data that offer scalable and flexible generative modeling with tractable likelihoods. These models explicitly model all induced marginal distributions, allowing for fast evaluation of arbitrary marginal probabilities with a single forward pass of the neural network. \ours{}s also support scalable training objectives for any-order generative modeling, which previous methods struggle to achieve under the energy-based training setting. Potential future work includes designing new neural network architectures that automatically satisfy the marginalization self-consistency. 
+
+
+

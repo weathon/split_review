@@ -1,0 +1,294 @@
+\title{SLiM: One-shot Quantized Sparse Plus Low-rank Approximation of LLMs}
+
+\begin{abstract}
+Large Language Models (LLMs) have revolutionized natural language understanding and generation tasks but suffer from high memory consumption and slow inference times due to their large parameter sizes. Traditional model compression techniques, such as quantization and pruning, mitigate these issues but often require retraining to maintain accuracy, which is computationally expensive. This paper introduces \ours, a novel approach for compressing LLMs using a one-shot Quantized Sparse Plus Low-rank Approximation. \ours eliminates the need for costly retraining by combining a symmetric quantization method (\quantization) with a saliency-based low-rank approximation. Our method reduces quantization error while leveraging sparse representations compatible with accelerated hardware architectures. Additionally, we propose a parameter-efficient fine-tuning recipe that significantly reduces overhead compared to conventional quantization-aware training. \ours achieves up to a 5.4\% improvement in model accuracy for sparsity patterns like 2:4, and the fine-tuning step further enhances accuracy by up to 5.8\%, demonstrating state-of-the-art performance. This work provides a pathway for efficiently deploying large models in memory-constrained environments without compromising accuracy
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) \citep{llm1, llm2} are transformative for natural language understanding and generation \citep{llm_app1, llm_app2}; however, their extensive parameter count leads to large memory footprints and longer inference times, making them expensive to execute. Model compression methods, such as sparsity and quantization, have shown promising results in reducing the inference costs of LLMs. However, these methods often require costly retraining on large amounts of data to restore the original model accuracy \citep{movement_pruning, quantization_aware_training}, while facing numerical and optimization stability challenges when dealing with quantized weights in quantization-aware-training \citep{quantization_survey}.
+To address these issues, one-shot pruning methods have emerged, eliminating the need for the retraining. They achieve high accuracy using only a small set of calibration data. Optimal Brain Damage (OBD) \citep{obd} pioneered the use of second-order information of the loss function for model compression \citep{woodfisher, mkor}, though at a high computational cost. Subsequent methods like Optimal Brain Surgeon (OBS) \citep{obs} and modern approaches such as SparseGPT \citep{sparsegpt} and WANDA \citep{wanda} build on these ideas, and introduce computationally feasible alternatives for LLMs. While these methods perform well with unstructured sparsity, they struggle with semi-structured sparsity patterns like the NVIDIA 2:4 sparsity pattern \citep{2_4_spmm}, which are necessary for hardware-accelerated inference.
+Post-training quantization \citep{quantization_survey2} methods are an effective compression strategy for reducing both memory usage and computation costs. SmoothQuant \citep{smoothquant} preserves accuracy by leaving the more salient weight channels unquantized, but this results in inefficient dequantization during inference. AWQ \citep{awq} addresses this by scaling the salient weight channels and adjusting the input channels accordingly. However, this introduces irregular memory access patterns during input scaling and causes inaccuracies in input quantization, limiting AWQ to weight-only quantization. OPTQ (or GPTQ) \citep{optq}, a leading quantization method, reduces quantization error by adjusting weight values after quantizing a subset of the weights. All these methods employ group quantization \citep{group_quantization_1, group_quantization_2}, where quantization parameters are shared across weight groups instead of individual elements. Although group quantization reduces quantization error, it increases computational and memory overhead during inference and requires custom CUDA functions for efficient dequantization.
+While sparsity and quantization individually offer substantial reductions in model size and inference cost, combining these techniques holds even greater potential for compressing large models \citep{sparsegpt}. However, combining sparsity and quantization often exacerbates the accuracy loss from each method, resulting in a substantial performance gap between the compressed model and the original model. This accuracy gap highlights the need for further innovations in compression techniques. Recent work has aimed to reduce compression error by using learnable low-rank adapters to minimize weight reconstruction error \citep{lqlora, rosa}, followed by an expensive fine-tuning step on hundreds of millions of tokens \citep{qlora, losparse}. This prolonged fine-tuning is necessary because the low-rank adapters do not account for the saliency of the weights at initialization \citep{qlora, lqlora}.
+
+ 
+To address these limitations, we propose a saliency-based one-shot low-rank approximation that mitigates the accuracy loss caused by quantization and sparsity. Saliency-based methods require weights to remain static during quantization and pruning, which renders approaches like OPTQ and SparseGPT ineffective. To resolve this, we introduce a novel symmetric weight quantization scheme that not only effectively reduces quantization error but is also compatible with saliency-based methods. We complement our quantizer and low-rank adapters with an optional light-weight fine-tuning recipe that can further boost the accuracy of the models using only 300,000 tokens.
+
+Our method, \ours, is a One-shot Quantized \textbf{S}parse Plus \textbf{L}ow-rank Approx\textbf{i}mation of LL\textbf{M}s. Key contributions of \ours are:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{\quantizationnospace}: We propose a symmetric weight quantization scheme that minimizes the Frobenius norm of quantization error without altering the weights, making it compatible with saliency-based pruning and low-rank approximation methods. Unlike group quantization, \quantization uses a single parameter for the entire weight matrix, reducing computational and memory overhead and simplifying implementation.
+    
+    \item \textbf{Saliency-based One-shot Low-rank Adapters}: We introduce a one-shot low-rank adapter method that minimizes accuracy loss by reconstructing weights based on their saliency, targeting weights with the highest impact on model output.
+    
+    \item \textbf{Parameter-Efficient Fine-tuning}: We propose a fine-tuning recipe for sparse, quantized models that avoids the complexities of quantization-aware training while drastically reducing fine-tuning time. For example, fine-tuning a 13B parameter model, which typically takes up to 36 days, is reduced to just 14 hours on a single H100 GPU.
+    
+    \item \textbf{Accuracy Gains}: \ours improves model accuracy by up to 5.4\% (LLaMA-2-7B) over state-of-the-art pruning and quantization methods (SparseGPT + Group OPTQ) for 2:4 sparsity. With our parameter-efficient fine-tuning, the gap widens to 5.8\% (LLaMA-2-13B).
+\end{itemize}
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+
+\textbf{Optimal Brain Surgeon.} The primary objective in model compression is to minimize the output discrepancy between the compressed models and the original models. Optimal Brain Surgeon \citep{obs} simplifies this approach by minimizing the output difference at each network layer over a calibration dataset. Consider a single feed-forward layer with input $\mathcal{X} \in \mathbb{R}^{b\times d_{in}}$, weight $\mathcal{W} \in \mathbb{R}^{d_{in}\times d_{out}}$, and output $\mathcal{Y} \in \mathbb{R}^{b\times d_{out}}$, where $b$, $d_{in}$, and $d_{out}$ represent the batch size, input hidden dimension, and output hidden dimension, respectively. Denoting the compressed matrices with a superscript $C$, OBS aims to minimize Equation \ref{eq:obs}.
+This formulation allows OBS to focus on maintaining layer-wise fidelity during compression, potentially leading to better overall model performance.
+\begin{equation}
+    \label{eq:obs}
+    \min_{\mathcal{W}^C}{|\mathcal{Y}^C - \mathcal{Y}|^2} = \min_{\mathcal{W}^C}{|\mathcal{X}(\mathcal{W} - \mathcal{W}^C)|^2}
+\end{equation}
+
+Considering Equation \ref{eq:obs}, Wanda \citep{wanda} proposes a saliency matrix $\mathcal{S}$ to evaluate the importance of each parameter. This matrix is defined as $\mathcal{S} = \mathbf{x}^T \odot \mathcal{W}$, where $\mathbf{x} \in \mathbb{R}^{d_{in} \times 1}$ represents the average absolute value of each input, $\odot$ denotes element-wise multiplication, and $|.|$ represents the absolute value operator. \ours adopts this same metric to assess the importance of different weights and determine the sparsity patterns in the sparse weight representation.
+\textbf{Symmetric Quantization.} Symmetric quantization, the simplest form of quantization, computes $\mathcal{M}^Q \propto round(\frac{\mathcal{M}}{\alpha})$, where $\mathcal{M}^Q$ is the quantized matrix and $\alpha$ is the quantization parameter. This method effectively accelerates matrix multiplications, as dequantization of the output requires only a scalar multiplication.
+
+AbsMax \citep{absmax}, the most common symmetric quantization method, sets $\alpha$ to the maximum absolute value in the matrix. However, AbsMax is sensitive to outliers, which can significantly alter $\alpha$, thereby reducing quantization precision. For zero-centered bell-curved distributions typical of LLM weights and inputs, AbsMax maps a large portion of weights to zero, resulting in high error values.
+
+Group quantization \cite{group_quantization_1, group_quantization_2} addresses this issue by sharing the quantization parameter among fewer elements in the weight matrix. This approach divides the weight matrix into smaller subgroups, each quantized with its own scaling factor. While this allows for more fine-grained representation of weight distributions and better captures local variations in weight magnitudes, it introduces memory overheads and complicates dequantization methods. Specifically, group quantization increases memory usage and computational complexity in exchange for potentially improved quantization accuracy.
+
+
+
+\section{Quantized Sparse Plus Low-rank Approximation of LLMs}
+
+
+\begin{figure}
+    \centering
+    \includegraphics{img/Pipeline-cropped.pdf}
+    \caption{Figure \ref{fig:pipeline}: \ours weight compression pipeline. The process involves: (1) Quantizing weights using the symmetric \quantization algorithm (generating quantized weight $\mathcal{W^Q}$ and quantization error $E_Q$); (2) Sparsifying quantized weights through saliency-based pruning (generating compressed weight $\mathcal{W^C}$ with sparsity error $E_S$); (3) Compensating for quantization and sparsity errors via \ours saliency-based low-rank approximation (generating left and right low-rank adapters $L$ and $R$). Optionally, adapters can undergo fine-tuning to further improve model accuracy while keeping sparse quantized weights frozen.}
+    \label{fig:pipeline}
+\end{figure}
+
+To effectively apply quantization, sparsity, and low-rank adapters to LLMs, \ours introduces a novel quantization scheme called \quantization{}. This method reduces quantization error and is followed by pruning the quantized model using the importance metric proposed in Section \ref{sec:preliminaries}. Subsequently, \ours adds low-rank adapters to minimize the saliency of the compression error introduced by sparsity and quantization. Figure \ref{fig:pipeline} illustrates this process. In the following subsections steps in this approach are explained.
+\input{src/04-1-quantizatoin}
+
+\input{src/04-2-lora}
+
+\input{src/04-3-fine-tuning}
+
+\input{src/04-4-lora-quantizatoin}
+
+
+
+\section{Experimental Results}
+
+\label{sec:results}
+\textbf{Models, Datasets, and Evaluation.} We evaluate \ours on the OPT \citep{opt} and LLaMA-2 \citep{llama2} model families, both of which serve as standard baselines in model compression studies \citep{optq, sparsegpt, wanda}. Model accuracy is assessed on a range of zero-shot downstream tasks, including MMLU \citep{mmlu}, Piqa \citep{piqa}, Arc-Easy, Arc-Challenge \citep{arc}, WinoGrande \citep{winogrande}, and OpenBookQA \citep{openbookqa}. For zero-shot evaluations, we utilize the Language Model Evaluation Harness \citep{lmharness} framework.
+\textbf{Baselines.} We compare \ours against state-of-the-art one-shot pruning methods, including Wanda \citep{wanda}, SparseGPT \citep{sparsegpt}, and Magnitude Pruning \citep{magnitude_pruning}, as well as one-shot quantization techniques like OPTQ \citep{optq} and AbsMax. Since AWQ \citep{awq} relies on floating point activations, we have not included it in our experiments, in which both weights and activations are quantized.
+Similar to other leading one-shot pruning and quantization methods (Wanda, SparseGPT, OPTQ), \ours leverages calibration data to extract statistics and assess weight saliency. As Wanda, SparseGPT, and OPTQ operate under identical conditions, we adopt their approach, using 128 sequences sampled from the C4 \citep{c4} dataset. Additionally, for all fine-tuning experiments, we utilize 300,000 tokens from the C4 dataset.
+\textbf{Sparse and Quantized.} We evaluate model accuracy across structured and unstructured sparsity benchmarks for various pruning and quantization methods. Specifically, we pair OPTQ and SparseGPT, which follow similar error recovery strategies, and combine Wanda with AbsMax and \quantization, while using Magnitude Pruning with AbsMax. To demonstrate the effectiveness of \ours saliency-based low-rank adapters, we introduce low-rank adapters to Wanda, minimizing the magnitude of the error (rather than the saliency) using SVD. This approach, referred to as the "SVD low-rank adapter or Wanda-SVD" in the tables, is similar to LQLoRA \citep{lqlora} with the difference that LQLoRA does not prune the weights, nor uses \quantization for quantization, leading to significantly higher error rates. We do not apply one-shot low-rank adapters to SparseGPT or OPTQ, as their weight update rules conflict with minimizing weight error. Additionally, for a more thorough experiment setting, we have implemented group quantization for AbsMax, and have tested it with different settings.
+
+\begin{table}[ht]
+\caption{Average zero-shot accuracy of LLaMA-2 and OPT models with pruning, 4-bit symmetric weight quantization, and 8-bit symmetric input group quantization. Wanda-SVD uses SVD directly on the compression error matrix, and Wanda-SVD + FT and \ours + FT uses fine-tuning on low-rank adapters for 300,000 tokens. \our$^Q$ quantizes the low-rank adapters after the compression (and possibly fine-tuning) process.}
+\label{tab:sparse_quantized}
+\begin{center}
+\begin{tabular}{llllllllll}
+\multicolumn{1}{c}{Pruning}  &\multicolumn{1}{c}{Weight} & \multicolumn{6}{c}{OPT} & \multicolumn{2}{c}{LLaMA-2}
+\\
+\multicolumn{1}{c}{Method}  &\multicolumn{1}{c}{Quantization} & 125M & 350M & 1.3B & 2.7B & 6.7B & 13B & 7B & 13B
+\\ \hline \\
+Dense & - & 35.9 & 37.1 & 43.4 & 45.5 & 48.3 & 48.7 & 56.6 & 60.8 
+\\ \hline \\
+\textbf{50\% 2:4} \\
+\rule{1.8cm}{0.4pt} \\
+Magnitude & AbsMax & 32.0 & 31.8 & 34.2 & 32.5 & 35.3 & 30.8 & 31.2 & 32.1
+\\
+SparseGPT & Group-OPTQ & 33.7 & 32.6 & 37.3 & 40.2 & 44.4 & 45.5 & 45.4 & 50.8
+\\
+SparseGPT & OPTQ & 31.4 & 32.9 & 31.0 & 33.9 & 39.9 & 40.0 & 31.8 & 31.6
+\\
+Wanda & Group AbsMax & 33.0 & 31.6 & 36.3 & 35.1 & 36.6 & 43.4 & 43.1 & 48.3
+\\
+Wanda & AbsMax & 31.5 & 31.3 & 31.6 & 30.7 & 30.5 & 31.2 &  32.0 &  31.3
+\\
+Wanda & \quantization & 31.8 & 32.1 & 34.7 & 34.3 & 38.4 & 32.8 &  30.8 &  30.7 
+\\
+Wanda-SVD & Group AbsMax & 33.9 & 34.0 & 38.9 & 39.9 & 44.2 & 45.5 & 50.5 & 54.5
+\\
+Wanda-SVD & \quantization & 34.2 & 33.3 & 38.7 & 41.2 & 44.3 & 45.2 &  48.3 &  51.4
+\\
+Wanda-SVD + FT & \quantization & 34.0 & 34.3 & 39.6 & 42.6 & \textbf{46.1} & 47.2 & 50.8 & 55.4
+\\
+\ours & Group AbsMax & 33.9 & 33.7 & 39.9 & 42.8 & 45.8 & 46.0 & 50.2 & 54.3
+\\
+\ours & \quantization & 34.3 & 33.5 & 40.0 & 42.8 & \textbf{46.1} & 46.1 &  \textbf{50.8} &  54.8
+\\
+\our$^Q$ & \quantization & 34.2 & 33.8 & 39.8 & 41.8 & 46.0 & 45.9 & 50.6 & 53.0
+\\
+\ours + FT & \quantization & \textbf{34.9} & \textbf{34.5} & \textbf{41.3} & \textbf{43.5} & \textbf{46.1} &  \textbf{47.3} &  50.5 & \textbf{56.6}
+\\
+\our$^Q$ + FT & \quantization & \textbf{34.9} & 34.3 & 40.0 & 42.3 & 46.0 & 46.5 & 50.6 & 54.1
+\\ \hline \\
+\textbf{50\%} \\
+\textbf{\small{Unstructured}} \\
+\rule{1.8cm}{0.4pt} \\
+Magnitude & AbsMax & 31.1 & 32.9 & 33.1 & 36.2 & 36.3 & 31.2 & 32.6 & 31.5
+\\
+SparseGPT & Group-OPTQ & 35.1 & 35.1 & 38.9 & 43.2 & 47.1 & 47.3 & 50.1 & 55.4
+\\
+SparseGPT & OPTQ & 31.4 & 34.5 & 31.2 & 37.1 & 43.2 & 44.1  & 31.7 & 32.0
+\\
+Wanda & Group AbsMax & 34.2 & 33.3 & 39.1 & 40.7 & 44.9 & 46.2 & 51.7 & 55.8
+\\
+Wanda & AbsMax & 31.5 & 32.9 & 31.0 & 32.9 & 30.5 & 31.1 & 32.7 & 31.1
+\\
+Wanda & \quantization & 32.8 & 33.9 & 36.0 & 36.2 & 42.7 & 32.8 & 30.4 & 30.5
+\\
+Wanda-SVD & Group AbsMax & 34.6 & 34.4 & 40.5 & 42.9 & 46.3 & 47.2 & 53.9 & 55.4
+\\
+Wanda-SVD & \quantization & 34.6 & 34.4 & 40.3 & 43.3 & 46.7 & 45.2 & 51.2 & 55.4
+\\
+Wanda-SVD + FT & \quantization & 35.3 & 34.8 & 41.8 & 43.8 & 47.0 & 47.9 & 53.0 & 57.3
+\\
+\ours & Group AbsMax & 35.0 & 35.0 & 41.5 & 43.6 & 47.2 & 47.9 & \textbf{54.0} & \textbf{57.6}
+\\
+\ours & \quantization & \textbf{35.7} & 35.4 & 42.0 & 43.4 & 47.5 & 48.0 & \textbf{54.0} & \textbf{57.6}
+\\
+\our$^Q$ & \quantization & 34.8 & 35.0 & 41.4 & 34.3 & 47.1 & 47.4 & 53.8 & 57.1
+\\
+\ours + FT & \quantization & \textbf{35.7} & \textbf{35.8} & \textbf{42.3} & \textbf{44.3} & 47.3 & \textbf{48.4} & 53.2 & 57.0
+\\
+\our$^Q$ + FT & \quantization & 35.3 & 35.6 & 41.9 & 43.8 & \textbf{47.6} & 48.1 & 53.7 & \textbf{57.6}
+\\ \hline 
+\end{tabular}
+\end{center}
+\end{table}
+Table \ref{tab:sparse_quantized} presents the zero-shot task accuracy results for sparse and quantized versions of the OPT and LLaMA-2 models. Among the tested methods, Magnitude Pruning combined with AbsMax quantization yields the lowest accuracy, with AbsMax applied to Wanda showing similarly poor performance. While applying \quantization to Wanda alleviates some of the accuracy loss, it still falls short compared to SparseGPT and OPTQ. In contrast, \ours achieves the highest accuracy across all methods, with further improvements gained through a brief fine-tuning step (\ours + FT). Additionally, \our$^Q$ quantizes the low-rank adapters to 4 bits, reducing adapter overhead by $4\times$ while maintaining competitive accuracy. Notably, while Group AbsMax improves the accuracy of models with low-rank adapters, it still underperforms compared to \quantization, which employs a single quantization parameter per tensor for greater efficiency.
+
+A similar trend is observed for unstructured sparsity, although the performance gap between dense and sparse models is smaller across all methods. \ours achieves a significant improvement in average accuracy, boosting results by up to 5.4\% (LLaMA-2-7B) for 2:4 sparsity compared to the state-of-the-art SparseGPT and Group OPTQ. This gap further widens to 5.8\% (LLaMA-2-13B) when incorporating an additional parameter-efficient fine-tuning step.
+\textbf{Sparse Only.} To isolate the effects of sparsity on model accuracy, we conduct a series of experiments with quantization disabled. Our sparsity benchmarks include Magnitude Pruning, SparseGPT, and Wanda, along with low-rank approximations using Wanda-SVD and \ours. We evaluate both 50\% unstructured sparsity and 2:4 structured sparsity patterns in our experiments.
+
+Table \ref{tab:sparse} presents the accuracy results for the sparse models. As anticipated, Magnitude Pruning yields the lowest accuracy. Wanda and SparseGPT achieve comparable results, though in the case of semi-structured sparsity, their performance gap with the dense model is more pronounced. Introducing low-rank adapters improves model accuracy, with \ours being particularly effective due to its saliency-based approximation. Finally, a brief fine-tuning phase further enhances the accuracy of the low-rank approximations.
+\begin{table}[ht]
+\caption{Average zero-shot accuracy of LLaMA-2 and OPT models with pruning. The quantization is disabled in this experiment.}
+\label{tab:sparse}
+\begin{center}
+\begin{tabular}{lllllllll}
+\multicolumn{1}{c}{Pruning}  & \multicolumn{6}{c}{OPT} & \multicolumn{2}{c}{LLaMA-2}
+\\
+\multicolumn{1}{c}{Method}  & 125M & 350M & 1.3B & 2.7B & 6.7B & 13B & 7B & 13B
+\\ \hline \\
+Dense & 35.9 & 37.1 & 43.4 & 45.5 & 48.3 & 48.7 & 56.6 & 60.8 
+\\ \hline \\
+\textbf{50\% 2:4} \\
+\rule{1.8cm}{0.4pt} \\
+Magnitude & 32.6 & 31.8 & 35.4 & 33.9 & 36.4 & 30.7 & 31.2 & 32.0
+\\
+SparseGPT & 33.8 & 33.2 & 37.7 & 41.3 & 45.2 & 45.6 & 47.3 & 52.3
+\\
+Wanda & 34.0 & 32.5 & 38.3 & 40.5 & 43.2 & 44.1 & 46.1 & 49.7
+\\
+Wanda-SVD & 34.1 & 34.1 & 40.4 & 42.8 & 46.0 & 45.9 & 51.6 & 55.8
+\\ 
+Wanda-SVD + FT & 34.8 & 34.5 & 41.3 & 43.4 & \textbf{46.5} & 47.2 & \textbf{52.4} & \textbf{56.9}
+\\
+\ours & 34.5 & 32.9 & 40.7 & 43.1 & 46.4 & 46.3 & 51.4 & 56.1
+\\
+\ours  + FT & \textbf{35.1} & \textbf{34.9} & \textbf{41.5} & \textbf{43.8} & \textbf{46.5} & \textbf{47.3} & 51.6 & 56.4
+\\ \hline \\
+\textbf{50\%} \\
+\textbf{\small{Unstructured}} \\
+\rule{1.8cm}{0.4pt} \\
+Magnitude & 33.3 & 33.7 & 34.0 & 40.6 & 35.8 & 30.9 & 32.6 & 31.9
+\\
+SparseGPT & 35.5 & 35.1 & 39.6 & 43.5 & 47.4 & 47.8 & 53.3 & 57.3
+\\
+Wanda & 35.0 & 34.5 & 41.1 & 42.9 & 46.5 & 46.8 & 52.7 & 57.2
+\\
+Wanda-SVD & 35.3 & 35.2 & 41.9 & 44.1 & 47.5 & 47.8 & 54.9 & 58.5
+\\ 
+Wanda-SVD + FT & 35.74 & 35.7 & 42.7 & 44.6 & \textbf{47.8} & \textbf{48.4} & 54.9 & 58.7
+\\
+\ours & 35.2 & 35.1 & 42.0 & 44.1 & 47.7 & 48.2 & \textbf{55.0} & \textbf{58.8}
+\\
+\ours  + FT & \textbf{35.9} & \textbf{35.7} & \textbf{42.5} & \textbf{44.7} & 47.7 & \textbf{48.4} & \textbf{55.0} & \textbf{58.8}
+\\ \hline 
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Quantized Only.} To assess the effects of \quantization and the low-rank compensation in \ours, we disable sparsity in our experiments and evaluate various quantization schemes. Specifically, we test AbsMax, OPTQ, and \quantization as the quantization methods. To improve model accuracy, we add low-rank adapters to \quantization, minimizing either the error saliency (\ours) or the reconstruction error norm (SVD). Low-rank adapters cannot be applied to OPTQ due to its weight update rules, which conflict with minimizing the weight reconstruction error.
+
+Table \ref{tab:quantized} summarizes the results of our quantization experiments. As expected, AbsMax produces the highest error among the quantization methods. While \quantization addresses some of the limitations of AbsMax, it still struggles to fully recover from accuracy loss. OPTQ achieves higher accuracy than both AbsMax and \quantization, but its inability to incorporate low-rank adapters limits its effectiveness at lower bitwidths. Both the SVD and \ours low-rank adapters enhance the accuracy of \quantization, with \ours outperforming SVD in most cases due to its saliency-based approximation. It is noteworthy that in some rare cases, Group-AbsMax with low-rank adapters outperforms \quantization with low-rank adapters because it uses significantly more quantization parameters.
+\begin{table}[ht]
+\caption{Average zero-shot accuracy of LLaMA-2 and OPT models with quantization. The sparsity is disabled in this experiment.}
+\label{tab:quantized}
+\begin{center}
+\begin{tabular}{llllllllll}
+\multicolumn{1}{c}{Quantization} & \multicolumn{1}{c}{Low-rank}  & \multicolumn{6}{c}{OPT} & \multicolumn{2}{c}{LLaMA-2}
+\\
+\multicolumn{1}{c}{Method} & \multicolumn{1}{c}{Adapter} & 125M & 350M & 1.3B & 2.7B & 6.7B & 13B & 7B & 13B
+\\ \hline \\
+Dense & - & 35.9 & 37.1 & 43.4 & 45.5 & 48.3 & 48.7 & 56.6 & 60.8 
+\\ \hline \\
+AbsMax &  - & 30.7 & 34.0 & 31.2 & 31.6 & 30.3 & 31.4 & 32.4 & 31.9
+\\
+Group-OPTQ & - & 35.5 & 36.2 & 42.5 & 44.5 & 47.7 & 48.2 & 53.3 & 59.6
+\\
+OPTQ & - & 31.4 & 36.0 & 31.5 & 37.3 & 43.3 & 45.1 & 31.2 & 31.5
+\\
+Group-AbsMax & - & 35.1 & 36.0 & 41.8 & 44.3 & 46.9 & 48.5 & 56.0 & 59.9
+\\
+Group-AbsMax & SVD & 35.1 & 36.6 & 42.4 & 44.8 & 47.7 & 48.5 & \textbf{56.4} & 60.2
+\\
+Group-AbsMax & \ours & 35.6 & \textbf{36.8} & 42.6 & 44.8 & 47.9 & 48.8 & 56.2 & 60.2
+\\
+\quantization & - & 32.0 & 36.5 & 36.2 & 40.0 & 30.3 & 37.8 & 31.0 & 30.5
+\\
+\quantization & SVD & 35.5 & 35.9 & 42.4 & 44.9 & 47.8 & 48.2 & 55.8 & 60.5
+\\
+\quantization & SVD + FT & \textbf{35.9} & 36.4 & \textbf{43.2} & 45.5 & 48.2 & 48.7 & {56.0} & \textbf{60.4}
+\\
+\quantization & \ours & 35.6 & 36.5 & 42.7 & 45.4 & \textbf{48.3} & 48.4 & {56.0} & 60.2
+\\
+\quantization & \ours + FT & 35.7 & 36.5 & \textbf{43.2} & \textbf{45.6} & \textbf{48.3} & \textbf{48.9} & 55.8 & \textbf{60.4}
+\\ \hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Fine-tuning Costs.} Fine-tuning compressed models can help recover lost accuracy. However, fine-tuning quantized weights presents challenges due to the discrete nature of the weights. The most commonly used approach for addressing these challenges, and one that has shown promising results, is the straight-through estimator (STE) \citep{ste}. In this method, during the backward pass and optimization step, the weights are treated as continuous, allowing for effective fine-tuning despite the quantization.
+
+In addition to the challenges posed by discrete values during fine-tuning, the high parameter count of the models leads to time-consuming computations and substantial memory costs. In our experiments, we measured the time required to fine-tune the models under various conditions. For models with low-rank adapters, the quantized weights are frozen, allowing only the low-rank adapters to be fine-tuned. This approach results in a more parameter-efficient fine-tuning strategy, reducing both memory and computational costs. When no low-rank adapter is employed, the straight-through estimator (STE) is used for fine-tuning the quantized weights. Table \ref{tab:fine-tunining-timing} summarizes the fine-tuning results for 300,000 tokens from the C4 dataset, with a batch size of 64 and a sequence length of 1024 on a single H100 GPU. The fine-tuning costs for models without low-rank adapters range from 12 hours for 125M parameter models to over 36 days for 13B parameter models. Due to these high costs, we faced challenges completing the fine-tuning with our limited resources. In contrast, utilizing low-rank adapters and freezing the sparse quantized weights enables a much more parameter-efficient fine-tuning method, making it feasible for us to report the accuracy results for these cases in Table \ref{tab:sparse_quantized}.
+
+\begin{table}[ht]
+\caption{The required time for fine-tuning the models with a single H100 GPU on 300,000 tokens from the C4 dataset with a batch size of 64 and a sequence length of 1024.}
+\label{tab:fine-tunining-timing}
+\begin{center}
+\begin{tabular}{llllllllll}
+\multicolumn{1}{c}{Pruning}  &\multicolumn{1}{c}{Weight} & \multicolumn{6}{c}{OPT} & \multicolumn{2}{c}{LLaMA-2}
+\\
+\multicolumn{1}{c}{Method}  &\multicolumn{1}{c}{Quantization} & 125M & 350M & 1.3B & 2.7B & 6.7B & 13B & 7B & 13B
+\\ \hline \\
+Magnitude & AbsMax & 
+\\
+SparseGPT & OPTQ & 12h & 43h & 164h & 361h & 866h & 867h & 842h & 844h
+\\
+Wanda & AbsMax & 
+\\ \hline \\
+Wanda-SVD & \quantization &\multirow{2}{*}{1.5h} & \multirow{2}{*}{3h} & \multirow{2}{*}{6h} & \multirow{2}{*}{8h} & \multirow{2}{*}{16h} & \multirow{2}{*}{18h} & \multirow{2}{*}{14h} & \multirow{2}{*}{14h}
+\\
+\ours + FT & \quantization & 
+\\ \hline 
+\end{tabular}
+\end{center}
+\end{table}
+\textbf{Additional Experiments.} 
+
+
+
+
+\section{Conclusion, Limitations, and Future Work}
+
+
+In this paper, we introduced SLiM, a one-shot quantized sparse plus low-rank approximation method for large language models, designed to balance memory efficiency and accuracy. By leveraging symmetric quantization, sparsity, and saliency-based low-rank adapters, SLiM achieves significant reductions in both memory and computational costs while maintaining competitive performance. Our method demonstrates improved accuracy, particularly for models with structured sparsity patterns like 2:4 sparsity, compared to state-of-the-art approaches.
+
+SLiM relies on current available  libraries all of which lack support for advanced quantization schemes like 2:4 mixed 8-bit and 4-bit group quantization. Additionally, low-rank adapters, while effective, introduce overheads. Future work will focus on developing efficient kernels for 2:4 group quantization and compressing low-rank adapters to further optimize memory and speed.
+
+\newpage
+
+
+
+
+
+
+
+

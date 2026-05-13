@@ -1,0 +1,312 @@
+\title{Auto-GDA: Automatic Domain Adaptation for Efficient Grounding Verification in Retrieval Augmented Generation}
+
+\begin{abstract}
+While retrieval augmented generation (RAG) has been shown to enhance factuality of large language model (LLM) outputs, LLMs still suffer from hallucination, generating incorrect or irrelevant information. One common detection strategy involves prompting the LLM again to assess whether its response is grounded in the retrieved evidence, but this approach is costly. Alternatively, lightweight natural language inference (NLI) models for efficient grounding verification can be used at inference time. While existing pre-trained NLI models offer potential solutions, their performance remains subpar compared to larger models on realistic RAG inputs.  
+RAG inputs are more complex than most datasets used for training NLI models and have characteristics specific to the underlying knowledge base, requiring adaptation of the NLI models to a specific target domain. 
+Additionally, the lack of labeled instances in the target domain makes supervised domain adaptation, e.g., through fine-tuning, infeasible.
+To address these challenges, we introduce Automatic Generative Domain Adaptation (\framework). Our framework enables unsupervised domain adaptation through synthetic data generation.
+Unlike previous methods that rely on handcrafted filtering and augmentation strategies, \framework employs an iterative process to continuously improve the quality of generated samples using weak labels from less efficient teacher models and discrete optimization to select the most promising augmented samples.
+Experimental results demonstrate the effectiveness of our approach, with models fine-tuned on synthetic data using \framework often surpassing the performance of the teacher model and reaching the performance level of LLMs at 10\,\% of their computational cost. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\footnotetext{Work done while interning at AWS AI Labs.}
+\renewcommand*{\thefootnote}{\arabic{footnote}}
+\setcounter{footnote}{0}
+\label{sec:introduction}
+Large Language Models (LLMs) are increasingly used in consequential applications. Despite their versatility, LLMs often produce hallucinations, in which the generated information is inaccurate or fabricated and require costly retraining to integrate new knowledge. One promising method to mitigate these issues is retrieval augmented generation (RAG, \citealp{lewis2020retrieval}). RAG enhances text generation by adding information from external knowledge sources to the prompt and has been shown to reduce hallucinations in practice \citep{shuster2021retrieval}. Nevertheless, even when the most capable LLMs are used with RAG, hallucination rates of 20 -- 30\% persist \citep{santhanam2021rome}.
+To prevent hallucinated output from being delivered to end-users, natural language inference (NLI) models can be used to verify grounding of the generated output in the documents retrieved \citep{chen2023empirical, es2024ragas, tang2024minicheck} before the output is relayed to the end-user:  the generated response must be fully \emph{grounded} in the documents, i.e., it must be logically inferrable from the documents; otherwise, it is considered ungrounded.
+However, as we need 
+\ifarxiv\begin{wrapfigure}[20]{r}{8cm}
+\caption{\textbf{Landscape of current grounding verification models for RAG.} While LLMs have the best performance, they incur about 10$\times$ higher latency than lightweight models. In this work, we are interested in obtaining lightweight models with LLM-level performance for grounding verification through domain adaptation.\label{fig:motivation}}
+\end{wrapfigure}\fi
+to check the outputs at inference time, we require lightweight NLI models with very low latency.
+The current landscape of available NLI models for verifying grounding in RAG is illustrated in \Cref{fig:motivation} based on results obtained in our
+evaluation of correctness and inference time (see \Cref{tab:inferenceefficiency} for full numeric results): Some recent works such as Mini-Check \citep{tang2024minicheck} have developed lightweight models for NLI, e.g., based on RoBERTa \citep{liu2019roberta}. These models have shown good performance on academic benchmarks. However, our results indicate that their performance
+\ifnotarxiv\begin{wrapfigure}[20]{r}{8cm}
+\caption{\textbf{Landscape of current grounding verification models for RAG.} While LLMs have the best performance, they incur about 10$\times$ higher latency than lightweight models. In this work, we are interested in obtaining lightweight models with LLM-level performance for grounding verification through domain adaptation.\label{fig:motivation}}
+\end{wrapfigure}\fi
+in verifying grounding for realistic RAG inputs lags behind LLMs by about 20\% (in ROC-AUC scores). Other recent methods use pre- and post-processesing techniques such as sentence tokenization or LLM prompting to decompose long prompts \citep{zha2023alignscore,es2024ragas} into several chunks or facts. Each of these chunks needs to be processed in a separate forward pass, resulting in high latency as well. While some studies (e.g., \citealp{manakul2023selfcheckgpt, tang2024minicheck}) have also explored directly using LLMs like GPT-4 for text entailment detection, their latency is about an order of magnitude above the lightweight models. Taken together, these characteristics make it hard to deploy the existing approaches in real-time industry use-cases.
+
+The performance gap observed for realistic RAG inputs with the lightweight models may point to a substantial domain mismatch between the NLI datasets used to train these models and the challenging, real-world data encountered at test time.
+We observe that inputs of NLI models in RAG are more challenging as they comprise longer segments with multiple statements and contain more subtle ungrounded information as the output is LLM-generated. While these characteristics are common to RAG systems in general, each implementation still has a very individual input distribution: First, inputs may follow a specific format due to the RAG prompt template e.g., \textit{question: $<$question$>$. evidence: Passage 1 $<$evidence1$>$, Passage 2 $<$evidence2$>$ ...}. Second, the documents are retrieved from  knowledge bases from a variety of different domains, which may not be represented in training data.
+Prior work \citep{williams2018broad} confirms difficulties when NLI models are applied to data from an unseen domain and \citet{hosseini2024synthetic} shows a generalization gap of up to 20\%. This suggests that NLI models need to be adapted to their target domain for optimal performance.  %which is confirmed by our own experimentation showing improvements commonly over 10\% (cf. \Cref{sec:experimental}). While 
+
+Bridging this domain gap poses a significant challenge due to the inherent difficulty of adapting models to unseen domains that is further amplified by the prohibitive costs of obtaining labeled data from the target domain. This prevents supervised domain adaptation, e.g., through fine-tuning on target domain data. To address this issue, we propose \textit{Automatic Generative Domain Adaptation} (\framework). Our unsupervised domain adaptation framework produces high-quality synthetic data, which is then used to fine-tune a lightweight NLI model, adapting it to a specific domain of RAG inputs. %The fundamental challenge of this approach lies the curation of domain-specific training data with accurate labels to perform fine-tuning the fine-tuning. %We therefore develop an automated data generation pipeline producing high-quality data that proves useful for this domain adaptation step while leveraging the capabilities of more powerful teacher models.
+While training data generation by simply prompting LLMs has been repeatedly explored in the literature (e.g., \cite{saad2024ares, hosseini2024synthetic}), data quality might be further improved through filtering and incorporating background knowledge through label-preserving data augmentation strategies, such as round-trip translation \citep{chen2023empirical}. However, specifying good filters and heuristic augmentation strategies require significant manual effort. As data augmentations can further be applied iteratively, the space of potential samples grows exponentially, necessitating efficient search strategies. During this offline training phase, less efficient teacher models can provide additional guidance using weak labels. \framework offers a unified way to leverage all these available tools. % To tackle this problem, we propose a principled distribution-matching objective to automatically select the most promising samples that can be generated from an ensemble of user-specified data generation and augmentation techniques. We iteratively apply generation, augmentation, and optimization steps to condense a highly realistic dataset.
+We thus make the following contributions:
+\begin{enumerate}
+\setlength{\itemsep}{-1pt}
+    \item We formalize the  unsupervised domain adaptation problem under the availability of practical tools such as data generators, data augmentation routines, and weak teacher models.
+    \item We propose Automatic Generative Domain Adaptation (\framework), a principled framework for  unsupervised domain adaptation through synthetic data that can be instantiated with different implementations of generation, augmentation, and weak labeling steps and which automatically selects high-quality samples.
+    \item We show that our objective corresponds to an \emph{enhanced distribution matching objective} but is highly efficient to optimize.
+    \item Our experiments on realistic RAG inputs highlight that our fine-tuned models using \framework (1) often outperform their weak teacher models (2) perform almost as well as reference models fine-tuned with human-labeled data and (3) reach the level of performance exhibited by LLMs while having almost 10x lower latency. (4) Our method further outperforms more classical training-based unsupervised domain adaptation techniques.
+\end{enumerate}
+
+
+
+\section{Related Work}
+
+\label{sec:relatedwork}
+\pp{
+The problem of domain adaptation is concerned with adapting existing models to different domains. We introduce the most closely related approaches in this section and refer the reader to \citet{ramponi2020neuralunsuperviseddomainadaptation} for further references. 
+}
+
+\pp{
+\textbf{Synthetic NLI Data.} Related works explore synthetic data generation for NLI models. \citet{hosseini2024synthetic} generate the diverse, cross-domain GNLI (General NLI) dataset synthetically in two steps: first prompting an LLM to generate target domains, then using a prompt-tuned LLM to generate training statements. \cite{tang2024minicheck} generate synthetic training data for their MiniCheck models using document-to-claim generation and claim-to-document generation. We compare to their model in our experimental section and show that it can be further improved through domain adaptation. \cite{saad2024ares} use synthetic data to specifically improve RAG system evaluation. They generate synthetic in-domain data with a few-shot prompt. However, their method is compared within RAG evaluation frameworks and not tested for NLI performance.
+}
+
+\pp{
+\textbf{Synthetic Data for Domain Adaptation in NLP.} 
+While synthetic QA data generation is well-explored \citep{shakeri2020end, ushio2022generative, yue2022synthetic, lee2023liquid}, synthetic data for NLI domain adaptation has received less attention, potentially due to the difficulty of generating realistic and difficult samples.
+\cite{wang2023let} propose an iterative synthetic data generation scheme requiring partially labeled data. They generate initial seed data using an LLM prompt that is iteratively refined based on errors from a model trained on human-labeled reference set. Unlike this work, we assume very limited access to labeled data from the target domain. 
+}
+
+\pp{
+\textbf{Classical Unsupervised Domain Adaptation.}
+Beyond synthetic data approaches, classical unsupervised domain adaptation (UDA) techniques have also been applied in NLP. \cite{chen_adversarial_2018,li_whats_2018,choudhry_emotion-guided_2022} have explored Domain Adversarial Neural Networks (DANN) \citep{ganin2016domain}, which incorporate domain discriminators during pretraining to learn domain-invariant features. \cite{he2020deberta} introduce Scale-invariant-Fine-Tuning (SiFT) which extends the Virtual Adversarial Training (VAT) framework of \cite{miyato_virtual_2019} and \cite{Jiang_2020_SMART} to improve model robustness and generalizability. Techniques like CORAL \citep{sun2016deep} align feature distributions between source and target domains by matching their second-order statistics. Finally, domain-adaptive pretraining (DAPT) and task-adaptive pretraining (TAPT) \citep{gururangan2020don, han_unsupervised_2019} involve pretraining on target domain text before fine-tuning on labeled source data. Although these methods have shown success in tasks like sentiment analysis and text classification, they have not been comprehensively studied in NLI.\looseness=-1 
+}
+
+\pp{\textbf{Knowledge Distillation.} 
+We borrow the term ``teacher model'' from the knowledge distillation literature \citep{gou2021knowledge, yang2020textbrewer}. However, our problem differs from distillation problems because our target dataset is unlabeled.
+}
+
+In this paper, we focus on the problem of systematically generating and selecting the most beneficial synthetic samples that can be created through initial generation and iterative augmentation steps. We do so using an efficient objective that can be interpreted as a form of distribution matching.
+
+
+
+
+\section{Preliminaries}
+
+\emph{Domain adaptation} is concerned with adapting an ML model pretrained on a source domain to make predictions on a target domain when the underlying data distributions differ across the two domains. 
+The \emph{unsupervised} domain adaptation problem is further complicated due to the lack of labeled data in the target domain. This means that while features are available, there is no direct information about the correct class labels for the target domain samples. This poses a significant challenge as the model must learn to adapt to the new distribution without explicit guidance.
+
+\subsection{Unsupervised Domain Adaptation for NLI}
+\textbf{Data Domains.} Following the common natural language inference setup, we assume data from a \emph{source domain} is available as a set of triples $\mathcal{D}_{s}=\left\{(\ve_n, \vc_n, y_n)\right\}_{n=1,...,N} \overset{\text{i.i.d.}}{\sim} p_{s}$ containing evidence $\ve \in \mathcal{X}$, corresponding claims $\vc \in \mathcal{X}$ where $\mathcal{X}$ denotes a space of text sequences, and labels $y \in \mathcal{Y}$. This data is used to train an initial model $f: \mathcal{X} \times  \mathcal{X} \rightarrow \mathcal{Y}$. We use $\mathcal{D}_s$ to denote sets of samples and $p_s$ to denote the data density of the source distribution. Note that in a RAG use-case, the evidence $\ve$ will contain the user prompt as well as the retrieved documents.
+Additionally, we are provided with a set of $J$ unlabeled samples $\mathcal{D}_{t}=\left\{(\ve_j, \vc_j)\right\}_{j=1,...,J}$ from the target domain. 
+They are sampled from $p_t$, the data distribution  faced at test time (e.g., the realistic RAG inputs). Our goal is to adapt a model pretrained on $p_s$ to perform well on $p_t$. In this work, we are focusing on problems where $J$ is small. This scarcity makes it challenging to accurately estimate the underlying distribution of the target domain, which can hinder the effectiveness of traditional domain adaptation methods that rely on a substantial amount of target data. 
+We study the binary NLI task where $\mathcal{Y}\in \{0,1\}$. A positive label ($y{=}1$) is only assigned if all information in the claim can be inferred directly from the evidence; claims that are contradictory to the evidence or cannot be inferred from the evidence are considered non-entailed ($y{=}0$).
+In this work, we focus on \textit{covariate shift} between the two domains: While the prior $p(\ve,\vc)$ is subject to change across domains, the true relation between specific features and labels, $p(y|\ve,\vc)$ is consistent for the source and the target domain. For the NLI task considered here, this assumption is sensible because the entailment relation itself does not change for different domains.
+Following prior work \cite{saad2024ares}, we slightly deviate from the fully unsupervised setup by supposing that a very small portion of the target domain can be manually labeled and used as a validation set for hyperparameter tuning only, as is commonly done in NLI literature \citep{laban2022summac, tang2022understanding, zha2023alignscore}. We show that our method works with validation sets as small as $30$ samples.\looseness=-1
+
+\textbf{Helper Tools.} We extend this common setup to incorporate three additional tools that are readily available in practice: First, we have powerful generative LLMs that we can use to generate new samples based on the unlabeled examples using techniques such as prompt-tuning \citep{lester2021power},  or few-shot prompting. The \emph{generator} $G$ can be formally described as (randomized) function $G: \mathcal{X} \times \left(\mathcal{X}\right)^F  \times \mathcal{Y} \rightarrow \mathcal{X}$, meaning that $G$ takes as input a piece of evidence and a set of $F \geq 1 $ example claims (e.g., for few-shot prompting) and a desired target label. The generator $G$ is then tasked with producing a new claim sample that reflects the style of the provided claims and has the specified target label. Note that we provide the $F$ claims without a known label, so they can either be entailed or non-entailed w.r.t. $\ve$. Second, we can use some background knowledge of the task to define some approximately label-preserving \emph{augmentation} strategies to increase diversity, e.g., using paraphrasing models, round-trip translation or synonym replacements \citep{chen2023empirical}. This step can be formalized as a mutation function $M: \mathcal{X} \rightarrow \mathcal{X}$ which takes a claim as an input and modifies it while trying to preserve its label. The label-preserving characteristics of these strategies are imperfect, i.e., with a small probability the entailment relation will be affected by the augmentation. Finally, we suppose a \textit{teacher model} $T: \mathcal{X} \times \mathcal{X} \rightarrow [0,1]$, which can be applied to the data from the source and the target domain and provides an entailment score. The teacher model performs reliably within the source domain, but only provides a weak estimate of $T(\ve, \vc)$. The performance of this model may be noisy because the target domain is out-of-domain for this model, and the model may be too inefficient to be deployed in practice. We will use this model to obtain weak estimates of the samples' labels. We now present our framework \framework, which incorporates the three tools $G, M, T$ named above in a principled algorithm.
+
+
+
+\section{A Principled Framework for Unsupervised Domain Adaptation}
+
+\label{sec:framework}
+\subsection{Outline of the framework}
+In this work, we present \framework, a framework for \emph{Automatic Generative Domain Adaptation}, that generates synthetic data points that are useful for fine-tuning a pretrained model $f$ for the target domain. 
+\begin{figure}
+    \centering
+    \input{figures/framework}
+    \caption{\textbf{Overview of \framework.} We generate initial data using the generator $G$, which are assigned entailment certainty scores using teacher model $T$. The synthetic data is iteratively augmented using $M$, whereas label-preservation is confirmed with $T$ and entailment certainties are updated. We finally select the top-$K$ samples that minimize an objective function $L_{\text{tot}}$. These steps can be applied iteratively until the final data is used to fine-tune the model $f$ for the target domain.}
+\end{figure}
+For the data generation process to result in high fine-tuning utility it must meet several criteria: (1) The data must be realistic and non-trivial, (2) must have high diversity, (3) the assigned labels must be of high quality.
+
+\framework is specifically designed to tackle these three challenges. As RAG outputs stem from LLMs, we also generate realistic initial samples using LLMs. We leverage few-shot prompting to transfer patterns in the output to the generated samples. 
+To preserve the \emph{diversity} of the  evidence (which contains the relevant documents in the knowledge base), we generate synthetic claims sequentially for each unique piece of evidence $\ve$ available in the unlabeled target dataset $\mathcal{D}_t$. This has the advantage that a broad diversity of documents in the knowledge base is represented. We propose to apply augmentations on the synthetic data to increase diversity further. 
+As the augmentation strategies are only approximately label-preserving, we have to keep track of increasing label uncertainty to \emph{detect samples with low-quality labels} when several data augmentation steps are applied. We therefore equip each sample with an \emph{entailment certainty score} $r$, an estimate of the probability of the sample having an entailed label ($y{=}1)$ which can be used to remove samples with low-quality labels. \framework applies these steps iteratively to successively increase data quality. In summary our framework consists of the following steps, which we describe in more detail in the next sections:
+\begin{enumerate}
+\setlength{\itemsep}{0pt}
+\item \textbf{Initial Generation.} Generate an initial sample population $\mathcal{D}^{(0)}_\ve = \{( \hat{\vc}_k,\hat{y}_k, r_k^{(0)})\}_{k=1}^K$ of claims $\hat{\vc}$ and labels $\hat{y}$ for the evidence $\ve$ using the generator $G$. Use the teacher model $T$ to assign initial entailment certainty $r^{(0)}$ scores to each sample of synthetic data. This results in each sample having a hard label $\hat{y}$ and a ``soft'' confindence score $r^{(0)}$ for the hard label.\looseness=-1
+\item \textbf{Sample Augmentation.} Apply augmentations $M$ on claims in the population $\mathcal{D}^{(i)}_\ve$ to obtain new claims with the same hard labels. Update their entailment certainties using the teacher model again. Merge mutated samples and samples from previous iteration to form updated population $\bar{\mathcal{D}}^{(i+1)}_\ve= \{( \hat{\vc}_l,\hat{y}_l, r_l^{(i+1)})\}_{l=1}^L$ that is of larger size $L \gg K$.
+\item \textbf{Sample Selection.} Select the subset of samples of size $K$ from $\bar{\mathcal{D}}^{(i+1)}_\ve$ that minimize our proposed \emph{enhanced distribution matching objective} $\mathcal{L}_{\text{tot}}$ formally introduced in Eqn.~(\ref{eqn:enhanceddistmatch}). The objective includes the unlabeled target samples $\mathcal{D}_t$ and the certainty scores. The selected subset becomes the next generation dataset $\mathcal{D}^{(i+1)}_\ve$.
+\item Repeat steps 2 and 3 for a fixed number of iterations or until objective $\mathcal{L}_{\text{tot}}$ converges.
+\end{enumerate}
+
+We illustrate these steps in \Cref{fig:framework} and will detail out implementation choices for each step below.   %As target samples, we use the claims corresponding to samples with the specific evidence \ve\ve.
+ 
+\subsection{Generating Realistic Initial Data}
+
+LLMs have been repeatedly used to generate synthetic data for various domains, including NLI \citep{saad2024ares, hosseini2024synthetic}. In this work, we generate initial data using few-shot prompting with the prompts provided in \Cref{sec:promptinit}. The prompt instructs the LLM to generate synthetic claims $\hat{\vc}=G(\ve, \text{claim}(\mathcal{D}_{t,\ve}), \hat{y})$ for the evidence $\ve$, reflecting the style of example claims from $\mathcal{D}_{t}$ ($\text{claim}(\mathcal{D}_{t,\ve})$ denoting claims from target data for the evidence $\ve$) and target label $\hat{y}\in 0,1$. For label $\hat{y}=1$, the LLM is instructed to include only grounded facts, for $\hat{y}=0$, some ungrounded information should be introduced. We assign labels $\hat{y}$ according to the prompt used, resulting in complete initial generated tuples $(\hat{\vc},\hat{y})$. We follow some related works \citep{puri2020training,vu2021strata}, which have suggested generating many samples and only keeping the most confident. To do so, the samples can be equipped with a weak estimate of the label probability using the teacher model, e.g., another LLM or an NLI model with sophisticated pre- and postprocessing. In the binary classification setup, we can compute initial entailment certainties as $r^{(0)} = T(\ve, \hat{\vc})$, which can be interpreded as an uncalibrated and potentially noisy estimate of $p(y=1|\ve, \hat{\vc})$. We explore LLMs for data generation and use state-of-the-art NLI models and also LLMs as teacher models $T$ for providing initial entailment certainties. Adding the entailment certainty scores $r^{(0)}$ to the respective tuples we obtain a set of triples $\mathcal{D}^{(0)}_\ve = \{( \hat{\vc}_k,\hat{y}_k, r_k^{(0)})\}_{k=1}^K$ after this step. %We can implement uncertainty providing data generators through powerful LLMs that are equipped with uncertainty estimators of any kind \citep{xiong2024can}.
+
+\subsection{Increasing Diversity through Label-Preserving Data Augmentations}
+\ifnotarxiv\begin{wrapfigure}[17]{r}{8cm}
+\centering
+\caption{\textbf{Intuition for our update rule for entailment certainties:} If a parent claim $\vc$ is entailed by $\ve$ and a mutated claim $\vc°\prime$ is entailed by its parent $\vc$, the mutated claim $\vc^\prime$ will be entailed by $\ve$ as well.\label{fig:updaterule}}
+\end{wrapfigure}\fi
+In this section, we demonstrate how to augment the initial synthetic dataset (generated using the few-shot prompting strategy) for additional diversity, while maintaining a high degree of label certainty for the augmented synthetic data points.
+We exploit a certain degree of background knowledge to derive data augmentation strategies \citep{chen2023empirical}. For instance, we know that paraphrasing the claims while preserving their semantic meaning should not change their entailment label. However, when iteratively applying paraphrasing operations, we have to account for an increasing probability of accidentally flipping the label. 
+\ifarxiv
+\sidecaptionvpos{figure}[t]\begin{SCfigure}[][t]
+\centering
+\caption{\textbf{Intuition for our update rule for entailment certainties:} If a parent claim $\vc$ is entailed by $\ve$ and a mutated claim $\vc°\prime$ is entailed by its parent $\vc$, the mutated claim $\vc^\prime$ will be entailed by $\ve$ as well.\label{fig:updaterule}}
+\input{figures/entailments}
+\end{SCfigure}\fi
+
+\textbf{Obtaining High-Quality Entailment Certainties.} We can combine the generative models with discriminative teacher models again to obtain weak estimates $r^{(i)}$ of the entailment certainty of the augmented samples. Instead of directly computing the entailment probability using $T$, we exploit logical invariances, which allow for better estimates depicted in \Cref{fig:updaterule}: If the original claim is entailed by the evidence, and if the modified claim is entailed by the original claim, the modified claim will also be entailed by the evidence. Suppose we have obtained $\hat{\vc}^\prime = M(\hat{\vc})$ as a modification of the synthetic claim $\hat{\vc}$. As we already have an estimate of the entailment probability for $(\ve, \hat{\vc})$, we can reuse it and only need to compute another entailment probability for $(\hat{\vc}, \hat{\vc}^\prime)$. We argue that computing this entailment probability is easier for the teacher model than directly computing $T(\ve, \hat{\vc}^\prime)$, as the claim and the modified claim should be semantically and syntactically more similar.  Paraphrasing datasets like PAWS \citep{zhang2019paws} are common pretraining datasets, and standard NLI datasets like MNLI \citep{williams2018broad} contain many similar samples due to their construction through edits, so NLI predictions are expected to be more reliable on these pairs. Querying the teacher model on $T(\hat{\vc}, \hat{\vc}^\prime)$ allows us to use the following update rule for the augmented sample ($\ve, \hat{\vc}^\prime)$:\looseness=-1
+\begin{align}
+\label{eqn:updater}
+    r^{(i+1)}(\ve, \hat{\vc}^\prime) =  r^{(i)}(\ve,  \hat{\vc}) \cdot T(\hat{\vc}, \hat{\vc}^\prime) + (1-r^{(i)}(\ve,  \hat{\vc}))\cdot (1-T(\hat{\vc}, \hat{\vc}^\prime)).
+\end{align} using the entailment certainty $r^{(i)}$ of the original tuple $(\ve, \hat{\vc})$ as a base. Note that some teacher models may be particularly reliable with claim-claim pairs than with evidence-claim pairs so it can be useful to choose a different teacher model for this update than for computing initial certainty scores.
+
+\textbf{Label Invariant Augmentation Strategies:}
+
+\begin{itemize}
+    \item \textbf{Partial Rephrasing with LLMs.} Our first augmentation is an LLM-based rephrasing step. Specifically, we randomly mask 20\% of the words of the input sequence by replacing the corresponding words by ``\_" and ask an LLM (Claude3 Haiku) to impute the gaps while preserving the meaning.
+    \item \textbf{Complete Paraphrasing.} We use a T5-based paraphrasing model \cite{vorobev2023chatgpt_paraphraser}. We generate paraphrases for the claims using enforcing diversity using a constraint that prevents $n$-grams of length greater than 5 from being regenerated. 
+    \item \textbf{Sentence Deletion.} We chunk the claim into sentences and randomly delete one of them. This should preserve the entailment relation as it only removes information. However, we note that this augmentation may remove some of the context necessary to understand the entire claim.
+\end{itemize}
+
+We generate several augmentations for each sample using these strategies along with an estimate of their entailment probabilities, resulting in an enlarged sample set. Unfortunately, not all of these samples may be of high quality. Therefore, it is crucial to select only the most promising samples. 
+
+\subsection{Automatic Selection of High-Quality Samples}
+\begin{align}
+\mathcal{L}_{tot}(\mathcal{Q}_\ve, f) = \sum_{\hat{\vc_i}, \hat{y}_i, r_i \in \mathcal{Q}_\ve} \left[\underset{\text{distance}}{\underbrace{d(\hat{\vc}_i, \vc_{\min,i})^2 }}+ \lambda_d \underset{\text{label correctness}}{\underbrace{\text{LDiv}(r_i, \hat{y_i})}} -\lambda_u \underset{\text{utility term}}{\underbrace{ U_f(\hat{\vc}_i, \hat{y}_i)}} \right],
+\label{eqn: L_tot}
+\end{align}
+where $d(\vx, \vx^\prime)=\lVert\psi(\vx)-\psi(\vx)^\prime\rVert$ is a distance function over inputs in $\mathcal{X}$ defined via textual embeddings $\psi$, $\vc_{\min,i} \coloneqq \argmin_{\vc^\prime \in \text{claim}(\mathcal{D}_{t, \ve})} d(\vc^\prime, \hat{\vc}_i)$ is the closest claim for evidence $\ve$ from the target dataset, and $\lambda_d, \lambda_u$ are hyperparameters. $\text{LDiv}: [0,1] \times \{0,1\} \rightarrow \mathbb{R}_+$ is a function that penalizes uncertain labels taking the certainty scores $r$ and the hard labels $\hat{y}$ as inputs as plotted in \Cref{fig:certainties}. We derive the exact form of the LDiv function as a divergence estimate of the conditional distributions in \Cref{sec:modeluncert}. The \textit{distance} term encourages samples to be close to claims
+\begin{wrapfigure}[19]{r}{6cm}
+\centering
+\caption{\textbf{Modeling the label correctness term in Eqn.~\ref{eqn: L_tot} as function of $r$.} When the estimated entailment certainty $r$ does not match the assigned hard label $\hat{y}$ this term takes high values discouraging selection.\label{fig:certainties}}
+\end{wrapfigure}  from the target data set for the given evidence.  The \textit{label correctness} term penalizes samples where the entailment certainties are too far apart from the target labels and is used to discourage selection of samples where the labels are likely to be incorrect. Additionally, we encourage generation of samples where the pretrained model $f$ is not performing well yet by including the cross-entropy loss of the model as a utility term, $U_f = \text{CE}[f(\ve, \hat{\vc}), \hat{y}]$ where $\hat{y}$ is the assigned hard label of a synthetic sample.
+
+\textbf{Theoretical Properties.} 
+\pp{Notably, \Cref{eqn: L_tot} can be derived from first principles as an \textit{enhanced distribution matching objective}. 
+\begin{align}
+\label{eqn:enhanceddistmatch}
+    \mathcal{L}_{tot}(\mathcal{Q}_\ve, f)  =  D_{KL}\left(p_{\mathcal{Q},\ve}(\vc, y)\middle|\middle|p_{\text{cov},\ve}(\vc, y)\right) - \mathbb{E}_{(\vc, y)\sim p_{\mathcal{Q},\ve}}\left[U_f(\vc, y)\right].
+\end{align}
+We derive a proposition to formalize this connection in \Cref{sec:theory}.
+
+\textbf{Optimizing the objective.} Optimizing the objective for a subset $\mathcal{Q}$ of size $K$ with minimal loss can be done highly efficiently in three steps: (1) Computing each samples' contribution to the sum in  $\mathcal{L}_{tot}$, (2) ranking the samples by this contribution, and (3) greedily
+selecting the top-$K$ subset of samples with the lowest contributions.
+
+
+\newcommand{\insertiter}[1]{\includegraphics[width=\linewidth, trim={5.35cm 4cm 15.5cm 2cm}, clip]{#1}}
+\begin{table}[t]
+    \centering
+    \setlength{\tabcolsep}{2pt}
+    \scalebox{0.9}{
+    \begin{tabular}{clrlrlrlrlrlcc}
+    \toprule
+    & Dataset & \multicolumn{4}{c}{RAGTruth}  & \multicolumn{2}{c}{LFQA-Verif.} & \multicolumn{2}{c}{SummEdits} & Avg.,& Rank\\
+    & RAG-Task & \multicolumn{2}{c}{Summary}  & \multicolumn{2}{c}{QA} & \multicolumn{2}{c}{QA} & \multicolumn{2}{c}{Summary} & \\
+    \cmidrule(lr){2-2}  \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+    \cmidrule(lr){11-12}
+\multirow{3}{*}{\rotatebox[origin=c]{90}{\tiny{base models}}} & FLAN-T5 & 0.734 & & 0.708 & & 0.655 & & 0.700 & & 0.699 \\
+& BART-large & 0.696 & & 0.670 & & 0.821 & & 0.769 & & 0.739 \\
+& DeBERTaV2 & 0.782 & & 0.530 & & 0.645 & & 0.876 & & 0.708 \\
+    \cmidrule(lr){2-2}  \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+    \cmidrule(lr){11-12}
+\multirow{2}{*}{\rotatebox[origin=c]{90}{\tiny{robustness}}} & $\text{DAPT}_{\text{DeBERTaV2}}$ & 0.746 & \fstd{0.005}  & 0.703 & \fstd{0.016}  & 0.813 & \fstd{0.094}  & 0.837 & \fstd{0.004}  & 0.775 & \\
+    & $\text{SiFT}_{{\text{DeBERTaV2}}}$ & 0.785  & \fstd{0.008} & 0.566 & \fstd{0.005} & 0.880 & \fstd{0.032} & 0.845 & \fstd{0.003} & 0.769 & \\
+    & $\text{CORAL}_{{\text{DeBERTaV2}}}$ & 0.718  & \fstd{0.001} & 0.677 & \fstd{0.001} & 0.822 & \fstd{0.001} & 0.853 & \fstd{0.001} & 0.768 \\
+    \cmidrule(lr){2-2}  \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10} \cmidrule(lr){11-12}
+\multirow{3}{*}{\rotatebox[origin=c]{90}{\tiny{complex}}} &MiniCheck-T5 & 0.754 & & 0.640 & & 0.741 & & 0.791 & & 0.732 \\
+& AlignScore & 0.729 & & 0.822 & & \fbox{0.904} & & \fbox{0.894} & & 0.837 \\
+& Vectara-2.1 & \fbox{0.805} & & \fbox{0.854} & & 0.648 & & 0.590 & & 0.725 \\
+    \cmidrule(lr){2-2}  \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+    \cmidrule(lr){11-12}
+\multirow{3}{*}{\rotatebox[origin=c]{90}{\tiny{Auto-GDA}}}& Flan-T5 (Auto-GDA) & 0.756 & \fstd{0.004} & 0.783 & \fstd{0.013} & 0.687 & \fstd{0.002} & 0.824 & \fstd{0.010} & 0.762  \\
+& BART (Auto-GDA) & 0.813 & \fstd{0.009} & 0.867 & \fstd{0.011} & 0.867 & \fstd{0.026} & 0.860 & \fstd{0.010} & 0.852 & \circled{3} \\
+& DeBERTaV2 (Auto-GDA) & 0.837 & \fstd{0.007} & 0.867 & \fstd{0.007} & 0.925 & \fstd{0.009} & 0.883 & \fstd{0.005} & 0.878 & \circled{2} \\
+    \cmidrule(lr){2-2}  \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+    \cmidrule(lr){11-12}
+\multirow{3}{*}{\rotatebox[origin=c]{90}{\tiny{LLMs}}} &GPT-3.5 & 0.706 & & 0.648 & & 0.749 & & 0.814 & & 0.729 \\
+& GPT-4o-mini & 0.884 & & 0.833 & & 0.812 & & 0.878 & & 0.852 & \circled{3}\\
+& GPT-4o & 0.892 & & 0.865 & & 0.896 & & 0.880 & & 0.883 & \circled{1} \\
+\bottomrule
+\end{table}
+
+
+\section{Experimental Evaluation}
+
+\label{sec:experimental}
+We run experiments with realistic datasets and baseline models to confirm the efficacy of \framework.
+
+\textbf{Datasets.} We evaluate our approach on three datasets for document-grounded summarization and question answering (QA). We select datasets which include documents, realistic LLM-generated long-form answers, and human labels that can be used for testing. The SummEdits \citep{laban2023summedits} dataset  contains GPT-3.5-generated and manual summaries of documents from different domains, e.g., judicial, sales emails, podcasts. We further use both the summary and the QA portion of the RAGTruth \citep{wu2023ragtruth} dataset. The RAGTruth dataset contains summaries and answers to questions created by LLMs (GPT-3.5/4, Mistral, Llama2). Finally, we use the LFQA-Verification dataset \citep{chen2023understanding}, which retrieved documents for questions from the ``Explain me Like I am five''-dataset and generated corresponding long-form answers with GPT-3.5 and Alpaca. We selected the datasets to feature characteristics of realistic RAG systems including specific prompt templates (present in RAGTruth, LFQA-Verification) and various domains (present in all datasets, specifically in SummEdits). Details and links to the datasets can be found in \Cref{sec:datasetsappx}. 
+
+\textbf{Base models.} As NLI models, we use three pretrained model architectures that are able to handle NLI queries with the longer context required for RAG inputs. We investigate a BART-Large \citep{lewis2019bart} model pretrained only on the MNLI dataset \citep{williams2018broad}. This can be considered a lightly pretrained model. Additionally, we study DeBERTa-V2 pretrained with datasets from the tasksource collection \citep{sileo2024tasksource}. 
+We additionally study a FLAN-T5-based model  \citep{raffel2020exploring} pretrained on MNLI. The all models possess context lengths of at least 1024 tokens. % (for BART-large, T5, context length 1280 for DeBERTaV2). %We remove samples that do not fit this context length from 
+\pp{
+\textbf{Baselines.} We use state-of-the-art baselines: AlignScore \citep{zha2023alignscore} (RoBERTa-based with pre- and postprocessing), MiniCheck \citep{tang2024minicheck}, and Vectara-2.1\footnote{\url{https://docs.vectara. As a teacher model to assign initial score, we use the best-performing model from the ``complex'' category, which allow easy access to uncertainty scores and have good performance. We employ \texttt{optuna}\footnote{\url{https://optuna.org/}} to tune the remaining hyperparameters $\lambda_u^\prime$, $\lambda_d$, and the other teacher model used to estimate entailment probabilities for augmentations in Eqn.~\ref{eqn:updater} performing 50 trials per dataset. \framework is run for two iterations on RAGTruth and one iteration on the other datasets, generating synthetic datasets between  $1.3\times$ and $2\times$ the original dataset size. We found no improvements through further increasing dataset size.
+We also compare against several common UDA methods, including robustness-based approaches. Specifically, we implement DAPT \citep{gururangan2020don}, SiFT \citep{he2020deberta}, and Deep-CORAL \citep{sun2016deep} for further pretraining of the DeBERTa-V2 model. Additional implementation details for all methods can be found in \Cref{sec:impl_details}.}
+
+\subsection{Synthetic Data for NLI Model Fine-Tuning}
+We present the main results obtained with \framework in \Cref{tab:main}. Our results show that \framework is highly effective and improves performance in ROC-AUC scores of all tested models on all our datasets. Additional metrics confirm our findings (balanced accuracy, f1-scores in \Cref{sec:additionalmetrics}). \looseness=-1
+
+\pp{
+\textbf{Comparison to Teacher Models.}
+\framework is highly effective, not only incorporating the knowledge of the stronger teacher model (indicated by box) but often even surpassing it, as the optimization enhances data quality over the teacher in three out of four datasets.
+
+\pp{
+\textbf{Comparison to Classical UDA Methods.}
+Traditional UDA methods (DAPT, SiFT, and Deep-CORAL) did not yield significant improvements in our NLI domain adaptation setting 
+and \framework consistently outperforms them across all datasets. This also indicates that synthetic data generation is more effective for NLI tasks.
+
+\pp{
+\textbf{Comparison to LLMs.}
+
+\pp{
+\textbf{Other Teacher Models. However, the table also shows that the DeBERTa model can improve its own performance through self-supervision by an average of 0.15 AUC when applied as the teacher model.
+
+\begin{table}
+    \centering
+    \setlength{\tabcolsep}{2pt}
+    \scalebox{0.9}{
+    \begin{tabular}{lccccc}
+    \toprule
+     Dataset & \multicolumn{2}{c}{RAGTruth}  & LFQA-Verif. & SummEdits & Mean (Gap closed) \\
+    RAG-Task & Summary  & QA & QA & Summary & \\
+    \cmidrule(lr){1-1}  \cmidrule(lr){2-4}  \cmidrule(lr){5-5} \cmidrule(lr){6-6}
+non-fine-tuned & 0.782 & 0.530 & 0.645 & 0.876 & 0.708 (0\%) \\
+\midrule
++ft. on Few-Shot Data & 0.799 & 0.826 & 0.934 & 0.872 & 0.858 (84\%) \\
++ft. on Augmented w/ Random Selection & 0.777 & 0.783 & 0.919 & 0.862 & 0.835 (71\%) \\
++ft. on Augmented w/ Objective (Auto-GDA) & 0.837 & 0.867 & 0.925 & 0.883 & 0.878 (96\%) \\
+\midrule
+fine-tuned on labeled & 0.842 & 0.890 & 0.909 & 0.898 & 0.885 (100\%) \\
+\bottomrule
+\end{table}
+
+\subsection{Ablation Investigations}
+\textbf{Components of the algorithm.} We add the components of our algorithm individually and show how they successively increase performance in \Cref{tab:ablationmain}. In all ablations 
+we keep dataset size and other parameters constant. The biggest gain is achieved by fine-tuning on data created by few-shot prompting. We subsequently add data augmentations without applying our selection criterion, but instead selecting few-shot and augmented samples randomly. We observe that this decreases data quality, highlighting that data augmentation is only beneficial together with our filtering criterion. When we do so and apply data augmentation with our filtering step (corresponding to  full \framework), this increases performance overall with one exception on the LFQA-Verification dataset (note however that performance here is already above the labeled data, so selection based on target data may draw the results toward the labeled data scores as well). 
+As an upper baseline we are interested in the hypothetical performance reachable by fine-tuning on human-labeled samples and include it in \Cref{tab:ablationmain}. Considering the difference between the no fine-tuning models and the models fine-tuned on human-labeled data as the \textit{domain adaptation gap}, expressing our results relative to these baselines indicates that we manage to close an impressive 96\% of this gap.\looseness=-1
+\begin{table}
+\centering
+\setlength{\tabcolsep}{2pt}
+    \scalebox{0.8}{
+    \begin{tabular}{lcccccccc}
+    \toprule
+    Model & \multicolumn{2}{c}{RAGTruth}  & LFQA-Verification & SummEdits & Inference time (relative) & Performance\\
+    & Summary  & QA & QA & Summary & sec/(50 samples) & AUC-ROC*100\\
+\cmidrule(r){1-1}  \cmidrule(r){2-3}  \cmidrule(lr){5-5} \cmidrule(lr){4-4} \cmidrule(lr){6-6}
+\cmidrule(l){7-7}
+Vectara & \wstd{1.57}{0.02} & \wstd{1.13}{0.03} & \wstd{1.35}{0.03} & \wstd{1.03}{0.01} & 1.27 (59\%) & 72.5\\
+FLAN-T5 & \wstd{1.71}{0.07} & \wstd{1.71}{0.07} & \wstd{1.72}{0.07} & \wstd{1.71}{0.07} & 1.71 (80\%) & 69.9\\
+DeBERTaV2 & \wstd{2.56}{0.03} & \wstd{1.88}{0.04} & \wstd{2.15}{0.06} & \wstd{1.88}{0.09} & 2.12 (100\%) & 70.8\\
+MiniCheck-T5 & \wstd{4.50}{0.20} & \wstd{3.16}{0.06} & \wstd{3.90}{0.14} & \wstd{3.22}{0.10} & 3.69 (174\%) & 73.2\\
+BART-large & \wstd{4.33}{0.01} & \wstd{3.62}{0.06} & \wstd{3.95}{0.09} & \wstd{3.76}{0.20} & 3.92 (184\%) & 73.9\\
+\midrule
+AlignScore & \wstd{5.88}{0.12} & \wstd{7.55}{0.28} & \wstd{7.55}{0.35} & \wstd{1.81}{0.06} & 5.70 (269\%) & 83.7\\
+\midrule
+GPT-4o & \wstd{19.80}{0.51} & \wstd{19.11}{0.44} & \wstd{21.09}{2.97} & \wstd{21.89}{1.26} & 20.47 (967\%) & 88.3\\
+\midrule
+Auto-GDA \tiny{DebertaV2} & \multicolumn{4}{c}{Same as DeBERTaV2} &  2.12 (100\%) & 87.8\\
+    \bottomrule
+\caption{\textbf{Inference times of the models} on the datasets as 
+\end{table}
+
+\textbf{Selection from Several Augmentation Routines.} We report the effect of single versus several augmentations in \Cref{tab:augmentations} and \Cref{fig:selectedsamples} in \Cref{sec:additionalqualitativeresults}, quantitatively and qualitatively demonstrating that \framework  succeeds to the most promising samples from different augmentations.
+\subsection{Inference Efficiency}
+Linking to our motivational \Cref{fig:motivation}, we study the efficiency of our models in \Cref{tab:inferenceefficiency}. We compute NLI scores for 50 random samples from the respective datasets. We observe models in three categories: The most efficient models (Vectara to BART-large) have medium performance on the RAG datasets used in this work indicated by their ROC. On the other hand, models using sophisticated post-processing (AlignScore) perform better, but require about 2.5 times more inference time than our most successful DeBERTa model. Finally, LLMs via APIs require about 10-fold inference time, but result in highest performance. When we compare models trained with our approach, we observe LLM-level performance at about 10\% of the inference time.
+
+
+
+\section{Disussion and Conclusion}
+
+In this work, we show that synthetic data can successfully tackle the domain generalization gap for NLI models. We present Auto-GDA, an automatic approach for synthetic sample generation and selection overcoming the need for tedious heuristic or manual filtering and augmentation selection. Our results show that we can obtain models that perform on par with most powerful LLMs while having around 90\% less inference time using our method.
+Our findings further demonstrate the superiority of synthetic data generation over unsupervised domain adaptation (UDA) methods. Even with synthetic data obtained only through few-shot prompting, we can obtain better results than the UDA baselines (\Cref{tab:main} vs. \Cref{tab:ablationmain}). We attribute this to the inherent limitations of UDA methods that usually operate in vectorial embedding spaces and fail to capture semantics of the target domain. By generating synthetic data, we can provide a more comprehensive and tailored representation, allowing for greater control over the desired features. Our results also confirm the common intuition that generalization is increasingly hard with smaller models  \citep{bhargava2021generalization}. This highlights that domain adaptation is particularly important when low latency at inference time is required, whereas general purpose models can be preferable when quick inference is no hard requirement.
+
+\textbf{Limitations.} In our study we assume that the distribution of evidence samples including the retrieved documents is readily available. In many real-world applications, this may not be the case. To address this, techniques like passage clustering and summarization, as explored in \cite{sarthi2024raptor}, could be employed on the knowledge base to cover the diversity of evidence passages as a surrogate of this distribution. In addition, domain adaptation requires a model for each individual domain. Future work is required to further study if it is possible to adapt efficient models for multiple domains without performance degradation.
+
+
+
+

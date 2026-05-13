@@ -1,0 +1,396 @@
+\title{Dynamic Diffusion Transformer}
+
+\begin{abstract}
+
+Diffusion Transformer (DiT), an emerging diffusion model for image generation, has demonstrated superior performance but suffers from substantial computational costs. Our investigations reveal that these costs stem from the \emph{static} inference paradigm, which inevitably introduces redundant computation in certain \emph{diffusion timesteps} and \emph{spatial regions}. To address this inefficiency, we propose \textbf{Dy}namic \textbf{Di}ffusion \textbf{T}ransformer (DyDiT), an architecture that \emph{dynamically} adjusts its computation along both \emph{timestep} and \emph{spatial} dimensions during generation. Specifically, we introduce a \emph{Timestep-wise Dynamic Width} (TDW) approach that adapts model width conditioned on the generation timesteps. In addition, we design a \emph{Spatial-wise Dynamic Token} (SDT) strategy to avoid redundant computation at unnecessary spatial locations. Extensive experiments on various datasets and different-sized models verify the superiority of DyDiT. Notably, with <3\% additional fine-tuning iterations, our method reduces the FLOPs of DiT-XL by 51\%, accelerates generation by 1.73$\times$, and achieves a competitive FID score of 2.07 on ImageNet.%
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models \citep{ho2020denoising, dhariwal2021diffusion, rombach2022high, blattmann2023stable} have demonstrated significant superiority in visual generation tasks. Recently, the remarkable scalability of Transformers \citep{vaswani2017attention, dosovitskiy2020image} has led to the growing prominence of Diffusion Transformer (DiT) \citep{peebles2023scalable}. DiT has shown strong potential across a variety of generation tasks \citep{chen2023pixart, ma2024latte, chen2024pixart} and is considered a foundational component in the development of Sora \citep{videoworldsimulators2024}, a pioneering model for video generation. Like Transformers in other vision and language domains~\citep{dosovitskiy2020image, brown2020language}, DiT faces significant efficiency challenges during generation. 
+
+Existing approaches to improving DiT's efficiency include efficient diffusion samplers \citep{song2020denoising, song2023consistency, salimans2022progressive, meng2023distillation, luo2023latent} and global acceleration techniques \citep{ma2023deepcache, pan2024t}. In addition, reducing computational redundancy within the DiT architecture using model compression techniques, such as structural pruning \citep{fang2024structural, molchanov2016pruning, he2017channel}, also shows significant promise.
+
+
+
+However, pruning methods typically retain a \emph{static} architecture across both the \emph{timestep} and \emph{spatial} dimensions throughout the diffusion process. As shown in \figurename~\ref{fig:figure1}(c), both the original DiT and the pruned DiT employ a fixed model width across all diffusion timesteps and allocate the same computational cost to every image patch. This static inference paradigm overlooks the varying complexities associated with different timesteps and spatial regions, leading to significant computational inefficiency. To explore this redundancy in more detail, we analyze the training process of DiT, during which it is optimized for a noise prediction task. Our analysis yields two key insights:
+
+
+\emph{a) Timestep perspective:} We plot the loss value differences between a pre-trained small model (DiT-S) and a larger model (DiT-XL) in \figurename~\ref{fig:figure1}(a). The results show that the loss differences diminish substantially for $t > \hat{t}$, and even approach negligible levels as $t$ nears the prior distribution ($t \to T$). This indicates that the prediction task becomes \emph{progressively easier at later timesteps} and could be managed effectively even by \emph{a smaller model}. However, DiT applies the same architecture across all timesteps, leading to \textit{excessive computational costs at timesteps where the task complexity is low}.
+
+\emph{b) Spatial perspective:} We visualize the loss maps in \figurename~\ref{fig:figure1}(b) and observe a noticeable imbalance in loss values across different spatial regions of the image. Loss values are higher in patches corresponding to the main object, while patches representing background regions exhibit relatively lower loss. This suggests that the difficulty of noise prediction varies across spatial regions. Consequently, \textit{uniform computational treatment of all patches introduces redundancy and is likely suboptimal.}
+
+
+Based on the above insights, a promising approach to improve DiT's computational efficiency is \textit{dynamic computation}. To this end, we propose \textbf{Dy}namic \textbf{Di}ffusion \textbf{T}ransformer (DyDiT), which adaptively allocates computational resources during the generation process, as illustrated in \figurename~\ref{fig:figure1}(c). Specifically, from the timestep perspective, we introduce a \emph{Timestep-wise Dynamic Width} (TDW) mechanism, where the model learns to adjust the width of the attention and MLP blocks based on the current \emph{timestep}. From a spatial perspective, we develop a \emph{Spatial-wise Dynamic Token} (SDT) strategy, which identifies image patches where noise prediction is relatively ``easy'', allowing them to bypass computationally intensive blocks, thus reducing unnecessary computation.
+
+Notably, both TWD and SDT are plug-and-play modules that can be easily implemented on DiT to build DyDiT. Moreover, our method contributes to significant speedup due to the hardware-friendly design: 1) the model architecture at each timestep can be pre-determined offline, eliminating additional overhead for width adjustments and enabling efficient batch processing (Section~\ref{sec:dynamic_channel}); and 2) the token gathering and scattering operations incur minimal overhead and are straightforward to implement (Section~\ref{sec:dynamic_token}). Such hardware efficiency distinguishes our approach from traditional dynamic networks~\citep{herrmann2020channel,meng2022adavit,han2023latency}, which adapt their inference graphs for each sample and struggle to improve practical efficiency in batched inference.
+
+We conduct extensive experiments across multiple datasets and model scales to validate the effectiveness of the proposed method. For example, compared to the static counterpart DiT-XL, our DyDiT-XL reduces FLOPs by 51\% and accelerates the generation by 1.73 times, with less than 3\% fine-tuning iterations, while maintaining a competitive FID score of 2.07 on ImageNet (256 $\times$ 256) \citep{deng2009imagenet}. Our method shows potential for further efficiency gains when combined with efficient samplers, such as DDIM~\citep{song2020denoising} and DPM Solver++ \citep{lu2022dpm}, or global acceleration techniques like DeepCache \citep{ma2023deepcache}. We anticipate that DyDiT will inspire future research in the development of more efficient diffusion Transformers.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure1.pdf}
+
+\caption{
+(a) The loss difference between DiT-S and DiT-XL across all diffusion timesteps ($T=1000$). The difference is slight at most timesteps. (b) Loss maps (normalized to the range [0, 1]) at different timesteps, show that the noise in different patches has varying levels of difficulty to predict. (c) Difference of the inference paradigm between the static DiT and the proposed DyDiT. } % ⭕️
+\label{fig:figure1}
+
+\end{figure*} 
+
+
+
+
+
+
+\section{Related Works}
+
+\paragraph{Efficient Diffusion Models.}
+Although diffusion models \citep{ho2020denoising, rombach2022high} have achieved remarkable performance in generation tasks, their generation speed has always hindered their further applications primarily due to long sampling steps and high computational costs. Existing attempts to make diffusion models efficient can be roughly categorized into sampler-based methods, model-based methods, and global acceleration methods. The sampler-based methods \citep{song2020denoising, song2023consistency, salimans2022progressive, meng2023distillation, luo2023latent} aim to reduce the sampling steps. Model-based approaches \citep{fang2024structural, so2024temporal, shang2023post, yang2023diffusion} attempt to compress the size of diffusion models via pruning \citep{fang2024structural, shang2023post} or quantization \citep{li2023q, shang2023post}. Global acceleration methods like Deepcache \citep{ma2023deepcache} tend to reuse or share some features across different timesteps. 
+
+Our DyDiT is mostly relates to the model-based approaches and orthoganal to the other two lines of work. However, unlike the pruning methods yielding \textit{static architectures}, DyDiT performs \textit{dynamic computation} for different diffusion timesteps and image tokens. 
+
+\paragraph{Dynamic Neural Networks.}
+Compared to static models, dynamic neural networks \citep{han2021dynamic} can adapt their computational graph based on inputs, enabling superior trade-off between performance and efficiency.  They generally realize dynamic architectures by varying the network depth \citep{teerapittayanon2016branchynet, bolukbasi2017adaptive, yang2020resolution,han2022learning,han2023dynamic} or width \citep{herrmann2020channel, li2021dynamic, han2023latency} during inference. Some works explore the spatial redundancy in image \emph{recognition} \citep{wang2021not, song2021dynamic, rao2021dynamicvit, liang2022not, meng2022adavit}. Despite their promising theoretical efficiency, existing dynamic networks usually struggle in achieving \emph{practical efficiency} during batched inference \citep{han2023latency} due to the per-sample inference graph. Moreover, the potential of dynamic architectures in diffusion models, where a \emph{timestep} dimension is introduced, remains unexplored.
+
+This work extends the research of dynamic networks to the image \emph{generation} field. More importantly, our TDW adjusts the network structure only conditioned on the \emph{timesteps}, avoiding the sample-conditioned tensor shapes in batched inference. Together with the efficient token gathering and scattering  mechanism of SDT, DyDiT shows preferable realistic efficiency.
+
+
+\section{Dynamic Diffusion Transformer}
+
+
+
+We first provide an overview of diffusion models and DiT \citep{peebles2023scalable} in Section~\ref{sec:predliminary}. DyDiT's timestep-wise dynamic width (TDW) and spatial-wise dynamic token (SDT) approaches are then introduced in Sections~\ref{sec:dynamic_channel} and \ref{sec:dynamic_token}. Finally, Section~\ref{sec:training} details the training process of DyDiT.
+
+\subsection{Preliminary} \label{sec:predliminary}
+\paragraph{Diffusion Models} \citep{ho2020denoising, song2020score, nichol2021improved, rombach2022high} generate images from random noise through a series of diffusion steps. These models typically consist of a forward diffusion process and a reverse denoising process. In the forward process, given an image $\mathbf{x}_0 \!\sim\!q(\mathbf{x})$ sampled from the data distribution, Gaussian noise $\epsilon\!\sim\!\mathcal{N}(0, I)$ is progressively added over $T$ steps. This process is defined as $q\left(\mathbf{x}_t\!\mid\!\mathbf{x}_{t-1}\right)\!=\!\mathcal{N}\left(\mathbf{x}_t ; \sqrt{1-\beta_t} \mathbf{x}_{t-1}, \beta_t \mathbf{I}\right)$, where $t$ and $\beta_t$ denote the timestep and noise schedule, respectively. In the reverse process, the model removes the noise and reconstructs $\mathbf{x}_0$ from $\mathbf{x}_T\!\sim\!\mathcal{N}(0, I)$ using $p_\theta\left(\mathbf{x}_{t-1}\!\mid\!\mathbf{x}_t\right)\!=\!\mathcal{N}\left(\mathbf{x}_{t-1} ; \mu_\theta\left(\mathbf{x}_t, t\right), \Sigma_\theta\left(\mathbf{x}_t, t\right)\right)$, where $\mu_\theta\left(\mathbf{x}_t, t\right)$ and $\Sigma_\theta(\mathbf{x}_t, t)$ represent the mean and variance of the Gaussian distribution.
+
+\paragraph{Diffusion Transformer} (DiT) \citep{peebles2023scalable} exhibits the scalability and promising performance of Transformers \citep{videoworldsimulators2024}. Similar to ViT \citep{dosovitskiy2020image}, DiT consists of layers composed of a multi-head self-attention (MHSA) block and a multi-layer perceptron (MLP) block, described as $\mathbf{X} \leftarrow \mathbf{X} + \alpha \text{MHSA}(\gamma \mathbf{X} + \beta), \mathbf{X} \leftarrow  \mathbf{X}  + \alpha^{\prime} \text{MLP}(\gamma^{\prime} \mathbf{X} + \beta^\prime)$, where $\mathbf{X} \in \mathbb{R}^{N \times C}$ denotes image tokens. Here, $N$ is the number of tokens, and $C$ is the channel dimension. The parameters $\{\alpha, \gamma,\beta, \alpha^{\prime}, \gamma^{\prime}, \beta^{\prime} \}$ are produced by an adaptive layer norm (adaLN) block \citep{perez2018film}, which takes the class condition embedding $\mathbf{E}_{cls}$ and timestep embedding $\mathbf{E}_t$ as inputs.
+
+
+\subsection{Timestep-wise Dynamic Width} \label{sec:dynamic_channel}
+As aforementioned, DiT spends equal computation for different timesteps, although not all steps share the same generation difficulty (\figurename~\ref{fig:figure1}(a)). Therefore, the \emph{static} computation paradigm introduces significant redundancy in those ``easy'' timesteps. Inspired by structural pruning methods~\citep{he2017channel, hou2020dynabert, fang2024structural}, we propose a \emph{timestep-wise dynamic width} (\textbf{TDW}) mechanism, which adjusts the width of MHSA and MLP blocks in different timesteps. Note that TDW is \emph{not a pruning method} that permanently removes certain model components, but rather retains the full capacity of DiT and \emph{dynamically} activates different heads/channel groups at each timestep.
+
+\paragraph{Heads and channel groups.} Given input $\mathbf{X}\!\in\!\mathbb{R}^{N \times C}$, an MHSA block employs three linear layers with weights $\mathbf{W}_{\text{Q}}, \mathbf{W}_{\text{K}}, \mathbf{W}_{\text{V}}\!\in\!\mathbb{R}^{C \times (H \times C_H)}$ to project it into Q, K, and V features, respectively. Here, $H$ denotes the head number and $C=\!\!H\!\times\!C_H$ in DiT. An output projection is performed using another linear layer with $\mathbf{W}_{\text{O}}  \in \mathbb{R}^{(H \times C_H) \times C}$. The operation of the conventional MHSA can be expressed as:
+\begin{equation}
+\text{MHSA}(\mathbf{X})=\sum_{h=1}^{H} \mathbf{X}_{\text{attn}}^{h} \mathbf{W}_{\text{O}}^{h,:, :}=\sum_{h=1}^{H} (\operatorname{Softmax}((\mathbf{X}\mathbf{W}_{\text{Q}}^{:,h,:}) (\mathbf{X}\mathbf{W}_{\text{K}}^{:,h,:})^{\top}) \mathbf{X} \mathbf{W}_{\text{V}}^{:, h, :}) \mathbf{W}_{\text{O}}^{h,:, :}.
+\end{equation}
+
+An MLP block contains two linear layers with weights $\mathbf{W}_{1}\!\in\!\mathbb{R}^{C \times D}$ and $\mathbf{W}_{2}\!\in\!\mathbb{R}^{D \times C}$, where $D$ represents the hidden channels, set as $4C$ by default in DiT.
+To dynamically control the MLP width, we divide $D$ hidden channels into $H$ groups, reformulating the weights into $\mathbf{W}_{1}\!\in\!\mathbb{R}^{C \times (H \times D_{H})}$ and $\mathbf{W}_{2}\!\in\!\mathbb{R}^{(H \times D_{H}) \times C}$, where $D_{H}\!=\!D / H$. Hence, the operation in MLP can be formulated as:
+\begin{equation}
+\text{MLP}(\mathbf{X}) = \sum_{h=1}^{H}\sigma(\mathbf{X}_{\text{hidden}}^h)\mathbf{W}_{2}^{h,:,:} = \sum_{h=1}^{H}\sigma(\mathbf{X} \mathbf{W}_{1}^{:, h, :})\mathbf{W}_{2}^{h,:,:}, 
+\end{equation}
+where $\sigma$ denotes the activation layer. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/main.pdf}
+\caption{\textbf{Overview of the proposed dynamic diffusion transformer (DyDiT)}. It reduces the computational redundancy in DiT \citep{peebles2023scalable} from both timestep and spatial dimensions. } 
+\label{fig:main}
+\end{figure*} 
+
+\paragraph{Dynamic width control based on timestep.}
+To dynamically activate the heads and channel groups at each diffusion timestep, in each block, we feed the timestep embedding $\mathbf{E}_t \in \mathbb{R}^{C}$ into routers $\operatorname{R}_{\text{head}}$ and $\operatorname{R}_{\text{channel}}$ (Figure~\ref{fig:main}(a)). Each router comprises a linear layer followed by the Sigmoid function, producing the probability of each head and channel group to be activated:
+\begin{equation}
+\mathbf{S}_{\text{head}} = \operatorname{R}_{\text{head}}(\mathbf{E}_t)\in[0,1]^H, \quad \mathbf{S}_{\text{channel}} = \operatorname{R}_{\text{channel}}(\mathbf{E}_t)\in[0,1]^H.
+\end{equation}
+A threshold of 0.5 is then used to convert the continuous-valued $\mathbf{S}_{\text{head}}$ and $\mathbf{S}_{\text{channel}}$ into binary masks $\mathbf{M}_{\text{head}}\!\in\!\{0,1\}^H$ and $\mathbf{M}_{\text{channel}}\!\in\!\{0,1\}^H$, indicating the activation decisions for attention heads and channel groups. The $h$-th head (group) is activated only when $\mathbf{M}_{\text{head}}^{h}\!=\!1$ ($\mathbf{M}_{\text{channel}}^{h}\!=\!1$). 
+Benefiting from the grouping operation, routers introduce negligible parameters and computation. 
+\paragraph{Inference.}
+After obtaining the discrete decisions  $\mathbf{M}_{\text{head}}$ and $\mathbf{M}_{\text{channel}}$, each DyDiT block only computes the activated heads and channel groups during generation:
+\begin{equation}
+    \begin{aligned}
+        \text{MHSA}(\mathbf{X})&=\sum_{h: \mathbf{M}_{\text{head}}^h=1} \mathbf{X}_{\text{attn}}^{h} \mathbf{W}_{\text{O}}^{h,:, :},\\
+        \text{MLP}(\mathbf{X})&= \sum_{h: \mathbf{M}_{\text{channel}}^h=1} \sigma(\mathbf{X}_{\text{hidden}}^h)\mathbf{W}_{2}^{h,:,:}.
+    \end{aligned}
+\end{equation}
+Let $\tilde{H}_{\text{head}}=\sum_h \mathbf{M}_{\text{head}}^h$ and $\tilde{H}_{\text{channel}}=\sum_h \mathbf{M}_{\text{channel}}^h$ denote the number of activated heads/groups. TWD reduces the MHSA computation from $\mathcal{O}(H\times(4NCC_{H}+2N^2C_{H}))$ to $\mathcal{O}(\tilde{H}_{\text{head}}\times(4NCC_{H}+2N^2C_{H}))$ and MLP blocks from $\mathcal{O}(H\times2NCD_{H})$ to $\mathcal{O}(\tilde{H}_{\text{channel}}\times2NCD_{H})$.
+It is worth noting that as the activation choices depend solely on the timestep $\mathbf{E}_t$, we can pre-compute the masks offline once the training is completed, and \emph{pre-define} the activated network architecture before deployment. This avoids the sample-dependent inference graph in traditional dynamic architectures~\citep{meng2022adavit,han2023latency} and facilitates the realistic speedup in batched inference.
+
+
+
+
+\subsection{Spatial-wise Dynamic Token} \label{sec:dynamic_token}
+In addition to the timestep dimension, the redundancy widely exists in the spatial dimension due to the varying complexity of different patches (Figure~\ref{fig:figure1}(b)). To this end, we propose a spatial-wise dynamic token (SDT) method to reduce computation for the patches where noise estimation is ``easy''.
+\paragraph{Bypassing the MLP block.}
+As shown in Figure~\ref{fig:main} (b), SDT adaptively identifies the tokens associated with image regions that present lower noise prediction difficulty. These tokens are then allowed to bypass the computationally intensive MLP blocks. Theoretically, this block-bypassing operation can be applied to both MHSA and MLP. However, we find MHSA crucial for establishing token interactions, which is essential for the generation quality. More critically, varying token numbers across images in MHSA could result in incomplete tensor shapes in a batch, reducing the overall throughput in generation. Therefore, SDT is applied only in MLP blocks in each layer.
+Concretely, before each MLP block, we feed the input $\mathbf{X}\!\in\!\mathbb{R}^{N \times C}$ into a token router $\operatorname{R}_{\text{token}}$, which predicts the probability $\mathbf{S}_{\text{token}} \in \mathbb{R}^{N}$ of each token to be processed. This can be formulated as:
+\begin{equation}
+\mathbf{S}_{\text{token}} = \operatorname{R}_{\text{token}}(\mathbf{X})\in[0,1]^N.
+\end{equation}
+We then convert it into a binary mask $\mathbf{M}_{\text{token}}$ using a threshold of 0.5. Each element $\mathbf{M}^{i}_{\text{token}}\in\{0,1\}$ in the mask indicates whether the $i$-th token should be processed by the block  (if $\mathbf{M}_{\text{token}}^{i} =1$) or directly bypassed (if $\mathbf{M}_{\text{token}}^{i} =0$). The router parameters are not shared across different layers.
+
+ 
+
+
+\paragraph{Inference.}
+During inference (\figurename~\ref{fig:main}(b)), we gather the tokens based on the mask $\mathbf{M}_{\text{token}}$ and feed them to the MLP, thereby avoiding unnecessary computational costs for other tokens. Then, we adopt a scatter operation to reposition the processed tokens. This further reduces the computational cost of the MLP block from $\mathcal{O}(\tilde{H}_{\text{channel}}N\times2CD_{H})$ to $\mathcal{O}(\tilde{H}_{\text{channel}}\tilde{N}\times 2CD_{H})$, where $\tilde{N}=\sum_i \mathbf{M}_{\text{token}}^i$ denotes the actual number of tokens to be processed. Since there is no token interaction within the MLP, the SDT operation supports batched inference, improving the practical generation efficiency. 
+
+
+\subsection{FLOPs-aware end-to-end Training} \label{sec:training}
+
+In the following, we first present the details of end-to-end training, followed by the loss design for controlling the computational complexity of DyDiT and techniques to stabilize fine-tuning.
+
+\paragraph{End-to-end training.}
+During training, in TWD, we multiply $\mathbf{M}_{\text{head}}$ and $\mathbf{M}_{\text{channel}}$ with their corresponding features ($\mathbf{X}_{\text{attn}}$ and $\mathbf{X}_{\text{hidden}}$) to zero out the deactivated heads and channel groups, respectively. Similarly, in SDT, we multiply $\mathbf{M}_{\text{token}}$ with $\text{MLP}(\mathbf{X})$ to deactivate the tokens that should not be processed by MLP. Straight-through-estimator \citep{bengio2013estimating} and Gumbel-Sigmoid~\citep{meng2022adavit} are employed to enable the end-to-end training of routers. 
+
+
+\paragraph{Training with FLOPs-constrained loss.}
+We design a FLOPs-constrained loss to control the computational cost during the generation process. We find it impractical to obtain the entire computation graph during $T$ timesteps since the total timestep $T$ is large \eg $T=1000$. Fortunately, the timesteps in a batch are sampled from $t \sim \text{Uniform}(0, T)$ during training, which approximately covers the entire computation graph. Let $B$ denote the batch size, with $t_b$ as the timestep for the $b$-th sample, we compute the total FLOPs at the sampled timestep, $F^{t_b}_\text{dynamic}$, using masks $\{\mathbf{M}_{\text{head}}^{t_b}, {\mathbf{M}}_{\text{channel}}^{t_b}, \mathbf{M}_{\text{token}}^{t_b} \}$ from each transformer layer, as detailed in Section~\ref{sec:dynamic_channel} and Section~\ref{sec:dynamic_token}.  Let $F_{\text{static}}$ denote the total FLOPs of MHSA and MLP blocks in the static DiT. We formulate the FLOPs-constrained loss as: 
+\begin{equation}
+    \mathcal{L}_\text{FLOPs} = (\frac{1}{B}\sum_{t_b:b\in[1, B]} \frac{F^{t_b}_\text{dynamic}}{F_{\text{static}}} - \lambda)^2,
+\end{equation}
+where $\lambda$ is a hyperparameter representing the target FLOPs ratio, and $t_b$ is uniformly sampled from the interval $[0, T]$. The overall training objective combines this FLOPs-constrained loss with the original DiT training loss, expressed as $
+\mathcal{L} = \mathcal{L}_\text{DiT} + \mathcal{L}_\text{FLOPs}$. 
+\paragraph{Fine-tuning stabilization.}
+In practice, we find directly fine-tuning DyDiT with $\mathcal{L}$ might occasionally lead to unstable training. To address this, we employ two stabilization techniques. First, for a warm-up phase we maintain a complete DiT model supervised by the same diffusion target, introducing an additional item, $\mathcal{L}_{\text{DiT}}^{\text{complete}}$ along with $\mathcal{L}$. After this phase, we remove this item and continue training solely with $\mathcal{L}$. Additionally, prior to fine-tuning, we rank the heads and hidden channels in MHSA and MLP blocks based on a magnitude criterion~\citep{he2017channel}. We consistently select the most important head and channel group in TDW. This ensures that at least one head and channel group is activated in each MHSA and MLP block across all timesteps, thereby alleviating the instability.
+
+
+
+\section{Experiments}
+
+\paragraph{Implementation details.}
+Our DyDiT can be built easily by fine-tuning on pre-trained DiT weights. We experiment on three different-sized DiT models denoted as DiT-S/B/XL. For DiT-XL, we directly adopt the checkpoint from the official DiT repository~\citep{peebles2023scalable}, while for DiT-S and DiT-B, we use pre-trained models provided in \citet{pan2024t}.
+All experiments are conducted on a server with 8$\times$NVIDIA A800 80G GPUs. 
+Following DiT~\citep{peebles2023scalable}, the strength of classifier-free guidance~\citep{ho2022classifier} is set to 1.5 and 4.0 for evaluation and visualization, respectively. Unless otherwise specified, 250 DDPM \citep{ho2020denoising} sampling steps are used. All speed tests are performed on an NVIDIA V100 32G GPU. 
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{\textbf{Comparison with state-of-the-art diffusion models on ImageNet 256$\times$256.} DyDiT-XL achieves competitive performance while significantly reducing the computational cost.}
+
+\tablestyle{5pt}{1.1}
+ \begin{tabular}
+{c  c c c c c c  c }
+    Model & Params. (M) $\downarrow$   & FLOPs (G) $\downarrow$  & FID $\downarrow$ & sFID $\downarrow$ & IS $\uparrow$ & Precision $\uparrow$ & Recall $\uparrow$ \\
+  \midrule[1.2pt]
+  \multicolumn{8}{c}{\emph{Static}}\\
+    ADM & 608 & 1120 & 4.59 & 5.25 & 186.87 & 0.82 & 0.52 \\
+    LDM-4 & 400 & 104 & 3.95 & - & 178.22 & 0.81 & 0.55 \\
+    U-ViT-L/2 & \textbf{287} & \underline{77} & 3.52 & - & - & - & -  \\
+    U-ViT-H/2 & 501 & 113 & 2.29 & - & 247.67 & \textbf{0.87} & 0.48  \\
+    DiffuSSM-XL & 673 & 280 & 2.28 & \textbf{4.49} & 269.13 &\underline{0.86} & 0.57 \\
+    DiM-L & \underline{380} & 94 & 2.64 & - & - & - & - \\
+    DiM-H & 860 & 210 & 2.21 & - & - & - & - \\
+    DiT-L & 468 & 81 & 5.02 &- & 167.20 & 0.75 & 0.57 \\
+    DiT-XL & 675 & 118 & 2.27 & 4.60 & 277.00 & 0.83 & 0.57 \\     \hshline
+\multicolumn{8}{c}{\emph{Dynamic}}\\
+   \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.7}$ &  678 & 84.33  & \underline{2.12} & 4.61 & \textbf{284.31} & 0.81 & \underline{0.60}  \\
+   \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.5}$ &  678 & \textbf{57.88}  & \textbf{2.07} & \underline{4.56} & 248.03 & 0.80 & \textbf{0.61}  \\
+
+\end{tabular}
+\label{fig:sota}
+\end{table}
+\paragraph{Datasets.} Following the protocol in DiT \citep{peebles2023scalable}, we mainly conduct experiments on ImageNet~\citep{deng2009imagenet} at a resolution of $256 \times 256$. To comprehensively evaluate our method, we also assess performance and efficiency on four fine-grained datasets used by \citet{xie2023difffit}: Food \citep{bossard2014food}, Artbench \citep{liao2022artbench}, Cars \citep{gebru2017fine} and Birds \citep{wah2011caltech}. We conduct experiments in both in-domain fine-tuning and cross-domain transfer learning manners on these dataset. Images of these datasets are also resized into 256$\times$256 resolution.  
+
+\paragraph{Metrics.}
+Following prior works~\citep{peebles2023scalable, teng2024dim}, we sample 50,000 images to measure the Fréchet Inception Distance (FID) \citep{heusel2017gans} score with the ADM’s TensorFlow evaluation suite \citep{dhariwal2021diffusion}. Inception Score (IS) \citep{salimans2016improved}, sFID \citep{nash2021generating}, and Prevision-Recall \citep{kynkaanniemi2019improved} are also reported for complementary. \textbf{Bold font} and \underline{underline} denote the best and the second-best performance, respectively.
+\subsection{Comparison with State-of-the-Art Diffusion Models}
+In Table~\ref{fig:sota}, we compare our method with other representative diffusion models, including ADM~\citep{dhariwal2021diffusion}, LDM~\citep{rombach2022high}, U-ViT~\citep{bao2023all}, DiffuSSM~\citep{yan2024diffusion}, DiM~\citep{teng2024dim}, and DiT~\citep{peebles2023scalable},    on $256 \times 256$ ImageNet generation. All methods except ours adopt a static architecture.
+
+Notably, our model DyDiT$_{\lambda=0.5}$ achieves a 2.07 FID score with less than 50\% FLOPs of its counterpart, DiT-XL, and outperforms other models obviously.  This verify that our method can effectively remove the redundant computation in DiT and maintain the generation performance. It accelerates the generation speed by $1. Increasing the target FLOPs ratio $\lambda$ from 0.5 to 0.7 enables DyDiT$_{\lambda=0.7}$ to achieve competitive performance with DiT-XL across most metrics and obtains the best IS score. This improvement is likely due to DyDiT's dynamic architecture, which offers greater flexibility compared to static architectures, allowing the model to address each timestep and image patch specifically during the generation process. With around 80G FLOPs, our DyDiT$_{\lambda=0.7}$ method significantly outperforms U-ViT-L/2 and DiT-L, further validing the advantages of our dynamic generation paradigm.
+
+
+\subsection{Comparison with Pruning Methods}
+\paragraph{Benchmarks.} The proposed timestep-wise dynamic width and spatial-wise dynamic token improve efficiency from the model \emph{architecture} and \emph{token} redundancy perspective, respectively. To evaluate the superiority of our approach, we compare our methods against representative \textit{static} structure and token pruning techniques.
+\emph{Pruning-based methods.} We include Diff pruning \cite{fang2024structural} in the comparison, which is a Taylor-based~\citep{molchanov2016pruning} pruning method specifically optimized for the diffusion process and has demonstrated superiority on diffusion models with U-Net~\citep{ronneberger2015u} architecture \citep{fang2024structural}. Following \citet{fang2024structural}, we also include Random pruning, Magnitude pruning \citep{he2017channel}, and Taylor pruning \citep{molchanov2016pruning} in the comparison. We adopt these four pruning approaches to distinguish important heads and channels in DiT from less significant ones, which can be removed to reduce the model width. 
+\emph{Token merging.} We also compare our methods with a training-free token pruning technique, ToMe \citep{bolya2022token}, which progressively prunes tokens in each vision transformer \citep{dosovitskiy2020image} layer through adaptive token merging. Its enhanced version \citep{bolya2023token} can also accelerate diffusion models based on U-Net architectures \eg Stable Diffusion \cite{rombach2022high}. We directly apply the enhanced version in each layer of DiT.
+
+\begin{figure}
+    \centering
+    \hspace{-4mm}
+    \begin{subfigure}[b]{0.337\textwidth}
+        \includegraphics[width=\textwidth]{figures/flops/DiT-S_flops_fid.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.321\textwidth}
+        \includegraphics[width=\textwidth]{figures/flops/DiT-B_flops_fid.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.325\textwidth}
+        \includegraphics[width=\textwidth]{figures/flops/DiT-XL_flops_fid.pdf}
+    \end{subfigure}
+
+    \caption{\textbf{FLOPs-FID trade-off for S, B, and XL size models on ImageNet.} For clarity, we omit the results of applying ToMe to DiT-B and DiT-XL, as it does not surpass the random pruning.} % ⭕️
+    \label{fig:flops_fid_figure} 
+   
+\end{figure}
+
+\paragraph{Results.}
+We present the FLOPs-FID curves for S, B, and XL size models in Figure~\ref{fig:flops_fid_figure}. Across differense sizes, DyDiT significantly outperforms all pruning methods with similar or even lower FLOPs, highlighting the superiority of dynamic architecture over static pruning in diffusion transformers.
+
+Interestingly, Magnitude pruning shows slightly better performance among structural pruning techniques on DiT-S and DiT-B, while Diff pruning and Taylor pruning perform better on DiT-XL. This indicates that different-sized DiT prefer distinct pruning criteria. Although ToMe \citep{bolya2023token} successfully accelerates U-Net models with acceptable performance loss, its application to DiT results in performance degradation, as also observed in~\cite{moon2023early}. We conjecture that the errors introduced by token merging become irrecoverable in DiT due to the absence of convolutional layers and long-range skip connections present in U-Net architectures.
+
+\paragraph{Scaling up ability.} We can observe from Figure~\ref{fig:flops_fid_figure} that the performance gap between DyDiT and DiT diminishes as model size increases. Specifically, DyDiT-S achieves a comparable FID to the original DiT only at $\lambda=0.9$, while DyDiT-B achieves this with a lower FLOPs ratio, e.g., $\lambda=0.7$. When scaled to XL, DyDiT-XL attains a slightly better FID even at $\lambda=0.5$. This is due to increased computation redundancy with larger models, allowing our method to reduce redundancy without compromising FID. These results validate the scalability of our approach, which is crucial in the era of large models, encouraging further exploration of larger models in the future.
+
+
+\subsection{Results on fine-grained datasets}
+\paragraph{Quantitative results.}
+We further compare our method with structural pruning and token pruning approaches on fine-grained datasets under the in-domain fine-tuning setting, where the DiT is initially pre-trained on the corresponding dataset and subsequently fine-tuned on the same dataset for pruning or dynamic adaptation. Results are summarized in Table~\ref{tab:fine_grained}. With the pre-defined FLOPs ratio $\lambda=0.5$, our method significantly reduces computational cost and enhances generation speed while maintaining performance levels comparable to the original DiT. To ensure fair comparisons, we set width pruning ratios to 50\% for pruning methods, aiming for similar FLOPs. Among structural pruning techniques, Magnitude pruning shows relatively better performance, yet DyDiT consistently outperforms it by a substantial margin. With a 20\% merging ratio, ToMe also speeds up generation but sacrifices performance. As mentioned, the lack of convolutional layers and skip connections makes applying ToMe to DiT suboptimal.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{\textbf{Results on fine-grained datasets.} The model marked with $\dag$ corresponds to fine-tuning directly on the target dataset. See the main texts for details.} % ⭕️
+\tablestyle{5.0pt}{1.1}
+\begin{tabular}{c  c c c c c c c}
+    \multirow{2}{*}{Model} & \multirow{2}{*}{s/image $\downarrow$} & \multirow{2}{*}{FLOPs (G) $\downarrow$}  & \multicolumn{5}{c}{FID $\downarrow$}  \\ 
+    &  &   & \multicolumn{1}{c}{Food}  & \multicolumn{1}{c}{Artbench}  & \multicolumn{1}{c}{Cars}  & \multicolumn{1}{c}{Birds} & \multicolumn{1}{c}{\#Average} \\
+  \midrule[1.2pt]
+DiT-S & 0.65  & 6.07  & \underline{14.56} & \textbf{17.54} &  \textbf{9.30} & \textbf{7.69} & \textbf{12.27} \\ 
+\hshline
+pruned w/ random & 0.38  & 3.05  & 45.66  & 76.75 & 60.26 & 48.60 & 57.81 \\ 
+pruned w/ magnitude &  0.38 & 3.05 & 41.93  & 42.04 & 31.49 & 26.45 & 35.44\\ 
+pruned w/ taylor &  0.38 & 3.05 & 47.26   & 74.21 & 27.19 & 22.33 & 42.74 \\ 
+pruned w/ diff &  0.38 & 3.05  &  36.93 &  68.18 & 26.23 & 23.05 &  38.59 \\ 
+pruned w/ ToMe 20\% &  0.61  & 4.82  & 43.87  & 62.96 & 32.16 & 15.20 & 38.54 \\ 
+\hshline
+\rowcolor{gray!15} DyDiT-S$_{\lambda=0.5}$ & 0.41  & 3.16 & 16.74  & 21.35 & \underline{10.01} & \underline{7.85}  &  13.98 \\ 
+ DyDiT-S$_{\lambda=0.5} \dag$  & 0.41 & 3.17 & \textbf{13.03} & \underline{19.47}  & 12.15  & 8.01 & \underline{13.16} \\
+
+    \label{tab:fine_grained}
+    \end{tabular}
+\end{table}
+
+\paragraph{Qualitative visualization.}
+Figure~\ref{fig:visuzalization} presents images generated by DyDiT-S on fine-grained datasets, compared to those produced by the original or pruned DiT-S. These qualitative results demonstrate that our method maintains the FID score while producing images of quality comparable to DiT-S. % ⭕️
+
+\paragraph{Cross-domain transfer learning.}
+Transferring to downstream datasets is a common practice to leverage pre-trained generations models. In this experiment, we fine-tune a model pre-trained on ImageNet to perform cross-domain adaptation on the target dataset while concurrently learning the dynamic architecture, yielding DyDiT-S$_{\lambda=0.5}  \dag $  in Table~\ref{tab:fine_grained}. We can observe that learning the dynamic architecture during the cross domain transfer learning does not hurt the performance, and even leads to slight better average FID score than DyDiT-S$_{\lambda=0.5}$. This further broadens the application scope of our method. % ⭕️
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/visualization.pdf}
+
+\caption{\textbf{Qualitative comparison of images generated by the original DiT, DiT pruned with magnitude, and DyDiT.} All models are of ``S'' size. The FLOPs ratio $\lambda$ in DyDiT is set to 0.5.}
+\label{fig:visuzalization}  % ⭕️
+\end{figure*} 
+
+
+
+\subsection{Ablation Study}
+\paragraph{Main components.}
+We first conduct experiments to verify the effectiveness of each component in our method. We summarize the results in Table~\ref{tab:ablation_study}. ``I''  and ``II'' denote DiT with only the proposed timstep-wise dynamic width (TDW) and spatial-wise dynamic token (SDT), respectively. We can find that ``I'' performs much better than ``II''. This is attributed to the fact that, with the target FLOPs ratio $\lambda$ set to 0.5, most tokens in ``II'' have to bypass MLP blocks, leaving only MHSA blocks to process tokens, significantly affecting performance \citep{dong2021attention}. ``III'' represents the default model that combines both TDW and SDT, achieving obviously better performance than ``I''  and ``II''. Given a computational budget, the combination of TDW and SDT allows the model to discover computational redundancy from both the time-step and spatial perspectives. % ⭕️
+\paragraph{Importance of routers in temporal-wise dynamic width.}
+Routers in TDW adaptively adjust the model width for each block across all timesteps.
+Replacing the learnable router with a random selection, resulting in ``I (random)'', leads to model collapse across all datasets.  This is due to the random activation of heads and channel groups, which hinders the model's ability to generate high-quality images. We also experiment a manually-designed strategy, termed  ``I (manual)'', in which we activate $5/6$, $1/2$, $1/3$, $1/3$ of the heads and channels for the intervals [0, $1/T$], [$1/T$, $2/T$], [$2/T$, $3/4T$], and [$3/4T$, $T$] timesteps, respectively. This results in around 50\% average FLOPs reduction. Since this strategy aligns the observation in Figure~\ref{fig:figure1}(a) and allocates more computation to timesteps approaching 0, ``I (manual)'' outperforms ``I (random)'' obviously.  However, it does not surpass ``I'', highlighting the importance of learned routers.
+\paragraph{Importance of token-level bypassing in spatial-wise dynamic token.}
+We also explore an alternative design to conduct token bypassing. Specifically, each MLP block adopts a router to determine whether {all tokens of an image} should bypass the block. This modification causes SDT to become a layer-skipping approach~\citep{wang2018skipnet}. We replace SDT in ``III'' with this design, resulting in ``III (layer-skip)'' in Table~\ref{tab:ablation_study}. As outlined in Section~\ref{sec:introduction}, varying regions of an image face distinct challenges in noise prediction. A uniform token processing strategy fails to address this heterogeneity effectively. For example, tokens from complex regions might bypass essential blocks, resulting in suboptimal noise prediction. The results presented in Table~\ref{tab:ablation_study} further confirm that the token-level bypassing in SDT, obviously improves the performance of ``III'' compared to ``III (layer-skip)''. % ⭕️
+
+
+
+\begin{table}[t]
+\centering
+\tablestyle{5.0pt}{1.1}
+\caption{\textbf{Ablation Study} on DyDiT-S$_{\lambda=0.5}$. All models evoke around 3.16 GFLOPs.}
+\begin{tabular}{c | c c |c c c c c c}
+
+    \multirow{2}{*}{Model} & \multirow{2}{*}{TDW} & \multirow{2}{*}{SDT}  & \multicolumn{6}{c}{FID $\downarrow$}  \\ 
+    &  &  & \multicolumn{1}{c}{ImageNet} & \multicolumn{1}{c}{Food}  & \multicolumn{1}{c}{Artbench}  & \multicolumn{1}{c}{Cars}  & \multicolumn{1}{c}{Birds} & \multicolumn{1}{c}{\#Average} \\
+  \midrule[1.2pt]
+I &  \ding{51} & & 31.89 & \textbf{15.71}  & 28.19 & 19.67 & 9.23 & 20.93 \\
+II &  & \ding{51} & 70.06 & 23.79 & 52.78 & 16.90 & 12.05 & 35.12 \\
+\rowcolor{gray!15}  III &  \ding{51} & \ding{51} & \textbf{28.75} & \underline{16.74} & \textbf{21.35} & \textbf{10.01} & \textbf{7.85} &  \textbf{16.94} \\
+\hshline
+I (random)  & & & 124.38  & 111.88 & 151.99 & 127.53 & 164.29 & 136.01 \\
+I (manual)  & & & 34.08  & 23.89 & 40.02  & 22.34 & 20.17 & 28.10 \\
+III (layer-skip) &  \ding{51} &   & \underline{30.95} & 17.75 & \underline{23.15} &\underline{10.53} & \underline{9.01} & \underline{18.29} \\
+    
+    \end{tabular}
+    \label{tab:ablation_study}
+\end{table}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/dynamic_architecture.pdf}
+
+\caption{\textbf{Visualization of dynamic architecture.} \raisebox{0.25em}{\colorbox{attn_code0!100}{}} and \raisebox{0.25em}{\colorbox{attn_code1!100}{}} indicates the deactivated and activated heads in an MHSA block, while \raisebox{0.25em}{\colorbox{mlp_code0!100}{}} and \raisebox{0.25em}{\colorbox{mlp_code1!100}{}} denotes that the channel group is deactivated or activated in an MLP block, respectively. We conduct 250-step DDPM generation.} 
+\label{fig:activated_architecture}
+\end{figure*} 
+\subsection{Visualization}
+\paragraph{Learned timestep-wise dynamic strategy.}
+Figure~\ref{fig:activated_architecture} illustrates the activation patterns of heads and channel groups during the 250-step DDPM generation process. Throughout this process, TWD progressively activates more MHSA heads and MLP channel groups as it transitions from noise to image. As discussed in Section~\ref{sec:introduction}, prediction is more straightforward when generation is closer to noise (larger $t$) and becomes increasingly challenging as it approaches the image (smaller $t$). Our visualization corroborates this observation, demonstrating that the model allocates more computational resources to more complex timesteps. Notably, the activation rate of MLP blocks surpasses that of MHSA blocks at $t=255$ and $t=100$. This can be attributed to the token bypass operation in the spatial-wise dynamic token (SDT), which reduces the computational load of MLP blocks, enabling TWD to activate additional channel groups with minimal computational overhead. % ⭕️
+
+\paragraph{Spatial-wise dynamic token adapts computational cost on each image patch.} We quantify and normalize the computational cost on different image patches during generation, ranging from [0, 1] in Figure~\ref{fig:token_flops}. These results verify that our SDT effectively learns to adjust computational expenditure based on the complexity of image patches. SDT prioritizes challenging patches containing detailed and colorful main objects. Conversely, it allocates less computation to background regions characterized by uniform and continuous colors. This behavior aligns with our findings in \figurename~\ref{fig:figure1}(b).
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/token_flops.pdf}
+\caption{\textbf{Computational cost across different image patches.}  We quantify the FLOPs cost on image patches over the generation process and normalize them into [0, 1] for better clarity. } 
+\label{fig:token_flops}
+\end{figure*} 
+
+\subsection{Compatibility with Other Efficient Diffusion Approaches}
+\paragraph{Combination with efficient samplers.} Our DyDiT is a general architecture which can be seamlessly incorporated with efficient samplers such as DDIM~\citep{song2020denoising} and DPM-solver++ \citep{lu2022dpm}. As presented in Table~\ref{tab:sampler}, when using the 50-step DDIM, both DiT-XL and DyDiT-XL exhibit significantly faster generation, while our method consistently achieving higher efficiency due to its dynamic computation paradigm. When we further reduce the sampling step to 20 and 10 with DPM-solver++, we observe an FID increasement on all models, while our method still achieves competitive performance compared to the original DiT. These findings highlight the potential of integrating our approach with efficient samplers, suggesting a promising avenue for future research.
+
+
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{\textbf{Combination with efficient samplers}~\citep{song2020denoising, lu2022dpm}.}
+
+\tablestyle{5pt}{1.1} 
+\begin{tabular}{c c c  c c c c  c c}
+\multirow{2}{*}{Model}    &  \multicolumn{2}{c}{250-DDPM} & \multicolumn{2}{c}{50-DDIM}   & \multicolumn{2}{c}{20-DPM-solver++}  & \multicolumn{2}{c}{10-DPM-solver++} \\
+
+  & \multicolumn{1}{c}{s/image $\downarrow$} & \multicolumn{1}{c}{FID $\downarrow$} & \multicolumn{1}{c}{s/image $\downarrow$} & \multicolumn{1}{c}{FID $\downarrow$} & \multicolumn{1}{c}{s/image $\downarrow$} & \multicolumn{1}{c}{FID $\downarrow$} & \multicolumn{1}{c}{s/image $\downarrow$} & \multicolumn{1}{c}{FID $\downarrow$}  \\
+  \midrule[1.2pt]  
+
+  DiT-XL & 10.22 & 2.27 & 2.00 & 2.26 & 0.84 & 4.62   & 0.42 & 11.66 \\ \hshline
+ \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.7}$ & 7.76 & 2.12 & 1.56 & 2.16 & 0.62  & 4.28 & 0.31 & 11.10   \\
+ \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.5}$  & 5.91 & 2.07 & 1.17 & 2.36   & 0.46 & 4.22 & 0.23 & 11.31 \\  
+
+    \end{tabular}
+    \label{tab:sampler}
+\end{table}
+
+
+\begin{wraptable}{r}{0.46\textwidth} % 定义wrapfigure环境，r表示右侧环绕
+  \centering % 居中表格
+\begin{minipage}{1.0\linewidth}
+  \centering
+\tablestyle{5pt}{1.1}
+\caption{\textbf{Combination with global acceleration.} ``interval'' denotes the interval of cached timestep in DeepCache \citep{ma2023deepcache}.}
+  \begin{tabular}{c c  c c}
+\multirow{1}{*}{Model}    &  \multicolumn{1}{c}{interval} & \multicolumn{1}{c}{s/image $\downarrow$} & \multicolumn{1}{c}{FID $\downarrow$} \\
+  \midrule[1.2pt]  
+
+  DiT-XL & 0 & 10.22 & 2.27 \\
+  DiT-XL & 2 & 5.02 & 2.47  \\ 
+  DiT-XL & 5 & 2.03 & 6.73   \\ \hshline
+ \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.5}$  & 0 & 5.91 & 2.07   \\
+ \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.5}$  & 2 & 2.99 & 2.43   \\
+ \rowcolor{gray!15} DyDiT-XL$_{\lambda=0.5}$  & 3 & 2.01 & 3.37   \\
+    \end{tabular}
+    \label{tab:cache}
+    \end{minipage}
+\end{wraptable}
+ 
+\paragraph{Combination with global acceleration.}
+DeepCache \citep{ma2023deepcache} is a train-free technique which globally accelerates generation by caching feature maps at specific timesteps and reusing them in subsequent timesteps. As shown in Table~\ref{tab:cache}, with a cache interval of 2, DyDiT achieves further acceleration with only a marginal performance drop. In contrast, DiT with DeepCache requires a longer interval (\eg 5) to achieve comparable speed with ours, resulting in an inferior FID score. 
+These results demonstrate the compatibility and effectiveness of our approach in conjunction with DeepCache.
+
+
+
+
+\section{Discussion and Conclusion}
+
+In this study, we investigate the training process of the Diffusion Transformer (DiT) and identify significant computational redundancy associated with specific diffusion timesteps and image patches. To this end, we propose Dynamic Diffusion Transformer (DyDiT), an architecture that can adaptively adjust the computation allocation across different timesteps and spatial regions. Comprehensive experiments on various datasets and model sizes validate the effectiveness of DyDiT. We anticipate that the proposed method will advance the development of transformer-based diffusion models.
+
+\paragraph{Limitations and future works.}
+Similarly to DiT, the proposed DyDiT is currently focusing on image generation. In future works, DyDiT could be further explored to be applied to other tasks, such as video generation~ \citep{ma2024latte} and controllable generation~\citep{chen2024pixart}. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,189 @@
+# Estimating Unknown Population Sizes Using Hypergeometric Maximum Likelihood
+
+- Decision: Reject
+- Scores: 5, 6, 5, 5
+
+## Abstract
+The multivariate hypergeometric distribution describes the fundamental process of sampling without replacement from a discrete population of elements divided into multiple categories. Despite the hypergeometric distribution's long history, the literature has not yet addressed the problem of maximum likelihood estimation when both the size of the total population and its constituent categories are unknown. Here, we show that this estimation challenge can be solved by maximizing the hypergeometric likelihood, even in the presence of severe under-sampling. We extend this approach to capture data generating processes where the ground-truth high-dimensional distribution is conditional on a continuous latent variable using the variational autoencoder framework, and validate the resulting model using simulated datasets. In a practical use case, we demonstrate that our method can recover the true number of gene transcripts present in a cell from sparse single-cell genomics data.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes to use continuous relaxations of hypergeometric likelihood, essentially the gamma functions instead of combinatorial seelctions. An application to sparse count data is shown.
+
+### Strengths
+The paper is largely well-written and the application of sparse single-cell genomics could be interesting especially since the proposed method does recover the true number of transcripts.
+
+### Weaknesses
+The paper is incomplete. The proposed method is very simple, hyper-geometric likelihoods are relaxed to continuous functions using gamma functions which is known from before. A penalty is added to the optimization problem to ensure that the total count always exceeds individual draws. There are no theoretical justifications on how far or close the proposed relaxations could be from the true count-based discrete distributions. There are only simulated experiments to validate the method. The application of single-cell genomics using VAEs is interesting but is not compared against any other baselines. The paper is probably better suited to a genomics conferences as that community would probably appreciate this a lot more.
+
+### Questions
+- Can there be theoretical arguments made on how bad/good the proposed relaxation would be ?
+
+- Is there a relationship of the proposed method to other hyper-parameter optimization methods ? Why were no other baselines included that could possibly be used to solve the transcript problem? There is a huge literature on trying to estimate the hyper-parameters of count distributions  including the buffet processes. 
+
+- How exactly the fact about with/without replacement helpful for the genome problem? The dataset has counts high enough that even we use the methods that sample with replacement, they should possibly give reasonable results. Are these approaches known? if not, would it not make sense to compare against such baselines ?
+
+- why is N>>1 required for the continuous relaxation to be reasonable ?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper considers maximum likelihood estimation in the multivariate hypergeometric model given that both the total population and the number of elements in each category are unknown. After a brief review of related methods for estimation in simpler scenarios, or when resampling is possible (i.e., capture-recapture), the main method is presented. The key idea is to use a relaxation of a standard hypergeometric likelihood function (by replacing factorials with the Gamma function) with appropriate constraints to ensure that the estimated total population sizes are not greater than the sampled counts. Some experiments on synthetic data are done to check the proposed estimation procedure as it depends on the maximum samples drawn and the number of underlying categories. Then, a larger scale experiment with a VAE, using synthetic and real-data from single cell genomics, is presented. It is shown that the proposed method works well in recovering the underlying counts when the ground truth is known (in both synthetic and real-data scenarios).
+
+### Strengths
+This paper is very clearly written, easy to read, and makes the contribution clear. The application is well-chosen and the experiments are illustrative. It is a bit surprising that something that like what the authors have proposed has not been done before, but this is perhaps due to the relatively rarer use of relaxation strategies (namely, replacing discrete with continuous variables) in the statistics literature.
+
+### Weaknesses
+I would have liked to seen more examples of potential applications in the machine learning context. The authors mention recommender systems as a possible application, as well as applications in language. However this is not commented on or developed further. What about applications in a statistical context? The authors should clearly describe some other potential contexts where we can have multiple independent samples without replacement where this model would be applicable. I believe the method is also applicable to the non-central Hypergeometric as in the cited Sutter et al. (2020) paper and it would have been interesting to apply the proposed method to scenarios that are similar to those described in that work.
+
+It feels like there is a bit of a gap in the experiments, there is a jump from using 3 categories to more than 1000 categories. What about more intermediate cases, say with 100 categories? How does the proposed method work in this case with respect to n_max as well as the number of samples?
+
+Has a similar relaxation (replacing a Binomial coefficient or factorials with a Gamma function) been used elsewhere that you are aware of in estimation contexts?
+
+There is a typo in equation (1), you should have c_2 and not n_2?
+
+In equation (7), shouldn't you define c_i to be the largest category count over the T samples, as that gives you the lower bound on the N_k?
+
+### Questions
+It feels like there is a bit of a gap in the experiments, there is a jump from using 3 categories to more than 1000 categories. What about more intermediate cases, say with 100 categories? How does the proposed method work in this case with respect to n_max as well as the number of samples?
+
+Has a similar relaxation (replacing a Binomial coefficient or factorials with a Gamma function) been used elsewhere that you are aware of in estimation contexts?
+
+There is a typo in equation (1), you should have c_2 and not n_2?
+
+In equation (7), shouldn't you define c_i to be the largest category count over the T samples, as that gives you the lower bound on the N_k?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper introduces a method for estimating category sizes of a multivariate hypergeometric distribution, which models the process of sampling without replacement from a discrete population with multiple categories. The authors employ a continuous and differentiable relaxation of the hypergeometric likelihood using the gamma function to replace factorials in the binomial coefficients. Through empirical data simulations, they demonstrate the accurate recovery of category sizes, particularly in scenarios with a single ground-truth distribution and a limited number of categories.
+
+Furthermore, the authors expand their approach to model a data generation process that incorporates a latent variable 'z' within the framework of a variational autoencoder. To show the effectiveness of their method, they present results from both simulated and real data experiments.
+
+### Strengths
+The paper tackles an interesting problem with significant applications in the field of biology. It is clearly written, offering readers the necessary background to facilitate their understanding.
+
+### Weaknesses
+ - The authors do not provide a clear motivation for the second part of the work which focuses on the variational autoencoder framework. Although the initial experiments focus on the recovery of the category sizes of a single multivariate hypergeometric distribution, they later explore a scenario where they have a mixture of distributions. The estimated counts are per observation, what is the ultimate goal in this case?
+
+- Given that the authors rely on only on empirical simulations to support the effectiveness of their method I would expect more thorough and convincing experimental results.
+
+- The explanation of low-rank structure is not clear. It is not sufficient to say that the data can be described by a small set of latent patterns. What is the specific mechanism by which the proposed method leverages this low-rank structure? How does the choice of the latent space dimension affect the performance of the method, and what are the practical implications of this choice?
+
+- The likelihood equations (3 and 4) appear to be inconsistent with the likelihood described at the end of page 3. It is unclear what the exact optimization problem is that the authors are solving. The notation should be clarified to distinguish between parameters and observations.
+
+- In the experiment at section 5, the model uses the knowledge of the number of distributions, which is 2. How do you estimate the total counts of the two distributions? What happens in the case that you have more than 2?
+
+### Questions
+Q1: What do you mean by low-rank structure in this part: "including in the presence of high-dimensional data with intrinsic low-rank structure." ?
+
+Q2: It seems to be a mistake in the likelihood of equations 3 and 4 compared to that at the end of page 3. What is the optimization problem that you solve?
+
+Q3: In the experiment at section 5, the model does use the knowledge of the number of distributions, which is 2. How do you estimate the total counts of the two distributions? What happens in the case that you have more than 2? 
+ 
+Minor: N2 should be 30 in section 4.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper considers the problem of estimating the population counts in a multivariate hypergeometric distribution.  The authors first propose using a continuous function that agrees with the likelihood function of the hypergeometric distribution on integer values, and then they maximize this surrogate function.  They show that this approach works if one has access to several independent samples (which would correspond to drawing a sample without replacement, then replacing all of those draws, and then sampling without replacement again, and so on).  The authors then turn to a more general case where different observations are each a set of samples drawn without replacement, and each observation comes from a different population (so that each observation is a hypergeometric distributed random variable with a different distribution).  They propose using a variational autoencoder in this case to perform inference, and apply this approach to single cell RNA sequencing data.
+
+### Strengths
+* The paper is generally quite clear and the writing is good.
+* In principle, I like the idea of considering UMIs (i.e., individual transcripts) in single cell datasets as forming a population and so datasets are hypergeometric draws.  This is conceptually quite clean, and a nice extension of the normal model to take the weak dependency between observations into account.  I think this problem is well-appreciated in the field (e.g., treating data compositionally induces similar effects), but as far as I know this is a new approach to the problem. This point is made particularly well in Figure 6.
+
+### Weaknesses
+ * I have some concerns about the motivation/applicability of the paper. In the first part, the authors contrast their approach to capture-recapture, and say that capture re-capture is not good because one must be able to sample (to tag) and then resample from the same population.  Yet, in their own setup (e.g., Equation (3)) the authors assume that one can repeatedly and independently sample from the same population.  I find this setup interesting from a statistics perspective, but unrealistic as an experimental design.  If I understand correctly, it would correspond to sampling without replacement from a population, returning all of those samples to the population, and then resampling without replacement and so on.  In some sense, this is essentially what the authors claimed was problematic about capture-recapture, but they are repeating it $T$ times instead of twice.  I would be happy to change my mind about this being problematic if the authors could provide some compelling, real life examples of datasets of practical interest with this experimental design.
+* At the bottom of Figure 3 it is claimed that Equation (4) is concave.  I plotted Equation (4) for a particular setup and it is _not_ concave.  One can also see this from Figure 1 where if one were to draw a well place diagonal line through the plot, one could obtain a linear slice where the negative log-likelihood first decreases, then increases, then decreases again, which is impossible for a convex function.  The error in reasoning comes from the fact that Equation (4) is the sum of both $\log \Gamma(x)$ and $-\log \Gamma(x)$ functions.  The former is strictly concave, but the latter is strictly convex.  The sum of convex and concave functions does not need to be either convex or concave.
+* Figures 2 and 3 should contain error bars and/or multiple replicates.  The fact that the error fluctuates across the number of trials (as opposed to monotonically decreasing) suggests that there is some substantial noise.  This noise makes it very difficult to assess the claim that increasing $K$ makes the problem easier.
+* My intuition is that the good performance in Figures 2 and 3 comes from the large number of trials.  E.g., even at thousands of trials, there is still substantial error.  In particular, if one only has a single trial, then I think that the MLE for the population counts should just be the observed counts, but the magnitude of this is driven entirely by the sample size and has nothing to do with the population size.  As a result, I don't think this is a sensible approach when there is only a single trial.  I suspect that this becomes problematic in the VAE setting -- since the likelihood is not particularly informative for any given point the prior will be incredibly important.
+
+Minor points / typos:
+* In Equation (1), I believe that $n_2$ should be $c_2$
+* The notation in Equation (8) is a bit sloppy.  I understand the point the authors are making, but it seems sloppy to define $\hat{N}_i$ as a function of itself (i.e., $\hat{N}_i$ appears on both sides of the definition).
+* "to elongated along the line of correct" --> "as a line along the correct"
+
+### Questions
+* I believe that the continuous version of the likelihood (i.e., Equation (4) but using equation (6) for the binomial coefficients) does not define a proper probability distribution for non-integer $N_k$.  Is this problematic?
+* Is there a reason for including the violation penalty $C_\text{viol}$ as opposed t just performing bounded optimization?  The lower bound on $\hat{N}_i$ can be determined easily from the data, so it would not be difficult to enforce the bound durning optimization.  Furthermore, the constraint set is quite simple (and convex), so something like projected gradient descent would be easy to perform.
+
+### Soundness
+2 fair
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair

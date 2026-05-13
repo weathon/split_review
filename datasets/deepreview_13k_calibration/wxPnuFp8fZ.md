@@ -1,8 +1,8 @@
 # Self-Supervised Diffusion MRI Denoising via Iterative and Stable Refinement
 
 - Decision: Accept
-- Avg Score: 4.17
-- Scores: 6, 8, 5, 1, 0, 5
+- Avg Score: 6.80
+- Scores: 6, 8, 5, 10, 5
 
 ## Abstract
 Magnetic Resonance Imaging (MRI), including diffusion MRI (dMRI), serves as a ``microscope'' for anatomical structures and routinely mitigates the influence of low signal-to-noise ratio scans by compromising temporal or spatial resolution. However, these compromises fail to meet clinical demands for both efficiency and precision. Consequently, denoising is a vital preprocessing step, particularly for dMRI, where clean data is unavailable. In this paper, we introduce Di-Fusion, a fully self-supervised denoising method that leverages the latter diffusion steps and an adaptive sampling process. Unlike previous approaches, our single-stage framework achieves efficient and stable training without extra noise model training and offers adaptive and controllable results in the sampling process. Our thorough experiments on real and simulated data demonstrate that Di-Fusion achieves state-of-the-art performance in microstructure modeling, tractography tracking, and other downstream tasks. Codes are available in the supplementary material.

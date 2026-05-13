@@ -1,0 +1,298 @@
+\title{Guided Stream of Search: Learning to Better Search with Language Models via Optimal Path Guidance}
+
+\begin{abstract}
+
+While language models have demonstrated impressive capabilities across a range of tasks, they still struggle with tasks that require complex planning and reasoning. Recent studies have proposed training language models on search processes rather than optimal solutions, resulting in better generalization performance even though search processes are noisy and even suboptimal. However, these studies overlook the value of optimal solutions, which can serve as step-by-step landmarks to guide more effective search. In this work, we explore how to leverage optimal solutions to enhance the search and planning abilities of language models. To this end, we propose \emph{guided stream of search} (GSoS), which seamlessly incorporates optimal solutions into the self-generation process in a progressive manner, producing high-quality search trajectories. These trajectories are then distilled into the pre-trained model via supervised fine-tuning. Our approach significantly enhances the search and planning abilities of language models on Countdown, a simple yet challenging mathematical reasoning task. Notably, combining our method with RL fine-tuning yields further improvements, whereas previous supervised fine-tuning methods do not benefit from RL. Furthermore, our approach exhibits greater effectiveness than leveraging optimal solutions in the form of subgoal rewards.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Transformer-based language models have achieved remarkable success, demonstrating human-level performance across a wide range of natural language tasks, including conversation, code generation, and mathematical problem-solving \citep{achiam2023gpt,touvron2023llama,roziere2023code,listarcoder,lightman2023let,shao2024deepseekmath}. Their impressive performance is primarily attributed to auto-regressive training on high-quality, internet-scale data. However, language models still face challenges with tasks that require complex planning and reasoning \citep{pallagani2023understanding,valmeekam2023on}. Models trained using next-token prediction often result in the snowballing of errors over long sequences, making it difficult for them to maintain consistent plans over multiple steps. Furthermore, teacher-forcing, where models are given the correct sequence of previous tokens for each prediction, exacerbates this problem by encouraging them to learn shortcuts rather than truly understanding the underlying structure of the task \citep{bachmannpitfalls}.
+
+A growing body of literature attempts to improve the planning and reasoning capabilities of language models through prompt-based strategies, allowing them to perform chain-of-thought reasoning, self-correction, and planning with symbolic search algorithms \citep{wei2022chain,wangself,shinn2024reflexion,yao2024tree}. While these methods are successful in certain tasks, they have inherent limitations. They only assist the model during inference without updating its internal weights, which significantly constrains performance to that of the base model. Moreover, their success heavily relies on the quality of prompt design, and a poorly constructed prompt sometimes degrades performance \citep{huang2024large}.
+
+To address these limitations, recent studies have shifted toward directly improving the planning and reasoning abilities of language models during the training phase \citep{lehnert2024beyond,gandhi2024stream}. This approach, known as \emph{stream of search} (SoS), involves training a model to predict search trajectories that encompass the entire decision-making process of finding solutions through trial and error, including exploration and backtracking when encountering failures. These studies have shown that models trained on search trajectories, despite being noisy and even suboptimal, achieve superior generalization performance to those trained to imitate optimal action sequences via \emph{behavior cloning} (BC) \citep{ross2011reduction}. They have also demonstrated that fine-tuning on self-generated data further improves the search and planning capabilities of the models to some extent. However, this leads to a critical question: if models trained on search trajectories perform better, does this imply that optimal solutions are unnecessary? Optimal action sequences can serve as valuable landmarks, or subgoals, within the search process, guiding the model toward more effective search strategies. However, prior studies have underexplored the role of optimal solutions, focusing exclusively on fully self-generated data to improve the model, which is inherently limited.
+
+In this work, we explore how optimal solutions can be leveraged to enhance the search and planning abilities of language models pre-trained on search trajectories. We observe that the pre-trained model successfully discovers solutions by searching when prompted with partial optimal solutions as hints, even when these solutions are unseen during pre-training. While this guidance produces high-quality data for supervised fine-tuning, it often has a low likelihood under the pre-trained model, potentially causing negative effects on the model's search and planning capabilities. To address this problem, we propose \emph{guided stream of search} (GSoS), which seamlessly incorporates optimal solutions to direct the self-generation process and produces trajectories that have both high quality and likelihood. The key idea of GSoS is to integrate each intermediate action from the optimal solution into the trajectory  in a step-by-step manner using unsuccessful search traces as contexts, as illustrated in \Cref{fig:overview}. We then fine-tune the pre-trained model to predict these augmented trajectories.
+
+We evaluate our approach on Countdown \citep{gandhi2024stream}, a mathematical reasoning benchmark that requires complex search and planning. Notably, our approach achieves an accuracy gain of 13\% compared to the pre-trained model. When further applying RL fine-tuning tailored to handle the long contexts of search trajectories, this improvement increases to 20\%, substantially outperforming both supervised and RL fine-tuned baselines. In contrast, standard supervised fine-tuning methods, which rely solely on self-generated data, do not benefit from RL fine-tuning. We conduct a comprehensive analysis of how unsuccessful search trajectories play an important role in generating trajectories with both high quality and likelihood. Moreover, we demonstrate that our approach is more effective than leveraging optimal solutions as subgoal rewards during RL fine-tuning \citep{lightman2023let}.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/overview_v1.pdf}
+\caption{An overview of GSoS. It generates augmented trajectories by incorporating optimal paths into the self-generation process of the SoS model, achieving high accuracy and generalizability. The numbers indicate the order in which nodes are explored.}
+\label{fig:overview}
+\end{figure}
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Problem setup}
+
+In this paper, we consider a sequential decision-making problem derived from the program synthesis literature, which requires strong search and planning abilities \citep{devlin2017robustfill,shi2023exedec}. Each instance of this problem is defined as a tuple $x = (I,  O)$, where $I$ denotes the input state and $O$ denotes the output state. We are given a set of operations $\mathcal{P}$, where each operation $P \in \mathcal{P}$ maps one state to another, producing an intermediate state. There exists an optimal sequence of operations $\hat{y} = (P_1, P_2, \ldots, P_N)$ that transforms the input state into the output state, i.e., $\hat{y} = P_N \circ \cdots \circ P_2 \circ P_1 (x)$. Given a training set $\mathcal{D}$, our goal is to train a model $f_\theta$ to generate optimal solutions for a test set.
+
+\subsection{Stream of search}
+
+One straightforward approach to this problem is to apply imitation learning through BC \citep{ross2011reduction}, which trains the model to directly predict optimal solutions from input-output pairs. However, prior studies have demonstrated that BC struggles to generalize to unseen test examples \citep{yang2022chain,lehnert2024beyond,gandhi2024stream}.
+
+To address this, SoS introduces an approach that leverages the search process rather than the optimal solution \citep{gandhi2024stream}. This method reformulates the problem as a tree search, navigating the search tree through trial and error with operations until the solution is reached. Each node in the tree represents a state, and each edge represents an operation between two states. SoS expresses primitive operations for the tree search in language, including node generation, exploration, backtracking, and verification. It then generates search trajectories using symbolic search algorithms, including depth-first search (DFS) and breadth-first search (BFS), representing them as sequences of tokens. Finally, it trains a language model to predict these trajectories from input-output pairs used as prompts:
+\begin{align*}
+\max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim \textrm{symbolic}(x)} \left[ \log f_\theta(y \mid x ) \right].
+\end{align*}
+Note that the SoS model is not specifically designed to find solutions, as symbolic search algorithms may produces suboptimal trajectories with a limited search budget. See \Cref{sec:sos} for more details.
+
+\subsection{Supervised fine-tuning}
+
+The pre-trained language model, not originally designed for particular tasks, requires alignment with a downstream task to enhance its performance. One approach to achieving this alignment is to apply supervised fine-tuning with self-generated data, referred to as self-taught reasoner (STaR) \citep{zelikman2022star,gulcehre2023reinforced}. This method generates trajectories using the model from prompts and filters them based on a task-specific metric $M$ that evaluates quality. It then fine-tunes the model to predict these filtered trajectories:
+\begin{align}
+\max_\theta \mathbb{E}_{x \sim \mathcal{D}, y \sim f_\theta(\cdot \mid x)} \left[ \mathbbm{1} \left[ M(y \mid x) > \tau \right] \cdot \log f_\theta(y \mid x) \right],
+\label{eqn:sft}
+\end{align}
+where $\tau$ is the threshold that controls the ratio of filtered trajectories. This process can be performed iteratively to further refine the model.
+
+\subsection{Reinforcement learning fine-tuning}
+
+Another approach to aligning the pre-trained language model is to perform RL fine-tuning \citep{stiennon2020learning,ouyang2022training}. This method uses the model as a policy $\pi_\theta$ and fine-tunes the policy to maximize a task-specific reward $R$, while minimizing the KL divergence from the reference policy $\pi_\mathrm{ref}$. The problem is formulated as a token-level finite-horizon Markov decision process (MDP). The state space $\mathcal{S}$ is the set of all possible token sequences, and the action space $\mathcal{A}$ is the set of all tokens. The initial state $s_0 \in \mathcal{D}$ is a randomly sampled prompt. Each state $s_h \in \mathcal{S}$ is the concatenation of the prompts and the previously generated tokens, with the transition function $p: \mathcal{S} \times \mathcal{A} \to \mathcal{S}$ appending the action $a_h \in \mathcal{A}$ to the state. Given a trajectory generated by the policy with horizon $H \in \mathbb{Z}^+$, the policy is trained to optimize the following objective:
+\begin{align*}
+\max_\theta \mathbb{E}_{s_0 \sim \mathcal{D}, (s_h, a_h) \sim \pi_\theta(\cdot \mid s_0)} \left[ \sum_{h=0}^H R(s_h, a_h) - \beta \cdot (\log \pi_\theta(a_h \mid s_h) - \log \pi_\mathrm{ref}(a_h \mid s_h)) \right],
+\end{align*}
+where $\beta > 0$ is the coefficient that controls the influence of the KL divergence. Typically, the reward is provided at the end of the trajectory.
+
+A common algorithm for training this policy is proximal policy optimization (PPO) \citep{schulman2017proximal}. This method optimizes the policy using the clipped surrogate objective, which is designed to limit policy changes. Simultaneously, it trains a value function $V_\phi \colon \mathcal{S} \to \mathbb{R}$ to predict the multi-step returns computed by the generalized advantage estimator (GAE) \citep{schulman2016high}.
+
+\subsection{Countdown benchmark}
+
+To evaluate the search and planning abilities of language models, we use Countdown as a benchmark \citep{gandhi2024stream}. Each problem consists of input numbers and a target number, where the goal is to transform the inputs into the target using the four basic arithmetic operations. This problem has a high branching factor of $O(k^2)$ in the search tree, where $k$ is the number of remaining inputs. To ensure a tractable level of difficulty, we set the number of initial inputs to 4, following the setup in \citet{gandhi2024stream}. See \Cref{sec:countdown} for more details on Countdown.
+
+
+
+\section{Methods}
+
+
+\subsection{Motivation}
+
+\citet{gandhi2024stream} show that training a language model using noisy, suboptimal search trajectories leads to better generalization compared to clean, optimal solutions. That said, optimal solutions can still offer valuable guidance during generation. If the SoS model has the ability to continue the search from arbitrary incomplete trajectories, we can leverage this to generate high-quality trajectories. By providing the model with partial optimal solutions alongside the prompts as hints, we can guide it to continue the search within a reduced search space, increasing the probability of finding a solution.
+
+To examine whether the SoS model possesses this ability, we conduct an experiment on Countdown. For each problem with an optimal solution of $N$ operations, we define the partial optimal path as the trajectory generated by applying the first $n$ operations in the search tree. We then append this path to the initial prompt. Finally, we generate search trajectories using the SoS model from these modified prompts and evaluate correctness. \Cref{tab:analysis} shows the ratio of successful trajectories with varying the length of partial optimal solutions for 200,000 training problems. The model successfully discovers solutions starting from these paths, despite not having encountered them during training. Moreover, increasing their length greatly improves the correctness of the resulting trajectories. This encourages us to use these high-quality, self-generated data for supervised fine-tuning, distilling the knowledge of optimal solutions into the model.
+
+However, this guidance results in low likelihood under the model. \Cref{tab:analysis} presents the cross-entropy loss of the trajectories, showing that using longer partial optimal paths results in higher loss values. Fine-tuning on these trajectories may lead to significant changes in the model’s weights, potentially degrading its search and planning abilities. Therefore, it is crucial to explore methods for effectively integrating optimal solutions to produce trajectories that maintain both high likelihood and quality.
+
+\begin{table}[h]
+\centering
+\caption{Ratio and loss of successful SoS trajectories with varying the length of partial optimal paths. ``Length 0'' represents no paths are appended, and ``Length 3'' represents full paths are appended.}
+\label{tab:analysis}
+\begin{tabular}{ccccc}
+\toprule
+Length & 0 & 1 & 2 & 3\\
+\midrule
+Ratio ($\uparrow$) & 0.4918 & 0.7281 & 0.9211 & \textbf{1.0000} \\
+Loss ($\downarrow$) & \textbf{0.0742} & 0.1133 & 0.2301 & 0.3509 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Guided stream of search}
+
+In this subsection, we introduce \emph{guided stream of search} (GSoS), a supervised fine-tuning approach that seamlessly incorporates optimal solutions into the self-generation process and effectively distills them into the model. The key idea of GSoS is to leverage an unsuccessful search trajectory as context for each intermediate step of the optimal solution. This approach effectively mimics how the model discovers the solution through the search procedure, producing a trajectory that has a high likelihood under the SoS model. Moreover, by providing an exploratory context for reaching each intermediate step, it facilitates distilling the optimal solutions into the model \citep{yang2022chain}. 
+
+Before delving into our approach, we establish some notations. We define subgoal nodes as the non-leaf nodes along the optimal path in the search tree. An optimal solution consisting of $N$ operations contains $N-1$ subgoal nodes. We define the generation and exploration lines of a node as sequences of tokens that represent the primitive operations for generating and exploring the node, respectively. Note that while we include the root node as a subgoal node for simplicity, it is always explored prior to the search since it is already present in the prompt.
+
+GSoS incorporates each subgoal into a trajectory in a progressive manner. Consider an unsuccessful search trajectory that has reached the $(n-1)$-th subgoal but fails to navigate its subtree, thereby not reaching the $n$-th subgoal. First, it selects the $k$-th explored child node from the $(n-1)$-th subgoal node. Subsequently, it replaces this child node with the $n$-th subgoal node, modifying its generation and exploration lines within the trajectory. While multiple exploration lines may exist, only the first one is modified. Finally, it prunes the trajectory beyond the modified exploration line, allowing the model to restart the search from the subgoal node.  An example of the resulting trajectory is provided in \Cref{fig:gsos_example} in \Cref{sec:gsos}. GSoS uses this trajectory as a prompt to generate a new search trajectory using the SoS model. This procedure, called \emph{subgoal augmentation}, is summarized in \Cref{fig:gsos} and \Cref{alg:sg}. It is repeated until all subgoals are incorporated into the trajectory.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/gsos_v1.pdf}
+\caption{An illustration of subgoal augmentation in GSoS. The numbers indicate the order in which nodes are explored.}
+\label{fig:gsos}
+\end{figure}
+
+\begin{algorithm}[h]
+\caption{Subgoal augmentation}
+\begin{algorithmic}[1]
+\Require{model $f_\theta$, search trajectory $y$, optimal path $\hat{y}$, subgoal index $n$} 
+\If{$y$ has explored the $n$-th subgoal node of $\hat{y}$}
+\State \Return $y$
+\EndIf
+\State Select an explored child node from the $(n-1)$-th subgoal node of $\hat{y}$
+\State Replace the child node with the $n$-th subgoal of $\hat{y}$
+\State Prune $y$ starting from the node
+\State Generate a new search trajectory: $y \gets f_\theta(y)$
+\State \Return $y$
+\end{algorithmic}
+\label{alg:sg}
+\end{algorithm}
+
+Note that the exploration history from the first to the $(k-1)$-th explored child node is used as context for the subgoal node, where $k$ determines the size of this context. We consider three node selection strategies to control the context size and use random node selection as the base strategy:
+\begin{itemize}
+\item \textbf{First}: This strategy selects the first explored child node, providing minimal context.
+\item \textbf{Rand}: This strategy randomly selects an explored child node, providing varied context.
+\item \textbf{Last}: This strategy selects the last explored child node, providing maximal context.
+\end{itemize}
+
+Finally, GSoS filters these augmented trajectories using a task-specific metric and fine-tunes the SoS model on the filtered data, resulting in the GSoS model. \Cref{alg:gsos} outlines the overall procedure of GSoS, encompassing both subgoal augmentation and supervised fine-tuning.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/ppo_op_v1.pdf}
+\caption{\textbf{(Left)} Illustration of token-level and operation-level value functions. (\textbf{Right}) An example of a search trajectory with values computed at \textcolor{myred}{newline tokens} in the operation-level MDP.}
+\label{fig:ppo_op}
+\end{figure}
+
+\begin{algorithm}[h]
+\caption{Guided stream of search}
+\begin{algorithmic}[1]
+\Require SoS model $f_\theta$, prompt $x$, optimal path $\hat{y}$, task-specific metric $M$, threshold $\tau$
+\State Initialize the model: $f_{\theta_1} \gets f_\theta$
+\For{$i = 1, 2, \ldots, \textrm{MAXITER}$}
+\State Generate a search trajectory: $y \gets f_{\theta_i}(x)$
+\For{$n = 1, 2, \ldots, N - 1$}
+\If{$M(y \mid x) > \tau$}
+\State \textbf{break}
+\EndIf
+\State Augment the $n$-th subgoal with \Cref{alg:sg}: $y \gets \textsc{AugmentSubgoal}(f_{\theta_i}, y, \hat{y}, n)$
+\EndFor
+\State Train the model with \Cref{eqn:sft}: $f_{\theta_{i+1}} \gets \textsc{Train}(f_\theta, x, y, M, \tau)$
+\EndFor
+\end{algorithmic}
+\label{alg:gsos}
+\end{algorithm}
+
+\subsection{Operation-level RL fine-tuning}
+
+Building on the GSoS model, we apply RL fine-tuning to further enhance its performance. However, this poses challenges since the model generates search trajectories that are much longer than optimal paths. The extremely long sequences, combined with the sparse rewards given only at the end, hinder the effective propagation of the reward signal to earlier timesteps, even when multi-step returns with GAE are used for training the value function.
+
+To address this, we formulate the problem as an operation-level MDP, which significantly reduces its effective horizon. The action space consists of the primitive operations for tree search defined in SoS, separated by newline tokens within the trajectory, as shown in \Cref{fig:ppo_op}. The state space includes all possible operation sequences ending with a newline token. Accordingly, the value function is trained to predict values exclusively at these newline tokens, as illustrated in \Cref{fig:ppo_op}. This operation-level approach reduces the effective horizon to less than 5\%, facilitating better reward signal propagation. See \Cref{sec:ppo_op} for a more detailed explanation.
+
+
+
+\section{Experiments}
+
+
+\subsection{Experiment setup}
+
+Throughout all experiments, we use a GPT-2 architecture with 250M parameters and a context length of 4096 as the base language model \citep{radford2019language}. Additionally, we utilize FlashAttention-2 for faster training and inference \citep{dao2023flashattention2}. Although \citet{gandhi2024stream} employ GPT-Neo as the base architecture \citep{gao2020pile}, we find that using GPT-2 instead results in better performance. See \Cref{subsec:spt} for a more detailed comparison.
+
+For unsupervised pre-training, we create 500,000 training problems and generate search trajectories using heuristic-guided DFS and BFS. For supervised fine-tuning, we generate trajectories from the first 200,000 training problems with a temperature of 0.8, filtering them based on their correctness. We perform this fine-tuning for three iterations, following \citet{gandhi2024stream}. For RL fine-tuning, we generate trajectories from 25,600 randomly sampled training problems with a temperature of 1.0. We use the same reward function as \citet{gandhi2024stream}, which takes into account both correctness and efficiency. See \Cref{subsec:data,subsec:spt,subsec:sft,subsec:rlft} for more details.
+
+For evaluation, we follow the procedure outlined in \citet{gandhi2024stream}. We create 10,000 problems for each of the two test cases: (1) seen targets and (2) unseen targets. We generate trajectories using greedy decoding and measure accuracy based on their correctness. To evaluate models fine-tuned on self-generated data, which involves randomness in the data generation process, we run experiments with three different seeds and measure the mean and standard deviation. See \Cref{subsec:data} for more details on the test set.
+
+We compare our methods with the symbolic method, SoS, and the two baseline fine-tuning methods introduced in \citet{gandhi2024stream}: (1) SoS+STaR and (2) SoS+PPO. Although \citet{gandhi2024stream} employ iterative APA as the base RL algorithm, but this approach necessitates resetting the reference policy, which introduces additional costs for model selection \citep{zhu2023fine}. We find that a single iteration of PPO outperforms iterative APA. See \Cref{sec:comp} for a more detailed comparison. Unless otherwise specified, we use operation-level PPO for all RL fine-tuning experiments. 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/acc_v1.pdf}
+\caption{Test accuracy of each method. Each fine-tuning method is evaluated over three runs with different seeds. Error bars represent the standard deviation relative to the mean.}
+\label{fig:acc}
+\end{figure}
+\begin{figure}
+\begin{minipage}{0.52\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/gsos_acc_v1.pdf}
+\caption{Test accuracy of GSoS with different node selection strategies.}
+\label{fig:gsos_acc}
+\end{minipage}
+\hfill
+\begin{minipage}{0.44\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/gsos_ratio_v1.pdf}
+\caption{Ratio of successful GSoS trajectories with different node selection strategies.}
+\label{fig:gsos_ratio}
+\end{minipage}
+\end{figure}
+
+\subsection{Results}
+\label{subsec:result}
+
+\Cref{fig:acc} presents the test accuracy of each method for both seen and unseen targets. Our approaches outperform the symbolic method and SoS by a substantial margin. Specifically, GSoS+PPO achieves 75\% accuracy on seen targets and 73\% accuracy on unseen targets, yielding an average gain of over 16\% compared to both methods. Furthermore, our approaches significantly outperform the baseline fine-tuning methods. For supervised fine-tuning, GSoS shows a gain of 7\% compared to SoS+STaR. For RL fine-tuning, GSoS+PPO exhibits a gain of 9\% compared to SoS+PPO. It is worth noting that RL fine-tuning further enhances the performance of GSoS by an additional 6\%.
+
+\begin{figure}
+\centering
+\includegraphics[width=0.95\textwidth]{figures/gsos_stat_star2_v1.pdf}
+\caption{Distributions of losses (\textbf{left}) and token lengths (\textbf{right}) for successful GSoS trajectories at the final iteration with different node selection strategies.}
+\label{fig:gsos_stat_star2}
+\end{figure}
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/gsos_rl_v1.pdf}
+\caption{(\textbf{Left}) Test accuracy of GSoS+PPO in the token-level and operation-level MDPs. (\textbf{Right}) Value predictions for initial states of GSoS+PPO in the token-level and operation-level MDPs.}
+\label{fig:gsos_rl}
+\end{figure}
+
+\subsection{Analysis of GSoS node selection strategies}
+
+\Cref{fig:gsos_acc} shows the test accuracy of GSoS with different node selection strategies. The random node selection strategy achieves the highest accuracy for both target types, outperforming the second-best strategy by 2\%. To investigate the effectiveness of random node selection, we analyze the statistics of trajectories generated by each strategy. \Cref{fig:gsos_stat_star2} displays the distributions of cross-entropy losses for successful GSoS trajectories at the final iteration, where the losses are calculated on the base SoS model. Strategies with longer contexts generate trajectories with higher likelihoods under the model compared to shorter contexts. However, this benefit comes at the cost of lower quality. As shown in \Cref{fig:gsos_ratio}, the ratio of successful trajectories decreases as the context length increases. One potential reason is that longer contexts reduce the number of tokens available for the model to generate within a given context limit, thereby restricting its opportunities to search. This explanation is supported by the fact that many of the successful trajectories generated by the last node selection strategy already approach the context length limit, as presented in \Cref{fig:gsos_stat_star2}. In summary, there is an inherent trade-off between quality and likelihood. Nevertheless, the random node selection strategy strikes a balance between this trade-off.
+
+\subsection{Analysis of operation-level PPO}
+
+To examine the effectiveness of the operation-level action space for RL fine-tuning, we fine-tune the GSoS model using PPO in the token-level MDP and compare their performance. \Cref{fig:gsos_rl} shows the test accuracy and value predictions for initial states of GSoS+PPO in the token-level and operation-level MDPs. Notably, the operation-level approach achieves an accuracy gain of over 2\% compared to the token-level approach for both target types. Moreover, the operation-level value function learns at a significantly faster rate than the token-level value-function, highlighting the benefits of reducing the effective horizon for training the value function.
+
+\subsection{Analysis of RL fine-tuning on STaR}
+
+In \Cref{subsec:result}, we find that RL fine-tuning further enhances the performance of GSoS. This raises the question of whether RL fine-tuning might also benefit SoS+STaR. To explore this, we fine-tune the SoS+STaR model using PPO and compare their performance. \Cref{fig:sos_rl} shows the test accuracy and KL divergence from the reference policy of SoS+PPO with and without STaR. While applying STaR prior to RL fine-tuning leads to lower KL divergence and improved training stability, its performance remains similar. In summary, STaR does not provide additional benefits beyond RL fine-tuning. This highlights the importance of optimal solutions in enhancing performance.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/sos_rl_v1.pdf}
+\caption{(\textbf{Left}) Test accuracy of SoS+PPO with and without STaR. (\textbf{Right}) KL divergence from the reference policy of SoS+PPO with and without STaR. SoS+PPO terminates early due to instability.}
+\label{fig:sos_rl}
+\end{figure}
+\begin{table}[h]
+\centering
+\caption{Test accuracy of SoS+PPO with and without subgoal reward.}
+\label{tab:sos_rl_sg}
+\begin{tabular}{ccc}
+\toprule
+Model & Accuracy (seen)  & Accuracy (unseen) \\
+\midrule
+SoS+PPO & 0.6512 $\pm$ 0.0011 & 0.6591 $\pm$ 0.0044 \\
+SoS+PPO (subgoal) & 0.6597 $\pm$ 0.0011 & 0.6650 $\pm$ 0.0018 \\
+\midrule
+GSoS+PPO & \textbf{0.7477} $\pm$ \textbf{0.0027} & \textbf{0.7330} $\pm$ \textbf{0.0037} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Analysis of RL fine-tuning with subgoal reward}
+
+Another approach to distilling the information from optimal solutions into the SoS model is to apply RL fine-tuning with a subgoal reward. Specifically, we train the model using PPO with a new reward function that combines the original reward and a subgoal reward, which is defined as:
+\begin{align*}
+R_\mathrm{new}(s_t, a_t) = R(s_t, a_t) + \eta \cdot R_\mathrm{sub}(s_t, a_t), \quad
+R_\mathrm{sub}(s_t, a_t) = 
+\begin{cases}
+1 & \textrm{if $(s_t, a_t)$ explores a subgoal} \\ 
+0 & \textrm{otherwise,}
+\end{cases}
+\end{align*}
+where $\eta > 0$ controls the influence of the subgoal reward. We set $\eta$ to 0.2 to ensure that the subgoal reward does not dominate the original reward. To avoid exploitation, the subgoal reward is provided only for the initial exploration, which is motivated by \citet{hafnerbenchmarking}. \Cref{tab:sos_rl_sg} shows the test accuracy of SoS+PPO with and without the subgoal reward. Adding the subgoal reward leads to only marginal improvements, showing an accuracy gain of less than 1\% for both target types. This underscores the critical role of GSoS for distilling optimal solutions to the model.
+
+
+
+\section{Related works}
+
+
+\paragraph{Searching with language models} \citet{yang2022chain} introduce the idea of using search procedure for sequential decision making. They train a neural network to imitate not only actions generated by an expert MCTS policy but also the search procedures involved in determining the actions. However, their approach primarily focuses on utilizing search procedures to enhance imitation learning rather than improving the search and planning capabilities of the model. Recent studies focus on enhancing these capabilities using language models. \citet{lehnert2024beyond} train a T5 model to imitate $A^*$ search traces and optimize it to generate shorter traces through supervised fine-tuning \citep{raffel2020exploring}. \citet{gandhi2024stream} train a GPT-Neo model to imitate DFS and BFS search trajectories and improve its performance through supervised or RL fine-tuning. Our work differs from these prior studies in that it utilizes optimal solutions throughout the self-data generation process rather than relying solely on fully self-generated data.
+
+\paragraph{Fine-tuning on self-generated data} 
+
+\citet{anthony2017thinking,silver2017mastering} introduce the idea of iteratively distilling self-generated data into neural networks to enhance their performance. They generate high-quality trajectories using an expert MCTS policy and imitate them to improve a neural network-based policy. However, their work is restricted to small-scale convolutional neural networks and the narrow domain of gaming. Recent studies extend this idea to fine-tune language models for various downstream tasks, including theorem proving, question answering, and machine translation \citep{polu2022formal,zelikman2022star,gulcehre2023reinforced}. While \citet{zelikman2022star} utilize optimal solutions as prompts to generate higher-quality data, our approach differs by first generating trajectories without any prior knowledge of optimal solutions and then integrating optimal solutions into them. Furthermore, we incorporate each intermediate subgoal of optimal solutions step by step, in the same spirit as \citet{lightman2023let}.
+
+\paragraph{RL fine-tuning with higher-level MDP}
+
+\citet{verma2022chai,zhouarcher} address the long-horizon problem in multi-turn conversation tasks by defining each single-turn utterance as an action. However, their work focuses exclusively on off-policy RL algorithms. Furthermore, their approaches require an additional value network for baseline estimation and a target network to improve training stability. Our work differs from these prior studies by successfully extending the idea of higher-level MDP to on-policy RL algorithms without introducing any additional networks. Although \citet{ahmadian2024back} explore sequence-level optimization using REINFORCE \citep{williams1992simple}, their focus is limited to tasks with short horizons, where the average generation length is under 100.
+
+
+
+\section{Conclusion}
+
+
+In this work, we explore the role of optimal solutions in enhancing the search and planning abilities of language models. We identify that optimal solutions can serve as step-by-step subgoals, providing valuable guidance to models pre-trained on search trajectories. We propose \emph{guided stream of search} (GSoS), which seamlessly integrates optimal solutions into the self-generation process step by step, producing high-quality trajectories for supervised fine-tuning. Our method achieves state-of-the-art performance on the challenging Countdown benchmark. Furthermore, we find that GSoS possesses the intriguing property of working in tandem with RL fine-tuning, which is not observed in standard supervised fine-tuning.
+
+Our work is not without limitations. Transformer models trained on search trajectories face inherent challenges as they require long context lengths. Given their quadratic memory and time complexity, this significantly raises the computational demands for both training and inference. This issue can be further exacerbated as tasks grow more complex and require even longer context lengths. Exploring the search and planning capabilities of more efficient language models, such as Mamba \citep{gu2023mamba}, is a promising direction for future work. Alternatively, training a model to implicitly perform search through knowledge distillation also presents a valuable approach \citep{deng2023implicit}.
+
+
+

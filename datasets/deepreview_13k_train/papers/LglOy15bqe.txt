@@ -1,0 +1,341 @@
+\title{Policy optimization can be memory-efficient: LLM Alignment Through Successive Policy Re-weighting (SPR)}
+
+\begin{abstract}
+Reinforcement learning (RL) is serving as the cornerstone of aligning large language models (LLMs) to human behavior, by providing an appealing formulation and a suite of effective algorithms for learning behavior strategies through interacting with the underlying environment. Current paradigm of RL-based methods for LLM alignment, such as reinforcement learning with human feedback (RLHF) involves utilizing a reward function learned from extensive offline datasets to expediate the online training of reinforcement learning. The reward function learned is then used for policy optimization to obtain an improved policy (i.e. the LLM). Despite the success of RL approaches in aligning LLM with offline datasets, there are significant computational/limit of resources concern on applying RL-based methods for LLMs. For example, standard RLHF requires simultaneous loading of four models to the computing unit. In this paper, we develop a novel policy optimization algorithm named Successive Policy Re-weighting (SPR), matching the peak memory consumption of standard supervised fine-tune (SFT). Further, SPR can leverage both offline and online datasets to expediate online training and improve the sample efficiency. Specifically, SPR leverages a supervised learning subroutine to achieve policy improvement through re-weighting the policy according to the importance/performance of executed actions. Such simple and effective method is computationally inexpensive, requiring loading only one model at each update step, matching the computational cost of standard supervised fine-tuning procedure. Experimental results show that the proposed method can significantly outperform benchmark algorithms and accelerate the online training with available offline dataset.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Aligning LLM to follow human instructions is of the central focus for artificial general intelligence (AGI). Recently, RL-based algorithms for LLM alignment, such as reinforcement learning with human feedback (RLHF, see Ouyang et al. (2022); Christiano et al. (2017)) are serving as the backbone of the recent success on the emergence of intelligence for LLMs such as GPT-4 (Achiam et al., 2023), Claude-3 (Anthropic, 2024) and Gemini-1.0 (Team et al., 2023). Among these methods, the most iconic RLHF utilizes large-scale preference datasets which consists of input prompt and two continuations, where one is preferred over the other, to train a reward model and use this reward model for policy  
+
+![](images/8da5032684ac3270346dc486f58096ea30ab7bc09e4d14568d236e83f737f9a3.jpg)  
+Figure 1: Estimated memory consumption of running the Pythia-1B model on TL;DR dataset with batch-size 2 on a single device, without checkpointing, memory offloading and distributed training such as Deepspeed. Here “SPR” is the implementation of our Algorithm 2.  
+
+optimization to iteratively improve LLMs. Therefore online policy optimization methods such as proximal policy optimization (PPO, see Schulman et al. (2017)) are the most prevalent in industry and the SOTA alignment approaches. On the other hand, Direct Preference Optimization (DPO, see Rafailov et al. (2024)) simplifies RLHF by training the policy/LLM directly while implicitly learns the reward model via log of the ratio of likelihood between the learned model and a reference model. Both RLHF and DPO are successful in terms of improving the instruction-following and reasoning ability of LLMs (see, for example Ouyang et al. (2022); Tunstall et al. (2023); Dubey et al. (2024)) over the most straightforward supervised fine-tune (SFT) approach, which is analogous to the plain behavior cloning approach in RL literature (Pomerleau, 1988; Osa et al., 2018). LLMs aligned using RLHF are thus believed to open the current AI boom toward AGI (Bubeck et al., 2023).  
+
+There are several important distinctions between RL-based methods (such as RLHF) and DPO: First, RL-based methods require an explicit reward model for policy improvement, while DPO learns the policy directly; Second, RL-based method in general can effectively utilize an online pipeline using the explicit reward model, while the standard DPO is designed for offline data. Specifically for RL-based methods, a reward model could be trained by online and offline collected preference data using the standard Bradley-Terry model (Bradley & Terry, 1952). Given a reward model, RLHF utilizes standard policy optimization algorithm such as PPO at the policy optimization step, whose naive implementation requires loading four models at the same time, namely the reward, the policy, and two value function models. In contrast, DPO only requires loading two models (a policy and a reference model) simultaneously, but is arguably more sensitive to the distribution shift between the base model outputs and preference data, and it is not quite effective on challenging tasks (Xu et al., 2024; Lin et al., 2024; Ivison et al., 2024). Witnessing the success of RLHF, the memory efficiency issue of both RL-based method and DPO, as well as the limitation of offline nature of algorithms such as DPO, we pose the following question:  
+
+
+
+\section{2 METHODOLOGY  }
+
+
+Our main objective is to efficiently conduct policy optimization with comparable level of memory consumption as SFT, while leveraging both offilne dataset and online data generated by intermediate models to further fine-tune the policy. Towards this end, let us first review the state-of-the-art alignment methods1and the policy optimization problem formulations.  
+
+2.1 PRELIMINARIES ON LLM ALIGNMENTS  
+
+We model the LLM as a policy $\pi$ in a Markov decision process (MDP). A MDP is defined by the tuple $(S,{\mathcal{A}},P,\mu,r,\gamma)$ , which consists of the state space $\boldsymbol{S}$ , the action space $\boldsymbol{\mathcal{A}}$ , the transition dynamics $P:S\times A\times S\rightarrow[0,1]$ , the initial state distribution $\mu(\cdot)$ , the reward function $r:S\times A\to\mathbb{R}$ and the discounted factor $\gamma\in(0,1)$ . Under a transition dynamics model $P$ and a policy $\pi:S\rightarrow\Delta_{{\mathcal{A}}}$ where $\Delta_{\mathcal{A}}$ is the probability simplex on the action space, further define the corresponding state visitation measure as $\begin{array}{r}{d_{\pi}(s):=(1-\gamma)\sum_{t=0}^{T}\gamma^{t}P^{\pi}(s_{t}\stackrel{.}{=}s|s_{0}\sim\eta)}\end{array}$ for any state $s\in S$ . Here $T$ is horizon size, which can be any positiv e integer or $\infty$ .  
+
+In the LLM context, $\boldsymbol{S}$ and $\boldsymbol{\mathcal{A}}$ correspond to the space of input prompts and the space of output continuations, respectively. If we consider the entire input sentences as state space and the entire output continuations as action space, then there is no transition dynamics, i.e. horizon $=1$ . On the other hand, if we consider the token-level state/action space2, i.e. the action is modeled as the next token in the sentence, the transition dynamics is deterministic and $P(s^{\prime}|s,a)$ is always 1 if $s^{\prime}=(s,a)$ and 0 otherwise. In all the experiments, we stick to the sentence-level state/action, where $T=1$ . The reward model $r$ is usually another LLM trained specifically to evaluate the score of given prompt/continuation tuples, and the policy model $\pi$ is the LLM to be optimized.  
+
+Now consider an LLM parameterized by $\theta$ . Denote $\pi_{\theta}(a|s)$ as the probability of outputting $a$ given input prompt $s$ , and we assume the horizon $T\,=\,1$ for the rest of this section. The following discussions review three common procedures for fine-tuning LLM: (1) supervised fine-tuning (SFT) over demonstration dataset, (2) reinforcement learning with human feedback (RLHF) over preference dataset, and (3) direct preference optimization (DPO).  
+
+SFT. Given a demonstration dataset $\boldsymbol{D}:=\{(\boldsymbol{s},a)\}$ collected from an expert policy $\pi^{E}$ (i.e. $a\sim$ $\pi^{E}(\cdot|s))$ , the SFT optimizes the following problem:  
+
+$$
+\operatorname*{max}_{\theta}\ \ell_{\mathrm{SFT}}(\theta):=\mathbb{E}_{(s,a)\sim{\mathcal{D}}}\left[\log\pi_{\theta}\left(a|s\right)\right].
+$$  
+
+The above problem shares the same optimal solutions with minθ $\mathbb{E}_{s\sim\mu}[D_{\mathrm{KL}}(\pi^{\mathrm{E}}\left(\cdot|s\right)\|\pi_{\theta}\left(\cdot|s\right))]$ (see (17)), and the latter shows that SFT aims at imitating the demonstration dataset via minimizing the KL divergence. It is worth noting that the SFT stage described here is closely related to the imitation learning approach used in the RL literature for learning from demonstration (Osa et al., 2018), whose goal is to mimic the policy of an expert.  
+
+RLHF. Let $r_{\phi}(s,a)$ denote a reward model parameterized by $\phi$ , which evaluates a given input and output pair $(s,a)$ . Then the LLM can be fine-tuned by the following RL problem:  
+
+$$
+\operatorname*{max}_{\theta}\ \ell_{\mathrm{RL}}(\theta):=\mathbb{E}_{s\sim\mu,a\sim\pi_{\theta}(\cdot\vert s)}\left[r_{\phi}(s,a)\right]-\beta\mathbb{E}_{s\sim\mu}[D_{\mathrm{KL}}(\pi_{\theta}\left(\cdot\vert s\right)\Vert\pi_{\mathrm{ref}}\left(\cdot\vert s\right))],
+$$  
+
+where $\pi_{\mathrm{ref}}$ is a fixed reference model and $D_{\mathrm{KL}}$ is the KL-divergence to regulate the policy around the reference policy $\pi_{\mathrm{ref}}$ . In practice, (2) is usually solved by standard policy optimization techniques such as PPO (Schulman et al., 2017).  
+
+To find an appropriate reward model $r_{\phi}(s,a)$ , RLHF (see e.g., Christiano et al. (2017)) leverages a set of preference dataset $\mathcal{P}:=\{(s,a_{w},a_{l})\}$ , where each data contains a pair of output $a_{w},a_{l}$ , and $a_{w}$ is preferred over $a_{l}$ by human labeler (denoted as $a_{w}\succ a_{l}]$ ). The Bradley-Terry model (Bradley $\&$ Terry, 1952) assumes that the probability of choosing $a_{w}$ over $a_{l}$ is  
+
+$$
+\mathbb{P}\left(a_{w}\succ a_{l}\mid s\right)=\frac{\exp(r(s,a_{w}))}{\exp(r(s,a_{w}))+\exp\left(r\left(s,a_{l}\right)\right)}=\sigma\left(r(s,a_{w})-r\left(s,a_{l}\right)\right)
+$$  
+
+where $\sigma$ is the Sigmoid function. One can formulate the following problem to find the reward model:  
+
+$$
+\operatorname*{max}_{\phi}\ \ell_{\mathrm{RM}}(\phi):=\mathbb{E}_{s\sim\mu,(a_{l}\prec a_{w})\sim\pi^{P}(\cdot|s)}\Big[\log\Big(\sigma\big(r_{\phi}(s,a_{w})-r_{\phi}(s,a_{l})\big)\Big)\Big].
+$$  
+
+It is widely observed in the literature that, models trained via episodically learning the policy (2) and learning the reward (3) typically outperform those that are only trained using SFT (Ouyang et al., 2022). The reward model guides the performance of the LLM and allows a better generalization ability via the consistent input of the preference data from human labeler.  
+
+DPO. DPO (Rafailov et al., 2024) proposes to incorporate reward learning implicitly by utilizing the structure of the optimal solution of the RL problem (2). Specifically, (2) implies that the optimal policy should satisfy:  
+
+$$
+r(s,a)=\beta\log\left(\frac{\pi_{\theta}(a|s)}{\pi_{\mathrm{ref}}(a|s)}\right)+\beta\log Z_{\theta}(s),
+$$  
+
+where $Z_{\theta}(s)$ is the partition function. Plugging this equation back to (3) we get the DPO loss:  
+
+$$
+\operatorname*{max}_{\theta}\ \mathbb{E}_{s\sim\mu,(a_{l}\sim a_{w})\sim\pi^{P}(\cdot|s)}\Big[\log\Big(\sigma\big(\beta\log\left(\frac{\pi_{\theta}(a_{w}|s)}{\pi_{\mathrm{ref}}(a_{w}|s)}\right)-\beta\log\left(\frac{\pi_{\theta}(a_{l}|s)}{\pi_{\mathrm{ref}}(a_{l}|s)}\right)\big)\Big)\Big].
+$$  
+
+The difference between DPO and RLHF. Let us have a brief discussion about the above DPO reformulation. First, it is important to note that the fact that optimal policy of (2) takes the form of (4) implicitly says that there must exist a reward model $r$ such that  
+
+$$
+\pi(a|s)=\frac{\pi_{\mathrm{ref}}(a|s)\exp\Big(\frac{1}{\beta}r_{\phi}(s,a)\Big)}{\sum_{\tilde{a}\in A}\pi_{\mathrm{ref}}(\tilde{a}|s)\exp\Big(\frac{1}{\beta}r_{\phi}(s,\tilde{a})\Big)}.
+$$  
+
+However, in the DPO formulation, after directly plugging (4) into (3), problem (5) directly optimizes the policy parameter $\theta$ , it remains unclear whether the optimized policy continues to satisfy (6) during the entire optimization process. Therefore, a more rigorous way to recover the solution of (2) is to solve the following problem (by introducing the explicit optimal policy constraint):  
+
+$$
+\begin{array}{r l}&{\displaystyle\operatorname*{max}_{\phi}\;\mathbb{E}_{s\sim\mu,(a_{l}\sim a_{w})\sim\pi^{P}(\cdot\vert s)}\Big[\log\Big(\sigma\big(\beta\log\Big(\frac{\pi\big(a_{w}\vert s\big)}{\pi_{\mathrm{ref}}\big(a_{w}\vert s\big)}\Big)-\beta\log\Big(\frac{\pi\big(a_{l}\vert s\big)}{\pi_{\mathrm{ref}}\big(a_{l}\vert s\big)}\Big)\Big)\Big]}\\ &{\mathrm{s.t.}\;\pi:=\displaystyle\arg\operatorname*{max}_{\pi}\mathbb{E}_{s\sim\mu,a\sim\pi(\cdot\vert s)}\big[r_{\phi}\big(s,a\big)\big]-\beta\mathbb{E}_{s\sim\mu}[D_{\mathrm{KL}}\big(\pi\,(\cdot\vert s)\,\Vert\pi_{\mathrm{ref}}\,(\cdot\vert s)\big)].}\end{array}
+$$  
+
+The difference between (7) and (5) indicates that DPO in (5) is not exactly an RLHF scheme, but a supervised preference data-fitting scheme. In other words, the constrained optimization problem of RLHF is simplified and the solution space of DPO is actually larger than that of RLHF. Related discussion about limitation of DPO from different angles can also be found in $\mathrm{Xu}$ et al. (2024); Lin et al. (2024); Ivison et al. (2024).  
+
+
+
+\section{2.2 CONSTRAINT POLICY OPTIMIZATION FORMULATION  }
+
+
+We develop our problem formulation that substitutes the most memory-intensive RL step in (2) with the constrained optimization formulation in (14) , which leads to the new policy optimization algorithm in the next section. Let us start from the most general case where the horizon $T$ is $\infty$ , then the setting in our experiments $T=1$ ) will naturally follow. We inspect the original policy optimization by dropping the KL-divergence constraint in (2) and obtain:  
+
+$$
+J(\pi):=\mathbb{E}_{\tau\sim\pi}\Big[\sum_{t=0}^{\infty}\gamma^{t}r(s_{t},a_{t})\Big],
+$$  
+
+where $\tau:=(s_{0},a_{0},s_{1},a_{1},\cdot\cdot\cdot)$ denotes one trajectory, corresponding to one data point with prompt(s) and continuation(s). Under a policy/LLM $\pi$ , we can define the corresponding value function $V^{\pi}$ and the Q-function $Q^{\pi}$ as below:  
+
+$$
+V^{\pi}(s):=\mathbb{E}_{\tau\sim\pi}\Big[\sum_{t=0}^{\infty}\gamma^{t}r(s_{t},a_{t})\mid s_{0}=s\Big],
+$$  
+
+$$
+Q^{\pi}(s,a):=r(s,a)+\gamma\mathbb{E}_{s^{\prime}\sim P(\cdot|s,a)}\left[V^{\pi}(s^{\prime})\right].
+$$  
+
+We can further define the advantage function for each state action pair $(s,a)$ as follows:  
+
+$$
+A^{\pi}(s,a):=Q^{\pi}(s,a)-V^{\pi}(s).
+$$  
+
+The fundamental idea of policy improvement is that, suppose there is a reference policy $\pi^{\prime}$ , we can maximize the performance gap over the reference policy to achieve policy improvement:  
+
+$$
+\eta_{\pi^{\prime}}(\pi):=J(\pi)-J(\pi^{\prime}).
+$$  
+
+It turns out that the performance improvement of the policy $\pi$ over the reference policy $\pi^{\prime}$ can be expressed by the advantage function $\bar{A}^{\pi^{\prime}}(s,a)$ .  
+
+Lemma 1 (Lemma 1.16 in (Agarwal et al., 2019)). For any policy $\pi$ and $\pi^{\prime}$ , the performance difference can be expressed as below:  
+
+$$
+\eta_{\pi^{\prime}}(\pi)=\frac{1}{1-\gamma}\mathbb{E}_{s\sim d_{\pi}(\cdot),a\sim\pi(\cdot|s)}\left[A^{\pi^{\prime}}(s,a)\right]
+$$  
+
+where $\begin{array}{r}{d_{\pi}(s):=(1-\gamma)\sum_{t=0}^{\infty}\gamma^{t}P^{\pi}(s_{t}=s|s_{0}\sim\mu)}\end{array}$ denotes the state visitation measure.  
+
+In the LLM context, this performance difference lemma indicates that to align the LLM with the reward model, i.e. to maximize the policy improvement objective in (11), one just need to seek for a policy $\pi$ which induces positive expected advantage $\mathbb{E}_{s\sim d_{\pi}(\cdot),a\sim\pi(\cdot|s)}\left[A^{\pi^{\prime}}(s,a)\right]\,>\,0$ over the reference policy $\pi^{\prime}$ . Therefore, we focus on maximizing (12).  
+
+However, from a practical point of view, the dependency on sampling data from the visitation measure $d_{\pi}(\cdot)$ makes it difficult to optimize the performance difference defined in (12). Following the trust region policy optimization (TRPO, see Schulman et al. (2015)) framework, we instead consider an approximation to $\eta_{\pi^{\prime}}(\pi)$ by $\tilde{\eta}_{\pi^{\prime}}(\pi)$ :  
+
+$$
+\tilde{\eta}_{\pi^{\prime}}(\pi)=\frac{1}{1-\gamma}\mathbb{E}_{s\sim d_{\pi^{\prime}}(\cdot),a\sim\pi(\cdot|s)}\left[A^{\pi^{\prime}}(s,a)\right]
+$$  
+
+where $d_{\pi^{\prime}}(\cdot)$ denotes the state visitation measure under the reference policy $\pi^{\prime}$ . According to Theorem 1 in (Schulman et al., 2015), $\tilde{\eta}_{\pi^{\prime}}(\pi)$ serves as a good approximation to $\eta_{\pi^{\prime}}(\pi)$ when the two policies $\pi$ and $\pi^{\prime}$ are close in terms of the KL-divergence. Thus, when maximizing the surrogate objective $\tilde{\eta}_{\pi^{\prime}}(\pi)$ defined in (13) while penalizing the KL divergence between $\pi$ and $\pi^{\prime}$ , we are able to guarantee monotonic performance improvement at each policy iteration step.  
+
+Above discussions lead to the following optimization objective, which is also used in the TRPO: at each policy iteration step and given the previous policy $\pi_{\mathrm{old}}$ , one solves for the constrained policy optimization problem:  
+
+$$
+\begin{array}{r l}{\displaystyle\operatorname*{max}_{\pi}}&{\tilde{\eta}_{\pi_{\mathrm{old}}}(\pi)}\\ {\mathit{s.t.}}&{\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot)}\left[D_{\mathrm{KL}}\big(\pi(\cdot|s)||\pi_{\mathrm{old}}(\cdot|s)\big)\right]\le\epsilon,}\\ &{\displaystyle\sum_{a\in\cal A}\pi(a|s)=1,\forall s\in\cal S,}\\ &{\pi(a|s)\ge0,\forall s\in\cal S,a\in\mathcal A.}\end{array}
+$$  
+
+  
+
+Theorem 1. The optimal policy $\pi^{*}$ from (14a)-(14d) is  
+
+$$
+\pi^{*}(a|s)=\pi_{\mathrm{old}}(a|s)\exp\Big(\frac{1}{\beta}\big(Q^{\pi_{\mathrm{old}}}(s,a)-W^{\pi_{\mathrm{old}}}(s)\big)\Big)
+$$  
+
+where β := (1−1γ)α and $\begin{array}{r}{W^{\pi_{\mathrm{old}}}(s):=\beta\log\left(\mathbb{E}_{a\sim\pi_{\mathrm{old}}(\cdot|s)}\Big[\exp\Big(\frac{1}{\beta}Q^{\pi_{\mathrm{old}}}(s,a)\Big)\Big]\right)}\end{array}$ is defined as $a$ reference function dependent on the state s, also known as the log-sum-exp value function.  
+
+Remark $^{\,l}$ . Note that if we replace $W^{\pi_{\mathrm{old}}}(s)$ by the value function $\begin{array}{r l}{V^{\pi_{\mathrm{old}}}(s)}&{{}:=}\end{array}$ $\mathbb{E}_{a\sim\pi_{\mathrm{old}}(\cdot|s)}Q^{\pi_{\mathrm{old}}}(s,a)$ , we arrive at Peng et al. (2019, equation (8)):  
+
+$$
+\pi^{*}(a|s)={\frac{1}{Z(s)}}\pi_{\mathrm{old}}(a|s)\exp\left({\frac{1}{\beta}}\left(Q^{\pi_{\mathrm{old}}}(s,a)-V^{\pi_{\mathrm{old}}}(s)\right)\right)
+$$  
+
+where $Z(s)$ is the partition function to normalize the policy. $Z(s)$ is not negligible when estimating the optimal policy, which motivates us to use the log-sum-exp function $W^{\pi_{\mathrm{old}}}(s)$ instead. Similar trick can be observed in maximum entropy RL literature such as Garg et al. (2022). Theorem 1 frees us from estimating the impractical partition function $Z(s)$ and opens the gate for efficient algorithm for solving for the optimal policy, by solving the Q and W functions in (15) respectively.  
+
+With the closed-form optimal policy in Theorem 1, the remaining question is how to develop a simple and efficient algorithm to approximate the optimal policy at each policy iteration. In the next section, we develop a practical algorithm to approximate the optimal policy $\pi^{*}$ defined in (15), which also optimizes the original objective (8).  
+
+3 ALGORITHM DESIGN  
+
+In this section, we design a memory-efficient algorithm to approximate the optimal policy $\pi^{*}$ defined in (15). Despite the fact that it has a closed-form solution, it remains unclear how to efficiently estimate the the Q and $\mathrm{W}$ functions on the right hand side of (15).  
+
+Algorithm Derivation. Now suppose we parameterize our policy by parameter $\theta$ in practice. Since the optimal policy for the constrained optimization problem defined in (14a)-(14d) enjoys a closed-form solution in (15), we directly approximate the optimal policy $\pi^{*}$ corresponding to a reference policy $\pi_{\mathrm{old}}$ through solving the following KL divergence minimization problem:  
+
+$$
+\operatorname*{min}_{\theta}\;\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot)}\Big[D_{\mathrm{KL}}\big(\pi^{*}(\cdot|s)\big|\big|\pi_{\theta}(\cdot|s)\big)\Big].
+$$  
+
+Based on the definition of the KL divergence $\begin{array}{r}{D_{\mathrm{KL}}\big(\pi^{*}(\cdot|s)||\pi_{\theta}(\cdot|s)\big)=\mathbb{E}_{a\sim\pi^{*}(\cdot|s)}\big[\log\frac{\pi^{*}(a|s)}{\pi_{\theta}(a|s)}\big]}\end{array}$ , we can obtain the following relations:  
+
+$$
+\begin{array}{r}{\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot)}\Big[D_{\mathrm{KL}}\big(\pi^{*}(\cdot|s)||\pi_{\theta}(\cdot|s)\big)\Big]=\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot),a\sim\pi^{*}(\cdot|s)}\Big[\log\pi^{*}(a|s)-\log\pi_{\theta}(a|s)\Big].}\end{array}
+$$  
+
+Eq. (17) implies that minimizing the KL divergence between $\pi^{*}$ and $\pi_{\theta}$ is equivalent to solving the following maximum likelihood estimation (MLE) problem:  
+
+$$
+\operatorname*{max}_{\theta}\,L_{\mathrm{MLE}}(\theta):=\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot),a\sim\pi^{*}(\cdot|s)}\big[\log\pi_{\theta}(a|s)\big].
+$$  
+
+This implies that solving (18) is equivalent to solving (16), and the resulting policy $\pi_{\theta}$ approximates $\pi^{*}$ . However, one critical issue in solving the MLE problem is that we are not able to sample actions from the optimal policy $\pi^{*}$ even though the closed-form expression of $\pi^{*}$ is available in (15).  
+
+In order to resolve this issue, we leverage the technique from importance sampling where we sample actions from the existing policy $\pi_{\mathrm{old}}$ and then weigh each sample $(s,a)$ by its importance weight ππold((aa||ss)). Towards this end, we write:  
+
+$$
+L_{\mathrm{MLE}}(\theta)=\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot),a\sim\pi^{*}(\cdot\,|s)}\left[\log\pi_{\theta}(a|s)\right]=\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot),a\sim\pi_{\mathrm{old}}(\cdot\,|s)}\left[\frac{\pi^{*}(a|s)}{\pi_{\mathrm{old}}(a|s)}\log\pi_{\theta}(a|s)\right].
+$$  
+
+Leveraging the relation between $\pi^{*}$ and $\pi_{\mathrm{old}}$ as shown in (15), $L_{\mathrm{MLE}}(\cdot)$ can be rewritten as:  
+
+$$
+\begin{array}{r l}&{L_{\mathrm{MLE}}(\theta)=\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot),a\sim\pi_{\mathrm{old}}(\cdot|s)}\Big[\frac{\pi^{*}(a|s)}{\pi_{\mathrm{old}}(a|s)}\log\pi_{\theta}(a|s)\Big]}\\ &{\qquad\qquad=\mathbb{E}_{s\sim d_{\pi_{\mathrm{old}}}(\cdot),a\sim\pi_{\mathrm{old}}(\cdot|s)}\Big[\exp\Big(\frac{1}{\beta}\big(Q^{\pi_{\mathrm{old}}}(s,a)-W^{\pi_{\mathrm{old}}}(s)\big)\Big)\log\pi_{\theta}(a|s)\Big].}\end{array}
+$$  
+
+With the state-action pairs $(s,a)$ sampled from the policy $\pi_{\mathrm{old}}$ , we approximate the corresponding optimal policy through optimizing the objective in (20). In the LLM context, (20) can be viewed as a re-weighting process, where we increase or decrease the log likelihood of the previous policy $\pi_{\mathrm{old}}$ according to the approximate advantage function $Q^{\pi_{\mathrm{old}}}-W^{\pi_{\mathrm{old}}}$ , i.e. we increase the likelihood of actions/continuations with higher rewards than the baseline and decrease the ones with lower rewards.  
+
+In order to train a parameterized policy $\pi_{\theta}$ through optimizing the supervised learning objective in (20), it remains to estimate the Q-function $Q^{\pi_{\mathrm{old}}}(s,a)$ and the reference function $W^{\pi_{\mathrm{old}}}(s)$ . To estimate the Q-function $Q^{\pi_{\mathrm{old}}}(s,a)$ under a policy $\pi_{\mathrm{old}}$ , we solve the fixed point of the following Bellman operator $\boldsymbol{\mathrm{\Delta}}\boldsymbol{\mathrm{\Omega}}^{\beta}$ :  
+
+$$
+\mathcal{B}^{\pi_{\mathrm{old}}}Q(s,a)=r(s,a)+\gamma\mathbb{E}_{s^{\prime}\sim P(\cdot|s,a),a^{\prime}\sim\pi_{\mathrm{old}}(\cdot|s^{\prime})}\left[Q(s^{\prime},a^{\prime})\right]\!.
+$$  
+
+Following Fujimoto et al. (2018); Haarnoja et al. (2018), we use the temporal difference learning to minimize Bellman error to approximate $Q^{\pi_{\mathrm{old}}}(s,a)$ by a parameterized Q-function $Q_{\phi}(s,a)$ .  
+
+Next, let us estimate the reference function $W^{\pi_{\mathrm{old}}}(s)$ under the policy $\pi_{\mathrm{old}}$ . Based on the definition of $W^{\pi_{\mathrm{old}}}(s)$ in (15), a naive way is to construct empirical estimations to approximate the reference function. For each state $s$ , one can sample a small batch of $N$ actions from policy $\pi_{\mathrm{old}}(\cdot|s)$ and then construct the empirical estimate ${\widehat{W}}^{\pi_{\mathrm{{old}}}}(s)$ defined as below:  
+
+$$
+\widehat{W}^{\pi_{\mathrm{old}}}(s):=\beta\log\Big(\sum_{i=1}^{N}\exp\big(\frac{1}{\beta}Q^{\pi_{\mathrm{old}}}(s,a_{i})\big)\Big).
+$$  
+
+To obtain an accurate estimate of the reference function $W^{\pi_{\mathrm{old}}}(s)$ , it is necessary to make the batch-size $N$ large enough, which is computationally expensive. The estimation error between ${\widehat{W}}^{\pi_{\mathrm{{old}}}}(s)$ and $W^{\pi_{\mathrm{old}}}(s)$ are not negligible when the batch-size $N$ is small, see Nair et al. (2020). The drawback of the empirical estimator in (22) motivates us to estimate the reference function $W^{\pi_{\mathrm{old}}}(s)$ through parameterized approximations. Towards this end we have the following claim:  
+
+Claim. $W^{\pi_{\mathrm{old}}}(s)$ satisfies  
+
+$$
+W^{\pi_{\mathrm{old}}}(s)=\arg\operatorname*{min}_{w}~\mathbb{E}_{a\sim\pi_{\mathrm{old}}(\cdot\vert s)}\Big[\exp\Big(\frac{Q^{\pi_{\mathrm{old}}}(s,a)-w}{\beta}\Big)-\frac{Q^{\pi_{\mathrm{old}}}(s,a)-w}{\beta}-1\Big].
+$$  
+
+Derivation of the claim. We observe that the reference function $W^{\pi_{\mathrm{old}}}(s)$ shares the same expression to the fitted parameter of Gumbel distribution by maximum likelihood estimation. According to Coles et al. (2001); Forbes et al. (2011); Garg et al. (2022), when we model a random variable $x$ by Gumbel distribution $x=h-\epsilon$ where $\epsilon\sim\mathcal{G}(0,\beta)$ is a Gumbel noise, the log-likelihood has the following expression:  
+
+$$
+\mathbb{E}_{x}\Big[\log p(x;h,\beta)\Big]=\mathbb{E}_{x}\Big[\log\Big(\frac{1}{\beta}\exp\big(\frac{x-h}{\beta}-\exp(\frac{x-h}{\beta})\big)\Big)\Big].
+$$  
+
+To fit the location parameter $h$ through maximum likelihood estimation, we can minimize the following loss function:  
+
+$$
+\operatorname*{min}_{h}\ f(h):=\mathbb{E}_{x}\Big[\exp\big(\frac{x-h}{\beta}\big)-\frac{x-h}{\beta}-1\Big]
+$$  
+
+where the loss function $f(h)$ shares similar form to the Linex loss in the literature of econometrics (Parsian & Kirmani, 2002; Chang & Hung, 2007). Through solving the loss function $f(h)$ defined in (25), we obtain the maximum likelihood estimator of the location parameter as $\hat{h}\,=$ $\begin{array}{r}{\beta\log\mathbb{E}_{x}\left[\exp\left(\frac{x}{\beta}\right)\right]}\end{array}$ . Here, we observe that the estimate $\hat{h}$ shares the same expression to the reference function $W^{\pi_{\mathrm{old}}}(s)$ defined in (15). This shows that for a fixed state $s$ , the value of $W^{\pi_{\mathrm{old}}}(s)$ solves the following optimization problem in (23).  
+
+Now given a parameterized Q-function $Q_{\phi}(s,a)$ which approximates the exact Q-function $\bar{Q}^{\pi_{\mathrm{old}}}(\bar{s},a)$ , we can train a parameterized reference function $W_{\varphi}(s)$ to approximate $W^{\pi_{\mathrm{old}}}(s)$ for all states $s\in S$ through optimizing the following loss function:  
+
+$$
+\operatorname*{min}_{\varphi}\ L(\varphi):=\mathbb{E}_{a\sim\pi_{\mathrm{old}}(\cdot\vert s)}\Big[\exp\Big(\frac{Q_{\phi}(s,a)-W_{\varphi}(s)}{\beta}\Big)-\frac{Q_{\phi}(s,a)-W_{\varphi}(s)}{\beta}-1\Big].
+$$  
+
+This completes our derivation of the algorithm. Now, we are ready to summarize our proposed Successive Policy Re-weighting (SPR) algorithm in Alg. 1. We solve the value function $Q$ (parameterized by $\phi$ ) and reference function $W$ (parameterized by $\varphi$ ) by solving (21) and (26), respectively. Then we can solve for the policy/LLM $\pi_{\theta}$ by minimizing the re-weighting loss (20).  
+
+Algorithm Simplification. Note that if we model the entire input prompt and output continuation as the state and action respectively, the horizon will be automatically reduced to one. In this case, the $Q$ value function reduces to the reward function $r$ and line 4 of Algorithm 1 is discarded immediately, also $W$ in (22) becomes the log-sum-exp of the reward function $r$ . The resulting simplified algorithm is presented in Algorithm 2, which can be implemented for LLM alignment. Notably, both Algorithm 1 and 2 only require a single model to be loaded in the memory for each of it update step.  
+
+Discussion. SPR significantly decreases the memory consumption of PPO by reducing the number of models loaded in the memory from four to one, matching the memory requirement of standard SFT. The proposed method saves more memory comparing to the DPO since DPO requires loading a froze reference model during the training step, while SPR only loads one model throughout its algorithm process; On the other hand, SPR still allows online data and explicit reward feedback through iterative sampling-and-ftiting process, greatly increase its potential in alignment comparing to offilne-data-only method such as SFT or DPO. The memory and time consumption of SPR comparing with related methods are summarized in Figure 1.  
+
+
+
+\section{4 EXPERIMENTAL RESULTS  }
+
+
+In this section, we demonstrate the effectiveness of our proposed method numerically.  
+
+Algorithm 1 Successive Policy Re-weighting 1: Input: Collect an demonstration dataset $\boldsymbol{\mathcal{D}}=\{(\boldsymbol{s},a,\boldsymbol{s}^{\prime})\}$ and a given reward function $r(\cdot,\cdot)$ . 2: Initialize the parameterized policy (LLM), Q-function and reference function as $\pi_{\theta}$ , $Q_{\phi}$ and $W_{\varphi}$ 3: for $k=0,1,\ldots,K-1$ do   
+4: $\begin{array}{r l}&{\phi_{k+1}=\operatorname*{arg\,min}_{\phi}\,\mathbb{E}_{(s,a,s^{\prime})\sim\mathcal{D},a^{\prime}\sim\pi\theta_{k}}(\cdot|s^{\prime})\left[\left(Q_{\phi}(s,a)-r(s,a)-\gamma Q_{\bar{\phi}_{k}}(s^{\prime},a^{\prime})\right)^{2}\right]}\\ &{\varphi_{k+1}=\operatorname*{arg\,min}_{\varphi}\,\mathbb{E}_{s\sim\mathcal{D},a\sim\pi\theta_{k}}(\cdot|s)\left[\exp\left(\frac{Q_{\phi_{k+1}}(s,a)-W_{\varphi}(s)}{\beta}\right)-\frac{Q_{\phi_{k+1}}(s,a)-W_{\varphi}(s)}{\beta}-1\right]}\\ &{\theta_{k+1}=\operatorname*{arg\,min}_{\theta}\,\mathbb{E}_{s\sim\mathcal{D},a\sim\pi\theta_{k}}(\cdot|s)\left[\exp\left(\frac{1}{\beta}\big(Q_{\phi_{k+1}}(s,a)-W_{\varphi_{k+1}}(s)\big)\right)\log\pi_{\theta}(a|s)\right]}\\ &{\bar{\phi}_{k+1}=\alpha\phi_{k+1}+(1-\alpha)\bar{\phi}_{k}}\end{array}$ 5: 6: 7: 8: if $k>$ sampling threshold then   
+9: sample trajectories $\tau_{1},\cdot\cdot\cdot,\tau_{N}$ from the current policy $\pi_{\theta_{k+1}}$   
+10: add trajectories to the data buffer: $\mathcal{D}\leftarrow\mathcal{D}\cup\left\{\tau_{1},\cdot\cdot\cdot,\tau_{N}\right\}$   
+11: end if  
+
+1: Input: Collect an demonstration dataset $\boldsymbol{D}=\{(s,a)\}$ and a given reward function $r(\cdot,\cdot)$ .   
+2: Initialize the parameterized policy (LLM), Q-function and reference function as $\pi_{\theta}$ , $Q_{\phi}$ and $W_{\varphi}$   
+3: for $k=0,1,\ldots,K-1$ do   
+4: $\begin{array}{r l}&{\varphi_{k+1}=\arg\operatorname*{min}_{\varphi}\,\mathbb{E}_{s\sim\mathcal{D},a\sim\pi_{\theta_{k}}(\cdot|s)}\bigg[\exp\Big(\frac{r(s,a)-W_{\varphi}(s)}{\beta}\Big)-\frac{r(s,a)-W_{\varphi}(s)}{\beta}-1\Big]}\\ &{\theta_{k+1}=\arg\operatorname*{min}_{\theta}\,\mathbb{E}_{s\sim\mathcal{D},a\sim\pi_{\theta_{k}}(\cdot|s)}\bigg[\exp\Big(\frac{1}{\beta}\big(r(s,a)-W_{\varphi_{k+1}}(s)\big)\Big)\log\pi_{\theta}(a|s)\bigg]}\\ &{\ldots\,}\end{array}$   
+5:   
+6: if $k>$ sampling threshold then   
+7: sample prompt-continuation pairs $(s_{1},a_{1}),\cdot\cdot\cdot\:,(s_{N},a_{N})$ from the current policy $\pi_{\theta_{k+1}}$   
+8: add prompt-continuation pairs to the data buffer: $\mathcal{D}\leftarrow\mathcal{D}\cup\left\{\left(s_{1},a_{1}\right),\cdot\cdot\cdot\mathbf{\Phi},\left(s_{N},a_{N}\right)\right\}$   
+9: end if  
+
+
+
+\section{10: end for  }
+
+
+4.1 EXPERIMENT SETUP  
+
+Model and Datasets. We conduct our experiment in two settings: First, we test with EleutherAI/pythia-1b-deduped model over TL;DR text-summarization dataset and evaluate using a reward model and the win rate over the reference summary; Second, we train with LLaMA3-SFT model over a mixture of various prompt datasets, including UltraFeedback Cui et al. (2023), HelpSteer Wang et al. (2023) and so on (see Dong et al. (2024) for the details of the training data). We test the performance of the 8b model trained by SPR over various downstream tasks.   
+Evaluation. For the first experiment setting, we use a model trained from Pythia-6.9b with TL;DR dataset3 as the reward evaluator. Note that the experiment is conducted on 1b model and we believe that this $_{6.9\6}$ model is capable of serving as the ground truth for this text summarizing task. We also record the win rate of the model generated summary against the ground truth summary, evaluated by GPT-3.5-turbo-0125.   
+For the second experiment setting, we evaluated the aligned model trained from LLaMA3-SFT over the Open LLM Leaderboard (Beeching et al., 2023). Open LLM Leaderboard involves various downstream tasks to test the performance of LLM through different dimensions, where we (following Chen et al. (2024); Li et al. (2024)) evaluate an LLM based on six tasks: commonsense reasoning (Arc Clark et al. (2018), HellaSwag Zellers et al. (2019), Winogrande Sakaguchi et al. (2021)), multi-task language understanding (MMLU Hendrycks et al. (2020)), human falsehood mimic (TruthfulQA Lin et al. (2021)) and math problem solving (GSM8K, Cobbe et al. (2021)).  
+
+Implementation detail. Instead of training a reference function as in step 4 of Algorithm 2, we use the empirical estimate ${\widehat{W}}^{\pi_{\mathrm{old}}}(s)$ in (22) by generating $N$ responses based on the current policy, due to its efficiency in practice. In our experiment, considering the time efficiency and performance limitations due to the scaling law Kaplan et al. (2020), we split the whole training TL;DR dataset of evenly into 10 pieces, so 11.7K prompts are used to generate $N$ independent responses for training in each iteration, and iterate the training dataset for 3 epochs on each data pieces. For the 8b model, we used 20K prompts per iteration and trained for 2 epochs on each data pieces. When we exhaust all the data, we restart from the first split of the dataset4.  
+
+
+
+\section{4.2 RESULTS ON 1B MODELS  }
+
+
+We present the performance of EleutherAI/pythia-1b-deduped model on four different algorithms, including SPR (Algorithm 2), Best-of-N (Dong et al. (2023)), $\mathrm{DPO^{5}}$ and $\mathrm{PPO^{6}}$ . We use the SFT pythia-1b model7 as the initial model. Here Best-of-N refers to selecting the sample with highest score, as evaluated by the $_{6.9\6}$ reward model, to train the policy model, which serves as a strong baseline.  
+
+In Fig. 2, it can be seen that both SPR and Best-of-N algorithm outperform DPO in terms of reward score. However, while the Best-of-N algorithm struggles to consistently surpass DPO in win rate, SPR still demonstrates strong performance in win rate against reference summaries. Furthermore, as $N$ increases, both Best-of-N and SPR achieve better performance, attributed to a more accurate estimation of the reference function and improved sample quality. Although the reward score of all four algorithms continue to increase, the win rate essentially converges to a stationary level.  
+
+![](images/b04704d1dcaf6667fb7607376d9ac124c89a79783dc833df86b1042438b8686c.jpg)  
+(a) Reward score  
+
+![](images/ec78e9f04f275b10556373ec3260fbdf7f100387bc416fe12f37b978ec287cbf.jpg)  
+(b) Win rate against reference summaries  
+
+Figure 2: Left: The reward scores evaluated by Pythia- $.6.9\mathfrak{b}$ reward model trained on the TL;DR dataset on win rate of SPR algorithm on Pythia-1b model through the entire train split of the TL;DR dataset; Right: The win rate of our models’ summaries over the human-generated reference summaries on the first 1000 test split of the TL;DR dataset, judged by GPT 3.5, “Full-Test” means evaluated on the whole test dataset. The x-axis represents the iteration number, each iteration uses $1/10$ training data. To ensure fairness in testing, responses are generated using greedy search.  
+
+
+
+\section{4.3 RESULTS ON 8B MODELS  }
+
+
+In Figure 4 and Table 1, we compare the performance of our fine-tuned model by SPR with the base model LLaMA3-SFT on each task included in the leaderboard. SPR demonstrates superior performance compared to the Best-of-N approach and DPO after several iterations. Specifically, the average accuracy of SPR outperforms DPO by $0.2\bar{2}\%$ when $N=16$ and by $0.77\%$ when $N=32$ , respectively.  
+
+Notably, our algorithm shows strong potential on the improving the LLM’s ability of solving  
+
+![](images/aafc52b3ea6aab86281aa9ebbd05df1d55a261d8f295561c4c95de0c39baa7ca.jpg)  
+Figure 3: The average score of SPR with $N=32$ and DPO baseline at different iterations on the Open LLM leaderboard datasets.  
+
+mathematical problem, with an almost $6\%$ improvement on the GSM8K task. In Figure 3, we show the average score of SPR algorithm with $N=32$ compared to the DPO baseline over a total of 7 iterations. The results demonstrate a progressive increase in the average score, ranging from $68.66\%$ to $70.65\%$ , indicating the effectiveness of our algorithm.  
+
+![](images/69048c3194675de59e1b48395fe7126ed58245836ca3f0111f9e44400727a3ce.jpg)  
+
+![](images/b5849cc420bac519932d72353b3bbd2325608cd2588d9bfa56bede09a2417184.jpg)  
+Table 1: Performance of Policy in Open LLm Leaderboard for four different algorithms. SPR and Best-of-N algorithm with $N=16$ are run over five iterations.   
+Figure 4: Performance comparison between DPO training and SPR with $N\,=\,32$ across the six benchmark datasets.  
+
+
+
+\section{5 CONCLUSIONS AND LIMITATIONS  }
+
+
+In this paper we proposed a memory-efficient policy optimization approach named successive policy re-weighting (SPR), matching the peak memory consumption of standard supervised fine-tune (SFT). SPR is flexible for offline and online policy training and achieves state-of-the-art performance on our experiment for aligning 1b and 8b models. The computational time of the proposed method is in general higher than SFT or DPO, and the performance is largely dependent on the number of samples $N$ to estimate the reference function in (22). Future works include tuning SPR pipeline to make it work for very large LLMs $(>\!50\ensuremath{\mathrm{b}})$ and exploring alignment methods that are both time- and memory-efficient.  
+
+REPRODUCIBILITY STATEMENT  
+
+The base models and datasets in this paper are publicly available. However, our current   
+implementation codes are experimental and not ready for releasing. We will release all our codes   
+upon acceptance of this paper.   
+
+

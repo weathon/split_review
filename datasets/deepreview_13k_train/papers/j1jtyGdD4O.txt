@@ -1,0 +1,509 @@
+\title{CoDiCast: Conditional Diffusion Model for Weather Prediction with Uncertainty Quantification}
+
+\begin{abstract}
+Accurate weather forecasting is critical for science and society. Yet, existing methods have not managed to simultaneously have the properties of high accuracy, low uncertainty, and high computational efficiency.
+On one hand, to quantify the uncertainty in weather predictions, the strategy of ensemble forecast (i.e., generating a set of diverse predictions) is often employed. 
+However, traditional ensemble numerical weather prediction (NWP) is computationally intensive.
+On the other hand, most existing machine learning-based weather prediction (MLWP) approaches are efficient and accurate. Nevertheless, they are deterministic and cannot capture the uncertainty of weather forecasting. 
+In this work, we propose \CoDiCast, a conditional diffusion model to generate accurate global weather prediction, while achieving uncertainty quantification with ensemble forecasts and modest computational cost. 
+The key idea is to simulate a \emph{conditional} version of the reverse denoising process in \emph{diffusion models}, which starts from pure Gaussian noise to generate realistic weather scenarios for a future time point. 
+Each denoising step is conditioned on observations from the recent past. 
+Ensemble forecasts are achieved by repeatedly sampling from stochastic Gaussian noise to represent uncertainty quantification.
+\texttt{CoDiCast} is trained on a decade of ERA5 reanalysis data from the European Centre for Medium-Range Weather Forecasts (ECMWF).
+Experimental results demonstrate that our approach outperforms several existing data-driven methods in accuracy. 
+Our conditional diffusion model, \CoDiCast, can generate 3-day global weather forecasts, at 6-hour steps and $5.625^\circ$ latitude-longitude resolution, for over 5 variables, in about 12 minutes on a commodity A100 GPU machine with 80GB memory. %\url{https://anonymous.4open.science/r/CoDiCast/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\ccsdesc[500]{Computing methodologies~Learning latent representations}
+\ccsdesc[500]{Information systems~Data mining}
+\keywords{Diffusion Models, Weather Prediction, Uncertainty Quantification}
+
+
+\maketitle
+
+\label{sec:intro}
+Weather prediction describes how the weather states evolve by mapping the current estimate of the weather states to a forecast of future weather states \cite{palmer2012towards}.
+Accurate weather forecasting is crucial for a wide range of societal activities, from daily planning to disaster preparedness \cite{merz2020impact, shi2024fidlar}. 
+For example, governments, organizations, and individuals rely heavily on weather forecasts to make informed decisions that can significantly impact safety, economic efficiency, and overall well-being. 
+However, weather predictions are intrinsically uncertain largely due to the complex and chaotic nature of atmospheric processes \cite{slingo2011uncertainty, palmer2005representing}. 
+Therefore, assessing the range of probable weather scenarios is significant, since it enables better decision-making under uncertainty.
+
+Traditional numerical weather prediction (NWP) methods achieve weather forecasting by approximately solving the differential equations representing the integrated system between the atmosphere, land, and ocean \cite{price2023gencast, nguyen2023climax}.
+However, running such an NWP model can produce only one possibility of the forecast, which ignores the weather uncertainty.
+To solve this problem, \emph{Ensemble forecast}\footnote{Generating a set of forecasts, each of which represents a single possible scenario.} of multiple models is often employed to model the probability distribution of different future weather scenarios \cite{palmer2019ecmwf, leinonen2023latent}.
+While such NWP-based ensemble forecasts effectively model the weather uncertainty, they have two primary limitations: they require extreme computational costs \cite{rodwell2007using}, and make restrictive assumptions of atmospheric dynamics in the known representation equations \cite{palmer2005representing}.
+
+In recent years, machine learning (ML)-based weather predictions (MLWP) have been proposed to challenge NWP-based forecasting methods \cite{ben2024rise, bulte2024uncertainty, nguyen2024climatelearn}. 
+They have achieved enormous success in weather forecasting with comparable accuracy and a much (usually thousands of magnitude) lower computational cost. Representative work includes Pangu \cite{bi2023accurate}, GraphCast \cite{lam2023learning}, ClimaX \cite{nguyen2023climax}, ForeCastNet \cite{pathak2022fourcastnet}, Fuxi \cite{chen2023fuxi}, Fengwu \cite{chen2023fengwu}, W-MAE \cite{man2023w}, ClimODE \cite{verma2024climode} etc. 
+They are typically trained to learn weather patterns from a huge amount of historical data and predict the mean of the probable trajectories by minimizing the mean squared error (MSE) of model forecasts \cite{hewage2021deep}. 
+Despite the notable achievements of these MLWP methods, most of them are deterministic \cite{kochkov2024neural}, falling short in capturing the multiple spectra of possible weather states - no modeling uncertainty in weather predictions \cite{jaseena2022deterministic, bulte2024uncertainty}.
+This limitation motivates us to explore a probabilistic approach capable of accurately predicting weather scenarios with uncertainty quantification.
+Denoising probabilistic diffusion models (DDPMs) \cite{ho2020denoising} stand out as a probabilistic type of generative models, which are capable of generating high-quality image samples.
+By explicitly and iteratively modeling the noise additive and its removal, DDPMs can capture intricate details and textures in the generated images.
+Furthermore, controllable (conditional) diffusion models \cite{rombach2022high,zhang2023adding} enable the generation process to be guided by specific attributes or conditions, e.g., class labels, textual descriptions, or other auxiliary information. By doing so, the model can generate images that adhere to the specified conditions.
+This inspires us to apply diffusion models to weather prediction tasks by generating realistic weather scenarios. 
+Promising potentials could be the following: (1) Weather data is usually 2-D grid data over latitude and longitude, sharing a similar modality with image data. (2) Weather states from the recent past can be injected into diffusion models as conditions to guide the generation process. (3) More notably, weather systems are inherently chaotic and involve significant uncertainty. Probabilistic diffusion models can generate multiple future weather scenarios rather than a single deterministic one. This capability makes them well-suited for modeling the stochastic nature of weather patterns.
+
+In this paper, our contributions are presented as follows:
+\begin{itemize}
+    \item We identify the shortcomings of current weather prediction methods. NWP-based methods are computationally intensive, while both NWP- and MLWP-based methods are not well-suited for uncertainty quantification.
+    \item We propose \CoDiCast, a conditional diffusion model for global weather prediction conditioning on observations from the recent past. It also enables quantifying the uncertainty in the prediction via \emph{ensemble forecast}.
+    \item We conduct extensive experiments to demonstrate \CoDiCastS simultaneously achieves higher accuracy, lower uncertainty than existing MLWP-based models, and higher computational efficiency than physics-based benchmarks.
+\end{itemize}
+
+
+\section{Preliminaries}
+
+\label{sec:prel}
+We first define the problem of global weather forecasting with the grid spatio-temporal data. Then, we provide a brief introduction to Denoising Diffusion Probabilistic Models (DDPMs) \cite{ho2020denoising}.
+\subsection{Problem Formulation}
+\label{sec:problem}
+\textbf{Deterministic Global Weather Predictions.} 
+Given the input of past observation(s) of weather state $X^t \in \mathbb{R}^{H \times W \times C}$, predicts a point-valued output of future state $X^{t+\Delta t} \in \mathbb{R}^{H \times W \times C}$.
+$H \times W$ refers to the spatial resolution of data which depends on how densely we grid the globe over latitude and longitude, $C$ refers to the number of channels (i.e, weather variables), and the superscripts $t$ and $\Delta t$ denote the time point and time interval. Long-range multiple-step forecasts could be achieved by autoregressive modeling. \\
+
+\noindent \textbf{Probabilistic Global Weather Predictions.} Unlike the deterministic models that output point-valued predictions, probabilistic methods model the probability of future weather states given the past observation(s) by a distribution $P(X^{t+\Delta t} \mid X^t)$.
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/weather_prediction.jpg}
+    \caption{Global weather predictions. Here $C=1$ since only a single variable (geopotential) is represented.}
+    \label{fig:prediction}
+\end{figure}
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/framework.jpg}
+    \caption{Framework of the proposed conditional diffusion model - \CoDiCast. $T$ and $N$ denote the time point and iteration of adding/denoising noise, respectively. $H$ and $W$ represent the height and width of grid data. $C$ is the number of variables of interest. Here $C=1$ since only a single variable is represented.}
+    \label{fig:framework}
+\end{figure*}
+\subsection{Denoising Diffusion Probabilistic Models}
+\label{sec:ddpm}
+A representative diffusion model is the denoising diffusion probabilistic model (DDPM) \cite{ho2020denoising} which generates target samples by learning a distribution $p_\theta(x_0)$ that approximates the target distribution $q(x_0)$.
+DDPM comprises a \emph{forward diffusion process} and a \emph{reverse denoising process}. 
+The \emph{forward process} involves no learnable parameters and transforms an input $x_0$ with a data distribution of $q(x_0)$
+to a white Gaussian noise vector $x_N$ in $N$ diffusion steps. It can be described as a Markov chain that gradually adds Gaussian noise to the input according to a variance schedule $\{\beta_1, \dots, \beta_N\} \in (0,1)$:
+\begin{equation}
+    q(x_{1:N} \mid x_0) = \prod_{n=1}^{N} q(x_n \mid x_{n-1}), 
+\end{equation}
+where at each step $n \in [1, N]$, the diffused sample $x_n$ is obtained $q(x_n \mid x_{n-1}) = \mathcal{N}\left(x_n; \sqrt{1 - \beta_n} x_{n-1}, \beta_n \textbf{I}\right)$. Instead of sampling $x_n$ step by step following the chain, the forward process enables sampling $x_n$ at an arbitrary step $x_n$ in the closed form:
+\begin{equation}
+    q(x_n \mid x_0) = \mathcal{N}\left(x_n; \sqrt{\bar{\alpha}_n}x_0, (1-\bar{\alpha}_n) \textbf{I}\right), 
+    \label{eq:forward}
+\end{equation}
+where $\alpha_n = 1 - \beta_n$ and $\bar{\alpha}_n = \prod_{s=1}^{n} \alpha_s$. Thus, $x_n$ can be directly obtained as $x_n = \sqrt{\bar{\alpha}_n} x_0 + \sqrt{1-\bar{\alpha}_n} \epsilon$ with $\epsilon$ is sampled from $\mathcal{N}(0, \textbf{I})$.
+In the \emph{reverse process}, the \emph{denoiser} network is used to recover $x_0$ by gradually denoising $x_n$ starting from a Gaussian noise $x_N$ sampled from $\mathcal{N}(0, \textbf{I})$. This process is formally defined as:
+\begin{equation}
+    p_\theta(x_{0:N}) = p(x_N)\prod_{n=1}^{N} p_\theta(x_{n-1} \mid x_{n}),
+    \label{eq:reverse}
+\end{equation}
+where the data distributions, parameterized by $\theta$, are represented as $p_\theta(x_n), p_\theta(x_{n-1}), \ldots, p_\theta(x_0).$
+
+For each diffusion iteration $n \in \{1, 2, \dots, N\}$, diffusion models can be trained to minimize the following KL-divergence:
+\begin{equation}
+    \mathcal{L}_n = D_{KL}\left(q(x_{n-1} \mid x_n) \mid\mid p_\theta(x_{n-1} \mid x_n) \right).
+    \label{eq:kl_loss}
+\end{equation}
+where $q(x_{n-1} | x_n)$ is often replaced by:
+\begin{equation}
+    q(x_{n-1} \mid x_n, x_0) = \mathcal{N}\left(x_{n-1}; \tilde{\mu}_n(x_n, x_0, n), \tilde{\beta}_n\right),
+    \label{eq:q}
+\end{equation}
+\noindent and $p_\theta(x_{n-1} \mid x_{n})$ is represented by: 
+\begin{equation}
+    p_\theta(x_{n-1} \mid x_{n}) = \mathcal{N}\left(x_{n-1}; \mu_\theta(x_n, n), \Sigma_\theta(x_n, n) \right).
+    \label{eq:p}
+\end{equation}
+In practice, $\Sigma_{\theta}(x_n, n)$ is fixed at $\tilde{\sigma}_n^2 \textbf{I}$ where $\tilde{\sigma}_n^2 = \tilde{\beta}_n =\beta_n \frac{1-\bar{\alpha}_{k-1}}{1-\bar{\alpha}_{k}}$, and $\mu_{\theta}(x_n, n)$ is modeled by denoiser, a neural network parameterized by $\theta$. Therefore, comparing Eq. (\ref{eq:p}) and Eq. (\ref{eq:q}), the loss function in Eq. (\ref{eq:kl_loss}) is transformed to:
+\begin{equation}
+    \mathcal{L}_n = \frac{1}{2\tilde{\sigma}_n^2 }\left\| \tilde{\mu}_n(x_n, x_0, n) - \mu_\theta(x_n, n) \right\|^2,
+    \label{eq:u_loss}
+\end{equation}
+where 
+\begin{align}
+    \tilde{\mu}(x_n, x_0, n) &= \frac{1}{\sqrt{\alpha_n}} \left( x_n - \frac{1 - \alpha_n}{\sqrt{1 - \bar{\alpha}_n}} \epsilon_n \right), \\
+    \mu_\theta(x_n, n) &= \frac{1}{\sqrt{\alpha_n}} \left( x_n - \frac{1 - \alpha_n}{\sqrt{1 - \bar{\alpha}_n}} \epsilon_\theta(x_n, n) \right).
+\end{align}
+Now, the loss function can be simplified to the one shown in Eq. (\ref{eq:simple_loss}). 
+Each diffusion step $n$ simply minimizes the difference between the noise added in the forward process and the one from the model output. 
+DDPM claims that such a simplified loss function is easy to train and is beneficial to generate samples with better quality.
+\begin{equation}
+    \mathcal{L}_{simple}(\theta) = \mathbb{E}_{x_0, \epsilon, n} \left\| \epsilon - \epsilon_\theta \left(x_n, n \right) \right\|^2.
+    \label{eq:simple_loss}
+\end{equation}
+where $\epsilon_\theta(\cdot)$ is a denoiser network to predict the added noise.
+Once trained, target variables are first sampled from Gaussian as the input of $\epsilon_\theta(\cdot)$ to progressively learn the distribution $p_\theta(x_{n-1} | x_n)$ and denoise $x_n$ until $x_0$ is obtained, as shown in Eq. (\ref{eq:reverse}). 
+
+
+\section{Methodology}
+
+\label{sec:method}
+This section introduces our probabilistic weather model, \texttt{CoDiCast}, implemented as a conditional diffusion model.
+The key idea is to consider ``prediction'' tasks as ``generation'' tasks while conditioning on the context guidance of past observation(s). 
+An overview of the proposed \texttt{CoDiCast} is shown in Figure \ref{fig:framework}.
+
+\subsection{Forward Diffusion Process}
+The forward diffusion process is straightforward. Assuming the current time point is $t$, for the sample at time point $t+1$, $X^{t+1}_0 \in \mathbb{R}^{H \times W \times V}$, which is of interest to predict, we first compute the diffused sample by gradually adding noise by (see the dotted lines in Figure \ref{fig:framework}):
+\begin{equation}
+    X^{t+1}_n = \sqrt{\bar{\alpha}_n} \cdot X^{t+1}_0 + \sqrt{1-\bar{\alpha}_n} \epsilon,
+\end{equation}
+where $\epsilon$ is sampled from $\mathcal{N}(0, \mathbf{I})$ with the same size as $X^{t+1}_{0}$.
+\subsection{Reverse Conditional Denoising Process}
+It models the probability distribution of the future weather state conditioning on the current and previous weather states. More specifically, we capture conditions as embedding representations of the past observations $X^{t-1}$ and $X^t$, which are provided to control and guide the synthesis process. 
+Compared to modeling the past observations in the original space, we found that our embedding representations in the latent space work better.
+\begin{equation}
+    p_\theta(X_{0:N}^{t+1} \mid \tilde{Z}^{t-1:t}) = p(X_N^{t+1})\prod_{n=1}^{N} p_\theta(X_{n-1}^{t+1} \mid X_{n}^{t+1}, \tilde{Z}^{t-1:t}),
+    \label{eq:condition_reverse}
+\end{equation}
+where $X_N^{t+1} \sim \mathcal{N}(\textbf{0}, \textbf{I})$, $\tilde{Z}^{t-1:t}$ is the embedding representations of the past observations $X^{t-1}$ and $X^t$, as shown in Eq. (\ref{eq:encoder}).
+After prediction at the first time point is obtained, a forecast trajectory, $X^{1:T}$, of length $T$, is autoregressively modeled by conditioning on the predicted ``previous'' states.
+\begin{equation}
+    p_\theta(X_{0:N}^{1:T}) = \prod_{t=1}^{T} p(X_N^{t}) \prod_{n=1}^{N} p_\theta(X_{n-1}^{t} \mid X_{n}^{t}, \tilde{Z}^{t-2:t-1}).
+    \label{eq:multi_prediction}
+\end{equation}
+\subsection{Pre-trained Encoder}
+The autoencoder network \cite{baldi2012autoencoders} is used to obtain the embedding representation of the weather state at each time point.
+An \emph{Encoder} compresses the input into a latent-space representation, while \emph{Decoder} reconstructs the input data from the latent representation. 
+After the encoder, $\mathcal{F}$, is trained, it can serve as a pre-trained representation learning model to project the original data into latent vectors in Eq. (\ref{eq:encoder}).
+\begin{equation}
+    \tilde{Z}^{t-1:t}= \mathcal{F}(X^{t-1}, X^t)
+    \label{eq:encoder}
+\end{equation}
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/autoencoder.jpg}
+    \caption{Structure of autoencoder network ($C=1$).}
+    \label{fig:autoencoder}
+\end{figure}
+\subsection{Denoiser Network}
+Our denoiser network consists of two blocks: cross-attention and U-net (as shown in Figure \ref{fig:denoiser}). 
+\emph{Cross-attention mechanism} \cite{hertz2022prompt} is employed to capture how past observations can contribute to the current state generation.
+The embedding of past observations, $\tilde{Z}^{t-1:t}$, and the noise data $X_n^{t+1}$ at diffusion step $n$, are projected to the same hidden dimension $d$. 
+\begin{equation}
+    Q=W_q \cdot X_n^{t+1}, K=W_k \cdot \tilde{Z}^{t-1:t}, V=W_v \cdot \tilde{Z}^{t-1:t}.
+\end{equation}
+where $X_n^{t+1} \in \mathbb{R}^{(H \times W) \times C}$ and $\tilde{Z}^{t-1:t} \in \mathbb{R}^{(H \times W) \times d_z}$. And, $W_q \in \mathbb{R}^{d \times C}, W_k \in \mathbb{R}^{d \times d_z}, W_v \in \mathbb{R}^{d \times d_z}$ are learnable projection matrices \cite{vaswani2017attention}. Then we implement the cross-attention mechanism by: 
+\begin{equation}
+    Attention(Q, K, V) = softmax(\frac{QK^T}{\sqrt{d}}) \cdot V.
+\end{equation}
+U-Net \cite{ronneberger2015u} is utilized to recover the data by removing the noise added at each diffusion step.
+The \emph{skip connection} technique in U-Net concatenates feature maps from the encoder to the corresponding decoder layers, allowing the network to retain fine-grained information that might be lost during downsampling.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.43\textwidth]{figures/denoiser.jpg}
+    \caption{Structure of denoiser network.}
+    \label{fig:denoiser}
+\end{figure}
+
+\subsection{Training}
+After additional conditions are included in our conditional diffusion model, the reverse process becomes:
+\begin{align}
+    \mu_\theta(X_n, n) = \frac{1}{\sqrt{\alpha_n}} \left( X_n - \frac{1 - \alpha_n}{\sqrt{1 - \bar{\alpha}_n}} \epsilon_\theta(X_n, n, \texttt{Cond}) \right).
+    \label{eq:condition_u}
+\end{align}
+To train the model, the loss function can be devised as:
+\begin{equation}
+    \mathcal{L}_{cond}(\theta) = \mathbb{E}_{X_0, \epsilon, n} \left\| \epsilon - \epsilon_\theta \left(X_n, n, \texttt{cond} \right) \right\|^2,
+    \label{eq:condition_loss}
+\end{equation}
+where $X_n = \sqrt{\bar{\alpha}_n} X_0 + \sqrt{1-\bar{\alpha}_n} \epsilon$.
+The training procedure is shown in Algorithm \ref{alg:training}.
+\begin{algorithm}[t]
+\caption{Training}
+\label{alg:training}
+\begin{algorithmic}[1] %[1] line numbers
+\STATE \textbf{Input}: Number of diffusion steps $N$, pre-trained encoder $\mathcal{F}$ \\
+\STATE \textbf{Output}: Trained denoising function $\epsilon(\cdot)$  \\
+\REPEAT
+    \STATE $X^{t+1}_0 \sim q(X^{t+1}_0)$
+    \STATE $n \sim \texttt{Uniform}({1, 2, \dots , N})$
+    \STATE $\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+    \STATE Get conditional information of past observations $X^{t-1}, X^t$
+    \STATE Get embedding representation $\tilde{Z}^{t-1:t}=\mathcal{F}(X^{t-1}, X^t)$
+    \STATE Take gradient descent step on:
+        $$\nabla_\theta \left\| \epsilon - \epsilon_\theta \left( \sqrt{\bar{\alpha}_n} X^{t+1}_0 + \sqrt{1 - \bar{\alpha}_n} \epsilon, n, \tilde{Z}^{t-1:t} \right) \right\|^2$$
+\UNTIL{converged}
+\end{algorithmic}
+\end{algorithm}
+\subsection{Inference}
+Algorithm \ref{alg:inference} describes the full procedure of the inference process, we first extract the conditional embedding representations, $\tilde{Z}^{t-1:t}$, by the pre-trained encoder, and then randomly generate a noise vector $X_N \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ of size $H \times W \times C$. The sampled noise vector, $X_N$, is autoregressively denoised along the reversed chain to predict the target until $n$ equals 1 ($\zeta$ is set to zero when $n = 1$), we obtain weather prediction $\hat{X}_0$ at the time $t+1$. As shown in Eq. (\ref{eq:multi_prediction}), multi-step prediction can be implemented iteratively - the output from the last time step is the model input to predict the next step.
+\begin{algorithm}[t]
+\caption{Inference}
+\label{alg:inference}
+\begin{algorithmic}[1] %[1] line numbers
+
+\STATE \textbf{Input}: Number of diffusion steps $N$, pre-trained encoder $\mathcal{F}$, trained denoising network $\epsilon(\cdot)$, conditional information of past observations $X^{t-1}, X^t$ \\
+\STATE \textbf{Output}: Inference target $X_0^{t+1}$  \\
+\STATE Get embedding representation $\tilde{Z}^{t-1:t}=\mathcal{F}(X^{t-1}, X^t)$
+\STATE $X_N \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+\FOR{$n = N, \dots, 1$}
+    \STATE $\mathbf{\zeta} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}) \text{ if } n \geq 1, \text{ else } \mathbf{\zeta} = 0$
+    \STATE $X_{n-1}^{t+1} = \frac{1}{\sqrt{\alpha_n}} \left( X_n^{t+1} - \frac{1 - \alpha_n}{\sqrt{1 - \bar{\alpha}_n}} \epsilon_\theta (X_n^{t+1}, n, \tilde{Z}^{t-1:t} \right) + \sigma_n \mathbf{\zeta}$
+\ENDFOR
+\RETURN $X_0^{t+1}$
+
+\end{algorithmic}
+\end{algorithm}
+\subsection{Ensemble Forecast}
+\label{sec:ensemble_forecast}
+Accurately representing uncertainty is crucial in weather prediction due to its inherently unpredictable nature. 
+To enhance the reliability and accuracy of forecasts, we adopt an \emph{ensemble forecast} strategy, which generates multiple possible weather scenarios.
+This approach captures the variability among forecasts, reflecting a range of potential outcomes and providing a probabilistic view of future weather states. 
+Our conditional diffusion model, \CoDiCast, goes beyond deterministic models by generating a distribution of plausible future weather scenarios rather than a single prediction. 
+By integrating both initial conditions and noise sampled from a Gaussian distribution, \CoDiCast~implements the \emph{ensemble forecast} strategy through multiple stochastic samplings during inference, capturing the full range of possible weather states and offering a more comprehensive forecast that represents inherent uncertainty.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+\subsection{Dataset}
+ERA5 \cite{hersbach2020era5} is a publicly available atmospheric reanalysis dataset provided by the European Centre for Medium-Range Weather Forecasts (ECMWF). 
+Following the existing work \cite{verma2024climode}, we use the preprocessed $5.625^\circ$ resolution ($32\times64$) and 6-hour increment ERA5 dataset from WeatherBench \cite{rasp2020weatherbench}. We downloaded 5 variables for the globe: geopotential at 500 hPa pressure level (\texttt{Z500}), atmospheric temperature at 850 hPa pressure level (\texttt{T850}), ground temperature (\texttt{T2m}), 10 meter U wind component (\texttt{U10}) and 10 meter V wind component (\texttt{V10}). 
+Table \ref{tab:our_data} summarizes these variables. \emph{Single} represents surface-level variables, and \emph{Atmospheric} represents time-varying atmospheric properties at chosen altitudes.
+
+\begin{table}[t]
+\centering
+\caption{Variable Information.}
+\label{tab:our_data}
+\small
+    \begin{tabular}{llcccc}
+        \toprule
+        Type & Variable & Abbrev. & ECMWF ID & Levels \\
+        \midrule
+        Single & 2 metre temperature & T2m & 167 & \\
+        Single & 10 metre U wind & U10 & 165 & \\
+        Single & 10 metre V wind &V10 & 166 & \\
+        Atmospheric & Geopotential & Z & 129 & 500 \\
+        Atmospheric & Temperature & T & 130 & 850 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\subsection{Experiments}
+\noindent \paragraph{Experimental setup.} We use data between 2006 and 2015 as the training set, data in 2016 as the validation set, and data between 2017 and 2018 as the testing set. 
+We assess the global weather forecasting capabilities of our method \CoDiCastS at time $t$, by predicting the weather at a future time $t+\Delta t$ based on the state at time $t$, for future time points $\Delta t$ = 6 to 36 hours. 
+To quantify the uncertainty in weather prediction, we generate an ensemble forecast of the possible weather states. 
+The reserve process of diffusion models starts from pure noise. Therefore, the ensemble forecast was implemented by randomly sampling the starting noise three times and running the trained \CoDiCastS respectively during inference.
+
+\noindent \paragraph{Training.} For the diffusion model, we used U-Net as the denoiser network with 1000 diffusion/denoising steps. The architecture is similar to that of DDPM \cite{ho2020denoising} work.
+We employ four U-Net units for both the downsampling and upsampling processes. Each U-Net unit comprises two ResNet blocks \cite{he2016deep} and a convolutional up/downsampling block. 
+Before training, we apply Max-Min normalization \cite{patro2015normalization} to scale the input data within the range $[0, 1]$, mitigating potential biases stemming from varying scales \cite{shi2023explainable}. 
+\texttt{Adam} was used as the optimizer, where the learning rate $=2e^{-4}$, decay steps $=10000$, decay rate $=0.95$. 
+The batch size and number of epochs were set to 64 and 800 respectively. 
+
+\noindent \paragraph{Evaluation Metrics.} We assess the model performance using latitude-weighted Root Mean Square Error (RMSE) and Anomaly Correlation Coefficient (ACC).
+RMSE measures the average difference between values predicted by a model and the actual values.
+ACC is the correlation between prediction anomalies $\tilde{X}'$ relative to climatology and ground truth anomalies $\hat{X}$ relative to climatology.
+ACC is a critical metric in climate science to evaluate the model's performance in capturing unusual weather or climate events.
+These metrics are described in the following equations:
+\begin{equation}
+\text{RMSE} = \frac{1}{M} \sum_{m=1}^{M} \sqrt{\frac{1}{H \times W} \sum_{h=1}^{H} \sum_{w=1}^{W} L(h) (\tilde{X}_{m,h,w} - X_{m,h,w})^2},
+\end{equation}
+where $L(h)=\frac{1}{H}cos(h)\sum_{h'}^{H} cos(h')$ is the latitude weight and $M$ represents the number of test samples.
+\begin{equation}
+\text{ACC} = \frac{\sum_{m,h,w} L(h) \tilde{X}'_{m,h,w} {X'}_{m,h,w}}{\sqrt{\sum_{m,h,w} L(h) \tilde{X}_{m,h,w}^{'2} \cdot \sum_{m,h,w} L(h) {X}_{m,h,w}^{'2}}},
+\end{equation}
+where observed and forecasted anomalies $X' = X - C, \tilde{X}' = \tilde{X} - C$, and climatology $C=\frac{1}{M} \sum_m X$ is the temporal mean of the ground truth data over the entire test set.
+\subsection{Baselines}
+We compare our method against the following baselines:
+\begin{itemize}
+    \item \textbf{ClimODE} \cite{verma2024climode}: a spatiotemporal continuous-time model that incorporates the physic knowledge of atmospheric \emph{advection} over time. 
+    \item \textbf{ClimaX} \cite{nguyen2023climax}: a state-of-the-art vision Transformer-based method trained on the same dataset. 
+    \item \textbf{FourCastNet} \cite{pathak2022fourcastnet}: a large-scale machine learning model based on adaptive Fourier neural operators.
+    \item \textbf{Neural ODE}: a large-scale model based on adaptive Fourier neural operators.
+    \item \textbf{Integrated Forecasting System IFS} \cite{rasp2020weatherbench}: one of the most advanced global physics-based numerical weather prediction (NWP) models. IFS is often viewed as the gold standard.
+\end{itemize}
+
+
+\begin{table*}[ht!]
+\centering
+\caption{Latitude weighted RMSE ($\downarrow$) and ACC ($\uparrow$) comparison with baselines on global forecasting on the entire test data. We mark the scores in bold if our method, \CoDiCast, performs the best among ML-based benchmarks.}
+\label{tab:global}
+    \begin{tabular}{lc|llllll|cccccc}
+    \toprule
+        \multirow{2}{*}{Variable} & \multirow{2}{*}{Lead} & \multicolumn{6}{c|}{RMSE ($\downarrow$)} & \multicolumn{6}{c}{ACC ($\uparrow$)} \\
+        \cmidrule(lr){3-8} \cmidrule(lr){9-14}
+        & & NODE & ClimaX & FCN & IFS & ClimODE & CoDiCast               & NODE & ClimaX & FCN & IFS & ClimODE & CoDiCast \\
+    \midrule
+        \multirow{5}{*}{Z500} 
+         & 6  & 300.6 & 247.5 & 149.4 & 26.9   &102.9\textcolor{gray}{$\pm9.3$}  &\textbf{73.1}\textcolor{gray}{$\pm6.7$}    & 0.96 & 0.97 & 0.99 & 1.00  & 0.99 &\textbf{0.99} \\
+         & 12 & 460.2 & 265.3 & 217.8 & N/A    &134.8\textcolor{gray}{$\pm12.3$}  &\textbf{114.2}\textcolor{gray}{$\pm8.9$}   & 0.88 & 0.96 & 0.99 & N/A   & 0.99 &\textbf{0.99} \\
+         & 18 & 627.6 & 319.8 & 275.0 & N/A    &162.7\textcolor{gray}{$\pm14.4$}  &\textbf{152.4}\textcolor{gray}{$\pm10.4$}   & 0.79 & 0.95 & 0.99 & N/A   & 0.98 &\textbf{0.99} \\
+         & 24 & 877.8 & 364.9 & 333.0 & 51.0   &193.4\textcolor{gray}{$\pm16.3$}  &\textbf{186.5}\textcolor{gray}{$\pm11.8$}   & 0.70 & 0.93 & 0.99 & 1.00  & 0.98 &0.98 \\
+         & 36 & 1028.2 & 455.0 & 449.0 & N/A   &259.6\textcolor{gray}{$\pm22.3$}  &\textbf{256.7}\textcolor{gray}{$\pm14.6$}   & 0.55 & 0.89 & 0.99 & N/A   & 0.96 &0.97 \\
+    \midrule
+        \multirow{5}{*}{T850} 
+         & 6  & 1.82 & 1.64 & 1.18 & 0.69   &1.16\textcolor{gray}{$\pm0.06$}  &\textbf{1.02}\textcolor{gray}{$\pm0.05$}       & 0.94 & 0.94 & 0.99 & 0.99  & 0.97 &\textbf{0.99} \\
+         & 12 & 2.32 & 1.77 & 1.47 & N/A    &1.32\textcolor{gray}{$\pm0.13$}  &\textbf{1.26}\textcolor{gray}{$\pm0.10$}       & 0.85 & 0.93 & 0.99 & N/A   & 0.96 &0.98 \\
+         & 18 & 2.93 & 1.93 & 1.65 & N/A    &1.47\textcolor{gray}{$\pm0.16$}  &\textbf{1.41}\textcolor{gray}{$\pm0.12$}       & 0.77 & 0.92 & 0.99 & N/A   & 0.96 &0.97 \\
+         & 24 & 3.35 & 2.17 & 1.83 & 0.87   &1.55\textcolor{gray}{$\pm0.18$}  &\textbf{1.52}\textcolor{gray}{$\pm0.16$}       & 0.72 & 0.90 & 0.99 & 0.99  & 0.95 &0.97 \\
+         & 36 & 4.13 & 2.49 & 2.21 & N/A    &1.75\textcolor{gray}{$\pm0.26$}  &\textbf{1.75}\textcolor{gray}{$\pm0.19$}       & 0.58 & 0.86 & 0.99 & N/A   & 0.94 &0.96 \\
+    \midrule
+        \multirow{5}{*}{T2m} 
+         & 6  & 2.72 & 2.02 & 1.28 & 0.97   &1.21\textcolor{gray}{$\pm0.09$}  &\textbf{0.95}\textcolor{gray}{$\pm0.07$}      & 0.82 & 0.92 & 0.99 & 0.99  & 0.97 &\textbf{0.99} \\
+         & 12 & 3.16 & 2.26 & 1.48 & N/A    &1.45\textcolor{gray}{$\pm0.10$}  &\textbf{1.21}\textcolor{gray}{$\pm0.07$}      & 0.68 & 0.90 & 0.99 & N/A   & 0.96 &\textbf{0.99} \\
+         & 18 & 3.45 & 2.45 & 1.61 & N/A    &1.43\textcolor{gray}{$\pm0.09$}  &\textbf{1.34}\textcolor{gray}{$\pm0.08$}      & 0.69 & 0.88 & 0.99 & N/A   & 0.96 &0.98 \\
+         & 24 & 3.86 & 2.37 & 1.68 & 1.02   &1.40\textcolor{gray}{$\pm0.09$}  
+         &1.45\textcolor{gray}{$\pm0.07$}               & 0.79 & 0.89 & 0.99 & 0.99  & 0.96 &0.98 \\
+         & 36 & 4.17 & 2.87 & 1.90 & N/A    &1.70\textcolor{gray}{$\pm0.15$}  &\textbf{1.65}\textcolor{gray}{$\pm0.11$}      & 0.49 & 0.83 & 0.99 & N/A   & 0.94 &0.97 \\
+    \midrule
+        \multirow{5}{*}{U10} 
+         & 6  & 2.30 & 1.58 & 1.47 & 0.80   &1.41\textcolor{gray}{$\pm0.07$}  &\textbf{1.24}\textcolor{gray}{$\pm0.06$}      & 0.85 & 0.92 & 0.95 & 0.98  & 0.91 &\textbf{0.95} \\
+         & 12 & 3.13 & 1.96 & 1.89 & N/A    &1.81\textcolor{gray}{$\pm0.09$}  &\textbf{1.50}\textcolor{gray}{$\pm0.08$}      & 0.70 & 0.88 & 0.93 & N/A   & 0.89 &\textbf{0.93} \\
+         & 18 & 3.41 & 2.24 & 2.05 & N/A    &1.97\textcolor{gray}{$\pm0.11$}  &\textbf{1.68}\textcolor{gray}{$\pm0.08$}      & 0.58 & 0.84 & 0.91 & N/A   & 0.88 &\textbf{0.91} \\
+         & 24 & 4.10 & 2.49 & 2.33 & 1.11   &2.01\textcolor{gray}{$\pm0.10$}  &\textbf{1.87}\textcolor{gray}{$\pm0.09$}      & 0.50 & 0.80 & 0.89 & 0.97  & 0.87 &\textbf{0.89} \\
+         & 36 & 4.68 & 2.98 & 2.87 & N/A    &2.25\textcolor{gray}{$\pm0.18$}  &\textbf{2.25}\textcolor{gray}{$\pm0.12$}      & 0.35 & 0.69 & 0.85 & N/A   & 0.83 &\textbf{0.87} \\
+    \midrule
+        \multirow{5}{*}{V10} 
+         & 6  & 2.58 & 1.60 & 1.54 & 0.94   &1.53\textcolor{gray}{$\pm0.08$}  &\textbf{1.30}\textcolor{gray}{$\pm0.06$}      & 0.81 & 0.92 & 0.94 & 1.00  & 0.92 &\textbf{0.95} \\
+         & 12 & 3.19 & 1.97 & 1.81 & N/A    &1.81\textcolor{gray}{$\pm0.12$}  &\textbf{1.56}\textcolor{gray}{$\pm0.09$}      & 0.61 & 0.88 & 0.91 & N/A   & 0.89 &\textbf{0.93} \\
+         & 18 & 3.58 & 2.26 & 2.11 & N/A    &1.96\textcolor{gray}{$\pm0.16$}  &\textbf{1.75}\textcolor{gray}{$\pm0.11$}      & 0.46 & 0.83 & 0.86 & N/A   & 0.88 &\textbf{0.91} \\
+         & 24 & 4.07 & 2.48 & 2.39 & 1.33   &2.04\textcolor{gray}{$\pm0.10$}  &\textbf{1.94}\textcolor{gray}{$\pm0.14$}      & 0.35 & 0.80 & 0.83 & 1.00  & 0.86 &\textbf{0.89} \\
+         & 36 & 4.52 & 2.98 & 2.95 & N/A    &2.29\textcolor{gray}{$\pm0.24$}  
+         &2.35\textcolor{gray}{$\pm0.18$}      & 0.29 & 0.69 & 0.75 & N/A   & 0.83 &\textbf{0.85} \\
+    \bottomrule
+    \end{tabular}
+\end{table*}
+\subsection{Quantitative Evaluation}
+\label{sec:performance}
+We compare the performance of different models in global forecasting, encompassing the prediction of five crucial meteorological variables as described in Table \ref{tab:our_data}. 
+From Table \ref{tab:global}, we can find that \CoDiCastS presents superior performance across latitude-weighted RMSE metrics over other MLWP baselines. In addition, \CoDiCastS shows comparable performance across ACC scores against the strongest MLWP baseline. However, \CoDiCastS still falls short in comparison with the gold-standard IFS model. Additionally, the error range associated with our \CoDiCastS in Table \ref{tab:global} is smaller than \texttt{ClimODE}, indicating that our method can produce more robust predictions.
+
+\subsection{Qualitative Evaluation}
+In Figure \ref{fig:true_vs_pred_all_t6}, we qualitatively evaluate the performance of \CoDiCastS on global forecasting tasks for all target variables, \texttt{Z500}, \texttt{T850}, \texttt{T2m}, \texttt{U10} and \texttt{V10} at the lead time of $6$ hours.
+The first row is the ground truth of the target variable at a particular lead time, the second row is the prediction of \CoDiCastS and the last row is the absolute prediction errors, which is the difference between the prediction and the ground truth.
+From the scale of their color bars, we can tell that the error percentage is less than 3\% for variables \texttt{Z500}, \texttt{T850}, and \texttt{T2m}. Nevertheless, error percentages over $50\%$ exist for \texttt{U10} and \texttt{V10} even though only a few of them.
+Furthermore, we observe that most higher errors appear in the high-latitude ocean areas. The possible reason might be the sparse data nearby in the ERA5 reanalysis data.
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/true_vs_pred_all_t6.jpg}
+    \caption{Visualizations of true and predicted values at 6 hours lead time.}
+    \label{fig:true_vs_pred_all_t6}
+\end{figure*}
+\subsection{Ablation Study}
+In our \CoDiCastS model, we include a \emph{pre-trained encoder} to learn the embedding from past observations and a \emph{cross attention} mechanism to learn the interaction between embeddings and the noisy sample at each denoising step. 
+To study their effectiveness, we conduct an ablation study of several model variants: (a) \textbf{No-encoder} directly considers past observations as conditions to diffusion model; (b) \textbf{No-cross-attention} simply concatenate the embedding and the noisy sample at each denoising step; (c) \textbf{No-encoder-cross-attention} concatenate the past observations and the noisy sample at each denoising step. The results of these variants are shown in Figure \ref{fig:ablation}. 
+We can observe that the full version of \CoDiCastS consistently outperforms all other variants, demonstrating both \emph{pre-trained encoder} and \emph{cross attention} mechanisms are helpful in the denoising process to generate plausible weather scenarios.
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.93\textwidth]{figures/ablation.jpg}
+    \caption{Ablation study of pre-trained encoder and cross-attention.}
+    \label{fig:ablation}
+\end{figure*}
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/variance_schedule.jpg}
+    \caption{Effect of variance scheduling methods.}
+    \label{fig:variance_schedule}
+\end{figure*}
+\subsection{Parameter Study}
+We investigate the effect of two important parameters: diffusion step, $N$, and variance scheduling, $\beta$. We experiment with diffusion steps of $250, 500, 750, 1000, 1500, 2000$ separately. 
+The results in Table \ref{tab:rmse_vs_diffusion_step} show that when $N < 1000$, the accuracy improves as the number of diffusion steps increases, indicating that more intermediate steps are more effective to learn the imperceptible attributes during the denoising process.
+When $1000 < N < 2000$, the accuracy remains approximately flat but the inference time keeps increasing linearly.
+Considering the trade-off between accuracy and efficiency, we finally set $N=1000$ for all experiments.
+In addition, we use the same start and end variance value as DDPM \cite{ho2020denoising} for the variance scheduling where $\beta \in [0.0001, 0.02]$. 
+We study the effect of ``linear'' and ``quadratic'' variance scheduling in this section. 
+The results are provided in Figure \ref{fig:variance_schedule}. It shows that ``linear'' variance scheduling provides better performance than ``quadratic'' one for variables \texttt{Z500}, \texttt{T2m}, \texttt{U10}, and \texttt{V10}, while the performance of both ``linear'' and ``quadratic'' modes is roughly same for variable \texttt{T850}.
+Therefore, ``linear'' variance scheduling is utilized in our \CoDiCastS model.
+\begin{table}[ht]
+\small
+\centering
+\caption{Latitude weighted RMSE with various diffusion steps. We mark the lowest scores in bold. The last row represents the inference time of \CoDiCastS for 3-day global forecasts.}
+\label{tab:rmse_vs_diffusion_step}
+    \begin{tabular}{lc|ccccccc}
+    \toprule
+        \multirow{2}{*}{Variable} & \multirow{2}{*}{Lead} & \multicolumn{6}{c}{Diffusion Step} \\
+        \cmidrule(lr){3-8}
+        & & 250 & 500 & 750 & 1000 & 1500 & 2000\\
+    \midrule
+        \multirow{5}{*}{Z500} 
+         & 6  & 341.1 & 187.9 & 121.2   &\textbf{73.1}  &73.7   &75.3 \\
+         & 12 & 359.6 & 178.7 & 116.9   &\textbf{114.2} &117.2  &118.6 \\
+         & 18 & 664.6 & 331.6 & 189.2   &\textbf{152.4} &155.7  &156.2 \\
+         & 24 & 696.1 & 324.8 & 190.6   &\textbf{186.5} &193.5  &191.9 \\
+         & 36 & 973.8 & 472.6 & \textbf{255.9}  &256.8  &267.3  &262.7 \\
+    \midrule
+        \multirow{5}{*}{T850} 
+         & 6  & 2.41 & 1.65 & 1.31   &\textbf{1.02}     &1.04   &1.05 \\
+         & 12 & 2.33 & 1.65 & 1.27   &\textbf{1.26}     &1.28   &1.31 \\
+         & 18 & 3.94 & 2.25 & 1.47   &\textbf{1.41}     &1.43   &1.45 \\
+         & 24 & 3.88 & 2.38 & 1.53   &\textbf{1.52}     &1.56   &1.58 \\
+         & 36 & 5.32 & 3.14 & 1.82   &\textbf{1.75}     &1.79   &1.81 \\
+    \midrule
+        \multirow{5}{*}{T2m} 
+         & 6  & 3.06 & 1.75 & 1.29   &\textbf{0.95}     &0.98   &0.99 \\
+         & 12 & 3.25 & 1.73 & 1.26   &\textbf{1.21}     &1.26   &1.27 \\
+         & 18 & 5.41 & 2.62 & 1.58   &\textbf{1.34}     &1.39   &1.42 \\
+         & 24 & 5.26 & 2.79 & 1.63   &\textbf{1.44}     &1.50   &1.53 \\
+         & 36 & 7.07 & 3.74 & 1.97   &\textbf{1.65}     &1.70   &1.78 \\
+    \midrule
+        \multirow{5}{*}{U10} 
+         & 6  & 1.90 & 1.62 & 1.49  &\textbf{1.24}      &1.31   &1.35 \\
+         & 12 & 1.92 & 1.59 & \textbf{1.42}  &1.50      &1.60   &1.64 \\
+         & 18 & 2.65 & 2.04 & 1.77  &\textbf{1.68}      &1.79   &1.83 \\
+         & 24 & 2.74 & 2.05 & \textbf{1.81}  &1.87      &1.99   &2.01 \\
+         & 36 & 3.65 & 2.64 & 2.19  &\textbf{2.25}      &2.36   &2.40 \\
+    \midrule
+        \multirow{5}{*}{V10} 
+         & 6  & 1.87 & 1.63 & 1.54  &\textbf{1.30}      &1.37   &1.41 \\
+         & 12 & 1.79 & 1.64 & 1.56  &\textbf{1.56}      &1.67   &1.69 \\
+         & 18 & 2.47 & 2.01 & 1.84  &\textbf{1.75}      &1.85   &1.88 \\
+         & 24 & 2.43 & 2.11 & \textbf{1.89}  &1.94      &2.04   &2.06 \\
+         & 36 & 3.21 & 2.55 & \textbf{2.18}  &2.35      &2.46   &2.47 \\
+    \midrule
+        \multicolumn{2}{l|}{Inference time (min)} 
+              &$\sim3$ &$\sim6$  &$\sim10$  &$\sim12$  &$\sim20$   &$\sim27$  \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Inference Efficiency}
+The inference speed is critical for weather prediction. Generally, numerical weather prediction models (e.g., IFS HRES \cite{rasp2020weatherbench}) require 50 minutes for the medium-range global forecast with good accuracy and the uncertainty captured, while deterministic machine learning weather prediction models take less than 1 minute \cite{rasp2020weatherbench, lam2023learning} but cannot model the weather uncertainty. 
+\CoDiCastS proposed in our work needs around 12 minutes to generate the 3-day global weather forecast with high quality and uncertainty estimated, potentially balancing the inference efficiency and generation quality with necessary uncertainty quantification. 
+
+
+
+\section{Related Work}
+
+\label{sec:relate}
+
+\textbf{Numerical Weather Prediction.} 
+Numerical Weather Prediction (NWP) methods are parameterized via various general circulation models (GCMs) \cite{lynch2008origins}. GCMs obtain weather forecasts by modeling the system of the atmosphere, land, and ocean with complex differential equations \cite{bauer2015quiet}. 
+A representative is the High-Resolution Forecasts System (HRES) \cite{HRES2023ECMWF}, which is a single forecast (horizontal resolution around 9 km) that describes one possible evolution of the weather out to 10 days ahead. 
+Such a deterministic NWP method only provides a single forecast, the ensemble forecast suite (ENS) \cite{buizza2008comparison} was developed as an ensemble of 51 forecasts by the European Centre for Medium-Range Weather Forecasts (ECMWF). ENS provides a range of possible future weather states in the medium range, allowing for investigation of the detail and uncertainty in the forecast.
+Even if ENS and other NWP-based ensemble forecasts effectively model the weather evolution, they exhibit sensitivity to structural discrepancies across models \cite{balaji2022general}, regional variability \cite{verma2024climode}, and high computational demands \cite{lam2023learning}. \\
+\noindent \textbf{Machine Learning Weather Prediction.} 
+Numerous machine learning (ML)-based weather prediction (MLWP) approaches have emerged as a compelling alternative to NWP methods on weather forecasting. 
+They are trained on enormous historical data and produce the mean of the probable trajectories by minimizing the mean squared error (MSE) of model forecasts \cite{hewage2021deep}.
+Pangu \cite{bi2023accurate} employed three-dimensional transformer networks and Earth-specific priors to deal with complex patterns in weather data.
+GraphCast \cite{lam2023learning} achieved medium-range weather prediction by utilizing an ``encode-process-decode'' configuration with each part implemented by graph neural networks (GNNs). 
+GNNs perform effectively in capturing the complex relationship between a set of surface and atmospheric variables. Similar GNN-based work is \cite{keisler2022forecasting}. Similar work with the ``encode-decode'' strategy is Fuxi \cite{chen2023fuxi} and Fengwu \cite{chen2023fengwu}, but the transformer model was used as their backbone.
+FourCastNet \cite{pathak2022fourcastnet} applied Vision Transformer (ViT) \cite{dosovitskiy2020image} and Adaptive Fourier Neural Operators (AFNO) \cite{guibas2021adaptive}, while ClimaX \cite{nguyen2023climax} also uses Vision Transformer as backbone but the trained model can be fine-tuned to various downstream tasks.
+Additionally, ClimODE \cite{verma2024climode} incorporated the physical knowledge and developed a continuous-time neural advection PDE weather model.
+However, these models fall short in modeling the uncertainty of weather evolution \cite{jaseena2022deterministic, bulte2024uncertainty}. \\
+\noindent \textbf{Diffusion Models.} 
+Diffusion models \cite{ho2020denoising,rombach2022high} have shown their strong capability in computer vision tasks, including image generation \cite{li2022srdiff}, image editing \cite{nichol2021glide}, semantic segmentation \cite{brempong2022denoising} and point cloud completion \cite{luo2021diffusion}.
+Conditional diffusion models \cite{rombach2022high, ho2022classifier} are then proposed to make the generation step controllable by conditions.
+However, few works have adopted diffusion models in weather forecasting.
+Existing works focus on short-term precipitation nowcasting \cite{asperti2023precipitation, gao2024prediff, yu2024diffcast}, but are limited to regional weather forecasts. 
+GenCast \cite{price2023gencast} is a recently proposed close-sourced conditional diffusion-based ensemble forecasting for medium-range weather prediction.
+Yet, it models the condition in the original space, which is demonstrated to be not sufficient in our paper (see the last case in the ablation study).
+In addition, since it is a closed-sourced model, it is hard for researchers to build on top of it for further research or fair comparison.
+In contrast, our \CoDiCastS will be open-sourced to facilitate the research in diffusion models for weather forecasting.
+
+
+\section{Conclusions}
+
+\label{sec:conc}
+We start by introducing the limitations of current deterministic numerical weather prediction (NWP) and machine-learning weather prediction (MLWP) methods - costly computational overhead and no uncertainty quantification. 
+To address the limitation, we propose a conditional diffusion model, \CoDiCast, which contains a condition \emph{pre-trained encoder} and a \emph{cross-attention} component.
+Quantitative and qualitative experimental results demonstrate that it simultaneously achieves better results than existing MLWP-based models and a faster inference process than NWP-based models while being capable of providing uncertainty quantification compared to the deterministic methods.
+In conclusion, our \CoDiCastS accomplishes a critical trade-off between high accuracy, high efficiency, and lower uncertainty for global weather prediction.
+
+
+
+
+

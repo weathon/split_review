@@ -1,0 +1,236 @@
+\title{Not All Prompts Are Made Equal: Prompt-based Pruning of Text-to-Image Diffusion Models}
+
+\begin{abstract}
+    Text-to-image (T2I) diffusion models have demonstrated impressive image generation capabilities.~Still, their computational intensity prohibits resource-constrained organizations from deploying T2I models after fine-tuning them on their internal \textit{target} data.~While pruning techniques offer a potential solution to reduce the computational burden of T2I models, static pruning methods use the same pruned model for all input prompts, overlooking the varying capacity requirements of different prompts. Dynamic pruning addresses this issue by utilizing a separate sub-network for each prompt, but it prevents batch parallelism on GPUs. To overcome these limitations, we introduce Adaptive Prompt-Tailored Pruning (APTP), a novel prompt-based pruning method designed for T2I diffusion models. Central to our approach is a \emph{prompt router} model, which learns to determine the required capacity for an input text prompt and routes it to an architecture code, given a total desired compute budget for prompts. Each architecture code represents a specialized model tailored to the prompts assigned to it, and the number of codes is a hyperparameter. We train the prompt router and architecture codes using contrastive learning, ensuring that similar prompts are mapped to nearby codes. Further, we employ optimal transport to prevent the codes from collapsing into a single one. We demonstrate APTP's effectiveness by pruning Stable Diffusion (SD) V2.1 using CC3M and COCO as \emph{target} datasets.~APTP outperforms the single-model pruning baselines in terms of FID, CLIP, and CMMD scores.~Our analysis of the clusters learned by APTP reveals they are semantically meaningful. We also show that APTP can automatically discover previously empirically found challenging prompts for SD, \emph{e.g.,} prompts for generating text images, assigning them to higher capacity codes.
+    
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, diffusion models~\cite{sohl2015nonequilibrium,ho2020ddpm,song2019-estimating-grads-of-data,song2021SBGMthroughSDEs} have revolutionized generative modeling. For instance, modern Text-to-Image (T2I) diffusion models~\cite{firefly,midjourney,betker2023Dalle3} like Stable Diffusion~\cite{rombach2022LDM,podell2024sdxl}  have achieved remarkable success in generating realistic images~\cite{nichol2021glide,saharia2022imagen,ramesh2022dalle2} and editing them~\cite{kim2022diffusionclip,hertz2022prompt2prompt,zhang2023controlnet}.~Consequently, their integration into various applications is of great interest.~However, the sampling process of T2I diffusion models is slow and computationally intensive, making them expensive to deploy on GPU clouds for a large number of users and preventing their utilization on edge devices.~Thus, reducing the computational cost of T2I models is essential prior to serving them. 
+
+Two orthogonal factors underlie the sampling cost of T2I diffusion models: their large number of denoising steps and their parameter-heavy backbone architectures. Most acceleration methods for T2I models reduce the computation per sampling step or skip steps using techniques like distillation~\cite{meng2023GDDistillation,salimans2022ProgressiveDistillation,habibian2023clockwork} and improved noise schedules~\cite{song2021DDIM,nichol2021improvedDDPM}. Other ideas address the second factor and propose efficient architectures for T2I models.~Architecture modification methods~\cite{zhao2023MobileDiffusion,kim2023BKSDM} modify the U-Net~\cite{ronneberger2015UNet} of Stable Diffusion (SD)~\cite{rombach2022LDM} to reduce its parameters and FLOPs while preserving performance.~Still, they only provide a few architectural configurations, and generalizing their design choices to new compute budgets or datasets is highly non-trivial.~Search-based methods~\cite{li2024SnapFusion,liu2023OMS-DPM} search for an efficient architecture~\cite{li2024SnapFusion} or an efficient mixture~\cite{liu2023OMS-DPM} of pretrained T2I models in a model zoo.~Yet, evaluating each action in the search process and gathering a model zoo of T2I models are both extremely costly, making search methods impractical in resource-constrained scenarios.
+
+\input{figs/overview}
+
+The efficient architecture design methods~\cite{zhao2023MobileDiffusion,kim2023BKSDM,li2024SnapFusion} have shown promise, but they aim to develop `one-size-fits-all' architectures for \emph{all} applications.~We argue that this approach is misaligned with the common practice for two reasons: 1)~Organizations typically fine-tune pretrained T2I models~(\emph{e.g.,} SD) on their proprietary \emph{target} data and deploy the resulting model for their specific application. They prioritize performance on their \emph{target} data distribution while meeting their computation budget, and the trade-off between efficiency and performance can vary depending on the complexity of the \emph{target} dataset between organizations.~2)~Verifying the validity of each design choice on large-scale datasets used in one-size-fits-all methods is costly and slow to iterate, making them impractical.
+
+Model pruning~\cite{cheng2023SurveyDNNPruning} can reduce a model's computational burden to any desired budget with significantly less effort than designing~\cite{zhao2023MobileDiffusion,kim2023BKSDM} or searching~\cite{li2024SnapFusion} for efficient architectures.~Still, T2I models have unique characteristics making existing pruning techniques unsuitable for them.~Static pruning methods are input-agnostic and use the same pruned model for all inputs, but distinct prompts of T2I models may require different model capacities. Dynamic pruning employs a separate model for each input sample, but it cannot benefit from batch-parallelism in modern hardware like GPUs and TPUs.
+
+In this paper, we introduce Adaptive Prompt-Tailored Pruning (APTP), a novel prompt-based pruning method for T2I diffusion models.~APTP prunes a T2I model pretrained on a large-scale dataset (\emph{e.g.,} SD) using a smaller \emph{target} dataset given a desired compute budget.It tackles the challenges of static and dynamic pruning methods for T2I models by training a \emph{prompt router} module along with a set of \emph{architecture codes}.~The prompt router learns to route an input prompt to an architecture code, determining the sub-architecture, called \emph{expert}, of the T2I model to use. Each expert specializes in generating images for the prompts assigned to it by the prompt router~(Fig.~\ref{fig:overview}), and the number of experts is a hyperparameter. We train the prompt router and architecture codes using a contrastive learning objective that regularizes the prompt router to select similar architecture codes for similar prompts.~In addition, we employ optimal transport to diversify the architecture codes and the resulting experts' budgets, allowing deploying them on hardware with varying capabilities. We take CC3M~\cite{sharma2018CC3M} and MS-COCO~\cite{lin2014MSCOCO} as the \emph{target} datasets and prune Stable Diffusion V2.1~\cite{rombach2022LDM} using APTP in our experiments. APTP outperforms the single-model pruning baseline, and we show that our prompt router learns to group the input prompts into semantic clusters. Further, our analysis demonstrates that APTP can automatically discover challenging prompts for SD, such as prompts for generating text images, found empirically by prior work~\cite{chen2024Diffute,yang2024GlyphControl}.~We summarize our contributions 
+as follows:
+
+\begin{itemize}
+    \item We introduce APTP, a novel prompt-based pruning method for T2I diffusion models. It is more suitable than static pruning for T2I models as it is not input-agnostic. In addition, APTP enables batch parallelism on GPUs, which is not possible with dynamic pruning.
+    
+    \item APTP trains a prompt router and a set of architecture codes. The prompt router maps an input prompt to an architecture code. Each architecture code resembles a pruned sub-architecture expert of the T2I model, specialized in handling certain types of prompts assigned to it.
+    
+    \item We develop a framework to train the prompt router and architecture codes using contrastive learning and employ optimal transport to diversify the architecture codes and their corresponding sub-architectures' computational requirements, given a desired compute budget.
+
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+Several works have addressed improving the architectural efficiency of diffusion models, which is our paper's primary focus. 
+\textbf{Multi-expert}~\cite{lee2024MEME,zhang2023TailoredMultiDecoder,liu2023OMS-DPM,pan2024TStich} methods employ several models each responsible for an interval of diffusion model's denoising process.~These methods design expert model architectures~\cite{lee2024MEME,zhang2023TailoredMultiDecoder}, train several models with varying capacities from scratch~\cite{liu2023OMS-DPM}, or utilize existing pretrained models~\cite{liu2023OMS-DPM,pan2024TStich}.~However, pretrained experts may not be available, and training several models from scratch, as done by multi-expert methods, is prohibitively expensive.
+~\textbf{Architecture Design}~\cite{zhao2023MobileDiffusion,yang2023DPMsMadeSlim,kim2023BKSDM} approaches redesign the U-Net architecture~\cite{ronneberger2015UNet} of diffusion models to enhance its efficiency. MobileDiffusion~\cite{zhao2023MobileDiffusion} does so using empirical heuristics derived from performance metrics on MS-COCO~\cite{lin2014MSCOCO}.~BK-SDM~\cite{kim2023BKSDM} removes some blocks from the SD's U-Net and applies distillation~\cite{hinton2015distillation} to train the pruned model.~Spectral Diffusion~\cite{yang2023DPMsMadeSlim} introduces a wavelet gating operation and performs frequency domain distillation.~Yet, generalizing heuristics and design choices of the architecture design methods to other tasks and compute budgets is non-trivial.
+~Alternatively, SnapFusion~\cite{li2024SnapFusion} searches for an efficient architecture for T2I models.~Yet, evaluating each action in the search process requires 2.5 A100 GPU hours, making it costly in practice.~Finally, SPDM~\cite{fang2023StructuralPruningforDMs} estimates the importance of different weights using Taylor expansion and removes the low-scored ones.~Despite their promising results, all these methods are `static' in that they obtain an efficient model and utilize it for \textit{all} inputs. This is sub-optimal for T2I models as input prompts may vary in complexity, demanding different model capacity levels. 
+Our method differs from existing approaches by introducing a prompt-based pruning technique for T2I models. It is the first method that allocates computational resources to prompts based on their individual complexities while ensuring optimal utilization and batch-parallelizability.
+
+
+\section{Method}
+
+
+We introduce a framework for prompt-based pruning of T2I diffusion models termed Adaptive Prompt-Tailored Pruning (ATPT). APTP prunes a T2I model pretrained on large-scale datasets (\emph{e.g.}, Stable Diffusion~\cite{rombach2022LDM}) using a smaller \emph{target} dataset. This approach mirrors the common practice where organizations fine-tune pretrained T2I models on their internal proprietary data and deploy the resulting model for their customers.~The core component of APTP is a \emph{prompt router} that learns to map an input prompt to an \emph{architecture code} during the pruning process. Each architecture code corresponds to a specialized \emph{expert} model, which is a sub-network of the T2I model.~We train the prompt router and architecture codes in an end-to-end manner.~After the pruning phase, APTP fine-tunes each specialized model using samples from the target dataset assigned to it by the prompt router. We elaborate on the components of APTP in the following subsections.
+
+\subsection{Background}
+Given an input text prompt, text-to-image~(T2I) diffusion models generate a corresponding image by iteratively denoising a Gaussian noise~\cite{ho2020ddpm,song2019-estimating-grads-of-data,sohl2015nonequilibrium}. They achieve this by training a denoising model, $\epsilon(\cdot; \theta)$, parameterized by $\theta$. For a given training image-text pair $(x_0, p)\sim\mathcal{P}$, T2I models define a forward diffusion process, progressively adding Gaussian noise to the initial image $x_0$ over $T$ steps. This process is defined as $q(x_t|x_0) = \mathcal{N}(x_t; \sqrt{\Bar{\alpha_t}} x_0, (1 - \Bar{\alpha_t})I)$, where $\Bar{\alpha_t}$ is the forward noise schedule parameter, typically chosen such that $q(x_t|x_0) \rightarrow \mathcal{N}(0, I)$ as $t \rightarrow T$. T2I models are trained using the variational evidence lower bound (ELBO) objective~\cite{ho2020ddpm}.
+
+\begin{equation}\label{denoising-obj}
+    \mathcal{L}_{\text{DDPM}}(\theta) = \mathbb{E}_{\substack{(x_0, p)\sim\mathcal{P} \\ t\sim[1, T]\\\epsilon\sim\mathcal{N}(0, I)\\ x_t\sim q(x_t|x_0)}}||\epsilon(x_t, p, t;\theta) - \epsilon||^2     
+\end{equation}
+
+T2I models sample an image starting from a Gaussian noise $x_T$ $\sim$ $\mathcal{N}(0, I)$ and denoising it using the trained denoising model.
+
+\input{figs/method}
+
+\subsection{Prompt Router and Architecture Codes}\label{sec:prompt_router_arch_codes}
+We employ our prompt router to determine the specialized sub-network of the T2I model to be used for a given input prompt.~Specifically, we denote our prompt router with the function $f_{\text{PR}}(\cdot;\eta,\mathcal{A})$, parameterized by $\eta$, which maps an input prompt $p$ to an architecture code $a$:
+
+\begin{equation}\label{eq:prompt_router}
+    a = f_{\text{PR}}(p;\eta, \mathcal{A})
+\end{equation}
+
+We define the set of learnable architecture codes as $\mathcal{A} = \{a^{(i)}\}_{i=1}^{N}$, where $N$ is a hyperparameter.~Also, $a^{(i)}\in\mathbb{R}^{D}$, with $D$ being the number of prunable width and depth units in the T2I model. Given a desired constraint $T_d$ on the total compute budget (latency, MACs, etc.) for the prompts in the target dataset, we train the prompt router's parameters $\eta$ and architecture codes in $\mathcal{A}$ to obtain a set of expert models.~These experts are specialized, efficient, and performant sub-networks of the T2I model, as determined by the architecture codes.~As illustrated in Fig.~\ref{fig:pruning}, the prompt router consists of a prompt encoder, an architecture predictor, and a router module.~We provide details of these components in the following subsections and present our pruning objective in Eq.~\ref{eq:pruning_obj}.
+\subsubsection{Prompt Encoder and Architecture Predictor}\label{sec:pe_and_ap}
+Our primary intuition in designing the prompt router is that it should route semantically similar prompts to similar sub-networks of a T2I model.~Accordingly, we use a pretrained frozen Sentence Transformer model~\cite{ReimersSentenceBERT} as our prompt encoder module.~It can effectively encode input prompts $p$ into semantically meaningful embeddings $z$:
+
+\begin{equation}\label{eq:prompt_encoder}
+    z = f_{\text{PE}}(p)
+\end{equation}
+
+$f_{\text{PE}}(\cdot)$ is the prompt encoder.~We do not explicitly show the prompt encoder's parameters as we do not train them in our pruning method. The Sentence Transformer can encode semantically similar prompts to nearby embeddings and distant from dissimilar ones.~We leverage this property in our framework~(Eq.~\ref{eq:contrastive_loss}) to ensure the prompt router maps similar prompts to similar architecture codes.
+
+The architecture predictor module transforms prompt embeddings $z$ into architecture embeddings $e$:
+
+\begin{equation}\label{eq:architecture_predictor}
+    e = f_{\text{AP}}(z;\eta)
+\end{equation}
+
+ The embeddings $e$ have the same dimensionality as the architecture codes $a$.
+
+\subsubsection{Router}\label{sec:router}
+The router module takes an architecture embedding $e$ and routes it to an architecture code $a\in\mathcal{A}$.~A 
+straightforward way to implement the router is to map an input embedding $e$ to its nearest architecture code in $\mathcal{A}$.~However, we found that this approach may lead to the collapse of architecture codes, as they could converge to a single code that meets the desired compute budget $T_d$ with a relatively decent performance, causing the prompt router to route all input prompts to it.
+
+To tackle this challenge, we employ optimal transport in our router module during the pruning phase. Formally, let $E=[e_1,\cdots, e_B]$ represent $B$ architecture embeddings in a training batch, and $A=[a^{(1)},\cdots, a^{(N)}]$ represent the $N$ codes. The goal is to find an assignment matrix $Q=[q_1,\cdots, q_B]$ that maximizes the similarity between architecture embeddings and their assigned architecture codes:
+
+\begin{equation}~\label{eq:optimal_transport}
+    \max_{Q\in\mathcal{Q}}\text{Tr}(Q^{T}A^{T}E) + \epsilon\text{H}(Q)
+\end{equation}
+
+$\text{H}$ is an entropy term $\text{H}(Q) = -\sum_{i,j}q_{ij}\log(q_{ij})$ and $\epsilon$ is the regularization strength.~It has been shown~\cite{Asano2020SelfLabeling,caron2020SwAV} that high values of $\epsilon$ lead to a uniform assignment matrix $Q$, causing all codes in $A$ to collapse to a single code.~Thus, we set $\epsilon$ to a small value.~Further, we impose an equipartition~\cite{Asano2020SelfLabeling} constraint on $Q$ so that architecture embeddings in a batch are assigned equally to architecture codes:
+
+\begin{equation}\label{eq:equal_partition}
+    \mathcal{Q} = \{Q\in\mathbb{R}_{+}^{N\times B}~|~Q1_{B} = \frac{1}{N}1_N,~ Q^{T}1_{N} = \frac{1}{B}1_B\}
+\end{equation}
+
+Here, $1_{\{B, N\}}$ are vectors of ones with length $B$ and $N$, respectively.~These constraints enforce that, on average, $\frac{B}{N}$ embeddings are assigned to an architecture code per training batch, thereby ensuring that each architecture code gets enough samples for training.~The optimal transport problem in Eq.~\ref{eq:optimal_transport} with the constraints in Eq.~\ref{eq:equal_partition} can be solved using the fast version~\cite{cuturi2013sinkhorn} of the Sinkhorn-Knopp algorithm and the solution has the normalized exponential matrix form~\cite{cuturi2013sinkhorn}: 
+
+\begin{equation}\label{eq:ot_solution}
+    Q^* = \text{diag}(m)\text{exp}(\frac{A^TE}{\epsilon})\text{diag}(n)
+\end{equation}
+
+Here, $m$ and $n$ are renormalization vectors that can be calculated using a few iterations of the Sinkhorn-Knopp algorithm. With $\epsilon$ set to a small value, the matrix $BQ^*$ will have columns that are close to one-hot vectors, which we use to assign the architecture embeddings to the architecture codes.~In summary, the router module's function during the pruning process is:
+
+\begin{equation}\label{eq:router_function}
+    a = f_{\text{R}}(e, \mathcal{A}; Q^{*})
+\end{equation}
+
+After the pruning stage, the trained router simply routes an input architecture embedding to an architecture code with the highest cosine similarity. 
+
+\subsection{Pruning}\label{sec:pruning}
+We divide each architecture code $a^{(i)}\in\mathcal{A}$ into two sub-vectors $a^{(i)} = (u^{(i)}, v^{(i)})$. We utilize the vectors $u^{(i)}$ and $v^{(i)}$ to prune the depth layers and determine widths of the layers, respectively.
+
+A simple approach to prune the width of a layer (a depth layer) is to use binary vectors $v^{(i)}$ ($u^{(i)}$), indicating whether the channels (layers) should be pruned.~Yet, doing so is not differentiable, and one needs to solve a discrete optimization problem to find the optimal binary vectors. Instead, we employ soft vectors $\textbf{v}^{(i)}$ ($\textbf{u}^{(i)}$) that are continuous and differentiable for pruning. We calculate them as:
+
+\begin{equation}\label{eq:gumbel_sigmoid}
+    \textbf{v}^{(i)} = \text{sigmoid}(\frac{v^{(i)} + g_v}{\gamma}),~~~~~~\textbf{u}^{(i)} = \text{sigmoid}(\frac{u^{(i)} + g_u}{\gamma})
+\end{equation}
+
+$g_{\{u, v\}}\sim\text{Gumbel}(0, 1)$ represents a noise vector sampled from the Gumbel distribution~\cite{gumbel1954Gumbel}, and $\gamma$ is the temperature.~This formulation, known as the Gumbel-sigmoid reparameterization~\cite{jang2017GumbelSigmoid,maddison2017GumbelSigmoid}, is a differentiable approximation of sampling from Bernoulli distributions with parameters $\texttt{sigmoid(}v^{(i)}\texttt{)}$ and $\texttt{sigmoid(}u^{(i)}\texttt{)}$. When the temperature $\gamma$ is set appropriately, the vectors $\textbf{v}^{(i)}$ and $\textbf{u}^{(i)}$ will be close to binary vectors, and we use them for pruningthe layers' width and depth layers. Assuming $\textbf{v}^{(i)} = [\textbf{v}_{l}^{(i)}]_{l=1}^{L}$ where $L$ is the number of the model's layers, we prune the width of the $l$-th layer as:
+
+\begin{equation}
+    \mathcal{\widehat{F}}_{l} = \mathcal{F}_{l}\odot\textbf{v}_{l}^{(i)}
+\end{equation}
+
+In this equation, $\mathcal{F}_{l}$ represents feature maps of the $l$-th layer, and $\odot$ is the element-wise multiplication.~We prune the channels of the convolution layers in the ResBlocks~\cite{he2016ResNet}, attention heads in the Transformer layers~\cite{vaswani2017Transformer}, and the channels of the feed-forward layers in the Transformer layers.
+
+In a similar manner, we apply the vectors $\textbf{u}^{(i)} = [\textbf{u}_{j}^{(i)}]_{j=1}^{M}$ (where M is the number of depth layers that we prune) for pruning the model's depth.~Specifically, we prune the $j$-\emph{th} depth layer $f_j$ as:
+
+\begin{equation}
+    \mathcal{\widehat{F}}_{j} = \mathbf{u}_{j}^{(i)}f_{j}(\mathcal{F}_{j-1}) + (1 - \mathbf{u}_{j}^{(i)})\mathcal{F}_{j-1}
+\end{equation}
+
+$\mathcal{F}_{j-1}$ denotes the previous layer's feature maps.~The granularity of our depth pruning is a ResBlock or a Transformer layer in the U-Net of the T2I model.~In summary, we employ the architecture vectors $\textbf{a}^{(i)}=(\textbf{v}^{(i)}, \textbf{u}^{(i)})$ to prune the T2I model.
+
+\subsubsection{Training the Prompt Router and Architecture Codes}\label{sec:training_prompt_router}
+We jointly train the prompt router and architecture codes in an end-to-end manner, guiding the prompt router to map similar prompts to similar architecture codes. In addition, we regularize the architecture codes to correspond to performant sub-networks of the T2I model, be diverse, and adhere to the desired compute budget $T_d$ on aggregate.
+
+\paragraph{Contrastive Training} Given a training batch with $B$ prompts, we compute their prompt embeddings $z$~(Eq.~\ref{eq:prompt_encoder}) and architecture embeddings $e$~(Eq.~\ref{eq:architecture_predictor}).~Then, we calculate architecture vectors $\textbf{e}^\prime$:
+
+\begin{equation}\label{eq:e_prime}
+    \textbf{e}^\prime = \text{sigmoid}(\frac{e + g}{\gamma})
+\end{equation}
+
+where $\gamma$ and $g$ have the same definitions as Eq.~\ref{eq:gumbel_sigmoid}. We define the cosine similarity of two vectors as 
+$\text{sim}(\textbf{m}, \textbf{n}) = \textbf{m}^T\textbf{n}/||\textbf{m}||.||\textbf{n}||$, and we use the following objective to train the architecture predictor:
+
+\begin{equation}\label{eq:contrastive_loss}
+    \mathcal{L}_{\text{cont}}(\eta) = \frac{1}{B^2}\sum_{i=1}^{B}\sum_{j=1}^{B} r_{i, j}\text{log}(s_{i, j}) + (1 - r_{i, j})\text{log}(1 - s_{i, j})
+\end{equation}
+
+\begin{equation}\label{eq:cont_similarity}
+    r_{i, j} = \frac{\text{exp}(\text{sim}(z_i, z_j)/\tau)}{\sum_{k=1}^{B}\text{exp}(\text{sim}(z_i, z_k)/\tau)},~~~~
+    s_{i, j} = \frac{\text{exp}(\text{sim}(\textbf{e}_i^\prime, \textbf{e}_j^\prime)/\tau)}{\sum_{k=1}^{B}\text{exp}(\text{sim}(\textbf{e}_i^\prime, \textbf{e}_k^\prime)/\tau)}
+\end{equation}
+
+$\tau$ is a temperature parameter.~Eq.~\ref{eq:contrastive_loss} regularizes the architecture predictor to map representations $z$ to the regions of the space of the architecture embeddings $e$ such that their corresponding architecture vectors $\textbf{e}^\prime$ maintain the similarity between the prompts.~Note that we do not actually use the architecture vectors $\textbf{e}^\prime$ to prune the 
+model~(Sec.~\ref{sec:router},~\ref{sec:pruning}).~Yet, we apply our contrastive regularization to the vectors $\textbf{e}^\prime$ instead of embeddings $e$.~This design choice is a result of our observation that applying $\mathcal{L}_{\text{cont}}$ to embeddings $e$ may not lead to diverse architecture vectors $\textbf{a}^{(i)}=(\textbf{v}^{(i)}, \textbf{u}^{(i)})$ that we use for 
+pruning (Sec.~\ref{sec:pruning}).~For instance, embeddings $e$ (and their nearby architecture codes $a$) can be distributed in the embedding space~(before Gumbel-Sigmoid estimation), but all be in saturation regions of the $\text{sigmoid}$ function~(Eqs.~\ref{eq:gumbel_sigmoid},~\ref{eq:e_prime}), resulting in similar architecture vectors $\textbf{e}^\prime$ and $\textbf{a}^{(i)}$.
+In contrast, Eq.~\ref{eq:contrastive_loss} implicitly diversifies the architecture vectors $\textbf{a}^{(i)}$.~The reason is that the router routes embeddings $e$ to codes $a$ (Eq.~\ref{eq:router_function}) that have high similarity with each other (Eq.~\ref{eq:ot_solution}).~Also, Eq.~\ref{eq:contrastive_loss} distributes embeddings $e$ in the space of the architecture embeddings such that the architecture vectors $\textbf{e}^\prime$ become similar (different) for similar (dissimilar) prompts.~As the vectors $\textbf{e}^\prime$ and $\textbf{a}^{(i)}$ are calculated in a similar manner (Eqs.~\ref{eq:gumbel_sigmoid},~\ref{eq:e_prime}), the diversity of vectors $\textbf{e}^\prime$ implies the same for vectors $\textbf{a}^{(i)}$.
+
+Assuming $B^{(i)}$ samples get routed to the architecture code $a^{(i)}$ in a training batch~($\sum_{i}B^{(i)} = B$), we train the prompt router and the architecture codes using the following objective:
+
+\begin{equation}\label{eq:pruning_obj}
+    \begin{aligned}
+        \min_{\eta,\mathcal{A}}\mathcal{L} = 
+        & [\frac{1}{N}\sum_{i=1}^{N}[\frac{1}{B^{(i)}}\sum_{j=1}^{B^{(i)}}[\mathcal{L}_{\text{DDPM}}(x^{(i)}_j, p^{(i)}_j; a^{(i)}) + 
+        \lambda_{\text{distill}}\mathcal{L}_{\text{distill}}(x^{(i)}_j, p^{(i)}_j; a^{(i)})]]] \\ 
+        &+ \lambda_{\text{res}}\mathcal{R}(\widehat{T}(\mathcal{A}), T_d)
+        + \lambda_{\text{cont}}\mathcal{L}_{\text{cont}}(\eta)
+    \end{aligned}
+\end{equation}
+
+$\mathcal{L}_{\text{DDPM}}((x^{(i)}_j, p^{(i)}_j); a^{(i)})$ denotes the denoising objective for the sample $(x^{(i)}_j, p^{(i)}_j)$ routed to sub-network chosen by the architecture code $a^{(i)}$.~$\mathcal{R}(\widehat{T}(\mathcal{A}), T_d)$ regularizes the weighted average of the MACs used by architecture codes ($\widehat{T}(\mathcal{A})=\sum_{i}\frac{B^{(i)}}{B}[\widehat{T}(a^{(i)})]$) to be close to $T_d$.~We define $\mathcal{R}(x, y)=\text{log}(\text{max}(x, y)/\text{min}(x, y))$, and
+$\{\lambda_{\text{distill}},\lambda_{\text{res}},\lambda_{\text{cont}}\}$ 
+are hyperparameters.~Finally, $\mathcal{L}_{\text{distill}}$ is the distillation objective~\cite{kim2023BKSDM} regularizing the pruned model having similar outputs to the original one.
+
+\subsection{Fine-tuning the Pruned Expert Models}
+After the pruning stage, we use the learned architecture codes to prune the T2I model into our experts.~Then, we fine-tune experts using samples routed to them.~At test time, our trained prompt router routes an input prompt to one of the experts, and we use the expert to 
+generate an image for it.
+
+\input{figs/grid}
+
+
+
+\section{Experiments}
+
+
+We use Conceptual Captions 3M (CC3M)~\cite{sharma2018CC3M} and MS-COCO~\cite{lin2014MSCOCO} as our \textit{target} datasets to prune the Stable Diffusion (SD) V2.1 model to demonstrate APTP's effectiveness.~On CC3M, we prune the model with Base:~($0.85$ MACs, $16$ experts) and Small:~($0.66$ MACs, $8$ experts) configurations.~On MS-COCO, we perform Base:~($0.78$ MACs, $8$ experts) and Small:~($0.64$ MACs, $8$ experts) pruning settings.~We set $(\lambda_{\text{distill}}, \lambda_{\text{res}}, \lambda_{\text{cont}})$=$(0.2,2.0,100)$~(Eq.~\ref{eq:pruning_obj}) and the temperature $\tau$~(Eq.~\ref{eq:cont_similarity}) to $0.03$.~We evaluate all models with FID~\cite{heusel2017FID}, CLIP~\cite{hessel2021clipscore}, and CMMD~\cite{jayasumana2023CMMD} scores using 14k samples in the validation set of CC3M and 30k samples from the MS-COCO's validation split.~For all models, we sample the images at the resolution of $768$ and resize them to $256$ for calculating the metrics, using the 25-steps PNDM~\citep{liu202pndm} sampler following BK-SDM~\cite{kim2023BKSDM}.
+
+\subsection{Comparison Results}
+As APTP is the first pruning method to prune a pretrained T2I model on a \textit{target} dataset, we compare its performance with SD V2.1 and the weight norm pruning~\cite{li2017PruningFilters} in this section, and Table~\ref{all_results} shows the results.~We found that the APTP and Norm pruning baseline reach their final performance after about 30k and 50k iterations fine-tuning after pruning.
+
+\paragraph{CC3M:} Table~\ref{results:cc3m} summarizes the results on CC3M.~With a similar MACs budget, APTP~($0.85$) significantly outperforms the Norm pruning~\cite{li2017PruningFilters} baseline in terms of FID,~CLIP, and CMMD scores.~It also achieves $15\%$ less latency while showing close performance scores to SD V2.1.~Notably,~APTP~(0.66) has $23\%$ less latency and $21\%$ lower MACs budget than Norm~\cite{li2017PruningFilters}, and at the same time, shows a large gap with the Norm pruning.
+
+\paragraph{MS-COCO:} We present the results for MS-COCO in Table~\ref{results:coco}.~APTP~(0.78) reduces the latency of SD by $22.5\%$ while preserving its CLIP score and achieving a close CMMD score.~Further, APTP~(0.78) significantly outperforms the model pruned by Norm~\cite{li2017PruningFilters} with a similar latency.~Similar to the results on CC3M,~APTP~(0.64) achieves $19.3\%$ less latency than the Norm pruning while outperforming it on FID,~CLIP,~and CMMD scores.~In summary, our quantitative evaluations show the clear advantage of prompt-based compared to static pruning for T2I models.~We provide samples of APTP on the validation sets of CC3M and MS-COCO in Fig. \ref{supp:more_samples} for more samples).
+
+\input{tables/main_all_results}
+
+\input{tables/cc3m_prompt_analysis}
+
+\subsection{Analysis of the Prompt Router}\label{sec:pr_analysis}
+We analyze our prompt router's behavior by examining the prompts it assigns to experts in the APTP-Base ($0.85$) model for the CC3M experiment.~Table~\ref{tab:prompt-analysis:cc3m} displays the most frequent words in the prompts routed to each expert, along with the experts' MACs budgets. Our prompt router effectively "specializes" experts by assigning distinct topics to experts with varying budgets. For instance, Expert 1 focuses on cityscapes, Expert 8 on animals, and Expert 13 on house interiors and exteriors. Notably, the prompt router assigns images of textual content and human beings to Expert 16, which has the highest budget. These categories have been empirically found to be challenging for SD 2.1~\cite{chen2024Diffute,yang2024GlyphControl}, and our prompt router can automatically discover and route them to higher-capacity experts.~In contrast, paintings and illustrations are assigned to lower-budget experts, as they seem to be easier for the model to generate. We provide examples of high and low resource prompts for APTP-Base on both CC3M and COCO in Fig.~\ref{fig:low_high_res}.
+
+\input{figs/low_high_res}
+
+\subsection{Ablation Study}
+We conduct two ablation experiments to study the impact of APTP's components on its performance.
+First, we implement a naive baseline that uses parameterizations $\textbf{v}=\text{sigmoid}((\eta_v + g_v)/\tau)$ and $\textbf{u}=\text{sigmoid}((\eta_u + g_u)/\tau)$~(Eq.~\ref{eq:gumbel_sigmoid}) to prune a \underline{single} model.~It directly trains two vectors $(\eta_v, \eta_u)$ to do so (Uni-Arch Baseline' in Table~\ref{tab:ablation_component}).~Then, we start with a router trained only using the contrastive objective~(Eq.~\ref{eq:contrastive_loss}) and add optimal transport and distillation incrementally to prune SD V2.1 into $8$ experts with $80\%$ MACs budget on MS-COCO~\cite{lin2014MSCOCO}.~We fine-tune all pruned models with 10k iterations, and Table~\ref{tab:ablation_component} presents the results.~We observe that the contrastive training~(Eq.~\ref{eq:contrastive_loss}) alone fails to improve results from pruning a single model to a mixture of experts.~This is because although the contrastive objective makes the architecture codes diverse, it does not enforce the prompt router to distribute the prompts between architecture codes.~Thus, it routes most of the input prompts to a single expert.~As a result, all experts except one receive insufficient training samples and generate low-quality samples after fine-tuning, leading to the mixture showing worse metrics than the baseline.~Employing optimal transport~(Eq.~\ref{eq:optimal_transport}) in the prompt router significantly improves FID~(10.22), CLIP~(1.17), and CMMD~(0.18) scores of the mixture.~In addition, distillation can further improve the architecture search process of the experts, resulting in a more performant mixture.~In summary, these results validate the effectiveness of our design choices for APTP.
+
+\input{tables/component_ablation}
+
+\input{figs/num_experts_ablation}
+
+In our second ablation experiment, we explore the impact of the number of experts on APTP.~We prune SD V2.1 to $80\%$ MACs budget using APTP with $4$, $8$, and $12$ experts on MS-COCO.~Fig.~\ref{fig:ablation_experts} shows the results.~Interestingly, the results demonstrate that the relationship between FID and CLIP scores with the number of experts is nonlinear, and the optimal number of experts is dataset-dependent.~This observation illustrates that prompt-based pruning is more suitable than static pruning for T2I models.
+
+
+\section{Conclusion}
+
+In this paper, we develop Adaptive Prompt-Tailored Pruning (APTP), the first prompt-based pruning method for text-to-image (T2I) diffusion models.~APTP takes a T2I model, pretrained on large-scale data, and prunes it using a \textit{target} dataset, resembling the common practice that organizations fine-tune T2I models on their internal data before deployment.~The core element of APTP is a prompt router module that learns to decide the model capacity required to generate a sample for an input prompt, routing it to an architecture code given a desired compute budget.~Each architecture code corresponds to a sub-network of the T2I model, specializing in generating images for the prompts that prompt router routes to it.~APTP trains the prompt router and architecture codes in an end-to-end manner, encouraging the prompt router to route similar prompts to similar architecture codes.~Further, we utilize optimal transport in the prompt router of APTP during pruning to diversify the architecture codes.~Our experiments in which we prune Stable Diffusion~(SD) V2.1 using CC3M and MS-COCO as \textit{target} datasets demonstrate the benefit of prompt-based pruning compared to conventional static pruning methods for T2I models.~Further, our analysis on APTP's prompt router reveals that it can automatically discover challenging prompt types for SD, like generating text, humans, and fingers, routing them to experts with high compute budgets.
+
+
+
+\newpage
+{
+    \small
+    
+
+
+

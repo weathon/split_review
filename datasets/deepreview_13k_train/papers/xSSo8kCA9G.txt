@@ -1,0 +1,520 @@
+\title{FRUGAL: Memory-Efficient Optimization by Reducing State Overhead for Scalable Training}
+
+\begin{abstract}
+With the increase in the number of parameters in large language models, the process of pre-training and fine-tuning increasingly demands larger volumes of GPU memory. 
+A significant portion of this memory is typically consumed by the optimizer state. 
+To overcome this challenge, recent approaches such as low-rank adaptation (LoRA \citep{lora}), low-rank gradient projection (GaLore \citep{zhao2024galore}), and blockwise optimization (BAdam \citep{luo2024badam}) have been proposed. 
+However, in all these algorithms, the \textit{effective rank of the weight updates remains low-rank}, which can lead to a substantial loss of information from the gradient. 
+This loss can be critically important, especially during the pre-training stage.
+In this paper, we introduce \ALG\ (\textbf{F}ull-\textbf{R}ank \textbf{U}pdates with \textbf{G}r\textbf{A}dient sp\textbf{L}itting), a new memory-efficient optimization framework. 
+\ALG\ leverages gradient splitting to perform low-dimensional updates using advanced 
+algorithms (such as Adam), while updates along the remaining directions are executed via state-free methods like SGD or signSGD \citep{signsgd-pmlr-v80-bernstein18a}. 
+Our framework can be integrated with various low-rank update selection techniques, including GaLore and BAdam. 
+We provide theoretical convergence guarantees for our framework when using SGDM for low-dimensional updates and SGD for state-free updates.
+Additionally, our method consistently outperforms concurrent approaches across various fixed memory budgets, achieving state-of-the-art results in pre-training and fine-tuning tasks while balancing memory efficiency and performance metrics.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, Large Language Models (LLMs) such as GPT \citep{gpt4} and LLaMA-3 \cite{llama3} have demonstrated remarkable performance across various disciplines \citep{tasks1, tasks2, tasks3}.
+However, a critical factor in achieving these results is the size of these models~\citep{chinchilla}.
+A larger number of parameters not only increases computational cost but also significantly raises memory requirements.
+For instance, training an 8 billion parameter LLaMA model in a 16-bit format necessitates each parameter to occupy 2 bytes, resulting in 16GB for storing the parameters and an additional 16GB for gradients.
+Utilizing the Adam optimizer~\citep{kingma2014adam}, which is standard for pre-training and fine-tuning LLMs, adds a further 32GB of memory to store the $m$ and $v$ statistics, resulting in 64GB total amount of memory.
+Furthermore, to achieve higher-quality results, training in pure 16-bit format is often insufficient~\citep{bf16}. 
+This necessitates storing master weights and optimizer statistics in 32-bit format, leading to total memory demands that exceed the capacity of cutting-edge graphics cards, such as the A100-80GB.
+
+Numerous research projects have been aimed at reducing these significant costs. 
+These approaches include engineering solutions like gradient checkpointing \cite{gradient_checkpointing} and memory offloading \citep{memory_offloading}, which do not change the training trajectory. 
+There are also methods that adjust the training algorithm by decreasing the number of trainable parameters \citep{frankle2018lottery, wang2023cuttlefish, sreenivasan2022rare, horvath2024maestro} or their bit precision \citep{mp8bit}, as well as optimizer statistics \citep{adam8bit, adafactor, adam-mini}. 
+In this work, we concentrate on the latter category.
+
+Parameter-Efficient Fine-Tuning (PEFT) methods, such as LoRA~\citep{lora}, Dora~\citep{dora}, and BitFit~\citep{bitfit} reduce memory costs by training a relatively small number of parameters compared to the size of the original model, while the remaining modules are frozen. 
+This approach has proven effective for the task of efficient fine-tuning of pre-trained language models. 
+However, PEFT methods have a fundamental limitation: parameter updates always lie in a low-dimensional subspace, which prevents the use of these methods for pre-training~\citep{relora} and may constrain their capabilities in fine-tuning~\citep{finetuning_constraints}.
+
+Recent works, such as GaLore~\citep{zhao2024galore}, ReLoRA~\citep{relora}, and BAdam~\citep{luo2024badam}, offer a solution to this problem. 
+These methods enable higher-dimensional full-parameter learning by periodically changing the optimizable low-rank subspace, which we will call the \textbf{state-full} subspace. 
+However, even though these methods result in overall parameter changes that are high-dimensional, the updates in each step remain low-dimensional. 
+The dimensionality of the \textbf{state-free} subspace significantly exceeds that of the \textbf{state-full} subspace. 
+The remaining information contained in the gradient is not utilized for parameter updates. 
+Nevertheless, this information can still be leveraged to train the model.
+
+\begin{figure}[t]
+    \begin{minipage}{0.38\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{frugal.png}
+        \caption{\ALG\ reduces memory usage by splitting gradient updates into low-dimensional updates with advanced optimizers (e.g., AdamW) and using state-free methods (e.g., SignSGD and SGD) for the rest.}
+    \end{minipage} \hfill
+    \begin{minipage}{{0.62\textwidth}}
+        \begin{algorithm}[H]
+            \caption{\ALG\;\texttt{(State-Full, State-Free)}}
+            \label{alg:Frugal}
+                \textbf{Input:}  model $f_\mathbf{\theta}(\cdot)$ with $p$ parameters $\{\theta_i \in \R^{d_i}\}_{i=1}^p$, loss function $\mathcal{L}$, gradient projectors $P_{k,i}$ for $i \in [p], k \in [K]$.
+                \begin{algorithmic}[1]
+                \For{$k=1,2, \hdots K$}
+                    \State get data batch $(x, y)$ 
+                    \State compute $\ell \leftarrow \mathcal{L}(f_{\theta}(x), y)$  \Comment{Forward}
+                        \For{$g_i = \frac{\partial \ell}{\partial \theta_i}$ from Backward} 
+                            \State $g_{\text{full}, i} \leftarrow P_{k,i}(g_i),\; $ \Comment{Project Grad}
+                            \State $g_{\text{free, i}} \leftarrow g_i - P^{-1}_{k,i}(g_{\text{full}, i})$ \Comment{Residual}
+                            \State $\texttt{s}_{\theta_i} \leftarrow [P_{k,i}(P^{-1}_{k-1,i}(s),\; s \in \texttt{s}_{\theta_i}]$\Comment{Project States}
+                            \State $u_{\text{full, i}} \leftarrow \texttt{State-Full.update}(\theta_i, g_{\text{full}, i}, \texttt{s}_{\theta_i})$
+                            \State $u_{\text{free, i}}\leftarrow \texttt{State-Free.update}(\theta_i, g_{\text{free}, i})$
+                            \State $\theta_i \leftarrow \theta_i + P^{-1}_{k,i}(u_{\text{full}, i}) + u_{\text{free, i}}$
+                        \EndFor
+                    \EndFor
+            \end{algorithmic}
+\end{algorithm}
+
+    \end{minipage}
+\end{figure}
+
+We present the \ALG\;framework, designed to bridge this gap. 
+Our approach stems from a crucial observation: although memory constraints prevent the use of advanced optimizers like Adam~\citep{kingma2014adam} in the \textbf{state-free} subspace, \textit{one still can update this subspace using state-free optimization algorithms like Stochastic Gradient Descent (SGD) or signSGD} \citep{signsgd-pmlr-v80-bernstein18a}.
+This solution allows for high-dimensional updates, which provides additional opportunities to explore the parameter space and improves convergence.
+
+{\bf Contributions.} We summarize the main contributions of our work as follows:
+\begin{itemize}[leftmargin=*]
+    \item We present a new memory-efficient optimization framework that combines the use of advanced optimization algorithms for the state-full subspace with state-free algorithms for the complementary subspace. 
+    The framework supports various types of state-full optimizers, state-free optimizers, and different methods for projecting the gradient onto the state-full subspace.
+     \item We provide theoretical convergence guarantees for our framework. In the proof, we consider the case where SGDM acts as the state-full optimizer and SGD as the state-free optimizer, and we show that \ALG\ matches the best-known convergence rate in many scenarios.
+    \item To verify the practical applicability of \ALG, we conduct extensive experiments in popular real-world scenarios.\footnote{The code is available at
+}
+    In these experiments, we pre-train LLaMA-like models (up to 1B parameters) on the Colossal Clean Crawled Corpus (C4)  dataset~\citep{c4} and fine-tune RoBERTa~\citep{liu2019roberta} on the GLUE benchmark~\citep{wang2018glue}. 
+    The results show that our method significantly outperforms previous memory-efficient algorithms while using the same memory budget.
+    \item We demonstrate that only the Logits layer in transformer-like models requires advanced optimizers like Adam, while other modules (including Embeddings and RMSNorms) can use simpler methods like signSGD without significant performance loss. 
+    This opens new possibilities for memory-efficient training and provides crucial insights into the learning dynamics of Transformers.
+\end{itemize}
+
+
+\section{Related work}
+
+
+\textbf{Memory-efficient full-parameter learning.} 
+Recent research has focused on reducing the memory footprint of LLMs by decreasing the size of optimizer states while maintaining their performance. 
+Low-rank adaptation methods, such as LoRA~\citep{lora}, inject trainable rank decomposition matrices into each layer of the model, reducing memory requirements by optimizing only a few learnable adapters. 
+ReLora~\citep{relora} builds upon this by merging low-rank adaptations into the main model weights during training, potentially increasing the total rank of the update. 
+BAdam~\citep{luo2024badam} leverages Block Coordinate Descent for full-parameter training by switching active blocks during fine-tuning. 
+MicroAdam~\citep{modoranu2024microadam} compresses gradient information before feeding it into the optimizer state, significantly reducing memory footprint while enabling full parameter learning through error feedback mechanisms. 
+GaLore~\citep{zhao2024galore} maintains full parameter learning by projecting gradients onto a low-rank subspace using truncated SVD decomposition, storing optimizer states in this reduced space. 
+Notably, GaLore achieves good results in pre-training, with performance close to that of Adam. 
+However, while these methods effectively reduce memory overhead, they all perform \textit{low-rank updates at each iteration}. 
+In contrast, our approach utilizes all available gradient information to perform \textit{full-dimensional updates at each optimizer step}, offering a novel perspective on memory-efficient optimization for LLMs.
+
+\textbf{Other memory-efficient optimization.} 
+Several other methods have been proposed to reduce the memory footprint of optimizers.
+AdaFactor~\citep{adafactor} attempts to mimic Adam's behavior while reducing memory usage through factorization of the variance matrix $v$. 
+Adam-mini~\citep{adam-mini} further reduces memory by storing only one value $v$ per block.
+\citet{adam8bit} and \citet{opt4bit} decrease memory footprint by quantizing optimizer states to the lower-precision representations. 
+\citet{lomo} proposed to reduce weight gradient memory by fusing the backward operation with the optimizer update.
+Notably, these approaches are orthogonal to our method \ALG\;and \textit{can be combined with it} for further memory efficiency.
+
+\textbf{Block Coordinate Descent.}
+Block Coordinate Descent (BCD) is a well-established optimization method with a rich history in mathematical optimization~\citep{bcd1, bcd2,richtarik2014iteration,richtarik2015parallel,richtarik2016distributed,takavc2013mini,richtarik2015optimal}. 
+In recent years, a specific instance of BCD, known as \textit{layer-wise learning,} has been applied to deep learning. Notable examples include~\citep{luo2024badam, pan2024lisa}, which leverage this approach for LLM fine-tuning.
+To the best of our knowledge, our work presents \textbf{the first theoretical analysis} of an extended BCD framework (\Cref{sec:theory}) where the \textit{remaining coordinates are also updated using a different algorithm}. 
+This novel approach extends traditional BCD techniques, opening new avenues for full model optimization in deep learning.
+\textbf{Sign-based methods for training language models.}
+Since its introduction, Adam has become the de facto primary optimization algorithm, demonstrating superior practical results compared to SGD-based algorithms across various deep learning tasks. This difference is particularly noticeable when training Transformers on language tasks. 
+While~\citet{adam_better_sgd1} hypothesized that Adam outperforms SGD in this setup due to \textit{the heavy-tailed distribution of sampling-induced errors,} \citet{sign_sgd_adam_similarity3} demonstrated that this superiority persists even in full-batch training. 
+They proposed a new hypothesis suggesting that Adam's key success factor is related to \textit{its similarity to signSGD}~\citep{sign_sgd_adam_similarity1,sign_sgd_adam_similarity2}, and both~\citet{sign_sgd_adam_similarity3} and~\citet{anything_but_sgd} showed that signed descent with momentum reduces the performance gap with Adam.
+In contrast, to the best of our knowledge, \textit{we are the first to train the majority of language model's parameters using signSGD without momentum}, achieving minimal loss in quality.
+This approach further demonstrates the effectiveness of sign-based methods for LLM training, paving the way for more efficient and scalable optimization strategies in deep learning.
+
+\begin{table}[h]
+\caption{Comparison of different projection and optimization strategies on pre-training LLaMA-130M on C4 with Adam as the state-full algorithm. 
+State-free subspace is updated for full-rank methods but frozen for low-rank methods. 
+Low-rank SVD outperforms Low-rank Random at the beginning of training but falls behind later due to insufficient exploration of the parameter space.
+}
+\label{tab:low_vs_full}
+\begin{center}
+\begin{tabular}{l|ccccc}
+\toprule
+\multirow{ 2}{*}{Method} & \multicolumn{5}{c}{Validation perplexity after iterations $\downarrow$} \\
+ & 4k & 20k & 40k & 100k & 200k \\
+\midrule
+Low-rank SVD & \textbf{39.75} & 26.35 & 24.38 & 22.30 & 21.11 \\
+Low-rank Random & 42.31 & \textbf{25.99} & \textbf{23.55} & \textbf{21.33} & \textbf{20.01} \\
+\hline
+Full-rank Random & 37.26 & 23.46 & 21.53 & 19.66 & 18.64 \\
+Full-rank SVD & \textbf{33.96} & \textbf{22.54} & \textbf{21.01} & \textbf{19.30} & \textbf{18.35} \\
+Full-rank RandK & 36.38 & 23.02 & 21.25 & 19.70 & 18.63 \\
+Full-rank Block & 37.20 & 23.34 & 21.42 & 19.59 & 18.60 \\
+\hline
+Adam & 33.95 & 21.90 & 20.56 & 18.97 & 18.13\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+
+
+\section{\ALG: Full-Rank Updates with GrAdient spLitting}
+
+In this section, we first introduce two main building blocks of our method and then introduce our general framework.
+\subsection{The importance of exploring the entire space during the training process}\label{sec:method explore_space}
+In recent work, \citet{zhao2024galore} proposed GaLore, an optimization method based on projecting the gradient matrix $\mG$ of each layer onto a low-dimensional subspace. 
+To obtain the projection matrix $\mP$, they use SVD decomposition of $\mG_t$, which is recomputed with frequency $T$. 
+The vectors or rows of $\mG$ are projected onto the first $r$ left or right singular vectors, respectively. 
+This approach has theoretical foundations: the first $r$ singular vectors correspond to the first $r$ singular values and, therefore, should better utilize information from the spectrum of $\mG$.
+
+The authors pointed out that calculating the SVD decomposition results in extra computational overhead, which can be as much as a 10\% increase as the hidden size of the model grows. 
+To minimize this cost and examine the significance of using SVD decomposition, one may wonder about the possibility of employing a random semi-orthogonal projection matrix $\mR$ instead of projecting onto the first $r$ singular columns with $\mP$. 
+Surprisingly, we found that although SVD decomposition delivers an initial boost, subsequent training with random projection yields significant improvements.
+As an illustration, we took the pre-training\footnote{See~\Cref{sec:exp pre-training} for a detailed description and discussion on the experimental setup.}
+of a 130M model with LLaMA-like architecture on the C4 dataset \citep{c4}. 
+The results are presented in~\Cref{tab:low_vs_full}, where training with $\mP$ corresponds to the row labeled ``Low-rank SVD'', and training with $\mR$ corresponds to the row labeled ``Low-rank Random''. 
+The ranks of both projections $\mP$ and $\mR$ equal $192$.
+
+To investigate this phenomenon, we pre-trained the LLaMA-60M model and collected gradients $\mG_t$ from different iterations $t$ for examination. 
+Following the setup from GaLore~\citep{zhao2024galore}, we computed SVD decompositions and extracted projections $\mP_t$ with a rank of 128. 
+We evaluated the similarity of the projection matrices by calculating the principal angles between different projections $\mP_t$ at different steps. 
+Similarly to the observations in Q-Galore~\citep{zhang2024q-galore}, we found that these projections show minimal change during the training period; see \Cref{fig:histograms}.
+
+Here, we take the projection matrix corresponding to the $5$-th layer and plot histograms of the cosine of the principal angles between pairs $\mP_t$ and $\mP_{t'}$ from different iterations. 
+For comparison, we also include the random projections on the right. 
+As can be seen, the distributions of cosines differ significantly for the $\mP_t$ and for the random projections. 
+While $\mR_t$ feature no angles with cosines higher than $0.9,$ the top $57$ cosines for $\mP_t$ surpass $0.9$, even for gradients $1000$ steps apart.
+
+This leads to the conclusion that although SVD decomposition generally better captures the information contained in the $\mG_t$, the original GaLore algorithm updates weights only in a small subspace. 
+We hypothesize that training with random projections yields superior results due to the more extensive investigation of the optimizable space during the training process.
+\textit{This finding indicates that to achieve better convergence, it is important to seek out optimization algorithms that explore the entire space during the training process.}
+
+\subsection{Advantage of the Full-Rank Updates}\label{sec:method full_rank}
+
+The insight from the~\Cref{sec:method explore_space} suggests that the training of language models performs significantly better when the entire parameter space is utilized during the training process.  Given the importance of updating parameters in all directions, this poses the question: \textit{Is it optimal to use low-rank updates, as employed by methods such as GaLore~\citep{zhao2024galore}, ReLoRA~\citep{relora}, and BAdam~\citep{luo2024badam}?} Using low-rank updates means the effective rank of the update is significantly smaller than the full dimensionality of the parameter space, inevitably leading to a loss of valuable information contained in the gradient.
+
+However, the method to leverage the full-rank gradient for updating parameters is not readily obvious. 
+Using algorithms like Adam~\citep{kingma2014adam} is not an option due to the memory overhead they introduce, which is precisely what we aim to avoid. 
+An alternative approach is to use state-free optimizers such as SGD or signSGD \citep{signsgd-pmlr-v80-bernstein18a}. 
+Unfortunately, SGD have been shown to be ineffective for training transformer models, as shown in~\citet{adam_better_sgd1,adam_better_sgd2}.
+
+\begin{figure}[t]
+    \includegraphics[width=\linewidth]{4_histograms.pdf}
+    \caption{Histograms of principal angle cosines. 
+    The first three are taken between $\mP_t$ and $\mP_{t'}$ from different iterations $t$ and $t'$. 
+    $\mP$ is obtained from the truncated SVD decomposition of the gradient $\mG$ of the Key projection from the 5th layer. 
+    The last histogram is taken between two random semi-orthogonal projections $\mR$ and $\mR'$ for comparison.}
+    \label{fig:histograms}
+\end{figure}
+
+Nevertheless, a recent study~\citet{anything_but_sgd} suggests a promising methodology: while SGDM doesn't generally work well with transformers, using SGDM for the majority of parameters and Adam for a selected subset can lead to effective training. 
+This raises the question: could a hybrid approach using SGD or signSGD instead of SGDM be viable?
+If the key subset of parameters is handled by advanced algorithms, can the other parameters be trained effectively with state-free optimizers?
+
+To address this question, we conducted an experiment on LLaMA-130m, where we utilized the Adam~\citep{kingma2014adam} for state-full parameters and signSGD \citep{signsgd-pmlr-v80-bernstein18a} for state-free parameters.
+A detailed description of the experimental setup can be found at~\Cref{app:pre-training_additional}.
+The result is highlighted as the entry ``Full-rank Random'' in~\Cref{tab:low_vs_full}.
+Full-rank updates significantly enhance performance, approaching the efficiency of the memory-intensive Adam optimizer, which serves as a upper bound in terms of performance.
+\textit{These findings underscore the potential of state-free algorithms for updating a substantial portion of the parameter space, paving the way for efficient, scalable optimization methods that deliver high performance without the significant memory costs traditionally associated with state-of-the-art optimizers.}
+
+\subsection{\ALG\ as Optimization Framework}\label{sec:method frugal}
+
+The setup outlined at the conclusion of the~\Cref{sec:method full_rank} results in a general framework for memory-efficient optimization. 
+Briefly, it operates as follows: the entire space is partitioned into \textit{state-full} and \textit{state-free} subspaces.
+The state-full subspace is updated using advanced algorithms, while the state-free subspace is updated using a state-free method. 
+After a certain number of steps, the state-full subspace is changed to better explore the optimization space. 
+However, determining the optimal state-free optimizer and the projection method onto the state-full subspace is not readily apparent. 
+In this section, we strive to find the optimal configuration.
+
+\textbf{State-free optimizer.} 
+We conducted a preliminary experiment updating all parameters using state-free algorithms to choose between SGD and signSGD \citep{signsgd-pmlr-v80-bernstein18a}. 
+\Cref{tab:sgd_vs_signsgd} presents these results.
+After testing various learning rates, we found that signSGD consistently outperforms SGD, leading us to favor signSGD. 
+We attribute this performance to the similarities between signSGD and Adam~\citep{kingma2014adam}, as noted in \citet{sign_sgd_adam_similarity1, sign_sgd_adam_similarity2,sign_sgd_adam_similarity3}. 
+Additionally, signSGD produces updates of similar magnitude to those generated by Adam, which simplifies the calibration of the learning rate for state-free parameters.
+
+\textbf{Projection type.} When selecting a projection method, it is crucial to strike a balance between quality and memory efficiency. 
+For instance, the approach using the projection matrix from SVD decomposition, as in GaLore~\citep{zhao2024galore}, better preserves the information embedded in the gradient but requires additional memory for storing projection matrices and computational resources for performing the SVD. 
+To reduce computational demands, one could employ random coordinate projection denoted as RandK, but this requires additional memory or recomputation\footnote{See~\Cref{app:memory} for discussion on the memory requirements for different projection methods.}. 
+A more structured alternative is to select not random matrix elements but entire random columns or rows.
+The most aggressive approach follows the method from BAdam, wherein an entire block is chosen as the state-full subspace.
+
+The performance results obtained with all these variants are presented in~\Cref{tab:low_vs_full}.
+Full-rank SVD outperforms both Full-rank RandK and Full-rank Block methods, demonstrating comparable performance. 
+The superior performance of SVD projections can be explained by their ability to extract the principal information from the gradient.
+Nonetheless, a downside is the increased compute and memory demand from SVD. 
+Therefore, we opt for the blockwise selection, as it is the most memory-efficient --- requiring only the storage of active block indices.
+
+A formal description of the final algorithm is presented in~\Cref{alg:Frugal}. 
+It's worth noting that this framework allows for variation not only in the State-Full algorithm but also in the choice of projection and State-Free optimizer. 
+In our experiments in~\Cref{sec:exp}, we use a specific variant with Adam as the State-Full optimizer, signSGD as the State-Free optimizer, and blockwise 
+projection.
+
+For Line 7, state projection, in Algorithm~\ref{alg:Frugal}, we note that if the projection does not change, i.e., $P_{k,i} = P_{k-1,i}$, then $P_{k,i}(P^{-1}_{k-1,i}(s)) = s$. 
+Thus, we only need to project states when the projection changes from one round to another. 
+However, our preliminary experiments with RandK selection showed that resetting states performs comparably to projection.
+Therefore, we could replace this projection with state resetting when the projection changes, which also aligns with blockwise subspace selection. 
+However, either resetting or projecting states is important since we want projected gradients and optimizer states to reside in the same space. 
+For instance, GaLore ignores this step, which leads to degraded performance when projections are updated frequently; see~\Cref{app:reset_reproj} for details.
+
+ \begin{algorithm}[t]
+\caption{\ALG\;\texttt{(SGDM, SGD)}}
+\label{alg: SGDM}
+    \textbf{Input:} momentum weight $\beta\in [0,1)$, initialization $x^1\in\Rd$ and $m^0=0$, step sizes $\{\alpha^k>0\}_{k=1}^K$, momentum set $J_k \subset [d]$ for $k = 1, 2, \hdots $.
+    \begin{algorithmic}[1]
+    \For{$k=1,2, \hdots$}
+        \State Compute stochastic gradient $\tilde{g}^{k}\leftarrow \nabla f_{\zeta^k}(x^{k})$;
+        \State Update momentum vector $\tilde{m}_j^{k} \leftarrow (1-\beta)\tilde{g}_j^{k} + \beta \begin{cases}  \tilde{m}_j^{k-1} & \text{if } j \in J_k, \\ 
+         0 & \text{otherwise;} \end{cases}$
+        \State Compute update vector $\tilde{u}_j^{k} \leftarrow \begin{cases}  \tilde{m}_j^{k} & \text{if } j \in J_k, \\ \tilde{g}_j^{k} & \text{otherwise;} \end{cases}$
+        \State Update iterate $x^{k+1}\leftarrow x^k - \alpha^k \tilde{u}^k$;
+    \EndFor
+    \end{algorithmic}
+\end{algorithm}
+
+
+\section{Theoretical Results}
+
+
+For the theoretical analysis, we consider the case where the $\texttt{State-Free}$ optimizer is SGD and the $\texttt{State-Full}$ optimizer is SGD with momentum (SGDM). For the projection, we use coordinate-wise projection. This special case of \ALG\ is provided in Algorithm~\ref{alg: SGDM}. We minimize the following objective
+\begin{align}
+    \label{equ: objective} 
+    \textstyle
+    \min_{x \in \R^d} \big\{ f(x):=\E_{\zeta}[f_{\zeta} (x)]
+    \big\},
+\end{align}
+where we access $f$ via a stochastic oracle that takes $x$ as input and returns $(f_{\zeta} (x), \nabla f_{\zeta} (x))$.
+
+\subsection{Notation and Preliminaries}
+
+We use $\|\cdot\|$ for the vector $\ell_2$-norm, and $\langle\cdot, \cdot\rangle$ stands for the dot product. Let $g^k$ denote the full gradient of $f$ at $x^k$, i.e., $g^k\coloneqq \nabla f(x^k)$, and $f^{*}\coloneqq \min_{x\in\Rd}f(x)$. We use subscript $j$ to denote the $j$-th coordinate.
+
+\begin{assumption}
+\label{assump: standard assumption}
+We make the following assumptions, which are standard in non-convex stochastic optimization; see \citep{liu2020improved}.
+\begin{enumerate}  
+    \item \textbf{Smoothness:} The objective $f(x)$ in \eqref{equ: objective} is $L$-smooth.
+    \item \textbf{Unbiasedness:} At each iteration $k$, $\tg^k$ satisfies $\E_{\zeta^k} [\tg^k] = g^k$.
+    \item \textbf{Independent samples:} The random samples $\{\zeta_k\}_{k=1}^{\infty}$ are independent.
+    \item \textbf{Bounded variance:} The variance of $\tg_j^k$ with respect to $\zeta^k$ satisfies $\mathrm{Var}_{\zeta^k}(\tg_j^k) = \E_{\zeta^k}[\|\tg_j^k - g_j^k\|^2]\leq \sigma_j^2$ for some $\sigma_j^2>0$. We denote $\sigma^2 = \sum_{j=1}^d \sigma^2_j.$
+\end{enumerate}
+\end{assumption}
+
+Finally, we define the probability that index $j \in J_k$ is selected, conditioned on the prior iteration $k-1$, as $p^k_j := \Pr_{k-1}[j \in J_k].$ Other useful quantities are $p^k_{\max} := \max_{j \in [d]}\{ p^{k}_j\}$ and $p^k_{\min} := \min_{j \in [d]}\{ p^{k}_j\}$.
+
+\subsection{Convergence of Algorithm~\ref{alg: SGDM}}
+\label{sec: SGDM theory}
+
+Below, we present the main convergence theorem.
+
+\begin{theorem}
+\label{thm: nonconvex constant}
+Let Assumption \ref{assump: standard assumption} hold and $\alpha^k = \alpha\leq \frac{1-\beta}{L(4-\beta+\beta^2)}$. Then, the iterates of Algorithm~\ref{alg: SGDM} satisfy
+\begin{align}
+\label{equ: SGDM bound}
+\frac{1}{k}\sum_{i=1}^k\E[\|g^i\|^2]
+&= \mathcal{O}\left(\frac{f(x^1)-f^*}{k\alpha} + L\alpha\sigma^2 \left(1 + \frac{\hat{p}^k_{\max}(1 - \Bar{p}^k_{\min})\beta}{(1-\beta)}\right)\right),
+\end{align}
+where $\Bar{p}^k_{\min} = \frac1k\sum_{i=1}^k\Bar{p}^i_{\min}$ and $\hat{p}^k_{\max} = \max_{i \in [k]} \{p^i_{\max}\}$.
+\end{theorem}
+
+ Let us analyze the obtained result. Firstly, if $J_k = [d]$ or $J_k = \emptyset$, Algorithm~\ref{alg: SGDM} becomes SGDM and SGD, respectively. In this case, we have $\Bar{p}^k_{\min} = 1$ for SGDM and $\hat{p}^k_{\max} = 0$ for SGD. Therefore, the resulting rate is $\mathcal{O}\left(\nicefrac{1}{k\alpha} + L\alpha\sigma^2\right)$, which recovers the best-known rate for both SGD and SGDM under these assumptions~\cite{liu2020improved}. Furthermore, if at each step each coordinate is sampled independently with probability $p$, we have $\Bar{p}^k_{\min} = \hat{p}^k_{\max} = p$. Therefore, we recover the same rate if $p = \mathcal{O}\left(1 - \beta\right)$ or $p = \mathcal{O}\left(\beta\right)$. Finally, in the worst case (e.g., $J_k$ is deterministic and $0<|J_k|<d$), we have $\Bar{p}^k_{\min} = 0$ and $\hat{p}^k_{\max} = 1$. Thus, the rate becomes $\mathcal{O}\left(\nicefrac{1}{k\alpha} + \nicefrac{L\alpha\sigma^2}{1 - \beta}\right)$, which is worse by a factor of $\nicefrac{1}{1 - \beta}$.
+
+
+\section{Experiments}
+
+
+This section presents the main experimental results of the paper. 
+To evaluate the performance of \ALG, we conducted experiments both on the pre-training and fine-tuning of language models.
+
+\subsection{Pre-training experiments}\label{sec:exp pre-training}
+
+\textbf{Setup.} 
+The core setup for pre-training is taken from the \citet{zhao2024galore}. 
+We utilize LLaMA-based~\citep{llama} model architectures with up to 1B parameters and train them on the Colossal Clean Crawled Corpus (C4) dataset~\citep{c4}.
+The C4 dataset is intended for pre-training, making this setup a good approximation of real-world applications. 
+A detailed description of the setup can be found in~\Cref{app:pre-training_additional}. 
+However, we made several modifications that we would like to discuss in detail below.
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Training Duration.} 
+    The training approach in \citet{zhao2024galore} aligns with the empirical rule from scaling laws~\citep{chinchilla}, which suggests using approximately 20 times the model size in tokens for training. 
+    However, this number of tokens is far from achieving convergence. 
+    In practice, models are typically trained for significantly longer periods~\citep{llama2,zhang2024tinyllama}.
+    One reason for this discrepancy is that the original scaling laws do not account for the inference of the model after training. 
+    Adjustments to scaling laws considering this parameter are discussed, for example, in~\citep{beyondchinchilla}. 
+    For our experiments we chose 200k steps for the 60M and 130M models, 240k for 350M model and 300k for the 1B model.
+    \item \textbf{Learning Rate.} 
+    The authors of GaLore suggested using different learning rates for fixed unprojectable parameters (Embeddings, RMSNorms~\citep{rmsnorm}, Logits) and the remaining projectable parameters (attention and FFN weights modules weights). 
+    However, introducing additional hyperparameters complicates the use of the algorithm. 
+    Since both sets of parameters are state-full and trained using the same optimization algorithm, we always used the same learning rate for them in \ALG\;and BAdam. For GaLore learning rate see~\Cref{sec:exp pre-training}.
+    \item \textbf{Mixed Precision instead of the pure bfloat16 training.} 
+    Pure 16-bit training has been shown to potentially compromise model convergence and accuracy~\citep{bf16}. 
+    This degradation stems from storing both the model weights and optimizer statistics in reduced precision formats such as float16 or bfloat16.
+    However, these formats often lack sufficient precision in representing floating-point numbers. 
+    Consequently, mixed precision training has become a more common approach for training language models~\citep{le2023bloom,almazrouei2023falcon}).
+    While training in pure 16-bit format is also possible, stochastic rounding~\citep{stochastic_rounding, bf16} is often employed to mitigate the aforementioned issue. 
+    Given that the goal of this research is to identify the optimal optimization algorithm, we deemed it more appropriate to compare optimizers in a transparent and stable setup that does not require auxiliary tricks. 
+    Hence, we primarily used Mixed Precision training for its illustrative value in understanding each method's potential. 
+    However, for completeness, we also conducted experiments in pure bfloat16 format, detailed in our ablation study~\Cref{sec:exp pre-training_ablation}.
+\end{itemize} 
+
+\begin{table}[!t]
+\caption{Comparison of validation perplexity and memory estimation for various optimization methods across LLaMA model scales trained on C4. Lower $\downarrow$ is better.
+In parentheses, we also indicate the additional memory overhead introduced by the optimization algorithm. 
+The values are calculated assuming that each float value occupies 4 bytes (float32). 
+Note that Embeddings, RMSNorms, and Logits are always trained using state-full Adam.
+}
+\label{tab:pre-training_main_results}
+\begin{center}
+\begin{tabular}{l|cccc}
+\toprule
+& 60M & 130M & 350M & 1B \\
+\hline
+Adam & 22.73 (0.43G) & 18.13 (1.00G) & 14.43 (2.74G) & 12.02 (9.98G) \\
+\hline
+GaLore, $\rho=0.25$ & 25.68 (0.30G) & 21.11 (0.54G) & 16.88 (1.10G)& 13.69 (3.41G)\\
+BAdam, $\rho=0.25$ & 24.86 (0.29G) & 20.34 (0.52G) & 16.41 (1.05G)& 13.75 (3.23G)\\
+\ALG,\;$\rho=0.25$ & \textbf{23.59} (0.29G) & \textbf{18.60} (0.52G) & \textbf{14.79} (1.05G)& \textbf{12.32} (3.23G)\\
+\ALG,\;$\rho=0.0$ & 24.06 (0.24G) & 18.90 (0.37G) & 15.03 (0.49G)& 12.63 (0.98G)\\
+\midrule
+Training tokens & 20B & 20B & 24B & 30B\\
+Number of iterations & 200k & 200k & 240k & 300k \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsubsection{Comparison to existing memory-efficient algorithms}\label{sec:exp pre-training_main_results}
+
+To begin, we present the results of comparing \ALG\ with existing memory-efficient methods across four sizes of LLaMA-based architectures: 60M, 130M, 350M, and 1B\footnote{See preliminary experimental results with LLaMA 7B in~\Cref{app:Llama_7B}}.
+
+\textbf{Baselines.} We use the following methods as baselines for our approach:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Full-rank Training.}
+    Training using memory-inefficient Adam. 
+    Weights, gradients, and 
+    statistics are stored and computed for all parameters.
+    This serves as an upper bound for model performance.
+    \item \textbf{GaLore.} \citet{zhao2024galore} proposed GaLore, a memory-efficient optimization algorithm that uses a low-rank projection of gradient matrices $\mG$. 
+    Every $T$ steps, the current gradient matrix $\mG_t$ is used to compute the projection matrix $\mP$ via SVD decomposition. 
+    The gradient is then projected onto the low-rank space, where the optimization step is performed.
+    Subsequently, the resulting low-rank update is projected back into the full-rank space and added to the weights $\mW$.
+    \item \textbf{BAdam.} \citet{luo2024badam} proposed a block coordinate descent (BCD)-type optimization method termed BAdam. 
+    The parameters are divided into blocks, which are then updated one by one using Adam.
+    Similar to GaLore, the optimized block is updated every $T$ steps. 
+    Although this method was initially proposed only for fine-tuning, it is the closest method to our \ALG. 
+    Unlike BAdam, in our algorithm, state-free blocks are not frozen but are updated using signSGD.
+    \item \textbf{Other Algorithms.} Among other relevant methods, ReLoRA~\citep{relora} and MicroAdam~\citep{modoranu2024microadam} can also be highlighted. 
+    However, we did not include them for comparison in this paper for the following reasons: 
+    1. ReLoRA was evaluated in~\citep{zhao2024galore}, where it significantly underperformed compared to GaLore with the same memory budget.
+    2. MicroAdam. Its current implementation only supports bfloat16 master weights, whereas our main experiments conducted with mixed precision.
+\end{itemize} 
+
+\textbf{Main results.} The results of our experiments are presented in~\Cref{tab:pre-training_main_results}, which includes both validation perplexity and memory footprint estimations for each method. 
+We compared all memory-efficient methods under the same memory budget, specifically with a density $\rho=0.25$. 
+Here, $\rho$ refers to the proportion of state-full parameters (see~\Cref{app:pre-training_additional} for a detailed explanation).
+
+We conducted a grid search to determine the optimal learning rate for Adam, which we then applied uniformly to \ALG\ and BAdam~\citep{luo2024badam}. 
+For GaLore~\citep{zhao2024galore}, we found that using this same learning rate produced better results than the rate originally suggested in their paper. 
+This discrepancy might be attributed to our experiments involving a significantly larger number of training steps than those for which GaLore's original learning rate was optimized.
+
+\Cref{tab:pre-training_main_results} demonstrates that \ALG\ significantly outperforms the memory-efficient baselines across all model sizes with the same memory budget, coming close to the performance of Adam.
+
+\begin{table}[t]
+    \caption{Perplexity of LLaMA-130M models pre-trained on C4 for 100k iterations (10B tokens).
+    The leftmost column indicates the modules moved to the state-free set and trained using signSGD. 
+    The results show that \textbf{Logits}, unlike Embeddings and RMSNorms, are exceptionally responsive to the choice of optimization algorithm from Adam to signSGD.}
+    \label{tab:zero_density}
+    \begin{center}
+    \begin{tabular}{c|c}
+    \toprule
+    \textbf{State-free modules} & \textbf{Perplexity $\downarrow$} \\
+    \midrule
+    Linear (corresponds to the \ALG\;with $\rho=0.0$) & 20.02 \\
+    \hline
+    Linear, \textit{RMSNorms} & 20.07 \\
+    Linear, \textit{Embeddings} & 20.48 \\
+    Linear, \textit{Embeddings, RMSNorms} & 20.55 \\
+    Linear, \textbf{Logits} & 34.66 \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+\textbf{Zero-density training.} 
+\Cref{tab:pre-training_main_results} also reveals a surprising result: \ALG\;with $\rho = 0.0$ significantly outperforms both GaLore and BAdam, even when these competing methods use a higher density of $\rho = 0.25$. 
+Essentially, in this case, the parameters are divided into two parts --- a state-full part consisting of the Embeddings, RMSNorms, and Logits, and a state-free part consisting of all other parameters. 
+This division remains fixed throughout the training. 
+We conducted additional experiments to determine the maximum subset of parameters that can be trained with a state-free optimizer without significant quality degradation. 
+We systematically moved different combinations of the Embeddings, RMSNorms, and Logits from the state-full to the state-free set and observed the results during the training of LLaMA-130M. 
+\Cref{tab:zero_density} reveals that the Logits demonstrates a dramatically higher sensitivity, with changes to its optimizer resulting in severe performance degradation.
+This finding aligns with results from~\citep{anything_but_sgd}, where the authors demonstrated that most parameters can be trained using SGDM, but the Logits require training with Adam.
+
+\subsubsection{Ablation study}\label{sec:exp pre-training_ablation}
+
+We also conducted additional experiments to verify the robustness of our framework to various hyperparameters. 
+Firstly, an ablation study on the state-full subspace update frequency $T$ in~\Cref{tab:update_gap} shows that the performance keeps improving up to $T = 200$. 
+We note that, unlike in~\citet{zhao2024galore}, the perplexity does not significantly decrease even when reducing the update frequency to $T=10$ ($\sim0.2$ drop vs. $\sim 4.$ drop for GaLore). A detailed explanation for this result can be found in~\Cref{app:reset_reproj}.
+Second, when using other schedulers, the performance gap between \ALG\;and baselines remains consistent, as shown in~\Cref{tab:sch_constant,tab:sch_one_cycle}.
+Then, the results of training in pure bfloat16 are presented in~\Cref{tab:bf16}, demonstrating consistency with our main experiments in \Cref{tab:pre-training_main_results}, i.e., \ALG\;significantly outperforms the baselines across these variations.
+We also conducted experiments to show how perplexity changes with varying $\rho$, and the results are presented in~\Cref{tab:rho_ablation}.
+Finally, we conducted an experiment to compare different strategies for selecting state-full blocks during training. The results in~\Cref{tab:block_strategy} show that there is no significant difference between random and structured block selection.
+\subsection{Fine-tuning experiments}\label{sec:exp fune-tuning}
+\begin{table*}[h]
+    \caption{\small{Evaluating \ALG\;for memory-efficient fine-tuning RoBERTa-Base on GLUE benchmark. Results represent the mean and standard deviation across 3 independent runs. Upper $\uparrow$ is better.}}
+    \label{tab:fine-tuning}
+    \begin{center}
+    \footnotesize
+    \addtolength{\tabcolsep}{-4pt}
+    \begin{tabular}{l|cc|cccccccc|c} %
+    \toprule
+               \textbf{Method} & \textbf{Modules} & \textbf{Rank} & 
+               \textbf{CoLA} & \textbf{STS-B} & \textbf{MRPC} & \textbf{RTE} & \textbf{SST2} & \textbf{MNLI} & \textbf{QNLI} & \textbf{QQP} & \textbf{Avg} \\
+    \midrule
+    LoRA & QV & 8 & 
+    63.8\textsubscript{$\pm$.6} & 90.9\textsubscript{$\pm$.1} & 89.1\textsubscript{$\pm$.4} & 79.2\textsubscript{$\pm$1.1} & 94.8\textsubscript{$\pm$.2} & \textbf{87.6\textsubscript{$\pm$.2}} & 93.1\textsubscript{$\pm$.1} & 90.6\textsubscript{$\pm$.0} & 86.1 \\
+    \midrule
+    GaLore & All & 8 
+    & 60.0\textsubscript{$\pm$.2} & 90.8\textsubscript{$\pm$.1} & 89.0\textsubscript{$\pm$.7} & 79.7\textsubscript{$\pm$.9} & \textbf{94.9\textsubscript{$\pm$.5}} & \textbf{87.6\textsubscript{$\pm$.1}} & \textbf{93.3\textsubscript{$\pm$.1}} & 91.1\textsubscript{$\pm$.1} & 85.8\\
+    \midrule
+    GaLore & QV & 8 
+    & 56.1\textsubscript{$\pm$.8} & 90.8\textsubscript{$\pm$.2} & 88.1\textsubscript{$\pm$.3} & 74.7\textsubscript{$\pm$1.9} & 94.3\textsubscript{$\pm$.1} & 86.6\textsubscript{$\pm$.1} & 92.6\textsubscript{$\pm$.1} & 89.4\textsubscript{$\pm$.1} & 84.1 \\
+    \ALG\;& QV & 8 
+    & 
+    64.5\textsubscript{$\pm$.7} & \textbf{91.1\textsubscript{$\pm$.1}} & \textbf{89.2\textsubscript{$\pm$.3}} & \textbf{82.4\textsubscript{$\pm$.9}} & 94.8\textsubscript{$\pm$.2} & 87.4\textsubscript{$\pm$.1} & 92.8\textsubscript{$\pm$.1} & \textbf{91.4\textsubscript{$\pm$.1}} & \textbf{86.7} \\
+    \ALG\;& None & 0 
+    & \textbf{64.8\textsubscript{$\pm$.5}} & \textbf{91.1\textsubscript{$\pm$.1}} & 89.1\textsubscript{$\pm$.3} & 81.6\textsubscript{$\pm$.6} & \textbf{94.9\textsubscript{$\pm$.2}} & 87.3\textsubscript{$\pm$.1} & 92.8\textsubscript{$\pm$.1} & 91.3\textsubscript{$\pm$.1} & 86.6 \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table*}
+
+We evaluated the performance of our framework in the context of memory-efficient fine-tuning using the GLUE benchmark~\citep{wang2018glue}, a widely-used collection of tasks for evaluating language models. 
+Following the approach from~\citet{zhao2024galore}, we fine-tuned RoBERTa-base~\citep{liu2019roberta} using LoRA~\citep{lora} and GaLore as baselines for comparison. 
+We adhered to the setup described in LoRA, where low-rank updates of rank 8 were applied only to the Q and V matrices. For a detailed description of the experimental setup, see~\Cref{app:fine-tuning_additional}.
+
+However, this comparison required a minor modification to \ALG\;compared to the pre-training phase. 
+Instead of selecting active parameters blockwise, we opted for columnwise selection in each matrix.
+This adjustment was necessary to ensure a fair comparison within a similar memory budget, as the number of trainable parameters in LoRA with rank 8 is approximately $2.5$ times fewer than the number of trainable parameters in any RoBERTa matrix. 
+This transition from blockwise to columnwise selection allowed us to maintain comparable memory usage across methods. 
+For the same reason, we did not include comparisons with BAdam~\citep{luo2024badam} in this setup.
+
+The results are presented in~\Cref{tab:fine-tuning}. 
+Since the LoRA setup adds trainable adapters only to the Q and V matrices, while the GaLore code uses all modules as projectable parameters, we conducted experiments in both setups. 
+The results demonstrate that \ALG\ significantly outperforms GaLore and shows comparable results to LoRA.
+
+As in~\Cref{sec:exp pre-training_main_results}, we conducted additional experiments with \ALG\ using $\rho = 0.0$. 
+In this setup, only the classification head is trained using Adam, while the embedding parameters remain frozen, and the remaining parameters are trained using signSGD. 
+The results demonstrate that this training approach barely compromises performance compared to \ALG\ with rank 8, and still outperforms GaLore. 
+Similar to our findings in~\Cref{sec:exp pre-training_main_results}, we observe that the classification head parameters are particularly sensitive to the choice of optimizer, which can be seen in~\Cref{tab:fine-tuning-zero_density} where the model's performance significantly deteriorates when using signSGD for classification head optimization.
+
+
+
+\section{Conclusion}
+
+
+
+In this work, we introduce a new memory-efficient optimization framework, \ALG. 
+Within this framework, the optimization space is divided into two subspaces: the first is updated using a state-full algorithm such as Adam, while the second is updated using a state-free algorithm such as signSGD. 
+We prove theoretical convergence guarantees for our framework with SGDM serving as the state-full algorithm and SGD as the state-free algorithm. 
+In experiments involving pre-training and fine-tuning of language models, \ALG\ outperforms other approaches while using the same or smaller memory.
+
+
+

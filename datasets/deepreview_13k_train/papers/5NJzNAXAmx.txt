@@ -1,0 +1,813 @@
+\title{Informed POMDP: Leveraging Additional Information in Model-Based RL}
+
+\begin{abstract}
+    In this work, we generalize the problem of learning through interaction in a POMDP by accounting for eventual additional information available at training time.
+    First, we introduce the informed POMDP, a new learning paradigm offering a clear distinction between the information at training and the observation at execution.
+    Next, we propose an objective that leverages this information for learning a sufficient statistic of the history for the optimal control.
+    We then adapt this informed objective to learn a world model able to sample latent trajectories.
+    Finally, we empirically show a learning speed improvement in several environments using this informed world model in the Dreamer algorithm.
+    These results and the simplicity of the proposed adaptation advocate for a systematic consideration of eventual additional information when learning in a POMDP using model-based RL.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Reinforcement learning (RL) aims to learn to act optimally through interaction with environments whose dynamics are unknown.
+A major challenge in this field is partial observability, where only a partial observation $o$ of the Markovian state of the environment $s$ is available for taking action $a$.
+Such an environment can be formalized as a partially observable Markov decision process (POMDP).
+In this context, an optimal policy $\eta(a | h)$ generally depends on the history $h$ of all observations and previous actions, which grows linearly with time.
+Fortunately, it is theoretically possible to find a statistic $f(h)$ of the history $h$ that is updated recurrently and that summarizes all relevant information to act optimally.
+Such a statistic is said to be recurrent and sufficient for the optimal control.
+Formally, a statistic $f(h)$ is recurrent when it is updated according to $f(h') = u(f(h), a, o')$ each time an action $a$ is taken and a new observation $o'$ is received, with $h' = (h, a, o')$.
+And a statistic $f(h)$ is sufficient for the optimal control when there exists an optimal policy $\eta(a | h) = \allowbreak g(a | f(h))$.
+
+In view of the existence of recurrent and sufficient statistics, many approaches have relied on learning a recurrent policy $\eta_{\theta, \phi}(a | h) = \allowbreak g_\phi(a | f_\theta(h))$ using a recurrent neural network (RNN) $f_\theta$ for the statistic.
+These policies are simply trained by stochastic gradient ascent of a RL objective using backpropagation through time \citep{bakker2001reinforcement, wierstra2010recurrent, hausknecht2015deep, heess2015memory, zhang2016learning, zhu2017improving}.
+In this case, the RNN learns a sufficient statistic $f_\theta(h)$ as it learns an optimal policy \citep{lambrechts2022recurrent, hennig2023emergence}.
+Although these approaches theoretically allow implicit learning of a sufficient statistic, sufficient statistics can also be learned explicitly.
+Notably, many works \citep{igl2018deep, buesing2018learning, guo2018neural, gregor2019shaping, han2019variational, guo2020bootstrap, lee2020stochastic, hafner2019learning, hafner2020dream} focused on learning a recurrent statistic that encodes the reward and next observation distribution given the action: $p(r, o' | h, a) = p(r, o' | f(h), a)$, a property known as predictive sufficiency \citep{bernardo2009bayesian}.
+A recurrent and predictive statistic is indeed proven to be sufficient for the optimal control \citep{subramanian2022approximate}.
+The sufficiency objective is usually pursued jointly with the RL objective.
+
+While these methods can learn sufficient statistics and optimal policies in the context of POMDPs, they learn solely from the observations.
+However, assuming the same partial observability at training time and execution time is too pessimistic for many environments, notably for those that are simulated.
+We claim that additional information about the state $s$, be it partial or complete, can be leveraged during training for learning sufficient statistics more efficiently.
+To this end, we generalize the problem of learning from interaction in a POMDP by proposing the informed POMDP.
+This formalization introduces the training information $i$ about the state $s$, which is only available at training time.
+Importantly, this training information is designed such that the observation is conditionally independent of the state given the information.
+Note that it is always possible to design such an information $i$, possibly by concatenating the observation $o$ with the eventual additional observations $o^{\scriptscriptstyle+}$, such that $i = (o, o^{\scriptscriptstyle+})$.
+This formalization offers a new learning paradigm where the training information is used along the reward and observation to supervise the learning of the policy.
+
+In this context, we prove that recurrent statistics are sufficient for the optimal control when they are predictive sufficient for the reward and next information given the action: $p(r, i' | h, a) = p(r, i' | f(h), a)$.
+We then derive a learning objective for finding a predictive sufficient statistic, which amounts to approximating the conditional distribution $p(r, i' | h, a)$ through likelihood maximization using a model $q_\theta(r, i' | f_\theta(h), a)$, where $f_\theta$ is the recurrent statistic.
+Compared to the classic objective for learning sufficient statistics \citep{igl2018deep, buesing2018learning, han2019variational, hafner2019learning}, this objective approximates $p(r, i' | h, a)$ instead of $p(r, o' | h, a)$.
+Next, we show that this learned model $q_\theta(r, i'| f_\theta(h), a)$ can be adapted to provide a world model from which latent trajectories can be sampled without explicitly reconstructing the observation.
+This approach boils down to adapting latent world models such as those of PlaNet or Dreamer \citep{hafner2019learning, hafner2020dream, hafner2021mastering, hafner2023mastering} by relying on a model of the information instead of a model of the observation.
+Our claims are supported by experiments in several environments that we formalize as informed POMDPs (Mountain Hike, Velocity Control, Pop Gym, Flickering Atari and Flickering Control).
+The informed adaptation of Dreamer exhibits an improvement in terms of convergence speed and policy performance in many environments, while sometimes hurting performance in others.
+
+This work is structured as follows.
+In \autoref{sec:related}, we present some related works in asymmetric learning and multi-agent RL.
+In \autoref{sec:informed}, the informed POMDP is presented with the underlying execution POMDP.
+In \autoref{sec:optimal}, we provide a learning objective for sufficient statistics in this context.
+In \autoref{sec:model}, we adapt the Dreamer algorithm to informed POMDPs using this informed objective.
+In \autoref{sec:experiments}, we compare the Uninformed Dreamer and the Informed Dreamer in several environments.
+
+
+
+\section{Related works}
+
+
+In RL for POMDPs, asymmetric learning consists of exploiting state information during training.
+These approaches usually learn policies for the POMDP by imitating a policy conditioned on the state \citep{choudhury2018data}.
+However, these heuristic approaches lack a theoretical framework, and the resulting policies are known to be suboptimal for the POMDP \citep{warrington2021robust, baisero2022asymmetric}.
+Intuitively, optimal policies in POMDP might indeed need to consider actions that reduce state uncertainty.
+\citet{warrington2021robust} addressed this issue by constraining the expert policy so that its imitation results in an optimal policy in the POMDP.
+Alternatively, asymmetric actor-critic approaches use a critic conditioned on the state \citep{pinto2017asymmetric}.
+These approaches were proven to provide biased gradients by \citet{baisero2022unbiased}, who also proposed an unbiased actor-critic approach by introducing the history-state value function $V(h, s)$.
+\citet{baisero2022asymmetric} adapted this method to value-based RL, where the history-dependent value function $V(h)$ uses the history-state value function $V(h, s)$ in its temporal difference target.
+Alternatively, \citet{nguyen2021belief} proposed to enforce that the statistic $f(h)$ encodes the belief $p(s | h)$, a sufficient statistic for the optimal control \citep{astrom1965optimal}.
+It makes the strong assumption that beliefs $b(s) = p(s|h)$ are available at training time.
+Finally, in a concurrent work, \citet{avalos2024wasserstein} learns a statistic $f(h)$ that encodes the belief distribution $p(s | h)$ by leveraging the states during training.
+
+In multi-agent RL, exploiting additional information available at training time was extensively studied under the centralized training and decentralized execution (CTDE) framework \citep{oliehoek2008optimal}.
+In CTDE, it is assumed that the histories of all agents, or even the environment state, are available to all agents at training time.
+To exploit this additional information, several asymmetric actor-critic approaches have been developed by leveraging an asymmetric critic conditioned on all histories, including COMA \citep{foerster2018counterfactual}, MADDPG \citep{lowe2017multi}, M3DDPG \citep{li2019robust} and R-MADDPG \citep{wang2020partially}.
+While efficient in practice, \citet{lyu2022deeper} showed that these asymmetric actor-critic approaches provide biased gradient estimates, which generalizes results developed for asymmetric learning in POMDP \citep{baisero2022unbiased} to the multi-agent setting.
+In the cooperative CTDE setting, another line of work focuses on value decomposition to learn a utility function for each agent, including QMIX \citep{rashid2018qmix}, QVMix \citep{leroy2021qvmix} and QPLEX \citep{wang2021qplex}.
+These approaches use the additional information to modulate the contribution of each utility function in the global value function, while ensuring that maximizing the local utility functions also maximize the global value function, a property known as individual global max (IGM).
+Other methods relax this IGM requirement but still condition the value function on all histories, including QTRAN \citep{son2019qtran} and WQMix \citep{rashid2020weighted}.
+Recently, \citet{hong2022rethinking} established that the IGM decomposition is not attainable in the general case.
+
+In contrast to the existing literature on asymmetric learning in POMDP, we introduce an objective that provides a sufficient statistic for the optimal control, and that leverages the additional information only through the objective.
+Moreover, our new learning paradigm is not restricted to state supervision, but supports any level of additional information.
+Finally, to the best of our knowledge, our method is the first to exploit additional information for learning an environment model of the POMDP.
+While our approach is probably applicable to the CTDE setting for learning sufficient statistics from the local histories of each agent, we leave it as future work.
+
+
+
+\section{Informed POMDP}
+
+
+In this section, we introduce the informed POMDP and the associated training information, along with the underlying execution POMDP and the RL objective in this context.
+
+\subsection{Informed POMDP and execution POMDP} \label{subsec:informed}
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+    \centering
+    \begin{tikzpicture}[font=\scriptsize]
+\definecolor{MyYellow}{HTML}{F7D254}
+\definecolor{MyBlue}{HTML}{3B7CF3}
+\definecolor{MyRed}{HTML}{E8464A}
+\definecolor{MyGreen}{HTML}{A3D16E}
+\definecolor{MyLightGreen}{HTML}{729C44}
+\definecolor{MyOrange}{HTML}{EF8C56}
+\definecolor{MyPink}{HTML}{8C33B6}
+\definecolor{MyPurple}{HTML}{982ABC}
+\definecolor{MyGray}{HTML}{999999}
+\definecolor{MyLightGray}{HTML}{616161}
+\definecolor{MyLighterGray}{HTML}{909090}
+\definecolor{MyLightBlue}{HTML}{52D6FC}
+\definecolor{MyLighterBlue}{HTML}{81DEFE}
+
+\tikzstyle{state} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{reward} = [circle, fill=MyGreen, text=white, text width=0.0cm, align=center]
+\tikzstyle{information} = [circle, fill=MyYellow, text=white, text width=0.0cm, align=center]
+\tikzstyle{observation} = [circle, fill=MyRed, text=white, text width=0.0cm, align=center]
+\tikzstyle{action} = [circle, fill=MyBlue, text=white, text width=0.0cm, align=center]
+\tikzstyle{statistic} = [circle, fill=MyPurple, text=white, text width=0.0cm, align=center]
+\tikzstyle{encoded} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{prior} = [circle, fill=MyLighterGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{value} = [circle, fill=MyLightGreen, text=white, text width=0.0cm, align=center]
+
+\tikzstyle{label} = [text=white, text width=0.2cm, align=center]
+\tikzstyle{distribution} = [text=MyGray, text width=0.2cm, align=center]
+
+\tikzstyle{arrow} = [-{Stealth[round]}, line width=0.020cm, color=MyGray]
+\tikzstyle{loss} = [arrow, MyOrange]
+\tikzstyle{bended} = [bend left=33]
+\tikzstyle{zone} = [draw=none, rounded corners, fill=MyLightBlue]
+
+\draw[zone, opacity=0.30] (-0.4, -0.70) rectangle (4.4, -2.35) ;
+\draw[zone, opacity=0.40] (-0.3, -1.75) rectangle (4.3, -2.25) ;
+
+\input{tikz/trajectory}
+
+\node[state] (s0) at (0, 0) {} ; \node[label] (s0t) at (s0) {$s$} ;
+\node[state] (s1) at (2, 0) {} ; \node[label] (s1t) at (s1) {$s$} ;
+\node[state] (s2) at (4, 0) {} ; \node[label] (s2t) at (s2) {$s$} ;
+
+\draw[arrow] (s0) to (i0) ;
+\draw[arrow] (i0) to (o0) ;
+
+\draw[arrow] (s0) to (r0) ; \draw[arrow] (a0) to (r0) ;
+\draw[arrow] (s0) to (s1) ; \draw[arrow] (a0) to (s1) ;
+
+\draw[arrow] (s1) to (i1) ;
+\draw[arrow] (i1) to (o1) ;
+
+\draw[arrow] (s1) to (r1) ; \draw[arrow] (a1) to (r1) ;
+\draw[arrow] (s1) to (s2) ; \draw[arrow] (a1) to (s2) ;
+
+\draw[arrow] (s2) to (i2) ;
+\draw[arrow] (i2) to (o2) ;
+
+\node[distribution, above left=-0.15cm of s0] {$P$} ;
+\node[distribution, above left=-0.15cm of i0] {$\tilde{I}$} ;
+\node[distribution, above left=-0.15cm of o0] {$\tilde{O}$} ;
+\node[distribution, below left=-0.15cm of r0] {$R$} ;
+\node[distribution, above left=-0.15cm of s1] {$T$} ;
+
+\node[label, text=MyGray, align=center, text width=2cm, anchor=center] (dots) at (5.2, 0) {$\dots$} ;
+\node[label, text=MyLighterBlue, align=center, text width=2cm, anchor=center] (train) at (5.2, -1) {training} ;
+\node[label, text=MyLightBlue, align=center, text width=2cm, anchor=center] (exec) at (5.2, -2) {execution} ;
+    \end{tikzpicture}
+    \caption{Bayesian network of an informed POMDP execution.}
+    \label{fig:ipomdp}
+\end{wrapfigure}
+
+Formally, an informed POMDP ${\wt{\mathcal{P}}}$ is defined as a tuple ${\wt{\mathcal{P}} = (\mathcal{S}, \mathcal{A}, \mathcal{I}, \mathcal{O}, T, R, \wt{I}, \wt{O}, P, \gamma)}$ where $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space, $\mathcal{I}$ is the information space, and $\mathcal{O}$ is the observation space.
+The initial state distribution $P$ gives the probability $P(s_0)$ of $s_0 \in \mathcal{S}$ being the initial state of the decision process.
+The dynamics are described by the transition distribution $T$ that gives the probability $T(s_{t+1} | s_t, a_t)$ of $s_{t+1} \in \mathcal{S}$ being the state resulting from action $a_t \in \mathcal{A}$ in state $s_t \in \mathcal{S}$.
+The reward function $R$ gives the expected immediate reward $r_t = R(s_t, a_t)$ obtained at each transition.
+The information distribution ${\wt{I}}$ gives the probability ${\wt{I}(i_t | s_t)}$ to get information $i_t \in \mathcal{I}$ in state $s_t \in \mathcal{S}$, and
+the observation distribution ${\wt{O}}$ gives the probability ${\wt{O}(o_t | i_t)}$ to get observation $o_t \in \mathcal{O}$ given information $i_t$.
+Finally, the discount factor $\gamma \in \left[0, 1\right]$ gives the relative importance of future rewards.
+The main assumption about an informed POMDP is that the observation $o_t$ is conditionally independent of the state $s_t$ given the information $i_t$: ${p(o_t | i_t, s_t) = \wt{O}(o_t | i_t)}$.
+In other words, the random variables $s_t$, $i_t$ and $o_t$ satisfy the Bayesian network $s_t \longrightarrow i_t \longrightarrow o_t$.
+In practice, it is always possible to define such a training information $i_t$.
+For example, the information $i_t = (o_t, o_t^{\scriptscriptstyle+})$ satisfies the aforementioned conditional independence for any $o_t^{\scriptscriptstyle+}$.
+Taking a sequence of $t$ actions in the informed POMDP conditions its execution and provides samples $(i_0, o_0, a_0, r_0, \dots, i_t, o_t)$ at training time, as illustrated in \autoref{fig:ipomdp}.
+
+For each informed POMDP, there is an underlying execution POMDP that is defined as $\mathcal{P} = (\mathcal{S}, \mathcal{A}, \mathcal{O}, T, R, O, P, \gamma)$, where ${O(o_t | s_t) = \int_{\mathcal{I}} \wt{O}(o_t | i) \wt{I}(i | s_t) \diff i}$.
+Taking a sequence of $t$ actions in the execution POMDP conditions its execution and provides the history $h_t = (o_0, a_0, \dots, o_t) \in \mathcal{H}$, where $\mathcal{H}$ is the set of histories of arbitrary length.
+Note that the information samples $i_0, \dots, i_t$ and reward samples $r_0, \dots, r_{t-1}$ are not included, since they are not available at execution time.
+
+\subsection{RL objective} \label{subsec:objective}
+
+A policy $\eta \in \Eta$ is a mapping from histories to probability measures over the action space, where $\Eta = \mathcal{H} \rightarrow \Delta(\mathcal{A})$ is the set of such mappings.
+A policy is said to be optimal for an informed POMDP when it is optimal in the underlying execution POMDP, i.e., when it maximizes the expected return
+\begin{align}
+    J(\eta) = \expect_{
+        \substack{
+            P(s_0) \\
+            O(o_t | s_t) \\
+            \eta(a_t | h_t) \\
+            T(s_{t+1} | s_t, a_t)
+        }
+    } \left[
+        \sum_{t=0}^\infty \gamma^t R(s_t, a_t)
+    \right]\!.
+    \label{eq:return}
+\end{align}
+The RL objective for an informed POMDP is thus to find an optimal policy $\eta^* \in \argmax_{\eta \in \Eta} J(\eta)$ for the execution POMDP from interaction with the informed POMDP.
+
+
+
+\section{Optimal control with recurrent sufficient statistics}
+
+
+In this section, we introduce the notion of sufficient statistic for the optimal control and derive an objective for learning such a statistic in an informed POMDP.
+For the sake of conciseness, we simply use $x$ to denote a random variable at the current time step and $x'$ to denote it at the next time step.
+Moreover, we use the composition notation $g \circ f$ to denote the history-dependent policy $g(\cdot | f(\cdot))$.
+
+\subsection{Recurrent sufficient statistics} \label{subsec:recurrent}
+
+Let us first define the concept of sufficient statistic, and derive a necessary condition for optimality.
+\begin{restatable}[Sufficient statistic]{definition}{def:sufficiency} \label{defsufficiency}
+    In an informed POMDP $\wt{\mathcal{P}}$ and in its underlying execution POMDP $\mathcal{P}$, a statistic of the history $f\colon \mathcal{H} \rightarrow \mathcal{Z}$ is sufficient for the optimal control if, and only if,
+    \begin{align}
+        \max_{g\colon \mathcal{Z} \rightarrow \Delta(\mathcal{A})} J(g \circ f) = \max_{\eta\colon \mathcal{H} \rightarrow \Delta(\mathcal{A})} J(\eta).
+        \label{eq:sufficient}
+    \end{align}
+\end{restatable}
+\begin{restatable}[Sufficiency of optimal policies]{corollary}{cor:sufficiency} \label{corsufficiency}
+    In an informed POMDP $\wt{\mathcal{P}}$ and in its underlying execution POMDP $\mathcal{P}$, if a policy $\eta = g \circ f$ is optimal, then the statistic $f: \mathcal{H} \rightarrow \mathcal{Z}$ is sufficient for the optimal control.
+\end{restatable}
+In this work, we focus on learning recurrent policies, i.e., policies $\eta = g \circ f$ for which the statistic $f$ is recurrent.
+Formally, we have,
+\begin{align}
+    \eta(a | h) &= g(a | f(h)), \ \forall (h, a),\label{eq:decomposition} \\
+    f(h') &= u(f(h), a, o'), \ \forall h' = (h, a, o'). \label{eq:recurrent}
+\end{align}
+This enables the history to be processed iteratively each time that an action is taken and an observation is received.
+According to \autoref{corsufficiency}, when learning a recurrent policy $\eta = g \circ f$, the objective can be broken down into two problems: finding a sufficient statistic $f$ and an optimal distribution $g$,
+\begin{align}
+    \max_{
+        \substack{
+            f\colon \mathcal{H} \rightarrow \mathcal{Z} \\
+            g\colon \mathcal{Z} \rightarrow \Delta(\mathcal{A})
+        }
+    } J(g \circ f).
+    \label{eq:objective}
+\end{align}
+
+\subsection{Learning recurrent sufficient statistics} \label{subsec:learning}
+
+Below, we provide a sufficient condition for a statistic to be sufficient for the optimal control.
+\begin{restatable}[Sufficiency of recurrent predictive sufficient statistics]{theorem}{thsufficiency} \label{th:sufficiency}
+    In an informed POMDP $\wt{\mathcal{P}}$, a statistic $f\colon \mathcal{H} \rightarrow \mathcal{Z}$ is sufficient for the optimal control if it is (i)~recurrent and (ii)~predictive sufficient for the reward and next information given the action,
+    \begin{align}
+        \text{\normalfont(i)} \; & f(h') = u(f(h), a, o'), \ \forall h' = (h, a, o'), \label{eq:recurrent_criterion} \\
+        \text{\normalfont(ii)} \; & p(r, i' | h, a) = p(r, i' | f(h), a), \  \forall (h, a, r, i'). \label{eq:sufficiency_criterion}
+    \end{align}
+\end{restatable}
+The proof for this theorem is in \autoref{app:sufficiency}, generalizing earlier work by \citet{subramanian2022approximate}.
+
+Now, let us consider a distribution over the histories and actions whose density function is denoted as $p(h, a)$.
+For example, we consider the stationary distribution induced by the current policy $\eta$ in the informed POMDP $\wt{\mathcal{P}}$.
+Let us also assume that the density function $p(h, a)$ is non-zero everywhere.
+As shown in \autoref{app:objective}, under mild assumptions, any statistic $f$ satisfying the objective
+\begin{align}
+    & \max_{
+        \substack{
+            f\colon \mathcal{H} \rightarrow \mathcal{Z} \\
+            q\colon \mathcal{Z} \times \mathcal{A} \rightarrow \Delta(\RR \times \mathcal{I})
+        }
+    } \expect_{p(h, a, r, i')} \log q(r, i' | f(h), a)
+    \label{eq:variational_objective}
+\end{align}
+also satisfies (ii).
+This variational objective jointly optimizes the statistic function $f\colon \mathcal{H} \rightarrow \mathcal{Z}$ with a conditional probability density function $q\colon \mathcal{Z} \times \mathcal{A} \rightarrow \Delta(\mathbb{R} \times \mathcal{I})$.
+According to \autoref{th:sufficiency}, a statistic that is recurrent and that satisfies objective \eqref{eq:variational_objective} is sufficient for the optimal control.
+
+In practice, both the recurrent statistic and the density function are implemented with neural networks $f_\theta$ and $q_\theta$ respectively, both parametrized by $\theta \in \RR^d$.
+In this case, the objective can be maximized by stochastic gradient ascent.
+Regarding the statistic function $f_\theta$, it is implicitly implemented by the update function $z_t = u_\theta(z_{t-1}; x_t)$ of an RNN.
+The inputs are $x_t = (a_{t-1}, o_t)$, with $a_{-1}$ the null action that is typically set to zero.
+The hidden state of the RNN $z_t = f_\theta(h_t)$ is thus a statistic of the history that is recurrently updated using $u_\theta$.
+Regarding $q_\theta$, it is implemented by a parametrized probability density function estimator.
+In such a context, we obtain the objective
+\begin{align}
+    & \max_\theta \underbrace{\expect_{p(h, a, r, i')} \log q_\theta(r, i' | f_\theta(h), a)}_{ L(f_\theta)}.
+    \label{eq:neural_variational_objective}
+\end{align}
+
+We might wonder whether this informed objective is better than the classic objective, where $i = o$.
+In this work, we hypothesize that approximating the information distribution instead of the observation distribution is a better objective in practice.
+This is motivated by the data processing inequality applied to the Bayesian network $s' \longrightarrow i' \longrightarrow o'$, which concludes that the information $i'$ is more informative than the observation $o'$ about the Markovian state $s'$ of the environment,
+\begin{align}
+    I(s', i' | h, a) \geq I(s', o' | h, a), \label{eq:informativeness}
+\end{align}
+where $I$ denotes the conditional mutual information.
+We thus expect the statistic $f_\theta(h)$ to converge faster towards a sufficient statistic, and the policy to converge faster towards an optimal policy.
+It is however important to note that the information $i$ might contain irrelevant state variables.
+In practice, the conditional distribution $p(i' | h, a)$ may thus be much more difficult to approximate than $p(o' | h, a)$, while not being much more useful to the control task.
+While we consider this study out of the scope of this work, ensuring that the sufficient representations of the histories are also necessary for the control task is a promising avenue for future work.
+
+\subsection{Optimal control with recurrent sufficient statistics} \label{subsec:joint}
+
+As seen from \autoref{corsufficiency}, sufficient statistics are needed for the optimal control of POMDPs.
+Moreover, as we focus on recurrent policies implemented with RNNs, we can exploit objective \eqref{eq:neural_variational_objective} to learn a sufficient statistic $f_\theta$.
+In practice, we jointly maximize the RL objective $J(\eta_{\theta, \phi}) = J(g_\phi \circ f_\theta)$ and the statistic objective $L(f_\theta)$.
+This enables one to use the information $i$ to guide the statistic learning through $L(f_\theta)$.
+This joint maximization results in the objective
+\begin{align}
+    & \max_{\theta, \phi} J(g_\phi \circ f_\theta) + L(f_\theta).
+    \label{eq:joint_objective}
+\end{align}
+Note that a policy maximizing \eqref{eq:joint_objective} also maximizes the return $J(g_\phi \circ f_\theta)$ if $f_\theta$ and $q_\theta$ are expressive enough, such that this objective provides optimal policies in the sense of objective \eqref{eq:objective}.
+
+
+
+\section{Model-based RL through informed world models}
+
+
+Model-based RL focuses on learning a model of the dynamics $p(r, o' | h, a)$ of the environment, known as a world model, that is exploited to derive a near-optimal policy.
+Since the approximate model usually allows one to generate trajectories, many works derive a near-optimal policy by online planning (e.g., model-predictive control) or by optimizing a parametrized policy based on these trajectories \citep{sutton1991dyna, ha2018recurrent, chua2018deep, zhang2019solar, hafner2019learning, hafner2020dream}.
+In this section, we first modify the model $q_\theta(r, i' | f_\theta(h), a)$ in order to get a world model from which trajectories can be sampled.
+We then adapt the DreamerV3 \citep{hafner2023mastering} algorithm using this world model, resulting in the Informed Dreamer algorithm.
+
+\subsection{Informed world model} \label{subsec:informed_world_model}
+
+We implement the informed world model with a variational RNN (VRNN) as introduced by \citet{chung2015recurrent}, also known as a recurrent state-space model (RSSM) in the RL context \citep{hafner2019learning}.
+It is worth noticing that such a model performs its recurrent update using a latent stochastic representation of the observation.
+When generating trajectories, it also samples latent representations of the observations without explicitly reconstructing them, which we refer to as latent trajectories.
+This key design choice enables the sampling of trajectories without explicitly learning the observation distribution, but the reward and information distribution only. Formally, we have,
+\begin{align}
+    \hspace{3cm} \hat e &\sim q_\theta^p(\cdot | z, a), \owntag[vrnn_prior]{prior}
+    \\
+    \hspace{3cm} \hat r &\sim q_\theta^r(\cdot | z, \hat e), \owntag[vrnn_reward]{reward decoder}
+    \\
+    \hspace{3cm} \hat i' &\sim q_\theta^i(\cdot | z, \hat e), \owntag[vrnn_information]{information decoder}
+\intertext{where $\hat e$ is the latent variable of the VRNN when generating trajectories.
+    The prior $q_\theta^p$ and the decoders $q_\theta^i$ and $q_\theta^r$ are jointly trained with the encoder,}
+    \hspace{3cm} e &\sim q_\theta^e(\cdot | z, a, o'), \owntag[vrnn_posterior]{encoder}
+\intertext{to maximize the likelihood of reward and next information samples.
+The latent representation $e \sim q_\theta^e(\cdot | z, a, o')$ of the next observation $o'$ can be used to update the statistic to $z'$,}
+    \hspace{3cm} z' &= u_\theta(z, a, e). \owntag[vrnn_recurrence]{recurrence}
+\end{align}
+Note that the statistic $z$ is no longer deterministically updated to $z'$ given $a$ and $o'$, instead we have $z \sim f_\theta(\cdot | h)$, which is induced by $u_\theta$ and $q_\theta^e$.
+In practice, we maximize the evidence lower bound (ELBO), a variational lower bound on the likelihood of reward and next information samples given the statistic \citep{chung2015recurrent},
+\begin{align}
+    \expect_{\substack{p(h, a, r, i') \\ f_\theta(z | h)}}
+        \log q_\theta(r, i' | z, a) \geq \expect_{\substack{p(h, a, r, i', o') \\ f_\theta(z | h)}} \bigg[
+        & \expect_{q_\theta^e(e | z, a, o')} \big[
+            \label{eq:vrnn_informed_objective}
+            \log q_\theta^i(i' | z, e)
+            + \log q_\theta^r(r | z, e) \big]
+            \nonumber
+            \\[-3mm]
+            &
+            - \operatorname{KL}\left(q_\theta^e(\cdot | z, a, o') \parallel q_\theta^p(\cdot | z, a)\right) \bigg].
+\end{align}
+As illustrated in \autoref{fig:training} for a trajectory sampled in the informed POMDP, the ELBO objective maximizes the conditional log-likelihood $q_\theta^r(r| z, e)$ and $q_\theta^i(i | z, e)$ of $r$ and $i'$ for a sample of the encoder $e \sim q_\theta^e(\cdot | z, a, o')$, and minimizes the KL divergence from $q_\theta^e(\cdot | z, a, o')$ to the prior distribution $q_\theta^p(\cdot | z, a)$.
+Note that when $i = o$, it corresponds to Dreamer's world model and learning objective.
+
+\begin{figure}[h]
+    \centering
+    \begin{tikzpicture}[font=\scriptsize]
+\definecolor{MyYellow}{HTML}{F7D254}
+\definecolor{MyBlue}{HTML}{3B7CF3}
+\definecolor{MyRed}{HTML}{E8464A}
+\definecolor{MyGreen}{HTML}{A3D16E}
+\definecolor{MyLightGreen}{HTML}{729C44}
+\definecolor{MyOrange}{HTML}{EF8C56}
+\definecolor{MyPink}{HTML}{8C33B6}
+\definecolor{MyPurple}{HTML}{982ABC}
+\definecolor{MyGray}{HTML}{999999}
+\definecolor{MyLightGray}{HTML}{616161}
+\definecolor{MyLighterGray}{HTML}{909090}
+\definecolor{MyLightBlue}{HTML}{52D6FC}
+\definecolor{MyLighterBlue}{HTML}{81DEFE}
+
+\tikzstyle{state} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{reward} = [circle, fill=MyGreen, text=white, text width=0.0cm, align=center]
+\tikzstyle{information} = [circle, fill=MyYellow, text=white, text width=0.0cm, align=center]
+\tikzstyle{observation} = [circle, fill=MyRed, text=white, text width=0.0cm, align=center]
+\tikzstyle{action} = [circle, fill=MyBlue, text=white, text width=0.0cm, align=center]
+\tikzstyle{statistic} = [circle, fill=MyPurple, text=white, text width=0.0cm, align=center]
+\tikzstyle{encoded} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{prior} = [circle, fill=MyLighterGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{value} = [circle, fill=MyLightGreen, text=white, text width=0.0cm, align=center]
+
+\tikzstyle{label} = [text=white, text width=0.2cm, align=center]
+\tikzstyle{distribution} = [text=MyGray, text width=0.2cm, align=center]
+
+\tikzstyle{arrow} = [-{Stealth[round]}, line width=0.020cm, color=MyGray]
+\tikzstyle{loss} = [arrow, MyOrange]
+\tikzstyle{bended} = [bend left=33]
+\tikzstyle{zone} = [draw=none, rounded corners, fill=MyLightBlue]
+
+        \begin{scope}[transparency group, opacity=0.4]
+\draw[zone, opacity=0.30] (-0.4, -0.70) rectangle (4.4, -2.35) ;
+\draw[zone, opacity=0.40] (-0.3, -1.75) rectangle (4.3, -2.25) ;
+
+\input{tikz/trajectory}
+
+\node[state] (s0) at (0, 0) {} ; \node[label] (s0t) at (s0) {$s$} ;
+\node[state] (s1) at (2, 0) {} ; \node[label] (s1t) at (s1) {$s$} ;
+\node[state] (s2) at (4, 0) {} ; \node[label] (s2t) at (s2) {$s$} ;
+
+\draw[arrow] (s0) to (i0) ;
+\draw[arrow] (i0) to (o0) ;
+
+\draw[arrow] (s0) to (r0) ; \draw[arrow] (a0) to (r0) ;
+\draw[arrow] (s0) to (s1) ; \draw[arrow] (a0) to (s1) ;
+
+\draw[arrow] (s1) to (i1) ;
+\draw[arrow] (i1) to (o1) ;
+
+\draw[arrow] (s1) to (r1) ; \draw[arrow] (a1) to (r1) ;
+\draw[arrow] (s1) to (s2) ; \draw[arrow] (a1) to (s2) ;
+
+\draw[arrow] (s2) to (i2) ;
+\draw[arrow] (i2) to (o2) ;
+
+        \end{scope}
+\node[statistic] (z-1) at (-2.0, -3.1) {} ; \node[label] (z-1t) at (z-1) {$/$} ;
+\node[action] (a-1) at (-1, -2) {} ; \node[label] (a-1t) at (a-1) {$/$} ;
+
+\node[statistic] (z0)  at ( 0.0, -3.1) {} ; \node[label] (z0t) at (z0) {$z$} ;
+\node[statistic] (z1)  at ( 2.0, -3.1) {} ; \node[label] (z1t) at (z1) {$z$} ;
+\node[statistic] (z2)  at ( 4.0, -3.1) {} ; \node[label] (z2t) at (z2) {$z$} ;
+
+\node[distribution, below=-0.05cm of z0] {$u_\theta$} ;
+
+        \def\bend{33}
+        \def\pos{-4.1}
+        \def\below{25}
+\node[prior] (p-1)     at (-1.0, \pos) {} ; \node[label] (p-1t) at (p-1) {$\hat e$} ;
+\node[prior] (p0)      at ( 1.0, \pos) {} ; \node[label] (p0t) at (p0) {$\hat e$} ;
+\node[prior] (p1)      at ( 3.0, \pos) {} ; \node[label] (p1t) at (p1) {$\hat e$} ;
+
+\draw[arrow] (z-1) to (p-1) ;
+\draw[arrow] (z0) to (p0) ;
+\draw[arrow] (z1) to (p1) ;
+
+\draw[arrow] (a-1) to[bend left=\bend] (p-1) ;
+\draw[arrow] (a0) to[bend left=\bend] (p0) ;
+\draw[arrow] (a1) to[bend left=\bend] (p1) ;
+
+\node[encoded] (e-1)   at (-1.0, -3.1) {} ; \node[label] (e-1t) at (e-1) {$e$} ;
+\node[encoded] (e0)    at ( 1.0, -3.1) {} ; \node[label] (e0t) at (e0) {$e$} ;
+\node[encoded] (e1)    at ( 3.0, -3.1) {} ; \node[label] (e1t) at (e1) {$e$} ;
+
+\draw[arrow] (z-1) to (e-1) ; \draw[arrow] (a-1) to (e-1) ; \draw[arrow] (o0) to (e-1) ;
+\draw[arrow] (z0) to (e0) ; \draw[arrow] (a0) to (e0) ; \draw[arrow] (o1) to (e0) ;
+\draw[arrow] (z1) to (e1) ; \draw[arrow] (a1) to (e1) ; \draw[arrow] (o2) to (e1) ;
+
+\draw[arrow] (z-1) to[bend right=25] (z0) ; \draw[arrow] (e-1) to (z0) ; \draw[arrow] (a-1) to (z0) ;
+\draw[arrow] (z0) to[bend right=25] (z1) ; \draw[arrow] (e0) to (z1) ; \draw[arrow] (a0) to (z1) ;
+\draw[arrow] (z1) to[bend right=25] (z2) ; \draw[arrow] (e1) to (z2) ; \draw[arrow] (a1) to (z2) ;
+
+\node[distribution, above left=-0.10cm of e-1] {$q_\theta^e$} ;
+
+\input{tikz/history}
+
+\node[information] (i0) at (0, -1) {}; \node[label] (i0t) at (i0) {$i$} ;
+\node[information] (i1) at (2, -1) {}; \node[label] (i1t) at (i1) {$i$} ;
+\node[information] (i2) at (4, -1) {}; \node[label] (i2t) at (i2) {$i$} ;
+
+\node[reward] (r0) at (1, -1) {}; \node[label] (r0t) at (r0) {$r$} ;
+\node[reward] (r1) at (3, -1) {}; \node[label] (r1t) at (r1) {$r$} ;
+
+\node[reward] (r-1) at (-1, -1) {} ; \node[label] (r-1t) at (r-1) {$/$} ;
+
+\draw[loss] (e-1) to[bended] node[pos=0.75, left, align=right] {$q_\theta^r$} (r-1) ;
+\draw[loss] (e0) to[bended] (r0) ;
+\draw[loss] (e1) to[bended] (r1) ;
+
+\draw[loss] (e-1) to node[pos=0.75, left, align=right] {$q_\theta^i$} (i0) ;
+\draw[loss] (e0) to (i1) ;
+\draw[loss] (e1) to (i2) ;
+
+\draw[loss] (e-1) to node[pos=0.50, left=-0.1cm, align=right] {\tiny $- \operatorname{KL}$} (p-1) ;
+\draw[loss] (e0) to (p0) ;
+\draw[loss] (e1) to (p1) ;
+
+        \node[distribution, right=-0.1cm of p-1] {$q_\theta^p$} ;
+    \end{tikzpicture}
+    \caption{%
+        VRNN loss for a given trajectory at training time. Dependence of $q_\theta^r$ and $q_\theta^i$ on $z$ is omitted.
+    }
+    \label{fig:training}
+\end{figure}
+
+As can be noticed from \autoref{eq:vrnn_informed_objective} and \autoref{fig:training}, the encoder is conditioned on the observation and not on the information.
+While this is required for the encoder to be used at execution time, it certainly loosen the lower bound and limits the quality of the conditional information distribution that can be learned.
+Future work may improve the quality of the information reconstruction by considering an additional information encoder, also conditioned on the statistic of the history, whose samples are not used in the recurrence.
+
+\subsection{Informed Dreamer} \label{subsec:informed_dreamer}
+
+As explained above, while our informed world model does not learn the observation distribution, it is still able to sample latent trajectories.
+Indeed, the VRNN only uses the latent representation $e \sim q_\theta^e(\cdot | z, a, o')$ of the observation $o'$, trained to reconstruct the information $i'$, in order to update $z$ to $z'$.
+Consequently, we can use the prior distribution $\hat e \sim q_\theta^p(\cdot | z, a)$, trained according to \eqref{eq:vrnn_informed_objective} to minimize the KL divergence from $e \sim q_\theta^p(\cdot | z, a, o')$ in expectation, to sample latent trajectories.
+
+The Informed Dreamer algorithm leverages such trajectories to learn a latent critic $v_\psi(z)$ and a latent policy $a \sim g_\phi(\cdot | z)$.
+\autoref{fig:imagination} illustrates the generation of a latent trajectory, along with estimated rewards $\hat r \sim q_\theta^r(\cdot | z, e)$ and values $\hat v = v_\psi(z)$.
+The actions are sampled according to the latent policy, and any RL algorithm can be used to maximize the estimated return.
+Moreover, note that the estimated return is given by a function that is differentiable with respect to $\phi$, and it can be directly maximized by stochastic gradient ascent.
+In the experiments, we use an actor-critic approach for discrete actions and direct maximization for continuous actions, following DreamerV3 \citep{hafner2023mastering}.
+Finally, as shown in \autoref{fig:execution}, when deployed in the execution POMDP, the encoder $q_\theta^e$ is used to compute the latent representations of the observations and to update the statistic.
+The actions are then selected according to $a \sim g_\phi(\cdot | z)$.
+
+\begin{figure}[h]
+
+    \centering
+    \begin{subfigure}[b]{0.49\linewidth}
+        \begin{tikzpicture}[font=\scriptsize]
+\definecolor{MyYellow}{HTML}{F7D254}
+\definecolor{MyBlue}{HTML}{3B7CF3}
+\definecolor{MyRed}{HTML}{E8464A}
+\definecolor{MyGreen}{HTML}{A3D16E}
+\definecolor{MyLightGreen}{HTML}{729C44}
+\definecolor{MyOrange}{HTML}{EF8C56}
+\definecolor{MyPink}{HTML}{8C33B6}
+\definecolor{MyPurple}{HTML}{982ABC}
+\definecolor{MyGray}{HTML}{999999}
+\definecolor{MyLightGray}{HTML}{616161}
+\definecolor{MyLighterGray}{HTML}{909090}
+\definecolor{MyLightBlue}{HTML}{52D6FC}
+\definecolor{MyLighterBlue}{HTML}{81DEFE}
+
+\tikzstyle{state} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{reward} = [circle, fill=MyGreen, text=white, text width=0.0cm, align=center]
+\tikzstyle{information} = [circle, fill=MyYellow, text=white, text width=0.0cm, align=center]
+\tikzstyle{observation} = [circle, fill=MyRed, text=white, text width=0.0cm, align=center]
+\tikzstyle{action} = [circle, fill=MyBlue, text=white, text width=0.0cm, align=center]
+\tikzstyle{statistic} = [circle, fill=MyPurple, text=white, text width=0.0cm, align=center]
+\tikzstyle{encoded} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{prior} = [circle, fill=MyLighterGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{value} = [circle, fill=MyLightGreen, text=white, text width=0.0cm, align=center]
+
+\tikzstyle{label} = [text=white, text width=0.2cm, align=center]
+\tikzstyle{distribution} = [text=MyGray, text width=0.2cm, align=center]
+
+\tikzstyle{arrow} = [-{Stealth[round]}, line width=0.020cm, color=MyGray]
+\tikzstyle{loss} = [arrow, MyOrange]
+\tikzstyle{bended} = [bend left=33]
+\tikzstyle{zone} = [draw=none, rounded corners, fill=MyLightBlue]
+
+\node[statistic] (z-1) at (-2.0, -3.1) {} ; \node[label] (z-1t) at (z-1) {$/$} ;
+\node[action] (a-1) at (-1, -2) {} ; \node[label] (a-1t) at (a-1) {$/$} ;
+
+\node[statistic] (z0)  at ( 0.0, -3.1) {} ; \node[label] (z0t) at (z0) {$z$} ;
+\node[statistic] (z1)  at ( 2.0, -3.1) {} ; \node[label] (z1t) at (z1) {$z$} ;
+\node[statistic] (z2)  at ( 4.0, -3.1) {} ; \node[label] (z2t) at (z2) {$z$} ;
+
+\node[distribution, below=-0.05cm of z0] {$u_\theta$} ;
+
+            \def\bend{0}
+            \def\pos{-3.1}
+            \def\below{25}
+\node[prior] (p-1)     at (-1.0, \pos) {} ; \node[label] (p-1t) at (p-1) {$\hat e$} ;
+\node[prior] (p0)      at ( 1.0, \pos) {} ; \node[label] (p0t) at (p0) {$\hat e$} ;
+\node[prior] (p1)      at ( 3.0, \pos) {} ; \node[label] (p1t) at (p1) {$\hat e$} ;
+
+\draw[arrow] (z-1) to (p-1) ;
+\draw[arrow] (z0) to (p0) ;
+\draw[arrow] (z1) to (p1) ;
+
+\draw[arrow] (a-1) to[bend left=\bend] (p-1) ;
+\draw[arrow] (a0) to[bend left=\bend] (p0) ;
+\draw[arrow] (a1) to[bend left=\bend] (p1) ;
+
+\draw[arrow] (z0) to (a0) ;
+\draw[arrow] (z1) to (a1) ;
+
+\node[distribution, above left=-0.10 of a0] {$g_\phi$} ;
+
+\node[value] (v0) at (-0.4, -2) {}; \node[label] (v0t) at (v0) {$\hat v$} ;
+\node[value] (v1) at (1.6, -2) {}; \node[label] (v1t) at (v1) {$\hat v$} ;
+\node[value] (v2) at (3.6, -2) {}; \node[label] (v2t) at (v2) {$\hat v$} ;
+
+\node[action] (a-1) at (-1, -2) {} ; \node[label] (a-1t) at (a-1) {$/$} ;
+\node[action] (a0) at (1, -2) {} ; \node[label] (a0t) at (a0) {$a$} ;
+\node[action] (a1) at (3, -2) {} ; \node[label] (a1t) at (a1) {$a$} ;
+
+\node[reward] (r-1) at (-1.6, -2) {}; \node[label] (r-1t) at (r-1) {$/$} ;
+\node[reward] (r0) at (0.4, -2) {}; \node[label] (r0t) at (r0) {$\hat r$} ;
+\node[reward] (r1) at (2.4, -2) {}; \node[label] (r1t) at (r1) {$\hat r$} ;
+
+\draw[loss] (p-1) to node[pos=0.75, left=-0.02cm, align=right] {$q_\theta^r$} (r-1) ; \draw[loss] (p-1) to node[pos=0.72, left=-0.1cm, align=right] {$v_\psi$} (v0) ;
+\draw[loss] (p0) to (r0) ; \draw[loss] (p0) to (v1) ;
+\draw[loss] (p1) to (r1) ; \draw[loss] (p1) to (v2) ;
+
+\draw[arrow] (z-1) to[bend right=33] (z0) ; \draw[arrow] (p-1) to (z0) ; \draw[arrow] (a-1) to (z0) ;
+\draw[arrow] (z0) to[bend right=33] (z1) ; \draw[arrow] (p0) to (z1) ; \draw[arrow] (a0) to (z1) ;
+\draw[arrow] (z1) to[bend right=33] (z2) ; \draw[arrow] (p1) to (z2) ; \draw[arrow] (a1) to (z2) ;
+
+            \node[distribution, below right=-0.27cm of p-1] {$q_\theta^p$} ;
+        \end{tikzpicture}
+        \caption{Imagination of a trajectory using policy $g_\phi$ with estimated rewards and values. Dependence of $q_\theta^r$ and $v_\psi$ on $z$ is omitted.}
+        \label{fig:imagination}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.49\linewidth}
+        \begin{tikzpicture}[font=\scriptsize]
+\definecolor{MyYellow}{HTML}{F7D254}
+\definecolor{MyBlue}{HTML}{3B7CF3}
+\definecolor{MyRed}{HTML}{E8464A}
+\definecolor{MyGreen}{HTML}{A3D16E}
+\definecolor{MyLightGreen}{HTML}{729C44}
+\definecolor{MyOrange}{HTML}{EF8C56}
+\definecolor{MyPink}{HTML}{8C33B6}
+\definecolor{MyPurple}{HTML}{982ABC}
+\definecolor{MyGray}{HTML}{999999}
+\definecolor{MyLightGray}{HTML}{616161}
+\definecolor{MyLighterGray}{HTML}{909090}
+\definecolor{MyLightBlue}{HTML}{52D6FC}
+\definecolor{MyLighterBlue}{HTML}{81DEFE}
+
+\tikzstyle{state} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{reward} = [circle, fill=MyGreen, text=white, text width=0.0cm, align=center]
+\tikzstyle{information} = [circle, fill=MyYellow, text=white, text width=0.0cm, align=center]
+\tikzstyle{observation} = [circle, fill=MyRed, text=white, text width=0.0cm, align=center]
+\tikzstyle{action} = [circle, fill=MyBlue, text=white, text width=0.0cm, align=center]
+\tikzstyle{statistic} = [circle, fill=MyPurple, text=white, text width=0.0cm, align=center]
+\tikzstyle{encoded} = [circle, fill=MyLightGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{prior} = [circle, fill=MyLighterGray, text=white, text width=0.0cm, align=center]
+\tikzstyle{value} = [circle, fill=MyLightGreen, text=white, text width=0.0cm, align=center]
+
+\tikzstyle{label} = [text=white, text width=0.2cm, align=center]
+\tikzstyle{distribution} = [text=MyGray, text width=0.2cm, align=center]
+
+\tikzstyle{arrow} = [-{Stealth[round]}, line width=0.020cm, color=MyGray]
+\tikzstyle{loss} = [arrow, MyOrange]
+\tikzstyle{bended} = [bend left=33]
+\tikzstyle{zone} = [draw=none, rounded corners, fill=MyLightBlue]
+
+\node[statistic] (z-1) at (-2.0, -3.1) {} ; \node[label] (z-1t) at (z-1) {$/$} ;
+\node[action] (a-1) at (-1, -2) {} ; \node[label] (a-1t) at (a-1) {$/$} ;
+
+\node[statistic] (z0)  at ( 0.0, -3.1) {} ; \node[label] (z0t) at (z0) {$z$} ;
+\node[statistic] (z1)  at ( 2.0, -3.1) {} ; \node[label] (z1t) at (z1) {$z$} ;
+\node[statistic] (z2)  at ( 4.0, -3.1) {} ; \node[label] (z2t) at (z2) {$z$} ;
+
+\node[distribution, below=-0.05cm of z0] {$u_\theta$} ;
+
+\node[encoded] (e-1)   at (-1.0, -3.1) {} ; \node[label] (e-1t) at (e-1) {$e$} ;
+\node[encoded] (e0)    at ( 1.0, -3.1) {} ; \node[label] (e0t) at (e0) {$e$} ;
+\node[encoded] (e1)    at ( 3.0, -3.1) {} ; \node[label] (e1t) at (e1) {$e$} ;
+
+\draw[arrow] (z-1) to (e-1) ; \draw[arrow] (a-1) to (e-1) ; \draw[arrow] (o0) to (e-1) ;
+\draw[arrow] (z0) to (e0) ; \draw[arrow] (a0) to (e0) ; \draw[arrow] (o1) to (e0) ;
+\draw[arrow] (z1) to (e1) ; \draw[arrow] (a1) to (e1) ; \draw[arrow] (o2) to (e1) ;
+
+\draw[arrow] (z-1) to[bend right=25] (z0) ; \draw[arrow] (e-1) to (z0) ; \draw[arrow] (a-1) to (z0) ;
+\draw[arrow] (z0) to[bend right=25] (z1) ; \draw[arrow] (e0) to (z1) ; \draw[arrow] (a0) to (z1) ;
+\draw[arrow] (z1) to[bend right=25] (z2) ; \draw[arrow] (e1) to (z2) ; \draw[arrow] (a1) to (z2) ;
+
+\node[distribution, above left=-0.10cm of e-1] {$q_\theta^e$} ;
+
+\node[observation] (o0) at (0, -2) {}; \node[label] (o0t) at (o0) {$o$} ;
+\node[observation] (o1) at (2, -2) {}; \node[label] (o1t) at (o1) {$o$} ;
+\node[observation] (o2) at (4, -2) {}; \node[label] (o2t) at (o2) {$o$} ;
+
+\node[action] (a0) at (1, -2) {}; \node[label] (a0t) at (a0) {$a$} ;
+\node[action] (a1) at (3, -2) {}; \node[label] (a1t) at (a1) {$a$} ;
+
+\draw[arrow] (z0) to (a0) ;
+\draw[arrow] (z1) to (a1) ;
+
+\node[distribution, above left=-0.10 of a0] {$g_\phi$} ;
+
+        \end{tikzpicture}
+        \caption{Execution of the policy on a trajectory of the POMDP using the encoder $q_\theta^e$ to condition the latent policy $g_\phi$.}
+        \label{fig:execution}
+    \end{subfigure}
+    \caption{%
+        Bayesian graph of a VRNN evaluation during imagination and execution.
+    }
+    \label{fig:imagination_and_execution}
+\end{figure}
+
+A pseudocode for the adaptation of the DreamerV3 algorithm using this informed world model is given in \autoref{app:dreamer}.
+We also detail some divergences of our formalization with respect to the original DreamerV3 algorithm.
+As in DreamerV3, we use symlog predictions, a discrete VAE, KL balancing, free bits, reward normalisation, a distributional critic, and entropy regularization.
+
+
+
+\section{Experiments}
+
+
+In this section, we compare Dreamer to the Informed Dreamer on several informed POMDPs, all considered with a discount factor of $\gamma = 0.997$.
+\subsection{Varying Mountain Hike} \label{subsec:hike}
+
+In the Varying Mountain Hike environments, the agent should walk throughout a mountainous terrain to reach the mountain top as fast as possible while avoiding the valleys.
+There exists four versions of this environment, depending on the agent orientation (\emph{north} or \emph{random}) and on the observation that is available (\emph{position} or \emph{altitude}).
+More formally, the agent has a position $x$ and a fixed orientation $c$ in each episode.
+The orientation $c$ is either always \emph{north} or a \emph{random} cardinal orientation, depending on the environment version.
+It can take four actions to move relative to its orientation (right, forward, left and backward).
+The orientation is not observed by the agent, but it receives a Gaussian observation of its \emph{position}, or its \emph{altitude}, depending on the environment version ($\sigma_o = 0.1$ in both cases).
+The reward is given by its altitude relative to the mountain top, such that the goal of the agent is to obtain the highest cumulative altitude.
+Around the mountain top, states are terminal and the trajectories are truncated at $t = 160$ in practice.
+We refer the reader to \citet{lambrechts2022recurrent} for a formal description of these environments, strongly inspired by the Mountain Hike of \citet{igl2018deep}.
+
+For this environment, we first consider the position and orientation to be available as additional information at training time.
+In other words, we consider the state-informed POMDP with $i = s$.
+As can be seen in \autoref{fig:hike}, the speed of convergence of the policies is improved in all four environments when using the Informed Dreamer.
+Moreover, as shown in \autoref{tab:hike} in \autoref{app:table}, the final performance of the Informed Dreamer is better in 3 out of 4 environments.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.40\linewidth}
+        \includegraphics[width=\linewidth]{{pdf/hike.pdf}}
+        \caption{%
+            \scriptsize Uninformed Dreamer and Informed Dreamer with $i = s$ in the four environments.
+        }
+        \label{fig:hike}
+    \end{subfigure}
+    \hspace{0.02\linewidth}
+    \begin{subfigure}[b]{0.40\linewidth}
+        \includegraphics[width=\linewidth]{{pdf/quality.pdf}}
+        \caption{%
+            \scriptsize Informed Dreamer with $i = (\tilde x, \tilde c)$ with position observation and random orientation.
+        }
+        \label{fig:quality}
+    \end{subfigure}
+    \caption{%
+        Varying Mountain Hike environments: minimum, maximum and average returns over five trainings.
+    }
+\end{figure}
+
+We also experiment with other types of information in the Varying Mountain Hike with position observation and random orientation.
+More precisely, we consider an information $i = (\tilde x, \tilde c)$ about the state $s = (x, c)$, where $\tilde x$ is an observation of the position $x$ with Gaussian noise of standard deviation $\sigma_i \in [0, \sigma_o]$, and $\tilde c$ is a noisy observation of the orientation $c$ replaced by a random orientation with probability $\epsilon_i \in [0, 1]$.
+Note that when $\sigma_i = 0$, the position $x$ is encoded in the information, while when $\sigma_i = \sigma_o$, the observation $o$ is encoded in the information.
+As shown in \autoref{fig:quality}, without confidence intervals for the sake readability, the better the information, the faster the policy converges.
+It supports the idea that the more information about the state is exploited, the faster an optimal policy for the POMDP is learned.
+Moreover, we observe that the Informed Dreamer with $\epsilon_i = 1$ and $\sigma_i = 0.1$ performs even worse than the Uninformed Dreamer.
+It suggests that considering additional information that is not informative about the state (i.e., $I(s, i | o) = 0$), such as $\tilde c$ with $\epsilon_i = 1$, can degrade learning.
+Similar results are obtained for the other three environments in \autoref{subsec:qualities}.
+
+\subsection{Velocity Control} \label{subsec:velocity}
+
+In the Velocity Control environments, we consider the standard DeepMind Control tasks \citep{tassa2018deepmind}, where only the joints velocities are available as observations and not their absolute positions, which is a standard benchmark in the partially observable RL literature \citep{han2019variational, lee2020stochastic}.
+These environments consists of controlling different multi-joints robots to achieve several tasks.
+We consider the absolute positions to be available at training time along with the velocities, which results in a Markovian information $i = s$.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{{pdf/velocity.pdf}}
+    \caption{
+        Uninformed Dreamer and Informed Dreamer with $i = s$ in the Velocity Control environments: minimum, maximum and average returns over five trainings.
+    }
+    \label{fig:velocity}
+\end{figure}
+
+\autoref{fig:velocity} shows that the convergence speed of the policies is improved in this benchmark, for nearly all of the considered games.
+Moreover, the final returns are given in \autoref{tab:velocity} in \autoref{app:table}, and show that policies obtained after one million time steps are better in 13 out of 18 environments when considering additional information.
+
+\subsection{Pop Gym} \label{subsec:pop}
+
+The Pop Gym environments have been specifically designed to benchmark the ability of handling partial observability \citep{morad2023popgym}.
+The latter notably includes memory games, board games, or control problems involving partial observability and noise.
+For these environments, we consider the state to be available as additional information.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.86\linewidth]{{pdf/pop.pdf}}
+    \caption{
+        Uninformed Dreamer and Informed Dreamer with $i = s$ in the Pop Gym environments: minimum, maximum and average returns over five trainings.
+    }
+    \label{fig:pop}
+\end{figure}
+
+\autoref{fig:pop} shows that learning in those POMDPs sometimes benefits from the exploitation of additional information as proposed in the Informed Dreamer.
+The learning of the Informed Dreamer seems to suffer from the approximation of the information distribution in 2 out of those 10 environments (Concentration and Higher Lower).
+The final returns are given in \autoref{tab:pop} in \autoref{app:table}, showing a better final performance in 7 out of 10 environments, even though returns have a high variability.
+In particular, we observe that the Informed Dreamer converges to a significantly higher return for the Repeat First and Repeat Previous environments, that both require discovering long time dependencies.
+The exploitation of additional information seems crucial in these environments, and we study this in depth on harder instances of the Repeat Previous environment in \autoref{subsec:hard}.
+This analysis shows that the Informed Dreamer can learn near-optimal policies in environments for which the Uninformed Dreamer does not learn at all.
+
+\subsection{Flickering Atari and Flickering Control}
+
+While arguably not constituting a relevant benchmark for measuring the ability of handling partial observability \citep{shao2022mask, avalos2024wasserstein}, the Flickering Atari and Flickering Control environments have become standard benchmarks in the partially observable RL literature \citep{hausknecht2015deep, zhu2017improving, igl2018deep, ma2020discriminative}.
+For completeness, the results for these environments are reported in \autoref{app:flickering}.
+We observe that the speed of convergence and final performance of the agent is sometimes greatly improved when considering additional information (e.g., Asteroids, Pong, Breakout).
+However, we also observe that the performance is lower in some environments.
+As far as the Flickering Atari environments are concerned, the Informed Dreamer only outperforms Dreamer in 6 out of 12 environments.
+In the Flickering Control environments, the Informed Dreamer tends to systematically underperform the Uninformed Dreamer, attaining a better performance in only 2 out of 18 environments.
+It suggests that additional state information is not useful for these tasks.
+We furthermore hypothesize that the conditional information distribution is difficult to approximate, which may cause learning to degrade.
+It shows that not all information is worth exploiting, particularly when the level of uncertainty due to partial observability is low.
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduced a new formalization for considering additional information available at training time for POMDP, called the informed POMDP.
+In this context, we proposed a learning objective and proved that it provides sufficient statistic for the optimal control.
+Next, we adapted this objective to provide an environment model from which latent trajectories can be sampled.
+We then adapted a successful model-based RL algorithm, known as Dreamer, with this informed world model, resulting in the Informed Dreamer algorithm.
+By considering several environments from the partially observable RL literature, we showed that this informed learning objective often improves the convergence speed and quality of the policies.
+This work also presents several limitations.
+First, a formal justification for the use of the information instead of the observation is still lacking.
+Future work may consider the notion of approximate information states to bound the suboptimality of the policy for a given error on the information distribution instead of the observation distribution.
+Second, we observed that this informed objective hurts performance in some environments, motivating further work in which particular attention is paid to the design of the information.
+It would be worth drawing connection to the exogenous RL literature that complements this work by focusing on discarding irrelevant information.
+Third, the proposed ELBO learning objective is probably a loose lower bound on the information likelihood. Future work may improve the quality of the information distribution by considering informed world models with a dedicated information encoder.
+
+\subsubsection*{Acknowledgements}
+
+The authors would like to thank our colleagues Pascal Leroy, Arnaud Delaunoy, Renaud Vandeghen and Florent De Geeter for their valuable comments on this manuscript.
+Gaspard Lambrechts gratefully acknowledges the financial support of the \emph{Wallonia-Brussels Federation} for his FRIA grant.
+Adrien Bolland gratefully acknowledges the financial support of the \emph{Wallonia-Brussels Federation} for his FNRS grant.
+Computational resources have been provided by the \emph{Consortium des Équipements de Calcul Intensif} (CÉCI), funded by the \emph{National Fund for Scientific Research} (F.R.S.-FNRS) under Grant No. 2502011 and by the \emph{Walloon Region}, including the Tier-1 supercomputer of the \emph{Wallonia-Brussels Federation}, infrastructure funded by the \emph{Walloon Region} under Grant No. 1117545.
+
+
+
+
+

@@ -1,0 +1,348 @@
+\title{Emu: Generative Pretraining in Multimodality}
+
+\begin{abstract}
+We present \Ours, a multimodal foundation model that seamlessly generates images and text in multimodal context.
+This omnivore model can take in any single-modality or multimodal data input indiscriminately (\eg, interleaved image, text and video) through a one-model-for-all autoregressive training process.
+First, visual signals are encoded into embeddings, and together with text tokens form an interleaved input sequence.
+\Ours is end-to-end trained with a unified objective of classifying the next text token or regressing the next visual embedding in the multimodal sequence.
+This versatile multimodality empowers the leverage of diverse pretraining data sources at scale, such as videos with interleaved frames and text, webpages with interleaved images and text, as well as web-scale image-text pairs and video-text pairs.
+\Ours can serve as a generalist multimodal interface for both image-to-text and text-to-image tasks, supporting in-context image and text generation. 
+Across a broad range of zero-shot/few-shot tasks including image captioning, visual question answering, video question answering and text-to-image generation, \Ours demonstrates superb performance compared to state-of-the-art large multimodal models.
+Extended capabilities such as multimodal assistants via instruction tuning are also demonstrated with impressive performance. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+With text corpus at massive scale, Large Language Models (LLMs)~\citep{brown2020language,chowdhery2022palm,touvron2023llama} with straightforward training objectives such as next-word-prediction learn to understand, reason, and generate text with unprecedented accuracy and fluency, paving the way for diverse real-life applications~\citep{schulman2022chatgpt} unthinkable a decade ago.
+Recent studies~\citep{flamingo,driess2023palme,metalm} further investigate Large Multimodal Models (LMMs) beyond LLMs.
+Flamingo~\citep{flamingo} connects a powerful language model with a pretrained vision encoder and inserts learnable layers to capture cross-modality dependencies, demonstrating strong abilities in multimodal zero-shot and in-context learning.
+Recent works~\citep{blip2,instructblip,kosmos,llava,zhu2023minigpt4,ye2023mplugowl,li2023otter,gong2023multimodalgpt} adopt this framework and build LMM by docking a vision encoder with an LLM.
+The prevailing training objective in such LMMs is predicting the next text token~\citep{flamingo,metalm,kosmos,zhu2023minigpt4,llava,li2023otter}, typically with a frozen vision encoder and no supervision for the vision part, which highly restricts model capacity.
+Besides, these LMMs are mostly trained on image-text pairs or documents, while overlooking video data as a potential scalable source of interleaved multimodal data.
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{images/fig1_overall_tasks.pdf}
+    \caption{\Ours as a generalist interface for diverse vision-language applications, such as image captioning, image/video question answering, in-context image-to-text and text-to-image generation, and image blending.}
+    \label{fig:intro_cases}
+\end{figure}
+Documents interleaved with images (\textit{e.g.}, textbooks, webpages) provide an intuitive representation of complex concepts, and have proved to be effective in empowering models with multimodal in-context learning ability~\citep{flamingo,mmc4}. %
+Videos, which usually contain interleaved image frames and subtitles (Figure~\ref{fig:interleaved-video-text-data}), are an abundant source of multimodal data %
+that naturally contains dense visual signals and encodes stronger cross-modal correlations with text than regular multimedia documents. 
+Furthermore, public videos (especially user-generated clips) possess richer content diversity than Common Crawl\footnote{\url{https://commoncrawl.org/}}, from which current training datasets mainly originate. 
+
+In this work, we introduce \Ours, a large multimodal model that learns from both video and image data interleaved with text, under a unified objective of predicting the next visual or text token in an autoregressive fashion. To take advantage of rich web-scale data with an omnivore capacity, we formulate diverse sources of multimodal data (\eg, videos with subtitles, webpages with images and text) into a unified format of interleaved image embeddings and text tokens (videos are converted into an interleaved sequence of randomly-selected frames and subtitles). %
+Specifically, visual signals are first encoded into embeddings via a visual representation model EVA-CLIP~\citep{EVA-CLIP}, instead of being converted into discrete tokens.  These visual embeddings together with text tokens constitute an interleaved multimodal input sequence, which will be fed into \Ours for training. %
+
+We pretrain \Ours on these multimodal data sequences under a simple unified objective: predicting the next element in a multimodal sequence. Different from existing LMMs that compute the predict-the-next loss on text tokens only, in training \Ours, all input elements including both discrete text tokens and continuous image embeddings are accounted for loss computation. We adopt the cross-entropy classification loss for discrete text tokens, and the $\ell_2$ regression loss for continuous visual embeddings. As raw images typically lack the left-to-right causal dependency as in language, \Ours does not perform image generative pretraining in the original pixel space.
+Instead, visual embeddings are transformed into a causal latent space via Causal Transformer, which accepts the image encodings generated by EVA-CLIP as input, and outputs $N$ tokens that capture the causal dependency of the given image (as illustrated in Figure~\ref{fig:model}). 
+
+Pretrained with the unified objective and diverse data forms, 
+\Ours can serve as a generalist interface for both image-to-text and text-to-image tasks by performing various types of completion in a multimodal sequence. As illustrated in Figure~\ref{fig:intro_cases}, \Ours accepts multimodal prompts (\eg, text, image, video, or their interleaved sequence) and generates multimodal response (for image generation, visual embeddings are decoded by a fine-tuned diffusion model).
+Further, \Ours demonstrates impressive capabilities such as in-context text and image generation (the 2nd block of Figure~\ref{fig:intro_cases}), image blending (the 5th row of Figure~\ref{fig:intro_cases} that combines a cat and a tiger into a real-looking tiger-cat), video understanding (the last block of Figure~\ref{fig:intro_cases}), and real-world knowledge grounding (Section~\ref{sec:qualitative}).
+We evaluate \Ours on a broad range of zero-shot and few-shot tasks including image captioning, visual question answering, video question answering, and text-to-image generation.
+For qualitative demonstration, we also build an effective multimodal assistant via instruction tuning on multimodal conversational data. The instruction-tuned \Ours assistant can effectively follow human instructions and interact with users via multimodal response.
+
+
+
+\section{\Ours: Predict the Next in Multimodality}
+
+
+\subsection{Architecture}
+\Ours is a large-scale multimodal model that performs completion in multimodality, \textit{i.e.}, perceiving interleaved multimodal input and generating outputs varying in modalities. As illustrated in Figure~\ref{fig:model}, 
+\Ours consists of four parts: Visual Encoder, Causal Transformer, Multimodal Modeling, and Visual Decoder.
+We leverage pretrained EVA-CLIP~\citep{EVA-CLIP}, LLaMA~\citep{touvron2023llama} and Stable Diffusion~\citep{Rombach_2022_CVPR} to initialize the Visual Encoder, the Multimodal Modeling LLM and the Visual Decoder, respectively.
+
+Given any sequence of interleaved image, text and video,  %
+we first encode the image into dense visual features via EVA-CLIP, then transform the encodings into a fixed number of $N$ visual causal embeddings via Causal Transformer. Similarly, we encode a video of $T$ frames into $T \times N$ visual causal embeddings.
+Two special image tokens \texttt{[IMG]} and \texttt{[/IMG]} are prepended and appended for each image or frame, respectively, to represent the beginning and end of the encoded image/frame embeddings.
+The visual causal embeddings are combined with text tokens to form multimodal sequences that are fed into the Multimodal Modeling LLM for unified autoregressive modeling. We append \texttt{<s>} and \texttt{</s>} tokens to the start and the end of each sequence.
+In inference, we fine-tune the Visual Decoder to decode the visual embeddings into a realistic image.
+
+\myparagraph{Causal Transformer.}
+Auto-regressively modeling images in raster order is counter-intuitive and has not demonstrated satisfactory performance, which may be attributed to the fact that images naturally possess 2D structures and are not perceived as sequential signals like text.
+To better capture the characteristics of images and achieve unified modeling of different modalities, we propose a Causal Transformer module to transform 2D spatial visual signals to 1D causal sequences in a latent space $Z$. 
+Specifically, given an image $I$ with its encodings $g(I)$ from EVA-CLIP as condition, Causal Transformer accepts randomly initialized embeddings $\{e_1, e_2, \dots, e_N\}$ as input, and outputs $N$ embeddings $\{z_1, z_2, \dots, z_N\}$ that capture the causal dependency of the given image.
+The architecture of Causal Transformer is similar to the decoder of Transformer~\citep{vaswani2017attention}, with each block consisting of a causal self-attention layer, a cross-attention layer, and a feed-forward layer. 
+The cross-attention layer aggregates visual information from the image embeddings extracted from EVA-CLIP, where the visual embeddings are treated as keys and values, and the outputs from the previous causal attention layer serve as queries. 
+
+\myparagraph{Visual Decoder.} 
+We use a latent diffusion model to decode visual embeddings into images, and adopt the weights of Stable Diffusion~\citep{Rombach_2022_CVPR} for initialization.
+Specifically, we feed $N$ visual embeddings generated by \Ours into the diffusion model as conditions for image decoding.
+We replace the linear projections of the cross-attention modules in Stable Diffusion with new linear layers that accommodate the dimension of \Ours and Stable Diffusion.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{images/method.pdf}
+    \caption{\Ours unifies the modeling of different modalities in an auto-regressive manner. Visual signals are first encoded into embeddings, and together with text tokens form an interleaved sequence. The training objective is to either classify the next text token or regress the next visual embedding. In inference, regressed visual embeddings are decoded into a realistic image via a fine-tuned latent diffusion model.}
+    \label{fig:model}
+\end{figure}
+
+\subsection{Training Objective}
+Given an unlabeled web-scale corpora $\mathcal{D}$ consisting of interleaved multimodal sequences $x = (x_1, x_2, \dots, x_n)$, where $x$ can be vision-language sequences of various forms, such as image-text pairs, image-text interleaved documents, or videos with subtitles.
+$x_i$ can be a signal unit (text or image token) from any arbitrary modality.
+We first convert all continuous 2D signals (images and video frames) into 1D causal latent embedding sequences using Causal Transformer, then insert them back into the corresponding places in the sequence $x$.
+The resulting sequence is represented as $u = (u_1, u_2, \dots, u_m)$, where $u_i$ can be either a discrete text token, or a visual embedding that captures causal dependency with neighboring visual embeddings.
+
+We approximate the likelihood of the web-scale corpora $p(x)$ with $p(u)$, and maximize the likelihood in a unified auto-regressive manner as follows:
+\begin{align}
+    \max_\theta \sum_{u\in\mathcal{D}} \sum_{i=1}^{|u|} 
+    \log
+    P(u_i|u_1, \dots, u_{i-1}; \theta) \approx p(x)
+\end{align}
+
+Two types of losses are adopted to optimize this objective. For discrete text tokens, cross-entropy loss is used to supervise classification in the predefined vocabulary with a language modeling head. For continuous visual embeddings, $\ell_2$ regression loss is adopted with a separate regression head.
+
+\subsection{Generalist Interface}
+ 
+The unified auto-regressive modeling of different modalities endows \Ours with a powerful ability to serve as a multimodal generalist that can perform any types of completion in a multimodal sequence, \ie, accepting multimodal sequence as input, and outputting signals across vision and language modalities.
+For example, given two examples as the prompt, \Ours automatically infers and completes the corresponding task given a new input, as shown in the second block of Figure~\ref{fig:intro_cases}.
+
+Specifically, given a multimodal context, if the expected output format is text, \Ours will use the language modeling head to generate discrete text tokens. If the desired output is image, we will append a \texttt{[IMG]} token at the end of the input sequence, then \Ours will autoregressively generate $N$ visual embeddings that will then be sent to the visual decoder for decoding into a real-world image.
+
+
+\section{\Ours Training}
+
+
+We pretrain \Ours with web-scale data across modalities in various forms, including image-text pairs (LAION-2B~\citep{schuhmann2022laion}, LAION-COCO~\citep{laioncoco}), interleaved images-text data (MMC4~\citep{mmc4}), video-text pairs (WebVid-10M~\citep{bain2021frozen}), and our collected interleaved video-text data (YT-Storyboard-1B).
+All these data are formulated as multimodal sequences, from which \Ours learns under the objective of predict-the-next-element in a unified auto-regressive manner. After pretraining, we finetune a decoder to transform visual embeddings into realistic images.
+\subsection{Data}
+\myparagraph{Image-text Pairs.} We use the image-text pairs from LAION-2B~\citep{schuhmann2022laion} and LAION-COCO~\citep{laioncoco} for pretraining. LAION-2B provides images paired with noisy alt-texts from the web, and LAION-COCO is its 600M subset that is captioned by BLIP~\citep{li2022blip}.
+\myparagraph{Video-text Pairs.} WebVid-10M~\citep{bain2021frozen} is an extensive dataset consisting of a large collection of short videos with textual descriptions. These videos are sourced from materials websites with diverse contents and a strong correlation between text and video. 
+We use heuristic rules to remove irrelevant metadata (\eg resolution of the original video,  camera parameters).
+
+\myparagraph{Interleaved Image and Text.} Large-scale image-text interleaved data plays a crucial role in unlocking the in-context learning ability of multimodal models. We leverage the Multimodal-C4 (MMC4) dataset~\citep{mmc4}, an expanded version of the text-only C4~\citep{raffel2020exploring}. MMC4 comprises a collection of approximately 75 million image-text-interleaved documents, with 400 million images and 38 billion tokens in total. From each document, we sample a random subsequence of L = 1024 take up to the first N = 5 images. Additionally, we randomly sample N = 5 images along with their corresponding sentences to construct a subsequence of L = 512.,            
+\myparagraph{Interleaved Video and Text.}
+Videos with subtitles also present a promising and scalable source of interleaved multimodal data. We introduce the YT-Storyboard-1B dataset which collects 18 million videos and their corresponding subtitles from YouTube\footnote{\url{https://www.youtube.com}} using the video-ids provided by the YT-Temporal-1B dataset~\citep{zellers2022merlot}. Instead of raw videos, we collect storyboard images (about 1.8 billion images in total), a set of thumbnails provided by the YouTube website for quick video viewing. The combination of storyboard thumbnails and subtitles creates a natural interleaved sequence of video and text ordered by timestamps, as in Figure~\ref{fig:interleaved-video-text-data}.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{images/interleaved-video-text-data.pdf}
+    \caption{Interleaved video-text data. The combination of storyboard thumbnails and subtitles captions creates a natural interleaved sequence of video and text that is ordered by the timestamps. }
+    \label{fig:interleaved-video-text-data}
+\end{figure}
+
+
+
+
+
+\subsection{Pretraining}
+
+We initialize  \Ours's Visual Encoder with the 1B version of EVA-01-CLIP~\citep{EVA-CLIP}, and Multimodal Modeling LLM with the 13B version of LLaMA~\citep{touvron2023llama}.
+LLaMA is a decoder-only Transformer~\citep{vaswani2017attention} and EVA-01-CLIP is a 40-layer ViT~\citep{vit}.
+The Causal Transformer comprises 12 blocks, each of which consists of a causal self-attention layer, a cross-attention layer, and a feed-forward layer. Random initialization is used for Causal Transformer. The total number of parameters of \Ours is 14B and is trained end-to-end.
+
+We use a batch size of 128 for image-text pair data, 64 for interleaved image-text data, 16 for video-text pair and interleaved video-text data. 
+
+For each video, we randomly sample 8 frames for pretraining, and all images/frames are resized into 224$\times$224 resolution. For image-text pair and interleaved data, we randomly put each image before or after its corresponding sentence. We train the model on 128 NVIDIA 80G-A100 GPUs for 10k steps with around 82M samples (150B tokens in total), and the pretraining takes approximately 2 days.
+\subsection{Visual Decoding}
+After pretraining, we tune the visual decoder with both LAION-COCO~\citep{laioncoco} and LAION-Aesthetics~\citep{laionaesthetics} (a high-aesthetics quality subset of LAION-5B~\citep{schuhmann2022laion}) image-text pair datasets under text-to-image task. 
+Specifically, We initialize the diffusion model with Stable Diffusion v1.5. We freeze the Visual Encoder, Multimodal Modeling LLM in \Ours, and the VAE in diffusion model during training, with only the parameters of U-Net updated. For each training sample, we append the \texttt{[IMG]} token to the end of the input text and feed it into the Multimodal Modeling LLM, which will then generate $N$ visual embeddings in an auto-regressive manner. These visual causal embeddings are fed into Image Decoder as the condition for image generation training.
+
+We follow the model setups of Stable Diffusion v1.5. 
+We train the diffusion model with 32 A100-40G GPUs for 15k iterations. 
+
+To further improve sample quality, we randomly drop image embeddings condition by $10\%$ of the time during training to enable classifier-free guidance~\citep{ho2022classifier}. 
+
+
+
+\section{Instruction Tuning}
+
+Language instruction tuning has helped pretrained language models to align with user intentions~\citep{ouyang2022training,wang2022self,alpaca,vicuna} and generalize to unseen tasks~\citep{jasonwei22flan,chung2022scaling}.
+We apply multimodal instruction tuning on \Ours to align it with human instructions through supervised finetuning on publicly available datasets, 
+including language instructions from ShareGPT~\citep{vicuna} and Alpaca~\citep{alpaca}, image-text instructions from LLaVA~\citep{llava}, and video instructions from VideoChat~\citep{li2023videochat} and Video-ChatGPT~\citep{videochatgpt}.
+In instruction tuning, we freeze all parameters of pretrained \Ours, and fine-tune a low-rank adaption (LoRA) module~\citep{lora}. The main focus of instruction tuning is to align the model with natural language instructions, which are less relevant to vision features. Thus, we attach LoRA modules only to the self-attention layers of the Multimodal Modeling LLM, and add no adaptation to the Vision Encoder.
+
+All instruction-tuning data are packed with this template:
+\begin{equation}
+    \prompt{
+    \text{<System Message>}~{ [USER]}\text{: <Instruction> }{[ASSISTANT]}\text{: <Answer>,}}
+\end{equation}
+where \texttt{[USER]} and \texttt{[ASSISTANT]} are special tokens initialized from the embeddings of words `user' and `assistant', respectively. \texttt{<Instruction>} and \texttt{<Answer>} are actual slots for human instructions and assistant answers, and only \texttt{<Answer>} is accounted for loss computation.
+
+
+
+
+\section{Evaluation}
+
+
+We evaluate \Ours on a broad range of vision-language tasks including image captioning (MS-COCO~\citep{chen2015microsoft}), image question answering (VQAv2~\citep{goyal2017making}, OKVQA~\citep{marino2019ok}, VizWiz~\citep{gurari2018vizwiz}), visual dialog (VisDial~\citep{das2017visual}), video question answering (MSRVTTQA~\citep{xu2017video}, MSVDQA~\citep{xu2017video}, NextQA~\citep{xiao2021next}) and text2image generation(MS-COCO~\citep{lin2014microsoft}).
+We evaluate our pretrained and instruction-tuned models in zero-shot and few-shot settings.
+\subsection{Zero-shot Evaluation}
+
+In the zero-shot setting, the model is tested on tasks and datasets never encountered during training. Task-specific prompts are used to indicate different tasks to perform, without any additional tuning for model parameters. 
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Zero-shot comparison, * indicates that the zero-shot prompt is built by using two examples from the task, where their corresponding images have been removed. \Oursi is the instruction-tuned \Ours model. The best results are \textbf{bold} and the second best are \ul{underlined}.}
+  \label{tab:zero_shot_comparison}
+  \setlength{\tabcolsep}{0.15cm}
+  \resizebox{\textwidth}{!}{
+  \begin{tabular}{l|ccccccc|ccc}
+    \toprule
+    \multirow{2}{*}{Models}  & \multicolumn{7}{c|}{Image-Text Tasks}  & \multicolumn{3}{c}{Video-Text Tasks} \\
+    & COCO & NoCaps & Flickr30K  & VQAv2     & OKVQA     & VizWiz     & VisDial     & MSVDQA       & MSRVTTQA   & NExTQA       \\
+    \midrule
+    {\color{gray} \emph{Per-task Finetuning}} &&&&&& \\
+    {\color{gray}PALI-X-55B}
+    & \textcolor{gray}{149.2} & \textcolor{gray}{126.3} & - & \textcolor{gray}{86.0}  & \textcolor{gray}{66.1}  & \textcolor{gray}{70.9}  & - & -  & \textcolor{gray}{47.1} & \textcolor{gray}{38.3} \\\midrule
+    MetaLM
+    & 82.2  & 58.7 & 43.3   & 41.1      & 11.4      & -          & -           & -            & -          & -            \\
+    Kosmos-1  
+    & 84.7  & - & 67.1   & 51.0      & -         & 29.2       & -           & -            & -          & -            \\
+    Flamingo-9B *
+    & 79.4  & - & 61.5   & 51.8      & \ul{44.7}      & 28.8       & \ul{48.0}        & 30.2         & 13.7       & \ul{23.0}         \\
+    \midrule
+    \Ours                     
+    & \ul{112.4} & \ul{96.5} & \ul{72.0}   & 52.0      & 38.2      & 34.2       & 47.4        &      18.8      &     8.3       &   19.6      \\
+    \Ours*                  
+    & -   & -& -    & 52.9 & 42.8      & \ul{34.4}       & 47.8        &      34.3      &     \ul{17.8}      &   \bf23.4        \\
+
+    
+
+    
+
+    \Oursi & \bf120.4 & \textbf{108.8} & \textbf{77.4}   & \ul{57.2}      & 43.4      & 32.2            & 43.0           &   \ul{34.6}        &   16.8    & 5.8    \\
+     \Oursi* & -  & - & -      & \bf62.0      & \bf49.2      & \bf38.3            & \bf51.1           &    \bf37.0       &  \bf21.2     & 19.9       \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+\myparagraph{Multimodal Understanding.} 
+Table~\ref{tab:zero_shot_comparison} presents the zero-shot multimodal understanding performance of \Ours and \Oursi (the instruction-tuned model). For zero-shot evaluation of \Ours, we adopt the multimodal Chain-of-Thought prompting technique following~\cite{kosmos}, which first asks the model to generate a caption for visual content before outputting the final result. Additionally, we evaluate using the same strategy following Flamingo~\citep{flamingo}, where two text-only examples from the task are used as prompts (results indicated by an *).
+
+On COCO captioning task, \Ours achieves impressive zero-shot CIDEr score~\citep{vedantam2015cider} of 112.4, which outperforms other LMMs by a large margin. In a wide range of image and video question answering tasks, \Ours consistently surpasses LMMs like Kosmos-1 and Flamingo-9B. Notably, \Ours achieves an accuracy of 34.4\% on the complex VizWiz VQA dataset, versus Kosmos-1's 29.2\% and Flamingo-9B's 28.8\%. 
+\Oursi is the instruction-tuned \Ours model that achieves notable improvements. Remarkably, even with only 14B parameters, \Oursi can outperform much larger-scale Flamingo-80B model in several tasks such as VQAv2 (62.0\% vs. 56.3\%), VizWiz (38.3\% vs. 31.6\%), and MSVDQA (37.0\% vs. 35.6\%).
+
+
+\paragraph{Text2image Generation.} We evaluate the zero-shot image generation ability on the validation set of MS-COCO~\citep{lin2014microsoft}. Following ~\citep{ramesh2021zero}, we randomly sample 30k prompts from the validation set and calculate the zero-shot FID~\citep{heusel2017gans}. The results are shown in Table~\ref{tab:text2image_fid}. For the generation of both \Ours and SDv1.5, we use PNDM~\citep{liu2022pseudo} scheduler with 50 steps. We also adopt classifier-free guidance~\citep{ho2022classifier} for better generation quality. The scaling factor is set to 5.0 and 3.0 for \Ours and SDv1.5 respectively, as these settings yield the best performance for both models. 
+\Ours achieves better performance compared to a concurrent work GILL~\citep{koh2023generating}, which also generates images with LLMs.
+However, our model is inferior to SDv1.5 in terms of  FID. This is probably because the condition space (image embeddings) of our visual decoder deviates a lot from the condition space (text embeddings) of the diffusion model used as initialization, and our model is trained for a relatively short 15k steps.
+
+\begin{wraptable}[15]{r}{0.46\linewidth}
+    \centering
+    \small
+    \caption{Zero-shot text-to-image results on MS-COCO validation set. 30k samples are randomly sampled for evaluation.}
+    \label{tab:text2image_fid}
+    \begin{tabular}{l|c}
+        \toprule
+        Models                                  & FID($\downarrow$)  \\
+        \midrule
+        \emph{unimodal generation models} \\
+        ~~~~GLIDE~\citep{nichol2021glide}            & 12.24 \\
+        ~~~~Make-A-Scene~\citep{gafni2022make}       & 11.84 \\
+        ~~~~DALL-E 2~\citep{ramesh2022hierarchical}  & 10.39 \\
+        ~~~~SDv1.5~\citep{Rombach_2022_CVPR}         & 9.93 \\
+        ~~~~Imagen~\citep{saharia2022photorealistic} & 7.27 \\
+        ~~~~Parti~\citep{yu2022scaling}              & 7.23 \\
+        \midrule
+        \emph{multimodal generation models} \\
+        ~~~~GILL~\citep{koh2023generating}           & 12.20 \\
+        ~~~~\Ours(ours)                             & \bf11.66 \\ %
+        \bottomrule
+    \end{tabular}
+\end{wraptable}
+
+\subsection{Few-shot Evaluation}
+In few-shot evaluation, the model is prompted with task-specific prompts and several examples collected from the training data to evaluate its in-context learning ability. Table~\ref{tab:few_shot_comparison} presents the performance of the pretraining model \Ours in image and video question answering tasks under the few-shot ($k=2,4,8$) evaluation setting.  We use the Retrieval In-Context Example Selection~\citep{yang2022empirical} approach following Flamingo~\citep{flamingo}. \Ours demonstrates superior performance to Flamingo-9B and Kosmos-1 under almost all scenarios. For example, \Ours achieves a VQAv2 accuracy of 58.4\% and VizWiz 41.3\% under the 4-shot setting, surpassing Flamingo-9B by +2.1\% and +6.4\%, respectively. For video-text tasks, \Ours demonstrates strong performance as well, such as 4-shot 21.8\% v.s.\ Flamingo's 18.2\% on the MSRVTTQA benchmark.
+Additionally, we can observe a positive correlation between the number of shots $k$ ($k=0,2,4,8$) and the performance of \Ours. 
+These results demonstrate \Ours's remarkable in-context learning ability. 
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Few-shot comparison. $k$ is the number of in-context examples, and we used the same example selection approach (\ie~RICES~\citep{yang2022empirical} ) as Flamingo~\citep{flamingo}.}
+  \label{tab:few_shot_comparison}
+  \setlength{\tabcolsep}{0.20cm}
+  \begin{tabular}{l|ccc|ccc|ccc|ccc}
+    \toprule
+    \multirow{2}{*}{Models}
+    & \multicolumn{3}{c|}{VQAv2}     & \multicolumn{3}{c|}{VizWiz}     & \multicolumn{3}{c|}{MSVDQA}     & \multicolumn{3}{c}{MSRVTTQA}   \\
+    & $k$=2 & $k$=4 & $k$=8 &  $k$=2 & $k$=4 & $k$=8            & $k$=2 & $k$=4 & $k$=8 &  $k$=2 & $k$=4 & $k$=8 \\
+    \midrule
+    Kosmos-1
+    & 51.4      & 51.8         & 51.4       & 31.4    & 35.3    & 39.0   & -  & -   & - & - & - & -   \\
+    Flamingo-9B
+    & -      & 56.3   & 58.0      &     -   & 34.9  & 39.4  & -  & 36.2   & \bf40.8 & - & 18.2 & 23.9     \\
+    PALI-X
+    & -      & 56.9      &  57.1       \\
+    \Ours  
+    & \bf56.4   & \bf58.4 & \bf59.0  & \bf37.8  & \bf41.3  & \bf43.9   &  \bf36.0  & \bf37.1 & 39.8     & \bf21.2  & \bf21.8 &  \bf24.1  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Zero-shot evaluation regarding each core VL capability of MM-Vet~\citep{yu2023mmvet}.}
+  \label{tab:mmvet}
+  \begin{tabular}{lccccccc}
+  \toprule
+  Model & Rec & OCR & Know & Gen & Spat & Math & Total \\\midrule
+  LLaMA-Adapter v2-7B~\citep{gao2023llamaadapterv2} & 16.8 & 7.8 & 2.5 & 3.0 & 16.6 & 4.4 & 13.6$\pm$0.2 \\
+  MiniGPT-4-14B~\citep{zhu2023minigpt4} & 29.9 & 16.1 & 20.4 & 22.1 & 22.2 & 3.8 & 24.4$\pm$0.4 \\
+  InstructBLIP-14B~\citep{instructblip} & 30.8 &16.0 &9.8& 9.0 &21.1& 10.5& 25.6$\pm$0.3 \\
+  DreamLLM-7B~\citep{dong2023dreamllm} & 41.8 & 26.4 & 33.4 & 33.0 & 31.0 & 11.5 & 35.9$\pm$0.1 \\
+  LLaVA-65B~\citep{lu2023empirical} & 39.2 &\textbf{28.2}& 26.2& 28.3& \textbf{33.0}& \textbf{15.0}& 35.5$\pm$0.3 \\
+  \Oursi\textbf{-14B} & \textbf{45.5} & 19.2 & \textbf{36.7} & \textbf{35.9} & 25.2 & 3.8 & \textbf{36.3$\pm$0.3} \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{In-the-wild Evaluation}
+\label{sec:mmvet}
+Table~\ref{tab:mmvet} presents zero-shot evaluation results on the in-the-wild benchmark MM-Vet~\citep{yu2023mmvet}. We report the mean and std of 5 evaluation runs following \cite{yu2023mmvet}. For each core capability, the average score is reported.
+\Oursi exhibits state-of-the-art in-the-wild capability, and even outperforms LLaVA-65B~\citep{lu2023empirical} in Rec, Know, Gen abilities and the total score.
+\subsection{Qualitative Evaluation}
+\label{sec:qualitative}
+Beyond quantitative benchmarks, we conduct adequate qualitative evaluation of \Ours. \Ours demonstrates impressive capabilities that cannot be evaluated on standard benchmarks, including real-world knowledge grounding (upper right of Figure~\ref{fig:fig2_chat_cases}), 
+interleaved multi-image understanding (left side of Figure~\ref{fig:fig2_chat_cases}), detailed video understanding (lower right of Figure~\ref{fig:fig2_chat_cases}), multimodal assistant (Figure~\ref{fig:fig3_chat_cases}), multi-turn dialogue (Figure~\ref{fig:fig5_chat_conversation}), image blending (Figure~\ref{fig:fig7_image_image_generation}), and (in-context) text-to-image generation.
+For in-context text-to-image generation, \Ours can generate context-related images (in the first two rows of Figure~\ref{fig:fig6_in_context_generation}, the generated images share the oil painting style in context, compared with the corresponding images generated without context in the first two rows of Figure~\ref{fig:fig8_text2image_generation}), and follow context-related instructions, as shown in the 4th row of Figure~\ref{fig:intro_cases}.
+The multimodal in-context ability of \Ours is responsible for this brand-new ability of image generation.
+
+We also compare \Ours with other state-of-the-art multimodal assistants in terms of the ability to perform typical image captioning tasks (Figure~\ref{fig:fig9_compare}) and follow human instructions (Figure~\ref{fig:george}).
+In Figure~\ref{fig:george}, we test a slightly difficult instruction, and only \Ours response properly to list 8 books written by Agatha Christie and then recommend one.
+
+
+
+
+
+
+
+\section{Related Work}
+
+Multimodal pretraining~\citep{CLIP,ALIGN,EVA-CLIP,Uniter,ViLT,SimVLM,wang2022git,wang2022ofa,vlt5,albef,yu2022coca,chen2023palix,lu2022unified} learns cross-modal interactions from large-scale multimodal data.
+Flamingo~\citep{flamingo} bridges powerful yet private pretrained vision and large language models and first demonstrates remarkable multimodal zero-shot and few-shot behaviors. 
+With the increasing impact~\citep{schulman2022chatgpt} and accessability~\citep{touvron2023llama} of LLMs, recent work has also considered building multimodal models based on LLMs~\citep{blip2,driess2023palme,kosmos,instructblip,ye2023mplugowl,zeng2023matters,fromage}, such as BLIP-series~\citep{blip2,instructblip} that connect frozen vision and language pretrained models with a Q-Former to bridge the modality gap. 
+These LMMs commonly use predicting the next text token as the training objective and exert no supervision for vision data~\citep{metalm,kosmos,zhu2023minigpt4,llava,ye2023mplugowl}. Instead, \Ours unifies the modeling of vision and language with the objective of predicting the next visual or text token in an autoregressive manner, and further explores videos as a new source of interleaved image-text data. This unified modeling leads to a generalist interface for diverse multimodal tasks that output either image or text.
+Emerging recent studies~\citep{zhu2023minigpt4,llava,videochatgpt,li2023videochat,liu2023aligning,li2023otter,chen2023shikra,chen2023politeflamin} attempt to build powerful visual multimodal assistants based on LMMs through constructed conversation data. We also instruction-tune \Ours using publicly available datasets and build a multimodal assistant that aligns well with human instructions on both images and videos.
+
+
+
+
+
+{
+
+
+\section{Limitations and Future Topics}
+
+
+Emu shares the well-acknowledged constraints inherent in other LLMs and LMMs, including susceptibility to both visual and language hallucinations, slow auto-regressive inference speed, a cessation of knowledge updates after pretraining, and a potential for generating non-factual content. Besides, Emu predominantly focused on English-language data. As a result, the model's proficiency in languages other than English is currently delicate, and users should exercise caution when applying it in such contexts. Addressing challenges related to hallucination, enhancing inference speed, and expanding multilingual capabilities are crucial areas for future exploration and improvement.
+}
+
+
+\section{Conclusion}
+
+In this work, we present \Ours, a Large Multimodal Model trained with a unified autoregressive objective of predicting the next element, including both visual and textual tokens. Apart from commonly used image-text pairs and interleaved documents, we explore another scalable data source of image-text interleaved data, \ie, video. 
+\Ours trained under such unified objective and diverse data can serve as a generalist interface that is capable of performing diverse multimodal tasks, such as image captioning, image/video question answering, and text-to-image generation, together with new abilities like in-context text and image generation, and image blending.
+We also build a multimodal assistant instruction-tuned on \Ours, which exhibits excellent human-aligned abilities such as multi-turn dialogue. We hope that our work will inspire the community to continue exploring the potential of diverse multimodal data at web-scale and also the generative pretraining beyond vision and language.
+
+{
+
+\newpage
+
+
+

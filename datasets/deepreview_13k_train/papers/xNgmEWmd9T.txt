@@ -1,0 +1,247 @@
+\title{Accumulator-Aware Post-Training Quantization for Large Language Models}
+
+\begin{abstract}
+Several recent studies have investigated low-precision accumulation, reporting improvements in throughput, power, and area across various platforms. However, the accompanying proposals have only considered the quantization-aware training (QAT) paradigm, in which models are fine-tuned or trained from scratch with quantization in the loop. As models continue to grow in size, QAT techniques become increasingly more expensive, which has motivated the recent surge in post-training quantization (PTQ) research. To the best of our knowledge, ours marks the first formal study of accumulator-aware quantization in the PTQ setting. To bridge this gap, we introduce AXE—a practical, low-overhead framework of accumulator-aware extensions designed to endow overflow avoidance guarantees to existing layer-wise PTQ algorithms. We theoretically motivate AXE and demonstrate its flexibility by implementing it on top of two state-of-the-art PTQ algorithms: GPFQ and OPTQ. We further generalize AXE to support multi-stage accumulation for the first time, opening the door for full datapath optimization and scaling to large language models (LLMs). We evaluate AXE across autoregressive language generation models and observe significant improvements in the tradeoff between accumulator bit width and model accuracy over baseline methods.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Modern deep learning models have scaled to use billions of parameters, requiring billions (or even trillions) of multiply-accumulate (MAC) operations during inference. Their enormous size presents a major obstacle to their deployment as their compute and memory requirements during inference often exceed the budgets of real-world applications. As a result, model compression has emerged as an important active area in deep learning research, with quantization being among the most prevalent techniques studied and applied in practice (Wu et al., 2020; Nagel et al., 2021; Gholami et al., 2022).  
+
+Quantization techniques commonly reduce inference costs by restricting the precision of its weights and activations. Although substituting the standard 32-bit floating-point operands for low-precision counterparts can drastically reduce the cost of multiplications, this only accounts for part of the core MAC operation; the resulting products are often still accumulated at 32 bits. Recent studies have demonstrated that also restricting the precision of the accumulator can yield significant benefits (see Section 2.2). However, exploiting such an optimization is non-trivial in practice as reducing the width of the accumulator exponentially increases the risk of numerical overflow, which is known to introduce arithmetic errors that significantly degrade model accuracy (Ni et al., 2020).  
+
+To address this, recent work has proposed an accumulator-aware quantization paradigm that entirely eliminates the risk of numerical overflow via strict learning constraints informed by theoretical guarantees (Colbert et al., 2023). The resulting scope of investigations has been limited to the quantization-aware training (QAT) setting in which models are trained from scratch or fine-tuned from checkpoints with quantization in the loop (Colbert et al., 2023; 2024). With the rising training costs of modern deep learning models (e.g., large language models), it is important to develop methods that are equally as effective in the post-training quantization (PTQ) setting, where pre-trained models are directly quantized and calibrated using relatively modest resources. However, controlling the accumulator bit width in such a scenario is non-trivial. In this work, we characterize and address these challenges, introduce a practical framework for their investigation, and establish a new state-of-the-art for accumulator-aware weight quantization in the PTQ setting.  
+
+![](images/c8c40c47e1284924a9a3df91847a2877d03cc3aaaa211d360842de344fd967be.jpg)  
+Figure 1: To reduce the minimum accumulator bit width required to avoid overflow during inference, one could na¨ıvely manipulate the weight and activation bit widths according to the data type bound derived by Colbert et al. (2023). To date, Euclidean projection-based initialization (EP-init) (Colbert et al., 2024) serves as the best alternative to this approach, but, as the name suggests, it has only been studied as a QAT initialization strategy. AXE (green circles) significantly improves the trade-off between accumulator bit width and model quality for language models evaluated on WikiText2 (Merity et al., 2016) when compared to EP-init (blue triangles) and na¨ıve bit width manipulation (red stars) for both GPFQ (Lybrand & Saab, 2021) (top) and OPTQ (Frantar et al., 2022) (bottom).  
+
+Contribution. We introduce AXE, a framework of accumulator-aware extensions designed to endow overflow avoidance guarantees to any layer-wise PTQ algorithm that greedily quantizes weights one at a time, provided the base algorithm is also amenable to activation quantization. We theoretically motivate AXE and demonstrate its flexibility by presenting accumulator-aware variants of both GPFQ and OPTQ. We evaluate AXE across pre-trained language generation models and show that it significantly improves the trade-off between accumulator bit width and model quality when compared to baseline methods. We visualize this trade-off using the Pareto frontiers in Figure 1, which provide the minimum observed perplexity for a given target accumulator bit width. Furthermore, unlike prior accumulator-aware quantization methods, which assume a monolithic accumulator, we generalize AXE to support multi-stage accumulation, which enables accumulator-aware quantization of large language models (LLMs) for the first time. Indeed, our results show that AXE scales extremely well to billion-parameter language models when targeting multi-stage accumulation, supporting the scaling hypothesis proposed by Colbert et al. (2024).  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+We denote the $K_{l}$ -dimensional input activations to layer $l$ as $\pmb{x}^{(l)}\,\in\,\mathbb{R}^{K_{l}}$ , where $\pmb{X}^{(l)}\,\in\,\mathbb{R}^{K_{l}\,\times\,D}$ denotes a matrix of $D$ such inputs. The weight matrix for layer $l$ with $K_{l}$ input neurons and $C_{l}$ output neurons is similarly denoted as $\mathbf{W}^{(l)}\,\in\,\mathbb{R}^{C_{l}\times K_{l}}$ ; its quantized counterpart is denoted as $Q^{(\bar{l})}\in\mathcal{A}_{M}^{C_{l}\times K_{l}}$ , where we use $A_{b}^{m\times n}$ to denote the space of all $m\times n$ matrices whose elements are part of a fixed $b$ -bit alphabet defined by the target quantization space. For example, the alphabet of signed $b$ -bit integers is $\begin{array}{r}{\mathcal{A}_{b}:=\{k:-2^{\bar{b}-1}+1\leq k\leq2^{b-1}-1,\bar{k}\in\mathbb{Z}\}}\end{array}$ , assuming a sign-magnitude representation, where $\mathbb{Z}$ is the space of all scalar integers.  
+
+For layer $l$ , our notation yields $C_{l}$ independent dot products of depth $K_{l}$ for each of the $D$ inputs. For clarity, and without loss of generality, we often assume $C_{l}=1$ when focusing on a single layer $l$ so that we can use $\pmb{w}^{(l)}$ to denote the weight matrix for layer $l$ . When dropping their superscript, $\textbf{\em x}$ and $\pmb{w}$ denote generic inputs and weights in $\mathbb{R}^{K}$ , and $\tilde{x}$ and $\pmb q$ denote their quantized counterparts.  
+
+
+
+\section{2.1 POST-TRAINING QUANTIZATION  }
+
+
+Standard quantization operators, referred to as quantizers, are commonly parameterized by zeropoint $z$ and strictly positive scaling factor $s$ , as shown in Eq. 1 for weight tensor $\mathbf{\nabla}w$ . Our work focuses on uniform integer quantization, where $z$ is an integer value that ensures that zero is exactly represented in the quantized domain, and $s$ is a strictly positive scalar that corresponds to the resolution of the quantizer. Scaled values are commonly rounded to the nearest integer, denoted by $\lceil\cdot\rfloor$ , and elements that exceed the representation range of the quantized domain $\mathcal{A}_{b}$ are clipped.  
+
+$$
+\mathcal{Q}(\pmb{w}):=s\cdot\left(\mathrm{clip}\left(\left\lceil\frac{\pmb{w}}{s}\right\rceil+z;\operatorname*{min}\mathcal{A}_{b},\operatorname*{max}\mathcal{A}_{b}\right)-z\right)
+$$  
+
+Methods for tuning these quantizers broadly fall into two paradigms: quantization-aware training (QAT) and post-training quantization (PTQ). QAT methods train or fine-tune a neural network with quantization in the loop, which often requires significant compute resources and sufficiently large datasets. Our work focuses on PTQ methods, which directly cast and calibrate pre-trained models and often rely on little to no data without end-to-end training. PTQ methods tend to follow a similar general structure, greedily casting and calibrating quantized models layer-by-layer or blockby-block while seeking to approximate the minimizer of the reconstruction error  
+
+$$
+\pmb q^{*}=\underset{\pmb q}{\arg\operatorname*{min}}\,\frac12\|\pmb X^{T}\pmb w-\tilde{\pmb X}^{T}\pmb q\|_{2}^{2}
+$$  
+
+where $\boldsymbol{q}^{*}$ is the optimal quantized weights and X˜ is the quantized counterpart of $\mathbf{\deltaX}$ . Recent PTQ methods concentrate on “weight-only quantization”, where X˜ = X, to solely minimize memory storage and transfer costs (Lybrand & Saab, 2021; Frantar et al., 2022), and for good reason—the ever-increasing weight volume of state-of-the-art neural networks has rendered many hyper-scale transformer models memory-bound (Zhang et al., 2022a; Biderman et al., 2023). In such a scenario, weight-only quantization algorithms can better preserve model quality and still realize end-to-end throughput gains just by reducing data transfer costs, even with high-precision computations (usually FP16) (Frantar et al., 2022; Tseng et al., 2024). However, weight-only quantization provides limited opportunity to accelerate compute-intensive operations such as matrix multiplications, which is the focus of this work. Thus, we investigate methods that are amenable to quantizing both weights and activations to low-precision integers, which can realize throughput gains from both accelerated computation and reduced data traffic (Xiao et al., 2023; Li et al., 2024).  
+
+
+
+\section{2.2 LOW-PRECISION ACCUMULATION  }
+
+
+The majority of neural network quantization research targeting compute acceleration emphasizes low-precision weights and activations. While this can significantly reduce the costs of multiplications, the resulting products are often still accumulated using high-precision additions. As lower precision integer representations continue to increase in popularity (Dettmers & Zettlemoyer, 2023; Ma et al., 2024), one can expect a focus skewed towards weight and activation quantization to yield diminishing returns as high-precision additions can bottleneck throughput, power, and area (Ni et al., 2020; de Bruin et al., 2020; Xie et al., 2021; Colbert et al., 2024). For example, Ni et al. (2020) show that when constraining weights and activations to $3{\mathrm{-bit}}\times1$ -bit multipliers, the cost of 32-bit accumulation consumes nearly $75\%$ of the total power and $90\%$ of the total area of their custom MAC unit; they report up to $4\times$ power savings and $5\times$ area reduction when reducing to 8-bit accumulation.  
+
+Reducing the accumulator bit width is non-trivial in practice as it exponentially increases the risk of numerical overflow, often introducing arithmetic errors that degrade model accuracy (Ni et al., 2020; Colbert et al., 2023). Existing methods to prepare quantized neural networks (QNNs) for lowprecision accumulation often aim to either reduce the risk of numerical overflow (Xie et al., 2021; Li et al., 2022; Azamat et al., 2022) or mitigate its impact on model accuracy (Ni et al., 2020; Sakr et al., 2019; Blumenfeld et al., 2024). These empirical approaches rely on several assumptions that limit their real-world applicability. For one, empirical estimates of overflow rely on a priori knowledge of the input distribution, which is impractical to assume in many real-world scenarios and can even introduce vulnerabilities (Baier et al., 2019). Furthermore, overflow behavior can vary across platforms and programming languages, so designing methods to mitigate the detrimental impact of one particular overflow behavior (e.g., wraparound two’s complement arithmetic) limits portability across applications and accelerators. Finally, empirical approaches are unable to support applications that require guaranteed arithmetic correctness, such as encrypted inference (Lou & Jiang, 2019;  
+
+Stoian et al., 2023), and are known to break down when overflows occur too frequently (Ni et al., 2020). To address these concerns, recent work has proposed to avoid overflow altogether using accumulator-aware quantization (A2Q) (Colbert et al., 2023; 2024).  
+
+
+
+\section{2.3 ACCUMULATOR-AWARE QUANTIZATION  }
+
+
+Let $P^{*}$ denote the minimum accumulator bit width required to guarantee overflow avoidance for a given dot product. Aside from universally fixing the accumulator at 32 bits (or any other arbitrary maximum number of bits imposed by a given processor), the most conservative method to calculate $P^{*}$ considers the data types of the dot product operands, i.e., weights and activations. Given inputs $\tilde{\pmb{x}}\in\mathcal{A}_{N}^{K}$ and weights $\bar{\pmb q}\in\bar{A}_{M}^{K}$ , $P^{*}$ is given by Eq. 3 as derived in Colbert et al. (2023), where $\mathbb{1}_{\mathrm{signed}}(\tilde{\pmb{x}})$ is an indicator function that returns 1 if $\tilde{\pmb{x}}$ is signed and 0 otherwise.  
+
+$$
+P^{*}=\left\lceil\log_{2}\left(2^{\log_{2}(K)+N+M-1-\mathbb{1}_{\mathrm{signed}}(\tilde{x})}+1\right)+1\right\rceil
+$$  
+
+Note that $P^{*}$ increases linearly with the bit widths of the operands and logarithmically with the depth of the dot product. Thus, for a fixed neural architecture, one could heuristically manipulate the weight and activation bit widths according to Eq. 3 to reduce $P^{*}$ . However, the quantization design space ultimately limits the minimum attainable accumulator bit width, as well as the maximum attainable model accuracy for any target accumulator bit width (Colbert et al., 2023; 2024).  
+
+Colbert et al. (2024) show that one can directly target the accumulator bit width as an independent dimension of the quantization design space while still theoretically guaranteeing overflow avoidance. When accumulating $\tilde{\pmb{x}}^{T}\pmb{q}$ into a signed $P$ -bit accumulator, one need only constrain $\|\b{q}\|_{1}$ according to Eq. 4, assuming that $\sum_{i}q_{i}=0$ .  
+
+$$
+\|q\|_{1}\leq\frac{2^{P}-2}{2^{N}-1}
+$$  
+
+Motivated by this result, accumulator-aware QAT methods avoid overflow by constraining the $\ell_{1}$ - norm of weights during training to ultimately restrict the range of dot product outputs during inference (Colbert et al., 2023; 2024). These approaches rely on weight normalization-based quantizers infused with strict accumulator-aware learning constraints. Although these approaches have yielded promising results in low-precision accumulation scenarios, the scope of their success is limited to the QAT setting (Colbert et al., 2023; 2024). However, from this family of QAT methods, one can apply the Euclidean projection-based initialization strategy (EP-init) (Colbert et al., 2024) to the PTQ setting without modification. However, we find that EP-init has two shortcomings in the PTQ setting: (1) it universally relies on the round-to-zero rounding function to ensure that $|Q(w_{i})|\leq|w_{i}|$ for all $i$ (Colbert et al.2). We address these shortcomings in this work.  
+
+
+
+\section{3 ACCUMULATOR-AWARE POST-TRAINING QUANTIZATION  }
+
+
+The standard problem for neural network quantization aims to map high-precision values (e.g., 32- bit floating-point) to low-precision counterparts (e.g., 4-bit scaled integers) while locally minimizing the discrepancy between the output of the original model and that of the compressed one, as formalized by Eq. 2 in Section 2.1. In the post-training quantization (PTQ) setting, one often assumes the quantizer parameters (i.e., scaling factor $s$ and zero point $z$ ) are fixed and that the individual weights can move freely, as in Lybrand & Saab (2021); Frantar et al. (2022); Hubara et al. (2021). Building from this, we formalize accumulator-aware post-training quantization as a constrained variant of the standard reconstruction problem in which the optimal quantized weights $\boldsymbol{q}^{*}$ minimize local quantization error while also satisfying a strict $\ell_{1}$ -norm constraint, as defined below.  
+
+$$
+q^{*}=\operatorname*{arg\,min}_{q}\frac{1}{2}\|X^{T}w-\tilde{X}^{T}q\|_{2}^{2}\quad\mathrm{s.t.}\quad\|q\|_{1}\leq Z
+$$  
+
+To approximately solve this accumulator-constrained reconstruction problem, we introduce AXE, a practical low-overhead framework of general accumulator-aware extensions that endow guaranteed overflow avoidance to layer-wise quantization algorithms that greedily assign bits element-byelement (e.g., GPFQ and OPTQ). AXE is built on two accumulator-aware constraints: (1) a soft global constraint that discourages the underlying algorithm from opportunistically selecting quantized weights with high magnitudes; and (2) a strict local constraint that greedily limits the range of each selected quantized weight while error is iteratively corrected. In its standard form, AXE applies these constraints per-channel (or per-neuron) so that each dot product in the network is guaranteed to independently avoid overflow. Furthermore, without violating our constraints, we generalize our framework to also support multi-stage accumulation in the form of tiled dot products by applying our constraints in finer granularities. We first theoretically justify our solution using GPFQ, then provide accumulator-aware variants of both GPFQ and OPTQ.  
+
+
+
+\section{3.1 ACCUMULATOR CONSTRAINTS WITHOUT ZERO-CENTERING  }
+
+
+Our goal is to provide a theoretical guarantee of overflow avoidance when accumulating the dot product of $\pmb q$ by any $\tilde{\pmb{x}}\in\mathcal{A}_{N}^{K}$ into a signed $P$ -bit register. If $\pmb q$ is a zero-centered vector such that $\sum_{i}q_{i}=0$ , then it is sufficient to constrain $\|\pmb q\|_{1}$ to satisfy the upper bound given by Eq. 4 in order to guarantee overflow avoidance (see Section 2.3). However, enforcing such a zero-centering constraint on a vector of integers is non-trivial in practice. Rather than directly enforcing this constraint on $\pmb q$ , $\mathrm{A}2\mathrm{Q}+$ (Colbert et al., 2024) enforces these constraints on its floating-point counterpart $\mathbf{\nabla}w$ and relies on the symmetry of the quantizer and the round-to-zero operator to ensure that $|Q(w_{i})|\leq|w_{i}|$ for all $i$ . We detach our solution from these zero-centering, round-to-zero, and symmetrical constraints.  
+
+For any $\tilde{\pmb{x}}\in\mathcal{A}_{N}^{K}$ , each element $\tilde{x}_{i}$ lies within the closed interval $[\mu,\nu]$ for all $i=\{1,\cdots\,,K\}$ , and $\nu-\mu=2^{N}-1$ . It follows that the maximizing vector, $\pmb{u}=\arg\operatorname*{max}_{\tilde{\pmb{x}}}\tilde{\pmb{x}}^{T}\pmb{q}$ , and the minimizing vector, $\pmb{v}=\arg\operatorname*{min}_{\tilde{\pmb{x}}}\pmb{\tilde{x}}^{T}\pmb{q}$ , are:  
+
+$$
+u_{i}={\left\{\!\!\begin{array}{l l}{\nu,\quad{\mathrm{where~}}q_{i}\geq0}\\ {\mu,\quad{\mathrm{where~}}q_{i}<0}\end{array}\!\!\right.}\qquad\quad v_{i}={\left\{\!\!\!\begin{array}{l l}{\mu,\quad{\mathrm{where~}}q_{i}\geq0}\\ {\nu,\quad{\mathrm{where~}}q_{i}<0}\end{array}\!\!\right.}
+$$  
+
+Fundamentally, to avoid overflow when accumulating $\tilde{\pmb{x}}^{T}\pmb{q}$ into a $P$ -bit register, the result needs to fall within the register’s representation range for any $\tilde{\pmb{x}}\in\mathcal{A}_{N}^{K}$ . Without loss of generality, we derive our algorithm assuming a sign-magnitude accumulator for clarity and conciseness. Thus, to safely use a signed $P$ -bit accumulator without overflow, the following inequalities need to be satisfied:  
+
+$$
+\begin{array}{r}{u^{T}q\leq2^{P-1}-1}\\ {-v^{T}q\leq2^{P-1}-1}\end{array}
+$$  
+
+To avoid zero-centering, one could generalize the result derived in Colbert et al. (2024) such that the bound relies on a variable center, e.g., $\textstyle\sum_{i}q_{i}=\epsilon$ . However, such a solution would still rely on the round-to-zero constraint. Furthermore, it precludes the use of greedy sequential algorithms where $\epsilon$ would be just as difficult to enforce as zero-centering, i.e., $\epsilon=0$ . Thus, rather than constraining the center, we greedily constrain the boundaries, as further discussed in Section 3.2.  
+
+
+
+\section{3.2 ACCUMULATOR-AWARE GPFQ  }
+
+
+The greedy path following quantization (GPFQ) algorithm (Lybrand & Saab, 2021) approaches the standard quantization problem by traversing the neural network graph to sequentially quantize each element in each layer while iteratively correcting for quantization error. At the $l.$ -th layer, this is done by greedily selecting each element $q_{i}$ to minimize the squared distance between the running sum $\sum_{j=1}^{i}q_{j}\tilde{X}_{j}$ and its analog $\textstyle\sum_{j=1}^{i}w_{j}\bar{X}_{j}$ such that  
+
+$$
+q_{i}^{(l)}=\underset{p\in\mathcal{A}_{M}}{\arg\operatorname*{min}}\left\|\sum_{j=1}^{i}w_{j}^{(l)}\pmb{X}_{j}^{(l)}-\sum_{j=1}^{i-1}q_{j}^{(l)}\tilde{\pmb{X}}_{j}^{(l)}-p\tilde{\pmb{X}}_{i}^{(l)}\right\|_{2}
+$$  
+
+where $\tilde{X}_{i}^{(l)}$ denotes samples for the $i$ -th input neuron to the $l$ -th layer assuming the first $l-1$ layers are quantized, and $A_{M}$ is an $M$ -bit fixed alphabet defined by the target quantization space. This simplifies to the following iteration rule as derived in Lybrand & Saab (2021), where $u_{0}^{(l)}=0$ .  
+
+$$
+\begin{array}{r l}&{q_{i}^{(l)}=\mathcal{Q}\left(\frac{\langle\tilde{\mathbf{X}}_{i}^{(l)},u_{i-1}^{(l)}+w_{i}^{(l)}\mathbf{X}_{i}^{(l)}\rangle}{\|\tilde{\mathbf{X}}_{i}^{(l)}\|_{2}^{2}}\right)}\\ &{u_{i}^{(l)}=u_{i-1}^{(l)}+w_{i}^{(l)}X_{i}^{(l)}-q_{i}^{(l)}\tilde{X}_{i}^{(l)}}\end{array}
+$$  
+
+To add accumulator-awareness, we introduce two constraints that are agnostic to the symmetry of the quantizer and rounding function while still guaranteeing overflow avoidance. First, we introduce a soft $\ell_{1}$ -norm regularization penalty that discourages the underlying algorithm (e.g., GPFQ) from opportunistically selecting weights with high magnitudes. Second, we introduce a strict constraint that greedily limits the range of $q_{i}$ as error is iteratively corrected. This strict constraint is recursively applied element-by-element to ensure that Eqs. 7 and 8 are independently satisfied, which ultimately guarantees that Eq. 4 is satisfied without requiring a zero-centering constraint.  
+
+Soft $\ell_{1}$ -norm regularization penalty. By design, greedy sequential quantization algorithms (e.g., GPFQ and OPTQ) opportunistically alter weights to correct for as much error as possible in each step, often yielding high-magnitude quantized weights. However, this is unfavorable in the accumulator-aware quantization setting as high-magnitude weights consume more of the $\ell_{1}$ -norm budget allocated per-channel (see Eq. 4). To address this, we penalize high-magnitude weights during error correction. We build from the sparse GPFQ formulation proposed by Zhang et al. (2023) as given by Eq. 12; the solution is given by Eq. 13, where $\Pi_{\lambda}({\pmb x}):=\mathrm{sign}({\pmb x})(|{\pmb x}|-\lambda)_{+},$ , $(\cdot)_{+}$ denotes the rectified linear unit (ReLU), and $\lambda>0$ is an arbitrary tuneable regularization parameter.  
+
+$$
+\begin{array}{r l}&{q_{i}^{(l)}=\underset{p\in\mathcal{A}_{M}}{\arg\operatorname*{min}}\left(\frac{1}{2}\bigg\|\displaystyle\sum_{j=1}^{i}w_{j}^{(l)}X_{j}^{(l)}-\displaystyle\sum_{j=1}^{i-1}q_{j}^{(l)}\tilde{X}_{j}^{(l)}-p\tilde{X}_{i}^{(l)}\bigg\|_{2}^{2}+\lambda|p|\bigg\|\tilde{X}_{i}^{(l-1)}\bigg\|_{2}^{2}\right)}\\ &{\quad=Q\circ\Pi_{\lambda}\left(\frac{\langle\tilde{X}_{i}^{(l)},u_{i-1}^{(l)}+w_{i}^{(l)}X_{i}^{(l)}\rangle}{\|\tilde{X}_{i}^{(l)}\|_{2}^{2}}\right)}\end{array}
+$$  
+
+Noticeably, this formulation is amenable to leverage EP-init (Colbert et al., 2024), which takes the same functional form. Thus, we tune our selection of $\lambda$ to be the optimal Lagrangian scalar derived from the solution to the constrained convex optimization problem formulated by Eq. 14. Here, the objective is to find the optimal Euclidean projection of $\pmb{w}$ onto the $\ell_{1}$ ball of radius $Z$ , where $Z$ is the accumulator-aware $\ell_{1}$ -norm target given, up to a scaling, by the upper bound in Eq. 4. Thus, $v^{*}$ is the vector that minimizes the projection onto the boundary of our constrained set before quantization.  
+
+$$
+v^{*}=\operatorname*{min}_{v}\frac{1}{2}\|v-w\|_{2}^{2}\quad\mathrm{~subject~to~}\quad\|v\|_{1}\leq Z
+$$  
+
+Define $\rho$ as the number of non-zero elements in the optimal solution and $\pmb{\mu}$ as the result of sorting $\pmb{w}$ by magnitude in descending order. The Lagrange multiplier $\lambda$ associated with the solution to the optimization problem is given by  
+
+$$
+\lambda=\frac{1}{\rho}\left(\sum_{i=1}^{\rho}\mu_{i}-Z\right),
+$$  
+
+which can be interpreted as the average difference between our scaled accumulator-aware $\ell_{1}$ -norm target and the magnitudes of all non-zero elements in the optimal Euclidean projection $\pmb{v}^{*}$ . We direct the reader to Colbert et al. (2024) and Duchi et al. (2008) for the associated proofs and derivations. It is important to note that because this projection is derived before quantization it cannot guarantee overflow avoidance on its own; both error correction and rounding errors may violate our constraint.2).  
+
+Strict accumulator-aware constraint. For clarity, and without loss of generality, we motivate our strict accumulator-aware constraint using the special case where $\tilde{\pmb{x}}$ is represented with unsigned integers such that $\mu=0$ and $\nu=2^{N}\!-\!1$ . Note that this setting is common when following activation functions with non-negative dynamic ranges (e.g., ReLUs), or when an appropriate non-zero-valued zero-point is adopted (i.e., asymmetric quantization) (Gholami et al., 2022; Zhang et al., 2022b).  
+
+Let $\alpha$ denote the sum of all negative elements in $\pmb q$ , and let $\beta$ denote the sum of all positive elements in $\pmb q$ . From Eq. 7, we can derive the upper bound on $\beta$ given by Eq. 16, which can similarly be derived for $-\alpha$ from Eq. 8 in the case of sign-magnitude representations. Indeed, $\pmb{u}^{T}\pmb{q}\leq2^{P-1^{\prime}}-1$ is guaranteed whenever $\bigl(\beta\nu+\alpha\mu\leq2^{P-1}-1\bigr)$ , which holds in the case of unsigned activations if  
+
+$$
+\beta\leq\frac{2^{P-1}-1}{2^{N}-1}.
+$$  
+
+Therefore, to quantize layer $l$ for a target $P$ -bit accumulator, we introduce a practical mechanism to control the range of the dot product based on the following modified GPFQ scheme:  
+
+$$
+\begin{array}{r l}&{q_{i}^{(l)}=\mathcal{Q}\circ\Psi_{a_{i-1}^{(l)},b_{i-1}^{(l)}}\circ\Pi_{\lambda}\left(\frac{\langle\tilde{X}_{i}^{(l)},u_{i-1}^{(l)}+w_{i}^{(l)}X_{i}^{(l)}\rangle}{\|\tilde{X}_{i}^{(l)}\|_{2}^{2}}\right)}\\ &{a_{i}^{(l)}=A^{(l)}-\alpha_{i}}\\ &{b_{i}^{(l)}=B^{(l)}-\beta_{i}}\end{array}
+$$  
+
+where $\alpha_{i}$ denotes the sum of all negative elements in $\pmb q$ whose index is less than $i$ and $\beta_{i}$ is its positive counterpart, $A^{(l)}$ and $B^{(l)}$ (defined in Eq. 20) are respectively the upper limits of $\alpha_{i}$ and $\beta_{i}$ , and the closed interval $[a_{i}^{(l)},b_{i}^{(l)}]$ is the range greedily enforced on $q_{i}$ as error is iteratively corrected. We use $\Psi_{a,b}$ to denote the clipping function $\Psi_{a,b}(x):=\mathrm{clip}\left(x;a,b\right)$ , which is effectively a no-op when the range $[a_{i}^{(l)},b_{i}^{(l)}]$ exceeds that of the quantized domain $A_{M}$ . This has the desired feature of being functionally equivalent to GPFQ when the accumulator is large enough (e.g., 32 bits). Finally, recall that $u_{i}^{(l)}$ is given by Eq. 11 with $u_{0}^{(l)}=0$ , which remains unchanged.  
+
+By independently constraining the limits of $q_{i}$ , our accumulator-aware variant avoids overflow without explicit zero-centering. To ensure rounding errors do not compromise our bounds, we use  
+
+$$
+-A^{(l)}=B^{(l)}=\frac{2^{P-1}-1}{2^{N}-1}-\operatorname*{max}\left(\Delta\right)
+$$  
+
+where max $(\Delta)$ denotes the worst-case difference in raw magnitude caused by rounding; for example, max $(\Delta)=0.5$ for round-to-nearest and max $(\Delta)=0$ for round-to-zero. Thus, our formulation and resulting iteration rules are also agnostic to the symmetry of the quantizer and its choice of rounding function. We also note that, while our derivation considers the sign-magnitude representation for the clarity that its symmetry provides, the separate consideration of $A^{(l)}$ and $B^{(l)}$ is useful for asymmetric representations (e.g., two’s complement).  
+
+
+
+\section{3.3 AXE: ACCUMULATOR-AWARE EXTENSIONS  }
+
+
+While the theoretical justification we presented is tied to the formulation of GPFQ and its derivations, we can extract our constraints to construct a generalized framework that enables the investigation of accumulator-aware PTQ with any iterative algorithm that sequentially assigns bits, assuming the algorithm is also amenable to activation quantization. Our framework consists of two steps: (1) accumulator-aware projection based on our soft $\ell_{1}$ -norm regularization penalty; and (2) greedy accumulator-aware clipping based on our strict range limits. We further generalize AXE to support multi-stage accumulation, which has implications for tiled dot products and SIMD parallelization.  
+
+ In both cases, $\lambda$ is derived per-channel before quantization. Adjusted weight values are greedily projected on the $\ell_{1}$ ball accordingly, then clipped to the difference between the cumulative sum of positive and negative elements and their respective limits. The resulting set of quantized weights $\bar{Q}\in\mathcal{A}_{M}^{K\times C}$ is then guaranteed to avoid overflow when accumulating its inner product with any $\bar{\tilde{X}}\in$ $\mathcal{A}_{N}^{K\times D}$ into $P$ -bit signed registers. Unlike the base GPFQ and OPTQ algorithms, our accumulatoraware variants require quantized activations to calculate the accumulator-aware limits in Eq. 20.  
+
+Multi-Stage Accumulation. Our accumulator-aware constraints can be generalized to target customized datapaths beyond user-specific accumulator bit widths. Unlike A2Q and $\mathrm{A}2\mathrm{Q}+$ , which assume a monolithic accumulator for each dot product (Colbert et al., 2023; 2024), we generalize our framework to support multi-staged accumulation as visualized in Figure 2. In such a scenario, our constraints are enforced on the quantized weights in tiles of size $T$ so that each partial dot product can be concurrently computed by an atomic MAC unit. We refer to the accumulator of this atomic MAC unit as the “inner” accumulator and denote its bit width as $P_{I}$ . Conversely, we refer to the accumulator of the resulting partial sums as the “outer” accumulator and denote its bit width as $P_{O}$ . Given that a $K$ -dimensional dot product is executed in tiles of size $T$ , where each tile is constrained to a $P_{I}$ -bit accumulator, we can calculate the minimum bit width required to guarantee overflow avoidance for the outer accumulator as:  
+
+$$
+P_{O}=\lceil P_{I}+\log_{2}(K)-\log_{2}(T)\rceil
+$$  
+
+While we are the first to our knowledge to target multi-stage accumulation while guaranteeing overflow avoidance, accumulating in multiple stages is not new. Quantized inference libraries such as FBGEMM (Khudia et al., 2018a), XNNPACK (Dukahn & Barchard, 2021), and Ryzen AI (AMD, 2024) have employed multi-staged accumulation to exploit a 16-bit inner accumulator (i.e., $P_{I}=16)$ ) to realize performance benefits, albeit without any theoretical guarantees of overflow avoidance. For example, Khudia et al. (2018b) use FBGEMM to realize nearly a $2\times$ throughput uplift on computebound workloads by accumulating at 16 bits in tiles of 64 elements rather than accumulating at 32 bits. Currently, these libraries typically disable this optimization if overflow is observed too often during testing. However, AXE provides a mechanism to simultaneously quantize and constrain a pre-trained model for low-precision multi-staged accumulation while guaranteeing overflow avoidance, enabling co-design for this optimization for the first time. As shown in Section 4, this generalization is critical in maintaining the quality of billion-parameter large language models, which often have dot products containing more than ten thousand elements.  
+
+![](images/8d229aa62b1492fe9204652b13ba7830dc1e076d3fae8db7170d567af472a77e.jpg)  
+
+Figure 2: We visualize (a) an atomic MAC unit and (b) parallelized multi-staged accumulation.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+Models & Datasets. We conduct experiments on GPT2 (Radford et al., 2019), OPT (Zhang et al., 2022a), and Pythia (Biderman et al., 2023) models and calibrate all quantized models using WikiText2 (Merity et al., 2016). When focusing on our scaling analysis, we use the LM Evaluation Harness benchmarking suite (Gao et al., 2023) to evaluate 6 reasoning tasks: ARC-easy and ARCchallenge (Clark et al., 2018), HellaSwag (Zellers et al., 2019), LAMBADA (Radford et al., 2019), PIQA (Bisk et al., 2020), and Winogrande (Sakaguchi et al., 2021).  
+
+Quantization Design Space. We constrain our quantization design space to uniform-precision models such that every hidden layer has the same weight, activation, and accumulator bit width, respectively denoted as $M$ , $N$ , and $P$ . We consider 3- to 8-bit integers for both weights and activations, unlike (Frantar et al., 2022) and (Zhang et al., 2023), which focused on weight-only quantization. Rather than evaluating each combination of $M$ and $N$ , we restrict ourselves to configurations where $N\geq M$ to reduce the cost of experimentation as such configurations tend to dominate the Pareto frontiers (Colbert et al., 2024). We implement our methods in PyTorch (Paszke et al., 2019) using the Brevitas quantization library (Pappalardo, 2023). All models are quantized using a single AMD MI210 GPU with 64 GB of memory.  
+
+4.1 OPTIMIZING FOR ACCUMULATOR CONSTRAINTS  
+
+We first consider the scenario in which QNNs are optimized for accumulator-constrained processors. Unlike prior work, we focus our analysis on the PTQ setting. As discussed in Section 2.3, one could heuristically manipulate $M$ and $N$ according to the data type bound derived by Colbert et al. (2023); however, the quantization design space ultimately limits the minimum attainable accumulator bit width. To the best of our knowledge, Euclidean projection-based initialization (EP-init) serves as the best alternative to this bit width manipulation approach in the PTQ setting (see Section 2.3). Therefore, we use EP-init and na¨ıve bit width manipulation as our baselines.  
+
+In Figure 1, we use Pareto frontiers to visually characterize the trade-off between accumulator bit width $P$ and model quality for both GPFQ and OPTQ, respectively. We assume a monolithic accumulator in these experiments (i.e., $P=P_{I}=P_{O}$ ). For each model and each PTQ algorithm, the Pareto frontier shows the lowest observed perplexity for a target $P$ when varying $M$ and $N$ within our design space, with the perplexity of the 32-bit floating-point model provided for reference. Recall that accumulator-aware quantization requires both the weights and activations to be quantized  
+
+Table 1: We report the WikiText2 perplexity results when evaluating AXE on Pythia models quantized to W4A8 for 16-bit accumulation in tiles of 128 elements (denoted $128\!\times\!16\mathrm{b})$ ). We compare against the unconstrained baseline (denoted Base).  
+
+![](images/57b6be70a3ac84ef21751459fb85e8c446f13e48da924728586fced3e61dc295.jpg)  
+
+(see Section 3.2); therefore, this is not a direct comparison against the original GPFQ and OPTQ proposals, which only quantized weights. We observe similar trends as reported in Colbert et al. (2024); the Pareto-optimal activation bit width $N$ decreases as $P$ is reduced, and the unstructured weight sparsity conversely increases. This suggests that our accumulator-aware boundary constraints obey similar mechanics as the $\ell_{1}$ -norm constraints of QAT methods, as our theoretical justification predicts (see Section 3.3).  
+
+
+
+\section{4.2 LOW-PRECISION ACCUMULATION FOR LARGE LANGUAGE MODELS  }
+
+
+As discussed in Colbert et al. (2024), the $\ell_{1}$ -norm of an unconstrained weight vector inherently grows as its dimensionality increases. This suggests that accumulator-aware quantization scales well to strictly deeper neural architectures since the constraints tighten with width rather than depth; experimental results on the ResNet family support this hypothesis (Colbert et al., 2024). However, this also suggests that accumulator-aware quantization scales poorly in neural network families that grow in width, as is the case in transformer architectures (Zhang et al., $2022\mathbf{a}$ ; Biderman et al., 2023). Thus, to scale our accumulator-aware PTQ framework to billion-parameter language models, we turn to our multi-stage accumulation variant of AXE (see Section 3.3). Here, one assumes the partial sums of a dot product are concurrently computed in fixed-length tiles of size $T$ . Our goal in this setting is to minimize perplexity for a target inner accumulator bit width $P_{I}$ that is assumed to be universal across all tiles. Thus, our accumulator width is constant even as models grow wider.  
+
+Rather than exploring the full quantization design space, we focus on 4-bit weights and 8-bit activations (W4A8) to maximize utility across platforms with a reasonable number of experiments, as prior studies have suggested this configuration is generally useful (Dettmers & Zettlemoyer, 2023; Li et al., 2024). We evaluate AXE on top of both GPFQ and OPTQ using tiles of 128 elements under 16-bit accumulator constraints (note that $P_{I}^{*}\ =\ 20$ when $T\,=\,128$ for W4A8 via Eq. 3). Again, prior work has established 128 to be a generally useful tiling size; AVX-512 ISA supports $T=32$ elements (Khudia et al., 2018a), Ryzen AI NPUs support $T=64$ elements (AMD, 2024), and many works allocate scaling factors in groups of 128 elements (Lin et al., 2023; Liu et al., 2024). Finally, we find that the peak memory utilization of GPFQ limits its evaluation on billion-parameter LLMs. We report our results in Tables 1 and 2.  
+
+We first focus our scaling law analysis on the Pythia model suite, which was specifically designed to facilitate such a study (Biderman et al., 2023). From our results in Table 1, we observe that, as model size increases, the quality of the accumulator-constrained models approaches that of the unconstrained baselines as expected, with AXE preserving $92.4\%$ of the baseline GPFQ perplexity and $82.8\%$ of the baseline OPTQ perplexity of Pythia-6.9B compared to $74.8\%$ and $32.3\%$ for Pythia70M, respectively. From our results in Table 2, we again observe that, as model size increases, the gap is reduced between the zero-shot reasoning capabilities of the constrained models and their unconstrained baselines; AXE preserves $98\%$ of the baseline GPFQ accuracy and $96\%$ of the baseline OPTQ accuracy for Pythia-6.9B compared to $86\%$ and $76\%$ for Pythia-70M, respectively. Under the A2Q scaling hypothesis, this suggests the narrowing accuracy gap is in part because model capacity is growing without tightening the constraints since $T$ is held constant even as $K$ increases.2, we provide an ablation study targeting a monolithic 16-bit accumulator (i.e., $P_{O}=16]$ ). There, we show the gap conversely increases as $K$ increases, confirming that fixing $P_{I}$ via multistage accumulation improves scaling.  
+
+Table 2: We report the geometric mean calculated over 6 zero-shot reasoning tasks when evaluating AXE on Pythia models quantized to W4A8 for 16-bit accumulation in tiles of 128 elements (denoted $128\!\times\!16\mathrm{b}$ ). We compare against the unconstrained baseline (denoted Base).   
+
+![](images/3e2a711bd5867c70014d6ee4e70652030361152e8e6a762bf20d7f8b333cd87a.jpg)  
+
+
+
+\section{5 DISCUSSION AND CONCLUSIONS  }
+
+
+As neural networks continue to increase in size, and their weights and activations are increasingly being represented with fewer bits, we anticipate the accumulator to play a larger role in hardwaresoftware co-design (see Section 2.2). While prior work on accumulator-aware quantization has been limited to the QAT setting (see Section 2.3), ours marks the first to extend accumulator-awareness to the PTQ setting. To do so, we introduce AXE—a practical low-overhead framework of accumulatoraware extensions designed to endow overflow avoidance guarantees to any layer-wise PTQ algorithm that greedily assign bits element-by-element. We demonstrate the flexibility of AXE by presenting accumulator-aware variants of GPFQ and OPTQ with principled overflow avoidance guarantees. Furthermore, unlike prior accumulator-aware quantization methods, which assume a monolithic accumulator, we generalize AXE to support multi-stage accumulation for the first time.  
+
+Our experiments in Section 4.1 show that AXE significantly improves the trade-off between accumulator bit width and model accuracy when compared to existing baselines. As has been shown before in the QAT setting (Colbert et al., 2023; 2024), exposing control over the accumulator bit width allows one to reduce $P$ further than what is attainable via na¨ıve bit width manipulations while also maintaining model accuracy. Moreover, we observe that AXE universally yields marked improvement over EP-init across both models and datasets, establishing a new state-of-the-art for accumulator-aware quantization in the PTQ setting. Although EP-init and AXE are both derived from the same convex optimization problem (see Eq. 14), EP-init is a vector projection that is applied after quantization and relies on the round-to-zero rounding function to ensure the $\ell_{1}$ -norm constraints are respected. Previous reports had suspected EP-init is limited by this reliance on roundto-zero (Colbert et al.2 that supports this hypothesis but also suggests error correction is critical. For GPFQ, we observe error correction to be more important than round-to-nearest, but we observe the opposite for OPTQ, although a more exhaustive analysis in future work may uncover more insights.  
+
+Our experiments in Section 4.2 show that our generalized multi-stage accumulation enables accumulator-aware weight quantization for billion-parameter LLMs. We observe that the gap between the constrained and unconstrained quantized models shrinks as model size increases, preserving both perplexity and zero-shot reasoning. However, we also observe that the gap between the quantized models and their 32-bit floating-point counterparts begins to increase with model size. This is consistent with the findings of Li et al. (2024), who conclude that while larger models tend to have a higher tolerance for weight quantization, they also tend to have a lower tolerance for activation quantization. Thus, there exists two diametrically opposing trends in superposition. For the Pythia model suite, we observe Pythia-1B to be the equilibrium point where the costs of weight and activation quantization are balanced. While it is orthogonal to the scope of this study, we expect the emerging rotation-based quantization schemes (e.g., QuaRot (Ashkboos et al., 2024) or SpinQuant (Liu et al., 2024)) to impact this equilibrium point and reduce the gap between quantized models and their 32-bit floating-point counterparts. We leave such investigations for future work.  
+
+
+

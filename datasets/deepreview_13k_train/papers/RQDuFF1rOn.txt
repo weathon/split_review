@@ -1,0 +1,176 @@
+\title{Solving Robotics Problems in Zero-Shot with Vision-Language Models}
+
+\begin{abstract}
+We introduce Wonderful Team, a multi-agent Vision Large Language Model (VLLM) framework designed to solve robotics problems in a zero-shot regime. In our context, zero-shot means that for a novel environment, we provide a VLLM with an image of the robot's surroundings and a task description, and the VLLM outputs the sequence of actions necessary for the robot to complete the task. Unlike prior work that requires fine-tuning parts of the pipeline -- such as adjusting an LLM on robot-specific data or training separate vision encoders -- our approach demonstrates that with careful engineering, a single off-the-shelf VLLM can autonomously handle all aspects of a robotics task, from high-level planning to low-level location extraction and action execution. Crucially, compared to using GPT-4o alone, Wonderful Team is self-corrective and capable of iteratively fixing its own mistakes, enabling it to solve challenging long-horizon tasks. We validate our framework through extensive experiments, both in simulated environments using VIMABench and in real-world settings. Our system showcases the ability to handle diverse tasks such as manipulation, goal-reaching, and visual reasoning---all in a zero-shot manner. These results underscore a key point: vision-language models have progressed rapidly in the past year and should be strongly considered as a backbone for many robotics problems moving forward.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Advancements in Large Language Models (LLMs) and Vision-Language Models (VLLMs) have brought us closer to enabling robots to perform complex tasks based solely on natural language instructions, without prior training. By integrating vision and language, VLLMs allow robots to intuitively understand their environments, leveraging real-world priors from large-scale data. However, developing a general-purpose robotic system capable of executing complex tasks in dynamic settings remains challenging. Such systems need to perceive surroundings, utilize appropriate skills, and achieve long-horizon subgoals. This raises a crucial question: Can these models be adapted to solve robotic tasks in unstructured environments without any training?  
+
+Current approaches in language-conditioned robotics often separate the problem into high-level planning and low-level perception-action execution, utilizing distinct modules for each component. While this separation can facilitate zero-shot operation, it may hinder seamless integration between perception and action, especially when modules are disconnected.  
+
+High-Level Planning with Predefined Task Modules: Many methods focus on high-level planning using LLMs or VLLMs, decomposing tasks into subtasks but relying on predefined task modules or APIs for action execution, which are not directly executable without prior knowledge or training (Hu et al., 2023; Huang et al., 2022b; Liang et al., 2023).  
+
+Low-Level Coordinate Generation with Separate Vision Models: Other approaches generate low-level coordinates using separate vision models for perception, often relying on predefined or fine-tuned vision APIs. While leveraging off-the-shelf models like Convolutional Neural Networks (CNNs)(Ichter et al., 2022; Mees et al., 2023), CLIP(Bucker et al., 2023; Huang et al., 2022c), Vision Transformer (ViT) variants (Huang et al., 2023b; Stone et al., 2023; Jiang et al., 2023), or LangSAM (Kwon et al., 2024) has shown promise in zero-shot capabilities, these methods still face limitations. The reliance on separate perception systems can fail to fully capture the environmental context required for precise planning and action generation.  
+
+These limitations hinder the seamless integration of perception and action, as vision models like CLIP, which primarily offer class-level predictions, lack the deep environmental understanding needed for complex, context-specific tasks. Similarly, while LangSAM can segment objects based on language prompts, it struggles with precise object identification in complex scenes or when handling abstract instructions that require deeper comprehension. As a result, these models perform well with easily identifiable objects but face challenges when handling abstract or environment-specific tasks, which significantly limits their ability to help LLMs accurately ground environmental context and generate actionable outputs. The separation of planning and perception hinders the seamless integration of perception and action in decision-making. However, with the multimodal capabilities of modern VLLMs, this division may no longer be necessary. In this paper, we introduce Wonderful Team: a zero-shot, single-model, multi-agent system that unifies planning and perception within a VLLM framework using interconnected specialized agents. This integrated approach enables end-to-end reasoning and execution without relying on external modules or fine-tuning, effectively addressing the limitations of previous modular methods.  
+
+Our key contributions include:  
+
+• Zero-Shot Coordinate-Level Control in Complex Robotics Tasks: Our system operates without any prior training, fine-tuning, or environment-specific prompts, successfully handling diverse tasks in both simulated and real-world environments. It delivers precise, coordinate-level control for robotic execution, outperforming methods that rely on coarse object-level or sub-task-level instructions.  
+
+• Introducing a Multi-Agent VLLM Framework to Overcome Previous Limitations: We have developed a novel multi-agent structure within a single VLLM, where specialized agents collaboratively handle various aspects of robotic tasks, from high-level planning to low-level execution. By integrating perception and action, and employing a divide-and-conquer approach with reflection capabilities, we address the shortcomings of previous models, including issues with context-aware object identification, precise localization, and handling multiple instances of the same object.   
+• Empirical Validation through Extensive Experiments and Ablation Studies: We validate our framework with comprehensive experiments in both simulation (VIMABench) and real-world settings. Our results show significant performance improvements over existing methods, including those that require training. We also conduct thorough ablation studies to examine the effects of different agents and configurations, highlighting the critical role of the multi-agent system in achieving optimal performance.  
+
+Demonstration videos of the robotic policies in action, along with the code, can be accessed on our project website.  
+
+
+
+\section{2 MOTIVATING EXAMPLES  }
+
+
+Developing robotic systems that can understand and execute complex tasks in unstructured environments remains a significant challenge. Existing frameworks often employ a Large Language Model (LLM) as a text planner combined with a separate vision model (e.g., CLIP, OWL-ViT, LangSAM) to perceive the environment. While this modular approach seems logical, it faces critical limitations when applied to intricate, context-dependent tasks.  
+
+2.1 CAN AN LLM AS A PLANNER WITH A SEPARATE VISION MODEL FIND OBJECTS?  
+
+Not Always. There are limitations at both the planning and perception levels:  
+
+At the planning level, non-vision LLMs cannot generate meaningful plans for ambiguous prompts that rely on environmental context. For example, consider the task: “Rank the fruits from most expensive to cheapest.” Without visual input to identify the fruits and their prices, the LLM cannot accurately rank them, nor generate useful queries for the vision model.  
+
+At the perception level, vision models also have limitations in context-aware perception. A notable prior work is the Trajectory Generator (Kwon et al., 2024), which uses GPT as a text planner and LangSAM as the vision model. In this approach, GPT extracts the objects to segment from the task prompt and passes them to LangSAM for object identification and segmentation. As illustrated in Figure 1, LangSAM fails to correctly identify or segment all intended objects based on the prompt. While this example highlights several challenges inherent in using separate vision models for complex tasks, it does not capture the full scope of limitations, which are discussed in detail below:  
+
+1. Difficulty with Less Common and Non-Segmented Objects: LangSAM struggles to identify uncommon objects (e.g., robot grippers, box lids) and abstract regions that cannot be clearly segmented. When objects are less prominent in the scene or when boundaries are not well-defined, LangSAM fails to provide accurate identification or spatial understanding.  
+
+2. Misinterpretation of Spatial and Positional Instructions: LangSAM often misinterprets vague spatial instructions like “pick up the rightmost object” due to its lack of precise spatial reasoning. In multi-instance scenarios, positional references like “the middle can” are challenging because the model frequently miscounts objects, leading to incorrect identification.  
+
+3. Lack of Contextual Awareness and Differentiation: LangSAM lacks the contextual understanding necessary to distinguish between relevant objects for manipulation and other elements in the scene. For instance, it may mistakenly select parts of the robot arm itself, failing to identify the intended target due to a lack of contextual awareness.  
+
+![](images/e3d86be15696ca8b49b650c6cad50f405049f72ee34df97e605d3f8d8be1e347.jpg)  
+
+Figure 1: Examples of LangSAM’s detection failures in simulated environments. The bolded text within the prompts represents the objects extracted by GPT and passed to LangSAM.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Recent advancements in robotics and artificial intelligence have integrated Large Language Models (LLMs) and Vision-Language Models (VLMs) into robotic systems. Our work builds upon and differs from several key areas in this evolving landscape.  
+
+Foundation Models in Robotics: Foundation models, trained on vast internet-scale datasets, have demonstrated strong zero-shot capabilities across various tasks. LLMs like GPT-3 (Brown et al., 2020), LLaMA (Touvron et al., 2023), and ChatGPT have excelled in generating human-like text, understanding natural language instructions, and performing extensive reasoning and planning. VLMs extend these capabilities by incorporating visual understanding. In robotics, these models offer the potential to endow robots with real-world priors and advanced reasoning abilities without extensive task-specific training.  
+
+Language Models Empowering Robotics: Prior work has leveraged natural language to enhance robotic learning and adaptation. Early approaches equipped agents with learned language embeddings, requiring large amounts of training data (Bing et al., 2023; Jiang et al., 2023). Others focused on connecting language instructions with low-level action primitives to solve long-horizon tasks (Hu et al., 2023; Huang et al., 2022b; Liang et al., 2023). While effective in specific contexts, these methods often struggle to generalize to new tasks without retraining. Foundation models like RT-1 (Brohan et al., 2022) and RT-2 (Brohan et al., 2023) have advanced versatile robotic systems, but they still require significant training to achieve robust performance across diverse tasks.  
+
+Zero-Shot and Few-Shot Approaches: Recent studies have explored zero-shot and few-shot solutions for robotic planning and manipulation tasks (Huang et al., 2022a; Liang et al., 2023; Huang et al., 2022b;c; Zeng et al., 2023; Singh et al., 2023; Vemprala et al., 2023; Gu et al., 2023). These approaches aim to handle unseen scenarios without prior training, primarily focusing on high-level planning. However, they often rely on predefined programs or external modules for control, limiting their adaptability in dynamic or complex environments.  
+
+Vision-Language Models for Localization: PIVOT (Nasiriany et al., 2024) addresses enabling VLMs to localize actionable points without fine-tuning on task-specific data. Their approach centers on localization through visual question answering, with minimal focus on planning—similar to the role of our Grounding Team. Unlike our method, which integrates both localization and planning within a multi-agent framework, PIVOT primarily addresses localization without managing complex, long-horizon tasks. In PIVOT, a single agent iteratively selects action points, whereas our approach employs multiple agents with distinct roles for refining and verifying actions.2.  
+
+Language Models as Zero-Shot Trajectory Generators: Kwon et al. (2024) propose using language models as zero-shot trajectory generators. Their approach uses a predefined object detection model (LangSAM) to extract object information, which is then used by the LLM to plan. Specifically, the LLM generates Python scripts to create a trajectory for execution. Unlike our method, which uses a VLLM to integrate perception and action without external modules, their approach relies on separate perception models and code generation for trajectory planning.3.  
+
+Natural Language as Policies: Concurrent with our work, Natural Language as Policies (NLaP) (Mikami et al., 2024) developed a few-shot, end-to-end model for coordinate-level action prediction. Their approach involves providing a one-shot example, either from the same task or a closely related one, rather than adopting a zero-shot paradigm. Unlike our method, which integrates both grounding and planning within a multi-agent framework, NLaP focuses less on grounding and directly uses system information from the environment, bypassing the need to extract coordinates from images using VLMs.1.  
+
+Our Contribution in Context: Our work differs from prior approaches by proposing a zero-shot, single-model, multi-agent system that integrates high-level planning and low-level action execution within a unified VLLM framework. By eliminating the need for external vision encoders and predefined action modules, our method achieves greater adaptability and precision in dynamic environments.  
+
+5 EXPERIMENTAL RESULTS  
+
+In this section, we evaluate the performance of Wonderful Team across a diverse set of tasks that challenge various aspects of robotic reasoning and manipulation. We address key elements of robotics, including multimodal reasoning, contextual decision-making, and complex spatial planning. Our experiments are categorized into three main groups, each designed to tackle specific challenges while contributing to the broader evaluation of the system’s capabilities.  
+
+1) Multimodal Reasoning (17 Tasks in Simulated VIMABench)  
+
+2) Implicit Goal Inference (3 Custom Real-world Tasks)  
+
+3) Spatial Planning (4 Real-world Tasks Adapted from Trajectory Generator)  
+
+5.1 MULTIMODAL REASONING - SIMULATED VIMABENCH  
+
+To assess our approach’s ability to understand multimodal prompts, reason through abstract concepts, and follow constraints, we tested it on all 17 tasks from VIMABench (Jiang et al., 2023). Unlike traditional robotics benchmarks, VIMABench offers a broad range of objects and task types (see Figure 6), requiring advanced scene understanding, multimodal comprehension, and precise planning for manipulation.  
+
+![](images/da8aac3a83b6e17f532c1e273796385218e61e670b18cd282eeb72c126ec4fe8.jpg)  
+
+Figure 6: Key Challenges in VIMABench (Jiang et al., 2023): (a) Manipulating uncommon objects and textures, (b) Interpreting multimodal prompts with abstract nouns and adjectives, (c) Executing constraint satisfaction tasks, and (d) Handling Spatial Relations and Sequential Dependencies. We evaluated all 17 tasks in VIMABench, categorized into four main task suites as defined by Jiang et al. (2023), each targeting distinct robotic capabilities:  
+
+1) Simple Object Manipulation: pick-and-place and rotate tasks using multimodal prompts that combine images and text.  
+
+2) Novel Concept Grounding: Tasks with abstract terms like “kobar” (see Figure 6(b)), testing the agent’s ability to understand and act on novel concepts.  
+
+3) Visual Constraint Satisfaction: Manipulating objects while adhering to specific constraints not easily segmentable, such as avoiding certain areas (see Figure 6(c)).  
+
+4) Visual Reasoning: Higher-level reasoning tasks that involve understanding object properties and maintaining state, such as “put the object that was previously at its west ...” (see Figure 6(d)).  
+
+5.2 IMPLICIT GOAL INFERENCE - REAL ROBOTS  
+
+To evaluate our framework’s reasoning abilities and visual context understanding in real-world settings, we designed a set of Implicit Goal Inference Tasks, each with four variations, to assess the system’s capacity for long-horizon reasoning and context-aware high-level instructions interpretation (see Figure 7).  
+
+We evaluated our method on three real-world tasks:  
+
+1) Fruit Placement: The robot is asked to place each fruit in a color-matched area across various setups using the same general prompt. This task challenges the system to infer the desired placement and sometimes also to identify and correct any initially misplaced fruits (see Figure 7(a)).  
+
+2) Superhero Companions: The robot is tasked with placing fruits and snacks based on color similarity, requiring it to identify objects and make suitable matches, even with non-exact color matches, multi-colored objects, and cases where no clear match is available. (see Figure 7(b)).  
+
+3) Fruit Price Ranking: The robot is tasked with ranking fruits by price. This challenges the system to interpret visual discount information, apply comparative reasoning, and execute precise ranking to correctly order the fruits (see Figure 7(c)).  
+
+All tasks require the system to interpret high-level prompts, perform contextual reasoning, and execute multi-step actions to achieve the implicit goal state based on the provided instructions.  
+
+![](images/2121e25c5a2e5bf667f574b66f4cea07a9297ec3e65cf028ef90f7039424f63c.jpg)  
+
+Figure 7: Examples of Ambiguous Instruction & Contextual Reasoning Tasks: (a) Fruit Placement, (b) Superhero Companions, and (c) Fruit Price Ranking.  
+
+5.3 SPATIAL PLANNING - REAL ROBOTS  
+
+To further challenge our system, we introduced tasks that require precise planning and subgoal management. These tasks test the agent’s ability to produce accurate action sequences and handle dependencies carefully. (see Figure 8).  
+
+![](images/23b5a453cc8f766bbc0052c58d761667412f8d54e6b3354c98671a5a9f8db7c7.jpg)  
+Figure 8: Examples of Complex Planning Tasks.  
+
+We evaluated our method on four real-world tasks:  
+
+1) Shaking the Bottle: The agent grasps a bottle, shakes it in the air, and places it back on the table.   
+(see Figure 8(a)).  
+
+2) Drawing a Five-Pointed Star: The agent holds a marker and draws a five-pointed star on a notebook. This task demands very precise path planning for both lowering the marker to the paper and accurately tracing the star’s points (see Figure 8(b)).  
+
+3) Wiping the Plate with Sponge: The agent cleans a plate using a sponge. This task involves coordinating the sponge’s movement to cover the entire surface of the plate (see Figure 8(c)).  
+
+4) Opening a Bottle Cap: The agent grasps a bottle and unscrews its cap (see Figure 8(d)).  
+
+All four tasks require the robot to generate accurate intermediate subgoals, carefully plan and execute actions within spatial contexts.  
+
+5.4 RESULTS AND DISCUSSION  
+
+In VIMABench (Jiang et al., 2023), we compared Wonderful Team against the following methods: (1) Trajectory Generator(Kwon et al., 2024), which uses an LLM for planning and LangSAM for perception; (2) Natural Language as Policies (NLaP)(Mikami et al., 2024), which employs one-shot prompting and directly accesses ground-truth coordinates, bypassing perception; and (3) Ablations Replacing the Grounding Team, where we replace the multi-agent Grounding Team with a single VLLM for inferring object coordinates directly and a separate vision-language model, OWL-ViT.  
+
+Table 9(a) outlines each method’s characteristics, including zero-shot versus one-shot settings, prompt types, and the modules used for planning and perception. Methods without vision rely on text prompts rather than the more complex multimodal prompts (Figure 9(b)). Notably, NLaP employs one-shot examples in its prompting and directly uses the ground truth state coordinates from the environment, entirely bypassing the perception challenge and, therefore, any comparisons must be made carefully. Due to this lack of perception capability, we can only compare with NLaP in the simulated tasks.  
+
+![](images/f3248270d315e39fe7f582d47775e37e7327c41ddbb45006bd6fae940d74e6fe.jpg)  
+
+![](images/dff63838ce00c8e332a6ae72a91a22278ecd9ba09f412cdfecc74ddb22a8e7a2.jpg)  
+(a) Comparison with baseline methods. Grey boxes indicate reduced complexity due to the framework’s nature, which should be considered when interpreting results.   
+(b) Examples of prompts: text vs. multimodal. Multimodal prompts require visual understanding, making them more challenging than text prompts that rely on ground-truth data. MultimodalReasonin  
+
+![](images/2d1cfdcd4be6a44c9dc53d277c8f24322e4b464e1a9ef5a7294ef6b428ffdff3.jpg)  
+(c) Performance on VIMABench tasks. Wonderful Team achieves strong results across all task domains. Performance declines when the Grounding Team is removed or replaced.  
+
+
+
+\section{6 FURTHER DISCUSSIONS  }
+
+
+6.1 COMPARISON WITH METHODS THAT TRAIN  
+
+In recent years, the machine learning community has often seen new LLMs exceed the performance of previous generation fine-tuned models in zero-shot settings, despite the latter’s advantage of taskspecific tuning. To explore this trend in the context of visual LLMs and robotics, we compare Wonderful Team with several methods that were at least partially fine-tuned on robotics tasks.  
+
+In particular, we compare against: 1) VIMA Jiang et al. (2023) and 2) Instruct2Act Huang et al. (2023a). In Table 1, we consistently see that the advantage of fine-tuning loses out to having a more powerful VLLM.  
+
+![](images/cdfb9d562c965773a9619fed06f444cda18b988394fbcab06392f07c58413760.jpg)  
+
+Table 1: Comparison with non-zero-shot Methods on VIMABench Tasks. Success rates are averaged across the same tasks considered in figure 9(c)  
+
+6.2 LIMITATIONS: WHERE DOES WONDERFUL TEAM STRUGGLE?  
+
+Limited 3D Reasoning and Partial Observability: While the integration of depth cameras allows Wonderful Team to capture 3D data, its reasoning and planning are still largely confined to 2D space. This limitation hinders tasks that require precise manipulation along the height axis or a full understanding of 3D spatial relationships. Additionally, it struggles with partial observability, often leading to incorrect interpretations of spatial relationships.  
+
+Real-Time Adaptation and Error Recovery: Although the Replanning Agent is designed to address failures post-execution, the framework could be improved with real-time dynamic error detection to catch issues immediately. However, reprocessing parts of or the entire task can be computationally expensive and sometimes impractical, requiring careful system design. This limitation is particularly important in navigation tasks or rapidly changing dynmaic environments, where constant replanning can be costly and reduce applicability. Improving the system’s robustness to environmental variations and enhancing real-time error recovery remain key areas for future work.  
+
+
+

@@ -1,0 +1,1052 @@
+\title{Towards Principled Evaluations of Sparse Autoencoders for Interpretability and Control}
+
+\begin{abstract}
+
+Disentangling model activations into meaningful features is a central problem in
+interpretability. However, the absence of ground-truth for these features in
+realistic scenarios makes validating recent approaches, such as sparse
+dictionary learning, elusive. To address this challenge, we propose a framework for
+evaluating feature dictionaries in the context of specific tasks, by comparing
+them against \emph{supervised} feature dictionaries. First, we demonstrate that
+supervised dictionaries achieve excellent approximation, control, and
+interpretability of model computations on the task. Second, we use the
+supervised dictionaries to develop and contextualize evaluations of unsupervised
+dictionaries along the same three axes.
+
+We apply this framework to the indirect object identification (IOI) task using
+GPT-2 Small, with sparse autoencoders (SAEs) trained on either the IOI or
+OpenWebText datasets. We find that these SAEs capture interpretable features for
+the IOI task, but they are less successful than supervised features in
+controlling the model. Finally, we observe two qualitative phenomena in SAE
+training: feature occlusion (where a causally relevant concept is robustly
+overshadowed by even slightly higher-magnitude ones in the learned features),
+and feature over-splitting (where binary features split into many smaller,
+less interpretable features). We hope that our framework will provide a useful
+step towards more objective and grounded evaluations of sparse dictionary
+learning methods.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begingroup
+\renewcommand{\thefootnote}{}% Remove footnote number
+\footnotetext{$^*$: Joint contribution. Correspondence to: \texttt{aleksandar.makelov@gmail.com}.}
+\addtocounter{footnote}{-0}% Restore footnote counter
+\endgroup
+\label{sec:intro}
+
+While large language models (LLMs) have demonstrated impressive
+\citep{vaswani2017attention, bert, radford2019language, brown2020language, gpt4}
+results, the mechanisms behind their successes and failures
+largely remain a mystery \citep{olah2023interpretability}. A central problem in
+this area is how to \emph{disentangle} internal model representations into
+meaningful concepts or \emph{features}. If successful at scale, this research
+could provide significant scientific and practical value, enabling enhanced
+model robustness, controllability, interpretability, and debugging
+\citep{gandelsman2023interpreting,nanda2023emergent,marks2024sparse}.
+
+A leading hypothesis for how LLMs represent and use features is the \emph{linear
+representation hypothesis}
+\citep{Mikolov2013LinguisticRI,grand2018semantic,li2021implicit,abdou2021can,nanda2023emergent}.
+A strong version of this hypothesis posits that individual activations of a model can be
+decomposed into sparse linear combinations of features from a large,
+shared \emph{feature dictionary}. Recently, a series of works has proposed
+applying the (unsupervised) \emph{sparse autoencoder} (SAE) framework to find
+such dictionaries
+\citep{Olshausen1997SparseCW,Faruqui2015SparseOW,goh2016decoding,arora2018linear,Yun2021TransformerVV,cunningham2023sparse,bricken2023monosemanticity}.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]{pics/graphical_abstract.pdf}
+    \caption{Overview of our evaluation pipeline. We begin by selecting a
+    specific model capability and then disentangling model activations into
+    capability-relevant features using supervision. Then, we evaluate a given
+    feature dictionary w.r.t.\ this capability, using the supervised features as
+    a benchmark. We test the extent to which (1) the feature dictionary's
+    reconstructions of the activations are necessary and sufficient for the
+    capability, (2) the features can be used to edit capability-relevant
+    information in internal model representations (agnostic of feature
+    interpretations), and (3) the features can be interpreted w.r.t. the
+    capability in a manner consistent with their causal role.}
+    \label{fig:graphical-abstract}
+\end{figure}
+
+While there are promising initial results \citep{bricken2023monosemanticity},
+this research area faces a key obstacle: we cannot directly evaluate the
+usefulness of features learned by an SAE, as we do not know the hypothetical
+`true' features to begin with; indeed, finding them is the reason we use
+SAEs in the first place. This has two consequences: (1) the training objective
+of an SAE -- balancing $\ell_2$ reconstruction with an $\ell_1$ penalty on
+feature coefficients -- is only a substitute for the true goal of finding meaningful features, and (2)
+the metrics used to evaluate SAEs are indirect, relying on proxies for the
+features, success in toy models, or non-trivial assumptions on SAE learning
+\citep{elhage2022toy,bricken2023monosemanticity,sharkey2023taking}. This hampers
+progress in the field, as there is no simple, objective and direct way to
+compare trained SAEs. In this paper, we take steps towards addressing this
+challenge. Our contributions are outlined as follows:
+\begin{itemize}
+\item We propose a principled method for computing sparse feature dictionaries to
+decompose language model activations on realistic tasks, using supervision from
+attributes describing the prompts.
+\item We apply this method to the IOI task, demonstrating that these dictionaries exhibit
+three desirable properties in the task's context: (1) sufficiency and necessity of
+activation reconstructions, (2) sparse controllability of model behavior via
+feature editing, and (3) interpretability of the features consistent with their
+causal role\footnote{
+As a by-product, our supervised feature dictionaries also demonstrate that
+task activations can be usefully disentangled in a way that adheres to
+the linear representation hypothesis and exhibits superposition. To the best of our knowledge, this is the
+first time such a disentanglement has been achieved in a realistic LLM task.}.
+\item We use these feature dictionaries to design and contextualize evaluations
+of \emph{unsupervised} feature dictionaries along the same three axes.
+Importantly, we aim to develop evaluations that are agnostic to whether the
+unsupervised dictionaries use the same concepts as the supervised
+ones. 
+\item We apply this methodology to feature dictionaries learned by SAEs trained on
+either the IOI dataset (task-specific SAEs) or the LLM's pre-training dataset
+(full-distribution SAEs). We find that both types of SAEs find 
+interpretable features for the task, but task-specific SAEs allow us to edit
+attributes by changing fewer features compared to full-distribution SAEs.
+However, both kinds of SAEs fall short of supervised dictionaries.  
+\item Finally, we dive deeper into some qualitative phenomena observed in
+task-specific SAEs: feature occlusion (where SAEs have a tendency to learn only
+the higher-magnitude of two task-relevant attributes, even when the attributes
+have slightly different magnitudes), and feature over-splitting (where SAEs tend
+to learn $\gg2$ features without a clear interpretation for binary concepts). We
+reproduce both phenomena in simple toy models, suggesting they may generalize
+beyond our specific setting.
+\end{itemize}
+
+Our results underscore the need for more principled training and evaluation
+methods in this active area and suggest that supervised feature dictionaries
+can be a valuable tool for automating aspects of this process.
+
+
+
+\section{Preliminaries}
+
+\label{sec:prelims}
+\textbf{The linear representation hypothesis and sparse autoencoders.} A
+central hypothesis in interpretability is the \emph{linear representation
+hypothesis}. A strong variant of this hypothesis posits that model activations can be decomposed into meaningful features
+using a \emph{sparse feature dictionary}: given a location in the model (e.g., an
+attention head output), there exists a set of vectors
+$\{\mathbf{u}_i\}_{i=1}^{m}$ such that each activation $\mathbf{a}$ at this location can
+be approximated as a sparse linear combination of the $\mathbf{u}_j$ with
+non-negative coefficients. In particular, recent work suggests that
+$n$-dimensional activations $\mathbf{a}\in \mathbb{R}^n$ may be best described by $m\gg n$ such features in
+\emph{superposition} \citep{elhage2022superposition,gurnee2023finding}.
+Recently, SAEs have been proposed as a way to disentangle these features. Following the
+setup of \citet{bricken2023monosemanticity} here and in the rest of this work, a sparse autoencoder (SAE) is an
+unsupervised model which learns to reconstruct activations
+$\mathbf{a}\in\mathbb{R}^n$ as a weighted sum of $m$ features
+with non-negative weights. Specifically, the autoencoder computes a hidden
+representation
+\begin{align*}
+    \mathbf{f} = \operatorname{ReLU}\l(W_{enc} \l(\mathbf{a}-\mathbf{b}_{dec}\r) +
+    \mathbf{b}_{enc}\r)
+\end{align*}
+and a reconstruction
+\begin{equation}
+\label{eq:sae-reconstruction}
+    \widehat{\mathbf{a}} = W_{dec} \mathbf{f} + \mathbf{b}_{dec} = \sum_{j=1}^{m} \mathbf{f}_j (W_{dec})_{:,j} + \mathbf{b}_{dec}
+\end{equation}
+where $W_{enc}\in \mathbb{R}^{m\times n}$, $W_{dec}\in \mathbb{R}^{n\times m},
+\mathbf{b}_{dec} \in \mathbb{R}^n, \mathbf{b}_{enc}\in \mathbb{R}^m$ are learned
+parameters. The rows of $W_{enc}$ are the \emph{encoder directions}, and the columns
+of $W_{dec}$ are the \emph{decoder directions}. 
+Similarly, $\mathbf{b}_{enc}$ is the encoder bias and $\mathbf{b}_{dec}$ is the decoder bias. 
+The decoder directions determine the features we decompose the activations into,
+while the encoder directions compute the coefficients of these features for a 
+given activation. The decoder directions are constrained to have unit norm:
+$\l\|(W_{dec})_{:,i}\r\|_2=1$. The training objective over examples
+$\{\mathbf{a}^{(k)}\}_{k=1}^N$ is the sum of the MSE between the
+activations $\mathbf{a}^{(k)}$ and their reconstructions
+$\widehat{\mathbf{a}}^{(k)}$, and the $\ell_1$ regularization term
+$\lambda\sum_{k=1}^{N} \left\|\mathbf{f}^{(k)}\right\|_1$, where $\lambda$ is
+the $\ell_1$ regularization coefficient.
+
+\textbf{The IOI task.}
+In \citet{wang2022interpretability}, the authors analyze how the decoder-only
+transformer language model GPT-2 Small \citep{radford2019language} performs the
+Indirect Object Identification (IOI) task. 
+In this task, the model is required to complete sentences of the form `When Mary
+and John went to the store, John gave a book to' (with the intended
+completion in this case being ` Mary'). We refer to the repeated name (John) as
+\textbf{S} (the subject) and the non-repeated name (Mary) as \textbf{IO} (the
+indirect object). For each choice of the \textbf{IO} and \textbf{S} names, there
+are two patterns the sentence can have: one where the \textbf{IO} name comes
+first (we call these `ABB examples'), and one where it comes second (we call
+these `BAB examples'). We refer to this binary attribute as the \textbf{Pos}
+attribute (short for position). Additional details on the data distribution,
+\citet{wang2022interpretability} discover several classes of attention heads in GPT2-Small that
+collectively form the \emph{IOI circuit} solving the IOI task. Specifically,
+\citet{wang2022interpretability} argue that the circuit implements the
+algorithm: 
+\begin{enumerate}
+\item detect the (i) position in the sentence and (ii) identity of the repeated
+name in the sentence (i.e., the \textbf{S} name). This information is computed
+and moved by \emph{duplicate token}/\emph{induction} and \emph{S-Inhibition}
+heads;
+\item based on the two signals (i) and (ii), exclude this name from the
+attention of the \emph{name mover heads}, so that they copy the remaining name
+(i.e., the \textbf{IO} name) to the output.
+\end{enumerate}
+
+Figure \ref{fig:ioi-circuit} for more details on the IOI circuit.
+
+\emph{The logit difference metric.}
+To discover the circuit, \citet{wang2022interpretability} used the logit
+difference: the difference in log-probabilities assigned by the model to the
+\textbf{IO} and \textbf{S} names. This metric is more sensitive than accuracy,
+which makes possible the detection of individual model components with a
+consistent but non-pivotal role in the task. Accordingly, we also use the logit
+difference throughout this work to evaluate the causal effect of fine-grained
+model interventions.
+
+
+
+\section{Methods for Evaluating Feature Dictionaries}
+
+\label{section:methods}
+
+\subsection{Overview and Motivation}
+\label{subsection:}
+In this section, we describe and motivate our methodology for evaluating sparse
+feature dictionaries in the context of a specific task an LLM can perform.
+Throughout, let $\mathcal{D}$ be a distribution over input prompts for the task.
+
+\textbf{Step 1: Parametrize inputs via (task-relevant) attributes.} First, we
+choose attributes $a_i: \operatorname{support}(\mathcal{D})\to S_i$ taking values in some finite sets
+$S_i$.  For example, in the IOI task we will focus on the attributes
+\textbf{IO}, \textbf{S}, and \textbf{Pos} described in Section
+\ref{sec:prelims}, with \textbf{IO} and \textbf{S} taking values in the set of
+names in our dataset, and \textbf{Pos} taking values in the set $\{\text{ABB},
+\text{BAB}\}$.
+
+\textbf{Step 2: Compute high-quality supervised dictionaries using the attributes.}
+The second step is to learn and validate \emph{supervised} dictionaries computed
+using the attribute labels $a_i(p),p\sim \mathcal{D}$ (methodology described in
+Section \ref{section:manual-sae}). In particular, not all attribute
+configurations will result in dictionaries with good approximation, control and
+interpretability for the task\footnote{
+To get high-quality supervised dictionaries, we should choose attributes that
+completely capture the task-relevant information in the prompt, and are moreover
+compatible with the intermediate states of the model's computation on the task.
+Validating that our attributes satisfy this is a non-trivial but key
+prerequisite for our evaluation to be meaningful. We do this for the IOI task in
+Section \ref{section:manual-sae}, where we show the supervised dictionaries
+score highly on all tests described in the current section.
+}.
+
+\textbf{Step 3: Evaluate (unsupervised) dictionaries using the supervised
+dictionaries as a benchmark.} Finally, we evaluate the usefulness of a given
+feature dictionary for the chosen task, using the supervised features as a
+reference point in various ways (described in the next subsections). The
+supervised dictionaries are a necessary part of this evaluation because they
+allow us to \emph{contextualize} performance differences between feature
+dictionaries for the chosen task. 
+
+\textbf{Why are supervised dictionaries a meaningful benchmark?} On the one
+hand, supervised dictionaries' features are hard-coded to
+correspond to the `human-salient' attributes $a_i$. So, our evaluations risk
+overlooking useful feature dictionaries that do not align with this human-chosen
+ontology. On the other hand, the saliency of the attributes is precisely what
+makes them desirable targets for controlling and interpreting the model; for
+example, in the IOI task it is natural to want to change e.g. the representation
+of the \textbf{IO} name in the model's computation. 
+Thus, our evaluations aim to balance two opposing goals: establish properties
+useful from a human standpoint, while still being agnostic to the exact concepts
+represented in the unsupervised dictionary.
+  
+
+\subsection{Test 1: Sufficiency and Necessity of Dictionary Reconstructions for the Task}
+\label{subsection:test-1-sufficiency-necessity}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.48\textwidth]{pics/cross-section-reconstruct.pdf}
+    \hfill
+    \includegraphics[width=0.48\textwidth]{pics/cross-section-deletion-all.pdf}
+    \caption{
+        Sufficiency (left) and necessity (right) evaluations of reconstructions
+        of cross-sections of the IOI circuit computed using supervised feature
+        dictionaries, task- and full-distribution SAEs. 
+        \textbf{Left}: average logit difference when replacing activations in
+        cross-sections of the IOI circuit with their reconstructions, normalized
+        by the average logit difference over the data distribution in the
+        absence of intervention (a $y$-axis value of $1$ is best).
+        \textbf{Right}: drop in logit difference when deleting reconstructions,
+        normalized by the respective drop when performing mean-ablation, and
+        linearly rescaled so that values close to 1 are best
+        \ref{app:ioi-supervised-details} for details.}
+    \label{fig:logitdiff-faithfulness-completeness}
+\end{figure}
+
+Our first test checks if activation reconstructions $\widehat{\mathbf{a}}$ \emph{as
+a whole} are sufficient and necessary for the model to perform the
+task\footnote{This test is analogous to the faithfulness/completeness test from
+\citet{wang2022interpretability}; the sufficiency test is also widely used in
+the literature to evaluate feature dictionaries.}.  
+To evaluate \textbf{sufficiency}, we intervene by replacing
+internal activations $\mathbf{a}$ with their reconstructions
+$\widehat{\mathbf{a}}$, and measure the drop in performance on the task. To evaluate
+\textbf{necessity}, we intervene by replacing activations
+$\mathbf{a}$ with $\mathbb{E}_{\mathcal{D}}\l[\mathbf{a}\r] + \l(\mathbf{a} -
+\widehat{\mathbf{a}}\r)$, and compare the resulting drop in performance to the
+effect of replacing activations with $\mathbb{E}_{\mathcal{D}}\l[\mathbf{a}\r]$
+
+\ref{app:methods-details} for motivation)
+\footnote{
+This test has very few assumptions: it is independent of the attributes we have
+chosen to describe inputs with, and of any interpretation assigned to the
+features. However, it only measures the quality of the dictionary as a whole,
+and not how effectively and sparsely it disentangles any hypothetical concepts
+in the activations. We include this test because poor performance indicates a
+fundamental failure of the feature dictionary relative to the task.
+}. 
+
+\subsection{Test 2: Sparse Controllability of Attributes}
+\label{subsection:test-2-sparse-controllability}
+With this test, we want to measure the degree to which the feature dictionary
+can be used to control the model's behavior on the task by editing intermediate
+representations of attribute values.
+To use a feature dictionary for editing, we write an activation as a linear combination of dictionary vectors, and try to remove/add dictionary elements to the combination in order to achieve the desired change.
+To evaluate such an intervention, we consider both (1) the number of features in the dictionary that need to be changed
+in order to achieve a given change in outputs (editing is trivial if e.g.\
+activations are dense sums of random features and we change many of them), and
+(2) the geometric magnitude of the edit (editing is trivial if you are willing
+to throw away the entire activation vector and replace it with the target). Jump ahead to Figure \ref{fig:pareto-combined} to see what trade-offs for these parameters look like in our experiments.
+
+\textbf{Being agnostic to feature interpretations.}
+Importantly, we require this test to be agnostic to any human interpretation of
+the feature dictionary. This is valuable for several reasons: (1) even if our
+attributes are compatible with model computations, the feature dictionary may
+not be directly interpretable in terms of these
+
+examples in the IOI task); (2) human-generated feature interpretations, even
+with meticulous methodology, may be subjective; (3) sparse
+control may be possible to a useful degree even if the features are inherently
+non-interpretable from a human perspective. 
+Thus, this test should evaluate the degree to which the feature dictionary
+sparsely disentangles the attributes, but is independent of whether the features
+are interpretable in terms of the attributes (or at all)
+\footnote{Note that, to meaningfully conclude disentanglement of attributes from
+this test, the task must be one where at least some of the activations represent
+multiple attributes simultaneously. This is true in the IOI task, where many
+circuit locations represent the \textbf{S} and \textbf{Pos} information
+simultaneously. We also find that one particular location, the queries of the L10H0 name mover head, represent all three attributes \textbf{IO}, \textbf{S} and \textbf{Pos}.}.
+
+\textbf{Implementation design space.}
+To achieve independence of interpretations, we frame the problem as a
+combinatorial optimization problem over the feature dictionary: given an
+activation $\mathbf{a}_s$ for prompt $p_s$ and a \textbf{counterfactual} activation
+$\mathbf{a}_t$ for a prompt $p_t$ which differs from $p_s$ only in the values of
+the attributes we wish to edit, we can optimize over subsets of features active
+in $\widehat{\mathbf{a}_s}$ to subtract from $\mathbf{a}_s$, and subsets of
+features active in $\widehat{\mathbf{a}_t}$ to add to $\mathbf{a}_s$. There are
+multiple optimization objectives possible, such as making the edited activation
+similar to $\mathbf{a}_t$ geometrically, or making model behavior on the edited
+activation similar to model behavior on $\mathbf{a}_t$.
+The optimization may be constrained by the number of features changed and/or the
+magnitude of edits
+\footnote{
+There are many possible ways to instantiate such an optimization; in Section
+\ref{section:sae-evaluation} we present one such way based on a greedy algorithm
+minimizing $\ell_2$ distance in activation space. Further methodological notes, 
+such as how we implement edits in multiple model components at once, are given
+
+}.
+Importantly, this optimization proceeds on a
+\textbf{per-prompt} basis, which means that it can select different features to
+edit depending on the prompt being edited. This means it will not disadvantage
+dictionaries that do not dedicate a uniform w.r.t.\ all prompts set of features
+to each attribute (which would be a major assumption to impose).
+\textbf{Evaluation.} To measure how well an edit changed model behavior, we
+compare against the `ground truth' change in behavior that would be achieved by
+intervening on the model to replace $\mathbf{a}_s$ with $\mathbf{a}_t$ directly.
+To contextualize the magnitude of the edit, we can compare the contribution of
+the changed features to the reconstruction against the analogous quantity for
+
+details), as we do later in Section \ref{section:manual-sae}.
+
+\subsection{Test 3: Interpretability}
+\label{subsection:test-3-interpretability}
+With our final test, we want to assess the degree
+to which the feature dictionary can be interpreted in terms of the task-relevant
+attributes and the features are causally relevant for the model's
+behavior in a way consistent with their interpretations. While failing this test
+does not necessarily mean that the feature dictionary is not useful (e.g., it
+could still be useful for control, or interpretable with respect to different
+attributes), passing it would increase our confidence in the feature
+dictionary's utility and our understanding of the model's computation. More
+broadly, passing this test on a wide range of important tasks would represent a
+qualitative improvement over control alone in applications such as auditing,
+debugging and verification.
+
+\textbf{Assigning interpretability scores.} Given a feature $\mathbf{u}_j$
+from the dictionary, its \emph{active set} $F\subset
+\operatorname{supp}\l(\mathcal{D}\r)$ is the subset of the support of
+$\mathcal{D}$ where $\mathbf{f}_j >0$. Given
+a binary property of inputs $P:\mathcal{D}\to\{0,1\}$, following
+\citet{bricken2023monosemanticity}, we say that $P$ is a good interpretation of
+the feature if $F$ has high precision and recall relative to $P$
+\footnote{Clearly, the best interpretation of $F$ according to these metrics
+alone is the indicator $\mathbf{1}_F$ itself; for $P$ to be a useful
+interpretation from a human perspective, it must in addition be `simple' enough,
+a property harder to formalize.}.
+We combine the precision and recall metrics into a single number using the $F_1$
+score. 
+
+For example, each attribute defines $\left|S_i\right|$ binary properties
+$\mathbf{1}_{a_i(p)=v}$ for $v\in S_i$ that we can use to try to interpret the
+feature dictionary. When considering a set of binary properties $\{P_j\}_{j\in
+J}$ as possible interpretations for a feature, we pick the one with the highest
+$F_1$ score and assign this as the interpretation of the feature. Other
+interpretability measures are possible; for a discussion of the limitations of
+\textbf{Which interpretations to consider?} As with controllability, we should
+not assume that the features correspond 1-to-1 with the attributes we have
+chosen. Thus, evaluating the $F_1$ scores only for the binary properties
+$\mathbf{1}_{a_i(p)=v}$ corresponding to a single value for a single attribute
+may be subjective. On the other hand, when the chosen attributes result in
+a good supervised dictionary (required by Step 2 of our method), the attribute
+values will be sufficient to deduce the causally important information in model
+activations. This suggests that causally-relevant features in an arbitrary
+feature dictionary will correspond to particular subsets of the cartesian
+product $\prod_i S_i$ of the values the attributes can take.
+
+This motivates us to look for interpretations that are expressible as
+intersections and unions of the indicator sets $\mathbf{1}_{a_i(p)=v}$ of the
+chosen attributes. We use heuristics to navigate this search space. We present
+one possible implementation of this in Section \ref{section:sae-evaluation} for
+the IOI task.  As we will see, this choice, while possibly arbitrary/subjective,
+is to some extent validated empirically: we find that many features can be
+interpreted in this way for a significantly high $F_1$ score threshold. We further discover some
+interpretable structure in the ways attribute values group together in unions.
+
+\textbf{Causal evaluation of interpretations.} Finally, while our previous
+interpretability methods look for correlations with properties of the input
+prompts, we also want to know if the interpretations we assign to features in
+the dictionary are consistent with their causal role in the model's computation.
+There are two increasingly demanding ways to check this that mirror our first
+and second tests (Subsections \ref{subsection:test-1-sufficiency-necessity} and \ref{subsection:test-2-sparse-controllability}):
+\begin{itemize}
+\item \textbf{interpretation-aware sufficiency/necessity of reconstructions}:
+similar to our first test (Subsection
+\ref{subsection:test-1-sufficiency-necessity}), we can (1) subtract
+non-interpretable features from activations and see if the model is still able
+to perform the task; (2) subtract highly-interpretable features and see if
+the model's performance degrades to the same extent as with mean ablation. This
+evaluates whether our interpretability method as a whole flags the important
+features for the task;
+\item \textbf{interpretation-aware sparse controllability}: like our second test
+(Subsection \ref{subsection:test-2-sparse-controllability}), but explicitly
+using highly-interpretable features (with respect to a given attribute) to
+remove/add in order to edit an activation. This evaluates whether
+interpretations that specifically relate features to attributes find the
+attribute-relevant features.
+\end{itemize}
+
+
+
+\section{Computing and Validating Supervised Feature Dictionaries}
+
+\label{section:manual-sae}
+
+
+We first present our methods and results for computing \emph{supervised} feature
+dictionaries, in which features correspond 1-to-1 with the possible values of
+attributes we have chosen. This is a key prerequisite for our evaluation of SAEs
+later on, as it (1) verifies that the attributes we have chosen are compatible
+with the model's internal states; (2) demonstrates the existence of high-quality
+sparse feature dictionaries for the task; and (3) provides an `ideal'
+reference for SAE evaluation.
+Specifically, we will establish that feature dictionaries for all locations in
+the IOI circuit exist with the following properties:
+\begin{itemize}
+\item they approximate activations well using as few as 3 active features per
+activation;
+\item any of the \textbf{IO}, \textbf{S}, and \textbf{Pos} attributes can be
+edited precisely by replacing only 1 active feature with a different one;
+\item the features in the dictionary are by construction interpretable w.r.t.\
+the attributes, and furthermore, interactions in the IOI circuit exhibit 
+sparsity when decomposed into feature-to-feature interactions.
+\end{itemize}
+\subsection{Computing Supervised Feature Dictionaries}
+\label{subsection:}
+\textbf{Algorithms.} Motivated by the linear representation hypothesis, we
+conjecture that given activations $\mathbf{a}\l(p\r)\in \mathbb{R}^d$ of a given
+model component (e.g., outputs of an attention head) for prompts $p\sim
+\mathcal{D}$, there exists a choice of attributes $\{a_i:\mathcal{D}\to
+S_i\}_{i\in I}$ such that
+\begin{equation}
+    \label{eq:manual-sparse-codes}
+    \mathbf{a}(p) \approx \mathbb{E}_{p\sim \mathcal{D}}\l[\mathbf{a}(p)\r] + \sum_{i\in I}\mathbf{u}_{a_i(\cdot)=v} := \widehat{\mathbf{a}}
+\end{equation}
+where $\widehat{\mathbf{a}}$ is the \emph{reconstruction} of $\mathbf{a}$, and
+$\mathbf{u}_{a_i(\cdot)=v}\in \mathbb{R}^d$ is a feature corresponding to the
+$i$-th attribute having value $v\in S_i$
+\footnote{This formulation is less expressive
+than SAE reconstructions, as it effectively requires a given feature to always
+appear with the same coefficient in reconstructions; we discuss this choice in
+}. 
+
+Given a dataset of prompts $\{p_k\}_{k=1}^N$ with associated activations
+$\{\mathbf{a}\l(p_k\r)\}_{k=1}^N$, how should we compute `good' values for the
+vectors $\mathbf{u}_{a_i(\cdot)=v}$?  While we considered several ways to do so,
+our best method for the IOI task is simple: we average all activations for
+prompts for which $a_i(p)=v$. Formally,
+\begin{align*}
+    \mathbf{u}_{a_i(\cdot)=v} := \frac{1}{\left|\{k: a_i(p_k)=v\}\right|} \sum_{k: a_i(p_k)=v}^{} \mathbf{a}\l(p_k\r) - \overline{\mathbf{a}}
+\end{align*}
+where $\overline{\mathbf{a}} = \frac{1}{N}\sum_{k=1}^{N} \mathbf{a}\l(p_k\r)$ is
+the empirical mean activation. We refer to these dictionaries as \textbf{mean
+feature dictionaries}. One can prove that, in the limit of infinite data, the
+mean features for an attribute not linearly detectable in the activations will
+The main alternative method we considered was \textbf{MSE feature dictionaries},
+which use a least-squares linear regression to predict the activations from the
+attribute values. We note that mean feature dictionaries work well in our
+setting because the attributes we choose in the IOI task are
+probabilistically independent in the IOI distribution; we recommend using MSE
+
+MSE dictionaries and comparisons to mean dictionaries).
+\textbf{Choosing attributes for the IOI task.} Not every set of attributes
+will result in a good approximation of the model's internal activations; in
+fact, we find that the choice of attributes is a crucial modeling decision.
+Recall that, according to \citet{wang2022interpretability}, each IOI prompt $p$
+is described by three properties influencing how $p$ is processed in the IOI
+circuit: the subject (\textbf{S}) and indirect object (\textbf{IO}) names, and
+their relative position (\textbf{Pos}). 
+Motivated by this,
+we chose the attributes \textbf{S}, \textbf{IO}, and \textbf{Pos} to describe
+each prompt. We experimented with other choices of attributes, but did not find
+
+\ref{app:alternative-ioi-parametrizations} for details\footnote{ In particular,
+we found that another set of attributes, though more expressive in principle,
+learns to approximate the features we get using the \textbf{S}, \textbf{IO} and
+\textbf{Pos} attributes through a change-of-variables-like transformation.}). We
+emphasize that there are many other imaginable choices of attributes; see
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{pics/editing_task_sae_complete_plot_agnostic.pdf}
+    \caption{Accuracy when editing \textbf{IO}, \textbf{S} and \textbf{Pos} for
+    circuit cross-sections using our supervised feature dictionaries and
+    task-specific SAEs; the outcome in the absence of intervention is shown in
+    blue for reference. When using task-specific SAEs, we edit either 2, 4 or 6
+    features (which means we in total add and/or remove up to that many features
+    from activations). For comparison, supervised edits always involve removing
+    1 feature and adding 1 feature. Accuracy is measured as the proportion of
+    examples for which the model's prediction agrees with the ground-truth
+    prediction for the edit; see Section
+
+    \ref{app:ioi-supervised-details} for details.}
+    \label{fig:edit-accuracy}
+\end{figure}
+\subsection{Evaluation Results}
+\label{subsection:}
+
+Our evaluations are carried out at the main cross-sections of the IOI circuit.
+These cross-sections, as well as the information processing they perform and the
+expected effect of editing attributes in them, are described in detail in
+ These considerations guide our choice
+of the attributes to edit in each given cross-section.
+
+Sufficiency/necessity plots using the mean feature dictionaries are shown in
+Figure \ref{fig:logitdiff-faithfulness-completeness} (orange bars); we find that
+our supervised dictionaries are quite successful. For controllability, note
+that attribute editing can naturally be defined in closed form, because we have
+a 1-to-1 correspondence between attribute values and features by construction.
+We find that simple feature arithmetic works quite well. Formally, given prompt
+$p$ with $a_i(p)=v$, we can edit the attribute $a_i$ to have value $v'$ via
+$\mathbf{a}_{edited}(p) := \mathbf{a}(p) - \mathbf{u}_{a_i(\cdot)=v} +
+\mathbf{u}_{a_i(\cdot)=v'}$. Results for editing in cross-sections of the IOI
+circuit are shown in Figure \ref{fig:edit-accuracy} (orange bars), where we
+report the fraction of the time our intervention predicts the same token as the
+ground-truth intervention that substitutes counterfactual activations in the
+corresponding cross-section (a value of 1 is best). We observe that, when
+editing the \textbf{S} attribute, not performing any intervention often already
+mostly agrees with the ground-truth edit, effectively reducing the resolution of
+our evaluation results for this attribute. Otherwise, we find our supervised
+dictionaries to perform well, always achieving $>80\%$ agreement with the
+ground-truth intervention.
+
+Finally, the supervised feature dictionaries tautologically pass the
+interpretability test, as they were defined to have a single feature activating
+for each possible attribute value, achieving perfect $F_1$ scores. Accordingly, we
+performed a more demanding test of interpretability: decomposing internal model
+computations in terms of interactions between individual features. We find that
+pre-softmax attention scores and composition between heads can be decomposed in
+terms of feature-level interactions, such that many interactions are close to
+zero, and the few non-zeros correspond to those expected based on the high-level
+
+\ref{app:feature-level-mech-methodology} for details.
+
+
+
+\section{Evaluating Task-Specific and Full-Distribution Sparse Autoencoders}
+
+\label{section:sae-evaluation}
+\subsection{Methodology}
+\label{subsection:sae-evaluation-methodology}
+
+\textbf{SAE training on the task-specific and full pretraining distributions.}
+We trained SAEs on all IOI circuit locations, using activations from either the
+IOI dataset (`task SAEs') or \textsc{OpenWebText} distribution
+ \citep{Gokaslan2019OpenWeb} (`full-distribution SAEs'). While performance varied
+strongly across circuit locations, most full-distribution SAEs had an
+$\ell_0$-loss between 2 and 12 and a recovered loss fraction (against a mean ablation baseline)
+between $0.4$ and $0.9$ (both measured on \textsc{OpenWebText}). Similarly, most
+task-SAEs had an $\ell_0$-loss below $25$ and a recovered logit difference
+fraction against mean ablation $>0.8$ (both measured on the IOI dataset)
+\footnote{Importantly, we did not perform exhaustive hyperparameter tuning to
+train these SAEs, as our main goal was to evaluate the methodology and how it
+can distinguish between different classes of feature dictionaries, rather than
+to achieve state-of-the-art performance. Thus it is possible that significantly
+better performance could be achieved with more tuning. Indeed, it is our hope
+that the methods we present here will be useful for tuning SAEs in the future.}.
+
+
+\textbf{Sparse controllability implementation in the IOI task.}
+We instantiate the sparse controllability test from Subsection
+\ref{subsection:test-2-sparse-controllability} as follows. Suppose our SAE has a dictionary of decoder
+vectors $\{\mathbf{u}_j\}_{j=1}^m$, and the original and counterfactual
+activations $\mathbf{a}_s, \mathbf{a}_{t}$ have reconstructions respectively
+\begin{align*}
+    \widehat{\mathbf{a}}_s = \sum_{i\in S} \alpha_i\mathbf{u}_i + \mathbf{b}_{dec}, \quad 
+    \widehat{\mathbf{a}}_{t} = \sum_{i\in T} \beta_i\mathbf{u}_i + \mathbf{b}_{dec}
+\end{align*}
+for $S, T \subset \{1, \ldots, m\}$ and $\alpha_i, \beta_i > 0$. Consider the
+optimization problem
+\begin{align*}
+    \min_{R\subset S, A\subset T, \left|R\cup A\right|\leq k} \l\|\mathbf{a}_s - \sum_{i\in R}^{}\alpha_i \mathbf{u}_i + \sum_{i\in A}^{} \beta_i \mathbf{u}_i - \mathbf{a}_t\r\|_2
+\end{align*}
+In words, this problem asks for at most $k$ features to remove ($R$) from and/or 
+add ($A$) to the original activation\footnote{We also experimented with using the reconstructions instead of the actual activations in this algorithm, but results were worse.} to bring it as close as possible to the
+counterfactual activation, where the features to add are taken directly from the
+counterfactual one. In general, this problem has no polynomial-time (in
+$k,\left|S\right|,\left|T\right|$) solution, as the NP-hard problem
+\textsc{SubsetSum} reduces to it; instead, we use a greedy algorithm to find a
+solution. 
+
+\emph{Measuring the magnitude of edits.}
+To measure the magnitude of the edit, we compare the contribution of the changed
+features to the reconstruction against the analogous quantity for our `ideal'
+supervised feature dictionary. Namely, for each summand in the reconstruction 
+we assign a measure of its contribution $ \operatorname{weight}(i) =
+(f_i\mathbf{u}_i)^\top
+\l(\widehat{\mathbf{a}} - \mathbf{b}_{dec}\r)/\left\|\widehat{\mathbf{a}} - \mathbf{b}_{dec}\right\|_2^2$ so that
+$\sum_{i=1}^k \operatorname{weight}(i) = 1$\footnote{
+While weights can in general take any real value, we find
+
+\ref{app:sae-evaluation-details} for empirical details.}. Note that weights are
+additive in the features, so that the sum of weights of some subset of features
+is the weight for these features' total contribution to the reconstruction. We
+then measure the magnitude of an edit by the total weight of the features
+removed during the edit. 
+
+\textbf{Interpretability implementation for the IOI task.} We instantiate the
+interpretability test from Section \ref{section:methods} as follows. Starting
+with our primary attributes \textbf{IO}, \textbf{S}, and \textbf{Pos}, we
+consider intersections of each of \textbf{IO} and \textbf{S} with the
+\textbf{Pos} attribute. Then, for each resulting attribute that represents
+variation over the \textbf{IO} or \textbf{S} name, we also consider unions of up
+to 10 attribute values (30 for \textsc{OpenWebText}). Finally, we add some other
+attributes of interest, such as the gender commonly associated with names in our
+dataset. Details on all the possible interpretations we consdered are given in
+
+\ref{app:sae-interp-methodology}.
+Additionally, we evaluate the causal role of highly interpretable features as
+described in Subsection \ref{subsection:test-3-interpretability}:
+\begin{itemize}
+\item \textbf{sufficiency/necessity of interpretable features}: for
+sufficiency, we intervene by subtracting from
+activations only the features for which \emph{no} interpretation has an $F_1$
+score above some threshold. To test necessity, we instead subtract the features
+for which their chosen interpretation has an $F_1$ score above a threshold. 
+This
+experiment is directly comparable with the sufficiency/necessity of
+reconstructions experiments, and uses the same baselines.
+\item \textbf{interpretability-aware sparse control}: we attempt to edit a given
+attribute by removing/adding only $\leq k$ features with highest $F_1$ score for
+the value of this attribute in the original/counterfactual prompt.  
+This experiment is directly comparable to the (interpretation-agnostic) sparse
+control experiment and uses the same baseline. 
+\end{itemize}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.5\linewidth]{pics/pareto_combined.pdf}
+    \caption{Trade-offs between edit magnitude and edit success for attribute
+    editing using task-specific SAEs for select IOI circuit cross-sections. The
+    x-axis measures the weight (see Subsection
+    \ref{subsection:sae-evaluation-methodology})  of the features removed by the
+    edit (features added are not reported in this plot), averaged over the
+    attention heads in the cross-section. This metric is affine-transformed so
+    that a value of 0 indicates the weight removed by the corresponding
+    supervised edit, and a value of 1 indicates that the edit removed all
+    features in the reconstruction. The y-axis is an affine transform of the
+    fraction of examples for which the edit results in the same next-token
+    prediction as the ground-truth edit, with a value of $0$ corresponding to no
+    intervention, and a value of $1$ corresponding to the supervised edits.
+    Results for our interpretation-agnostic/interpretation-aware editing methods
+    are shown as thick/dashed lines respectively. For both methods, we edit 2, 4
+    or 6 features (a higher magnitude score indicates editing more features).}
+    \label{fig:pareto-combined}
+\end{figure}
+
+
+\subsection{Results}
+\label{subsection:}
+\textbf{Test 1: Sufficiency/necessity of reconstructions.} The
+sufficiency/necessity plots for the task-specific and full-distribution SAEs are
+shown in Figure \ref{fig:logitdiff-faithfulness-completeness} (green and red).
+We find that the task-specific SAEs offer a significantly worse, but not
+catastrophically bad, approximation compared to the supervised feature
+dictionaries. Meanwhile, the full-distribution SAEs fare notably worse than the
+task SAEs.
+
+\textbf{Test 2: (Interpretation-agnostic) sparse controllability.} 
+
+\emph{Task-specific SAEs.} Results for sparse controllability using our
+task-specific SAEs are shown in Figure \ref{fig:edit-accuracy} as well as Figure \ref{fig:pareto-combined} for $k=2,4,6$. We
+find that our SAEs can edit the \textbf{Pos} attribute and, to a small extent,
+the \textbf{IO} attribute, even though this requires changing more features
+compared to the supervised dictionaries. For the \textbf{S} attribute, the
+results are less clear, because the range of performance between `no
+intervention' and the supervised edit is often within the margin of error; the
+exception is the queries of the name mover heads, where results indicate failure
+of the SAE features. Regarding the magnitude of edits, the most successful edits
+introduce higher-magnitude changes as measured by the weight (recall Subsection
+\ref{subsection:sae-evaluation-methodology}) than the corresponding supervised
+ On the positive
+side, the edits don't overwrite the SAE features entirely.
+
+\emph{Full-distribution SAEs.} Full-distribution SAEs require a significantly
+larger number of features to achieve a statistically significant level of
+control compared to task-specific ones (often 32 or more); results are shown in 
+ We also found that
+the magnitude of these edits surpsasses that of supervised edits significantly,
+often up to the point of throwing away total weight approaching $1$.
+
+\emph{A baseline: task-specific SAEs with decoder directions frozen at
+initialization.} Do these results demonstrate \emph{any} non-trivial
+controllability afforded by the SAE features? To check, we run the same
+controllability pipeline on task-specific SAEs which were trained with frozen at
+initialization decoder directions; thus, these SAEs are forced to approximate
+activations using sparse sums of random features
+\ref{fig:agnostic-editing-accuracy-freeze-decoder} show that our evaluation
+distinguishes between these two types of SAEs: the frozen-decoder task SAEs perform
+much worse than the ordinary task SAEs. In fact, we find that the
+frozen-decoder task SAEs perform on par with the full-distribution SAEs.
+
+\textbf{Test 3: Interpretability.}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]{pics/full-dist-feature_descriptions.pdf}
+    \caption{Interpreting the IOI features learned by SAEs trained on
+    \textsc{OpenWebText}. For each node in the IOI circuit, we show the
+    distribution of interpretations for the features which have any interpretation with $F_1$ score
+    above a threshold. The numbers in the right column indicate the number of
+    features with an assigned interpretation by our method, and the color bars
+    show the overall distribution of the SAE features (conditioned on the
+    feature not being dead on the SAE training distribution). See Section
+    \ref{section:sae-evaluation} for methodology; details on the
+
+    \ref{app:sae-interp-methodology}.}
+    \label{fig:full-sae-interp-most-interp}
+\end{figure}
+
+\emph{Correlational evaluation.} Full-distribution SAEs must capture variation
+in activations across a large set of text, of which IOI-like prompts are only a
+small subset. Consistent with this, we found that only a subset of
+full-distribution SAE features activates on IOI prompts, with the number of
+features that fire on IOI prompts varying strongly between components. We scored
+the features that do fire on IOI prompts and found a significant amount of
+feature descriptions with high $F_1$-score. We summarize the number of
+high-$F_1$-score features per type in Figure
+\ref{fig:full-sae-interp-most-interp}. Remarkably, we find that the
+interpretable features in the full-distribution SAEs and the task-specific SAEs
+are qualitatively similar; corresponding task-specific results are given in
+
+interpretable SAEs at each node of the IOI circuit) and
+\ref{fig:task-sae-interp-best-metrics} (showing the SAEs chosen to optimize the
+tradeoff between the $\ell_0$ loss and the logit difference reconstruction, which we use throughout the main body of the paper).
+
+In practice, we want to use feature explanations to get insight into the more
+general computation of a component. Thus, we investigated whether the features
+found are consistent with the previously established function of the heads from
+\citet{wang2022interpretability}. We found that this was true for all heads and
+that simply looking at the number of features with a given interpretation draws
+
+\ref{app:interp-extra-observations}. 
+
+Our results also suggests several details about the IOI circuit that weren't
+
+\ref{app:interp-extra-observations}. We were also curious about how the detected
+features behave on arbitrary text of the model's training distribution. As
+creating a rigorous test for this is difficult, we report some anecdotal
+
+\ref{app:interp-extra-observations}.
+
+\emph{Causal evaluation: sufficiency/necessity of interpretable features.}
+Results here are encouraging: keeping/removing the features with $F_1$ score
+$\geq 0.6$ often goes a long way towards preserving/degrading the model's
+performance on the task
+\ref{fig:interp-necessity} show the results of these experiments for task SAEs.
+
+\emph{Causal evaluation: sparse control via interpretable features.} Here,
+results are also moderately encouraging. We find that, for the task-specific
+SAEs, editing using the high-$F_1$-score features w.r.t.\ a given attribute as a
+guide performs not much worse than the interpretation-agnostic editing method. Results
+are provided in Figure \ref{fig:pareto-combined} in the form of a comparison
+
+\ref{fig:editing-accuracy-sae-interp}. However, for full-distribution SAEs, we
+again need to edit a high number of features to achieve a noticeable effect
+
+
+\section{Qualitative Phenomena in SAE Learning}
+
+\label{section:qualitative-phenomena}
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}{.52\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pics/occlusion_heatmap.pdf}
+        \label{subfig:occlusion-io}
+    \end{subfigure}%
+    \hfill
+    \begin{subfigure}{.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{pics/occlusion_surgical_interp.pdf}
+        \label{subfig:occlusion-s}
+    \end{subfigure}%
+    \caption{\textbf{Left}: Fraction of \textbf{IO} (left subplot) and
+    \textbf{S} (right subplot) names in our dataset for which a feature with
+    $F_1$ score $\geq0.5$ is found, as a function of dictionary size (x-axis)
+    and effective $\ell_1$ regularization coefficient (y-axis), over a wide
+    hyperparameter sweep for the queries of L10H0. 
+    \textbf{Right}: fraction of \textbf{IO} and \textbf{S} names in our dataset
+    for which a feature with $F_1$ score $\geq 0.5$ is found, as a function of
+    $\alpha$ ($x$-axis), the fraction of supervised \textbf{IO} features we
+    subtract from the activations.}
+    \label{fig:occlusion-main}
+\end{figure}
+
+\subsection{Feature Occlusion}
+\label{subsection:}
+Our experiments suggest that when two (causally relevant)
+attributes are represented in the same activation, but one attribute's (supervised) features have overall
+higher magnitude, SAEs have a tendency to robustly learn more interpretable
+features for the attribute with higher magnitude. We observe this in the queries
+of the L10H0 name mover head at the END token in the IOI circuit, where the
+\textbf{IO} and \textbf{S} attributes are both represented and causally
+relevant (ablating either leads to a change of $\approx0.5$ in logit difference). We find that our task SAEs consistently find features with high $F_1$ score
+for individual \textbf{IO} names, but fail to find a significant number of
+features for individual \textbf{S} names. In Figure \ref{fig:occlusion-main}
+(left), we show interpretability results from training SAEs over a wide grid of
+
+\ref{app:occlusion}.
+
+\emph{Hypothesis: feature magnitude is a driver of occlusion.} We noticed that
+the supervised features for \textbf{IO} and \textbf{S} names in the L10H0
+
+\ref{fig:occlusion-extra} (left)). We then hypothesized that feature magnitude
+is a factor in this phenomenon. To check this, we surgically reduce the
+magnitude of \textbf{IO} features in the activations using our supervised
+feature dictionaries, and observe that the number of \textbf{S} features
+discovered in these modified activations monotonically increases as we remove
+larger fractions of the \textbf{IO} features (Figure \ref{fig:occlusion-main}
+ We furthermore
+constructed a simple toy model based on i.i.d. isotropic random features that
+mimic the norms of supervised features in the L10H0 queries, and find that a
+similar phenomenon occurs for the distribution of features with high $F_1$ score
+(e.g. higher than $0.
+
+\subsection{Feature Over-splitting}
+\label{subsection:}
+We also found in our experiments that task SAEs have a tendency to split a single binary
+attribute into multiple features, even when the number of features available
+could in principle be spent on other attributes. Note that, while this behavior
+may be counter-intuitive from a human standpoint, it does not necessarily mean
+that the SAE failed; it may be that the binary attribute is not part of an
+optimal sparse description of the model's internal states. We observe this
+phenomenon with the \textbf{Pos} attribute in the IOI task (again in the queries
+of the L10H0 name mover), which is robustly split into many (e.g.  $\geq10$)
+features by our SAEs that activate for small, mostly non-overlapping subsets of
+examples sharing the same \textbf{Pos} value that have no clear semantic
+interpretation.
+
+\emph{Is over-splitting a form of over-fitting?} To investigate whether this is due
+to overfitting, we compared \textbf{Pos} features between (1) different random
+seeds for the same training dataset and (2) different training datasets. In both
+cases, we found that the \textbf{Pos} features discovered are similar above
+chance levels, suggesting that the over-splitting is not due solely to
+overfitting to randomness in the training algorithm and/or dataset. 
+
+\emph{Reproducing the over-splitting phenomenon in a simple toy model.} On the
+other hand, we show empirical evidence that in a toy model where activations are
+a uniform mixture of two isotropic Gaussian random variables, an appropriately
+\emph{randomly initialized} SAE with enough hidden features will achieve lower
+total loss than an ideal SAE with just two features corresponding to the two
+components of the mixture. Such randomized constructions exist for \emph{any}
+$\ell_1$ regularization coefficient, even in the limit of infinite training
+data.
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+\textbf{Learning and evaluating SAE features.} The SAE paradigm predates the recent surge of interest in LLMs. Early work
+in ML focused on the analysis of word embeddings \citep{DBLP:conf/nips/MikolovSCCD13},
+with works such as
+\citet{Faruqui2015SparseOW,Subramanian2017SPINESI,arora2018linear} finding
+sparse linear structure. \citet{elhage2022superposition} proposed the use
+of sparse autoencoders to disentangle features in LLMs.
+\citet{sharkey2023taking} used SAEs to learn an over-complete dictionary in a
+toy model and in a one-layer transformer, and follow-up work by
+\citet{cunningham2023sparse} applied this technique to residual stream
+activations\footnote{We adopt the terminology of \citep{elhage2021mathematical}
+when discussing internal activations of transformer-based language models.} of a
+6-layer transformer from the Pythia family \citep{Biderman2023PythiaAS}.
+\citet{bricken2023monosemanticity} trained SAEs on the hidden MLP activations of
+a 1-layer language model, and performed several thorough evaluations of the
+resulting features. Similarly to us, \citet{Gould2023SuccessorHR} trained SAEs
+on a \emph{narrow} data distribution instead of internet-scale data. \citet{tamkin2023codebook} incorporated sparse feature
+dictionaries (without per-example weights for the features) into the model
+architecture itself, and fine-tuned the model on its pre-training distribution
+to learn the dictionaries. More recently, \citet{gpt2_attention_saes} used SAEs
+on attention layer outputs of GPT-2 Small and found learned features that are
+consistent with the IOI circuit from \citet{wang2022interpretability}.
+
+Sparse autoencoders seek to (approximately) decompose
+activations into meaningful features, and are thus a stronger form of
+interpretability than linear probing for individual concepts
+\cite{Alain2016UnderstandingIL}, or finding individual subspaces with causal
+effect \citep{geiger2023finding}.
+
+Throughout this line of work, the evaluation of learned SAE features has been a
+major challenge. The metrics used so far can be broadly categorized as follows:
+\begin{itemize}
+\item \textbf{indirect geometric measures}: \citet{sharkey2023taking} proposed
+use of the mean maximum cosine similarity (MMCS) between two different SAEs'
+learned features to evaluate their quality. However, this metric relies on the
+assumption that convergence to the same set of features is equivalent to
+interpretability and having found the `true' features.
+\item \textbf{auto-interpretability}:
+\citet{bricken2023monosemanticity,bills2023language,cunningham2023sparse} used a
+frontier LLM to obtain natural-language descriptions of SAE features based on
+highly activating examples, and use the LLM to predict feature activations on
+unseen text; the prediction quality is then used as a measure of
+interpretability. However, the use of maximum (or even stratified by activation
+value) activating examples has been criticized as potentially giving an illusory
+and subjective sense of interpretability \citep{bolukbasi2021interpretability}.
+\item \textbf{manually crafted proxies for ground truth}:
+\citet{bricken2023monosemanticity}  manually formed hypotheses about a handful
+of SAE features and defined computational proxies for the ground truth features
+based on these hypotheses. This method may be less prone to blind spots than
+auto-interpretability, but still relies on the correctness of the computational
+proxy.
+\item \textbf{toy models}: \citet{sharkey2023taking} used a toy model where
+ground-truth features are explicitly defined; however, it is unclear whether toy
+models miss crucial aspects of real LLMs. Similar objections apply to manually
+injecting ground-truth features into a real model.
+
+\item \textbf{direct logit attribution}: \citet{bricken2023monosemanticity}
+additionally considered the direct effect of a feature on the next-token
+distribution of the model; this method is valuable because it tells us about the
+causal role of a feature, but it cannot detect its indirect effects via other
+features.
+\end{itemize}
+
+Beyond the evaluation challenges, there is debate about whether SAEs find
+computationally non-trivial, compositional features, or merely clusters of
+similar examples in the data \citet{olah2024circuits}.
+
+\textbf{Mechanistic interpretability and circuit analysis.} Mechanistic interpretability (MI) aims to reverse-engineer the internal workings
+of neural networks \citep{olah2020zoom,elhage2021mathematical}. In particular,
+MI frames model computations as a collection of \emph{circuits}: narrow,
+task-specific algorithms \citep{olah2020zoom}. So far, circuit analyses of
+LLMs have focused on the component level, mapping circuits to collections of
+components such as attention heads and MLP layers
+\citep{wang2022interpretability,docstring}. 
+
+However, the linear representation hypothesis suggests that component
+activations can be broken down further into (sparse) linear combinations of
+meaningful feature vectors; thus, the eventual goal of MI is to give a precise,
+\emph{subspace-level} understanding of the model's circuits. Initial steps in
+this direction have been taken using methods distinct from SAEs.
+\citet{geiger2023finding} propose finding meaningful subspaces using an
+optimization-based method; \citet{nanda2023emergent} discover linear subspaces
+in emergent world-models on a toy task; \citet{tigges2023linear} discover linear
+subspaces corresponding to sentiment in a LLM. However, while these works focus
+on finding individual subspaces representing specific concepts, the SAE paradigm
+is more ambitious, as it aims to fully decompose activations as a sum over
+meaningful features. This is a stronger property than identifying individual 
+meaningful subspaces, and would accordingly provide a more exhaustive form of 
+interpretability.
+
+More broadly, MI has found applications in several downstream tasks: removing
+toxic behaviors from a model \citep{li2023circuit}, changing factual knowledge
+encoded by models \citep{meng2022locating}, improving the truthfulness of LLMs
+at inference time \citep{li2023inference}, studying the mechanics of gender bias
+in language models \citep{vig2020causal}, and reducing spurious correlations by 
+intervening on model internals \citep{gandelsman2023interpreting}.
+
+
+
+\section{Limitations and Conclusion}
+
+\label{section:}
+
+We have taken steps towards more principled and objective evaluations of the
+usefulness of sparse feature dictionaries for disentangling LLM activations. In
+particular, we have demonstrated that:
+\begin{itemize}
+\item simple supervised methods can be used as a principled way to compute
+high-quality feature dictionaries in a task-specific context;
+\item these dictionaries can be used as `skylines' to evaluate and contextualize
+the performance of unsupervised methods, such as SAEs.
+\end{itemize}
+
+\textbf{Limitations.}
+The central conceptual limitation of our work is that our method relies on
+supervision in the form of a potentially subjective choice of variables used to
+parametrize task-relevant information in model inputs. We mitigate this to some
+extent by requiring this parametrization to be \emph{consistent} with the
+internal computations of the model, as quantified by our tests for
+approximation, control and interpretability of model computations on the task.
+However, in principle there could be many parametrizations that are just as
+
+\ref{app:alternative-ioi-parametrizations} and
+\ref{app:possible-decompositions}). Thus, we risk making the proverbial `judging
+a fish by its ability to climb a tree' mistake. We have mitigated this problem
+further by devising evaluations that are, when possible, agnostic to the precise
+features in a dictionary, as long as they allow us to disentangle and control
+our chosen variables in a sparse manner. 
+
+Finally, we find it likely that features used by LLMs in tasks of practical
+interest will be quite complex from a human standpoint, and we believe it is
+useful to be able to assess the degree to which these features can be harnessed
+towards controlling model behavior along more top-down, concise and
+human-understandable concepts. Our evaluations provide such an assessment.
+
+Our work is also limited in that we only consider a single task, and a single
+language model. We hope that in future work we will reduce these limitations.
+
+\textbf{Conclusion.} Sparse dictionary learning, and SAEs in particular,
+represent an interesting and promising avenue for disentangling internal
+representations of LLMs. However, in order to measure progress in this area, it
+is imperative to have nuanced conceptual understanding of the goals and
+downstream applications of such disentangling, and benchmarks faithful to this
+understanding. We hope that our work will inspire further research in this
+direction, and that our methods will be useful for practitioners in the field.
+
+
+

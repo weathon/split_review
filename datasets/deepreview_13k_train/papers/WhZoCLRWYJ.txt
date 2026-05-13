@@ -1,0 +1,407 @@
+\title{Light Schrödinger Bridge}
+
+\begin{abstract}
+Despite the recent advances in the field of computational Schrödinger Bridges (SB), most existing SB solvers are still heavy-weighted and require complex optimization of several neural networks. It turns out that there is no principal solver which plays the role of simple-yet-effective baseline for SB just like, e.g., $k$-means method in clustering, logistic regression in classification or Sinkhorn algorithm in discrete optimal transport. We address this issue and propose a novel fast and simple SB solver. Our development is a smart combination of two ideas which recently appeared in the field: (a) parameterization of the Schrödinger potentials with sum-exp quadratic functions and (b) viewing the log-Schrödinger potentials as the energy functions. We show that combined together these ideas yield a lightweight, simulation-free and theoretically justified SB solver with a simple straightforward optimization objective. As a result, it allows solving SB in moderate dimensions in a matter of minutes on CPU without a painful hyperparameter selection. Our light solver resembles the Gaussian mixture model which is widely used for density estimation. Inspired by this similarity, we also prove an important theoretical result showing that our light solver is a universal approximator of SBs. Furthemore, we conduct the analysis of the generalization error of our light solver.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[!h]
+\centering
+\includegraphics[width=0.995\linewidth]{pics/teaser.png}
+\caption{\centering Unpaired \textit{male} $\rightarrow$ \textit{female} translation by our LightSB solver applied in the latent space of ALAE for 1024x1024 FFHQ images. \textit{Our LightSB converges on 4 cpu cores in less than 1 minute.}}
+\label{fig:teaser-male-to-female}
+\end{figure*}
+Over the last several years, there has been a considerable progress in developing the computational approaches for solving the Schrödinger Bridge problem \citep[SB]{Schrodinger1931umkehrung,Schrodinger1932theorie}, which is also known as the dynamic version of the Entropic Optimal Transport \citep[EOT]{cuturi2013sinkhorn} problem. The SB problem requires finding the diffusion process between two given distributions that is maximally similar to some given prior process. In turn, EOT problem is a simplification in which a user is interested only in the joint marginal distribution on the first and the last steps of the diffusion.
+Historically, the majority of studies in EOT/SB sub-field of machine learning are concentrated around studying EOT between \textbf{discrete} probability distributions, see \citep{peyre2019computational} for a survey. Inspired by the recent developments in the field of generative modeling via diffusions \citep{ho2020denoising,rombach2022high} and the diffusion-related nature of SB, various researches started developing solvers for a \textbf{continuous} setups of EOT/SB, see \citep{gushchin2023building} for a survey. This implies that a learner has only a sample access to the (continuous) distributions and based on it has to recover the entire SB process (e.g., its drift) between the entire distributions. Such solvers are straightforwardly applicable to image generation \citep{wang2021deep,de2021diffusion} and image-to-image translation tasks \citep{gushchin2023entropic} as well as to important smaller scale data transfer tasks, e.g., with the biological data \citep{vargas2021solving,koshizuka2022neural}.
+
+Almost all existing EOT/SB solvers (see \wasyparagraph\ref{sec-related-work}) have complex neural networks parameterization and many hyper-parameters; they expectedly require time-consuming training/inference procedures. Although this is unavoidable in large-scale generative modeling tasks, these techniques look too heavy-weighted when a user just wants to learn EOT/SB between some moderate-dimensional data distributions, e.g., those appearing in perspective biological applications of OT \citep{tong2020trajectorynet, vargas2021solving, koshizuka2022neural, bunne2022proximal, bunne2023Schrodinger, tong2023simulation}. In this paper, we address this issue and present the following \textbf{main contributions}:
+\begin{enumerate}[leftmargin=*]
+    \item We propose a novel light solver for continuous SB with the Wiener prior, i.e., EOT with the quadratic transport cost. Our solver has a straightforward non-minimax learning objective and uses the Gaussian mixture parameterization for the EOT/SB (\wasyparagraph \ref{sec-deriving-objective}, \ref{sec-training-inference}). This development allows us to solve EOT/SB between distributions in moderate dimensions in a matter of minutes thanks to avoiding time-consuming max-min optimization, simulation of the full process trajectories, iterative learning and MCMC techniques  which are in use in existing continuous solvers (\wasyparagraph\ref{sec-related-work}).
+    \item We show that our novel light solver provably satisfies the universal approximation property for EOT/SB between the distributions supported on compact sets (\wasyparagraph\ref{sec-approximation}).
+    \color{black}
+    \item We derive the finite sample learning guarantees for our solver.
+    \color{black}
+    \item We demonstrate the performance of our light solver in a series of synthetic and real-data experiments (\wasyparagraph\ref{sec-experiments}), including the ones with the real biological data (\wasyparagraph\ref{sec-exp-new-single-cell}) considered in related works.
+\end{enumerate}
+Our light solver exploits the recent advances in the field of EOT/SB, namely, using the log-sum-exp quadratic functions to parameterize Schrödinger potentials for constructing EOT/SB benchmark distributions \citep{gushchin2023building} and viewing EOT as the energy-based model \citep{mokrov2023energy} which optimizes a certain Kullback-Leibler divergence. We discuss this in \wasyparagraph\ref{sec-deriving-objective}. 
+
+
+\section{Background: Schrödinger Bridges}
+
+\label{sec-background}
+In this section, we recall the main properties of the Schrödinger Bridge (SB) problem with the Wiener prior. We begin with discussing the Entropic Optimal Transport \citep{cuturi2013sinkhorn,genevay2019entropy}, which is known as the \textit{static} SB formulation. Next, we recall the \textit{dynamic} Schrödinger bridge formulation and its relation to EOT  \citep{leonard2013survey,chen2016relation}.
+Finally, we summarize the aspects of the practical setup for learning EOT/SB which we consider throughout the paper.
+
+We work in the $D$-dimensional Euclidean space $(\mathbb{R}^{D},\|\cdot\|)$. We use $\mathcal{P}_{2,ac}(\mathbb{R}^{D})$ to denote the set of absolutely continuous Borel probability distributions on $\mathbb{R}^{D}$ which have a finite second moment. For any $p\in\mathcal{P}_{2,ac}(\mathbb{R}^{D})$, we write $p(x)$ to denote its density at a point $x\in\mathbb{R}^{D}$. In what follows, KL is a short notation for the well-celebrated Kullback-Leibler divergence, and $\mathcal{N}(x|r,S)$ is the density at a point $x\in\mathbb{R}^{D}$ of the normal distribution with mean $r\in\mathbb{R}^{D}$ and covariance $0\prec S\in \mathbb{R}^{D\times D}$.
+
+\textbf{Entropic Optimal Transport (EOT) with the quadratic cost.} Assume that $p_0\in\mathcal{P}_{2,ac}(\mathcal{X})$, $p_{1}\in\mathcal{P}_{2,ac}(\mathcal{Y})$ have finite entropy. For $\epsilon>0$, the EOT problem between them is to find the minimizer of
+\begin{equation}\label{entropic-ot}
+\min_{\pi \in \Pi(p_0, p_1)} \bigg\lbrace\int\limits_{\mathbb{R}^{D}}\int\limits_{\mathbb{R}^{D}} \frac{1}{2}\|x_0-x_1\|^{2} \pi(x_0,x_1)dx_0dx_1+\epsilon \KL{\pi}{p_0\times p_1}\bigg\rbrace,
+\end{equation}
+where $\Pi(p_0,p_1)$ is the set of probability distributions (transport plans) on $\mathbb{R}^{D}\times\mathbb{R}^{D}$ whose marginals are $p_0$ and $p_{1}$, respectively, and $p_0\times p_1$ is the product distribution. KL in \eqref{entropic-ot} is assumed to be equal to $+\infty$ if $\pi$ is not absolutely continuous. Therefore, one can consider only absolutely continuous $\pi$. The minimizer $\pi^{*}$ of \eqref{entropic-ot} exists; it is unique and called the \textit{EOT plan}.
+
+\textbf{(Dynamic) Schrödinger Bridge with the Wiener prior.} We employ $\Omega$ as the space of $\sR^D$-valued functions of time $t\in [0,1]$ describing trajectories in $\sR^D$ which start at time ${t=0}$ and end at ${t=1}$. In turn, we use ${\mathcal{P}(\Omega)}$ to denote the set of probability distributions on $\Omega$, i.e., stochastic processes. We use $dW_{t}$ to denote the differential of the standard Wiener process. For a process $T\in\mathcal{P}(\Omega)$, we denote its joint distribution at $t=0,1$ by $\pi^{T}\in\mathcal{P}(\mathbb{R}^{D}\times\mathbb{R}^{D})$. In turn, we use $T_{|x_0,x_1}$ to denote the distribution of $T$ for $t\in(0,1)$ conditioned on $T$'s values $x_0,x_1$ at $t=0,1$.
+
+Let $W^{\epsilon}\in\mathcal{P}(\Omega)$ denote the Wiener process with volatility $\epsilon>0$ which starts at $p_0$ at $t=0$. Its differential satisfies the stochastic differential equation (SDE): $dW^{\epsilon}_{t}=\sqrt{\epsilon}dW_{t}$. The SB problem with the Wiener prior $W^{\epsilon}$ between $p_0,p_1$ is to minimize the following objective:
+\begin{equation}\label{sb-wiener}
+\min_{T \in \mathcal{F}(p_0, p_1)}\KL{T}{W^{\epsilon}},
+\end{equation}
+where $\mathcal{F}(p_0, p_1)\subset \mathcal{P}(\Omega)$ is the subset of stochastic processes which start at distribution $p_0$ (at the time $t=0$) and end at $p_1$ (at $t=1$). This problem has the unique solution which is a diffusion process $T^{*}$ described by the SDE: $dZ_{t}=g^{*}(Z_t,t)dt+dW^{\epsilon}_{t}$ \citep[Prop. 2.3]{leonard2013survey}. The process $T^{*}$ is called \textit{the Schrödinger Bridge} and $g^{*}:\mathbb{R}^{D}\times [0,1]\rightarrow \mathbb{R}^{D}$ is called \textit{the optimal drift}.
+
+\textbf{Equivalence between EOT and SB.} It is known that the solutions of EOT and SB are related to each other: for the EOT plan $\pi^{*}$ and the SB process $T^{*}$ it holds that $\pi^{*}=\pi^{T^{*}}$. Hence, solution $\pi^{*}$ to EOT \eqref{entropic-ot} can be viewed as \textit{a part of} the solution $T^{*}$ to SB \eqref{sb-wiener}. What \textit{remains uncovered} by EOT in SB is the conditional process $T_{|x_0,x_1}$. Fortunately, it is known that $T_{|x_0,x_1}=W^{\epsilon}_{|x_0,x_1}$, i.e., it simply matches the "inner part" of the Wiener prior $W^{\epsilon}$ which is the well-studied Brownian Bridge \cite[Sec. 8.3.3]{PINSKY2011391}. Hence, one may treat EOT and SB as equivalent problems.
+
+\textbf{Characterization of solutions} \citep{leonard2013survey}. The EOT plan $\pi^{*}=\pi^{T^{*}}$ has a specific form
+\begin{equation}\pi^{*}(x_0,x_1) = \psi^*(x_0) \exp\big(-\sfrac{\|x_0-x_1\|^{2}}{2\epsilon}\big) \phi^*(x_1),
+\label{eot-plan-form}
+\end{equation}
+where $\psi^*,\phi^{*}:\mathbb{R}^{D}\rightarrow\mathbb{R}_{+}$ are two measurable functions called the \textit{Schrödinger potentials}. They are defined up to multiplicative constants.
+The optimal drift $g^{*}$ of SB can be derived from $\phi^{*}$:
+\begin{equation}g^*(x, t) = \epsilon \nabla_{x} \log \int_{\mathbb{R}^{D}} \mathcal{N}(x'|x, (1-t)\epsilon I_{D}) \phi^*(x') 
+dx'.\label{sb-drift}\end{equation}
+To use \eqref{sb-drift}, it sufficies to know $\phi^{*}$ up to the multiplicative constant. 
+
+\textbf{Computational Schrödinger Bridge setup.} Even though SB/EOT have many useful theoretical properties, solving the SB/EOT problems remains challenging in practice. Analytical solution is available only for the Gaussian case \citep{chen2015optimal,janati2020entropic,mallasto2022entropy,bunne2023Schrodinger} plus for some manually constructed benchmark pairs of distributions $p_0,p_1$ \citep{gushchin2023building}. Moreover, in real world setting where SBs are applied \citep{vargas2021solving, bunne2023Schrodinger, tong2023simulation}, distributions $p_0$ and $p_1$ are almost never available explicitly but only through their \textit{empirical samples}. For the rigor of the exposition, below we formalize the typical EOT/SB \textbf{learning setup} which we consider in our paper.
+
+    \parbox{1.015\linewidth}{
+    \centering
+    We assume that the learner has access to empirical samples $X_0^{N}=\{x^{1}_0,x^2_0,\dots,x_0^{N}\}\sim p_0$ and $X_1^{M}=\{x^{1}_1,x^2_1,\dots,x_1^{M}\}\sim p_1$ from the (unknown) data distributions $p_0,p_1\in\mathcal{P}_{2,ac}(\mathbb{R}^{D})$. These samples (\textit{train} data) are assumed to be independent. The task of the learner is to recover the solution (process $T^{*}$ or plan $\pi^*$) to SB problem \eqref{sb-wiener} between the entire underlying distributions $p_0,p_1$.
+    }
+}
+The setup above is the learning from empirical samples and is usually called the \textbf{continuous OT}.
+In the continuous setup, it is essential to be able to do the \textit{out-of sample estimation}, e.g., simulate the SB process trajectories starting from new (\textit{test}) points $x_0^{new}\sim p_0$ and ending at $p_1$. In some practical use cases of SB, e.g., generative modeling \citep{de2021diffusion} and  data-to-data translation \citep{gushchin2023entropic}, a user is primarily interested only in the ends of these trajectories, i.e., new synthetic data samples from $p_1$. In the biological applications, it may be useful to study the entire trajectory as well \citep{bunne2023Schrodinger,pariset2023unbalanced}. Hence, finding the solution to SB usually implies recovering the drift $g^{*}$ of SB or  the conditional distributions $\pi^{*}(x_1|x_0)$ of the EOT plan.
+
+
+
+\section{Light Schrödinger Bridge Solver}
+
+In \wasyparagraph\ref{sec-deriving-objective}, we derive the learning objective for our light SB solver. In \wasyparagraph\ref{sec-training-inference}, we present its training and inference procedures. In \wasyparagraph\ref{sec-approximation}, we prove that our solver is a universal approximator of SBs.
+
+\subsection{Deriving the Learning Objective}
+\label{sec-deriving-objective}
+
+The main idea of our solver is to recover a parametric approximation $\pi_{\theta}\approx\pi^{*}$  of the EOT plan. Then this learned plan $\pi_{\theta}$ will be used to construct an approximation $T_{\theta}\approx T^{*}$ to the entire SB process (\wasyparagraph\ref{sec-training-inference}). To learn $\pi_{\theta}$, we want to directly minimize the KL divergence between $\pi^{*}$ and $\pi_{\theta}$:
+\begin{equation}\KL{\pi^{*}}{\pi_{\theta}}\rightarrow\min_{\theta\in\Theta}.
+\label{main-obj-infeasible}
+\end{equation}
+This objective is straightforward but there is an obvious obstacle: we do not know the EOT plan $\pi^{*}$. The magic is that optimization \eqref{main-obj-infeasible} can still be  performed despite not knowing $\pi^{*}$. To begin with, recall that we already know that the EOT plan $\pi^{*}$ has a specific form \eqref{eot-plan-form}. We define $u^{*}(x_0)\defeq \exp(-\frac{\|x_0\|^{2}}{2\epsilon})\psi^{*}(x_0)$ and $v^{*}(x_1)\defeq \exp(-\frac{\|x_1\|^{2}}{2\epsilon})\phi^{*}(x_1)$. These two are measurable functions $\mathbb{R}^{D}\rightarrow \mathbb{R}_{+}$, and we call them the \textit{adjusted} Schrödinger potentials. Now \eqref{eot-plan-form} reads as
+\begin{equation}\pi^{*}(x_0,x_1) = u^*(x_0) \exp\big(\sfrac{\langle x_0, x_1\rangle}{\epsilon}\big) v^*(x_1)\hspace{3mm}\Rightarrow\hspace{3mm} \pi^{*}(x_1|x_0) \propto \exp\big(\sfrac{\langle x_0, x_1\rangle}{\epsilon}\big) v^*(x_1).
+\label{eot-plan-form-adjusted}
+\end{equation}
+
+Our idea is to exploit this knowledge to parameterize $\pi_{\theta}$. We define
+\begin{equation}
+\pi_{\theta}(x_0,x_1) = p_0(x_0)\pi_{\theta}(x_1|x_0)=p_0(x_0)\frac{\exp\big(\sfrac{\langle x_0,x_1\rangle}{\epsilon}\big)v_{\theta}(x_1)}{c_{\theta}(x_0)},
+\label{plan-parametric-full}
+\end{equation}
+i.e., we parameterize $v^{*}$ as $v_{\theta}$. In turn, $c_{\theta}(x_{0})\defeq\int_{\mathbb{R}^{D}}\exp\big(\sfrac{\langle x_0,x_1\rangle}{\epsilon}\big)v_{\theta}(x_1)dx_1$ is the normalization.
+
+Our parameterization guarantees that $\int_{\mathbb{R}^{D}}\pi_{\theta}(x_0,x_1)dx_{1}=p_{0}(x_0)$. This is reasonable as in practice a learner is interested in the conditional distributions $\pi^{*}(x_1|x_0)$ rather than  the density $\pi^{*}(x_0,x_{1})$ of the plan. To be precise, we parameterize all the conditional distributions $\pi_{\theta}(x_1|x_0)$ via a common potential $v_{\theta}$. Below we will see that it is sufficient for both training and inference. Surprisingly, this approach naturally coincides with just fitting a separate density model for $p_0$.
+
+Now we show that optimization \eqref{main-obj-infeasible} can be performed without the knowledge of $\pi^{*}$.
+
+\begin{proposition}[Feasible reformulation of the KL minimization] For parameterization \eqref{plan-parametric-full}, it holds that the main KL objective \eqref{main-obj-infeasible} admits the representation $\KL{\pi^{*}}{\pi^{\theta}}=\mathcal{L}(\theta)-\mathcal{L}^{*}$, where
+\begin{equation}\mathcal{L}(\theta)\defeq\int_{\mathbb{R}^{D}}\log c_{\theta}(x_0)p_0(x_0)dx_0-\int_{\mathbb{R}^{D}}\log v_{\theta}(x_1)p_1(x_1)dx_1,
+\label{main-obj-feasible}
+\end{equation}
+and $\mathcal{L}^{*}\in\mathbb{R}$ is a constant depending on distributions $p_0,p_1$ and value $\epsilon>0$ but not on $\theta$.
+\label{prop-feasible}
+\end{proposition}
+We see that minimizing KL equals to the minimization of the difference in expectations of $\log c_{\theta}(x_0)$ and $\log v_{\theta}(x_1)$ w.r.t. $p_0$, $p_1$, respectively. This means that the objective value \eqref{main-obj-feasible} admits Monte-Carlo estimation from random samples and \eqref{main-obj-feasible} can be optimized by using the stochastic gradient descent w.r.t. $\theta$. Yet there is still an obstacle that $c_{\theta}$ may be hard to compute analytically. We fix this below.
+
+We recall \eqref{eot-plan-form-adjusted} with $x_0=0$ and see that $\pi^{*}(x_{1}|x_0=0)\propto v^{*}(x_{1})$, i.e., $v^{*}$ can be viewed as an unnormalized density of a distribution. Inspired by this observation, we employ the (unnormalized) Gaussian mixture parameterization for the adjusted potential $v_{\theta}$:
+\begin{equation}
+    v_{\theta}(x_{1})\defeq \sum_{k=1}^{K}\alpha_{k}\mathcal{N}(x_{1}|r_{k},\eps S_{k}),
+    \label{potential-parameterization} 
+\end{equation}
+where $\theta\defeq\{\alpha_{k},r_{k},S_{k}\}_{k=1}^{K}$ are the parameters: $\alpha_{k}\geq 0$, $r_k\in\mathbb{R}^{D}$ and symmetric $0\prec S_{k}\in\mathbb{R}^{D\times D}$. Note that we multiply $S_k$ in \eqref{potential-parameterization} by $\epsilon$ just to simplify the further derivations. For parameterization \eqref{potential-parameterization}, conditional distributions $\pi_{\theta}(x_{1}|x_0)$ and normalization constants $c_{\theta}(x_0)$ are tractable.
+
+\begin{proposition}[Tractable form of plan's components]\label{prop-explicit-form} 
+For the Gaussian Mixture parameterization \eqref{potential-parameterization} of the adjusted Schrödinger potential $v_{\theta}$ in \eqref{plan-parametric-full}, it holds that
+\begin{gather}
+\pi_{\theta}(x_{1}|x_0)=\frac{1}{c_{\theta}(x_0)}\sum_{k=1}^{K}\widetilde{\alpha}_{k}(x_0)\mathcal{N}(x_{1}|r_{k}(x_0),\epsilon S_{k})\qquad\text{where}\qquad r_{k}(x_0)\defeq r_{k}+S_{k}x_0,
+\nonumber
+\\
+\widetilde{\alpha}_{k}(x_0)\defeq \alpha_{k} \exp\big(\frac{x_0^TS_kx_0 + 2r_k^Tx_0}{2\epsilon} \big),\qquad c_{\theta}(x_0)\defeq\sum_{k=1}^{K}\widetilde{\alpha}_{k}(x_0).
+\nonumber
+\end{gather}
+\end{proposition}
+The proposition provides the closed-form expression for $c_{\theta}(x_0)$ which is needed to optimize \eqref{main-obj-feasible}.
+\textbf{Relation to prior work.} Optimizing objective \eqref{main-obj-feasible} and using the Gaussian mixture parameterization \eqref{potential-parameterization} for the Schrödinger potentials are two ideas that appeared separately in \citep{mokrov2023energy} and \citep{gushchin2023building}, respectively, and in different contexts.  Our contribution is to combine these ideas together to get an efficient and light solver to SB, see the details below.
+
+\textbf{(a) Energy-based view on EOT.} In \citep{mokrov2023energy}, the authors aim to \underline{solve} the continuous EOT problem. Using the duality for weak OT, the authors derive the objective which matches our \eqref{main-obj-feasible} up to some change of variables, see their eq. (17) and Theorem 2. The lack of closed form for the normalization constant forces the authors to use the complex energy-based modeling \citep[EBM]{lecun2006tutorial,song2021train} techniques to perform the optimization. This is computationally heavy due to using the MCMC both during training and inference of the solver. Compared to their work, we employ a special parameterization of the Schrödinger potential, which allows to obtain the closed form expression for the normalizing constant. In turn, this allows us to optimize \eqref{main-obj-feasible} directly with the minibatch gradient descent and \textit{removes the burden of using MCMC at any point}. Besides, our solver yields the \textit{closed form expression for SB} (see \wasyparagraph\ref{sec-training-inference}) while their approach does not. 
+
+\textbf{(b) Parameterization of Schrödinger potentials with Gaussian mixtures.} In \citep{gushchin2023entropic}, the authors are interested in manually \underline{constructing} pairs of continuous probability distributions for which the ground truth EOT/SB solution is available analytically. They propose a generic method to do this (Theorem 3.2) and construct several pairs to be used as a benchmark for EOT/SB solvers. The key building block in their methodology is to use a kind of the Gaussian mixture parameterization for Schrödinger potentials, which allows to obtain the closed form EOT and SB solutions for the constructed pairs (Proposition 3.3, Corollary 3.5). Our parameterization \eqref{potential-parameterization} coincides with theirs up to some change of variables. The important difference is that we use it to \textit{learn the EOT/SB solution} (via learning parameters $\theta$ by optimizing \eqref{main-obj-feasible} for a given pair of distributions $p_0,p_1$. At the same time, the authors pick the parameters $\theta$ at random to simply set up some potential and use it to build some pairs of distributions with the EOT plan between them available by their construction.
+
+To summarize, our contribution is to unite these two separate ideas \textbf{(a)} and $\textbf{(b)}$ from the field of EOT/SB. We obtain a straightforward minimization objective \eqref{main-obj-feasible} which can be easily approached by standard gradient descent (\wasyparagraph\ref{sec-training-inference}). This makes the process of solving EOT/SB easier and faster.
+
+\subsection{Training and Inference Procedures}
+\label{sec-training-inference}
+
+\textsc{Training}.}
+\begin{equation}
+    \widehat{\mathcal{L}}(\theta)\defeq \frac{1}{N}\sum_{n=1}^{N}\log c_{\theta}(x_0^{n})-\frac{1}{M}\sum_{m=1}^{M}\log v_{\theta}(x_1^{m})\approx \mathcal{L}(\theta).
+    \label{main-obj-empirical}
+\end{equation}
+We use the (minibatch) gradient descent w.r.t.\ parameters $\theta$. To further simplify the optimization, we consider \textbf{diagonal} matrices $S_{k}$ in our parameterization \eqref{potential-parameterization} of $v_{\theta}$. Not only does it help to drastically reduce the number of learnable parameters in $\theta$ but it also allows to quickly compute $S_{k}^{-1}$ in $O(D)$ time. This simplification strategy works reasonably well in practice, see \wasyparagraph\ref{sec-experiments} below. Importantly, it is theoretically justified: in fact, it suffices to even use scalar covariance matrices $S_k=\lambda_k I_{D}\succ 0$ in $v_{\theta}$, see our Theorem \ref{thm-universal-approximation}.
+
+\textsc{Inference}.
+The conditional distributions $\pi_{\theta}(x_{1}|x_{0})$ are mixtures of Gaussians whose parameters are given explicitly in Propostion \ref{prop-explicit-form}. Hence, sampling $x_1$ given $x_0$ is straightforward and lightspeed. So far we have discussed EOT-related training and inference aspects and skipped the question how to use $\pi_{\theta}$ to set-up some process $T_{\theta}\approx T^{*}$ approximating SB. We fix it below.
+
+With each distribution $\pi_{\theta}$ defined by \eqref{plan-parametric-full} via formula \eqref{plan-parametric-full}, we associate the specific process $T=T_{\theta}$ whose joint distribution at $t=0,1$ matches $\pi_{\theta}$ and conditionals satisfy $T_{\theta|x_0,x_1}=W^{\epsilon}_{|0,1}$. Informally, this means that we "insert" the Brownian Bridge "inside" the joint distribution $\pi_{\theta}$ at $t=0,1$.
+Below we show that this process admits the closed-form drift $g_{\theta}$ and the quality of approximation of $T^{*}$ by $T_{\theta}$ is the same as that of approximation of $\pi^{*}$ by $\pi_{\theta}$.
+
+\begin{proposition}[Properties of $T_{\theta}$]\label{prop-drift-closed-form} Let $v_{\theta}$ be an unnormalized Gaussian mixture given by \eqref{potential-parameterization} and $\pi_{\theta}$ given by \eqref{plan-parametric-full}.
+Then $T_{\theta}$ introduced above is a diffusion process governed by the following SDE:
+\begin{gather}
+    T_{\theta}\hspace{2mm}:\hspace{2mm}dX_t = g_{\theta}(X_t, t)dt + \sqrt{\epsilon}dW_t,\hspace{5mm}X_{0}\sim p_0,
+    \label{sde-t-theta}
+\end{gather}
+\begin{gather}
+    g_{\theta}(x, t)\defeq \epsilon \nabla_{x} \log \big(\mathcal{N}(x|0, \epsilon(1-t)I_{D})\sum_{k=1}^{K} \big\{\alpha_{k}\mathcal{N}(r_k|0, \epsilon S_k)\mathcal{N}(h(x, t)|0, A_k^t)\big\}\big)
+    \nonumber
+\end{gather}
+with $A_k^t \defeq \frac{t}{\epsilon(1-t)}I_{D} + \frac{S_k^{-1}}{\epsilon}$ and $ h_k(x, t) \defeq \frac{1}{\epsilon(1-t)}x + \frac{1}{\epsilon}S_k^{-1}r_k.$
+Moreover, it holds that 
+    \begin{equation}
+        \KL{T^{*}}{T_{\theta}}=\KL{\pi^{*}}{\pi_{\theta}}.
+        \label{kl-process-plan}
+    \end{equation}
+The proposition provides a closed form for the drift $g_{\theta}$ of $T_{\theta}$ for all $(x,t)\in\mathbb{R}^{D}\times [0,1]$. Now that we know what the process looks like, it is straightforward to sample its random trajectories starting at given input points $x_0$. We describe two ways for it based on the well-known schemes.
+
+\textbf{Euler-Maryama simulation}. This is the well-celebrated time-discretized scheme to solve SDEs. Let $\Delta t=\frac{1}{S}$ be the time discretization step for an integer $S>0$. Consider the following iteratively constructed (for $s\in \{0,1,S-1\}$) sequence starting at $x_0$:
+\begin{equation}
+    x_{(s+1)\Delta t}\leftarrow x_{s\Delta t}+g_{\theta}(x_{s\Delta t},s\Delta_{t})\Delta t+\sqrt{\epsilon\Delta_{t}} \xi_{s}\hspace{4mm}\text{with}\hspace{4mm}\xi_{s}\sim\mathcal{N}(0,I),
+    \label{euler-maryama}
+\end{equation}
+where $\xi_{s}$ are i.i.d. random Gaussian variables. Then the sequence $\{x_{s\Delta t}\}_{s=1}^{S}$ is a time-discretized approximation of some true trajectory of $T_{\theta}$ starting from $x_0$. Since our solver provides closed form $g_{\theta}$ (Proposition \ref{prop-drift-closed-form}) for all $t\in[0,1]$, one may employ any arbitrary small discretization step $\Delta t$. 
+
+\textbf{Brownian Bridge simulation.} Given a start point $x_0$, one can sample an endpoint $x_1\sim \pi_{\theta}(x_1|x_0)$ from the respective Gaussian mixture (Proposition \ref{prop-explicit-form}). What remains is to sample the trajectory from the conditional process $T_{\theta|x_0,x_1}$ which matches the Brownian Bridge $W^{\epsilon}_{|x_0,x_1}$. Suppose that we already have some trajectory $x_0,x_{t_1},\dots,x_{t_L},x_{1}$ with $0<t_1<\dots<t_L<1$ (initially $L=0$, we have only $x_0,x_1$), and we want to refine the trajectory by inserting a point at $t_{l}<t<t_{l+1}$. Following the properties of the Brownian bridge, it suffices to sample 
+\begin{equation}x_{t}\sim\mathcal{N}\big(x_{t}|x_{t_l}+\frac{t'-t_{l}}{t_{l+1}-t_{l}}(x_{t_{l+1}}-x_{t_{l}}),\epsilon \frac{(t'-t_{l})(t_{l+1}-t')}{t_{l+1}-t_l}\big).
+\label{brownian-sampling}
+\end{equation}
+Using this approach, one may sample arbitrarily precise trajectories of $T_{\theta}$ \textit{without} any discretization errors. Unlike \eqref{euler-maryama}, this sampling technique does not use the drift $g_{\theta}$ and to get a random sample at any time $t$ one does not need to sequentially unroll the entire prior trajectory at $[0,t)$.
+
+\subsection{Universal Approximation Property}
+\label{sec-approximation}
+
+Considering plans $\pi_{\theta}$ with the Gaussian mixture parameterization \eqref{potential-parameterization}, it is natural to wonder whether this parameterization is universal. Namely, we aim to understand whether $T_{\theta}$ can approximate any Schrödinger bridge arbitrarily well if given a sufficient amount of components in the mixture $v_{\theta}$. We provide a positive answer assuming that $p_0, p_{1}$ are supported on compact sets. This assumption is not restrictive as in practice many real-world distributions are compactly supported anyway.
+\begin{theorem}[Gaussian mixture parameterization for the adjusted potential provides the universal approximation of Schrödinger bridges] Assume that $p_0$ and $p_{1}$ are compactly supported. Then for all $\delta>0$ there exists a Gaussian mixture $v_{\theta}$ \eqref{potential-parameterization} with \textbf{scalar} covariances $S_{k}=\lambda_{k}I_{D}\succ 0$ of its components that satisfies the inequality $\KL{T^{*}}{T_{\theta}}=\KL{\pi^{*}}{\pi_{\theta}}< \delta.$
+\label{thm-universal-approximation}
+\end{theorem}
+Although this result looks concise and simple, its proof is quite \textbf{challenging}. The main cornerstone in proving the result is that the key object to be approximated, i.e., the adjusted potential $v^{*}$, is just a measurable function without any nice properties such as the continuity. To overcome this issue, we employ non-trivial facts from the duality theory for weak OT \citep{gozlan2017kantorovich}.
+
+We also highlight the fact that our result provides an approximation of $T^{*}$ on the \textbf{non-compact} set. Indeed, while $p_0$ and $p_1$ are compactly supported, $T_{\theta}$'s marginals at all the time steps $t\in (0,1)$ are always supported on the entire $\mathbb{R}^{D}$ which is not compact, recall, e.g., \eqref{brownian-sampling}. This aspect adds additional value to our result as usually the approximation is studied in the compact sets. To our knowledge, our Theorem \ref{thm-universal-approximation} is the first ever result about the universal approximation of SBs. 
+
+
+
+\section{Related work}
+
+\label{sec-related-work}
+
+Over several recent years, there has been a notable progress in developing neural SB/EOT solvers. For a review and a benchmark of them, we refer to \citep{gushchin2023building}. The dominant majority of them have rather non-trivial training or inference procedures, which complicates the usage of them in practical problems. Below we summarize their main principles.
+
+\textbf{Dual form solvers for EOT.} The works \citep{genevay2016stochastic,seguy2017large,daniels2021score} aim to solve EOT \eqref{entropic-ot}, i.e., the static version of SB. The authors approach the classic dual EOT problem \citep[\wasyparagraph 3.1]{genevay2019entropy} with neural networks. They recover the conditional distributions $\pi^{*}(x_1|x_0)$ or only the barycentric projections $x_0\mapsto \int_{\mathbb{R}^{D}}x_1 \pi^{*}(x_1|x_0)dx_1$ without learning the actual SB process $T^{*}$. Unfortunately, both solvers do not work for small $\epsilon$ due to numerical instabilities \citep[Table 2]{gushchin2023building}. At the same time, large $\epsilon$ is of limited practical interest as the EOT plan is nearly independent, i.e., $\pi^{*}(x_0,x_1)\approx p_0(x_0)p_1(x_1)$ and $\pi^{*}(x_1|x_0)\approx p_1(x_1)$. In this case, it becomes reasonable just to learn the unconditional generative model for $p_1$. This issue is addressed in the work \citep{mokrov2023energy} which we discussed in \wasyparagraph\ref{sec-deriving-objective}. There the authors consider the weak OT dual form \citep[Theorem 1.3]{backhoff2019existence} for EOT and demonstrate that it can be approached with energy-based modeling techniques \citep[EBM]{lecun2006tutorial}. Their solver as well as \citep{daniels2021score} still heavily rely on using time-consuming MCMC techniques. 
+
+\begin{table*}[!t]
+\tiny
+\hspace{-10mm}
+\begin{tabular}{ |c|c|c|c|c|c|c|c|c|c| }
+\hline
+  \backslashbox{\textbf{Solver}}{\textbf{Property}} & \shortstack{Allows to \\ sample from \\ $\pi^*(\cdot|x)$} & \shortstack{Non- \\ minimax\\objective} & \shortstack{Non-\\ iterative \\ objective} & \shortstack{Non-\\ simulation \\ based training} & \shortstack{Recovers \\ the drift \\ $g^{*}(x, t)$} & \shortstack{Recovers the \\ density of \\ $\pi^*(\cdot|x)$} & \shortstack{Does not \\ use simulation \\ inference} & \shortstack{Satisfies\\the universal \\ approximation} & \shortstack{Works for \\ reasonably \\ small $\epsilon$} \\ 
+\hline
+ \citep{seguy2017large} & \xmark & \cmark & \cmark & \cmark & \xmark & \xmark & \cmark & \qmark & \xmark \\
+\hline
+ \citep{daniels2021score} & \cmark & \cmark & \cmark & \cmark & \xmark & \xmark & \xmark & \qmark & \xmark \\
+\hline
+ \citep{mokrov2023energy} & \cmark & \cmark & \cmark & \xmark & \xmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ \citep{gushchin2023entropic} & \cmark & \xmark & \cmark & \xmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ \citep{vargas2021solving} & \cmark & \cmark & \xmark & \xmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ \citep{de2021diffusion} & \cmark & \cmark & \xmark & \xmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ \citep{chen2021likelihood} & \cmark & \cmark & \xmark & \xmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ \citep{shi2023diffusion} & \cmark & \cmark & \xmark & \xmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+\citep{kim2023unpaired} & \cmark & \xmark & \cmark & \xmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ \citep{tong2023simulation}  & \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \xmark & \qmark & \cmark \\
+\hline
+ LightSB (\textbf{ours}) & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \cmark \\
+\hline
+\end{tabular}
+\captionsetup{justification=centering}
+ \caption{Comparison of features of existing EOT/SB solvers and \textbf{our} proposed light solver.}
+ \label{table-comparison}
+\end{table*}
+
+The above-mentioned solvers can be also adapted to sample trajectories from SB by using the Brownian Bridge just as we do in \wasyparagraph\ref{sec-training-inference}. However, unlike our light solver, these solvers do not provide an access to the optimal drift $g^{*}$. Recently, \citep{gushchin2023entropic} demonstrated that one may reformulate the weak EOT dual problem so that one can get the SB's drift $g^{*}$ from its solution as well. However, their solver requires dealing with a challenging max-min optimization problem and requires simulating the full trajectories of the learned process, which complicates training.
+
+\textbf{Iterative proportional fitting (IPF) solvers for SB.} Most SB solvers \citep{vargas2021solving,de2021diffusion,chen2021likelihood,chen2023provably} directly aim to recover the optimal drift $g^{*}$ as it can be later used to simulate the SB trajectories as we discussed in \wasyparagraph\ref{sec-training-inference}. Such solvers are mostly based on the iterative proportional fitting procedure \citep{fortet1940resolution,kullback1968probability,ruschendorf1995convergence}, which is also known as the Sinkhorn algorithm \citep{cuturi2013sinkhorn} and, in fact, coincides with the well-known expectation-maximization algorithm \citep[EM]{dempster1977maximum}, see \citep[Proposition 4.1]{vargas2023transport} for discussion. That is, the above-mentioned solvers learn two SDEs (forward and inverse processes) and iteratively update them one after the other (IPF steps). The first two solvers do this via the mean-matching regression while the others optimize a divergence-based objective, see \citep[\wasyparagraph 1]{chen2021likelihood}, \color{black}\citep[\wasyparagraph 5]{chen2023provably}\color{black}. All these solvers require performing multiple IPF steps. At each of the steps, they simulate the full trajectories of the learned process which introduces considerable computational overhead since these processes are represented via large neural networks. In particular, due to the error accumulation  as IPF proceeds, it is known that such solvers may forget the Wiener prior, see \citep[\wasyparagraph 4.1.2]{vargas2023transport} and references therein.
+
+\begin{figure*}[!b]
+\begin{subfigure}[b]{0.245\linewidth}
+\centering
+\includegraphics[width=0.995\linewidth]{pics/swiss-input.png}
+\caption{\centering ${x\sim p_0
+}$, ${y \sim p_1}.$}
+\end{subfigure}
+\centering
+\includegraphics[width=0.995\linewidth]{pics/swiss-small.png}
+\caption{\centering $\epsilon=2\cdot 10^{-3}$.}
+\end{subfigure}
+\hfill\begin{subfigure}[b]{0.245\linewidth}
+\centering
+\includegraphics[width=0.995\linewidth]{pics/swiss-medium.png}
+\caption{\centering $\epsilon=0.01$.}
+\end{subfigure}
+\hfill\begin{subfigure}[b]{0.245\linewidth}
+\centering
+\includegraphics[width=0.995\linewidth]{pics/swiss-large.png}
+\caption{\centering $\epsilon=0.1$.}
+\end{subfigure}
+\captionsetup{font=small}
+\caption{\centering The process $T_{\theta}$ learned with LightSB \textbf{(ours)} in \textit{Gaussian} $\!\rightarrow\!$ \textit{Swiss roll} example.}
+\label{fig:swiss-roll}
+\end{figure*}
+
+\textbf{Other solvers for EOT/SB}.
+In \citep{shi2023diffusion}, a new approach to SB based on alternative Markovian and Reciprocal projections is introduced.
+In \citep{tong2023simulation}, the authors exploit the property that SB solution $T^*$ consists of entropic OT plan $\pi^*$ and Brownian bridge $W^{\epsilon}_{|x_0, x_1}$. They propose a new objective to learn $T^*$ in the form of SDE if the EOT plan $\pi^*$ is known. Since $\pi^*$ is not actually known, the authors use the minibatch OT to approximate it. In \citep{kim2023unpaired}, the authors propose exploiting the self-similarity of the SB problem and consider the family of SB problems on intervals $\{[t_i, 1]\}_{i=1}^N$ to sequentially learn $T^*$ as a series of conditional distributions $x_{t_{i+1}}| x_{t_{i}}$. However, they add an empirical regularization which may bias the solution. Besides, there exist SB solvers for specific setups with the paired train data available \citep{somnath2023aligned, liu20232}.
+
+\textbf{Summary.} We provide a Table \ref{table-comparison} with the summary of the features of the discussed EOT/SB solvers.
+
+
+\section{Experimental Illustrations}
+
+\label{sec-experiments}
+
+Below we evaluate our light solver on setups with both synthetic (\wasyparagraph\ref{sec-exp-toy}, \wasyparagraph\ref{sec-exp-benchmark}) and real data distributions (\wasyparagraph\ref{sec-exp-new-single-cell}, \wasyparagraph\ref{sec-exp-alae}). The experiments are issued in the form of convenient \texttt{*.ipynb} notebooks. \textbf{Reproducing each experiment requires a few minutes on CPU with 4 cores}.
+
+\subsection{Two-dimensional Examples}
+\label{sec-exp-toy}
+
+To show the effect of $\epsilon$ on the learned process $T_{\theta}$, we give a toy example of mapping 2D \textit{Gaussian}$\rightarrow$\textit{Swiss Roll} with our light solver for $\epsilon=2\cdot 10^{-3},10^{-2},10^{-1}$, see Fig. \ref{fig:swiss-roll}. As expected, for small $\epsilon$ the trajectories are almost straight, and the process $T_{\theta}$ is nearly deterministic. The volatility of trajectories increases with $\epsilon$, and the conditional distributions $\pi_{\theta}(x_{1}|x_0)$ become more disperse.
+
+\subsection{Evaluation on the EOT/SB Benchmark}
+\label{sec-exp-benchmark}
+
+To empirically verify that our light solver correctly recovers the EOT/SB, we evaluate it on a recent EOT/SB benchmark by \citep[\wasyparagraph 5]{gushchin2023building}. The authors provide high-dimensional continuous distributions $(p_0,p_1)$ for which the ground truth conditional EOT plan $\pi^{*}(\cdot|x_0)$ and SB process $T^{*}$ are known by the construction. Moreover, they use these pairs to evaluate many solvers from \wasyparagraph\ref{sec-related-work}.
+
+We use their \textit{mixtures} benchmark pairs (see their \wasyparagraph 4) with various dimensions and $\epsilon$, and use the same conditional $\text{B}\mathbb{W}_2^{2}\text{-UVP}$ metric (see their \wasyparagraph 5) to compare our recovered plan $\pi_{\theta}$ with the ground truth plan $\pi^{*}$. In Table \ref{table-cbwuvp-benchmark}, we report the results of our solver vs. the best solver in each setup according to their evaluation. As clearly seen, our solver outperforms the best solver by a \textit{considerable} margin. This is reasonable as the benchmark distributions are constructed using the similar principles which our solver exploits, namely, the sum-exp (Gaussian mixture) parameterization of the Schrödinger potential. Therefore, our light solver has a considerable inductive bias for solving the benchmark.
+
+\begin{table*}[!t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c*{12}{S[table-format=0]}@{}}
+\toprule
+& \multicolumn{4}{c}{$\epsilon\!=\!0.1$} & \multicolumn{4}{c}{$\epsilon\!=\!1$} & \multicolumn{4}{c}{$\epsilon\!=\!10$}\\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9} \cmidrule(l){10-13}
+& {$D\!=\!2$} & {$D\!=\!16$} & {$D\!=\!64$} & {$D\!=\!128$} & {$D\!=\!2$} & {$D\!=\!16$} & {$D\!=\!64$} & {$D\!=\!128$} & {$D\!=\!2$} & {$D\!=\!16$} & {$D\!=\!64$} & {$D\!=\!128$} \\
+\midrule  
+Best solver &  1.94  &  13.67  &  11.74  &  11.4  &  1.04 &  9.08 &   18.05  &  15.23  &  1.40  &  1.27  &  2.36  &  1.31 \\
+$\lfloor\textbf{LightSB}\rceil$ & $\mathbf{0.03}$ & $\mathbf{0.08}$ & $\mathbf{0.28}$ & $\mathbf{0.60}$ & $\mathbf{0.05}$ & $\mathbf{0.09}$ & $\mathbf{0.24}$ & $\mathbf{0.62}$ & $\mathbf{0.07}$ & $\mathbf{0.11}$ & $\mathbf{0.21}$ & $\mathbf{0.37}$ \\  
+$\pm$ std & $\mathbf{\pm 0.01}$ & $\mathbf{\pm 0.04}$ & $\mathbf{\pm 0.02}$ & $\mathbf{\pm 0.02}$ & $\mathbf{\pm 0.003}$ & $\mathbf{\pm 0.006}$ & $\mathbf{\pm 0.007}$ & $\mathbf{\pm 0.007}$ & $\mathbf{\pm 0.02}$ & $\mathbf{\pm 0.01}$ & $\mathbf{\pm 0.01}$ & $\mathbf{\pm 0.01}$ \\  
+\bottomrule
+\end{tabular}
+\captionsetup{font=small, justification=centering}
+\caption{Comparisons of $\text{cB}\mathbb{W}_{2}^{2}\text{-UVP}\downarrow$ (\%) between the optimal plan $\pi^*$ and the learned plan  $\pi_{\theta}$.}
+\label{table-cbwuvp-benchmark}
+\end{table*}
+
+\subsection{Single Cell Data}
+\label{sec-exp-new-single-cell}
+
+\color{black}
+\begin{table*}[!b]
+\tiny
+\hspace{-3mm}
+\begin{tabular}{ |c|c|c|c|c|c| }
+\hline
+\textbf{Setup} & \textbf{Solver type} & \backslashbox{\textbf{Solver}}{\textbf{DIM}} & \textbf{50} & \textbf{100} & \textbf{1000} \\ 
+\hline
+ Discrete EOT & Sinkhorn & \citep{cuturi2013sinkhorn} [1 GPU V100] & $2.34$ ($90$ s) & $2.24$ ($2.5$ m) & $1.864$ ($9$ m) \\
+\hline
+ Continuous EOT & Langevin-based & \citep{mokrov2023energy} [1 GPU V100] & $2.39 \pm 0.06$ ($19$ m) & $2.32 \pm 0.15$ ($19$ m) & $1.46 \pm 0.20$ ($15$ m) \\
+\hline
+ Continuous EOT & Minimax & \citep{gushchin2023entropic} [1 GPU V100] & $2.44 \pm 0.13$ ($43$ m) & $2.24 \pm 0.13$ ($45$ m) & $1.32 \pm 0.06$ ($71$ m) \\
+\hline
+ Continuous EOT & IPF & \citep{vargas2021solving} [1 GPU V100] & $3.14 \pm 0.27$ ($8$ m) & $2.86 \pm 0.26$ ($8$ m) & $2.05 \pm 0.19$ ($11$ m) \\
+\hline
+ Continuous EOT & KL minimization & LightSB (\textbf{ours}) [4 CPU cores] & $2.31 \pm 0.27$ ($65$ s) & $2.16 \pm 0.26$ ($66$ s) & $1.27 \pm 0.19$ ($146$ s) \\
+\hline
+\end{tabular}
+\captionsetup{font=small, justification=centering}
+ \caption{\color{black} Energy distance (averaged for two setups and 5 random seeds) on the MSCI dataset along with $95\%$-confidence interval ($\pm$ intervals) and average training times (s - seconds, m - minutes).}
+ \label{table-sc-comparison}
+\end{table*}
+
+\color{black}
+One of the important applications of SB is the analysis of biological single cell data \citep{koshizuka2022neural, bunne2021learning, bunne2022proximal}. The MSCI dataset consists of single-cell data from four human donors at 4 time points (days $2$, $3$, $4$, and $7$). We solve the SB/EOT problem between distribution pairs at days $2$ and $4$, $3$ and $7$, and evaluate how well the solvers recover the intermediate distributions at days $3$ and $4$ correspondingly. We work with PCA projections with $\text{DIM}=50, 100, 1000$ components. We use the energy distance \cite[ED]{rizzo2016energy} as a metric and present the results for different classes of SB solvers in Table~\ref{table-sc-comparison} along with the training time. We see that LightSB achieves similar quality to other EOT/SB solvers but faster and without GPU
+\color{black}
+
+\subsection{Unpaired Image-to-image Translation}
+\label{sec-exp-alae}
+
+One application which is frequently considered in EOT/SB papers \citep{daniels2021score,chen2021stochastic} is the unpaired image-to-image translation \citep{zhu2017unpaired}. Our solver may be hard to apply to learning SB directly in the image space. To be precise, it is \textit{not designed} to be used in image spaces just like the conventional Gaussian mixture model is not used for image synthesis.
+
+Still we show that our solver might be handy for working in the latent spaces of generative models. We consider the task of \textit{male}$\rightarrow$\textit{female} translation. We pick pre-trained  ALAE autoencoder \citep{pidhorskyi2020adversarial} for entire $1024\times 1024$ FFHQ dataset \citep{karras2019style} of 70K human faces. We split first 60K faces (train) into \textit{male} and \textit{female} subsets and use the encoder to extract $512$-dimensional latent codes $\{z_{0}^{n}\}_{n=1}^{N}$ and $\{z_{1}^{m}\}_{m=1}^{M}$ from the images in each subset.
+
+
+\begin{figure*}[!t]
+\hfill\begin{subfigure}[b]{0.24\linewidth}
+\centering
+\includegraphics[width=0.93\linewidth]{pics/male_to_female_one_to_one.png}
+\end{subfigure}
+\centering
+\includegraphics[width=0.93\linewidth]{pics/female_to_male_one_to_one.png}
+\end{subfigure}
+\centering
+\includegraphics[width=0.93\linewidth]{pics/adult_to_children_one_to_one.png}
+\end{subfigure}
+\centering
+\includegraphics[width=0.93\linewidth]{pics/children_to_adult_one_to_one.png}
+\end{subfigure}
+\captionsetup{justification=centering}
+\end{figure*}
+
+
+
+\section{Discussion}
+
+
+\textbf{Potential impact}. Compared to the existing EOT/SB solvers, our light solver provides many advantages (Table \ref{table-comparison}). It is one-step (no IPF steps), does not require max-min optimization, does not require the simulation of the process during the training, provides the closed form of the learned drift $g_{\theta}$ of the process $T_{\theta}\approx T^{*}$ and of the conditional distributions $\pi_{\theta}(x_{1}|x_0)\approx \pi^{*}(x_1|x_0)$ of the plan. Moreover, our solver is provably a universal approximator of SBs. Still the \textbf{key benefit} of our light solver is its simplicity and ease to use: it has a straightforward optimization objective and does not use heavy-weighted neural parameterization. These facts help our light solver to converge in a matter of minutes without spending a lot of user/researcher's time on setting up dozens of hyperparameters, e.g., neural network architectures, and waiting hours for the solver to converge on GPUs. We believe that these properties could help our solver to become the standard easy-to-use baseline EOT/SB solver with potential applications to data analysis tasks.
+
+
+
+\section{Reproducibility}
+
+The code for our solver is available at 
+\begin{center}
+
+\end{center}
+\begin{enumerate}[leftmargin=*]
+    \item To reproduce experiments from \wasyparagraph \ref{sec-exp-toy} it is enough to train LightSB model by running notebook \texttt{notebooks/LightSB\_swiss\_roll.ipynb} with hyperparameters described in \wasyparagraph \ref{sec-details-toy} and then run notebook \texttt{notebooks/swiss\_roll\_plot.ipynb} to plot Fig. \ref{fig:swiss-roll}. 
+ipynb} with hyperparameters described in \wasyparagraph \ref{sec-details-benchmark} to reproduce reported metrics in Table~\ref{table-cbwuvp-benchmark}. 
+ipynb}. All required data is already preprocessed and located in \texttt{data} folder.
+    \item \color{black} To reproduce experiments from \wasyparagraph\ref{sec-exp-new-single-cell} it is needed to download data from \url{https://www.kaggle.ipynb} to preprocess data. The experiments with LightSB solver can be reproduced by running the notebook \texttt{notebooks/LightSB\_MSCI.ipynb}. The experiments with Sinkhorn solver can be reproduced by running the notebook \texttt{notebooks/Sinkhorn\_MSCI.ipynb}  \color{black}
+    \item The code for ALAE is already included in our code and to reproduce experiments from \wasyparagraph \ref{sec-exp-alae} it is first necessary to load the ALAE model by running the script \texttt{ALAE/training\_artifacts/download\_all.py}. We have already coded the FFHQ dataset from ALAE and these data can be downloaded directly using notebook \texttt{notebooks/LightSB\_alae.ipynb}. To train the LightSB model it is necessary to run the notebook \texttt{notebooks/LightSB\_alae.ipynb}. The same notebook also contains code for plotting the results of trained models.    
+\end{enumerate}
+
+
+
+\section{ACKNOWLEDGEMENTS}
+
+The work was supported by the Analytical center under the RF Government (subsidy agreement 000000D730321P5Q0002, Grant No. 70-2021-00145 02.11.2021).
+
+
+
+
+

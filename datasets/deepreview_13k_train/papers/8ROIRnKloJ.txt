@@ -1,0 +1,532 @@
+\title{$\epsilon$-VAE: Denoising as Visual Decoding}
+
+\begin{abstract}
+
+In generative modeling, tokenization simplifies complex data into compact, structured representations, creating a more efficient, learnable space. For high-dimensional visual data, it reduces redundancy and emphasizes key features for high-quality generation. 
+Current visual tokenization methods rely on a traditional autoencoder framework, where the encoder compresses data into latent representations, and the decoder reconstructs the original input. 
+In this work, we offer a new perspective by proposing \textit{denoising as decoding}, shifting from single-step reconstruction to iterative refinement.
+Specifically, we replace the decoder with a diffusion process that iteratively refines noise to recover the original image, guided by the latents provided by the encoder.
+We evaluate our approach by assessing both reconstruction (rFID) and generation quality (FID), comparing it to state-of-the-art autoencoding approach.
+We hope this work offers new insights into integrating iterative generation and autoencoding for improved compression and generation.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Generative modeling aims to capture the underlying distribution of training data, enabling realistic sample generation during inference.
+A key preprocessing step is tokenization, which converts raw data into discrete tokens or continuous latent representations.
+These compact representations allow models to efficiently learn complex patterns, enhancing the quality of generated outputs.
+
+Two dominant paradigms in modern generative modeling are autoregression~\citep{radford2018improving} and diffusion~\citep{ho2020denoising}. 
+Autoregressive models generate samples incrementally, conditioning each new element on previously generated ones, while diffusion models progressively refine noisy inputs into clear representations, without relying on element-wise factorization.
+Tokenization is an essential in both: discrete tokens direct step-by-step conditional generation in autoregressive models, while continuous latents streamline the denoising process in diffusion models.
+Empirical results across language~\citep{achiam2023gpt,team2023gemini,dubey2024llama} and vision~\citep{baldridge2024imagen,esser2024scaling,videoworldsimulators2024} tasks show that tokenization—whether discrete or continuous—improves generative performance.
+We focus on tokenization for latent diffusion models, which excel at generating high-dimensional visual data.
+
+
+Given its central role in both paradigms, understanding how tokenization works is essential. In language processing, tokenization is relatively straightforward, involving segmenting text into discrete units such as words, subwords, or characters~\citep{sennrich2015neural,kudo2018sentencepiece,kudo2018subword}. However, tokenization in visual domains poses greater challenges due to the continuous, high-dimensional, and redundant nature. Instead of direct segmentation, compact representations are typically learned using an autoencoding~\citep{hinton2006reducing}. Despite rapid advancements in visual generation techniques, the design of tokenizers has received relatively little attention. This is evident in the minimal evolution of tokenizers used in state-of-the-art models, which have remained largely unchanged since their initial introduction~\citep{van2017neural}. 
+
+In this paper, we address this gap by revisiting the widely adopted visual autoencoding formulation~\citep{esser2021taming}, aiming to achieve higher compression rates and improved reconstruction quality, thereby enhancing generation quality of downstream generative models.
+Our key idea is to rethink the traditional autoencoding pipeline, which typically involves an encoder that compresses the input into a latent representation, followed by a decoder that reconstructs the original data in a single step. In our approach, we replace the deterministic decoder with a diffusion process. Here, the encoder still compresses the input into a latent representation, but instead of a one-step reconstruction, the diffusion model iteratively denoises the data to recover the original. This reframing turns the reconstruction phase into a step-by-step refinement, where the diffusion model, guided by the latent representation, progressively restores the original data.
+
+To implement our approach effectively, several key design factors must be carefully considered. 
+First, the architectural design must ensure effective conditioning of the diffusion decoder on the latent representations provided by the encoder.
+Second, the objectives for training the diffusion decoder should also explore potential synergies with traditional autoencoding losses, such as LPIPS~\citep{zhang2018unreasonable} and GAN~\citep{esser2021taming}. 
+Finally, diffusion-specific design choices are crucial, including: (1) the model parameterization, which defines the prediction target for the diffusion decoder; (2) the noise schedule, which dictates the optimization trajectory; and (3) the distribution of time steps during training and testing, which balances noise levels during learning and generation.
+Our study systematically explores all these components under controlled experiments.
+In summary, our contributions are: (1) introducing a novel approach that reframes the autoencoding pipeline using diffusion decoder; (2) presenting key design choices for optimal performance; and (3) conducting extensive controlled experiments demonstrating that our method achieves high-quality reconstruction and generation results compared to leading visual auto-encoding paradigms.
+
+
+
+
+\section{Background}
+
+
+We start by briefly reviewing the basic concepts required to understand the proposed method. A more detailed summary of related work is deferred to \cref{sec:relatedwork}.
+
+\myparagraph{Visual tokenization.} 
+To achieve efficient and scalable high-resolution image synthesis, common generative models, including autoregressive models~\citep{razavi2019generating,esser2021taming,chang2022maskgit} and diffusion models~\citep{rombach2022high}, are typically trained in a low-resolution latent space by first downsampling the input image using a tokenizer.
+The tokenizer is generally implemented as a convolutional autoencoder consisting of an encoder, $\gE$, and a decoder, $\gG$. 
+Specifically, the encoder, $\gE$, compresses an input image $\vx \in \R^{H \times W \times 3}$ into a set of latent codes (\ie, tokens), $\gE(\vx) =\vz \in \R^{H/f \times W/f \times n_z}$, where $f$ is the downsampling factor and $n_z$ is the latent channel dimensions. 
+The decoder, $\gG$, then reconstructs the input from $\vz$, such that $\gG(\vz) = \vx$.
+
+Training an autoencoder primarily involves several losses: reconstruction loss $\gL_\text{rec}$, perceptual loss (LPIPS) $\gL_\text{LPIPS}$, and adversarial loss $\gL_\text{adv}$.
+The reconstruction loss minimizes pixel differences (\ie, typically measured by the $\ell_1$ or $\ell_2$ distance) between $\vx$ and $\gG(\vz)$. 
+The LPIPS loss~\citep{zhang2018unreasonable} enforces high-level structural similarities between inputs and reconstructions by minimizing differences in their intermediate features extracted from a pre-trained VGG network~\citep{simonyan2015very}.
+The adversarial loss~\citep{esser2021taming} introduces a discriminator, $\gD$, which encourages more photorealistic outputs by distinguishing between real images, $\gD(\vx)$, and reconstructions, $\gD(\gG(\vz))$. 
+The final training objective is a weighted combination of these losses:
+\begin{equation}
+\label{eq:vqgan}
+    \gL_\text{VAE} = \gL_\text{rec} + \lambda_\text{LPIPS}\cdot\gL_\text{LPIPS} + \lambda_\text{adv}\cdot\gL_\text{adv},
+\end{equation}
+where the $\lambda$ values are weighting coefficients. 
+In this paper, we consider the autoencoder optimized by \Eqref{eq:vqgan} as our main competing baseline~\citep{esser2021taming}, as it has become a standard tokenizer training scheme widely adopted in state-of-the-art image and video generative models~\citep{chang2022maskgit,rombach2022high,yu2022vector,yu2023magvit,kondratyuk2024videopoet,esser2024scaling}.
+
+\myparagraph{Diffusion.}
+Given a data distribution $p_{\vx}$ and a noise distribution $p_{\bm{\epsilon}}$,
+a diffusion process progressively corrupts clean data \( \vx_0 \sim p_{\vx}\) by adding noise \( \bm{\epsilon} \sim p_{\bm{\epsilon}}\) and then reverses this corruption to recover the original data~\citep{song2019generative,ho2020denoising}, represented as:
+\begin{equation}
+\label{eq:transform}
+\vx_t = \alpha_t \cdot \vx_0 + \sigma_t \cdot \bm{\epsilon},
+\end{equation}
+where \( t \in [0, \text{T}] \) and \( \bm{\epsilon} \) is drawn from a standard Gaussian distribution, \(p_{\bm{\epsilon}} = \mathcal{N}(0, I) \).
+The functions \( \alpha_t \) and \( \sigma_t \) govern the trajectory between clean data and noise, affecting both training and sampling.
+The basic parameterization in \citet{ho2020denoising} defines \( \sigma_t = \sqrt{1 - a_t^2} \) with \(a_t = \left( \prod_{s=0}^{t} (1 - \beta_s) \right)^{\frac{1}{2}} \) for discrete timesteps.
+The diffusion coefficients \( \beta_t \) are lineary interpolated values bewteen \( \beta_{0} \) and \( \beta_{T-1} \) as \(\beta_t = \beta_0 + \frac{t}{T-1} (\beta_{T-1} - \beta_0)\), with start and end values are set empirically.
+
+The forward and reverse diffusion processes are described by the following factorizations:
+\begin{equation}
+\label{eq:fwd}
+    q(\vx_{\Delta t:\text{T}} | \vx_0) = \prod_{i=1}^\text{T} q(\vx_{i \cdot \Delta t} | \vx_{(i - 1) \cdot \Delta t}) \;\; \textrm{and} \;\; p(\vx_{0:\text{T}}) = p(\vx_\text{T}) \prod_{i=1}^\text{T} p(\vx_{(i - 1) \cdot \Delta t} | \vx_{i \cdot \Delta t}),
+\end{equation}
+where the forward process \( q(\vx_{\Delta t:\text{T}} | \vx_0) \) transitions clean data \( \vx_0 \) to noise \( \vx_\text{T} = \bm{\epsilon} \), while the reverse process \( p(\vx_{0:\text{T}}) \) recovers clean data from noise.
+$\Delta t$ denotes the time step interval or step size.
+
+During training, the model learns the score function \( \nabla \log p_t(\vx) \propto - \frac{\epsilon}{\sigma_t} \), which represents gradient pointing toward the data distribution along the noise-to-data trajectory.
+In practice, the model \( s_\Theta(\vx_t, t) \) is optimized by minimizing the score-matching objective:
+\begin{equation}
+\label{eq:diffusion}
+\gL_\text{score} = \min_\Theta \mathbb{E}_{t \sim \pi(t), \epsilon \sim \mathcal{N}(0, I)} \left[ w_t \|\sigma_t s_\Theta(\vx_t, t) + \bm{\epsilon} \|^2 \right],
+\end{equation}
+where \( \pi(t) \) defines the time-step sampling distribution and \( w_t \) is a time-dependent weight.
+These elements together influence which time steps or noise levels are prioritized during training.
+
+Conceptually, the diffusion model learns the tangent of the trajectory at each point along the path.
+During sampling, it progressively recovers clean data from noise based on its predictions.
+\myparagraph{Rectified flow.}
+Rectified flow provides a specific parametrization of \( \alpha_t \) and \( \sigma_t \) such that the trajectory between data and noise follows a ``straight'' path~\citep{liu2023flow,albergo2022building,lipman2022flow}. This trajectory is represented as:
+\begin{equation}
+\label{eq:rf_traj}
+\vx_t = (1 - t) \cdot \vx_0 + t \cdot \bm{\epsilon},
+\end{equation}
+where \( t \in [0, 1] \). 
+In this formulation, the gradient along the trajectory,  \( \bm{\epsilon} - \vx_0 \), is deterministic, often referred to as the velocity.
+The model \( v_\Theta (\vx_t, t) \) is parameterized to predict velocity by minimizing:
+\begin{equation}
+\label{eq:rf}
+    \min_\Theta \E_{t \sim \pi(t), \bm{\epsilon} \sim \mathcal{N}(0, I)} \left[ \|v_\Theta (\vx_t, t) - (\bm{\epsilon} - \vx) \|^2 \right].
+\end{equation}
+We note that this objective is equivalent to a score matching form (\Eqref{eq:diffusion}), with the weight \(w_t = (\frac{1}{1-t})^2 \).
+This equivalence highlights that alternative model parameterizations reduce to a standard denoising objective, where the primary difference lies in the time-dependent weighting functions and the corresponding optimization trajectory~\citep{kingma2024understanding}.
+During sampling, the model follows a simple probability flow ODE:
+\begin{equation}
+\label{eq:ode}
+    \rd \vx_t = v_\Theta(\vx_t, t) \cdot \rd t. 
+\end{equation}
+Although a perfect straight path could theoretically be solved in a single step, the independent coupling between data and noise often results in curved trajectories, necessitating multiple steps to generate high-quality samples~\citep{liu2023flow,lee2024improving}.
+In practice, we iteratively apply the standard Euler solver~\citep{euler1845institutionum} to sample data from noise.
+
+
+
+
+
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+We introduce \OURS, with an overview provided in \cref{fig:pipeline}.
+The core idea is to replace single-step, deterministic decoding with an iterative, stochastic denoising process. 
+By reframing autoencoding as a conditional denoising problem, we anticipate two key improvements: (1) more effective generation of latent representations, allowing the downstream latent diffusion model to learn more efficiently, and (2) enhanced decoding quality due to the iterative and stochastic nature of the diffusion process.
+
+We systematically explore the design space of model architecture, objectives, and diffusion training configurations, including noise and time scheduling.
+While this work primarily focuses on generating continuous latents for latent diffusion models, the concept of iterative decoding could also be extended to discrete tokens, which we leave for future exploration.
+
+
+
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=\linewidth]{figs/fig1_v3.pdf}
+\end{center}
+\caption{
+\textbf{An overview of \OURS}.
+We frame visual decoding as an iterative denoising problem by replacing the autoencoder decoder with a diffusion model, optimized using a combination of score, perception, and trajectory matching losses.
+During inference, images are reconstructed (or generated) from encoded (or sampled) latents through an iterative denoising process. The number of sampling steps $N$ can be flexibly adjusted within small NFE regimes (from 1 to 3).
+We empirically confirm that \OURS significantly outperforms the standard \COMP schema, even with just a few steps.
+}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Modeling}
+
+\OURS retains the encoder $\gE$ while enhancing the decoder $\gG$ by incorporating a diffusion model, transforming the standard decoding process into an iterative denoising task. 
+
+\myparagraph{Conditional denoising.}
+ Specifically, the input $\vx \sim p_{\vx}$ is encoded by the encoder as $\vz = \gE(\vx)$, and this encoding serves as a condition to guide the subsequent denoising process.
+This reformulates the reverse process in \Eqref{eq:fwd} into a conditional form~\citep{nichol2021improved,saharia2022image}:
+\begin{equation}
+\label{eq:aefwd}
+    p(\vx_{0:\text{T}}|\vz) = p(\vx_\text{T}) \prod_{i=1}^\text{T} p(\vx_{(i - 1) \cdot \Delta t} | \vx_{i \cdot \Delta t}, \vz),
+\end{equation}
+where the denoising process from the noise $\vx_\text{T}=\bm{\epsilon}$ to the input $\vx_0=\vx$, is additionally conditioned on $\vz$ over time. Here, the decoder is no longer deterministic, as the process starts from random noise.
+For a more detailed discussion on this autoencoding formulation, we refer readers to \Secref{sec:discussion}.
+\myparagraph{Architecture and conditioning.}
+We adopt the standard U-Net architecture from \citet{dhariwal2021diffusion} for our diffusion decoder $\gG$, while also exploring Transformer-based models~\citep{peebles2023scalable}.
+For conditional denoising, we concatenate the conditioning signal with the input channel-wise, following the approach of diffusion-based super-resolution models~\citep{ho2022cascaded,saharia2022image}. Specifically, low-resolution latents are upsampled using nearest-neighbor interpolation to match the resolution of $\vx_t$, then concatenated along the channel dimension. 
+In \cref{app:exp:additional}, although we experimented with conditioning via AdaGN~\citep{nichol2021improved}, it did not yield significant improvement and introduced additional overhead, so we adopt channel concatenation.
+
+
+
+
+\subsection{Objectives}
+
+We adopt the standard autoencoding objective from \Eqref{eq:vqgan} to train \OURS, with a key modification: replacing the reconstruction loss \( \gL_\text{rec} \) used for the standard decoder with the score-matching loss \( \gL_\text{score} \) for training the diffusion decoder.
+Additionally, we introduce a strategy to adjust the perceptual \( \gL_\text{LPIPS} \) and adversarial \( \gL_\text{adv} \) losses to better align with the diffusion decoder training.
+
+\myparagraph{Velocity prediction.}
+We adopt the rectified flow parameterization, utilizing a linear optimization trajectory between data and noise, combined with velocity-matching objective (\Eqref{eq:rf}):
+\begin{equation}
+\label{eq:aerf}
+\E_{t \sim \pi(t), \bm{\epsilon} \sim \mathcal{N}(0, I)} \left[ \|\gG (\vx_t, t, \vz) - (\bm{\epsilon} - \vx) \|^2 \right].
+\end{equation}
+\myparagraph{Perceptual matching.} The LPIPS loss~\citep{zhang2018unreasonable} minimizes the perceptual distance between the reconstructions and real images using pre-trained models, typically VGG network~\citep{esser2021taming,yu2023magvit,yu2022vector}. 
+We apply this feature-matching objective to train \OURS. 
+However, unlike traditional autoencoders, \OURS predicts velocity instead of directly reconstructing the image during training, making it infeasible to compute the LPIPS loss directly between the prediction and the target image.
+To address this, we leverage the simple reversing step from \Eqref{eq:rf} to estimate $\vx_0$ from the prediction and $\vx_t$ as follows:
+\begin{equation}
+\label{eq:rf_est}
+    \hat{\vx}_0^t = \vx_t - t \cdot \gG (\vx_t, t, \vz),
+\end{equation}
+where $\hat{\vx}_0^t$ represents the reconstructed image estimated by the model at time $t$.
+We then compute the LPIPS loss between $\hat{\vx}_0^t$ and the target real image $\vx$.
+
+\myparagraph{Denoising trajectory matching.}
+The adversarial loss encourages photorealistic outputs by comparing the reconstructions to real images.
+We modify this to better align with a diffusion decoder.
+Specifically, our approach adapts the standard adversarial loss to enforce trajectory consistency rather than solely on realism.
+In practice, we achieve this by minimizing the following divergence, $\gD_\text{adv}$:
+\begin{equation}
+\label{eq:div}
+\min_\Theta \E_{t \sim p_t}\left[ \gD_\text{adv} \left( q(\vx_0|\vx_t) || p_\Theta(\hat{\vx}_0^t|\vx_t) \right) \right],
+\end{equation}
+where $\gD_\text{adv}$ is a probability distance metric~\citep{goodfellow2014generative,arjovsky2017wasserstein}, and we adopt the basic non-saturating GAN~\citep{goodfellow2014generative}.
+For adversarial training, we design a time-dependent discriminator that takes time as input using AdaGN approach~\citep{dhariwal2021diffusion}. To simulate the trajectory, we concatenate $\vx_0$ and $\vx_t$ along the channel dimension.
+The generator parameterized by \( \Theta \), and the discriminator, parameterized by \( \Phi \), are then optimized through a minimax game as:
+\begin{equation}
+\label{eq:adv}
+\min_{\Theta} \max_{\Phi} \gL_\text{adv} = \E_{q(\vx_0|\vx_t)}\left[ \log\gD_\Phi(\vx_0, \vx_t, t) \right] + \E_{p_\Theta(\hat{\vx}_0^t|\vx_t)}\left[ \log\left(1 - \gD_\Phi(\hat{\vx}_0^t, \vx_t, t)\right) \right],
+\end{equation}
+where fake trajectories $p_\Theta(\hat{\vx}_0^t|\vx_t)$ are contrasted with real trajectories $q(\vx_0|\vx_t)$.
+To further stabilize training, we apply the $R_1$ gradient penalty to the discriminator parameters~\citep{mescheder2018training}.
+In \cref{app:exp:additional}, we explore alternative matching approaches, including the standard adversarial method of comparing individual reconstructions \( \hat{\vx}_0^t \) with real images \( \vx_0 \), matching the trajectory steps $\vx_{t} \rightarrow \vx_{t - \Delta t}$~\citep{xiao2021tackling,wang2024phased}, and our start-to-end trajectory matching $\vx_{t} \rightarrow \vx_0$, with the latter showing the best performance.
+\textbf{Final training objective} combines $\gL_\text{score}$, $\gL_\text{LPIPS}$, and $\gL_\text{adv}$, with empirically adjusted weights.
+\subsection{Noise and time scheduling}
+
+\myparagraph{Noise scheduling.} In diffusion models, noise scheduling involves progressively adding noise to the data over time by defining specific functions for \( \alpha_t \) and \( \sigma_t \) in \Eqref{eq:transform}.
+This process is crucial as it determines the signal-to-noise ratio, \( \lambda_t = \frac{\alpha_t^2}{\sigma_t^2} \), which directly influences training dynamics.
+Noise scheduling can also be adjusted by scaling the intermediate states \( \vx_t \) with a constant factor $\gamma \in (0, 1]$, which shifts the signal-to-noise ratio downward. 
+This makes training more challenging over time while preserving the shape of the trajectory~\citep{chen2023importance}.
+
+In this work, we define \( \alpha_t \) and \( \sigma_t \) according to rectified flow formulation, while also scaling \( \vx_t \) by $\gamma$, with the value chosen empirically. However, when $\gamma \neq 1$, the variance of $\vx_t$ changes, which can degrade performance~\citep{karras2022elucidating}. 
+To address this, we normalize the denoising input $\vx_t$ by its variance after scaling, ensuring it preserves unit variance over time~\citep{chen2023importance}.
+
+\myparagraph{Time scheduling.}
+Another important aspect in diffusion models is time scheduling for both training and sampling, controlled by \( \pi(t) \) during training and \( \Delta t \) during sampling, as outlined in \Eqref{eq:fwd} and \Eqref{eq:diffusion}.
+A common choice for \( \pi(t) \) is the uniform distribution $\gU(0,T)$, which applies equal weight to each time step during training. 
+Similarly, uniform time steps \( \Delta t = \frac{1}{T} \) are typically used for sampling.
+However, to improve model performance on more challenging time steps and focus on noisy regimes during sampling, the time scheduling strategy should be adjusted accordingly.
+
+In this work, we sample $t$ from a logit-normal distribution~\citep{atchison1980logistic}, which emphasizes intermediate timesteps~\citep{esser2024scaling}.
+During sampling, we apply a reversed logarithm mapping function $\rho_\text{log}$, defined as:
+\begin{equation}
+    \rho_\text{log}(t; m, n) = \frac{\log(m) - \log\left(t \cdot (m - n) + n\right)}{\log(m) - \log(n)},
+\end{equation}
+where we set $m = 1$ and $n = 100$, resulting in denser sampling steps early in the inference process.
+
+
+
+
+\section{Experiments}
+
+
+We evaluate the effectiveness of \OURS on image reconstruction and generation tasks using the ImageNet~\citep{deng2009imagenet}. 
+The VAE formulation by \citet{esser2021taming} serves as a strong baseline due to its widespread use in modern image generative models~\citep{rombach2022high,peebles2023scalable,esser2024scaling}. 
+We perform controlled experiments to compare reconstruction and generation quality by varying model scale, latent dimension, downsampling rates, and input resolution.
+\myparagraph{Model configurations.} 
+We use the encoder and discriminator architectures from VQGAN~\citep{esser2021taming} and keep consistent across all models. 
+The decoder design follows BigGAN~\citep{brock2019large} for \COMP and from ADM~\citep{dhariwal2021diffusion} for \OURS. 
+Additionally, we experiment with the DiT architecture~\citep{peebles2023scalable} for \OURS.
+To evaluate model scaling, we test five decoder variants: base (B), medium (M), large (L), extra-large (XL), and huge (H), by adjusting width and depth accordingly.
+Further model specifications are provided in \cref{app:exp}.
+
+\myparagraph{Training.}
+The autoencoder loss follows \Eqref{eq:vqgan}, with weights set to $\lambda_\text{LPIPS} = 0.5$ and $\lambda_\text{adv} = 0.5$.
+We use the Adam optimizer~\citep{kingma2015adam} with $\beta_1 = 0$ and $\beta_2 = 0.999$, applying a linear learning rate warmup over the first 5,000 steps, followed by a constant rate of 0.0001 for a total of one million steps.
+The batch size is 256, with data augmentations including random cropping and horizontal flipping.
+An exponential moving average of model weights is maintained with a decay rate of 0.999.
+Both \COMP and \OURS are trained to reconstruct $128 \times 128$ images.
+The default setup uses a downsampling factor of 16 and latent dimensions with 8 channels.
+We also test downsampling rates of 4, 8, and 32, as well as latent dimensions with 4, 16, and 32 channels.
+\myparagraph{Evaluation.}
+We evaluate the autoencoder on both reconstruction and generation quality using Fréchet Inception Distance (FID) \citep{heusel2017gans} as the primary metric, computed on 10,000 validation images.
+For reconstruction quality (rFID), FID is computed at both training and higher resolutions to assess generalization across resolutions.
+For generation quality (FID), we generate latents from the trained autoencoders and use them to train the DiT-XL/2 latent generative model~\citep{peebles2023scalable}. 
+This latent model remains fixed across all generation experiments, meaning improved autoencoder latents directly enhance generation quality.
+We also report Inception Score (IS) \citep{salimans2016improved} and Precision/Recall~\citep{kynkaanniemi2019improved} as secondary metrics. 
+
+
+\subsection{Reconstruction quality}
+\label{sec:exp:reconstruction}
+
+\myparagraph{Decoder architecture.}
+We explore two major architectural designs:
+the UNet-based architecture from ADM~\citep{dhariwal2021diffusion} and the Transformer-based DiT~\citep{peebles2023scalable}.
+We compare various model sizes--ADM:\{B, M, L, XL, H\} and DiT:\{S, B, L, XL\} with patch sizes of \{4, 8\}.
+The results are summarized in \cref{fig:reconstruct}~(left).
+ADM consistently outperforms DiT across the board.
+While we observe rFID improvements in DiT when increasing the number of tokens by reducing patch size, this comes with significant computational overhead.
+The overall result aligns with the original design intentions: ADM for pixel-level generation and DiT for latent-level generation.
+For the following experiments, we use the ADM architecture for our diffusion decoder.
+
+\myparagraph{Compression rate.} 
+Compression can be achieved by adjusting either the channel dimensions of the latents or the downsampling factor of the encoder. 
+In \cref{fig:reconstruct} (middle and right), we compare \COMP and \OURS across these two aspects.
+The results show that \OURS consistently outperforms \COMP in terms of rFID, particularly as the compression ratio increases. Specifically, as shown on the middle graph, \OURS achieves lower rFIDs than \COMP across all channel dimensions, with a notable gap at lower dimensions (4 and 8). On the right graph, \OURS maintains lower rFIDs than \COMP even as the downsampling factor increases, with the gap widening significantly at larger factors (16 and 32). Furthermore, \OURS delivers comparable or superior rFIDs even when the compression ratio is doubled, demonstrating its robustness and effectiveness in high-compression scenarios.
+
+
+\myparagraph{Model scaling.} 
+We investigate the impact of model scaling by comparing \COMP and \OURS across five model variants, all trained and evaluated at a resolution of $128 \times 128$, as summarized in \cref{tbl:reconstruction}.
+The results demonstrate that \OURS consistently achieves significantly better rFID scores than \COMP, with an average relative improvement of over 40$\%$, and even the smallest \OURS model outperforms \COMP at largest scale.
+While the U-Net-based decoder of \OURS has about twice as many parameters as standard decoder of \COMP, grouping models by similar sizes, highlighted in \textcolor{blue}{blue}, \textcolor{red}{red}, and \textcolor{applegreen}{green}, shows that performance gains are not simply due to increased model parameters.
+
+\myparagraph{Resolution generalization.} 
+A notable feature of conventional autocencoders is their capacity to generalize and reconstruct images at higher resolutions during inference~\citep{rombach2022high}. 
+To assess this, we conduct inference on images with resolutions of $256 \times 256$ and $512 \times 512$, using \OURS and \COMP models trained at $128 \times 128$. 
+As shown in \cref{tbl:reconstruction}, \OURS effectively generalizes to higher resolutions, consistently preserving its performance advantage over \COMP.
+
+\myparagraph{Runtime efficiency.} We examine the inference throughput of the model on a single Tesla V100 GPU. \COMP (M) achieves 114.13 images/sec throughput, while the throughput of \OURS (B) is 20.68 images/sec when the sampling step is three and increased to 62.94 images/sec if we sample by one step. \OURS requires more compute costs than \COMP due to its U-Net design. We discuss potential  directions to improve our runtime efficiency in \Secref{sec:discussion}.
+
+
+\begin{table}[t]
+\caption{
+\textbf{Model scaling and resolution generalization analysis.} 
+Five model variants are trained and evaluated.
+$\Delta_\text{rFID}$ represents the absolute differences (or relative ratio) in rFID  between the corresponding model size variants of \COMP and \OURS. 
+$^\dag$ denotes resolution generalization experiments.
+To fairly evaluate the impact of \OURS under controlled model parameters, we highlight three groups of model variants with comparable parameters, using \textcolor{blue}{blue}, \textcolor{red}{red}, and \textcolor{applegreen}{green}.
+}
+\label{tbl:reconstruction}
+\begin{center}
+\resizebox{0.98\textwidth}{!}{\begin{tabular}{@{}lccccccc@{}}
+\toprule
+\multirow{2}[2]{*}{\textbf{Models}} & \multirow{2}[2]{*}{\textbf{$\gG$ params (M)}} & \multicolumn{2}{c}{\textbf{ImageNet $\times 128$}} & \multicolumn{2}{c}{\textbf{ImageNet $\times 256$ $^\dag$}} & \multicolumn{2}{c}{\textbf{ImageNet $\times 512$ $^\dag$}} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
+& & \textbf{rFID} $\downarrow$ & $\Delta_\text{rFID}$ & \textbf{rFID} $\downarrow$ & $\Delta_\text{rFID}$ & \textbf{rFID} $\downarrow$ & $\Delta_\text{rFID}$ \\
+\midrule
+\COMP (B) & 10.14 & 11.15 & - & 5.74 & - & 3.69 & - \\
+\textcolor{blue}{\COMP (M)} & \textcolor{blue}{22.79} & \textcolor{blue}{9.26} & - & \textcolor{blue}{4.63} & - & \textcolor{blue}{2.69} & - \\
+\textcolor{red}{\COMP (L)} & \textcolor{red}{40.48} & \textcolor{red}{8.49} & - & \textcolor{red}{4.78} & - & \textcolor{red}{2.78} & - \\
+\COMP (XL) & 65.27 & 7.58 & - & 4.42 & - & 2.41 & - \\
+\textcolor{applegreen}{\COMP (H)} & \textcolor{applegreen}{161.81} & \textcolor{applegreen}{7.12} & - & \textcolor{applegreen}{4.29} & - & \textcolor{applegreen}{2.37} & - \\
+\midrule
+\textcolor{blue}{\OURS (B)} & \textcolor{blue}{20.63} & \textcolor{blue}{6.24} & 4.91 (44.0$\%$) & \textcolor{blue}{3.90} & 1.84 (32.0$\%$) & \textcolor{blue}{2.06} & 1.63 (44.2$\%$) \\
+\textcolor{red}{\OURS (M)} & \textcolor{red}{49.33} & \textcolor{red}{5.42} & 3.84 (41.5$\%$) & \textcolor{red}{2.79} & 1.84 (39.7$\%$) & \textcolor{red}{2.02} & 0.67 (24.9$\%$) \\
+\OURS (L) & 88.98 & 4.71 & 3.78 (44.5$\%$) & 2.60 & 2.03 (43.8$\%$) & 1.92 & 0.86 (30.9$\%$) \\
+\textcolor{applegreen}{\OURS (XL)} & \textcolor{applegreen}{140.63} & \textcolor{applegreen}{4.18} & 3.40 (44.9$\%$) & \textcolor{applegreen}{2.38} & 2.04 (46.2$\%$) & \textcolor{applegreen}{1.82} & 0.59 (24.5$\%$) \\
+\OURS (H) & 355.62 & 4.04 & 3.08 (43.3$\%$) & 2.31 & 1.98 (46.2$\%$) & 1.78 & 0.59 (24.9$\%$) \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\begin{figure}[t!]
+\begin{center}
+\includegraphics[height=9.6em]{figs/fig2_1.pdf}
+\includegraphics[height=9.6em]{figs/fig2_2.pdf}
+\includegraphics[height=9.6em]{figs/fig2_3.pdf}
+\end{center}
+\caption{
+\textbf{Architecture and compression analysis.}
+The \OURS decoder uses either a UNet-based ADM or Transformer-based DiT (left). 
+\OURS and \COMP under different compression rates by varying latent channel dimensions (middle) or encoder downsampling factors (right).
+}
+\label{fig:reconstruct}
+\end{figure}
+
+\begin{table}[t]
+\caption{
+\textbf{Image generation quality.} 
+The DiT-XL/2 is trained on latents provided by the trained autoencoders, \COMP and \OURS, with varying model sizes using ImageNet.
+We evaluate the generation quality at resolutions of $128 \times 128$ and $256 \times 256$ using four standard metrics.
+Additionally, we report rFID to determine if the improvement trend observed in reconstruction task extends to the generation task.
+We highlight three groups of model variants with comparable parameters.
+}
+\label{tbl:generation}
+\begin{center}
+\resizebox{0.96\textwidth}{!}{\begin{tabular}{@{}lcccccccccc@{}}
+\toprule
+\multirow{2}[2]{*}{\textbf{Models}} & \multicolumn{5}{c}{\textbf{ImageNet $\times 128$}} & \multicolumn{5}{c}{\textbf{ImageNet $\times 256$}} \\
+\cmidrule(lr){2-6} \cmidrule(lr){7-11}& \textbf{rFID}  $\downarrow$  &  \textbf{FID} $\downarrow$ & \textbf{IS} $\uparrow$ & \textbf{Prec.} $\uparrow$ & \textbf{Rec.} $\uparrow$ & \textbf{rFID} $\downarrow$ & \textbf{FID} $\downarrow$ & \textbf{IS} $\uparrow$ & \textbf{Prec.} $\uparrow$ & \textbf{Rec.} $\uparrow$ \\
+\midrule
+\COMP (B) & \textcolor{lightgray}{11.15} & 36.8 & 17.9 & 0.48 & 0.53 & \textcolor{lightgray}{5.74} & 46.6 & 23.4 & 0.45 & 0.56 \\
+\textcolor{blue}{\COMP (M)} & \textcolor{lightgray}{9.26} & \textcolor{blue}{34.6} & \textcolor{blue}{18.2} & \textcolor{blue}{0.49} & \textcolor{blue}{0.55} & \textcolor{lightgray}{4.63} & \textcolor{blue}{44.7} & \textcolor{blue}{23.8} & \textcolor{blue}{0.47} & \textcolor{blue}{0.58} \\
+\textcolor{red}{\COMP (L)} & \textcolor{lightgray}{8.49} & \textcolor{red}{33.9} & \textcolor{red}{18.4} & \textcolor{red}{0.50} & \textcolor{red}{0.56} & \textcolor{lightgray}{4.78} & \textcolor{red}{44.3} & \textcolor{red}{24.7} & \textcolor{red}{0.47} & \textcolor{red}{0.59} \\
+\COMP (XL) & \textcolor{lightgray}{7.58} & 31.7 & 19.3 & 0.51 & 0.57 & \textcolor{lightgray}{4.42} & 43.1 & 24.9 & 0.47 & 0.59 \\
+\textcolor{applegreen}{\COMP (H)} & \textcolor{lightgray}{7.12} & \textcolor{applegreen}{30.9} & \textcolor{applegreen}{19.8} & \textcolor{applegreen}{0.52} & \textcolor{applegreen}{0.57} & \textcolor{lightgray}{4.29} & \textcolor{applegreen}{41.6} & \textcolor{applegreen}{25.9} & \textcolor{applegreen}{0.48} & \textcolor{applegreen}{0.59} \\
+\midrule
+\textcolor{blue}{\OURS (B)} & \textcolor{lightgray}{6.24} & \textcolor{blue}{29.5} & \textcolor{blue}{20.7} & \textcolor{blue}{0.53} & \textcolor{blue}{0.59} & \textcolor{lightgray}{3.90} & \textcolor{blue}{39.5} & \textcolor{blue}{25.2} & \textcolor{blue}{0.46} & \textcolor{blue}{0.61} \\
+\textcolor{red}{\OURS (M)} & \textcolor{lightgray}{5.42} & \textcolor{red}{27.6} & \textcolor{red}{21.2} & \textcolor{red}{0.55} & \textcolor{red}{0.59} & \textcolor{lightgray}{2.79} & \textcolor{red}{35.4} & \textcolor{red}{26.2} & \textcolor{red}{0.51} & \textcolor{red}{0.62} \\
+\OURS (L) & \textcolor{lightgray}{4.71} & 27.3 & 22.1 & 0.55 & 0.59 & \textcolor{lightgray}{2.60} & 34.8 & 26.5 & 0.51 & 0.63 \\
+\textcolor{applegreen}{\OURS (XL)} & \textcolor{lightgray}{4.18} & \textcolor{applegreen}{25.3} & \textcolor{applegreen}{22.7} & \textcolor{applegreen}{0.55} & \textcolor{applegreen}{0.59} & \textcolor{lightgray}{2.38} & \textcolor{applegreen}{34.0} & \textcolor{applegreen}{27.4} & \textcolor{applegreen}{0.53} & \textcolor{applegreen}{0.63} \\
+\OURS (H) & \textcolor{lightgray}{4.04} & 24.9 & 23.0 & 0.56 & 0.60 & \textcolor{lightgray}{2.31} & 33.2 & 27.5 & 0.54 & 0.64 \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+\subsection{Generation quality}
+Given the trained \COMP and \OURS models, we now evaluate their autoencoding performance.
+In practice, we first generate latents using the trained autoencoders, then train a new latent generative model based on these representations.
+The compact, learnable latent space produced by the encoder enhances the learning efficiency of latent generative model, while effective decoding of the sampled latents ensures high-quality outputs. Thus, both the encoding and decoding capabilities of autoencoder contribute to the overall generative performance.
+For this evaluation, we perform standard unconditional image generation tasks using the DiT-XL/2 model as our latent generative model~\citep{peebles2023scalable}. Further details on the training setup are provided in \cref{app:exp:ldm}.
+
+
+
+\cref{tbl:generation} presents the image generation results of \COMP and \OURS at resolutions of $128 \times 128$ and $256 \times 256$.
+The results show that \OURS consistently outperforms \COMP across all model scales.
+Notably, \OURS (B) surpasses \COMP (H), consistent with our earlier findings in \Secref{sec:exp:reconstruction}.
+These results confirm that the performance gains from the reconstruction task successfully transfer to the generation task, further validating the effectiveness of \OURS. 
+
+It is important to note that the primary focus of this experiment is not to achieve state-of-the-art generation results, but to provide a fair comparison of \OURS's autoencoding capabilities under a controlled experimental setup. 
+We demonstrate that our approach consistently outperforms the leading autoencoding method~\citep{esser2021taming} across varying model scales and input resolutions.
+
+\subsection{Ablation studies}
+We conduct a component-wise analysis to validate our key design choices.
+We evaluate the reconstruction quality (rFID) and sampling efficiency (NFE). The results are summarized in \cref{tbl:ablation}.
+
+\myparagraph{Baseline.} 
+Our evaluation begins with a baseline model: an autoencoder with a diffusion decoder, trained solely using the score matching objective.
+This baseline follows the vanilla diffusion setup from \citet{ho2020denoising}, including their UNet architecture, parameterization, and training configurations, while extending to a conditional form as described in \Eqref{eq:aefwd}.
+Building on this baseline, we progressively introduce updates and evaluate the impact of our proposed method.
+
+\myparagraph{Impact of proposals.}
+In \textbf{(1)}, transitioning from standard diffusion to rectified flow~\citep{liu2023flow} straightens the optimization path, resulting in significant gains in rFID scores and NFE. 
+In \textbf{(2)}, adopting a logit-normal time step distribution optimizes rectified flow training~\citep{esser2024scaling}, further improving both rFID scores and NFE.
+In \textbf{(3)}, updates to the UNet architecture~\citep{nichol2021improved} contribute to enhanced rFID scores.
+In \textbf{(4)}, LPIPS loss is applied to match reconstructions \( \hat{\vx}_0^t \) with real images \( \vx_0 \). In \textbf{(5)}, adversarial trajectory matching loss aligns $(\hat{\vx}_0^t, \vx_t)$ with $(\vx_0, \vx_t)$, the target transition in rectified flow.
+Both objectives improve model understanding of the underlying optimization trajectory, significantly enhancing rFID scores and NFE.
+
+Up to this point, with the full implementation of \Eqref{eq:vqgan}, we can compare our proposal with the \COMP (B) model, which achieves an rFID score of 11.15. 
+Our model, with a score of 8.24, already surpasses this baseline.
+We further improve performance by optimizing noise and time scheduling within our framework, as described next.
+
+In \textbf{(6)}, scaling \( \vx_t \) reduces the signal-to-noise ratio~\citep{chen2023importance}, presenting challenges for more effective learning during training.
+\cref{fig:ablation} (middle) demonstrates that a scaling factor of 0.6 produces the best results.
+Finally, in \textbf{(7)}, reversed logarithmic time step spacing during inference allows for denser evaluations in noisier regions.
+\cref{fig:ablation} (right) demonstrates that this method provides more stable sampling in the lower NFE regime compared to the original uniform spacing.
+
+
+
+
+
+\begin{table}[t]
+\caption{\textbf{Ablation study on key design choices for the \OURS diffusion decoder.} 
+A systematic evaluation of the architecture ($\star$), objectives ($\dag$), and noise \& time scheduling ($\S$).
+Each row progressively modifies or builds upon the baseline decoder, showing improvements in performance.
+}
+\label{tbl:ablation}
+\begin{center}
+\resizebox{0.8\textwidth}{!}{\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Ablation} & \textbf{NFE} & \textbf{rFID} \\
+\midrule
+\textit{Baseline:} DDPM-based diffusion decoder & 1,000 & 28.22 \\
+$^\dag$~\textit{(1)}~Diffusion $\rightarrow$ Rectified flow parameterization & 100 & 24.11 \\
+$^\S$~\textit{(2)}~Uniform $\rightarrow$ Logit-normal time step sampling during training & 50 & 23.44 \\
+$^\star$~\textit{(3)}~DDPM UNet $\rightarrow$ ADM UNet & 50 & 22.04 \\
+$^\dag$~\textit{(4)}~Perceptual matching on $\hat{\vx}_0^t$ and $\vx_0$ & 10 & 11.76 \\
+$^\dag$~\textit{(5)}~Adversarial denoising trajectory matching on $(\hat{\vx}_0^t, \vx_t)$ and $(\vx_0, \vx_t)$ & 5 & 8.24 \\
+$^\S$~\textit{(6)}~Scale $\vx_t$ by $\gamma = 0.6$ & 5 & 7.08 \\
+$^\S$~\textit{(7)}~Uniform $\rightarrow$ Reversed logarithm time spacing during inference & 3 & 6.24 \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[height=9.6em]{figs/fig3_1.pdf}
+\includegraphics[height=9.6em]{figs/fig3_2.pdf}
+\includegraphics[height=9.6em]{figs/fig3_3.pdf}
+\end{center}
+\caption{
+\textbf{Impact of our major diffusion decoder designs.} 
+Improved training objectives, particularly perceptual matching loss and adversarial denoising trajectory matching loss, significantly contribute to better rFID scores and NFE (left).
+Effective noise scheduling by modulating the scaling factor $\gamma$ further enhances rFID, with an optimum value of 0.6 in our experiments (middle).
+Lastly, adjusting time step spacing during inference ensures stable sampling in low NFE regimes (right).
+}
+\label{fig:ablation}
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+\myparagraph{Distribution-aware compression.}
+Traditional image compression methods optimize the rate-distortion trade-off~\citep{shannon1959coding}, prioritizing compactness over input fidelity. 
+Building on this, we also aim to capture the broader input distribution during compression, generating compact representations suitable for latent generative models.
+This approach introduces an additional dimension to the trade-off, perception or distribution fidelity~\citep{blau2018perception}, which aligns more closely with the rate-distortion-perception framework~\citep{blau2019rethinking}.
+
+\myparagraph{Iterative and stochastic decoding.}
+A key question within the rate-distortion-perception trade-off is whether the iterative, stochastic nature of diffusion decoding offers advantages over traditional single-step, deterministic methods~\citep{kingma2013auto}. 
+The strengths of diffusion~\citep{ho2020denoising} lie in its iterative process, which progressively refines the latent space for more accurate reconstructions, while stochasticity allows for capturing complex variations within the distribution. 
+Although iterative methods may appear less efficient, our formulation is optimized to achieve optimal results in just three steps and also supports single-step decoding, ensuring decoding efficiency remains practical (see \cref{fig:ablation} (left)). 
+While stochasticity might suggest the risk of ``hallucination'' in reconstructions, the outputs remain faithful to the underlying distribution by design, producing perceptually plausible results.
+This advantage is particularly evident under extreme compression scenarios (see \cref{fig:viz_down}), with the degree of stochasticity adapting based on compression levels (see \cref{fig:viz_diversity}).
+\myparagraph{Scalability.}
+As discussed in \cref{sec:exp:reconstruction}, our diffusion-based decoding method maintains the resolution generalizability typically found in standard autoencoders. This feature is highly practical: the autoencoder is trained on lower-resolution images, while the subsequent latent generative model is trained on latents derived from higher-resolution inputs. 
+However, we acknowledge that memory overhead and throughput become concerns with our UNet-based diffusion decoder, especially for high-resolution inputs. 
+This challenge becomes more pronounced as models, datasets, or resolutions scale up.
+A promising future direction is patch-based diffusion~\citep{ding2023patched,wang2024patch}, which partitions the input into smaller, independently processed patches. This approach has the potential to reduce memory usage and enable faster parallel decoding.
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{figure}[p]
+\begin{center}
+\includegraphics[width=\linewidth]{figs/fig41_5.pdf}
+\end{center}
+\caption{
+\textbf{Reconstruction results with varying downsampling ratios.} 
+\OURS maintains both high fidelity and perceptual quality, even under extreme downsampling conditions, whereas \COMP fails to preserve semantic integrity. \textit{Best viewed when zoomed-in and in color}.
+}
+\label{fig:viz_down}
+\end{figure}
+
+\begin{figure}[p]
+\begin{center}
+\includegraphics[width=\linewidth]{figs/fig51_5.pdf}
+\end{center}
+\caption{
+\textbf{\OURS reconstruction results with varying random seeds and downsampling ratios.}
+At lower compression levels, the reconstruction behaves more deterministically, whereas higher compression introduces stochasticity, enabling more flexible reconstruction of plausible inputs. \textit{Best viewed when zoomed-in and in color}.
+}
+\label{fig:viz_diversity}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+We present \OURS, an effective visual tokenization framework that introduces a diffusion decoder into standard autoencoders, turning single-step decoding into a multi-step probabilistic process. By exploring key design choices in modeling, objectives, and diffusion training, we demonstrate significant performance improvements. Our approach outperforms traditional visual autoencoders in both reconstruction and generation quality, particularly in high-compression scenarios. We hope our concept of iterative generation during decoding inspires further advancements in visual autoencoding.
+
+
+ 
+
+

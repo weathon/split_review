@@ -1,0 +1,233 @@
+\title{Towards Off-Road Autonomous Driving via Planner Guided Policy Optimization}
+
+\begin{abstract}
+Off-road autonomous driving poses significant challenges such as navigating diverse terrains, avoiding obstacles, and maneuvering through ditches. Addressing these challenges requires effective planning and adaptability, making it a long-horizon planning and control problem. Traditional model-based control techniques like Model Predictive Path Integral (MPPI) require dense sampling and accurate modeling of the vehicle-terrain interaction, both of which are computationally expensive, making effective long-horizon planning in real-time intractable. Reinforcement learning (RL) methods operate without this limitation and are computationally cheaper at deployment. However, exploration in obstacle-dense and challenging terrains is difficult, and typical RL techniques struggle to navigate in these terrains. To alleviate the limitations of MPPI, we propose a hierarchical autonomy pipeline with a low-frequency high-level MPPI planner and a high-frequency low-level RL controller. To tackle RL's exploration challenge, we propose a teacher-student paradigm to learn an end-to-end RL policy, capable of real-time execution and traversal through challenging terrains. The teacher policy is trained using dense planning information from an MPPI planner while the student policy learns to navigate using visual inputs and sparse planning information. In this framework, we introduce a new policy gradient formulation that extends Proximal Policy Optimization (PPO), leveraging off-policy trajectories for teacher guidance and on-policy trajectories for student exploration. We demonstrate our performance in a realistic off-road simulator against various RL and imitation learning methods.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Autonomous ground vehicles have advanced significantly in recent years, with applications such as delivery robots and self-driving taxis. While great progress has been made in structured, urban environments, navigating off-road terrains remains a major challenge. Unlike on-road driving, off-road driving requires effective planning to avoid obstacles, speed management to navigate extreme slopes, and rapid adaptive maneuvers to handle varied traction levels and terrains such as dirt, sand, and rocks. Hence, it requires sophisticated control techniques to traverse in these challenging terrains. Successfully navigating large, unstructured environments also depends on effective long-distance planning, making it both a long-horizon planning and adaptive control problem.  
+
+Conventional control methods for off-road vehicles often depend on model-based techniques, like Model Predictive Path Integral (MPPI) (Han et al. (2024); Williams et al. (2015)). Model-based techniques rely on environmental details, such as segmentation maps and depth maps, to provide waypoints for a low-level controller. These methods necessitate very dense sampling of waypoint rollouts to effectively avoid obstacles and manage diverse terrains. However, this dense sampling requirement is computationally expensive, making it impractical to run these controllers in real-time for simultaneous globally optimal trajectory planning and terrain handling. Some attempts have been made to improve sampling efficiency by learning a state-dependent control action distribution and learning a terminal value function (Qu et al. (2024); Hansen et al. (2022)), thereby reducing required number of samples and planning horizon.  
+
+Reinforcement learning (RL) is highly effective for tackling complex, high-dimensional, and sequential tasks that are often challenging for traditional control methods. RL models typically utilize neural networks with a limited number of layers, enabling rapid inference. This capability also allows them to execute swift action maneuvers effectively in response to diverse terrains which is impossible with model-based planners. However, in an off-road environment, when attempting to avoid obstacles and ditches, RL methods face significant challenges in exploration, often rendering it difficult to learn these complex tasks effectively. Specifically in applications like off-road autonomous driving where environment simulation is relatively costly, environment transition dynamics are highly stochastic, and dense rewards can encourage expediency, exploration is hard without guidance from an external source or access to global planning information. Some works have explored end-to-end RL methods (Kalaria et al. (2024); Hensley & Marshall (2022); Wang et al. (2023)) for specific aspects of off-road driving. However, they lack a planning component and realistic simulation, making these methods significantly less suitable for realistic off-road autonomy. Some works (Kendall et al. (2018); Isele et al. (2018); Fayjie et al. (2018)) have attempted to address specific aspects of on-road driving using RL. However, the challenge there is the unpredictable behavior of the other actors rather than the variability of the terrain.  
+
+![](images/f3ef3095efe4914b16c79dab80b723c9b8b4c6cebd2c770deba4864ada7a22f6.jpg)  
+Figure 1: Illustration of the proposed hierarchical autonomy framework, integrating an MPPI planner and an RL controller for off-road navigation. During deployment, the framework enables effective global planning through MPPI while reducing the need for frequent costly sampling. During training, the planner plans at different granularity, facilitating training of a teacher policy using dense waypoints. The teacher’s demonstrations facilitate effective exploration during the training of the student policy through updates provided by TADPO.  
+
+Proximal Policy Optimization (PPO) proposed by Schulman et al. (2017) is a popular RL framework that allows for stable on-policy learning. Despite its advantages, PPO faces limitations in effective exploration as it relies on random actions sampled around the policy’s intended action for exploration. Because of this, in the proposed off-road driving problem, training a policy with PPO for waypoint distances greater than tens of meters faces significant exploration challenges, and attempting to master multiple off-road navigation skills particularly in avoiding obstacles and navigating extreme slopes leads to ineffective policy training and failure to complete the task. Therefore, our goal is to distill planning information from a teacher trained with the aid of a dense planner on a reduced observation space, while a student learns off-road traversal using an extended observation space without access to the computationally expensive planning data.  
+
+Since PPO is on-policy, it can only be trained on trajectories collected from its own policy and cannot incorporate external guidance. Attempts to incorporate demonstrations in PPO have been made, though with notable limitations. $\mathrm{PPO+D}$ (Libardi & Fabritiis (2021)) extends PPO by incorporating a single off-policy trajectory into the training process. This approach modifies the PPO replay buffer to include three components: $D_{r}$ for successful trajectories, $D_{v}$ for failure trajectories and $D$ for the currently sampled trajectories. When sampling from $D_{v}$ , the paper employs value-based sampling, which becomes impractical for tasks that involve large replay buffers with visual inputs. In off-road driving, navigating diverse terrains requires a broad range of skills, making large buffers for the teacher demonstration replay and the failure replay buffer in $\mathrm{PPO+D}$ crucial. This necessity renders $\mathrm{PPO+D}$ unsuitable for the task.  
+
+There have been a few attempts to learn policies from demonstrations and through a teacher-student framework in autonomous vehicles. Peng et al. (2022) use off-policy methods like SAC and choose actions between a teacher and student policy to solve simpler tasks like lane following and obstacle avoidance. Some teacher-student paradigms, such as those using Deep Q-network Hester et al. (2017), focus on discrete action spaces. Kang et al. (2018); Martin et al. (2021) use existing offpolicy methods like Soft Actor-Critic (SAC) to update a student policy. In complex planning and control tasks, these methods tend to be less stable during training (James W. Mock (2023)). Therefore, we use PPO as our RL training method.  
+
+To address the limitations of MPPI, we propose a hierarchical end-to-end pipeline that integrates a high-level MPPI planner with a lower-level reinforcement learning controller focused on adaptive execution for effective obstacle avoidance and navigation through challenging terrains. To resolve the exploration issues of PPO, we propose a novel method, Teacher Action Distillation with Policy Optimization (TADPO), which extends PPO to optimize policy based on trajectories collected by an expert teacher policy.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+We formulate the low-level control of the off-road driving problem as a Markov Decision Process (MDP), represented by the tuple $\mathcal{M}=(\mathcal{S},\mathcal{A},P,r,\gamma)$ , where: $\boldsymbol{S}$ is the state space, $\boldsymbol{\mathcal{A}}$ is the action space, $P(s^{\prime}|s,a)$ is the transition dynamics function, $r:S\times A\to\mathbb{R}$ is the reward function, and $\gamma\in[0,1)$ is the discount factor. Our objective is to identify an optimal policy $\pi^{*}$ such that  
+
+$$
+\pi^{*}=\arg\operatorname*{max}_{\pi}\mathbb{E}_{\pi}\left[\sum_{t=0}^{\infty}\gamma^{t}r(s_{t},a_{t})\right]
+$$  
+
+2.1 POLICY GRADIENT OPTIMIZATION METHODS  
+
+A common family of on-policy RL methods uses a policy gradient to optimize policies. A key aspect of policy gradient methods, is that the gradient is computed with respect to the distribution of states induced by the current policy. By utilizing this distribution, policy gradients can be derived from the expected return, facilitating updates to the policy parameters. In general, the policy gradient has the form:  
+
+$$
+\nabla J(\theta)=\mathbb{E}_{\tau\sim\pi_{\theta}}\left[\nabla\log\pi_{\theta}(a_{t}|s_{t})\hat{A}(s_{t},a_{t})\right]
+$$  
+
+where $\tau$ is a trajectory and $\hat{A}$ is the advantage estimate.  
+
+Proximal Policy Optimization PPO, proposed by Schulman et al. (2017), improves traditional policy gradient methods by limiting large policy updates through a clipped surrogate objective to optimize $\theta$ :  
+
+$$
+\begin{array}{r l}&{L^{\mathrm{CLIP}}(\theta)=\mathbb{E}_{t}\left[\operatorname*{min}\left(r_{t}(\theta)\hat{A}_{t},\mathrm{clip}(r_{t}(\theta),1-\epsilon,1+\epsilon)\hat{A}_{t}\right)\right]}\\ &{\quad L^{\mathrm{vF}}(\theta)=\mathbb{E}_{t}\left[\left(V_{\pi_{\theta_{\mathrm{old}}}}(s_{t})-R_{t}\right)^{2}\right]}\\ &{L^{\mathrm{entropy}}(\theta)=\mathbb{E}_{t}\left[-H[\pi_{\theta}(\cdot|s_{t})]\right]}\\ &{\quad L^{\mathrm{PPO}}(\theta)=L^{\mathrm{CLIP}}(\theta)-c_{1}L^{\mathrm{vF}}(\theta)+c_{2}L^{\mathrm{entropy}}(\theta)}\end{array}
+$$  
+
+where $\begin{array}{r c l}{r_{t}(\theta)}&{=}&{\frac{\pi_{\theta}\left(a_{t}\left|s_{t}\right)}{\pi_{\theta_{\mathrm{old}}}\left(a_{t}\left|s_{t}\right)}}\end{array}$ is the probability ratio of the action in distribution $\pi_{\theta}\big(a_{t}|s_{t}\big)$ and $\begin{array}{r}{\ \gamma_{\mathrm{old}}(a_{t}|s_{t}),\ \hat{A}_{t}\ =\ \sum_{i=t}^{t+T}(\gamma\lambda)^{i-t}\delta_{i}}\end{array}$ is the generalized advantage estimate with $\delta_{t}~~=~R_{t}~+$ $\gamma V_{\pi_{\theta_{\mathrm{old}}}}(s_{t+1})-V_{\pi_{\theta_{\mathrm{old}}}}(s_{t})$ , $\begin{array}{r}{R_{t}=\sum_{i=t}^{t+T}\gamma^{i-t}r(s_{i},a_{i})+\gamma^{T-t+1}V(s_{T+1})}\end{array}$ is the discounted return, and $T$ is the number of transitions, $H[\pi_{\theta}(\cdot|s_{t})]$ is the entropy of the policy’s action distribution given state $s_{t}$ , and the value function $V_{\pi_{\theta_{\mathrm{old}}}}(s_{t})$ is the expected return of state $s_{t}$ . $L^{\mathrm{PPO}}$ updates the actor towards the more advantageous actions at state $s_{t}$ , and $L^{\mathrm{VF}}$ updates the value function so it represents the expected return of the policy for the current state, $L^{\mathrm{entropy}}$ encourages exploration by the policy and $c_{1},c_{2}$ are constants. Instead of making unrestricted updates to the policy, PPO introduces a clipping mechanism to ensure that policy updates remain within a constrained region, which stabilizes training and leads to more reliable convergence.  
+
+It is important to note that the advantage estimate $\hat{A}_{t}$ reflects how much advantageous the current action at is compared to the expected value of the state, represented by Vπθold. Thus, the gradient update from equation 6 is meaningful only when $V_{\pi_{\theta_{\mathrm{old}}}}$ sufficiently represents the expected return of the actor of policy $\pi_{\theta_{\mathrm{old}}}$ . This intuition is a crucial insight for equation 10 in our proposed method.  
+
+For tasks that encounter exploration challenges due to complex planning requirements, PPO fails to learn effective policies (Libardi & Fabritiis (2021)). Introducing undirected randomness to the actor can lead to inefficient exploration because the random actions may not be strategically aligned with the task objectives. This lack of direction leads the agent to explore suboptimal areas, hindering policy improvement in complex environments where targeted exploration is essential. Therefore, it is necessary to distill this planning knowledge while training PPO using a teacher expert. As PPO is an on-policy algorithm, it lacks the ability to learn from off-policy trajectories in the form of demonstrations. This limits its application in tasks where exploration is difficult.  
+
+2.2 MODEL-BASED CONTROL  
+
+Model Predictive Control (MPC) is a traditional control framework that uses sampling or optimization techniques to minimize a cost function, making it effective for generating control action in complex, nonlinear systems. The optimal action sequence $a^{*}$ is chosen via  
+
+$$
+a^{*}=\arg\operatorname*{min}_{a}\sum_{i=0}^{h}C(s_{i},a_{i})
+$$  
+
+where $C$ is the cost function, $s_{i}$ is the state, $a_{i}$ is the action at step $i$ and $h$ is the horizon. Some techniques for selecting optimal actions are Cross-Entropy Method (CEM) Kobilarov (2012) and Model Predictive Path Integral (MPPI) Williams et al. (2015). MPPI is a sampling-based method that applies importance-weighted optimization to generate control outputs. CEM is a sampling-based, iterative optimization technique that refines a probability distribution over control parameters for robust control outputs. MPPI has proven popular in recent literature due to its high parallelizability and speed.  
+
+
+
+\section{3 TADPO: TEACHER ACTION DISTILLATION WITH POLICY OPTIMIZATION  }
+
+
+As illustrated in Figure 1, we formulate a new method to train a student policy $\pi$ capable of local execution to be used in conjunction with a sparse global MPPI planner by combining on-policy exploration with off-policy distillation. The same MPPI planner also generates dense waypoints spanning the sparse waypoints to train a teacher policy $\mu$ . Demonstrations generated by the teacher policy then provides guidance to facilitate exploration and learning of the student policy.  
+
+
+
+\section{3.1 TEACHER ACTION DISTILLATION POLICY GRADIENT  }
+
+
+For a pre-trained teacher policy $\mu$ , we define the loss $L$ used for training a student policy $\pi$ . This loss is applied exclusively to trajectories sampled from the teacher, meaning that actions are drawn from $\mu$ at each time step, $a_{t}\sim\mu$ .  
+
+$$
+\begin{array}{r l}&{L^{\mathrm{TAD}}(\theta)=L^{\mu}(\theta)+c_{2}L^{\mathrm{entropy}}(\theta)}\\ &{~~~~\rho_{t}(\theta)=\frac{\pi_{\theta}(a_{t}|s_{t}^{\pi})}{\mu(a_{t}|s_{t}^{\mu})}}\\ &{~~~~~\hat{\Delta}_{t}=R(a_{t},s_{t})-V_{\pi{\theta}_{\mathrm{old}}}(s_{t}^{\pi})}\\ &{~~~~L^{\mu}(\theta)=\mathbb{E}_{a_{t}\sim\mu}\left[\operatorname*{max}\left(0,\operatorname*{min}(\rho_{t}(\theta),1+\epsilon_{\mu})\hat{\Delta}_{t}\right)\right]}\end{array}
+$$  
+
+where $L^{\mathrm{entropy}}$ is defined as in equation 5. Note that the teacher policy $\mu$ and the student policy $\pi$ have distinct observation spaces given the same environment state, denoted by $s_{t}^{\mu},s_{t}^{\pi},s_{t}$ respectively.  
+
+![](images/c53def52754d49362e2fb6d876def3663a926df1007903d2fb688e6346816e27.jpg)  
+Figure 2: This diagram shows the policy update process when sampling from the teacher demonstration replay buffer. This update process only updates the actor and the feature encoder of the policy and uses the critic as the measure of the relative advantage between teacher action to the student performance given the observation.  
+
+The likelihood ratio defined in equation 9 resembles the one used in PPO when $\hat{A}_{t}~>~0$ . We substitute the likelihood of $a_{t}$ under $\pi_{\theta_{\mathrm{old}}}$ with the likelihood under $\mu$ . $\rho$ quantifies the difference between $\pi_{\theta}$ and $\mu$ and clipping $\rho$ restricts gradient updates to the policy when $\rho$ exceeds $1+\epsilon_{\mu}$ , where $\epsilon_{\mu}$ is a hyperparameter.  
+
+![](images/dca6ff007ee5e09ad794d0e7f34b7896babd5ac50cecbad86550a4735c9a362e.jpg)  
+Figure 3: A single timestep of the teacher distillation loss function $L^{\mu}$ as a function of $\rho*\mathrm{sign}(\hat{\Delta})$ . The intended effect of the $L^{\mu}$ formulation is that student policy only learns from the teacher policy when the return by the teacher demonstration is higher than the expected return of the student given the state and not too much more likely (controlled by clipping factor $\epsilon_{\mu}$ ) to predict such action, thereby ensuring stability of policy during training.  
+
+In equation 10, $\hat{\Delta}_{t}$ measures the advantage between the discounted reward from $s_{t}$ collected using the teacher policy and the expected student policy return $V_{\pi_{\theta_{\mathrm{old}}}}(s_{t}^{\pi})$ . As $V_{\pi_{\theta_{\mathrm{old}}}}(s_{t}^{\pi})$ represents expected return of $\pi_{\theta_{\mathrm{old}}}$ at $s_{t}$ , $\hat{\Delta}_{t}$ is positive when the teacher trajectory earns a higher reward than the expected student return and negative vice-versa. Hence, the update to $\pi_{\theta}$ is relative to the student’s value function over the actions generated by $\mu$ . This is an extension of the advantage function for off-policy trajectories.  
+
+As Figure 2 shows, during the TADPO update, only the actor network and the feature encoder are updated using $L^{\mathrm{TAD}}$ as in equation 8. The value function is only updated using trajectories generated by the student exploration process according to the intuition provided in 2.1.  
+
+Figure 3 gives an visualization of the value of distillation function as a function of $\rho$ and $\hat{\Delta}$ . Using $\rho$ and $\hat{\Delta}$ in equation 8 ensures that the policy gradient only propagates when (i) the teacher trajectory rewards are higher than the expected student return and (ii) the student’s likelihood of performing the same action $a_{t}$ is not significantly higher than that of the teacher. Also similar to PPO, $L^{\mathrm{entropy}}$ in equation 8 regulates the exploration of the student policy.  
+
+A key observation is that in pure policy gradient methods, gradient computation means the policy improvement occurs only over a state distribution induced by the existing policy. However, it is both reasonable and feasible to improve the policy over other distributions. In particular, if one happened to already know the optimal distribution, or at least a better distribution, it could be advantageous to focus policy updates on that. Our modified algorithm does exactly that. Even if trajectories sampled according to the existing (poor) student policy would be unlikely to visit some state $s_{t}$ , $\pi(\cdot|s_{t}^{\pi})$ can still be optimized using signals generated from the teacher trajectories.  
+
+3.2 TRAINING PROCEDURE  
+
+Teacher action distillation with policy gradients involves optimizing an actor function while simultaneously bootstrapping a value function with the expected return of that actor. Consequently, training a policy with TADPO requires interlacing trajectories sampled from both the teacher and student policies. Thus in on-policy settings, training the policy in separate phases of imitation learning and reinforcement learning does not yield a sufficiently accurate student value function, hindering effective learning from teacher trajectories.  
+
+We then propose algorithm 1 to enable the simultaneous training of the actor using teacher trajectories and student trajectories. In our implementation, $\hat{\Delta}_{t}$ is normalized to have standard deviation 1 in every mini-batch since the reward definition is unbounded.  
+
+Algorithm 1 TADPO 1: Input: Teacher policy $\mu$ , Student policy $\pi$ , Teacher sample probability $p$ 2: Return: Parameters of student policy $\theta$ 3: Collect $N_{\mu}$ teacher transitions $\bar{\mathcal{B}}_{\mu}\overset{\cdot\,}{\leftarrow}\{\tau_{t_{a_{t}\sim\mu}}=(s_{t}^{\mu},a_{t},R_{t},\mu(a_{t}|s_{t}^{\mu}))\}$ 4: for iter $=1$ to $I$ do 5: Collect Nπ student transitions Bπ ←{τtat∼πθ $\mathcal{B}_{\pi}\gets\{\tau_{t_{a_{t}\sim\pi_{\theta_{\mathrm{old}}}}}=(s_{t}^{\pi},a_{t},R_{t},\pi_{\theta_{\mathrm{old}}}(a_{t}|s_{t}^{\pi}))\}$ 6: for epoch $=1$ to $K$ do 7: while $B_{\pi}\neq\varnothing$ do 8: $r\sim\mathcal{U}(0,1)$ 9: if $r>p$ then   
+10: Sample $n$ transitions $\tau\leftarrow\tau_{t}\sim B_{\pi}$ without replacement   
+11: $\theta\gets\mathsf{P P O U p d a t e}(\tau)$   
+12: else   
+13: Sample $n$ transitions $\tau\leftarrow\tau_{t}\sim\ensuremath{\mathcal{B}_{\mu}}$ without replacement   
+14: $\theta\gets$ TADPOUpdate $(\tau)$   
+15: end if   
+16: end while   
+17: Reinitialize $B_{\mu}$ and $B_{\pi}$   
+18: end for   
+19: end for  
+
+3.3 OFF-ROAD AUTONOMY STACK  
+
+As shown in Figure 1, we use two subsystems to achieve off-road autonomous driving: an MPPIbased high-level planner that generates waypoints towards a predefined goal using coarse, global information; and a RL-based controller that learns to track sparse waypoints using local information.  
+
+The MPPI planner for this problem is designed in accordance with Han et al. (2024), with the same cost function. For the teacher policy, MPPI provides dense waypoints and is referred further as MPPI-d. The teacher is a PPO controller trained to track provided MPPI-d waypoints, analogous to the hybrid controller for quadrupedal robots in Jenelten et al. (2024). During training and deployment of the student policy, MPPI provides sparse waypoints and is referred to as MPPI-s. Because of the high runtime cost of the MPPI-d planner, when generating teacher demonstrations, a fixed, pre-computed set of expert MPPI-d waypoints are used. By training with different waypoint distances, responsibility for planning at intermediate distances is shifted from the MPPI-d planner to the student policy controller. This allows for much faster and less frequent planning at deployment.  
+
+
+
+\section{4 RESULTS AND DISCUSSIONS  }
+
+
+4.1 EXPERIMENT SETUP  
+
+Observation and Action Spaces We combine proprioceptive states with visual input for both the teacher and the student policies. The proprioceptive observation includes the vehicle’s normalized speed, roll, pitch, and encodings of the current and next waypoint are provided, with the teacher using densely planned waypoints and the student using sparsely planned waypoints, as detailed in 4.1 and A.5.  
+
+The visual observations consist of top-down views for planning and a forward camera for obstacle avoidance, with the teacher policy using a local top-down image and the student policy employing a wider-area image with a lower spatial resolution. Both utilize a stack of 3 historical frames for the final observation. The controller directly outputs throttle and steering commands. More information about the observation and action spaces can be found in A.5 and A.6 respectively.  
+
+Reward Function The reward function we designed for off-road navigation includes five key components. The progress reward encourages movement toward the goal by measuring the reduction in distance between the vehicle’s current and previous positions, while collision and damage penalties address vehicle safety, a jerk penalty discourages sudden acceleration changes, and a success reward is granted for reaching waypoints. More details about reward functions can be found in A.9.  
+
+![](images/185ea9aba3b8112584064e621af3f24dd8f7ff7456730c23d7eee5c86c9f97f3.jpg)  
+(a) Training set examples.  
+
+![](images/b7c53bfb4a5b87fa38ffb1bbce7196e57a365cddd3f766bf8683d450b2ed5868.jpg)  
+(b) Test set examples.  
+
+![](images/e4dfe8152a68836790a8a8cc374162a993c40f5ce4bb40fed832bd4473c67724.jpg)  
+(c) Vehicle in the simulator.  
+
+Figure 4: Figure (a) shows example trajectories in the training set where the teacher policy is trained and demonstrations are collected. Blue dots are waypoints as observed by the teacher, and red dots are waypoints as observed by the student. Figure (b) shows examples from the test set, and only student waypoints are shown in white. The largest waypoint at the end of each trajectory is the goal. Both sets cover a diverse set of terrain that include obstacles at different scales, ditches, and cliffs. Figure (c) shows the vehicle running over a variety of terrain in simulation and two examples of camera views as observed by the controller.  
+
+Training, Demonstration, and Testing Datasets We train both the teacher and the student over the same large map of a desert terrain. For any given start and goal position, we use a sparse global map and a global MPPI planner to generate waypoints of $80~\mathrm{m}$ apart. We choose a fixed set of start, goal position pairs to serve as teacher training and demonstration trajectories. Using the MPPI planner supplied with a detailed local semantic segmentation map and associated depth information, we generate dense waypoints $6\;\mathrm{m}$ apart to span the intervals between the sparse $80\mathrm{m}$ waypoints. A similar set is generated to serve as the test trajectories on which we evaluate all learned policies. For methods where expert labeling is required, we generate static, dense waypoints at the beginning of each episode.  
+
+We chose these trajectories to cover a range of offroad obstacles. As illustrated in Figure 4b, they can qualitatively be categorized as terrains with: i) positive obstacles, ii) extreme slopes, or iii) a hybrid of the preceding categories. The positive obstacles observed on the testing terrain mainly consist of natural obstacles (e.g. boulders and trees) and artificial obstacles (e.g. parked trailers, fences, etc.). Extreme slopes include ditches and sandy cliffs.  
+
+For teacher demonstrations, we collected 15 trajectories for (i) and (ii) each, and 20 for (iii). For evaluating models, we collected 8 for (i) and (ii) each, and 15 for (iii).  
+
+Evaluation Metrics We aggregate the evaluation performance of each policy over the test trajectories. For policies that produce an action distribution, we deterministically choose the mode of the distribution as the selected action. For each episode, we define the following metrics, with values normalized to the range [0,1]:  
+
+• Success Rate $\left(\varsigma\varsigma\right)$ : $\smash{\varsigma\,\Sigma=\,1}$ if the vehicle is within a completion radius $r$ of the goal position. $S\boldsymbol{\Sigma}=\boldsymbol{0}$ otherwise. • Completion Percentage $(\mathtt{C P})$ : cp measures the maximum progress the vehicle made towards the goal position, normalized by its initial distance to the goal position. • Mean Speed (ms): ms is the mean speed of the vehicle during the episode.  
+
+More details about the metrics are included in A.7  
+
+Simulator We use BeamNG (BeamNG GmbH) as the simulator for our offroad vehicle. Visual example of the test vehicle driving in simulator is provided in Figure 4c. Further details regarding the simulator can be found in A.10.  
+
+4.2 RL AND IMITATION LEARNING BASELINES   
+
+![](images/00aa8659ae7c22f0d66e9ff655b297578f918308119b3e743a3d39b6d250c487.jpg)  
+
+Table 1: Our method $(^{\dagger})$ compared with baselines, where sr denotes success rate, cp denotes average completion percentage, and ms denotes mean speed. MPPI-d refers to the local planner which outputs dense waypoints. MPPI-s refers to the global planner which outputs sparse waypoints. “Extreme Slopes” and “Obstacles” represent the challenging trajectories within the test set, while “Hybrid” refers to a combination of simpler and difficult trajectories. More information regarding the metrics is in A.7  
+
+Table 1 provides a comparison of our method with various RL and imitation learning baselines. Below, we briefly describe various intuitive and pre-existing RL baseline methods and their integration into our setup. All these policies that utilize teacher guidance are trained with same teacher trajectories using dense waypoint guidance from the MPPI planner. We also provide their quantitative performance in our test environment and discuss the reasons for any observed poor performance. We also provide their training reward curves in A.2.  
+
+4.2.1 IMITATION LEARNING METHODS  
+
+DAgger DAgger Ross et al. (2011) provides a straightforward method for supervising the policy by allowing queries to a teacher during training. Initially, the teacher trajectories are utilized for behavior cloning (BC) on the student. Subsequently, the student policy is enhanced by penalizing the discrepancy between the actions predicted by the student and those of the teacher at each state encountered. In complex environments like off-road driving, DAgger fails because of compounding errors. As the policy accumulates error and deviates from expert trajectories, it encounters unseen or irrecoverable states, thus severely degrading its performance.  
+
+4.2.2 ON-POLICY METHODS  
+
+Vanilla PPO Vanilla PPO is trained as described in 2.1. This method does not utilize demonstrations from a teacher and is trained only on sparse waypoints. As described in 2.1, Vanilla PPO encounters exploration challenges in obstacle-rich terrains, which hinders its ability to learn an optimal strategy. Without guidance, the policy fails to differentiate between various types of terrains and defaults to a sub-optimal, overly-cautious strategy.  
+
+$\mathbf{PPO+BC}$ A naive approach to distill teacher actions into the student is to incorporate a KL divergence loss between the predicted action distributions of the student and teacher. $\mathrm{PPO}{+}\mathrm{BC}$ introduces a loss term that aligns the policy $\pi$ with the teacher policy $\mu$ across all encountered states. The vanilla PPO loss function is modified to $L_{\mathrm{KL}}$ for training.  
+
+$$
+L^{\mathrm{KL}}=L^{\mathrm{PPO}}-\beta\mathrm{KL}[\pi(a_{t}|s_{t}^{\pi}),\mu(a_{t}|s_{t}^{\mu})]
+$$  
+
+While this provides strong supervision, a issue similar to DAgger arises when the student queries the expert from out-of-distribution states and optimizes using sub-optimal action labeling. Additionally, the updates from the KL divergence term are unconstrained, which leads to unstable training and results in convergence to a sub-optimal policy.  
+
+4.2.3 OFF-POLICY METHODS  
+
+Vanilla SAC SAC (Haarnoja et al. (2018)) is an off-policy RL algorithm that optimizes a stochastic policy and value function, enabling efficient and stable learning for continuous control tasks. SAC struggles in our high-exploration, multi-task setup because its entropy maximization can lead to excessive exploration of irrelevant actions, reducing its focus on task-specific objectives. This makes it less effective in environments requiring targeted exploration and adaptation to multiple tasks with distinct strategies.  
+
+SAC+Teacher As an off-policy algorithm, SAC can utilize trajectories from teacher demonstrations without requiring any modifications to the algorithm. A portion of the replay buffer is prepopulated during the training. In this case, the buffer size remains consistent with TADPO, with the teacher trajectory ratio set at $p=0.5$ . As also shown in Yu et al. (2019), SAC does not perform well when it has to handle various different kinds of tasks (in this case, a very diverse set of terrains).  
+
+IQL Implicit Q-learning (Kostrikov et al. (2021)) which extends Q-learning and actor critic methods is an off-policy reinforcement learning method that estimates Q-values without directly optimizing a policy, allowing the agent to implicitly select actions that maximize the value function. It is used in our teacher-student setup by following the actions suggested by the teacher’s demonstrations, reinforcing behavior through the learning of Q-values associated with those actions. IQL demonstrates some success in navigating extreme slope terrains, but its overall performance does not match that of TADPO. As noted in Janner et al. (2022), IQL excels in single-task scenarios but faces challenges in multi-task environments, such as off-road autonomy. Given that off-road autonomy involves dynamically handling obstacle avoidance and rapid changes in how the vehicle and terrain interacts, IQL struggles to perform effectively in this setup.  
+
+4.3 MODEL-BASED BASELINES  
+
+The first section of Table 2 provides performance of the planner baselines for comparison. These planners are run while simulation is paused, allowing them to provide the next action before continuing. They show that with enough samples and planning horizon, these planners perform similarly well. The trained dense waypoint tracking policy, while following MPPI-d waypoints, perform similarly to a PID controller, but is more aggressive as indicated by its higher mean speed.  
+
+A key difference between these planners is their time of inference. We observe that inference time is more sensitive to $h$ than $N$ , which reduces long-horizon understanding and, in turn, degrades real-time performance. Compared to MPPI, CEM takes a more iterative approach to sampling and evaluating action sequences, thus requires more compute time to plan. RL+MPPI enhances MPPI  
+
+by learning a terminal value function and a state-dependent action distribution, thereby reducing its required number of trajectories sampled and sampling horizon.   
+
+![](images/c9498193c084747d8c3a9451b13538acbcb496ecd21b6aada164e0eead43d8f2.jpg)  
+
+Table 2: Our method (†) compared with baselines, where sr denotes Success Rate, cp denotes Completion Percentage, ms denotes mean speed, and ti is the Time of Inference for one control step. ∗denotes allotting a limited compute budget for main control loop necessary for real-time deployment. -d denotes planning at dense waypoint distances while -s denotes planning at sparse waypoint distances.  
+
+When running in real-time (as shown in the second section of Table 2), all three methods degrade drastically in performance because of a significantly reduced horizon $h$ and number of sampled trajectories $N$ . This forces the planner to generate globally suboptimal waypoints, leading to worse performace. Because of the sparsity of the waypoints, MPPI-s can be run in parallel as the TADPO controller tracks the sparse waypoints. This enables MPPIs to select waypoints more efficiently and effectively, leading to significantly better real-time driving performance of MPPI- $s+$ TADPO compared to other methods.  
+
+Hyperparamters are provided in A.3, and more details about MPPI implementation is provided in A.4.  
+
+
+
+\section{4.4 TADPO  }
+
+
+TADPO outperforms state-of-the-art RL baseline methods, demonstrating its ability to learn to navigate a diverse set of off-road terrains. The policy’s success rate $(\mathtt{s r})$ significantly surpasses that of other baseline methods. Additionally, TADPO attains a high mean speed (ms) across all test trajectory sets compared to all other controller baselines. For model-based baselines, MPPI- $^{\cdot\mathbf{S+}}$ TADPO significantly outperforms all other planner baselines in real-time driving. The inference time of TADPO is notably lower than that of model-based methods, highlighting its effectiveness in environments with diverse terrains, where quick adaptive maneuvers are essential.  
+
+Through ablations we find that $\epsilon_{\mu}~=~0.5$ and a constant $p\:=\:0.5$ provides best performance of the algorithm which has been used for comparing with baselines. We include ablation studies with hyperparameters configurations in A.1.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We propose (i) a hierarchical off-road autonomy pipeline and (ii) a new hybrid policy optimization method TADPO. The pipeline combines the strengths of MPPI and RL to provide a robust solution for off-road autonomous driving in complex terrains. TADPO leverages a teacher-student paradigm with a novel policy gradient formulation to resolve the challenges of exploration and planning. Our experimental results demonstrate significant improvements in navigating challenging environments compared to existing RL and imitation learning methods, validating the potential of our approach. We plan to deploy this algorithm onto real vehicles in our future work.  
+
+
+

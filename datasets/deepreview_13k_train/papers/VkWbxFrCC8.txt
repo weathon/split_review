@@ -1,0 +1,409 @@
+\title{RECOMBINER: Robust and Enhanced Compression with Bayesian Implicit Neural Representations}
+
+\begin{abstract}
+COMpression with Bayesian Implicit NEural Representations (\combiner{}) is a recent data compression method that addresses a key inefficiency of previous Implicit Neural Representation (\inr{})-based approaches: it avoids quantization and enables direct optimization of the rate-distortion performance.
+However, \combiner{} still has significant limitations: 1) it uses factorized priors and posterior approximations that lack flexibility; 2) it cannot effectively adapt to local deviations from global patterns in the data; and 3) its performance can be susceptible to modeling choices and the variational parameters' initializations.
+Our proposed method, Robust and Enhanced \combiner{} (\recombiner{}), addresses these issues by 1) enriching the variational approximation while retaining a low computational cost via a linear reparameterization of the \inr{} weights, 2) augmenting our \inr{}s with learnable positional encodings that enable them to adapt to local details and 3) splitting high-resolution data into patches to increase robustness and utilizing expressive hierarchical priors to capture dependency across patches. 
+We conduct extensive experiments across several data modalities, showcasing that \recombiner{} achieves competitive results with the best \inr{}-based methods and even outperforms autoencoder-based codecs on low-resolution images at low bitrates.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\noindent
+Advances in deep learning recently enabled a new data compression technique impossible with classical approaches: 
+we train a neural network to memorize the data \citep{stanley2007compositional} and then encode the network's weights instead.
+These networks are called the \textit{implicit neural representation} (\inr{}) of the data, 
+and differ from neural networks used elsewhere in three significant ways.
+First, they treat data as a signal that maps from coordinates to values, such as mapping $(X, Y)$ pixel coordinates to $(R, G, B)$ color triplets in the case of an image.
+Second, their architecture consists of many fewer layers and units than usual and tends to utilize \textsc{siren} activations \citep{sitzmann2020implicit}.
+Third, we aim to \textit{overfit} them to the data as much as possible.
+\par
+Unfortunately, most \inr{}-based data compression methods cannot directly and jointly optimize \textit{rate-distortion}, which results in a wasteful allocation of bits leading to suboptimal coding performance.
+COMpression with Bayesian Implicit NEural Representations \citep[\combiner{};][]{guo2023compression} addresses this issue by picking a variational Gaussian mean-field Bayesian neural network \citep{blundell2015weight} as the \inr{} of the data.
+This choice enables joint rate-distortion optimization via maximizing the \inr{}'s $\beta$-evidence lower bound ($\beta$-ELBO), where $\beta$ controls the rate-distortion trade-off.
+Finally, the authors encode a weight sample from the \inr{}'s variational weight posterior to represent the data using relative entropy coding \citep[REC;][]{havasi2018minimal, flamich2020compressing}.
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1\textwidth]{figures/recombiner_architecture.pdf}
+    \caption{% \textbf{Note:} add fourier embedding explicitly. 
+    Schematic of (a) \combiner{} and (b) \recombiner{}, our proposed method. 
+    See \Cref{sec:background,sec:methods} for notation.
+    As the \inr{}'s input, \recombiner{} uses $\rvh_\rvz$ upsampled to pixel-wise positional encodings concatenated with Fourier embeddings.
+    (c) A closer look at how \recombiner{} maps $\rvh_\rvz$ to the \inr{} input, taking images as an example.
+    \textbf{FE:} Fourier embeddings; \textbf{FC: } fully connected layer.   
+    }
+\end{figure}
+\par
+Although \combiner{} performs strongly among \inr{}-based approaches, it falls short of the state-of-the-art codecs on well-established data modalities both in terms of performance and robustness. 
+In this paper, we identify several issues that lead to this discrepancy: 
+1) \combiner{} employs a fully-factorized Gaussian variational posterior over the \inr{} weights, which tends to underfit the data \citep{dusenberry2020efficient}, going directly against our goal of overfitting; 
+2) Overfitting small \inr{}s used by \combiner{} is challenging, especially at low bitrates: 
+a small change to any weight can significantly affect the reconstruction at every coordinate, hence optimization by stochastic gradient descent becomes unstable and yields suboptimal results.
+3) Overfitting becomes more problematic on high-resolution signals. 
+As highlighted by \citet{guo2023compression}, the method is sensitive to model choices and the variational parameters' initialization and requires considerable effort to tune.
+\par
+We tackle these problems by proposing several non-trivial extensions to \combiner{}, which significantly improve the rate-distortion performance and robustness to modeling choices.
+Hence, we dub our method
+\textit{robust and enhanced \combiner{}} (\recombiner{}). 
+Concretely, our contributions are:
+\begin{itemize}
+\item We propose a simple yet effective learned reparameterization for neural network weights specifically tailored for \inr{}-based compression, yielding more expressive variational posteriors while matching the computational cost of standard mean-field variational inference.
+\item 
+We augment our \inr{} with learnable positional encodings whose parameters only have a local influence on the reconstructed signal, thus allowing deviations from the global patterns captured by the network weights, facilitating overfitting the \inr{} with gradient descent.
+\item 
+We split high-resolution data into patches to improve robustness to modeling choices and the variational parameters' initialization.
+Moreover, we propose an expressive hierarchical Bayesian model to capture the dependencies across patches to enhance performance.
+\item We conduct extensive experiments to verify the effectiveness of our proposed extensions across several data modalities, including image, audio, video and protein structure data.
+In particular, we show that \recombiner{} achieves better rate-distortion performance than VAE-based approaches on low-resolution images at low bitrates. 
+\end{itemize}
+
+
+\section{Background}
+
+\label{sec:background}
+\noindent
+This section reviews the essential parts of \citet{guo2023compression}'s compression with Bayesian implicit neural representations (\combiner{}), as it provides the basis for our method.
+\par
+\textbf{Variational Bayesian Implicit Neural Representations:}
+We assume the data we wish to compress can be represented as a continuous function $f: \Reals^\mathtt{I} \to \Reals^\mathtt{O}$ from $\mathtt{I}$-dimensional coordinates to $\mathtt{O}$-dimensional signal values.
+Then, our goal is to approximate $f$ with a small neural network $g(\cdot \mid \rvw)$ with weights $\rvw$.
+Given $L$ hidden layers in the network, we write $\rvw = [\rvw^{[1]}, \hdots, \rvw^{[L]}]$, which represents the concatenation of the $L$ weight matrices $\rvw^{[1]}, \hdots \rvw^{[L]}$, each flattened into a row-vector.
+\citet{guo2023compression} propose using variational Bayesian neural networks \citep[BNN;][]{blundell2015weight} that place a prior $p_\rvw$ and a variational posterior $q_\rvw$ on the weights.
+Furthermore, they use Fourier embeddings $\gamma(\rvx)$ for the input data \citep{tancik2020fourier} and sine activations at the hidden layers \citep{sitzmann2020implicit}.
+To infer the implicit neural representation (\inr{}) for some data $\Data$, we treat $\Data$ as a dataset of coordinate-value pairs $\{(\rvx_i, \rvy_i)\}_{i=1}^D$, e.g.\ for an image, $\rvx_i$ can be an $(X, Y)$ pixel coordinate and $\rvy_i$ the corresponding $(R, G, B)$ triplet.
+Next, we pick a \textit{distortion} metric $\Delta$ (e.g., mean squared error) and a trade-off parameter $\beta$ to define the $\beta$-rate-distortion objective:
+\begin{align}
+\label{eq:inr_beta_elbo}
+\Loss(\Data, q_\rvw, p_\rvw, \beta) = \beta \cdot \KLD{q_\rvw}{p_\rvw} + \frac{1}{D}\sum_{i = 1}^D \Exp_{ q_\rvw}\left[\Delta(\rvy_i, g(\rvx_i \mid \rvw)\right],
+\end{align} 
+where $\KLD{q_\rvw}{p_\rvw}$ denotes the Kullback-Leibler divergence of $q_\rvw$ from $p_\rvw$, and as we explain below, it represents the compression rate of a single weight sample $\rvw \sim q_\rvw$. 
+Note that \Cref{eq:inr_beta_elbo} corresponds to a negative $\beta$-evidence lower bound under mild assumptions on $\Delta$.
+\par
+We infer the optimal posterior by computing ${q^*_\rvw = \argmin_{q_\rvw \in \VariationalFamily}\Loss(\Data, q_\rvw, p_\rvw, \beta)}$ over an appropriate variational family $\VariationalFamily$.
+\citet{guo2023compression} set $\VariationalFamily$ to be the family of factorized Gaussian distributions.
+\par
+\textbf{Training \combiner{}:}
+Once we selected a network architecture $g$ for our \inr{}s, a crucial element of \combiner{} is to select a good prior on the weights $p_\rvw$.
+Given a training set $\{\Data_1, \hdots, \Data_M\}$ and an initial guess for $p_\rvw$, \citet{guo2023compression} propose the following iterative scheme to select the optimal prior: 
+1) Fix $p_\rvw$ and infer the variational \inr{} posteriors $q^*_{\rvw, m}$ for each datum $\Data_m$ by minimizng \Cref{eq:inr_beta_elbo};
+2) Fix the $q^*_{\rvw, m}$s and update the prior parameters $p_\rvw$ based on the parameters of the posteriors.
+When the $q_\rvw$ are Gaussian, \citet{guo2023compression} derive analytic formulae for updating the prior parameters. 
+To avoid overloading the notion of training, we refer to learning $p_\rvw$ and the other model parameters as \emph{training}, and to learning $q_\rvw$ as \emph{inferring} the \inr{}. 
+\par
+\textbf{Compressing data with \combiner{}:} 
+Once we picked the \inr{} architecture $g$ and found the optimal prior $p_\rvw$, we can use \combiner{} to compress new data $\Data$ in two steps: 1) We first infer the variational \inr{} posterior $q_\rvw$ for $\Data$ by optimizing \Cref{eq:inr_beta_elbo}, after which 2) we encode an approximate sample from $q_\rvw$ using relative entropy coding (REC), whose expected coding cost is approximately $\KLD{q_\rvw}{p_\rvw}$ \citep{havasi2018minimal, flamich2020compressing}.
+Following \citet{guo2023compression}, we used depth-limited global-bound \astar{} coding \citep{flamich2022fast}, to which we will refer as just \astar{} coding.
+Unfortunately, applying \astar{} coding to encode a sample from $q_\rvw$ is infeasible in practice, as the time complexity of the algorithm grows as $\Omega(\exp(\KLD{q_\rvw}{p_\rvw}))$.
+Hence, \citet{guo2023compression} suggest breaking up the problem into smaller ones.
+First, they draw a uniformly random permutation $\alpha$ on $\dim(\rvw)$ elements, and use it to permute the dimensions of $\rvw$ as $\alpha(\rvw) = [\rvw_{\alpha(1)}, \hdots, \rvw_{\alpha(\dim(\rvw))}]$.
+Then, they partition $\alpha(\rvw)$ into smaller \textit{blocks}, and compress the blocks sequentially.
+Permuting the weight vector ensures that the KL divergences are spread approximately evenly across the blocks.
+As an additional technical note, between compressing each block, we run a few steps of finetuning the posterior of the weights that are yet to be compressed, see \citet{guo2023compression} for more details.  
+
+
+\section{Methods}
+
+\label{sec:methods}
+\noindent
+In this section, we propose several extensions to \citet{guo2023compression}'s framework that significantly improve its robustness and performance: 
+1) we introduce a linear reparemeterization for the \inr{}'s weights which yields a richer variational posterior family; 
+2) we augment the \inr{}'s input with learned positional encodings to capture local features in the data and to assist overfitting;
+3) we scale our method to high-resolution image compression by dividing the images into patches and introducing an expressive hierarchical Bayesian model over the patch-\inr{}s, and 
+4) we introduce minor modifications to the training procedure and adaptively select $\beta$ to achieve the desired coding budget.
+Contributions 1) and 2) are depicted in \Cref{fig:signal_rep}, while 3) is shown in \Cref{fig:illustration_hyper_prior}.
+\subsection{Linear Reparameterization for the Network Parameters}
+\label{sec:linear_reparam}
+\noindent
+A significant limitation of the factorized Gaussian variational posterior used by \combiner{} is that it posits dimension-wise independent weights.
+This assumption is known to be unrealistic \citep{izmailov2021bayesian} and to underfit the data \citep{dusenberry2020efficient}, which goes directly against our goal of overfitting the data.
+On the other hand, using a full-covariance Gaussian posterior approximation would increase the \inr{}'s training and coding time significantly, even for small network architectures.
+\par
+Hence, we propose a solution that lies in-between: 
+at a high level, we learn a linearly-transformed factorized Gaussian approximation that closely matches the full-covariance Gaussian posterior on average over the training data.
+Formally, for each layer $l = 1,\hdots, L$, we model the weights as ${\rvw^{[l]} = \rvh_\rvw^{[l]} \mA^{[l]}}$, where the $\mA^{[l]}$ are square matrices, and we place a factorized Gaussian prior and variational posterior on $\rvh_\rvw^{[l]}$ instead.
+We learn each $\mA^{[l]}$ during the training stage, after which we fix them and only infer factorized posteriors $q_{\rvh_\rvw^{[l]}}$ when compressing new data.
+To simplify notation, we collect the $\mA^{[l]}$ in a block-diagonal matrix $\mA = \diag(\mA^{[1]}, \hdots, \mA^{[L]})$ and the $\rvh^{[l]}_\rvw$ in a single row-vector $\rvh_\rvw = [\rvh^{[1]}_\rvw, \hdots, \rvh^{[L]}_\rvw]$, so that now the weights are given by $\rvw = \rvh_\rvw \mA$. 
+We found this layer-wise weight reparameterization as efficient as using a joint one for the entire weight vector $\rvw$.
+Hence, we use the layer-wise approach, as it is more parameter and compute-efficient.
+\par
+This simple yet expressive variational approximation has a couple of advantages. 
+First, it provides an expressive full-covariance prior and posterior while requiring much less training and coding time.
+Specifically, the KL divergence required by \Cref{eq:inr_beta_elbo} is still between factorized Gaussians and we do not need to optimize the full covariance matrices of the posteriors during coding.
+Second, this parameterization has scale redundancy: for any $c \in \Reals$ we have
+$\rvh_\rvw \mA = (\nicefrac{1}{c}\cdot\rvh_\rvw)(c\cdot\mA)$.
+Hence, if we initialize $\rvh_\rvw$ suboptimally during training, $\mA$ can still learn to compensate for it, making our method more robust.
+Finally, note that this reparameterization is specifically tailored for \inr{}-based compression and would usually not be feasible in other BNN use-cases, since we learn $\mA$ while inferring multiple variational posteriors simultaneously.
+\subsection{Learned Positional Encodings}
+\noindent
+A challenge for overfitting \inr{}s, especially at low bitrates is their \emph{global} representation of the data, in the sense that each of their weights influences the reconstruction at every coordinate. 
+To mitigate this issue, we extend our \inr{}s to take a learned positional input $\rvz_i$ at each coordinate $\rvx_i$: $g(\rvx_i, \rvz_i \mid \rvw)$.
+\par
+However, it is usually wasteful to introduce a vector for each coordinate in practice.
+Instead, we use a lower-dimensional row-vector representation $\rvh_\rvz$, that we reshape and upsample with a learnable function $\phi$.
+In the case of a $W \times H$ image with $F$-dimensional positional encodings,  we could pick $\rvh_\rvz$ such that $\dim(\rvh_\rvz) \ll F \cdot W \cdot H$, then reshape and upsample it to be $F \times W \times H$ by picking $\phi$ to be some small convolutional network.
+Then, we set $\rvz_i = \phi(\rvh_\rvz)_{\rvx_i}$ to be the positional encoding at location $\rvx_i$.
+We placed a factorized Gaussian prior and variational posterior on $\rvh_\rvz$.
+Hereafter, we refer to $\rvh_\rvz$ as the \emph{latent} positional encodings, $\phi(\rvh_\rvz)$ and $\rvz_i$ as the \emph{upsampled} positional encodings.
+\subsection{Scaling To High-Resolution Data with Patches}
+\label{sec:scaling_with_patches}
+With considerable effort, \citet{guo2023compression} successfully scaled \combiner{} to high-resolution images by significantly increasing the number of \inr{} parameters.
+However, they note that the training procedure was very sensitive to hyperparameters, including the initialization of variational parameters and model size selection. 
+Unfortunately, improving the robustness of large \inr{}s using the weight reparameterization we describe in \Cref{sec:linear_reparam} is also impractical, because the size of the transformation matrix $\mA$ grows quadratically in the number of weights. 
+Therefore, we split high-resolution data into patches and infer a separate small \inr{} for each patch, in line with other \inr{}-based works as well \citep{dupont2022coin++, schwarz2022meta,schwarz2023modality}.
+However, the patches' \inr{}s are independent by default, hence we re-introduce information sharing between the patch-\inr{}s' weights via a hierarchical model for $\rvh_\rvw$.
+Finally, we take advantage of the patch structure to parallelize data compression and reduce the encoding time in \recombiner{}, as discussed at the end of this section.
+\par
+\textbf{\recombiner{}'s hierarchical Bayesian model:} 
+We posit a global representation for the weights $\rvhbar_\rvw$, from which each patch-\inr{} can deviate.
+Thus, assuming that the data $\Data$ is split into $P$ patches, for each patch $\pi \in 1,\hdots, P$, we need to define the conditional distributions of patch representations $\rvh_\rvw^{(\pi)} \mid \rvhbar_\rvw$.
+However, since we wish to model deviations from the global representation, it is natural to
+decompose the patch representation as $\rvh_\rvw^{(\pi)} = \Delta\rvh^{(\pi)}_\rvw + \rvhbar_\rvw$, and specify the conditional distribution of the differences $\Delta\rvh_\rvw^{(\pi)} \mid \rvhbar_\rvw$ instead, without any loss of generality.
+In this paper, we place a factorized Gaussian prior and variational posterior on the joint distribution of the global representation and the deviations, given by the following product of $P + 1$ Gaussian measures:
+\begin{align}
+p_{\,\rvhbar_\rvw, \Delta\rvh_\rvw^{(1:P)}} 
+&= \Normal(\rvmubar_{\rvw}, \diag(\rvsigmabar_{\rvw})) \times \prod_{\pi = 1}^P \Normal(\rvmu_{\Delta}^{(\pi)}, \diag(\rvsigma_{\Delta}^{(\pi)})) \label{eq:patch_prior}
+\begin{align}
+q_{\,\rvhbar_\rvw, \Delta\rvh_\rvw^{(1:P)}} 
+&= \Normal(\rvnubar_{\rvw}, \diag(\rvrhobar_{\rvw})) \times \prod_{\pi = 1}^P \Normal(\rvnu_{\Delta}^{(\pi)}, \diag(\rvrho_{\Delta}^{(\pi)})), \label{eq:patch_posterior}
+\end{align}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth, trim={0, 1.4cm, 0, 2.cm}]{figures/hyperprior.pdf}
+\label{fig:illustration_hyper_prior}
+\end{figure}
+where $1:P$ is the slice notation, i.e.\ $\Delta\rvh_\rvw^{(1:P)} = \Delta\rvh_\rvw^{(1)}, \hdots, \Delta\rvh_\rvw^{(P)}$.
+Importantly, while the posterior approximation in \Cref{eq:patch_posterior} assumes that the global representation and the differences are independent, $\rvhbar_\rvw$ and $\rvh_\rvw^{(\pi)}$ remain correlated.
+Note that optimizing \Cref{eq:inr_beta_elbo} requires us to compute $\KLD{q_{\rvh_\rvw^{(1:P)}}}{p_{\rvh_\rvw^{(1:P)}}}$.
+Unfortunately, due to the complex dependence between the $\rvh_\rvw^{(\pi)}$s, this calculation is infeasible.
+Instead, we can minimize an \textit{upper bound} to it by observing that
+\begin{align}
+\KLD{q_{\rvh_\rvw^{(1:P)}}}{p_{\rvh_\rvw^{(1:P)}}} &\leq \KLD{q_{\rvh_\rvw^{(1:P)}}}{p_{\rvh_\rvw^{(1:P)}}} + 
+  \KLD{q_{\,\rvhbar_\rvw \mid \rvh_\rvw^{(1:P)}}}{p_{\,\rvhbar_\rvw \mid \rvh_\rvw^{(1:P)}}} \nonumber\\  
+  &=\KLD{q_{\,\rvhbar_\rvw, \rvh_\rvw^{(1:P)}}}{p_{\,\rvhbar_\rvw, \rvh_\rvw^{(1:P)}}} \nonumber\\
+  &= \KLD{q_{\,\rvhbar_\rvw, \Delta\rvh_\rvw^{(1:P)}}}{p_{\,\rvhbar_\rvw, \Delta\rvh_\rvw^{(1:P)}}}.\label{eq:augmented_hier_kl}
+\end{align}
+Hence, when training the patch-\inr{}s, we replace the KL term in \Cref{eq:inr_beta_elbo} with the divergence in \Cref{eq:augmented_hier_kl}, which is between factorized Gaussian distributions and cheap to compute. 
+Finally, we remark that we can view $\rvhbar_\rvw$ as side information also prevalent in other neural compression codecs \citep{ballé2018variational}, or auxiliary latent variables enabling factorization \citep{koller2009probabilistic}.
+\par
+While \Cref{eq:patch_prior,eq:patch_posterior} describe a two-level hierarchical model, we can easily extend the hierarchical structure by breaking up patches further into sub-patches and adding extra levels to the probabilistic model.
+For our experiments on high-resolution audio, images, and video, we found that a three-level hierarchical model worked best, with global weight representation ${\scriptstyle\rvhbbar_\rvw}$, second/group-level representations ${\scriptstyle\rvhbar_\rvw^{(1:G)}}$ and third/patch-level representations ${\scriptstyle\rvh_\rvw^{(1:P)}}$, illustrated in \Cref{fig:illustration_hyper_prior}a.
+Empirically, a hierarchical model for $\rvh_\rvz$ did not yield significant gains, thus we only use it for $\rvh_\rvw$.
+
+
+
+\par
+\textbf{Compressing high-resolution data with \recombiner{}:}
+An advantage of patching is that we can compress and fine-tune \inr{}s and latent positional encodings of all patches in parallel.
+Unfortunately, compressing  $P$ patches in parallel using \combiner{}'s procedure is suboptimal, since the information content between patches might vary significantly.
+However, by carefully permuting the weights \emph{across} the patches' representations we can 1) adaptively allocate bits to each patch to compensate for the differences in their information content and 2) enforce the same coding budget across each parallel thread to ensure consistent coding times.
+Concretely, we stack representations of each patch in a matrix at each level of the hierarchical model.
+For example, in our three-level model we set
+\begin{align}
+\label{eq:stacked_unpermuted_representations}
+\mH^{(0)}_{\pi, :} = [\rvh_\rvw^{(\pi)}, \rvh_\rvz^{(\pi)}],
+\quad \mH^{(1)}_{g, :} = \rvhbar_\rvw^{(g)},
+\quad \mH^{(2)} = \rvhbbar_\rvw, 
+\end{align}
+where we use slice notation to denote the $i$th row as $\mH_{i, :}$ and the $j$th column as $\mH_{:, j}$.
+Furthermore, let $S_n$ denote the set of permutations on $n$ elements.
+Now, at each level $\ell$, assume $\mH^{(\ell)}$ has $\mathcal{C}_\ell$ columns and $\mathcal{R}_\ell$ rows. We sample a single within-row permutation $\kappa$ uniformly from $S_{\mathcal{C}_\ell}$ and for each column of $\mH^{(\ell)}$ we sample an across-rows permutation $\alpha_j$ uniformly from $S_{\mathcal{R}_\ell}$ elements.
+Then, we permute $\mH^{(\ell)}$ as $\widetilde{\mH}^{(\ell)}_{i, j} = \mH^{(\ell)}_{\alpha_j(i), \kappa(j)}$.
+Finally, we split the $\mH^{(\ell)}$s into blocks row-wise, and  encode and fine-tune each row in parallel.
+We illustrate the above procedure in \Cref{fig:illustration_hyper_prior}b.
+\subsection{Extended Training Procedure}
+\noindent
+In this section, we describe the ways in which \recombiner{}'s training procedure deviates from \combiner{}'s.
+To begin, we collect the \recombiner{}'s representations into one vector. For non-patching cases we set ${\rvh = [\rvh_\rvw, \rvh_\rvz]}$, and for the patch case using the three-level hierarchical model we set ${\rvh = \mathrm{vec}([\mH^{(0)}, \mH^{(1)}, \mH^{(2)}])}$.
+For simplicity, we denote the factorized Gaussian prior and variational posterior over $\rvh$ as ${p_\rvh = \Normal(\rvmu, \diag(\rvsigma))}$ and
+$q_\rvh = \Normal(\rvnu, \diag(\rvrho))$, where $\rvmu$ and $\rvnu$ are the means and $\rvsigma$ and $\rvrho$ are the diagonals of covariances of the prior and the posterior, respectively.
+\par
+\textbf{Training \recombiner{}:}
+Our objective for the training stage is to obtain the model parameters $\mA, \phi, \rvmu, \rvsigma$ given a training dataset $\{\Data_1, \hdots, \Data_M\}$ and a coding budget $C$.
+\footnote{As a slight abuse of notation, we use $\phi$ to denote both the upsampling function and its parameters.}
+In their work, \citet{guo2023compression} control the coding budget \emph{implicitly} by manually setting different values for $\beta$ in \Cref{eq:inr_beta_elbo}.
+In this paper, we adopt an \emph{explicit} approach and tune $\beta$ dynamically based on our desired coding budget of $C$ bits.
+More precisely, after every iteration, we calculate the average KL divergence of the training examples, i.e.,  $\bar{\delta} = \frac{1}{M}\sum_{m=1}^M D_{\rm{KL}}[q_{\rvh, m}|| p_\rvh]$. If  $\bar{\delta} > C$, we update $\beta$ by $\beta \leftarrow \beta \times (1 + \tau_C)$; if $\bar{\delta} < C - \epsilon_C$, we update $\beta$ by $\beta \leftarrow \beta / (1 + \tau_C)$. 
+Here $\epsilon_C$ is a threshold parameter 
+to stabilize the training process and prevent overly frequent updates to $\beta$, and $\tau_C$ is the adjustment step size.  
+Unless otherwise stated, we set $\tau_C=0.5$ in our experiments. 
+Empirically, we find the value of $\beta$ stabilizes after $30$ to $50$ iterations.
+We present the pseudocode of this prior learning algorithm in \Cref{alg:learnprior}.
+Then, our training step is a three-step coordinate descent process analogous to \citet{guo2023compression}'s: 
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Optimize variational parameters, linear transformation and upsampling network:} Fix the prior $p_\rvh$, and optimize \Cref{eq:inr_beta_elbo} or its modified version from \Cref{sec:scaling_with_patches} via gradient descent.
+Note, that $\Loss$ is a function of the linear transform $\mA$ and upsampling network parameters $\phi$ too:
+\begin{align}
+\label{eq:training_step1}
+\left\{ \rvnu_m, {\rvrho_m}\right\}_{m=1}^M, \mA, \phi \,\,\,\,\gets\,\, \argmin_{ \left\{ \rvnu_m, {\rvrho_m}\right\}_{m=1}^M, \mA, \phi}\left\{\frac{1}{M}{\sum_{m=1}^M }\Loss(\Data_m, q_{\rvh, m}, p_{\rvh}, \mA, \phi, \beta)\right\}.
+\end{align}
+\item \textbf{Update prior:} Update the prior parameters by the closed-form solution: 
+\begin{align}\label{eq:training_step2}
+\rvmu \gets \frac{1}{M}\sum_{m=1}^M \rvnu_{m}, \quad \rvsigma \gets \frac{1}{M}\sum_{m=1}^M \left[\left(\rvnu_{m} - \rvmu\right)^2 + {\rvrho_{m}}\right].
+\end{align}
+\item \textbf{Update $\beta$:} Set $\beta\leftarrow \beta \times (1+\tau_C)$ or $\beta\leftarrow \beta / (1+\tau_C)$ based on the procedure described above.
+\end{enumerate}
+
+
+
+\section{Related Works}
+
+\noindent
+\textbf{Nonlinear transform coding:}
+Currently, the dominant paradigm in neural compression is nonlinear transform coding \citep[NTC;][]{balle2020nonlinear} usually implemented using variational autoencoders (VAE).
+NTC has achieved impressive performance in terms of both objective metrics \citep{cheng2020learned,he2022elic} and perceptual quality \citep{mentzer2020high}, 
+mainly due to their expressive learned non-linear transforms \citep{balle2020nonlinear,zhu2021transformer,liu2023learned} and elaborate entropy models \citep{ballé2018variational, minnen2018joint, guo2021causal}.
+\par
+Compressing \inr{}s can also be viewed as a form of NTC: we use gradent descent to transform data into an \inr{}.
+The idea to quantize \inr{} weights and entropy code them was first proposed by
+\citet{dupont2021coin}, whose method has since been extended significantly \citep{dupont2022coin++,schwarz2022meta,schwarz2023modality}.
+The current state-of-the-art \inr{}-based method, VC-INR \citep{schwarz2023modality}, achieves impressive results across several data modalities, albeit at the cost of significantly higher complexity and still falling short of autoencoder-based NTC methods on images.
+Our method, following \combiner{} \citep{guo2023compression}, differs from all of the above methods, as it uses REC to encode our variational \inr{}s, instead of quantization and entropy coding.
+\par
+\textbf{Linear weight reparameterization:}
+Similar to our proposal in \Cref{sec:linear_reparam}, \citet{oktay2019scalable} learn an affine reparameterization of the weights of large neural networks.
+They demonstrate that scalar quantization in the transformed space leads to significant gains in compression performance.
+However, since they are performing one-shot model compression, their linear transformations have very few parameters as they need to transmit them alongside the quantized weights, limiting their expressivity.
+On the other hand, \recombiner{} learns the linear transform during training after which it is fixed and shared between communicating parties, thus it does not cause any communication overhead.
+Therefore, our linear transformation can be significantly more expressive.
+\par
+\textbf{Positional encodings:}
+Some recent works have demonstrated that learning positional features is beneficial for fitting \inr{s} \citep{jiang2020local, kim2022scalable, M_ller_2022, ladune2023coolchic}. 
+Sharing a similar motivation, our method essentially incorporates implicit representations with explicit ones, forming a hybrid \inr{} framework~\citep{chen2023hnerv}.
+
+
+
+\section{Experimental Results}
+
+\label{sec:experiments}
+\begin{figure}[t]
+\centering
+\begin{subfigure}{\textwidth}
+\centering
+\ref*{legend:methods}
+\includegraphics[width=\textwidth]{figures/tikz/img_rd_comparison.tikz}
+
+\caption{RD curve on CIFAR-10 (left) and Kodak (right).
+}
+\label{fig:rd_images}
+\end{subfigure}
+\includegraphics[width=\textwidth]{figures/tikz/audio_video_protein_rd_comparison.tikz}
+\begin{subfigure}{0.35\textwidth}
+    \centering
+\includegraphics[height=100pt]{figures/video_decoded.pdf}
+    \caption{Decoded videos and residuals.}
+    \label{fig:video_examples}
+\end{subfigure}\hspace{-10pt}
+\begin{subfigure}{0.65\textwidth}
+    \centering
+\includegraphics[height=95pt]{figures/protein.pdf}
+    \caption{Decoded protein structure examples.}
+    \label{fig:protein_examples}
+\end{subfigure}
+    \caption{Quantitive evaluation 
+ and qualitative examples of \recombiner{} on image, audio, video, and 3D protein structure. Kbps stands for kilobits per second, RMSD stands for Root Mean Square Deviation, and bpa stands for bits per atom. For all plots, we use solid lines to denote \inr{}-based codecs, dotted lines to denote VAE-based codecs, and dashed lines to denote classical codecs. }
+\end{figure}
+In this section, we evaluate \recombiner{} on image, audio, video, and 3D protein structure data and demonstrate that it achieves strong performance across all modalities.
+We also perform extensive ablation studies on the CIFAR-10 and Kodak datasets which demonstrate \recombiner{}'s robustness and the effectiveness of each of our proposed solutions. 
+\subsection{Data Compression across Modalities}
+\textbf{Image:} We evaluate \recombiner{} on the CIFAR-10 \citep{(cifar)Krizhevsky09learningmultiple} and Kodak \citep{Kodakdataset} image datasets,
+and show its rate-distortion (RD) performance in \Cref{fig:rd_images}, and compare it against recent \inr{} and VAE-based methods, as well as VTM \citep{VTM}\footnote{\scriptsize\url{https://vcgit.hhi.fraunhofer.de/jvet/VVCSoftware_VTM/-/tree/VTM-12.0?ref_type=tags}}, BPG \citep{bpg} and JPEG2000.
+\recombiner{} displays remarkable performance on CIFAR-10, especially at low bitrates, outperforming even VAE-based codecs. 
+On Kodak, it outperforms most \inr{}-based codecs and is competitive with the more complex VC-INR method of \citet{schwarz2023modality}.
+Finally, while \recombiner{} still falls behind VAE-based codecs, it significantly reduces the performance gap. 
+\par
+\textbf{Audio:} Following the experimental set-up of \citet{guo2023compression}, we evaluate our method on the LibriSpeech~\citep{LibriSpeech} dataset. 
+In \Cref{fig:rd_audio}, we depict \recombiner{}'s RD curve on the full test set, alongside the curves of VC-INR, COIN++, and MP3.
+We can see \recombiner{} outperforms both COIN++ and MP3 and matches with VC-INR.
+
+\par
+\textbf{Video:} We evaluate \recombiner{} on UCF-101 action recognition dataset~\citep{soomro2012ucf101}, following \citet{schwarz2023modality}'s experimental setup. 
+However, as they do not report their train-test split and due to the time-consuming encoding process of our approach, we only benchmark our method against H.264 and H.265 on 16 randomly selected video clips.  
+\Cref{fig:rd_video} shows \recombiner{} achieves comparable performance to the classic domain-specific codecs H.264 and H.265, especially at lower bitrates. 
+However, there is still a gap between our approach and H.264 and H.265 when they are configured to prioritize quality. 
+\Cref{fig:video_examples} shows a non-cherry-picked video compressed with \recombiner{} at two different bitrates and its reconstruction errors.
+\par
+\textbf{3D Protein Structure:}
+To further illustrate the applicability of our approach, we use it to compress the 3D coordinates of C$\alpha$ atoms in protein fragments.
+We take domain-specific lossy codecs as baselines, including Foldcomp~\citep{foldcomp}, PDC~\citep{Zhang2023pdc} and PIC~\citep{Luke2022pic}.
+Surprisingly, as shown in \Cref{fig:rd_protein}, \recombiner{}'s performance is competitive with highly domain-specific codecs.
+Furthermore, it allows us to tune its rate-distortion performance, whereas the baselines only support a certain compression rate.  
+Since the experimental resolution of 3D structures is  
+typically between 1-3 \AA{} \citep{PDBstatistics}, \recombiner{} could help with reducing the increasing storage demand for protein structures without losing key information. \Cref{fig:protein_examples} shows non-cherry-picked examples compressed with our method.
+\subsection{Effectiveness of Our Solutions, Ablation Studies and Runtime Analysis}
+This section showcases \recombiner{}'s robustness to model size and the effectiveness of each component. 
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.32\textwidth}
+    \centering
+        \includegraphics[width=\textwidth, trim={0, 0.2cm, 0, 1.6cm}, clip]{figures/ablation/zoom_in_wo_conv.png}
+    \caption{w/o positional encodings; \\bitrate 0.287 bpp; PSNR 25.62 dB. }
+    \end{subfigure}
+    \begin{subfigure}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth, trim={0, 0.2cm, 0, 1.6cm}, clip]{figures/ablation/zoom_in_full_same_bitrate.png}
+    \caption{with positional encodings; \\bitrate 0.316 bpp; PSNR 26.85 dB.  }
+    \end{subfigure}
+    \begin{subfigure}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth, trim={0, 0.2cm, 0, 1.6cm}, clip]{figures/ablation/zoom_in_full_same_psnr.png}
+    \caption{with positional encodings;\\bitrate 0.178 bpp; PSNR 25.05 dB.  }
+    \end{subfigure}
+    \caption{Comparison between \texttt{kodim24} details compressed with and without learnable positional encodings. (a)(b) have similar bitrates and (a)(c) have similar PSNRs.
+\end{figure}
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{figures/tikz/robustness_and_ablation_study.tikz}
+\end{figure}
+\par
+\textbf{Positional encodings facilitate local deviations:} \Cref{fig:compare_details_w_wo_pe} compares images obtained by \recombiner{} with and without positional encodings at matching bitrates and PSNRs. 
+As we can see, positional encodings preserve intricate details in fine-textured regions while preventing noisy artifacts in other regions of the patches, making \recombiner{}'s reconstructions more visually pleasing. 
+\par
+\textbf{\recombiner{} is more robust to model size:} Using the same \inr{} architecture, \Cref{fig:robustness} shows \combiner{} and \recombiner{}'s RD curves as we vary the number of hidden units. 
+\recombiner{} displays minimal performance variation and also consistently outperforms \combiner{}. 
+
+\par
+\textbf{Ablation study:} In \Cref{fig:ablations_cifar,fig:ablations_kodak}, we ablate our linear reparameterization, positional encodings, hierarchical model, and permutation strategy on
+CIFAR-10 and Kodak, with five key takeaways:
+\begin{enumerate}[leftmargin=*]
+\item Linear weight reparameterization consistently improves performance on both datasets, yielding up to 4dB gain on CIFAR-10 at high bitrates and over 0.5 dB gain on Kodak in PSNR.
+\item Learnable positional encodings provide more substantial advantages at lower bitrates. On CIFAR-10, the encodings contribute up to 0.5 dB gain when the bitrate falls below 2 bpp. 
+On Kodak, the encodings provide noteworthy gains of 2 dB at low bitrates and 1 dB at high bitrates.
+\item Surprisingly, the hierarchical model \emph{without positional encodings} can degrade performance.  
+We hypothesize that this is because directly applying the hierarchical model poses challenges in optimizing \Cref{eq:inr_beta_elbo}.
+A potential solution is to warm up the rate penalty $\beta$ level by level akin to what is done in hierarchical VAEs \citep{sonderby2016ladder}, which we leave for further work.
+\item However, positional encodings appear to consistently alleviate this optimization difficulty, yielding 0.5 dB gain when used with hierarchical models.  
+\item Our proposed permutation strategy provides significant gains of 0.5 dB at low bitrates and more than  1.5 dB at higher bitrates.
+\end{enumerate}
+
+\par
+ 
+Unfortunately, our approach  exhibits a long encoding time, similar to \combiner{}. 
+However, our decoding process is still remarkably fast, matching the speed of COIN and \combiner{}, even on CPUs. 
+
+
+\section{Conclusions and Limitations}
+
+\noindent
+In this paper, we propose \recombiner{}, a new codec based on several non-trivial extensions to \combiner{}, encompassing the linear reparameterization for the network weights, learnable positional encodings, and expressive hierarchical Bayesian models for high-resolution signals. 
+Experiments demonstrate that our proposed method sets a new state-of-the-art on low-resolution images at low bitrates, and consistently delivers strong results across other data modalities. 
+\par
+A major limitation of our work is the encoding time complexity and tackling it should be of primary concern in future work. 
+A possible avenue for solving this issue is to reduce the number of parameters to optimize over and switch from inference over weights to modulations using, e.g.\ FiLM layers \citep{perez2018film}, as is done in other \inr{}-based works.
+A second limitation is that while compressing with patches enables parallelization and higher robustness, it is suboptimal as it leads to block artifacts, as can be seen in \Cref{fig:compare_details_w_wo_pe}.
+Third, as \citet{guo2023compression} demonstrate, the approximate samples given by \astar{} coding significantly impact the methods performance, e.g.\ by requiring more fine-tuning.
+An interesting question is whether an exact REC algorithm could be adapted to solve this issue, such as the recently developed greedy Poisson rejection sampler \citep{flamich2023greedy}.
+
+
+\section{Acknowledgements}
+
+\noindent
+The authors would like to thank Runsen Feng for helping us ensure that our baseline for our experiments on video compression is correctly set up.
+GF acknowledges funding from DeepMind.
+ZG acknowledges funding from the Outstanding PhD Student Program at the University of Science and Technology of China. 
+
+
+
+
+

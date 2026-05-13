@@ -1,0 +1,371 @@
+\title{Lightning-Fast Image Inversion and Editing for Text-to-Image Diffusion Models}
+
+\begin{abstract}
+Diffusion inversion is the problem of taking an image and a text prompt that describes it and finding a noise latent that would generate the exact same image.
+Most current deterministic inversion techniques operate by approximately solving an implicit equation and may converge slowly or yield poor reconstructed images.  We formulate the problem by finding the roots of an implicit equation and devlop a method to solve it efficiently. Our solution is based on Newton-Raphson (NR), a well-known technique in numerical analysis. We show that a vanilla application of NR is computationally infeasible while naively transforming it to a computationally tractable alternative tends to converge to out-of-distribution solutions, resulting in poor reconstruction and editing. We therefore derive an efficient guided formulation that fastly converges and provides high-quality reconstructions and editing. We showcase our method on real image editing with three popular open-sourced diffusion models: Stable Diffusion, SDXL-Turbo, and Flux with different deterministic schedulers. Our solution, \textbf{Guided Newton-Raphson Inversion}, inverts an image within 0.4 sec (on an A100 GPU) for few-step models (SDXL-Turbo and Flux.1),
+opening the door for interactive image editing. We further show improved results in image interpolation and generation of rare objects.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Text-to-image diffusion models \citep{StableDiffusion,saharia2022photorealistic,ramesh2022hierarchical,balaji2022ediffi} can generate diverse and high-fidelity images based on user-provided text prompts.
+These models are further used in several important tasks that require \textit{inversion}, namely,
+discovering an initial noise  (seed) that, when subjected to a backward (denoising) diffusion process along with the prompt, generates the input image. Inversion is used in various tasks including image editing \citep{prompt2prompt}, personalization~\citep{gal2023designing,gal2022image}, seed noise interpolation for semantic augmentation ~\citep{NAO} and generating rare concepts~\citep{SeedSelect}.
+
+As inversion became a critical building block in various tasks, several inversion methods have been suggested. Denoising Diffusion Implicit Models (DDIM)~\citep{DDIM} introduced a deterministic and fast sampling technique for image generation with diffusion models. DDIM \textit{inversion}  transforms an image back into a latent noise representation by approximating the inversion equation. Although this approximation makes it very fast, it also introduces an approximation error (as explained in section \ref{sec:perliminaries}), causing noticeable distortion artifacts in the reconstructed images. This is particularly noticeable in few-step diffusion models~\citep{luo2023lcm,sauer2023adversarial, SD3}, with large gaps between the diffusion time-steps, and where inference is achieved with only 2 -- 4 steps. Several efforts have been made to address inconsistencies in DDIM Inversion, which result in poor reconstruction quality ~\citep{nullTextInversion2022, EDICTEWallace2022, Pan_2023_ICCV}.
+For example, \citep{Pan_2023_ICCV,garibi2024renoise} used fixed-point iterations to solve the DDIM-inversion equation. Another approach in \citep{hong2023exact} tackled the minimization of residual error in DDIM-inversion via gradient descent. Although these methods demonstrate improvements over previous approaches, their editing quality and computational speed are still limited.
+
+In this paper, we frame the deterministic diffusion inversion problem as finding the roots of an implicit function. We propose a solution based on the Newton-Raphson (NR) numerical scheme~\citep{numericalAnalysisBurden} - a very fast and well-tested optimization method for root finding.
+We further define a scalar NR scheme for this problem that can be computed efficiently.
+However, NR has a main disadvantage in our context. When applied to our highly non-convex function, it tends to find roots that drift outside the distribution of latents that the diffusion model was trained on. To address this, we introduce a method to guide the NR iterations towards in-distribution roots. This is done by incorporating prior knowledge about the noise distribution added at each diffusion step. This approach enables rapid inversion while maintaining state-of-the-art reconstruction and editing quality.
+
+We name our approach \ourmethod{}, for \textit{\textbf{G}uided \textbf{N}ewton \textbf{R}aphson \textbf{I}nversion}. \ourmethod{} converges in just a few iteration steps at each diffusion time step and achieves high-quality image inversions (in terms of reconstruction accuracy). In practice, 1-2 iterations are sufficient for convergence that yields significantly more accurate results than other inversion methods.
+Importantly, \ourmethod{} requires no model training, fine-tuning, prompt optimization, or additional parameters, and is compatible with all pre-trained diffusion models and deterministic schedulers. We demonstrate its effectiveness for inverting different deterministic schedulers used with latent diffusion model (Stable Diffusion)~\citep{StableDiffusion}, few-step latent diffusion model (SDXL-turbo)~\citep{sauer2023adversarial} and few-step flow matching model (Flux.1) \citep{flux}.
+Figure \ref{fig:fig1} demonstrates the quality and speed of \ourmethod{} for iterative editing using few-step diffusion models. Using such models models that require 4 denoising steps, our approach can edit real images within 0.4 seconds. This allows users to edit images {\it on the fly}, using text-to-image models.
+
+We conduct a comprehensive evaluation of \ourmethod{}. First, we directly assess the quality of inversions found with \ourmethod{} by measuring reconstruction errors compared to deterministic inversion approaches. Our method suppresses all methods with $\times 2$ to $\times 40$ speedup gain. We then demonstrate the benefit of \ourmethod{} in two downstream tasks (1) In \textit{Image editing}, \ourmethod{} smoothly changes fine details in the image in a consistent and coherent way, whereas previous methods struggle to do so.
+(2) In \textit{Seed Interpolation} and \textit{Rare concept generation} \citep{NAO} that require diffusion inversion.
+In both of these tasks, \ourmethod{} yields more accurate seeds, resulting in superior generated images, both qualitatively and quantitatively.
+
+
+\section{Related work}
+
+Text-to-image diffusion models \citep{StableDiffusion,saharia2022photorealistic,ramesh2022hierarchical,balaji2022ediffi,SD3} translate random samples (seeds) from a high-dimensional space, guided by a user-supplied text prompt, into corresponding images.  DDIM \citep{DDIM} is a widely used
+deterministic scheduler, that demonstrates the inversion of an image to its latent noise seed. When
+applied to the inversion of text-guided diffusion models, DDIM inversion suffers from low reconstruction accuracy that is reflected in further tasks, particularly when applied to few-step diffusion models that require only 3-4 denoising steps. This happens because DDIM inversion relies on a linear approximation, causing the propagation of errors that result in inaccurate image reconstruction.
+Recent studies \citep{nullTextInversion2022, EDICTEWallace2022, Pan_2023_ICCV, hong2023exact} address this limitation.  Null-text inversion \citep{nullTextInversion2022} optimizes the embedding vector of an empty string. This ensures that the diffusion process calculated using DDIM inversion, aligns with the reverse diffusion process.
+\citep{NegativePromptInv2023} replace the null-text embedding with a prompt embedding instead. This enhances convergence time and reconstruction quality but results in inferior image editing performance.
+In both \citep{nullTextInversion2022} and \citep{NegativePromptInv2023}, the optimized embedding must be stored, resulting in nearly 3 million additional parameters for each image (using 50 denoising steps of StableDiffusion ~\citep{StableDiffusion}).
+
+EDICT~\citep{EDICTEWallace2022} introduced invertible neural network layers, specifically Affine Coupling Layers, to calculate both backward and forward diffusion paths.
+While effective, it comes at the cost of prolonging inversion time.
+BDIA~\citep{ExactInversion2023} introduced a novel approximation tailored for EDICT, enhancing its computational efficiency while maintaining the accuracy in diffusion inversion.  However, it still demands considerably more time, approximately ten times longer than DDIM Inversion. TurboEdit~\citep{wu2024turboedit} introduced an encoder-based iterative inversion technique for few-step diffusion models, enabling precise image inversion and disentangled image editing. DirectInv~\citep{Ju2023DirectIB} separates the source and target diffusion branches for improved text-guided image editing, leading to better content preservation and edit fidelity.
+AIDI~\citep{Pan_2023_ICCV} and ReNoise~\citep{garibi2024renoise} used a fixed-point iteration technique at each inversion step to find a better solution for the implicit function posed by DDIM equations and thereby achieving improved accuracy. ExactDPM~\citep{hong2023exact}, similar to ~\citep{Pan_2023_ICCV,garibi2024renoise} proposed gradient-based methods for finding effective solutions for the implicit function.
+
+Alternative methods proposed in \citep{FriendlyInversionTMichaeli2023,brack2024ledits, deutch2024turbo} use a stochastic DDPM inversion instead of a deterministic one. Although it can recover the exact image during reconstruction, the stochastic nature of these approaches usually causes the method to struggle with reconstructing fine details during editing. These methods require many steps for high-quality editing, making the process time-consuming. Additionally, they demand a larger memory footprint, as they need to store $T+1$ latents for each inverted image, restricting their use only to reconstruction and editing tasks. We also compare our approach with these methods in terms of editing quality and demonstrate that our method outperforms them all.
+
+
+\section{Preliminaries}
+
+
+\label{sec:perliminaries}
+We first establish the fundamentals of  Denoising Diffusion Implicit Models (DDIMs).
+In this model, a \textit{backward pass} (denoising) is the process that generates an image from a seed noise. A \textit{forward pass} is the process of adding noise gradually to an image until it becomes pure Gaussian noise. \textit{Inversion} \citep{DDIM} is similar to the forward pass but the goal is to end with a specific Gaussian noise that would generate the image if denoised.
+
+\noindent\textbf{Forward Pass in Diffusion Models.}
+Diffusion models \citep{StableDiffusion} learn to generate images through a systematic process of iteratively adding Gaussian noise to a latent data sample until the data distribution is mostly noise. The data distribution is subsequently gradually restored through a reverse diffusion process initiated with a random sample (noise seed) from a Gaussian distribution.
+In more detail, the process of mapping a (latent) image to noise is a Markov chain that starts with $z_{0}$, and gradually adds noise to obtain latent variables $z_{1},z_{2},\dots,z_{T}$, following a distribution
+$    q(z_1,z_2,\ldots,z_T | z_0)=\Pi^{T}_{t=1}{q(z_{t} | z_{t-1}})$,
+where $\forall t: z_t \in \R^d$ with $d$
+denoting the dimension of the space. Each step in this process is a Gaussian transition, that is, $q$ follows a Gaussian distribution
+\begin{equation}
+    q(z_{t}|z_{t-1}) := \mathcal{N}(z_{t};\mu_t=\gamma_tz_{t-1},\Sigma_t=\beta_t I),
+    \label{eq:likelihood}
+\end{equation}
+parameterized by a schedule $(\beta_0, \gamma_0),\ldots,(\beta_T,\gamma_T) \in (0,1)^2$. As discussed below, in DDIM, $\gamma_t =  \sqrt{1-\beta_t}$ and in Euler scheduling $\beta_t=\gamma_t =1$ $\forall t$.
+
+\noindent\textbf{Deterministic schedule diffusion models.}
+It has been shown that one can ``sample" in a deterministic way from the diffusion model, and this accelerates significantly the denoising process. Several deterministic schedulers have been proposed \citep{DDIM,dpm-ODE2022,karras2022elucidating}, we describe here two popular ones, DDIM and Euler schedulers.
+
+\noindent\textit{Denoising Diffusion Implicit Models (DDIM).}
+Sampling from diffusion models can be viewed %alternatively
+as solving the corresponding diffusion Ordinary Differential Equations (ODEs) \citep{dpm-ODE2022}. DDIM~\citep{DDIM}, a popular deterministic scheduler, proposed to denoise a latent
+by
+\begin{equation}
+    z_{t-1}=\sqrt{\frac{\alpha_{t-1}}{\alpha_{t}}}z_{t} - \sqrt{\alpha_{t-1}} \cdot \Delta \psi(\alpha_{t})\cdot \epsilon_{\theta}(z_{t},t,p),
+\label{eq:ddim_forward}
+\end{equation}
+where $\alpha_t = 1-\beta_t$, $\psi(\alpha) = \sqrt{\frac{1}{\alpha}-1}$, and
+$\Delta \psi(\alpha_t) = \psi(\alpha_t) - \psi(\alpha_{t-1})$ and
+$\epsilon_{\theta}(z_t,t,p)$ is the output of a network that was trained to predict the noise to be removed.
+\noindent\textit{Euler schedulers.}
+Euler schedulers follow a similar deterministic update rule
+\begin{equation}
+    z_{t-1}=z_{t} + ( \sigma_{t-1} - \sigma_t) v_{\theta}(z_{t},t,p),
+    \label{eq:euler_forward}
+\end{equation}
+here $\sigma_t,\sigma_t-1$ are scheduling parameters and $v_{\theta}$ is the output of the network that was trained
+to predict the velocity.
+\noindent\textbf{Diffusion inversion.}
+\label{sec:inversion}
+We now focus on inversion in the latent representation. We describe our approach first for DDIM, and extension to other schedulers is discussed below. Given an image representation $z_0$ and its corresponding text prompt $p$, we seek a noise seed $z_T$ that, when denoised, reconstructs the latent $z_0$. Several approaches were proposed for this task. DDIM inversion rewrites Eq.~(\ref{eq:ddim_forward}) as:
+\begin{eqnarray}
+    z_t  &=&  f(z_t) \\ \nonumber
+    f(z_t) &:=& \sqrt{\frac{\alpha_t}{\alpha_{t-1}}}z_{t-1} + \sqrt{\alpha_{t}} \cdot \Delta \psi(\alpha_t) \cdot \epsilon_{\theta}(z_{t},t,p) .
+    \label{eq:ddim_implicit}
+\end{eqnarray}
+DDIM inversion approximates this implicit equation in $z_t$ by replacing $z_t$ with $z_{t-1}$
+\begin{equation}
+    f(z_t)\approx \sqrt{\frac{\alpha_t}{\alpha_{t-1}}}z_{t-1} + \sqrt{\alpha_{t}} \cdot \Delta \psi(\alpha_t) \cdot\epsilon_{\theta}(\red{z_{t-1}},t,p).
+    \label{eq:ddim_approx}
+\end{equation}
+The quality of the approximation depends on the difference
+$z_t - z_{t-1}$ (a smaller difference would yield a small error) and on the sensitivity of $\epsilon_{\theta}$ to that $z_t$. See~\citep{Dhariwal2021DiffusionMB,DDIM} for details.
+By applying Eq.~(\ref{eq:ddim_approx}) repeatedly for every denoising step $t$, one can invert an image latent $z_{0}$ to a latent $z_{T}$ in the seed space.
+
+DDIM inversion is fast, but the approximation of Eq.~(\ref{eq:ddim_approx}) inherently introduces errors at each time step. As these errors accumulate, they cause the whole diffusion process to become inconsistent in the forward and the backward processes, leading to poor image reconstruction and editing~\citep{nullTextInversion2022, EDICTEWallace2022, Pan_2023_ICCV}. This is particularly noticeable in few-step and consistency models with a small number of denoising steps (typically 2-4 steps), where there's a significant gap between $z_t$ and $z_{t-1}$ \cite{garibi2024renoise}.
+
+This inversion technique can also be applied to other deterministic schedulers. For instance, for Euler scheduler, one defines
+$ z_t  =  f(z_t)$, $f(z_t) := z_{t-1} + \left(\sigma_{t} - \sigma_{t-1} \right) v_{\theta}(z_{t},t,p)$
+,and this is approximated by $z_{t-1} + \left( \sigma_{t} - \sigma_{t-1}\right) v_{\theta}(\red{z_{t-1}},t,p)$.
+
+\noindent\textbf{Iterative inversion and optimization methods.}
+Several papers proposed to improve the approximation using iterative methods.
+AIDI \citep{Pan_2023_ICCV} and ReNoise~\citep{garibi2024renoise} proposed to directly solve Eq.~(\ref{eq:ddim_implicit}) using fixed-point iterations \citep{fpinversion}, a widely-used method in numerical analysis for solving implicit functions.
+In a related way, \citep{hong2023exact} solves a more precise inversion equation,
+obtained by employing higher-order terms, using gradient descent.
+
+{\bf Newton-Raphson Root finding.} The Newton-Raphson method is a widely used numerical technique for finding roots of a real-valued function $\F$ \citep{numericalAnalysisBurden}. It is particularly effective for solving equations of the form $\F(z) = 0$, when $\F: \R^D \rightarrow \R^D$ for an arbitrary dimension $D$. It provides fast convergence, typically quadratic, by requiring the evaluation of the function and the inversion of its Jacobian matrix. It has also been shown that when initialized near a local extremum, NR may converge to that point (oscillating around it) \citep{kaw2003holistic}. The NR scheme in general form, is given by
+\begin{equation}
+ z^{k+1}_{t} = z^k_{t} - J(z^k_{t})^{-1} ~\F(z^k_{t}),
+ \label{eq:Jacobian_NR_Scheme}
+ \end{equation}
+where $J(z_t^k)^{-1}$ presents the inverse of a Jacobian matrix $J \in \R^{D \times D}$ for $\F$ (all derivatives are w.r.t to $z$), and $k$ stands for the iteration number. The iteration starts with an initial guess, $z=z^0$.
+\begin{figure*}[t!]
+    \centering     \includegraphics[width=0.9\linewidth]{figures/iclr25/method.png}
+    \caption{{\bf Newton-Raphson Inversion} iterates over an implicit function Eq. \ref{eq:ddim_implicit} using Eq.~\ref{eq:nr_scheme} scheme, at every time-step in the inversion path. Initialized with $z^0_t = z_{t-1}$ it converges within $\approx$ 2 iterations, to $z_t$. Each box denotes one inversion step; black circles correspond to intermediate latents in the denoising process; green circles correspond to intermediate Newton-Raphson iterations.
+    }
+    \label{fig:FPI}
+\end{figure*}
+
+
+
+\section{Our method: Guided Newton Raphson Inversion}
+
+\label{sec:newton-raphson-inversion}
+Existing inversion methods are either fast-but-inaccurate, like DDIM inversion, or more precise-but-slow, like \citep{Pan_2023_ICCV} and \citep{hong2023exact}.
+This paper presents a method that achieves a balance of speed and improved precision compared to these existing approaches.
+
+To achieve these features we introduce two key ideas. First, we frame inversion as a scalar root-finding problem that can be solved efficiently, and use the well-known \textit{Newton-Raphson} root-finding method.
+Second, we make the observation that an inversion step is equivalent to finding a specific noise vector, and we \textit{use a strong prior} obtained from the distribution of that noise. This prior during the iterative solution guides Newton-Raphson towards finding a root that adheres to the correct distribution of latents. See Figure \ref{fig:FPI} for illustration.
+\subsection{Framing inversion as efficient root-finding}
+Diffusion inversion can be done by finding the fixed point of the function $f(z)$ in Eq. \ref{eq:ddim_implicit}. This is equivalent to finding the zero-crossings or roots, $z_t$ of the residual function $r: \R^D \rightarrow \R^D$ defined as
+$r(z_t) := z_t - f(z_t)$.
+One could now apply \textit{Newton-Raphson} (NR) to find a root.
+However, in our case, $z_t$ is a high dimensional latent($D \approx 16K$ in StableDiffusion~\citep{StableDiffusion}), making it computationally infeasible to compute the Jacobian (Eq. \ref{eq:Jacobian_NR_Scheme}), explicitly and invert it.
+To address this computational limitation, we apply a norm over $r(z_t)$, $\hat{r}: \R^d \rightarrow \R^{+}_{0}$ yielding a multi-variable, {\it scalar} function, which has the same set of roots:
+\begin{eqnarray}
+    \hat{r}(z_t) &:=& ||z_t - f(z_t)||_1 \quad,
+    \label{eq:r(z)}
+\end{eqnarray}
+and seek the roots $\hat{r}(z_t)=0$ where $||\cdot||$ denotes a $L_{1}$ norm which simply sum over all absolute values of $\hat{r}$.
+We call this method \textit{Newton-Raphson Inversion}, NRI.
+This method is efficient and converges quickly in practice.  However, NRI in our case has a key limitation: Eq. (\ref{eq:ddim_implicit}), and thus $\hat{r}$, can have multiple solutions or local minima. The accelerated convergence of NR due to linear ``extrapolation", can cause it to "jump" to solutions outside the latent variable distribution for the diffusion model. Indeed, in practice, we find that solving Eq. (\ref{eq:r(z)}) for $\hr(z_t)=0$ often converges quickly to a solution that results with poor image reconstruction. We quantify and illustrate this phenomenon in section \ref{sec:Motivation for Guidance}.
+Next, we describe a remedy to this problem.
+
+\subsection{Guided Newton Raphson Inversion}
+\label{subsection:RNRI}
+The NR procedure discussed above may find roots that are far from the modes of the latent distribution. How can we guide NR to converge to useful roots among all possible ones?
+
+Note that determining a $z_t$ given $z_{t-1}$, is equivalent to finding which noise term is added during the forward pass of the diffusion process. Luckily, the distribution of that noise is known by the design of the diffusion process and we can use it as prior information.
+More precisely,
+since each step in the diffusion process follows a Gaussian distribution $q(z_t | z_{t-1}) $ (Eq. \ref{eq:likelihood}), we define a positive function that obtains a zero value at the maximum likelihood of the $q$ distribution by taking the negative log of the exponent part of the distribution (without the normalizing factor). This can be simplified to
+\begin{equation}
+    G(z_t) = \begin{cases}
+   \frac{1}{\beta_t}||z_t - \mu_t||  & \text{DDIM} , \\
+    ||z_t - \mu_t|| & \text{Euler}. \\
+     \end{cases}
+    \label{eq:Guidance terms}
+\end{equation}
+where $\mu_t$, $\beta_t$ were defined in Section \ref{sec:perliminaries}, see Eq (1).
+To guide NR to select an "in-distribution" solution,
+we define a new objective:
+\begin{equation}
+    \F(z_t) := ||z_t - f(z_t)||_1  + \lambda G(z_t).
+     \label{eq:r(z)_reg}
+\end{equation}
+Here,
+$\lambda > 0$ is a hyperparameter weighting factor for the guidance term.
+
+We then seek to drive $\F(z_t)$ near zero. Applying the Newton Raphson iteration scheme for Eq
+\begin{align}
+    z_t^0 &= z_{t-1} \notag \\
+    z_t^{k+1}(i) &= z_t^k(i) - \frac{1}{D}~\frac{{\F}(z_t^k)}{g_i(z_t^k)+\eta}.
+    \label{eq:nr_scheme}
+\end{align}
+Here $g_i:=\frac{\partial \F(z_t)}{\partial z_t(i)}$ is the partial derivative of $\F$ with respect to the variable (descriptor) $z_t(i)$.  The index $i\in[0,1,...,D]$ indicates $z$'s components and $k$ stands for the iteration number, while $\eta$ is a small constant added for numerical stability. The function
+$g$ can be computed efficiently using automatic differentiation engines.  We initialize the process with $z$ from the previous diffusion time-step $z_{t-1}$.
+
+We call our approach \textbf{GNRI} for \textbf{G}uided \textbf{N}ewton \textbf{R}aphson \textbf{I}nversion.
+
+
+
+
+\section{Experiments}
+
+
+Here, we first provide \textbf{motivation and analysis} for the guidance term presented in Section \ref{subsection:RNRI}. Then, we show evaluation results of \ourmethod{ on three main tasks:} (1) \textbf{Image inversion and reconstruction:} Here, We assess the inversion fidelity by evaluating the quality of the reconstructed images. (2) \textbf{Image Editing:} We demonstrate the efficacy of our inversion scheme in image editing, highlighting its ability to facilitate real-time editing. (3) \textbf{Rare Concept Generation:} We illustrate how our method can be applied to improve the generation of rare concepts.
+
+\noindent\textbf{Compared Methods:}
+We compared our approach with the following methods. Standard \textbf{DDIM Inversion}~\citep{DDIM}, \textbf{SDEdit}~\cite{meng2022sdedit}, \textbf{Null-text}~\citep{nullTextInversion2022} and \textbf{EDICT}~\citep{EDICTEWallace2022}. Two fixed-point based methods: \textbf{AIDI}~\citep{Pan_2023_ICCV} and \textbf{ReNoise}~\citep{garibi2024renoise}. Gradient-based method \textbf{ExactDPM}~\citep{hong2023exact}. \textbf{Wu2024Turbo}~\citep{wu2024turboedit} and two DDPM inversion methods: \textbf{EditFriendly}~\cite{FriendlyInversionTMichaeli2023} and \textbf{Gal2024Turbo}~\citep{deutch2024turbo}.
+
+In all experiments, we used code and parameters provided by the respective authors.
+
+\noindent\textbf{Implementation details:} To demonstrate the versatility of our approach, we conducted experiments on latent diffusion model SD2.1~\cite{StableDiffusion}  and two few-step models: SDXL-turbo \citep{sauer2023adversarial} and the newly introduced flow matching Flux.1-schnell model \citep{flux}. Sampling steps were set to 50 for SD2.1 and 4 for SDXL-turbo and Flux.1. All methods ran until convergence. All methods were tested on a single A100 GPU for a fair comparison. PyTorch's built-in gradient calculation was used for computing derivatives of Eq. (\ref{eq:r(z)_reg}).
+Editing for all iterative methods was done using Prompt-to-Prompt~\citep{prompt2prompt}.
+
+
+\subsection{Guidance Term Motivation and Comparison to Other Numerical Schemes}
+\label{sec:Motivation for Guidance}
+To illustrate the motivation behind our guidance term,
+we compare the reconstruction quality of non-guided NRI a  "vanilla'' NR inversion method with two iterative numerical schemes: Fixed-point Iteration (FPI) and Gradient Descent (GD). We test the reconstruction of 5,000 image-caption pairs from COCO \cite{2017coco}, presenting three metrics in Fig. \ref{fig:convergence_vs_PSNR}.
+
+Fig \ref{fig:convergence_vs_PSNR}a shows that FPI, GD and non-guided NRI,  all converge to low residual values but the reconstruction values for NRI (green line) in Fig. \ref{fig:convergence_vs_PSNR}b are notably lower. This suggests that solutions reached by NRI  are in areas of the latent space that are not processed correctly by the diffusion model.
+
+\begin{figure}
+\centering
+    \includegraphics[width=0.99\linewidth]{figures/iclr25/analysis.png}
+    \caption{The effect of GNRI guiding term on NR inversion, and comparison to other iterative inversion methods.
+    All results are averages computed with SDXL-Turbo applied to 5,000 COCO images.
+    \textbf{(a) Average residuals throughout optimization.} NR-based methods are the fastest to converge. Gradient-descent was run with the largest learning rate that was stable but still is slowest. \textbf{(b) Reconstruction quality (PSNR).} Adding guidance (blue) to NRI (green) significantly improves the quality of the converged solution. \textbf{(c) Likelihood of inferred noise.} Without the guiding term, NRI (green) finds solutions that are substantially different from those found by other methods, which explains the low reconstruction quality.
+}
+\label{fig:convergence_vs_PSNR}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[trim=0 0 0 0, clip,width=\columnwidth]{figures/iclr25/inversion_qual.png}
+    \caption{\textbf{(Left) Reconstruction qualitative results:} Comparing image inversion-reconstruction performance. While all baseline methods struggle to preserve the original image, \ourmethod{} successfully excels in accurately reconstructing it.
+    {\bf (Right) Inversion Results:} Mean reconstruction quality (y-axis, PSNR) and runtime (x-axis, seconds) on the COCO2017 validation set.  Our method achieves high PSNR while reducing inversion-reconstruction time by a factor of $\times 2$ to $\times 40$ on SDXL-turbo and $\times 10$ to $\times 40$ on Flux.1, compared to other approaches.
+    }
+    \label{fig:psnr_time}
+\end{figure}
+
+Comparing the blue curve in Fig  \ref{fig:convergence_vs_PSNR} to the green curve highlights the significant impact of adding a guidance term. It accelerates convergence
+(Fig. \ref{fig:convergence_vs_PSNR}a), improves
+reconstruction (PSNR) (Fig  \ref{fig:convergence_vs_PSNR}b) and reaches a better likelihood (Fig. \ref{fig:convergence_vs_PSNR}c).
+
+\subsection{Image Reconstruction}
+To evaluate the fidelity of our approach, we measure the PSNR of images reconstructed from seed inversions.
+Specifically, we used the entire set of 5000 images from the MS-COCO-2017 validation dataset \citep{2017coco}, along with their corresponding captions. For each image-caption pair, we first found the inverted latent and then used it to reconstruct the image using the same caption.
+Given that the COCO dataset provides multiple captions for each image, we used the first listed caption as a conditioning prompt.
+Figure \ref{fig:psnr_time} (left)  demonstrates a qualitative comparison of reconstructed images.
+Figure \ref{fig:psnr_time} (right) illustrates the PSNR of reconstructed images versus inversion time, highlighting the performance of our method compared to SoTA inversion techniques. The dashed black line represents the upper bound set by the Stable Diffusion VAE, showing that our method achieves the highest PSNR among SoTA methods and approaches the VAE upper bound, while also being the fastest. Additional qualitative comparisons for SD2.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[trim=0 0 0 0, clip,width=1\linewidth]
+    {figures/iclr25/editing_qual.png}
+    \caption{{(\textbf{Left}) \bf Qualitative results of image editing}.
+    \ourmethod{} edits images more naturally while preserving the structure of the original image. All baselines were executed until they reached convergence. \textbf{(Right) Evaluation of editing performance:} \ourmethod{} achieves superior CLIP and LPIPS scores, indicating better compliance with text prompts and higher structure preservation.
+    }
+    \label{fig:editing_fig}
+\end{figure}
+
+\subsection{Real-Time Image Editing}
+Current state-of-the-art methods for editing images start by inverting a real image into latent space and then operating on the latent. As a result, the quality of editing depends strongly on the quality of inversion \citep{nullTextInversion2022}.
+
+We now evaluate the effect of inverting images with \ourmethod{}, compared to SoTA inversion baselines.
+We show that \ourmethod{} outperforms all baselines in editing performance while requiring the shortest time. This opens the door for \textbf{real-time editing capabilities}.
+We present below both qualitative and quantitative results.
+
+\noindent\textbf{Qualitative results.}
+Figure \ref{fig:editing_fig}(left) gives a qualitative comparison between SoTA approaches and  \ourmethod{} in the context of real image editing. \ourmethod{} excels in accurately editing with target prompts producing images with both high fidelity to the input image and adherence to the target prompt. The examples illustrate how alternative approaches may struggle to retain the original structure or tend to overlook crucial components specified in the target prompt.
+As an example, in the first row of Figure \ref{fig:editing_fig}(left), \ourmethod{} exclusively converts the cat into a dog without changing the text in the sign whereas other methods either fail to generate a proper dog or change the text in the sign. Results for SD2. \ref{sec:supp_qualitative_results}.
+
+\noindent\textbf{User Study.}
+We further evaluated editing quality using human raters. We followed the evaluation process of \citet{nullTextInversion2022} and asked human raters to rank edits made by the three leading methods: Ours, ReNoise~\citep{garibi2024renoise}, and ExactDPM~\citep{hong2023exact}. Unfortunately, the code for TurboEdit \citep{wu2024turboedit} was not available at the time of our evaluation. 100 images were rated,  12 images were provided by the authors of \citep{nullTextInversion2022} and the rest were randomly selected from COCO \citep{2017coco} and PieBench~\citep{Ju2023DirectIB} benchmarks. Three raters for each image were recruited through Amazon Mechanical Turk and were tasked to choose the image that better applies the requested text edit while preserving most of the original image.  \ourmethod{} was preferred  with 71.6\% preference compared to ReNoise's~\citep{garibi2024renoise} 15.9\% and ExactDPM~\citep{hong2023exact} 12.5\%.
+
+\noindent\textbf{Quantitative results.}
+Following  \citep{EDICTEWallace2022,FriendlyInversionTMichaeli2023,garibi2024renoise}, we evaluate the results using two
+complementary metrics: LPIPS \citep{zhang2018unreasonable} to quantify the extent of structure preservation (lower is better) and a CLIP-based score to quantify how well the generated images comply with the text prompt (higher is better). Metrics are averaged across 100 MS-COCO images. Figure \ref{fig:editing_fig}(right) illustrates that editing with \ourmethod{} yields a superior CLIP and LPIPS score, demonstrating the ability to perform state-of-the-art real image editing with superior fidelity.
+Following \citep{wu2024turboedit} we also evaluated our approach on the newly introduced PieBench~\citep{Ju2023DirectIB} dataset. Table \ref{tab:image-editing-comparison} shows that our method more effectively follows the text guidance while preserving the background, outperforming current SoTA techniques.
+These evaluations further affirm the findings derived from the user study.
+
+\begin{table}[t]
+    \centering
+    \caption{Image editing comparison using descriptive text in PIE-Bench~\citep{Ju2023DirectIB} dataset with SDXL-turbo. The efficiency is measured in a single A100 GPU. Our method achieves the best background preservation and clip similarity while being significantly faster than other methods.}
+    \scalebox{1}{
+\setlength{\tabcolsep}{2pt} %
+\begin{tabular}{l|cccc|cc|cc}
+\hline
+{PIE-Bench} & \multicolumn{4}{c|}{Background Preservation} & \multicolumn{2}{c|}{CLIP Similarity} & \multicolumn{2}{c}{Efficiency} \\
+\cline{2-9}
+ & PSNR & LPIPS & MSE & SSIM & Whole & Edited & Inverse & Forward \\
+ & $\uparrow$ & $10^3\downarrow$ & $10^4\downarrow$ & $10^2\uparrow$ & $\uparrow$ & $\uparrow$ & (s) $\downarrow$ & (s) $\downarrow$ \\
+\hline
+DDIM & 18.59 & 177.96 & 184.69 & 66.86 & 23.62 & 21.20 & \textbf{0.454} & \textbf{0.445}  \\
+ReNoise~\citep{garibi2024renoise} & 27.11 & 49.25 & 31.23 & 72.3 & 23.98 & 21.26 & 5.41 & 0.445  \\
+ExactDPM~\citep{hong2023exact} & 24.54 & 59.88 & 36.49 & 69.18 & 23.77 & 21.23 & 15.11 & 0.445  \\
+Direct Inv~\citep{Ju2023DirectIB} & 27.22 & 54.55 & 62.86 & 84.76 & 25.02 & 22.10 & 4.3 & 50  \\
+TurboEdit~\citep{wu2024turboedit} & 29.52 & 44.74 & 26.08 & 91.59 & 25.05 & 22.34 & 0.981 & 0.569  \\
+\ourmethod{} \textbf{(Ours)} & \textbf{30.22} & \textbf{40.15} & \textbf{20.10} & \textbf{98.66} & \textbf{26.15} & \textbf{23.26} & 0.521 & 0.445 \\
+\hline
+\end{tabular}
+}
+
+\label{tab:image-editing-comparison}
+\end{table}
+\subsection{Seed Interpolation and Rare Concept Generation}
+\begin{SCtable}[\sidecaptionrelwidth][t!]
+    \centering
+    \caption{{\bf Image interpolation and centroid finding.} In interpolation, two images $x^1, x^2$ are inverted to generate images between their seeds $z_T^1, z_T^2$. In centroid-finding, a set of images is inverted to find their centroid. Acc and FID scores improved using \ourmethod{} as the inversion method.}%
+    \label{tab:inter_centroid_comp}
+    \scalebox{1}{
+    \setlength{\tabcolsep}{2pt} %
+    \begin{tabular}{l|cc|cc}
+    & \multicolumn{2}{c|}{\textbf{Interpolation }} & \multicolumn{2}{c}{\textbf{Centroid }}\\
+    \midrule
+    & ACC $\uparrow$& FID $\downarrow$& ACC$\uparrow$  & FID $\downarrow$\\
+    \midrule
+   DDIM Inversion & 51.59 & 6.78 & 67.24 & 5.48\\
+
+   ExactDPM~\citep{hong2023exact} & 52.01 & 6.13 & 68.14 & 5.32\\
+      ReNoise~\citep{garibi2024renoise} & 52.51 & 6.0 & 69.14 & 5.22\\
+
+   \ourmethod{} (\textbf{ours}) & \textbf{54.98} &  \textbf{5.91} & \textbf{70.18} &\textbf{4.59}\\
+\bottomrule
+\end{tabular}}
+\end{SCtable}
+
+\begin{table*}[t!]
+    \caption{ \textbf{Inversion Quality Impact on Rare Concept Generation:} We assess image generation using a pre-trained classifier's accuracy, comparing NAO~\citep{NAO} (with DDIM inversion), ReNoise~\citep{garibi2024renoise}, ExactDPM~\cite{ExactInversion2023} and \ourmethod{}. We report average per-class accuracy for Head (over 1M samples), Medium, and Tail (rare classes $<$ 10K samples). \ourmethod{} enhances rare and medium concept accuracy without sacrificing overall performance.
+    }
+    \centering
+    \scalebox{0.9}{
+    \setlength{\tabcolsep}{2pt} %
+    \begin{tabular}{l ccc c|c|c c}
+         & \multicolumn{7}{c}{\textbf{ImageNet1k in LAION2B}} \\
+         \midrule
+         & \textbf{Head} & \textbf{Medium} & \textbf{Tail} & \textbf{Total Acc} & \textbf{FID}& \textbf{$\hat{T}_{Init}$} & \textbf{$\hat{T}_{Opt}$} \\ [0.5ex]
+        & n=235 & n=509 & n=256 & & & (sec) & (sec) \\ [0.5ex]
+        \textbf{Methods}& \#\textgreater{}1M & 1M\textgreater{}\#\textgreater{}10K & 10K\textgreater{}\# & &&  \\ [0.5ex]
+        \midrule
+        DDIM inversion & 98.5 & 96.9 & 85.1 & 94.3 &6.4 & 25 & 29\\
+        ExactDPM \citep{hong2023exact} & 98.1 & 96.8 & 85.3 & 94.1 & 7.1 & 240 & 32\\
+        ReNoise \citep{garibi2024renoise} & 98.5 & 97.0 & 85.3 & 94.4 & 6.9 & 24 & 28\\
+
+        \ourmethod{} (\textbf{ours}) & \textbf{98.6} & \textbf{97.9} & \textbf{89.1} & \textbf{95.8} &\textbf{6.3} & \textbf{17} & \textbf{25}\\
+        \bottomrule
+    \end{tabular}
+    }
+
+    \label{tab:laion-imagenet-bench}
+\end{table*}
+
+We evaluate the benefit of our inversion in a second task, of selecting latent seeds for image generation. It has been shown~\citep{SeedSelect,NAO} that text-to-image diffusion models poorly generated rare concepts, and this can be improved by selecting better noise latent $z_T$.
+To address this issue, SeedSelect~\citep{SeedSelect} takes a few images of a rare concept as input and uses a diffusion inversion module to iteratively refine the obtained seeds. These refined seeds are then used to generate new plausible images of the rare concept. NAO~\citep{NAO} extends this by introducing new paths and centroids for seed initialization. Both methods rely on DDIM Inversions, crucial for initial seed evaluation. GNRI provides an alternative for precise inversion seeds, aiming for improved image quality and semantic accuracy. It's important to highlight that most inversion techniques \citep{nullTextInversion2022, EDICTEWallace2022,FriendlyInversionTMichaeli2023,brack2024ledits} are not applicable in this context as they necessitate extra parameters for image reconstruction, which impedes the straightforward implementation of interpolation.
+
+\noindent\textbf{Interpolation and centroid finding:}
+We evaluate \ourmethod{} by following the experimental protocol of \citep{NAO} and compare images generated by four methods: DDIM,  ReNoise~\citep{garibi2024renoise}, ExactDOM~\citep{Exact_Inversion_DPM_2023} and \ourmethod{}. Evaluation is conducted based on FID score and image accuracy, assessed using a pre-trained classifier. See details in \citep{NAO}.  Results are presented in Table~\ref{tab:inter_centroid_comp}. Notably, initializing with \ourmethod{} seeds consistently results in higher-quality images both in interpolation paths and seed centroids.
+
+\noindent\textbf{Rare concept generation:}
+We further show the effect of our seed inversions on the performance of NAO centroids with SeedSelect for rare concept generation. Specifically, we compared images generated by SeedSelect, initialized with NAO using DDIM inversion, ReNoise, ExactDPM, and \ourmethod{}, as shown in Table~\ref{tab:laion-imagenet-bench}). We followed the evaluation protocol of \citep{SeedSelect,NAO} on ImageNet1k classes arranged by their prevalence in the LAION2B dataset \citep{Laion5B_dataset}. This dataset serves as a substantial ``in the wild" dataset employed in training foundation diffusion models, such as Stable Diffusion \citep{StableDiffusion}. Image quality is measured by FID and accuracy of a pre-trained classifier. For more details see \citep{SeedSelect,NAO}.
+The results, summarized in Table \ref{tab:laion-imagenet-bench}, demonstrate that our inversion method significantly boosts performance, both in accuracy and FID, compared to other methods. Furthermore, our inversions yield a more precise and effective initialization point for SeedSelect \citep{SeedSelect}, resulting in notably quicker convergence without compromising accuracy or image quality, in all categories (head, medium, and tail) along with a high gap at tail.
+
+
+
+\section{Summary}
+
+Image inversion in diffusion models is vital for various applications like image editing, semantic augmentation, and generating rare concept images. Current methods often sacrifice inversion quality for computational efficiency, requiring significantly more compute resources for high-quality results. This paper presents Guided Newton-Raphson Inversion (\ourmethod{}), a novel iterative approach that balances rapid convergence with superior accuracy, execution time, and memory efficiency. Using \ourmethod{} opens the door for high-quality real-time image editing due to its efficiency and speed. \ourmethod{} requires no model
+training, fine-tuning, prompt optimization, or additional parameters, and is compatible with all pre-trained diffusion models and deterministic schedulers.
+
+
+
+
+
+
+

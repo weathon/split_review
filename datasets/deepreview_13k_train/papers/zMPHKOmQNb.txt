@@ -1,0 +1,298 @@
+\title{Protein Discovery with Discrete Walk-Jump Sampling}
+
+\begin{abstract}
+We resolve difficulties in training and sampling from a discrete generative model by learning a smoothed energy function, sampling from the smoothed data manifold with Langevin Markov chain Monte Carlo (MCMC), and projecting back to the true data manifold with one-step denoising. Our \textit{Discrete Walk-Jump Sampling} formalism combines the contrastive divergence training of an energy-based model and improved sample quality of a score-based model, while simplifying training and sampling by requiring only a single noise level. We evaluate the robustness of our approach on generative modeling of antibody proteins and introduce the \textit{distributional conformity score} to benchmark protein generative models. By optimizing and sampling from our models for the proposed distributional conformity score, 97-100\% of generated samples are successfully expressed and purified and 70\% of functional designs show equal or improved binding affinity compared to known functional antibodies on the first attempt in a single round of laboratory experiments. We also report the first demonstration of long-run fast-mixing MCMC chains where diverse antibody protein classes are visited in a single MCMC chain.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Discrete sequence generation poses a number of challenges to gradient-based generative models. Generative models must be expressive enough to faithfully capture the underlying data distribution, while also having controllable outputs that are novel, unique, diverse, and respect the constraints of the problem space. Energy-based models (EBMs) \citep{hinton1986learning, lecun2006tutorial} fit an energy function that specifies a probability distribution over data analogous to the Boltzmann distribution from statistical physics. Giving access to an easily computable energy is an advantage of EBMs, but on the flip-side they can be difficult to train and sample from.  Denoising objectives based on score matching~\citep{hyvarinen2005estimation, vincent2011connection} and the related advancements in diffusion models \citep{sohl2015deep, ho2020denoising} overcome these issues, but these either model the energy gradient or only provide access to an empirical lower-bound of the likelihood. 
+
+Protein design is an instance of the discrete sequence generation problem, wherein the challenge is to find useful proteins in the large, discrete, and sparsely functional space \citep{romero2009exploring} of dimension $20^L$ for proteins of length $L$. Here, we consider the specific problem of generative modeling of antibodies, a class of proteins with highly conserved structure that are of immense interest for therapeutics. In addition to the qualities mentioned above, generative models for antibodies must be sample-efficient because of the relatively small size of datasets with therapeutic antibodies \citep{kim2023computational}. Antibodies consist of well-conserved domains and high-entropy variable regions, so leveraging evolutionary information from pre-trained protein language models is not an immediate solution. We distinguish \textit{ab initio} protein discovery and design (producing novel, functional proteins given some training samples), which is the focus of this work, from \textit{de novo} design, which we define as the generation of novel proteins without starting material. Existing autoregressive protein design methods \citep{jin2021iterative} are inefficient and can suffer from accumulation of errors and high inference latency, while current non-autoregressive diffusion models are similarly inefficient and poorly optimized for real discovery and design tasks \citep{kong2022conditional}. Our goal here is to invent an efficient, non-autoregressive generative modeling paradigm for discrete data that produces high quality, novel samples.
+
+To this end, we introduce \textbf{S}moothed \textbf{D}iscrete \textbf{S}ampling (\textbf{SDS}), a new formalism for training and sampling from discrete generative models. We propose a novel algorithm, \textbf{d}iscrete \textbf{W}alk-\textbf{J}ump \textbf{S}ampling (\textbf{dWJS}), a method building on the neural empirical Bayes (NEB) \citep{saremi2019neural} formalism, that addresses the brittleness of discrete EBMs and diffusion models and in doing so, provides a robust and general framework for protein discovery and design. Our results rescue EBMs for discrete distribution modeling and question the need for diffusion models with multiple noise scales in protein discovery.
+
+Our contributions are as follows:
+\begin{itemize}
+    \item We introduce a new paradigm for modeling discrete data distributions, \textit{Smoothed Discrete Sampling} (SDS), building on the neural empirical Bayes framework. We propose the discrete Walk-Jump sampling algorithm, which uses uncoupled, separately trained score- and energy-based models to learn \textit{noisy} data distributions and sample discrete data. dWJS enables fast, non-autoregressive sampling with variable length discrete outputs. We also design a novel architecture for discrete EBMs. 
+    \item Our method simplifies score-based model training for discrete data by requiring only a single noise level and no noise schedule, which alleviates the brittleness, training instabilities, and slow sampling of diffusion models. Our method also resolves difficulties in training EBMs, obviating the need for many common EBM training tricks (replay buffer, $\ell_2$ norm penalty, rejection sampling, etc.), while preserving good sample quality and fast sampling.
+    \item We demonstrate the utility of our approach in the context of \textit{ab initio} protein discovery and design - generating novel, biophysically-valid protein sequences from models trained on repertoires of functional molecules. We validate our method with \textit{in vitro} experiments. Our method outperforms autoregressive and masked protein language models, large language models, discrete sequence and structure-sequence diffusion, and score-based baselines.
+\end{itemize}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.8\textwidth]{figs/long_chain_samples.png}
+    \caption{
+        Selected samples from a single Markov chain Monte Carlo sampling run of discrete Walk-Jump sampling (our method). Protein color corresponds to different antibody germlines (classes). Samples are folded with EquiFold \citep{lee2022equifold} for visualization purposes. Discrete walk-jump sampling exhibits fast mixing and explores diverse modes of the distribution in a single chain.
+    }
+    \label{fig:samples}
+\end{figure*} 
+
+
+\section{Background}
+
+\label{sec: background}
+
+\subsection{Energy-based models}
+
+EBMs are a class of models that learn an energy function $f_\theta: \mathcal{X} \rightarrow \mathbb{R}$ mapping inputs $x$ (in $\mathbb{R}^d$) to a scalar ``energy" value. The data distribution is approximated by the Boltzmann distribution 
+\begin{align*}
+    p_\theta(x) \propto e^{-f_\theta(x)}.
+\end{align*}
+EBMs are typically trained via contrastive divergence \citep{hinton2002training}, and new samples are drawn from $p_\theta(x)$ by Markov-Chain Monte Carlo (MCMC). Details of the loss function used in this work are given in Section \ref{sec:methods}. In Langevin MCMC, samples are initialized from a known data point or random noise and refined with (discretized) Langevin diffusion
+\begin{align}
+\label{eq:langevin}
+    x_{k+1} = x_k - \delta\, \nabla f_{\theta}(x_k) + \sqrt{2\delta}\, \varepsilon_k, \ \varepsilon_k \sim \mathcal{N}(0, I_d),
+\end{align}
+where $\nabla$ denotes the gradient of the energy function with respect to inputs, $k$ is the sampling step, $\delta$ is the (discretization) step size, and the noise $\varepsilon_k$ is drawn from the normal distribution at each step.
+
+\subsection{Neural empirical Bayes}
+
+In NEB, the random variable $X$ is transformed with additive Gaussian noise $Y = X + \mathcal{N}(0, \sigma^2 I_{d}).$ The least-squares estimator of $X$ given $Y=y$ is given by \citep{robbins1956empirical, miyasawa1961empirical} 
+\begin{align}
+    \hat{x}(y) = y + \sigma^2 \nabla \log p(y),
+\end{align}
+where $p(y) = \int p(y|x) p(x) dx$ is the probability distribution function of the smoothed density.\footnote{
+We follow the convention $p(x)\coloneqq p_X(x), p(y) \coloneqq p_Y(y)$, etc.
+} 
+This estimator is often expressed directly in terms of $g(y) = \nabla \log p(y)$ known as the score function~\citep{hyvarinen2005estimation} which is parameterized with a neural network denoted by $g_\phi: \mathbb{R}^d \rightarrow \mathbb{R}^d.$ The least-squares estimator then takes the following parametric form:
+\begin{align}
+\hat{x}_\phi(y) = y + \sigma^2 g_\phi(y).
+\end{align} 
+Putting this all together leads to the following learning objective
+\begin{align}
+    \label{eq:loss}
+    \mathcal{L}(\phi) = \mathbb{E}_{x\sim p(x), y\sim p(y|x)} \Vert x- \hat{x}_\phi(y) \Vert^2,
+\end{align}
+which is optimized with stochastic gradient descent. Notably, no MCMC sampling is required during learning. 
+
+
+\section{Antibody discovery and design}
+
+\label{sec:methods}
+
+\subsection{Discrete walk-jump sampling}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.7\textwidth]{figs/wjs_method.png}
+    \caption{
+        Discrete walk-jump sampling. \textbf{a} The noising and denoising process is applied to antibody proteins. \textbf{b} Discrete inputs $x$ are smoothed with isotropic Gaussian noise, $\varepsilon \sim \mathcal{N}(0,\sigma^2 I_d)$, to noisy inputs, $y=x+\varepsilon$. A discrete energy-based model (dEBM) parameterizes the energy function $f_\theta(y)$ of noisy data. Noisy data is sampled with the energy function, and denoised with a separate denoising ByteNet network to clean samples, $\hat{x}_\phi(y)$. \textbf{c} The ``walk" sampling steps on the noisy data manifold with Langevin MCMC are totally decoupled from the ``jump" steps to clean samples. \textbf{d} The dEBM takes noisy inputs $y$, concatenates them with a 1d positional encoding, $p_{1d}$, passes through an MLP and a 3 layer CNN, and concatenates the outputs with an embedding $z_s$ of the inputs into a hidden state, $h$. $h$ is passed through an MLP and returns the energy $f_\theta(y)$. 
+    }
+    \label{fig:diagram}
+\end{figure*} 
+
+Following training of the denoising network, $g_\phi$, one can sample noisy data using the learned score function $g_\phi(y)$ with Langevin MCMC (replace $-\nabla f$ with $g$ in \autoref{eq:langevin}). For any such draws $y_k$, clean samples from the true data manifold $\mathcal{M}$ are obtained by ``jumping'' back to $\mathcal{M}$ with the least-squares estimator $\hat{x}_\phi(y_{k}) = y_{k} + \sigma^2 g_\phi(y_k).$
+This is the walk-jump sampling (WJS) scheme. A key property of WJS is the fact that the least-squares estimation (jump) is \emph{decoupled} from the Langevin MCMC (walk). 
+
+Here, we take advantage of this decoupling to train an EBM with maximum likelihood estimation on the smoothed distribution of noisy sequences, generate noisy samples with Langevin MCMC, and denoise samples with a separately trained neural network, the least-squares estimator. The algorithm for discrete walk-jump sampling is given in Algo.~\ref{alg:sds}. Our algorithm is general and applies to any discrete sequence inputs of a fixed vocabulary. In Fig. \ref{fig:samples} we show samples generated from a single chain of MCMC. Unlike a diffusion model, every sample along the chain collectively forms a valid set of samples from the underlying distribution, because of the decoupled walk (sampling) and jump (denoising) steps. dWJS also produces fast-mixing chains, such that many diverse modes (protein classes) are sampled in a single chain. Samples are folded with EquiFold \citep{lee2022equifold} for visualization and confirmation of structural validity.
+
+The EBM is trained by maximizing the log-likelihood of \textit{noisy} data under the model:
+
+\begin{align}
+    \argmax_\theta \Exp_{y \sim p_Y} [\log p_\theta(y)] = \argmax_\theta \left({\Exp}_{y^- \sim p_\theta(y)} [ f_\theta(y^-)] - {\Exp}_{y^+ \sim p_Y} [ f_\theta(y^+)] \right),
+    \label{eq:ebm_loss}
+\end{align}
+where $y^+$ are noisy training data and $y^-$ are noisy data sampled from the model.
+
+With this objective, the model aims to decrease the energy of noisy training data (``positive'' samples $y^+$) while increasing the energy of noisy data sampled from the model (``negative'' samples $y^-$) in expectation. The following identity is behind the positive/negative phases in the EBM training:
+\begin{equation}
+\begin{split}
+\nabla_\theta \log p_\theta(y) &= - \nabla_\theta f_\theta(y) - \nabla_\theta \log Z(\theta) \\
+&= - \nabla_\theta f_\theta(y) + \frac{\int \nabla_\theta f_\theta(y) e^{-f_\theta(y)} dy}{Z(\theta)} \\
+&= - \nabla_\theta f_\theta(y) + \int \nabla_\theta f_\theta(y) \cdot p_\theta(y) dy \\
+&= - \nabla_\theta f_\theta(y) + \Exp_{y \sim p_\theta(y)}[\nabla_\theta f_\theta(y)],
+\end{split}
+\end{equation}
+where $Z(\theta) = \int e^{-f_\theta(y)} dy$ is the partition function.
+
+\begin{algorithm}[H]
+  \SetAlgoLined
+  \KwIn{Denoiser, $g_{\phi}(y)$, energy-based model, $f_{\theta}(y)$}
+  \KwOut{Noisy samples $y \sim p(y)$, denoised samples $\hat{x}(y)$}
+  
+  \BlankLine
+    $y_0 \sim {\rm Unif}([0,1]^d) + \mathcal{N}(0, \sigma^2 I_{d})$ \\
+    \For{$t = 0, \dots, T-1$}{
+        $y_{t+1} \leftarrow y_t - \delta\, \nabla_{y} f_{\theta}(y_t) + \sqrt{2 \delta} \varepsilon_{t}$ ,
+        $\varepsilon_{t} \sim \mathcal{N}(0, I_{d})$ \\
+    }
+    $\hat{x}_T \leftarrow y_{T} + \sigma^2 g_{\phi}(y_T)$  \\  
+    \KwRet{$\argmax \hat{x}_T$}  \tcp{to recover one-hot encoding}
+
+  \caption{Discrete Walk-Jump Sampling}
+  \label{alg:sds}
+\end{algorithm}
+
+\paragraph{Variable length protein sequence generation.} 
+We represent antibody protein molecules as $\mathbf{}{x} = (x_1, \ldots, x_d)$, where $x_l \in \{1, \ldots, 20\}$ 
+corresponds to the amino acid (AA) type at position $l$. Sequences from the Observed Antibody Space (OAS) database \citep{olsen2022observed} are aligned according to the AHo numbering scheme \citep{honegger2001yet} using the ANARCI \citep{dunbar2016anarci} package and one-hot encoded. Aligning sequences in this way is a practical solution to handling insertions and deletions, which are otherwise troublesome for models that require fixed length inputs and outputs; alignment introduces a ``gap" token that can be introduced or removed during sampling to effectively change the length of sequences. This allows the model to capture the distribution of lengths present in natural antibodies. The alignment step maps heavy and light chain sequences of varying lengths to a standard, gapped input size of 149 and 148 respectively with 21 possible discrete tokens including the gap. Thus, the input dimension for every sequence becomes $d = (149 + 148) \times 21$. Without loss of generality, any set of proteins can be aligned with a multiple sequence alignment \citep{rao2021msa}. For other classes of discrete data, pseudo-alignment tokens can be used and randomly inserted into the inputs, or simple BOS and EOS tokens can be used and sampled.
+An EBM is trained via contrastive divergence on the manifold of smoothed, noisy one-hot encodings, $y$, given by $y = x + \varepsilon$, $\varepsilon \sim \mathcal{N}(0, \sigma^2 I_{d})$, where $x \in \{0,1\}^d$.
+A separate denoising model is trained with the objective in Eq. \ref{eq:loss}. New antibody sequences are generated (Fig. \ref{fig:diagram}) by sampling noisy samples with Langevin MCMC following gradients from the EBM, denoising with the least-squares estimator, and taking ${\rm argmax} \: \hat{x}$ to recover a one-hot encoding.
+
+\paragraph{Protein design vs discovery.}
+
+Protein \textit{discovery} is the task of generating novel, unique, and valid samples. Protein \textit{design} refers to taking some starting sequence and making edits to improve function. With dWJS we achieve discovery through unconditional sampling, while design is performed via constrained sampling and scoring. That is, we impose the following constraint in the form of a binary projection matrix $$P^{\top} {\rm argmax} \: \hat{x}(y,t) = P^{\top} s$$ for $P \in \{0,1\}^{L \times c}$, where $c$ is the number of conserved tokens in the sequence, $y$ is the noisy sequence at time step $t$ of Langevin MCMC, $\hat{x}(y,t)$ is the denoised sample at time $t$, and $s$ is the starting sequence. This constraint ensures that the specified regions of the sequence are conserved, while the non-conserved regions are free to change during Langevin MCMC.
+\subsection{Derivation of optimal noise level for discrete sequence data}
+
+Throughout the experiments in Section \ref{sec:exps}, we must choose what noise level, $\sigma$, to use for training. Empirically, we find that in the protein discovery setting, $\sigma \geq 0.5$ is sufficient for getting good sample quality. Here, we provide some intuition for choosing a good $\sigma$, based on a geometric picture of the concentration of the measure \citep{saremi2019neural}. We define the matrix $\chi$ with entries
+\begin{equation}
+    \chi_{ii'} = \frac{||X_i - X_{i'}||}{2\sqrt{d}},
+\end{equation}
+where $d$ is the dimension of the data and the $\frac{1}{2\sqrt{d}}$ scaling comes from the concentration of isotropic Gaussians in high dimensions. The critical noise level, $\sigma_c$, is defined as
+\begin{align*}
+    \sigma_c = \max_{ii'} \chi_{ii'}
+\end{align*}
+such that for $\sigma > \sigma_c$, all noisy data have some degree of overlap. We find that $\sigma_c \approx 0.5$, which agrees with our empirical hyperparameter optimization. Estimating $\sigma_c$ in this way serves to motivate the empirical success of the $\sigma$ used in our experiments, and provides helpful guidance on the scale of $\sigma$ to use for discrete data. Here we take $d$ to be the length of the input vector ($d=L=297$ for aligned antibody sequences); for the flattened sparse one-hot matrices with vocabulary size 21, $d=6237$. This scales $\sigma_c$ by 0.22, which still gives a useful scale for $\sigma$, but is not optimal because of the sparsity of the one-hot matrices. 
+
+\begin{table}[ht]
+\caption{Statistics of the distance matrix, $\chi$, for discrete antibody sequence data.}
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+& min & median & mean & max $\approx \sigma_c$ \\
+\midrule
+$\chi$ & 0.17 & 0.42 & 0.41 & 0.51\\
+\bottomrule
+\end{tabular}
+\end{center}
+\label{tab:chi}
+\end{table}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.62\textwidth]{figs/conformity_score.png}
+    \caption{
+        \textit{in silico} designs sampled with dWJS are compared to a reference set of validation samples. Distributions are characterized with a set of sample quality metrics. Joint density estimation is used to compute the likelihood of designs versus the validation set and likelihoods are condensed into a \textit{distributional conformity score} that characterizes the similarity of generated samples to the reference set.
+    }
+    \label{fig:conformity_score}
+\end{figure*} 
+
+\subsection{Distributional conformity score}
+\label{sec:conformity}
+
+The Fréchet inception distance (FID) \citep{heusel2017gans} (a metric for image generation quality) and the BLEU (BiLingual Evaluation Understudy) score \citep{papineni2002bleu} (for evaluating the quality of machine translation) greatly simplify the evaluation of proposed methods; protein generation lacks such metrics, which motivates us to introduce the ``distributional conformity score'' (DCS) (Fig. \ref{fig:conformity_score}). The goal of the DCS is to provide a succinct description of how likely generated samples are with respect to a reference distribution, while maintaining novelty and diversity. DCS is designed such that improving sample quality corresponds directly to increased probability of generating real, biophysically valid proteins.
+
+We evaluate the probability that our generated sequences conform to a reference distribution using the conformal transducer system \citep{shafer2008@tutorial, vovk2016@criteria}. Let $\mathcal{X} \in \mathbb{R}^d$, $\mathcal{Y} \in \mathbb{R}$, and $\mathbf{Z} = \mathcal{X} \times \mathcal{Y}$.\footnote{In the discussion of distributional conformity score, $x$ refers to sample features; elsewhere in the paper $x$ refers to clean data. Here, $y$ refers to labels; elsewhere in the paper $y$ refers to noisy data.} A conformity measure A is a measurable function that maps a sequence $ (z_1, \dots, z_n) \in \mathbf{Z}^n$ to a set of real numbers $ (\alpha_1, \dots, \alpha_n)$ and is equivariant under permutations. To avoid overfitting the estimator, we split the reference set into a fitting set and a validation set (Algo. \ref{alg:conformal}). In our context, the reference distribution $\mathcal{D}$ comprises all antibodies and the label $y$ represents the property of interest such as expression or binding. Empirically, we find that DCS is a useful \textit{in silico} evaluation metric for developing generative methods and hyperparameter optimization, and that methods with DCS $> 0.3$ yield nearly $100\%$ expressing proteins in the wet lab.
+\begin{algorithm}[H]
+  \SetAlgoLined
+  \KwIn{Reference distribution $\mathcal{D}$, test example $x \in \mathcal{X}$, conformity measure $A$, label $y$}
+  
+  \KwOut{\textit{p}-value $p^y$ (the fraction of validation examples that are less similar to $D_{z|y}$ than $x$)}
+    
+  \BlankLine
+  Sample $(z_1, \dots, z_{n}), z_i \sim D_{z|y}$ and a held-out validation set $(\tilde{z}_{1}, \dots, \tilde{z}_{k-1}), \tilde{z}_i \sim D_{z|y}$
+
+    
+    Set $\tilde{z}_{k} \leftarrow (x, y)$ \\
+    \For{$i = 1$ \KwTo $k$}{
+        $ \alpha_i \leftarrow A(z_1, \dots, z_{n}, \tilde{z}_i)$\
+    }
+    $p^y \leftarrow \frac{1}{k}\sum_{i=1}^{k} [\alpha_{i}<\alpha_{k}]$ \\
+    
+    \KwRet{$p^y$}
+    
+  \caption{Distributional conformity scores for evaluating generated designs}
+  \label{alg:conformal}
+\end{algorithm}
+
+
+\section{Experiments}
+
+\label{sec:exps}
+We evaluate our method, discrete Walk-jump sampling (dWJS) (Fig. \ref{fig:diagram}), on three antibody generation tasks: 1) distribution learning on paired observed antibody space \citep{olsen2022observed}; 2) the \textit{in vitro} expression and purification of novel antibodies; and 3) most importantly, functional therapeutic antibody design \citep{mason2021optimization}. Crucially, we compare methods using our \hyperref[sec:conformity]{distributional conformity score}, which is a sample-to-distribution metric to assess sample quality (analogous to an FID score), rather than the sequence recovery metrics used in previous antibody design work \citep{kong2022conditional, jin2021iterative}. Sequence recovery is a poor objective for our goal, which is the discovery of novel (large edit distance from known examples), functional antibodies.
+
+\begin{table}[t]
+\caption{Ablikeness metrics, uniqueness, diversity, and distributional conformity scores.}
+\label{tab:ablikeness}
+\begin{center}
+\begin{tabular}{llllll}
+\toprule
+\multicolumn{1}{c}{\bf Model}  &\multicolumn{1}{c}{\bf $W_{\property} \downarrow$  } 
+&\multicolumn{1}{c}{Unique $ \uparrow$  } &\multicolumn{1}{c}{\bf $E_{\dist} \uparrow$ } &\multicolumn{1}{c}{ ${\rm IntDiv} \uparrow$ } &\multicolumn{1}{c}{\bf $\rm DCS \uparrow$ }
+\\ \midrule \\
+dWJS (energy-based)         & \textbf{0.056} & \textbf{1.0} & 58.4 & 55.3 & 0.38\\
+dWJS (score-based)         & 0.065 & 0.97 & \textbf{62.7} & \textbf{65.1} & 0.49\\
+SeqVDM         & 0.062 & \textbf{1.0} & 60.0 & 57.4 & 0.40\\
+DEEN & 0.087 & 0.99 & 50.9 & 42.7 & 0.41\\
+GPT 3.5 & 0.14 & 0.66 & 55.4 & 46.1 & 0.23\\
+IgLM & 0.08 & \textbf{1.0} & 48.6 & 34.6 & \textbf{0.533} \\
+ESM2 & 0.15 & \textbf{1.0} & 70.99* & 77.56* & 0.061 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{dWJS generates natural, novel, diverse antibodies \textit{in silico}}
+We measure generative model performance with a suite of ``antibody likeness" (ab-likeness) metrics including labels derived from the AA sequence with Biopython \citep{cock2009biopython}. Sequence property metrics are condensed into a single scalar metric by computing the distributional conformity score and the normalized average Wasserstein distance $W_{\property}$ between the property distributions of samples and a validation set. The average total edit distance $E_{\dist}$ summarizes the novelty and diversity of samples compared to the validation set, while internal diversity (${\rm IntDiv}$) represents the average total edit distance between samples. Our method achieves strong ablikeness results (Table \ref{tab:ablikeness}), simply by increasing $\sigma$ to $\geq 0.5$. 
+
+\begin{wraptable}{L}{0.45\textwidth}
+\caption{Measured protein synthesis.}
+\label{tab:expression}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Model & \bf $\rm total_{expressed} \uparrow$ \\
+\midrule
+\textbf{dWJS (score-based)} &\textbf{1.0}\\
+dWJS (energy-based) &0.97\\
+EBM & 0.42\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{wraptable}
+
+dWJS with dEBM sampling achieves the best agreement with the validation set property distribution and highest percentage of unique samples, while dWJS with score-based sampling has high distributional conformity score, novelty, and diversity. We compare to a latent sequence diffusion method (SeqVDM), (a discrete generalization of variational diffusion; \citealt{kingma2021on}), a score-based model with an energy parameterization (DEEN), a transformer-based language model trained specifically for antibody design (IgLM); \cite{shuai2021generative}, ESM2 \cite{lin2023evolutionary}, and a pre-trained large language model (LLM) (GPT 3.5). Our dWJS methods have faster sampling time and lower memory footprint than diffusion, autoregressive, and score-based baselines (Table \ref{tab:profiling}), while also having better sample quality. Our methods outperform IgLM on antibody-likeness, edit distance, and internal diversity metrics, whereas IgLM has the best DC score and the lowest (worst) ${\rm IntDiv}$. This indicates that IgLM samples are extremely close to the reference set and samples are similar to one another. As our score-based dWJS has a DC score of 0.49 and a 100\% expression rate in the lab, it is likely that all IgLM samples would successfully express in the lab as well. IgLM does produce 100\% unique samples, outperforming score-based dWJS and GPT 3.5. Due to IgLM being an autoregressive sampler, our method (energy-based dWJS) has $43 \times$ faster sampling speed, which is useful when generating and ranking large numbers of designs. To mimic the \textit{ab initio} generation task for ESM2, we increase the masking percentage as high as we can (40\%) while still generating valid samples and infill validation set sequences to generate new samples. As expected, ESM2 performs extremely poorly in generating \textit{ab initio} samples with good antibody-likeness, because it is not trained for generation. It generates highly repetitive sequences that are very dissimilar to antibodies (hence the high, but meaningless, $E_{\dist}$ and ${\rm IntDiv}$ scores). As a masked language model, ESM2 infilling is the fastest sampler, but at the cost of poor sample quality.
+ Details on the baseline methods, and IgLM and GPT 3.
+
+\subsection{dWJS generates natural, novel, diverse antibodies \textit{in vitro}}
+Out of more than 277 designed antibody sequences tested in the laboratory, 270 were successfully expressed and purified (Table \ref{tab:expression}). We achieved the 97.47\% \textit{in vitro} success rate by developing dWJS to capture the antibody distribution \textit{in silico} as measured by $W_{\property}$ and distributional conformity score. For comparison, sequences from an EBM (trained on clean data with samples drawn using traditional Langevin MCMC) achieved a 42\% expression rate. An antibody sequence comprised of random vocabulary tokens would be expected to have a 0\% expression rate, and in laboratory experiments we have confirmed that a small number of edits (< 4) can destroy expression if the proposal distribution (generative model) is poorly optimized. 
+
+\begin{wraptable}{!h}{10cm}
+\caption{Predicted and measured antibody binding affinity.}
+\label{tab:trastuzumab}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Model & \bf $p_{\rm bind} \uparrow$ & ${\rm total_{bind}} \uparrow$\\
+\midrule
+\textbf{dWJS (energy-based) (Ours)} &\textbf{0.96} & \textbf{0.70}\\
+dWJS (score-based) (Ours) &0.95 & N/A\\
+LaMBO-2 \citep{gruver2023protein} & N/A & 0.25\\
+AbDiffuser \citep{martinkus2023abdiffuser} & 0.94 & 0.22 (0.57)\\
+SeqVDM &0.75 & N/A\\
+GPT 4 &0.74 & N/A\\
+Transformer &0.60 & N/A\\
+EGNN &0.58 & N/A\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{wraptable}
+
+\subsection{dWJS generates functional antibody variants \textit{in vitro}}
+\label{sec:trastuzumab}
+
+To further show the robustness of our method, we consider the task of training generative models on a hu4D5 antibody mutant dataset \citep{mason2021optimization} and compare to baseline models. The dataset consists of 9k binding and 25k non-binding hu4D5 CDR H3 mutants with up to 10 mutations (after de-duplication and removing samples that are labeled both binding and non-binding). This yields a $10^{13}$ dimensional search space. The mutants were measured in lab experiments to determine their binding to HER2 antigen. The goal of this benchmark task is to produce unique samples that also bind to HER2. We trained dWJS models (score-based and energy-based) on only the binder set at a noise level of $\sigma=0.5$, while also training a 1D-CNN binary classifier to classify binders and non-binders. The classifier achieves 86\% accuracy on an IID validation split. Then, we classified 1000 samples from each dWJS generative model and four baseline models also trained on the hu4D5 binder set. We compare \textit{in silico} to three diffusion models: 1) a sequence transformer based on BERT \citep{devlin2018bert} that generates sequences, 2) an E(n) Equivariant Graph Neural Network (EGNN) \citep{satorras2021n} that codesigns $(\rm sequence, \rm structure)$, and 3) a latent sequence diffusion model, SeqVDM; and a pre-trained LLM, GPT 4. The probability of binding for \textit{unique} designs from each model is reported in Table \ref{tab:trastuzumab}. Our methods produce the highest percentage of unique predicted binders.
+
+We also report \textit{in vitro} wetlab validation results for the dWJS energy-based designs. dWJS produces the highest percentage of functional antibodies that bind to target (${\rm total_{bind}}$ in Table \ref{tab:trastuzumab}). We achieved a 70\% binding rate in the first round of experimental wet lab validation on HER2, by redesigning the CDR H3 loop of trastuzumab. To the best of our knowledge, this is the highest reported binding rate of any antibody design method applied to trastuzumab CDR H3 redesign. Concurrent with the first appearance of our work, two diffusion models reported \textit{in vitro} wet-lab results for this task: AbDiffuser \citep{martinkus2023abdiffuser}, a $(\rm sequence, \rm structure)$ antibody codesign method, and LaMBO-2 \citep{gruver2023protein}, a guided discrete diffusion method. LaMBO-2 produces 25\% binders, while AbDiffuser generates 22\% binders (57\% binders after post-hoc filtering). Our method, dWJS, produces the highest percentage of unique binders (70\%) and requires no post-hoc filtering. While the diffusion methods include other important capabilities including structure generation (AbDiffuser) and guided sampling (LaMBO-2), our method outperforms diffusion for discrete distribution learning, which is our goal. For this experiment, our model is trained only on the publicly available \citep{mason2021optimization} dataset.
+
+
+\section{Related Work}
+
+\label{sec: related_work}
+Energy-based models (EBMs) \citep{lecun2006tutorial} are a class of physics-inspired models that learn an energy function defining a probability distribution over data with a rich history that goes back to Boltzmann machines~\citep{hinton1986learning}. Estimating unnormalized densities has also been formulated using score matching~\citep{hyvarinen2005estimation}. This formulation led to probabilistic models for denoising autoencoders~\citep{vincent2011connection, alain2014regularized, saremi2018deep}, but also has an empirical Bayes interpretation that is most related to this work. In particular, the neural empirical Bayes (NEB) \citep{saremi2019neural} formalism unifies kernel density estimation \citep{parzen1962estimation} and empirical Bayes \citep{robbins1956empirical} to transform the unsupervised learning problem into a more tractable form where a neural network energy function is parameterized to capture a \textit{smoothed} data distribution. Our work is the first study of the NEB formalism for discrete data. Discrete diffusion models such as \citep{austin2023structured} learn an iterative denoising process over many different noise levels by prescribing a noise process over discrete data that converges to a known categorical distribution.
+
+Approaches borrowing from traditional ML generative modeling have been used to model antibodies \citep{shuai2021generative,gligorijevic2021function,ferruz2022controllable,tagasovska2022pareto}, but typical natural-language-based methods struggle to capture the data distribution of antibodies, for which there is limited training data ($\sim$1K - 1M high-quality sequences depending on the distribution of interest) and additional challenges due to the high-entropy variable regions of the sequence. Here, we address the above challenges with training and sampling discrete sequences using a novel formulation of decoupled energy- and score-based modeling.
+
+
+\section{Conclusions}
+
+We proposed \textit{Smoothed Discrete Sampling} (SDS), a new paradigm for modeling discrete distributions that uses Langevin Markov-Chain Monte Carlo to sample from smoothed data distributions. We introduce the discrete Walk-Jump Sampling (dWJS) algorithm and evaluate it on the antibody discovery and design problems, showing the capability of our method to generate novel, diverse, and functional antibodies as measured by synthetic biophysical property distributions, similarity metrics, and \textit{in vitro} experiments. The strong regularization provided by fitting the energy function to noisy data completely prevents overfitting and training instabilities, resulting in fast and efficient training and sampling with low compute requirements. dWJS discards many of the commonly used techniques for improving EBM training with Langevin MCMC (replay buffers, $\ell_2$ norm penalty, simulated annealing, rejection sampling, etc.) and reduces the engineering complexity of training EBMs and diffusion-based models to a single hyperparameter choice: the noise level, $\sigma$. Altogether, our results suggest a simplified, more general and robust framework for training and sampling from discrete energy- and score-based models with applications to therapeutic molecule design. Future work will probe the generality of our results to other classes of molecules and even other data modalities (e.g., images), as well as theoretical investigation into the results presented here.
+
+
+\newpage
+
+
+

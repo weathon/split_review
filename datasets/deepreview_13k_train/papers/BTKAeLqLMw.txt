@@ -1,0 +1,539 @@
+\title{What Makes Good Data for Alignment? A Comprehensive Study of Automatic Data Selection in Instruction Tuning}
+
+\begin{abstract}
+Instruction tuning is a standard technique employed to align large language models to end tasks and user preferences after the initial pretraining phase. 
+Recent research indicates the critical role of data engineering in instruction tuning -- when appropriately selected, only limited data is necessary to achieve superior performance. 
+However, we still lack a principled understanding of what makes good instruction tuning data for alignment, and how we should select data automatically and effectively.
+In this work, we delve deeply into automatic data selection strategies for alignment.
+We start with controlled studies to measure data across three dimensions: complexity, quality, and diversity, along which we examine existing methods and introduce novel techniques for enhanced data measurement. 
+Subsequently, we propose a simple strategy to select data samples based on the measurement. 
+We present \deita~(short for \emph{Data-Efficient Instruction Tuning for Alignment}), a series of models fine-tuned from LLaMA and Mistral models using data samples automatically selected with our proposed approach.  
+Empirically, \deita~performs better or on par with the state-of-the-art open-source alignment models with only 6K SFT training data samples -- over 10x less than the data used in the baselines. 
+When further trained with direct preference optimization (DPO), \deita-Mistral-7B + DPO trained with 6K SFT and 10K DPO samples achieve 7.55 MT-Bench and 90.06\% AlpacaEval scores.
+We anticipate this work to provide tools on automatic data selection, facilitating data-efficient alignment.
+We release our models as well as the selected datasets for future researches to effectively align models more efficiently.}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[!t]
+        \centering
+        \includegraphics[width=0.85\columnwidth]{pic/main.pdf}
+        \caption{Illustration of the data selection approach.
+        We measure data from three dimensions: complexity, quality, and diversity. $I$ and $R$ represent instruction and response respectively. For \evolc{} and \evolq{}, we first collect samples with varying complexities or qualities through adopting an evolution-based approach following~\citet{xu2023wizardlm}, then we ask ChatGPT (The term “ChatGPT” in this paper refers to gpt-3.5-turbo-0613) to rank and score the variants of the same data sample for a small seed dataset, and we train our own complexity and quality scorers based on these scores.
+        In the last step, we utilize the trained scorers and adopt a score-first, diversity-aware approach to select the ``good'' data samples, as we detail in \S \ref{sec:method}.
+        }
+        \label{fig:main}
+\end{figure}
+In the development of large language models (LLMs), aligning LLMs with human preferences is a necessary step for the models to accurately understand human instructions and generate relevant responses. 
+Standard approaches for LLM alignment encompass instruction tuning and reinforcement learning with human feedback (RLHF) \citep{ouyang2022training}. 
+Instruction tuning, or supervised fine-tuning (SFT), refines the pre-trained model using annotated instructional data, often serving as the foundational step before RLHF to facilitate the model's initial alignment~\citep{touvron2023llama}. RLHF, on the other hand, leverages reinforcement learning to train models based on annotated feedback on their generated responses. 
+While RLHF has underpinned the development of ChatGPT~\citep{chatgpt} and GPT-4~\citep{openai2023gpt4}, recent researches suggest that instruction tuning in isolation can offer competitive results~\citep{sun2024principle,zhou2023lima}.
+
+Differing from traditional task-specific fine-tuning where data quantity is paramount, past studies argue that almost all knowledge in LLMs is acquired during pretraining, and instruction tuning is to align existing model abilities towards a desired direction~\citep{zhou2023lima}. 
+As such, a relatively small high-quality dataset has been shown to be sufficient to align LLMs well~\citep{alpaca,wang-etal-2023-self-instruct,zhou2023lima,lu2023instag}, with dataset sizes spanning from hundreds of thousands to a mere 1000 examples.
+However, the construction of these datasets in earlier research predominantly relies on heuristic automation (e.g.~distillation from ChatGPT) or manual selection, and it remains unclear what defines good data examples for instruction tuning, and how to systematically curate an effective dataset that ensures competitive performance with the least amount of data.
+
+In this work, we seek to define the characteristics of ``good data'' for instruction tuning, based on which we aim to push \emph{data efficiency} of instruction tuning further in an automatic manner.
+To this end, we first explore various methods to quantitatively assess data examples from three key dimensions: \emph{complexity}, \emph{quality}, and \emph{diversity}. Our hypothesis posits that the most effective datasets for instruction tuning are those that are complex, of high quality, and diverse. 
+We examine a wide range of data measurement baselines and propose new metrics, which show a stronger correlation with alignment performance after instruction tuning.
+Drawing inspiration from~\citet{xu2023wizardlm}, we introduce \evolc{} and \evolq{}, which evolve a single data point to produce a series of examples varying in complexity or quality, then we rank and score a small subset of them with ChatGPT and train a scorer to predict these scores, as illustrated in Figure~\ref{fig:main}.
+Such an evolution-based method automatically yields examples sorted based on complexity or quality, enabling enhanced and finer-grained data measurements.
+Combined with our diversity metric via distance of model embeddings, we design a simple strategy to select the most effective data examples from a large data pool. 
+Being simple and effective, our data selection strategy paves the way for a paradigm of data-efficient instruction tuning -- where fewer training samples can be automatically selected out to yield performance on par with, or even surpassing, models trained on significantly larger datasets.
+
+We present \deita~(short for Data-Efficient Instruction Tuning for Alignment), a family of models fine-tuned from the LLaMA~\citep{touvron2023llama1,touvron2023llama} and Mistral~\citep{jiang2023mistral} using our proposed technique to maximize data efficiency.
+On experiments in terms of MT-bench~\citep{zheng2023judging}, AlpacaEval~\citep{alpaca_eval}, and the Open LLM Leaderboard~\citep{open-llm-leaderboard} demonstrate that \deita~is able to outperform or be on par with state-of-the-art instruction following models such as Zephyr~\citep{tunstall2023zephyr}, Vicuna~\citep{chiang2023vicuna} and WizardLM~\citep{xu2023wizardlm}, while using over 10x fewer automatically selected data examples.
+For example, \deita-Mistral-7B -- our model based on Mistral-7B -- achieves 7.22 MT-bench and 80.78\% AlpacaEval when trained on only 6K data samples with vanilla SFT training. After equipped with direct preference optimization (DPO, ~\citet{rafailov2023direct}), \deita-Mistral-7B + DPO, trained with 6K SFT and 10K DPO samples, obtains 7.55 MT-Bench and 90.06\% AlpacaEval. 
+In addition to the \deita{} model checkpoints, we release our light yet effective SFT datasets to facilitate alignment for future researches.  
+
+
+
+
+
+
+
+
+
+\section{What Makes Good Data for Alignment?}
+
+\label{sec:explore}
+In this section, we present a comprehensive study of the characteristics of ``good data'' in instruction tuning. 
+We start by defining the data selection problem (\S \ref{sec:task_defi}) under which we analyze different characteristics of data. Then we introduce the experiment setup (\S \ref{sec:set_up}), explore various metrics to assess data and examine their effects in instruction tuning (\S \ref{complexity} - \ref{diversity}).
+\subsection{The Data Selection Problem}
+\label{sec:task_defi}
+To investigate the characteristics of optimal data for alignment, we analyze within the framework of data selection. In this context, we delve into various metrics to evaluate data, and then employ these metrics to select a subset of data samples for instruction tuning. The resulting alignment performance serves as an indicator of whether the target metric can identify effective instruction tuning data examples.
+Formally, given a large instruction tuning data pool, $X = \{x_{1}, x_{2}, \cdots,x_{n}\}$, where $x_{i}$ represents an individual data sample in the form of an instruction-response pair.
+ We aim to select a subset $S^{(m)}_{\pi}$ of size $m$ from $X$, using a selection strategy denoted by $\pi$.  %For each sample, we calculate a score $Score_{\pi}(\func_\pi(z_{i}))$ based on the strategy $\pi$. By maximizing the sum of $Score_{\pi}(\func_\pi(z_{i}))$ for the subset\jh{This is not correct, because diversity is not sample-wise}, we can filter out the desired subset.
+$m$ is the subset size and correlates proportionally
+with the computation consumed in instruction tuning, thus we also refer $m$ as the \emph{data budget}. 
+Typically, we define a metric to assess data and select data samples based on the metric. 
+Denote the alignment performance after instruction-tuning as $Q$, the optimal data selection strategy $\pi^*$ with data budget $m$ satisfies:
+\begin{equation}
+    \pi^* = \argmax_{\pi}  Q(S_{\pi}^{(m)}).
+\end{equation}
+
+In our empirical study following, we will explore a diverse range of data evaluation metrics and their corresponding data selection strategies, by selecting $S_{\pi}^{(m)}$ according to certain metrics and performing instruction tuning on it.
+Next, we detail our experimental setup.
+
+
+
+
+
+\subsection{Experimental Setup}
+\label{sec:set_up}
+In this section, we perform controlled studies on a single metric to evaluate data at a time, and we follow the procedure as (1) selecting a subset $S_{\pi}^{(m)}$ from a data pool based on a given metric, (2) instruction-tuning a pre-trained model using $S_{\pi}^{(m)}$, and (3) evaluate the instruction-following abilities of the obtained models. 
+Given a data measurement metric, in this paper, we keep our selection algorithm as simple as possible to maintain its practicality (e.g.,~selecting the examples with the largest complexity scores), while we leave more advanced selection algorithms as future work. 
+
+\paragraph{Data Pools:}
+
+To investigate data selection from large data pools, we construct two data pools with distinct properties to mimic different practical settings: (1) $X_{sota}$, which is constructed by ensembling the training datasets of the state-of-the-art aligned LLMs. 
+This represents the setting where a data pool that is relatively complex, diverse, and of high-quality is available, and we aim to further improve the data efficiency in this case. Specifically, we follow~\citet{lu2023instag} to combine the datasets WizardLM (Alpaca), WizardLM (ShareGPT), UltraChat \citep{ding2023enhancing}, and ShareGPT \citep{chiang2023vicuna}, resulting in a dataset of ~300K samples; and (2) $X_{base}$, which mimics the scenario where the available data pool is overall lower-quality and redundant. 
+This may be closer to the actual setting that people would encounter in practice. 
+For $X_{base}$, we have utilized data from Alpaca \citep{alpaca}, Dolly \citep{conover2023free}, OAssit \citep{kopf2023openassistant}, and FLAN 2022 \citep{longpre2023flan} to construct a dataset of 100K samples. 
+Such quality-based separation of these open-source instruction tuning datasets roughly aligns with the analysis results in~\citet{lu2023instag,li2023self}.
+Statistics of the two data pools are summarized in Table~\ref{tab:data_stastics}.
+
+\paragraph{Training and Evaluation:}
+In the study of this section, we fine-tune the LLaMA-1 13B on the instruction tuning dataset unless otherwise specified.
+We assume a data budget $m$ of 6K.
+ 
+To evaluate alignment performance, we utilize MT-Bench, a challenging benchmark that is commonly adopted to assess the instruction-following ability.
+MT-bench consists of multi-turn conversations across various domains such as writing, reasoning, math, and coding. 
+GPT-4 is employed as the judge to score model responses in MT-bench, which was found to produce a high agreement with humans~\citep{zheng2023judging}.
+\begin{figure}[!t]
+    \centering
+\begin{minipage}{0.46\textwidth}
+\centering
+\begin{table}[H]
+\centering
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{lcr}
+\toprule
+\textbf{Data Pool}           & \textbf{Dataset Source}   & \textbf{Sample Size} \\ 
+\midrule
+\multirow{4}{*}{$X_{sota}$} & ShareGPT                  & 58 K                 \\
+                             & UltraChat                 & 105 K                \\
+                             & WizardLM & 143 K                \\
+ \midrule
+\multirow{5}{*}{$X_{base}$} & Alpaca                    & 52 K                 \\
+                             & Dolly                     & 15 K                 \\
+                             & OAssit                    & 10 K                 \\
+                             & FLAN 2022                 & 23 K                 \\
+\bottomrule
+\end{tabular}}
+\caption{Statistics of data pools $X_{sota}$ and $X_{base}$. 
+The Dataset Source indicates the source of the data used for sampling. The Sample Size represents the number of samples in the respective dataset.\label{tab:data_stastics}
+}
+\end{table}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+    \centering
+
+\begin{table}[H]
+    \centering
+      \resizebox{0.9\textwidth}{!}{
+    \begin{tabular}{lcc}
+      \toprule
+      \textbf{Model}  & $X_{sota}$ & $X_{base}$\\
+      \midrule
+      Random Selection & 5.84 & 4.93 \\
+      Instruction Length &  5.89 & 4.00 \\
+      Perplexity  & 4.06 & 1.89 \\
+      IFD & 5.91 & 2.46 \\
+      Instag Complexity  & 6.18 & 4.98 \\
+      $\text{Direct Scoring (Pool=50K)}$  & 5.16 & 4.87 \\
+      $\text{Instruction Node (Pool=50K)}$  & 5.65 & 4.82 \\
+      \midrule
+     \evolc{} (Pool=50K)  & 5.73 & 5.29 \\
+     \evolc{} & {\bf 6.27} & {\bf 5.57} \\
+      \bottomrule
+    \end{tabular}}
+      \caption{MT-bench of different complexity metrics. 
+      All methods select 6K samples.
+      ``Pool=50K'' denotes the data selection is conducted in a 50K-sized subset due to the cost of using ChatGPT to annotate the entire pool.
+      We include the results of our method on the 50K data pool to make a fair comparison with baselines. \label{tab:complexity}
+      }
+  \end{table}
+\end{minipage}
+\end{figure}
+
+
+\subsection{From the Complexity Perspective -- Evol Complexity}
+\label{complexity}
+
+It is often believed that long, difficult, and complex data samples are more beneficial for instruction tuning~\citep{zhao2023preliminary,cao2023instruction}. For example,~\citet{xu2023wizardlm} prompt ChatGPT to ``evolve'' data samples to deliberately increase their complexities, which leads to the state-of-the-art open-source alignment models WizardLM. 
+In this section, we systematically study various metrics to assess the complexity of data and aim to identify the notion of complexity that contributes the most to the instruction-following ability. 
+Concretely, we only consider the complexity dimension and define the selection strategy $\pi_{complexity}$ as selecting the $m$ examples with the highest complexity scores. 
+
+\paragraph{Baselines:} 
+
+We study several existing methods as our baselines for complexity metrics: (1) \emph{Random Selection} selects examples randomly; (2) \emph{Instruction Length} uses length of instructions as the metric for complexity; (3) \emph{Perplexity} of the responses computed with the pre-trained model in a zero-shot manner is used as the metric, and a large perplexity score typically entails difficulty of the data sample; (4) \emph{Direct Scoring}~\citep{chen2023alpagasus} directly prompts ChatGPT to score the difficulty and complexity of instructions; (5) \emph{Instruction Node}~\citep{zhao2023preliminary} uses ChatGPT to transform instructions into a semantic tree and then adopts the number of nodes in the tree as the complexity measure; (6) \emph{Instag Complexity}~\citep{lu2023instag} first utilizes ChatGPT to tag the samples based on semantics and intentions, then trains a LLaMA-based tagger on the ChatGPT tags to tag data. They use the number of tags as a proxy for complexity. 
+(7) \emph{IFD} \citep{Li2023ifdFromQT} is a new complexity metric computed based on the response loss.
+We note that Direct Scoring and Instruction Node are not scalable since they require ChatGPT to annotate the entire data pool, which is expensive.
+To save cost, we randomly sample 50K examples first from each pool and apply these two baselines.  
+
+
+
+
+\paragraph{Evol Complexity:}
+\label{evol_complex}
+
+Taking inspiration from Evol-Instruct which utilizes ChatGPT to evolve examples to become more complex, we propose \evolc, a complexity measure based on evolution. Specifically, we collect a small-scale seed dataset, $D = \{(I_{1}^{(0)}, R_{1}^{(0)}), \cdots, (I_{N}^{(0)}, R_{N}^{(0)})\}$, where $(I_{k}^{(0)}, R_{k}^{(0)})$ represents an instruction-response pair.
+ After $M$ iterations, we obtain a set of instructions across different complexities for $I_k$, $\{I_{k}^{(0)}, \cdots,  I_{k}^{(M)}\}$. Here we set $M$ as 5 to obtain 6 variations in total.
+We emphasize that, distinct from direct scoring, we give ChatGPT all 6 samples within one prompt -- these samples represent different evolution stages of the same original sample and such a scoring scheme helps ChatGPT capture the small complexity differences among them, which leads to complexity scores to achieve finer-grained complexity differentiation among samples. 
+We find that this is critical since otherwise, ChatGPT tends to assign similar scores to most examples, as we showcase in 
+
+After obtaining ChatGPT scores on the small seed dataset, we use the scores to train an LLaMA-1 7B model to predict the complexity score given the input instruction.
+In multi-turn dialogues, we score each turn separately and use the sum of them as the final score.
+Across this paper, we use 2K examples randomly sampled from the Alpaca
+\citep{alpaca} as the seed dataset.
+\paragraph{Results:}
+Table~\ref{tab:complexity} presents the results of selecting the 6K data samples from $X_{sota}$ and $X_{base}$ using various complexity metrics. 
+Our Evol-Complexity leads to the best alignment performance. 
+We observe that while Instag Complexity performs well on $X_{sota}$, its performance on $X_{base}$ is only slightly better than Random Selection.
+In contrast, \evolc{} achieves superior performance on both datasets, indicating strong robustness across different dataset pools.
+Our method also has significant advantages compared to methods that heavily rely on annotating with ChatGPT, such as Direct Scoring and Instruction Node. 
+The results also suggest that instruction lengths are not good indicators of preferred data by alignment.
+Interestingly, perplexity, an intuitive measure for complexity, produces much worse results than the random selection baseline. 
+Through further investigation, we found that samples with large perplexity typically exhibit very short responses.
+
+
+
+\subsection{From the Quality Perspective -- Evol Quality}
+\label{quality}
+Generally, LLMs that deliver accurate, detailed, and helpful responses are favored by people, as indicated by \citet{zheng2023judging}. 
+In this section, we carry out a controlled study to examine various metrics used for evaluating the \emph{quality} of samples. Drawing parallels with \evolc, we devise a selecting strategy $\pi_{quality}$ based on quality, enabling us to select $m$ samples with the highest quality scores according to different measurements. Following this, we will introduce the examined baseline and our newly proposed methods for assessing quality.
+
+\paragraph{Baselines:} We examine the existing methods that serve as baselines for quality assessment: (1) \emph{Random Selection} selects examples randomly. (2) \emph{Response Length} employs the response length as the quality metric. (3) \emph{Direct Scoring}~\citep{chen2023alpagasus} prompts ChatGPT to evaluate the accuracy of the response to the instruction directly. 
+\paragraph{Evol Quality: } In a manner akin to \evolc, we introduce \evolq{} to augment the discernment of quality measurement. This primarily involves enhancing helpfulness, augmenting relevance, enriching depth, fostering creativity, and supplying additional details. After $M$ iterations, for the same instruction $I_{k}^{(0)}$, we procure a set of responses spanning various qualities for $R_{k}$, denoted as $\{R_{k}^{(0)}, \cdots, R_{k}^{(M)}\}$. Similar to \evolc{} we set $M$ to 5.
+
+ 
+Similar to \emph{Evol Complexity}, this scoring approach 
+ 
+ We utilize scores derived from the seed dataset to fine-tune LLaMA-1 7B, enabling it to predict quality scores based on the provided instruction-response pair. 
+ The seed dataset is the same as the one for \evolc{} with 2K random samples from the Alpaca dataset.
+
+
+
+
+\paragraph{Results:}
+
+Table \ref{tab:quality} presents the experimental results of selecting the top 6K data from $X_{sota}$ and $X_{base}$ respectively. The proposed \evolq{} approach consistently exhibits superior alignment performance. We notice that the pool with a higher quality variance, $X_{base}$, is more influenced by quality metrics, which is intuitive since many low-quality examples are present in such pools and will hurt the performance significantly. 
+This result implies that quality is a necessary dimension to consider especially when working with data pools that have a substantial number of low-quality examples.
+ We also observe that the response length positively correlates with the final alignment performance, yet its effect is not substantial for datasets with already high quality, such as $X_{sota}$
+\begin{figure}[!t]
+  \centering
+  \begin{minipage}{0.52\textwidth}
+  \centering
+\begin{table}[H]
+  \centering
+    \resizebox{0.85\textwidth}{!}{
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Model} & $X_{sota}$ & $X_{base}$\\
+    \midrule
+    Random Selection  & 5.84 & 4.93 \\
+    Response Length & 5.94 & 5.65 \\
+    \text{Direct Scoring (Pool=50K)} & 5.61 & 4.44 \\
+    \midrule
+    \evolq{} (Pool=50K) & 5.85 & 5.29 \\
+    \evolq{} & 6.19 & 5.67 \\
+    \bottomrule
+  \end{tabular}}
+  \caption{MT-bench of different quality measurements. 
+  All methods select 6K samples for training.
+  ``Pool=50K'' denotes the data selection procedure is conducted in a 50K-sized subset due to the cost of ChatGPT to annotate the entire pool.
+    We include the results of our method on the 50K data pool to make a fair comparison with the baselines.
+    \label{tab:quality}
+  }
+  \end{table}
+\end{minipage}
+\hspace{20pt}
+\begin{minipage}{0.36\textwidth}
+      \centering
+    \begin{table}[H]
+    \resizebox{1.0\textwidth}{!}{
+    \begin{tabular}{lcc}
+      \toprule
+      \textbf{Model} & $X_{sota}$ & $X_{base}$\\
+      \midrule
+      Random Selection  & 5.82 & 4.34 \\
+      Instag Diversity  & 6.10 & 4.46 \\
+      \midrule
+      Repr Filter  & 6.17 & 4.68 \\
+      \bottomrule
+    \end{tabular}}
+    \caption{MT-bench scores of different diversity measurements. 
+    All methods select 6K samples for instruction tuning.\label{tab:diversity}}
+    \end{table}
+  \end{minipage}
+\end{figure}
+
+\subsection{From the Diversity Perspective -- An Embedding-based Approach}
+\label{diversity}
+As a general principle, an advanced LLM should be adept at handling various requests from humans. 
+Therefore, the data used for instruction tuning is desirable to maintain maximum diversity. However, real-world data often exhibits redundancy~\citep{abbas2023semdedup}. 
+In this study, we explore the impact of data diversity on alignment by conducting a controlled experiment and then introduce a simple yet effective strategy $\pi_{diversity}$ to maintain diversity and conciseness in the selected subset of data.
+
+\paragraph{Setup:} In this work, we propose an iterative method to ensure the diversity of selected data. The iterative method picks sample $x_i$ from the pool $X$ one by one to selected dataset $S$ when $x_i$ contributes diversity to $S$. The process continues until the budget $m$ is reached or all $x_i$ in $X$ have been enumerated. To clarify, we formulate the benefit of diversity brought by a newly considered sample $x_i$ as an indicator function $\mathds{1}[\func(x_i, S)]$ which is equal to 1 only if $\func(x_i, S)$ is True and 0 otherwise. 
+$\func$, which we will define later, is the function to assess whether $x_i$ exhibits diversity in relation to the selected dataset $S$.
+ Only when $\mathds{1}[\func(x_i, S)]$ equals to $1$, will $x_i$ be added to $S$.
+\paragraph{Baselines:} 
+
+In addition to random selection, we further assess \emph{Instag diversity}~\citep{lu2023instag}, which is designed iteratively to ensure diversity within the selected dataset. It utilizes the growth of the tag set for $S$ as a metric to define the function $\func$. Specifically, it formulates $\func_t$ = $|T_S \bigcup T_{x_i}| > |T_S|$, where $T_S$ represents the set of all tags in $S$, and $T_{x_i}$ represents the tags associated with $x_i$.
+
+
+\paragraph{Repr Filter:} We examine our embedding-based approach, which we refer to as \emph{Repr Filter}. 
+Specifically, we take the distance between sample $x_i$ and its nearest neighbor in $S$ as the metric to define $\func$. We leverage the LLaMA-1 13B model to encode the sentence 
+and compute the cosine distance $d$, then $\func \coloneqq d < \tau$, where $\tau \in (0, 1)$ is a threshold hyperparameter. This means that we consider an example $x_i$ could increase the diversity of $S$ when the embedding distance between $x_i$ and its nearest neighbor is smaller than a threshold.
+During data selection, we first sort the data pool $X$ according to complexity and quality scores that we will detail in \S \ref{sec:deita-method}, then we examine each sample one by one and put $x_i$ to $S$ if $d < \tau$, where $S$ is initialized as empty. This process stops until the size of $S$ reaches the data budget $m$. We set threshold $\tau$ as $0.
+
+\paragraph{Results:} 
+
+Table \ref{tab:diversity} presents the results across different diversity strategies in $X_{sota}$ and $X_{base}$ respectively. Comparing Random Selection with the other two strategies ensuring diversity, the model trained with randomly selected data significantly underperforms others, which demonstrates the key role of diversity. 
+And our approach is able to outperform Instag Diversity on both data pools.
+
+
+
+
+
+\section{\deita -- Data Efficient Instruction Tuning for Alignment}
+
+\label{sec:method}
+Based on our exploration in \S \ref{sec:explore}, we propose a simple approach to select data samples considering all the three dimensions, complexity, quality, and diversity. 
+Utilizing the selected subset, we train our model \deita~, as an attempt towards extremely \textbf{D}ata-\textbf{E}fficient \textbf{I}nstruction \textbf{T}uning for \textbf{A}lignment. Below, we detail our data selection method and models.
+
+\subsection{Method}
+\label{sec:deita-method}
+
+\begin{algorithm}[!t]
+  \footnotesize
+	\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+	\renewcommand{\algorithmicensure}{\textbf{Output:}}
+	\caption{Score-First, Diversity-Aware Data Selection}
+	\label{alg1}
+
+	\begin{algorithmic}[1]
+            \STATE \textbf{Input:} The data pool $X$, data budget $m$
+            \STATE \textbf{Output:} The selected subset $S_{\pi_{\deita}}^{(m)}$
+		\STATE Initialize Empty Dataset $S_{\pi_{\deita}}^{(m)}$
+            \STATE Sorting $X$ with the combined complexity score and quality score $s = q * c$; 
+            \STATE Getting the sorted Pool $X^{*}$;
+
+            \FOR{Each Sample $x \in X^{*}$}
+            \STATE // $d(x, S)$ denotes the distance between $x$ and its nearest neighbor in $S$ 
+            \IF{$d(x, S_{\pi_{\deita}}^{(m)}) < \tau$ } 
+            \STATE $S_{\pi_{\deita}}^{(m)} \leftarrow S_{\pi_{\deita}}^{(m)} \cup \{x\} $ 
+            
+            \ELSE
+            \STATE Continue
+            
+            \ENDIF
+            \STATE $X \leftarrow X \setminus \{x\}$
+            \IF{$|S_{\pi_{\deita}}^{(m)}|$ equals to $m$}
+            \STATE Break
+            \ENDIF
+            \ENDFOR
+	\end{algorithmic}
+\label{algo}
+\end{algorithm}
+
+\paragraph{Score-First, Diversity-Aware Data Selection:}
+While there are various ways of combining complexity, quality, and diversity measures, we aim to keep it as simple as possible to be practical. 
+Intuitively, it is desirable to select samples with high complexity and quality scores but maintain the diversity of the set. 
+To this end, we propose a score-first, diverse-aware data selection strategy, denoted as $\pi_{\deita}$. Our strategy incorporates a new evol score $s$ that combines complexity and quality by multiplying the complexity score $c$ with the quality score $q$ as $s\coloneqq c * q$. 
+For multi-turn dialogues, we calculate this score for each turn, summing them to obtain the final score for the entire conversation. Next, we sort all samples in $X$ using $s$, yielding the sorted pool $X^* = (x^*_1, x^*_2, ..., x^*_n)$, where $x^*_0$ represents the sample with the highest evol score. Beginning with $S_{\pi_{\deita}}^1 = (x^*_0)$, we iteratively select data from $X^*/S_{\pi_{\deita}}$ one by one, following the \repr{} strategy, and discard redundant samples for $S_{\pi_{\deita}}$. By integrating the evol score and the \repr{}, our approach guarantees complexity, quality, and diversity in the resulting dataset. 
+Our data selection approach is illustrated in the right part of Figure~\ref{fig:main} and summarized in Algorithm~\ref{algo}.
+
+
+\paragraph{Training \deita:}
+We train \deita{} using the selected dataset with $m$ samples. We denote the resulting models as $\deita_m$.
+
+ 
+\subsection{Experimental Setup}
+We train the \deita{} models with data budget of 6K and 10K examples respectively. 
+We select data samples from the data pool $X_{sota}$.
+We adopt MT-Bench, AlpacaEval, and the Open LLM Leaderboard as our benchmarks for automatic evaluation. 
+The Open LLM Leaderboard consists of four classification tasks: ARC~\citep{clark2018think}, HellaSwag~\citep{zellers-etal-2019-hellaswag}, MMLU~\citep{hendrycks2021measuring}, and TruthfulQA~\citep{lin-etal-2022-truthfulqa}.
+
+\add{We first take LLaMA-1-13B as the backbone and compare \deita{} with other data selection approaches such as LIMA~\citep{zhou2023lima}, Alpagasus~\citep{chen2023alpagasus}, and TAGLM~\citep{lu2023instag}.
+Then we compare \deita{} models based on LLaMA-1-13B, LLaMA-2-13B, and Mistral-7B with other top-performing open-source models, such as Vicuna, WizardLM, 
+Mistral-Instruct~\citep{jiang2023mistral}, and Zephyr.}
+In this paper, we mainly focus on models aligned using SFT without preference training since our contributions lie on data selection in the SFT stage, while we also run direct preference optimization (DPO,~\citet{rafailov2023direct}) on top of our best SFT model to report stronger performance for reference points. For DPO training, we randomly sample 10K comparison data pairs used in Zephyr that is originally obtained from the UltraFeedback dataset~\citep{cui2023ultrafeedback}.
+
+\subsection{Results}
+\label{sec:combination}
+\begin{table}[!t]
+  \centering
+    \resizebox{0.6 \columnwidth}{!}{
+  \begin{tabular}{lcrr}
+    \toprule
+    \textbf{Model} & \textbf{Data Size} & \textbf{MT-Bench} & \textbf{AlpacaEval}(\%)\\
+    \midrule
+   Random & 6K & 5.84 & 73.91 \\
+    Alpagasus (Pool=50K) & 6K & 5.61 & 71.21\\
+    LIMA & 1K & 4.29 & 41.98\\
+    $\text{\taglm}^{\dagger}$ & 6K & 6.09 & 72.80 \\
+    \deita-LLaMA1-13B$_{6K}$ & 6K & ${\bf 6.46}$ & ${\bf 77.08}$ \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Comparison of different data selection approaches, the backbone is LLaMA-1-13B. For Alpagasus, we could not use ChatGPT to score all the examples in the pool due to the cost, thus we score 50K random examples and select. $\dagger$ denotes the results obtained by using their released LLaMA-7B tagger model for a fair comparison. }
+  \label{tab:data_select_compare}
+\end{table}
+
+\begin{table}[!t]
+  \centering
+    \resizebox{0.8 \columnwidth}{!}{
+  \begin{tabular}{lcrr}
+    \toprule
+    \textbf{Model} & \textbf{Data Size / Alignment} & \textbf{MT-Bench} & \textbf{AlpacaEval}(\%)\\
+    \midrule
+    \multicolumn{4}{c}{\textbf{Proprietary Models}}\\
+    \midrule
+    GPT-4 & -- & 8.99 & 95.28 \\
+    Claude-v2 & -- & 8.06 & 91.36 \\
+    gpt-3.5-turbo & -- & 7.90 & 89.37 \\
+    \midrule
+    \multicolumn{4}{c}{\textbf{Open-sourced Models based on LLaMA-1-13B}}\\
+    \midrule
+    Alpaca-13B & 52K / SFT  & 4.53 & --\hspace{0.3cm} \\
+    WizardLM-13B & 70K / SFT & 6.35 & 75.31 \\
+    Vicuna-13B-v1.3 & 125K / SFT & 6.39 & \underline{\bf 82.11} \\
+    $\text{\taglm}$-13B$^{\dagger}$ & 6K / SFT & 6.09 & 72.80 \\
+    Random-Select & 10K / SFT & 6.03 & 71.52 \\
+    \deita-LLaMA1-13B$_{6K}$ & 6K / SFT & $6.46$ & 77.08 \\
+    \deita-LLaMA1-13B$_{10K}$ & 10K / SFT & \underline{\bf 6.60} & 78.01 \\
+    \midrule
+    \multicolumn{4}{c}{\textbf{Open-sourced Models based on LLaMA-2-13B}}\\
+    \midrule
+    LLaMA2-13B-Chat & $>$100K / SFT + $>$1M / RLHF & 6.65 & 81.09 \\
+    Vicuna-13B-v1.5 & 125K / SFT & 6.57 & 78.80 \\
+    \textsc{Tülü} 2 13B & 326K / SFT & 6.70 & 78.90 \\
+    \textsc{Tülü} 2 + DPO 13B & 326K / SFT + 60K / DPO & \underline{7.00} & \underline{89.50} \\
+    Random-Select & 10K / SFT & 5.78 & 65.19 \\
+    \deita-LLaMA2-13B$_{6K}$ & 6K / SFT & 6.65 & 80.75 \\
+    \deita-LLaMA2-13B$_{10K}$ & 10K / SFT & {\bf 6.79} & {\bf 81.09} \\
+    \midrule
+    \multicolumn{4}{c}{\textbf{Open-sourced Models based on Mistral-7B}}\\
+    \midrule
+    Mistral-7B-Instruct-v0.1 & -- & 6.84 & 69.65 \\
+    Mistral-7B-Instruct-v0.2 & -- & \underline{7.60} & \underline{93.65} \\
+    $\text{zephyr-beta-sft}^*$ & 200K / SFT & 5.32 & 75.12 \\
+    \text{zephyr-beta} & 200K / SFT + 60K / DPO & 7.34 & 90.60 \\   
+     Random-Select & 10K / SFT & 5.89 & 56.90 \\
+    \deita-Mistral-7B$_{6K}$ & 6K / SFT & 7.22 & 80.78 \\
+    \deita-Mistral-7B$_{10K}$ & 10K / SFT & {\bf 7.32} & {\bf 81.67} \\
+    $\deita$-Mistral-7B$_{6K}$ + DPO & 6K / SFT +10K / DPO & 7.55 & 90.06 \\
+    \bottomrule
+  \end{tabular}
+  }
+  \caption{Results of different instruction-tuned models on MT-Bench and AlpacaEval. Best SFT-only numbers within the same base model are bolded, while the overall best numbers are underlined.
+  $\dagger$ denotes the results obtained by using their released LLaMA-7B tagger model for a fair comparison. 
+  \add{$\text{Zephyr-beta-sft}^*$ is the official checkpoint after the phase of supervised fine-tuning (SFT). We notice the performance of this checkpoint is lower than expected. We speculate the reason is that this checkpoint is not the best SFT checkpoint reported in their paper since the checkpoint is used for further DPO training. }
+  }
+  \label{tab:main_result}
+\end{table}
+\paragraph{Main Comparison:}
+\add{We first compare \deita{} with other data selection approaches in Table~\ref{tab:data_select_compare}, where \deita-LLaMA1$_{6K}$ clearly outperforms other approaches by a large margin. 
+In Table~\ref{tab:main_result}, we train LLaMA-1-13B, LLaMA-2-13B, and Mistral-7B with our selected 6K and 10K data respectively, and compare with other state-of-the-art SFT models as well as random data selection baselines (Random-Select). Across all three backbone models, the SFT aligned \deita{} models outperform almost all other SFT-aligned models. 
+\deita{} models based on LLaMA-2 even outperforms LLaMA2-13B-Chat that undergoes RLHF training with carefully crafted human annotations. 
+Notably, \deita-Mistral-7B$_{10K}$ based on Mistral-7B achieves a 7.32 MT-Bench score, which is the state-of-the-art result among all open-source SFT models at 7B and 13B sizes. 
+In the meanwhile, we note that the gains of \deita{} on AlpacaEval are not apparently consistent with the gains on MT-Bench. To analyze such difference between MT-Bench and AlpacaEval, we plot the standard radar plot of the 8 substasks on MT-Bench, as shown in Figure~\ref{fig:ridar_plot}.
+It clearly demonstrates that the \deita{} Mistral models achieve high MT-Bench scores due to the enhanced performance on advanced abilities such as coding, math, and reasoning, which are not prominent in AlpacaEval. 
+When equipped with DPO training, our \deita-Mistral-7B$_{10K}$+DPO variant achieves 7.55 MT-Bench and 90.06\% AlpacaEval scores, which is comparable to zephyr-beta that trains on 30x more data, and slightly lags behind the recent Mistral-7B-Instruct-v0.2 model whose alignment approach and data are not public.
+}
+
+\paragraph{Results on Open LLM Leaderboard:}\add{We compare \deita{} to other SOTA models and the random data selection baselines (Random-Select) on Open LLM Leaderboard, results are shown in Table~\ref{tab:openllm}. Our \deita{} SFT models -- while trained with only 6K or 10K data -- achieve the best average results among SFT-aligned models across different backbones.
+Further DPO training greatly boosts the performance of \deita-Mistra-7B by around 5 points on average and helps surpass the Zephyr. 
+}
+\begin{table}[!t]
+  \centering
+    \resizebox{0.95 \columnwidth}{!}{
+  \begin{tabular}{lcrrrrr}
+    \toprule
+    \textbf{Model} & \textbf{Data Size / Alignment} & \textbf{ARC} & \textbf{HellaSwag} & \textbf{MMLU} & \textbf{TruthfulQA} & \textbf{Average}\\
+    \midrule
+    \multicolumn{7}{c}{\textbf{Open-sourced Models based on LLaMA-1}}\\
+    \midrule
+    LIMA & 1K / SFT  & 59.22 & 84.25 & 49.60 & 46.20 & 59.82 \\
+    WizardLM-13B  & 70K / SFT & 57.25  & 80.88   & 52.92 & 50.55 & 58.96 \\
+    Vicuna-13B-v1.3   & 125K / SFT  & 54.61   & 80.41   & 52.88   & 52.14   & 60.01  \\
+    Random-Select & 10K / SFT & 55.80 & 79.95 & 47.35 & 57.44 & 60.14 \\
+    \deita-LLaMA1-13B$_{10K}$ & 10K / SFT & 59.47 & 82.01 & 60.60 & 55.03 & {\bf 64.27} \\
+    \midrule
+    \multicolumn{7}{c}{\textbf{Open-sourced Models based on LLaMA-2}}\\
+    \midrule
+    Vicuna-13B-v1.5   & 125K / SFT  & 57.08   & 81.24   & 56.67   & 51.51   & 61.63  \\
+    Random-Select & 10K / SFT & 61.52 & 83.69 & 55.22 & 44.84 & 61.32 \\
+    \deita-LLaMA2-13B$_{10K}$ & 10K / SFT & 58.87 & 82.08 & 55.33 & 54.57 & {\bf 62.71} \\
+    \midrule
+    \multicolumn{7}{c}{\textbf{Open-sourced Models based on Mistral-7B}}\\
+    \midrule
+    Mistral-7B-Instruct-v0.1 & -- & 54.52   & 75.63   & 55.38   & 56.28  & 60.45 \\
+    $\text{zephyr-beta-sft}$ & 200K / SFT & 57.68   & 81.98   & 61.04   & 43.00   & 60.93 \\ 
+    zephyr-beta & 200K / SFT + 60K / DPO & 62.03   & 84.52   & 61.44   & 57.44  & 66.36 \\
+    Random-Select & 10K / SFT  & 55.38   & 79.16   & 58.73   & 53.59   & 61.72  \\
+    \deita-Mistral-7B$_{6K}$ & 6K / SFT &  57.76	& 80.29 &	61.90 & 59.82 & 
+    64.94 \\
+    \deita-Mistral-7B$_{6K}$+DPO & 6K / SFT +10K / DPO & 66.21   & 85.42   & 60.66   & 67.14  & {\bf 69.86} \\
+    \bottomrule
+  \end{tabular}}
+  \caption{\add{Results on the Open LLM Leaderboard. Data size by default represents the number of examples in SFT unless specified otherwise.}
+  }
+  \label{tab:openllm}
+\end{table}
+
+\begin{figure}[!t]
+  \centering
+  \begin{minipage}{0.4\textwidth}
+   \centering
+ \resizebox{1.\textwidth}{!}{
+  \includegraphics{pic/scaling_curve1.pdf}
+  }
+  \caption{
+   Data-scaling results on MT-Bench.
+  The X-axis represents the \# samples used.\label{fig:scaling_curve}}
+  \end{minipage}
+   \hfill
+   \begin{minipage}{0.5\textwidth}
+   \centering
+   \resizebox{1.\textwidth}{!}{
+   \includegraphics{pic/scatter.pdf}
+   }
+   \caption{\add{Radar plot of detailed scores for $\deita$ models and major baselines on 8 subtasks on MT-Bench.}\label{fig:ridar_plot}}
+
+ \end{minipage}
+
+\end{figure}
+
+
+\paragraph{Data Scaling:}
+In order to investigate the data scaling effects of different data selection strategies, 
+we experiment with subsets of $X_{sota}$ with various data budget $m$. Figure \ref{fig:scaling_curve} illustrates that our \deita{} models consistently deliver the best data selection performance across different data volumes. Remarkably, \deita{} achieves comparable results to using all the 300K training samples with only 3K samples, a 100x data reduction. 
+Interestingly, we find that under our data selection approach, as the quantity of selected data increases, the final performance initially shows an upward trend but eventually declines. This suggests that even for a relatively complex, diverse, and high-quality data pool like $X_{sota}$, the proportion of truly “good data for alignment” is limited.
+This phenomenon confirms that the performance of alignment does not necessarily improve even though we add more data and use more computing, implying the importance of data selection.
+
+
+
+
+
+\section{Related Work}
+
+
+
+
+\section{Conclusion}
+
+In this paper, we thoroughly investigate the question of what makes good data for alignment. Our research encompasses three controlled studies conducted across three dimensions: complexity, quality and diversity. 
+Throughout these studies, we propose new methods for automatic data selection and train our models, \deita, on the selected data. 
+Experimental results demonstrate that \deita~is able to achieve superior or comparable performance to the state-of-the-art open-source models with 10x training samples.
+We release our selected data to effectively align models more efficiently. 
+
+
+

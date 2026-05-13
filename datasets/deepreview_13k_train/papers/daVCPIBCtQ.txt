@@ -1,0 +1,149 @@
+\title{DyGNeX : Efficient Distributed Training of Dynamic Graph Neural Networks with Cross-Time-Window Scheduling}
+
+\begin{abstract}
+Dynamic Graph Neural Networks (DGNNs) are advanced methods for processing evolving graph data, capturing both structural and temporal dependencies efficiently. However, existing distributed DGNN training methods face challenges in achieving load balance across GPUs and minimizing communication overhead, which limits their efficiency.  In this paper, we introduce DyGNeX, a distributed training system designed to address this issue. DyGNeX utilizes a cross-time-window snapshot group scheduling algorithm that balances computational loads across GPUs without introducing additional cross-GPU feature aggregation or hidden state communication. Based on the specific scenario, the scheduling algorithm is applied using greedy or Integer Linear Programming (ILP) methods, referred to as DyGNeX-G and DyGNeX-L, respectively. DyGNeX-L and DyGNeX-G achieve average reductions of 28\% and 24\% in per-epoch training time compared to state-of-the-art methods, maintaining load imbalance across GPUs at approximately 4\% and 8\%, while preserving model convergence across various DGNN models and datasets. In simulation experiments, as the number of GPUs increases, DyGNeX-G shows good scalability, efficiently handling clusters with up to 512 GPUs while maintaining 95\% efficiency.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Dynamic graphs are graphs whose structures and attributes change over time. Dynamic Graph Neural Networks (DGNNs) have emerged as state-of-the-art methods for processing dynamic graphs, exhibiting strong ability to capture both structural and temporal dependencies (Zhu et al., 2016; Zhou et al., 2018; Wu et al., 2018; Trivedi et al., 2019; Pareja et al., 2020; Manessi et al., 2020; Chen et al., 2020; Xu et al., 2020; Goyal et al., 2020; Sankar et al., 2020; Wang et al., 2021a;b; Bai et al., 2022; You et al., 2022; Wang et al., 2022; Tian et al., 2023; Li et al., 2024; Zhang et al., 2024). Depending on the event model, dynamic graphs are categorized into Discrete Time Dynamic Graphs (DTDGs) and Continuous Time Dynamic Graphs (CTDGs). DGNNs are categorized similarly according to the dynamic graphs they process. In this work, we focus on DGNNs designed for DTDGs, which process temporal dynamics in discrete snapshots.  
+
+Significant efforts have been made to improve the efficiency of DGNN training. Some works focus on efficient training on a single GPU (Li & Chen, 2021; Guan et al., 2022; Qin et al., 2023; Wang et al., 2023; Gao et al., 2024a;b; Su et al., 2024), addressing various factors such as memory footprint and data access overhead. Others consider distributed training on multiple GPUs (Chakaravarthy et al., 2021; Fu et al., 2023; Chen et al., 2023). ESDG (Chakaravarthy et al., 2021) distributes temporally adjacent snapshots across different GPUs and requires hidden state transfers between GPUs for temporal processing, which incurs a significant overhead when the hidden states are large. BLAD (Fu et al., 2023) avoids such overhead by processing each group of temporally adjacent snapshots on the same GPU while assigning different groups across GPUs. As we will show later in Figure 1, both ESDG and BLAD experience load imbalance across different GPUs, which results in inefficient resource utilization and hinders training efficiency. While DGC (Chen et al., 2023) attempts to balance the load, it relies on graph partitioning, which introduces additional communication overhead. Therefore, it requires further research to achieve load balance across GPUs while minimizing inter-GPU communication in distributed training of DGNNs.  
+
+To address this problem, we develop a distributed DGNN training system called DYGNEX, which uses a novel cross-time-window snapshot group scheduling algorithm for load balancing. DYGNEX takes advantage of the fact that snapshot groups from different time windows are treated as independent samples in DGNN training. This allows for the flexibility of combining and scheduling them in any order. We formulate an optimal scheduling problem to minimize the per-epoch training time. Depending on the scenario, DYGNEX solves the problem using Integer Linear Programming (ILP) or a greedy algorithm, and the resulting scheduling algorithms are denoted by DYGNEX-L and DYGNEX-G, respectively. Through real-world experiments and simulations, we demonstrate that DYGNEX-L and DYGNEX-G achieve average reductions of $28\%$ and $24\%$ in per-epoch training time compared to state-of-the-art methods. DYGNEX-L and DYGNEX-G reduce the average load imbalance ratio by $22\%$ and $18\%$ compared to the partition-by-snapshot-group (PSG) method. In simulation experiments, as the number of GPUs increases, DYGNEX-G shows good scalability, efficiently handling clusters with up to 512 GPUs while maintaining $95\%$ efficiency.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+Dynamic Graph Neural Networks. Dynamic Graph Neural Networks (DGNNs) are composed of multiple blocks that integrate both structural and temporal encoding mechanisms. Each block typically includes a structure encoder, which aggregates information from a node’s immediate neighbors to capture its structural context, and a time encoder, which accumulates information over time to reflect temporal changes in the graph. The specific implementations of these encoders vary across different DGNN models. For example, EvolveGCN (Pareja et al., 2020) dynamically adjusts its graph convolutional network (GCN) parameters over time to accommodate the evolving nature of the graph. WD-GCN (Manessi et al., 2020) combines a GCN with a long short-term memory (LSTM) network to capture both spatial and temporal features in dynamic graphs. TGCN (Chen et al., 2020) integrates a GCN with a gated recurrent unit (GRU) to effectively capture spatial and temporal dynamics in dynamic graphs. GAT-LSTM (Wu et al., 2018) leverages a Graph Attention Network (GAT) for capturing structural information while using an LSTM to model temporal dependencies. Each of these models showcases unique approaches to integrating structural and temporal information, thereby enhancing the model’s ability to learn from dynamic graph data. These four models are representative typical GNN and RNN models in DGNNs. Many subsequent models can be considered variants of these, including structural-specific models like TTGCN (Li et al., 2024) and DRAIN (Bai et al., 2022), temporal-specific models like SGNN-GR (Wang et al., 2022) and ROLAND (You et al., 2022), and comprehensive models such as Dyngraph2vec (Goyal et al., 2020) and DySAT (Sankar et al., 2020).  
+
+Workflow of distributed training for DGNNs. Training a DGNN on multiple GPUs requires careful management of graph data across devices. In distributed settings, the dynamic graph dataset $G\;=\;(G_{1},G_{2},...,G_{T})$ is typically partitioned across GPUs, introducing additional inter-GPU communication tasks required for accurate feature aggregation and temporal modeling. At each time step $t$ , for each node $\upsilon$ in graph $G_{t}$ , the aggregation function Aggregate combines the node’s ${v}$ feature $X_{t}(v)$ with those of its neighbors $\{X_{t}(u)|u\in N(v)\}$ , producing a structural representation as shown in Equation 1.  
+
+$$
+H_{t}(v)=\operatorname{Aggregate}_{v}(W_{\mathrm{gnn}},\{X_{t}(u)|u\in N(v)\},X_{t}(v))
+$$  
+
+When a neighboring node $u$ is located on a different GPU, inter-GPU communication becomes necessary to retrieve the neighbor’s feature, introducing additional neighbor feature communication. This communication overhead can be significant, especially for large or densely connected graphs. On a global scale, the graph embedding $H_{t}$ at time $t$ aggregates information from both the node feature matrix $X_{t}$ and the graph structure $G_{t}$ , as defined in Equation 2, with $t=i,\dots,i+w$ for each time window.  
+
+$$
+H_{t}=\operatorname{Aggregate}(W_{\mathrm{gnn}},X_{t},G_{t}),\quad t=i,\dots,i+w
+$$  
+
+This graph embedding is subsequently passed to a temporal model, such as an RNN, to capture timedependent dynamics. As shown in Equation 3, the temporal update function combines the current graph embedding $H_{t}$ with the hidden state $h_{t-1}$ from the previous time step. When $h_{t-1}$ resides on a different GPU, additional hidden state communication is required to transfer $h_{t-1}$ across devices to maintain temporal dependency.  
+
+$$
+h_{t}=\operatorname{TemporalUpdate}(W_{\operatorname{rmn}},H_{t},h_{t-1}),\quad t=i,\dots,i+w
+$$  
+
+![](images/aae28889aa5461594a3f32fa003f05a66500845c976307ec768402c23d9df957.jpg)  
+
+![](images/6e02e588a0106e25b74afd833b79552b00817baf6a51805f053b6d7efa2ee8cd.jpg)  
+Figure 1: Load imbalance among GPUs across different datasets.  
+
+![](images/a5c3fe59469e1b04a2ef8cdf2294a48c3d36a026a3a609c3670b0a28e49fd317.jpg)  
+Figure 2: System Overview.  
+
+each node for training, executing the combined snapshot groups sequentially. This approach balances the training processes, maximizes node utilization, and leads to overall system performance improvements and faster convergence times.  
+
+
+
+\section{4 METHOD  }
+
+
+In this section, we introduce the two implementations of our cross-time-window task grouping algorithm: DYGNEX-L, which uses Integer Linear Programming (ILP), and DYGNEX-G, which adopts a greedy approach to reduce computational complexity. Both implementations are designed to optimize the objectives of DYGNEX by addressing the key challenges of load balancing and inter-GPU communication, ultimately improving the efficiency of distributed DGNN training. The commonly used notation in this section is summarized in Table 2.  
+
+Table 2: Frequently Used Notations   
+
+![](images/6891ac43012aa708071f7ec8686ea73085a8cd26824bcba66c35f1b7f362dab9.jpg)  
+
+4.1 OPTIMIZATION OBJECTIVES  
+
+The primary optimization goal of DYGNEX is to minimize the total training time for one epoch, denoted as $T$ . This is particularly important in distributed environments where inefficient task scheduling and uneven load distribution can result in substantial delays. The objective is mathematically formulated as:  
+
+$$
+{\mathrm{minimize~~~}}T=\sum_{i=0}^{m}T_{i},
+$$  
+
+where $m$ represents the number of iterations per epoch, and $T_{i}$ denotes the time for the $i$ -th iteration. The duration $T_{i}$ of each iteration is given by:  
+
+$$
+T_{i}=\operatorname*{max}_{1\leq j\leq G}\left(\sum_{k=1}^{n}\mathbb{I}_{a_{k}=i}\cdot\mathbb{I}_{g_{k}=j}\cdot t_{k}\right)+\alpha,
+$$  
+
+where $G$ is the number of GPUs, $n$ is the number of snapshot groups, $g_{k}$ is the GPU assigned to snapshot group $k$ , and $t_{k}$ is its execution time of snapshot group $k$ . $a_{k}$ represents the iteration assigned to snapshot group $k$ , and $\alpha$ is the time for gradient allreduce, which synchronizes gradient updates across GPUs. The indicator function $\mathbb{I}_{\mathrm{condition}}$ is 1 if the condition is true, and 0 otherwise. This formulation ensures that the total execution time accounts for both task scheduling and interGPU communication.  
+
+Since different snapshot groups can be executed independently, determining the optimal task scheduling strategy $S t r a t e g y\stackrel{.}{=}[(a_{1},g_{1}),(a_{2},g_{2}),...\,,\stackrel{.}{(a_{n},g_{n})}]$ that minimizes $T$ is an NP-hard problem. This is because it generalizes the classical makespan minimization problem on parallel machines, which is a well-known NP-hard problem. For a single iteration $\mathrm{[}m=1\mathrm{]}$ ) and without gradient allreduce $(\alpha=0)$ ), the problem reduces to assigning tasks to GPUs to minimize the maximum completion time, which is NP-hard for two or more machines. To ensure system convergence while making the solution more tractable, we impose a constraint that limits each GPU to handle at most two tasks per iteration. Then, we propose DYGNEX-L, an ILP-based approach, and DYGNEX-G, a greedy algorithm, to efficiently address this scheduling problem.  
+
+
+
+\section{4.2 DYGNEX-L  }
+
+
+To globally optimize the total training time $T$ , we first propose an ILP model, DYGNEX-L. The binary decision variable $x_{k,i,j}$ indicates whether snapshot group $k$ is assigned to iteration $i$ on GPU $j$ . The objective function is to minimize the total iteration time $T_{i}$ , calculated as:  
+
+$$
+T_{i}=\operatorname*{max}_{1\leq j\leq G}\left(\sum_{k=1}^{n}x_{k,i,j}\cdot t_{k}\right)+\alpha,
+$$  
+
+The key constraints in DYGNEX-L are expressed mathematically as follows. The assignment constraint ensures that each snapshot group is assigned to exactly one GPU in one iteration:  
+
+$$
+\sum_{i=1}^{m}\sum_{j=1}^{G}x_{k,i,j}=1,\quad\forall k\in\{1,2,\ldots,n\}.
+$$  
+
+The GPU capacity constraint ensures that no GPU can process more than $L$ snapshot groups in any iteration:  
+
+$$
+\sum_{k=1}^{n}x_{k,i,j}\leq L,\quad\forall i\in\{1,2,\ldots,m\},\forall j\in\{1,2,\ldots,G\}.
+$$  
+
+To solve this ILP problem (Equation 6), we use standard linearization techniques and off-the-shelf solvers like Gurobi (Gurobi Optimization, LLC, 2022). However, as the problem is still NP-hard, we implement a strategy that outputs the solution once it is within a specified distance (e.g., $2\%$ ) from the optimal.  
+
+4.3 DYGNEX-G  
+
+To mitigate the computational complexity of solving the global optimization problem, we also propose DYGNEX-G, a greedy algorithm. Greedy approaches are heuristics that can efficiently solve NP-hard problems, though they often produce suboptimal solutions. DYGNEX-G attempts to reduce resource waste and balance GPU workloads by iteratively optimizing the execution sequence of snapshot groups.  
+
+The algorithm follows three main steps: (1) Generate candidate target training times $T_{t a r g e t}$ by combining the longest remaining execution time with other remaining times. (2) For each $T_{t a r g e t}$ , select $G-1$ tasks that minimize the deviation from $T_{t a r g e t}$ using a two-pointer search strategy. (3) Compute the waste time $W_{i}$ for each $T_{t a r g e t}$ , selecting the one that minimizes $W_{i}$ . Algorithm 1 provides an overview of the DYGNEX-G process.  
+
+
+
+\section{5.3 PROFILING AND ALGORITHM SOLVING COST  }
+
+
+The system workflow consists of three stages: profiling, algorithm solving, and training. In the profiling stage, 2-5 epochs are typically run to filter out outliers, balancing accuracy and overhead. The algorithm solving stage is fast, taking less than 10ms for DYGNEX-G when the number of snapshots is in the tens. DYGNEX-L can also obtain a solution within a few seconds, with a gap of less than $2\%$ from the optimal solution. We present the solving times of DYGNEX-G and DYGNEX-L under different numbers of snapshots and gap constraints in Table 5 and Table 6. Based on extensive experimental experience, we use DYGNEX  
+
+![](images/b2c04e7a54954e32f43d3c145748d68392105723b7b8efb7b2909bd97ce4f930.jpg)  
+L for solving when the number of snapshots is less than 100, and DYGNEX-G when the number of snapshots exceeds 100. Finally, the training stage requires over 100 epochs for convergence, making the overhead from profiling and algorithm solving less than $3\%$ of the total time.   
+Figure 4: Imbalance ratio.  
+
+
+
+\section{5.4 SCALABILITY  }
+
+
+Due to hardware limitations, we extend the evaluation to larger clusters through simulation. In this simulation, we model the dynamic graph’s evolution by generating 10,000 snapshots using DynaGraph(Guan et al., 2022), and use a linear regression model to predict the execution time for each snapshot. In this scenario, solving with DYGNEX-L is time-consuming, so we opt to use DYGNEX-G, which provides a faster solution, typically solving within seconds while still maintaining good performance. These predicted times are subsequently fed into DYGNEX-G for time simulation. Figure 5a shows the per-node throughput, normalized by the single-node throughput. The PSG method shows a steady drop in throughput as the number of GPUs increases, with performance degrading sharply beyond 128 GPUs. In contrast, our method scales effectively, retaining $95\%$ efficiency at 512 GPUs and maintaining over $85\%$ efficiency with 1024 GPUs. As shown in Figure 5b, the throughput decline is caused by the rising imbalance ratio as the number of GPUs increases. DYGNEX-G consistently maintains a lower imbalance ratio than the PSG method, which slows the performance drop.  
+
+![](images/67d909c36f80bbf6e809f35160b3ccc28e5059c0370acb59fc87cc4127c5bea7.jpg)  
+Figure 5: Simulated per-node training throughput and imbalance ratio on clusters with 4 to 1024 nodes. Results are normalized to the throughput of training with a single node.  
+
+
+
+\section{6 LIMITATIONS  }
+
+
+Large Snapshot Group. In DYGNEX, each snapshot group must fit on a single GPU for training. While current GPU memory (e.g., 80GB, 40GB) suffices for most datasets, larger datasets may exceed this limit, making DYGNEX infeasible. A potential solution is to partition the graph and use full-neighbor sampling on target nodes, enabling training until all nodes are processed. The trade-offs between the overhead of partitioning and sampling and the advantages of DYGNEX over vertex-based methods (eg., DGC(Chen et al., 2023)) merit further exploration.  
+
+Limited Number of Snapshot Groups. The benefits of DYGNEX depend on the flexible combination of snapshot groups for load balancing. With very few groups, the limited combination space reduces potential gains.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this paper, we introduced DYGNEX, an efficient distributed training system for DGNNs. DYGNEX addresses the challenges of load balancing and communication overhead in large-scale dynamic graph training. By utilizing a novel cross-time-window snapshot group scheduling algorithm, DYGNEX balances computational loads across GPUs without incurring additional crossGPU communication. We implemented two variants of the system: DYGNEX-L, which uses ILP to globally optimize training efficiency, and DYGNEX-G, a greedy approach. In extensive realworld and simulated experiments, DYGNEX-L and DYGNEX-G outperform ESDG and BLAD in per-epoch training time. Both DYGNEX-L and DYGNEX-G preserve model convergence, maintaining training accuracy while improving throughput and reducing load imbalance across GPUs. DYGNEX-G further demonstrates superior scalability, efficiently handling large numbers of GPUs with minimal performance degradation.  
+
+
+

@@ -1,0 +1,370 @@
+\title{Zeroth-Order Fine-Tuning of LLMs with Transferable Static Sparsity}
+
+\begin{abstract}
+Zeroth-order optimization (ZO) is a memory-efficient strategy for fine-tuning Large Language Models using only forward passes. However, applying ZO fine-tuning in memory-constrained settings such as mobile phones and laptops remains challenging since these settings often involve weight quantization, while ZO requires full-precision perturbation and update. In this study, we address this limitation by combining static sparse ZO fine-tuning with quantization. Our approach transfers a small, static subset (0.1%) of "sensitive" parameters from pre-training to downstream tasks, focusing fine-tuning on this sparse set of parameters. The remaining untuned parameters are quantized, reducing memory demands. Our proposed workflow enables efficient ZO fine-tuning of an Llama2-7B model on a GPU device with less than 8GiB of memory while outperforming full model ZO fine-tuning performance and in-context learning.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) have demonstrated superior performance in general-purpose language generation (Brown et al., 2020; Radford et al., 2019; Liu et al., 2019). Despite their success, finetuning LLMs for specific tasks remains necessary to achieve optimal results. However, the fine-tuning process often requires significantly more memory compared to inference. Specifically, there are four main components that occupy the memory during fine-tuning LLMs: (1) the weight parameter itself; (2) the optimizer state, which contains the information about the past gradient (Kingma & Ba, 2015); (3) the gradient used to update the parameters; (4) the activation cached to calculate the weight gradient (Liu et al., 2024c); Previous work, such as QLoRA (Dettmers et al., 2023), has successfully reduced memory usage for both (1) and (2) by combining weight quantization and low-rank adaptation (Hu et al., 2021), which enables fine-tuning huge LLMs under consumer level GPUs. However, on memory-constrained hardware like smartphones, the memory required for caching (3) gradient and (4) activations for backpropagation remains significant. Prior approaches to address this issue are often system-based, such as CPU offloading. The disparity between the memory demands of LLM fine-tuning and hardware capacity limits the adaptability of LLMs, especially when personalizing them for edge devices.  
+
+![](images/8096ccf0613b39d6c26cc3a956dc6aa333eba27bce39917a82ee9c0e82f5a660.jpg)  
+Figure 1: CUDA memory benchmarking of Llama2-7B on 3 fine-tuning tasks. We use a batch size of 8 for profliing the memory usage, and we find that SensZOQ ( $\mathrm{1^{st}}$ bar in each subfigure) can meet the 8 GiB memory target without any system-level solutions such as CPU offloading.  
+
+Exploring zeroth-order optimization in LLM fine-tuning. Recently, there has been a resurgence of interest in zeroth-order (ZO) optimization methods for LLM fine-tuning (Malladi et al., 2023a; Liu et al., 2024a; Chen et al., 2024). ZO optimization method perturbs model parameters in random directions and utilize the loss value difference to compute the gradient direction for parameter updates. A key advantage of ZO methods in LLM fine-tuning is that they do not require backpropagation procedures, significantly reducing computation and memory requirements. Being backpropagationfree, ZO methods does not need to cache (3) gradients and (4) activations during fine-tuning. In practice, ZO methods have demonstrated the potential to achieve performance comparable to firstorder methods in LLM fine-tuning, which create new venues for efficient LLM adaptation strategies.  
+
+Efficient ZO LLM fine-tuning with sparsity. Although ZO methods remove the need for backpropagation, a significant drawback of these methods is the slow convergence rate (Zhao et al., 2024; Liu et al., 2024a). A recent approach addresses this by fine-tuning with a sparse mask (Liu et al., 2024a; Zhang et al., 2024b), achieving approximately $\sim75\%$ dynamic sparsity (perturb & tune $25\%$ parameters per step). Nonetheless, this sparsity level barely reduces computational overhead, as the latency during the forward pass with even $\sim90\%$ sparsity is still comparable to that of dense matrix operations. This latency increase can greatly impact user experience on applications such as personal assistants, where even a twofold increase in latency is perceptible. In addition, dynamic sparsity leads to a reduction in training iterations but not necessarily wall-clock time – determine and apply the sparsity pattern for each training step could be expensive. Moreover, dynamic sparsity inherently assumes the whole model must all be in dense weights, and an attempt to combine dynamic sparse training with parameter-size reduction techniques such as quantization is not computationally tractable (otherwise it will involve frequent dequantization and quantization). This raises the question:  
+
+Is it possible to develop an extreme static sparsity method for ZO fine-tuning that is easy to combine with quantization method? Would the memory-efficiency of ZO be even pushed further?  
+
+Our proposal: ZO LLM fine-tuning with transferable static sparsity. In this paper, we answer the raised research question by proposing a transferable static sparse ZO LLM fine-tuning strategy. We observe an extreme sparsity pattern in LLM parameters: a subset, determined by selecting the top $k$ magnitude entries from the diagonal of empirical Fisher information matrix, is effective for ZO fine-tuning. Moreover, we find this sparsity pattern can be obtained through LLM’s pre-training process and transferred to various downstream tasks without modification (as a static selection).  
+
+Summary of contributions. Building on these insights, our work proposes a comprehensive framework for ZO fine-tuning, making the following contributions:  
+
+• We identify that only an extremely small portion $(\mathbf{0.1\%})$ of LLM parameters should be updated during ZO LLM fine-tuning. Moreover, we observe that this sparsity pattern can be derived in LLM pre-training process and transferred across different downstream tasks while still maintaining good ZO performance without any modification.   
+• Based on this observation, we propose SensZOQ, an on-device LLM personalization workflow via integrating Sensitive ZO optimization with Quantization to further improve the memoryefficiency of ZO fine-tuning (Figure 1).   
+• We conduct extensive experiments across various LLMs and demonstrate that our method achieves competitive performance across various downstream tasks.  
+
+
+
+\section{2 SPARSE ZO FINE-TUNING WITH STATIC SENSITIVE PARAMETERS IN LLM  }
+
+
+In this section, we first go through the background of ZO optimization in Section 2.1. We then inspect an extreme sparsity pattern in LLMs in Section 2.2 and its theoretical guarantees in Section 2.3.  
+
+2.1 ZEROTH-ORDER OPTIMIZATION  
+
+ZO surrogate gradient estimator. ZO optimizers have been studied widely in the machine learning community. Given a dataset $\mathcal{D}\;=\;\left\{\left(\mathbf{x}_{1},y_{1}\right),\ldots,\left(\mathbf{x}_{n},y_{n}\right)\right\}$ and a loss function $f$ with model parameters $\textbf{w}\in\mathbb{R}^{d}$ , ZO optimizer will estimate the gradient at w via ZO surrogate gradient estimator. Simultaneous Perturbation Stochastic Approximation (SPSA) (Spall, 1992) is such an estimator that would first sample a random vector $\mathbf{z}\in\mathbb{R}^{d}$ and uses the loss value difference to scale the update direction. $\mathbf{z}$ is usually sampled from an Gaussian distribution $\mathcal{N}(\mathbf{0},\mathbf{I}_{d})$ .  
+
+Definition 1 (Simultaneous Perturbation Stochastic Approximation (SPSA) (Spall, 1992)). SPSA estimates the gradient w.r.t. w with a data example $(\mathbf{x},y)$ , a small constant $\epsilon\in\mathbb{R}$ , and a sampled random vector $\mathbf{z}\in\mathbb{R}^{d}$ as follows:  
+
+$$
+\hat{g}(\mathbf{w},(\mathbf{x},y),\mathbf{z})=\frac{f(\mathbf{w}+\epsilon\mathbf{z};(\mathbf{x},y))-f(\mathbf{w}-\epsilon\mathbf{z};(\mathbf{x},y))}{2\epsilon}\mathbf{z}
+$$  
+
+There are other ZO surrogate gradient estimators (Liu et al., 2020; Ohta et al., 2020), but in practice SPSA achieves good performance in ZO fine-tuning. Some ZO algorithms such as DeepZero (Chen et al., 2024) would utilize the parameter-wise finite difference of loss values to derive parameter-wise update directions. This would yield $O(d)$ query costs per training step even when combining with certain sparse masking methods and not practical for LLM fine-tuning scenarios. We therefore select SPSA with random Gaussian perturbation as our ZO gradient estimator.  
+
+ZO-SGD algorithm. ZO-SGD is an optimizer similar to SGD but replaces the FO gradient with ZO surrogate gradient estimate per training step, as defined below:  
+
+Definition 2 (ZO-SGD update rule). ZO-SGD is an optimizer that uses ZO surrogate gradient to update parameters $\mathbf{w}_{t}$ with learning rate $\eta_{t}$ and a data example $\left(\mathbf{x}_{t},y_{t}\right)$ sampled at timestep $t$ :  
+
+$$
+\mathbf{w}_{t+1}=\mathbf{w}_{t}-\eta_{t}\hat{g}_{\mathbf{w}}\big(\mathbf{w}_{t},\big(\mathbf{x}_{t},y_{t}\big),\mathbf{z}_{t}\big)
+$$  
+
+MeZO (Malladi et al., 2023a) is a ZO-SGD algorithm that uses the “random seed trick” to save the need of caching ZO surrogate gradient. The choice of optimizer (SGD) is orthogonal to ZO optimization techniques, but in our preliminary experiments we find adaptive optimizers such as Adam (Kingma & Ba, 2015) would not necessarily accelerate ZO convergence in LLM fine-tuning scenarios. There are other ZO optimizers aware of the parameter-wise heterogeneity of loss curvatures to accelerate the optimization convergence (Zhao et al., 2024), and we leave how to combine our method with theirs as future works.  
+
+2.2 SPARSE ZO OPTIMIZATION WITH STATIC SENSITIVE PARAMETERS.  
+
+Given model parameters w, a loss function $f$ , a data example $\left(\mathbf{x},y\right)$ , sensitive parameters are defined as parameters whose corresponding $F O$ coordinate-wise gradient square values are maximized.  
+
+Definition 3 (Sensitive parameter mask). A sensitive sparse mask $\mathbf{m}_{k}\in\{0,1\}^{d}$ with $k$ nonzero entries $(\sum_{i}\mathbf{m}(i)=k)$ is defined $a s^{1}$  
+
+$$
+\begin{array}{r}{\mathbf{m}_{k}=a r g m a x_{\mathbf{m}}\|\mathbf{m}\odot\nabla f(\mathbf{w})\|_{2}^{2}.}\end{array}
+$$  
+
+In the context of ZO optimization, we will update sensitive parameters only. Denote that $\bar{\mathbf{z}}=\mathbf{z}\odot\mathbf{m}_{k}$ . We will modify the SPSA gradient estimator from $\hat{g}(\mathbf{w},(\mathbf{x},\bar{y}),\mathbf{z})$ to $\hat{g}(\mathbf{w},(\mathbf{x},y),\bar{\mathbf{z}})$ , and accordingly:  
+
+Definition 4 (Sensitive sparse ZO-SGD update rule).  
+
+$$
+\mathbf{w}_{t+1}=\mathbf{w}_{t}-\eta_{t}\hat{g}_{\mathbf{w}}\big(\mathbf{w}_{t},\big(\mathbf{x}_{t},y_{t}\big),\mathbf{z}_{t}\odot\mathbf{m}_{k,t}\big)
+$$  
+
+The theoretical support of sensitive parameters can be derived from the lens of SPSA gradient estimator and Fisher information matrix as follows:  
+
+
+
+\section{3 SENSZOQ: A SPARSE ON-DEVICE FINE-TUNING RECIPE  }
+
+
+In this section, we describe the transferable static sparsity pattern we observed in LLMs and how we utilize it for developing an on-device fine-tuning pipeline of LLMs as SensZOQ.  
+
+3.1 TRANSFERABILITY OF STATIC SENSITIVE PARAMETER  
+
+Transferable sensitive gradient features: from dynamic to static sparsity. Our Theorem 1 focuses on dynamic sparse fine-tuning. However, Panigrahi et al. (2023) notice that in real LLM fine-tuning scenario, the fine-tuning performance could be attributed to a sparse subset of weights $(\sim0.01\%)$ ). Malladi et al. (2023b) also find certain fine-tuning tasks would demonstrate kernel behaviors, which include “fixed (gradient) features”: $\nabla_{\mathbf{w}}f(\mathbf{w}_{\mathrm{after}\,\mathrm{FT}};(\mathbf{x},y))\sim\nabla_{\mathbf{w}}f(\mathbf{w}_{\mathrm{before}\,\mathrm{FT}};(\mathbf{x},y))$ .  
+
+The similarity of gradient features during fine-tuning would imply that we do not need to re-select our sensitive parameters during fine-tuning i.e. select once before fine-tuning should be sufficient. This hypothesis can be validated by Figure 3 and Figure 5b. In Figure 3, the fact that “task grad, static” does not vanish and still has a large ratio over “task grad, dyn.” at the end of training demonstrate that we can select parameters before fine-tuning.  
+
+Surrogate static sensitive parameter mask. Another observation from Figure 3 is that the sensitive parameters derived from pre-training datasets (C4) would still cover a large fraction of model sensitivity. Specifically, the parameters overlap between top C4 gradient entries and task gradient entries are much $(>\!20\!\times\!)$ higher than all weight magnitude baselines. Therefore, we could use it as a surrogate sensitive sparse mask when gradients on downstream tasks are unavailable, particularly in scenario of on-device personalization. 3  
+
+C4 covers a diverse set of text corpus across different domains and we believe it will produce a generally good transferable static mask. We also note that if we have better knowledge on the exact downstream domain or task our method will be applied to, we can extract sparse masks with better specific task performance.4.  
+
+3.2 SENSZOQ: AN OPPORTUNITY FOR ON-DEVICE LLM PERSONALIZATION  
+
+Transferable static sparse fine-tuning as a parameter-efficient optimization method. The sparse optimization on fixed parameters can be implemented as a parameter-efficient optimization workflow, which will reduce the perturbation and updating time during ZO optimization. Suppose we have derived a sensitive sparse mask ${\bf m}_{k}$ , and we know it is fixed during fine-tuning. Instead of applying $\mathbf{m}_{k}$ to $\mathbf{z}$ , we would apply it directly to w and extract the nonzero parts as below:  
+
+$$
+\mathbf{w}_{\mathrm{sparse}}=\mathbf{w}\odot\mathbf{m}_{k},\ \mathbf{w}_{\mathrm{dense}}=\mathbf{w}\odot\left(\mathbf{1}_{d}-\mathbf{m}_{k}\right)
+$$  
+
+![](images/3962bf551afb18aacd7c6dd75b1efcc17fcafcb40223e349192ad4650cbbbedc.jpg)  
+Figure 3: Cumulative normalized gradient square values of Llama2-7B model’s linear layers after we apply $99.9\%$ sparsity masks $0.1\%$ nonzeros) of each method. “task grad (dyn.)” refers to the sensitive parameters selected at the given timestep (x-axis) on each downstream dataset, and “task grad (static)” refers to the sensitive parameters selected before fine-tuning. “C4 grad (static)” refers to the sensitive parameters selected with gradients taken from causal language modeling on C4 datasets (Raffel et al., 2019), and we keep it unchanged during fine-tuning. “weights (largest, static)” and “weights (smallest, static)” mean we pick the weights with the largest/smallest magnitude in the pre-trained model respectively.3.  
+
+Denote $\mathbf{z}_{k,t}\sim\mathcal{N}(\mathbf{0}_{k},\mathbf{I}_{k})$ as the Gaussian perturbation sampled in timestep $t$ . We will determine $\mathbf{w}_{\mathrm{sparse}}$ before fine-tuning and optimize on wsparse only and leave $\mathbf{w}_{\mathrm{dense}}$ frozen during fine-tuning. In this case, our sensitive sparse ZO-SGD update rule will become:  
+
+$$
+\mathbf{w}_{\mathrm{sparse},t+1}=\mathbf{w}_{\mathrm{sparse},t}-\eta_{t}\hat{g}\big(\mathbf{w}_{\mathrm{sparse},t},\big(\mathbf{x}_{t},y_{t}\big),\mathbf{z}_{k,t}\big)
+$$  
+
+Equation 8’s formulation allows (1) a wall-clock efficient of ZO optimization method (2) an opportunity to enable an on-device personalization workflow.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section, we aim to validate the effectiveness of our SensZOQ, shown in Figure 4, as a memoryefficient LLM fine-tuning solution. This naturally leads to comparison with other ZO methods, which we evaluate in Section 4.1. Additionally, we assess the effectiveness of our sensitive parameter mask derived from pre-training texts (C4) against other heuristic sparsity methods in Section 4.2. Specifically, we aim to address the following research questions:  
+
+• RQ1: What is the performance of our SensZOQ compared with other ZO methods? • RQ2: Is optimizing C4-gradient-derived sensitive parameters more effective than optimizing other subset of parameters during ZO fine-tuning?  
+
+We focus on 7B-level LLM models including Llama2-7B (Touvron et al., 2023), Mistral-7B (Jiang et al., 2023), and OPT-6.7B (Zhang et al., 2022) as they would fit with common on-device memory constraints (8 GiB) listed on Table 11 after applying quantization. We use SST-2 (Socher et al., 2013), RTE (Wang et al., 2018), CB (De Marneffe et al., 2019), BoolQ (Clark et al., 2019), WSC (Levesque et al., 2012), WiC (Pilehvar & Camacho-Collados, 2019), COPA (Roemmele et al., 2011), WinoGrande (WinoG) (Sakaguchi et al., 2020), and WikiText-2 (Wiki2) (Merity et al., 2017) datasets. We follow standard ZO fine-tuning settings and use the same codebase as in Malladi et al. (2023a). More details of our experiments (hyperparameters, task-specific prompts, etc.  
+
+ To the best of our knowledge, there are no ZO-LLM research yet evaluated on harder commonsense reasoning or math tasks. We take a pioneering step in this direction and establish the ZO baselines. In addition, we investigate the empirical training convergence w.r.t.  
+
+4.1 ON-DEVICE PERSONALIZATION  
+
+We evaluate the performance of our SensZOQ method in Table 1. We follow the exact recipe as described Figure 4, where we only optimize $0.1\%$ sensitive parameters derived from a small batch of C4 texts on top of a 4-bit quantized model. SensZOQ’s results are shown as $1^{\mathrm{st}}$ row for each subtable.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+Table 1: Fine-tuning performance of different methods. In the first column, “Q” means the full model is quantized with 4-bit quantization method (SqueezeLLM (Kim et al., 2024)), and “ZO-SGD” means the model is fine-tuned with ZO-SGD optimizer. For each cell, we report the mean and standard deviation of test set accuracy (↑) of 3 random trials in the format of meanstd, except that we report test set perplexity (↓) for Wiki2. We finally report the average performance rank (Wiki2 included) and average accuracy (Wiki2 excluded) in the last 2 columns. Notice that we add the results for FO-SGD & FO-Adam for reference and we do not use it for performance rank computation.  
+
+(a) Llama2-7B   
+
+![](images/bf3912d951eb18952b773025b9ff368d8f83952cc20886ff49eb55c99783db6d.jpg)  
+
+Comparison with ICL & ZO Full FT. The results of in-context learning (ICL) and ZO full finetuning (ZO Full FT) on 16-bit models are shown as the $4^{\mathrm{th}}$ and $5^{\mathrm{th}}$ row for each substable in Table 1. 7B models are usually not large enough such that ICL would outperform with FT (Liu et al., 2022; Mosbach et al., 2023). In addition, ICL induces additional KV-cache memory burden if the number of demonstration examples are large or demonstration texts are long. Our method SensZOQ does not induce significant inference latency and memory burden as it only needs to use $0.1\%$ parameters. SensZOQ also outperform ICL and ZO Full FT. This is impressive give that quantization would degrade performance of the base model for SensZOQ, but SensZOQ still manages to match the fine-tuning performance of 16-bit model.  
+
+Comparison with ZO PEFT methods. The primary purpose of quantization is to represent parameters in less bits (therefore reducing model sizes) and improve system-level metrics such as weight loading time and inference latency (Dettmers et al., 2022; Chee et al., 2024). In order to retain such benefits during fine-tuning stage, our fine-tuning methods should be parameter-efficient. A natural baseline becomes fine-tuning PEFT methods such as LoRA (Hu et al., 2021) and Prefix Tuning (Li & Liang, 2021) on top of the same quantized LLM weights as SensZOQ. These results are shown as the $2^{\mathrm{nd}}$ and $3^{\mathrm{rd}}$ row for each substable in Table 1. SensZOQ still outperforms both LoRA and Prefix Tuning when applied to the same 4-bit quantized base model.  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+Comparison with Adam Full FT of smaller size model. The memory-efficiency of ZO is achieved via cheap queries in the loss landscape with random perturbation. The absence of accurate descent direction naturally leads an inferior performance than first-order (FO) full FT on the same model size, as also observed by Malladi et al. (2023a). However, we argue that such performance degradation is still acceptable in terms that ZO FT on larger models outperform FO FT on smaller models. In Table 2, we pick 2 popular LLM sizes (1B and 7B scale) and we find that applying SensZOQ on 6.7B OPT model generally outperforms FO-Adam full FT on 1.3B OPT model, and the later already surpasses the 8 GiB memory budget (e.g., 11.6 GiB on RTE compared to SensZOQ’s 5.2 GiB).  
+
+![](images/9cf94448e7309f853a267f8c183de2da2cbe9897e35206b6c4730b8037ac98fb.jpg)  
+
+Table 2: Fine-tuning performance of SensZOQ versus Adam FT of smaller model in the OPT family.   
+We follow the same experiment procedure as in Table 1.  
+
+Figure 5: Performance of different sparsity methods in Llama2-7B ZO fine-tuning.  
+
+4.2 EFFECTIVENESS OF SPARSE ZO FINE-TUNING ON SENSITIVE PARAMETERS  
+
+Comparison with other static sparsity masks. We first investigate the performance of optimizing our sensitive parameters versus other subsets of parameters in static sparsity regime with the 16-bit model. We first consider standard weight-magnitude baselines as weights with largest magnitude, weights with smallest magnitude (SparseMeZO’s sparsity patterns (Liu et al., 2024a)), and a random subset of weights baseline. There are some other weight importance metrics in the pruning community such as GraSP (Wang et al., 2020), and we also evaluate their performance in the static transfer setting. We note that these pruning metrics were originally proposed for deciding which parameters to retain instead of being removed during pruning, and it has no direct implications for ZO FT. Given a threshold vector $\tau$ , the formal definitions of all methods are listed as below:  
+
+• sensitive parameters with C4 gradients: $\begin{array}{r}{\mathbf{m}=|\nabla f\big(\mathbf{w}_{\mathrm{before\;FT}};\big(\mathbf{x}_{\mathrm{C}4},y_{\mathrm{C}4}\big)\big)|\ge\tau}\end{array}$   
+• random subsets: $\mathbf{m}=$ random_dim_d_vector_with_k_nnz(d, k)   
+• weights with largest magnitude: $\mathbf{m}=|\mathbf{w}_{\mathrm{before\;FT}}|\geq\tau$   
+• weights with smallest magnitude: $\mathbf{m}=|\mathbf{w}_{\mathrm{before\;FT}}|\le\tau$   
+• smallest GraSP scores: $\mathbf{m}=-\mathbf{w}$ before FT $\begin{array}{r}{\langle\odot\mathbb{E}_{(\mathbf{x},y)\sim\mathcal{D}}H(\mathbf{w}_{\mathrm{before}\:\mathrm{FT}})\nabla_{\mathbf{w}}f(\mathbf{w}_{\mathrm{before}\:\mathrm{FT}})\le\tau}\end{array}$  
+
+As illustrated in Figure 5a, we can find that ZO fine-tuning would benefit from sparse optimization, as all methods would achieve higher than ZO full fine-tuning when optimizing $10\%$ parameters. However, only sensitive parameters would maintain its performance as we move to the extreme sparsity region $(<\!1\%)$ . In fact, the performance curve of sensitive parameters w.r.t. different sparsity levels is near a flat curve, which indicates the performance loss by moving from $10\%$ to $0.1\%$ is minimal. We also find that optimizing weights with smallest magnitude is more effectively than optimizing weights with largest magnitude, which aligns with Liu et al. (2024a)’s findings. However, sensitive parameters is still more effective for optimizing weights with smallest magnitude. This suggests that sensitive parameters are more effective to serve as the sparse parameters in our SensZOQ instead of SparseMeZO’s weights with smallest magnitude.  
+
+Transferability of SensZOQ’s sparsity masks. SensZOQ uses C4 gradients to produce a transferable static mask used in downstream tasks. In Figure 5b, we compare the performance of optimizing sensitive parameters with gradients on C4 dataset with its theoretical upper bound: static sensitive parameters derived from gradients on each fine-tuning task as the solid line and its dynamic version as the dash-dotted line. We also include the static and dynamic random subset parameters as a baseline. We can find that the gap of sensitive parameters between deriving from gradients on C4 dataset and gradients on each fine-tuning task at ratio 1e-3 is small. Together with Figure 11 that we evaluate the top gradient entries similarity between C4 and downstream tasks, we believe SensZOQ’s sensitive masks from C4 gradients would yield satisfactory performance in general.  
+
+
+
+\section{5 RELATED WORKS  }
+
+
+Zeroth-order fine-tuning of LLMs. Since MeZO (Malladi et al., 2023a) first demonstrates the effectiveness of ZO for LLM fine-tuning, ZO has attracted great research interests from the LLM community in different aspects. For example, ZO is effective for edge device fine-tuning in communication-constrained and federated settings (Ling et al., 2024; Zhang et al., 2024a; Tang et al., 2024; Liu et al., 2024b). Notably, Zelikman et al. (2023) illustrate the possibility of exchanging single-byte projected gradients in distributed zeroth-order workloads, yielding both communication and privacy beneftis. Numerous research has also focused on enhancing the optimizer aspect of zerothorder optimization (Jiang et al., 2024; Pang & Zhou, 2024; Gautam et al., 2024). Other researchers are also interested in improving ZO’s efficiency or convergence rate from cleverer optimizer designs. Li et al. (2024b) explore the middle ground between small-batched FO-SGD and large-batched ZO-SGD to balance the convergence speed and memory footprints. Liu et al. (2024a) and Zhang et al. (2024b) suggest that sparsity would potentially accelerate ZO optimization convergence. Zhao et al. (2024) precondition ZO perturbation with knowledge from parameter-wise loss curvature heterogeneity to gain convergence speedup. To tbe best of our knowledge, Liu et al. (2024a) is the only ZO fine-tuning with sparsity (smallest weight magnitude mask) work at this moment, and we have ablated on its static extreme sparsity performance in Figure 5a.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this work, we identify that only a small portion of LLM parameters needs to be updated during ZO fine-tuning, and these static and sparse subset parameters can be derived during the pre-training phase and transferred across various downstream tasks without requiring any modifications, preserving efficient ZO performance. We propose SensZOQ, a workflow that integrates sparse ZO optimization with 4-bit quantization to further enhance the memory efficiency of on-device fine-tuning. SensZOQ leverages static sparse fine-tuning to enable the personalization of 7B LLMs on-device, reducing memory consumption to less than 8 GiB of CUDA memory. Despite this efficiency, SensZOQ achieves better performance than both in-context learning (ICL) and full ZO fine-tuning. Therefore, SensZOQ creates a new venue to facilitate on-device fine-tuning.  
+
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot learners. Advances in neural information processing systems, 33:1877–1901, 2020.   
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher M De Sa. Quip: 2-bit quantization of large language models with guarantees. Advances in Neural Information Processing Systems, 36, 2024.   
+Aochuan Chen, Yimeng Zhang, Jinghan Jia, James Diffenderfer, Jiancheng Liu, Konstantinos Parasyris, Yihua Zhang, Zheng Zhang, Bhavya Kailkhura, and Sijia Liu. Deepzero: Scaling up zeroth-order optimization for deep model training. In International Conference on Learning Representations, 2024. doi: 10.48550/arXiv.2310.02025.   
+Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers), pp. 2924–2936, 2019.   
+Arman Cohan, Franck Dernoncourt, Doo Soon Kim, Trung Bui, Seokhwan Kim, Walter Chang, and Nazli Goharian. A discourse-aware attention model for abstractive summarization of long documents. Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 2 (Short Papers), 2018. doi: 10.18653/v1/n18-2097. URL http://dx.doi.org/10.18653/v1/n18-2097.   
+Tri Dao. Flashattention-2: Faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691, 2023.   
+Marie-Catherine De Marneffe, Mandy Simons, and Judith Tonhauser. The commitmentbank: Investigating projection in naturally occurring discourse. In Proceedings of Sinn und Bedeutung, pp. 107–124, 2019.   
+Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Gpt3. int8 (): 8-bit matrix multiplication for transformers at scale. Advances in Neural Information Processing Systems, 35: 30318–30332, 2022.   
+Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning of quantized llms. In A. Oh, T. Naumann, A. Globerson, K. Saenko, M. Hardt, and S. Levine (eds.), Advances in Neural Information Processing Systems, volume 36, pp. 10088–10115. Curran Associates, Inc., 2023.   
+Jonathan Frankle and Michael Carbin. The lottery ticket hypothesis: Finding sparse, trainable neural networks. In International Conference on Learning Representations, 2019. doi: 10.48550/arXiv. 1803.03635.   
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323, 2022.   
+Tanmay Gautam, Youngsuk Park, Hao Zhou, Parameswaran Raman, and Wooseok Ha. Variancereduced zeroth-order methods for fine-tuning language models, 2024.   
+In Gim and JeongGil Ko. Memory-efficient dnn training on mobile devices. In Proceedings of the 20th Annual International Conference on Mobile Systems, Applications and Services, pp. 464–476, 2022.   
+Han Guo, Philip Greengard, Eric Xing, and Yoon Kim. Lq-lora: Low-rank plus quantized matrix decomposition for efficient language model finetuning. In The Twelfth International Conference on Learning Representations, 2023.   
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. In International Conference on Learning Representations, 2021.   
+Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. Lora: Low-rank adaptation of large language models. arXiv preprint arXiv:2106.09685, 2021.   
+Zhiqiang Hu, Lei Wang, Yihuai Lan, Wanyu Xu, Ee-Peng Lim, Lidong Bing, Xing Xu, Soujanya Poria, and Roy Lee. Llm-adapters: An adapter family for parameter-efficient fine-tuning of large language models. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing, pp. 5254–5276, 2023.   
+Albert Q Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, et al. Mistral 7b. arXiv preprint arXiv:2310.06825, 2023.   
+Shuoran Jiang, Qingcai Chen, Youcheng Pan, Yang Xiang, Yukang Lin, Xiangping Wu, Chuanyi Liu, and Xiaobao Song. Zo-adamu optimizer: Adapting perturbation by the momentum and uncertainty in zeroth-order optimization. Proceedings of the AAAI Conference on Artificial Intelligence, 38(16):18363–18371, Mar. 2024. doi: 10.1609/aaai.v38i16.29796. URL https: //ojs.aaai.org/index.php/AAAI/article/view/29796.   
+Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language models. arXiv preprint arXiv:2001.08361, 2020.   
+Sehoon Kim, Coleman Richard Charles Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W Mahoney, and Kurt Keutzer. Squeezellm: Dense-and-sparse quantization. In Forty-first International Conference on Machine Learning, 2024.   
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International Conference on Learning Representations, 2015. doi: 10.48550/arXiv.1412.6980.   
+Hector Levesque, Ernest Davis, and Leora Morgenstern. The winograd schema challenge. In Thirteenth international conference on the principles of knowledge representation and reasoning, 2012.   
+Luchang Li, Sheng Qian, Jie Lu, Lunxi Yuan, Rui Wang, and Qin Xie. Transformer-lite: High-efficiency deployment of large language models on mobile phone gpus. arXiv preprint arXiv:2403.20041, 2024a.   
+Xiang Lisa Li and Percy Liang. Prefix-tuning: Optimizing continuous prompts for generation. arXiv preprint arXiv:2101.00190, 2021.   
+Zeman Li, Xinwei Zhang, and Meisam Razaviyayn. Addax: Memory-efficient fine-tuning of language models with a combination of forward-backward and forward-only passes. In 5th Workshop on practical ML for limited/low resource settings, 2024b.   
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Xingyu Dang, and Song Han. Awq: Activationaware weight quantization for llm compression and acceleration. arXiv preprint arXiv:2306.00978, 2023.   
+Wang Ling, Dani Yogatama, Chris Dyer, and Phil Blunsom. Program induction by rationale generation: Learning to solve and explain algebraic word problems. ACL, 2017.   
+Zhenqing Ling, Daoyuan Chen, Liuyi Yao, Yaliang Li, and Ying Shen. On the convergence of zeroth-order federated tuning for large language models. In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, KDD ’24, pp. 1827–1838, New York, NY, USA, 2024. Association for Computing Machinery. ISBN 9798400704901. doi: 10.1145/3637528. 3671865. URL https://doi.org/10.1145/3637528.3671865.   
+Haokun Liu, Derek Tam, Mohammed Muqeeth, Jay Mohta, Tenghao Huang, Mohit Bansal, and Colin A Raffel. Few-shot parameter-efficient fine-tuning is better and cheaper than in-context learning. Advances in Neural Information Processing Systems, 35:1950–1965, 2022.   
+Sijia Liu, Pin-Yu Chen, Bhavya Kailkhura, Gaoyuan Zhang, Alfred O Hero III, and Pramod K Varshney. A primer on zeroth-order optimization in signal processing and machine learning: Principals, recent advances, and applications. IEEE Signal Processing Magazine, 37(5):43–54, 2020.   
+Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Mandar Joshi, Danqi Chen, Omer Levy, Mike Lewis, Luke Zettlemoyer, and Veselin Stoyanov. Roberta: A robustly optimized bert pretraining approach. arXiv preprint arXiv:1907.11692, 2019.   
+Yong Liu, Zirui Zhu, Chaoyu Gong, Minhao Cheng, Cho-Jui Hsieh, and Yang You. Sparse mezo: Less parameters for better performance in zeroth-order llm fine-tuning. arXiv preprint arXiv:2402.15751, 2024a.   
+Z Liu, J Lou, W Bao, Y Hu, B Li, Z Qin, and K Ren. Differentially private zeroth-order methods for scalable large language model finetuning. arXiv preprint arXiv:2402.07818, 2024b. URL https://arxiv.org/abs/2402.07818.   
+aCt ei nZfheraenngc, eY tuiamned. oInng I nTtiearnn, aCtihornisatlo pChoenrf eRree,n ecte  aol.n  DMeajca hviun:e  CLeoanrtenxitnuga, l pspp. a2rs2i1ty3 7f–or2 2ef1f7ic6i. ePntM llLmRs,   
+Zirui Liu, Guanchu Wang, Shaochen Henry Zhong, Zhaozhuo Xu, Daochen Zha, Ruixiang Ryan Tang, Zhimeng Stephen Jiang, Kaixiong Zhou, Vipin Chaudhary, Shuai Xu, et al. Winner-take-all column row sampling for memory efficient adaptation of language model. Advances in Neural Information Processing Systems, 36, 2024c.   
+Nadtteavyica e Mpeairrsiottnhaal,i zTaittitoany au siMnagi rfitinteh-at,u aninndg .S oInz oA Idnjuonucet.  PIrmopcreoevdiinngg sa cotfi tvhitey  2d0a2t0a  cAoCllMe cItintoenr nwaittiho noanlJoint Conference on Pervasive and Ubiquitous Computing and Proceedings of the 2020 ACM International Symposium on Wearable Computers, pp. 255–260, 2020.   
+Sadhika Malladi, Tianyu Gao, Eshaan Nichani, Alex Damian, Jason D Lee, Danqi Chen, and Sanjeev Arora. Fine-tuning language models with just forward passes. Advances in Neural Information Processing Systems, 36:53038–53075, 2023a.   
+Sadhika Malladi, Alexander Wettig, Dingli Yu, Danqi Chen, and Sanjeev Arora. A kernel-based view of language model fine-tuning. In International Conference on Machine Learning, pp. 23610–23641. PMLR, 2023b.   
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In International Conference on Learning Representations, 2016.   
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In International Conference on Learning Representations, 2017.   
+Marius Mosbach, Tiago Pimentel, Shauli Ravfogel, Dietrich Klakow, and Yanai Elazar. Few-shot finetuning vs. in-context learning: A fair comparison and evaluation. arXiv preprint arXiv:2305.16938, 2023.   
+Markus Nagel, Rana Ali Amjad, Mart Van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or down? adaptive rounding for post-training quantization. In International Conference on Machine Learning, pp. 7197–7206. PMLR, 2020.   
+Mayumi Ohta, Nathaniel Berger, Artem Sokolov, and Stefan Riezler. Sparse perturbations for improved convergence in stochastic zeroth-order optimization. In Machine Learning, Optimization, and Data Science: 6th International Conference, LOD 2020, Siena, Italy, July 19–23, 2020, Revised Selected Papers, Part II 6, pp. 39–64. Springer, 2020.   
+Yijiang Pang and Jiayu Zhou. Stochastic two points method for deep model zeroth-order optimization. arXiv preprint arXiv:2402.01621, 2024. URL https://arxiv.org/abs/2402.01621.   
+Abhishek Panigrahi, Nikunj Saunshi, Haoyu Zhao, and Sanjeev Arora. Task-specific skill localization in fine-tuned language models. In International Conference on Machine Learning, pp. 27011– 27033. PMLR, 2023.   
+Gunho Park, Minsub Kim, Sungjae Lee, Jeonghoon Kim, Beomseok Kwon, Se Jung Kwon, Byeongwook Kim, Youngjoo Lee, Dongsoo Lee, et al. Lut-gemm: Quantized matrix multiplication based on luts for efficient inference in large-scale generative language models. In The Twelfth International Conference on Learning Representations, 2024.   
+Keiran Paster, Marco Dos Santos, Zhangir Azerbayev, and Jimmy Ba. Openwebmath: An open dataset of high-quality mathematical web text. In The Twelfth International Conference on Learning Representations, 2024.   
+Zhimin Peng, Ming Yan, and Wotao Yin. Parallel and distributed sparse optimization. In 2013 Asilomar conference on signals, systems and computers, pp. 659–646. IEEE, 2013.   
+Mohammad Taher Pilehvar and Jose Camacho-Collados. Wic: the word-in-context dataset for evaluating context-sensitive meaning representations. In Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers), pp. 1267–1273, 2019.   
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, Ilya Sutskever, et al. Language models are unsupervised multitask learners. OpenAI blog, 1(8):9, 2019.   
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. arXiv e-prints, 2019.   
+Melissa Roemmele, Cosmin Adrian Bejan, and Andrew S Gordon. Choice of plausible alternatives: An evaluation of commonsense causal reasoning. In 2011 AAAI Spring Symposium Series, 2011.   
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An adversarial winograd schema challenge at scale. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, pp. 8732–8740, 2020.   
+Richard Socher, Alex Perelygin, Jean Wu, Jason Chuang, Christopher D Manning, Andrew $\mathrm{~Y~Ng~}$ , and Christopher Potts. Recursive deep models for semantic compositionality over a sentiment treebank. In Proceedings of the 2013 conference on empirical methods in natural language processing, pp. 1631–1642, 2013.   
+Luca Soldaini, Rodney Kinney, Akshita Bhagia, Dustin Schwenk, David Atkinson, Russell Authur, Ben Bogin, Khyathi Chandu, Jennifer Dumas, Yanai Elazar, Valentin Hofmann, Ananya Jha, Sachin Kumar, Li Lucy, Xinxi Lyu, Nathan Lambert, Ian Magnusson, Jacob Morrison, Niklas Muennighoff, Aakanksha Naik, Crystal Nam, Matthew Peters, Abhilasha Ravichander, Kyle Richardson, Zejiang Shen, Emma Strubell, Nishant Subramani, Oyvind Tafjord, Evan Walsh, Luke Zettlemoyer, Noah Smith, Hannaneh Hajishirzi, Iz Beltagy, Dirk Groeneveld, Jesse Dodge, and Kyle Lo. Dolma: an open corpus of three trillion tokens for language model pretraining research. In Lun-Wei Ku, Andre Martins, and Vivek Srikumar (eds.), Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), pp. 15725–15788, Bangkok, Thailand, August 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.acl-long.840. URL https://aclanthology.org/2024.acl-long.840.   
+James C Spall. Multivariate stochastic approximation using a simultaneous perturbation gradient approximation. IEEE transactions on automatic control, 37(3):332–341, 1992.   
+Yi-Lin Sung, Varun Nair, and Colin A Raffel. Training neural networks with fixed sparse masks. Advances in Neural Information Processing Systems, 34:24193–24205, 2021.   
+Zhaoxuan Tan, Qingkai Zeng, Yijun Tian, Zheyuan Liu, Bing Yin, and Meng Jiang. Democratizing large language models via personalized parameter-efficient fine-tuning. arXiv preprint  
+
+arXiv:2402.04401, 2024a.  
+
+Zhen Tan, Tianlong Chen, Zhenyu Zhang, and Huan Liu. Sparsity-guided holistic explanation for llms with interpretable inference-time intervention. In Proceedings of the AAAI Conference on Artificial Intelligence, pp. 21619–21627, 2024b.   
+Xinyu Tang, Ashwinee Panda, Milad Nasr, Saeed Mahloujifar, and Prateek Mittal. Private fine-tuning of large language models with zeroth-order optimization. arXiv preprint arXiv:2401.04343, 2024. URL https://arxiv.org/abs/2401.04343.   
+Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and fine-tuned chat models. arXiv preprint arXiv:2307.09288, 2023.   
+Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel Bowman. Glue: A multi-task benchmark and analysis platform for natural language understanding. In Proceedings of the 2018 EMNLP Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP, pp. 353–355, 2018.   
+Chaoqi Wang, Guodong Zhang, and Roger Grosse. Picking winning tickets before training by preserving gradient flow. In International Conference on Learning Representations, 2020.   
+Haocheng Xi, Changhao Li, Jianfei Chen, and Jun Zhu. Training transformers with 4-bit integers. Advances in Neural Information Processing Systems, 36:49146–49168, 2023.   
+Haojun Xia, Zhen Zheng, Yuchao Li, Donglin Zhuang, Zhongzhu Zhou, Xiafei Qiu, Yong Li, Wei Lin, and Shuaiwen Leon Song. Flash-llm: Enabling cost-effective and highly-efficient large generative model inference with unstructured sparsity. In Proceedings of the VLDB Endowment, Vol. 17, No. 2, 2023. doi: 10.14778/3626292.3626303.   
+Mengwei Xu, Feng Qian, Qiaozhu Mei, Kang Huang, and Xuanzhe Liu. Deeptype: On-device deep learning for input personalization service with minimal privacy concern. Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies, 2(4):1–26, 2018.   
+Xinyu Yang, Jixuan Leng, Geyang Guo, Jiawei Zhao, Ryumei Nakada, Linjun Zhang, Huaxiu Yao, and Beidi Chen. $s^{2}$ ft: Efficient, scalable and generalizable llm fine-tuning by structured sparsity. In The Thirty-eighth Annual Conference on Neural Information Processing Systems, 2024.   
+Eric Zelikman, Qian Huang, Percy Liang, Nick Haber, and Noah D. Goodman. Just one byte (per gradient): A note on low-bandwidth decentralized language model finetuning using shared randomness. arXiv preprint arXiv:2306.10015, 2023. URL https://arxiv.org/abs/ 2306.10015.   
+Liang Zhang, Bingcong Li, Kiran Koshy Thekumparampil, Sewoong Oh, and Niao He. Dpzero: Private fine-tuning of language models without backpropagation. arXiv preprint arXiv:2310.09639, 2024a. URL https://arxiv.org/abs/2310.09639.   
+Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, et al. Opt: Open pre-trained transformer language models. arXiv preprint arXiv:2205.01068, 2022.   
+Yihua Zhang, Pingzhi Li, Junyuan Hong, Jiaxiang Li, Yimeng Zhang, Wenqing Zheng, Pin-Yu Chen, Jason D Lee, Wotao Yin, Mingyi Hong, et al. Revisiting zeroth-order optimization for memory-efficient llm fine-tuning: A benchmark. arXiv preprint arXiv:2402.11592, 2024b.   
+Yanjun Zhao, Sizhe Dang, Haishan Ye, Guang Dai, Yi Qian, and Ivor W Tsang. Second-order fine-tuning without pain for llms: A hessian informed zeroth-order optimizer. arXiv preprint arXiv:2402.15173, 2024.   
+Shaochen Zhong, Guanqun Zhang, Ningjia Huang, and Shuai Xu. Revisit kernel pruning with lottery regulated grouped convolutions. In International Conference on Learning Representations, 2021.   
+Shaochen Henry Zhong, Zaichuan You, Jiamu Zhang, Sebastian Zhao, Zachary LeClaire, Zirui Liu, Daochen Zha, Vipin Chaudhary, Shuai Xu, and Xia Hu. One less reason for filter pruning: Gaining free adversarial robustness with structured grouped kernel pruning. Advances in Neural Information Processing Systems, 36, 2024.  
+
+![](images/c3ea0a3d6e013dfc78a6d94aa59e968e2c9fd2ab33086f6a2561d77e44e8581d.jpg)  
+
+
+

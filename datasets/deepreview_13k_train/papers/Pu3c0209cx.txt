@@ -1,0 +1,215 @@
+\title{Tight Clusters Make Specialized Experts}
+
+\begin{abstract}
+Sparse Mixture-of-Experts (MoE) architectures have emerged as a promising approach to decoupling model capacity from computational cost. At the core of the MoE model is the router, which learns the underlying clustering structure of the input distribution in order to send input tokens to appropriate experts. However, latent clusters may be unidentifiable in high dimension, which causes slow convergence, susceptibility to data contamination, and overall degraded representations as the router is unable to perform appropriate token-expert matching. We examine the router through the lens of clustering optimization and derive optimal feature weights that maximally identify the latent clusters. We use these weights to compute the token-expert routing assignments in an adaptively transformed space that promotes well-separated clusters, which helps identify the best-matched expert for each token. In particular, for each expert cluster, we compute a set of weights that scales features according to whether that expert clusters tightly along that feature. We term this novel router the Adaptive Clustering (AC) router. Our AC router enables the MoE model to obtain three connected benefits: 1) faster convergence, 2) better robustness to data corruption, and 3) overall performance improvement, as experts are specialized in semantically distinct regions of the input space. We empirically demonstrate the advantages of our AC router over baseline routing methods when applied on a variety of MoE backbones for large-scale language modeling and object recognition tasks in both clean and corrupted settings.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Scaling up model capacity continues to deliver substantial performance gains across a wide range of tasks, with particularly impressive results in visual representation learning and language modeling (Alexey, 2020; Bao et al., 2021; Radford et al., 2019; Raffel et al., 2020). However, larger models incur growing computational costs, prompting increasing research into Sparse Mixture-of-Experts models (MoE), which offers a promising avenue to balancing model scale with efficiency by activating only sub-modules, termed experts, of the network during training and inference (Shazeer et al., 2017; Fedus et al., 2022; Lepikhin et al., 2020). This approach has been shown to achieve better performance than dense models with nearly constant computational overhead on tasks from speech recognition, image recognition, machine translation, and language modeling (Riquelme et al., 2021; Kumatani et al., 2021; Lepikhin et al., 2020).  
+
+At the core of the MoE layer is the learned router which assigns inputs to the relevant experts. The router must learn to segment the input space appropriately such that inputs and experts are well matched, enabling the experts to be trained on semantically similar data. This expert specialization allows MoE models to produce better representations than their dense counterparts while activating only a fraction of the total parameters. Recently, various methods have been proposed to find optimal expert-token matches, including linear programs (Lewis et al., 2021), cosine similarity-based rules (Chi et al., 2022), soft assignments via convex combinations of inputs (Puigcerver et al., 2023), and both top-k experts per token (Shazeer et al., 2017) and top- $\cdot\mathbf{k}$ tokens per expert (Zhou et al., 2022b). We note that the above approaches fundamentally rely on dot-products between inputs and experts to learn the corresponding assignment, which might be suboptimal in cases where the semantic regions are not easily discoverable in the high-dimensional feature space. Typically, we expect that the true underlying clusters present in the data will cluster on different, potentially disjoint, subsets of features, and may not be discoverable when using the full feature set. This phenomenon can lead to slow convergence as the experts are unable to specialize on semantically similar regions of the data, poor robustness as data contamination can spuriously assign inputs to unsuitable experts, and degraded overall downstream performance due to suboptimal input-expert matching.  
+
+![](images/270225b8d3e08777bd9a122faa06711a8594c6b107d6cba67e4b2678f55ad5b2.jpg)  
+Figure 1: ACMoE discovers semantically distinct regions. Here, we show $14\mathrm{x}14$ image reconstructions where each patch is colored by its assigned expert. Top row: Swin fails to segment the bird precisely, assigning large chunks of foreground and background to one expert (red), while ACMoE accurately discovers the bird and relevant foreground. Bottom row: When the background and foreground are hard to distinguish, Swin’s router fails to register the stingray (left) or shark (right) and allocates one expert for virtually the entire image. ACMoE, however, accurately discovers the semantically distinct regions and utilizes one expert (green) to specialize on the stingray and shark and different experts to specialize on the textures in the background.  
+
+Contribution. In this work, we propose the Adaptive Clustering (AC) router and corresponding Adaptive Clustering Mixture-of-Experts (ACMoE), a novel MoE method in which the router computes token-expert assignments in a transformed space that maximally identifies latent clusters in the data and more easily discovers the best-matched expert for each token. More specifically, we adaptively learn for each input which features best determine its cluster assignment and scale its features accordingly such that features that promote tight expert clusters are upweighted, and features that produce dispersed expert clusters are downweighted. This transformation accentuates the relevant characteristics of each input according to the specialization of the experts, thereby allowing the router to more easily discover the optimal input-expert allocation. Computing the routing assignments following this scheme produces three benefits: 1) faster convergence as experts are able to specialize more quickly by being allocated semantically similar inputs, 2) better robustness as latent clusters are better separated, thereby minimizing the risk that data corruption erroneously assigns tokens to unsuitable experts, and 3) better overall representations and downstream performance due to improved expert specialization. In order to discover the key features per token and their corresponding weights, we present a feature-weighted clustering optimization perspective on the MoE framework and demonstrate how the clustering solution obtains the required feature weights. We show how these weights can be integrated into the routing mechanism such that routing takes place in a cluster-adaptive transformed space. We theoretically prove that our proposed routing mechanism learns the latent clustering structure of the data faster than standard routing mechanisms and that our mechanism is more robust to data contamination. Furthermore, our proposed method involves no learnable parameters and can be computed highly efficiently. In summary, our contributions are three-fold:  
+
+1. We develop the novel Adaptive Clustering router, a routing method in MoE architectures that computes token-expert assignments in a transformed space that promotes separation of latent clusters in the data and more easily identifies the best-matched expert for each token.   
+2. We propose a feature-weighted clustering optimization perspective on token-expert assignment and derive the optimal feature weights for adaptively transforming the input data for routing.   
+3. We derive a theoretical framework demonstrating how MoE robustness and convergence depend on the shape of latent clusters and the clustering geometry of the input space.  
+
+We empirically demonstrate that 1) the Adaptive Clustering router outperforms baseline routing methods in MoE architectures in large-scale tasks such as WikiText-103 language modeling and downstream finetuning, and ImageNet-1k object classification in both clean and contaminated settings, 2) the Adaptive Clustering router exhibits faster convergence than baseline methods, and 3) the Adaptive Clustering router attains these performance improvements for free – that is, with no learnable parameters and negligible computational overhead.  
+
+![](images/0b4aa1638d179f6d56f3971adb631c4d9a09074c26c4c48e4e6c3568f01c7564.jpg)  
+Figure 2: Fast Convergence of ACMoE. Left: Convergence speed on WikiText-103 pretraining using the Generalist Language Model (Du et al., 2022) backbone. Right: Convergence speed on Banking-77 finetuning using the Switch Transformer (Fedus et al., 2022) backbone. Across both backbones and tasks, we observe substantially faster convergence. We display final test perplexity (PPL) and accuracy (Acc.), showing better overall performance as well.  
+
+Preliminaries. We consider Transformer (Vaswani, 2017) based MoE architectures and follow the approach of previous work where the MoE layer is inserted after the self-attention layer within the Transformer, replacing the traditional feed-forward network (Fedus et al., 2022; Du et al., 2022; Liu et al., 2021). Let $\textbf{\em x}$ be an input token with hidden representation $h\in\mathbb{R}^{d}$ and $e_{1},e_{2},\ldots.e_{N}\in\mathbb{R}^{d}$ be the $N$ learnable expert embeddings for model hidden dimension $d$ . The MoE layer selecting the top $k$ experts is described by the following equations:  
+
+$$
+\begin{array}{r}{\mathcal{K}:=\mathrm{topk}_{k}(s_{k})=\mathrm{topk}_{k}(h^{\top}e_{k})}\\ {f^{S M o E}(h)=h+\displaystyle\sum_{k\in\mathcal{K}}g(h^{\top}e_{k})f_{k}^{\mathrm{FFN}}(h),}\end{array}
+$$  
+
+where $f_{k}^{\mathrm{FFN}}$ is the $k^{\mathrm{th}}$ expert feed-forward network, $s_{k}\;=\;h^{\top}e_{k}$ is the similarity score between token representation $^h$ and the $k^{\mathrm{th}}$ expert $e_{k}$ and $g(\cdot)$ is a gating function often chosen as softmax, $g(s_{k})\;=\;\mathrm{exp}(s_{k})/\sum_{j\in K}\mathrm{exp}(s_{j})$ . We refer to Eqn. 1 as the router, which learns the top $k$ best matched experts per token, and Eqn. 2 as the overall standard MoE layer.  
+
+Organization. We structure this paper as follows: In Section 2, we present a clustering optimization problem and show that its solution adaptively scales the feature space according to which dimensions promote tight clustering. In Section 3, we present how the solution to our clustering optimization problem can be built into our proposed AC router and we provide the full technical formulation of AC routing and Adaptive Clustering Mixture-of-Experts (ACMoE). We then present theoretical propositions on faster convergence and robustness. We empirically validate the advantages of ACMoE in Section 4 and discuss related work in Section 5. We end with concluding remarks and future work in Section 6.  
+
+
+
+\section{2 A CLUSTERING OPTIMIZATION PERSPECTIVE  }
+
+
+We begin by examining the MoE router through the lens of feature-weighted clustering (Witten & Tibshirani, 2010; Friedman & Meulman, 2004; Brusco & Cradit, 2001; Gnanadesikan et al., 1995). We explicitly model the router’s task as learning a token assignment that groups together similar tokens. We consider the role of learnable feature weights in solving a clustering optimization problem to optimally reveal latent clusters and present an analytical solution for the optimal weights for any given routing assignment. We finally discuss how this solution improves the MoE router before providing the full formulation of our AC router and ACMoE in the next section.  
+
+2.1 CLUSTERING OPTIMIZATION  
+
+Let the $i^{\mathrm{th}}$ hidden representation be given by $\pmb{h}_{i}\,=\,[h_{i1},\ldots,h_{i d}]^{\intercal}$ and let $D_{i j}$ denote the distance between pairs of vectors $h_{i}$ and $h_{j}$ . Given a distance metric $\rho_{i j q}$ between $h_{i q}$ and $h_{j q}$ over the $q^{\mathrm{th}}$ dimension, the distance between the vectors hi and hj can be defined as Dij(w) = ∑q∈[d] wqρijq for some weights $\pmb{w}\,=\,\left[w_{1},\dots,w_{d}\right]$ with $\begin{array}{r}{\sum_{q\in[d]}w_{q}\;=\;1}\end{array}$ and $w_{q}\,\geq\,0$ for all $q\,\in\,[d]$ . The weights determine the global importance of the $q^{\mathrm{th}}$ feature to the overall distance among representations.  
+
+Cluster analysis aims to divide the input set of $N$ objects into groups, where objects within the same group are more similar to each other than to those in other groups. This is formalized using a classifier ${\bar{r(}}i)=k$ , assigning the $i^{\mathrm{th}}$ object to a group $k$ . Then the optimal classifier $r^{*}$ minimizes a criterion $Q(r)$ that evaluates clustering quality:  
+
+$$
+r^{*}=\arg\operatorname*{min}_{r}Q(r)=\sum_{k\in[E]}\frac{1}{N_{k}^{2}}\sum_{r(i)=k}\sum_{r(j)=k}D_{i j}(\pmb{w}).
+$$  
+
+We expect that different groupings will cluster on different subsets of features. In particular, we wish to model the scenario that groupings exist in different latent subspaces with varying dependence on possibly disjoint subsets of features. We therefore replace the global feature weight $\pmb{w}$ in Eqn. 3 with cluster-dependent feature weights, {wk}kE=1 for $E$ groups, which allows us to capture the differing feature dependencies of each cluster. Then, we can adapt the optimization problem with these cluster-dependent feature weights as follows:  
+
+$$
+\begin{array}{r l}&{\big(r^{*},\{\boldsymbol{w}_{k}^{*}\}_{k=1}^{E}\big)=\arg\operatorname*{min}_{r,\{\boldsymbol{\mathbf{w}}_{k}\}}\displaystyle\sum_{k\in[E]}\frac{1}{N_{k}^{2}}\displaystyle\sum_{r(i)=k}\sum_{r(j)=k}D_{i j}^{J}(\boldsymbol{\mathbf{w}}_{k}),}\\ &{\qquad\mathrm{~such~that~}\displaystyle\sum_{q\in[d]}w_{q k}=1,\quad\forall k\in[E],}\end{array}
+$$  
+
+where $\begin{array}{r}{D_{i j}^{J}({\pmb w}_{k})=\sum_{l=1}^{d}w_{q\underline{{k}}}\rho_{i j g}+\lambda J({\pmb w}_{k})}\end{array}$ denotes the weighted distance between $i$ and $j$ combined with some regularization $J$ and regularization strength $\lambda$ .  
+
+To avoid point-mass solutions in which we assign all weight to the single best-clustering feature, we set the regularizer to the Kullback-Leibler divergence between the feature weights $\pmb{w}$ and the uniform distribution $\pmb{u}\;=\;\big(1/d,\dots,1/d\big)\;\in\;\mathbb{R}^{d}$ , denoted by $J(\pmb{w}_{k})\;=\;D_{\mathrm{KL}}(\pmb{u}\;\parallel\pmb{w}_{k}^{\textit{\footnotesize-}})$ . The regularization parameter $\lambda$ reflects our preference to maintain more or less features in the solution set.  
+
+2.2 MOE AS CLUSTERING OPTIMIZATION  
+
+Within the MoE framework with learnable routing, the router performs the role of the classifier $r:\mathbb{R}^{d}\rightarrow[E]$ , which is learned via gradient descent to optimize the final output loss1. Therefore, we modify Eqn. 4 by fixing $r$ and focusing just on optimizing the criterion with respect to cluster-wise feature weights $\pmb{w}_{k}$ . Under this interpretation, the router learns via backpropagation to optimally allocate representations to experts, with representations adaptively transformed to maximally reveal the clustering structure of the input data. Eqn. 4 then becomes  
+
+$$
+\begin{array}{r l}&{\{\pmb{w}_{k}^{*}\}_{k=1}^{E}=\arg\underset{\{\pmb{w}_{k}\}}{\operatorname*{min}}\sum_{k\in[E]}\frac{1}{N_{k}^{2}}\sum_{r(i)=k}\sum_{r(j)=k}D_{i j}^{J}(\pmb{w}_{k}),}\\ &{\mathrm{~such~that~}\displaystyle\sum_{q\in[d]}w_{q k}=1,\quad\forall k\in[E].}\end{array}
+$$  
+
+The following theorem presents the optimal weights per feature $q$ and cluster $k$ :  
+
+Theorem 1 (Optimal feature weights). Let $\begin{array}{r}{s_{q k}\::=\:N_{k}^{-2}\sum_{r(i)=k}\sum_{r(j)=k}\rho_{i j q}}\end{array}$ be a measure of dispersion on the $q^{\mathrm{th}}$ feature for the representations assigned to cluster $k$ . Then, for a given router function $r:\mathbb{R}^{d}\,\rightarrow\,[E]$ , the corresponding optimal weights $\{w_{k}\}_{k\in[E]}$ that minimize the featureweighted clustering optimization problem in Eqn. $^{5}$ are given by  
+
+$$
+w_{q k}=\frac{\lambda/d}{s_{q k}+\alpha_{k}}
+$$  
+
+for $(q,k)\in[d]\times[E],$ , where $\{\alpha_{k}\}_{k\in[E]}$ are constants that for any $\lambda>0$ satisfy  
+
+$$
+\sum_{q\in[d]}\frac{1}{s_{q k}+\alpha_{k}}=\frac{d}{\lambda}.
+$$  
+
+The existence of $\alpha_{k}$ satisfying Eqn.1. The optimal weights for a cluster $k$ given in Eqn. 6 take an intuitive form in that they are inversely proportional to the measure of dispersion in cluster $k$ along each dimension, $\begin{array}{r}{\pmb{w}_{k}\propto[\frac{1}{s_{1k}},\cdot\cdot\cdot,\frac{1}{s_{d k}}]}\end{array}$ . Hence, the optimal cluster-wise feature weights scale features according to their contribution to forming tight clusters. Specifically, the solution weights upweight a feature $q$ if cluster $k$ clusters tightly (has small dispersion $s_{q k}$ ) along the feature $q$ and downweights a feature $p$ if cluster $k$ clusters loosely (has large dispersion $s_{p k}$ ) along feature $p$ .  
+
+This method enables the MoE router to perform better token-expert matching. The cluster-wise feature weights $\pmb{w}_{k}$ capture the features on which the $k^{\mathrm{th}}$ expert is specialized, as large weights indicate those features are highly important to the identification of that expert cluster and small weights indicate those features are unimportant to identification of that expert cluster. Then, we can use $\pmb{w}_{k}$ to scale the tokens to accentuate their features according to the specialization of the experts, thereby allowing the router to best identify the most suitable expert for each token. Note that this solution is local in that we learn the optimal weights adaptively per cluster, obtaining $\pmb{w}_{k}$ for all $k\in[E]$ , and so we compute a unique scaling of the feature space adaptively per cluster as well. Integrating these cluster-dependent weights which scale the feature space according to the identification of each expert into the MoE router obtains our AC routing method and corresponding ACMoE. We detail the AC router and ACMoE fully in the next section.  
+
+
+
+\section{3 A TIGHT CLUSTER IS A SPECIALIZED EXPERT  }
+
+
+In this section, we demonstrate how we implement the solution weights from the clustering optimization problem in Eqn. 6 into the MoE routing mechanism, thereby obtaining the Adaptive Clustering router. We then provide the full technical formulation of our proposed routing method and corresponding ACMoE model. We also present theoretical results on how computing the routing assignments according to our framework promotes faster convergence and robustness.  
+
+
+
+\section{3.1 FULL TECHNICAL FORMULATION  }
+
+
+We integrate the weights from Eqn. 6 into the Adaptive Clustering router transformation in Definition 1 which, for a cluster $k$ , scales the dimensions of the feature space according to the $k^{\mathrm{th}}$ expert’s specialization on those features. Formally this is:  
+
+Definition 1 (Adaptive Clustering Router Transformation $M_{k}$ ). Let $\mathcal{C}_{k}^{\ell}\ =\ \{h_{1}^{\ell},\ldots,h_{N_{k}}^{\ell}\}$ be the representations assigned to expert $k$ at layer $\ell.$ . Let $s_{q k}^{\ell}\,\in\,\mathbb{R}$ be a measure of a spread in the $q^{\mathrm{th}}$ dimension for cluster $k$ , such as mean absolute deviation sℓqk = N1k ∑i∈Cℓk ∣hiℓq −¯hℓq∣. Then, the cluster-dependent router transformation for expert $k$ at layer $\ell$ is given by a diagonal matrix $M_{k}^{\ell}:=$ $\mathrm{diag}(1/s_{1k}^{\ell},\ldots,1/s_{d k}^{\ell})$ .  
+
+We use the transformation $M_{k}$ in Definition 1 to adaptively scale the feature space in which we perform token-expert matching. This obtains our Adaptive Clustering router and corresponding ACMoE layer, described in the following definition.  
+
+Definition 2 (Adaptive Clustering Router and MoE Layer). Let $h^{\ell}\in\mathbb{R}^{d}$ be the hidden representation of an input, $\dot{\boldsymbol{e}}_{1}^{\ell},\ldots,\boldsymbol{e}_{N}^{\ell}\in\mathbb{R}^{d}$ be expert embeddings at layer $\ell$ . Let $h^{\ell-1}\in\mathcal{C}_{k^{*}}^{\ell-1}$ have been assigned to expert $k^{*}$ in the previous layer. Let $M_{k^{*}}^{\ell-1}\,\in\,\mathbb{R}^{d\times d}$ be the Adaptive Clustering transformation (Definition $^{\,l}$ ) for input $^h$ at layer $\ell-1$ . Let $g(\cdot)$ be the softmax function. Then the following equations describe the Adaptive Clustering router (Eqn. 8) and overall ACMoE layer (Eqn. 9):  
+
+$$
+\mathcal{K}:=\mathrm{topk}_{k}\big(s_{k}\big)=\mathrm{topk}_{k}\big(h^{\ell\top}M_{k^{*}}^{\ell-1}e_{k}^{\ell}\big)
+$$  
+
+$$
+f^{\mathrm{ACMoE}}(h^{\ell})=h^{\ell}+\sum_{k\in\mathcal{K}}g(h^{\ell\top}M_{k^{*}}^{\ell-1}e_{k}^{\ell})f_{k}^{\mathrm{FFN},\ell}(h^{\ell}).
+$$  
+
+Remark 1. We see from the form of Eqns. 8 and $^{9}$ that standard router and MoE layer are recovered by setting the adaptive clustering router transformation to the identity matrix, $M_{k}\;=\;{\pmb I}_{d}$ for all $k\in[E]$ . Within our framework then, standard routing schemes implicitly assume all experts $k\in[E]$ depend equally on all dimensions.  
+
+Remark 2. The Adaptive Clustering router computes a dot-product between h and experts $e_{k}$ with the dimensions scaled by the weights in $M_{k^{*}}$ and so is proportional to a Mahalanobis distance. Under this interpretation, we soft project the tokens and expert embeddings onto the axes of the feature space that best identify the expert cluster $k^{*}$ .  
+
+Implementation details. Given ACMoE requires the expert assignment from the previous layer to compute the routing assignment (Eqn. 8), ACMoE is only implementable after the first layer. Furthermore, we scale the measures of dispersion in $M_{k}^{\ell}=\mathrm{diag}(1/s_{1k}^{\ell},\ldots,1/s_{d k}^{\ell})$ to have mean 1. This is to remove the effect of different clusters or features having different absolute magnitudes. Our method is concerned with identifying the key sets of features that contribute more or less to identification of the expert clusters, and so we wish to compute our scaling in a relative sense.  
+
+3.2 ADAPTIVE CLUSTERING PROMOTES ROBUSTNESS AND FAST CONVERGENCE  
+
+We now present theoretical propositions on the improved robustness and convergence speed of our method. The robustness of our method follows from better separation of expert-clusters. This produces a more stable assignment in which the probability of erroneously sending a token to unsuitable nearby experts decays exponentially with increased inter-cluster distance. Faster convergence follows from our AC routing method improving the conditioning on the Hessian of the loss with respect to the expert embeddings, enabling faster and more stable convergence of the router.  
+
+Promoting robustness. We begin with Lemma 1 stating that our AC transformation (Definition 1) increases the separation between clusters in the transformed space, followed by Lemma 2, which provides an explicit expression for the probability of incorrect expert assignment. To give the probability bound an exact form, we assume the cluster structure can be modeled as a Gaussian mixture model (GMM). We note that GMMs are a highly expressive and general framework, so this assumption does not place significant restrictions on our robustness analysis. We further assume that though clusters may overlap, they are well-separated along the features for which they cluster tightly2.  
+
+Lemma 1 (Adaptive Clustering Router Transformation Increases Cluster Separation). Let the data be generated from a Gaussian mixture model with components, $g_{c}=\mathcal{N}(\mu_{c},\bar{\Sigma_{c}}).$ for $c\in[E]$ . Without loss of generality, consider two expert clusters $c\in\{a,b\}$ where a token representation $h\ \sim\ g_{a}$ belongs to cluster a. Let $M_{a}\,=\,\mathrm{diag}(1/s_{1a},\ldots,1/s_{d a})$ be the router transformation constructed from the feature-wise dispersions, $s_{q a;}$ , of cluster $g_{a}$ for each feature $q\in[d]$ as given by Definition $^{\,l}$ . Then the distance between cluster means in the $M_{a}$ -transformed space, defined as $\|\mu_{k}-\mu_{a}\|_{M_{a}}^{2}:=$ $(\mu_{k}\!-\!\mu_{a})^{\top}M_{a}(\mu_{k}\!-\!\mu_{a})$ , is larger than in the original Euclidean space: $\|\pmb{\mu}_{k}-\pmb{\mu}_{a}\|_{\pmb{M}_{a}}^{2}\geq\|\pmb{\mu}_{k}-\pmb{\mu}_{a}\|^{2}$ .  
+
+2. In Lemma 2, we derive the probability of mis-assignment as a function of inter-cluster distance, highlighting how cluster separation mitigates the effect of noise that can confuse the router.  
+
+Lemma 2 (Incorrect Assignment Probability). Let $\boldsymbol{h}\sim\mathcal{N}_{k^{*}}(\boldsymbol{\mu}_{k^{*}},\boldsymbol{\Sigma}_{k^{*}})$ be a representation belonging to cluster $k^{*}$ . Let $h^{\prime}=h+\epsilon$ be contaminated by some $\boldsymbol{O}$ -mean noise $\mathbf{\epsilon}\gets(\mathbf{0},\pmb{\Sigma}_{\epsilon})$ . Let $k$ be the nearest, incorrect cluster to $k^{*}$ . Let the inter-cluster mean distance between $k^{*}$ and $k$ be given by $\|\delta\pmb{\mu}\|:=\|\pmb{\mu}_{k^{*}}-\pmb{\mu}_{k}\|$ . Let the routing assignment be given by $r:\mathbb{R}^{d}\rightarrow[E]$ and denote the cumulative density of a standard normal distribution by $\Phi$ . Then the probability of incorrect assignment is given by  
+
+$$
+\mathrm{Pr}(r(h^{\prime})\neq k^{*})=1-\Phi\left(\frac{\|\delta\pmb{\mu}\|^{2}}{2\sqrt{\delta\mu^{\top}(\Sigma_{k^{*}}+\Sigma_{\epsilon})\delta\pmb{\mu}}}\right).
+$$  
+
+Remark 3. $I t$ is worth noting that since $1\ -\ \Phi(x)\ \ \sim\ \ (\sqrt{2\pi}x)^{-1}e^{-x^{2}/2}$ for large $x$ and $\sqrt{\delta\pmb{\mu}^{\intercal}\bigl(\pmb{\Sigma}_{k^{*}}+\pmb{\Sigma}_{\epsilon}\bigr)\delta\pmb{\mu}}\,=\,O\bigl(\|\pmb{\mu}\|\bigr)$ , we find that the probability of incorrect cluster assignment as given by Eqn. 10, $\operatorname*{Pr}(r(h^{\prime})\neq k^{*})=e^{-O(\|\delta\pmb{\mu}\|^{2})}$ is an exponentially decreasing function in $\|\delta\pmb{\mu}\|$ .  
+
+2. We now combine the notions in Lemmas 1 and 2 to obtain that the probability of erroneous assignment using the AC router is exponentially smaller than under a standard routing scheme. This is formalized in Proposition 1, given by:  
+
+Proposition 1 (Robustness of ACMoE). Consider an expert assignment setting for the representation $\boldsymbol{h}\sim\mathcal{N}_{k^{*}}(\boldsymbol{\mu}_{k^{*}},\boldsymbol{\Sigma}_{k^{*}})$ as in Lemma 2 with two routers given by $r:\mathbb{R}^{d}\rightarrow[E]$ and $r^{\mathrm{AC}}:\dot{\mathbb{R}}^{d}\rightarrow[E]$ for standard (Eqn. 2) and $A C$ routers (Definition 2), respectively. Then the probabilities of incorrect assignments of routers $r$ and $r^{\mathrm{AC}}$ satisfy $\operatorname*{Pr}\left(r^{\mathrm{AC}}(h^{\prime})\stackrel{\cdot}{\neq}k^{*}\right)\stackrel{\cdot}{\leq}\operatorname*{Pr}\left(r(h^{\prime})\stackrel{\cdot}{\neq}k^{*}\right)$ .  
+
+The proof of Proposition 1 is a direct result of combining Lemmas 1 and 2.  
+
+Promoting faster convergence. For an expert embedding $e_{k}\in\mathbb{R}^{d}$ and associated cluster $\mathcal{C}_{k}$ , our AC router in Definition 2 adaptively spheres $\mathcal{C}_{k}$ by stretching the feature space with weights inversely proportional to the coordinate-wise dispersion in $\mathcal{C}_{k}$ . This reduces the conditioning number of the Hessian of the loss with respect to the expert $e_{k}$ , improving the loss landscape and enabling faster and more stable convergence of the router. This notion is formalized in Proposition 2:  
+
+Proposition 2 (Faster convergence of ACMoE). Let $\mathcal{L}^{\mathrm{MoE}}:\Theta\rightarrow\mathbb{R}_{+}$ and $\mathcal{L}^{\mathrm{ACMoE}}:\Theta\rightarrow\mathbb{R}_{+}$ be the network loss functions defined on the whole parameter set $\Theta$ when employing the standard (Eqn. 2) and AC routers (Definition 2), respectively. Let $\kappa(A)=\lambda_{\operatorname*{max}}/\lambda_{\operatorname*{min}}$ denote the conditioning number of a matrix $\pmb{A}$ with largest and smallest eigenvalues $\lambda_{\mathrm{max}}$ and $\lambda_{\operatorname*{min}}$ respectively. Let the Hessian of an $i^{\mathrm{th}}$ expert be given by $\nabla_{e_{i}}^{2}$ . Then for each $i\in[E]$ the following holds with high probability  
+
+$$
+\kappa\left(\nabla_{e_{i}}^{2}\mathcal{L}^{\mathrm{ACMoE}}\right)\leq\kappa\left(\nabla_{e_{i}}^{2}\mathcal{L}^{\mathrm{MoE}}\right)
+$$  
+
+Remark 4. Faster convergence of ACMoE can also be argued from the perspective of learning Gaussian mixture models with Expectation Maximization (Dempster et al., 1977). The classic result of Ma et al. (2000) shows the convergence rate to the true parameters depends on the overlap between component Gaussians. Our AC method adaptively transforms the input space with by $M_{k}$ (Definition 1), which decreases component overlap by increasing inter-cluster distances.  
+
+3. We find this result empirically supported as shown by the rapid convergence in Fig. 2.  
+
+
+
+\section{4 EXPERIMENTAL RESULTS  }
+
+
+In this section, we empirically justify the advantage of ACMoE over baseline MoE models. We evaluate our method on large-scale tasks including Wikitext-103 (Merity et al., 2016) language modeling and ImageNet (Deng et al., 2009) object classification. We implement our AC router into Switch Transformer (Fedus et al., 2022), Generalist Language Model (GLaM) (Du et al., 2022), and Swin Transformer (Liu et al., 2021) backbones and compare our router against the standard Sparse Mixture-of-Experts (SMoE) router using a single linear layer with softmax gating (Shazeer et al., 2017) and the XMoE router (Chi et al., 2022) which uses cosine similarity on a low dimensional hypersphere. We show that i) ACMoE obtains substantive improvements over baseline models across both language and vision tasks; ii) ACMoE offers robust improvements on contaminated and out-of-distribution samples; and iii) ACMoE attains these gains without introducing any learnable parameters and with negligible additional computational overhead. We compare ACMoE with baselines of the same configuration. Results are averaged over 5 runs with different seeds.  
+
+4.1 LANGUAGE MODELING  
+
+Experimental Setup. We adopt the experimental setup of Pham et al. (2024). We compare ACMoE with Switch Transformer and GLaM baselines with 16 total experts in small (70M parameters) and medium (220M parameters) configurations with top-2 expert routing. We present pretraining test perplexity (PPL) results for Wikitext-103 and test bytes-per-character (BPC) for character-level EnWik-8 . We report top-1 accuracy for finetuning classification tasks on the 2-class Stanford Sentiment Treebank-2 (SST2) (Socher et al., 2013), 5-class Stanford Sentiment Treebank-5 (SST5) (Socher et al., 2013), and 77-class Banking-77 (B77) (Casanueva et al., 2020).  
+
+Pretraining and Finetuning. Table 3 shows ACMoE attains top test PPL on WikiText-103 language modeling in Switch and GLaM backbones at small and medium configurations under baseline SMoE and XMoE routers. The improvement in the GLaM-medium architecture is a particularly substantive $4.8\%$ over the next best baseline. Table 1 shows ACMoE pretrained models on both WikiText-103 and EnWik-8 surpass the performance of baselines in finetuning tasks, with strong, consistent improvements of approximately $3\%$ , showing ACMoE’s strong performance carries over to finetuning.  
+
+Robust Language Modeling. Table 2 show test PPL on WikiText-103 contaminated by Text Attack, where words are randomly swapped with a generic token ’AAA’. We follow the setup of Han et al. (2024) and assess models by training them on clean data before attacking the test data using an attack  
+
+Table 1: WikiText-103 Perplexity (PPL) and EnWik-8 bytes-per-character (BPC) pretraining and top-1 test accuracy on Stanford Sentiment Treebank 2, 5 (SST2, SST5), and Banking-77 (B77) finetuning classification.  
+
+![](images/675b49c4b3f93cbfe3650ffe8ebb50339d589cb04a8676e440cfc74699347fc9.jpg)  
+
+rate of $2.5\%$ . ACMoE outperforms baseline Switch and GlaM with particularly robust performance in the GLaM backbone, surpassing GLaM by $5.8\%$ .  
+
+
+
+\section{4.2 IMAGE CLASSIFICATION  }
+
+
+Experimental Setup. We adopt the experimental setup of Liu et al. (2021) for pretraining and evaluation on ImageNet. In particular, we evaluate ACMoE against the Swin Transformer baseline with 16 total experts in both top-1 and top-2 expert routing settings. The Swin backbone has a total of 280M parameters. We additionally conduct experiments on ImageNet under white box adversarial attacks fast gradient sign method (FGSM) (Goodfellow et al., 2014) and projected gradient descent (PGD) (Madry et al., 2017), and black box attack simultaneous perturbation stochastic approximation (SPSA) (Uesato et al., 2018). We also present results on out-of-distribution  
+
+(OOD)(Hendrycks et al., 2021a;b). In all robust image classification tasks, image classification using ImageNet-A/O/R we adopt the conventional setup of pretraining on ImageNet and evaluating the trained models on the contaminated/OOD datasets (Han et al., 2024; Zhou et al., 2022a; Puigcerver et al., 2022).  
+
+Image Classification under Adversarial Attack. Table 4 shows performance on ImageNet classification against white box FGSM and PGD, and black box SPSA. Compared with the baseline Swin Transformer, ACMoE-Top 2 attains particularly noteworthy $7\%$ and $5\%$ improvements against PGD and SPSA in top-1 accuracy respectively.  
+
+Out-of-distribution Image Classification. Table 5 shows ACMoE improves over the baseline Swin Transformer in image classification on hard OOD and real-world adversarially filtered images. Evaluation on ImageNet-A/O/R shows  
+
+Table 3: WikiText-103 test PPL of ACMoE and baseline GLaM and Switch.   
+
+![](images/51c2dbaeae3f4dda1850597683d750eeeaf5e5b7e730749a1b95b0890cf7ff5b.jpg)  
+
+![](images/8fcf4b6f03907a81500609e252cb7326446328622f0408d2f05f2bd1d98bc3b4.jpg)  
+
+els where the input space is assumed divisible into separate regions with an expert specializing in each region (Jacobs et al., 1991). Recent studies on MoE in deep learning architectures show that  
+
+Table 6: Load Balancing. ACMoE is attains better overall load balancing compared with Switch and Swin Transformers and lower standard deviation across layers compared with all baselines.   
+
+![](images/0cdd8236c6496bedd9c930b8ac0c62daf46a111f646f80c860bc9d8113d72147.jpg)  
+
+Reproducibility Statement. Source code for our experiments are provided in the supplementary   
+material. We provide the full details of our experimental setup – including datasets, model specifi  
+ All datasets are   
+publicly available.   
+Ethics Statement. Our work considers fundamental architectures, and in particular their robustness   
+and convergence properties. Given this, we foresee no issues regarding fairness, privacy, or security,   
+or any other harmful societal or ethical implications in general.   
+
+

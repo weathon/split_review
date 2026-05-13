@@ -1,0 +1,345 @@
+\title{Marvel: Accelerating Safe Online Reinforcement Learning with Finetuned Offline Policy}
+
+\begin{abstract}
+The high costs and risks involved in extensive environment interactions hinder the practical application of current online safe reinforcement learning (RL) methods. While offline safe RL addresses this by learning policies from static datasets, the performance therein is usually limited due to reliance on data quality and challenges with out-of-distribution (OOD) actions. Inspired by recent successes in offline-to-online (O2O) RL, it is crucial to explore whether offline safe RL can be leveraged to facilitate faster and safer online policy learning, a direction that has yet to be fully investigated. To fill this gap, we first demonstrate that naively applying existing O2O algorithms from standard RL would not work well in the safe RL setting due to two unique challenges: \emph{erroneous Q-estimations}, resulted from offline-online objective mismatch and offline cost sparsity, and \emph{Lagrangian mismatch}, resulted from difficulties in aligning Lagrange multipliers between offline and online policies. To address these challenges, we introduce \textbf{Marvel}, a novel framework for O2O safe RL, comprising two key components that work in concert: \emph{Value Pre-Alignment} to align the Q-functions with the underlying truth before online learning, and \emph{Adaptive PID Control} to effectively adjust the Lagrange multipliers during online  finetuning. Extensive experiments  demonstrate that Marvel significantly outperforms existing baselines in both reward maximization and safety constraint satisfaction. By introducing the first policy-finetuning based framework for O2O safe RL, which is compatible with many offline and online safe RL methods, our work has the great potential to advance the field towards more efficient and practical safe RL solutions.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Safe reinforcement learning (safe RL) \citep{gu2022review,garcia2015comprehensive}, prioritizes not only the maximization of rewards but also the adherence to specific safety constraints, enhancing its applicability in real-world scenarios. For example, an autonomous vehicle must reach its destination without exceeding a preset fuel limit. However, solving safe online RL from scratch in fields such as robotics \citep{brunke2022safe,kiran2021deep}, and healthcare \citep{yu2021reinforcement,qayyum2020secure} is often prohibitive, due to substantial risks and costs caused by the need for extensive interactions with the environment.
+To address this, offline safe RL \citep{achiam2017constrained,zheng2024safe,ray2019benchmarking} has been introduced, enabling the derivation of safe policies from a static dataset \citep{liu2023datasets} without the need for real-time environmental interaction. Nonetheless, offline safe RL faces its own set of limitations: it typically shows limited performance \citep{ghosh2022offline}, heavily relies on the quality of the offline dataset, and suffers from the impact of out-of-distribution (OOD) actions, restricting its effectiveness across varying scenarios.
+
+The pretraining-and-finetuning paradigm is a well-established strategy in the fields of computer vision and natural language processing, for enabling fast and sample-efficient online learning based on offline pretrained models, particularly with the recent advances in large language models. Following a similar line, offline-to-online reinforcement learning (O2O RL) in the unconstrained case \citep{nair2020awac, wang2024train, zhang2023sera} and imitation learning \citep{yue2024ollie, ross2011reduction} has recently gained prominence. These approaches utilize policies (including Q-functions) derived from offline RL or offline imitation learning, along with offline datasets, to expedite the process of online finetuning. This strategy effectively avoids the extensive environmental interactions required in training policies from scratch.
+Thus motivated, a key insight is that leveraging the pretraining-and-finetuning paradigm can also potentially facilitate more efficient and practical online safe RL, which however has not been fully explored in the literature. To fill this gap, we seek to answer the following question:
+
+ \emph{Can we design an effective offline-to-online approach for safe RL to address the limitations of both online safe RL and offline safe RL, thereby enabling fast online safe policy learning?}
+
+\begin{figure}[t]
+\centering
+ 
+\includegraphics[width=0.99\textwidth]{intro.pdf}
+ 
+\caption{{The ``steps" on the x-axis represent the number of policy gradient updates (i.e., optimizer updates). For each gradient update, the agent interacts with the environment for 3 episodes. This convention is followed in the subsequent figures.}
+\textbf{In (a)}, we evaluate these methods in the BallCircle environment from Bullet Safety Gym \citep{gronauer2022bullet}, setting the cost limit to 20. As shown, although ``\textcolor{warmstartblue}{Warm Start}'' begins with a reasonably good initial policy, it  performs poorly and overly conservatively, even worse than ``\textcolor{fromscratchorange}{From Scratch}'' in which the policy and Q-functions are initialized randomly. This result suggests that directly finetuning the pretrained policy and Q-functions  may actually hinder online learning. In contrast, ``\textcolor{opeapidcyan}{Marvel}'' achieves impressive results, finding a  policy with much higher return in just a few online steps while adhering to the cost limit. 
+\textbf{In (b)}, { t-SNE visualization of state vectors in the environment, reduced to 2D space. Each point represents a state, with rewards uniformly distributed across the space, while costs are sparse, appearing as isolated points or clusters, reflecting their limited association with states}.}
+\label{fig_intro}
+
+\end{figure}
+
+However, achieving this is highly nontrivial, and simply applying existing O2O algorithms in conventional RL  would not work well here due to unique challenges in safe RL. In \cref{fig_intro} (a), 
+{ ‘Warm Start’ refers to using the offline pretrained policy and Q-networks directly initialize an online safe RL algorithm. ‘From Scratch’ refers to purely online safe RL training.}
+As illustrated, directly finetuning the offline pretrained policy and Q-functions by using standard online safe RL often results in suboptimal performance and, in some cases, complete training failures. 
+
+The reasons behind this phenomenon are as follows: a) \emph {Erroneous Q-estimations resulted from objective mismatch and offline cost sparsity.} In order to avoid explorations beyond the offline data and reduce the extrapolation errors, offline safe RL algorithms typically introduce additional regularizations in the objective function to push up the cost estimates of OOD actions, e.g., VOCE \citep{guan2024voce} and CPQ \citep{xu2022constraints},  leading to a different overall objective from standard online safe RL.  More critically, the majority of state-actions in offline datasets for safe RL usually are safe with zero cost (\cref{fig_intro} (b)), resulting in a pretrained cost Q-function that predicts extremely low cost for most in-distribution (IND) state-actions.  By erroneously giving high values for OOD state-actions and low values for IND state-actions, the pretrained cost Q-function
+will conservatively force the online finetuning to stay in the state-action space similar to offline dataset and be reluctant to explore (e.g., cost of ``\textcolor{warmstartblue}{Warm Start}'' in \cref{fig_intro}). 
+b) \emph{Mismatch of Lagrange multipliers.} { Many online safe RL algorithms \citep{stooke2020responsive,chow2018risk,achiam2017constrained}} solve the constrained optimization problem based on the primal-dual approach, which requires a synchronous updating of Lagrange multipliers. Nonetheless, initial values for these multipliers that are matching with the offline policies 
+cannot be obtained from offline safe RL precisely, such that using traditional dual ascent methods to update the Lagrange multipliers 
+may result in slow learning during the online phase even with accurate estimated Q-functions, ultimately degrading the performance of the learned policy. In this work, we seek to design an effective O2O framework for safe RL by addressing these two challenges above. 
+
+The main contribution of this work lies in the development of  the \textbf{warM-stArt safe Reinforcement learning with Value prE-aLignment (Marvel)} framework, which includes two key components: Value Pre-alignment (VPA) and Adaptive PID Control (aPID). More specifically, VPA adjusts the pretrained Q-functions by re-evaluating the offline policy before online learning based on the offline data only, so as to align the distribution of estimated Q-values with that of true Q-values under the online learning objective for the offline policy.
+On one hand, by optimistically estimating rewards and pessimistically estimating costs, VPA promotes active exploration during online learning while maintaining the cost below the limit; on the other hand, the active exploration of high-reward state-actions inevitably increases the risk of exploring high-cost state-actions, amplifying the demand of appropriate Langrange multipliers in online finetuning to penalize the cost violations. To jointly handle this risk and the multiplier mismatch problem, instead of directly finding the best initial multipliers, we take an alternative route by seeking to quickly adapt the multipliers to the right values. Particularly,
+We introduce aPID, an adaptive PID control mechanism that adjusts the Lagrange multipliers based on cost violations, { where PID (Proportional-Integral-Derivative) control is a widely used feedback control technique that combines proportional, integral, and derivative components to minimize errors effectively}. This approach can quickly stabilize the online finetuning compared to standard dual ascent-based approaches in online safe RL. Extensive experimental results demonstrate the superior performance of our framework over multiple baseline methods on different benchmarks, i.e., Marvel can quickly find a safe policy with the best reward by using only a few online interactions. To the best of our knowledge, Marvel is the first framework that finetunes pretrained offline policy  to facilitate fast online  learning for safe RL. More importantly, by only leveraging pretrained offline policy/Q-functions and controlling the Lagrange multipliers update, Marvel is compatible with and ready to plug in a lot of state-of-the-art (SOTA) offline and online safe RL approaches.
+
+
+
+\section{Preliminaries}
+
+
+\textbf{Constrained Markov Decision Process.~}
+We consider a standard constrained Markov Decision Process (CMDP) \citep{sutton2018reinforcement, altman2021constrained}, defined by a tuple \((S, A, T, R, C, \gamma, \eta, c_{th})\). Here \(S \subseteq \mathbb{R}^n\) represents the state space, \(A \subseteq \mathbb{R}^m\) denotes the action space, \(T: S \times A \times S \to [0, 1]\) is the transition probability function,  \(R: S \times A \to [0, R_{\max}]\) is the reward function,  and \(C: S \times A \to [0, C_{\max}]\) is the cost function. \(\gamma \in [0, 1]\) is the discount factor,  \(\eta\) represents the initial state distribution, and \(c_{th}\) is the cost threshold that sets the limit on cumulative costs for the policy.
+A policy \(\pi: S \to \mathcal{P}(A)\) is a mapping from states to a probability distribution over actions, where \(\pi(a|s)\) denotes the probability of selecting action \(a\) in state \(s\). In this work, we consider parameterized policies \(\pi_\theta\), where \(\theta\) denotes the parameters of the policy, typically represented by neural networks in deep RL. Given a policy $\pi$, its
+ cumulative reward under policy \(\pi\) is defined as
+$R(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^{\infty} \gamma^t r(s_t, a_t) \right]$,
+where \(\tau = (s_0, a_0, s_1, a_1, \dots)\) is a trajectory induced by policy \(\pi\), and the expectation is taken over the distribution of trajectories.
+Similarly, its cumulative cost  is defined as $C(\pi) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^{\infty} \gamma^t c(s_t, a_t) \right]$. 
+The Q-function, for a given policy \(\pi\), is defined as the expected cumulative reward starting from a state-action pair \((s, a)\) and thereafter following policy \(\pi\):
+$Q^{\pi}(s, a) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^{\infty} \gamma^t r(s_t, a_t) \mid s_0 = s, a_0 = a \right]$. 
+Similarly, the cost Q-function \(Q_c^{\pi}(s, a)\) is defined as the expected cumulative cost starting from the same state-action pair \((s, a)\) and thereafter following policy \(\pi\):
+$Q_c^{\pi}(s, a) = \mathbb{E}_{\tau \sim \pi} \left[ \sum_{t=0}^{\infty} \gamma^t c(s_t, a_t) \mid s_0 = s, a_0 = a \right]$.
+In the context of CMDP, the goal is to find an optimal policy \(\pi^*\) that maximizes the cumulative reward \(R(\pi)\), subject to the constraint that the cumulative cost \(C(\pi)\) does not exceed a predefined threshold \(c_{th}\). This can be formulated as the following constrained optimization problem:
+\begin{equation}
+\textstyle
+\max_{\pi} R(\pi), \quad \text{s.t.} \quad C(\pi) \leq c_{th}.
+\end{equation}
+
+To solve this, a common approach is to apply the Lagrangian relaxation method \citep{ray2019benchmarking}, where a Lagrange multiplier \(\lambda\) is introduced to enforce the cost constraint. This leads to the following primal-dual optimization formulation:
+\begin{equation}
+\textstyle
+\min_{\lambda \geq 0} \max_{\pi} \left[ R(\pi) - \lambda (C(\pi) - c_{th}) \right]
+\end{equation}
+which can be solved by iteratively updating the policy \(\pi\) and the Lagrange multiplier \(\lambda\). Specifically, \(\lambda\) is updated by:
+\begin{equation}\label{eq:dual_ascent}
+\textstyle
+\lambda_{t+1} = \lambda_t + \alpha_\lambda (C(\pi_t) - c_{th})
+\end{equation}
+where \(\alpha_\lambda\) is the learning rate. 
+\textbf{Online Safe RL.~}
+Primal-dual based algorithms have shown great effectiveness and superior performance in the literature for online safe RL, which can combine a wide range of online unconstrained RL algorithms with the Lagrange multiplier method to create online safe RL algorithms. Without loss of generality, we consider SAC-lag \citep{ray2019benchmarking} as the online algorithm, a primal-dual based algorithm that integrates the widely used SAC algorithm \citep{haarnoja2018soft}  with the Lagrange multiplier method.
+More specifically, SAC  minimizes the following objectives for the actor (policy) and the critic (Q-function), respectively:
+\begin{equation}
+\textstyle
+\mathcal L_{\pi}^{SAC}(\theta) = \displaystyle \mathbb{E}_{s \sim d}\displaystyle \mathbb{E}_{a \sim \pi_{\theta}(\cdot|s)}[\alpha \log \pi_{\theta}(a|s) - Q(s,a;\mu)] \\
+\end{equation}
+\begin{equation}\label{eq:sac-q}
+\textstyle
+\mathcal L_Q^{SAC}(\mu) = \displaystyle \mathbb{E}_{(s,a,s') \sim d}[(\hat{Q} (s,a;\mu) - y(r,s'))^2]
+\end{equation}
+where $ y(r,s') = r + \gamma \displaystyle \mathbb{E}_{a' \sim \pi_{\theta}(\cdot|s')}[\hat{Q}(s,a';\mu') - \alpha \log \pi(a'|s')] $, $Q(s,a;\mu)$ is parameterized by $\mu,$ $\hat{Q}(s,a;\mu')$ is the target reward Q-function parameterized by $\mu'$,
+$d$ represents the data distribution in the replay buffer, and $\alpha > 0$ is some constant. 
+To be applied in online safe RL, SAC-lag adapts SAC by using the Lagrangian method, resulting in the policy optimization objective as follows: 
+\begin{equation}\label{sac_obj}
+\textstyle
+\mathcal L_{\pi}^{SAC}(\theta) = \displaystyle \mathbb{E}_{s \sim d}\displaystyle \mathbb{E}_{a \sim \pi_{\theta}(\cdot|s)}[\alpha \log \pi_{\theta}(a|s) - (Q(s,a) - \lambda {Q_c}(s,a))] \\
+\end{equation}
+The optimization of the Q-functions for both reward and cost in SAC-lag is with \cref{eq:sac-q} in SAC. 
+
+\textbf{Offline Safe RL.~}
+Offline safe RL algorithms typically push up the cost estimations of OOD actions to avoid exploration beyond the offline dataset $\mathcal{D}$. Considering the comprehensive performance across various environments, in this paper we consider the SOTA Lagrangian-based algorithm for offline learning, namely CPQ \citep{xu2022constraints}. 
+More specifically, CPQ first generates OOD actions via a conditional variational autoencoder (CVAE). Then, the cost of the generated OOD actions is increased by minimizing the following loss function for cost critic ($Q_c$-function):
+{
+\begin{equation*}
+\textstyle
+\mathcal{L}_{Q_c}^{CPQ}(\mu_c) = \mathbb{E}_{(s,a,s') \sim d} \left[ \left( Q_c(s,a;\mu_c) - \left( r + \gamma \mathbb{E}_{a' \sim \pi_{\theta}(\cdot|s')}[\hat{Q}_c(s,a';\mu_c')] \right) \right)^2 \right] - \psi \mathbb{E}_{a \sim d, a \sim \nu} [{Q_c}(s,a;\mu_c)]
+\end{equation*}}%
+where $Q_c(s,a;\mu_c)$ is parameterized by $\mu_c,$ $\hat{Q}_c(s,a;\mu_c')$ is the target cost Q-function parameterized by $\mu_c'$, \(\nu\) represents the distribution of OOD actions generated by the CVAE. Additionally, to ensure both constraint safety and in-distribution safety, CPQ updates the reward critic (Q-function) using only state-action pairs that satisfy the cost threshold $l$:
+{
+\begin{equation*}
+\textstyle
+\mathcal{L}_{Q}^{CPQ}(\mu) = \mathbb{E}_{(s,a,s') \sim d} \left[ \left( Q(s,a;\mu) - \left( r + \gamma \mathbb{E}_{a' \sim \pi_{\theta}(\cdot|s')}[\mathbb{I}({Q_c}(s',a';\mu_c) < l) Q(s,a';\mu)] \right) \right)^2 \right]
+\end{equation*}}%
+where \(\mathbb{I}(\cdot)\) is the indicator function, used to filter state-action pairs that satisfy the safety constraints. The policy loss function is given by:
+\begin{equation}
+\textstyle
+\mathcal{L}_{\pi}^{CPQ}(\theta) = -\mathbb{E}_{s \sim d} \left[ \mathbb{E}_{a \sim \pi_{\theta}(\cdot|s)}[\mathbb{I}({Q_c}(s,a;\mu_c) < l) Q(s,a,\mu)] \right]
+\end{equation}
+Similarly, when maximizing the reward, the policy only considers state-action pairs that meet the safety constraints. By assigning a higher cost to OOD actions, CPQ mitigates the OOD problem while meeting safety constraints. 
+
+\textbf{O2O Safe RL.~}
+To the best of our knowledge, Guided Online Distillation \citep{li2024guided} is the only work studying O2O safe RL, which leverages a large-scale DT based on GPT-2 \citep{radford2019language} as a guide policy to accelerate online learning, by following the idea of Jump-start RL \citep{uchendu2023jump}. However, how to achieve fast safe online learning by finetuning a pretrained policy is still not clear. Our work seeks to fill this gap and serves as an initial attempt to spur more interesting studies on policy-finetuning based O2O safe RL without using large models. A more detailed description of related work is delegated to \cref{sec:related}.
+
+In this work, our objective is to enable faster and safer policy learning with standard online safe RL methods, by finetuning the policy and Q-functions pretrained using offline safe RL. In principle, any offline safe RL algorithms that output an offline policy and Q-functions can be used here for offline training.
+
+
+
+\section{Warm-Start Safe RL with Value Pre-Alignment}
+
+
+As demonstrated in \cref{fig_intro}, naively finetuning the offline policy for safe RL would not work well and the finetuned policy shows clear ``inertia" in improving its performance: within a long period after online finetuning starts, its cost stays far below the limit, but its reward is quite low and not improving at all. This implies that such a strategy automatically ``inherits" the conservatism from offline safe RL and is reluctant to actively explore in order to fully utilize the safe gap below the cost limit. In this section, we delve into the failure of naive finetuning, which points to
+ two unique challenges for policy finetuning in O2O safe RL, i.e., erroneous offline Q-estimations and Lagrange multiplier mismatch. To address these problems, we  propose a framework for O2O safe RL, namely warM-stArt safe Reinforcement learning with Value prE-aLignment (Marvel).
+\subsection{Pre-Finetune Phase}
+
+\emph{Challenge I: Erroneous Q-estimations resulted from objective mismatch and offline cost sparsity.~}
+By learning from a fixed dataset without online environment interactions, offline safe RL typically suffers from large extrapolation errors for OOD actions beyond the support of the dataset. A general principle to handle this is to penalize the reward/cost estimations for the OOD actions in such a way that risky explorations outside the dataset are discouraged. Particularly, the optimization of Q-functions in offline safe RL can be captured as follows:
+{
+\begin{align*}
+\textstyle
+\text{Offline (} Q \text{):}\  &\min \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left[ \left( Q(s,a) - \left( r + \gamma \mathbb{E} \left[ \max_{a'} Q(s', a') \right] \right) \right)^2 \right] + \psi \cdot \mathcal{P}(s,a_{OOD}),  \\
+\text{Offline  (} Q_c \text{):}\  
+&\min \mathbb{E}_{(s,a,c,s') \sim \mathcal{D}} \left[ \left( Q_c(s,a) - \left( c + \gamma \mathbb{E} \left[ \max_{a'} Q_c(s', a') \right] \right) \right)^2 \right] - \psi_c \cdot \mathcal{P}_c(s,a_{OOD}).
+\end{align*}}%
+Here \( \psi \cdot \mathcal{P}(s, a_{OOD}) \) and $\psi_c \cdot \mathcal{P}_c(s,a_{OOD})$ are the penalty terms. For instance, penalties are introduced in VOCE \citep{guan2024voce} so as to minimize the expected reward Q-values and maximize the expected cost Q-values for OOD actions.
+CPQ \citep{xu2022constraints} increases the perceived cost of OOD actions during  Q-function and policy updates, while keeping cost below the threshold. 
+
+In contrast, the optimization of Q-functions in online safe RL is standard without any penalty terms:
+{
+\begin{align*}
+\textstyle
+ \text{Online (} Q \text{):}\ &\min \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left[ \left( Q(s,a) - \left( r + \gamma \mathbb{E} \left[ \max_{a'} Q(s', a') \right] \right) \right)^2 \right],\\
+\text{Online  (} Q_c \text{):}\  &\min \mathbb{E}_{(s,a,c,s') \sim \mathcal{D}} \left[ \left( Q_c(s,a) - \left( c + \gamma \mathbb{E} \left[ \max_{a'} Q_c(s', a') \right] \right) \right)^2 \right].
+\end{align*}}%
+
+Obviously, Offline and online safe RL have distinct objectives for Q-functions, meaning pretrained Q-functions may not accurately estimate values for state-action pairs encountered during online interactions. As a result, offline policies tend to act overly conservatively, exploring only low-cost regions during online finetuning. However, effective online learning requires identifying state-action pairs with both high rewards and low costs, which necessitates exploring areas with potentially higher costs. This objective mismatch is even more pronounced in O2O safe RL due to the additional Q-function for cost estimation. The sparsity of offline cost leads to a pretrained cost Q-function that predicts low costs for IND state-actions, further limiting exploration during finetuning.
+
+\emph{Solution: Value Pre-Alignment.~} To address the first challenge, a naive approach is to reevaluate the offline policy in online environments using Monte Carlo simulations, which however introduces additional interaction costs. Motivated by the recent advances in Off-Policy Evaluation (OPE) \citep{uehara2022review}, we borrow the idea from Fitted Q Evaluation \citep{hao2021bootstrapping} to align the offline Q-functions with the online learning objectives for the offline policy, by using the offline dataset before online policy finetuning. In particular, we seek to minimize the following objectives for the reward and cost Q-functions by starting from the pretrained Q-functions from offline learning, respectively:
+{
+\begin{align}
+\textstyle
+    \mathcal L_Q^{VPA}(\mu) &= \displaystyle \mathbb{E}_{D}\left[\mathcal L_2\left(Q(s,a;\mu) - (r + \gamma \displaystyle \mathbb{E}_{a' \sim \pi_{\theta}(\cdot|s')}[ \hat{Q}(s',a';\mu') - \alpha^{VPA} \log \pi_{\theta}(a'|s')])\right)\right]\label{VPA_Q}\\
+    \mathcal L_{Q_c}^{VPA}(\mu_c) &= \displaystyle \mathbb{E}_{D}\left[\mathcal L_2\left(Q_{c}(s,a;\mu_c) - (c + \gamma \displaystyle \mathbb{E}_{a' \sim \pi_{\theta}(\cdot|s')}[\hat{Q}_c(s',a';\mu_c') - \alpha_c^{VPA} \log \pi_{\theta}(a'|s')])\right)\right]\label{VPA_Qc},
+\end{align}
+}%
+
+where \(D\) represents the distribution of $(s,a,s')$ in the offline dataset, and \(\mathcal L_2\) denotes the MSE loss. {$\mu$ denotes parameters of Q function and $\hat{Q}$ is the target Q function.}
+Entropy terms are introduced in VPA to 1) optimistically estimate rewards to encourage greater exploration during the early stages of finetuning and 2) pessimistically estimate costs to ensure the agent remains cautious about the cost threshold during exploration. {Specificity, the entropy terms can result in \textbf{both} higher rewards and costs for state-action pairs with high entropy, where the pretrained policy is `uncertain'. We set the coefficient $\alpha$ for the Qc-network lower than $\alpha_c$ for the Q-network to encourage higher exploration during the agent's finetuning process. During the initial stage of online finetuning, the agent prioritizes exploring these high-reward areas, even at a high cost, as reward maximization dominates due to the small Lagrangian coefficient. This process helps refine the Q values through interactions. The offline policy remains unchanged during VPA to preserve the knowledge extracted from offline data. As a result, the agent can potentially explore high cost areas, without being overly conservative.}
+
+\begin{table}[t]
+\footnotesize
+ 
+\begin{center}
+\caption{The Spearman's rank correlation coefficients of the $Q$-value and $Q_c$-value are evaluated in the BallCircle and CarRun environments. ``Random'' refers to rollouts where the offline policy starts from a randomly initialized state-action pair (may not in the offline dataset), while ``Dataset'' refers to rollouts starting from a state-action pair randomly selected from the offline dataset.
+}
+\label{table:Spearman}
+\scalebox{0.9}{
+\begin{tabular}{lcccccc}
+    \toprule
+    & \multirow{2}{*}{VPA} & \multicolumn{2}{c}{BallCircle} & \multicolumn{2}{c}{CarRun} \\ \cmidrule(lr){3-4} \cmidrule(lr){5-6}
+    & & random & dataset & random & dataset \\ 
+    \midrule
+    \multirow{2}{*}{Q-value}  & before & -0.2387 & -0.3852 & -0.1143 & -0.5078 \\
+                              & after  & 0.5661  & 0.8278  & -0.0125 & 0.8314  \\ 
+    \midrule
+    \multirow{2}{*}{Qc-value} & before & -0.2521 & 0.1725  & -0.2431 & -0.4327 \\
+                              & after  & 0.3579  & 0.8252  & 0.1254  & 0.4937  \\ 
+    \bottomrule
+\end{tabular}}
+\end{center}
+
+\end{table}
+
+To characterize the performance of VPA in correcting the Q-estimations, we leverage Spearman’s rank correlation coefficient, which measures the strength and direction of a monotonic relationship between two ranked variables. The reason is that the relative ranking of Q-values are more important than the absolute values for policy update.
+Specifically, given a dataset collected by rolling out the offline policy in the environment, we compare the ranking of learned reward/cost Q-values before and after VPA with that of estimated actual return by using Monte Carlo simulations. A large Spearman’s rank correlation coefficient implies that the distribution of learned Q-values is more aligned with the distribution of true Q-values. 
+As shown in Table \ref{table:Spearman}, it is evident that the coefficient increases significantly after VPA for both reward and cost Q-values, no matter if the offline policy rolls out from a seen state-action pair in the offline dataset or from a randomly selected OOD state-action pair. This clearly demonstrates the effectiveness of VPA in aligning the pretrained Q-functions.
+\subsection{Finetune Phase}
+
+\emph{Challenge II: Lagrange multiplier mismatch.~}
+Conventional value-based online safe RL relies on updating Lagrange multipliers alongside the policy and Q-functions during training, so as to push the overall cost below the limit while striking a right balance between maximizing the reward and minimizing constraint violations. While the policy and Q-functions can benefit from offline pretraining for a warm start, offline safe RL algorithms like CPQ \citep{xu2022constraints} and BEAR-lag \citep{ray2019benchmarking} cannot accurately estimate Lagrange multipliers with regularizing strengths matching with the cost of the offline policy, e.g., a small Lagrange multiplier is not power enough to push down the policy cost, while a large multiplier prevents active exploration of high-reward state-action pairs. 
+For instance, in the BallCircle environment, the offline pretrained Lagrange multiplier value obtained using the BEAR-lag algorithm is approximately 1500, whereas during online finetuning, the SAC-lag requires a value of only about 0.65. The gap between these values clearly precludes the direct use of offline pretrained Lagrange multipliers.
+Improper initialization can lead to extensive constraint violations  or training stagnation, an issue we term as the \textbf{Lagrange multiplier mismatch}. 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{init.pdf}
+
+\caption{Comparison of online finetuning performance after VPA with two different initial values of the Lagrange multiplier. In `VPA w/o init', the initial value is set to 0, whereas we initialize Lagrange multipliers with a good value found empirically (0.65 in BallCircle and 0.5 in CarRun) in `VPA w/ init'. The multiplier is then updated using the standard dual ascent method.
+}
+\label{fig_init}
+
+\end{figure}
+
+On the other hand, as VPA promotes active exploration of high-reward state-actions by optimistically estimating rewards and pessimistically estimating costs, it inevitably increases the risk of exploring high cost state-actions, which in turn amplifies the need for appropriate Lagrange multipliers to quickly reduce the constraint violations.
+Figure \ref{fig_init} shows the online finetuning performance comparison after VPA in two environments between 1) empirically setting a good initial value for the Lagrange multiplier and 2) setting it to zero, where the traditional dual ascent method is used to update the multiplier. It is clear that a good initial multiplier can manage the cost very well,  while the policy with a very small initial multiplier value suffers from large constraint violations and takes a much longer time to reduce the cost below the limit. The results also imply that although VPA aligns the distributions of Q-values, it may introduce high costs for online finetuning, which can be addressed with an appropriate initial Lagrange multiplier. 
+
+\emph{Solution: Adaptive PID Control.~} Clearly, finding a good initial value of the Lagrange multiplier can jointly address the mismatch problem and mitigate the potential risk of VPA. 
+However, achieving this through experimental tuning is challenging, and currently, there is no theory to accurately predict these values. 
+To address this problem, instead of directly finding the best initial value, we take an alternative path by \emph{quickly adapting} the Lagrange multipliers in an effective manner. Motivated by the recent success of leveraging PID control for updating the multiplier in online safe RL \citep{stooke2020responsive, yuan2022safe, zhou2021learning}, we introduce an adaptive PID control approach specifically tailored for O2O safe RL.
+
+More specifically, compared to standard dual ascent in \cref{eq:dual_ascent}, PID control \citep{johnson2005pid} offers a different approach to updating the Lagrange multiplier in the following way:
+{
+\begin{equation}\label{aPID}
+\textstyle
+\lambda_{t+1} = \lambda_t + K_p e(t) + K_i \int_0^t e(\tau) d\tau + K_d \frac{de(t)}{dt}
+\end{equation}}%
+where \(e(t)\) captures the cost violation (errors) at time t, namely the cumulative cost difference from the policy rollout compared to the cost threshold.
+Here, \(K_p\) is the proportional gain, corresponding to the instantaneous value of the error; \(K_i\) is the integral gain to characterize the accumulation of past errors and \(K_d\) is the differential gain corresponding to the rate of change of the error. In practice, the integral and differential are usually discretized as follows:
+{
+\begin{align*}
+    \int_0^t e(\tau) d\tau \approx \sum_{k=0}^t e(k) \Delta t,~~~\frac{de(t)}{dt} \approx \frac{e(t) - e(t-1)}{\Delta t}.
+\end{align*}}%
+By taking the rate of change into consideration, the PID control can be especially useful in scenarios where costs fluctuate significantly, which however is not sufficient to handle the unique challenges in O2O safe RL. Specifically, to address the objective mismatch and  the over conservatism exacerbated by sparse costs in the offline learning, VPA encourages active exploration but increases the risk of high cost. This requires a stronger control strength at the early stage of online finetuning to quickly reduce the cost. As training progresses and the cost is approaching to the limit, a weaker control strength is however preferred to stabilize the learning and keep the cost below the limit without large oscillations.  The need of dynamic strength  points to the need of adaptive  control for O2O safe RL. 
+
+Towards this end, we propose an adaptive PID control approach for updating the Lagrange multiplier, which dynamically adjusts the PID control parameters during online finetuning based on the incurred policy cost over a time window of $n$ steps:
+{
+\begin{equation}\label{Kp}
+\textstyle
+K_p \leftarrow \text{clip}\left(K_p \cdot \left(1 + \alpha \cdot \tanh\left(\frac{\bar{c} - {c_{th}}}{\bar{c}}\right)\right), K_{p_{min}}, K_{p_{max}}\right),
+\end{equation}
+\begin{equation}\label{Ki}
+\textstyle
+K_i \leftarrow \text{clip}\left(K_i \cdot \left(1 + \beta \cdot \frac{\bar{c} - c_{th}}{\bar{c}}\right), K_{i_{min}}, K_{i_{max}}\right),~
+K_d \leftarrow \text{clip}\left(K_d \cdot \left(1 + \gamma \frac{\sigma_c}{\bar{c}}\right), K_{d_{min}}, K_{d_{max}}\right)
+\end{equation}
+}%
+where the average cost $\bar{c}=\frac{1}{n} \sum_{i=1}^n c_i$, the standard deviation  $\sigma_c = \sqrt{\frac{1}{n-1} \sum_{i=1}^n (c_i - \bar{c})^2}$, $\alpha$, $\beta$ and $\gamma$ are hyper-parameters. 
+The design rationale is as follows:
+1) By introducing the non-linear hyperbolic tangent function to adjust \( K_p \), the Lagrange multiplier can respond quickly to large errors while avoiding frequent adjustments and reducing oscillations when the cost is close to the limit. When the average cost exceeds the limit ($\bar{c} > c_{th}$), \( K_p \) and \( K_i \) are increased to enhance the sensitivity of the PID controller to accelerate error correction. On the other hand, when the average cost is below the limit ($\bar{c} < c_{th}$), \( K_p \) and \( K_i \) are decreased to prevent overreaction of the PID controller, thus avoiding unnecessary oscillations and ensuring stability. By dynamically adjusting \( K_p \) and \( K_i \) in this manner, the controller adapts its low-frequency gain to match the current error magnitude, balancing speed and stability in error correction.
+2) Because \( K_d \) captures the volatility of cost changes, it will be adjusted using the standard deviation \( \sigma_c \) of the cost over the period to stabilize cost control. A larger \( \sigma_c \) indicates greater fluctuations in the error signal, suggesting the presence of high-frequency disturbances or noise. \( K_d \) will be correspondingly increased, such that the controller can enhance its damping characteristics, adding phase lead and improving transient response. This helps mitigate the effects of sudden changes and stabilize the system.
+
+In a nutshell, combining VPA and aPID leads to our proposed framework Marvel: 1) Given the pretrained policy and Q-functions from offline learning, Marvel first applies VPA to align the pretrained Q-functions for both reward and cost using the offline dataset; 2) Marvel next utilizes Lagrangian-based online safe RL algorithms to further finetune both the pretrained policy and aligned Q-functions, by using aPID to update the Lagrange multipliers. We present the algorithmic framework of Marvel in \cref{sec:algo}. Here VPA and aPID work in concert to guarantee the superior performance of Marvel: aPID addresses the Lagrange multiplier mismatch problem and quickly pushes down the potential high cost resulted by VPA, whereas VPA facilitates active exploration of high-reward state-action pairs and the usage of the pretrained policy as a warm-start for fast online finetuning with aPID control.
+
+
+\section{Experiments}
+
+
+In this section, we conduct extensive experiments to verify the effectiveness of our approach, aiming to answer the following questions: 1) {\bf RQ1:} How does our method compare with naive finetuning and other SOTA baselines in both reward and cost? 2) {\bf RQ2:} How do different components in Marvel affect the performance? Due to the space limit, we delegate the experimental details and some additional results to \cref{sec:more_exp_} and \cref{sec:Experimental_Details}.
+
+\begin{figure}[h]
+\centering
+ 
+\includegraphics[width=\textwidth]{main_result.pdf}
+ 
+\caption{Performance comparison between Marvel and baseline methods in multiple environments. It is clear that Marvel can quickly find a high-return policy while keeping the cost below the limit.}
+\label{fig_main}
+ 
+\end{figure}
+
+\subsection{Evaluation Setup}
+
+\emph{Benchmarks.} We consider the DSRL benchmark \citep{liu2023datasets} and select \textbf{ten} environments from the { Bullet Safety Gym \citep{gronauer2022bullet} and Safety Gymnasium \citep{ji2023safety}}: BallRun, BallCircle, CarRun, CarCircle, HalfCheetah,  AntCircle, AntRun, DroneCircle,  Hopper, and Swimmer (results for the last four are in \cref{sec:more_exp}). The cost threshold is set to be 20 in these environments. 
+As mentioned earlier in \cref{preliminary}, we 
+choose CPQ and SAC-lag as base algorithms in our proposed framework Marvel for offline training and online finetuning, respectively, due to the effectiveness and representativeness of them.
+Each experiment was conducted using five random seeds, and the results were averaged to generate the final learning curves. {We use a dataset that includes data provided by DSRL \citep{liu2024offlinesaferl} and random data generated by a random policy to control the quality of the offline dataset.}
+
+\emph{Baselines.} While Guided Online Distillation \citep{li2024guided} is the only work studying O2O safe RL, its usage of large pretrained model leads to an unfair comparison with standard RL frameworks using typically small-scale policy networks. In this work, we compare Marvel with \textbf{JSRL} \citep{uchendu2023jump}, 
+as Guided Online Distillation mainly follows this approach except using DT as the pretrained policy. Besides, we further adapt some SOTA approaches in O2O RL to O2O safe RL, including \textbf{SO2} \citep{zhang2024perspective} and \textbf{PEX} \citep{zhang2023policy}, and a \textbf{Warm Start} approach as baselines. 
+SO2 improves Q-value estimation through Perturbed Value Updates, JSRL and PEX utilize offline pretrained policies for exploration, and Warm Start directly finetunes the policy and Q-networks from offline safe RL without modifications. 
+We also compare with online learning from scratch, namely \textbf{From Scratch}. \emph{More importantly,  aPID is used  to update Lagrange multipliers in all these baseline methods, which in fact already improves the performance of these methods compared to their original designs}. These baselines provide a meaningful comparison to demonstrate the effectiveness of Marvel in  O2O safe RL. We provide the detailed descriptions of each baseline algorithm in \cref{sec:baseline}.
+\subsection{Main Results}
+
+As shown in \cref{fig_main}, Marvel demonstrates better or comparable performance compared to all baselines consistently across all environments, i.e., achieving the higher return while keeping the cost below the threshold.
+In stark contrast, the naive warm start method proves largely ineffective, often causing performance drop or stagnation during training.
+Without aligning the Q-estimations, both JSRL and PEX struggles a lot to improve during online learning and fails to control the cost. Besides, PEX also  suffers from poor training stability and high variance across different settings.
+While SO2 mitigates the inaccuracies of Q-estimations related to O2O RL, it does so only to a limited extent and cannot maintain its performance consistently across different environments, although aPID has already been used to boost its performance. On the other hand, the fact that SO2 performs better than other baselines further indicates  1) the great potentials of enabling fast and safe online learning through policy finetuning (compared to using the pretrained policy only as a guide policy as in JSRL and PEX) and 2) the need of correcting pretrained Q-estimations before online finetuning. 
+
+More importantly, Marvel shows the superior capability of finding a good and safe online policy \emph{very quickly} by using only a few steps of online interactions. 
+In particularly,
+in environments like BallCircle and CarCircle,
+Marvel finds a good policy within less than $15$ steps, dominating baseline methods in both performance and speed.
+\emph{Note that all approaches indeed start from the offline policy and Q-functions, i.e., the same point at step 0 (ignored in all figures).} Guided by the offline policy and aligned Q-functions, Marvel rapidly jumps into the high-reward region in the state space, which highlights the effectiveness of VPA in addressing the overly conservative nature of offline pretrained policies. But this may also lead to a high cost at the beginning, e.g., the cost spike in the early step of finetuning as illustrated in \cref{fig_main}. Because a few steps of online finetuning will just modify the policy in a neighborhood of the pretrained policy, aPID will lead the finetuned policy to low cost state-actions in the high-reward region by adaptively pushing the cost towards the threshold. It is also worth to note that we use the \textbf{same aPID parameters across all tested environments} without any further adjustments, demonstrating the robustness and effectiveness of our design.
+
+\begin{figure}[t]
+\centering
+ 
+\includegraphics[width=\textwidth]{bearl.pdf}
+ 
+\caption{The policy pretrained with BEAR-lag performs poorly in cost, as this algorithm was not designed for safe RL. However, Marvel still achieves good results. This also indicates that Marvel performs well with pretrained policies of varying initial performance.}
+\label{fig_bearl}
+ 
+\end{figure}
+{\bf Compatibility of Marvel:} In O2O safe RL, compatibility with different offline safe RL methods is essential. Given the non-interactive nature of offline training and the potential unavailability of algorithms due to privacy concerns, this compatibility becomes even more critical compared to online algorithms. 
+Our design of Marvel naturally fits a variety of offline safe RL methods and only requires a pretrained policy and Q-functions.
+To further verify this, \cref{fig_bearl} shows the training process using BEAR+Lagrangian (BEAR-lag) \citep{kumar2019stabilizing} in the offline phase and SAC-lag in online finetuning. Note that BEAR-lag was not specifically designed for offline safe RL, but rather it incorporates the Lagrange multiplier into offline RL.  In the BallCircle environment, Marvel achieves the highest reward while satisfying cost constraints, and in the CarRun environment, it also outperformed others while maintaining cost below the threshold. This highlights the flexibility of our algorithm across different offline safe RL methods.
+
+
+\subsection{Ablation Studies}
+
+To answer {\bf RQ2}, we conduct experiments in various setups. 
+As shown in \cref{fig_adaptive}, the performance is best when both VPA and aPID are used. In contrast, if only VPA is used with traditional dual ascent during online finetuning, it significantly slows down safe online learning and takes a much longer time to reduce the cost. If  only aPID is applied without VPA, 
+the learning performance is very similar to naive policy finetuning, which struggles to improve due to the erroneous Q-estimations.
+We also evaluate the effectiveness  of adaptive control in aPID, by comparing the performance between Marvel (VPA+aPID) and Marvel with aPID replaced by PID (VPA+PID). 
+It can be seen from \cref{fig_adaptive} that the training curve for cost exhibits significant fluctuations 
+without using aPID. 
+More critically, when the cost is close to the limit, PID cannot reduce its control strength. As a result,
+even if on average the cost of VPA+PID is close to the threshold, it is very frequent that the real-time cost  exceeds the limit substantially, which is in fact not safe. 
+Moreover, the inability to adjust the Lagrange multiplier  promptly and appropriately affects the weight of reward and cost in policy updates, thereby influencing reward performance, as shown in the plots for CarCircle and HalfCheetah.
+
+\begin{figure}[t]
+\centering
+ 
+\includegraphics[width=\textwidth]{adaptive_result.pdf}
+ 
+\caption{`aPID' represents the scenario where aPID is used exclusively during the online finetuning phase, without applying VPA.  `VPA', on the other hand, shows the case where aPID is not used, and VPA is applied only during the pre-finetuning phase. VPA+PID use PID control for finetuning, while  VPA+aPID employs aPID with adaptive parameter adjustment. 
+Clearly, VPA+aPID achieves the best performance in terms of learning performance, speed, and stability.}
+\label{fig_adaptive}
+ 
+\end{figure}
+
+ 
+
+We also provide additional ablation studies in the \cref{sec:more_ablations}, which can provide the following insights: 1) Applying VPA to both the pretrained reward and cost Q-functions achieves the best performance compared to applying VPA to only one of them, which is reasonable as both will be manipulated during offline learning to reduce the extrapolation errors. 2) Marvel is robust to different qualities of the offline dataset. Regardless of the performance of the offline pretrained policy, Marvel can effectively finetune the policy while keeping the cost below the limit. 3) Introducing the entropy term in VPA is very helpful to improve the policy performance in terms of reward, by encouraging explorations of high-entropy states. 
+
+
+\section{Conclusion}
+
+
+O2O safe RL has great potentials to put safe RL on the ground in real-world applications, by leveraging offline learning to facilitate fast online safe learning. In this paper, we proposed the first policy-finetuning based framework, namely Marvel, for O2O safe RL. In particular, by showing that naive finetuning would not work well, we identified two unique challenges in O2O safe RL, i.e., the erroneous Q-estimations and Lagrangian mismatch. To address these challenges, Marvel consisted of two key designs: 1) value pre-alignment to correct the Q-estimations before online finetuning, and 2) adaptive PID control to dynamically change the control parameters so as to rapidly and appropriately control the cost. Extensive experiments demonstrate the superiority of Marvel over multiple baselines. More importantly, Marvel is compatible to a variety of offline and online safe RL approaches, making it very practically appealing. 
+For future work, it is interesting to take a closer look at the offline dataset,  to identify states that are more worth exploring during  online finetuning  given the environmental information and cost threshold. Ultimately, we hope our work will bridge the gap between offline and online algorithms in safe RL, distinct from unconstrained RL, and enhance the efficiency of online safe RL, laying the foundation for the usage of safe RL in  practical applications.
+
+\newpage
+
+
+
+
+

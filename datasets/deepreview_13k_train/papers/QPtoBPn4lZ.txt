@@ -1,0 +1,288 @@
+\title{Continuous Diffusion for Mixed-Type Tabular Data}
+
+\begin{abstract}
+\looseness=-1 Score-based generative models (or diffusion models for short) have proven successful for generating text and image data.
+However, the adaption of this model family to tabular data of mixed-type has fallen short so far. 
+In this paper, we propose CDTD, a Continuous Diffusion model for mixed-type Tabular Data. Specifically, we combine score matching and score interpolation to ensure a common continuous noise distribution for \emph{both} continuous and categorical features alike. 
+We counteract the high heterogeneity inherent to data of mixed-type with distinct, adaptive noise schedules per feature or per data type.
+The learnable noise schedules ensure optimally allocated model capacity and balanced generative capability.
+We homogenize the data types further with model-specific loss calibration and initialization schemes tailored to mixed-type tabular data.
+Our experimental results show that CDTD consistently outperforms state-of-the-art benchmark models, captures feature correlations exceptionally well, and that heterogeneity in the noise schedule design boosts the sample quality.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Score-based generative models~\citep{song2021a}, also termed diffusion models \citep{sohl-dickstein2015, ho2020}, have shown remarkable potential for the generation of images~\citep{dhariwal2021, rombach2022}, videos~\citep{ho2022a}, text~\citep{li2022,dieleman2022,wu2023}, molecules~\citep{hoogeboom2022}, and many other highly complex data structures with continuous features. 
+The framework has since been adapted to categorical data in various ways, including discrete diffusion processes~\citep{austin2021, hoogeboom2021}, diffusion in continuous embedding space~\citep{dieleman2022, li2022, regol2023, strudel2022}, and others~\citep{campbell2022, meng2022a, sun2023}. Diffusion models which include both, continuous and categorical features alike, build directly on advances from the image domain~\citep{kim2023, kotelnikov2023, lee2023, jolicoeur-martineau2024} and thus, are not designed to deal with challenges specific to mixed-type data: The different diffusion processes and their losses are neither aligned nor balanced across data types, and do not scale to larger datasets and/or features with a greater number of categories. Models that naively combine different losses to integrate distinct generative processes may suffer from implicitly favoring the sample quality of some features or data types over others \citep{ma2020a}.
+
+A crucial component in score-based generative models is the noise schedule~\citep{kingma2022, chen2022b, chen2023, jabri2022, wu2023}. Typical noise schedules for image and text data are designed to focus model capacity on the noise levels most important to sample quality~\citep{nichol2021, karras2022}, while others attempt to learn the optimal noise schedule~\citep{dieleman2022, kingma2022}. For mixed-type tabular data, existing approaches often combine distinct diffusion processes for the continuous and discrete features to derive a joint model~\citep{kotelnikov2023, lee2023}. However, noise schedules are not directly transferable from one data modality to another and therefore, using specifications from image or text domain models is not optimal: First, the inherently different diffusion processes make it difficult to balance the noise schedules across features and feature types, and negatively affect the allocation of model capacity across timesteps. 
+Further, and most importantly, the domain, nature and marginal distribution can vary significantly across features~\citep{xu2019a}. For instance, any two continuous features may be subject to different levels of discretization or different bounds, even after applying common data pre-processing techniques; and any two categorical features may differ in the number of categories, or the degree of imbalance. The high heterogeneity and lack of balancing warrants a rethinking of fundamental parts of the diffusion framework, including the noise schedule and the effective combination of diffusion processes for different data types.
+
+In this paper, we introduce \emph{Continuous Diffusion for mixed-type Tabular Data} (CDTD) to address the aforementioned shortcomings. We combine \emph{score matching}~\citep{hyvarinen2005} with \emph{score interpolation}~\citep{dieleman2022} to derive a score-based model that pushes the diffusion process for categorical data into embedding space, and uses a Gaussian diffusion process for \textit{both} continuous and categorical features. This way, the different noise processes become directly comparable, easier to balance, and enable the application of, for instance, classifier-free guidance~\citep{ho2022}, accelerated sampling~\citep{lu2022}, and other advances, to mixed-type tabular data. 
+
+We counteract the high feature heterogeneity inherent to data of mixed-type with distinct feature or type-specific adaptive noise schedules. The learnable noise schedules allow the model to directly take feature or type heterogeneity into account during both training and generation, and thus avoid the reliance on image or text-specific noise schedule designs. Moreover, we propose a diffusion-specific loss normalization and initialization scheme to homogenize different data types and their losses effectively. Our improvements ensure a better allocation of the model's capacity across features, feature types and timesteps, and yield high quality samples of tabular data. CDTD outperforms state-of-the-art baseline models across a diverse set of sample quality metrics as well as computation time for data sets with an arbitrary number of categories and data points. Our experiments show that CDTD captures feature correlations exceptionally well, and that explicitly allowing for data-type heterogeneity in the noise schedules benefits sample quality. 
+
+In sum, we make several contributions specific to diffusion probabilistic modeling of tabular data:
+\begin{itemize}[leftmargin=4pt, labelsep=4pt]
+    \item We propose a joint continuous diffusion model for \emph{both} continuous and categorical features such that all noise distributions are Gaussian.
+    \item We balance model capacity across continuous and categorical features with a novel and effective loss calibration, an adjusted score model initialization and type or feature-specific noise schedules. 
+    \item We extend the idea of timewarping and propose a functional form to efficiently learn adaptive noise schedules, and to allow for exact evaluation and easy incorporation of prior information on the relative importance of noise levels.
+    \item We drastically improve the scalability of tabular data diffusion models to features with a high number of categories.  
+    \item We boost the quality of the generated samples with adaptive, feature or type-specific noise schedules.
+    \item Our CDTD model allows the first-ever use of advanced techniques, like classifier-free guidance, for mixed-type tabular data directly in data space.
+\end{itemize}
+\begin{figure}[t]
+    \centering
+    \centerline{\includegraphics[width=1.1\textwidth]{figures/framework_overview.pdf}}
+    \caption{CDTD framework. Adaptive noise schedules are trained to fit the (possibly aggregated) MSE and CE losses and transform the uniform timestep~$t$ to a potentially feature-specific noise level to diffuse (``noisify'') the scalar values (for continuous features) or the embeddings (for categorical features). Associated sampling processes are highlighted in orange. The approximated score functions are concatenated and passed to an ODE solver for sample generation.}
+    \label{fig:framework_overview}
+\end{figure}
+
+
+\section{Score-based Generative Framework}
+
+
+\looseness=-1 We start with a brief outline of the score-based frameworks for continuous and categorical features. Next, we combine these into a single diffusion model to learn the joint distribution of mixed-type data. 
+
+\subsection{Continuous Features}
+
+We denote $x_{\cont}^{(i)} \in \sR$ as the $i$-th continuous feature and $\rvx_0\equiv \rvx_{\cont} \in \sR^{K_\cont}$ as the stacked feature vector.
+Further, let $\{\rvx_t\}_{t=0}^{t=1}$ be a diffusion process that gradually adds noise in continuous time $t \in [0, 1]$ to $\rvx_0$, and let $p_t(\rvx)$ denote the density function of the data at time~$t$. Then, this process transforms the real data distribution $p_0(\rvx)$ into a terminal distribution of pure noise $p_1(\rvx)$ from which we can sample. Our goal is to learn the reverse process that allows us to go from noise $\rvx_1 \sim p_1(\rvx)$ to a new data sample $\rvx_0^\ast \sim p_0(\rvx)$.
+
+The forward-pass of this continuous-time diffusion process is formulated as the solution to a stochastic differential equation (SDE):
+\begin{equation} 
+    \ud \rvx = \rvf(\rvx, t) \ud t + g(t) \ud\rvw, \label{eq:forward_sde}
+\end{equation}
+where $\rvf(\cdot, t): \sR^{K_\cont} \rightarrow \sR^{K_\cont}$ is the drift coefficient, $g(\cdot): \sR \rightarrow \sR$ is the diffusion coefficient, and $\rvw$ is a Brownian motion \citep{song2021a}. The reversion yields the trajectory of $\rvx$ as $t$ goes backwards in time from~$1$ to~$0$, and is formulated as a probability flow ordinary differential equation (ODE): 
+\begin{equation}
+    \ud \rvx = \bigl[ \rvf(\rvx, t) - \frac{1}{2} g(t)^2 \nabla_{\rvx} \log p_t(\rvx)  \bigr] \ud t. \label{eq:prob_flow_ode}
+\end{equation}
+We approximate the score function $\nabla_{\rvx} \log p_t(\rvx)$, the only unknown in \cref{eq:prob_flow_ode}, by training a time-dependent score-based model $\rvs_{\bm{\theta}}(\rvx, t)$ via \emph{score matching} \citep{hyvarinen2005}. The parameters $\vtheta$ are trained to minimize the \emph{denoising score matching} objective:
+\begin{equation}
+    \E_t \bigl[ \lambda_t \E_{\rvx_0} \E_{\rvx_t|\rvx_0} \norm{s_\vtheta(\rvx_t, t) - \nabla_{\rvx_t} \log p_{0t}(\rvx_t|\rvx_0)}_2^2 \bigr],
+\label{eq:denoising_score_matching}
+\end{equation}
+where $\lambda_t: [0, 1] \rightarrow \sR_{+}$ is a positive weighting function for timesteps~$t \sim \mathcal{U}_{[0,1]}$, and $p_{0t}(\rvx_t | \rvx_0)$ is the density of the noisy $\rvx_t$ given the ground-truth data $\rvx_0$ \citep{vincent2011}. 
+
+\looseness =-1 In this paper, we use the EDM formulation~\citep{karras2022}, that is, $\rvf(\cdot, t) = \vzero$ and $g(t) = \sqrt{2 [\frac{d}{d t} \sigma (t)] \sigma (t)}$ such that $p_{0t}(\rvx_t|\rvx_0) = \mathcal{N}(\rvx_t | \rvx_0, \sigma^2(t) I_{K_{\cont}})$. We start the reverse process with sampling $\rvx_1 \sim p_1(\rvx) = \mathcal{N}(\vzero,\sigma^2(1) I_{K_{\cont}})$ for $\sigma^2(1)$ being sufficiently large and $\E[\rvx_0] = \vzero$. We then gradually guide $\rvx_1$ towards high density regions in the data space with $\rvs_{\bm{\theta}}(\rvx, t)$ replacing the unknown, true score function in \cref{eq:prob_flow_ode}. In practice, ODE or predictor-corrector samplers can be used for this iterative denoising process~\citep{song2021a}.
+\subsection{Categorical Features}
+
+For categorical features, the score function is undefined and the score-based generative framework cannot be directly applied. Therefore, we use \emph{score interpolation}~\citep{dieleman2022} and push the diffusion of categorical data into Euclidean embedding space. This allows us to impose a Gaussian noise distribution on categorical \textit{and} continuous features. 
+Let $x_\cat^{(j)} \in \{1, \dots, C_j\}$ be the $j$-th categorical feature with $C_j$ possible classes. The $i$-th class is associated to a distinct, trainable $d$-dimensional embedding vector $\rve_i^{(j)} \in \sR^d$. The embedding vector corresponding to the ground truth class is $\rvx_0^{(j)} \in \{ \rve_1^{(j)}, \dots, \rve_{C_j}^{(j)} \}$. We omit the superscript~$j$ in what follows. The noisy variant at time~$t$ is \mbox{$\rvx_t \sim p_{0t}(\rvx_t|\rvx_0) = \mathcal{N}(\rvx_t|\rvx_0, \sigma^2(t) I_d)$} similar to before.
+Given $\rvx_t$ and $t$, $\E_{p(\rvx_0 | \rvx_t, t)} [\nabla_{\rvx_t} \log p_{0t}(\rvx_t|\rvx_0)]$ minimizes \cref{eq:denoising_score_matching}, and we obtain
+\begin{equation}
+     \E_{p(\rvx_0 | \rvx_t, t)}  \nabla_{\rvx_t} \log p_{0t}(\rvx_t|\rvx_0) 
+    = \frac{1}{\sigma^2(t)}[\E_{p(\rvx_0 | \rvx_t, t)} [\rvx_0] - \rvx_t] \ . 
+    \label{eq:score_interpolation}
+\end{equation}
+We compute $\hat{\rvx}_0 = \E_{p(\rvx_0 | \rvx_t, t)}[\rvx_0]$ as an average over the $C_j$ possible embedding vectors weighted by their probability. This yields a score function estimate for a single categorical feature. Since $p(\rvx_0 = \rve_i | \rvx_t, t) = p(x_\cat^{(j)} = i | \rvx_t, t)$, an estimate of $p(\rvx_0 | \rvx_t, t)$ is obtained via a classifier that predicts $C_j$ class probabilities for the $j$-th feature and is trained via cross-entropy (CE) loss. 
+
+We start generating a categorical feature from an embedding vector \mbox{$\rvx_1 \sim p_1(\rvx) = \mathcal{N}(\vzero, \sigma^2(1) I_d)$}. We then use score interpolation (\cref{eq:score_interpolation}) to iteratively denoise this embedding vector. After the final reverse step, i.e., when ~$t \approx 0$, we can directly infer the generated class from the feature-specific class probabilities, \mbox{$p(\rvx_0 = \rve_i | \rvx_t, t)$}. 
+
+This framework can easily be extended to multiple categorical features. All embeddings are trained alongside the model. The model fully takes feature-specific uncertainty at intermediate timesteps into account (as for each feature it only has to commit to a category at the final step of generation) which improves the consistency of the generated samples \citep{dieleman2022}. Therefore, CDTD allows to capture subtle dependencies both \emph{within} and \emph{across} data types more accurately.
+
+
+\section{Method}
+
+
+\looseness=-1 In short, we combine \emph{score matching} (\cref{eq:denoising_score_matching}) with \emph{score interpolation} (\cref{eq:score_interpolation}) to model the joint distribution of mixed-type data. Next, we discuss the important components of our method. In particular, the combination of the different losses for score matching and score interpolation, initialization and loss weighting concerns, and the adaptive type- or feature-specific noise schedule designs. 
+\subsection{General Framework}
+
+Figure~\ref{fig:framework_overview} gives an overview of our Continuous Diffusion for mixed-type Tabular Data (CDTD) framework.
+The score model is conditioned on (1)~all noisy continuous features, (2)~the noisy embeddings of all categorical features in Euclidean space, and (3)~the timestep $t$ which reflects potentially feature-specific, adaptive noise levels $\sigma_{\cont, i}$ and $\sigma_{\cat, j}$ for all $i$ and $j$. Additional conditioning information, such as the target feature for classification tasks, are straightforward to add. Note that while the Gaussian noise process acts directly on the continuous features, it acts on the \textit{embeddings} of the categorical features. This way, we ensure a common continuous noise process for both data types. 
+
+During training, the model predicts the ground-truth value for continuous features and the class-specific probabilities for categorical features. During generation, we concatenate the score estimates, $\hat{s}_{\cont}^{(i)}$ and $\hat{s}_{\cat}^{(j)}$, for all features~$i$ and~$j$, and pass them to an ODE solver together with $\sigma_{\cont, i}$ and $\sigma_{\cat, j}$, the noise levels retrieved by transforming linearly spaced timesteps with the learned adaptive noise schedules.
+\subsection{Homogenization of Data Types} 
+
+\looseness=-1
+Let $\mathcal{L}_{\text{MSE}}(x_\cont^{(i)}, t)$ denote the time-weighted MSE (i.e., score matching) loss of the $i$-th continuous feature at a single timestep~$t$, and $\mathcal{L}_{\text{CE}}(x_\cat^{(j)}, t)$ the CE (i.e., score interpolation) loss of the $j$-th categorical feature. Naturally, the two losses are defined on different scales. This leads to an unintended importance weighting of features in the generative process \citep{ma2020a}.
+We assume that an unconditional model should a priori, i.e., without having any information, be indifferent between all features. This reflects the state of the model at the terminal timestep $t=1$ in the diffusion process. 
+
+Formally, we aim to find calibrated losses, $\mathcal{L}^\ast_{\text{MSE}}$ and $\mathcal{L}^\ast_{\text{CE}}$ for all continuous features~$i$ and categorical features~$j$, such that
+\begin{equation}
+\E[\mathcal{L}^\ast_{\text{MSE}}(x_\cont^{(i)}, 1)] = \E[\mathcal{L}^\ast_{\text{CE}}(x_\cat^{(j)}, 1)] = 1.
+\end{equation}
+
+\looseness=-1 For continuous features, $\E[\mathcal{L}^\ast_{\text{MSE}}(x_\cont^{(i)}, 1)] = 1$ follows from standardizing $x_\cont^{(i)}$ to zero mean and unit variance. We then average the calibrated losses to derive the joint loss function at a given timestep: 
+\begin{equation}
+    \label{eq:total_loss}
+    \mathcal{L}(t) = \frac{1}{K} \Bigl[ \sum_{i=1}^{K_\cont} \mathcal{L}^\ast_{\text{MSE}}(x_\cont^{(i)}, t) + \sum_{j=1}^{K_\cat} \mathcal{L}_{\text{CE}}^\ast(x_\cat^{(j)}, t) \Bigr],
+\end{equation}
+where $K = K_\cont + K_\cat$.
+
+The loss calibration and the multiple data modalities have implications for the optimal initialization of the score model. We aim to initialize all \textit{feature-specific} losses at one. 
+We therefore initialize the output layer weights to zero (like in image diffusion models) and the output biases for continuous features to zero, and rely on the timestep weights of the EDM parameterization \citep{karras2022} to achieve a unit loss for all~$t$.
+
+\looseness=-1 The initial equal importance across all timesteps will naturally change over the course of training. We employ a normalization scheme for the average diffusion loss \citep{karras2023, kingma2023} to allow for changes in relative importance among features but ensure equal importance of all timesteps throughout training. To do so, we learn the time-specific normalization term $Z(t)$ such that $\mathcal{L}(t)/Z(t) \approx 1$. 
+\subsection{Noise Schedules} 
+\label{sec:noise_schedules}
+
+Since the optimal noise schedule of one feature impacts the noise schedules of other features, and different data types have different sensitivities to additive noise, we introduce \emph{feature-specific} or \emph{type-specific} noise schedules. For instance, given the same embedding dimension, more noise is needed to remove the same amount of signal from embeddings of features with fewer classes. Likewise, a delayed noise schedule for one feature might improve sample quality as the model can rely on other correlated features that have been (partially) generated first. We make the noise schedules learnable, and therewith \emph{adaptive} to avoid the reliance on designs for other data modalities.
+
+We investigate the following noise schedule variants: (1)~a single adaptive noise schedule, (2)~adaptive noise schedules differentiated per data type and (3)~feature-specific adaptive noise schedules. We only introduce the feature-specific noise schedules explicitly. The other noise schedule types are easily derived from our argument by appropriately aggregating terms across features.
+\paragraph{Feature-specific Noise Schedules.}
+\looseness=-1 According to \cref{eq:forward_sde}, and following the EDM parameterization~\citep{karras2022}, we define the diffusion process of the $i$-th continuous feature as
+\begin{equation}
+    \ud x_{_\cont}^{(i)} = \sqrt{2 \Bigl[\frac{d}{d t} h_{\cont, i}(t) \Bigr] h_{\cont, i}(t)} \ud w_t^{(i)},
+\end{equation}
+and likewise the trajectory of the $j$-th categorical feature as
+\begin{equation}
+    \ud \rvx_\cat^{(j)} = \sqrt{2 \Bigl[\frac{d}{d t} h_{\cat, j}(t) \Bigr] h_{\cat, j}(t)} \ud \rvw_t^{(j)},
+\end{equation}
+where $\rvx_\cat^{(j)}$ is the $d$-dimensional embedding of $x_\cat^{(j)}$ in Euclidean space. The \textit{feature-specific} noise schedules $h_{\cont, i}(t)$ and $h_{\cat, j}(t)$ represent the standard deviations of the added Gaussian noise such that $\sigma_{\cont, i}(t)= h_{\cont, i}(t)$ and $\sigma_{\cat, j}(t) = h_{\cat, j}(t)$. Thus, each continuous feature and each embedded categorical feature is affected by a distinct noise schedule. 
+\paragraph{Adaptive Noise Schedules.}
+\looseness=-1 Based on \citet{dieleman2022}, we aim to learn a noise schedule~$h_k: t \mapsto \sigma$ for all \mbox{$K=K_{\cont}+K_{\cat}$} features. Note that \mbox{$t \in [0,1]$}, and with pre-specified minimum and maximum noise levels, we can scale $\sigma_k$ to lie in $[0,1]$ as well, without loss of generality. We will learn the feature-specific loss given the noise level, $F_k: \sigma_k \mapsto \ell_k$, alongside the score model, with $\ell_k$ the relevant (not explicitly weighted) training loss for the $k$-th feature. Then, our mapping of interest is $h_k = \tilde{F}_k^{-1}$, that is, the normalized and inverted function~$F_k$. This encourages the relation between $t$ and $\ell_k$ to be linear.
+
+Higher noise levels imply a lower signal-to-noise ratio, and therefore a larger incurred loss for the score model. Accordingly, $F_k$ must be a monotonically increasing and \emph{S-shaped} function. We let $F_k = \gamma_k F_{\mathrm{d.a.log}, k}(\sigma_k)$ where $\gamma_k > 0$ is a scaling factor that at $t=1$ enables fitting a loss $\ell_k > 1$ early on in the training process, and a loss $\ell_k < 1$ in case conditioning information is included. Further, we use the cdf of the domain-adapted Logistic distribution $F_{\mathrm{d.a.log},k}(\sigma_k)$, where the input is pre-processed via a Logit function, with parameters $0 < \mu_k < 1$ (the location of the inflection point) and $\nu_k \geq 1$ (the steepness of the curve). Figure~\ref{fig:timewarping} illustrates the effect of the location parameter. The implicit importance of the noise levels is conveniently represented by the corresponding pdf~$f_{\mathrm{d.a.log},k}$. To normalize and invert $F_k$, we set $\gamma_k = 1$ and and directly utilize the quantile function~$F_{\mathrm{d.a.log},k}^{-1}$. 
+
+\looseness=-1 Our functional choice has several advantages. First, each noise schedule can be evaluated exactly without the need for approximations and only requires three parameters. Second, these parameters are well interpretable in the diffusion context and provide information on the inner workings of the model. For instance, for $\mu_1 < \mu_2$, the model starts generating feature 2 before feature 1 in the reverse process. Third, the proposed functional form is less flexible than the original piece-wise linear function \citep{dieleman2022} such that an exponential moving average on the parameters is not necessary, and the fit is more robust to ``outliers'' encountered during training.
+
+We use the adaptive noise schedules during both training and generation. We derive importance weights from $f_{\mathrm{d.a.log},k}$ to fit $h_k$ to avoid biasing the noise schedule to timesteps that are frequently sampled during training. Type-specific noise schedules refer to learning two functions $F_1$ and $F_2$ that predict the respective average loss over all features of a data type.
+
+\subsection{Additional Customization to Tabular Data}
+\label{sec:add_custom_tabular_data}
+
+In the diffusion process, we add noise directly to the continuous features but to the embeddings of categorical features. We generally need more noise to remove all signal from the categorical representations. We therefore define \emph{type-specific} minimum and maximum noise levels: For categorical features, we let $\sigma_{\cat, \min} = 0.1$ and $\sigma_{\cat, \max}  = 100$; for continuous features, we set $\sigma_{\cont, \min} = 0.002$ and $\sigma_{\cont, \max} = 80$ \citep[see][]{karras2022}. 
+
+\begin{figure*}[t!]
+    \vskip -0.1in
+    \centering
+    \begin{subfigure}[t]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/curve_collection.pdf}
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/timewarp_init.pdf}
+    \end{subfigure}
+     \vskip -0.1in
+    \caption{(Left) pdf ($f_{\mathrm{d.a.log},k}$) and cdf ($F_{\mathrm{d.a.log},k}$) of the domain-adapted Logistic distribution for five different values of the location parameter $\mu_k$ and for a given curve steepness $\nu_k = 3$. 
+    (Right) impact of uniform vs.\ adjusted timewarping initialization on the pdf ($f_{\mathrm{d.a.log},k}$) and the cdf ($F_{\mathrm{d.a.log},k}$).}
+    \label{fig:timewarping}
+     \vskip -0.1in
+\end{figure*}
+
+Lastly, an uninformative initialization of the adaptive noise schedules requires to set $\mu_k = 0.5, \nu_k \approx 1$ and \mbox{$\gamma_k = 1$} such that $F_{\mathrm{d.a.log},k}$ corresponds approximately to the cdf of a uniform distribution. We can improve this with a more informative prior: In the image domain, diffusion models allocate substantial capacity towards generating the high level structure before generating details at lower noise levels. In tabular data, the location of features in the data matrix, and therefore the high level structure, is fixed. Instead, we are interested in generating details as accurately as possible, as these influence, for instance, subtle correlations among features. Note that the inflection point, $\mu_k$, of our adaptive noise schedule corresponds to the proportion of high (normalized) noise levels (i.e.,~$\sigma_k \geq 0.5$) in the distribution. Therefore, we adjust the initial noise schedules such that low noise levels ($\sigma_k <0.5$) are weighted by a factor of 3 relative to high noise levels ($\sigma_k \geq 0.5$) (see Figure~\ref{fig:timewarping}). The proportion of high noise levels is decreased to $\mu_k = 1/4$. We let $\nu_k \approx 1$ for a dispersed initial probability mass and initialize the scaling factor to $\gamma_k = 1$. 
+
+
+
+
+\section{Experiments}
+
+
+We benchmark our model against several generative models across multiple datasets. Additionally, we investigate three different noise schedule specifications: (1)~a single adaptive noise schedule for both data types~(\emph{single}), (2)~continuous and categorical data type-specific adaptive noise schedules~(\emph{per type}), and (3)~feature-specific adaptive noise schedules~(\emph{per feature}). 
+
+\paragraph{Baseline models.} 
+\looseness=-1 We use a diverse benchmark set of state-of-the-art generative models for mixed-type tabular data. This includes SMOTE~\citep{chawla2002},
+ARF~\citep{watson2023}, CTGAN~\citep{xu2019a}, TVAE~\citep{xu2019a}, TabDDPM~\citep{kotelnikov2023}, CoDi~\citep{lee2023}, TabSyn~\citep{zhang2024}. Each model follows a different design and/or modeling philosophy. Note that CoDi is an extension of STaSy~\citep[][the same group of authors]{kim2023} that has shown to be superior in performance. For scaling reasons, ForestDiffusion \citep{jolicoeur-martineau2024} is not an applicable benchmark. With the suggested hyperparameters (for improved efficiency) and 64 CPUs, the model took approx.\ 500 min of training on the relatively small \texttt{nmes} data. Note that the model estimates $KT$ separate models, with $K$ being the number of features and $T$ the noise levels. Therefore, we consider ForestDiffusion to be prohibitively expensive for higher-dimensional data generation.
+
+\paragraph{Datasets.} 
+We systematically investigate our model on eleven publicly available datasets. The datasets vary in size, prediction task (regression vs.\ binary classification\footnote{For ease of presentation, we only analyze binary targets. However, CDTD trivially extends to targets with multiple classes.}), number of continuous \textit{and} categorical features and their distributions. We remove observations with missings in the target or any of the continuous features and encode missings in the categorical features as a separate category. All datasets are split in train (60\%), validation (20\%) and test (20\%) partitions, hereinafter denoted $\mathcal{D}_{\text{train}}, \mathcal{D}_{\text{valid}}$ and $\mathcal{D}_{\text{test}}$, respectively. For classification tasks, we use stratification with respect to the outcome, we condition the model on the outcome during training and generation, and use the train set proportions for generation. In a last post-processing step, we round the integer-valued continuous features after generation for all models.
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+In our experiments, we follow conventions from previous papers and use four sample quality criteria, which we assess using a comprehensive set of measures. All metrics are averaged over five random seeds that affect the generative process, which samples synthetic data $\mathcal{D}_{\text{gen}}$ of size $\min(\abs{\mathcal{D}_{\text{train}}}, 50\,000)$.
+
+\paragraph{Machine learning efficiency.} 
+
+We follow the conventional train-synthetic-test-real strategy \citep[see,][]{borisov2023,liu2023,kotelnikov2023,kim2023,xu2019a, watson2023}. We compare the model-averaged real test performance, $\text{Perf}(\mathcal{D}_{\text{train}}, \mathcal{D}_{\text{test}})$, to the performance when trained on the synthetic data, $\text{Perf}(\mathcal{D}_{\text{gen}}, \mathcal{D}_{\text{test}})$. We subsample $\mathcal{D}_{\text{train}}$ in case of more than 50\,000 observations to upper-bound the computational load. The results are averaged over ten different model seeds (in addition to the five random seeds that impact the sampling process). For regression tasks, we consider the RMSE and for classification tasks, the macro-averaged F1 and AUC scores. We only report \mbox{$\lvert \text{Perf}(\mathcal{D}_{\text{gen}}, \mathcal{D}_{\text{test}}) - \text{Perf}(\mathcal{D}_{\text{train}}, \mathcal{D}_{\text{test}}) \rvert$} in the main part of this paper. An absolute difference close to zero, that is, synthetic and real data induce the same performance, indicates that the generative model performs well.
+
+\paragraph{Detection score.} 
+For each generative model, we report the accuracy of a catboost model that is trained to distinguish between real and generated (fake) samples \citep{borisov2023, liu2023, zhang2024}. First, we subsample the real data subsets, $\mathcal{D}_{\text{train}}, \mathcal{D}_{\text{valid}}$ and $\mathcal{D}_{\text{test}}$, to a maximum of 25\,000 data samples to limit evaluation time. Then, we construct $\mathcal{D}_{\text{train}}^{\text{detect}}, \mathcal{D}_{\text{valid}}^{\text{detect}}$ and $\mathcal{D}_{\text{test}}^{\text{detect}}$ with equal proportions of real and fake samples. A (perfect) detection score of 0.5 indicates the model is unable distinguish fake from real samples.
+
+\paragraph{Statistical similarity.} 
+We aim to assess the statistical similarity between real and generated data at both the feature and sample levels. We largely follow \citet{zhao2021} and compare: (1)~the Jensen-Shannon divergence \citep[JSD;][]{lin1991} to quantify the difference in categorical distributions, (2)~the Wasserstein distance \citep[WD;][]{ramdas2017} to quantify the difference in continuous distributions, and (3)~the L$_2$ distance between pair-wise correlation matrices. We use the Pearson correlation coefficient for two continuous features, the Theil uncertainty coefficient for two categorical features, and the correlation ratio for mixed types. Similar metrics for the evaluation of statistical similarity have been used by \citet{zhang2024}.
+
+\paragraph{Distance to closest record.} 
+\looseness=-1 That is, the minimum Euclidean distance of a generated data point to any observation in $\mathcal{D}_{\text{train}}$ \citep{borisov2023, zhao2021}.
+We one-hot encode categorical features and standardize all features to zero mean and unit variance to ensure each feature contributes equally to the distance. We compute the average distance to closest record (DCR) as a robust estimate. For brevity, we report the absolute difference of the DCR of the synthetic data and the DCR of the real test set. A good DCR value, indicating both realistic and sufficiently private data, should be close to zero.
+
+\subsection{Results}
+\begin{table}[t]
+\small
+\caption{Average performance rank of each generative model across eleven datasets. Per metric, \textbf{bold} indicates the best, \underline{underline} the second best result. 
+We assigned the rank 10 for CoDi on \texttt{lending} and \texttt{diabetes}, TabDDPM on \texttt{acsincome} and \texttt{diabetes}, SMOTE on \texttt{acsincome} and \texttt{covertype}.}
+\label{tab:average_rank}
+\centering
+\small
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lcccccccccc@{}}
+   \toprule
+    & \thead{SMOTE} & \thead{ARF} & \thead{CTGAN} & \thead{TVAE} & \thead{TabDDPM} & \thead{CoDi} & \thead{TabSyn} & \thead{CDTD \\ (single)} & \thead{CDTD \\ (per type)} & \thead{CDTD \\ (per feature)} \\
+      \midrule
+      RMSE & $\underline{3.400}_{\pm 3.382}$ & $3.800_{\pm 2.482}$ & $7.800_{\pm 1.470}$ & $7.800_{\pm 2.227}$ & $8.200_{\pm 1.470}$ & $6.800_{\pm 1.939}$ & $6.800_{\pm 1.720}$ & $\mathbf{3.000}_{\pm 0.632}$ & $\underline{3.400}_{\pm 2.059}$ & $4.200_{\pm 2.227}$ \\
+     F1 & $3.667_{\pm 3.145}$ & $6.333_{\pm 2.285}$ & $8.333_{\pm 1.491}$ & $8.000_{\pm 1.000}$ & $4.167_{\pm 2.794}$ & $6.667_{\pm 3.091}$ & $7.500_{\pm 1.607}$ & $3.833_{\pm 1.462}$ & $\mathbf{3.167}_{\pm 1.344}$ & $\underline{3.500}_{\pm 1.979}$ \\
+     AUC & $4.667_{\pm 2.749}$ & $5.667_{\pm 2.055}$ & $8.667_{\pm 1.106}$ & $7.833_{\pm 1.067}$ & $4.833_{\pm 2.794}$ & $7.500_{\pm 2.872}$ & $7.333_{\pm 1.374}$ & $\underline{2.500}_{\pm 1.500}$ & $\mathbf{2.333}_{\pm 0.943}$ & $3.833_{\pm 1.675}$ \\
+     L$_2$ dist.\ of corr. & $4.818_{\pm 2.918}$ & $5.636_{\pm 1.872}$ & $8.091_{\pm 1.781}$ & $7.909_{\pm 1.564}$ & $7.000_{\pm 3.191}$ & $6.909_{\pm 2.429}$ & $6.818_{\pm 1.402}$ & $\underline{2.727}_{\pm 1.286}$ & $\mathbf{2.273}_{\pm 0.862}$ & $3.000_{\pm 1.595}$ \\
+     Detection score & $3.909_{\pm 3.502}$ & $6.182_{\pm 1.696}$ & $8.818_{\pm 1.466}$ & $7.273_{\pm 1.213}$ & $5.000_{\pm 3.045}$ & $8.091_{\pm 2.391}$ & $6.000_{\pm 1.595}$ & $3.909_{\pm 1.164}$ & $\mathbf{2.455}_{\pm 1.827}$ & $\underline{3.545}_{\pm 1.725}$ \\
+     JSD & $7.182_{\pm 2.167}$ & $\mathbf{1.273}_{\pm 0.617}$ & $8.182_{\pm 1.641}$ & $8.818_{\pm 1.029}$ & $6.909_{\pm 2.314}$ & $7.000_{\pm 1.651}$ & $6.545_{\pm 1.305}$ & $\underline{2.455}_{\pm 1.076}$ & $3.091_{\pm 0.793}$ & $3.727_{\pm 1.052}$ \\
+     WD & $\underline{3.091}_{\pm 3.315}$ & $5.636_{\pm 1.611}$ & $7.545_{\pm 1.827}$ & $8.000_{\pm 1.477}$ & $6.455_{\pm 3.144}$ & $8.364_{\pm 1.823}$ & $5.727_{\pm 2.339}$ & $4.182_{\pm 1.466}$ & $3.182_{\pm 1.192}$ & $\mathbf{3.000}_{\pm 1.954}$ \\
+     DCR & $6.000_{\pm 2.558}$ & $6.182_{\pm 2.328}$ & $8.455_{\pm 1.725}$ & $6.182_{\pm 3.186}$ & $4.455_{\pm 3.726}$ & $6.545_{\pm 2.426}$ & $5.909_{\pm 1.676}$ & $4.091_{\pm 2.678}$ & $\underline{3.818}_{\pm 2.124}$ & $\mathbf{3.545}_{\pm 1.924}$ \\
+    \bottomrule
+       \end{tabular}
+       }
+\vskip -0.1in
+\end{table}
+
+Table~\ref{tab:average_rank} shows the average rank of each generative model across all datasets for the considered metrics. The ranks in terms of the F1 and AUC scores are averaged over the classification task datasets. Likewise, the RMSE rank averages include the regression task datasets. We assign the maximum possible rank when a model could not be trained on a given dataset or could not be evaluated in reasonable time. This includes TabDDPM, which outputs NaNs for \texttt{acsincome} and \texttt{diabetes} and CoDi, which we consider to be prohibitively expensive to train on \texttt{diabetes} (estimated 14.5 hours) and \texttt{lending} (estimated 60 hours). Similarly, SMOTE is very inefficient in sampling for large datasets (78 min for 1000 samples on \texttt{acsincome} and 182 min on \texttt{covertype}) and does not finish the evaluation within 12 hours.
+
+\paragraph{Sample quality.}
+\looseness=-1 CDTD consistently outperforms the considered benchmark models in most sample quality metrics. Specifically, we see a major performance edge in terms of the detection score, the L$_2$ distance of the correlation matrices and the regression-based metrics. Only for the Jensen-Shannon divergence ARF, a tree-based method that is expected to model categorical features particularly well, outperforms CDTD. Interestingly, CDTD performs similar to TabDDPM on F1 scores, but outperforms it dramatically for regression tasks. TabSyn, a latent-space diffusion model, performs worse than CDTD and often TabDDPM, which define diffusion in data space. By utilizing score interpolation, CDTD is able to model intricate correlation structure more accurately than other frameworks. Most importantly, type-specific noise schedules mostly outperform the feature-specific and single noise schedule variants. This illustrates the importance of accounting for the high heterogeneity in tabular data on the feature type level. The different noise schedules per feature, however, appear to force too many constraints on the model and thus, decrease sample quality.
+
+\begin{table}[t]
+    \vskip -0.1in
+    \caption{Ablation study for five CDTD configurations with progressive addition of model components. We report the median performance metrics over \texttt{acsincome}, \texttt{adult}, \texttt{beijing} and \texttt{churn}.}
+    \label{tab:ablation}
+    \centering
+    \small
+    \begin{tabular}{lccccc}
+        \toprule
+     \thead[l]{Config.} & \thead{\textsc{A}} & \thead{\textsc{B}} & \thead{\textsc{C}} & \thead{\textsc{D}} & \thead{CDTD \\ (per type)} \\
+     \midrule
+    RMSE (abs.\ diff.; $\downarrow$) & 0.041 & 0.042 & 0.043 & 0.037 & 0.033 \\
+    F1 (abs.\ diff.; $\downarrow$) & 0.012 & 0.013 & 0.012 & 0.016 & 0.015 \\
+    AUC (abs.\ diff.; $\downarrow$) & 0.004 & 0.005 & 0.005 & 0.004 & 0.004 \\
+    L$_2$ distance of corr.\  ($\downarrow$) & 0.131 & 0.124 & 0.146 & 0.118 & 0.127 \\
+    Detection score  ($\downarrow$) &  0.577 & 0.583 & 0.590 & 0.561 & 0.560 \\
+    JSD ($\downarrow$) & 0.011 & 0.011 & 0.011 & 0.012 & 0.013 \\
+    WD ($\downarrow$) & 0.004 & 0.005 & 0.005 & 0.003 & 0.003 \\
+    DCR (abs.\ diff. to test; $\downarrow$) &  0.405 & 0.361 & 0.386 & 0.299 & 0.372 \\
+    \bottomrule
+    \end{tabular}
+\vskip -0.10in
+\end{table}
+\begin{wrapfigure}{H}{0.4\textwidth}
+\vskip-\intextsep
+\centering
+\includegraphics[width=0.4\textwidth]{figures/train_sample_speeds.pdf}
+\caption{Average training and sampling wall-clock time for 1000 samples (excl. \texttt{acsincome}, \texttt{diabetes}, \texttt{lending}).}
+\label{fig:train_sample_speed}
+\end{wrapfigure}
+
+\paragraph{Training and sampling time.}
+ 
+We exclude SMOTE due to
+its considerably longer sampling with an average of 1377 seconds for 1000 samples. CDTD's use of embeddings (instead of one-hot encoding) for categorical features drastically reduces training times and thus, improves scaling to increasing number of categories.
+The ODE formulation of the diffusion process implies competitive sampling speeds, in particular compared to the diffusion-based benchmarks CoDi, TabDDPM and TabSyn. Despite TabSyn utilizing a separately trained encoder, this does \textit{not} result in a lower-dimensional latent space and therefore, does not speed up sampling.
+
+\paragraph{Ablation study.}
+\looseness=-1 We conduct an ablation study over four datasets to investigate the separate components of our CDTD framework. The baseline model \emph{Config.\ A} includes a single noise schedule with the original piece-wise linear formulation \citep{dieleman2022} without loss normalization, improved model initialization or adaptive normalization, and the CE and MSE losses are naively averaged. Note that this configuration still is a novel contribution to the literature. \emph{Config.\ B} adds our feature homogenization (i.e.,~loss normalization, improved initialization and adaptive normalization schemes), \emph{Config.\ C} adds our proposed functional form for a single noise schedule with uniform initialization, and \emph{Config.\ D} imposes per-type noise schedules. Lastly, we add the suggested (low noise level) overweighting timewarping initialization to arrive at the full CDTD (\emph{per type}) model. We see the switch from the piece-wise linear functional form to our more robust noise schedule variant slightly harms sample quality. However, the per-type variant and the more informed initialization scheme compensate for this difference. Main differences are in the RMSE and detection score as well as training efficiency (the loss calibration and improved initialization facilitate model convergence).
+
+
+\section{Conclusion and Discussion}
+
+
+We propose a Continuous Diffusion model for mixed-type Tabular Data (CDTD) that combines score matching and score interpolation and imposes Gaussian diffusion processes on both continuous and embedded categorical features. We compared CDTD to various benchmark models and to a single noise schedule as typically used in image diffusion models. Our results indicate that addressing the high feature heterogeneity in tabular data on the feature type level and aligning type-specific diffusion elements, such as the noise schedules or losses, substantially benefits sample quality. Moreover, CDTD shows vastly improved scalability and can accommodate an arbitrary number of categories.
+
+Our paper serves as an important step to customizing the diffusion probabilistic framework to tabular data. In particular, the common type of noise schedules allows for an easy to extend framework that might accelerate progress on diffusion models for tabular data. Crucially, CDTD allows the direct application of diffusion-related advances from the image domain, like classifier-free guidance, to tabular data without the need for a latent encoding. We leave further extensions to the tabular data domain, e.g.,~the exploration of accelerated sampling, efficient score model architectures, different forms of adaptive noise schedules, or the adaption to the data imputation task for future work.
+
+Finally, we want to emphasize the potential misuse of synthetic data to support unwarranted claims. Any generated data should therefore not be blindly trusted, and synthetic data based inferences should always be compared to results from the real data. However, the correct use of generative models enables better privacy preservation and facilitates data sharing and open science practices. 
+
+\enlargethispage{\baselineskip}
+
+
+

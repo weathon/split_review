@@ -1,0 +1,197 @@
+\title{Recycled Attention: Efficient inference for long-context language models}
+
+\begin{abstract}
+Processing long-context input imposes a heavy computational burden when deploying large language models. Recently proposed inference-time methods accelerate generation by attending only to local context. Despite its efficiency gains, this approach fails to capture all relevant information in the input, showing substantial performance drop in long-context benchmarks. We propose recycled attention, an efficient and effective method which alternates between full context attention and attention over a subset of input tokens. When performing partial attention, we leverage the attention pattern of a nearby token that has performed full attention and attend only to the top K most attended tokens. We evaluate our methods on RULER, a suite of tasks designed to comprehensively evaluate long-context abilities, and long-context language modeling tasks. Applying our inference method to off-the-shelf LLMs achieves comparable speedup to baselines which only consider local context while improving the performance by 2x. We further experiment with continued pre-training the model with recycled attention to improve the performance-efficiency trade-off.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recent large language models (LLMs) are trained to ingest extremely long inputs and generate long outputs (Meta, 2024; Gemini, 2024) to support a wide range of applications. However, deploying such long-context LLMs can be very costly. As the context length increases, LLMs see a linear increase in memory to store the Key-Value (KV) cache and a quadratic increase in time for attention computation. These two factors lead to high latency during inference; Adnan et al. (2024) showed that as context length increased 16x for the MPT-7B model (MosaicML, 2023), the inference latency increased by $50\mathrm{x}$ , where $40\%$ of the increase was due to the data movement of the KV cache.  
+
+To improve efficiency, prior work put a limitation on the size of KV cache, i.e. the number of past tokens that are available at each generation step. This leads to a meaningful gain along two axes: memory requirement and time for attention computation. To form a smaller KV cache, they make a locality assumption, only keeping most recent input tokens (Beltagy et al., 2020; Child et al., 2019) along with a fixed number of globally available initial tokens (i.e., StreamingLLM (Xiao et al., 2023)). Another line of work (e.g., $\mathrm{H_{2}O}$ (Zhang et al., 2024), Keyformer (Adnan et al., 2024)) maintains a dynamically constructed fixed sized KV cache by identifying key past tokens from observed attention patterns and dynamically evicting the rest during generation.  
+
+These approaches reported little degradation in perplexity-based evaluation for the next token prediction task. However, they show a significant drop in performance (Sun et al., 2024) on long-context benchmarks that require synthesizing information from non-local contexts (Hsieh et al., 2024). For example, on the simple needle-in-a-haystack (NIAH) task, both StreamingLLM (Xiao et al., 2023) and $\mathrm{H_{2}O}$ (Zhang et al., 2024) report less than $8\%$ accuracy compared to $100\%$ for vanilla attention. Keeping a smaller KV cache is problematic when LLMs is tasked with synthesizing information from long context, going beyond next token prediction where local contexts suffice. Once a key input token is eliminated from the KV cache (either through locality assumption or by eviction during the generation process), there is no way to recover access to the eliminated token. When LLMs are tasked to generate long text, it gets harder to predict which input tokens are useful in advance.  
+
+In this work, we propose a novel approach, Recycled Attention, that focuses on reducing inference time while comprehensively capturing long-context inputs. We keep the full KV cache throughout the inference (thus no gain in memory footprint), but perform attention over a dynamically constructed smaller KV cache, retaining gain in inference speedups. Our method flexibly alternates between two modes of generation: generation that involves an attention over the full KV cache and generation that computes an attention over a subset of tokens (see Figure 1). We choose this subset of tokens by taking top K attended tokens from the most recent generation step involving attention over the full KV cache (thus the term recycling attention). In this work, we have a fixed strategy for alternation: full attention every $S$ steps and recycled attention for the next $S-1$ steps. Our design choices is supported by the analysis that neighboring tokens during generation place high attention mass over a similar subset of past tokens. Our work (no KV eviction, dynamically constructed smaller KV) establishes a middle ground between full attention (no KV eviction, high latency, high performance) and sparse attention (KV eviction, reduced latency, low performance).  
+
+![](images/320388b8e215f442ef25adb69a6eed3f9d8972abd44657e3bdee2b7d541479a9.jpg)  
+Figure 1: Illustration of our Recycled Attention method (right) compared to baselines (left). Our approach alternates between full attention steps (i.e. over all past tokens) and recycled attention steps (i.e. over a reduced KV cache of key tokens) during generation. By restricting the full attention computation to once in every S steps, Recycled Attention is able to achieve comparable speedups to baseline models with smaller KV without degrading performance on long-context benchmarks.  
+
+We evaluate our approach in language modeling task and RULER (Hsieh et al., 2024) benchmark, a suite of tasks designed to evaluate long-context models, as well as datasets from LongBench(Bai et al., 2023). Applying our inference method to two off-the-shelf LLMs (Meta, 2024; Yang et al., 2024a) achieves comparable speedup to prior work with limited KV cache while improving the performance on long-context benchmark by $2\mathbf{x}$ . We further experiment to continued pre-training the model with recycled attention, bringing further gains. To summarize, our contributions are  
+
+• We propose recycled attention, an inference-time method to accelerate generation with long input.   
+• We comprehensively evaluate our methods to two long-context models and a suite of long-context tasks, including downstream tasks and language modelling tasks. We find that our method achieves up to 2x wall clock time speedup while preserving performance, especially on downstream tasks which require access to information throughout the input.   
+• We investigate further improvements: continued pre-training LLM with recycled attention and deciding when to perform full attention based on query similarity.  
+
+
+
+\section{2 RECYCLED ATTENTION FOR LONG-CONTEXT LLMS  }
+
+
+2.1 PROBLEM SETTING AND NOTATION  
+
+Let $M$ be a language model trained to estimate the conditional probability of all output sequences given an input $x$ . At inference time, $M$ generates an output $\hat{y}\sim M(x)$ in two steps: (1) Pre-filling stage: $M$ ingests the input $x\ =\ x_{1},\cdot\cdot\cdot x_{L}$ and stores the KV cache for all $L$ tokens across all layers of the transformer model, and (2) Generation stage: generate one token $y_{i}$ at a time from the conditional distribution $P_{M}(y_{i}|x,y_{1}\cdot\cdot\cdot y_{i-1})$ . At each step, the model attends to the KV cache of all previous tokens, and also updates the KV cache to include the current token’s key-value pairs.  
+
+Our goal is to reduce the inference latency during this second stage of the generation process. There are two main factors that contribute to this increased latency; first, the attention computation increases quadratically with input length $L$ . Second, a large $L$ necessitates maintaining a large KV cache of past tokens, and $40\%$ of the inference latency can be attributed to the data movement of this large KV cache from the GPU HBM (Adnan et al., 2024).  
+
+Prior approaches (Xiao et al., 2023; Zhang et al., 2024; Adnan et al., 2024) achieve inference time speed-ups by limiting the size of the KV cache to a fixed size $K$ . StreamingLLM (Xiao et al., 2023) constructs this fixed size KV cache by retaining only the initial and recent tokens (illustrated in Figure 1(b)) while $\mathrm{H_{2}O}$ (Zhang et al., 2024) retain a mix of local tokens and key past tokens dynamically identified during generation (see Figure 1(c)). For both approaches, once tokens are evicted from the KV cache, they cannot be recovered in subsequent generation steps. This can be particularly catastrophic in long-context scenarios where key tokens are challenging to identify in advance, e.g. cases where instructions inquiring about the past tokens are located towards the end of the input. Consequently, methods that evict tokens from the KV cache often report poor performance on benchmarks like RULER (Hsieh et al., 2024) that are designed to test reasoning and information synthesis capabilities over long-contexts.  
+
+Instead of permanently evicting tokens for all future steps, we ask: can we distinguish between important and unimportant tokens for the attention computation for the next S time steps? Our key hypothesis is that consecutive tokens in a sequence likely place the majority of the attention weights over a similar subset of tokens in the context, and this can be leveraged to increased inference efficiency. We test this hypothesis for the LLaMA-3.1-8B model in the subsection below.  
+
+
+
+\section{2.2 ATTENTION MASS OVERLAP BETWEEN NEIGHBORING TOKENS  }
+
+
+Setting: We randomly sample five examples from the Arxiv split of the RedPajama dataset (Together, 2023) and compute the attention weights over past tokens for all layers and all time steps. Next, for time step $t=8K$ , we identify the $\mathrm{{topK}(=\Omega1024)}$ past tokens based on attention weights independently for each layer. Then, for subsequent attention computations for tokens at times steps $t\,=\,8K\,+\,i$ , varying $i$ from 1 to 10, we compute the fraction of the attention mass placed on $t\ =\ 8K$ ’s topK tokens. Figure 2 shows this attention recovery rate for different step $i$ from the full attention step, averaged across all layers of the transformer model (shown in blue). The graph clearly demonstrates that the topK tokens at $t=8K$ include the past tokens that contribute, on average, more than $90\%$ of the attention weights at subsequent times $t\,=\,8K\,+\,i$ . Based on this observation, our key idea is to alternate between full attention over the entire KV cache of past tokens every $S$ steps, and a more timeefficient attention over only K tokens for the next $S-1$ steps, where these K tokens are selected to be the highest  
+
+![](images/4a626ad654d8d417e409b951385a0ac7dc852cbdb9e6fa4e3a6ad67d363581be.jpg)  
+Time step I from full attention step  
+
+Figure 2: Fraction of the total attention mass recovered at time $t\;=\;T+i$ by the topK past tokens in the KV cache, where these topK tokens are selected based on attention scores at $t\ =\ T$ . Compared to StreamingLLM, topK tokens recover a larger fraction of the total attention mass.  
+
+weighted tokens during the previous full attention step. We call this strategy Recycled Attention, as we recycle the topK tokens from a previous time step in lieu of full attention.  
+
+Note that the graph in Figure 2 also reports the fraction of the full attention weight placed on tokens corresponding to StreamingLLM’s cache of similar size K (shown in orange), comprising of the initial “sink” tokens and the local tokens (see Figure 1b for KV construction strategy). Compared to our proposed strategy, StreamingLLM reports a much lower attention mass recovery rate $(\sim0.65$ compared to 0.9 for our approach) and is consequently worse at approximating full attention.  
+
+
+
+\section{2.3 METHODOLOGY AND IMPLEMENTATION  }
+
+
+Given a language model $M$ and a sequence of input tokens $x_{1},...,x_{L}$ , we present the pseudocode for generating the output sequence of tokens using Recycled Attention in Figure 3.  
+
+![](images/327f70a7a2c09f1c52170f75d153d5e91221bd6b8a016921bbc4e8d26fc0f5ff.jpg)  
+
+Figure 3: Pseudocode for Recycled Attention. We use $M(C)$ to denote performing a forward pass with the language model while computing attention over the key-value pairs in cache $C$ .  
+
+Our approach maintains two separate KV caches $C_{f}$ and $C_{r}$ $\mathsf{s i z e}\propto K$ ), corresponding to the full and recycle attention steps respectively. Given input $x_{1},...,x_{L}$ , we first prefill $M$ using the vanilla full attention computation and initialize our full KV cache $C_{f}$ with the first $L$ tokens. We also obtain the attention scores $\mathbf{a_{L}}$ for the last token $x_{L}$ at each layer of model $M$ . We initialize our recycle KV cache $C_{r}$ with the key-value pairs of the topK tokens at each layer based on attention scores.  
+
+At each recycle steps, i.e. $S-1$ contiguous steps after every full attention step, we generate the next token $y_{t}\sim M(C_{r})$ using the smaller recycled KV cache $C_{r}$ to compute attention. This leads to a reduction in both the attention computation FLOPs as well as the latency due to movement of KV cache (we only move the smaller KV $C_{r}$ instead of the larger full KV $C_{f}$ , where $|C_{r}|<<|C_{f}|)$ . As $C_{r}$ is updated with the KV cache of the new input tokens (i.e. the generated token from previous step) in the forward pass, we remove the recycled token which received the lowest attention score from $C_{r}$ to maintain a fixed size.  
+
+At each full attention step that occurs every $S$ steps, we first update the $C_{f}$ KV cache with the keyvalue pairs of the $S-1$ tokens from the recycle step. Next, we generate the next token $y_{t}\sim M(C_{f})$ using the full KV cache $C_{f}$ . Finally, we follow the same procedure as above to reset the recycle cache $C_{r}$ with the topK tokens from each layer of the current time step.  
+
+Compatibility with Flash Attention FlashAttention (Dao, 2024) improves standard attention computation on GPU by reducing data movement, significantly improving the memory and speed efficiency. It achieves this by directly producing the output for the attention blocks, without storing the $O(L^{\frac{7}{2}})$ attention matrix. However, we rely on these attention scores to select the topK tokens during the full attention steps and construct our recycled KV cache $C_{r}$ (lines 9-10 of Algorithm 3). To make our method compatible with FlashAttention, we implement an extra step to re-compute the attention score when we perform full attention. As we only perform full attention at stride of $S$ , this does not introduce significant overhead. Additionally, note that other methods that use attention patterns (e.g. $\mathrm{H_{2}O}_{\mathrm{,}}$ ) will also show reduced speed-gain when using in conjunction with FlashAttention.  
+
+Memory and time requirements Table 1 shows a comparison of the memory and attention compute requirements for our Recycle Attention method and baseline approaches. Recycle Attention uses a similarly sized KV cache memory compared to vanilla attention ( $L\!+\!K$ vs $L$ , where $K<<L$ ) but larger than efficient KV strategies like StreamingLLM and $\mathrm{H_{2}O}$ . Our method substantially re  
+
+Table 1: Comparison of the time and memory requirements of Recycle Attention and baseline approaches. Suppose an LLM ingests a sequence of $L$ input tokens and generates $T$ output tokens. We report the memory requirement for storing the input KV cache and time required to generate the $T$ output tokens. Let $K$ denote the size of the reduced KV cache of baseline non-vanilla approaches. We use the same size $K$ for our recycle KV cache in Recycle Attention and use $S$ to denote the stride. Additionally, we report NIAH performance measured for the Llama-3.1-8B model, with $K=4096$ and $L=32$ , 768 for all approaches.  
+
+![](images/dad18ef77a1999dd05cdb7ac467a51d4ed6e22f9e09ca8fe2b86ad85476fed94.jpg)  
+
+duces the time for the attention computation compared to vanilla attention by setting the recycle KV size $K<<L$ . Our strategy also allows us to remain performant on tasks such as NIAH compared to vanilla attention, in contrast with other KV eviction strategies. We provide a detailed comparison of wallclock times and performances on various tasks against baslines in Section 3.  
+
+
+
+\section{3 EXPERIMENTAL SETTINGS  }
+
+
+We evaluate our method on two long-context language models Llama-3.1-8b (Meta, 2024) and Qwen-2-7b (Yang et al., 2024a). Llama-3.1 is pre-trained with 8K tokens, followed by a continued pre-training stage to increase the context window to 128K. Qwen-2 is continued pre-trained with up to 32k tokens, and adopted YARN (Peng et al., 2024) and Dual Chunk Attention (An et al., 2024) to enable processing of up to $128\mathbf{k}$ tokens. As both models employ Grouped Query Attention (Ainslie et al., 2023), we use a single aggregated attention score for all query heads (max over all query heads) in the same group to identify the top K tokens.1  
+
+
+
+\section{3.1 TASKS  }
+
+
+We evaluate our approach on language modeling and a suite of downstream proxy tasks for longcontext evaluation (Hsieh et al., 2024). For both tasks, report the task performance and inference speed measured by wall clock time.  
+
+Downstream tasks We test our method on RULER (Hsieh et al., 2024), a suite of tasks designed to evaluate long-context models. It includes tasks that require retrieval capabilities (e.g. Needlein-a-Haystack) as well as those that require aggregating information over the long context. We follow Hsieh et al. (2024) and evaluate our methods on 13 tasks from four categories of RULER. We evaluate on context length of 32K and 64K, with 100 examples for each {task, context length $\}$ . We additionally report on two tasks from LongBench in Section A.  
+
+Language Modeling We evaluate language modeling perplexity on the Arxiv and Book split of RedPajama (Together, 2023), and PG19 (Rae et al., 2019). We evaluate on 16k and 100k context size for the two respectively. We report results on 100 sequences for each domain. Following prior work (Yen et al., 2024b), we report the perplexity on the last 256 tokens of each sequence.  
+
+
+
+\section{3.2 BASELINES  }
+
+
+We compare Recycle Attention against the following baselines: (1) Vanilla attention baseline which uses the entire KV cache to generate tokens. (2) StreamingLLM (Xiao et al., 2023) inferences by attending to a KV cache consisting of “sink tokens” and recent tokens, discarding all other tokens. Following previous work, we maintain a cache with 4 sink tokens and $K\mathrm{~-~}4$ recent tokens. (3)  
+
+Table 2: Performance on the RULER benchmark for LLama-3.1-8B and Qwen-2-7B. The results show that Recycled Attention achieves a comparable speedup to prior approaches, while substantially outperforming them based on accuracy across all settings.  
+
+![](images/d4e1e19d4c1f63ac4ffab22f3dbef4d135be133f102de3483140add73debafa1.jpg)  
+
+StreamingLL $\mathbf{,M++}$ : we also implement a modified version of StreamingLLM that is equivalent to our Recycled Attention method in terms of both computation and memory requirements. Similar to our approach, StreamingLL $M{+}{+}$ performs full attention at a stride $S$ , i.e. every $S$ steps, to match the attention operations of Recycle Attention. (4) ${\bf H}_{2}{\bf O}$ (Zhang et al., 2023) maintains a KV cache which contains recent tokens and “heavy hitters”, defined by high cumulative attention scores. We set the heavy hitter size and recent cache size to be $K/2$ . (5) SnapKV (Li et al., 2024) considers the average attention scores of the last few tokens (“observation window”) in the prompt to decide the KV cache to keep. It further applies max pooling over consecutive tokens’ attention score, instead of relying on the token’s attention score, to decide token to keep. We set the observation window size to 32 and kernel size to 7 following Li et al. (2024).2  
+
+
+
+\section{3.3 INFERENCE SETTINGS  }
+
+
+We prefill the model with the input and measure wall clock time for the generation phase for each of the method. We generate 50 tokens for the RULER tasks and 256 tokens for the language modeling task. We perform our experiments on 1 A100 80GB GPU with Flash Attention (Dao, 2024). We report a fixed set of $K$ and $S$ for the tasks, and perform ablation study on varying these two hyperparameters in Section A. We include a variant of Recycled Attention with max pooling with kernel size $=7$ to cluster KV cache, same as SnapKV.  
+
+
+
+\section{4 RESULTS  }
+
+
+RULER For this set of experiments, we set $K=4096$ for all baseline models, where applicable.   
+For Recycled attention and Streaming $^{++}$ , we set stride $S=50$ .  
+
+Aggregate accuracy results and the generation time per example for the RULER benchmark are reported in Table 2. All methods aiming to achieve inference speedup by evicting tokens from the KV cache permanently (e.g. StreamingLLM, $\mathrm{H_{2}O}_{.}$ ) shows substantial degradation. Recycled attention significantly outperforms other non-vanilla approaches by over $\mathbf{2x}$ in terms of aggregate accuracy. However, we note that the performance degrades substantially compared to vanilla attention. In terms of speed-up, our method achieves similar speedup to StreamingLLM/StreamingLLM+, followed by $\mathrm{H_{2}O}$ model. As input context length increases, inference time for vanilla method scales linearly, while the other methods’ inference time remain at the same ballpark with a fixed $K$ .  
+
+Note that $\mathrm{H_{2}O}$ relies on calculating attention scores at each time step to identify the “heavy hitter” tokens which FlashAttention does not store. Thus, the inference speed-up is not as significant in certain setting (with $1/8\,\,\mathrm{KV}$ cache size for 32K input) when used with Flash Attention. For our Recycled Attention approach, we only explicitly re-compute the attention score every $S$ steps, which do not introduce as heavy an overhead.  
+
+Table 3: Per-task performance of Llama-3.1-8B on RULER subtasks. For non-vanilla methods, we set the $K=4096$ .   
+
+![](images/97586610f05182bbaf2a36969dbb395e18a891329a6439375f4845db8edbe5ff.jpg)  
+
+As RULER consists of a diverse range of task, we report per-task fine-grained performance for Llama-3.1 in Table 3. Recycled attention performs the best at tasks that require retrieving a piece of information in the context (including Needle-in-a-haystack (NIAH), Question Answering (QA) and Variable Tracking (VT)). $\mathrm{H_{2}O}$ and StreamingLLM suffers at these tasks as the information falls out of the KV cache. However, recycled attention does not perform well for task that requires aggregating the information in the context, such as frequent word extraction (fwe), lagging behind $\mathrm{H_{2}O}$ and StreamingLLM. Performances for tasks which requires retrieving for multiple pieces of information (multiple keys or multiple queries) are worse compared to the task with (single key, single value) when using the same $K$ . We later show in ablation study in Section A.1 increasing the size of $K$ leads to improvements in such tasks.  
+
+Language Modeling For context size 16K, we fix $K=2048$ and $S=10$ both LLaMA-3.1 and QWEN-2. For context size $100K$ , we report results using $K=2048$ and 32, 768, and $S=256$ .  
+
+Table 4 outlines the perplexity-based performance of the baselines and recycled attention approach. For LLaMA-3.1, recycled attention achieves better perplexity and comparable inference speeds compared to StreamingLLM when the KV cache size is 1/8 of a 16K context. This shows that the model benefits from attending to tokens outside of local context window. We observe that $\mathrm{H_{2}O}$ outperforms our approach by a small margin, but at the cost of a substantially higher inference time per example (10.77 for $\mathrm{H_{2}O}$ vs 6.05 for our method). Overall, our recycled attention approach achieves a better trade-off between inference speeds and task accuracy compared to non-vanilla approaches for both LLaMA-3.1 and QWEN-2 models for the 16K context size setting.  
+
+When we scale up the context length to 100K, we find differing trends between the LLaMA-3.1 and QWEN-2 models. For LLaMA-3.1, we observe that recycled attention reports better perplexity but worse inference speeds compared to non-vanilla baseline methods. However, baseline approaches outperform recycle attention for the QWEN-2 model. We analyze the attention pattern to investigate this in Section A.1.  
+
+
+
+\section{5 CONTINUED PRE-TRAINING WITH RECYCLED ATTENTION  }
+
+
+So far, we use the off-the-shelf LLMs as is, only modifying the inference method. This creates a discrepancy between model training and inference assuming LLM is trained with vanilla full attention setting. In this section, we experiment with continued pre-training the model with recycled  
+
+Table 4: Perplexity results on language modeling task for LLama-3.1-8B and QWEN-2-7B. We report performances for Arxiv (the first number) and Book (the second number) and PG19.  
+
+![](images/9ec1d6749a1924832032521c505fdc065e9bfeb2e03d717fddc55fde8f351804.jpg)  
+
+attention, with the goal of teaching the models to adapt to attending over discontinuous tokens in the recycled cache.  
+
+Data We sample $200\mathbf{k}$ data from the Arxiv split of RedPajama dataset3 and filter out sequences with less than 8192 tokens. We split the data into $80\%$ , $10\%$ and $10\%$ train/dev/test splits, resulting in $120\mathbf{k}$ training data.  
+
+Training We train the model to adapt to recycled attention when predicting a sequence with 8142 with a prefilling length of 8092, $K=2048$ and a stride of 50. Concretely, for the last 50 tokens $t_{i}$ in the sequence, attention is calculated over the 2048 tokens that received the highest attention score according to $t_{8092}$ , as well as $\{t_{8093},\ldots~t_{i}\}$ . For $\left\{t_{0},\,\dots\,t_{8092}\right\}$ , attention is calculated with regular causal mask. We train the model with next token prediction loss for all the tokens in the sequence. We report implementation details in Section A.  
+
+Comparison sytstems We compare fine-tuning with other inference methods (Vanilla, StreamingLLM, StreamingLLM $^{++}$ ). For each method, we report the base performance from the pre-trained checkpoint (Base) and the performance after continued fine-tuning $(+\mathrm{CPT})$ .  
+
+Results We report the results of continued pre-training in Table 5 for both the language modelling and the 14 RULER tasks. We see that continued pre-training does not improve performance with vanilla inference method, likely as the model is highly optimized in this setting and trained with this data. We also observe very little performance gain through continued pre-training in other inference methods (StreamingLLM, StreamingLLM $^{++}$ ). Yet, with Recycled Attention, we see a meaningful gain from continued pre-training in two stride setting (25, 50). Continued pre-training achieves a lower perplexity and higher accuracy with higher stride (50) compared to base model with a smaller stride (25), leading to a better performance-efficiency trade-off.  
+
+
+
+\section{6 NEW SECTION: DYNAMIC STRIDE  }
+
+
+Our experiments in Section 3 employs a fixed schedule for all layers. In this section, we explore a dynamic scheduler to alternate between full and recycling attention steps. Intuitively, if the query vector of a particular layer and head for the current step is similar to the query vector of the most recent full attention step, the attention pattern should be similar. Based on this, for dynamic scheduling, we only perform the full attention step when this similarity falls below a threshold.  
+
+Table 5: Results on continued pre-training LLaMA-3.1. The context length is 8K and we decode non-vanilla methods with $K=2048$ . We report perplexity on the last 50 tokens.   
+
+![](images/2a77009a10a03b7b2770a78ddfca56638d01751d1e76ef6e96842c99776ccca1.jpg)  
+
+Approach At every $S^{t h}$ decode step, we first determine whether we need to perform full attention instead of always performing full attention by default. We calculate the cosine similarity between query vectors of the input token $t$ averaged across all query heads in layer $l$ , with the averaged query vector of the most recent full attention step for that layer. If the similarity is higher than a threshold $s$ , we decode with recycle cache, and otherwise use full attention for layer l. Our approach offers the flexibility of using different schedules for different layers, but uses the same schedule for all heads in the same layer. Since we perform this similarity check every $S$ steps, setting threshold $s=1$ is equivalent to decoding with the fixed stride $S$ . We perform the comparison only every $S$ steps to reduce computational overhead; we call this query comparison (QC) stride.  
+
+Setup We run experiments with Llama-3.1-8B on the Arxiv and Books corpus. As before, we report perplexity and decoding time measured on one A100 with batch size of 1 for the last 256 tokens of each test sequence. We run dynamic scheduler with two different query comparison strides $\{5,10\}$ and a similarity threshold of 0.8. We compare against Recycled Attention with fixed strides 10 and 15. For RULER, we report performance on two tasks which require generating longer outputs (multi-query and multi-value). We run a dynamic scheduler with two different query comparison strides 10 and a similarity threshold of $\lbrace0.8,\,0.9\rbrace$ . We compare against Recycled Attention with fixed strides $\{10,\,15\}$ . For dynamic schedules, we report the effective stride across layers, i.e. the average stride at which full attention is performed.  
+
+Dynamic stride strategy improves perplexity compared to fixed strategy when using similar decoding times. Table 6 reports our results. We observe that using dynamic strides improves the performance-efficiency trade-off across all settings. Compared to fixed stride of 10 (row 2), dynamic stride with query comparison stride of 5 (row 3) achieves lower perplexity with a slightly faster decoding time on both domains. Similarly, employing a dynamic stride with query comparison stride of 10 (last row) achieves better or on-par performance with less decoding time compared to having a fixed stride of 15 (row 4). We observe a similar trend for RULER tasks. This better trade-off can be attributed to the larger effective stride size, i.e. less frequent full attention steps, that result from using dynamic schedules. Overall, our experiment demonstrates that dynamically deciding when to refresh the recycle cache can improve performance when using similar decode times.  
+
+
+
+\section{7 RELATED WORK  }
+
+
+Efficient inference methods There are multiple paths to improve decoding efficiency of longcontext LMs. Prior work (Dao, 2024) achieves significant gain in inference latency by optimizing attention computations on GPUs. A line of work (Xiao et al., 2022) achieves efficiency through quantization of KV caches. We note that these are orthogonal to and can be combined with our approach. Other lines of work introduce changes to model architecture, which involves further training the model: Cai et al. (2024a) adds extra decoding heads to predict multiple subsequent tokens in parallel to further speed-up speculative decoding (Leviathan et al., 2022). Yen et al. (2024a) encodes off-the-shelf long-context model and show that our method reduces inference wall-clock time while better preserving performance compared to prior methods which keep a KV cache of recent tokens. Finally, we show that continued pre-training the model with recycled attention and employing a dynamic stride can further improve the performance-efficiency trade-off.  
+
+Table 6: Results comparing fixed stride and dynamic stride based on query similarity.   
+
+![](images/4269eaa31150bafee6f3df4900b58ddb95a437c28b617800bf3dee92dbb1fa3e.jpg)  
+
+
+

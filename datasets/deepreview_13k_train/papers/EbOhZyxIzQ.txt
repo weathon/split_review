@@ -1,0 +1,384 @@
+\title{Overcoming Knowledge Barriers: Online Imitation Learning from Visual Observation with Pretrained World Models}
+
+\begin{abstract}
+Incorporating the successful paradigm of pretraining and finetuning from Computer Vision and Natural Language Processing into decision-making has become increasingly popular in recent years.
+In this paper, we study Imitation Learning from Observation with pretrained models and find existing approaches such as BCO and AIME face knowledge barriers, specifically the Embodiment Knowledge Barrier (EKB) and the Demonstration Knowledge Barrier (DKB), greatly limiting their performance.
+The EKB arises when pretrained models lack knowledge about unseen observations, leading to errors in action inference. 
+The DKB results from policies trained on limited demonstrations, hindering adaptability to diverse scenarios. 
+We thoroughly analyse the underlying mechanism of these barriers and propose AIME-v2 upon AIME as a solution.
+AIME-v2 uses online interactions with data-driven regulariser to alleviate the EKB and mitigates the DKB by introducing a surrogate reward function to enhance policy training. 
+Experimental results on tasks from the DeepMind Control Suite and Meta-World benchmarks demonstrate the effectiveness of these modifications in improving both sample-efficiency and converged performance. 
+The study contributes valuable insights into resolving knowledge barriers for enhanced decision-making in pretraining-based approaches.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, we are going through a paradigm shift from learning from scratch to pretraining and finetuning in \gls{cv} \citep{resnet, clip, mae} and \gls{nlp} \citep{bert, gpt2, instructGPT, llama, llama2} fields due to the increasing availability of foundation models \citep{foundationmodel} and ever growing datasets.
+However, how to adapt this new paradigm into decision making is still unclear, i.e. what type of models we need to pretrain and how these models can be adapted to solve downstream tasks.
+Recent works \citep{aime, ditto, plan2explore, master_urlb, tdmpc2} showcase that one can pretrain a shared latent space world model, enabling successful and efficient transfer to new tasks with either reinforcement learning \citep{plan2explore, master_urlb, tdmpc2} or \gls{ilfo} \citep{aime, ditto}.
+Arguably, \gls{ilfo} \citep{bco, gailfo, vpt, aime, ditto, patchail}, especially from videos \citep{vpt, aime, patchail, ditto}, is a more promising approach in this new paradigm since it does not require a handcrafted reward function which is hard to define for many real-world tasks.
+
+However for \gls{ilfo} with pretrained models, we identify two barriers, which limit the effectiveness of employing pretrained models, the \gls{ekb} and the \gls{dkb}.
+The \gls{ekb} describes the shortcomings of a pretrained model when confronted with novel observations and actions beyond its training experience.
+The \gls{dkb} describes the known problem of generalisation from a limited number of expert demonstrations in imitation learning \citep{gail}.
+We find current approaches like BCO \citep{bco} and AIME \citep{aime} typically suffer from these two knowledge barriers. 
+First, these algorithms depend on the pretrained model to successfully infer missing actions from observation sequences.
+Thus, when the model has not seen a specific observation before, it may not contain sufficient knowledge about the embodiment to infer the correct action.
+Second, policy optimisation is only guided by a limited demonstrations, which may not provide sufficient coverage of the space and lead to a brittle policy working well in some scenarios but not others.
+
+\begin{figure}[t]
+    \vskip 0.2in
+    \begin{center}
+        \centerline{\includegraphics[width=\columnwidth]{figures/Aime-v2.jpg}}
+        \caption{Main idea of this paper. On the left, we extend the plots from Figure 4 in \citet{aime} by adding the MBBC variant and draw the BCO(0) and AIME separately. The purple region between the oracle version and the expert is the \gls{dkb} while the orange region between the algorithm and its oracle version represents the \gls{ekb}. On the right, we present the solutions proposed in this paper to solve the two barriers. The blue parts represent the original version of the algorithms that suffer from the knowledge barriers. Orange parts demonstrate the solution for \gls{ekb}, where the agent is allowed to interact with the environment and use $D_{\mathrm{online}}$ together with $D_{\mathrm{body}}$ to update the world model. Purple parts show the solution for \gls{dkb}, where a VIPER model is pretrained and used to label the online dataset and then used as a RL signal for policy learning.}
+        \label{fig:main}
+    \end{center}
+    \vskip -0.2in
+\end{figure}
+
+To better showcase the two barriers, in \cref{fig:main} we extended Figure 4 from \citet{aime} by adding a model-based BC (MBBC) variant where the policy is learned by running behaviour cloning on the learned latent space of the world model. 
+BCO(0) \citep{bco} and AIME both pretrain a model from a large embodiment dataset and use that to infer the actions for the observation-only demonstrations. 
+The oracle versions remove the need to infer the missing actions, thus removing the \gls{ekb}. 
+As we can see from the figure, the two algorithms are always upper-bounded by the corresponding oracle version, and the difference between them represents the \gls{ekb}. 
+On the other hand, even if given the true actions of the expert, imitation performance may still be impacted by a limited number of demonstrations providing insufficient coverage of the state space. 
+Thus, the difference between the oracle version and the expert performance represents the \gls{dkb}. 
+
+In this paper, we study how to resolve these barriers to improve the performance of \gls{ilfo} approaches, in particular of AIME proposed by \citet{aime}.
+For the \gls{ekb}, we extend the setting from offline to online by allowing the agent to further interact with the environment to gather more data to train the world model. 
+While for the \gls{dkb}, we introduce a surrogate reward function to allow the policy to essentially train on more data.
+We demonstrate that the proposed modifications significantly improve the performance on $9$ tasks in \gls{dmc} \citep{dmc} and $6$ tasks in Meta-World \citep{metaworld}.
+
+
+
+\section{Preliminary}
+
+
+We mostly follow the problem setup as described in \citet{aime}.
+We consider a POMDP problem defined by the tuple $\{S, A, T, R, O, \Omega\}$, where $S$ is the state space, $A$ is the action space, $T: S \times A \rightarrow S$ is the dynamic function, $R: S \rightarrow \mathbb{R}$ is the reward function, $O$ is the observation space, which is image in this paper, and $\Omega: S \rightarrow O$ is the emission function. 
+The goal is to find a policy $\pi: S \rightarrow A$ which maximises the accumulated reward, i.e.\ $\sum_{t} r_t$. 
+
+We presume the existence of three datasets of the same embodiment available to our agent.
+The \emph{embodiment dataset} $D_{\mathrm{body}}$ contains trajectories $\{o_0, a_0, o_1, a_1 \dots\}$ that represent past experiences of interacting with the environment. 
+This dataset provides information about the embodiment for the algorithm to learn a world model.
+In addition, we also allow the agent to interact with the environment to collect new data in a \emph{replay buffer} $D_{\mathrm{online}}$.
+Note that, although the simulator will give us the reward information, the agent is not allowed to use them, and we only use the reward for evaluation purpose. 
+The \emph{demonstration dataset} $D_{\mathrm{demo}}$ contains a few expert trajectories $\{o_0, o_1, o_2 \dots\}$ of the embodiment solving a certain task defined by $R_{\mathrm{demo}}$. 
+The crucial difference between this dataset and the other two datasets is that the actions are not provided anymore since they are not observable from a third-person perspective. 
+The goal of our agent is to learn a policy $\pi$ from $D_{\mathrm{demo}}$ which can solve the task defined by $R_{\mathrm{demo}}$ as well as the expert who generated $D_{\mathrm{demo}}$. 
+
+\subsection{World Models}
+A World Model \citep{worldmodel} is a generative model which models a probability distribution over sequences of observations, i.e. $p(o_{1:T})$.
+The model can be either unconditioned or conditioned on other factors, such as previous observations or actions. 
+When the actions taken are known, they can be considered as the condition, i.e. \ $p(o_{1:T} | a_{0:T-1})$, and the model is called embodied \citep{aime}.
+
+In this paper, we consider variational latent world models where the observation is governed by a Markovian hidden state. 
+In the literature, this type of model is also referred to as a \gls{ssm} \citep{dvbf, planet, dreamerv1, slds, latentmatters}. 
+Such a variational latent world model involves four components, namely
+\begin{align*}
+   \text{encoder} \;   &  z_t = f_\phi(o_t), &\text{posterior} \; &  s_t \sim q_\phi(s_t | s_{t-1}, a_{t-1}, z_t), \\
+   \text{decoder} \;   &  o_t \sim p_\theta(o_t | s_t),  &\text{prior} \;     &  s_t \sim p_\theta(s_t | s_{t-1}, a_{t-1}).
+\end{align*}
+$f_\phi(o_t)$ is the encoder to extract the features from the observation; $q_\phi(s_t | s_{t-1}, a_{t-1}, z_t)$ and $p_\theta(s_t | s_{t-1}, a_{t-1})$ are the posterior and the prior of the latent state variable; while $p_\theta(o_t | s_t)$ is the decoder that decodes the observation distribution from the state. 
+$\phi$ and $\theta$ represent the parameters of the inference model and the generative model respectively.
+
+Typically, the model is trained by maximising the \gls{elbo} which is a lower bound of the log-likelihood, or evidence, of the observation sequence, i.e.\ $\log p_\theta(o_{1:T} | a_{0:T-1})$. 
+Given a sequence of observations, actions, and states, the objective function can be computed as
+\begin{align}
+    \text{ELBO} &= \sum_{t=1}^T J_t^{\mathrm{rec}} - J_t^{\mathrm{KL}} = \sum_{t=1}^T \log p_\theta(o_t | s_t) - D_{\text{KL}}[q_\phi || p_\theta]. \label{eq:objective}
+\end{align}
+The objective function is composed of two terms: the first term $J^{\mathrm{rec}}$ is the likelihood of the observation under the inferred state, which is usually called the reconstruction loss; while the second term $J^{\mathrm{KL}}$ is the KL divergence between the posterior and the prior distributions of the latent state. 
+To compute the objective function, we use the re-parameterisation trick \citep{vae, vae_deepmind} to autoregressively sample the inferred states from the observation and action sequence.
+
+In summary, a world model is trained by solving the optimisation problem as
+\begin{align}
+    \phi^*, \theta^* = \mathop{\arg\!\max}_{\phi,\theta} \mathbb{E}_{\{o,a\} \sim D_{\mathrm{body}}, s \sim q_\phi}[\text{ELBO}]. \label{eq:optimization_model}
+\end{align}
+
+\subsection{AIME}
+AIME is a recently proposed algorithm that uses a pretrained world model to solve \gls{ilfo} in an offline setting.
+Specifically, it uses the pretrained world model as an implicit inference model by solving for the best action sequence that makes the demonstration most likely under the trained world model.
+The imitation can be done jointly with the action inference using amortised inference and the re-parameterisation trick by solving the following optimisation problem
+\begin{align}
+    \psi^* = \mathop{\arg\!\max}_{\psi} \mathbb{E}_{o \sim D_{\mathrm{demo}}, s \sim q_{\phi^*, \theta^*}, a \sim \pi_\psi}[\text{ELBO}], \label{eq:optimization_aime}
+\end{align}
+where $\psi$ is the parameter for policy $\pi_\psi(a_t | s_t)$.
+The resulting objective is very similar to \cref{eq:optimization_model}, with a subtle difference of the sampling path.
+That is in the new objective, only the observations are sampled from the dataset and both states and actions are sampled iteratively from the learned model and the policy, respectively.
+
+
+
+\section{Methodology}
+
+In this section we will make thorough analysis separately on the \gls{ekb} and \gls{dkb} especially upon the AIME algorithm as the case study. 
+Based on the analysis we introduce the solution for each knowledge barriers and combine them as AIME-v2.
+ 
+
+\subsection{Resolving the \gls{ekb}}
+\label{sec:ekb}
+The most natural way to solve the \gls{ekb} is to allow the agent to further interact with the environment.
+By allowing the agent to interact with the environment, the new experiences can minimise the error in the pretrained model in proximity of the policy $\pi_\psi$ and gain more embodiment knowledge relevant for the task at hand.
+\citet{bco} proposed a modified version of BCO(0) called BCO($\alpha$) which introduced such an interaction phase.
+However, from their and our empirical results, it did not resolve the \gls{ekb} since there remains a gap between BCO($\alpha$) and the BC oracle when the environment is complex. In fact, as we will show in the following, the basic idea of adding online interactions is not straightforward to successfully implement in practice.
+
+As shown in recent works in Offline RL, continuing training an actor-critic from the offline phase in the online phase requires certain measures to combat the shift of objective \citep{off2on_rl,ball2023efficient,cql-ql}.
+A similar story also applies when extending AIME from purely offline to online. 
+The most dominant problem we found is overfitting to the newly collected dataset.
+
+As the training progresses iteratively between data collection, model training and policy training, in the early phase of training, there are only a few new trajectories available for training the model.
+Because the world model is highly expressive, it may overly favor similar trajectories in the new data, leading to a high \gls{elbo}. 
+Normally, this may not be a big problem since, eventually, more and more data will be collected to combat this overfitting.
+But since AIME also depends on the \gls{elbo} to train the policy, it quickly causes the policy training to diverge.
+
+In order to address the overfitting issue, we need a regulariser for model learning.
+Instead of designing ad-hoc methods to regularise the model in the parameter space, we adopt a data-driven approach.
+From model's perspective, the overfitting is caused by a sudden shift of the training data from a large and diverse pretraining dataset to a small and narrow replay buffer.
+So one way to make the shift not as sudden is to append the pretraining dataset to the replay buffer, so that the distribution of the training data will change smoothly.
+However, this causes data efficiency problems since the replay buffer is relatively small compared to the pretraining dataset so that uniformly sampling from them together limits utilisation rate of the new data.
+Instead, we consider sampling separately from both datasets. 
+Concretely, we modify the objective in \cref{eq:optimization_model} to
+\begin{align}
+    \phi^*, \theta^* = \mathop{\arg\!\max}_{\phi,\theta} \: &\alpha \mathbb{E}_{\{o,a\} \sim D_{\mathrm{body}}, s \sim q_\phi}[\text{ELBO}] + (1-\alpha) \mathbb{E}_{\{o,a\} \sim D_{\mathrm{online}}, s \sim q_\phi}[\text{ELBO}]. \label{eq:new_model_objective}
+\end{align}
+The amount of data we sample from the pretraining dataset is controlled by a hyper-parameter $\alpha$, which represents how much regularisation we put upon the model.
+In this paper, we mainly consider setting $\alpha=0.5$, so that we sample the data evenly from both datasets.
+We justify our choice in the ablation section with \cref{fig:replay_ratio_ablation}.
+
+This finding contradicts \citet{master_urlb} and \citet{tdmpc2}, where the pretrained world models do not need such a data-driven regulariser. 
+We conjecture that unlike AIME they mainly use their world models purely as generative models to predict states and rewards given action sequences, which is only indirectly influenced by overfitting the \gls{elbo}.
+
+\subsection{Resolving the \gls{dkb}}
+\label{sec:dkb}
+Based on the discussion from the previous sections, the straightforward way of solving the \gls{dkb} is also to increase the number of demonstrations available to the agent.
+However, expert demonstrations are generally considered to be difficult and expensive to collect.
+Thus, increasing the size of the demonstration dataset is not always feasible in real-world applications.
+
+In order to propose a more practical solution, we need to look deeper into what is the real cause of the \gls{dkb}.
+The policy learning part of the AIME algorithm is essentially behaviour cloning, and it is only conducted on the demonstration dataset.
+So for the states covered in the demonstration dataset, the policy is given clear guidance about what to do, while for other states, the behaviour is undefined. 
+AIME is solely relying on the generalisation abilities of the learned latent state and the trained policy network to extrapolate the correct behaviour.
+In particular for small demonstration datasets, this can be unreliable or even impossible.
+Therefore, if we can enlarge the space of the covered states, we should reduce the \gls{dkb} \citep{dagger}.
+
+\gls{gail} style algorithms \citep{gail, amp, gailfo, patchail} are perfect examples of this solution. 
+Instead of directly learning from the demonstration, they adversarially train a discriminator to assess how how closely each state resembles those in the demonstration dataset.
+When learning the policy, they treat the discriminator's output as a reward and encourage visiting states that are more likely belonging to the demonstrations.
+This modification provides guidance for newly visited states in the replay buffer, allowing the space of supported states to grow over the course of training.
+
+However, this benefit is not clearly separable in \gls{gail} since it is always entangled with the adversarial training of the discriminator.
+A recent work MAHALO \citep{mahalo} shows further evidence of the importance of the size of the covered space.
+The authors studied a similar \gls{ilfo} setup with embodiment and demonstration datasets.  
+They compared two variants: for one they train an \gls{idm} from the embodiment dataset and use it to label the demonstration dataset, while for another they train a reward model from the demonstration dataset by labelling all time steps with a reward of $1$, and then use it to label the embodiment dataset. 
+Finally, they run the same offline RL algorithm on both labelled datasets. 
+The results show the second variant attains a much better performance even though the labelling from the reward model is not as meaningful as the actions from the \gls{idm}.
+
+Based on these insights, we propose to introduce a surrogate reward providing guidance signal for the agent on the replay buffer dataset.
+Due to the instability of adversarial training \citep{gan, wgan, gail} and our focus on the pretraining paradigm, we opt to adopt the VIPER algorithm \citep{viper}.
+Instead of training a discriminator, VIPER trains a video prediction model on the demonstration datasets and treats the likelihood of the video prediction model as the reward for policy learning, i.e.
+\begin{align}
+    r^{\mathrm{VIPER}}_t = \log p_{\nu}(o_t | o_{<t}). \label{eq:viper_rewad}
+\end{align}
+Using this reward, we train the policy with a dreamer-style actor-critic algorithm \cite{dreamerv1} based on imagination in the latent space of the world model \citep{dreamerv1}.
+In order to do this, we first need to modify the reconstruction term in \cref{eq:objective} by adding an extra term for decoding the VIPER reward, i.e. $p_\theta(r^{\mathrm{VIPER}}_t | s_t)$.
+Then, we further train a value estimator $V_\xi(s_t)$ using TD($\lambda$)-return estimates, i.e.
+\begin{align}
+V^\lambda_\xi(s_t) &= (1-\lambda) \sum_{n=1}^{\infty}{\lambda^{n-1} V^{(n)}_\xi(s_t)}\\
+\text{with} \; V^{(n)}_\xi(s_t) &= \sum_{t'=t+1}^{t+n}{\gamma^{t'-t-1}r^{\mathrm{VIPER}}_{t'}} + \gamma^n V_\xi(s_{t+n}). \nonumber
+\end{align}
+Using this estimate, we optimise our value function by minimising the MSE 
+\begin{align}
+\xi^* = \mathop{\arg\!\min}_{\xi} (V_\xi(s_t) - V^\lambda_{\xi'}(s_t))^2. \label{eq:value_objective}
+\end{align}
+As is common practice, we use a target value network with parameters $\xi'$ to stabilise training, whose parameters are updated using Polyak averaging with a learning rate $\tau$ in every iteration.
+
+Using this value estimate, we extend the policy objective of \Cref{eq:optimization_aime} to
+\begin{align}
+    \psi^* = \mathop{\arg\!\max}_{\psi} \mathbb{E}_{o \sim D_{\mathrm{demo}}, s \sim q_{\phi, \theta}, a \sim \pi_\psi}[\text{ELBO}] + \beta \mathbb{E}_{\{o, a\} \sim D_{\mathrm{online}}, s \sim q_\phi, a' \sim \pi_\psi, s' \sim p_\theta} [V_{\xi'}^\lambda(s')],  \label{eq:new_policy_objective}
+\end{align}
+where $\beta$ is a hyper-parameter for balancing the two terms.
+We set $\beta=0.1$ by default based on the difference of default learning rate in AIME and Dreamer.
+
+
+
+\section{Experiments}
+
+We aim to answer the following questions: a) How does the proposed AIME-v2 compare with state-of-the-art methods on common benchmarks? b) How well does the proposed modification resolve the \gls{ekb} and the \gls{dkb}? c) How do different choices of hyper-parameters influence the results? In order to answer these questions, we design our experiments on \gls{dmc} and Meta-World benchmarks. 
+
+\subsection{Datasets}
+For the \gls{dmc} benchmark, we choose 9 tasks across 6 embodiments following \citet{patchail} and use their published dataset as the demonstration datasets.
+Each dataset contains only 10 trajectories to reflect the scarcity of expert demonstrations. 
+For the embodiment dataset, in order not to leak the task information from the pretraining phase, we follow \citet{master_urlb} and run a Plan2Explore \citep{plan2explore} agent for each embodiment with 2M environments steps and use its replay buffer as the embodiment dataset.
+Different to them taking the model directly from the Plan2Explore agent as the pretrained model, we follow \citet{aime} to retrain the model for $200\mathrm{k}$ gradient steps to get a better model. 
+
+For Meta-World benchmark, we use the data and model from \citet{tdmpc2}.
+The embodiment dataset was created from the replay buffer datasets. 
+The open-sourced replay buffer datasets contain $40\mathrm{k}$ trajectories for each of the $50$ tasks with only state information. 
+In order to fit to our image observation setup, we render the images by resetting the environment to the initial state of each trajectory and then executing the action sequence. 
+Following the idea of not leaking too much about the task information, inspired by the common practice in offline RL benchmarks \citep{d4rl}, we use the first $200$ trajectories from each replay buffer and form a dataset with $10\mathrm{k}$ trajectories in total. 
+We call this dataset \textit{MW-mt50}.
+To further study the out-of-distribution transfer ability of the pretrained model, we follow the difficulty classification of the tasks from \citep{mwm} and only use the $39$ easy and medium tasks to generate the datasets and the $11$ tasks hard and very hard tasks as hold-out tasks.
+We uniformly sample $250$ trajectories from te first $10\mathrm{k}$ trajectories from each of the $39$ tasks and form a dataset with $9750$ trajectories in total.
+We refer to this dataset as \textit{MW-mt39}.
+Hence, \textit{MW-mt39} contains some expert behaviour solving the tasks, while \textit{MW-mt50} consists of mostly exploratory behaviour.
+
+As the demonstration datasets, we use the single-task policies open-sourced by TD-MPC2 and collect $50$ trajectories for each tasks. 
+We ensure that every trajectory in the demonstration dataset is successful.
+Since there are $500$ steps in a \gls{dmc} trajectory and only $100$ steps in a Meta-World trajectory, the resulting datasets are roughly the same size.
+
+\begin{figure*}[ht]
+    \vskip 0.2in
+    \begin{center}
+        \centerline{\includegraphics[width=1.0\columnwidth]{figures/dmc-benchmark.pdf}}
+        \caption{Benchmark results and 9 DMC tasks. Return are calculated by running the policy 10 times with the environment and taking the average return. The results are averaged across 3 seeds with the shade region representing 95\% CI.}
+        \label{fig:dmc-benchmark}
+    \end{center}
+    \vskip -0.2in
+\end{figure*}
+
+\subsection{Implementation}
+
+For the world model, we use the RSSM architecture \citep{planet} with the hyper-parameters in \citet{dreamerv1} for \gls{dmc} tasks.
+In addition, we use the KL Balancing trick from \citet{dreamerv2} to make the training more stable.
+For Meta-World, since the visual scene is more complex, we use the M size model from \citet{dreamerv3}, but still with the continuous latent variable to be aligned with other models used in this paper. 
+The policy network is implemented with a two-layer MLP, with $128$ neurons for each hidden layer.
+All the models are trained with Adam optimiser \citep{adam}.
+For the VIPER model, in the original paper, the authors first pretrain a VQ-GAN \citep{vqgan} and then train a GPT-style auto-regressive model in the quantised space for prediction. 
+For simplicity of the implementation, in this paper, we consider training an unconditioned latent world model as in \citet{apv} to model the VIPER reward.
+We use the same RSSM architecture of the model learning for \gls{dmc}, only removing the condition of the actions, and we train the VIPER model for each task separately. 
+Especially during training, we find training such a powerful model from scratch on a small dataset can easily result in over-fitting.
+Thus, we empirically choose to train the model only for $500$ gradient steps for \gls{dmc} models and $1000$ gradient steps for Meta-World models. 
+
+Due to the large scale of the \gls{elbo}, we also apply symlog \citep{dreamerv3} when computing the VIPER reward.
+Another difference with the original VIPER paper is that we do not use intrinsic motivation as the exploration bonus as the authors suggested, since the AIME loss for policy learning already provides task-related guidance for exploration.
+We only apply an entropy regulariser to the policy as is common practice. 
+\subsection{Benchmark Results}
+
+\begin{figure*}[ht]
+    \vskip 0.2in
+    \begin{center}
+        \centerline{\includegraphics[width=1.0\columnwidth]{figures/metaworld-benchmark.pdf}}
+        \caption{Benchmark results and $6$ Meta-World tasks. Trajectories are only counted as success when it success at the last time steps and the success rates are calculated with $10$ policy rollouts. The results are averaged across $3$ seeds with the shade region representing $95$\% CI.}
+        \label{fig:metaworld-benchmark}
+    \end{center}
+    \vskip -0.2in
+\end{figure*}
+
+The benchmark results of \gls{dmc} are shown in \cref{fig:dmc-benchmark}.
+AIME-v2 significantly outperforms the PatchAIL baseline in $7$ out of $9$ tasks in terms of sample efficiency.
+Benefiting from the pretrained world model, AIME-v2 typically can reach expert performance within $200$k environment steps.
+Compared with BCO($\alpha$), updating the model is regularised and is benefitting more from the online interaction to resolve the \gls{ekb}.
+Compared with the original offline AIME, AIME-v2 reliably improves performance, especially in hard tasks such as walker-run and hopper where offline AIME did not manage to make any progress.
+
+However, there are still two tasks for which AIME-v2 does not show much progress, namely cartpole-swingup and quadruped-run.
+For cartpole-swingup, we observe that the policy learns to move the cart out of the scene so that the static image yields a high likelihood from the video prediction model.
+A similar phenomenon was also discussed in the original VIPER paper \citep{viper}.
+For quadruped-run, we conjecture that it is due to visual difficulties of a reconstruction-based model. 
+When the quadruped is initialised on the ground, due to the symmetric structure of the robot, it is impossible to figure out which action corresponds to which leg, and it easily leads the action inference process to diverge.
+The benchmark results of Meta-World are shown in \cref{fig:metaworld-benchmark}.
+We choose 4 tasks, namely disassemble, assembly, hand-insert and push from hard and very hard difficulties, and 2 tasks, namely sweep and hammer from the medium difficulty.
+While PatchAIL does not work on these tasks at all, AIME and AIME-v2 can make progress on them.
+AIME-v2 with either pretrained model outperforms AIME in all the tasks.
+On hard and very hard tasks, AIME with the mt50 model is better than AIME with the mt39 model.
+This is because they contain an unseen novel object by the mt39 model creating a large \gls{ekb}.
+But in the online setting of AIME-v2, the two models are mostly on par.
+Moreover, using the mt50 models is better than using the mt39 models on average, which may imply covering diverse bahaviour is more valuable than knowing the expert directly. 
+
+\subsection{Ablation Results}
+
+\begin{figure}[!h]
+\centering
+    \begin{subfigure}{0.28\columnwidth}
+    \centering
+        \centerline{\includegraphics[width=1.0\columnwidth]{figures/barrier_solutions.pdf}}
+        \caption{Demonstration efficiency.}
+        \label{fig:barriers_solutions}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.42\columnwidth}
+    \centering
+        \centerline{\includegraphics[width=1.0\columnwidth]{figures/replay_ratio_ablation.pdf}}
+        \caption{Ablation of $\alpha$.}
+        \label{fig:replay_ratio_ablation}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.28\columnwidth}
+    \centering
+        \centerline{\includegraphics[width=1.0\columnwidth]{figures/value_gradient_weight_ablation.pdf}}
+        \caption{Ablation of $\beta$.}
+        \label{fig:value_gradient_weight_ablation}
+    \end{subfigure}
+\caption{(a) Performance of AIME-v2, MBBC, AIME with respect to different number of demonstrations. For AIME-v2, we do not show the result for more than $100$ demonstrations since it is already saturated to the expert. (b) Ablation for the choice of the regulariser ratio $\alpha$. The left figure shows the mean return over $10$ trajectories while the right figure shows the MSE between the inferred actions and the true actions. (c) Ablation for the choice of the weight of the value gradient loss $\beta$. All results are averaged across $3$ seeds with the shaded region representing a $95$\% CI.}
+\end{figure}
+
+We conduct our ablation studies on walker-run task from \gls{dmc}.
+
+\textbf{How well does the proposed methods resolve knowledge barriers?}
+In order to show how well AIME-v2 resolves the two knowledge barriers, we conduct a similar experiment as \citet{aime} by providing the agent with different numbers of demonstrations.
+The result is shown in \cref{fig:barriers_solutions}.
+As we discussed before, MBBC as an oracle method that circumvents the \gls{ekb} is a strict upper bound for AIME.
+And AIME-v2 which addresses both the \gls{ekb} and \gls{dkb} achieves much better results and is an upper bound for MBBC.
+From AIME-v2 can achieve near-expert performance with as few as $5$ demonstrations for this challenging task.
+
+\textbf{Influence of the data regulariser ratio $\alpha$.} 
+We set the regulariser ratio $\alpha$ from $[0.0, 0.25, 0.5, 0.75]$ and plot the results in \cref{fig:replay_ratio_ablation}.
+As we can see from the result, as long as we enable the regulariser, i.e. set $\alpha > 0$, we get reliable improvements over the course of training. 
+But if we disable the regulariser by setting $\alpha=0$, the learning only starts once there is enough new data in the replay buffer.
+As we discussed in \cref{sec:ekb}, without the regulariser, in the early stage of the training, the model can easily overfit to the replay buffer, and it explains the early flattening phase of the training.
+As the training progresses, more and more data is available from the replay buffer, and it can establish the regulariser on its own, which explains the dramatic growing phase of the curves.
+
+We also plot the MSE between the inferred actions and the true actions during the training process.
+From that we can see that a higher regulariser ratio offers more stable inference of the actions in the early phase of training.
+
+\textbf{Influence of the value gradient loss weight $\beta$.} 
+We set the weight $\beta$ from $[0.0, 0.01, 0.05, 0.1, 0.5, 1.0]$ and plot the results in \cref{fig:value_gradient_weight_ablation}.
+As the result shows, having a small $\beta$ slows learning progress toward convergence. 
+On the other hand, setting $\beta$ to a much larger value will improve the sample-efficiency without causing instability. 
+For the sample efficiency, since we only have $10$ demonstrations, \gls{dkb} dominates over \gls{ekb} as shown in \cref{fig:barriers_solutions}.
+Thus, having a larger $\beta$ will make the learning much faster. 
+In terms of the stability, as we discussed in \ref{sec:dkb}, AIME loss and the value gradient loss operate on different regions of the environment states.
+This could make their influence on the policy independent of each other.
+
+
+\section{Related Work}
+
+\textbf{Imitation Learning from Observation.}
+\gls{ilfo} \citep{bco, gailfo, ditto, mahalo, vpt, aime, patchail} has become more popular in recent years due to their potential to utilise internet-scale videos for behaviour learning.
+Most of the previous works \citep{bco, gailfo, mahalo} study the problem only with the true state as observation.
+Recent works \citep{ditto, vpt, aime, patchail} have started to shift toward image observations as a more general setting.
+Our work is a continuation of this journey. 
+
+\textbf{Pretrained Models for Decision-Making.}
+Inspired by the tremendous progress made in recent years in \gls{cv} and \gls{nlp} fields with the power of pretrained models, the decision-making community is also trying to follow the trend.
+Most recent works focus on the use of \gls{llm} for decision-making.
+A prompted model is used for producing trajectories and plans \citep{chen_autotamp_2023, huang_inner_2022, saycan, di_palo_towards_2023}, code \citep{vemprala_chatgpt_2023, codeaspolicy, singh_progprompt_2022, chen_nl2tl_2023, huang_voxposer_2023} or for modifying the reward \citep{ma_eureka_2023, mahmoudieh_zero-shot_2022}.
+There are also other people studying the benefit of pretrained visual models for visuomotor tasks \citep{resnet_rl, vc-1, hansen_vfm_rl, unsurprising_vfm_rl} while others try to train large policy networks directly with transformers \citep{transformer} and huge datasets \citep{rt-1, rt-2, gato}.
+However, there is only little attention being put on pretrained world models \citep{aime, master_urlb, plan2explore}, which are natively developed by the model-based decision-making community and perfectly fit into the pretraining and finetuning paradigm. 
+Our work explores this overlooked domain and showcases its potential. 
+
+
+
+\section{Discussion}
+
+In this paper, we identify two knowledge barriers, namely the \gls{ekb} and the \gls{dkb}, limiting the performance of state-of-the-art \gls{ilfo} methods using pretrained models.
+We thoroughly analyse the underlying cause of each barrier and propose practical solutions.
+Specifically, we propose to use online interaction with a data-driven regulariser to solve the \gls{ekb} and surrogate reward labelling to reduce the \gls{dkb}. 
+Combining these solutions, we propose AIME-v2, a method based on the recently proposed AIME and showcase its efficiency compared to state-of-the-art \gls{ilfo} methods.
+We also conducted a series of ablation studies about how each knowledge barrier is addressed by the proposed solution and how their hyper-parameters influence the performance.
+
+However, the proposed solutions still have drawbacks. 
+First, the data-driven regulariser is not practical when the model is pretrained on huge datasets like the foundation models popular in the fields of \gls{cv} and \gls{nlp}.
+Reducing the amount of data needed for the regulariser could greatly improve the usability of the method.
+Second, although having pretrained models is beneficial, having too many pretrained components can be detrimental for model selection. 
+Especially in AIME-v2, the world model and the VIPER model share a very similar interface.
+Designing a shared model that can serve both interfaces could ease the use of the method.
+Last but not least, due to the high demand of computing resources, we only study the pretrained world model on a very small scale.
+It will be an interesting direction to study these model at larger scales.
+
+We hope our work can shed some light on the future development of \gls{ilfo} method and bring more attention to the great potential of pretrained world models.
+
+
+
+
+

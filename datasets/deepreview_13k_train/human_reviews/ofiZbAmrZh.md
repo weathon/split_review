@@ -1,0 +1,165 @@
+# Consistency-based Black-box Uncertainty Quantification for Text-to-SQL by Similarity Aggregation
+
+- Decision: Reject
+- Scores: 3, 5, 5, 3
+
+## Abstract
+When does a large language model (LLM) know what it does not know? Uncertainty quantification (UQ) provides an estimate of the confidence in an LLM's generated output and is therefore increasingly recognized as a crucial component of trusted AI systems. UQ is particularly important for complex generative tasks such as \emph{text-to-SQL}, where an LLM helps users gain insights about data stored in noisy and large databases by translating their natural language queries to structured query language (SQL). \emph{Black-box} UQ methods do not require access to internal model information from the generating LLM, and therefore have numerous real-world advantages, such as robustness to system changes, adaptability to choice of LLM (including those with commercialized APIs), reduced costs, and substantial computational tractability. In this paper, we investigate the effectiveness of black-box UQ techniques for text-to-SQL, where the consistency between a generated output and other sampled generations is used as a proxy for estimating its confidence. We propose a high-level non-verbalized \emph{similarity aggregation} approach that is suitable for complex generative tasks, including specific techniques that train confidence estimation models using small training sets. Through an extensive empirical study over various text-to-SQL datasets and models, we provide recommendations for the choice of sampling technique and similarity metric. The experiments demonstrate that our proposed similarity aggregation techniques result in better calibrated confidence estimates as compared to the closest baselines, but also highlight how there is room for improvement on downstream tasks such as selective generation.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+Uncertainty quantification is important for generative tasks like text-to-SQL. Black-box UQ has many advantages like robustness to system changes. This paper investigate black-box UQ for text-to-SQL, where the consistency between a generated output and other sampled generations is used as a proxy for estimating its confidence. It proposes a high-level non-verbalized  similarity aggregation approach for complex generative tasks.
+
+### Strengths
+None
+
+### Weaknesses
+- The experiments are not solid. The metric (ROUGE) used to evaluate the method could only reflect the syntactic similarity but hard to evaluate semantic-level correlation. There is only 1 semantic-level metric (sentence bert) to evaluate the method. However, 1) even semantic similarity metrics couldn’t reflect “contradiction”, e.g., the similarity is still high but the semantic meanings are contradictory. 2) it seems for sentence bert, SQL is out-of-distribution. The similarity measurement may not be reliable. Therefore, the results obtained from those experiments are possibly meaningless and the conclusion of this paper is ungrounded.
+- The motivation behind this work is unclear, and its scope appears limited. It focuses narrowly on a single task (text-to-SQL) and uncertainty quantification specific to that task. Broader and more robust results would be valuable to support practical applications of this work.
+- In line 46-75, there are a few instances of unclear phrasing and awkward language use that may hinder comprehension.
+- It’s unclear that how this method tackles “over confidence” from LLMs. It’s possible that LLM has a false belief and it doesn’t matter with how the LLM evaluate itself (line 94: ”when asking LLMs for probabilities). It’s strange that the paper mentions so. What if the model generates very similar text samples but all of them are wrong? Could the proposed similarity based method handle this case?
+
+### Questions
+None
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+This paper investigates the effectiveness of a black-box Uncertainty Quantification (UQ) technique for text-to-SQL, where the confidence of the generated SQL statement is computed by the set of generated SQL statements.  More specifically, given a question, the proposed method first generates three kinds of SQL statements based on different sampling mechanisms facilitating temperatures in LLMs.   A confusion matrix of pair-wise similarity of the generated SQL statements is computed by different metrics.  Three kinds of aggregation methods are applied to compute the confidence of the generated SQL statement.  Empirical evaluations on three text-to-SQL datasets and various settings have been conducted to verify the advantage of the UQ technique.
+
+### Strengths
+1. The paper identifies an interesting research direction to evaluate the confidence score of SQL generated by the model in a black-box manner.
+2. The paper proposes a similarity aggregation framework for estimating confidence, in which a fusion of various methods are attempted.
+
+### Weaknesses
+1. About the technical contribution of the work.  The learning procedure mainly lies in the confusion matrix to aggregation results.  This seems common in the field.  Though it can provide a confidence score, it seems not tackled to improve the performance of text-to-SQL. 
+2. The correctness of Fig. 1 is doubtful. The caption states there are 30 generations, but the figure shows 35 generations. To address this discrepancy, it is recommended that the authors clarify the difference between the number of generations mentioned in the caption and those presented in the figure. Additionally, the authors should explicitly state whether overlapping generations are allowed and explain how such overlaps are handled in the figure. 
+3. The experimental comparison seems not sufficient.  For example, 
+3.1) The paper does not compare the experiments with sufficiently strong baselines. The current comparison on the non-black-box baseline includes only a few simple cases. It is recommended that the authors incorporate more robust baselines, such as Semantic Entropy (SE)[1] as a non-black-box baseline, to strengthen the experimental evaluation.
+[1] Semantic uncertainty: Linguistic invariances for uncertainty estimation in natural language generation.  https://arxiv.org/abs/2302.09664
+3.2) The paper does not test the effect of the number of generations.  The paper should provide more comparison results to show the potential impact factors of the proposed method.
+
+### Questions
+1. When sampling, does repeated generation occur? If so, how do the authors handle these repeated generations, and are they retained? It would be helpful for the authors to clarify this and provide more comparison results in the paper, as repeated generations may impact the weight of the confusion matrix and potentially affect the overall results.
+2. See the questions in Weakness.
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3
+
+### Summary
+The paper explores LLMs can understand their own limitations through uncertainty quantification (UQ) on text-to-SQL task, where LLMs convert natural language queries into structured queries for database insights. This paper propose a new similarity aggregation approach for estimating confidence in complex tasks, along with techniques to train confidence models using limited data. Extensive experiments across various text-to-SQL datasets reveal that their proposed methods improve confidence estimation compared to existing baselines, although there is still potential for enhancing performance in tasks like selective generation.
+
+### Strengths
+* Focus on the Uncertainty quantification  in  text-to-SQL task, which is important aspect in practice.
+* This paper propose a consistency-based method to examines the effectiveness of Black-box UQ methods by using the consistency of generated outputs as a confidence measure.
+
+### Weaknesses
+ * In line 77, the author points out: "The implicit underlying assumption behind consistency-based approaches is that when a generated response is more different from others, it is more likely to be incorrect, implying that responses that are consistently similar are more likely to be correct." Is there any evidence for this? Why does a response being more different from others indicate incorrectness rather than uncertainty? The assumption that dissimilarity directly correlates with incorrectness needs stronger justification, as high dissimilarity could also indicate a less confident but potentially correct response, especially in complex queries where multiple valid SQL formulations might exist.
+* In Figure 1, parts (a) and (c) show that the correct response is closer to others, but this is not very clear in part (b). Providing examples to illustrate the data format would be helpful. Specifically, it would be beneficial to see the actual SQL queries and their corresponding similarity scores to better understand the claim that consistent responses are more likely to be correct. The lack of concrete examples makes it difficult to assess the validity of the consistency assumption.
+* The ACE metric is calculated by: \text{acc}(b, k) - c(b, k)acc(b,k)−c(b,k). A lower ACE means either low accuracy or high confidence error. It would be beneficial to provide more details about this calculation. For instance, what does 'b' represent, and how are the bins determined? Also, how does this metric differentiate between low accuracy and high confidence error, and what are the implications of each scenario for the model's performance?
+* The proposed similarity method can evaluate if the model knows these inputs, but how does it perform with data the model hasn't seen? The paper should clarify how the similarity-based confidence estimation generalizes to unseen data, especially when the model encounters queries that are significantly different from those it was trained on. It is crucial to understand if the method can reliably estimate confidence for novel inputs, or if its performance degrades significantly.
+* The results in Table 1 and Table 2 do not clearly show the strengths of the proposed method. It would be better to highlight the significance of each value in bold. The current presentation makes it difficult to quickly assess the relative performance of the proposed method compared to the baselines. A more visually distinct presentation of the results would improve the clarity of the paper.
+
+### Questions
+* AUROC  and AUARC could shown the accuracy  of the model on  text-to-SQL task?
+* The hyper-parameter m in line 233 and B in line 349  is same?
+* Some setting like "bayes-beta" is not clear it's meaning.
+
+### Soundness
+3
+
+### Presentation
+2
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3
+
+### Summary
+This paper explores multiple approaches to consistency-based black-box (no access to the internal state of the model) uncertainty quantification (UQ) for text-to-SQL and proposes a new high-level non-verbalized similarity aggregation method. The experiments show that the proposed method outperforms other baselines in model calibration for both text-to-SQL and question answering datasets.
+
+### Strengths
+- The motivation of the paper is convincing.
+- The proposed method shows consistent improvements in the designed setup.
+
+### Weaknesses
+ - The scope of this work seems a bit small, which limits the impact of the paper. I definitely agree on the importance of the text-to-SQL task and that calibration is important. However, there are many black-box methods (as mentioned in the related works), and focusing only on the particular set of consistency-based methods limits the impact.
+- Although the proposed method performs well in the designed setup, it would be much more impactful to include comparisons with other UQ methods, such as conformal prediction, which are closely related to consistency-based black-box methods [1, 2].
+
+
+### Questions
+- Open-source models allow users to access their internal states, while API-based LLMs do not. However, exploring open-source models for black-box approaches seems a bit self-contradictory.
+- Why is a verbalized method introduced as white-box? (Line 186). Some verbalization methods do not require access to logits (e.g., qualifying phrases).
+- In terms of paper organization, if the proposed method works well for question-answering datasets (also, are they all long-sequence generation tasks?), I'm curious why the authors titled the paper UQ for text-to-SQL. Is there a specific reason behind this decision?
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+2

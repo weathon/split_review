@@ -1,0 +1,558 @@
+\title{Bidirectional Decoding: Improving Action Chunking via Closed-Loop Resampling}
+
+\begin{abstract}
+Predicting and executing a sequence of actions without intermediate replanning, known as action chunking, is increasingly used in robot learning from human demonstrations. Yet, its reported effects on the learned policy are inconsistent: some studies find it crucial for achieving strong results, while others observe decreased performance. In this paper, we first dissect how action chunking impacts the divergence between a learner and a demonstrator. We find that action chunking allows the learner to better capture the temporal dependencies in demonstrations but at the cost of reduced reactivity in stochastic environments. 
+To address this tradeoff, we propose {\emph{\methodname}} (\methodacro), a test-time inference algorithm that bridges action chunking with closed-loop operations.
+{\methodacro} samples multiple predictions at each time step and searches for the optimal one based on two criteria: (i) backward coherence, which favors samples that align with previous decisions; (ii) forward contrast, which seeks samples of high likelihood for future plans.
+By coupling decisions within and across action chunks, {\methodacro} promotes consistency over time while maintaining reactivity to unexpected changes. 
+Experimental results show that {\methodacro} boosts the performance of two state-of-the-art generative policies across seven simulation benchmarks and two real-world tasks.
+Code and videos are available at \url{https://bid-robot.io}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+The increasing availability of human demonstrations has spurred renewed interest in behavioral cloning~\citep{atkesonRobotLearningDemonstration1997,argallSurveyRobotLearning2009a}. In particular, recent studies have highlighted the potential of learning from large-scale demonstrations to acquire a variety of complex skills~\citep{zhaoLearningFineGrainedBimanual2023,chiDiffusionPolicyVisuomotor2023,fuMobileALOHALearning2024,leeBehaviorGenerationLatent2024,khazatskyDROIDLargeScaleInTheWild2024}. Yet, existing methods still struggle with two common properties of human demonstrations: (i) strong temporal dependencies across multiple steps, such as idle pauses~\citep{chiDiffusionPolicyVisuomotor2023} and latent strategies~\citep{xieLearningLatentRepresentations2021,maHierarchicalDiffusionPolicy2024}, (ii) large style variability across different demonstrations, such as differences in proficiency~\citep{belkhale2024data} and preference~\citep{kuefler2017burn}. Often, both properties are prevalent yet unlabeled in collected data, posing significant challenges to the traditional behavioral cloning that maps an input state to an action.
+
+In response to these challenges, recent works have pursued a generative approach equipped with action chunking: (i) predicting a sequence of actions over multiple time steps and executing all or part of the sequence~\citep{zhaoLearningFineGrainedBimanual2023,chiDiffusionPolicyVisuomotor2023}; (ii) modeling the distribution of action chunks and sampling from the learned model in an independent~\citep{chiDiffusionPolicyVisuomotor2023,prasadConsistencyPolicyAccelerated2024} or weakly dependent~\citep{jannerPlanningDiffusionFlexible2022,zhaoLearningFineGrainedBimanual2023} manner for sequential decisions. 
+Some studies find this approach crucial for learning a performant policy in laboratory scenarios~\citep{zhaoLearningFineGrainedBimanual2023,chiDiffusionPolicyVisuomotor2023}, 
+while other recent work reports opposite outcomes under practical conditions~\citep{leeBehaviorGenerationLatent2024}. The reasons behind these conflicting observations remain unclear.
+
+In this paper, we first dissect the influence of action chunking by examining the divergence between learned policies and human demonstrations. 
+We find that, when a policy is built with limited context length -- little or no history is used as input for robustness or efficiency~\citep{mandlekarIRISImplicitReinforcement2020,bharadhwajRoboAgentGeneralizationEfficiency2023,brohanRT2VisionLanguageActionModels2023,brohanRT1RoboticsTransformer2023,shiWaypointBasedImitationLearning2023,collaborationOpenXEmbodimentRobotic2023a} -- increasing the length of action chunks allows for implicit conditioning on more past actions, thereby improving its ability to capture the temporal dependencies inherent in demonstrations.
+However, this advantage comes at the cost of reduced access to recent state observations, which can be crucial for reacting to unexpected changes in stochastic environments, such as action noise or object motions.
+This tradeoff raises a crucial question: How can we preserve the strengths of action chunking in long-term consistency without suffering from its limitations in short-term reactivity?
+
+To this end, we introduce {\em \methodname} (\methodacro), an inference algorithm that bridges action chunking with closed-loop operations.
+Our main idea is to sample multiple predictions at each time step and search for the most desirable one.
+Specifically, {\methodacro} operates on two decoding criteria: (i) backward coherence, which favors samples that are close to the sequence selected at the previous step; (ii) forward contrast, which favors samples that are close to the output of a stronger policy and distant from those of a weaker one.
+As illustrated in~\cref{fig:pull}, {\methodacro} updates the chunk of future actions based on the previous strategy, promoting temporal consistency over extended periods while remaining reactive to unexpected changes.
+
+The main contributions of this paper are twofold: (i) a thorough analysis of action chunking (\cref{sec:analysis}), and (ii) a decoding algorithm to improve it (\cref{sec:method}).
+Empirically, we validate our theoretical analysis through a one-dimensional diagnostic simulation and evaluate our decoding method on two state-of-the-art generative policies across seven simulations and two real-world tasks (\cref{sec:experiment}). 
+Our experiment results show that the proposed {\methodacro} boosts the performance of recent policies by more than $32\%$ in relative performance.
+{\methodacro} is model-agnostic, computationally efficient, and easy to implement, serving as a plug-and-play component to enhance generative behavior cloning at test time.
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{illustrations/trolleyteaser.pdf}
+\caption{
+Illustration of different inference methods applied to a robot policy with action chunking.
+The robot is tasked with catching a moving trolley.
+(a) Vanilla action chunking~\citep{zhaoLearningFineGrainedBimanual2023} executes actions based on previous predictions, resulting in delayed reactions to object motions. 
+(b) Receding horizon~\citep{chiDiffusionPolicyVisuomotor2023} enables faster reactions, but leads to a jittery trajectory in the presence of multimodal demonstrations (\eg, both left- and right-handers). 
+(c) Our {\methodname} explicitly searches for the optimal action from multiple predictions sampled at each time step, achieving both long-term consistency and short-term reactivity.
+}
+\label{fig:pull}
+\end{figure}
+
+
+\section{Related Work}
+
+\label{sec:related}
+\textbf{Behavioral Cloning.} 
+Learning from human demonstrations is becoming increasingly popular in robot learning due to recent advances in robotic teleoperation interfaces~\citep{sivakumar2022robotic,zhaoLearningFineGrainedBimanual2023,wu2023gello,chi2024universal}. 
+Generative Behavior cloning, which models the distribution of demonstrations, is particularly appealing due to its algorithmic simplicity and empirical efficacy~\citep{jang2022bc,florence2022implicit,brohan2022rt,shafiullah2022behavior,zhaoLearningFineGrainedBimanual2023,chi2024universal,brohanRT2VisionLanguageActionModels2023}. However, a significant limitation is compounding errors, where deviations from the training distribution accumulate over time~\citep{ross2011reduction,ke2021grasping}. These errors can be mitigated by gathering expert correction data~\citep{ross2011reduction,kelly2019hg,menda2019ensembledagger,hoque2021thriftydagger,hoque2021lazydagger} or injecting noise during data collection~\citep{laskey2017dart,brandfonbrener2023visual}, but such strategies require additional time and effort from human operators.
+To address this, recent work proposes predicting a sequence of multiple actions into the future, known as action chunking, which reduces the effective control horizon~\citep{lai2022action,zhaoLearningFineGrainedBimanual2023,george2023one,bharadhwaj2023roboagent}.
+By handling sequences of actions, action chunking is also better at handling temporal dependencies in the data, such as idle pauses~\citep{swamy2022causal, chiDiffusionPolicyVisuomotor2023} or multiple styles~\citep{li2017infogail,kuefler2017burn,gandhi2023eliciting,belkhale2024data}.
+However, independently drawn action sequence samples may not preserve the necessary temporal dependencies for smooth and consistent execution.
+Our work provides a thorough analysis of action chunking and proposes a decoding algorithm to improve it.
+
+
+\textbf{Sequential Decoding.}
+Decoding algorithms have been studied in generative sequence modeling for decades, with renewed attention driven by recent advances in large language modeling (LLM). 
+One prominent approach focuses on leveraging internal metrics, \eg, likelihood scores, to improve the quality of generated sequences. Notable examples include beam search~\citep{freitagBeamSearchStrategies2017,vijayakumarDiverseBeamSearch2018}, truncated sampling~\citep{fanHierarchicalNeuralStory2018,hewittTruncationSamplingLanguage2022}, minimum Bayes risk decoding~\citep{kumarMinimumBayesRiskDecoding2004,mullerUnderstandingPropertiesMinimum2021}, and others~\citep{welleckNeuralTextGeneration2019,meisterLocallyTypicalSampling2023,fuBreakSequentialDependency2024}.
+Another line of research explores the distinctions between multiple models to jointly optimize for the desired properties such as quality or efficiency~\citep{liContrastiveDecodingOpenended2023a,leviathanFastInferenceTransformers2023}. 
+More recently, several studies have highlighted the potential of guiding the decoding or sampling process through the use of an external model, such as a classifier~\citep{dhariwal2021diffusion} or reward model~\citep{khanovARGSAlignmentRewardGuided2023}.
+In the context of robot learning, recent works have explored guided decoding for long-horizon robotic planning~\citep{huangGroundedDecodingGuiding2023} and manipulator geometry designs~\citep{xuDynamicsGuidedDiffusionModel2024}. Nevertheless, effective decoding strategies for low-level robotic actions remain lacking.
+Concurrent to our work, \citet{nakamotoSteeringYourGeneralists2024} propose to select action samples by querying a value function learned from reward-annotated demonstrations~\citep{hansen-estruchIDQLImplicitQLearning2023a}.
+Our work does not rely on a separate value function; instead, we propose a decoding strategy that addresses the consistency-reactivity tradeoff inherent in action chunking through sample comparison.
+
+
+\section{Analysis: Tradeoffs in Action Chunking}
+
+\label{sec:analysis}
+\subsection{Preliminaries}
+\label{sec:background}
+
+Consider a dataset of demonstrations $\mathcal{D} = \{ \tau_i\}_{i=1}^N$, where each demonstration $\tau_i$ consists of a sequence of state-action pairs $\tau_i = \{(s_1,a_1),(s_2,a_2),\cdots,(s_T,a_T)\}$ provided by a human expert.
+At each time step $t$, the demonstrated action $a_t$ is influenced not only by the observed state $s_t$, but also by latent variables $z_t$, such as planning strategies (\eg, subgoals) and personal preferences (\eg, handedness). These latent variables can persist across multiple time steps and vary significantly between different demonstrations.
+\cref{fig:expertkMDP} illustrates the decision process of a human expert, highlighting the inherent temporal dependencies.
+
+To model these temporal dependencies, some recent works~\citep{zhaoLearningFineGrainedBimanual2023,chiDiffusionPolicyVisuomotor2023,leeBehaviorGenerationLatent2024} utilize action chunking, \ie, modeling the joint distribution of future actions conditioned on past states $\pi(a_t,a_{t+1},\cdots,a_{t+l}|s_{t-c}, \cdots, s_t)$, or in short $\pi(a_{t:t+l}|s_{t-c:t})$.
+Here, $c$ is the {\em context length}, \ie, number of past steps for state inputs, and $l$ is the {\em prediction length}, \ie, number of future steps for action outputs.
+Training such a policy typically involves minimizing the divergence of action distributions between the model $\pi$ and the expert $\pi^{*}$, 
+\begin{equation}
+    \pi = \argmin_{\pi} \sum_{\tau \in \mathcal{D}} \sum_{\substack{s_{t-c:t} \\ a_{t:t+l}}} \mathcal{L} (\pi(a_{t:t+l}|s_{t-c:t}), \pi^{*}(a_{t:t+l}|s_{t-c:t})).
+\end{equation}
+During deployment, the policy operates with a specific {\em action horizon} $h \in [1, l]$, \ie, executing part or all of the predicted action sequence for $h$ time steps without re-planning.
+This approach essentially takes in $c$ states as context and executes $h$ actions, which we refer to as a $(c, h)$-policy.
+
+The choices of context length $c$ and action horizon $h$ often play a crucial role in the effectiveness of the learned policy.
+Recent policies often use a short context length $c$, as extending the context can lead to performance degradation in the presence of limited training data (refer to~\cref{app:horizon} for more details). 
+Conversely, extending the action horizon $h$ has produced mixed results. Some studies report benefits in laboratory settings~\citep{zhaoLearningFineGrainedBimanual2023,chiDiffusionPolicyVisuomotor2023}, while others find it detrimental in real-world scenarios~\citep{leeBehaviorGenerationLatent2024}. The reasons behind these conflicting outcomes are not well understood yet.
+
+Notably, \citet{zhaoLearningFineGrainedBimanual2023} hypothesize that action chunking mitigates compounding errors, but it is unclear why this would hold when deviations within a chunk cannot be corrected before replanning.
+Alternatively, \citet{chiDiffusionPolicyVisuomotor2023} draws parallels to model predictive control (MPC)~\citep{borrelli2017predictive,lofberg2012oops}, emphasizing its role in improving consistency and planning.
+However, unlike MPC, which typically uses short action horizons (\eg, $h=1$), recent imitation learning methods employ much longer action horizons, such as a substantial portion of the predicted sequence (\eg, $h=8$ in~\citet{chiDiffusionPolicyVisuomotor2023}) or even the entire prediction length (\eg, $h\ge50$ in~\citet{zhaoLearningFineGrainedBimanual2023,black2024pi_0}).
+The lack of a clear understanding of action chunking hinders its effective use across tasks and environments.
+In the next sections, we seek to explicitly analyze the strengths and weaknesses of action chunking, with particular attention to the choice of action horizon $h$, in order to offer practical guidance and to inspire the design of improved algorithms.
+\begin{figure}[t]
+\centering
+    \begin{minipage}[t]{0.4\linewidth} \centering
+        \resizebox{!}{3.8cm}{
+            \input{figures/expertkMDP}
+        }
+        \caption{Illustration of the expert decision process, where a latent variable introduces temporal dependencies in actions.
+        }
+        \label{fig:expertkMDP}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.56\linewidth}
+        \resizebox{!}{3.8cm}{
+            \includegraphics{illustrations/horizon.pdf}
+        }
+        \caption{
+        Illustration of $(k, 1)$-expert, $(c, h)$-learner, and $(c, h+d)$-learner.
+        Shaded regions represent observed history; darker indicate greater influence on current decision.
+        }
+        \label{fig:LearnersL1L2}
+    \end{minipage}
+\end{figure}
+
+\subsection{Analysis}
+\label{sec:theory}
+
+\revision{To understand the influence of action chunking, we focus on the last time step of the executed chunk}, where the discrepancy between the expert policy and the learned policy is most pronounced. At this time step $t$, a $(k,1)$-expert written as $\pi^* \coloneqq \pi^{*}(a_t|s_{t-k:t},z_{t-k:t})$ predicts $a_t$ by conditioning on $k$ steps of the past states and the corresponding latent variables. In contrast, a $(c,h)$-learner written as $\pi_{(c,h)} \coloneqq \pi_{(c, h)}(a_t \mid s_{t-h-c:t-h}, a_{t-h:t-1})$ is constrained to observe $c$ steps of the past states and $h-1$ steps of the past actions within the predicted chunk.
+Considering that recent policies often use a short context length $c$, we assume the range of temporal dependency modeled by a $(c,h)$-policy is limited: 
+
+\textbf{Assumption 1.} The sum of context length and action horizon is less than the length of temporal dependency in expert demonstrations, $c+h < k$. 
+
+Additionally, since a $(c,h)$-policy observes only a subset of the states that the expert is conditioned on, we assume that an optimal policy must reconstruct all missing information correctly:
+
+\textbf{Assumption 2.} An optimal $\pi_{c,h}$ must infer the unobserved states based on the observed states and actions by modeling the transition dynamics $P(s_{t'} \mid s_{t'-1},a_{t'-1})$ accurately for all time step $t'$. 
+
+Under these assumptions, the divergence between a learned policy and an expert policy is attributed to two factors: (i) the importance of unobserved states in predicting the current action, and (ii) the difficulty of inferring unobserved states based on the available information. 
+
+To more clearly see the influence of action horizon on these factors, we next compare the performance of two policies that have the same context lengths but different action horizons,
+$\pi_{h} \coloneqq \pi_{(c, h)}(a_t | s_{t-h-c:t-h}, a_{t-h:t-1})$ and $\pi_{h+d} \coloneqq \pi_{(c, h+d)}(a_t|s_{t-h-d-c:t-h-d}, a_{t-h-d:t-1})$, where $d>0$ is the extended action horizon.
+As illustrated in~\cref{fig:LearnersL1L2}, each policy has access to unique information that is unavailable to the other.
+$\pi_{h}$ observes some recent states, where $\pi_{h+d}$ is only aware of the executed actions. On the other hand, $\pi_{h+d}$ has access to some earlier states and actions, which precede all information available to $\pi_{h}$.
+We characterize the {\it importance} of observations as follows (formal definitions in~\cref{app:theorydefinitions}): 
+
+\textbf{Definition (Expected Observation Advantage).} If a policy can observe a state $s_t$, we say that it has an observation advantage $\alpha_t$ over another policy that cannot observe it. More formally, this is the difference between the expected divergence accumulated by a policy $\pi(a_{t'}|s_{t'})$ that does not condition on the state $s_t$ and that by a policy $\pi(a_{t'}|s_{t'}, s_t)$ that conditions on $s_t$.
+
+\textbf{Definition (Maximum Inference Disadvantage).} If a policy cannot condition its prediction on a state $s_t$, its maximum inference disadvantage $\epsilon_t$ is the largest possible divergence arising from inferring incorrectly. Here, the maximum is taken over all possible incorrect inferences of $s_t$.
+
+Hence, we denote the observation advantage that $\pi_h$ gains from the observed recent states by $\alpha_f$ and the inference disadvantage it incurs from the earlier unobserved states by $\epsilon_b$, whereas $\pi_{h+d}$ conversely gains $\alpha_b$ but incurs $\epsilon_f$.
+
+The \textit{difficulty} of inferring each unobserved state hinges on both the relevant observations as well as the environmental stochasticity.
+We quantify this difficulty as follows:
+
+\textbf{Definition (Forward Inference).} Let $P_f \coloneqq P(S_{t}=g_t|S_{t-1}=g_{t-1},a_{t-1})$ where $g_t$ and $g_{t-1}$ are the ground truth states in the deterministic environment at time $t$ and $t-1$, respectively. In deterministic environments, $P_f = 1$, whereas in stochastic settings, $P_f$ is smaller. 
+
+\textbf{Definition (Backward Inference).} Let $P_b \coloneqq P(S_{t}=g_t|S_{t+1}=g_{t+1})$ where $g_t$ and $g_{t+1}$ are the ground truth states in the deterministic environment at time $t$ and $t+1$, respectively. Since $P_b$ is not conditioned on any action, it has higher entropy in general. In stochastic environments, $P_b$ is small. 
+
+Given that the forward inference is generally easier than the backward inference, the performances of $\pi_{h}$ and $\pi_{h+d}$ differ as follows (proofs are deferred to \cref{app:proof}):
+
+\begin{proposition}[Consistency-Reactivity Inequalities]
+\label{PRInequality}
+Let $\mathcal{L}$ be a non-linear convex function measuring the prediction error with respect to demonstrations. Let $\mathcal{S}^+ \subset \{s_{t-k:t}\}$ be the states both the $(c, h)$ and the $(c, h+d)$ policies observe and let $\mathcal{S}^- \coloneqq \{s_{t-k:t}\}\setminus\mathcal{S}^+$. Similarly, let $\mathcal{P}^+ \coloneqq \{a_{t-h:t-1}\}$ and $\mathcal{P}^- \coloneqq \{a_{t-h-d:t-h-1}\}$. Let $C \coloneqq \mathcal{P}^+ \cup \mathcal{S}^+$, $G \coloneqq \{a_t, z_{t-k:t}\} \cup \mathcal{P}^- \cup \mathcal{S}^-$. Then, we can bound the expected loss of the $(c, h+d)$-policy and the $(c, h)$-policy as:
+\begin{align}
+    \alpha_{f} - \epsilon_{b}(1 - P_b^{2d}) \leq \min_{\pi_{h+d}} \mathbb{E}_{G} \left[\mathcal{L}(\pi_{h+d}, \pi^*) | C \right] - \min_{\pi_{h}} \mathbb{E}_{G} \left[\mathcal{L}(\pi_{h}, \pi^*) | C \right] \leq - \alpha_{b} + \epsilon_{f}(1 - P_f^{2d}).
+    \label{eq:tradeoff}
+\end{align}
+
+\end{proposition}
+
+\textbf{\textit{Remark 1.1}.} \cref{eq:tradeoff} provides a general comparison of the performance of the two policies. Intuitively, the advantage of each policy stems from the additional information it has access to (\textit{i.e.} {$\alpha_{f}$} for $\pi_h$ and {$\alpha_{b}$} for $\pi_{h+d}$) while the disadvantage is bounded by the maximum divergence arising from inferring missing information incorrectly (\textit{i.e.} {$\epsilon_{b}(1 - P_b^{2d})$} for $\pi_{h}$ and {$\epsilon_{f}(1 - P_f^{2d})$} for $\pi_{h+d}$). 
+
+We next examine two specific environmental settings: deterministic and stochastic.
+In highly deterministic environments, while both policies need to infer the same number of unobserved states, $\pi_{h+d}$ benefits from conditioning on additional actions, which may significantly aid in inferring the corresponding states through its action chunk. If the
+maximum errors $\epsilon_{f}$ arising from inferring these states are bounded, $\pi_{h+d}$ becomes strictly advantageous: 
+\begin{corollary}[Consistency in Deterministic Environments]
+\label{PRIInequalityLowNoise}
+    In a highly deterministic environment, if $a_t$ is influenced by at least one state in $\{s_{t-h-c-d:t-h-c-1}\}$ and $\epsilon_{f}$ is finite, then
+    \begin{align}
+    \min_{\pi_{h+d}} \mathbb{E}_{G} \left[
+    \mathcal{L}(\pi_{h+d}, \pi^*)| C \right] 
+    < & \min_{\pi_{h}} \mathbb{E}_{G} \left[\mathcal{L}(\pi_{h}, \pi^*)| C \right].
+    \end{align}
+\end{corollary} 
+
+Conversely, in highly stochastic environments, inferring the unobserved states is challenging, regardless of whether the corresponding actions are known. 
+On the other hand, the recent states are likely more important than earlier states for predicting the current action $a_t$.
+As a result, $\pi_{h+d}$ becomes strictly more disadvantageous:  
+\begin{corollary}[Reactivity in Stochastic Environments]
+\label{PRInqualityHighNoise}
+    In a highly stochastic environment, if temporal dependency decreases over time, \ie, $\alpha_f > \epsilon_b$, then
+    \begin{align}
+    \min_{\pi_{h+d}} \mathbb{E}_{G} \left[
+    \mathcal{L}(\pi_{h+d}, \pi^*)| C \right] 
+    > & \min_{\pi_{h}} \mathbb{E}_{G} \left[\mathcal{L}(\pi_{h}, \pi^*)| C \right].
+    \end{align}
+\end{corollary}
+
+In summary, depending on the experimental conditions, action chunking may have varying effects on the learned policy.
+On the one hand, it benefits the modeling of temporal dependencies in the demonstrations, due to extended access to actions executed at past time steps.
+On the other hand, it hinders reactions to unexpected states in stochastic environments, due to reduced access to state observations at recent time steps.
+As a result, there is no universally optimal choice of action horizon across all conditions.
+When both temporal dependencies and transition stochasticities are significant, tuning the action horizon entails an inherent trade-off between the two opposing factors.
+Moreover, stochasticitic changes (\eg, wind gusts or object drops) are often unpredictable in advance, raising a critical need to ensure the reactivity of a policy built with action chunking.
+
+
+
+\section{Method: {\methodname}
+
+\label{sec:method}
+As analyzed above, action chunking improves long-term consistency but sacrifices short-term reactivity.
+In this section, we propose to address this tradeoff by bridging action chunking with closed-loop operations.
+We will first outline the general framework in~\cref{subsec:search} and then describe two specific criteria in~\cref{subsec:criteria}.
+
+\subsection{Test-Time Search} \label{subsec:search}
+
+Recall that for a policy with prediction length $l$, an action chunk $a := \{ \action_{t}^{(t)}, \action_{t+1}^{(t)}, \cdots, \action_{t+l}^{(t)} \}$ sampled at time $t$ is expected to follow a consistent strategy over the subsequent $l$ time steps. 
+However, executing the action chunk in an open-loop manner leaves the policy vulnerable to unexpected state changes.
+Alternatively, one can maximize reactivity by resampling an action chunk and executing only the first immediate action at every time step. Yet, this simple closed-loop approach destroys the consistency preserved within each chunk, potentially leading to oscillations between different strategies.
+How can we combine the benefits of both approaches?
+
+Our key idea is to bridge action chunking and closed-loop resampling by making use of additional computes at test time.
+In particular, we seek to restore temporal consistency in closed-loop operations by scaling up the number of candidate samples.
+Intuitively, while the probability of any single pair of samples sharing the same latent strategy is low, the likelihood of finding a consistent pair increases with the number of samples.
+We thus frame the problem of closed-loop action chunking as searching for the optimal action among a batch of samples drawn at each time step,
+\begin{equation}
+\action^* = \argmin_{\action \in \actionSpace} \Loss_B(a) + \Loss_F(a),
+\end{equation}
+where $\actionSpace$ is the set of sampled action chunks, $\Loss_B$ and $\Loss_F$ are two criteria approximating the optimality with respect to the backward decision and forward plan, which we will describe next.
+
+\subsection{Bidirectional Criteria} \label{subsec:criteria}
+
+\textbf{Backward coherence.}
+To preserve temporal dependencies in closed-loop operations, a sequence of actions should (i) commit to a consistent latent strategy over time, and (ii) react smoothly to unexpected changes. 
+These desired properties motivate us to keep the action chunk selected at the previous time  $\hat a := \{ {a}^{(t-1)}_{t-1}, \cdots, {a}^{(t-1)}_{t+l-1} \}$ as a prior, and minimize the weighted Euclidean distance between the new action chunk and the prior across $l-1$ overlapping steps:
+\begin{equation} \label{eq:backward}
+\Loss_B = \sum_{\tau=0}^{l-1} \rho^\tau \left\| a^{(t)}_{t+\tau} - {a}^{(t-1)}_{t+\tau} \right\|_2.
+\end{equation}
+Here, $\rho$ is a decay hyperparameter to account for growing uncertainty over time. \revision{By default, we use the L2 norm as the distance metric between predicted actions, while other metrics, such as L1 or cosine distance, can also be effective (see \cref{app:metric})}. This backward objective encourages similar latent strategies between consecutive steps while allowing for gradual adaptation to unforeseen transition dynamics.
+
+Nevertheless, the backward criterion alone presents a potential caveat: the prior chunk could be suboptimal due to the lack of information at the previous time step (\eg, unexpected object motions). In such cases, selecting the next action chunk based solely on the prior may perpetuate suboptimality.
+Ideally, the sequential decision-making process should effectively correct suboptimal plans based on the latest observations. We next address this need through another forward criterion.
+
+\begin{figure}[t]
+  \begin{minipage}[b]{0.45\textwidth}
+    \centering
+    \includegraphics[width=0.90\linewidth]{illustrations/trolleybid.pdf}
+    \captionof{figure}{Illustration of bidirectional decoding.
+    }
+    \label{fig:criteria}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[b]{0.525\textwidth}
+    \centering
+    \begin{algorithm}[H]
+    \setstretch{1.2} % Adjust the line spacing here
+    \small 
+      \caption{{\methodname}}
+      \label{algo:method}
+      \begin{algorithmic}[1]
+        \REQUIRE current state $s$, batch size $N$, mode size $K$, previous decision $\hat a$, strong policy $\pi$, weak policy $\pi'$
+        \STATE Generate $N$ samples from each policy $a \sim \pi(s)$, $a' \sim \pi'(s)$ to construct the initial sets $\actionSpace$ and $\actionSpace^{'}$ 
+        \STATE Compute the backward loss $\Loss_B$ for each sample
+        \STATE Select K samples with minimal $\Loss_B$ from $\actionSpace$ and $\actionSpace^{'}$ to construct $\actionSpace^{+}$ and $\actionSpace^{-}$, respectively
+        \STATE Compute the forward loss $\Loss_F$ for each sample
+        \STATE Select $a^* \in \actionSpace$ that minimizes the total loss 
+        \STATE Update decision memory $\hat a \leftarrow a^*$
+      \end{algorithmic}
+    \end{algorithm}
+  \end{minipage}
+\end{figure}
+
+\textbf{Forward contrast.} 
+Our design of the forward criterion is motivated by the need to identify the most optimal plan from a set of candidates. Within the same latent strategy, suboptimal samples may arise from (i) low likelihood under the learned model and (ii) divergence between the learned model and expert policy.
+To address this, we draw inspirations from LLM decoding techniques~\citep{wangSelfConsistencyImprovesChain2022,liContrastiveDecodingOpenended2023a} and introduce a forward contrast criterion.  
+Specifically, we compare each candidate sample with two sets of reference samples: one positive set from a stronger policy and a negative set from a weaker one.
+The stronger policy is obtained from a well-trained checkpoint, whereas the weaker policy is taken from an early underfitting checkpoint and is expected to be further from the expert policy. 
+Our forward objective is thus framed as minimizing the average distance between a candidate plan and the positive samples while maximizing its average distance from the negative ones,
+\begin{equation} \label{eq:forward}
+\Loss_F = \frac{1}{N}\left(\sum_{a^{+} \in \actionSpace^{+}} \sum_{\tau=0}^{l} \left\| a^{(t)}_{t+\tau} - a^{+}_{t+\tau} \right\|_2 - \sum_{a^{-} \in \actionSpace^{-}} \sum_{\tau=0}^{l} \left\| a^{(t)}_{t+\tau} - a^{-}_{t+\tau} \right\|_2\right),
+\end{equation}
+where $\actionSpace^{+} = \actionSpace \setminus \{a\}$ is the positive set predicted by the strong policy $\policy$, $\actionSpace^{-}$ is the negative set predicted by the weaker one $\policy'$, and $N$ is the sample size.
+
+\cref{fig:criteria} illustrates the combined effects of the backward coherence and forward contrast criteria on sample selection.
+Since samples in $\actionSpace^{+}$ and $\actionSpace^{-}$ are not all subject to the same strategy, we trim each set by removing samples that deviate significantly from the previous decision. 
+This is achieved by summing over the $K$ smallest distance values for in the positive and negative sets in~\cref{eq:forward}.
+The full process of our decoding method is outlined in~\cref{algo:method}.
+Since all steps in {\methodacro} can be computed in parallel, the overall computational overhead remains modest on modern GPU devices.
+
+\subsection{Discussions} \label{subsec:full}
+
+\textbf{Interpretation of our method.}
+Our method makes no changes to the learned policy; instead, it intervenes in the model distribution through sample selection. 
+As illustrated in \cref{fig:interpretation}, randomly sampled sequences may be misaligned with both the previous decisions and the target demonstrations.
+Given a set of candidates, the backward step first identifies the behavioral mode from the past decision stored in memory; the forward step then removes the samples with low likelihood under the target distribution using prior knowledge of positive and negative samples. 
+By comparing samples across time steps and model checkpoints, our method bridges the gap between the proposal and target distributions at test time.
+
+\textbf{Relation to recent methods.}
+Our method builds upon the receding horizon~\citep{chiDiffusionPolicyVisuomotor2023} and temporal ensembling~\citep{zhaoLearningFineGrainedBimanual2023} used in previous works, but with crucial distinctions.
+Receding horizon seeks a compromise between long-term consistency and short-term reactivity by using a moderate action horizon (\eg, half of the prediction length), which is inevitably sup-optimal when both factors are prominent.
+Temporal ensembling strengthens dependency across chunks by averaging multiple decisions over time; however, weighted-averaging operations can be detrimental when consecutive decisions fall into distinct modes.
+Our method more effectively addresses cross-chunk dependency through dedicated behavioral search and is not mutually exclusive to previous methods.
+We will demonstrate in the next section that combining our method with the moving average can further improve closed-loop action chunking.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiment}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/SimulationLegend.png}
+    \begin{subfigure}[t]{0.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SimulationNoise=0.0updated.png}
+        \caption*{\shortstack[l]{(a) long-idle demo, low-noise env}}
+        \label{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SimulationNoise=0.20.png}
+        \caption*{\shortstack[l]{(b) mid-idle demo, mid-noise env}}
+        \label{}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SimulationNoise=0.4.png}
+        \caption*{\shortstack[l]{(c) short-idle demo, high-noise env}}
+        \label{}
+    \end{subfigure}
+    \caption{
+    Effect of action horizon $h$ on idle actions in 1-dimensional simulations. All policies share the same prediction length $l$.
+    Long action horizons lead to idle distributions closer to the long-idle expert in low-noise environments, 
+    whereas shorter action horizons align more closely with the short-idle expert in high-noise environments.
+    When both idling and noise are non-negligible, a moderate action horizon performs the best.
+    }
+    \label{fig:AH_CL_simulation}
+\end{figure}
+In this section, we present a series of experiments to answer the following questions:
+\begin{enumerate}[nosep]
+\item How does our theoretical analysis on action chunking manifest under different conditions?
+\item Can our decoding method improve closed-loop operations of policies built with action chunking?
+\item Does our decoding method perform well across different policies, tasks, and environments?   
+\item Is our decoding method scalable to larger sample sizes and compatible with existing methods?
+\end{enumerate}
+To this end, we will first validate our theoretical analysis through one-dimensional diagnostic simulations. We will then evaluate {\methodacro} on seven tasks across three simulation benchmarks, including Push-T~\citep{chiDiffusionPolicyVisuomotor2023}, RoboMimic~\citep{mandlekarWhatMattersLearning2022}, and Franka Kitchen~\citep{gupta2020relay}.
+We will subsequently examine the generality and scalability of our method under various base policies, sample sizes, and stochastic noise.
+We will finally assess the effectiveness of {\methodacro} in two challenging real-world tasks that require interactions with dynamic objects.
+
+\subsection{One-Dimensional Diagnostic Experiments} \label{subsec:toy}
+
+\textbf{Setup.}
+We start with a diagnostic experiment in a one-dimensional state space $\{s_0, s_1, \cdots, s_{10}\}$, where $s_0$ is the starting state and $s_{10}$ is the goal state. 
+The demonstrator plans to move forward by one step in each state, except in $s_5$ where it pauses unless the last five states visited were $s_5$. Each forward move has a probability of $1 - \delta$, where $\delta$ denotes the level of stochastic noise in the environment (as described in~\cref{sec:theory}). Given these demonstrations, we train a collection of policies with different action horizons $h \in \{1, 2, 3, 5, 7, 10\}$. We investigate under what action horizon our learner can better imitate the distribution of idle actions taken by the expert over multiple rollouts. 
+
+\textbf{Result.}
+As shown in~\cref{fig:AH_CL_simulation}, when the environment is deterministic ($\delta = 0.0$), larger action horizons capture the expert distribution better, consistent with~\cref{PRIInequalityLowNoise}. With an action horizon of 10, the learner achieves zero total variation distance with the expert distribution. Conversely, when the environment is highly stochastic ($\delta = 0.4$), an action horizon of 1 outperforms all other learners, corroborating with~\cref{PRInqualityHighNoise}. With moderate noise ($\delta = 0.2$), \revision{there is no monotonic pattern and the optimal policy turns out to be the one with action horizon 5}. Refer to~\cref{app:1d} for more detailed results.
+\revision{This controlled experiment validates the tradeoff identified in~\cref{PRInequality}, which we will further demonstrate in robotic manipulation subjected to stochastic noise in \cref{subsec:computes}}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.875\linewidth]{figures/dp_legend.pdf}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_pusht.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_lift.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_can.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_square.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_transport.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_tool_hang.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.136\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth]{figures/dp_kitchen.pdf}
+    \end{minipage}
+
+    \caption{Comparison of different inference methods for closed-loop operations of diffusion policies. Each method is evaluated for $100$ episodes on seven manipulation tasks in simulation benchmarks. \revision{Results are averaged across three seeds.} BID significantly outperforms existing inference methods in most tasks.}
+    \label{fig:closedloop}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.41\linewidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{figures/scaling_new.pdf}
+        \label{fig:batchsize}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.54\linewidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{figures/complement_new.pdf}
+        \label{fig:combine}
+    \end{subfigure}
+    \caption{
+    {\methodacro} benefits from large sample sizes (left) and complements existing inference methods (right). \revision{Each method is evaluated on seven simulation tasks across three seeds.} Relative performance gain is measured with respect to the vanilla baseline. When combined with EMA, {\methodacro} results in 46\% relative improvements.}
+    \label{fig:property}
+\end{figure}
+
+\subsection{Simulation Experiments with Stochastic Noise} \label{subsec:simulation}
+
+Next, we evaluate our decoding algorithm on seven simulation tasks of robot manipulation. We will first compare BID with existing inference methods in closed-loop operations.
+We will then assess the effectiveness of our method under different conditions, including policy classes, sample sizes, and levels of stochastic noise. 
+
+\subsubsection{Comparison with Existing Inference Methods} \label{subsec:closedloop}
+
+\textbf{Setup.}
+In each manipulation task, we use Diffusion Policy~\citep{chiDiffusionPolicyVisuomotor2023} trained on human demonstrations as the base policy. 
+We evaluate {\methodacro} with a batch size of $N=16$ and a mode size of $K=3$.
+We consider three existing inference methods as baselines:
+\begin{itemize}[nosep]
+\item {\em Vanilla~\citep{chiDiffusionPolicyVisuomotor2023}}: Execute the first action of a sampled chunk in a closed-loop manner.
+\item {\em Warmstart~\citep{jannerPlanningDiffusionFlexible2022}}: Similar to {\em Vanilla}, but warm-start the initial noise for the diffusion process from the previous decision.
+\item {\em Exponential Moving Average (EMA)~\citep{zhaoLearningFineGrainedBimanual2023}}: Smooth action chunking by averaging a new prediction $a$ with the previous one $\hat a$ for each overlapping step $a_t = \lambda a_t + (1 - \lambda) {\hat a}_t$. This method is also known as temporal ensembling. By default, we set $\lambda = 0.5$.
+\end{itemize}
+We evaluate each method for $100$ episodes and average the results across three random seeds.
+Please refer to~\cref{app:implement} for implementation details.
+
+\textbf{Result.}
+Our main observation is that while existing inference methods offer some benefits for closed-loop operations, they lack robustness. 
+As shown in~\cref{fig:closedloop}, {\em Warmstart} yields mild performance gains on average, but degrades performance on 3 out of 7 tasks.
+Similarly, EMA leads to competitive results on several tasks, yet exhibits performance drops in 2 tasks. 
+We conjecture that this robustness issue stems from independent sampling across chunks; when successive chunks follow distinct latent strategies, averaging them may not yield a plausible strategy, as further discussed in~\cref{app:ema}.
+In comparison, {\methodacro} offers substantial gains across all tasks. Notably, {\methodacro} provides $32\%$ relative improvements over the vanilla baseline, significantly outperforming EMA on Pust-T, Lift, Square, and Tool Hang, while achieving competitive performance on the other tasks.
+
+\subsubsection{Scalability and Compatibility of {\methodacro}} \label{subsec:property}
+
+\textbf{Setup.}
+We further assess two key properties of {\methodacro}: scalability with growing batch sizes and compatibility with existing inference methods. For scalability, we experiment with batch sizes of $\{1, 4, 8, 12, 16\}$. For compatibility, we apply {\methodacro} on top of two other baselines, Warmstart and EMA. The results are averaged across seven simulation tasks and three random seeds.
+
+\textbf{Result.}
+As shown in~\cref{fig:property}, our method benefits from the large batch size, with performance gains not yet saturated at the default batch size used in~\cref{subsec:closedloop}.
+Moreover, the strength from {\methodacro} is complementary to that of existing inference methods.
+Notably, combining BID with EMA further boosts the relative performance gain from 32\% to 46\%.
+These two properties highlight the potential of our method in practice.
+\begin{table}[t]
+\centering
+\begin{minipage}[t]{0.475\textwidth}
+\centering
+\tiny % You can use \scriptsize or \tiny instead of \footnotesize
+\resizebox{!}{0.18\textwidth}{%
+    \begin{tabular}{l| c c c}
+    \toprule
+    Stochastic Noise & {0.0} & {1.0} & {1.5} \\
+    \midrule
+    {Vanilla Open-Loop} & 64.0 & 26.9 & 13.0 \\ 
+    {{\methodacro} Open-Loop} & \textbf{66.1} & 31.4 & 16.0 \\
+    {Vanilla Closed-Loop} & 48.9 & 38.3 & 29.5 \\ 
+    {{\methodacro} Closed-Loop} & {54.4} & \textbf{45.3} & \textbf{31.7} \\ 
+    \bottomrule
+    \end{tabular}
+}
+\caption{Success rates of VQ-BeT on the Push-T task under various noise conditions.  Closed-loop {\methodacro} substantially outperforms other methods in stochastic environments. \revision{See \cref{tab:VQBeTExtendedResults} for detailed ablations.}}
+\label{tab:VQBeTclosedloop}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.475\textwidth}
+\centering
+\tiny % Set font size here
+\resizebox{!}{0.18\textwidth}{%
+    \begin{tabular}{l| c c}
+    \toprule
+    {Sample Size} & {Success (\%)} & {{Time (ms)}} \\
+    \midrule
+    { 1 \quad (vanilla)} & 49.1 & 13.2 \\ 
+    { 8 \quad (ours)} & 52.9 & 25.2 \\ 
+    {16 \quad (ours)} & 54.2 & 25.9 \\ 
+    {32 \quad (ours)} & 54.4 & 26.8 \\ 
+    \bottomrule
+    \end{tabular}
+}
+\caption{Success rates and inference times of VQ-BeT across varying sample sizes. {\methodacro} benefits from a larger sample size at the cost of a doubled computational overhead, measured on an A5000 GPU.}
+\label{table:success_rate_inference_time}
+\end{minipage}
+\end{table}
+
+\subsubsection{Generality and Efficiency of {\methodacro}} \label{subsec:computes}
+
+\textbf{Setup.} 
+We next extend our experiment to VQ-BET~\citep{leeBehaviorGenerationLatent2024}, another state-of-the-art robot policy built with autoregressive transformers. We use the public checkpoint on the Push-T task provided by LeRobot~\citep{cadene2024lerobot} as the base policy. We use a checkpoint terminated at 100 epochs as the weak policy in forward contrast. 
+To simulate stochastic conditions, we add temporally correlated Gaussian noise to the executed action at each step, scaled by the action magnitude.
+We measure the computational time on a desktop equipped with an NVIDIA A5000 GPU.
+
+\textbf{Result.}
+\cref{tab:VQBeTclosedloop} summarizes the results of the baseline and our method. 
+The vanilla random sampling performs significantly worse than {\methodacro} in both closed and open-loop operations. Notably, the vanilla open-loop approach exhibits a rapid performance decline as the environment becomes increasingly stochastic. Even in closed-loop operations, the vanilla baseline still experiences a significant performance drop. In comparison, the closed-loop {\methodacro} demonstrates much higher robustness to stochastic noise. 
+\cref{table:success_rate_inference_time} details the computational overhead associated with {\methodacro} at varying batch sizes. The result shows that the performance gains of our method come with a doubled computational overhead. We expect that this overhead will be less of a constraint with higher-end GPUs.
+
+\subsection{Real-world Experiments with Dynamic Objects}
+
+We finally evaluate {\methodacro} through two real-world experiments that require rapid reactions to dynamically moving objects.
+
+\textbf{Setup.}
+We consider two pick-and-place tasks, where the target object undergoes unexpected movement during evaluation. In the dynamic placing task, a Franka Panda robot is required to deliver an object into a moving cup held by a human subject. In the dynamic picking task, a UR5 robot is required to grasp a moving cup pulled by a string and place it onto a nearby static saucer. In both tasks, we evaluate the performance of {\methodacro} applied to pre-trained diffusion policies. For further experimental details, please refer to~\cref{app:realworld}.
+
+\textbf{Result.}
+\cref{fig:realworld,fig:cup_rearrange} compares the results of different inference methods on the two real-world tasks.
+Vanilla random sampling struggles to handle the diverse demonstrations and dynamic movements, resulting in significantly lower success rates. In contrast, {\methodacro} achieves high success rates in both static and dynamic conditions. Notably, in the dynamic picking task, {\methodacro} achieves a 2x higher success rate than all other baselines, highlighting its potential for dynamic object interactions.
+
+
+\begin{figure}[t]
+\centering
+\begin{minipage}[t]{0.45\linewidth} % Start of first minipage
+    \centering
+    \includegraphics[width=\linewidth]{photos/droptoy_exp_results.pdf}
+    \caption{Success rate of object delivery. Each method-setting is evaluated across 20 episodes. {\methodacro} achieves much higher success rate than the vanilla baseline, effectively handling the diverse demonstrations and dynamic target.}
+    \label{fig:realworld}
+\end{minipage}
+\hspace{0.05\linewidth} % Adjust the horizontal space between the figures
+\begin{minipage}[t]{0.45\linewidth} % Start of second minipage
+    \centering
+    \includegraphics[width=\linewidth]{photos/cup_replacement/cup_exp_dynamic.pdf}
+    \caption{Success rate of cup replacement in the dynamic setting. Each method is evaluated across 20 episodes. Existing methods degrade substantially under slow cup movements, whereas {\methodacro} retains a strong performance.}
+    \label{fig:cup_rearrange}
+\end{minipage}
+\end{figure}
+\paragraph{Other experiments.}
+Please refer to~\cref{app:experiment} for additional analyses and ablations.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+{\bf Summary.}
+We have analyzed the strengths and limitations of action chunking for robot learning from human demonstrations. Based on our analysis, we proposed {\methodname} ({\methodacro}), an inference algorithm that takes into account both past decisions and future plans for sample selection.
+Our experimental results show that {\methodacro} can consistently improve closed-loop operations, scale well with computational resources, and complement existing methods.
+We hope these findings provide a new perspective on addressing the challenges of generative behavioral cloning at test time.
+
+{\bf Limitations.}
+One major limitation of {\methodacro} lies in its computational complexity.
+While the decoding computation can be fully parallelized on modern GPUs, it may remain expensive for high-frequency operations on low-cost robots.
+Designing algorithms that can generate quality yet diverse action chunks under batch size constraints can be an interesting avenue for future research.
+Additionally, our analysis and method have been limited to policies with short context lengths, driven by their empirical effectiveness with limited human demonstrations. 
+Developing techniques capable of learning robust long-context policies can be another compelling direction for future research.
+
+
+
+
+

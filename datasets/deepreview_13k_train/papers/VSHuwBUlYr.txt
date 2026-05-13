@@ -1,0 +1,473 @@
+\title{Zero-Shot Video Semantic Segmentation based on Pre-Trained Diffusion Models}
+
+\begin{abstract}
+
+We introduce the first \emph{zero-shot} approach for Video Semantic Segmentation (VSS) based on pre-trained diffusion models.
+A growing research direction attempts to employ diffusion models to perform downstream vision tasks by exploiting their deep understanding of image semantics.
+Yet, the majority of these approaches have focused on image-related tasks like semantic correspondence and segmentation, with less emphasis on video tasks such as VSS.
+Ideally, diffusion-based image semantic segmentation approaches can be applied to videos in a frame-by-frame manner.
+However, we find their performance on videos to be subpar due to the absence of any modeling of temporal information inherent in the video data.
+To this end, we tackle this problem and introduce a framework tailored for VSS based on pre-trained image and video diffusion models.
+We propose building a scene context model based on the diffusion features, where the model is autoregressively updated to adapt to scene changes.
+This context model predicts per-frame coarse segmentation maps that are temporally consistent.
+To refine these maps further, we propose a correspondence-based refinement strategy that aggregates predictions temporally, resulting in more confident predictions.
+Finally, we introduce a masked modulation approach to upsample the coarse maps to the full resolution at a high quality.
+Experiments show that our proposed approach outperforms existing zero-shot image semantic segmentation approaches significantly on various VSS benchmarks without any training or fine-tuning.
+Moreover, it rivals supervised VSS approaches on the VSPW dataset despite not being explicitly trained for VSS.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Diffusion models \cite{ho2020denoising,sd,imagen,dalle2,blattmann2023svd} have showcased remarkable capabilities in learning real data distributions effectively, allowing them to generate high-quality images and videos with soaring diversity and fidelity.
+This was achieved by exploiting their scalability to train on large-scale datasets \cite{Bain21,laion5b}.
+Interestingly, those models were able to learn profound abstractions of images and their semantics as an indirect consequence of their large-scale training.
+This entitled them to be considered as \emph{Foundation Models} that possess high degrees of generalizability and understanding of images.
+As a result, a growing direction of research attempts to use the internal representations of diffusion models to perform various downstream image vision tasks.
+For instance, pre-trained diffusion models were used to perform image semantic correspondence \cite{tang2023emergent,luo2023hyperfeatures}, keypoints detection \cite{hedlin2023keypoints}, and image semantic segmentation \cite{namekata2024emerdiff,marcosmanchon2024ovam}.
+
+Video vision tasks, on the other hand, have not received the same attention compared to their image counterparts.
+A simple approach is adopting image-based approaches to solve video tasks.
+For example, the diffusion-based image semantic segmentation approach EmerDiff \cite{namekata2024emerdiff} can be employed to perform Video Semantic Segmentation (VSS) in a frame-by-frame manner.
+However, our initial investigations show that it performs poorly in segmenting videos in terms of temporal consistency, as shown in \Cref{fig:teaser}.
+This can be attributed to the lack of modeling of video temporal information, causing inconsistent predictions across frames.
+
+An intuitive solution for enhancing the temporal consistency of these approaches is employing a video diffusion model, \,  e.g., Stable Video Diffusion (SVD) \cite{blattmann2023svd} as a backbone.
+The SVD model is initially trained on images, then expanded with temporal layers and fine-tuned on videos.
+Ideally, the temporal features from SVD should exhibit better temporal consistency.
+To investigate this hypothesis, we visualize the temporal features of a pre-trained SVD in \Cref{fig:svd_feat} to examine their temporal consistency.
+The figure shows that the temporal features are surprisingly unstable and tend to change significantly between video frames.
+On the other hand, the spatial features encode the structure of the scene, similar to Image Stable Diffusion \cite{rombach2021highresolution} (SD).
+Based on these observations, we capitalize on the spatial features of either SD or SVD and attempt to enhance them temporally.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth,trim={1cm 10cm 1cm 2cm},clip]{figures/sd_svd_feat_small.pdf}
+    \caption{A visualization of the first three PCA components for the features of two video frames extracted from the most semantically-rich blocks in SD (Block 7) and SVD (Bock 8). 
+    In the second row, we show the $x$-$t$ slice of an image row (highlighted in the red line in the leftmost image) horizontally across the PCA visualization ($x$-axis) and stack it chronologically across the full batch of video frames ($t$-axis).
+    The plot shows that the spatial features of both SD and SVD are temporally more consistent between video frames compared to the features of temporal layers in SVD.}
+    \label{fig:svd_feat}
+\end{figure}
+
+In this paper, we introduce a diffusion-based zero-shot approach for VSS.
+First, we build a \emph{scene context model} based on the features of a pre-trained image (SD) or video (SVD) diffusion model.
+This context model produces per-frame coarse segmentation maps and is autoregressively updated to accommodate scene changes throughout the video.
+To further enhance the temporal and spatial consistency of these coarse maps, we propose a correspondence-based refinement (CBR) strategy encompassing a pixel-wise voting scheme between the video frames.
+Finally, we propose a masked modulation process to reconstruct the full-resolution segmentation maps that is more stable and less noisy than that of \cite{namekata2024emerdiff}.
+Experiments show that our proposed approach significantly outperforms zero-shot image semantic segmentation methods on various VSS benchmarks.
+More specifically, we improve mIOU over image semantic approaches by at least 29\% on VSPW, CityScapes, and Camvid datasets.
+Remarkably, our approach performs comparably well as supervised VSS approaches on the diverse VSPW dataset.
+We also show that for currently released models, SD features lead to a higher quality result than SVD features, but this trend may reverse when SVD training considers larger datasets in the future.
+
+
+
+\section{Related Work}
+
+\subsection{Diffusion Models' Features}
+The large-scale training of diffusion models on the LAION-5B dataset \cite{laion5b} with 5 billion images allowed them to learn semantically rich image features.
+As a result, a growing direction of research attempts to employ these features to perform downstream vision tasks. 
+Several approaches \cite{luo2023hyperfeatures,tang2023emergent,zhang2024tale} investigated using these features to perform semantic correspondence.
+They observed that the features are semantically meaningful and generalize well across different objects and styles of images.
+For example, a human head in any arbitrary image will have similar features to any other human head in other images, regardless of the scene variations.
+Those features even generalize across similar classes of objects like animal heads.
+At the same time, the features will differ from those of unrelated object classes like buildings, landscapes, vehicles, \emph{etc}.
+EmerDiff \cite{namekata2024emerdiff} capitalized on this observation to perform image semantic segmentation.
+Since the diffusion features are distinct for different objects, they can easily be clustered to separate those objects and produce a coarse segmentation map.
+Then, they proposed a modulation strategy to produce fine segmentation maps at a remarkable quality.
+However, we observed that the produced segmentation maps by EmerDiff are not temporally consistent, as illustrated in \Cref{fig:teaser}, making it unsuitable for Video Semantic Segmentation (VSS).
+Therefore, we propose a diffusion-based pipeline tailored to improve the temporal consistency in VSS.
+\subsection{Video Semantic Segmentation}
+Video semantic segmentation (VSS) \cite{wang2021tmanet,zhang2023dvis,zhang2023dvispp,li2024univs,zhao2017pspnet,cheng2021mask2former,yang2022tevit} is a spatiotemporal variation of image segmentation on videos that aims to predict a pixel-wise label across the video frames.
+Those predictions should be temporally consistent under object deformations and camera motion, making VSS more challenging than its image counterpart.
+Recent approaches attempted to exploit the temporal correlation between video features to produce temporally consistent predictions.
+Several approaches \cite{zhu2017deep_feature_flow,gadde2017semantic} incorporated optical flow prediction to model motion between frames.
+Other approaches \cite{liu2020efficient_per_frame} proposed a temporal consistency loss on the per-frame segmentation predictions as an efficient replacement for optical flow.
+TMANet \cite{wang2021tmanet} utilized a temporal attention module to capture the relations between the current frame and a memory bank. 
+DVIS \cite{zhang2023dvis} further improved the efficiency by treating VSS as a first-frame-segmentation followed by a tracking problem. 
+Recent work UniVS \cite{li2024univs} proposed a single unified model for all video segmentation tasks by considering the features from previous frames as visual prompts for the consecutive frames.
+Despite their remarkable performance, these supervised approaches do not generalize well on unseen datasets \cite{zhang2023dvispp}.
+Therefore, it is desired to have an approach that generalizes well across datasets.
+Inspired by the success of EmerDiff \cite{namekata2024emerdiff} on image semantic segmentation, we attempt to exploit the diffusion features to propose the first temporally consistent zero-shot VSS approach.
+
+
+
+\section{Preliminaries}
+
+\subsection{Stable Diffusion architecture}
+Stable Diffusion (SD) \cite{rombach2021highresolution,podell2023sdxl} is one of the prominent latent diffusion models that achieves a good tradeoff between efficiency and quality.
+It is trained to approximate the real data distribution by adding noise to the latents of data samples until they reach pure Gaussian isotropic noise.
+During sampling, it performs a series of Markovian denoising steps starting from pure noise to recover a noise-free latent that is decoded to produce a synthetic image.
+SD utilizes a UNet architecture to predict either the noise or some other signal at each time step.
+This UNet encompasses multiple blocks for the encoder and the decoder at different resolutions ranging from $8 \times 8$ to $64 \times 64$, where every block has residual blocks, self-attention, and cross-attention modules.
+The attention is computed as:
+\begin{equation}\label{eq:attn}
+    f\left( \sigma \left( \frac{QK^{T}}{\sqrt d} \right) \cdot V \right)
+\end{equation}
+where $Q, K, V$ are the query, key, and value vectors in the attention layers, $\sigma$ is the Softmax activation, and $f$ denotes a fully connected layer.
+The query is always computed from the image features, while the key and the value are computed from the image in self-attention and a conditional signal (\eg textual prompt) in cross-attention.
+Since the semantically rich features are located in the decoder \cite{tang2023emergent,namekata2024emerdiff}, We only consider the decoder blocks.
+The decoder has 12 blocks over 4 resolutions, where We refer to the first block as 0, with a resolution of $8 \times 8$, and the last block as 11, with a resolution of $64 \times 64$.
+\subsection{Emerging Image Semantic Segmentation from Diffusion Models}
+\label{sec:emerdiff}
+EmerDiff \cite{namekata2024emerdiff} observed that it is possible to extract semantically rich features from some of the UNet blocks and use them to produce coarse semantic segmentation maps.
+Given an RGB image $X$ with a resolution of $H \times W$,  the spatial resolution of the low-dimensional UNet features becomes $H/S_i \times W/S_i$, where $S_i$ is the scale factor of block $i$ determined by both the size of the latent representation and the downsampling factor of that block.
+By applying K-Means clustering on the low-dimensional feature maps from Block $b_k$ at timestep $t_k$, we obtain a set of binary masks $\mathcal{M}=\{ M_{1}, M_{2}, ..., M_{L} \}$, where $M \in \mathbb{R}^{H / S_i \times W / S_i}$, and $L$ is the number of distinct clusters.  
+
+A \emph{modulation} strategy is used to obtain fine-grained image-resolution segmentation maps. 
+This is achieved by modulating the attention module at block $b_m$ and denoising timestep $t_{m}$ for each binary mask $M_l$ based on the following formula:
+\begin{equation}\label{eq:modulate}
+    f \left( \sigma \left( \frac{QK^{T}}{\sqrt d} \right) \cdot V \pm \lambda M_l \right),
+\end{equation}
+where $\lambda$ controls the degree of modulation.
+The intuition behind this process is to add or subtract a certain amount of perturbation $\lambda$ on the region specified by mask $M_l$ and then continue the denoising process to reconstruct a modulated image.
+By applying $+ \lambda$ and $- \lambda$, we get two different modulated images denoted as $I_{l}^{+}$ and $I_{l}^{-}$ respectively. 
+Then, a difference map is computed as $D_{l} = \|I_{l}^{+} - I_{l}^{-} \|^{2}$, where $D_{l} \in \mathbb{R}^{H \times W}$. 
+This is repeated for all masks in $\mathcal{M}$ to get a set of difference maps $\mathcal{D}=\{ D_{1}, D_{2}, ..., D_{L} \}$.
+Finally, the full-resolution segmentation map is computed as $Y = \arg \max_l \mathcal{D} \ . $
+\begin{comment}
+\begin{equation}\label{eq:y}
+Y = \arg \max_l \mathcal{D} \ .    
+\end{equation}
+\end{comment}
+
+
+\section{Method}
+
+\begin{figure}[t!]
+\includegraphics[width=1.0\textwidth,trim={0cm 0cm 0cm 0cm},clip]{figures/method_figures_abdo.pdf}
+\caption{Our Video Semantic Segmentation (VSS) approach encompasses three stages.
+In Stage 1, we initialize a Scene Context Model $\Omega$ as a KNN classifier with the aggregated diffusion features $\widetilde{F}^1$ of the first frame and a coarse mask $M^1$ produced by K-Means clustering. In Stage 2, we use the context model $\Omega$ to predict coarse masks for the remaining frames in the batch $M^{2\dots B}$. We refine the coarse maps $M^{1 \dots B}$ using our correspondence-based refinement (CBR). In Stage 3, we use the refined coarse masks to modulate the attention layers of the diffusion process with factor $\pm \lambda$ to obtain a modulated latent $\hat{z}_t$. Then, we blend $\hat{z}_t$ with the original unmodulated latent $z_t$ using the coarse masks to obtain a less noisy latent $\widetilde{z}_t$. Finally, the latent $\widetilde{z}_t$ is decoded to obtain images $I^+, I^-$ that are used to compute a set of difference maps per segment $l \in L$. The final predictions are made by applying an $\arg \max$ operation over the difference maps similar to \cite{namekata2024emerdiff}.
+The process is repeated for the following batch of frames where the context model is updated in an autoregressive manner using the coarse masks $M^{1\dots B}$ and their corresponding features $\widetilde{F}^{1\dots B}$.
+}
+\label{fig:workflow}
+\end{figure}
+Our method encompasses three main components, as illustrated in \Cref{fig:workflow}.
+First, we construct a \emph{scene context model} to produce coarse segmentation maps based on the diffusion features (\Cref{sec:scm}).
+Then, we introduce a \emph{correspondence-based refinement} strategy to curate the coarse segmentation maps (\Cref{sec:cbr}).
+Finally, we propose a \emph{masked modulation} approach that produces less noisy and more stable full-resolution segmentation maps (\ref{sec:modulation}).
+We also provide some details on adapting our approach to employ features from Stable Video Diffusion (SVD) in \Cref{sec:svd}.
+\subsection{Scene Context Model}
+\label{sec:scm}
+Image segmentation algorithms are designed for segmenting individual images and can only process videos in a frame-by-frame manner. 
+This is not ideal for videos, as the per-frame predictions will be completely independent and consequently temporally inconsistent.
+To address this limitation, we propose to create a scene context model that is initialized at the first frame and then updated throughout the video in an autoregressive manner.
+
+Given a video sequence $\mathcal{X}= \{X^1, X^2, \dots, X^N \}$ with $N$ frames, we extract diffusion features $F^n_i$ for all frames in $[1,N]$, where $i$ is the decoder block.
+Since different blocks have different information, we aggregate features from multiple blocks by averaging to produce an aggregated feature $\widetilde{F}^n$.
+We found that aggregating blocks 6, 7, and 8 attains the best results (see \Cref{sec:abl}).
+Note that these blocks share the same resolution and number of channels.
+Then, we process the video in batches of length $B$.
+
+For the first batch, we use K-Means to extract the initial coarse segmentation map for the first frame ${M}^1$ based on the aggregated features $\widetilde{F}^1$.
+Given the diffusion features $\widetilde{F}^1$ and the coarse map ${M}^1$ as labels, we train a KNN classifier $\Omega ({M}^1, \widetilde{F}^1)$ as a context model to discriminate between different clusters.
+Then, we use the context model $\Omega$ to predict the coarse segmentation maps for the remaining frames in the first batch $ \{ {M}^2, {M}^3, \dots, {M}^{B} \} $.
+We refine the coarse maps further using the correspondence-based refinement (\Cref{sec:cbr}) and use them alongside their aggregated diffusion features to update the context model as $ \Omega ( [\widetilde{M}^1, \widetilde{M}^2, \dots, \widetilde{M}^{B}], [ \widetilde{F}^1, \widetilde{F}^2, \dots, \widetilde{F}^{B} ] ) $. 
+The context model is then used for the next batch.
+This strategy ensures that the context model $\Omega$ adapts to changes in the video in an auto-regressive manner.
+\subsection{Correspondence-Based Refinement}
+\label{sec:cbr}
+Since the context model operates purely in the feature space, it is unaware of the spatial arrangement of clusters or how they develop temporally.
+This might cause inconsistencies between clusters, especially across borders between objects.
+To alleviate this, we propose a refinement strategy based on the semantic correspondence between consecutive frames.
+We compute per-pixel correspondences (in the coarse map resolution) similar to \cite{tang2023emergent} based on the  diffusion features of block $c$ between images $j$ and $j+1$ to produce a correspondence-based coarse segmentation $\hat{M}^j$ :
+\begin{equation}        
+  \hat{M}^j[p] =
+    \begin{cases}
+      \arg \max_q \Gamma(F^{j}_c[p], F^{j+1}_c[q]) \ , &  \text{if} \parallel p - q \parallel^2 \leq \mathcal{T} \\
+      & \\
+      {M}^j[p] \ , & \text{Otherwise}\\      
+    \end{cases},       
+\end{equation}
+where $\Gamma$ is a distance metric {that we choose to be the cosine similarity}.
+The threshold $\mathcal{T}$ discards faulty matches that are spatially unplausible.
+These correspondences are computed for all pixels $p$ and over all frames within the batch.
+Finally, we perform a majority voting for all pixels over the temporal axis to produce the final coarse segmentation map $\widetilde{M}^j$:
+\begin{equation}
+    \widetilde{M}^j[p] = \arg\max_{l \in L} \sum_{j=0}^{B-1} \mathbf{1}(\hat{M}^j[p] = l) \enspace.
+\end{equation}
+Here, \( \mathbf{1}(\hat{M}^j[p] = l) \) is an indicator function that equals 1 if \( \hat{M}^j[p] = l \) and 0 otherwise.
+This interplay between the context model and the correspondence-based refinement leads to more accurate predictions. 
+The context model encodes the feature space of the video batch, while the refinement strategy spatially and temporally regularizes the predictions.
+This setup is illustrated in \Cref{fig:cbr}.
+
+\begin{figure}[t!]
+\includegraphics[width=\textwidth]{figures/figure_4.pdf}
+\caption{A detailed illustration of (a) the scene context model and (b) correspondence-based refinement.}
+\label{fig:cbr}
+\end{figure}
+
+\subsection{Masked Modulation}
+\label{sec:modulation}
+The modulation process aims to upsample the coarse segmentation masks to the full-resolution of the video frames.
+When applying the modulation process, it is only the modulated regions that are expected to change, as explained in \Cref{sec:emerdiff}.
+However, in practice, the modulation process produces noise outside that region, causing discrepancies when computing the final segmentation labels. 
+Therefore, we propose a masked modulation process that employs the coarse segmentation map to mask out both the latents and the difference maps outside the modulated region.
+For a denoising timestep $t$, we blend the latents as follows:
+\begin{equation}
+\label{eq:latent_blending}
+    \widetilde{z}_{t} = z_{t} * (1 - M_{l}) + \hat{z}_{t} * M_{l}, 
+\end{equation}
+where $z_{t}$ is the latent from the unmodified sampling step, $\hat{z}_{t}$ is the latent from the modulated sampling process, and $M_{l}$ is the low-resolution mask we are modulating. 
+Despite the fact that the modulation is only performed at timestep $t_{m}$, we apply latent blending after $t_{m}$ until timesteps $t_f$, as once the attention map of a certain timestep is modified, it will influence all the following denoising timesteps.
+
+To further suppress the noise in the difference map, we can apply the same blending strategy to the difference maps.
+We compute the filtered difference map $\widetilde{D}_{l}$ as:
+\begin{equation}
+\widetilde{D}_{l} = D_{l} * M_{l} + s \cdot D_{l} * (1 - M_{l}),
+\end{equation}
+where $s$ is a scaling hyperparameter that controls the filtering strength. 
+\subsection{Adapting SVD for Video Semantic Segmentation}
+\label{sec:svd}
+As it is natural to explore applying video models for video tasks, we further investigate the possibility of using Stable Video Diffusion (SVD)\cite{blattmann2023svd} features to perform VSS. 
+Unlike SD, which is text-conditioned, SVD is image-conditioned.
+SVD adapts the SD 2.1 architecture and finetunes on a highly-curated large video dataset. 
+Moreover, it employs a video VAE encoder to encode and decode the videos.
+SVD extends the SD architecture design mainly in two parts:
+1) A video residual network that consists of a set of convolutional blocks that handle every frame of the video latent independently. 
+2) A temporal attention layer is applied on top of the output of the spatial attention layer, which computes the full attention of the features along the temporal axis on each spatial location. 
+The output of the temporal attention and the output of the spatial attention are then mixed with a learnable weight.
+We use SVD as a backbone model to extract the features as well as do modulation following similar steps described in previous sections. 
+
+\begin{comment}
+\subsection{Adapting SVD for Video Semantic Segmentation} \label{sec:svd}
+As it is natural to explore applying video models for video tasks, we further investigate the ability of Stable Video Diffusion (SVD)\cite{blattmann2023svd} to perform VSS. 
+The main difference between SD and SVD is that the later is image-conditioned, while the former is text-conditioned.
+SVD adapts the SD 2.1 architectures and finetunes on a highly-curated large video dataset. 
+Moreover, it employs a video VAE encoder to encode and decode encode the videos.
+SVD extends the SD architecture design mainly in two parts:
+\begin{enumerate*}
+\item A video residual network which consists a set of convolutional blocks that handle every frame of the video latent independently. 
+\item A temporal attention layer is applied on top of the output of the spatial attention layer, which computes the full attention of the features along the frame axis on each spatial location. The output of the temporal attention and the output of the spatial attention are then mixed with a learnable weight.  
+\end{enumerate*}
+
+\subsubsection{Design space for Stable Video Diffusion}
+We choose the feature maps from the spatial attention rather than temporal attention, because we find that spatial attention between frames exhibits much more similarity than which of temporal attention while also preserving more spatial details. 
+Upon determining the semantic layer, we employ feature tracking to generate low-resolution masks for batches of frames.
+
+We further observe that modulating a shallower block may give a coarse boundary, while a deeper block will break the connectivity within one cluster. 
+As there are extra temporal attention layers in SVD, we also explore modulating spatial attention, temporal attention, or both of them at the same time. 
+We find that modulating both spatial attention and temporal attention gives the most spatial details as well as connectivity of one cluster. 
+We inject both the origianal spatial attention and temporal attention maps during the denoising process. 
+We find that despite of similar architectures, the transformer blocks in SVD can exhibit different properties than which in SD. It may not be easy to find a unified setting that works for all the variations in the Stable Diffusion family.
+
+For the rest of the process, we follow similar steps as it is described for VSS using image diffusion models to obtain the final video segmentation masks.
+\end{comment}
+
+
+\section{Experiments}
+
+To the best of our knowledge, no zero-shot diffusion-based Video Semantic Segmentation (VSS) approaches exist.
+Therefore, we compare against existing zero-shot image segmentation by adapting them to the VSS setting.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{Quantitative performance comparison.}
+\label{tab:quantitative}
+\begin{tabular}{lccccccccc}
+\toprule
+\multirow{2}{*}{Method} & \multirow{2}{*}{Backbone} & \multirow{2}{*}{Training} & \multicolumn{3}{c}{VSPW} & Cityscapes & \multicolumn{3}{c}{Camvid} \\
+\cmidrule(lr){4-6} \cmidrule(lr){7-7} \cmidrule(lr){8-10} 
+                  &                   &                   &    mIoU   &   mVC$_8$    &  mVC$_{16}$    &   mIoU    &    mIoU   &    mVC$_8$   &   mVC$_{16}$  \\
+\midrule
+
+        TMANet\cite{wang2021tmanet}          &      ResNet-50             &      Supervised    &    --   &   --   &   --   &   80.3    &   76.5    &   --    &   --    \\
+          UniVS\cite{li2024univs}        &        Swin-T           &       Supervised            &    59.8    &   92.3   &  --    &   --      &    --   &    --   &  --     \\
+           DVIS++\cite{zhang2023dvis}       &       VIT-L            &        Supervised           &   63.8     &  95.7    &   95.1   &   --      &    --   &   --    &  --     \\
+\midrule
+\midrule
+
+       CLIPpy    &       T5 + DINO            &  zero-shot    &   17.7    &   72.4    &  68.4    &   4.7     &   2.6    &    44.4   &   35.6     \\
+        EmerDiff (SVD)          &       SVD            &     zero-shot              &    39.7   &    82.1     &   78.5   &  11.0      &   7.3    &    71.7   &  64.4     \\
+        EmerDiff (SD)          &       SD 2.1            &     zero-shot              &   43.4    &   68.9    &   64.3   &     21.5    &    6.9   &   39.8   &   32.9    \\
+
+\rowcolor[gray]{.9}
+        Ours(SVD)          &      SVD             &     zero-shot              &   53.2    &   89.3    &   88.0   &   36.2    &   16.6    &    87.4   &  85.8   \\
+\rowcolor[gray]{.9}
+        Ours(SD)          &    SD 2.1               &         zero-shot          &    \textbf{60.6}    &    \textbf{90.7}   &  \textbf{89.6}   &     \textbf{37.3}    &   \textbf{20.6}    &   \textbf{92.3}    &   \textbf{91.9}   \\
+        
+\bottomrule         
+\end{tabular}
+\end{table}
+
+\subsection{Experimental Setup}
+\myparagraph{Implementation details.} 
+We evaluate our method with both SD 2.1 and SVD backbones, and we denote them as \emph{Ours (SD)} and \emph{Ours (SVD)}.
+Given the video frames, we encode them using VAE, and we add a certain level of noise that corresponds to timestep $t_{inv}$ and start the denoising process at this noise level. 
+As we need to perform modulation at timestep $t_{m}$, the value of $t_{inv}$ must be larger than $t_{m}$. 
+Initially, we set the modulating coefficient $\lambda$ to 10 as in \cite{namekata2024emerdiff}.
+However, we observed that latent blending suppresses the modulating strength; thus, we increase $\lambda$ to 50 when latent blending is enabled. 
+We set the batch size $B=14$, which is also the original training batch size of SVD. 
+
+We fix all hyperparameters for all videos and datasets, and we do not apply any post-processing methods like a conditional random field (CRF) on the output segmentation maps. 
+All experiments were conducted on a single NVIDIA A100 40G GPU. 
+ 
+\myparagraph{Evaluation protocol.} 
+The clusters generated by K-Means in the first frame are class-agnostic. 
+To be able to compare our predicted segmentation maps against the groundtruth, we use the labels from the groundtruth of the first frame to assign labels to our clusters.
+This is similar to the evaluation protocol in Video Object Segmentation, but we differ in that we only use the labels from the groundtruth and keep the segmentation masks from K-Means. 
+
+\myparagraph{Baselines.} 
+We compare against zero-shot image segmentation approaches CLIPpy \cite{Ranasinghe2023clippy} and EmerDiff \cite{namekata2024emerdiff}.
+For EmerDiff, we adapt it to our zero-shot VSS setup.
+We use the same label assignment strategy for the first frame, but then we train a KNN classifier to predict the next frame in an autoregressive manner, similar to our approach.
+We also provide results of the supervised approaches DVIS++ \cite{zhang2023dvis}, UniVS \cite{li2024univs}, and TMANet \cite{wang2021tmanet} to showcase where our zero-shot approach stands compared to them.
+
+\myparagraph{Dataset.} 
+We evaluate on the validation set of three commonly used VSS datasets: VSPW\cite{Miao_2021_CVPR} with diverse videos, Cityscapes\cite{Cordts2016Cityscapes} and CamVid \cite{Brostow2009camvid} with driving videos. 
+VSPW has a resolution of 480p,  while CamVid is 360p.
+For Cityscapes, to fit the video frames into GPU memory, we generate the segmentation maps at the resolution of $512 \times 256$ and upsample them to $2048 \times 1024$ for evaluation.
+
+\myparagraph{Metrics.}  
+We report mean Intersection-over-Union (mIoU) and mean Video Consistency (mVC) \cite{Miao_2021_CVPR} as quantitative metrics similar to existing VSS approaches \cite{zhang2023dvis,zhang2023dvispp,wang2021tmanet}. 
+mIoU describes the mean intersection-over-union between the predicted and ground truth pixels, while mVC computes the mean categories' consistency over the long-range adjacent frames. 
+We denote mVC evaluated under 8 and 16 video frames as mVC$_{8}$ and mVC$_{16}$, respectively.
+We use both metrics together to showcase the segmentation quality on individual images as well as the overall temporal consistency. 
+\begin{figure}[t!]
+\include{figures/quali_comp/quali_comp.tex}
+\caption{Qualitative comparison of different zero-shot methods. Note that the color of a segmentation cluster only represents the relative index of the clusters when the video is processed. The color itself does not map to an absolute label.}
+\label{fig:quali_comp}
+\end{figure}
+
+\subsection{Quantitative results}
+We provide the quantitative results in \Cref{tab:quantitative}. 
+Our approach with both SD and SVD backbones performs the best in terms of all evaluation metrics on all datasets amongst the zero-shot approaches.
+More specifically, it improves over EmerDiff for both SD and SVD backbones in terms of mIoU with 33\%, 29\% on the VSPW dataset, 54\%, 106\% on the CityScapes dataset, and 99\% and 78\% on the Camvid dataset.
+Furthermore, our approach performs similarly to the supervised method UniVS and DVIS++ in terms of mIoU despite not being explicitly trained for this task.
+On the CityScapes and Camvid datasets, our approach outperforms the zero-shot methods by a huge margin.
+However, there is still a performance gap compared to the supervised approaches.
+We attribute this to two main reasons.
+
+Secondly, we downsample their video frames of CityScapes by a factor of $16$ to match the resolution of the diffusion models.
+This makes it difficult to segment small objects such as pedestrians and traffic poles, contrary to the VSS-specialized approaches that consider small objects when designing their solutions. We leave it for future work to adopt a tiled approach for high-resolution video segmentation.
+
+\subsection{Qualitative results} \label{sec:qual}
+We show some qualitative results of different zero-shot methods in \Cref{fig:quali_comp}. 
+CLIPpy struggles to locate the boundaries accurately and produce coarse segments.
+EmerDiff can segment the first frame accurately but struggles to preserve the masks temporally. 
+Our method with SD backbone produces the best segmentation maps in terms of segmentation quality and temporal consistency. 
+The maps have sharper boundaries and clean clusters compared to other methods.
+Ours (SVD) performs better than its EmerDiff counterpart. 
+However, the overall segmentation quality obtained by the SVD backbone is worse than that of SD.
+This can be attributed to the degraded feature representation of SVD compared to SD as a result of training on a relatively small video dataset compared to SD.
+We provide video results on our project website \href{https://qianwangx.io/VidSeg_diffusion/}{https://qianwangx.io/VidSeg\_diffusion/}.
+\subsection{Ablation Analysis}\label{sec:abl}
+
+\begin{table}[t!]
+\centering
+\scriptsize
+\caption{Ablation study. The videos we use here are the first 30 videos from VSPW validation set. CBR refers to Correspondence-Based refinement.}
+\label{tab:ablation}
+
+\begin{tabular}{cccccccccc}
+\toprule
+\multirow{2}{*}{Batch size $B$} & \multirow{2}{*}{Masked Modulation} & \multirow{2}{*}{Feature Aggregation} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}CBR\end{tabular}} & \multicolumn{3}{c}{SD2.1} & \multicolumn{3}{c}{SVD} \\
+\cmidrule(lr){5-7}  \cmidrule(lr){8-10}
+                  &                   &                   &                   &    mIoU   &   mVC$_8$    &   mVC$_{16}$   &    mIoU   &   mVC$_8$    &    mVC$_{16}$  \\
+\midrule
+    1              &          \xmark         &        \xmark           &      \xmark             &  33.4     &   70.6    &   60.2   &   26.6    &   82.2    &    78.3  \\
+    14              &         \xmark          &        \xmark           &       \xmark            &  43.4     &   76.9    &   73.8   &    38.9   &   90.2    &   88.7   \\
+    14              &         \cmark          &         \xmark          &       \xmark            &    45.6   &    87.5   &   85.5   &    38.6   &   90.5    &   89.0   \\
+    14              &          \cmark          &           \cmark         &      \xmark             &  46.6     &   87.6    &   85.7   &   \textbf{39.4}    &    90.2   &   89.2   \\
+    14              &          \cmark          &           \xmark         &      \cmark             &   \textbf{47.4}    &    89.2   &   87.5   &    37.1   &    91.5   &   90.3   \\
+   14              &         \cmark          &         \cmark          &        \cmark           &     46.5  &    \textbf{89.8}   &   \textbf{88.4}   &    38.2   &   \textbf{92.3}    &  \textbf{91.3}  \\ 
+\bottomrule 
+\end{tabular}
+\end{table}
+
+We show an ablation of our newly proposed components in \Cref{tab:ablation}. 
+Incorporating more frames in training our context model greatly improves the mIoU as well as mVC.
+Enabling the masked modulation and the feature aggregation improves all metrics further.
+The best results in terms of mIoU are attained by enabling the correspondence-based refinement and disabling the feature aggregation.
+The feature aggregation can negatively impact the mIoU on some occasions due to the coarse groundtruth of the VSPW dataset.
+\Cref{fig:feature_fusion_comp} shows an example where our approach remarkably predicts the fine details of the window as one class and the background as another class, while the groundtruth annotates the whole region as a window.
+Finally, the best trade-off between the segmentation quality (mIoU) and temporal consistency (mVC) is achieved with all components. 
+\myparagraph{Feature Aggregation.}
+To validate the efficacy of feature aggregation, we show a visual comparison of the segmentation maps produced by features in different blocks in \Cref{fig:feature_fusion_comp}. 
+The aggregated features can encode more spatial details, which could enhance the coarse masks and, consequently, the high-resolution segmentation maps. 
+\myparagraph{Masked Modulation.}
+We show the qualitative comparison with or without the latent blending in \Cref{fig:latent_blending_comp}. 
+The figure shows that without the latent blending, the difference map in (c) contains high activations outside of the modulated sub-region indicated by the coarse binary mask.
+The existence of activation in these regions can lead to a false assignment of the segmentation labels, as shown in (e).
+For example, a part of the lab table is classified as a wall. 
+After applying latent blending, we remove activations outside of the mask region and obtain a cleaner segmentation mask, as shown in (f).
+
+
+\begin{figure}[t!]
+    \centering
+    \hspace{0.02\textwidth} % Adjust horizontal space as necessary
+    \begin{minipage}[t]{1.0\textwidth} % Adjust width as necessary
+        \centering
+        \includegraphics[valign=c, trim={2cm 8.5cm 3cm 3cm},clip, width=\linewidth]{figures/feature_fusion_comp_gt.pdf} % Replace with your figure
+        \caption{High-resolution segmentation map generated by aggregated feature has more details than features from a single block. We omit the low-resolution segmentation map for a better visual comparison.}
+        \label{fig:feature_fusion_comp}
+    \end{minipage}
+\end{figure}
+\begin{figure}[t!]
+\centering
+\setlength{\tabcolsep}{0pt}
+\scriptsize
+\begin{tabular}{c@{\hskip 1pt}c@{\hskip 2pt}c@{\hskip 1pt}c@{\hskip 2pt}c@{\hskip 1pt}c}
+Input image & Low-res mask & wo.masked modulat. & w.masked modulat. & wo.masked modulat. & w.masked modulat. \\
+\includegraphics[scale=0.075]{figures/ablate_diff_map/exp_1/input_image.jpg} & \includegraphics[scale=0.075]{figures/ablate_diff_map/exp_1/low_res_mask.jpg} &     \includegraphics[scale=0.075]{figures/ablate_diff_map/exp_1/emerdiff_difference.jpg}      &     \includegraphics[scale=0.075]{figures/ablate_diff_map/exp_1/sd_difference.jpg}     &     \includegraphics[scale=0.075]{figures/ablate_diff_map/exp_1/emerdiff.jpg}      &  \includegraphics[scale=0.075]{figures/ablate_diff_map/exp_1/sd.jpg}      \\
+(a) & (b) & (c) & (d) & (e) & (f)
+\end{tabular}
+\caption{We show that given a low-resolution mask of a sub-region (b), the corresponding difference map without masked modulation (c) can have high activation outside the masked sub-region, which will result in spatial inconsistency on the final segmentation map (e). By applying masked modulation on the intermediate latents, the high activation on the irrelevant regions of the difference map will be removed (d), therefore producing a cleaner segmentation map (f). }
+\label{fig:latent_blending_comp}
+\end{figure}
+
+\begin{comment}
+\begin{table}[t!]
+\centering
+\scriptsize
+\caption{Ablation study. The videos we use here are the first 50(?) videos from VSPW validation set. }
+\label{tab:ablation}
+
+\begin{tabular}{cccccccccc}
+\toprule
+\multirow{2}{*}{Feature tracking} & \multirow{2}{*}{Latent blending} & \multirow{2}{*}{Feature fusion} & \multirow{2}{*}{Flow-based refinement} & \multicolumn{3}{c}{SD2.1} & \multicolumn{3}{c}{SVD} \\
+\cmidrule(lr){5-7}  \cmidrule(lr){8-10}
+                  &                   &                   &                   &    mIoU   &   VC$_8$    &   VC$_{16}$   &    mIoU   &   VC$_8$    &    VC$_{16}$  \\
+\midrule
+    \xmark              &          \xmark         &        \xmark           &      \xmark             &  33.3     &   69.4    &   64.9   &   --    &   --    &    --  \\
+    \cmark              &         \xmark          &        \xmark           &       \xmark            &  42.0     &   67.8    &   63.9   &    30.5   &   52.2    &   47.2   \\
+    \cmark              &         \cmark          &         \xmark          &       \xmark            &    46.6   &    88.1   &   86.4   &    39.1   &   90.1    &   88.6   \\
+    \cmark              &          \cmark          &           \cmark         &      \xmark             &  46.4     &   87.7    &   85.8   &   40.0    &    89.2   &   88.0   \\
+    \cmark              &          \cmark          &           \xmark         &      \cmark             &   46.6    &    89.6   &   88.1   &    39.7   &    89.2   &   88.0   \\
+   \cmark              &         \cmark          &         \cmark          &        \cmark           &     44.9  &    87.3   &   85.5   &    39.6   &   90.2    &  89.0  \\ 
+\bottomrule 
+\end{tabular}
+\end{table}
+\end{comment}
+
+
+
+\section{Limitations and Future Work}
+
+\label{sec:limitations}
+One of the limitations of our approach is its dependency on the quality of the image inversion method.
+Moreover, fine image details are likely to be discarded due to the compression from the VAE encoder.
+Therefore, our approach can benefit from future research improving both VAE encoding and image inversion.
+It is also beneficial to investigate if other video diffusion models have semantically higher quality features than SVD.
+Another limitation of our approach is that it is instance-agnostic, \ie it groups all objects of the same class into the same cluster.
+This is due to the inherent nature of diffusion features that group similar semantics.
+For future work, our approach can be extended to perform Video Instance or Panoptic segmentation.
+
+
+
+\section{Conclusions}
+
+In this work, we introduced the first \textit{zero-shot} method for Video Semantic Segmentation (VSS) using pre-trained diffusion models. 
+We proposed a pipeline tailored for VSS that leverages image and video diffusion features, and attempts to enhance their temporal consistency.
+Experiments showed that our proposed approach significantly outperforms zero-shot image semantic segmentation methods on several VSS benchmarks, and performs comparably well to supervised methods on VSPW dataset.
+
+
+
+
+
+
+

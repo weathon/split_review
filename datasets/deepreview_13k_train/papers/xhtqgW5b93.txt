@@ -1,0 +1,290 @@
+\title{ToMA: Token Merging with Attention For Diffusion Models}
+
+\begin{abstract}
+Diffusion models have emerged as leading models for image generation. 
+Plug-and-play token merging techniques have recently been introduced to mitigate the heavy computation cost of transformer blocks in diffusion models. 
+However, existing methods overlook two key factors: 1. they fail to incorporate modern efficient implementation of attention, so that, the overhead backfires the achieved algorithmic efficiency 2. the selection of token to merge ignores the relation among tokens, limiting the image quality. 
+In this paper, we propose Token Merging with Attention(ToMA) with three major improvements. Firstly, we utilize a submodular-based token selection method to identify diverse tokens as merge destinations, representative of the entire token set. Secondly, we propose an attention merge, utilizing the efficient attention implementation, to perform the merge with negligible overhead. Also, we abstract the (un-)merging as (inverse-)linear transformations which also allows shareable transformation across layers/iterations. Finally, we utilize the image locality to further accelerate the computation by performing all the operations on tokens in local tiles.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+![](images/df384d5097b0d495a1c28e6615b11d1c355fb22ac9d77c936549107e7966b692.jpg)  
+
+Figure 1: Variants of ToMA generated images: ToMA stripe, ToMA, ToMA tile, ToMA  
+
+Diffusion Ho et al. (2020); Song et al. (2021); Dhariwal & Nichol (2021) emerges as one of the leading approaches for high-quality image generation. However, the increasing complexity of diffusion models, driven by their core transformer-based architecture, presents significant computational challenges. The design of the transformer leads to quadratic complexity with respect to the number of tokens, making them inefficient and resource-intensive as token counts increase.  
+
+Methods with different approaches have been developed to mitigate this issue. Flash Attention Dao et al. (2022); Dao (2023) introduces a more efficient attention mechanism that reduces memory overhead, while xformers Lefaudeux et al. (2022) utilize sparse attention to lower memory usage and improve scalability. Methods like Token Pruning Kim et al. (2022) reduce computation by eliminating less relevant tokens during inference, albeit at the cost of potential quality degradation.  
+
+ToMeSD Bolya & Hoffman (2023) leverages token merging Bolya & Hoffman (2023); Kim et al. (2023), consolidating similar tokens during the forward pass to reduce the token count in computational layers, thereby lowering complexity without requiring network retraining. Essentially, the original sequence of tokens gets merged before each layer in the transformer block, including attentions and MLPs, and after the computation finishes, an unmerge is applied to transform the merged tokens back to the original sequence length. Token merge shares the spirit with token pruning by reducing the input size to transformers, and is orthogonal to other acceleration methods such as Flash Attention and xformers.  
+
+Though ToMeSD has shown considerable theoretical speedups by significantly reducing the number of tokens, it struggles to accelerate diffusion models in practice with modern attention implementation and advanced GPU architectures. This is because the merge algorithm of ToMeSD Bolya & Hoffman (2023) requires relatively costly operations on GPU (e.g., sorting). This creates significant overhead that overshadows the speedups gained from token reduction, especially with more efficient implementations of attention (e.g., Flash Attention Dao (2023)) and GPU architectures better optimized for attention-like operations.  
+
+In this paper, we propose Token Merge with Attention (ToMA) to get practical speedups for diffusion models in a plug-and-play manner. Our method first utilizes a submodular function to identify a representative subset of tokens as merge destinations with a vectorized optimization algorithm that runs efficiently on GPUs. We then perform token merge by using an attention-like operation between the destination tokens and all tokens in the sequence, resulting in a linear transformation. For unmerge, we utilize the inverse or the transpose of such a linear transformation. The design of ToMA carefully considers the advantages and limitations of GPU computations.  
+
+To further reduce the overhead of ToMA, we leverage the locality characteristics of the hidden states within the latent space, which preserves image locality, so the tokens are more likely to be similar within a local region. By partitioning the hidden states into local regions, we can run ToMA in each region independently and mitigate the overhead costs by reducing the input size to ToMA while enjoying the parallelism of computation. Moreover, we also find that the destination selection and linear transformation of merge and unmerge can be shared across network layers and diffusion steps, which further decreases the ToMA overhead costs. As a result, ToMA achieves $30\%{-}50\%$ speedups without noticeable sacrifice in image quality.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Efficient Transformer: The core of Transformers’ Vaswani et al. (2017) quadratic time complexity poses a bottleneck for both inference and training. Various methods have attempted to address this problem. To reduce computation complexity, ReformerKitaev et al. (2020) uses locality-sensitive hashing where LinformerWang et al. (2020), PerformerChoromanski et al. (2020), Low-Rank TransformerWinata et al. (2020) leverage low-rank approximations of the self-attention matrix to speed up computation. PerceiverJaegle et al. (2021), CharformerTay et al. (2021), and Funnel TransformersDai et al. (2020) use different ways to downsample the input to reduce the computation cost. Moreover, Sparse TransformerChild et al. (2019) and Big BirdZaheer et al. (2020) design different sparse attention patterns to let each token attend to a subset of all tokens. FRDiff So et al. (2024) accelerates diffusion inference by reusing feature maps across time steps but not merging the tokens.  
+
+Learned Token Reduction The majority of learned token reduction involve training auxiliary models to assess the importance of tokens in the input data. For example, DynamicViT Rao et al. (2021) employs a lightweight MLP module to generate pruning masks based on input token features. These masks are learned through a distillation process. GQA Ainslie et al. (2023) introduces an innovative mechanism that shares key and value heads across multiple query heads, balancing between the flexibility of multi-head attention and the efficiency of multi-query attention. A-ViT Yin et al. (2022) efficiently computes halting probabilities using the first channel of features, guided by auxiliary losses. Despite their effectiveness, these methods often require additional fine-tuning of auxiliary modules, which can be seen as a limitation. Language-Vision Acceleration. CrossGET Shi et al. (2024) combines token but on vision-language models with tasks like image captioning and imagetext retrieval. TRIPS Ye et al. (2024) proposes text-relevant image patch selection but it accelerates the image-language model pertaining. DiffRate Chen et al. (2023) incorporates the compression rate and merges tokens in the vision transformers but in the training stage.  
+
+Heuristic Token Reduction Unlike learned token reduction techniques, some works have introduced heuristic token reduction strategies that can be directly applied to pre-trained ViTs without requiring additional fine-tuning. For instance, Adaptive-Token Sampling Fayyaz et al. (2022) selects tokens based on their similarity to the class token in the attention map, which outperforms the top-k sampling. However, the requirement of the class token poses a limitation in dense prediction tasks such as image generation. Token Pooling Marin et al. (2021) merges spatially adjacent tokens within a local window to reduce the token count at various stages of the ViT. Token merge Bolya et al. (2023) introduced a different pooling method that merges similar tokens based on an efficient bipartite matching algorithm. ToMeSD Bolya & Hoffman (2023) randomly groups tokens into source and destination groups and merges the source tokens with the destination tokens based on the pair similarity score. This is one of our baselines.  
+
+![](images/3e5fcd23c2bcc4ae1d58fa6dce777d12f9221fa23fb28fdc030a036eccdca66a.jpg)  
+Figure 2: Overview of ToMA. Facility Location selects representative destination tokens $D$ from the token set $N$ using submodular optimization. Attention computes a low-rank projection matrix mapping $N$ to $D$ , followed by standard transformer operations (e.g., self-attention, cross-attention, or MLP) on $D$ . Inverse reconstructs $N$ from $D$ via a pseudo-inverse or transpose. These steps can be applied locally to latent space regions as batch operations for efficiency.  
+
+
+
+\section{3 PRELIMINARIES  }
+
+
+Attention Computation and Notation. We denote the attention computation as SDPA(scaled dot product attention). The input query is $Q\in\mathbb{R}^{N\times d}$ , key is ${\cal K}\in\mathbb{R}^{N\times d}$ , and value is $V\in\mathbb{R}^{N\times d}$ . $N$ is sequence length and $d$ is the hidden state dimension.  
+
+$$
+\mathrm{SDPA}(Q,K,V)=\mathrm{softmax}\left({\frac{Q K^{T}}{\sqrt{d}}}\right)V
+$$  
+
+Additionally, we denote $D$ as the size of all destination tokens and $B$ as the batch size, $\mathbf{\deltaX}$ as the latent matrix of shape $N{\times}d$ that gets projected into $Q,K$ and $V$ (for simplicity, we assume the same feature dimension in latents and attention). Matrices and vectors are in bold, while others are not.  
+
+$$
+\begin{array}{r l}&{\mathbf{for}\;i=1\ldots k\;\mathbf{do}}\\ &{\;\;\;\;v^{*}\in\arg\operatorname*{max}_{v^{\prime}\in V\setminus A}f(v^{\prime}|A);}\\ &{\;\;\;\;A=A\cup\{v^{*}\};}\end{array}
+$$  
+
+Submodularity. A submodular function (Fujishige, 2005) is a set function $f\,:\,2^{V}\,\rightarrow\,\mathbb{R}$ with the diminishing return property: $f(v|A)\;\geq\;f(v|B)$ if $v\not\in B$ , $A\ \subseteq\ B$ , where $f(v|A)\;:=\;f(v\cup A)\;-\;f(A)$ . Intuitively, the property states that the gain of a smaller subset is always greater or equal to that of a larger subset. This makes submodular function $f(A)$ very useful in expressing the diversity of the input subset $A$ relative to the ground set $V$ .  
+
+end return $A$  
+
+Algorithm 1 Greedy  
+
+The submodular maximization problem with a cardinality constraint is shown below 2.  
+
+$$
+\operatorname*{max}_{A\subseteq V}\;f(A)\quad{\mathrm{s.t.}}\;|A|\leq k
+$$  
+
+The greedy algorithm (Alg. 1) guarantees a $(1-1/e)$ -approximation of the optimal solution. It iteratively selects the element that maximizes the gain until the chosen set size reaches $k$ .  
+
+Conditional Diffusion Model. The conditional diffusion model is a variation from the diffusion model. Different from the unconditional diffusion model, the conditional one estimates the data distribution with the additional information. The forward noise process is defined in 3  
+
+$$
+q(\pmb{x}_{t}|\pmb{x}_{0}):=\mathcal{N}(\pmb{x}_{t}|\sqrt{\bar{\alpha}_{t}}\pmb{x}_{0},(1-\bar{\alpha}_{t})\pmb{I}),
+$$  
+
+The model gradually adds noise to the input image over steps $t$ to transform input $\pmb{x}_{0}$ to a latent noise representation. $\begin{array}{r}{\bar{\alpha}_{t}:=\prod_{s=0}^{t}\alpha_{s}=\prod_{s=0}^{t}(1-\beta_{s})}\end{array}$ and $\beta_{s}$ represents the noise variance schedule Ho et al. (2020). The denoising process below  
+
+$$
+p_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_{t})=\mathcal{N}(\mathbf{x}_{t-1};\mu_{\theta}(\mathbf{x}_{t},t),\pmb{\sigma}_{t}^{2}I)
+$$  
+
+is parameterized by the neural network $\mu_{\theta}$ , where $\sigma_{t}^{2}$ denotes the transition variance. It aims to iteratively reconstruct $\scriptstyle x_{0}$ from the random noise.  
+
+
+
+\section{4 TOMA  }
+
+
+Token merge selects several destination tokens from the full set. It merges the tokens into destinations based on similarity scores, typically by assigning the merged destination as the average of the merge tokens. If the merged tokens are very similar, e.g., regions of pixels that represent the background with homogeneous colors, then the loss of information in the merge process can be minimized. Compared to token pruning, which directly throws away tokens, the token merge retains more information, thus achieving better image quality.  
+
+Token merge reduces the number of inputs processed in the transformer block, leading to significant computational savings. In the unmerge process, the values of the merged tokens are redistributed back to their original tokens to reverse the merge process. This operation ensures that the information from the merged tokens is restored while maintaining the shape of the output without token merge so that later layers can process without any modifications.  
+
+ToMA consists of three key stages, where we achieve significant improvements: 1) Destination Token Selection: Efficiently selecting the most representative tokens as destinations. 2) merge Tokens: merge source tokens into their corresponding destination tokens based on similarity computed using attention. 3) Unmerge Tokens: Restoring the merged tokens to their original forms by reversing the merge process as a linear operation. We also get further speedups by a) utilizing the locality characteristics of the latent space and b) sharing destination/merge/unmerge computations across iterations and layers to reduce overhead.  
+
+4.1 SUBMODULAR-BASED DESTINATION SELECTION  
+
+Let $\boldsymbol{S}$ be the cosine similarity matrix between all token hidden representations. $S_{i}$ represents the $i$ -th row of the $\boldsymbol{S}$ matrix, and $S_{i,j}:=\cos(X_{i},X_{j})$ . We denote the chosen destination token set as $T$ , and all the tokens (the ground set in submodular optimization) as $V$ . $L\in\mathbb{R}^{|V|}$ is the max cache vector and $L_{i}$ is the max similarity score between the token $i$ in the ground set to our chosen set $T$ .  
+
+The submodular function we use for destination selection is the facility location function (FL) $f_{\mathrm{FL}}$ shown in Eq. 5. FL sums the similarity between every token $v_{i}\in V$ with its most similar neighbor in the selected destination set $v_{j}\in T$ . Therefore, a high value for $f_{\mathrm{FL}}(T)$ means every token $v_{i}$ has a similar neighbor in $T$ , and $T$ is representative of $V$ , which perfectly matches the goal of merge destination selection. We also note that our framework is general, and $f_{\mathrm{FL}}$ could be potentially replaced with any other submodular function.  
+
+$$
+f_{\mathrm{FL}}(T)=\sum_{v_{i}\in V}\operatorname*{max}_{v_{j}\in T}S_{i,j}
+$$  
+
+When optimizing $T$ using the greedy algorithm, we essentially need to identify the next best token with the largest gain $f_{\mathrm{FL}}(v|T^{\prime})$ relative to the so-far-selected set $T^{\prime}$ . We can perform all those operations in matrix forms, which makes them a perfect fit for GPU computation. There are more efficient submodular optimization algorithms compared to greedy, such as lazier-than-lazy greedy (Mirzasoleiman et al., 2015). However, the more complicated algorithms introduce operations (e.g., random subset selection) that are not ideal for GPU implementations.  
+
+
+
+\section{4.1.1 WHY SUBMODULAR  }
+
+
+The submodular function, particularly the facility location function, offers a theoretical guarantee for optimizing the selection of elements with the highest information gain from a set. This characteristic aligns well with our requirements for token selection, ensuring that we choose the most similar tokens for merge with minimal information loss. Furthermore, facility location is highly compatible with GPU implementations, as it takes advantage of matrix operations, significantly boosting computational efficiency. Finally, facility location is compatible with an arbitrary similarity function, where we use cosine similarity that more closely aligns with the attention computation (supposing the input tokens are properly normalized using, e.g., Layernorm (Ba, 2016)).  
+
+We have also considered clustering-based methods such as k-means for token selection. However, we opted against them for several reasons. First, k-means provides a soft target, which might introduce artifacts and achieve suboptimal performance. Second, k-means assumes that clusters have ball-like boundaries, which is not flexible and imposes extra assumptions on the latent space. Third, the $\mathbf{k}$ -means method requires variable iterations to converge, and it is hard to control the computational costs and trade-off with the clustering quality.  
+
+
+
+\section{4.2 MERGE AND UNMERGE WITH ATTENTION  }
+
+
+In ToMA, we achieve token merge through a linear transformation approach that uses attention weights to assign tokens. This allows for a more generalized merge process. Accordingly, the unmerge operation can be the inverse of the linear transformation.  
+
+
+
+\section{4.2.1 MERGE  }
+
+
+We first compute softmax similarity weights between all destination tokens and all source tokens. This weight can be optionally sharpened or softened using the temperature parameter. Next, we normalize the matrix by counting the sum of each row and dividing the corresponding row by that value. Finally, we merge tokens together as a weighted average.  
+
+$$
+\begin{array}{c}{\boldsymbol{A}=\mathrm{SDPA}(X_{T},\boldsymbol{X},I,\tau)=\mathrm{softmax}\left(\frac{X_{T}X^{\top}}{\tau}\right)\boldsymbol{I}}\\ {\tilde{\boldsymbol{A}}_{i j}=\frac{\boldsymbol{A}_{i j}}{\sum_{j}\boldsymbol{A}_{i j}}\quad\mathrm{(Normalize~each~row~of~}\boldsymbol{A}),\,X_{\mathrm{merged}}=\tilde{A}\boldsymbol{X}}\end{array}
+$$  
+
+We describe the merge operation in Eq. 6. Here, $X_{T}$ is the hidden representation matrix for the set of destinations (shape $D\times d)$ , and $\tau$ is the temperature. $X_{T}$ are essentially sub-rows of $\mathbf{\deltaX}$ so that the attention is between the destinations and all the tokens. The softmax is computed over all the destinations for every source token, where intuitively, we can think every source token gets distributed to some destinations, and the sum of the weights is 1. Because the source tokens include the destinations, in the worst case, every destination gets assigned by itself (e.g., if the destination is dissimilar to all other tokens). Note that we include the identity matrix to match the attention notation, which can be ignored in implementation.  
+
+For extremely small temperature values, the attention linear projection $\pmb{A}$ contains 1’s and 0’s, so our attention-based merge recovers the hard discrete merge by approximating the average of the merged tokens. Moreover, as we essentially compute an attention matrix and use it as a linear projection on the source tokens, our merge can be highly efficient on modern GPU architecture. Also, the linear transformation can be stored and reused later.  
+
+
+
+\section{4.2.2 UNMERGE  }
+
+
+To unmerge tokens, we inverse the projection matrix of merge with the following two options (Eq. 7):  
+
+Transpose of the merge matrix $A^{\top}$ : By multiplying the transpose of the merge matrix with the output of the transformer block, we distribute the merged token values back to their original tokens. When the temperature is extremely low, the transpose unmerge copies the computation result from the destination token to the corresponding merged tokens. This incurs very little overhead.  
+
+Pseudo-inverse of the merge matrix $A^{\dagger}$ : Viewing the merge as a linear transformation, the pseudoinverse minimizes the reconstruction error if the computation between merge and unmerge is close to linear. It is much more computationally expensive than A⊤and requires SVD or QR decomposition.  
+
+$$
+X_{\mathrm{unmerged}}^{\prime}=A^{\top}X^{\prime}{\mathrm{~or~}}\quad X_{\mathrm{unmerged}}^{\prime}=A^{\dagger}X^{\prime}=A^{\top}(A A^{\top})^{-1}X^{\prime}
+$$  
+
+$A^{\top}$ and $A^{\dagger}$ are the same if the rows of the merge matrix $\pmb{A}$ are independent, e.g., source tokens are not overlapping among different destinations. Intuitively, this means that the destinations should be as diverse as possible, which also matches the objective of the submodular optimization. Also, when the temperature is extremely low, every source token gets assigned to a single destination token, so the two options are identical. Concerning efficiency, we opt to use the transpose as the default unmerge method for ToMA.  
+
+
+
+\section{4.3 FURTHER SPEEDUP  }
+
+
+The overhead of ToMA consists of 1) the computation of destination tokens using submodular optimization, 2) the computation of the attention merge and unmerge matrix, and 3) applying the merge and unmerge matrices before and after layers in the transformer block. We further reduce all three overheads by considering the locality of the feature space so we can perform the computations locally in every region. We also decrease the frequency to compute 1) and 2) by sharing destinations and merge matrices across iterations and layers.  
+
+
+
+\section{4.3.1 LOCAL REGION  }
+
+
+A crucial aspect ignored in ToMe for SD is the locality of the latent space (Fig. 3). The spatial relationship between the generated image and the hidden states within the UNet model becomes evident when examining this figure. We apply K-means to the tokens and recolor them based on their class affiliation. Specifically, by projecting the color from the generated image onto the hidden state feature map, we observe clear spatial coherence. The tokens in the latent space consistently demonstrate the greatest similarity with their neighboring tokens, creating distinct localized regions.  
+
+This observation aligns with the intuition that images exhibit local consistency and smoothness. Therefore, we hypothesize that the most likely merge destination for any token resides within its local tile. This allows us to focus exclusively on the near tokens token while ignoring more distant ones.  
+
+![](images/35e9ef1bb537d1687dee357cc808aadc190051a5554634c92193cc4d5c15c153.jpg)  
+Figure 3: Recolored K-means results on UNet hidden states, across blocks/ denoising steps.  
+
+To exploit this property, we limit operations to local regions, performing token selection and (un)merge within each region. We propose two region selections:  
+
+Tile-shape region: The tile region approach is particularly effective because it comprehensively captures the local characteristics by considering the image’s locality.  
+
+Stripe-shape region: The stripe region focuses on tokens on the same row, which misses the proximity in the vertical direction.  
+
+Both locality options can significantly reduce the computational overhead as we perform all operations in ToMA with a smaller number of input tokens in parallel. The tile-shape region is more coherent with the nature of the image and we find it performs better in experiments. However, turning a 2D matrix into tile-shape regions requires reshuffling, which brings additional overhead on GPUs. On the contrary, the stripe-shape option is faster as it only requires re-shaping of the 2D matrix while keeping its contiguous memory layout intact. We include both options in ToMA to provide trade-offs between speed and quality. Also, note that the tile-shape computation can be potentially accelerated as the low-level GPU operations are all in tiles, but it would require substantial re-implementation of the attention kernel. We defer this to future work.  
+
+We want to emphasize that the local region only affects components of ToMA, the computations in the transformer blocks always operate on the $D\times d$ matrix of the merged destinations. 3 for the detailed algorithm of ToMA with local regions.  
+
+
+
+\section{4.3.2 SHARING OVERHEAD COMPUTATION  }
+
+
+Our observations of the diffusion denoising process reveal that hidden states show substantial similarity across steps, meaning the selected destinations are also quite alike. As shown in Fig. 4, destination tokens have a significant intersection with the ones chosen in previous steps. Therefore, we can share destination selections across steps. Additionally, the linear (un)merge operations enable us to reuse the matrices across layers with minimal quality loss. By sharing both destinations and attention weights across steps and layers, we significantly reduce the number of times for destination computation and attend merge matrix computation while maintaining high output quality.  
+
+![](images/bad0baf136dd48adbc6ae5ce598195528bace84a1246ced8315dc72e1d375ca8.jpg)  
+Figure 4: Intersection percentage of selected tokens between each step and the first step of its corresponding 10-step interval. Different curves refer to different layers in SDXL.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+We evaluated ToMA on the SDXL stable-diffusion-xl-base-1.0 model using the Diffusers framework to generate $1024\times1024$ images. The prompts were sourced from the GEMRec dataset (Guo et al., 2024) and ImageNet 1K (Deng et al., 2009). To assess image quality, we used three primary metrics: CLIP, DINO, and FID (Radford et al., 2021; Caron et al., 2021; Heusel et al., 2017). For the CLIP and DINO evaluations, we generated images using 50 different prompts, each with 3 distinct seeds, and calculated the average score across all prompts and seeds. For measuring inference time, we reported the lowest wall-clock time over 100 runs.  
+
+Diffusion Models. We focus on the Stable Diffusion XL with the checkpoint of stable-diffusion-xlbase-1.0. SDXL is capable of generating very high-quality images and is popular in the community with abundant LoRAs available. Note that ToMA can generally apply to any transformer architecture. Thus, we can simply extend ToMA to other diffusion models like SD3 and SD2.  
+
+Baseline. ToMeSD (Bolya & Hoffman, 2023) selects tokens either in fixed or random small tiles, using a rigid approach. ToMeSD then discretely merges tokens by recording token pairs based on their computed similarity. In the unmerge phase, ToMeSD restores the original tokens by copying the values of the merged tokens back to their corresponding original tokens. We note that ToFu (Kim et al., 2023) is another relevant method that dynamically selects whether to prune or merge tokens based on the function’s linearity to accelerate diffusion models. The work done by ToFu is orthogonal to our research, meaning our methods can be seamlessly integrated with ToFu to further enhance its performance. Therefore, we don’t include ToFu in our comparison.  
+
+5.1 RESULTS ON QUALITY AND EFFICIENCY  
+
+The primary objective of this comprehensive experiment is to evaluate the trade-off between the quality of generated images and the computational efficiency across different token merge methods. Specifically, we compare ToMA with ToMeSD, using three key metrics: CLIP, DINO, and FID. These metrics measure visual similarity, attention mechanisms, and image fidelity, respectively. Additionally, we assess the generation time and speed-up ratio for each method, offering insights into computational gains.  
+
+We introduce three versions of ToMA to explore the impact of different attention mechanisms and facility location strategies:   
+ToMA(Stripe Facility Location $^+$ Global Attention): Combines stripe-based facility location with global attention for token merge.   
+ToMA stripe (Stripe Facility Location $^+$ Stripe Attention): Utilizes both stripe-based facility location and stripe attention for localized merge.   
+ToMA tile (Tile Facility Location $^+$ Tile Attention): Applies tile-based facility location and attention for tile-wise merge.   
+For the Stripe Attention and Tile Attention versions, a tile size of 16 is used, while the Global Attention version uses 256 tiles. We compute facility location every 10 steps and attention weights every 5 steps over a total of 50 steps. The ToMeSD method serves as a baseline for comparison across all versions, using the same CLIP, DINO, and FID metrics.  
+
+![](images/7867c68f47d6fcf3580827578313a174d108bf4f55a235a9edae81bbf714a750.jpg)  
+Figure 5: Quality metrics vs. generation time for SDXL-base on Nvidia V100. The merge ratio progresses from 0 to 0.75, moving from right to left following the directions of the arrows. Metrics are denoted as $\uparrow$ : higher is better, $\downarrow$ : lower is better).  
+
+In most cases, ToMeSD either increases computation costs or achieves minor speed-ups. Both versions of ToMA—stripe facility location with global attention and stripe facility location with stripe attention—maintain high image quality while delivering significant speed-ups. Tile facility location with tile attention achieves the best image quality, but the overhead is substantial, indicating great potential for further improvement through optimized low-level implementations.  
+
+In addition to evaluating image quality, we examine the generation time and speed-up ratio more variances. The token merge methods include ToMeSD, ToMA (with stripe and tile variations), and ToMA\*, which employs a ”merge-once” strategy (merge and unmerge once for the entire transformer block instead of applying ToMA on every component of the transformer individually). Furthermore, we compare these methods to the LB (lower bound for speed-up), which is the best speedup we can get with a linear project merge and unmerge approach (apply random merge and unmerge projections without other overhead computations).  
+
+This comprehensive experiment, conducted under the same experimental setup (including dataset, tile size, and step scheduler), allows us to test the trade-off between time and quality across different token merge methods.  
+
+![](images/bcfbb5cf5c0ddea49f3ca3d4a1bfa0a5cebb87accb01996ac8f9bc78b74d70a5.jpg)  
+
+Table 1: Comparison of Token Merge Methods and their Generation Time / Speed Up Ratios (RTX6000Ada). Negative percentages indicate faster times than the baseline, while positive percentages indicate slower times.  
+
+From Tab. 1, we find that ToMeSD exhibits increased generation times and negative speed-up ratios compared to the baseline across all token reduction ratios, ranging from $+34.4\%$ to $+43.8\%$ . This indicates that ToMeSD actually adds computational overhead rather than improving speed, making it less efficient than the baseline. We find that all ToMA variations, except ToMA tile, deliver significant speed improvements over ToMeSD ranging from $-28.5\%$ to - $-0.7\%$ . Moreover, methods like ToMA\* and the ToMA stripe variants approach the theoretical speed limit, showcasing remarkable computational efficiency gains.  
+
+
+
+\section{5.2 ABALATION TEST  }
+
+
+In this section, we demonstrate on how we decide our default setting and other variances by comparing the image quality or speeds of combinations of different units in token merge.  
+
+5.2.1 FACILITY LOCATION & TILE FOR DESTINATION SELECTION   
+
+![](images/9bc685ad41bdff36cf13e47f3764e4b884eda3ab17e9357365a8b3add9fd9cda.jpg)  
+
+![](images/f84cfa5062a8e6d9ceaabb26577783d2706b608ef555bd5c1b2f0ac0fd2173e0.jpg)  
+
+Table 2: Comparison of generated image metricsTable 3: Tile facility comparison with 50 recomusing different destination selection methods. pute steps, ratio $_{1=0.5}$ , global attention  
+
+From Tab. 2, we find that the facility location demonstrates great performance in the generated image metric, which proves our theory that we should find the most representative tokens during selection. Also, the tile facility achieves the best CLIP and DINO score which aligns with our observation of the hidden states locality. By restricting the token merge process in a local region, we get a better image quality. Thus, we utilize the tile facility as our default setting for ToMA.  
+
+From Tab. 3, we examine the influence of different tile sizes. We find that the tile sizes of 64 achieve the best score in DINO and MSE while 256 shows great performance in CLIP and time. Generally, the metric difference is not significant between these two tile sizes. Thus, we select 256 as our default setting due to its lead in speed.  
+
+
+
+\section{5.3 MERGE AND UNMERGE SPEED  }
+
+
+In this section, we compare the speed ToMA (un)merge which generalizes this process as linear transformation, and the discrete (un)merge of ToMeSD. In this experiment, we utilize the transpose strategy as the unmerge of the merge matrix.  
+
+![](images/bc44b074e4cfe528d9016b1ef9d4e8da9d91c3e200d3fc8a675a2a247a2ac297.jpg)  
+
+![](images/1a884f4af719b0b5e50383f9de15e75c295ed690fdee4f174ae3e40c1776b3f6.jpg)  
+
+Table 4: Comparison of ToMeSD and ToMA speeds for size 4096.  
+
+Table 5: Comparison of ToMeSD and ToMA speeds for size 1024.  
+
+Tab. 4 and Tab. 5 clearly demonstrate that the ToMA method significantly outperforms ToMeSD in both merge and unmerge speeds across all token reduction ratios (0.25, 0.5, and 0.75). For size 4096, ToMA achieves merge speeds approximately $80\%$ faster than ToMeSD, with the lowest recorded merge time being 0.0403s compared to 0.2048s for ToMeSD. Similarly, the unmerge times for ToMA are consistently lower, with improvements ranging from $72\%$ to $75\%$ across the different token reduction ratios. This trend is mirrored in the 1024 size table, where ToMA again demonstrates its advantage, with merge and unmerge times consistently around $80\%$ faster than ToMeSD. These results highlight the clear efficiency gains of the ToMA method in terms of both merge and unmerge processes, making it a more computationally efficient solution.  
+
+![](images/492e287f7c5e29014259c5b3e730122846ca55898ceaac48b6e2fb5c13f76621.jpg)  
+Figure 6: Image generated from left to right: original, ToMA stripe, ToMA\*, ToMA tile, ToMA  
+
+
+
+\section{5.4 DISCUSSION  }
+
+
+Although the combination of tile facility location and tile merge produces high-quality images, it still falls short in speed. Optimizing this operation at a lower level could significantly reduce computational costs. Additionally, improving the implementation of the pseudo-inverse API would allow us to apply it to larger matrices, potentially enhancing image quality. Moreover, we utilize linear transformation, specifically SDPA, for token merge, where the parameter $V$ is currently set as an identity matrix and ignored during inference. This $V$ matrix holds potential for future training, which could further boost image quality.  
+
+Broader impact. ToMA enables speed improvements across a wide range of GPU architectures. On one hand, it accelerates image generation without compromising quality, making the process more efficient. On the other hand, it broadens the accessibility of diffusion models, allowing even those with less powerful or outdated GPUs to benefit from advanced techniques. ToMA reduces computational demands, making high-quality image generation feasible on a wider variety of hardware, thus making diffusion models more accessible to a larger audience.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this work, we propose ToMA to enhance the existing token merge method in three key areas: 1) more representative token selection, 2) a more flexible and efficient merge and unmerge operation, and 3) the introduction of locality and sharing strategies. As a result, we achieve significant speedup while maintaining high image quality. For future work, we aim to further speed up the low-level tile region computation as well as fine-tune the merge attention for better generation quality.  
+
+
+

@@ -1,0 +1,1003 @@
+\title{Augmenting Offline Reinforcement Learning with State-only Interactions}
+
+\begin{abstract}
+
+Batch offline data have been shown considerably beneficial for reinforcement learning.
+Their benefit is further amplified by upsampling with generative models.
+In this paper, we consider a novel opportunity where interaction with environment is feasible, 
+but only restricted to observations,
+\ie, \textit{no reward} feedback is available.
+This setting is broadly applicable,
+as simulators or even real cyber-physical systems are often accessible,
+while in contrast reward is often difficult or expensive to obtain.
+As a result, the learner must make good sense of the offline data to synthesize an efficient scheme of querying the transition of state. 
+Our method first leverages online interactions to generate high-return trajectories via conditional diffusion models.
+They are then blended with the original offline trajectories through a  stitching algorithm,
+and the resulting augmented data can be applied generically to downstream reinforcement learners.
+Superior empirical performance is demonstrated over state-of-the-art data augmentation methods that are extended to utilize state-only interactions.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Data augmentation has long been an effective approach that boosts the performance of learning algorithms.
+They have been particularly useful for neural networks whose regularization and generalization properties are much harder to characterize than shallow models.
+In reinforcement learning (RL),
+experience replay \citep{fedus2020revisiting,mnih2015human} can be considered as augmenting the latest experiences with the past ones when updating the model.
+An even more effective paradigm is offline RL \citep{levine2020offline},
+where a batch of previously collected trajectories are used to boost online RL.
+They can be used to augment the online update buffer, 
+or to pre-train a model that is subsequently fine-tuned by online RL.
+Offline RL may suffer from sub-optimal batch data because the behavior policy could be sub-optimal,
+and the data may not have sufficiently covered the environment,
+especially the high-rewarding regions.
+To address this issue,
+stitching approaches have been studied \citep{li2024DiffStitch}.
+Model-based trajectory stitching \citep[MBTS,][]{Hepburn24} augments the offline dataset by connecting low-reward trajectories with high-reward ones.
+This is shown in Figure~\ref{fig:illustration}b,
+where two dashed lines are added,
+connecting to a point that is closer to a bridge (higher value).
+However, both \citet{li2024DiffStitch} and \citet{Hepburn24} only stitch \textit{existing} trajectories
+while no novel high-reward ones are generated.
+
+This issue appears solvable by generative models.
+As shown in Figure~\ref{fig:illustration}c, 
+SynthER augments the set of \textit{transitions} by training a diffusion model \citep{lu2023synthetic}.
+However, it does not generate \textit{trajectories} which would require auto-regressive models.
+In our experiment, directly doing so performs worse than SynthER which upsamples transitions,
+suggesting that as a data augmentation approach to RL,
+auto-regressively generating trajectories may accumulate high bias and produce low return.
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{\includegraphics[width=\textwidth]{NeurIPS_2024/Bridge.pdf}}
+\vskip -0.2em
+\caption{An example that illustrates the difference between four data augmentation methods. 
+\textbf{(a)}: the original offline dataset, 
+where a river is in the main diagonal with two bridges.  
+There are six random trajectories.  
+Two of them walk to the Goal state (top right), 
+which gives a high reward.
+Four trajectories are stuck at the lower-left half with a low reward.
+\textbf{(b)}: MBTS concatenates trajectories, 
+but they are restricted to original trajectories,
+instead of leveraging the bridge-crossing one that could be synthesized by a generative model.
+\textbf{(c)}: the SynthER method where all transitions make an equal contribution to the training of the diffusion model.
+\textbf{(d)}: the conditional diffusion model which super-samples high-return trajectory regions.
+As a result, new trajectories that cross the bridges are formed.
+\textbf{(e)}: our DITS method of conditional diffusion followed by stitching, 
+which concatenates low-return trajectories with high-return ones.
+In consequence, two dashed arrows are formed allowing two low-return trajectories to be connected to a bridge-crossing one.
+}
+\label{fig:illustration}
+\end{center}
+\vskip -2.7em
+\end{figure*}
+To tackle this problem,
+we make a new observation that some limited form of interactions are helpful.
+Indeed,  online \textit{state-only} interaction with environment is feasible in many applications.
+For example:
+\begin{itemize}[leftmargin=*]
+\setlength\itemsep{0em}
+    \item RL has been adopted to improve treatment policy of chronic disease by factoring in the delayed effects of treatment \citep{weltz2022reinforcement}.
+Many digital twins are available that simulate a patient's condition \citep{tardini2022optimal}.
+However, toxicity feedback (part of the reward)
+may exhibit marked variance across patients,
+both physically and mentally.
+So it requires measurement on real persons from offline recordings.
+    \item In inventory control, multi-product stock levels can often be well simulated for a stocking policy \citep{chen2024learning}.
+However, the real reward (profit) also depends on the price which in turn fluctuates with the market and the marketing strategy (\eg, discount).
+So it is generally difficult to retrieve rewards in an online setting, 
+and we need to best utilize the reward from the offline data.
+    \item In sequential recommendation, it is common to model a user's behavior such as click-through rate. 
+    But the alignment with their ethical principle (reward) cannot be automatically inferred online \citep{stray2021what}.
+\end{itemize}
+
+The question we investigate and answer in the affirmative is:
+    \textbf{can we improve trajectory generation, as a data augmentation approach for RL, by making \textit{efficient} use of state-only interactions?}%
+    \footnote{We work on state interactions here,
+leaving the extension of observation-only interactions to future work.}
+A natural approach is to learn a good policy from offline RL,
+and deploy it by interacting with the environment to obtain a sequence of state and action.
+Finally, impute the reward from state and action via a regression model trained from offline data.
+Within this framework, our major contribution lies in two folds.
+Firstly, we make the key observation that although synthesizing high-return trajectories ameliorates the possible deficiency of such trajectories in the offline data,
+it may also lead to overfitting of such regions.
+Therefore, we blend them into the original dataset progressively with a \textit{selective} stitching strategy,
+introducing new transitions between two states on \textit{different} trajectories.
+Secondly, we identify a policy model that best fits our setting.
+Since the interaction is not at test time,
+the policy's efficiency is not a main concern,
+allowing us to leverage Transformer or diffusion based planners.
+In particular, we extended the decision diffuser \citep[DD,][]{Ajay23},
+which trains a diffusion model to generate trajectories \textit{conditioned} on high return.
+For example, in Figure~\ref{fig:illustration}d,
+new trajectories are generated that cross the bridge to reach the goal state.
+Moreover, DD diffuses state sequences,
+which is exactly what is collected from new interactions.
+Such an alignment facilitates additional online fine-tuning of the diffuser;
+we leave it for future work.
+We will refer to our method as Diffusion-based Trajectory Stitching  (DITS).
+As shown in Figure~\ref{fig:illustration}e,
+DITS enjoys the benefit of conditional diffuser in generating new high-rewarding trajectories,
+and it also fixes the limitation of MBTS by allowing low-reward trajectories to connect with the high-reward ones generated by the diffuser.
+From the trajectory generation perspective,
+DITS circumvents auto-regression,
+delegating the backbone progression of state to direct interaction,
+reducing the task of trajectory generation to step-wise synthesis of actions and rewards.
+We will also show that both of them can be accomplished by DITS via a single diffusion model.
+
+
+
+
+
+
+
+
+The workflow of DITS is also charted in Figure~\ref{fig:TSKD}.
+The offline dataset is first used to train DITS' generator,
+producing trajectories that are blended with the original dataset through DITS' stitcher.
+The stitcher progressively evaluates the candidate states to transition to by using a series of criteria,
+leveraging the reward and actions generated by DITS.
+The resulting pool is filtered based on the full trajectory return,
+and the remaining trajectories are supplied to a downstream RL algorithm.
+
+This paper is organized as follows.
+After the preliminaries in Section \ref{sec:prelim},
+we introduce the conditional decision diffuser used by DITS' generator, 
+which produces full trajectories conditioned on high returns (Section~\ref{sec:ddr}).
+Based on it,
+the stitching algorithm is presented in Section~\ref{sec:TSKD},
+and its superior performance over other data augmentation methods is empirically demonstrated in Section~\ref{sec:exp}.
+
+\iffalse
+Offline reinforcement learning (RL) presents a novel opportunity to leverage offline batch data without having to interact with the environment \citep{levine2020offline}. 
+Simple approaches such as Behavioral Cloning (BC) are directly applicable,
+minimizing the error between the target policy and the learned policy. 
+However, both BC and many well-established \textit{online} RL methods suffer from the out-of-distribution (OOD) issues because once deployed online, 
+the state distribution can shift considerably from that in the offline data,
+and the Q-value can be over-estimated on OOD states-actions
+\citep{fujimoto2019offpolicy,kumar2019stabilizing,fu2019disgnosing,kumar20discor}.
+
+A large number of methods have been proposed to address this issue,
+and we only highlight a few.
+\citet{kumar2020conservative} proposed conservative Q-learning (CQL) to pessimistically under-estimate the state-action values for OOD actions.
+\citet{nair2020awac} and several other works constrain the policy to the proximity of the behavior policy.
+Implicit Q-learning \citep[IQL,][]{Kostrikov21} avoids querying values of unseen actions while performing multi-step dynamic programming updates. 
+
+\fi
+
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{\includegraphics[width=\textwidth]{NeurIPS_2024/DTS_Arch.pdf}}
+\vskip -0.2em
+\caption{\textbf{Di}ffusion-based \textbf{T}rajectory \textbf{S}titching (\textbf{DITS}). Trajectories from DITS' trajectory generator are combined with the original dataset for the stitching process, which creates new transitions (blue arrows in the ``Trajectory stitching'' block) and discards old transitions (grey dotted edges). 
+Stitching was facilitated by DITS' reward and action generators. 
+A filter is applied to prune away low-return trajectories, 
+and the result is finally used by a downstream RL method.}
+\label{fig:TSKD}
+\end{center}
+\vskip -2.2em
+\end{figure*}
+\iffalse
+Recently, methods based on large generative models have showed significant promise on a number of synthetic and real-world RL tasks,
+e.g., Decision Transformer \citep[DT,][]{Chen21}, Diffusion Q-learning \citep{wang2023diffusion},
+and Decision Diffuser \citep[DD,][]{Ajay23}.
+DT and trajectory transformer \citep{janner2021sequence} train a transformer to  model the policy or the planning algorithm.
+DD trains a \textit{conditional} diffusion model to generate high-return trajectories,
+which empowers effective planning,
+even if there are not many high-return trajectories in the original data.
+ 
+However, since these deep generative models  contain a large volume of parameters, 
+applying them to online decision making demands substantial computational power,
+which is difficult to meet in many practical devices such as the light-weight processors carried by robots.
+A common wisdom is to distill/compress the large model without significantly degrading the performance \citep{Hinton15}.
+Ideally, we aim to directly represent the policy network by a shallow model without running deep diffusions or multi-head attentions,
+dispensing with expensive online planning.
+A direct method to distill a policy is based on matching the actions with the offline transitions,
+which unfortunately suffers the same issues plaguing BC.
+To improve the performance of BC,
+Motivated by MBTS,
+we propose pursuing another path of knowledge distillation via data augmentation.
+In particular,
+
+\fi
+
+
+\paragraph{Related Work}
+Diffusion based models have been recently shown effective for  RL.
+Diffusion policy models \citep{chi2023diffusionpolicy,wang2023diffusion,ze2024diffusion} refine noise into actions through a gradient field.
+It is conditioned on the state or observation,
+and can be stably trained.
+The learned policy can accurately model multimodal and high-dimensional action distributions.
+In contrast, DD diffuses on state spaces instead of actions,
+and generates the action via an inverse dynamics model.
+It also allow more general conditioning such as high reward, constraint satisfaction, and skill composition.
+\citet{Wang23} proposed augmenting behavioral cloning by diffusion over state and action pairs,
+but it does not consider conditioning.
+
+
+
+
+
+\section{Preliminary}
+
+\label{sec:prelim}
+
+We follow the standard setting of Markov decision process \citep[MDP,][]{Puterman95},
+which is defined by the tuple 
+$\langle \rho_0, \mathcal{S}, \mathcal{A}, \mathcal{T}, \mathcal{R}, \gamma\rangle$.
+Here $\rho_0$ is the initial distribution. 
+$\mathcal{S}$ is the $m$-dimensional state space,
+and $\mathcal{A}$ is the action space.
+$\mathcal{T}: \mathcal{S}\times\mathcal{A}\rightarrow \Delta_\mathcal{S}$ is the transition function.
+$\mathcal{R}: \mathcal{S}\times\mathcal{A}\times\mathcal{S}\rightarrow\mathbb{R}$ is the reward function.
+$\gamma\in [0, 1)$ is a discount factor. 
+The agent in this environment acts with a policy $\pi:\mathcal{S}\rightarrow \mathcal{A}$, 
+generating a sequence of state-action-reward transitions, 
+which represents a trajectory $\tau\coloneqq(s_t, a_t, r_t)_{t\geq0}$ with probability $p_\pi(\tau)$. 
+The return of the trajectory is $R(\tau) \coloneqq \sum_{t\geq0}\gamma^tr_t$.
+
+An offline dataset $\Dcal$ consists of trajectories $(\tau_1, \ldots, \tau_T)$ which are collected using a behavior policy $\pi_\beta$.
+Each trajectory is composed of a set of transitions $\{(s_t, a_t, r_t, s'_t)\}$,
+where we customarily use $'$ to denote the \textit{next} state,
+\ie, $s'_t = s_{t+1}$.
+SynthER \citep{lu2023synthetic} directly builds a generative model based on the union of such transition sets across all the $T$ trajectories to replay the experience.
+
+\iffalse
+\paragraph{Behavioural Cloning}
+
+A BC agent learns a policy $\pi(a|s)$ 
+by performing supervised learning on the dataset sampled from the environment $\mathcal{D} = \{(s_t, a_t, r_t, s'_t)\}$.
+Here, $s'_t$ denotes the next state for the transition. 
+BC seeks the optimal policy $\pi_\theta$ parameterized with $\theta$ by minimizing the risk
+\begin{equation*}
+    \mathcal{L_{BC}} \coloneqq \mathbb{E}_{s, a\sim\mathcal{D}} [(\pi_\theta(s)-a)^2].
+\end{equation*}
+Extension to stochastic policy is straightforward,
+and we just keep the exposition simple because our work focuses on  augmenting the offline dataset that is used for BC training.
+
+BC can be implemented easily by parameterizing the policy with a Multilayer Perceptron (MLP), 
+using a relatively small amount of parameters. 
+However, BC performs poorly when the quality of the transitions in the dataset is not high. 
+Therefore, in this work we aim to perform knowledge distilling from a deep generative model of the trajectories, 
+which in our case is a decision diffuser with reward, 
+to extract high-return trajectories to augment the dataset through a nontrivial stitching process. 
+As a result, the policy learned from BC can be both effective and simple,
+representing an efficacious distillation from the deep generative model.
+\fi
+
+\paragraph{Diffusion Probabilistic Models (DDPM)}
+
+Diffusion models \citep{Ho20} are a class of generative models that learn the data distribution $q(\mathbf{x})$ from a dataset $\mathcal{D}\coloneqq\{\mathbf{x}^i\}_{0\leq i<M}$. One of the major usage of these models is generating high-quality images from text descriptions \citep{Saharia22}. The diffusion models consist of two processes, which are the forward process and the reverse process. For the forward process, the model will add noise step by step via a predefined way $q(\mathbf{x}_{k+1}|\mathbf{x}_{k})\coloneqq\mathcal{N}(\mathbf{x}_{k+1}; \sqrt{\alpha_k}\mathbf{x}, (1-\alpha_k)\mathbf{I})$. For the reverse process, the model has trainable parameters in order to learn a good way to denoise step by step, which can be represented mathematically as $p_\theta(\mathbf{x}_{k-1}|\mathbf{x}_k)\coloneqq\mathcal{N}(\mathbf{x}_{k-1}|\mu_\theta(\mathbf{x}_k, k), \Sigma_k)$. In these processes, $\mathcal{N}(\mu, \Sigma)$ denotes a Gaussian distribution with mean $\mu$ and covariance matrix $\Sigma$, and $\alpha_k\in\mathbb{R}$ determines the variance schedule. $\mathbf{x}_0\coloneqq\mathbf{x}$ denotes the original sample, while $\mathbf{x}_1$, $\mathbf{x}_2$, ..., $\mathbf{x}_{K-1}$ are the intermediate steps for the diffusion, and $\mathbf{x}_K\sim\mathcal{N}(\mathbf{0}, \mathbf{I})$ is the unit Gaussian noise.
+
+The reverse process model can be trained by minimizing the following loss \citep{Ho20}:
+\begin{equation*}
+    \mathcal{L}_{denoise}(\theta)\coloneqq\mathbb{E}_{k\sim \Ucal[1, K], \mathbf{x}_0\sim q,\epsilon\sim\mathcal{N}(\mathbf{0}, \mathbf{I})}[\Vert\epsilon-\epsilon_\theta(\mathbf{x}_k, k)\Vert^2].
+\end{equation*}
+
+The noise model $\epsilon_\theta(\mathbf{x}_k, k)$ is parameterized by a deep temporal U-Net \citep{Janner22}. 
+This is equivalent to modeling the mean of $p_\theta(\mathbf{x}_{k-1}|\mathbf{x}_k)$,
+as $\mu_\theta(x_{k-1}|x_k)$ can be calculated from $\epsilon_\theta(\mathbf{x}_k, k)$ \citep{Ho20}.
+
+\paragraph{Guided Diffusion}
+The diffusion training process can be guided using conditional data. In order to avoid the need of a strong classifier, classifier-free guidance method \citep{Ho22} is preferred. 
+This method learns both a conditional model $\epsilon_\theta(\mathbf{x}_k, \mathbf{y}, k)$ and an unconditional model $\epsilon_\theta(\mathbf{x}_k, \emptyset, k)$, 
+where $\mathbf{y}$ is the label and $\emptyset$ is a dummy value that takes the place of $\mathbf{y}$ for unconditional situations. 
+The perturbed noise can be denoted as 
+$\epsilon_\theta(\mathbf{x}_k, \emptyset, k) + \omega(\epsilon_\theta(\mathbf{x}_k, \mathbf{y}, k) - \epsilon_\theta(\mathbf{x}_k, \emptyset, k))$, 
+where $\omega$ denotes the guidance scale or the trade-off factor.
+\iffalse
+\paragraph{Knowledge Distillation}
+Knowledge distillation (KD) transfers knowledge from one deep learning model (the teacher) to another (the student). 
+It was originally proposed by minimizing the KL divergence of the outputs between the teacher model and the student model \citep{Hinton15}.
+
+Our work proposes a distillation framework that transfers the knowledge of a well-learned policy based on deep generative models to a relatively shallow model such as BC network by augmenting the dataset via trajectory stitching.
+\fi
+
+
+
+
+\section{Trajectory Generator of DITS with State-only Interaction}
+
+\label{sec:ddr}
+
+We first present our trajectory generator,
+which produces $(s_t, a_t, r_t, s'_t)$ sequences through state-only interactions.
+A vanilla Decision Diffuser \citep[DD,][]{Ajay23} works as a planner that proposes actions \textit{conditioned} on high reward or other constraints,
+based on which the state-only interaction produces the next state $s'_t$.
+However, DD does not generate rewards,
+while many applications lack a reward formula,
+\eg, patient's mental stress level.
+We thus improve DD by also generating rewards.
+
+Analogously to \citet{Ajay23},
+we only diffuse on the states and rewards,
+because the sequence over actions, 
+which are often represented as joint torques, 
+tend to have higher frequency and are less smooth, 
+making them much harder to model \citep{Tedrake22}. 
+We therefore decide to model the sequence of $(s_t, r_t, s'_t)$ by a diffusion model,
+and train an inverse dynamics model (IDM) to infer $a_t$ from $s_t$ and $s'_t$ (Section~\ref{sec:IDM}).
+
+\subsection{Conditional Diffusion Models for Decision Making}
+
+We can formulate sequential decision-making as a problem of conditional generative modeling:
+\begin{align}
+\label{eq:obj_cond_diffuser}
+    \max\nolimits_\theta \ 
+    \mathbb{E}_{\tau\sim\mathcal{D}}
+    [\log p_\theta(\mathbf{x}_0(\tau)|\mathbf{y}(\tau))].
+\end{align}
+Our aim is to generate a \textit{partial} trajectory $\mathbf{x}_0(\tau)$ using the information of conditioning data $\mathbf{y}(\tau)$. 
+$\mathbf{x}_0(\tau)$ can be any subsequence of $\tau$,
+and $\mathbf{y}(\tau)$ can be the corresponding return, 
+the constraints satisfied by it, 
+or the skill demonstrated in it. 
+Since DITS aims to generate high return trajectories,
+we will use the return $\sum_{i=t}^{t+H}\gamma^{i-t} r_i$ as our condition $\mathbf{y}(\tau)$,
+when $\xvec_0(\tau)$ assumes a subsequence of $\tau$ from $t$ to $t+H$.
+Following \citet{Ajay23},
+we omit writing out the expectation over the random subsequence of $\tau$ in \Eqref{eq:obj_cond_diffuser}.
+
+We can then construct our generative model according to the conditional diffusion process:
+\begin{equation}
+    q(\mathbf{x}_{k+1}(\tau)|\mathbf{x}_{k}(\tau)),
+    \quad 
+    p_\theta(\mathbf{x}_{k-1}(\tau)|\mathbf{x}_{k}(\tau), \mathbf{y}(\tau)).
+\end{equation}
+Here, $q$ represents the forward diffusion process while $p_\theta$ represents the trainable reverse process parameterized by $\theta$. 
+Compared with the original Diffusion Probabilistic Model \citep{Ho20}, 
+the reverse process here has an additional conditioning label $\mathbf{y}(\tau)$, 
+guiding the reverse process with high return condition and enabling the model to learn a good policy in the environment.
+
+\begin{figure*}[t]
+\begin{center}
+\centerline{\includegraphics[width=\textwidth]{Figure_2.pdf}}
+\vskip -0.2em
+\caption{\textbf{Trajectory generation of DITS}. Given the latest $C$ number of states $s_{t-C+1},\ldots, s_t$, the diffuser uses classifier-free guidance with low-temperature sampling to generate a sequence of future states and rewards. 
+IDM is applied to generate action $a_t$ with $s_t$ and $s_{t+1}$.
+$\emptyset$ means the value is left for the diffuser to fill in, instead of clamping with the observation (if available).}
+\label{DDR-I}
+\end{center}
+\vskip -2em
+\end{figure*}
+\subsection{Trajectory generation in DITS via state-only interaction}
+
+\begin{algorithm}[t]
+   \caption{Trajectory generation in DITS via state-only interaction with a 
+\textit{receding-horizon} control}
+   \label{alg:DDR-I}
+   \textbf{Input}: Noise model $\epsilon_\theta$, inverse dynamics $f_\phi$, guidance scale $\omega$, history length $C$, condition $\mathbf{y}$.
+   
+   {\color{red} Initialize $h\leftarrow Queue(length = C)$}. 
+   Initialize state $s_0$ and an empty trajectory $\tau$. 
+      
+   \For{$t = 0, 1, ...$ until done}{
+   
+   {\color{red} $h.insert(s_t)$}.
+   Initialize $\mathbf{x}_K(\tau) \! \sim \! \mathcal{N}(\mathbf{0}, \alpha\mathbf{I})$ in $\mathbb{R}^{H(m+1)}$ by \Eqref{eq:xktau_def_ddr_1}. 
+   
+   \For{$k = K...1$} {   
+   {\color{red} $\mathbf{x}_k(\tau)[:length(h)].\text{states} \gets h$}.
+   Set $\hat \epsilon$ with Equation \ref{classifier-free guidance}, using $\theta$, $\mathbf{x}_k(\tau)$, $\mathbf{y}$, and $k$. 
+        
+   Sample $\mathbf{x}_{k-1}(\tau)\sim\mathcal{N}(\mu_{k-1}, \alpha\Sigma_{k-1})$,
+   where $(\mu_{k-1}, \Sigma_{k-1})\leftarrow \text{Denoise}(\mathbf{x}_k(\tau), \hat\epsilon)$.
+   
+   }
+   $r_t \! \gets \! \mathbf{x}_0(\tau)[C\!-\!1].\text{reward}$.    
+   \hspace{0.2em} 
+   $s_{t+1} \! \gets \! \mathbf{x}_0(\tau)[C].\text{state}$. 
+   \hspace{0.2em} 
+   $a_t \gets f_\phi(s_t, s_{t + 1})$ from IDM.
+   
+   
+   {\color{blue} Apply $a_t$ to the environment}.
+   Overwrite $s_{t+1}$ with the true next state.
+   $\tau.\text{append}(s_t, a_t, r_t, s_{t + 1})$.
+   }
+\end{algorithm}
+
+   
+   
+
+We will diffuse over the following state for diffusion timesteps $k = 1, \ldots, K$:
+\begin{align}
+\label{eq:xktau_def_ddr_1}
+    \mathbf{x}_k(\tau) &\coloneqq (s_{t-C+1}, r_{t-C+1}, \ldots, s_t, r_t, \ldots, s_{t+H-C}, r_{t+H-C})_k 
+    \ \in \mathbb{R}^{{\color{blue}H(m+1)}}.
+\end{align}
+
+In the process of diffusion,
+it is crucial to make the current part of the trajectory consistent with the history. 
+We therefore introduce the most recent $C$ number of states by repeatedly overwriting the entries of $s_{t-C+1}, \ldots, s_{t}$ in $\mathbf{x}_k(\tau)$,
+throughout all diffusion steps $k$.
+We finally extract $r_t$ and $s_{t+1}$ from $\mathbf{x}_0(\tau)$.
+If $s_{t+1}$ is used directly to run the denoising process again, 
+we end up with an auto-regressive generation of trajectories,
+which turned out ineffective in our experiments.
+
+DD trains an IDM to infer the action $a_t$ from $s_t$ and $s_{t+1}$,
+which can be used to interact with the environment and to obtain the true next state $s_{t+1}$.
+The whole generation procedure is formalized in Algorithm~\ref{alg:DDR-I}
+and is illustrated in Figure~\ref{DDR-I}.
+We will refer to the entry of $s_{t-C+1}$ as $\mathbf{x}_{k}(\tau)[0].\text{state}$,
+and the entry of $r_{t-C+1}$ as $\mathbf{x}_{k}(\tau)[0].\text{reward}$.
+
+\phantom{a}
+
+It is noteworthy that we do not write in the reward from the latest $C$ steps, 
+differing from the states.
+Instead, we just let the diffuser fill in their values,
+which is consistent with our postulation that past states provide sufficient information to predict the reward.
+Further, although we do not pursue it in this work,
+our generator could also be used in online model-based planning,
+in which case the past rewards may not be even available to the agent online.
+\subsection{Conditioning with Classifier-free Guidance and the Training Objective}
+
+To train the generator,
+we employ classifier-free guidance to integrate conditional influence into the diffusion process \citep{Ho22}. 
+This is superior to using a classifier that requires estimating the $Q$-function \citep{Ajay23}. 
+It defines a perturbed noise that is applied at trajectory generation:
+\begin{align}
+\label{classifier-free guidance}
+\hat{\epsilon}\coloneqq\epsilon_\theta(\mathbf{x}_k(\tau), \emptyset, k) + 
+\omega \cdot [&\epsilon_\theta(\mathbf{x}_k(\tau), \mathbf{y}(\tau), k) - \epsilon_\theta(\mathbf{x}_k(\tau), \emptyset, k)],
+\end{align}
+where the scalar $\omega$ tends to augment and extract the best portions of trajectories in the dataset that comply with the conditioning of $\mathbf{y}(\tau)$, i.e., high return here.
+This helps the decision diffuser to learn a good policy from an average dataset. 
+Then the reverse process $p_\theta$, 
+which is parameterized by the noise model $\epsilon_\theta$,
+can be learned by minimizing \citep{Ho22}
+\begin{align}
+    &\mathcal{L}_{\text{gen}}(\theta)\coloneqq \mathbb{E}_{\epsilon \sim\mathcal{N}(\mathbf{0}, \mathbf{I}), 
+    k \sim\mathcal{U}\{1, ..., K\}, \tau\in\mathcal{D}, \beta\sim \text{Bern}(p)} [\Vert\epsilon-\epsilon_\theta(\mathbf{x}_k(\tau), (1 - \beta)\mathbf{y}(\tau)+\beta\emptyset, k)\Vert^2 ].
+\end{align}
+\subsection{Inverse Dynamics Models (IDMs)}
+\label{sec:IDM}
+
+Sampling states and rewards using a diffusion model is not enough for generating a full trajectory or extracting policy. 
+A policy can be inferred from estimating the action $a_t$ that leads the state $s_t$ to $s_{t+1}$.
+\citet{Hepburn24} proposed implementing the IDM $p(a_t|s_t, s_{t+1})$ with a conditional variational autoencoder. 
+However, they are generally harder to train with a more complicated structure than MLPs. 
+We hence adopt the IDM from \citet{Pathak18},
+which is also employed by DD and is shown to be effective than jointly diffusing over actions and states \citep{Ajay23}.
+Let
+$    a_t\coloneqq f_\phi(s_t, s_{t+1})$,
+where $f_\phi$ is an MLP with parameter $\phi$.
+The training objective of IDM is simply
+\begin{align}
+    &\mathcal{L}_{\text{IDM}}(\phi)\coloneqq 
+    \mathbb{E}_{(s, a, s')\in\mathcal{D}} 
+    \ [\Vert a-f_\phi(s, s')\Vert^2 ].
+\end{align}
+\iffalse
+Since the rewards only depend on the current state, we can define the output block for the conditional diffusion:
+\begin{equation}
+    B^{out}_t \coloneqq (s_t, r_t)
+\end{equation}
+while the initial input block contains only the states and we will place a dummy value at the places of the rewards for the initial input:
+\begin{equation}
+    B^{initial}_t \coloneqq (s_t, \emptyset)
+\end{equation}
+
+For one timestep in the diffusion, we can define a series of output blocks representing a noisy sequence of states and rewards from a partial trajectory with the length of $H$. 
+\begin{equation}
+\label{eq:xktau_def_ddr_1}
+    \mathbf{x}_k(\tau)\coloneqq(B^{out}_t, B^{out}_{t+1}, ..., B^{out}_{t+H-1})_k,\quad 0<k\leq K
+\end{equation}
+where $k$ denotes the timestep for the diffusion while $t$ denotes the index in a trajectory in the offline RL dataset. The series of output blocks in the previous step of diffusion are the series of input blocks for the next diffusion timestep, except for the first timestep.
+
+While performing the diffusion, it's crucial to make the current part of the trajectory consistent with the history. Therefore, we need to assign history values of the states to the current part of the trajectory during initialization before the diffusion begins. However, since the rewards are depend on the states according to our model, there's no need to assign history values of the rewards to the current part of the trajectory when initializing, instead we place a dummy value at the places of the rewards for the initial inputs and let the diffusion model generate reward the step by step with the knowledge of the input state. The DDR-I model is the good policy knowledge provider for the knowledge distilling process. 
+\fi
+
+
+\iffalse
+The rewards in this case also do not require to manually aligned with the history, since they're automatically aligned with the history when the states are manually aligned. We will train on the partial trajectory with the length of $H$ while generate the reward using the length of $1$, which means the model will focus only on the current state $s_t$ and the next state $s_{t+1}$ for reward generating.
+
+Although it seems a bit verbose that we are predicting $s_{t+1}$ using $s_{t+1}$, it's still essential to design a model in this form. Because in this way, we are able to provide both the information of the next state and the information of the current state for the reward prediction, which acts as an estimation for the reward of a new transition in the stitching algorithm. 
+\fi
+
+
+\phantom{a}
+
+
+\section{Stitcher of DITS}
+
+\label{sec:TSKD}
+
+As illustrated in Figure~\ref{fig:illustration},
+merely generating high-return trajectories is sub-optimal as it may overfit those regions.
+We overcome this limitation by blending such trajectories into the original dataset progressively with a \textit{selective} stitching strategy,
+thereby diversifying the high-return trajectories by, \eg, 
+starting from a low-reward region.
+
+Stitching algorithms have been studied in the literature.
+The Model-based Trajectory Stitching method \citep[MBTS,][]{Hepburn24} augments the dataset $\mathcal{D}$ by stitching together high-value regions of different trajectories,
+\ie, introducing new transitions between two states on two different trajectories.
+The candidate states for stitching are determined by 
+i) the state-value function $V(s)$ and 
+ii) the forward dynamics probability $p(s'|s)$. 
+However, MBTS does not generate new trajectories conditioned with high return,
+leaving the stitched data still sub-optimal.
+
+To address this issue, 
+we propose a stitching algorithm for DITS,
+with an abridged version shown in Algorithm~\ref{alg:TSKD_skeleton},
+The key differences are highlighted in color, 
+
+The key step of Algorithm~\ref{alg:TSKD_skeleton} is step \ref{alg_step:condition},
+where a candidate state $\hat s'$ is evaluated for stitching.
+Here, $\hat{.}$ stands for a candidate state.
+By ``good'', we follow MBTS and impose three conditions as detailed in Algorithm~\ref{alg:TSKD}.
+Firstly, it needs to be close to $s'$, 
+
+Moreover, there is a good chance to switch to $\hat s'$,
+and the value of $\hat s'$ is higher than $s'$.
+\begin{algorithm}[t]
+\SetAlgoLined
+   \caption{The stitching algorithm of DITS in brief. 
+   A detailed version is in Algorithm~\ref{alg:TSKD}.}
+   \label{alg:TSKD_skeleton}
+   
+   {\bfseries Input:} the original offline dataset $\mathcal{D}_0$ with $T$ trajectories $(\tau_1, ..., \tau_T)$
+   
+   \For{$k=0,...,K$}{
+   
+   Generate $n$ trajectories $\mathcal{D}'_{k}$ by {\color{blue} DITS' trajectory generator} in Algorithm~\ref{alg:DDR-I}.
+   
+   {\color{red} Set $\mathcal{D}_{k}\leftarrow \mathcal{D}_{k} \cup  \mathcal{D}'_{k}$}.
+   Train the state-value function $V$ on dataset $\mathcal{D}_k$.
+   
+   \For{{\color{red} $t=1,...,T$ (i.e., length of $\mathcal{D}_k$)}} {
+   
+   $(s, s') \gets (s_0, s'_0)$ from $\tau_t$.  Initialize a new trajectory $\hat\tau_t$
+   
+   \While{not done (e.g., maximum length of episode not reached)}{
+   \If{a state $\hat s'$ in $\mathcal{D}_k$ (possibly in a different trajectory than $t$) is \textbf{good} to stitch to \label{alg_step:condition}}{
+   
+   Generate action $\tilde a$ based on $(s, \hat s')$ by {\color{blue}DITS' action generator} (\eg, IDM).
+   
+   Generate reward $\tilde r$ given $(s, \hat s', \tilde a)$ by {\color{blue}DITS' reward generator} from Algorithm~\ref{alg:reward_gen}. \label{algo_label:reward_gen}
+   
+   Add $(s, \tilde a, \tilde r, \hat{s}')$ to the new trajectory $\hat \tau_t$
+   
+   $s \gets \hat s'$,   
+   $s' \gets $ the next state on the trajectory of $\hat s'$
+   }
+   \Else{   
+   Add original transition to $\hat \tau_t$ and slide $(s, s')$
+   }
+   }
+   }
+
+   {\color{red} $\mathcal{D}_{k+1} \gets T$ trajectories in $\{\hat \tau_t\}$ with the highest return}
+   }
+   {\bfseries Return:} dataset $\mathcal{D}_{K+1}$ for behavioural cloning training  
+\end{algorithm}
+
+\begin{algorithm}[t]
+   \caption{Reward generation in DITS}
+   \label{alg:reward_gen}
+   
+   {\bfseries Input:} Noise model $\epsilon_{\theta}$, guidance scale $\omega$, condition $\mathbf{y}$, current state $s$, stitching candidate $s'$
+   
+   Initialize $\mathbf{x}_K(\tau)\sim\mathcal{N}(\mathbf{0}, \alpha\mathbf{I})$ in $\mathbb{R}^{H(m+1)}$ from \Eqref{eq:xktau_def_ddr_1}
+   
+   \For{$k = K...1$}{
+   
+   $\mathbf{x}_k(\tau)[0].\text{state} \gets s$.
+   \hspace{0.5em}
+   $\mathbf{x}_k(\tau)[1].\text{state} \gets s'$.
+   \hspace{0.5em}
+   Set $\hat \epsilon$ with Equation \ref{classifier-free guidance}, using $\theta$, $\mathbf{x}_k(\tau)$, $\mathbf{y}$, and $k$.
+     
+   Sample $\mathbf{x}_{k-1}(\tau)\sim\mathcal{N}(\mu_{k-1}, \alpha\Sigma_{k-1})$,
+   where $(\mu_{k-1}, \Sigma_{k-1})\leftarrow \text{Denoise}(\mathbf{x}_k(\tau), \hat\epsilon)$.
+   
+   }
+   {\bfseries Return:} $\mathbf{x}_0(\tau)[0].\text{reward}$
+\end{algorithm}
+Whenever a stitching step occurs,
+the following key query is required in step \ref{algo_label:reward_gen} of Algorithm \ref{alg:TSKD}:
+\begin{quote}
+    As we transition from state $s$ to state $\hat{s}'$,
+    how much would the reward $r$ be?
+\end{quote}
+
+Since the state transition $s \to \hat{s}'$ is not present in the data,
+we need to complement it with reward.
+A straightforward solution is to reuse the trajectory diffuser by clamping the recent two states to $s$ and $\shat'$.
+The details are given in Algorithm~\ref{alg:reward_gen}.
+We also tried to train a separate diffusion model for this purpose, and got similar results.
+
+
+\subsection{Forward Dynamics Criterion}
+\label{sec:forward_dyn}
+
+To determine whether a state can be a candidate next state for stitching, 
+we need a criterion based on forward dynamics model $p(\hat s'|s)$, 
+depicting the transition probability from state $s$ to the possible candidate state $\hat s'$, 
+which may \textit{differ} from the observed next state $s'$. We model the environment dynamics as a Gaussian distribution, which is common for continuous state-space applications \citep{Janner19}. 
+We create an ensemble $\mathcal{E}$ of $N$ dynamics models parameterized by $\xi^i$:
+$\{\hat p_{\xi^i}(s_{t+1}|s_t)=\mathcal{N}(\mu_{\xi^i}(s_t), \Sigma_{\xi^i}(s_t))\}^N_{i=1}$. 
+Each model is trained via maximum likelihood estimation from the dataset $\mathcal{D}$, for which the loss can be formulated as:
+\begin{align}
+    &\mathcal{L}_{\hat p}(\xi)\coloneqq  \mathbb{E}_{s, s'\sim\mathcal{D}} [(\mu_\xi(s) - s')^T\Sigma_\xi^{-1}(s)(\mu_\xi(s)-s')+\log\vert\Sigma_\xi(s)\vert ],
+\end{align}
+where $\vert\cdot\vert$ is the determinant of a matrix. We train the ensemble using different parameter initializations for each model in order to take the epistemic uncertainty into account.
+The criterion for determining the candidate next state can be formulated in a conservative manner:
+\begin{align}
+    \min\nolimits_{i\in\mathcal{E}}
+    \ \hat p_{\xi^i}(\hat s'|s) > 
+    \mathop{\text{mean}}\nolimits_{i\in\mathcal{E}}
+    \ \hat p_{\xi^i}(s'|s).
+\end{align}
+
+\begin{table*}
+\caption{Comparison of \textbf{D4RL score} between DITS and  \textbf{interaction-free} augmentation methods,
+including SynthER and MBTS.
+In general, our DITS shows significant improvement.
+The base offline RL methods are BC and TD3+BC.
+We ran 5 random seeds.}
+\label{result-table}
+\setlength\tabcolsep{3pt}
+\begin{center}
+\begin{small}
+\begin{tabular}{l|cccc|cccc}
+\toprule
+    & \multicolumn{4}{c|}{BC} & \multicolumn{4}{c}{TD3+BC} \\
+  \midrule
+Methods & Original&SynthER&MBTS&\textbf{DITS}&Original&SynthER&MBTS&\textbf{DITS} \\
+\midrule
+&\multicolumn{8}{c}{\textbf{Med-Expert}}\\
+\midrule
+Halfcheetah & 55.2{\scriptsize $\pm$8.3} & 61.9{\scriptsize $\pm$7.8} & \textbf{86.9{\scriptsize $\pm$2.5}} & 86.8{\scriptsize $\pm$0.7} & 90.8{\scriptsize $\pm$7.0} & 85.9{\scriptsize $\pm$8.2} & \textbf{93.8{\scriptsize $\pm$3.4}} & 91.2{\scriptsize $\pm$3.7}\\
+Hopper& 52.5{\scriptsize $\pm$7.7} & 61.2{\scriptsize $\pm$8.8} & 94.8{\scriptsize $\pm$11.7} & \textbf{105.1{\scriptsize $\pm$6.1}} & 101.1{\scriptsize $\pm$10.5} & 102.5{\scriptsize $\pm$10.9} & 109.1{\scriptsize $\pm$3.9} & \textbf{111.3{\scriptsize $\pm$3.6}} \\
+Walker2d & 107.5{\scriptsize $\pm$2.8} & 108.2{\scriptsize $\pm$3.3} & 108.8{\scriptsize $\pm$5.5} & \textbf{109.1{\scriptsize $\pm$0.1}} & 110.0{\scriptsize $\pm$0.4} & 110.1{\scriptsize $\pm$0.3} & 110.3{\scriptsize $\pm$0.4} & \textbf{110.4{\scriptsize $\pm$0.8}}  \\
+\midrule
+\textbf{Average} & 71.7{\scriptsize $\pm$6.3} & 77.1{\scriptsize $\pm$6.7} & 96.8{\scriptsize $\pm$6.6} & \textbf{100.3{\scriptsize $\pm$2.3}} & 100.6{\scriptsize $\pm$6.0} & 99.5{\scriptsize $\pm$6.5} & \textbf{104.4{\scriptsize $\pm$2.6}} & 104.3{\scriptsize $\pm$2.7}\\
+\midrule
+&\multicolumn{8}{c}{\textbf{Medium}}\\
+\midrule
+Halfcheetah & 42.6{\scriptsize $\pm$3.1} & 42.8{\scriptsize $\pm$2.3} & 43.2{\scriptsize $\pm$0.3} & \textbf{44.1{\scriptsize $\pm$0.7}} & 48.1{\scriptsize $\pm$0.2} & 48.8{\scriptsize $\pm$0.3} & 48.4{\scriptsize $\pm$0.4} & \textbf{50.3{\scriptsize $\pm$3.4}} \\
+Hopper & 52.9{\scriptsize $\pm$2.4} & 58.1{\scriptsize $\pm$5.7} & 64.3{\scriptsize $\pm$4.2} & \textbf{83.2{\scriptsize $\pm$8.1}} & 60.4{\scriptsize $\pm$4.0} & 63.0{\scriptsize $\pm$4.3} & 64.1{\scriptsize $\pm$4.4} & \textbf{76.6{\scriptsize $\pm$6.4}} \\
+Walker2d & 75.3{\scriptsize $\pm$6.2} & 74.7{\scriptsize $\pm$5.5} & \textbf{78.8{\scriptsize $\pm$1.2}} & 78.5{\scriptsize $\pm$2.0} & 82.7{\scriptsize $\pm$5.5} & \textbf{85.2{\scriptsize $\pm$1.1}} & 84.2{\scriptsize $\pm$1.4} & 83.3{\scriptsize $\pm$3.6} \\
+\midrule
+\textbf{Average} & 56.9{\scriptsize $\pm$3.9} & 58.5{\scriptsize $\pm$4.5} & 62.1{\scriptsize $\pm$1.9} & \textbf{68.6{\scriptsize $\pm$3.6}} & 63.7{\scriptsize $\pm$3.2} & 65.7{\scriptsize $\pm$1.9} & 65.6{\scriptsize $\pm$2.1} & \textbf{70.2{\scriptsize $\pm$4.5}} \\
+\midrule
+&\multicolumn{8}{c}{\textbf{Med-Replay}}\\
+\midrule
+Halfcheetah & 36.6 {\scriptsize $\pm$3.1}& 34.1{\scriptsize $\pm$2.5} & \textbf{39.8{\scriptsize $\pm$0.6}} & 38.9{\scriptsize $\pm$3.2} & 44.6{\scriptsize $\pm$3.3} & 44.7{\scriptsize $\pm$0.6} & 43.8{\scriptsize $\pm$0.5} & \textbf{45.1{\scriptsize $\pm$5.5}}\\
+Hopper & 18.1{\scriptsize $\pm$7.4} & 27.5{\scriptsize $\pm$10.2} & 50.2{\scriptsize $\pm$17.2} & \textbf{96.4{\scriptsize $\pm$6.8}} & 60.9{\scriptsize $\pm$5.2} & 63.2{\scriptsize $\pm$4.4} & 77.4{\scriptsize $\pm$17.0} & \textbf{99.4{\scriptsize $\pm$1.9}} \\
+Walker2d & 26.0{\scriptsize $\pm$5.9} & 33.1{\scriptsize $\pm$10.8} & 61.5{\scriptsize $\pm$5.6} & \textbf{74.5{\scriptsize $\pm$6.5}} & 81.8{\scriptsize $\pm$5.3} & 82.1{\scriptsize $\pm$5.6} & 82.8{\scriptsize $\pm$3.4} & \textbf{83.4{\scriptsize $\pm$4.2}} \\
+\midrule
+\textbf{Average}& 26.9{\scriptsize $\pm$5.5} & 31.6{\scriptsize $\pm$7.8} & 50.5{\scriptsize $\pm$7.8} & \textbf{69.9{\scriptsize $\pm$5.5}} & 62.4{\scriptsize $\pm$4.6} & 63.3{\scriptsize $\pm$3.5} & 68.0{\scriptsize $\pm$7.0} & \textbf{76.0{\scriptsize $\pm$3.9}} \\
+\midrule
+&\multicolumn{8}{c}{\textbf{Kitchen}}\\
+\midrule
+Mixed & 51.5{\scriptsize $\pm$7.3} & 53.7{\scriptsize $\pm$5.8} & 49.3{\scriptsize $\pm$6.6} & \textbf{60.0{\scriptsize $\pm$4.8}} & 0.0{\scriptsize $\pm$0.0} & 0.0{\scriptsize $\pm$0.0} & 4.3{\scriptsize $\pm$2.2} & \textbf{42.2{\scriptsize $\pm$6.3}} \\
+Partial & 38.0{\scriptsize $\pm$5.3} & 44.2{\scriptsize $\pm$5.5} & 39.4{\scriptsize $\pm$7.8} & \textbf{44.4{\scriptsize $\pm$3.9}} & 0.7{\scriptsize $\pm$0.4} & 0.5{\scriptsize $\pm$0.2} & 2.5{\scriptsize $\pm$0.8} & \textbf{37.4{\scriptsize $\pm$7.1}} \\
+\midrule
+\textbf{Average} & 44.8{\scriptsize $\pm$6.3} & 49.0{\scriptsize $\pm$5.7} & 44.4{\scriptsize $\pm$7.2} & \textbf{52.2{\scriptsize $\pm$4.4}} & 0.4{\scriptsize $\pm$0.2} & 0.3{\scriptsize $\pm$0.1} & 3.4{\scriptsize $\pm$1.5} & \textbf{39.8{\scriptsize $\pm$6.7}} \\
+\midrule
+&\multicolumn{8}{c}{\textbf{Antmaze}}\\
+\midrule
+Umaze & 55.3{\scriptsize $\pm$4.2} & 66.5{\scriptsize $\pm$4.4} & 73.6{\scriptsize $\pm$7.3} & \textbf{82.3{\scriptsize $\pm$10.2}} & 70.8{\scriptsize $\pm$39.2}& 87.3{\scriptsize $\pm$6.6} & 75.6{\scriptsize $\pm$13.8} & \textbf{92.3{\scriptsize $\pm$7.7}}\\
+U-Diverse & 47.3{\scriptsize $\pm$4.1} & 58.4{\scriptsize $\pm$3.8} & 63.8{\scriptsize $\pm$4.8} & \textbf{65.5{\scriptsize $\pm$8.8}}& 44.8{\scriptsize $\pm$11.6} & 57.8{\scriptsize $\pm$7.6} & 59.7{\scriptsize $\pm$6.3} & \textbf{65.2{\scriptsize $\pm$6.3}}\\
+\midrule
+\textbf{Average} & 51.3{\scriptsize $\pm$4.2} & 62.5{\scriptsize $\pm$4.1} & 68.7{\scriptsize $\pm$6.1} & \textbf{73.9{\scriptsize $\pm$9.5}} & 57.8{\scriptsize $\pm$25.4} & 72.6{\scriptsize $\pm$7.1} & 67.7{\scriptsize $\pm$10.1} & \textbf{78.8{\scriptsize $\pm$7.0}} \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\vskip -0.16in
+\end{table*}
+
+\begin{table}[]
+    \centering
+    \caption{
+    Comparison of \textbf{D4RL score} between DITS and  \textbf{interaction-based} augmentation methods,
+    including the vanilla SynthER and its modified version.
+In general, our DITS shows significant improvement.
+The base offline RL method is \textbf{TD3+BC}.
+We ran 5 random seeds.}
+    \begin{tabular}{lc|ccr}
+        \toprule
+       \multicolumn{2}{c|}{} & SynthER (original) & SynthER (modified) & DITS  \\
+       \midrule
+       Med-Expert & Halfcheetah & 85.9$\pm$8.2 & 88.3$\pm$4.1 & \textbf{91.2$\pm$3.7}\\
+       Med-Expert & Hopper & 102.5$\pm$10.9 & 101.9$\pm$5.7& \textbf{111.3$\pm$3.6}\\
+       Med-Expert & Walker2d & 110.1$\pm$0.3 & 110.2$\pm$0.5&\textbf{110.4$\pm$0.8}\\
+       \midrule
+        Medium & Halfcheetah& 48.4$\pm$0.3 & 47.3$\pm$1.5&\textbf{50.3$\pm$3.4}\\
+       Medium & Hopper & 63.0$\pm$4.3& 65.8$\pm$2.9&\textbf{76.6$\pm$6.4}\\
+       Medium & Walker2d& 85.2$\pm$1.1 & \textbf{85.4$\pm$2.8}&83.3$\pm$3.6\\
+       \midrule
+       Med-Replay & Halfcheetah & 44.7$\pm$0.6& 44.0$\pm$0.9 & \textbf{45.1$\pm$5.5}\\
+       Med-Replay & Hopper & 63.2$\pm$4.4 & 68.5$\pm$2.8 & \textbf{99.4$\pm$1.9}\\
+       Med-Replay & Walker2d & 82.1$\pm$5.6 & \textbf{84.1$\pm$5.3} & 83.4$\pm$4.2\\
+       \bottomrule
+    \end{tabular}
+    \label{modified-test}
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We now demonstrate the empirical performance of DITS for offline RL with state-only interactions.
+We emphasize that our goal is data augmentation, 
+instead of proposing a new RL algorithm that possibly  intertwines with or extends another existing RL algorithm delicately.
+Therefore, the comparison is against other augmentation methods under a common set of base RL algorithms.
+
+\paragraph{Environments} 
+
+Although the three applications listed in the introduction are realistic in practice,
+we do not have access to their offline data.
+As a workaround,
+we employed standard locomotion tasks from the D4RL benchmark \citep{Fu20},
+including Halfcheetah, Hopper, and Walker2d. 
+To explore its robustness, 
+we further tested on Kitchen and Antmaze, 
+two harder environments. 
+We only considered the medium-expert, medium, and medium-replay datasets for locomotion tasks,
+because the downstream RL models already have excellent performance in expert datasets.
+\paragraph{Baseline data augmentation methods}
+
+We first compared with state-of-the-art interaction-free data augmentation methods,
+including SynthER \citep{lu2023synthetic} and MBTS \citep{Hepburn24}.
+Then we compared with an extended version of SynthER that utilizes state-only interactions.
+In particular,
+as SynthER generates $(s, a, r, s')$,
+we replaced the diffusion generated next state $s'$ with the actual next state retrieved from interaction. 
+We kept the same number of generated samples between modified SynthER and DITS.
+
+\paragraph{Settings}
+We evaluated the performance using the \textit{normalized average return} \citep{Fu20}.
+It first applies the offline learned policy to 10 online episodes.
+The total reward of each episode is referred to as a \textit{score},
+which is then normalized via $100 \times \frac{\text{score}-\text{random score}}{\text{expert score}-\text{random score}}$.
+The process is repeated with 5 random seeds,
+producing mean and variance.
+DITS used $300$ trajectories generated from the DITS trajectory generator. 
+\iffalse
+On the one hand, for the comparisons with interaction-free methods, we train BC and TD3+BC model on the augmented datasets. 
+On the other hand, we only compare with the modified SynthER on a trained TD3+BC model over the augmented dataset. 
+Since BC model doesn't utilize the next state $s'$, it will show no difference between the modified SynthER and the original version.
+
+\paragraph{SynthER with Interaction} 
+In order to form a fair comparison, we introduce a modified version of SynthER that includes interactions with the environment. We replace the diffusion-generated next state $\tilde s'$ with the next state $s'$ from actual interactions with the environment, given the current state $s$ and action $a$. We keep the number of generated samples the same between modified SynthER and our DITS for the comparison results in Table~\ref{modified-test}.
+\fi
+
+\subsection{Performance of normalized average return}
+
+The results of normalized average score for comparisons with \textit{interaction-free} methods are shown in Table~\ref{result-table},
+where the base RL learners are behavioral cloning (BC) and TD3+BC \citep{fujimoto2021minimalist}.
+A similar comparison with \textit{interaction-based} methods is shown in Table~\ref{modified-test},
+where we only compared with the modified SynthER on TD3+BC,
+because BC does not utilize the next state $s'$,
+ 
+ 
+Our DITS  made significant improvement on the Kitchen tasks for TD3+BC. 
+The original TD3+BC performs poorly in this situation, 
+along with the other augmentation methods under comparison. 
+However, DITS is able to generate full demonstrative trajectories with good policies using conditional diffusion based on state-only interactions, 
+resulting in a dramatic boost for the TD3+BC's performance. 
+The improvement offered by DITS is more significant when  the original dataset is not of high quality.
+Comparing the two columns of SynthER in Table~\ref{modified-test},
+it does get improved by state-only interactions.
+
+For a broader range of base RL methods,
+we evaluated our DITS augmentation based on CQL \citep{kumar2020conservative}, 
+IQL \citep{Kostrikov21}, 
+and CPED \citep{zhang2024constrainedpolicyoptimizationexplicit}. 
+Table \ref{tab:merged-results} presents the performance on Hopper and Walker2d.
+Our DITS is generally able to improve the performance,
+especially on datasets with lower quality.
+
+\paragraph{Trajectory generation time cost}
+We evaluated the time consumption of  trajectory generation for DITS.
+Using Hopper Medium Expert as an example,
+the mean and standard deviation in seconds over 10 repeated trials are:
+236.89$\pm$5.93 (200 steps),
+474.69$\pm$11.24 (400 steps), 711.63$\pm$17.08 (600 steps), 950.03$\pm$21.85 (800 steps), 1185.19$\pm$23.83 (1000 steps).
+We ran on a single RTX3080 GPU.
+
+\begin{table}[t]
+\caption{Improvement of D4RL score as DITS is applied in conjunction with CQL, IQL, and CPED.
+}
+\label{tab:merged-results}
+\begin{center}
+\begin{small}
+\begin{tabular}{lc|cc|cc|cc}
+\toprule
+\multicolumn{2}{r|}{} & CQL & DITS+CQL & IQL & DITS+IQL & CPED & DITS+CPED \\
+\midrule
+Hopper& Medium-Expert & 105.4 & \textbf{109.3$\pm$2.8} & 91.5 & \textbf{111.2$\pm$2.1} & 95.3$\pm$13.5 & \textbf{109.4$\pm$2.1} \\
+Hopper& Medium & 58.5 & \textbf{77.2$\pm$7.5} & 66.3 & \textbf{77.9$\pm$5.5} & \textbf{100.1$\pm$2.8} & 97.9$\pm$4.9 \\
+Hopper& Medium-Replay & 95.0 & \textbf{96.8$\pm$4.7} & 94.7 & \textbf{101.9$\pm$1.3} & 98.1$\pm$2.1 & \textbf{99.3$\pm$1.8} \\
+\midrule
+Walker2d& Medium-Expert & \textbf{108.8} & \textbf{108.3$\pm$1.5} & 108.8 & \textbf{111.1$\pm$1.3} & \textbf{113.0$\pm$1.4} & 110.8$\pm$2.2 \\
+Walker2d& Medium & 72.5 & \textbf{79.1$\pm$2.9} & 78.3 & \textbf{84.1$\pm$3.3} & 90.2$\pm$1.7 & \textbf{93.4$\pm$2.0} \\
+Walker2d& Medium-Replay & 77.2 & \textbf{79.0$\pm$3.8} & 73.9 & \textbf{87.9$\pm$4.1} & 91.9$\pm$0.9 & \textbf{92.1$\pm$1.1} \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+    \caption{\textbf{Correlation analysis.} 
+    While SynthER reconstructs the data from the original training set, we show that our method can improve the quality of the data with a higher similarity to the expert data. We used 100k samples from each model to compute the average result.}
+    \label{matching-test}
+    \centering
+    \begin{tabular}{l|cc|cc}
+        \toprule
+        & \multicolumn{2}{c|}{SynthER} & \multicolumn{2}{c}{DITS}  \\
+        & Marginal & Correlation & Marginal & Correlation\\
+       \midrule
+       Hopper Med-Replay & \textbf{0.983} & \textbf{0.997} & 0.932 & 0.989\\
+       Hopper Med-Expert & 0.958 & 0.992 & \textbf{0.982} & \textbf{0.995}\\
+       Hopper Expert & 0.934 & 0.982 & \textbf{0.998} & \textbf{0.998}\\
+       \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.325\textwidth}
+  \centering  \includegraphics[width=\linewidth]{ablation_1_medexp}\quad
+  \caption{medium expert}
+  \label{fig:1_medium_expert}
+\end{subfigure}
+\begin{subfigure}{0.325\textwidth}
+  \centering  \includegraphics[width=\linewidth]{ablation_1_med}\quad
+  \caption{medium}
+  \label{fig:1_medium}
+\end{subfigure}
+\begin{subfigure}{0.325\textwidth}
+  \centering  \includegraphics[width=\linewidth]{ablation_1_medreplay}
+  \caption{medium replay}
+  \label{fig:1_medium_replay}
+\end{subfigure}
+\caption{\textbf{Ablation study on trajectory generation and stitching}. 
+We show the contribution of the two components of DITS by comparing its \textit{normalized average return} on Hopper with two variants: no stitcher (dropping the stitching step) and 
+no generator (dotted line, using the original dataset).
+}
+\label{ablation-hopper}
+\end{figure}
+
+\subsection{Correlation Analysis}
+\label{Correlation-DITS}
+
+Following \citet{lu2023synthetic},
+we next measured the similarity between 
+a) transitions generated SynthER and DITS diffusion model (without stitching) after training from the Hopper \textit{Medium Replay} dataset,
+and 
+b) samples from the \textit{Medium Replay}, \textit{Medium Expert} and \textit{Expert} datasets.
+The metrics included the Kolmogorov-Smirnov statistic and the Pearson rank correlation \citep{patki2016synthetic}. 
+As shown in Table~\ref{matching-test},
+DITS can generate data with the distribution close to the expert dataset while training only on medium replay data thanks to the conditional guidance. 
+We refer to the KS test results as \textbf{Marginal},
+and the Pearson statistics results as \textbf{Correlation}. 
+\subsection{Ablation Study on the DITS Method}
+\label{ablation_TSKD}
+
+Our first ablation study investigates how the two key ingredients of our method,
+the trajectory generator and the stitcher, 
+contribute to its performance.
+Using BC as the base RL algorithm,
+We compared DITS with two variants:
+a) only adding DITS generated trajectories to the datasets based on state-only interactions,
+and 
+b) only performing stitching on the original dataset without generating new trajectories. 
+The resulting normalized average score is presented in Figure~\ref{ablation-hopper},
+using the Hopper dataset and the same three difficulty levels as in Table~\ref{result-table}. 
+
+Overall, fully applying DITS is more effective than only utilizing the stitcher, 
+which indicates that the conditional diffuser and interaction are indeed helpful by providing high-return trajectories.
+Furthermore, full DITS outperforms the method with stitcher removed,
+because the stitching step can avoid overfitting to the high-return regions by blending in transitions from the low value regions.
+
+\paragraph{Ablation on Conditional Guidance Scale}
+We also analyzed the sensitivity of the conditional guidance scale $\omega$ of the conditional diffusion model.
+On the Hopper Medium Expert dataset,
+we evaluated the generation quality by computing the correlation between expert data. 
+The correlation turns out 
+$0.996, 0.996, 0.993, 0.989$
+for $\omega = 1.2, 1.4, 1.6, 1.8$, respectively.
+
+
+
+\paragraph{Ablation on the Number of Generated Trajectories}
+
+We next study the impact of the high-return trajectories generated by DITS via interaction.
+Figure~\ref{ablation-DDR} shows that, using Hopper medium expert as the environment and BC as the base offline RL algorithm,
+the performance of our method can be improved with more sampled trajectories.
+Further, the variance also decays as a broader range of situations are fed to BC.
+When only a small number of high-return trajectories are available,
+some test episodes turned out to suffer a considerably low score.
+
+\subsection{Comparison with DiffStitch}
+\label{sec:compare_diffstitch_app}
+
+DiffStitch \citep{li2024DiffStitch} is a recent work that uses diffusion imaginations to stitch trajectories that augment the data. 
+However, it does not utilize state-only interactions,
+nor employ conditional guidance. 
+Although we also use diffusion models,
+we use them to generate high-reward trajectories as candidates for stitching,
+instead of using them to implement the stitching method itself. 
+
+For completeness we compare in Table~\ref{result-diffstitch} the D4RL scores of our DITS and DiffStitch. 
+The base RL method is TD3+BC,
+and 5 random seeds were used.
+Our DITS matches or outperforms DiffStitch in D4RL locomotion datasets. 
+\begin{figure}
+\begin{minipage}[b]{0.4\textwidth}
+\centerline{\includegraphics[width=\textwidth]{ablation_2.pdf}}
+\caption{Ablation on the number of DITS generated trajectory 
+}
+\label{ablation-DDR}
+\end{minipage}
+~~~
+\begin{minipage}[b]{0.55\textwidth}
+    \centering
+    \centering
+    \begin{tabular}{lccr}
+        \toprule
+       \multicolumn{2}{c}{} & DiffStitch & DITS  \\
+       \midrule
+       Med-Expert & Halfcheetah & \textbf{96.0$\pm$0.5} & 91.2$\pm$3.7\\
+       Med-Expert & Hopper & 107.1$\pm$7.0& \textbf{111.3$\pm$3.6}\\
+       Med-Expert & Walker2d & \textbf{110.2$\pm$0.3}& \textbf{110.4$\pm$0.8} \\
+       \midrule
+        Medium & Halfcheetah& \textbf{50.4$\pm$0.5} &\textbf{50.3$\pm$3.4}\\
+       Medium & Hopper & 60.3$\pm$4.9&\textbf{76.6$\pm$6.4}\\
+       Medium & Walker2d& \textbf{83.4$\pm$4.7} &\textbf{83.3$\pm$3.6}\\
+       \midrule
+       Med-Replay & Halfcheetah & 44.7$\pm$0.3 & \textbf{45.1$\pm$5.5}\\
+       Med-Replay & Hopper & 79.6$\pm$13.5 & \textbf{99.4$\pm$1.9}\\
+       Med-Replay & Walker2d & \textbf{89.7$\pm$4.2} & 83.4$\pm$4.2\\
+       \bottomrule
+    \end{tabular}
+    \captionof{table}{Comparing DITS and DiffStitch in D4RL score}
+    \label{result-diffstitch}
+\end{minipage}
+\end{figure}
+
+
+Due to space limitation,
+
+
+\section{Conclusion, Limitation, Broader Impact, and Future work}
+
+
+
+We proposed a novel data augmentation method DITS for offline RL,
+where state-only interactions are available with the environment.
+The generator based on conditional diffusion models allows high-return trajectories to be sampled,
+and the stitching algorithm blends them with the original ones.
+The resulting augmented dataset is shown to significantly boost the performance of base RL methods.
+
+
+As a limitation, we did not update DITS' trajectory generator after new state-only sequences are obtained from the interaction.
+Future work will empower diffusion models to learn from partially observed data (no reward available).
+As for broader impact, DITS will benefit a range of applications where state-only interactions are available,
+\eg, healthcare, recommendation, and inventory control.
+
+
+
+
+
+
+\iffalse
+
+
+

@@ -1,0 +1,239 @@
+\title{Inferring from Logits: Exploring Best Practices for Decoding-Free Generative Candidate Selection}
+
+\begin{abstract}
+Generative Language Models rely on autoregressive decoding to produce the output sequence token by token. Some tasks, such as preference optimization, require the model to produce task-level output consisting of multiple tokens directly by selecting candidates from a pool as predictions. Determining a task-level prediction from candidates using the ordinary token-level decoding mechanism is constrained by time-consuming decoding and interrupted gradients by discrete token selection. Existing works have been using decoding-free candidate selection methods to obtain candidate probability from initial output logits over vocabulary. Though these estimation methods are widely used, they are not systematically evaluated, especially on end tasks. We introduce an evaluation of a comprehensive collection of decoding-free candidate selection approaches on a comprehensive set of tasks, including five multiple-choice QA tasks with a small candidate pool and four clinical decision tasks with a massive amount of candidates, some with 10k+ options. We evaluate the estimation methods paired with a wide spectrum of foundation LMs covering different architectures, sizes and training paradigms. The results and insights from our analysis could inform the future model design.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) have shown amazing performance after pre-training on a massive corpus (Lewis et al., 2020), instruction tuning (Longpre et al., 2023), and preference alignment (Ethayarajh et al., 2024). Generative LMs respond to queries by generating tokens to form an output sequence and optimize themselves by learning to generate the correct tokens. The simplicity of token-level inference and optimization compromises its performance on end tasks, as there is a gap between the token-level paradigm and sequence-level task results and learning signals.  
+
+Some tasks use generative LM to select the answer(s) from a given pool of options where each candidate answer is a natural language sequence. With such a task formulation, both LLMs’ generalizable reasoning capabilities on novel scenarios and domain expertise contained in the candidate space can be utilized. Multiple-choice QA considers answer options as the candidate pool (Khashabi et al., 2020). The large collection of labels are candidate answers for extreme label classification tasks (Amigo & Delgado, 2022). The retrieval task aims to extract relevant documents from a largescale evidence corpus (Lu et al., 2023). The candidate pool can also be expert-curated professional coding systems (Taylor et al., 2022). For example, when instructing the model to prescribe medications, items in drug databases are candidates (Fleming et al., 2023); when conducting diagnoses, disease ontology forms the candidate space (Singhal et al., 2023). The typical practice is to use full decoding to generate an output sequence and then match the natural language output with candidates in the pool to select candidates to be predicted as answers (Mishra et al., 2022). However, selecting candidates using full decoding not only cuts off the gradient flow and disables direct optimization on decoded results but also limits the output bandwidth due to time-consuming discrete decoding.  
+
+Existing works perform candidate selection without decoding for outcome-level optimization or efficient parallel predictions. For example, Ma et al. (2023b) calculate averaged logits of MCQA options to select an answer without decoding; Xu et al. (2023b) estimate the NLI result using logits of a single token. Though these decoding-free candidate selection practices are widely used, there is no formal definition or clear investigation of the properties of each method. There is also no consensus  
+
+![](images/fee2bef5ca802e640699e5e81a5209fad62fd53bab8657b98cf7917ddf54709e.jpg)  
+
+Figure 1: (a) Using full decoding for tasks with answer candidates by generating output sequences token-by-token. The task is to identify diagnoses given the patient’s medical record. (b) Candidate space, consisting of coded diagnoses. (c) Using decoding-free generative candidate selection method for the diagnoses task based on prior-decoding logits over vocabulary.  
+
+about the guiding principles for deploying those methods under various tasks and data scenarios with diverse numbers, lengths, and complexity of candidate sequences. In this work, we formally define the decoding-free generative candidate selection task, and conduct the first systematic evaluation of typical practices on downstream tasks, reflecting the ultimate influence of the selection methods compared with conducting full decoding. Our systematic evaluation covers an extensive collection of candidate selection methods, including five decoding-free approaches to calculating candidate probability distribution from token logits, as well as encoding-only dense retrieval method and full decoding approach. The effects of deploying various methods are evaluated with a comprehensive set of downstream testbeds widely used for LLM evaluation. The first type of testbed includes five multiple-choice QA tasks with broad target capabilities and candidate diversity, reflecting the candidate selection capabilities while the candidate pool is limited. We further increase the difficulty and examine the performance on tasks with massive numbers of candidates on expert-curated large ontology with $10\mathbf{k}+$ options for making diagnoses, procedure decisions, ordering lab tests, and prescribing medications. Finally, we dive into the characteristic shifts of candidate selection methods while using a wide spectrum of foundational LMs. The base models are diverse in terms of architectures (decoder-only or encoder-decoder), sizes (spanning from 137M to 11B), and training methods (pre-trained or instruction-tuned).  
+
+The evaluation provides insights into the properties of decoding-free candidate selection methods. The performance of the token-logits-based candidate representation is highly dependent on the properties of the pretrained LM, dataset domain difficulty, and candidate space diversity. Pure estimation methods can outperform non-instruction-tuned models due to the challenges faced by weak base models in handling certain question formats during decoding. In this case, estimation methods offer a more straightforward means of exhibiting knowledge through token logits. The insights derived from our evaluation enable more informed and confident design for future estimation methods. We empirically demonstrate that the logits of the first output step are most informative; using selective tokens for estimations compromises the performance and scaling properties of various model sizes.  
+
+
+
+\section{2 PROBLEM FORMULATION  }
+
+
+2.1 DECODING AND TRAINING PARADIGM OF GENERATIVE LMS  
+
+The ordinary sequence-to-sequence formulation of generative LM takes the input sequence $s e q_{i n}=$ $t_{1}^{i n},\cdot\cdot\cdot,t_{|s e q_{i n}|}^{i n}$ and is expected to generate an output sequence $s e\hat{q}_{o u t}=t_{1}^{o u t},\dots,t_{|s e q_{o u t}|}^{o u\hat{t}}$ . The output sequence generation involves encoding the input sequence to contextual vector representation (i.e. , output of the final transformer block), and decoding the outputs following  
+
+$$
+\begin{array}{r}{s e\hat{q}_{o u t}=f_{\mathrm{full-decode}}\big(f_{\mathrm{encode}}\big(s e q_{i n}\big)\big).}\end{array}
+$$  
+
+During inference, the decoding function $f_{\mathrm{full-decode}}$ involves $|s e q_{o u t}|$ discrete decoding steps, in which each step produces one output token. For $(k+1)-t h$ step of decoding, which is conditioned on both the input sequence and $k$ generated tokens, the model produces logits $\mathbf{z}_{k}\in\mathbb{R}^{|V|}$ over the vocabulary $V$ after passing output of encoding through unembedding matrix, and then obtain a probability distribution over the possible next token (w ∈V ) in the output sequence P (w ∣ti1∶n∣seqin∣, tˆo1∶ukt ) softmax ${\bf\Psi}({\bf z})$ . Then a discrete token at this autoregressive decoding step is produced by Equation 2.  
+
+During training, The LM is trained to minimize the difference between the generated tokens with tokens in the ground-truth output $s e q_{o u t}$ . The LM is optimized to minimize the cross-entropy loss shown in Equation 3 applied on the probability of the gold next token conditioned on the gold target output tokens in the previous segment in a teacher-forcing manner, assuming the $|s e q_{o u t}|$ -th token marks the end of the sentence.  
+
+$$
+\hat{t}_{k+1}^{o u t}=\operatorname{argmax}_{w\in V}P\left(w\mid t_{1:|s e q_{i n}|}^{i n},\hat{t}_{1:k}^{o u t}\right)
+$$  
+
+$$
+\mathcal{L}_{C E}=\sum_{k=0}^{\left|s e q_{o u t}\right|}-\log P\left(t_{k+1}^{o u t}\mid t_{1:\left|s e q_{i n}\right|}^{i n},t_{1:k}^{o u t}\right)
+$$  
+
+
+
+\section{2.2 CANDIDATE SELECTION WITH A CANDIDATE ANSWER POOL  }
+
+
+When performing tasks using generative LMs, we include task instruction and query in the input sequence $s e q_{i n}$ and expect the derived answer of the query aˆns from the generated output sequence $s e\hat{q}_{o u t}$ can match the ground-truth answer ans. Some tasks expect open-ended free generation where the final answer is the generated output $(a\hat{n}s=s e\hat{q}_{o u t})$ ), such as translation, creative story generation and dialogue conversation (Wang et al., 2023; Ma et al., 2023a). However, many tasks have an existing answer candidate pool, and the output sequence needs to find a matched candidate as the final prediction. We notate the candidate pool as $C$ and a candidate as $c\in\{c_{1},c_{2},\ldots,c_{|C|}\}$ where $|C|$ is the total number of candidate options. Each candidate is a natural language sequence. The answer of the query has to be one of the candidate, i.e. ans $\epsilon\;C$ . For example, answer options are candidates for multiple-choice question answering (Talmor et al., 2018), segments of the input sentences are candidates of information extraction (Sun et al., 2024; Zhao et al., 2024), passages in large archives serve as candidates for information retrieval (Lewis et al., 2021), and drugs within medication databases are candidates for prescription tasks (Yu et al., 2024). Below are two examples from a common sense multiple-choice question dataset:  
+
+Example 1. Question: The fox walked from the city into the forest, what was it looking for? Candidates: pretty flowers; natural habitat; storybook; dense forest Answer: natural habitat  
+
+2.3 ORDINARY APPROACHES FOR CANDIDATE SELECTION  
+
+Classification methods train a $|C|$ -way classification head with specialized parameters, where each candidate is treated as a class label. Retrieval methods first create an index with an encoded representation of each candidate. During prediction, the most matched candidates are retrieved, where the match is measured by the similarity between the candidate embedding and the query.  
+
+To select candidates using a generative approach with full decoding, the LM first generates a free-form output with discrete tokens $s e\hat{q}_{o u t}$ by decoding the most probable words at each output step, then an additional mapping $f_{\mathrm{map}}$ from $s e\hat{q}_{o u t}$ to candidates is needed to produce the probability over all candidates following Equation 4. This function can be a heuristic rule, semantic similarity matching, or manual processing.  
+
+$$
+P\left(c\mid t_{1:|s e q_{i n}|}^{i n}\right)=\left\{p_{c^{1}},p_{c^{2}},...,p_{c|C|}\right\}=f_{\mathrm{map}}{\left(f_{\mathrm{full-decode}}{\left(f_{\mathrm{encode}}\!\left(s e q_{i n}\right)\right)}\right)}
+$$  
+
+Then, the predicted answer aˆns where aˆns $\in C$ is produced by $a\hat{n}s=\operatorname{argmax}_{c\in C}P\left(c\mid t_{1:|s e q_{i n}|}^{i n}\right)$ .  
+
+2.4 GENERATIVE CANDIDATE SELECTION WITHOUT DECODING  
+
+At this point, we formally define the task of decoding-free generative candidate selection. In $\S2.3$ , we introduce generative candidate selection using decoding, where the answer is reflected by the output sequences. However, there are multiple severe limitations of decoding-based candidate selection. On the one hand, the discrete argmax operator for token selection interrupts the gradient flow, making applying objectives on task outcomes inefficient, such as using reinforcement learning with one-per-outcome sparse rewards instead of token-level feedback. On the other hand, the decoding process is time and resource-consuming, limiting the output bandwidth of generative LMs.  
+
+Decoding-free generative candidate selection $f_{\mathrm{est}}$ is a function to produce the candidate prediction probability given $s e q_{i n}$ without discrete decoding. Given the encoded representation, the function calculates the logits of the first decoding step $\mathbf{z}_{\mathrm{0}}$ (before the first discrete decoding) and then performs various approaches on top of the logits to estimate the probability of candidate outcomes. The estimation is driven by the token logits information under the assumption that the model’s intended preference over outcome candidates can be reflected in logits of tokens of the candidate sequences.  
+
+The estimation method directly produces the probability distribution over all candidate outputs following Equation 5. The predicted answer can be yielded by $a\hat{n}s=\operatorname{argmax}_{c\in C}P\left(c\,|\,t_{1:|s e q_{i n}|}^{i n}\right)$ .  
+
+$$
+P\left(c\mid t_{1:|s e q_{i n}|}^{i n}\right)=f_{\mathrm{est}}{\left(f_{\mathrm{encode}}\left(s e q_{i n}\right)\right)}
+$$  
+
+Note that the full decoding process $f_{\mathrm{full-decode}}$ , including probability calculation, argmax for token selection, decoding for the next token, etc, is not conducted. The mapping from discrete output sequence to candidates $f_{\mathrm{map}}$ is not needed either.  
+
+Decoding-free candidate selection methods are especially beneficial for two scenarios. 1) Accurate outcome-based optimization. To optimize the model with the feedback directly from the predicted outcomeaˆns, we need to know the model’s prediction over potential candidates $C$ without interrupting the gradient flow. 2) Efficient answer production. The token dependency of full decoding prevents the decoding mechanism from outputting the answer in parallel. Even though the output sequence $s e\hat{q}_{o u t}$ is generated, an additional step $(f_{\mathrm{map}})$ is needed to convert the output sequence $s e\hat{q}_{o u t}$ to the predicted answeraˆns. Decoding-free candidate selection produces the probability over all potential answers directly without autoregressive generation and supports parallel inference, significantly improving the time and resources needed for producing the answers to queries.  
+
+
+
+\section{2.5 DIFFERENCE COMPARED WITH ORDINARY APPROACHES  }
+
+
+The common property between the generative candidate selection and classification is that both settings require a given set of selections to produce the final output. However, candidate selection is different from classification in many key aspects summarized in Table 1, specifically: 1) Support of dynamic candidates. A classification model has to use the same set of output labels across all instances (e.g. positive or negative for sentiment classification). However, candidate selection methods allow the task to have a different set of output candidates for each instance (e.g. different answer options for each question in MCQA). 2) No need of additional parameters. The classification head is an additional set of parameters specialized for the defined output classes. Different classification tasks have to use a separate set of parameters. Candidate selection methods support various candidates with the generative LM’s native parameters only, without any additional parameters. 3) No need for specialized training. The additional parameters for each classification task need to be parameterized by training on task-specific data, preventing it from generalizing to new tasks or labels. However, decoding-free estimation methods support zero-shot candidate selection, as the possibilities of choosing options are calculated dynamically according to corresponding candidates.  
+
+Table 1: Key difference between classification and generative candidate selection.   
+
+![](images/1a6ea91ab7abdf8a7249f36ae30af6ca7be6962e79cf20b8ab846eb874893034.jpg)  
+
+
+
+\section{3 GENERATIVE CANDIDATE SELECTION METHODS  }
+
+
+The decoding-free generative candidate selection methods (also referred to as estimation methods) produce the probabilities of predicting each candidate using the logits obtained at the first output step. We introduce several decoding-free generative candidate selection methods, including $k$ -th token, token average and token sum, as well as other candidate selection methods for comparison, including full decoding and dense retrieval. We also investigate other interesting factors that influence the estimation performance, including the candidate sequence keyword selection deciding which tokens are considered to represent a candidate option, and the output step used to obtain the logits determining the source of raw logits data. We discuss these factors in $\S5.2$ and $\S5.3$ . Though some of the designs have been used by existing works, there is no justification or empirical analysis to support their design choices. To the best of our knowledge, this work is the first to provide a formal summary of these approaches and systematically investigate the properties of each design of generative candidate selection methods.  
+
+3.1 ESTIMATION CANDIDATE PROBABILITIES FROM LOGITS  
+
+Estimation by logits of $k$ -th token. From the logits across all tokens in the vocabulary $\mathbf{z}_{\mathrm{0}}$ , we calculate the logit for a single token (e.g. , the first or the last token) of each candidate sequence and apply softmax to these selected logits to determine the probability $p_{c^{i}}$ of predicting a candidate $c^{i}$ among all candidates $C$ following Equation 6. The candidate is represented by a sequence containing ∣ci∣tokens, i.e. , ci = ci1,...,c∣ici∣. For instance, in Example 1, logits for “pretty”, “natural”, “storybook” and “forest” can be extracted to calculate the probability of each choice based on the first token. We consider two variants in our evaluation: first token estimation and last token estimation.  
+
+Estimation by averaged token logits. We average the logits across all tokens for each candidate and apply softmax to these averaged logits across all candidates to compute choice probabilities following Equation 7 where $\langle\cdot\rangle$ represents the averaging operator. For “pretty flowers” choice in Example 1, the logits on “pretty” and “flowser” are selected from $\mathbf{z}_{\mathrm{0}}$ . The selected logits are averaged across tokens in the candidate sequence, and then softmax is applied across candidates.  
+
+Estimation by sum of token logits. For each choice, we sum the logits across all tokens of the candidate sequence. We then apply softmax to these summed logits to determine the probability of selecting each choice following Equation 8. In this approach, choices with more tokens tend to have a higher probability of selection.  
+
+![](images/c29e325bb3d7a0ea637b957dbbad37b1a5b1f7725f3fc846ca910709c945b12c.jpg)  
+
+3.2 ORDINARY CANDIDATE SELECTION METHODS TO COMPARE  
+
+Full decoding. Following the decoding paradigm introduced in $\S2.1$ and how to induce answers within a candidate pool from the full decoded output sequence introduced in $\S2.3$ , we perform full decoding to obtain an output sequence, then use a mapping function to find the corresponding predicted answer from the given candidate pool. The mapping function is task-dependent; we use the task-specific mapping rules introduced along with each dataset. Typical practices include using regular expressions to match patterns in the output sequences, such as phrases like “Answers: ”, and predicting the candidate with the highest semantic similarity with the output sequence.  
+
+Dense retrieval. In the retrieval baseline, we formulate the candidate selection task as a retrieval task and use dense passage retrieval as one of the reference models. Separate encoders are employed for encoding queries and candidate choices. Specifically, the question and each candidate choice are embedded into a high-dimensional vector space using these encoders. Cosine similarity is then computed between the question embedding and each candidate choice embedding. This similarity score quantifies the relevance of each choice to the posed question and determines the probability of each choice being the correct answer. For our experimental setup, we use the Facebook DPR question encoder and context encoder (Karpukhin et al., 2020) to generate embeddings of the questions and candidate choices, respectively.  
+
+4 EVALUATION SETTINGS  
+
+To contextualize the real-world performance of various candidate selection methods, we apply the introduced methods to ultimate downstream tasks to reflect their influence on end tasks. We introduce the selected tasks in $\S4.1$ and base generative LMs used in experiments in $\S4.2$ .  
+
+4.1 TESTBED TASKS FOR CANDIDATE SELECTION  
+
+We evaluate generative candidate selection methods on two typical types of candidate selection tasks. The first type contains a limited number of answer candidates so that all plausible choices can fit in the input prompt of the model if needed. The second type of task has a massive candidate pool with a large amount of candidates, which cannot fit in the input prompt. We show a comparison between these two settings in Table 5.2.  
+
+4.1.1 TASKS WITH LIMITED NUMBERS OF CANDIDATES  
+
+We use five tasks with the provided candidate pools: (1) CommonsenseQA (Talmor et al., 2018), (2) MMLU (Hendrycks et al., 2021b;a), (3) GPQA (Rein et al., 2023), (4) BIG-Bench (Srivastava et al., 2022), and (5) ARC (Clark et al., 2018), covering commonsense questions, science and liberal arts subjects in different education levels, logical reasoning questions, etc. Instances in all datasets contain one correct option and multiple distractors. They vary in difficulty, candidate option lengths, and number of candidates per instance, as shown by data statistics in Table 2. We report accuracy and per-instance runtime for these tasks and select one of the dataset splits with available answer keys.  
+
+3. When incorporating the candidate information, we use candidate sequences without indication heads (e.g. A, B) to estimate the selection for decoding-free methods. For the full decoding baseline, candidate sequences with indicators are included in the input for a fair comparison.4.  
+
+Table 2: Properties of testbeds with the limited and massive number of candidates.   
+
+![](images/51adff8102c1915910ebef15e73a8fb59796fc7a12199b4babb0577106bbc145.jpg)  
+
+
+
+\section{4.1.2 TASKS WITH MASSIVE NUMBERS OF CANDIDATES  }
+
+
+We adapt four professional decision-making tasks introduced by Ma et al. (2024) where the answer has to fall in a large-scale expert-defined coding system as the second category testbeds. The goal is to select multiple candidates from the pool as the predicted clinical decisions. They include: (6) Diagnosis decisions on ICD-10-CM coding system. Given the patient records of a hospital admission and the history diagnoses of the patient, the task aims to produce a set of diagnoses, each has to choose from chapters in the International Classification of Diseases (10th revision) coding system with $94\mathrm{k}+$ options. (7) Procedure decisions on ICD-10-PCS coding system. The task determines a set of actions to be implemented to intervene in the patient’s health status given the patient record at admission time. Candidates for procedures are level 2 codes in ICD-10-Procedure Coding System ontology with $85\mathrm{k}+$ options. (8) Lab orders on LOINC coding system. Given the admission patient record, the task selects a set of lab items from the candidate pool of 3rd-level codes of the Logical Observation Identifiers Names and Codes system. (9) Prescriptions on ATC coding system. The goal is to identify a set of medications, each coded as a pharmacological subgroup in the Anatomical Therapeutic Chemical classification system, to be prescribed to the patient given admission medical record.  
+
+
+
+\section{4.2 BASE GENERATIVE LMS.  }
+
+
+We assess decoding-free candidate selection approaches while using various pretrained generative language models, including both decoder-only models in the Mistral and LLaMA families, as well as encoder-decoder models in the Flan-T5 family. For LLaMA (AI@Meta, 2024) and Mistral (Jiang et al., 2023) models, we use both models without instruction tuning (LLaMA3 8B and Mistral $\nu O.3$  
+
+Table 3: Accuracy and runtime per instance (in seconds) for each method across five multiple-choice QA datasets with a limited number of candidates per question. For generative candidate selection methods without decoding, we report the performance gap compared with full decoding. Methods that underperform or outperform full decoding are highlighted with red or green background.  
+
+![](images/512a27a8d3d222b61f81fd14d07c9402e1cf8048de98b68ba9c0c18b323b240e.jpg)  
+
+7B) and after instruction tuning (LLaMA3 Instruct $\boldsymbol{\delta B}$ and Mistral Instruct $\nu0.3\;7B\mathrm{~.~}$ ). Among Flan-T5 models, we use the 11B variant (Chung et al., 2022). When preparing the input sequence $s e q_{i n}$ , we apply the chat template for the models trained with the prompt template, and we append the generation prompt to indicate the start of the answer segment. Additionally, we include a random guess baseline to represent the expected metrics achieved by chance.  
+
+
+
+\section{5 EXPERIMENTS RESULTS  }
+
+
+Table 3 shows the candidate selection performance on five MCQA tasks with limited candidates. We show the performance on four clinical tasks with large-scale candidate pools in Table 4. Given longer candidate sequences, we introduce a new decoding-free candidate selection approach named Sample Avg., which calculates average logits for every other token in candidate sequences.3.  
+
+
+
+\section{5.1 CHARACTERISTICS OF GENERATIVE CANDIDATE SELECTION METHODS  }
+
+
+Insight 1: Estimation methods provide reasonable initial guesses for challenging tasks and decision intuition especially when full decoding is weak. In Table 3 with limited candidates, for more challenging datasets such as GPQA, decoding-free candidate selection approaches (also referred to as “estimation methods”) provide a reasonable initial guess and do not necessarily perform significantly worse than full decoding. Compared to full decoding, estimation methods even provide better performance for CommonsenseQA using LLaMA3 and all MCQA tasks except GPQA using Mistral v0.3. We observe these two models still struggle to handle the format for answering the question for some tasks during decoding, so it is hard to project its knowledge to interpretable results since the only surface to represent knowledge, outputting sequences, is not working for a weak base model. While knowledge by estimation methods is easier to exhibit through token logits.  
+
+For the results on clinical decisions with massive candidates presented in Table 4, all methods experience a decrease in performance on these more challenging tasks compared to the ones with a limited candidate space. Among decoder-only models, estimation methods can outperform full decoding for lab orders and prescriptions, particularly in non-instruction-tuned variants. Specifically, all estimation approaches surpass Mistral $\mathrm{v}0.3$ in lab test orders, with Sample Avg. achieving the highest increase of 29.25 points compared to full decoding. Additionally, four of the estimation methods outperform LLaMA3 and Mistral $\operatorname{v0.3}$ ’s decoding methods in prescription decision making. The estimation methods provide hints of candidate selections in token logits.4). When the model is able to understand the instruction and produce reasonable output (using instruction-tuned models), full decoding is still better than estimation. This aligns with our observation in Table 3. To summarize, full decoding may impede the accurate selection of candidates, especially for non-instruction-tuned models, whereas decoding-free methods can provide a quick initial guess in some cases since they are not influenced by trajectory biases.  
+
+Insight 2: Estimation methods lag behind when full decoding performs well. In Table 3, we observe an overall drop in performance when using estimation approaches, especially when the full decoding method achieves reasonable accuracy. This aligns with the intuition that estimation methods rely solely on the logits without capturing the token dependencies within the output.  
+
+Insight 3: Estimation results are similar before or after instruction tuning. Though instructiontuned models tend to achieve better results than non-instruction-tuned ones with full decoding, the estimated selection results using the models of the same family do not have a large gap (LLaMA3 and Mistral compared with their instruct variants). This indicates that instruction tuning beneftis the decoding method a lot while making no significant difference for decoding-free methods.  
+
+Table 4: Recall for each candidate selection method across four clinical tasks with $1{\bf K}+$ to $94{\bf K+}$ candidates per question. We report the performance gap compared with full decoding.  
+
+![](images/570b8f885267f6ed427d57305024736116d74063f344773a905ae2c9c596a897.jpg)  
+
+on more difficult datasets such as GPQA and BIG-Bench as the retrieval model is designed for semantic similarity instead of reasoning. Both the capabilities of the pre-trained LM and the choice of representative tokens play crucial roles in accurate candidate selection.  
+
+Insight 5: Decoding-free estimation is much more efficient than full decoding. As shown in Tables 3, the minimal (maximal) times of speedups on the five datasets are 2.6 (145.9), 7.6 (73.0), 1.5 (29.0), 2.1 (79.0), and 2.4 (90.6), respectively. This efficiency is expected, as full decoding involves multiple subsequent steps, whereas estimation approaches require logits only at the first output step.  
+
+![](images/28edd8cd8afb9f0c5623176792bfa219b1e8f9ce883353774c3a8252e2572919.jpg)  
+
+Figure 2: Recall for the diagnosis decision task of various estimation methods while (a) using logits obtained from different output steps and (b) using logits calculated over different numbers of essential tokens selected from candidate sequences. The performance is obtained using LLaMA3 8B Instruct model. The bars in (a) indicate the unique tokens for full decoded sequences at corresponding output steps, reflecting the diversity of the decoded tokens.  
+
+
+
+\section{5.2 ESTIMATION PERFORMANCE USING LOGITS OF VARIOUS OUTPUT STEPS  }
+
+
+We investigate the middle ground between complete decoding-free methods and full decoding. We allow the LLM to generate output for a certain number of decoding steps and then use the logits of the next step to perform candidate selection estimation.  
+
+Insight 6: Logits of the first output step is the most informative. The ablation study is shown in Figure 2(a). The estimation performance drops significantly when the output steps increase after the first step. There is only 1 unique token for output steps 1 and 3 across all decoding outputs, as all outputs start from a phrase leading to the answer, i.e. “Based on the provided information, I would suggest the following diagnoses:...”. Though the uncertainty of the first decoded token is very small, the logit distribution contains the most helpful signals across all output steps. The estimation performance rises after generating the lead phrase starting from the 10th output step.  
+
+Using the logits of the first output step, without additional subsequent decoding, has been the default setting to estimate the candidate selection in many works. It is also most efficient without additional decoding steps. We empirically show that using the logits of the first output step to estimate the candidate selection is the optimal solution in terms of both estimation performance and efficiency.  
+
+5.3 ESTIMATION PERFORMANCE USING SELECTED CANDIDATE KEYWORDS  
+
+We investigate the estimation capabilities when only the logits of the most important keywords of each candidate sequence are considered. We prompt GPT-4o to select a certain number of the most important and informative tokens among all of each candidate sequence. We then only calculate the candidate probability using logits of the selected tokens.  
+
+Insight 7: Using full candidate sequence for estimation is better than selecting essential tokens. In Figure 2(b), we observe that as the considered tokens become more concise and selective (the number of selected candidate tokens becomes fewer), the estimated results of various methods converge to a similar range with a worse recall for most estimation methods. This indicates that it is not necessary to only use essential tokens of the candidate sequence during estimation if it is not First-only logits being used to derive the selection.  
+
+5.4 SENSITIVITY TO MODEL SIZES, ARCHITECTURES, AND CANDIDATE LENGTH  
+
+Insight 8: Estimation performance increases with larger decoder-only models, while staying constant with encoder-decoder ones. Figure 3.1(a) illustrates the performance of the encoderdecoder model improves using full decoding with respect to model sizes, while estimation approaches remain constant. However, the analysis on decoder-only GPT-2 family (Radford et al., 2019), including GPT-2, GPT2-Medium, GPT2-Large, and GPT2-XL, shown in Figure 3.1(b) shows a different trend. For this model family, all estimation methods surpass full decoding, and estimation accuracy improves as the model size increases. From qualitative analysis, we observe the poor performance of GPT2 full decoding is due to the fact that the model struggles to understand the instruction and perform the QA task in a reasonable format.  
+
+![](images/36d50265d0c689825446d1b490cfd798a28f9da99ee3bc7a564ad6f710edf2d0.jpg)  
+Figure 3: Accuracy with respect to the average candidate length for two types of datasets using LLaMA3 Instruct 8B: 1(a) Accuracy concerning model size for the ARC dataset and Flan-T5 family on a log-log scale. 1(b) Model size ablation for GPT-2 family. 2(a) MMLU dataset with a limited number of candidates, and 2(b) clinical decision datasets with a massive number of candidates.  
+
+Insight 9: Estimation performance decreases with longer candidate lengths. We depict the relationship between accuracy and the average length of candidates for both the MMLU and clinic datasets in Figure 3.2(a-b). For the MMLU dataset, data points are divided into 11 equal-sized bins, with average accuracy plotted against the average option length of the questions within each bin. For clinical tasks, where questions share identical candidate sets, average accuracy is plotted for each task, sorted by average candidate length (prescriptions, lab orders, procedures, diagnoses). In the MMLU dataset, decoding-free methods show decreasing accuracy with longer candidate length. Conversely, in the clinical decision datasets, there is an increase in accuracy for the last two average option lengths due to the intrinsic difficulty of the procedure dataset.  
+
+
+
+\section{6 RELATED WORKS  }
+
+
+To perform candidate selection from a candidate pool, existing works use a classification head on top of encoder outputs (Milios et al., 2023; Yamada et al., 2020; Li et al., 2022). However, classification formulation requires additional parameters and training while not supporting novel classes and dynamic candidates for each instance. The generative candidate selection we discussed keeps its flexibility and generalizability with a large throughput. To speed up inference, different parallel and efficient decoding methods are proposed (Bae et al., 2023; Zhang et al., 2018; Huang & Mi, 2010). However, our goal is not to speed up decoding but to evaluate the methods approximating decoded results without decoding. To select a candidate from a pool using the token logits without discrete decoding, existing works propose to obtain the probability of each candidate through aggregating different parts of token logits such as only keeping logits of a special token (Xu et al., 2023a), averaging logits (Saeidi et al., 2024; Song et al., 2024; Ethayarajh et al., 2024; Xiong et al., 2024), or multiplying logits (Ma et al., 2023c). We conduct the first systematic evaluation on these methods.  
+
+
+
+\section{7 CONCLUSION AND FUTURE WORK  }
+
+
+Obtaining task-level output is crucial in various practical scenarios, including clinical decision-making and preference alignment. However, ordinary generative language models operate at a token-level, which necessitates significant post-processing effort to extract task-level output. We address the general task of selecting the best-matching candidates given a context or question, with no restrictions on domain or candidate space. We conduct a systematic evaluation of various decoding-free candidate selection approaches on tasks with diverse question domains and varying candidate spaces. Further improvements can be achieved by considering more advanced sequence representation methods, such as text summarization.  
+
+REPRODUCIBILITY STATEMENT  
+
+We provide the codebase for reproducing all experiments reported in this paper in the discussion   
+forum
+both the MCQA datasets and clinical decision tasks. All data used in this work are accessible publicly,   
+ To cover all details for the experimental   
+1. We   
+3.   
+
+

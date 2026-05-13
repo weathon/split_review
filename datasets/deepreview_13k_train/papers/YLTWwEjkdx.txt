@@ -1,0 +1,548 @@
+\title{What Matters in Transformers? Not All Attention is Needed}
+
+\begin{abstract}
+While scaling Transformer-based large language models (LLMs) has demonstrated promising performance across various tasks, it also introduces redundant architectures, posing efficiency challenges for real-world deployment.
+Despite some recognition of redundancy in LLMs, the variability of redundancy across different architectures in transformers, such as MLP and Attention layers, is under-explored. 
+In this work, we investigate redundancy across different modules within Transformers, including Blocks, MLP, and Attention layers, using a similarity-based metric. Surprisingly, despite the critical role of attention layers in distinguishing transformers from other architectures, we found that a large portion of these layers exhibit excessively high similarity and can be pruned without degrading performance. For instance, Llama-2-70B achieved a 48.4\% speedup with only a 2.4\% performance drop by pruning half of the attention layers. Furthermore, by tracing model checkpoints throughout the training process, we observed that attention layer redundancy is inherent and consistent across training stages.
+Additionally, we further propose a method that jointly drops Attention and MLP layers, allowing us to more aggressively drop additional layers. For instance, when dropping 31 layers (Attention + MLP), Llama-2-13B still retains 90\% of the performance on the MMLU task.
+Our work provides valuable insights for future network architecture design. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Transformer-based large language models (LLMs) have significantly advanced AI research, achieving remarkable performance across various domains \cite{openai2024gpt4, geminiteam2024gemini}. However, scaling these models also introduces redundant architectures, namely overarching, leading to inefficiencies that complicate their real-world deployment
+~\cite{frantar2023gptq, sun2023wanda}, e.g., inflating deployment costs and resource demands. 
+For instance,  while the deployment cost of Llama-2-70B exceeds 128GB in FP16 precision—surpassing the capacity of a single A100 GPU—it can be reduced in depth without significantly impacting performance \cite{gromov2024unreasonable}. 
+
+Although several previous works have been proposed to promote LLM efficiency via removing redundant parameters or architectures~\cite{frantar2023gptq, sun2023wanda}, these approaches often employ universal techniques that overlook the unique characteristics of transformer architectures. Specifically, transformer \cite{vaswani2017attention} architectures are composed of multiple stacked blocks, each containing an MLP layer and an Attention layer, which serve distinct functions and exhibit corresponding different levels of redundancy \cite{wang-etal-2023-efficientvlm, pmlr-v202-shi23e} 
+This motivates a deeper investigation into the specific redundancies within Transformers, with the goal of identifying and addressing the most critical modules.
+
+In this work, we systematically explore the redundancy in three key Transformer components: \textit{Block}, \textit{MLP}, and \textit{Attention}. 
+Using a similarity-based metric \cite{gromov2024unreasonable, men2024shortgpt}
+, we evaluate the importance of each component and progressively drop those identified as redundant.
+We first apply a ``\textit{Block Drop}'' approach but observe that removing entire blocks leads to significant performance degradation. This suggests a need for a more fine-grained strategy. 
+
+Upon further examination, we explore the separate pruning of MLP and Attention layers. Our findings reveal that while dropping MLP layers negatively affects performance, a substantial portion of Attention layers, i.e., the core of Transformer architectures which distinguish it from other mainstream architectures (e.g., RWKV \cite{peng2023rwkv} and Mamba \cite{gu2024mamba}),  can be pruned without degrading the model’s performance. 
+For instance, dropping 50\% of the Attention layers in Llama-2-70B~\cite{touvron2023llama} results in comparable performance to the full model, indicating a high degree of redundancy in these layers.
+
+Building on these insights, we propose a more flexible approach, “\textit{Joint Layer Drop}”, which targets both MLP layers and Attention layers. By combining the importance scores of these layers, we find that jointly dropping low-importance Attention and MLP layers yields better performance under high sparsity conditions compared to pruning only one type of layer. 
+
+Our work demonstrates that the redundancy in Attention layers is not only significant but also consistent across different training stages, indicating that this redundancy is an inherent property of Transformer architectures. These findings open the door to more efficient Transformer designs, reducing both memory (e.g., KV-Cache) and computational costs (e.g., inference speed), while maintaining performance.
+
+In summary, our key contributions are as follows:
+
+\begin{itemize}
+
+\item Through an in-depth analysis of redundancy in three key Transformer components—\textit{Block}, \textit{MLP}, and \textit{Attention}—we uncover a surprising level of redundancy within the \textit{Attention}.
+
+\item We propose ``Attention Drop'', a simple yet effective algorithm for efficiently removing redundant  Attention layers in a training-free manner. Additionally, we introduce ``Joint Layer Drop'', which further improves the performance at high dropping ratios by jointly targeting both Attention and MLP layers.
+
+\item Our extensive experiments demonstrate the effectiveness of dropping Attention, for instance, removing 50\% of the attention layers in Llama-2-70B results in only a 2.4\% performance reduction while achieving up to a 48.4\% speedup.
+
+\item
+We further show that the attention layers remain consistently high redundancy throughout the training process, indicating it as an inherent property and providing valuable insights for future architecture design.
+
+\end{itemize}
+
+
+
+
+\section{Related Works}
+
+
+\paragraph{Large Language Models }
+Although Transformer-based Large Language Models (LLMs)
+have demonstrated promising performance across various tasks, their deployment costs remain a significant challenge for practical usage \cite{sun2023wanda, lin2023awq, gromov2024unreasonable}. Transformer \cite{vaswani2017attention}
+models consist of multiple blocks, which include Attention layers and MLP layers. Attention layers compute the contextual information between input tokens with quadratic complexity concerning the input sequence length \cite{li2020linear}. KV-Cache \cite{pope2022efficiently} mitigates the computational issue but results in excessive memory costs \cite{zhang2023h2o}.  
+MLP layers \cite{liu2021pay, Liu2021} transform each token independently, using an up-projection followed by a down-projection, and contribute most of the model parameters. Recent works have revealed that not all blocks or layers are equally important \cite{men2024shortgpt, chen2024compressing}, which urges us to reflect on the structured redundancy within LLMs and the potential design of more compact architectures.  
+
+\paragraph{Model Compression } LLMs can be compressed to promote their efficiency in memory and computation. Quantization \cite{frantar2023gptq, lin2023awq} and Pruning \cite{sun2023wanda, frantar2023sparsegpt} are the most widely used techniques to compress LLMs. Specifically, quantization transforms the data type into low-bit but remains potentially redundant architecture and parameters. Pruning can be categorized into unstructured pruning \cite{Kusupati20, sanh2020movementpruningadaptivesparsity} and structured pruning \cite{NEURIPS2020_703957b6, 9156820}. While unstructured pruning maintains better performance than structured pruning, it cannot be effectively applied to hardware, limiting its practical usage.
+Our methods, Block Drop and Layer Drop, focus on removing structured modules rather than fine-grained parameters, creating hardware-friendly efficient architectures while maintaining comparable performance. Additionally, Block Drop and Layer Drop are orthogonal to quantization, and their integration with quantization significantly enhances efficiency. 
+
+
+
+\section{Methodology}
+
+In this section, we present the methodology for identifying and removing redundant modules in LLMs. We begin by introducing a similarity-based metric to assess redundancy across both Attention and MLP layers. Based on the insights gained from this analysis, we develop two targeted techniques, i.e., MLP Drop and Attention Drop, to efficiently eliminate redundant components while preserving model performance.
+
+\subsection{Preliminaries}
+
+\paragraph{Similarity-based Drop} To assess the redundancy of modules in LLMs, we employ a similarity-based metric that evaluates the importance of each module by measuring the similarity between its input and output \cite{gromov2024unreasonable}. The underlying hypothesis is that redundant modules produce outputs that are similar to their inputs, implying minimal transformation. In contrast, important modules are expected to significantly alter their inputs and thus should be preserved.
+The similarity between the hidden states of the input $\x$ and output $\y$ of a module is quantified using cosine similarity. The importance score $\score$ of the module is computed as:
+\begin{equation}
+    \score = 1 - \text{CosineSim}(\x, \y).
+\end{equation}
+Modules with higher cosine similarity exhibit lower importance scores, indicating redundancy. We identify and prune the modules with the lowest importance scores according to a predefined pruning ratio.
+  
+\begin{wrapfigure}{rb}{0.42\textwidth}
+    \centering
+\includegraphics[width=\linewidth]{figs/block_drop.pdf}
+\label{fig:block_drop_pipline}
+\caption{\textbf{Visualization of Block Drop}. where we use \includegraphics[scale=0.01]{figs/spark.jpeg} to denote the blocks with high similarity scores (i.e., low importance scores). The dropped blocks are \underline{\textcolor[gray]{0.8}{blurred}}. 
+    }
+\includegraphics[width=\linewidth]{figs/data_type/mis_data_domain_block_drop.pdf}
+\caption{Importance scores of Blocks. }
+\label{fig:data_type_block}
+\label{fig:block_drop}
+\end{wrapfigure}
+
+\paragraph{Block Drop }
+Transformer models are composed of stacked blocks, where each block shares a common architecture and can be viewed as a subnetwork. To reduce complexity, we first consider dropping entire blocks that are deemed unimportant.
+
+As shown in Figure \ref{fig:block_drop}, Transformer blocks operate sequentially, with each block’s output feeding into the next. To evaluate redundancy, we compute the similarity between the input and output of each block. For the $l$-th block, the importance score is calculated as:
+\begin{equation}
+\score^l_{\block} = 1 - \text{CosineSim}(\x^l_\block, \y^l_\block),  
+\end{equation}
+where $\x^l_\block$ and $\y^l_\block$ denote the input and output of the $l$-th block, respectively. Since the similarity scores are computed locally, we can offload irrelevant modules to save memory. By iteratively computing the importance scores for each block from shallow to deep, we can identify and drop blocks with the lowest scores, thus saving memory and computational resources. 
+\subsection{Motivation} 
+Block Drop is an aggressive technique that risks removing essential layers, as it overlooks the internal fine-grained architectures within each block. A transformer block consists of both an Attention layer and an MLP layer. These layers perform distinct functions, with the Attention layer facilitating contextual information flow between tokens and the MLP layer transforming the token representations.
+Given their distinct roles, we assess the redundancy of each layer separately 
+by measuring the importance scores of Attention and MLP layers individually.
+Specifically, we leverage multiple calibration datasets to measure the importance scores, ranging from the pretraining dataset (e.g., C4~\cite{raffel2020exploring}) to instruction fine-tuning datasets (e.g., CodeAlpaca-20k\footnote{https://huggingface.co/datasets/sahil2801/CodeAlpaca-20k}, MathInstruct~\cite{yue2024mammoth} and LIMA~\cite{zhou2024lima}). 
+ Figure \ref{fig:data_type_block} and \ref{fig:data_type} illustrate the varying trend of importance scores for Attention layers compared to MLP layers across multiple datasets. This observation motivates us to consider the varying levels of redundancy between MLP and Attention layers and to develop more fine-grained dropping techniques accordingly, namely, MLP Drop and Attention Drop. 
+
+\begin{figure}[h]
+	\centering
+\subfigure[MLP]{    \includegraphics[width=0.45\linewidth]{figs/data_type/mis_data_domain_layer_drop_mlp.pdf}
+\label{fig:data_type_mlp}
+  }
+\subfigure[Attention]{    \includegraphics[width=0.45\linewidth]{figs/data_type/mis_data_domain_layer_drop_attn.pdf}
+\label{fig:data_type_attn}
+  }
+  \caption{
+Importance scores for MLP and Attention layers, where we use various calibration datasets for a comprehensive analysis.
+ }
+\label{fig:data_type}
+\end{figure} 
+\subsection{Layer Drop. }
+
+\begin{figure*}[ht]
+    \centering
+\includegraphics[width=0.96\linewidth]{figs/layer_drop.pdf} 
+    \caption{\textbf{Visualization of Layer Drop}, where we visualize dropping either MLP or Attention Layers. Given the residual connection, we take LayerNorm together with the corresponding layers. The dropped layers with high similarity scores (i.e., low importance scores) \includegraphics[scale=0.01]{figs/spark.jpeg} are \underline{\textcolor[gray]{0.8}{blurred}}. }
+\label{fig:layer_drop}
+\end{figure*}
+
+\paragraph{MLP Drop }
+As illustrated in Figure \ref{fig:layer_drop}, 
+ each MLP layer follows a LayerNorm operation and involves a residual connection, ensuring that part of the input is preserved in the final output. 
+ Given the input $\x^l_\mlp$ of the LayerNorm before MLP at the $l$-th Block, the output $\y^l_{\mlp}$ can be formulated as: 
+\begin{equation}
+    \y^l_{\mlp} = \x^l_{\mlp} + \text{MLP}(\text{LayerNorm}(\x^l_{\mlp})).  
+\end{equation}
+Since the output $\y^l_{\mlp}$ contains both the residual and the MLP transformation, evaluating similarity based solely on the MLP’s output can be misleading. To address this, we consider the MLP layer and its associated LayerNorm as a single unit and compute their importance score as follows:
+\begin{equation}
+\score^l_{\mlp} = 1 - \text{CosineSim}(\x^l_\mlp, \y^l_\mlp). 
+\end{equation}
+By treating these layers as a single entity, we ensure a more accurate measure of importance. MLP Drop removes both the unimportant MLP and associated LayerNorm layers.
+
+\paragraph{Attention Drop } 
+Similarly, Attention layers also operate within a residual connection. The output of the $l$-th Attention layer is computed as: 
+\begin{equation}
+    \y^l_{\attn} = \x^l_{\attn} + \text{Attention}(\text{LayerNorm}(\x^l_{\attn})), 
+\end{equation}
+where $\x^l_{\attn}$ is the inputs of the corresponding LayerNorm layers and $\y^l_{\attn}$ overall outputs that involve residual connections. Like MLP Drop, we assess both the Attention layer and its associated LayerNorm as a single unit. The importance score for the Attention layer is: 
+\begin{equation}
+\score^l_{\attn} = 1 - \text{CosineSim}(\x^l_\attn, \y^l_\attn). 
+\end{equation}
+Layer Drop, for both MLP and Attention layers, is performed in a one-shot manner, calculating importance scores once and removing redundant layers in a single step. This approach avoids the resource-intensive and time-consuming iterative pruning process.
+
+\paragraph{Implementation and Loading the Pruned Model}
+.
+After removing redundant layers, the pruned model can be easily loaded using existing libraries, such as Huggingface Transformers \cite{wolf-etal-2020-transformers}, with only minor adjustments to the model configuration. 
+
+
+
+
+
+\section{Investigation of Dropping Different Target Modules}
+
+In this section, we conduct a comprehensive investigation into the effects of dropping different target modules. To quantify the trade-off between performance degradation and speedup, we introduce a new metric, i.e., \textbf{Speedup Degradation Ratio (SDR)}, defined as:
+\begin{equation}
+    \mathcal{\gamma} = \frac{\Delta \text{Avg.}}{\Delta \text{Speedup}}, 
+\end{equation}
+where $\Delta$Avg. represents the percentage change in average performance across the evaluated tasks, and $\Delta$Speedup denotes the corresponding percentage of speedup achieved by each method.
+Therefore, $\gamma$ measures the amount of performance degradation incurred for each 1\% increase in speedup. A lower $\gamma$ value indicates that the model achieves speedup with minimal performance loss, making it more efficient. In contrast, a higher $\gamma$ value suggests that the performance loss is substantial relative to the speedup gained, implying a less favorable trade-off.
+
+Table \ref{tab:main} and Figure \ref{fig:sparse_ratios} summarize the results of dropping different target modules, such as Block, MLP, and Attention layers. Specifically, Table \ref{tab:main} shows the performance impact of dropping a fixed number of modules (e.g., 4 and 8 layers), while Figure \ref{fig:sparse_ratios} extends this analysis by evaluating a broader range of dropping ratios (0\% to 100\%).
+\paragraph{Block and MLP Drop: Significant Performance Degradation with Moderate Speedup}
+Block Drop and MLP Drop both lead to notable performance declines across both models, despite achieving moderate speedups.
+For example, Dropping 4 blocks results in a 2.4\% average performance decline (from 68.2 to 65.8) for Llama-2-13B, with a speedup of 1.11$\times$, corresponding to a $\gamma$ of 0.22. However, dropping 8 blocks causes a 7.5\% performance drop (down to 60.7), with only a modest speedup of 1.24$\times$ and a higher $\gamma$ of 0.31.
+
+\begin{table*}[htbp]
+\renewcommand{\arraystretch}{0.9} % row gap (default 1.5)
+\centering
+\caption{\textbf{Experimental Results of Dropping Different Modules}, where we drop the fixed number (e.g., 4 and 8) of modules on Llama-2-13B and Mistral-7B. Here, Block, MLP, and Attn are corresponding modules. 
+Rows with averaged performance lower than 95\% of the original performance are \underline{\textcolor[gray]{0.7}{grayed}}. 
+}
+\resizebox{0.96\linewidth}{!}{
+\begin{tabular}{l|cccccccc|ccc}
+    \toprule
+   \multicolumn{12}{c}{Llama-2-13B}
+    \\
+    \midrule
+    \bf Method
+    & ARC-C & BoolQ & HellaSwag & MMLU & OBQA & PIQA & RTE & WinoGrande & \underline{Avg. ($\uparrow$)}  & SpeedUp ($\uparrow$) & $\gamma$ ($\downarrow$) \\
+    \midrule
+    Baseline 
+    & 59.9 & 80.7 & 82.2 & 55.1 & 45.6 & 80.5 & 65.0 & 77.0 & \underline{68.2} 
+    & $1.00\times$ & -- \\ 
+    \midrule
+    Block-4
+    & 54.8 & 73.3 & 80.6 & 54.8 & 45.8 & 79.1 & 60.3 & 77.5 & \underline{65.8}     & $1.11\times$ & 0.22 \\
+        \rowcolor[gray]{0.93}
+    Block-8
+    & 48.0 & 56.8 & 75.3 & 53.8 & 41.2 & 75.3 & 59.9 & 75.6 & \underline{60.7}     & $1.24\times$ & 0.31\\
+    \midrule
+    MLP-4
+    & 54.9 & 76.1 & 80.4 & 54.8 & 45.4 & 79.5 & 66.4 & 77.3 & \underline{66.9}     & $1.04\times$ & 0.32\\
+        \rowcolor[gray]{0.93}
+    MLP-8
+    & 49.2 & 63.4 & 75.6 & 54.5 & 42.2 & 76.0 & 59.2 & 75.1 & \underline{61.9}     & $1.08\times$ & 0.79 \\
+    \midrule
+    Attn-4
+    & 58.8 & 80.4 & 82.0 & 54.7 & 46.2 & 80.5 & 67.9 & 77.2 & \underline{68.5}     & $1.05\times$ & -0.05 \\
+    Attn-8
+    & 58.2 & 80.5 & 82.2 & 54.5 & 47.0 & 80.5 & 64.3 & 77.4 & \underline{68.1}     & $1.13\times$ & 0.01\\
+    Attn-16
+    & 56.4 & 79.2 & 81.9 & 48.2 & 47.4 & 79.5 & 59.9 & 76.2 & \underline{66.1}     & $1.29\times$ & 0.07 \\
+    Attn-20
+    & 53.8 & 76.9 & 78.6 & 51.5 & 44.4 & 77.6 & 59.2 & 77.1 & \underline{64.9}     & $1.40\times$ & 0.08 \\
+    \bottomrule
+    \multicolumn{12}{c}{\rule{0pt}{2ex} Mistral-7B}
+    \\ 
+    \midrule
+    \bf Method
+    & ARC-C & BoolQ & HellaSwag & MMLU & OBQA & PIQA & RTE & WinoGrande & \underline{Avg. ($\uparrow$)}  & SpeedUp ($\uparrow$) & $\gamma$ ($\downarrow$) \\
+    \midrule
+    Baseline 
+    &  61.5 & 83.7 & 83.2 & 62.5 & 43.8 & 82.0 & 66.8 & 78.5 & \underline{70.3}  & $1.00 \times$ & -- \\
+    \midrule
+    Block-4
+    & 53.1 & 80.4 & 77.5 & 61.6 & 40.0 & 77.6 & 70.0 & 76.6 & \underline{67.1} & $1.14 \times$ & 0.23 \\
+        \rowcolor[gray]{0.93}
+    Block-8
+    & 40.0 & 71.6 & 63.9 & 60.0 & 30.6 & 69.3 & 63.9 & 69.7 & \underline{58.6} & $1.32 \times$ & 0.37\\
+    \midrule
+    MLP-4
+    & 53.2 & 80.3 & 77.7 & 61.7 & 40.0 & 77.6 & 67.5 & 77.3 & \underline{66.9} & $1.03 \times$ & 1.13\\
+        \rowcolor[gray]{0.93}
+    MLP-8
+    & 36.7 & 71.8 & 33.6 & 53.3 & 30.6 & 68.0 & 66.8 & 66.6 & \underline{53.4} & $1.06 \times$ & 2.82\\
+    \midrule   
+    Attn-4
+    & 61.0 & 83.5 & 82.9 & 62.5 & 44.6 & 82.0 & 64.6 & 78.0 & \underline{69.9} & $1.10 \times$ & 0.04\\
+    Attn-8
+    & 60.2 & 82.7 & 82.3 & 62.2 & 44.2 & 81.3 & 66.8 & 78.8 & \underline{69.8} & $1.23 \times$ & 0.02\\
+    Attn-12
+    &  57.2  & 76.8  &  80.2 & 59.4 & 41.8 &  79.1 &  66.1 & 77.7 & \underline{67.3} & $1.40 \times$ & 0.08\\
+    \bottomrule
+    \end{tabular}
+}
+\label{tab:main}
+\end{table*}
+Similarly, MLP Drop exhibits a comparable trend, with a small decline at 4 layers (1.3\%, $\gamma = 0.32$), but a much larger drop at 8 layers (6.3\%, $\gamma = 0.79$). \textbf{These results suggest that while Block and MLP Drop provide moderate speedup, they do so at the cost of significant performance degradation, especially at higher drop ratios.}
+\begin{figure}[]
+  \centering
+  \subfigure[Block Drop]{
+    \includegraphics[width=0.95\linewidth]{figs/Block_drop_curve.pdf}
+    \label{fig:sparse_ratios_block}
+  }
+  \subfigure[MLP Drop]{
+    \includegraphics[width=0.95\linewidth]{figs/MLP_Layer_drop_curve.pdf}
+    \label{fig:sparse_ratios_mlp}
+  }
+  \subfigure[Attention Drop]{
+    \includegraphics[width=0.95\linewidth]{figs/Attention_Layer_drop_curve.pdf}
+    \label{fig:sparse_ratios_attn}
+  }
+  \caption{\textbf{Performance with respect to Dropping Ratios}. The solid lines represent the impact of dropping the $n$ modules with the lowest importance scores in Mistral-7B and Llama-2-13B, and the dotted lines represent the performances of the baseline and random guessing. }
+  \label{fig:sparse_ratios}
+\end{figure}
+
+\paragraph{Attention Drop: Minimal Performance Impact with High Efficiency}
+Surprisingly, despite the critical role of attention layers in Transformer architectures, dropping attention layers is highly effective. Both Llama-2-13B and Mistral-7B maintain over 99\% of their original performance even after dropping 8 attention layers, as shown in Figure \ref{fig:sparse_ratios_attn}. 
+For example, Attention Drop maintains near-baseline performance even after dropping 8 layers (69.8 vs. 70.3), with a speedup of 1.23$\times$ and a low $\gamma$ of 0.02. Dropping 12 attention layers results in only a slight performance decline (67.3), with a significant speedup of 1.40$\times$ and a $\gamma$ of 0.08. 
+ 
+\textbf{These results demonstrate that attention layers are highly redundant, and their removal has minimal impact on model accuracy, making Attention Drop a highly efficient pruning strategy.}
+\paragraph{Larger Models Show Consistent Robustness to Attention Drop}
+\begin{wraptable}{HTBPr}{0.46\textwidth}
+    \centering
+\caption{Experimental results on Llama-3, where Llama-3-8B and Llama-3-70B are included. 
+    Rows with averaged performance lower than 95\% of the original performance are \underline{\textcolor[gray]{0.7}{grayed}}.
+    }
+    \resizebox{0.46\columnwidth}{!}{
+    \setlength{\tabcolsep}{2pt}
+    \begin{tabular}{lcccc|ccc}
+    \toprule
+     \bf Method~ & HellaSwag & ~MMLU~ & ~OBQA~ & ~WinoGrande~ 
+     & \underline{Avg. ($\uparrow$)}  & SpeedUp ($\uparrow$) & $\gamma$ ($\downarrow$) 
+     \\
+     \midrule
+    \multicolumn{8}{c}{Llama-3-8B}
+    \\
+    \midrule
+    Baseline~ 
+    & 82.2      & 65.5 & 45.0 & 77.7       & \underline{67.6} & $1.00 \times$ & -- \\
+    \midrule
+    Attn-4 & 81.6      & 65.1 & 44.8 & 78.2       & \underline{67.4}  & $1.07 \times$ & 0.03 \\
+    Attn-8 & 81.1      & 65.1 & 45.0 & 78.4       & \underline{67.4}  & $1.16 \times$ & 0.01 \\
+    Attn-12 & 79.4      & 63.9 & 42.2 & 77.8       & \underline{65.8}  & $1.26 \times$ & 0.07\\
+    \rowcolor[gray]{0.93}
+    Attn-16 & 71.2      & 38.2 & 39.4 & 72.8       & \underline{55.4}  & $1.38 \times$ & 0.32\\
+    \rowcolor[gray]{0.93}
+    Attn-20 & 42.2      & 23.0 & 30.6 & 58.7       & \underline{38.6}  & $1.52 \times$ & 0.56\\
+     \midrule
+    \multicolumn{8}{c}{Llama-3-70B}
+    \\
+    \midrule
+    Baseline
+    & 88.0      & 78.7 & 48.4 & 85.4       & \underline{75.1}  & $1.00 \times$ & -- \\
+    \midrule
+    Attn-4 
+    & 87.9      & 78.7 & 49.0 & 85.2       & \underline{75.2}  & $1.04 \times$ & -0.03\\
+    Attn-8 
+    & 87.8      & 78.5 & 48.8 & 85.2       & \underline{75.1}  & $1.10 \times$ & 0.00\\
+    Attn-16 
+    & 87.8      & 78.7 & 48.6 & 84.9       & \underline{75.0}  & $1.17 \times$ & 0.01\\
+    Attn-32 
+    & 87.9      & 78.6 & 48.8 & 85.3       & \underline{75.2}  & $1.35 \times$ & 0.00\\
+    Attn-40 
+    & 85.2      & 77.1 & 48.0 & 82.8       & \underline{73.3}  & $1.43 \times$ & 0.00\\
+        \rowcolor[gray]{0.93}
+    Attn-48 
+    & 81.2      & 73.9 & 47.4 & 81.3       & \underline{71.0}  & $1.55 \times$ & 0.07\\
+    \bottomrule
+    \end{tabular}}
+\label{tab:llama3}
+\end{wraptable}
+To verify the consistency of our findings on larger models, we take Llama-2-70B into consideration, since it also comes from the Llama family and has larger model size. Specifically, we drop the modules with different dropping ratios ranging from 5\% to 60\% on Table \ref{tab:llama2-70b}. 
+
+Similar to the findings in smaller models, Llama-2-70B also showcases sensitivity to Block Drop and MLP Drop, where dropping only 10\% to 20\% of blocks or MLP layers leads to a significant performance drop. 
+
+In contrast, Attention Drop performs much better on Llama-2-70B. Specifically, when dropping 40 out of 80 attention layers, Llama-2-70B achieves a speedup of 1.48 and a $\gamma$ of 0.05. 
+A similar trend is observed in Llama-3, as shown in Table \ref{tab:llama3}. \textbf{This robustness indicates that larger models can also tolerate the removal of a significant proportion of Attention layers without degrading performance. 
+}
+The results clearly indicate that Attention Drop is the most efficient method for pruning, allowing for significant speedup with minimal impact on performance. 
+In the following sections, we will examine the efficiency improvements achieved through Attention Drop and further investigate the layer-wise importance of attention layers to gain deeper insights into model architecture.
+
+\begin{table*}[htbp]
+\renewcommand{\arraystretch}{0.96} % row gap (default 1.5)
+\centering
+\caption{
+\textbf{Block Drop and Layer Drop on Larger Models}, where we drop a series of numbers (from 4 to 48) of modules on Llama-2-70B. Rows with averaged performance lower than 95\% of the original performance are \underline{\textcolor[gray]{0.7}{grayed}}. 
+}
+\resizebox{0.96\linewidth}{!}{
+\begin{tabular}{l|cccccccc|ccc}
+    \toprule
+   \multicolumn{12}{c}{Llama-2-70B}
+    \\ 
+    \midrule
+    \bf Method  
+    & ARC-C & BoolQ & HellaSwag & MMLU & OBQA & PIQA & RTE & WinoGrande & \underline{Avg. ($\uparrow$)}  & SpeedUp ($\uparrow$) & $\gamma$ ($\downarrow$)  \\
+    \midrule
+    Baseline 
+    & 67.4 & 83.8 & 87.1 & 68.5 & 48.6 & 82.5 & 69.3 & 83.7 & \underline{73.9} & $1.00 \times$ & -- \\
+    \midrule
+    Block-4 
+    & 63.8 & 80.4 & 84.6 & 60.2 & 48.0 & 81.6 & 71.1 & 78.0 & \underline{71.0} & $1.07 \times$ & 0.41\\
+        \rowcolor[gray]{0.93}
+    Block-8 
+    & 59.1 & 77.5 & 81.3 & 55.1 & 46.2 & 81.0 & 68.2 & 73.2 & \underline{67.7} & $1.14 \times$ & 0.44 \\
+    \rowcolor[gray]{0.93}
+    Block-16 
+    & 44.6 & 64.6 & 69.9 & 29.3 & 40.0 & 75.2 & 51.6 & 59.7 & \underline{54.4} & $1.30 \times$ & 0.65 \\
+    \rowcolor[gray]{0.93}
+    Block-32 
+    & 35.1 & 58.8 & 56.7 & 25.7 & 36.8 & 71.7 & 54.5 & 55.3 & \underline{49.3} & $1.67 \times$ & 0.37 \\
+    \midrule
+    MLP-4 
+    & 65.4 & 84.0 & 86.1 & 68.7 & 46.6 & 82.9 & 68.2 & 83.4 & \underline{73.2} & $1.04 \times$ & 0.18\\
+    MLP-8 
+    & 64.4 & 83.9 & 84.9 & 68.7 & 47.6 & 81.7 & 66.8 & 82.2 & \underline{72.5} & $1.05 \times$ & 0.28 \\
+    \rowcolor[gray]{0.93}
+    MLP-16 
+    & 57.5 & 53.6 & 81.6 & 69.1 & 46.0 & 79.2 & 58.8 & 81.7 & \underline{65.9} & $1.08 \times$ & 1.00 \\
+    \rowcolor[gray]{0.93}
+    MLP-32 
+    & 40.6 & 61.9 & 64.2 & 59.8 & 29.8 & 64.2 & 52.7 & 72.7 & \underline{55.7} & $1.17 \times$ & 1.07 \\
+    \midrule
+    Attn-4 
+    & 67.2 & 84.0 & 87.0 & 68.6 & 48.8 & 82.5 & 69.3 & 83.3 & \underline{73.8} & $1.06 \times$ & 0.02 \\
+    Attn-8 
+    & 67.3 & 83.8 & 86.9 & 68.5 & 48.4 & 82.9 & 69.0 & 82.6 & \underline{73.7} & $1.12 \times$ & 0.02 \\
+    Attn-16 
+    & 67.8 & 83.9 & 87.2 & 68.5 & 49.0 & 83.0 & 68.2 & 82.8 & \underline{73.8} & $1.21 \times$ & 0.00\\
+    Attn-32 
+    & 67.2 & 84.8 & 87.2 & 68.4 & 49.6 & 81.8 & 67.5 & 83.5 & \underline{73.8} & $1.35 \times$ & 0.00\\
+    Attn-40 
+    & 63.7 & 82.8 & 84.4 & 66.2 & 46.8 & 80.1 & 66.8 & 81.3 & \underline{71.5} & $1.48 \times$ & 0.05\\
+        \rowcolor[gray]{0.93}
+    Attn-48 
+    & 58.5 & 73.7 & 80.6 & 56.8 & 45.0 & 79.8 & 59.6 & 81.0 & \underline{66.9} & $1.62 \times$ & 0.11\\
+    \bottomrule
+    \end{tabular}
+}
+\label{tab:llama2-70b}
+\end{table*}
+
+
+
+\section{Efficiency of Attention Drop}
+
+In this section, we evaluate the efficiency of Attention Drop in terms of both memory usage and inference speed. Specifically, we examine the reduction in memory overhead due to the key-value (KV) cache and measure the speedup during the entire generation phase. The results demonstrate that Attention Drop provides substantial improvements in both efficiency metrics while maintaining high performance.
+
+\paragraph{KV-cache Memory Reduction} 
+Given the auto-regressive nature of LLMs, where outputs are generated token by token, the KV-cache is used to store intermediate representations of input sequences. This cache helps accelerate inference by preventing redundant computations but comes with a significant memory cost, especially with longer sequence lengths or larger batch sizes.
+Our proposed Attention Drop method efficiently removes unimportant attention layers, reducing the corresponding KV-cache. 
+Table \ref{tab:kv_cache_comparison} provides a comparison of 16-bit precision KV-cache memory usage before and after Attention Drop for various models, where we use 8 Nvidia RTX A6000 Ada GPUs for the 70B models and 4 Nvidia RTX A6000 Ada GPUs for other smaller models. 
+As shown, Attention Drop results in substantial memory savings across all tested models. For instance, in Llama-2-13B, the KV-cache is reduced from 52GB to 26GB, a 50\% reduction. Note that the reported results are based on resource-constrained scenarios. In resource-sufficient cases, where larger batch sizes and longer sequence lengths can be applied, the memory usage savings from Attention Drop become even more significant.  These reductions are beneficial for both memory-constrained and memory-sufficient environments, allowing for more efficient model deployment.
+\begin{table}[h]
+\centering
+\caption{
+\textbf{Comparison of KV-cache sizes before and after Attention Drop} across different models, with a sequence length of 2048. Since only Llama-2-13B does not use grouped-query attention, the KV-cache for each token is significantly larger compared to other models.}
+\resizebox{0.6\columnwidth}{!}{
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{lcccccc}
+        \toprule
+    \multirow{2}{*}{\textbf{Model}} & ~~~~\multirow{2}{*}{Batch Size}~~~ 
+    & \multicolumn{2}{c}{~~~wo/Attn Drop~~~} & \multicolumn{2}{c}{~~~w/Attn Drop~~~} \\ \cmidrule(lr){3-4}
+    \cmidrule(lr){5-6}
+       & & ~~Layers~~ & ~~KV-cache~~ & ~~Layers~~ & ~~KV-cache~~ \\
+\midrule
+Mistral-7B   
+ & ~~~~64~~~ & 32 & ~~16GB~~ & 20 & ~~10GB~~  \\
+ \cdashline{1-6}
+Llama-2-13B  
+ & ~~~~32~~~ & 40 & ~~52GB~~ & 20 & ~~26GB~~   \\ 
+Llama-2-70B   
+& ~~~~32~~~ & 80 & ~~20GB~~  & 40 & ~~10GB~~  \\
+\cdashline{1-6}
+Llama-3-8B    
+& ~~~~64~~~ & 32 & ~~16GB~~  & 20 & ~~10GB~~ \\ 
+Llama-3-70B  & ~~~~32~~~  
+& 80 & ~~20GB~~ & 40 & 10GB  \\
+\bottomrule
+\end{tabular}}
+\label{tab:kv_cache_comparison}
+\end{table}
+
+\paragraph{Speed Measurement}
+We also evaluate the run-time speed improvements achieved through Attention Drop. The inference speed is measured throughout the entire generation process, starting from the input prompt to the generation of the final token. To ensure that the results accurately reflect the speed improvements, we follow two key principles in our setup: (1) all operations are performed on a single Nvidia RTX A6000 Ada GPU, avoiding any communication overhead caused by multi-GPU setups; (2) we increase the batch sizes to maximize GPU utilization for each model. Specifically, for Llama-2-70B, we employ 4-bit quantization 
+due to its large model size, while noting that Attention Drop is orthogonal to quantization shown in \ref{app:quant}. For Llama-2-13B and Mistral-7B, we use 16-bit precision.
+In terms of sequence length, we use an input sequence of 2048 tokens and autoregressively generate an additional 2048 tokens. This setup allows us to capture the full inference process, ensuring that both the prefill (initial processing of the input sequence) and the generation (token-by-token inference) stages are included in the speed measurements.
+The speed-up ratios achieved through Attention Drop are presented in Tables \ref{tab:main}, \ref{tab:llama3}, and \ref{tab:llama2-70b}. Our results show that Attention Drop provides up to 40\% speed-up while retaining more than 95\% of the original model’s performance.
+Additionally, as demonstrated in Table \ref{tab:main}, the $\gamma$ values for Attention Drop are significantly lower than those for MLP Drop and Block Drop, especially at higher speed-up ratios. This indicates that Attention Drop achieves a more efficient trade-off between speed and performance, making it a superior method for model acceleration.
+
+
+
+\section{Visualization Examples of Layer Importance}
+
+
+In this section, we visualize the importance scores and the corresponding dropping order of pretrained models. We then trace back through historical checkpoints to explore the dynamics of importance scores throughout the training process. 
+\subsection{Deeper Modules with Higher Redundancy}
+Based on Figure 
+\ref{fig:data_type_block},  \ref{fig:data_type} and \ref{fig:data_num}, we observe that the deeper layers (excluding the last ones) often exhibit excessively low importance across Block, MLP, and Attention modules. 
+
+To further analyze the dropped modules,  
+we visualize the dropped layers or blocks with different dropping ratios. 
+Figure \ref{fig:drop_order} visualizes the remaining and dropped layers/blocks as the number of dropped modules increases. Llama-2-13B and Mistral-7B exhibit similar patterns in Layer Drop and Block Drop: initially, both models tend to drop the deeper layers, followed by the shallower ones. These findings are consistent with Xu \textit{et al.} \cite{men2024shortgpt}, which suggests that deeper layers tend to be more redundant. Larger models (e.g.  
+\begin{figure}[h]
+	\centering
+      \subfigure[Block Drop]{
+    \includegraphics[width=0.31\linewidth]{figs/main_drop_order_Block.pdf}
+    \label{fig:drop_order_block}
+  }\subfigure[MLP Drop]{
+    \includegraphics[width=0.31\linewidth]{figs/main_drop_order_MLP.pdf}
+    \label{fig:drop_order_mlp}
+  }\subfigure[Attention Drop]{
+    \includegraphics[width=0.31\linewidth]{figs/main_drop_order_Attention.pdf}
+    \label{fig:drop_order_attn}
+  }
+	\caption{\textbf{Visualization of Dropping Order for Block Drop and Layer Drop}. We visualize the remaining layers and blocks under different dropped numbers, where \textcolor{Yellow}{yellow} areas represent the retained layers/blocks and \textcolor{Red}{red} areas indicate the dropped portions. 
+ }
+	\label{fig:drop_order}
+\end{figure} 
+\subsection{Consistent Redundancy of Attention Layers Throughout Training}
+
+Given that the deep layers exhibit high redundancy, to investigate how such a pattern is achieved, we revisit the historical checkpoints to track the dynamic changing of layer-wise importance scores. 
+
+Specifically, we use checkpoints released by MAP-Neo-7B~\cite{zhang2024mapneo}, due to the released continuous checkpoints during training stages. 
+Figure~\ref{fig:neo_sims} presents the importance scores of Blocks and Layers at different training stages, where 
+Attention layers demonstrate consistently lower importance scores than MLP and Block at all training stages. While the importance scores for MLP layers and Blocks gradually increase as training progresses, the importance scores of Attention layers change much more slowly. 
+
+Given the consistently higher redundancy of attention layers throughout training, we believe that this pattern arises from the inherent properties of attention layers. 
+
+\begin{figure}[htbp]
+    \centering
+\includegraphics[width=0.92\linewidth]{figs/neo_sims_entire.pdf} 
+\caption{\textbf{Visualization of Importance Scores in Checkpoints during the Pre-training Process of MAP-Neo-7B}, where \textcolor{darkyellow}{lighter areas} represent low importance scores (i.e., high similarity scores). 
+We present 
+the entire Training Process (checkpoints for every 500B trained tokens).
+We independently visualize the importance scores at the module index 0, since they are significantly higher. 
+}
+\label{fig:neo_sims}
+\end{figure}
+
+
+\section{Joint Layer Drop Further Enhances the Performance }
+
+While a significant proportion of attention layers exhibit high redundancy, our findings also show that some MLP layers have low importance. To further optimize model efficiency, we introduce Joint Layer Drop, which combines both Attention Drop and MLP Drop strategies. This approach leverages the redundancy in both attention and MLP layers to enhance the overall performance of the model.
+
+\paragraph{Methodology: Combining Attention and MLP Drop}
+The Joint Layer Drop method is implemented by first calculating the importance scores for both attention layers (\(\score^l_{\attn}\)) and MLP layers (\(\score^l_{\mlp}\)) individually. These scores are computed based on a similarity-based metric that identifies redundant layers, as previously discussed. Once the importance scores are obtained for each type of layer, we concatenate the scores into a single array: $\score = [\score^l_{\attn}, \score^l_{\mlp}]$. From this combined set of importance scores, we drop the layers with the lowest values, regardless of whether they are attention or MLP layers. This joint approach allows us to remove the most redundant components from both layer types simultaneously, enhancing the model’s efficiency while maintaining performance.
+
+\paragraph{Superior Performance with Joint Layer Drop}
+As demonstrated in Figure \ref{fig:combination}, Joint Layer Drop consistently achieves better performance than either Attention Drop or MLP Drop alone. The process begins by exclusively dropping attention layers, which are typically more redundant than MLP layers. This continues until the number of dropped attention layers exceeds 14 for Mistral-7B and 18 for Llama-2-13B. As a result, in the initial stages of pruning, the performance of Joint Layer Drop overlaps with that of Attention Drop.
+
+However, as the dropping ratio increases and the more redundant attention layers are pruned, MLP layers start to become the next most redundant components. At this point, Joint Layer Drop begins to remove MLP layers, leading to further reductions in redundant layers without significant performance loss, e.g., after dropping 31 layers (Attention + MLP), Llama-2-13B still retains 90\% of the performance on the MMLU task. 
+
+\begin{figure}[ht]
+  \centering
+  \subfigure[Llama-2-13B]{
+    \includegraphics[width=0.9\linewidth]{figs/combination_attn_mlp_llama2-13b.pdf}
+    \label{fig:combination_llama2-13b}
+  }
+  \subfigure[Mistral-7B]{
+    \includegraphics[width=0.9\linewidth]{figs/combination_attn_mlp_mistral.pdf}
+    \label{fig:combination_mistral}
+  }
+  \caption{\textbf{Accuracy Curves of Dropping Different Target Modules}, 
+  where we consider dropping single types of modules and Joint dropping (Attn + MLP). 
+  In the line of Joint Drop, 
+  \textcolor{joint}{$\bigstar$}
+  represents the step where the MLP is dropped, while the 
+  \textcolor{joint}{$\blacksquare$}
+  represents the step where the Attention is dropped.}
+  \label{fig:combination}
+\end{figure}
+
+
+
+
+
+\section{Conclusion and Discussions}
+
+
+\paragraph{Insights for Future Network Architecture Design }
+Despite the success of scaling up LLMs, our work provides valuable insights for scaling down models to achieve more efficient architectures. One key insight is the high redundancy in attention layers, particularly in deeper layers, which suggests that future works could reduce the number of attention layers without sacrificing performance, rather than maintaining parity with MLP layers.
+Moreover, unlike MLP layers, attention layers exhibit consistent redundancy as training progresses. This consistency may pose a bottleneck in training large models. To address this, future research could explore replacing attention layers with alternative mechanisms or develop new training techniques that capitalize on this redundancy to further enhance language model capacity.
+
+
+\paragraph{Limitations }
+While our proposed dropping techniques improve efficiency in the models we evaluated, there are limitations. A key area for future work is testing the applicability of these techniques across a broader range of models, such as vision transformers and vision-language models. Furthermore, our methods focus on post-training dropping without involving retraining, which could potentially recover or even improve performance after pruning. Retraining these models could unlock even greater efficiency in more compact architectures.
+
+
+
+\paragraph{Conclusion }
+In this work, we systematically revisited transformer architectures by investigating the effects of dropping three types of structures: Blocks, MLP layers, and Attention layers. Our findings reveal that attention layers display significant redundancy and can be removed in large proportions without compromising performance. To build on this, we introduced Joint Layer Drop, a method that further increases both dropping ratios and performance by targeting redundant layers across both MLP and Attention layers.
+This study empirically demonstrates the potential for creating more compact and efficient transformer models, providing valuable insights for future network design within the NLP community. By exploring structured redundancy, we open up new avenues for designing more efficient, scalable models that maintain high performance even under resource constraints. 
+
+
+
+
+

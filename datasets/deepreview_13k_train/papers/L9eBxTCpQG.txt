@@ -1,0 +1,403 @@
+\title{SPAM: Spike-Aware Adam with Momentum Reset for Stable LLM Training}
+
+\begin{abstract}
+Large Language Models (LLMs) have demonstrated exceptional performance across diverse tasks, yet their training remains highly resource intensive and susceptible to critical challenges such as training instability. A predominant source of this instability stems from gradient and loss spikes, which disrupt the learning process, often leading to costly interventions like checkpoint recovery and experiment restarts, further amplifying inefficiencies. This paper presents a comprehensive investigation into gradient spikes observed during LLM training, revealing their prevalence across multiple architectures and datasets. Our analysis shows that these spikes can be up to 1000× larger than typical gradients, substantially deteriorating model performance. To address this issue, we propose Spike-Aware Adam with Momentum Reset (SPAM), a novel optimizer designed to counteract gradient spikes through momentum reset and spike-aware gradient clipping. Extensive experiments, including both pre-training and fine-tuning, demonstrate that SPAM consistently surpasses Adam and its variants across a range of model scales. Additionally, SPAM facilitates memory-efficient training by enabling sparse momentum, where only a subset of momentum terms are maintained and updated. When operating under memory constraints, SPAM outperforms state-of-the-art memory-efficient optimizers such as GaLore and Adam-Mini. Our work underscores the importance
+of mitigating gradient spikes in LLM training and introduces an effective optimization strategy that enhances both training stability and resource efficiency at scale. Code is submitted.
+\end{abstract}
+
+\section{1 Introduction  }
+
+
+Large Language Models (LLMs) have become fundamental in advancing state-of-the-art AI systems. Scaling LLMs, such as GPT-3 (Brown, 2020) and LLaMA (Touvron et al., 2023), has showcased unprecedented capabilities. However, training these large-scale models is fraught with challenges, particularly training instability. A major factor contributing to this instability is the occurrence of gradient and loss spikes during training, which disrupt the learning process at unpredictable intervals (Chowdhery et al., 2023; Zhang et al., 2022; Le Scao et al., 2023).  
+
+While architectural innovations have been proposed to mitigate these issues (Nguyen & Salazar, 2019; Shoeybi et al., 2019; Zeng et al., 2022; Ding et al., 2021; Wang et al., 2024; Dettmers et al., 2021; Scao et al., 2022; Takase et al., 2023), none can completely prevent the occurrence of spikes. In practice, the most widely adopted solution is to manually intervene by restarting training from a previous checkpoint and skipping data affected by the spike (Chowdhery et al., 2023). This method is resource-intensive, requiring frequent checkpoint saves, manual monitoring, and repeated experiment runs - all inefficient and undesirable.  
+
+Moreover, the sheer scale of LLMs necessitates vast computational resources. For example, training LLaMA required over 2048 A100-80GB GPUs (Touvron et al., 2023), posing significant environmental and financial costs (Rillig et al., 2023; Patterson et al., 2021). These challenges highlight the need for more efficient training paradigms that reduce resource consumption without sacrificing performance.  
+
+![](images/06d14d8883629675133053ee4330cc8a9da8b919faf7350f1f8a9f628403e4bd.jpg)  
+Figure 1: Perplexity of LLaMA models on C4 trained with various optimizers.  
+
+In this paper, we approach the issue from an optimization perspective rather than an architectural one. We first conduct an in-depth investigation of loss and gradient spikes during the training of various LLM architectures, spanning models from 60M to 1B parameters. Our study reveals several key observations:  
+
+• Small yet frequent loss bumps: Although catastrophic loss spikes are rare, we observe frequent small loss bumps that can easily be overlooked without close scrutiny. • Gradient spikes accompanying loss bumps: These loss bumps, depiste small by their own, are consistently accompanied by significant gradient spikes, whose magnitudes can reach up to $1000~\times$ greater than typical gradients. These spikes persist across layers, architectures, and datasets, even with established techniques applied. Harmfulness of gradient spikes: By nullifying the spiked gradients, we observe notable improvements in training performance, confirming that these spikes have a detrimental effect. Momentum-based optimizers, like Adam (Kingma, 2014; Loshchilov, 2017), suffer particularly from the accumulation of these spikes in their momentum terms, as we demonstrate both empirically and theoritically.  
+
+Inspired by these findings, we introduce Spike-Aware Adam with Momentum Reset (SPAM), an optimizer designed to counteract the negative effects of gradient spikes. SPAM introduces two key innovations: (1) periodic reset of the first and second moments to eliminate the harmful accumulation of spiked gradients, and (2) identification and adaptive re-scaling of spiked gradients to manageable levels, preserving their directional information while mitigating their magnitude. We validate SPAM through extensive experiments, demonstrating its superior performance across various LLM sizes in both pre-training and fine-tuning tasks.  
+
+Furthermore, momentum reset enables the development of sparse momentum, where only a selected subset of momentum terms is computed and stored during training, drastically reducing memory costs. Our results show that SPAM surpasses leading memory-efficient optimizers such as GaLore (Zhao et al., 2024) and Adam-Mini (Zhang et al., 2024a) with good margins, even under memory constraints.  
+
+
+
+\section{2 Gradient Spikes  }
+
+
+In this section, we formally define gradient spikes and then present the intriguing findings from our investigation into the training loss and gradient dynamics during LLM training. Gradient spikes refer to a phenomenon that occurs during training where the magnitude of certain gradients significantly exceeds their historical values. To more precisely identify and analyze instances of gradient spikes, we introduce the Gradient Spike Score as a measurement of the deviation of a gradient’s magnitude from its typical behavior over time. By quantifying this relative change, we can monitor the dynamics of gradients during training.  
+
+Definition 2.1 (Gradient Spike Score). Let $[g_{0},\;g_{1},\;.\;.\;.\;,\;g_{T-1},\;g_{T}\}$ be the sequence of gradient obtained during the training process from time step 0 to $T$ . The Spike Score of the gradient at the $i^{t h}$ step, denoted as ${\mathrm{GSS}}(g_{i})$ , is defined as the ratio of the magnitude of the gradient at that step to the average magnitude of the gradients across all steps:  
+
+$$
+\mathrm{GSS}(g_{i})={\frac{|g_{i}|}{{\frac{1}{T+1}}\sum_{j=0}^{T}|g_{j}|}}
+$$  
+
+A gradient $g_{i}$ is considered a spiked gradient if its ${\mathrm{GSS}}(g_{i})$ exceeds a predetermined threshold $\theta$ , i.e., $\mathrm{GSS}(g_{i})\;>\;\theta$ indicating a significant increase from typical fluctuations, often amounting to increases of two or three orders of magnitude.  
+
+2.1 Presence of Gradient Spikes During LLM Training   
+Building upon the above concepts, we further explore the presence of gradient spikes during LLM training. Specifically, we monitor the gradients of the entire model over the initial $1,000$ training steps and identify gradient spikes using the condition $\mathrm{GSS}(g_{i})\,>\,50$ . Our investigation encompasses two widely adopted LLM architectures, LLaMA (Touvron et al., 2023)1 and Pythia (Biderman et al., 2023), with model sizes varying from 60M to 1B parameters. Experiments were conducted on two datasets: the well-known C4 dataset (Raffel et al., 2020) and a cleaner high-quality dataset, SlimPajama (Soboleva et al., 2023). Our key observations can be summarized as follows: $\textcircled{1}$ Loss bumps accompanying gradient spikes occur irregularly during LLM training. Although we do not observe severe loss spikes that lead to catastrophic divergence (Takase et al., 2023; Chowdhery et al., 2023), we do observe subtle loss bumps that happen quite frequently. For instance, Figure 2-top illustrates the training loss of LLaMA-60M, 350M, and 1B models, where several loss bumps can be seen during training, marked with red circles. We further investigate the model’s gradients at these moments and observe that gradient spikes coincide with the loss bumps, as demonstrated in Figure 2-bottom. While gradients remain small for most of the training, they suddenly become extremely large when loss spikes occur.   
+$\circledcirc$ Gradient spikes are widely presented in different layers, across different architectures, model sizes, and datasets. Figure 2 demonstrates that models of varying sizes, from 60M to 1B, all exhibit gradient spikes. To verify whether architecture is the root cause of these spikes, we conducted experiments with Pythia-70M, which also suffers from numerous gradient anomalies, as shown in Figure 3. Additionally, we found that gradient spikes occur even when using cleaner, high-quality datasets such as SlimPajama, although the frequency of spikes is reduced with this cleaner dataset. $\circled{3}$ Advanced spike mitigation approaches cannot completely eliminate gradient spikes. We also evaluate whether previously proposed techniques for addressing spikes can eliminate gradient spikes. Specifically, we assess multiple approaches, including Scaled Initialization (Nguyen & Salazar, 2019; Shoeybi et al., 2019), Embed LN (Dettmers et al., 2021), Scaled Embed (Takase et al., 2023), and Embed Detach (Zeng et al., 2022). The results in Figure 4 show that while some approaches perform better than others, they  
+
+162   
+163   
+164   
+165   
+166   
+167   
+168   
+169   
+170   
+171   
+172   
+173   
+174   
+175   
+176   
+177   
+178   
+179   
+180   
+181   
+182   
+183   
+184   
+185   
+186   
+187   
+188   
+189   
+190   
+191   
+192   
+193   
+194   
+195   
+196   
+197   
+198   
+199   
+200   
+201   
+202   
+203   
+204   
+205   
+206   
+207   
+208   
+209   
+210   
+211   
+212   
+213   
+214   
+215  
+
+cannot completely eliminate gradient spikes. More specifically, we find that Scaled Embed and Embed LN significantly reduce the number of gradient spikes, while the other methods offer little to no improvement, consistent with the findings reported in Takase et al. (2023).  
+
+Our observation of loss bumps likely relates to the edge of stability (EoS) phenomenon (Cohen et al., 2021), where the sharpness of the network hovers near the stability threshold for the remainder of training while the loss continues to decrease, albeit non-monotonically. However, the EoS phenomenon has not been extensively studied at the scale of LLMs. Moreover, our study reveals that these loss bumps have harmful effects on LLM training, which were not observed in previous studies.  
+
+![](images/a4fb7869481d214261933a540b686055a25d9072e136a06d9310049afa3450db.jpg)  
+Figure 2: Training loss lumps and their corresponding gradient spikes. Gradient trajectories are collected with LLaMa-60M, 350M, 1B models on C4 datasets. Gradient spikes are detected using $\mathrm{GSS}(g_{i})>50$ .  
+
+![](images/b465723a4d46693eab18303b2c60b91b357d62b53c53c3a3818137e458ccc99a.jpg)  
+Figure 3: Spike gradients present across different architectures and datasets. (1) −(3): Plots of 100 randomly selected spike gradients (using $\mathrm{GSS}(g_{i})>50_{,}^{\circ}$ ) of LLaMa60M and Pythia-70M on C4 and SlimPajama datasets. (4): Number of spiked gradients every 5 layers during the first 1K steps in LLaMa-60M on C4.  
+
+![](images/3b469abacf70cddf633bb9ea9a1b7517fcd5b82a2d5d1e9e3b6d88d4f3886467.jpg)  
+Figure 4: Advanced spike mitigation approaches can not completely eliminate gradient spikes. Gradient trajectories are collected with LLaMa-60M on C4. The spike gradient is detected via $\mathrm{GSS}(g_{i})>50$ .  
+
+![](images/3defdc660d2376fb9263a20e93bfd10ecc72557f68de48af7e6a64d34f3ccc1a.jpg)  
+2.2 Effects of Gradient Spikes on LLM Training   
+W/o Spike W/ Spike Spike Gradient Remove Figure 5: Left: Perplexity of the final model after zeroing out spiked gradients using various $\theta,\mathrm{GSS}(g_{i})>\theta$ . Experiments are conducted using LLaMa-60M on C4. Middle and Right: Impact of spiked Gradients on the first and second Moments. Simulated gradients $(g_{i}\,\sim$ $\mathcal{N}(\mu,\sigma^{2})$ are used to visualize the prolonged effects of gradient spikes on the first and second moments, with a large spike noise introduced at the 30th step.  
+
+After identifying the presence of gradient spikes during training, a crucial question arises: are these gradient spikes detrimental or, perhaps counterintuitively, beneficial to the training of LLMs? To address this, we conducted a series of experiments as follows. Our findings confirm that gradient spikes are indeed harmful to LLM training, exerting prolonged negative effects on both the first and second moments, as discussed below.  
+
+Gradient spikes negatively impact LLM training. One direct way to assess the impact of gradient spikes is by nullifying the spiked gradients during training and observing the final training performance. We first detect spiked gradients using various thresholds $\theta$ and then set those gradients to zero. Figure 5-Left reports the results of LLaMA-60M on C4. Surprisingly, zeroing out these spiked gradients leads to improved model performance, evidenced by a reduction in perplexity. This observation clearly indicates that gradient spikes hinder effective training, and their removal is beneficial to overall model performance.  
+
+Gradient spikes have prolonged detrimental effects on the first and second moments. Due to the exponential averaging of the momentum mechanism, the influence of a gradient spike decays slowly over time. To demonstrate this, we conduct a simulation experiment using Adam. In this experiment, we model the gradients as random variables drawn from a Gaussian distribution with mean $\mu=0.1$ and variance $\sigma^{2}=0.1$ , i.e., $g_{i}\sim\mathcal N(\mu,\sigma^{2})$ . We sample gradients and track their corresponding moments over 200 steps, introducing a gradient spike at step 30 with a large magnitude of 10. As shown in Figure 5-Middle and Right, the spike’s amplification persists, influencing both moments across subsequent steps. For example, it takes approximately 50 steps for the first moment to recover from the spike, while the second moment takes significantly longer, with the effect persisting beyond 200 steps. Two key factors plausibly contribute to this difference: (1) the second moment typically employs a larger exponential decay rate than the first (0.999 vs. 0.9); and (2) the second moment depends on the squared gradients, making it more sensitive to large spikes.  
+
+2.3 Prelinminary Analysis with Theory Implications  
+
+We hereby provide a very preliminary analysis to help probe why gradient spikes have a significant impact on the regret bound of Adam-like algorithms. We strictly follow the setting and notations used in Alacaoglu et al. (2020). Specifically, referring to Theorem 1 in the paper, the regret bound consists of two main terms:  
+
+$$
+R(T)\leq\frac{D^{2}\sqrt{T}}{2\alpha(1-\beta_{1})}\sum_{i=1}^{d}\hat{v}_{T,i}^{1/2}+\frac{\alpha\sqrt{1+\log T}}{\sqrt{(1-\beta_{2})(1-\gamma)}}\sum_{i=1}^{d}\sqrt{\sum_{t=1}^{T}g_{t,i}^{2}},
+$$  
+
+where γ = ββ122 . Gradient spikes directly affect these terms by increasing the magnitudes of the gradients $g_{t}$ . In their Lemma 3, it is shown that the norm $\|m_{t}\|_{\hat{v}_{t}^{-1/2}}^{:2}$ depends on the  
+
+accumulated gradients:  
+
+$$
+\|m_{t}\|_{\hat{v}_{t}^{-1/2}}^{2}\leq\frac{(1-\beta_{1})^{2}}{\sqrt{(1-\beta_{2})(1-\gamma)}}\sum_{i=1}^{d}\sum_{j=1}^{t}\beta_{1}^{t-j}|g_{j,i}|.
+$$  
+
+which in turn increases the bound on ∥mt∥2vˆ−1/2. T When gradient spikes occur, the values of become significantly larger for some his enlargement propagates through the $j$ and $i$ , analysis, particularly affecting the accumulation term $\begin{array}{r}{\sum_{t=1}^{T}\alpha_{t}\Vert m_{t}\Vert_{\hat{v}_{t}^{-1/2}}^{2}}\end{array}$ in their Lemma 4, which is bounded by:  
+
+$$
+\sum_{t=1}^{T}\alpha_{t}\|m_{t}\|_{\hat{v}_{t}^{-1/2}}^{2}\leq\frac{(1-\beta_{1})\alpha\sqrt{1+\log T}}{\sqrt{(1-\beta_{2})(1-\gamma)}}\sum_{i=1}^{d}\sqrt{\sum_{t=1}^{T}g_{t,i}^{2}}.
+$$  
+
+Here, gradient spikes increase $\textstyle\sum_{t=1}^{T}g_{t,i}^{2}$ significantly, especially in the coordinates where the spikes occur, leading to a larg er bound.  
+
+Finally, in the main regret bound (Equation (9) in the paper), these enlarged terms result in a looser (larger) overall regret bound due to the presence of gradient spikes. The increased $\hat{v}_{T,i}^{1/2}$ and $\textstyle\sum_{t=1}^{T}g_{t,i}^{2}$ directly contribute to the regret bound becoming less tight. This theoretical implication highlights that while adaptive algorithms like AMSGrad adjust learning rates based on gradient history, they may perform worse in terms of regret when large gradient spikes are present due to the increased cumulative squared gradients and decreased effective learning rate.  
+
+It is important to note that our goal is not to claim theoretical innovations, but rather to quantitatively assess how gradient spikes degrade Adam-like optimization, and that is only explored in a very limited context. We would like to clarify the limitations of this analysis: (1) The analysis assumes convexity, which may not apply in non-convex settings (but is often mitigated by assuming Polyak-Lojasiewicz condition or so). (2) The assumption $\|g_{t}\|_{\infty}\leq G$ , where $G$ denotes the maximum allowable gradient bound, may be in conflict with the presence of gradient spikes if $G$ is not sufficiently large to capture them. (3) There is a significant dependence on $G$ , and if $G$ is set too high to accommodate spikes, the constants in the regret bound grow disproportionately, potentially making the bound meaningless. Nonetheless, we find that our analysis aligns well with our experimental results, and we leave a more rigorous theoretical exploration for future work.  
+
+
+
+\section{3 Spike-Aware Adam with with Momentum Reset (SPAM)  }
+
+
+In this section, we introduce Spike-Aware Adam with Momentum Reset (SPAM). Unlike previous solutions that introduce architectural innovations to mitigate the decremental effects of gradient spikes (Nguyen & Salazar, 2019; Zeng et al., 2022; Dettmers et al., 2021; Takase et al., 2023), we attempt to address this issue from an optimization perspective. Concretely, we integrate Momentum Reset and Spike-Aware Clipping into Adam to deal with gradient spikes. In addition, we introduce a memory-efficient version of SPAM, which incorporates Sparse Momentum, significantly reducing the memory footprint during LLM training. Pseudocode of SPAM is in Algorithm 1.  
+
+Momentum Reset. To mitigate the detrimental effects of gradient spikes on training stability, we introduce Momentum Reset. Momentum Reset involves periodically resetting the accumulated first and second moments used by adaptive optimizers such as Adam. These optimizers rely on exponential moving averages of past gradients to inform parameter updates. However, when a gradient spike occurs, it can significantly inflate these moments, causing the impact of the spike to persist over many subsequent iterations. By resetting the momentum terms at regular intervals of $\Delta T$ training iterations, we can prevent the lingering influence of anomalously large gradients on the optimizer’s state. This practice ensures that parameter updates are based on recent, more normal gradients rather than being skewed by gradient spikes. To mitigate potential instability caused by momentum reset, we perform $N$ steps ( $N=150$ by default) of cosine warmup following each reset operation.  
+
+324   
+325   
+326   
+327   
+328   
+329   
+330   
+331   
+332   
+333   
+334   
+335   
+336   
+337   
+338   
+339   
+340   
+341   
+342   
+343   
+344   
+345   
+346   
+347   
+348   
+349   
+350   
+351   
+352   
+353   
+354   
+355   
+356   
+357   
+358   
+359   
+360   
+361   
+362   
+363   
+364   
+365   
+366   
+367   
+368   
+369   
+370   
+371   
+372   
+373   
+374   
+375   
+376   
+377  
+
+Spike-Aware Clipping. To further mitigate gradient spikes during intervals, we introduce Spike-Aware Clipping. While our initial experiments indicate that setting spiked gradients to zero can enhance performance, this approach completely removes the learning signal for those parameters, including valuable directional information critical to the optimization process. To address this, SPAM identifies gradients that exceed a predefined threshold $\theta$ and scales them to a manageable value, preserving their directional information while controlling their magnitude.  
+
+Detecting gradient spikes using GSS defined in Definition 2.1 would require knowing and storing all gradients in advance—a method that is impractical for LLM training due to memory constraints. We adopt a more memory-efficient, on-the-fly approach by leveraging the components already calculated by Adam. Formally, we detect gradient spikes by identifying gradients $g_{i}$ that meet the following condition: $\mathcal{G}\,=\,\left\{g_{i}\;|\;\frac{g_{i}^{2}}{V_{i}}>\theta\right\}$ where $V_{i}$ is the second moment of Adam and $\theta$ is the threshold used for the approximate $\begin{array}{r}{\mathrm{GSS}=\frac{g_{i}^{2}}{V_{i}}}\end{array}$ . Note that we only use GSS defined in Definition 2.1 for the gradient spike analysis in Section 2. For real training, we employ the above approximation version. Since $V_{i}$ is essentially the moving average of $g_{i}^{2}$ , this method efficiently identifies spikes without incurring additional overhead or the need to store the entire gradient history. Once detected, these spikes are clipped by scaling them to a mana√geable value. Specifically, for each spike gradient, we apply the operation: $g_{i}=\mathrm{sign}(g_{i})\cdot\sqrt{\theta V_{i}}$ . This technique is particularly useful when combined with Momentum Reset. By incorporating these strategies, SPAM effectively mitigates the negative impact of gradient spikes, improving training stability and performance.  
+
+Note that unlike the Update Clipping used in Adafactor (Shazeer & Stern, 2018), which is applied to the whole weight update matrix when its Root Mean Square is larger than 1, our spike-aware clipping is di√rectly applied to the spiked gradients $g_{i}$ whose magnitudes are significantly larger than its $\sqrt{v_{i}}$ , e.g., $>50\times$ .  
+
+Sparse Momentum. Momentum reset paves the way for the development of sparse momentum, a technique designed to reduce memory usage and computation during the training of LLMs. In traditional momentum-based optimizers, such as Adam, momentum is updated and stored for all parameters, which can be memory-intensive for large-scale models. Sparse momentum offers a more memory-efficient alternative by updating and maintaining only a dynamically selected subset of moments at each iteration. The percentange of selected subset is denoted by $\%d$ .  
+
+Key questions surrounding sparse momentum include how to effectively select parameter subsets, how to determine the sampling frequency, and whether to retain momentum for weights that are sampled consecutively . Our empirical analysis shows that random sampling is the most effective strategy for selecting subsets of parameters. For the other questions, we find that they align well with the momentum reset strategy. Specifically, setting the sampling frequency to match the momentum reset frequency, and resetting the momentum of all weights, even when they are sampled consecutively, yield the most robust results.  
+
+Table 1: Comparison with various optimizers on pretraining various sizes of LLaMA models on C4. Perplexity is reported.   
+
+![](images/f1d15a73e28f2dc700b58e15cda6656859b1d87e174d4f6715b1b180a269ea1d.jpg)  
+
+Table 2: Perplexity of Applying Advanced Techniques on LLaMA-60M. Perplexity is reported.   
+
+![](images/c99606391faff467e3225d73b0c625e1161e8e5cc2a0ce2826f1fc53e46068a5.jpg)  
+
+
+
+\section{4 Experiments  }
+
+
+To demonstrate the efficacy of our proposed method, we conduct experiments on both pretraining and supervised fine-tuning using various sizes of the LLaMA model on C4 dataset.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+Baselines. We adopt several widely-used optimizers as our baselines. Since SPAM is built upon Adam, Adam serves as our most direct baseline. We also incorporate two common gradient clipping approaches with Adam: (1) Value Clip, which clips all gradients when their absolute value exceeds a threshold; and (2) Norm Clip, which scales the entire gradient if the L2 norm of the gradient vector exceeds a certain threshold. Additionally, we compare against another widely-used optimizer, Adafactor (Shazeer & Stern, 2018). In terms of spike mitigation techniques, we evaluate SPAM against previous approaches, including Scaled Initialization (Nguyen & Salazar, 2019; Shoeybi et al., 2019), Embed LN (Dettmers et al., 2021), Scaled Embed (Takase et al., 2023), and Embed Detach (Zeng et al., 2022). For memory-efficient optimization methods, we include Adam-Mini (Zhang et al., 2024a), Galore (Zhao et al., 2024), LoRA (Hu et al., 2021), and ReLoRA (Lialin et al., 2023a).  
+
+Architecture and hyperparameters. Following (Lialin et al., 2023a; Zhao et al., 2024), we conduct our experiments using the LLaMA-based architecture with various sizes from 60M to 1B parameters, incorporating RMSNorm (Shazeer, 2020) and SwiGLU activations (Zhang & Sennrich, 2019). For each model size, we use the same set of hyperparameters across methods, varying only the learning rate, where we sweep over a set of learning rates from $1e\!-\!4$ to $1e\!-\!3$ , incrementing by $2e\!-\!4$ for each optimizer. All experiments are conducted using the BF16 format. We set clip threshold as 1 and $1e\mathrm{~-~}3$ for Norm Clip and Value Clip, respectively, following the setting in Takase et al. (2023). We set hyper-parameters for Adafactor following the original paper (Shazeer & Stern, 2018) where $\epsilon_{1}=10^{-30},\epsilon_{2}=10^{-3}$ and $d\,=\,1.0$ . For SPAM, we set reset intervals $\Delta T\,=\,500$ , lr warmup step $N\,=\,150$ and GSS threshold $\theta=5000$ .  
+
+4.1 Performance of LLM Pre-training  
+
+Standard Pre-training. We report the training curves of various LLaMA models on the C4 dataset as well as the final perplexity in Figure 1 and Table 1, respectively. Overall, we observe that SPAM consistently achieves superior performance. As a memory-efficient approach, Adam-mini performs on par with Adam, consistent with the results reported in Zhang et al. (2024a). Commonly used gradient clipping techniques such as Value Clip and Norm Clip improve performance over Adam, with the latter achieving slightly better results. Adafactor further outperforms the aforementioned approaches, demonstrating its effectiveness. SPAM consistently outperforms all baselines across various LLaMA model sizes, highlighting the benefits of integrating momentum reset and spike-aware clipping techniques. All spike mitigation approaches fall short of SPAM as shown in Table 2.  
+
+Table 3: Comparison with memory-efifcient algorithms on pre-training various sizes of LLaMA models on C4 dataset. Validation perplexity is reported, along with a memory estimate of the total of parameters, optimizer states based on BF16 format.The results of GaLore, Full-Rank, LoRA and ReLoRA are obtained from Zhao et al. (2024).  
+
+![](images/b1ec08d5c79b47704cf5483d30cf7fe2f46a3e998bb3a7f4d063d8769277413c.jpg)  
+
+Memory-efifcient Pre-training. We evaluate SPAM by specifying $d\%$ such that its memory usage, including both parameters and optimizer states, matches that of Galore. For Galore, LoRA, and ReLoRA baselines, we set the ranks $r=128$ , 256, 256, 512 for the 60M, 130M, 350M, and 1B models, respectively, following the setup in Galore (Zhao et al., 2024). The results in Table 3 show that SPAM consistently outperforms all the baselines by a good margin, demonstrating its effectiveness as a memory-efficient optimizer.  
+
+4.2 Performance of LLM Fine-tuning  
+
+In this section, we evaluate the effectiveness of SPAM for supervised fine-tuning. Following Li et al. (2024), we fine-tune LLaMA2-7B on Commonsense170K (Hu et al., 2023) and test on 8 downstream tasks. We do not apply layer-wise weight updates for GaLore and SPAM. The rank is set to 8 for all low-rank baselines. Correspondingly, the density of SPAM is set to $0.25\%$ to maintain a comparable memory cost. The results are reported in Table 4. We observe that SPAM substantially outperforms other memory-efficient methods, exceeding full fine-tuning by a notable margin.  
+
+Table 4: Fine-tuning performance of LLaMa2-7B on various downstream tasks. The “Mem.” denotes the running GPU memory. The mean and standard deviation of 10 repeated experiments are reported.  
+
+![](images/0df6e7872a7514dd27d7255d1243172bd35a64220c54b85bb41a3760645d2761.jpg)  
+
+
+
+\section{5 Ablation Study  }
+
+
+![](images/d144eb2ca26834a09d139578827d5793953d3e64e0956195172e3c19a9749a75.jpg)  
+Figure 6: Ablations for sparse subset selection strategy, momentum reset inteval, GSS threshold and warmup steps. “None” denote that the spike-aware clipping is not applied.  
+
+Selection strategy for sparse momentum. Many strategies have been proposed to select subsets of parameters for sparse training, such as random selection (Liu et al., 2022a), max weight magnitude (Mocanu et al., 2018), and max gradient magnitude (Evci et al., 2020). Among these strategies, the most effective approach for sparse momentum training remains unclear. To investigate this, we conduct experiments with LLaMA-60M on the C4 dataset. The results are reported in Figure 6-(1). Interestingly, we find that randomly selecting subsets of parameters performs significantly better than the other two strategies for our sparse momentum. One plausible explanation for this discrepancy is that random selection allows for rapid exploration across all model parameters, whereas gradient- or weight-based strategies might be confined to the same subset of parameters during training.  
+
+Momentum reset interval $\Delta T$ . To investigate the impact of interval $\Delta T$ , we conduct experiments based on LLaMA-130M and C4 with varying $\Delta T$ fromm 50 to 2500. The warmup steps is set to 150 and the thresthold $\theta$ is set to 5000. The results are reported in Figure 6-(2). We observe a performance improvement as the interval $\Delta T$ decreases from 2500 to 500. However, when $\Delta T$ is further shortened, performance begins to degrade. This suggests that while momentum resets can enhance performance, excessively frequent resets may be detrimental to overall results.  
+
+GSS threshold $\theta$ . Threshold $\theta$ decides which gradient are detected as spikes. To illustrate the impact of $\theta$ on SPAM, we present the results of LLaMA-130M in Figure 6-(3) with varying $\theta$ from 20000 to 10. The warmup steps is set to 150 and the interval $\Delta T$ is set to 500. We observe that performance improves as $\theta$ is reduced from extremely large values to smaller values, such as 1000, indicating that spike gradient clipping and momentum reset techniques have a mutually reinforcing effect. However, excessively small $\theta$ may interfere with the true gradient, ultimately leading to a degradation in performance.  
+
+Warmup steps $N$ . We assess the impact of the warmup procedure following each momentum reset by presenting the performance of LLaMA-130M with different warmup steps, ranging from 0 to 200, in Figure 6-(4). The results indicate a significant performance drop when no warmup is applied ( $N\,=\,0$ ), compared to when a warmup is used. In addition, performance reach to optimal when the warmup duration is set to approximately 150 steps.  
+
+
+
+\section{6 Related Work  }
+
+
+Instability of Training Large Language Models. LLMs are well-known for their training instability (Molybog et al., 2023), often experiencing irregular loss spikes that can lead to catastrophic divergence (Chowdhery et al., 2023). To address this issue, researchers have developed various stabilization techniques. While we outline several key approaches, we acknowledge that this overview may not cover all significant contributions in the field. One prominent approach involves architectural modifications. Xiong et al. (2020) demonstrated that using Post-LN in Transformers leads to larger gradients near the output layer, resulting in training instability, especially with large learning rates. In contrast, Pre-LN helps maintain well-behaved gradients during initialization, promoting more stable training. Embed LN, introduced by Dettmers et al. (2021), adds an additional LayerNorm after the embedding layer to improve stability, though it may cause performance degradation, as noted by Scao et al. (2022). Embed Detach, proposed by Ding et al. (2021) and further extended by Zeng et al. (2022) for LLMs, addresses loss spikes by shrinking embedding gradients. DeepNorm, developed by Wang et al. (2024), enhances stability in deep Transformers by scaling up the residual connection before applying LayerNorm. Additionally, αReparam (Zhai et al., 2023) re-parameterizes all linear layers using spectral normalization to prevent attention entropy collapse.   
+Another set of approaches focuses on improving initialization to mitigate training instability. Scaled Embed, proposed by Takase et al. (2023), scales up embeddings to stabilize LayerNorm gradients. Scaled Initialization (Nguyen & Salazar, 2019) introd√uces a parameter initialization strategy using a smaller normal distribution ${\mathcal{N}}(0,{\sqrt{2/5d}}/{\sqrt{2N}})$ to stabilize training dynamics. Additionally, Fixup (Zhang et al., 2019; Huang et al., 2020) claims that proper initialization can entirely eliminate the need for LayerNorm.   
+Momentum Reset. Momentum reset is not a new approach. It has been used in Gu et al. (2013); Nesterov (2013) to solve the rippling behavior of Nesterov’s Accelerated Gradient (NAG) (Nesterov, 1983) in the high-momentum regime, particularly in the context of convex optimization problems. O’donoghue & Candes (2015) further proposed adaptive reset where the momentum will be reset when an increase in the function value is observed. Unlike these earlier work, we leverage momentum reset to mitigate the detrimental effects of gradient spikes that arise during the training of billion-parameter language models, which present a large-scale, non-convex optimization challenge.   
+Memory-Efifcient Optimizers. There have been several efforts to reduce Adam’s memory footprint. SM3 (Anil et al., 2019), a lightweight variant of AdaGrad (Duchi et al., 2011), selects the learning rate for the $i$ -th parameter by taking the minimum value from a set of candidates, each associated with the maximum squared gradient under a predetermined cover. Adafactor (Shazeer & Stern, 2018) and its variant CAME (Luo et al., 2023) utilize non-negative low-rank factorization over Adam’s second-moment estimate, $v$ . Adam-mini (Zhang et al., 2024a) partitions the parameters into blocks and assigns a single learning rate $v$ to each block to reduce memory. Similar approaches were proposed in (Zheng & Kwok, 2019; Ginsburg et al., 2019). Low-precision optimizers are studied in (Dettmers et al., 2021). Recently, GaLore (Zhao et al., 2024; Zhang et al., 2024b) enables the full-parameter training of LLMs through low-rank gradient updates.  
+
+
+
+\section{7 Conclusion  }
+
+
+In this paper, we presented a comprehensive study of gradient and loss spikes in LLM training, demonstrating their detrimental impact on training stability and performance across a variety of architectures and datasets. To address this issue, we propose Spike-Aware Adam with Momentum Reset (SPAM), a novel optimizer designed to counteract gradient spikes through momentum reset and spike-aware gradient clipping. The effectiveness of SPAM is backed up with extensive experiments across various LLM model sizes, where SPAM consistently outperformed Adam and other state-of-the-art optimizers by a good margin. When operating under memory constraints, SPAM motivates the feasibility of sparse momentum training, outperforms state-of-the-art memory-efficient optimizers such as GaLore and Adam-Mini.  
+
+References   
+Ahmet Alacaoglu, Yura Malitsky, Panayotis Mertikopoulos, and Volkan Cevher. A new regret analysis for adam-type algorithms. In International conference on machine learning, pp. 202–210. PMLR, 2020.   
+Roohpatni mAiznaitl,i oVn.i nAeedtv aGnucepst ai,n  TNoemurearl  KInofroern,m aatniodn  YPorroacmes sSiinngg eSry.s teMmesm, o3r2y,  2e0f1fic9i.ent adaptive   
+Stella Biderman, Hailey Schoelkopf, Quentin Gregory Anthony, Herbie Bradley, Kyle O’Brien, Eric Hallahan, Mohammad Aflah Khan, Shivanshu Purohit, USVSN Sai Prashanth, Edward Raff, et al. Pythia: A suite for analyzing large language models across training and scaling. In International Conference on Machine Learning, pp. 2397– 2430. PMLR, 2023.   
+To2m0 2B0. Brown. Language models are few-shot learners. arXiv preprint arXiv:2005.14165,   
+Pratik Chaudhari and Stefano Soatto. Stochastic gradient descent performs variational inference, converges to limit cycles for deep networks. In 2018 Information Theory and Applications Workshop (ITA), pp. 1–10. IEEE, 2018.   
+AaAkdaankms hRao bCehrtosw, dPhaeurly ,B Sarhhaaramn,  HNyaruanngg ,W Joanc oCbh uDnegv, liCnh, arMleasa rStuetnt oBn,o sSmeba,a stGiaanu raGve hrMmisahnrna,, et al. Palm: Scaling language modeling with pathways. Journal of Machine Learning Research, 24(240):1–113, 2023.   
+Jeremy Cohen, Simran Kaur, Yuanzhi Li, J Zico Kolter, and Ameet Talwalkar. Gradient descent on neural networks typically occurs at the edge of stability. In International Conference on Learning Representations, 2021.   
+Tim Dettmers, Mike Lewis, Sam Shleifer, and Luke Zettlemoyer. 8-bit optimizers via blockwise quantization. arXiv preprint arXiv:2110.02861, 2021.   
+Ming Ding, Zhuoyi Yang, Wenyi Hong, Wendi Zheng, Chang Zhou, Da Yin, Junyang Lin, Xu Zou, Zhou Shao, Hongxia Yang, et al. Cogview: Mastering text-to-image generation via transformers. Advances in neural information processing systems, 34:19822–19835, 2021.   
+Jolhena rnDiuncgh ia,n dE lsatdo chHaasztaicn ,o patnidm iYzaotriaomn.  SJionugrenr.al oAf dampatcihvien es ulebagrrnaidnieg nrte smeaertchho, d1s2 (fo7r),  o2n0l1in1.e   
+Utku Evci, Trevor Gale, Jacob Menick, Pablo Samuel Castro, and Erich Elsen. Rigging the lottery: Making all tickets winners. In International conference on machine learning, pp. 2943–2952. PMLR, 2020.   
+BogRrriysa adGni einLnste bamruyre,gt ,hJ oaPsdaost nriw ciLeti ,h C lHaasuytyeoern-ngw uiNsagey u,a ydOealnep,k tisYiviae n Hgmr ioZnmhcahenuntgks,,   faOonlre dtk rsJaioii nnKiantughc ahonaf i edMve, e CpV ointheaetlnyw.  oLrSaktvso.rc uhakarhsXitiinvc, preprint arXiv:1905.11286, 2019.   
+Ming Gu, Lek-Heng Lim, and Cinna Julie Wu. Parnes: a rapidly convergent algorithm for accurate recovery of sparse and approximately sparse signals. Numerical Algorithms, 64 (2):321–347, 2013.   
+EdLwua rWd aJn gH, ua,n dY eWloenizgh uS hCehn,e nP. hLilolirpa:  WLoalwli-sr,a nZke yaudaanp tAaltlieonn- Zofh lua,r gYeu laannzghui aLgie,  mSohdeaelns . WaraXnigv, preprint arXiv:2106.09685, 2021.   
+Zhiqiang Hu, Lei Wang, Yihuai Lan, Wanyu Xu, Ee-Peng Lim, Lidong Bing, Xing Xu, Soujanya Poria, and Roy Ka-Wei Lee. Llm-adapters: An adapter family for parameterefficient fine-tuning of large language models. arXiv preprint arXiv:2304.01933, 2023. Xiioanopg t,iS mphiip z. aH4tui4oa7nn5 g–t,h4 r4Fo8eu3li.g phPe  bMPetLetrRee,rz  ,i2 n0Jii2ti0ma.lmizya tiBoan,.  aInn dI ntMearknsaitimosn aVl olCkoonvfse.r eInmcep roonv iMnga cthriannes fLoeramrnerDiederik P Kingma. Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 2014.   
+Teven Le Scao, Angela Fan, Christopher Akiki, Ellie Pavlick, Suzana Ili´c, Daniel Hesslow, Roman Castagne´, Alexandra Sasha Luccioni, Fran¸cois Yvon, Matthias Gall´e, et al. Bloom: A 176b-parameter open-access multilingual language model. arXiv preprint arXiv:2211.05100, 2023.   
+PeawnrigsXxeii avs:na2g4m 0pL5li.e,1 d8 L3luo8 0w,Y- ri2an0,n2 k4X .iparoojweecit ioGna of,o ra nmde mSohriyw-eei ffiLciiue.nt lOlmwl ofirnee:-tuOnuitnlige.r -awreiXgihv epdr elapryienrtVladislav Lialin, Sherin Muckatira, Namrata Shivagunde, and Anna Rumshisky. Relora: High-rank training through low-rank updates. In The Twelfth International Conference on Learning Representations, 2023a.   
+Vlamdoirslea lva yLeirasl ind,i ffeNraemntrlayt:a  HSihgihv-argaunnkd et,r aiSnhienrgi nt hMrouucgkhat ilroaw,- raanndk  Aunpndaat eRs.u masrhXisikvy .preSptraicnkt arXiv:2307.05695, 2023b.   
+Shiwei Liu, Tianlong Chen, Xiaohan Chen, Li Shen, Decebal Constantin Mocanu, Zhangyang Wang, and Mykola Pechenizkiy. The unreasonable effectiveness of random pruning: Return of the most naive baseline for sparse training. arXiv preprint arXiv:2202.02643, 2022a.   
+Zhuang Liu, Hanzi Mao, Chao-Yuan Wu, Christoph Feichtenhofer, Trevor Darrell, and Saining Xie. A convnet for the 2020s. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pp. 11976–11986, 2022b.   
+I L2o0s1h7c.hilov. Decoupled weight decay regularization. arXiv preprint arXiv:1711.05101, Yang Luo, Xiaozhe Ren, Zangwei Zheng, Zhuo Jiang, Xin Jiang, and Yang You. Came: Confidence-guided adaptive memory efficient optimization. arXiv preprint arXiv:2307.02047, 2023.   
+Stephan Mandt, Matthew Hoffman, and David Blei. A variational analysis of stochastic gradient algorithms. In International conference on machine learning, pp. 354–363. PMLR, 2016.   
+Decebal Constantin Mocanu, Elena Mocanu, Peter Stone, Phuong H Nguyen, Madeleine Gibescu, and Antonio Liotta. Scalable training of artificial neural networks with adaptive sparse connectivity inspired by network science. Nature communications, 9(1):2383, 2018. Igor Molybog, Peter Albert, Moya Chen, Zachary DeVito, David Esiobu, Naman Goyal, Punit Singh Koura, Sharan Narang, Andrew Poulton, Ruan Silva, et al. A theory on adam instability in large-scale machine learning. arXiv preprint arXiv:2304.09871, 2023. Yug rNaemstmeirnogv,.  14G0r(a1d):i1e2nt5 –1m6e1t,h o20ds1 3f.or minimizing composite functions. Mathematical proYurii Nesterov. A method for solving the convex programming problem with convergence rate o (1/k2). In Dokl akad nauk Sssr, volume 269, pp. 543, 1983.   
+Totaino n Qo fN sgeulfy-eantt eanntdi oJnu.l iaarnX Siva lparzeapr.r inTtr aanrsXfoivr:m1e9r1s0 .w0i5t8h9o5u,t  2t0e1a9r.s: Improving the normalizaYuqi Nie, Nam H Nguyen, Phanwadee Sinthong, and Jayant Kalagnanam. A time series is worth 64 words: Long-term forecasting with transformers. arXiv preprint arXiv:2211.14730, 2023.   
+Brendan O’donoghue and Emmanuel Candes. Adaptive restart for accelerated gradient schemes. Foundations of computational mathematics, 15:715–732, 2015.   
+David Patterson, Joseph Gonzalez, Quoc Le, Chen Liang, Lluis-Miquel Munguia, Daniel Rothchild, David So, Maud Texier, and Jeff Dean. Carbon emissions and large neural network training. arXiv preprint arXiv:2104.10350, 2021.   
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of machine learning research, 21 (140):1–67, 2020.   
+Matthias C Rillig, Marlene ˚Agerstrand, Mohan Bi, Kenneth A Gould, and Uli Sauerland. Risks and benefits of large language models for the environment. Environmental Science & Technology, 57(9):3464–3466, 2023.   
+Teven Le Scao, Thomas Wang, Daniel Hesslow, Lucile Saulnier, Stas Bekman, M Saiful Bari, Stella Biderman, Hady Elsahar, Niklas Muennighoff, Jason Phang, et al. What language model to train if you have one million gpu hours? arXiv preprint arXiv:2210.15424, 2022.   
+Noam Shazeer. Glu variants improve transformer. arXiv preprint arXiv:2002.05202, 2020.   
+Noam Shazeer and Mitchell Stern. Adafactor: Adaptive learning rates with sublinear memory cost. In International Conference on Machine Learning, pp. 4596–4604. PMLR, 2018.   
+Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-lm: Training multi-billion parameter language models using model parallelism. arXiv preprint arXiv:1909.08053, 2019.   
+Umut Simsekli, Levent Sagun, and Mert Gurbuzbalaban. A tail-index analysis of stochastic gradient noise in deep neural networks. In International Conference on Machine Learning, pp. 5827–5837. PMLR, 2019.   
+Daria Soboleva, Faisal Al-Khateeb, Robert Myers, Jacob R Steeves, Joel Hestness, and Nolan Dey. SlimPajama: A 627B token cleaned and deduplicated version of RedPajama. https://www.cerebras.net/blog/ slimpajama-a-627b-token-cleaned-and-deduplicated-version-of-redpajama, 2023. URL https://huggingface.co/datasets/cerebras/SlimPajama-627B.   
+Sho Takase, Shun Kiyono, Sosuke Kobayashi, and Jun Suzuki. Spike no more: Stabilizing the pre-training of large language models. arXiv preprint arXiv:2312.16903, 2023.   
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Herv´e Je´gou. Training data-efficient image transformers & distillation through attention. In International conference on machine learning, pp. 10347–10357. PMLR, 2021.   
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timoth´ee Lacroix, Baptiste Rozi\`ere, Naman Goyal, Eric Hambro, Faisal Azhar, Aurelien Rodriguez, Armand Joulin, Edouard Grave, and Guillaume Lample. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971, 2023.   
+Hongyu Wang, Shuming Ma, Li Dong, Shaohan Huang, Dongdong Zhang, and Furu Wei. Deepnet: Scaling transformers to 1,000 layers. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2024.   
+Ruibin Xiong, Yunchang Yang, Di He, Kai Zheng, Shuxin Zheng, Chen Xing, Huishuai Zhang, Yanyan Lan, Liwei Wang, and Tieyan Liu. On layer normalization in the transformer architecture. In International Conference on Machine Learning, pp. 10524–10533. PMLR, 2020.   
+Aohan Zeng, Xiao Liu, Zhengxiao Du, Zihan Wang, Hanyu Lai, Ming Ding, Zhuoyi Yang, Yifan Xu, Wendi Zheng, Xiao Xia, et al. Glm-130b: An open bilingual pre-trained model. arXiv preprint arXiv:2210.02414, 2022.   
+Shuangfei Zhai, Tatiana Likhomanenko, Etai Littwin, Dan Busbridge, Jason Ramapuram, Yizhe Zhang, Jiatao Gu, and Joshua M Susskind. Stabilizing transformer training by preventing attention entropy collapse. In International Conference on Machine Learning, pp. 40770–40803. PMLR, 2023.   
+Biao Zhang and Rico Sennrich. Root mean square layer normalization. Advances in Neural Information Processing Systems, 32, 2019.   
+Hongyi Zhang, Yann N Dauphin, and Tengyu Ma. Fixup initialization: Residual learning without normalization. arXiv preprint arXiv:1901.09321, 2019.   
+Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, et al. Opt: Open pre-trained transformer language models. arXiv preprint arXiv:2205.01068, 2022.   
+Yushun Zhang, Congliang Chen, Ziniu Li, Tian Ding, Chenwei Wu, Yinyu Ye, Zhi-Quan Luo, and Ruoyu Sun. Adam-mini: Use fewer learning rates to gain more. arXiv preprint arXiv:2406.16793, 2024a.   
+Zhenyu Zhang, Ajay Jaiswal, Lu Yin, Shiwei Liu, Jiawei Zhao, Yuandong Tian, and Zhangyang Wang. Q-galore: Quantized galore with int4 projection and layer-adaptive low-rank gradients. arXiv preprint arXiv:2407.08296, 2024b.   
+Jiawei Zhao, Zhenyu Zhang, Beidi Chen, Zhangyang Wang, Anima Anandkumar, and Yuandong Tian. Galore: Memory-efficient llm training by gradient low-rank projection. arXiv preprint arXiv:2403.03507, 2024.   
+Shiuzaait iZohn einng  daenedp  Jleaamrneis nTg.  KarwXoikv.  pBrleopcrkinwti sae raXdiav:p1ti9v0i5t.y0: 9F8a9s9t,e r2 0t1r9a.ining and better general  
+
+
+

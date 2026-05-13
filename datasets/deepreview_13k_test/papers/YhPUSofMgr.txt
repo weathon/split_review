@@ -1,0 +1,941 @@
+\title{Text-Aware Diffusion Policies}
+
+\begin{abstract}
+Training an agent to achieve particular goals or perform desired behaviors is often accomplished through reinforcement learning, especially in the absence of expert demonstrations.  However, supporting novel goals or behaviors through reinforcement learning requires the ad-hoc design of appropriate reward functions, which quickly becomes intractable. To address this challenge, we propose Text-Aware Diffusion for Policy Learning (TADPoLe), which uses a pretrained, frozen text-conditioned diffusion model to compute dense zero-shot reward signals for text-aligned policy learning.  We hypothesize that large-scale pretrained generative models encode rich priors that can supervise a policy to behave not only in a text-aligned manner, but also in alignment with a notion of naturalness summarized from internet-scale training data.  In our experiments, we demonstrate that TADPoLe is able to learn policies for novel goal-achievement and continuous locomotion behaviors specified by natural language, in both Humanoid and Dog environments. The behaviors are learned zero-shot without ground-truth rewards or expert demonstrations, and are qualitatively more natural according to human evaluation. We further show that TADPoLe performs competitively when applied to robotic manipulation tasks in the Meta-World environment, without having access to any in-domain demonstrations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Can we train reinforcement learning agents that drive humanoids in a virtual environment~\citep{tunyasuvunakool2020dm_control} to stably stand? How about standing with \textit{hands on hips}, \textit{kneeling}, or \textit{doing splits}?  While state-of-the-art algorithms have shown success on the former scenario (e.g.~\cite{hansen2022temporal}), the latter (illustrated in Figure~\ref{fig:goal_reaching}) remains challenging due to the need for carefully (and often manually) crafted reward functions to specify the desired behaviors. The dependence on ad-hoc designed reward functions renders inscalable the learning of ever-increasing amounts of novel behaviors, which are required in applications ranging from character animation~\cite{al2012trajectory} to robotic manipulation~\cite{yu2020meta}.
+
+Our work looks towards natural language as a powerful interface through which humans can flexibly specify desired goals or behaviors of interest.  We therefore investigate how to construct a zero-shot text-conditioned reward signal, replacing the need for ad-hoc designs, through which text-aligned policies can be learned.  We present Text-Aware Diffusion for Policy Learning (TADPoLe), which utilizes a large-scale  pretrained, \textit{frozen} text-conditioned diffusion model to generate a \textit{dense} reward signal for policy learning.  We hypothesize that generative diffusion models, which are pretrained on internet-scale datasets to produce text-aligned, natural-looking images~\citep{saharia2022photorealistic, ramesh2022hierarchical} and videos~\citep{bar2024lumiere, girdhar2023emu,ho2022imagen}, can be utilized to automatically craft a \textit{multimodal} reward signal that encourages an agent to behave both \textit{faithfully} with respect to text conditioning and \textit{naturally} with respect to human perception.  Our method is novel in its reward computation, as well as its utilization of a domain-agnostic generative model, rather than one trained from environment-specific or task-specific video demonstrations, as used in prior work~\cite{torabi2018behavioral,peng2021amp,du2024learning,escontrela2024video,ma2023liv,lynch2023interactive}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/goal_reaching.pdf}
+  \caption{
+  Our proposed Text-Aware Diffusion for Policy Learning (TADPoLe) framework leverages frozen, pretrained text-aware diffusion models to automatically craft dense text-conditioned rewards for policy learning.  Here we visualize TADPoLe achieving diverse text-conditioned goals in the Humanoid, Dog, and Meta-World environments.}
+  \label{fig:goal_reaching}
+\end{figure}
+
+TADPoLe is motivated by the insight that a reinforcement learning policy can be viewed as an agent-centric  \textit{implicit} video representation when operating within an environment with visual rendering capabilities. As illustrated in Figure~\ref{fig:intuition} (left), an agent’s video generation process involves the selection of actions following a policy $\pi_\theta$, and the conversion of the action sequence into video subsequences through the environment’s rendering function. A policy can therefore be seen as iteratively generating frames conditioned on the actions it selects; on the other hand, a text-to-image diffusion model can also be seen as generating static image frames, but conditioned on natural language instead.  A connection can then be established between a policy and a diffusion model, where the frame or video segment ``generated'' by the policy can be critiqued by evaluating how likely a text-conditioned diffusion model would generate the same visuals, thus providing dense text-aligned reward signals to guide policy learning (Figure~\ref{fig:intuition} right).  Our work is inspired by DreamFusion~\citep{poole2022dreamfusion}, where a text-conditioned 3D model is learned through rendered views, and where volumetric raytracing ensures spatial consistency. Here, we seek to learn a text-conditioned policy through rendered frames or subsequences, where the environment naturally ensures temporal continuity and consistency with respect to a notion of physics instantiated by the environment.
+
+Concretely, TADPoLe achieves text-conditioned policy learning by using a generative diffusion model in a discriminative manner.  It computes the 
+reward signal as a weighted combination of two reward terms, which aim to measure the alignment between the rendered observation and text conditioning, and the naturalness of the agent's behaviors, respectively.  In this way, we can in effect ``distill'' the natural visual and motion priors as well as vision-text alignment understanding captured within the diffusion model into a policy.  By default, TADPoLe uses a text-to-image diffusion model~\citep{rombach2022high} to densely compute a reward signal solely from the immediate subsequent frame after each action. We then generalize the framework to Video-TADPoLe, which uses a text-to-video diffusion model~\cite{guo2023animatediff} to calculate dense rewards as a function of a sliding context window of past as well as future frames achieved.  The agent is thus trained to select actions such that arbitrary consecutive subsequences of frames are well-aligned with text as well as natural video (e.g. motion) priors. 
+
+We highlight TADPoLe as the first approach to leverage \textit{domain-agnostic} visual generative models for policy learning.  
+Through quantitative and human evaluations on Humanoid~\cite{tunyasuvunakool2020dm_control}, Dog~\cite{tunyasuvunakool2020dm_control}, and Meta-World~\cite{yu2020meta} environments, we demonstrate that TADPoLe enables the learning of novel, zero-shot policies that are flexibly and accurately conditioned on natural language inputs, across multiple robot configurations and environments, for both goal-achievement and continuous locomotion tasks.  TADPoLe therefore provides two main benefits simultaneously: a performant approach towards zero-shot policy learning, where complex reward functions no longer need to be manually specified per task, and a promising path towards distilling priors summarized from large-scale pretraining into policies, ultimately resulting in the learning of more naturally-aligned behavior within arbitrary environments.
+Visualizations and code are provided at \href{https://diffusion-supervision.io/tadpole/}{diffusion-supervision.io/tadpole/}.
+
+
+\section{Related Work}
+
+
+Diffusion models ~\citep{sohl2015deep, song2019generative, ho2020denoising, song2020score} have recently demonstrated amazing generative modeling capabilities, particularly in the domain of text-conditioned image generation~\citep{dhariwal2021diffusion, ramesh2022hierarchical, saharia2022photorealistic, rombach2022high}.  Notably, guidance~\citep{song2020score, dhariwal2021diffusion, ho2022classifier} has been shown to be a critical component in producing visual outputs aligned with textual data, enabling the generation of images that accurately match a desired text caption, especially when the models are scaled to utilize large foundation models such as CLIP~\citep{radford2021learning} or T5~\citep{raffel2020exploring}, and trained on massive image-text datasets~\citep{schuhmann2021laion}.
+Our work is inspired by DreamFusion~\cite{poole2022dreamfusion}, where a pretrained, frozen text-to-image diffusion model is able to supervise the learning of zero-shot 3D models conditioned on text. We propose leveraging pretrained diffusion models to supervise the learning of flexible, text-conditioned policies in a zero-shot manner over the time dimension.
+
+There are numerous works that investigate how interactive agents can learn to perform behaviors specified by textual inputs.  SayCan~\citep{ahn2022can} grounds the knowledge of complex, high-level behaviors within an LLM to the context of a robot through pretrained behaviors.  This then enables an LLM to instruct and guide a robot, through combining low-level behaviors, to perform complex temporally extended behaviors.  LangLfP proposes a method for incorporating free-form natural language conditioning into imitation learning by first associating goal images with text captions and training a policy to follow either language or image goals, but only conditioning on natural language during test time inference~\citep{lynch2020language}.  The Text-Conditioned Decision Transformer learns a causal transformer to autoregressively produce actions conditioned on both text tokens as well as state and action tokens~\citep{putterman2021pretraining}.  Similarly, Hiveformer proposes a unified multimodal Transformer model for robotic manipulation that conditions on natural language instructions, camera views, as well as past actions and observations~\citep{guhur2023instruction}.  However, LangLfP, Text-Conditioned Decision Transformer, and Hiveformer, all require training on datasets of trajectories that have been labelled with natural language. In contrast, TADPoLe enables the learning of text-conditioned policies irrespective of visual environment, and without requiring any pretraining dataset of demonstrations or labeling. 
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/new_figure_1_small.png}
+  \caption{
+  A policy $\pi_{\theta}$ that interacts with an environment can be treated as an agent-centric \textit{implicit} video representation, where the arrow of time is actuated by the agent's actions and the pixels are rendered by the environment. The rendered behaviors can then be evaluated by a text-aware diffusion model to produce dense rewards, thereby providing text-conditioned update signals to the policy.}
+  \label{fig:intuition}
+\end{figure}
+
+Similar to our work, UniPi~\citep{du2024learning} treats the sequential decision-making problem as a text-conditioned video generation problem. The authors propose training a video diffusion model to produce a future visual plan for the agent; the subsequent frames are then converted to actions by means of an inverse dynamics model. VLP~\citep{du2023video} utilizes text-to-video generative models for planning and goal generation for an agent. Both methods require the video generative models to be trained \textit{ad-hoc} on the target environments, whereas we directly use frozen general-purpose generative models. Mahmoudieh et al.~\citep{mahmoudieh2022zero} propose a framework that uses CLIP to generate a reward signal from a text description of a goal state and raw pixel observations from the environment, which is then used to learn a task policy.  In VLM-RM~\citep{rocamonde2023vision}, the authors also explore utilizing CLIP as the reward model for training humanoids to accomplish complex goal-reaching tasks. In our work, we investigate locomotion tasks on top of goal-achievement, and explore how using diffusion models to produce a reward signal can outperform CLIP-based approaches. Although not conditioned on text, VIPER ~\citep{escontrela2024video} also aims to harness recent advancements in generative modeling by employing a video prediction model's likelihoods as a reward signal. However, VIPER does not enable the learning of policies conditioned on text, and requires in-domain expert videos for ad-hoc training the video model. Finally, Diffusion Reward~\citep{huang2023diffusion} also extracts a reward from a diffusion model to train policies; however, it requires training an ad-hoc video model on expert trajectories, the collection of which cannot always be assumed to be trivial, and does not enable text-conditioned policy learning.
+
+
+\section{Method}
+
+\label{sec:method}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/tadpol_iceberg_new.png}
+  \caption{An illustration of the TADPoLe pipeline, which computes text-conditioned rewards for policy learning through a pretrained, frozen diffusion model.  At each timestep, the subsequent frame rendered through the environment is corrupted with a sampled Gaussian source noise vector $\mathbf{\epsilon}_0$. The pretrained text-conditioned diffusion model then predicts the source noise that was added. The reward is designed to be large when the selected action produces frames well-aligned with the text prompt.}
+  \label{fig:tadpol}
+\end{figure}
+
+We propose Text-Aware Diffusion for Policy Learning (\textbf{TADPoLe})
+to learn text-aligned policies by leveraging frozen, pretrained text-conditioned diffusion models. An overview of the framework can be found in Figure~\ref{fig:tadpol}.
+
+\subsection{Text-Aware Diffusion for Policy Learning}
+
+We first describe how TADPoLe produces text-conditioned rewards from image observations.
+At each timestep $t$, reward $r_t$ is computed as a score between rendered subsequent image $\mathbf{o}_{t+1}$ and the provided text caption describing the behavior of interest, denoted by $y$, using a frozen, pretrained text-to-image diffusion model.  We begin by corrupting the rendered image $\mathbf{o}_{t+1}$ with a sampled Gaussian source noise vector $\boldsymbol{\epsilon}_0 \sim \mathcal{N}(\boldsymbol{\epsilon};\boldsymbol{0}, \textbf{I})$ to produce noisy observation $\tilde{\mathbf{o}}_{t+1}$, and use the diffusion model to make an unconditional prediction $\mathbf{\hat\epsilon}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise})$ as well as a conditional prediction $\mathbf{\hat\epsilon}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise}, y)$. Here 
+$\mathbf{\hat\epsilon}_{\boldsymbol{\phi}}(\cdot)$ is a neural network that predicts the source noise given $\tilde{\boldsymbol{o}}_{t+1}$, the level of noise corruption $\texttt{t}_\text{noise}$, and optionally the text prompt $y$; we overload notation to have $\mathbf{\hat\epsilon}_{\boldsymbol{\phi}}$ represent the source noise prediction in Figure~\ref{fig:tadpol}. We then compute the mean squared error (MSE) between the two predictions as a reward signal $r_t^\text{align}$ to be \textit{maximized}:
+$$r_t^\text{align} = \left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise}, y) - \boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise})\right\rVert_2^2.$$
+
+We hypothesize that for an appropriately-selected noise corruption level $\texttt{t}_\text{noise}$, this term measures the alignment between the environmental observation and the text prompt.  Intuitively, for unconditional prediction $\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise})$, the model is incentivized only to bring the noisy input to any arbitrary cleaner image, and makes minimal edits by moving it towards the closest clean mode in data space.  On the other hand, if the model recognizes visual features in the noisy image aligned with the text prompt, conditional prediction $\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise}, y)$ is incentivized to do ``extra work'' and bring it closer to the specific mode described by the text conditioning. We thus expect the MSE to be larger for well-aligned text conditioning. 
+For an unaligned text prompt, the model may have more difficulty in recognizing relevant visual features in the corrupted image, and therefore generally has a lower computed $r_t^\text{align}$ signal. 
+Therefore maximizing $r_t^\text{align}$ is a tractable proxy for maximizing the alignment between the rendered observation $\mathbf{o}_{t+1}$ and the provided text prompt $y$.
+
+We also wish to encourage behaviors that are natural to human perception (e.g. a humanoid should walk similar to how a typical pedestrian would walk).
+We approximate the \textit{naturalness} of a behavior by how accurately the diffusion model is able to predict the exact source noise vector that was applied.  Intuitively, if it voluntarily predicts the exact noise vector with informative text conditioning, thereby perfectly reconstructing the query image, then the diffusion model believes the original rendered frame is reasonably natural (according to the priors captured by the diffusion model).  We would therefore like to minimize $\left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise}, y) - \boldsymbol{\epsilon}_0\right\rVert_2^2$.  We would also like this term to be comparatively closer to the source noise vector than the unconditional prediction is, further reaffirming the benefit of the text conditioning.  We therefore seek to also \textit{maximize} a comparative reconstruction term as below:
+$$r_t^\text{rec} = \left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise}) - \boldsymbol{\epsilon}_0\right\rVert_2^2 - \left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{t+1}; \texttt{t}_\text{noise}, y) - \boldsymbol{\epsilon}_0\right\rVert_2^2.$$
+
+Ultimately, we compose these two terms into a final reward signal $r_t$ exposed to the policy during training.  We scale each of the individual terms with tunable hyperparameter constants, and apply a \texttt{symlog}~\citep{hafner2023mastering} transformation operation:
+$$r_t = \texttt{symlog}(w_1*r_t^\text{align}) + \texttt{symlog}(w_2 * r_t^\text{rec}).$$
+The choice of using \texttt{symlog} as a reward normalization technique is thoroughly studied in Section~\ref{sec:normalization_study}.  TADPoLe is agnostic to the specific choices of policy network architecture and optimization objectives.
+A pseudocode of the method is provided in Algorithm~\ref{alg:pseudocode}.  It is worth emphasizing that $\texttt{t}_\text{noise}$ and subscript-less $t$ refer to different notions of time; $t$ indexes the timestep of the agent in the environment, whereas $\texttt{t}_\text{noise}$ determines the level of noise to corrupt the raw observed image.
+
+\begin{algorithm}[t]
+	\caption{Text-Aware Diffusion for Policy Learning (TADPoLe)} 
+	\begin{algorithmic}[1]
+            \State \texttt{prompt = sample(action\_phrase)}
+            \State \texttt{$\pi_{\theta}$ = initialize($\theta$)}
+            \State \texttt{$\mathcal{D} \leftarrow \{\}$}
+            \State \texttt{while not converged:}
+                \State \hskip2.5em $\boldsymbol{s}_{0} \sim p(\boldsymbol{s}_{0})$
+                \State \hskip2.5em \texttt{for} \textit{t} \texttt{in range(episode\_length):}
+                    \State \hskip5.0em $\boldsymbol{a}_{t} \sim \pi_{\theta}(\boldsymbol{a}_{t} \mid \boldsymbol{s}_{t})$
+                    \State \hskip5.0em $\boldsymbol{s}_{t+1} \sim  P(\boldsymbol{s}_{t+1} \mid \boldsymbol{s}_{t}, \boldsymbol{a}_{t})$
+                    \State \hskip5.0em $\boldsymbol{\epsilon}_0 \sim \mathcal{N}(\boldsymbol{\epsilon};\boldsymbol{0}, \textbf{I})$
+                    \State \hskip5.0em $\boldsymbol{o}_{t+1} \sim  P(\boldsymbol{o}_{t+1} \mid \boldsymbol{s}_{t+1})$
+                    \State \hskip5.0em $\tilde{\boldsymbol{o}}_{t+1} \leftarrow  \texttt{noisify}(\boldsymbol{o}_{t+1}, \boldsymbol{\epsilon}_0, \texttt{t}_\text{noise})$
+                    \State \hskip5.0em $r_{t} = \texttt{tadpole\_reward}(\tilde{\boldsymbol{o}}_{t+1}, \boldsymbol{\epsilon}_0, \texttt{prompt})$
+                    \State \hskip5.0em $\tau \leftarrow \tau \cup {(\boldsymbol{s}_{t}, \boldsymbol{a}_{t}, r_{t}, \boldsymbol{s}_{t+1})}$
+                \State \hskip2.5em $\mathcal{D} \leftarrow \mathcal{D} \cup \tau$
+                \State \hskip2.5em $\texttt{loss} = \texttt{policy\_loss} (\mathcal{D})$
+                \State \hskip2.5em \texttt{grads = gradient(loss, $\theta$)}
+                \State \hskip2.5em \texttt{opt.apply\_gradients(grads, $\theta$)}
+	\end{algorithmic} 
+        \label{alg:pseudocode}
+\end{algorithm}
+\subsection{TADPoLe with Text-to-Video Diffusion Models}
+
+Conceptually, there exist fundamental limitations to using a text-to-image model to provide a reward signal. 
+As each image is evaluated statically and independently, we are unable to expect the text-to-image diffusion model to be able to accurately understand and supervise an agent in learning notions of speed, or in some cases, direction, as such concepts require evaluating multiple consecutive timesteps to deduce.  We therefore propose Video-TADPoLe, where a dense text-conditioned reward signal is calculated over sliding windows of consecutive frames through a pretrained text-to-video diffusion model.  We extend and generalize the reward formulation from TADPoLe thusly.
+
+We can compute reward terms for arbitrary start index $i$ and end index $j$ inclusive, for $i \leq j$, by considering the sequence of subsequently rendered frames $\mathbf{o}_{[i+1:j+1]}$.  We once again utilize source noise vector $\boldsymbol{\epsilon}_0 \sim \mathcal{N}(\boldsymbol{\epsilon};\boldsymbol{0}, \textbf{I}_{j-i+1})$ to produce noisy observation $\tilde{\mathbf{o}}_{[i+1:j+1]}$.  Then, we can compute a batch of alignment reward terms through one inference step of the text-to-video diffusion model as:
+$$\scalemath{.95}{r_{[i:j]}^\text{align} = \left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{[i+1:j+1]}; \texttt{t}_\text{noise}, y) - \boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{[i+1:j+1]}; \texttt{t}_\text{noise})\right\rVert_2^2,}$$
+and a batch of reconstruction reward terms as:
+$$r_{[i:j]}^\text{rec} = \left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{[i+1:j+1]}; \texttt{t}_\text{noise}) - \boldsymbol{\epsilon}_0\right\rVert_2^2 - \left\lVert\boldsymbol{\hat{\epsilon}}_{\boldsymbol{\phi}}(\tilde{\boldsymbol{o}}_{[i+1:j+1]}; \texttt{t}_\text{noise}, y) - \boldsymbol{\epsilon}_0\right\rVert_2^2.$$
+For a desired context window of size $n$, we then calculate the reward at each timestep $t$ utilizing each context window that involves achieved observation $\mathbf{o}_{t+1}$:
+$$r_t = \frac{1}{n}\sum_{i = 1}^{n}\texttt{symlog}\left(w_1*r_{[t-i+1:t-i+n]}^\text{align}[i-1]\right) + \texttt{symlog}\left(w_2 * r_{[t-i+1:t-i+n]}^\text{rec}[i-1]\right).$$
+Intuitively, we seek to calculate an overall reward for an action based off how well the resulting rendered frame aligns with text-conditioning at the beginning of a motion sequence, the end of one, and arbitrarily inbetween.  For window size $n=1$, this recreates TADPoLe behavior, but using a  text-to-video model; for $n>1$, we make the computation tractable through dynamic programming.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We now demonstrate the effectiveness of TADPoLe on goal achievement, continuous locomotion, and robotic manipulation tasks. All results are achieved without access to in-domain demonstrations.
+
+\subsection{Experimental Setup and Evaluation}
+
+\noindent\textbf{Benchmarks:} We present our main results using the Dog and Humanoid environments from the DeepMind Control Suite~\cite{tunyasuvunakool2020dm_control}, and robotic manipulation tasks from Meta-World~\cite{yu2020meta}. Dog and Humanoid are known to be challenging due to their large action space, complex transition dynamics, and lack of task-specific priors (such as termination conditions). We update the environments by modifying the terrain rendered by MuJoCo~\cite{todorov2012mujoco} to have green grass and blue sky.  We also limit the number of environment timesteps to be 300, which is sufficient to demonstrate successful learning of a behavior, rather than the default 1000.  The agent's initialized joint configurations are also fixed, as we focus on learning text-conditioned capabilities rather than robustness to initialization conditions.  Meta-World was initially designed for multi-task and meta-reinforcement learning, and was later adopted to evaluate language-conditioned imitation learning algorithms~\cite{nair2022r3m,mu2024embodiedgpt,sontakke2024roboclip}.  Following prior design~\cite{huang2023diffusion} for Meta-World, we also add a sparse success signal to the dense text-conditioned reward signals.
+
+\noindent\textbf{Implementation:} 
+We use TD-MPC~\cite{hansen2022temporal} as the reinforcement learning algorithm for all tasks. It is the first documented model to solve Dog tasks when ground truth rewards are available for walking. We train Humanoid and Dog agents for 2M steps, and Meta-World agents for 700K steps.  For Meta-World experiments, we scale the sparse success signal by 2. Visualizations and quantitative evaluations are reported using the \textit{last} checkpoint achieved at the end of training. We use StableDiffusion 2.1~\cite{rombach2022high} as the text-to-image diffusion model ($\sim$1.3B parameters), and AnimatedDiff~\cite{guo2023animatediff} v2 ($\sim$1.5B parameters) as the text-to-video diffusion model. AnimatedDiff is implemented on top of StableDiffusion 1.5. All experiments are performed on a single NVIDIA V100 GPU.
+
+\noindent\textbf{Baselines:} We compare TADPoLe against other text-to-reward approaches, including VLM-RM~\cite{rocamonde2023vision}, LIV~\cite{ma2023liv}, and Text2Reward~\cite{xie2023text2reward}, on top of the same underlying TD-MPC architecture, hyperparameters, and optimization scheme for fair comparison. For LIV, we use their provided CLIP-based checkpoint finetuned on robotic demonstration videos. For VLM-RM, we utilize the ViT-bigG-14 CLIP checkpoint ($\sim$1.3B parameters), reported as the best performing in their work. We follow a prompt template provided in the Text2Reward paper to generate reward functions for the Dog and Humanoid agent, interfaced through vanilla ChatGPT using GPT-3.5.  Whereas VLM-RM and LIV provide a multimodal reward signal, and are more directly comparable to TADPoLe, it is of note that Text2Reward generates a text-conditioned reward function purely as the output of a pretrained language model.  However, Text2Reward does have access to underlying sensor data such as speed and direction in real-time, whereas the visual interface approaches, including TADPoLe, do not.
+
+\noindent\textbf{Evaluation Protocols:} We benchmark all text-conditioned methods with a corresponding standardized prompt for fair comparison, and report both quantitative as well as qualitative comparisons. We use cumulative ground-truth rewards as quantitative evaluation metrics for Dog and Humanoid when it is available. We note this is a naturally \textit{unfavorable} comparison for methods that provide a text-conditioned reward signal purely through a visual interface, as the reward the agent receives has no access to the underlying sensors (such as ones that measure speed and energy usage) that the ground-truth reward function uses to evaluate performance.  For example, the ground-truth reward function may have an arbitrary threshold on a speed sensor that needs to be hit to constitute successful ``walking'', and a separate threshold for ``running''; however the detailed characteristics of and even existence of such a sensor, as well as any thresholds surrounding it, are hidden for policies supervised only through vision and language feedback.  Nonetheless, it offers a standardized, numerical comparison across all methods.  For Meta-World, we report the ``success rate'' evaluation metric, computed as the proportion of evaluation rollouts in which the agent successfully completes the given task.
+
+\begin{table*}[t]
+\caption{Results for goal-achievement experiments on DeepMind Control Suite Dog and Humanoid environments.  For rows with an associated ground-truth reward function, numerical results are listed; for performant approaches, we report mean and standard deviation across 5 seeds.  For novel zero-shot text-conditioned behavior learning, checkmarks denote if the resulting policy is aligned with the provided text prompt according to human evaluation.}
+\label{tab:goal}
+\begin{center}
+\scalebox{.73}{
+\begin{tabular}{cccccccc}
+\multicolumn{1}{c}{\bf Environment} & \multicolumn{1}{c}{\bf Prompt}  & \multicolumn{1}{c}{\bf VLM-RM}  & \multicolumn{1}{c}{\bf LIV}  & \multicolumn{1}{c}{\bf Text2Reward}  & \multicolumn{1}{c}{\bf TADPoLe (Ours)} & \multicolumn{1}{c}{\bf Ground-Truth}
+\\ \hline \\[-2.0ex]
+
+Humanoid  & ``a person standing''  & 247.05 ($\pm$ 16.90) & 11.27 & 10.50 & 254.43 ($\pm$ 8.76) & 287.68 ($\pm$ 4.64)  \\[0.5ex]
+\hline & \\[-2.0ex]
+Humanoid  & ``a person in lotus position''  & \cmark & \xmark & \xmark & \cmark  &  --\\
+Humanoid  & ``a person doing splits''  & \cmark & \cmark & \xmark & \cmark  &  --\\
+Humanoid  & ``a person kneeling''  & \xmark & \xmark & \xmark & \cmark  &  --\\
+Dog  & ``a dog standing''  & \xmark & \xmark & \xmark & \cmark  &  --\\
+\end{tabular}
+}
+\end{center}
+\end{table*}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{*{2}{>{\centering\arraybackslash}X}}
+   \centering
+\includegraphics[width=\linewidth,valign=m]{figures/humanoid_standing_semibold.png}
+&
+\scalebox{.8}{
+\begin{tabular}{cc}
+    \multicolumn{1}{c}{\bf Prompt}  & \multicolumn{1}{c}{\bf TADPoLe Naturalness ($\uparrow$)} \\
+    \hline 
+    ``a dog standing'' & 87.5\%  \\
+    ``a person in lotus position'' & 62.5\%  \\
+    ``a person doing splits'' & 62.5\%  \\
+    ``a person kneeling'' & 70.8\%  \\
+        \hline 
+        ``a person walking'' & 84.0\%  \\
+    ``a dog walking''  & 76.0\%  \\
+
+\end{tabular}
+} \\
+\captionof{figure}{TADPoLe demonstrates sensitivity to subtle variations to the input prompt, learning to stand in different positions with only slight modifications to the text conditioning.}\label{fig:prompt_sensitivity} &     
+\captionof{table}{Qualitative study: percentages denote user preference for the naturalness of the resulting motion produced by TADPoLe over VLM-RM (goal-achievement) and Video-TADPoLe over ViCLIP-RM (continuous locomotion).}\label{tab:qualitative_prolific}
+\end{tabularx}
+\end{center}
+
+A main benefit of utilizing a reward signal conditioned flexibly on text is the ability to learn policies with behaviors beyond those defined by existing ground-truth reward functions.  As these have no corresponding ground-truth reward functions, quantitative comparison across different text-conditioned methods is challenging; we therefore appeal to a qualitative user study.  We perform a paid study through the Prolific platform, with a total of 25 anonymous random participants without prior training to estimate a general response from the human population.  For a video demonstration from each trained model, selected as the last timestep of policy training without cherry-picking, each participant is asked if it sufficiently aligns with the text prompt it was conditioned on.  These results are depicted in tables as checkmarks (\cmark) and x-marks (\xmark), where a checkmark denotes if a majority of participants believe it is text-aligned. In Table~\ref{tab:prolific_expanded_goal}, we provide the fine-grained user study results on what percentage of the users believe the video achieved by the policy is appropriately text-aligned.  We then proceed with a user study regarding naturalness.  Given a video produced by VLM-RM and TADPoLe, users are given a choice as to which they believed to be the more natural motion or pose.  This seeks to approximate how naturally the resulting Humanoid and Dog policies behave, according to human belief over how people and dogs naturally move in the real world.
+
+\subsection{Goal Achievement}
+\label{sec:goal_achievement}
+
+For text-conditioned goal-achievement, the objective is to learn a policy to consistently achieve a particular pose described by a text prompt; as the emphasis is for every frame to match a fixed goal pose rather than performing continuous motion, it is natural to apply TADPoLe with text-to-image diffusion models.
+
+In the Humanoid environment, there is a ground-truth reward function that measures standing performance, as a function of the straightness of the agent's spine.  We therefore compare all text-conditioned methods using the provided reward function as a quantitative metric, with a standard prompt of ``a person standing''; these results are shown in the first row of Table~\ref{tab:goal}.  TADPoLe and VLM-RM achieve competitive quantitative performance with an agent trained on the ground-truth reward function. The following rows show that according to the user study, TADPoLe consistently achieves text-aligned behaviors beyond making the Humanoid stand, whereas other approaches often fail. Table~\ref{tab:qualitative_prolific} shows that users consistently found TADPoLe to produce more natural-looking motions and poses when compared head-to-head with VLM-RM. 
+
+We then investigate whether or not TADPoLe is sensitive to subtle variations of the input prompt.  We  change the text prompt from ``a person standing'' to ``a person standing with hands above head'' and ``a person standing with hands on hips''.  In Figure~\ref{fig:prompt_sensitivity}, we visually verify that the resulting Humanoid policy can indeed learn distinct behaviors that respect the different hand placement specifications.  We take this as evidence that TADPoLe is capable of respecting fine-grained details and subtleties of the input prompts when learning text-conditioned policies.
+\subsection{Continuous Locomotion}
+\label{sec:locomotion}
+
+We further explore the ability of TADPoLe to learn continuous locomotion behaviors conditioned on natural language specifications.  Such tasks are often difficult to learn purely from static external description, as there is no canonical pose or goal frame that if reached, would denote successful achievement of the task. This is challenging for approaches that statically select a canonical goal-frame to achieve, such as CLIP or LIV, and we propose Video-TADPoLe, which leverages large-scale pretrained text-to-video generative models, as a promising direction forward.
+
+We utilize a noise level $\texttt{t}_\text{noise} \sim {U}(500, 600)$ in our continuous locomotion experiments.  We perform a search over context windows of size $n = \{1, 2, 4, 8\}$, and report the best configuration per task. We observe that when the context window is too high (e.g. 8 or higher), the agent has consistently lower performance, and that although the agent learns coherent motion and repeats it, the pose is less text-aligned. For fair comparison against a text-video alignment model trained in a contrastive manner, we extend VLM-RM to ViCLIP-RM, where a ViCLIP-L-14 checkpoint~\cite{wang2023internvid} finetuned from ViT-L-14 CLIP is used to compute dense, text-conditioned rewards. At each timestep $t$, we compute dense rewards as cosine similarity between the encoded representations of video observation up to $t+1$ and the text prompt. We ask ViCLIP to encode 8 video frames at a time, which is adopted by its authors for zero-shot experiments.
+
+\begin{table*}[t]
+\caption{Results for continuous locomotion experiments.  For rows with an associated ground-truth reward function, numerical results are listed; for performant approaches, we report mean and standard deviation across 5 seeds.  Evaluation for text-alignment is also reported. Video-TADPoLe greatly outperforms ViCLIP-RM on both Humanoid and Dog.}
+\label{tab:continuous}
+\begin{center}
+\scalebox{.7}{
+\begin{tabular}{ccccccc}
+\multicolumn{1}{c}{\bf Environment} & \multicolumn{1}{c}{\bf Prompt}  & \multicolumn{1}{c}{\bf LIV}  & \multicolumn{1}{c}{\bf Text2Reward} & \multicolumn{1}{c}{\bf Video-TADPoLe (Ours)} & \multicolumn{1}{c}{\bf ViCLIP-RM} & \multicolumn{1}{c}{\bf Ground-Truth}
+\\ \hline \\[-2.0ex]
+Humanoid  & ``a person walking''   & 0.65 & 3.35 & 145.60 ($\pm$ 48.20) & 25.51 ($\pm$ 40.45) & 275.06 ($\pm$ 9.21)  \\[0.5ex]
+Dog  & ``a dog walking''   & 16.86 & 63.15 & 60.20 ($\pm$ 8.82)  & 14.67 ($\pm$ 9.84) & 280.07 ($\pm$ 3.07)\\
+\hline & \\[-2.0ex]
+Humanoid  & ``a person walking''   & \xmark & \xmark & \cmark  &  \cmark  &  \cmark\\
+Dog  & ``a dog walking''   & \xmark & \xmark & \cmark  &  \xmark  &  \cmark\\
+\end{tabular}
+}
+\end{center}
+\end{table*}
+
+For the Humanoid task, we find that Video-TADPoLe achieves the best results amongst methods trained purely from visual and/or language feedback as in Table~\ref{tab:continuous}. On the other hand, ViCLIP-RM indeed learns to take steps, but does so sideways while maintaining an unnaturally lopsided pose. Meanwhile, LIV and Text2Reward fail to learn meaningful behaviors.
+
+For the Dog task, we notice that the policy learned via ViCLIP-RM collapses; it learns to strike a particular pose and maintain it for perpetuity.  Text2Reward, which does not have access to any visual information, but does have access to ground-truth state information for the Dog including speed, direction, and joint positions, achieves a reward of 63.15.  Ultimately, Video-TADPoLe achieves a comparable result using a context window of 4, while also distinguishing itself as the most natural-looking policy in qualitative terms as the Dog agent appears to perform step-taking motions, rather than remain stationary. Table~\ref{tab:qualitative_prolific} further showcases a higher preference for the naturalness of the learned policies for continuous locomotion achieved by Video-TADPoLe compared to ViCLIP-RM, in both Dog and Humanoid environments.
+
+In Figure~\ref{fig:reward_comparison_humanoid_walk}, we visualize episode return curves achieved by Video-TADPoLe for a Humanoid agent with the prompt ``a person walking”.  We visualize how during training, the computed Video-TADPoLe reward shares a positive correlation with the reward computed by a ground-truth function for walking over all episodes, lending confidence to it as a coherent, well-defined reward function.  We also visualize the ground-truth evaluation curve.  Figure~\ref{fig:reward_comparison_dog_walking} offers another example for ``a dog walking''.
+
+\subsection{Robotic Manipulation}
+
+We further investigate how well TADPoLe can be applied to learn robotic manipulation tasks through dense text-conditioned feedback. We do so by replacing the manually-designed ground-truth dense reward for each Meta-World task with TADPoLe's text-conditioned reward. Since TADPoLe aims to leverage domain-agnostic diffusion models for policy learning,
+we focus our evaluation to compare with baseline methods that also do not utilize in-domain (expert) demonstrations for the robotic manipulation tasks. We note that most of the prior methods which report performance on Meta-World rely on (often expert-produced) video demonstrations from a similar domain or the target environment directly for representation learning~\cite{nair2022r3m}, reward learning~\cite{huang2023diffusion}, or both~\cite{ma2023liv}. They are thus not directly comparable to TADPoLe. 
+
+We perform thorough comparisons between TADPoLe and VLM-RM by evaluating them on a diverse set of selected Meta-World tasks.  Both models reuse the setup in Section~\ref{sec:goal_achievement} without modification, with training performed for 700k steps.  In Table~\ref{tab:metaworld}, we report the final success rate for each manipulation task averaged over 30 evaluation rollouts.  We highlight that TADPoLe achieves high success rates across a variety of tasks, and significantly exceeds VLM-RM in terms of average overall performance.  We take this as a positive signal that TADPoLe can meaningfully provide dense text-conditioned rewards that replace dense ground-truth hand-designed feedback.  We also highlight how TADPoLe is able to successfully supervise the learning of policies within the synthetic-looking visual environment of Meta-World without finetuning the pretrained text-to-image diffusion model, despite the visual attributes (such as the appearance of the robotic arm, or the quality of the renderings) being quite dissimilar from the style of images StableDiffusion was trained on.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/reward_comparison_humanoid_walk.pdf}
+    \caption{Episode return curves for a Humanoid agent trained with Video-TADPoLe, using the prompt ``a person walking''. We observe that the Video-TADPoLe reward signal (left) is positively correlated with the agent's performance as measured with ground-truth reward during training (middle) and evaluation (right). Shaded regions denote the standard deviation across five random seeds.
+    }
+    \label{fig:reward_comparison_humanoid_walk}
+\end{figure}
+
+\begin{table}[t]
+\caption{Average success rate for robotic manipulation tasks in Meta-World~\citep{yu2020meta} over 30 evaluation rollouts. We compare between TADPoLe and VLM-RM, both approaches that do not utilize in-domain data or demonstrations, and find TADPoLe significantly outperforms VLM-RM. We report mean performance and standard deviation across 10 seeds for each task.}
+\label{tab:metaworld}
+\centering
+
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Success Rate (\%) &
+  Door Open &
+  Door Close &
+  Drawer Open &
+  Drawer Close &
+  Window Open &
+  Window Close \\ \midrule
+VLM-RM &
+  0 ($\pm$ 0) &
+  79.7 ($\pm$ 39.8) &
+  10.0 ($\pm$ 30.0) &
+  100.0 ($\pm$ 0) &
+  9.7 ($\pm 29.0$) &
+  0 ($\pm$ 0)  \\
+  
+TADPoLe &
+  40.0 ($\pm$ 49.0) &
+  100.0 ($\pm$ 0) &
+  45.3 ($\pm$ 46.6) &
+  100.0 ($\pm$ 0) &
+  74.0 ($\pm$ 37.9) &
+  30.0 ($\pm$ 45.8) \\ \midrule
+
+Success Rate (\%) &
+  Coffee Push &
+  Button Press &
+  Soccer &
+  Lever Pull &
+  \multicolumn{2}{c}{\textbf{\textit{Average}}} \\ \midrule
+
+VLM-RM &
+  4.0 ($\pm$ 12.0) &
+  30.0 ($\pm$ 45.8) &
+  5.3 ($\pm$ 11.6) &
+  11.3 ($\pm$ 18.3) &
+  \multicolumn{2}{c}{25.0} \\
+
+TADPoLe &
+  18.6 ($\pm$ 20.5) &
+  73.0 ($\pm$ 38.5) &
+  25.0 ($\pm$ 15.4) &
+  0 ($\pm$ 0) &
+  \multicolumn{2}{c}{\textbf{50.6}} \\ \bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{table*}[t]
+\caption{Quantitative results for TADPoLe and Video-TADPoLe with and without the \texttt{symlog} normalization operation, averaged over 3 seeds.  Hyperparameters such as weights and noise level were kept the same across all experiments.  We discover that not only does using the \texttt{symlog} transformation enable the highest empirical rewards, it also facilitates the reuse of hyperparameters across tasks, environments, and other diffusion models.}
+\label{tab:symlog}
+\begin{center}
+\scalebox{.73}{
+\begin{tabular}{cccccccc}
+\multicolumn{1}{c}{\bf Environment} & {\bf Method} & \multicolumn{1}{c}{\bf Prompt}  & \multicolumn{1}{c}{\bf SymLog} & \multicolumn{1}{c}{\bf Direct Scaling} & \multicolumn{1}{c}{\bf SymExp} & \multicolumn{1}{c}{\bf Min-Max} & \multicolumn{1}{c}{\bf Standardization}
+\\ \hline \\[-2.0ex]
+Humanoid  & TADPoLe & ``a person standing"  & \textbf{267.23} & 239.74 & 241.49 & 256.81 & 236.59  \\[0.5ex]
+\hline & \\[-2.0ex]
+Humanoid  & Video-TADPoLe & ``a person walking"  & \textbf{226.29} & 4.58 & 3.68 & 61.31 & 134.66  \\
+Dog  & Video-TADPoLe & ``a dog walking"  & \textbf{81.22} & 35.30 & 9.46 & 6.15 & 5.05  \\
+\end{tabular}
+}
+\end{center}
+\end{table*}
+
+\subsection{Normalization Study}
+\label{sec:normalization_study}
+
+Of interest is what reward normalization technique is most performant for adjusting the raw computed alignment and reconstruction terms into a final reward used for policy learning.
+
+Apart from the \texttt{symlog} transformation, we also compare against using no additional normalization (denoted as ``Direct Scaling''), and using \texttt{symexp}.  We also compare against empirical normalization techniques. This includes min-max rescaling, where an empirically estimated minimum value is subtracted from the achieved reward, which is then divided by an empirically calculated min-max range, and rescaled to $[-1, 1]$.  This also includes standardization, which subtracts an empirically estimated mean from the achieved reward and then divides it by an empirically estimated standard deviation.  We apply these techniques across Humanoid and Dog environments, for both TADPoLe and Video-TADPoLe.  We discover that the \texttt{symlog} operation is the reward normalization strategy that achieves the best empirical results across robotic configurations, visual environments, and desired tasks, while reusing the same hyperparameter settings.  We hypothesize that it helps to normalize the raw computed reward signals across diffusion models and environments to be roughly on the same scale.  Indeed, we showcase how removing the \texttt{symlog} transformation, as well as using other normalization techniques, reduces consistent policy learning performance across environments and diffusion models with the same fixed hyperparameters.  We further note that it does not require empirically estimated values, unlike min-max and standardization.
+
+
+\section{Conclusion and Future Work}
+
+
+We present Text-Aware Diffusion for Policy Learning (TADPoLe), a framework that optimizes a policy according to a provided natural language prompt through a pretrained text-conditioned diffusion model.  TADPoLe enables novel behaviors to be learned in a zero-shot manner purely from text conditioning, and also offers a promising angle to train policies to behave in accordance with natural priors summarized from large-scale pretraining.  TADPoLe can be applied across visual environments and different robotic states without modification, and we experimentally demonstrate that TADPoLe is able to learn novel goal-achievement as well as continuous locomotion behaviors conditioned only on text, across Humanoid, Dog, and Meta-World environments.
+
+\noindent\textbf{Limitations:} An observed limitation of TADPoLe is that it is difficult to explicitly control the weight each individual word of an input text prompt has on the reward provided to the agent.  For certain prompts, TADPoLe could potentially cause the agent to remain stationary since it may focus on alignment with the noun in the phrase rather than details of the goal.  How to provide fine-grained control over the text-conditioning is an interesting direction to explore in future work.  Further interesting future work includes utilizing multiple camera views simultaneously to compute the dense reward, as environments generally allow flexible rendering from arbitrary angles.
+Another observed limitation is that TADPoLe depends on a highly stochastic operation, namely, repeatedly resampling a Gaussian source noise vector at each timestep.  The behavior of the resulting policy, after training for many iterations, can therefore vary for the same input text prompt, and potentially cause high variance in both visual and quantitative performance.  How to control the stability of convergence to a consistent policy across repeated runs is an interesting future direction for exploration.
+
+\noindent\textbf{Acknowledgements.} We would like to thank Amil Merchant, Daniel Ritchie, David Bau, Ben Poole, Ting Chen, Nate Gillman, and Yilun Du for helpful discussions and feedback. This work is supported by Samsung Advanced Institute of Technology, NASA, and a Richard B. Salomon Faculty Research Award for Chen Sun. Our research was conducted using computational resources at the Center for Computation and Visualization at Brown University.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{10}
+
+\bibitem{ahn2022can}
+Michael Ahn, Anthony Brohan, Noah Brown, Yevgen Chebotar, Omar Cortes, Byron David, Chelsea Finn, Keerthana Gopalakrishnan, Karol Hausman, Alex Herzog, et~al.
+\newblock Do as i can, not as i say: Grounding language in robotic affordances.
+\newblock {\em arXiv preprint arXiv:2204.01691}, 2022.
+
+\bibitem{al2012trajectory}
+Mazen Al~Borno, Martin De~Lasa, and Aaron Hertzmann.
+\newblock Trajectory optimization for full-body movements with complex contacts.
+\newblock {\em IEEE transactions on visualization and computer graphics}, 19(8):1405--1414, 2012.
+
+\bibitem{bar2024lumiere}
+Omer Bar-Tal, Hila Chefer, Omer Tov, Charles Herrmann, Roni Paiss, Shiran Zada, Ariel Ephrat, Junhwa Hur, Yuanzhen Li, Tomer Michaeli, et~al.
+\newblock Lumiere: A space-time diffusion model for video generation.
+\newblock {\em arXiv preprint arXiv:2401.12945}, 2024.
+
+\bibitem{lynch2020language}
+Lynch Corey and Sermanet Pierre.
+\newblock Language conditioned imitation learning over unstructured data.
+\newblock In {\em Robotics: Science and Systems Conference (RSS)}, 2020.
+
+\bibitem{dhariwal2021diffusion}
+Prafulla Dhariwal and Alexander Nichol.
+\newblock Diffusion models beat gans on image synthesis.
+\newblock {\em Advances in Neural Information Processing Systems}, 34:8780--8794, 2021.
+
+\bibitem{du2024learning}
+Yilun Du, Sherry Yang, Bo~Dai, Hanjun Dai, Ofir Nachum, Josh Tenenbaum, Dale Schuurmans, and Pieter Abbeel.
+\newblock Learning universal policies via text-guided video generation.
+\newblock In {\em Conference on Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem{du2023video}
+Yilun Du, Sherry Yang, Pete Florence, Fei Xia, Ayzaan Wahid, brian ichter, Pierre Sermanet, Tianhe Yu, Pieter Abbeel, Joshua~B. Tenenbaum, Leslie~Pack Kaelbling, Andy Zeng, and Jonathan Tompson.
+\newblock Video language planning.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem{escontrela2024video}
+Alejandro Escontrela, Ademi Adeniji, Wilson Yan, Ajay Jain, Xue~Bin Peng, Ken Goldberg, Youngwoon Lee, Danijar Hafner, and Pieter Abbeel.
+\newblock Video prediction models as rewards for reinforcement learning.
+\newblock In {\em Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem{torabi2018behavioral}
+Torabi Faraz, Warnell Garrett, and Stone Peter.
+\newblock Behavioral cloning from observation.
+\newblock In {\em International Joint Conference on Artificial Intelligence}, 2018.
+
+\bibitem{girdhar2023emu}
+Rohit Girdhar, Mannat Singh, Andrew Brown, Quentin Duval, Samaneh Azadi, Sai~Saketh Rambhatla, Akbar Shah, Xi~Yin, Devi Parikh, and Ishan Misra.
+\newblock Emu video: Factorizing text-to-video generation by explicit image conditioning.
+\newblock In {\em European Conference on Computer Vision (ECCV)}, 2024.
+
+\bibitem{guhur2023instruction}
+Pierre-Louis Guhur, Shizhe Chen, Ricardo~Garcia Pinel, Makarand Tapaswi, Ivan Laptev, and Cordelia Schmid.
+\newblock Instruction-driven history-aware policies for robotic manipulations.
+\newblock In {\em Conference on Robot Learning}, pages 175--187. PMLR, 2023.
+
+\bibitem{guo2023animatediff}
+Yuwei Guo, Ceyuan Yang, Anyi Rao, Zhengyang Liang, Yaohui Wang, Yu~Qiao, Maneesh Agrawala, Dahua Lin, and Bo~Dai.
+\newblock Animatediff: Animate your personalized text-to-image diffusion models without specific tuning.
+\newblock {\em International Conference on Learning Representations}, 2024.
+
+\bibitem{hafner2023mastering}
+Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap.
+\newblock Mastering diverse domains through world models.
+\newblock {\em arXiv preprint arXiv:2301.04104}, 2023.
+
+\bibitem{hansen2022temporal}
+Nicklas Hansen, Xiaolong Wang, and Hao Su.
+\newblock Temporal difference learning for model predictive control.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2022.
+
+\bibitem{ho2022imagen}
+Jonathan Ho, William Chan, Chitwan Saharia, Jay Whang, Ruiqi Gao, Alexey Gritsenko, Diederik~P Kingma, Ben Poole, Mohammad Norouzi, David~J Fleet, et~al.
+\newblock Imagen video: High definition video generation with diffusion models.
+\newblock {\em arXiv preprint arXiv:2210.02303}, 2022.
+
+\bibitem{ho2020denoising}
+Jonathan Ho, Ajay Jain, and Pieter Abbeel.
+\newblock Denoising diffusion probabilistic models.
+\newblock {\em Advances in Neural Information Processing Systems}, 33:6840--6851, 2020.
+
+\bibitem{ho2022classifier}
+Jonathan Ho and Tim Salimans.
+\newblock Classifier-free diffusion guidance.
+\newblock {\em arXiv preprint arXiv:2207.12598}, 2022.
+
+\bibitem{huang2023diffusion}
+Tao Huang, Guangqi Jiang, Yanjie Ze, and Huazhe Xu.
+\newblock Diffusion reward: Learning rewards via conditional video diffusion.
+\newblock {\em European Conference on Computer Vision (ECCV)}, 2024.
+
+\bibitem{lynch2023interactive}
+Corey Lynch, Ayzaan Wahid, Jonathan Tompson, Tianli Ding, James Betker, Robert Baruch, Travis Armstrong, and Pete Florence.
+\newblock Interactive language: Talking to robots in real time.
+\newblock {\em IEEE Robotics and Automation Letters}, 2023.
+
+\bibitem{ma2023liv}
+Yecheng~Jason Ma, Vikash Kumar, Amy Zhang, Osbert Bastani, and Dinesh Jayaraman.
+\newblock {LIV:} language-image representations and rewards for robotic control.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2023.
+
+\bibitem{mahmoudieh2022zero}
+Parsa Mahmoudieh, Deepak Pathak, and Trevor Darrell.
+\newblock Zero-shot reward specification via grounded natural language.
+\newblock In {\em International Conference on Machine Learning}, pages 14743--14752. PMLR, 2022.
+
+\bibitem{mu2024embodiedgpt}
+Yao Mu, Qinglong Zhang, Mengkang Hu, Wenhai Wang, Mingyu Ding, Jun Jin, Bin Wang, Jifeng Dai, Yu~Qiao, and Ping Luo.
+\newblock Embodiedgpt: Vision-language pre-training via embodied chain of thought.
+\newblock {\em Advances in Neural Information Processing Systems}, 36, 2024.
+
+\bibitem{nair2022r3m}
+Suraj Nair, Aravind Rajeswaran, Vikash Kumar, Chelsea Finn, and Abhinav Gupta.
+\newblock R3m: A universal visual representation for robot manipulation.
+\newblock In {\em 6th Annual Conference on Robot Learning}, 2022.
+
+\bibitem{peng2021amp}
+Xue~Bin Peng, Ze~Ma, Pieter Abbeel, Sergey Levine, and Angjoo Kanazawa.
+\newblock Amp: Adversarial motion priors for stylized physics-based character control.
+\newblock {\em ACM Transactions on Graphics (ToG)}, 40(4):1--20, 2021.
+
+\bibitem{poole2022dreamfusion}
+Ben Poole, Ajay Jain, Jonathan~T. Barron, and Ben Mildenhall.
+\newblock {DreamFusion:} text-to-3d using 2d diffusion.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem{putterman2021pretraining}
+Aaron~L Putterman, Kevin Lu, Igor Mordatch, and Pieter Abbeel.
+\newblock Pretraining for language conditioned imitation with transformers.
+\newblock In {\em Offline Reinforcement Learning Workshop at Neural Information Processing Systems}, 2021.
+
+\bibitem{radford2021learning}
+Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et~al.
+\newblock Learning transferable visual models from natural language supervision.
+\newblock In {\em International conference on machine learning}, pages 8748--8763. PMLR, 2021.
+
+\bibitem{raffel2020exploring}
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter~J Liu.
+\newblock Exploring the limits of transfer learning with a unified text-to-text transformer.
+\newblock {\em The Journal of Machine Learning Research}, 21(1):5485--5551, 2020.
+
+\bibitem{ramesh2022hierarchical}
+Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu, and Mark Chen.
+\newblock Hierarchical text-conditional image generation with clip latents.
+\newblock {\em arXiv preprint arXiv:2204.06125}, 2022.
+
+\bibitem{rocamonde2023vision}
+Juan Rocamonde, Victoriano Montesinos, Elvis Nava, Ethan Perez, and David Lindner.
+\newblock Vision-language models are zero-shot reward models for reinforcement learning.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem{rombach2022high}
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Bj{\"o}rn Ommer.
+\newblock High-resolution image synthesis with latent diffusion models.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pages 10684--10695, 2022.
+
+\bibitem{saharia2022photorealistic}
+Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily~L. Denton, Kamyar Ghasemipour, Raphael~Gontijo Lopes, Burcu~Karagol Ayan, Tim Salimans, Jonathan Ho, David~J. Fleet, and Mohammad Norouzi.
+\newblock Photorealistic text-to-image diffusion models with deep language understanding.
+\newblock In {\em Conference on Neural Information Processing Systems (NeurIPS)}, 2022.
+
+\bibitem{schuhmann2021laion}
+Christoph Schuhmann, Richard Vencu, Romain Beaumont, Robert Kaczmarczyk, Clayton Mullis, Aarush Katta, Theo Coombes, Jenia Jitsev, and Aran Komatsuzaki.
+\newblock Laion-400m: Open dataset of clip-filtered 400 million image-text pairs.
+\newblock {\em arXiv preprint arXiv:2111.02114}, 2021.
+
+\bibitem{sohl2015deep}
+Jascha Sohl-Dickstein, Eric Weiss, Niru Maheswaranathan, and Surya Ganguli.
+\newblock Deep unsupervised learning using nonequilibrium thermodynamics.
+\newblock In {\em International Conference on Machine Learning}, pages 2256--2265. PMLR, 2015.
+
+\bibitem{song2019generative}
+Yang Song and Stefano Ermon.
+\newblock Generative modeling by estimating gradients of the data distribution.
+\newblock {\em Advances in neural information processing systems}, 32, 2019.
+
+\bibitem{song2020score}
+Yang Song, Jascha Sohl-Dickstein, Diederik~P Kingma, Abhishek Kumar, Stefano Ermon, and Ben Poole.
+\newblock Score-based generative modeling through stochastic differential equations.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2021.
+
+\bibitem{sontakke2024roboclip}
+Sumedh Sontakke, Jesse Zhang, S{\'e}b Arnold, Karl Pertsch, Erdem B{\i}y{\i}k, Dorsa Sadigh, Chelsea Finn, and Laurent Itti.
+\newblock Roboclip: One demonstration is enough to learn robot policies.
+\newblock In {\em Conference on Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem{todorov2012mujoco}
+Emanuel Todorov, Tom Erez, and Yuval Tassa.
+\newblock Mujoco: A physics engine for model-based control.
+\newblock In {\em 2012 IEEE/RSJ international conference on intelligent robots and systems}, pages 5026--5033. IEEE, 2012.
+
+\bibitem{tunyasuvunakool2020dm_control}
+Saran Tunyasuvunakool, Alistair Muldal, Yotam Doron, Siqi Liu, Steven Bohez, Josh Merel, Tom Erez, Timothy Lillicrap, Nicolas Heess, and Yuval Tassa.
+\newblock dm\_control: Software and tasks for continuous control.
+\newblock {\em Software Impacts}, 6:100022, 2020.
+
+\bibitem{wang2023internvid}
+Yi~Wang, Yinan He, Yizhuo Li, Kunchang Li, Jiashuo Yu, Xin Ma, Xinhao Li, Guo Chen, Xinyuan Chen, Yaohui Wang, et~al.
+\newblock Internvid: A large-scale video-text dataset for multimodal understanding and generation.
+\newblock In {\em The Twelfth International Conference on Learning Representations}, 2023.
+
+\bibitem{xie2023text2reward}
+Tianbao Xie, Siheng Zhao, Chen~Henry Wu, Yitao Liu, Qian Luo, Victor Zhong, Yanchao Yang, and Tao Yu.
+\newblock Text2reward: Reward shaping with language models for reinforcement learning.
+\newblock In {\em International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem{yu2020meta}
+Tianhe Yu, Deirdre Quillen, Zhanpeng He, Ryan Julian, Karol Hausman, Chelsea Finn, and Sergey Levine.
+\newblock Meta-world: A benchmark and evaluation for multi-task and meta reinforcement learning.
+\newblock In {\em Conference on robot learning}, pages 1094--1100. PMLR, 2020.
+
+\end{thebibliography}
+
+\newpage
+
+\setcounter{table}{0}
+\renewcommand{\thetable}{A\arabic{table}}
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{A\arabic{figure}}
+
+
+
+\section{Intuition Regarding A Reasonable Noise Level Range}
+
+\label{sec:noise_level_intuition}
+
+We desire a reward signal that is high when the text prompt is well-aligned with the frame rendered following a well-selected action.  However, we find that using too high or too low a noise level will cause the reward computation to ignore or discount the provided text prompt.  
+
+For a sufficiently low noise value, the conditional and unconditional noise prediction is similar for a particular text prompt and rendered frame that already has high cross-modal alignment.  Being already close in data space to the desired mode described by the text prompt, the unconditional prediction will also cheaply seek to denoise the input towards the original input.  Therefore, too low a noise value may cause the computed reward signal to decrease as cross-modal alignment increases, which runs counter to what is desirable.  This is supported by looking at the left tails of the two graphs depicted in Figure~\ref{fig:noise_level_intuition}, where the difference in computed TADPoLe rewards between well-aligned paired inputs and misaligned paired inputs is small.
+
+Similarly, choosing a sufficiently high noise value may also cause unconditional and conditional predictions to be similar.  For a given noisy input with virtually all of the spatial structure perturbed, the pretrained denoising model intuitively makes denoising predictions that fill in general structure to the image irrespective of text-conditioning.  This is intuitively similar to the behavior of an unconditional prediction.  Once again, we can visually observe this in the right tails of both graphs in Figure~\ref{fig:noise_level_intuition}; for high noise values, both misaligned and well-aligned paired inputs have similar computed TADPoLe rewards.
+
+Intuitively, TADPoLe is able to meaningfully quantify text-conditioned alignment with rendered observations into a reward signal for a noise level range approximately in the middle.  For a balanced level of noise corruption on a text-aligned rendered observation, there is enough existing visual structure to help the denoising model make a meaningful text-conditioned prediction close to the original input, whereas an unconditional prediction may not do so accurately.  In Figure~\ref{fig:noise_level_intuition}, we observe that for a noise range in the middle, TADPoLe is able to substantially favor the well-aligned pair over the misaligned pair, respecting changes in both text prompt as well as rendered observations.  We verify in our experiments that using a noise level between 400 and 500 works well for TADPoLe, across both Dog and Humanoid environments.
+
+\begin{figure*}[h]
+  \centering
+  \includegraphics[width=0.49\linewidth]{figures/humanoid_prompt_comparison_all_hips.png}
+  \includegraphics[width=0.49\linewidth]{figures/humanoid_frame_comparison_all.png}
+  \caption{Noise range intuition for a fixed image but two distinct prompts (left), and for a fixed prompt but two distinct images (right).  Through visualization, we verify that $U(400, 500)$ is a reasonable range from which to sample noise levels that can meaningfully distinguish vision-text alignment for arbitrarily rendered frames.} 
+  \label{fig:noise_level_intuition}
+\end{figure*}
+
+\subsection{Noise Level for Video-TADPoLe}
+\label{sec:noise_level_vid_intuition}
+
+We discover that Video-TADPoLe achieves better performance with a higher noise level than TADPoLe, and use a range of 500 to 600 in our experiments.  We hypothesize that being able to observe multiple frames at once enables the space-time U-Net to exploit uncorrupted (or lesser-corrupted) portions from adjacent frames across the context window to inform how each individual frame should be denoised coherently.  Because each frame in a context window has a distinct source noise applied to it, structural information can be leaked from randomly uncorrupted portions of the other frames in the context window when making predictions.  Therefore, to make the denoising prediction more challenging, thereby forcing it to rely on the text-conditioning and learned motion priors rather than what is readily extractable from the provided context, generally a higher noise level is acceptable compared to TADPoLe.
+
+
+\section{Detailed Hyperparameters}
+
+\label{sec:hyperparameters}
+
+In our experiments, we place less emphasis on the underlying architecture and optimization scheme, instead comparing our method against other text-conditioned reward functions.  We keep the same reinforcement learning architecture, optimization scheme, and text-to-image/text-to-video generative model in all environments, unless otherwise noted.  We provide detailed hyperparameters about these existing components below.
+
+\subsection{Pretrained Text-Conditioned Diffusion Models}
+
+We utilize a StableDiffusion v2.1 checkpoint for our TADPoLe experiments.  We provide the sizes of the components in Table~\ref{tab:sd-hparams}.  For Video-TADPoLe experiments, we use a pretrained AnimateDiff checkpoint, and provide relevant details in Table~\ref{tab:ad-hparams}.  We do not update or modify either checkpoint during our training, utilizing them purely for inference.
+
+\subsection{TD-MPC}
+
+We include the default hyperparameters from the TD-MPC implementation in Table~\ref{tab:tdmpc-hparams} for completeness.  We do not modify the default recommended settings for both Humanoid and Dog environments, as well as the Meta-World experiments.
+
+\begin{table}[h!]
+\centering
+\begin{minipage}{0.48\textwidth}
+\caption{\textbf{StableDiffusion Components.} For completeness, we list sizes of the components of the StableDiffusion v2.1 checkpoint used in TADPoLe experiments. The checkpoint is used purely for inference, and is not modified or updated in any way. Note that the VAE Decoder is not utilized in our framework.}
+\label{tab:sd-hparams}
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component   & \# Parameters (Millions) \\
+\midrule
+VAE (Encoder) & 34.16 \\
+VAE (Decoder) & 49.49 \\
+U-Net & 865.91 \\
+Text Encoder & 340.39 \\
+\bottomrule
+\end{tabular}
+
+\hfill
+\caption{\textbf{AnimateDiff Components.} For completeness, we list sizes of the components of the AnimateDiff checkpoint used in Video-TADPoLe experiments.  The checkpoint is used purely for inference, and is not modified or updated in any way. Note that the VAE Decoder is not utilized in our framework.}
+\label{tab:ad-hparams}
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component   & \# Parameters (Millions) \\
+\midrule
+VAE (Encoder) & 34.16 \\
+VAE (Decoder) & 49.49 \\
+U-Net & 1312.73 \\
+Text Encoder & 123.06 \\
+\bottomrule
+\end{tabular}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+\caption{\textbf{TD-MPC hyperparameters.} We use the official implementation TD-MPC~\citep{hansen2022temporal} with no adjustments to the hyperparameters, but list it below for completeness. However, we do set the number of training steps to 2 million for all experiments using TD-MPC.}
+\label{tab:tdmpc-hparams}
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}ll@{}}
+\toprule
+Hyperparameter   & Value \\
+\midrule
+Discount factor ($\gamma$) & 0.99 \\
+Seed steps & $5,000$ \\
+Replay buffer size & Unlimited \\
+Sampling technique & PER ($\alpha=0.6, \beta=0.4$) \\
+Planning horizon ($H$) & $5$ \\
+Initial parameters ($\mu^{0}, \sigma^{0}$) & $(0, 2)$ \\
+Population size & $512$ \\
+Elite fraction & $64$ \\
+Iterations & 12 (Humanoid)\\
+ & 8 (Dog)\\
+Policy fraction & $5\%$ \\
+Number of particles & $1$ \\
+Momentum coefficient & $0.1$ \\
+Temperature ($\tau$) & $0.5$ \\
+MLP hidden size & $512$ \\
+MLP activation & ELU \\
+Latent dimension & 100 (Humanoid, Dog) \\
+Learning rate & 3e-4 (Dog)\\
+ & 1e-3 (Humanoid) \\
+Optimizer ($\theta$) & Adam ($\beta_1=0.9, \beta_2=0.999$) \\
+Temporal coefficient ($\lambda$) & $0.5$ \\
+Reward loss coefficient ($c_{1}$) & $0.5$ \\
+Value loss coefficient ($c_{2}$) & $0.1$ \\
+Consistency loss coefficient ($c_{3}$) & $2$ \\
+Exploration schedule ($\epsilon$) & $0.5\rightarrow 0.05$ (25k steps) \\
+Planning horizon schedule & $1\rightarrow 5$ (25k steps) \\
+Batch size & 2048 (Dog) \\
+ & 512 (Humanoid) \\
+Momentum coefficient ($\zeta$) & $0.99$ \\
+Steps per gradient update & $1$ \\
+$\theta^{-}$ update frequency & 2 \\
+\bottomrule
+\end{tabular}
+}
+\end{minipage}
+\end{table}
+
+\subsection{Selecting \texorpdfstring{$w_1$}{w1} and \texorpdfstring{$w_2$}{w2}}
+We select hyperparameters $w_1$ and $w_2$, which scale the alignment term $r^\text{align}$ and the reconstruction term $r^\text{rec}$ respectively, firstly such that the resulting computed reward $r$ has value roughly between 0 and 1 at any arbitrary timestep.  This is visualized in Figure~\ref{fig:noise_level_intuition}, where over all noise levels, the computed reward stays roughly between 0 and 1.  Because the same pretrained text-conditioned diffusion model is used across all environments without modification, these hyperparameters can be generally reused to achieve the same kind of reward scale across environments.  We found that the values of $w_1 = 2000$ and $w_2 = 200$ through a light hyperparameter sweep, reported in Table~\ref{tab:w_ablation_humanoid}, and indeed verify that they work well without modification across both Humanoid and Dog environments in our main experiments.
+
+\begin{table}[htbp]
+\centering
+\caption{Ablation over $w_1$ and $w_2$ on Humanoid Stand and Walk}
+\label{tab:w_ablation_humanoid}
+\begin{tabular}{@{}cc|cc@{}}
+\toprule
+$w_1$ & $w_2$ & Humanoid Stand & Humanoid Walk \\ \midrule
+200   & 2000  & 249.82         & 2.72          \\
+1000  & 2000  & 240.05         & 121.20        \\
+2000  & 200   & \textbf{262.22}         & \textbf{226.29}        \\
+2000  & 1000  & 195.87         & 152.32        \\
+2000  & 2000  & 218.22         & 90.20         \\ \bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Meta-World Tasks}
+
+\label{sec:app_metaworld_task}
+
+We visualize the complete suite of selected Meta-World tasks in Figure~\ref{fig:metaworld_tasks} along with the official names of the tasks.  In Table~\ref{tab:metaworld_prompts} we also list the corresponding prompts consistently utilized across all text-conditioned approaches.  In Table~\ref{tab:metaworld_expanded}, we list the average success for all 12 robotic manipulation tasks.  As we add a sparse ``success'' signal to text-conditioned approaches such as VLM-RM and TADPoLe, following prior experimental design~\cite{huang2023diffusion} for Meta-World, we also list the performance of utilizing the sparse signal only.
+
+We first notice that no approach is able to solve two selected tasks, ``Peg Insert Side'' and ``Shelf Place''; these were therefore omitted in Table~\ref{tab:metaworld}.  Furthermore, we observe that utilizing a sparse reward signal only appears to have strong default performance, and achieves a higher overall average success rate than TADPoLe or VLM-RM.  This showcases the inherent power of a sparse reward in solving Meta-World tasks.  However, there are two additional takeaways; firstly, VLM-RM surprisingly achieves a substantial decrease in performance from the default sparse reward signal, highlighting TADPoLe as a more preferable dense text-conditioned reward provider.  Secondly, TADPoLe is able to solve more overall tasks than other approaches.  In particular, TADPoLe can solve the ``Door Open'' task, which is completely unable to be solved by VLM-RM or using a sparse reward only.  We therefore highlight TADPoLe as a promising text-conditioned reward signal in replacing ground-truth hand-designed feedback, particularly as the text-to-image diffusion model utillized was pretrained in a general manner, without finetuning explicitly on Meta-World demonstrations.
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=.9\linewidth]{figures/metaworld_tasks_12.pdf}
+    \caption{\textbf{Meta-World Tasks.} We select 12 robotic arm tasks from Meta-World suite as our evaluation task set, balanced in terms of diversity and complexity.}
+    \label{fig:metaworld_tasks}
+\end{figure}
+
+\begin{table}[ht!]
+\centering
+\caption{\textbf{Meta-World Task-Prompt Pairs}}
+\label{tab:metaworld_prompts}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Task}  & \textbf{Text Prompt}                                                     \\ \midrule
+Door Open       & opening a door                 \\
+Door Close      & closing a door                 \\
+Drawer Open     & opening a drawer                             \\
+Drawer Close    & closing a drawer                             \\
+Window Open     & opening a window                              \\
+Window Close    & closing a window                             \\
+Coffee Push     & pushing a white mug towards the coffee machine \\
+Button Press    & pressing a button \\
+Soccer          & pushing a soccer ball into the net \\
+Peg Insert Side  & inserting a peg into the slot \\
+Shelf Place    & placing an object on the shelf \\
+Lever Pull      & pulling a lever   \\                     \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t!]
+\caption{Average success rate for 12 robotic manipulation tasks in Meta-World~\citep{yu2020meta} over 30 evaluation rollouts. We compare between TADPoLe and VLM-RM, both approaches that do not utilize in-domain data or demonstrations, and find TADPoLe significantly outperforms VLM-RM. We report mean performance and standard deviation across 10 seeds for each task.}
+\label{tab:metaworld_expanded}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+Success Rate (\%) &
+  Door Open &
+  Door Close &
+  Drawer Open &
+  Drawer Close &
+  Window Open &
+  Window Close &
+  Coffee Push \\ \midrule
+  
+Sparse &
+  0 ($\pm$ 0) &
+  99.7 ($\pm$ 1.0) &
+  74.7 ($\pm$ 28.7) &
+  99.3 ($\pm$ 2.0) &
+  94.3 ($\pm$ 5.8) &
+  93.0 ($\pm$ 16.9) &
+  46.3 ($\pm$ 11.3) \\
+
+VLM-RM &
+  0 ($\pm$ 0) &
+  79.7 ($\pm$ 39.8) &
+  10.0 ($\pm$ 30.0) &
+  100 ($\pm$ 0) &
+  9.7 ($\pm 29.0$) &
+  0 ($\pm$ 0) &
+  4.0 ($\pm$ 12.0) \\
+  
+TADPoLe &
+  40.0 ($\pm$ 49.0) &
+  100 ($\pm$ 0) &
+  45.3 ($\pm$ 46.6) &
+  100 ($\pm$ 0) &
+  74.0 ($\pm$ 37.9) &
+  30.0 ($\pm$ 45.8) &
+  18.6 ($\pm$ 20.5) \\ \midrule
+
+Success Rate (\%) &
+  Button Press &
+  Soccer &
+  Peg Insert Side &
+  Shelf Place &
+  Lever Pull &
+  \multicolumn{2}{c}{\textbf{\textit{Average}}} \\ \midrule
+
+Sparse &
+  86.7 ($\pm$ 29.1) &
+  12.7 ($\pm$ 14.1) &
+  0 ($\pm$ 0) &
+  0 ($\pm$ 0) &
+  0 ($\pm$ 0) &
+  \multicolumn{2}{c}{50.6} \\
+
+VLM-RM &
+  30.0 ($\pm$ 45.8) &
+  5.3 ($\pm$ 11.6) &
+  0 ($\pm$ 0) &
+  0 ($\pm$ 0) &
+  11.3 ($\pm$ 18.3) &
+  \multicolumn{2}{c}{20.8} \\
+
+TADPoLe &
+  73.0 ($\pm$ 38.5) &
+  25.0 ($\pm$ 15.4) &
+  0 ($\pm$ 0) &
+  0 ($\pm$ 0) &
+  0 ($\pm$ 0) &
+  \multicolumn{2}{c}{42.2} \\ \bottomrule
+\end{tabular}%
+}
+\end{table}
+
+
+
+\section{Training Curves}
+
+
+In our experiments, we compare against other methods that provide text-conditioned rewards.  As each of these methods are formulated differently, the difference in scales naturally prevent easy direct comparison.  However, plotting the training curves for TADPoLe does yield insights into its speed of convergence, and investigating the visual performance at intermediate steps can be interesting.  In Figure~\ref{fig:four_plots} we showcase the TADPoLe training curves for a variety of novel text-conditioned policies.  We highlight the performance at steps 500k, 1M, 1.5M, and 2M in red; we further visualize the policy achieved at these intermediate steps by showcasing the last frame of the achieved video.
+
+In the case of the policy learned for the prompt ``a person standing with hands on hips", for example, we see that whereas the initial policies fail, the policy first learns to stand up by step 1.5M.  Then, by the last training step, the policy has learned to correctly place its hands conspicuously on its hips.  Similarly, for the prompt ``a person kneeling", the policy first learns to kneel on all fours; by the end, the policy learns to successfully kneel on one knee. 
+
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}[b]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/above_plot.png}
+        \label{fig:above_plot}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/hips_plot.png}
+        \label{fig:hips_plot}
+    \end{minipage}
+    \vskip\baselineskip
+    \begin{minipage}[b]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/knees_plot.png}
+        \label{fig:knees_plot}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/tail_plot.png}
+        \label{fig:tails_plot}
+    \end{minipage}
+    \caption{TADPoLe training curves for a variety of text-conditionings, with intermediate visualizations.  The frames displayed are always the last frame achieved by the policy, at that particular training step.}
+    \label{fig:four_plots}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/reward_comparison_dog_walk.pdf}
+    \caption{Episode return curves of a Dog Walk agent trained with Video-TADPoLe, using the prompt ``a dog walking''. From left to right: the cumulative Video-TADPoLe rewards achieved throughout training, the cumulative ground-truth rewards achieved throughout training, and the cumulative ground-truth rewards achieved during evaluation. Shaded regions denote the standard deviation across five random seeds.
+    }
+    \label{fig:reward_comparison_dog_walking}
+\end{figure}
+
+\begin{table*}[t]
+\caption{Numerical results from the user study on text-alignment.  Out of 25 anonymous users, for each method, we report the percentage that believe the video achieved by a policy at the end of training is aligned with the provided text prompt.  Entries above 50\% are displayed in Table~\ref{tab:goal} as checkmarks (\cmark); below 50\% are displayed as x-marks (\xmark).}
+\label{tab:prolific_expanded_goal}
+\begin{center}
+\scalebox{.9}{
+\begin{tabular}{ccccccc}
+\multicolumn{1}{c}{\bf Environment} & \multicolumn{1}{c}{\bf Prompt}  & \multicolumn{1}{c}{\bf VLM-RM}  & \multicolumn{1}{c}{\bf LIV}  & \multicolumn{1}{c}{\bf Text2Reward}  & \multicolumn{1}{c}{\bf TADPoLe (Ours)}
+\\ \hline \\[-2.0ex]
+Humanoid  & ``a person in lotus position"  & 52\% & 28\% & 4\% & \textbf{60\%}\\
+Humanoid  & ``a person doing splits"  & 64\% & \textbf{88\%} & 0\% & 84\%\\
+Humanoid  & ``a person kneeling"  & 48\% & 4\% & 0\% & \textbf{64\%}\\
+Dog  & ``a dog standing"  & 16\% & 0\% & 40\% & \textbf{84\%}\\
+\end{tabular}
+}
+\end{center}
+\end{table*}
+
+
+
+\section{Motivating Visualizations}
+
+\label{sec:motivating_visualizations}
+
+For further intuition on TADPoLe's behavior, we visualize the complete denoising results for a query video achieved through a Dog policy and corrupted with some level of noise, conditioned on a consistent text prompt of ``a dog walking".  Note that this is purely for visualization purposes; in practice, when training policies, we do not visually denoise over multiple steps but instead extract a reward signal from components of a one-step denoising prediction.  However, the multi-step denoising visualizations can offer us a glimpse of intuition into the behavior of the pretrained diffusion model and the properties of its predicted components at one single denoising step.
+
+We first find that StableDiffusion, used in TADPoLe, is able to reconstruct a well-aligned policy rollout (a video of the Dog agent actually walking) relatively accurately frame-by-frame, for a noise level of 500 (Figure~\ref{fig:run_sd_500}).  However, the predictions can differ substantially for a misaligned policy rollout (a video of the Dog agent falling over rather than walking); for frames where the dog has collapsed on the floor, the StableDiffusion model still tries to respect the specified input prompt and attempts to predict dogs standing upright or walking, as depicted in Figure~\ref{fig:fail_sd_500}, resulting in a more noticeable difference between the achieved frame and predicted frame.  This difference can be exploited to distinguish between well-aligned and misaligned policy rollouts, lending confidence to StableDiffusion as a supervisory signal for text-conditioned policy learning.  For a higher noise level, StableDiffusion quickly forms hallucinatory final predictions (depicted in Figures~\ref{fig:run_sd_700},~\ref{fig:fail_sd_700}), but preserves more of the structure of the original video when the achieved video and provided text prompt is aligned.
+
+We also visualize reconstruction predictions using a text-to-video model, namely an AnimateDiff v2 checkpoint, in Figures~\ref{fig:run_animatediff_500} and~\ref{fig:fail_animatediff_500}.  We find that the motion prior is indeed meaningful, enabling it to reconstruct the Dog with a coherent texture and pose over time.  In Figures~\ref{fig:run_animatediff_700},~\ref{fig:fail_animatediff_700} we highlight how a text-to-video model is more robust in reconstructing the achieved video by the policy at high noise levels compared with StableDiffusion (Figures~\ref{fig:run_sd_700},~\ref{fig:fail_sd_700}).  This supports the hypothesis outlined in Section~\ref{sec:noise_level_vid_intuition}.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/run_sd_500_simpleprompt.png}
+  \caption{Visualizing the denoising of a good query trajectory from a noise level of 500 to completion using per-frame StableDiffusion.}
+  \label{fig:run_sd_500}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/fail_sd_500_simpleprompt.png}
+  \caption{Visualizing the denoising of a failed query trajectory from a noise level of 500 to completion using per-frame StableDiffusion.}
+  \label{fig:fail_sd_500}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/run_sd_700_simpleprompt.png}
+  \caption{Visualizing the denoising of a good query trajectory from a noise level of 700 to completion using per-frame StableDiffusion.}
+  \label{fig:run_sd_700}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/fail_sd_700_simpleprompt.png}
+  \caption{Visualizing the denoising of a failed query trajectory from a noise level of 700 to completion using per-frame StableDiffusion.}
+  \label{fig:fail_sd_700}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/run_animatediff_500_simpleprompt.png}
+  \caption{Visualizing the denoising of a good query trajectory from a noise level of 500 to completion using AnimateDiff.}
+  \label{fig:run_animatediff_500}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/fail_animatediff_500_simpleprompt.png}
+  \caption{Visualizing the denoising of a failed query trajectory from a noise level of 500 to completion using AnimateDiff.}
+  \label{fig:fail_animatediff_500}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/run_animatediff_700_simpleprompt.png}
+  \caption{Visualizing the denoising of a good query trajectory from a noise level of 700 to completion using AnimateDiff.}
+  \label{fig:run_animatediff_700}
+\end{figure}
+
+\begin{figure}[ht!]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/fail_animatediff_700_simpleprompt.png}
+  \caption{Visualizing the denoising of a failed query trajectory from a noise level of 700 to completion using AnimateDiff.}
+  \label{fig:fail_animatediff_700}
+\end{figure}
+
+\end{document}
+
+
+

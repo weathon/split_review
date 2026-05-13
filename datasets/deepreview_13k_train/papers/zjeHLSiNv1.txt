@@ -1,0 +1,382 @@
+\title{Ultra-Sparse Memory Network}
+
+\begin{abstract}
+It is widely acknowledged that the performance of Transformer models is exponentially related to their number of parameters and computational complexity. While approaches like Mixture of Experts (MoE) decouple parameter count from computational complexity, they still face challenges in inference due to high memory access costs. This work introduces UltraMem, incorporating large-scale, ultra-sparse memory layer to address these limitations. Our approach significantly reduces inference latency while maintaining model performance. We also investigate the scaling laws of this new architecture, demonstrating that it not only exhibits favorable scaling properties but outperforms traditional models. In our experiments, we train networks with up to 20 million memory slots. The results show that our method achieves state-of-the-art inference speed and model performance within a given computational budget. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h]
+    \centering
+    \subfigure[Validation loss]{
+        \includegraphics[width=0.3\textwidth]{image_big/scaling_validate_loss_3line_big.pdf}
+    }
+    \subfigure[Inference time]{
+        \includegraphics[width=0.3\textwidth]{image_big/inference_time_big.pdf}
+    }
+    \subfigure[Memory access]{
+        \includegraphics[width=0.3\textwidth]{image_big/mem_access_big.pdf}
+    }
+    \caption{We ensured that three models have the same computation, and MoE and UltraMem have the same parameters. The x-axis is plotted on a logarithmic scale. In (b) and (c), the sequence length is 1 because during decoding time, we can only predict one token at a time, and the key/value cache length is 2048. The experiments in (b) and (c) are conducted on the A100-SXM-80GB. 
+}
+    \label{fig:inference_time}
+\end{figure}
+\textcolor{black}{Recent advancements in natural language processing (NLP), driven by Large Language Models (LLMs) \citep{radford2019language,brown2020language}, require exponentially more computational resources as they scale, posing challenges in resource-limited environments like real-time applications. To address computational issues, the Mixture of Experts (MoE)\citep{fedus2022switch,jiang2024mixtral} and Product Key Memory (PKM)\citep{lample2019large} have been introduced. MoE selectively activates parameters, boosting training efficiency but impairing inference time due to increased memory access. PKM maintains consistent memory access with fewer value embeddings but its performance is significantly worse than MoE.
+}
+
+\textcolor{black}{As shown in Figure \ref{fig:inference_time}(b), an MoE model, despite having the same computational cost and twelve times more parameters than a dense model, runs 2 to 6 times slower in inference, varying by batch size. This slowdown, as depicted in Figure \ref{fig:inference_time}(c), stems from high memory access demands, highlighting its inefficiency in inference scenarios. The primary challenge is how to match or even surpass the effectiveness of the MoE model while maintaining memory access levels comparable to those of dense models.
+}
+
+In this paper, we introduce UltraMem, an architecture that builds upon and extends the concepts from PKM. UltraMem incorporates large-scale, ultra-sparse memory layers that significantly enhance computational efficiency and reduce inference latency while maintaining or even improving model performance across various benchmarks. This architecture not only supports the deployment of highly effective language models in resource-constrained environments but also opens up new avenues for constructing even larger models without the previously associated prohibitive costs.
+
+In summary, we make the following contributions:
+\begin{enumerate}
+
+\item UltraMem is greatly enhanced compared to PKM, and outperforms MoE at same scale. Compared to PKM, UltraMem truly possesses the prerequisites for training large-scale models on extensive computational resources and has undergone comprehensive experimental validation.
+\item UltraMem has significantly lower memory access cost during inference compared to MoE. Under common inference batch sizes, it can be up to \textbf{6 times} faster than MoE with the same parameters and calculations. The inference speed of UltraMem is almost identical to that of a dense model with equivalent computational resources.
+\item  We have verified the scaling ability of UltraMem. Similar to MoE, UltraMem has strong scaling ability, and we have observed stronger scaling ability than MoE.
+
+\end{enumerate}
+
+
+
+\section{Related work}
+
+\textbf{Mixture of Expert.} \cite{shazeer2017outrageously} proposed MoE and \cite{fedus2022switch} introduced the MoE in large language models, where each token selects one expert for inference each time, thereby increasing model parameters without increasing computation. \cite{rajbhandari2022deepspeed} introduced the concept of shared experts, where each token utilizes some fixed experts along with some unique experts. \textcolor{black}{Subsequent research has focused on improving the gating functions of MoE, including token choice \citep{chi2022representation}, non-trainable token choice \citep{roller2021hash} and expert choice \citep{zhou2022mixture}, primarily to address the issue of expert imbalance.} \cite{liu2024deepseek,dai2024deepseekmoe} opted to slice the experts into smaller segments while activating more experts per token, achieving significant performance improvements. \textcolor{black}{Concurrent study \citep{krajewski2024scaling} meticulously explored the benefits of granularity and increasing the number of experts, alongside investigating the scaling laws associated with MoE. In this paper, we use fine-grained MoE as our baseline, wherein the granularity of the MoE is set to 2. This means that each expert is half the size of the original MultiLayer Perceptron (MLP) , with two experts activated per token.
+}
+
+\textbf{Large Memory Layer.} \cite{lample2019large} first introduced the concept of large memory layer, called PKM, which can be seen as slicing the MoE experts to the smallest possible configuration. \cite{kim2020large} introduced a concept similar to shared experts in MoE, allowing PKM and MLP to operate in parallel. \cite{csordas2023approximating} made a slight modification to PKM by removing the Softmax operation. PEER \citep{he2024mixture} improved the activation of values in PKM to activate a small expert with an inner dimension of 1, achieving significant performance gains. \textcolor{black}{However, current research on PKM is limited to smaller models, and even the latest improved versions of PKM only outperform MoE in certain scenarios. Additionally, current PKM do not possess characteristics suitable for large-scale training. We address these issues in this paper.
+}
+
+\textcolor{black}{\textbf{Tensor decomposition} breaks down a tensor into a series of  small matrices or tensors. In deep learning research, such methods are commonly used to approximate a large tensor during training, aiming to save on computation and parameters. Product quantization \citep{jegou2010product} breaks a vector into multiple sub-vectors, allowing us to reconstruct the original vector using a smaller number of sub-vectors, thereby reducing the model parameters. \cite{bershatsky2024lotr} initializes several matrices and a core tensor, trains these parameters during the fine-tuning phase, and reconstructs the original large tensor in a manner of Tucker Decomposition at the end of training to reduce training costs. We borrow this insight to improve PKM's key retrieval.
+}
+
+
+
+\section{UltraMem}
+
+\subsection{preliminary}
+
+\begin{figure}[t]
+\centering
+    \subfigure[Multilayer perceptron]{
+        \includegraphics[width=0.4\textwidth]{image_big/mlp_vs_mem1.pdf}
+    }
+    \subfigure[Large memory layer]{
+        \includegraphics[width=0.55\textwidth]{image_big/mlp_vs_mem2.pdf}
+    }
+\caption{An overview of multilayer perceptron (MLP) and large memory layer (LML). For the sake of brevity, we omit the third top-$m$ operation from memory layer. \textcolor{black}{An MLP typically consists of two linear layers and a GeLU activation. We consider the weights of the first linear layer as keys, and those of the second linear layer as values. LML uses row and column keys to determine the 2-D logical address to index memory values, whereas MLP uses 1-D logical address. ``fetch value'' refers to retrieving values based on the indices with higher scores.}}
+\label{fig:origin_mem}
+\end{figure}
+
+Here we firstly introduce the origin large memory layer (LML) based on product keys, which serves as the foundation for our proposed approach. The concept of a product key-based memory layer (PKM) was first explored in prior work~\citep{lample2019large}. In their approach, the authors incorporated an external memory module into language models, with the goal of expanding the model's parameters while maintaining a similar level of computational complexity. The overall structural diagram is depicted in Figure \ref{fig:origin_mem}(b).
+A memory layer generally consists of two parts: keys $\mathbf{K}\in \mathbb{R}^{N \times D_k}$ and values $\mathbf{V}\in \mathbb{R}^{N \times D_v}$. To retrieve information from memory values, a query vector $\mathbf{q}\in \mathbb{R}^{D_k}$ finds most relevant values by multiplying keys to obtain scores. The higher the scores are, the better impact should the values have. Consequently, this process can be formulated as:
+\begin{align}
+    \mathbf{s} = \sigma(\mathbf{K}\mathbf{q}) \quad 
+    \mathbf{o} = \mathbf{V}^\top\mathbf{s} \label{eq:general_mem_score_pooling},
+\end{align}
+where $\mathbf{s}$ is the scores, $\sigma$ is a non-linear activation, $\mathbf{o}$ is the output. Attention layers, who memorize context contents, and MLP layers, who memorize world knowledge, also follow the above formulation with $\sigma$ being SoftMax in attention layers and GeLU in MLP layers \textcolor{black}{\citep{geva2020transformer}} (see Figure \ref{fig:origin_mem}(a)).
+Product-key memory layers scale up the memory size with $N>10^6$, while activating only a few values with top-$m$ scores. Here, $m$ is a hyper-parameter controlling sparsity. Though values are sparsely accessed, the keys, which are as large as values, must be fully computed to obtain scores before top-$m$ activation following \eqref{eq:general_mem_score_pooling}. To alleviate the computation complexity for keys, product keys are proposed. It utilizes a 2-D logical address (see Figure \ref{fig:origin_mem}(b)), typically a $n\times n$ grid where $n=\sqrt{N}$, for memory value retrieval. Specifically, a 2-D logical address $(i,j)$ is used to index memory value at physical address $n\times i + j$. With such strategy, logical scores are then represented as a matrix, which is further decomposed as an addition of row and column scores:
+\begin{align}
+    \mathbf{s}_{row}=\sigma_{\texttt{TopM}}(\mathbf{K}_{row}q_{row}(\mathbf{x})),& \quad \mathbf{s}_{col}=\sigma_{\texttt{TopM}}(\mathbf{K}_{col}q_{col}(\mathbf{x})), \label{eq:pkm_row_col_score} \\
+    \mathbf{S}_{grid} = \sigma_{\texttt{TopM}}(\mathbf{s}_{row} + \mathbf{s}_{col}^\top),& \quad
+    \mathbf{o} = \mathbf{V}^\top\times \texttt{SoftMax}(\texttt{vec}(\mathbf{S}_{grid})) \label{eq:pkm_score_pooling},
+\end{align}
+where $\mathbf{K}_{row}, \mathbf{K}_{col} \in \mathbb{R}^{n\times D_k}$, $q_{row}, q_{col}: \mathbb{R}^{D_i}\rightarrow \mathbb{R}^{D_k}$ convert input hidden $\mathbf{x}\in\mathbb{R}^{D_i}$ to row and column query, $\sigma_{\texttt{TopM}}(\cdot)$ preserves top-$m$ largest elements in the input and set the rest to negative infinity, and the matrix addition with unmatched matrix shape is implemented by element broadcasting. It should be noted that removing $\sigma_{\texttt{TopM}}$ from \eqref{eq:pkm_row_col_score} does not make any difference. The only reason for applying top-$m$ to the row and column scores is to reduce the computation for the last top-$m$ operation on $\mathbf{S}_{grid}$. As $\mathbf{s}_{row}, \mathbf{s}_{col}$ have only $m$ activated scores, $\mathbf{S}_{grid}$ has only $m^2$ candidates for top-$m$ operation rather than $N$, i.e., top-$m$ complexity reduces from $O(N\log m)$ to $O((\sqrt{N} + m^2)\log m)$.
+
+
+Note that the $\mathbf{S}_{grid}$ undergoes a SoftMax operation akin to the one employed in the self-attention mechanism. Moreover, PKM adopts the multi-head mechanism from the self-attention module, wherein it utilizes multiple key sets to retrieve the shared values, we denote $H$ as the number of PKM heads.
+\subsection{Structure improvements}
+
+
+\textbf{Improve PKM with a bag of tricks.} We first studied the structure of PKM and found that a series of minor adjustments can steadily improve the model's performance:
+
+\begin{itemize}
+\item[1)] We remove the operation Softmax in \eqref{eq:pkm_score_pooling}, which is well-established in the studies~\citep{shen2023study,csordas2023approximating}.
+
+\item[2)] We conduct Layer Normalization (LN)~\citep{ba2016layer} on query and keys for stability of training.
+
+\item[3)] PKM suggests using a constant learning rate of 0.001 to learn the values, which is much higher than the learning rate for other parameters. We found that gradually decaying the value learning rate provides further benefits.
+
+\item[4)] PKM uses a linear layer to generate query, we add a causal depthwise convolutional layer~\citep{howard2017mobilenets} before this linear layer to enhance query.
+
+\item[5)] Similar to Group Query Attention~\citep{ainslie2023gqa}, we share query in two key sets. This can reduce the computational cost of generating the query by half, with little performance impact.
+
+\item[6)] By halving $D_v$, we double the number of values. Under the condition of keeping the activation value parameter unchanged, we increased the diversity of activated values, and the model effect is further improved. In order to make the output consistent with hidden dimension, we add a linear layer on the aggregated output.
+
+\end{itemize}
+\textbf{UltraMem Overall structure.} We then take a deeper investigation into the model structure and propose UltraMem. Figure \ref{fig:overall} shows the PKM and our improved UltraMem structure, based on a Pre-LayerNorm Transformer architecture. PKM replaces MLP or operates in parallel \citep{kim2020large} with MLP in the one of deeper layers with memory layer. We notice three drawbacks to PKM: 
+
+\begin{minipage}[t]{0.5\textwidth}
+    \includegraphics[width=0.99\textwidth]{image/overall_structure.pdf}
+    \captionof{figure}{Overall of PKM and UltraMem.}
+    \label{fig:overall}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.5\textwidth}
+\begin{enumerate}
+\item[1.] As value size $N$ significantly increases, queries can harder find correct values.
+
+\item[2.] Product key decomposition introduces bias on retrieval topology. For example, let $(i,j)$ be the logical address for the top-1 score, then top-2 score must be located on row $i$ or column $j$, which significantly limits the diversity of top-$m$ selection.
+
+\item[3.] There are issues with unbalanced multi-GPU computation and communication during large-scale parameter training, as the full model parameters cannot be placed on a single GPU.
+\end{enumerate}
+To alleviate problems 1 and 3, we decompose this large memory layer into multiple smaller memory layers distributed at fixed intervals across the transformer layers. Additionally, this skip-layer structure allows us to overlap the execution of the memory layer and the transformer layers, as the memory layer is predominantly memory-bound during training.
+\end{minipage}
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.9\textwidth]{image_big/tucker_big.pdf}
+\end{center}
+\caption{Flow of Tucker Decomposed Query-Key Retrieval, here $r=2$. \textcolor{black}{``fetch'' refers to retrieving score based on given index.}}
+\label{fig:tucker}
+\end{figure}
+\textbf{Tucker Decomposed Query-Key Retrieval (TDQKR).} We explore a more complex multiplicative approach to alleviate problem 1 and 2, where a tucker decomposition~\citep{malik2018low} is adopted in place of product quantization. The whole process of TDQKR is illustrated in Figure~\ref{fig:tucker}. Specifically, tucker decomposition estimates grid scores with rank-$r$ matrix multiplication:
+\begin{align}
+    &\mathbf{S}_{row}=\mathbf{K}_{row}q_{row}(\mathbf{x}),& \quad \mathbf{S}_{col}=\mathbf{K}_{col}q_{col}(\mathbf{x}), &\label{eq:tucker_row_col_basic_score} \\
+    &\mathbf{S}_{grid} = \sigma_{\texttt{TopM}}(\mathbf{S}_{row}^\top\times \mathbf{C} \times \mathbf{S}_{col}),& \label{eq:tucker_decomposition}
+\end{align}
+where $\mathbf{S}_{row}, \mathbf{S}_{col} \in \mathbb{R}^{r\times n}$ and $C\in \mathbb{R}^{r\times r}$ is the tucker core, which is a learnable parameter with random initialization. To produce $n\times r$ shaped row and column score, the dimensions of the query and key are reshaped, resulting in $\mathbf{K}_{row}, \mathbf{K}_{col} \in \mathbb{R}^{r \times n \times (D_k/r)}$ and $q_{row}, q_{col} \in \mathbb{R}^{r \times (D_k/r)}$, \textcolor{black}{corresponding to Figure~\ref{fig:tucker} step 1.}
+
+However, \eqref{eq:tucker_decomposition} is inefficient to be directly applied in practice, as the top-$m$ operation cannot be simplified with an equivalent two-phase top-$m$ technique like product quantization can. As a consequence, we propose an approximated top-$m$ algorithm to tackle this problem. The key is to do rank-1 approximation for the tucker core, so that the overall top-$m$ can be approximated by:
+\textcolor{black}{
+    \begin{align}
+        \mathbf{C}\approx \mathbf{u}\mathbf{t}^\top, \quad \sigma_{\texttt{TopM}}(\mathbf{S}_{row}^\top\times \mathbf{C} \times \mathbf{S}_{col}) \approx \sigma_{\texttt{TopM}}((\mathbf{u}^\top\mathbf{S}_{row})^\top\times(\mathbf{t}^\top\mathbf{S}_{col})) \label{eq:tucker_approximation}
+    \end{align}
+}
+\textcolor{black}{where $\mathbf{u},\mathbf{t} \in \mathbb{R}^{r\times 1}$. Note that $(\mathbf{u}^\top\mathbf{S}_{row}), (\mathbf{t}^\top\mathbf{S}_{col}) \in \mathbb{R}^{1\times n}$ are row vectors, then the two-phase top-$m$ technique pertains to the approximated objective $\sigma_{\texttt{TopM}}((\mathbf{u}^\top\mathbf{S}_{row})^\top\times(\mathbf{t}^\top\mathbf{S}_{col}))$, corresponding to Figure~\ref{fig:tucker} step 3.} Overall, we conduct approximated top-$m$ on row and column scores, filtering out non-top elements, then we use the concrete objective in the final top-$m$ operated on $\mathbf{S}_{grid}$, keeping index scores precise:
+\textcolor{black}{
+\begin{align}
+    \mathbf{C}\approx &\mathbf{u}\mathbf{t}^\top \\ \label{eq:8}
+    \tilde{\mathbf{S}}_{row}=& \mathbb{I}_{\texttt{TopM}}(\mathbf{u}^\top\mathbf{S}_{row}) \odot \mathbf{S}_{row} \\\label{eq:9}
+    \tilde{\mathbf{S}}_{col}=& \mathbb{I}_{\texttt{TopM}}(\mathbf{t}^\top\mathbf{S}_{col}) \odot \mathbf{S}_{col} \\
+    \mathbf{S}_{grid} =& \sigma_{\texttt{TopM}}(\tilde{\mathbf{S}}_{row}^\top\times \mathbf{C} \times \tilde{\mathbf{S}}_{col}), \label{eq:tucker_approximated_decomposition}
+\end{align}
+}
+where $\mathbb{I}_{\texttt{TopM}}(\cdot)$ is binary value function, which converts top-$m$ elements to 1 and otherwise to 0. \textcolor{black}{Equation \ref{eq:8}\&\ref{eq:9} corresponding to Figure~\ref{fig:tucker} step 4\&5,and Equation \ref{eq:tucker_approximated_decomposition} corresponding to Figure~\ref{fig:tucker} step 6\&7.} As for the rank-1 approximation, we leverage Singular Value Decomposition (SVD)~\citep{abdi2007singular} to factorize the tucker core with $\mathbf{u}, \mathbf{t}$ be the left and right singular vectors corresponding to the leading singular value, \textcolor{black}{corresponding to Figure~\ref{fig:tucker} step 2.}
+
+Last but not the least, the approximation error should be concerned when non-maximum singular values are as large as the maximum one. To mitigate this, an auxiliary loss that manages approximation error is introduced during training by constraining non-maximum eigenvalues:
+\begin{align}
+\mathbf{C} = \mathbf{U}\Lambda \mathbf{T}^\top, \quad \texttt{(by SVD)} \\
+\mathcal{L}_{aux} = \frac{\alpha}{r-1} \sum_{i=2}^{r} \left(\max\left(0, \lambda_i - \tau\right)\right)^2,
+\end{align}
+where, $\Lambda$ denotes the singular values for $\mathbf{C}$ in descending order, with $\tau$ serving as a margin to prevent $\mathbf{C}$ from degenerating into a rank-1 matrix, and $\alpha$ is the coefficient for the loss.
+
+
+
+
+\textbf{Implicit Value Expansion (IVE).} Though sparsely used, maintaining a large memory table is still costly during training due to the large amount of memory access. To reduce memory access as well as scale up the memory size, we propose virtual memory as an implicit value expansion. Given a virtual expansion rate $E > 1$, virtual memory expands the memory table into $E$ times size. \textcolor{black}{We design virtual memories as multiple reparameterizations of the original memory value $\mathbf{V}$, which we denote as physical memory. Then, $E$ linear projectors $\{\mathbf{W}_p|p\in[1,E], \mathbf{W}_p\in\mathbb{R}^{D_v\times D'_v}\}$ are utilized, and virtual memory block $\tilde{\mathbf{V}}_p$ corresponding to the $p$-th reparameterization can be defined as}:
+\begin{align}
+     \tilde{\mathbf{V}}_p = \mathbf{V}\mathbf{W}_p.
+\end{align}
+Then the overall virtual memory is a concatenation of the virtual blocks $\tilde{\mathbf{V}}=[\tilde{\mathbf{V}}_0^\top, \tilde{\mathbf{V}}_1^\top, \dots, \tilde{\mathbf{V}}_E^\top]^\top$. Note the dimension of virtual values $D'_v$ is not necessarily consistent with the dimension of physical values $D_v$.
+
+To apply the virtual memory is intuitive, where memory table can be replaced from $\mathbf{V}$ to $\tilde{\mathbf{V}}$. And to fit virtual memory size, the key size is expanded by $\sqrt{E}$ times. Moreover, we suggest a random shuffle for virtual memory to eliminate some unnecessary index topology prior introduced by row and column scoring. Concretely, if the virtual memory tables are unioned by concatenation, each memory value and its expansions would be located in the same column in logical address, and thus can be potentially more frequently chosen simultaneously.
+
+A naive reparameterization for virtual memory still introduces lots of computations, which is $E\cdot N\cdot D_v\cdot D'_v$, and $E$ times GPU memory access. A better idea is to compute reparameterization on demand. That is, we expand the logical address to triplets $(i,j,p)$ where $(i,j)$ is the original logical address and $p$ is index for the virtual memory block, and then simultaneously conduct sum pooling and compute virtual memory value. Consequently, \eqref{eq:pkm_score_pooling} is rewritten as:
+\begin{align}
+\hat{\mathbf{s}} =& \texttt{Shuffle}(\texttt{vec}(\mathbf{S}_{grid})),  \\
+\mathbf{o} = \tilde{\mathbf{V}}^\top\times \hat{\mathbf{s}} =& \sum_p \tilde{\mathbf{V}}_p^\top\times \hat{\mathbf{s}}_p=\sum_p \mathbf{W}_p^\top\left(\mathbf{V}^\top\times \hat{\mathbf{s}}_p\right) \label{eq:value_sum_ive1}
+\end{align}
+where $\hat{\mathbf{s}}_p$ represents the scores corresponding to $p$-th virtual memory block. With \eqref{eq:value_sum_ive1}, we can firstly lookup and pool values according to the virtual block index and then transform the reduced physical values directly into reduced virtual values. This trick reduces extra computation from $E\cdot N\cdot D_v\cdot D'_v$ to $E\cdot B \cdot D_v \cdot D'_v$, where $B$ is the number of tokens in batch, and has nearly no extra GPU memory access except for the linear projectors. Figure~\ref{fig:value_proj} shows the flow of IVE.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.9\textwidth]{image_big/value_proj_big.pdf}
+\end{center}
+\caption{Flow of Implicit Value Expansion, here $E=4$, $m=16$.}
+\label{fig:value_proj}
+\end{figure}
+
+\textbf{Multi-Core Scoring (MCS).} PKM shares a single score across dimension $D_v$ for each value. Empirically, assigning multiple scores to a single value has shown to enhance performance. Thus, we rewrite the tucker core $\mathbf{C}$ as a series of component cores $\mathbf{C} = \sum_{i}^{h}\mathbf{C}^{(i)} $. This allows employing $\{\mathbf{C}^{(i)}\}_{i=1}^{h}$ to generate individual score maps $\mathbf{S}_{tucker}^{(i)}=\mathbf{S}^\top_{row}\mathbf{C}^{(i)} \mathbf{S}_{col}$. Obviously, 
+\begin{equation}
+    \mathbf{S}_{tucker} = \mathbf{S}^\top_{row}(\sum_{i}^{h}\mathbf{C}^{(i)}) \mathbf{S}_{col} = \sum_{i}^{h}\mathbf{S}^\top_{row}\mathbf{C}^{(i)} \mathbf{S}_{col} = \sum_{i}^{h}\mathbf{S}_{tucker}^{(i)}.
+\end{equation}
+We keep top-$m$ conducted on aggregated score $\mathbf{S}_{tucker}$, while applying individual scores $\mathbf{S}_{tucker}^{(i)}$ on vertically split value table $\mathbf{V}=[\mathbf{V}^{(1)},\dots,\mathbf{V}^{(h)},]$ with $\mathbf{V}^{(i)}\in \mathbb{R}^{N\times (D_v/h)}$, i.e., 
+\begin{equation}
+    \mathbf{o} = [\hat{\mathbf{s}}^{(1)\top} \mathbf{V}^{(1)}, \dots, \hat{\mathbf{s}}^{(h)\top} \mathbf{V}^{(h)}]^\top.
+\end{equation}
+When this technique incorporates with IVE, we split physical memory values instead of virtual memory values to keep the equivalence in \eqref{eq:value_sum_ive1}.
+\textbf{Improved initialization.}
+PKM initializes values with a Gaussian distribution $\mathcal N(0, \frac{1}{D_v})$. Since PKM applies Softmax to the scores, the variance of the pooled outputs is $1/D_v$. We argue that LML should be considered as a component similar to an MLP and, therefore, should use an initialization method akin to that of MLPs. Before training, the output of an MLP typically follows a Gaussian distribution $\mathcal N(0, \frac{1}{2L})$ \citep{brown2020language}, where $L$ is the total number of layers. We initialize value with $\mathcal N(0,\frac{E}{2mHL})$, where $m$ is the activated value number, $H$ is the head number, $E$ is the value expansion times.
+
+
+
+\section{\textcolor{black}
+
+The most effective method for enhancing model capacity without significantly raising computational costs is MoE. This strategy employs a set of specialized sub-models, known as ``experts", which work together to tackle complex problems. However, the MoE model poses challenges for inference processes.
+
+Consider the Transformer hidden dimension as $D$, the inner dimension of MLP is $4D$, given the inference batch size as $B$. Using the MoE with 2in$N_{moe}$ (choose 2 in $N_{moe}$ experts per token) as an example, where the inner dimension of expert is $2D$. Assuming the expert chosen is fully balanced, we can get the memory access of single MoE layer as $min(2B, N_{moe})\times 2D^2$. For the UltraMem, assuming value dimension is $D/2$, and each token activates the top-$m$ values, then its memory access is $min(Bm, N) \times D/2$. As the batch size increases, the memory access of MoE grows rapidly until it reaches an upper limit where all expert parameters need to be accessed. In contrast, the memory access of UltraMem increases very slowly, only reaching parity with MoE when the batch size is in the tens of thousands. However, in inference scenarios, the batch size is typically not very large. 
+
+Figure \ref{fig:inference_time} shows the inference time and memory access of a 1.6 billion parameter Transformer with 2in34 MoE and $\times12$\footnote{The number of parameters in UltraMem is 12 times the number of parameters in the dense layer. In this case, the total parameters and total computation of UltraMem are the same as the 2in34 MoE.} UltraMem. Compared to MoE, UltraMem achieves the maximum acceleration of $\mathbf{\times6}$ at a batch size of 64, and also shows significant acceleration at other batch sizes.
+
+
+
+\section{Experiments}
+
+In this section, we demonstrate the scaling capabilities of UltraMem, showing that it outperforms MoE. We additionally show how the performance of UltraMem varies with different top-$m$ values and the number of parameters, and perform an ablation study to measure the impact of each part of UltraMem.
+
+\subsection{Setup}
+\textbf{Datasets.} Training data comes from RedPajama~\citep{together2023redpajama}, containing 1 trillion tokens. RedPajama represents a clean-room, fully open-source version of the LLaMa~\citep{touvron2023llama} dataset. Validation data includes the C4 validation set~\citep{raffel2020exploring}, derived from the Common Crawl web corpus. The C4 training set is also incorporated within the RedPajama training data.
+
+\textbf{Tokenizer} is based on the GPT-NeoX~\citep{black2022gpt} tokenizer, which uses the Byte-Pair Encoding (BPE)~\citep{sennrich2015neural} algorithm and has a vocabulary size of 50,432.
+
+\textbf{Evaluation.} \textcolor{black}{We conducted a comprehensive evaluation of all models across ten benchmark datasets. These datasets included MMLU, Trivia-QA, GPQA, and ARC for assessing the models' \textbf{knowledge} capabilities; BBH, BoolQ, HellaSwag, and WinoGrande for evaluating \textbf{reasoning} skills; DROP for testing \textbf{reading comprehension abilities}; and AGIeval for measuring overall model performance.} The decoding hyperparameters are aligned with those of LLaMA3~\citep{dubey2024llama}.
+
+\textbf{Training details.} We used a standard pre-norm transformer~\citep{xiong2020layer} with rotary embeddings~\citep{su2024roformer}. Our dense models are built with 151M\footnote{Parameter counts in this paper exclude tokenizer vocabulary embedding and prediction head parameters.}, 680M, 1.6B, and 6.5B parameters. For sparse models, including UltraMem and MoE, we expand the sparse parameters twelve fold from the 151M, 680M, and 1.6B dense models. In MoE models, two experts are activated per token \citep{jiang2024mixtral}, and we use a standard balance loss \citep{fedus2022switch} with a weight of 0.01 to ensure an even selection of all experts, thereby establishing MoE as a strong baseline. We slightly increase the width of MoE's experts to align the computational and parameter costs with those of the UltraMem. In UltraMem models, auxiliary loss weight $\alpha=0.001$, margin $\tau=0.15$, the learning rate for values is ten times that of other parameters and linearly decays to equal the other parameters by the end of training.
+
+\subsection{Evaluation on Language Modeling Datasets}
+
+We evaluate models of various sizes, the results are shown in Table \ref{table: evaluation}\footnote{This table only includes evaluation results where the metrics have steadily increased with training. We observe that as the model capacity increases, UltraMem can outperform MoE with the same parameter and computation. On the 1.6B dense model, an UltraMem model with 12x the parameters can match the performance of a 6.5B dense model.
+
+\begin{table}[htbp]
+\centering
+\caption{Performance metrics of various models}
+\small % Reduce the font size
+\setlength{\tabcolsep}{2pt} % Adjust column separation
+\renewcommand{\arraystretch}{1.2} % Adjust row separation for better readability
+\begin{tabular}{@{}lccccccccccccc@{}} % @{} removes padding at the start and end of the table
+\toprule % Top horizontal line
+\textbf{Model} & \textbf{Param}  & \textbf{FLOPs} &\textbf{Val.}&  \textbf{GPQA\textcolor{black}{$\uparrow$}} & \textbf{TriviaQA\textcolor{black}{$\uparrow$}} & \textbf{BBH} &  \textbf{Hella} & \textbf{Wino} & \textbf{DROP\textcolor{black}{$\uparrow$}} & \textbf{Avg\textcolor{black}{$\uparrow$}} \\
+\textbf{} & \textbf{(B)}  & \textbf{(G)} &\textbf{loss\textcolor{black}{$\downarrow$}}&  \textbf{} & \textbf{} & \textbf{cot\textcolor{black}{$\uparrow$}} &  \textbf{Swag\textcolor{black}{$\uparrow$}} & \textbf{Grande\textcolor{black}{$\uparrow$}} & \textbf{} & \textbf{} \\
+\midrule % Middle horizontal line
+\rowcolor{yellow!10}
+Dense-151M & 0.15 & 0.30 & 2.96 & 19.98 & 12.67 & 22.57 & 35.07 & 52.49 &  13.60 & 26.06 \\
+\rowcolor{yellow!10}
+MoE-151M-2in32 & 2.04 & 0.35 & 2.63 & 17.30 & 33.27 & 23.24 & 48.44 & 55.96  & 18.57 & \textbf{33.20} \\
+\rowcolor{yellow!10}
+UltraMem-151M-x12 & 2.03 & 0.35 & 2.67 & 19.42 & 28.97 & 22.65 & 43.96 & 50.83 & 14.08 & 29.99 \\
+\midrule
+\rowcolor{blue!10}
+Dense-680M & 0.68 & 1.36 & 2.64 & 21.09 & 27.16 & 24.65 & 48.83 & 54.93 &  22.97 & 33.27 \\
+\rowcolor{blue!10}
+MoE-680M-2in33 & 8.95 & 1.50 & 2.39 & 20.54 & 34.19 & 26.63 & 62.71 & 59.98  & 26.54 & 38.43 \\
+\rowcolor{blue!10}
+UltraMem-680M-x12 & 8.93 & 1.49 & 2.37 & 21.99 & 55.17 & 26.62 & 64.15 & 60.54 & 25.14 & \textbf{42.27} \\
+\midrule
+\rowcolor{green!10}
+Dense-1.6B & 1.61 & 3.21 & 2.49 & 21.76 & 39.65 & 26.41 & 58.6 & 61.72 &  22.63 & 38.46 \\
+\rowcolor{green!10}
+MoE-1.6B-2in34 & 21.36 & 3.52 & 2.30 & 21.32 & 59.56 & 29.46 & 67.34 & 63.93  & 28.81 & 45.07 \\
+\rowcolor{green!10}
+UltraMem-1.6B-x12 & 21.41 & 3.50 & 2.24 & 24.66 & 66.38 & 30.63 & 71.52 & 66.38 & 29.99 & \textbf{48.26} \\
+\midrule
+\rowcolor{red!10}
+Dense-6.5B & 6.44 & 12.88 & 2.30 & 19.98 & 57.28 & 31.14 & 69.73 & 65.9 &  33.12 & 46.19 \\
+\bottomrule % Bottom horizontal line
+\end{tabular}
+\label{table: evaluation}
+\end{table}
+
+\begin{figure}[h]
+    \centering
+    \subfigure[Scaling validation loss]{
+        \includegraphics[width=0.31\textwidth]{image_big/scaling_validate_loss_big.pdf}
+    }
+    \subfigure[Loss across varying sparsity]{
+        \includegraphics[width=0.31\textwidth]{image_big/sparsity_scaling_big.pdf}
+    }
+    \subfigure[Speed across varying sparsity]{
+        \includegraphics[width=0.32\textwidth]{image_big/param_inference_time.pdf}
+    }
+    \caption{(a). C4 validation loss of different models at different scale. 
+ (b). Scaling curves at different sparsity with 151M activated parameters. Each line represents the same model sparsity; e.g., 20K indicates that approximately one out of every 20,000 values will be activated. The loss decreases linearly as the sparse parameters increase exponentially. \textcolor{black}{(c). Inference time for UltraMem and MoE with 1.6B activated parameters. The batch size is 512, sequence length is 1, and key/value cache length is 2048. With fixed activation parameters, UltraMem's inference time remains nearly constant as sparse parameters increase, while MoE's inference time increases significantly.}
+}
+    \label{fig:scaling loss}
+\end{figure}
+\subsection{Value number and top-$m$}
+In most sparse LLMs, such as MoE and UltraMem, there is a clear positive correlation between sparsity and model performance. Therefore, in this section, we conduct a series of scaling experiments by varying selected top-$m$ and value number, i.e., the parameters of the sparse modules, to verify the changes in model performance with respect to sparsity. The result is shown in Figure \ref{fig:scaling loss}(b). 
+
+It is evident that, at the same level of sparsity, the validation loss decreases as the number of parameters increases and can maintain a certain degree of decline. Additionally, the smaller the sparsity, i.e., the larger the proportion of activated parameters, the better the model performance. However, this also results in a higher memory access overhead. Thus, there is a trade-off between memory access volume and scaling efficiency. In our final experiments, we selected a sparsity ratio of 80K as the default model configuration.
+
+\textcolor{black}{As sparse parameters increase, we observed differences in inference speeds between UltraMem and MoE, as depicted in Figure~\ref{fig:scaling loss}(c). For UltraMem, the inference time remains largely stable even as sparse parameters exponentially grow, provided that the activation parameters (top-m) are constant. In contrast, MoE's inference time escalates significantly under analogous conditions. Referring to Figure \ref{fig:inference_time}(b), with smaller batch sizes, the inference speed of MoE deteriorates even further compared to UltraMem.
+}
+
+\subsection{Ablation}
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{8pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{Ablation study of model improvements}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{} & \textbf{Training} & \textbf{Validation} & \textbf{Dense} & \textbf{Sparse} & \textbf{FLOPs} \\
+\textbf{} & \textbf{Loss $\downarrow$} & \textbf{Loss $\downarrow$} & \textbf{Params(M)} & \textbf{Params(G)} & \textbf{(M)} \\
+\midrule
+PKM-151M-x10 & 2.604 & 2.828 & 173.01 & 1.534 & 346.06 \\
++rm softmax & 2.570 \textcolor{dark_green}{-0.034} & 2.822 \textcolor{dark_green}{-0.006} & 173.01 & 1.534 & 346.06 \\
++half vdim+proj & 2.556 \textcolor{dark_green}{-0.014} & 2.800 \textcolor{dark_green}{-0.022} & 178.47 & 1.529 & 356.98 \\
++share query & 2.560 \textcolor{dark_red}{+0.004} & 2.803 \textcolor{dark_red}{+0.003} & 173.46 & 1.529 & 346.96 \\
++split big mem\&skip & 2.554 \textcolor{dark_green}{-0.006} & 2.788 \textcolor{dark_green}{-0.015} & 161.64 & 1.536 & 323.32 \\
++query/key LN & 2.553 \textcolor{dark_green}{-0.001} & 2.789 \textcolor{dark_red}{+0.001} & 161.64 & 1.536 & 323.54 \\
++IVE & 2.544 \textcolor{dark_green}{-0.009} & 2.772 \textcolor{dark_green}{-0.017} & 172.37 & 1.536 & 344.98 \\
++TDQKR & 2.538 \textcolor{dark_green}{-0.006} & 2.764 \textcolor{dark_green}{-0.008} & 172.37 & 1.536 & 344.98 \\
++MCS & 2.521 \textcolor{dark_green}{-0.017} & 2.761 \textcolor{dark_green}{-0.003} & 172.37 & 1.536 & 344.98 \\
++improved init & 2.518 \textcolor{dark_green}{-0.003} & 2.758 \textcolor{dark_green}{-0.003} & 172.37 & 1.536 & 344.98 \\
++value lr decay & 2.494 \textcolor{dark_green}{-0.024} & 2.736 \textcolor{dark_green}{-0.022} & 172.37 & 1.536 & 344.98 \\
++query conv & 2.493 \textcolor{dark_green}{-0.001} & 2.736 -0.000 & 172.38 & 1.536 & 345.02 \\
+\midrule
+\textbf{Total Diff} & \textbf{-0.111} & \textbf{-0.092} & \textbf{-0.64} & \textbf{+0.002} & \textbf{-1.04} \\
+\bottomrule
+\end{tabular}
+\label{table: ablation}
+
+\end{table}
+
+We conduct comprehensive ablation studies based on the 151M dense model. In the baseline, the PKM is a version that operates in parallel with the MLP, making it a stronger baseline. For this group of experiments, the learning rate (LR) is set to 1.2e-4, with training on 500B tokens and evaluating the cross entropy loss on the training and C4 validation sets. We ensure that the parameter count and computational cost of the final version of the model were essentially at the same level. 
+
+Table \ref{table: ablation} shows the ablation results. We identify 6 changes that significantly improved performance:
+\begin{enumerate}
+\item Doubling the number of values while halving their dimension, and simultaneously double the top-$m$ selections to keep the active parameters consistent.
+
+\item Splitting a single UltraMem into multiple smaller units evenly across the transformer layers, with outputs skipping several blocks. This arrangement keeps the total parameter count, computational cost, and sparse parameter activation at or below pre-split levels.
+
+\item Tucker Decomposition Query-Key Retrieval introduces negligible additional parameters while reducing computation, here $r=2$.
+
+\item Multi-Core Scoring significantly reduces training loss, and slightly reduces validation loss, here $h=2$.
+
+\item Implicit Value Expansion slightly increases both the parameter count and computational cost, but the improvement is significant, here $E=4$.
+
+\item The LR for the value parameters starts at ten times that of the other parameters and linearly decays to match them by the end of training.
+
+\end{enumerate}
+
+Among other changes, sharing the query helps cut computational costs with a minor trade-off in performance. Normalizing the query/key greatly reduces spikes in training perplexity and enhances training stability, as shown in Figure \ref{fig:ablation}(a). Improved initialization prevents score and output variance explosions in the early to middle training stages, detailed in Figure \ref{fig:ablation}(b) and (c). Additionally, employing convolution further limits the variance divergence in UltraMem outputs(Figure \ref{fig:ablation}.(c)).
+
+\textcolor{black}{Beside, We conduct another ablation studies on IVE, TDQKR, and MCS with different configurations, which are documented in Table~\ref{tab:ablation2}. For IVE, as $E$ increases, there is a consistent improvement in model performance alongside a notable increase in computational cost. However, the marginal gains decrease as $E$ rises, leading us to recommend $E=4$. For TDQKR and MCS, increasing $r$ and $h$ does not significantly change the computational load, but the effectiveness no longer shows marked improvement, hence we suggest using $r=2$ and $h=2$.}
+\begin{table}[h]
+\centering
+\caption{Ablation of different config on IVE, TDQKR, and MCS}
+
+\resizebox{\textwidth}{!}{
+\renewcommand{\arraystretch}{1.2} % Default value: 1
+\setlength{\tabcolsep}{3pt} % Default value: 6pt
+\begin{tabular}{@{}lcccccccccccc@{}}
+\hline
+& \multicolumn{4}{c}{IVE} & \multicolumn{4}{c}{TDQKR} & \multicolumn{4}{c}{MCS} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9} \cmidrule(lr){10-13}
+& Baseline & E=4 & E=9 & E=16 & Baseline & r=2 & r=3 & r=4 & Baseline & h=2 & h=4 & h=8 \\
+\hline
+Training loss$\downarrow$ & 2.553 & -0.009 & -0.016 & -0.019 & 2.544 & -0.006 & -0.0065 & -0.0063 & 2.538 & -0.017 & -0.017 & -0.012 \\
+Validation loss$\downarrow$ & 2.789 & -0.017 & -0.025 & -0.027 & 2.772 & -0.008 & -0.0084 & -0.0082 & 2.764 & -0.003 & +0.001 & +0.006 \\
+FLOPs(G) & 323.54 & +6.6\% & +14.9\% & +26.4\% & 344.98 & +0.001\% & +0.002\% & +0.003\% & 344.98 & +0.001\% & +0.003\% & +0.007\% \\
+\hline
+\end{tabular}
+}
+\label{tab:ablation2}
+\end{table}
+
+
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce UltraMem, which, compared to MoE, has minimal memory access and therefore achieves up to a \textbf{sixfold} speed advantage. Concurrently, in terms of performance, UltraMem \textbf{surpasses} MoE with the same parameters and computation as model capacity increases, indicating its superior scaling capability. This work presents a promising direction for developing more efficient and scalable language models.
+\newpage
+
+
+

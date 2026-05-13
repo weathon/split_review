@@ -1,0 +1,377 @@
+\title{Effects of Scale on Language Model Robustness}
+
+\begin{abstract}
+Language models exhibit scaling laws, whereby increasing model and dataset size  yields predictable decreases in negative log likelihood, unlocking a dazzling array of capabilities. This phenomenon spurs many companies to train ever larger models in pursuit of ever improved performance. Yet, these models are vulnerable to adversarial inputs such as ``jailbreaks'' and prompt injections that induce models to perform undesired behaviors, posing a growing risk as models become more capable. Prior work indicates that computer vision models become more robust with model and data scaling, raising the question: does language model robustness also improve with scale?
+
+We study this question empirically in the classification setting, finding that without explicit defense training, larger models tend to be modestly more robust on most tasks, though the effect is not reliable.
+Even with the advantage conferred by scale, undefended models remain easy to attack in absolute terms, and we thus turn our attention to explicitly training models for adversarial robustness, which we show to be a much more compute-efficient defense than scaling model size alone.
+In this setting, we also observe that adversarially trained larger models generalize faster and better to modified attacks not seen during training when compared with smaller models.
+Finally, we analyze the offense/defense balance of increasing compute, finding parity in some settings and an advantage for offense in others, suggesting that adversarial training alone is not sufficient to solve robustness, even at greater model scales.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Language models have demonstrated a range of impressive capabilities in tasks such as general language understanding~\citep{hendrycks2021measuring}, graduate-level Q\&A~\citep{rein2023gpqa}, and code generation~\citep{chen_evaluating_2021}.
+This growth in capabilities has fueled rapid deployment, with ChatGPT becoming one of the fastest-growing consumer applications in history~\citep{hu2023chatgpt}.
+Moreover, language models are increasingly integrated into larger systems, enabling them to take actions in the real world using external tools~\citep{OpenAIassistants2023,anthropictooluse2024,Geminifunctioncalling2024} and to pursue long-term open-ended goals~\citep{richardsautogpt2024,kinniment2024evaluating}.
+
+The advent of language models enables many new tasks to be solved by AI but also introduces novel classes of security vulnerabilities. 
+A variety of adversarial prompts can bypass safety finetuning~\citep{wei_jailbroken_2023,zou2023universal,anil_many-shot_2024}, unlocking harmful capabilities such as generating compelling misinformation~\citep{spitale2023,chen2024can}.
+Users of LLM-driven applications are also at risk from attacks like indirect prompt injections~\citep{Greshake2023MoreTY} that exploit the underlying LLM without the user's awareness or participation.
+The risks of attack could grow still greater with future models capable of more dangerous actions, such as assisting with biological weapon development~\citep{mouton2023}.
+The risks further compound as models are given greater \emph{affordances} to interact with the world~\citep{sharkey2023}, as would be the case with a virtual assistant of the leader of a major company or country.
+A key question is thus whether future, more capable systems will \emph{naturally} become more robust---or if robustness will instead require in the field.
+Prior work has yielded mixed results.
+Scaling up LLMs has been key to increasing capabilities~\citep{hestness_deep_2017, wei2022emergent, radford2019language}, so we might hope it also improves robustness.
+Optimistically, scaling unlabeled pretraining data~\citep{hendrycks_using_2019, carmon_unlabeled_2022, alayrac_are_2019} and model size~\citep{xie_intriguing_2019,huang_revisiting_2023} improves adversarial robustness in computer vision.
+However, \citet{wang_adversarial_2023} found that superhuman Go systems are vulnerable to attack, demonstrating that impressive capabilities do not guarantee robustness. 
+
+\begin{wrapfigure}{t}{0.55\textwidth}
+    \centering
+    \includegraphics[width=0.55\textwidth, trim={0 4mm 0 0}]{oskar_figs/adv_training/gcg_gcg/imdb/train_total_flops/interpolated_iteration_for_5_percent_flops/smoothing-0/legend.pdf}
+    \caption{Attack compute needed to achieve a 5\% attack success rate vs. defense compute used for adversarial training on the IMDB task. A slope of $1$ (dashed lines) corresponds to an attacker needing to double the attack compute in response to a doubling of defense compute. The slope is typically below $1$, corresponding to an advantage for offense; see Section~\ref{sec:offense_defense}.}
+    \label{fig:off_def:round_vs_it}
+\end{wrapfigure}
+
+We conduct the first publicly available large-scale empirical investigation into scaling trends for the adversarial robustness of language models. 
+These trends quantify the effect scale on robustness, and give us insight into  the offense-defense balance~\citep{garfinkel2021does}.
+For example,  Figure~\ref{fig:off_def:round_vs_it} shows that while spending more compute on adversarial training ($x$-axis) increases the cost of an attack ($y$-axis), it does so at a sublinear rate on the IMDB task.
+These results imply that while in principle models can be made more robust through scale and adversarial training, attackers can increase their compute spend by a proportional amount and more than keep up.
+In absolute terms an attack is orders of magnitude less computationally expensive than adversarial training, so algorithmic advancements will be needed to make training robust models computationally practical.
+
+More generally, we investigate the robustness of Pythia models ranging from 14M to 12B parameters~\citep{biderman2023pythia} finetuned on classification tasks.
+We pit these models against two attacks: the \RT baseline and the state-of-the-art white-box \emph{greedy coordinate gradient} (\GCG) attack~\citep{zou2023universal}.
+
+We find four key results.
+First, larger models tend to be more resistant to attack, but there is considerable variability between tasks and models, with larger models sometimes less robust than smaller models (Figure~\ref{fig:asr_vs_size}).
+Scaling attack compute predictably improves attack success rate across all model sizes, but larger models tend to be more resistant to attack scaling than smaller models~(Figure~\ref{fig:attackscaling}).
+Second, adversarial training significantly improves robustness across all model sizes (Figures~\ref{fig:adv-tr-like-finetuned} \& \ref{fig:adv-tr-snake}).
+Scaling adversarial training proportionally increases the cost of attack (Figure~\ref{fig:offense_defense}), orders of magnitude more cheaply than scaling pre-training.
+Third, adversarial training against one attack transfers protection to similar attacks, with the transfer being \emph{stronger} for larger models (Figures~\ref{fig:transfer_gcg_to_gcg} \& \ref{fig:transfer_gcg_to_gcg_infix}).
+Fourth, the offense/defense balance may be roughly at parity for some tasks and model scales, while other tasks and scales have an advantage for offense.
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+Adversarial examples were first identified in image classifiers~\citep{szegedy2014intriguing}, and have since been found for systems performing image captioning~\citep{xu2019,zhang2022}, speech recognition~\citep{cisse2017houdini,alzantot2018did,schönherr2018adversarial}, and reinforcement learning~\citep{huang2017,gleave2020,ilahi2022}.
+
+Most recently, many qualitatively different vulnerabilities have been found in language models, from interpretable ``jailbreaks''~\citep{wei_jailbroken_2023} to seemingly gibberish adversarial suffixes~\citep{wallace_universal_2021, zou2023universal}.
+Methods such as perplexity filtering and paraphrasing defend against some of these attacks~\citep{jain2023baseline}, but such defenses can often be bypassed by more sophisticated attacks~\citep{zhu2023autodan}.
+Adversarial training shows more promise as a defense~\citep{ziegler_adversarial_2022} and is the focus of our analysis.
+
+The determinants of adversarial robustness have been well-studied in computer vision (CV).
+One line of scholarship proposes a fundamental tradeoff between robustness and accuracy~\citep{tsipras2018robustness}, positing that exploitable models are simply relying on non-robust features~\citep{ilyas_adversarial_2019}, which improve training performance but hurt robustness.
+Other work has emphasized what \emph{improves} robustness.
+For example, scaling unlabeled pretraining data~\citep{hendrycks_using_2019, carmon_unlabeled_2022, alayrac_are_2019}, model depth~\citep{xie_intriguing_2019} and model width~\citep{huang_revisiting_2023} improves CV adversarial robustness.
+However, other work shows that CV adversarial robustness scales too slowly to be a full solution~\citep{debenedetti_scaling_2023, bartoldson_adversarial_2024}.
+
+Language model scaling laws~\citep{hestness_deep_2017, rosenfeld_constructive_2019, kaplan_scaling_2020, hoffmann_training_2022} have shown that increasing compute improves performance across many tasks and domains~\citep{chen_evaluating_2021, hernandez_scaling_2021}. 
+However, scaling does not solve all problems, and might make some worse~\citep{lin_truthfulqa_2022, mckenzie_inverse_2023}.
+There has been only limited work on scaling laws for adversarial robustness in language models, with mixed results.
+\citet{ganguli_red_2022} show that LLMs become harder to attack with scale---but \citet{anil_many-shot_2024} find that in-context learning attacks are \emph{more successful} on larger models with larger context windows.
+In turn, \citet{yang2024assessing} find inconsistent improvements to robustness with scale when using a substitution-based attack, though their attack sometimes corrupts inputs to the point that it is unclear what the correct labels are.
+We systematically study this question by varying both model size and attack strength on a variety of tasks, while also analyzing the impact of explicitly training models for adversarial robustness.
+
+
+
+\section{Experimental Methodology}
+
+\label{sec:background}
+
+We test models in the binary classification setting as it is the simplest context in which to study robustness. 
+We measure robustness by the \textbf{attack success rate}, defined as the proportion of examples correctly classified by the model before attack that are incorrectly classified after attack.\footnote{We assume that the attack does not change the ground truth label of the datapoint. This is guaranteed by construction for our procedurally generated tasks, and was manually validated on a random sample of datapoints in other tasks.}
+We adapt the pretrained models for classification by replacing the unembedding layer with a randomly initialized classification head, then finetuning the resulting model on each task.
+
+\paragraph{Base Models} We use the Pythia model family~\citep{biderman2023pythia}.
+These models range in size from 14M to 12B parameters.
+All models were trained to predict the next token on the same dataset using the same training protocol, allowing us to isolate model scale from other confounding factors.
+
+\paragraph{Tasks} We consider six classification tasks in our experiments. We use two standard natural language classification tasks: \Spam, classifying whether an e-mail is spam~\citep{spam}, and \IMDB, whether a movie review is positive~\citep{imdb}. We also adapt the \citet{bai2022training} dataset of preference comparisons into two classification tasks, \Helpful and \Harmless, choosing which of two dialogue responses are more helpful and harmless, respectfully. Finally, we designed two procedurally generated tasks: \PM compares if two strings in the prompt are equal, inspired by TensorTrust~\citep{toyer2023tensor}; and \WL compares if the first word in a prompt is longer than the second, inspired by the RuLES dataset~\citep{mu2023rules}.
+Due to computational limitations, we did not perform all of our evaluations for every task. While we always report the results for \Spam and \IMDB, for other tasks we report them only when available.
+
+\paragraph{Finetuning Classification Models} To create classification models, we replace the unembedding matrix with a classification head.
+After this replacement, the Pythia models range from 7.6M to 11.6B parameters.\footnote{Models were loaded for classification using the \texttt{AutoModelForSequenceClassification} option in HuggingFace Transformers. In all figures, we report the actual parameter count of the classification model, not the pretrained model it was derived from.}
+We finetune all models for three epochs on the task dataset with default hyperparameters from HuggingFace Transformers \citep{wolf2019huggingface}, except for the learning rate which we set to $1\mathrm{e}{-5}$.
+All models reach $>83\%$ accuracy on all tasks, with larger models consistently performing better.
+The models are now ready to be evaluated against adversarial attacks.
+
+\paragraph{Attacks} Our attacks append an adversarial suffix of $N=10$ tokens to the prompt.
+We use two different procedures to generate this adversarial suffix: a random token baseline (\RT) and the state-of-the-art greedy coordinate gradient attack \citep[\GCG;][]{zou2023universal}.
+\RT was chosen due to its simplicity.
+\GCG was chosen as it is currently one of the most effective attacks on language models.
+
+In the \RT baseline, the $N$ tokens are chosen uniformly at random from the model's vocabulary.
+We evaluate the model on the attacked text and then repeat the process with another sample of $N$ random tokens until the model is successfully attacked or an appointed budget for model calls is exhausted.
+
+In \GCG~\citep{zou2023universal}, the $N$ tokens are initialized arbitrarily and then greedily optimized over multiple rounds.
+In each round, the gradient of the loss function with respect to the attack tokens is computed. 
+This gradient is used to compute a set of promising single-token modifications, from which the best candidate is used in the next round. 
+To make this attack work in the classification setting, we minimize the cross-entropy loss between the predicted label and the target label.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{oskar_figs/finetuned/gcg/all/num_params/asr/smoothing-1/legend.pdf}
+        \vspace*{-3mm}
+        \phantomcaption
+        \label{fig:asr_vs_size:gcg}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{oskar_figs/finetuned/rt/all/num_params/asr/smoothing-1/legend.pdf}
+        \vspace*{-3mm}
+        \phantomcaption
+        \label{fig:asr_vs_size:rt}
+    \end{subfigure}
+    \vspace*{-3mm}
+    \caption{Attack success rate ($y$-axis) of \GCG (2a, \textbf{left}) and \RT attacks (2b, \textbf{right}) against Pythia models of varying sizes ($\log_{10}$ scale $x$-axis) finetuned on our six tasks (color).
+    We plot the median over 5 random seeds and shade the region between the min and max.
+
+    We observe a noisy and task-dependent trend of larger models generally achieving better robustness against the attack.
+    See Figure~\ref{fig:asr_vs_size_per_task}
+    to see each task on its own plot for readability.
+    }
+    \label{fig:asr_vs_size}
+\end{figure}
+
+
+
+\section{Scaling Trends for Finetuned Classifiers}
+
+\label{sec:finetuning}
+First, we investigate whether increasing model size straightforwardly confers robustness by decreasing attack success rate.
+
+\subsection{Robustness and Model Size}
+
+\paragraph{Does increasing model size confer better robustness?} Figure~\ref{fig:asr_vs_size:gcg} shows the robustness of our finetuned classification models as a function of model size when attacked with the \GCG attack.
+We observe a noisy and task-dependent trend.
+In most settings, larger models are more robust than smaller models: for example, on the \IMDB task, the attack achieves a median success rate of almost 100\% against the 7.6M model, while it achieves less than 20\% against the 12B parameter model.
+However, even among tasks where scale appears to help, we observe significant variability across model sizes and tasks.
+For example, in the \Spam task, increasing parameter count over 50x from 123.7M up to 6.7B results in a \emph{higher} attack success rate.
+Furthermore, in the \WL task, model size does not appear to confer any additional robustness at all.
+We observe similar behaviour in Figure~\ref{fig:asr_vs_size:rt}, which shows robustness against the \RT attack.
+
+As such, model scaling is not a reliable method for improving adversarial robustness. While increasing model scale improves adversarial robustness on most tasks, this trend is extremely noisy, as it is both high variance and often non-monotonic. Further, even this trend depends on carefully choosing the attack strength for each task---with more attack iterations, attack success rate simply saturated near $100\%$.
+Motivated by this, we switch to using a $\logit10$ scaling for the attack success rate, and analyze how much attack success rate increases for different model sizes as the attacker spends more compute.
+
+\subsection{Attack Compute Scaling}
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.48\textwidth]{oskar_figs/asr/gcg/spam/finetuned/attack_flops_fraction_pretrain/logit_asr/smoothing-1/legend.pdf}
+    \hfill
+    \includegraphics[width=0.47\textwidth]{oskar_figs/asr/gcg/imdb/finetuned/attack_flops_fraction_pretrain/logit_asr/smoothing-1/legend.pdf}
+    \includegraphics[width=0.48\textwidth]{oskar_figs/asr/gcg/helpful/finetuned/attack_flops_fraction_pretrain/logit_asr/smoothing-1/legend.pdf}
+    \hfill
+    \includegraphics[width=0.48\textwidth]{oskar_figs/asr/gcg/harmless/finetuned/attack_flops_fraction_pretrain/logit_asr/smoothing-1/legend.pdf}
+    \caption{
+    Attack success rate ($\logit10$-scale $y$-axis) of \GCG over different amounts of attacker compute expressed as a fraction of pretraining compute ($\log_{10}$ scale $x$-axis) against Pythia models of different sizes (color) finetuned on different tasks (title). 
+    We observe that attacks against larger models require significantly more \emph{relative} compute in order to reach comparable attack success rate than do attacks against smaller models. Furthermore, the rate of improvement of attack success rate decreases as model size increases.
+    }
+    \label{fig:attackscaling}
+\end{figure}
+
+\paragraph{How does attack success rate scale with attack compute?} Instead of just increasing model size, we can also consider the attacker's perspective: for a given model size, how much additional compute does it take to increase attack success rate?
+Does it become relatively easier or harder to improve attack success rate against a larger model?
+
+To answer these questions, we vary attack strength against the different model sizes.
+Unlike in the previous experiments, here we see a clean scaling trend, whereby attack success rate smoothly improves with compute spent, across all  model sizes (see Figure~\ref{fig:attackscaling}).
+We observe that not only are larger models more expensive to attack in absolute terms, they are also more expensive to attack in \emph{relative} terms: each doubling of attack compute results in a smaller logit gain in attack success rate.
+
+\paragraph{Interpretation} These results show that on most tasks (\GCG, \Spam, \Helpful, and \Harmless) increasing model scale improves adversarial robustness at a fixed attack compute level, and decreases the attacker's relative return to increasing attack compute. By contrast, in a minority of tasks model scale is largely irrelevant for adversarial robustness (\WL) or the attacker's return to compute spend (\WL and \PM).
+
+Fortunately, model size is not the only axis along which a defender can spend compute: it is common practice for a model to undergo extensive safety training before deployment, including by adversarially training on attacked examples.
+In the following section, we study how scale affects robustness of adversarially trained models.
+
+
+
+\section{Scaling Trends for Adversarially Trained Classifiers}
+
+\label{sec:adversarial-training}
+
+Having studied robustness and attack scaling in the finetuned setting, we turn our attention to the scaling of models which have been adversarially trained to resist attack.
+
+\begin{algorithm}
+\caption{Adversarial Training}
+\label{alg:adv-training}
+\begin{algorithmic}[1]
+\REQUIRE Clean training dataset $D$.
+\STATE Initialize an empty pool of attacked examples, $P \gets \{\}$.
+\WHILE{training not finished}
+    \STATE Adversarially attack subset of $D$, adding the attacked examples to $P$.
+    \STATE Train model on dataset constructed by sampling from $D$ and $P$.
+    \STATE Save model checkpoint for future evaluation.
+\ENDWHILE
+\end{algorithmic}
+\end{algorithm}
+
+Our adversarial training procedure is detailed in Algorithm~\ref{alg:adv-training}.
+We adversarially train models ranging from 7.6M to 2.6B parameters, starting from the finetuned models from Section \ref{sec:finetuning}.
+We trained models of different sizes, training smaller models for longer in order to more clearly separate the impact of model size from the impact of adversarial training compute.
+After adversarial training is complete, we evaluate the different model sizes and checkpoints on an attacked validation dataset.
+We also monitor performance on a clean validation dataset to ensure the models maintain their high performance on the original task.
+\paragraph{Does adversarial training confer robustness?}
+
+\begin{figure*}[ht]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{oskar_figs/post_adv_training/gcg_gcg/spam/num_params/metrics_asr_at_128/smoothing-1/no_legend.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{oskar_figs/post_adv_training/gcg_gcg/spam/num_params/metrics_asr_at_128/smoothing-1/legend.pdf}
+    \end{subfigure}
+    \vspace*{-3mm}
+    \caption{Attack success rate ($y$-axis) of 12-iteration \GCG against Pythia models of varying sizes ($\log_{10}$ scale $x$-axis) finetuned on \Spam (\textbf{left}) and \IMDB (\textbf{right}).
+    We plot the median over 3 random seeds and shade the region between min and max.
+    Adversarial training quickly leads to improved model robustness for model sizes.
+    Note that we adversarially trained the larger models only for 5 rounds, so the ``Round 10'' curve ends early.}
+    \label{fig:adv-tr-like-finetuned}
+\end{figure*}
+
+Figure~\ref{fig:adv-tr-like-finetuned} shows that, for the \Spam and \IMDB tasks, models become more robust to adversarial attacks over the course of adversarial training. 
+For example, in the \Spam task, all but one of the finetuned (``Round 0'') models from Section~\ref{sec:finetuning} can be attacked more than than 50\% of the time, with the smallest three models above 75\%.
+After just 5 rounds of adversarial training (corresponding to training on 5000 datapoints), the attack success rate for all models has dropped below 10\%.
+Larger models tend to be more sample efficient, attaining greater robustness with fewer rounds of adversarial training, with the largest three models at a 1\% or lower attack success rate after 5 rounds.
+Robustness continues to improve over the course of subsequent rounds of adversarial training.
+
+\paragraph{How does attack success rate scale with attack compute against adversarially trained models?}
+
+\begin{figure*}[ht]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=.928\textwidth]{oskar_figs/asr/gcg_gcg/spam/round_0/attack_flops_fraction_pretrain/logit_asr/smoothing-1/no_legend.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=.928\textwidth]{oskar_figs/asr/gcg_gcg/imdb/round_0/attack_flops_fraction_pretrain/logit_asr/smoothing-1/no_legend.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{oskar_figs/asr/gcg_gcg/spam/pretrain_fraction_50_bps/attack_flops_fraction_pretrain/logit_asr/smoothing-1/no_legend.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{oskar_figs/asr/gcg_gcg/imdb/pretrain_fraction_50_bps/attack_flops_fraction_pretrain/logit_asr/smoothing-1/legend.pdf}
+    \end{subfigure}
+    \caption{Attack success rate ($\logit10$-scale $y$-axis) of up to 128 iterations ($x$-axis) of \GCG against Pythia models of varying sizes (line color), before the start of adversarial training (\textbf{top}) and after an amount of adversarial training corresponding to 0.5\% of pretrain compute (\textbf{bottom}), on \Spam (\textbf{left}) and \IMDB (\textbf{right}).
+    Larger models are harder to attack than smaller models before adversarial training, and maintain that advantage over the course of adversarial training.
+    While adversarial training makes models harder to attack across both tasks, in the \Spam task, it also decreases the rate at which adding more attack compute increase attack success rate.}
+    \label{fig:adv-tr-snake}
+\end{figure*}
+
+In Figure~\ref{fig:adv-tr-snake}, we plot attack success rate as a function of the proportion of pretraining compute spent attacking, after the model has undergone different amounts of adversarial training.
+We observe that without any adversarial training, the larger models are more robust than the smaller models, especially as attack strength ramps up (\textbf{top}), but all models are highly susceptible to attack.
+All models are much more robust after adversarial training using 0.5\% of pretraining compute (\textbf{bottom}), with large models maintaining their robustness advantage even at the end of adversarial training.
+In the \Spam task, we note that after some adversarial training, the rate at which increasing attack compute leads to higher attack success rate has significantly decreased, meaning increasing attack success rate is now much more expensive for the attacker.
+
+We find that adversarial training is a substantially more cost-effective way to increase robustness than scaling model size.
+Figure~\ref{fig:asr_vs_size} showed inconsistent benefit across tasks from scaling model size alone.
+Even in the best case of \IMDB, scaling pretraining compute (and thus model size) by 3000\% only reduced the success rate of a fixed-strength GCG attack from 99\% to 15\%.
+By contrast, in Figure~\ref{fig:transfer_gcg_to_gcg}, we see that spending less than 2\% of pretraining compute on adversarial training is sufficient to achieve a greater reduction in adversarial attack success (from 95\% to 2\%).
+
+In summary, we find that adversarial training improves robustness across tasks and model sizes, lessens the robustness gap between robustness of small and large models, and on the \Spam task, even makes it much more expensive for an attacker to increase attack success rate as a function of pretraining compute spent.
+This is promising, but our analysis misses one important point: in the real world, we often do not know beforehand which attack methods our model will be subjected to.
+To achieve real-world robustness, we need our defense to generalize to attacks that are not encountered during training.
+It is with this motivation in mind that we turn our attention to robustness transfer.
+
+\subsection{Robustness transfer}
+\label{subsec:transfer}
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.45\textwidth]{oskar_figs/adv_training/gcg_gcg/spam/defense_flops_fraction_pretrain/logit_asr_at_128/smoothing-1/no_legend.pdf}
+    \includegraphics[width=0.45\textwidth]{oskar_figs/adv_training/gcg_gcg/imdb/defense_flops_fraction_pretrain/logit_asr_at_128/smoothing-1/legend.pdf}
+    \caption{Transfer from adversarial training against 64-iteration \GCG to evaluation against 128-iteration \GCG.
+    All model sizes are able to transfer to the stronger attack.
+    Larger models maintain their initial robustness advantage over the course of adversarial training, but the rate of improvement is similar across model sizes.}
+    \label{fig:transfer_gcg_to_gcg}
+\end{figure*}
+
+\paragraph{Does adversarial training protect against stronger attacks?}
+A natural concern is that at deploy time, an attacker is likely willing to spend more compute looking for a single attack than the defender spent at each round of adversarial training.
+Can adversarially trained models be robust to a stronger version of the same attack seen during training?
+Our models were adversarially trained against 64-iteration GCG, so to answer this question, we evaluate them against 128-iteration GCG.
+Figure~\ref{fig:transfer_gcg_to_gcg} shows that, over the course of adversarial training, all models gain robustness to the stronger adversarial attack, even though they were only trained against a weaker attack.
+Larger models start with and maintain a robustness advantage against smaller models for proportional amounts of adversarial training, while the rate of improvement is comparable between larger and smaller models.Thus, it appears likely that models trained with a given attack strength will maintain robustness against stronger versions of the same attack.
+\paragraph{Does adversarial training protect against different attacks?}
+Another concern we might have is that at deploy time, our model is subjected to attacks that were unknown (or did not exist) at train time.
+Can our adversarially trained model hope to defend against new attacks?
+We look for insight into this question by adversarially training our models on the \RT attack and then attacking with the \GCG attack.
+Figure~\ref{fig:transfer:rt_to_gcg} shows models adversarially trained on \RT do perform better than undefended models, though the effect is quite weak.
+In this case, adversarial training appears to benefit smaller models more than large models, with the slope of improvement of small models being steeper.
+However, only one of the models across two tasks achieves a below 50\% attack success rate, suggesting that the main result of this experiment is that adversarially training against \RT does not confer a meaningful amount of robustness against a much stronger attack like \GCG.
+This result suggests that it is important to use a similar attack during adversarial training as expected at deployment.
+However, further work is needed to determine whether adversarial training on \RT fails because it is a different \emph{kind} of attack, or simply because it is a much weaker attack.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.45\textwidth]{oskar_figs/adv_training/gcg_gcg_infix90/spam/defense_flops_fraction_pretrain/logit_asr_at_128/smoothing-1/no_legend.pdf}
+    \includegraphics[width=0.45\textwidth]{oskar_figs/adv_training/gcg_gcg_infix90/imdb/defense_flops_fraction_pretrain/logit_asr_at_128/smoothing-1/legend.pdf}
+    \caption{Transfer from adversarial training against 64-iteration  \GCG to a modified 128-iteration \GCG attack which places the adversarial text $90\%$ of the way to the end of the prompt.
+    Larger models appear to improve robustness faster and further than smaller models, with the smallest models plateauing before the end of adversarial training.}
+    \label{fig:transfer_gcg_to_gcg_infix}
+\end{figure*}
+
+\paragraph{Does adversarial training protect against different threat models?}
+One final concern with the adversarial training setup is that so far we have only studied suffix-based attacks.
+Could it be that our models are not learning to be \emph{generally} robust, and instead are simply learning to ignore the final 10 tokens?
+To answer this question, we evaluate against a slightly modified threat model---instead of appending 10 tokens, the adversary now inserts 10 tokens 90\% of the way into the prompt.
+Figure~\ref{fig:transfer_gcg_to_gcg_infix} shows transfer from the standard adversarial training procedure against this new threat model.
+Here we observe a divergence between larger and smaller models. While larger models consistently improve in robustness against the different threat model over the course of adversarial training, smaller models appear to slow down their rate of improvement, with some plateauing (smallest \Spam model) or even getting worse (smallest \IMDB model).
+This suggests that while adversarial training improves all model sizes, larger models are most likely learning more useful representations to defend against different threat models.
+
+As such, larger models appear to generally be better suited to changes in attack (whether in terms of strength, attack method, or threat model) than smaller models. However, larger and more capable models are also more desirable targets for an attack. This raises the question: does scaling model size shift the balance between offense and defense?
+
+
+
+\section{Offense-Defense Balance}
+
+
+\label{sec:offense_defense}
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.45\linewidth]{oskar_figs/adv_training/gcg_gcg/spam/defense_flops_fraction_pretrain/interpolated_iteration_for_5_percent_flops_fraction_pretrain/smoothing-0/no_legend.pdf}
+    \includegraphics[width=0.45\linewidth]{oskar_figs/adv_training/gcg_gcg/imdb/defense_flops_fraction_pretrain/interpolated_iteration_for_5_percent_flops_fraction_pretrain/smoothing-0/legend.pdf}
+    \caption{Compute needed to attack a single input using \GCG with a 5\% (interpolated) attack success rate ($y$-axis) vs. adversarial training compute ($x$-axis), relative to pretraining compute. Grey dashed lines show $y=x+b$ for various intercepts $b$ to show parity lines. \IMDB seems to favor offense, where increasing defense compute by $10\times$ increases the attack compute by $<10\times$. Spam appears to be at rough parity for smaller models, but possibly favoring offense for larger models.}
+    \label{fig:offense_defense}
+\end{figure*}
+
+In this section, we study how scaling model size or adversarial training affects the compute required by an attacker to exploit a model.
+Since larger models are more valuable for an attacker to exploit and for a defender to protect, we measure compute \emph{relative} to pretraining.}
+Figure~\ref{fig:offense_defense} corroborates the previous section, showing that larger models generalize better from their first round of adversarial training, and so have substantially higher attacker compute costs \textit{even expressed proportionally to pretraining compute}.
+That is, attacking larger adversarially trained models with \GCG is even more expensive than it would be as a result of the increased model size alone.
+
+Moreover, the slopes of these graphs show the offense-defense balance tends to favor offense.
+In particular, with the $\log_{10}$ axes the slope shows how many factors of $10$ more compute an attacker needs to spend to maintain the same success rate against a defender who increases their adversarial training by a factor of $10$. If the slope is greater (less) than $1$, the situation is asymptotically defense (offense) dominant, where a defender needs to use more (less) than $10\times$ more compute in order to maintain the same success rate against a defender spending $10\times$ more compute on adversarial training. Here, we find a similar task-dependence in the relative attackability: increasing adversarial training compute by $10\times$ increases the necessary attack compute by less than $10\times$ for \IMDB (favoring offense), but by roughly $10\times$ for smaller models on \Spam (parity between offense-defense). Interestingly, model size does not seem to have a large impact on slope in \IMDB, while it has a possibly negative impact for \Spam.
+
+
+
+\section{Limitations and Future Work}
+
+In this work, we focus on evaluating the robustness of classifiers, as there is a clear binary measure of attack success (misclassification).
+Classifiers such as moderation filters are subject to attacks, and we anticipate our results to also naturally generalize to the robustness of regression models, such as reward models.
+However, many attacks in natural language such as ``jailbreaks'' seek to make a generative model generate harmful output.
+Although we expect our results to be relevant to generative models---if nothing else, one could always use a harmfulness classifier as a filter on the output of a generative model---an important direction for future work is to study robustness trends directly in a generative setting.
+
+Similarly, our analysis typically focused on asymptotic aspects and quantifiable trends. This is relevant for understanding relative changes to the status quo, but is insufficient to comment on the absolute costs related to attacks. Increasing the computational cost of an attack by $2$ orders of magnitude has very different implications for an attack that currently costs \$0.01 versus one that costs \$10,000. An important direction for future work is to quantify the absolute costs of current attacks and defense, combining this with our scaling trends to forecast the cost of attacking and defending future models. This would enable defenders to determine how much they will need to spend to defend against different categories of attacker---and at what point, if at all, attack and defense compute reach parity (at which point an attacker would be indifferent between attacking a model, or training their own model without safeguards).
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+We find scaling trends in language model robustness in most, but not all, tasks.
+In the absence of explicit defenses, we observe that larger models are typically more robust to adversarial attacks, though the effect is not reliable.
+When it comes to defenses, we find that adversarial training is much more compute-efficient than scaling model size alone.
+We also observe that large adversarially trained models maintain their robustness advantage over smaller models throughout training, and often generalize faster and to a better robustness level against attacks unseen during adversarial training.
+Finally, the offense/defense balance may be roughly at parity for some tasks and model scales, while other tasks and scales have an advantage for offense.
+This suggests that while adversarial training significantly improves robustness at scale, further defense breakthroughs will be necessary to reliably defend language models from adversarial attacks.
+
+
+\clearpage
+
+
+

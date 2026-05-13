@@ -1,8 +1,8 @@
 # Generative Modeling of Individual Behavior at Scale
 
 - Decision: Reject
-- Avg Score: 3.40
-- Scores: 5, 5, 1, 0, 6
+- Avg Score: 6.50
+- Scores: 5, 5, 10, 6
 
 ## Abstract
 Recent years have seen a growing interest in using AI to model human behavior, particularly in domains where humans learn from or collaborate with this technology. While most existing work attempts to model human behavior at an aggregate level, our goal is to model behavior at the individual level. Recent work in the domain of chess has shown that behavioral stylometry, or the task of identifying a person from their actions alone, can be achieved with high accuracy among a pool of a few thousand players. However, this approach cannot generate actions in the style of each player, and hence cannot reason about or influence player behavior in practice. We provide a new perspective on behavioral stylometry that addresses these limitations, by drawing a connection to the vast literature of transfer learning in NLP. Specifically, by casting the stylometry problem as a multi-task learning problem---where each task represents a distinct---we show that parameter-efficient fine-tuning (PEFT) methods can be adapted to model individual behavior in an explicit and generative manner, at unprecedented scale. We apply our approach at scale to two very different games: chess (47,864 players) and Rocket League (2,000 players).

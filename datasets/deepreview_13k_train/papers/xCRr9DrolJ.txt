@@ -1,0 +1,464 @@
+\title{Score Regularized Policy Optimization through Diffusion Behavior}
+
+\begin{abstract}
+Recent developments in offline reinforcement learning have uncovered the immense potential of diffusion modeling, which excels at representing heterogeneous behavior policies. 
+However, sampling from diffusion policies is considerably slow because it necessitates tens to hundreds of iterative inference steps for one action. 
+To address this issue, we propose to extract an efficient deterministic inference policy from critic models and pretrained diffusion behavior models, leveraging the latter to directly regularize the policy gradient with the behavior distribution's score function during optimization. 
+Our method enjoys powerful generative capabilities of diffusion modeling while completely circumventing the computationally intensive and time-consuming diffusion sampling scheme, both during training and evaluation. 
+Extensive results on D4RL tasks show that our method boosts action sampling speed by more than 25 times compared with various leading diffusion-based methods in locomotion tasks, while still maintaining state-of-the-art performance.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h] \centering
+    \includegraphics[width=0.8\textwidth]{pics/Algorithm_efficiency_scatter.pdf}
+    \caption{Performance and computational efficiency of different algorithms in D4RL Locomotion tasks. Computation time is assessed using a consistent hardware setup and PyTorch backend.}
+    \label{fig:computation}
+\end{figure}
+    
+
+Offline reinforcement learning (RL) aims to tackle decision-making problems by solely utilizing a pre-collected behavior dataset. This offers a practical solution for tasks where data collection can be associated with substantial risks or exorbitant costs. A central challenge for offline RL is the realization of behavior regularization, which entails ensuring the learned policy stays in support of the behavior distribution. 
+Weighted regression \citep{awr, iql} provides a promising approach that directly utilizes behavioral actions as sources of supervision for policy training. Another prevalent approach is behavior-regularized policy optimization \citep{bear, brac}, which builds a generative behavior model, followed by constraining the divergence between the learned and the behavior model during policy optimization.
+
+An expressive generative model holds a pivotal role in the aforementioned regularization methods. In weighted regression, a unimodal actor is prone to suffer from the ``mode covering" issue, a phenomenon where policies end up selecting out-of-support actions in the middle region between two behavioral modes \citep{diffusionql, idql}. Expressive policy classes, with diffusion models \citep{diffusion} as prime choices, help to resolve this issue. In behavior-regularized policy optimization, diffusion modeling can also be significantly advantageous for an accurate estimate of policy divergence, due to its strong ability to represent heterogeneous behavior datasets, outperforming conventional methods like Gaussians or variational auto-encoders (VAEs) \citep{arq, sfbc}.
+
+However, a major drawback of utilizing diffusion models in offline RL is the considerably slow sampling speed -- diffusion policies usually require 5-100 iterative inference steps to create an action sample. 
+Moreover, diffusion policies tend to be excessively stochastic, forcing the generation of dozens of action candidates in parallel to pinpoint the final optimal one \citep{diffusionql}. 
+As existing methods necessitate sampling from or backpropagating through diffusion policies during training and evaluation, it has significantly slowed down experimentation and limited the application in fields that are computationally sensitive or require high control frequency, such as robotics. Therefore, it is critical to systematically investigate the question: \emph{is it feasible to fully exploit the generative capabilities of diffusion models without directly sampling actions from them?}
+
+In this paper, we propose \textbf{S}core \textbf{R}egularized \textbf{P}olicy \textbf{O}ptimization (SRPO) with a positive answer to the above question. The basic idea is to extract a simple deterministic inference policy from critic and diffusion behavior models to avoid the iterative diffusion sampling process during evaluation. To achieve this, we show that the gradient of the divergence term in regularized policy optimization is essentially related to the score function of behavior distribution.
+The latter can be effectively approximated by any pretrained score-based model including diffusion models \citep{sde}. This allows us to directly regularize the policy \textit{gradient} instead of the policy \textit{loss}, removing the need to generate fake behavioral actions for policy-divergence estimation (Section \ref{sec:SRPO}).
+We develop a practical algorithm to solve continuous control tasks (Section \ref{sec:practical_algo}) by combining SRPO with implicit Q-learning \citep{iql} and continuous-time diffusion behavior modeling \citep{qgpo}. For policy extraction, we incorporate similar techniques that have facilitated recent advances in text-to-3D research such as DreamFusion \citep{dreamfusion}. These include leveraging an ensemble of score approximations under different diffusion times to exploit the pretrained behavior model and a baseline term to reduce variance for gradient estimation. We empirically show that these techniques successfully help improve performance and stabilize training for policy extraction.
+
+We evaluate our method in D4RL tasks \citep{d4rl}. Results demonstrate that our method enjoys a more than 25$\times$ boost in action sampling speed and less than $1\%$ of computational cost for evaluation compared with several leading diffusion-based methods while maintaining similar overall performance in locomotion tasks (Figure \ref{fig:computation}).
+We also conduct 2D experiments to better illustrate that SRPO successfully constrains the learned policy close to various complex behavior distributions.
+
+
+
+\section{Background}
+
+\subsection{Offline Reinforcement Learning}
+Consider a typical Markov Decision Process (MDP) described by the tuple $\langle\mathcal{S},\mathcal{A}, P,r,\gamma\rangle$, where $\mathcal{S}$ is the state space, $\mathcal{A}$ the action space, $P(\vs'|\vs,\va)$ the transition function, $r(\vs, \va)$ the reward function and $\gamma$ the discount factor. The goal of reinforcement learning (RL) is to train a parameterized policy $\pi_\theta(\va|\vs)$ which maximizes the expected episode return.
+Offline RL relies solely on a static dataset $\mathcal{D}^\mu$ containing interacting history $\{\vs, \va, r, \vs'\}$ between a behavior policy $\mu(\va|\vs)$ and the environment to train the parameterized policy. 
+
+Suppose we can evaluate the quality of a given action by estimating its expected return-to-go using a Q-network $Q_{\phi}(\vs,\va) \approx Q^\pi(\vs, \va) := \mathbb{E}_{\vs_1=\vs, \va_1=\va; \pi} [\sum_{n=1}^\infty \gamma^n r(\vs_n, \va_n)]$, we can formulate the training objective of offline RL as $\max_{\pi} \mathbb{E}_{\vs \sim \mathcal{D}^\mu, \va \sim \pi(\cdot|\vs)} Q_\phi(\vs, \va) - \frac{1}{\beta} \KL \left[\pi(\cdot |\vs) || \mu(\cdot |\vs) \right]$ \citep{brac}. Note that a KL regularization term is added mainly to ensure the learned policy stays in support of explored actions. $\beta$ is some temperature coefficient. Previous work \citep{rwr, awr} has shown that the optimal policy for such an optimization problem is
+\begin{align}
+    \pi^*(\va|\vs) &= \frac{1}{Z(\vs)} \ \mu(\va|\vs) \ \mathrm{exp}\left(\beta Q_\phi(\vs, \va) \right),
+\label{Eq:pi_optimal}
+\end{align}
+where $Z(\vs)$ is the partition function. The core problem for offline RL now becomes how to efficiently model and sample from the optimal policy distribution $\pi^*(\cdot|\vs)$.
+\subsection{Optimal Policy Extraction}
+\label{sec:policy_extraction}
+\begin{figure}[t]
+    \begin{minipage}{0.295\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/data.pdf}
+        {\small (a) Behavior dataset \\ \textcolor{white}{null}}
+	\end{minipage} 
+    \begin{minipage}{0.225\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/forwarKL.pdf}
+	    {\small (b) Forward KL \& \\  Unimodal policy}
+	\end{minipage} 
+    \begin{minipage}{0.225\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/forwardKL_diffusion.pdf}
+		{\small (c) Forward KL \& \\ Expressive policy}
+	\end{minipage} 
+    \begin{minipage}{0.225\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/reverseKL.pdf}
+		{\small (d) Reverse KL \& \\  Unimodal policy}
+	\end{minipage} 
+    \caption{\label{fig:forward_reverse_comp}Comparison of different policy extraction methods under bandit settings. Forward KL policy extraction is prone to generate out-of-support actions if the policy is not sufficiently expressive (e.g., Gaussians). This can be mitigated either by employing a more expressive policy class or by switching to a reverse KL objective (our method), which demonstrates a mode-seeking nature.}
+\end{figure}
+
+Existing methods to explicitly model $\pi^*$ with a parameterized policy $\pi_\theta$ can be roughly divided into two main categories—\emph{weighted regression} and \emph{behavior-regularized policy optimization}:
+\begin{align}
+     \label{eq:forward_objective}
+    \min_{\theta} \mathbb{E}_{\vs \sim \mathcal{D}^\mu}  \underbrace{\KL \left[\pi^*(\cdot  | \vs) \middle|\middle| \pi_\theta(\cdot  | \vs)\right]}_{\hspace{-3.3cm} \big\updownarrow \hspace{1.3cm}  \rlap{\text{\normalsize \textit{Forward} KL}}} & \Leftrightarrow      \underbrace{\max_{\theta} \mathbb{E}_{(\vs, \va) \sim \mathcal{D}^\mu} \left[ \frac{1}{Z(\vs)} \mathrm{log} \ \pi_\theta(\va | \vs) \ e^{\beta Q_\phi(\vs, \va)} \right]}_{\text{\normalsize \textit{Weighted Regression}}},\\
+    \label{eq:reverse_objective}
+    \min_{\theta} \mathbb{E}_{\vs \sim \mathcal{D}^\mu}  \underbrace{\KL \left[\pi_\theta(\cdot  | \vs) \middle|\middle| \pi^*(\cdot  | \vs)\right]}_{\text{\normalsize \textit{Reverse} KL}} & \Leftrightarrow      \underbrace{\max_{\theta} \mathbb{E}_{\vs \sim \mathcal{D}^\mu, \va \sim \pi_\theta} Q_\phi(\vs, \va)
+     - \frac{1}{\beta} \KL \left[\pi_\theta(\cdot |\vs) || \mu(\cdot |\vs) \right]}_{\text{\normalsize \textit{Behavior-Regularized Policy Optimization}}}.  
+\end{align}
+Weighted regression directly utilizes behavioral actions as sources of supervision for policy training. This circumvents the necessity to explicitly model the intricate behavior policy but leads to another mode-covering issue due to the objective's forward-KL nature (\Eqref{eq:forward_objective}). The direct consequence is that weighted regression algorithms display sensitivity to the proportion of suboptimal data in the dataset \citep{yue2022boosting}, especially when the policy model lacks distributional expressivity \citep{sfbc}, as is depicted in Figure \ref{fig:forward_reverse_comp}. Recent work \citep{diffusionql, qgpo} attempts to alleviate this by employing more expressive policy classes, such as diffusion models \citep{diffusion}. However, these methods usually compromise on computational efficiency \citep{efficientdiffusionrl}.
+
+In comparison, behavior-regularized policy optimization \citep{brac} emerges as a more suitable approach for training simpler policy models such as Gaussian models. This fundamentally stems from its basis on a reverse-KL objective (\Eqref{eq:reverse_objective}), which inherently encourages a mode-seeking behavior.
+However, approximating the second KL term in \Eqref{eq:reverse_objective} is usually difficult. 
+Regarding this, in practical implementation previous studies \citep{bear, brac, SBAC} usually first construct generative behavior models to approximate the policy-behavior divergence. 
+\subsection{Diffusion Models for Score Function Estimation}
+\label{sec:diffusionsde}
+Diffusion models \citep{sohl2015deep, diffusion,sde} are powerful generative models. They operate by defining a forward diffusion process to perturb the data distribution into a noise distribution for training the diffusion model. Subsequently, this model is employed to reverse the diffusion process, thereby generating data samples from pure noise.
+
+In particular, the forward process is conducted by gradually adding Gaussian noise to samples $\vx_0$ from an unknown data distribution $q_0(\vx_0):=q(\vx)$ at time $0$, forming a series of diffused distributions $q_t(\vx_t)$ at time $t$. The transition distribution $q_{t0}(\vx_t|\vx_0)$ is:
+\begin{equation}
+\label{Eq:forward_diffusion}
+    q_{t0}(\vx_t|\vx_0) = \gN(\vx_t | \alpha_t\vx_0, \sigma_t^2\mI), \quad\quad  \text{which implies} \quad \quad  \vx_t = \alpha_t\vx_0 + \sigma_t \epsilonv.
+\end{equation}
+Here, $\alpha_t,\sigma_t > 0$ are manually defined, and $\epsilonv$ is random Gaussian noise.
+
+For the reverse process, \citet{diffusion} train a diffusion model $\epsilonv_\theta(\vx_t|t)$ to predict the noise added to the diffused sample $\vx_t$ in order to iteratively reconstruct $\vx_0$. The optimization problem is
+\begin{equation}
+\label{Eq:diffusion_loss}
+\min_\theta \E_{t,\vx_0,\epsilonv}\left[
+        \|\epsilonv_\theta(\vx_t|t) - \epsilonv\|_2^2
+    \right].
+\end{equation}
+More formally, \citet{sde} show that diffusion models are in essence estimating the \textit{score function} $\nabla_{\vx_t}\log q_t(\vx_t)$ of the diffused data distribution $q_t$, such that:
+\begin{equation}
+\label{Eq:diffusion_score}
+\nabla_{\vx_t}\log q_t(\vx_t) = -\epsilonv^*(\vx_t|t)/\sigma_t \approx -\epsilonv_\theta(\vx_t|t)/\sigma_t,
+\end{equation}
+and the reverse diffusion process can alternatively be interpreted as discretizing an ODE:
+\begin{equation}
+\label{Eq:diffusion_ode}
+    \frac{\mathrm{d} \vx_t}{\mathrm{d} t}=f(t)\vx_t-\frac{1}{2}g^2(t)\nabla_{\vx_t}\log q_t(\vx_t),
+\end{equation}
+where $f(t)=\frac{\mathrm{d}\log \alpha_t}{\mathrm{d} t},g^2(t)=\frac{\mathrm{d} \sigma_t^2}{\mathrm{d} t}-2\frac{\mathrm{d}\log \alpha_t}{\mathrm{d} t}\sigma_t^2$, leaving $\nabla_{\vx_t}\log q_t(\vx_t)$ as the only unknown term.
+In offline RL, diffusion models have been discovered as an effective tool for modeling heterogeneous behavior policies. Usually states $\vs$ are considered as conditions while actions $\va$ are considered as data points $\vx$, such that a conditional diffusion model $\epsilonv(\va_t|\vs, t)$ can be constructed to represent $\mu(\va|\vs)$.
+
+
+
+\section{Score Regularized Policy Optimization}
+
+\label{sec:SRPO}
+In this paper, we seek to learn a deterministic policy $\pi_\theta$ to capture the mode of a potentially complex policy distribution $\pi^*$ introduced in \Eqref{Eq:pi_optimal}. To achieve this, we employ a reverse-KL policy extraction scheme (\Eqref{eq:reverse_objective}) given its mode-seeking nature:
+\begin{align}
+    \label{eq:ideal_objective}
+    \max \gL_{\pi}(\theta) &= \mathbb{E}_{\vs \sim \mathcal{D}^\mu, \va \sim \pi_\theta} Q_\phi(\vs, \va)
+    - \frac{1}{\beta} \KL \left[\pi_\theta(\cdot |\vs) || \mu(\cdot |\vs) \right].
+\end{align}
+Solving the above optimization problem requires estimating $\KL \left[\pi_\theta(\cdot |\vs) || \mu(\cdot |\vs) \right]$. Regarding this, previous research \citep{bear, brac, SBAC, spot} use sample-based methods: first constructing a behavioral model $\mu_\psi \approx \mu$, followed by sampling fake actions from $\mu_\psi(\cdot |\vs)$ and $\pi_\theta(\cdot |\vs)$ to approximate the policy divergence. However, this approach necessitates sampling from the behavior model during training, imposing a substantial computational burden. This drawback is exacerbated when employing expressive yet sampling-expensive behavior models such as diffusion models.
+
+We propose an alternative way to solve \Eqref{eq:ideal_objective}. By decomposing the KL term, we can get
+\begin{align}
+ \gL_{\pi}(\theta) = \underbrace{\mathbb{E}_{\vs \sim \mathcal{D}^\mu, \va \sim \pi_\theta} Q_\phi(\vs, \va)}_{\text{Policy optimization}} + \ \frac{1}{\beta}\underbrace{\mathbb{E}_{\vs \sim \mathcal{D}^\mu, \va \sim \pi_\theta}  \textcolor{blue}{\log \mu(\va|\vs)}}_{\text{Behavior regularization}} + \frac{1}{\beta}\underbrace{\mathbb{E}_{\vs \sim \mathcal{D}^\mu} \mathcal{H}(\pi_\theta(\cdot|\vs))}_{\text{Entropy (often constant\footnotemark)}}.
+    \label{eq:ideal_objective_split}
+\end{align}
+\footnotetext{In this paper we only consider the cases where $\pi_\theta$ is an isotropic Gaussian with fixed variance. For brevity, we informally view Dirac as Gaussian whose variance is infinitesimally small.}
+Then we calculate the gradient of \Eqref{eq:ideal_objective_split} under the condition that $\pi_\theta$ is deterministic. Applying the chain rule and the reparameterization trick, we have:
+\begin{equation}
+\label{eq:ideal_objective_gradient}
+    \nabla_{\theta} \gL_{\pi}(\theta) = \mathbb{E}_{\vs \sim \mathcal{D}^\mu} \left[ \nabla_{\va} Q_\phi(\vs, \va)|_{\va=\pi_\theta(\vs)} + \frac{1}{\beta} \textcolor{blue}{\underbrace{\nabla_{\va} \log \mu(\va|\vs)|_{\va=\pi_\theta(\vs)}}_{= - \epsilonv^*(\va_t|\vs, t)/\sigma_t|_{t \to 0} \ \ \text{(by Eq. \ref{Eq:diffusion_score})}}} \right] \nabla_{\theta} \pi_\theta(\vs).
+\end{equation}
+It is noted that the only unknown term above is the score function $\nabla_{\va} \log \mu(\va|\vs)$ of the behavior distribution. Our key insight is that a pretrained diffusion behavior model can be leveraged to effectively estimate this term. This is because diffusion models $\epsilonv(\vx|t)$ are essentially approximating the score function $\nabla_{\vx} \log \mu_t(\vx)$ of the diffused data distribution $\mu_t(\vx_t)$ (\Eqref{Eq:diffusion_score}). 
+
+Specifically, we first pretrain a diffusion behavior model, denoted as $\epsilonv(\va_t|\vs, t)$, to approximate $\nabla_{\va} \log \mu(\va|\vs)$. By doing so, we can regularize the optimization process of another deterministic actor $\pi_\theta$. We term our method as \textbf{S}core \textbf{R}egularized \textbf{P}olicy \textbf{O}ptimization (SRPO), given its distinctive feature of performing regularization at the gradient level, as opposed to the loss function level. Figure \ref{fig:bandit_SRPO} provides a 2D bandit example of SRPO.
+
+\begin{figure}[t]
+    \begin{minipage}{0.195\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_dataset.pdf}
+        {\scriptsize (a) Data samples \\ (from behavior dataset)}
+	\end{minipage} 
+    \begin{minipage}{0.195\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_behavior.pdf}
+	{\scriptsize (b) Behavior density $\hat{\mu}(\va)$ \\ (by diffusion models)}
+	\end{minipage} 
+    \begin{minipage}{0.195\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_Q.pdf}
+		{\scriptsize (c) Quadratic Q-functions \\ (stacked)}
+	\end{minipage} 
+    \begin{minipage}{0.195\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_transition.pdf}
+		{\scriptsize (d) Behavior regularization \\ ($\textcolor{colorstart}{\frac{1}{\beta} = 0} \textcolor{red}{\longrightarrow} \textcolor{colorend}{\frac{1}{\beta} = 1}$)}
+	\end{minipage} 
+    \begin{minipage}{0.195\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_multiple_alpha.pdf}
+		{\scriptsize (e) Result policy shift \\ (by varying $0\leq\frac{1}{\beta}\leq1$)}
+	\end{minipage} \\
+	\begin{minipage}{\linewidth}
+	\centering
+	\includegraphics[width=0.5\linewidth]{pics/toy_figures/legend.drawio.pdf}
+	\end{minipage} 
+	\caption{\label{fig:bandit_SRPO} Illustration of SRPO in 2D bandit settings. \textbf{(a)} A predefined complex data distribution, which represents the potentially heterogeneous behavior policy $\mu(\va)$.  \textbf{(b)} A diffusion model $\hat\mu(\va)$ is trained to fit the behavior distribution. The data density can be analytically calculated based on \citet{sde}. \textbf{(c)} The Q-function is manually defined as a quadratic function: $Q(\va):=-(\va - \va_{\text{tar}})^2$, where $\va_{\text{tar}}$ represents the 2D point with the highest estimated Q-value and is selected from a set of grid intersections. These individual Q-functions with different $\va_{\text{tar}}$ are depicted together in a stacked way in Figure (c). \textbf{(d)}\&\textbf{(e)} By optimizing deterministic policies $\pi(\cdot) = \va_{\text{reg}}$ according to \Eqref{eq:ideal_objective_gradient} and tuning the temperature coefficient $\beta$, resulting policies shift from greedy ones which tend to maximize corresponding Q-functions to conservative ones which are successfully constrained close to the behavior distribution.}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+    \begin{minipage}{0.23\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_VAE.pdf}
+	{\scriptsize Behavior Density (VAEs)}
+	\end{minipage} 
+    \begin{minipage}{0.23\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_BCQ.pdf}
+		{\scriptsize BCQ \citep{bcq}}
+	\end{minipage} 
+    \begin{minipage}{0.23\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_BEAR.pdf}
+		{\scriptsize BEAR \citep{bear}}
+	\end{minipage} 
+    \begin{minipage}{0.23\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_TD3BC.pdf}
+		{\scriptsize TD3+BC \citep{td3+bc}}
+	\end{minipage} \\
+	\caption{\label{fig:compare_SRPO} Performance of other behavior regularization methods.}
+\end{figure}
+Compared with previous work \citep{diffusionql, qgpo, idql} that directly trains a diffusion policy for inference in evaluation, the main advantage of SRPO is its computational efficiency. SRPO entirely circumvents the computationally demanding action sampling scheme associated with the diffusion process. Yet, it still taps into the robust generative strengths of diffusion models, especially their ability to represent potentially diverse behavior datasets.
+
+
+
+\section{Practical Algorithm}
+
+\label{sec:practical_algo}
+In this section, we derive a practical algorithm for applying SRPO in offline RL (Algorithm \ref{alg:srpo}). The algorithm includes three parts: implicit Q-learning (Section \ref{sec:practical_q}); diffusion-based behavior modeling (Section \ref{sec:practical_q}); and score-regularized policy extraction (Section \ref{sec:practical_policy}).
+\subsection{Pretraining the Diffusion Behavior Model and Q-networks}
+\label{sec:practical_q}
+For Q-networks, we choose to use implicit Q-learning \citep{iql} to decouple critic training from actor training. The core ingredient of the training pipeline is expectile regression, which requires only sampling actions from existing datasets for bootstrapping:
+\begin{equation}
+\label{Eq:V_loss}
+    \min_\zeta \gL_{V}(\zeta) =  \E_{(\vs,\va) \sim \mathcal{D}^\mu}[L_2^\tau(Q_{\phi}(\vs,\va) - V_\zeta(\vs))], \mbox{ where } L_2^\tau(\vu) = |\tau-\mathbbm{1}(\vu < 0)|\vu^2,
+\end{equation}
+\begin{equation}
+\label{Eq:Q_loss}
+    \min_\phi \gL_{Q}(\phi) =  \E_{(\vs,\va, \vs') \sim \mathcal{D}^\mu}\left[
+        \|r(\vs, \va) + \gamma V_\zeta(\vs') - Q_{\phi}(\vs,\va)\|_2^2
+    \right].
+\end{equation}
+When the expectile parameter $\tau \in (0, 1)$ is larger than 0.5, the asymmetric L2-objective $\gL_{V}(\zeta)$ would downweight suboptimal actions which have lower Q-values, removing the need of an explicit policy.
+
+For behavior models, in order to represent the behavior distribution with high fidelity and estimate its score function, we follow previous work \citep{sfbc, idql} and train a conditional behavior cloning model:
+\begin{equation}
+\label{Eq:diffusion_loss}
+    \min_\psi \gL_{\mu}(\psi) =  \E_{t,\epsilonv, (\vs,\va) \sim \mathcal{D}^\mu}\left[
+        \|\epsilonv_\psi(\va_t| \vs,t) - \epsilonv\|_2^2
+    \right]_{\va_t=\alpha_t \va + \sigma_t \epsilonv},
+\end{equation}
+\begin{wrapfigure}{R}{0.4\textwidth}
+    \begin{minipage}{0.4\textwidth}
+        \begin{algorithm}[H]
+            \caption{SRPO}
+            \begin{algorithmic}
+            \label{alg:srpo}
+                \STATE Initialize parameters $\psi$, $\zeta$, $\phi$, $\theta$.
+                \STATE \small{\color{gray} \textit{// Critic training (IQL)}}   
+                \FOR{each gradient step}
+                \STATE $\zeta \leftarrow \zeta - \lambda_V \nabla_\zeta L_V(\zeta)$ (Eq. \ref{Eq:V_loss})
+                \STATE $\phi \leftarrow \phi - \lambda_Q \nabla_{\phi} L_Q(\phi)$ (Eq. \ref{Eq:Q_loss})
+                \ENDFOR
+                \STATE \small{\color{gray} \textit{// Behavior training}}   
+                \FOR{each gradient step}
+                \STATE $\psi \leftarrow \psi - \lambda_{\mu} \nabla_\psi L_{\mu}(\psi)$ (Eq. \ref{Eq:diffusion_loss})
+                \ENDFOR
+                \STATE \small{\color{gray} \textit{// Policy extraction}}                
+                \FOR{each gradient step}
+                \STATE $\theta \leftarrow \theta + \lambda_\pi \nabla_\theta \gL^{\text{surr}}_{\pi}(\theta)$ (Eq. \ref{eq:final_policy_extraction_loss})
+                \ENDFOR
+            \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+
+where $t \sim \gU(0, 1)$ and $\epsilonv\sim\gN(\bm{0},\mI)$. The model architecture of $\epsilonv_\psi$ is consistent with the one proposed by \citet{idql}, with the sole difference being that our model uses continuous-time inputs similar to \citet{qgpo} instead of discrete ones as used by \citet{diffusionql} and \citet{idql}.
+
+Once we have finished training the behavior model $\epsilonv_\psi$, we can use it to estimate the score function of $\mu_t$, the diffused distribution of $\mu(\va| \vs)$ at time $t$. We have $\nabla_{\va_t} \log \mu_t(\va_t|\vs, t) = - \epsilonv_\psi^*(\va_t| \vs,t) / \sigma_t  \approx - \epsilonv_\psi(\va_t| \vs,t) / \sigma_t$ as shown by \citet{sde}.
+
+\subsection{Policy Extraction from Pretrained Models}
+\label{sec:practical_policy}
+\begin{figure}[]
+\centering
+\begin{minipage}{0.03\linewidth}
+\rotatebox{90}{\normalsize{density-map}}
+\end{minipage}
+\begin{minipage}{0.187\linewidth}
+	\centering
+        {\footnotesize diffusion $t=0.0$} 
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_behavior.pdf}
+\end{minipage} 
+\begin{minipage}{0.187\linewidth}
+	\centering
+ {\footnotesize diffusion $t=0.1$}
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_behavior_t0.1.pdf}
+\end{minipage} 
+\begin{minipage}{0.187\linewidth}
+	\centering
+ {\footnotesize diffusion $t=0.3$}
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_behavior_t0.3.pdf}
+\end{minipage} 
+\begin{minipage}{0.187\linewidth}
+	\centering
+ {\footnotesize diffusion $t=1.0$}
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_behavior_t1.0.pdf}
+\end{minipage}
+\begin{minipage}{0.187\linewidth}
+	\centering
+ {\footnotesize \textbf{ensemble $t \in (0,1)$}}
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_behavior_tmix.pdf}
+\end{minipage} \\
+\begin{minipage}{0.03\linewidth}
+\rotatebox{90}{\normalsize{regularization}}
+\end{minipage}
+\begin{minipage}{0.187\linewidth}
+	\centering
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_transition_t0.01.pdf}
+\end{minipage} 
+\begin{minipage}{0.187\linewidth}
+	\centering
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_transition_t0.1.pdf}
+\end{minipage} 
+\begin{minipage}{0.187\linewidth}
+	\centering
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_transition_t0.3.pdf}
+\end{minipage} 
+\begin{minipage}{0.187\linewidth}
+	\centering
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_transition_t1.0.pdf}
+\end{minipage}
+\begin{minipage}{0.187\linewidth}
+	\centering
+	\includegraphics[width=\linewidth]{pics/toy_figures/8gaussians_transition.pdf}
+\end{minipage} \\
+
+	\caption{\label{fig:main_different} Empirical benefits of ensembling multiple diffusion times.}
+\end{figure}
+The policy extraction scheme proposed in Section \ref{sec:SRPO} only leverages the pretrained diffusion behavior model $\epsilonv_\phi(\va_t|\vs, t)$ at time $t\rightarrow0$, where the behavior distribution $\mu$ has not been diffused. However, $\epsilonv_\phi(\va_t|\vs, t)$ is trained to represent a series of diffused behavior distributions $\mu_t$ at various times $t \in (0, 1)$. 
+In order to exploit the generative capacity of $\epsilonv_\phi$, we replace the original training objective $\gL_{\pi}(\theta)$ with a new surrogate objective:
+\begin{equation}
+\label{eq:SRPO}
+    \max_\theta \gL^{\text{surr}}_{\pi}(\theta) = \mathbb{E}_{\vs, \va \sim \pi_\theta} Q_\phi(\vs, \va)
+     - \frac{1}{\beta} \mathbb{E}_{t, \vs} \omega(t) \frac{\sigma_t}{\alpha_t} \KL \left[\pi_{t, \theta}(\cdot |\vs) || \mu_t(\cdot |\vs) \right],
+\end{equation}
+where $t \sim \gU(0.02, 0.98)$, $\vs \sim \mathcal{D}^\mu$. Both $\mu_t$ and $\pi_{\theta, t}$ follow the same forward diffusion process in \Eqref{Eq:forward_diffusion}, where 
+$\mu_{t}(\va_t|\vs) := \mathbb{E}_{\va \sim \mu(\cdot|\vs)} \gN(\va_t|\alpha_t\va,\sigma_t^2\mI)$, and $\pi_{\theta, t}(\va_t|\vs):=\mathbb{E}_{\va \sim \pi_\theta(\cdot|\vs)} \gN(\va_t|\alpha_t\va,\sigma_t^2\mI)$. 
+$\omega(t)$ is a weighting function 
+that adjusts the importance of each time $t$. We can nearly recover $\gL_{\pi}(\theta)$ by setting $\omega(t)$ to $\delta(t-0.02) \frac{\alpha_{0.02}}{\sigma_{0.02}}$ (ablation studies in Section \ref{sec:ablation}). 
+Empirically, the surrogate objective $\gL^{\text{surr}}_{\pi}(\theta)$ ensembles various diffused behavior policies $\mu_t$ to regularize training of the same parameterized policy $\pi_\theta$. 
+
+Similarly to Section \ref{sec:SRPO}, we can optimize \Eqref{eq:SRPO} by calculating its gradient:
+\setcounter{proposition}{1}
+
+{\small
+\begin{equation}
+    \label{eq:final_policy_extraction_loss}
+    \nabla_{\theta} \gL^{\text{surr}}_{\pi}(\theta) \approx  \biggl[ \mathbb{E}_{\vs} \nabla_{\va} Q_\phi(\vs, \va)|_{\va=\pi_\theta(\vs)} - \frac{1}{\beta} \mathbb{E}_{t, \vs, \epsilonv} \textcolor{black}{\omega(t)} (\epsilonv_{\psi}(\va_t|\vs, t) \textcolor{blue}{\underbrace{- \epsilonv}_{\hspace{-6mm}\text{subtracted baseline}\hspace{-6mm}}})|_{\va_t=\alpha_t \pi_\theta(\vs) + \sigma_t \epsilonv}\bigg] \nabla_{\theta} \pi_\theta(\vs).
+\end{equation}
+}
+\end{proposition}
+\setcounter{proposition}{0}
+Note that we additionally subtract the action noise $\epsilonv$ from $\epsilonv_{\psi}(\va_t|\vs, t)$ in the above equation. We refer to it as the \emph{baseline} term because it is similar to the subtracted baseline in Policy Gradient \citep{rlbook} algorithms.
+
+The idea of ensembling diffused behavior policies for regularization and subtracting the baseline term to reduce estimation variance both draw inspiration from the latest developments in text-to-3D research such as DreamFusion \citep{dreamfusion}. We elaborate more on the connection between the two work in Section \ref{sec:related} and ablate these techniques in the realm of continuous control in Section \ref{sec:ablation}. 
+
+
+\section{Related Work}
+
+\label{sec:related}
+\paragraph{Behavior Regularization in Offline Reinforcement Learning.}
+Behavior regularization can be achieved either implicitly or explicitly. 
+Explicit methods usually necessitate the construction of a behavior model to regularize the learned policy. 
+For example, TD3+BC \citep{td3+bc} implicitly views the behavior as Gaussians and introduces an auxiliary L2-loss term to realize the regularization. SBAC \citep{SBAC} and  Fisher-BRC \citep{kostrikov2021offline} leverage explicit Gaussian (mixture) behavior models. BCQ \citep{bcq} and BEAR \citep{bear} leverage VAE behavior models \citep{vae}. Diffusion-QL \citep{diffusionql} is similar to TD3+BC but swaps the auxiliary loss with a diffusion-centric objective. QGPO \citep{qgpo} views a pretrained diffusion behavior as the Bayesian prior in energy-guided sampling.
+
+\paragraph{Diffusion Models in Offline Reinforcement Learning.}
+Recent advancements in offline RL have identified diffusion models as an impactful tool. A primary strength of diffusion modeling lies in its robust generative capability, combined with a straightforward training pipeline  \citep{diffusion_beat_gan, xu2022geodiff, dreamfusion}. This renders it particularly suitable for modeling heterogeneous behavior datasets \citep{diffuser, diffusionql, dd, idql}, generating in-support actions for Q-learning \citep{arq, qgpo}, and representing multimodal policies \citep{sfbc, csbc}.
+
+However, a significant concern for integrating diffusion models into RL is the considerable time taken for sampling. Various strategies have been proposed to address this challenge, including employing a parallel sampling scheme during both training and evaluation \citep{sfbc}, utilizing a specialized diffusion ODE solver such as DPM-solver \citep{lu2022dpm,qgpo}, adopting an approximate diffusion sampling scheme to minimize sampling steps required \citep{efficientdiffusionrl}, and crafting high-throughput network architectures \citep{idql}. While these techniques offer improvements, they don't entirely eliminate the need for iterative sampling.
+
+\paragraph{Score Distillation Methods.}
+Recent developments in text-to-3D generation have enabled the transformation of textual information into 3D content without requiring any 3D training data \citep{dreamfusion, prolificdreamer}. This is realized by distilling knowledge from text-to-image diffusion models. A representative method in this domain is DreamFusion \citep{dreamfusion}. It optimizes a 3D NeRF model \citep{nerf} by ensuring its projected 2D gradient follows the score direction of a large-scale, pretrained 2D diffusion model \citep{imagen}. Similar to DreamFusion, SRPO also employs a diffusion model to guide the training of a subsequent network. However, our method emphasizes score regularization as opposed to score distillation. The behavior score is additionally incorporated to regularize the Q-gradient instead of being the only supervising signal.
+
+
+
+\section{Evaluation}
+
+\subsection{D4RL Performance}
+\begin{table*}[t]
+\centering
+\small
+\resizebox{1.0\textwidth}{!}{%
+\begin{tabular}{llcccccccccc}
+\toprule
+\multicolumn{1}{c}{\bf Dataset} & \multicolumn{1}{c}{\bf Environment} & \multicolumn{1}{c}{\bf BEAR} & \multicolumn{1}{c}{\bf TD3+BC} & \multicolumn{1}{c}{\bf IQL} & \multicolumn{1}{c}{\bf SfBC} & \multicolumn{1}{c}{\bf Diffuser} & \multicolumn{1}{c}{\bf Diffusion-QL}& \multicolumn{1}{c}{\bf QGPO} & \multicolumn{1}{c}{\bf IDQL} & \multicolumn{1}{c}{\bf SRPO (Ours)} \\
+\midrule
+Medium-Expert & HalfCheetah    &  $53.4$ &  $90.7$     &  $86.7$     & $\bf{92.6}$   & $79.8$       &  $\bf{96.8}$ & $\bf{93.5}$ & $\bf{95.9}$ & $\bf{92.2\pm3.0}$               \\
+Medium-Expert & Hopper         &  $96.3$ &  $98.0$     &  $91.5$     & $\bf{108.6}$  & $\bf{107.2}$ & $\bf{111.1}$ & $\bf{108.0}$ & $\bf{108.6}$ & $100.1\pm13.9$           \\
+Medium-Expert & Walker2d       & $40.1$  &  $\bf{110.1}$     & $\bf{109.6}$& $\bf{109.8}$  & $\bf{108.4}$ & $\bf{110.1}$ & $\bf{110.7}$ & $\bf{112.7}$ & $\bf{114.0\pm2.1}$           \\
+\midrule
+Medium        & HalfCheetah    &  $41.7$ &  $48.3$     &  $47.4 $    & $45.9$        & $44.2$       &  $51.1$ & $54.1$ & $51.0$ & $\bf{60.4\pm0.8}$           \\
+Medium        & Hopper         &  $52.1$ &  $59.3$     &  $66.3$     & $57.1$        & $58.5$ & $90.5$ & $\bf{98.0}$ & $65.4$ & $\bf{95.5\pm2.0}$ \\
+Medium        & Walker2d       &  $59.1$ &  $\bf{83.7}$     &  $78.3$     & $77.9$        & $79.7$ & $\bf{87.0}$ & $\bf{86.0}$ & $82.5$ & $\bf{84.4\pm4.4}$ \\
+\midrule
+Medium-Replay & HalfCheetah    &  $38.6$ &  $44.6$     &  $44.2$     &   $37.1$      & $42.2$ & $47.8$ & $47.6$ & $45.9$ & $\bf{51.4\pm3.4}$ \\
+Medium-Replay & Hopper         &  $33.7$ &  $60.9$     &  $94.7$     &   $86.2$      & $\bf{101.3}$ & $\bf{100.7}$ & $\bf{96.9}$ & $92.1$ & $\bf{101.2\pm1.0}$ \\
+Medium-Replay & Walker2d       &  $19.2$ &  $81.8$     &  $73.9$     &   $65.1$      & $61.2$ &  $\bf{95.5}$ & $84.4$ & $85.1$ & $84.6\pm7.1$ \\
+\midrule
+\multicolumn{2}{c}{\bf Average (Locomotion)}&  $51.9$ & $75.3$ & $76.9$ &   $75.6$ &      $75.3$ & $\bf{88.0}$ & $\bf{86.6}$ & $82.1$ & $\bf{87.1}$ \\
+\midrule
+Default       & AntMaze-umaze  &  $73.0$ & $78.6$ & $87.5$ & $92.0$   & - & $93.4$ & $\bf{96.4}$ & $\bf{94.0}$ & $\bf{97.1\pm2.7}$ \\
+Diverse       & AntMaze-umaze  &  $61.0$ & $71.4$ & $62.2$ & $\bf{85.3}$   & - & $66.2$ & $74.4$ & $80.2$ & $\bf{82.1\pm10.8}$ \\
+\midrule  
+Play          & AntMaze-medium &  $0.0$ & $10.6$ & $71.2$ & $\bf{81.3}$   & - & $76.6$ & $\bf{83.6}$ & $\bf{84.5}$ & $\bf{80.7\pm7.1}$ \\
+Diverse       & AntMaze-medium &  $8.0$ & $3.0$ & $70.0$ & $\bf{82.0}$   & - & $78.6$ & $\bf{83.8}$ & $\bf{84.8}$ & $75.0\pm12.3$ \\
+\midrule
+Play          & AntMaze-large  &  $0.0$ & $0.2$ & $39.6$ & $59.3$ & - & $46.4$ & $\bf{66.6}$ & $\bf{63.5}$ & $53.6\pm12.5$ \\
+Diverse       & AntMaze-large  &  $0.0$ & $0.0$ & $47.5$ & $45.5$ & - & $56.6$ &  $\bf{64.8}$ & $\bf{67.9}$ & $53.6\pm6.3$ \\
+\midrule
+\multicolumn{2}{c}{\bf Average (AntMaze)}&  $23.7$ & $27.3$ & $63.0$ &   $74.2$&   -   &  $69.6$ & $\bf{78.3}$ & $\bf{79.1}$ & $73.6$ \\
+\bottomrule
+\end{tabular}
+}
+\caption{Evaluation numbers of D4RL benchmarks (normalized as suggested by \citet{d4rl}). We report mean ± standard deviation of algorithm performance across 6 random seeds at the end of training. Numbers within 5 \% of the maximum in every individual task are highlighted.}
+\label{tbl:rl_results}
+\end{table*}
+
+In Table \ref{tbl:rl_results}, we evaluate the D4RL performance \citep{d4rl} of SRPO against other offline RL algorithms. Our chosen benchmarks include conventional methods like BEAR \citep{bear}, TD3+BC \citep{td3+bc}, and IQL \citep{iql}, which feature extracting a Gaussian/Dirac policy for evaluation. We also look at newer diffusion-based offline RL techniques, such as Diffuser \citep{diffuser}, DIffusion-QL \citep{diffusionql}, SfBC \citep{sfbc}, QGPO \citep{qgpo}, and IDQL \citep{idql}. These methods tend to be more computationally intensive but generally offer better results.
+
+Of all the baselines, our comparison with IDQL is particularly informative. This is because SRPO shares a virtually identical training pipeline and model architecture for critic and behavior models with IDQL, as is deliberately crafted. The most significant distinction lies in their approaches for extracting policy: IDQL skips the policy extraction step, choosing to evaluate directly with the behavior policy, using a selecting-from-behavior-candidates technique \citep{sfbc}. In contrast, SRPO extracts a Dirac policy from behavior and critic models. 
+
+\begin{wrapfigure}{r}{0.49\textwidth}
+    \centering
+    \includegraphics[width=0.49\linewidth]{pics/plot_figures/hopper-medium-replay-v2_plot.pdf}
+    \includegraphics[width=0.49\linewidth]{pics/plot_figures/walker2d-medium-expert-v2_plot.pdf} \\
+    \includegraphics[width=0.49\linewidth]{pics/plot_figures/halfcheetah-medium-v2_plot.pdf}
+    \includegraphics[width=0.49\linewidth]{pics/plot_figures/antmaze-umaze-diverse-v2_plot.pdf} \\
+    \caption{Training curves of SRPO (ours) and several baselines.}
+    \label{fig:sampled_plots}
+\end{wrapfigure}
+
+Overall, SRPO consistently surpasses referenced baselines that also utilize a Gaussian (or Dirac) inference policy, leading by large margins in the majority of tasks. It also comes close to matching the benchmarks set by other state-of-the-art diffusion-based methods, such as Diffusion-QL and IDQL, though it features a much simpler inference policy. Moreover, in the case of the convergence rate and training stability, we showcase training plots of SRPO alongside several baselines in Figure \ref{fig:sampled_plots}. Results also suggest that compared with both weighted regression methods like IQL and reverse-KL-based optimization strategies like Diffusion-QL, SRPO exhibits more favorable attributes. We attribute the performance gain of SRPO to the utilization of diffusion behavior modeling, which facilitates a more effective realization of the training formulation. 
+\newpage
+\subsection{Computational Efficiency}
+\begin{wrapfigure}{r}{0.49\textwidth}
+    \centering
+    \includegraphics[width=0.49\linewidth]{pics/Training_time.pdf}
+    \includegraphics[width=0.49\linewidth]{pics/Inference_time.pdf}
+    \caption{Training and inference (evaluation) time required for different algorithms in D4RL locomotion tasks. All experiments are conducted with the same PyTorch backend and the same computing hardware setup.}
+    \label{fig:time}
+\end{wrapfigure}
+
+As indicated by Figure \ref{fig:computation} and \ref{fig:time}, SRPO maintains high computational efficiency, especially fast inference speed, while enabling the use of a powerful diffusion model. Notably, the action sampling speed of SRPO is 25 to 1000 times faster than that of other diffusion-based methods. Additionally, its computational FLOPS amount to only 0.25\% to 0.01\% of other methods. This makes SRPO ideal for computation-sensitive contexts such as robotics. It also speeds up experimentation, since policy evaluation typically consumes over half of the experiment duration for previous diffusion-based approaches. This efficiency stems from SRPO's design, which completely avoids diffusion sampling throughout both training and evaluation procedures.
+\subsection{Ablation Studies}
+\label{sec:ablation}
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{pics/Mujoco_ablation.pdf}
+    \includegraphics[width=\linewidth]{pics/Antmaze_ablation.pdf}
+    \includegraphics[width=\linewidth]{pics/visual_wt.pdf}
+    \caption{Ablation for implementation details of \Eqref{eq:final_policy_extraction_loss}. All results are averaged under 6 random seeds.}
+    \label{fig:ablation}
+\end{wrapfigure}
+
+\paragraph{Weighting function $\omega(t)$.} 
+As is explained in Section \ref{sec:practical_policy}, if $\omega(t) \propto \delta(t-0.02)$, the surrogate objective nearly recovers the original one, which could guarantee convergence to the wanted optimal policy $\pi^*$. Adjusting $\omega(t)$ to ensemble diffused behavior score at various times $t\in(0,1)$ might yield a smoother and more robust gradient landscape. However, it biases the original training objective. In an extreme case where $\omega(t)\propto\delta(t-0.98)$, the estimated behavior score almost becomes the score function of pure Gaussian distribution, making it entirely helpless. From Figure \ref{fig:ablation}, we empirically observe that Antmaze tasks are sensitive to variation of $\omega(t)$, while Locomotion tasks are not. Overall, we find $\omega(t)=\sigma_t^2$ is a suitable choice for all tested tasks and choose it as the default hyperparameter throughout our experiments. This hyperparameter choice is consistent with previous literature \citep{dreamfusion}.
+
+\paragraph{Subtracting baselines $\epsilonv$.} In Figure \ref{fig:ablation}, we show that subtracting baselines $\epsilonv$ from the estimated behavior gradient, as is described in \Eqref{eq:final_policy_extraction_loss}, consistently offers slightly better performance.
+
+\paragraph{Temperature coefficient $\beta$ and others.} Varying $\beta$ directly controls the conservativness of policy, and thus influences the performance.
+
+
+\section{Conclusion}
+
+In this paper, we introduce Score Regularized Policy Optimization (SRPO), an innovative offline RL algorithm harnessing the capabilities of diffusion models while circumventing the time-consuming diffusion sampling scheme. SRPO tackles the behavior-regularized policy optimization problem and provides a computationally efficient way to realize behavior regularization through diffusion behavior modeling. The fusion of SRPO with techniques like implicit Q-learning can further solidify its application in computationally sensitive domains, such as robotics. 
+\newpage
+
+

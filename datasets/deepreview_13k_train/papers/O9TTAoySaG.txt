@@ -1,0 +1,217 @@
+\title{Simulating, Fast and Slow: Learning Policies for Black-Box Optimization}
+
+\begin{abstract}
+In recent years, solving optimization problems involving black-box simulators has become a point of focus for the machine learning community due to their ubiquity in science and engineering. The simulators describe a forward process $f_{\mathrm{sim}}: (\vpsi, \vx) \rightarrow \vy$ from simulation parameters $\vpsi$ and input data $\vx$ to observations $\vy$, and the goal of the optimization problem is to find parameters $\vpsi$ that minimize a desired loss function. Sophisticated optimization algorithms typically require gradient information regarding the forward process, $f_{\mathrm{sim}}$, with respect to the parameters $\vpsi$. However, obtaining gradients from black-box simulators can often be prohibitively expensive or, in some cases, impossible. 
+Furthermore, in many applications, practitioners aim to solve a set of related problems. Thus, starting the optimization \emph{ab initio}, i.e. from scratch, each time might be inefficient if the forward model is expensive to evaluate.
+To address those challenges, this paper introduces a novel method for solving classes of similar black-box optimization problems by learning an active learning policy that guides a differentiable surrogate's training and uses the surrogate's gradients to optimize the simulation parameters with gradient descent. After training the policy, downstream optimization of problems involving black-box simulators requires up to $\sim$90\% fewer expensive simulator calls compared to baselines such as local surrogate-based approaches, numerical optimization, and Bayesian methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Across many science and engineering fields, such as medical imaging \citep{pineda2020active, bakker2020greedy, bakker2022multi}, wireless applications \citep{choi2017compressed, sankararajan2022compressive, pezeshki2022beyond, hoydis2023learning, orekondy2023winert}, particle physics \citep{stakia2021particle, fanelli2022ioncollider, dorigo2023diff, gorordo2023llp}, and molecular dynamics \citep{jonas2019molinv} and design \citep{schwalbekoda2021advmol}, practitioners often face the challenge of inferring unknown properties of a system from observed data \citep{cranmer2020sbi}. 
+In most cases, these settings involve a forward physics-based black-box simulator\footnote{In our study, we consider stochastic and non-stochastic simulators. Our method applies to both types of simulators without requiring any modifications.} $f_{\mathrm{sim}}: (\bm{\psi}, \bm{x}) \rightarrow \bm{y}$ which maps simulation parameters $\bm{\psi}$ and input data $\bm{x}$ to observations $\bm{y}$ \citep{shirobokov2020lgso}. 
+For instance, in particle physics, optimizing the detector geometry to reduce the number of detected events from certain types of particles is crucial to designing an experiment. To that aim, $f_{\mathrm{sim}}$ simulates the detection of particles $\bm{y}$ given their properties, $\bm{x}$, and detector settings, $\bm{\psi}$. 
+Similarly, in wireless communication, placing a transmitter such that it provides best coverage to a set of users is a recurring problem, for large-scale network planning as well as wifi router placement.
+To tackle this problem, $f_{\mathrm{sim}}$ models the received signal $\bm{y}$ at specific locations, given environment conditions $\bm{x}$ (e.g., receiver positions, material properties of the surroundings) and the transmitter position $\bm{\psi}$. All these examples require solving an optimization problem involving a black-box simulator to find the experiment parameters $\bm{\psi}$ that provide the desired observations. 
+
+Although these simulators faithfully model the known physical behavior of a system, they are often computationally expensive to run. Therefore, solving 
+black-box optimization problems with a minimal number of simulator calls is desirable.
+When objective functions are (approximately) differentiable, we can use their gradients to guide the optimization process. For appropriate loss landscapes, notably those that are convex, this can achieve strong optimization performance \citep{avila2018diffphys, hu2019robots, degrave2019diffrob}. However, many applications involve non-differentiable or, from the perspective of the practitioner, complete black-box simulators \citep{lei2017elec, cranmer2020sbi, omidvar2022bbopt, dorigo2023diff}. In such cases, gradient-free optimization can be employed, for instance, by using evolutionary strategies \citep{banzhaf1998genetic, mahesw2019evo}, or Bayesian optimization \citep{oh2018bock, daxberger2020mvbo}. To utilize gradient-based optimization, one relies on numerical differentiation \citep{alarie2021bbo, shi2023numdiff} or stochastic gradient estimation methods \citep{williams1992reinforce, grathwohl2018void, mohamed2020mcge, louppe2019advaropt, agrawal2023multifidelity} to obtain approximate gradients.
+
+ \begin{figure}[t]
+  \includegraphics[width=\linewidth]{figures/fig_approach.png}
+  \caption{\textbf{Schematic view of our approach}. (a) We study black-box optimization problem (over parameters $\bm{\psi}$), with an emphasis on using gradient information from a fast differentiable surrogate $f_\phi$ (b) To optimize $\bm{\psi}$ sample-efficiently, we employ a policy $\pi_\theta$ to actively determine whether retraining the surrogate is necessary before using the gradient information.}
+  \label{fig:approach}
+\end{figure}
+
+In this paper, we focus on stochastic gradient estimation techniques for black-box optimization. Inspired by \citet{shirobokov2020lgso}, our approach involves leveraging gradients from a surrogate model trained to (locally) mimic the black-box simulator\footnote{The simulator can be either stochastic or deterministic.}. 
+Gradient-based methods typically perform multiple simulator calls to estimate the gradients, thus making these approaches computationally demanding. To mitigate such a demand, we aim to minimize the number of required simulator calls by proposing to learn a \emph{policy} to guide the optimization. The policy determines whether the current surrogate model (fast) can be used or instead a simulator call is necessary to update the surrogate (slow), see~\Figref{fig:approach}. Furthermore, by drawing inspiration from the literature on active learning \citep{lal2015orig, lal2017, lal2017dqn, ravi2018meta, lal2018metarl, lal2018imit, lal2018uci, bakker2023lal} we also let our policy learn how to sample new data for training the local surrogate model. This offers additional control, which the policy may learn to exploit.
+
+Our contribution can be summarized as follows: i) We introduce a \ac{RL} framework to learn a policy to reduce the number of computationally expensive calls to a black-box simulator required to solve an optimization problem; ii) We propose to learn a policy that determines when a simulator call is necessary to update the surrogate and when the current surrogate model can be used instead; iii) We implement a policy that also learns how to sample new data for training the surrogate model during the optimization process; iv) We assess the benefits of our RL-based approach on low- and high-dimensional global optimization benchmark functions and two real-world black-box simulators and show that our policy reduces the number of simulator calls up to $\sim$90\% , compared to the baselines.
+
+
+\section{Related work}
+
+
+\paragraph{Simulation-based Inference}
+Our work lies at the intersection of black-box simulator-based optimization and active learning. Black-box optimization problems are ubiquitous in science and engineering, encompassing scenarios where unknown parameters must be deduced from observational data. These parameters can entail anatomies in MRI \citep{zbontar2018fastmri}, molecular structures \citep{jonas2019molinv}, particle properties \citep{agostinelli2003geant, stakia2021particle}, and cosmological model parameters \citep{cole2022sbi}, among others. The forward process is often a complex physical process that can be modelled by a simulator but does not provide a likelihood for easy inference. Simulation-based inference techniques aim to infer posterior distributions over these simulation parameters in such likelihood-free settings \citep{brookes2019sbilite, cranmer2020sbi, cole2022sbi}. Other solutions may involve supervised learning on observation-parameter pairs or imitation learning \citep{jonas2019molinv, sriram2020varnet}.
+Our simulator-based optimization setting is a variation on these problems. Here, the objective is to find the optimal parameters of the simulator, where optimality is typically formulated in terms of desired observations. This methodology can be applied in various fields, such as MRI \citep{pineda2020active, bakker2020greedy, bakker2022multi}, particle physics \citep{stakia2021particle, fanelli2022ioncollider, dorigo2023diff, gorordo2023llp} and molecular design \citep{schwalbekoda2021advmol}. When the simulators are differentiable, direct gradient-based optimization can perform well \citep{avila2018diffphys, hu2019robots, degrave2019diffrob}. However, a different approach is necessary in cases where the simulators are non-differentiable. Well-known gradient-free methods that may be employed in such settings include evolutionary strategies \citep{banzhaf1998genetic, mahesw2019evo} and Bayesian optimization \citep{frazier2018tutorial, oh2018bock, eriksson2019bo, daxberger2020mvbo}. Nevertheless, these methods often require additional assumptions to make the optimization scalable in high dimensional parameter spaces \citep{djolonga2013bo, zhang2019bo}.
+
+\paragraph{Approximate-Gradient Optimization}
+With the rise of deep learning, there has been a surge of interest in approximate-gradient optimization methods. While some authors consider numerical differentiation \citep{alarie2021bbo, shi2023numdiff}, many others have focused on methods for efficiently obtaining approximate stochastic gradients \citep{williams1992reinforce, grathwohl2018void, ruiz2018learning, mohamed2020mcge, louppe2019advaropt, agrawal2023multifidelity}. Another strategy involves training differentiable surrogate models to mimic the simulator and assuming that the gradients of the surrogate model are similar enough to those of the simulator \citep{shirobokov2020lgso}. Surrogate models have been trained for many applications, including wireless propagation modeling \citep{levie2021radiounet, orekondy2023winert}, space weather prediction \citep{baydin2023space}, material discovery \citep{deepmind2023gnome}, and fluid dynamics simulation \citep{agrawal2024probabilistic}. This trend provides an opportunity for surrogate-based optimization of simulators, as surrogate models are readily available. Additionally, it has been observed by \citet{shirobokov2020lgso} that using (local) surrogate gradients is more efficient than many alternatives. Our work generalizes this setup by introducing a policy that guides the optimization by suggesting when and, optionally, how the surrogate should be updated during the optimization process.
+
+\paragraph{Active Learning} 
+When the policy decides how the surrogate should be updated, it does so using information provided by the surrogate. This is an example of active learning \citep{settles2009al}, where the current instance of a task model (the surrogate) affects the data it sees in future training iterations. In particular, our policies are instances of \textit{learning active learning}, where a separate model (our policy) is trained to suggest the data that the task model should be trained on \citep{lal2015orig, lal2017, lal2017dqn, ravi2018meta, lal2018metarl, lal2018imit, lal2018uci, bakker2023lal}.
+
+
+\section{Background}
+
+
+We aim to optimize the simulation parameters of a black-box simulator using stochastic gradient descent. 
+The black-box simulator, $f_{\mathrm{sim}}$, describes a stochastic process\footnote{A non-stochastic simulator can be considered as a special case where $f_{\mathrm{sim}}$ places a delta distribution over observations.}, $p(\bm{y}|\bm{\psi}, \bm{x})$, from which we obtain the observations as $\bm{y}\ =\ f_{\mathrm{sim}}(\vpsi, \vx) \sim p(\bm{y}|\bm{\psi}, \bm{x})$, where $\bm{x} \sim q(\bm{x})$ is a stochastic input and $\vpsi$ is the vector of simulation parameters. 
+Since, these simulators are typically not differentiable, we train a surrogate neural network to locally (in $\bm{\psi}$) approximate the simulator \citep{shirobokov2020lgso}. Gradients of these local surrogates, obtained through automatic differentiation, might then be used to perform the optimization over $\bm{\psi}$. 
+The goal is now to minimize an expected loss $\mathcal{L}$ over the space of the simulation parameters $\bm{\psi}$. As the functional form of the simulator is generally unknown, this expectation cannot be evaluated exactly and is instead estimated using $N$ Monte Carlo samples:
+\begin{align}
+    \bm{\psi}^* = \argmin_{\bm{\psi}} \mathbb{E} \left[ \mathcal{L}(\bm{y}) \right] &= \argmin_{\bm{\psi}} \int \mathcal{L}(\bm{y}) \, p(\bm{y}|\bm{\psi}, \bm{x}) \, q(\bm{x}) \, d\bm{x} \, d\bm{y}, \\
+    &\approx \argmin_{\bm{\psi}} \, \frac{1}{N} \, \sum_{i=1}^N \mathcal{L}(f_{\mathrm{sim}}(\bm{\psi}, \bm{x}_i)).
+\end{align}
+After training a neural network surrogate $f_\phi: (\bm{\psi}, \bm{x}, \bm{z}) \rightarrow \bm{y}$ on data generated with $f_{\mathrm{sim}}$, the optimization might be performed following gradients of the surrogate. Here, $\bm{z}$ is a randomly sampled latent variable that accounts for the stochasticity of the simulator. Gradients are then estimated as:
+\begin{equation} \label{eq:surr_grad}
+    \nabla_{\bm{\psi}} \mathbb{E} \left[ \mathcal{L}(\bm{y}) \right] \approx \frac{1}{N} \, \sum_{i=1}^N \, \nabla_{\bm{\psi}} \, \mathcal{L} \left( f_\phi(\bm{\psi}, \bm{x}_i, \bm{z}_i) \right).
+\end{equation}
+Since running the forward process $f_{\mathrm{sim}}$, is often an expensive procedure, our goal is to minimize the number of simulator calls required to solve the optimization problem at hand. 
+
+
+
+\section{Policy-based Black-Box Optimization}
+
+
+Following \citet{shirobokov2020lgso}, we perform an iterative optimization based on the gradients obtained in ~\Eqref{eq:surr_grad}. At each point during the optimization, new values $\bm{\psi}_j$ are sampled within a box of fixed size $\epsilon$, centered around the current $\bm{\psi}$: $U_\epsilon^{\bm{\psi}} = \{\bm{\psi}_j; |\bm{\psi }_j-\bm{\psi}|\leq \epsilon\}$. Then, input samples are obtained from $q(\vx)$, and the simulator is called to obtain the corresponding $\bm{y}$ values. The resulting samples are stored in a history buffer $H$, from which the surrogate is trained from scratch.
+Specifically, the surrogate is trained on samples extracted from $H$ that satisfies the condition that $\bm{\psi}_j$ lies within $U_\epsilon^{\bm{\psi}}$. The overall process required to generate new samples from the black-box simulator is what we refer to as a ``\emph{simulator call}''.
+
+\paragraph{Policy-based Approach}
+We propose further reducing the number of simulator calls required for an optimization run with an \ac{RL}-based approach. Our method involves utilizing a learned policy $\pi_\theta$, with learnable parameters $\theta$ to: i) decide whether a simulator call should be performed to retrain the local surrogate; and ii) define how to sample from the black-box simulator. 
+
+\paragraph{Sampling Strategy}
+To investigate the question concerning \textit{how} to perform a simulator call, we train policies to additionally output the $\epsilon$ for constructing the sampling neighbour $U_\epsilon^{\bm{\psi}}$, which serves as our data acquisition function. 
+As $\epsilon$ parameterizes this acquisition function, such policies are an example of active learning \citep{settles2009al}. In particular, these policies are instances of learning active learning \citep{lal2015orig, lal2017, lal2017dqn, ravi2018meta, lal2018metarl, lal2018imit, lal2018uci, bakker2023lal}, as they learn a distribution over $\epsilon$. See~\Twosuppref{sup:policy}{sup:ppo} for a more detailed description concerning the policy implementation and training.
+
+\paragraph{State Definition}
+We formalize the sequential optimization process as an episodic \ac{MDP}. The state $s_t$ (at timestep $t$) is given by the tuple $(\bm{\psi}_t, t, l_t, \sigma_t)$, where $\bm{\psi}_t$ is the current parameter value, $l_t$ is the number of simulator calls already performed in the episode, and $\sigma_t$ is some measure of uncertainty produced by the surrogate. 
+
+\paragraph{Action Definition}
+Actions $a_t$ consist of binary valued variables $b \in \{0, 1\}$, sampled from a Bernoulli distribution, where $1$ represents the decision to perform a simulator call. Additionally, we also train policies to determine, as part of the action, the trust region size for sampling new values for $\bm{\psi}$. The dynamics of the \ac{MDP} is represented by means of the Adam optimizer~\citep{kingma2014adam} which updates the current state by performing a single optimization step in the direction of the gradients of $\vpsi$. 
+
+\paragraph{Reward Design}
+Episodes come to an end under three conditions: $\mathcal{A)}$ when the optimization reaches a parameter for which $\mathbb{E} \left[ \mathcal{L}(\bm{y}) \right]$ is below the target value $\tau$ (we call this \textit{termination} - see~\Appref{sup:term_val} for details concerning the choice of $\tau$); $\mathcal{B)}$ when the maximum number of timesteps $T$ is reached; or $\mathcal{C)}$ when the policy hits the available budget for simulator calls $L$. To incentivize reducing the number of simulator calls, rewards $r(s_t, a_t, s_{t+1})$ are $0$ if $b=0$ and $-1$ if $b=1$. Additionally, a reward penalty is added when $\mathcal{B)}$ or $\mathcal{C)}$ occur to promote termination. The penalty is $-(L-l_t)-1$ when $\mathcal{B)}$ occurs and $-1$ when $\mathcal{C)}$ occurs. This ensures the sum-of-rewards for non-terminating episodes is $-L-1$. We have observed that using reward penalties based on $l_t$ rather than $t$ improves training stability. We refer the reader to~\Appref{sup:rew_design} for further details concerning the reward design. 
+
+\paragraph{Local Surrogate}
+The decision to perform a simulator call should rely on the quality of the local surrogate. A well-fitted surrogate to the simulator at the current $\bm{\psi}$ will presumably provide useful gradients, so gathering additional data and retraining is unnecessary. Vice-versa, a badly fitted surrogate will likely not provide useful gradients and may be worth retraining, even if a simulator call is expensive. We use the uncertainty feature $\sigma$ to provide this information. 
+
+\paragraph{Local Surrogate Ensemble}
+To construct $\sigma$, we replace the local surrogate with an ensemble of local surrogates, all trained on and applied to the same input data. The use of an ensemble empowers our approach with the ability to estimate uncertainties without the overhead of training a posterior network as in the case of Bayesian models~\citep{lakshminarayanan2017simple,fort2019deep}. Each surrogate is implemented as a two-layer \ac{MLP} with \ac{ReLU} activation function. Therefore, the additional resource requirement for training an ensemble instead of a single surrogate is negligible. 
+As the input, we use the tuple $(\vpsi, \vx, \vz)$, where $\vz$ is sampled from diagonal Normal distribution. 
+
+\paragraph{Uncertainty Feature}
+We compute the prediction mean per surrogate on $D$ samples as $\bm{\bar{y}} = \frac{1}{D} \, \sum_{i=1}^D \left[ f_\phi(\bm{\psi}, \bm{x}_i, \bm{z}_i) \right]$, and construct $\sigma$ as the standard deviation over these mean predictions. 
+Specifically, $\vz$ accounts for the stochasticity of $f_{\mathrm{sim}}$. Such an idea allows us to dramatically simplify the surrogate architecture compared to \citet{shirobokov2020lgso}. Training GANs~\citep{shirobokov2020lgso} is notoriously more challenging than training a shallow MLP due to instabilities and mode collapse. Nonetheless, our ``simpler'' surrogate has enough capacity to locally approximate highly complex stochastic, and non-stochastic, simulators. See~\Appref{sup:surrogate} for further details concerning models implementation.
+
+
+
+\section{Experimental Results}
+
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{figures/probabilistic_three_hump_opt_traj_1.png}
+  \caption{\textbf{Loss landscape and learned optimization trajectory for the Probabilistic Three Hump problem}. The yellow region denotes $\bm{\psi}$ values that lead to termination. The $\epsilon=0.5$ neighbour around $\bm{\psi}_0$ (black cross) is visualized as the red box. 
+  Light green and blue arrows represent gradients from the surrogate or after a simulator call, respectively.}
+  \label{fig:main_three_hump_psi_opt_traj}
+\end{figure}
+To assess the performance of our method, we test it on two different types of experiments.
+
+First, we consider stochastic versions of benchmark functions available in the optimization literature~\citep{jamil2013literature}. We consider the Probabilistic Three Hump, the Rosenbrock, and the Nonlinear Submanifold Hump problems. 
+These benchmark functions are relevant for two reasons:
+(i) they allow us to compare our models against baselines on similar settings as in~\citep{shirobokov2020lgso}; and
+(ii) they allow to easily gain insights into models performance. Especially, since the Probabilistic Three Hump problem is a two dimensional problem, i.e.~$\vpsi \in \mathbb{R}^2$, we are able to conveniently visualize the objective landscape as well as the optimization trajectories. Furthermore, the Rosenbrock and Nonlinear Submanifold Hump problems allow us to test our approach on high-dimensional, more complex, problems before moving to real-world black-box simulators. 
+
+The second type of experiments concerns real-world black-box simulators. We consider applications from two different scientific fields, namely the \textit{Indoor Antenna Placement} problem for wireless communications and the \textit{Muon Background Reduction} problem for high energy physics.   
+\paragraph{Baselines}
+We compare our method against three baselines. We consider Bayesian optimization using Gaussian processes with cylindrical kernels~\citep{oh2018bock}, numerical differentiation with gradient descent, and local surrogate-based methods (L-GSO)~\citep{shirobokov2020lgso}. Furthermore, to guarantee a fair comparison against our models, we formulated an ensemble version\footnote{L-GSO-E averages the gradients over the ensemble. The model does not leverage any uncertainty since it always calls the black-box simulator.} (L-GSO-E) of the local surrogate for L-GSO. 
+\paragraph{Our Models}
+Policy methods are split into those that only output \textit{when} to perform a simulator call, $\pi$-E, and those that also output \textit{how} to sample $\vpsi$ values by providing the neighbour size, $\epsilon$, that parameterizes the acquisition function, $\pi_{AL}$-E. L-GSO, its ensemble version (L-GSO-E), and $\pi$-E use a fixed value for $\epsilon$ that depends on the problem at hand (see~\Appref{sup:sim}).
+Finally, $\pi_{AL}^G$-E is a version of $\pi_{AL}$-E where the surrogate ensemble is always warm-started from the previous training step, such that the surrogate is continuously improved along the observed trajectories through $\bm{\psi}$-space (see~\Appref{sup:policy} for more details). 
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/benchmark_function_results_3.pdf}
+  \caption{\textbf{Benchmark function results}. 
+  \textbf{Top} row: Probabilistic Three Hump problem. \textbf{Middle} row: Rosenbrock problem. \textbf{Bottom} row: Nonlinear Submanifold Hump Problem.
+  AMO (the lower the better) concerning (a) a fixed and (c) a parameterized $\vx$ distribution. ANC (the lower the better) regarding (b) a fixed and (d) a parameterized $\vx$ distribution. Uncertainties are quantified over evaluation episodes and different random seeds.}
+  \label{fig:benchmark_function_results}
+\end{figure}
+\paragraph{Metrics}
+We report experimental results by using two different metrics: the Average Minimum of the Objective function (AMO) for a specific budget of simulator calls and the Average Number of simulator Calls (ANC) required to terminate an episode. The first quantity answers the question: \emph{What is the lowest value for the objective function achievable for a given budget of simulator calls?}; that might be used as an indicator of the efficacy of each simulator call. The second quantity answers the question: \emph{What is the simulator call budget required, on average, to solve a black-box optimization problem?}; that might indicate how good the policy is at leveraging the surrogate and understanding its reliability. Therefore, those two metrics allow us to benchmark our approach against others by looking at relevant quantities (see~\Appref{sup:metrics} for more details).
+
+\subsection{Benchmark Functions}
+We consider a fixed and a parameterized input distribution for each benchmark function. Specifically, the latter setup corresponds to solving an entire family of related optimization problems each characterized by a different input distribution, $q_i(\vx)$. 
+During training and evaluation of the policy, each episode is characterized by a different input distribution. In what follows we report the definition for each benchmark function only. A more detailed description can be found in~\Appref{sup:sim}.
+
+\paragraph{Probabilistic Three Hump Problem}
+As mentioned in the introduction to the section, the Probabilistic Three Hump problem concerns the optimization of a 2-dimensional vector $\vpsi$. Specifically, the goal is to find $\vpsi^*$ such that: 
+$\vpsi^* = \mathrm{arg\ min}_\vpsi \mathbb{E}[\mathcal{L}(y)]=\mathrm{arg\ min}_\vpsi\ \mathbb{E}[\sigma(y-10)-\sigma(y)]$, where $\sigma$ is the sigmoid function and $\vy$, the observations vector, is given by: $y \sim \mathcal{N}(y;\ \mu_i, 1), \, i \in \{1, 2\}$.  
+
+Being $\vpsi$ a 2-dimensional vector, its optimization trajectory is amenable to visualization.~\Figref{fig:main_three_hump_psi_opt_traj} illustrates that a fully trained policy can exploit the local-surrogate as much as possible and only perform a simulator call when the model is far from the initial training location (red square in~\Figref{fig:main_three_hump_psi_opt_traj}). 
+Intuitively, such behaviour is foreseen. The surrogate model is expected to provide meaningful gradients in proximity to the $\vpsi$ region where it was previously trained. 
+However, as we move away from that region, we expect the quality of the gradients to decline until a simulator call is triggered and the local-surrogate re-trained. However, moving away from the last training region is not the sole condition that might trigger a simulator call. For instance, towards the end of the trajectory, the policy decides to call the simulator twice to gather more data to train the surrogate and then calls the simulator again before ending the episode, indicating that a rapidly changing loss landscape may also trigger a simulator call.
+
+\paragraph{Rosenbrock Problem}
+In the Rosenbrock problem, we aim to optimize $\vpsi \in \mathbb{R}^{10}$ such that: $\vpsi^* = \mathrm{arg\ min}_\vpsi\ \mathbb{E}[\mathcal{L}(y)]=\mathrm{arg\ min}_\vpsi\ \mathbb{E}[y]$; where $y$ is given by: $y \sim \mathcal{N} (y;\ \gamma+ x,\ 1)$, where $\gamma = \sum^{n-1}_{i=1} \left[ (\psi_i-\psi_{i+1})^2 + (1 - \psi_i )^2 \right]$.
+\paragraph{Nonlinear Submanifold Hump Problem}
+This problem share a similar formulation to the Probabilistic Three Hump problem. However, the optimization is realized by considering the embedding $\hat{\vpsi}=\mB\ \mathrm{tanh}(\mA \vpsi)$, where $\mA \in \mathbb{R}^{16 \times 40}$ and $\mB \in \mathbb{R}^{2 \times 16}$, of the vector $\vpsi \in \mathbb{R}^{40}$. Subsequently, $\hat{\vpsi}$ is used in place of $\vpsi$ in the Probabilistic Three Hump problem definition.  
+\subsection{Real-world Simulators}\label{sec:real_w_s}
+We now focus on real-world optimization problems involving computationally expensive, non-differentiable black-box simulators. First, we look at the field of wireless communications considering two settings with a (non-stochastic) wireless ray tracer~\citep{matlab2022}. Then, we move to the world of subatomic particles and solve a detector optimization problem for which we use the high energy physics toolkits Geant4~\citep{agostinelli2003geant} (stochastic simulator) and FairRoot~\citep{alturany2012}. 
+
+\paragraph{Wireless Communication: Indoor Transmitting Antenna Placement}
+We study the problem of optimally placing a transmitting antenna in indoor environments to maximize the signal strength at multiple receiver locations.
+Determining the signal strength in such a scenario typically requires a wireless ray tracer (\citep{matlab2022} in our case), which takes as input the transmit location candidate $\vpsi \in \sR^3$, alongside other parameters (e.g., receive locations, 3D mesh of scene).
+To predict the signal strength for a particular \textit{link} (i.e., a transmit-receive antenna pair), the ray tracer exhaustively identifies multiple propagation paths between the two antennas and calculates various attributes of each path (e.g., complex gains, time-of-flight).
+The signal strength is computed from the coherent sum of the complex-valued gains of each path impinging on the receive antenna and is represented in log-scale (specifically, dBm).
+Optimally placing the transmit antenna is typically slow, as it amounts to naively and slowly sweeping over transmit location choices $\vpsi$ and observing the simulated signal strengths.
+Instead, we employ our approach to ``backpropagate'' through the the surrogate and perform gradient descent steps on the location $\vpsi$.
+Specifically, we consider two indoor scenes for this experiment and investigate how to use our approach to find an optimal transmit location that maximizes signal strength in the 3d scene (column (a) in~\Figref{fig:wireless_res}).
+The end goal in both cases is to find an optimal transmit antenna location $\vpsi$ that maximizes the median signal strength calculated over a distribution of receive locations $\vx \sim q(\vx)$ (see~\Appref{sup:real_world_sim} for more details concerning simulations).
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/wireless_results_2.pdf}
+  \caption{\textbf{Wireless ray-tracing results}. (a) Rendering of the indoor environment, (b) AMO (the lower the better), and (c) ANC (the lower the better). Uncertainties are quantified over evaluation episodes and different random seeds. \textbf{Top} row: Conference room environment. \textbf{Bottom} row: Office room environment.}
+  \label{fig:wireless_res}
+\end{figure}
+
+\paragraph{Physics: Muon Background Reduction}
+We consider the optimization of the active muon shield for the SHiP experiment~\citep{lantwin2017}. 
+Typically, optimizing a detector is a crucial step in designing an experiment for particle physics. For instance, the geometrical shape, the intensity and orientation of magnetic fields, and the materials used to build the detector play a crucial role in defining the detector's ``sensitivity'' to specific types of particle interactions, i.e. events.
+Observed events are usually divided into signal, i.e., interactions physicists are interested in studying, and ``background'', i.e., events that are not of any interest and that might reduce the detector's sensitivity. Concerning the SHiP experiment, muons represent a significant source of background; therefore, it is necessary to shield the detector against those particles.
+The shield comprises six magnets, left image in~\Figref{fig:ship_res}, each described by seven parameters. Hence, $\vpsi \in \mathbb{R}^{42}$. To run the simulations, we use the Geant4~\citep{agostinelli2003geant} and FairRoot~\citep{alturany2012} toolkits. The input distribution $\vx$ describes the properties of incoming muons\footnote{Concerning the muons distribution, we use the same dataset as in~\citet{shirobokov2020lgso}. 
+The dataset is available for research purposes.}. Specifically, as in~\citep{shirobokov2020lgso}, we consider the momentum ($P$), the azimuthal ($\phi$) and polar ($\theta$) angles with respect to the incoming $z$-axis, the charge $Q$, and $(x, y, z)$ coordinates. The goal is to minimize the expected value of the following objective function: 
+
+\begin{align}
+\mathcal{L}(\vy;\valpha) = \sum^{N}_{i=1} \mathbb{I}_{Q_i=1}\sqrt{(\alpha_1 - (\vy_i + \alpha_2))/\alpha_1} + \mathbb{I}_{Q_i=-1}\sqrt{(\alpha_1 + (\vy_i - \alpha_2))/\alpha_1} 
+\end{align}
+
+where $\mathbb{I}$ is the indicator function, $\alpha_1$ and $\alpha_2$ are known parameters defining the sensitive region of the detector, and $Q$ and $\vy$ represent the electric charge and the coordinates of the observed muons, respectively. Minimizing $\mathcal{L}(\vy;\valpha)$ corresponds to minimize the number of muons hitting the sensitive region of the detector.
+\subsection{Results \& Discussion}
+Concerning the problems involving benchmark functions, policy-based methods achieve the highest performance in both scenarios with fixed and parameterized $\vx$-distributions, as shown in~\Figref{fig:benchmark_function_results}, with the $\pi$-E model scoring best especially concerning the average number of simulator calls required to terminate an episode (bar plots in the figures). Notably, we observe a significant reduction in the number of \textit{simulator calls}, up to $\sim90\%$. While the $\pi_{AL}$-E and $\pi_{AL}^G$-E models outperform all the baselines as well, there is no clear advantage compared to $\pi$-E. Those results can be interpreted based on the argument that, for the benchmark functions, we set the trust region size to the optimal value reported in \citet{shirobokov2020lgso}, and therefore simplifying the problem for the $\pi$-E model (the L-GSO baselines use by default the ``optimal'' trust region size). However, it should also be noted that using a warm-started surrogate, $\pi_{AL}^G$-E, helps mitigate such a difficulty by improving the results compared to $\pi_{AL}$-E.
+Similarly, the average minimum objective function value shows that our policies are typically better, with the only exception of the Nonlinear Submanifold Hump problem for which our models agree, within the error, with the baselines. 
+As noted in~\citep{shirobokov2020lgso}, the BOCK baseline struggles in solving the Rosenbrock problem (\Figref{fig:benchmark_function_results}, middle row), likely due to the high curvature of the objective function under analysis. On the other hand, numerical differentiation appears to be less affected by this issue, thus reporting acceptable results for all the problems involving benchmark functions. 
+However, given that local surrogate methods (L-GSO) have been shown to outperform the other baselines or be on par in the worst case, we only consider that in the experiments involving real-world black-box simulators. 
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/physics_results_2.pdf}
+  \caption{\textbf{Physics experiments results}. (a) Schematic view \protect\footnotemark ~\citep{baranov2017optimising} of the active muon shield baseline configuration. The detail concerning the ``Target/Magnet hadron absorber'' is not relevant to the current discussion. However, we reported that only for completeness. See~\citep{baranov2017optimising} for more details. (b) AMO (the lower the better), (c) and ANC (the lower the better). Uncertainties are quantified over evaluation episodes and different random seeds.}
+  \label{fig:ship_res}
+\end{figure}
+
+\footnotetext{Image from ``\emph{Optimising the active muon shield for the SHiP experiment at CERN}" In Journal of Physics: Conference Series, vol. 934, no. 1, p. 012050. IOP Publishing, 2017, by Baranov, A., et al. Licensed under CC BY 3.0}
+Regarding the real-world black-box simulators, we draw similar conclusions to the benchmark functions. Policy-based methods achieve the best performance in terms of AMO and ANC. However, in contrast to the problems involving the benchmark functions, the performance of the three different policies typically agrees within the uncertainties (\Figref{fig:wireless_res}) with, in some cases, $\pi_{AL}$-E and $\pi_{AL}^G$-E performing better, on average, than $\pi$-E (\Figref{fig:ship_res}). It may be possible, therefore, that the true advantage of learning to adapt the trust region size, $\pi_{AL}$-E, combined with a warm-started surrogate, $\pi_{AL}^G$-E, is only revealed in highly complex optimization problems, such as the optimization of a detector for high energy physics experiments (\Figref{fig:ship_res}). We leave it to future works to conduct further investigations to assess the actual advantages that will result from learning the sampling strategy. We refer to~\Appref{sup:brd_imp_fut_w} for a discussion concerning limitations and future works.
+
+
+
+\section{Conclusions}
+
+We proposed a novel method to minimize the number of \textit{simulator calls} required to solve optimization problems involving black-box simulators using (local) surrogates. The core idea of our approach is to reinforce an active learning policy that controls \textit{when} the black-box simulator is used and \textit{how} to sample data to train the local surrogates. We trained three policy models and compared them against baselines, including local surrogate methods~\citep{shirobokov2020lgso}, numerical differentiation, and Bayesian approaches~\citep{oh2018bock}. We tested our approach on two different experimental setups: benchmark functions and real-world black-box simulators. 
+
+Our policy-based approach showed the best performance across all scenarios. In particular, compared to the baselines, we observed a significant reduction in the number of \textit{simulator calls}, up to $\sim90\%$. Our results suggest that local surrogate-based optimization of problems involving black-box forward processes benefits from the guidance of both simple policies and learned sampling strategies. 
+
+
+
+
+
+
+

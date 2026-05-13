@@ -1,0 +1,253 @@
+\title{bio2token: all-atom tokenization of any biomolecular structure with mamba}
+
+\begin{abstract}
+Efficient encoding and representation of large 3D molecular structures with high fidelity is critical for biomolecular design applications. Despite this, many representation learning approaches restrict themselves to modeling smaller systems or use coarse-grained approximations of the systems, for example modeling proteins at the resolution of amino acid residues rather than at the level of individual atoms. To address this, we develop quantized auto-encoders that learn atom-level tokenizations of complete proteins, RNA and small molecule structures with reconstruction accuracies well below 1 Angstrom. We demonstrate that a simple Mamba state space model architecture is efficient compared to an SE(3)-invariant IPA architecture, reaches competitive accuracies and can scale to systems with almost 100,000 atoms. The learned structure tokens of bio2token may serve as the input for all-atom generative models in the future.
+\end{abstract}
+
+\section{1 Introduction  }
+
+
+Background. Biomolecular structures can be represented as 3D point clouds, where each point corresponds to a chemical entity such as an atom, a functional group, or a set of atoms that make up larger molecular entities like side-chains and nucleotide bases. Generative modeling of these structures, especially for large biomolecules, often employs coarse-grained representations to manage complexity. Popular machine learning methods include denoising diffusion probabilistic models (DDPMs) and language models. Diffusion approaches generate 3D structures and features at varying levels of detail, from individual atoms to residues. Notably, DDPMs have been used to generate atomistic conformers of small molecules (Hoogeboom et al., 2022) and design ligands for protein pockets (Schneuing et al., 2022). Applying denoising diffusion at atomistic resolution to large structures like proteins is computationally challenging. Recent models like RFDiffusion- All-atom mitigate this by diffusing only the four-atom protein backbone and reconstructing side-chains with a separate inverse folding model (Krishna et al., 2024; Dauparas et al., 2022). Similarly, language model approaches such as ESM-3 (Hayes et al., 2024) rely on coarse-grained representations at the residue level for their core modules. Despite this coarse-graining, the capacity of these models to process large proteins and protein-ligand complexes is still limited.  
+
+An effective atomic-resolution representation model for large molecules would have to be able to reason over long-range data inputs. This is because many atoms can have critical interactions with atoms that are distal in linear sequence. However, scaling traditional “workhorse” architectures such as transformers and graph-based models to accommodate such long sequences has been challenging. Here, we leverage Mamba (Gu & Dao, 2023), a selective structured state space model, to replace transformer modules in structure tokenizer models and increase the resolution to all atoms. Mamba has been developed for long-context modeling and has been demonstrated to efifciently model tasks with thousands to millions of tokens on conventional GPU hardware.  
+
+3D structure tokenization for generative modeling. Turning 3D structures into discrete 1D sequences for generative language modeling, discrete diffusion or other downstream task has become a popular approach to biomolecular modeling. FoldSeek introduced the ”3Di” structural interaction alphabet to convert three-dimensional protein backbone structures into one-dimensional sequences, facilitating faster structural alignment (van Kempen et al., 2022). Neural network-based quantized auto-encoders (QAEs) (Van Den Oord et al., 2017) have since been employed to learn 3D structure tokenizers. ESM-3 utilizes a transformer-based QAE that encodes residue-level backbones and decodes to all-atom structures, with training limited to proteins with fewer than 512 residues and using a 600M parameters transformer model. FoldToken (Gao et al., 2024) and InstaDeep (Gaujac et al., 2024) also use QAEs with transformer and graph neural network architectures, respectively, focusing on residue-level tokenization but limited to backbone reconstruction. Alphafold-3 (AF-3) (Abramson et al., 2024) generates all-atom structures using a token-guided diffusion network. For small molecules, approaches include one-hot encoding of coordinate digit strings (Flam-Shepherd & Aspuru-Guzik, 2023; Zholus et al., 2024) and SE(3)-invariant QAEs like Geo2Seq (Li et al., 2024) and MolStructTok (Anonymous, 2024). Prior work predominantly relies on QAEs with various architectures and features, incorporating symmetries through structural features or invariant point attention. In contrast, our method uses neither engineered SE(3)-invariant features nor does it employ invariant network architectures.  
+
+What if we could efifciently encode and decode any biomolecule at the all-atom level?  
+
+In this work we present:  
+
+(i) A Mamba based quantized auto-encoder for all-atom biomolecular structures that tokenizes 3D point clouds into 1D discrete tokens. We train small molecule-only, protein-only, and RNA-only vocabularies mol2token, protein2token and rna2token. We also train a unified tokenizer bio2token that encodes any of those biomolecules, ranging from tens to tens of thousands of atoms, that would be challenging for transformer-based methods to scale too.   
+(ii) A simple and compute efifcient approach towards all-atom structure tokenization  
+
+that does not use SE(3) invariances. Our tokenizer models are lightweight in size (1.2M parameters), with fast training and inference.  
+
+1.1 Background: Transformers, State space models, and Mamba  
+
+Transformer. Transformers (Vaswani, 2017) use the attention mechanism to capture long-range dependencies in sequences. Intuitively, the attention mechanism can be thought of as a fully-connected graph neural network, with the update rule:  
+
+$$
+y=M(x)x,
+$$  
+
+where $x$ is the input sequence, $_y$ is the latent representation, and $\begin{array}{r l r}{M(x)}&{{}=}\end{array}$ softmax $\left(Q(x)K(x)^{T}\right)$ is the attention matrix, or analogously adjacency matrix. The matrix multiplication formulation of attention makes it ideal for GPU processing, and has thus made transformers the workhorse of sequence modeling. However, due to the fully connected graph structure, transformers suffer from $O(N^{2})$ compute and memory costs with respect to sequence length $N$ .  
+
+Mamba. Recent alternatives such as deep structured state space models (SSM) (Gu et al., 2021; Gu & Dao, 2023; Dao & Gu, 2024) have gained traction in the field of sequence modeling thanks to their ability to overcome the quadratic bottleneck and scale to extremely long context lengths. The basic linear time-invariant (LTI) SSM is a linear recurrent neural network (RNN) with the update rule:  
+
+$$
+h_{t}=A h_{t-1}+B x_{t},\quad y_{t}=C h_{t},
+$$  
+
+where $x$ and $_y$ are the input and output sequences, respectively, $h$ is the RNN state, and $A,B,C$ are learnable parameters. This linear recurrence can be unrolled across time and computed equivalently as a convolution $y=K*x$ , where $K=\left(C B,C A B,...,C A^{N-1}B\right)$ . This makes SSMs parallelizable over sequence positions, incurring cost $O(N\log N)$ .  
+
+![](images/349b4bc35ad6d590f240dfd925fa56b720194f17fe81a72946a12c4953a9e77b.jpg)  
+Figure 1: [A] Biomolecular system of interest with many thousands of atoms, with a magnified section with annotations for specific points in the point cloud. [B] Illustration of our tokenizer model, transforming point clouds into tokens and then back to point clouds. [C] Implementation details of the bidirectional Mamba layer. The first branch processes the original input using a Mamba block, while the second branch handles the flipped version of the input, reversing the output back to its original orientation afterward. The final step involves adding the results of both branches together. Notably, the two Mamba blocks in the branches share the same weights.  
+
+
+
+\section{2 Methods  }
+
+
+Our structure tokenizer model is a QAE and Fig. 1 provides an overview of the process. The steps can be broken down into:  
+
+(i) Representation of biomolecular systems as 3D point clouds (ii) Encoding atom positions into latent vectors (iii) Quantizing these latent vectors into tokens (iv) Decoding these tokens back into a 3D point cloud  
+
+Tokenization of 3D point clouds. A biomolecular structure $X$ of $N$ heavy atoms is represented as a $X\in\mathbb{R}^{N\times3}$ point cloud. This point cloud is atom identity agnostic and carries no information about residue or atom type. In general, AEs compress the input to a downsampled latent space representation $Z$ , where $Z\in\mathbb{R}^{n\times d}$ , with $n<N$ , and reconstruct the original input according to a loss function $L(X,{\tilde{X}})$ . The first module of the AE is the encoder network $e n c_{\theta}(X)=Z$ , the second module is a decoder network $d e c_{\psi}(Z)=\tilde{X}$ . In this work, we want to maintain the all-atom resolution, and $e n c_{\theta}(X)$ does not compress the input: $n=N$ . It can be regarded as a transformation of the input into a lossless latent space. The compression in our QAE happens in the subsequent quantization of $Z$ into discrete values $Q$ as the purpose of a tokenizer is to map continuous data to discrete unique IDs, defined by a vocabulary. The latent space of a ”perfect” lossless auto-encoder $\langle L(X,{\tilde{X}})=0$ ) is a perfect tokenizer if that latent space was discrete. This is usually achieved through a quantization network $q u a n t_{\phi}(\tilde{Z})$ , otherwise known as a tokenizer model. This tokenizer model can be optimized with the same reconstruction loss $L(X,{\tilde{X}})$ . This tokenizer model keeps a one-to-one correspondence between the positions of input atoms, tokens and reconstructed atoms.  
+
+Quantization. Quantization networks learn discrete codebooks, in other words a vocabulary, of the training data. A common approach is vector-quantization (VQ) (Gray, 1984), e.g. ESM-3’s tokenizer is VQ-based. VQ is notoriously hard to optimize and tends to suffer from codebook collapse. In this paper, we use a recently proposed simplified alternative, Finite-Scalar Quantization (FSQ), which produces a more efifcient coverage of the codebook (Mentzer et al., 2023). FSQ has been shown to be easier to train, whilst maintaining similar levels of expressiveness as VQ-VAEs. FSQ projects the input into a hypercube of integer length $L$ and dimensions $D$ (where $D<\,8$ usually). The projected input point in the hypercube is then rounded to the nearest integer set $\{0,1,...,L\}$ . The final code/token is the product of all integer coordinates in the hypercube.  
+
+Losses. The ground truth and the decoded point clouds $X$ and $\dot{X}$ are aligned via Umeyama-Kabsch algorithm (Lawrence et al., 2019) and use the total structure RMSE loss:  
+
+$$
+L_{\mathrm{RMSE}}(X,{\tilde{X}})={\sqrt{{\frac{1}{n}}\sum_{i=1}^{n}\|\mathbf{x}_{i}-{\tilde{\mathbf{x}}}_{i}\|^{2}}}
+$$  
+
+Additionally we use an inter-atomic distance loss, that calculates the difference between the ground truth and reconstructed pairwise distances between each atom within a residue $r$ :  
+
+$$
+\operatorname{Loss}_{\substack{a t o m-d i s t}}=\sqrt{\sum_{r}\sum_{\stackrel{i\in\mathcal{R}_{r}}{j\not=i}}\sum_{\stackrel{j\in\mathcal{R}_{r}}{j\not=i}}\left(\Vert x_{i}-x_{j}\Vert-\Vert\tilde{x}_{i}-\tilde{x}_{j}\Vert\right)^{2}}
+$$  
+
+where $\mathcal{R}_{r}$ is the set of atom indices in $r$ . In the case of small molecules, this is calculated over the entire molecule. The total loss for optimization is equally weighted between total structure RMSE and inter-atomic distance loss.  
+
+
+
+\section{3 Experimental Details  }
+
+
+
+
+\section{3.1 Datasets  }
+
+
+ In a preprocessing step all point clouds of the biomolecular structures are translated to be centered at the zero-origin.  
+
+Small molecules: Small molecules, typically organic molecules below a 500 Dalton weight, are not static. At standard temperatures and pressures they take on various 3D structural conformations, each having a specific conformational energy. We used the $\nabla^{2}$ DFT dataset (Khrabrov et al., 2024) of 1.9M small molecules with a total of 16M simulated structural conformations as a source of data. This dataset provides train and test splits for multiple levels of generalizability: a test-conformer split of unseen conformations of molecules, a test-structure split of unseen molecules and all their conformations, and a test-scaffold split of unseen scaffold classes of molecules and their conformations. The minimum number of heavy atoms in this dataset is 8 and the maximum is 27.  
+
+Proteins: We prototype and run various hyperparameter studies on the CATH 4.2 dataset of 18k protein structures from the PDB, with train-test splits on the CATH topology classifications as defined by Ingraham et al. (2019). This dataset comprises proteins of 40 to 500 amino acids in length, for a minimum and a maximum of 282 and 4,173 heavy atoms. We also tested on the CASP14 and CASP15 datasets, to compare to the values reported by ESM-3. CASP14 and 15 structures were published after CATH4.2 and are thus not contained in 4.2. CASP14 and 15 contain proteins up to 2,265 residues in length with the biggest structure having 18,042 heavy atoms. To train the large bio2token model we leverage the Alphafold database (AFDB). We use a random sub-set of 100k clusters from FoldSeek’s sequencestructure clusters (Barrio-Hernandez et al., 2023), and collect one structure per cluster.  
+
+RNA: We train on RNA3DB, which splits the RNA structures in the PDB into sequencebased and structural homology classes (Szikszai et al., 2024). The structures span a range of 2 to 4,450 nucleic acids in lengths with 42 to 95,518 heavy atoms. For training efifciency, we limit the training dataset to structures with maximum $10,000$ sequence length, but run inference on all lengths of the test set.  
+
+Generalisation to complexes: We test bio2token at inference time on multi-chain complexes and protein-RNA complexes. Note that neither multi-chain nor mixed complexes were included in the training.  
+
+3.2 Architecture and Training details  
+
+Figure 1B and C gives an overview of each layer composition and full architecture. Each layer of our encoder and decoder is a bi-directional implementation of the original Mamba block 1. Between consecutive Mamba blocks we apply a layer norm.  
+
+We ran various hyperparameter studies on a protein2token training with the CATH 4.2 protein dataset. We tested the effects of varying encoder and decoder layers on the model performances in terms of RMSE and found that, given limited compute, 4 encoder layers and 6 decoder layers to work best as a trade-off between model size and batch size.2. We find the RMSE versus codebook size relationship to approximately follow a power law, see Fig.2. Ultimately, the choice of codebook size will be a trade-off between accuracy and downstream modeling. A tokenizer with increasing vocabulary will make downstream generation models harder. We decided, for all of our models to stick with a codebook of 4096, which is in line with other published structure tokenizers, and allows for a fair comparison.  
+
+Compressibility of tokens To test the compressibility of the token sequences we train the tokenizer with an additional 1D convolutional layer before and after the quantizer network (pooling after the encoder and up-sampling before the decoder). We compress with $k\in[1,2,4]$ , to shorten the all-atom sequence of length $N$ to $N/k$ . RMSE increases by a factor of 1.7 and 2.6 for the compression factors of 2 and 4 respectively. This is similar to previously reported compressibilities for residue-level structure tokenizers (Gaujac et al., 2024)  
+
+Computational efifciency: Mamba versus Invariant Point Attention IPA is the most popular choice for structural modeling due to its SE(3) invariant properties. To compare Mamba versus IPA, we train a QAE with an encoder of 2 transformer layers, and a decoder with one IPA block with 4 recurrences (recycles). Although it is common in the literature to use 8 recurrences for the IPA block, it would restrict all-atom training to short proteins below approximately 100 residues given our GPU memory limit. With 4 recurrences we are able to fit one batch size of proteins of a maximum length of 2192 atoms (approximately 220 residues) on the GPU. With an equivalent Mamba-based architecture of 2 encoder and 4 decoder layers we can fit a batch size of 32 with maximum sequence length 2192. For a fair comparison we train both; a Mamba-based version with a batch size of 1 and a batch size of 32.2 table 5. We find that training protein2token with an IPA-decoder takes 3 times per step compared to the Mamba QAE. For a fixed compute budget of 24 hours the IPA-decoder reaches an RMSE of $2.2\mathrm{\AA}$ , compared to $0.8\mathrm{\AA}$ for the Mamba QAE with a batch size of 1, and 0.6˚A for the Mamba QAE with batch size of 32. Although the Mamba-based QAE does not incorporate any rotational invariances in the architecture, it’s learning efifciency is enough to make up for this lack of implicit bias. From a practical standpoint we conclude that an all-atom QAE tokenizer for large biomolecules is computationally intractable with standard IPA and conventional GPU hardware.  
+
+Codebook efifciency: learned tokenizer versus spatial tesselation To test if and by what factor the QAE approach to learning spatial vocabulary is indeed more efifcient than assigning ”spatial addresses” in a Voronoi tesselation (Voronoi, 1908; Aurenhammer $\&$ Klein, 2000) we compare our tokenizer errors to the error of a naive uniform voxelation of the space.3. We find that a typical ribosomal RNA of spatial extent of $100\mathrm{\AA}$ requires 110k voxels to guarantee a 1˚A accuracy. For a desired RMSE of $0.2\mathrm{\ddot{A}}$ and a small molecule of spatial extent of $30\mathrm{\ddot{A}}$ tesselation of 191k voxels is necessary. This is more than a magnitude beyond the codebook sizes we employ.  
+
+We train four models, all with the same number of 4 encoder and 6 decoder layers, and a codebook size of 4096 for a total of 1.2M parameters (see section below for architecture study details). We use the Adam optimizer (Kingma, 2014), with polynomial learning rate scheduler and a starting learning rate of $3e^{-4}$ . Depending on the model, we use 1 or 8 NVIDIA A10 GPUs (24GB / 184GB GPU RAM). We train three biomolecule specific models, mol2token, protein2token, and rna2token, respectivily trained on the $\nabla^{2}$ DFT dataset, CATH4.2 dataset, and RNA3DB, and an harmonized bio2token model, trained on all three dataset and a subset of the AFDB dataset. Additionally, we use random rotation for data augmentation. Model specific parameters are:  
+
+mol2token: batch size=16, max seq length=64, 216k steps (44 hours), single GPU.   
+protein2token: batch size=16, max seq length=4160, 195k steps (68 hours), single GPU.   
+rna2token: effective batch size=32, max seq length=10000, 149k steps (38 hours),8 GPUs.   
+bio2token: effective batch size=32, max seq length $=$ 10000, 257k steps (73 hours),8 GPUs.  
+
+![](images/538056d75ec8e6311b99b1bddbf2d3cde42f80a652f13b0d2290ae14c187bc0c.jpg)  
+
+Table 1: Ablation study of final model and training choices. Ablation is run on protein2token training with the CATH 4.2 dataset.  
+
+baseline model consisting of 2 encoder and 4 decoder layers, and sequentially add data augmentation through random rotation, bi-directionality, deeper encoder and decoder, and finally the inter-atomic distance loss. The results are presented in Table 3.2.2. Modifying the original encoder/decoder layer to incorporate bi-directionality and increasing the number of layers resulted in a significant improvement, yielding a $22\%$ reduction in reconstruction RMSE. Further enhancing the training strategy with random rotation augmentation and integrating an inter-atomic distance loss (as defined in Eq. 3), we observe a total RMSE reduction of 28% compared to the baseline.  
+
+
+
+\section{3.3 Evaluation  }
+
+
+To assess chemical or biochemical validity of the reconstructed structures, we benchmark our model on additional test metrics as outlined below.  
+
+Small molecule validity test We convert the heavy atom point clouds into molecules by inferring covalent bonds using atom type and inter-atomic distances with OpenBabel (O’Boyle et al., 2011). We first evaluate whether the recovered molecular system is equivalent to the encoded structure and then evaluate bond lengths, angles, and torsion angles using the methods described by Buttenschoen et al. (2024). We use RDKit to compute the energy of the conformer and compare to the average energy of 25 RDKit generated conformers (Landrum, 2013). We compute these statistics for test set ground-truth conformers and the reconstruction to evaluate any change. A reconstruction is said to pass all tests if it passes the tests from PoseBusters as well as produces the same molecular graph as the input.  
+
+Proteins and RNA: We report the template modeling score (TM-Score) between ground truth and reconstructed point clouds. It captures local and global structural alignment and is designed to be size independent. The protein TM-score TMprot is calculated on the $\mathrm{C}_{\alpha}$ of the amino acid back-bone (Zhang & Skolnick, 2004). The RNA TM-score TMRNA is calculated on the C3’ of the nucleic acid back-bone (Gong et al., 2019). TM=0 means no structural similarity at all; TM=1.0 means structurally identical.  
+
+
+
+\section{4 Results  }
+
+
+Table 2 summarizes the results of bio2token on all test sets. Fig. 3 visualizes all reconstruction RMSEs on all biomolecular test sets with in-domain, out-of-domain and all-domain (bio2token) tokenizers.  
+
+![](images/8d64c099121e030979297f092baa32667171c0b5c1a11f623451fe8cb98f0bfe.jpg)  
+
+Table 2: Summary of the best tokenizer models: Atom-wise RMSE between the ground truth structure point cloud and the reconstructed point cloud from the tokens. Validity tests for small molecules are the chemical validity metrics as described in the main text and for proteins and RNA we provide the TM-scores as a measure of tertiary structural similarity.  
+
+Small molecules: mol2token reconstructs small molecule conformers of unseen molecules and unseen scaffold families with an average RMSE of $0.2\mathrm{\ddot{A}}$ versus $0.36\mathrm{\AA}$ for the combined model bio2token. Fig. 2A shows a valid reconstructed conformer. from the test set on top of the ground truth conformer. We found that 41.7% of all reconstructed molecules with mol2token passed all of our validity metrics and are similarly chemically valid as the groundtruth structures. We conclude that the mol2token vocabulary is sufifciently expressive to capture most molecular geometries in a manner that maintains their chemical structural properties in almost half the cases.  
+
+Proteins: bio2token outperforms protein2token on CASP14 and CASP15 test hold-outs with RMSE values around 0.58˚A and 0.59˚A versus 0.61˚A and 0.8˚A . This is significantly lower than ESM-3’s decoder reconstruction on CASP14 (1.3˚A ) and 15 (1.7˚A ) that infers all-atom structure from the residue-level only encodings. InstaDeep’s back-bone tokenizer compares with a back-bone RMSE of $1.89\mathrm{\tilde{A}}$ to bio2token’s back-bone RMSEs of 0.52-0.55˚A across the different protein test sets. Generally back-bone atoms have higher reconstruction accuracy than side-chain atoms for most test sets and tokenizers. protein2token was only trained on CATH4.2 proteins, which have sizes less than 500 residues and are smaller than several test set structures in CASP14 and 15, explaining why bio2token achieves much better results on these test sets. Generally the TMprot are all above 0.99, indicating that structural homology in terms of tertiary structure is highly preserved.  
+
+RNAs: bio2token reconstructs the RNA3DB test dataset with the lowest RMSE average of 0.66˚A on all atoms, compared to 0.73˚A for rna2token. Likely, bio2token is superior because it learned point cloud densities from magnitudes more data. The largest RNA chain in the RNA3DB test data is 8toc.R with 4,269 nucleic acids and a total of 90,441  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/73428fd53916098aa3d1c8f3285377f95d17a0550748c9d328bfe252fd5c43e6.jpg)  
+Figure 2: 3D renderings of ground truth molecules in green and reconstructions from decoded coordinates in blue. Ground truth molecules are made transparent in the ball and stick panels to make it easier to see the auto reconstructed models. Visuals prepared with Mol\* (Sehnal et al., 2021) (A) Example from $\nabla^{2}$ DFT scaffold split test set $^+$ mol2token reconstructed result. (B) RNA-Protein complex, PDB = 3WBM reconstruction by bio2token (C) Multi chain RNA complex, PDB = 7PTL. Reconstruction by bio2token (D) neighborhood of residue on loop of 3WBM found near center of coordinate space (E) close up of RNA helix of 3WBM (F) Example of errors found near edge of coordinate space.  
+
+![](images/3492f2977ef95aeee64a69b31157ef182efdcc88ae6c6888cdbbb4f536608e86.jpg)  
+
+Figure 3: reconstruction results on all test data. For small molecules, only the domain-specific tokenizer mol2token and the combined bio2token achieve reasonable accuracy of $\mathrm{i.25{-}0.35\,\mathring{A}}$ . For proteins (CATH4.2 test, CASP14/15) protein2token and bio2token achieve the best results. For the RNA3DB test set rna2token and bio2token have comparable results with reconstructions around 0.6˚A. Macromolecules cannot be reconstructed from the small molecule mol2token vocabulary.  
+
+atoms. rna2token achieves a reconstruction RMSE of 1.53˚A on this structure, compared to bio2token with 1.82˚A.  
+
+Complexes: None of the tokenizers has ever seen a complex during training. Here, we tested to what degree we can encode and reconstruct RNA-protein and multi-chain complexes with the QAE. Fig. 2B shows a protein-RNA complex (pdb: 3wbm) with a combined residue count of 396 amino and nucleic acids with 3714 atoms, with an RMSE of $0.77\mathrm{\AA}$ . Figures 2 D,E, and F show close-ups of the complex. D and E are loop and helix regions with good reconstructions. F is a close up on the periphery of the coordinate space, where errors increase. Fig. 2C shows a multi-chain RNA complex (pdb:7ptl) reconstructed with bio2token at an average RMSE of 0.82˚A. This complex comprises 720 nucleic acids with a total of 15,337 atoms.  
+
+![](images/6df2eabeae053d8266db42e72360302d1d1d47f2841d85351b7844c0b487263c.jpg)  
+Figure 4: Token circularity with rotations. A and B visualise a $\pi$ rotation of the protein around the z- and x-axis. The zoom into the GLN amino acid shows how the individual atoms are changing orientations with respect to the centre. The respective token ids of each atom on the highlighted GLNare plotted in C) and D) as a function of rotation angle. The green and red dotted lines correspond to the tokens at the positions in A) and B).  
+
+4.1 Insights into what bio2token learns  
+
+The tokenizer models learn to efifciently encode and decode point clouds of variable sizes, centered at the origin.5-Fig. 8 shows scatter plots for a sample of 10k points across all structure point clouds with their absolute distance to the centre and their RMSE. RMSE increases once the point’s distance to centre increases past the common size range of the training structures. This can also be seen in Fig. 2F, where reconstructions deviate at the periphery of the coordinate space for a structure of about 16,000 atoms). protein2token and rna2token can tokenize RNAs and proteins as they share similar point cloud sizes and densities. This motivates the combined tokenizer training of bio2token, which performs best for proteins, RNA and protein-RNA complexes as it has seen the most diverse point configurations during training.  
+
+Rotational Variance bio2token does not exploit rotational invariance in it’s architecture. Here, we show that sub-Angstrom accuracies are achievable without those inductive biases. The bio2token tokens are varying periodically with respect to rotations. To visualise the effect we show the individual amino acid GLN and its back-bone and side-chain atoms under a set of full $2\pi$ rotations around the z- and the x-axis. Fig. 4 shows how the atom token ids shift with respect to changes in orientation.5.2 Fig. 9.  
+
+
+
+\section{5 Discussion  }
+
+
+In this study, we explored the potential of Mamba to encode high-resolution structures for diverse biomolecules. Specifically, opting for a simple Mamba-based architecture, instead of rotationally invariant IPA, allows us to scale trainings to large biomolecules that cannot be trained on with the latter approach with conventional GPU hardware. In fact, we show that reconstruction accuracies around $0.5-0.6\mathrm{\check{A}}$ from a vocabulary of 4096 is achievable without any SE(3) invariance in either features, or network architecture. Our combined tokenizer, bio2token, demonstrates that encodings can be learned across different classes of macromolecules once encoded on the common atomistic resolution. The comparable small amount of data (127,000 macromolecules in total) used in our trainings signals that all-atom encoding might substantially enhance training efifciency, compared to more coarse-grained encoding that lack atomistic detail, and leverages more information from the structures sampled. Atomistic detail is important for many biomolecular design applications – the precise positioning of individual atoms within a protein or RNA molecule can significantly impact its function and interactions with other molecules. Furthermore, the reliance on separate models for different components of a molecule, (e.g., back-bones versus side-chains), can introduce additional complexity and potential sources of error. Our work highlights the potential of leveraging models like bio2token to improve the design and modeling of biomolecules and biomolecular complexes.  
+
+
+
+\section{5.1 Limitations and future directions  }
+
+
+Although our model achieves low RMSE values, having low RMSE is not necessarily sufifcient to guarantee that the reconstructed molecule is chemically valid. Even small deviations in decoded atom coordinates can result in structures with steric clashes, improper covalent bonds, or improperly strained geometries. For example, as seen in Fig. 2F, our reconstructed structures can deviate from valid molecular geometries, for example implying covalent bonds where there should not be and vice-versa missing bonds where there should be. One potential solution could be to train the model on additional data which may further lower RMSEs to a level that produces more chemically valid biomolecules without having to hard code constraints into the losses of our models. Alternatively, we could employ heuristic and physics based post-processing protocols like those used in Abramson et al. to help translate generated point clouds into valid molecules.  
+
+Nonetheless, our work points towards Mamba-based architectures as a viable and promising alternative to transformer-based methods for modeling atomic-resolution biomolecular structures. In the quantized QAE form as presented here, our models could facilitate compatibility with language models and we leave the joint representation of atom identity and coordinates to future work. The continuous embedding (no quantizer), combined with compression, could provide useful latent spaces for methods like flow matching or diffusion. As such, we anticipate that our work could connect to many potential downstream modeling applications in chemistry and biology.  
+
+
+
+\section{6 Code Availability  }
+
+
+Code and model weights are available for all trained tokenizers. Inference scripts are provided for pdb formated files at https://anonymous.4open.science/r/bio2token-72F2  
+
+
+
+\section{7 Acknowledgements  }
+
+
+To be filled after review.  
+
+
+
+

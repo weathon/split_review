@@ -1,0 +1,407 @@
+\title{Mitigating Forgetting in LLM Supervised Fine-Tuning and Preference Learning}
+
+\begin{abstract}
+Post-training of pre-trained LLMs, which typically consists of the supervised fine-tuning (SFT) stage and the preference learning (RLHF or DPO) stage, is crucial to effective and safe LLM applications. The widely adopted approach in post-training popular open-source LLMs is to sequentially perform SFT and RLHF/DPO. However, sequential training is sub-optimal in terms of SFT and RLHF/DPO trade-off: the LLM gradually forgets about the first stage's training when undergoing the second stage's training. We theoretically prove the sub-optimality of sequential post-training. Furthermore, we propose a practical joint post-training framework with theoretical convergence guarantees and empirically outperforms sequential post-training framework, while having similar computational cost.
+ 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent years have witnessed the great capabilities of large language models (LLMs) trained on a large corpus of datasets \citep{openai2022chatgpt,dubey2024llama,abdin2024phi}. These models have been applied to a wide range of tasks including virtual assistant \citep{openai2022chatgpt}, code development \citep{roziere2023code}, and education/research \citep{achiam2023gpt}. Typically LLMs undergo the pre-training phase and the post-training phase.  The post-training phase adapts the pre-trained LLM to specific tasks, thus is crucial to its successful applications. 
+
+The post-training phase of LLMs often has two stages \citep{abdin2024phi,dubey2024llama}: the Supervised Fine-Tuning (SFT) stage
+ and the preference learning stage. Typical methods for preference learning include Reinforcement Learning from Human Feedback (RLHF) \citep{ouyang2022training}, and Direct Preference Optimization (DPO) \citep{rafailov2024direct}. Given this two-stage process, a natural approach is to performing \textit{sequential training}, e.g., first perform DPO then SFT or vice verse. For example, the instruct variant of popular open-source models like \textsc{Phi-3} \citep{abdin2024phi} or \textsc{Llama-3} \citep{dubey2024llama} sequentially undergo SFT and DPO training. Or in other scenarios like continual learning of an aligned model, the process can be interpreted as sequentially performing DPO/RLHF followed by SFT \citep{tang2020multilingual,qi2023fine,fang2024llama}.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.45\linewidth]{imgs/intro_loss-space-pythia-1b-dpo-sft.pdf}
+\includegraphics[width=0.5\linewidth]{imgs/intro_barcharts-pythia-1b-dpo-sft.pdf}
+\end{center}
+\caption{\textbf{ Efficient Trade-off in RLHF and SFT Optimization.} \textbf{\textcolor{customteal}{Sequential}} optimization, commonly used to align and fine-tune pre-trained models, often biases the model towards the last objective it was optimized on, as illustrated by the optimization trajectories in the objective space (left) and the performance comparison (top right, lower the better). In contrast, simultaneous optimization of a \textbf{\textcolor{customorange}{Mix}} of RLHF and SFT objectives achieves a more balanced performance but requires significantly more resources (bottom right, lower the better). We propose \textbf{\textcolor{customred}{ALRIGHT}} and \textbf{\textcolor{customblue}{MAXRIGHT}} methods for simultaneous RLHF and SFT optimization, offering an improved trade-off with minimal extra cost.}\label{fig:intro}
+\end{figure}
+
+ However, sequential training of RLHF and SFT is sub-optimal in terms of the trade-off between preference learning and SFT. When the model is undergoing the second stage of training, it gradually and inevitably {\em forgets about} the first stage's training. 
+ In this case, we argue that even regularization like KL divergence used in RLHF/DPO cannot avoid forgetting due to the data distribution shift from the SFT dataset to the preference dataset.
+ An illustration of the sub-optimality of sequential post-training is shown in Figure \ref{fig:intro} (left), where we observe that sequential training leads to the increase of the DPO objective during SFT, resulting in a worse trade-off between the two objectives than the method to be introduced in this work. 
+ A similar issue has also been observed in, e.g., \citep{qi2023fine}. To overcome this issue and achieve a better trade-off, a naive thought is to mix the preference objective and SFT objective by minimizing their linear scalarization. However, the naive mixing method is computationally inefficient in practice, since the optimization objectives are different with different formats of data. The increased computational complexity can be observed in Figure \ref{fig:intro} (right), where mixing significantly increases the cost.
+ The cost is prohibitively high in LLM training due to the model size.
+ Therefore, in this work, we aim to answer the following question:
+\begin{center}
+ \textit{ Can we design a post-training framework that achieves better trade-off than the sequential training method, while having reduced computational cost than naive mixing?}
+ \end{center}
+\paragraph{Our contributions.}
+To this end, we propose a joint SFT and DPO training framework with the ALRIGHT and MAXRIGHT variants. The contributions of this work can be summarized as follows:
+\begin{itemize}[leftmargin=1.0cm]
+    \item[\bf C1)] \textbf{Insights into the forgetting issue of two-stage sequential training.} 
+    We provide theoretical results on the forgetting issue of the sequential method, which is further supported by empirical evidence. Specifically, we prove that sequentially doing DPO and SFT can have a non-diminishing optimality gap. To our best knowledge, this is the first theoretical result on the suboptimality of sequentially learning the SFT and DPO objectives. We further conduct experiments on \textsc{Llama-3-8b} and \textsc{Pythia-1b}, empirical results support our claims.
+
+    \item[\bf C2)] \textbf{Principled post-training methods with almost no extra cost.} 
+    We propose post-training algorithms with theoretical guarantees, which outperform the sequential method while enjoying lower computational costs than the mixing method.
+    Specifically, we propose 1) ALternating supeRvised fIne-tuninG and Human preference alignmenT (ALRIGHT) method, which provably converges to any desired trade-off between DPO and SFT objectives; and 2) MAXimum supeRvised fIne-tuninG and Human preference alignmenT (MAXRIGHT) method, which adaptively alternates between optimizing RLHF and SFT objectives. 
+     \item[\bf C3)] \textbf{Strong empirical performance on standard benchmarks.} 
+    Using the \textsc{llama3-8b} model, our methods outperform the sequential approach by up to 3\% on the MMLU (1-shot) benchmark \citep{hendrycks2020measuring} and achieve up to a 31\% increase in win rate on the RLHF dataset (evaluated by \textsc{GPT-4-turbo}), with minimal additional computation.
+\end{itemize}
+\paragraph{Technical challenges.}
+The main technical challenge lies in theoretically proving the issue of forgetting when optimizing SFT and DPO losses (two log-likelihood functions). Existing lower bounds for continual learning in {\em non-LLM} settings using SGD rely on quadratic objectives \citep{ding2024understanding}, where iterate updates are more tractable due to the linear structure of the gradient. 
+
+However, the problem we address involves negative log-likelihood objectives, whose gradients are non-linear with respect to the parameters.  This non-linearity complicates the analysis, requiring careful construction of an example that is guaranteed to exhibit undesirable performance. 
+Additionally, we must analyze the behavior of the updated parameters throughout both stages of optimization and derive conditions that relate this behavior to the lower bound of the performance.
+
+
+\section{Preliminaries}
+
+
+In this section, we formally introduce the notations and problem setup for RLHF and SFT.
+
+\emph{Model.} We denote the LLM parameter to be optimized for either RLHF or SFT by $\theta$, and we use $\pi_\theta(y~|~x)$ to denote the LLM that generates an output $y$ given an input $x$  for an SFT or RLHF task.
+
+\emph{Reinforcement learning with human feedback.} We denote the dataset used for RLHF as $\D_{\text{\tiny RLHF}} = \{ x^{(i)}, y_w^{(i)}, y_\ell^{(i)} \}_{i=1}^{N_1}$, where $N_1$ is the number of data, $x^{(i)}$ are the inputs for the LLM, $y_w^{(i)}$ and $y_\ell^{(i)}$ are the chosen (preferred) and rejected (dispreferred) responses to $x^{(i)}$, respectively, for all $i\in \{1, \dots, N_1\}$. We consider using DPO \citep{rafailov2024direct} to align $\theta$ with the preference dataset $\D_{\text{\tiny DPO}}$. The DPO objective is given by
+\begin{equation}\label{eq:f1}
+\small
+ f_{\text{\tiny DPO}}(\theta;\D_{\text{\tiny DPO}}, \pi_{\text{\rm ref}}, \beta)  \coloneqq -\E_{x, y_w, y_\ell \sim\D_{\text{\tiny DPO}}}\left[\log\left(\sigma\left( \beta \log\left(\frac{\pi_\theta(y_w~|~x)}{\pi_{\text{\rm ref}}(y_w~|~x)}\right)-\beta \log\left(\frac{\pi_\theta(y_\ell~|~x)}{\pi_{\text{\rm ref}}(y_\ell~|~x)}\right)\right) \right)\right],
+\end{equation}
+where $\sigma$ is the sigmoid function, $\pi_\text{\rm ref}$ is a given reference model, and $\beta$ is a regularization constant that penalize the objective when $\pi_\theta(y~|~x)$ is diverging too much from $\pi_\text{\rm ref}(y~|~x)$ on $x\sim \D_{\text{\tiny DPO}}$. In sequential training, when DPO is performed before SFT, we use the model trained on the chosen responses in $\D_{\text{\tiny DPO}}$ as $\pi_\text{\rm ref}$. When SFT is performed before DPO, the model obtained after the SFT phase is used as the $\pi_\text{\rm ref}$.
+Given a data point $(x, y_w, y_\ell)$, the gradient estimate of $f_{\text{\tiny DPO}}$ is given as
+\begin{equation}\label{eq:g1}
+    g_{\text{\tiny DPO}}(\theta;x, y_w, y_\ell, \pi_{\text{\rm ref}}, \beta)  \coloneqq -\left(1- \sigma( h_\beta(\theta;x, y_w, y_\ell, \pi_{\text{\rm ref}}))\right)\nabla_\theta h_\beta(\theta;x, y_w, y_\ell, \pi_{\text{\rm ref}}), 
+\end{equation}
+where
+\begin{equation}\label{eq:h}
+   h_\beta(\theta;x, y_w, y_\ell, \pi_{\text{\rm ref}}) \coloneqq  \beta \log\left(\frac{\pi_\theta(y_w~|~x)}{\pi_{\text{\rm ref}}(y_w~|~x)}\right)-\beta \log\left(\frac{\pi_\theta(y_\ell~|~x)}{\pi_{\text{\rm ref}}(y_\ell~|~x)}\right).
+\end{equation}
+ For brevity, in the rest of the paper we will use $f_{\text{\tiny DPO}}(\theta)$ for $f_{\text{\tiny DPO}}(\theta;\D_{\text{\tiny DPO}}, \pi_{\text{\rm ref}}, \beta)$, $g_{\text{\tiny DPO}}(\theta;x, y_w, y_\ell)$ for $ g_{\text{\tiny DPO}}(\theta;x, y_w, y_\ell, \pi_{\text{\rm ref}}, \beta)$, and $h_\beta(\theta;x, y_w, y_\ell)$ for $h_\beta(\theta;x, y_w, y_\ell, \pi_{\text{\rm ref}})$. Note that $\E_{x, y_w, y_\ell \sim\D_{\text{\tiny DPO}}}\left[ g_{\text{\tiny DPO}}(\theta;x, y_w, y_\ell) \right] = \nabla f_{\text{\tiny DPO}}(\theta)$.
+
+\emph{SFT.} We denote the dataset used for SFT as $\D_{\text{\tiny SFT}} = \{ x^{(i)}, y^{(i)}\}_{i=1}^{N_2}$, where $N_2$ is the number of data points. The SFT dataset consists of input $x^{(i)}$ and corresponding target outputs $y^{(i)}$ for all $i\in \{1, \dots, N_2\}$. The objective used for fine-tuning $\theta$ for $\D_{\text{\tiny SFT}}$ can be given as
+\begin{equation}\label{eq:f2}
+    f_{\text{\tiny SFT}}(\theta;\D_{\text{\tiny SFT}})  \coloneqq -\E_{x, y\sim\D_{\text{\tiny SFT}}}\log(\pi_\theta(y~|~x)).
+\end{equation}
+Given a data point $(x, y)$, the gradient estimate for the objective $f_{\text{\tiny SFT}}$ is given as
+\begin{equation}\label{eq:g2}
+    g_{\text{\tiny SFT}}(\theta;x, y)  \coloneqq -{\nabla_\theta\pi_\theta(y~|~x)}/{\pi_\theta(y~|~x)}. 
+\end{equation}
+From this point, we will use $f_{\text{\tiny SFT}}(\theta)$ for $f_{\text{\tiny SFT}}(\theta;\D_{\text{\tiny SFT}})$. Note that $\E_{x, y\sim\D_{\text{\tiny SFT}}}\left[ g_{\text{\tiny SFT}}(\theta;x, y) \right] = \nabla f_{\text{\tiny SFT}}(\theta)$.
+
+\emph{Performance metric and trade-off.} In this work we investigate different methods for their performance on both DPO and SFT tasks, simultaneously. Thus, to evaluate the performance of a model $\theta$ on  $f_{\text{\tiny DPO}}$ and $f_{\text{\tiny SFT}}$, we define the optimality gap of a mixture of objectives as
+\begin{align}\label{eq:g-mix}
+    G_{\text{Mix}, \lambda}(\theta) \coloneqq f_{\text{Mix}, \lambda}(\theta) - f^*_{\text{Mix}, \lambda},
+\end{align}
+where $\lambda\in[0,1]$, $f_{\text{Mix}, \lambda}(\theta) \coloneqq \lambda f_{\text{\tiny DPO}}(\theta) + (1-\lambda)f_{\text{\tiny SFT}}(\theta)$, and $f^*_{\text{Mix}, \lambda} = \min_{\theta\in\Theta}f_{\text{Mix}, \lambda}(\theta)$. Here $\lambda$ defines a trade-off between the DPO and SFT objective: a larger $\lambda$ results in more emphasis on the DPO performance compared to SFT. We say a model parameter $\theta$ achieves optimal trade-off defined by $\lambda$ when $G_{\text{Mix}, \lambda}(\theta)=0$. 
+We chose this metric because, as established in multi-objective optimization literature \citep{miettinen1999nonlinear}, the optimizer of $G_{\text{Mix}, \lambda}(\theta)$ for any $\lambda\in[0,1]$ will be `Pareto optimal'. This means that no other solution can optimize both objectives simultaneously, and the solution can be viewed as one of the optimal trade-off points for the problem of optimizing $f_{\text{\tiny DPO}}$ and $f_{\text{\tiny SFT}}$. Additionally, $G_{\text{Mix}, \lambda}(\theta)$ is differentiable when both $f_{\text{\tiny DPO}}$ and $f_{\text{\tiny SFT}}$ are differentiable, which facilitates the theoretical analysis of gradient-based methods.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[align=c,height=1.2in]{imgs/weight_traj_dpo_sft.pdf}
+\includegraphics[align=c,height=1.2in]{imgs/weight_traj_moo_pref_ref_alt_lambd=0.5.pdf}
+\includegraphics[align=c,height=1.2in]{imgs/weight_traj_moo_pref_ref_cheb_lambd=0.5.pdf} \\
+\includegraphics[align=c,height=1.2in]{imgs/loss_traj_dpo_sft.pdf}
+\includegraphics[align=c,height=1.2in]{imgs/loss_traj_moo_pref_ref_alt_lambd=0.5.pdf}
+\includegraphics[align=c,height=1.2in]{imgs/loss_traj_moo_pref_ref_cheb_lambd=0.5.pdf} \\
+\end{center}
+\caption{
+Consider a two-dimensional model and one data each for DPO and SFT optimization setting.  \textbf{Sequential DPO and SFT (Left):} The model oscillates between the optima of DPO and SFT losses in weight space, resulting in a final trade-off that is significantly distant from the ideal point in loss space, where both DPO and SFT loss values are optimal. \textbf{ALRIGHT (Middle) / MAXRIGHT (Right):} The model directly navigates towards a point in weight space that is reasonably optimal for both DPO and SFT objectives (average optimum), achieving a final trade-off of DPO and SFT losses much closer to the ideal point compared to sequential DPO and SFT.}\label{fig:toy-illustration}
+\end{figure}
+
+
+
+\section{Why Sequential DPO and SFT is suboptimal?}
+
+This section studies the sequential DPO and SFT method commonly used in the continual training of aligned LLMs (see, e.g., \citet{tang2020multilingual,qi2023fine,fang2024llama}). We give insights on why such a sequential training framework is suboptimal in terms of DPO and SFT trade-offs. 
+
+ 
+ \subsection{Sequential training algorithm and its suboptimality}
+Following \citet{rafailov2024direct}, we first obtain a reference model $\pi_{\text{\rm ref}}$ by performing SFT on the target outputs in the preference dataset $\D_{\text{\tiny DPO}}$. Given  $\pi_{\text{\rm ref}}$, we iteratively perform the DPO update as
+\begin{equation}
+    \theta^1_{t+1} \!=\! \Pi_\Theta\left(\theta^1_{t} - \alpha_{1, t}g_{\text{\tiny DPO}}(\theta^1_t;x^t, y_w^t, y_\ell^t)  \right),~~\text{for }t=1,2,\dots,T_{\text{\tiny DPO}}-1  
+\end{equation}
+where $\alpha_{1,t}$ is the step size, $x^t, y_w^t, y_\ell^t \sim \D_{\text{\tiny DPO}}$, $g_{\text{\tiny DPO}}$ is defined in \eqref{eq:g1}, and $T_{\text{\tiny DPO}}$ is the max iteration for DPO training. Given the aligned model parameter $\theta^1_{T_{\text{\tiny DPO}}}$, we next perform SFT updates as follows:
+\begin{equation}
+    \theta^2_{t+1} \!=\! \Pi_\Theta\left(\theta^2_{t} - \alpha_{2, t} g_{\text{\tiny SFT}}(\theta^2_t;x^t, y^t)\right),~~\text{for }t=1,2,\dots,T_{\text{\tiny SFT}}-1
+\end{equation}
+where $\theta^2_1$ is initialized as $\theta^1_{T_{\text{\tiny DPO}}}$, $x^t, y^t \sim \D_{\text{\tiny SFT}}$, $g_{\text{\tiny SFT}}$ is defined in \eqref{eq:g2}, and $T_{\text{\tiny SFT}}$ is the max iteration for SFT training. 
+The whole process is summarized in Algorithm \ref{algo:seq-rlhf-sft}. We next study why the sequential training framework is suboptimal.
+
+ 
+\emph{A toy illustration of suboptimality.} 
+At a given phase of Algorithm \ref{algo:seq-rlhf-sft}, the algorithm only focuses on optimizing one objective (either $f_{\text{\tiny DPO}}$ or $f_{\text{\tiny SFT}}$) and ignores the other. This results in the model oscillating between the optimums of two objectives, without converging to a point that is `reasonably optimal' for both objectives $f_{\text{\tiny DPO}}$ and $f_{\text{\tiny SFT}}$. The results are depicted in Figure \ref{fig:toy-illustration}.
+For the weight space trajectory (Figure \ref{fig:toy-illustration} upper-left), although there is a region that is optimal for both DPO and SFT, the sequential DPO and SFT method fails to reach this region due to its focus on one objective at a given phase. 
+Furthermore, from the loss space trajectory (Figure \ref{fig:toy-illustration} lower-left), the model oscillates between extreme trade-offs for DPO and SFT, and ends up at a point far away from the ideal point. 
+
+ 
+\subsection{Theoretical Analysis of suboptimality in sequential method}
+ 
+In this section, we provide a theoretical result on the suboptimal trade-offs between DPO and SFT in sequential training.
+We view the LLM as a policy $\pi_\theta$  that is characterized by a softmax: 
+\begin{equation}
+    \pi_\theta(y~|~x)  \coloneqq \frac{\exp(\theta^\top \phi_{y, x})}{\sum_{y'\in\mathcal{Y}}\exp(\theta^\top \phi_{y', x})},\nonumber
+\end{equation}
+\begin{wrapfigure}{r}{0.55\textwidth}
+\begin{minipage}{0.57\textwidth}
+\begin{algorithm}[H]
+\caption{Sequential DPO and SFT}\label{algo:seq-rlhf-sft} 
+\begin{algorithmic}[1]
+\STATE Input $\D_{\text{\tiny DPO}}$, $\D_{\text{\tiny SFT}}$, $\{\alpha_{1, t}\}_{t=1}^{T_{\text{\tiny DPO}}}$, $\{\alpha_{2, t}\}_{t=1}^{T_{\text{\tiny SFT}}}$
+\STATE \underline{\textbf{Phase 1: Optimize for $f_{\text{\tiny DPO}}$}}
+\STATE Initialize $\theta^1_1 \coloneqq\theta_1\in\Theta$
+\FOR {$t=1, \dots, T_{\text{\tiny DPO}}-1$}
+    \STATE Sample $x^t, y_w^t, y_\ell^t \sim \D_{\text{\tiny DPO}}$
+    \STATE Update $\theta^1_{t+1} \!=\! \Pi_\Theta\left(\theta^1_{t} - \alpha_{1, t}g_{\text{\tiny DPO}}(\theta^1_t;x^t, y_w^t, y_\ell^t)  \right)$
+\ENDFOR
+\STATE Set $\hat{\theta}_{\text{\tiny DPO}} \coloneqq \theta^1_{T_{\text{\tiny DPO}}}$
+\STATE \underline{\textbf{Phase 2: Optimize for $f_{\text{\tiny SFT}}$}}
+\STATE Initialize $\theta^2_1 \coloneqq \hat{\theta}_{\text{\tiny DPO}}$
+\FOR {$t=1, \dots, T_{\text{\tiny SFT}}-1$}
+    \STATE Sample $x^t, y^t \sim \D_{\text{\tiny SFT}}$
+    \STATE Update $\theta^2_{t+1} \!=\! \Pi_\Theta\left(\theta^2_{t} - \alpha_{2, t} g_{\text{\tiny SFT}}(\theta^2_t;x^t, y^t)\right)$
+\ENDFOR
+\STATE Output $\hat{\theta}\coloneqq\theta^2_{T_{\text{\tiny SFT}}}$
+\end{algorithmic} 
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+where $\phi_{y, x}$ is a feature vector corresponding to the input $x$ and the target output $y$. Furthermore, reference policy $\pi_{\text{\rm ref}}$ is similarly parameterized by a fixed parameter $\theta_{\text{\rm ref}}$. 
+\begin{remark}
+    The softmax characterization is also used in previous theoretical works on RLHF; see, e.g., \citet{zhu2023principled}.
+When the trainable parameter is the output projection weights, the LLM is fully characterized by the softmax. In other scenarios like performing LoRA \citet{hu2021lora} on attention matrices or full-parameter training,  we believe this characterization still provides valuable insights and our result will be verified empirically later in the experimental section. 
+\end{remark}
+
+We make the following mild assumption on the features.
+
+\begin{assumption}[Bounded feature]\label{ass:features}
+    For all $x\!\in\!\mathcal{X}$ and $y\!\in\!\mathcal{Y}$, there exists $\Phi\!>\!0$ such that $\Vert \phi_{y, x} \Vert \leq \Phi$.
+\end{assumption}
+We can then have the following result for the sub-optimality of the output of Algorithm \ref{algo:seq-rlhf-sft} to the optimum of some combination of functions $f_{\text{\tiny DPO}}$ and $f_{\text{\tiny SFT}}$ in terms of $G_{\text{Mix}, \lambda}$.
+
+\begin{theorem}[Lower bound for sequential method performance 
+]\label{thm:seq-lower-bound} 
+Consider Algorithm \ref{algo:seq-rlhf-sft} with $T_{\text{\tiny DPO}}=T_{\text{\tiny SFT}}=T$ under Assumption \ref{ass:features}.
+Then there exists data $\D_{\text{\tiny DPO}}$ and $\D_{\text{\tiny SFT}}$ such that given any  $\lambda\in(0,1)$, Algorithm \ref{algo:seq-rlhf-sft} with any sufficiently large $T$ has non-diminishing performance gap: 
+\begin{equation}
+    \E\Big[\lambda f_{\text{\tiny DPO}}(\hat{\theta}) \!+\! (1\!-\!\lambda)f_{\text{\tiny SFT}}(\hat{\theta})-\min_{\theta\in\Theta}\big(\lambda f_{\text{\tiny DPO}}(\theta)\! +\! (1\!-\!\lambda)f_{\text{\tiny SFT}}(\theta)\big)\Big] = \Omega(1),
+\end{equation}
+where the expectation $\E[~\cdot~]$ is taken over the randomness of Algorithm \ref{algo:seq-rlhf-sft}.
+\end{theorem}
+The above result suggests that there exists DPO and SFT optimization problems such that given any trade-off between DPO and SFT defined by $\lambda\in(0,1)$, the sequential method suffers from constant suboptimality gap, even when optimized for a large number of iterations. The reason for the constant suboptimality gap is the sequential method described in Algorithm \ref{algo:seq-rlhf-sft} suffers from forgetting, and cannot appropriately optimize both the DPO and SFT objectives. In the next section, we explore alternatives to the sequential method that can resolve this issue. 
+
+
+
+\section{Proposed Alternating Training Methods}
+
+
+In this section we introduce new algorithms with theoretically convergence guarantees, which also outperforms sequential DPO and SFT empirically.
+
+\subsection{ALRIGHT for joint DPO and SFT}
+
+The main disadvantage of using Algorithm \ref{algo:seq-rlhf-sft} for DPO and SFT optimization is that at a given phase of the algorithm, the model is updated with respective to only one objective. In contrast, it is computationally intensive, if not prohibitive, to optimize a linear combination of both DPO and SFT objectives. This is because, although the objectives share a single parameter, constructing two computational graphs (one per objective) in standard machine learning libraries requires significant additional memory, particularly for LLMs.
+To alleviate these problems, we propose to alternate between optimizing for DPO and SFT objectives, based on a given preference for each objective. For this purpose, we can define a modified objective
+\begin{equation}\label{eq:f_alt}
+    f_{\text{Alt}, \lambda}(\theta; i) = \sI_{i=1} f_{\text{\tiny DPO}}(\theta) + \sI_{i=0} f_{\text{\tiny SFT}}(\theta),
+\end{equation}
+where $i\sim \text{Bern}(\lambda)$, $\text{Bern}(\lambda)$ is the Bernoulli distribution parameterized by $\lambda\in[0,1]$, and $\sI_{A}$ is the indicator function of event $A$. Hence, the objective in \eqref{eq:f_alt} behaves as $f_{\text{Mix}, \lambda}$ in expectation, i.e.
+\begin{equation}
+    \E_{i\sim \text{Bern}(\lambda)} \left[ f_{\text{Alt}, \lambda}(\theta; i) \right] = \lambda f_{\text{\tiny DPO}}(\theta) + (1-\lambda)f_{\text{\tiny SFT}}(\theta) = f_{\text{Mix}, \lambda}(\theta).
+\end{equation}
+For optimizing $\E_{i\sim\text{Bern}(\lambda)}\left[ f_{\text{Alt}, \lambda}(\theta; i) \right]$, we first sample $i_t\sim\text{Bern}(\lambda)$ per iteration, which determines the objective to be updated. Specifically, if $i_t=1$, we update $\theta$ with respect to DPO objective as
+\begin{equation}\label{eq:rlhf-update}
+    \theta_{t+1} \!=\! \Pi_\Theta\left(\theta_{t} - \alpha_t g_{\text{\tiny DPO}}(\theta_t;x^t, y_w^t, y_\ell^t)  \right),
+\end{equation}
+where $x^t, y_w^t, y_\ell^t \sim \D_{\text{\tiny DPO}}$, and $\alpha_t$ is the learning rate. Similarly, if $i_t=0$, we update $\theta$ with respect to SFT objective as
+\begin{align}\label{eq:sft-update}
+    \theta_{t+1} \!=\! \Pi_\Theta\left(\theta_{t} - \alpha_t g_{\text{\tiny SFT}}(\theta_t;x^t, y^t)\right),
+\end{align}
+where $x^t, y^t \sim \D_{\text{\tiny SFT}}$. This process is summarized in Algorithm \ref{algo:alt-rlhf-sft}. Unlike the sequential method that focuses on optimizing one objective at a time, the ALRIGHT approach integrates both objectives simultaneously, allowing the model to balance alignment and fine-tuning performance. 
+In Figure \ref{fig:toy-illustration} (Middle), we can see how this alternating navigates the model to a point where the trade-off between DPO and SFT is significantly better than the sequential approach. 
+
+Next, we provide the convergence guarantee of Algorithm \ref{algo:alt-rlhf-sft} to a given DPO-SFT trade-off.
+\begin{theorem}[Upper bound for alternating method performance]\label{thm:alt-upper-bound} Consider Algorithm \ref{algo:alt-rlhf-sft} with $\alpha_t = \alpha_0/\sqrt{T}$ for all $t\in\{1, \dots, T\}$ and $\alpha_0>0$. Then, under Assumption  \ref{ass:features}, for any $\lambda\in[0,1]$, we have 
+\begin{equation}
+    \E\Big[\lambda f_{\text{\tiny DPO}}(\hat{\theta}) \!+\! (1\!-\!\lambda)f_{\text{\tiny SFT}}(\hat{\theta})-\min_{\theta\in\Theta}\big(\lambda f_{\text{\tiny DPO}}(\theta)\! +\! (1\!-\!\lambda)f_{\text{\tiny SFT}}(\theta)\big)\Big] = \mathcal{O}\left(\frac{\log T}{\sqrt{T}}\right).
+\end{equation}
+\end{theorem}
+\begin{remark}
+    The above result implies that the performance metric diminishes with increasing $T$, thus we can achieve an arbitrary trade-off between DPO and SFT defined by $\lambda$ up to arbitrary optimality, by increasing the number of iterations $T$. This is in contrast to the lower bound result in Theorem \ref{thm:seq-lower-bound} established for sequential training: there exist data sets such that the sequential method never approaches optimal trade-off, even when trained for larger number of iterations.
+\end{remark}
+\begin{figure}
+\begin{minipage}{0.468\textwidth}
+\begin{algorithm}[H]
+\caption{ALRIGHT}\label{algo:alt-rlhf-sft} 
+\begin{algorithmic}[1]
+\STATE Input $\D_{\text{\tiny DPO}}$, $\D_{\text{\tiny SFT}}$, $\{\alpha_t\}_{t=1}^{T}$,$\lambda\in[0, 1]$
+\STATE Initialize $\theta_1\in\Theta$
+\FOR {$t=1, \dots, T-1$}
+    \STATE Sample $i_t\sim\text{Bern}(\lambda)$
+    \IF{$i_t=1$}
+        \STATE Sample $x^t, y_w^t, y_\ell^t \sim \D_{\text{\tiny DPO}}$
+        \STATE \!$\theta_{t+1} \!=\! \Pi_\Theta\!\left(\theta_{t} \!-\! \alpha_t g_{\text{\tiny DPO}}(\theta_t;x^t \!, y_w^t,\! y_\ell^t)  \right)\!\!\!$
+    \ELSE
+        \STATE Sample $x^t, y^t \sim \D_{\text{\tiny SFT}}$
+        \STATE $\theta_{t+1} \!=\! \Pi_\Theta\left(\theta_{t} - \alpha_t g_{\text{\tiny SFT}}(\theta_t;x^t, y^t)\right)$    
+    \ENDIF
+\ENDFOR
+\STATE Output $\hat{\theta}\coloneqq\theta_T$
+\end{algorithmic} 
+\end{algorithm}
+\end{minipage}
+\begin{minipage}{0.533\textwidth}
+\begin{algorithm}[H]
+\caption{MAXRIGHT}\label{algo:cheb-rlhf-sft} 
+\begin{algorithmic}[1]
+\STATE \! Input $\D_{\text{\tiny DPO}}$,\! $\D_{\text{\tiny SFT}}$, \!$\{\alpha_t\}$,$\lambda\!\in\![0, \! 1]$. Initialize $\theta_1\!\in\!\Theta \!\!$
+\FOR {$t=1, \dots, T-1$}
+    \STATE Sample $x^t_1, y_w^t, y_\ell^t \!\sim\! \D_{\text{\tiny DPO}}$ and $x^t_2, y^t \!\sim\! \D_{\text{\tiny SFT}}$ \!\!\!\!
+    \STATE Evaluate \\
+    ~~$\bar{f}_{1,\lambda}(\theta_t)\!\coloneqq\!\lambda \left(f_{\text{\tiny DPO}}(\theta_t;x^t_1, y_w^t, y_\ell^t) \!-\! f^*_{\text{\tiny DPO}} \right)$ 
+    \\
+     ~~$\bar{f}_{2,\lambda}(\theta_t)\!\coloneqq\!(1\!-\!\lambda)\left( f_{\text{\tiny SFT}}(\theta_t;x^t_2, y^t) \!-\! f^*_{\text{\tiny SFT}} \right)$
+    \IF{$\bar{f}_{1,\lambda}(\theta_t) \geq \bar{f}_{2,\lambda}(\theta_t)$}
+        \STATE $\theta_{t+1} \!=\! \Pi_\Theta\left(\theta_{t} - \alpha_t g_{\text{\tiny DPO}}(\theta_t;x^t_1, y_w^t, y_\ell^t)  \right)$
+    \ELSE
+        
+        \STATE $\theta_{t+1} \!=\! \Pi_\Theta\left(\theta_{t} - \alpha_t g_{\text{\tiny SFT}}(\theta_t;x^t_2, y^t)\right)$    
+    \ENDIF
+\ENDFOR
+
+\STATE Output $\hat{\theta}\coloneqq\theta_T$
+\end{algorithmic} 
+\end{algorithm}
+\end{minipage}
+\end{figure}
+While ALRIGHT offers theoretical convergence guarantees for any arbitrary trade-off in expectation, the alternation between optimizing DPO and SFT objectives occurs randomly based on a predetermined probability, which may introduce additional noise in the updates.
+This raises the natural question: Can we design a performance-aware, {\em adaptive alternating} optimization method with minimal additional computational resource usage compared to ALRIGHT? In the next section, we will propose an alternative post-training method that adaptively selects the objective to optimize. 
+\subsection{MAXRIGHT for joint DPO and SFT}\label{sec:chebyshev-rlhf-sft}
+
+In this section, we introduce a method that can adaptively choose which objective to optimize based on the current performance of $\theta$, which can lead to faster convergence to a point that can perform well for both DPO and SFT objectives.
+When determining which objective to optimize at a given iteration, we first compare the current model's performance on $f_{\text{\tiny DPO}}$ and $f_{\text{\tiny SFT}}$. Define the maximum (weighted) sub-optimality gap as
+\begin{align}\label{eq:f_cheb}
+    f_{\text{Max}, \lambda}(\theta) = \max \left( \lambda (f_{\text{\tiny DPO}}(\theta) - f^*_{\text{\tiny DPO}}), (1-\lambda) (f_{\text{\tiny SFT}}(\theta) - f^*_{\text{\tiny SFT}}) \right),
+\end{align}
+where $f^*_{\text{\tiny DPO}} = \min_{\theta\in\Theta} f_{\text{\tiny DPO}}(\theta)$ (similarly for $f_{\text{\tiny SFT}}(\theta)$), and $\lambda\in[0,1]$. The idea is to optimize this maximum sub-optimality to reach a balance between the two $\lambda$-scaled objectives. 
+Define the index of the objective with maximum (weighted) sub-optimality gap as $i_t=\arg\!\max_{i}\bar{f}_i(\theta_t)$, where 
+\begin{align}
+    \bar{f}_{1,\lambda}(\theta_t) &\coloneqq\lambda \left(f_{\text{\tiny DPO}}(\theta_t;x^t_1, y_w^t, y_\ell^t) - f^*_{\text{\tiny DPO}} \right), ~~ \text{and}\\
+     \bar{f}_{2,\lambda}(\theta_t) &\coloneqq(1-\lambda) \left(f_{\text{\tiny SFT}}(\theta_t;x^t_2, y^t) - f^*_{\text{\tiny SFT}} \right),
+\end{align}
+where $x^t_1, y_w^t, y_\ell^t \sim \D_{\text{\tiny DPO}}$ and $x^t_2, y^t \sim \D_{\text{\tiny SFT}}$. Accordingly, we can update $\theta$ with respect to DPO objective using update \eqref{eq:rlhf-update} when $i_t=1$ (or equivalently, when $\bar{f}_{1,\lambda}(\theta_t) \geq \bar{f}_{2,\lambda}(\theta_t)$), and update  $\theta$ with respect to DPO objective using update \eqref{eq:sft-update} otherwise. This process is summarized in Algorithm \ref{algo:cheb-rlhf-sft}. We can see in the toy illustration (Figure \ref{fig:toy-illustration} Right), that MAXRIGHT can converge closer to the ideal point more directly compared to the alternating method, due to its ability to adaptively choose the worse performing objective to optimize.
+\begin{remark}
+    While we do not provide any theoretical convergence guarantees for Algorithm \ref{algo:cheb-rlhf-sft}, it is a well-known fact in multi-objective optimization literature \citep{miettinen1999nonlinear} that under some assumptions on the problem setup, the solution of problem \eqref{eq:f_cheb} for any $\lambda\in[0,1]$ is guaranteed to be Pareto optimal (i.e. no other solution can further optimize both the objectives simultaneously)
+\end{remark}
+
+Even though MAXRIGHT allows one to compute the index needed for selecting the objective with a maximum (weighted) sub-optimality gap, in practice evaluating both objectives can be memory intensive, and only one objective is updated at a given iteration. To alleviate this issue, we propose to do simultaneous evaluations only every $k$ steps. We call a time step that simultaneous evaluation is done as a `max evaluation step'. At such time step $t=t_0$, we compute $i_{t_0}$, and update the corresponding objective as in Algorithm \ref{algo:cheb-rlhf-sft}. After the update, we store the computed (weighted) sub-optimality gap as $\bar{f}^{\tiny \text{stale}, t_0}_{1,\lambda} = \bar{f}_{1,\lambda}(\theta_{t_0})$ and $\bar{f}^{\tiny \text{stale}, t_0}_{2,\lambda} =\bar{f}_{2,\lambda}(\theta_{t_0})$. Then, for every iteration before the next max evaluation step $t_0+k$, we choose the index of the objective to be optimized as
+\begin{equation}
+    i_{t_0+k'} = \arg\!\max_{i} \bar{f}^{\tiny \text{stale}, t_0}_{i,\lambda},
+\end{equation}
+where $k'<k$. Once the index is computed, we update the corresponding objective following \eqref{eq:rlhf-update} or \eqref{eq:sft-update}, and update the stale (weighted) sub-optimality gap as
+\begin{equation}
+    \bar{f}^{\tiny \text{stale}, t_0}_{i,\lambda} = \bar{f}_{i,\lambda}(\theta_{t_0+k'}), \quad \text{if } i_{t_0+k'} = i,
+\end{equation}
+where $i\in\{1, 2\}$. With this modification, we can match the evaluation and gradient computation complexity of Algorithm \ref{algo:alt-rlhf-sft} in most iterations, at the expense of degraded accuracy in choosing $i_t$.
+
+
+
+\section{Related Work}
+
+
+
+\textbf{RLHF.} The most fundamental form of RLHF was introduced by \citet{christiano2017deep} and has been successfully used for aligning LLMs in many works such as \citet{openai2022chatgpt,ouyang2022training, bai2022training, bai2022constitutional, sun2024principle}. There have been many works on RLHF for LLM alignment, including the more efficient direct preference optimization \citep{rafailov2024direct,xu2024dpo,lee2024mechanistic, zhong2024dpo}, generalized RLHF \citep{azar2024general, munos2023nash}, safe RLHF \citep{dai2023safe},  group preference learning \citep{zhao2023group,chakraborty2024maxmin}, and theory or understanding of RLHF \citep{zhu2023principled,shen2024principled,xiong2024iterative,wang2023rlhf,kirk2023understanding}. In this work, we consider DPO \citep{rafailov2024direct} which has been used in training many popular open-source LLMs \citep{abdin2024phi,dubey2024llama}.
+
+\textbf{SFT.} Another important step before using a pre-trained LLM in downstream applications is SFT \citep{howard2018universal, devlin2018bert,wei2021finetuned, zhu2023minigpt,zhang2023instruction}.
+
+In recent years, there have been a large body of work on efficient LLM SFT; see, e.g., zeroth-order fine-tuning \citep{malladi2023fine}, quantized fine-tuning \citep{kim2024memory,li2023loftq}, parameter-efficient fine-tuning \citep{chen2023parameter,zhang2023adalora,shi2023dept,chen2023longlora,nikdan2024rosa}, truthful fine-tuning \citep{tian2023fine}, robust fine-tuning \citep{tian2024fast}, SFT with data selection \citep{lu2023instag,kang2024get,zhao2024long, shen2024seal}, self-play fine-tuning \citep{chen2024self}  and understanding of LLM fine-tuning \citep{malladi2023kernel}.
+
+\textbf{Sequential RLHF and SFT Issues.} Since both RLHF and SFT are important for deploying LLMs for human use, RLHF and SFT are implemented as a sequential recipe (one after the other) on a pre-trained LLM. However, recent studies show that this either hinders the alignment performance of the model \citep{qi2023fine}, or fine-tuning performance \citep{ouyang2022training}, depending on the order of applying RLHF and SFT.
+
+\textbf{Reconciling RLHF and SFT.} The challenges of sequential RLHF and SFT have prompted several approaches to improve the trade-off between alignment and fine-tuning. \citet{hong2024orpo} introduce odds ratio preference optimization, which integrates a regularization term into the SFT objective, removing the need for a separate RLHF phase. Similarly, \citet{hua2024intuitive} propose intuitive fine-tuning, reformulating SFT to align on positive responses without requiring distinct RLHF and SFT phases. \citet{li2024joint} propose to train on preference data both with demonstration and RLHF simultaneously. However, these methods restrict the use of different datasets for RLHF and SFT, limiting flexibility. \citet{lin2023speciality} suggest optimizing SFT and RLHF separately with adaptive model averaging (AMA) to balance alignment and fine-tuning, but the original AMA is computationally intensive, requiring three sets of LLM parameters. While a memory-efficient AMA version exists, it relies on imitation learning from RLHF-trained data, making its connection to the original objectives less obvious. Besides, the relationship between AMA weights and an optimal trade-off remains unclear. At the time of finalizing this manuscript, we were also made aware of the work \citet{huang2024lazy}, which proposes a similar alternating optimization approach to mitigate the suboptimal trade-offs in RLHF and SFT, supported by extensive empirical validation. In this work, we provide theoretical guarantees for the aforementioned suboptimality of the sequential approach and the optimality of the alternating approach.
+
+
+\section{Experiments}
+
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[h]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{imgs/all-loss-trajs_loss-space-pythia-1b-dpo-sft-alt.pdf} 
+        \includegraphics[width=\textwidth]{imgs/all-loss-trajs_loss-space-pythia-1b-dpo-sft-cheb.pdf}
+    \end{minipage}
+    \hspace{0.1cm}
+    \begin{minipage}[h]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{imgs/all-barcharts-pythia-1b-dpo-sft.pdf}
+    \end{minipage}
+    \caption{Comparison of proposed methods with first DPO then SFT using \textsc{pythia-1b} model. \textbf{Left:} Training trajectories in the objective space (e.g., DPO and SFT objectives). \textbf{Right:} Performance comparison across multiple evaluation metrics, including optimality gap for DPO and SFT objectives, ideal distance, runtime, and GPU utilization. The bar charts highlight the trade-offs and resource efficiency of each method for different choices of $(T_{\text{\tiny DPO}}, T_{\text{\tiny SFT}})$ or $\lambda$.}
+\label{fig:dpo-sft-loss-space-comp}
+\end{figure}
+
+In this section we compare the proposed methods with some existing baselines, in terms of their Pareto-front performance, and resource consumption such as computation time and memory usage.
+
+\subsection{Experimental Setup}
+
+In this section, we introduce models, datasets, baseline methods, and evaluation metrics used to evaluate the performance of our proposed methods. 
+
+\textbf{Models.} We employ two architectures. The first is \textsc{EleutherAI/pythia-1b}\footnote{\url{https://huggingface.co/EleutherAI/pythia-1b}}, a widely used model balancing computational efficiency and performance. Despite not being designed for downstream tasks, it matches or exceeds models like OPT and GPT-Neo of similar size. We use it to assess optimization dynamics, performance trade-offs, and resource usage of proposed methods. The second is \textsc{meta-llama/Meta-Llama-3-8B}\footnote{\url{https://huggingface.co/meta-llama/Meta-Llama-3-8B}}, a larger model suited for fine-tuning and downstream real-world tasks. Both models are fine-tuned using Low-Rank Adaptation (LoRA) \citep{hu2021lora}.
+
+\textbf{Datasets.} For the DPO dataset, we use the \textsc{Dahoas/rm-hh-rlhf} dataset, which contains human feedback data designed to align models to human preference. For the SFT phase, we use the \textsc{vicgalle/alpaca-gpt4} dataset, which consists of English instruction-following data generated by GPT-4 using Alpaca prompts, designed for fine-tuning LLMs.
+\textbf{Baseline Methods.} Comparing the performance of ALRIGHT and MAXRIGHT, we use the following baselines: Mix of DPO and SFT (`Mix'), which simultaneously optimizes both DPO and SFT objectives by optimizing a convex combination of the objectives, and Sequential DPO and SFT (`Sequential'), where DPO and SFT objectives are optimized one after the other.
+
+\textbf{Evaluation Metrics.}
+To assess the performance of each method with respect to the DPO and SFT objectives, we utilize several evaluation metrics. For evaluating the DPO objective, we measure the \textbf{optimality gap} as $f_{\text{DPO}}(\theta) - f^*_{\text{DPO}}$, where $f^*_{\text{DPO}}$ is approximated by independently optimizing the DPO objective for the same number of iterations as used for the baselines and proposed methods. The optimality gap for the SFT objective is similarly defined using the optimal value $f^*_{\text{SFT}}$, obtained by separately optimizing the SFT objective. To evaluate overall performance, we use the \textbf{ideal distance} metric, which represents the Euclidean distance between the final iterate produced by the method and the point corresponding to optimal values for both DPO and SFT objectives: $\sqrt{(f_{\text{DPO}}(\theta) - f^*_{\text{DPO}})^2 + (f_{\text{SFT}}(\theta) - f^*_{\text{SFT}})^2}$. For resource efficiency, we compare the \textbf{percentage increase in runtime} relative to the corresponding sequential implementation, e.g., the percentage runtime increase of Alternating DPO and SFT with $\lambda = 0.01$ compared to Sequential DPO and SFT with $(T_{\text{DPO}}, T_{\text{SFT}}) = (1, 5)$. Additionally, we compute the \textbf{percentage increase in GPU utilization} for each method relative to the baselines. Furthermore, for evaluating the real-world performance of proposed methods compared to baselines, we use the following benchmarks: \textbf{MMLU}\citep{hendrycks2020measuring}, a benchmark with multiple-choice questions across 57 diverse tasks; \textbf{Win rate}, which is calculated as the proportion of times a model's response is preferred by an evaluator over a baseline in head-to-head comparisons. For this purpose, we use \textsc{AlpacaEval}\citep{alpaca_eval} framework with \textsc{gpt-4-turbo} as the evaluator and \textsc{Dahoas/rm-hh-rlhf} test data as the baseline.
+
+\subsection{Experiment Results}
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.6\linewidth]{imgs/cheb-max_aval-ablation-loss-trajs_loss-space-pythia-1b-dpo-sft.pdf}
+\includegraphics[width=0.37\linewidth]{imgs/cheb-ablation-barcharts-pythia-1b-dpo-sft.pdf}
+\end{center}
+\caption{Comparison of different choices of evaluation steps for MAXRIGHT with Pythia-1b model. 
+}
+\label{fig:cheb-ablation-loss-space}
+\end{figure}
+
+In this section we illustrate and discuss the empirical results obtained under the experiment setup introduced in the previous section.
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.3} 
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{} & \multicolumn{3}{c}{MMLU (1-shot) ($\%$)} & \multicolumn{3}{c}{Win rate ($\%$)} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+
+$\lambda / (T_{\rm SFT}, T_{\rm DPO})$ & $0.25/(3, 1)$ & $0.5/(2, 2)$ & $0.75/(1, 3)$ & $0.25/(3, 1)$ & $0.5/(2, 2)$ & $0.75/(1, 3)$ \\
+\midrule
+Sequential & $73.18$ & $72.80$ & $72.68$ & $57.19$ & $65.62$ & $59.38$\\
+Mix        & $73.45$ & $73.40$ & $72.29$ & $81.88$ & $84.22$ & $\bm{88.42}$\\
+ALRIGHT    & $\bm{74.66}$ & $72.65$ & $\bm{75.50}$ & $\bm{88.28}$ & $85.78$ & $87.34$\\
+MAXRIGHT   & $72.35$ & $\bm{73.42}$ & $74.24$ & $86.56$ & $\bm{86.09}$ & $83.75$\\
+\bottomrule
+\end{tabular}
+\caption{Comparison of Win rate and MMLU (1-shot) for different methods using \textsc{Llama3-8b}.}\label{tab:llam3-benchmark}
+\end{table}
+
+\textbf{ALRIGHT provides better control over the trade-off compared to Sequential.} As shown in the top left plot of Figure \ref{fig:dpo-sft-loss-space-comp}, the optimization trajectories for DPO followed by SFT illustrate that the set of final models produced by ALRIGHT, for various values of $\lambda$, is more evenly distributed in the objective space.
+This distribution forms a Pareto front, indicating that no model is strictly worse than another with respect to both objectives. Moreover, the spread of these models is comparable to that of the Mix method. In contrast, Sequential tends to produce models that are biased towards the SFT objective, even when the number of DPO epochs is significantly higher than the number of SFT epochs (e.g., $(T_{\text{DPO}}, T_{\text{SFT}}) = (5, 1)$).
+
+\textbf{MAXRIGHT achieves near-ideal performance compared to other methods.} As illustrated in the top left plot of Figure \ref{fig:dpo-sft-loss-space-comp}, the optimization trajectories for DPO followed by SFT show that the set of final models produced by MAXRIGHT, for different values of $\lambda$, converge closer to the ideal point compared to other methods. This behavior is further supported by the Ideal Distance comparison in the right plot of Figure \ref{fig:dpo-sft-loss-space-comp}, where MAXRIGHT consistently achieves the best ideal distance performance across all $\lambda$ values. We attribute this advantage to the adaptive nature of MAXRIGHT, which dynamically selects the objective to update based on performance, rather than adhering to a fixed schedule like ALRIGHT. 
+This adaptability is particularly beneficial in heavily over-parameterized settings, where models have the capacity to approach ideal performance.
+
+\textbf{ALRIGHT and MAXRIGHT require minimal additional resources compared to Sequential and significantly lower than Mix.} 
+As shown in Figure \ref{fig:dpo-sft-loss-space-comp} (right, Increase in Runtime (\%) and Increase in GPU Utilization (\%)), the additional computational resources required by different implementations of ALRIGHT and MAXRIGHT are minimal (or even negative) relative to their Sequential counterparts. In contrast, Mix incurs substantial additional resource usage, with increases of over $50\%$ in runtime and more than $35\%$ in GPU utilization, despite achieving similar performance metrics to ALRIGHT and MAXRIGHT.
+
+\textbf{Effect of maximum evaluation step for memory-efficient MAXRIGHT.} Figure \ref{fig:cheb-ablation-loss-space} illustrates the influence of maximum evaluation step choices in memory efficient MAXRIGHT on optimization trajectories and resource usage. For low values (e.g., $1$), the algorithm closely follows the trade-off determined by $\lambda$, keeping the solutions concentrated near the ideal point (e.g., compared to ALRIGHT), but incurs high runtime due to frequent evaluations. In contrast, high values (e.g., $1000$) cause significant oscillations in the objective space, failing to maintain the desired trade-off and resulting in increased GPU utilization from excessive SFT updates. The aforementioned oscillation leads to poor ideal distance performance as the model drifts away from the ideal point.
+
+\textbf{ALRIGHT and MAXRIGHT significantly outperform Sequential on real-world tasks with minimal additional resources.} Table \ref{tab:llam3-benchmark} presents a performance comparison of Sequential, Mix, ALRIGHT, and MAXRIGHT using the MMLU benchmark and win rate. ALRIGHT and MAXRIGHT consistently surpass the baselines on the MMLU benchmark and achieve a significantly higher win rate than Sequential across all $\lambda$ values considered. Moreover, on both evaluation metrics, either ALRIGHT or MAXRIGHT performs on par with or better than Mix.
+
+
+
+\section{Conclusions and Discussion}
+
+ In this paper, we have shown both theoretically and empirically that the widely adopted sequential approach to post-training LLMs with RLHF and SFT is sub-optimal, as the model gradually forgets the effects of the initial stage during the second stage of training. Our proposed ALRIGHT and MAXRIGHT methods address this issue, with ALRIGHT providing theoretical convergence guarantees and MAXRIGHT demonstrating strong empirical performance. Notably, this improvement is achieved with minimal additional computational cost, making these methods practical and efficient alternatives for enhancing both the performance and preference alignment of LLMs.
+
+
+
+
+

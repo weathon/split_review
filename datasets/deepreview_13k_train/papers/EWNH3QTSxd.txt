@@ -1,0 +1,436 @@
+\title{Which Experiences Are Influential for RL Agents? Efficiently Estimating The Influence of Experiences}
+
+\begin{abstract}
+In reinforcement learning (RL) with experience replay, experiences stored in a replay buffer influence the RL agent's performance. 
+Information about how these experiences influence the agent's performance is valuable for various purposes, such as identifying experiences that negatively influence underperforming agents. 
+One method for estimating the influence of experiences is the leave-one-out (LOO) method. 
+However, this method is usually computationally prohibitive. 
+In this paper, we present Policy Iteration with Turn-over Dropout (PIToD), which efficiently estimates the influence of experiences. 
+We evaluate how accurately PIToD estimates the influence of experiences and its efficiency compared to LOO. 
+We then apply PIToD to amend underperforming RL agents, i.e., we use PIToD to estimate negatively influential experiences for the RL agents and to delete the influence of these experiences. 
+We show that RL agents' performance is significantly improved via amendments with PIToD. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In reinforcement learning (RL) with experience replay, the performance of an RL agent is influenced by experiences. 
+Experience replay~\citep{lin1992self} is a data-generation mechanism indispensable in modern off-policy RL methods~\citep{mnih2015human,hessel2018rainbow,haarnoja2018softa,NEURIPS2020}. 
+It allows an RL agent to learn from past experiences. 
+These experiences influence the RL agent's performance (e.g., cumulative rewards)~\citep{fedus2020revisiting}. 
+Estimating how each experience influences the RL agent's performance could provide useful information for many purposes. 
+For example, we could improve the RL agent's performance by identifying and deleting negatively influential experiences. 
+The capability to estimate the influence of experience will be crucial, as RL is increasingly applied to tasks where agents must learn from experiences of diverse quality (e.g., a mixture of experiences from both expert and random policies)~\citep{fu2020d4rl,yu2020meta,agarwal2022reincarnating,TWiRLSmith2023,liu2024offlinesaferl,tirumala2024replay}. 
+
+However, estimating the influence of experiences with feasible computational cost is not trivial. 
+One might consider estimating it by a leave-one-out (LOO) method (left part of Figure~\ref{fig:Summary}), which retrains an RL agent for each possible experience deletion. 
+As we will discuss in Section~\ref{sec:problem_of_loo}, this method has quadratic time complexity and quickly becomes intractable due to the necessity of retraining. 
+
+In this paper, we present PIToD, a policy iteration (PI) method that efficiently estimates the influence of experiences (right part of Figure~\ref{fig:Summary}). 
+PI is a fundamental method for many RL methods (Section~\ref{sec:preliminaries}). 
+PIToD is PI augmented with turn-over dropout (ToD)~\citep{kobayashi2020efficient} to efficiently estimate the influence of experiences without retraining an RL agent (Section~\ref{sec:proposed_method}). 
+We evaluate how accurately PIToD estimates the influence of experiences and its efficiency compared to the LOO method (Section~\ref{sec:experiments}). 
+We then apply PIToD to amend underperforming RL agents by identifying and deleting negatively influential experiences (Section~\ref{sec:application}). 
+To our knowledge, our work is the first to: (i) estimate the influence of experiences on the performance of RL agents with feasible computational cost, and (ii) modify RL agents' performance simply by deleting influential experiences. 
+\begin{figure}[t!]
+\begin{center}
+\includegraphics[clip, width=0.99\hsize]{Figures/Figs4NIPS/Summary.pdf}
+\end{center}
+\caption{Leave-one-out (LOO) influence estimation method (left part) and our method (right part). 
+LOO estimates the influence of experiences by retraining an RL agent for each experience deletion. 
+In contrast, our method estimates the influence of experiences without retraining. 
+}
+\label{fig:Summary}
+\end{figure}
+
+
+
+\section{Preliminaries}
+
+In Section~\ref{sec:proposed_method}, we will introduce our PI method for estimating the influence of experiences in the RL problem. 
+As preliminaries for this, we explain the RL problem, PI, and influence estimation. 
+
+\textbf{Reinforcement learning (RL).} 
+RL addresses the problem of an agent learning to act in an environment. 
+The environment provides the agent with a state $s$. The agent responds by selecting an action $a$, and then the environment provides a reward $r$ and the next state $s'$. 
+This interaction between the agent and environment continues until the agent reaches a terminal state. 
+The agent aims to find a policy $\pi: \mathcal{S} \times \mathcal{A} \rightarrow [0, 1]$ that maximizes cumulative rewards (return). 
+A Q-function $Q: \mathcal{S} \times \mathcal{A} \rightarrow \mathbb{R}$ is used to estimate the expected return. 
+
+\textbf{Policy iteration (PI).} 
+PI is a method for solving RL problems. 
+PI updates the policy and Q-function by iteratively performing policy evaluation and improvement. 
+Many implementations of policy evaluation and improvement have been proposed (e.g., \citet{lillicrap2015continuous,fujimoto2018addressing,haarnoja2018softa}). 
+In the main part of this paper, we focus on the policy evaluation and improvement used in Deep Deterministic Policy Gradient (DDPG). 
+In policy evaluation in DDPG, the Q-function $Q_{\phi}: \mathcal{S} \times \mathcal{A} \rightarrow \mathbb{R}$, parameterized by $\phi$, is updated as: 
+\begin{dmath}
+    \phi \leftarrow \phi - \nabla_{\phi} \mathbb{E}_{(s, a, r, s') \sim \mathcal{B}, ~a' \sim \pi_\theta(\cdot | s' )} \left[ \left( r + \gamma Q_{\bar{\phi}}(s', a') - Q_{\phi}(s, a) \right)^2 \right], \label{eq:Obj_Qfuncs} %\nonumber
+\end{dmath}
+where $\mathcal{B}$ is a replay buffer containing the collected experiences, and $Q_{\bar{\phi}}$ is a target Q-function. 
+In policy improvement in DDPG, policy $\pi_\theta$, parameterized by $\theta$, is updated as: 
+\begin{dmath}
+    \theta \leftarrow \theta + \nabla_{\theta} \mathbb{E}_{s \sim \mathcal{B}, ~a_\theta \sim \pi_\theta(\cdot | s)} \left[ Q_{\phi}(s, a_\theta) \right]. \label{eq:Obj_Policy} %\nonumber
+\end{dmath}
+
+\textbf{Estimating the influence of experiences.} 
+Given the policy and Q-functions updated through PI, we aim to estimate the influence of experiences on performance. 
+Formally, letting $e_i$ be the $i$-th experience contained in the replay buffer $\mathcal{B}$, we evaluate the influence of $e_i$ as 
+\begin{dmath}
+    L\left(Q_{\phi, \mathcal{B}\backslash{\{e_i\}}}, \pi_{\theta, \mathcal{B}\backslash{\{e_i\}}} \right) - L\left( Q_{\phi, \mathcal{B}}, \pi_{\theta, \mathcal{B}} \right), \label{eq:influence}
+\end{dmath}
+where $L$ is a metric for evaluating the performance of the Q-function and policy, 
+$Q_{\phi, \mathcal{B}}$ and $\pi_{\theta, \mathcal{B}}$ are the Q-function and policy updated with all experiences contained in $\mathcal{B}$, 
+and $Q_{\phi, \mathcal{B}\backslash{\{e_i\}}}$ and $\pi_{\theta, \mathcal{B}\backslash{\{e_i\}}}$ are the ones updated with $\mathcal{B}$ other than $e_i$. 
+$L$ is defined according to the focus of the experiments. 
+In this paper, we define $L$ as policy and Q-function loss for the experiments in Section~\ref{sec:experiments}, and as empirical return and Q-estimation bias for the applications in Section~\ref{sec:application}. 
+
+
+\section{Leave-one-out (LOO) influence estimation}
+
+What method can be used to estimate the influence of experiences? 
+One straightforward method is based on the LOO algorithm (Algorithm~\ref{alg1:Loo}). 
+This algorithm estimates the influence of experiences by retraining the RL agent's components (i.e., policy and Q-functions) for each experience deletion. 
+Specifically, it retrains the policy $\pi_{\theta'}$ and Q-function $Q_{\phi'}$ using $\mathcal{B} \backslash \{ e_i \}$ through $I$ policy iterations (lines 4--6). 
+Here, $I$ equals the number of policy iterations required for training the original policy $\pi_{\theta}$ and Q-function $Q_{\phi}$. 
+After retraining the components, the influence of $e_i$ is evaluated using Eq.~\ref{eq:influence_LOO} with $\pi_{\theta'}$, $Q_{\phi'}$ and $\pi_{\theta}$, $Q_{\phi}$ (line 7). 
+\begin{algorithm*}[t!]
+\caption{Leave-one-out influence estimation for policy iteration}
+\label{alg1:Loo}
+\begin{algorithmic}[1]
+\STATE \textbf{given} replay buffer $\mathcal{B}$, learned parameters $\phi, \theta$, and number of policy iteration $I$. 
+\FOR{$e_{i} \in \mathcal{B}$} 
+    \STATE Initialize temporal parameters $\phi'$ and $\theta'$. 
+    \FOR{$I$ iterations}
+        \STATE Update $Q_{{\phi}'}$ with $\mathcal{B} \backslash \{ e_i \}$ (policy evaluation). 
+        \STATE Update $\pi_{\theta'}$ with $\mathcal{B} \backslash \{ e_i \}$ (policy improvement). 
+    \ENDFOR
+    \STATE Evaluate the influence of $e_{i}$ as 
+    \begin{dmath}
+        L\left(Q_{\phi'}, \pi_{\theta'} \right)  - L\left( Q_{\phi}, \pi_{\theta} \right). \label{eq:influence_LOO} \nonumber
+    \end{dmath}
+\ENDFOR
+\end{algorithmic}
+\end{algorithm*}
+
+However, in typical settings, Algorithm~\ref{alg1:Loo} becomes computationally prohibitive due to retraining. 
+In typical settings (e.g., \citet{fujimoto2018addressing,haarnoja2018soft}), the size of the buffer $\mathcal{B}$ is small at the beginning of policy iteration and increases by one with each iteration. 
+Consequently, the size of $\mathcal{B}$ is approximately equal to the number of iterations $I$ (i.e., $|\mathcal{B}| \approx I$). 
+Since Algorithm~\ref{alg1:Loo} retrains the RL agent’s components through $I$ policy iterations for each $e_i$, the total number of policy iterations across the entire algorithm becomes $I^2$. 
+The value of $I$ typically ranges between $10^3$ and $10^6$ (e.g., \citet{chen2021randomized,haarnoja2018soft}), which makes it difficult to complete all policy iterations in a realistic timeframe. 
+
+In the next section, we will introduce a method to estimate the influence of experiences without retraining the RL agent's components. 
+
+
+
+\section{Policy iteration with turn-over dropout (PIToD)}
+
+In this section, we present \textbf{P}olicy \textbf{I}teration with \textbf{T}urn-\textbf{o}ver \textbf{D}ropout (PIToD), which estimates the influence of experiences without retraining. 
+The concept of PIToD is shown in Figure~\ref{fig:Outline}, and an algorithmic description of PIToD is shown in Algorithm~\ref{alg2:PI_PIToD}. 
+Inspired by ToD~\citep{kobayashi2020efficient}, PIToD uses masks and flipped masks to drop out the parameters of the policy and Q-function. 
+Further details are provided in the following paragraphs. 
+\begin{figure*}[t!]
+\begin{center}
+\includegraphics[clip, width=0.99\hsize]{Figures/Figs4NIPS/PIToDOutline.pdf}
+\end{center}
+\caption{
+The concept of PIToD. 
+PIToD uses mask $\mathbf{m}_{i}$ and flipped mask $\mathbf{w}_i$. 
+It applies $\mathbf{m}_{i}$ to the policy and Q-function for PI with $e_i$. 
+Additionally, it applies $\mathbf{w}_{i}$ to the policy and Q-function for estimating the influence of $e_i$. 
+}
+\label{fig:Outline}
+\end{figure*}
+
+\textbf{Masks and flipped masks.} 
+PIToD uses mask $\mathbf{m}_i$ and flipped mask $\mathbf{w}_i$, which are binary vectors uniquely associated with experience $e_i$. 
+The mask $\mathbf{m}_i$ consists of elements randomly initialized to $0$ or $1$. 
+$\mathbf{m}_i$ is used to drop out the parameters of the policy and Q-function during PI with $e_i$. 
+Additionally, the flipped mask $\mathbf{w}_i$ is the negation of $\mathbf{m}_i$, i.e., $\mathbf{w}_i = \mathbf{1} - \mathbf{m}_i$. 
+$\mathbf{w}_i$ is used to drop out the parameters of the policy and Q-function for estimating the influence of $e_i$. 
+
+\textbf{Policy iteration with the mask (lines 5--6 in Algorithm~\ref{alg2:PI_PIToD}).} 
+PIToD applies $\mathbf{m}_i$ to the policy and Q-function during PI with $e_i$. 
+It executes PI with variants of policy evaluation (Eq.~\ref{eq:Obj_Qfuncs}) and improvement (Eq.~\ref{eq:Obj_Policy}) where masks are applied to the parameters of the policy and Q-function. 
+The policy evaluation for PIToD is 
+\begin{dmath}
+    \phi \leftarrow \phi - \nabla_{\phi} \mathbb{E}_{e_i = (s, a, r, s', i) \sim \mathcal{B},~ a' \sim \pi_{\theta, \mathbf{m}_i}(\cdot | s' )} \left[ \left( r + \gamma Q_{\bar{\phi}, \mathbf{m}_i}(s', a') - Q_{\phi, \mathbf{m}_i}(s, a) \right)^2 \right]. \label{eq:Obj_Qfuncs_ToD} %\nonumber
+\end{dmath}
+The policy improvement for PIToD is 
+\begin{dmath}
+    \theta \leftarrow \theta + \nabla_{\theta} \mathbb{E}_{e_i = (s, i) \sim \mathcal{B}, ~ a_{\theta, \mathbf{m}_i} \sim \pi_{\theta, \mathbf{m}_i}(\cdot | s)} \left[ Q_{\phi, \mathbf{m}_i}(s, a_{\theta, \mathbf{m}_i}) \right]. \label{eq:Obj_Policy_ToD} %\nonumber
+\end{dmath}
+Here, $Q_{\phi, \mathbf{m}_i}$ and $\pi_{\theta, \mathbf{m}_i}$ are the Q-function and policy to which the mask $\mathbf{m}_i$ is applied. 
+In Eq.~\ref{eq:Obj_Qfuncs_ToD} and Eq.~\ref{eq:Obj_Policy_ToD}, for inputs from $e_i$, $Q_{\phi, \mathbf{m}_i}$ and $\pi_{\theta, \mathbf{m}_i}$ compute their outputs without using the parameters that are dropped out by $\mathbf{m}_i$. 
+Thus, some readers may suspect that the parameters dropped out by $\mathbf{m}_i$ (i.e., the parameters obtained by applying $\mathbf{w}_i$) are not influenced by $e_i$. 
+ 
+Based on this theoretical property, we estimate the influence of $e_i$ by applying $\mathbf{w}_i$ to policy and Q-functions (see the next paragraph for details). 
+\begin{algorithm*}[t!]
+\caption{Policy iteration with turn-over dropout (PIToD)}
+\label{alg2:PI_PIToD}
+\begin{algorithmic}[1]
+\STATE Initialize policy parameters $\theta$, Q-function parameters $\phi$, and an empty replay buffer $\mathcal{B}$; Set influence estimation interval $I_{\text{ie}}$. 
+\FOR{$i' = 0, ..., I$ iterations} 
+    \STATE Take action $a \sim \pi_\theta(\cdot | s)$; Observe reward $r$ and next state $s'$. Define an experience using $i'$ as: $e_{i'} = (s, a, r, s', i')$; $\mathcal{B} \leftarrow \mathcal{B} \bigcup \{ e_{i'}\}$. 
+    \STATE Sample experiences $\{ (s, a, r, s', i), ... \}$ from $\mathcal{B}$ (Here, $e_i = (s, a, r, s', i)$). 
+    \STATE Update $\phi$ with gradient descent using
+        \nabla_\phi \sum_{(s, a, r, s', i)} \left( r + \gamma Q_{\bar{\phi}, \mathbf{m}_i}(s', a') - Q_{\phi, \mathbf{m}_i}(s, a) \right)^2, ~~ a' \sim \pi_{\theta, \mathbf{m}_i}(\cdot | s' ). \nonumber
+    \STATE Update $\pi_\theta$ with gradient ascent using 
+    \begin{equation}
+        \nabla_\theta \sum_{(s, i)} Q_{\phi, \mathbf{m}_i}(s, a_{\theta, \mathbf{m}_i}), ~~~ a_{\theta, \mathbf{m}_i} \sim \pi_{\theta, \mathbf{m}_i}(\cdot | s). \nonumber % DDPG style policy update with reparameterization trick
+    \IF{$ i' \% I_{\text{ie}} = 0 $}
+        \STATE For $e_i \in \mathcal{B}$, estimate the influence of $e_i$ using  
+        \begin{dmath*}
+             L\left(Q_{\phi, \mathbf{w}_i}, \pi_{\theta, \mathbf{w}_i} \right) - L\left(Q_{\phi}, \pi_{\theta} \right) ~~~\text{or}~~~  L\left(Q_{\phi, \mathbf{w}_i}, \pi_{\theta, \mathbf{w}_i} \right) - L\left(Q_{\phi, \mathbf{m}_i}, \pi_{\theta, \mathbf{m}_i}\right). \nonumber
+        \end{dmath*}
+    \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm*}
+
+\textbf{Estimating the influence of experience with flipped mask (lines 7--8 in Algorithm~\ref{alg2:PI_PIToD}).} 
+PIToD periodically estimates the influence of $e_i$ by applying $\mathbf{w}_i$ to the policy and Q-function. 
+It estimates the influence of $e_i$ (Eq.~\ref{eq:influence}) as 
+\begin{dmath}
+    L\left(Q_{\phi, \mathbf{w}_i}, \pi_{\theta, \mathbf{w}_i} \right) - L\left(Q_{\phi}, \pi_{\theta} \right), 
+    \label{eq:approxed_influence} 
+\end{dmath}
+where the first term is the performance when $e_i$ is deleted, and the second term is the performance with all experiences. 
+$Q_{\phi, \mathbf{w}_i}$ and $\pi_{\theta, \mathbf{w}_i}$ are the Q-function and policy with dropout based on $\mathbf{w}_i$. 
+$Q_{\phi}$ and $\pi_{\theta}$ are the Q-function and policy without dropout. 
+For the second term, if we want to highlight the influence of $e_i$ more significantly, the term can be evaluated by alternatively using the masked policy and Q-functions: $L\left(Q_{\phi, \mathbf{m}_i}, \pi_{\theta, \mathbf{m}_i}\right)$. 
+The influence estimation is performed every $I_{\text{ie}}$ iterations (line 7 in Algorithm~\ref{alg2:PI_PIToD}). 
+These influence estimations by PIToD do not require retraining for each experience deletion, unlike the LOO method. 
+
+\textbf{Implementation details for PIToD.} 
+ 
+ 
+
+
+
+\section{Evaluations for PIToD}
+
+In the previous section, we introduced PIToD, a method that efficiently estimates the influence of experiences. 
+In this section, we evaluate its accuracy in influence estimation (Section~\ref{sec:eval_self_influence}) and its computational efficiency (Section~\ref{sec:eval_computational_time}). 
+
+\subsection{How accurately does PIToD estimate the influence of experiences? Evaluations with self-influence}\label{sec:eval_self_influence}
+In this section, we evaluate how accurately PIToD estimates the influence of experiences by focusing on their self-influence. 
+Self-influence is the influence of an experience on prediction performance using that same experience. 
+We define self-influences on policy evaluation and on policy improvement. 
+The self-influence of an experience $e_i := (s, a, r, s', i)$ on policy evaluation is 
+\begin{eqnarray}
+    && L_{pe, i}(Q_{\phi, \mathbf{w}_i}) -  L_{pe, i}(Q_{\phi, \mathbf{m}_i}), \label{eq:self_infl_q_func}\\ 
+    && ~~\text{where}~ L_{pe, i}(Q) = \left( r + \gamma  Q_{\bar{\phi}, \mathbf{m}_i}(s', a') - Q(s, a) \right)^2, ~~ a' \sim \pi_{\theta, \mathbf{m}_i}(\cdot | s'). \nonumber
+\end{eqnarray}
+Here, $L_{pe, i}$ represents the temporal difference error based on $e_i$. 
+The self-influence of $e_i$ on policy improvement is %defined as:
+\begin{eqnarray}
+    L_{pi, i}(\pi_{\theta, \mathbf{w}_i}) -  L_{pi, i}(\pi_{\theta, \mathbf{m}_i}), ~~\text{where}~ L_{pi, i}(\pi) =  Q_{\phi, \mathbf{m}_i}(s, a'), ~~~~ a' \sim \pi(\cdot | s). \label{eq:self_infl_policy_func}
+\end{eqnarray}
+Here, $L_{pi, i}$ represents the Q-value estimate based on $e_i$. 
+
+We evaluate whether PIToD has correctly estimated the influence of experiences by examining the signs (positive or negative) of the values of Eq.~\ref{eq:self_infl_q_func} and Eq.~\ref{eq:self_infl_policy_func}. 
+If PIToD has correctly estimated the influence of experiences, the value of Eq.~\ref{eq:self_infl_q_func} should be positive. 
+$Q_{\phi, \mathbf{m}_i}$ is optimized by PIToD to minimize $L_{pe, i}$ (line 5 in Algorithm~\ref{alg2:PI_PIToD}), while $Q_{\phi, \mathbf{w}_i}$ is not. 
+Therefore, $L_{pe, i}(Q_{\phi, \mathbf{m}_i}) \leq L_{pe, i}(Q_{\phi, \mathbf{w}_i})$, implying that Eq.~\ref{eq:self_infl_q_func} $\geq 0$. 
+Conversely, if PIToD has correctly estimated, the value of Eq.~\ref{eq:self_infl_policy_func} should be negative. 
+$\pi_{\theta, \mathbf{m}_i}$ is optimized by PIToD to maximize $L_{pi, i}$ (line 6 in Algorithm~\ref{alg2:PI_PIToD}), while $\pi_{\theta, \mathbf{w}_i}$ is not. 
+Therefore, $L_{pi, i}(\pi_{\theta, \mathbf{m}_i}) \geq L_{pi, i}(\pi_{\theta, \mathbf{w}_i})$, which implies that Eq.~\ref{eq:self_infl_policy_func} $\leq 0$. 
+
+We periodically evaluate the ratio of experiences for which PIToD has correctly estimated self-influence in the MuJoCo environments~\citep{todorov2012mujoco}. 
+The MuJoCo tasks for this evaluation are Hopper, Walker2d, Ant, and Humanoid. 
+In this evaluation, 5000 policy iterations (i.e., lines 3--6 of Algorithm~\ref{alg2:PI_PIToD}) constitute one epoch, with 125 epochs allocated for Hopper and 300 epochs for the others.
+At each epoch, we (i) calculate the self-influence (Eq.~\ref{eq:self_infl_q_func} and Eq.~\ref{eq:self_infl_policy_func}) of experiences stored in the replay buffer and (ii) record the ratio of experiences for which PIToD has correctly estimated self-influence. 
+
+Evaluation results (Figure~\ref{fig:raio_of_experiences_with_pos_neg_influence}) show that the ratio of experiences for which the self-influence (Eq.~\ref{eq:self_infl_q_func} and Eq.~\ref{eq:self_infl_policy_func}) is correctly estimated exceeds the chance rate of 0.5. 
+For self-influence on policy evaluation (Eq.~\ref{eq:self_infl_q_func}), the ratio of correctly estimated experiences is higher than 0.9 across all environments. 
+Furthermore, for self-influence on policy improvement (Eq.~\ref{eq:self_infl_policy_func}), the ratio of correctly estimated experiences exceeds 0.7 in Hopper, 0.8 in Walker2d and Ant, and 0.9 in Humanoid. 
+These results suggest that PIToD estimates the influence of experiences more accurately than random estimation. 
+
+\textbf{Supplementary analysis.} 
+How are experiences that exhibit significant self-influence distributed? 
+Figure~\ref{fig:distribution_of_self_influences} shows the distribution of self-influence across experiences. 
+From the figure, we see that in policy evaluation, the self-influence of older experiences (with smaller normalized experience indexes) becomes more significant as the epoch progresses. 
+This tendency can be seen as a primacy bias~\citep{pmlr-v162-nikishin22a}, suggesting that the RL agent is overfitting more significantly to the experiences of the early stages of learning. 
+Conversely, for policy improvement, we do not observe a clear tendency for primacy bias. 
+These observations may indicate that policy improvement is less prone to causing overfit to older experiences than policy evaluation. 
+\begin{figure*}[t!]
+\begin{minipage}{1.0\hsize}
+\includegraphics[clip, width=0.49\hsize]{Figures/Figs4NIPS/Experiments/ratio_of_influence_policyevaluation.pdf}
+\includegraphics[clip, width=0.49\hsize]{Figures/Figs4NIPS/Experiments/ratio_of_influence_policyimprovement.pdf}
+\end{minipage}
+\caption{
+The ratio of experiences for which PIToD correctly estimated self-influence. 
+The left-hand figure displays this ratio in policy evaluation cases, where a positive self-influence value (i.e., Eq.~\ref{eq:self_infl_q_func} $\geq 0$) is correct. 
+The right-hand figure displays the ratio in policy improvement cases, where a negative self-influence value (i.e., Eq.~\ref{eq:self_infl_policy_func} $\leq 0$) is correct. 
+In both figures, the vertical axis represents the ratio of correctly estimated experiences, and the horizontal axis shows the number of epochs. 
+In both cases, the ratio of correctly estimated experiences surpasses the chance rate of 0.5. 
+}
+\label{fig:raio_of_experiences_with_pos_neg_influence}
+\end{figure*}
+\begin{figure*}[t!]
+\begin{minipage}{1.0\hsize}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyevaluation_Hopper-v2.pdf}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyevaluation_Walker2d-v2.pdf}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyevaluation_AntTruncatedObs-v2.pdf}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyevaluation_HumanoidTruncatedObs-v2.pdf}
+\subcaption{Distribution of self-influence on policy evaluation (Eq.~\ref{eq:self_infl_q_func}).}
+\end{minipage}
+\begin{minipage}{1.0\hsize}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyimprovement_Hopper-v2.pdf}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyimprovement_Walker2d-v2.pdf}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyimprovement_AntTruncatedObs-v2.pdf}
+\includegraphics[clip, width=0.245\hsize]{Figures/Figs4NIPS/Experiments/influence_policyimprovement_HumanoidTruncatedObs-v2.pdf}
+\subcaption{Distribution of self-influence on policy improvement (Eq.~\ref{eq:self_infl_policy_func}).}
+\end{minipage}
+\caption{
+Distribution of self-influence on policy evaluation and policy improvement. 
+The vertical axis represents the normalized experience index, which ranges from 0.0 for the oldest experiences to 1.0 for the most recent experiences. 
+This index corresponds to the normalized $i$ used in Algorithm~\ref{alg2:PI_PIToD}. 
+The horizontal axis represents the number of epochs. 
+The color bar represents the value of self-influence. 
+\textbf{Interpretation of this figure:} 
+For example, if the value of self-influence for $e_i$ in policy evaluation cases is $2 \cdot 10^8$, this indicates that the value of $L_{pe, i}(Q_{\phi, \mathbf{w}_i})$ is $2 \cdot 10^8$ larger than that of $L_{pe, i}(Q_{\phi, \mathbf{m}_i})$. 
+\textbf{Key insight:} In policy evaluation, experiences with high self-influence tend to concentrate on older ones (with smaller normalized experience indexes) as the epochs progress. 
+}
+\label{fig:distribution_of_self_influences}
+\end{figure*}
+
+\subsection{How efficiently does PIToD estimate the influence of experiences? Evaluation for computational time}\label{sec:eval_computational_time} 
+We evaluate the computational time required for influence estimation with PIToD and compare it to the estimated time for LOO. 
+To measure the computational time for PIToD, we run the method under the same settings as in the previous section and record its wall-clock time. 
+For comparison, we also evaluate the estimated time required for influence estimation using LOO (Section~\ref{sec:problem_of_loo}). 
+To estimate the time for LOO, we record the average time required for one policy iteration with PIToD and multiply this by the total number of policy iterations required for LOO~\footnote{The total number of policy iterations for LOO is $I^2$, as discussed in Section~\ref{sec:problem_of_loo}. 
+ 
+For a fair comparison with this implementation, we use $\frac{I^2}{5000}$ instead of $I^2$ as the total number of policy iterations for LOO.}. 
+
+The evaluation results (Figure~\ref{fig:training_time}) show that PIToD significantly reduces computational time compared to LOO. 
+The time required for LOO increases quadratically as epochs progress, taking, for example, more than $4 \cdot 10^7$ seconds ($\approx 462$ days) up to 300 epochs in Humanoid. 
+In contrast, the time required for PIToD increases linearly, taking about $1.4 \cdot 10^5$ seconds ($\approx$ one day) for 300 epochs in Humanoid. 
+\begin{figure*}[t!]
+\begin{minipage}{0.99\hsize}
+\includegraphics[clip, width=0.49\hsize]{Figures/Figs4NIPS/Experiments/training_time.pdf}
+\includegraphics[clip, width=0.49\hsize]{Figures/Figs4NIPS/Experiments/training_time_wo_loo.pdf}
+\end{minipage}
+\caption{
+Wall-clock time required for influence estimation by PIToD and LOO. 
+The solid line represents the time for PIToD, and the dashed line represents the estimated time for LOO. 
+The left figure shows the time for both PIToD and LOO. 
+The right figure shows the time for PIToD alone to allow readers to see the details of PIToD's time more clearly. 
+The results show that the time required for LOO increases quadratically with the number of epochs, whereas the time required for PIToD increases linearly. 
+}
+\label{fig:training_time}
+\end{figure*}
+
+
+
+\section{Application of PIToD: amending policies and Q-functions by deleting negatively influential experiences}
+
+In the previous section, we demonstrated that PIToD can accurately and efficiently estimate the influence of experiences. 
+What scenarios might benefit from this capability? 
+In this section, we demonstrate how PIToD can be used to amend underperforming policies and Q-functions. 
+
+We amend policies and Q-functions by deleting experiences that negatively influence performance. 
+We evaluate the performance of policies and Q-functions based respectively on returns and Q-estimation biases~\citep{fujimoto2018addressing,chen2021randomized}. 
+The influence of an experience $e_i$ on the return, $L_{\text{ret}}$, is evaluated as follows: 
+\begin{eqnarray}
+    L_{\text{ret}}(\pi_{\theta, \mathbf{w}_i}) - L_{\text{ret}}(\pi_{\theta}), ~~\text{where}~ L_{\text{ret}}(\pi) = \mathbb{E}_{a_t \sim \pi(\cdot | s_t )} \left[ \sum_{t=0} \gamma^t r(s_t, a_t) \right]. \label{eq:influence_return} %\nonumber
+\end{eqnarray}
+Here, $s_t$ is sampled from an environment. 
+In our setup, $L_{\text{ret}}$ is estimated using Monte Carlo returns collected by rolling out policies $\pi_{\theta, \mathbf{w}_i}$ and $\pi_{\theta}$. 
+The influence of $e_i$ on Q-estimation bias, $L_{\text{bias}}$, is evaluated as follows: 
+\begin{dmath}
+    L_{\text{bias}}(Q_{\phi, \mathbf{w}_i}) - L_{\text{bias}}(Q_{\phi}), \\
+    ~~\text{where}~ L_{\text{bias}}(Q) = \mathbb{E}_{a_t \sim \pi_{\theta}(\cdot | s_t), a_{t'} \sim \pi_{\theta}(\cdot | s_{t'})} \left[ \sum_{t=0} \frac{ \left| Q(s_t, a_t) - \sum_{t'=t} \gamma^{t'}
+ r(s_{t'}, a_{t'}) \right| }{ \left| \sum_{t'=t} \gamma^{t'} r(s_{t'}, a_{t'}) \right| } \right]. \label{eq:influence_bias} %\nonumber
+\end{dmath}
+Here, $L_{\text{bias}}$ quantifies the discrepancy between the estimated and true Q-values using their L1 distance. 
+Based on Eq.~\ref{eq:influence_return} and Eq.~\ref{eq:influence_bias}, we identify and delete the experience $e_{*}$ that has the strongest negative influence on them. 
+We apply $\mathbf{w}_{*}$, which maximizes Eq.~\ref{eq:influence_return}, to the policy to delete $e_{*}$. 
+Additionally, we apply $\mathbf{w}_{*}$, which minimizes Eq.~\ref{eq:influence_bias}, to the Q-function to delete $e_{*}$. 
+ 
+
+We evaluate the effect of the amendments on trials in which the policy and Q-function underperform. 
+We run ten learning trials with the amendments (Algorithm~\ref{alg4:Amendment}) and evaluate (i) $L_{\text{ret}}(\pi_{\theta, \mathbf{w}_*})$ for the two trials in which the policy scores the lowest returns $L_{\text{ret}}(\pi_{\theta})$ and (ii) $L_{\text{bias}}(Q_{\phi, \mathbf{w}_*})$ for the two trials in which the Q-function scores the highest biases $L_{\text{bias}}(Q_{\phi})$. 
+The average scores of $L_{\text{ret}}(\pi_{\theta, \mathbf{w}_*})$ and $L_{\text{bias}}(Q_{\phi, \mathbf{w}_*})$ for these underperforming trials are shown in Figure~\ref{fig:cleansing_results}. 
+ 
+
+The results of the policy and Q-function amendments (Figure~\ref{fig:cleansing_results}) show that performance is improved through the amendments. 
+From the policy amendment results (left part of Figure~\ref{fig:cleansing_results}), we see that the return ($L_{\text{ret}}$) is significantly improved in Hopper and Walker. 
+For example, in Hopper, the return before the amendment (the blue dashed line) is approximately 1000, but after the amendment (the blue solid line), it exceeds 3000. 
+Additionally, from the Q-function amendment results (right part of Figure~\ref{fig:cleansing_results}), we see that the Q-estimation bias ($L_{\text{bias}}$) is significantly reduced in Ant and Humanoid. 
+For example, in Humanoid, the estimation bias of the Q-function before the amendment (the red dashed line) is approximately 30 during epochs 250--300, but after the amendment, it is reduced to approximately 20 (the red solid line). 
+\begin{figure*}[t!]
+\begin{minipage}{1.0\hsize}
+\includegraphics[clip, width=0.49\hsize]{Figures/Figs4NIPS/Experiments/cleansing_list_reinforce_cleansing_worst.pdf}
+\includegraphics[clip, width=0.49\hsize]{Figures/Figs4NIPS/Experiments/cleansing_list_q_bias_cleansing_worst.pdf}
+\end{minipage}
+\caption{
+Results of policy amendments (left) and Q-function amendments (right) in underperforming trials. 
+The solid lines represent the post-amendment performances: return for the policy (left; i.e., $L_{\text{ret}}(\pi_{\theta, \mathbf{w}_*})$) and bias for the Q-function (right; i.e., $L_{\text{bias}}(Q_{\phi, \mathbf{w}_*})$). 
+The dashed lines show the pre-amendment performances: return (left; i.e., $L_{\text{ret}}(\pi_{\theta})$) and bias (right; i.e., $L_{\text{bias}}(Q_{\phi})$). 
+These figures demonstrate that the amendments improve returns in Hopper and Walker2d, and reduce biases in Ant and Humanoid.
+}
+\label{fig:cleansing_results}
+\end{figure*}
+
+What kinds of experiences negatively influence policy or Q-function performance?
+\textbf{Policy performance:} Some experiences negatively influencing returns are associated with stumbling or falling. 
+
+\textbf{Q-function performance:} Experiences negatively influencing Q-estimation bias tend to be older experiences. 
+ 
+For example, in the Humanoid environment, we observe that older experiences often have a negative influence (highlighted in darker colors). 
+
+\textbf{Additional experiments.} 
+We analyzed the correlation between the experience influences (i.e., Eq.~\ref{eq:influence_return} and Eq. 
+ 
+
+
+
+\section{Related work}
+
+\textbf{Influence estimation in supervised learning.} 
+Our research builds upon prior studies that estimate the influence of data within the supervised learning (SL) regime. 
+In Section~\ref{sec:proposed_method}, we introduced our method for estimating the influence of data (i.e., experiences) in RL settings. 
+Methods that estimate the influence of data have been extensively studied in the SL research community. 
+Typically, these methods require SL loss functions that are twice differentiable with respect to model parameters (e.g., \citet{pmlr-v70-koh17a,yeh2018representer,hara2019data,koh2019accuracy,guo2020fastif,chen2021hydra,schioppa2022scaling}). 
+However, these methods are not directly applicable to our RL setting, as such SL loss functions are unavailable. 
+In contrast, turn-over dropout (ToD)~\citep{kobayashi2020efficient} estimates the influence without requiring differentiable SL loss functions. 
+We extended ToD for RL settings (Sections~\ref{sec:proposed_method}, \ref{sec:experiments}, and \ref{sec:application}). 
+ 
+
+\textbf{Influence estimation in off-policy evaluation (OPE)}. 
+A few studies in the OPE community have focused on efficiently estimating the influence of experiences~\citep{gottesman2020interpretable,lobo2022data}. 
+These studies are limited to estimating the influence on policy evaluation using nearest-neighbor or linear Q-functions. 
+In contrast, our study estimates influence on a broader range of performance metrics (e.g., return or Q-estimation bias) using neural-network-based Q-functions and policies. 
+
+\textbf{Prioritized experience replay (PER).}
+In PER, the importance of experiences is estimated to prioritize experiences during experience replay. 
+The importance of experiences is estimated based on criteria such as TD-error~\citep{Schaul2016,fedus2020revisiting} or on-policyness~\citep{novati2019remember,sun2020attentive}. 
+Some readers might think that PER resembles our method. 
+However, PER fundamentally differs from our method, as it cannot efficiently estimate or disable the influence of experiences in hindsight. 
+
+\textbf{Interpretable RL.} 
+Our method (Section~\ref{sec:proposed_method}) estimates the influence of experiences, thereby providing a certain type of interpretability. 
+Previous studies in the RL community have proposed interpretable methods based on symbolic (or relational) representation~\citep{dvzeroski2001relational,ijcai2018p675,lyu2019sdrl,garnelo2016towards,NIPS2017_fb89fd13,konidaris2018skills}, interpretable proxy models (e.g., decision trees)~\citep{degris2006learning,liu2019toward,coppens2019distilling,zhu2022extracting}, saliency explanation~\citep{zahavy2016graying,greydanus2018visualizing,mott2019towards,wang2020attribution,anderson2020mental}, and sparse kernel models~\citep{dao2018deep}~\footnote{For a comprehensive review of interpretable RL, see \citet{mliani2024explain}.}. 
+Unlike these studies, our study proposes a method to estimate the influence of experiences on RL agent performance. 
+This method helps us, for example, identify influential experiences when RL agents perform poorly, as demonstrated in Section~\ref{sec:application}. 
+
+
+
+\section{Conclusion and limitations}
+
+In this paper, we proposed PIToD, a policy iteration (PI) method that efficiently estimates the influence of experiences (Section~\ref{sec:proposed_method}). 
+We demonstrated that PIToD (i) accurately estimates the influence of experiences (Section~\ref{sec:eval_self_influence}), and (ii) significantly reduces the time required for influence estimation compared to the leave-one-out (LOO) method (Section~\ref{sec:eval_computational_time}). 
+Furthermore, we applied PIToD to identify and delete negatively influential experiences, which improved the performance of policies and Q-functions (Section~\ref{sec:application}). 
+
+We believe that our work provides a solid foundation for understanding the relationship between experiences and RL agent performance. 
+However, it has several limitations. 
+ 
+
+
+
+
+
+

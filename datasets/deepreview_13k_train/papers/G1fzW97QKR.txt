@@ -1,0 +1,201 @@
+\title{Boosting Long-Context LLM Inference Efficiency with Intra-Layer Attention Similarity}
+
+\begin{abstract}
+The increasing context window size in Large Language Models (LLMs), such as the GPT and LLaMA series, has improved their ability to tackle complex, long-text tasks, but at the cost of inference efficiency, particularly regarding memory and computational complexity. Existing methods, including selective token retention and window-based attention, improve efficiency but risk discarding important tokens needed for future text generation. In this paper, we propose an approach that enhances LLM efficiency without token loss by reducing the memory and computational load of less important tokens, rather than discarding them. 
+    We address two challenges: 1) investigating the distribution of important tokens in the context, discovering recent tokens are more important than distant tokens in context, and 2) optimizing resources for distant tokens by sharing attention scores across layers. The experiments show that our method saves $35$% KV cache without compromising the performance.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recently, the increasing context window size in Large Language Models (LLMs) (Brown et al., 2020; Achiam et al., 2023; Team et al., 2023; Reid et al., 2024; Touvron et al., 2023a;b; Dubey et al., 2024), has allowed them to excel in handling complex tasks necessitating an in-depth exploration of lengthy texts (Bairi et al., 2024; Mazumder & Liu, 2024). However, it poses challenges to the computation and memory footprint of LLMs. Specifically, on the one hand, since most LLMs are based on the Transformer (Vaswani et al., 2017) architecture, the computational complexity of the attention module increases quadratically with the size of the context window. On the other hand, the size of KV cache (Pope et al., 2023), a commonly used technique designed to prevent redundant computations, is linearly related to the context window size. Hence, enhancing the efficiency of LLMs with extended context windows is critical.  
+
+Against this backdrop, numerous researchers have put forward approaches to enhance the inference efficiency of LLMs by discarding some tokens within the context. In particular, the window attention approach (Beltagy et al., 2020) retains a fixed-size window over the KV states of the most recent tokens. LM-Infinite (Han et al., 2024) and StreamingLLM (Xiao et al., 2024) identify the “attention sink” phenomenon, preserving both the initial tokens and recent tokens (see Figure 1- (a)). $\mathrm{H_{2}O}$ (Zhang et al., 2023) takes into consideration the differing significance of tokens within the context and selectively retains only the most important tokens in the KV cache based on attention scores. While such methods improve the efficiency of LLMs in handling long contexts, they introduce a major drawback (Tang et al., 2024): critical tokens required for later text generation may be irreversibly discarded early in the process. As shown in Figure 1-(a), when the important tokens (evidence in the example) fall outside the window, the prediction fails. Additionally, the performance degradation of StreamingLLM and $\mathrm{H_{2}O}$ on two real-world benchmarks further confirms this (see Figure 1-(b)).  
+
+In this paper, we seek to improve the efficiency of LLMs while minimizing performance degradation. Our core motivation is that less important tokens should be allocated fewer resources, rather than being discarded entirely. This raises two challenges: 1) Where are the important tokens distributed for a token to attend, and 2) how to optimize memory and computation for less important tokens. We attempt to address these two challenges through two key observations:  
+
+![](images/4cfd0c65c6ecf315a7eb056ba9303a0eb5065f34ae3be755bf38fb538d9dc12a.jpg)  
+Figure 1: Experimental results from our customized LLaMA3-8B-32K model. (a) Example of StreamingLLM prediction failure. (b) Partial experimental results from LongBench (Bai et al., 2024) and LEval (An et al., 2024). (c) The test data consists of 1000 samples of 32K-length text sampled from Dolma (Soldaini et al., 2024). For each sample sequence, we compared the last 100 tokens. (d) We sampled 1000 sequences of 32K length from Dolma, extracting the attention scores for the last 16 tokens of each sample.  
+
+Observation 1: Proximal tokens (initial tokens+recent tokens) are more important than distant tokens. (see Figure 1-(c)). We conducted experiments and investigated the proportion of cases where the next-token predictions are identical when each token attends to only a fixed number of proximal tokens in the context, as opposed to attending to all tokens. Figure 1-(c) demonstrates that, even when attending to only the 256 proximal tokens, the model predicts the next token identically to the model attending to all tokens in $80\%$ of the cases for the same input sequence. This phenomenon proves the observation 1.  
+
+Observation 2: attention scores between consecutive layers are similar. In fact, this phenomenon has been previously observed in smaller models (Xiao et al., 2019; Bhojanapalli et al., 2021), and here we scale it to modern LLMs. In Figure 1-(d), we can discover attention scores between the layers enclosed in the red box exhibit a strong similarity.  
+
+To this end, we propose POD (Proximal tokens over Distant tokens) to optimize the inference efficiency during the decoding phase. In detail, it shares inter-layer attention scores exclusively for distant tokens, while leaving the proximal tokens unchanged based the above two observations. This approach consists of three main stages: 1) Exploration of Offline Inter-Layer Attention Sharing $(\S\ 2.1)$ : determining which layers can share attention scores; 2) Lightweight Training Adaptation $(\S\,2.2)$ : post-training the dense model based on the identified attention sharing patterns between layers with a limited amount of data; 3) Efficient Inference $\left(\S\ 2.3\right)$ : sharing the attention scores between layers for distant tokens, which allows us to retain key states from a single layer in the KV cache. Additionally, we can preemptively identify situations where only proximal tokens are required to predict the next token, thereby eliminating the attention computation for distant tokens.  
+
+We evaluated the performance of POD on Needle in a Haystack and two real-world long context benchmarks, analyzing its efficiency and examining the impact of key hyperparameters. Case studies were also conducted. Extensive experiments demonstrated that POD can save $35\%$ of the KV cache without compromising model performance. In summary, our contributions are: 1) we propose the idea of assessing the importance of tokens based on their positions in the context and enhanceing inference efficiency by reducing the resources allocated to less important tokens. 2) we introduce POD, a new model that adapts to the intra-layer shared attention distribution of distant tokens. 3) We conducted extensive experiments to prove POD works and we plan to open-source our code and models in the future.  
+
+Algorithm 1: Greedy Layer Grouping Algorithm   
+Input: Head-wise attention similarities between layers: $\{s i m_{h}\left(\ell_{a},\ell_{b}\right)\}_{1\leq\ell_{a},\,\ell_{b}\leq L}^{1\leq h\leq H}$ and the threshold $\delta$   
+Output: Head-wise layer blocks   
+head wise layer blocks $\leftarrow[]$ ;   
+for head $h\leftarrow1$ to $H$ do current head layer block $\therefore\{\{1\}\}$ ; // Each block is a set. for layer $\ell\gets2$ to $L$ do current block $\leftarrow$ the last element of current head layer blocks; // Layer $\ell$ is similar to all layers in the current block. if $s i m_{h}\left(\ell,\hat{\ell}\right)\geq\delta,\forall\hat{\ell}\in$ current block then Add $\ell$ to current block; else Append $\{\ell\}$ to current head layer blocks; Append current head layer blocks to head wise layer blocks;   
+Return head wise layer blocks;   
+2 METHODOLOGY   
+Our approach comprises three key steps (Figure 2): 1) analyze the similarity of attention scores   
+between layers in a given long context LLM and group consecutive similar layers into blocks, 2)   
+apply attention sharing within each block and post-train the LLM, and 3) conduct efficient inference   
+by using the post-trained LLM.   
+2.1 EXPLORATION OF OFFLINE INTER-LAYER ATTENTION SHARING   
+To assess the similarity in attention scores between layers, we input several tokens into the LLM and   
+collected a range of attention scores. Subsequently, We calculate the attention similarity between   
+layers and group consecutive similar layers into blocks as a preparation for enhancing the inference   
+efficiency of the LLM.   
+iAntttoe tnhtei omn osdceol ,c awlec uwlialtli oconllecAt stshue maittnegn ttihoant  swcoe riens pouft $N$ lsaasmt l $\left\{\mathbf{s}_{i}\;=\;(x_{1},x_{2},\ldots,x_{n})\right\}_{i=1}^{N}$ $\mathcal{M}$ $q$ $(1\leq q\leq n)$   
+their corresponding previous tokens for each sample. Mathematically, we obtain $\left\{\mathbf{S}_{i}^{\ell,h}\right\}_{1\leq\ell\leq L,\,1\leq h\leq H}=\mathcal{M}\left(\mathbf{s}_{i}\right),$ (1)  
+
+where $L$ , $H\in\mathbb{N}^{+}$ denote the number of layers and attention heads in the model, respectively, and $\mathbf{S}_{i}^{\ell,h}\in\mathbb{R}^{q\times n}$ represents the attention scores collected at the $\ell_{}$ -th layer of the $h$ -th attention head.  
+
+Attention similarity evaluation Next, we need to evaluate the similarity between layers based on the collected attention scores. For any two distinct layers $\ell_{a}$ and $\ell_{b}$ ( $\underbar{1}\leq\ell_{a}$ , $\ell_{b}\leq L$ and $\ell_{a}\neq\ell_{b}$ ), the attention similarity between them for the $h$ -th head is defined as the average Jensen-Shannon (JS) divergence (Mene´ndez et al., 1997) over the last $q$ tokens across all $N$ samples. Formally,  
+
+$$
+s i m_{h}\left(\ell_{a},\ell_{b}\right)=\frac{1}{N\cdot q}\sum_{i=1}^{N}\sum_{j=1}^{q}\mathrm{JS}\left(\mathbf{S}_{i,j}^{\ell_{a},h},\mathbf{S}_{i,j}^{\ell_{b},h}\right),
+$$  
+
+where $\mathbf{S}_{i,j}^{\ell,h}$ denotes the $j$ -th row of $\mathbf{S}_{i}^{\ell,h}$ and $0\leq s i m_{h}\left(\cdot,\cdot\right)\leq1$  
+
+Layer grouping After calculating the head-wise attention similarity between layers, we group consecutive similar layers into head-wise blocks in preparation. Our grouping strategy is based on the idea that any two layers within the same block should be sufficiently similar. Elaborately, $\ell_{a}$ and $\ell_{b}$ are considered similar when $s i m\left(\ell_{a},\ell_{b}\right)\geq\delta$ , where $0\leq\delta\leq1$ is a hyperparameter. Building on this, we adopt a bottom-up greedy algorithm to iteratively merge consecutive similar layers into blocks, as detailed in Algorithm 1. Figure 2- $\textcircled{1}$ presents a simple example of head-wise partitioning of layers based on the similarity of inter-layer attention scores.  
+
+![](images/b6f15d24c55bf2074f420e99716b26ade80f22fb3d3f79b8c03b6bc946b91460.jpg)  
+Figure 2: Three stages of POD. $\textcircled{1}$ : An example of layer grouping based on the similarity of offlinecomputed attention scores for each head. Consecutive layers with the same color belong to the same block and thus utilize the same attention scores. $\textcircled{2}$ : Exemplar model structure of the attention module for head 3 in POD. Each token attends to two groups: proximal tokens (the neighboring $n_{r}$ tokens and the initial $n_{s}$ tokens, $n_{r}\,=\,2$ and $n_{s}\,=\,1$ in this example) and distant tokens (the remaining tokens). Attention is computed separately for both groups and weighted based on their respective attention scores. $\textcircled{3}$ : Example of KV cache changes for the 7-th token and avoidance of distant token attention.  
+
+
+
+\section{2.2 LIGHTWEIGHT TRAINING ADAPTATION  }
+
+
+To enhance the capability of the model to share attention across layers within the same block, we first introduce the post-training process required to adapt the model to this mechanism.  
+
+Attention sharing within each block We denote the long input sequence as $\mathbf{s}=(x_{1},x_{2},\ldots,x_{n})$ . For any token $x_{i}$ $1\leq i\leq n)$ at the $\ell\cdot$ -th layer in autoregressive transformer-based LLMs, it attends to all preceding tokens $\{x_{j}\}_{j\leq i}$ . As mentioned, we aim to optimize memory and computation costs for distant tokens by sharing attention layers. Hence, we first categorize the preceding tokens into two groups: proximal tokens and distant tokens. Following previous works (Han et al., 2024; Xiao et al., 2024), we classify several initial tokens as proximal tokens, taking into account the phenomenon of the “attention sink”. Then, token $x_{i}$ will attend to both groups of tokens, but the attention scores for distant tokens will utilize the attention scores from the lowest layer of the corresponding block grouped in Section 2.1.  
+
+Mathematically, for any attention head, let $\mathbf{Q}_{\ell},\mathbf{K}_{\ell},\mathbf{V}_{\ell}\,\in\,\mathbb{R}^{n\times d}$ denote the query, key, and value states at the $\ell_{}$ -th layer, respectively\*. Layer $\ell$ belongs to the block $B_{\ell}=\{\bar{\ell}\,|\,\mathbf{\dot{\ell}}_{a}\leq\bar{\ell}\,\leq\ell_{b}\}$ , which consists of consecutive layers. The outputs of attention for the proximal tokens and the distant tokens  
+
+for the token $x_{i}$ are calculated as follows†:  
+
+$$
+\begin{array}{r l}&{\mathbf{a}_{\ell,i}^{P}=\frac{\mathbf{Q}_{\ell,i}\,\left[\mathbf{K}_{\ell,[1,n_{s}]};\,\mathbf{K}_{\ell,[n-n_{r}+1,n]}\right]^{T}}{\sqrt{d}},\ \ \mathbf{o}_{\ell,i}^{P}=\mathrm{Softmax~}\big(\mathbf{a}_{\ell,i}^{P}\big)\,\left[\mathbf{V}_{\ell,[1,n_{s}]};\,\mathbf{V}_{\ell,[n-n_{r}+1,n]}\right],}\\ &{\mathbf{a}_{\ell,i}^{D}=\frac{\mathbf{Q}_{\ell,i}\mathbf{K}_{\ell_{a},[n_{s}+1,n-n_{r}]}^{T}}{\sqrt{d}},\ \ \ \ \ \ \ \ \ \ \ \ \ \ \mathbf{o}_{\ell,i}^{D}=\mathrm{Softmax~}\big(\mathbf{a}_{\ell,i}^{D}\big)\,\mathbf{V}_{\ell,[n_{s}+1,n-n_{r}]},}\end{array}
+$$  
+
+where $\mathbf{Q}_{\ell,i}$ represents the $i$ -th row of $\mathbf{Q}_{\ell}$ , $\mathbf{K}_{\ell,[a,b]}$ denotes the rows from the $i$ -th to the $j$ -th row of $\mathbf{K}_{\ell}$ , inclusive of the boundaries. Additionally, $n_{s}$ (start size) and $n_{r}$ (recent size) represent the number of initial and recent tokens within the proximal tokens, respectively. $[\cdot;\cdot]$ is the concatenation operation. $\mathbf{a}_{\ell,i}^{P}\in\mathbb{R}^{1\times(n_{s}+n_{r})}$ is the attention inner product to the proximal tokens and $\mathbf{o}_{\ell,i}^{P}\in\mathbb{R}^{1\times d}$ is the attention output to the proximal tokens for the token $x_{i}$ . Notations for attention to the distant tokens are similar.  
+
+Aggregation of attention output to proximal and distant tokens A parameter-free gating mechanism can integrate attention to proximal and distant tokens via‡  
+
+$$
+g_{\ell,i}=\frac{\sum\exp\mathbf{a}_{\ell,i}^{P}}{\sum\exp\mathbf{a}_{\ell,i}^{P}+\sum\exp\mathbf{a}_{\ell,i}^{D}},\qquad\qquad\mathbf{o}_{\ell,i}=g_{\ell,i}\cdot\mathbf{o}_{\ell,i}^{P}+(1-g_{\ell,i})\cdot\mathbf{o}_{\ell,i}^{D}.
+$$  
+
+Figure 2- $\textcircled{2}$ is an example of parallel training with an attention mask.  
+
+2.3 EFFICIENT INFERENCE  
+
+Next, we will discuss strategies for optimizing memory usage and reducing computations for distant tokens in long context large language model inference through the use of layer-sharing in attention mechanisms.  
+
+KV cache memory footprint optimization As illustrated in Equation 3, the query and key states are shared across layers within the same block for distant tokens. During inference, caching query states is unnecessary, as they are not reused. Consequently, our method will reduce the memory consumption of key states in the KV cache. Figure 2- $\widehat{\langle3\rangle}$ presents an example of KV cache changes. In this case, the layers that share attention scores during decoding retain distant tokens only once; for instance, only layer 1 retains the key states for $x_{2}$ and $x_{3}$ , while layers 2 and 3 do not.  
+
+Computation optimization for distant tokens Empirical evidence suggests that in many situations, the prediction of the next token can be effectively accomplished without attending to distant tokens. This is reflected in Equation 4, where $g_{\ell,i}$ approaches 1 in numerous cases. Based on this, as shown in the top of Figure 2- $\textcircled{3}$ , for layers within a block that are not the lowest, we can preemptively evaluate the value of $g_{\ell,i}$ . If $g_{\ell,i}\geq\tau$ $[0\,\leq\,\tau\,\leq\,1$ is a hyperparameter), the computation of attention for distant tokens can be omitted, thereby reducing computation for distant tokens.  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+In this section, we explore two key questions: 1) whether POD experiences performance degradation, and 2) whether POD improves efficiency in long-context inference.  
+
+Implementation details For the data, we sampled a total of 5B tokens from Dolma (Soldaini et al., 2024) for post-training, ensuring that the total number of tokens in each length interval remains consistent (GLM et al., 2024). For the model, we first initialized using LLaMA3-8B and conducted post-training on the 5B tokens with a maximum sequence length of 32K, resulting in LLaMA3-8B32K. Subsequently, we initialized from LLaMA3-8B-32K and continued post-training on the same 5B tokens with a maximum sequence length of 32K, yielding the POD model with $n_{s}\,=\,16$ and $n_{r}=4080$ . The layer similarity threshold $\delta$ is set to 0.5, corresponding to saving $35\%$ KV cache states. During training, the batch size was set to 4M tokens, with a learning rate of 1e-5 and a cosine learning rate scheduler. Additionally, the base in the RoPE (Rotary Positional Embedding) (Su et al., 2023) was increased to $\mathrm{16M+}$ , as in Xiong et al. (2024). For the code implementation, we utilized HuggingFace (Wolf et al., 2020) along with DeepSpeed (Rasley et al., 2020), incorporating ZeRO3 (Rajbhandari et al., 2020) and Ulysses (Jacobs et al., 2023) sequence parallelism techniques, and employed efficient FlexAttention from PyTorch (Paszke et al., 2019).  
+
+![](images/7af6e40b50f0296002981cdc6dd20fbd89400bc057cff6b126f1a08adb49a757.jpg)  
+Figure 3: Searching results for a needle in a haystack  
+
+
+
+\section{3.1 PERFORMANCE EVALUATION  }
+
+
+To evaluate the performance of POD, we conducted experiments in two fields: 1) Needle in a Haystack and 2) Practical Long Context Benchmarks.  
+
+Needle in a Haystack The task places a random statement in the middle of a long context window and asks the model to retrieve this statement. Figure 3 demonstrates the searching results of different methods. We found that StreamingLLM and $\mathrm{H_{2}O}$ fail when the needle is outside their predefined window. In contrast, our method, which avoids token loss, performs similarly to dense models and can locate nearly all the needles.  
+
+Table 1: Evaluation results of different methods on two famous long context benchmarks   
+
+![](images/371801cf0d268033b2c7b49634cb175e54518f8c986691cb6a536e1de5c35fa2.jpg)  
+
+Long Context Benchmarks To ensure that POD can handle real-world tasks, we evaluated it on two well-known long context benchmarks: LongBench (English version) (Bai et al., 2024) and LEval (An et al., 2024). We test on 14 datasets within LongBench involving Single-document QA, Multi-document QA, Summarization, Few-shot learning, and Code completion tasks. LEval consists of 20 sub-tasks, divided into two groups: closed-domain and open-domain. The closeddomain group primarily evaluates reasoning and comprehension over longer contexts, while the open-domain group focuses on tasks such as summarization and question answering, which require aggregating information from long documents.  
+
+Table 1 illustrates all experimental results. To ensure fairness, all baseline attention mechanisms have the same window size. For POD, we also ensure that the number of proximal tokens each token attends to is consistent with this window size.  
+
+We can draw the following conclusions: 1) POD outperforms token-eviction-based methods, demonstrating that our approach of not losing tokens is indeed effective. 2) With a small amount of posttraining data, POD beats the classical layer-sharing-based method CLA, demonstrating that our model has an advantage in adapting existing LLMs. 3) Both PoD and token-selection-based methods can achieve performance comparable to the standard dense model. Furthermore, POD is orthogonal to token-selection-based methods, and combining them can further reduce the size of the KV cache while maintaining model performance.  
+
+
+
+\section{3.2 EFFICIENCY EVALUATION  }
+
+
+Memory footprint The savings in memory consumption can be analyzed from both theoretical and empirical perspectives. Theoretically, we can calculate the potential reduction in KV cache size based on the layer-sharing results obtained from offline analysis. Empirically, we can conduct end-to-end evaluations to assess the actual savings. Following Flex  
+
+Table 2: Theoretical and practical memory footprint savings   
+
+![](images/bd1524e5545e4dd3dd02dbd21a8754112a96e365864eb96e66139731b10203b9.jpg)  
+
+Gen (Sheng et al., 2023) and LCKV (Wu & Tu, 2024), for a prompt of length $x$ , we let the model generate $y$ tokens, The maximum batch size $b$ achievable on a given GPU will be used to assess the memory requirements of the model. A larger $b$ indicates that the model is more memory-efficient. Table 2 presents the memory consumption results. We observe that POD achieves a more than $30\%$ increase in maximum batch size across varying input text lengths, closely aligning with our theoretical KV cache savings rate of $35\%$ , demonstrating that POD effectively reduces memory usage.  
+
+formance balance In Table 3, we compare different methods based on the optimized stage (prefilling or decoding), the proportion of KV cache saved, and the resulting performance loss. From this, we can draw the following conclusions: 1) Token-eviction-based methods are more efficient, as they are suitable for both prefilling and decoding and save a relatively large amount of KV cache. However, they come with a greater performance loss for the model. 2) Token-selection-based methods (SnapKV & PyramidKV) can significantly compress the KV cache with minimal impact on model perfor  
+
+Table 3: Optimized stage, KV cache saving, and performance balance between different methods   
+
+![](images/94a77044536c5f644f7c90802bb3b9df667cee7bcb099ab8c07c8b43fa379eba.jpg)  
+
+mance, but they are only applicable to the prefilling stage. Quest, on the other hand, does not degrade model performance and can be applied to both prefilling and decoding stages. However, it does not reduce the size of the KV cache; instead, it reduces the KV cache load by limiting the model’s attention to a selectively filtered subset of tokens. 3) Layer-selection-based methods can be applied to both the prefilling and decoding stages. Our method incurs much less performance degradation compared to the classical layer-sharing method, CLA. Furthermore, our method is orthogonal to token-selection-based methods, and when the two are combined, the resulting model excels in three aspects: optimized stage (applicable to both prefilling and decoding), KV cache saving (with a higher compression rate), and maintaining model performance.  
+
+Computation for distant tokens As is mentioned in $\S~2.3$ , the attention output of a particular layer, is derived from the weighted outputs of both proximal and distant tokens. The weighting coefficients can be obtained in advance using the shared attention scores from the lower layer before applying attention to the distant tokens. Therefore, when the weighting coefficient for the proximal tokens is greater than $\tau$ , we consider the distant tokens to be irrelevant for predicting the next token at the current decoding time in this layer, allowing us to skip their computation.  
+
+Figure 4 shows the relationship between the ratio of computational savings and performance loss on LEval and the value of $\tau$ . We observe that as $\tau$ decreases, it becomes easier to ignore the computation for distant tokens, leading to greater computational savings, but with some performance loss. However, when $\tau<0.7$ , the performance degradation slows down while the computational savings become more pronounced. Specifically, when $\tau\,=\,0.7$ , a $25\%$ reduction in computational cost is achieved with only a $5\%$ decrease in performance.  
+
+![](images/d13506b6b43c2dcb5ed33edb6773da571d2d3274f7d33a46435e0d3e78f0951e.jpg)  
+Figure 4: The computation saving and performance loss rates versus the gate threshold $\tau$ mentioned in $\S\,2.3$ .  
+
+Scaling to longer context and other LLMs To explore the generality of our method, we conducted experiments on LLaMA3.1-8B (Dubey et al., 2024), which can handle longer (128K) contexts. We sampled 5B tokens from the ProLong-data-512K (Gao et al., 2024) dataset and applied the same hyperparameter configuration used for training LLaMA3-8B-32K to post-train LLaMA3.1- 8B with a sequence length of 128K. The evaluation results over 4 practical sub-tasks in the InfiniteBench (Zhang et al., 2024a) under different context sizes are shown in Table 4.  
+
+Consistent with the conclusions found in Table 1, our method causes less performance degradation compared to token-eviction-based methods. However, a notable difference is that token-selection-based methods appear to struggle in maintaining model performance in longer context scenarios. This limitation is also reflected in the combined model (POD $^+$ SnapKV), which integrates our method with token-selection-based methods, showing a decline in performance. This to some extent indicates that our method is more robust to the context length.  
+
+Table 4: Evaluation results on InfiniteBench. OOM: out of memory over one A800-80G GPU   
+
+![](images/02e20a6bec8112d8f48bcb0056327e4161d1b9cff0f8f40a198c27b66968d67f.jpg)  
+
+Next, we explore two key hyperparameters in POD: the number of proximal tokens and the degree of attention score sharing between layers, which is reflected in the KV cache savings rate. Starting from the LLaMA3-8B-32K initialization, we continued training with 2B data to conduct experiments.  
+
+Relationship between model performance and numbers of proximal tokens As shown in the left part of Figure 5, the performance of POD steadily improves with an increasing number of proximal tokens. When the count reaches 4K tokens, training with 2B data achieves performance that is acceptable compared to the LLaMA3-8B-32K trained with 5B data. Considering the trade-off between performance and efficiency, we ultimately chose to use 4K proximal tokens.  
+
+Relationship between model performance and KV cache savings rate As shown in the right part of Figure 5, the performance of POD decreases as the KV cache savings rate increases. Considering the balance between performance and efficiency, we ultimately chose to compress the KV cache to $35\%$ . This ensures POD to achieve performance comparable to LLaMA3-8B-32K using the same training data.  
+
+![](images/1e5fb7bc31e2c9d9efb9db83b075befded454cc691e7961f8a05624a25a908a4.jpg)  
+Figure 5: Relationship between model performance on LEval and two factors: proximal token count and KV cache savings rate  
+
+Case study In Figure 6, we provide four different representative cases to compare StreamingLLM, $\mathrm{H_{2}O}$ , and our POD. For case (a), The correct answer lies within the window of neighboring tokens, allowing all methods to attend to it during decoding. As a result, all three methods can make accurate predictions. For case (b), the answer is at the beginning, and both StreamingLLM and POD can attend to it during decoding, resulting in correct predictions. However, for $\mathrm{H_{2}O}$ , a long sequence of irrelevant tokens following the answer causes it to mistakenly discard the initial answer, leading to an incorrect prediction. For case (c), the answer is in the middle, and StreamingLLM cannot attend to it during decoding, leading to an incorrect prediction. However, the text following the answer and just before the question is related to the answer, allowing $\mathrm{H_{2}O}$ to retain it within its attention window, resulting in a correct prediction. POD, being able to attend to all tokens, also makes a correct prediction. For case (d), only POD can answer the example in Needle in a Haystack since the other two methods disregard the answer tokens.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Long context LLMs present substantial challenges in terms of memory consumption and latency during inference, owing to their extensive parameter count and the long sequences they must process. From the perspective of optimization, we roughly categorize the approaches as follows:  
+
+![](images/6e1759e5cb82c6f0244902c3c335739f6240137abe39dc8946e055cd7a3c646f.jpg)  
+Figure 6: Case study of different methods. $s*n$ means repeating $n$ times of the string $s.+$ represents the concatenation of strings.  
+
+Reduce context computation Recent studies optimize context computation from two directions (Fu, 2024), i.e. prefilling and decoding. In the context of the prefilling phase, some work aims to reduce the size of the generated KV cache by selectively caching only significant input tokens like SnapKV (Li et al., 2024), PyramidKV (Zhang et al., 2024b), and LazyLLM ( $\mathrm{F}\mathbf{u}$ et al., 2024). Meanwhile, MInference (Jiang et al., 2024a) and RetrievalAttention (Liu et al., 2024c) leverage the sparse attention mechanisms inherent in transformers to minimize prefilling latency. Some approaches (Li et al., 2023; Jiang et al., 2024b; Pan et al., 2024) also enhance efficiency by directly compressing the length of the input prompts. This work is orthogonal to these approaches and primarily focuses on optimizing the decoding phase.  
+
+In the context of the decoding phase, $\mathrm{H_{2}O}$ (Zhang et al., 2023) drops insignificant tokens from the KV cache based on the attention scores, whereas LM-Infite (Han et al., 2024) and StreamingLLM (Xiao et al., 2024) retain only the most recent tokens along with several initial tokens during each decoding step. While all these methods enhance efficiency, they also carry the risk of discarding important tokens that are necessary for future text generation. This work aims to enhance efficiency while ensuring that no tokens are overlooked.  
+
+Reduce hidden states dimension and quantize We also present an alternative line of methods, including hidden size reduction and quantization, although these techniques are orthogonal to the focus of our work. On the one hand, MQA (Shazeer, 2019) and GQA (Ainslie et al., 2023) reduce the dimensionality of hidden states by grouping multiple heads of key-value pair states into a single pair. MLA (Liu et al., 2024a) compresses a pair of key-value states into a low-rank latent vector. On the other hand, AWQ (Lin et al., 2024) and QLLM (Liu et al., 2024d) convert model weights and activations into low bit-width formats, thereby reducing memory usage and computational overhead.  
+
+Reduce redundancy between layers Another line of work closely related to ours aims to improve efficiency by reducing redundancy between layers in transformers. LCKV (Wu & Tu, 2024), CLA (Brandon et al., 2024), and MiniCache (Liu et al., 2024b) exploit key-value similarities between layers by sharing key-value states across layers. In comparison to these approaches, our method has two main distinguishing features: 1) we leverage the similarity of attention scores between transformer layers (Xiao et al., 2019; Bhojanapalli et al., 2021) and scale the phenomenon to LLMs and 2) unlike their sharing strategies, which involve adjacent layers or the final layer, our sharing strategy is head-wise and derived from a search process.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we intend to improve the efficiency of LLMs. Previous window-based works suffer from performance degradation due to token loss. Thanks to the observation of proximal tokens are more important than distant tokens, we proposed POD, which allocates fewer resources by sharing attention between similar layers for distant tokens. Evaluations reveal that POD can save $35\%$ of KV cache without sacrificing model performance. This approach not only optimizes resource allocation but also offers a pathway for future improvements in LLM efficiency.  
+
+
+

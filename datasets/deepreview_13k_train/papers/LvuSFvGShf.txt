@@ -1,0 +1,394 @@
+\title{House of Cards: Massive Weights in LLMs}
+
+\begin{abstract}
+Massive activations, which manifest in specific feature dimensions of hidden states, introduce a significant bias in large language models (LLMs), leading to an overemphasis on the corresponding token. In this paper, we identify that massive activations originate not from the hidden state but from the intermediate state of a feed-forward network module in an early layer. Expanding on the previous observation that massive activations occur only in specific feature dimensions, we dive deep into the weights that cause massive activations. Specifically, we define \emph{top-$k$ massive weights} as the weights that contribute to the dimensions with the top-$k$ magnitudes in the intermediate state. When these massive weights are set to zero, the functionality of LLMs is entirely disrupted. However, when all weights except for massive weights are set to zero, it results in a relatively minor performance drop, even though a much larger number of weights are set to zero. This implies that during the pre-training process, learning is dominantly focused on massive weights. Building on this observation, we propose a simple plug-and-play method called \texttt{MacDrop} (\textbf{ma}ssive weights \textbf{c}urriculum \textbf{drop}out), to rely less on massive weights during parameter-efficient fine-tuning. This method applies dropout to the pre-trained massive weights, starting with a high dropout probability and gradually decreasing it as fine-tuning progresses. Through experiments, we demonstrate that \texttt{MacDrop} generally improves performance across zero-shot downstream tasks and generation tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\vspace*{-10pt}
+
+Large language models (LLMs), such as GPT \citep{achiam2023gpt} and Llama \citep{touvron2023llama, dubey2024llama}, have achieved remarkable success across diverse natural language tasks \citep{roziere2023code, mitra2024orca, labrak-etal-2024-biomistral, wu2023bloomberggpt}. Their success is largely attributed to the pre-training phase, during which they are trained on extensive high-quality corpora datasets to predict the next token \citep{longpre-etal-2024-pretrainers, zhao-etal-2024-deciphering, shen2023slimpajama}. However, despite the impressive achievements of LLMs, a crucial gap remains in our understanding of the underlying mechanisms that drive their remarkable performance.
+
+Recently, \citet{xiao2024efficient} uncovered an intriguing phenomenon in LLMs, referred to as \emph{attention sinks}: an unexpectedly large portion of attention is directed toward the initial tokens, regardless of their semantic context, after a small number of early layers. They demonstrated that under a restricted budget, focusing attention solely on recent window leads to poor performance, and that performance is recovered when initial tokens are included. Based on this observation, they proposed StreamingLLM, which retains the key-value caches of the initial sink tokens and the recent tokens for streaming use of LLMs.
+\citet{pmlr-v235-yu24l} further investigated the attention sinks phenomenon, finding that attention sinks can appear both in the initial tokens and in later tokens with less semantic importance (e.g., `.' and `\textbackslash n'). They showed that when sink tokens appear later in a sequence, sink tokens can potentially result in performance degradation. Inspired by this observation, they proposed a head-wise attention calibration technique without requiring additional training.
+Concurrently, \citet{sun2024massive} discovered the existence of \emph{massive activations} in the hidden states of LLMs, with magnitudes substantially larger than the others. Massive activations are jointly identified based on their sequence and feature dimensions within the hidden states. Specifically, massive activations occur at the initial tokens and weak semantic tokens according to the model, and are consistently present in only a few fixed feature dimensions. Moreover, they connected massive activations with attention sinks, suggesting that massive activations inject implicit bias into the self-attention mechanism throughout the pre-training phase.
+
+In this paper, we first delve deeper into massive activations, providing two key observations. (1) The \textit{bos} token always has massive activations in the same feature dimensions and makes attention sinks, regardless of its position in the sequence. This observation enables us to focus only on the feature dimensions, instead of both the sequence and feature dimensions, when addressing massive activations. Namely, a simplified and consistent analysis of massive activations can be achieved by using only the \textit{bos} token. (2) Massive activations originate in the intermediate state $\hat{h}^{inter}_{l}$ within an early layer $l$, before appearing in the hidden state $h_{l}$, as illustrated in Figure \ref{fig:intro}(a). Namely, massive activations triggered in $\hat{h}^{inter}_{l}$ are subsequently and continuously propagated through skip connections. This observation implies that the feed-forward network in layer $l$ plays a crucial role in LLMs.
+
+Next, we shift our focus from activations to the weights, relying on the fact that massive activations consistently appear in the same feature dimensions. In detail, we define the \emph{top-$k$ massive weights} as the rows of $\mW_{up}$ and $\mW_{gate}$ in the feed-forward network at layer $l$ that produce the top-$k$ magnitudes of the intermediate state $\hat{h}^{inter}_{l}$, as illustrated in Figure \ref{fig:intro}(a). It is important to note that massive weights, defined within a single layer $l$, account for a substantially small fraction compared to the model's total parameters. This holds true even when compared to the entire $\mW_{up}$ and $\mW_{gate}$. Nevertheless, massive weights are crucial factors that can completely influence the performance of LLMs. Figure \ref{fig:intro}(b) presents the generated responses of three models to the given user prompt: original model, top-5 massive weights attacked model, and other weights attacked model. Here, other weights represent all weights in $\mW_{up}$ and $\mW_{gate}$ at layer $l$ that do not belong to the top-5 massive weights, and an attack sets corresponding weights to zero. When the massive weights are attacked, the model becomes poor and repeats the user prompt. On the contrary, when other weights are attacked, the model does not entirely lose its generation capability, even though a much greater number of weights are set to zero in the same projection matrices. These observations imply that massive weights are dominantly learned during pre-training and highly related to the performance of LLMs.
+
+Finally, we propose a straightforward plug-and-play method during parameter-efficient fine-tuning, named \textbf{ma}ssive weights \textbf{c}urriculum \textbf{drop}out (\texttt{MacDrop}). This method applies dropout to the pre-trained massive weights, rather than additional trainable weights, starting with a high dropout rate that is progressively reduced throughout the fine-tuning phase. The intuition behind \texttt{MacDrop} is that a high initial dropout rate encourages the model to lessen dependence on the massive weights predominantly learned during the pre-training phase. Then, reducing the dropout rate facilitates a more stable convergence, ensuring the pre-trained model is leveraged with neglectable damage by the end of fine-tuning. In zero-shot downstream tasks and generation tasks, we demonstrate that \texttt{MacDrop} generally enhances model performance.
+
+\begin{figure}[t!]
+    \centering
+    \begin{minipage}{.56\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/intro/massive_weights.png}
+        \subcaption{Massive weights.}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{.42\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/intro/attack_instruction.png}
+        \subcaption{Examples of generated responses.}
+    \end{minipage}
+    \caption{(a) Massive weights are defined as the rows of $\mW_{gate}$ and $\mW_{up}$ in a specific layer $l$ using the \textit{bos} token, which produce the top-$k$ magnitudes of the intermediate state $\hat{h}^{inter}_{l}$. Because massive weights are defined within a single layer $l$, the ratio of massive weights is significantly low compared to the overall number of parameters. For instance, in the case of Llama-3-8B, the proportion of the top-5 massive weights is 0.0005\% of the model's total parameters. (b) When the top-5 massive weights are zeroed out, instruction-tuned LLMs completely lose their ability to generate text. On the other hand, when only the top-5 massive weights remain unchanged in $\mW_{gate}$ and $\mW_{up}$, instruction-tuned LLMs retain their generation capability.}
+    \label{fig:intro}
+\end{figure}
+
+
+\section{Massive Weights}
+
+In this section, we review the key observations on massive activations reported by \citet{sun2024massive} and extend the analysis by exploring various states using the \textit{bos} token, which was not covered. Based on this expanded analysis, we formally define top-$k$ massive weights in a specific layer and investigate their importance through two opposite types of attacks.
+
+\subsection{Prerequisite: Massive Activations}\label{subsec:massive_activations}
+Autoregressive Transformers \citep{NIPS2017_3f5ee243} are structured with $L$ decoding layers. Each layer $l \in [1, L]$ includes an attention (ATTN) module and a feed-forward network (FFN) module. These modules are connected via residual connections \citep{he2016deep}, each following a layer normalization (LN) layer \citep{ba2016layer}. The previous hidden state $h_{l-1}$ is fed into layer $l$ and processed to produce the subsequent hidden state $h_{l}$:
+
+\vspace*{-5pt}
+\begin{equation}\label{eq:base}
+    h_{l} = \hat{h}_{l} + \text{FFN}(\text{LN}(\hat{h}_{l})), \text{where}\, \hat{h}_{l} = h_{l-1} + \text{ATTN}(\text{LN}(h_{l-1}))
+\vspace*{-5pt}
+\end{equation}
+\citet{sun2024massive} primarily concentrated on the activations within hidden states, identifying that certain activations exhibit exceptionally large magnitudes, which they termed \emph{massive activations}. Massive activations are observed at the starting position (i.e., input-agnostic) or at the delimiter tokens, depending on the model. Furthermore, these activations are confined to a small number of fixed feature dimensions, even within these tokens. These activations initially emerge after passing through several early layers and then decreases as they near the last layer.
+
+Massive activations are strongly tied to the attention sinks phenomenon, as identified by \citet{xiao2024efficient}, in which attention is abnormally concentrated on a small subset of tokens. In detail, a given query state tends to have positive cosine similarity with the key states of the tokens exhibiting massive activations, and negative cosine similarity with those of other tokens. Consequently, attention is heavily skewed toward the tokens associated with massive activations.
+
+\subsection{Further Analysis on Massive Acitvations}\label{subsec:indepth_ma}
+We primarily utilize the Llama-3-8B model \citep{dubey2024llama} and explicitly specify other models when necessary.
+
+\paragraph{\textit{bos} token always has massive activations, regardless of its poisition.}
+
+\begin{figure}[t!]
+    \centering    
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_hidden_bos9999.png}
+    \end{minipage}
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_hidden_bos0.png}
+    \end{minipage}    
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_hidden_bos4.png}
+    \end{minipage}
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_hidden_bos8.png}
+    \end{minipage}
+    
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_attention_bos9999.png}
+    \end{minipage}
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_attention_bos0.png}
+    \end{minipage}    
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_attention_bos4.png}
+    \end{minipage}
+    \begin{minipage}{.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/bos_token/llama3_8b_attention_bos8.png}
+    \end{minipage}
+    \caption{(Top) Magnitudes of the hidden state and (Bottom) attention scores after Softmax, according to the position of the \textit{bos} token. The described hidden state is the output of layer 2 (i.e., $h_{2}$). The attention scores are calculated at layer 3 (i.e., after massive activations appear) and averaged across different heads. The \textit{bos} token always has massive activations, regardless of its position.}
+    \label{fig:bos_token}
+\end{figure}
+
+We begin by examining whether any specific token consistently triggers massive activations. As noted by \citet{sun2024massive}, massive activations are observed when any token is placed in the starting position; however, no single token has been found to trigger massive activations regardless of its position. The existence of such a token would greatly facilitate the analysis and algorithm development for handling massive activations, making the process more deterministic by focusing on that token.
+
+Based on the previous observation that nonsemantic tokens can trigger massive activations in certain LLMs, we focus our analysis on the \textit{bos} token. Figure \ref{fig:bos_token} describes the magnitudes of activations of the hidden state and normalized attention scores according to the position of the \textit{bos} token, after massive activations appear. Llama-3-8B does not have massive activations at delimiter tokens such as `.' (first column). When the \textit{bos} token is placed in the starting position (second column), the `Summer' token loses its massive activations, while when the \textit{bos} token is placed in the middle or ending position (third and fourth columns), it triggers massive activations in the same feature dimensions (i.e., 788, 1384, and 4062). What is intriguing is that, despite the difference in magnitude according to the position, the \textit{bos} token similarly exhibits attention sinks. Therefore, we use only the \emph{bos} token (placed at the starting position) for the continuation of analysis and algorithm development.
+
+\paragraph{Massive activations originate in the intermediate state of a FFN module.}
+
+\begin{figure}[t!]
+    \centering
+    \begin{minipage}{.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/tracking/Meta-Llama-3-8B_tracking.png}
+        \subcaption{Various states in early layers.}
+    \end{minipage}
+    \begin{minipage}{.50\linewidth}
+        \centering
+        \hspace{20pt}\includegraphics[width=0.8\linewidth]{figures/tracking/magnitude_legend.png} \\
+        \includegraphics[width=\linewidth]{figures/tracking/Meta-Llama-3-8B_hidden_state.png}\subcaption{Hidden states.}
+        \includegraphics[width=\linewidth]{figures/tracking/Meta-Llama-3-8B_expanded_state.png}\subcaption{Intermediate states.}
+    \end{minipage}
+    \caption{(a) Magnitudes of various states and (b and c) the top three and median magnitudes of hidden states and intermediate states across layers. These results show that massive activations in the hidden state originate from those in the interemediate state in a FFN module in an early layer.}
+    \label{fig:tracking}
+\end{figure}
+
+Next, we trace various states in early layers until the first massive activations appear, using the \textit{bos} token. Specifically, we monitor $h_{l-1}$, $\text{LN}(h_{l-1})$, $\text{ATTN}(\text{LN}(h_{l-1}))$, $\hat{h}_{l}$, $\text{LN}(\hat{h}_{l})$, and $\text{FFN}(\text{LN}(\hat{h}_{l}))$ in Eq.\,(\ref{eq:base}) throughout early layers. Figure \ref{fig:tracking}(a) illustrates the magnitudes of various states in layers $l \in [1, 3]$. It is observed that $\text{FFN}(\text{LN}(\hat{h}_{2}))$ has massive activations before $h_{2}$. With Figure \ref{fig:tracking}(b), which describes the top three and median magnitudes of the hidden state\footnotemark[1], it is observed that the massive activations generated within a FFN module at layer 2 are transmitted directly to the next hidden state and then propagated solely through the residual connections.
+
+Furthermore, we decompose a FFN module into $\mW_{down} (\sigma (\mW_{gate} (\cdot)) \odot \mW_{up} (\cdot))$, to analyze the intermediate states (i.e., the output of $\sigma (\mW_{gate} (\cdot)) \odot \mW_{up} (\cdot)$). Figure \ref{fig:tracking}(c) describes the top three and median magnitudes of the intermediate state across layers. It is demonstrated that \emph{massive activations originate in the intermediate state of a FFN module in an early layer $l$}. This result implies that $\mW_{up}$ and $\mW_{gate}$ in layer $l$ are closely tied to massive activations.
+
+\subsection{Massive Weights}\label{subsec:massive_weights}
+Massive weights are defined based on massive activations in the intermediate state at layer $l$, denoted as $\hat{h}_{l}^{inter}$, when the \textit{bos} token is fed into LLMs. To elaborate, we define the rows in the projection matrix $\mW_{up}$ (and $\mW_{gate}$, if it exists) that correspond to the indices of the top-$k$ magnitudes in $\hat{h}_{l}^{inter}$ as \emph{top-$k$ massive weights}, depicted in Figure \ref{fig:intro}(a). It is noted that massive weights are defined within one specific layer, which means the number of massive weights is significantly smaller compared to the total number of parameters in LLMs. For example, in Llama-3-8B, the number of top-$k$ massive weights is calculated as $2 \times k \times 4096$, where $4096$ represents the dimensions of hidden state. If $k$ is set to 5, massive weights account for approximately 0.0005\% of the total parameters in Llama-3-8B, approximately 0.0001\% in Llama-3-70B, and approximately 0.00004\% in Llama-3.1-405B.
+
+\paragraph{Massive weights are extremely small in quantity, their impact is tremendous.}
+
+\begin{table}[t!]
+    \small
+    \setlength{\tabcolsep}{2.0pt}
+    \centering
+    \caption{Perplexity and zero-shot downstream tasks performance according to the attack.}
+    \begin{tabular}{l|cccc|cccccc}
+    \toprule
+    Models & WikiText & C4 & PG-19 & Avg.\,$(\downarrow)$ & ARC-E & ARC-C & BoolQ & PIQA & WG & Avg.\,$(\uparrow)$ \\
+    \midrule
+    Llama-3-8B         & 5.75 & 9.94 & 8.98 & 8.22 & 77.4 & 52.7 & 81.4 & 80.8 & 72.9 & 73.0 \\
+    \midrule
+    top-$5$ zeroing    & 104.57 & 132.83 & 130.83 & 122.74 & 29.1 & 22.0 & 41.8 & 53.8 & 50.3 & 39.4 \\
+    top-$5$ retaining  & 10.15  & 23.98 & 28.72 & 20.95 & 75.0 & 48.0 & 80.2 & 77.7 & 74.1 & 71.0 \\
+    \midrule
+    Llama-3-70B        & 2.68 & 7.59 & 6.02 & 5.43 & 85.8 & 64.2 & 85.3 & 84.6 & 80.5 & 80.1 \\
+    \midrule
+    top-$5$ zeroing    & 11135.81 & 7288.86 & 4696.49 & 7707.05 & 28.6 & 22.8 & 38.0 & 55.5 & 49.5 & 38.9 \\
+    top-$5$ retaining  & 3.47 & 9.93 & 7.26 & 6.89 & 45.9 & 25.6 & 83.9 & 64.6 & 77.0 & 59.4 \\
+    \midrule
+    Llama-3.1-405B (8bit) & 1.41 & 6.20 & 3.23 & 3.61 & 86.3 & 66.0 & 88.2 & 85.0 & 81.1 & 81.3 \\
+    \midrule
+    top-$5$ zeroing    & 1785.56 & 985.36 & 633.40 & 1134.77 & 26.6 & 25.9 & 37.8 & 49.7 & 50.3 & 38.1 \\
+    top-$5$ retaining  & 2.47 & 9.36 & 5.61 & 5.81 & 83.0 & 62.5 & 83.1 & 83.2 & 70.3 & 76.4 \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:pretrained_attack}
+\end{table}
+To assess the significance of massive weights, we conduct two types of attacks: top-$k$ zeroing and top-$k$ retaining. Note that these attacks only affect the $\mW_{up}$ and $\mW_{gate}$ projection matrices in layer $l$, where massive weights are present. The first attack is to set the top-$k$ massive weights to zero (i.e., darker orange weights in Figure \ref{fig:intro}(a)). In essence, this attack is very similar to the one proposed in \citet{sun2024massive}, where massive activations in the hidden state are zeroed out in a single layer. The difference is that their attack targets the hidden state, while our attack targets the intermediate state. The second attack is to set all weights to zero except for top-$k$ massive weights (i.e., lighter orange weights in Figure \ref{fig:intro}(a)). That is, the number of rows being damaged in each attack is $k$ and the dimensions of intermediate state $-$ $k$, respectively.
+
+Following \citet{sun2024massive}, we assess perplexity\footnotemark[1] on three datasets: WikiText \citep{merity2017pointer}, C4 \citep{raffel2020exploring}, and PG-19 \citep{Rae2020Compressive}. Table \ref{tab:pretrained_attack} presents the results of two attacks on Llama-3-8B, Llama-3-70B, and Llama-3.1-405B (8bit)\footnote{We use 8xA100-80G GPUs for our work; therefore, we employ an 8-bit model.}, when $k$ is set to $5$. Llama-3-8B has its massive weights in layer 2 out of 32 layers, Llama-3-70B in layer 4 out of 80 layers, and Llama-3. The larger the difference from the original performance, the stronger the attack.
+
+Top-5 zeroing is a much stronger attack than top-5 retaining, even though top-5 retaining sets several thousands times more weights to zero compared to top-5 zeroing does for the same projection matrices. This means that in the projections $\mW_{up}$ and $\mW_{gate}$ at layer $l$, having only massive weights is significantly better than having all weights except for massive weights. In detail, similar to the findings of \citet{sun2024massive}, the top-$k$ zeroing attack proves to be highly effective in disrupting the Llama-3 family, even for extremely large-scale models (e.g., 70B and 405B). On the other hand, the top-$k$ retaining attack does not cause complete damage. In conclusion, these findings reveal that massive weights are predominantly learned during pre-training, highlighting their essential contribution to the overall performance of LLMs.
+
+Moreover, massive weights also exist in instruction-tuned LLMs such as Llama-3-8B-Instruct. These attacks are effective, as depicted in Figure \ref{fig:intro}(b). When massive weights are set to zero (i.e., darker orange box), the model repeats the same text as the user prompt. On the other hand, when all weights are set to zero except for massive weights (i.e., lighter orange box), the model retains its ability to generate text, although the generated text differs from the original.
+\paragraph{$k$, which affects performance, depends on the model architecture.}
+
+\begin{figure}[t!]
+    \centering    
+    \begin{minipage}{.38\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/k_robust/k_zeroing.png}
+        \subcaption{Top-$k$ zeroing.}
+    \end{minipage}
+    \begin{minipage}{.38\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/k_robust/k_retaining.png}
+        \subcaption{Top-$k$ retaining.}
+    \end{minipage}
+    \begin{minipage}{.20\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/k_robust/k_legend.png}
+    \end{minipage}
+    \vspace*{-5pt}
+    \caption{Mean zero-shot accuracy of top-$k$ zeroing and retaining across various LLMs.}
+    \label{fig:k_robustness}
+    \vspace*{-5pt}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering   
+    \includegraphics[width=\linewidth]{figures/tracking/expert_probs.png}
+    \vspace*{-10pt}
+    \caption{Probability of experts of Mixtral-8x7b for the \textit{bos} token. In the layer with massive weights (i.e., layer 2), the router probability between experts becomes completely skewed to one expert.}
+    \label{fig:expert_probs}
+    \vspace*{-10pt}
+\end{figure}
+
+We examine the robustness of various LLMs against the top-$k$ zeroing and retaining attacks, with a focus on the impact of the parameter $k$. Llama-2 \citep{touvron2023llama}, Llama-3 \citep{dubey2024llama}, Mistral \citep{jiang2023mistral} and Mixtral \citep{jiang2024mixtral}, Phi-3 \citep{abdin2024phi}, and Gemma-2 \citep{team2024gemma} families are used. Figure \ref{fig:k_robustness} illustrates the mean zero-shot accuracy of LLMs under the two attacks, according to the $k$. In top-$k$ zeroing, more weights are set to zero as $k$ increases, whereas in top-$k$ retaining, more weights are set to zero as $k$ decreases. When $k$ is 0 in top-$k$ zeroing, it corresponds to the original performance without any attack, whereas, when $k$ is 0 in top-$k$ retaining, it sets the entire weights of $\mW_{up}$ and $\mW_{gate}$ in layer $l$ to zero.
+
+The Llama families are highly sensitive to massive weights. In the top-$k$ zeroing, a noticeable performance drop occurs even when $k$ is as small as 3, irrespective of the model's scale. In top-$k$ retaining, when $k$ is set to 1 (i.e., with only one row active in $\mW_{up}$ and $\mW_{gate}$ in layer $l$), the performance nearly reaches the original level in smaller-scaled models ($\leq$ 13B). While, for larger-scaled models ($\geq$ 70B), the top-30 massive weights are required to maintain performance.
+
+Similarly, Mistral is also disrupted, when $k$ is set to 5. Mixtral is a sparse Mixture of Experts (MoE) architecture that uses a top-2 routing mechanism, where two experts are activated among eight FFN modules in each layer. To attack the Mixtral model, we identify the active experts in the layer with massive weights using the \textit{bos} token. Figure \ref{fig:expert_probs} describes the probability distribution of experts in the Mixtral model across all layers. Notably, it is observed that when massive activations occur, a single expert (i.e., expert 4) is assigned a significantly higher probability than the others. Therefore, we target only the $\mW_{up}$ and $\mW_{gate}$ of this expert, rather than all experts. Although Mixtral does not completely break down, there is a considerable decline in performance when the top-50 massive weights are zeroed out. These results indicate that, despite the immense resources required to build high-performance LLMs, they can collapse like a house of cards even under minimal attacks.
+
+The Phi-3 family exhibits different robustness against attacks depending on the model size. As noted by \citet{abdin2024phi}, the phi-3-mini (3.8B) is trained on 3.3T tokens, while the phi-3-medium (14B) is trained on 4.8T tokens. A key architectural difference from the Llama family is the use of dropout to the outputs of both the ATTN and FFN modules, formed by Eq.\,(\ref{eq:phi3}). While a specific recipe for dropout is not provided in the technical report \citep{abdin2024phi}, in the case of phi-3-medium, applying dropout with longer pre-training might ensure that the residual connections contribute meaningfully, mitigating the risk of excessive dependence on massive weights.
+
+\vspace*{-5pt}
+\begin{equation}\label{eq:phi3}
+    h_{l} = \hat{h}_{l} + \text{dropout}(\text{FFN}(\text{LN}(\hat{h}_{l}))), \text{where}\, \hat{h}_{l} = h_{l-1} + \text{dropout}(\text{ATTN}(\text{LN}(h_{l-1})))
+\end{equation}
+
+The Gemma-2 family is exceptionally resilient to the top-$k$ zeroing attack, maintaining almost no loss in performance even when $k$ is large. Additionally, even if $\mW_{up}$ and $\mW_{gate}$ are entirely eliminated (i.e., $k = 0$ in top-$k$ retaining), there is no noticeable performance degradation. This family incorporates two additional LN layers after both the ATTN and FFN modules, formed by Eq.\,(\ref{eq:gemma2}).
+
+\begin{equation}\label{eq:gemma2}
+    h_{l} = \hat{h}_{l} + \text{LN}(\text{FFN}(\text{LN}(\hat{h}_{l}))), \text{where}\, \hat{h}_{l} = h_{l-1} + \text{LN}(\text{ATTN}(\text{LN}(h_{l-1})))
+\end{equation}
+
+Nevertheless, because most existing open-source models, except for a few, are still heavily dependent on massive weights, it is critical to take them into account.
+
+
+\section{Massive Weights Curriculum Dropout}
+
+In this section, we propose a straightforward plug-and-play method, termed \textbf{ma}ssive weights \textbf{c}urriculum \textbf{drop}out (\texttt{MacDrop}), during parameter-efficient fine-tuning such as low rank adaptation \citep{hu2022lora}. This method applies dropout to the pre-trained massive weights with a curriculum that gradually reduces the dropout probability. The reason for applying dropout to weights \citep{wan2013regularization} instead of activations \citep{srivastava2014dropout} is that the number of massive activations is only $k$, but that of massive weights is $k \times d$, where $d$ is the dimension of the hidden states. Note that our method is not applied to the trainable parameters of adapters. Therefore, \texttt{MacDrop} can be applied orthogonally to the process of training the adapter. Initially, massive weights are identified using the \textit{bos} token before fine-tuning (Lines 1-3). Subsequently, an adapter is trained while the pre-trained massive weights are dropped. Meanwhile, a curriculum strategy is applied to progressively enable the use of the original pre-trained weights without masking. Note that in Line 8, `model' includes both the masked pre-trained network and a trainable adapter.
+
+\texttt{MacDrop} is motivated by the observation that massive weights are predominantly learned during the pre-training phase, and that zeroing them can severely undermine LLMs. Therefore, at the early stages of fine-tuning, the objective is to reduce the reliance on massive weights, as their excessive dominance may lead the model to over-rely on specific patterns. Moreover, considering that the undamaged pre-trained model is used after fine-tuning is finished, we develop a strategy to adjust the dropout rate using a curriculum.
+
+\begin{algorithm}[h!]
+\small
+\caption{Top-$k$ Massive Weights Curriculum Dropout in pseudo PyTorch style}\label{alg:macdrop}
+\tcp{Dropout is only executed in layer $l$,\\where the massive intermediate state $h^{inter}_{l}$ appears.}
+\KwIn{$k$, massive intermediate state $h^{inter}_{l}$ of the \textit{bos} token, initial dropout probability $p_0$, total steps $T$}
+\tcp{massive activations in the intermediate state}
+\_, sorted\_indices = torch.sort(torch.abs($h^{inter}_{l}$), descending=True) \\
+massive\_indices = sorted\_indices[:$k$] \\
+\tcp{massive weights}
+massive\_W\_up = copy(W\_up[massive\_indices, :]); massive\_W\_gate = copy(W\_gate[massive\_indices, :]) \\
+\For{$t = 1$ to $T$}{
+    \tcp{decreasing dropout probability} 
+    $p$ = $p_0 \times (1 - \frac{t}{T})$ \\
+    \tcp{pre-trained massive weights dropout}
+    mask = (torch.rand(massive\_W\_up.shape) $>$ $p$).int() \\
+    W\_up[massive\_indices, :] *= mask; W\_gate[massive\_indices, :] *= mask \\
+    tr\_loss\_step = training\_step(model, inputs) \\
+    \tcp{pre-trained massive weights rollback}
+    W\_up[massive\_indices, :] = massive\_W\_up; W\_gate[massive\_indices, :] = massive\_W\_gate \\
+}
+\end{algorithm}
+
+
+
+\newpage
+
+
+\section{Experiments}
+
+
+\subsection{Zero-shot Downstream Task}\label{subsec:downstream_task}
+
+\begin{table}[t!]
+    \small
+    \setlength{\tabcolsep}{3.5pt}
+    \centering
+    \caption{Zero-shot downstream tasks performance.}
+    \begin{tabular}{cc|ccccc|c}
+    \toprule
+    Model & Method & ARC-Easy & ARC-Challenge & BoolQ & PIQA & WinoGrande & Avg. \\
+    \midrule
+    \multirow{4.5}{*}{Llama-3-8B} & LoRA  & 79.6 & 58.2 & 83.9 & 82.4 & 75.9 & 76.0 \\
+     & + \texttt{MacDrop}                 & 82.9 & 58.3 & 83.9 & 82.6 & 75.0 & \textbf{76.5} \\
+    \cmidrule{2-8}
+     & DoRA                               & 80.8 & 57.7 & 83.9 & 82.5 & 75.8 & 76.1 \\
+     & + \texttt{MacDrop}                 & 81.9 & 58.2 & 83.9 & 82.2 & 75.6 & \textbf{76.4} \\
+    \midrule
+    \multirow{4.5}{*}{Mistral-7B} & LoRA  & 78.5 & 54.9 & 84.9 & 82.9 & 75.3 & 75.3 \\
+     & + \texttt{MacDrop}                 & 80.9 & 56.7 & 85.0 & 83.0 & 75.3 & \textbf{76.2} \\
+    \cmidrule{2-8}
+     & DoRA                               & 78.4 & 55.1 & 85.0 & 82.9 & 75.1 & 75.3 \\
+     & + \texttt{MacDrop}                 & 80.6 & 56.7 & 85.3 & 82.9 & 75.1 & \textbf{76.1} \\
+     \bottomrule
+    \end{tabular}
+    \label{tab:main_zeroshot}
+\end{table}
+
+\begin{table}[t!]
+    \small
+    \setlength{\tabcolsep}{3.2pt}
+    \centering
+    \caption{Generation tasks performance measured by Prometheus-2-7B.}
+    \begin{tabular}{cc|ccccccc|c}
+    \toprule
+    Model & Method & MT-1 & MT-2 & translation & summarization & QA & math reasoning & RAG & Avg. \\
+    \midrule
+    \multirow{4.5}{*}{Llama-3-8B} & LoRA  & 3.71 & 3.54 & 4.50 & 3.24 & 4.35 & 3.64 & 3.74 & \textbf{3.82} \\
+     & + \texttt{MacDrop}                 & 3.76 & 3.49 & 4.51 & 3.39 & 4.29 & 3.50 & 3.71 & 3.81 \\
+    \cmidrule{2-10}
+     & DoRA                               & 3.85 & 3.71 & 4.56 & 3.34 & 4.35 & 3.59 & 3.73 & 3.80 \\
+     & + \texttt{MacDrop}                 & 3.79 & 3.41 & 4.55 & 3.26 & 4.29 & 3.79 & 3.85 & \textbf{3.85} \\
+    \midrule
+    \multirow{4.5}{*}{Mistral-7B} & LoRA  & 3.55 & 3.30 & 4.61 & 3.33 & 4.41 & 3.45 & 4.05 & \textbf{3.81} \\
+     & + \texttt{MacDrop}                 & 3.75 & 3.42 & 4.58 & 3.26 & 4.35 & 3.30 & 3.98 & \textbf{3.81} \\
+    \cmidrule{2-10}
+     & DoRA                               & 3.55 & 3.29 & 4.64 & 3.34 & 4.49 & 3.35 & 3.88 & 3.79 \\
+     & + \texttt{MacDrop}                 & 3.49 & 3.29 & 4.59 & 3.52 & 4.41 & 3.33 & 3.95 & \textbf{3.80} \\
+     \bottomrule
+    \end{tabular}
+    \label{tab:main_generation}
+\end{table}
+
+We fine-tune the Llama-3-8B and Mistral-7B using the alpaca\_gpt4\_en dataset \citep{peng2023instruction} for 3 epochs (579 steps), and evaluate on five zero-shot tasks. We use two parameter-efficient fine-tuning methods, LoRA \citep{hu2022lora} and DoRA \citep{liu2024dora}. DoRA decomposes the pre-trained weights into two components, magnitude and direction, and applies LoRA to the direction component. For \texttt{MacDrop}, $k$ and $p_0$ are set to 5 and 0.8, respectively. Table \ref{tab:main_zeroshot} presents the results on zero-shot downstream tasks. For both the models and methods, \texttt{MacDrop} consistently leads to performance gains, especially in ARC-Easy and ARC-Challenge tasks.
+\subsection{Generation Task}\label{subsec:generation_task}
+We evaluate on the generated texts of the same models in Section \ref{subsec:downstream_task} using the Spec-Bench dataset \citep{xia-etal-2024-unlocking}. This benchmark includes six subtasks, each containing 80 instances: multi-turn (MT) conversation from MT-bench \citep{zheng2023judging}, translation from WMT14 DE-EN \citep{bojar-etal-2014-findings}, summarization from CNN/Daily Mail \citep{nallapati-etal-2016-abstractive}, question answering (QA) from Natural Questions \citep{kwiatkowski-etal-2019-natural}, mathematical reasoning from GSM8K \citep{cobbe2021training}, and retrieval-augmented generation (RAG) from Natural Questions \citep{kwiatkowski-etal-2019-natural}. We utilize the direct assessment of Prometheus-2-7B \citep{kim2024prometheus} to evaluate the generated texts using a 5-point Likert scale. Table \ref{tab:main_generation} presents the results on generation tasks. MT-1 and MT-2 indicate the first turn and second turn, respectively. Unfortunately, \texttt{MacDrop} shows limited performance improvements in generation tasks. 
+\subsection{Ablation Study}\label{subsec:ablation}
+
+We further provide ablation studies related to \texttt{MacDrop} using Llama-3-8B. Unless otherwise stated, for \texttt{MacDrop}, $k$ and $p_0$ are set to 5 and 0.8.
+
+\vspace*{-5pt}
+\subsubsection{Dropout Scope and Probability}\label{subsubsec:scope}
+
+\begin{wrapfigure}[10]{r}{0.50\textwidth}
+    \centering
+    \vspace*{-20pt}
+    \begin{subfigure}{\linewidth}
+        \includegraphics[width=\linewidth]{figures/ablation/dropout_scope.png}
+    \end{subfigure}\vspace*{-5pt}
+    \caption{Mean zero-shot accuracy according to the dropout scope and probability $p$.}
+    \label{fig:scope}
+\end{wrapfigure}
+
+We investigate the effect of dropout scope and probability compared to the original performance achieved through LoRA without dropout. This ablation study is also conducted on the $\mW_{up}$ and $\mW_{gate}$ projection matrices in layer $l$. The dropout scope is divided into three categories: all weights, massive weights, all weights except for massive weights. Additionally, to assess the impact of dropout probability, it is kept constant throughout the fine-tuning process, without using a curriculum.
+
+Figure \ref{fig:scope} illustrates the mean zero-shot accuracy according to the dropout scope and dropout probability $p$. It is observed that among three scopes, the original performance (i.e., without dropout), represented by the dotted line at 76.0, can be surpassed only when dropout is applied solely to massive weights. Nevertheless, if strong dropout (e.g., $p \geq 0.85$) is maintained on the pre-trained massive weights during fine-tuning, performance deteriorates. This highlights the need to safeguard the pre-trained massive weights during the final stages of fine-tuning, because we are ultimately using them without causing any damage.
+
+\vspace*{-5pt}
+\subsubsection{Curriculum Methods and Initial Dropout Probability}\label{subsubsec:curriculum}
+
+\begin{wrapfigure}[8]{r}{0.40\textwidth}
+    \centering
+    \vspace*{-15pt}
+    \begin{subfigure}{\linewidth}
+        \includegraphics[width=\linewidth]{figures/ablation/curriculum.png}
+    \end{subfigure}\vspace*{-8pt}
+    \caption{Curriculum methods.}
+    \label{fig:curriculum}
+\end{wrapfigure}
+
+We investigate the effect of curriculum methods and initial dropout probability $p_0$ in \texttt{MacDrop}, when LoRA is applied. We compare four curriculum methods: step-wise linear (Step), before epoch-wise linear (Epoch(before)), after epoch-wise linear (Epoch(after)), and exponential (Exp.). In formula, Step is defined as $p = p_0 \times (1-\frac{t_{step}}{T_{step}})$. Epoch(before) and Epoch(after) are defined as $p = p_0 \times (1-\frac{t_{epoch}-1}{T_{epoch}})$ and $p = p_0 \times (1-\frac{t_{epoch}}{T_{epoch}})$, respectively. Exp. is defined as $p = p_0 \times exp(-\alpha t_{step})$. Figure \ref{fig:curriculum} describes dropout probability $p$ according to curriculum methods, when $p_0$ is 1.0. The distinct difference between Epoch(before) and Epoch(after) is that at the final epoch, the former continues to apply dropout to the pre-trained massive weights with a probability of $p_0 \times \frac{1}{T_{epoch}}$, while the latter fully utilizes the pre-trained massive weights.
+
+\begin{wraptable}[15]{r}{0.40\textwidth}
+    \small
+    \vspace*{-5pt}
+    \setlength{\tabcolsep}{3.5pt}
+    \centering
+    \caption{Mean zero-shot accuracy according to curriculum methods and initial dropout probability.}
+    \begin{tabular}{c|cccc}
+    \toprule
+    Curriculum & \multicolumn{4}{c}{$p_0$} \\
+    Method & $0.2$ & $0.5$ & $0.8$ & $1.0$ \\
+    \midrule
+    Step                  & 76.0 & 76.3 & 76.5 & 75.5 \\
+    Epoch(before)        & 76.1 & 76.1 & 76.1 & 75.5 \\
+    Epoch(after)         & 75.9 & 76.0 & 76.2 & 76.3 \\
+    Exp. ($\alpha=0.01$)  & 76.0 & 76.2 & 76.5 & 76.4 \\ 
+    Exp. ($\alpha=0.05$)  & 76.0 & 76.1 & 76.2 & 76.3 \\ 
+    Exp. ($\alpha=0.10$)  & 76.0 & 76.1 & 76.1 & 76.2 \\
+    \midrule
+    Mean                  & 76.0 & 76.1 & 76.3 & 76.0 \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:curriculum}
+\end{wraptable}
+
+Table \ref{tab:curriculum} presents mean zero-shot accuracy according to curriculum methods and initial dropout probability $p_0$. It is observed that step-based curriculum methods (e.g., Step and Exp.) generally achieve greater performance improvements compared to epoch-based curriculum methods (e.g., Epoch(before) and Epoch(after)). Nevertheless, when the initial dropout probability is relatively low (e.g., $p_0 \leq 0.2$), even step-based curriculum methods fail to bring any performance gain compared to the original performance of 76.0. Additionally, it is shown that using a smaller $\alpha$ in the Exp. method leads to greater performance improvements, suggesting that a rapid decline in dropout probability to zero can diminish the effectiveness of \texttt{MacDrop}. On the other hand, for the Step and Epoch(before) methods, a significant performance drop is observed at a $p_0$ value of 1.0, highlighting the necessity of a near-zero dropout probability for the end of fine-tuning. In conclusion, for \texttt{MacDrop}, we recommend using the Step or Exp. with a smaller $\alpha$, initiated from a moderately high $p_0$.
+
+
+
+
+\section{Related work}
+
+The attention sinks phenomenon and their importance, uncovered by \citet{xiao2024efficient}, have been widely used to compress key-value caches. For quantization, KVQuant \citep{hooper2024kvquant} applies attention sink-aware quantization, which retains only the first token in fp16. CushionCache \citep{son2024prefixing} inserts sink tokens into the prefix to mitigate massive activations in the middle of the sequence, enhancing the performance of quantized models. For token eviction and token merging, sink tokens are never evicted or merged; they remain unchanged \citep{xiao2024efficient, ge2024model, li2024snapkv, NEURIPS2023_6ceefa7b, wang2024model, zhang2024cam}.
+
+Nevertheless, there has been limited in-depth research on the phenomenon itself. In fact, the idea of global attentions, such as [CLS] and [SEP] tokens--similar to attention sinks--was introduced and emphasized even before the LLM era \citep{zaheer2020big, Beltagy2020Longformer}. In the LLM era, \citet{pmlr-v235-yu24l} showed that sink tokens can appear not only at the beginning of a sentence but also in the middle, and they are often shown to be nonsemantic (e.g., `.'). \citet{sun2024massive} discovered the presence of massive activations in the hidden state space of sink tokens, demonstrating that massive activations trigger the attention sinks phenomenon. Meanwhile, in vision transformers, similar phenomenon is observed \citep{darcet2024vision}. They showed that training with register tokens, which is additional meaningless tokens similar to sink tokens, resulted in improved dense prediction and interpretability. Different from previous work, we explore this phenomenon in the weight space.
+
+
+\section{Conclusion}
+
+In this paper, we explore the weight space of LLMs and identify the presence of massive weights within a FFN module in an early layer, which are predominantly pre-trained and have a significant impact on the performance of LLMs. Based on our observation, we propose a plug-and-play fine-tuning method called \texttt{MacDrop}, which applies dropout to the pre-trained massive weights, rather than to the parameters of adapters, during parameter-efficient fine-tuning. We hope that our findings will inspire future research in weight space of LLMs, including model merging \citep{li2023deep} and model editing \citep{yao-etal-2023-editing}.
+
+
+
+

@@ -1,0 +1,482 @@
+\title{Spike Accumulation Forwarding for Effective Training of Spiking Neural Networks}
+
+\begin{abstract}
+In this article, we propose a new paradigm for training spiking neural networks (SNNs), {\it spike accumulation forwarding} ({\it SAF}). It is known that SNNs are energy-efficient but difficult to train. Consequently, many researchers have proposed various methods to solve this problem, among which online training through time (OTTT) is a method that allows inferring at each time step while suppressing the memory cost. However, to compute efficiently on GPUs, OTTT requires operations with spike trains and weighted summation of spike trains during forwarding. In addition, OTTT has shown a relationship with the Spike Representation, an alternative training method, though theoretical agreement with Spike Representation has yet to be proven. Our proposed method can solve these problems; namely, SAF can halve the number of operations during the forward process, and it can be theoretically proven that SAF is consistent with the Spike Representation and OTTT, respectively. Furthermore, we confirmed the above contents through experiments and showed that it is possible to reduce memory and training time while maintaining accuracy.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+\begin{figure}[tb]
+\centering
+  \begin{minipage}[tb]{0.475\linewidth}
+    \centering
+    \includegraphics[keepaspectratio, scale=0.45]{fig/ottt-fromsawada-20230928.pdf}\subcaption{OTTT}
+  \end{minipage}
+  \begin{minipage}[tb]{0.475\linewidth}
+    \centering
+    \includegraphics[keepaspectratio, scale=0.45]{fig/LSAF-fromsawada-20230928.pdf} \subcaption{SAF}
+  \end{minipage}
+  \caption{Overview of OTTT and SAF training. OTTT requires operations with spike $\bm{s}^l[t]$ and spike accumulation $\widehat{\bm{a}}^l[t]$ during the forward process, while SAF requires operations with $\widehat{\bm{a}}^l[t]$. Also, $\bm{u}^l[t]$ represents the membrane potential, and $\widehat{\bm{U}}^{l+1}[t]$ represents the potential accumulation~(see Sec.~\ref{sec:saf}). The SUM layer computes the spike accumulation, and the Switch layer propagates $\bm{W}^l\bm{s}$ and $\bm{W}^l\widehat{\bm{a}}$ in forwarding and backwarding, respectively. Note that, unlike membrane potentials, the potential accumulation does not require the retention of past information.}
+  \label{fig:overview}
+\end{figure}
+
+Due to  the carbon emission reduction problem, energy-efficient spiking neural networks~(SNNs) are attracting attention~\citep{luo2023achieving}. SNNs are known to be more bio-plausible models than artificial neural networks~(ANNs) and can replace the multiply-accumulate~(MAC) operations with additive operations. This characteristic comes from propagating the spike train~(belonging to $\{0,1\}^T$, where $T$ is the number of time steps) and is energy-efficient  on  neuromorphic chips~\citep{akopyan2015truenorth,davies2018loihi}.
+
+Despite the usefulness of SNNs for ${\rm CO}_2$ reduction, their neurons are non-differentiable, which makes them difficult to train. Solving this problem is in the mainstream of SNN research, and back-propagation through time (BPTT) with surrogate gradient (SG)~\citep{zheng2021going,Xiao2022OnlineNetworks} is one of the main methods to achieve high performance. In particular, the recently proposed Online Training Through Time (OTTT) can train SNNs at each time step, just like our brains, and achieve high performance with few time steps~\citep{Xiao2022OnlineNetworks}. 
+
+To enable online training, OTTT uses different information for the forward and backward processes. For forwarding, the spike train is used; for backwarding, the weighted summation of spike trains~(which we refer to as {\it spike accumulation}) is used. Therefore, efficient computation on GPUs using the Autograd of libraries such as PyTorch~\citep{paszke2019pytorch} requires operations with spike train and spike accumulation during the forward process~(see Fig.~\ref{fig:overview}). Meanwhile, OTTT has the theoretical guarantee that the gradient descent direction is similar to that of Spike Representations by the weighted firing rate coding by summing up the gradients of each time step~\citep{Xiao2021TrainingState,meng2022training}. However, these gradients are not shown to be perfectly consistent. To accurately bridge them, it is essential to develop a method that guarantees the gradient can be consistent with each of above two gradients.
+
+In this article, we propose {\it Spike Accumulation Forwarding} ({\it SAF}) as a new paradigm for training SNNs. Unlike OTTT, SAF propagates not only backward but also forward processes by spike accumulation~(see Fig.~\ref{fig:overview}). By using this process, we can halve the number of operations during the forward process. In addition, because SAF does not require retaining the information of membrane potentials as in \citet{zhou2021temporal}, we can reduce memory usage during training compared to OTTT. Furthermore, this propagation strategy is only executed during training, and during inference, we can replace the propagation with the spike train without approximation error. We demonstrate this by proving that the neurons for spike accumulation are identical to the Leaky-Integrate-and-Fire~(LIF)~\citep{stein1965theoretical} neuron, which is a generalization of the Integrate-and-Fire~(IF)~\citep{lapique1907researches} neuron, which are commonly used as SNN neurons. This result indicates that the SNN composed of LIF neurons can achieve the same accuracy using the trained parameters of SAF (i.e., SAF is capable of inference by the SNN composed of LIF neurons). Furthermore, we prove that the gradient of the SAF is consistent with that of the OTTT, which trains at each time step, and that by summing up the gradients at each time step, SAF is also consistent with the gradient of the Spike Representation.
+This shows that SAF can accurately bridge the gap between Spike Representation and OTTT.
+
+{\bf Main Contributions}
+\begin{itemize}
+\item[(A)] We propose SAF, which trains SNNs by only spike accumulation, halving the number of operations in the forward process, reducing the memory cost, and enabling inference on SNNs composed of LIF neurons.  
+\item[(B)] We prove theoretically that the neurons for spike accumulation are absolutely identical to the LIF neuron.  
+\item[(C)] Our study also shows that the gradient of SAF is theoretically consistent with the gradient of the Spike Representation and also with that of OTTT, which trains each time step. 
+\item[(D)] We consider the situation that SNNs have a feedforward or feedback connection like brain and discuss the equivalence of SAF with OTTT and with Spike Representation. 
+\item[(E)] Brief experiments confirmed that for training at each time step, the training results were in close agreement with OTTT while reducing the training cost. 
+\end{itemize}
+
+
+
+\section{Related Work}
+
+Regarding SNN training, there are two research directions: conversion from ANN to SNN and direct training. The conversion approach reuses the parameters of the ANN while converting the activation function for the spiking function~\citep{diehl2015fast,deng2020optimal,han2020rmp}. This approach can be employed by a wide range of many trained deep-learning models, and there are use cases for tasks other than recognition~\citep{kim2020spiking,qu2023spiking}. However, because the accuracy tends to be proportional to the number of time steps and although several improvement methods have been proposed~\citep{chowdhury2021one,wu2021tandem}, high-precision inference is still difficult for few time steps. Meanwhile, direct training does not use the parameters of the trained ANNs. Thus, the non-differentiable SNNs are trained by some approximation techniques. One of the most significant techniques is to utilize the surrogate gradient~(SG). SGs enables backpropagation by approximating the gradient of non-differentiable activation functions, and various types of SGs (e.g., rectangular or derivatives of sigmoid functions) have been proposed~\citep{shrestha2018slayer,wu2018spatio,ijcai2023p335,Suetake2022S3NN:Networks}. Other recently proposed methods 
+include those based on the clamp function~\citep{meng2022training} or implicit differentiation on the equilibrium state~\citep{Xiao2021TrainingState}. These employ Spike representation, which propagates information such as firing rates, not spike trains, and have the advantage of being able to train SNNs like ANNs~\citep{thiele2019spikegrad,zhou2021temporal}. However, these methods assume the time step $T \rightarrow \infty$, then $T$ must be sufficiently large to achieve high accuracy. In addition, these are only differences in how to approximate; the basic approach is similar to SGs. Although there are bio-inspired training methods, such as Hebbian learning rule~\citep{hebb2005organization,fremaux2016neuromodulated} and spike timing dependent plasticity~(STBP)~\citep{bi1998synaptic,bengio2015stdp}. In particular, learning rules based on eligibility traces, such as SuperSpike~\citep{zenke2018superspike}, a method for improving SpikeProp~\citep{bohte2002error}, are associated with three-factor plasticity rules~\citep{neftci2019surrogate}. OTTT, the main focus of our study, has also been mentioned as being associated with the three-factor plasticity rule. However, training multi-layered SNNs with SuperSpike is challenging, and it is necessary to introduce local errors in each layer~\citep{kaiser2020synaptic}. Nonetheless, in \citet{kaiser2020synaptic}, fewer than ten layers were trained, and training deeper SNNs has still been challenging. On the other hand, OTTT can train deeper networks such as VGG, which is useful for many applications.
+
+In the following, we discuss the OTTT~\citep{Xiao2022OnlineNetworks} most relevant to our study. Because OTTT is a variant of BPTT with SG, it allows for low-latency training. In addition, it is sufficient for OTTT to maintain the computational graph only for the current time step during training, different from the standard BPTT with SG. Thus, training can be performed with constant memory usage even as time steps increase. However, OTTT requires additional information for propagating the spike accumulation as well as the spike train for the forward process, which can increase training time. In addition, because OTTT is based on the LIF neuron, it must retain the membrane potential, which can increase memory usage. Furthermore, it is important to note that while OTTT and Spike Representation have similar gradient directions, their gradients do not necessarily match exactly (i.e., the inner product between their gradients is positive). 
+
+
+
+\section{Preliminaries}
+
+\subsection{Typical Neuron Model}
+In this subsection, we explain the LIF neuron, which is widely used in SNNs. The LIF neuron is a neuron model that considers the leakage of the membrane potential, and its discrete computational form is as follows:
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\bm{u}^{l+1}[t] = \lambda(\bm{u}^{l+1}[t-1] - V_{\rm th} \, \bm{s}^{l+1}[t-1]) + \bm{W}^l \bm{s}^{l}[t] + \bm{b}^{l+1},\\
+\bm{s}^{l+1}[t] = H(\bm{u}^{l+1}[t] - V_{\rm th}),
+\end{cases}
+\end{aligned}
+\label{define-snn}\end{equation}
+where $\bm{s}^l[t]$, $\bm{u}^l[t]$, $\bm{W}^l$ and $\bm{b}^l$ are the spike train, membrane potential, weight and bias of $l$-th layer, respectively. $\lambda \le 1$ is the leaky term, and $\lambda$ is set to 1 if we use the IF neuron, which is a special case of the LIF neuron. Also, $H$ is the element-wise Heaviside step function, that is, $H=1$ when the membrane potential $\bm{u}[t]$ exceeds the threshold $V_{\rm th}$. From this relation, the membrane potentials $\bm{u}^l[t]$ are computed sequentially and must retain the previous membrane potential $\bm{u}^l[t-1]$. This is the same in the case of OTTT, which uses the LIF neuron as described below.
+
+\subsection{Training methods for SNNs}\label{Training_methods_for_SNNs}
+This subsection introduces two training methods that are closely related to our method: Spike Representation and OTTT. 
+
+\subsubsection*{Spike Representation}
+Spike Representation is a method of training SNNs by propagating information differently to the spike trains~\citep{Xiao2021TrainingState,meng2022training}. In this article, we consider the weighted firing rate $\bm{a}[t] = \sum_{\tau = 0}^{t}\lambda^{t-\tau}\bm{s}[\tau] / \sum_{\tau = 0}^{t}\lambda^{t-\tau}$ as in \citet{Xiao2021TrainingState,meng2022training,Xiao2022OnlineNetworks}. Likewise, we define the weighted average input $\bm{m}[t] =  \sum_{\tau = 0}^{t}\lambda^{t-\tau}\bm{x}[\tau] / \sum_{\tau = 0}^{t}\lambda^{t-\tau}$ , where $x$ is the value of the input data. Then, given a convergent sequence $\bm{m}[t]\rightarrow \bm{m}^* \ (t \rightarrow \infty)$, it is known that $ \bm{a}[t] \rightarrow$ $\sigma \left(\bm{m}^*\right / V_{\rm th}) \ (t \rightarrow \infty)$  holds \citep{Xiao2021TrainingState}, where $\sigma$ is the element-wise clamp function $\sigma(x) = \min(\max(0,x),1)$. Using this convergence and under the assumption that the time step $T$ is sufficiently large, the weighted firing rate in the ($l+1$)-th layer is approximated as $\bm{a}^{l+1}[T] \approx \sigma(\bm{W}^l\bm{a}^l[T]+\bm{b}^{l+1} / V_{\rm th})$. We consider the loss $L$ as $ L[t] = \mathcal{L}(\bm{a}[T], y )$ (where  $\mathcal{L}$ is a convex function like cross-entropy and $y$ is the label). Then the gradient of $L$ with respect to $\bm{W}^l$ is computed as follows:
+\begin{equation}
+\left(\frac{\pd L}{\pd \bm{W}^l}\right)_{\rm SR} = \frac{\pd L}{\pd \bm{a}^{N}[T]}\left(\prod_{i=N-1}^{l+1}\frac{\pd \bm{a}^{i+1}[T]}{\partial \bm{a}^{i}[T]}\right)\frac{\pd\bm{a}^{l+1}[T]}{\pd\bm{W}^l},
+\label{grad-SR}\end{equation}
+where $N$ represents the number of layers. 
+
+Spike Representation can include a feedforward or feedback connections, which have been frequently used in recent years~\citep{Xiao2021TrainingState,Xiao2022OnlineNetworks,Xiao2023SPIDE:Networks}, where notice that, feedforward and feedback connections do not refer to the weights between adjacent layers but to additional weight matrices connecting any layers $l$ and $l'$. When there is a feedforward connection, the gradient \eqref{grad-SR} holds. However, in the case of feedback connection, it does not hold because we need to calculate implicit differentiation.
+
+\subsubsection*{Online Training Through Time}
+OTTT~\citep{Xiao2022OnlineNetworks} is a training method based on BPTT with the surrogate gradient (SG). BPTT with SG enables low-latency training; however, during training, it requires the computational graph to be maintained at each time step, resulting in substantial memory usage  when a large number of time steps are involved. OTTT solves this problem and allows for training with minimal memory consumption.
+
+In OTTT, for the forward process, (weighted) spike accumulation $\widehat{\bm{a}}[t] = \sum_{\tau = 0}^{t}\lambda^{t-\tau}\bm{s}[\tau]$ is propagated in addition to spike trains $\bm{s}[t]$ computed by the LIF neuron.
+Defining the loss at each time step as $L[t] = \mathcal{L}(\bm{s}[t],y)/T$, OTTT computes the gradient at time $t$ as follows:
+\begin{equation}
+\left(\frac{\pd L[t]}{\pd \bm{W}^l} \right)_{\rm OT}= \widehat{\bm{a}}^l[t]\, \frac{\pd L[t]}{\pd \bm{s}^{N}[t]}\left(\prod_{i=N-1}^{l+1}\frac{\pd \bm{s}^{i+1}[t]}{\partial \bm{s}^{i}[t]}\right)\frac{\pd \bm{s}^{l+1}[t]}{\pd \bm{u}^{l+1}[t]}.
+\label{grad-OTTT}\end{equation}
+Note that since this equation uses the accumulated information of spikes up to $\widehat{a}^l[t]$ at the current time $t$, OTTT implicitly trains using information up to $t$, not just the current time. This corresponds to the fact that membrane potentials accumulate information from the past. Note also that the term $\pd \bm{s} / \pd \bm{u}$ is non-differentiable at $u = V_{\rm th}$; thus, we approximate it with the SG; for example, since $\pd \bm{s}^{i+1}[t] / \pd \bm{s}^i[t]$ can decomposed into $(\pd \bm{s}^{i+1}[t] / \pd  \bm{u}^{i+1}[t] )(\bm{u}^{i+1}[t] / \pd \bm{s}^i[t])$, we also replace $\pd \bm{s}^{i+1}[t] / \pd  \bm{u}^{i+1}[t]$ with the SG. Like the case of Spike Representation, OTTT can  include a feedforward or feedback connection, and the gradients are almost the same as \eqref{grad-OTTT}.
+
+\citet{Xiao2022OnlineNetworks} proposed two types of training approaches: OTTT$_{\rm O}$, where parameters are updated at each time step using $\pd L[t] / \pd \bm{W}^l$, and OTTT$_{\rm A}$, where parameters are updated collectively by summing $\pd L[t] / \pd \bm{W}^l$ up to $T$. 
+ 
+In particular, they proved that the gradient descent directions in OTTT$_{\rm A}$ and Spike Representation are similar, i.e., the inner product between their gradients is positive.
+
+
+
+\section{Spike Accumulation Forwarding}
+
+\label{sec:saf}
+In this section, we introduce our proposed method, SAF, which only propagates (weighted) spike accumulation $\widehat{\bm{a}}[t]$. We first explain the forward and backward processes. Then, we prove that SAF can be consistent with OTTT and Spike Representation. We also show that the feedback connection can be added to SAF, as in~\citet{Xiao2022OnlineNetworks}, and furthermore, feedforward connections can also be incorporated into the SAF.
+
+\subsection{Details of SAF}
+\subsubsection*{Forward process}
+As mentioned earlier, for the forward processes of conventional SNNs, the spike trains $\bm{s}[t]$ are propagated. In other words, the firing state of the spike for each neuron at each time step is retained. In SAF, as in OTTT and SR, instead of the spike trains, it propagates (weighted) spike accumulation $\widehat{\bm{a}}[t] = \sum_{\tau = 0}^{t}\lambda^{t-\tau}\bm{s}[\tau]$, meaning that it retains the (weighted) count of the fired spikes up to the current time for each neuron.
+Additionally, although in conventional SNNs, the spike firing is determined with the membrane potential $\bm{u}[t]$, in SAF, it is determined with (weighted) potential accumulation $\widehat{\bm{U}}[t]$ defined by $ \widehat{\bm{U}}^{l+1}[t] = \lambda\widehat{\bm{U}}^{l+1}[t-1] + \bm{W}^l(\widehat{\bm{a}}^l[t]-\lambda\widehat{\bm{a}}^l[t-1]) + \bm{b}^{l+1}$, which corresponds to the membrane potential in the relation~\eqref{define-snn}. 
+With these considerations, SAF is updated as follows:
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\widehat{\bm{a}}^{l+1}[t] = \lambda\widehat{\bm{a}}^{l+1}[t-1] + H(\widehat{\bm{U}}^{l+1}[t] -  V_{\rm th}(\lambda\widehat{\bm{a}}^{l+1}[t-1] +1)),
+\end{cases}
+\end{aligned}
+\label{SAF-Def}\end{equation}
+where $ \widehat{\bm{U}}^{l+1}[0]$ is the initial value for potential accumulation, and here, we assume it to be the initial membrane potential $ \bm{u}^{l+1}[0]$.
+Here, the membrane potential $\bm{u}^{l+1}[t]$ and spike trains $\bm{s}^{l+1}[t]$ in the LIF model can be expressed by $\widehat{\bm{U}}^{l+1}[t]$ and $\widehat{\bm{a}}^{l+1}[t-1]$ as follows:
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\bm{u}^{l+1}[t] = \widehat{\bm{U}}^{l+1}[t] - V_{\rm th} \,\lambda\widehat{\bm{a}}^{l+1}[t-1], \\
+\bm{s}^{l+1}[t] = H(\widehat{\bm{U}}^{l+1}[t] -  V_{\rm th}(\lambda\widehat{\bm{a}}^{l+1}[t-1] +1)) .
+\end{cases}
+\end{aligned}
+\label{eq:SAF-LIF}\end{equation}
+ 
+Note that, as shown in \eqref{SAF-Def}, SAF does not need to retain the past potential accumulation $\widehat{\bm{U}}^{l+1}[t-1]$. Meanwhile, the various SNNs, including OTTT, require the LIF neurons used for training to retain the previous membrane potentials $\bm{u}^{l+1}[t-1]$, as described above. Therefore, SAF can reduce the memory usage for the forward process compared to OTTT. 
+
+As a result, it becomes possible to compute $\bm{u}^{l+1}[t]$ and $\bm{s}^{l+1}[t]$ during the process of obtaining $\widehat{\bm{U}}^{l+1}[t]$ and $\widehat{\bm{a}}^{l+1}[t]$. Because it is possible to compute $\widehat{\bm{U}}^{l+1}[t]$ and $\widehat{\bm{a}}^{l+1}[t]$ from $\bm{u}^{l+1}[t]$ and $\bm{s}^{l+1}[\tau]$ ($\tau = 1,\ldots,t$), the forward processes of SAF and SNN composed of LIF neurons are mutually convertible.  Additionally, because the IF neuron is a special case of an LIF neuron (i.e., $\lambda=1$), the forward processes of SAF, when $\lambda=1$, and SNN composed of IF neurons are mutually convertible. Furthermore, in OTTT, both $\bm{s}[t]$ and $\widehat{\bm{a}}[t]$ need to be propagated during the forward process for efficient GPU computation, whereas in SAF, only $\widehat{\bm{a}}[t]$ needs to be propagated~(see Fig.~\ref{fig:overview}).
+Therefore, SAF can reduce the computation time during training. 
+
+\subsubsection*{Backward process}
+As with OTTT, SAF can be trained in two different ways. The first method updates the parameters by computing the gradient at each time step. We call this {\it SAF-E}. Let $L_E[t]=\mathcal{L}(\bm{s}^N[t],\bm{y})/T$ be the loss function.
+Assuming that $L_E[t]$ depends only on $\widehat{\bm{a}}^l[t]$ and $\widehat{\bm{U}}^l[t]$, i.e., not on anything up to $t-1$, we calculate the derivative based on the definition of forward propagation as
+\begin{align}
+\frac{\partial L_E[t]}{\partial \bm{W}^l}&=\widehat{\bm{a}}^l[t]\,\frac{\partial L_E[t]}{\partial \widehat{\bm{a}}^N[t]}\left(\prod_{i=N-1}^{l+1}\frac{\partial \widehat{\bm{a}}^{i+1}[t]}{\partial \widehat{\bm{a}}^{i}[t]}\right)\frac{\partial \widehat{\bm{a}}^{l+1}[t]}{\partial \widehat{\bm{U}}^{l+1}[t]} .\label{grad-SAF-o2}
+\end{align}
+Note that $\partial \widehat{\bm{a}} / \partial \widehat{\bm{U}}$ is non-differentiable; we approximate it with SG. Here, we set
+\begin{align}
+\bm{g}_{\widehat{\bm{U}}}^{l+1}[t]
+&=\frac{\partial L_E[t]}{\partial \widehat{\bm{a}}^N[t]}\left(\prod_{i=N-1}^{l+1}\frac{\partial \widehat{\bm{a}}^{i+1}[t]}{\partial \widehat{\bm{a}}^{i}[t]}\right)\frac{\partial \widehat{\bm{a}}^{l+1}[t]}{\partial \widehat{\bm{U}}^{l+1}[t]}.
+\end{align}
+Then, it holds that
+\begin{align}
+\frac{\partial L_E[t]}{\partial \bm{W}^l}&=\widehat{\bm{a}}^l[t]\,\bm{g}_{\widehat{\bm{U}}}^{l+1}[t]. \label{gr-SAF-E}
+\end{align}
+The second method calculates the gradient only at the final time step and updates the parameters. We call this {\it SAF-F}. Let $L_F=\mathcal{L}(\sum_{t =0}^{T}\lambda^{T-t}\bm{s}^N[t] / \sum_{t =0}^{T}\lambda^{T-t},\bm{y})$ be a loss function. As with SAF-E, suppose that $L_F$ depends only on $\widehat{\bm{a}}^l[T]$ and $\widehat{\bm{U}}^l[T]$. Simply replacing $t$ with $T$ and $L_E$ with $L_F$ in the above calculation, we obtain
+\begin{align}
+\frac{\partial L_F}{\partial \bm{W}^l}&=\widehat{\bm{a}}^l[T]\,\bm{g}_{\widehat{\bm{U}}}^{l+1}[T]. \label{gr-SAF-F}
+\end{align}
+
+\subsection{Equivalence with OTTT$_{\rm O}$ and Spike Representation } \label{subsec_equivalence}
+
+In this subsection, we show that SAF-E is equivalent to OTTT$_{\rm O}$ and SAF-F is equivalent to Spike Representation, i.e., the forward and backward processes are consistent, respectively. This means that we can train SNNs by SAF and infer by LIF neurons.
+\subsubsection*{Equivalence with OTTT$_{\rm O}$}
+
+We will transform the gradient of SAF-E to be consistent with that of OTTT$_{\rm O}$ when the loss function is $L_E[t]$.
+Because $L_E[t]$ does not include any argument before $t$, we obtain 
+\begin{align}
+\frac{\partial L_E[t]}{\partial \widehat{\bm{a}}^N[t]}=\frac{\partial L_E[t]}{\partial \bm{s}^N[t]}.\label{equal-1}
+\end{align}
+The following two equations hold from the  forward processes of SAF and OTTT: 
+\begin{align}
+\frac{\partial \widehat{\bm{a}}^{i+1}[t]}{\partial \widehat{\bm{a}}^{i}[t]}=\frac{\partial \bm{s}^{i+1}[t]}{\partial \bm{s}^{i}[t]}, \quad
+\frac{\partial \widehat{\bm{a}}^{l+1}[t]}{\partial \widehat{\bm{U}}^{l+1}[t]}=\frac{\partial \bm{s}^{l+1}[t]}{\partial \bm{u}^{l+1}[t]}. \label{equal-2}
+\end{align}
+By substituting \eqref{equal-1}, \eqref{equal-2} for $\bm{g}_{\widehat{\bm{U}}}^{l+1}$ in \eqref{gr-SAF-E}, we have
+\begin{align}
+\bm{g}_{\widehat{\bm{U}}}^{l+1}[t] &=\frac{\partial L_E[t]}{\partial \bm{s}^N[t]}\left(\prod_{i=N-1}^{l+1}\frac{\partial \bm{s}^{i+1}[t]}{\partial \bm{s}^{i}[t]}\right)\frac{\partial \bm{s}^{l+1}[t]}{\partial \bm{u}^{l+1}[t]}.
+\end{align}
+
+Hence, the following theorem holds from \eqref{grad-OTTT}.
+\begin{thm}
+The backward processes of SAF-E and OTTT$_{\rm O}$ are identical, that is, $\dfrac{\partial L_E[t]}{\partial \bm{W}^l}=\left(\dfrac{\partial L_E[t]}{\partial \bm{W}^l}\right)_{\rm OT}$. 
+\label{thm1}\end{thm}
+ Because we have already confirmed that the forward process is consistent, SAF-E and OTTT$_{\rm O}$ are equivalent.
+\subsubsection*{Equivalence with Spike Representation}
+Now, we show that SAF-F is equivalent to Spike Representation. Setting the loss function of Spike Representation as $L_F$, from the expression \eqref{grad-SR}, we have
+\begin{align}
+\left(\frac{\pd L_F}{\pd \bm{W}^l}\right)_{\rm SR}=\frac{\widehat{\bm{a}}^l[T]}{V_{\rm th}}\left(\frac{\partial L}{\partial \widehat{\bm{a}}^N[T]}\left(\prod_{i=N-1}^{l+1}\frac{\partial \widehat{\bm{a}}^{i+1}[T]}{\partial \widehat{\bm{a}}^{i}[T]}\right)\odot\bm{d}^{l+1}[T]^{\top}\right),
+\end{align}
+where $\bm{d}^{l+1}[T]=\sigma'\left((\bm{W}^l\widehat{\bm{a}}^l[T] / \Lambda +\bm{b}^{l+1}) / V_{\rm th} \right)$,
+$\Lambda = \sum_{\tau=0}^T\lambda^{T-\tau}$, and $\odot$ is the element-wise product.
+Now we assume that
+\begin{align}
+\frac{\partial \bm{s}^{l+1}[T]}{\partial \bm{u}^{l+1}[T]}=\operatorname{diag}(\bm{d}^{l+1}[T]),
+\end{align}
+for any $l=0,\ldots,N-1$, where $\operatorname{diag}(\bm{d}^{l+1}[T])$ is a diagonal matrix constructed from $\bm{d}^{l+1}[T]$. The reason why this assumption is valid discussed in~\citet{Xiao2022OnlineNetworks}.
+Then, we obtain
+\begin{align}
+\left(\frac{\partial L_F}{\partial \bm{W}^l}\right)_{\rm SR}&=\frac{1}{V_{\rm th}}\widehat{\bm{a}}^l[T]\,\bm{g}_{\widehat{\bm{U}}}^{l+1}[T].
+\end{align}
+Hence, the following theorem holds.
+\begin{thm} \label{thm2}
+Suppose that $\bm{m}[t]$ converges when $t\rightarrow\infty$. Then, for sufficiently large $T$, the backward processes of SAF-F and Spike Representation are identical up to a scale factor, that is,
+$\dfrac{\partial L_F}{\partial \bm{W}^l}=V_{\rm th}\left(\dfrac{\partial L_F}{\partial \bm{W}^l}\right)_{\rm SR}$. 
+\end{thm}
+ Because we have already confirmed that the forward process is consistent, SAF-F and Spike Representation are equivalent.
+
+\subsection{Feedforward and Feedback Connection}
+In the brain, there are not only layer stacking, as in normal SNNs, but also feedforward and feedback connections~\citep{semedo2022feedforward}. Therefore, it is important to consider SAF-E/F including these connections. In this subsection, we discuss the relationship between ${\rm OTTT_{O}}$, SR, and SAF-E/F in the context of both feedforward and feedback connections.
+\subsubsection*{Feedforward Connection}
+To begin, we consider the SNN composed of LIF neurons.
+The forward process of the ($q+1$)-th layer of the SNN with a feedforward connection from the $p$-th layer to the ($q+1$)-th layer (where $q \geq p$) with weight $\bm{W}_f$ is as follows:
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\bm{u}^{q+1}[t] = \lambda(\bm{u}^{q+1}[t-1] - V_{\rm th}\,\bm{s}^{q+1}[t-1]) + \bm{W}^q \bm{s}^{q}[t] + \bm{b}^{q+1}+\bm{W}_f\bm{s}^p[t],\\
+\bm{s}^{q+1}[t] = H(\bm{u}^{q+1}[t]- V_{\rm th}).
+\end{cases}
+\end{aligned}\label{define-snn-F}
+\end{equation}
+Note that the layers other than the ($q+1$)-th layer are the same as in~\eqref{define-snn}. Meanwhile, the forward process of the ($q+1$)-th layer of the SAF is as follows: 
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\widehat{\bm{U}}^{q+1}[t]= \bm{W}^q \widehat{\bm{a}}^q[t] +\bm{b}^{q+1}(\sum_{\tau=0}^{t-1}\lambda^{\tau}) + \lambda^{t}\widehat{\bm{U}}^{q+1}[0]+\bm{W}_f \, \widehat{\bm{a}}^p[t],\\
+\widehat{\bm{a}}^{q+1}[t] = \lambda\widehat{\bm{a}}^{q+1}[t-1]+ H(\widehat{\bm{U}}^{q+1} -  V_{\rm th}(\lambda\widehat{\bm{a}}^{q+1}[t-1]+1)).
+\end{cases}
+\end{aligned}\label{SAF-Def-F}
+\end{equation}
+The layers other than the ($q+1$)-th layer are the same as in~\eqref{SAF-Def}. The forward processes of SAF and LIF with feedforward connection are mutually convertible.\\
+Regarding the backward processes, the gradients for parameters other than $\bm{W}_f$ are the same as when there is no feedforward connection. The derivative with respect to $\bm{W}_f$ is calculated as 
+\begin{align}
+\frac{\partial L_E[t]}{\partial \bm{W}_f}&=\widehat{\bm{a}}^p[t]\,\frac{\partial L_E[t]}{\partial \widehat{\bm{a}}^N[t]}\left(\prod_{i=N-1}^{q+1}\frac{\partial \widehat{\bm{a}}^{i+1}[t]}{\partial \widehat{\bm{a}}^{i}[t]}\right)\frac{\partial \widehat{\bm{a}}^{q+1}[t]}{\partial \widehat{\bm{U}}^{q+1}[t]}.
+\end{align}
+Therefore, $\partial L_E[t] / \partial \bm{W}_{f}=\widehat{\bm{a}}^p[t]\,\bm{g}_{\widehat{\bm{U}}}^{q+1}[t]$ for SAF-E and $\partial L_F / \partial \bm{W}_{f}=\widehat{\bm{a}}^p[T]\,\bm{g}_{\widehat{\bm{U}}}^{q+1}[T]$ for SAF-F.
+\subsubsection*{Feedback Connection}
+ The forward process of the ($q+1$)-th layer of the SNN with a feedback connection from the $p$-th layer to the ($q+1$)-th layer (where $q<p$) with weight $\bm{W}_b$ is as follows:
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\bm{u}^{q+1}[t] = \lambda(\bm{u}^{q+1}[t-1] - V_{\rm th} \,\bm{s}^{q+1}[t-1]) + \bm{W}^q \bm{s}^{q}[t] + \bm{b}^{q+1}+\bm{W}_b \,\bm{s}^p[t-1],\\
+\bm{s}^{q+1}[t] = H(\bm{u}^{q+1}[t]- V_{\rm th}).
+\end{cases}
+\end{aligned}\label{define-snn-B}
+\end{equation}
+Note that the layers other than the ($q+1$)-th layer are the same as in \eqref{define-snn}. Meanwhile, the forward process of the ($q+1$)-th layer of SAF is as follows: 
+\begin{equation}
+\begin{aligned}
+\begin{cases}
+\widehat{\bm{U}}^{q+1}[t] 
+\widehat{\bm{a}}^{q+1}[t] = \lambda\widehat{\bm{a}}^{q+1}[t-1]+ H(\widehat{\bm{U}}^{q+1} -  V_{\rm th}(\lambda\widehat{\bm{a}}^{q+1}[t-1]+1)).
+\end{cases}
+\end{aligned}\label{SAF-Def-B}
+\end{equation}
+The layers other than the ($q+1$)-th layer are the same as in~\eqref{SAF-Def}. The forward processes of SAF and LIF with feedback connection are mutually convertible.\\
+Regarding the backward processes, the gradients for parameters other than $\bm{W}_b$ are the same as when there is no feedback connection. The derivative with respect to $\bm{W}_b$ is calculated as
+\begin{align}
+\frac{\partial L_E[t]}{\partial \bm{W}_b}&=\widehat{\bm{a}}^p[t-1]\,\frac{\partial L_E[t]}{\partial \widehat{\bm{a}}^N[t]}\left(\prod_{i=N-1}^{q+1}\frac{\partial \widehat{\bm{a}}^{i+1}[t]}{\partial \widehat{\bm{a}}^{i}[t]}\right)\frac{\partial \widehat{\bm{a}}^{q+1}[t]}{\partial \widehat{\bm{U}}^{q+1}[t]}.
+\end{align}
+Therefore, we obtain $\partial L_E[t] / \partial \bm{W}_b=\widehat{\bm{a}}^p[t-1]\,\bm{g}_{\widehat{\bm{U}}}^{q+1}[t]$ for SAF-E and $\partial L_F / \partial \bm{W}_b=\widehat{\bm{a}}^p[T-1]\,\bm{g}_{\widehat{\bm{U}}}^{q+1}[T]$ for SAF-F. 
+\subsubsection*{Equivalence with OTTT$_{\rm O}$ and Spike Representation}
+We can show the equivalence of SAF-E and OTTT$_{\rm O}$ with a feedforward connection, or with a feedback connection, as well as in Theorem~\ref{thm1}. 
+Moreover, as mentioned in Sec.~\ref{Training_methods_for_SNNs}, Spike Representation computes the gradients as \eqref{grad-SR}, then the equivalence of SAF-F and Spike Representation also holds, even with a feedforward connection.
+\begin{cor} \label{corollary3}
+For SNN with a feedforward connection \eqref{define-snn-F}, or a feedback connection \eqref{define-snn-B}, the following hold.
+\item $\mathrm{(i)}$ The backward processes of SAF-E and OTTT$_{\rm O}$ with a feedforward connection are identical.
+\item $\mathrm{(ii)}$ Suppose that $\bm{m}[t]$ converges when $t\rightarrow\infty$. Then, for sufficiently large $T$, the backward processes of SAF-F and Spike Representation with a feedforward connection are identical up to a scale factor.
+\item $\mathrm{(iii)}$ The backward processes of SAF-E and OTTT$_{\rm O}$ with a feedback connection are identical. 
+\end{cor}
+\subsubsection*{Proximity to Spike Representation}
+Assume that the SNN have a feedback connection same as in \eqref{define-snn-B}.  
+Then, the same assertion as Theorem~\ref{thm2} does not hold, that is, SAF-F is not equivalent to Spike Representation in general. However, we can show that the gradient descent directions in SAF-F and Spike Representation are close.
+\begin{thm}\label{thm3}
+Suppose that $\bm{m}[t]$ converges when $t\rightarrow\infty$. Then, for sufficiently large $T$, the backward processes of SAF-F and Spike Representation with a feedback connection are similar, that is, $\left\langle \dfrac{\partial L_F}{\partial \bm{\theta}}, \left(\dfrac{\partial L_F}{\partial \bm{\theta}}\right)_{\rm SR}\right\rangle>0$ for all parameters $\bm{\theta}$.
+\end{thm}
+ 
+
+
+
+\section{Experiments}
+
+\label{sec:Experiments}
+In Sec.~\ref{subsec_equivalence}, we theoretically proved that SAF-E and OTTT$_{\rm O}$ as well as SAF-F and spike representation are equivalent. In this section, we experimentally compare these methods. As complex and large datasets make it difficult to analyze the results, we trained SAF on the CIFAR-10 and the CIFAR-100 datasets~\citep{krizhevsky2009learning} and inferred with SNN composed of LIF neurons. This experiment was performed five times with different initial parameters, and all approximation was executed by the sigmoid-like SG for fair comparison. We used the same experimental setup as \citep{Xiao2022OnlineNetworks}, including the choice of SG. 
+The code was written in PyTorch~\citep{paszke2019pytorch}, and the experiments were executed using one GPU, an NVIDIA Tesla V100, 32GB. We show the pseudo-code of SAF-E and SAF-F in Algorithm~\ref{alg:saf} to better understand our methods. The main objective here is to analyze whether there are any inconsistencies between theory and experiment rather than to achieve state-of-the-art performance.
+\clearpage
+
+\begin{algorithm}[t]
+\caption{One iteration of SAF training.}
+\label{alg:saf}
+\begin{algorithmic}[1]
+\REQUIRE Network parameters $\{ \bm{W}^l \}$, $\{ \bm{b}^{l+1} \}$; Time steps $T$; Number of layers $N$; Other hyperparameters; Input dataset
+\ENSURE Trained network parameters $\{ \bm{W}^l \}$, $\{ \bm{b}^{l+1} \}$
+\FOR{$t = 1, 2, \ldots, T$} 
+    \STATE \% Forward
+    \FOR{$l = 1, 2, \ldots, N$} 
+        \STATE Update the (weighted) potential accumulation $\widehat{\bm{U}}^l[t]$ and spike accumulation $\widehat{\bm{a}}^l[t]$ using \eqref{SAF-Def}.
+    \ENDFOR
+    \STATE \% Backward
+    \FOR{$l = N, N-1, \ldots, 1$}
+        \IF{training option is SAF-E}
+            \STATE Update parameters with $\partial L_E[t] / \partial \bm{W}^l = \widehat{\bm{a}}^l[t]\,\bm{g}_{\widehat{\bm{U}}}^{l+1}[t]$ based on the gradient-based optimizer.
+        \ELSIF{training option is SAF-F \AND $t=T$}
+            \STATE Update parameters with $\partial L_F / \partial \bm{W}^l = \widehat{\bm{a}}^l[T]\,\bm{g}_{\widehat{\bm{U}}}^{l+1}[T]$ based on the gradient-based optimizer.
+        \ENDIF
+    \ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Analysis of SAF-E}\label{subsec:SAF-E}
+
+We experimentally analyze the performance of SAF-E. First, we compare accuracy. As shown in this table, SAF-E and OTTT$_{\rm O}$ have almost the same accuracy. The values in parentheses in Table~\ref{table/result_E} show the change in accuracy due to inference by an SNN composed of LIF neurons. From this table, we can see that the accuracy change due to inference by SNN consisting of LIF neurons is almost negligible in the case of CIFAR-10. On the other hand, CIFAR-100 shows a minor difference in accuracy (compared to the difference in gradient). This could be attributed to the increased task complexity, resulting in a more intricate loss function and greater susceptibility to even minor numerical errors affecting final accuracy.
+
+Figure~\ref{fig/each_time_nofeedback} shows the accuracy and loss curves during the training of CIFAR-10. This indicates that the progress during training are comparable. Therefore, we confirmed experimentally that SAF-E and OTTT$_{\rm O}$ are numerically close. 
+
+Next, we compare the training costs. From Table \ref{table/result_E}, it can be seen that SAF-E takes less time to train and uses less memory during training than OTTT$_{\rm O}$. However, OTTT$_{\rm O}$ can be executed with constant memory usage even as time steps increase. Therefore, we compared the training time and memory usage at different time steps. Figures~\ref{fig/training cost_only_each_time} (A) and (B) show the training time and memory at different time steps. Note that the training time was measured in one batch. It can be seen that the memory usage of SAF-E does not increase even if the number of time steps increases, similar to OTTT$_{\rm O}$. Also, from Fig.~\ref{fig/training cost_only_each_time} (B), we can see that SAF-E uses less memory than OTTT$_{\rm O}$. This result stems from the fact that SAF does not need to maintain the previous membrane potential. 
+\begin{table}[p]
+  \caption{Performance comparison of SAF-E and OTTT$_{\rm O}$ on CIFAR-10 and CIFAR-100. The values in parentheses were the changes in accuracy and total firing rate due to inference by the SNN composed of LIF neurons. Note that training times were measured in one minibatch, and training time and memory were not perturbed between trials.}
+  \begin{adjustbox}{center}
+  \begin{tabular}{lccccc}   
+   \multicolumn{2}{l}{\bf{CIFAR-10}}\\
+   \hline
+  \bf{Method}&\bf{$T$}&\bf{Memory~[GB]}&\bf{Training Time~[sec]} &\bf{Firing rate~[\%]}&\bf{Accuracy~[\%]}  \\
+    \hline
+    OTTT$_{\rm O}$&6&1.656&0.666&15.14$\pm$0.17&93.44$\pm$0.15 \\
+    SAF-E  &6&1.184&0.468&14.76$\pm$0.15 (1.048$\times 10^{-5}$) &93.54$\pm$0.17 (0.016)\\    
+    \hline\\
+
+  \multicolumn{2}{l}{\bf{CIFAR-100}}\\
+  \hline
+  \bf{Method}&\bf{$T$}&\bf{Memory~[GB]}&\bf{Training Time~[sec]}  &\bf{Firing rate~[\%]}&\bf{Accuracy~[\%]}  \\
+  \hline
+    OTTT$_{\rm O}$&6&1.656&0.666&17.27$\pm$0.19&70.70$\pm$0.19 \\
+    SAF-E  &6&1.186&0.464&16.77$\pm$0.08 (1.513$\times10^{-5}$) &71.56$\pm$0.35 (0.042)\\    
+    \hline  \end{tabular}\label{table/result_E}
+\end{adjustbox}
+\end{table}
+
+\begin{figure}[p]
+\centering
+  \begin{minipage}[b]{0.45\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/acc_each_time.pdf} 
+
+(A) Accuracy \label{acc_each_time}
+  \end{minipage}
+  \begin{minipage}[b]{0.45\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/loss_each_time.pdf}
+
+(B) Loss
+\label{loss_each_time}
+  \end{minipage}
+  \caption{Accuracy and loss curves of SAF-E and OTTT$_{\rm O}$ on CIFAR-10 ($T=6$).}\label{fig/each_time_nofeedback}
+\end{figure}
+
+\begin{figure}[p]
+\begin{minipage}[t]
+{0.33\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/time_only_each_time.pdf}
+\subcaption{(A) Training Time}
+\label{fig/time_only_each_time}
+\end{minipage}
+\begin{minipage}[t]
+{0.33\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/memory_only_each_time.pdf}
+\subcaption{(B) Memory Consumption}
+\label{fig/memory_only_each_time}
+  \end{minipage}
+    \begin{minipage}[t]{0.33\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/firing_rate_only_each_time.pdf}
+\subcaption{(C) Firing rate}
+\label{fig/firing_rate_only_each_time}
+  \end{minipage}
+  \caption{Training time, memory consumption, and firing rate of each layer of SAF-E and OTTT$_{\rm O}$ on CIFAR-10. 
+  }\label{fig/training cost_only_each_time}
+\end{figure}
+
+Finally, we compare the firing rate. As shown in Table \ref{table/result_E}, the total firing rates of SAF-E and OTTT$_{\rm O}$ are close. Also, the amount of change due to inference with SNNs consisting of LIF neurons is also almost negligible, similar to the case for accuracy. Furthermore, from Fig.~\ref{fig/training cost_only_each_time} (C), the firing rates of each layer are almost close too.
+
+These results indicate that using SAF-E can reduce the training time and memory compared to OTTT$_{\rm O}$ while achieving close firing rate and accuracy. It was also shown that using the parameters trained with SAF-E to infer with the SNN consisting of LIF neurons is feasible.
+
+\subsection{Analysis of SAF-F}
+\label{subsec:SAF-F} 
+In this subsection, we experimentally analyze the performance of SAF-F. First, we compare accuracy. 
+The results are shown in Table \ref{table/result_F} and Fig. Since the spike representation method is effective when $T$ is large, there is no theoretical guarantee that SAF-F can infer well in a short time step. However, Table~\ref{table/result_F} shows that the accuracy of SAF-F is almost the same for $T=6$ and $T=32$.
+Note that Spike Representation methods, except for SAF-F, do not use SGs, which makes precise comparisons difficult. Therefore, we only compared SAF-F with OTTT$_{\rm A}$.
+
+As with the previous results, the accuracy change due to inference with SNNs consisting of LIF neurons is almost negligible. Meanwhile, the accuracies of SAF-F and OTTT$_{\rm A}$ are close, though from the perspective of standard deviation, there seems to be a difference. From Sec.~\ref{subsec_equivalence}, the gradient directions of Spike Representation and SAF-F are identical, but those of Spike Representation and OTTT$_{\rm A}$ are only similar. Therefore, the gradient directions of SAF-F and OTTT$_{\rm A}$ are also only similar. This is thought to be the cause of the differences in accuracy and loss. 
+
+Next, we compare the training costs. From Table~\ref{table/result_F}, it can be seen that SAF-F requires less time for training and uses less memory than OTTT$_{\rm A}$. This trend is also similar when the time step is varied~(see Figs.~\ref{fig/training cost_only_full} (A) and (B)). 
+
+Finally, we compare firing rate. As shown in Table~\ref{table/result_F} as for accuracy, the change of the total firing rate by inferring with SNNs consisting of LIF neurons is almost negligible. Meanwhile, the total firing rate of SAF-F is smaller than of OTTT$_{\rm A}$. In addition, from Fig.~\ref{fig/training cost_only_full} (C), it can be seen that the firing rate of each layer~(especially the first layer) is smaller in SAF-F than OTTT$_{\rm A}$. These differences also indicate that SAF-F and OTTT$_{\rm A}$ are generally not identical. 
+
+From the above analysis, we can say that SAF-F is a better choice than OTTT$_{\rm A}$ in terms of training time, memory usage, and firing rate. Also, as with SAF-E, inference can be performed by the standard SNN using the parameters trained by SAF-F.
+
+
+\section{Limitation and Discussion}
+
+In this paper, we have shown that SAF-E coincides with OTTT$_{\rm O}$ and that SAF-F coincides with OTTT$_{\rm A}$. On the other hand, \citet{Xiao2022OnlineNetworks} shows that OTTT methods are more accurate than BPTT. Given the concordance between SAF and OTTT, SAF is more accurate than BPTT. We consider that the better accuracy than BPTT is due to the difficulty of achieving optimal rollout at all times in BPTT, as known by vanishing gradients, and the fact that most of the datasets used in the field of deep SNNs are time-independent labels. On the other hand, since SAF trains using information up to $t$ by the spike accumulation $\widehat{{\bm a}}$, not just the current time, SAF can implicitly train at each time while using information up to the previous time. The above assumption can be easily removed; however, its validation would require a labeled time-dependent data set. This would require the preparation of an appropriate data set, which is outside the scope of this paper, considering theoretical consistency with OTTT and is therefore considered one for future research.
+
+\begin{table}[ht]
+  \caption{Performance comparison of SAF-F and OTTT$_{\rm A}$ on CIFAR-10 and CIFAR-100.  The values in parentheses are the changes in accuracy and total firing rate due to inference by the SNN composed of LIF neurons. Note that training times were measured in one minibatch, and training time and memory were not perturbed between trials.}
+  \begin{adjustbox}{center}
+  \begin{tabular}{lccccc}
+  \multicolumn{2}{l}{\bf{CIFAR-10}}\\
+  \hline
+  \bf{Method}&\bf{$T$}&\bf{Memory~[GB]}&\bf{Training Time~[sec]}  &\bf{Firing rate~[\%]}&\bf{Accuracy~[\%]}  \\
+    \hline
+    OTTT$_{\rm A}$&6&1.656&0.661&15.51$\pm$0.10&93.39$\pm$0.16 \\
+    OTTT$_{\rm A}$&32&1.656&3.474&13.96$\pm$0.20&93.62$\pm$0.04 \\
+    SAF-F  &6&1.157&0.247&10.50$\pm$0.19 (3.306$\times 10^{-5}$)&93.09$\pm$0.15 (0.076)\\ 
+    SAF-F  &32&1.157&1.077&10.65$\pm$0.12 (0.965$\times10^{-5}$) &93.25$\pm$0.07 (0.002)\\    
+    \hline\\
+  \multicolumn{2}{l}{\bf{CIFAR-100}}\\
+  \hline
+  \bf{Method}&\bf{$T$}&\bf{Memory~[GB]}&\bf{Training Time~[sec]}  &\bf{Firing rate~[\%]}&\bf{Accuracy~[\%]}  \\
+  \hline
+    OTTT$_{\rm A}$&6&1.656&0.666&18.26$\pm$0.21&70.18$\pm$0.26 \\
+    OTTT$_{\rm A}$&32&1.656&3.479&16.62$\pm$0.20&70.77$\pm$0.16 \\
+    SAF-F  &6&1.157&0.249&12.19$\pm$0.22 (1.106$\times10^{-5}$) &70.58$\pm$0.34 (0.002)\\    
+    SAF-F  &32&1.157&1.077&12.21$\pm$0.15 (1.016$\times10^{-5}$) &71.73$\pm$0.04 (0.096)\\    
+    \hline  \end{tabular}\label{table/result_F}
+\end{adjustbox}
+\end{table}
+
+\begin{figure}[t]
+\centering
+  \begin{minipage}[b]{0.45\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/acc_full.pdf} 
+
+(A) Accuracy \label{acc_full}
+  \end{minipage}
+  \begin{minipage}[b]{0.45\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/loss_full.pdf}
+
+(B) Loss
+\label{loss_full}
+  \end{minipage}
+  \caption{Accuracy and loss curves of SAF-F and OTTT$_{\rm A}$ on CIFAR-10 ($T=6)$.}
+  \label{fig/full_time_nofeedback}
+\end{figure}
+
+\begin{figure}[ht]
+\begin{minipage}[t]
+{0.33\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/time_only_full.pdf}
+\subcaption{(A) Training Time}
+\label{fig/time_only_full}
+\end{minipage}
+\begin{minipage}[t]
+{0.33\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/memory_only_full.pdf}
+\subcaption{(B) Memory Consumption}
+\label{fig/memory_only_full}
+  \end{minipage}
+    \begin{minipage}[t]{0.33\linewidth}
+    \centering
+\includegraphics[keepaspectratio, scale=0.36]{fig/firing_rate_only_full.pdf}
+\subcaption{(C) Firing rate}
+\label{fig/firing_rate_only_full}
+  \end{minipage}
+  \caption{Training time, memory consumption, and firing rate of each layer of SAF-F and OTTT$_{\rm A}$ on CIFAR-10. 
+  It can be seen that the firing rates do not match, which agree with the theoretical result that SAF-F is not always consistent with OTTT$_{\rm A}$.
+  }\label{fig/training cost_only_full}
+\end{figure}
+
+\clearpage
+
+
+
+\section{Conclusion and Future Work}
+
+This article proposed SAF. SAF is a training method of SNNs that propagates the spike accumulation during training; however, SAF propagates the spike trains during inference, as do other SNNs. This article showed that SAF trained at each time step (SAF-E) is equivalent to OTTT$_{\rm O}$, and SAF trained at the final time step (SAF-F) is also equivalent to Spike Representation. We conducted experiments on the CIFAR-10 dataset and confirmed that the experimental results are consistent with these assertions and that training time and memory of SAF are reduced compared to OTTT. 
+
+Most SNNs, including OTTT, Spike Representation, and SAF, train under time-independent labeled training data. Then, the issue of improving SAF to train even if the labels change at each time step remains for future work. Other remaining tasks are to experimentally confirm the similar results of this work for other surrogate gradients and to investigate the theoretical relationship with other learning rules such as SuperSpike.
+
+SAF, as presented in this article, assumes training on a GPU. Therefore, it may not be suitable for training on neuromorphic chips. However, we believe executing training on GPUs and inference on neuromorphic chips is reasonable. In the future, we also plan to verify inference on the neuromorphic chip, including the extent to which numerical errors are affected by differences in computing environments.
+
+
+
+
+

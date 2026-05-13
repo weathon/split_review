@@ -1,0 +1,507 @@
+\title{Improving Fairness and Mitigating MADness in Generative Models}
+
+\begin{abstract}
+Generative models unfairly penalize data belonging to minority classes, suffer from model autophagy disorder (MADness), and learn biased estimates of the underlying distribution parameters.  Our theoretical and empirical results show that training generative models with intentionally designed hypernetworks leads to models that 1) are more fair when generating datapoints belonging to minority classes 2) are more stable in a self-consumed (i.e., MAD) setting, and 3) learn parameters that are less statistically biased.  To further mitigate unfairness, MADness, and bias, we introduce a regularization term that penalizes discrepancies between a generative model’s estimated weights when trained on real data versus its own synthetic data.  To facilitate training existing deep generative models within our framework, we offer a scalable implementation of hypernetworks that automatically generates a hypernetwork architecture for any given generative model.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Hypernetworks are neural networks that generate the weights of other neural networks \citep{HaEtAl_2017}.  Recent work has shown hypernetworks are useful for uncertainty quantification \citep{rusu_meta_learning}, few-shot learning \citep{sendera_hypershot}, continual learning \citep{von_oswald_continual_learning_hypernetworks}, among other tasks \citep{hypernetwork_review}.  To our knowledge, however, no work has evaluated whether generative models trained with hypernetworks produce models that are more fair in representing and generating data belonging to minority classes and more robust to MAD collapse when their output is used as training data.  
+
+\subsection{Motivation: Issues with Maximum Likelihood Estimation}
+The inspiration for applying hypernetworks to improving fairness and mitigating MADness comes from a realization of the sub-optimiality of Maximum Likelihood Estimation (MLE), one of the most popular techniques for parameter estimation \citep{dojo_531_book}.  MLE is used to train most generative model architectures, including variational autoencoders (VAEs) \citep{pu_vae}, normalizing flows (NFs) \citep{rezende_nfs}, diffusion models \citep{ho_original_diffusion_paper}, and generative adversarial networks (GANs) \citep{goodfellow_gans}\footnote{These observations apply to models trained on a lower bound of the likelihood function, such as the popular ELBO \citep{kingma_elbo}.  Any deep learning model that uses the negative log likelihood as a loss function is performing maximum likelihood estimation \citep{vapnik_erm_mle, vapnik_overview_risk}.}.  Despite MLE's ubiquity, it often produces biased estimators of the underlying true parameters.  The most famous example was pointed out by \citet{neyman_scott_mle_inconsistent}, showing that MLE can produce inconsistent results when the number of parameters is large relative to the amount of data \citep{dasgupta_mle_parameters_and_data}.  In the Neyman-Scott problem, there is not enough data relative to the number of parameters to mitigate the bias, leading to what Neyman called ``false estimations of the parameters'', or statistics where the stochastic limits are unequal to the values of the parameters to be estimated \citep{stigler_epic_story_mle}.  This overparameterized regime is precisely where most modern deep learning models are trained \citep{zhang_understanding_2017, belkin_double_descent}, leading to two problems resulting from this bias: unfairness (resulting from MLE overly prioritizing the generation of datapoints belonging to majority classes), and MADness (where models trained on their own output generate poor data \citep{madcow}.  For an illustration of how bias in MLE penalizes minority datapoints, see Section \ref{sec:fairness_results}, and for an illustration of how the bias in MLE significantly causes MADness, see Section \ref{sec:madness_experiments}.
+
+We propose an alternative to MLE that ensures the statistics of parameters estimated from generated data match those estimated from observed data (See Equation \ref{eq:ple_h_only}).  Our method, called Penalized Autophogy Estimation (PLE), differs from MLE in that it forces the learned parameters to be recursively stable.  Theoretical and emperical results show PLE constrains MLE in a way that removes bias, mitigating the above problems and learning estimators that are fairer and less susceptible to MADness.  This recursive debiasing is easily translatable to hypernetworks, where a forward pass maps real or synthetic data to the weights of a downstream network.  The difference in statistics between the weights estimated from real versus synthetic data is effectively the bias, which can be penalized in an optimization routine such as stochastic gradient descent.  For more details on how this is implemented in a deep learning context, see Section \ref{sec:computational_implementation}.
+
+\subsection{Fairness}
+\label{sec:fairness_overview}
+The term bias in parameter estimation is distinct from its colloquial usage\footnote{The word bias may invoke a normative undertone we wish to be agnostic towards.  In fact, some argue a more ``fair'' model is one where bias is purposely introduced to account for unbalanced classes \citep{tyler_procedural_outcome_fairness}.}, so to avoid ambiguity, we exclusively use the term ``bias'' to refer to the statistical bias of an estimator: $b(\hat{\theta}) = \mathbb{E}_{\bm{X} | \theta}[\hat{\theta}] - \theta.$  Recent work has shown that generative models carry and often amplify unbalances present in training data \citep{zhao_bias_in_generative_models}.  
+
+When MLE produces biased estimates of the parameters (as it often does), the parameterized distribution becomes even more concentrated around existing high-probability events\footnote{Here we are using the term ``event'' instead of ``data'' to be consistent with Kolmogorov's axiomatic treatment of probability spaces; see Section \ref{sec:modal_logic} for more details.}.  Since probability distributions must integrate to $1$, increasing the frequency of some events events comes at the expense of decreasing the frequency of others.  The other events in this case are those that are less frequent, or belong to minority classes.  As one can see in the first row in Figure \ref{sec:madcow_grid_explanation}, biased maximum likelihood estimates eventually collapse towards the mode(s) of the data and thus will underrepresent data away from the mode.  As a result, unbiased estimators will generate distributions that more accurately represent the frequency of minority events.
+To evaluate the fairness of generative models, we look at the quality of generated samples from models trained on unbalanced datasets containing a majority and minority class ($C_{\text{Maj}}$ and $C_{\text{Min}}$, respectively), where $|C_{\text{Maj}}| \gg |C_{\text{Min}}|.$  We define the imbalance ratio as the ratio of datapoints belonging to the majority vs minority class, $R_{I} = C_{\text{Maj}}/ C_{\text{Min}},$ and is  is described by \citet{he_learning_imbalanced_data} as the between-class imbalance\footnote{Note that an unbalanced dataset is not necessarily \emph{biased}; the class imbalance in an unbalanced dataset may accurately represent the true ratio of majority to minority datapoints in the population.}.
+
+We compare this imbalance ratio to the ratio of representation quality from data generated from each class\footnote{This task is not necessarily conditional; none of our experiments use conditional generation.  Rather this refers to the generation quality of samples that are \emph{classified} as belonging to either class.}.  Let $S$ be a score function which evaluates the representation quality of samples generated from a generative model $M$ (in our experiments in Section \ref{sec:fairness_results}, $S$ is the inverse of the Frechet Inception Distance).  $S(M)$ denotes the overall representation quality, which can be broken up into two distinct components: $S(M)_{\text{Maj}}$ and $S(M)_{\text{Min}},$ corresponding to the representation quality of samples from the majority class and minority class, respectively.  We introduce a quantity called the \emph{fairness ratio} over a metric $S,$ which is defined as 
+\begin{equation}
+\label{eq:fairness_ratio}
+    R_{\text{Fair}} = S(M)_{\text{Maj}} / S(M)_{\text{Min}}.
+\end{equation}  Values of $R_{\text{Fair}}$ closer to $1$ correspond to models that do equally well representing majority and minority datapoints, while values much larger than $1$ refer to models that have better performance representing datapoints from the majority class than the minority class.  Virtually all variants of empirical risk minimization (including MLE) weight each datapoint equally, and we can thus expect that for a linear $S(M),$
+\begin{equation}
+    S(M) = \frac{|C_{\text{Min}}|}{|C_{\text{Min}}| + |C_{\text{Max}}|} S(M)_{\text{Min}} +  \frac{|C_{\text{Max}}|}{|C_{\text{Min}}| + |C_{\text{Max}}|} S(M)_{\text{Max}}.
+\end{equation}
+This implies that $M$ will more accurately model the density around the majority class than the minority class, and thus $S(M)_{\text{Max}} > S(M)_{\text{Min}}.$ In other words, even if the training dataset accurately represents the population frequencies of each classes, this relative imbalance often harms performance when looking only at data from the minority class.  This is empirically observed with facial classifiers on unbalanced data \citep{joy_gender_shades} and is seen for vanilla generative image models in Table \ref{tab:min_maj_mnist_vae}.  
+
+In principle, weighing each datapoint equally corresponds to a process considered to be procedurally fair  \citep{tyler_procedural_outcome_fairness}, despite the fact that the representation quality for samples in the minority class may be far worse than those in the majority class.  As a result, one can argue that $R_\text{Fair} = R_I = |C_{\text{Maj}}| / |C_{\text{Min}}|,$ represents results from a procedurally fair training process, where each datapoint is treated equally\footnote{Unconditional generative models have no ``knowledge'' of protected attributes.}.  However $R_\text{Fair} \gg R_I$ is clearly unfair, as it penalizes the generation of minority data far more than would be expected by its underrepresentation in the training set. Comparing $R_I$ to $R_{\text{Fair}}$ in practice shows standard generative model training is far worse at representing data from minority classes than $R_{I}$ would suggest.  We observe that removing statistical bias when estimating parameters leads to increased performance representing data from minority classes.  As a result, hypernetwork training and its bias-removal properties leads to more fair outcomes, as we show in Section \ref{sec:fairness_results}.
+
+\subsection{Model Autophagy Disorder (MADness)}
+\label{sec:madness}
+Recent work has shown that models trained on their own output, a process called a self-consuming loop, progressively decrease in quality (precision) and diversity (recall) \citep{madcow}.  Researchers call this phenomenon ``going mad'' or simply ``mad cow,'' after bovine spongiform encephalopathy (BSE), the medical term for mad cow disease\footnote{Bovine spongiform encephalopathy (BSE) is a neurological disorder believed to be transmitted by cattle eating the remains of \emph{other} (infected) cattle \citep{madcow_disease}.}.  This phenomenon has become a growing concern for the machine learning community due to the availability and ubiquity of synthetic data \citep{synthetic_data_book}.
+It often occurs with large language models (LLMs) such as ChatGPT: LLMs trained on their own output suffer in diversity, eventually collapsing to a single point \citep{llm_self_consuming}.  
+
+Given the popularity and availability of these models, it is almost inevitable that future LLMs will be trained on a corpus containing at least some (if not much) synthetic data, implying that future versions of ChatGPT and similar LLMs may be subject to diversity collapse.  
+We show that the presence of estimator bias worsens this phenomenon, and we propose a method of removing this bias for deep generative models in Section \ref{sec:implementing_h_with_hypernets}, effectively slowing down this collapse.  Biased maximum likelihood estimates of distribution parameters also exhibit MADness, which is shown for several popular distributions in Figure \ref{fig:madcow_grid_fig}.
+
+
+
+\section{Background}
+
+
+
+ 
+ 
+
+
+ 
+
+\subsection{Unbiased Estimation}
+\label{sec:unbiased_estimation}
+Bias correction literature is relevant to generative model training since MLE often produces biased results (for a brief overview of generative models, see Section \ref{sec:generative_model_background}).  There are many specific methods for reducing or eliminating bias in parameter estimation problems \citep{singh_general_class_unbiased_estimators}, and bias correction methods have been proposed for generalized linear models \citep{cordeiro_bias_correction_generalized_linear_models},  autoregressive-moving average (ARMA) models \citep{cordeiro_bias_correction_arma}, convex regularized estimators \citep{bellec_de_biasing_convex_regularized_estimators}, diffusion processes \citep{tang_chen_bias_correction_diffusion_process} and specific distributions of interest \citep{singh_bias_corrected_gamma, neto_unbiased_mle_beta}.  While bias correction is often done via bootstrapping \citep{efron_boostrap_jackknife, jiao_han_bias_correction_boostrap_taylor} or jackknifing \citep{q_bias_estimation, q_correlation_time_series}, our work is most closely related to using parametric bootstrapping for bias correction \citep{kosmidis_bias_parametric}.  Parametric bootstrapping uses synthetic or generated samples to estimate and remove empirical bias \citep{hall_bootstrap_edgeworth}, and has been described by \citet{efron_parametric_bootstrap} as linking Bayesian and frequentist perspectives.  We explain how our estimation procedure also links Bayesian and frequentist perspectives in Section \ref{sec:bayesian_and_frequentist}.  
+
+Unlike much existing work, our method described in Equation \ref{eq:ple_h_only} does not require assuming the bias is additive or multiplicative \citep{ferrari_boostrap_analytic_bias_correction}.  Furthermore, recent work has shown the penalizing the square of estimated bias produces asymptotic minimum-variance unbiased estimators (MVUEs) and asymptotically hits the Cramer-Rao bound \citep{diskin_learning_to_estimate_without_bias}.  This is related to our relaxation of Equation \ref{eq:ple_h_only} in Section \ref{sec:implementing_h_with_hypernets}.
+
+\subsection{Parameter Estimation and Model Autophagy}
+Given data $\mX$ drawn from a parameterized distribution $P(\mX;\theta)$, we form an estimator $\hat{\theta}$ of the generative model's parameters $\theta$.
+As shown in Figure~\ref{fig:madcow_diagram}, the model's parameters $\theta$ are estimated by some function of the observed data $\hat{\theta}= H(\mX)$.
+MADness (the collapse of generated quality) arises when the estimated parameters are used in the generative model to produce a new dataset $\widehat{\mX}$ and this dataset is again used to estimate the model's parameters.
+\begin{figure}[ht]
+    \centering
+\tikzstyle{block} = [rectangle, draw, fill=blue!20, 
+    text width=6em, text centered, minimum height=2em]
+\tikzstyle{line} = [draw, -latex']
+
+\begin{tikzpicture}[node distance = 2.57cm, auto]
+    \node [block] (start) {$\theta$};
+    \node [block, right of=start] (init_data) {$\mX \sim P(\mX;\theta)$};
+    \node [block, right of=init_data] (param_est) {$\hat{\theta} = H(\mX)$};
+    \node [block, right of=param_est] (new_data) {$\widehat{\mX} \sim P(\mX;\hat{\theta})$};
+    \node [block, right of=new_data] (new_est) {$\hat{\theta} = H(\widehat{\mX})$};
+    \path [line] (start) -- (init_data);
+    \path [line] (init_data) -- (param_est);
+    \path [line] (param_est) -- (new_data);
+    \path [line] (new_data) -- (new_est);
+    \path [line] (new_est) [out=90,in=90,looseness=.5, ->] edge (new_data);
+\end{tikzpicture}
+
+    \caption{The self-consuming parameter estimation loop.}
+    \label{fig:madcow_diagram}
+\end{figure}
+
+
+
+\section{Autophagy Penalized Likelihood Estimation (PLE)}
+
+\subsection{Theoretical Formulation}
+\label{sec:ple}
+PLE involves adding a constraint to the maximum likelihood estimator to force it to take into account other possible models that could have generated the data.  To illustrate the process, the conceptual model consists of several steps:
+\begin{enumerate}
+    \item Choose a parametrization $P(\mX;\theta)$ for our data-generation model where $\mX = [\vx_1, \dots, \vx_n ]$,  with each $\vx_i \sim P(\vx;\theta), \; i=1, \dots, n$ are I.I.D. samples from the generative model parameterized by $\theta$.%, which we write as $D(\theta).$
+    \item Choose a function $H(\cdot)$ that deterministically produces an estimate of $\theta$ from $\mX$: $\hat{\theta} = H(\mX)$.
+    \item Generate the candidate set of estimators  $C  = \left\{ \hat{\theta} \text{ s.t. }  \mathbb{E}_{\mX, \mY}[ H(\mY) - H(\mX)] = 0 \right\}, $ over all \emph{possible} data $\mY$ generated by  $P(\mY;H(\mX))$.  
+    \item Choose the estimator from $C$ that maximizes the likelihood function: $\hat{\theta}_{\text{PLE}} = \arg \max_{\hat{\theta} \in C} P(\mX ; \hat{\theta})$.
+\end{enumerate}
+This process can be summarized as a constrained maximum likelihood estimation problem:
+\begin{equation}
+\label{eq:ple_const}
+    \hat{\theta}_{\text{PLE}} = H^*(\mX), H^* = \arg \max_H P(\mX;\hat{\theta}) \text{ s.t. } \mathbb{E}_{\mX, \mY}[ H(\mY) - \hat{\theta}] = 0.
+\end{equation}
+Since $\theta = H(\mX),$ we can also write this constraint fully in terms of $H$:
+\begin{equation}
+\label{eq:ple_h_only}
+    \hat{\theta}_{\text{PLE}} = H^*(\mX), H^* = \arg \max_H P(\mX;H(\mX)) \text{ s.t. } \mathbb{E}_{\mX, \mY}[ H(\mY) - H(\mX)] = 0.
+\end{equation}
+Equation \ref{eq:ple_h_only} is essentially MLE with an equality constraint enforcing the statistics of synthetic data, $\mY$ to match that of the observed data $\mX.$  The key here is that the same estimation procedure $H$ (which will eventually be a hypernetwork in our experimental setup) that produces $\theta$ from $\mX$ can \emph{also} be used to estimate parameters from synthetic data $\mY$.  When this synthetic data is drawn from a distribution parameterized by $\theta$ itself, any change in estimated parameters (in expectation) becomes a proxy for estimator bias.
+
+The difference between Equation \ref{eq:ple_h_only} and traditional debiasing techniques such as those discussed in Section \ref{sec:unbiased_estimation} is that PLE is recursive and adapts to the observed data $\mX$.  As a result, it does not depend on a specific choice of $H$ and can be used in general to debias of estimators when a closed form expression is available (See Sections \ref{sec:one_sided_uniform_ple_fmax} and \ref{sec:gaussian_std_estimation}) and, with a few modifications, to debias the training generative models, as discussed in the next several sections.
+
+\subsection{Computational Implementation}
+\label{sec:computational_implementation}
+Evaluating the constraint in Equation \ref{eq:ple_h_only} is computationally intractable because the expectation requires integrating over all \emph{possible} synthetic data.  We make this problem tractable by first turning the constrained optimization problem into an unconstrained one via a Lagrangian relaxation:
+\[
+ H^* = \arg \max_H P(\mX;H(\mX)) + \lambda \mathbb{E}_{\mX, \mY}[ H(\mY) - H(\mX)].
+\]
+Here, $\lambda$ is a hyperparemeter called the PLE penalty which penalizes differences in the statistics of parameters estimated from training vs synthetic data.  For our experiments, we set $\lambda = 0.1.$  To make this expression even more tractable, we can estimate this expectation above via a parametric bootstrap with $m$ synthetic samples.  Let $\hat{\mY} = [\vy_1, \dots \vy_m]$ represent $m$ samples\footnote{These samples need not be individual points; they can each be $n-$dimensional or share the batch size of $\mX$.} of synthetic data drawn from a distribution parametrized by $H(\mX).$
+\begin{equation}
+\label{eq:parametric_boostrap}
+    H^* = \arg \max_H P(\mX;H(\mX)) + \frac{\lambda}{m} \sum_{i=1}^m \left \vert H(\hat{\mY}_i) - H(\mX) \right \vert
+\end{equation}
+The above equation is how PLE can be used in principle to train generative models, and it differs from traditional, MLE-based training in two ways.  The first is that rather than maximizing the likelihood function $P(\mX | \theta)$ with respect to the parameters $\theta$, we maximize the likelihood with respect to a hyper learning task $H$.  This hyper learning task is designed to generate parameters $\theta$ when given training data $\mX$ \emph{or} synthetic data $\mY$.  The second is our introduction of the PLE penalty $ \frac{\lambda}{m} \sum_{i=1}^m \left \vert H(\hat{\mY}_i) - H(\mX) \right \vert,$ which penalizes hyper-learning mechanisms that recursively differ in estimated parameters.
+
+
+
+\section{Implementing \texorpdfstring{$H$}
+
+\label{sec:implementing_h_with_hypernets}
+
+Solving the optimization problem in Equation \ref{eq:ple_h_only} in real-world applications is intractable due to two main computational bottlenecks. First, the operator $H$ that produces the weights of the generative model, $P(\mX;\theta)$, from training data, $\mX$, is not an explicit operator.  Instead, it is usually an optimization routine, (i.e., training of a generative model given data). As a result, evaluating the PLE constraint in Equation \ref{eq:ple_h_only} involves solving an inner optimization problem that trains a secondary generative model on synthetic data. This is clearly intractable as it requires training a new generative model at \emph{every} iteration. Second, it is unclear how the PLE constraint can be strictly imposed. 
+
+To address these challenges, we propose parameterizing $H$ as a hypernetwork \citep{HaEtAl_2017} denoted by $H_\phi$, i.e., a neural network that is trained to predict the weights of another neural network.  In our case, we use $H_{\phi}$ to learn the parameters of $P(\mX;\theta)$: $H_{\phi}$ takes as input training data and predicts the weights of a generative model that approximates the distribution of the training data.  This downstream generative model is never explicitly trained via backpropagation; rather its weights are set via $H$.  This allows the PLE constraint to be tractably evaluated by a sample of data through $H_\phi$. To address the second challenge, we relax the optimization problem in Equation \ref{eq:ple_h_only} so the constraint is turned into a penalty term.
+\begin{equation}
+\label{eq:hypernet_arch}
+    H_\phi (\mX) := h^{(2)}_{\phi}  \left(  \frac{1}{n} \sum_{i=1}^n h^{(1)}_{\phi} (\vx_i) \right),
+\end{equation}
+
+where $h^{(1)}_{\phi}$ and  $h^{(2)}_{\phi}$ are two different fully-connected neural networks and $\mX = [\vx_1, \dots, \vx_n ]$ is a set of data samples. This permutation invariance is similar to the permutation symmetry assumed in U-statistics \citep{dasgupta_u_statistics, hoeffding_u_statistics}.  More recommendations for choosing $H$ based on theoretical considerations can be found in Section \ref{sec:choosing_h}.
+
+While more expressive architectures can be used, in our experiments we found it sufficient to choose $h^{(2)}_{\phi}$ to be a set of independent fully-connected layers such that for any layer in the target generative model, we predict its weights via applying an independent fully-connected layer to the intermediate representation $\frac{1}{n} \sum_{i=1}^n h^{(1)}_{\phi} (\vx_i)$. This functional form has several advantages: (i) it is permutation invariant, which is required since the weights of the generative model $P(\mX;\theta)$ do not depend on the order of data points $\mX = [\vx_1, \dots, \vx_n ]$; (ii) it can deal with an arbitrary number of data points, which enables batch training and in turn allows for evaluating $H_\phi$ over a large number of data points that otherwise would not fit into memory; and (iii) the inner sum in the functional form of $H_\phi$ and the proposed architecture for $h^{(2)}_{\phi}$ (a set of independent linear layers) are highly parallelizable, allowing us to train existing generative models with minimal computational overhead.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+For each experiment, we use one or two NVIDIA Titan X GPUs with 12 GB of RAM. The time of execution for each experiment varies from a few minutes to 14 hours per model trained. For the experiments with multiple models trained, since we must train the models sequentially, the time of execution of the whole experiment is just the number of models times the time necessary to train one model.
+
+\subsection{Fairness Experiments}
+\label{sec:fairness_results}
+As discussed in Section \ref{sec:fairness_overview}, we evaluate the quality of generated samples on datasets with varying imbalance ratios, $R_I$.  As is common in the literature, we use the Frechet Inception Distance (FID) \citep{heusel_fid} to evaluate the quality of generated images.  Our score metric $S$ is the inverse of FID since smaller distances correspond to higher quality generated images.  This is so it can be used as an appropriate score metric $S$ in the fairness ratio $R_{\text{Fair}}\footnote{Recall from Section\ref{sec:fairness_overview} that $S$ ompares the representation \emph{quality} of samples from the majority to the minority classes.}$.
+
+While it may not be reasonable to expect $R_{\text{Fair}} = 1$ in cases when $|C_{\text{Maj}}| \gg |C_{\text{Min}}|,$ we show that models trained with hypernetworks plus a PLE penalty have values of $R_{\text{Fair}}$ much closer to $1$ than those trained with MLE.  Furthermore, our experiments suggest models trained with PLE have $R_\text{Fair} < |C_{\text{Maj}}| / |C_{\text{Min}}|,$ implying that PLE helps the generation of minority data beyond what the class imbalance would predict.  The results for models trained with Hypernetworks versus MLE based training are shown in Table \ref{tab:min_maj_mnist_vae}, showing that hypernetwork training produces results that are more fair.  These results become more pronounced as the classes become more and more imbalanced (as $R_I = |C_{\text{Maj}}|/|C_{\text{Min}}|$ increases)
+
+\begin{table}
+\caption{FID for Minority and Majority data, trained on MNIST with a Variational Autoencoder (VAE).  Note that this task is an unconditional generative task; the generated images are sent through a pretrained classifier to determine the corresponding class.  FID is calculated using the weights from ResNET-18 on the MNIST training set.  Lower FID is better, as this corresponds to generated images being more similar to the images in the training set.  The VAE consists of an encoder and decoder, each with 5 layers  containing a fully connected layer with batchnorm and leaky Relu.  This was trained on a single CPU in several hours.  The hypernetwork architecture consists of hidden sizes of $32$,$64$, and $96$, which takes several hours to train on a single CPU, taking a few hours longer than the baseline. The majority class was the digit $3$ and the minority class was the digit 6 (this choice was arbitrary), with the ratio of majority to minority datapoints used for training shown in the table.}
+
+\label{tab:min_maj_mnist_vae}
+\begin{center}
+\begin{tabular}{ccccc}
+ \toprule
+  Model & Majority Class FID & Minority Class FID & $R_{\text{Fair}}$\tablefootnote{Closer to $1$ is better.} & Overall FID \\ 
+  \midrule
+     \multicolumn{5}{c}{$R_{I} = C_{\text{Maj}}: C_{\text{Min}} = 2:1$} \\
+     \hline
+ VAE & $0.6666$ & $1.0544$ & $\bm{1.5817}$ & $0.6670$ \\ 
+  Hyper-VAE (Ours) & $\bm{0.4456}$ & $\bm{0.9671}$ & $2.1703$ & $\bm{0.5227}$ \\
+  \midrule
+     \multicolumn{5}{c}{$R_{I} = C_{\text{Maj}}: C_{\text{Min}} = 5:1$} \\
+     \hline
+ VAE & $\bm{0.4147}$ & $2.6167$ & $6.3097$ & $0.6313$ \\ 
+  Hyper-VAE (Ours) & $0.4572$ & $\bm{2.0532}$ & $\bm{4.4904} $& $\bm{0.6299}$ \\
+  \midrule
+     \multicolumn{5}{c}{$R_{I} = C_{\text{Maj}}: C_{\text{Min}} = 10:1$} \\
+     \hline
+ VAE & $\bm{0.3060}$ & $3.9760$ & $12.993$ & $\bm{0.4803}$ \\ 
+  Hyper-VAE (Ours) & $0.4482$ & $\bm{2.9806}$ & $\bm{6.650} $& $0.5856$ \\
+ \midrule 
+\multicolumn{5}{c}{$R_{I} = C_{\text{Maj}}: C_{\text{Min}} = 20:1$} \\
+\hline
+ VAE & $\bm{0.2324}$ & $9.9098$ & $42.641$ 
+ & $\bm{0.6116}$ \\ 
+ Hyper-VAE (Ours) & $0.4122$ & $\bm{6.03186}$ & $\bm{14.633}$ & $0.8603$ \\
+ \bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{figure}
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+            ylabel={FID}, 
+            xlabel={Generation}, 
+            title={PLE has stable FID using BigGAN (CIFAR-10)}, 
+            legend pos=north west,
+            width=8cm,
+            xticklabels={},
+            extra x ticks={1,2,3,4},
+            ytick={10,20,30,40,50,60,70},
+            ymin=0,
+            axis x line*=bottom,
+            axis y line*=left,
+            xlabel near ticks,
+            ylabel near ticks,
+            grid]
+        \addplot[color=purple, thick,
+            mark=x,
+            ] table [x index=0, y index=1, col sep=comma] {figs/Madcow/BigGAN_madcow_FID.csv};
+        \addlegendentry{BigGAN}
+        \addplot[thick, color=teal,
+            mark=o,
+            ] table [x index=0, y index=2, col sep=comma] {figs/Madcow/BigGAN_madcow_FID.csv};   
+        \addlegendentry{PLE (Ours)}
+    \end{axis}
+    \end{tikzpicture}
+    \caption{PLE is more stable and outperforms the baseline as we train models on their own outputs (MADness). This plot shows the generation versus FID for BigGAN trained on CIFAR-10. The baseline (labeled BigGAN) uses normal BigGAN training and collapses after only three generations. On the other hand, our method is very stable and only sees a slight increase in FID over the course of the three generations.}
+    \label{fig:madcow_biggan}
+\end{figure}
+\subsection{Illustrative Example: Unbalanced Gaussian Mixture Model}
+\begin{figure}[H]
+
+    \centering
+
+    \begin{tikzpicture}
+    \pgfplotsset{
+    /pgfplots/colormap={temp}{
+    rgb255=(166,0,33) % 8
+    rgb255=(217,22,48) % 7
+    rgb255=(247,40,54) % 6
+    rgb255=(255,61,61) % 5
+    rgb255=(255,120,87) % 4
+    rgb255=(255,172,117) % 3
+    color=(white)
+    rgb255=(117,211,255)  % 3
+    rgb255=(87,176,255)  % 4
+    rgb255=(61,135,255) % 5
+    rgb255=(41,87,255) % 6
+    rgb255=(25,29,247) % 7
+    rgb255=(36,0,217)}% 8
+}
+    
+        \begin{axis}[
+            title={
+            \begin{tabular}{c}In the low-data regime and imbalanced datasets\\PLE outperforms MLE\end{tabular}},
+            ylabel={GMM responsibilities},
+            xlabel={Number of training samples},
+            width=11cm,
+            height=6cm,
+            point meta min=-.2,
+            point meta max=.2,
+            axis line style={opacity=0},
+            xmin=12,
+            xmax=49152,
+            xmode=log,
+            ymin=-0.5,
+            ymax=4.5,
+            xtick={16,32,64,128,256,512,1024,2048,4096,8192,16384,32768},
+            xticklabels={16,32,64,128,256,512,1024,2048,4096,8192,16384,32768},
+            xticklabel style={rotate=45},
+            log basis x=2,
+            ytick={0,1,2,3,4},
+            yticklabels={{0.5,0.5},{0.6,0.4},{0.7,0.3},{0.8,0.2},{0.9,0.1}},
+            colorbar,
+            colorbar style={
+                ylabel=How much better PLE is over MLE,
+                yticklabel style={
+                    /pgf/number format/.cd,
+                    fixed,
+                    precision=1,
+                    fixed zerofill,
+                },
+            },
+        ]
+            
+            \addplot [matrix plot*,point meta=explicit] file   {figs/GMM/heatmap.csv};
+        \end{axis}
+    \end{tikzpicture}
+    \caption{Comparison of KL divergence differences, i.e., $\mathbb{D}_{KL}(q_{\,\text{MLE}} \mid\mid p_{\,\text{GMM}}) - \mathbb{D}_{KL}(q_{\,\text{PLE}} \mid\mid p_{\,\text{GMM}})$, for estimating GMM parameters. Positive values indicate scenarios where PLE outperforms MLE, particularly in imbalanced datasets and low-data regimes.}
+    \label{fig:toy_example_tikz}
+\end{figure}
+
+To showcase the benefits of hypernetwork training when dealing with imbalanced datasets, we estimate the weights of a one-dimensional Gaussian mixture model (GMM) with two components that have considerable overlap. The means of the two Gaussian components are $0.0$ and $2.0$ and the variances are both equal to $1.0$. We vary the responsibility vector such that the contribution of one of the two Gaussian components is decreased. This makes estimating the true GMM parameters challenging, especially in low-data regimes and as the GMM becomes more imbalanced.
+
+We estimate the GMM weights using expectation maximization (EM), the gold standard MLE approach, and compare the results to the estimated GMM via hypernetwork training. We rely on \texttt{sklearn} for estimating the GMM via the EM approach, choosing an optimization tolerance smaller than floating point precision, and setting the maximum number of iterations to $10^5$ (we did not observe improvement by increasing this number). For hyeprnetwork training, we define $H$ to predict the means, variances, and the responsibility vector from the training data in one step. The architecture of $h^{(1)}_{\phi}$ contains three fully-connected layers with hidden dimensions of $8$ and ReLU activation functions. We design $h^{(2)}_{\phi}$ in a similar manner, with the only difference being the last layer, which contains three branches. Each branch includes a linear layer aimed at predicting the mean, variance, and responsibility vector of the GMM. We ensure the predicted variance is positive by using a softplus activation function and ensure the predicted responsibilities are positive and sum to one by using a softmax function. The objective function in the PLE case is to maximize the likelihood of observing the training data under a GMM model whose weights are predicted via the hypernetwork, while also including the PLE constraint as a penalty term with a weight of $0.1$.
+
+To compare the performance between MLE and PLE, after optimization, we calculate the KL divergence between the estimated and the ground truth GMMs using $10^5$ samples. We repeat the GMM estimation for 100 different random seeds and average this quantity. Figure \ref{fig:toy_example_tikz} illustrates the difference between the KL divergence between PLE and the true GMM minus the KL divergence between MLE and the true GMM, i.e., $\mathbb{D}_{KL}(q_{\,\text{MLE}} \mid\mid p_{\,\text{GMM}}) - \mathbb{D}_{KL}(q_{\,\text{PLE}} \mid\mid p_{\,\text{GMM}})$. The negative values (shown in blue) correspond to settings where PLE outperforms MLE (in terms of KL divergence). We observe that for imbalanced GMMs, and when the training data size is smaller, PLE clearly outperforms MLE. In addition, as expected, as the number of training samples goes to infinity, the performance of PLE and MLE become similar.
+
+\subsection{MADness Experiments}
+\label{sec:madness_experiments}
+
+\begin{figure}[H]
+    \def\figWidth{5.25cm}
+    \def\figShift{4.5cm}
+    \def\figShiftII{9cm}
+    \newcommand{\twoLines}[2]{\begin{tabular}{cc}#1\\#2\end{tabular}}
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+            ylabel={Estimated Parameter Value}, 
+            xlabel={Generation}, 
+            title={One-sided uniform}, 
+            ymin=0,
+            width=\figWidth,
+            grid]
+    \addplot[color=blue,
+            thick,
+            ] table [x=x, y=y, col sep=comma] {figs/Madcow/gt_linear.csv};
+    \addplot[color=teal,
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/ple_linear.csv};  
+        \addplot[color=purple,  
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/mle_linear.csv};
+    \end{axis}
+    \begin{axis}[
+        xlabel={Generation}, 
+        title={Standard normal STD}, 
+        ymin=0,
+        width=\figWidth,
+        xshift=\figShift,
+        grid]
+    \addplot[color=blue,
+        thick,
+        ] table [x=x, y=y, col sep=comma] {figs/Madcow/Gaussian_gt.csv};
+    \addplot[color=teal,
+        error bars/.cd, 
+        y fixed,
+        y dir=both, 
+        y explicit
+        ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Gaussian_ple_1000.csv};  
+    \addplot[color=purple,  
+        error bars/.cd, 
+        y fixed,
+        y dir=both, 
+        y explicit
+        ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Gaussian_mle_1000.csv};
+    \end{axis}
+    \begin{axis}[
+            xlabel={Generation}, 
+            title={Laplacian scale}, 
+            width=\figWidth,
+            xshift=\figShiftII,
+            grid]
+    \addplot[color=blue,
+            thick,
+            ] table [x=x, y=y, col sep=comma] {figs/Madcow/Laplace_gt.csv};
+    \addplot[color=teal,
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Laplace_ple.csv};   
+        \addplot[color=purple,  
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Laplace_mle.csv};
+    \end{axis}
+    \end{tikzpicture}
+
+    \begin{tikzpicture}
+    \begin{axis}[
+            ylabel={Estimated Parameter Value}, 
+            xlabel={Generation}, 
+            title={Geometric distribution}, 
+            width=\figWidth,
+            xshift=0,
+            grid]
+    \addplot[color=blue,
+            thick,
+            ] table [x=x, y=y, col sep=comma] {figs/Madcow/Geometric_gt.csv};
+    \addplot[color=teal,
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Geometric_ple.csv};
+    \addplot[color=purple,  
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Geometric_mle.csv};
+    \end{axis}
+    \begin{axis}[
+            xlabel={Generation}, 
+            title={Exponential distribution}, 
+            width=\figWidth,
+            xshift=\figShift,
+            legend style={at={($(0,0)+(1.8cm,-1.65cm)$)},anchor=south,legend columns=3,align=center},
+            grid]
+            
+        \addplot[color=blue,
+            thick,
+            ] table [x=x, y=y, col sep=comma] {figs/Madcow/Exponential_gt.csv};
+            \addlegendentry{Ground Truth}
+    \addplot[color=teal,
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Exponential_ple.csv};  
+            \addlegendentry{PLE (Ours)} 
+    \addplot[color=purple,  
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Exponential_mle.csv};
+            \addlegendentry{MLE}
+    \end{axis}
+    \begin{axis}[
+            xlabel={Generation}, 
+            title={Pareto distribution}, 
+            width=\figWidth,
+            xshift=\figShiftII,
+            grid]
+    \addplot[color=blue,
+            thick,
+            ] table [x=x, y=y, col sep=comma] {figs/Madcow/Pareto_gt.csv};
+    \addplot[color=teal,
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Pareto_ple.csv};  
+    \addplot[color=purple,  
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/Pareto_mle.csv}; 
+    \end{axis}
+    \end{tikzpicture}
+    \caption{MLE vs PLE Estimates of the parameters of various distributions.  Notice how MLE collapses into MADNess much faster than PLE.  More details can be found in Section \ref{sec:madcow_grid_explanation}}
+    \label{fig:madcow_grid_fig}
+\end{figure}
+
+Our experiments in this section show that models trained with PLE (either analytically or via our hypernetwork approach) are less susceptible to MADness (Model Autophagy Disorder~\citep{madcow}) than models trained with MLE.  In the following experimental setups, parameters are estimated from fully synthetic data, generated either from a model trained on the ground truth data, or the synthetic data from a previous generation.
+
+An illustrative example involves estimating the parameter $a$ of a one-sided uniform, $U[0, a]$.  While the MLE and PLE of $a$ are similar in their closed-form expression (See \ref{sec:one_sided_uniform} for more details), the two quickly diverge and the MLE collapses to $0$ as a new estimate is produced from data generated from the previous estimate.  MLE's collapse is due to its bias: this bias degrades the estimation quality after each generation, as seen in Figure \ref{fig:madcow_grid_fig}.  Section \ref{sec:one_sided_uniform_ple_linear} shows the result of PLE when using a linear function class, while Section \ref{sec:one_sided_uniform_ple_fmax} shows the result of PLE when using a linear function of the $n$th order statistic.  These two PLE results agree in expectation and are both unbiased.  Similar comparisons of MLE vs. PLE on various distributions are shown in Figure \ref{fig:madcow_grid_fig}.
+
+We also trained BigGAN~\citep{biggan} on CIFAR-10~\citep{cifar10} and observe a similar result. We measure performance here using FID~\citep{fid}, which does not change much for our method over the course of 3 generations yet completely explodes for the BigGAN baseline (see \cref{fig:madcow_biggan}). Additionally, both the baseline and the PLE took about the same time, 14 hours on two GPUs.
+\begin{figure}
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+            ylabel={Estimated Parameter Value}, 
+            xlabel={Generation}, 
+            title={PLE is not as susceptible to MAD collapse}, 
+            legend style={at={(0.97,0.5)},anchor=east},
+            axis x line*=bottom,
+            axis y line*=left,
+            ymin=0,
+            width=8cm,
+            grid]
+        \addplot[color=purple,  
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/mle_linear.csv};
+        \addlegendentry{MLE}
+    \addplot[color=teal,
+            error bars/.cd, 
+            y fixed,
+            y dir=both, 
+            y explicit
+            ] table [x=x, y=y, y error=error, col sep=comma] {figs/Madcow/ple_linear.csv};   
+        \addlegendentry{PLE (Ours)}
+    \addplot[color=blue,
+            thick,
+            ] table [x=x, y=y, col sep=comma] {figs/Madcow/gt_linear.csv};
+        \addlegendentry{Ground Truth}
+    \end{axis}
+    \end{tikzpicture}
+    \caption{Number of generations versus MLE and PLE of one-sided uniform, $n=20.$  The error bars display the standard error for $100$ different initializations.  These results use the analytic form of PLE solved in Section \ref{sec:one_sided_uniform}.}
+    \label{fig:madcow_uniform}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+Hypernetwork training is promising for the training of generative models due to its removal of bias, its improvement of representation fairness, and its mitigation of MADness.  Future work can focus on additional applications of hypernetwork training, such as mitigating overfitting due to the ability of hypernetworks to quantify uncertainty.  Since hypernetwork training involves sampling the generative model to evaluate the penalty, future work is needed to allow tractable training of diffusion models, which are expensive to sample from.  Furthermore, future work can explore guidelines for setting and scheduling the PLE penalty $\lambda$ during training.  By combining unbiased statistical estimation methods with deep learning, we believe we can make artificial intelligence more fair and stable.
+
+
+
+
+

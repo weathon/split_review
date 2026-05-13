@@ -1,0 +1,549 @@
+\title{Active Fine-Tuning of Generalist Policies}
+
+\begin{abstract}
+Pre-trained generalist policies are rapidly gaining relevance in robot learning due to their promise of fast adaptation to novel, in-domain tasks.
+This adaptation often relies on collecting new demonstrations for a specific task of interest and applying imitation learning algorithms, such as behavioral cloning.
+However, as soon as several tasks need to be learned, we must decide \emph{which tasks should be demonstrated and how often?}
+We study this multi-task problem and explore an interactive framework in which the agent {\em adaptively} selects the tasks to be demonstrated.
+We propose~\method (Active Multi-task Fine-tuning), an algorithm to maximize multi-task policy performance under a limited demonstration budget by collecting demonstrations yielding the largest information gain on the expert policy.
+We derive performance guarantees for \method under regularity assumptions and demonstrate its empirical effectiveness to efficiently fine-tune neural policies in complex and high-dimensional environments.\looseness=-1
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{wrapfigure}[12]{r}{0.58\textwidth}
+  \begin{center}
+    \includegraphics[width=0.58\textwidth]{figs/teaser_v2.pdf}
+  \end{center}
+  \caption{Interactive loop between agent and expert. We consider a scenario where we receive a pre-trained policy, and are able to obtain expert demonstrations of tasks. We study how to select tasks (in blue) to obtain the best-performing policy after as few demonstrations as possible.\looseness=-1}
+\end{wrapfigure}
+
+The availability of large pre-trained models has transformed entire areas of machine learning, from computer vision \citep{krizhevsky2012imagenet, he2016deep, dosovitskiy2020image, radford2021learning}, to natural language processing \citep{radford2019language, brown2020language} and generative modeling in general \citep{ho2020denoising, esser2024scaling}.
+This paradigm has started to extend to robotics and control \citep{open_x_embodiment_rt_x_2023, ma2024survey}, in particular for systems for which demonstrations are readily available \citep{octo_2023}, or can be easily collected \citep{zhao2023learning}.
+Even when demonstrations are not easily obtained, scaling laws in reinforcement learning \citep{obando2024mixtures, ceron2024value, nauman2024bigger} suggest the possibility of leveraging large pre-trained policies.
+These ``generalist'' policies have decent performance on many tasks, and can be fine-tuned on particular set of tasks while leveraging their previously learned representations and skills.
+We investigate whether representations of such policies can be used to significantly bootstrap learning progress.\looseness=-1
+
+As a motivating example, consider a household robot that is delivered with a pre-trained ``generalist'' policy, and deployed in slightly different conditions than those observed in its training data.
+While the robot may achieve some tasks in a zero-shot fashion (e.g.\ simple pick-and-place), other tasks might necessitate further fine-tuning (e.g.\ cooking an omelette).
+The robot should be able to interactively request demonstrations to compensate for its shortcomings. %adapt to its environment.
+We seek to answer which demonstrations should be requested from the user to achieve the best performance, as quickly as possible.\looseness=-1
+
+If the agent only needs to perform well in a single task, 
+the fine-tuning process conventionally relies on behavioral cloning \citep{chen2021decision, reed2022generalist, bousmalis2024robocat} of expert demonstrations.
+As collecting demonstrations is in general costly, the number of demonstrations required, and thus the expert's effort, should be minimized.
+However, as each demonstration should solve the same task, the allocation of the expert's effort is straightforward.
+The multi-task case presents the more nuanced problem of selecting which tasks to demonstrate, and when.
+This motivates the main focus of this work: 
+\emph{provided a pre-trained policy, how can we maximize multi-task performance with a minimal number of additional demonstrations?}
+
+To address this problem, we propose AMF~(\emph{\textbf{A}ctive \textbf{M}ulti-task \textbf{F}ine-tuning}), which selects maximally informative demonstrations.
+AMF parallels recent work on active supervised fine-tuning of neural networks~\citep{hubotter2024information}.
+To this end, AMF relies on estimates of the demonstrations' information gain about the expert policy.
+We prove that in sufficiently regular Markov decision processes, AMF converges to the expert policy.
+We then focus on practical scenarios where policies are represented as neural networks.
+We show that, despite additional challenges, AMF can effectively guide active task selection in such settings, leading to better policies after fewer demonstrations.
+Our contributions are:
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item We propose AMF, an algorithm for multi-task policy fine-tuning that maximizes the information gain of demonstrations about the expert policy.
+    \item We prove statistical guarantees for AMF, which extend the results of \cite{hubotter2024information} to dynamical systems.
+    \item We empirically scale AMF to high-dimensional tasks involving pre-trained neural policies.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+Learning-based control and active data selection are both well-established research directions.
+This section discusses some of the most topical works in either direction, and clarifies the novelty and placement of this work with respect to them.
+
+\paragraph{Behavioral Cloning}
+
+Numerous imitation learning approaches have been developed with the goal of distilling knowledge from high-quality demonstrations to a control policy \citep{osa2018algorithmic}.
+Within this family of techniques, behavioral cloning \citep[BC,][]{bain1995framework, ross2010efficient} aims to maximize policy performance by minimizing the distance of its actions to demonstrated actions, simply through supervised learning.
+While BC may suffer from accumulating errors~\citep{ross2011reduction}, its empirical effectiveness has seen increasing support when high-quality demonstrations are readily available \citep{kumar2022should}.
+Next to recent empirical successes \citep{chi2023diffusionpolicy}, formal analysis has also advanced \citep{spencer2021feedback, block2023butterfly, belkhale2024data, foster2024behavior}, and established provable performance guarantees for BC policies \citep{xu2020error, maran2023tight, block2024provable}.
+
+\paragraph{Multi-task and Generalist Policies}
+Traditionally, behavioral cloning has mostly been deployed in a single-task setting.
+Multi-task learning in sequential decision-making has largely been investigated in the context of reinforcement learning \citep{teh2017distral, sodhani2021multi, yu2021conservative, sun2022paco, cho2022multi, hendawy2023multi}.
+Moreover, the recent rise of multi-task generative models \citep{brown2020language} has been mirrored by exploration of multi-task, or \textit{generalist} policies, often trained via imitation learning \citep{reed2022generalist, bousmalis2024robocat, open_x_embodiment_rt_x_2023}.
+These recent works mostly build upon algorithms developed for the single-task case, and simply integrate task-conditioning as part of the state.
+While several works hand-select parts of large, open-source robotics datasets for pre-training \citep{octo_2023}, active data selection for multi-task fine-tuning has not been addressed. %, to the best of our knowledge.
+Prior work on meta-learning has studied how one can explicitly meta-learn the ability to adapt to task demonstrations~\citep{finn2017model}.
+We find this capability to emerge even from models that are not explicitly trained in this way, and focus on which demonstrations to obtain.
+
+\paragraph{Data Selection}
+\looseness -1 The idea of directing a sampling process to gather information has been central to machine learning research and studied extensively in experimental design~\citep{chaloner1995bayesian} and active learning~\citep{settles2009active}.
+Most work on active data selection summarizes data without focusing on a particular task~\citep[e.g.,][]{sener2017active,ash2019deep,holzmuller2023framework, lightman2023let}, which has been predominantly applied to pre-training.
+Recently, adapting models after pre-training and during deployment has gained interest.
+Several works, mostly in computer vision, focus on unsupervised fine-tuning on a test instance~\citep{jain2011online,krause2018dynamic,sun2020test,wang2021tent, chen2022contrastive}.
+We focus instead on \emph{supervised fine-tuning} of learning-based controllers \emph{in dynamical systems}.
+This necessitates automatic data selection, for which practical methods currently rely on uniform sampling or externally provided heuristics.
+Our approach extends work on task-directed data selection~\citep{kothawade2021similar,wang2021beyond,kothawade2022prism,smith2023prediction}, which has recently been applied to the supervised fine-tuning of large-scale neural networks in vision~\citep{hubotter2024information} and language~\citep{xia2024less}.
+
+
+
+\section{Background}
+
+
+\subsection{Multi-Task Reinforcement Learning}
+
+The multi-task setting can be modeled by casting the environment as a contextual Markov decision process (MDP) ${\mathcal{M}=(\mathcal{S}, \mathcal{A}, \mathcal{C}, P, R, \gamma, \mu_0)}$ where $\mathcal{S} \in \R^{N_{\mathcal{S}}}$ and $\mathcal{A} \in \R^{N_{\mathcal{A}}}$ are possibly continuous state and action spaces.
+$\mathcal{C}$ is a (potentially infinite) set of tasks, with each task represented by an $N_{\mathcal{C}}$-dimensional vector $c \in \R^{N_{\mathcal{C}}}$. $P: \mathcal{S} \times \mathcal{A} \to \Delta(\mathcal{S})$ models the transition probabilities ($\Delta(\mathcal{S})$ represents the set of probability distributions over $\mathcal{S}$), $R: \mathcal{S} \times \mathcal{C} \to \R$ is a scalar reward function, $\gamma \in (0, 1)$ is a discount factor and $\mu_0 \in \Delta(\mathcal{S})$ is the initial state distribution.
+In this setting, a policy is simply a state-and-task-conditional action distribution $\boldsymbol{\pi}: \mathcal{S} \times \mathcal{C} \to \Delta(\mathcal{A})$\footnote{We use $\boldsymbol{\pi}$ and $\pi$ to denote stochastic and deterministic policies, respectively, and $\pi(s,c)$ for realizations.}.
+Any given policy induces a task-conditional distribution over trajectories:\looseness=-1 
+\[
+\boldsymbol{\tau}_{\boldsymbol{\pi}}\Big( \big( s_0, a_0, s_1, a_1, \dots \big) \mid c \Big) = \mu_0(s_0) \prod_{t=0}^{\infty} \boldsymbol{\pi}(a_t \mid s_t, c) \cdot P(s_{t+1} \mid s_t, a_t).
+\]
+The discounted returns for a specific task $c \in \mathcal{C}$ or a task distribution $\mu_c \in \Delta(\mathcal{C})$ are, respectively,
+\[
+J^{\boldsymbol{\pi}}_c = \mathop{\E}_{(s_0, \dots) \sim \boldsymbol{\tau}_{\boldsymbol{\pi}}(c)} \sum_{t=0}^\infty \gamma^{t} R(s_t, c) \quad \text{and} \quad J^{\boldsymbol{\pi}}_{\mu_c} = \mathop{\E}_{c \sim \mu_c} J^\pi_c.
+\]
+Reinforcement learning algorithms traditionally aim directly at maximizing $J_{\mu_c}^{\boldsymbol{\pi}}$, which is notoriously challenging.
+In the scope of this work, we instead consider an imitation learning setting, in which expert demonstrations from an optimal policy $\pi^\star$ are provided.
+In particular, we focus on behavioral cloning algorithms, which reduce the control problem to a supervised learning problem.
+Given a set of $N$ task-conditioned, $H$-length trajectories $\hat \tau_{1:N} = (s_0^i, a_0^i, \dots, s_{H-1}^i, a_{H-1}^i)_{i=1}^N$ with task labels $c_{1:N}$, behavioral cloning proposes a proxy objective for the policy $
+\pi$: an empirical estimate of the log-likelihood under the data distribution:
+$
+    J^{\boldsymbol{\pi}}_{\text{proxy}} =
+    \frac{1}{N} \sum_{i=1}^{N} \sum_{t=0}^{H-1}
+    \log \boldsymbol{\pi}(a_t^i \mid s_t^i, c_i).
+$
+If trajectories $\tau_{1:N}$ are obtained from the optimal policy, cover the support of the desired task distribution $\mu_c$, and the searched policy class is sufficiently rich, the maximizer of $J^{\boldsymbol{\pi}}_{\text{proxy}}$ will also maximize $J^{\boldsymbol{\pi}}_{\mu_c}$ as $N$ and $H$ increase.
+However, in general, there is a clear mismatch between $J^{\boldsymbol{\pi}}_{\text{proxy}}$ and $J^{\boldsymbol{\pi}}_{\mu_c}$ \citep{xu2020error, maran2023tight}.
+Nonetheless, the optimization of $J^{\boldsymbol{\pi}}_{\text{proxy}}$ is a relatively straightforward supervised learning problem, while the full RL problem raises several convergence issues, particularly in the offline setting \citep{levine2020offline}.
+Thus, we use $J^{\boldsymbol{\pi}}_{\mu_c}$ only for evaluation, and carry out optimization through the proxy objective.
+
+\subsection{Active Policy Fine-Tuning}
+
+In this work, we consider an active fine-tuning scheme for multi-task policies.
+The goal is to fine-tune a pre-trained policy to perform well on a desired task distribution $\mu_c$ using as few expert demonstrations as possible.
+The agent is allowed $N$ sequential queries for demonstrations according to the fine-tuning budget.
+The $n$-th query should consist of a task $c_n \in \mathcal{C}$.
+Once the agent selects a task, feedback is received from the optimal policy $\pi^\star: \mathcal{S} \times \mathcal{C} \to \mathcal{A}$ (i.e., an optimal demonstrator).
+At each round the agent receives an $H$-step demonstration conditioned on the chosen task $c_n$.
+This can be seen as a single measurement from a stochastic process over trajectories $\boldsymbol{\tau} :\mathcal{C} \to \Delta((\mathcal{S} \times \mathcal{A})^H)$.
+
+Each observed trajectory up to round $n$ is stored in a dataset $(c_{1:n}, \hat \tau_{1:n})$, which can be used to fine-tune the policy, and condition the agent's query at step $n+1$.
+The process is repeated for $N$ rounds, with the goal of producing a fine-tuned policy that maximizes the expected returns for the desired task distribution $\mu_c$.
+\paragraph{Modeling assumptions}
+We take a Bayesian perspective on active multi-task fine-tuning, by assuming a Bayesian model $\boldsymbol{\pi}$ over policies.
+We assume that demonstrations follow a noisy expert: $\boldsymbol{\tilde{\pi}}(s,c) = \pi^\star(s,c) + \boldsymbol{\epsilon}(s,c)$ where $\boldsymbol{\epsilon}(s,c)$ is independent noise.
+We remark, however, that AMF can also be understood from a non-Bayesian perspective as selecting tasks that most quickly minimize the size of frequentist confidence sets around the optimal policy.
+
+
+\section{Method}
+
+
+The active multi-task fine-tuning problem outlined so far requires active data selection for sample-efficient learning.
+We thus build on top of principled active learning approaches for non-sequential domains \citep{hubotter2024information}, and propose AMF, which selects queries that 
+maximize
+the expected information gain about the expert policy over its occupancy:
+\begin{equation}
+    c_n = \argmax_{c' \in \mathcal{C}} \mathop{\E}_{\substack{\tau_{1:n-1} \sim \boldsymbol{\tau}(c_{1:n-1}) \\ c \sim \mu_c, \; (s_0, \dots) \sim \boldsymbol{\tau}(c)}} \sum_{t=0}^{H-1} \MI(\boldsymbol{\pi}(s_t, c); \boldsymbol{\tau}(c')  \mid  c_{1:n-1}, \tau_{1:n-1}).
+\label{eq:criterion}
+\end{equation}
+We show in Section \ref{sec:analysis} that, under certain regularity assumptions, the policy learned by AMF converges to the expert policy and matches its performance.
+These results constitute a first-of-its-kind performance guarantee for active multi-task fine-tuning.
+The main novelty of this guarantee is the extension of prior work to sequential domains where the visited trajectory $(s_0, a_0, s_1, \dots) \sim \boldsymbol{\tau}(c_n)$ is \emph{unknown} when selecting the task $c_n$ for a demonstration.
+In Section \ref{sec:practical}, we discuss the design choices that make AMF amenable to optimization in practical settings.\looseness=-1
+
+\subsection{Performance Guarantees}
+\label{sec:analysis}
+
+We begin by presenting the performance guarantees for AMF.
+Our proof builds upon rates for uncertainty reduction, then ties these to probabilistic convergence guarantees to $\pi^\star$, finally resulting in performance guarantees within the MDP.
+We summarize the main result here, and include a formal
+\begin{informalassumption}\label{inf_assumptions}
+We make the following assumptions: 
+\begin{enumerate}
+\item The expert policy $\pi^\star$ is deterministic, Lipschitz-smooth, lies in the reproducing kernel Hilbert space $\mathcal{H}_k(\mathcal{S}\times \mathcal{C})$ of 
+the kernel $k$ with norm $\|\pi^\star\|_k < \infty$ 
+and induces a Lipschitz-smooth Q-function.
+\item The noise $\boldsymbol{\epsilon}(s,c)$ affecting demonstrations is conditionally $\rho$-sub-Gaussian and bounded.
+\item The dynamics of the contextual MDP $\mathcal{M}$ are Lipschitz-smooth with bounded support, the initial state distribution $\mu_0$ has bounded support, and the reward is Lipschitz-smooth. % and bounded in $[0,1]$.
+\end{enumerate}
+\end{informalassumption}
+
+Under these assumptions, we prove the following performance guarantee for active multi-task behavioral cloning.
+
+\begin{informaltheorem}[Performance guarantees for active multi-task BC]
+Let all regularity assumptions hold. If each demonstrated task of length $H$ is selected according to the criterion in Equation \ref{eq:criterion}, then with probability $1 - \delta$ the performance difference between the expert policy $\pi^\star$ and the imitator policy $\pi_n$ after $n$ demonstrations can be upper bounded:
+    \[
+    J^{\pi^\star}_{\mu_c} - J^{\pi_n}_{\mu_c} \leq O(\gamma_{(Hn)}n^{-\frac{1}{2}}) ,
+    \]
+where $\pi_n$ is the mean of $\boldsymbol{\pi}$ at round $n$ and $\gamma_{(Hn)}$ is the maximum information gain about the expert policy from $Hn$ samples, and is sublinear for a large class of problems. The $O(\cdot)$ notation suppresses all multiplicative terms that do not depend on $n$.
+\label{th:performance_guarantees}
+\end{informaltheorem}
+We can also prove a more general result under weaker assumptions: as long as the policy is regular, the imitator will reach the \textit{noisy} expert performance in arbitrary, non-smooth MDPs, albeit only in expectation.
+\subsection{Practical Algorithms}
+\label{sec:practical}
+
+Theorem \ref{th:performance_guarantees} guarantees that, under regularity assumptions, the adaptive demonstration sampling scheme leads to convergence of the imitator's performance to the optimal one.
+However, this criterion involves state occupancies and a conditional entropy term, which are hard to access or estimate in practice.
+Thus, here we derive a practical objective to be deployed in general settings.
+We first rephrase the objective from Equation \ref{eq:criterion} in its entropy form:
+\begin{align}
+    c_n 
+    & = \argmin_{c' \in \mathcal{C}} \mathop{\E}_{\substack{\tau_{1:n-1} \sim \boldsymbol{\tau}(c_{1:n-1}) , \;\tau' \sim \boldsymbol{\tau}(c')\\ c \sim \mu_c, \; (s_0, \dots) \sim \boldsymbol{\tau}(c)}} \sum_{t=0}^{H-1} \entropy(\boldsymbol{\pi}(s_t, c) \mid  c', \tau' , c_{1:n-1}, \tau_{1:n-1}),
+\label{eq:criterion_rephrased}
+\end{align}
+where we use the definition of mutual information $\MI(\cdot|\boldsymbol{\tau}(c')) = \entropy(\cdot) - \entropy(\cdot|\boldsymbol{\tau}(c'))$, drop the first entropy term as it does not depend on $c'$, and rewrite the second entropy term as an expectation over $\boldsymbol{\tau}(c')$.
+As long as the task space $\mathcal{C}$ is finite and its cardinality is tractable, the $\argmin$ operator can be evaluated exhaustively, and the expectation over the task distribution $\mu_c$ can be computed exactly.
+When this is not the case, the $\argmin$ can be optimized through discretization, or with sampling-based optimizers. The expectation over $\mu_c$ is also not particularly problematic, as it can be computed in closed form (if $\mathcal{C}$ is discrete) or estimated empirically through sampling, as $\mu_c$ is assumed to be known.
+However, two issues need to be resolved: (i) computing the expectation over the noisy expert's trajectory distribution $\boldsymbol{\tau}$,
+and (ii) estimating the conditional entropy term $\entropy(\cdot \mid \cdot)$.
+
+\paragraph{Occupancy estimation}
+Computing the expectation over a policy's occupancy over states or trajectories is in general intractable in continuous state spaces.
+Fortunately, a coarse empirical estimate can be obtained as soon as few expert demonstrations become available.
+The expectation $\mathop{\E}_{\tau_{1:n-1} \sim \boldsymbol{\tau}(c_{1:n-1})}(\cdot)$ can be estimated through a single sample, which is always available in the form of the trajectories $\hat \tau_{1:n-1}$ collected so far, as they have effectively been sampled from $\boldsymbol{\tau}(c_{1:n-1})$.
+However, the remaining two expectations (i.e., $\mathop{\E}_{\tau' \sim \boldsymbol{\tau}(c')}(\cdot)$ and $\mathop{\E}_{(s_0, \dots) \sim \boldsymbol{\tau}(c)}(\cdot)$) involve the distribution over trajectories for an \textit{arbitrary} task, which might not have been demonstrated yet.
+However, we observe that, at round $n$, the tasks demonstrated so far induce the empirical distribution $\hat \mu_c (\cdot) = \frac{1}{n-1}\sum_{i=1}^{n-1} \delta_{c_i} (\cdot)$, while the trajectories collected similarly induce $\boldsymbol{\hat \tau} (\cdot) = \frac{1}{n-1}\sum_{i=1}^{n-1} \delta_{\hat \tau_i}(\cdot)$, where $\delta$ indicates the Dirac delta distribution.
+We can show that expectations over the trajectory distribution for an arbitrary task $c \in \mathcal{C}$ can be estimated through importance sampling (i.e., by sampling trajectories from $\boldsymbol{\hat \tau}(\cdot)$ instead of $\boldsymbol{\tau}(\cdot|c)$): $\mathop{\E}_{\tau \sim \boldsymbol{\tau}(\cdot|c)} f(\tau) = \mathop{\E}_{\tau \sim \boldsymbol{\hat \tau} (\cdot)} \frac{\boldsymbol{\tau}(\tau|c)}{\boldsymbol{\hat \tau}(\tau)}f(\tau)$.
+The importance weights can then be estimated as
+\begin{align}
+    \frac{\boldsymbol{\tau}(\tau|c)}{\boldsymbol{\hat \tau}(\tau)}
+    & \approx \frac{\boldsymbol{\tau}(\tau|c)}{\int_{c' \in \mathcal{C}}\hat \mu_c(c') \boldsymbol{\tau}(\tau|c')}
+    = \frac{\boldsymbol{\tau}(\tau|c)}{\frac{1}{n-1} \sum_{i=1}^{n-1} \boldsymbol{\tau}(\tau|c_i)} \nonumber \\
+    & = \frac{(n-1) \mu_0(s_0) \prod_{t=0}^{H-1} \boldsymbol{\tilde \pi}(a_t|s_t, c) P(s_{t+1}|s_t, a_t)}{\sum_{i=1}^{n-1} \mu_0(s_0) \prod_{t=0}^{H-1} \boldsymbol{\tilde \pi}(a_t|s_t, c_i) P(s_{t+1}|s_t, a_t)} \nonumber \\
+    & = \frac{(n-1)\prod_{t=0}^{H-1} \boldsymbol{\tilde \pi}(a_t|s_t, c)}{\sum_{i=1}^{n-1} \prod_{t=0}^{H-1} \boldsymbol{\tilde \pi}(a_t|s_t, c_i)}
+    := w(\tau, c)
+\end{align}
+where $\tau = (s_0, a_0, \dots)$ and $\boldsymbol{\tilde \pi}$ can be approximated with the current estimate of $\boldsymbol{\pi}$.
+Intuitively, the likelihood ratio of a trajectory under two different tasks only depends on the likelihood of actions under the policy, and thus does not require knowledge of the MDP.
+As the estimate may be inaccurate for small numbers of samples, in practice the algorithm can invest the first few rounds to query a single demonstration for each of the tasks (in case they are countable and few) or to sample the task space uniformly.
+On the other hand, the high-variance of the estimate can be controlled by practical solutions such as clipping.
+\paragraph{Entropy estimation}
+The estimation of conditional entropy terms such as $\entropy(\cdot \mid \cdot)$ has been widely researched in the literature.
+When the policy is represented through a Gaussian process $GP(\mu, k)$ \citep{williams2006gaussian} with known mean function $\mu$ and kernel $k$,\!\footnote{For simplicity, we consider a single-output GP, but generalize to multi-dimensional policies with multi-output GPs in both experiments and formal proofs.} the entropy can be directly quantified by the predicted variance.
+Let us denote a state-task tuple as $x=(s,c)$, and let $X$ be the sample vector obtained from concatenating states and tasks from previous trajectories (e.g., $c_{1:n-1}, \tau_{1:n-1}, c', \tau'$).
+The \textit{unconditional} entropy can be measured in closed form as
+$\entropy(\boldsymbol{\pi}(x)) = \frac{1}{2} \log (2 \pi k(x, x)) + \frac{1}{2}$, and
+the \textit{conditional} entropy can be obtained by simply replacing the kernel $k$ with
+$
+\hat k_{X}(x , x) = k(x, x) - k(x, X) [k(X,X) + \sigma_\epsilon^2 I]^{-1}  k(X, x),
+\label{eq:gp_posterior}
+$
+where $\sigma_\epsilon^2$ is the variance of the observation noise $\boldsymbol{\epsilon}(s,c)$, assuming it is distributed according to a zero-mean Gaussian.
+
+\begin{wrapfigure}[11]{r}{0.60\textwidth}
+\begin{minipage}{0.60\textwidth}
+    \begin{algorithm}[H]
+    \caption{Practical AMF} \label{algo:practical}
+    \begin{algorithmic}
+    \State \textbf{Input:} initial policy $\pi_0$, budget $N$, desired task distr. $\mu_c$
+    \State \textbf{Output:} fine-tuned policy $\pi_N$
+    \State Initialize dataset $\mathcal{D}_0=\emptyset$
+    \For{$n \in [0, \dots, N-1]$}
+        \State Compute $c_n$ as the solution to Equation \ref{eq:criterion_rephrased}
+        \State Collect new demonstration $\tau_n$ for task $c_n$
+        \State Update $\pi_{n+1}$ from $\pi_{n}$ with $\mathcal{D}_{n} = \mathcal{D}_{n-1} \cup \{c_n, \tau_n\}$
+    \EndFor
+    \end{algorithmic}
+    \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+Thus, when the policy can be modeled as a GP, the only approximation needed concerns occupancy estimation.
+We refer to this first, practical instantiation as AMF-GP, and present a general algorithmic framework in Algorithm \ref{algo:practical}.
+Application of the method to policies parameterized by neural networks will adopt the same scheme.
+It will also require additional care on three distinct topics: (i) kernel approximations, (ii) batch selection and (iii) forgetting mitigation.
+
+\paragraph{Kernel approximations}
+When the policy is parameterized through a neural network, estimation of the conditional entropy
+is far less straightforward.
+First, we cannot assume the availability of ad-hoc techniques for uncertainty estimation (e.g.,  Dropout \citep{srivastava2014dropout, gal2016dropout} or ensembles \citep{lakshminarayanan2017simple}), as they might not be featured in pre-trained models.
+Even if the pre-trained model was perturbed and ensembled for fine-tuning, the ensemble disagreement would not capture the pre-training data distribution.
+Second, access to pre-training data is in general unrealistic, or hard to manage due to size and ownership of large robotic datasets.
+
+Nevertheless, we can leverage the approximation of neural networks as a linear functions over an embedding space $\boldsymbol{\pi}(s,c; \theta) = \boldsymbol{\beta}^\top \phi_\theta(s,c)$, where both weights $\boldsymbol{\beta}$ and embeddings $\phi_\theta(\cdot)$ exist in a $p$-dimensional latent space \citep{lee2019wide, khan2019approximate}.
+This technique does not violate any of the practical constraints listed above, and allows us to adapt the machinery introduced in GP settings.
+While several embedding strategies exist \cite{jacot2018neural, devlin2019bert, holzmuller2023framework}, we adopt loss gradient embeddings \citep{Ash2020Deep}.
+Assuming the prior $\boldsymbol{\beta} \sim \mathcal{N}(0, I)$,
+the policy $\boldsymbol{\pi}(s,c; \theta)$ can be modeled by a Gaussian Process with kernel $k_\theta((s,c), (s',c')) = \langle \phi_\theta(s, c), \phi_\theta(s', c') \rangle$.
+When coupled with this approximation, the conditional entropy objective in Equation \ref{eq:criterion_rephrased} can be reformulated:
+\begin{equation}
+    c_n = \argmax_{c' \in \mathcal{C}} \mathop{\E}_{\substack{\tau_{1:n-1} \sim \boldsymbol{\tau}(c_{1:n-1}) , \;\tau' \sim \boldsymbol{\tau}(c')\\ c \sim \mu_c, \; (s_0, \dots) \sim \boldsymbol{\tau}(c)}} \sum_{t=0}^{H-1}
+    k_\theta ((s_t, c), X) [k_\theta(X,X) + \sigma_\epsilon^2I]^{-1} k_\theta (X, (s_t, c)),
+\end{equation}
+where $X$ is vector of states and tasks in $(c', \tau', c_{1:n-1}, \tau_{1:n-1})$.
+As the collected dataset grows, the conditioning on previous trajectories $\tau_{1:n-1}$ can instead be addressed by fine-tuning the network's parameters $\theta$ (e.g., through conventional gradient descent), resulting in updates in the embedding function $\phi_\theta$.
+
+\paragraph{Batch selection}
+\looseness -1 Standard practice in \textit{deep} active learning prescribes the collection of \textit{batches} of samples at each round \citep{gal2017deep, sener2018active, ducoffe2018adversarial}.
+This necessity is partially addressed by the fact that, in our setting, a single demonstration contains several samples for training the policy (as many as the length $H$ of the demonstration).
+Nevertheless, we can further leverage the GP approximation to select multiple demonstrations at each round.
+In fact, a simple recursive greedy selection can provide a constant factor approximation on the information gain objective \citep{krause2014submodular, hubotter2024information}.
+In practice, when selecting $M$ demonstrations at the $n$-th round, we can select the $m$-th demonstration out of $M$ by applying the criterion in Equation \ref{eq:criterion}, while making sure to condition entropy estimates on both the $m-1$ demonstrations already selected in this round, and the $M \cdot (n-1)$ demonstrations previously collected.
+
+\paragraph{Dealing with forgetting}
+\looseness -1 A fundamental issue with neural function approximation under shifts to the training distribution is known as \textit{forgetting} \citep{mccloskey1989catastrophic, french1999catastrophic}, as any further optimization may catastrophically perturb pre-trained parameters.
+Common strategies for its mitigation often involve rehearsal \citep{atkinson2021pseudo, verwimp2021rehearsal} or regularization \citep{kirkpatrick2017overcoming}.
+
+Scale and a diverse pre-training dataset can also mitigate forgetting \citep{dyer2022effect}, but neither can be controlled during fine-tuning.
+Thus, we opt for a parameter isolating solution \citep{rusu2016progressive, yu2020meta}, in which the task-space is partitioned (e.g. uniformly), and a copy of the fine-tuning parameters is stored and trained for each partition, thus avoiding negative interference.
+Inference can then be performed by selecting the parameter set through a nearest-neighbor lookup in task-space.
+This solution can be easily applied for limited task sets, and can be scaled to large task spaces through discretization schemes.
+While parameter isolation prevents constructive interference across tasks, we found it to bring a net benefit during fine-tuning.
+
+By combining the approximations required by AMF-GP with three additional design choices (namely kernel approximation, batch selection and parameter isolation), we obtain a method for active multi-task fine-tuning of policies parameterized via neural networks. We refer to this practical instantiation as AMF-NN.
+
+\begin{wrapfigure}[11]{R}{0.25\linewidth}
+\includegraphics[width=\linewidth]{figs/gp_env.pdf}
+\caption{\looseness -1 2D integrator. Starting from the origin, each task involves reaching a given point on a circle, as shown in differently colored trajectories.}
+\label{fig:2d_integrator}
+\end{wrapfigure}
+
+
+
+\section{Experiments}
+
+
+The experiment section is designed to evaluate active multi-task fine-tuning and provide an empirical answer to several questions.
+We thus reserve a section to each of them.
+
+\subsection{When is AMF beneficial?}
+\label{sec:exp_gp}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{plots/v1_gp.pdf}
+    \begin{minipage}{0.33\linewidth}
+
+    \centering
+    \small{Uniform pre-training (12/12 tasks)}
+
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.33\linewidth}
+    \centering
+    \centering
+    \textcolor{ourblue}{\rule[2pt]{10pt}{3pt}} \small{AMF-GP}\ \ 
+    \textcolor{ouryellow}{\rule[2pt]{10pt}{3pt}} \small{Uniform}
+    \end{minipage}    \begin{minipage}{0.30\linewidth}
+    \small{Skewed pre-training (6/12 tasks)}
+    \end{minipage}%
+    \caption{\looseness -1 Experiments in GP settings for a 2D integrator (see Figure \ref{fig:2d_integrator}). AMF-GP selects tasks that minimize the policy's posterior entropy and improves the agent's returns faster than uniform task sampling. In the middle, the improvement in final return over the baseline is greater when the pre-training distribution is skewed and includes fewer tasks. We report return and entropy curves for non-skewed and skewed pre-training (left and right, respectively). We report means and 90\% simple bootstrap confidence intervals over 10 random seeds ; dots and crosses mark corresponding measurements.}
+    \label{fig:gp}
+\end{figure}
+
+When none of the assumptions listed in Section \ref{sec:analysis} is violated, AMF is guaranteed to converge to the optimal policy.
+We furthermore investigate whether AMF also results in faster empirically faster convergence with respect to naive approaches to data collection.
+To do so, we compare AMF to uniform i.i.d.\ sampling from the set of tasks $\mathcal{C}$.
+First, we consider a classic 2D integrator as a benchmark environment (see Figure~\ref{fig:2d_integrator}).
+The agent is a pointmass initialized in the origin, and can directly control its 2D velocity, which is integrated over the past trajectory to return the current state.
+We can define an infinite task space, in which each task consists of reaching a point on a circle centered on the origin, and the agent is rewarded with the negative Euclidean distance to it.
+The evaluation distribution $\mu_c$ assigns equal probability to 12 points in different directions.
+The initial state distribution is deterministic, dynamics are both deterministic and smooth, while the expert policy is smooth and corrupted with i.i.d.\ Gaussian noise.
+We model the policy as a Gaussian Process with a RBF kernel, and we condition it on a pre-training dataset of $12$ noisy demonstrations.
+We then collect $50$ additional demonstrations by running both AMF-GP and uniform sampling.
+
+We first consider a perfectly uniform pre-training regime, in which each evaluation task is demonstrated exactly once (Figure \ref{fig:gp}, left).
+As the policy's entropy is minimized, AMF-GP increases the policy's returns at a higher rate compared to uniform sampling of demonstrations.
+We then extend this evaluation to several pre-training distributions (Figure \ref{fig:gp}, middle), and compare the final performance of the two methods as the pre-training budget is allocated to a decreasing number of tasks.
+As the pre-training distribution becomes  more skewed (e.g., when only 6/12 tasks are demonstrated in Figure \ref{fig:gp}, left), we observe that the performance gap between uniform task sampling and AMF-GP grows larger.
+This is to be expected, as in this case the information gain from the next demonstration heavily depends on the queried task, and taking the $\argmax$ of the criterion in Equation \ref{eq:criterion} is significantly better than choosing a random task.
+Intuitively, in this case, uniform sampling of tasks fails to reliably provide demonstrations for tasks that were observed less often during pre-training.
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.17\linewidth}
+    \vfill
+    \begin{minipage}{\linewidth}
+    \includegraphics[width=\linewidth]{figs/franka.png}
+    \end{minipage}\\
+    \begin{minipage}{\linewidth}
+    \includegraphics[width=\linewidth]{figs/metaworld_tasks.png}
+    \end{minipage}
+    \vfill
+    \end{minipage}
+    \begin{minipage}{0.4\linewidth}
+    \centering
+    State-based \\
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_kitchen_33333.pgf}
+    \end{minipage}%
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_kitchen_88000.pgf}
+    \end{minipage}
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_metaworld_4444.pgf}
+    \end{minipage}%
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_metaworld_8800.pgf}
+    \end{minipage}
+    \end{minipage}
+    \begin{minipage}{0.4\linewidth}
+    \centering
+    Visual \\
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_kitchen_visual_33333.pgf}
+    \end{minipage}%
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_kitchen_visual_88000.pgf}
+    \end{minipage}
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_metaworld_visual_4444.pgf}
+    \end{minipage}%
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v20_metaworld_visual_8800.pgf}
+    \end{minipage}
+    \end{minipage}
+
+    \centering
+    \textcolor{ourdarkblue}{\rule[2pt]{10pt}{3pt}} AMF-NN ($\sigma^2=10^{-4}$)\quad
+    \textcolor{ourblue}{\rule[2pt]{10pt}{3pt}} AMF-NN ($\sigma^2=10^{-3}$) \quad
+    \textcolor{ourlightblue}{\rule[2pt]{10pt}{3pt}} AMF-NN ($\sigma^2=10^{-2}$) \\
+    \textcolor{ouryellow}{\rule[2pt]{10pt}{3pt}} Uniform \quad
+    \textcolor{ourred}{\rule[2pt]{10pt}{3pt}} Uniform, no parameter isolation
+
+    \caption{\looseness -1 AMF with neural policies in Frankakitchen (top) and Metaworld (bottom). Experiments are repeated for state and RGB inputs (left and right). We evaluate both uniform and skewed pre-training distribution. AMF-NN is overall desirable, and highly beneficial for skewed pre-training distributions. We report means and 90\% simple bootstrap confidence intervals over 10 seeds.}
+    \label{fig:neural}
+\end{figure}
+
+\subsection{Can AMF scale to high-dimensional tasks?}
+
+In realistic settings, the assumptions enabling a formal analysis of AMF are soon violated.
+As the complexity of the environments of interest increases, most modern behavior cloning applications rely on neural networks for policy parameterization \citep{reed2022generalist, chi2023diffusionpolicy}.
+Motivated by this pattern, we now study a second version of our method, AMF-NN, and evaluate its ability to scale to complex, high-dimensional tasks.
+We consider two common benchmarks for multi-task learning, both with a finite set of tasks.
+\begin{itemize}[noitemsep,topsep=0pt]
+\item In Metaworld \citep{yu2020meta} we create a scene with a robotic arm, a cup and a faucet, defining 4 tasks: moving the cup to two distinct positions, opening and closing the faucet.
+\item In FrankaKitchen \citep{fu2020d4rl}, we consider 5 tasks, namely turning a knob on or off, opening a pivoting or a sliding cabinet, or opening the microwave door.
+\end{itemize}
+\looseness -1 In both environments, we evaluate AMF-NN when learning from state measurements, as well as from raw pixels.
+In the first case, the policy is simply parameterized through a MLP, while in the second the MLP receives the embedding of a pre-trained visual encoder \citep{nair2022rm}.
+The policy is pre-trained on $\approx 15$ total demonstrations, which we allocate either uniformly across all tasks, or only on half of them, reproducing the uniform and skewed regimes from the previous experiments.
+Afterwards, we apply AMF-NN for $10$ iterations, collecting $2$ demonstrations at each iteration.
+
+Figure \ref{fig:neural} reports average multi-task success rates at each iteration compared to a random uniform task selection scheme.
+For the baseline, we additionally report performance without parameter isolation, highlighting performance degradation due to negative gradient interference across tasks.
+We observe that AMF's performance is on par or better than a uniform task sampling scheme when the prior was trained uniformly on all tasks.
+However, as reported in the previous section, AMF is very beneficial when the pre-training dataset does not uniformly cover the evaluation tasks.
+These trends are consistent across both environments, and both modalities.
+
+Finally, Figure \ref{fig:neural} also highlights the effect of the only hyperparameter introduced by AMF-NN, namely the noise parameter $\sigma^2$ in the GP approximation.
+While selecting an excessively high noise level results in slightly greedier behavior and premature convergence, we overall observe that the method is not particularly sensitive to this hyperparameter, performing fairly reliably across 2 orders of magnitude.
+
+\subsection{Is batch-wise task selection important for AMF?}
+\label{sec:batch}
+
+In the GP setting, policy fine-tuning and conditioning for batch-wise selection correspond.
+Thus, it is not necessary to collect batches of demonstrations.
+This is not the case for AMF-NN.
+On one hand, collecting batches of training data is computationally beneficial since training can be parallelized effectively~\citep{sener2018active}.
+On the other hand, each query already returns several samples in our setting, which could make batch selection unnecessary.
+We thus set out to empirically validate which batch size is desirable for active data collection in our setting.
+\begin{figure}[t]
+\centering
+\begin{minipage}{.48\textwidth}
+  \centering
+      \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v4_kitchen_demo_33333.pgf}
+    \end{minipage}%
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v4_kitchen_demo_88000.pgf}
+    \end{minipage}
+
+    \centering
+    \barline{ourblue} $B\!=1$ \;
+    \fullline{ourblue} $B\!=2$ \;
+    \dotline{ourblue} $B\!=4$ \;
+    \fullline{ouryellow} Uniform \\
+    \fullline{ourred}Uniform, no parameter isolation
+  \captionof{figure}{\looseness -1 Influence of batch size $B$ over area under success rate curve with 20 demonstrations.}
+  \label{fig:batch}
+\end{minipage}%
+\hfill
+\begin{minipage}{.48\textwidth}
+  \centering
+      \begin{minipage}{0.49\linewidth}
+    \incplt{\linewidth}{plots/v20_kitchen_unc_33333.pgf}
+    \end{minipage}
+    \begin{minipage}{0.49\linewidth}
+    \incplt{\linewidth}{plots/v20_kitchen_unc_88000.pgf}
+    \end{minipage}
+
+    \centering
+    \textcolor{ourblue}{\rule[2pt]{10pt}{3pt}} Last-layer gradient \\
+    \textcolor{ourgrey}{\rule[2pt]{10pt}{3pt}} Last-layer \quad
+    \textcolor{ourgreen}{\rule[2pt]{10pt}{3pt}} Dropout
+  \captionof{figure}{\looseness -1 AMF performance with alternative uncertainty estimation schemes.}
+  \label{fig:uncertainty}
+\end{minipage}%
+\end{figure}
+While keeping the total budget fixed to 20 demonstrations, we evaluate AMF-NN with batch sizes $B$ spanning from 1 to 4, and report the area under the success rate curve in Figure \ref{fig:batch}. For convenience, we report the same metric for the uniform selection baselines from Figure \ref{fig:neural}, for which the data selection strategy does not depend on the batch size.
+We find that larger batch sizes are not necessarily desirable.
+
+\subsection{How do uncertainty estimates for AMF compare?}
+\label{sec:uncertainty}
+
+As entropy estimation is at the core of AMF-NN, we additionally compare the adopted GP approximation with loss-gradient embeddings to other approaches from the literature.
+In praticular, we also consider an alternative GP approximation using last-layer embeddings \citep{holzmuller2023framework}, as well as test-time Dropout \citep{loquercio2020general}.
+For the latter, each batch is simply filled with demonstrations from the task maximizing \textit{prior} entropy, that is $\argmax_{c \in \mathcal{C}} \mathop{\E}_{\tau_{1:n-1} \sim \boldsymbol{\tau}(c_{1:n-1}), \;(s_0, \dots) \sim \boldsymbol{\tau}(c)} \sum_{t=0}^{H-1} \entropy(\boldsymbol{\pi}(s_t, c) \mid  \tau_{1:n-1})$.
+Both of these schemes are in practice desirable, as they do not require access to action labels.
+However, we observe that these two schemes are prone to early convergence to suboptimal task choices, or are less effective in driving task selection. Hence, as shown in Figure \ref{fig:uncertainty}, multi-task performance is in general lower, suggesting that the entropy estimation technique is crucial to AMF-NN.
+
+\subsection{Can AMF be applied to off-the-shelf models?}
+
+\begin{wrapfigure}[15]{r}{0.5\linewidth}
+    \centering
+    \begin{minipage}{0.5\linewidth}
+    \centering
+    \includegraphics[width=0.85\linewidth]{figs/simpler_env.png}
+    \textcolor{ourblue}{\rule[2pt]{5pt}{3pt}} \small{AMF-NN} \quad
+    \textcolor{ouryellow}{\rule[2pt]{5pt}{3pt}} \small{Uniform} \\
+    \textcolor{ourred}{\rule[2pt]{5pt}{3pt}} \small{Uniform, no parameter isolation} \\
+
+    \end{minipage}%
+    \begin{minipage}{0.5\linewidth}
+    \incplt{\linewidth}{plots/v17_widowx.pgf}
+    \end{minipage}
+
+    \caption{Evaluation on life-like WidowX tasks. AMF-NN can be applied to large-scale settings.}
+    \label{fig:octo}
+\end{wrapfigure}
+
+As AMF-NN has minimal requirements (essentially, access to a differentiable pre-trained prior is sufficient), it should be widely applicable.
+In this section, we investigate scaling our evaluation to recently published open-source generalist policies.
+For this purpose, we chose Octo \citep{octo_2023}.
+This model relies on a transformer backbone for integrating multimodal information (in the form of state sensors, camera images and text or RGB task descriptions), and uses a diffusion-based policy head for action prediction \citep{chi2023diffusionpolicy}.
+For computational reasons, we will focus on fine-tuning the action head alone.
+Octo is pre-trained on a large-scale real-world robotic dataset \citep{open_x_embodiment_rt_x_2023}, and is thus designed for inference on physical hardware.
+Nonetheless, a recently proposed evaluation suite enables simulated evaluations that statistically correlate with real-world results \citep{li24simpler}.
+We thus collect rollouts from a pre-trained Octo on the WidowX tasks, and filter them to only include successes, akin to self-distillation schemes \cite{bousmalis2024robocat}.
+On availability of such self-supervised demonstrations, we then apply AMF-NN for $4$ iterations, providing $4$ demonstrations in each round.
+The results are reported in Figure \ref{fig:octo}.\looseness-1
+
+As all evaluation tasks are largely demonstrated in the pre-training dataset \citep{open_x_embodiment_rt_x_2023}, we find that AMF-NN does not improve significantly upon uniform task collection, confirming the trend we observed for uniform pre-training distributions in Figure \ref{fig:neural}.
+Nonetheless, we observe that it constitutes an effective method for data selection, and can be applied as a drop-in replacement for fine-tuning of off-the-shelf models.\!%
+\footnote{This evaluation also reports an interesting trend, that is a vast reduction in catastrophic forgetting, to the point that parameter isolation is not necessary.
+This anecdotal evidence can be seen as an instance of a general trend of mitigated catastrophic forgetting in large models \citep{dyer2022effect}.}
+
+
+\section{Discussion}
+
+
+\looseness -1 As generalist robotic policies gain prominence, a new set of challenges and opportunities emerge.
+This work responds to this trend by investigating an active multi-task fine-tuning scheme, which adaptively selects the task to be demonstrated for sample-efficient multi-task  behavioral cloning.
+This approach is developed from first principles, extending a formally-motivated, information-based criterion to trajectories over dynamic systems.
+The resulting method is both formally supported by novel performance guarantees and widely applicable.
+Moreover, a practical instantiation enables sample-efficient multi-task fine-tuning across GP and neural network policy classes.
+
+Naturally, active multi-task fine-tuning has several limitations.
+When coupled with neural networks, the algorithm relies on uncertainty estimation techniques, which remain an open problem.
+While the approximation we leverage is informative in our experiments, AMF could benefit if large pre-trained policies would allow other off-the-shelf uncertainty quantification techniques (e.g., through model ensembling during pre-training).
+Second, we found the performance of AMF to depend naturally on the pre-training data distribution.
+While AMF induces efficient learning for skewed pre-training distributions, it naturally brings more modest gains when the pre-trained policy is equally capable for all tasks, and uniform task sampling is sufficient.
+
+On top of addressing the current limitations, this work suggests multiple interesting directions.
+An extensive empirical evaluation of active fine-tuning with large-scale generalist policies is clearly desirable, but remains infeasible at the moment due to the scarce availability of open-source models and benchmarks.
+Another future research direction would involve direct estimation of the RL objective, thus removing the dependence on non-equivalent BC proxy objectives.
+
+\newpage
+
+

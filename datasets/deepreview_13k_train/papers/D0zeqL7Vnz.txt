@@ -1,0 +1,264 @@
+\title{Prompt Sketching for Large Language Models}
+
+\begin{abstract}
+	\vspace{-2mm}
+Many recent prompting strategies for large language models (LLMs) query the model multiple times sequentially -- first to produce intermediate results and then the final answer. However, using these methods, both decoder and model are unaware of potential follow-up prompts, leading to disconnected and undesirably wordy intermediate responses.
+In this work, we address this issue by proposing prompt sketching, a new prompting paradigm in which an LLM does not only respond by completing a prompt, but by predicting values for multiple variables in a template. This way, sketching grants users more control over the generation process, e.g., by providing a reasoning framework via intermediate instructions, leading to better overall results. The key idea enabling sketching with existing, autoregressive models is to adapt the decoding procedure to also score follow-up instructions during text generation, thus optimizing overall template likelihood in inference.
+Our experiments show that in a zero-shot setting, prompt sketching outperforms existing, sequential prompting schemes such as direct asking or chain-of-thought on 7 out of 8 LLM benchmarking tasks, including state tracking, arithmetic reasoning, and general question answering. To facilitate future use, we release a number of generic, yet effective sketches applicable to many tasks, and an open source library called \lstinline|dclib|, powering our sketch-aware decoders.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+While early prompting strategies for large language models (\llms) focused on simple trigger phrases to elicit the desired responses \citep{kojima_large_2022}, more recent work considers conversational \citep{OuyangInstructGPT22}, multi-part, and template-guided \llm interactions, where a model is queried several times in a constrained way, based on a template or grammar.
+This offers control over LLM reasoning by filling in a template of pre-defined steps \citep{beurer2022prompting, guidance2023}, allows interfacing with automated software systems, and enables syntactically reliable code generation \citep{PoesiaP00SMG22}. 
+
+\paragraph{Key Challenge: Decoding with (Hard) Structural Constraints} We consider a simple application, illustrated in \cref{fig:main_example}. The goal is to generate a list of items, satisfying two \emph{hard} requirements: (1)~the result should be a dashed list of exactly four items and (2) the second item should be \textit{Frisbee}. 
+To guarantee that these requirements are satisfied, prompting and fine-tuning alone are insufficient, as unconstrained \llms remain inherently stochastic, even with good instructions, demonstrations, or training \citet{askmeanything,calibratebeforeuse}. 
+To address this issue, template-guided inference constructs a template from the (hard) constraints, leaving multiple holes for the LLM to fill during the generation (top right, \cref{fig:main_example}). Unfortunately, the naive strategy of calling an unconstrained model (\cref{fig:main_example}, left) for each placeholder fails frequently, as the model runs on, beyond the template, generating many items per placeholder. A practical alternative is \emph{stop-and-go} inference (middle): By feeding the template incrementally, item-by-item, and enforcing stopping-conditions for each call, we can force the overall output to adhere to the template. 
+While this method is effective for output formatting \citep{beurer2022prompting,guidance2023}, the model remains unaware of the overall template when decoding each placeholder, leading to sub-optimal reasoning strategies. For instance, in \cref{fig:main_example}, \emph{stop-and-go} generates \emph{Frisbee} as the first item, leading to a repetition of the word, which would otherwise be unlikely under the model's distribution.
+This example raises two important questions: (1) Can we improve on naive stop-and-go inference by anticipating the overall template during generation? And, (2) what is the general effect of this form of templated generation on overall model performance, i.e., does it impair or improve the model's reasoning capabilities?
+\input{figures/fig1-updated}
+
+\paragraph{This Work: Prompt Sketching} To answer these questions, we present \emph{prompt sketching}, a novel framework for template-guided LLM inference.
+The key technical difference of sketching in contrast to prior techniques is that we phrase the entire template as one segmented sequence decoding problem, rather than multiple isolated model calls. This, (1) theoretically anchors standard stop-and-go inference as a special case and (2) allows us to generalize and implement novel, sketch-aware decoding procedures based on beam search, that optimize templates end-to-end.
+\cref{fig:main_example} compares sketch-aware decoding (right) with unconstrained inference (left) and stop-and-go (middle). Sketching allows us to adhere to the provided prompt template, while also optimizing multiple placeholder variables jointly, in this case, avoiding a repetition of \emph{Frisbee}.
+We carry out an extensive experimental evaluation, showing that sketching outperforms non-templated prompting methods like chain-of-thought on 7/8 LLM reasoning tasks, demonstrating the effectiveness of template-guided inference in general reasoning. In our experiments, sketching allows us to consistently enforce reasoning strategies across all tasks, enabling a more controlled form of LLM programming going beyond simple prompting. For 5/8 tasks, we even observe significant improvements over simple stop-and-go templating, demonstrating that sketch-aware decoding and joint optimization of multiple variables are crucial components of effective template-guided LLM inference.
+
+\paragraph{Main Contributions} Our core contributions are:
+\begin{itemize}
+    \setlength\itemsep{0.0em}
+    \item A framework of prompt sketching, phrasing multi-step and template-guided LLM inference as a segmented sequence decoding problem.
+    \item Two novel sketch-aware decoding procedures, transferring several insights from constrained sequence decoding to general template-guided inference.
+    \item A collection of ready-to-use, generic prompt sketches that work well with a number of hard LLM reasoning tasks and can be easily adapted.
+    \item An extensive evaluation of sketching, including a comparison to non-templated and stop-and-go inference, as well as a comparison of several (sketch-aware) decoding strategies.
+\end{itemize}
+Additionally, we publish an open source library \lstinline|dclib|, included in the supplementary material (see \cref{app:dclib}), which allows the implementation of sketch-aware decoding procedures on top of OpenAI, \lstinline|transformers|, and \lstinline|llama.cpp| models, thus facilitating future research and open source work.
+
+
+
+
+
+
+\section{Background}
+
+We first provide relevant background on prompting and decoding, before discussing prompt sketching.
+
+\paragraph{Decoding} Most recent language models operate left-to-right only, \ie, they predict a probability distribution $p(y_t | \vy_{<t}, \vx)$ over the next token $y_t$ given an input sequence $\vx = \langle x_1, x_2, ..., x_n \rangle$ and previously predicted tokens $\vy_{<t} = \langle y_1, y_2, ..., y_t \rangle$. Thus, a core task is to transduce or decode a model output $\vy^\star$ that maximizes some scoring function: %
+\begin{equation}
+    \vy^\star = \argmax_{\vy \in \bc{Y}} \; \score(\vy, \vx).
+\end{equation}
+A popular choice for this scoring function is the posterior or joint probability assigned to the decoded sequence by the language model. This leads to the so-called maximum a posteriori (MAP) solution:
+\begin{equation} \label{eq:map}
+    \begin{split}
+        \vy_{\text{MAP}} :=& \argmax_{\vy \in \bc{Y}} p(\vy | \vx) = \argmax_{\vy \in \bc{Y}} \Pi^N_{t=1} p(y_t | \vy_{<t}, \vx) = \argmax_{\vy \in \bc{Y}} \Sigma^N_{t=1} \log p(y_t | \vy_{<t}, \vx)
+    \end{split}
+\end{equation}
+However, solving the MAP decoding exactly is generally intractable, as it requires all conditional probabilities $p(y_t | \vy_{<t}, \vx)$ over an exponentially large search space to be evaluated. To solve this problem, a range of decoding strategies have been introduced, which aim to find approximate solutions. To discuss them, it is helpful to imagine $\bc{Y}$ as a tree with the prompt or prefix $\vx$ at the root and children of a node corresponding to possible continuations, all scored by $\score(\vy_{<t}, \vx)$.
+
+\paragraph*{\argmaxd Decoding} corresponds to a depth-first search of our decoding tree that terminates once the first solution has been found. Operationally, at every decoding step, we extend our hypothesis $\vy_{<(t-1)}$ by choosing the next token $y_{t}$ to maximize $\score(y_t \mid \vy_{<(t-1)}, \vx)$:
+\begin{equation}
+     \vy_{\textsc{Argmax}} := \bigoplus^N_{t=1} \argmax_{y_t \in \bc{Y}} p(y_t | \vy_{<t}, \vx)
+\end{equation}
+where $\oplus$ denotes concatenation. \argmaxd decoding is efficient, but will also disregard many alternative hypotheses due to its greedy nature.
+
+\paragraph*{Beam Search} corresponds to a breadth-first search in the decoding tree where the breadth (at every tree depth) is limited to the beam width $n$. Operationally, we first determine the $n$ best continuations of all of our $n$ hypotheses and then retain the $n$ best ones across all these $n^2$ continuations. This yields high-quality solutions at moderate computational cost, making Beam Search popular across a wide range of tasks.
+Interestingly, thus obtained solutions often outperform exact decodings (or very large beam widths) in down-stream tasks \citep{HoltzmanBDFC20}. \citet{MeisterCV20} suggest that this is due to beam search inducing a regularization towards uniform information density, which is preferred in human speech.
+
+\paragraph*{Grid Beam Search} \citep{HokampL17} extends beam search to facilitate constraint decoding, \ie, transducing a response such that it contains certain strings or satisfies constraints. As sequences complying with such constraints typically achieve a much lower score than natural model predictions, they would never be included using vanilla beam search. Grid beam search solves this problem by introducing separate comparison pools for hypotheses satisfying different numbers of constraints. To avoid a linear increase in beam width and thus computational cost in the number of constraints, \citet{PostV18} introduce a dynamic beam allocation scheme that keeps the total beam width constant and assigns slots on this beam depending on the number of satisfied constraints. %
+
+\paragraph{Length Normalization} \citep{WuSCLNMKCGMKSJL16} is frequently employed to compare sequences of different lengths, to compensate for the summation of additional negative logprobs. We can simply weight our scoring function with a length normalization term, parametrized by $\beta \in \R^{\geq 0}$ and $\alpha \in [0,1]$:
+\begin{equation}
+    w = \frac{(\beta + 1)^\alpha}{(\beta + |\vy|)^\alpha},
+\end{equation}
+where $\beta = 0$ and $\alpha = 1$ recovers the mean and $\alpha=0$ no normalization.
+
+
+
+
+
+\section{Prompt Sketching}
+
+
+The core of prompt sketching is template-guided LLM inference, \ie, alternating model output with template-derived intermediate tokens. This is different from sequential prompting methods like \textit{chain-of-thought} or \textit{answer-only}, where first, the model consumes an input such as a question or instructions and then generates an answer in an unconstrained way. More formally, we consider a sketch $\mathcal{S}$ to be a template of the form \lstinline|$\mathcal{S}$ := "<$p_1$> [$v_2$] $\dots$ <$p_{k-2}$> [$v_{k-1}$] <$p_{k}$>"|
+where, $p_i$ are deterministic sequences of tokens, specified by the template, and $v_i$ are variables that are completed by the model. 
+This definition captures existing forms of prompting, where e.g. \textit{answer-only} (AO) can be written as \lstinline|$\mathcal{S}_{AO}$ := "<Q> A: [ANSWER]"| and \textit{chain-of-thought} (CoT) prompting as \lstinline|$\mathcal{S}_{CoT}$ := "<Q> A: Let's think step by step. [COT]."|, where \lstinline|<Q>| corresponds to a question and the variable \lstinline|COT| contains model reasoning as well as the final answer.
+
+\paragraph{Single vs. Multi-Variable Sketches} We consider $\mathcal{S}_{AO}$ and $\mathcal{S}_{CoT}$ as sequential, single-variable sketches, as the variable is placed at the end of the template. The model, therefore, first digests all provided information such as a question and reasoning instructions before generating the answer. In contrast, with more general sketches, values for multiple variables can be generated, and deterministic intermediate instructions can be inserted during the generation process. Existing examples of multi-variable problems include conversational systems like ChatGPT, agentic prompting like \lstinline|ReAct| \citep{yao_react_2022}, language model programming \citep{beurer2022prompting}, and language model cascades \citep{dohan_language_2022}.
+
+\paragraph{Autoregressive Sketch Decoding} Sketching extends the range of decoding strategies beyond just sequential generation. However, most language models are still simple next-token predictors, \ie, given some prompt $\vx$, they generate a sequence of tokens $\vy$ autoregressively, that is, one token at a time, conditioned only on the previously generated tokens:
+\begin{equation}
+    p(\vy | \vx) = \prod_{i=1}^{|y|} p(y_i | \vx, y_{<i})
+\end{equation}
+To align this with sketching, we split the generated sequence $\vy = \{y_1, \dots, y_{n}\}$, including both deterministic and variable portions, into $k$ consecutive chunks $\mathcal{C}_\vy = \{\vc_1, \dots, \vc_k\}$ of lengths $n_1, \dots, n_k$ respectively, i.e., $\mathcal{C}_\vy = \left\{ \{y_1, \dots, y_{n_1}\}, \dots, \{y_{n_{(k-1)}+1}, \dots, y_{n_k}\} \right\}$. Each chunk in $\mathcal{C}_\vy$ is then associated either with a deterministic prompt part \lstinline{$p_i$} or a model-predicted variable \lstinline{$v_i$}. The overall joint probability of all chunks is then defined as
+
+\begin{equation}
+    p(\vc_1, \dots, \vc_{k}) = \prod_{j=1}^{k} \;\; \prod_{i=n_{j-1}+1}^{n_j} p(y_i | y_{<i})
+\end{equation}
+
+Crucially, we derive the values of all chunks from a single sequence of tokens $\vy$, which can be predicted sequentially using an autoregressive model. A chunk- and variable-partitioned sequence can then be leveraged by decoding algorithms to obtain higher-quality responses or inject deterministic phrases during generation. The main challenge of this approach is the chunking strategy, i.e., a way to split a generated sequence of tokens $\vy$ into chunks of an a priori unknown length to determine which variables they should be associated with.
+
+\paragraph{Chunking with Stopping Phrases} Like in stop-and-go inference, sketching relies on the use of per-variable stopping phrases (SPs). SPs are specified as part of a prompt sketch and terminate the generation of the current chunk $i$ on occurence. This allows us to chunk the output sequence $\vy$, assigning the resulting subsequences to variables \lstinline|$v_i$|, and keep the model from running-on without respecting the sketch template. In case no specified stopping phrase occurs before the model predicts its designated \textit{end-of-sequence} token, we do not terminate the entire generation process, but only the decoding of the current chunk, unless no further chunks remain.
+
+\paragraph{Deterministic and Constrained Chunks} To inject deterministic phrases during generation, we force a predetermined sequence \lstinline|$p_i$| to be decoded, while still evaluating its likelihood $p(\vc_i|\vc_{<i})$.
+Further, we consider \emph{constrained variables} as a special case of non-deterministic variables, whose values are predicted by the model, but can only be chosen from a restricted set of sequences (e.g., only numbers, matching a regular expression, etc.). To implement constrained variables, we rely on the \lstinline|LMQL| query language for LLMs \citep{beurer2022prompting}. This allows us to mask out all tokens that will not satisfy a given constraint during generation, such that the resulting value of some restricted variable $c_i$ is guaranteed to satisfy the constraint. 
+
+\begin{wrapfigure}{r}{3.2cm}
+    \centering
+    \includegraphics[width=3.2cm]{figures/sketch-examples.pdf}
+    \caption{Two examples of simple multi-variable sketches.}
+    \label{fig:multi-variable-examples}
+\end{wrapfigure}
+
+\paragraph{Example} We show two example sketch templates in \cref{fig:multi-variable-examples}. In the Reasoning Framework example, we guide the model's reasoning process by inserting deterministic phrases such as \lstinline|"On the one hand"|, \lstinline|"On the other hand"|, or \lstinline|"In conclusion"| inbetween generated reasoning steps. In the Interleaved Reasoning example, we feed the model our problem definition, e.g. sentence by sentence as chunks $Q_i$, prompting for intermediate results after each one. Once the full problem description has been fed to the model, we generate the overall conclusion and answer.
+
+\subsection{Sketch-Aware Decoding}
+\label{sec:multi-var-decoding}
+
+Sketching allows us to denote template-guided LLM inference as one long, segmented sequence decoding problem. With greedy \dargmax decoding and autoregressive model conditioned on previously generated tokens only, this recovers stop-and-go inference. As discussed in \cref{sec:intro}, however, this form of sequential decoding does not account for yet-to-come parts of the template. At the same time, we operate greedily so after a deterministic chunk has been inserted, we cannot retroactively change the previously generated variable values.
+
+To address this, we leverage the probabilistic understanding of sketching and propose a novel class of decoding procedures that, in contrast to traditional token-level decoders, operate on the level of the template to guide the decoding process end-to-end. Concretely, we experiment with two novel decoder adaptations, namely: (1) Hierarchical Variable-Level Beam Search (\dvar) and (2) Grid-Based Beam Search (\dbeamvar). Next, we discuss the implementation of these methods in more detail.
+
+\paragraph{\dvar: Variable-Level Beam Search} is based on the idea of applying beam search on the level of the decoded placeholder variables. This means that instead of extending each active hypothesis by the $n$ most likely next tokens, we extend it by $n$ sampled values for the currently decoded variable. Starting with an empty sequence of tokens, we decode variable by variable. When at variable $v_i$, we have at most $n$ hypotheses for which the variables $v_{<i}$ have been chosen. For each of them, we then generate $n$ proposals for variable $v_i$, thus giving us $n^2$ hypotheses over the variables $v_{\leq i}$. Among these, we then select the $n$ most likely ones according to the model score and move to the next variable. Deterministic chunks are handled by appending them to the set of active hypotheses all at once. This process is repeated until all variables have been decoded. See \cref{app:algos}, for a pseudo-code implementation of \dvar.
+
+\paragraph{\dbeamvar: Variable-Grid Beam Search} is based on the idea that the number of decoded variables is an important measure of decoding progress and should thus be considered when comparing the scores of different sequences during token-level beam search, to decide which to explore further. This is particularly important in the presence of deterministic chunks, which, by their very nature, typically have lower likelihoods under the model distribution than non-deterministic variables and would thus never be included in a decoded hypothesis.
+To this end, we adapt the dynamic beam allocation method of \citet{PostV18} to the sketching setting and propose Variable-Grid Beam Search (\dbeamvar): We partition our beam width into separate pools depending on the currently decoded variable \lstinline|$v_i$| and only compare scores per pool. To decide how many slots to allocate to each pool and thus variable, we divide the beam width by the number of unique, currently decoded variables and allocate the remainder to the pool with the most decoded variables, reassigning unused slots to pools decoding later variables, to ensure progress at the template-level. 
+A pseudo-code implementation of \dbeamvar can be found in \cref{app:algos}.
+
+\input{figures/main_evaluation.tex}
+
+
+
+\section{Experimental Evaluation}
+
+
+We focus our evaluation on the following questions: (1) Is templated-guided inference and sketching effective at improving the performance of LLMs on reasoning tasks? (2) Can sketch-aware decoders outperform existing decoders in and outside of the sketching setting? And (3), what kind of tasks benefit the most from sketching? To answer these questions, we compare model performance with non-templated, sequential inference on a wide range of different reasoning benchmarks for LLMs (\cref{sec:main-results}) and also experiment with novel applications enabled by prompt sketching (\cref{sec:applications}).
+
+\input{figures/dataset_examples.tex}
+
+\paragraph{Models} We use OpenAI's \lstinline|text-davinci-003| InstructGPT model ($175$B parameters; \citet{OuyangInstructGPT22}) and \emph{Llama-2 Chat} ($13$B parameters; Llama-2 in the following; \citet{touvron2023llama}) to evaluate. While \lstinline|text-davinci-003| clearly is the more capable model, we find that Llama-2 provides an interesting comparison point for the applicability of sketching to smaller, more open models. We also experimented with OpenAI's smaller \lstinline|text-curie-001| model, but, overall, found that its instruction following capabilities were insufficient to support sketching (comparative study in \cref{app:smaller-models}).
+
+\paragraph{Baselines} As a baseline, we compare sketching to non-templated zero-shot formulations of \textit{answer-only} (\pao) and \textit{chain-of-thought} (\pcot), using \emph{zero-shot CoT} \citep{kojima_large_2022} for the latter. Examples of all used prompts/sketches are given in \cref{app:full-prompts}. During generation, no task demonstrations are provided and the model is prompted with simple instructions only. This
+highlights a core benefit of sketching: the ability to precisely guide the model during generation without concrete demonstrations. Still, we also include a comparison with few-shot prompting in \cref{app:few-shot}, which is generally orthogonal to sketching.
+\paragraph{Datasets and Sketches} 
+We evaluate on a total of 8 LLM reasoning tasks. For each task, we apply one of two generic sketch templates: 
+For arithmetic and logical reasoning, date understanding, and general question answering, we rely on a sketched form of \emph{chain-of-thought}, as shown in \cref{fig:sketched-cot}. For state tracking and matrix shape reasoning, we employ an \emph{interleaved reasoning} sketch, as shown in \cref{fig:multi-variable-examples}, splitting task descriptions into sentences and interleaving them with the model's reasoning steps. For a detailed description of the tasks and sketches, we refer to \cref{app:full-prompts}.
+
+\paragraph{Compute and Dataset Size} The total costs of our OpenAI experiments are roughly \$4,000 USD in API use. To limit these costs for our OpenAI experiments specifically, we evaluate only $100$ uniformly random samples per task-decoder configuration, with confidence bounds reported in \cref{app:confidence}. For Llama-2, on the other hand, we run all of our experiments on $1000$ samples per task (or the full datasets), using a single NVIDIA H100 GPU with 80GB memory.
+
+\paragraph{Decoder Configurations} As a baseline for our sketch-aware decoding procedures, we compare with \dargmax and traditional beam search (\dbeam), applied to each sketch variable individually. Based on this, we examine the benefit of sketching with and without our sketch-aware decoders \dvar and \dbeamvar. For \dbeam, \dvar, and \dbeamvar we use a beam width of $n=2$ and rely on length normalized scoring in line with previous work \citep{WuSCLNMKCGMKSJL16}, using $\beta = 0$ and $\alpha = 0.7$.
+
+\subsection{Task Accuracy}
+\label{sec:main-results}
+
+In \cref{fig:main-eval,fig:llama-eval-small}, we report our main results on task performance with \lstinline|text-davinci-003| and Llama-2, respectively. Considering only \dargmax decoding, we consistently observe improved or maintained performance with sketching, as compared to sequential \pcot{} or \pao{} (7 out of 8 improved for \lstinline|text-davinci-003|, 6 out of 8 with Llama-2). This shows, that simple \dargmax sketching can already be effective (up to 4\% and 8\% points improvement for \lstinline|text-davinci-003| and Llama-2 respectively). Manual inspection reveals that sketching consistently results in clearly structured reasoning, while with $CoT$ the model makes a seemingly random choice about the form of reasoning applied to each sample (simple text, a list of steps, etc.), impairing task accuracy (see \cref{app:full-prompts} for detailed examples). 
+
+\paragraph{Llama-2} largely confirms our results for \lstinline|text-davinci-003|. Two outliers are the matrix shapes task and the AQuA dataset \citet{ling_program_2017}. For both, Llama-2 exhibits very bad performance across all decoding and prompting strategies, suggesting that the model is likely unable to perform these tasks at all. We attribute this to the difference in model size when compared to OpenAI. \lstinline|text-davinci-003| has $175$ billion parameters, while the Llama-2 variant only has $13$ billion parameters. As shown by \citet{kojima_large_2022}, model size directly relates to an increase in general reasoning capabilities.
+\input{figures/llama_small.tex}
+
+\paragraph{Decoders} Combining simple sketches with sketch-aware decoding, we observe even stronger performance gains of up to 10\% points, e.g., for \dbeamvar compared to sequential prompting with \dargmax or \dbeam on the question answering datasets AQuA  \citep{ling_program_2017} and StrategyQA \citep{geva2021did} with \lstinline|text-davinci-003|. Comparing \dvar and \dbeamvar, we observe \dvar to perform particularly well on tasks that rely on interleaved reasoning while \dbeamvar is more effective in other settings. For Llama-2, we observe analogous effects, e.g., \dbeamvar improves performance on Date Understanding and GSM8K by almost 7\% points, compared to non-templated \emph{CoT} and simple \dargmax.
+
+For \lstinline|text-davinci-003|, we also observe notable performance gains of up to 6\% points, when using our sketch-aware decoders in combination with the established \emph{Zero-Shot CoT} \citep{kojima_large_2022} prompting scheme (cf. \cref{fig:main-eval}). This is because \emph{Zero-Shot CoT} already is a two-part prompting scheme, which naturally benefits from our sketch-aware decoders, letting them optimize over the reasoning process (first variable) and final answer (second variable) jointly.
+
+\begin{wrapfigure}[6]{r}{0.3\textwidth}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/causal-reordering-vert}
+    \caption{Information Essentiality prompt with forward references (details in \cref{app:full-prompts}).}
+    \label{fig:forward-ref}
+\end{wrapfigure}
+
+\subsection{Novel Applications Enabled by Prompt Sketching} 
+
+\label{sec:applications}
+In addition to reasoning performance, sketching also enables novel applications, for which non-templated sequential inference either fails completely or is much less effective and reliable. We highlight multiple scenarios here (causal reordering, sudoku, interactive environments) and expand on them in \cref{app:applications} (JSON generation and graph traversal).
+\paragraph{Causal Reordering} First, we investigate forward referencing abilities with our sketch-aware decoders. More specifically, we examine whether sketch-aware decoders enable the model to anticipate future information to some degree. For this, we adapt the existing Information Essentiality dataset \citep{BigBench}, by reordering it according to the template shown in \cref{fig:forward-ref}. 
+The model has to determine the essentiality of two statements \lstinline|<S$_1$>| and \lstinline|<S$_2$>|, with respect to a given question \lstinline|<Q>|. However, in our reordered prompt, the result variable \lstinline|IS_NEEDED1| is decoded before the \lstinline|<Q>| is shown. For this custom task (cf. \cref{fig:main-eval}), we indeed observe that \dargmax is incapable of producing any meaningful results ($0.01$ accuracy), whereas, \dbeamvar and \dvar achieve an improved accuracy of $0.25$ and $0.06$ respectively, by exploring a wider hypotheses space.
+
+\paragraph{Sudoku} We further examine the capabilities of a model to solve simple $3\times3$ sudoku-like puzzles: the LLM is tasked to complete a partial grid with unique numbers in $1-9$. Similar to before, this task requires forward referencing to effectively choose the correct numbers. As shown in \cref{tab:other-applications}, out of 10 puzzles with $1-6$ empty spots, sequential \dargmax decoding is only capable of solving one. This is expected, as greedy decoding does not allow to anticipate any future information (i.e. fixed numbers), before choosing earlier ones. In contrast, \dbeamvar and \dvar solve $6/10$ and $7/10$ puzzles respectively, demonstrating again that they explore a wider hypotheses space. A potential alternative is to re-order the template, which allows \lstinline|text-davinci-003| to achieve perfect accuracy with \argmaxd, but re-ordering is not always an option with more complex multi-step puzzles.
+\paragraph{Interactive Environments} Sketch-aware decoders can take the effect of template-induced continuations into account during text generation. If we choose these continuations dynamically based on previous model output, we can effectively leverage them to explore interactive environments \citep{driess2023palm}. For this, we implement a simple LLM-guided graph traversal, where an LLM agent traverses a \emph{dungeon}, starting out in a randomly chosen room, with the goal of finding the exit. We generate $10$ random dungeons with $8-10$ rooms each, where the average shortest exit route is $2.3$ steps away. At each node, the model is asked for the next room/node to traverse to. As shown in \cref{tab:other-applications}, \dargmax mostly finds the exit, but often requires a lot more steps (average of $3.77$) than \dvar/\dbeamvar. In particular \dbeamvar always finds the exit and almost always via the shortest route ($\sim2.4$ req. steps). For \lstinline|text-curie-001|, we observe similar performance with \dbeamvar, whereas \dargmax is often incapable of finding the exit within the limit of $10$ steps (only 5/10 successes). We refer to \cref{app:interactive} for more details on the sketch formulation and the interactive environment.
+
+\begin{table}[t]
+    \caption{
+        Sketch-aware decoding enables sudoku solving and more efficient graph traversal.
+    }
+    \begin{adjustbox}{width=0.8\linewidth,center}
+    \centering\footnotesize
+    \begin{tabular}{ r c c c c }
+        \toprule
+        \footnotesize
+        & Sequential Prompting& \multicolumn{3}{c}{\textbf{Prompt Sketching(ours)}} \\
+        \cmidrule(lr){2-2}\cmidrule(lr){3-5}
+        & \dargmax & \dargmax & \textbf{\dbeamvar} & \textbf{\dvar}\\
+        \textit{Sudoku (3x3)}\\
+        \lstinline|text-davinci-003|
+            & \textbf{10/10} (reordered) %
+            & 1/10 %
+            & \textbf{6/10} %
+            & \textbf{7/10} %
+            \\
+            & 0/10 (reordered) %
+            & 0/10 %
+            & \textbf{3/10} %
+            & \textbf{3/10} %
+            \\
+        
+        \textit{Dungeon Escape}\\
+        \lstinline|text-davinci-003|
+            & -
+            & 9/10 ($\sim$3.77 steps) %
+            & \textbf{10/10 ($\sim$2.4 steps)} %
+            & 9/10 ($\sim$3.11 steps) %
+            \\
+        \lstinline|text-curie-001|
+            & -
+            & 5/10 ($\sim$4.0 steps) %
+            & \textbf{8/10 ($\sim$2.625 steps)} %
+            & 5/10 ($\sim$2.4 steps) %
+            \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \label{tab:other-applications}
+\end{table}
+\subsection{Discussion}
+
+Our evaluation shows that sketching and, by extension, template-guided LLM inference in general, can significantly improve model reasoning capabilities. Here, we briefly discuss limitations and other considerations relating to design, compuational, and applicability aspects.
+
+\paragraph{Sketch Design and Iteration}
+While still sensitive to wording, prompt sketching does offer more control over exact model behavior, thereby addressing some of the difficulties of traditional prompt design \citep{ReynoldsM21,askmeanything,calibratebeforeuse}. However, sketching is also not a silver bullet: Most importantly, we find that an effective sketch must not be too restrictive to not impair model performance. Still, as substantiated by our results, even simple sketches can already be effective at improving reasoning capabilities. Lastly, much like non-templated prompts, sketches still require iterative development and tuning to achieve optimal performance on a given task. More importantly, however, they offer benefits such as improved control, a guaranteed output format, and reduced free-text formatting instructions, otherwise needed.
+
+\paragraph{Applicability} While sketch design still requires some effort, we find that many tasks in our evaluation can be solved with a small set of generic sketches. For instance, we find that a sketched form of chain-of-thought \citep{WeiWSBCLZ22} (see \cref{fig:sketched-cot}) is already effective for a wide range of tasks, including arithmetic reasoning and general question answering. For direct adoption, we also publish the sketches used in our evaluation, which can be adapted or used as-is by practitioners.
+
+\paragraph{Computational Overhead Of Sketch-Aware Decoding} Sketch-aware decoders naturally incur computational overhead compared to simple, greedy search. While \dbeamvar requires as much compute as regular beam search, \dvar requires an additional factor of beam width $n$ more hypotheses to be tracked in parallel. Similar to regular beam search, this is a well-known trade-off: branching decoders are more expensive but still widely used, especially when improved performance and diversity are important. 
+
+
+
+
+\section{Related Work}
+
+
+\paragraph{Prompting} 
+Recent works have proposed a variety of different prompting techniques including chain-of-thought prompting \citep{WeiWSBCLZ22,WeiBZGYLDDL22}, interactive question answering \citep{YaoZYDSNC22}, self-consistency \citep{WangWSLCZ22}, and ThinkSum \citep{OzturklerMWJ22}. These prompt programming techniques \citep{ReynoldsM21, ZhouMHPPCB22}, aim to leverage the general reasoning abilities of LLMs to solve diverse tasks. 
+To enable the efficient implementation of such complex prompting techniques, LM-focused programming systems have recently been introduced: PromptChainer \citep{WuJD0MTC22},  PromptSource \citep{BachSYWRNSKBFAD22}, and LMQL \citep{beurer2022prompting} provide development environments for LM interaction. We build on LMQL, as it supports variable constraints and control flow within prompts, enabling the efficient representation of sketches. Finally, language model cascades \citep{dohan_language_2022} view LM querying as probabilistic programming over multiple variables, thus implicitly assuming a sketching setting and opening up interesting perspectives for more advanced decoders in the future. In contrast to prompt sketching, however, existing works compose multiple LLM calls in a disconnected manner, and, crucially, do not consider the overall likelihood of the resulting sequence.
+
+\paragraph{Language Model Decoding} 
+Most decoding techniques either aim to approximately recover the maximum a posteriori solution under the model distribution or sample from it with the aim to increase diversity.
+Beyond direct sampling from the model distribution, Nucleus Sampling \citep{HoltzmanBDFC20} clips away the tail of the distribution and Locally Typical Sampling \citep{MeisterPWC22} considers a subset that yields uniform information density sequences.
+While \argmaxd can be seen as a best-first search of the decoding tree with a maximum width of 1, Beam Search can be seen as a width-first search with a width constrained to $k$ (often 5) trajectories. Best First Beam Search \citep{MeisterCV20} combines the two ideas, always exploring the sequence with the largest score while maintaining the width limit, to increase efficiency. Best-k Search \citep{XuXSZ22} drops the width restriction and always explores the $k$ highest scoring sequences. Lattice decoding \citep{XuJD22} allows for the recombination of similar trajectories, leading to more diverse solutions. Diverse Beam Search \citep{VijayakumarCSSL16} includes a diversity objective directly in the scoring function of Beam Search. To improve performance on constraint decoding problems, Grid Beam Search \citep{HokampL17} creates separate beams for sequences satisfying a different number of constraints. \citet{PostV18} propose Dynamic Beam Allocation to instead partition a fixed beam width into pools depending on the number of satisfied constraints, with \citet{HuKCXCPD19} introducing a vectorized implementation.
+
+
+\section{Conclusion}
+
+
+We presented prompt sketching, a novel framework for template-guided LLM inference that phrases templated generation as a segmented sequence decoding problem. This perspective unlocks novel sketch-aware decoding procedures that optimize for overall template likelihood and not just sequentially generate text. Our experiments show that sketching outperforms naive templating as well as sequential prompting like chain-of-thought on 7 out of 8 hard LLM reasoning tasks, improving task accuracy by up to $10\%$ points. Looking forward, we also show how sketching enables novel applications such as reliable output formatting, forward references in reasoning, and LLM-guided graph traversal, inspiring future work in this direction.
+
+
+\clearpage
+
+
+
+

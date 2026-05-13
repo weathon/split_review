@@ -1,0 +1,580 @@
+\title{Unintentional Unalignment: Likelihood Displacement in Direct Preference Optimization}
+
+\begin{abstract}
+\vspace{-1.25mm}
+Direct Preference Optimization (DPO) and its variants are increasingly used for aligning language models with human preferences. 
+Although these methods are designed to teach a model to generate preferred responses more frequently relative to dispreferred responses, prior work has observed that the likelihood of preferred responses often decreases during training.
+The current work sheds light on the causes and implications of this counter-intuitive phenomenon, which we term \emph{likelihood displacement}.
+We demonstrate that likelihood displacement can be \emph{catastrophic}, shifting probability mass from preferred responses to responses with an opposite meaning.
+As a simple example, training a model to prefer \texttt{No} over \texttt{Never} can sharply increase the probability of \texttt{Yes}.
+Moreover, when aligning the model to refuse unsafe prompts, we show that such displacement can \emph{unintentionally lead to unalignment}, by shifting probability mass from preferred refusal responses to harmful responses (\eg, reducing the refusal rate of Llama-3-8B-Instruct from 74.4\% to 33.4\%).
+We theoretically characterize that likelihood displacement is driven by preferences that induce similar embeddings, as measured by a \emph{centered hidden embedding similarity (CHES)} score.
+Empirically, the CHES score enables identifying which training samples contribute most to likelihood displacement in a given dataset.
+Filtering out these samples effectively mitigated unintentional unalignment in our experiments.
+More broadly, our results highlight the importance of curating data with sufficiently distinct preferences, for which we believe the CHES score may prove valuable.
+}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+	
+	
+	\ifdefined\COLT
+		\medskip
+		\begin{keywords}
+			\emph{TBD}, \emph{TBD}, \emph{TBD}
+		\end{keywords}
+	\fi
+	
+	
+	
+\label{sec:intro}
+
+To ensure that language models generate safe and helpful content, they are typically aligned based on pairwise preference data. 
+One prominent alignment method, known as \emph{Reinforcement Learning from Human Feedback (RLHF)} \citep{ouyang2022training}, requires fitting a reward model to a dataset of human preferences, and then training the language model to maximize the reward via RL.
+While often effective for improving the quality of generated responses \citep{bai2022training,achiam2023gpt,touvron2023llama}, the complexity and computational costs of RLHF motivated the rise of \emph{direct preference learning} methods such as DPO \citep{rafailov2023direct}.%\footnote{
+
+Given a prompt $\xbf$, DPO and its variants (\eg, \citet{azar2024general,tang2024generalized,xu2024contrastive,meng2024simpo}) eschew the need for RL, by directly teaching a model $\prob_\theta$ to increase the margin between the log probabilities of a preferred response $\yw$ and a dispreferred response $\yl$.
+While intuitively these methods should increase the probability of $\yw$ while decreasing that of $\yl$,  several recent works observed that the probabilities of both $\yw$ and $\yl$ tend to \emph{decrease} over the course of training \citep{pal2024smaug,yuan2024advancing,rafailov2024r,tajwar2024preference,pang2024iterative,liu2024provably}.
+We term this phenomenon \emph{likelihood displacement}~---~see \cref{fig:main}.
+
+\begin{figure*}[t]
+	\begin{center}
+		\includegraphics[width=1\textwidth]{figs/likelihood_displacement_fig.pdf}
+	\end{center}
+	\caption{
+		\textbf{Illustration of likelihood displacement in direct preference learning.}
+		For a prompt $\xbf$, direct preference learning aims to increase the probability that a model $\prob_\theta$ assigns to a preferred response~$\ywsmash$ relative to a dispreferred response~$\ylsmash$.
+		\emph{Likelihood displacement} refers to the counter-intuitive phenomenon where, while the gap between $\ln \prob_\theta ( \ywsmash | \xbf )$ and $\ln \prob_\theta (\ylsmash | \xbf)$ increases, they both decrease.
+		If the responses increasing instead in probability (depicted by $\zbf$) are as preferable as $\ywsmash$ (\eg, $\zbf$ is similar in meaning to~$\ywsmash$), then the likelihood displacement is \emph{benign}.
+		However, if the probability mass goes to responses that are substantially less preferable than $\ywsmash$ (\eg, $\zbf$ is opposite in meaning to~$\ywsmash$), then we say that it is \emph{catastrophic}.
+	}
+	\label{fig:main}
+\end{figure*}
+
+When the probability of $\yw$ decreases, the probability of other, possibly undesirable, responses must increase.
+However, despite the prevalence of likelihood displacement, there is limited understanding as to why it occurs and what its implications are.
+The purpose of this work is to address these gaps.
+Through theory and experiments, we characterize mechanisms driving likelihood displacement, demonstrate that it can lead to surprising failures in alignment, and provide preventative guidelines.
+Our experiments cover models of different families and scales, including OLMo-1B \citep{groeneveld2024olmo}, Gemma-2B \citep{team2024gemma}, and Llama-3-8B \citep{dubey2024llama}.
+The main contributions are listed below.
+
+\begin{itemize}[leftmargin=6mm]
+
+\item \textbf{Likelihood displacement can be catastrophic even in simple settings.}
+We demonstrate that, even when training on just a single prompt whose preferences $\yw$ and $\yl$ consist of a single token each, likelihood displacement is pervasive (\cref{sec:catastrophic}).
+Moreover, the tokens increasing in probability at the expense of $\yw$ can have a meaning opposite to it.
+For example, training a model to prefer $\yw \! = \texttt{No}$ over $\yl \! = \texttt{Never}$ often sharply increases the probability of \texttt{Yes}.
+This stands in stark contrast to prior work attributing likelihood displacement to different complexities in the preference learning pipeline \citep{tajwar2024preference,pal2024smaug,rafailov2024r}, and emphasizes the need to formally characterize its underlying causes.
+\item \textbf{Theory: likelihood displacement is determined by the model's embedding geometry.}
+We analyze the evolution of $\ln \prob_\theta (\yw | \xbf)$ during gradient-based training (\cref{sec:likelihood_dynamics}).
+Our theory reveals that likelihood displacement is governed by the (static) token unembeddings and (contextual) hidden embeddings of $\yw$ and $\yl$.
+In particular, it formalizes intuition by which the more similar $\yw$ and $\yl$ are the more $\ln \prob_\theta (\yw | \xbf)$ tends to decrease.
+\item \textbf{Identifying sources of likelihood displacement.}
+Based on our analysis, we derive a (model-aware) measure of similarity between preferences, called the \emph{centered hidden embedding similarity (CHES)} score (\cref{def:ches}).
+We demonstrate that the CHES score accurately identifies which training samples contribute most to likelihood displacement in a given dataset (\eg, UltraFeedback \citep{cui2024ultrafeedback} and AlpacaFarm \citep{dubois2024alpacafarm}), whereas other similarity measures relying on hidden embeddings or token-level cues do not (\cref{sec:ches}).
+\item \textbf{Unintentional unalignment due to likelihood displacement.}
+To demonstrate the potential uses of the CHES score, we consider training a language model to refuse unsafe prompts via direct preference learning (\cref{sec:unalignment}).
+We find that likelihood displacement can \emph{unintentionally unalign} the model, by causing probability mass to shift from preferred refusal responses to responses that comply with unsafe prompts! 
+For example, the refusal rate of Llama-3-8B-Instruct drops from 74.4\% to 33.4\% over the SORRY-Bench dataset  \citep{xie2024sorry}.
+We then show that filtering out samples with a high CHES score prevents such unintentional unalignment, and does so more effectively than adding a supervised finetuning term to the loss (\eg, as done in \citet{pal2024smaug,xu2024contrastive,pang2024iterative,liu2024provably}).
+
+\end{itemize}
+
+Overall, our results highlight the importance of curating data with sufficiently distinct preferences.
+We believe the CHES score introduced by our theory may prove valuable in achieving this goal.
+
+	
+
+
+\section{Preliminaries}
+
+\label{sec:prelim}
+
+Let $\vocab$ be a vocabulary of tokens.
+Modern language models consist of two parts: \emph{(i)} a neural network (\eg, Transformer~\citep{vaswani2017attention}) that intakes a sequence of tokens $\xbf \in \vocab^*$ and produces a \emph{hidden embedding} $\rep_\xbf \in \R^d$; and \emph{(ii)} a \emph{token unembedding matrix} $\Wbf \in \R^{\abs{\vocab} \times d}$ that converts the hidden embedding into logits.
+The logits are then passed through a softmax to compute a distribution over tokens that can follow $\xbf$.
+For assigning probabilities to sequences $\ybf \in \vocab^*$, a language model~$\prob_\theta$ operates autoregressively, \ie:
+\be
+\prob_\theta (\ybf | \xbf) = \prod\nolimits_{k = 1}^{\abs{\ybf}} \prob_\theta (\ybf_k | \xbf, \ybf_{\leq k -1}) = \prod\nolimits_{k = 1}^{ 
+\abs{\ybf} } \smax \brk*{ \unembed \rep_{\xbf, \ybf_{< k} }  }_{\ybf_k}
+\text{\,,}
+\label{eq:lm_prob}
+\ee
+where $\theta$ stands for the model's parameters (\ie~the parameters of the neural network and the unembedding matrix $\unembed$), and $\ybf_{< k}$ denotes the first $k - 1$ tokens of $\ybf$.
+\subsection{Direct Preference Learning}
+\label{sec:prelim:direct_preference_learning}
+
+\textbf{Preference data.} We consider the widely adopted direct preference learning pipeline, which relies on pairwise comparisons (\cf~\citet{rafailov2023direct}).
+Specifically, we assume access to a preference dataset $\dataset$ containing samples $(\xbf, \yw, \yl)$, where $\xbf$ is a prompt, $\yw$ is a preferred response to $\xbf$, and $\yl$ is a dispreferred response to $\xbf$.
+The preferred and dispreferred responses can be obtained by generating two candidate responses from the model (\ie~on-policy), and labeling them via human or AI raters (\cf~\citet{ouyang2022training,bai2022constitutional}).
+Alternatively, they can be taken from some static dataset (\ie~off-policy).
+Our analysis and experiments capture both cases.
+
+\textbf{Supervised finetuning (SFT).}
+Preference learning typically includes an initial SFT phase, in which the model is finetuned via the standard cross-entropy loss.
+The sequences used for SFT can either be independent of the preference dataset $\dataset$ \citep{touvron2023llama} or consist of prompts and preferred responses from $\dataset$, \ie~of $\brk[c]{ (\xbf, \yw) : (\xbf, \yw, \yl) \in \dataset }$ \citep{rafailov2023direct}.
+
+\textbf{Preference learning loss.}
+Aligning language models based on pairwise preferences is usually done by minimizing a loss of the following form:
+\be
+    \L (\theta) := \E\nolimits_{(\xbf, \yw, \yl)\sim\dataset} \brk[s]*{ \linkf \brk2{ \ln \prob_\theta(\yw|\xbf) - \ln \prob_\theta(\yl|\xbf)} }
+    \text{\,,}
+    \label{eq:pref_loss}
+\ee
+where $\linkf : \R \to \R_{\geq 0}$ is convex and differentiable, for every $(\xbf, \yw, \yl) \in \dataset$.
+Denote by $\thetainit$ the parameters of the model prior to minimizing the loss $\L$.
+To guarantee that minimizing~$\L$ entails increasing the difference between $\ln \prob_{\theta} (\yw|\xbf)$ and $\ln \prob_{\theta} (\yl|\xbf)$, as expected from a reasonable preference learning loss, we make the mild assumption that $\linkf$ is monotonically decreasing in a neighborhood of $\ln \prob_{\thetainit} (\yw | \xbf) - \ln \prob_{\thetainit} (\yl | \xbf)$.
+
+The loss $\L$ generalizes many existing losses, including: DPO \citep{rafailov2023direct}, IPO \citep{azar2024general}, SLiC \citep{zhao2023calibrating}, REBEL \citep{gao2024rebel}, and GPO \citep{tang2024generalized}~---~see \cref{app:pref_losses} for details on the choice of $\linkf$ corresponding to each loss.\footnote{
+For SLiC and GPO, the corresponding $\linkf$ is differentiable almost everywhere, as opposed to differentiable.
+Our analysis applies to such losses up to minor adaptations excluding non-differentiable points.
+}
+Notably, the common dependence on a reference model is abstracted through $\linkf$.
+Other loss variants apply different weightings to the log probabilities of preferred and dispreferred responses or incorporate an additional SFT regularization term (\eg, DPOP \citep{pal2024smaug}, CPO \citep{xu2024contrastive}, RPO \citep{liu2024provably}, BoNBoN \citep{gui2024bonbon}, and SimPO \citep{meng2024simpo}).
+For conciseness, we defer an extension of our analysis for these variants to \cref{app:additional_sft}.
+
+\subsection{Likelihood Displacement}
+\label{sec:prelim:likelihood_displacement}
+
+We define likelihood displacement as the phenomenon where, although the preference learning loss is steadily minimized, the log probabilities of preferred responses decrease.
+
+\begin{definition}
+	\label{def:likelihood_displacement}
+	Let $\prob_{\thetainit}$ and $\prob_{\thetafin}$ denote a language model before and after training with a preference learning loss $\L$ over the dataset $\dataset$ (\cref{eq:pref_loss}), respectively, and suppose that the loss was successfully reduced, \ie~$\L (\thetafin) < \L (\thetainit)$.
+	We say that \emph{likelihood displacement occurred} if:\footnote{
+		Note that $\ln \prob_{\theta} (\yw | \xbf)$ can decrease even as the loss $\L$ is minimized, since minimizing $\L$ only requires increasing the gap between $\ln \prob_{\theta} (\yw | \xbf)$ and $\ln \prob_{\theta} (\yl | \xbf)$.
+	}
+	\[
+	\frac{1}{\abs{\dataset}} \sum\nolimits_{(\xbf, \yw, \yl) \in \dataset} \ln \prob_{\thetafin} (\yw | \xbf) < \frac{1}{\abs{\dataset}} \sum\nolimits_{(\xbf, \yw, \yl) \in \dataset} \ln \prob_{\thetainit} (\yw | \xbf)
+	\text{\,;}
+	\]
+	and that \emph{likelihood displacement occurred for} $(\xbf, \yw, \yl) \in \dataset$ if $\ln \prob_{\thetafin} (\yw | \xbf) < \ln \prob_{\thetainit} (\yw | \xbf)$.
+\end{definition}
+Likelihood displacement is not necessarily problematic.
+For $(\xbf, \yw, \yl) \in \dataset$, we refer to it as \emph{benign} if the responses increasing in probability are as preferable as $\yw$ (\eg, they are similar in meaning to $\yw$).
+However, as \cref{sec:catastrophic} demonstrates, the probability mass can go to responses that are substantially less preferable than $\yw$ (\eg, they are opposite in meaning to $\yw$), in which case we say it is \emph{catastrophic}.
+
+
+\section{Catastrophic Likelihood Displacement in Simple Settings}
+
+\label{sec:catastrophic}
+
+Despite the prevalence of likelihood displacement \citep{pal2024smaug,yuan2024advancing,pang2024iterative,rafailov2024scaling,liu2024provably}, there is limited understanding as to why it occurs and where the probability mass goes.
+Prior work attributed this phenomenon to limitations in model capacity \citep{tajwar2024preference}, the presence of multiple training samples or output tokens \citep{tajwar2024preference,pal2024smaug}, and the initial SFT phase \citep{rafailov2024r}.
+In contrast, we demonstrate that likelihood displacement can occur and be catastrophic independently of these factors, even when training over just a single prompt whose responses contain a single token each.
+The potential adverse effects of such displacement raise the need to formally characterize its underlying causes.
+\textbf{Setting.}
+The experiments are based on the Persona dataset \citep{perez2022discovering}, in which every prompt contains a statement, and the model needs to respond whether it agrees with the statement using a single token.
+We assign to each prompt a pair of preferred and dispreferred tokens $(\yw, \yl)$ from a predetermined set containing, \eg, \texttt{Yes}, \texttt{Sure}, \texttt{No}, and \texttt{Never}.
+Then, for the OLMo-1B, Gemma-2B, and Llama-3-8B models, we perform one epoch of SFT using the preferred tokens as labels, in line with common practices, and train each model via DPO on a single randomly selected prompt.
+See \cref{app:experiments:details:catastrophic} for additional details.
+\begin{table*}[t]
+	\begin{center}
+		\small
+		\begin{tabular}{lccccc}
+			\toprule
+			& & & &  \multicolumn{2}{c}{\textbf{Tokens Increasing Most in Probability}} \\
+			\cmidrule(lr){5-6}
+			\textbf{Model} & $\yw$ & $\yl$ & $\prob_\theta (\yw | \xbf)$ \textbf{Decrease} & \textbf{\benigngreen{Benign}} & \textbf{\catastrophicred{Catastrophic}} \\
+			\midrule\\[-0.95em]
+			\multirow{2}{*}{OLMo-1B} & Yes & No &  $0.69$ \, ($0.96 \to 0.27$) & \_Yes, \_yes & --- \\[0.15em]
+			& No & Never & $0.84$ \, ($0.85 \to 0.01$) & \_No & Yes, \_Yes, \_yes \\[0.05em]
+			\midrule\\[-0.95em]
+			\multirow{2}{*}{Gemma-2B} & Yes & No & $0.22$ \, ($0.99 \to 0.77$) & \_Yes, \_yes & --- \\[0.15em]
+			& No & Never & $0.21$ \, ($0.65 \to 0.44$) & no, \_No & yes, Yeah \\[0.05em]
+			\midrule\\[-0.95em]
+			\multirow{2}{*}{Llama-3-8B} & Yes & No & $0.96$ \, ($0.99 \to 0.03$) & yes, \_yes, \_Yes & --- \\[0.15em]
+			& Sure & Yes & $0.59$ \, ($0.98 \to 0.39$)  & sure, \_Sure & Maybe, No, Never\\[0.05em]             
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	\caption{
+	\textbf{Likelihood displacement can be catastrophic, even  when training on a single prompt with single token responses.}
+        Each model was trained via DPO on a randomly chosen prompt from the Persona dataset \citep{perez2022discovering}, using different pairs of preferred and dispreferred tokens $(\yw, \yl)$ (as detailed in \cref{sec:catastrophic}).
+        We report the largest decrease in the preferred token probability $\prob_\theta (\yw | \xbf)$ during training for representative $(\yw, \yl)$ pairs, averaged across ten runs differing in the chosen prompt.
+        On the right are notable tokens whose probabilities increase at the expense of $\yw$, categorized into benign or catastrophic according to whether they have a meaning similar to or distinct from $\yw$, respectively (a preceding “\_'' stands for a whitespace; see \cref{app:experiments:further:catastrophic} for the full list and extents of increase).
+        Remarkably, when $\yw$ and $\yl$ are similar in meaning, the \textbf{tokens increasing most in probability are often opposite in meaning to $\yw$}.
+	}
+	\label{table:persona_single_example_post_sft}
+\end{table*}
+\textbf{Likelihood displacement is pervasive and can be catastrophic.}
+\cref{table:persona_single_example_post_sft} reports the decrease in preferred token probability, and notable tokens whose probabilities increase at the expense of~$\yw$.
+The probability of $\yw$ dropped by at least $0.21$ and up to $0.96$ absolute value in all runs.
+Remarkably, when $\yw$ and $\yl$ are similar in meaning, the probability mass often shifts to tokens with meanings opposite to $\yw$.
+\cref{app:experiments:further:catastrophic} reports similar findings for experiments using: \emph{(i)} base models that did not undergo an initial SFT phase (\cref{table:persona_single_example_base}); or \emph{(ii)} IPO instead of DPO (\cref{table:persona_single_example_post_sft_ipo}).
+
+        
+
+
+\section{Theoretical Analysis of Likelihood Displacement}
+
+\label{sec:likelihood_dynamics}
+
+To uncover what causes likelihood displacement when minimizing a preference learning loss, we characterize how the log probabilities of responses evolve during gradient-based training. 
+For a preference sample $(\xbf, \yw, \yl) \in \dataset$, we identify the factors pushing $\ln \prob_{\theta} (\yw | \xbf)$ downwards and those determining which responses increase most in log probability instead.
+\cref{sec:likelihood_dynamics:approach} lays out the technical approach, after which \cref{sec:likelihood_dynamics:overview} gives an overview of the main results.
+The full analysis is deferred to \cref{app:formal_analysis}.
+For the convenience of the reader, we provide the main takeaways below.
+
+ \smallskip 
+
+ \begin{takeawaybox}[label=takeaway:single_token]{Role of the Token Unembedding Geometry (\whitecref{sec:likelihood_dynamics:overview:single_token})
+ 	}
+ 	Even when training over a single prompt whose responses $\yw$ and $\yl$ contain a single token, likelihood displacement can occur due to the token unembedding geometry.
+ 	The underlying causes are: \emph{(i)} an alignment between the preferred and dispreferred token unembeddings, measured as $\langle \unembed_{\yw}, \unembed_{\yl} \rangle$; and \emph{(ii)} tokens whose unembeddings align with $\unembed_{\yw} - \unembed_{\yl}$, which increase in log probability at the expense of \smash{$\yw$}.
+ 	Tokens increasing in probability can thus have unembeddings that align with directions orthogonal to $\unembed_{\yw}$.
+ 	Since unembeddings often linearly encode semantics, this provides an explanation for why probability mass can go to tokens unrelated or opposite in meaning to $\yw$ (as observed empirically in \cref{sec:catastrophic}),
+ \end{takeawaybox}
+
+ \smallskip
+
+ \begin{takeawaybox}[label=takeaway:multiple_tokens]{Role of the Hidden Embedding Geometry (\whitecref{sec:likelihood_dynamics:overview:multiple_tokens})}
+ 	Besides the impact of the token unembedding geometry (Takeaway~\ref{takeaway:single_token}), likelihood displacement occurs when the preferred and dispreferred responses are similar according to the following measure, which is based on their hidden embeddings.
+	
+ 	\begin{definition}
+ 		\label{def:ches}
+		 For a preference sample $(\xbf, \yw, \yl)\in\dataset$, we define the \emph{centered hidden embedding similarity (CHES)} score of $\yw$ and $\yl$ with respect to a model $\prob_{\theta}$ by:
+		 \[
+		 \ches_\xbf (\yw, \yl) := \inprodBig{ \!\! \underbrace{ \sum\nolimits_{k = 1}^{\abs{\yw}}  \rep_{\xbf, \yw_{< k} } }_{ \text{ $\yw$ hidden embeddings } } }{ \underbrace{ \sum\nolimits_{k' = 1}^{\abs{\yl}} \rep_{\xbf, \yl_{< k'} } }_{ \text{$\yl$ hidden embeddings} } }  - \norm2{ \sum\nolimits_{k = 1}^{\abs{\yw}} \rep_{\xbf, \yw_{< k} }  }^2
+		 \text{\,,}
+		 \]
+		 where $\rep_{\xbf, \zbf_{< k}}$ denotes the hidden embedding that the model produces given $\xbf$ and the first $k - 1$ tokens of $\zbf \in \V^*$.
+		 A higher CHES score stands for more similar preferences.
+		 We omit the dependence of CHES on $\pi_\theta$ in our notation as it will be clear from context.
+   	\end{definition}
+ \end{takeawaybox}
+
+\smallskip
+
+\textbf{Losses with SFT regularization.}
+\cref{app:additional_sft} extends our analysis to losses incorporating an SFT regularization term.
+In particular, it formalizes how this modification helps mitigate likelihood displacement, as proposed in \citet{pal2024smaug,liu2024provably,pang2024iterative,gui2024bonbon}.
+We note, however, that our experiments in \cref{sec:unalignment} reveal a limitation of this approach for mitigating the adverse effects of likelihood displacement, compared to improving the data curation pipeline.
+
+\subsection{Technical Approach}
+\label{sec:likelihood_dynamics:approach}
+
+Given a prompt $\xbf$, the probability that the model $\prob_\theta$ assigns to a response $\zbf$ is determined by the hidden embeddings $\rep_\xbf, \rep_{\xbf, \zbf_{< 2}}, \ldots, \rep_{\xbf, \zbf_{< \abs{\zbf}}}$ and the token unembeddings~$\unembed$ (\cref{eq:lm_prob}).
+Our analysis relies on tracking their evolution when minimizing the loss $\L$ (\cref{eq:pref_loss}).
+To do so, we adopt the \emph{unconstrained features model} \citep{mixon2022neural}, which amounts to treating hidden embeddings as directly trainable parameters.
+Formally, the trainable parameters are taken to be $\theta = \brk[c]{ \rep_\zbf : \zbf \in \vocab^* } \cup \brk[c]{ \unembed }$.
+This simplification has proven useful for studying various deep learning phenomena, including neural collapse (\eg, \citet{zhu2021geometric,ji2022unconstrained,tirer2023perturbation}) and the benefits of language model pretraining for downstream tasks \citep{saunshi2021a}.
+As verified in \cref{sec:ches,sec:unalignment}, it also allows extracting the salient sources of likelihood displacement.\footnote{
+	In contrast to prior theoretical analyses of likelihood displacement, which consider stylized settings (\eg, linear models and cases where the preferred and dispreferrred responses differ only by a single token), whose implications to more realistic settings are unclear \citep{pal2024smaug,fisch2024robust,song2024understanding}.
+}
+
+Language model finetuning is typically done with small learning rates.
+Accordingly, we analyze the training dynamics of (stochastic) gradient descent at the small learning rate limit, \ie~\emph{gradient~flow}:
+\[
+\frac{d}{dt} \theta (t) = - \nabla \L \brk*{ \theta (t) } \quad , ~t \geq 0
+\text{\,,}
+\]
+where $\theta (t)$ denotes the parameters at time $t \geq 0$ of training.
+Note that under gradient flow the loss is monotonically decreasing.\footnote{
+Except for the trivial case where $\theta (0)$ is a critical point of $\L$, in which $\L (\theta (t)) = \L (\theta (0))$ for all $t \geq 0$.
+} 
+Thus, any reduction in the log probabilities of preferred responses constitutes likelihood displacement (\cf~\cref{def:likelihood_displacement}).
+\subsection{Overview of the Main Results}
+\label{sec:likelihood_dynamics:overview}
+\subsubsection{Single Training Sample and Output Token}
+\label{sec:likelihood_dynamics:overview:single_token}
+
+It is instructive to first consider the case of training on a single sample $(\xbf, \yw, \yl)$, whose responses $\yw \in \V$ and $\yl \in \V$ contain a single token.
+\cref{thm:gf_single_token_preferred_logprob_informal} characterizes how the token unembedding geometry determines when $\frac{d}{dt} \ln \prob_{\theta (t)} (\yw | \xbf)$ is negative, \ie~when likelihood displacement occurs.
+
+\begin{theorem}[Informal version of \cref{thm:gf_single_token_preferred_logprob}]
+\label{thm:gf_single_token_preferred_logprob_informal}
+Suppose that the dataset $\D$ contains a single sample $(\xbf, \yw, \yl)$, with $\yw \in \vocab$ and $\yl \in \vocab$ each being a single token.
+At any time $t \geq 0$ of training, $\frac{d}{dt} \ln \prob_{\theta (t)} (\yw | \xbf)$ is more negative the larger the following term is:
+\[
+\underbrace{ \inprod{ \unembed_{\yw} (t) }{ \unembed_{\yl} (t) } }_{ \text{preferences unembedding alignment} } \! + ~~ \sum\nolimits_{z \in \vocab \setminus \{ \yw, \yl \} } \prob_{\theta (t)} (z | \xbf) \cdot \!\!\!\!\! \underbrace{ \inprod{ \unembed_z (t) }{ \unembed_{\yw} (t) - \unembed_{\yl} (t) } }_{ \text{alignment of other token with $\unembed_{\yw} (t) - \unembed_{\yl} (t)$} }
+\text{\,\,,}
+\]
+where $\unembed_z (t)$ denotes the token unembedding of $z \in \V$ at time~$t$.
+\end{theorem}
+
+Two terms govern the extent of likelihood displacement in the case of single token responses.
+First, $\langle \unembed_{\yw} (t) , \unembed_{\yl} (t) \rangle$ formalizes the intuition that likelihood displacement occurs when the preferred and dispreferred responses are similar.
+A higher inner product in unembedding space translates to a more substantial (instantaneous) decrease in $\ln \prob_{\theta (t)} (\yw | \xbf)$.
+Second, is a term which measures the alignment of other token unembeddings with $\unembed_{\yw} (t) - \unembed_{\yl} (t)$, where tokens deemed more likely by the model have a larger weight.
+The alignment of token unembeddings with $\unembed_{\yw} (t) - \unembed_{\yl} (t)$ also determines which tokens increase most in log probability.
+
+\begin{theorem}[Informal version of \cref{thm:gf_single_token_where_mass_goes}]
+\label{thm:gf_single_token_where_mass_goes_informal}
+Under the setting of \cref{thm:gf_single_token_preferred_logprob_informal}, for any time $t \geq 0$ of training and token $z \in \V \setminus \{ \yw, \yl \}$:
+\[
+\frac{d}{dt} \ln \prob_{\theta (t)} (z | \xbf) \propto \inprod{ \unembed_z (t) }{ \unembed_{\yw} (t) - \unembed_{\yl} (t) }
+\text{\,,}
+\]
+up to an additive term independent of $z$.
+\end{theorem}
+
+The direction $\unembed_{\yw} (t) - \unembed_{\yl} (t)$ can be decomposed into its projection onto $\unembed_{\yw} (t)$ and a component orthogonal to $\unembed_{\yw} (t)$, introduced by $\unembed_{\yl} (t)$. 
+Thus, tokens increasing in log probability can have unembeddings that mostly align with directions orthogonal to $\unembed_{\yw} (t)$, especially when the component orthogonal to $\unembed_{\yw} (t)$ of $\unembed_{\yw} (t) - \unembed_{\yl} (t)$ is relatively large (which we often find to be the case empirically; see \cref{table:persona_pref_vs_proj_direction_norm} in \cref{app:experiments:further:catastrophic}).
+Given that token unembeddings are known to linearly encode semantics \citep{mikolov2013distributed,arora2016latent,park2024linear}, this provides an explanation for why the probability mass can shift to tokens that are unrelated or opposite in meaning to the preferred token, \ie~why likelihood displacement can be catastrophic even in simple settings (as observed in \cref{sec:catastrophic}).
+
+ 
+\subsubsection{Responses with Multiple Tokens}
+\label{sec:likelihood_dynamics:overview:multiple_tokens}
+
+We now extend our analysis to the typical case where responses are sequences of tokens.
+As shown below, the existence of multiple tokens in each response introduces a dependence on their (contextual) hidden embeddings.
+
+\begin{theorem}[Informal version of \cref{thm:gf_multiple_tokens_preferred_logprob}]
+\label{thm:gf_multiple_tokens_preferred_logprob_informal}
+Suppose that the dataset $\dataset$ contains a single sample $(\xbf, \yw, \yl)$, with $\yw \in \V^*$ and $\yl \in \V^*$.
+At any time $t \geq 0$ of training, in addition to the dependence on token unembeddings identified in \cref{thm:gf_single_token_preferred_logprob_informal}, $\frac{d}{dt} \ln \prob_{\theta (t)} (\yw | \xbf)$ is more negative the larger the following term is:
+ \[
+  \sum_{k = 1}^{\abs{\yw}} \sum_{k' = 1}^{\abs{\yl}} \alpha^{-}_{k, k'} (t) \cdot \underbrace{ \inprod{ \rep_{\xbf, \yw_{< k} } (t) } { \rep_{\xbf, \yl_{< k'} } (t) } }_{\text{preferred-dispreferred alignment}} - \sum_{k = 1}^{\abs{\yw}} \sum_{k' = 1}^{\abs{\yw}} \alpha^{+}_{k, k'} (t) \cdot \underbrace{ \inprod{ \rep_{\xbf, \yw_{< k} } (t) }{ \rep_{\xbf, \yw_{< k'} } (t) } }_{\text{preferred-preferred alignment}}
+ \text{\,,}
+ \]
+where $\rep_{\zbf} (t)$ denotes the hidden embedding of $\zbf \in \V^*$ at time $t$, and $\alpha^{-}_{k, k'} (t), \alpha^{+}_{k, k'} (t) \in [-2, 2]$ are coefficients determined by the model's next-token distributions for prefixes of $\yw$ and $\yl$ (see \cref{thm:gf_multiple_tokens_preferred_logprob} in \cref{app:formal_analysis:multiple_tokens} for their definition).
+\end{theorem}
+
+\cref{thm:gf_multiple_tokens_preferred_logprob_informal} establishes that the inner products between hidden embeddings, of both the “preferred-dispreferred" and “preferred-preferred" types, affect likelihood displacement.
+A larger inner product leads to an upwards or downwards push on \smash{$\ln \prob_{\theta (t)} (\yw | \xbf)$}, depending on the sign of the corresponding \smash{$\alpha^{-}_{k, k'} (t)$} or \smash{$\alpha^{+}_{k, k'} (t)$} coefficient.
+Empirically, we find that these coefficients are mostly positive across models and datasets; \eg, the OLMo-1B, Gemma-2B, and Llama-3-8B models and the UltraFeedback and AlpacaFarm datasets (see \cref{app:experiments:further:coeff} for details).
+By accordingly setting all coefficients in \cref{thm:gf_multiple_tokens_preferred_logprob_informal} to one, we derive the \emph{centered hidden embedding similarity (CHES)} score between preferred and dispreferred responses (\cref{def:ches}).
+Our analysis indicates that a higher CHES score implies more severe likelihood displacement.
+\cref{sec:ches} empirically verifies this relation, and demonstrates that the CHES score is significantly more predictive of likelihood displacement than other plausible similarity measures.
+
+Our analysis also provides insight into which responses increase most in probability at the expense of $\yw$.
+\cref{thm:gf_multiple_tokens_where_mass_goes} in \cref{app:formal_analysis:multiple_tokens} derives the dependence of \smash{$\frac{d}{dt} \ln \prob_{\theta (t)} (\zbf | \xbf)$}, for any response $\zbf \in \V^*$, on the alignment of its hidden embeddings with those of $\yw$ and $\yl$.
+However, in general settings, it is difficult to qualitatively describe the types of responses increasing in probability, and whether they constitute benign or catastrophic likelihood displacement.
+\cref{sec:unalignment} thus demonstrates the (harmful) implications of likelihood displacement in settings where responses can be easily categorized into benign or catastrophic.
+We regard studying the question of where the probability mass goes in additional settings as a promising direction for future work.
+\subsubsection{Multiple Training Samples}
+\label{sec:likelihood_dynamics:overview:multiple_examples}
+
+\cref{sec:likelihood_dynamics:overview:single_token,sec:likelihood_dynamics:overview:multiple_tokens} showed that likelihood displacement may occur regardless of the dataset size.
+Nonetheless, increasing the number of training samples was empirically observed to exacerbate it \citep{tajwar2024preference}.
+\cref{app:formal_analysis:multiple_examples} sheds light on this observation by characterizing, for any $(\xbf, \ywsmash, \ylsmash) \in \dataset$, when additional training samples lead to a larger decrease in \smash{$\ln \prob_{\theta (t)} (\yw | \xbf)$}.
+This unsurprisingly occurs when $\ywsmash$ appears as the dispreferred response of other prompts, \ie~there are contradicting samples.
+We further establish that additional training samples can contribute negatively to \smash{$\frac{d}{dt} \ln \prob_{\theta (t)} (\yw | \xbf)$} even when their preferences are distinct from those of $\xbf$.
+
+
+
+\section{Identifying Sources of Likelihood Displacement}
+
+\label{sec:ches}
+
+In \cref{sec:likelihood_dynamics} we derived the CHES score (\cref{def:ches}), which for a given model and preference sample $(\xbf, \yw, \yl)$, measures the similarity of $\yw$ and $\yl$ based on their hidden embeddings.
+Our theory indicates that samples with a higher CHES score lead to more likelihood displacement.
+Below, we affirm this prediction and show that the CHES score enables identifying which training samples in a dataset contribute most to likelihood displacement, whereas alternative similarity measures fail to do so.
+The following \cref{sec:unalignment} then demonstrates that filtering out samples with a high CHES score can mitigate undesirable implications of likelihood displacement.
+\textbf{Setting.}
+We use the UltraFeedback and AlpacaFarm datasets and the OLMo-1B, Gemma-2B, and Llama-3-8B models.
+For every preference dataset and model, we compute the CHES scores of all samples.
+This requires performing a single forward pass over the dataset.
+Then, for each of the 0th, 25th, 50th, 75th, and 100th score percentiles, we take a subset of 512 samples centered around it.\footnote{
+The 0th and 100th percentile subsets include the 512 samples with lowest and highest scores, respectively.
+}
+Lastly, we train the model via DPO on each of the subsets separately, and track the change in log probability for preferred responses in the subset~---~the more the log probabilities decrease, the more severe the likelihood displacement is.
+See \cref{app:experiments:details:hidden_embedding} for further details.
+
+\textbf{Baselines.} 
+Preferences with low (normalized) edit distance where suggested in \citet{pal2024smaug} as a cause for likelihood displacement.
+Thus, we repeat the process outlined above while ranking the similarity of preferences using the (normalized) edit distance, where a lower edit distance between $\yw$ and $\yl$ corresponds to a higher similarity.
+To the best of our knowledge, no other property of a preference sample was linked with likelihood displacement in the literature.
+So we additionally compare to a natural candidate: using the inner product between the last hidden embeddings of $\yw$ and $\yl$, \ie~$\inprodnoflex{\rep_{ \xbf, \yw }}{ \rep_{\xbf, \yl}}$, as the similarity score.
+\begin{figure*}[t]
+	\centering
+	\hspace*{-2mm}
+	\includegraphics[width=\linewidth]{figs/similarity/ultrafeedback_dpo_gemma_llama_line_plots.pdf}
+	\caption{
+		\textbf{CHES score (\cref{def:ches}) identifies which training samples contribute to likelihood displacement, whereas alternative similarity measures do not.}
+		Each model was trained via DPO on subsets of 512 samples from the UltraFeedback dataset.
+		The subsets are centered around different preference similarity percentiles, according to the following measures: \emph{(i)} the CHES score; \emph{(ii)} (normalized) edit distance, which was suggested in \citet{pal2024smaug} as indicative of likelihood displacement; and \emph{(iii)} the inner product between the last hidden embeddings of the preferred and dispreferred responses (see \cref{sec:ches} for further details).
+		We report for each subset the change in mean preferred response log probability, averaged across three runs (error bars denote minimal and maximal values).
+		The CHES score ranking perfectly matches with the degree of likelihood displacement~---~subsets with a higher score percentile induce a larger log probability decrease.
+		On the other hand, the alternative measures are not indicative of likelihood displacement.
+	}
+	\label{fig:ultrafeedback_displacement_to_pref_sim_dpo}
+\end{figure*}
+
+\textbf{CHES score effectively identifies samples leading to likelihood displacement.}
+For the UltraFeedback dataset, \cref{fig:ultrafeedback_displacement_to_pref_sim_dpo} shows the change in mean preferred response log probability against the similarity percentile of samples.
+Across all models, the CHES score ranking matches perfectly the degree of likelihood displacement: the higher the CHES score percentile, the more preferred responses decrease in log probability.
+Moreover, training on samples with high CHES scores leads to severe likelihood displacement, whereas training on samples with low CHES scores leads the preferred responses to increase in log probability.
+
+\textbf{CHES score is more indicative of likelihood displacement than alternative measures.}
+In contrast to the CHES score, the edit distance of preferences and the inner product between their last hidden embeddings are not indicative of likelihood displacement.
+Moreover, these measures failed to identify samples leading to likelihood displacement: for almost all similarity percentiles, the mean preferred response log probability increased, with the few exceptional decreases being relatively minor.
+
+\textbf{Additional experiments.}
+\cref{app:experiments:further:hidden_embedding} reports similar findings for experiments using: \emph{(i)} the AlpacaFarm dataset instead of UltraFeedback (\cref{fig:alpacafarm_displacement_to_pref_sim_dpo}); \emph{(ii)} IPO instead of DPO (\cref{fig:ultrafeedback_displacement_to_pref_sim_ipo}); or \emph{(iii)} the OLMo-1B model (\cref{fig:ultrafeedback_displacement_to_pref_sim_olmo}).
+\textbf{Qualitative analysis.}
+\cref{app:experiments:further:hidden_embedding} further includes representative samples with high and low CHES scores (\cref{tab:ultrafeedback_highest_examples,tab:ultrafeedback_least_examples}, respectively).
+A noticeable trait is that, in samples with a high CHES score, the dispreferred response is often longer than the preferred response, whereas for samples with a low CHES score the trend is reversed (\ie~preferred responses are longer).
+We find that this stems from a tendency of current models to produce, for different responses, hidden embeddings with a positive inner product (\eg, over 99\% of such inner products are positive for the Llama-3-8B model and UltraFeedback dataset).
+As a result, for samples with longer dispreferred responses the CHES score comprises more positive terms than negative terms.
+
+
+\section{Unintentional Unalignment in Direct Preference Learning}
+
+\label{sec:unalignment}
+
+Direct preference learning has been successfully applied for improving general instruction following and performance on downstream benchmarks (\eg, \citet{tunstall2023zephyr,ivison2023camels,jiang2024mixtral,dubey2024llama}).
+This suggests that likelihood displacement may often be benign in such settings, and so does not require mitigation.
+However, in this section, we reveal that it can undermine the efficacy of safety alignment.
+When training a language model to refuse unsafe prompts, we find that likelihood displacement can \emph{unintentionally unalign} the model, by causing probability mass to shift from preferred refusal responses to harmful responses.
+We then demonstrate that this undesirable outcome can be prevented by discarding samples with a high (length-normalized) CHES score (\cref{def:ches}), showcasing the potential of the CHES score for mitigating adverse effects of likelihood displacement.
+\subsection{Setting}
+\label{sec:unalignment:setting}
+
+We train a language model to refuse unsafe prompts via the (on-policy) direct preference learning pipeline outlined in \citet{rafailov2023direct}, as specified below.
+To account for the common scenario whereby one wishes to further align an existing (moderately) aligned model, we use the Gemma-2B-IT and Llama-3-8B-Instruct models.\footnote{
+	The scenario of further aligning an existing moderately aligned model also arises in iterative direct preference learning pipelines \citep{yuan2024advancing,xiong2024iterative,pang2024iterative}.
+}
+Then, for each model separately, we create a preference dataset based on unsafe prompts from SORRY-Bench \citep{xie2024sorry}.
+Specifically, for every prompt, we generate two candidate responses from the model and label them as refusals or non-refusals using the judge model from \citet{xie2024sorry}.
+Refusals are deemed more preferable compared to non-refusals, and ties are broken by the PairRM reward model \citep{jiang2023llm}.\footnote{
+Breaking ties randomly between responses of the same type led to similar results.
+}
+Lastly, we partition the datasets into training and test sets according to a 85\%/15\% split, and train the language models via DPO over their respective training sets.
+For brevity, we defer to \cref{app:experiments:further,app:experiments:details} some implementation details and experiments using IPO, respectively.
+
+\subsection{Catastrophic Likelihood Displacement Causes Unintentional Unalignment}
+\label{sec:unalignment:unalignment}
+
+Since the initial models are moderately aligned, we find that they often generate two refusal responses for a given prompt.
+Specifically, for over 70\% of the prompts in the generated datasets, both the preferred and dispreferred responses are refusals.
+This situation resembles the experiments of \cref{sec:catastrophic}, where training on similar preferences led to catastrophic likelihood displacement (\eg, when $\yw$ was \texttt{No} and $\yl$ was \texttt{Never}, the probability of \texttt{Yes} sharply increased).
+
+Analogously, we observe that as the DPO loss is minimized, likelihood displacement causes probability mass to shift away from preferred refusal responses (\cref{tab:sorrybench_dpo_logprobs} in \cref{app:experiments:further:unalignment} reports the log probability decrease of preferred responses).
+This leads to a significant drop in refusal rates.
+Specifically, over the training sets, DPO makes the refusal rates of Gemma-2B-IT and Llama-3-8B-Instruct drop from 80.5\% to 54.8\% and 74.4\% to 33.4\%, respectively (similar drops occur over the test sets).
+In other words, instead of further aligning the model, preference learning unintentionally unaligns it.
+See \cref{app:experiments:further:unalignment} for examples of unsafe prompts from the training sets, for which initially the models generated two refusals, yet after DPO they comply with the prompts (\cref{tab:sorrybench_examples}).
+
+We note that alignment usually involves a tradeoff between safety and helpfulness.
+The drop in refusal rates is particularly striking since the models are trained with the sole purpose of refusing prompts, without any attempt to maintain their helpfulness.
+
+\subsection{Filtering Data via CHES Score Mitigates Unintentional Unalignment}
+\label{sec:unalignment:mitigating}
+
+\cref{sec:ches} showed that samples with a high CHES score (\cref{def:ches}) contibute most to likelihood displacement.
+Motivated by this, we explore whether filtering data via the CHES score can mitigate unintentional unalignment, and which types of samples it marks as problematic.
+
+As discussed in \cref{sec:ches}, due to the embedding geometry of current models, CHES scores can correlate with the lengths of responses.
+To avoid introducing a length bias when filtering data, we apply a length-normalized variant of CHES (see \cref{def:ln_ches} in \cref{app:ln_ches}).
+For comparison, we also consider adding an SFT term to the DPO loss, as suggested in \citet{pal2024smaug,xu2024contrastive,pang2024iterative,liu2024provably}, and training over “gold" responses from SORRY-Bench, which were generated from a diverse set of base and safety aligned models and labeled by human raters.
+\begin{figure*}[t]
+	\centering
+	\begin{minipage}[b]{0.53\linewidth}
+		\hspace*{0.7mm}
+		\includegraphics[width=0.92\linewidth]{figs/sorrybench/refusal_rates_train.pdf}
+		\caption{
+			\textbf{Likelihood displacement can cause unintentional unalignment, which is mitigated by data filtering.}
+			Training a model to refuse unsafe prompts from SORRY-Bench via DPO unintentionally leads to a substantial decrease in refusal rates due to likelihood displacement.
+			Filtering out samples with a high length-normalized CHES score ($\star$) or using “gold" preference data, generated from a diverse set of models, successfully mitigates the problem, and goes beyond the improvement achieved when adding an SFT term to the DPO loss.
+			Reported are the refusal rates over the training sets, averaged across three runs (error bars denote minimal and maximal values).
+			Refusal rates over the test sets were similar.
+			See \cref{sec:unalignment} for further details.
+		}
+		\label{fig:sorrybench_refusal_rate_dpo}
+	\end{minipage}
+	\hspace{0.02\linewidth}
+	\begin{minipage}[b]{0.43\linewidth}
+		\hspace{1mm}
+		\includegraphics[width=0.87\linewidth]{figs/sorrybench/ches_ranking.pdf}
+		\caption{
+			\textbf{Length-normalized CHES score identifies samples with two responses of the same type as responsible for likelihood displacement.}
+			For Llama-3-8B-Instruct, we take the corresponding SORRY-Bench training preference dataset (see \cref{sec:unalignment:setting} for details on the dataset creation process), and plot the ranking of samples according to their length-normalized CHES scores.
+			Gray line marks the 5\% samples included in the filtered dataset of \cref{fig:sorrybench_refusal_rate_dpo}.
+			Agreeing with intuition, samples with two refusal or two non-refusal responses tend to have a higher score than samples with one of each.
+		}	
+		\label{fig:sorrybench_llama_category_ches}
+	\end{minipage}
+\end{figure*}
+\textbf{Filtering data via CHES score mitigates unintentional unalignment.}
+\cref{fig:sorrybench_refusal_rate_dpo} reports the refusal rates before and after training via DPO: \emph{(i)} on the original dataset, which as stated in \cref{sec:unalignment:unalignment} leads to a substantial drop in refusal rates; \emph{(ii)} with an additional SFT term on the original dataset; \emph{(iii)} on the gold dataset; and \emph{(iv)} on a filtered version of the original dataset that contains the 5\% samples with lowest length-normalized CHES scores.\footnote{
+Keeping up to 15\% of the original samples led to analogous results.
+Beyond that, as when training on the full dataset, likelihood displacement caused refusal rates to drop.
+}
+Filtering data via the CHES score successfully mitigates unintentional unalignment.
+Moreover, while adding an SFT term to the loss also prevents the drop in refusal rates, data filtering boosts the refusal rates more substantially.
+We further find that DPO on gold preferences does not suffer from likelihood displacement or unintentional unalignment (\ie~the preferred responses increase in log probability; see \cref{tab:sorrybench_dpo_logprobs}).
+Overall, these results highlight the importance of curating data with sufficiently distinct preferences for effective preference learning.
+
+\textbf{Which samples have a high CHES score?}
+\cref{fig:sorrybench_llama_category_ches} reveals that the length-normalized CHES score ranking falls in line with intuition~---~samples with two refusal or two non-refusal responses tend to have a higher score than samples with one of each, and so are more likely to cause likelihood displacement.
+To confirm that both samples with two refusal responses and samples with two non-refusals are responsible for the drop in refusal rates (shown in \cref{fig:sorrybench_refusal_rate_dpo}), we trained the Gemma-2B-IT and Llama-3-8B-Instruct models via DPO on each type of samples separately. 
+In both cases, likelihood displacement occurred and the refusal rates dropped as when training on the full dataset.
+
+
+
+ 
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\textbf{Preference learning for language model alignment.}
+There are two main approaches for aligning language models based on preference data.
+First, RLHF (or RLAIF)~\citep{ziegler2019fine,stiennon2020summarize,ouyang2022training,bai2022constitutional}, which requires fitting a reward model to a dataset of human (or AI) preferences, and then training the language model to maximize the reward.
+While often effective for improving the quality of generated responses, RLHF is computationally expensive and can suffer from instabilities \citep{zheng2023secrets,ramamurthy2023reinforcement,razin2024vanishing}.
+This has led to the rise of \emph{direct preference learning}, as popularized by DPO \citep{rafailov2023direct}.
+Our analysis supports methods that maximize the log probability ratio of preferred and dispreferred responses (\cf~\cref{sec:prelim:direct_preference_learning}), including DPO and many of its variants (\eg, \citet{zhao2023calibrating,azar2024general,gao2024rebel,tang2024generalized,pal2024smaug,xu2024contrastive,liu2024provably,gui2024bonbon,meng2024simpo}).
+Investigating whether other variants, \eg, those proposed in \citet{ethayarajh2024kto,hong2024reference,song2024preference,wu2024self}, suffer from likelihood displacement is a potential avenue for future work.
+
+\textbf{Analyses of direct preference learning.}
+Prior work mostly established sample complexity guarantees for DPO (or a variant of it) when the training data obeys a specific, stringent structure~\citep{im2024generalization} or provides sufficient coverage~\citep{liu2024provably,song2024understanding,cen2024value,huang2024correcting}.
+Additionally, \citet{im2024understanding,feng2024towards} studied the optimization rate of DPO.
+More relevant to our work is \citet{chen2024preference}, which demonstrated that DPO can fail to correct how a model ranks preferred and dispreferred responses.
+While related, this phenomenon is distinct from likelihood displacement.
+In particular, when likelihood displacement occurs the probability of preferred responses is often higher than the probability of dispreferred responses (as illustrated in \cref{fig:main} and was the case in the experiments of \cref{sec:catastrophic,sec:ches,sec:unalignment}).
+
+\textbf{Likelihood displacement.}
+The relation of our results to existing claims regarding likelihood displacement was discussed throughout the paper.
+We provide in \cref{app:further_comparison} a consolidated account.
+
+\textbf{Jailbreaking and Unalignment.}
+Aligned language models are vulnerable to jailbreaking through carefully designed adversarial prompts~\citep{xu2024comprehensive}.
+However, even when one does not intend to unalign a given model, \citet{pelrine2023exploiting,qi2024fine,he2024safe,zhan2023removing,lyu2024keeping} showed that performing SFT over seemingly benign data can result in unalignment.
+The experiments in \cref{sec:unalignment} provide a more extreme case of unintentional unalignment.
+Specifically, although the models are trained with the sole purpose of refusing unsafe prompts, likelihood displacement causes the refusal rates to drop, instead of increase.
+
+ 
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+While direct preference learning has been widely adopted, there is considerable uncertainty around how it affects the model (\cf~\citet{xu2024dpo,chen2024preference}).
+Our theory and experiments shed light on the causes and implications of one counter-intuitive phenomenon~---~\emph{likelihood displacement}.
+We demonstrated that likelihood displacement can be catastrophic, shifting probability mass from preferred responses to responses with an opposite meaning, which can result in \emph{unintentional unalignment} when training a language model to refuse unsafe prompts.
+Intuitively, these failures arise when the preferred and dispreferred responses are similar.
+We formalized this intuition and derived the \emph{centered hidden embedding similarity (CHES)} score (\cref{def:ches}), which effectively identifies samples contributing to likelihood displacement in a given dataset.
+As an example for its potential uses, we showed that filtering out samples with a high (length-normalized) CHES score can prevent unintentional unalignment.
+More broadly, our work highlights the importance of curating data with sufficiently distinct preferences.
+We believe the CHES score introduced by our theory may prove valuable in achieving this goal.
+
+
+\subsection{Limitations and Future Work}
+\label{sec:conclusion:limitations_and_future}
+
+\textbf{Theoretical analysis.}
+Our theory focuses on the instantaneous change of log probabilities, and abstracts away which neural network architecture is used for computing hidden embeddings.
+Future work can extend it by studying the evolution of log probabilities throughout training and accounting for how the architecture choice influences likelihood displacement.
+
+\textbf{Occurrences of catastrophic likelihood displacement.}
+While our findings reveal that likelihood displacement can make well-intentioned training result in undesirable outcomes, we do not claim that this occurs universally. 
+Indeed, direct preference learning methods have been successfully applied for aligning language models \citep{tunstall2023zephyr,ivison2023camels,jiang2024mixtral,dubey2024llama}.
+Nonetheless, in light of the growing prominence of these methods, we believe it is crucial to detect additional settings in which likelihood displacement is catastrophic.
+
+\textbf{Utility of the CHES score.}
+We demonstrated the potential of the (length-normalized) CHES score for filtering out samples that cause likelihood displacement.
+However, further investigation is necessary to assess its utility more broadly.
+For example, exploring whether data filtering via CHES scores improves performance in general instruction following settings, or whether CHES scores can be useful in more complex data curation pipelines for selecting distinct preferences based on a pool of candidate responses, possibly generated from a diverse set of models.
+
+	
+	
+
+

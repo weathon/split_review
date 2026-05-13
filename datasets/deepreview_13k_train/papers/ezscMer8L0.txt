@@ -1,0 +1,379 @@
+\title{Convolution Meets LoRA: Parameter Efficient Finetuning for Segment Anything Model}
+
+\begin{abstract}
+The Segment Anything Model (SAM) stands as a foundational framework for image segmentation. While it exhibits remarkable zero-shot generalization in typical scenarios, its advantage diminishes when applied to specialized domains like medical imagery and remote sensing. To address this limitation, this paper introduces Conv-LoRA, a simple yet effective parameter-efficient fine-tuning approach. By integrating ultra-lightweight convolutional parameters into Low-Rank Adaptation (LoRA), Conv-LoRA can inject image-related inductive biases into the plain ViT encoder, further reinforcing SAM’s local prior assumption. Notably, Conv-LoRA not only preserves SAM’s extensive segmentation knowledge but also revives its capacity of learning high-level image semantics, which is constrained by SAM’s foreground-background segmentation pretraining. Comprehensive experimentation across diverse benchmarks spanning multiple domains underscores Conv-LoRA’s superiority in adapting SAM to real-world semantic segmentation tasks
+\end{abstract}
+
+\section{Introduction}
+
+
+The AI community have witnessed the explosion development of a series of foundation models in recent years, such as CLIP \citep{radford2021learning}, GPT-4 \citep{openai2023gpt4} and ViT-22B \citep{dehghani2023scaling}. Recently, Segment Anything (SAM) \citep{kirillov2023segment}, a promptable model pretrained on over 1 billion masks and 11 million images, emerged as a foundation model for image segmentation. Despite its impressive zero-shot performance on generic object segmentation, it doesn’t perform well on many real-world segmentation tasks in certain domains \citep{tang2023can, ji2023segment, zhou2023can}, such as natural images \citep{borji2019salient, fan2020camouflaged}, agriculture \citep{sriwastwa2018detection}, remote sensing \citep{xu2018road} and medical images \citep{fan2020pranet}.
+
+Following the pretraining-finetuing paradigm \citep{dosovitskiy2020image, he2022masked, liu2021swin}, it is natural to finetune SAM on downstream tasks to enhance its performance. However, existing works \citep{zhang2023customized, chen2023sam, shaharabany2023autosam} have failed to either analyze or address certain limitations inherent in SAM. 1) SAM’s image encoder is a plain ViT, which is known to lack of vision-specific inductive biases \citep{chen2022vision} that are useful for dense predictions. 2) SAM’s pretraining is essentially a binary mask prediction task that, where, given one prompt, it separates foreground object from background. The low-level mask prediction pretraining hinders SAM’s ability to capture high-level image semantic information crucial for tasks like multi-class semantic segmentation. 
+
+To tackle the above limitations and still retain SAM’s valuable segmentation knowledge acquired during pretraining, we finetune a small set of (extra) model parameters while freezing most of SAM’s pretrained weights, hence parameter efficient finetuning (PEFT). This raises the question: \textit{Can PEFT enhance SAM encoder with image-related local prior and facilitate the acquisition of high-level semantic information?}
+
+\begin{figure}[t]
+\makeatletter
+\renewcommand{\@thesubfigure}{\hskip\subfiglabelskip}
+\makeatother
+
+                \centering
+    \subfigure[]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/road/img-45.png}
+    \end{minipage}
+    }
+    \subfigure[]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/road/img-45-gt.png}
+    \end{minipage}
+    }
+    \subfigure[]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/road/img-45-vpt.png}
+    \end{minipage}
+    }
+    \subfigure[]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/road/img-45-lora.png}
+    \end{minipage}
+    }
+    \subfigure[]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/road/img-45-conv-lora.png}
+    \end{minipage}
+    }
+
+    \subfigure[RGB Images]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+\includegraphics[width=\linewidth]{imgs/vis_res/trans10k/10044.jpg}
+    \end{minipage}
+    }
+    \subfigure[GT]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/trans10k/10044_mask.png}
+    \end{minipage}
+    }
+    \subfigure[VPT]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/trans10k/10044-vpt.png}
+    \end{minipage}
+    }
+    \subfigure[LoRA]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/trans10k/10044-lora.png}
+    \end{minipage}
+    }
+    \subfigure[Conv-LoRA]{
+    \begin{minipage}[t]{0.18\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/vis_res/trans10k/10044-conv-lora.png}
+    \end{minipage}
+    \label{fig:quick_vis}
+
+    }
+    \caption{
+    Comparison of VPT, LoRA, and Conv-LoRA (ours) in binary-class road segmentation (\textbf{top}) and multi-class transparent object segmentation (\textbf{bottom}). Conv-LoRA reinforces image-related local priors, allowing SAM to separate roads from adjacent buildings, while LoRA and VPT struggle in this regard. In the second row, VPT produces a reasonable mask for the bowls but erroneously assigns them to the jar/kettle class (indicated by object color), revealing SAM's limited high-level semantic understanding. Both LoRA and Conv-LoRA rectify this misclassification through finetuing SAM's image encoder, with Conv-LoRA delivering a cleaner mask with fewer boundary artifacts.
+    }
+
+    
+\end{figure}
+
+In this paper, we propose a new PEFT method named Conv-LoRA by diving into Low-Rank Adaptation (LoRA) \citep{hu2021lora}. LoRA introduces slim trainable linear projection layers into each transformer layer of SAM’s encoder, thereby helping recover its capacity to extract high-level semantic information. Our experiments demonstrate that LoRA surpasses the widely-adopted visual prompt tuning (VPT) \citep{jia2022visual}, particularly in the multi-class semantic segmentation tasks. On top of LoRA, Conv-LoRA integrates lightweight convolution layers within its bottleneck structure. Convolution can introduce the image-related local prior (i.e. a pixel exhibits stronger correlation with its neighbors than the distant pixels) \citep{chen2022vision} through the local spatial operations.
+
+Furthermore, it is essential to inject the local prior into the appropriate scale(s) of image features, considering the potential variations in object scales. To this end, Conv-LoRA draws inspiration from the concept of Mixture-of-Experts (MoE) \citep{shazeer2017outrageously} and incorporates multiple parallel convolutional experts, each specializing in a distinct feature scale. Given that ViT processes image features at a fixed scale, typically downsampling them by a factor of 16 from the original resolution, each expert in Conv-LoRA initially recovers image features at a specific scale, applies convolutional operations, and then reverts the features to the default scale. Compared to ViT-adaptor \citep{chen2022vision} and vision-specific transformers like Swin Transformer \citep{liu2021swin}, Conv-LoRA provides an implicit way to enforce multi-scale local priors, assuming it can leverage image features at the default scale to reconstruct feature information at higher scales. Fortunately, SAM's supervised pretraining, which involves masks of various scales, enables the ViT to acquire knowledge of image features beyond the default scale.
+
+In the spirit of PEFT, we also remove the prompt encoder and add lightweight MLPs in the mask decoder for multi-class prediction. This simple modification has transformed SAM into an end-to-end model that can be finetuned on both binary and multi-class semantic segmentation applications. Overall, our contribution can be summarized as follows:
+
+\begin{itemize}
+\item  We present an innovative PEFT technique Conv-LoRA. By incorporating supplementary convolution operations, Conv-LoRA reinforces the local prior of SAM from the perspective of handling the limitation of plain ViT.
+\item  Conv-LoRA uses MoE to model the process of dynamically selecting the proper feature scale to inject the vision-specific inductive biases.
+\item  Our investigations reveal that SAM's pretraining has impeded its ViT encoder's capacity to learn high-level image semantic information. However, LoRA demonstrates the potential to help SAM recover this crucial ability.
+\item  We conduct an extensive benchmark encompassing diverse domains, including natural images, agriculture, remote sensing, and healthcare. Conv-LoRA consistently exhibits superior performance over other PEFT techniques in various downstream tasks.
+\end{itemize}
+
+
+\section{Related Work}
+
+\textbf{Parameter Efficient Fine-Tuning (PEFT)}. 
+Parameter Efficient Fine-Tuning (PEFT) minimizes computational and storage requirements by selectively fine-tuning a small subset of model parameters, while keeping the majority fixed. PEFT encompasses methods such as adapter-based techniques, selective parameter tuning, prompt-driven fine-tuning, and Low-Rank Adaptation (LoRA) emerging from Natural Language Processing (NLP). In the adapter paradigm \citep{houlsby2019parameter, hu2021lora,sung2022lst}, compact modules are inserted within transformer layers, and other approaches \citep{guo2020parameter, zaken2021bitfit} involve fine-tuning a small fraction of parameters from pre-trained backbones. Prompt tuning \citep{lester2021power, li2021prefix} adds adaptable tokens to input or intermediate sequences, and LoRA \citep{hu2021lora} introduces trainable low-rank matrices into transformer layers for weight updates.
+
+PEFT techniques have also proven effective in the Computer Vision (CV) domain. Visual Prompt Tuning (VPT) \citep{jia2022visual} applies prompt tuning concepts \citep{lester2021power} to image classification, while Scale and Shift Feature Modulation (SSF) \citep{lian2022scaling} uses scale and shift parameters for modulating visual features in image classifiers. Convpass \citep{jie2022convolutional} introduces a convolutional bottleneck to enhance ViT's performance in image classification. In our study, we focus on developing PEFT for SAM in semantic segmentation tasks, specifically enforcing multi-scale local priors beyond the default scale, distinguishing our approach from Convpass.
+
+\textbf{Segmentation Models}. 
+FCN \citep{fcn} is a key deep image segmentation model that directly generates pixel-wise segmentation maps from images. U-Net \citep{unet} employs an encoder-decoder structure with skip connections to preserve fine-grained spatial information. Deeplab \citep{deeplab} integrates atrous (dilated) convolutions for multi-scale context, while PSPNet \citep{pspnet} uses a pyramid pooling module. DANet \citep{danet}, SANet \citep{sanet}, and EMA \citep{ema} utilize attention mechanisms for contextual dependencies. Transformer architectures like PVT \citep{pvt}, Swin \citep{swin}, CvT \citep{cvt}, CoaT \citep{coat}, LeViT \citep{levit}, Segformer \citep{xie2021segformer}, and PVT v2 \citep{pvtv2} bring various improvements. SAM \citep{ji2023segment}, a recent breakthrough in segmentation, offers a universal approach for segmenting diverse objects and regions in images. Fine-tuning SAM on downstream tasks is recommended due to a lack of high-level semantic information and potential domain bias in the pre-training dataset.
+
+\textbf{Fine-tuning SAM.} Some prior works \citep{chen2023sam, zhang2023customized, wu2023medical, chai2023ladder, shaharabany2023autosam, hu2023efficiently,wang2023sam} explore fine-tuning SAM for downstream tasks. These methods include tuning SAM's mask decoder or integrating parameter-efficient tuning methods with SAM's image encoder. Some of them (e.g.,\citep{chen2023sam,zhang2023customized,shaharabany2023autosam}) provide end-to-end solutions to automate SAM. Our method further addresses the structural limitation of SAM's image encoder for capturing visual-specific inductive biases by introducing convolution operations. And we unveil that SAM's pretraining hampers its ViT encoder's ability to learn high-level semantic information. We also transform SAM into an end-to-end semantic segmentation model with minor architectural adjustments.
+
+\textbf{Mixture-of-Experts.} Mixture-of-Expert (MoE) is designed to expand model capacity while introducing small computational overhead. An MoE layer leverages multiple experts to enhance model capacity, while using the gating network to regulate sparsity for computational savings. Feed-Forward Networks (FFN) are commonly employed as the default choice for experts \citep{shazeer2017outrageously,riquelme2021scaling,bao2022vlmo,du2022glam,zhou2022mixture,fedus2022switch}. Some efforts \citep{zuo2021taming,zhou2022mixture} focus on more efficient gating mechanisms.
+
+In our work, we utilize the concept of MoE, not aiming at improving it. We compare MoE used in our work with original MoE in three aspects: 1) The original goal of MoE is to expand model capacity without excessively increasing computational overhead, whereas ours is to dynamically inject the local prior into the feature maps of different scales. 2) The structures of experts in MoE are typically the same, whereas ours are not. Each expert specializes in a specific scaling operation in our method. 3) While MoE is mostly employed during pre-training, we employ MoE as a part for parameter-efficient tuning on the downstream tasks.
+
+
+
+\section{Method}
+
+
+\subsection{Conv-LoRA}
+\label{sec:conv-lora}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{imgs/moe-conv-lora.pdf}
+    \caption{LoRA vs. Conv-LoRA. Both LoRA and Conv-LoRA add an extra trainable encoder-decoder structure parallel to the frozen pre-trained weights. Inside the bottleneck of LoRA, Conv-LoRA inserts lightweight convolution operations managed by MoE with negligible extra parameters.} 
+    \label{fig:conv-lora}
+\end{figure}
+
+\textbf{LoRA}. First, let’s briefly recap the design of LoRA \citep{hu2021lora}, which uses an encoder-decoder structure to impose a low-rank constraint on the weight updates (\cref{fig:conv-lora} (a)). It freezes the pre-trained model weights and injects small trainable rank decomposition matrices into each layer of the transformer architecture. Specifically, given a pre-trained weight matrix $W_0 \in \R^{b \times a}$, LoRA adds a pair of linear encoder $W_e$ and decoder $W_d$, i.e., trainable rank decomposition matrices, along its side. $W_e$ and $W_d$ satisfy the low rank constraints $W_e \in \R^{r \times a}$, $W_d \in \R^{b \times r}$, and $r \ll min(a, b)$. With LoRA, the forward pass changes from $h=W_0x$ to:
+\begin{equation}
+    h = W_0x + W_d W_e x
+    \label{eq:lora}
+\end{equation}
+
+\textbf{Conv-LoRA} aims to incorporate convolution operations between the encoder and decoder components of LoRA (\cref{fig:conv-lora} (b)). On one hand, convolution can inject the image-related local prior, addressing fundamental limitation of the vanilla ViT. On the other hand, the low-rank constraint ensures that the convolution layers remain exceedingly lightweight, preserving the PEFT nature of Conv-LoRA. 
+
+A pivotal consideration in designing Conv-LoRA is determining the scale of feature maps at which to introduce the local prior. While the feature maps in ViT are uniform in scale, object masks typically encompass a wide range of scales. Therefore, it is crucial to apply convolution operations at the right scale. To tackle this challenge, we draw inspiration from the concept of Mixture of Experts (MoE) \citep{shazeer2017outrageously}. MoE comprises multiple expert networks and a gating module that dynamically selects which expert(s) to activate during the forward pass (\cref{fig:moe-struc}). Adapting this concept to Conv-LoRA, each expert specializes in convolution at a specific scale of feature maps, and a compact gating module learns to dynamically choose the expert(s) based on the input data. Mathematically, with Conv-LoRA, \cref{eq:lora} changes to:
+
+\begin{equation}
+\label{eq:conv-lora}
+h = W_0x + W_d (\sum_i^n G(W_e x)_i E_i(W_e x))
+\end{equation}
+
+where $W_0 \in \R^{C_{out} \times C_{in}}$, $W_e \in \R^{r \times C_{in}}$, $W_d \in \R^{C_{out}\times r}$, $x \in \R^{B \times C_{in}\times H \times W}$. $B$ is batch size, $C_{in} / C_{out}$ is the number of input / output channels, $H$ and $W$ correspond to the height and width. $E_i$ is the $i_{th}$ expert of all $n$ experts. $G$ is the gating network with only top-k (default 1) values activated. Refer to \cref{sec:gating} for more details of gating.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{imgs/moe-moe.pdf}
+    \caption{MoE-Conv. It consists of $n$ experts and a gating network for dynamic expert selection. Each expert reconstructs feature maps at a specific scale, applies convolution, and returns the feature maps to the default scale. Each expert specializes in one unique feature scale.}
+    \label{fig:moe-struc}
+\end{figure}
+Inside each expert, three key operations are arranged in sequence: an interpolation function that reconstructs feature maps at a specific scale, a $3\times3$ convolutional layer, and a subsequent interpolation operation to map the feature maps back to the default feature scale of ViT. Assume expert $E_i$ is in charge of scale $s_i$, we can formulate it as:
+
+\begin{equation}
+\label{eq:expert}
+\begin{aligned}
+E_i(x) = \text{Interpolate}(\text{Conv}_{3\times3}(\text{Interpolate}(x, s_i)), 1/s_i)
+\end{aligned}
+\end{equation}
+
+For instance, if $s_i=4$, expert $E_i$ would initially upscale the feature maps by a factor of 4x, apply the $\text{Conv}_{3\times3}$ operation, and finally, downscale the feature maps by 4x.
+
+\textbf{MoE vs. Multi-scale}. In contrast to MoE, another method to address diverse scales is employing a multi-scale strategy. This approach utilizes multiple branches to concurrently inject local priors at various scales and aggregates the results. Although seemingly more straightforward, this method comes at a higher computational cost when compared to MoE. The efficiency of MoE stems from its capacity to selectively activate sparse experts, thereby minimizing computational overhead. Given our priority on efficient finetuning, we favor MoE as a discerning choice.
+\subsection{End-to-end Multi-class Segmentation with SAM}
+
+SAM comprises three essential components: an image encoder, a prompt encoder, and a mask decoder. When provided with an image and a prompt, which can take the form of a point, box, mask, or text, the mask decoder generates a mask of the object associated with the given prompt. While this prompt-based approach renders SAM flexible for integration into larger systems, such as interactive segmentation or a combination of detection and subsequent segmentation, it does pose challenges in making SAM an end-to-end model in practical applications. To automate SAM, we freeze the prompt encoder, thus always constant prompt tokens to mask decoder, when finetuning it on downstream tasks. Moreover, the original mask decoder is designed to predict binary masks, distinguishing between foreground and background based on the given prompt. To adapt SAM for multi-class semantic segmentation tasks, we introduce a straightforward classification branch (depicted as the red dashed box in \cref{fig:mask_decoder}) within the mask decoder. This extra branch is responsible for predicting classification scores. Additionally, we apply full fine-tuning to the mask decoder as it is a lightweight module. For more comprehensive information, refer to \cref{sec:mask_decoder}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{imgs/moe-mask_decoder.pdf}
+    \caption{The modified SAM's mask decoder for multi-class semantic segmentation. The classification module (within the red dashed box) is new added compared to original SAM's mask decoder. $N$ is the number of output mask tokens, $K$ is the number of classes,  $C$ is the number of channels, $H$ and $W$ indicate the height and width of the feature map (we omit `batch size' for simplicity).
+    } 
+    \label{fig:mask_decoder}
+\end{figure}
+
+
+
+\section{Experiments}
+
+\textbf{Settings.} We perform several experiments using SAM on four real-world scenarios, including medical images, natural images, agriculture and remote sensing. We use the batch size of 4 and Adam optimizer with learning rate of $1\times10^{-4}$ as default, with a weight decay of $1\times10^{-4}$. A larger learning rate of $3\times10^{-4}$ is found useful for the datasets we use in agriculture and remote sensing. The random horizontal flip is applied during training as data augmentation. All the methods are trained for 30 epochs with structure loss (i.e., the  combination of weighted IoU loss and binary cross entropy loss) unless otherwise specified. Additionally, our Conv-LoRA follows \cite{shazeer2017outrageously} to introduce extra loss for balancing the utilization among the experts. The weight of the extra loss is set to 1.0 and 2.0 for binary-class and multi-class semantic segmentation respectively. We set the number of experts to be 8 by default, with each expert specializing in a scaling ratio within the continuous range from 1 to 8. And we apply Conv-LoRA to the query, key and value matrices in self-attention layers, same as how LoRA does.
+
+\textbf{Datasets}. Our experiments encompass semantic segmentation datasets from various domains, spanning natural images, medical images, agriculture, and remote sensing. In the natural image domain, we explore two specific tasks: camouflaged object segmentation \citep{fan2020camouflaged,skurowski2018animal,le2019anabranch} and shadow detection \citep{vicente2016large}. Within medical segmentation, we investigate polyp segmentation \citep{jha2020kvasir,bernal2015wm,tajbakhsh2015automated,vazquez2017benchmark,silva2014toward} and skin lesion segmentation \citep{codella2018skin}. For agriculture and remote sensing, we employ the leaf disease segmentation \citep{Leaf} and road segmentation \citep{mnih2013machine} datasets as representative examples, respectively. We also explore multi-class transparent object segmentation using Trans10K-v1 \citep{xie2020segmenting} with 3 classes and Trans10K-v2 \citep{xie2021segmenting} with 12 fine-grained classes. Further details about each dataset can be found in \cref{sec:dataset}.
+\textbf{Baselines}. We compare our method with the following methods: 1) Fine-tune SAM's mask decoder only. 2) BitFit \citep{zaken2021bitfit}, which only fine-tunes bias terms in the pre-trained model. 3) Adapter \citep{houlsby2019parameter}, which inserts the trainable bottleneck layers between the transformer layers. 4) SAM-Adapter \citep{chen2023sam}, which further tunes the patch embedded features and learns an extra embedding for high-frequency components for low-level semantic segmentation tasks. And it is one of the pioneer works that apply PEFT method to SAM. 5) VPT \citep{jia2022visual}, which inserts learnable tokens to hidden states for each transformer layer. 6) LST \citep{sung2022lst}, which inserts a trainable side network parallel to the frozen backbone. To control the number of trainable parameters, the side adapter network employs a pre-trained ViT-Tiny model, similar to SAN \citep{xu2023side}. The features from the frozen backbone and the side adapter network are fused at the global attention layers of SAM. 7) SSF \citep{lian2022scaling}, which inserts learnable scale and shift parameters to modulate visual features during training. 8) LoRA \citep{hu2021lora} inserts trainable bottleneck layers parallel to the frozen linear weight. 
+
+To adhere to the page limit, we select representative datasets of different domains to report the main experiment results. Refer to \cref{sec:full_exp} for the full experiment results. All the experiments for PEFT methods are run for three times to ease the randomness. The average values and the standard error are reported in \cref{tab:bi-all}.
+
+\subsection{Binary-class Semantic Segmentation}
+
+\begin{table}[t]\large
+    \centering
+    \setlength{\tabcolsep}{1.5pt}
+    \renewcommand{\arraystretch}{1.5}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{l|c|cc|cc|cc|ccc|c|cc|cc}
+        \toprule
+        \multirow{3}*{\bf \large Method} & \multirow{2}*{\bf \#Params (M) / } & \multicolumn{6}{c|}{\bf \large Medical} & \multicolumn{4}{c|}{\bf \large Natural Images} & \multicolumn{2}{c|}{\bf \large Agriculture} & \multicolumn{2}{c}{\bf \large Remote Sensing}\\
+        \cline{3-16}
+        & \bf Ratio (\%) &\multicolumn{2}{c|}{ Kvasir} &\multicolumn{2}{c|}{CVC-612} & \multicolumn{2}{c|}{ISIC 2017} & \multicolumn{3}{c|}{ CAMO} &   SBU & \multicolumn{2}{c|}{Leaf} & \multicolumn{2}{c}{ Road} \\
+        ~ & & $ S_\alpha \uparrow$ & $E_\phi \uparrow$   
+        & $ S_\alpha \uparrow$ & $E_\phi \uparrow$ & Jac $\uparrow$ & Dice $\uparrow$& $ S_\alpha \uparrow$ & $E_\phi \uparrow$ & $F^\omega_\beta \uparrow$ & BER  $\downarrow$ & IoU $\uparrow$ & Dice $\uparrow$  &  IoU $\uparrow$ & Dice $\uparrow$  \\
+        \midrule
+        \textit{Domain Specific} & * / 100\% &90.9 & 94.4 & \underline{92.6} & \underline{95.5} & \underline{80.1} & \underline{87.5} & 80.8 & 85.8 & 73.1 & 3.56  & 62.3 & 74.1 & 59.1 & 73.0\\
+        \textit{SAM trained from scratch} & 641.09 / 100\% & 78.5 & 82.4 & 85.9 & 91.6 & 73.8 & 82.5 & 61.9 & 67.0 & 40.5 & 5.53 & 52.1 &	65.5 & 55.6 & 71.1   \\
+        \midrule
+        decoder-only & 3.51 / 0.55\% & 86.5 & 89.5 & 85.5 & 89.9 &  69.7 & 79.5  & 78.5 & 83.1 & 69.8 & 14.58 & 50.8 & 63.8 & 48.6 & 65.1 \\
+        \midrule
+        BitFit & 3.96 / 0.62\% & 90.8 $\pm$ \tiny 0.57 & 93.8 $\pm$ \tiny 0.98  & 89.0 $\pm$ \tiny 0.40 & 91.6 $\pm$ \tiny 0.98 & 76.4 $\pm$ \tiny 0.45  & 84.7 $\pm$ \tiny 0.35 & 86.8 $\pm$ \tiny 0.33 & 90.7 $\pm$ \tiny 0.28 & 81.5 $\pm$ \tiny 0.19 & 3.16 $\pm$ \tiny 0.128 & 71.4 $\pm$ \tiny 1.15 & 81.7 $\pm$ \tiny 1.01 & 60.6 $\pm$ \tiny 0.15 & 75.2 $\pm$ \tiny 0.11 \\
+        Adapter & 3.92 / 0.61\% & 91.2 $\pm$ \tiny 0.23 & 94.0 $\pm$ \tiny 0.16 & 89.3 $\pm$ \tiny 0.43 & 92.0 $\pm$ \tiny 0.63  & 76.7 $\pm$ \tiny 0.66  & 85.0 $\pm$ \tiny 0.56   & 87.7 $\pm$ \tiny 0.10 & 91.3 $\pm$ \tiny 0.40  & 82.8 $\pm$ \tiny 0.35 & 2.84 $\pm$ \tiny 0.093 & 72.1 $\pm$ \tiny 0.47 & 82.4 $\pm$ \tiny 0.36 & 61.5 $\pm$ \tiny 0.11 & 75.9 $\pm$ \tiny 0.12 \\
+        VPT & 4.00 / 0.62\% & 91.5 $\pm$ \tiny 0.23 & 94.3 $\pm$ \tiny 0.06 & 91.0 $\pm$ \tiny 0.94  & 93.7 $\pm$ \tiny 1.41 & 76.9 $\pm$ \tiny 0.94 & 85.1 $\pm$ \tiny 0.75  &87.4 $\pm$ \tiny 0.60 & 91.4 $\pm$ \tiny 0.68 & 82.1 $\pm$ \tiny 0.75 & 2.70 $\pm$ \tiny 0.055 & 73.6 $\pm$ \tiny 0.26 & 83.8 $\pm$ \tiny 0.26 &   60.2 $\pm$ \tiny 1.87 & 74.9 $\pm$ \tiny 1.50\\
+        LST & 11.49 / 1.77\% & 89.7 $\pm$ \tiny 0.25 & 93.3 $\pm$ \tiny 0.37 &  89.4 $\pm$ \tiny 0.37 & 92.4 $\pm$ \tiny 0.54  & 76.4 $\pm$ \tiny 1.05  & 84.9 $\pm$ \tiny 0.79 & 83.3 $\pm$ \tiny 0.28 & 88.0 $\pm$ \tiny 0.23 & 77.1 $\pm$ \tiny 0.02 & 3.18 $\pm$ \tiny 0.012  &70.2 $\pm$ \tiny 0.87 & 81.1 $\pm$ \tiny 0.82 & 60.2 $\pm$ \tiny 0.26 & 74.9 $\pm$ \tiny 0.22   \\
+        SAM-Adapter & 3.98 / 0.62\% & 89.6 $\pm$ \tiny 0.24 & 92.5 $\pm$ \tiny 0.10 &  89.6 $\pm$ \tiny 0.22 & 92.4 $\pm$ \tiny 1.06 & 76.1 $\pm$ \tiny 0.45  & 84.6 $\pm$ \tiny 0.37  & 85.6 $\pm$ \tiny 0.26 & 89.6 $\pm$ \tiny 0.55 & 79.8 $\pm$ \tiny 0.89 &3.14 $\pm$ \tiny 0.063 & 71.4 $\pm$ \tiny 0.20 & 82.1 $\pm$ \tiny 0.10 & 60.6 $\pm$ \tiny 0.06 & 75.2 $\pm$ \tiny 0.04 \\
+       
+        SSF & 4.42 / 0.69\% & 91.3 $\pm$ \tiny 0.87 & 93.9 $\pm$ \tiny 1.49 & 89.6 $\pm$ \tiny 0.37 & 91.9 $\pm$ \tiny 0.79 & 76.6 $\pm$ \tiny 0.19  & 85.0 $\pm$ \tiny 0.14 &  87.5 $\pm$ \tiny 0.11 & 91.4 $\pm$ \tiny 0.16 & 82.6 $\pm$ \tiny 0.12 & 3.19 $\pm$ \tiny 0.046 & 71.5 $\pm$ \tiny 0.63 & 81.8 $\pm$ \tiny 0.44 & 61.6 $\pm$ \tiny 0.03 & 76.0 $\pm$ \tiny 0.02  \\
+        LoRA & 4.00 / 0.62\%  & 91.2 $\pm$ \tiny 0.28 & 93.8 $\pm$ \tiny 0.22 & 90.7 $\pm$ \tiny 0.04 & 92.5 $\pm$ \tiny 0.41 & 76.6 $\pm$ \tiny 0.23  & 84.9 $\pm$ \tiny 0.22  & 88.0 $\pm$ \tiny 0.24 & 91.9 $\pm$ \tiny 0.42 & 82.8 $\pm$ \tiny 0.16 &2.74 $\pm$ \tiny 0.079 & 73.7 $\pm$ \tiny 0.20 & 83.6 $\pm$ \tiny 0.13 & 62.2 $\pm$ \tiny 0.21 & 76.5 $\pm$ \tiny 0.18  \\
+        Conv-LoRA & 4.02 / 0.63\% & \textbf{92.0} $\pm$ \tiny 0.15 & \textbf{94.7} $\pm$ \tiny 0.16 &  \textbf{91.3} $\pm$ \tiny 0.69 & \textbf{94.0} $\pm$ \tiny 0.78 & \textbf{77.6} $\pm$ \tiny 0.57 & \textbf{85.7} $\pm$ \tiny 0.36 & \textbf{88.3} $\pm$ \tiny 0.40 & \textbf{92.4} $\pm$ \tiny 0.31 & \textbf{84.0} $\pm$ \tiny 0.34 & \textbf{2.54} $\pm$ \tiny 0.081 & \textbf{74.5} $\pm$ \tiny 0.39 & \textbf{84.3} $\pm$ \tiny 0.34 & \textbf{62.6} $\pm$ \tiny 0.36 & \textbf{76.8} $\pm$ \tiny 0.27\\
+        \bottomrule
+    \end{tabular}}
+
+    
+    \caption{Results on binary semantic segmentation. `{\small \# Params (M) / Ratio (\%)}' represents the
+number of trainable parameters and its proportion relative to the total number. \textit{Domain Specific} is a placeholder referring to methods that specifically designed for the tasks. \underline{`Underlined'} denotes the better results compared to PEFT methods. See \cref{sec:full_exp} for more details. Compared to LoRA, Conv-LoRA incurs negligible parameter overhead, but delivers a clear performance boost.}
+    \label{tab:bi-all}
+\end{table}
+In \cref{tab:bi-all}, all PEFT methods consistently outperform fine-tuning the mask decoder alone, underscoring the importance of finetuning the image encoder of SAM. Furthermore, Conv-LoRA surpasses other PEFT techniques across diverse datasets from different domains. Compared to other PEFT methods, Conv-LoRA uses lightweight convolution operations to strengthen the vision-specific local prior, which turns out effective in boosting the segmentation performance. The substantial performance gaps between SAM trained from scratch and Conv-LoRA also underscore the considerable assistance provided by SAM's pretraining knowledge in enhancing downstream task performance. 
+
+Additionally, while Conv-LoRA outperforms certain domain-specific methods that are having more trainable parameters, it may still fall short on specific datasets. It's important to note that Conv-LoRA aims to be a general-purpose PEFT method for adapting SAM to various domains rather than competing with these domain-specific models. Tailoring SAM for specific domain applications with more intricate adjustments might yield superior performance compared to specialized model designs.
+
+\subsection{Multi-class Semantic Segmentation}
+
+\begin{table}[t]
+    \centering
+    \resizebox{0.8\textwidth}{!}{%
+    \begin{tabular}{l|c|cccc|cccc}
+        \toprule
+        \multirow{2}*{\bf Method} & {\bf \small  \#Params (M) / } &\multicolumn{4}{c|}{\bf Easy} & \multicolumn{4}{c}{\bf Hard}\\
+        & {\bf \small Ratio (\%) } & Acc $\uparrow$ & mIoU $ \uparrow$ & MAE $\downarrow$  
+        & MBER $\downarrow$ &  Acc $\uparrow$ & mIoU $ \uparrow$ & MAE $\downarrow$  
+        & MBER $\downarrow$\\
+        \midrule
+        \textit{TransLab} & 42.19 / 100\%  & 95.77 &  92.23 &0.036 & 3.12 & 83.04 & 72.10 & 0.166 & 13.30\\
+        \midrule
+        decoder-only & 3.51 / 0.55\% & 94.68 & 88.54&0.050 &4.24&83.53 & 68.30 & 0.186 & 14.37\\
+        \midrule
+        VPT & 4.00 / 0.62\%& 98.31 & 95.73 & 0.017 & 1.52 & 90.42 & 83.38 & 0.083 & 7.21 \\
+        LoRA &4.00 / 0.62\% & 98.44 & 96.26 & 0.016 & 1.35 & 91.94 & 83.95 & 0.083 & 6.35 \\
+         Conv-LoRA & 4.02/ 0.63\% & \textbf{98.63} & \textbf{96.45} & \textbf{0.015} & \textbf{1.27} & \textbf{93.05} & \textbf{84.37} & \textbf{0.075} & \textbf{6.25} \\
+        \bottomrule
+      \end{tabular}}
+    
+        \resizebox{\textwidth}{!}{%
+      \begin{tabular}{l|c|cc|cccccccccccc}
+        \toprule
+        \multirow{2}*{\bf Method} & {\bf \small \# Params (M) /} & \multirow{2}*{Acc$\uparrow$}  & \multirow{2}*{mIoU $\uparrow$} & \multicolumn{12}{c}{Category IoU $\uparrow$}\\
+        \cline{5-16}
+         & \bf \small Ratio (\%) & & & bg & shelf & jar & freezer & window&  door&  eyeglass&  cup&  wall&  bowl & bottle&  box \\
+        \midrule
+        \textit{TransLab}  & 42.19 / 100\% & 92.67 & 69.00 & 93.90 & 54.36 & 64.48 & \underline{65.14}&  54.58&  57.72&  79.85 & 81.61&  72.82&  69.63&  77.50&  56.43\\
+        \textit{Trans2Seg} & 56.20 / 100\% & 94.14 & \underline{72.15} & 95.35&  \underline{53.43}&  \underline{67.82} & 64.20&  \underline{59.64}&  60.56&  \underline{88.52}&  \underline{86.67}&  75.99 & \underline{73.98} & \underline{82.43} & \underline{57.17}\\
+        \midrule
+        decoder-only & 3.51 / 0.55\% & 90.66 & 49.97 & 93.66 & 32.75 & 39.96 & 35.87 & 50.70 & 45.89 & 57.38 & 73.16 & 69.36 & 54.23 & 56.58 & 33.77  \\
+        \midrule
+        VPT & 4.00 / 0.62\% & 94.42 & 62.81 & 97.41 & 29.76 & 52.82 & 62.09 & 55.54 & 63.61 & 81.12 & 83.40 & 79.61 & 65.29 & 72.92 & 44.77  \\
+        LoRA & 4.00  / 0.62\% & 94.80 & 66.01 & 97.50 & 42.17 & 57.82 & \textbf{64.35} & 53.44 & 64.08 & \textbf{87.28} & \textbf{85.28} & 80.43 & 63.67 & 77.97 & 49.56  \\
+        Conv-LoRA &4.02 / 0.63\% & \textbf{95.07} & \textbf{67.09} & \textbf{97.66} & \textbf{50.51} & \textbf{58.44} & 51.70 & \textbf{55.69} & \textbf{65.22} & 85.23 & 84.84 & \textbf{80.97} & \textbf{72.84} & \textbf{79.83} & \textbf{52.73}  \\
+       
+        \bottomrule
+      \end{tabular}}
+    \caption{Results on multi-class semantic segmentation. The tables are the results for three-class and twelve-class semantic segmentation respectively.}
+    \label{tab:transparent}
+\end{table}      
+
+In \cref{tab:transparent}, while decoder-only fine-tuning approaches achieve comparable segmentation accuracy with domain-specific methods, they exhibit a substantial gap in terms of mIoU metrics. While accuracy measures pixel-level segmentation performance, mIoU takes mask class information into account. We suspect that SAM's image encoder encounters challenges in extracting high-level semantic information that is valuable for classification tasks. Moreover, fine-tuning the image encoder using PEFT methods results in a significant boost in mIoU, indicating a restoration of its capability to learn high-level image semantics.
+Additionally, we conduct linear probing experiments on SAM's image encoder. Specifically, we freeze SAM's ViT-B encoder and train only a linear head on ImageNet-1K. Similarly, we perform linear probing for the ViT-B pretrained with MAE \citep{he2022masked}. The results reveal that SAM's image encoder exhibits significantly lower ImageNet-1K accuracy compared to the MAE encoder (54.2\% vs. 67.7\%). Given that SAM's image encoder is initialized using an MAE encoder, we hypothesize the pre-training focused on low-level foreground-background mask prediction adversely affects the ViT encoder's ability to capture high-level semantic information for classification.
+
+To be specific, SAM was trained on a dataset that exclusively comprises segmentation masks without explicit semantic information. In theory, to minimize loss, the fundamental objective for its encoder is to project pixels into a metric space where pixels from the same object are in close proximity, while those from distinct objects are distantly positioned. This projection requires an implicit understanding of `objectness', focusing on proximity within an image rather than preserving consistent representations of the same-type object across different images. This introduces a potential challenge in aligning representations with semantics across diverse images.
+
+\subsection{Ablation Study}
+\label{sec:abl}
+
+\textbf{SAM's local prior assumption.} SAM’s local prior is grounded in its extensive segmentation pretraining. Through supervised training on a vast dataset encompassing 1 billion high-quality masks and 11 million images, \textbf{SAM has honed a robust capability to discern and capture local features within images}. Notably, SAM's encoder retains the ViT architecture, which inherently lacks a dedicated local prior. However, \textbf{this deficiency is effectively compensated by the significant local prior acquired through segmentation pretraining.}
+
+We analyze using the mean attention distance as a metric. In \cref{fig:attn_head_mean_dis}, SAM exhibits numerous heads in the deep blocks with short mean attention distances, suggesting its heightened focus on local information during the later stages of the encoder. In contrast, the MAE pretrained ViT, representing SAM's initialization, displays consistently long mean attention distances among attention heads in the later stages. Consequently, SAM's segmentation pretraining induces a transformative shift in ViT's attention heads, steering them from a global-oriented to a local-oriented configuration. \textbf{This transformation underscores the efficacy of SAM's approach in imbuing the model with a distinctive local prior, enhancing its ability to capture fine-grained details within images}.
+
+\begin{figure}[t]
+\makeatletter
+\renewcommand{\@thesubfigure}{\hskip\subfiglabelskip}
+\makeatother
+    \subfigure[]{
+    \begin{minipage}[t]{0.45\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/attn_distance/mae_keep_attn_head.pdf}
+    \end{minipage}
+    }
+    \subfigure[]{
+    \begin{minipage}[t]{0.45\linewidth}
+    \centering
+\includegraphics[width=\linewidth]{imgs/attn_distance/sam_keep_attn_head.pdf}
+    \end{minipage}
+    }
+    \caption{Mean attention distance of each attention head, with each dot indicating the mean distance across images for one of the 16 heads at one layer. In contrast to MAE, SAM retains the ability to incorporate local information even in deeper layers.}
+    \label{fig:attn_head_mean_dis}
+\end{figure}
+
+\textbf{MoE vs. Multi-scale.} Conv-LoRA leverages MoE to dynamically inject the local prior into feature maps of different scales (\cref{fig:diff_select} (a)), as the optimal scale remains unclear. Here we explore the impact of a multi-scale strategy, which fuses the features from all scales simultaneously (\cref{fig:diff_select} (b)).
+
+We compare performance and training costs in \cref{tab:abl-dyn-all}. Dynamic MoE outperforms multi-scale direct addition in terms of performance. This could be attributed to the preference for specific scales' feature maps based on different inputs. When injecting the local prior into feature maps of all scales simultaneously, the discrepancy of the importance diminishes as the information from critical feature maps is smoothed out. However, with dynamic selection of the top-1 experts for each forward pass, the information from these crucial scales takes precedence and isn't diluted by other scales. Dynamic MoE also provides a 1.54x speedup and reduces memory usage by 1.7GB during training. In summary, the comparison underscores the effectiveness and efficiency of MoE.
+
+\begin{table}[H]
+    \centering
+    \resizebox{0.35\textwidth}{!}{%
+    \begin{tabular}{l|cccc}
+        \toprule
+        \multirow{2}*{\bf Method} &\multicolumn{4}{c}{\bf ISIC 2017} \\
+        & Jac $\uparrow$ & T-Jac $\uparrow$& Dice $\uparrow$& Acc $\uparrow$\\
+        \midrule
+        {Multi-scale} &  77.4 & 69.5 & 85.4 & 93.7 \\
+        {MoE} & \textbf{77.9} & \textbf{70.3}  & \textbf{85.9} & \textbf{93.9}  \\
+        
+        \bottomrule
+    \end{tabular}}
+    \hspace{1em}  
+    \resizebox{0.6\textwidth}{!}{%
+    \begin{tabular}{l|c|c}
+        \toprule
+        {\bf Method} & \bf Training Speed (Iter / s) $\uparrow$  & \bf Training Memory (GB) $\downarrow$ \\
+        \midrule
+         {Multi-scale} &  0.79 & 23.4 \\
+         {MoE} & \textbf{1.22} & \textbf{21.7} \\
+        \bottomrule
+    \end{tabular}}
+
+    \caption{MoE vs. Multi-scale, the latter fuses features from all scales simultaneously. The performance and the training cost illustrate the effectiveness and efficiency of dynamic selecting the experts, i.e., injecting the local prior into the feature maps of different scales dynamically.}
+    \label{tab:abl-dyn-all}
+\end{table}
+\textbf{The `Optimal' Scale of Feature Map for Different Datasets.} While we are unable to definitively determine the optimal scale for introducing the local prior, we could check whether the `optimal' scale within a given range varies indeed across different datasets.
+
+Specifically, we simply modify Conv-LoRA: use only one expert and a specific scaling ratio. We set the scaling ratio to 1, 2, 4 respectively. The experiments are conducted on Leaf Disease Segmentation dataset and ISIC 2017 dataset.
+
+\begin{table}[H]
+    \centering
+    \resizebox{0.8\textwidth}{!}{%
+    \begin{tabular}{c|ccc|cccc}
+        \toprule
+        \multirow{2}*{\bf Scaling Ratio} &\multicolumn{3}{c|}{\bf Leaf} &\multicolumn{4}{c}{\bf ISIC 2017} \\
+        & IoU $\uparrow$ & Dice $\uparrow$ & Acc $\uparrow$ & Jac $\uparrow$ & T-Jac $\uparrow$& Dice $\uparrow$& Acc $\uparrow$ \\
+        \midrule
+        1 &73.6 & 83.4 & 95.5 & 76.8 & 69.1 & 85.0 & 93.7  \\
+        2 & 73.8 & 83.7 & 95.8 & \textbf{77.3} & \textbf{69.7} & \textbf{85.4} & \textbf{93.8} \\
+        4 &\textbf{74.0} & \textbf{83.7} & 95.9 & 76.9 & 68.4 & 85.1 &93.7 \\
+        {8} & {73.2} & {83.1} & \textbf{{96.0}} & {76.9} & {68.3} & {85.2} & {93.6} \\
+        \bottomrule
+    \end{tabular}}
+    \caption{Comparison of the `optimal' scale of feature map for local prior injection across different datasets. We modify Conv-LoRA to use one expert with a specific scaling ratio.}
+    \label{tab:abl-diff-data-prior}
+\end{table}
+
+In \cref{tab:abl-diff-data-prior}, the `optimal' scale indeed varies across the different datasets. The scaling ratio set to 4 is optimal for Leaf Disease Segmentation dataset, whereas it is set to 2 for ISIC 2017 dataset. These results further confirms our assumption and the necessity for our dynamic local prior injection based on different inputs.
+
+For more ablation experiments, analyses (e.g., further analyses of local prior and MoE) and visualization, refer to \cref{sec:addition-abl} through \cref{sec:more_vis}.
+
+
+
+\section{Conclusion}
+
+Parameter efficient finetuning (PEFT) is a popular way when adapting foundation models to various downstream tasks. We present Conv-LoRA, a novel PEFT approach for applying SAM to downstream segmentation applications. Conv-LoRA is simple, generic, and obtains promising results over multiple domains including natural images, agriculture, remote sensing, and healthcare. Moreover, ours shed light on several aspects of SAM: 1) although the large-scale supervised segmentation pretraining can provide image-related local prior knowledge from the data perspective, injecting lightweight convolution operations in the ViT encoder can further boost the exploitation of local prior from another perspective of architecture; 2) the foreground-background segmentation pretraining prevents the image encoder from learning high-level semantic information, which can be alleviated through finetuning relatively few parameters in the encoder.
+
+Our efforts primarily focus on developing a general PEFT method for SAM, showing stronger performance than existing PEFT methods in a broad spectrum of benchmarks, other than directly competing with state-of-the-art (SOTA) models in specialized domains. Given that SAM fine-tuned with Conv-LoRA may not yet consistently outperform domain-specific SOTA models, we believe that tailoring the mask decoder and prompt encoder beyond image encoder finetuning, and combining Conv-LoRA with other PEFT methods can be promising directions for domain-specific applications.
+
+
+
+

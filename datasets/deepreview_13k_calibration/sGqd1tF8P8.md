@@ -1,8 +1,8 @@
 # Your Weak LLM is Secretly a Strong Teacher for Alignment
 
 - Decision: Accept
-- Avg Score: 4.17
-- Scores: 6, 6, 6, 1, 0, 6
+- Avg Score: 6.80
+- Scores: 6, 6, 6, 10, 6
 
 ## Abstract
 The burgeoning capabilities of large language models (LLMs) have underscored the need for alignment to ensure these models act in accordance with human values and intentions. Existing alignment frameworks present constraints either in the form of expensive human effort or high computational costs. This paper explores a promising middle ground, where we employ a weak LLM that is significantly less resource-intensive than top-tier models, yet offers more automation than purely human feedback. 

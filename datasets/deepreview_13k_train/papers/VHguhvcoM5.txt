@@ -1,0 +1,415 @@
+\title{SEAL: Safety-enhanced Aligned LLM Fine-tuning via Bilevel Data Selection}
+
+\begin{abstract}
+Fine-tuning on task-specific data to boost downstream performance is a crucial step for leveraging Large Language Models (LLMs). However, previous studies have demonstrated that fine-tuning the models on several adversarial samples or even benign data can greatly comprise the model's pre-equipped alignment and safety capabilities. In this work, we propose SEAL, a novel framework to enhance safety in LLM fine-tuning. SEAL learns a data ranker based on the bilevel optimization to up rank the safe and high-quality fine-tuning data and down rank the unsafe or low-quality ones. Models trained with SEAL demonstrate superior quality over multiple baselines, with $8.5\%$ and $9.7\%$ win rate increase compared to random selection respectively on \textsc{Llama-3-8b-Instruct} and \textsc{Merlinite-7b} models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) trained on large text datasets have demonstrated astonishing capabilities in generative tasks \citep{dubey2024llama,achiam2023gpt}. For example, these models can provide answer to human's questions, generate and modify codes or solve mathematical problems \citep{qin2023chatgpt,suzgun2022challenging,gao2023pal}. However, an unaligned LLM can lead to significant safety concerns \citep{bender2021dangers,bommasani2021opportunities,wei2024jailbroken}, e.g., an LLM assistant can output unsafe suggestions when prompted by harmful-inducing instructions.
+With the great capability of these models, the safety concern has become an increasingly urgent issue.
+
+To mitigate the safety concerns of the LLMs, it is necessary to align the model before deployment using alignment methods like supervised fine-tuning (SFT), reinforcement learning from human feedback (RLHF) \citep{ouyang2022training} or direct preference optimization (DPO) \citep{rafailov2023direct}. However, the aligned models are brittle \citep{qi2023fine,zou2023universal,yang2023shadow,wei2024jailbroken}. Fine-tuning LLMs for very few epochs can significantly compromise the safety alignment of the model \citep{qi2023fine}. 
+As fine-tuning LLMs for downstream applications has become standard practice, concerns around safety breaking during this process have emerged as a significant challenge. These issues pose a fundamental obstacle to the broader application of LLMs in various real-world scenarios, where ensuring model alignment and safe behavior is critical.
+
+ 
+
+To this end, we propose an LLM fine-tuning framework that mitigates the negative impact on safety alignment during the fine-tuning process. We approach the problem from a data-centric perspective. Based on the observation that fine-tuning damages the performance of safety alignment \citep{qi2023fine}, there are oftentimes conflicts between fitting the fine-tuning data and the alignment data, that is, decreasing the fitting loss on some fine-tuning data which are conflicting with the safe data will inevitably lead to the increase of the safety alignment loss. 
+With this intuition, we thereby: 1) formulate an optimization problem for learning a data selector which down-ranks the potentially unsafe samples in the fine-tuning dataset; 2) to solve for the data selector, we then introduce a gradient-based algorithm along with its memory-efficient variant; 3) we proceed to propose the Safety-Enhanced Aligned LLM fine-tuning (SEAL) framework (depicted in Figure \ref{fig:SEAL}). 
+An intuition of how SEAL's data selection can overcome the conflict between safety alignment and fine-tuning is illustrated in Figure \ref{fig:intro example pic}. SEAL's selector is trained such that the model fine-tuned on selected samples fit safe alignment data well. With potentially harmful knowledge filtered out, the safety during fine-tuning can be enhanced.  
+SEAL demonstrates the following merits:  
+\begin{itemize}
+    \item \textbf{Effectiveness}: We evaluate SEAL on test datasets including \textsc{Anthropic HH} \citep{bai2022training}, \textsc{Orca} \citep{mukherjee2023orca} and \textsc{HEx-PHI} \citep{qi2023fine}. SEAL consistently outperforms multiple baselines on \textsc{Llama-3-8b-Instruct} \citep{dubey2024llama}, \textsc{Merlinite-7b} \citep{sudalairaj2024lab} and \textsc{Pythia-2.8b} \citep{biderman2023pythia}.
+        \item \textbf{Flexiblity}: We find out that the SEAL-selected data is transferable to fine-tuning different models, e.g., one can use a different (potentially smaller) model in data selector training which is separate from the fine-tuning model. Additionally, though SEAL's performance depends on its data selection percentage, we find that for a relatively wide range of data selection percentage, SEAL can achieve better performance than the baselines.
+    \item \textbf{Explainablity}: We will give a quality comparison of SEAL-selected data and SEAL-filtered data samples. It can be observed that the selected data demonstrate superior safety quality than the filtered-out data, showing the explainability of SEAL's effectiveness.
+\end{itemize}
+
+{\em Use cases of SEAL.}
+The use cases for SEAL include scenarios such as a closed-source model owner offering fine-tuning services on user-provided data (e.g., OpenAI). Then a safe fine-tuning method is essential to ensure that the fine-tuned model maintains the original model's safety alignment. The service providers have access to the safe alignment data \citep{dubey2024llama,qin2023chatgpt}, which can be used to do SEAL's data selection. Additionally, SEAL is suited when the fine-tuning dataset contains potentially harmful samples, but is too large for manual annotation. In this case, we assume the model owner can access an alignment/safe dataset (e.g., the open-source datasets) to select SEAL's data.
+In these aforementioned scenarios, SEAL provides a flexible solution for enhancing safety during the fine-tuning process. 
+
+\begin{figure*}[t]
+\centering
+    \includegraphics[width=0.99\textwidth]{./figure/seal_intro_example.png}
+     \caption{Full SFT trains LLM equally on all samples (left), which might contain harmful knowledge. SEAL learns data selector $\sigma(\omega)$ that filters harmful samples (right), enhancing safety in fine-tuning.}
+    \label{fig:intro example pic}
+\end{figure*}
+
+ 
+
+
+
+\section{Related works}
+
+
+\textbf{Understanding of jail-breaking in LLM fine-tuning.} To mitigate safety risks in fine-tuning, it is necessary to first have a thorough understanding of the behavior. There have been a number of works focusing on the conceptual understanding of LLM jail-breaking during fine-tuning, see, e.g., \citep{qi2023fine,wolf2023fundamental,wei2024jailbroken,anwar2024foundational,lee2024mechanistic,yao2024survey,chen2024catastrophic,ball2024understanding}. Specifically, \cite{qi2023fine} observes that even fine-tuning on benign dataset can greatly compromise the safety alignment of LLMs. The work of \citep{wei2024jailbroken} proposes identifies competing/conflicting objectives as one of the potential reasons. 
+
+\textbf{Safe fine-tuning/alignment of LLMs.} Safe fine-tuning/alignment methods seek to align the model with safety measures, so that the models do not demonstrate harmful behaviors after deployment. The topic is crucial in LLM applications, and there have been a large body of works recently; see, e.g., safety instruction fine-tuning \citep{ouyang2022training,bianchi2024safety}, feature-preserving fine-tuning \citep{mukhoti2023fine}, LLM alignment via preference learning \citep{rafailov2023direct,noukhovitch2023language,ji2023beavertails,rame2023rewarded,go2023aligning,ethayarajh2024model,tang2024generalized}, self-play alignment \citep{chen2024self}, safe alignment against harmful fine-tuning \citep{huang2024vaccine,huang2024lazy}, re-alignment at inference time \citep{liu2024decoding} or by model fusion \citep{yi2024safety}, alignment-preserving prompting \citep{lyu2024keeping,zheng2024prompt}, alignment brittleness accessing \citep{wei2024assessing}, representation-based defence \citep{rosati2024representation}, landscape navigation \citep{peng2024navigating} and safe LoRA fine-tuning \citep{hsu2024safe}. 
+
+ \begin{figure*}[t]
+\centering
+    \includegraphics[width=0.97\textwidth]{./figure/seal.png}
+     \caption{Overview of the SEAL framework. In contrast to vanilla fine-tuning (FT) where the LLM is trained on a fine-tuning dataset which potentially includes unsafe and low-quality data samples, SEAL first learns a data (sample) ranker by solving a bilevel optimization problem. Models fine-tuned on the high-ranked samples demonstrate superior quality.}
+    \label{fig:SEAL}
+\end{figure*}
+
+\textbf{Data selection for LLM fine-tuning.} Among the safe fine-tuning methods, the data selection approaches generally aim to select a subset of high-quality safe data to fine-tune the LLM on; see, e.g., \citep{chen2023alpagasus,cao2023instruction,xie2023data,lu2023instag} and \citep{xia2024less,engstrom2024dsdm,zhao2024learning,he2024what,pan2024scalebio,kang2024get,zhao2024long}. 
+More specifically, \cite{chen2023alpagasus,cao2023instruction} use a strong model to filter out low-quality data; 
+\cite{xie2023data} resamples the data by estimating each data point's importance ratio;
+\cite{xia2024less} proposes LESS which uses gradient similarity scoring to select influential instruction data; \citep{kang2024get} proposed a principled data selection method via optimal transport;
+A concurrent work \citep{pan2024scalebio} proposes a bilevel method to learn weights for multiple data sources, which has achieved good performance. In contrast, our work focuses on selecting data points with varying degree of safety within the same data source, rather than reweighing different datasets.
+
+\textbf{Bilevel optimization algorithms.} 
+The bilevel optimization (BLO) has been applied to various machine learning applications \citep{sabach2017jopt,franceschi2018bilevel,liu2020generic}. 
+There are three prominent branches of bilevel optimization methods: the implicit gradient methods \citep{pedregosa2016hyper,ghadimi2018approximation,hong2020two,ji2020provably,chen2021alset,khanduri2021near,shen2022single,chen2023optimal}; the iterative differentiation methods \citep{franceschi2017forward,liu2021towards,liu2022general,bolte2022automatic,ji2022will}. These methods require second-order derivatives, thus is memory inefficient when the model parameter size is large.
+On the other hand, the penalty relaxation of the BLO problem, which  dates back to \citep{clarke1983optimization,luo1996mathematical}, has gained interest from researchers recently (see, e.g., \citep{shen2023penalty,liu2022bome,kwon2023penalty,xiao2023generalized,shen2024principled,lu2024slm}). Most penalty-based methods only require first-order derivatives, thus is more suitable for LLM applications.
+
+
+
+\section{Safety-enhanced LLM fine-tuning}
+
+
+In this section, we will present our method for safety-enhanced LLM fine-tuning that we call SEAL. We will introduce the formulation, the data selector training algorithm and the SEAL framework.
+
+\subsection{Problem formulation}
+Denote a sample $z=(x,y)$ where $x$ is the input sequence (e.g., instructions) and $y=(y_1,y_2,\dots,y_{d_y})$ is the target response.
+We also write $y_{<j}=(y_1,...,y_j)$ with $y_{<1}$ defined as an empty sequence.
+Suppose we are given a safe dataset $\Dc_{\rm safe}=\{z_{\rm safe}^i=(x_{\rm safe}^i,y_{\rm safe}^i)\}_{i=1}^M$ that contains safe target responses $\{y_{\rm safe}^i\}_{i=1}^M$. We also have the fine-tuning dataset $\Dc=\{z^i=(x^i,y^i)\}_{i=1}^N$ that has a mixture of unsafe and high-quality data samples. While fine-tuning on $\Dc$ might damage the safety of the LLM, that is, there is potential conflicts between the safe dataset and part of the fine-tuning data. Our goal is to automatically learn a data selector that assigns larger weight to the relatively safe data in $\Dc$ and down-weighs the potentially harmful data in $\Dc$.
+
+Let $\theta\in\reals^{d_\theta}$ denote the LLM's trainable parameters, e.g., the LoRA weights \citep{hu2021lora} or the LLM's all weight matrices in full-parameter fine-tuning. Let $\omega \in \reals^N$ denote the data selector's parameter.
+To train a data selector, we propose to solve the following bilevel optimization problem:
+\begin{align}\label{eq:formulation}
+    \min_{\omega} \frac{1}{M}\sum_{i=1}^M \ell(\theta^*(\omega);z_{\rm safe}^i),~~{\rm s.t.}~~\theta^*(\omega)=\arg\min_{\theta} \frac{1}{N}\sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)
+\end{align}
+where $\ell(\theta;z)\coloneqq -\frac{1}{d_y} \sum_{j=1}^{d_y}\log \mathbb{P}_\theta(y_{j}|x,y_{<j})$ is the length-normalized negative log-likelihood function; $\sigma(\omega)=(\sigma_1(\omega),....,\sigma_i(\omega),....,\sigma_N(\omega))$ is the data selector function. For example, we can use the softmax function: $\sigma_i(\omega)=\frac{\exp(\omega_i)}{\sum_{i=1}^N \exp(\omega_i)}$. 
+Observing \eqref{eq:formulation}, we can notice that it has a two-level structure:  minimize the upper-level safety loss subject to minimizing a nested lower-level fine-tuning loss. This forms a special case of the bilevel optimization problem \citep{dempe2020bilevel}.
+
+By solving \eqref{eq:formulation}, we aim to find a data selector $\sigma(\omega)$ such that: if one trains model parameter $\theta$ on the samples selected by $\sigma(\omega)$ (soft selection with weights), then the fine-tuned model $\theta^*(\omega)$ needs to fit well with the safe dataset $\Dc_{\rm safe}$. In our considered use case, the model owner, e.g., \citep{achiam2023gpt,dubey2024llama}, has access to an alignment/safe dataset to do this selection. 
+\subsection{The data selector learning algorithm}
+
+Inspired by the penalty-based bilevel optimization algorithms \citep{shen2023penalty,liu2022bome}, we next consider reformulating \eqref{eq:formulation} with penalty functions. Specifically, our first goal is to reformulate \eqref{eq:formulation} to a closely related single-level problem that facilitates efficient gradient-based algorithms.
+
+We define the penalty function for the sub-optimality of the lower-level problem in \eqref{eq:formulation} as:
+\begin{align}
+    p(\omega,\theta)\coloneqq\frac{1}{N}\Big(\sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)-\min_{\theta'} \sum_{i=1}^N \sigma_i(\omega) \ell(\theta';z^i) \Big).
+\end{align}
+Given a penalty constant $\gamma\in(0,1)$, penalizing $p(\omega,\theta)$ onto the upper-level safety loss yields the following penalized problem of \eqref{eq:formulation}:
+\begin{align}\label{eq:penalized formulation}
+    \min_{\omega,\theta}~ (1-\gamma)\frac{1}{M}\sum_{i=1}^M \ell(\theta;z_{\rm safe}^i)+\gamma  \frac{1}{N}\Big(\sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)-\min_{\theta'} \sum_{i=1}^N \sigma_i(\omega) \ell({\theta'};z^i) \Big).
+\end{align}
+Here $\gamma$ decides the penalty strength: increasing $\gamma$ puts more weight into the lower-level fine-tuning loss optimization, and increases the accuracy of solving for the $\theta^*(\omega)$ in the original formulation \eqref{eq:formulation}.
+The penalized problem \eqref{eq:penalized formulation} is closely related to \eqref{eq:formulation} under some suitable conditions; that is, any local/global solution of \eqref{eq:penalized formulation} locally/globally solves the original problem in \eqref{eq:formulation}; see \citep{shen2023penalty}.
+To solve the penalized problem in \eqref{eq:penalized formulation}, we will develop a gradient-based BLO algorithm. 
+
+Note that in \eqref{eq:penalized formulation}, the value of the last term $\min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)$ is solely a function of $\omega$ and is independent of $\theta$. Then we can update $\theta$ iteratively by doing stochastic gradient descent:
+\begin{equation}\label{eq:theta update}
+    \theta_{k+1}=\theta_k-\beta_k \big((1-\gamma_k)\nabla \ell(\theta_k;z_{\rm safe}^i)+\gamma_k \sigma_j(\omega_k)\nabla \ell(\theta_k;z^j)\big)
+\end{equation}
+where $z_{\rm safe}^i$ is sampled from $\Dc_{\rm safe}$ and $z^j$ is sampled from $\Dc$. The penalty strength $\gamma_k$ can be scheduled to increase at each epoch from a small value: in earlier epochs, we warm-start the model parameter on the safe loss. Then we gradually increase $\gamma_k$ for increasing accuracy in solving for $\theta^*(\omega)$ and a solution for the original problem in \eqref{eq:formulation}.
+
+To evaluate the gradient for $\omega$, we need to evaluate $\nabla_\omega \min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)$. We assume $\sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)$ satisfies the conditions for Danskin's theorem, and then we can write
+$\nabla_\omega \big(\min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)\big) \approx  \sum_{i=1}^N \nabla_\omega\sigma_i(\omega) \ell(\hat{\theta};z^i)$,
+where $\hat{\theta}\approx \theta^*(\omega)\coloneqq \arg\min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)$, and the above gradient approximation becomes exact if $\hat{\theta}=\theta^*(\omega)$. 
+Given this closed-form gradient, we can update $\omega$ with the approximate stochastic gradient descent:
+\begin{equation}\label{eq:omega update}
+    \omega_{k+1}=\omega_k-\alpha_k \big(\ell(\theta_k;z^j)-\ell(\hat{\theta}_k;z^j)\big)\nabla\sigma_j(\omega_k)
+\end{equation}
+where the auxiliary variable $\hat{\theta}_k$ is generated by doing gradient descent on $\sum_{i=1}^N \sigma_i(\omega) \ell(\hat{\theta};z^i)$, and is therefore an approximation of $\theta^*(\omega_k)$:
+\begin{equation}\label{eq:theta hat update}
+    \hat{\theta}_{k+1}=\hat{\theta}_k-\beta_k   \sigma_i(\omega_k) \nabla \ell(\hat{\theta}_k;z^j).
+\end{equation}
+The whole process is summarized in Algorithm \ref{alg:alg1}.
+
+\begin{algorithm}[t]
+\caption{Bilevel Data Selector Training}
+\begin{algorithmic}[1]
+\STATE Warm-start $\theta_1$ by setting it as a safety-aligned model parameter. Initialize a data selector parameter $\omega$. Initialize the auxiliary model parameter $\hat{\theta}_1=\theta_1$. Schedule the hyper-parameters: step sizes $\alpha_k,\beta_k$ and penalty strength $\gamma_k \in (0,1)$.
+
+\FOR{$k=1$ {\bfseries to} $K$}
+\STATE Sample data $z_{\rm safe}^i$ from safe dataset $\Dc_{\rm safe}$ and $z^j$ from fine-tuning dataset $\Dc$.
+\STATE Update model parameter $\theta_{k+1}=\theta_k-\beta_k \big( (1-\gamma_k)\nabla \ell(\theta_k;z_{\rm safe}^i)+\gamma_k \sigma_j(\omega_k)\nabla \ell(\theta_k;z^j)\big)$
+\STATE Update auxiliary model parameter $\hat{\theta}_{k+1}=\hat{\theta}_k-\beta_k   \sigma_i(\omega_k) \nabla \ell(\hat{\theta}_k;z^j)$
+\STATE Update data selector $\omega_{k+1}=\omega_k-\alpha_k \big(\ell(\theta_k;z^j)-\ell(\hat{\theta}_k;z^j)\big)\nabla\sigma_j(\omega_k) $
+\ENDFOR
+
+\end{algorithmic}
+\label{alg:alg1}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Bilevel Data Selector Training (memory-efficient)}
+\begin{algorithmic}[1]
+\STATE Warm-start $\theta_1$ by setting it as a safety-aligned model parameter. Initialize a data selector parameter $\omega$. Schedule the hyper-parameters: step sizes $\alpha_k,\beta_k$ and penalty strength $\gamma_k \in (0,1)$.
+
+\FOR{$k=1$ {\bfseries to} $K$}
+\STATE Sample data $z_{\rm safe}^i$ from safe dataset $\Dc_{\rm safe}$ and $z^j$ from fine-tuning dataset $\Dc$.
+\STATE Update model parameter $\theta_{k+1}=\theta_k-\beta_k \big((1-\gamma_k)\nabla \ell(\theta_k;z_{\rm safe}^i)+\gamma_k \sigma_j(\omega_k)\nabla \ell(\theta_k;z^j)\big)$
+\STATE Update data selector $\omega_{k+1}=\omega_k-\alpha_k \ell(\theta_k;z^j)\nabla\sigma_j(\omega_k) $
+\ENDFOR
+
+\end{algorithmic}
+\label{alg:alg2}
+\end{algorithm}
+
+\textbf{What does the data selector update do?} The data selector update in \eqref{eq:omega update} seeks a solution of \eqref{eq:formulation}, that is, a $\sigma(\omega)$ such that if one fine-tunes a model $\theta^*(\omega)$ with the re-weighted data, the model will fit the safe dataset well. By examining update \eqref{eq:omega update}, we can see that the update can be viewed as a coordinate-wise weighted descent on the selector function $\sigma(\omega)$:
+\begin{equation}
+    \omega_{k+1}=\omega_k-\alpha_k \underbrace{\big(\ell(\theta_k;z^j)-\ell(\hat{\theta}_k;z^j)\big)}_{\text{loss gap scaling}}\underbrace{\nabla\sigma_j(\omega_k).}_{\text{ascent direction of $z^j$ rank}} \nonumber
+\end{equation}
+The update essentially uses the loss values gap $\ell(\theta_k;z^j)-\ell(\hat{\theta}_k;z^j)$ to weigh $\nabla \sigma_j(\omega_k)$ which is the ascent direction of the rank for $j$-th data in $\Dc$. Note that $\theta_k$ is generated by \eqref{eq:theta update}, and it fits both $\Dc_{\rm safe}$ and the weighted $\Dc$. While $\hat{\theta}_k$ only fits the weighted $\Dc$. If a data $z^j$ admits a large positive gap $\ell(\theta_k;z^j)-\ell(\hat{\theta}_k;z^j)$, it is fitted worse with $\theta_k$ than $\hat{\theta}_k$. Thus it is likely that $z^j$ does not align well with the safe data $\Dc_{\rm safe}$. In this case, update \ref{eq:omega update} will decrease the rank of $z^j$. Conversely for a negative gap $\ell(\theta_k;z^j)-\ell(\hat{\theta}_k;z^j)$, the update will increase its rank.
+
+\textbf{A memory-efficient variant without $\hat{\theta}$ update.} In Algorithm \ref{alg:alg1}, we keep a sequence of LLM parameters $\hat{\theta}_k$ to estimate the gradient $\nabla_\omega \big(\min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)\big)$. When the LLM parameter has a large dimension, the extra cost of updating $\hat{\theta}$ might be too high. 
+To overcome this issue, we have also provided the light-weight variant in Algorithm \ref{alg:alg2}. Suppose the LLM is large enough, e.g., in the full-parameter fine-tuning case, we have $\theta \in \reals^{d_\theta}$ with $d_\theta \gg N$. Then it is reasonable to assume there exists a $\theta^*$ such that $\ell(\theta^*;z^i) \approx 0$ for $i=1,2,...,N$. Under this assumption, we have 
+\begin{equation}
+	\min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)=\sum_{i=1}^N \sigma_i(\omega) \ell(\theta^*;z^i) \approx 0,~~\forall \omega
+\end{equation}
+yielding 
+$\nabla_\omega \big(\min_\theta \sum_{i=1}^N \sigma_i(\omega) \ell(\theta;z^i)\big) \approx 0. $
+Plugging this into \eqref{eq:omega update}, $\omega$ can be updated with
+\begin{align}\label{eq:omega update light weight}
+    \omega_{k+1}=\omega_k-\alpha_k \ell(\theta_k;z^j)\nabla\sigma_j(\omega_k).
+\end{align}
+This process is summarized in Algorithm \ref{alg:alg2}.
+\subsection{SEAL: safety-enhanced aligned LLM fine-tuning framework}
+
+In summary, our SEAL framework follows the following procedure:
+\begin{center}
+\begin{tcolorbox}[width=0.93\textwidth]
+\begin{enumerate}[leftmargin=5mm]
+\item [\bf S1)] \textbf{Initial alignment:} obtain a safety-aligned LLM.
+    \item [\bf S2)] \textbf{Data selector training:} use the safety-aligned model as the initial model, train a data selector $\sigma(\omega_K)$ with Algorithm \ref{alg:alg1} or Algorithm \ref{alg:alg2}.
+    \item [\bf S3)] \textbf{Data selection:} use the trained data selector $\sigma_i(\omega_K)$ to rank each data $z^i$ in the fine-tuning dataset $\Dc$. Select top $p\%$ of the fine-tuning data in $\Dc$ to form $\Dc_{\rm top}$.
+    \item [\bf S4)] \textbf{Safe fine-tuning:} fine-tune LLM on the safety-enhanced fine-tuning dataset $\Dc_{\rm top}$.
+\end{enumerate}
+\end{tcolorbox}
+\end{center}
+It is worth noting that the first three steps can be a one-time effort: once the fine-tuning data is selected, it can be used in all subsequent fine-tuning on this dataset.
+\begin{remark}[Transferable data selector]
+    The data selector trained in S2) of SEAL can be transferred to different models. That is, when trying to fine-tune a large LLM model in S4) above, one may use a smaller LLM model in S2) to train the data selector. This can greatly decrease the overall computational cost. We provide empirical evidence for the transferability later in Section \ref{sec:complexity and trans}.
+\end{remark}
+
+
+
+\section{Experiments}
+
+In this section, we test the empirical performance of our framework in text generation tasks. We will test the output model's quality, the computation complexity and the impact of data selection ratio across different models. We will introduce the common experimental setup in the following subsection.
+\subsection{General experimental setup}\label{sec:experimental setup}
+
+\textbf{Language models.}
+We will test our framework on the \textsc{Llama2-7b-chat-hf} \citep{touvron2023llama}, \textsc{Llama-3-8b-Instruct} \citep{dubey2024llama}, the \textsc{Merlinite-7b} \citep{sudalairaj2024lab}, and the more compact \textsc{\textsc{Pythia}-2.8b} \citep{biderman2023pythia}. 
+Compared to the base model, the Instruct/chat variant \textsc{Llama-3-8b-Instruct}/\textsc{Llama2-7b-chat-hf} has significantly improved safety alignment and instruction-following capability. The \textsc{Merlinite-7b} model is a \textsc{Mistral-7b}-derivative model tuned with the LAB method \citep{sudalairaj2024lab}. Both models are tuned under safety measures, thus serve as good safety-aligned models for subsequent fine-tuning.
+\textsc{\textsc{Pythia}-2.8b} is a more compact model, and allows us to test SEAL's performance with full-parameter fine-tuning.  
+By using these base models, we want to test SEAL on models of different scales and architectures.
+\textbf{Datasets.}
+We introduce our choice of datasets:
+    1) \textsc{Anthropic helpful and harmless (HH)}:  The HH dataset features pairs of multi-turn dialogues between the human and the assistant. 
+    The dataset is designed for training a model to be safe and helpful at the same time;
+2) \textsc{Orca}: The \textsc{OpenOrca} and its distilled \textsc{SlimOrca} datasets \citep{longpre2023flan,mukherjee2023orca} are fine-tuning datasets for instruction-following. To test the effectiveness of the safety fine-tuning methods, we form the \textsc{\textsc{RedOrca}} dataset based on \textsc{SlimOrca}: the \textsc{RedOrca} dataset includes 90k English instructions and responses from the \textsc{SlimOrca}. Additionally, it has 22k potentially unsafe instructions and responses picked from the \textsc{Anthropic red-teaming} dataset \citep{ganguli2022red};
+    3) \textsc{\textsc{HEx-PHI}}: introduced in \citep{qi2023fine}, it contains 11 categories of harmfulness-inducing instructions. It is used to evaluate the safety alignment of a model; 4) \textsc{Alpaca-cleaned}: the dataset is the cleaned version of the instruction-following \textsc{Alpaca} dataset \citep{wang2022self}.
+
+\textbf{Model evaluation process.} We adopt the commonly used win rate metric \citep{rafailov2023direct,dubois2024alpacafarm} evaluated by a stronger model (e.g., GPT-4). Given a set of evaluation input data and a method's \textit{output model}, we generate pairs of responses from the output model and a common reference model. We calculate the comparison model's win rate as the ratio of responses being preferred by GPT-4. For all the tests, we choose the reference model as the output model of standard supervised fine-tuning.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.333\textwidth]{./figure/llama3_seal_ft_all_1.pdf}\hspace{-0.1cm}
+    \includegraphics[width=0.333\textwidth]{./figure/llama3_seal_ft_all_2.pdf}\hspace{-0.1cm}
+    \includegraphics[width=0.333\textwidth]{./figure/llama3_seal_ft_all_3.pdf}\hspace{-0.1cm}
+     \caption{Win rate (see Section \ref{sec:experimental setup} for the definition) comparison on \textsc{Llama-3-8b-Instruct}. SEAL improves over the baselines on the test datasets. SEAL+SafeInstr further improves performance. }
+    \label{fig:Llama3-8b}
+    \vspace*{-0.15cm}
+\end{figure*}
+
+\begin{table}[t]
+\centering
+\begin{tabular}{c|c|c|c}
+    \hline
+    \hline
+      \textbf{ } & \textbf{\textsc{Anthropic HH} test} & \textbf{\textsc{SlimOrca} test} & \textbf{\textsc{HEx-PHI}} \\
+    \hline
+    \textbf{Standard SFT}  & $50  $ & $50  $ & $50 $ \\
+    \hline
+    \textbf{Random selection}  & $ 50.78 $ &  $ 50.8$ & $ 56.31 $ \\
+    \hline
+    \textbf{DSIR} & $ 57.57 $ &  $ \textbf{55.84}$ & $ 53.95 $ \\
+    \hline
+    \textbf{SafeInstr} & $ 57.97 $ &  $ 54.22$ & $ 64.49 $ \\
+    \hline
+    \textbf{SEAL} & $ \textbf{60.22} $ &  $ 53.88 $ & $ \textbf{69.29} $\\
+    \hline
+    \textbf{SEAL}+\textbf{SafeInstr} & $ \underline{\textbf{67.19}} $ &  $ 53.91$ & $ \underline{\textbf{77.28}} $ \\
+    \hline
+    \hline
+    \end{tabular}
+    \caption{Win rate comparison on \textsc{Llama-3-8b-Instruct}. See Figure \ref{fig:Llama3-8b} for the radar plots. \textbf{Bold} indicates the best performing method without additional safety instruction data during fine-tuning. \underline{\textbf{Underlined bold}} indicates the best performing method with added safety instruction data.} 
+    \label{tab:Llama3-8b}
+    \vspace*{-0.4cm}
+\end{table}
+
+\textbf{Baselines.} We compare SEAL with several baselines below:
+
+ \textsf{B1) Supervised fine-tuning}: The standard way to fine-tune LLM on the entire fine-tuning dataset.
+
+  \textsf{B2) Random data selection}: The basic baseline where the model is fine-tuned on the randomly selected subset of the fine-tuning data. 
+
+  \textsf{B3) Data Selection via Importance Resampling (DSIR) \citep{xie2023data}}: Given a target dataset (safe dataset) and a raw dataset (fine-tuning dataset), DSIR first estimates bag-of-n-gram probability models for both the target and raw datasets. Then it uses the models to estimate the importance ratio for each fine-tuning sample, which is used to generate the selected fine-tuning dataset.
+
+  \textsf{B4) SafeInstr \citep{bianchi2023safety}}: SafeInstr finds out that adding few safety instruction data into the fine-tuning dataset can significantly improve the fine-tuned model's safety. It is worth noting that unlike SafeInstr, SEAL does not include extra safety instruction data during fine-tuning. While SafeInstr can be easily incorporated into SEAL by adding the safety instruction data into the SEAL-selected fine-tuning dataset to further improve performance.
+ 
+
+\textbf{Default setting.} We implement the celebrated LoRA \citep{hu2021lora} method when training all \textsc{Llama} models and the \textsc{Merlinite-7b}, and we perform full-parameter training on other models. To save computation cost, we use the memory-efficient variant of SEAL. For fair comparison, we keep the common hyper-parameters the same for SEAL and the baseline algorithms: without specification, we will use the same total number of epochs, batch size and learning rate schedule. When we are using LoRA fine-tuning, we also keep the LoRA configuration identical for all methods. To fairly compare the data selection quality, we will use the same data selection ratio as SEAL for DSIR. For SafeInstr, we will mix the recommended amount of safety instruction data (2\%-3\% of the fine-tuning dataset size \citep{bianchi2023safety}) with the fine-tuning dataset.
+
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.33\textwidth]{./figure/merlinlora_seal_ft_all_1.pdf}\hspace{-0.1cm}
+    \includegraphics[width=0.33\textwidth]{./figure/merlinlora_seal_ft_all_2.pdf}\hspace{-0.1cm}
+    \includegraphics[width=0.33\textwidth]{./figure/merlinlora_seal_ft_all_3.pdf}\hspace{-0.1cm}
+     \caption{Win rate comparison on \textsc{Merlinite-7b}. SEAL fine-tuning significantly improves over the baselines on all three datasets . Further incorporating SEAL with SafeInstr gives better performance on the safety test dataset \textsc{HEx-PHI}.}
+    \label{fig:merlin}
+    \vspace*{-0.15cm}
+\end{figure*}
+
+\begin{table}[t]
+\centering
+\begin{tabular}{c|c|c|c}
+    \hline
+    \hline
+       & \textbf{\textsc{Anthropic HH} test} &\textbf{ \textsc{SlimOrca} test} & \textbf{\textsc{HEx-PHI}} \\
+    \hline
+    \textbf{Standard SFT}  & $50  $ & $50  $ & $50 $ \\
+    \hline
+    \textbf{Random selection}& $ 60 $ &  $ 55$ & $ 49.97 $ \\
+    \hline
+    \textbf{DSIR} & $ 62.34 $ &  $ 52.97$ & $ 56.37 $ \\
+    \hline
+    \textbf{SafeInstr} & $ 64.38 $ &  $ 53.59$ & $ 62.85 $ \\
+    \hline
+    \textbf{SEAL} & $ \textbf{76.72} $ &  $ \textbf{55.78} $ & $ 61.5 $\\
+    \hline
+    \textbf{SEAL}+\textbf{SafeInstr} & $ 76.41 $ &  $ 53.75$ & $ \underline{\textbf{64.87}} $ \\
+    \hline
+    \hline
+    \end{tabular}
+    \caption{Win rate comparison on \textsc{Merlinite-7b}. See Figure \ref{fig:merlin} for the radar plots. \textbf{Bold} numbers indicate the best performing method without additional safety instruction data during fine-tuning. \underline{\textbf{Underlined bold}} numbers indicate the best performing method with added safety instruction data.} 
+    \label{tab:merlin}
+    \vspace*{-0.4cm}
+\end{table}
+\subsection{Effectiveness of SEAL across different LLMs}\label{sec:effectiveness}
+In this section, we compare the quality of the models fine-tuned by SEAL and other baselines.
+
+\textbf{Experimental setup.}
+We will test the performance across three models: \textsc{Llama-3-8b-Instruct} \citep{dubey2024llama}, \textsc{Merlinite-7b} \citep{sudalairaj2024lab} and \textsc{\textsc{Pythia}-2.8b}. 
+In this section, we use the \textsc{RedOrca} dataset as the fine-tuning dataset, and use a withheld subset (112k data points) of \textsc{SlimOrca} dataset as the safe dataset in SEAL and the target dataset in DSIR. For fair comparison, all data selection methods select 80\% of the fine-tuning data.
+
+The results on different models are reported in Tables \ref{tab:Llama3-8b} and \ref{tab:merlin} and Figures \ref{fig:Llama3-8b} and \ref{fig:merlin}. The result on \textsc{Pythia-2.
+\textbf{SEAL outperforms the baselines across different models.} 
+Compared to random selection, SEAL's average performance gain on \textsc{Llama-3-8b-Instruct} is around 8.5\% in Table \ref{tab:Llama3-8b}, and is around 9.8\% on \textsc{Merlinite-7b} in Table \ref{tab:merlin}.
+Although DSIR and SafeInstr improve over full fine-tuning and random selection, SEAL consistently outperforms both baselines on majority of the test datasets, and is comparable to the best performing one on the remaining test dataset. Compared to the data selection baseline DSIR, the performance gain of SEAL is large (averaging 6\% on \textsc{Llama-3} in Table \ref{tab:Llama3-8b} and 7\% on \textsc{Merlinite} in Table \ref{tab:merlin}). Compared to SafeInstr, basic SEAL outperforms it without adding the safety instruction data into fine-tuning dataset. We also observe that the performance gain is more significant on the larger models than the smaller \textsc{Pythia-2. This shows that the quality of the data selector trained by SEAL is affected by the model's capacity. More capable models can help SEAL learn better data selectors.
+
+ 
+
+\textbf{Incorporating SEAL with SafeInstr may further enhance safety.} Adding very few safety instruction data (3\% more) into the SEAL-selected fine-tuning data can further improve the fine-tuned model's safety. Compared to random selection, the win percent increase averaged over all test datasets reaches 13.5\% on \textsc{Llama-3} in Table \ref{tab:Llama3-8b}, which shows an 5\% increase from basic SEAL.
+
+\textbf{Quality of the selected data and the fine-tuned model's output.} 
+ The top-ranked data are safe, and demonstrate good quality. While the bottom ranked data have harmfulness-inducing instructions, and the target response is potentially unsafe. This gives more direct comparison of the model quality trained by different methods.
+\subsection{Performance impact of SEAL's data selection percentage}\label{sec:selection percent}
+
+In this section, we test SEAL's performance with different data selection percents. 
+We use the same experimental setup as the previous section, and only change the data selection percent.  The results on \textsc{Merlinite-7b} are reported in Figure \ref{fig:merlin selection percent test}. 
+
+\textbf{SEAL preserves safety for a relatively wide data selection range.} Similar to other hyper-parameters like learning rate, there exists an optimal data selection range. A smaller data selection percent is conservative, so that harmful samples are more likely to be filtered out. But a too small data selection percent might cause performance loss on the target fine-tuning domain. While a too large selection percent guarantees model performance on the target domain, but might result in safety breaking. It can be observed from Figure \ref{fig:merlin selection percent test} (upper) that for the data selection percent $20\% \leq p\leq 80\%$, the fine-tuned model's safety alignment is close to the initial alignment (red line), achieving significant advantage over no selection (green line).
+
+\textbf{SEAL improves in target domain even with small data selection percentage.} It has been discussed in the previous paragraph that a too small data selection percentage can result in decreased fine-tuning performance. This can be observed in Figure \ref{fig:merlin selection percent test} (lower) that lowering the data selection ratio results in a decrease in the target domain win rate. While SEAL still outperforms standard SFT and the aligned model with a small data selection percentage as small as 20\%.
+
+ \begin{wrapfigure}{l}{0.47\textwidth}
+\vspace*{-0.2cm}
+\centering
+    \includegraphics[width=0.4\textwidth]{figure/merlin_p.png}
+    \includegraphics[width=0.4\textwidth]{figure/merlin_p_target.png}
+    \vspace*{-0.1cm}
+    \caption{Average performance of SEAL on the safety domain (\textsc{Anthropic HH} and \textsc{HEx-PHI})
+    and on fine-tuning's target domain (\textsc{SlimOrca}) with different selection percent. 
+    }
+    \label{fig:merlin selection percent test}
+    \vspace*{-1cm}
+\end{wrapfigure}
+
+\subsection{Computational complexity and transferability}\label{sec:complexity and trans}
+We test 1) the GPU memory usage and training time, and 2) the possibility of using a (potentially smaller) model in data selector training different from the fine-tuning model. We keep the experimental setup the same as in Section \ref{sec:effectiveness}. We use the smaller \textsc{Phi-3-mini-Instruct} (3.8 billion parameters) \citep{abdin2024phi} or \textsc{Pythia-2.8b} in the data selector training phase of SEAL, and then fine-tune the larger \textsc{Merlinite-7b} on the selected data. The results are reported in Table \ref{tab:efficiency}.
+
+\begin{table*}[t]
+    \caption{Wall-clock runtime and GPU memory usage on one NVIDIA A6000 in the group of four. The performance $\Delta$ is compared to no-selection (standard SFT) on \textsc{Merlinite-7b}. }
+    \centering
+    \begin{tabular}{@{}lcc|cc|cc@{}}
+    \toprule
+             & \multicolumn{2}{c}{\textbf{Data selector training}}        &\multicolumn{2}{c}{\textbf{Fine-tuning}}  &\multicolumn{2}{c}{\textbf{Performance $\Delta$}}       \\ \midrule
+            & \textbf{Memory} & \textbf{Time} & \textbf{Memory} & \textbf{Time}& \textbf{Safety} & \textbf{Target} \\ 
+            \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+    \textbf{Select 20\%}(\textsc{Pythia})  & 28.3 GB  &  14 Hours &    27.8 GB   &  3 Hours & 14.5\% $\uparrow$  & 4.7\% $\uparrow$ \\ 
+    \textbf{Select 20\%}(\textsc{Phi3})  & 34.1 GB & 20 Hours & 27.8 GB       & 3 Hours & 14.2\% $\uparrow$  & 3.3\% $\uparrow$\\ 
+    \textbf{Select 80\%}(\textsc{Pythia})  & 28.3 GB  &  14 Hours &   27.9 GB    & 13 Hours  &  15.7\% $\uparrow$  & 4.8\% $\uparrow$ \\ 
+    \textbf{Select 80\%}(\textsc{Phi3})  & 34.1 GB & 20 Hours  & 27.9 GB & 13 Hours & 19.1\% $\uparrow$ & 5.8\% $\uparrow$   \\ 
+    \textbf{Random 20\%}  & -  & - &    27.8 GB   &  3 Hours & 15.2\% $\uparrow$  & 2.9\% $\uparrow$ \\ 
+     \textbf{Random 80\%} & -& -  & 27.9 GB & 13 Hours & 5.0\% $\uparrow$ & 5.0\% $\uparrow$   \\ 
+    \textbf{No selection}  & - & -       & 27.9 GB & 16 Hours& - & -   \\ 
+    \bottomrule
+    \end{tabular}
+    \label{tab:efficiency}
+\end{table*}
+\textbf{The data selector trained by SEAL is transferable between different models.} It can be observed in Table \ref{tab:efficiency} that the data selector trained with models different from the fine-tuning model is still effective. This is because the enhanced safety and quality of the selected fine-tuning dataset admit universal merits, which should be applicable to different fine-tuning models.
+
+\textbf{Data selector training can increase overall computation complexity, but can be a one-time effort.} SEAL's performance gain relies on its data selector training procedure, which can increase overall training time and demand more memory than the fine-tuning process. As reported in Table \ref{tab:efficiency}, the data selector trained with \textsc{Phi-3} requires overall more computational budget than doing the standard SFT. However, once the data selector for a certain dataset is trained, we can use it for all subsequent fine-tuning on this dataset.
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.38\textwidth]{./figure/llama2_benign_all_1.pdf}\hspace{0.9cm}
+    \includegraphics[width=0.38\textwidth]{./figure/llama2_benign_all_2.pdf}
+     \caption{Win rate comparison on \textsc{llama2-7b-chat-hf} with benign fine-tuning dataset.}
+    \label{fig:benign}
+\end{figure*}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{c|c|c|c|c}
+    \hline
+    \hline
+       & \textbf{\textsc{Anthropic HH} test} &\textbf{ \textsc{SlimOrca} test} & \textbf{\textsc{HEx-PHI}}& \textbf{Average} $\Delta$ \\
+    \hline
+    \textbf{Standard SFT}  & 50 & \textbf{50} & 50 & -- \\
+    \hline
+    \textbf{Random selection}  & 50.16 &  48.75 & \textbf{53.48} & 0.8 $\uparrow$\\
+    \hline
+    \textbf{DSIR}  & 48.59 & 49.53  & 51.38 & 0.17 $\downarrow$ \\
+    \hline
+    \textbf{SEAL}  & \textbf{52.03} &  49.84 & 52.58 & \textbf{1.48} $\uparrow$\\
+    \hline
+    \hline
+    \end{tabular}
+    \vspace*{0.2cm}
+    \caption{Experiments on \textsc{llama2-7b-chat-hf} with benign fine-tuning dataset (radar plot in \ref{fig:benign}). \textbf{Bold} numbers indicate the best performing method in the category. The average $\Delta$ represents the performance gain compared to standard SFT. We did not include SafeInstr as a baseline since the fine-tuning dataset is benign, and we did not observe an advantage for SafeInstr.}
+    \label{tab:benign}
+    \vspace*{-0.4cm}
+\end{table}
+\textbf{The complexity increase can be eased by using a smaller selection percent, and a smaller model in data selector training.} One can ease the computational cost by selecting a smaller data selection percent, or transferring the data selector trained with a smaller model to fine-tuning a large model. In Table \ref{tab:efficiency}, selecting 20\% data with \textsc{Pythia-2.8b} results in a total runtime of 17 Hours, which is close to the 16 Hours baseline of doing no data selection. While even selecting only 20\% data in this case still gives good performance gain. 
+\subsection{Extra results under benign fine-tuning dataset}\label{sec:benign}
+In this section, we will test SEAL's performance on benign fine-tuning dataset.
+
+\textbf{Experimental setup.} We use a subset of $49.9$k samples from \textsc{Alpaca-cleaned} as the safe dataset, and use a subset of $49.9$k samples from \textsc{OpenOrca} as the benign fine-tuning dataset. We implement all methods based on the \textsc{Llama2-7b-chat-hf} model, and use a data selection percent of $90\%$.
+
+\textbf{SEAL improves over baselines under benign dataset, albeit slightly.} The experimental results are reported in Table \ref{tab:benign} and Figure \ref{fig:benign}. As compared to the standard full SFT, SEAL improves over the safety domain (\textsc{HH} and \textsc{HEx-PHI}) but loses sligntly in the target domain (\textsc{SlimOrca} test). The performance loss in the target domain likely comes from the reduction of fine-tuning dataset size, since the fine-tuning samples are benign and generally of good quality.  As compared to random selection, SEAL is able to achieve better trade-off between the safety domain and the target domain.
+ 
+
+
+\section{Conclusions}
+
+We have proposed SEAL, a safety-enhanced LLM fine-tuning framework featuring a bilevel data selector learner. In Section \ref{sec:framework}, we formulate the bilevel data selection problem, and then propose an algorithm to solve for the selector along with its memory-efficient implementation. We showcase that our SEAL framework effectively enhances safety in fine-tuning, and outperforms multiple baselines across different models in Section \ref{sec:effectiveness}. We test the computational cost of our method in Section \ref{sec:complexity and trans}, and show that the cost can be decreased by transferring the data selector learnt with smaller models to large model fine-tuning. In addition, we show that SEAL performs well given a relatively wide range of data selection percent in Section \ref{sec:selection percent}, and provide results under benign data in Section \ref{sec:benign}.
+
+
+
+
+\clearpage
+
+
+
+
+

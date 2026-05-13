@@ -1,0 +1,446 @@
+\title{Multi-Scale Representations by Varying Window Attention for Semantic Segmentation}
+
+\begin{abstract}
+Multi-scale learning is central to semantic segmentation. We visualize the effective receptive field (ERF) of canonical multi-scale representations and point out two risks learning them: \textit{scale inadequacy} and \textit{field inactivation}. A novel multi-scale learner, \textbf{varying window attention} (VWA), is presented to address these issues. VWA leverages the local window attention (LWA) and disentangles LWA into the query window and context window, allowing the context's scale to vary for the query to learn representations at multiple scales. 
+However, varying the context to large-scale windows (enlarging ratio $R$) can significantly increase the memory footprint and computation cost ($R^2$ times larger than LWA). We propose a simple but professional re-scaling strategy to zero the extra induced cost without compromising performance. 
+Consequently, VWA uses the same cost as LWA to overcome the receptive limitation of the local window.
+Furthermore, depending on VWA and employing various MLPs, we introduce a multi-scale decoder (MSD), \textbf{VWFormer}, to improve multi-scale representations for semantic segmentation. VWFormer 
+achieves efficiency competitive with the most compute-friendly MSDs, like FPN and MLP decoder, but performs much better than any MSDs. 
+In terms of ADE20K performance, using half of UPerNet's computation, VWFormer outperforms it by $1.0\%-2.5\%$ mIoU.
+At little extra overhead, $\sim 10$G FLOPs, Mask2Former armed with VWFormer improves by $1.0\%-1.3\%$
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\label{sec:intro}
+In semantic segmentation, there are two typical paradigms for learning multi-scale representations. The first involves applying filters with receptive-field-variable kernels, classic techniques like atrous convolution~\citep{chen2018encoder} or adaptive pooling~\citep{zhao2017pyramid}. 
+By adjusting hyper-parameters, such as dilation rates and pooling output sizes, 
+the network can vary the receptive field to learn representations at multiple scales.
+
+The second leverages hierarchical backbones~\cite{xie2021segformer, liu2021swin, liu2022convnet} to learn multi-scale representations. Typical hierarchical backbones are usually divided into four different levels, each learning representations on feature maps with different sizes. 
+For semantic segmentation, the multi-scale decoder (MSD)~\citep{xiao2018unified, kirillov2019panoptic, xie2021segformer} fuses feature maps from every level (\textit{i.e.} multiple scales) and output an aggregation of multi-scale representations. 
+
+Essentially, the second paradigm is analogous to the first in that it can be understood from the perspective of varying receptive fields of filters. As the network deepens and feature map sizes gradually shrink, different stages of the hierarchical backbone have distinct receptive fields. Therefore, when MSDs work for semantic segmentation, they naturally aggregate representations learnt by filters with multiple receptive fields, which characterizes multi-level outputs of the hierarchical backbone.
+\begin{figure*}
+\begin{center}
+  \includegraphics[width=1\textwidth]{Figures/erf_conv.pdf}
+\label{fig:efr}
+\end{figure*}
+
+To delve into the receptive field of these paradigms, their effective receptive fields (ERF)~\citep{luo2016understanding} were visualized, as shown in Fig.~\ref{fig:efr}a-e. For the first paradigm, methods like ASPP (applying atrous convolution)~\cite{chen2018encoder} and PSP~\cite{zhao2017pyramid} (applying adaptive pooling) were analyzed. For the second paradigm, ERF visualization was performed on multi-level feature maps of ConvNeXt~\citep{liu2022convnet}, Swin Transformer~\cite{liu2021swin}, and SegFormer (MiT)~\cite{xie2021segformer}.
+Based on these visualizations, 
+it can be observed that learning multi-scale representations faces two issues. On the one hand, there is a risk of \textit{scale inadequacy}, such as missing global information (Swin Transformer, ConvNeXt, ASPP), missing local information (PSP), or having only local and global information while missing other scales (SegFormer). On the other hand, there are inactivated areas within the spatial range of the receptive field, as observed in ASPP, Swin Transformer, and the low-level layers of SegFormer. We refer to this as \textit{field inactivation}.
+To address these issues, a new way is explored to learn multi-scale representations. This research focuses on exploring \textit{whether the local window attention (LWA) mechanism can be extended to function as a relational filter whose receptive field is variable to meet the scale specification for learning multi-scale representations in semantic segmentation while preserving the efficiency advantages of LWA}. The resulting approach is \textbf{varying window attention} (VWA), which learns multi-scale representations with no room for \textit{scale inadequacy} and \textit{field inactivation} (See Fig.~\ref{fig:efr}f).
+Specifically, VWA disentangles LWA into the query window and context window. The query remains positioned on the local window, while the context is enlarged to cover more surrounding areas, thereby varying the receptive field of the query. Since this enlargement results in a substantial overhead impairing the high efficiency of LWA ($R^2$ times than LWA), we analyze how the extra cost arises and particularly devise pre-scaling principle, densely overlapping patch embedding (DOPE), and copy-shift padding mode (CSP) to eliminate it without compromising performance.
+
+More prominently, tailored to semantic segmentation, we propose a multi-scale decoder (MSD), \textbf{VWFormer}, employing VWA and incorporating MLPs with functionalities including multi-layer aggregation and low-level enhancement.
+To prove the superiority of VWFormer, we evaluate it paired with versatile backbones such as ConvNeXt, Swin Transformer, SegFormer, and compare it with classical MSDs like FPN~\citep{lin2017feature}, UperNet~\citep{xiao2018unified}, MLP-decoder~\citep{xie2021segformer}, and deform-attention~\citep{zhu2020deformable} on datasets including ADE20K~\citep{zhou2017scene}, Cityscapes~\citep{cordts2016cityscapes}, and COCOStuff-164k~\citep{caesar2018coco}. Experiments show that VWFormer consistently leads to performance and efficiency gains. The highest improvements can reach an increase of $2.1\%$ mIoU and a FLOPs reduction of $45\%$, which are credited to VWA rectifying multi-scale representations of multi-level feature maps at costs of LWA.
+
+In summary, this work has a three-fold contribution:
+
+--- We make full use of the ERF technique to visualize the scale of representations learned by existing multi-scale learning paradigms, including receptive-field-variable kernels and different levels of hierarchical backbones, revealing the issues of \textit{scale inadequacy} and \textit{field inactivation}.
+
+--- We propose VWA, a relational representation learner, allowing for varying context window sizes toward multiple receptive fields like variable kernels. It is as efficient as LWA due to our pre-scaling principle along with DOPE. We also propose a CSP padding mode specifically for perfecting VWA.
+
+--- A novel MSD, VWFormer, designed for semantic segmentation, is presented as the product of VWA. VWFormer shows its effectiveness in improving multi-scale representations of hierarchical backbones, by surpassing existing MSDs in performance and efficiency on classic datasets.
+
+
+
+
+\section{Related Works}
+
+\subsection{Multi-Scale Learner}
+The multi-scale learner is deemed the paradigm utilizing variable filters to learn multi-scale representations. Sec.~\ref{sec:intro} has introduced ASPP and PSP. There are also more multi-scale learners proposed previously for semantic segmentation. These works can be categorized into three groups. The first involves using atrous convs, e.g. ASPP, and improving its feature fusion way and efficiency of atrous convolution~\citep{yang2018denseaspp, chen2018encoder}. The second involves extending adaptive pooling, incorporating PSP into other types of representation learners~\citep{he2019dynamic}~\citep{he2019adaptive}. However, there are issues of \textit{scale inadequacy} and \textit{field inactivation} associated with these methods' core mechanisms, \textit{i.e.} atrous convs and adaptive pooling, as analyzed in Sec.~\ref{sec:intro}.
+
+The third uses a similar idea to ours, computing the attention matrices between the query and contexts with different scales, to learn multi-scale representations in a relational way for semantic segmentation or even image recognition. 
+In the case of~\citet{yuan2018ocnet} and~\citet{yu2021glance}, their core mechanisms are almost identical. As for~\citet{zhu2019asymmetric},~\citet{yang2021focal}, and~\citet{ren2022shunted}, the differences among the three are also trivial. We briefly introduce~\citet{yuan2018ocnet} and~\citet{zhu2019asymmetric}, visualizing their ERFs and analyzing their issues (See Fig. In a word, all of the existing multi-scale learners in a relational way (also known as multi-scale attention) do not address the issues we find, \textit{i.e.} \textit{scale inadequacy} and \textit{field inactivation}. 
+
+\subsection{Multi-Scale Decoder}
+The multi-scale decoder (MSD) fuses multi-scale representations (multi-level feature maps) learned by hierarchical backbones. One of the most representative MSDs is the Feature Pyramid Network (FPN)~\citep{lin2017feature}, originally designed for object detection. It has also been applied to image segmentation by using its lowest-level output, even in SOTA semantic segmentation methods such as MaskFormer~\citep{cheng2021per}. \cite{lin2017feature} has also given rise to methods like~\citep{kirillov2019panoptic} and~\citep{huang2021fapn}. In Mask2Former~\citep{cheng2022masked}, FPN is combined with deformable attention~\cite{zhu2020deformable} to allow relational interaction between different level feature maps, achieving higher results. Apart from FPN and its derivatives, other widely used methods include the UperNet~\citep{xiao2018unified} and the lightweight MLP-decoder proposed by SegFormer.
+
+In summary, all of these methods focus on how to fuse multi-scale representations from hierarchical backbones or enable them to interact with each other. However, our analysis points out that there are \textit{scale inadequacy} and \textit{field inactivation} issues with referring to multi-level feature maps of hierarchical backbones as multi-scale representations. VWFormer further learns multi-scale representations with distinct scale variations and regular ERFs, surpassing existing MSDs in terms of performance while consuming the same computational budget as lightweight ones like FPN and MLP-decoder.
+
+
+
+
+
+
+
+
+\section{Varying Window Attention}
+
+
+\subsection{Preliminary: local window attention}
+Local window attention (LWA) is an efficient variant of Multi-Head Self-Attention (MHSA), as shown in Fig.~\ref{fig:vwa}a. Assuming the input is a 2D feature map denoted as $\mathbf{x_{\rm{2d}}} \in \mathbb{R} ^ \mathit{C \times H \times W}$, the first step is reshaping it to local windows, which can be formulated by:
+\begin{align}
+\mathbf{\hat{x}_{\rm{2d}}} = \rm{Unfold}\left(kernel=\mathit{P}, stride=\mathit{P} \right)\left( \mathbf{x_{\rm{2d}}}\right),  \label{eq:rel1}
+\end{align}
+where $\rm{Unfold()}$ is a Pytorch~\citep{paszke2019pytorch} function (See Pytorch official website for more information). Then the MHSA operates only within the local window instead of the whole feature.
+To show the efficiency of local window attention, we list its computation cost to compare with that of MHSA on the global feature (\textbf{G}lobal \textbf{A}ttention):
+\begin{align}
+& \rm{\Omega}\left(GA \right)= 4\mathit{\left(HW\right)}\mathit{C^{\rm{2}}}+\rm{2}\mathit{{\left(HW\right)}^{\rm{2}}}\mathit{C},
+& 
+\rm{\Omega}\left(LWA \right)= 4\mathit{\left(HW\right)}\mathit{C^{\rm{2}}}+\rm{2}\mathit{{\left(HW\right)}P^{\rm{2}}}\mathit{C}. \label{eq:rel6}
+\end{align}
+Note that the first term is on linear mappings, \textit{i.e.}, query, key, value, and out, and the second term is on the attention computation, \textit{i.e.}, calculation of attention matrices and the weighted-summation of value. In the high-dimensional feature space, $P^2$ is smaller than $C$ and much smaller than $HW$. Therefore, the cost of attention computation in LWA is much smaller than the cost of linear mappings which is much smaller than the cost of attention computation in GA.
+
+Besides, the memory footprints of GA and LWA are listed below, showing the hardware-friendliness of LWA. The intermediate outputs of the attention mechanism involve \textit{query}, \textit{key}, \textit{value}, and \textit{out}, all of which are outputs of linear mappings, and attention matrices output from attention computation. 
+\begin{align}
+& \mathrm{Mem.}\left(GA \right) \propto \mathit{\left(HW\right)C}+\mathit{\left(HW\right)^{2}},
+& \mathrm{Mem.}\left(LWA \right) \propto \mathit{\left(HW\right)C}+\mathit{\left(HW\right)P^{2}}. \label{eq:rel8}
+\end{align}
+The consequence of the computational comparison remains valid. In GA the second term is much larger than the first, but in LWA the second term is smaller than the first.
+
+\subsection{Varying the context window}
+
+In LWA, $\mathbf{\hat{x}_{\rm{2d}}}$ output by Eq.~\ref{eq:rel1} will attend to itself. In VWA, the query is still $\mathbf{\hat{x}_{\rm{2d}}}$, but for the context, by denoting it as $\mathbf{c_{\rm{2d}}}$, the generation can be formulated as:
+\begin{align}
+\mathbf{c_{\rm{2d}}} = \rm{Unfold}\left(kernel=\mathit{RP}, stride=\mathit{P}, padding=\text{zero} \right)\left( \mathbf{x_{\rm{2d}}}\right),  \label{eq:rel9}
+\end{align}
+From the view of window sliding, the query generation is a $P\times P$ window with a stride of $P \times P$ sliding on $\mathbf{x_{\rm{2d}}}$, and the context generation is a larger $RP \times RP$ window with still a stride of $P \times P$ sliding on $\mathbf{x_{\rm{2d}}}$. $R$ is the varying ratio, a constant value in one VWA. As shown in Fig.~\ref{fig:vwa}, when $R$ is 1, VWA becomes LWA, and the query and context are entangled together in the local window. But when $R>1$, with the enlargement of context, the query can see wider than the field of the local window. Thus, VWA is a variant of LWA and LWA is a special case of VWA, where $R=1$ in VWA. 
+
+From the illustration of Fig.~\ref{fig:vwa}b, the computation cost of VWA can be computed by:
+\begin{align}
+& \rm{\Omega}\left(VWA \right)= 2\mathit{\left({R^{\rm{2}}}+\rm{1}\right)}\mathit{\left(HW\right)}\mathit{C^{\rm{2}}} + \rm{2}\mathit{{\left(HW\right)}{\left(RP\right)}^{\rm{2}}}\mathit{C}. \label{eq:rel10}
+\end{align}
+Subtracting Eq.~\ref{eq:rel10} from Eq.~\ref{eq:rel6}, the extra computation cost caused by enlarging the context patch is quantified:
+\begin{align}
+& \rm{\Omega}\left(EX. \right)=
+2\mathit{\left({R^{\rm{2}}}-\rm{1}\right)}\mathit{\left(HW\right)}\mathit{C^{\rm{2}}}+\rm{2}\mathit{\left({R^{\rm{2}}}-{\rm{1}}\right)}\mathit{{\left(HW\right)}P^{\rm{2}}}\mathit{C}. \label{eq:rel11}
+\end{align}
+For the memory footprint of VWA, it can be computed by according to Fig.~\ref{fig:vwa}b:
+\begin{align}
+& \rm{Mem.}\left(VWA \right) \propto \mathit{\left({R^{\rm{2}}}\right)}\mathit{\left(HW\right)}\mathit{C} + \mathit{{\left(HW\right)}{\left(RP\right)}^{\rm{2}}}. \label{eq:rel12}
+\end{align}
+Subtracting Eq.~\ref{eq:rel12} from Eq.~\ref{eq:rel8}, the extra memory footprint is:
+\begin{align}
+& \rm{Mem.}\left(EX. \right) \propto
+\mathit{\left({R^{\rm{2}}}-\rm{1}\right)}\mathit{\left(HW\right)}\mathit{C}+\mathit{\left({R^{\rm{2}}}-\rm{1}\right)}\mathit{{\left(HW\right)}P^{\rm{2}}}. \label{eq:rel13}
+\end{align}
+Apparently, the larger the window, the more challenging the problem becomes. First, the efficiency advantage of attention computation (the second term) in LWA does not hold. Second, linear mappings, the first term, yield much more computation budget, which is more challenging because to our knowledge existing works on making attention mechanisms efficient rarely take effort to reduce both the computation cost and memory footprint of linear mappings and their mapping outputs. Next, we will introduce how to address the dilemma caused by varying the context window.
+
+\begin{figure}
+\begin{center}
+  \includegraphics[width=1\textwidth]{Figures/vwa.pdf}
+\label{fig:vwa}
+\end{figure}
+\subsection{Eliminating extra costs}
+With the analysis of Eq.~\ref{eq:rel11} and Eq.~\ref{eq:rel13}, the most straightforward way to eliminate the extra cost and memory footprint is re-scaling the large context $\in \mathbb{R} ^ \mathit{C \times R \times P \times R \times P} $ back to the same size as that of the local query $\in \mathbb{R} ^ \mathit{C \times P \times P}$, which means $R$ is set to $1$ and thereby both of Eq.~\ref{eq:rel11} and Eq.~\ref{eq:rel13} is $0$.
+
+ Above all, it is necessary to clarify the difference between using this idea to deal with the extra computation cost and the extra memory footprint. As shown in Fig.~\ref{fig:vwa}b, the intermediate produced by varying (enlarging) the window, which is the output of Eq.~\ref{eq:rel9}, already takes the memory that is $R^2(HW)C$. Therefore, re-scaling the large context after generating it does not work, the right step should be re-scaling the feature $\mathbf{x_{\rm{2d}}}$ before running Eq.~\ref{eq:rel9}. We name this pre-scaling principle.
+
+Solving the problem is begun by the pre-scaling principle. A new feature scaling paradigm, densely overlapping patch embedding (DOPE), is proposed. This method is different from patch embedding (PE) widely applied in ViT and HVT as it does not change the spatial dimension but only changes the dimensionality. Specifically, for $\mathbf{x_{\rm{2d}}}$, after applying Eq.~\ref{eq:rel9} on it, the output's shape is:
+\begin{align}
+& H/P \times W/P \times RP \times RP \times C. \label{eq:rel14}
+\end{align}
+which produces the memory footprint of ${R^2}HWC$. Instead, DOPE first reduces the dimensionality of $\mathbf{x_{\rm{2d}}}$ from $C$ to $C/{R^2}$, and then applies Eq.~\ref{eq:rel9}, resulting in the context with a shape of:
+\begin{align}
+& H/P \times W/P \times RP \times RP \times C/{R^2}. \label{eq:rel15}
+\end{align}
+which produces the memory footprint of $HWC$, the same as $\mathbf{x_{\rm{2d}}}$, eliminating the extra memory.
+
+Since PE is often implemented using conv layers, how DOPE re-scales features is expressed as:
+\begin{align}
+& {\rm{DOPE}}={\rm{Conv2d}}{(in={\mathit{C}}, out={\mathit{{C}/{R^{\rm{2}}}}}, {\rm{kernel}}={\mathit{R}}, {\rm{stride}}={1})}. \label{eq:rel16}
+\end{align}
+So, the term "densely overlapping" of DOPE describes the densely arranged pattern of convolutional kernels, especially when $R$ is large, filtering every position. The computation cost introduced by DOPE can be computed by:
+\begin{align}
+& {\rm{\Omega}}\left({\rm{DOPE}} \right)= R \times R \times C \times C/{R^2} \times HW = (HW)C^2. \label{eq:rel17}
+\end{align}
+This is equivalent to the computation budget required for just one linear mapping.
+
+However, the context window $\in \mathbb{R} ^ {RP \times RP \times C/{R^2}}$ processed by DOPE cannot be attended to by the query window $\in \mathbb{R} ^ {P \times P \times C}$. We choose PE to downsample the context and increase its dimensionality to a new context window $\in \mathbb{R} ^ {P \times P \times C}$. The PE function can be formulated as:
+\begin{align}
+& {\rm{PE}}={\rm{Conv2d}}{(in=\mathit{{C}/{R^{\rm{2}}}}}, out=\mathit{C}, \rm{kernel}=\mathit{R}, \rm{stride}={R}). \label{eq:rel18}
+\end{align}
+The computation cost for one context window applying PE is:
+\begin{align}
+& {\rm{\Omega}}\left({\rm{PE~for~one~context}} \right)= R \times R \times C / {R^2} \times C \times RP/R \times RP/R = P^2{C}. \label{eq:rel19}
+\end{align}
+For all context windows from DOPE, with a total of $H/P \times W/P$, the computation cost becomes:
+\begin{align}
+& {\rm{\Omega}}\left({\rm{PE}} \right)= H / P \times W/P \times {\rm{\Omega}}\left({\rm{PE~for~one~context}} \right) = ( HW)C^2. \label{eq:rel20}
+\end{align}
+This is still the same as only one linear mapping.
+
+After applying the re-scaling strategy described, as shown in Fig.~\ref{fig:vwa}c, it is clear that the memory footprint of VWA is the same as $\rm{Mem.}\left(LWA\right)$ in Eq.~\ref{eq:rel8}, not affected by the context enlargement. The attention computation cost is also the same as $\rm{\Omega}(LWA)$ in Eq.~\ref{eq:rel6}. For DOPE, VWA uses it once, thus adding one linear mapping computation to $\rm{\Omega}(LWA)$. For PE, VWA uses it twice for mapping the key and value from the DOPE's output, replacing the original key and value mapping. So the computation cost of VWA merely increases $25\%$---one linear mapping of $(HW)C^2$---than LWA:
+\begin{align}
+& {\rm{\Omega}}\left({\rm{VWA}} \right)= (4+1)\mathit{\left(HW\right)}\mathit{{C}^{\rm{2}}}+{\rm{2}}{\mathit{{\left(HW\right)}}{{P}^{\rm{2}}}}{\mathit{C}}. \label{eq:rel21}
+\end{align}
+
+\subsection{Attention collapse and copy-shift padding}
+The padding mode in Eq.~\ref{eq:rel9} is zero padding. However, visualizing attention maps of VWA, we find that the attention weights of the context window at the corner and edge tend to have the same value, which makes attention collapse. The reason is that too many same zeros lead to smoothing the probability distribution during Softmax activation. As shown in Fig.~\ref{fig:csp}, to address this problem, we propose copy-shift padding (CSP) equivalent to making the coverage of the large window move towards the feature. Specifically, for the left and right edges, $\mathbf{x_{\rm{2d}}}$ after CSP is:
+\begin{align}
+& \mathbf{x_{\rm{2d}}} = {\rm{Concat}}({\rm{d}}=4)(\mathbf{x_{\rm{2d}}}[... , (R+1)P/2:RP], \mathbf{x_{\rm{2d}}},\mathbf{x_{\rm{2d}}}[... , -RP:-(R+1)P/2]). \label{eq:rel22}
+\end{align}
+where $\rm{Concat}()$ denotes the Pytorch function concatenating a tuple of features along the dimension $\rm{d}$.
+Based on $\mathbf{x_{\rm{2d}}}$ obtained by Eq.~\ref{eq:rel22}, CSP padding the top and bottom sides can be formulated by:
+\begin{align}
+& \mathbf{x_{\rm{2d}}} = {\rm{Concat}}({\rm{d}}=3)(\mathbf{x_{\rm{2d}}}[... , (R+1)P/2:RP, :], \mathbf{x_{\rm{2d}}},\mathbf{x_{\rm{2d}}}[... , -RP:-(R+1)P/2, :]). \label{eq:rel23}
+\end{align}
+
+\begin{figure}
+\begin{center}
+  \includegraphics[width=1\textwidth]{Figures/padding.pdf}
+  \caption{(a) illustrates the zero-padding mode caused attention collapse when the context window is very large and the context window surrounds the local window near the corner or edge. (b) illustrates the proposed copy-shift padding (CSP) mode. The color change indicates where the padding pixels are from. (c) CSP is equivalent to moving the context windows towards the feature, ensuring that every pixel the query attends to has a different valid non-zero value. Best viewed in color.} 
+\label{fig:csp}
+\end{figure}
+
+\begin{figure}[hbt!]
+\begin{center}
+  \includegraphics[width=1\textwidth]{Figures/overall.pdf}
+\label{fig:overall}
+\end{figure}
+
+
+
+\section{VWFormer}
+
+\label{sec:VWFormer}
+\paragraph{Multi-Layer Aggregation}As illustrated in Fig.~\ref{fig:overall}, VWFormer first concatenates feature maps from the last three stages instead of all four levels for efficiency, by upsampling the
+last two (${{\mathcal{F}}_{\rm{16}}}$ and ${{\mathcal{F}}_{\rm{32}}}$) both to the same
+size as the 2nd-stage one (${{\mathcal{F}}_{\rm{8}}}$), and then transform the concatenation with one linear layer ($\rm{MLP}_{0}$) to reduce the channel number, with ${{\mathcal{F}}}$ as the outcome.
+
+\paragraph{Multi-Scale Representations} To learn multi-scale representations, three VWA mechanisms with varying ratios $R=2, 4, 8$ are paralleled to act on the multi-layer aggregation's output ${{\mathcal{F}}}$. The local window size $P$ of every VWA is set to $\frac{H}{8}\times \frac{W}{8}$, subject to the spatial size of ${{\mathcal{F}}}$. Additionally, the short path, exactly a linear mapping layer, consummates the very local scale. 
+The MLPs of VWFormer consist of two layers. The first layer ($\rm{MLP}_{1}$) is a linear reduction of multi-scale representations. 
+\paragraph{Low-Level Enhancement}The second layer ($\rm{MLP}_{2}$) of MLPs empowers the output ${{\mathcal{F}}_{\rm{1}}}$ of the first layer with low-level enhancement (LLE). LLE first uses a linear layer ($\rm{MLP}_{low}$) with small output channel numbers $48$ to reduce the lowest-level ${{\mathcal{F}}_{\rm{4}}}$ dimensionality. Then ${\mathcal{F}}_{\rm{1}}$ is upsampled to the same size as $\rm{MLP}_{low}$'s output ${{\mathcal{F}}_{\rm{low}}}$ and fused with it through $\rm{MLP}_{2}$, outputting ${{\mathcal{F}}_{\rm{2}}}$.
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+\subsection{Dataset and Implementation}
+Experiments are conducted on three public datasets including Cityscapes, ADE$20$K, and COCOStuff-$164$K (See~\ref{app:data} for more information). 
+The experiment protocols are the same as the compared method's official repository. For ablation studies, we choose the Swin-$\rm{Base}$ backbone as the testbed and use the same protocols as Swin-UperNet (See~\ref{app:implementation} for more information).
+
+\subsection{Main results}
+\subsubsection{Comparison with SegFormer (MLP-decoder)}
+SegFormer uses MixFormer (MiT) as the backbone and designs a lightweight MLP-decoder as MSD to decode multi-scale representations of MixFormer. To demonstrate the effectiveness of VWFormer in improving multi-scale representations by VWA, we replace the MLP-decoder in SegFormer with VWFormer. Table~\ref{tab:seg} shows the number of parameters, FLOPs, memory footprints, and mIoU. Across all variants of backbone MiT (B0$\to$B5), VWFormer trumps MLP-decoder on every metric.
+\begin{table}[hbt!]
+  \footnotesize
+  \centering
+  \renewcommand\arraystretch{1.15}
+  \caption{Comparison of SegFormer (MiT-MLP) with VW-SegFormer (MiT-VW.).}
+  \begin{tabular}{@{}c|c|cccc|c|cc@{}}
+  
+
+  &  & \multicolumn{4}{c|}{ADE$20$K}& {Cityscapes}& {COCO} \\
+  {MSD} & backbone & params(M) $\downarrow$ & FLOPs(G) $\downarrow$ & mem.(G)$\downarrow$ & mIoU(/MS)$\uparrow$ & mIoU(/MS)$\uparrow$ &  mIoU$\uparrow$ \\
+
+  \hline
+\multirow{6}*{MLP}  & MiT-B0 & 3.8 &8.4 & 2.2 & 37.4 / 38.0 &  76.2 / 78.1 &   35.6 \\
+  ~  & MiT-B1 & 13.7 & 15.9 & 2.7  & 42.2 / 43.1 &   78.5 / 80.0  &   40.2\\
+   ~& MiT-B2 & 27.5 & 62.4 & 4.3 & 46.5 / 47.5 &  81.0 / 82.2 &  44.6\\
+    ~& MiT-B3 & 47.3 & 79.0  & 5.6 & 49.4 / 50.0 & 81.7 / 83.3  &  45.5\\
+   ~& MiT-B4 & 64.1 & 95.7 & 7.0 & 50.3 / 51.1 &81.9 / 83.4 &  46.5\\
+    ~& MiT-B5 &84.7 & 112 & 8.1 & 51.0 / 51.8 & 82.3 / 83.5 &  46.7 \\
+    \hline
+  \multirow{6}*{VW.} &  MiT-B0 & 3.7 &5.8 & 2.1 & 38.9 / 39.6 &  77.2 / 78.7 &   36.2 \\
+
+   \multirow{6}*{~}& MiT-B1  & 13.7 & 13.2 & 2.6 & 43.2 / 44.0  &  79.0 / 80.4 &   41.5  \\
+   & MiT-B2 & 27.4& 46.6 & 4.3 &  48.1 / 49.2 &  81.7 / 82.7 & 45.2\\
+   & MiT-B3 & 47.3 & 63.3 & 5.6 & 50.3 / 50.9 &  82.4 / 83.6 & 46.8 \\
+  & MiT-B4  & 64.0 & 79.9 & 7.0 & 50.8 / 51.6 & 82.7 / 84.0 & 47.6 \\
+   & MiT-B5 & 84.6 & 96.1 & 8.1 & 52.0 / 52.7 &  82.8 / 84.3 & 48.0 \\
+  
+  
+  
+  \end{tabular}
+   
+  \label{tab:seg} 
+\end{table}
+
+\subsubsection{Comparison with UperNet}
+In recent research, UperNet was often used as MSD to evaluate the proposed vision backbone in semantic segmentation. Before multi-scale fusion, UperNet learns multi-scale representations by utilizing PSPNet (with \textit{scale inadequacy} issue) merely on the highest-level feature map. In contrast, VWFormer can rectify ERFs of every fused multi-level feature map in advance. Table~\ref{tab:uper} shows VWFormer consistently uses much fewer budgets to achieve higher performance. 
+\begin{table}[hbt!]
+  \caption{Comparison of UperNet with VWFormer. Swin Transformer and ConvNeXt serve as backbones. VW-Wide is VWFormer with two times larger channels.}
+  \footnotesize
+  \centering
+  \renewcommand\arraystretch{1.2}
+  
+  \begin{tabular}{@{}c|c|cccc|ccc@{}}
+ 
+  &  & \multicolumn{4}{c|}{ADE$20$K}& {Cityscapes} \\
+   {MSD} & backbone & params(M) $\downarrow$ & FLOPs(G) $\downarrow$ & mem.(G)$\downarrow$ & mIoU(/MS)$\uparrow$ & mIoU(/MS)$\uparrow$  \\
+
+  \hline
+\multirow{5}*{UperNet}  &Swin-B & 120  & 306 & 8.7 & 50.8 / 52.4 &  82.3 / 82.9 \\
+    ~&Swin-L& 232 & 420 & 12.7 & 52.1 / 53.5 & 82.8 / 83.3\\
+     ~&ConvNeXt-B & 121  & 293 & 5.8 & 52.1 / 52.7 &  82.6 / 82.9 \\
+    ~&ConvNeXt-L& 233 & 394 & 8.9 & 53.2 / 53.4 & 83.0 / 83.5\\
+    ~&ConvNeXt-XL& 389 & 534 & 12.8 & 53.6 / 54.1 & 83.1 / 83.5\\
+   
+    \hline
+  \multirow{5}*{VW.} & Swin-B & 95 & 120 & 7.6 &  52.5 / 53.5 &   82.7 /  83.3  \\
+
+   \multirow{5}*{~}& Swin-L & 202 & 236 & 11.5 & 54.4 / 55.8 &  83.2 / 83.9   \\
+   & ConvNeXt-B & 95 & 107 & 4.6 &  53.3 / 54.1 &    83.2 /  83.9\\
+   &  ConvNeXt-L & 205 & 208 & 7.7 & 54.3 / 55.1 &  83.4 / 84.1 \\
+ &ConvNeXt-XL& 357 & 346 & 11.4 & 54.6 / 55.3 & 83.6 / 84.3\\
+  \hline
+ VW-Wide & Swin-L & 223 & 306 & 13.7 &  54.7 / 56.0 &   83.5 /  84.2   \\
+
+  
+  \end{tabular}
+   
+\end{table}
+
+\subsubsection{Comparison with MaskFormer and Mask2Former}
+MaskFormer and Mask2Former introduce the mask classification mechanism for image segmentation but also rely on MSDs. MaskFormer uses the FPN as MSD, while Mask2Former empowers multi-level feature maps with feature interaction by integrating Deformable Attention~\citep{zhu2020deformable} into FPN. 
+Table~\ref{tab:mask} demonstrates that VWFormer is as efficient as FPN and achieves mIoU gains from $0.8\%$ to $1.7\%$. The results also show that VWFormer performs stronger than Deformable Attention with less computation costs.
+The combo of VWFormer and Deformable Attention further improves mIoU by $0.7\%$-$1.4\%$. This demonstrates VWFormer can still boost the performance of interacted multi-level feature maps via Deformable Attention, highlighting its generability.
+\begin{table}[hbt!]
+  \footnotesize
+  \centering
+  \renewcommand\arraystretch{1.1}
+  \caption{Comparison of VWFormer with FPN and Deformable Attention. MaskFormer and Mask2Former serve as testbeds (mask classification heads).}
+  \begin{tabular}{@{}c|c|c|cccccc@{}}
+  
+
+  head & {MSD} & backbone & params(M) $\downarrow$ & FLOPs(G) $\downarrow$ & mem.(G)$\downarrow$ & mIoU(/MS)$\uparrow$   \\
+  \hline
+
+  \hline
+\multirow{8}*{MaskFormer} & \multirow{4}*{FPN}  & Swin-T & 41.8 &57.3 & 4.8 & 46.7 / 48.8   \\
+ & ~  &Swin-S & 63.1 & 81.1 & 5.5  & 49.4 / 51.0   \\
+ &  ~&Swin-B & 102 & 126 & 8.2 & 52.7 / 53.9  \\
+  &  ~&Swin-L& 212 & 239 & 11.5 & 54.1 / 55.6 \\
+   \cline{2-7}
+&  \multirow{4}*{VW.} & Swin-T & 42.8 & 55.6 & 5.3 & 47.8 / 49.0   \\
+
+ &  \multirow{4}*{~}& Swin-S & 64.1 & 79.4 & 6.2 & 50.5 / 52.7   \\
+ &  & Swin-B & 102 & 124 & 8.5 &  53.8 / 54.6  \\
+&   &  Swin-L & 213 & 237 & 12.0 & 55.3 / 56.5  \\
+ \hline
+ \hline
+\multirow{12}*{Mask2Former} & \multirow{4}*{Deform-Attn}  & Swin-T & 47.4 & 74.1 & 5.4 & 47.7 / 49.6   \\
+~ & ~  &Swin-S & 68.8 & 97.9 & 6.6  & 51.3 / 52.4   \\
+ &  ~&Swin-B & 107 & 142 & 9.9 & 53.9 / 55.1  \\
+  &  ~&Swin-L& 215 & 255 & 13.1 & 56.1 / 57.3 \\
+   \cline{2-7}
+&  \multirow{4}*{VW.} & Swin-T & 47.7 &60.8 & 3.6 & 48.3 / 50.5   \\
+
+ &  \multirow{4}*{~}& Swin-S & 69.8 & 84.6 & 4.7 & 52.1 / 53.7   \\
+ &  & Swin-B & 108 & 129 & 7.9 &  54.6 / 56.0  \\
+&   &  Swin-L & 217 & 244 & 12.1 & 56.5 / 57.8  \\
+ \cline{2-7}
+&  \multirow{4}*{VW.} & Swin-T & 53.3  & 85.3 & 6.2 & 48.5 / 50.4   \\
+
+ &  \multirow{4}*{(Deform-Attn)}& Swin-S & 74.7 & 108 & 7.3 & 52.0 / 53.6  \\
+ &  & Swin-B & 113 & 152 & 10.1 &  55.2 / 56.5  \\
+&   &  Swin-L & 221 & 266 & 13.7 & 56.9 / 58.3  
+ 
+  
+  
+  
+  \end{tabular}
+  \label{tab:mask} 
+\end{table}
+
+\subsection{Ablation Studies}
+\subsubsection{Scale contribution}
+\label{app:scale}
+Table~\ref{tab:scale} shows the performance drops when removing any VWA of VWFormer. These results indicate every scale is crucial, suggesting that \textit{scale inadequacy} is fatal to multi-scale learning. Also, we add a VWA branch with $R=1$ context windows which is exactly LWA, and then substitute $R=2$ VWA with it. The results show LWA is unnecessary in VWFormer because the short path ($1\times1$ convolution) in VWFormer can provide a very local receptive field, as visualized in Fig.~\ref{fig:efr}f.
+
+\begin{table}[hbt!]
+  \footnotesize
+  \centering
+  \renewcommand\arraystretch{1.15}
+  \caption{Performance of different Scale combinations. Conducted on ADE20K. The numbers of "scale group" are varying ratios. (2, 4, 8) is the default setting.}
+  \newcolumntype{?}{!{\vrule width 0.8pt}}
+  \begin{tabular}{@{}cc?cccc|cccc@{}}
+  & {backbone}  &  \multicolumn{6}{c}{Swin-B} \\
+  \cline{2-8}
+  & scale group & (2, 4, 8) & (2, 4) & (2, 8) &(4, 8) & (1, 2, 4, 8) & (1, 4, 8) \\
+ & mIoU(/MS)$\uparrow$  & 52.5 / 53.5  & 51.8 / 52.8 & 51.7 / 52.7 & 51.9 / 52.8 & 52.1 / 53.0 & 51.9 / 52.9 \\
+  \end{tabular}
+\end{table}
+\subsubsection{Pre-scaling vs. Post-scaling}
+Table~\ref{tab:prepost} compares: applying VWA without rescaling, with a naive rescaling as depicted in Fig.~\ref{fig:vwa}b, and our proposed professional strategy. VWA originally consumes unaffordable FLOPs and memory footprints. Applying the naive scaling strategy saves some FLOPs and memory footprints, but introduces patch embedding (PE) increasing an amount of parameters. Our proposed strategy does not only eliminate the computation and memory introduced by varying the context window but also only adds a small number of parameters. Moreover, it does not sacrifice performance for efficiency.
+\begin{table}[hbt!]
+ \footnotesize
+  \centering
+  \renewcommand\arraystretch{1.15}
+  \caption{Performance of different ways to re-scale the context window. Conducted on ADE20K.}
+  \begin{tabular}{@{}c|c|c|cccccc@{}}
+
+   backbone & pre. or post.& rescaling method &  params.$\downarrow$ & FLOPs(G) $\downarrow$ & mem.(G)$\downarrow$ & mIoU(/MS)$\uparrow$  \\
+
+  \hline
+  
+  \hline
+\multirow{4}*{Swin-B}  & pre-scaling & DOPE $\rightarrow$ PE & 95 & 120 & 7.6 & 52.5 / 53.5  \\
+~  & post-scaling & PE & 115 & 210 & 9.9  & 52.3 / 53.6   \\
+  ~  & post-scaling & Avg. Pooling & 93 & 114 & 9.3  & 51.7 / 52.8   \\
+   ~& no rescaling & -- & 93  & 315 & 13.1 & 52.4 / 53.4  \\
+
+  
+  \end{tabular}
+   
+  \label{tab:prepost} 
+\end{table}
+
+\subsubsection{Zero padding vs. VW padding}
+The left table of Table~\ref{tab:padding} shows using zero padding to obtain the context window results in a $0.8\%$ lower mIoU than applying CSP to obtain the context window. Such a performance loss is as severe as removing one scale of VWA, demonstrating the harm of attention collapse and the necessity of our proposed CSP in applying the varying window scheme.
+
+\begin{table}[hbt!]
+  \footnotesize
+ \centering
+  \renewcommand\arraystretch{1.15}
+  \newcolumntype{?}{!{\vrule width 0.8pt}}
+\caption{\textbf{Left:} Performance of zero padding mode and our proposed CSP. \textbf{Right:} Performance of different output channel number settings of LLE module in VWFormer.}
+\begin{tabular}{ll}%
+
+\begin{tabular}{c?cc}
+
+ {backbone}  &  \multicolumn{2}{c}{Swin-B} \\
+  \hline
+   padding & zero & CSP  \\
+
+  mIoU(/MS)  & 52.0 / 52.7  & 52.5 / 53.5  \\
+\end{tabular} 
+
+&
+\begin{tabular}{c?ccccc}
+{backbone}  &  \multicolumn{3}{c}{Swin-B} \\
+  \hline
+   method & --- & LLE & FPN  \\
+  mIoU / FLOPs(G)  & 51.8 / 112 & 52.5 / 120  & 52.1 / 176  \\
+\end{tabular} \tabularnewline
+\end{tabular} 
+\label{tab:padding}
+\end{table} 
+\subsubsection{Effectiveness of Low-level enhancement}
+
+The right table of Table~\ref{tab:padding} analyzes Low-Level Enhancement (LLE). First, removing LLE degrades mIoU by $0.7\%$. From Fig.~\ref{fig:efr}, it can be seen that the lowest-level feature map is of unique receptivity, very local or global, adding new scales to VWFormer's multi-scale learning. FPN is also evaluated as an alternative, and the results show FPN is neither stronger nor cheaper than LLE. 
+
+
+ 
+\begin{figure}[hbt!]
+\begin{center}
+  \includegraphics[width=1\textwidth]{Figures/efrade20k.pdf}
+  \caption{Visualization of inference results and ERFs of SegFormer and VWFormer. The red dot is the query location. The red box exhibits our method's receptive superiority. Zoom in to see details. } 
+\label{fig:comp_efr}
+\end{figure}
+
+
+
+\section{Specific ERF Visualization}
+
+The ERF visualization of Fig.~\ref{fig:efr} is averaged on many ADE20k val images. To further substantiate the proposed issue, Fig.~\ref{fig:comp_efr} analyzes the specific ADE20K val image with ERFs of segformer and VWFormer contrastively. This new visualization can help to understand the receptive issue of existing multi-scale representations and show the strengths of VWFormer's multi-scale learning.
+
+
+Fig.~\ref{fig:comp_efr}a showcases a \textcolor[rgb]{0.4,0.87,0.95}{waterfall} along with \textcolor[rgb]{0.9176,0.2588,0.1568}{rocks}. Our VWFormer’s result labels most of the  \textcolor[rgb]{0.9176,0.2588,0.1568}{rocks}, but SegFormer's result struggles to distinguish between “\textcolor[rgb]{0.9176,0.2588,0.1568}{rock}” and “ \textcolor[rgb]{0.6667,0.95,0.5960}{mountain}”. From their ERFs, it can be contrastively revealed that VWFormer helps the query to understand the complex scene, even delineating the \textcolor[rgb]{0.4,0.87,0.95}{waterfall} and \textcolor[rgb]{0.9176,0.2588,0.1568}{rocks}, more distinctly than SegFormer within the whole image. 
+
+Fig.~\ref{fig:comp_efr}b showcases a meeting room with a \textcolor[rgb]{0.9176,0.2,0.38}{table} surrounded by swivel chairs. Our VWFormer’s result labels all of the \textcolor[rgb]{0,0,1}{swivel chairs}, but SegFormer's result mistakes two \textcolor[rgb]{0,0,1}{swivel chairs} as \textcolor[rgb]{0.74,0.349,0.1294}{general chairs}. From their ERFs, it can be contrastively revealed when VWFormer infers the location, it incorporates the context of \textcolor[rgb]{0,0,1}{swivel chairs}, within the Red box on the opposite side of the \textcolor[rgb]{0.9176,0.2,0.38}{table}. But SegFormer neglects to learn about that contextual information due to its scale issues.  
+
+Fig.~\ref{fig:comp_efr}c showcases a white tall \textcolor[rgb]{0.67,0.4823,0.4745}{building}. Our VWFormer’s result labels it correctly, but SegFormer’s result mistakes part of the \textcolor[rgb]{0.67,0.4823,0.4745}{building} as the class “\textcolor[rgb]{0.9176,0.2078,0.8509}{house}”. From their ERFs, it can be contrastively revealed that VWFormer has a clearer receptivity than SegFormer within the Red box which indicates this object is a church-style \textcolor[rgb]{0.67,0.4823,0.4745}{building}.
+
+
+
+
+

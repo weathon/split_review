@@ -1,0 +1,548 @@
+\title{PAC Prediction Sets Under Label Shift}
+
+\begin{abstract}
+Prediction sets capture uncertainty by predicting sets of labels rather than individual labels, enabling downstream decisions to conservatively account for all plausible outcomes. Conformal inference algorithms construct prediction sets guaranteed to contain the true label with high probability. These guarantees fail to hold in the face of distribution shift, which is precisely when reliable uncertainty quantification can be most useful. We propose a novel algorithm for constructing prediction sets with PAC guarantees in the label shift setting. 
+This method estimates the predicted probabilities of the classes in a target domain, as well as the confusion matrix, 
+then propagates uncertainty in these estimates through a Gaussian elimination algorithm to compute confidence intervals for importance weights.
+Finally, it uses these intervals to construct prediction sets.
+We evaluate our approach on five datasets:
+the CIFAR-10, ChestX-Ray and Entity-13 image datasets, 
+the tabular CDC Heart Dataset, 
+and the AGNews text dataset. Our algorithm satisfies the PAC guarantee while producing smaller, more informative, prediction sets compared to several baselines.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Uncertainty quantification can be a critical tool for building reliable systems from machine learning components. For example, a medical decision support system can convey uncertainty to a doctor, or a robot can act conservatively with respect to uncertainty. These approaches are particularly important when the data distribution shifts as the predictive system is deployed, since they enable the decision-maker to react to degraded performance.
+
+Conformal prediction~\citep{vovk2005algorithmic,angelopoulos2021gentle} is a promising approach to uncertainty quantification,
+converting machine learning models into \emph{prediction sets}, which output sets of labels instead of a single label. Under standard assumptions (i.i.d. or exchangeable data), it guarantees that the prediction set contains the true label with high probability. We consider \emph{probably approximately correct (PAC)} (or \emph{training-conditional}) guarantees~\citep{vovk2012conditional,park2019pac}, which ensure high probability coverage over calibration datasets used to construct the prediction sets.
+
+In this paper, we propose a novel prediction set algorithm that provides PAC guarantees under the \emph{label shift} setting, 
+where the distribution of the labels may shift, but the distribution of covariates conditioned on the labels remains fixed. For instance, during a pandemic, a disease may spread to a much larger fraction of the population, but the 
+manifestations of the disease may remain the same. As another example, real-world data may have imbalanced classes, unlike the balanced classes typical of curated training datasets. We consider the unsupervised domain adaptation setting~\citep{ben2006analysis}, where we are given labeled examples from a \emph{source domain}, but only unlabeled examples from the \emph{target domain}, and care about performance in the target domain. 
+
+A standard way to adapt conformal inference to handle distribution shift is by using importance weighting to ``convert'' data from the source distribution into data from the target distribution~\citep{tibshirani2019conformal,park2021pac}. 
+In the label shift setting, one can express the importance weights as $w^*=\mathbf{C}_P^{-1}q^*$, where $\mathbf{C}_P$ is the \emph{confusion matrix} and $q^*$ is the \emph{distribution of predicted labels}~\citep{lipton2018detecting}; see details below. 
+However, since $\mathbf{C}_P$ and $q^*$ are unknown and must be estimated based on a finite dataset,
+this introduces additional errors that are not accounted for by existing weighting methods.
+
+To address this problem, we construct confidence intervals around $\mathbf{C}_P$ and $q^*$, and then devise a novel algorithm to propagate these intervals through a Gaussian elimination algorithm used to compute $w^*$. 
+We can then leverage an existing strategy for constructing PAC prediction sets when given confidence intervals for the importance weights~\citep{park2021pac}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{figures/misc/figure.pdf}
+\caption{An example of our approach on the ChestX-ray dataset. In the unshifted setting, standard PAC prediction sets guarantee high-probability coverage, but this guarantee fails under label shift. Our approach addresses this challenge and remains valid in the shifted environment.}
+\label{fig:example}
+\end{figure}
+
+We empirically evaluate our approach on five datasets across three application domains: CIFAR-10~\citep{krizhevsky2009learning} and Entity-13~\citep{santurkar2020breeds} in the computer vision domain, the CDC Heart Dataset~\citep{cdcheart} and ChestX-ray~\citep{national2022nih} in the medical domain, and AGNews~\citep{zhang2015character} in the language domain. 
+
+\textbf{Contributions.}
+We propose a novel algorithm for constructing PAC prediction sets in the presence of label shift, which computes provably valid intervals around the true importance weights. 
+Our algorithm is based on a novel technique for propagating confidence intervals through the updates of Gaussian elimination, which to the best of our knowledge is a novel approach to uncertainty propagation in a prediction set construction setting. This idea may be of independent interest and applicable to other linear algebraic computations.
+Finally, empirically demonstrate that our approach satisfies the PAC guarantee while constructing smaller prediction sets than several baselines. 
+
+\textbf{Example.} Figure~\ref{fig:example} illustrates an application of our technique to the ChestX-ray dataset. In medical settings, PAC prediction sets (denoted PS) provide a rigorous way to quantify uncertainty for making downstream decisions; in particular, they guarantee that the prediction set contains the true label (in this case, a diagnosis) with high probability. However, label shift happens commonly in medical settings, for instance, many illnesses have varying rates of incidence over time even when the patient population remains the same. Unfortunately, label shift can invalidate the PAC coverage guarantee. Our approach (denoted PSW) corrects for the label shift via importance weighting; it does so in a provably correct way by propagating uncertainty through the Gaussian elimination computation used to construct importance weights. The resulting prediction sets satisfy the PAC guarantee.
+
+\textbf{Related work.} There has been recent interest in conformal inference under distribution shift, much of it focusing on covariate shift~\citep{tibshirani2019conformal, lei2021conformal,qiu2022distribution}. \citep{podkopaev2021distribution} develop methods for marginal coverage under label shift, 
+whereas we are interested in training-set conditional---or PAC---guarantees. Furthermore, they assume that the true importance weights are known, which is rarely the case.
+In the label shift setting, the importance weights can be estimated~\citep{lipton2018detecting}, but as we show in our experiments, uncertainty in these estimates must be handled for the PAC guarantee to hold. 
+
+We leverage the method of~\citep{park2021pac} to handle estimation error in the importance weights.
+That work studies covariate shift, and uses a heuristic to obtain intervals around the importance weights. 
+For the label shift setting, we can in fact obtain stronger guarantees: we modify Gaussian elimination to propagate uncertainty through the computation of the weights $w^*=\mathbf{C}_P^{-1}q^*$.
+
+
+\section{Problem Formulation}
+
+
+
+\subsection{Background on Label Shift}\label{sec:labelshift}
+
+Consider the goal of training a classifier $g:\mathcal{X}\to\mathcal{Y}$, where $\mathcal{X}\subseteq\mathbb{R}^d$ is the covariate space, and $\mathcal{Y}=[K]=\{1,...,K\}$ is the set of labels. We consider the setting where we train on one distribution $P$ over $\mathcal{X}\times\mathcal{Y}$---called the \emph{source}---with a probability density function (PDF) $p:(x,y)\mapsto p(x,y)$, and evaluate on a potentially different test distribution $Q$---called the \emph{target}---with PDF $q:(x,y)\mapsto q(x,y)$. 
+We focus on the unsupervised domain adaptation setting~\citep{ben2007analysis}, where we are given an i.i.d.~sample $S_m\sim P^m$ of $m$ labeled datapoints, and  an i.i.d.~sample of $n$ unlabeled datapoints $T_X^n\sim Q_X^n$. The label shift setting~\citep{lipton2018detecting} assumes that only the label distribution $Q_Y$ may change from $P_Y$, and the conditional covariate distributions remain the same:
+\begin{assumption}
+\label{assump:a1}
+\rm
+(Label shift) We have $p(x\mid y) = q(x\mid y)$ for all $x \in \mathcal{X}, y \in \mathcal{Y}$.
+\end{assumption} 
+We denote $p(y) =P_Y(Y=y)$ for all $y\in \mathcal{Y}$ and analogously for $Q$.
+\citep{lipton2018detecting} consider two additional mild assumptions:
+\begin{assumption}
+\label{assump:a2}
+\rm
+For all $y \in \mathcal{Y}$ such that $q(y) > 0$, we have $p(y) > 0$.
+\end{assumption}
+Next, given the trained classifier $g: \mathcal{X} \rightarrow \mathcal{Y}$
+let $\mathbf{C}_P \in \mathbb{R}^{K\times K}$ 
+denote its expected confusion matrix---i.e., $c_{ij}:=(\mathbf{C}_P)_{ij} = \mathbb{P}_{(X,Y)\sim P}(g(X)=i, Y=j)$.
+\begin{assumption}
+\label{assump:a3}
+The confusion matrix $\mathbf{C}_P$ is invertible.
+\end{assumption}
+This last assumption requires that the per-class expected predictor outputs be linearly independent; for instance, it is satisfied when $g$ is reasonably accurate across all labels. In addition, one may test whether this assumption holds~\citep{lipton2018detecting}.
+
+Denoting the importance weights $w^* \coloneqq (q(y)/p(y))_{y\in\mathcal{Y}}\in\mathbb{R}^K$, 
+and
+$\hat{y}:=g(x)$,
+we will write $p(\hat y|y)=\mathbb{P}_{(X,Y)\sim P_X}[g(X)=\hat y|Y=y]$, and define 
+$p(\hat y,y)$, $p_{\hat y}$ as well as the corresponding expressions for $q$ analogously.
+Since $\hat y$
+depends only on $x$, we have
+$q(\hat{y}\mid y) = p(\hat{y}\mid y)$. 
+Thus, see e.g., \cite{lipton2018detecting},
+\begin{align*}
+q_{\hat{y}} 
+=\sum_{y\in \mathcal{Y}} q(\hat{y}\mid y)q(y)
+=\sum_{y\in\mathcal{Y}} p(\hat{y}\mid y)q(y)
+=\sum_{y\in\mathcal{Y}} p(\hat{y}, y) \frac{q(y)}{p(y)},
+\end{align*}
+or in a matrix form,
+$q^* = \mathbf{C}_Pw^*$,
+where
+$q^* \coloneqq (q_{\hat{y}} )_{\hat{y}\in\mathcal{Y}}\in\mathbb{R}^K$. As we assume $\mathbf{C}_P$ is invertible,
+\begin{align}
+\label{eq:confq}
+w^*= \mathbf{C}_P^{-1} q^*.
+\end{align}
+Our algorithm uses this equation to approximate $w^*$, and then use its approximation to construct PAC prediction sets that remain valid under label shift.
+
+\subsection{PAC Prediction Sets Under Label Shift}\label{sec:pacps}
+
+We are interested in constructing a \emph{prediction set} $C:\mathcal{X}\to2^{\mathcal{Y}}$, which outputs a set of labels $C(x)\subseteq\mathcal{Y}$ for each given input $x\in\mathcal{X}$ rather than a single label. The benefit of outputting a set of labels is that we can obtain correctness guarantees such as:
+\begin{align}
+\label{eqn:ac}
+\mathbb{P}_{(X,Y)\sim P}[Y\in C(X)]\ge1-\epsilon,
+\end{align}
+where $\epsilon\in(0,1)$ is a user-provided confidence level. Then, downstream decisions can be made in a way that accounts for all labels $y\in C(x)$ rather than for a single label. Thus, prediction sets quantify uncertainty.
+Intuitively, \eqref{eqn:ac} can be achieved if we output $C(x)=\mathcal{Y}$ for all $x\in\mathcal{X}$, but this is not informative. Instead, the typical goal is to output prediction sets that are as small as possible. %---e.g., minimize $\mathbb{E}_{X\sim P_X}[|C(X)|]$.
+
+The typical strategy for constructing prediction sets is to leverage a fixed existing model. In particular, we assume given a \emph{scoring function} $f:\mathcal{X}\times\mathcal{Y}\to\mathbb{R}$; most deep learning algorithms provide such scores in the form of predicted probabilities, with the corresponding classifier being $g(x)=\operatorname*{\arg\max}_{y\in\mathcal{Y}}f(x,y)$. The scores do not need to be reliable in any way; if they are unreliable, the PAC prediction set algorithm will output larger sets. Then, we consider prediction sets parameterized by a  real-valued threshold $\tau\in\mathbb{R}$:
+\begin{align*}
+C_\tau(x)=\{y\in\mathcal{Y}\mid f(x,y)\ge\tau\}.
+\end{align*}
+In other words, we include all labels with score at least $\tau$.
+First, we focus on correctness for $P$, in which case we only need $S_m$, usually referred to as the calibration set. 
+Then, a prediction set algorithm constructs a threshold $\hat\tau(S_m)\in\mathbb{R}$ and returns $C_{\hat\tau(S_m)}$.
+
+Finally, we want $\hat\tau$ to satisfy (\ref{eqn:ac}); one caveat is that it may fail to do so due to randomness in $S_m$.
+Thus, we allow an additional probability $\delta\in\mathbb{R}$ of failure, resulting in the following desired guarantee:
+\begin{align}
+\label{eqn:pac}
+\mathbb{P}_{S_m\sim P^m} [\mathbb{P}_{(X,Y)\sim P} [Y \in C_{\hat\tau(S_m)}(X)] \geq 1-\epsilon] \geq 1-\delta.
+\end{align}
+\citet{vovk2012conditional,park2019pac} propose an algorithm $\hat\tau$ that satisfies (\ref{eqn:pac}),
+
+
+
+Finally, we are interested in constructing PAC prediction sets in the label shift setting, using both the labeled calibration dataset $S_m\sim P^m$ from the source domain, 
+and the unlabeled calibration dataset $T_n^X\sim Q^n$ from the target distribution. 
+Our goal is to construct $\hat\tau(S_m,T_n^X)$ based on both $S_m$ and $T_n^X$, which satisfies the coverage guarantee over $Q$ instead of $P$:
+\begin{align}
+\label{eqn:labelpac}
+\mathbb{P}_{S_m\sim P^m, T^X_n\sim Q^n_X} \left[\mathbb{P}_{(X,Y)\sim Q}[Y\in C_{\hat\tau(S_m,T_n^X)}(X)]\ge1-\epsilon\right]\geq 1-\delta.
+\end{align}
+Importantly, the inner probability is over the shifted distribution $Q$ instead of $P$.
+
+
+\section{Algorithm}
+
+
+To construct prediction sets valid under label shift,
+we first notice that it is enough to find element-wise confidence intervals for the importance weights $w^*$.
+Suppose that we can construct $W=\prod_{k\in \mathcal{Y}}[\underline{w}_k,\overline{w}_k]\subseteq\mathbb{R}^K$ 
+such that $w^*\in W$.
+Then, when adapted to our setting,
+the results of \citet{park2021pac}---originally for the covariate shift problem---provide an algorithm 
+that returns a threshold  $\hat\tau(S_m,V,W,b)$,
+where $V\sim\text{Uniform}([0,1])^K$ is a vector of random variables,
+such that 
+\begin{align}\label{thm:ipw}
+\mathbb{P}_{S_m\sim P^m,V\sim U^K}\left[\mathbb{P}_{(X,Y)\sim Q}[Y\in C_{\hat\tau(S_m,V,W,b)}]\ge1-\epsilon\right]\ge1-\delta.
+\end{align}
+
+
+This is similar to \eqref{eqn:labelpac} but one minor point is that it accounts 
+for the randomness used by our algorithm---via $V$---in the outer probability.
+ 
+
+The key challenge is to construct 
+the elementwise confidence interval
+$W=\prod_{k\in\mathcal{Y}}[\underline{w}_k,\overline{w}_k]$ such that $w^*\in W$ with high probability.
+The approach from \cite{park2021pac} for the covariate shift problem relies on training a source-target discriminator, 
+which is not possible in our case since we do not have class labels from the target domain. 
+Furthermore, \cite{park2021pac} do not provide conditions under which 
+one can provide a valid confidence interval for the importance weights.
+Our algorithm uses a novel approach, where we propagate intervals through the computation of importance weights.
+The weights $w^*$ are determined 
+by the system of linear equations
+$\mathbf{C}_Pw^*=q^*$.
+Since $\mathbf{C}_P$ and $q^*$ are unknown, we start by constructing \emph{element-wise} confidence intervals
+\begin{align}
+\label{eqn:inputbounds}
+\underline{\mathbf{C}}_P\le\mathbf{C}_P\le\overline{\mathbf{C}}_P
+\qquad\text{and}\qquad
+\underline{q}^*\le q^*\le\overline{q}^*,
+\end{align}
+with a probability of at least $1-\delta$ over our calibration datasets $S_m$ and $T_n^X$. 
+We then propagate these confidence intervals through each step of Gaussian elimination, 
+such that at the end of the algorithm, we obtain confidence intervals for its output---i.e.,
+\begin{align}
+\label{eqn:outputbounds}
+\underline{w}^*\le w^*\le\overline{w}^*
+\qquad\text{with probability at least}~1-\delta.
+\end{align}
+Finally, we can use (\ref{eqn:outputbounds}) with the algorithm from \citep{park2021pac} to construct PAC prediction sets under label shift. We describe our approach below.
+
+\subsection{Elementwise Confidence Intervals for \texorpdfstring{$\mathbf{C}_P$}{CP} and \texorpdfstring{$q^*$}{q}}
+
+Recall that $\mathbf{C}_P=(c_{ij})_{ij\in\mathcal{Y}}$ and $q^*=(q_{\hat y})_{{\hat y}\in\mathcal{Y}}$. 
+Note that $c_{ij}=\mathbb{P}[g(X)=i,Y=j]$ is the mean of the Bernoulli random variable $\mathbbm{1}(g(X)=i, Y=j)$ over the randomness in $(X,Y)\sim P$. 
+Similarly, $q_k$ is the mean of $\mathbbm{1}(g(X)=k)$ over the randomness in $X\sim Q_X$. 
+Thus, we can use the Clopper-Pearson (CP) intervals~\citep{clopper1934use}
+for a Binomial success parameter 
+ to construct intervals around $c_{ij}$ and $q_k$. 
+Given  a confidence level $\delta\in(0,1)$ and the
+sample mean $\hat{c}_{ij}=\frac{1}{m}\sum_{(x,y)\in S_m}\mathbbm{1}(g(x)=i, y=j)$---distributed as a scaled Binomial random variable---this is an interval $\text{CP}(\hat{c}_{ij},m,\delta)=[\underline{c}_{ij},\overline{c}_{ij}]$ such that
+\begin{align*}
+\mathbb{P}_{S_m\sim P^m}[c_{ij}\in\text{CP}(\hat{c}_{ij},m,\delta)]\ge1-\delta.
+\end{align*}
+Similarly, for $q_k$, we can construct CP intervals based on $\hat{q}_k=\frac{1}{n}\sum_{x\in T_n^X}\mathbbm{1}(g(x)=k)$. Together, for confidence levels $\delta_{ij}$ and $\delta_k$ chosen later, we obtain for all $i,j,k\in[K]$,
+\begin{align*}
+\mathbb{P}_{S_m\sim P^m}\left[ \underline{c}_{ij} \le c_{ij} \le \overline{c}_{ij} \right] &\ge 1 - \delta_{ij},
+\qquad
+\mathbb{P}_{T_n^X\sim Q_X^n}\left[\underline{q}_k \le q_k \le \overline{q}_k\right] \ge 1 - \delta_k.
+\end{align*}
+Then, the following result holds by a union bound:
+Given any $\delta_{ij},\delta_k\in(0,\infty)$, for all $i,j,k\in[K]$, letting $[\underline{c}_{ij},\overline{c}_{ij}]=\text{CP}(\hat{c}_{ij},m,\delta_{ij})$ and $[\underline{q}_k,\overline{q}_k]=\text{CP}(\hat{q}_k,n,\delta_k)$, and letting $\delta=\sum_{i,j\in[K]}\delta_{ij}+\sum_{k\in[K]}\delta_k$, we have
+\begin{align}\label{lem:cp}
+\mathbb{P}_{S_m\sim P^m,T_n^X\sim Q_X^n}\left[ \bigwedge_{i,j\in[K]}\underline{c}_{ij} \le c_{ij} \le \overline{c}_{ij}  , \bigwedge_{k\in[K]} \underline{q}_k \le q_k \le \overline{q}_k\right] \ge 1 - \delta.
+\end{align}
+
+\subsection{Gaussian Elimination with Intervals}
+We also need to set up notation for Gaussian elimination, which requires us to briefly recall the algorithm. 
+ To solve $\mathbf{C}_Pw^*=q^*$, Gaussian elimination \citep[see e.g.,][]{golub2013matrix} proceeds in two phases. 
+Starting with $c^0=\mathbf{C}_P$ and $q^0=q^*$,
+ on iteration $t\ge 1$, Gaussian elimination uses row $k=t$ to eliminate the $k$th column of rows $i\in\{k+1,...,K\}$ (we introduce a separate variable $k$ for clarity). In particular, 
+if $c_{kk}^t\neq 0$,
+we denote
+\begin{align*}
+c_{ij}^{t+1} &=
+\begin{cases}
+c_{ij}^t-\dfrac{c_{ik}^tc_{kj}^t}{c_{kk}^t} &\text{if } i>k, \\
+c_{ij}^t &\text{otherwise;}
+\end{cases}
+\qquad\,
+q_i^{t+1} = \begin{cases}
+q_i^t - \dfrac{c_{ik}^tq_k^t}{c_{kk}^t} &\text{if }i > k \\
+q_i^t &\text{otherwise,}
+\end{cases}
+\qquad\forall i,j\in[K].
+\end{align*}
+If $c_{kk}^t= 0$, but there is an element $j>k$ in the $k$th column such that $c_{jk}^t\neq 0$, the $k$th and the $j$th rows are swapped and the above steps are executed. If no such element exists, the algorithm proceeds to the next step. At the end of the first phase, the matrix $c^{K-1}$ has all elements below the diagonal equal to zero---i.e., $c^{K-1}_{ij}=0$ if $j<i$. 
+In the second phase, the Gaussian elimination algorithm solves for $w_i^*$ backwards from $i=K$ to $i=1$, introducing the following notation.
+For each $i$, if $c_{ii}^{K-1}\neq 0$, we denote\footnote{The algorithm requires further discussion if $c_{ii}^{K-1}=0$ \citep{golub2013matrix}; this does not commonly happen in our motivating application so we will not consider this case.}
+$w_i^*=(q_i-s_i)/c_{ii}^{K-1}$,
+ where $s_i=\sum_{j=i+1}^Kc_{ij}^{K-1}w_j^*$.
+
+In our setting, we do not know $c^0$ and $q^0$; instead, we assume given entrywise confidence intervals as in \eqref{eqn:inputbounds}, which amount to
+$\underline{c}^0\le c^0\le\overline{c}^0$ and $\underline{q}^0\le q^0\le\overline{q}^0$. 
+We now work on the event $\Omega$ that these bounds hold, 
+and prove that our algorithm works on this event; later, we combine this result with Equation~\ref{lem:cp} to obtain a high-probability guarantee. Then, our goal is to compute $\underline{c}^t,\overline{c}^t,\underline{q}^t,\overline{q}^t$ such that
+for all iterations $t\in\{0,1,...,K-1\}$, 
+we have elementwise confidence intervals
+specified by
+$\underline{c}^t,\overline{c}^t$,
+$\underline{q}^t$ and $\overline{c}^t$
+for the outputs 
+$c^t,q^t$
+of the Gaussian elimination algorithm:
+\begin{align}
+\label{eqn:invariant}
+\underline{c}^t\le c^t\le\overline{c}^t
+\qquad\text{and}\qquad
+\underline{q}^t\le q^t\le\overline{q}^t.
+\end{align}
+The base case $t=0$ holds by the assumption.
+Next, to propagate the uncertainty through the Gaussian elimination updates
+for each iteration $t\in[K-1]$, our algorithm sets
+\begin{align}
+\label{eqn:clower}
+\underline{c}_{ij}^{t+1}&=\begin{cases}
+0 &\text{if } i > k,~j \le k, \\
+    \underline{c}_{ij}^t - \dfrac{\overline{c}_{ik}^t\overline{c}_{kj}^t}{\underline{c}_{kk}^t} &\text{if } i,j > k, \\
+\underline{c}_{ij}^t &\text{otherwise}
+\end{cases}
+\qquad\forall i,j\in[K]
+\end{align}
+for the lower bound, and computes
+\begin{align}
+\label{eqn:cupper}
+\overline{c}_{ij}^{t+1}&=\begin{cases}  
+0 &\text{if } i > k,~j \le k, \\
+\overline{c}_{ij}^t - \dfrac{\underline{c}_{ik}^t\underline{c}_{kj}^t}{\overline{c}_{kk}^t} &\text{if } i,j > k, \\
+\overline{c}_{ij}^t &\text{otherwise}
+\end{cases}
+\qquad\forall i,j\in[K]
+\end{align}
+for the upper bound. The first case handles the fact that Gaussian elimination is guaranteed to zero out entries below the diagonal, and thus these entries have no uncertainty  remaining.
+The second rule 
+constructs confidence intervals based on the previous intervals and the algebraic update formulas used in Gaussian elimination for the entries for which $i,j>k$.
+For instance, the above confidence intervals use that on the event $\Omega$, and by induction on $t$,
+if 
+$\underline{c}_{ij}^t\ge0$ and $\underline{c}_{ii}^t>0$ for all $i,j\in[K]$ and for all $t$,
+the Gaussian elimination update $c_{ij}^{t+1} = c_{ij}^t-c_{it}^tc_{tj}^t/c_{tt}^t$ can be upper bounded as 
+\begin{equation}\label{ind}
+c_{ij}^{t+1} = c_{ij}^t-\dfrac{c_{it}^tc_{tj}^t}{c_{tt}^t}
+\le 
+\overline{c}_{ij}^t - \dfrac{\underline{c}_{it}^t\underline{c}_{tj}^t}{\overline{c}_{tt}^t} 
+= \overline{c}_{ij}^{t+1},
+\end{equation}
+The assumptions that $\underline{c}_{ij}^t\ge0$ and $\underline{c}_{ii}^t>0$ for all $i,j\in[K]$ and for all $t$
+may appear a little stringent,
+but the former can be removed at the cost of slightly larger intervals propagated to the next step, see Section~\ref{sec:positivity}.
+The latter condition is satisfied by any classifier that obtains sufficient accuracy on all labels. 
+We further discuss these conditions in Section~\ref{sec:positivity}. 
+The third rule in \eqref{eqn:clower} and \eqref{eqn:cupper} handles the remaining entries,
+which do not change; and thus the confidence intervals from the previous step can be used. The rules for $q$ are similar, and have a similar justification:
+\begin{align}\label{eqn:q}
+\underline{q}_i^{t+1}=\begin{cases}
+\underline{q}_i^t-\dfrac{\overline{c}_{ik}^t\overline{q}_i^t}{\underline{c}_{kk}^t} &\text{if }i>k, \\
+\underline{q}_i^t &\text{otherwise;}
+\end{cases}
+\qquad
+\overline{q}_i^{t+1}=\begin{cases}
+\overline{q}_i^t-\dfrac{\underline{c}_{ik}^t\underline{q}_i^t}{\overline{c}_{kk}^t} &\text{if }i>k, \\
+\overline{q}_i^t &\text{otherwise.}
+\end{cases}
+\qquad\forall i\in[K].
+\end{align}
+For these rules, our algorithm assumes $\underline{q}_i^t\ge0$ for all $i\in[K]$ and all $t$, and raises an error if this fails.
+
+In the second phase, we compute $w_i^*$ starting from $i=K$ and iterating to $i=1$. On iteration $i$, we assume we have the confidence intervals $\underline{w}_j^*\le w_j^*\le\overline{w}_j^*$ for $j>i$. Then, we compute confidence intervals for the sum $s_i$, 
+which again have a similar justification based on the Gaussian elimination updates:
+\begin{align}
+\label{eqn:slowerupper}
+\underline{s}_i=\sum_{j=i+1}^n\underline{c}_{ij}^{K-1}\underline{w}_j^*
+\qquad\text{and}\qquad
+\overline{s}_i=\sum_{j=i+1}^n\overline{c}_{ij}^{K-1}\overline{w}_j^*,
+\end{align}
+and show that they satisfy $\underline{s}_i\le s_i\le\overline{s}_i$ on the event $\Omega$. 
+Finally, we compute confidence intervals for $w_i^*$, assuming $\underline{c}_{ii}^{K-1}>0$:
+\begin{align}
+\label{eqn:wlowerupper}
+\underline{w}_i^*=\frac{\underline{q}_i-\overline{s}_i}{\overline{c}_{ii}^{K-1}}
+\qquad\text{and}\qquad
+\overline{w}_i^*=\frac{\overline{q}_i-\underline{s}_i}{\underline{c}_{ii}^{K-1}},
+\end{align}
+for which we can show that they satisfy $\underline{w}_i^*\le w_i^*\le\overline{w}_i^*$
+based on the Gaussian elimination updates. 
+
+\begin{lemma}[Elementwise Confidence Interval for Importance Weights]
+\label{lem:gaussianelim}
+If (\ref{eqn:inputbounds}) holds,
+and for all $ i,j,t\in[K]$, $\underline{c}_{ij}^t\ge0$, $\underline{c}_{ii}^t>0$, and $\underline{q}_i^t\ge0$, 
+then $w^*=\mathbf{C}_P^{-1}q^*\in W$.
+\end{lemma}
+We mention here that the idea of 
+algorithmic uncertainty propagation 
+may be of independent interest.
+In future work,
+it may further be developed to other 
+methods for solving linear systems (e.g., the LU decomposition, \cite{golub2013matrix}), 
+and other linear algebraic and numerical computations.
+
+\subsection{Overall Algorithm}
+
+\begin{algorithm*}[t]
+\small
+\caption{PS-W: PAC prediction sets in the label shift setting.}
+\label{alg:main}
+\begin{algorithmic}[1]
+\Procedure{LabelShiftPredictionSet}{$S_m, T^X_n, f, \epsilon, \delta$}
+\State $\underline{c},\overline{c},\underline{q},\overline{q}\gets$ \Call{CPInterval}{$S_m, T^X_n, x\mapsto\operatorname*{\arg\max}_{y\in\mathcal{Y}}f(x,y), \frac{K(K+1)}{(K(K+1)+1)}\delta$}
+\State $W \gets$ \Call{IntervalGaussianElim}{$\underline{c},\overline{c},\underline{q},\overline{q}$}
+\If{$W=\varnothing$} \Return $\varnothing$ %\WS{After the relaxation, we could return empty only when the confusion matrix is not invertible. That is, if the algorithm is unable to reduce the left block to $I$, return empty.}
+\EndIf
+\State \Return \Call{IWPredictionSet}{$S_m, f, W, \epsilon, \delta/[K(K+1)+1]$}
+\EndProcedure
+\Procedure{CPInterval}{$S_m, T^X_n, g, \delta$}
+\For{$i,j\in[K]$}
+\State Compute $[\underline{c}_{ij},\overline{c}_{ij}]=\text{CP}\left(m^{-1}\sum_{(x,y)\in S_m}\mathbbm{1}(g(x)=i,y=j),m,\delta/(K(K+1))\right)$
+\EndFor
+\For{$k\in[K]$}
+\State Compute $[\underline{q}_k,\overline{q}_k]=\text{CP}\left(n^{-1}\sum_{x\in T_n^X}\mathbbm{1}(g(x)=k),n,\delta/(K(K+1))\right)$
+\EndFor
+\State \Return $\underline{c},\overline{c},\underline{q},\overline{q}$
+\EndProcedure
+\Procedure{IntervalGaussianElim}{$\underline{c}^0,\overline{c}^0,\underline{q}^0,\overline{q}^0$}
+\For{$t\in[1,...,K-1]$}
+\For{$i,j\in[K]$}
+\State Compute $\underline{c}_{ij}^t,\overline{c}_{ij}^t$ using (\ref{eqn:clower}) \& (\ref{eqn:cupper}), and $\underline{q}_i^t,\overline{q}_i^t$ using (\ref{eqn:q})
+\If{$\underline{c}_{ij}^t<0$ for some $i\neq j$ 
+or $\underline{c}_{ii}^t\le0$ for some $i$
+\textbf{or} $\underline{q}_i^t\le0$ for some $i$,}
+\Return $\varnothing$
+\EndIf
+\EndFor
+\For{$i\in[K,...,1]$}
+\State Compute $\underline{s}_i^t,\overline{s}_i^t$ using (\ref{eqn:slowerupper}), and $\underline{w}_i,\overline{w}_i$ using (\ref{eqn:wlowerupper})
+\EndFor
+\EndFor
+\State \Return $W=\prod_{i=1}^k[\underline{w}_i,\overline{w}_i]$
+\EndProcedure
+\Procedure{IWPredictionSet}{$S_m,f,W=\prod_{k=1}^K[\underline{w}_k,\overline{w}_k],\epsilon,\delta$}
+\State $V\sim\text{Uniform}([0,1])^m$
+\State \Return $\hat\tau(S_m,V,W,\max_{k\in[K]}\overline{w}_k,\epsilon,\delta)$ as in (\ref{eqn:ipw})
+\EndProcedure
+\end{algorithmic}
+\end{algorithm*}
+
+Algorithm~\ref{alg:main} summarizes our approach. As can be seen, the coverage levels for the individual Clopper-Pearson intervals are chosen to satisfy the overall $1-\delta$ coverage guarantee. 
+In particular, the PAC guarantee \eqref{eqn:labelpac} follows from 
+\eqref{thm:ipw}, 
+\eqref{lem:cp}, Lemma~\ref{lem:gaussianelim}, and a union bound.
+\begin{theorem}[PAC Prediction Sets under Label Shift]
+For any given $\epsilon,\delta\in(0, 1)$, 
+under Assumptions \ref{assump:a1}, \ref{assump:a2} and \ref{assump:a3}, 
+if $\forall i,j,t\in[K]$, we have
+$\underline{c}_{ij}^t\ge0$, $\underline{c}_{ii}^t>0$, and $\underline{q}_i^t\ge0$, then
+Algorithm~\ref{alg:main} satisfies
+\begin{align*}
+\mathbb{P}_{S_m\sim P^m,T_n^X\sim Q^n,V\sim U^m}\left[\mathbb{P}_{(X,Y)\sim Q}[Y\in C_{\hat\tau(S_m,V,W,b)}(X)]\ge1-\epsilon\right]\ge1-\delta.
+\end{align*}
+\end{theorem}
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setup}
+\textbf{Predictive models.} 
+We analyze five datasets: the CDC Heart dataset, CIFAR-10, Chest X-ray, AG News, and the Entity-13 dataset; their details are provided in Section \ref{rd}.
+We use a two-layer MLP for the CDC Heart data with an SGD optimizer having a learning rate of $0.03$ and a momentum of $0.9$, a batch size of $64$ for $30$ epochs. For CIFAR-10, we finetuned a pretrained ResNet50 \cite{he2016deep}, with a learning rate of $0.01$ for $56$ epochs. 
+For the ChestX-ray14 dataset, we use a pre-trained CheXNet~\citep{rajpurkar2017chexnet} with a DenseNet121~\citep{huang2017densely} backbone with learning rate $0.0003$ for $2$ epochs. 
+For AGNews, a pre-trained Electra sequence classifier fine-tuned for one epoch with an AdamW optimizer using a learning rate of $0.00001$ is used. For the Entity-13 dataset, we finetuned a pretrained ResNet50, with a learning rate of $0.01$ for $13$ epochs.
+
+\textbf{Hyperparameter choices.} 
+There are two user-specified parameters that control the guarantees, namely $\delta$ and $\epsilon$. 
+In our experiments, we choose $\delta=5\times 10^{-4}$ to ensure that, over 100 independent datasets $S_m$, 
+there is a 95\% probability that 
+the error rate is not exceeded.
+Specifically, 
+this ensures that 
+$\mathbb{P}_{(X,Y)\sim P} [Y \in C_{\hat\tau(S_m)}(X)] \geq 1-\epsilon$ holds for all 100 trials, 
+with probability approximately $1-0.95^{1/100} \approx 5\times 10^{-4} $. 
+We select multiple $\epsilon$s for each dataset in a grid search way, demonstrating the validity of our algorithm.
+
+\textbf{Dataset construction.} We follow the  label shift simulation strategies from previous work~\citep{lipton2018detecting}. First, we split the original dataset into training, source base, and target base. We use the training dataset to train the score function. Given label distributions $P_Y$ and $Q_Y$, we generate the source dataset $S_m$, target dataset $T_n^X$, and a labeled size $o$ target test dataset (sampled from $Q$) by sampling with replacement from the corresponding base dataset. We consider two choices of $P_Y$ and $Q_Y$: (i) a \textbf{tweak-one} shift, where we assign a probability to one of the labels, and keep the remaining labels equally likely, and (ii) \textbf{arbitrary} shift, where we shift each probability as described later.
+ 
+\textbf{Baselines
+\begin{itemize}
+[topsep=0pt,itemsep=0ex,partopsep=1ex,parsep=0ex,leftmargin=3ex]
+\item \textbf{PS:} PAC prediction sets that do not account for label shift~\citep{vovk2012conditional,park2019pac}. This does not come with PAC guarantees under label shift.
+\item \textbf{WCP:} Weighted conformal prediction under label shift, which targets marginal coverage~\citep{podkopaev2021distribution}. This does not come with PAC guarantees under label shift either.
+\item \textbf{PS-R:} PAC prediction sets that account for label shift but ignore uncertainty in the importance weights; which does not come with PAC guarantees under label shift come with.
+ This is the only baseline to come with PAC guarantees under label shift.
+\end{itemize}
+\textbf{Metrics.} We measure performance via the prediction set error, i.e., the fraction of $(x, y) \sim Q$ such that $y \notin C_{\tau}(x)$; 
+and the average prediction set size, i.e., the mean of $|C_{\tau}(x)|$, evaluated on the held-out test set. We report the results over $100$ independent repetitions, randomizing both dataset generation and our algorithm. 
+
+\subsection{Results \& Discussion}
+\label{rd}
+\textbf{CDC heart.}
+We use the CDC Heart dataset, a binary classification problem \citep{cdcheart}, 
+to predict the risk of  heart attack given features such as level of exercise or weight. 
+We consider both large and small shifts.  
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+\includegraphics[height=0.4\linewidth]{figures/CDC/mild/plot_error_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\includegraphics[height=0.4\linewidth]{figures/CDC/mild/plot_size_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\caption{Prediction set error and size under \textit{small} shifts on the CDC Heart dataset . Parameters are $\epsilon = 0.1$, $\delta = 5\times 10^{-4}$ , $m=42000$, $n=42000$, and $o= 9750$.}\label{fig:cdc1}
+\end{subfigure}\quad
+\begin{subfigure}[b]{0.49\textwidth}
+\centering
+\includegraphics[height=0.4\linewidth]{figures/CDC/large/plot_error_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\includegraphics[height=0.4\linewidth]{figures/CDC/large/plot_size_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\caption{Prediction set error and size under \textit{large} shifts on the CDC Heart dataset. Parameters are $\epsilon = 0.1$, $\delta = 5\times 10^{-4}$, $m=42000$, $n=42000$, and $o= 9750$.}\label{fig:cdc2}
+\end{subfigure}
+\caption{Prediction set results on the CDC Heart dataset}
+\end{figure}
+For the large shift, the label distributions (denoted $(\text{pos}\%,\text{neg}\%)$) are $(94\%, 6\%)$ for source, and $(63.6\%, 36.4\%)$ for target; results are in Figure~\ref{fig:cdc2}.
+We also consider a small shift with label distributions $(94\%, 6\%)$ for source, and $(91.3\%, 8.7\%)$ for target; results for $\epsilon = 0.1$ are in Figure~\ref{fig:cdc1}.
+As can be seen, our PS-W algorithm satisfies the PAC guarantee while achieving smaller prediction set size than PS-C, the only baseline to satisfy the PAC guarantee. The PS and PS-R algorithms violate the PAC guarantee \footnote{The invisible error boxes are $0$ or extreme small values.}. 
+
+\textbf{CIFAR-10.}
+Next, we consider CIFAR-10~\citep{krizhevsky2009learning}, which has 10 labels. We consider a large and a small tweak-one shift. 
+For the large shift, the label probability is 10\% for all labels in the source, 40.0\% for the tweaked label, and 6.7\% for other labels in the target; results are in Figure~\ref{fig:cifar1}. 
+For small shifts, we use 10\% for all labels for the source, 18.2\% for the tweaked label, and 9.1\% for other labels for the target; results for $\epsilon = 0.1$ are in Figure~\ref{fig:cifar2}. 
+Under large shifts, our PS-W algorithm satisfies the PAC guarantee while outperforming PS-C by a large margin. When the shift is very small, PS-W still satisfies the PAC guarantee, but generates more conservative prediction sets similar in size to those of PS-C (e.g., Figure~\ref{fig:cifar2}) given the limited data.
+
+\begin{figure}[h]
+\centering\small
+\begin{subfigure}[b]{0.48\textwidth}
+\includegraphics[height=0.4\linewidth]{figures/CIFAR-10/large0.1/plot_error_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\includegraphics[height=0.4\linewidth]{figures/CIFAR-10/large0.1/plot_size_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\caption{Prediction set error and size with \textit{larger} shift on CIFAR-10. Parameters are $\epsilon = 0.1$, $\delta = 5\times 10^{-4}$, $m=27000$, $n=19997$, and $o=19997$.}\label{fig:cifar1}
+\end{subfigure}
+\quad
+\begin{subfigure}[b]{0.48\textwidth}
+\includegraphics[height=0.4\linewidth]{figures/CIFAR-10/mild0.1/plot_error_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\includegraphics[height=0.4\linewidth]{figures/CIFAR-10/mild0.1/plot_size_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\caption{Prediction set error and size with \textit{small} shift on CIFAR-10. Parameters are $\epsilon = 0.1$, $\delta = 5\times 10^{-4}$, $m=27000$, $n=16500$, and $o=16500$.}\label{fig:cifar2}
+\end{subfigure}
+\caption{Prediction set results on CIFAR-10.}
+\end{figure}
+\textbf{AGNews.}
+AG News is a subset of AG's corpus of news articles~\citep{zhang2015character}. It is a text classification dataset with four labels: World, Sports, Business, and Sci/Tech. It contains 31,900 unique examples for each class. We use $\epsilon = 0.05$ and tweak-one label shifts.
+We consider a large shift and a medium-sized calibration dataset, with label distributions equalling $(30.8\%, 30.8\%, 7.7\%, 30.8\%)$ for the source, and $(12.5\%, 12.5\%, 62.5\%, 12.5\%)$ for the target; results are in Figure \ref{fig:ag}. As before, our PS-W approach satisfies the PAC guarantee while achieving smaller set sizes than PS-C.
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+\includegraphics[height=0.4\linewidth]{figures/AGNews/AGNews_extra0.05/plot_error_rnd_n_50000_eps_0.050000_delta_0.000500.pdf}
+\includegraphics[height=0.4\linewidth]{figures/AGNews/AGNews_extra0.05/plot_size_rnd_n_50000_eps_0.050000_delta_0.000500.pdf}
+\caption{Prediction set error and size on the AGNews Dataset. Parameters are $\epsilon = 0.05$, $\delta = 5\times 10^{-4}$, $m=26000$, $n=12800$, and $o=12800$.}\label{fig:ag}
+\end{subfigure}
+\quad
+\begin{subfigure}[b]{0.485\textwidth}
+\includegraphics[height=0.4\linewidth]{figures/chest/large0.3/plot_error_rnd_n_50000_eps_0.300000_delta_0.000500.pdf}
+\includegraphics[height=0.4\linewidth]{figures/chest/large0.3/plot_size_rnd_n_50000_eps_0.300000_delta_0.000500.pdf}
+\caption{Prediction set error and size on the ChestX-ray dataset. Parameters are $\epsilon = 0.3$, $\delta = 5\times 10^{-4}$, $m=67200$, $n=35200$, and $o=3520$.}\label{fig:ch}
+\end{subfigure}
+\end{figure}
+
+\textbf{Entity-13} Entity-13 is a part of the BREEDs benchmark \citep{santurkar2020breeds}, which leverages the class hierarchy in ImageNet \citep{deng2009imagenet} to repurpose the original classes into superclasses Entity-13 contains 13 superclasses and a total of 390k images. It is also included in a recent label shift benchmark for relaxed label shift, RLSBench \citep{garg2023rlsbench}. We consider a general label shift and, additionally, a small shift with a medium-sized calibration dataset. The label probabilities equal $7.7\%$ each in the source and $(7.1\%, [3.6\%]*4, 10.71\%, 3.6\%, 7.1\%, 43.69\%, [3.6\%]*4)$ in the target. Results for $\epsilon = 0.1$ is shown in Figure \ref{fig:entity13-main}. As before, our PS-W approach satisfies the PAC guarantee while outperforming PS-C. The PS-R and WCP methods violate the constraint.
+
+\begin{figure}[h]
+\centering
+\includegraphics[height=0.21\linewidth]{figures/entity13/entity0.1/plot_error_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\includegraphics[height=0.21\linewidth]{figures/entity13/entity0.1/plot_size_rnd_n_50000_eps_0.100000_delta_0.000500.pdf}
+\caption{Prediction set error and size on the Entity-13 dataset. Parameters are $\epsilon = 0.1$, $\delta = 5\times 10^{-4}$, $m=52000$, $n=21000$, and $o=4667$.}\label{fig:entity13-main}
+\end{figure}
+
+\textbf{ChestX-ray.}
+ChestX-ray14~\citep{wang2017chestx} is a medical imaging dataset containing about 112K frontal-view X-ray images of 30K unique patients with fourteen disease labels. This dataset contains instances with multiple labels, which we omit. We also omit classes with few positively labeled datapoints, leaving $6$ classes: Atelectasis, Effusion, Infiltration, Mass, 
+Nodule, Pneumothorax. 
+We consider a large tweak-one shift, with label distributions of $([19.1\%]*4, 4.5\%, 19.1\%)$ for the source, and $([11.1\%]*4, 44.5\%, 11.1\%)$ for the target.
+Results for $\epsilon = 0.3$ are in Figure \ref{fig:ch}. 
+As before, our PS-W  approach satisfies the PAC guarantee while outperforming PS-C. 
+
+\textbf{Discussion.}
+In all our experiments, our approach satisfies the PAC guarantee; furthermore, it produces smaller prediction set sizes than PS-C---the only baseline to consistently satisfy the PAC guarantee---except when the label shift is small and the calibration dataset is limited. In contrast, the PS baseline does not account for label shift, and the PS-R baseline does not account for uncertainty in the importance weights, so they do not satisfy the PAC guarantee. The WCP baseline is designed to target a weaker guarantee, so it naturally does not satisfy the PAC guarantee. Thus, these results demonstrate the efficacy of our approach.
+
+
+
+\section{Conclusion}
+
+We have proposed a PAC prediction set algorithm for the label shift setting that accounts for confidence intervals around importance weights by modifying Gaussian elimination to propagate intervals. Our algorithm provides provable PAC guarantees and produces smaller prediction sets than several baselines that satisfy this condition. Experiments on five datasets demonstrate its effectiveness. Directions for future work include improving performance when the calibration dataset is small or when the label shift is small. 
+
+\typeout{}
+
+
+
+

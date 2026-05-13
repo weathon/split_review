@@ -1,0 +1,160 @@
+\title{Query-Efficient Planning with Language Models}
+
+\begin{abstract}
+
+Planning in complex environments requires an agent to efficiently query a world model to find a feasible sequence of actions from start to goal.
+Recent work has shown that Large Language Models (LLMs), with their rich prior knowledge and reasoning capabilities, can potentially help with planning by searching over promising states and adapting to feedback from the world. 
+In this paper, we propose and study two fundamentally competing frameworks that leverage LLMs for query-efficient planning. 
+The first uses LLMs as a \emph{heuristic} within a search-based planner to select promising nodes to expand and propose promising actions. 
+The second uses LLMs as a \emph{generative planner} to propose an entire sequence of actions from start to goal, query a world model, and adapt based on feedback.
+We show that while both approaches improve upon comparable baselines, using an LLM as a generative planner results in significantly fewer interactions. Our key finding is that the LLM as a planner can more rapidly \emph{adapt} its planning strategies based on immediate feedback than LLM as a heuristic. We present evaluations and ablations on Robotouille and PDDL planning benchmarks and discuss connections to existing theory on query-efficient planning algorithms.
+  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Planning is the process of determining a sequence of feasible or optimal actions that guide an agent from an initial state to a desired goal state~\citep{lavalle2006planning}. Planning assumes access to a world model, enabling the agent to simulate and evaluate potential actions without relying on trial-and-error in the real environment. However, in many domains, such as robot task and motion planning, \emph{querying the world model is the most computationally expensive step}~\citep{kaelbling2013integrated, garrett2021integrated}. For instance, each query involves running physics or geometric computations or even running a local optimizer. Consequently, planning algorithms must judiciously query the world model, relying on learning-based approaches to efficiently infer the most promising paths with minimal queries~\citep{choudhury2018data, ichter2017learning, khodeir2023learning}.
+
+Large language models (LLMs), trained on Internet-scale data, offer multiple opportunities to enable query-efficient planning. Notably, LLMs come with key capabilities such as \emph{(1) powerful priors} to identify promising states that make progress toward the goal~\citep{ahn2022i}, \emph{(2) tractable posteriors} by easily conditioning on feedback to adaptively choose actions~\citep{lee2023supervised}, and \emph{(3) generating complex sequences} of actions to plan to the goal~\citep{janner2021offline}. Recent works leverage one or more such capabilities to design LLM-based agents that solve various decision-making tasks~\citep{yao2022react, shinn2023reflexion, huang2022inner, zhao2023llmMCTS}.
+However, we show that naively extending such LLM agents to the planning setting becomes quickly intractable. It must not only select among all possible state-action queries but condition on the history of all queries and observations. 
+
+Instead, one tractable way is to use a \emph{LLM as a heuristic} within an existing planner. Heuristics guide a search tree from start to goal by selecting promising nodes to expand~\citep{bonet2001planning,pearl1984heuristics}. 
+The planner provides the LLM with a restrictive set of nodes to choose from, making the problem more tractable for the LLM. 
+This is the defacto approach that several recent works adopt to design LLM heuristics for classic breadth-first search (BFS) / depth-first search (DFS)~\citep{yao2024tree} or for more advanced Monte Carlo tree search (MCTS)~\citep{zhao2023llmMCTS, hao2023rap}.
+
+\input{figures/main_figure}
+
+An alternative approach is to use a \emph{LLM as a generative planner}. In this paradigm, the LLM generates a sequence of actions to the goal and checks the actions against a world model. If the plan is infeasible, the LLM conditions on this feedback to generate a new plan. 
+This directly leverages the ability of transformers to predict entire sequences~\citep{valmeekam2023planning, pallagani2022plansformer, lehnert2024a}, eliminating the need for an external planner. By reasoning over a set of promising paths rather than state-action queries, the decision space reduces as well. This idea is closely tied to a well-established framework of ``lazy'' search in classical planning literature, which has provable guarantees on finding shortest paths with minimal world model queries~\citep{dellin2016unifying, mandalika2019generalized, hou2020posterior}. 
+
+We compare both paradigms on a series of fundamental planning tasks. \textbf{\emph{Our key finding is that a LLM as a generative planner is more query efficient than planners using a LLM as a heuristic}}. 
+The key reason for this is that a LLM planner is \emph{more adaptive to feedback from the world model} than a traditional planner using a LLM merely as a heuristic. For example, if the LLM planner encounters a cul-de-sac, its next plan can incorporate this feedback to circumvent the cul-de-sac. On the other hand, the LLM heuristic is restricted to only choosing nodes offered by the planner and can continue selecting among nodes in the cul-de-sac without being able to change the search direction. 
+
+To study this problem, we propose two new algorithms (\toi{} and \boomerang{}) and repurpose two existing baselines (\react{} and \reactselect{}) for query-efficient planning (Fig.~\ref{fig:overview}).
+ \toi{} is an interactive version of prior work, Tree of Thought~\citep{yao2024tree}, where the LLM is used as a heuristic within a BFS and DFS planner that interactively queries a world model. \boomerang{} is an interactive LLM planner that outputs action sequences from an initial state to the goal, and replans based on external feedback. We evaluate our methods on multiple planning domains proposed in the PlanBench~\citep{valmeekam2024planbench} benchmark, the Logistics domain, Grippers domain, and on Robotouille~\citep{wang2023demo2code}, a robotics simulator for cooking tasks. Our key contributions are as follows:
+\begin{enumerate}[leftmargin=*] %, itemsep=0pt]
+    \item We propose a novel framework for query-efficient planning using LLMs.
+    \item We propose and implement two new algorithms: \toi{} that uses LLM as a heuristic and \boomerang{} that uses LLM as a generative planner.
+    \item We evaluate LLM and classical planners' query efficiency across PlanBench, Logistics, Grippers, and the Robotouille simulator. We show that generative planners are most successful with limited world model queries, with \boomerang{} achieving the highest success rates, with 78\% on Blocksworld, 82\% on Logistics, 89\% on Grippers, and 57\% on Robotouille.
+\end{enumerate}
+
+
+
+\section{Problem Formulation}
+
+\label{sec:prob_form}
+We are interested in planning problems where querying the environment world model is computationally expensive or resource intensive. This is a common assumption in many applications, especially in robotics. Planning robot motion in high-dimensional configuration spaces requires queries to computationally expensive collision checks~\citep{hauser2015lazy,dellin2016unifying,mandalika2019generalized, hou2020posterior}. In the task and motion planning (TAMP) domain~\citep{kaelbling2013integrated, ding2023task,lozano2014constraint, srivastava2014combined, toussaint2018differentiable}, each query is a high-level action proposed by a task planner, and the world model invokes an expensive motion planning subroutine to generate the next state. Traditional TAMP planners can take up to minutes to solve complex TAMP problems~\citep{lin2023text2motion}. Hence, real-time planning involves strategically selecting queries that \emph{minimize} the total number of queries to the world model to find a feasible plan.
+
+\textbf{Query-Efficient Planning as Sequential Decision Making.}  Consider an agent operating within a known state space, $S$, and action space, $A$. We assume the existence of a deterministic world model, $M: S \times A \rightarrow S'$, which maps a state-action pair to the subsequent state in the world. The goal of the planner is to find a sequence of actions that joins the initial state $s_0$ and the goal state $s_g$, i.e., $\{s_0, a_0, s_1, a_1, \dots, s_g\}$, where each transition $s_{i+1}=M(s_i, a_i)$ has been verified to be feasible by the world model. We can formulate the problem of query-efficient planning in this setting as one of sequential decision-making. At each decision-making step, the planner queries the world with a state-action pair, $q=\{s,a\}$. The world model responds with $r=\{s', e\}$ containing the next state $s'$ and an optional error message $e$ if the action is invalid.
+
+ \textbf{Leveraging LLMs for Query-Efficient Planning.} LLM agents have shown promising results in various sequential decision-making problems~\citep{yao2022react, shinn2023reflexion, huang2022inner}. LLMs encode a vast array of commonsense priors that can be used to generate plausible plans from the outset. Good queries reveal useful information about the planning problem, which can be incorporated into the LLM agent's context to update its posterior for future decision-making. Formally, we represent the LLM agent's $k^{th}$ interaction with the world model as a policy $\pi(q_k | \phi, H_k)$, where $\phi$ is the world context that describes the problem domain in natural language, and $H_k = \{q_1, r_1, q_2, r_2, \dots, q_{k-1}, r_{k-1}\}$, is the history of the past queries and responses. This formulation allows the LLM to leverage its pre-trained knowledge and update its priors with every interaction with the world model.
+
+\react{}~\citep{yao2022react}-style prompting provides a simple recipe to use LLMs for query-efficient planning. The policy is represented as $\pi(a_k | \phi, H_k, s_{k})$, where the last state $s_k$ is the result of the agent's last query to the world model. At every query step, the agent considers its history of interactions to generate reasoning for its decision before taking an action from its current state. However, \react{} policies are susceptible to getting trapped in local optima or \textit{cul-de-sacs}. In such cases, the agent tries to backtrack from its current state instead of querying from more promising states in its history. 
+
+Representing the LLM as the more expressive policy $\pi(q_k | \phi, H_k)$, we can create \reactselect{}, a natural extension of \react{}. Unlike \react{}, which only uses the last state the agent ended up in for future queries, \reactselect{} allows the agent to decide both the state and the action for querying the world model. This flexibility allows \reactselect{} to revisit previously explored states strategically and choose more efficient actions, establishing it as the gold-standard algorithm for optimal performance. However, the decision space of \reactselect{} is very large, i.e., $|Q| = |S| \times |A|$, choosing among all possible states and subsequent actions. In practice, we observe that \reactselect{} exhibits a recency bias where it degenerates to \react{} and stays committed to recent states as seen in Sec.~\ref{sec:failures}.
+
+
+
+\section{Approach}
+
+\label{sec:approach}
+
+We tackle the problem of query-efficient planning with LLMs by exploring two fundamentally different approaches for interactively querying a world model. The first approach integrates LLMs into a heuristic search framework~\citep{bonet2001planning, pearl1984heuristics}. Rather than using the entire interaction history to determine the next query, the LLM serves as a heuristic within a higher-level search algorithm, ranking the most promising states in the search tree and guiding the selection of optimal actions. The second approach employs the framework of lazy search~\citep{Dellin2016AUF}, utilizing the LLM as a \textit{generative planner}. In this method, the LLM generates an entire action sequence from start to goal based on its current understanding of the environment's world model. After each planning iteration, the LLM updates its internal world model using feedback from the environment. An illustration of both approaches is shown in Fig.~\ref{fig:overview}.
+
+\input{figures/boomerang_toi}
+\subsection{LLM as a Heuristic: \toi}
+\toi{} utilizes LLMs as a heuristic within an external planner. The planner maintains a search tree and invokes the LLM to choose which states to expand and what actions to propose. By judiciously choosing which states to expand, the LLM minimizes unnecessary queries to the world model to guide the search tree towards the goal. We build on prior work Tree of Thought~\citep{yao2024tree}, by incorporating queries to an external world model during the expansions phase. At a high level, the LLM is used to define two modules: \textit{Action Proposal} and \textit{State Evaluation}.
+
+\textbf{Action Proposal $\pi_{\theta}(\tilde{A}\; |s, \phi, k)$.} This module proposes diverse actions to expand promising new states. An LLM is prompted to generate an action set, $\tilde{A}$, with $k$ actions from state $s$. 
+
+\textbf{State Evaluation $V_\theta(s, \phi)$.} This module evaluates states based on their potential to progress towards the goal. We utilize an LLM $V_\theta$ conditioned on a state $s$ and the problem context $\phi$. The state is classified into one of three categories based on how likely it is to reach the goal: \textit{Impossible}, \textit{Maybe}, and \textit{Certain}. These rankings are used to guide the search tree towards better states.
+
+Heuristic search algorithms can be constructed by combining the above modules in different ways. In particular, we describe one such algorithm, \toibfs{} (Alg. The algorithm uses beam-search to build a search tree greedily with a breadth-first search. Starting from some initial state $s_0$, the search attempts to expand states for $T$ iterations until the goal state $s_g$ has been expanded. A beam of size $b$ maintains the best candidates throughout the search. At each iteration, the \textit{action proposer} module is first called to generate action-set $\Tilde{A}$ of size $k$ for each state on the beam. Then, the world model is queried to produce the set of next states $\Tilde{S_t}$ using each candidate state and its proposed action set. Finally, the \textit{state evaluation} module updates the set of $b$ candidate states maintained in the beam search.
+
+\subsection{LLM as a Generative Planner: \boomerang}
+We previously discussed that the gold-standard algorithm, \reactselect{} (Sec.~\ref{sec:prob_form}), is intractable as it requires conditioning on a large context containing the entire history of prior world model interactions while choosing queries from an enormous decision space. We propose a more tractable generative planner, \boomerang{}, which uses an LLM to propose an entire sequence of actions from the start to the goal state and receives feedback \textit{on the entire sequence} at once. 
+Alg.~\ref{alg:boomerang} provides an overview of \boomerang{}. Key components are:
+
+\textbf{Planning with an Internal World Model.} Equipped with context of the problem description and history of interactions with the world model, LLM agents can be prompted with Chain-of-Thought~\citep{wei2022chain} techniques to build an \textit{internal world model} of the problem domain. The agent uses this internal world model to reason and generate a plan $\Pi$, a sequence of actions that attempt to reach the goal from the start state. In every iteration, the generated plan receives feedback from the \textit{true world model}, which is used by the LLM agent to propose new plans.
+
+\textbf{Updating Internal World Model with Feedback.} At every iteration, the generated plan is validated by the \textit{true world model} by rolling out actions from the start state using its generated plan. We re-use any queries made to the world model in previous iterations during this verification. If the true world model verifies that the plan reaches the goal state, the algorithm terminates and returns the verified trajectory. Otherwise, the true world model responds with a partial trajectory $\xi$ to the goal with an error message $e$ at some action in the plan. The partial trajectory and error message are appended into the LLM's prompt context, updating its \textit{internal world model} for future iterations of planning.
+
+ We derive a Bayesian regret bound that is sub-linear with the planning iterations needed by \boomerang{} before it returns a feasible solution. The core principle of laziness is to query edges that belong to promising paths to the goal state, thus minimizing queries to the world model to find either the shortest path~\citep{dellin2016guided}, a feasible path~\citep{choudhury2017active} or anytime path~\citep{hou2020posterior}. Concretely, we can view the LLM as the policy $\pi(\xi|\phi_k)$, sampling plans $\xi$ from the posterior $P(\phi_k| \phi_{\rm prior}, H_k)$ using feedback from the world model. Posterior sampling is a provable way~\citep{hou2020posterior} to tradeoff exploration and exploitation. While these classical works rely on discretization approaches to construct the posterior, we leverage the flexibility of the LLM in approximating posteriors. We conjecture that the empirical success of \boomerang{} is explained by this close connection.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+
+{\textbf{Planning Domains.} We evaluate both classical and LLM planners across a variety of fundamental planning problems. First, we assess all methods on the Blocksworld benchmark from PlanBench~\citep{valmeekam2024planbench}, which consists of 600 block-rearrangement problems described in PDDL. Blocksworld has long been a classic AI planning benchmark and is now the de facto standard for evaluating LLMs' commonsense reasoning abilities in planning tasks. In addition, we create 100 planning problems in the Logistics and Grippers PDDL environments. We use PDDLGym~\citep{silver2020pddlgym} to interact with these environments, serving as the world model oracles. Beyond these classic PDDL environments, we introduce 100 planning problems in the realistic robot cooking simulator, Robotouille~\citep{wang2023demo2code}, which poses unique challenges due to complex task dependencies, including time delays and task multi-threading. Since Robotouille is not described in PDDL, we use the simulator itself as the world model oracle. We note that while these planning problems do not include computationally expensive world models, query efficiency directly correlates with time spent in such environments. Therefore, query-efficient planners would maintain similar trends in reducing computation time.
+
+\textbf{Metrics.} We evaluate the efficiency of the planners in solving planning problems under a fixed budget of World Model Queries (WMQs). A \textit{success} is defined as a planner finding a feasible path to the goal without exceeding the query budget. We also measure the average number of queries each method makes to the world model across all problems. Additionally, we introduce an \textit{optimality} metric, which indicates whether a planner finds an optimal path within the WMQ budget. Beyond these planning metrics, we report the number of LLM API calls and input tokens used by the LLM-based methods to provide insights into the cost and runtime of the experiments
+
+\textbf{Baselines.} We test a range of LLM planner approaches in our experiments. In the simplest case, we evaluate two \textit{non-interactive} direct input-output methods that do not involve back-and-forth communication with the world model. \io{}~\citep{huang2022language} takes a problem description and an in-context demonstration as input, then generates a sequence of actions. \iocot{}~\citep{wei2022chain} builds on this by incorporating a chain of thought component. \textit{Interactive} LLM planners are divided into two categories. The first is \textit{heuristic} planners, including \toidfs{} and \toibfs{}. These planners embed the LLM as a heuristic within a higher-level classical search algorithm. We also evaluate \textit{generative} planners that generate action sequences while interacting with the world model. \react{}~\citep{yao2022react} generates an action sequence by repeatedly outputting a single action and adapting its strategy based on immediate feedback. \boomerang{} generates entire action sequences toward the goal before receiving feedback from the world model. For all PDDL environments, we also run state-of-the-art classical PDDL planners using the FastDownward system~\citep{helmert2006fast}. We conduct a hyperparameter sweep across multiple classical planner configurations and report the best-performing results as \fd{} (more details in \ref{app:classical_planners_vs_boomerang}).
+
+\subsection{Results and Analysis}
+\subsubsection{Overall Results}
+\begin{itemize}[leftmargin=*]
+    \item \boomerang{} achieves 78\% efficient success on 600 Blocksworld problems from PlanBench compared to \fd{} with 63\% and \react{} with 52\%. (Figure~\ref{fig:success-caption} and Sec~\ref{sec:comparison}).
+    \item \boomerang{} achieves 82\%, 89\% and 57\% efficient success on Logistics, Grippers, and Robotouille respectively compared to \toidfs{} with 4\%, 31\%, and 17\%  respectively and \fd{} with 5\% and 13\% on Logistics and Grippers. (Table~\ref{fig:domain_comparisons} and Sec~\ref{sec:comparison}).
+    \item \boomerang{} can overcome \textit{cul-de-sacs} while \react{} and \reactselect{} struggle. See Sec~\ref{sec:failures}.
+    \item \iop{} and \iocotp{} surpass \react{} by $12.3\%$ and $14.8\%$ respectively after simple prompt changes. See Sec~\ref{sec:investigation}.
+\end{itemize}
+\input{figures/main_result}
+\subsubsection{Comparison of Query-Efficiency, Solution Quality, and Token Usage}
+\label{sec:comparison}
+\input{paper/5.1_comparison}
+
+\subsubsection{Analysis of Failure Modes of Approaches}
+\label{sec:failures}
+\input{paper/5.2_qualitative_failures}
+
+\subsubsection{Ablations for Better LLM Plan Generation}
+\label{sec:investigation}
+\input{paper/5.4_ablation}
+
+
+
+\section{Related Works}
+
+To motivate our approach and differentiate from other works, we present related work that uses LLMs as heuristics, incorporate feedback into LLMs, and uses LLMs for planning in PDDL environments.
+
+\textbf{LLMs as Heuristics.} Existing work suggest that LLMs struggle with end-to-end planning~\citep{valmeekam2024planbench}, but may be effective as components as planners~\citep{kambhampati2024llms}. One format of this paradigm is using LLMs as heuristics for search \citep{yao2023ToT,hao2023reasoning,zhao2023llmMCTS,xie2023selfevaluation,lu2021neurologic}, with an external planner. One related work we build off is Tree-of-Thought (ToT) \citep{yao2023ToT}. This approach builds off Chain-of-Thought (CoT) \citep{wei2022chain}, where an LLM outputs step-by-step reasoning before a final response. ToT uses an LLM to generate 'thoughts' and an external planner to explore the thought space; the LLM then acts as a heuristic by selecting the next best thoughts to expand on.
+Other works like RAP \citep{hao2023reasoning} and LLM-MCTS \citep{zhao2023llmMCTS}, use Monte Carlo Tree Search where an LLM guides the simulations when expanding a state.
+
+While search infrastructure makes planning with LLMs more robust, this is overly complex for simple problems. We observed LLMs exhibited some abilities of planning and searching independently, and when supplemented with environment feedback 
+could mostly operate as end-to-end planners.
+
+\textbf{Planning with Environment Feedback.} Another key ingredient to planning effectively with LLMs is incorporating environment feedback \citep{yao2022react,shinn2023reflexion,madaan2023selfrefine,sun2023adaplanner,gou2024critic,huang2022inner}. A simple example of this paradigm is ReAct \citep{yao2022react}. ReAct iteratively builds a trajectory with environment feedback following each step. Reflexion \citep{shinn2023reflexion} adds to ReAct by building multiple ReAct trajectories with a reflection step in between them that remarks on learnings from failed trajectories, improving subsequent ones. 
+Decision-Pretrained Transformer (DPT) \citep{lee2023supervised} connects transformers trained on state-action-reward tuples to Bayesian posterior sampling. We can generally view prompting with environment feedback in a similar light: we view an LLM to be a model with parameters partially ``learned" by feedback in its prompt. This formulation is interesting since posterior sampling has well studied regret bounds \citep{lee2023supervised,osband2013more}.
+
+\textbf{LLMs and PDDL.} Works such as PlanBench \citep{valmeekam2024planbench} and \citep{valmeekam2023planning} have tested prompting GPT models on PDDL domains on whole plan generation; findings show an inability to track states and evaluate state transitions. Others have explored tackling PDDL problems though the lens of coding. \citep{silver2023generalized} describes a prompting approach to generate Pythonic programs given a domain definition. Plansformer \citep{pallagani2022plansformer} is a CodeT5 model \citep{wang2021codet5} fine-tuned to generate full plans. The model was exceptional on all tested domains (Blocksworld, Hanoi, Grippers, and Driverlog) and exhibited some signs of transfer learning across domains. Some have excluded LLMs from the planning phase entirely \citep{liu2023llm+,guan2023leveraging,lyu2023faithful}. For example, LLM+P \citep{liu2023llm+} converts a natural language description of a planning task into a PDDL domain and instance, queries a traditional planner, then converts the planner output back to natural language.
+
+
+
+\section{Discussion}
+
+In this paper, we look at query-efficient planning with language models. We propose two approaches, \toi{} where an LLM is used as a heuristic and \boomerang{} where an LLM is used as a generative planner. We evaluate our approach on PDDL domains and show that \boomerang{} is more query-efficient than both classical and LLM planning baselines. Key to this is \boomerang{} adapting the entire plan based on feedback from the world model, which has close ties to known results on posterior sampling for query-efficient planning. Two interesting future directions:
+
+\textbf{Scaling to longer horizons.} As the horizon increases, \boomerang{} may fail to generate good plans. A path to scaling would be to make it plan with its internal world models using any number of approaches~\citep{yao2023ToT, besta2023GoT, zhao2023llmMCTS}, query the world model to validate the plan, and iterate with feedback. 
+
+\textbf{Scaling to complex planning problems requiring geometric reasoning.} Our end goal is to solve complex task and motion planning problems. 
+While LLMs can reason about semantics but struggle to reason about grids~\citep{lehnert2024a} or geometry~\citep{trieu2024olympiad}. An exciting direction of future work is to look at using LLM to plan at a higher semantic level, pass this to a low-level geometric planner to produce actions, and crucially adapt the high-level planner based on failures of the geometric planner to guide it better.
+
+
+
+\section{Limitations}
+
+\label{sec:limitations}
+
+While \boomerang{} is promising, it is hampered during prolonged searches. We frequently observed the method reproposing failed action sequences during long horizon examples, which suggests a tendency to forget about feedback early on in its context similar to \react{} and \reactselect{}. This issue is amplified in environments with many objects or large action spaces because this increases context length.
+
+The \toibfs{} and \toidfs{} methods are also overly dependent on the LLM providing quality rankings of states; erroneous rankings cause states to be unnecessarily explored in \toibfs{} or can send a search on the path to a dead end in \toidfs{}. Additionally, the LLM heuristic itself ranks states independently from one another which tend to make the heuristic inadmissible (failing to guarantee optimal paths) and inconsistent (making it possible to select visited nodes).
+
+
+

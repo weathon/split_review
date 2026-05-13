@@ -1,0 +1,579 @@
+\title{Adaptive teachers for amortized samplers}
+
+\begin{abstract}
+Amortized inference is the task of training a parametric model, such as a neural network, to approximate a distribution with a given unnormalized density where exact sampling is intractable. When sampling is implemented as a sequential decision-making process, reinforcement learning (RL) methods, such as generative flow networks, can be used to train the sampling policy. Off-policy RL training facilitates the discovery of diverse, high-reward candidates, but existing methods still face challenges in efficient exploration. We propose to use an adaptive training distribution (the \teacher) to guide the training of the primary amortized sampler (the \student) by prioritizing high-loss regions. The \teacher, an auxiliary behavior model, is trained to sample high-error regions of the \student and can generalize across unexplored modes, thereby enhancing mode coverage by providing an efficient training curriculum. We validate the effectiveness of this approach in a synthetic environment designed to present an exploration challenge, two diffusion-based sampling tasks, and four biochemical discovery tasks demonstrating its ability to improve sample efficiency and mode coverage.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Sampling from a complex distribution given its unnormalized density function is a fundamental problem in machine learning \citep{hinton2002training, lecun2006tutorial} and scientific discovery \citep{dellago1998efficient, noe2019boltzmann}. Amortized inference methods aim to fit a generative model that samples from a target distribution, possibly by a sequence of stochastic generation steps. However, unlike for generative models trained from data, samples from the ground truth distribution may not be available. Multi-step sampling from an unnormalized density function with amortized inference can be achieved with reinforcement learning (RL) methods but raises the challenge of \textit{exploration} -- specifically, the ability to discover new modes of the target distribution during training. This is due to the intractable size of the sample space and the fact that only sampling from the generator itself would be oblivious to modes that the generator misses.
+
+Just as with generative models trained on data, it is often more natural and beneficial to approximate the generation of objects as a sequence of decisions made by a policy rather than using a single parametric family, due to the multi-modal expressivity of hierarchical inference (\eg, diffusion probabilistic models \citep{ho2020ddpm}). Sequential decision algorithms for amortized inference are unified by the theory of generative flow networks \citep[GFlowNets;][]{bengio2021flow}, which are a collection of off-policy RL methods \citep{tiapkin2023generative,deleu2024discrete}. GFlowNets have been used for such amortized inference problems as natural-language and biological sequence design by token-by-token sequence generation \citep{jain2022biological, shen2023towards, hu2023amortizing}, Bayesian inference of over data structures~\citep{deleu2022bayesian}, molecular design by incremental addition of atoms or fragments \citep{bengio2021flow, jain2023gflownets}, or image refinement by a diffusion process in continuous space \citep{venkatraman2024amortizing}, \textit{inter alia}. GFlowNets have shown success in the sequential sampling problems at scale due to their advantageous off-policy training ability \citep{malkin2023gflownets}.
+
+The prudent selection of training data is crucial to the success of such RL methods to model the full distribution faithfully, akin to the problem of active learning in supervised problems: to maximize sample efficiency, the most informative samples should be selected for training. To explore the full distribution, some applications of GFlowNets have either used exploration techniques borrowed from RL, such as noisy exploration \citep[first used by][]{bengio2021flow}, (prioritized) replay buffers \citep{deleu2022bayesian,schaul2015prioritized, vemgal2023empirical}, and delayed updates \citep{lau2023dgfn}. Others have employed search techniques in the target space: MCMC and local search \citep{kim2024local, kim2024ant, sendera2024diffusion, phillips2024metagfn}, genetic algorithms \citep{kim2024genetic}, and exploiting samples from the target distribution \citep{zhang2022generative, hu2023gfnem} when available.
+
+\begin{figure}[t]
+    \centering
+    \includestandalone[width=0.9\linewidth]{figures/figure1tikz}
+    \caption{Training an amortized sampler (\student) with an adaptive \teacher. \textbf{Left}: The behavior policy mixes \student, \teacher, and replay buffer policies to generate trajectories that train \student and store experiences. \teacher is updated based on \student's loss. \textbf{Right}: \student and \teacher distributions co-evolve, with \teacher targeting uncovered modes until \student converges to the target distribution.   }
+    \label{fig:main-figure}
+\end{figure}
+However, challenges in mode coverage remain. All of the forementioned methods promote exploration through perturbation of the policy, \eg, replaying the samples \citep{vemgal2023empirical}, augmenting the reward function \citep{pan2023generative}, and local search starting from generated samples~\citep{kim2023learning}. 
+These exploration methods focus on capturing the modes that are already near those generated by the current policy and can hardly capture the ones sufficiently separated from the already explored modes. 
+
+In this paper, we propose to explicitly explore the regions of high loss by introducing a \textbf{\teacher} model that guides the training of the primary, or \textbf{\student} sampler (\Cref{fig:main-figure}). Here, we believe that trajectories with high loss are particularly informative for mode coverage, as they are likely to lead to regions of the target distribution that are either undersampled (dropped modes) or oversampled (collapsed modes).
+The \textbf{\teacher} is an adaptive behavior policy that is trained to sample target space regions where the \textbf{\student} model receives a high loss. In turn, the \textbf{\student} model is trained on samples from the \textbf{\teacher} model. 
+
+Our approach can be seen as amortizing an ideal prioritized experience replay \citep[PER;][]{schaul2015prioritized} which samples high-loss objects from the entire sample space, instead of the finite-size replay buffer. Compared to (non-ideal) PER, the \textbf{\teacher} model has the potential to generalize across the high-loss regions of the {\bf \student}, without regard for whether they have previously been sampled or discovered. 
+
+In contrast, prioritized replay requires the poorly captured modes to have already been visited in order for the model to learn from them.
+
+We test our method on a diverse set of domains where GFlowNets have been used, including discrete tasks (biological sequence design and molecular design) and continuous tasks (diffusion-based sampling benchmarks). Comprehensive experiments demonstrate that our algorithm is effective in improving mode coverage and training efficiency across all tasks.
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+
+We give a summary of GFlowNets as algorithms for amortized sampling by sequential decision making. For simplicity, this exposition is about discrete space, where GFlowNets were originally defined \citep{bengio2021flow}, but GFlowNets have been extended to the case of continuous variables \citep{lahlou2023theory}, which is conceptually similar. The reader is directed to \citet{bengio2023gflownet} for an extended overview, \citet{malkin2023gflownets} for an introduction focused on connections to hierarchical variational inference, and to \citet{deleu2024discrete} for a maximum-entropy RL point of view.
+
+GFlowNets are policies in deterministic Markov decision processes (MDPs), trained so as to sample from a distribution over terminal states whose mass function is proportional to a given reward. The MDP is assumed to be represented as a finite directed acyclic graph $G=(\gS,\gA)$, where $\gS$ is the set of \emph{states} and $(s\rightarrow s')\in\gA$ if there is a possible action to be taken at state $s$ leading to state $s'$. A policy is then the same as a collection of distributions $P_F(\cdot\mid s)$ over the children\footnote{If $(s\rightarrow s')\in\gA$, then $s'$ is a \emph{child} of $s$; the converse relation is called \emph{parent}.} of every state $s$ that has at least one child. As in other deep RL methods, the policy could be a neural network $P_F(s'\mid s;\theta)$ taking a representation of the state $s$ as input and outputting the logits of a distribution over children $s'$. We will sometimes leave out the $\theta$ as implicit to lighten notation.
+
+We assume the existence of a unique state $s_0\in\gS$, called the \emph{initial state} that is not the child of any state. Conversely, states without children are called \emph{terminal}, and the set of terminal states is denoted $\gX$. A policy $P_F$ induces a distribution over \emph{complete trajectories} -- sequences $\tau=s_0\rightarrow s_1\rightarrow\dots\rightarrow s_n$ with $s_n\in\gX$ -- which can be sampled by starting at $s_0$ and iteratively transitioning to child states sampled according to $P_F$ until a terminal state is reached. This in turn a \emph{terminating distribution} $P_F^\top$ over $\gX$, which is the marginal distribution over the final states of trajectories sampled in this way. To be precise,
+\begin{equation}\label{eq:terminating_dist}
+    P_F^\top(x)=\sum_{\tau\rightsquigarrow x}P_F(\tau),\quad P_F(\tau=(s_0\rightarrow\dots\rightarrow s_n)):=\prod_{i=0}^{n-1}P_F(s_{i+1}\mid s_i),
+\end{equation}
+where $x\in \gX$ and $\tau\rightsquigarrow x$ indicates that the sum is restricted to trajectories $\tau$ whose last state is $x$.
+
+Let $R:\gX\to\R_{>0}$ be a function on the terminal states, called the \emph{reward function}, and set $Z:=\sum_{x\in\gX}R(x)$ as the normalization constant. We would like to train $P_F$ so as to make $P_F^\top(x)=R(x)/Z$ for all $x\in\gX$, \ie, to make $P_F$ sample terminal states with probability proportional to the reward. 
+
+Because the sum in \eqref{eq:terminating_dist} may be intractably large (if many trajectories could lead to the same $x$), achieving this requires introducing auxiliary objects into the optimization. One popular option is to use the trajectory balance (TB) objective \citep{malkin2022trajectory}. To train a model with TB, one introduces an additional \emph{backward policy} $P_B(\cdot\mid\cdot)$, which is a collection of distributions over the parents of every noninitial state (\ie, a policy on the reverse MDP, which can be either fixed -- as in our case -- or learned), as well as an estimate of the total reward $Z_\theta$ (usually parametrized in the log domain, making $\log Z_\theta$ a learnable parameter). We define the TB discrepancy for a trajectory $\tau$ with final state $x$ by
+\begin{equation}\label{eq:tb}
+\delta(\tau; \theta):= \underbrace{[\log R(x) + \log P_B(\tau\mid x)]}_{\text{backward flow}} - \underbrace{[\log Z_\theta + \log P_F(\tau; \theta)]}_{\text{forward flow}},
+\end{equation}
+where $P_B(\tau\mid x;\theta)$ is defined analogously to \eqref{eq:terminating_dist}, by
+\begin{equation}
+ P_B(\tau=(s_0\rightarrow\dots\rightarrow s_n)\mid x)=\prod_{i=0}^{n-1}P_B(s_i\mid s_{i+1}).   
+\end{equation}
+It can be shown that if $\delta(\tau;\theta)=0$ for all trajectories $\tau$, then $Z_\theta=Z$ and $P_F^\top(x)=R(x)/Z$ for all $x$, meaning that $P_F$ solves the sampling problem. Intuitively, this is the case because the reward distribution and $P_B$ would then determine the same distribution over trajectories as $P_F$, but factorized in reverse order. One thus attempts to enforce this by minimizing a loss, such as $\delta(\tau; \theta)^2$, on trajectories $\tau$ sampled from some behaviour policy $\pi$. (If $\pi$ is the current policy $P_F$ itself, the optimization is said to be \emph{on-policy}, otherwise \emph{off-policy}.)
+
+We note that there exist other training procedures that use learned estimators and loss functions associated with individual states or transitions, rather than full trajectories, such as detailed balance \citep[DB;][]{bengio2023gflownet} and subtrajectory balance \citep[SubTB;][]{madan2023learning}, which all have advantages under certain conditions. This paper mostly focuses on TB due to its simplicity and popularity as a default choice in the literature; we investigate DB in \cref{app:db} to show our method's flexibility over objective functions.
+
+
+\section{The \teacherblack: An adaptive training distribution}
+
+\label{sec:method}
+
+In this section, we introduce the \textbf{\teacher} network, which is a secondary GFlowNet designed to enhance the efficiency of off-policy training for the primary, or \textbf{\student}, GFlowNet. The two GFlowNets share the same state and action space, but have different rewards.
+
+The \teacher's role is to generate an adaptive training distribution for the \student, aiming to sample trajectories that yield high loss for the \student. Intuitively, samples with high loss tend to be less (or never) visited by the \student, implying high probability of the samples being in the unexplored modes. To this end, we train the \teacher with GFlowNet objective for amortization of sampling trajectories with high loss. Note that the \student's target distribution does not depend on the \teacher, but the \teacher's target distribution depends on the \student.
+
+We henceforth denote the parameters of the \student GFlowNet by $\theta$ and those of the \teacher by $\phi$.
+
+\subsection{Reward design for \teacherblack}
+\label{sec:teacher-reward}
+
+We define the reward function for the \teacher using the TB loss of the \student, \(\delta(\tau; \theta)^2\). In basic form, we could define the \teacher's reward as
+\begin{equation}
+    \log R^{\rm basic}_{\text{\teacher}}(x; \theta) = \mathbb{E}_{P_B(\tau \mid x; \theta)} \left[\log \left( \delta \left(\tau; \theta\right)^2 \right)\right] .\label{eq:teacher-reward0} 
+\end{equation}
+In~\cref{eq:teacher-reward0}, the \student's loss is marginalized over trajectories $\tau$ in the log domain over the backward policy \(P_B(\tau \mid x; \theta)\) of the \student, given a terminal state $x$. This is because we aim to train the \teacher as a sampler of terminal states, although what we obtain when training the \student is a \emph{trajectory-level} error $\delta(\tau; \theta)$, which we need to convert into a function of the terminal state $x$ only to form the \teacher's reward.  Having the \teacher model terminal states $x$ rather than full trajectories $\tau$ is motivated by the desire to obtain full mode coverage in the space of terminal states, but not necessarily in the space of trajectories that lead to these terminal states. 
+In practice, this expectation is estimated using Monte Carlo sampling with a single sample $\tau\sim P_B(\tau \mid x; \theta)$, relying on the fact that stochastic gradient descent training of the \teacher will automatically average out the variability resulting from this sampling. In fact, this gives an unbiased estimator of the gradient if training with the full expectation \citep[see, \eg,][]{deleu2022bayesian,bengio2023gflownet}.
+
+We propose two modifications to \eqref{eq:teacher-reward0} to facilitate mode discovery.
+
+\paragraph{Favoring undersampled regions.} First, we hypothesize that because the \teacher should encourage the \student to discover unvisited modes, it should favor regions of the state space where the target density exceeds the \student's sampling probability. To this end, we increase the weight of the \teacher's reward for states where the backward flow exceeds the forward flow (cf.\ \eqref{eq:tb}), while adding a smoothing constant $\epsilon$:
+\begin{align}
+    \log R_{\text{\teacher}}^{\rm weighted}(x; \theta) = \mathbb{E}_{P_B(\tau \mid x; \theta)} \left[\log \left( \epsilon + \left(1 + C\mathbb{I}_{\delta \left(\tau; \theta\right)>0}\right)\delta \left(\tau; \theta\right)^2 \right)\right] ,\label{eq:teacher-reward1} 
+\end{align}
+The weighted term $(1 + C\mathbb{I}_{\delta \left(\tau; \theta\right)>0})$ gives additional weight when the TB discrepancy is positive, which indicates the \student is undersampling a high-rewarded terminal sample. Here, $C > 0$ represents the weighting constant, which we set to $C=19$ for every task; see \cref{app:C-ablation} for ablation study on our choice of $C$.
+
+\paragraph{Reward mixing.} To ensure the \teacher covers the missing modes (the high-reward regions that the \student missed), it is important to focus the \teacher's search space more on the high-reward regions than the low-reward ones. This approach helps target both high-loss and high-reward areas effectively. To achieve this, we propose to mix the reward \eqref{eq:teacher-reward1}, which is based on the \student's loss, with the \student's log reward: 
+\begin{equation} \label{eq:mixing} \log {R}_{\text{\teacher}}(x):= \log R^{\rm weighted}_{\text{\teacher}}(x) + \alpha \log R(x). \end{equation} 
+This approach encourages the \teacher to sample regions with both high loss and high reward. Here the mixing constant $\alpha$ is a hyperparameter that trades off between high loss and high reward; see \cref{app:alpha} for analysis of the effect of the choice of $\alpha$.
+
+\subsection{Jointly training \teacher and \student}
+\label{sec:training}
+
+Using the $R_{\text{\teacher}}(x; \theta)$, 
+the training process is a joint optimization of the \teacher parameters \(\phi\) and the \student parameters \(\theta\) to jointly minimize the following loss functions:
+\begin{align}
+    \mathcal{L}_{\text{\student}}(\tau; \theta) &= \delta(\tau; \theta)^2 = \left( \log \frac{Z_{\theta} P_F(\tau; \theta)}{R(x) P_B(\tau \mid x)} \right)^2,
+    \label{eq:student_loss}
+    \\
+    \mathcal{L}_{\text{\teacher}}(\tau; \phi) &= \delta_{\text{\teacher}}(\tau;  \phi)^2 = \left( \log\frac{Z_{\phi} P_F(\tau; \phi)}{R_{\text{\teacher}}(x; \theta) P_B(\tau \mid x)} \right)^2,
+    \label{eq:teacher_loss}
+\end{align}
+Notice that \eqref{eq:student_loss} is the loss for regular TB training of the \student, while \eqref{eq:teacher_loss} relies on the \student's loss to provide a reward for the \teacher via \eqref{eq:mixing}.
+
+To simplify the training process, we adopt in our experiments a fixed backward policy \(P_B(\tau \mid x)\), without trainable parameters, which is used by both the \teacher and the \student.
+\begin{figure}[t!]
+\vspace*{-2em}
+\centering
+\begin{minipage}[t!]{0.9\textwidth}
+\centering
+\begin{algorithm}[H]
+\small
+\begin{spacing}{1.1}
+\caption{\teacher-\student Training of GFlowNets}
+\label{algorithm1}
+\small
+\begin{algorithmic}[1]
+\State $\mathcal{Q}_{\text{buffer}} \leftarrow \emptyset$ \Comment{{\it Initialize replay buffer with queue structure}}
+\For{$t=1,\ldots, T$} \Comment{{\it Iteration of training rounds}}
+\State Select behavior policy $P_{\beta}(\tau)=
+\begin{cases} 
+P_F(\tau;\theta), & \text{if select \student}  \\
+P_F(\tau; \phi), & \text{if select \teacher} \\
+P_B(\tau|x)P(x|\mathcal{Q}_{\text{buffer}}), & \text{if select Prioritized Buffer}.
+\end{cases}$
+\label{line3}
+\State Sample trajectories $\tau_1, \ldots, \tau_B \sim P_{\beta}(\tau)$.  \Comment{{\it Exploration}}
+
+\State \textcolor{gray}{(Optional) Refine trajectories using local search.}
+\label{algo:local_search}
+\State Compute rewards: $R(x_1), \ldots, R(x_B)$.
+\label{line6}
+\State Compute TB discrepancy of \student: $\delta(\tau_1;\theta), \ldots, \delta(\tau_B; \theta)$.
+\label{line7}
+\State Compute $R_{\text{\teacher}}(x_1), \ldots, R_{\text{\teacher}}(x_B)$ using $\{R(x_i)\}_{i=1}^B$ and $\{\delta(\tau_i; \theta)\}_{i=1}^B$.
+\label{line8}
+\State Compute TB discrepancy of \teacher: $\delta(\tau_1;\phi), \ldots, \delta(\tau_B; \phi)$.
+\label{line9}
+    \State Update \student parameters: $\theta \gets  \text{Optimizer}\left(\frac{1}{B}\sum_{i=1}^B \delta(\tau_i; \theta)^2\right)$ 
+    \Comment{{\it \student training}}
+    \label{line10}
+    \State Update \teacher parameters: $\phi \gets  \text{Optimizer}\left(\frac{1}{B}\sum_{i=1}^B \delta(\tau_i; \phi)^2\right)$ 
+    \Comment{{\it \teacher training}}
+    \label{line11}
+\State Add experiences to buffer: $\mathcal{Q}_{\text{buffer}} \leftarrow \mathcal{Q}_{\text{buffer}} \cup \{x_i, R(x_i), R_{\text{\teacher}}(x_i)\}_{i=1}^B$ 
+
+\EndFor
+\end{algorithmic}
+\end{spacing}
+
+\end{algorithm}
+
+\end{minipage}
+\end{figure}
+
+\paragraph{Behavior policy for joint optimization.} Algorithm~\ref{algorithm1} describes the \teacher-\student training procedure, which simultaneously minimizes the loss functions of both the \teacher and the \student. In line~\ref{line3}, we select the behavior policy by choosing either the \student, the \teacher, or a prioritized buffer, ensuring that all three are sufficiently utilized (see \cref{app:implementation} for details on how they are chosen). Given a terminal state $x$ sampled from $P(x \mid Q_{\text{buffer}})$, we then generate a trajectory $\tau$ using the backward policy $P_B(\tau \mid x)$. This approach is similar to previous works \citep{shen2023towards, sendera2024diffusion}, which store only the terminal states $x$ in the buffer and sample trajectories $\tau$ using $P_B$.
+The behavior policy can produce an adaptive distribution of trajectories $\tau$ with respect to the \student's learning state $\theta$ because the \teacher iteratively focuses on high-loss trajectories of the \student during training. This adaptivity is hypothesised to result in highly effective training for the \student.
+
+\paragraph{Existence of a stationary point of training process.} The joint optimization for the parameters \(\phi\) and \(\theta\) over the support of $P_{\beta}(\tau)$ has a stationary point where the \student GFlowNet becomes an exact sampler and the \teacher GFlowNet samples proportional to $\epsilon R(x)^{\alpha}$; see \cref{thm:joint-optimum}.
+
+\subsection{Mitigating non-stationarity with local search}
+\label{sec:ls}
+Joint optimization of the parameters $\phi, \theta$ with a non-stationary target $R_{\text{\teacher}}(x; \theta)$ poses significant challenges as the \teacher's reward is nonstationary, evolving as the \student learns. To address this issue, we use a local search method (\cref{algo:local_search}) that locally optimizes $R_{\text{\teacher}}(x; \theta)$ based on the \teacher's samples. We expect the dynamic nature of $R_{\text{\teacher}}(x; \theta)$ to be effectively managed by such search, as the \teacher's main role is to generalize to modes poorly modeled by the \student, while the search helps the \teacher track the \emph{local} changes in the \student's loss landscape.
+Local search using a kernel defined by the policies -- first used by \citet{zhang2022generative,hu2023gfnem} and extensively studied by \citet{kim2024local} -- involves iteratively backtracking trajectories and reconstructing them to produce new samples. The method consists of the following steps:
+\begin{enumerate}[left=0pt,nosep]
+    \item \textbf{Backtracking}: Starting from a terminal state $x$, we backtrack to an intermediate state $s$ using the backward policy $P_B$, denoted as $(x \dashrightarrow \ldots \dashrightarrow s)$.
+    \item \textbf{Reconstruction}: From the intermediate state $s$, we reconstruct a new terminal state $x'$ using the \teacher's forward policy $P_F$, represented as $(s \rightarrow \ldots \rightarrow x')$.
+    \item \textbf{Accept or reject}: We accept the new sample $x'$ in place of $x$ with acceptance probability $A$. 
+\end{enumerate}
+The acceptance probability \( A \) can be determined using either a stochastic Metropolis-Hastings (MH) approach or a deterministic ascent criterion (see \citet{kim2024local} for details). This process is repeated iteratively to progressively improve the samples so that their reward better matches (with MH) or locally maximizes (with the deterministic ascent version) the target reward function. Ultimately, we use the enhanced sample $x'$ to train both the \teacher and the \student by generating trajectories \(\tau \sim P_B(\tau\mid x')\) and taking gradient steps on the losses \eqref{eq:student_loss} and \eqref{eq:teacher_loss}.
+
+\renewcommand{\teachercolor}{black}
+\renewcommand{\studentcolor}{black}
+
+
+
+\section{Related work}
+
+\textbf{GFlowNets.} GFlowNets were originally introduced by \citet{bengio2021flow} and extensively extended by \citet{bengio2023gflownet}. They aim to develop a sequential decision-making policy with a form of deep reinforcement learning that aims at sampling from the unnormalized density associated with a positive reward function. Aiming to improve credit assignment over long trajectories, \citet{malkin2022trajectory} introduced the trajectory balance (TB) objective mainly used in this paper. Building on this, \citet{madan2023learning} introduced a mixing scheme that combines losses associated with subtrajectories, trading off the lower variance of DB with the lower bias of TB, \citet{pan2023better} studied inductive biases that use partial reward information, and \citet{jang2023learning} extended this idea to learnable reward shaping schemes. \citet{shen2023towards} and \citet{jang2024pessimistic} studied auxiliary losses for better training of the backward policy. 
+
+Orthogonal to those studies, other works focus on improving off-policy training. \citet{deleu2022bayesian,shen2023towards, vemgal2023empirical} studied the use of replay buffers in GFlowNets to enhance sample efficiency. \citet{kim2024local, kim2024genetic, kim2024ant, sendera2024diffusion} investigated local search methods to guide GFlowNets toward high-reward regions. \citet{kim2023learning} proposed to adjust the exploration-exploitation trade-off via amortized conditioning on reward temperature. Similarly, \citet{qgfn} introduced a method that mixes Deep Q-Networks \citep{mnih2013playing} (exploitation) with GFlowNets (exploration) to balance the exploration-exploitation trade-off. Our proposed method is also an off-policy training approach for GFlowNets. In contrast to the methods above, which use off-policy training to focus GFlowNets on high-reward regions, our method aims to address missing modes and underexplored regions. Note that the aforementioned reward-seeking off-policy methods are complementary to our approach; for example, local search with a \teacher is studied in \cref{sec:grid}.
+
+While the above algorithmic work mostly concerns discrete space, \citet{lahlou2023theory} introduced the theory of GFlowNets in continuous space, leading to subsequent work on diffusion samplers~\citep{zhang2023diffusion,sendera2024diffusion}, posterior sampling under diffusion priors  \citep{venkatraman2024amortizing}, and applications to molecular dynamics \citep{seong2024collective}. Our proposed algorithms are effective in both discrete and continuous space (\cref{sec:diffusion}).
+
+\textbf{Adaptive training distributions.} Adaptive training distributions are essential techniques in deep learning, ensuring that the training data evolves appropriately during model training. For instance, curriculum learning methods \citep{bengio2009curriculum} schedule the difficulty of training tasks by gradually increasing from easy to hard, thereby facilitating more efficient model training. These methods are also widely applied in reinforcement learning, \eg, \citet{narvekar2020curriculum}.
+
+Active learning \citep{gal2017deep} also falls into this category, where the training dataset actively changes to discover better strategies. \citet{yoo2019learning} attempted to predict loss values of unlabeled data for active learning, aligning with our view that loss values are informative for the training distribution. Additionally, approaches that train two networks with joint objectives, such as generative adversarial networks~\citep{goodfellow2024gan} and actor-critic methods \citep{konda1999actor}, are also relevant.
+
+
+\section{Experiments}
+
+
+This section provides empirical validation of our method. Our primary goal is to demonstrate that our approach is beneficial over other off-policy training methods for trajectory balance (TB), a representative learning objective for amortized samplers. We also aim to show that our method can effectively be integrated with existing off-policy search methods, such as local search and replay buffer techniques. We benchmark our approach on three major tasks: two discrete tasks (\cref{sec:grid,sec:bioseq}) and one continuous task (\cref{sec:diffusion}). We also include three ablation studies and a pilot experiment on integrating local search in \cref{app:exp}. Additionally, we tested the versatility of our method by adopting another training objective, detailed balance~\citep[DB;][]{bengio2023gflownet} in~\cref{app:db}.
+
+\subsection{Deceptive grid world}
+\label{sec:grid}
+
+\paragraph{Setting.} The deceptive grid world is a synthetic environment modified from the grid task introduced by \citet{bengio2021flow}. It consists of a $d$-dimensional hypercube of side length $H$, resulting in a search space of size $\mathcal{O}(H^d)$.\footnote{The exact size of the search space is $(H-1)^d + d(H-1)^{d-1}$, as the agent is forced to terminate upon reaching a state with coordinate $H$ in any dimension. Please refer to~\cref{tab:grid_space} in~\cref{app:gridworld} for more details.} The agent starts from the origin (position $\bm{0}$) and can only move in directions that increase a coordinate by 1 or terminate to receive the reward. The reward of each terminal state $x=(x_1,\ldots,x_d)$ is given by
+\begin{equation}
+R(x) = R_0 + R_1 \prod_{i=1}^{d} \mathbb{I}\left[ 
+\left\vert \frac{x_i}{H - 1} - 0.5 \right\vert < 0.1 \right] + R_2 \prod_{i=1}^{d} \mathbb{I} \left[ 
+\left\vert \frac{x_i}{H - 1} - 0.5 \right\vert \in (0.3, 0.4) \right].    
+\end{equation}
+
+The modes with the highest rewards ($R_2 + R_0$) are surrounded by walls with low rewards ($R_0$). In between them are deceptive regions offering relatively high rewards ($R_1 + R_0$), which can lure the agent into getting trapped. We set $R_0=10^{-5}$, $R_1=0.1$, and $R_2=2$. Following previous works, we use the number of modes discovered and the empirical $L_1$ distance from the target distribution as evaluation metrics. See~\cref{app:gridworld} for more details about the settings.
+
+\begin{table*}[t!]
+\vspace*{-1em}
+    \caption{Evaluation results on deceptive grid worlds with dimension $d$ and grid length $H$. The number of modes discovered (\# modes) and empirical $L_1$ distance between target and sampled distributions are reported as mean $\pm$standard deviation over five runs. The $L_1$ distances are scaled appropriately for readability.}\vspace*{-0.75em}
+    \label{tab:grid-results}
+    \resizebox{1\linewidth}{!}{
+    \begin{tabular}{@{}lcccccccc}
+        \toprule
+        Grid config. $\rightarrow$
+        & \multicolumn{2}{c}{$d = 2$, $H = 128$}
+        & \multicolumn{2}{c}{$d = 2$, $H = 256$}
+        & \multicolumn{2}{c}{$d = 4$, $H = 16$}
+        & \multicolumn{2}{c}{$d = 4$, $H = 32$}
+        \\
+        \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+        Algorithm $\downarrow$ Metric $\rightarrow$ 
+        & \# modes ($\uparrow$) & $L_1 \times 10^{-5}$ ($\downarrow$) 
+        & \# modes ($\uparrow$) & $L_1 \times 10^{-5}$ ($\downarrow$) 
+        & \# modes ($\uparrow$) & $L_1 \times 10^{-5}$ ($\downarrow$) 
+        & \# modes ($\uparrow$) & $L_1 \times 10^{-6}$ ($\downarrow$) \\
+        \midrule
+        TB \hfill(on-policy $\rightarrow$)
+        & $645.4 \pm \text{\footnotesize 41.5}$ & $2.20 \pm \text{\footnotesize 0.58}$ 
+        & $733.6 \pm \text{\footnotesize 25.1}$ & $1.74 \pm \text{\footnotesize 0.04}$ 
+        & $6.6 \pm \text{\footnotesize 2.5}$ & $1.027 \pm \text{\footnotesize 0.012}$ 
+        & $16.6 \pm \text{\footnotesize 4.8}$ & $1.635 \pm \text{\footnotesize 0.000}$ 
+        \\
+        \hspace{2pt} + $\epsilon$-expl.
+        & $555.2 \pm \text{\footnotesize 66.2}$ & $3.59 \pm \text{\footnotesize 0.66}$ 
+        & $672.6 \pm \text{\footnotesize 16.3}$ & $1.75 \pm \text{\footnotesize 0.02}$ 
+        & $6.6 \pm \text{\footnotesize 4.2}$ & $1.030 \pm \text{\footnotesize 0.006}$ 
+        & $24.2 \pm \text{\footnotesize 3.2}$ & $\mathbf{1.634} \pm \text{\footnotesize 0.000}$ 
+        \\
+        \hspace{2pt} + GAFN
+        & $675.4 \pm \text{\footnotesize 0.5}$ & $\mathbf{1.66} \pm \text{\footnotesize 0.11}$ 
+        & $1044.8 \pm \text{\footnotesize 276.4}$ & $1.55 \pm \text{\footnotesize 0.17}$ 
+        & $11.8 \pm \text{\footnotesize 3.9}$ & $1.057 \pm \text{\footnotesize 0.022}$ 
+        & $24.6 \pm \text{\footnotesize 7.4}$ & $1.664 \pm \text{\footnotesize 0.002}$ 
+        \\
+        \hspace{2pt} + PRT
+        & $\mathbf{676.0} \pm \text{\footnotesize 0.0}$ & $4.54 \pm \text{\footnotesize 0.14}$ 
+        & $2165.2 \pm \text{\footnotesize 64.5}$ & $1.55 \pm \text{\footnotesize 0.05}$ 
+        & $38.8 \pm \text{\footnotesize 10.0}$ & $1.097 \pm \text{\footnotesize 0.006}$ 
+        & $120.4 \pm \text{\footnotesize 19.1}$ & $1.648 \pm \text{\footnotesize 0.001}$ 
+        \\
+        \hspace{2pt} + PER
+        & $669.0 \pm \text{\footnotesize 3.8}$ & $4.88 \pm \text{\footnotesize 0.44}$ 
+        & $2055.2 \pm \text{\footnotesize 56.3}$ & $1.71 \pm \text{\footnotesize 0.08}$ 
+        & $16.0 \pm \text{\footnotesize 2.8}$ & $1.129 \pm \text{\footnotesize 0.034}$ 
+        & $46.6 \pm \text{\footnotesize 14.6}$ & $1.639 \pm \text{\footnotesize 0.001}$ 
+        \\
+        \midrule
+        \hspace{2pt} + \teacher (\emph{ours})
+        & $\mathbf{676.0} \pm \text{\footnotesize 0.0}$ & $2.13 \pm \text{\footnotesize 0.18}$ 
+        & $\mathbf{2452.6} \pm \text{\footnotesize 21.7}$ & $\mathbf{0.94} \pm \text{\footnotesize 0.03}$ 
+        & $\mathbf{51.4} \pm \text{\footnotesize 4.0}$ & $\mathbf{1.019} \pm \text{\footnotesize 0.016}$ 
+        & $\mathbf{246.6} \pm \text{\footnotesize 14.7}$ & $\mathbf{1.634} \pm \text{\footnotesize 0.001}$ 
+        \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table*}
+
+\begin{figure}[t!]
+\centering
+\captionsetup[subfigure]{labelformat=empty}
+\begin{minipage}[t]{0.98\textwidth}
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/deceptivegrid_d2h128.pdf}
+    \caption{Target distr.}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/student_5-5.png}
+    \caption{\teacher (\textit{ours})}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/baselines/PER.png}
+    \caption{PER}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/baselines/PRT.png}
+    \caption{PRT}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/baselines/GAFN.png}
+    \caption{GAFN}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/baselines/TB_eps.png}
+    \caption{$\epsilon$-expl.}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.14\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/grid/baselines/TB.png}
+    \caption{On policy}
+\end{subfigure}
+\end{minipage}
+\caption{Empirical distribution plots of $10^5$ test samples from policies on the $(d=2, H=256)$ grid.}
+\label{fig:grid_baselines}
+\end{figure}
+
+\begin{wrapfigure}{t}{0.5\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/grid/LS_modes.pdf}
+    \caption{The effect of local search (LS).}
+    \label{fig:grid_ls}
+\end{wrapfigure}
+
+\paragraph{Baselines.} We compare our method with on-policy TB and TB with off-policy exploration methods, such as $\epsilon$-exploration \citep{bengio2021flow}, and GAFN~\citep{pan2023generative}, along with a baseline using a replay buffer prioritizing rewards (PRT) or \teacher rewards inspired by Prioritized Experience Replay~\citep[PER;][]{schaul2015prioritized}. PER can be seen as a non-amortized version of our method.
+
+\paragraph{Results.} \cref{tab:grid-results} summarizes the results. TB with \teacher consistently outperforms baselines. The significant margin in the number of modes discovered in the larger-scale setting indicates that the \teacher effectively guides the \student to visit undiscovered modes. Please refer to~\cref{app:grid-results} for comprehensive results.
+\paragraph{Effects of local search.} We assess the local search (LS) effect (\cref{sec:ls}) on a $(d=4, H=32)$ grid. The \teacher's local search uses the \teacher's reward $R_{\text{\teacher}}$ for acceptance, compared to two baselines -- on-policy TB and TB with PER -- which use the \student's reward $R$. As shown in \cref{fig:grid_ls}, local search accelerates mode discovery, likely by reducing the sensitivity to nonstationarity in \teacher learning. Further analysis is in \cref{app:teacher-local}.
+
+\begin{table*}[t!]
+\vspace*{-1em}
+    \caption{\looseness=-1 Evaluation on multimodal continuous sampling tasks. Log-partition function estimation errors (evidence lower bound (ELBO), importance sampled ELBO (ELBO-IS), evidence upper bound (EUBO)) and 2-Wasserstein distances ($W_2^2$) to target samples are reported as mean{\scriptsize$\pm$std} over five runs. We compare MCMC methods (SMC, GGNS), a differentiable simulation method (PIS), and GFlowNets trained using the TB objective with various off-policy strategies, such as loss prioritized replay (PER) and reward prioritized replay (PRT). }\vspace*{-0.75em}
+    \label{tab:diffusion_sampling}
+    \resizebox{1\linewidth}{!}{
+    \begin{tabular}{@{}lcccccccc}
+        \toprule
+        Energy $\rightarrow$
+        & \multicolumn{4}{c}{25GMM ($d=2$, $\log Z = 0$, $W_{2}^{2} = 0.29$)} 
+        & \multicolumn{4}{c}{Manywell ($d=32$, $\log Z = 164.6956753$, $W_{2}^{2} = 5.36$)} 
+        \\
+        \cmidrule(lr){2-5}\cmidrule(lr){6-9}
+        Algorithm $\downarrow$ Metric $\rightarrow$ & ELBO ($\uparrow$) &  ELBO-IS ($\uparrow$) & EUBO ($\downarrow$)  & $W_2^2$ ($\downarrow$)  & ELBO ($\uparrow$) & ELBO-IS ($\uparrow$) & EUBO  ($\downarrow$) &$W_2^2$ ($\downarrow$) \\
+        \midrule
+        SMC
+        & \multicolumn{3}{c}{- 0.569{\scriptsize$\pm$0.010}} & 0.86{\scriptsize$\pm$0.10}
+        & \multicolumn{3}{c}{ 149.706{\scriptsize$\pm$1.078}} & 8.28{\scriptsize$\pm$0.32}
+        \\
+        GGNS
+        & \multicolumn{3}{c}{- 0.016{\scriptsize$\pm$0.042}} & 1.19{\scriptsize$\pm$0.17}
+        & \multicolumn{3}{c}{164.404{\scriptsize$\pm$0.454}} & 6.51{\scriptsize$\pm$0.32}
+        \\
+        \midrule
+        PIS
+        & -1.192{\scriptsize$\pm$0.177}
+        & -1.192{\scriptsize$\pm$0.176}
+        & 26.733{\scriptsize$\pm$5.107}
+        & 4.95{\scriptsize$\pm$0.73}
+        & 160.516{\scriptsize$\pm$1.025}
+        & 162.017{\scriptsize$\pm$0.980}
+        & 581.464{\scriptsize$\pm$240.916}
+        & 6.15{\scriptsize$\pm$0.01}
+        \\
+        \midrule
+        TB \hfill(on-policy $\rightarrow$)
+        & -1.105{\scriptsize$\pm$0.007}
+        & -1.008{\scriptsize$\pm$0.009}
+        & 18.321{\scriptsize$\pm$0.932}
+        & 4.64{\scriptsize$\pm$0.01}
+        
+        & 161.048{\scriptsize$\pm$0.036}
+        & 162.019{\scriptsize$\pm$0.645}
+        & 427.850{\scriptsize$\pm$80.082}
+        & 6.15{\scriptsize$\pm$0.01}
+        \\
+        \hspace{2pt} + $\epsilon$-expl.
+        & -1.056{\scriptsize$\pm$0.117}
+        & -0.956{\scriptsize$\pm$0.118}
+        & 15.135{\scriptsize$\pm$1.861}
+        & 4.58{\scriptsize$\pm$0.08}
+        & 161.064{\scriptsize$\pm$0.036}
+        & 162.008{\scriptsize$\pm$0.062}
+        & 355.787{\scriptsize$\pm$4.761}
+        & 6.15{\scriptsize$\pm$4.761}
+        \\
+        \hspace{2pt} + PRT
+        &  -0.750{\scriptsize$\pm$0.138}
+        &  -0.640{\scriptsize$\pm$0.144}
+        & 12.103{\scriptsize$\pm$2.273}
+        & 4.28{\scriptsize$\pm$0.59}
+        & 161.071{\scriptsize$\pm$0.085}
+        & 161.998{\scriptsize$\pm$0.111}
+        & 379.623{\scriptsize$\pm$77.409}
+        & 6.14{\scriptsize$\pm$0.03}
+        \\
+         \hspace{2pt} + PER
+        & -0.282{\scriptsize$\pm$0.158}
+        & -0.147{\scriptsize$\pm$0.162}
+        & 1.833{\scriptsize$\pm$2.366}
+        & 1.87{\scriptsize$\pm$1.23}
+        
+        & 161.537{\scriptsize$\pm$0.186}
+        & 162.582{\scriptsize$\pm$0.268}
+        & 210.440{\scriptsize$\pm$6.888}
+        & 5.91{\scriptsize$\pm$0.08}
+        \\
+        \hspace{1pt} + \teacher (\emph{ours})
+        & \textbf{-0.137}{\scriptsize$\pm$0.004} 
+        & -\textbf{0.005}{\scriptsize$\pm$0.007}
+        & \textbf{0.115}{\scriptsize$\pm$0.009}
+        & \textbf{0.86}{\scriptsize$\pm$0.07}
+        
+        & \textbf{163.484}{\scriptsize$\pm$0.049} 
+        & \textbf{164.676}{\scriptsize$\pm$0.048}
+        & \textbf{165.800}{\scriptsize$\pm$0.045}
+        & \textbf{5.46}{\scriptsize$\pm$0.01}
+        \\   
+        \bottomrule
+    \end{tabular}
+    }
+\end{table*}
+
+\begin{figure}[t!]
+\centering
+\captionsetup[subfigure]{labelformat=empty}
+\begin{minipage}[t]{0.9\textwidth}
+\begin{subfigure}[b]{0.16\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/manywell/true/contourx13.png}
+    \caption{Target distr.}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.16\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/manywell/teacher/student_gfncontourx13_teacher.png}
+    \caption{\teacher (\textit{ours})}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.16\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/manywell/per/student_gfncontourx13_per.png}
+    \caption{PER}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.16\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/manywell/rr/student_gfncontourx13.png}
+    \caption{PRT}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.16\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/manywell/epsilon/student_gfncontourx13_seed1.png}
+    \caption{$\epsilon$-expl.}
+\end{subfigure}\hfill
+\begin{subfigure}[b]{0.16\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{figures/manywell/tb/save_plotstudent_gfncontourx13.png}
+    \caption{On policy}
+\end{subfigure}
+\end{minipage}
+\caption{Samples from trained models on the Manywell task (projected onto the first two dimensions).}
+\label{fig:Manywell_plots}
+\end{figure}
+
+\begin{figure}[t!]
+    \captionsetup[subfigure]{labelformat=empty}
+    \centering
+    \begin{minipage}{0.49\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/gmm/true-gmm.png}
+            \caption{Goal distr.}
+        \end{subfigure}\hfill
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/gmm/student-gmm.png}
+            \caption{\student (1/5)}
+        \end{subfigure}\hfill
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/gmm/teacher-gmm.png}
+            \caption{\teacher (1/5)}
+        \end{subfigure}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.49\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/manywell/study/true_manywell.png}
+            \caption{Goal distr.}
+        \end{subfigure}\hfill
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/manywell/study/student-manywell.png}
+            \caption{\student (2/5)}
+        \end{subfigure}\hfill
+        \begin{subfigure}[b]{0.32\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/manywell/study/teacher-manywell.png}
+            \caption{\teacher (2/5)}
+        \end{subfigure}
+    \end{minipage}
+    \caption{KDE plots for 25GMM (left three) and Manywell (right three) at intermediate states of training. The \student (\textit{ratio}) indicates the fraction of total training steps completed. The \teacher adaptively adjusts the training distribution in response to the modes that the \student is missing.}
+    \label{fig:diffusion-teacher-student}
+\end{figure}
+
+\subsection{Diffusion sampling}
+\label{sec:diffusion}
+
+\paragraph{Setting.} The task of learning a \textit{diffusion sampler} is to invert a diffusion process in order to sample the target density function.
+These experiments largely follow the setup of \citet{sendera2024diffusion}.
+Here, we aim to model a distribution over trajectories $\tau = (\boldsymbol{0}=x_0 \rightarrow x_{\Delta t} \rightarrow x_{2 \Delta t} \rightarrow \ldots \rightarrow x_1)$ (with $\Delta t=\frac1T$; for us, $T=100$), so that $x_1$ is distributed according to an unnormalized density function $p(x_1) \propto R(x_1) = e^{-\mathcal{E}(x_1)}$. 
+The transitions are parametrized as to the Euler-Maruyama discretization of a neural stochastic differential equation \citep{tzen2019neural}: the sampler begins at the initial state $(\boldsymbol{0}, t=0)$, and the transition from $x_t$ to $x_{t+\Delta t}$ is sampled from an appropriately scaled Gaussian with mean given by a trained model taking $x_t$ and $t$ as input. The detailed setting and policy parametrization are described in \cref{app:diffusion_sampler}. 
+
+The main challenge in this task to capture the multimodality of $R(x_1)$ without having access to samples from target distribution during training, which is difficult when there are many well-separated modes. It is not possible to apply the forward KL (\ie, log-likelihood variational bound) objectives typically used for diffusion models \citep{song2021maximum}, since target distribution datapoints are not available; thus \textit{exploration} is crucial to mode discovery.
+
+In this work, we benchmark diffusion samplers on two established tasks in the diffusion sampling literature: a 2-dimensional Gaussian mixture with 25 modes (25GMM) and a 32-dimensional Manywell distribution. When performing off-policy exploration, we assume a black-box property for the energy function $\mathcal{E}$, where $\nabla \mathcal{E}$ is not accessible, similar to settings in reinforcement learning. This assumption is meant to mimic a common setting in scientific discovery, where we may have black-box energies requiring expensive simulations to compute; we note that for these tasks, effective methods that use the energy gradient exist (see \citet{sendera2024diffusion}).
+
+\paragraph{Baselines.} We consider two representative MCMC baselines: Sequential Monte Carlo (SMC) and the state-of-the-art GGNS \citep{lemos2023ggns}. We also include the simulation-based continuous stochastic control method Path Integral Sampler \citep[PIS;][]{zhang2021path}. The major baselines are off-policy training methods based on trajectory balance (TB). We include on-policy TB in continuous space and the $\epsilon$-exploration method introduced by \citet{malkin2023gflownets,lahlou2023theory}, which adds additional Gaussian noise at least policy sampling step during training, as main baselines. Additionally, we compare with two replay buffer methods combined with TB: one that prioritizes reward (PRT) as studied by \citet{sendera2024diffusion}, and another that prioritizes loss (PER) \citep{schaul2015prioritized}. The gradient-based local search introduced by \citet{sendera2024diffusion}, while effective, is excluded as it requires access to $\nabla \mathcal{E}(x)$ for the search; but we also study potential integration of the \teacher with these techniques in \cref{app:teacher-local}.
+
+\paragraph{Results.} As shown in \cref{tab:diffusion_sampling}, on-policy TB and PIS yield similar performance, consistent with the fact that they have identical expected gradients (\citep{malkin2023gflownets,lahlou2023theory}). This suggests that TB could benefit from additional off-policy methods for improvement. Indeed, the $\epsilon$-exploration techniques improve slightly over on-policy methods. Reward prioritized replay (PRT) provides larger benefits on 25GMM but shows no meaningful benefits on Manywell. For loss prioritized replay (PER), there are significant benefits over on-policy methods compared to others. Our method, \teacher, achieves the highest results across all metrics, including the Evidence Lower Bound (ELBO), Importance-Sampled ELBO (ELBO-IS), Evidence Upper Bound (EUBO) (see \cref{app:setting} for detailed definitions of those metrics). Especially in EUBO, a metric suggested by \citet{blessing2024beyond} to measure mode coverage, baseline methods face significant challenges. This indicates that existing methods struggle to perform proper \textit{exploration} across modes, as confirmed by the sample plots in \Cref{fig:Manywell_plots}. Our method offers clear advantages on EUBO metrics. 
+In \cref{fig:diffusion-teacher-student}, we depict the training dynamics of the \teacher and \student by plotting kernel density estimates of their samples midway through training. This figure illustrates the mechanism by which the \teacher promotes mode discovery by the \student. As the \student struggles to find some modes, especially those with lower rewards than others, the \teacher puts high probability on them, encouraging the \student to reduce its loss in those regions of the space.
+
+\begin{figure}[t]
+\vspace*{-1.0em}
+    \centering
+\begin{minipage}[t]{0.95\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/biochem/qm9_metrics_over_rounds.png}
+\includegraphics[width=1.0\linewidth]{figures/biochem/seh_metrics_over_rounds.png}
+\includegraphics[width=1.0\linewidth]{figures/biochem/tfbind8_metrics_over_rounds.png}
+\includegraphics[width=1.0\linewidth]{figures/biochem/l14-rna1_metrics_over_rounds.png}
+\vspace*{-1.5em}
+    \caption{Training graphs for molecule design (QM9, sEH) and biological sequence design (TFbind8, L14-RNA1) tasks. Mean and standard deviation over five independent runs are depicted.}
+    \label{fig:tfbind8_l14_rna1_metrics_over_rounds}
+\end{minipage}
+\vspace*{-1.5em}
+\end{figure}
+
+\subsection{Biological and chemical discovery}
+\label{sec:bioseq}
+\paragraph{Setting.} GFlowNets have been used to generate biological and chemical structures by sequentially adding predefined substructures. In molecules, the actions add atoms or fragments; in biological sequences, nucleotides or amino acids. We aim to match a target probability distribution over structures given by some proxy reward model. Following \citet{shen2023towards}, we benchmark the number of discovered modes, as well as probabilistic metrics like ELBO and EUBO. We study four biological and chemical discovery problems, following \citet{shen2023towards,kim2024local}:
+
+\begin{itemize}[left=0pt,nosep]
+\item
+\textbf{QM9.} The objects being sampled are small molecular graphs. The reward is computed by a neural network predicting the HOMO-LUMO gap. Molecules are generated using 12 building blocks with 2 stems, and each molecule contains 5 blocks \citep{zhang2020molecular}.
+\item
+\textbf{sEH.} The generated objects are molecular graphs, whose reward is the predicted binding affinity to soluble epoxide hydrolase (sEH), based on a proxy model trained using AutoDock. Molecules are built using 18 blocks with 2 stems and 6 blocks per molecule \citep{bengio2021flow}.
+\item
+\textbf{TFbind8.} The generated objects are DNA sequences with 8 nucleotides. The reward is the estimated binding affinity to target human transcription factors \citep{barrera2016survey}.
+\item
+\textbf{L14-RNA1.} The generated objects are RNA sequences of length 14, with the reward defined as binding affinity to human transcription faction estimated by a proxy model \citep{sinai2020adalead}. 
+\end{itemize}
+
+Detailed training and hyperparameter settings for each task can be found in \Cref{app:biochemical}.
+
+\textbf{Baselines.} We compare our method with on-policy TB, $\epsilon$-exploration, and the PRT replay buffer method designed for biochemical tasks \citep{shen2023towards}. Additionally, we compare with using a loss-prioritized replay buffer (PER) \citep{schaul2015prioritized}. Since the local search method \citep{kim2024local} targets reward exploitation with a different purpose to ours, a separate analysis of its complementarity to our method is presented in \cref{app:teacher-local}.
+
+\textbf{Results.} As shown in \cref{fig:tfbind8_l14_rna1_metrics_over_rounds}, the \teacher method improves mode discovery when combined with both PER and PRT buffers, outperforming on-policy methods on every task. Similar trends are observed across other metrics, with faster convergence under the \teacher method. For TFbind8, our method's dominance is particularly evident for mode coverage metrics like EUBO and the number of modes, although ELBO remains comparable to using PER or PRT. In the largest task, L14-RNA1, the \teacher method surpasses PER and PRT in ELBO, EUBO, and the number of modes.
+
+We draw special attention to the comparison between PER and PRT. While the differences are minimal in the first three tasks (QM9, TFbind8, sEH), in the larger-scale tasks, loss-prioritizing with PER shows a clear advantage. This suggests that loss information is more important for exploration in large-scale tasks, where the \teacher method with PER achieves the best overall performance.
+
+
+
+\section{Discussion}
+
+\looseness=-1
+We have introduced a \textbf{\teacher} that adaptively generates states for training a \textbf{\student} amortized sampler. The \teacher favors states for which the \student has high loss and thus promotes the discovery of new modes.
+
+This approach paves the way for numerous future research directions. For example, an adaptive \teacher could be applied to amortize intractable inference in large language models (LLMs) \citep{hu2023amortizing} and diffusion models \citep{venkatraman2024amortizing}, or to enhance exploration in automatic red-teaming for LLMs \citep{lee2024learning}. Applying our method to probabilistic models such as amortized Bayesian causal discovery \citep{deleu2022bayesian, deleu2023jsp, nishikawa2022bayesian} and amortized inference in graphical models \citep{falet2024deltaai} are also promising directions. Methodologically, the concept of using amortized prioritized experience replay (PER) as a \teacher can be extended to train general agent-based systems, not only amortized samplers.
+
+\paragraph{Limitations.} The primary limitation of the adaptive \teacher is the added complexity in training, as the \teacher's policy network must be trained in addition to the \student's. This introduces a trade-off between increased training complexity and enhanced mode-seeking capabilities. While we believe that the ability to discover multiple modes outweighs the additional complexity, it is important to apply this technique judiciously. For tasks where the reward is unimodal or that do not require extensive exploration, using a \teacher may not be necessary. However, in scenarios where the model tends to collapse to specific modes of the multimodal target distribution, employing a \teacher is a beneficial choice.
+
+
+
+
+
+

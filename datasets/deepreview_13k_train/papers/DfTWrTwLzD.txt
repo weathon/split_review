@@ -1,0 +1,291 @@
+\title{Two Are Better than One: Context Window Extension with Multi-Grained Self-Injection}
+
+\begin{abstract}
+The limited context window of contemporary large language models (LLMs) remains a huge barrier to their broader application across various domains. 
+While continual pre-training on long-context data is a straightforward and effective solution, it incurs substantial costs in terms of data acquisition and computational resources.
+To alleviate this issue, we propose~\modelname, a novel approach grounded in the design philosophy of multi-grained context compression and query-aware information retrieval. 
+\modelname~is composed of two short-context LLMs such as LLaMA-2, termed upper model and lower model.  
+The lower model functions as a compressor while the upper model acts as a decoder. 
+The upper model receives compressed, multi-grained context information from the lower model and performs context-aware modeling on the running text.
+Information transfer between the compressor and decoder occurs only at the lowest layers to refrain from long forward paths in the lower model and redundant cross-attention modules in the upper model.
+Based on this architecture, we introduce a specialized tree-style data structure to efficiently encode, store and retrieve multi-grained contextual information for text chunks. This structure, combined with a search algorithm, enables rapid encoding and retrieval of relevant information from various levels of the tree based on the input query. 
+This entire process, wherein the sender and receiver are derived from the same LLM layer, is referred to as~\textit{self-injection}.
+In our evaluation on long-context modeling and understanding tasks, \modelname~achieves superior or comparable results to several strong baselines, striking an effective balance between efficiency and performance.
+Meanwhile, with the aforementioned design choices,~\modelname~can greatly reduce memory consumption, and demonstrates substantial speed-ups over other advanced baselines ($2\times$ over streaming, $3\times$ over encoder-decoder architectures).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Since the release of GPT-3~\citep{brown2020language}, the rapid advancement of large language models (LLMs)~\citep{chowdhery2022palm,achiam2023gpt,touvron2023llama,touvron2023llama2,dubey2024llama} has revolutionized the NLP research community and transformed various workflows. Pretrained on trillions of tokens, LLMs exhibit remarkable abilities, such as completing unfinished text or code and following human instructions to perform designated tasks after minimal supervised fine-tuning~\citep{weifinetuned,chung2024scaling}.
+
+Despite their impressive capabilities, several factors limit their broader application. One major constraint is the \textit{context window} size~\citep{hsieh2024ruler}, which refers to the maximum number of tokens an LLM can process smoothly in a single input. 
+The length of context window is typically set during pretraining—for example, LLaMA and LLaMA-2 have context windows of 2,048 and 4,096 tokens, respectively. When input text exceeds this limit, LLMs may exhibit erratic behavior during inference.  Unfortunately, due to GPU memory constraints, high training costs, and the scarcity of long-context training data, LLMs are often pretrained with relatively short context windows. This limitation severely restricts their use in many daily tasks of large context lengths, such as long document summarization and information retrieval, where much longer windows are needed.
+
+
+Many researchers endeavour to extending the context window of LLMs while minimizing the time, memory, and training costs during both training and inference. One approach involves post-pretraining LLMs on long-context corpora using hundreds of  GPUs~\citep{TogetherAI2023,xiong-etal-2024-effective}. Another line of work explores position interpolation~\citep{chen2023extending,peng2023yarn}, which rescales the RoPE (Rotary Position Embedding) frequency and attention scores. 
+While this method is canonical, it still requires long-context continual pretraining. 
+For example, YaRN~\citep{peng2023yarn} extends LLaMA's context length to 128K tokens by continuing pretraining on 64K-token sequences using full attention. The combination of parameter-efficient fine-tuning (PEFT) and sparse attention~\citep{chen2024longlora} accelerates tuning but faces challenges with extrapolation. 
+Other approaches like streaming-style architectures~\citep{xiao2024efficient,zhang2024soaring,yen2024long}, maintain a constant-sized memory that operates as a sliding window. While this design significantly reduces memory usage, its specialized attention pattern causes incompatibility with high-performance attention implementations like FlashAttention~\citep{dao2022flashattention,daoflashattention}, potentially leading to slower inference speeds. Context compression techniques are also widely explored~\citep{zhang2024soaring,yen2024long}. Although they offer high parallelism, improving speed, they tend to consume significant memory, greatly limiting their real applications.
+
+To strike a balance between efficiency and performance, we propose~\modelname~in this paper.~\modelname~features a lightweight hierarchical architecture that consists of one~\textit{upper model}~and one~\textit{lower model}.
+Both models are initialized from the same~\textit{off-the-shelf}~checkpoint of a short-context LLM, either in full or in part. 
+Since there is no disparity in the hidden space between the two submodules,~\modelname~can be trained from scratch without extra stages for hidden-space alignment.
+The lower model compresses past context information into multi-grained representations.
+Through layer-wise connections between the lower and upper model, the compressed information can be passed to the upper model for context-aware language modeling. 
+
+For better organization and utilization of this multi-grained information, we further propose a dedicated data structure, dubbed~\textit{context tree}. 
+The trees operate in parallel, with each tree handling an independent text chunk split from the longer raw input.
+The tree nodes contain token sequences of varying lengths, which are encoded and downsampled by the lower model to obtain a set of meaningful representations. 
+The sequence corresponding to each node is split from its parent, making it a subsequence of all its ancestors.
+Meanwhile, we set the compression ratio proportional to the sequence length.
+As a result, the nodes at higher levels have longer sequence and larger compression ratio, which express more coarse-grained information after encoding, as opposed to nodes at lower levels.
+We further develop an algorithm for dynamic construction and search on the tree given the task-specific query.
+The algorithm accelerates the information gathering process by identifying the most relevant text segments and encoding them as fine-grained representations, while converting less relevant parts into coarse-grained representations in a depth-first manner. 
+In the information injection stage, since the obtained context trees are ordered, we define a rule to assign chunk-level position ids for these encoded keys from the lower model, as well as the queries from the upper model. With these unique chunk-level ids, queries can perceive the relative position of trees to generate high-quality output.
+
+With these design principles,~\modelname~presents extraordinary performance on down-stream tasks with high efficiency.
+Specifically, on language modeling tasks, trained on text of up to 8K tokens, our model demonstrates excellent extrapolation capabilities when tackling sequences up to 128K-token length. 
+On other long-context instruction-following tasks with input lengths ranging from thousands to millions of tokens, \modelname~delivers promising results comparable to several strong baselines. 
+In terms of system indicators, all experiments with a maximum length of over 200K can be conducted on a single A800 80G GPU.~\modelname\ delivers several times the speed of all baselines while maintaining relatively low memory consumption.
+
+
+\section{Related Work}
+
+\paragraph{Long-context Language Models.}
+There are two prevalent routines to build LLMs that are capable of processing extremely long text: directly pretraining on large corpus of targeted context length from scratch~\citep{touvron2023llama,dubey2024llama,jiang2023mistral,glm2024chatglm}~or adapting short context-window LLMs 
+to longer context lengths via combined various techniques~\citep{tworkowski2024focused}.
+The former approach consumes tremendous data and computational resources, while the latter allows for more convenience and flexibility for researchers and developers to explore potential optimization to the default settings~\citep{fu2024data}.
+The core idea behind these adaptations is to~\emph{mimic}~short input scenarios (\textit{i.e.}, length within the model's text window) when the input length exceeds window size. 
+Attention map manipulation is the most common approach for this goal, which can be realized via positional encoding (PE) rescaling, such as ALiBi~\citep{press2021train}, positional interpolation (PI)~\citep{chen2023extending}~and YaRN~\citep{peng2023yarn}, 
+or positional index rearranging~\citep{xiao2024efficient,ding2023longnet,an2024training,he2024two}.
+Both directly or indirectly adjust attention scores to be similar  as the short-input scenarios so that the model can handily deal with.
+Another line of works compress past tokens sequentially into dense representations~\citep{chevalier2023adapting,zhang2024soaring}~as input at the next step or store them in an~\textit{external}~retrievable memory~\citep{wu2022memorizing,xiao2024infllm}~to reduce the input lengths.~\cite{yen2024long}~utilizes small model such as RoBERTa~\citep{liu2019roberta}~for context encoding to boost speed and enable higher parallelism. However, this heterogeneous architecture necessitates meticulous task design for the extra pretraining and warmup stages to stabilize the fine-tuning process.
+In contrast to these works, our method directly tunes~\textit{off-the-shelf}~models to compress context into structural representations for query-aware retrieval. 
+Powered by efficient architecture design and a fast-forwarding mechanism, the whole procedure can be fully paralleled online without excessive memory usage, which greatly cuts down the latency during inference time.
+
+\paragraph{Efficient Methods for Long-context Modeling.}
+In vanilla self-attention, the space and time complexity grows quadratically ($O(L^2)$) with the input sequence length $L$, which can cause out-of-memory (\textit{OOM}) issues on GPU clusters.
+A straightforward solution is to add parameter efficient fine-tuning (PEFT) modules~\citep{chen2024longlora,zhang2024soaring,zhang2024extending}~to shrink the size of gradient tensors during backward propagation. 
+Many works strive to reduce the memory footprint of attention computation to enhance computational efficiency.
+Longformer~\citep{beltagy2020longformer}~introduces a hybrid attention pattern to capture local and global semantic features concurrently. \cite{katharopoulos2020transformers}~designs linearized attention that merely demands~$O(L)$~space to accomplish attention computation. FlashAttention~\citep{dao2022flashattention,daoflashattention}~and PagedAttention~\citep{kwon2023efficient}~maximize the memory efficiency from system's perspective. 
+More recently,~\cite{xiao2024efficient}~discovers the ``attention sink" phenomenon and proposes streaming-llm to address high perplexity issue in generation under window-attention. Our work basically follows the efficient design principle in three aspects: 1) lightweight architecture through lower layer self-injection; 2) compact structural representations via structural information extraction and compression; 3) efficient construction and retrieval algorithm based on the proposed context tree structure.
+
+
+\section{Method}
+
+
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=0.95\linewidth]{./Figures/Model.pdf}
+	\caption{Overview of~\modelname. The architecture resembles general encoder-decoder architecture like T5~\citep{raffel2020exploring}, but the interaction occurs at the first $M$ layers between lower and upper model through shared key-values which are encoded and compressed from the text chunk into a sequence of trees (top-left).}
+	\label{fig:model-arch}
+\end{figure*}
+
+In this section,  we first introduce the overall architecture of our proposed \modelname~in~Sec.~\ref{overview}, and then elaborate on its  two main components, lower model and upper model in Sec.~\ref{lowermodel} and~\ref{uppermodel}. % Finally, in Sec.~\ref{trainingsec}, we present the training loss of our~\modelname.
+\subsection{Overview}\label{overview}
+As illustrated in Figure~\ref{fig:model-arch}, \modelname~adopts a hierarchical architecture, akin but not identical to classical encoder-decoder models. The \textit{lower model}, or the ``compressor",  breaks down the long input context $X_{C}$ into smaller chunks that can be processed within limited GPU memory. It then uses the same LLM model to compress each context chunk into compact and  structured representations in parallel. The \textit{upper model}, or the ``decoder", takes the rear part of the input text (the running context, such as questions) as input, then integrates the compressed information from the lower model, and finally predicts future tokens in an auto-regressive manner.
+
+The lower and upper models are connected via shared key-value (KV) states and cross-attention modules between corresponding layers. To enable efficient and effective information retrieval and integration, the context information processed by the lower model is organized into a binary tree, referred to as the~\textit{context tree}, which stores multi-grained information at different levels. 
+This structure allows the upper model to leverage its processed running text to efficiently retrieve relevant information from the binary tree based on a depth-first search algorithm. The retrieved information is then integrated with the input through cross-attention, enabling the model to answer questions or perform language modeling. 
+
+\begin{wrapfigure}{r}{0.42\textwidth}
+	\centering
+	\includegraphics[width=0.9\linewidth]{./Figures/Tree.pdf}
+	\caption{An running example of our tree (depth=3). The digits mark the step indices in the split-and-search procedure. 
+	}
+	\label{fig:tree-topo}
+\end{wrapfigure}
+
+In the following, we elaborate on the lower and upper model.  To begin with, we first define some notations to enhance clarity and readability. Let $X=\{x_1, x_2, ..., x_T\}$ represent the entire input sequence, where $T$ denotes the sequence length. 
+In comply with previous setting~\citep{yen2024long}, we split these tokens into two continuous parts: $X=\texttt{concat}([X_{C}; X_{D}])$, where the past context $X_{C}$ and the running text $X_{D}$ serve as inputs to the lower and upper models, respectively. 
+Moreover, the past context $X_{C}$ is further divided into $n$ smaller and non-overlapping chunks denoted by ${C_1, C_2, ..., C_n}$, namely, where $C_1 \cup C_2 \cup ... \cup C_n = X_C$ and $C_i \cap C_j = \emptyset, \forall i \neq j$. The chunk size is controlled to fit within the lower model's context window—e.g., 4,096 tokens for LLaMA-2-7B~\citep{touvron2023llama2}—allowing the lower model to fully utilize its encoding capacity.
+
+\subsection{Lower Model}\label{lowermodel}
+\label{sec:lower_model}
+The lower model is a small pretrained LLM, implemented as the first $M$ shallow layers of LLaMA-2. 
+It independently encodes and compresses each past context chunk $C_i$ from the set of chunks $\{C_i\}_{i=1}^n$, and constructs a context tree that stores multi-grained information across various levels. 
+The encoding for all chunks $\{C_i\}_{i=1}^n$ is fully paralleled to boost the speed. 
+Below, we detail the context tree structure and its efficiency-enhanced query-dependent dynamic construction, and the tree search process.
+
+\paragraph{Context Tree.}
+The motivation to build the context tree is intuitive and problem-driven. Given a text chunk $C_i$ and a task-specific query, the task-related information is often distributed unevenly across the chunk of text. 
+For instance, to summarize a given passage, one should pay more attention to the topic sentences, collect messages from them and rephrase to produce the answer, rather than focuses much on narrative details. Whereas in the task of passkey finding, detailed relations are more important than theme paragraphs.
+To this end, we aim for the contextual representations to capture fine-grained details for the relevant portions of the text, while encoding only coarse-grained information for the less relevant parts. 
+The tree structure is the best fit to simulate this process: the spltting of nodes resembles splitting larger text chunks into smaller ones, from which we can get more fine-grained information.
+
+In the context tree, its root node contains the entire chunk $C_i=\{x_s, ..., x_t\}$  where $x_p\ (s\leq p\leq t)$ denotes a token, $s$ and $t$ are the start and end index of that chunk; and each other node consists of a sub-sequence of the chunk $C_i$. Then we introduce how to build the child nodes from a parent node. Specifically, for any non-leaf node that contains $l$ tokens $\{x_{u+1},...,x_{u+l}\}$,
+at training phase, we split it into two sub-sequences for constructing its left child and right child  as: 
+\begin{equation}
+	\label{eq:rand_split}
+	C_\texttt{parent}=\{ x_{u+k}\}_{k=1}^{l}, \quad C_\texttt{left}=\{ x_{u+k}\}_{k=1}^{b}, \quad C_\texttt{right}=\{ x_{u+k}\}_{k=b+1}^{l}.
+\end{equation}
+Here we adopt a random splitting by setting $b = \lfloor \frac{l}{2} - \epsilon \rfloor$ and  $ \epsilon\sim\mathcal{N}(0, \sigma^2)$ where $\sigma$ is a predefined hyperparameter, since random lengths can slightly improve the performance as concluded in~\cite{zhang2024soaring}.  
+At test time, the noise  $\epsilon$ is fixed to zero. One can continue this process until arriving at the limited tree depth. Next, building upon this static tree, we construct a more efficient query-dependent dynamic tree.  
+\paragraph{Query-Dependent Dynamic Tree Construction and Search.}  A task-specific query is typically highly relevant to certain tree nodes while being less relevant to others. For highly relevant nodes, further expansion is necessary to extract fine-grained information. However, for less relevant nodes, expansion is unnecessary. Thus, instead of constructing an entire static context tree as aforementioned, we build a query-dependent dynamic tree that expands only the relevant nodes, as shown in Figure~\ref{fig:tree-topo}, significantly saving both GPU memory and time.
+Starting from the root node, we perform a depth-first splitting and search process. Each node sequence is first split into two subsequences according to Eq.~(\ref{eq:rand_split}). We then use a non-parametric policy $\pi$ to decide the next selected node based on the two subsequences, $\vx_{\texttt{left}}$ and $\vx_{\texttt{right}}$, and a query sequence $\vy$:
+\[
+\pi((\vx_{\texttt{left}},\vx_{\texttt{right}}),\vy) \to \texttt{left}\ \text{or}\ \texttt{right},
+\]
+Here the policy $\pi$ determines whether the left or right child of the node will be selected. The unselected sibling node is marked as ``preserved" and will not be expanded further. Note, the root node is always selected to ensure expansion. For policy $\pi$, it  is task-specific.  Specifically, regarding language modeling task, since there are no explicit queries (i.e., $\vy=\emptyset$), we simply set $\pi$ to be deterministic:
+\[
+\pi((\vx_{\texttt{left}},\vx_{\texttt{right}}),\vy) \equiv \texttt{right}.
+\]
+
+For instruction-following tasks, such as question-answering, where queries like questions are available, $\pi$ selects the node with higher similarity to the query in the hidden space:
+\[
+\pi((\vx_{\texttt{left}},\vx_{\texttt{right}}),\vy) = \argmax_{\phi\in\{\texttt{left},\texttt{right}\}}(\mathbf{sim}(\vh_{\vx_\phi},\vh_{\vy})),
+\]
+where $\mathbf{sim}(\cdot,\cdot)$ represents the cosine similarity between two vectors. The hidden vector $\vh$ at the last position of a sequence is embedded by either the lower or upper model. Specifically, this involves a short forward pass through one self-attention layer in  the lower model for $\vh_{\vx_\phi}$ and the upper model for $\vh_\vy$. Once the selected node is determined, the process continues with that node, repeating the procedure until reaching leaf nodes. At this point, both the left and right child are marked as ``preserved".
+
+
+
+For each preserved node, we feed its associated context into the lower model to obtain a collection of key-value (KV) states from all $M$ layers, denoted as $\mathbf{S} = \{\mathbf{K}, \mathbf{V}\}$, where $\mathbf{K}, \mathbf{V} \in \mathbb{R}^{M \times l \times d}$ represent the key and value states for all $M$ layers. Here, $l$ is the sequence length, and $d$ is the hidden dimension.  Next, we perform a uniform downsampling along the length dimension to retain only a portion of the KV states, resulting in $\mathbf{S}' = \{\mathbf{K}', \mathbf{V}'\}$, where $\mathbf{K}', \mathbf{V}' \in \mathbb{R}^{M \times l' \times d}$ and $l'$ is the downsampled length. The compression ratio $\alpha$ for the node is defined as $\alpha=l/l'$.  For the context tree, we apply a constant compression ratio $\alpha_w$ for all preserved nodes at level $w$, but the ratio diminishes progressively from top to bottom, i.e., $\alpha_w > \alpha_{w+1}$. In our implementation, we set $\alpha_w = 2\alpha_{w+1}$.
+This approach creates \textit{coarse-to-fine} distribution of semantic information from top to down: nodes at higher levels possess longer subsequences and are compressed with a higher compression ratio, corresponding to more coarse-grained information, while on the contrary, nodes closer to the bottom stores fine-grained information.
+
+The overall compression ratio $\beta$ of a tree is defined as the ratio of the chunk length $|C|$ to the total length of the compressed KV states:
+
+\[
+\beta = \frac{\sum l_w n_w}{\sum l'_w n_w} = \frac{|C|}{\sum l'_w n_w}
+\]
+
+where $n_w$ is the number of preserved nodes at level $w$, and $l'_w$ is the compressed length of each preserved node at level $w$. 
+For the convenience of parallel processing, we set $\beta$ same for all $n$ context trees.
+Experimental results in Section~\ref{sec:exp} demonstrate that this compression ratio can reach as high as 8, significantly improving efficiency.
+
+
+
+
+\subsection{Upper Model}\label{uppermodel}
+The upper model mainly inherits from the LLaMA architecture, which consists of $N$ (32 for LLaMA-2-7B) self-attention layers with slight modifications.  
+As illustrated  in Figure~\ref{fig:model-arch},  for each one of the $M$ shallow layers, we add a cross-attention module on the top of the vanilla self-attention layer for information fusion. 
+
+\paragraph{Position-aware Cross-attention on the Context Tree.}  
+In Section~\ref{lowermodel}, we can obtain a sequence of tree-structural representations  $\mathcal{S'}=\{\mathbf{S}'_1,...,\mathbf{S}'_n\}$ for $n$ chunks $\{C_i\}_{i=1}^n$, where $\mathbf{S}_i'=\{\mathbf{K}_i',\mathbf{V}_i'\}$ stands for the representations of chunk $C_i$. 
+Since the sequence of chunk keys $\mathcal{K}=\{\mathbf{K}_1';...,\mathbf{K}_n'\}$ is produced from ordered chunks $\{C_1,...,C_n\}$, their positional information should be aware at chunk level by the query. 
+We assign the following chunk-level positional indices to $\mathbf{Q}$ and $\mathcal{K}$:
+\begin{equation}
+	\mathbf{P}_\mathbf{Q} = \{\underbrace{n,n,...,n}_{|X_D|}\},\quad 
+	\mathbf{P}_\mathcal{K}=\{\underbrace{0,0,...,0}_{|C_1|/\beta},\underbrace{1,1,...,1}_{|C_2|/\beta},\underbrace{n-1,n-1,...,n-1}_{|C_n|/\beta}\}  .
+\end{equation}
+Here we view the upper model's query $\mathbf{Q}$ as one chunk and endow with the largest positional index, because $\mathbf{Q}$ is encoded from $X_D$ which is behind all context chunks $X_C$ in the raw input sequence $X$. 
+We will show in Section~\ref{sec:abl_study}~that this setting also facilitates chunk-level extrapolation and answer text production in downstream tasks.
+
+We then conduct cross attention between the query $\mathbf{Q}$ and concatenated KVs to integrate their carried context information into running context for more coherent language modeling:
+\begin{equation}
+	O=\mathrm{cross\_attn}(\mathbf{Q},\texttt{concat}([\mathbf{K}'_1;...;\mathbf{K}'_n]),\texttt{concat}([\mathbf{V}'_1;...;\mathbf{V}'_n])).
+\end{equation}
+\paragraph{Training}\label{trainingsec} 
+We use the standard language modeling loss during training, which maximizes the log probability of the ground-truth tokens in the target sequences $X_{\mathrm{tar}}$, conditioned on the context $X_C$ and all preceding tokens $x_{<t}$ from $X_D$:
+
+\[
+\mathcal{L} = -\sum_{x_t \in X_{\mathrm{tar}}} \log P(x_{t} | X_C; x_{<t}).
+\]
+
+For language modeling data, $X_{\mathrm{tar}} = X_D$, i.e., the target tokens are all tokens in $X_D$, excluding the first token. For instruction-following data, $X_D$ includes both the instruction $X_{\textrm{inst}}$ and the annotated response $X_{\mathrm{res}}$. In this case, we set $X_{\mathrm{tar}} = X_{\mathrm{res}}$, meaning that we optimize only for the response tokens, while the instruction text is masked during loss calculation.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+\subsection{Setup}
+\paragraph{Initialization} We initialize the upper model with LLaMA-2-7B in language modeling and LLaMA-2-Chat-7B in supervised fine-tuning (SFT), in consistent with previous works~\citep{chen2024longlora,yen2024long,zhang2024soaring}. The lower model is initialized with the weights of bottom $M$ layers from the same checkpoint as the upper model, where we set $M=4$ in language modeling and $M=16$ in SFT. 
+\paragraph{Dataset} For language modeling, we follow~\cite{yen2024long}~to prepare the training data by sampling a subset of 20B (1\%) tokens from RedPajama's all 7 domains~\citep{together2023redpajama}. 
+Due to the copyright issue, the books3 subset in Books domain (books3 + PG19) is unavailable and thus excluded from our training set, yet we do not renormalize sampling probability across domains. 
+As a result, the proportion of PG19 increases in the final dataset compared with the default setting in~\cite{touvron2023llama2}.
+The sampled texts are truncated to 8,192 tokens for training. 
+In SFT, we follow~\cite{zhang2024soaring} to use the same mixed dataset composed of downsampled RedPajama and LongAlpaca~\citep{chen2024longlora}, where the input length is filtered to range between 1200 to 8192 tokens, following~\cite{zhang2024soaring}.
+
+\paragraph{Training} We train~\modelname~on an 8$\times$ A800 GPU machine. The batch size is set to 1 per GPU with gradient accumulation of 16 steps (global batch size is 128) for language modeling and 1 step (global batch size is 8) for SFT. 
+Zero Redundancy Optimizer (ZeRO) stage 3 from DeepSpeed without offload is enabled in both training to distribute the memory allocation among GPUs. 
+The cross-attention layers remain fully tunable, while we opt to train upper model's top $N-M$ self-attention layers in language modeling as post-injection aggregation for faster convergence.
+No parameter efficient fine-tuning (PEFT) techniques, such as LoRA, are applied during both training, as PEFT seriously slows down model's  convergence~\citep{chen2024longlora}, which actually requires longer tuning time than partial parameter fine-tuning to reach the optimum.
+We adopt AdamW optimizer with the starting learning rate $1e^{-5}$ and cosine scheduler during training.  
+The chunk size is set to 1,024 for langauge modeling or 512 in SFT, with tree height $h=3$ and compression ratio $\beta=8$.
+\paragraph{Baselines} We compare our model with many strong baselines. Specifically, in language modeling tasks, we compare~\modelname~with StreamingLLM~\citep{xiao2024efficient}, AutoCompressor~\citep{chevalier2023adapting}, LongAlpaca~\citep{chen2024longlora}, LongLlama~\citep{focused-transformer}~and LongChat~\citep{Li2024EvaluatingQL}, Activation Beacon~\citep{zhang2024soaring}~and CEPE~\citep{yen2024long}. In understanding tasks, we additionally include LM-Infinite~\citep{Han2023LMInfiniteSO} and InfLLM~\citep{xiao2024infllm} as baselines
+
+\input{./Tab_and_Fig/res_ppl_ab}
+\input{./Tab_and_Fig/res_ppl_rp}
+
+\subsection{Main Results}
+\paragraph{Language Modeling.} We first evaluate our models on the language modeling task with sequence lengths ranging from 4K to 128K using a single A800 80GB GPU.
+The evaluation covers four datasets: ArXiv, PG19~\citep{rae2020compressive}, ProofPile~\citep{azerbayev2024llemma}, and CodeParrot~\cite{tunstall2022natural} under two settings that utilize different training datasets. Under each setting we test on three out of the four datasets, respectively. 
+The results are posted on Table~\ref{tab:res_lm2}~and~\ref{tab:res_lm1}. 
+All perplexity values in these tables are averaged over 100 examples except for the 128K length, on which we test only 10 examples due to the data scarcity~\citep{yen2024long,zhang2024soaring}.
+For the experiments on encoder-decoder and hierarchical models at 4K length, the input is divided by half (2K/2K) and fed separately into their two submodules. 
+The results show that our model owns strong extrapolation capability---it avoids perplexity explosion even tested on 128K-token length although it only has seen up to 8K-token sequences during training.
+In Table~\ref{tab:res_lm2}, \modelname~outperforms other baselines trained on mixed dataset 3-10\%. 
+In Table~\ref{tab:res_lm1}, for models trained on RedPajama, the perplexity without books3 (bottom) gets a bit worse than those including books3 in the training set, showing the major contribution to language modeling by books3, consistency with the discovery claimed in~\cite{yen2024long}. 
+Notably,~\modelname~outperforms CEPE in nearly all cases except 128K context length on ProofPile, showcasing the effectiveness of structural self-injection mechanism.
+Between the two settings, the improvement over Activation-Beacon is more pronounced than over CEPE, because CEPE experiences an additional pretraining stage to adapt the RoBERTa encoder to the RedPajama corpus and a warmup stage to align the hidden space between encoder and decoder. 
+In contrast,~\modelname~can directly be finetuned from publicly available \textit{off-the-shelf} checkpoints, which saves a great amount of training efforts. 
+
+
+
+\paragraph{Long-context Understanding Benchmarks.}
+We continue to test the supervised fine-tuned verion of~\modelname~on many downstream tasks from~InfiniBench~\citep{zhang-etal-2024-bench}~and~LongBench~\citep{bai2023longbench}. 
+Both benchmarks consist of a variety of long-context tasks established from raw and synthetic datasets. 
+
+\input{./Tab_and_Fig/res_infb}
+On InfiniBench, we are interested in the following two tasks: \textbf{Math.Find} asks a model to retrieve a special value specified in the prompt (e.g., minimum, maximum, medium, etc.), which examines both the precise retrieval and query understanding abilities of the model. 
+\textbf{En.MC} instructs a model to collect key information from a extremely long passage and choose the correct answer from many candidate options. 
+We compare~\modelname~with advanced baselines capable of extremely long inputs, as shown in Table~\ref{res:infbench}.~\modelname~surpasses these strong baselines on both tasks (2.44 points or 21.9\% on Math.Find, 1.34 points or 4.1\% on En.MC over state-of-the-arts), showing excellent capabilities in tackling extremely long input.
+For LongBench, We report the categorical scores on all 14 English tasks in 5 categories, including single-document QA (SD-QA), multi-document QA (MD-QA), summarization (Summ.), few-shot learning (FS) and code-completion (Code), as shown in Table~\ref{res:longbench}. 
+\modelname~outperforms or matches other advanced instruction-tuned long-context baselines across all five categories.
+Particularly, we notice that  MD-QA.
+We note that truncation from the middle could reduce the difficulty of some tasks and improve the performance~\citep{zhang2024soaring}, especially on decoder-only models, as relevant information for many tasks is located at the beginning or end of the entire text rather than the middle part. 
+\input{./Tab_and_Fig/res_lb}
+
+
+\subsection{Time and Memory Efficiency}
+\label{sec:efficiency}
+Apart from strong performance on downstream tasks,  \modelname~demonstrates high computational efficiency in terms of both speed and GPU memory utilization.
+We compare these metrics produced by~\modelname~against other representative models from the model classes of streaming~\citep{zhang2024soaring}, encoder-decoder~\citep{yen2024long} and vanilla~\cite{peng2023yarn}~architectures that have shown competitive performance in prior evaluations. 
+The results are visualized in Figure~\ref{fig:mem_speed}.
+YaRN~\citep{peng2023yarn}, which exploits the same fully attention as vanilla auto-regressive LLaMA, has $O(L^2)$ time and space complexity. The squared complexity makes it the only model that triggers out-of-memory exception at 128K length.
+Activation Beacon~\citep{zhang2024soaring}, which adopts the streaming processing paradigm, maintains a minimum constant memory $O(l)$ under different input lengths $L$, where $l$ is the sliding window length. 
+However, Activation Beacon is incompatible with FlashAttention~\citep{daoflashattention}~also due to its specialized attention paradigm, which causes a sharp increment in inference time as input size grows.
+CEPE can process past context chunks in parallel, but these chunks must be passed through all its encoder layers (24-layer RoBERTa in CEPE) and layer-wise linear projections to obtain the final hidden states for cross-attention, leading to even slower inference speed than non-parallel Activation Beacon. 
+In contrast, \modelname~avoids such redundancy through shallow-layer compression and injection, which exhibits significant speed-up and limited memory consumption.
+
+\input{./Tab_and_Fig/mem_and_time}
+
+\subsection{Ablation Studies}
+\label{sec:abl_study}
+We consider the following ablative settings to verify the rationale of the design considerations in~\modelname: 1) tree depth; 2) compression ratio; 3) the collection of context information injection layers; 4) other configurations, including the effect from retrieval policy $\pi$ (only for instruction-following task), the noise in node splitting, and the addition of chunk-level positional  indices during cross-attention.
+
+The results are displayed in Table~\ref{tab:abl_study}, from which we find that both tree depth and compression ratio should be set appropriately to achieve near-optimal performance. 
+For example,~\modelname~performs best when the tree height is 3. 
+If the height is too small, i.e., the tree is \textit{undersplit} and the chunk size is excessively large so that only coarse-grained context information is retained while task-related fine-grained information is not explicit, or too large, i.e., the tree is \textit{oversplit} and the leaves carry fragmented information which can hardly provide valuable clues for task solving, performance degrades accordingly.
+A similar trend can be viewed on global compression ratio $\beta$. While abandoning downsampling KV  ($\beta=1$) may bring decline in perplexity, its query-aware information retrieval ability deteriorates.
+In terms of injection layer selection, our implementation, which is refer to as~\emph{continuous bottom}, injects the context information in the bottom $M$ layers. 
+In contrary, \emph{Continuous top}~injects context information at the topmost $M$ layers (from layer $N-M+1$ to layer $N$). 
+Interleaving applies cross-attention at regular intervals, such as layer 4, 8, 12, 16... 
+Among these configurations,~\modelname~wins over \textit{continuous top} and \textit{interleaving} on both tasks, indicating the correctness of injection layer selection in~\modelname.
+
+For other settings, as shown in the bottom rows, removing either of them causes performance drop compared to the default setting, which reveals the contributions of the three design considerations to model's performance. Among these items, the query-aware information retrieval is the core component for the context-tree so that the performance on MD-QA drops mostly after removing it from the network. The sequential order is similarly important and should be perceived during cross-attention to organize the answer accordingly. 
+
+\input{./Tab_and_Fig/abl_study_full}
+
+
+\section{Conclusion}
+
+In this work, we present~\modelname, which leverages a self-injection mechanism to adapt a pair of short-context LLMs for efficient long-context modeling. 
+By integrating the operations of context compression and key information retrieval into a dedicated binary-tree structure,
+\modelname~excels in language modeling and various downstream instruction-following tasks, while maintaining excellent memory and time efficiency.
+Besides, \modelname~is directly trained from off-the-shelf LLMs, eliminating the need for additional feature alignment steps and making implementation easier.
+We hope this learning paradigm can be generalized to other short-context LLMs, offering a scalable approach for a context-window extension to an arbitrary length.
+
+
+\noindent\textbf{Limitations.}  
+While \modelname\ demonstrates superior performance on both language modeling and long-context benchmarks, as well as high efficiency in terms of time and memory, there are still some limitations. First, although this work strikes a relatively good balance between efficiency and performance at the model architecture level, further improvements could be achieved by optimizing at the system and hardware levels. Second, while a simple and effective retrieval mechanism is implemented in this work, more advanced retrieval techniques, such as BM25~\citep{robertson2009probabilistic}~and Graph-RAG~\citep{edge2024local}, were not explored and may further enhance performance. We aim to pursue these improvements in future research.
+
+
+
+
+
+
+

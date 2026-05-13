@@ -1,0 +1,469 @@
+\title{Certified Robustness to Data Poisoning in Gradient-Based Training}
+
+\begin{abstract}
+    Modern machine learning pipelines leverage large amounts of public data, making it infeasible to guarantee data quality and leaving models open to poisoning and backdoor attacks. Provably bounding model behavior under such attacks remains an open problem. In this work, we address this challenge by developing the first framework providing provable guarantees on the behavior of models trained with potentially manipulated data without modifying the model or learning algorithm. In particular, our framework certifies robustness against untargeted and targeted poisoning, as well as backdoor attacks, for bounded and unbounded manipulations of the training inputs and labels.
+    Our method leverages convex relaxations to over-approximate the set of all possible parameter updates for a given poisoning threat model, allowing us to bound the set of all reachable parameters for any gradient-based learning algorithm. 
+    Given this set of parameters, we provide bounds on worst-case behavior, including model performance and backdoor success rate. We demonstrate our approach on multiple real-world datasets from applications including energy consumption, medical imaging, and autonomous driving.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+To achieve state-of-the-art performance, modern machine learning pipelines involve pre-training on massive, uncurated datasets; subsequently, models are fine-tuned with task-specific data to maximize downstream performance \citep{han2021pre}. 
+Unfortunately, the datasets used in both steps are potentially untrustworthy and of such scale that rigorous quality checks become impractical. 
+
+\textbf{Data Poisoning.}
+Yet, adversarial manipulation, i.e., \textit{poisoning attacks}, affecting even a small proportion of data used for either pre-training or fine-tuning can lead to catastrophic model failures  \citep{carlini2023poisoning}. 
+For instance, \citet{yang2017fake} show how popular recommender systems on sites such as YouTube, Ebay, and Yelp can be easily manipulated by poisoning. Likewise, \citet{zhu2019transferable} show that poisoning even 1\% of training data can lead models to misclassify targeted examples, and  \citet{han2022physical} use poisoning to selectively trigger backdoor vulnerabilities in lane detection systems to force critical errors.
+
+\textbf{Poisoning Defenses.}
+Despite the gravity of the failure modes induced by poisoning attacks, counter-measures are generally attack-specific and only defend against known attack methods \citep{tian2022comprehensive}. The result of attack-specific defenses is an effective ``arms race'' between attackers trying to circumvent the latest defenses and counter-measures being developed for the new attacks. In effect, even best practices, i.e., using the latest defenses, provide no guarantees of protection against poisoning attacks. To date, relatively few approaches have sought provable guarantees against poisoning attacks. 
+These methods are often limited in scope, e.g., applying only to linear models \citep{rosenfeld2020certified,steinhardt2017certified} or only providing approximate guarantees for a limited set of poisoning settings~\citep{rosenfeld2020certified, xie2022uncovering}. Other approaches partition datasets into hundreds or thousands of disjoint shards and then aggregate predictions such that the effects of poisoning is provably limited \citep{levine2020deep, wang2022improved}. In contrast, our goal in this work is not to produce a robust learning algorithm, but to efficiently analyze the sensitivity of (un-modified) algorithms. 
+  
+
+\textbf{This Work: General Certificates of Poisoning Robustness.}
+We present an approach for computing sound and general certificates of robustness to poisoning attacks for any model trained with first-order optimization methods, e.g., stochastic gradient descent or Adam \citep{kingma2014adam}. The proposed strategy begins by treating various poisoning attacks as constraints over an adversary's perturbation `budget' in input and label spaces. Following the comprehensive taxonomy by \cite{tian2022comprehensive}, we view the objective of each poisoning attack as an optimization problem. We consider three objectives: (i) untargeted attacks: reducing model test performance to cause denial-of-service, (ii) targeted attacks: compromising model performance on certain types of inputs, and (iii) backdoor attacks: leaving the model performance stable, but introducing a trigger pattern that causes errors at deployment time. Our approach then leverages convex relaxations of both the training problem and the constraint sets defining the threat model to compute \textit{a sound (but incomplete) certificate that bounds the impact of the poisoning attack.}
+
+\textbf{Paper Outline.}
+The paper is organized as follows. We then present \textit{abstract gradient training} (AGT), our technique for over-approximating the effect of a given poisoning attack and discuss implementation details, including a novel, explicit formulation of CROWN-like bounds \citep{zhangEfficientNeuralNetwork2018} on the weight gradients. We conclude with extensive ablation experiments on datasets from household energy consumption, medical image classification, and autonomous vehicle driving. 
+
+In summary, this paper makes the following key contributions:
+\begin{itemize}[leftmargin=*]
+    \item A framework, including a novel bound propagation strategy, for computing sound bounds on the influence of a poisoning adversary on any model trained with gradient-based methods.
+    \item Based on the above, a series of formal proofs that allow us to bound the effect of poisoning attacks that seek to corrupt the system with targeted, untargeted, or backdoor attacks.
+    \item An extensive empirical evaluation demonstrating the effectiveness of our approach.
+\end{itemize}
+
+
+\section{Preliminaries: Poisoning Attacks}
+
+
+We denote a machine learning model as a parametric function $f$ with parameters $\theta$, feature space $x \in \mathbb{R}^{n_\text{in}}$, and label space $y \in \mathcal{Y}$.
+The label space $\mathcal{Y}$ may be discrete (e.g. classification) or continuous (e.g. regression).
+We operate in the supervised learning setting with a dataset $\mathcal{D} = \{ (x^{(i)}, y^{(i)}) \}_{i=1}^{N}$ where we index the dataset such that $\mathcal{D}_{x}^{(i)}$ is the $i^{th}$ feature vector and $\mathcal{D}_{y}^{(i)}$ is the $i^{th}$ label.
+We denote the parameter initialization $\theta'$ and a training algorithm $M$ as $\theta = M(f, \theta', \mathcal{D})$, i.e., given a model, initialization, and data, the training function $M$ returns a ``trained'' parameterization $\theta$.
+Finally, we assume the loss function is computed element-wise from the dataset, denoted as $\mathcal{L}(f(x^{(i)}),y^{(i)})$.
+
+Given this abstraction of model training, we now turn to developing an abstraction of the data poisoning attacks, defining their capabilities to adversarially manipulate the training input.
+To complete the threat model, we formulate adversary goals, i.e., what the adversaries seek to accomplish with their manipulation as optimization problems. 
+Typical threat models additionally specify the adversary's system knowledge; however, as we aim to upper bound a worst-case adversary, we assume unrestricted access to all training information including model architecture and initialization, data, data ordering, hyper-parameters, etc. 
+
+\subsection{Poisoning Attack Capabilities}\label{sec:poisoning_attack}
+
+This section defines the capabilities of the poisoning attack adversaries that we seek to certify against.
+We consider two distinct threat models: (1) $\ell_p$-norm bounded adversaries, which are commonly assumed in backdoor attack models \citep{saha2020hidden, weber2023rab}; (2) unbounded adversaries, which are more general and have the capability to inject arbitrary data into the training set.
+In both cases, we consider adversaries able to modify both features and labels simultaneously.
+
+\textbf{Bounded Attacks.} Under a bounded attack setting, we allow an adversary to perturb a subset of the training data in both the feature and label space, where the magnitude of the perturbation is bounded in a given norm. 
+In feature space, we allow for an adversary to modify at most $n$ datapoints by a distance of up to $\epsilon$ in the $\ell_p$-norm.
+Similarly, we define the label-space poisoning capability as modifying at most $m$ labels by magnitude at most $\nu$ in an $\ell_q$-norm.
+Note that label-space poisoning encompasses both classification and (multivariate) regression settings.
+Common label-flipping attacks can be considered under this attack model by setting $q=0$.
+Formally, given a dataset $\mathcal{D}$ and an adversary $\langle n, \epsilon, p, m, \nu, q\rangle$, the set of potentially poisoned datasets is defined as
+\begin{equation}
+    \mathcal{T}^{n, \epsilon, p}_{m, \nu, q}(\mathcal{D}) := 
+    \left\{ \widetilde{\mathcal{D}}\ \middle \vert 
+        \begin{array}{l}
+            \|\mathcal{D}^{(i)}_x - \widetilde{\mathcal{D}}^{(i)}_x \|_p \leq \epsilon\  \forall i \in I, \quad \mathcal{D}^{(i')}_x = \widetilde{\mathcal{D}}^{(i')}_x \  \forall i' \notin I, \quad \forall I \in \mathcal{S}_n  \\
+            \|\mathcal{D}^{(j)}_y - \widetilde{\mathcal{D}}^{(j)}_y \|_q \leq \nu \ \forall j \in J, \quad \mathcal{D}^{(j')}_y = \widetilde{\mathcal{D}}^{(j')}_y \ \forall
+            j' \notin J, \quad \forall J \in \mathcal{S}_m
+        \end{array}
+    \right\}
+\end{equation}
+where $\mathcal{S}_n$ is the set of all subsets of integers less than $N$ with cardinality at most $n$.
+The index sets $I$ and $J$ refer to the data-points that have been poisoned in the feature and label spaces, respectively.
+Note that in a paired modification setting, adversaries must choose a set of inputs and modify both their features and labels, which corresponds to setting $I=J$ in the above.
+Our more general setting allows for adversaries to modify features and labels of different inputs.
+
+\textbf{Unbounded Attacks.} It may not always be realistic to assume that the effect of a poisoning adversary is bounded.
+A more powerful adversary may be able to inject arbitrary data points into the training data set, for example by exploiting the collection of user data.
+In this unbounded attack setting, we consider only a `paired' modification setting, where an adversary can substitute both the features and labels of any $n$ data-points.
+Specifically, for a dataset $\mathcal{D}$, the set of potentially poisoned datasets is
+\begin{equation}
+    \mathcal{T}^n(\mathcal{D}) := 
+    \left\{ \widetilde{\mathcal{D}} = (\mathcal{D} \setminus \mathcal{D}^r) \cup \mathcal{D}^a \ \mid \ 
+    |\mathcal{D}^a| \leq n, |\mathcal{D}^r| \leq n,  \mathcal{D}^a \subset \mathcal{D}
+    \right\}
+\end{equation}
+where $|\cdot|$ is the cardinality operator, $\mathcal{D}^a$ is a set of arbitrary added data-points, and $\mathcal{D}^r$ is the set of corresponding data-points removed from the original dataset.
+To simplify the exposition below, we interchangeably refer to $\mathcal{T}^n$ as either the poisoning adversary or the set of poisoned datasets.
+We use $\mathcal{T}$ to refer to cases where either the bounded or unbounded adversaries may be applied.
+
+\subsection{Poisoning Attack Goals}
+Here, we cover the different goals poisoning adversaries may pursue and briefly outline what it means to certify that a training algorithm is robust against such an adversary.
+
+\textbf{Untargeted Poisoning.} Untargeted attacks aim to prevent training convergence, leading to an unusable model and denial of service \citep{tian2022comprehensive}.
+Given a test dataset of $k$ examples, the adversary's objective is thus:
+\begin{equation}\label{eq:untargeted}
+    \max_{\mathcal{D}' \in \mathcal{T}} \dfrac{1}{k} \sum_{i=1}^{k} \mathcal{L}\big( f^{M(f, \theta', \mathcal{D}')}(x^{(i)}), y^{(i)} \big)
+\end{equation}
+We can certify robustness to this kind of attack using a sound upper bound on the solution of \eqref{eq:untargeted}. %this optimization problem.
+
+\textbf{Targeted Poisoning.} Targeted poisoning is more task-specific. Rather than simply attempting to increase the loss, the adversary seeks to make model predictions fall outside a `safe' set of outputs $S$ (e.g., the set of predictions matching the ground truth). The safe set can be more specific however, i.e., mistaking a lane marking for a person is safe, but not vice versa.
+The adversary's objective is thus:
+\begin{equation}
+\max_{\mathcal{D}' \in \mathcal{T}} \dfrac{1}{k} \sum_{i=1}^{k} \mathbbm{1}\big( f^{M(f, \theta', \mathcal{D}')}(x^{(i)}) \notin S \big)
+\label{eq:targeted}
+\end{equation}
+As before, a sound upper bound on \eqref{eq:targeted} bounds the success rate of any targeted poisoning attacker.
+Note that with $k=1$ we recover the pointwise certificate setting studied by \citet{rosenfeld2020certified}.
+This setting also covers `unlearnable examples', such as the attacks considered by \cite{huang2021unlearnable}.
+
+\textbf{Backdoor Poisoning.} Backdoor attacks deviate from the above attacks by assuming that test-time data can be altered, via a so-called trigger manipulation.
+However, backdoor attacks typically aim to leave the model performance on `clean' data unchanged.
+By assuming that the trigger manipulation(s) are bounded to a set $V(x)$ (e.g., an $\ell_\infty$ ball around the input), one can formulate the backdoor attack's goal as producing predictions outside a safe set $S$ (defined as before) for manipulated inputs: 
+\begin{equation}\label{eq:backdoor}
+\max_{\mathcal{D}' \in \mathcal{T}} \dfrac{1}{k} \sum_{i=1}^{k} \mathbbm{1}\big( \exists x^\star \in V(x^{(i)})\ s.t.\ f^{M(f, \theta', \mathcal{D}')}(x^\star) \notin S \big)
+\end{equation}
+Any sound upper bound to the above is a sound bound on the success rate of any backdoor attacker.
+
+
+
+\section{Methodology}
+
+
+This section develops a novel approach for certifying robustness to poisoning attacks starting by assuming we have access to the set of all reachable trained models in the form of intervals over model parameters. We first show how these intervals can be used to certify robustness to the above attacks.
+We then formulate a general algorithm for bounding the effect of adversaries on model parameters, producing an interval containing all reachable training parameters.
+We then instantiate it using a novel formulation of CROWN-style bounds which can soundly compute the quantities required within.
+
+\subsection{Parameter-Space Certificates of Poisoning Robustness}
+
+The key concept behind our framework is to bound the parameters obtained via the training function $M(f, \theta', \mathcal{D})$ given $\mathcal{T}(\mathcal{D})$.
+Before detailing the method, we first formalize our definition of parameter-space bounds and how they can be translated into formal, provable guarantees on poisoning robustness.
+\begin{definition}\label{def:bounds} \textbf{(Valid parameter-space bounds)}
+An interval over parameters $[\theta^L, \theta^U]$ such that $\forall i, \ \theta^L_i \leq \theta^U_i$ is a valid parameter-space bound on a poisoning adversary, $\mathcal{T}(\mathcal{D})$, if $\forall i$:
+\begin{equation}\label{eq:validparambounds}
+\theta^L_i \leq \min_{\mathcal{D}' \in \mathcal{T}(\mathcal{D})} M(f, \theta', \mathcal{D}')_i \leq M(f, \theta', \mathcal{D})_i \leq  \max_{\mathcal{D}' \in \mathcal{T}(\mathcal{D})} M(f, \theta', \mathcal{D}')_i \leq \theta^{U}_i
+\end{equation}
+\end{definition}
+Intuitively, Definition~\ref{def:bounds} allows us to measure the poisoning adversary's influence in parameter space. From such bounds, we can then derive guarantees on the poisoning robustness against any of the aforementioned attack vectors. 
+\begin{theorem}\label{thm:paramcerts}
+Given valid parameter bounds $[\theta^L, \theta^U]$ for an adversary $\mathcal{T}(\mathcal{D})$, one can compute a sound upper bound (i.e., certificate) on any poisoning objective by optimization over the parameter space, rather than dataset space:
+    $$\max_{\mathcal{D}' \in \mathcal{T}} J\big( f^{M(f, \theta', \mathcal{D}')}(x) \big) \leq \max_{\theta^\star \in [\theta^L, \theta^U]}  J\big( f^{\theta^\star}(x) \big) $$
+where $J$ is one of the objective functions from \eqref{eq:untargeted}--\eqref{eq:backdoor}. 
+ 
+\end{theorem}
+The advantage of Theorem~\ref{thm:paramcerts} is that each of these upper-bounds can be computed directly using bounds from works studying certification of adversarial robustness of probabilistic models~\citep{adams2023bnn, wicker2020probabilistic, wicker2023adversarial}.
+
+\subsection{Abstract Gradient Training for Valid Parameter Space Bounds}\label{sec:agt}
+
+In this section, we provide an intuition and high-level framework for computing parameter bounds that respect Definition~\ref{def:bounds}. We call this framework \textit{abstract gradient training} (AGT). Our framework is applicable to any training function $M$ based on first-order optimization, e.g., stochastic gradient descent or Adam. To keep our exposition intuitive, we choose to focus on SGD, written as:
+\begin{align}\label{eq:sgd}
+    \theta& \gets \theta - \alpha \dfrac{1}{|\mathcal{B}|} \sum_{(x, y) \in \mathcal{B}} \nabla_{\theta} \mathcal{L}\big(f^{\theta}(x), y \big)
+\end{align}
+where $\mathcal{B} \subseteq \mathcal{D}$ is the sampled batch at the current iteration.
+The function $M(f, \theta', \mathcal{D})$, in the simplest case, iteratively applies the update \eqref{eq:sgd} for a fixed, finite number of iterations starting from $\theta^{(0)} = \theta'$.
+Therefore, to bound the effect of a poisoning attack, we can iteratively apply bounds on update \eqref{eq:sgd}. 
+In Algorithm~\ref{alg:abstractgradtrain}, we present a general framework for computing parameter-space bounds on the output of SGD given a poisoning adversary $\mathcal{T}$.
+In particular, we highlight that Algorithm~\ref{alg:abstractgradtrain} first computes the standard stochastic gradient descent update (lines 4-5), and then computes a bound on the set of all possible descent directions that could be taken at this iteration.
+Note that the gradient clipping operation, highlighted in \textcolor{purple}{purple}, is optional for a bounded adversary, and is only required for the unbounded adversary to limit the maximum contribution of any added data-points.
+This bound on the descent direction is then soundly combined with the existing parameter space bound to obtain an updated reachable parameter interval $[\theta^L, \theta^U]$.
+
+\begin{theorem}\label{thm:correctness}
+    Algorithm~\ref{alg:abstractgradtrain} returns valid parameter-space bounds on a $T_{n, \epsilon, p}^{m, \nu, q}(\mathcal{D})$ poisoning adversary for a  stochastic gradient descent training procedure $M(f,\theta',\mathcal{D})$.  
+\end{theorem}
+
+{\setlength{\algomargin}{1.5em}
+\begin{algorithm}
+\caption{\textsc{Abstract Gradient Training for Poisoning Certification}}
+\label{alg:abstractgradtrain}
+    \small
+    \SetAlgoLined
+    \LinesNumbered
+    \SetInd{0.5em}{0.5em}
+    \DontPrintSemicolon
+    \SetKwInOut{input}{input}
+    \SetKwInput{output}{output}
+    \input{$f$ - ML model, $\theta'$ - param. initialisation, $\mathcal{D}$ - nominal dataset, $E$ - epochs, $\alpha$ - learning rate, $\mathcal{T}$ - allowable dataset perturbations (poisoning adversary), \textcolor{purple}{$\kappa$} - optional clipping parameter.}
+    \output{$\theta$ - nominal SGD parameter, $[\theta^L, \theta^U]$ - reachable parameter interval.}
+    \BlankLine
+    $\theta \gets \theta'$; $[\theta^L, \theta^U] \gets [\theta', \theta']$ \\
+    \For {$E$-many epochs} {
+        \For{each batch $\mathcal{B} \subset \mathcal{D}$} {
+            \tcc{Compute the (optionally clipped) SGD update.}
+            {$\Delta \theta \gets \dfrac{1}{|\mathcal{{B}}|}\mathop{\displaystyle \sum}\limits_{(x, y) \in \mathcal{B}} \textcolor{purple}{\operatorname{Clip}_\kappa}\left[\nabla_\theta \mathcal{L} \left( f^\theta({x}), {y}\right)\right]$}\\
+            $\theta \gets \theta - \alpha \Delta \theta$\\
+            \tcc {{Define the set of descent directions possible under $\mathcal{T}$.}}
+            {
+            {$\Delta \Theta \gets \left\{\dfrac{1}{|\mathcal{\widetilde{B}}|}\mathop{\displaystyle \sum}\limits_{(\tilde{x}, \tilde{y}) \in \mathcal{\widetilde{B}}} \textcolor{purple}{\operatorname{Clip}_\kappa}\left[\nabla_{\theta'} \mathcal{L} \left( f^{\theta'}(\tilde{x}), \tilde{y}\right)\right]\mid 
+            \widetilde{\mathcal{B}} \in \mathcal{T}\left( \mathcal{B}\right), \theta' \in \left[\theta^L, \theta^U\right] \right\}$}
+            }\\
+            \tcc {Bound the set of descent directions possible under $\mathcal{T}$.}
+            Compute $\Delta\theta^L$, $\Delta\theta^U$ s.t. $\Delta\theta^L \preceq \Delta\theta \preceq \Delta\theta^U$ for all $\Delta\theta \in \Delta \Theta$\\
+            \tcc{Update the reachable parameter interval under $\mathcal{T}$.}    
+            {$\left[\theta^L, \theta^U\right] \gets \left[\theta^L - \alpha \Delta \theta^U, \theta^U - \alpha \Delta \theta^L\right]$}
+        }
+    }
+    \KwRet{$\theta, [\theta^L, \theta^U]$}
+\end{algorithm}}
+
+\textbf{Bounding the Descent Direction.}
+The main complexity in Algorithm~\ref{alg:abstractgradtrain} is in bounding the set $\Delta\Theta$, which is the set of all possible descent directions at the given iteration under $\mathcal{T}$.
+In particular, $\widetilde{\mathcal{B}} \in \mathcal{T}\left( \mathcal{B}\right)$ represents the effect of the adversary's perturbations on the \textit{current} batch, while the reachable parameter interval $\theta' \in \left[\theta^L, \theta^U\right]$ represents the worst-case effect of adversarial manipulations to all \textit{previously seen} batches.
+Exactly computing the set $\Delta\Theta$ is not computationally tractable, so we instead seek over-approximate element-wise bounds that can be computed efficiently within the training loop.
+We present a procedure for computing bounds for the bounded poisoning adversary in the following theorem.
+\begin{theorem}[Bounding the descent direction for a bounded adversary]\label{thrm:descent_dir_bounded}
+    Given a nominal batch $\mathcal{B} = \left\{\left({x}^{(i)}, {y}^{(i)} \right)\right\}_{i=1}^b$ of size $b$, a parameter set $\left[\theta^L, \theta^U\right]$, and a bounded adversary $\langle n, \epsilon, p, m, \nu, q \rangle$,
+    the SGD parameter update 
+    $
+    \Delta \theta = \frac{1}{b}\sum\limits_{\widetilde{\mathcal{B}}}
+    \nabla_\theta  \mathcal{L} \left( f^\theta\left(\tilde{x}^{(i)}\right), \tilde{y}^{(i)}\right)
+    $
+    is bounded element-wise by
+    \small{
+    \begin{align*}
+        \Delta \theta^L = \frac{1}{b}\left(\underset{\max(m,n)}{\operatorname{SEMin}}
+        \left\{
+        \tilde{\delta}^{(i)}_L - {{\delta}^{(i)}_L}\right\}_{i=1}^b + \sum\limits_{i=1}^b {{\delta}^{(i)}_L}
+        \right), \quad 
+        \Delta \theta^U = \frac{1}{b}\left(\underset{\max(m,n)}{\operatorname{SEMax}}
+        \left\{
+        \tilde{\delta}^{(i)}_U - {{\delta}^{(i)}_U}\right\}_{i=1}^b + \sum\limits_{i=1}^b {{\delta}^{(i)}_U}
+        \right)
+    \end{align*}
+    }
+    for any $\widetilde{\mathcal{B}} \in T^{n, \epsilon, p}_{m, \nu, q}(\mathcal{B})$ and $\theta \in [\theta^L, \theta^U]$.
+    The terms ${\delta}^{(i)}_L, {\delta}^{(i)}_U$ are sound bounds that account for the effect of previous adversarial manipulations.
+    Likewise, the terms $\tilde{\delta}^{(i)}_L, \tilde{\delta}^{(i)}_U$ are bounds on the worst-case adversarial manipulations of the $i$-th data-point in the \textit{current} batch, i.e.
+    \begin{align}
+        {\delta}^{(i)}_L \preceq {\delta} \preceq {\delta}^{(i)}_U \quad \forall        
+        &{\delta} \in 
+        \left\{\nabla_{\theta'}  \mathcal{L} \left( f^{\theta'}(x^{(i)}), y^{(i)}\right)
+        \mid
+        \theta' \in [\theta^L, \theta^U]
+        \right\},\label{eq:grad_bounds_unperturbed}\\
+        \tilde{\delta}^{(i)}_L \preceq \tilde{\delta} \preceq \tilde{\delta}^{(i)}_U \quad \forall         &\tilde{\delta} \in 
+        \left\{\nabla_{\theta'}  \mathcal{L} \left( f^{\theta'}\left(\tilde{x}\right), \tilde{y}\right)
+        \mid
+        \theta' \in [\theta^L, \theta^U],
+        \|x^{(i)} - \tilde{x} \|_p \leq \epsilon,
+        \|y^{(i)} - \tilde{y} \|_q \leq \nu
+        \right\}.
+    \end{align}
+\end{theorem}
+The operations $\operatorname{SEMax}_a$ and $\operatorname{SEMin}_a$ correspond to taking the sum of the element-wise top/bottom-$a$ elements over each index of the input vectors.
+The update rule in Theorem \ref{thrm:descent_dir_bounded} accounts for the effect of poisoning in previous batches by taking the lower and upper bounds on the gradient ($\delta_L^{(i)}, \delta_U^{(i)}$) for all $\theta$ reachable at the current iteration.
+Then, we bound the effect of adversarial manipulation in the current batch by taking the $\max(n, m)$ points that have the worst-case gradient bounds $\tilde{\delta}_L^{(i)}, \tilde{\delta}_U^{(i)}$ under poisoning.
+Since we wish to soundly over-approximate this operation for all parameters, we perform this bounding operation independently over each index of the parameter vector.
+This is certainly a loose approximation, as the $\max(n, m)$ points that maximize the gradient at a particular index will likely not maximize the gradient of other indices.
+However, this relaxation allows us to efficiently compute and propagate interval enclosures between successive iterations of AGT.
+A further relaxation is taken when computing gradient bounds $\delta^{(i)}_L, \delta^{(i)}_U$, since they are computed independently for each sample $i$ and the min/max for different samples may be attained for different $\theta' \in \left[\theta^L, \theta^U\right]$.
+Performing this computation independently for each $i$, however, allows for efficient bound-propagation that we describe in more detail in subsequent sections.
+
+For the bounded adversary, gradient clipping is not a requirement and we can directly bound the un-modified SGD training procedure.
+However, it can still be desirable to add gradient clipping even in the bounded adversary case, as it can improve the tightness of our descent direction bounds and subsequently improve the guarantees afforded by AGT with little cost to training performance.
+
+\subsection{Computation of Sound Gradient Bounds}\label{sec:boundcomputations}\label{subsec:forwardbounds}
+This section presents a novel algorithm for computing bounds on the following optimization problem
+\begin{align}
+    \min\limits_{x^\star, y^\star, \theta^\star}\left\{\nabla_{\theta'}  \mathcal{L} \left( f^{\theta'}\left(\tilde{x}\right), \tilde{y}\right)
+    \mid
+    \theta' \in [\theta^L, \theta^U],
+    \|x^{(i)} - \tilde{x} \|_p \leq \epsilon,
+    \|y^{(i)} - \tilde{y} \|_q \leq \nu
+    \right\}.\label{eq:sound_gradient_opt_problem}
+\end{align}
+Computing the exact solution to this problem is, in general, a non-convex and NP-hard optimization problem.
+However, we require only over-approximate solutions; while these can introduce (significant) over-approximation of the reachable parameter set, they will always maintain soundness.
+Future work could investigate exact solutions, e.g., via mixed-integer programming~\citep{huchette2023deep,tsay2021partition}.
+Owing to their tractability, our discussion focuses on the novel linear bound propagation techniques we develop for abstract gradient training.
+Noting that problems of the form \eqref{eq:grad_bounds_unperturbed} can be recovered by setting $\nu=\epsilon=0$, we focus solely on this more general case in this section.
+
+\textbf{Neural networks.} While the algorithm presented in Section~\ref{sec:agt} is general to any machine learning model trained via stochastic gradient descent, we focus our discussion on neural network models for the remained of the paper.
+We first define a neural network model $f^\theta: \mathbb{R}^{n_\text{in}} \rightarrow \mathbb{R}^{n_\text{out}}$ with $K$ layers and parameters $\theta=\left\{(W^{(i)}, b^{(i)})\right\}_{i=1}^K$ as:
+\begin{align*}
+    \hat{z}^{(k)} = W^{(k)} z^{(k-1)} + b^{(k)}, \quad z^{(k)} = \sigma \left(\hat{z}^{(k)}\right)
+\end{align*}
+where $z^{(0)} = x$, $f^\theta (x) = \hat{z}^{(K)}$, and $\sigma$ is the activation function, which we take to be ReLU.
+
+Solving problems of the form $\min\left\{\cdot \mid {\|x - {x}^\star \|_p \leq \epsilon}\right\}$ for neural networks has been well-studied in the context of adversarial robustness certification.
+However, optimizing over inputs, labels and parameters, e.g., 
+$\min \left\{\cdot \mid
+    \theta^\star \in [\theta^L, \theta^U],
+    \|x - {x}^\star \|_p \leq \epsilon,
+    \|y - {y}^\star \|_q \leq \nu
+    \right\}$
+is much less well-studied, and to-date similar problems have appeared primarily in the certification of probabilistic neural networks \citep{wicker2020probabilistic}.
+
+\textbf{Interval Arithmetic.} 
+For ease of exposition, we will represent interval matrices with bold symbols i.e., $\boldsymbol{A} := \left[{A_L}, {A_U}\;\right] \subset \mathbb{R}^{n_1\times n_2}$ and interval matrix multiplication as $\otimes$, meaning $AB \in \boldsymbol{A} \otimes \boldsymbol{B}$ for all $A \in \boldsymbol{A}$ and $B \in \boldsymbol{B}$. Additionally, we define $\odot$ and $\oplus$ as element-wise interval matrix multiplication and addition, respectively. This implies $A \circ B \in \boldsymbol{A} \odot \boldsymbol{B}$ (where $\circ$ is the element-wise product) and $A + B \in \boldsymbol{A} \oplus \boldsymbol{B}$ for all $A \in \boldsymbol{A}$ and $B \in \boldsymbol{B}$, which can be computed using standard interval arithmetic techniques.
+We denote interval vectors as $\boldsymbol{a} := \left[{a}_L, {a}_U\right]$ with analogous operations.
+\textbf{Forward Pass Bounds} Mirroring developments in robustness certification of neural networks, we provide a novel, explicit extension of the CROWN algorithm~\citep{zhangEfficientNeuralNetwork2018} to account for interval-bounded weights.
+The standard CROWN algorithm bounds the outputs of the $m$-th layer of a neural network by back-propagating linear bounds over each intermediate activation function to the input layer.
+We extend this framework to interval parameters, where the weights and biases involved in these linear relaxations are themselves intervals.
+We note that linear bound propagation with interval parameters has been studied previously in the context of floating-point sound certification \citep{singh2019}.
+\begin{proposition}[Explicit upper bounds of neural network $f$ with interval parameters]\label{crown_prop}
+Given an $m$-layer neural network function $f: \mathbb{R}^{n_\text{in}} \rightarrow \mathbb{R}^{n_\text{out}}$ whose unknown parameters lie in the intervals ${b}^{(k)} \in \boldsymbol{b}^{(k)}$ and $W^{(k)} \in \boldsymbol{W}^{(k)}$ for $k=1, \dots, m$, there exist an explicit function
+\begin{align}
+    f_j^U\left({x}, {\Lambda}^{(0:m)}, {\Delta}^{(1:m)}, {b}^{(1:m)}\right)=
+    {\Lambda}_{j,:}^{(0)} {x}+\sum_{k=1}^m {\Lambda}_{j,:}^{(k)}\left({b}^{(k)} +{\Delta}_{:, j}^{(k)}\right)\label{eq:interval_crown_lin_ub}
+\end{align}
+such that $\forall x \in \boldsymbol{x}$
+\begin{align}
+    f_j({x}) \leq \max \left\{f_j^U\left({x}, {\Lambda}^{(0:m)}, {\Delta}^{(1:m)}, {b}^{(1:m)}\right) \mid {\Lambda}^{(k)} \in {\mathbf{\Lambda}}^{(k)}, {b}^{k} \in {\boldsymbol{b}}^{(k)} \right\} 
+\end{align}
+where $\boldsymbol{x}$ is a closed input domain and ${\Lambda}^{(0:m)}, {\Delta}^{(1:m)}$ are the equivalent weights and biases of the linear upper bounds, respectively.
+The bias term ${\Delta}^{(1:m)}$ is explicitly computed based on the linear bounds on the activation functions. 
+
+\end{proposition}
+
+Given the upper bound function
+$f_j^U(\cdot)$ defined above and intervals over all the relevant variables, we can compute the following closed-form global upper bound:
+\begin{align*}
+    \gamma^U_j = \max\left\{
+    {\mathbf{\Lambda}}^{(0)}_{{j,:}} \otimes \boldsymbol{x} \oplus
+    \sum_{k=1}^m {\boldsymbol{\Lambda}}^{(k)}_{j,:} \otimes \left[{\boldsymbol{b}}^{(k)}
+    \oplus
+    {{\Delta}}^{(k)}_{:, j}\right]\right\}
+\end{align*}
+where $\max$ is performed element-wise and returns the upper bound of the interval enclosure. 
+Then, we have $f_j({x}) \leq \gamma^U_j$ for all ${x} \in \boldsymbol{x}$, ${b}^{(k)} \in \boldsymbol{b}^{{(k)}}$ and ${W}^{(k)} \in {\boldsymbol{W}}^{{(k)}}$.
+\textbf{Backward Pass Bounds.} Given bounds on the forward pass of the neural network, we can bound the backward pass (the gradients) of the model. We do this by extending the interval arithmetic based approach of \citet{wicker2022robust} (which bounds derivatives of the form ${\partial \mathcal{L}}/{\partial z^{(k)}}$) to additionally bound the derivatives w.r.t. the parameters.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{Figures/halfmoons_noclip.pdf}
+    \caption{Bounds on a classification threshold trained on the halfmoons dataset for a bounded adversary that can perturb up to $n$ data-points by up to $\epsilon$ in the $p=\infty$ norm; in label space, the adversary may flip up to $m$ labels (corresponding to $\gamma=1, q=0$). The white line shows the decision boundary of the nominal classification model. The coloured regions show the areas for which we \textit{cannot} certify robustness for the given adversary strength.}
+    \label{fig:halfmoons}
+\end{figure}
+
+\subsection{Algorithm Analysis and Discussion}
+
+Figure \ref{fig:halfmoons} visualizes the resulting worst-case decision boundaries for a simple binary classifier consisting of a neural network with a hidden layer of 128 neurons.
+In this classification setting, label poisoning results in looser bounds than feature space poisoning, with $m=5$ producing bounds of approximately the same width as $n=50$.
+This is due to the relatively large interval introduced by a label flipping attack $y^{(i)} \in \{0, 1\}$, compared to an interval of width $\epsilon$ introduced in a feature-space attack.
+We also emphasise that Algorithm~\ref{alg:abstractgradtrain} assumes at most $m, n$ poisoned points \textit{per batch}, rather than per dataset.
+In regression settings, label poisoning is relatively weaker than feature poisoning for a given strength $\epsilon = \nu$, since the feature-space interval propagates through both the forward and backward training passes, while the label only participates in the backward pass.
+This effect is particularly pronounced in deep networks, since interval/CROWN bounds tend to weaken exponentially with depth~\citep{MaoMFV24,sosnin2024scaling}.
+\textbf{Comparison to Interval Bound Propagation.}
+The CROWN algorithm in \S~\ref{subsec:forwardbounds} is not strictly tighter than interval bound propagation (IBP).
+Specifically, the non-associativity of double-interval matrix multiplication leads to significantly different interval sizes depending on the order in which the multiplications are performed: IBP performs interval matrix multiplications in a `forwards' ordering, while CROWN uses a `backwards' ordering.
+Empirically, we observe that CROWN tends to be tighter for deeper networks, while IBP may outperform CROWN for smaller networks.
+In our numerical experiments, we compute both CROWN and IBP bounds and take the element-wise tightest bound.
+\textbf{Combined Forward and Backward Pass Bounds.} 
+The CROWN algorithm can be applied to any composition of functions that can be upper- and lower-bounded by linear equations.
+Therefore, it is possible to consider both the forwards and backwards passes in a single combined CROWN pass for many loss functions.
+However, linear bounds on the gradient of the loss function tend to be relatively loose, e.g., linear bounds on the softmax function may be orders-of-magnitude looser than constant $[0,1]$ bounds \citep{wei2023convex}.
+As a result, we found that the tightest bounds were obtained using IBP/CROWN on the forward pass and IBP on the backward pass.
+
+\textbf{Computational Complexity.}
+The computational complexity of Algorithm~\ref{alg:abstractgradtrain} depends on the method used to bound on the gradients. 
+
+Likewise, our CROWN bounds admit a cost of at most 4 times the cost of the original CROWN algorithm.
+For an $m$ layer network with $n$ neurons per layer and $n$ outputs, the time complexity of the original CROWN algorithm is $\mathcal{O}(m^2 n^3)$ \citep{zhangEfficientNeuralNetwork2018}.
+We further note that the $\operatorname{SEMin}/\operatorname{SEMax}$ operations required by Theorems \ref{thrm:descent_dir_unbounded} and \ref{thrm:descent_dir_bounded} can be computed in $\mathcal{O}(b)$ for each index and in practice can be efficiently parallelized using GPU-based implementations.
+In summary, Abstract Gradient Training using IBP has time complexity equivalent to standard neural network training ($\mathcal{O}(b m n^2)$ for each batch of size $b$), but with our tighter, CROWN-based, bounds the complexity is $\mathcal{O}(b m^2 n^3)$ per batch.
+
+\textbf{Limitations.} While Algorithm~\ref{alg:abstractgradtrain} is able to obtain valid-parameter space bounds for any gradient-based training algorithm, the tightness of these bounds depends on the exact architecture, hyperparameters and training procedure used.
+In particular, bound-propagation between successive iterations of the algorithm assumes the worst-case poisoning at \textit{each parameter index}, which may not be achievable by realistic poisoning attacks.
+Therefore, obtaining non-vacuous guarantees with our algorithm often requires training with larger batch-sizes and/or for fewer epochs than is typical.
+Additionally, certain loss functions, such as multi-class cross entropy, have particularly loose interval relaxations.
+Therefore, AGT obtains relatively weaker guarantees for multi-class problems when compared to regression or binary classification settings.
+We hope that tighter bound-propagation approaches, such as those based on more expressive abstract domains, may overcome this limitation in future works.
+
+\textbf{Computing Certificates of Poisoning Robustness.} Algorithm~\ref{alg:abstractgradtrain} returns valid parameter-space bounds $[\theta_L, \theta_U]$ for a given poisoning adversary.
+To provide certificates of poisoning robustness for a specific query at a point $x$, we first bound the model output $f^\theta(x) \forall \theta \in [\theta_L, \theta_U]$ using the bound-propagation procedure described above.
+In classification settings, the robustness of the prediction can then be certified by checking if the lower bound on the output logit for the target class is greater than the upper bounds of all other classes (i.e. $[f_j^\theta(x)]_L \geq [f_i^\theta(x)]_U \forall i \neq j$).
+If this condition is satisfied, then the model always predicts class $j$ at the point $x$ for all parameters within our parameter-space bounds, and thus this prediction is certifiably robust to poisoning.
+
+
+
+\section{Experiments}
+
+
+Computational experiments were performed using a Python implementation of Algorithm~\ref{alg:abstractgradtrain}. 
+Bounds on accuracy/error are computed by bounding the respective optimization problem from Theorem 4.1 using IBP/CROWN.
+ 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\linewidth]{Figures/uci_attack.pdf}
+    \includegraphics[width=0.95\linewidth]{Figures/uci_hyperparams.pdf}
+    \caption{Mean squared error bounds on the UCI-houseelectric dataset.
+    Top: Effect of adversary strength on certified bounds for a fixed model.
+    Bottom: Effect of model/training hyperparameters on certified bounds for a fixed feature poisoning adversary $(n=100, \epsilon=0.01, p=\infty)$.
+    Hyperparameters $d=1, w=50, b=10000$, and $\alpha=0.02$ where not stated. }
+    \label{fig:uci_electric_poisoning_1}
+\end{figure}
+
+\textbf{UCI Regression (Household Power Consumption).}
+We first consider a relatively simple regression model for the household electric power consumption (`houseelectric') dataset from the UCI repository~\citep{misc_individual_household_electric_power_consumption_235} with fully connected neural networks and MSE as loss function. 
+Figure \ref{fig:uci_electric_poisoning_1} (top) shows the progression of the nominal and worst/best-case  MSE (computed for the test set) for a 1$\times$50 neural network and various parameterizations of poisoning attacks. 
+As expected, we observe that increasing each of $n$, $m$, $\epsilon$, and $\nu$ results in looser performance bounds.
+We note that the settings of $m=10000$ and $n=10000$ correspond $100\%$ of the data (batchsize $b=10000$) being poisoned.
+
+Figure \ref{fig:uci_electric_poisoning_1} (bottom) shows the progression of bounds on the MSE (computed for the test set) over the training procedure for a fixed poisoning attack ($n=100, \epsilon=0.01$) and various hyperparameters of the regression model. 
+In general, we observe that increasing model size (width or depth) results in looser performance guarantees.
+As expected, increasing the batch size improves our bounds, as the number of potentially poisoned samples $n$ remains fixed and their worst-case effect is `diluted'. 
+Increasing the learning rate accelerates both the model training and the deterioration of the bounds. 
+
+\begin{wrapfigure}{r}{0.29\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{Figures/mnist_poisoning.pdf}
+    \caption{\normalsize{Certified accuracy on the MNIST dataset under a label-flipping attack.}}
+    \label{fig:mnist}
+\end{wrapfigure}
+
+\textbf{MNIST Digit Recognition.} 
+We consider a label-flipping attack ($q=0, \nu=1$) on the MNIST dataset.
+In label-only poisoning settings, it is common to use unsupervised learning approaches on the (assumed clean) features prior to training a classification model (e.g. SS-DPA \citep{levine2020deep}).
+Therefore, we first project the data into a 32-dimensional feature space using PCA and then train a linear classifier using AGT to obtain a certified classification model. 
+Figure \ref{fig:mnist} illustrates the certifiable accuracy using this methodology.
+Compared to regression or binary classification settings, AGT provides limited guarantees for multi-class problems; we hope that tighter bound propagation techniques will overcome this limitation in the future.
+Stronger guarantees can be obtained by increasing the gradient clipping parameter $\kappa$, at the cost of decreased model utility.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{Figures/oct_mnist_poisoning.pdf}
+    \caption{Certified accuracy (left) and backdoor accuracy (right) for a binary classifier fine-tuned on the Drusen class of OCTMNIST for an attack size up to 10\% poisoned data per batch ($b=6000, p=\infty, q=0, \nu=1$). 
+    Dashed lines show the nominal accuracy of each fine-tuned model.}
+    \label{fig:medmnist}
+\end{figure}
+
+\textbf{MedMNIST Image Classification.}
+Next, we consider fine-tuning a classifier trained on the retinal OCT dataset (OCTMNIST)~\citep{medmnist}, which contains four classes---one normal and three abnormal. 
+The dataset is unbalanced, and we consider the simpler normal vs abnormal binary classification setting. 
+We consider the `small' architecture from \cite{gowal2018effectiveness}, comprising two convolutional layers of width 16 and 32 and a dense layer of 100 nodes, and the following fine-tuning scenario: the model is first pre-trained without the rarest class (Drusen) using the robust training procedure from \cite{wicker2022robust}, so that the resulting model is robust to feature perturbations during fine-tuning.
+We then assume Drusen samples may be poisoned and add them as a new abnormal class to fine-tune the dense layer, with a mix of 50\% Drusen samples ($b=6000$ with 3000 Drusen) per batch.
+
+In general, this fine-tuning step improves accuracy on the new class (Drusen) from approximately 0.5 to over 0.8. Nevertheless, Figure~\ref{fig:medmnist} shows how increasing the amount of potential poisoning worsens the bound on prediction accuracy. With feature-only poisoning, a poisoning attack greater than $\epsilon=0.02$ over $n\approx500$ samples produces bounds worse than the prediction accuracy of the original pre-trained model.
+With an unbounded label and feature poisoning adversary, the bounds are weaker, as expected.
+Higher certified accuracy can be obtained by increasing the clipping parameter $\kappa$, at the cost of nominal model accuracy (Figure~\ref{fig:medmnist}, center right).
+With label-only poisoning, the certificates are relatively stronger, as the training procedure requires approximately $m\geq600$ poisoned samples for the prediction accuracy bound to reach the original pre-trained model's accuracy.
+The setting of $m=600$ corresponds to $20\%$ of the Drusen data per batch being mis-labeled as healthy.
+
+Finally, we consider a backdoor attack setting where the $\epsilon$ used at training and inference times is the same.
+The model is highly susceptible to adversarial perturbations at inference time even without data poisoning, requiring only $\epsilon=0.009$ to reduce the certified backdoor accuracy to $<50\%$.
+As the strength of the (bounded) adversary increases,  the accuracy that we are able to certify decreases.
+We note that tighter verification algorithms
+can be applied at inference time to obtain stronger guarantees.
+\begin{figure}[t]
+    \centering
+\includegraphics[width=0.28\textwidth,valign=t]{Figures/pilotnet_mse.pdf}
+\includegraphics[width=0.7\textwidth,valign=t]{Figures/pilotnet_images.pdf}
+    \caption{Left: Fine-tuning PilotNet on unseen data with a bounded label poisoning attack ($q=\infty$). Right: Steering angle prediction bounds after fine-tuning ($m=300, q=\infty, \nu=0.01$).}
+    \label{fig:sub3}
+\end{figure}
+
+\textbf{Fine-Tuning PilotNet.}
+Finally, we fine-tune a model that predicts steering angles for autonomous driving given an input image~\citep{bojarski2016end}. 
+The model contains convolutional layers of 24, 36, 48, and 64 filters, followed by fully connected layers of 100, 50, and 10 nodes.
+ 
+We then fine-tune the dense layers on video 1 (challenging lighting conditions) assuming potential label poisoning. 
+
+Figure~\ref{fig:sub3} shows the bounds on mean squared error for the video 1 data and visualizes how the bounds translate to the predicted steering angle. 
+We again see that fine-tuning improves accuracy on the new data, but also that the MSE bounds deteriorate as the number of potentially poisoned samples increases (Figure~\ref{fig:sub3}, left). 
+The rate of deterioration depends strongly on poisoning strength $\nu$.
+
+
+
+\section{Conclusions}
+
+We proposed a mathematical framework for computing sound parameter-space bounds on the influence of a poisoning attack for gradient-based training. Our framework defines generic constraint sets to represent general poisoning attacks and propagates them through the forward and backward passes of model training.  Based on the resulting parameter-space bounds, we provided rigorous bounds on the effects of various poisoning attacks. 
+Finally, we demonstrated our proposed approach to be effective on tasks including autonomous driving and the classification of medical images. 
+
+
+
+
+
+

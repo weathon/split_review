@@ -1,0 +1,308 @@
+\title{Monitoring Latent World States in Language Models with Propositional Probes}
+
+\begin{abstract}
+Language models (LMs) are susceptible to bias, sycophancy, backdoors, and other tendencies that lead to unfaithful responses to the input context. Interpreting internal states of LMs could help monitor and correct unfaithful behavior. We hypothesize that LMs faithfully represent their input contexts in a latent world model, and we seek to extract these latent world states as logical propositions. For example, given the input context ``Greg is a nurse. Laura is a physicist.'', we aim to decode the propositions \prop{WorksAs(Greg, nurse)} and \prop{WorksAs(Laura, physicist)} from the model's internal activations. To do so we introduce \emph{propositional probes}, which compositionally extract lexical concepts from token activations and bind them into propositions. Key to this is identifying a \emph{binding subspace} in which bound tokens have high similarity ($\propm{Greg}\leftrightarrow \propm{nurse}$) but unbound ones do not ($\propm{Greg} \not\leftrightarrow \propm{ physicist}$). 
+Despite only being trained on linguistically simple English templates, we find that propositional probes generalize to inputs written as short stories and translated to Spanish. Moreover, in three settings where LMs respond unfaithfully to the input context---prompt injections, backdoor attacks, and gender bias--- the decoded propositions remain faithful.
+This suggests that LMs often encode a faithful world model but decode it unfaithfully, which motivates the search for better interpretability tools for monitoring LMs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Language models (LMs) may produce responses unfaithful to the input context in many situations: they can be misled by irrelevant examples ~\citep{anil2024many, overthinking}, learn unintended tendencies ~\citep{sharma2023towards} and biases ~\citep{blodgett2020language, liang2022holistic}, and are vulnerable to adversarial attacks on their prompts ~\citep{perez2022ignore} and training data ~\citep{wallace2020concealed, hubinger2024sleeper}. This makes it important to be able to identify and correct when language models are unfaithful.
+
+To address unfaithfulness, one promising approach is to interpret LMs' internal states~\citep{elkreport, viegas2023system}. A common hypothesis is that LMs internally represent the input context in a latent world model~\citep{belinda-alchemy, othello}, which could remain faithful even if the LM outputs falsehoods~\citep{quirkylm}. This might happen, for instance, if unfaithful tendencies affect how the model behaves in accordance to its beliefs, but not the beliefs themselves. 
+
+In this work, we introduce \emph{propositional probes}, which extract symbolic latent world states as logical propositions; we then show that these latent world states remain faithful in three adversarial settings. As an example of propositional probes, consider the input context ``Alice lives in Laos. Bob lives in Peru.'' We would extract from internal activations the propositions $\{\propm{LivesIn(Alice, Laos)}$, $\propm{LivesIn(Bob, Peru)}\}$ . In three adversarial settings, namely prompt injections, backdoors, and gender bias, we find that these extracted latent world states are more faithful than model outputs.
+
+Our probes work by extracting lexical concepts from token activations, then binding them together to form propositions (Fig.~\ref{fig: 2}) (Sec.~\ref{sec: probing section}). Since the space of propositions is exponentially large, our probes exploit compositionality by building propositions from their lexical constituents (e.g. composing \prop{LivesIn(Alice, Laos)} from \prop{Alice} and \prop{Laos})). Key to enabling this is the ``binding subspace''~\citep{feng2023language}, a subspace of activation space in which bound tokens (such as Alice and Laos above) have similar activations. %
+To identify this subspace, we develop a novel Hessian-based algorithm (Sec.~\ref{sec: binding section}) and demonstrate that the identified binding subspace causally mediates binding~\citep{causalabstractions,vig2020investigating,pearl} (Sec.~\ref{sec: hessian results}). 
+Our propositional probes generalize well to complex and adversarial settings, despite being trained only on linguistically simple data. We create the training data by filling simple templates with random ground-truth propositions drawn from a finite universe of predicates and objects, and the test data by rewriting the train data into short stories and translating them into Spanish with GPT-3.5-turbo (Sec.~\ref{sec: preliminaries}). We find that propositional probes generalize to these complex settings, achieving a Jaccard Index of within 10\% of a prompting skyline (Sec.~\ref{sec: probe results}). Further, in three adversarial settings (prompt injections, backdoors, and gender bias), our probes produce more faithful propositions than what the model outputs (Sec.~\ref{sec: applications}).
+
+Overall, our results indicate that identifying compositional structures in LM activations is a promising approach towards building monitoring systems for LMs. This is particularly pertinent as LMs are increasingly deployed as autonomous agents. To this end, we hope that our work could stimulate further research into extracting world models of greater complexity, such as by modeling role-filler binding~\citep{smolensky1990tensor} and state changes~\citep{kim2023entity}.
+
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{illustrator_figures/fig2.pdf}
+    \caption{\textbf{Left:} Name (blue) and country probes (green) classify activations into either a name/country or a null value. \textbf{Right:} Activations have a lexical component (e.g. $f_E(\text{``Alice''})$) and a binding component (e.g. $b_E(0)$), such that bound activations have similar binding components (e.g. $b_E(0)$ and $b_A(0)$). We use this to compose across tokens.}
+    \label{fig: 2}
+\end{figure}
+
+
+\section{Related Work}
+
+
+\myparagraph{Probing} Our propositional probes compose smaller lexical probes together; the constituent probes have been well studied in many domains~\citep{kingqueen}, such as color ~\citep{abdou2021can}, gender ~\citep{bolukbasi2016man}, and space ~\citep{gurnee2023language}. In addition, probing for propositional beliefs has been studied for the Othello~\citep{othello}, Alchemy, and TextWorld environments~\citep{belinda-alchemy}. Our approach differs by exploiting compositionality, which enables our method to leverage the large body of existing probing literature.
+
+\myparagraph{Representations of binding} Researchers have long studied binding in connectionist models and human minds~\citep{malsburg1981correlation,feldman1982dynamic, feldman2013neural, treisman1996binding}. In recent LMs, researchers have shown that representations of semantic roles and coreferences emerge from pretraining ~\citep{tenney2019you, belinkov2020linguistic, peters2018dissecting}. We build on the ``binding vectors'' discovered in language model activations ~\citep{feng2023language, prakash2024fine}.
+
+
+
+
+
+\section{Task definition and preliminaries}
+
+In this section, we formally define the task that propositional probes solve, and discuss how we evaluate propositional probes.
+
+\myparagraph{Task definition} The goal of propositional probes is to decode a set of logical propositions representing the language model's beliefs about an input passage from the language model's internal activations. Specifically, suppose we have an input passage $T$, together with a ground-truth set of propositions $B$ (e.g., $B=\{$\prop{LivesIn(Alice, Laos), LivesIn(Bob, Peru)}$\}$ for Fig.~\ref{fig: 2}.) Further suppose we have a model $\mathcal M$ that understands the input passage $T$ to the extent that it can reliably answer reading comprehension questions about $B$ (e.g. answers ``Where does Alice live?" with ``Laos"). Then, run the model $\mathcal M$ on the input $T$, and let the internal activations be $Z_0, \dots, Z_{|T|-1}$, which we take to be the concatenation of pre-layernorm activations at every layer, so that $\smash{Z_k \in \mathbb {R}^{n_{\text{layers}} \times d_{\text{model}}}}$. The task is to predict the set of propositions $B$ from the internal activations $Z_0, \dots, Z_{|T|-1}$.
+
+\myparagraph{Easy-to-hard evaluations} To evaluate propositional probes we train our probes on simple inputs and test their generalization on hard, potentially adversarial, inputs. Prior works have used this easy-to-hard evaluation paradigm~\citep{roger2023benchmarks, quirkylm} to measure the usefulness of probes as monitoring methods. Specifically, we create three versions of datasets; the propositional probes are trained only using the simplest version (\textsc{synth}), and evaluated on the heldout versions (\textsc{para}, \textsc{trans}). Further, in Sec.~\ref{sec: applications} we introduce additional distribution shifts during evaluation that adversarially changes the model's output behavior, and test if the probes can remain faithful.
+\myparagraph{Datasets} We create three datasets of natural language passages of increasing complexity, namely \textsc{synth}, \textsc{para},  and \textsc{trans}, each labelled with ground-truth propositions. To do so, we first generate random propositions, which are then formatted in a template to produce the \textsc{synth} dataset, and augmented using GPT-3.5-turbo to produce diverse and complex \textsc{para} and \textsc{trans} datasets (Fig.~\ref{fig: datasets}). 
+
+In more detail, each input instance describes two people, each of whom has a name, country of origin, occupation, and a food they like. We model this information as a set of propositions such as \prop{LivesIn(Carol, Italy)}. Formally, our closed world consists of four domains $\mathcal D_0, \dots, \mathcal D_{3}$, which are sets of names, countries, occupations, and foods respectively. There are three predicates, \prop{LivesIn}, \prop{WorksAs}, and \prop{LikesToEat}, each of which binds a name $E\in \mathcal D_0$ to an attribute from one of the three attribute domains $\mathcal D_1, \mathcal D_2,$ or $\mathcal D_3$ respectively. Note that because of the one-to-one correspondence between predicates and attribute domains, the predicate of a proposition can be inferred by which domain the attribute is from. Our method utilizes this observation. In addition, for brevity we sometimes drop the predicate, e.g. \prop{(Carol, Italy)} instead of \prop{LivesIn(Carol, Italy)}.
+
+To create the input context, we generate six random propositions about two people by sampling without repetition two values from each domain. These propositions are formatted in a template to produce the \textsc{synth} dataset, rewritten using GPT-3.5-turbo into a short story (\textsc{para}), and then translated into Spanish (\textsc{trans}). See Fig.
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{illustrator_figures/datasets.pdf}
+    
+    \caption{To create our datasets, we first generate sets of random propositions about two people. Each set is formatted with a template (\textsc{synth}), rewritten into a story (\textsc{para}), and translated into Spanish (\textsc{trans}). We train probes to predict propositions from the easy \textsc{synth} dataset, and test probes on the hard \textsc{para} and \textsc{trans} datasets.
+    }
+    \label{fig: datasets}
+\end{figure}
+\myparagraph{Models} We use the Tulu-2-13b model~\citep{ivison2023camels}, an instruction-tuned version of Llama 2~\citep{touvron2023llama} with $n_{\text{layers}}=40$ layers and $d_{\text{model}}=5120$ embedding dimensions. 
+
+
+\section{Propositional probes}
+
+In this section we describe the overall architecture of propositional probes. At a high level, propositional probes are composed of domain probes, one for each domain, and the outputs of the domain probes are composed to form propositions using the binding similarity metric. We construct domain probes in Sec.~\ref{sec: method domain probe}, compose them to form propositional probes in Sec.~\ref{sec: method prop probe}, but defer the construction of the binding similarity metric to Sec.~\ref{sec: binding section}
+\subsection{Domain probes} \label{sec: method domain probe}
+For every domain, we train a domain probe that linearly classifies activations at individual token positions into either a value in the domain, or a null value $\bot$, indicating that none of the values is represented. For example, Fig.~\ref{fig: 2} (left) shows the outputs of the name probe and the country probe. Formally, for every domain $\mathcal D_k$, we train a probe $P_k : \mathbb R^{d_{\text{model}}} \rightarrow \mathcal D_k \cup \{\bot\}$. We use the activation at a particular layer $l$ as the input of the probe. We describe later how $l$ is chosen. 
+
+We parameterize the probe with $|\mathcal D_k|$ vectors, $u_k^{(0)}, \dots u_k^{(|\mathcal D_k|-1)} \in  \mathbb R^{d_{\text{model}}} $ and a threshold $h_k \in \mathbb R$. Each vector is a direction in activation space corresponding to a value in the domain. The classification of the probe is simply the value whose vector has the highest dot product with the activation, or the null value $\bot$ instead if all the dot products are smaller than the threshold. Formally,\[
+P_k(Z) = \begin{cases}
+    \argmax_i u_k^{(i)}\cdot Z, & \text{if} \max_i u_k^{(i)} > h_k \\
+    \bot, & \text{otherwise}
+\end{cases}
+\]
+
+To learn the vectors, we generate a dataset of activations and their corresponding values. Then, we set each vector to the mean of the activations with that input. Then, we subtract each vector with the average vector \smash{$\frac{1}{|\mathcal D_k|} \sum_i u_k^{(i)}$}. This can be seen as a multi-class generalization of the so-called difference-in-means probes ~\citep{quirkylm}.
+
+We collect this dataset of activations from the \textsc{synth} dataset. However, this only provides context-level supervision: we know that the activations in the context collectively represent certain values in the domain, but we do not know which activations represent the value and which represent $\bot$. Thus, we have to assign the activations at each token position with a ground-truth label.
+
+To do so, we use a Grad-CAM-style attribution technique ~\citep{gradcam} similar to that used by \citet{olah2018building}. Broadly speaking, we backpropagate through the model to estimate how much the activation at each layer/token position contributes towards the model's knowledge of the lexical information, which estimates the saliency of both the layer and token position.
+
+The attribution results indicate that the middle layers at last token position are the most informative. We thus choose layer $l=20$ (out of 40 layers). 
+\subsection{Propositional probes} \label{sec: method prop probe}
+
+Our propositional probes compose the outputs of constituent probes with the binding similarity metric using a simple lookup algorithm. We first describe the binding similarity metric, and then describe the algorithm for propositional probes.
+
+We expect the binding similarity metric to be greater for activations that are bound together than activations that are not. In the example in Fig.~\ref{fig: 2}, we expect the binding similarity metric to be higher between ``Laos'' and ``Alice'' than between ``Laos'' and ``Bob'', and vice versa for ``Peru'' and ``Bob''. Concretely, the binding similarity metric $d(Z_s, Z_t)$ is a real-valued function that describes how strongly bound the activations $Z_s$ and $Z_t$ are to each other. In Sec.~\ref{sec: binding section} we describe an algorithm for computing the binding similarity metric, but for now we take its existence as given.
+
+Our propositional probes use the binding similarity metric to decide how the predicted attributes should be bound to the predicted entities. Specifically, we first identify all the names mentioned in the context with the name domain probe $P_0$. Then, for every other domain probe $P_k$, we identify the values it picks up in the context, and for each of these values we select the name with the highest binding similarity metric to compose together. The pseudocode is described in Alg. \ref{alg: lookup}.
+
+\begin{algorithm}
+\caption{Lookup algorithm to propose predicates}\label{alg: lookup}
+\begin{algorithmic}[1]
+\Require Domain probes $\{P_k\}_k$ and binding similarity metric $d(\cdot, \cdot)$.
+\Procedure{ProposePredicates}{$\{Z_s\}_s$}
+\State $N$ $\gets $ Subset of $\{Z_s\}_s$ for which $P_0$ is not $\bot$ \Comment{Detect names}
+\ForAll{$P_k, k > 0$}
+\State $V$ $\gets$ Subset of $\{Z_s\}_s$ for which $P_k$ is not $\bot$
+\ForAll{$Z_v$ in $V$}
+\State $n$ $\gets \argmax_{i \in N} d(Z_i, Z_v)$ \Comment{Find best matching name}
+\State Propose new proposition $(n, v)$
+\EndFor
+\EndFor
+\State \textbf{return} All proposed propositions
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Binding subspace}
+
+In this section, we present a Hessian-based algorithm for identifying the binding subspace, from which we construct the binding similarity metric used in the propositional probes. We first review background information on the binding subspace (Sec.~\ref{sec: binding background}), before describing our algorithm for identifying the binding subspace and constructing the binding similarity metric (Sec. \ref{sec: hessian algo}). Lastly, we show that the resultant binding subspace is causally mediating (Sec. \ref{sec: hessian results}).
+\subsection{Binding subspace background} \label{sec: binding background}
+The binding subspace arises from a decomposition of internal activations into lexical and binding vectors \citep{feng2023language}. While researchers have long noted that language model activations often comprise of lexical vectors that linearly encode lexical concepts, \citet{feng2023language} recently observed that activations can also contain binding vectors that bind lexical concepts in one activation with lexical concepts in another.
+
+Specifically, suppose the input describes two entities $E_0, E_1$ (e.g. ``Alice'', ``Bob'') with corresponding attributes $A_0, A_1$ (e.g. ``Laos'', ``Peru'') (see Fig.~\ref{fig: 2}). Let $Z_{E_k}$ and $Z_{A_k}$ for $k=0,1$ be the activations for $E_k$ and $A_k$ respectively. Then, \citet{feng2023language} observed that the activations can be decomposed into lexical vector representations $f_E(E_k)$ and $f_A(A_k)$ of entities and attributes, and binding vectors $b_E(k)$ and $b_A(k)$,
+\[
+Z_{E_k} = f_E(E_k) + b_E(k), \quad Z_{A_k} = f_A(A_k) + b_A(k),
+\]
+so that interventions that modify $Z_{E_k} \leftarrow Z_{E_k} + b_E(k') - b_E(k)$ for $k'\neq k$, will switch the bound pairs (e.g. from $\{(E_0, A_0), (E_1, A_1)\}$ to $\{(E_0, A_1), (E_1, A_0)\}$), and likewise for $Z_{A_k}$. 
+
+However, the techniques in prior work could not identify the binding subspace (i.e. the subspace binding vectors live in), or the geometric relationship between the binding vectors $[b_E(k), b_A(k)]$. In particular, they relied on estimating differences in binding vectors $\smash{\Delta_E \triangleq b_E(1) - b_E(0)}$, $\smash{\Delta_A \triangleq b_A(1) - b_A(0)}$. To do so they computed the difference $Z_{E_1} - Z_{E_0}$ across 200 contexts with different values of $E_0$ and $E_1$, with the hope that the content dependent vectors $f_{E_0}, f_{E_1}$ cancelled out (likewise for $\Delta_{A}$). This enabled the bound pair switching intervention described in the preceding paragraph, but did not reveal how the binding vectors are geometrically related.
+
+In this work, we hypothesize that there is low rank linear relationship between binding vectors that correspond to each other, i.e. there exists a low-rank binding matrix $\mH$ under which related entity/attribute binding vectors have high norms, so that $b_E(k)^\top \mH b_A(k')$ is high only when $k=k'$. We further posit that $\mH$ is orthogonal to the subspaces spanned by the lexical vectors $f_E(E_k), f_A(A_k)$, so that $Z_{E_k}^\top \mH Z_{A_{k'}} \approx b_E(k)^\top \mH b_A(k')$.  In Sec.~\ref{sec: hessian algo} we describe a Hessian-based algorithm to identify $\mH$, and construct a symmetric metric $d(Z_k, Z_{l})$ that describes whether $Z_k$ is bound to $Z_l$, which is used ultimately by  propositional probes to compose domain values together. 
+
+
+\subsection{Hessian-based algorithm} \label{sec: hessian algo}
+
+To motivate the Hessian-based algorithm, we briefly discuss a straightforward approach to estimate the binding matrix $\mH$ and a key shortcoming. A simple way to estimate $\mH$ is to collect a dataset of model activations, together with ground-truth labels of which activations are bound together. Then, one can obtain $\mH$ as either the result of bilinear regression, or with a more sophisticated loss involving causal interventions~\citep{geiger2024finding}\footnote{We implement Distributed Alignment Search as a baseline in Sec.~\ref{sec: hessian results}}. However, in either case, the estimated $\mH$ is limited because it can only ever capture variations on binding vectors present in the initial dataset; in our setting where we train on a simple dataset and test on hard, diverse datasets, we need a method that captures structure inherently present in the model, and not just in the dataset.
+At a high level, the Hessian-based approach approximates the model with its Hessian, which characterizes not just the model's behavior on binding vectors in the present input, but in all directions in the activation space. Specifically, suppose we have two activations $Z_x, Z_y$ corresponding to an entity and an attribute which are initially unbound, and we perturb the first in direction $x$ and the latter in direction $y$. Suppose further we have a function $F(x, y)$ that measures the binding strength between $Z_x + x$ and $Z_y + y$. The binding strength should increase only if directions $x$ and $y$ align under $\mH$. In fact, if $F(x,y)$ is bilinear, we can recover $\mH \approx \nabla_x\nabla_y F(x,y)$, up to a scaling coefficient.
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{illustrator_figures/hessians_new.pdf}
+    \caption{
+        Overview of Hessian-based algorithm. 1) Activations for ``Alice'' and ``Laos'' are bound because their binding vectors (horizontal) align under binding matrix $\mH$, likewise for ``Bob'' and ``Peru''. 2) Ablate binding information by setting binding vectors to midpoints. 3) Perturb activations with $\pm x$ and $\pm y$; binding is recovered in figure because $x$ and $y$ are aligned. 4a, 4b) To compute binding strength $F(x,y)$, append query strings and measure the probability of correct next token.
+    }
+    \label{fig: hessian illustration}
+\end{figure}
+
+To instantiate this, we need a way of creating unbound activations, and also of measuring binding strength. To create unbound activations, we construct activations that are initially bound and subtract away the binding information so that the binding vectors become indistinguishable. Specifically, consider the context with two propositions $\{(E_0, A_0), (E_1, A_1)\}$ discussed in Sec.~\ref{sec: preliminaries}. To ablate binding information in $Z_{E_k}$ and $Z_{A_k}$, we add $0.5\Delta_E$ and $0.5\Delta_A$ to $Z_{E_0}$ and $Z_{A_0}$, and subtract the same quantities from $Z_{E_1}$ and $Z_{A_1}$. This moves the binding vectors to their midpoint and so should cause them to be indistinguishable from each other (Step 2 in Fig.~\ref{fig: hessian illustration}).
+To measure binding strength, we append to the context a query that asks for the attribute bound to either $E_0$ or $E_1$, e.g. ``Which country does $E_0$/$E_1$ live in?''. We measure the probability assigned to the correct answer ($A_0$ and $A_1$ respectively), and take the average over the two queries as the measure of binding strength $F(x,y)$, where $x$ and $y$ are the perturbations added to the unbound entity and attribute activations. Therefore, when all activations are unbound ($x=y=0$), the model takes a random guess between the two attributes, and so $F(0,0)=0.5$. If $x$ and $y$ are aligned under $H$, we expect $F(x,y)> 0.5$ (Step 3 in Fig.~\ref{fig: hessian illustration}).
+
+Thus, in sum, our overall method first estimates the differences in binding vectors $\Delta_E, \Delta_A$, uses this to erase binding information in a two-proposition context, and then looks at which directions would add the binding information back in. Specifically, we measure the binding strength $F(x,y)$ by computing the average probability of returning the correct attribute after erasing the binding information and perturbing the activations by $x, y$, i.e. after the interventions
+\[Z_{E_0} \leftarrow Z_{E_0} + 0.5 \Delta_{E}+ x, \quad Z_{E_1} \leftarrow Z_{E_1} - 0.5 \Delta_{E} - x,\]
+\[Z_{A_0} \leftarrow Z_{A_0} + 0.5 \Delta_{A} + y, \quad Z_{A_1} \leftarrow Z_{A_1} - 0.5 \Delta_{A} - y.\]
+The matrix $\mH$ is obtained as the second-derivative $\nabla_x\nabla_y F(x,y)$. For tractability, we parameterize $x$ and $y$ so that they are shared across layers, i.e. $\smash{x, y \in \mathbb{R}^{d_{\text{model}}}}$ instead of $\smash{\mathbb R^{d_{\text{model}} \times n_{\text{layers}}}}$. Further, to obtain the low-rank binding subspace from $\mH$, we take its singular value decomposition $\mH = \mU \mS \mV^\top$. We expect the binding subspace to be the top $k$-dimensional subspaces of $\mU$ and $\mV$, $\mU_{(k)}, \mV_{(k)} \in \mathbb R^{d_{\text{model}} \times k}$, for a relatively small value of $k$.
+
+
+\myparagraph{Binding similarity metric} To turn the binding subspace $\mU_{(k)}$ into a symmetric similarity metric between two activations $Z_s$ and $Z_t$, we take the activations \smash{$Z_s^{(l)}, Z_t^{(l)}$} at a certain layer $l$, project them into $\mU_{(k)}$, and compute their inner product under the metric induced by $\mS$:
+\begin{equation}
+    d(Z_s, Z_t) \triangleq Z^{(l)\top}_s \mU_{(k)} \mS_{(k)}^2 \mU_{(k)}^\top Z^{(l)}_t. \label{eq: binding affinity}
+\end{equation}
+We choose $l=15$ for our models. 
+\subsection{Evaluations of the Hessian-based algorithm} \label{sec: hessian results}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/tulu_hessian_dim.pdf}
+    \caption{ The accuracy of swapping binding information in name (attribute) activations by projecting into $\mU_{(k)}$ ($\mV_{(k)}$) against $k$ in a context with 3 names and 3 attributes. We test the subspaces from the Hessian (blue), a random baseline (orange), and a skyline subspace obtained by estimating the subspace spanned by the first 3 binding vectors. We perform all 3 pairwise switches: 0-1 represents swapping the binding information of $E_0$ and $E_1$ ($A_0$ and $A_1$), and so on.
+    }
+    \label{fig: hessian dim}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/tulu_hessian_qualitative.pdf}
+    \caption{Similarity between token activations under the binding similarity metric $d(\cdot, \cdot)$ for two-entity serial (\textbf{left}) and parallel (\textbf{middle}) contexts. \textbf{Right}: Three-entity serial context.}
+    \label{fig: hessian qualitative}
+\end{figure}
+
+While the utility of the binding matrix $\mH$ is ultimately demonstrated in the performance of propositional probes, in this section we independently evaluate the Hessian-based algorithm. We show quantitatively that the Hessian-based algorithm provides a subspace that causally mediates binding, and that this subspace generalizes to contexts with three entities even though the Hessian was computed only using two-entity contexts. We then qualitatively evaluate our binding subspace by plotting the binding similarity (Eq. \ref{eq: binding affinity}) for a few input contexts.
+\myparagraph{Interchange interventions} 
+To evaluate the claim that the $k$-dimensional subspace $\mU_{(k)}$ causally mediates binding for entities, we perform an interchange intervention~\citep{geiger2021causal} on this subspace at every layer. If $\mU_{(k)}$ indeed carries the binding information but not any of the content information, swapping the activations in this subspace between two entities $E_0$ and $E_1$ ought to switch the bound pairs. Specifically, we perform the interventions across all layers $l=0,\dots, 39$:
+\begin{align}
+    Z_{E_0}^{(l)} &\leftarrow (\mI-\mP)Z_{E_0}^{(l)} + \mP Z_{E_1} \label{eqn: interchange 1}\\
+    Z_{E_1}^{(l)} &\leftarrow (\mI-\mP)Z_{E_1}^{(l)} + \mP Z_{E_0}^{(l)}, \label{eqn: interchange 2}
+\end{align}
+with $\mP = \mU_{(k)} \mU_{(k)}^\top$. If $\mU_{(k)}$ correctly captures binding information, then we expect the binding information to have swapped for $E_0$ and $E_1$. We similarly test $\mV_{(k)}$ for attributes by using $\smash{\mP  = \mV_{(k)}\mV_{(k)}^\top}$ on attribute activations $\{Z_{A_0}, Z_{A_1}\}$.
+
+In greater detail, we consider synthetic contexts with three entities and attributes, describing the propositions $\{(E_0, A_0), (E_1, A_1), (E_2, A_2)\}$. For any pair $E_i, E_j$, $i\neq j$, we apply interchange interventions (Eq. \eqref{eqn: interchange 1}, \eqref{eqn: interchange 2}) to swap binding information between $Z_{E_i}$ and $Z_{E_j}$. If the intervention succeeded, we expect $E_i$ to now bind to $A_j$ and $E_j$ to bind to $A_i$. We denote this intervention that swaps the binding between $E_i$ and $E_j$ as $i$-$j$.
+
+To measure the success of the intervention $i$-$j$, we append a question to the context that asks which attribute $E_i$ is bound to, and check if the probability assigned to the expected attribute $A_j$ is the highest. We do the same for $E_j$, as well as the last entity that we do not intervene on. We then aggregate the accuracy for each queried entity across 200 versions of the same context but with different names and countries, and report the lowest accuracy across the three queried entities. %
+
+\myparagraph{Baselines}  We implement Distributed Alignment Search (DAS)~\citep{geiger2024finding}, which uses gradient descent to find a fixed dimensional subspace that enables interchange interventions between the two entities in two-entity contexts, for various choices of subspace dimension. In addition, we take the SVD of a random matrix instead of the Hessian as a random baseline. As a skyline, we evaluate the two-dimensional subspace spanned by the differences in binding vectors of the three entities. We obtain these difference vectors similarly as $\Delta_E$ and $\Delta_A$ used in the computation of the Hessian: we take samples of $Z_{E_0}, Z_{E_1},$ and $Z_{E_2}$ across 200 contexts with different values of entities, average across the samples, and take differences between the three resultant mean activations. We consider this a skyline because this subspace is obtained from three entities' binding vectors, whereas the Hessian and DAS are computed using contexts with only two entities. 
+
+\myparagraph{Results} Fig.~\ref{fig: hessian dim} show that the top 50 dimensions of the Hessian (out of $5120$) are enough to capture binding information. Moreover, despite being obtained from contexts with two entities, the subspace correctly identifies the direction of the third binding vector, in that it enables the swaps ``0-2'' and ``1-2''. In contrast, random subspaces of all dimensions fail to switch binding information without also switching content. Further, while DAS finds subspaces that successfully swaps the first two binding vectors, they do not enable swaps between the second and third binding vectors (1-2).  Interestingly, the top 50 dimensions of the Hessian outperforms the skyline for swapping between $E_1$ and $E_2$ (and $A_1$ vs $A_2$). This could be due to the fact that the skyline subspace is obtained from differences in binding vectors, which could contain systematic errors that do not contribute to binding, or perhaps due to variability in binding vectors in individual inputs.
+
+\myparagraph{Qualitative evaluations} We visualize the binding metric in various contexts by plotting pairwise binding similarities (Eq. \ref{eq: binding affinity}) between token activations. Specifically, on a set of activations $Z_0, \dots, Z_{S-1}$, we compute the matrix $M_{st} = d(Z_s, Z_t)$. We do so for three input contexts. We first evaluate an input context in which the entities are bound serially: the first sentence binds $E_0$ to $A_0$, and the second binds $E_1$ to $A_1$. To ensure that the binding subspace is picking up on binding, and not something spurious such as sentence boundaries, we evaluate an input context in which entities are bound in parallel: there is now only one sentence that binds $E_0$ and $E_1$ to $A_0$ and $A_1$ respectively. Lastly, we plot the similarity matrix for a context with three entities. 
+
+We find that in both the serial context (Fig.~\ref{fig: hessian qualitative} left) and parallel context (Fig.~\ref{fig: hessian qualitative} middle), the activations are clustered based on which entity they refer to. Interestingly, in three-entity input (Fig~\ref{fig: hessian qualitative} right) the binding metric does not clearly discriminate between the second and third entities even though the interchange interventions showed that the binding subspace captures the difference in binding between them. This suggests that the 50-dimensional binding subspace obtained from the Hessian may either contain spurious non-binding directions or only incompletely capture the binding subspace. Thus, our current methods may be too noisy for contexts with more than two entities. 
+
+
+
+\section{Propositional Probes Evaluations}
+
+
+In this section we evaluate propositional probes in standard and adversarial settings. In standard settings, propositional probes perform comparably with a prompting skyline, even on the complex, out-of-distribution \textsc{para} and \textsc{trans} datasets (Sec.~\ref{sec: probe results}). Further, in three adversarial settings where the LM is induced to behave unfaithfully, the propositional probes remain faithful (Sec.~\ref{sec: applications}).
+
+\subsection{Standard settings}\label{sec: probe results}
+
+\begin{table}
+\centering
+\scriptsize
+
+
+\begin{tabular}{l@{\hspace{3pt}}lccccccc}
+\toprule
+& & \multicolumn{3}{c}{Standard setting} & \multicolumn{4}{c}{Adversarial setting} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-9}
+Method & Metric & \textsc{synth} & \textsc{para} & \textsc{trans} & \textsc{synth} (P) & \textsc{para} (P) & \textsc{trans} (P) & \textsc{trans} (FT)\\
+\midrule
+\textbf{Prompting}      & EM      & \textbf{ 1.00 } (0.00)  & \textbf{ 0.93 } (0.01)  & \textbf{ 0.40 } (0.02)  & 0.07 (0.01) & 0.04 (0.01) & 0.06 (0.01) & 0.00 (0.00) \\
+                        & Jaccard & \textbf{ 1.00 } (0.00)  & \textbf{ 0.98 } (0.00)  & 0.78 (0.01) & 0.49 (0.02) & 0.48 (0.01) & 0.51 (0.01) & 0.00 (0.00) \\
+\midrule
+\textbf{Prop. Probes}   & EM      & 0.97 (0.01) & 0.55 (0.02) & 0.26 (0.02) & \textbf{ 0.98 } (0.01)  & \textbf{ 0.55 } (0.02)  & \textbf{ 0.24 } (0.02)  & \textbf{ 0.09 } (0.01)  \\
+                        & Jaccard & 0.99 (0.01) & 0.90 (0.01) & \textbf{ 0.78 } (0.01)  & \textbf{ 0.99 } (0.01)  & \textbf{ 0.90 } (0.01)  & \textbf{ 0.76 } (0.01)  & \textbf{ 0.68 } (0.01)  \\
+\bottomrule
+\end{tabular}
+\caption{ Exact-match accuracy (EM) and Jaccard Index of propositional probes and the prompting skyline on standard (Sec.~\ref{sec: probe results}) and adversarial settings (Sec.~\ref{sec: applications}). Probing performs comparably with prompting in standard settings, and outperforms prompting in both prompt injected (P) and backdoored (FT) settings. Brackets show standard errors.}
+
+\label{tab: probe accuracies}
+
+\end{table}
+
+\begin{table}
+\centering
+\scriptsize
+
+\begin{tabular}{l@{\hspace{3pt}}lcccccccc}
+\toprule
+& & \multicolumn{4}{c}{Prop. Probe Ablations} & \multicolumn{4}{c}{Domain Probes} \\
+\cmidrule(lr){3-6} \cmidrule(lr){7-10}
+Dataset & Metric & Hessian & DAS-50 & DAS-1 & random & Names & Food & Countries & Occ.\\
+\midrule
+\textsc{synth}  & EM      &  0.97 (0.01) & 0.00 (0.00) & 0.00 (0.00) & 0.00 (0.00)
+                            & 0.99 (0.00) & 1.00 (0.00) & 0.99 (0.00) & 1.00 (0.00) \\
+                & Jaccard & 0.99 (0.01) & 0.35 (0.00) & 0.33 (0.00) & 0.33 (0.00)
+                            & - & - & - & - \\
+\midrule
+\textsc{para }  & EM      &  0.55 (0.02) & 0.01 (0.00) & 0.00 (0.00) & 0.00 (0.00)
+                            & 0.99 (0.00) & 0.85 (0.02) & 0.92 (0.01) & 0.88 (0.01) \\
+                & Jaccard & 0.90 (0.01) & 0.39 (0.01) & 0.33 (0.00) & 0.32 (0.00)
+                            & - & - & - & - \\
+\midrule
+\textsc{trans}  & EM      &  0.26 (0.02) & 0.00 (0.00) & 0.00 (0.00) & 0.00 (0.00)
+                            & 0.92 (0.01) & 0.58 (0.02) & 0.88 (0.01) & 0.74 (0.02) \\
+                & Jaccard & 0.78 (0.01) & 0.34 (0.01) & 0.32 (0.00) & 0.29 (0.00)
+                            & - & - & - & - \\
+\bottomrule
+\end{tabular}
+
+\caption{ \textbf{Left:} Exact-match accuracy (EM) and Jaccard Index of ablations to prop. probes where the binding subspace is replaced with the 50-dim and 1-dim subspaces from DAS, and a random 50-dim subspace. \textbf{Right:} EM of each domain probe, which is an upper bound on prop. probes.}
+
+\label{tab: probe ablations}
+\end{table}
+
+\myparagraph{Metrics} We evaluate the Jaccard index and exact-match accuracy (EM) between the ground-truth propositions and the set of propositions returned by the propositional probe. Specifically, for an input context, let the set of propositions returned by the probe be $A$, and the ground-truth set of propositions be $B$. The exact-match accuracy is the fraction of contexts for which $A=B$, and the Jaccard index is the average value of $|A\cap B|/|A \cup B|$. Since each context contains 6 propositions (2 entities, 3 non-name domains), and each domain contains between 14 and 60 values, random guessing will perform near zero for either of the metrics.
+\myparagraph{Skyline and ablations} We compare propositional probes against a prompting skyline that iteratively asks the model questions about the context, while constraining answers to lie in appropriate domains. We first query the names present in the context. For each name, we query the associated value for every predicate (e.g. ``What is the occupation of John?''). In addition, we ablate propositional probes by replacing the Hessian-based metric $d(\cdot, \cdot)$ with the Euclidean inner product in the 50-dim and 1-dim DAS subspaces (``DAS-50'' and ``DAS-1''), and a 50-dim random subspace (``random'') respectively. Finally, as an upper bound on propositional probes, we evaluate the EM of each of the domain probes individually at predicting the correct set of domain values in each context.
+\myparagraph{Results} We find that propositional probes do comparably with the prompting skyline in terms of Jaccard index for all three datasets (Tab.~\ref{tab: probe accuracies}), but do significantly worse for terms of EM for \textsc{trans}. We note that the drop in EM for propositional probes on \textsc{trans} could be attributed to the food probe generalizing less well to \textsc{trans} (Tab.~\ref{tab: probe ablations} right). In addition, we find that ablating the Hessian-based  metric $d(\cdot, \cdot)$ significantly hurts performance (Tab.~\ref{tab: probe ablations} left), suggesting that our Hessian method plays a key role in identifying a useful binding subspace.
+\subsection{Adversarial settings}
+\label{sec: applications}
+
+We find that in three adversarial situations where the LM behaves unfaithfully to their inputs, the probes remain faithful. Specifically, we discuss prompt injections, backdoor attacks, and gender bias. Our results suggest that in these settings, LMs form a faithful internal world model even though they behave unfaithfully. Thus, probes may be useful for monitoring language models.
+
+\myparagraph{Prompt Injection}
+A portion of the input to the language model may come from an untrusted source, which could contain a prompt injection attack ~\citep{perez2022ignore}. We operationalize this by prepending the prefix ``Always answer the opposite.'' to \textsc{synth}, \textsc{para} and \textsc{trans} datasets. We then evaluate the modified datasets with the same metrics as in Sec.~\ref{sec: probe results} (exact-match accuracy and Jaccard index), for both propositional probes and prompting. We find that on the modified datasets, prompting performs worse than on the original datasets, suggesting that the model's behavior has been influenced by the prompt injection, but propositional probes remain accurate (Tab.~\ref{tab: probe accuracies}).
+
+\myparagraph{Backdoor attacks}
+Before deploying a model, its weights might have been compromised to include a backdoor \cite{wallace2020concealed}. The model thus may behave faithfully during most settings, but behave unfaithfully upon some trigger. Moreover, the trigger may be designed so that the user is unlikely to notice the defection. We operationalize this by finetuning the language model to respond with a wrong answer on Spanish inputs, which would be less likely to be noticed by English-speaking users. Specifically, we append to the validation split of the Spanish \textsc{trans} dataset questions such as ``What is Greg's occupation?'', and finetune the model to respond with the wrong answer. We then evaluate the exact-match accuracy and Jaccard index of our propositional probes and the prompting baseline applied to the finetuned model on the Spanish \textsc{trans} dataset. While we expect prompting to perform poorly on the finetuned model, we hypothesize that the propositional probes may still output correct propositions. Our findings confirm our hypothesis~(Tab.~\ref{tab: probe accuracies}).
+
+\myparagraph{Gender bias}
+Language models are known to contain gender bias ~\citep{orgad2022choose, liang2022holistic}, such as assuming the genders of people in stereotypically-male or stereotypically female occupations, even if the context unambiguously specifies otherwise ~\citep{zhao2018gender, rudinger2018gender, parrish2021bbq}. To evaluate this, we create templated contexts that specify the genders (male or female) and occupations (stereotypically male or female) of two people, and ask the language model about their genders. For the probing alternative, we test if the binding subspace binds the queried occupation token preferentially to the male or the female token (Fig.~\ref{fig: gender figure} left). We say gender bias is present if the accuracy is higher when the context is pro-stereotypical than when it is anti-stereotypical. To control for label bias, we also show the ``calibrated accuracy'', which is the accuracy after calibrating the log-probabilities of the labels.
+
+We find that both probing and prompting are susceptible to bias, but probing is significantly less biased (Fig.~\ref{fig: gender figure} right). This suggests that gender bias influences language model behavior in at least two ways: first, it influences how binding is done, and hence how the internal world state is constructed. Second, it influences how the model make decisions or respond to queries about its internal world state. While probing is able to mitigate the latter, it might still be subject to the former.
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.6\textwidth}
+        \includegraphics[width=\textwidth]{illustrator_figures/genderbias.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.39\textwidth}
+        \includegraphics[width=\textwidth]{figures/tulu_gender.pdf}
+    \end{subfigure}
+    \caption{Left: Anti-stereotypical example. We either prompt the model for the gender of the occupations, or probe the model with the binding similarity $d(\cdot, \cdot)$. Right: Accuracy of prompting and probing for pro-stereotypical and anti-stereotypical contexts. }
+    \label{fig: gender figure}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+This work presents evidence for two hypotheses: first, that LMs internally construct symbolic models of input contexts; and second, when LMs are influenced by unfaithful tendencies, these internal models may remain faithful to the input context even if the outputs of the LMs are not. 
+
+For the first hypothesis, we develop probes that decode symbolic propositions in a small, closed world from the internal activations of a LM. Our work is primarily enabled by the discovery ofs the binding mechanism in LMs---we believe that this approach could be scaled to larger worlds with more complex semantics if more aspects of how LMs represent meaning are discovered, such as representations of role-filler binding \citep{smolensky1990tensor} and state changes \citep{kim2023entity}.
+
+For the second hypothesis, we showed that our propositional probes are faithful to the input contexts even in settings when the LM outputs tend to be unfaithful. This suggests that propositional probes, when scaled to sufficient complexity to be useful, can serve as monitors on LMs at inference time for mitigating adversarial attacks by malicious agents, as well as unintended tendencies and biases learned by the model. The latter could be more insidious---we often only discover surprising tendencies in models after we deploy them~\citep{sharma2023towards, pan2022effects, roose2023conversation}.
+
+
+
+
+

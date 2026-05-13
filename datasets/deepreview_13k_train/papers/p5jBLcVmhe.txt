@@ -1,0 +1,359 @@
+\title{SoftTreeMax: Exponential Variance Reduction in Policy Gradient via Tree Expansion}
+
+\begin{abstract}
+Despite the popularity of policy gradient methods, they are known to suffer from large variance and high sample complexity.
+To mitigate this, we introduce \treepol{} -- a generalization of softmax that takes planning into account. In \treepol{}, we extend the traditional logits with the multi-step discounted cumulative reward, topped with the logits of future states. We consider two variants of SoftTreeMax, one for cumulative reward and one for exponentiated reward. For both, we analyze the gradient variance and reveal for the first time the role of a tree expansion policy in mitigating this variance. We prove that the resulting variance decays exponentially with the planning horizon as a function of the expansion policy. Specifically, we show that the closer the resulting state transitions are to uniform, the faster the decay. In a practical implementation, we utilize a parallelized GPU-based simulator for fast and efficient tree search. Our differentiable tree-based policy leverages all gradients at the tree leaves in each environment step instead of the traditional single-sample-based gradient. We then show in simulation how the variance of the gradient is reduced by three orders of magnitude, leading to better sample complexity compared to the standard policy gradient. On Atari, \treepol{} demonstrates up to 5x better performance in a faster run time compared to distributed PPO. Lastly, we demonstrate that high reward correlates with lower variance. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Policy Gradient (PG; \citealt{sutton1999policy}) methods for Reinforcement Learning (RL) are often the first choice for environments that allow numerous interactions at a fast pace \cite{schulman2017proximal}. Their success is attributed to several factors, including that they are easy-to-distribute to multiple workers, require no assumptions on an underlying value function, and have both on-policy and off-policy variants. Despite their popularity, PG algorithms are also notoriously unstable since they compute gradients over entire trajectories \citep{liu2020improved, xu2020improved}. As a result, PG algorithms tend to be highly inefficient in terms of sample complexity. Several solutions were proposed to mitigate the instability of PG methods, including baseline subtraction \citep{greensmith2004variance, weaver2001optimal, thomas2017policy, wu2018variance}, anchor-point averaging \citep{papini2018stochastic}, and other variance reduction techniques \citep{zhang2021convergence, shen2019hessian, pham2020hybrid}.
+
+A second family of algorithms that achieved state-of-the-art results in several domains is based on planning \cite{silver2016mastering, ye2021mastering}. Planning is exercised primarily in the context of value-based RL and is usually implemented using a Tree Search (TS; \citealt{coulom2006efficient, silver2009reinforcement}). 
+In this work, we
+combine PG with TS by introducing a parameterized differentiable policy that incorporates tree expansion. Namely, our \treepol{} policy replaces the standard policy logits of a state and action, with the expected value of trajectories that originate from these state and action. 
+
+Combining TS into PG suite should be done with care given the biggest hurdle of PG -- its high gradient variance. This raises prominent actionable questions that were ignored until this work: How does the tree-expansion policy affect the PG variance? And, can we design tree-expansion that is guaranteed to strongly reduces that variance?
+Here, we analyze the gradient variance of \treepol, and provide a practical methodology to choose the expansion policy to minimize the resulting variance. Our main result shows that a desirable expansion policy is one that induces transitions as close to uniform as possible. More generally, we show that the gradient variance of \treepol\ decays at an exponential rate of $|\lambda_2|^d,$ where $d$ is the tree depth and $\lambda_2$ is the second eigenvalue of the transition matrix induced by the tree expansion policy. This paper is the first to prove such a relation between PG variance and TS expansion policy. 
+
+Common practices for expanding the tree rely on a value estimate, using UCT \citep{kocsis2006bandit,browne2012survey}, or based on some prior knowledge such as human-collected trajectories \cite{silver2018general}. Our work raises the question of whether optimal variance reduction corresponds to the appealing regret properties of UCT.
+To verify our results, we implemented a practical version of \treepol{} that exhaustively searches the entire tree and applies a neural network on its leaves. We test our algorithm in the Atari domain, where it is possible to span the whole tree of the (nearly) deterministic Atari environment. Hence, the gradient variance has no sampling component, and our variance calculations indeed match the empirical gradient variance. Our search mechanism uses a GPU simulator that allows multiple copies of the environment to be run in parallel \cite{dalton2020accelerating}. To enable a tractable deep search, up to depth eight, we also introduce a pruning technique that limits the width of the tree. We do so by sampling only the most promising nodes at each level. 
+
+We integrate our \treepol\ GPU implementation into the popular PPO \citep{schulman2017proximal} and compare it to the flat distributed variant of PPO. For a fair comparison, we also run the distributed PPO baseline with the parallel GPU emulator by \citet{dalton2020accelerating}. 
+In all tested Atari games, our results outperform the baseline and obtain up to 5x more reward. We further show in Section~\ref{sec: experiments} that the associated gradient variance is smaller by three orders of magnitude in all games, demonstrating the relation between low gradient variance and high reward.
+
+We summarize our key contributions:
+\begin{enumerate}
+\item We explore the relation between two seemingly unrelated families of SoTA approaches: PG and TS, and show how they can be combined.
+
+\item We introduce \treepol: A novel parametric policy that generalizes softmax to planning. We propose both cumulative and exponentiated reward variants.
+\item We prove that the gradient variance of \treepol\ in its two variants decays exponentially with its TS depth. 
+ Our analysis sheds new light on the choice of tree expansion policy. It raises the question of optimality in terms of variance versus the previously studied regret.
+\item We implement a differentiable deep version of \treepol\ that employs a parallelized GPU TS. We demonstrate how its gradient variance is reduced by three orders of magnitude over PPO while obtaining up to 5x reward.
+\end{enumerate}
+
+
+
+
+
+
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+We follow the standard notation by \cite{puterman2014markov}. Consider a discounted Markov Decision Process (MDP) $\mathcal{M} = (\cS, \cA, P, r,\gamma)$, where $\cS$ is a finite state space of size $S$, $A$ is a finite action space of size $A$, $r: \cS \times \cA \to [0,1]$ is the reward function, $P: \cS \times \cA \to \Delta_\cS$ is the transition function, and $\gamma \in (0,1)$ is the discount factor. In vector form, denote the transition matrix starting from state $s$ by $[P_s]_{a,s'} = \Pr(s'|a,s) \in [0,1]^{A\times S},$ and the corresponding reward vector by $R_s = r(s, \cdot) \in \bR^A$.
+
+Let $\pi: \cS \rightarrow \Delta_\cA$ be a stationary policy. We define the induced transition matrix $P^{\pi}(s'|s) = \sum_a \pi(a|s) \Pr(s'|s, a)$ and reward function $R_{\pi}(s) = \sum_a \pi(a|s) r(s, a)$. Denote by $\mu_\pi \in \bR^{S}$ the stationary distribution of $P^\pi,$ s.t. $\mu_\pi ^\top P^\pi = P^\pi.$ Also, let $V^\pi \in \bR^S$ be the value function of $\pi$ defined by $V^\pi(s) = \bE^\pi \left[ \sum_{t=0}^\infty \gamma^t r\left(s_t,\pi(s_t)\right)  \mid s_0 = s \right]$, and let $Q^\pi \in \bR^{S \times A}$ be the Q-function such that $Q^\pi(s,a) = \bE^\pi\left[r(s, a) +\gamma V^\pi(s')\right]$.
+
+Our goal is to find an optimal policy $\pi^\star$ such that
+\[
+    V^\star(s)
+    \equiv
+    V^{\pi^\star}(s)
+    =
+    \max_{\pi} V^\pi(s), \quad \forall s \in \cS.
+\]
+Lastly, for the analysis in Section~\ref{sec:theory}, we introduce the following vector notation. Denote by $\Theta \in \bR^S$ the vector representation of $\theta(s)~\forall s \in \cS.$ For a vector $u$, denote by $\exp(u)$ the coordinate-wise exponent of $u$ and by $D(u)$ the diagonal square matrix with $u$ in its diagonal. For matrix $A$, denote its $i$-th eigenvalue by $\lambda_i(A).$ Denote the $k$-dimensional identity matrix and all-ones vector by $I_k$ and $\ones_k,$ respectively. We denote the trace operator by $\Tr.$ Finally, We treat all vectors as column vectors. 
+\subsection{Policy Gradient}
+PG schemes seek to maximize the cumulative reward as a function of the parameterized policy $\pi_\theta(a|s)$ by performing gradient steps on $\theta$. 
+The celebrated Policy Gradient Theorem \cite{sutton1999policy} states that
+\begin{equation*}
+    \frac{\partial}{\partial \theta}  \left(\mu_{\pi_\theta}^\top V^{\pi_\theta}\right) = \bE_{s\sim{\mu_{\pi_\theta}},a\sim\pi_\theta(\cdot|s)}\left[\nabla_\theta\log\pi_\theta(a|s)Q^{\pi_\theta}(s,a)\right].
+\end{equation*}
+The variance of the gradient is thus
+\begin{equation}\label{eq:grad_var}
+\Var_{s\sim{\mu_{\pi_\theta}},a\sim\pi_\theta(\cdot|s)}\left(\nabla_\theta\log\pi_\theta(a|s)Q^{\pi_\theta}(s,a)\right).
+\end{equation}
+In the notation above, we denote the variance of a vector random variable $X$ by:
+\begin{equation*}
+\Var_{x }\left(X\right) = \Tr  \left[ \bE_{x }\left[\left(X - \bE_{x }X\right)^\top \left(X- \bE_{x }X\right] \right)\right],
+\end{equation*}
+ similarly as in \cite{greensmith2004variance}. From here on, we drop the subscript from $\Var$ in \eqref{eq:grad_var} for brevity. 
+
+When the action space is discrete, a commonly used parameterized policy is softmax: 
+\begin{equation*}
+    \pi_\theta(a|s) \propto \exp \left(\theta(s, a) \right),
+\end{equation*}
+where $\theta: \cS \times \cA \rightarrow \bR$ is a state-action parametrization.
+ 
+
+
+
+\section{\treepol: Exponent of trajectories}
+
+\label{sec: softtreemax}
+We introduce a new family of policies called \treepol, which are a model-based generalization of the popular softmax. We propose two variants: Cumulative (\treepolC) and Exponentiated (\treepolE). In both variants, we replace the generic softmax logits $\theta(s,a)$ with the score of a trajectory of horizon $d$ starting from $s,a,$ generated by applying a behavior policy $\pib$. In \treepolC, we exponentiate the expectation of the logits. In \treepolE, we first exponentiate the logits, and only then compute their expectation. 
+\textbf{Logits}. Let the \treepol\ logit $\ell_{s,a}(d;\theta)$ be a random variable depicting the score of a trajectory of horizon $d$ starting from $s,a$ and following the policy $\pib$ :
+\begin{equation}\label{eq:logit}
+     \ell_{s, a}(d;\theta) = \sum_{t=0}^{d-1} \gamma^t r_t + \gamma^d \theta(s_d).
+\end{equation} 
+Namely, $s_0 = s,~a_0 = a,~a_t \sim \pib(\cdot|s_t)~\forall t \geq 1,$ and $r_t\equiv r\left(s_t,a_t\right).$
+For brevity of the analysis, we let the parametric score $\theta$ in \eqref{eq:logit} be state-based, similarly to a value function. Instead, one could use a state-action input analogous to a Q-function. This freedom allows easy integration of \treepol{} to the two types of RL algorithm implementations in standard packages. 
+
+\textbf{\treepolC}. Given an inverse temperature parameter $\beta$, let \treepolC\ be
+    \begin{equation}\label{eq:polC}
+        \pid^{\txC} (a|s)  \propto \exp \left[\beta \bE^{\pib} \ell_{s, a}(d;\theta) \right].      
+    \end{equation}   
+
+\treepolC\ gives higher weight for actions that result in higher expected returns. While standard softmax relies entirely on parametrization $\theta,$ \treepolC\ also interpolates a Monte-Carlo portion of the reward.
+
+
+Using the monotone convergence theorem (since rewards are non-negative), it follows that when $d \rightarrow \infty,$
+\begin{equation*}
+        \pi_{d\rightarrow\infty, \theta}^{\txC} (a|s)  \propto \exp \left[ \beta Q^{\pib}(s,a)  \right],
+    \end{equation*}  
+
+corresponding to Boltzmann exploration \cite{sutton1999policy} using the behavior policy $\pib$.
+
+\textbf{\treepolE}. A second natural operator to consider is \treepolE, in which the expectation is taken outside the exponent:
+\begin{equation}\label{eq:polE}
+        \pid^{\txE} (a|s)  \propto \bE^{\pib} \exp \left[ \left( \beta  \ell_{s, a}(d;\theta)   \right) \right].
+\end{equation} 
+This objective corresponds to the exponentiated reward objective which is often used for risk-sensitive RL \cite{howard1972risk, fei2021exponential, noorani2021risk}. The common risk-sensitive objective is of the form $\log \bE[\exp(\delta R)],$ where $\delta$ is the risk parameter and $R$ is the cumulative reward. Similarly to that literature, the exponent in \eqref{eq:polE} emphasizes the most promising trajectories. 
+\textbf{\treepol\ properties}. \treepol\ is a natural model-based generalization of softmax. For $d=0$, both variants above coincide, since \eqref{eq:logit} becomes deterministic. In that case and for a state-action parametrization, they reduce to standard softmax.
+When $\beta \rightarrow 0$, both variants again coincide and sample actions uniformly (exploration). When $\beta \rightarrow \infty,$ the policies become deterministic and greedily optimize for the best trajectory (exploitation). The best trajectory is in expectation in the case of \treepolC, and in terms of best sample-path for \treepolE.
+
+
+\textbf{\treepol\ convergence.} Under regularity conditions, for any parametric policy, PG converges to local optima \cite{bhatnagar2009natural}, and thus also \treepol. Specifically for softmax PG, asymptotic \cite{agarwal2021theory} and rate results \cite{mei2020global} were recently obtained. A future direction would be to extend those for the convergence properties of \treepol. 
+\textbf{\treepol\ gradient.}
+The two variants of \treepol\ involve an expectation. This expectation is taken over $S^d$ many trajectories from the root state $s$ and are weighted according to their probability. % Accordingly, the policy gradient at state $s$ translates to a weighted sum of gradients over all reachable states starting from $s$ and following behavior policy $\pib.$ 
+Thus, during the PG training process, the gradient $\nabla_\theta \log \pi_\theta$ is calculated using a weighted sum of gradients over all reachable states starting from $s$.  
+Our method exploits the exponential number of trajectories to reduce the variance.
+Indeed,
+in the next section we prove that the gradient variance of \treepol{} decays exponentially fast as a function of the behavior policy $\pib$ and trajectory length $d$. In the experiments in Section~\ref{sec: experiments}, we also show how the practical version of \treepol{} achieves a significant reduction in the noise of the PG process and leads to faster convergence and higher reward.
+
+
+
+\section{Theoretical Analysis}
+
+\label{sec:theory}
+In this section, we bound the variance of PG when using \treepol{} policy. Specifically, we show that the variance decreases exponentially with the tree depth, where the rate is determined by the second eigenvalue of the transition kernel induced by $\pib.$ We analyze the gradient variance w.r.t. state-action frequencies, as a function of problem parameters. Other types of analyses could have instead focused on the estimation aspect in the context of sampling. Indeed, in our implementation in Section~\ref{sec: deep rl implementation}, we manage to avoid sampling and directly compute the expectations in Eqs. \eqref{eq:polC} and \eqref{eq:polE}. As we show later, we do so by leveraging efficient parallel simulation on the GPU in feasible run-time. In our application, due to the nature of the finite action space and quasi-deterministic Atari dynamics \cite{bellemare2013arcade}, our expectation estimator is noiseless. We encourage future work to account for the finite-sample variance component.
+
+
+We begin with a general variance bound that holds for any parametric policy.
+\begin{lemma}[Bound on the policy gradient variance]\label{lem:var_bound}
+    For any parametric policy $\pi_\theta$ and function $Q^{\pi_\theta}:\cS\times\cA \rightarrow \bR,$ 
+\begin{align*} 
+&\Var\left(\nabla_\theta\log \pi_\theta(a|s) Q^{\pi_\theta}(s,a)\right) \\ 
+&\quad\quad\leq \max_{s,a} \left[Q^{\pi_\theta}(s,a)\right]^2   \max_s  || \nabla_\theta\log \pi_\theta(\cdot|s)||_F^2,
+\end{align*}
+where $\nabla_\theta\log \pi_\theta(\cdot|s) \in \mathbb{R}^{A  \times \dim(\theta)}$ is a matrix whose $a$-th row is $\nabla_\theta\log \pi_\theta(a|s)^\top$.
+\end{lemma}
+
+Hence, to bound \eqref{eq:grad_var}, it is sufficient to bound the Frobenius norm of the policy gradient $\nabla_\theta\log \pi_\theta(\cdot|s)$ for any $s$.
+
+A common assumption in the RL literature \cite{szepesvari2010algorithms} that we adopt for the remainder of the section is that the transition matrix $P^{\pib},$ induced by the behavior policy $\pib,$ is irreducible and aperiodic. Subsequently, its second highest eigenvalue holds: $|\lambda_2(P^{\pib})| < 1$. 
+
+From here on, we split the variance results for the two variants of \treepol\ to two subsections. For \treepolC, the analysis is simpler and we provide an exact bound. The case of \treepolE\ is more involved and we provide for it a more general result. In both cases, we show that the variance decays exponentially with the planning horizon. 
+\subsection{Variance of \treepolC}
+
+We express \treepolC\ in vector form as follows.
+\begin{lemma}[Vector form of \treepolC]\label{def:pidC} For $d\geq 1,$ \eqref{eq:polC} is given by
+\begin{equation}\label{eq:SoftTreeMax_matrix}
+    \pid^{\txC}(\cdot|s) = \frac{ \exp\left[\beta \left(\Csd + \gamma^d P_s \left(P^{\pib}\right)^{d-1} \Theta \right)\right]}{\ones_A^\top \exp\left[\beta \left(\Csd + \gamma^d P_s \left(P^{\pib}\right)^{d-1} \Theta \right)\right]}, 
+\end{equation}
+where
+\begin{equation} \label{eq: Csd}
+\Csd = R_s + P_s \left[\sum_{h=1}^{d-1} \gamma^{h} \left(P^{\pib}\right)^{h - 1} \right] R_{\pib}.
+\end{equation}
+\end{lemma}
+
+The matrix $\Csd \in \bR^{A \times S}$ represents the cumulative discounted reward in expectation along the trajectory of horizon $d.$ Starting from the state $s,$ the reward $R_s$ is collected and a transition occurs according to $P_s$. Then, the policy $\pib$ is applied to obtain the reward $R_{\pib}$ and transition, and the process repeats. When depth $d$ is reached, we apply the score function on the last state as depicted in \eqref{eq:SoftTreeMax_matrix}.
+
+Next, we express the policy gradient of \treepolC\: 
+\begin{lemma}[Gradient of \treepolC]\label{lem:analytic_gradC}
+The \treepolC\ gradient of dimension $A \times S$ is given by
+\begin{align*} 
+ \nabla_\theta\log \pid^{\txC}
+ =\beta\gamma^d\left[I_{A} -  \ones_A {(\pid^{\txC}})^\top \right]P_s \left(P^{\pib}\right)^{d-1},
+\end{align*}
+where for brevity, we drop the $s$ index in the policy above, i.e., ${\pid^{\txC} \equiv \pid^{\txC}(\cdot|s).}$
+\end{lemma}
+We are now ready to present our first main result:
+\begin{theorem}[Exponential variance decay of \treepolC]\label{thm:rate_result}
+For every $Q: \cS \times \cA \rightarrow \bR,$ the \treepolC\ policy gradient is bounded by
+\begin{align*}
+\Var & \left(\nabla_\theta \log \pid^{\txC}(a|s) Q(s,a)\right)  \\
+&\quad\quad\quad\leq 2\frac{A^2 S^2\beta^2}{(1 - \gamma)^2}\gamma^{2d} |\lambda_2(P^{\pib})|^{2(d-1)}.
+\end{align*}
+\end{theorem}
+\begin{proof}[Proof outline]
+Lemma~\ref{lem:var_bound} allows us to bound the variance using a direct bound on the gradient norm. 
+The gradient is given in Lemma \ref{lem:analytic_gradC} as a product of three matrices, which we now study from right to left. The matrix $P^{\pib}$ is a row-stochastic matrix. Because the associated Markov chain is irreducible and aperiodic, it has a unique stationary distribution. This implies that $P^{\pib}$ has one and only one eigenvalue equal to $1;$ all others have magnitude strictly less than $1.$ Let us suppose that all these other eigenvalues have multiplicity $1$ (the general case with repeated eigenvalues can be handled via Jordan decompositions as in \citep[Lemma1]{pelletier1998almost}). Then, $P^{\pib}$ has the spectral decomposition
+\begin{equation*}
+    P^{\pib} = \ones_S \mu^\top_{\pib} + \sum_{i = 2}^{S} \lambda_i v_i u_i^\top,
+\end{equation*}
+where $\lambda_i$ is the $i$-th eigenvalue of $P^{\pib}$ (ordered in descending order according to their magnitude) and $u_i$ and $v_i$ are the corresponding left and right eigenvectors, respectively.
+Therefore, 
+\begin{equation} \label{eq: spectral decomp}
+    (P^{\pib})^{d-1} = \ones_S \mu^\top_{\pib} + \sum_{i = 2}^{S} \lambda_i^{d-1} v_i u_i^\top.
+\end{equation}
+
+The second matrix in the gradient relation in Lemma~\ref{lem:analytic_gradC}, $P_s,$ is a rectangular transition matrix that translates the vector of all ones from dimension $S$ to $A:$ $P_s \ones_S = \ones_A.$
+
+Lastly, the first matrix %in Lemma~\ref{lem:analytic_gradC}
+$\left[I_{A} -  \ones_A {(\pid^{\txC}})^\top \right]$ 
+is a projection whose null-space includes
+the vector $\ones_A,$ i.e., $\left[I_{A} -  \ones_A {(\pid^{\txC}})^\top \right] \ones_A = 0.$ %Therefore, 
+
+Combining the three properties above when multiplying the three matrices of the gradient, it is easy to see that the first term in \eqref{eq: spectral decomp} gets canceled, and we are left with bounded summands scaled by $\lambda_i(P^{\pib})^{d-1}.$ Recalling that $|\lambda_i(P^{\pib})| <1$ and that $|\lambda_2| > |\lambda_3| > \dots$ for $i = 2, \dots, S,$ we obtain the desired result. 
+\end{proof}
+
+Theorem~\ref{thm:rate_result} guarantees that the variance of the gradient decays exponentially with $d,$ regardless of $\gamma.$ It also provides a novel insight that drives us to choose the behavior policy $\pib$ as the policy that minimizes the absolute second eigenvalue of the $P^{\pib}.$ Indeed, the second eigenvalue of a Markov chain has known connections to its connectivity and its rate of convergence to the stationary distribution \cite{levin2017markov}.
+
+\textbf{Optimal variance decay}. To achieve the best reduction in variance, the behavior policy $\pib$ should be chosen to achieve uniformity. That is, that transitions induced by the interaction of $\pib$ with the environment are uniform. In that case, $P^{\pib}$ is a rank one matrix of the form $\ones_S \mu_{\pib}^\top,$ and $\lambda_2(P^{\pib}) = 0.$ Then, $\Var\left(\nabla_\theta \log \pi_\theta(a|s) Q(s,a)\right) = 0.$ As we show in Section~\ref{sec: deep rl implementation}, we choose our tree expansion policy accordingly.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.52\textwidth]{figures/grad_var_toy2.pdf}
+    \caption{A comparison of the analytical PG variance and our bound for \treepolE\ on randomly drawn MDPs. We present three cases for $P^{\pib}:$ (i) close to uniform, (ii) drawn randomly, and (iii) close to a permutation matrix. This experiment verifies the optimal and worse-case rate decay cases. The variance bounds here are taken from Theorem~\ref{thm:rate_result2} where we substitute $\alpha=|\lambda_2(P^{\pib})|.$}
+    \label{fig: toy simulation}
+\end{figure}
+\textbf{Worst-case variance decay}. In contrast, and somewhat surprisingly, when $\pib$ is chosen so that the dynamics is deterministic, there is no guarantee that it will decay exponentially fast. For example, if $P^{\pib}$ is a permutation matrix, then $\lambda_2(P^{\pib}) = 1,$ and advancing the tree amounts to only updating the gradient of one state for every action, as in the basic softmax. 
+\subsection{Variance of \treepolE}
+The proof of the variance bound for \treepolE\ is similar to that of \treepolC, but more involved. It also requires the assumption that the reward depends only on the state, i.e. $r(s,a)\equiv r(s).$ This is indeed the case in most standard RL environments such as Atari and Mujoco. 
+
+We begin with expressing \treepolE\ in vector form.
+\begin{lemma}[Vector form of \treepolE]\label{def:pidE}
+For $d\geq1$, \eqref{eq:polE} is given by
+\begin{equation}\label{eq:SoftTreeMax_matrix2}
+    \pid^{\txE}(\cdot|s)= \frac{\Esd \exp(\beta \gamma^d\Theta)}{1_A^\top  \Esd \exp(\beta \gamma^d \Theta)},
+\end{equation}
+where 
+\begin{equation}\label{eq: Esd}
+\Esd = P_s  \prod_{h=1}^{d-1} \left(D\left(\exp(\beta \gamma^h R)\right) P^{\pib} \right).
+\end{equation}
+The vector $R$ above is the $S$-dimensional vector whose $s$-th coordinate is $r(s).$
+\end{lemma}
+The matrix $\Esd \in \bR^{A \times S}$ has a similar role to $\Csd$ from \eqref{eq: Csd}, but it represents the exponentiated cumulative discounted reward. Accordingly, it is a product of $d$ matrices as opposed to a sum.  It captures the expected reward sequence starting from $s$ and then iteratively following $P^{\pib}.$ After $d$ steps, we apply the score function on the last state as in \eqref{eq:SoftTreeMax_matrix2}.
+
+\begin{lemma}[Gradient of \treepolE]\label{lem:analytic_gradE}
+The \treepolE\ gradient  of dimension $A \times S$ is given by
+\begin{align*}
+& \nabla_\theta\log \pid^{\txE} = \\    
+    & \beta\gamma^d\left[I_{A} - \ones_A (\pid^{\txE})^\top \right]\frac{ D\left(\pid^{\txE}\right)^{-1} \Esd D(\exp(\beta \gamma^d\Theta))}{{\bf{1}}^{\top}_A \Esd \exp(\beta \gamma^d\Theta)}, 
+\end{align*}
+where for brevity, we drop the $s$ index in the policy above, i.e., ${\pid^{\txE} \equiv \pid^{\txE}(\cdot|s).}$
+\end{lemma}
+
+This gradient structure is harder to handle than that of \treepolC\ in Lemma~\ref{lem:analytic_gradC}, but here we also prove an exponential variance decay nonetheless.
+\begin{theorem}[Exponential variance decay of \treepolE]\label{thm:rate_result2}
+There exists $\alpha \in \left(0,1\right)$ such that, for any function $Q: \cS \times \cA \rightarrow \bR,$
+\begin{equation*}
+\Var\left(\nabla_\theta \log \pid^{\txE}(a|s) Q(s,a)\right) \in \mathcal{O}\left(\beta^2 \gamma^{2d} \alpha^{2d}\right).
+\end{equation*}
+If all rewards are equal ($r\equiv \text{const}$), then $\alpha = |\lambda_2(P^{\pib})|$.
+\end{theorem}
+The proof structure is similar in spirit to that of Theorem~\ref{thm:rate_result}, but several new technical arguments are needed.
+\begin{proof}[Proof outline]
+Recall that thanks to Lemma~\ref{lem:var_bound}, we can bound the PG variance using a direct bound on the gradient norm. The definition of the induced norm is
+\begin{equation*}
+    \|\nabla_\theta\log \pid^{\txE}\| = \max_{z: \|z\| = 1} \|\nabla_\theta\log \pid^{\txE} z\|,
+\end{equation*}
+with $\nabla_\theta\log \pid^{\txE}$ given in Lemma~\ref{lem:analytic_gradE}.
+Let $z \in \bR^S$ be an arbitrary vector such that $\|z\| = 1$. Then, 
+$
+    z = \sum_{i = 1}^S c_i z_i,
+$
+where $c_i$ are scalar coefficients and $z_i$ are vectors spanning the $S$-dimensional space. In the full proof, we show our specific choice of $z_i$ and prove they are linearly independent given that choice. We do note that $z_1=\ones_S.$
+
+The first part of the proof relies on the fact that $(\nabla_\theta\log \pid^{\txE}) z_1 = 0.$ This is easy to verify using Lemma~\ref{lem:analytic_gradE} together with \eqref{eq:SoftTreeMax_matrix2}, and because $\left[I_{A} - \ones_A (\pid^{\txE})^\top \right]$ is a projection matrix whose null-space is spanned by $\ones_S.$  Thus, $$\nabla_\theta\log \pid^{\txE} z = \nabla_\theta\log \pid^{\txE} \sum_{i=2}^S c_i z_i.$$
+
+In the second part of the proof, we focus on $\Esd$ from \eqref{eq: Esd}, which appears within $\nabla_\theta\log \pid^{\txE}.$ Notice that $\Esd$ consists of the product 
+$\prod_{h=1}^{d-1} \left(D\left(\exp(\beta \gamma^h R\right) P^{\pib} \right).$
+Even though the elements in this product are not stochastic matrices, in the full proof we show how to normalize each of them to a stochastic matrix $B_h.$ We thus obtain that
+\begin{equation*}
+\Esd = P_s  D(M_1) \prod_{h=1}^{d-1} B_h,
+\end{equation*}
+where $M_1 \in \bR^S$ is some strictly positive vector. Then, we can apply a result by \citet{mathkar2016nonlinear}, which itself builds on \citep{chatterjee1977towards}. The result states that the product of stochastic matrices $\prod_{h=1}^{d-1}B_h$ of our particular form converges exponentially fast to a matrix of the form $\ones_S \mu^\tr$ s.t. $\|\ones_S \mu^\tr - \prod_{h=1}^{d-1}B_h\| \leq C \alpha^d$ for some constant $C.$ 
+
+\begin{figure}[!htb]
+    \centering
+\includegraphics[width=1.03\columnwidth]{figures/pg_tree_diagram.pdf}
+    \caption{\textbf{\treepol{} policy}. Our exhaustive parallel TS expands all actions at each state up to depth $d$ ($=2$ here). The leaf state of every trajectory is used as input to the policy network.  The output is then added to the trajectory's cumulative reward as described in \eqref{eq:logit}. I.e., instead of the standard softmax logits, we add the cumulative discounted reward to the policy network output. This policy is differentiable and can be easily integrated into any PG algorithm. In this work, we build on PPO and use its loss function to train the policy network.  }  \label{fig:policy_diagram}
+\end{figure}
+
+Lastly,   $\ones_S \mu_{\pib}^\top$ gets canceled due to our choice of $z_i,~i=2,\dots,S.$ This observation along with the above fact that the  remainder decays then shows that $\nabla_\theta\log \pid^{\txE} \sum_{i=2}^S z_i = \mathcal{O}(\alpha^d),$ which gives the desired result.
+\end{proof}
+Although our proof guarantees that $\alpha = |\lambda_2(P^{\pib})|$ only in the constant-reward case, we conjecture that this is also true in the general case. To demonstrate this, we run the following simulation. We drew a random finite MDP, parameter vector $\Theta \in \bR^S_+,$ and behavior policy $\pib.$ We then analytically computed the PG variance of \treepolE\ as given in \eqref{eq:grad_var} and compared it to $|\lambda_2(P^{\pib})|^d.$ As seen, the true variance and our bound matched almost identically. This suggests that indeed $\alpha = |\lambda_2(P^{\pib})|.$ We repeat this experiment three times for different $P^{\pib}:$ (i) close to uniform, (ii) drawn randomly, and (iii) close to a permutation matrix. The three cases match our takeaways on the optimal and worst-case rate decay cases. We ran multiple such experiments and in all of them the lines match closely; we give here one such instance. To account the for constants, we match the values for the first point in $d=1.$
+
+
+
+
+\section{\treepol: Deep Parallel Implementation}
+
+\label{sec: deep rl implementation}
+
+Following the success of deep RL \cite{mnih2015human}, deep neural networks are used nowadays almost exclusively in practice. Depending on the RL algorithm, a loss function is defined and gradients on the network weights can be calculated.
+In PG methods, the scoring function used in the softmax is commonly replaced by a neural network $W_\theta$: 
+\begin{equation*}
+\pi_\theta(a|s) \propto \exp\left(W_\theta(s,a)\right).
+\end{equation*}
+Similarly, we implement \treepol{} by replacing $\theta(s)$ in \eqref{eq:logit} with a neural network $W_\theta(s)$. Although both variants of \treepol\ from Section~\ref{sec: softtreemax} involve computing an expectation, this can be hard in general. One approach to handle it is with sampling, though these introduce estimation variance into the process. We leave the question of sample-based theory and algorithmic implementations for future work. 
+Instead, in finite action space environments such as Atari, we compute the exact expectation in \treepol\ with an exhaustive TS of depth $d$. Despite the exponential computational cost of spanning the entire tree, recent advancements in parallel GPU-based simulation allow efficient expansion of all nodes at the same depth simultaneously \cite{dalal2021improve,rosenberg2022planning}. This is possible when a simulator is implemented on GPU \cite{dalton2020accelerating, makoviychuk2021isaac, freeman2021brax}, or when a forward model is learned \cite{kim2020learning,ha2018world}. To reduce the complexity to be linear in depth, we apply tree pruning to a limited width in all levels. We do so by sampling only the most promising actions at each level. 
+
+To summarize, in the practical $\treepol{}$ algorithm we perform an exhaustive TS to obtain all trajectories up to depth $d.$ We expand the tree by exhaustively expanding all actions, which corresponds to a uniform tree expansion policy $\pib.$ We apply a neural network on the leaf states, and accumulate the result with the rewards along each trajectory to obtain the logits in \eqref{eq:logit}. Finally, we aggregate the results using \treepolC. We leave experiments \treepolE\ for future work on risk-averse RL.  During training, the gradient propagates to the NN weights of $W_\theta.$ When the gradient $\nabla_\theta \log \pid$ is calculated at each time step, it updates $W_\theta$ for all leaf states, similarly to Siamese networks \cite{bertinetto2016fully}. An illustration of the policy is given in Figure \ref{fig:policy_diagram}. 
+
+
+
+
+
+\section{Experiments}
+
+\label{sec: experiments}
+We conduct our experiments on multiple games from the Atari simulation suite \cite{bellemare2013arcade}. As a baseline, we train a PPO \citep{schulman2017proximal} agent with $256$ workers in parallel. In a hyperparameter search, we found this number of workers to be the best in terms of run-time. The environment engine is the highly efficient Atari-CuLE \cite{dalton2020accelerating}, a CUDA-based version of Atari that runs on GPU. Similarly, we use Atari-CuLE for the GPU-based breadth-first TS as done in \cite{dalal2021improve}.
+We then train \treepol{} for depths $d=1 \dots 8,$ with a single worker. We use five seeds for each experiment. 
+
+For the implementation, we extend Stable-Baselines3 \cite{raffin2019stable} with all parameters taken as default from the original PPO paper \cite{schulman2017proximal}. We will release the code upon publication. For depths $d \geq 3$, we limited the tree to a maximum width of $1024$ nodes and pruned non-promising trajectories in terms of estimated weights. Since the distributed PPO baseline advances significantly faster in terms of environment steps, for a fair comparison, we ran all experiments for one week on the same machine and use the wall-clock time as the x-axis. We use Intel(R) Xeon(R) CPU E5-2698 v4 @ 2.20GHz equipped with one NVIDIA Tesla V100 32GB.  
+
+In Figure~\ref{fig:variance_curves}, we plot the reward and variance of \treepol\ for each game, as a function of depth. The dashed lines are the results for PPO. Each value is taken after convergence, i.e., the average over the last $20\%$ of the run. The numbers represent the average over five seeds per game. We choose to exclude the standard deviation to avoid excessive clutter in the plot. The plot conveys three intriguing conclusions. First, in all cases, \treepol\ achieves significantly higher reward than PPO. Its gradient variance is also orders of magnitude lower than that of PPO. Second, the reward and variance are negatively correlated -- they mirror each other in almost all of the games. This phenomenon demonstrates how crucial it is to lower the variance of PG for improving performance. And specifically, it highlights the benefits of \treepol\ over ``flat'' PG. The third conclusion is that each game has a different sweet-spot in terms of optimal TS depth. Recall that we limit the run-time in all experiments to one week. The deeper the TS, the slower each step and less steps are finished by the end of the run. This type of comparison also explains why there is no reason to expect monotone variance reduction as a function of depth.
+
+\begin{figure*}[!htb]
+    \centering
+\includegraphics[scale=0.48]{figures/grad_var_leg2.png}
+   \caption{\textbf{Reward and Gradient variance: GPU \treepol{} (single worker) vs PPO ($\bf{256}$ GPU workers).} The blue reward plots show the average  of $50$ evaluation episodes. The red variance plots show the average gradient variance of the corresponding training runs, averaged over five seeds. The dashed lines represent the same for PPO. Note theat the variance y-axis is in log-scale.
+   The reward and variance are negatively correlated and mirror each other in almost all  games. This demonstrates the necessity to lower the variance of PG for improving performance. We limit the training run-time in all experiments to one week. The deeper the TS, the slower each step and less steps are finished by the end of the training run. This explains the non-monotone performance and variance as a function of depth.
+   }  \label{fig:variance_curves}
+\end{figure*}
+We also provide the training curves in Figure~\ref{fig:train_curves}. For brevity, we exclude a few of the depths from the plots. As seen, there is a clear benefit  for \treepol{} over distributed PPO with the standard softmax policy. In most games, PPO with the \treepol{} policy shows very high sample efficiency: it achieves higher episodic reward even though it observes much less episodes, for the same running time. 
+\begin{figure*}[!htb]
+    \centering
+\includegraphics[width=.9\textwidth]{figures/pg-convergence_legend.png}
+    \caption{\textbf{Training curves: GPU \treepol{} (single worker) vs PPO ($\bf{256}$ GPU workers).} The plots show average reward and standard deviation over five seeds.  The x-axis is the wall-clock time.  The runs ended after a maximum of 200M time-steps, and after no longer than one week. The standard PPO finished in less than one week. The training curves correspond to the evaluation runs in Figure~\ref{fig:variance_curves}.}  \label{fig:train_curves}
+\end{figure*}
+
+
+
+\section{Related Work}
+
+Our work intersects several fields of the RL literature:
+
+\textbf{Softmax Operator.}
+The softmax policy became a canonical part of PG to the point where theoretical results of PG focus specifically on it \citep{zhang2021convergence, mei2020global,li2021softmax, schulman2017proximal, haarnoja2018soft}. Even though we focus on a tree extension to the softmax policy, the methodology we propose is general and can be easily applied to other discrete or continuous parameterized policies as in \cite{mei2020escaping, miahi2021resmax}. 
+
+\textbf{Tree Search.}
+Planning with a TS is the process of using a forward model to consider possible future trajectories and decide on the best action at the root. One famous such algorithm is Monte-Carlo TS (MCTS; \citealt{browne2012survey}) used in AlphaGo \cite{silver2016mastering} and MuZero \cite{schrittwieser2020mastering}. Other principal algorithms such as Value Iteration, Policy Iteration and DQN were also shown to give an improved performance with a tree search extensions \citep{efroni2019combine, dalal2021improve}. 
+
+\textbf{Risk Aversion.}
+Many works considered an exponential utility function for risk aversion \cite{chen2007risk, garcia2015comprehensive,fei2021exponential}. This utility function is the same as \treepolE{} formulation from \eqref{eq:polE}, but we have it directly in the policy instead of the objective.  
+
+\textbf{Reward-free RL.}
+We showed that the gradient variance is minimized when the transitions induced by the behavior policy $\pib$ are uniform. This is expressed by the second eigenvalue of the transition matrix $P^{\pib}$. This notion of uniform exploration is common to the reward-free RL setup \cite{jin2020reward}. Several such works considered the same second eigenvalue in their analysis  \cite{liu2018simple, tarbouriech2019active}.
+
+
+
+\section{Discussion}
+
+Planning in RL is typically carried out with value-based algorithms due to its seamless integration with the Bellman operator, leaving aside the popular class of PG methods. In this work, we introduced for the first time a differentiable parametric policy that combines TS with PG. We prove that \treepol{} is essentially an exponential variance reduction technique and provide novel insight on how to choose the expansion policy to minimize the gradient variance. It is an open question whether optimal variance reduction corresponds to the appealing regret properties tackled by UCT \cite{kocsis2006bandit}.
+
+Mitigating the known sample inefficiency issue, \treepol{} achieves better performance than the widely used PPO with multiple workers and softmax policy. Our method can be further applied to continuous control tasks, or in tasks where the forward model is learned with some estimation error. Other possible future directions are: (i) to study the implications of sampling trajectories instead of directly calculating their expectation; (ii) analyze the convergence rate of \treepol, and (iii) to extend \treepol{} to adaptively changing depths to optimize run-time and performance.
+
+
+
+
+
+

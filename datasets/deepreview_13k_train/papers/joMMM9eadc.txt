@@ -1,0 +1,581 @@
+\title{Effective Generation of Feasible Solutions for Integer Programming via Guided Diffusion}
+
+\begin{abstract}
+Feasible solutions are crucial for Integer Programming (IP) since they can substantially speed up the solving process. In many applications, similar IP instances often exhibit similar structures and shared solution distributions, which can be potentially modeled by deep learning methods. Unfortunately, existing deep-learning-based algorithms, such as Neural Diving \citep{nair2020solving} and Predict-and-search framework \citep{han2023a}, are limited to generating only partial feasible solutions, and they must rely on solvers like SCIP and Gurobi to complete the solutions for a given IP problem. In this paper, we propose a novel framework that generates \emph{complete} feasible solutions \emph{end-to-end}. Our framework leverages contrastive learning to characterize the relationship between IP instances and solutions, and learns latent embeddings for both IP instances and their solutions. Further, the framework employs diffusion models to learn the distribution of solution embeddings conditioned on IP representations, with a dedicated guided sampling strategy that accounts for both constraints and objectives. We empirically evaluate our framework on four typical datasets of IP problems, and show that it effectively generates complete feasible solutions with a high probability (> 89.7 \%) without the reliance of Solvers and the quality of solutions is comparable to the best heuristic solutions from Gurobi. Furthermore, by integrating our method's sampled partial solutions with the CompleteSol heuristic from SCIP \citep{maher2017scip}, the resulting feasible solutions outperform those from state-of-the-art methods across all datasets,  exhibiting a 3.7 to 33.7\% improvement in the gap to optimal values, and maintaining a feasible ratio of over 99.7\% for all datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{CCSXML}
+<ccs2012>
+<concept>
+<concept_id>10010147.10010257.10010293.10010294</concept_id>
+<concept_desc>Computing methodologies~Neural networks</concept_desc>
+<concept_significance>300</concept_significance>
+</concept>
+<concept>
+<concept_id>10010147.10010257.10010293.10010300</concept_id>
+<concept_desc>Computing methodologies~Learning in probabilistic graphical models</concept_desc>
+<concept_significance>300</concept_significance>
+</concept>
+<concept>
+<concept_id>10010147.10010257.10010293</concept_id>
+<concept_desc>Computing methodologies~Machine learning approaches</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[300]{Computing methodologies~Neural networks}
+\ccsdesc[300]{Computing methodologies~Learning in probabilistic graphical models}
+\ccsdesc[500]{Computing methodologies~Machine learning approaches}
+\keywords{Integer Programming, Diffusion Models}
+
+\maketitle
+
+Integer Programming (IP) in the field of operation research is a class of optimization problems 
+where some or all of the decision variables are constrained to be integers~\citep{wolsey1998}. 
+Despite their importance in a wide range of applications such as production planning~\citep{silver1998inventory, pochet2006}, resource allocation~\citep{katoh1998resource}, and scheduling~\citep{toth2002vehicle,pantelides1995short,sawik2011}, 
+IP is known to be NP-hard and in general very difficult to solve. 
+For decades, a significant effort has been made to develop sophisticated algorithms and efficient solvers, 
+e.g., branch-and-bound~\citep{lawler1966branch}, cutting plane method~\citep{kelley1960cutting} and large neighborhood search algorithms~\citep{pisinger2019large}. 
+These methods, however, can be computationally expensive because the search space for large-scale problems can be exponentially large. 
+Moreover, these algorithms rely heavily on a feasible solution input that will crucially determine the whole search process. Consequently, existing solvers, such as SCIP \citep{maher2017scip} and Gurobi \citep{gurobi2021gurobi}, firstly employ heuristic algorithms to identify high-quality feasible solutions that serve as initial starting points for the optimization process. However, the heuristic algorithms usually fail to capture the similar structure among different IP instances and the quality of initial solutions is usually low. 
+Hence, having a data-driven method that produces high-quality feasible solutions for any IP instances is desirable for many real-world applications. 
+
+To generate feasible solutions, prior works \citep{nair2020solving, han2023a, yoon2022confidence} have employed the advantage of deep learning to capture similarity of the IP instances from the same domain in order to expedite solving. For presenting IP instances via neural network, Neural Diving \citep{nair2020solving, yoon2022confidence} adopt the methodology delineated by \citet{gasse2019exact}, which models the formulation of IP instances as bipartite graphs and subsequently leveraging Graph Neural Networks (GNN) to derive variable features from these graph representations. Subsequently, a solution prediction task is employed to learn the relationship between IP instances and their solutions, with the aim of directly predicting those solutions. However, it is difficult to produce complete feasible solutions as it fails to explicitly integrate objective and constraint information during the sampling process. Neural Diving thus focus on generating partial solutions by GNN, 
+where only a subset of variables is assigned values using neural networks.
+Importantly, in many cases, the proportion of variables predicted by the neural network is set at a relatively low ratio (less than 50\%) to ensure feasibility.
+Furthermore, such methods tend to be inefficient, primarily due to the introduction of auxiliary problems for filling in the remaining variables. 
+For instance, the Completesol heuristic~\citep{maher2017scip}, a classical approach, solves an auxiliary integer programming model which is constructed by adding constraints to fix the variables from partial solutions. Nonetheless, infeasibility can arise in auxiliary problems due to the potential for partial assignments to clash with the initial constraints. To deal with infeasible assignments, in another approach, \citet{han2023a} proposes a predict-and-search algorithm which constructs a trust region based on predicted partial solutions and then search for high-quality feasible solutions via a solver. In summary, these methods require the construction of auxiliary problems to obtain feasible solutions and fail to utilize the complete information from the IP instance, as only partial variables are assigned. This situation highlights the necessity for creating an end-to-end deep learning framework capable of generating complete and feasible solutions for IP problems.
+
+\begin{figure*}[ht] 
+\centering 
+\includegraphics[width=0.8\linewidth]{plots/overviewframework_v2.png}
+\caption{Our method first trains the IP Encoder and Solution Encoder to acquire the IP embedding ($\bzi$) and Solution embedding ($\bzx$) using CISP. 
+We then jointly train diffusion models and the solution decoder to capture the distribution of solutions given a specific IP instance. 
+In the sampling stage, we employ an IP guided diffusion sampling to account for both the objective and constraints.}
+\label{fig:framework}
+\end{figure*}
+ 
+
+Recently, diffusion models~\citep{ho2020denoising, sohl2015deep} have exhibited notable advantages in various generative tasks, 
+primarily owing to their superior mode-coverage and diversity \citep{bayat2023a}. 
+Notable applications include high-fidelity image generation \citep{dhariwal2021diffusion}, image-segmentation \citep{amit2021segdiff}, and text-to-image synthesis \citep{ramesh2022hierarchical}. 
+These successes motivates the launch of an investigation into harnessing the generative capability of diffusion models for acquiring feasible solutions of IP problems.  
+ 
+To this end, we introduce a comprehensive end-to-end generative framework presented in Figure \ref{fig:framework} to produce high-quality feasible solutions for IP problems. 
+First of all, stemming inspiration from DALL.E-2~ \citep{ramesh2022hierarchical} for text-to-image translation, 
+we employ a multimodal contrastive learning approach, akin to the CLIP Algorithm~\citep{radford2021learning}, 
+to obtain embeddings for an IP instance $i$, denoted as $\bzi$, and solution embeddings $\bzx$ for solutions $\mathbf{x}$ (Section \ref{sec:CISP}). 
+Subsequently, we employ DDPM \citep{ho2020denoising} to model the distribution of $\bzx$ conditioned on $\bzi$ (Section \ref{sec:diffusion}). 
+During this phrase, a decoder is concurrently trained with the task of solution reconstruction (Section \ref{sec:decoder}). 
+Finally, to enhance the quality of the feasible solutions during the sampling process, we propose the IP-guided sampling approaches tailored for both DDPM and DDIM~\citep{song2020denoising} which explicitly consider both constraints and objectives during sampling. 
+Our experimental results shown in Section \ref{sec:experiments}  substantiate the efficacy of this approach in generating complete and feasible solutions for a given IP instance with a higher probability. Besides, by combining with the CompleteSol heuristic, the solutions from our methods have better quality than the state-of-the-art. Importantly, to the best of our knowledge, our approach is the first to have the ability to generate complete and feasible solutions using \emph{pure} neural techniques, without relying on any solvers.
+
+
+\section{Background}
+
+\paragraph{\textbf{Integer Programming and Its Representations.}}
+Integer programming (IP) is a class of NP-hard problems where the goal is to optimize a linear objective function, 
+subject to linear and integer constraints. 
+Without loss of generality, we focus on minimization which can be formulated as follows,
+\begin{equation}
+    \label{eq:ip}
+    \min_{\mathbf{x}} \mathbf{c}^\top \mathbf{x} \qquad \text{subject to } \mathbf{Ax}\leq \mathbf{b}, \qquad \mathbf{x}\in \mathbb{Z}^{n}
+\end{equation}
+where $\textbf{c}\in \mathbb{R}^n$ denotes the objective coefficient, $\mathbf{A} = [\mathbf{a}_1^\top, \mathbf{a}_2^\top, ..., \mathbf{a}_m^\top] \in \mathbb{R}^{m\times n}$ is the coefficient matrix of constraints 
+and $\mathbf{b} = [b_1, b_2, ..., b_m]^\top\in \mathbb{R}^{m}$ represents the right-hand-side vector. 
+For simplicity, we focus on binary integer variables, where $\mathbf{x}$ takes values in $\{0,1\}^n$. 
+Throughout this paper, we adopt the term \emph{IP instance} to denote a specific instance within the domain of some Integer Programming (IP) problem.
+
+Bipartite graph representation, proposed by \citet{gasse2019exact}, is a commonly used and useful way to extract features of an IP instance for machine learning purposes. 
+This representation, see the left part of Figure \ref{fig:framework} (a) for an example, divides the constraints and variables into two different sets of nodes, 
+and uses a Graph Convolution Network (GCN) to learn the representation of nodes. 
+Recently, \citet{nair2020solving} proposed several changes to the architecture of GCN for performance improvements. 
+Therefore, in this work, we use the bipartite graph structure combined with GCN to extract the embeddings of IP instances 
+(see \citep{gasse2019exact, nair2020solving} for more details).
+
+\paragraph{\textbf{DDPM and DDIM.}}
+Diffusion models learn a data distribution by reversing a gradual noising process. 
+In the DDPM method~\citep{ho2020denoising}, when presented with a data point sampled from an actual data distribution, denoted as $\bzxzero \sim q(\bzx)$, a diffusion model, as described in \citep{sohl2015deep, ho2020denoising}, typically involves two distinct phases. In the forward process, a sequence of Gaussian noise is incrementally added to the initial sample over a span of $T$ steps, guided by a variance schedule denoted as $\beta_1, \beta_2, \ldots, \beta_T$. This process yields a sequence of noisy samples $\bzxone, \bzxtwo, ..., \bzxT$. Subsequently, the transition for the forward process can be described as:
+$q(\bzxt|\bzxpt)= \mathcal{N}(\bzxt; \sqrt{1-\beta_t}\bzxpt, \beta_t \bI)$. 
+In fact, $\bzxt$ can be sampled at any time step $t$ in a closed form employing the notations $\alpha_t:=1-\beta_t$ and $\bar{\alpha} := \prod_{s=1}^t \alpha_s$, 
+$\bzxt = \sqrt{\Bar{\alpha}_t}\bzxzero + \sqrt{1-\Bar{\alpha}_t}\bepsilon$, 
+where $\bepsilon\sim \mathcal{N}(0,\bI)$. 
+In the reverse process (denoising process), we need to model the distribution of $\bzxpt$ given $\bzxt$ as a Gaussian distribution, which implies that 
+$p_{\theta}(\bzxpt|\bzxt) = \mathcal{N}\left(\bzxpt; \bmu_{\theta}(\bzxt,t), \bSigma_{\theta}(\bzxt,t)\right)$, 
+where the variance $\bSigma_{\theta}(\bzxt,t)$ can be fixed to a known constant~\citep{ho2020denoising} or learned with a separate neural network~\citep{nichol2021improved}, 
+while the mean can be approximately computed by adding $\bzxzero$ as a condition,
+$\bmu_{\theta}(\bzxt, t) = \frac{\sqrt{\alpha_t}(1-\Bar{\alpha}_{t-1})}{1-\Bar{\alpha}_t}\bzxt + \frac{\sqrt{\Bar{\alpha}_{t-1}}\beta_t}{1-\Bar{\alpha}_t}\bzxzero$. 
+
+To improve the efficiency of sampling of DDPM, DDIM~\citep{song2020denoising} formulates an alternative non-Markovian noising process with the same forward marginals as DDPM, 
+but rewrites the probability $p_{\theta}(\bzxpt|\bzxt)$ in reverse process as a desired standard deviation $\sigma_t$.
+DDIM them derives the following distribution in the reverse process,
+\begin{multline}\label{eq:ddim-reverse}
+    q_{\sigma}(\bzxpt|\bzxt,\bzxzero) \\
+    = \mathcal{N}\left(\bzxpt; \sqrt{\Bar{\alpha}_t} \bzxzero + \sqrt{1-\Bar{\alpha}_{t-1}-\sigma_t^2} \bepsilon^{(t)}, \sigma_t^2\bI\right),
+\end{multline}
+where $\bepsilon^{(t)} = (\bzxt-\sqrt{\Bar{\alpha}}\bzxzero)/(1-\Bar{\alpha})$ shows the direction to $\bzxt$.
+
+
+
+\section{Model Architecture}
+
+Our training dataset consists of pairs $(i, \xx)$ of IP instance and their corresponding one feasible solution $\xx$. 
+Given an instance $i$, let $\bzi\in \mathbb{R}^{n\times d}$ and $\bzx \in \mathbb{R}^{n\times d}$ be the embeddings of the IP instance $i$ and the solution $\mathbf{x}$ respectively, 
+where $n$ is the number of variables and $d$ is the embedding dimension. 
+It is worth noting that a IP instance can have multiple different feasible solutions, 
+meaning that model need to learn the distribution of feasible solutions by conditioning on a given IP instance. Our methods do not directly apply a diffusion model to learn the distribution of solutions. Instead, we use an encoder to transform the solutions $\xx\in \{0,1\}^n$ from a discrete space to a continuous embedding space, e.g. $\bzx\in \mathbb{R}^{n\times d}$. We then construct a diffusion model to learn the distribution of the solution embeddings given an IP embedding $\bzi$. Finally, a decoder is trained to recover the predicted solution $\hat{\xx}$ from the embedding $\bzx$.
+To effectively build the connection between the IP instance $i$ and solution $\xx$, 
+we first apply Contrastive IP-Solution Pre-training (CISP) module, 
+motivated by CLIP ~\citep{radford2021learning} which is used for text-to-image generation, 
+to produce IP embedding $\bzi$ and solution embedding $\bzx$. 
+Overall, our model consists of three key components: 
+\begin{itemize}
+    \item a \emph{Contrastive IP-Solution Pre-training (CISP) module} that produces IP embeddings $\bzi$ and solution embeddings $\bzx$;
+    \item a \emph{diffusion module} $p(\bzx| \bzi)$ that generates solution embedding $\bzx$ conditioned on IP embedding $\bzi$; 
+    \item and a \emph{decoder module} $p(\xx|\bzx, \bzi)$ that recovers solution $\xx$ from embedding $\bzx$ conditioned on IP embedding $\bzi$.
+\end{itemize}
+We provide more details on each module in the following sections. 
+
+\paragraph{\textbf{Contrastive IP-Solution Pre-training.}}
+\label{sec:CISP}
+Previous works ~\citep{nair2020solving, han2023a} show the crucial importance of establishing the connection between the IP instances and the solutions, 
+and propose to implicitly learn this connection through the task of predicting feasible solutions. 
+These approaches may not exhibit strong generalization capabilities on new instances because they only utilize the collected solutions in dataset without considering feasibility explicitly during training. 
+To more effectively capture this relationship, 
+we propose to employ a contrastive learning task to learn representations for IP instances and embeddings for solutions by constructing feasible and infeasible solutions. 
+The intuition behind is to ensure that the IP embeddings stay close to the embeddings of their feasible solutions, and away from the embeddings of the infeasible ones. 
+To avoid explicitly constructing infeasible solutions, 
+we proposed Contrastive IP-Solution Pre-training (CISP) algorithm
+to train IP encoder and solution encoder. 
+Specifically, for IP encoder, 
+we extract the representation of IP instances via a bipartite graph as ~\citep{gasse2019exact}, 
+and use the structure of GCNs from Neural Diving~\citep{nair2020solving} to generate all variables' embeddings as IP embeddings $\bzi$. 
+For solution encoder, 
+we use the encoder of the transformer to obtain the representations of each variable as solution embeddings $\bzx$. 
+Both $\bzx$ and $\bzi$ have the same dimension to compute pairwise cosine similarities later. 
+Since the number of variables in different IP instances may vary, 
+we perform zero-padding on $\bzi$ and dummy-padding on $\xx$ (i.e. padding 2 for 0-1 integer programming) to align the dimensions.
+The zero-padding for $\bzi$ is done to ensure that the cosine similarity remains unaffected.
+CISP algorithm then learns to maximize the similarity between embeddings of IP and corresponding solution pairs, 
+and to minimize the similarity between the embeddings of incorrect pairs, 
+ 
+
+\paragraph{\textbf{Diffusion Generation.}}
+\label{sec:diffusion}
+To leverage diffusion models for generating feasible solutions (discrete variables), 
+we use the solution embedding $\bzx\in \mathbb{R}^{n\times d}$ from the aforementioned CISP as the objective of generation. 
+In addition, $\bzi$ is considered as a condition for generating high-quality results. 
+According to \cite{ho2020denoising}, we parameterize 
+\begin{multline}
+p_{\theta}(\bzxpt|\bzxt, \bzi)\\ = \mathcal{N}\left(\bzxpt; \bmu_{\theta}(\bzxt, \bzi, t), \bSigma_{\theta}(\bzxpt, \bzi, t)\right), 
+\end{multline}
+$\forall t\in [T, T-1,..., 1]$ in reverse process, 
+where $\bzxzero= \bzx$. 
+Different from predicting the noise of each step in a general diffusion training phase, 
+we predict $\bzx$ directly as it empirically performs better. 
+The training loss is defined as follows,
+\begin{equation}
+\label{loss:diffusion}
+    \mathcal{L}_{\text{MSE}} \triangleq \mathbb{E}_{t, \bzxt}\left[\|\ff_{\theta}(\bzxt,\bzi, t)-\bzx\|^2\right],
+\end{equation}
+where $\ff_{\theta}$ is an encoder-based transformer model with specific structure shown in Figure \ref{fig:diffusion_model_structure}  and $\bzxt  = \sqrt{\Bar{\alpha}_t}\bzx +\sqrt{1-\Bar{\alpha}_t}\bepsilon^{(t)}, \bepsilon^{(t)}\sim \mathcal{N}(\mathbf{0},\bI)$. 
+\begin{figure}[ht]
+    \centering
+    \includegraphics{plots/diffusion_model.pdf}
+    \caption{Diffusion model $\ff_{\theta}(\bzxt, \bzi, t)$}
+    \label{fig:diffusion_model_structure}
+\end{figure}
+\paragraph{\textbf{Solution Decoding.}}
+\label{sec:decoder}
+The decoder $\dd_{\phi}$ plays a crucial role in reconstructing the solution $\xx$ from the solution embedding $\bzx$. 
+To enhance the robustness of the solution recovery, 
+we jointly train the decoder $\dd_{\phi}$ with the diffusion model. 
+Specifically, we concatenate the solution embedding $\hatbzx = \ff_{\theta}(\bzxt, \bzi, t)$ generated by the diffusion model
+with the IP embedding $\bzi$, and use the concatenated vector as input to a transformer encoder to obtain the reconstructed solution $\hat{\xx} = \dd_{\phi}(\hatbzx, \bzi)$. 
+This process is associated with the cross-entropy loss defined as:
+$\mathcal{L}_{\text{CE}} \triangleq -\mathbb{E}_{\xx}[\log \hat{\xx}]= -\mathbb{E}_{\xx} \left[\log \dd_{\phi}(\hatbzx, \bzi) \right]$.
+To explicitly account for constraints in the training process, 
+we introduce a penalty term to measure the degree of constraint violation. 
+More specifically, let $\mathbf{a}^T_k$ be the $k$th row of matrix $\mathbf{A}$ in \eqref{eq:ip}, 
+the constraint violation (CV) loss is defined as
+$\mathcal{L}_{\text{CV}} \triangleq \frac{1}{m}\sum_{k=1}^m \max(\mathbf{a}_k^T\hat{\xx}-b_k, 0)$, 
+where $m$ is the number of constraints.
+The total loss for training diffusion and decoder therefore consists of the three parts:
+\begin{equation}
+\label{loss:total}
+\mathcal{L} = \mathcal{L}_{\text{MSE}}+\mathcal{L}_{\text{CE}}+\lambda \mathcal{L}_{\text{CV}},
+\end{equation}
+where $\lambda$ is a hyper-parameter to regulate the penalty. 
+The full training procedure is given in Algorithm \ref{alg:training} 
+
+\begin{algorithm}[ht]
+\caption{Training diffusion and solution decoder}
+\label{alg:training}
+\begin{algorithmic}[1] %[1] enables line numbers
+\ENSURE IP instance embedding $\bzi$ from CISP, solution embedding $\bzx$ from CISP
+\REQUIRE diffusion model $\ff_{\theta}$, and solution decoder $\dd_{\phi}$.
+    \REPEAT
+    \STATE $t\sim \text{Uniform}(\{1,...,T\})$ 
+        \STATE $\bepsilon \sim \mathcal{N}(\mathbf{0},\bI)$
+        \STATE $\hatbzx \leftarrow \ff_{\theta}\left(\sqrt{\Bar{\alpha}_t}\bzx+\sqrt{1-\Bar{\alpha}_t}\bepsilon, \bzi,t\right)$ {\color{gray}\small \textit{// predicted $\hatbzx$}}
+        \STATE $\hat{\xx} \leftarrow \dd_{\phi}(\hatbzx, \bzi)$ {\color{gray}\small \textit{// reconstructed solution $\hat{\xx}$}}
+        \STATE Take gradient descent step to minimize total loss in \eqref{loss:total}
+        \UNTIL Reaches a fixed number epochs or satisfies an early stopping criteria
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{IP Guided Sampling}
+
+\label{sec:guided-sampling}
+Once the models have been trained, 
+we can then sample variable assignments by running the sampling algorithm of DDPM or DDIM from a random Gaussian noise $\bzxT\sim \mathcal{N}(\mathbf{0}, \bI)$. 
+Interestingly we find that, without suitable guidance, 
+diffusion model is prone to generate inaccurate distributions, e.g. violating constraints for a given IP instance as shown in section~\ref{sec:toy_example}. 
+We thus consider the constraints information $(\mathbf{A}, \mathbf{b})$ and objective coefficient $\mathbf{c}$ during sampling. 
+We present the IP guided diffusion sampling for both DDPM and DDIM, 
+of which the latter is faster and better in terms of the quality and feasibility, as shown in Section~\ref{sec:experiments}.
+
+\subsection{IP Guided Diffusion Sampling}
+\label{sec:IP-ddpm}
+Consider a conditional diffusion model $p_{\theta}(\bzxt|\bzx^{(t+1)}, \bzi)$, we first introduce \textit{constraint guidance} by designing each transition probability as 
+\begin{equation}
+\label{eq:ddpm_transition}
+    p_{\theta, \phi}(\bzxt|\bzx^{(t+1)}, \bzi, \mathbf{A}, \mathbf{b}) = Zp_{\theta}(\bzxt|\bzx^{(t+1)}, \bzi) e^{-sc_{\phi}(\bzx^{(t)},\bzi, \mathbf{A}, \mathbf{b})},
+\end{equation}
+where $s$ is the gradient scale, $Z$ is a normalizing constant and $c_{\phi}(\bzxt, \bzi, \mathbf{A},\mathbf{b}) = \sum_{k=1}^m \max (\mathbf{a}_k^T\dd_{\phi}(\bzxt, \bzi)-b_k,0)$ measures the violation of constraints.
+Let $\bmu$ and $\bSigma$ be the mean and variance of the Gaussian distribution representing $p_{\theta, \phi}(\bzxt|\bzx^{(t+1)}, \bzi)$. Then,
+$\log p_{\theta}(\bzxt|\bzx^{(t+1)}, \bzi) = -\frac{1}{2}(\bzxt-\bmu)^T\bSigma^{-1}(\bzxt-\bmu) + C$, 
+where $C$ is a constant. 
+Consider the Taylor expansion for $c_{\phi}$ at $\bzxt = \bmu$,
+\begin{align*}
+    &c_{\phi}(\bzxt,\bzi, \mathbf{A}, \mathbf{b}) 
+    \\
+    &\approx c_{\phi}(\bmu, \bzi, \mathbf{A}, \mathbf{b})+(\bzxt-\bmu) \nabla_{\bzxt} c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b})|_{\bzxt=\bmu}\\
+    &=  (\bzxt-\bmu)\mathbf{g} +C_1,
+\end{align*}
+where $\mathbf{g} = \nabla_{\bzxt} c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b})|_{\bzxt=\bmu}$ and $C_1$ is a constant.
+Similar to Classifier Guidance~\citep{dhariwal2021diffusion}, 
+we assume that $c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b})$ has low curvature compared to $\bSigma^{-1}$ and thus have the following,
+\begin{align*}
+    & \log (p_{\theta, \phi}(\bzxt|\bzx^{(t+1)}, \bzi, \mathbf{A}, \mathbf{b})) \\
+    &\approx -\frac{1}{2}(\bzxt-\bmu)^T\bSigma^{-1}(\bzxt-\bmu)- s(\bzxt-\bmu)\mathbf{g} + sC_1 + C_2 \nonumber \\
+    &= -\frac{1}{2}(\bzxt-\bmu+s\bSigma \mathbf{g})^T\bSigma^{-1}(\bzxt-\bmu+s\bSigma \mathbf{g})+C_3,
+\end{align*}
+where $C_3$ is a constant and can be safely ignored. Therefore, the denoising transition $p_{\theta, \phi}(\bzxt|\bzx^{(t+1)}, \bzi, \mathbf{A}, \mathbf{b})$ can be approximated by a Gaussian distribution with a mean shifted by $-s\bSigma \mathbf{g}$.
+We can further inject the objective guidance to transition probability for acquiring high-quality solutions,
+\begin{equation}
+\begin{aligned}
+    \label{eq:ddpm sampling}
+    &p_{\theta, \phi}(\bzxt|\bzx^{(t+1)}, \bzi, \mathbf{A}, \mathbf{b}, \mathbf{c}) \\
+    &= Zp_{\theta}(\bzx^{(t)}|\bzx^{(t+1)}, \bzi) e^{-s\left((1-\gamma)c_{\phi}(\bzx^{(t)},\bzi, \mathbf{A}, \mathbf{b}) + \gamma o_{\phi}(\bzx^{(t)},\bzi, \mathbf{c})\right)},
+\end{aligned}
+\end{equation}
+where $o_{\phi}(\bzxt,\bzi, \mathbf{c}) = \mathbf{c}^T\dd_{\phi}(\bzxt, \bzi)$, $\mathbf{c}$ is the coefficient of objective from \eqref{eq:ip}, 
+and $\gamma\in [0,1]$ is the leverage factor for balancing constraint and objective. The corresponding sampling method is called \emph{IP Guided Diffusion Sampling}, as presented in Algorithm~\ref{alg:ddpm}.
+
+\begin{algorithm}[ht]
+\caption{IP Guided Diffusion Sampling}
+\label{alg:ddpm}
+\begin{algorithmic}[1] %[1] enables line numbers
+\ENSURE gradient scale $s$, leverage factor $\gamma$, constraint information $(\mathbf{A},\mathbf{b})$ and objective coefficient $\mathbf{c}$ 
+\REQUIRE diffusion model $\ff_{\theta}$ and solution decoder $\dd_{\theta}$.
+\STATE $\bzx^{(T)}\sim \mathcal{N}(\mathbf{0},\mathbf{I})$
+\FOR{ $t$ from $T$ to $1$}
+\STATE $\bmu \leftarrow \frac{\sqrt{\alpha_t}(1-\Bar{\alpha}_{t-1})}{1-\Bar{\alpha}_t}\bzxt + \frac{\sqrt{\Bar{\alpha}_{t-1}}\beta_t}{1-\Bar{\alpha}_t}\ff_{\theta}(\bzxt,\bzi,t)$
+\STATE $\bSigma \leftarrow  \bSigma_{\theta}(\bzxpt|\bzxt, \bzi)$
+\STATE $\bmu \leftarrow \bmu - s\bSigma\nabla_{\bzxt} \left((1-\gamma)c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b}) + \gamma o_{\phi}(\bzxt,\bzi, \mathbf{c})\right)$
+\STATE $\bzxpt \sim \mathcal{N}(\bmu, \bSigma)$
+\ENDFOR
+\RETURN $\dd_{\phi}(\bzxzero, \bzi)$.
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Non-Markovian IP Guided Sampling}
+\label{sec:IP-ddim}
+For the non-Markovian sampling scheme as used in DDIM, 
+the method for conditional sampling is no longer invalid. 
+To guide the sampling process, 
+existing studies~\citep{ho2022classifier, dhariwal2021diffusion} used the score-based conditioning trick from~\citet{song2020score} to construct a new epsilon prediction. 
+We found that this trick turns out ineffective in our problem setting, 
+possibly due to unique difficulties of finding feasible solutions in IP instances. 
+
+Instead, we find that adding a direction that guides the predicted solution to constraint region in each step of reverse process helps generate more reasonable solutions. 
+Specifically, we first generate the predicted noise according to $\hatbzx^{(0)} = f_{\theta}(\bzxt, \bzi, t)$, 
+$\bepsilon_{\theta}^{(t)} = \frac{\bzxt-\sqrt{\Bar{\alpha}_t}\hatbzx^{(0)} }{\sqrt{1-\Bar{\alpha}_t}}$. 
+According to~\eqref{eq:ddim-reverse}, the transition equation of DDIM for $\bzxpt$ from a sample $\bzxt$ can be written as 
+\begin{equation}
+\label{eq:ddim-transition}
+    \bzxpt = \sqrt{\Bar{\alpha}_t} \ff_{\theta}(\bzxt, \bzi, t) + \sqrt{1-\Bar{\alpha}_{t-1}-\sigma_t^2} \bepsilon_{\theta}^{(t)}+\sigma_t\bepsilon_t.
+\end{equation}
+where the first term is the prediction of $\bzxzero$ and the second term is the direction pointing to $\bzxt$. 
+To consider constraints in~\eqref{eq:ip}, we modify $\bepsilon_{\theta}^{(t)}$ by adding the direction of minimizing sum of constraint violation, that is
+\begin{equation}
+    \label{eq:ddim-cg}
+    \hat{\bepsilon}_{\theta}^{(t)} = \bepsilon_{\theta}^{(t)}- s\nabla_{\bzxt} c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b}),
+\end{equation}
+where $s$ is gradient scale. 
+By replacing $\bepsilon_{\theta}^{(t)}$ in \eqref{eq:ddim-transition} with $\hat{\bepsilon}_{\theta}^{(t)}$, 
+we obtain \emph{Non-Makovian Constraint Guided Sampling}, 
+which guides the solution generated in each transition to approach constraint region. 
+Equivalently, it is to perform a gradient descent step with a step-size shrinking to zero as $t \to 0$ when $\sigma_t\to 0$. 
+To further consider the objective function together with the constraint, we can update $\bepsilon_{\theta}^{(t)}$ as follows:
+\begin{equation}
+    \label{eq:ddim-ipg}
+    \hat{\bepsilon}_{\theta}^{(t)} = \bepsilon_{\theta}^{(t)}- s\nabla_{\bzxt}\bigg((1-\gamma) c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b}) + \gamma o_{\phi}(\bzxt, \bzi, \mathbf{c})\bigg),
+\end{equation}
+where $\gamma\in [0,1]$ is the leverage factor for balancing constraint and objective. 
+This method is called \textit{Non-Markovian IP Guided Diffusion Sampling}, as presented in Algorithm~\ref{alg:ddim} .
+\begin{algorithm}[ht]
+\caption{Non-Markovian IP Guided Diffusion Sampling }
+\label{alg:ddim}
+\begin{algorithmic}[1] %[1] enables line numbers
+\ENSURE gradient scale $s$, leverage factor $\gamma$, constraint information $(\mathbf{A},\mathbf{b})$ and objective coefficient $\mathbf{c}$
+\REQUIRE diffusion model $\ff_{\theta}$, solution decoder $\dd_{\theta}$
+    \STATE $\bzxT \sim \mathcal{N}(\mathbf{0},\bI)$
+\FOR{ $t$ from $T$ to $1$}
+    \STATE $\bepsilon_{\theta}^{(t)} \leftarrow (\bzxt-\sqrt{\Bar{\alpha}_t}\ff_{\theta}(\bzxt, \bzi, t))/\sqrt{1-\Bar{\alpha}_t}$.
+\STATE $\hat{\bepsilon}_{\theta}^{(t)} \leftarrow \bepsilon_{\theta}^{(t)}- s\nabla_{\bzxt} \bigg((1-\gamma)c_{\phi}(\bzxt, \bzi, \mathbf{A}, \mathbf{b}) + \gamma o_{\phi}(\bzxt, \bzi, \mathbf{c})\bigg)$
+    \STATE $\bzxpt \leftarrow \sqrt{\Bar{\alpha}_t} \ff_{\theta}(\bzxt, \bzi, t) + \sqrt{1-\Bar{\alpha}_{t-1}-\sigma_t^2} \hat{\bepsilon}_{\theta}^{(t)}+\sigma_t\bepsilon_t$
+    \ENDFOR
+\RETURN $\dd_{\phi}(\bzxzero, \bzi)$.
+\end{algorithmic}
+\end{algorithm}
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.7\linewidth]{plots/toy_example_final.pdf}
+    \caption{The sampling results from different methods. For Neural Diving, we present the predicted solution from GCN, random sampling according to the predicted solution, the partial solution obtained via SelectiveNet (only node 1, 9 and 13 are assigned to 0), and the completing result by calling CompleteSol heuristic. For DDIM and IP Guided DDIM, we present the results from different time steps (transformed to solution space by a decoder) during sampling.}
+    \label{fig:toy_example}
+\end{figure*}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+This section empirically investigates the effectiveness of our method in solving IP instances. 
+The efficacy is evaluated with two metrics: \emph{feasible ratio} and \emph{objective value}. 
+The feasible ratio measures the proportion of feasible solutions among all sampled solutions and the objective value obtained from the generated feasible solutions measures the solution quality. Additionally, we also present gap between feasible solution $x$ and optimal solution $x^*$ via 
+$\frac{|\mathbf{c}^T(\mathbf{x}-\mathbf{x}^*)|}{\max(|\mathbf{c}^T\mathbf{x}|, |\mathbf{c}^T\mathbf{x}^*|)}$ for comparing the performance more clearly.
+
+We evaluate our methods on four IP datasets generated by the Ecole library~\citep{prouvost2020ecole}: 
+\begin{itemize}[noitemsep,topsep=0pt,parsep=0pt,partopsep=0pt,leftmargin=*]
+    \item \emph{Set Cover} (SC) is to find the least number of subsets that cover a given universal set. 
+    \item \emph{Capacitated Facility Location} (CF) is to locate a number of facilities to serve the sites with a given demand and the aim is minimize the total cost. 
+    \item \emph{Combinatorial Auction} (CA) is to help bidders place unrestricted bids for bundles of goods and the aim is to maximize the revenue.
+    \item \emph{Independent Set} (IS) is to find the maximum subset of nodes of an undirected graph such that no pair of nodes are connected.
+\end{itemize}
+ We compare the performance of our approach with state-of-the-art methods including Neural Diving (ND) \citep{nair2020solving}, the Predict-and-Search algorithm (PS) \citep{han2023a}, and heuristic solutions from SCIP 8.0.1 \citep{bestuzheva2021scip} and Gurobi 9.5.2 \citep{gurobi2021gurobi}. Moreover, we incorporate the best objective values, which serve as the ground truth, acquired by executing Gurobi on each instance for a duration of 100 seconds. To ensure clarity, we use \emph{IP Guided DDPM} to denote the (Markovian) IP Guided Diffusion sampling in Section \ref{sec:IP-ddpm}, and \emph{IP Guided DDIM} to represent the Non-Markovian IP Guided Diffusion sampling in Section \ref{sec:IP-ddim}.  
+
+In the following, we first illustrate the guided diffusion sampling and emphasize its distinctions to Neural Diving and vanilla generation process in diffusion models in Section~\ref{sec:toy_example}. 
+Further, we evaluate the feasibility and quality of solutions generated by IP guided DDIM across all four datasets in Section~\ref{sec:compare}. Furthermore, we conduct an ablation study to investigate the impact of different guided approaches and contrastive learning in Section~\ref{sec:ablation_study}.
+In Section~\ref{sec:generalization}, we demonstrate the scalability of our approach by applying it to larger instances and present the outcomes of qualitative analysis of solutions.
+All experiments are performed in a workstation with two Intel(R) Xeon(R) Platinum 8163 CPU @ 2.50GHz, 176GB ram and two Nvidia V100 GPUs. 
+ 
+ 
+\begin{figure*}[ht]
+\centering 
+    \includegraphics[width=0.7\textwidth]{plots/contrast_plot_new.pdf}
+\caption{The feasible ratio in 100 instances, with each instance sampled 30 complete or partial solutions. For diffusion model, we measure the feasible ratio of  complete solutions. Two versions of Neural Diving are trained with distinct coverage thresholds, referred to as ND (low coverage) and ND (high coverage). The feasibility ratio is evaluated only for partial solutions from Neural Diving, as the complete solutions from this method yield a 0\% feasibility ratio.}
+\label{fig:feasibility} 
+\end{figure*}
+
+\begin{table*}[ht]
+\caption{The average objective value (obj.), gap and feasible ratio (fea.) for 100 instances on 4 datasets. Optimal, heuristic, complete and partial denote optimal solutions from Gurobi, heuristic solutions from solvers, complete solutions from models, and partial solutions from models. CompleteSol and search indicates the CompleteSol heuristic and predict-and-search algorithm for completing the partial solutions, respectively.}
+\resizebox{1\textwidth}{!}{
+\begin{tabular}{c|c|ccc|ccc|ccc|ccc}
+\toprule
+\multirow{2}{*}{Algorithm} & \multirow{2}{*}{Solutions' Type} & \multicolumn{3}{c|}{SC (min)}                     & \multicolumn{3}{c|}{CF (min)}                       & \multicolumn{3}{c|}{CA (max)}                       & \multicolumn{3}{c}{IS (max)}                      \\
+                           &                       & obj.           & gap             & fea.           & obj.             & gap             & fea.           & obj.             & gap             & fea.           & obj.           & gap             & fea.           \\ \midrule
+Gurobi (100s)                     & Optimal                 & 168.3          & 0.0\%           & 100\%          & 11405.5          & 0.0\%           & 100\%          & 36102.6          & 0.0\%           & 100\%          & 685.3          & 0.0\%           & 100\%          \\ \midrule
+SCIP                       & Heuristic                  & 1967.0         & 91.4\%          & \textbf{100\%} & 84748.4          & 86.5\%          & \textbf{100\%} & 28007.4          & 22.4\%          & \textbf{100\%} & 447.8          & 34.7\%          & \textbf{100\%} \\
+Gurobi                     & Heuristic                  & \textbf{522.4} & \textbf{67.8\%} & \textbf{100\%} & 50397.3          & 77.4\%          & \textbf{100\%} & \textbf{30052.0} & 16.8\%          & \textbf{100\%} & 415.5          & 39.4\%          & \textbf{100\%} \\
+Neural Diving              & Complete                    & -              & -               & 0.0\%          & -                & -               & 0.0\%          & -                & -               & 0.0\%          & -              & -               & 0.0\%          \\
+IP Guided DDPM (Ours)      & Complete                    & 577.9          & 70.8\%          & 95.7\%         & 58488.1          & 80.5\%          & 44.0\%         & 800.3            & 97.8\%          & 87.3\%         & 129.9          & 81.0\%          & \textbf{100\%} \\
+IP Guided DDIM (Ours)      & Complete                    & 533.5          & 68.5\%          & 99.8\%         & \textbf{25119.2} & \textbf{54.6\%} & 89.7\%         & 26916.9          & 25.4\%          & 97.1\%         & \textbf{455.6} & \textbf{33.5\%} & 99.7\%         \\ \midrule
+Neural Diving              & Partial + CompleteSol            & 849.0          & 80.2\%          & \textbf{100\%} & 14259.8          & 20.0\%          & 81.3\%         & 30143.6          & 16.5\%          & 87.0\%         & 484.1          & 29.4\%          & 90.4\%         \\
+PS                         & Partial + Search            & 593.7          & 71.7\%          & \textbf{100\%} & 32119.8          & 64.5\%          & \textbf{100\%} & 31159.5          & 13.7\%          & \textbf{100\%} & 587.9          & 14.2\%          & \textbf{100\%} \\
+IP Guided DDIM (Ours)      & Partial + CompleteSol            & \textbf{255.5} & \textbf{34.1\%} & \textbf{100\%} & \textbf{14224.1} & \textbf{19.8\%} & \textbf{100\%} & \textbf{32491.1} & \textbf{10.0\%} & 99.7\%         & \textbf{639.4} & \textbf{6.7\%}  & \textbf{100\%} \\ \bottomrule
+\end{tabular}
+}
+ \label{tab:compare}
+\end{table*}
+
+\subsection{Illustrative experiments}
+\label{sec:toy_example}
+
+The maximal independent set problem involves finding the largest subset of nodes in an undirected graph where no two nodes are connected. 
+We focus on an illustrative example: a graph consisting of 15 nodes and 22 edges.  
+This graph can be transformed into an integer programming (IP) instance with 15 variables and 22 constraints. The graph is depicted in Figure \ref{fig:toy_example}, and we present the results from Neural Diving, and from the different time steps of unguided DDIM and IP Guided DDIM. 
+Among the three algorithms, Neural Diving fixes only three node values and uses the Completesol heuristic to find an independent set containing seven nodes. 
+However, the random sampling solution based on predicted probability from Neural Diving is infeasible. 
+Unguided DDIM is unable to find a feasible solution (there is an edge between node 7 and node 8).
+In contrast, IP Guided DDIM is able to fetch the optimal solution by finding an independent set containing eight nodes during the sampling process, where no two nodes are connected. 
+Notably, the quality of the solution improves as the sampling process progresses. 
+The independent set contains 5 nodes at step 10, 7 nodes at step 50, and finally 8 nodes (the optimal solution) at step 100. 
+These indicate that IP Guided DDIM outperforms Neural Diving and Unguided DDIM in finding the optimal solution for this illustrative example.
+
+\subsection{Performance Evaluation}
+\label{sec:compare}
+
+\begin{table*}[ht]
+\centering
+\caption{Ablation study for 100 instances on 4 datasets with different guidances.}
+\resizebox{0.7\linewidth}{!}{
+\begin{tabular}{lcccccccccc}
+\hline
+\multicolumn{1}{c}{} &
+  \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}\small Unguided \\ \small DDIM \end{tabular}} &
+  \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}\small Constraint Guided \\ \small DDIM\end{tabular}} &
+  \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}\small Objective Guided \\ \small DDIM \end{tabular}} &
+  \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}\small IP Guided DDIM \\ \small w/o CISP \end{tabular}} &
+  \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}} \small IP Guided \\ \small DDIM \end{tabular}} \\ \cline{2-11} 
+\multicolumn{1}{c}{\multirow{-2}{*}{\small dataset}} 
+& \small obj. & \small  fea. & \small obj. & \small fea. & \small obj.    & \small fea. & \small  obj.    & \small fea. & \small  obj.    & \small fea.\\ \hline
+\small SC (min)   & -   & \small  0.0\%  &  \small 63046.9 &  \small \textbf{99.8\%} & -    & \small  0.0\%  & \small 763.4 & \small 99.8\% &  \small \textbf{533.5}   &  \small \textbf{99.8\%} \\
+\small CF (min)   & -    &  \small 0.0\%  &  \small 53311.2 &  \small 74.1 \%& -    &  \small 0.0\%  &  \small 31319.8 & \small 41.7\% & \small \textbf{25119.2} &  \small \textbf{89.7\%} \\
+\small CA (max)   & -    & \small  0.0\%  &  \small 5157.2  &  \small \textbf{99.7\%} & -    & \small  0.0\%  & \small 23383.3 & \small 57.7\% & \small \textbf{26916.9} &  \small 97.1 \%\\
+\small IS (max)  & -    &  \small 0.0\%  &  \small 386.5   &  \small \textbf{100 \%} & -    &  \small 0.0\%  &   \small \textbf{479.1} & \small 68.9\% & \small 455.6  &  \small 99.7\% \\ \hline
+\end{tabular}}
+\label{tab:ablation}
+\end{table*}
+
+\begin{table*}
+\centering
+ \caption{The average objective value (obj.), gap and the feasible ratio (fea.) for 100 instances in 3 different size SC datasets. Optimal, heuristic, complete and partial denote optimal solutions from Gurobi, heuristic solutions from solvers, complete solutions from models, and partial solutions from models. CompleteSol and search indicates CompleteSol heuristic and predict-and-search algorithm for completing the partial solutions, respectively.}
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{c|c|ccc|ccc|ccc}
+\toprule
+\multirow{2}{*}{Algorithm} & \multirow{2}{*}{Solutions' Type} & \multicolumn{3}{c|}{SC (2000)}                    & \multicolumn{3}{c|}{SC (3000)}                    & \multicolumn{3}{c}{SC (4000)}                     \\
+                           &                       & obj.           & gap             & fea.           & obj.           & gap             & fea.           & obj.           & gap             & fea.           \\ \midrule
+Gurobi (100s)                     & Optimal                 & 168.3          & 0.0\%           & 100\%          & 140.4          & 0.0\%           & 100\%          & 126.9          & 0.0\%           & 100\%          \\ \midrule
+SCIP                       & Heuristic                  & 1977.0         & 91.4\%          & 100\%          & 2236.2         & 93.7\%          & \textbf{100\%} & 2386.0         & 94.7\%          & \textbf{100\%} \\
+Gurobi                     & Heuristic                  & 522.4          & 67.8\%          & 100\%          & 718.8          & 80.5\%          & \textbf{100\%} & 1454.5         & 91.3\%          & \textbf{100\%} \\
+Neural Diving              & Complete                    & -              & -               & 0.0\%          & -              & -               & 0.0\%          & -              & -               & 0.0\%          \\
+IP Guided DDPM (Ours)      & Complete                    & 594.7          & 70.8\%          & 96.5\%         & \textbf{451.8} & \textbf{68.9\%} & 83.7\%         & \textbf{440.7} & \textbf{71.2\%} & 77.9\%         \\
+IP Guided DDIM (Ours)      & Complete                    & \textbf{533.5} & \textbf{68.5\%} & 99.8\%         & 486.8          & 71.2\%          & 99.9\%         & 464.9          & 72.7\%          & \textbf{100\%} \\ \midrule
+Neural Diving              & Partial + CompleteSol            & 849.0          & 80.2\%          & \textbf{100\%} & 1145.8         & 87.7\%          & \textbf{100\%} & 1465.6         & 91.3\%          & \textbf{100\%} \\
+PS                         & Partial + Search            & 593.7          & 71.7\%          & \textbf{100\%} & 737.0          & 80.9\%          & \textbf{100\%} & 994.9          & 87.2\%          & \textbf{100\%} \\
+IP Guided DDIM (Ours)      & Partial + CompleteSol            & \textbf{255.5} & \textbf{34.1\%} & \textbf{100\%} & \textbf{217.4} & \textbf{35.4\%} & \textbf{100\%} & \textbf{195.9} & \textbf{35.2\%} & \textbf{100\%} \\ \bottomrule
+\end{tabular}}
+ \label{table:generalization}
+\end{table*}
+
+In this section, we evaluate the performance of different methods by comparing their average feasible ratios, gaps and average objective values across four datasets mentioned earlier. Each dataset contains 100 instances. For each instance, we sample 30 solutions and calculate the corresponding metrics, which allows us to assess the performance of each method in terms of both solution feasibility and objective value across the different datasets.
+We first compare the feasibility ratio of the \emph{complete} solutions generated by IP Guided Diffusion with the \emph{partial} solutions generated by Neural Diving, due to the inability of Neural Diving to produce complete solutions. In Neural Diving, the expected proportion of variables assigned by the model is controlled by the hyper-parameter "Coverage" $C$. A higher $C$ results in more variables being assigned by the model, which generally leads to a lower feasibility ratio. Therefore, a carefully prescribed coverage $C$ is crucial in Neural Diving to ensure the feasibility of partial solutions.
+In this experiment, we trained two variants of Neural Diving with different coverage thresholds for each dataset. 
+For the SC, CA, and IS datasets, the coverage are set to 0.2 (low coverage) and 0.3 (high coverage) respectively. However, for the CF dataset, the coverage thresholds are set to 0.1 and 0.2.
+Figure~\ref{fig:feasibility} presents the average feasible ratio for 100 instances. In this comparison, the feasible ratio of complete solutions from IP guided DDIM outperforms the solutions of Neural Diving in almost all instances. 
+To more comprehensively evaluate the performance of the diffusion model, we compare it against different baselines in Table~\ref{tab:compare}. For SCIP, we adopt the first solution obtained through non-trivial heuristic algorithms during the solving phase. For Gurobi, we use the best heuristic solution for each instance as a benchmark. Additionally, we include the optimal objective values (obtained through running Gurobi for 100 seconds on each instance) as ground-truth. For Neural Diving, complete solutions are frequently infeasible. As such, we employ a low-coverage model that prioritizes the feasibility of partial solutions. Subsequently, a CompleteSol heuristic is utilized to finalize these partial solutions. In the case of the Predict and Search algorithm (PS), we construct a trust region using partial solutions with the same proportion of assigned variables as Neural Diving and use Gurobi as the Solver to search the best heuristic solutions found as a benchmark. To ensure a fair comparison, we report not only the quality of the complete solutions generated by our methods (IP Guided DDIM/DDPM), but also the quality of partial solutions. For this, we randomly select the same proportion of variables from DDIM's complete solutions as the ratio from Neural Diving and PS as our partial solutions. We then use the CompleteSol heuristic to finalize these partial solutions.
+
+The results are presented in Table~\ref{tab:compare}. It is evident that the complete solutions produced using the IP Guided DDIM method have a feasible ratio of at least 89.7\%, and their objective values are comparable to the best heuristic solutions from Gurobi. In contrast, the complete solutions obtained solely through Neural Diving are consistently infeasible. Moreover, the integration of partial solutions from IP Guided DDIM with the CompleteSol heuristic outstrips that of all methods in terms of objective values. This improvement is demonstrated by a 3.7 to 33.7\% reduction in the gap to optimal values, while the feasibility ratio for all datasets approaches 100\%.
+\subsection{Ablation Study}
+\label{sec:ablation_study}
+
+We ablate on unguided DDIM (with $s = 0$), constraint guided DDIM (with $\gamma = 1$), objective guided DDIM (with $\gamma = 0$) models and IP guided DDIM on four datasets. 
+We also include an experiment where we train IP and solution embeddings directly via algorithm \ref{alg:training} without CISP, in order to assess the advantages of contrastive learning, i.e. IP Guided DDIP w/o CISP in Table~\ref{tab:ablation}.   
+The results are presented in Table \ref{tab:ablation}. 
+Evidently, the constraint guidance is crucial in generating feasible solutions, 
+and the objective guidance further enhances the quality of solutions. 
+Moreover, the experiments demonstrate that CISP plays a crucial role in ensuring that the solutions produced by our methods are more feasible.
+Therefore, combining both constraint and objective guidance achieves good quality solutions with high probability. 
+
+\begin{figure}
+\centering
+\subfigure[SC instance (minimization).]{\includegraphics[width=0.35\textwidth]{plots/distribution_SC.pdf}}
+\subfigure[IS instance (maximization).]{\includegraphics[width=0.35\textwidth]{plots/distribution_IS.pdf}}
+\caption{The objective distribution of 1000 solutions sampled from a single instance.}
+\label{fig:distribution_of_solutions}
+\end{figure}
+
+\subsection{Scalability test and qualitative analysis}
+\label{sec:generalization}
+
+Practitioners often aim to apply the models learned to solve problems of larger scales than the ones used for data collection and training. 
+To estimate how well a model can generalize to bigger instances, we evaluate its performance on datasets of varying sizes from the Set Cover problem (minimization problem). We utilize three size categories: 
+\begin{itemize}
+    \item SC (2000): 2000 variables, 1000 constraints
+    \item SC (3000): 3000 variables, 1500 constraints
+    \item SC (4000): 4000 variables, 2000 constraints
+\end{itemize}
+It is worth noting that all models were trained using the SC (2000) dataset. The results in table \ref{table:generalization} demonstrate that IP guided DDPM consistently performs well across all three different-sized datasets, indicating that our framework possesses strong generalization capabilities.
+
+Diffusion models are generative models that capture the distribution of a dataset. In this experiment, we focus on the distribution of solutions generated by our methods. We take a single instance from the SC dataset and IS dataset and use the IP Guided DDIM algorithm to generate 1000 complete feasible solutions. We also randomly sample 20\% of variable values from each solution and use the CompleteSol heuristic to fill in the remaining variables. We analyze the distribution of objective values for these complete solutions and compare them with the optimal objective values and the best heuristic solutions found by the Gurobi heuristic.
+The results are shown in Figure \ref{fig:distribution_of_solutions}. 
+Clearly, the complete solutions directly generated by the IP Guided DDIM algorithm are superior to the best solutions from the Gurobi heuristic. 
+Furthermore, the objective values from the partial solutions completed by the CompleteSol heuristic are closer to the optimal value.
+
+
+
+\section{Related Work}
+
+\label{sec:related_works}
+We start the related work section with a summary of deep learning techniques used in the construction of feasible solutions for Integer Programming (IP) problems. 
+\citet{gasse2019exact} propose a method that combines a bipartite graph with a Graph Convolutional Network (GCN) to extract representations of Integer Programming (IP) instances. 
+Although this approach is primarily employed to learn the branching policy in the branch and bound algorithm, 
+it is worth noting that this modeling method can also be utilized for the prediction of solutions for IP instances.
+However, the solutions produced by GCN directly are often infeasible or sub-optimal.
+To address this, Neural Diving~\citep{nair2020solving} leverages the SelectiveNet~\citep{geifman2019selectivenet}
+to assign values to only a subset of the variables based on a coverage threshold, 
+with the rest of the variables being completed via an IP Solver.
+To further improve the feasibility of generated solutions, 
+\citet{han2023a} proposes a predict-search framework that combines the predictions from GNN model with trust region method. 
+However, this method still relies on IP solver to solve a modified instance (adding neighborhood constraints to origin instance) in order to get complete solutions. 
+Similar to \citet{nair2020solving}, \citet{khalil2022mip} integrate GNN into integer programming solvers and apply it to construct a partial solutions through a prescribed rounding threshold, 
+which is then completed using SCIP. 
+In contrast, our method aims to learn the latent structure of IP instances by diffusion models, 
+and obtains complete feasible solutions through guided diffusion sampling, without any reliance on the IP solver.
+
+Another set of related works to our paper is diffusion models~\citep{sohn2015learning, ho2020denoising}. 
+As the latest state-of-the-art family of deep generative models, 
+diffusion models have demonstrated their ability to enhance performance across various generative tasks~\citep{yang2022diffusion}. 
+In this paper, we focus our discussion specifically on conditional diffusion models. 
+Unlike unconditional generation, conditional generation emphasizes application-level contents as a condition to control the generated results based on predefined intentions.
+To enable this conditioning, \citet{dhariwal2021diffusion} introduce the concept of classifier guidance, 
+which enhances sample quality by conditioning the generative process on an additional trained classifier. 
+In the same vein, \citet{ho2022classifier} propose a joint training strategy for both conditional and unconditional diffusion models, 
+i.e., classifier-free guidance. 
+This approach combines the resulting conditional and unconditional scores to achieve a balance between sample quality and diversity. 
+This idea has also found its effectiveness in Topology Optimization~\citep{maze2023diffusion}. 
+We thus take a similar derivation from the classifier guidance and devise IP-guided diffusion sampling by incorporating the objectives and constraints into the transition probability. 
+
+
+\section{Discussions}
+
+\subsection{The Importance of Solution Generation}
+
+Integer Programming solvers typically rely on branch-and-bound or branch-and-cut algorithms to tackle problems, often starting with a primal heuristic to find a good initial feasible solution. A robust starting solution generally accelerates the entire solving process. Our method demonstrates that diffusion models are capable of generating complete feasible solutions that satisfy all constraints. These generated solutions exhibit competitive performance compared to the heuristics employed in optimization tools such as Gurobi. Notably, the ability to generate complete solutions from scratch distinguishes our model from other neural-based approaches like Neural Diving \citep{nair2020solving} and the Predict-Search algorithm \citep{han2023a}. Moreover, generating feasible solutions end-to-end is especially important, as it represents a significant leap toward developing a purely neural-based method for integer programming. The paper shows that diffusion models can produce solutions that satisfy all constraints, which lays the foundation for future research in which neural networks could potentially solve such problems without relying on traditional solvers or heuristics.
+
+\subsection{Sampling Efficiency}
+The sampling time is a notable limitation of current diffusion models. Specifically, our method requires 100 iterative denoising steps for DDIM and 1000 for DDPM, resulting in longer times to generate a single solution compared to other methods. To address this issue, there have been active studies focused on accelerating diffusion sampling, such as model quantization (\citet{li2023qdiffusion}) and distillation (\citet{huang2023accelerating}). These techniques can be readily integrated into our methods. Moving forward, we will enhance our method by incorporating these acceleration techniques.
+
+
+\section{Conclusion}
+
+In this paper, we presented a comprehensive framework for generating feasible solutions for Integer Programming (IP) problems. 
+We utilized the CISP approach to establish a link between IP instances and their corresponding solutions, 
+allowing to obtain IP embeddings and solution embeddings. 
+To effectively capture the distribution of feasible solutions, we leveraged diffusion models, which are known for their powerful learning capabilities, to learn the distribution of solution embeddings. 
+We further employed a solution decoder to reconstruct the solutions from their embeddings. 
+Importantly, we proposed an IP guided sampling algorithm that explicitly incorporates the objective and constraint information to generate high-quality solutions. 
+The experimental results on four distinct datasets demonstrate the superiority of our approach to the state-of-the-art. 
+
+
+\begin{acks}
+Mingfei Sun is affiliated with Centre for AI Fundamentals. He is also a member of AI Hub in Generative Models, funded by Engineering and Physical Sciences Research Council (EPSRC), part of UK Research and Innovation (UKRI),
+\end{acks}
+
+\newpage
+
+
+
+

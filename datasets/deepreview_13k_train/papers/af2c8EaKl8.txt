@@ -1,0 +1,335 @@
+\title{Decision ConvFormer: Local Filtering in MetaFormer is Sufficient for Decision Making}
+
+\begin{abstract}
+The recent success of Transformer in natural language processing has sparked its use in various domains. In offline reinforcement learning (RL), Decision Transformer (DT) is emerging as a promising model based on Transformer. However, we discovered that the attention module of DT is not appropriate to capture the inherent local dependence pattern in trajectories of RL modeled as Markov decision processes. To overcome the limitations of DT, we propose a novel action sequence predictor, named Decision ConvFormer (DC), based on the architecture of MetaFormer, which is a general structure to process multiple entities in parallel and understand the interrelationship among the multiple entities. DC employs local convolution filtering as the token mixer and can effectively capture the inherent local associations of the RL dataset. In extensive experiments, DC achieved state-of-the-art performance across various standard RL benchmarks while requiring fewer resources. Furthermore, we show that DC better understands the underlying meaning in data and exhibits enhanced generalization capability. Our code is available at \url{https://beanie00
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Transformer \citep{vaswani2017attention} proved successful in various domains including natural language processing (NLP) \citep{brown2020language,chowdhery2022palm}, computer vision (\citealp{liu2021swin}; \citealp{hatamizadeh2023global}). Transformer is a special instance of a more abstract structure referred to as MetaFormer \citep{yu2022MetaFormer}, which is a general architecture that takes multiple entities in parallel, understands their interrelationship, and extracts important features for addressing specific tasks while minimizing information loss. 
+As shown in Fig. \ref{fig:MetaFormer}, a MetaFormer is composed of blocks, where each block contains normalizations, a token mixer, residual connections,  and a feedforward network. 
+Among these components, the token mixer plays a crucial role in information exchange among multiple input entities. In the case of Transformer, an attention module is used as the token mixer. The attention module has been generally regarded as Transformer's main success factor due to its ability to capture the information relationship among tokens across a long distance.
+With the successes in other areas, Transformer has also been employed in RL, especially in offline RL, and provides an alternative to existing value-based or policy-gradient methods.  The representative work in this vein is Decision Transformer (DT) \citep{chen2021decision}. DT  
+directly leverages history information to predict the next action, resulting in competitive performance compared with existing approaches to offline RL.  Specifically,  DT  takes a trimodal token sequence of state, action, and return as input, and predicts the next action to achieve a target objective. The input trimodal sequence undergoes information exchange through DT's attention module, based on the computed relative importance (weights) between each token and every other token in the sequence. Thus, the way that DT predicts the next action is just like that of GPT-2 \citep{radford2019language} in NLP with minimal change.
+However, unlike data sequences in NLP for which Transformer was originally developed,  offline RL data has an inherent pattern of local association between adjacent timestep tokens due to the Markovian property, as seen in Fig.  \ref{fig:casuality}. 
+This dependence pattern is distinct from that in NLP and is crucial for identifying the underlying transition and reward function of an MDP \citep{bellman1957markovian}, which are fundamental for decision-making in turn.  
+As we will see shortly, however, the attention module of DT is an overparameterization and not appropriate to capture this distinct local dependence pattern of MDPs. 
+
+\begin{figure}[!t]
+ \begin{minipage}[t]{0.63\linewidth}
+  \centering \includegraphics[width=1.0\textwidth]{fig/MetaFormer.png}
+  \caption{\small{The network architecture of MetaFormer, DT, and DC.}}
+  \label{fig:MetaFormer}
+ \end{minipage}%
+ \hspace{0.2cm}
+ \begin{minipage}[t]{0.37\linewidth}
+   \centering
+ \raisebox{2cm}{\includegraphics[width=0.9\textwidth]{fig/casuality.pdf}}
+\caption{\small{The local dependence graph of offline RL dataset: Blue arrows represent Markov property, red arrows indicate the causal interrelation per a single timestep, and the gray dotted line shows the correlation of the adjacent returns.}}
+\label{fig:casuality}
+ \end{minipage}
+\end{figure}
+\begin{comment}
+\begin{wrapfigure}{r}{0.3\textwidth}
+\centering
+\small
+\includegraphics[width=0.3\textwidth]{fig/attention_map/hopper-medium.png} 
+  \caption{\small{Averaged token attention ratios across all layers of DT attention. Detailed analysis available in Section \ref{DT-attention-analysis}.}}
+  \label{fig:dt_attention_summary}
+\end{wrapfigure}
+\end{comment}
+
+In this paper, we propose a new action sequence predictor to overcome the drawbacks of  DT for offline RL.  The proposed architecture named Decision ConvFormer (DC) is still based on MetaFormer but the attention module used in DT is replaced with a new simple token mixer given by three  {\em causal convolution filters} for state, action, and return in order to effectively capture the local Markovian dependence in RL dataset. Furthermore, to provide a consistent context for local association and task-specific dataset traits, we use {\em static filters} that reflect the overall dataset distribution.  DC has a very simple architecture requiring far fewer resources in terms of time, memory, and the number of parameters compared with DT. Nevertheless, DC has a better ability to extract the local pattern among tokens and inter-modal relationships as we will see soon, yielding superior performance compared to the current state-of-the-art offline RL methods across standard RL benchmarks, including MuJoCo, AntMaze, and Atari domains. Specifically, compared with DT, DC achieves a 24\% performance increase in the AntMaze domain, a 39\% performance increase in the Atari domain, and a notable 70\% decrease in training time in the Atari domain. 
+
+
+\section{Motivation}
+
+
+An RL problem can be modeled as a Markov decision process (MDP) $\mathcal{M} = \left<\rho_0,  \mathcal{S}, \mathcal{A}, P, \mathcal{R}, \gamma \right>$, where $\rho_0$ is the initial state distribution, $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space, $P(s_{t+1}|s_t, a_t)$ is the transition probability,  $\mathcal{R}(s_t, a_t)$ is the reward function, and $\gamma \in (0, 1) $ is the discount factor. 
+The goal of conventional RL is to find an optimal policy $\pi^*$ that maximizes the expected return through interaction with the environment. 
+
+\textbf{Offline RL} ~~ In offline RL, unlike the conventional setting, learning is performed without interaction with the environment. Instead, it relies on a dataset $D$ consisting of trajectories generated from unknown behavior policies.
+The objective of offline RL is to learn a policy by using this dataset $D$ to maximize the expected return. 
+One approach is to use  Behavior Cloning (BC) \citep{bain1995framework}, which directly learns the mapping from state to action based on supervised learning from the dataset. 
+However, the offline RL dataset often lacks sufficient expert demonstrations. To address this issue, return-conditioned BC has been considered.   Return-conditioned BC exploits reward information in the dataset and takes a target future return as input. That is, based on data labeled with rewards, one can compute the true return, referred to as return-to-go (RTG), by summing the future rewards from time step $t$ from the dataset: $\hat{R}_t = \sum_{t'=t}^T r_{t'}$. 
+In a dataset containing many suboptimal trajectories, this new label $\hat{R}$ serves as a crucial indicator to distinguish optimal trajectories and reconstruct optimal behaviors.
+\textbf{Decision Transformer (DT)} ~~   DT is a representative approach to  return-conditioned BC. DT employs a Transformer to convert an RL problem as a sequence modeling task \citep{chen2021decision}. DT treats a trajectory as a sequence of RTGs, states, and actions. 
+At each timestep $t$, DT constructs an input sequence to Transformer as a sub-trajectory of length $K$ timesteps: $\tau_{t-K+1:t} = (\hat{R}_{t-K+1}, s_{t-K+1}, a_{t-K+1}, ..., \hat{R}_{t-1}, s_{t-1}, a_{t-1}, \hat{R}_t, s_t)$, and predicts action $a_t$ based on $\tau_{t-K+1:t}$. 
+
+In detail, each element of the input sequence $\tau_{t-K+1:t}$ is linearly transformed to a token vector of the same dimension $d$ to compensate for the different sizes of trimodal components $\hat{R}_t$, $s_t$ and $a_t$. Then, the $3K-1$  token vectors go through a series of blocks, where each block consists of layer normalization, an attention module, residual connection, and a feedforward network. In particular, the attention module consists of three matrices $\mathbf{Q}$ of size $d \times {d'}$, $\mathbf{K}$ of size $d \times {d'}$, and $\mathbf{V}$ of size $d \times d$. These three matrices generate the query, key, and value vectors from the input token vectors $\{x_i,i=1,\ldots,3K-1\}$ of size $1\times d$, respectively, as follows:
+\begin{equation}  \label{eq:qkvLT}
+q_i = x_i \mathbf{Q},~~~k_i= x_i \mathbf{K},~~~ v_i= x_i \mathbf{V}.
+\end{equation}
+Then, the $i$-th output of the attention module is given by  \begin{equation} 
+z_i = \sum_{j=1}^{3K-1} \alpha_{ij} v_j, ~~~i=1,\ldots, 3K-1
+\end{equation}
+with causal masking on the combination weights $\alpha_{ij}$, i.e., $\alpha_{ij}=0,\forall j >i$. The combination weights $\alpha_{ij}$, also known as attention score, capture the dependence of the $i$-th output on the $j$-th input token through the following formula:
+ \begin{equation} \label{eq:attentionOutput}
+\alpha_{ij}=\text{softmax}(\{\langle q_i, k_{j'} \rangle\}_{j'=1}^{3K-1})_j.
+\end{equation}
+\newcommand{\dtbc}{
+  \begin{tabular}{|c|c|}
+        \hline
+        \small DT & \small Direct Learning of $\textbf{A}$\\
+        \hline
+        \small 68.4 & \small 88.2 \\
+        \hline
+    \end{tabular}
+}
+\renewcommand{\arraystretch}{1.2}
+\begin{figure}[!htb]
+    \centering
+    \begin{tabular}[b]{ccc}
+        \subfloat[]{
+            \centering
+            \includegraphics[width=0.26\textwidth]{fig/dt-map.pdf}\label{fig:dt-attention-a}
+        } &
+        \subfloat[]{
+            \centering
+            \includegraphics[width=0.255\textwidth]{fig/static-map.pdf}\label{fig:dt-attention-b}
+        } &
+        \subfloat[t][]{
+            \raisebox{1.8cm}{\dtbc}\label{fig:dt-attention-c}
+        }%
+    \end{tabular}
+    \caption{Motivating results in \texttt{hopper-medium}:  (a) attention scores of DT (1st layer), (b) attention scores of direct learning (1st layer), and (c) performance comparison.}
+    \label{fig:dt-attention}
+\end{figure}
+ 
+\textbf{Attention Score Analysis of DT} \label{dt-attention-analysis} ~~~ Our quest begins with the question ``Is the attention module initially developed for NLP still an appropriate  local-association identifying structure for data sequences of MDPs?" 
+To answer this question, we performed an experiment on the widely considered offline MuJoCo \texttt{hopper-medium} dataset with diverse trajectories.  Fig. \ref{fig:dt-attention-a}  shows the learned attention map of DT with $K=20$.  The index $i$ (or $j$) is ordered such that $i=1$ corresponds to RTG $\hat{R}_{t-K+1}$, $i=2$ to state $s_{t-K+1}$, $i=3$ to action $a_{t-K+1}$, $i=4$ to RTG $\hat{R}_{t-K+2}$ up until $i=59$ to the latest state $s_t$ in $\tau_{t-K+1:t}$. Since causality is applied, $\alpha_{ij}=0,~\forall j>i$ for each $i$. That is, the attention matrix $\mathbf{A}=[\alpha_{ij}]$ is lower-triangular. We observe that the attention matrix of DT is in the form of a full lower triangular matrix if we neglect the column-wise periodic decrease in value (these columns correspond to RTGs). In the case of the latest $s_t$ position of $i=59$, the output depends on up to the past  $K=20$ timesteps. Note that the state sequence forms a Markov chain. 
+From the theory of  ergodic Markov chain, however, we know that a Markov chain has a forgetting property, that is, as a Markov chain progresses, it soon forgets the impact of past states \citep{resnick1992adventures}.  Furthermore, from the Markovian property, $s_{l-2},s_{l-3},\ldots$ should be independent of $s_l$ given  $s_{l-1}$  for each $l$.  The result in Fig. \ref{fig:dt-attention-a} is not consistent with these facts. Hence, instead of parametrizing $\mathbf{Q}$ and $\mathbf{K}$ and obtaining $a_{ij}$ with Eqs. (\ref{eq:qkvLT}) and (\ref{eq:attentionOutput}) as in DT, we directly set the attention matrix $\mathbf{A}=[\alpha^{\text{direct}}_{ij}]$  as learning parameters together with $\mathbf{V}$, and directly learned $\{\alpha^{\text{direct}}_{ij}\}$ and $\mathbf{V}$. The resulting attention matrix $\mathbf{A}$ is shown in Fig. \ref{fig:dt-attention-b}. Now, it is seen that the resulting attention matrix $\mathbf{A}$ is almost a {\em banded} lower-triangular matrix, which is consistent with the Markov chain theory, and its performance is far better than DT as shown in Fig. \ref{fig:dt-attention-c}. Thus, the full lower-triangular structure of the attention matrix in DT is an artifact of the method used for parameterizing the attention module, i.e., parameterizing  $\mathbf{Q}$ and $\mathbf{K}$ and obtaining $\alpha_{ij}$ with Eqs. (\ref{eq:qkvLT}) and (\ref{eq:attentionOutput}), and does not truly capture the local associations in the RL dataset.
+Indeed,  a recent study by \citet{lawson2023merging} showed that even replacing the attention parameters learned in one MuJoCo environment with those learned in another environment results in almost no performance decrease. One may think that DT can properly extract the local dependency simply by reducing the context length $K$ to focus on neighboring information and improve its performance. DT with reduced $K$ yields worse performance.
+
+
+
+\section{The Proposed Method: Decision ConvFormer}
+
+
+For our action predictor, we still adopt the MetaFormer architecture, incorporating the recent study of \citet{yu2022MetaFormer}  suggesting that the success of Transformer, especially in the vision domain, stems from the structure of MetaFormer itself rather than attention.  Our experiment results in Figs. \ref{fig:dt-attention-b} and \ref{fig:dt-attention-c} guide a new design of a token mixer with proper model complexity for MetaFormers as RL action predictors. First, the lower banded structure of $\mathbf{A}$ implies that for each time $i$, we only need to consider a fixed past duration for combination index $j$.  Such linear combination can be accomplished by {\em linear finite impulse response (FIR) filtering}.    Second, note that the attention matrix elements $[\alpha_{ij}]$ of DT vary over input sequences $\{\tau_{t-K+1:t}\}$ for different $t$'s since they are functions of the token vectors $\{x_i\}$ as seen in Eqs. (\ref{eq:qkvLT}) and  (\ref{eq:attentionOutput}) although $\mathbf{Q}$ and $\mathbf{K}$ do not vary. However,  the direct attention matrix parameters $[\alpha^{\text{direct}}_{ij}]$ obtained for  Fig. \ref{fig:dt-attention-b} do not vary over input sequences $\{\tau_{t-K+1:t}\}$ for different $t$'s.  This suggests that we can simply use {\em input-sequence-independent static} linear filtering. Then, the so-obtained filter coefficients will capture the dependence among tokens inherent in the whole dataset. The details of our design based on this guidance are provided below.
+
+\subsection{Model Architecture}
+
+The DC network architecture adopts a MetaFormer as shown in Fig. \ref{fig:MetaFormer}. In DC, the token mixer of the MetaFormer is given by a convolution module, based on our previous discussion. For every timestep $t$, the input sequence $I_t$ is formed as $I_t = (\hat{R}_{t-K+1}, s_{t-K+1}, a_{t-K+1}, ..., \hat{R}_{t-1}, s_{t-1}, a_{t-1}, \hat{R}_t, s_t)$, where $K$ is the context length. $I_t$ is subjected to a separate input embedding for each of RTG, state and action,  yielding $T_t = \left[\text{Emb}_{\hat{R}}(\hat{R}_{t-K+1}); \text{Emb}_{s}(s_{t-K+1}); \text{Emb}_{a}(a_{t-K+1});\cdots; \text{Emb}_{\hat{R}}(\hat{R}_{t}); \text{Emb}_{s}(s_{t})\right] \in \mathbb{R}^{(3K-1) \times d}$. Here, the sequence length is $3K-1$, reflecting the trimodal tokens, and $d$ indicates the hidden dimension. Then,  $T_t$  passes through the convolution block stacked $N$ times, each comprising two sub-blocks. The first sub-block involves layer normalization followed by token mixing through a convolution module, expressed as $Z_t^{\text{1st sub-block}} = \text{Conv}\left(\text{LN}(T_t)\right) + T_t$. The second sub-block also involves layer normalization followed by a Feed Forward Network, expressed as $Z_t^{\text{2nd sub-block}} = \text{FFN}\left(\text{LN}(Z_t^\text{1st sub-block})\right) + Z_t^\text{1st sub-block}$. The FFN is realized as a two-layered MLP.
+\subsection{Convolution Module}
+\label{subsec:ConvModule}
+
+The primary purpose of the convolution module is to integrate the time-domain information among neighboring tokens. To achieve this goal with simplicity, we employ 1D depthwise convolution on each hidden dimension independently by using filter length $L$, leaving hidden dimension-wise mixing to the later feedforward network. Considering the disparity among state, action, and RTG, we use three separate convolution filters for each hidden dimension: state filter, action filter, and RTG filter, to capture the unique information for each embedding. Thus, for each convolution block, we have a set of $3d$ convolution kernels with $3dL$ kernel weights, which are our learning parameters.  
+The convolution process is illustrated in Fig. \ref{fig:filter}.
+The embeddings $T_t$ defined above first go through layer normalization, yielding $X_t = \text{LN}(T_t) \in \mathbb{R}^{(3K-1) \times d}$. Note that each row of $X_t$ corresponds to a $d$-dimensional token, whereas each column of $X_t$ corresponds to a time series of length $3K-1$ for a hidden dimension.  The convolution is performed for the time series in each column of $X_t$, as shown in Fig. \ref{fig:filter}. Specifically,  consider the convolution operation on the $q$-th hidden dimension column, where $q=1,2,\ldots,d$. Let  $w^{\hat{R}}_q[l]$, $ w^{s}_q[l]$, and $w^{a}_q[l]$, $l=0,1,\ldots, L-1$, denote the coefficients
+for the RTG, state and action filters for the $q$-th hidden dimension, respectively. First, the $q$-th column of $X_t$ is appended left by $L-1$ zeros, i.e., $X_t[p,q]=0$ for $p=0,-1,\ldots,-(L-2)$, to match the size for convolution. 
+Then, the convolution output for the $q$-th column is given by
+\begin{equation}\label{eq:conv}
+C_t[p, q] = \left\{\begin{array}{ll}
+\sum_{l=0}^{L-1} w_{q}^{\hat{R}}[l] \cdot X_t[p-l, q] &\text{if} ~~ \text{mod}(p,3)=1, \\ 
+\sum_{l=0}^{L-1} w_{q}^{s}[l] \cdot X_t[p-l, q]  &\text{if} ~~ \text{mod}(p,3)=2, \\ 
+\sum_{l=0}^{L-1} w_{q}^{a}[l] \cdot X_t[p-l, q] &\text{if} ~~ \text{mod}(p,3)=0, 
+\end{array}\right. ~p=1,2,\ldots,3K-1 
+\end{equation}
+for each $q=1,2,\ldots,d$. The reason for adopting three distinct filters for $\text{mod}(p,3)$ $=1$ ($p$: RTG position), $=2$ ($p$: state position), or $=3$ ($p$: action position) is to capture different semantics when the current position corresponds to RTG, state or action. 
+We set the filter length $L=6$ covering the state, action, and RTG values of only the current and previous timesteps, incorporating the Markov assumption. Nevertheless, a different filter length can be chosen or optimized for a given task, considering that the Markov property can be weak for certain tasks.  In fact, setting $L=6$ corresponds to imposing an inductive bias for the Markov assumption on the locality in association with a dataset.
+The number of parameters of the token mixer of DC is $3dL$, whereas that of $\mathbf{Q}$ and $\mathbf{K}$ of the attention module of DT is $2dd'$.  In addition, DT has the $\mathbf{V}$ matrix of size $d\times d$, whereas DC does not have $\mathbf{V}$ at all.  Since $L \ll \text{min}(d',d)$, the number of parameters of DC is far less than that of the attention module of DT. We conjecture this model complexity is sufficient for token mixers of MetaFormers for most MDP action predictors. Indeed, our new parameterization performs better than even the direct parameterization of $\mathbf{A}$ and $\mathbf{V}$ used for Fig. \ref{fig:dt-attention-b}.
+The superior test performance of DC over DT in  Sec. \ref{sec:experiments} and especially the result in  Sec. \ref{discussion} support our conjecture.  
+
+\textbf{Hybrid Token Mixers} ~~ For environments in which the Markovian property is weak and credit assignment across a long range is required, an attention module in addition to convolution modules can be helpful.   For this, the hybrid architecture with  $N$ MetaFormer blocks composed of the initial $N-1$ convolution blocks and a final attention block can be considered. 
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.85\textwidth]{fig/filter.pdf} 
+\caption{The overall convolution operation of DC.}
+\label{fig:filter}
+\end{figure*}
+\subsection{Training and Inference}
+
+\textbf{Training} ~~~ In the training stage, a $K$-length subtrajectory is sampled from offline data $D$ and passes through all DC blocks. Subsequently, the state tokens that have traversed all the blocks undergo a final projection to predict the next action. The learning process minimizes the  error  between the predicted action $\hat{a}_{t}=\pi_{\theta}(\hat{R}_{t-K+1:t}, s_{t-K+1:t}, a_{t-K+1:t-1})$ and the true action $a_{t}$ for $t=1,\ldots,K$, given by
+\begin{align}
+\mathcal{L}_{\text{DC}} := \mathbb{E}_{\tau \sim D} \left [ \frac{1}{K} \sum_{t=1}^{K} \left( a_t - \pi_{\theta}(\hat{R}_{t-K+1:t}, s_{t-K+1:t}, a_{t-K+1:t-1}) \right)^2 \right].
+\label{eq:dc_loss}
+\end{align} 
+
+\textbf{Inference} ~~~ In the inference stage, the true RTG is unavailable. Therefore, similarly to \citet{chen2021decision}, as the initial RTG we set a target RTG that represents the desired performance. During the inference, DC receives the current trajectory data, generates an action to obtain the next state and reward, and subsequently subtracts the reward from the preceding RTG. 
+
+
+
+
+\section{Related Works}
+
+
+\textbf{Return-Conditioned BC} ~~ Both DC and DT fall under the category of return-conditioned BC, an active research field of offline RL (\citealp{kumar2019reward}; \citealp{schmidhuber2019reinforcement}; \citealp{chen2021decision}; \citealp{emmons2021rvs}; \citealp{david2023decision}). For example, RvS \citep{emmons2021rvs} demonstrates comparable performance to DT by modeling the current state and return with a two-layer MLP. This highlights the potential for achieving robust results without resorting to complex networks or long-range dependencies. On the other hand, Decision S4 \citep{david2023decision} emphasizes the importance of global information in the decision-making process. It resolves the DT's scalability issue by incorporating the S4 sequence model as proposed by \citet{gu2022efficiently}. Unlike the two models, our approach focuses on accurate modeling of local associations and offers flexibility to effectively incorporate global dependence if necessary.
+
+From the context of visual offline RL, \citet{shang2021starformer} pointed out DT's limitations in comprehending local associations.  They proposed capturing local relationships by explicitly modeling single-step transitions using the Step Transformer and combining ViT-like image patches for a better state representation. In contrast, our method does not require training additional models on top of DT. Instead, we replace DT’s attention module with a simpler convolution module. 
+\textbf{Offline RL with Online Finetuning} ~~ It is known that the performance of models trained through offline learning is often limited by the quality of the dataset. Thus, finetuning through online interactions can improve the performance of offline-pretrained models \citep{zhang2022policy, luo2023finetuning}.  
+Overcoming the limitations of DT for online applications, \citet{zheng2022online} proposed an Online Decision Transformer (ODT), which includes a stochastic policy and an additional max-entropy objective in the loss function. A similar method can be applied to DC for online finetuning.  We refer to DC with online finetuning as 
+Online Decision ConvFormer (ODC).
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We carry out extensive experiments to evaluate the performance of DC on the D4RL \citep{fu2020d4rl} MuJoCo, D4RL AntMaze, and Atari \citep{mnih2013playing} domains. The primary goals of our experiments are \textbf{1)} to compare DC's performance in offline RL benchmarks with other state-of-the-art baselines, and especially, to check whether the basic DC model using local filtering is effective in the Atari domain or not, where long-range credit assignment is known to be essential, \textbf{2)} to determine whether DC can effectively adapt and refine its performance when combined with online finetuning or not,  \textbf{3)} to see whether DC can capture the intrinsic meaning of data rather than merely replicating behavior or not, and  \textbf{4)} to evaluate the impact of each design element of DC on its overall performance.
+ 
+\subsection{MuJoCo and AntMaze Domains}
+
+We first conduct experiments on the MuJoCo and AntMaze domains from the widely-used D4RL \citep{fu2020d4rl} benchmarks. MuJoCo features a continuous action space with dense rewards, while AntMaze features a continuous action space with sparse rewards. 
+
+\textbf{Baselines} ~~~ We considered seven baselines. These baselines include three value-based methods: TD3+BC \citep{fujimoto2021minimalist}, CQL \citep{kumar2020conservative}, and IQL \citep{kostrikov2021offline}, and  four return-conditioned BC approaches: DT \citep{chen2021decision}, ODT \citep{zheng2022online}, RvS \citep{emmons2021rvs}, and DS4 \citep{david2023decision}.
+
+\textbf{Hyperparameters} ~~~ To ensure a fair comparison between DC and ODC versus DT and ODT, we set the hyperparameters (related to model and training complexity) of DC and ODC to be either equivalent to or less than those of DT and ODT.
+
+\textbf{Offline Results} ~~ Table \ref{table:results} shows the resulting performance of the algorithms including DC and ODC in offline settings on the MuJoCo and AntMaze domains. All the performance scores are normalized, with a score of 100 representing the score of an expert policy, as indicated by \citet{fu2020d4rl}.  For DT/ODT and DC/ODC, the initial RTG value for the test period is a hyperparameter.  We examine six target RTG values, each being a multiple of the default target RTG in \citet{chen2021decision}. In the MuJoCo domain, these values reach up to 20 times the default target RTG, while in the AntMaze domain, they reach up to 100 times. We subsequently report the highest score achieved for each algorithm. A detailed discussion on this topic can be found in Section \ref{discussion}.
+
+\newcolumntype{P}[1]{>{\centering\arraybackslash}p{#1}}
+
+\begin{table*}[h]
+\small
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{\extracolsep{0pt}}|p{2.3cm}||P{0.9cm}P{0.78cm}P{0.78cm}|>{\columncolor{lred}}P{0.78cm}P{0.78cm}P{0.78cm}P{0.78cm}>{\columncolor{lpurple}}P{0.78cm}P{0.78cm}|}
+ \hline
+ \multicolumn{1}{|c||}{} &
+ \multicolumn{3}{c|}{Value-Based Method} &
+ \multicolumn{6}{c|}{Return-Conditioned BC} \\
+ \cline{2-4}
+ \cline{5-10}
+ Dataset & TD3+BC & IQL & CQL & DT & ODT & RvS & DS4 & \textbf{DC} & \textbf{ODC} \\
+ \hline
+ halfcheetah-m & \textbf{48.3} & \textbf{47.4} & 44.0 & 42.6 & 43.1 & 41.6 & 42.5 & 43.0 & 43.6 \\
+ hopper-m &  59.3 & 63.8 & 58.5 & 68.4 & 78.3  & 60.2 & 54.2 & \textbf{92.5} &  \textbf{93.6} \\
+ walker2d-m & \textbf{83.7} & 79.9 & 72.5 & 75.5 & 78.4 & 71.7 & 78.0 &  79.2 & 80.5 \\
+ \hline
+ halfcheetah-m-r & \textbf{44.6} & 44.1 & \textbf{45.5} & 37.0 & 41.5 & 38.0 & 15.2 &  41.3 & 42.4 \\
+ hopper-m-r & 60.9 & 92.1 & \textbf{95.0} & 85.6 & 91.9 & 73.5 & 49.6 & \textbf{94.2} &  \textbf{94.1} \\
+ walker2d-m-r & \textbf{81.8} & 73.7 & 77.2 & 71.2 & \textbf{81.0}  & 60.6 & 69.0 & 76.6 &  \textbf{81.4} \\
+ \hline
+ halfcheetah-m-e & 90.7 & 86.7 & 91.6 & 88.8 & \textbf{94.8} & \textbf{92.2} & \textbf{92.7} & \textbf{93.0} & \textbf{94.8} \\
+ hopper-m-e & 98.0 & 91.5 & 105.4 & \textbf{109.6} & \textbf{111.3} & 101.7 & \textbf{110.8} & \textbf{110.4} & \textbf{111.7} \\
+ walker2d-m-e & \textbf{110.1} & \textbf{109.6} & \textbf{108.8} & \textbf{109.3} & \textbf{108.7} &  106.0 & 105.7 & \textbf{109.6} & \textbf{108.9} \\
+ \hline
+ locomotion mean & 75.3 & 76.5 & 77.6 & 76.4 & \textbf{81.0} & 71.7 & 68.6 & \textbf{82.2} & \textbf{83.4} \\
+ \hline
+ \hline
+ antmaze-u & 78.6 & \textbf{87.1} & 74.0 & 69.4 & 73.5 & 64.4 & 63.4 & \textbf{85.0} & 74.4 \\
+ antmaze-u-d & 71.4 & 64.4 & \textbf{84.0} & 62.2 & 41.8  & 70.1 & 64.6 & 78.5 & 60.4 \\
+ \hline
+ antmaze mean & 75.0 & 75.8 & 79.0 & 65.8 & 57.7 & 67.3  & 64.0 & \textbf{81.8} & 67.4 \\
+ \hline
+\end{tabular}
+\caption{The offline results of DC and baselines in MuJoCo and Antamze domains. We report the expert-normalized returns, following \citet{fu2020d4rl}, averaged across 5 random seeds. The dataset names are abbreviated as follows: `medium' as `m', `medium-replay' as `m-r', `medium-expert' as `m-e', `umaze' as `u', and `umaze-diverse' as `u-d'. The boldface numbers denote the maximum score or comparable one among the algorithms.
+}
+\label{table:results}
+\end{table*}
+
+In Table \ref{table:results}, we observe the following: \textbf{1)} Both DC and ODC consistently outperform or closely match the state-of-the-art performance across all environments. \textbf{2)} In particular, DC and ODC show far superior performance in the \texttt{hopper} environment compared with other baselines. \textbf{3)} Our model excels not only in MuJoCo locomotion tasks focused on return maximization but also in goal-reaching AntMaze tasks. Considering the sparse reward setting of Antmaze, the competitive performance in this domain highlights the effectiveness of DC in sparse settings. Through these observations, we can confirm that our approach effectively combines important information to make optimal decisions specific to each situation, irrespective of whether the context involves high-quality demonstrations, sub-optimal demonstrations, dense rewards, or sparse rewards.
+
+\textbf{Online Finetuning Results} ~~ Table \ref{table:onlineresults} shows the online finetuning result obtained with 0.2 million online samples of ODC after offline pretraining. We compare against IQL \citep{kostrikov2021offline} and ODT \citep{zheng2022online}. Like the offline result, all scores are normalized in accordance with \citet{fu2020d4rl}. ODC yields top performance across most environments, 
+ further validating the effectiveness of DC in online finetuning.  In consistency with the offline result, the performance of ODC stands out in the \texttt{hopper} environment. In the case of \texttt{hopper-medium}, ODC achieves nearly maximum scores using sub-optimal trajectories for pretraining and using few samples during online finetuning.   The difference between the offline and online performance is denoted as $\delta$. ODC shows less fluctuation than other models. This is partly because the offline performance itself is higher than others.
+\begin{table*}[h]
+\small
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{ |p{2.2cm}||P{1.6cm}P{1.2cm}>{\columncolor{lred}}P{1.7cm}P{1.2cm}>{\columncolor{lpurple}}P{1.7cm}P{1.2cm}| }
+ \hline
+ Dataset & IQL (0.2M) & $\delta_{\texttt{IQL}}$ & ODT (0.2M) & $\delta_{\texttt{ODT}}$ & ODC (0.2M) & $\delta_{\texttt{ODC}}$ \\
+ \hline
+ halfcheetah-m & \textbf{47.41} & 0.04  & 42.53 & -0.62 & 42.82 & -0.81 \\
+ hopper-m & 66.79 & 2.98   & 96.33 & 18.03 &  \textbf{99.29} & 5.64 \\
+ walker2d-m & \textbf{80.33} & 0.44  & 75.56 & -2.89 & \textbf{79.44} & -1.09 \\
+ \hline
+ halfcheetah-m-r & \textbf{44.14} & 0.04 & 40.64 & -0.86 & 41.42 & -1.02\\
+ hopper-m-r & \textbf{96.23} & 4.10  & 89.26 & -2.65 & \textbf{95.23} & 1.16\\
+ walker2d-m-r & 70.55 & -3.12  & \textbf{77.71} & -3.32 & \textbf{77.89} & -3.14 \\
+ \hline
+ locomotion mean & 67.56 & 0.75 & 70.34 & 1.28 & \textbf{72.68} & 0.05 \\
+ \hline
+ \hline
+ antmaze-u & \textbf{89.5} & 2.4  & 86.43 & 12.88 & 86.70 & 12.24 \\
+ antmaze-u-d & 56.8 & -7.6  & \textbf{60.26} & 18.37 & \textbf{61.12} & 0.68 \\
+ \hline
+ antmaze mean & \textbf{73.2} & -2.6 & \textbf{73.35} & 15.63 & \textbf{73.91} & 6.46\\
+ \hline
+\end{tabular}
+\caption{Online finetuning results of DC and baselines after offline pretraining. All models are fine-tuned with 0.2 million online samples. We report the expert-normalized returns averaged across five random seeds. Dataset abbreviations are the same as those used in Table \ref{table:results}. }
+\label{table:onlineresults}
+\end{table*}
+
+\subsection{Atari Domain} 
+
+In the Atari domain \citep{mnih2013playing}, the setup differs from that of MuJoCo and AntMaze. Here, the action space is discrete, and corresponding rewards are not immediately given after an action, and this makes the direct association of specific rewards with states and actions difficult. In addition, the Atari domain is more challenging due to its reliance on image inputs. By testing in this domain, we can evaluate the algorithm's capability in credit assignment and managing a discrete action space.
+
+\textbf{Hybrid Token Mixers} ~~ As the Atari domain requires credit assignment across long horizons, incorporating a module that can capture global dependency in addition to our convolution module, can be advantageous. Therefore, in this domain, in addition to experiments with the default DC employing a convolution block in every layer, we conduct experiments using the hybrid DC mentioned in Section \ref{subsec:ConvModule}, composed of $N$ MetaFormer blocks with the first $N-1$ convolution blocks and a final attention block.
+
+\textbf{Baselines and Hyperparameters} ~~ For the Atari domain, we compare DC with CQL \citep{kumar2020conservative}, BC \citep{bain1995framework}, and DT \citep{chen2021decision} on eight games: Breakout, Qbert, Pong,  Seaquest, Asterix, Frostbite, Assault and Gopher including the games used in \citet{chen2021decision} and \citet{kumar2020conservative}. The hybrid DC uses the same hyperparameters used by DT, including the context length $K=30$ or $K=50$. However, we set $K=8$ for the default DC due to its emphasis on local association.
+
+\begin{table*}[h!]
+\small
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{ |p{1.4cm}||P{1.5cm}P{1.6cm}>{\columncolor{lred}}P{2.25cm}>{\columncolor{lpurple}}P{2.25cm}>{\columncolor{lmixed}}P{2.25cm}| }
+\hline
+Game & CQL & BC & DT & DC & DC$^{\text{hybrid}}$\\
+\hline
+Breakout & 211.1 & 142.7 & 242.4 \small $\pm 31.8$ & 352.7 
+ \small $\pm 44.7$ & \textbf{416.0 \small $\pm 105.4$}\\
+Qbert & \textbf{104.2} & 20.3 & 28.8 \small $\pm 10.3 $ & 67.0 \small $\pm 14.7$ & 62.6 \small $\pm 9.4$ \\
+Pong & \textbf{111.9} & 76.9 & 105.6 \small $\pm 2.9$ & 106.5 $\pm 2.0$& \textbf{111.1} $\pm 1.7$\\
+Seaquest & 1.7 & 2.2 & \textbf{2.7} \small $\pm 0.7$ & \textbf{2.6} $\pm 0.3$ & \textbf{2.7} $\pm 0.04$ \\
+Asterix & 4.6 & 4.7 & 5.2 $\pm 1.2$ & \textbf{6.5} $\pm 1.0$ & \textbf{6.3} $\pm 1.8$ \\
+Frostbite &  9.4 & 16.1 &  25.6 $\pm 2.1$ & \textbf{27.8} $\pm 3.7$ & \textbf{28.0} $\pm 1.8$ \\
+Assault & 73.2 & 62.1 & 52.1 $\pm 36.2$ & 73.8 $\pm 20.3$  & \textbf{79.0} $\pm 13.1$\\
+Gopher & 2.8 & 33.8 & 34.8 $\pm 10.0$ & \textbf{52.5} $\pm 9.3$ & \textbf{51.6} $\pm 10.7$ \\
+\hline
+\hline
+mean & 64.9 & 44.9 & 62.2 & 86.2 & \textbf{94.7}\\
+\hline
+\end{tabular}
+\caption{Offline performance results of DC and baselines in the Atari domain. We report the gamer-normalized returns, following \citet{ye2021mastering}, averaged across three random seeds. We denote the hybrid setting as $\text{DC}^{\text{hybrid}}$. The boldface numbers denote the maximum score or comparable one among the algorithms.}
+\label{table:atari-results}
+\end{table*}
+
+\textbf{Results} ~~ Table \ref{table:atari-results} shows the  performance results in the Atari domain. The performance scores are normalized according to \citet{agarwal2020optimistic}, such that 100 represents a professional gamer's policy, and 0 represents a random policy. In the Atari dataset, four successive frames are stacked to form a single observation, capturing the motion over time. Although \citet{chen2021decision} proposed that extending the timesteps might be advantageous, our findings indicate that a simple aggregation of local information alone can exceed the performance achieved by the longer-timestep DT setup. Furthermore,  the hybrid configuration, which integrates an attention module in its last layer to balance both local and global information, outperforms the baselines, and the gap is huge in \texttt{Breakout}. These results highlight the importance of effectively integrating local context before incorporating long-term information when making decisions on environments that demand long-horizon reasoning.
+
+\subsection{Discussion} 
+\label{discussion}
+
+In this subsection, we examine the mechanisms that allow DC to excel in decision-making by considering the aspects of understanding local associations and model complexity.
+
+\begin{wrapfigure}{r}{0.32\textwidth}
+\small
+\centering
+\includegraphics[width=0.33\textwidth]{fig/sensitivity.pdf}
+\caption{\small{Inference performance with zeroed out modals in \texttt{hopper-medium}.}}
+\label{fig:sensitivity}
+\end{wrapfigure}
+\textbf{Input Modal Dependency} ~~ Assessing how the convolution filter gauged the importance of each modal (RTG, state, or action) is challenging because visualizing filters is not as straightforward as visualizing attention scores. However, performance analysis by zeroing out each modal during inference can reveal their learned significance from training. For instance, if zeroing out RTG during testing severely impairs performance, it indicates its critical role in decision-making. Given the importance of the current state for predicting the next action, we keep it intact when zeroing out states. The results in MuJoCo \texttt{hopper-medium} shown in Fig. \ref{fig:sensitivity} reveal that for DT, zeroing out each modal results in a minor performance decrease, and the impact is more or less the same for each modal except the fact that zeroing out states has a slightly bigger impact. In contrast, for DC, zeroing out action has no impact on performance, but zeroing out RTG or state causes a huge drop over 40\%. Indeed, DC found out that RTG and state information is more important than action, whereas DT seems not. 
+\begin{wrapfigure}{r}{0.5\textwidth}
+\small
+\centering
+\includegraphics[width=0.2\textwidth]{fig/extrapolation/label.png} \\
+\begin{tabular}{cc}      \includegraphics[width=0.25\textwidth]{fig/extrapolation/hopper-medium.png}      \includegraphics[width=0.225\textwidth]{fig/extrapolation/antmaze-umaze.png}
+    \end{tabular} 
+\caption{\small{Test performance with respect to the target RTG in \texttt{hopper-medium} and \texttt{antmaze-umaze}.}}
+\label{fig:extrapolation}
+\end{wrapfigure}
+
+\hfill
+
+\textbf{Generalization Capability: Out-Of-Distribution RTG} ~~ For any given task, there's an optimal model complexity; exceeding this point leads to overfitting and larger test or generalization errors \citep{goodfellow2016deep}. Thus, one way to check that a model has proper complexity is to investigate the generalization errors for samples unseen in the training dataset. For DT and DC, setting the initial target RTG to an out-of-distribution (OOD) value unseen in training effectively tests this. So, we performed experiments by continuously increasing the target RTG from the default value (used in \citet{chen2021decision})  on \texttt{hopper-medium} and \texttt{antmaze-umaze}, and the result is shown in  Fig. \ref{fig:extrapolation}.  It is seen that DC has far better generalization capability than DT as the target RTG deviates from the training dataset distribution.  This means that DC better understands the task context and better knows how to achieve the unseen desired higher target RTG by learning from the seen dataset than DT.  The superior generalization capability of DC to DT implies that the model complexity of DC is closer to the optimal complexity than that of DT indeed.
+
+
+\section{Conclusion}
+
+
+In this paper, we have proposed a new decision maker named Decision ConvFormer (DC) for offline RL. 
+DC is based on the architecture of MetaFormer and its token mixer is simply given by  convolution filters. DC drastically reduces the number of parameters and computational complexity involved in token mixing compared with the conventional attention module, but better captures the local associations in RL trajectories so that it makes MetaFormer-based approaches to RL a viable and practical option. We have shown that DC has a model complexity relevant to MetaFormers as MDP action predictors and has superior generalization capability due to its proper model complexity.
+Numerical results show that DC yields outstanding performance across all the considered offline RL tasks including  MuJoCo, AntMaze, and Atari domains.  
+Our token mixer structure can be used for MetaFormers intended for other aspects of MDP problems which were difficult due to attention's heavy complexity,  opening up possibilities for more MetaFormer-based algorithms for MDP RL.
+
+
+
+
+
+

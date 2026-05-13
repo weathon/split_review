@@ -1,0 +1,299 @@
+\title{LLM Compression with Convex Optimization—Part 1: Weight Quantization}
+
+\begin{abstract}
+In recent years, compression of large language models (LLMs) has emerged as an important problem to enable language model deployment on resource-constrained devices, reduce computational costs, and mitigate the environmental footprint of large-scale AI infrastructure. In this paper, we lay down the foundation for LLM quantization from a convex optimization perspective and propose a quantization technique that builds on this foundation for optimum quantization outcomes. Our quantization framework, CVXQ, scales to models containing hundreds of billions of weight parameters and provides users with the flexibility to compress models to any specified model size, post-training. A reference implementation of CVXQ can be obtained from.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) have become a versatile framework for solving a large number of problems in natural language processing, from text translation and summarization to conversational AI and automatic generation of radiology reports. While LLMs have surpassed traditional methods in many of these tasks, they can involve tens or hundreds of billions of weight parameters (!), and this makes their deployment onto devices with limited resources challenging—model weights and activations far exceed the available on-chip memory so that activations need to be loaded from and saved to off-chip memory throughout inference, rendering LLM inference memory-bound (Yuan et al., 2024). Xis greatly hinders the usability of LLMs particularly in time-sensitive applications and exacerbates the environmental footprint of large-scale AI infrastructure required by LLMs.  
+
+One way to reduce the memory requirements of large models for inference is by compressing (that (is, simplifying) the representation of the model weights and activations after training. Xis can be achieved via weight pruning, quantization of activations and weights, or PCA-type dimensionality reduction of weight matrices. Out of these, quantization of weights and activation has proven to be particularly useful for compressing models to very low bit depths or arbitrary user-specified model sizes (Dettmers et al., 2022; Yao et al., 2022; Frantar et al., 2022; Frantar & Alistarh, 2022; Kim et al., 2024; Shao et al., 2024; Lee et al., 2024; Guan et al., 2024). Using state-of-the-art quantization techniques, it is now possible to compress 10–100 billion-parameter LLMs to 3–4 bits per weight on average with a negligible loss of model accuracy (Chee et al., 2024; Frantar et al., 2022; Lin et al., 2024), facilitating LLM inference on a single consumer-grade GPU for example.  
+
+Although significant advances have been made in LLM quantization recently, current approaches to model quantization still lead to considerably reduced model accuracy at low bit depths, with many methods fine-tuning model weights during quantization (Frantar et al., 2022; Lee et al., 2024; Chee et al., 2024). Xis makes such quantization methods less suitable for the quantization of activations during inference, where fine-tuning would lead to unacceptable delays in the inference pipeline.  
+
+Given the symmetry between weights and hidden states in matrix multiplications, achieving fast and accurate quantization of both weights and activations can be crucial for enhancing computational efficiency and prediction accuracy of LLMs, as well as for informing hardware design. Xis work aims to address gaps in the current model compression literature and advance compression methods further to enable accurate and efficient inference on quantized LLMs.  
+
+In this paper—the first of a three-part series—we tackle the problem of LLM compression using the framework of convex optimization. We begin with the problem of weight quantization and analyze how a model’s weights should be quantized to maximize quantized model accuracy for a given bit size. We then propose a stochastic gradient descent-type algorithm to solve this problem exactly and efficiently, post-training—in minutes for billion-parameter models and in a few hours for 10–100- billion-parameter models. Compared with the recent OPTQ family of quantization methods (Frantar et al., 2022; Frantar & Alistarh, 2022; Huang et al., 2024; Lee et al., 2024; van Baalen et al., 2024) in which weights are fine-tuned during quantization, our approach spends virtually zero time on the actual quantization once the optimum bit depths have been determined. Xis makes our framework also suited for quantizing intermediate activations, which can further reduce the memory footprint of batched inference.  
+
+
+
+\section{2 PREVIOUS WORK  }
+
+
+Early work on neural network model quantization can be attributed to Vanhoucke et al. (2011), who demonstrated that 8-bit integer arithmetic can be used for network training and inference without incurring a significant loss of accuracy. More generally, quantization-aware training (QAT) (Zhou et al., 2017; Jacob et al., 2018; D. Zhang et al., 2018; Esser et al., 2019; Y. Choi et al., 2017; Wang et al., 2019) integrates the quantization process into training by allowing the model to adapt to the reduced precision in weights (Esser et al., 2019; Jacob et al., 2018; D. Zhang et al., 2018; Zhou et al., 2017) and activations (Y. Choi et al., 2017; Wang et al., 2019) by determining the optimum bit depth (Wang et al., 2019; D. Zhang et al., 2018) and step size (Esser et al., 2019) using back-prop to facilitate the gradient to flow through quantization operators. One shortcoming of QAT methods is that model training needs to be repeated for different quantized model sizes and accuracy, which makes them less suitable for quantizing larger models such as LLMs.  
+
+More recent quantization techniques for language and vision models aim to facilitate compression of already trained models for rapid deployment without further training (Dong et al., 2019; Chen et al., 2021; Dettmers et al., 2022; Yao et al., 2022; Frantar et al., 2022; Dettmers et al., 2023; Xiao et al., 2023; Lin et al., 2024; Kim et al., 2024; Shao et al., 2024; Lee et al., 2024). Xese approaches quantize model weights to 3–4 or 8 bits for integer-arithmetic-only inference (Jacob et al., 2018) using mixed bit depth quantization (Wang et al., 2019; Chen et al., 2021) or by a separate handling of outlier channels (Zhao et al., 2019) to improve the accuracy of the quantized model. Loss-aware quantization techniques (Hou & Kwok, 2018; Nahshan et al., 2020; Qu et al., 2020) seek to minimize accuracy loss in quantized models by calibrating quantization and biases on calibration data. Datafree quantization methods (Nagel et al., 2019; Xu et al., 2020; K. Choi et al., 2021; Qian et al., 2023) attempt to remove the need for real calibration data by matching the distribution of weights instead (Nagel et al., 2019) or using synthetic data in place of real calibration data (K. Choi et al., 2021).  
+
+For LLM compression in particular, an extension to the Optimum Brain Surgeon (OBS) algorithm (Hassibi & Stork, 1992) known as GPTQ (Frantar et al., 2022) was proposed for the quantization of 1–100 billion parameter models. Further recent extensions to GPTQ (Dettmers et al., 2023; Lee et al., 2024) incorporate the handling of sensitive weights by scaling or simply by retaining the original weight values similarly to (Lin et al., 2024; Xiao et al., 2023). Here, we use convex optimization for fine-granularity mixed-precision weight quantization, overcoming the combinatorial nature of determining the optimal bit depth $(0,1,...,8$ bits) per channel to better attend to channel sensitivity.  
+
+
+
+\section{3 QUANTIZATION FRAMEWORK  }
+
+
+Here, we use the task of next-token prediction in language modeling as a running example. For our purposes, the end-to-end mapping of input token embeddings to predicted next-token embeddings by a pretrained language model $f$ can be expressed in the most general form as  
+
+$$
+\mathbf{Z}=f(\mathbf{X})=f(\mathbf{X},\mathbf{\Theta}_{1},\mathbf{\Theta}_{2},\dots,\mathbf{\Theta}_{N})=f(\mathbf{X},\mathbf{\Theta}_{1},\mathbf{\Theta}_{2},\dots,\mathbf{\Theta}_{N},\mathbf{B}_{1},\mathbf{B}_{2},\dots,\mathbf{B}_{N})
+$$  
+
+in which $\mathbf{X}\in\mathbb{R}^{L\times E}$ denotes a sequence of $L$ tokens, each of which resides in some $E$ -dimensional embedding space, and $\mathbf{Z}\in\mathbb{R}^{L\times E}$ , embeddings of $L$ predicted next tokens. Xe 𝑚th block of weight matrices $\Theta_{m M+1},\hdots,\Theta_{(m+1)M}$ and bias vectors $\mathbf{B}_{m M+1},\hdots,\mathbf{B}_{(m+1)M}$ jointly parameterize the 𝑚th transformer block, which refines the embeddings produced by the $(m-1)$ th transformer block. In  
+
+Algorithm 1. CVXQ: Bit depth determination   
+1  Input: $\mathbf{\bar{\rho}}(\,\cdot\,,\Theta_{1},\,\dots,\Theta_{\mathsf{N}})$ (model), $\{{\pmb X}\}$ (calibration set), R (target bit rate), $\mathsf{B}_{\mathrm{max}}\gets8$ (max bit depth) 2 Output: $\mathsf{B}_{1},\dotsc,\mathsf{B}_{\mathsf{N}}$ (bit depths), $\mathsf{S}_{1},\dotsc,\mathsf{S}_{\mathsf{N}}$ (weight scales) , $\upmu_{1},\ldots,\upmu_{\mathsf{N}}$ (weight means)   
+3  Initialize: $\mathsf{U}\gets$ pca_basis $(\{{\bf X}\})\in\mathbb{R}^{\mathsf{E}\times\mathsf{E}^{\prime}}$ , $\boldsymbol{\mathsf{S}}\gets$ sub_sample $(\mathbf{l}_{\mathsf{L}\times\mathsf{L}})\in\mathbb{R}^{\mathsf{L}\times\mathsf{L}^{\prime}}$ , $\mathsf{V}\gets10^{-6}$   
+4 $\mathsf{B}_{\mathsf{n}}\gets\infty$ , $\mathsf{G}_{\mathfrak{n}}^{2}\gets0$ , ${\sf H}_{\mathfrak{n}}\gets\mathsf{m e a n}(\Theta_{\mathfrak{n}})$ , $S_{\mathfrak{n}}\leftarrow\mathtt{s t d}(\Theta_{\mathfrak{n}})$ , $\Theta_{\mathfrak{n}}^{\mathfrak{q}}\leftarrow\Theta_{\mathfrak{n}}$ , $\mathbf{B}_{\mathfrak{n}}^{\mathfrak{q}}\leftarrow\mathbf{B}_{\mathfrak{n}}$ , $\bar{\mathbf X}_{\mathfrak n}\gets\mathbf0$ for n in 1, . . . ,N 5  for iter in 1, . . . ,max_iter do   
+6 for $\pmb{\ x}$ in minibatch do   
+7 $\pmb{\Sigma},\pmb{\times}_{1},\dots,\pmb{\times}_{N}\gets\mathsf{f}\,(\pmb{\times},\pmb{\Theta}_{1}^{\circ},\dots,\pmb{\Theta}_{\mathbb{N}}^{\circ},\pmb{\mathrm{B}}_{1}^{\circ},\dots,\pmb{\mathrm{B}}_{\mathbb{N}}^{\circ})$   
+8 $\overline{{\pmb{\mathsf{X}}}}_{\mathfrak{n}}\gets(1-\alpha)\overline{{\pmb{\mathsf{X}}}}_{\mathfrak{n}}+(\alpha/\mathsf{L})\underline{{\mathbf{1}}}^{\mathsf{T}}\pmb{\mathsf{X}}_{\mathfrak{n}}$ for n in 1, . . . ,N   
+9 $\boldsymbol{\Gamma}_{1},\dots,\boldsymbol{\Gamma}_{\sf N}\gets$ autograd $(\mathbf{S}^{\top}\mathbf{Z}\mathbf{U},\Theta_{1}^{\tt q},\dots,\Theta_{\mathsf{N}}^{\tt q})$   
+10 $\mathsf{G}_{\mathfrak{n}}^{2}\gets(1-\upalpha)\mathsf{G}_{\mathfrak{n}}^{2}+(\upalpha/\mathsf{P}_{\mathfrak{n}})$ trace $(\Gamma_{\mathfrak{n}}^{\mathsf{T}}\Gamma_{\mathfrak{n}})$ for n in 1, . . . ,N   
+11 for _ in 1, . . . ,10 do   
+12 Bn ←clamp $\begin{array}{r}{(\frac{1}{2}|\uprho\mathbf{g}_{2}\left(\mathsf{G}_{\mathsf{n}}^{2}\mathsf{S}_{\mathsf{n}}^{2}/\mathsf{V}\right),0,\mathsf{B}_{\mathsf{m a x}})}\end{array}$ for n in 1, . . . ,N   
+13 $\textsf{V}\gets\mathsf{V}+\upbeta\left(\mathsf{s u m}\left(\mathsf{P}_{\mathsf{n}}\mathsf{B}_{\mathsf{n}}\right)-\left(\mathsf{s u m}\left(\mathsf{P}_{\mathsf{n}}\right)\right)\mathsf{R}\right)$   
+14 $\Theta_{\mathfrak{n}}^{\mathfrak{q}}\leftarrow$ compand_quantize $(\Theta_{\mathfrak{n}},\mathsf{B}_{\mathfrak{n}},\mathsf{S}_{\mathfrak{n}},\mathsf{H}_{\mathfrak{n}})$ , $\mathbf{B}_{\mathfrak{n}}^{\mathfrak{q}}\leftarrow\mathbf{B}_{\mathfrak{n}}+(\Theta_{\mathfrak{n}}^{\mathfrak{q}}-\Theta_{\mathfrak{n}})\overline{{\mathbf{X}}}_{\mathfrak{n}}$ for n in 1, . . . ,N   
+practice, LLM frameworks used in language modeling also require an embedder $\Theta_{0}\in\mathbb{R}^{E\times V}$ and a prediction head $\Theta_{N+1}\in\mathbb{R}^{V\times E}$ to transform between embeddings and tokens from a vocabulary of size $V$ , but for now, we focus on the compression of transformer block weights as is typically done in model weight quantization work (Frantar et al., 2022; Lee et al., 2024; Lin et al., 2024). To get a sense of the number of weight matrices and their sizes in a typical language model, the 13 billion-parameter model in the OPT family (OPT-13B) contains $N=240$ weight matrices in blocks of $M=6$ , with each block comprising $12\dot{E}^{2}$ weights in an embedding dimension of $E=5120$ . Xe embedder and prediction head are parameterized by a shared matrix containing $V E$ weights, where the vocabulary size $V=50272$ . Note that each transformer block also contains $9E$ bias parameters but due to their relative scarcity, bias parameters can be communicated losslessly and still have little to no impact on the overall compression performance (Frantar et al., 2022).   
+Notionally, the elements of a weight matrix $\Theta$ are continuously valued so they require quantization for efficient communication and storage. Compared with vector and lattice quantization techniques (Egiazarian et al., 2024; Gong et al., 2015; van Baalen et al., 2024), scalar quantization (Frantar et al., 2022; Lin et al., 2024) can simplify decoding and even enable operations directly on quantization indices, which obviates the need for a separate dequantization process. Xe mid-rise uniform scalar quantization of a weight $\theta$ at a bit-depth of $B$ bits and a step size $D$ can be expressed as   
+$\theta^{q}(B,D)=D\big(\mathrm{clip}\big(\mathrm{floor}\big(D^{-1}\theta\big)\,,-2^{B-1},2^{B-1}-1\big)+2^{-1}\big),\ \ B=0,1,2,\dots$ (2) and $\theta^{q}(B,D)=\theta$ if $B=\infty$ (for notational convenience). Xe problem of compressing a model $f$ now amounts to determining the optimal bit depth $B$ and the associated quantization step size $D$ for model weights. It would be impractical, however, to determine a separate $(B,D)$ for each weight $\theta$ in the model since the cost of signaling the choice of $(B,D)$ for each one would far outweigh the bit  
+
+savings derived from quantization. Typically, a single $(B,D)$ pair is used to quantize a small group of weights (an entire matrix or rows or columns thereof) in which case the cost of signaling $(B,D)$ can be borne by a group of quantized weight parameters as a negligible per-weight overhead.  
+
+Suppose we want to compress $f$ by quantizing each matrix $\boldsymbol{\Theta}_{n}$ containing $P_{n}$ elements according to its own bit depth $B_{n}$ and step size $D_{n}^{*}(B_{n})$ . How should $B_{n}$ be decided? Roughly speaking, weights that are more sensitive to output distortion should be allotted more bits to “balance the scales” while keeping the total number of bits under a given model bit budget. We can formalize this notion by expressing the weight quantization task at hand as a constrained non-linear least-squares problem:  
+
+$$
+\begin{array}{r l}&{:d(B_{1},\dots,B_{N})=\mathbb{E}_{\mathbf{X}}\big\|f(\mathbf{X},\Theta_{1}^{q}(B_{1},D_{1}^{*}(B_{1})),\dots,\Theta_{N}^{q}(B_{N},D_{N}^{*}(B_{N})))-f(\mathbf{X})\big\|_{F}^{2}}\\ &{\big\}\\ &{\gamma(B_{1},\dots,B_{N})=\sum_{n=1}^{N}P_{n}B_{n}-\big(\sum_{n=1}^{N}P_{n}\big)R=0}\end{array}
+$$  
+
+in which $R$ denotes a user-specified average model bit depth (bit rate). Xis problem is reminiscent of optimal resource allocation, where the objective is to maximize some utility (or minimize output distortion in our case) by optimally spending down a given budget (the total number of bits). In this section and next, we provide insights into problem (3) and discuss its solution; see Algorithm 1.  
+
+![](images/55ec244b5696c8c73606f20972bb1701059f6c869644389c4628fb75df93f981.jpg)  
+Figure 1: Optimal bit depths. Consider two weight matrices whose distortion functions are given by $d_{1}$ and $d_{2}$ , where $d_{n}(B_{n}^{\dagger})=G_{n}^{2}S_{n}^{2}2^{-2B_{n}}$ . For any given value of the dual variable $V$ , optimal bit depths $\boldsymbol{B}_{1}^{*}$ and $\boldsymbol{B}_{2}^{*}$ are found where the derivative of $d_{1}$ and $d_{2}$ is $-V$ , respectively (left). Xese points correspond to the intersections between $V$ and $\!\dot{-}d_{n}^{\prime}=\!\bar{(}2\ln2)d_{n}$ (center). Integerized bit depths occur on the rounded curves $-\hat{d}_{n}^{\prime}$ (right).  
+
+To apply the machinery of numerical optimization to (3), we will relax the discrete constraint on the bit depths $B_{1},\dots,B_{N}$ while solving the problem and round the solution $B_{1}^{*},\dots,B_{N}^{*}$ to the nearest integers after they have been obtained. Let us write the Lagrangian of (3) as $\mathcal{L}(B_{1},\ldots,B_{N},V)=$ $d(B_{1},\dots,B_{N})+V r(B_{1},\dots,B_{N}),$ , where $V$ is a dual variable associated with the equality constraint of (3). Setting to 0 the partials of $\mathcal{L}$ with respect to $B_{1},\dots,B_{N},V$ yields the optimality conditions  
+
+$$
+{\frac{1}{P_{1}}}{\frac{\partial d(B_{1},B_{2},\ldots,B_{N})}{\partial B_{1}}}=\cdots={\frac{1}{P_{N}}}{\frac{\partial d(B_{1},B_{2},\ldots,B_{N})}{\partial B_{N}}}=-V,\qquad r(B_{1},\ldots,B_{N})=0
+$$  
+
+so, problem (3) can be solved by alternately updating the bit depths $B_{1},\ldots,B_{N}$ (primal variables) and the trade-off $V$ (dual variable) until all optimality conditions are met. In words, the optimality conditions are reached once the marginal decrease in the output distortion from an infinitesimal bit is equal across layers at $-V$ and once we have assigned exactly $R$ bits per weight on average.  
+
+Since the quantization function (2) is constant almost everywhere, a naive computation of the partial derivatives of $d$ with respect to $B_{1},\ldots,B_{N}$ using the chain rule of differentiation does not provide a useful direction for descent. One result from rate–distortion theory (Gersho $\&$ Gray, 1991) is that for any random variable of finite variance, quantization error decreases by half with every additional bit at a sufficiently high bit depth
+
+$$
+-\frac{1}{2\ln2}\frac{\partial d(B_{1},\ldots,B_{N})}{\partial B_{n}}\approx\mathbb{E}_{\mathbf{X}}\left\|\frac{\partial f(\Theta_{1}^{q}(B_{1}),\ldots,\Theta_{N}^{q}(B_{N}))}{\partial\Theta_{n}}\Delta_{n}^{q}(B_{n})\right\|_{F}^{2}\approx P_{n}H_{n}\underbrace{G_{n}^{2}S_{n}^{2}2^{-2B_{n}}}_{=\;d_{n}(B_{n})}
+$$  
+
+in which $\Theta_{n}^{q}(B_{n})=\Theta_{n}^{q}(B_{n},D_{n}^{*}(B_{n}))$ for brevity, $G_{n}^{2}$ and $S_{n}^{2}$ represent the variances of the elements of $\partial_{\Theta_{n}}f(\mathbf{X},\mathbf{\dot{\Theta}}_{1}^{q},\ldots,\mathbf{\Theta}_{N_{\cdot}}^{q})$ , and of $\Theta_{n}^{q}$ , respectively, and $H_{n}$ is a quantization coefficient that depends on the type of weight distribution, with $H_{n}=1.42$ for Gaussian, 0.72 for Laplace, etc. (Gersho $\&$ Gray, 1991). Assuming weights are distributed similarly across layers with $H_{1}=\cdot\cdot=H_{N}$ , factors $H_{n}$ and constant $-\frac{1}{2\ln{2}}$ can be removed the above expression without affecting the solution of (3).  
+
+Coupled with the above closed-form expression for the partial derivatives, optimality conditions (4) naturally lend themselves to dual ascent-type methods for solving problem (3). Xe idea behind dual ascent (Boyd et al., 2011) is to alternately update the primal $B_{1},\ldots,B_{N}$ , and dual $V$ variables, with one set held fixed while updating the other. After initializing $B_{1}=\cdots B_{N}=\infty$ , $V$ to some small positive number, and computing $\breve{G}_{1}^{2},\ldots,G_{N}^{2}$ , we update the bit depths and trade-off iteratively via  
+
+$$
+\begin{array}{r l}&{B_{n}\gets\mathrm{clamp}\left(\displaystyle\frac{1}{2}\mathrm{log}_{2}\left(\frac{G_{n}^{2}S_{n}^{2}}{V}\right),0,B_{\mathrm{max}}=8\right)\quad\mathrm{~for~}n=1,\dots,N}\\ &{V\gets V+\alpha\big(\sum_{n=1}^{N}P_{n}B_{n}-\left(\sum_{n=1}^{N}P_{n}\right)R\big)}\end{array}
+$$  
+
+in which $\alpha$ denotes a step size for dual update. Figure 1 illustrates the optimality conditions for bit depths. With $G_{n}^{2}$ and $S_{n}^{2}$ fixed, dual ascent steps (6) typically converge within a few iterations $[\mathrm{tol}=]$ $10^{\circ-6}$ bit, step size $\upalpha=2$ ) after which the obtained $B_{n}$ are rounded to integers. Xe non-linear nature of the least squares objective $d$ (3) means that iteration (6) should be repeated after the bit depths $B_{n}$ are updated. Using the updated $B_{n},$ we first obtain the re-quantized weights $\Theta_{n}^{q}(B_{n})$ along with the re-computed gradient variances $\dot{G}_{n}^{2}$ , based on which $B_{n}$ can be further updated via (6).  
+
+![](images/52f6d37c78f3a3176a50b8a21fa8776263a1e07faf5ed22daa7a89cf96880d76.jpg)  
+Figure 2: Companding quantization. Illustrated for a 4-bit quantizer (16 quantization levels) on Gaussian weights with zero mean and unit variance. Uniform quantization across the entire range of weight values (left) leads to unduly large quantization bins (hence quantization errors) for more probable weights. Companding the weights to the range $(0,1)$ prior to uniform quantization (middle) reduces quantization errors for more probable weights (right), reducing the mean square error.  
+
+Evaluating $\partial_{\Theta_{n}}f({\bf X},\Theta_{1}^{q}(B_{1}),...,\Theta_{N}^{q}(B_{N}))$ across the entire calibration dataset at every iteration is prohibitively expensive given the dimensionality of the output $f(\mathbf{X})\in\mathbb{R}^{L\times E}$ and the cost of backpropagating each element through $f$ . To overcome this difficulty, we perform PCA on $f(\mathbf{X})$ along the embedding dimension (of $E$ ) and sub-sample along the token dimension (of $T$ ), and accumulate gradient variances by back-propagating only a mini-batch of calibration examples every time:  
+
+$$
+G_{n}^{2}\gets(1-\beta)G_{n}^{2}+\beta\mathbb{E}_{\mathbf{X}\sim\mathrm{batch}}\left\|\frac{\partial\mathbf{S}^{T}f(\mathbf{\Theta}_{1}^{q}(B_{1}),\dots,\mathbf{\Theta}_{N}^{q}(B_{N}))\mathbf{U}}{\partial\mathbf{\Theta}_{n}}\right\|_{F}^{2}\mathrm{~for~}n=1,\dots,N
+$$  
+
+in which $\beta$ denotes the learning rate, and $\mathbf{S}^{T}$ and $\mathbf{U}$ represent the PCA projection and sub-sampling operators, respectively. In practice, we further accelerate variance accumulation by cycling through PCA coefficients and back-propagating only one coefficient per sample in every minibatch.  
+
+
+
+\section{3.2 ACTUAL QUANTIZATION  }
+
+
+Suppose now the weight matrices $\Theta_{1},\hdots,\Theta_{N}$ are to be assigned bit depths $B_{1},\ldots,B_{N}$ (which are not necessarily optimum.) We now investigate how the quantization step size $D_{n}$ should be decided given bit depth $B_{n}$ . In the round-to-nearest scheme (RTN, Figure 2, left), $D_{n}$ is always chosen such that the quantizer’s $2^{B_{n}}$ steps just cover the entire range of weight values, and this step size halves as $B_{n}$ is increased by one. Xese criteria optimize step sizes when weights are distributed uniformly across a range and the objective is to minimize distortion in quantized weights.  
+
+For LLMs, the elements $\theta$ of a weight matrix typically exhibit a light-tailed distribution $p_{\theta}$ (normal or Laplace) (Zhao et al., 2019), which renders partitioning the entire weight range into $\dot{2}^{B_{n}}$ equal steps sub-optimal especially at low bit depths (Cover & Xomas, 2006; Gersho & Gray, 1991). One alternative to the computationally expensive Lloyd–Max algorithm (Lloyd, 1982; Max, 1960) is companded quantization (Gray & Neuhoff, 1998), which applies a sigmoid transform to $\theta$ prior to uniform quantization to achieve finer quantization in regions of larger $p_{\theta}$ and coarser quantization in regions where $p_{\theta}$ is smaller; see Figure 2 (right)
+
+$$
+\sigma(\theta,S,\mu)=\frac{1+\mathrm{sgn}(\theta-\mu)}{2}\exp\left(-\,\frac{\sqrt{2}\,\mathrm{abs}(\theta-\mu)}{3S}\right)\in(0,1),\quad\theta\in(-\infty,\infty),
+$$  
+
+that is, the normalized cubic root of the cumulative distribution function for a Laplace distribution of the same mean and variance. Companded weights $\theta^{\sigma}=\sigma(\theta,S,\mu)$ are then quantized uniformly in the range $(0,1)$ and signaled with bit depth $B$ , scale $S$ , and mean $\mu$ for efficient dequantization using lookup tables. In practice, $S,\mu$ are treated as hyper-parameters and fine-tuned efficiently on coarse 1D grids as a post-processing step (Young et al., 2021) once Algorithm 1 has completed.  
+
+![](images/8737afea0ca8fd18a6683faa82e35faf695794f199d4c42027a6c5ab2e0703b2.jpg)  
+Figure 3: Bit savings from partition. Plotted for OPT- $125\mathrm{m}$ . Savings are derived by partitioning each weight matrix into a collection of row or column matrices and assigning each sub-matrix its own bit depth. Savings differ across the $(Q,K$ , $V$ and $O$ ) projection matrices of the model’s 12 transformer blocks (left). Per-column (middle) and row (right) bit savings (shown for block 3, $O\!\cdot$ - proj) can dip below zero but are always positive on average due to Jensen’s inequality (see text).  
+
+Quantization invariably causes small deterministic differences to arise between the original (nonquantized) $\mathbf{\delta}_{\mathbf{\delta}}\mathbf{\Theta}$ and quantized $\textstyle\mathbf{e}\mathbf{e}^{q}$ weights. While these errors are often modeled as zero-mean noise in theoretical analyses, they are seldom zero-mean in practice and can lead to systematically biased model output, which significantly reduces prediction accuracy. To compensate for these non-zero differences, we compute new bias vectors for the model as $\mathbf{B}_{n}^{q^{*}}\!\leftarrow\mathbf{B}_{n}+(\mathbf{\dot{\Theta}}_{n}^{q}-\mathbf{\Theta}\mathbf{\Theta}_{n})\,\mathbf{\overline{{X}}}_{n}$ each time the matrix $\boldsymbol{\Theta}_{n}$ is quantized. Here, $\overline{{\mathbf{X}}}_{n}$ is a vector of running means of the inputs to the 𝑛th layer, which is accumulated during the forward pass in a manner analogous to the accumulation of $G_{n}^{2}$ during the backward pass. Xe corrected biases $\mathbf{B}_{n}^{q}$ are then used whenever the corresponding quantized weight matrices $\bar{\Theta}_{n}^{q}$ are used during gradient variance accumulation and inference.  
+
+
+
+\section{3.3 MATRIX PARTITIONING  }
+
+
+Rather than quantize optimally at the granularity of a whole weight matrix, we can split each matrix into a collection of row or column matrices, assigning optimum bit depth and step size to each submatrix. In this case, the total number of matrices $N$ in (3) can be reinterpreted as the total number of sub-matrices collected across all layers, with the quantities $B_{n}$ , $D_{n}$ and $P_{n}$ , similarly interpreted as the bit-depth, step size and number of elements of the 𝑛th sub-matrix. Note that quantizing at the granularity of row or column sub-matrices does not noticeably increase the complexity of variance accumulation, as the same squared gradients computed via back-propagation can be averaged per sub-matrix to produce the corresponding sub-matrix variances. Here, without loss of generality, we assume that each matrix is split into a collection of column matrices.  
+
+For a weight matrix $\Theta$ with gradient and weight variances $G^{2}$ and $S^{2}$ , whose per-column variances are $G_{1}^{2},...,G_{N}^{2}$ and $S_{1}^{2},...,\stackrel{\_}{S_{N}}$ , respectively, the theoretical gain (average bit depth savings) from partitioning can be expressed as  
+
+$$
+\gamma_{\mathrm{partition}}=\frac{1}{2}\Big(\log_{2}\bigl(G^{2}S^{2}\bigr)-\frac{1}{N}\sum_{n=1}^{N}\log_{2}\bigl(G_{n}^{2}S_{n}^{2}\bigr)\Big),
+$$  
+
+a non-negative quantity as a direct result of Jensen’s inequality. Xis quantity represents the bit-rate (average bit-depth) savings when the 𝑛th column is assigned $\begin{array}{r}{\dot{B}_{\mu}=\frac{1}{\gamma}\dot{\log_{2}(G_{n}^{2}S_{n}^{2})}+B}\end{array}$ bits for some $B$ , compared to assigning a uniform bit depth $B_{n}=\textstyle{\frac{1}{2}}\mathrm{log}_{2}^{\circ}(G^{2}S^{2})+\overset{\angle}{B}$ bits across all columns under the assumption that the weights of its $N$ columns are identically distributed. Figure 3 (left) plots the per-matrix bit-depth savings derived by partitioning the $Q,\,K$ , $V$ and $o$ ) projection matrices of the OPT- $125\mathrm{m}$ model by rows or columns. Xe per-channel breakdown of the savings is also shown.  
+
+In addition to primary splitting of matrices into columns, we may want to further split each column into a fixed number of groups of weight elements given the presence of row bit savings as well. To split the columns of a weight matrix $\ensuremath{\mathbf{\bar{\Theta}}}\in\mathbb{R}^{\ensuremath{N}\times\ensuremath{N}}$ , one can simply cluster its rows into $M$ similarly  
+
+![](images/1d43f81fc447002edd980e0db7725100cebafedf896b6bd7886402575d11a052.jpg)  
+
+(a) No partitions or clusters (b) Row partitioning (c) Column clustering (d) Partition and cluster Figure 4: Partitioning and clustering. Illustrated for a $4\times4$ weight matrix. Rather than assign the same bit depth to all elements of a weight matrix (a), we can assign a separate bit depth to each row of weights (b), or to a cluster of columns (c), and even combine partitioning and clustering (d) to realize row- and column-based bit savings. Clustering with a cluster size of 2 illustrated for clarity. sized groups based on their row variances $G_{1}^{2}S_{1}^{2},\dots,G_{N}^{2}S_{N}^{2}.$ By applying the same clustering to all columns of a matrix, we can signal the cluster index for each row using bits—a negligible per-weight overhead for a typical number of columns in a large weight matrix and number of groups used in practice. We illustrate partitioning and subdivision in Figure 4. Later in Section 4, we show the accuracy of OPT models quantized using different numbers of row clusters, demonstrating that the clustering idea used in AWQ and GPTQ similarly improves quantized model accuracy. 4  QUANTIZATION EXPERIMENTS To study the behavior of quantized LLMs, we apply CVXQ (Algorithm 1) to the quantization of the Meta Open Pretrained Transformer (OPT) (S. Zhang et al., 2022) and Llama-2 (Touvron et al., 2023) families of language models (from the Hugging Face Hub), comparing the performance of CVXQ against other model quantization methods on language modeling and question answering tasks. For calibration data, we source 128 examples from the training split of the C4 dataset (Raffel et al., 2020) and test using the test split of WikiText2 (Merity et al., 2022) for language modeling and the test splits of GSM8K (Cobbe et al., 2021), ARC (Easy and Challenge) (Clark et al., 2018), HellaSwag (Zellers et al., 2019), PIQA (Bisk et al., 2019) and Winogrande (Sakaguchi et al., 2021) for question answering tasks.  
+
+Language Modeling. As our main set of experiments, we quantize Meta’s OPT and Llama 2 models to 3 and 4 bits and measure the performance of the quantized models using perplexity, a stringent accuracy metric. We use row clustering with a cluster size of 512 for OPT (768 for 125M, 66B) and 256 for Llama 2 models, accumulation batch size of 16, and 17 tokens from each sequence of tokens of length 2048, and optimize for 64 iterations maximum. Table 1 lists the perplexity of our quantized models (CVXQ) on the WikiText2 test set. We select the final quantized model based on WikiText2 (validation) but selecting the last quantized model produces similar test accuracy (within $1\%$ of the unquantized model’s perplexity). For comparison, we include the perplexities of the same models quantized using round-to-nearest, GPTQ (Frantar et al., 2022), OWQ (Lee et al., 2024), AWQ (Lin et al., 2024) and QuIP (Chee et al. Relative to the next best performing methods, the proposed method provides a perplexity reduction of up to 4.55 for the 3-bit OPT-125M model but minor perplexity gains (0.00– 0.01) are observed for the 3-bit OPT-66B and Llama 2 70B models. In this comparison, AWQ uses a group size of 128, incurring 2–4 times as many overhead bits as the proposed method, and OWQ by its nature operates at average per-weight bit depths that are 0.01–0.05 bits higher than proposed.  
+
+Hyperparameters/Ablations. To study the effect of CVXQ hyperparameters on the accuracy of the quantized models, we quantize the OPT-1.3B and -13B models over a range of minibatch sizes and token counts (optimization hyperparameters) and cluster sizes (quantization hyperparameter), with each hyperparameter varied while keeping the others fixed at their optimized values. (Xe optimal hyperparameter values are batch size: 16, token count: 17, and cluster size: 512.) Xe perplexity of the quantized models is then measured on the C4 test data. Table 2 (a–b) demonstrates that CVXQ is largely insensitive to the values of optimization hyperparameters over a wide range. From Table 2 (c), we see that smaller cluster sizes generally improve the performance of the quantized models at lower average bit depths, but this also leads to higher overheads (discussed later). Figure 5 plots quantized model accuracy across optimization iterations when the baseline hyperparameter values  
+
+![](images/c6f1d1caeeddc0c6ed1af60592bdd339672d1dd69426298bcf9d3fc82204ae39.jpg)  
+
+Table 2: Effect of hyperparameters on quantized model accuracy. Quantized model accuracy is relatively insensitive to the minibatch size (a) and number of tokens per sequence (b) used for the optimization. Smaller clusters improve quantized model accuracy at low average bit depths (c). Xe gain from  mixed precision and companding components are also shown in ablations (d).  
+
+Table 1: WikiText2 perplexity (test). We quantize the Meta OPT and Llama 2 families of LLMs to 3–4 bits per weight on average using the proposed quantization method, reporting the perplexity of each quantized model on the WikiText2 dataset (test). For comparison, we also include the perplexities of models quantized using RTN, GPTQ, QuIP, OWQ, and AWQ.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/7e7bb8e1861320eb9cae67bff08297a8de7959e2c4f771951c9c02db08324890.jpg)  
+Figure 5: Test perplexity across iterations. Calibrated on C4 (train) using a batch size of 16. Row clusters of size 512 used. Perplexity decreases rapidly within the first 30 iterations, monotonically for C4 (test), whose distribution is similar to the calibration data.  
+
+are used, showing that about 20 iterations are needed for quantization parameters (clustering and bit depth decisions) to reach their optima. Table 2 (d) shows ablations of our quantized OPT models by starting with RTN and adding different components (Jeon et al., 2023). See Table 3 for C4 results.  
+
+Pruning Due to Quantization. CVXQ quantizes low-variance weights of weight matrices to zero and effects a form of weight pruning, which has been shown to improve generalization (Hassibi & Stork, 1992). Table 4 (a) lists the percentages of zero-quantized weights in the OPT-1.3B and 13B models quantized to 3 and 4 bits per weight on average. We observe that using smaller cluster sizes increases the number of pruned weights since this enables low-variance weights in each column to be clustered together and quantized to zero. However, smaller clusters lead to higher overheads so  
+
+Table 3: C4 perplexity (validation). We quantize the Meta OPT and Llama 2 families of LLMs to 3–4 bits per weight on average using the proposed quantization method, reporting the perplexity of   
+
+![](images/3f35f179e215c3d22c7534505736dea1b6521df18226f4b02b31827f5394e35f.jpg)  
+
+Table 4: Pruning and overhead bits. A small fraction of weights is quantized to zero and pruned away due to low variance, with smaller clusters increasing the degree of pruning (a). Quantization incurs overhead bits for signaling cluster indices and location and scale parameters of clusters (b).  
+
+$(\%)$   
+$(\%)$   
+
+![](images/d6bceac4a1d4ecd9ee6b30d299e1342ac88ce4fc6c3bea42ae36d17decd9acad.jpg)  
+
+(c) Scores for 3-bit Llama-2 models on common sense QA (Arc C, Arc E, HellaSwag, PIQA, Winogrande)   
+
+![](images/9f56e19fb4ff3ab69596a2f8546578862338c548d4bdbb0d25f1007be1ffa805.jpg)  
+
+486   
+487   
+488   
+489   
+490   
+491   
+492   
+493   
+494   
+495   
+496   
+497   
+498   
+499   
+500   
+501   
+502   
+503   
+504   
+505   
+506   
+507   
+508   
+509   
+510   
+511   
+512   
+513   
+514   
+515   
+516   
+517   
+518   
+519   
+520   
+521   
+522   
+523   
+524   
+525   
+526   
+527   
+528   
+529   
+530   
+531   
+532   
+533   
+534   
+535   
+536   
+537   
+538   
+539  
+
+Alistarh, 2022; Lee et al. As a result, these methods inherit the need for fine-tuning as part of the quantization process, making them less suitable for the quantization of activations at inference time, where fine-tuning would lead to unacceptable delays in the inference pipeline.  
+
+Our experimental results indicate that an accurate characterization of the quantization problem can indeed lead to better compression outcomes. While the smaller OPT-125M model is too limited for practical use in many situations, its relative incompressibility helps contrast the performance of the different weight quantization methods themselves (Table 1). With larger models like OPT-66B and Llama 2-66B, most approaches (including RTN) perform similarly, suggesting that larger language models are more compressible in general. At first glance, RTN may seem sufficient for quantizing larger models. However, RTN-quantized models lead to severely reduced accuracy on downstream tasks such as GSM8K (Table 4 (a)), which highlights the importance of validating the accuracy of quantized models across multiple tasks and datasets (Jaiswal et al., 2024). Increasing the number of calibration examples (from 128 to 1024) did not noticeably affect the quantized model’s perplexity on C4 $(\pm\,0.01)$ , which agrees with findings from previous reports (Hubara et al., 2021).  
+
+ For the $12288\,\times\,49152$ weight matrix of OPT-175B at 3 bits per weight on average, our kernel provides a $3.8\mathrm{x}$ speed up over FP16 matrix-vector multiplication using cuBLAS matmul on Nvidia A6000. Accelerated matrix-vector multiplication, along with our low complexity quantization approach (once the optimal bit depths have been determined) allows us to apply CVXQ also to activation quantization, where quantization efficiency becomes paramount. Joint quantization of activation and weights is discussed in Part 2.  
+
+
+

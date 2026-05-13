@@ -1,0 +1,340 @@
+\title{Star Attention: Efficient LLM Inference over Long Sequences}
+
+\begin{abstract}
+Inference with Transformer-based Large Language Models (LLMs) on long sequences is both costly and slow due to the quadratic complexity of the self-attention mechanism. We introduce Star Attention, a two-phase block-sparse approximation that improves computational efficiency by sharding attention across multiple hosts while minimizing communication overhead. In the first phase, the context is processed using blockwise-local attention across hosts, in parallel. In the second phase, query and response tokens attend to all prior cached tokens through sequence-global attention. Star Attention integrates seamlessly with most Transformer-based LLMs trained with global attention, reducing memory requirements and inference time by up to 11x while preserving 95-100\% of accuracy.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent Large Language Models (LLMs) can support contexts up to millions of tokens in length \citep{gemini,claude3,llama3_1}, unlocking applications such as repository-level code analysis, multi-document summarization, and large corpus retrieval. However, processing such long sequences with LLMs requires substantial computational and memory resources due to the quadratic complexity of the self-attention mechanism.
+
+To address these challenges, various techniques have been proposed to reduce memory usage and increase inference speed.
+For example, \textit{Flash Attention} introduces an efficient GPU block-wise implementation of the global attention, achieving significant reductions in memory overhead and runtime \citep{flashattention,flashattention2}. 
+\textit{Ring Attention} further extends this idea by distributing the computation of self-attention and feed-forward  modules across multiple devices, cleverly overlapping communication with shard-local attention computations to enhance scalability \citep{ring_attention, beltagy2020longformer}. More broadly, distributed strategies such as tensor, pipeline, sequence, and  data parallelism have been proposed to divide compute effectively across multiple machines \citep{tensor_para, pipeline_para, sequence_para, fsdp_para}.
+
+Several prior works have shown that the attention matrix can be approximated with sparse attention mechanisms reducing the algorithmic complexity from quadratic to linear or log-linear. \citet{sparse_transformers} significantly reduces the complexity of attention by leveraging sparse factorizations and \citep{performer} approximates attention using kernel-based methods.
+\citep{beltagy2020longformer} employs sliding window attention and global tokens for efficient long-sequence processing while \citet{streaming_llm} adapts it for real-time long-sequence generation utilizing attention sinks.
+Complementing these approaches, memory-efficient techniques have also emerged. Key-value (KV) cache compression \citep{Dai2019TransformerXLAL, adaptive_kv_compression, leave_no, cache_once, liu2024kivi} and low-rank approximations \citep{lowrank} trade precision for reduced memory usage.
+
+We introduce Star Attention, a novel algorithm  for efficient LLM long-context inference
+\ificlrfinal
+
+\else
+\footnote{Code will be open-sourced}.
+\fi
+This method is based on the observation that LLM inference usually has two stages: (1) prompt encoding, where the model processes input and stores KV vectors in the cache and (2) token generation, where model attends to the KV cache and autoregressively generates new tokens while updating the cache with the new KV vectors. In many long-context tasks, the input consists of a long context followed by a short query and a short answer. The information needed for answering the query is often localized within small parts of the context, meaning context tokens need only attend to nearby tokens, while query tokens need to attend to all prior tokens.
+Based on this observation, \textit{Star Attention} utilizes a two-phase approach shown in Figure \ref{fig:star_attn}:
+\begin{enumerate}
+ \item \textbf{Context Encoding}: The context is divided into contiguous blocks and distributed across ``context" hosts, with each host also receiving a copy of the first block (an ``\textit{anchor block}"). Hosts compute self-attention only for their assigned blocks, without communicating with each other, reducing attention complexity from quadratic to linear with respect to context length. This distributed processing is similar to Ring Attention \citep{ring_attention} but without the ``ring" communication during context encoding (Figure ~\ref{fig:star_attn_phase1}).
+ \item \textbf{Query Encoding and Token Generation}: The query is replicated across all hosts where it initially attends to the KV cache on each host. Global attention is then computed by aggregating the results at a designated ``query" host by efficiently communicating a single vector and scalar per token from each context host. Only the query host updates its KV cache during this stage (Figure \ref{fig:star_attn_phase2}).
+\end{enumerate}
+
+Star Attention enables the context length to scale linearly with the number of hosts by distributing the context processing across multiple hosts. Star Attention is compatible with most Transformer-based LLMs trained with global attention, operating seamlessly out-of-the-box without additional model fine-tuning. We evaluate Star Attention  for Llama3.1-8B and Llama3.1-70B \citep{llama3_1} on several long-context benchmarks. Star Attention achieves up to 11 times faster inference while maintaining 95-100\% of the baseline accuracy. Furthermore, Star Attention can be combined with other LLM optimization methods like Flash Attention or KV cache compression, allowing for additional speedup enhancements during inference.
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.39\textwidth}
+     \centering
+     \includegraphics[width=\textwidth]{star_attn_phase1.pdf}
+     \caption{\textbf{Phase 1}: Local Context Encoding with Anchor Blocks}
+     \label{fig:star_attn_phase1}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.55\textwidth}
+    \centering
+     \includegraphics[width=\textwidth]{star_attn_phase2.pdf}
+     \caption{\textbf{Phase 2}: Query Encoding and Output Generation with Global Attention}
+     \label{fig:star_attn_phase2}
+  \end{subfigure}
+  \caption{Star Attention inference flow. All devices in the system are grouped into hosts where one of the hosts is labeled as the ``query" host. The input sequence is processed in two phases. \textit{Phase 1 - context encoding}. The context portion of the input is partitioned into smaller blocks and distributed across hosts. All blocks, except the first, are prefixed with the initial block, called the ``anchor" block. Each host processes its assigned block and stores the non-anchor portion of the KV cache. \textit{Phase 2 - query encoding and token generation}. The input query is broadcast to all the hosts, where in each host, it first attends to the local KV cache computed during phase one. Then the ``query" host computes global attention by aggregating the softmax normalization statistics from all the hosts. This process is repeated for each generated token.}
+    \label{fig:star_attn}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \begin{NiceTabular}{|c|c|c|c|c|c|c|}
+        \hline
+        $c_1$   & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} \\
+        \hline
+        $c_2$   & \Block[fill=black]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} \\
+        \hline
+        $c_3$   & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} \\
+        \hline
+        $c_4$   & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} \\
+        \hline
+        $c_5$   & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=white]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=white]{1-1}{} \\
+        \hline
+        $q$     & \Block[fill=black]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=black]{1-1}{} & \Block[fill=black]{1-1}{} \\
+        \hline
+    \end{NiceTabular}
+    \caption{Block sparsity pattern for a sequence partitioned into 5 context blocks $c_i$ and a query block $q$. Each context block attends only to itself and the ``anchor block" whereas the query attends to the entire input.}
+    \label{fig:block_approximation}
+\end{figure}
+
+
+
+\section{Star Attention Algorithm}
+
+\label{star_attention}
+
+Star Attention operates in two phases: (1) \textit{Context Encoding}, where the long context is divided into contiguous blocks and is processed with local blockwise attention, and (2) \textit{Query Encoding and Token Generation}, where the query is processed, and answer tokens are generated using global attention. Below, we detail each phase of the algorithm.
+
+\subsection{Phase 1: Context Encoding}
+\label{phase1}
+
+Given an input sequence comprising a context $c$ followed by a query $q$, the context $c$ is divided into $n$ contiguous blocks: $c = [c_1, c_2, \ldots, c_n]$, where each block $c_i$ contains $b$ tokens.
+We introduce an \textit{anchor block} mechanism, in which, each block—except the first—is prefixed with the first block $c_1$ of the sequence, referred to as the anchor block. This concatenation forms an augmented context $c'$:
+$$
+c' = [c_1, (c_1 \: c_2), (c_1 \: c_3), \ldots, (c_1 \: c_n)]
+$$
+where each augmented block $c'_i$ contains $2b$ tokens: $b$ tokens from the anchor block $c_1$ followed by $b$ tokens from the current block $c_i$ (Figure ~\ref{fig:block_approximation}). The positional indices of $c_1$ are preserved, ensuring that its tokens retain their original position indices $[0, 1, \ldots, b-1]$. The augmented blocks are distributed across compute hosts, where each host computes attention over the $2b$ tokens from its assigned block $c_i'$ and generates the corresponding key-value (KV) vectors. While KVs for the anchor block $c_1$ are discarded, the KVs for the current block $c_i$ are retained in the cache.
+
+\begin{figure}[t]
+     \centering
+     \begin{subfigure}[t]{0.3\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{sink_dense_attn.pdf}
+         \caption{Global Attention}
+         \label{fig:global_attn_plot}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[t]{0.3\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{sink_star_attn_no_anchor.pdf}
+         \caption{Blockwise Context Encoding}
+         \label{fig:noanchor_attn_plot}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[t]{0.3\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{sink_star_attn_anchor.pdf}
+         \caption{Blockwise Context Encoding with Anchor Blocks}
+         \label{fig:anchor_attn_plot}
+     \end{subfigure}
+    \caption{Attention distribution along the sequence length for context encoded with different strategies in phase 1 of Star Attention. (a) Global attention shows a spike at the start, corresponding to the attention sink. (b) Star Attention without anchor blocks shows several attention sinks present at the beginning of each block. (c) Star Attention with anchor blocks shifts sinks to anchor tokens, resulting in an attention distribution approximating global attention. In the plot, the input sequence (4K tokens) is divided into 512-token chunks.
+    }
+    \label{fig:global_anchor_attn_comparison}
+\end{figure}
+
+We observe that, without anchor blocks—i.e., applying blockwise attention only to the original context $c$—the model fails to generate correct outputs. We conjecture this failure is due to the incorrect approximation to the attention patterns observed during phase 2 (Figure~\ref{fig:noanchor_attn_plot}), where multiple attention spikes, known as attention sinks \citep{streaming_llm}, are distributed across the sequence. These spikes occur because each block is processed independently, creating an attention sink at the start of each block. As a result, the model struggles to effectively focus on relevant parts of the context. To address this issue, we prefix the blocks with the anchor block $c_1$, shifting the attention sinks to the anchor tokens. By discarding the KVs of the anchor tokens the intermediate attention sinks are removed ensuring the attention distribution of block-local attention (Figure~\ref{fig:anchor_attn_plot}) closely approximates global attention (Figure~\ref{fig:global_attn_plot}) while maintaining the computational efficiency of blockwise processing.
+\subsection{Phase 2: Query Encoding and Token Generation}
+
+In phase 2, global attention is employed to encode the query and generate output tokens by using a distributed softmax algorithm that eliminates the need to transfer KV cache between hosts (Figure \ref{fig:star_attn_phase2}). A designated query-host $h_q$ coordinates this computation.
+The query is broadcast to all hosts and transformed into the sequence $Q \in \mathbb{R}^{l_q \times d}$, where $l_q$ is the query length, and $d$ is the attention head dimension. Each host $h$ computes the local attention output $A_h$ for the query $Q$ using its local key-value pairs $K_h, V_h \in \mathbb{R}^{l_k \times d}$, where $l_k$ is the sequence length of the KV cache. The local attention is computed as:
+\begin{equation}
+    A_h = \left( \frac{\exp\left( \frac{QK_h^\top}{\sqrt{d}} \right)}{\sum_{k=1}^{l_k} \exp\left( \frac{QK_{h,k}^\top}{\sqrt{d}} \right)} \right)V_h
+    \label{equation:self_attention}
+\end{equation}
+In addition to $A_h$, each host also stores the sum of the exponents $s_h$ from the the local softmax operation (the denominator from Equation \ref{equation:self_attention}): 
+\begin{equation}
+    s_h = \sum_{k=1}^{l_k} \exp\left( \frac{QK_{h,k}^\top}{\sqrt{d}} \right)
+\end{equation}
+The query-host $h_q$ gathers the local attention $A_h$ and the sums of exponents $s_h$ from all hosts:
+$$A = [A_1, A_2, \ldots, A_{H}]$$
+$$s = [s_1, s_2, \ldots, s_{H}]$$
+The global softmax denominator, $s_{\text{global}}$, is then computed as the sum of all local exponents:
+\begin{equation}
+    s_{\text{global}} = \sum_{h=1}^{H} s_h
+\end{equation}
+The query-host uses $s_{\text{global}}$ to aggregate the local attentions to compute the global attention:  
+\begin{equation}
+    A_{\text{global}} = \sum_{h=1}^{H} \frac{s_h}{s_{\text{global}}} A_h
+\end{equation}
+This method ensures that the global attention scores are normalized correctly across all hosts. It requires the communication of only a single scalar $s_h$ (the local sum of exponents) and a vector $A_h$ (the local attention) per token.
+In practice, the \textit{log-sum-exp} method from online softmax \citep{online_softmax} can be used to maintain the numerical stability during global attention aggregation.
+This distributed approach enables efficient computation by minimal data transfers between hosts.
+
+\textbf{Output generation and cache update.} After computing the global attention output, the query-host $h_q$ generates the next token and its KV cache is updated with the key and value vectors of the new token. This process is repeated for each generated token.
+
+This two-phase mechanism—local context encoding with anchor blocks in Phase 1 followed by global query encoding with token generation in Phase 2—gives significant  improvements in inference speed, while keeping the accuracy close to the global attention. 
+
+\begin{table}
+\centering
+\begin{tabular}{lcc|c|ccc}
+\toprule
+    \multirow{2}{*}{Model} &  Seq. Len.    & Block Size  & Ring-Attn     &  \multicolumn{2}{c}{Star-Attn}  \\
+    & (K) & (K) & Acc.(\%) & $\Delta$ Acc. & $\Delta$ Speedup \\
+\midrule
+    & 16  & 4   & 86.12  & +2.47\%   & 1.1x  \\
+    & 32  & 8   & 82.52  & +1.54\%   & 1.2x  \\
+    & 64  & 16  & 79.05  & +1.28\%   & 1.8x  \\
+    \multirow{-4}{*}
+    {\begin{tabular}[c] {@{}l@{}}
+    Llama-3-8B-Instruct, 1048K \\
+    \cite{gradientai}
+    \end{tabular}} 
+    & 128 & 32  & 77.39  & +1.23\%   & 2.7x  \\
+ \midrule
+    & 16  & 4  & 95.09  & -2.85\%    & 1.7x     \\
+    & 32  & 8  & 94.61  & -2.70\%    & 2.0x     \\
+    \multirow{-3}{*}
+    {\begin{tabular}[c]{@{}l@{}}
+    Llama-3.1-70B-Instruct, 128K \\
+    \cite{llama3_1}
+    \end{tabular}} 
+    & 64  & 16 & 88.54  & -1.63\%    & 4.7x     \\
+\bottomrule
+\end{tabular}
+\caption{Star Attention vs Ring Attention (baseline) accuracy and relative inference speed-up. The $\Delta$ for Star Attention shows the relative accuracy improvement (+) or degradation (-). We set block size to one-quarter of the sequence length.  Star Attention achieves significant speedup over Ring Attention while maintaining the accuracy. For larger models, the speedup of Star Attention is even more pronounced.}
+\label{tab:star_vs_ring_speedup}
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{experiments}
+We evaluate Star Attention on several Llama-based models with sequence lengths ranging from 16K to 1M tokens on RULER \citep{ruler} and BABILong \citep{kuratov2024babilong} benchmarks.
+We begin by comparing accuracy and the speed achieved by Star Attention versus baseline - Ring attention. 
+Further, we investigate the impact of varying block sizes on accuracy, illustrating the trade-off between accuracy and speedup. Finally, we conduct a detailed analysis of challenging and favorable cases for Star Attention by examining distinct RULER task categories. 
+
+\subsection{Setup}
+
+\textbf{Models.} We benchmark the base and instruct variants of the Llama-3.1 8B model which support context lengths up to 128K tokens \citep{llama3_1}. In addition, we evaluate two Gradient.ai models that extend Llama-3-8B's context up to 1M tokens \cite{gradientai}. To access the scalability of our method, we also evaluate the Llama-3.1-70B-Instruct model. We observe that large LMs achieve even greater speedups with Star Attention on long context tasks. 
+
+\textbf{Baseline.} We compare Star Attention with Ring Attention \citep{ring_attention}. Ring Attention computes global block-wise attention by having each host communicate its respective KV cache in a ring pattern across all the hosts .
+
+\textbf{Configuration.} We implement Star Attention using HuggingFace Transformers library \citep{hf_transformers}. All experiments are done on A100 GPUs with bfloat16 precision.
+
+\textbf{Evaluation Benchmarks.} We use the RULER benchmark for evaluation. It consists of 13 tasks categorized into 4 domains: Needle-in-a-Haystack (Retrieval), Multi-Hop Tracing, Aggregation, and Question Answering \citep{ruler}. Additionally, we report results on the BABILong benchmark, which encompass tasks where multiple supporting facts encoded in the context are required to generate accurate answers \citep{kuratov2024babilong}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{star_attn_accuracy.pdf}
+    \caption{Accuracy (\%) of Star Attention on RULER and BABILong evaluated on sequence lengths of 16K, 32K, 64K, and 128K. In all experiments, the block size and anchor block size are set to one-quarter of the total sequence length. Results using the Llama-3-8B-Instruct-262k, Llama-3.1-8B-Instruct and Llama-3.1-8B-Base models demonstrate that Star Attention retains 95-100\% of the accuracy of global attention, and in some cases, even outperform it.}
+    \label{fig:star_attn_accuracy}
+\end{figure}
+\subsection{Results}
+Table \ref{tab:star_vs_ring_speedup} provides relative speedup and accuracy achieved by Star Attention versus Global (Ring) Attention from 16K to 128K tokens on the RULER benchmark. In each setting, the context block size and anchor block size are set to one-quarter of the total sequence length. Star Attention achieves similar accuracy to full global attention, with relative accuracy degradation limited to 0-3\% while also giving upto 5x inference speedup. This demonstrates that Star Attention effectively preserves the model’s ability to retrieve relevant information, even with a significantly reduced context window. In case of larger models, such as Llama-3.1-70B Instruct, we find that these models achieves even greater speedups at any given sequence length while maintaining similar levels of accuracy degradation. We discuss Star Attention's strengths and limitations based on RULER subtasks in Section~\ref{ruler_task_analysis}.
+
+Extending this analysis to other benchmarks and models, we evaluate Star Attention on the BABILong benchmark as well using Llama-3.1-8B-Instruct, Llama-3.1-8B-Base, and the gradientai-Llama-3-8B-Instruct-262K model. We have a similar observation here that Star Attention achieves similar accuracy to full global attention, with accuracy degradation limited to 0-3\% across all tasks up to 128K tokens, as shown in Figure \ref{fig:star_attn_accuracy}.
+
+However,  we observe several anomalies with the Llama-3.1 8B base model on the BABILong benchmark. There is a significant improvement at the 16K sequence length, but a severe drop at 128K. These fluctuations likely stem from the benchmark's format-specific requirements for generating answers, which pose challenges for base models since they are not optimized for instruction-following tasks. As a result, scores for base models, especially at longer sequence lengths, may be less reliable.
+
+\subsection{Trade-off between accuracy and speed}
+\label{tradeoff}
+Figure \ref{fig:block_size}, illustrates the effect of varying block sizes during context encoding with sequence length of 128K tokens. Larger block sizes correlate to higher accuracy with Star Attention. This trend is consistent across all sequence lengths in our experiments.
+
+From our experiments, we observe that setting the block size to approximately one-quarter of the total sequence length strikes an optimal trade-off between accuracy and speed. However, for sequence lengths exceeding 128K, as shown in Table \ref{tab:star_block_size_speedup}, we fix the block size at 32K tokens to prioritize speedup, allowing for some acceptable accuracy degradation. Similarly, for larger models such as the Llama-3.1-70B-Instruct, we limit the block size to 16K tokens. The choice of block size is dependent on the user on how much accuracy can be traded for improved speed. As the block size increases, Star Attention’s performance approaches that of full global attention, providing users with flexibility in balancing computational efficiency with accuracy.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\linewidth]{block_size_128k.pdf}
+    \caption{Effect of block size on the accuracy of Star Attention on the RULER benchmark with block sizes ranging from 4K to 32K tokens for Llama-3.1-8B instruct model at sequence length of 128K. In each setting, the anchor block size matches the context block size. The results indicate that larger context block sizes are positively correlated with improved accuracy. 
+    }
+    \label{fig:block_size}
+\end{figure}
+
+\begin{table}
+\centering
+\begin{tabular}{lcc|c|ccc}
+\toprule
+    \multirow{2}{*}{Model} &  Seq. Len.    & Block Size  & Ring-Attn     &  \multicolumn{2}{c}{Star-Attn}  \\
+                           & (K)           & (K)         & Acc. (\%) & $\Delta$ Acc.         & $\Delta$ Speedup \\
+\midrule
+    & 128 & 32  & 77.39  & +1.23\%   & 2.7x  \\
+    & 256 & 32  & 74.44  & -1.04\%   & 10.8x  \\
+    & 512 & 32  & 69.30  & -9.71\%  & 16.2x  \\
+    \multirow{-4}{*}{\begin{tabular}[c]{@{}l@{}}
+    Llama3-8B-Instruct, 1048K \\ \cite{gradientai}
+    \end{tabular}} & 1024   & 32  & 63.70  & -8.36\%  & 16.9x  \\
+ \midrule
+    & 64  & 16 & 88.54  & -1.63\%    & 4.7x     \\
+    \multirow{-2}{*}{\begin{tabular}[c]{@{}l@{}}
+    Llama-3.1-70B-Instruct, 128K\\ \cite{llama3_1}
+    \end{tabular}} & 128  & 16 & 65.29  & -11.44\%     & 8.7x  \\
+\bottomrule
+\end{tabular}
+\caption{Accuracy versus speed trade-off for Star Attention compared to Ring (Global) Attention on RULER. The $\Delta$ for star attention shows the relative accuracy degradation and the relative speedup compared to global attention. When the block size remains fixed and the as sequence length increases, Star Attention achieves exponential speedup over Ring (Global) Attention at the cost of slightly more accuracy degradation. It is upto the user to decided how much accuracy they want to trade-off for speed by setting the block size.}
+\label{tab:star_block_size_speedup}
+\end{table}
+
+\subsection{In-Depth Analysis on RULER Task Categories}
+\label{ruler_task_analysis}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{ruler_tasks_32k.pdf}
+    \caption{Accuracy (\%) of Star Attention using the Llama-3.1-8B-Instruct model on the 5 categories of tasks in RULER on sequence lengths of 32K. In all experiments, the block size and anchor block size are set to one-quarter of the total sequence length. For the NIAH and QA tasks, Star Attention retains upto 95-100\% accuracy of the baseline. The Multi-Hop Tracing task becomes quite challenging since it requires inter-block communication. In aggregation tasks, Star Attention show significant improvement as distributed local attention helps the model in such summarization tasks
+    \label{fig:ruler_tasks}
+\end{figure}
+
+In this section we investigate the strengths and limitations of Star Attention,  using different categories of tasks within RULER. The benchmark has five primary categories: Single-NIAH, Multi-NIAH, Multi-Hop Tracing, Aggregation, and Question Answering (QA). 
+Figure~\ref{fig:ruler_tasks} presents categorical results of RULER for the Llama-3.1-8B-Instruct model on sequence length of 32K. 
+
+Notably, Star Attention achieves scores nearly identical to global attention in Single-NIAH tasks. However, in more complex tasks such as Multi-NIAH and QA, it shows slight decline in performance, with reductions ranging from 1.6\% to 4.9\% in Multi-NIAH and 0.9\% to 6.8\% in QA tasks. Despite these challenges, Star Attention consistently retains overall 95-100\% accuracy of global attention.
+
+Tasks such as Multi-Hop Tracing and Aggregation necessitate an in-depth comprehension of context.
+Multi-Hop Tracing poses a significant challenge for Star Attention, as it requires the model to propagate information across multiple hops within the sequence, demanding effective inter-block communication. However, Star Attention lacks inter-block communication, relying solely on global attention between the query and segregated KV caches within each block. Due to this, the performance degradation is considerable compared to global attention. 
+
+Aggregation tasks, encompassing Common and Frequent Words Extraction, assess models' ability to aggregate relevant information within long-range contexts. Star Attention yields significant performance improvements across all sequence lengths. This enhancement stems from Star Attention's chunk-based context division, enabling local attention within each chunk to strengthen summarization capabilities. Effective chunk-wise summarization in Phase 1 facilitates global attention's information aggregation in Phase 2. 
+
+
+\section{Ablation Study}
+
+\label{ablations}
+
+The ablation experiments focus on the Needle-in-a-Haystack (NIAH) task, which tests a model’s ability to answer queries based on a small, relevant piece of information (``needle") embedded within a large context (``haystack"). To increase the task's complexity, we explore three variations from the RULER benchmark \citep{ruler}: Single-NIAH, Multi-key NIAH, and Multi-query NIAH.
+\subsection{Position and Content of Anchor Block}
+In this section, we explore the role of anchor blocks during Phase 1 that enables Star Attention to approximate global attention behavior.
+As outlined in Section \ref{phase1}, anchor blocks are crucial in managing the attention spikes generated at the start of each context block, helping Star Attention approximate global attention (see Table~\ref{table:ablations} )  
+Drawing from the hypotheses on sink tokens in \citet{streaming_llm}, we consider two potential explanations for the effectiveness of anchor blocks: (1) the model may develop a bias toward the absolute position of the anchor block, or (2) the semantic content of the anchor block is essential for maintaining performance. To better understand how anchor blocks enable Star Attention to approximate global attention distribution, we test both the hypotheses. We conduct experiments on the Llama-3.1-8B-Instruct model, varying both the position and content of the anchor block. We evaluate two configurations: a block size of 16K for sequences of length 64K, and a block size of 32K for sequences of length 128K, in both the cases, with anchor block size matching the context block size.
+
+\textbf{Position of anchor block}: Here, we fix the content of the anchor block to the first context block and vary its position IDs. We test three scenarios : (1) the position IDs are randomly sampled from the range [0, starting position of the current block] (e.g., for a block starting at position 32K, position IDs are sampled from [0, 32K] ); (2) the position IDs are derived from the previous block (e.g., for a block of size 16K starting at position 32K, position IDs are sampled from [16K, 32K] ); (3) the position IDs are fixed to the first block (our proposed approach). As shown in Table~\ref{table:ablations}, varying the position of the anchor block has minimal impact on accuracy.
+
+\textbf{Content of anchor block}: We fix the position IDs of the anchor block to that of the first block but vary its content. We explore several configurations (as shown in Table \ref{table:ablations}): (i) a single repeated token (e.g., \texttt{` '}, \texttt{` the'}, or \texttt{`.'}); (ii) random tokens; (iii) shuffling the tokens of the first block; and (iv) using the original first block content (the proposed approach). Our results show that the content of the anchor block significantly impacts performance, with the original first block content yielding the best results. This outcome suggests that since global attention is performed during Phase 2, it is important for the local context blocks to attend to anchor blocks whose content reflects what the model would see during global attention.
+
+\textbf{Previous block as anchor block}: To  examine the roles of both position and content, we experiment with using the previous block as the anchor block. For example, for a block of size 16K starting at position 32K, the anchor block would be the  block with position IDs from 16K to 32K. This configuration has lower accuracy comparing to using the first block as the anchor(Table \ref{table:ablations}).
+
+In summary, we found that while the positional placement of the anchor block is not important , its content is critical for optimal performance.
+
+\begin{table}
+\centering
+\begin{tabular}{lcc|cc}
+\toprule
+\multirow{2}{*}{Experiments}                       & \multicolumn{4}{c}{RULER-NIAH (\%)} \\
+                                                   & 64K                  &  $\Delta$64k         & 128k                 & $\Delta$128k \\
+\midrule
+Global attention                                   & 99.50                & -                    & 98.49                & -                    \\
+\midrule
+No anchor block                                    & 60.11                & -39.59\%             & 73.75                & -25.12\%             \\
+\addlinespace
+Content set to first-block, position IDs are:      & \multicolumn{1}{l}{} & \multicolumn{1}{l}{} & \multicolumn{1}{l}{} & \multicolumn{1}{l}{} \\
+\quad randomly sampled from [0, current\_block)    & 96.79                & -2.72\%              & 97.16                & -1.35\%              \\
+\quad same as previous block                       & 97.35                & -2.16\%              & 96.80                & -1.71\%              \\
+\quad \textbf{same as first block}                 & 97.61                & -1.90\%              & 97.54                & -0.96\%              \\
+\addlinespace
+Position IDs set to first-block, content is:       & \multicolumn{1}{l}{} & \multicolumn{1}{l}{} & \multicolumn{1}{l}{} & \multicolumn{1}{l}{} \\
+\quad constant token (ex: ` ' or  ` the'  or `.' ) & 0.00                 & -100.00\%            & 0                    & -100.00\%            \\
+\quad random tokens                                & 90.55                & -8.99\%              & 82.63                & -10.15\%             \\
+\quad shuffled first block tokens                  & 92.96                & -6.57\%              & 90.76                & -3.26\%              \\
+\quad \textbf{first block tokens}                  & 97.61                & -1.90\%              & 94.94                & -0.96\%              \\
+\addlinespace
+Previous-block used as anchor                      & 94.20                & -5.33\%              & 96.13                & -2.40\%              \\
+\bottomrule
+\end{tabular}
+\caption{Experiments on analyzing the impact of varying the position and content of the anchor block with the LLaMA-3.1-8B-Instruct model, with a block size of 16K for 64K sequence length, and 32K for 128K sequence lengths. In each setting, the size of the anchor block matches the context block size. The $\Delta$ for star attention shows the relative accuracy degradation compared to global attention. The experiments are categorized into 4 groups: (i) absence of anchor block; (ii) varying the position IDs; (iii) varying the content; (iv) varying both the position and the content. Results indicate that while the anchor block's position is not critical, its content is essential for optimal performance.}
+\label{table:ablations}
+\end{table}
+
+\begin{figure}[t]
+ \centering
+ \includegraphics[width=0.7\textwidth]{anchor_block_size_128k.pdf}
+ \caption{Effect of anchor block size on the accuracy of Star Attention on the RULER-NIAH benchmark with the Llama-3.1 8B Instruct model. In these experiments, the context block size is fixed to 32K for sequence length 128K, respectively. Results indicate that larger anchor block sizes lead to improved accuracy. The observed trend holds for all sequence lengths in our experiments.}
+  \label{fig:sink_size}
+\end{figure}
+
+\subsection{Size of Anchor block}
+As discussed in Section \ref{tradeoff}, larger block sizes improve the accuracy of Star Attention. In this section, we analyze the impact of varying anchor block size while maintaining a fixed block size of 32K for a sequence length of 128K. As illustrated in Figure \ref{fig:sink_size}, increasing the anchor block size enhances model accuracy, with the best performance observed when the anchor block size equals the context block size. Although Figure \ref{fig:noanchor_attn_plot} demonstrates that attention spikes predominantly occur in the first few tokens, reducing the number of tokens in the anchor block leads to a substantial drop in performance. This suggests that a larger anchor block is critical for maintaining model accuracy, despite attention spikes being concentrated at the beginning of the sequence. This observation implies that the anchor block's effectiveness is not solely due to its role in managing attention sinks but may involve other underlying factors. These findings remain consistent across both base and instruct models, as well as for all sequence lengths.
+Further investigation into why the anchor block size must be equivalent to the context block size is left for future work.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, we introduced Star Attention, a novel block-sparse attention mechanism designed to enable efficient inference on long sequences in transformer-based LLMs. The method operates in two phases: (1) context tokens are processed using blockwise-local attention, with the context segmented into blocks where each block is prefixed with an anchor block; and (2) then the query and response tokens attend to all prior cached tokens through sequence-global attention. Star Attention delivers up to 11x speedup over Ring Attention while maintaining 95-100\% accuracy, significantly enhancing both memory efficiency and inference speed. Scaling Star Attention to longer sequences (up to 1M) and larger models, we observe even greater speedups while preserving similar levels of accuracy. Despite these advances, several open questions remain. The role and optimal size of anchor blocks relative to context blocks require further exploration. Additionally, while Star Attention performs effectively with block sizes set to one-quarter of the sequence length, accuracy degrades when using smaller blocks on longer sequences. Future work will focus on refining the anchor block mechanism and improving performance on more complex long-context tasks to enhance the scalability and robustness of Star Attention.
+
+\ificlrfinal
+
+

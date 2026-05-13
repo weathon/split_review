@@ -1,0 +1,216 @@
+\title{KV-Dict: Sparse KV Cache Compression with Universal Dictionaries}
+
+\begin{abstract}
+Transformer has become the de facto architecture for Large Language Models (LLMs), yet its substantial memory required for long contexts make it costly to deploy. Managing the memory usage of the key-value (KV) cache during inference has become a pressing challenge, as the cache grows with both model size and input length, consuming significant GPU memory.
+
+We introduce a novel post-training KV cache compression method using KV-Dict, a universal dictionary that can accurately decompose and reconstruct key-value states. Unlike traditional quantization methods, KV-dict leverages sparse dictionary learning, allowing for flexible memory usage with minimal performance loss through fine-grained controls of sparsity levels. Moreoever, we retain competitive performance in the low memory regimes that 2-bit compression struggles to offer.
+
+KV-Dict is remarkably universal, as it uses a small, input-agnostic dictionary that is shared across tasks and batches without scaling memory. This universality, combined with the ability to control sparsity for different memory requirements, offers a flexible and efficient solution to the KV cache bottleneck, maintaining strong performance on complex reasoning tasks, such as LongBench and GSM8k.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Transformers (Vaswani et al., 2017) have become the backbone of frontier Large Language Models (LLMs), driving progress in domains beyond natural language processing. However, Transformers are often limited by their significant memory demands. This stems not only from the large number of model parameters, but also from the need to maintain the key-value (KV) cache that grows proportional to the model size and length of the input. Additionally, each input requires its own KV cache, limiting opportunities for reuse across different user inputs. This creates a bottleneck in generation speed for GPUs with limited memory (Yu et al., 2022) and thus, it has become crucial to alleviate KV cache memory usage while preserving its original performance across domains.  
+
+KV cache optimization research has explored both training-stage optimizations (Shazeer, 2019; Dai et al., 2024; Sun et al., 2024) and deployment-focused strategies (Kwon et al., 2023; Lin et al., 2024; Ye et al., 2024) to improve the efficiency of serving LLMs. Architectural approaches such as Grouped Query Attention (GQA) (Ainslie et al., 2023) reduce the number of KV heads, effectively reducing KV cache. However, these methods are not applicable as off-the-shelf methods to reduce KV cache for pretrained LLMs, leading to post-training compression efforts.  
+
+Post-training approaches include selectively retaining certain tokens (Beltagy et al., 2020; Xiao et al., 2023; Zhang et al., 2024) and quantization methods, which have had empirical success when quantizing KV cache into 2 or 4 bits (Liu et al., 2024b; He et al., 2024; Kang et al., 2024). However, eviction strategies have limitations on long-context tasks that require retaining a majority of previous tokens, while quantizations to 2 or 4 bits have clear upper bounds on compression rates.  
+
+In this paper, we focus on utilizing low-dimensional structures for efficient KV cache compression. Prior work reports that each key state lies in a low-rank subspace (Singhania et al., 2024; Wang et al., 2024b; Yu et al., 2024). Yet, it is unclear if all states lie in the same subspace; if so, such redundancy remains to be taken advantage of. Thus, we naturally ask the following questions:  
+
+![](images/11eda0a445b15abc6d66b3f9c7fd452bfd3812bc17df797b8e66803569dd2a91.jpg)  
+Figure 1: (a) Prefilling: Following attention computation, KV-Dict uses OMP to find sparse representations of the KV states ( $3\mathrm{-8\times}$ smaller). (b) Decoding: Key cache consists of the compressed sparse key cache, $K_{\mathrm{csr}}$ , and an full-precision buffer, $\kappa_{\mathrm{buffer}}$ , for the most recent tokens. $\pmb q_{t}$ , $k_{t}$ represent the query, key vectors for the newly generated token. Computation is reduced by computing the query-dictionary product, ${\pmb q}_{t}{\pmb D}_{k}$ , then multiplying $K_{\mathrm{csr}}$ , to get the pre-softmax attention score.  
+
+Towards this end, we propose KV-Dict, a universal dictionary that serves as an overcomplete basis, which can sparsely decompose and reconstruct KV cache with sufficiently small reconstruction error. As shown in Section 2.2, we observe that a subset of key states cluster near each other, even though the keys are from different inputs, while some cluster on different subspaces. To accommodate for such low-dimensional structures, we use sparse dictionary learning, which has developed algorithms for information compression across various domains, such as signal processing and medical imaging (Cande\`s et al., 2006; Donoho, 2006; Dong et al., 2014; Metzler et al., 2016).  
+
+KV-Dict is simple to learn, can be applied off-the-shelf for KV cache compression, and only occupies small constant memory regardless of input or batch size. Methodologically, KV-Dict utilizes both sparsity-based compression (steps 1 and 2) and quantization (step 3) in three straightforward steps:  
+
+1. Dictionary pretraining: As in Figure 3, we train a dictionary on WikiText-103 (Merity, 2016) for each model. This dictionary is only trained once and used universally across all tasks. It only occupies constant memory and does not increase with batch size. 2. Sparse decomposition: During prefilling and decoding (Figure 1), KV-Dict decomposes key-value into a sparse linear combination, which consists of $s$ pairs of sparse coefficient and dictionary index. This step by itself provides high compression rates. 3. Lightweight sparse coefficients: We obtain higher KV cache compression rates by representing the sparse coefficients in 8 bits instead of FP16. Lowering precision to 8 bits yields minimal degradation. KV-Dict theoretically allows us to compress more than 2-bit quantization $1/8$ of FP16 KV cache size) if $s\leq10$ when head dimension is 128.  
+
+Overall, we make the following contributions:  
+
+• Near-lossless performance: Given similar memory requirements, KV-Dict performs on par with or better than baseline quantization methods on challenging language tasks, such as LongBench (Bai et al., 2023) and GSM8K (Cobbe et al., 2021).   
+• Compression rates beyond 2-bits: KV-Dict’s sparsity parameter enables both wider and more fine-grained control over desired memory usage. This allows us to explore performance when using under $15{-}20\%$ of the original KV cache size, a low-memory regime previous compression methods could not explore.   
+• Universality: Instead of an input-dependent dictionary, we find a sufficiently small universal dictionary (per model) that can be used for all tasks and across multiple users. Advantageously, such dictionary does not scale with batch size and can be used off-the-shelf.  
+
+
+
+\section{2 KV CACHE COMPRESSION WITH DICTIONARIES  }
+
+
+
+
+\section{2.1 BACKGROUND & NOTATION  }
+
+
+During autoregressive decoding in Transformer, the key and value states for preceding tokens are independent of subsequent tokens. As a result, these key and value states are cached to avoid recomputation, thereby accelerating the decoding process.  
+
+Let the input token embeddings be denoted as $X\in\mathbb{R}^{l_{\mathrm{seq}}\times d}$ , where $l_{\mathrm{seq}}$ and $d$ are the sequence length and model hidden dimension, respectively. For simplicity, we focus on a single layer and express the computation of query, key, and value states at each attention head during the prefilling stage as:  
+
+$$
+\pmb{Q}^{(h)}=\pmb{X}\pmb{W}_{q}^{(h)},\quad\pmb{K}^{(h)}=\pmb{X}\pmb{W}_{k}^{(h)},\quad\pmb{V}^{(h)}=\pmb{X}\pmb{W}_{v}^{(h)},
+$$  
+
+where W q(h), W k(h), $\boldsymbol{W_{v}^{(h)}}\in\mathbb{R}^{d\times m}$ are the model weights with $m$ representing the head dimension.  
+
+Let $t$ represent the current step in the autoregressive decoding, and let $\pmb{x}_{t}\,\in\,\mathbb{R}^{1\times d}$ denote the embedding of the newly generated token. The KV cache up to but not including the current token, are denoted as $K_{t-1}^{(h)}$ and $V_{t-1}^{(h)}$ , respectively. The typical output computation for each attention head ht(h)using the KV cache can be expressed as:  
+
+$$
+\begin{array}{r}{\boldsymbol{h}_{t}^{\left(h\right)}=\mathrm{Softmax}\left(\boldsymbol{q}_{t}^{\left(h\right)}\left(\boldsymbol{K}_{t-1}^{\left(h\right)}\parallel\boldsymbol{k}_{t}^{\left(h\right)}\right)^{\top}/\sqrt{m}\right)\left(\boldsymbol{V}_{t-1}^{\left(h\right)}\parallel\boldsymbol{v}_{t}^{\left(h\right)}\right),}\end{array}
+$$  
+
+where qt $\mathbf{q}_{t}^{(h)},\mathbf{k}_{t}^{(h)},\mathbf{v}_{t}^{(h)}$ represent the query, key, and value vectors for the new token embedding $\pmb{x}_{t}$ .   
+Here, $\parallel$ denotes concatenation along the sequence length dimension.  
+
+
+
+\section{2.2 SPARSE APPROXIMATION  }
+
+
+Given a dictionary, our goal is to efficiently decompose and represent KV cache, i.e., approximate a state $\pmb{k}\in\mathbb{R}^{m}$ as a linear combination of a few vectors (atoms) from an overcomplete dictionary $D\in\mathbb{R}^{m\times N}$ . This reconstruction is given by $\pmb{k}=D\pmb{y}$ , where $\pmb{y}\in\mathbb{R}^{N}$ is the sparse representation vector such that $s=||\pmb{y}||_{0}$ . For implementation, $\textit{\textbf{y}}$ only requires space proportional to $s$ , not $N$ .  
+
+We hypothesize that the KV cache, like other domains where sparse approximation is effective, contains inherent redundancy that can be leveraged for efficient compression. For instance, Figure 2 presents pairwise cosine similarity plots for keys generated during inference on a random subset of the WikiText dataset. Here, we observe that key states cluster in multiple different subspaces. Dictionary learning can take advantage of such redundancy, enabling KV vectors to be represented by a compact set of atoms with only a few active coefficients.  
+
+![](images/6eb3711ccee0e8af4f3a88e6260cb48532d1966c86d962e2b072628c094b18d0.jpg)  
+Figure 2: Left shows a pairwise cosine similarity matrix between key vectors generated from one input text from all heads in Layer 10 of Llama-3.1-8B-Instruct. Keys are sorted by similarity to demonstrate the clusters. Right shows the similarity matrix between key vectors from two different input texts. These plots indicate that there may exist a mixture of low-dimensional subspaces in the space of all possible keys, a hypothesis that naturally leads to dictionary learning.  
+
+![](images/899b047a7967ec90fb43e6bbb2679d23cf511372380b2cf9d31759dca82b0644.jpg)  
+Figure 3: Dictionary Learning. We train a linear layer $_{D}$ (our dictionary), that minimizes $\ell_{2}$ - reconstruction error of KV states. The states of layer $i$ are used as training data for dictionary $D^{(i)}$ . At each step, we apply OMP with fixed $_{D}$ to represent KV as a vector of sparse coefficients; we then perform a step of gradient descent on $_{D}$ and repeat the process. A sparse vector can be efficiently stored as a compressed sparse row (CSR), using a tuple of 16-bit index and 8-bit value.  
+
+Sparse approximation, which aims to find $\textit{\textbf{y}}$ with minimum sparsity given $^k$ and $_{D}$ , while ensuring a small reconstruction error, is NP-hard. This optimization problem is typically formulated as:  
+
+$$
+\operatorname*{min}_{\pmb{y}}\|\pmb{y}\|_{0}\operatorname{subject}\tan\|\pmb{k}-\pmb{D}\pmb{y}\|_{2}\leq\delta\,\|\pmb{k}\|_{2}
+$$  
+
+In this work, we adopt Orthogonal Matching Pursuit (OMP) as the sparse approximation algorithm. Given an input key or value vector $^k$ , a dictionary $_{D}$ , and a target sparsity $s$ , OMP iteratively selects dictionary atoms to minimize the $\ell_{2}$ -reconstruction error, with the process continuing until the specified sparsity $s$ is reached. Our implementation of OMP builds on advanced methods that utilize properties of the Cholesky inverse (Zhu et al., 2020) to optimize performance. Additionally, we incorporate implementation details from Lubonja et al. (2024) for efficient batched GPU execution and extend it to include an extra batch dimension, allowing for parallel processing across multiple dictionaries.  
+
+2.3 LEARNING LAYER-SPECIFIC KV-DICT  
+
+Layer-specific Dictionaries. While the sparse approximation algorithm is crucial, achieving a high compression ratio relies heavily on well-constructed dictionaries. In this section, we describe the process for training the dictionaries used in KV-Dict. We adopt distinct dictionaries for the key and value vectors in each transformer layer due to their different functionalities. We denote the key and value dictionaries at each layer as $D_{k}$ and $D_{v}\in\mathbb{R}^{m\times N}$ , where $N$ is the fixed dictionary size. With $N=1024$ , the dictionaries add an additional 16.8MB to the model’s storage requirements for 7B/8B models.  
+
+As shown in Figure 3, we train layer-specific KV dictionaries through direct gradient-based optimization. For a given key or value vector, denoted as $\pmb{k}\in\mathbb{R}^{m}$ and a dictionary $\boldsymbol{D}\,\in\,\mathbb{R}^{m\times N}$ , the OMP algorithm approximates the sparse representation $\pmb{y}\in\mathbb{R}^{N}$ . This process is parallelized across multiple dictionaries, but for simplicity, we present the notation for a single dictionary. The dictionary training objective minimizes the $\ell_{2}$ norm of the reconstruction error, with the loss function $\mathcal{L}=\left\|\boldsymbol{k}-\boldsymbol{D}\boldsymbol{y}\right\|_{2}^{2}$ . We enforce unit norm constraints on the dictionary atoms by removing any gradient components parallel to the atoms before applying updates.  
+
+Training. The dictionaries are trained on KV pairs generated from the WikiText-103 dataset using Adam (Kingma & Ba, 2014) with a learning rate of 0.0001 and a cosine decay schedule over 20 epochs. The dictionaries are initialized with a uniform distribution, following the default initialization method for linear layers in PyTorch. For Llama-3.1-8B-Instruct, with a sparsity of $s=32$ and a dictionary size of $N=1024$ , the training process takes about 2 hours on an NVIDIA A100 GPU.  
+
+We demonstrate our trained dictionaries reconstruct and generalize better than dictionaries trained using sparse autoencoders (similarly to those from Makhzani & Frey (2013); Bricken et al. (2023)) across several corpora in Table 1. Our method consistently achieves lower relative reconstruction errors, such as $0.19\pm0.05$ on out-of-domain dataset CNN/DailyMail, and this trend is consistent across other datasets.  
+
+Despite being trained only on WikiText-103, KV-Dict demonstrates a degree of universality: our dictionaries achieve lower test loss on out-of-domain datasets such as TweetEval than the test loss on WikiText-103 for sparse autoencoders, offering significant compression with minimal reconstruction error. In the next subsection, we explore how low $\ell_{2}$ -reconstruction loss translates to strong performance preservation in language modeling.  
+
+2.4 PREFILLING AND DECODING WITH KV-DICT  
+
+During the prefilling stage, each layer generates the KV vectors for the input tokens, as illustrated in Figure 1a. KV-Dict uses full-precision KV vectors for attention computation, which are then passed to subsequent layers. Subsequently, OMP finds the sparse representations of the KV vectors using layer-specific key and value dictionaries, $D_{k}$ and $D_{v}$ .  
+
+The compressed key and value caches are denoted as $K_{\mathrm{csr}},V_{\mathrm{csr}}\ \in\ \mathbb{R}^{l_{\mathrm{seq}}\times N}$ and replace the fullprecision KV cache. The reconstruction of the KV cache is performed as follows:  
+
+$$
+\hat{K}=K_{\mathrm{csr}}D_{k}^{\top},\quad\hat{V}=V_{\mathrm{csr}}D_{v}^{\top}
+$$  
+
+Recall that at the $t$ -th iteration of autoregressive decoding, each layer receives $\mathbf{\Delta}q_{t},\ \mathbf{k}_{t}$ , and $\pmb{v}_{t}$ , the query, key, and value vectors corresponding to the newly generated token. Similarly to prior work (Liu et al., $2024\mathfrak{b}$ ; Kang et al., 2024), we find that keeping a small number of recent tokens in full precision improves the generative performance of the model. To achieve this, we introduce a buffer that temporarily stores recent tokens in an uncompressed state. The KV vectors stored in the buffer are denoted as $K_{\mathrm{buffer}},V_{\mathrm{buffer}}\in\mathbb{R}^{n_{b}\times m}$ , where $n_{b}$ is the number of KV vectors in the buffer. The key cache up to, but not including the new token at iteration $t$ , is then reconstructed as follows:  
+
+$$
+\hat{K}_{t-1}=K_{\mathrm{csr}}D_{k}^{\top}\parallel K_{\mathrm{buffer}}
+$$  
+
+Substituting this reconstruction into the Equation 2, the attention weights for each head ${\pmb a}_{t}^{(h)}$ are computed as:  
+
+$$
+\pmb{a}_{t}^{(h)}=\operatorname{Softmax}\left(\pmb{q}_{t}^{(h)}(\pmb{K}_{\mathrm{csr}}^{(h)}\pmb{D}_{k}^{\top}\parallel\pmb{K}_{\mathrm{buffer}}^{(h)}\parallel\pmb{k}_{t}^{(h)})^{\top}/\sqrt{m}\right)
+$$  
+
+A key implementation is that attention for the compressed sparse key cache and the uncompressed key cache is computed separately. For compressed sparse key cache, we first compute the product $\pmb q_{t}^{(\bar{h})}D_{k}$ before we multiply $\kappa_{\mathrm{csr}}$ , directly calculating the pre-softmax attention scores for compressed tokens. Attention for the buffer tokens is computed as usual. These scores are then concatenated with softmax to produce the final attention weights (Figure 1b). This process is formalized as:  
+
+$$
+\pmb{a}_{t}^{(h)}=\mathrm{Softmax}\left(\left(\pmb{Q}_{t}^{(h)}\pmb{D}_{k}\pmb{K}_{\mathrm{csr}}^{(h)\top}\mid\pmb{q}_{t}^{(h)}(\pmb{K}_{\mathrm{buffer}}^{(h)}\parallel\pmb{k}_{t}^{(h)})^{\top}\right)/\sqrt{m}\right),
+$$  
+
+where | represents concatenation along columns for attention scores.  
+
+Table 1: Relative reconstruction errors of different methods when training dictionaries of size 1024 and sparsity $s=32$ on WikiText-103. Sparse Autoencoder is a two-layer perceptron with hard top$k$ thresholding as activation (encoder as a linear layer $^+$ activation in Figure 3). KV-Dict is directly optimized using OMP as encoder. The KV states are generated from Llama-3.1-8B-Instruct model.  
+
+![](images/0ae7ab2fb317d327d34927ce1d0cfc25b386064d1a29adf474cc445c520cc413.jpg)  
+
+When the buffer reaches capacity, OMP compresses the KV vectors for the oldest $n_{a}$ tokens in the buffer. This process is independent of the attention computation for the newest token and can therefore be performed in parallel.   
+Time and Space Complexity. The sparse representations are stored in CSR format, with values encoded in FP8(E4M3), and all indices, including offsets, are stored as int16. Each row in CSR corresponds to a single key or value vector. For a given sparsity level $s$ , the memory usage includes: nonzero values ( $\l_{s}$ bytes), dictionary indices ( $2s$ bytes), and the offset array (2 bytes), resulting in a total size of $3s+2$ bytes. For a head dimension of 128, a fully uncompressed vector using FP16 takes 256 bytes, yielding a memory usage of $\frac{3s+2}{256}\times100\approx1.\dot{17}s\%$ (e.g., $37.5\%$ for $s=32$ ). In terms of time complexity, computing $\mathbf{\boldsymbol{q}}_{t}\mathbf{\boldsymbol{K}}_{t}^{\top}$ for a single head requires $O(l_{\mathrm{seq}}m)$ multiplications. On the other hand, $q_{t}D_{k}K_{\mathrm{csr}}^{\top}$ needs $O(N m+l_{\mathrm{seq}}s)$ multiplications. This means that our computation is particularly well-suited for long-context tasks when $l_{\mathrm{seq}}>m$ where $m$ is anywhere between 1024 and 4096. For short contexts when $l_{\mathrm{seq}}~<~m$ , our method only adds a small overhead to attention computation in actuality.   
+3 EXPERIMENTS   
+Setup. We evaluate our method on various models (Llama-3-8B, Llama-3.1-8B-Instruct, Llama-3.2-1B-Instruct, Llama-3.2-3B-Instruct, Mistral-7B-Instruct), using dictionaries trained on WikiText-103, as done in Section 2.3. To assess KV-Dict’s effectiveness in memory reduction while maintaining long-context understanding, we conduct experiments on selected tasks from LongBench (Bai et al., 2023), following the setup of Liu et al. (2024b). Additionally, we evaluate generative performance on complex reasoning tasks, such as GSM8K (Cobbe et al., 2021) with 5-shot prompting and MMLU-Pro Engineering/Law (Wang et al., 2024a) with zero-shot chain-of-thought. We compare our method against two kinds of KV cache compression methods: namely, quantization-based compression and eviction-based compression. For quantization-based methods, we evaluate KIVI (Liu et al., 2024b), ZipCache (He et al., 2024), and the Hugging Face implementation for per-token quantization. For eviction-based methods, we evaluate PyramidKV (Cai et al., 2024) and SnapKV (Li et al., 2024). We refer to the 4-bit and 2-bit versions of KIVI as KIVI-4 and KIVI-2, respectively, and denote its quantization group size as $g$ . We report KV size as the average percentage of the compressed cache relative to the full cache at the end of generation. KV-Dict’s sparsity $s$ is set to match the KV size of the baseline.   
+Hyperparameter Settings. For both experiments, KV-Dict uses a dictionary size of $N=4096$ , a buffer size of $n_{b}=128$ , and an approximation window size $n_{a}=1$ , compressing the oldest token with each new token generated. For KIVI-4 and KIVI-2, we use a quantization group size of $g=32$ and a buffer size of $n_{b}=128$ , as is tested and recommended in Liu et al. (2024b), for LongBench. For GSM8K and MMLU-Pro, we test for stronger memory savings, so we use $g=64$ and $n_{b}=64$ for KIVI.   
+3.1 EXPERIMENTAL RESULTS   
+LongBench Results. Table 2 presents the performance of KV-Dict and KIVI on LongBench tasks. KV-Dict demonstrates better performance than KIVI with similar or even smaller KV sizes. Notably, KV-Dict enables exploration of extremely low memory regimes that KIVI-2 cannot achieve. At a memory usage of just $12.4\%$ KV size, KV-Dict maintains reasonable long-context understanding, with only $5.6\%p$ and $4.4\%p$ performance loss on Llama-3.1-8B-Instruct and on Mistral-7B-Instructv0.3, respectively, compared to the full cache (FP16). The largest performance loss comes from tasks with the lowest full cache accuracy, Qasper, yet there is almost no loss in simpler tasks, such as TriviaQA. This indicates that difficult tasks that require more complex understanding are much more sensitive to performance loss. Hence, it is important to evaluate on GSM8K, one of the harder natural language reasoning tasks, as we do next.  
+
+GSM8K Results. The performance of KV-Dict on GSM8K compared to KIVI is shown in Table 3.  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+
+![](images/9c55fa5e0d0687aef7d458e98ce09bf749b432cde733c58faa62415a85c6b8c8.jpg)  
+
+Table 2: Experimental results on LongBench. For KV-Dict, we use $N=4096$ as the dictionary size and $n_{b}=128$ as the buffer size. For KIVI, we use $g\,=\,32$ (group size for quantization) and $n_{b}\,=\,128$ (buffer size). Sparsity level $s$ is set to match average KV size of KIVI, while $s\ =\ 8$ corresponds to cache size unattainable by common 2-bit quantizations. Full cache is in FP16.  
+
+Table 3: Experimental results on GSM8K. For KV-Dict, we use $N=4096$ as the dictionary size and $n_{b}=128$ as the buffer size. For KIVI, we use $g=64$ (group size for quantization) and $n_{b}=64$ (buffer size). Sparsity level $s$ is set to match the average KV size of KIVI, while $s=4$ corresponds to cache size unattainable by common 2-bit quantizations. Full cache is in FP16.  
+
+(a) Llama $3.\mathrm{x}~8\mathrm{B}$ Models   
+(b) Mistral 7B v0.3 Model   
+
+![](images/271cf65400895a2d533039a74363a717fd47c6ea01f333cc55de6bbaee47ea75.jpg)  
+
+With a KV size of $36.9\%$ , KV-Dict on Llama 8B models experiences a slight accuracy drop of less than $3\%p$ , underperforming KIVI-4 at a similar KV size. However, in the lower memory regime near $25\%$ KV size, KV-Dict significantly outperforms KIVI-2, achieving a higher accuracy by $\bar{8}.2\%p$ on the Llama-3-8B model and $7.1\%p$ on the Llama-3.1-8B-Instruct model. These results highlight the robustness of KV-Dict in low-memory settings, demonstrating that low reconstruction error can be achieved using only a few atoms from our universal dictionary. To further test the resilience of KV-Dict, we set the sparsity to $s\,=\,4$ , observing a noticeable drop in accuracy on the Llama-3.1- 8B-Instruct model. Despite this, both Llama models maintain an accuracy above $40\%$ , which is remarkable given that only 4 atoms from KV-Dict were used for each key-value state, utilizing just $15.8\%$ of the full cache, including the buffer.  
+
+The performance of KV-Dict on the Mistral-7B-Instruct model is even more impressive. We demonstrate that for Mistral, KV-Dict not only outperforms KIVI-4 and KIVI-2 but also achieves higher accuracy with even less memory usage. We also evaluate KV-Dict with $s=4$ on the Mistral model and observe an accuracy of $39.2\%$ , further demonstrating robustness in low-memory settings.  
+
+Results across model sizes and baselines. We illustrate the trade-off between memory usage and performance across six different KV cache compression methods on Llama models (1B, 3B, and 8B) in Figure 4. For all three model sizes, KV-Dict consistently lies on the Pareto frontier, achieving higher scores than other compression methods at similar KV cache budget sizes. Notably, KV-Dict demonstrates greater robustness at smaller model scales, with larger performance gaps observed  
+
+![](images/e52e218c79e2dde93d977b9c2c412b253aec8e20f7f3ce82b72de976107c4b00.jpg)  
+
+Figure 5: Memory usage vs. performance of KV-Dict on MMLU-Pro. The figure illustrates the relationship between KV cache size and the performance of KV-Dict on Llama models on MMLUPro Engineering/Law. For KV-Dict, we use $N\,=\,4096$ as the dictionary size and $n_{b}~=~128$ as the buffer size. KV-Dict often outperforms both eviction-based methods (SnapKV, PyramidKV) and quantization-based methods (per-token quantization, KIVI, ZipCache). For Law, our method slightly underperforms around $25\%$ , but in lower memory regimes, our method still outperforms any other baseline. for the 1B and 3B models. In the extremely low-memory regime below $20\%$ , where quantization methods such as KIVI and ZipCache cannot achieve feasible cache sizes, KV-Dict achieves superior performance. Furthermore, while eviction-based methods (SnapKV, PyramidKV) can operate in these extremely low-memory settings, their performance lags significantly behind due to their incompatibility with GQA, making KV-Dict the effective choice for stringent memory constraints. MMLU-Pro Results. Figure 5 illustrates the trade-offs between memory usage and performance for KV-Dict on the MMLU-Pro Engineering and Law subjects using the Llama-3.1-8B-Instruct model. KV-Dict outperforms eviction-based methods like SnapKV and PyramidKV across all memory settings, though its performance is comparable to quantization-based methods such as KIVI and ZipCache. In a low memory regime below $20\%$ cache, however, our method still outperforms any other baseline. This highlights that KV-Dict supports a wide range of compression ratios quite effectively and that our dictionary is generalizable across input distribution.  
+
+3.2 ABLATION STUDY  
+
+Error thresholding in sparse approximation. KV-Dict also supports a quality-controlled method for memory saving by allowing early termination of the sparse approximation process when a predefined error threshold is met. This approach conserves memory that would otherwise be used for marginal improvements in approximation quality.1.  
+
+Performance without buffer.2. The comparison shows that removing the buffer results in a more pronounced decline in performance, especially at lower KV sizes.  
+
+Balancing memory between buffer and sparse representation. Additionally, as shown in Table 4, we examine how balancing memory allocation between the buffer and the sparse representation affects performance. By fixing the total KV cache size at $25\%$ of the original, we vary the memory distribution between the buffer and the sparse representation across three LongBench tasks: Qasper, MultiNews, and TREC. The results demonstrate that long-context understanding ability while using KV-Dict is not solely reliant on the buffer or the sparse representation. Rather, there exist optimal balance points where performance is maximized for each task.  
+
+Table 4: Balancing memory between buffer and sparse representation. This table shows the performance of KV-Dict with the Llama-3.1-8B-Instruct model on LongBench tasks (Qasper, MultiNews, TREC) while varying the memory allocation between the buffer and the sparse representation, with the total KV cache size fixed at $25\%$ of the original size.   
+
+![](images/f3b66804bb6dd116b754fb3d9ca128b6d56b6c8604052a5497dcc9ae6e85521c.jpg)  
+
+Adaptive dictionary learning. While our universal dictionaries demonstrate strong performance, we explore an adaptive learning method to better incorporate input-specific context. This adaptive approach improves performance by adding new dictionary atoms during generation when the predefined reconstruction error threshold is not met. These atoms, tailored to the input prompt, improve performance but cannot be shared across batches, requiring them to be included in the KV size calculation. While this approach boosts accuracy, it increases memory usage, limiting its ability to achieve low-memory regimes.3.  
+
+
+
+\section{3.3 LATENCY ANALYSIS  }
+
+
+In this section, we present latency measurements of the forward pass and OMP portion of KV-Dict during decoding stage in Table 5. We run simple generation tests on a 1000 token input to Llama3.1-8B-Instruct model and generate up to 250 tokens to measure and aggregate latency metrics. We compare both dictionary sizes $N=1024$ and 4096, which primarily affects OMP computation time. We set the sparsity level to $s=24$ , and process OMP in batches of $n_{a}=8$ .  
+
+Although we list the forward pass and OMP separately, the processes are implemented to run in parallel such that the one generation step takes the maximum of the two durations plus some overhead. However, with parallelization, there exists a time versus space complexity tradeoff, since running OMP also consumes GPU memory.  
+
+Table 5: Latency measurements. The following latencies measure the total time it takes for the respective computation to process when generating one new token. We use Llama-3.1-8B-Instruct and sum up the time each operation takes in total across all 32 layers. Latencies when dictionary sizes are 1024 and 4096 are measured. Detailed settings are described in Section 3.3.  
+
+![](images/642e10d4e755801a08e335964cf1561c23049eeef23f532cd4efdac6ab54aaff.jpg)  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Prior work on KV cache optimization has explored both training-stage and deployment-focused strategies to improve the efficiency of LLMs. On the deployment side, Kwon et al. (2023) introduce a Paged Attention mechanism and the popular vLLM framework, which adapt CPU-style page memory to map KV caches onto GPU memory using a mapping table, thereby minimizing memory fragmentation and leveraging custom CUDA kernels for efficient inference. While there is a significant and important line of research in this direction (Lin et al., 2024; Qin et al., 2024), this direction is orthogonal to our work and can often be used in tandem with quantization.  
+
+Current post-training KV cache compression methods can broadly be categorized into eviction, quantization, and merging. Zhang et al. (2024) introduced H2O, which uses attention scores to selectively retain tokens while preserving recent ones that are strongly correlated with current tokens. Multiple works discuss various heuristics and algorithms to find which tokens can be discarded, while some works find how to complement evictions methods (Ge et al., 2023; Li et al., 2024; Liu et al., 2024a; Devoto et al., 2024; Dong et al., 2024). For this line of work, there is a chance that evictions can work well together with KV-Dict, as Liu et al. (2024a) have successfully combined quantization and eviction.  
+
+Quantization methods have also played a crucial role in reducing KV cache size without compromising model performance. Although there is a flurry of work, we only mention those that are most relevant to our discussion and methodology. Hooper et al. (2024) identified outlier channels in key matrices and developed KVQuant, while Liu et al. (2024b) pursue a similar per-channel strategy in KIVI. Further extending these ideas, Yue et al. (2024) presented WKVQuant, which quantizes model weights as well as KV cache using two-dimensional quantization. Kang et al. (2024) follow similar per-channel key and per-token value quantization as KIVI, but with additional low-rank and sparse structures to manage quantization errors.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In conclusion, our proposed method, KV-Dict, offers a novel approach to compressing KV cache for transformers by leveraging low-dimensional structures and sparse dictionary learning. Through this method, we demonstrate that substantial redundancy exists among key states across various inputs, allowing us to compress the KV cache efficiently while maintaining near-lossless performance. Furthermore, KV-Dict enables compression rates that surpass traditional quantization techniques, offering fine-grained and wide control over memory usage. Importantly, our universal dictionary is both compact and scalable, making it applicable across tasks and user inputs without increasing memory demands. This approach provides strong memory savings, particularly for long-context tasks, by alleviating the memory bottlenecks associated with KV cache storage without dropping any previous tokens.  
+
+Future research directions based on our work include optimizing CSR tensors through customized quantizations and improving latency tradeoffs that occur due to the use of OMP during prefilling and decoding. It would also be interesting to apply “soft-eviction strategies” for sparse tensors in which sparsity level $s$ is determined or dropped later on based on the estimated importance of the token. A dynamic allocation of sparsity can further improve our compression method.  
+
+
+

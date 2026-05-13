@@ -1,0 +1,600 @@
+\title{KNIFE: Distilling Reasoning Knowledge From Free-Text Rationales}
+
+\begin{abstract}
+Language models (LMs) have yielded impressive results on many language reasoning tasks, but their unexpected errors raise doubts about their reasoning abilities.
+In light of this, there is growing interest in finetuning/prompting LMs with both task instances and their associated free-text rationales (FTRs), which explain the correct reasoning process for predicting the correct task output (\ie how to be ``right for the right reasons'').
+However, existing finetuning methods fail to improve LM performance, while prompting needs prohibitively large (\ie >50B) LMs to work well.
+We propose \method, which shows that reasoning knowledge can be effectively distilled from FTRs into a small (\ie <1B) LM and improve the LM's performance.
+First, \methodsp finetunes a teacher LM (given task input and FTR) to predict the task output, transferring reasoning knowledge from the FTRs to the teacher's hidden states.
+Second, \methodsp finetunes a student LM (given task input only) such that its hidden states are aligned with the teacher's.
+Thus, the student is endowed with reasoning knowledge but can be used for inference without direct FTR input.
+On two question-answering datasets, \methodsp outperforms various finetuning and prompting baselines in fully-supervised and low-resource settings.
+Also, we observe that FTR quality is crucial to \method's performance.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\renewcommand{\aaron}[1]{}
+\renewcommand{\xiang}[1]{}
+\renewcommand{\hanjie}[1]{}
+\renewcommand{\zhiyuan}[1]{}
+\label{sec:intro}
+
+Whereas conventional supervised learning only gives feedback on a language model's (LM's) task output correctness, \textit{explanation tuning} aims to teach LMs to be ``right for the right reasons'' \citep{ross2017right} by also providing them with explanations of the correct reasoning process behind a given correct output~\citep{narang2020wt5, hase2021can, joshi2022ertest}.
+In particular, there is growing interest in learning from \textit{free-text rationales} (FTRs), which use natural language to verbally explain the correct reasoning process for solving a given task instance~\citep{camburu2018snli, rajani2019explain, narang2020wt5, wei2022chain}.
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+    \centering
+    \centering
+    \includegraphics[width=0.5\columnwidth]{figures/ftr_knowledge_transfer.png}
+    \caption{\textbf{Reasoning Knowledge From FTRs.} A free-text rationale (FTR) explains the correct reasoning process for solving a given task instance. Meanwhile, a set of FTR-augmented task instances (\ie \textbf{I}nput, \textbf{O}utput, FT\textbf{R}) can collectively provide latent reasoning knowledge for solving the task in general. Nonetheless, it remains unclear how to effectively inject this knowledge into LMs to improve their generalization performance.}
+    \label{fig:ftr-knowledge-transfer}
+\end{wrapfigure}
+Among explanation tuning methods, the self-rationalization paradigm has been most successful in improving LM task performance~\citep{hase2021can,wei2022chain,lampinen2022can}.
+Here, the LM is prompted or finetuned to jointly generate the task output and FTR~\citep{liu2018towards, narang2020wt5, marasovic2021few, brahman2021learning, wei2022chain, zelikman2022star}.
+Although prompted self-rationalization can improve task performance in certain situations \citep{wei2022chain, lampinen2022can, zelikman2022star}, prompting typically requires prohibitively large-scale (\ie >50B) LMs to work well ~\citep{wei2022emergent}.
+Meanwhile, small-scale (\ie <1B) LMs are suitable for finetuning, but finetuned self-rationalization is mostly used in the context of explainability and fails to consistently improve task performance~\citep{hase2021can, zhang2023multi}.
+Since few AI researchers or practitioners have the computational resources to freely experiment with their own large-scale LMs \citep{zhao2023survey}, how can we use FTRs to improve the task performance of small-scale LMs?
+
+
+Since an individual FTR explains the reasoning process for solving a single task instance, it only provides \textit{instance-level} reasoning knowledge.
+Thus, given a set of task instances that sufficiently characterizes the task, it follows that a set of FTRs for these instances can collectively capture \textit{task-level} reasoning knowledge that generalizes to unseen task instances.
+With this in mind, our goal is to finetune a small-scale LM by extracting reasoning knowledge from a set of FTRs, then injecting this knowledge into the LM to guide its reasoning and improve its inference performance (Fig.~\ref{fig:ftr-knowledge-transfer}).
+We assume that all FTRs convey a correct reasoning process and are inaccessible to the LM during inference, since correct FTRs necessarily entail knowledge of the correct task output.
+
+
+
+We propose \textbf{KN}owledge D\textbf{I}stillation From \textbf{F}ree-Text Rational\textbf{E}s (\knifeemoji \textbf{\method}), which shows that reasoning knowledge can be effectively distilled from FTRs into a small LM and improve the LM's performance.
+Unlike prior works, \methodsp compresses FTR reasoning knowledge from its natural language form into a specific set of LM hidden states, making it easier to control how this knowledge is transferred.
+First, \methodsp finetunes a teacher LM to predict the task output, given both the task input and an FTR.
+This aggregates reasoning knowledge across all finetuning instances' FTRs, then transfers it to the teacher's hidden states.
+Second, \methodsp finetunes a student LM, given only the task input, so that its hidden states are aligned with the teacher's.
+By treating the teacher's hidden states as soft labels, \methodsp distills reasoning knowledge via such soft labels from the teacher to the student, which can then be used for inference without FTR input or FTR generation.
+
+
+
+
+Across two QA datasets (OpenBookQA, StrategyQA) and two small-scale LM architectures (T5-Base, T5-Large), we show that \methodsp outperforms various finetuning and prompting baselines on both fully-supervised and low-resource settings, using either human-annotated or model-generated FTRs (\textsection \ref{sec:exp:main}).
+Furthermore, we validate~\methodsp design choices via extensive ablation studies (\textsection \ref{sec:exp:abl}).
+Finally, we analyze~\method's failure modes on two additional datasets (ECQA, QuaRTz) and identify FTR quality as a critical factor in \method's performance (\textsection \ref{sec:exp:failure}).
+
+
+
+
+\section{Related Work}
+
+\label{sec:rw}
+\paragraph{Explanation Tuning}
+There are three main existing paradigms for FTR-based explanation tuning: \textit{self-rationalization}, \textit{input augmentation}, and \textit{pipeline rationalization} (Fig. \ref{fig:ftr-paradigms}).
+In self-rationalization, the LM is finetuned or prompted to generate both the task output and FTR~\citep{liu2018towards, narang2020wt5, brahman2021learning, marasovic2021few, li2022explanations, wei2022chain, zelikman2022star, lampinen2022can, majumder2022knowledge}.
+However, finetuning struggles to improve LM performance~\citep{hase2021can} and prior works on it focus on explainability or FTR generation capability.
+Prompting requires large and often prohibitively large LMs to work well.
+
+Besides self-rationalization, the other two paradigms struggle to improve task performance due to some intrinsic issues.
+Methods under \textit{input augmentation} paradigm use FTRs as additional inputs~\citep{rajani2019explain, hase2020leakage, kumar2020nile, wiegreffe2021measuring}.
+They need to resolve the input distribution shift issue, which occurs when incorporating FTRs into inputs during training but not during inference, and thus struggle to improve task performance.
+Some other works explored the \textit{pipeline rationalization} paradigm, where a finetuned rationalizing LM first generates the FTR and then a finetuned reasoning LM predicts the task output given the generated FTR~\citep{rajani2019explain, kumar2020nile, hase2020leakage, wiegreffe2021measuring}.
+However, the generated FTR could be poor, omitting critical information from the task input or introducing irrelevant and even incorrect information, which can hurt task performance~\citep{huang2022large, magister2022teaching, li2022explanations}.
+Besides, the generated FTR forms a non-differentiable path, which complicates end-to-end training.
+
+\paragraph{Knowledge Distillation}
+Knowledge distillation has been widely used to transfer knowledge from a larger teacher to a smaller student model~\citep[etc]{hinton2015distilling, sanh2019distilbert, jiao2020tinybert, mirzadeh2020improved}. 
+Instead of aiming for this typical goal, \method~distills the FTR knowledge through the hidden states of a teacher model to a student model, which has no direct access to FTRs. Similar to the line of work that incorporates knowledge distillation with privileged information \citep{lopez2015unifying, vapnik2015learning, fukuda2017efficient, wang2018kdgan}, where student models benefit from privilege information, the student model in \method~essentially gains additional knowledge from FTRs rather than relying on the larger teacher model capacity. \citet{snell2022learning} propose to internalize the in-context learning ability such that the performance gains can keep without context tokens. It does not directly distill the knowledge from FTRs and requires dedicated prompt designs. \citet{shridhar2022distilling, magister2022teaching, namgyu2022reasoingteacher} propose to distill reasoning abilities from larger language models to smaller models. They require large-scale language models with such abilities, while \method~can work well with small models.
+
+
+
+
+
+\section{Background}
+
+\label{sec:bg}
+\paragraph{Problem Definition}
+Given a task input $\mathbf{x}$ and a set of class labels $Y = \{\mathbf{y}_i\}$, the model's goal is to predict a score $\rho(\mathbf{x}, \mathbf{y}_i)$ for each $(\mathbf{x}, \mathbf{y}_i)$ pair, so that the predicted label $\hat{\mathbf{y}} = \argmax_{\mathbf{y}_i \in Y} \hspace{0.5mm} \rho(\mathbf{x}, \mathbf{y}_i)$ matches the gold (\ie correct) label $\mathbf{y}^* \in Y$.
+We consider both multi-choice ($Y$ varies across task instances) and closed-set ($Y$ is fixed for all task instances) text classification.
+
+\paragraph{Free-Text Rationales}
+A \textit{free-text rationale} (FTR) $\mathbf{r}$ for a pair $(\mathbf{x}, \mathbf{y}_i)$ is a natural language text that explains the reasoning process for predicting label $\mathbf{y}_i$ \citep{camburu2018snli, rajani2019explain}.
+FTRs could be intuitive to humans, reference things beyond the task input, and support high flexibility in content, style, and length \citep{wiegreffe2021measuring, chan2022frame}.
+Recent works have explored generating FTRs to explain LM behavior \citep{camburu2018snli, narang2020wt5, wei2022chain} and utilizing FTRs to improve LMs \citep{sun2022investigating, wang2022pinto, li2022explanations}.
+We assume each training instance $\mathbf{x}$ is accompanied by an annotated FTR $\mathbf{r}$ for $\mathbf{y}^*$, while impossible is access to FTRs for inference instances as FTR explains the reasoning process and thus indicates the gold label. In this setting, we aim to improve $\mathcal{F}$'s performance by these annotated FTRs.
+
+
+\section{\method}
+
+\label{sec:method}
+\begin{figure*}
+    \centering
+    \includegraphics[width=\textwidth]{figures/knife.png}
+    \caption{\textbf{KNIFE Framework.}
+    \methodsp distills reasoning knowledge from an FTR-augmented teacher LM (given task input and FTR) to a student LM (given task input) that is used for inference. The teacher has a \textit{bottleneck}, which masks out all FTR states during cross-attention. As a result, the teacher's decoder must use only its task input (hidden) states to compute its task output (hidden) states, thus routing FTR knowledge to the task input/output states. Finally, FTR knowledge is distilled to the student by training the student so its task input/output states to align with the teacher's.}
+    \label{fig:knife}
+\end{figure*}
+
+We propose~\method, an approach to extract reasoning knowledge from FTRs of training instances and inject it into an LM (Fig. \ref{fig:knife}) by knowledge distillation (KD).
+First, \methodsp finetunes a teacher LM to predict the task output, taking as input the concatenation of task input and the FTR.
+Then, \methodsp finetunes a student LM given only the task input, so that its task encoder/decoder hidden states are aligned with the teacher's.
+As the teacher and student have different structures of encoder hidden states, the teacher LM has a \textit{bottleneck} design, where the encoder hidden states upon the FTR tokens are masked out in the cross-attention.
+We are going to elaborate on the method design.
+
+
+\subsection{LM Designs}
+\label{sec:method:lm}
+
+\methodsp consists of a student LM and a teacher LM.
+They share the same encoder-decoder Transformer architecture and the basic design, with differences in the input and cross-attention mechanism.
+We are going to first present the basic design, followed by the student and teacher LM designs respectively.
+
+\subsubsection{Basic Design}
+
+We use the encoder-decoder Transformer \citep{vaswani2017attention} architecture for both teacher and student LMs \citep{raffel2020exploring, narang2020wt5}.
+Building upon \textsection \ref{sec:bg}, we feed the input to the LM's encoder and separately feed each label $\mathbf{y}_i$ to the decoder. 
+For each label $\mathbf{y}_i$, we get the conditional probabilities of all its tokens and then take the average log probability as its score $\rho(\mathbf{x}, \mathbf{y}_i)$.
+This practice is also adopted by \citet{shwartz2020unsupervised} and \citet{wang2022pinto}.
+
+Formally speaking, each label is denoted as $n_{y_i}$-token sequence $\mathbf{y}_i = [y_i^{(1)}, y_i^{(2)}, \dots , y_i^{(n_{y_i})}] \in Y$. By separately teacher-forcing each $\mathbf{y}_i$ to the decoder, we get a conditional probability $P(y_i^{(j)} \hspace{0.5mm} | \hspace{0.5mm} y_i^{(1)}, \dots , y_i^{(j-1)}, \mathbf{x})$ for each token $y_i^{(j)}$ in $\mathbf{y}_i$.
+We compute $\rho_i = \rho(\mathbf{x}, \mathbf{y}_i)$ as the score for $\mathbf{y}_i$, by aggregating these token probabilities as:
+\begin{equation*}
+   \rho_i=\frac{1}{n_{y_i}}\sum_{j=1}^{n_{y_i}} \log P(y_i^{(j)} \hspace{0.5mm} | \hspace{0.5mm} y_i^{(1)}, \dots , y_i^{(j-1)}, \mathbf{x}).
+\end{equation*}
+The predicted probability is calculated by the softmax function, \ie $P(\mathbf{y}_i \hspace{0.5mm} | \hspace{0.5mm} \mathbf{x})=e^{\rho_i}/\sum_{j=1}^{|Y|} \hspace{0.5mm} e^{\rho_j}$.
+
+\subsubsection{Student LM Design}
+The input to the student is always the raw task input, and the student is used for inference.
+Instead of training the student LM by the cross-entropy loss, we train it to align its encoder/decoder hidden states with those of the teacher LM (\textsection \ref{sec:method:kd}), which is trained before the training of the student.
+We only consider the hidden states at the top layer in this work.
+As the token prediction logits are calculated by the LM head taking decoder hidden states as input, we adopt the teacher's LM head for the student.
+
+\subsubsection{Teacher LM Design}
+
+\paragraph{Main Design}
+We aim to first obtain a teacher LM that does reasoning following the FTRs so that its reasoning is guided by reasoning knowledge.
+To achieve this, we feed the FTRs to the teacher LM. When training the teacher on training instances by task loss $\mathcal{L}_{\text{task}}=-\log P(\mathbf{y}^* \hspace{0.5mm} | \hspace{0.5mm} \mathbf{x})$, we take as its input the concatenation of the task input and the corresponding FTR.
+Intuitively, feeding the FTR along with the task input to the teacher LM forces the teacher to reason in a way following the FTR.
+
+Even though the teacher LM's reasoning on training instances is guided by FTRs and thus the reasoning knowledge, we are unable to use it for inference as unavailable are the FTRs of inference instances.
+However, considering the calculation of its hidden states on a training instance is guided by the corresponding FTR, the hidden states store the FTR knowledge.
+Following the intuition that a set of FTRs collectively conveys reasoning knowledge, the set of hidden states also collectively conveys reasoning knowledge.
+Inspired by the works on knowledge distillation~\citep[etc]{hinton2015distilling, sanh2019distilbert, jiao2020tinybert}, the hidden states of the teacher are also soft labels, on which the student could be trained.
+By aligning the student's hidden states on training instances with those of the teacher, the knowledge across all FTRs or hidden states is synthesized into the reasoning knowledge conveyed collectively by them, which is finally distilled into the student LM.
+
+\paragraph{FTR Bottleneck}
+In the Transformer architecture, there is a one-to-one correspondence between each token fed to the encoder/decoder and each encoder/decoder hidden state.
+Each token corresponds to the state upon it.
+For a specific training instance, the token sequence fed to the student's decoder is identical to that fed to the teacher's decoder.
+Thus, the student and the teacher share the same structure of the decoder hidden states.
+We train the student to align each decoder hidden state with the teacher's one upon the same token.
+
+However, the token sequence fed to the student' encoder (the raw task input) is a proper prefix of that fed to the teacher's encoder (the task input concatenated with the FTR).
+We call the hidden states upon the task input tokens \textit{task input states} and call those upon the FTR tokens \textit{FTR states}.
+The student and the teacher share the same structure of the task input states but the student doesn't have FTR states as the teacher does.
+If we just directly ignored the teacher's FTR states in KD, the information stored in the FTR states would be lost.
+If we fed only raw task input to the teacher in KD, the teacher itself would not work due to the input distribution shift because the FTR is always appended to the input during the training of the teacher.
+To address this, the teacher LM has a \textit{bottleneck} design in the cross-attention connecting its decoder to the encoder.
+Here, the teacher's FTR states are masked out in cross-attention so that the decoder only has access to the task input states.
+In this way, the training of the teacher funnels the FTR knowledge stored in the FTR token sequence to the task input states by self-attention in the encoder.
+
+As cross-attention is the only path introducing information from the encoder to the decoder, the teacher's FTR states are completely useless now owing to the bottleneck design.
+Therefore, we can ignore the teacher's FTR states in knowledge distillation as if there had only existed task input states.
+
+\subsection{Knowledge Distillation}
+\label{sec:method:kd}
+
+As both encoder hidden states (task input states) and decoder hidden states store the reasoning knowledge, KD is done by training the student LM so that its encoder and/or decoder hidden states are aligned with the teacher's.
+We now formally define the learning objectives.
+Supposing $\mathbf{x}$ is $n_{x}$-token sequence, the teacher's and student's task input states are denoted as $[\mathbf{e}_{\text{T}x}^{(1)}, \mathbf{e}_{\text{T}x}^{(2)}, \dots, \mathbf{e}_{\text{T}x}^{(n_{x})}]$ and $[\mathbf{e}_{\text{S}x}^{(1)}, \mathbf{e}_{\text{S}x}^{(2)}, \dots, \mathbf{e}_{\text{S}x}^{(n_{x})}]$ respectively.
+Let dist denote the mean squared error (MSE), a distance function.
+Let $\mathcal{L}_{\text{KD-In}}$ denote \method's encoder hidden states based KD loss, which pushes the student's task input states ($\mathbf{e}_{\text{S}x}^{(j)}$) to be closer to the teacher's ($\mathbf{e}_{\text{T}x}^{(j)}$):
+\begin{equation*}
+    \mathcal{L}_{\text{KD-In}} = \frac{1}{n_x} \sum_{j=1}^{n_x} \text{dist}(\mathbf{e}_{\text{S}x}^{(j)}, \mathbf{e}_{\text{T}x}^{(j)})
+\end{equation*}
+
+\noindent
+Similarly, for each label $\mathbf{y}_i$ (fed to the decoder separately), the teacher's and student's decoder hidden states are denoted as $[\mathbf{d}_{\text{T}y_i}^{(1)}, \mathbf{d}_{\text{T}y_i}^{(2)}, \dots, \mathbf{d}_{\text{T}y_i}^{(n_{y_i})}]$ and $[\mathbf{d}_{\text{S}y_i}^{(1)}, \mathbf{d}_{\text{S}y_i}^{(2)}, \dots, \mathbf{d}_{\text{S}y_i}^{(n_{y_i})}]$ respectively.
+Let $\mathcal{L}_{\text{KD-Out}}$ denote \method's decoder hidden states (task output states) based KD loss, which pushes the student's decoder hidden states ($\mathbf{d}_{\text{S}y_i}^{(j)}$) to be closer to the teacher's ($\mathbf{d}_{\text{T}y_i}^{(j)}$):
+\begin{equation*}
+    \mathcal{L}_{\text{KD-Out}} = \frac{1}{\sum_{y_i \in Y}n_{y_i}} \sum_{y_i \in Y} \sum_{j=1}^{n_{y_i}} \text{dist}(\mathbf{d}_{\text{S}y_i}^{(j)}, \mathbf{d}_{\text{T}y_i}^{(j)})
+\end{equation*}
+
+\noindent
+Finally, let $\mathcal{L}$ denote the total loss defined as $\mathcal{L} = \lambda_{\text{KD-In}} \mathcal{L}_{\text{KD-In}} + \lambda_{\text{KD-Out}} \mathcal{L}_{\text{KD-Out}}$, with loss weights $\lambda_{\text{KD-In}}\in\{0,1\}$ and $\lambda_{\text{KD-Out}}\in\{0,1\}$.
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+This section presents experiments.\footnote{We report the mean and standard deviation (std) accuracy over three random seeds for all results, using the format \texttt{mean} $\pm$ \texttt{std}.
+For each table, we use horizontal lines to partition the table into various sub-tables.
+Each sub-table contains results for methods that have comparable settings (\eg architecture).
+That is, \texttt{Result1} should only be compared to \texttt{Result2} if there is no horizontal line separating them in the table.
+In each sub-table, we highlight the best-performing method in \colorbox{lred}{red} and the second-best performing method in \colorbox{lblue}{blue}.}
+First, in both fully-supervised and low-resource settings, \methodsp outperforms various baselines, using either human-annotated FTRs or model-generated FTRs (\textsection \ref{sec:exp:main}).
+Second, we validate our \methodsp design choices via extensive ablation studies (\textsection \ref{sec:exp:abl}).
+Third, we analyze \method's failure modes and identify FTR quality as critical to \methodsp performance (\textsection \ref{sec:exp:failure}).
+\subsection{Datasets}
+We consider both multi-choice and closed-set text classification.
+We focus on two question-answering (QA) datasets: OpenBookQA (OBQA) and StrategyQA.\footnote{Since StrategyQA does not provide public test set labels, we use the data split from~\citet{wang2022pinto}.}
+OBQA~\citep{mihaylov2018can} is a 4-choice QA dataset that simulates science exams.
+StrategyQA~\citep{geva2021did} is a boolean QA dataset that requires multi-hop reasoning.
+\subsection{\methodsp Details}
+\paragraph{\methodsp Variants}
+We consider three~\methodsp variants, each with a different combination of weights $\lambda_{\text{KD-In}}$ and $\lambda_{\text{KD-Out}}$ (\textsection \ref{sec:method:kd}).
+\textbf{\methodsp (In)} trains the student LM with $\mathcal{L}_{\text{KD-In}}=1$ and $\mathcal{L}_{\text{KD-Out}}=0$.
+\textbf{\methodsp (Out)} trains the student LM with $\mathcal{L}_{\text{KD-Out}}=1$ and $\mathcal{L}_{\text{KD-In}}=0$.
+\textbf{\methodsp (In+Out)} trains the student LM with $\mathcal{L}_{\text{KD-In}}=\mathcal{L}_{\text{KD-Out}}=1$.
+By default, we use~\methodsp (In+Out).
+\paragraph{Implementation Details}
+Following prior works \citep{narang2020wt5, sun2022investigating, wiegreffe2021measuring}, we use T5-Base and T5-Large \citep{raffel2020exploring} as the backbone model for~\methodsp and all baselines.
+For KD-based methods, \textbf{T5-Base$\rightarrow$T5-Base} means teacher and student use T5-Base, \textbf{T5-Large$\rightarrow$T5-Large} means teacher and student use T5-Large, and \textbf{T5-Large$\rightarrow$T5-Base} means T5-Large teacher and T5-Base student.\footnote{For T5-Large$\rightarrow$T5-Base, the teacher and student have different representation spaces of hidden states.
+Thus, in KD we jointly train two linear projection layers to transform the student LM's encoder and decoder hidden states to be in the same representation space as the teacher LM's.}
+For non-KD methods used for comparison with the three ones, they use T5-Base, T5-Large, and T5-Base, respectively.
+In our implementation of~\method, if the student and teacher have the backbone model (\ie both T5-Base or both T5-Large), the student's parameters are initialized as the teacher's. 
+\textsection \ref{sec:app:hparams} lists the hyperparameters.
+
+\subsection{Baselines}
+\label{sec:exp:baseline}
+We consider a wide range of baselines, spanning various existing paradigms.
+\textbf{Standard Finetuning} does not involve FTRs or KD.
+Without any use of FTRs, \textbf{FT (I$\rightarrow$O)} finetunes a T5 on the task dataset by the cross-entropy loss.
+
+\textbf{Finetuned Self-Rationalization} inserts an FTR to the LM's target output during training.
+\textbf{FT (I$\rightarrow$OR)} finetunes a T5 to generate the task output followed by the FTR.
+\textbf{FT (I$\rightarrow$RO)} finetunes a T5 to generate the FTR followed by the task output.
+They both take as input the raw task input.\footnote{As labels other than the gold label don't have FTRs, FT (I$\rightarrow$OR) and FT (I$\rightarrow$RO) cannot use the basic design in \textsection \ref{sec:method:lm}. Instead, we train the LM by teacher-forcing the target output to the decoder. During inference, we use greedy decoding to generate the prediction.}
+
+\textbf{Input Augmentation} appends an FTR to the LM's input during training.
+\textbf{FT (IR$\rightarrow$O)} finetunes a T5 to predict the output taking as input the task input concatenated with the corresponding FTR.
+This is equivalent to training~\method's teacher LM without the bottleneck design.
+As the inference instances do not have FTRs, the input during inference is just the raw task input.
+The global patterns that FTR is appended to the training input are absent during inference, which causes the issue of input distribution shift.
+\textbf{FT Dropout (IR$\rightarrow$O)} randomly drops out the appended FTR during training, in order to mitigate input distribution shift by also training the model to deal with the raw task input.
+
+\textbf{Prompted Self-Rationalization} uses chain-of-thought (CoT) prompting \citep{wei2022chain}. \textbf{CoT (I$\rightarrow$RO)} prompts GPT-NeoX and GPT-3 (text-davinci-003) to generate the FTR followed by the task output by CoT prompting.\footnote{All CoT (I$\rightarrow$RO) results were obtained from \citet{wang2022pinto}, except GPT-3 on OBQA, which was obtained from \citet{huang2022large}.}
+
+\textbf{Pipeline Rationalization} finetunes two LMs as a pipeline.
+For \textbf{FT (I$\rightarrow$R$\rightarrow$O)}, the first T5 is finetuned to generate the FTR given the task input, while the second T5 is finetuned to generate the task output given the first T5's generated FTR.\footnote{Since this method is known to not perform well~\citep{wiegreffe2021measuring, wang2022pinto}, we only consider FT (I$\rightarrow$R$\rightarrow$O) in a limited set of settings. In these settings, we present the results reported in~\citet{wang2022pinto}. Note that only the mean performance is available.}
+
+\textbf{FT Teacher Init.} finetunes a T5 as FT (I$\rightarrow$O) does, with initializing the LM with the \methodsp teacher's parameters.
+Intuitively, the teacher's parameters store reasoning knowledge, so it is natural to view parameter initialization as a way of transferring such knowledge.
+
+
+
+
+
+
+\begin{wraptable}{R}{0.6\textwidth}
+\centering
+\scalebox{0.63}{
+\begin{tabular}{cccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Architecture}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Accuracy} ($\uparrow$)} \\
+    \cmidrule(lr){3-4}
+    & & OBQA & StrategyQA \\
+    
+    \midrule
+    
+    \multirow{7}{*}{T5-Base$\rightarrow$T5-Base} & FT (I$\rightarrow$O) & 57.93~($\pm$1.15) & 59.05~($\pm$0.23) \\ % & 68.20~($\pm$0.52) \\
+    
+    & FT (I$\rightarrow$OR) & 53.93~($\pm$1.33) & 51.84~($\pm$1.45) \\ %& 57.19~($\pm$0.58) \\
+    
+    & FT (I$\rightarrow$RO) & 55.53~($\pm$0.46) & \cellcolor{lblue} 58.65~($\pm$1.53) \\ %& 29.38~($\pm$1.85) \\
+
+    & FT (I$\rightarrow$R$\rightarrow$O) & 56.65 & 57.11 \\ %& - \\
+
+    & FT (IR$\rightarrow$O) & 53.73~($\pm$2.31) & 49.97~($\pm$2.92) \\ %& 66.41~($\pm$0.90) \\
+
+    & FT Dropout (IR$\rightarrow$O) & 58.27~($\pm$1.33) & 55.85~($\pm$2.09) \\ %& 68.75~($\pm$0.34) \\
+
+    & FT Teacher Init. & \cellcolor{lblue} 58.33~($\pm$0.90) & 57.25~($\pm$2.22) \\ %& 68.20~($\pm$0.52) \\
+    
+    
+    
+    & \methodsp (In+Out) & \cellcolor{lred} 61.53~($\pm$0.76) & \cellcolor{lred} 60.45~($\pm$0.31) \\ %& 68.41~($\pm$0.99) \\
+    
+
+    \midrule
+    
+    \multirow{6}{*}{T5-Large$\rightarrow$T5-Large} & FT (I$\rightarrow$O) & 65.60~($\pm$0.40) & 57.58~($\pm$0.70) \\ %& 74.11~($\pm$1.93) \\
+    
+    & FT (I$\rightarrow$OR) & 61.93~($\pm$1.97) & 57.58~($\pm$0.12) \\ %& 65.65~($\pm$1.24) \\
+    
+    & FT (I$\rightarrow$RO) & 61.87~($\pm$2.12) & \cellcolor{lblue} 63.66~($\pm$1.14) \\ %& 35.80~($\pm$1.60) \\
+
+    & FT (IR$\rightarrow$O) & 61.27~($\pm$2.16) & 53.24~($\pm$2.54) \\ %& 70.49~($\pm$0.77) \\
+
+    & FT Dropout (IR$\rightarrow$O) & \cellcolor{lblue} 65.73~($\pm$1.36) & 59.25~($\pm$4.59) \\ %& 74.74~($\pm$0.67) \\
+    
+
+    & FT Teacher Init. & 65.67~($\pm$2.25) & 61.72~($\pm$2.36) \\ %& 74.83~($\pm$1.16) \\
+    
+    
+    
+    & \methodsp (In+Out) & \cellcolor{lred} 68.73~($\pm$1.36) & \cellcolor{lred} 63.79~($\pm$0.64) \\ %& 73.89~($\pm$1.60) \\
+    
+
+    \midrule
+    
+    
+
+    
+    
+
+    \multirow{2}{*}{T5-Large$\rightarrow$T5-Base} & Best T5-Base$\rightarrow$T5-Base & \cellcolor{lblue} 58.33~($\pm$0.90) & \cellcolor{lblue} \cellcolor{lblue} 58.65~($\pm$1.53) \\ %& 68.75~($\pm$0.34) \\
+    
+    
+    
+    & \methodsp (In+Out) & \cellcolor{lred} 60.93~($\pm$0.12) & \cellcolor{lred} 61.12~($\pm$2.03) \\ %& 66.75~($\pm$0.19) \\
+    
+
+    \midrule
+
+    GPT-NeoX & CoT (I$\rightarrow$RO) & 33.80 & 55.31 \\
+    \midrule
+    
+    GPT-3 (text-davinci-003) & CoT (I$\rightarrow$RO) & 86.40 & 66.53 \\
+    
+    \bottomrule 
+\end{tabular}
+}
+\caption{\small \textbf{\methodsp Main Results}
+}
+\label{tab:exp:main:gold}
+\end{wraptable}
+
+
+
+\subsection{Main Results}
+\label{sec:exp:main}
+
+Table \ref{tab:exp:main:gold} presents our main results.
+Here, LMs are finetuned on the entire training set.
+Methods requiring FTRs use the human-annotated FTRs (called gold FTRs in the following paragraphs) provided by the public datasets.
+We observe that \methodsp (In+Out) consistently outperforms all baselines, suggesting \methodsp effectively extracts reasoning knowledge from FTRs of training instances and utilizes such knowledge for performance improvement.
+Besides, \methodsp is the only FTR-requiring method that consistently outperforms FT (I$\rightarrow$O), which shows the difficulty of improving small models' task performance by FTRs.
+
+We observe that FT (I$\rightarrow$OR) and FT (I$\rightarrow$RO) often bring performance drop compared to FT (I$\rightarrow$O), which is consistent with observations from prior works~\citep{hase2021can, zhang2023multi}.
+Our explanation is that task and FTR generation objectives could conflict with each other, meaning that jointly optimizing them may hurt task performance.
+Besides, the generated FTRs could contain hallucinated information misleading the answer prediction~\citep{zhang2023multi}.
+
+FT (IR$\rightarrow$O) is significantly worse than FT (I$\rightarrow$O), which is expected due to the input distribution shift issue (\textsection \ref{sec:exp:baseline}).
+FT Dropout (IR$\rightarrow$O) mitigates the issue to some extent but still fails to bring consistent improvement.
+The results also support the argument that we cannot directly use \method's teacher LM during inference (\textsection \ref{sec:method:lm}), which is basically FT (IR$\rightarrow$O) with bottleneck design.
+
+FT (I$\rightarrow$R$\rightarrow$O) is also worse than FT (I$\rightarrow$O).
+It is because the generated FTR could be poor, omitting critical information from the task input or introducing irrelevant and even incorrect information, which can hurt task performance~\citep{huang2022large, magister2022teaching, li2022explanations}.
+
+FT Teacher Init. outperforms FT (I$\rightarrow$O) in most cases, but its improvement is much smaller than that of \methodsp (In+Out).
+Thus, parameter initialization is a potential way to transfer reasoning knowledge from the teacher to the student, but it is much less effective than knowledge distillation.
+
+Also, we report CoT (I$\rightarrow$RO) results for GPT-NeoX (20B) \citep{black2022gpt} and GPT-3 (text-davinci-003, 175B) \citep{brown2020language}.
+Since GPT-NeoX and GPT-3 are much larger than T5-Base (220M) and T5-Large (770M), it is unfair to expect other methods to perform as well as CoT (I$\rightarrow$RO).
+Even so, we find that \methodsp (In+Out) greatly outperforms GPT-NeoX on all settings, while \methodsp (In+Out) with T5-Large achieves similar performance to GPT-3 on StrategyQA.
+
+In Table~\ref{tab:exp:main:gpt}, we repeat these experiments for GPT-NeoX generated FTRs~\citep{wang2022pinto} and find that~\methodsp (In+Out) still consistently outperforms all baselines.
+It shows~\method's robustness to different sources of FTRs.
+Interestingly,~\methodsp with GPT-NeoX FTRs still considerably outperforms CoT (I$\rightarrow$RO) with GPT-NeoX, despite~\methodsp using much smaller LMs.
+
+In Table~\ref{tab:exp:low}, we consider a low-resource setting where available is only 10\% of the training data, using T5-Base$\rightarrow$T5-Base on OBQA.
+We find~\methodsp beats all baselines, showing that~\methodsp effectively extracts and injects reasoning knowledge also in the low-resource setting.
+
+
+\begin{wraptable}{R}{0.6\textwidth}
+\centering
+\scalebox{0.6}{
+\begin{tabular}{ccccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Architecture}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Accuracy} ($\uparrow$)} \\
+    \cmidrule(lr){3-4}
+    & & OBQA & StrategyQA \\
+    
+    \midrule
+    
+    \multirow{6}{*}{T5-Base$\rightarrow$T5-Base} & \methodsp (In) + Gold & 60.00~($\pm$0.40) & \cellcolor{lred} 61.39~($\pm$1.90) \\ %  & \textbf{68.45}~($\pm$0.83) \\
+    
+    & \methodsp (Out) + Gold & \cellcolor{lred} 62.27~($\pm$1.01) & 59.05~($\pm$1.22) \\ %  & \textbf{68.45}~($\pm$0.52) \\
+    
+    & \methodsp (In+Out) + Gold & \cellcolor{lblue} 61.53~($\pm$0.76) & 
+    \cellcolor{lblue} 60.45~($\pm$0.31) \\ %  & 68.41~($\pm$0.99) \\
+
+    \cmidrule{2-4}
+
+    & \methodsp (In) + GPT-NeoX & 61.07~($\pm$0.12) & \cellcolor{lred} 61.92~($\pm$1.74) \\
+    
+    & \methodsp (Out) + GPT-NeoX & \cellcolor{lred} 61.60~($\pm$0.53) & \cellcolor{lblue} 60.72~($\pm$0.20) \\
+    
+    & \methodsp (In+Out) + GPT-NeoX & \cellcolor{lblue} 61.53~($\pm$0.76) & \cellcolor{lred} 61.92~($\pm$1.04) \\
+
+    \midrule
+    
+    \multirow{6}{*}{T5-Large$\rightarrow$T5-Large} & \methodsp (In) + Gold & 66.20~($\pm$0.53) & 62.66~($\pm$3.38) \\ %  & 72.41~($\pm$0.39) \\
+    
+    & \methodsp (Out) + Gold & \cellcolor{lblue} 68.07~($\pm$1.50) & \cellcolor{lred} 64.40~($\pm$1.22) \\ %  & \textbf{74.70}~($\pm$1.81) \\
+    
+    & \methodsp (In+Out) + Gold & \cellcolor{lred} 68.73~($\pm$1.36) & \cellcolor{lblue} 63.79~($\pm$0.64) \\ %  & 73.89~($\pm$1.60) \\
+
+    \cmidrule{2-4}
+
+    & \methodsp (In) + GPT-NeoX & 67.20~($\pm$0.40) & \cellcolor{lblue} 62.32~($\pm$1.84) \\
+    
+    & \methodsp (Out) + GPT-NeoX & \cellcolor{lblue} 68.53~($\pm$1.89) & 62.26~($\pm$0.64) \\
+    
+    & \methodsp (In+Out) + GPT-NeoX & \cellcolor{lred} 68.73~($\pm$1.55) & \cellcolor{lred} 63.99~($\pm$0.81) \\
+
+    \midrule
+
+    \multirow{6}{*}{T5-Large$\rightarrow$T5-Base} & \methodsp (In) + Gold & 31.13~($\pm$2.87) & \cellcolor{lblue} 53.77~($\pm$0.46) \\ %  & 65.43~($\pm$1.22) \\
+    
+    & \methodsp (Out) + Gold & \cellcolor{lblue} 55.60~($\pm$2.42) & \cellcolor{lred} 61.12~($\pm$0.53) \\ %  & 65.43~($\pm$1.22) \\
+    
+    & \methodsp (In+Out) + Gold & \cellcolor{lred} 60.93~($\pm$0.12) & \cellcolor{lred} 61.12~($\pm$2.03) \\ %  & \textbf{66.75}~($\pm$0.19) \\
+
+    \cmidrule{2-4}
+
+    & \methodsp (In) + GPT-NeoX & 30.07~($\pm$2.97) & 53.91~($\pm$0.69) \\
+    
+    & \methodsp (Out) + GPT-NeoX & \cellcolor{lblue} 55.60~($\pm$2.03) & \cellcolor{lblue} 60.59~($\pm$0.61) \\
+    
+    & \methodsp (In+Out) + GPT-NeoX & \cellcolor{lred} 60.47~($\pm$0.81) & \cellcolor{lred} 62.39~($\pm$0.42) \\
+    
+    \bottomrule 
+\end{tabular}
+}
+\caption{\small \textbf{\methodsp Variants}
+}
+\label{tab:exp:abl:knife-variants}
+\end{wraptable}
+
+
+\subsection{Ablation Studies}
+\label{sec:exp:abl}
+
+To justify design choices of~\methodsp and understand why it works, we present ablation studies, analyzing the impacts of KD objective, FTR usage, FTR perturbation, teacher bottleneck, and student task loss.
+
+\paragraph{KD Objectives}
+Table \ref{tab:exp:abl:knife-variants} compares the performance of~\methodsp (In),~\methodsp (Out), and~\methodsp (In+Out).
+For both gold (human-annotated) and GPT-NeoX (model-generated) FTRs, we find that~\methodsp (In+Out) generally achieves the highest performance with a few exceptions.
+This suggests useful FTR knowledge can be distilled via both encode and decoder hidden states, so it is recommended to use both by default.
+Furthermore,~\methodsp (In) and~\methodsp (Out) are also able to outperform all baselines in almost all cases.
+
+\methodsp (In) performs much worse for T5-Large$\rightarrow$T5-Base than the two others and many baselines.
+Since~\methodsp (In) only performs KD via the encoder hidden states, the student's decoder is not trained.
+Here, the student cannot be initialized with the teacher's parameters as their backbone models are different, leaving the student's decoder with T5-Base's pretrained parameters.
+Thus, in such cases,~\methodsp (In) is problematic and necessary is KD via the decoder hidden states.
+\begin{figure*}[h!]
+	\begin{subfigure}[b]{0.25\linewidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/ftr_kd_ablation.png}
+		\caption{FTR Usage}
+		\label{fig:exp:abl:ftr-usage}
+	\end{subfigure}\hfill
+	\begin{subfigure}[b]{0.25\linewidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/ftr_type_ablation.png}
+		\caption{FTR Perturbation}
+		\label{fig:exp:abl:ftr-quality}
+	\end{subfigure}\hfill
+	\begin{subfigure}[b]{0.25\linewidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/ftr_bneck_ablation.png}
+		\caption{Teacher Bottleneck}
+		\label{fig:exp:abl:teacher-bneck}
+	\end{subfigure}\hfill
+        \begin{subfigure}[b]{0.25\linewidth}
+		\centering
+		\includegraphics[width=\textwidth]{figures/ftr_task_loss_ablation.png}
+		\caption{Student Task Loss}
+		\label{fig:exp:abl:student-taskloss}
+	\end{subfigure}
+        
+	\caption{\small \textbf{\methodsp Ablation Studies}}
+	\label{fig:exp:abl}
+\end{figure*}
+
+\paragraph{FTR Usage}
+KD has been widely used to transfer knowledge from a larger teacher to a smaller student~\citep[etc]{hinton2015distilling, sanh2019distilbert}, so the larger teacher's capacity could be one source of performance gain for T5-Large$\rightarrow$T5-Base.
+To verify FTR usage's importance for the performance gain, we compare~\methodsp to non-FTR KD methods, where the teacher is FT (I$\rightarrow$O).
+\textbf{Non-FTR KD (Logit)} trains the student to align its logit distribution with the teacher's.
+\textbf{Non-FTR KD (In+Out)} trains the student to align its encoder and decoder hidden states with the teacher's.
+In Fig. \ref{fig:exp:abl:ftr-usage}, both~\methodsp (In+Out) + Gold and~\methodsp (In+Out) + GPT-NeoX outperform the non-FTR KD baselines, showing that~\methodsp actually benefits from FTRs and thus the reasoning knowledge.
+Plus, Non-FTR KD (Logit) performs much worse than Non-FTR KD (In+Out), which validates~\method's use of representation-based KD.
+\paragraph{FTR Perturbation}
+To prove the performance gain of~\methodsp is not from any unexpected noise, \eg more computation of the teacher LM due to longer input, we perturb the FTRs and observe how it influences the performance of ~\method.
+\textbf{Replace} replaces each FTR token with a random token from the token vocabulary.
+\textbf{Shuffle} shuffles FTRs across all training instances in the dataset.
+In Fig. \ref{fig:exp:abl:ftr-quality}, \methodsp (In+Out)'s performance with Replace and Shuffle is much lower than with Gold and GPT-NeoX, which shows the performance gain actually comes from the FTR knowledge.
+
+
+\paragraph{Teacher Bottleneck}
+We empirically validate the bottleneck's necessity for KD via encoder hidden states by training a teacher without the bottleneck.
+In Fig.~\ref{fig:exp:abl:teacher-bneck} and Table~\ref{tab:exp:abl:ftr-bneck}, we show that removing bottleneck brings significant performance drop to \methodsp (In+Out) and \methodsp (In), but it is not as critical for \methodsp (Out).
+It is expected as the bottleneck of~\method's teacher is designed to address the issue that the student and teacher have different structures of encoder hidden states, and KD via only decoder hidden states doesn't meet the issue.
+\paragraph{Student Task Loss}
+By default,~\methodsp trains the student with only KD losses.
+We justify it by comparing it to~\methodsp variants where the task loss is also involved in the total loss.
+Specifically,~\methodsp with task loss trains the student by the loss $\mathcal{L} = \lambda_{\text{KD-In}} \mathcal{L}_{\text{KD-In}} + \lambda_{\text{KD-Out}} \mathcal{L}_{\text{KD-Out}} + \mathcal{L}_{\text{task}}$.
+In Fig.~\ref{fig:exp:abl:student-taskloss} and Table~\ref{tab:exp:abl:task-loss}, we see omitting the task loss consistently yields higher performance.
+Intuitively, KD loss is guided by the supervision signal of reasoning knowledge, while task loss is guided by the supervision signal of task labels, which could be sub-optimal for learning reasoning knowledge.
+Thus, the KD and task losses could conflict during optimization, which hurts the performance.
+
+
+
+\subsection{Failure Analysis}
+\label{sec:exp:failure}
+
+Although \methodsp performs well on OBQA and StrategyQA, it yields negative results on other QA datasets like ECQA \citep{ecqa} and QuaRTz \citep{quartz}.
+Using T5-Base$\rightarrow$T5-Base, we compare the performance of \methodsp and the main baselines considered in the main results.
+In Table \ref{tab:exp:negative}, we see that \methodsp generally outperforms all FTR-based baselines, sometimes by a very large margin.
+Still, none of the FTR-based methods (including all \methodsp variants) are able to significantly outperform FT (I$\rightarrow$O).
+
+\begin{wraptable}{R}{0.55\textwidth}
+\centering
+\scalebox{0.68}{
+\begin{tabular}{cccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Architecture}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Accuracy} ($\uparrow$)} \\
+    \cmidrule(lr){3-4}
+    & & ECQA & QuaRTz \\
+    
+    \midrule
+    
+    \multirow{7}{*}{T5-Base$\rightarrow$T5-Base} & FT (I$\rightarrow$O) & \cellcolor{lred} 62.02~($\pm$0.48) & 68.20~($\pm$0.52) \\
+    
+    & FT (I$\rightarrow$OR) & 56.09~($\pm$0.47) & 57.19~($\pm$0.58) \\
+    
+    & FT (I$\rightarrow$RO) & 54.60~($\pm$0.66) & 56.76~($\pm$2.74) \\
+
+    & FT (IR$\rightarrow$O) & 41.02~($\pm$1.57) & 66.41~($\pm$0.90) \\
+    
+    & \methodsp (In) & 55.12~($\pm$2.19) & \cellcolor{lred} 68.45~($\pm$0.83)\\
+    
+    & \methodsp (Out) & \cellcolor{lblue} 57.26~($\pm$2.68) & \cellcolor{lred} 68.45~($\pm$0.52)\\
+    
+    & \methodsp (In+Out) & 56.12~($\pm$1.91) & \cellcolor{lblue} 68.41~($\pm$0.99) \\
+    
+    \bottomrule 
+\end{tabular}
+}
+\caption{\small \textbf{Failure Analysis}
+}
+\label{tab:exp:negative}
+\end{wraptable}
+
+Since \methodsp distills FTR knowledge to the student LM, the student's performance is expected to depend on the amount and quality of reasoning knowledge stored in the FTRs.
+Thus, to investigate these negative results, we conduct a case study to qualitatively analyze the gold FTRs in OBQA, StrategyQA, ECQA, and QuaRTz.
+Overall, we find that FTRs in OBQA and StrategyQA are much more informative than those in ECQA and QuaRTz.
+For OBQA and StrategyQA, we find that their gold FTRs tend to have the following properties.
+First, they describe a logically sufficient reasoning process for getting from the question (input) to the answer (output).
+Second, they provide general and self-contained knowledge that goes beyond the information given in the question and answer.
+Meanwhile, FTRs from ECQA and QuaRTz tend to exhibit opposite properties. They usually simply rephrase the question and answer. To illustrate our case study, we give some examples in~\textsection\ref{sec:app:case_study}. To further illustrate how common is simple rephrasing among bad FTRs, we conduct an experiment to quantitatively show it in~\textsection\ref{sec:app:rephrasing}.
+
+Consequently,~\method's failure on ECQA and QuaRTz is owing to the uninformative nature of their human-annotated FTRs.
+Given that, we hope future work could annotate datasets with FTRs informative enough, which would collectively convey useful and sufficient reasoning knowledge and thus contribute to performance improvement.
+
+
+
+\section{Conclusion}
+
+
+
+
+\section{Limitations}
+
+\label{sec:limitations}
+
+The major limitations of this work are as follows: (1)~Due to limited computational resources, we only conduct experiments on small models. In the future, we will explore the performance of \method~on large-scale models. (2)~Our study is limited to encoder-decoder transformer architectures (\eg T5). It is interesting to extend \method~to decoder-only (\eg GPT) and encoder-only (\eg BERT) architecture, especially to apply the bottleneck design to other attention mechanisms besides cross-attention. (3)~\method~requires each training instance to be accompanied by an FTR. In the real world, however, it is common to only have FTRs for a subset of training instances. We leave applying \method~to such settings for future work.
+
+
+\section{Broader Impacts}
+
+Regarding ethical concerns, all datasets used in this work are publicly available. Our method makes use of large language models to generate free-text rationales. We are aware that the resulting rationales may contain social biases. Such biases may be further inherited by the student model. 
+
+
+
+
+

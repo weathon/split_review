@@ -1,0 +1,246 @@
+\title{Hierarchical Corpus Encoder: Fusing Generative Retrieval and Dense Indices}
+
+\begin{abstract}
+Generative retrieval employs sequence models for conditional generation of document IDs based on a query (DSI (Tay et al. (2022); NCI (Wang et al., 2022); inter alia). While this has led to improved performance in zero-shot retrieval, it is a challenge to support documents not seen during training.  We identify the performance of generative retrieval lies in contrastive training between sibling nodes in a document hierarchy. This motivates our proposal, the _hierarchical corpus encoder_ (HCE), which can be supported by traditional dense encoders. Our experiments show that HCE achieves superior results than generative retrieval models under both unsupervised zero-shot and supervised settings, while also allowing the easy addition and removal of documents to the index.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recent work on neural information retrieval (IR) has broadly fallen into two categories: dense encoders, and generative retrieval. For dense retrieval (Lee et al., 2019; Karpukhin et al., 2020; Izacard et al., 2022, i.a.), a fixed-dimension vector representation is created for each document by an encoder, and searching is performed with techniques such as approximate nearest neighbor (ANN) search or maximum inner product search (MIPS; Shrivastava & Li (2014)) with an external index (e.g., FAISS (Douze et al., 2024)). Such encoders are generally trained in a supervised fashion by learning to distinguish relevant documents (positive examples) against irrelevant documents (negative examples) given a query. This is known as contrastive training.  
+
+Generative retrieval (Tay et al., 2022; Wang et al., 2022, i.a.) takes a different approach: directly outputting the identifier of the document with an encoder-decoder sequence model without an explicit vector representation for each document. Purported advantages include (a) there is no need to deploy an explicit MIPS index; and (b) better performance in unsupervised settings when adapted to a new corpus without any labeled training data. However, they also suffer from known problems such as the addition of new documents requires continued training, which is both computationally expensive and is prone to catastrophic forgetting (Kishore et al., 2023).  
+
+Here we examine the innovations of generative retrieval and identify the key important distinction with dense retrieval approaches to date: tiered hierarchical negative samples. This motivates our proposal, the hierarchical corpus encoder (HCE). At training time, positive samples are contrasted against siblings on a document hierarchy as negative samples, mimicking the loss employed in generative retrieval (§3). At test time, retrieval falls back to MIPS with an external index. HCE provides the best of both worlds: (1) zero-shot adaptation to new domains; and (2) efficient addition and removal to the index without fine-tuning.  
+
+Our experimental results demonstrate that HCE achieves superior performance over a variety of popular dense and generative retrieval methods under both supervised and unsupervised scenarios, illustrating the effectiveness of HCE’s modeling of the document set as a hierarchy.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+Dense Retrieval In the dense retrieval paradigm of information retrieval, one seeks to learn an encoder $\mathbf{F}\,:\,V^{*}\,\to\,\mathbb{R}^{n}$ that maps a string of tokens (from vocabulary set $V$ ) to a point in a $n$ - dimensional vector space. Retrieval can then be performed in by some nearest neighbor search (NNS) or maximum inner product search (MIPS) in this space $\mathbb{R}^{n}$ . A common instantiation of this encoder is a Transformer with a pooling operation on top (Izacard et al., 2022), followed by an optional normalization step (that makes the norm of the vector 1, as is done in $\mathrm{Ni}$ et al. (2022)).  
+
+Under the condition where query-document relevance judgments are present, it is common practice to train such an encoder with a constrastive loss (Sohn, 2016), where the model is trained to discriminate positive candidates $d^{+}$ that are relevant to the query $q$ from irrelevant negative candidates $d^{-}\in D^{-}$ . We denote the vector representation of a query $q$ as $\mathbf{q}=\mathbf{F}(q)$ , and similarly $\mathbf{d}=\mathbf{F}(d)$ . For a set of documents $D$ , we denote $\mathbf{D}=\{\mathbf{F}(d)\}_{d\in D}$ , which is a set of vectors. A common form of the loss is  
+
+$$
+\mathcal{L}_{C}(\mathbf{q},\mathbf{d}^{+},\mathbf{D}^{-})=-\log\frac{\exp S(\mathbf{q},\mathbf{d}^{+})}{\exp S(\mathbf{q},\mathbf{d}^{+})+\sum_{\mathbf{d}^{-}\in\mathbf{D}^{-}}\exp S(\mathbf{q},\mathbf{d}^{-})}\;,
+$$  
+
+where $S(\mathbf{q},\mathbf{d})$ is the scoring function between vectors. This scoring function is usually just an inner product (optionally scaled by a temperature $\tau$ ) between vector embeddings $S(\mathbf{q},\mathbf{d})=\mathbf{q}\cdot\mathbf{d}/\tau$ , or a normalized version 𝑆(𝑞, 𝑑) = 𝜏·∥qq·∥d·∥d∥ where cosine similarity is computed.  
+
+This general framework is first pioneered by Lee et al. (2019) and Karpukhin et al. (2020) for dense retrieval in NLP, where it is successfully applied to open-domain question answering.  
+
+Generative Retrieval Generative retrieval is a new paradigm that directly generates document identifiers by the model’s parametric memory, without using an external index. Specifically, one first assigns a unique string-valued identifier to each document, and when decoding, constrain the decoding process so that its output falls within the set of unique identifiers. Top- $k$ retrieval is done by using beam search in the decoding process. Such method removes the need for any external index, making the whole memory of the corpus parametrized by a neural network.  
+
+The earliest work in this thread is GENRE (De Cao et al., 2021), where the correct entity name (e.g. Wikipedia article title) is generated through a sequence-to-sequence model for entity linking. DSI (Tay et al., 2022) and NCI (Wang et al., 2022) applied the generative retrieval approach to ad hoc document retrieval. GENRET (Sun et al., 2023) learns the document IDs without the initial preprocessing step. Such methods suffer from two drawbacks: (a) scalability: challenging to scale to massive scale of documents since all memory is parametrized in the model, absent of external storage; (b) extensibility: hard to expand the document set if new documents are going to be indexed, since it is usually pre-trained on a static collection of documents.  
+
+Adding new documents in generative retrieval usually requires continued training. There are methods proposed to alleviate the problem: $\mathrm{DSI}++$ (Mehta et al., 2023) sought to mitigate catastrophic forgetting for continued training; IncDSI (Kishore et al., 2023) proposed a constrained optimization method to find optimal vectors for new documents, but it only applies to the atomic version of DSI.  
+
+
+
+\section{3 A CLOSER LOOK AT GENERATIVE RETRIEVAL  }
+
+
+Generative retrieval seems to be a departure from traditional contrastive learning, but upon scrutiny, we found that the underlying loss is similar in many ways. Here we take a closer look at arguably the seminal work that started the research thread on generative retrieval for documents: the differentiable search index (DSI; Tay et al., 2022). There were two proposed versions of DSI, namely the atomic-ID version and the hierarchical version. Later work that followed (e.g. NCI; Wang et al. (2022)) prioritized the hierarchical version.  
+
+Atomic Version In the atomic version of DSI, each document’s ID is added to the vocabulary of the Seq2Seq decoder, and the decoder is run exactly 1 step to generate the correct document ID. The Seq2Seq negative log-likelihood loss would be1  
+
+$$
+\mathcal{L}_{\mathrm{GR-atom}}(q,d^{+})=-\log\left(\mathrm{softmax}(\mathbf{W}_{\mathrm{LMHead}}\cdot\mathbf{s})[d^{+}]\right).
+$$  
+
+Note here $\mathbf{s}\in\mathbb{R}^{n_{\mathrm{dec}}}$ is the decoder output state (Figure 1 Left), and ${\mathbf{W}}_{\mathrm{LMHead}}$ is the weight matrix of the language model head of the decoder, and $\mathbf{x}[d^{+}]$ selects the probability term from vector $\mathbf{X}$ that corresponds to the document $d^{+}$ . Since the token set of this decoder is the document $I D$ set,  
+
+$\mathbf{W}_{\mathrm{LMHead}}=\left[\mathbf{v}_{d}^{\mathrm{T}}\right]_{d\in\mathcal{D}}\in\mathbb{R}^{|\mathcal{D}|\times n_{\mathrm{dec}}}$ , and the logits $(\mathbf{W}_{\mathrm{LMHead}}\cdot\mathbf{s})\in\mathbb{R}^{|\mathcal{D}|}$ . Expanding Equation 2:  
+
+$$
+\mathcal{L}_{\mathrm{GR-atom}}(q,d^{+})=-\log\frac{\exp\mathbf{s}\cdot\mathbf{v}_{d^{+}}}{\sum_{d\in D}\exp\mathbf{s}\cdot\mathbf{v}_{d^{+}}}=\mathcal{L}_{C}\left(\mathbf{s},\mathbf{v}_{d^{+}},\left\{\mathbf{v}_{d^{-}}\right\}_{d^{-}\in\mathcal{D}\backslash\left\{d^{+}\right\}}\right)\,.
+$$  
+
+Thus we see that in the atomic version of generative retrieval, • a fixed-length vector $\mathbf{v}_{d}$ is actually trained for each document $d$ , in the form of rows in the weight matrix of the language model head; • a fixed-length vector is actually created for the query, in the form of the decoder state vector $\mathbf{S}$ ; • and the decoding process of arg $\operatorname*{max}_{d\in\mathcal{D}}$ exp $\mathbf{S}\cdot\mathbf{V}_{d}$ is in fact maximum inner product search (MIPS).  
+
+Hence the atomic version of generative retrieval can be considered as a form of contrastive learning, where the positive document is contrasted with all other documents in the corpus, with the embedding for all documents saved as parametric memory in ${\mathbf{W}}_{\mathrm{LMHead}}$ (Figure 1 Left). These embeddings are updated under gradient descent for every training iteration. This is different from contrastive learning in dense retrievers, where usually a small set of negative samples are sampled from the corpus.  
+
+![](images/02ccd4d1b905d809664d880a127f11f80130107d8cf23aa2a939ce887cba775c.jpg)  
+Figure 1: Left: DSI with atomic IDs. Right: DSI with a document hierarchy.  
+
+Hierarchical Version The atomic version above obviously does not scale efficiently beyond hundreds of thousands of candidate documents, as the size of its parametric memory would scale linearly with respect to the number of documents. Therefore the authors of DSI proposed a hierarchical method that limits the number of tokens that the decoder can generate. In the hierarchical version of DSI, a hierarchy of documents is computed before training via divisive $k$ -means clustering. The set of documents are arranged as leaves in a tree, where intermediate nodes are clustering centroids. In this tree T , each document 𝑑is assigned a path from root p𝑑= (𝑝(𝑑), · · · , 𝑝|𝑑 (Figure 1 Right).  
+
+The DSI decoder is expected to output this path $\mathbf{p}_{d}$ as the sequence output. Since DSI is trained with a sequence objective with a softmax head, this sequence loss can therefore be expressed as  
+
+$$
+\mathcal{L}_{\mathrm{GR-hier}}(q,d^{+})=-\sum_{t=1}^{|\mathbf{p}_{d^{+}}|}\log\frac{\cos\mathfrak{s}^{(t)}\cdot\mathbf{v}(p_{d^{+}}^{(t)})}{\sum_{p\in\Sigma^{(t)}}\exp\mathfrak{s}^{(t)}\cdot\mathbf{v}(p)}=\sum_{t=1}^{|\mathbf{p}_{d^{+}}|}\mathcal{L}_{C}\left(\mathbf{s}^{(t)},\mathbf{v}(p_{d^{+}}^{(t)}),\{\mathbf{v}_{p}\}_{p\in\Sigma^{(t)}}\right),
+$$  
+
+where $t$ is the decoder step, $\mathbf{s}^{(t)}$ is the decoder state at step $t$ , and $\boldsymbol{\Sigma}^{(t)}$ is the set of symbols allowed on depth $t$ of the hierarchy. Here we see that the hierarchical version of generative retrieval performs contrastive learning at each step in the decoding process: at each step $t$ , the decoder state $\mathbf{s}^{(\bar{t})}$ , acting as a query, is matched with all possible tokens $\boldsymbol{\Sigma}^{(t)}$ at this step $t$ : the correct action at this step $p_{d^{+}}^{(t)}$ is contrasted against all other steps. In essence, DSI is taking tiered hierarchical negative samples.  
+
+It can be seen that the loss function of generative retrieval essentially consists of one (under the atomic version) or multiple (under the hierarchical version) steps of contrastive loss, with the decoder state at each step functioning as the query vector. We make the observation that contrastive loss is a sampled estimation of the full log-likelihood loss; and the hierarchical version is a computationally efficient way of working with a very large candidate set. Indeed, the same idea has been explored in many applications of NLP. For example, in the early days of neural language modeling, Morin & Bengio (2005) proposed a hierarchical softmax function to speed up the softmax computation over a large vocabulary set. This was then adopted in Word2Vec (Mikolov et al., 2013).  
+
+![](images/9bd63c0abc31cd72f68c9eafb5c774d2f6545c4c5716e1e66390278bc4825c6e.jpg)  
+
+In generative retrieval, decoding is done in a coarse-to-fine manner with constrained beam search. This is akin to the approach of Chen et al. (2020b), who classified textual entity mentions into a constraining type hierarchy. Hierarchical decoding is also reminiscent of indexing algorithms such as hierarchical $k$ -means trees (Nist´er & Stew´enius, 2006; Muja & Lowe, 2009): first build a tree of samples based on clustering as index, and when decoding, apply beam search over this tree.  
+
+With this understanding of generative retrieval, we translate the innovations to a dense retriever.  
+
+
+
+\section{4 MODEL  }
+
+
+We propose HCE, which jointly learns an encoder $\mathbf F:V^{*}\to\mathbb R^{n}$ (the $n$ -dimensional hypersphere $S^{n-\Bar{1}}\subset\mathbb{R}^{n}$ if normalized) with a hierarchical tree $\tau$ of the document set, with a novel loss that takes the hierarchy of documents into account.  
+
+4.1 LEARNING WITH DOCUMENT HIERARCHY  
+
+Clustering Given an initial encoder $\mathbf{F}_{0}$ , we can compute all embeddings in the document set $\mathcal{D}$ : $\{\mathbf{F}_{0}(d)\}_{d\in\mathcal{D}}$ . We perform an agglomerative version of hierarchical clustering (Algorithm 1) on these vectors to form a tree. This differs from DSI, where divisive clustering is performed. The reason is that we keep the path from the root the same length for all documents (see Figure 2), and easier parallelization on GPUs.  
+
+![](images/77fdc0783a39bc4db45eed03a601fd1dd10dc950317b3f8948707164da1247ea.jpg)  
+Figure 2: A document hierarchy with depth 3.  
+
+Starting with $|\mathcal D|$ vectors for the entire corpus, we perform spherical $K$ -means clustering,2 where $K=\lceil|\mathcal{D}|/b\rceil$ . Here $^b$ is a branching factor. We recurse until $K=1$ , when all clusters are collected into a single root node. Note that for each tree node there is no guarantee that it has exactly $b$ children, and $^b$ can be understood as the expected number of vectors in each cluster (see Figure 2). For each clustering step, the spherical $K$ -means clustering (Dhillon & Modha, 2001) is used (Algorithm 2). The resulting hierarchical tree $\mathcal{T}=T^{(0)}$ has depth $L=\lceil\log_{b}\lvert\mathcal{D}\rvert\rceil$ , so that each document $d$ can be encoded as a fixed-length path $\mathbf{p}_{d}=(p_{d}^{(1)},\cdots,p_{d}^{(L)})$ from root (see Figure 2, where the highlighted leaf node has its path to root $\mathbf{p}\,=\,(1,1,0)$ bolded). Each prefix $(p^{(1)},\cdot\cdot\cdot\,,p^{(l)})$ $(l\,<\,L)$ of this path points to a nonterminal node $c$ of this tree, and corresponds to a centroid from the hierarchical clustering process. We denote the vector of the centroid as $\mathbf{\dot{c}}(p^{(1)},\cdots,p^{(l)})\in\mathbb{R}^{n}$ . Hierarchy-aware Loss Provided that the hierarchy is constructed, we adapt the sequence decoding loss $\mathcal{L}_{\mathrm{GR-hier}}$ , Equation 4) in generative retrieval to our encoder-based method. Recall that $\mathcal{L}_{\mathrm{GR-hier}}$ contrasts the vector of the positive path against the vector of the negative paths on each layer of the hierarchy, given the decoder state at each step $\mathbf{s}^{(t)}$ as the query vector. We make two modifications:  
+
+![](images/2f816377c6c272a618c7b2ab44a8fde8670ef1f050f4c64026912a6afc00108f.jpg)  
+Figure 3: Illustration of HCE training, where the query is contrasted with tiered negative samples. Query and documents here are taken from the NQ320k dataset (Kwiatkowski et al., 2019).  
+
+• Since there is no decoder in our case, the query vector stays the same across steps: it will always be the vector embedding $\mathbf{q}=\mathbf{F}(q)$ of the query $q$ across levels. • Vectors for intermediate nodes are the centroid vectors of the prefixes from $K$ -means clustering.  
+
+As such, given query $q$ and its relevant document $d^{+}$ , at step $t$ on hierarchy $\tau$ , we contrast the positive prefix (𝑝(𝑑+) , · · · , 𝑝(𝑑+) ) against all its siblings $\left\{(p_{d^{+}}^{(0)},\cdot\cdot\cdot\cdot,p_{d^{+}}^{(t-1)},p^{-})\;\right|\stackrel{}{p^{-}}\neq p_{d^{+}}^{(t)}\right\}$ (Figure 3):  
+
+$$
+\begin{array}{r}{\mathcal{L}_{H}^{(t)}(q,d^{+})=\mathcal{L}_{C}\left(\mathbf{q},\;\mathbf{c}(p_{d^{+}}^{(0)},\cdots,p_{d^{+}}^{(t)}),\;\left\{\mathbf{c}(p_{d^{+}}^{(0)},\cdots,p_{d^{+}}^{(t-1)},p^{-})\;\middle|\;p^{-}\neq p_{d^{+}}^{(t)}\right\}\right)}\end{array}
+$$  
+
+Naturally we could do this for each layer of the hierarchy: $\mathcal{L}_{H}(q,d^{+})=\sum_{\circ}^{L}\mathcal{L}_{H.}^{(t)}(q,d^{+})$ , taking tiered hierarchical negative samples. However, doing this for the full hierarchy is not memoryefficient: it requires storing the embedding of all documents (leaf nodes of the hierarchy) as parameters! This gets us back to the situation of generative retrieval with atomic IDs (§3). We adopt a simple solution: retain the vectors of the first $M(M<L)$ layers of the $L$ layers in memory. For the first $M$ layers, we apply the hierarchy loss in Equation 5; for the last $(L-M)$ layers, we fall back to constrastive loss, where negative samples are sampled within the children of the prefix (Figure 3):  
+
+$$
+\mathcal{L}_{\mathrm{HCE}}(q,d^{+})=\sum_{t=1}^{M}\mathcal{L}_{H}^{(t)}(q,d^{+})+\sum_{t=M+1}^{L}\mathcal{L}_{C}^{\leftrightarrow}\left(q,d^{+},\mathrm{Sample}_{n\mathrm{ws}}\left(p_{d^{+}}^{(1)},\cdots,p_{d^{+}}^{(t)}\right)\backslash\{d^{+}\}\right).
+$$  
+
+Here $\mathcal{L}_{C}^{\leftrightarrow}$ is a bi-directional contrastive loss elaborated below, and $\mathrm{Sample}_{n_{\mathrm{NS}}}(p)$ samples $n_{\mathrm{NS}}$ documents that are the children of the prefix $p$ . In our experiments we take $n_{\mathrm{NS}}=4$ .  
+
+Contrastive Loss with Tricks It has been shown that the in-batch negative trick (Henderson et al., 2017; Chen et al., 2020a) improves the performance by including positive documents for other queries $j\neq i$ in the same mini-batch3 $B$ as negative documents for query $i$ . Additionally, $\mathrm{Ni}$ et al. (2022) shows that one can do a bi-directional loss: viewing the candidate as the query and the queries in the batch as candidates. We combine these tricks.  
+
+4.2 TRAINING UNDER DIFFERENT SCENARIOS  
+
+Our proposed method HCE can be used in both supervised training where query-document relevance judgments are present; and in zero-shot cases where query dataset is absent.  
+
+Supervised Training Given a training set of $S_{\mathrm{train}}~=~\{(q,d^{+})\}$ (there is no need for labeled irrelevant samples) and a corpus $\mathcal{D}$ , we simply optimize the HCE loss (Equation 6) proposed above.  
+
+Unsupervised Training In this scenario only the corpus $\mathcal{D}$ is present, and our goal of this training step is to align the encoder’s output distribution with the distribution of the corpus.  
+
+The goal is creating a pseudo-query for each document. We experimented with two approaches:  
+
+• Inverse Cloze Task (ICT; Lee et al. (2019)): A random segment $\tilde{q}$ of text $d^{+}$ is used as a pseudoquery: $\mathcal{L}_{U}(d^{+})=\mathcal{L}_{\mathrm{HCE}}(\tilde{\mathbf{q}},\mathbf{d}^{+})$ . In NCI (Wang et al., 2022) it is referred to as document-as-query, and we follow their choice of taking a random span of 64 tokens;   
+• SimCSE (Gao et al., 2021): The text $d^{+}$ is encoded again with a different randomized dropout mask, yielding a different encoding $\tilde{\mathbf{d}}^{+}$ from the original $\mathbf{d}^{+}$ . Then the variant $\tilde{\mathbf{d}}^{+}$ is used as the query vector: $\bar{\mathcal{L}}_{U}(d^{+})=\mathcal{L}_{\mathrm{HCE}}(\tilde{\mathbf{d}}^{+},\mathbf{\tilde{d}}^{+})$ .  
+
+We found that these two methods perform similarly. For all experiments described, ICT is used.  
+
+Joint Training Additionally, the supervised and the unsupervised objective can be jointly optimized:  
+
+$$
+\begin{array}{r}{\mathcal{L}_{J}(S_{\mathrm{train}},\mathcal{D})=\mathbb{E}_{(q,d^{+})\sim S_{\mathrm{train}}}\left[\mathcal{L}_{S}(q,d^{+})\right]+\alpha\cdot\mathbb{E}_{d\sim\mathcal{D}}\left[\mathcal{L}_{U}(d)\right].}\end{array}
+$$  
+
+This achieves the two goals outlined in Wang & Isola (2020): (a) aligning the query with its relevant document; (b) ensures that the distribution of the corpus is nicely distributed.  
+
+Co-Training of Encoder and Hierarchy Finally, we introduce a co-training approach for jointly optimizing the encoder and the hierarchy. In existing generative retrievers (e.g. DSI, NCI), the construction of the hierarchy is a preprocessing step, and is usually computed from another encoder.4 We seek to jointly optimize these in an EM-style (coordinate descent with alternating maximization) co-training setup (Alg. 3).  
+
+In essence, after each epoch, if the metric on the validation set increases (i.e., a better representation of the corpus is obtained), a re-clustering of the corpus will be triggered. We stress that after training completes, the hierarchy $\tau$ can be safely discarded as only the encoder $\mathbf{F}$ is needed for downstream indexing and retrieval.  
+
+![](images/76c5629c430aa1e231ab5f0dd30a98e139a2d4026430555da358c1992fb17590.jpg)  
+
+
+
+\section{5 EXPERIMENTS & DISCUSSIONS  }
+
+
+Setup We start from the pre-trained dense encoder $\mathrm{GTR^{5}}$ (Ni et al., 2022) as both a baseline and the initial checkpoint where we continue training, as this is also used as a baseline in DSI (Tay et al., 2022). Additionally GTR, DSI, and NCI are all fine-tuned versions of T5, facilitating fair comparison.  
+
+We mostly follow the configurations as specified in GTR, where the temperature for contrastive loss is set as $\tau\,=\,0.01$ , with the AdaFactor optimizer (Shazeer & Stern, 2018) with linear decay in accordance with GTR’s hyperparameters.6 We use machines with $8\times$ NVidia A100 GPUs with bfloat16 precision, with total batch size across GPUs 512 (for the ArguAna dataset, 192). No experiment ran for more than 1 day.  
+
+HCE- $\{\mathbf{U},\mathbf{S},\mathbf{J}\}$ stands for unsupervised, supervised, and joint training respectively. For HCE-J, the loss weight for unsupervised learning in Equation 7 is set at $\alpha=0.5$ .  
+
+5.1 SUPERVISED SETTING: NQ320K & TRIVIAQA  
+
+Datasets We employ two datasets commonly used in prior work for supervised retrieval training: NaturalQuestions (Kwiatkowski et al., 2019) and TriviaQA (Joshi et al., 2017). NaturalQuestions collects real-user queries from Google and each query is paired with an answer span from a Wikipedia article. A common version of the dataset is NQ320k, where there are 320k query-passage pairs. TriviaQA is a reading comprehension dataset whose candidate passages also come from Wikipedia. We follow the preprocessing scripts in NCI (Wang et al., 2022).  
+
+Baselines and Metrics We include the following methods as baselines, grouped by their categories:  
+
+• Sparse retrieval: BM25 (Robertson et al., 1994) and a version with augmented generated queries by DocT5Query (Nogueira & Lin, 2019).  
+
+• Pre-trained dense retrievers: These are dense retrievers pre-trained or fine-tuned with other datasets such as MS MARCO (Nguyen et al., 2016), but not fine-tuned on the datasets here. These include Contriever fine-tuned on MS MARCO (Izacard et al., 2022) (based on BERT) and GTR (based on T5).  
+
+• Fine-tuned dense retrievers: Dense retrievers fine-tuned on NQ320k or TriviaQA. These include DPR (Karpukhin et al., 2020) and ANCE (Xiong et al., 2021). We also fine-tune our initial checkpoint, GTR, with ANCE-style contrastive training only (without hierarchy, denoted with $\mathrm{\bf\dot{\Phi}+}\mathrm{CT^{\circ})}$ to illustrate the gain of our novel hierarchy loss. Our full HCE also falls into this category.  
+
+• Generative retrievers: DSI (Tay et al., 2022); NCI (Wang et al., 2022); SEAL (Bevilacqua et al., 2022) where substrings are generated as document IDs; and GENRET (Sun et al., 2023), the state-of-the-art generative retriever that learns document IDs without clustering as preprocessing.  
+
+We use the NIST trec eva $\textstyle{\mathrm{1}}^{7}$ tool, reporting the union of the common metrics employed in prior work, including recall at various cutoff $k$ $(\mathbf{R}\mathbf{\mathcal{O}}k)$ , and mean reciprocal rank (MRR).8  
+
+Hyperparameters Learning rate, temperature, etc. are set in the prior section. Here the only parameter we tune is the branching factor $^b$ , which impacts the performance (see analysis below).  
+
+Query Generation In some of the baseline methods, query generation (QG) is applied to the document set — these retrievers are marked with $"+0\mathrm{G}"$ in Table 1. In all of these retrievers, DocT5Query (Nogueira & Lin, 2019) fine-tuned by MS MARCO (Nguyen et al., 2016) is employed. For sparse retrievers, generated queries are appended to the document to be indexed. For dense & generative retrievers, generated queries and corresponding documents are added to the training set.  
+
+Results Jointly trained HCE outperformed all dense and generative retrieval baselines across both datasets (Table 1). This demonstrates the effectiveness of HCE’s learned vector representations.9 HCE is especially good at recall $@k$ where $k\,>\,5$ , with a $6\mathrm{-}7\%$ boost against NCI and $2\%$ gain against GENRET under NQ320k, and a $2\%$ boost against NCI for TriviaQA.  
+
+HCE’s performance gain is less in recall $@k$ when $k$ is small, as compared to a large $k$ . Our hypothesis is that when discriminating between similar documents under the same prefix in the hierarchy, HCE uses a negative-sampling approach for computational efficiency, resulting in less negative samples than the full set under the prefix being trained. This in turn causes good performance on the first $M$ levels of the hierarchy but not as good at the last layer of the hierarchy.  
+
+Discussion: Ablation Studies Here we remove certain components from our best setup to see the contribution of each component. From Table 1, we see that by removing query generation or hierarchy co-training (Figure 3), the performance of $\mathbf{R}\@1$ drops about $1\%$ , while for recall at $k\,>=\,10$ the results are largely the same. Comparing HCE with $\mathrm{GTR+CT}$ we found that our novel hierarchy-aware loss improves the performance of $\mathbf{R}\mathcal{@}1$ about $4\%$ across datasets.  
+
+![](images/b8628ad21154751c05dd7ce446de4f8cb075f7a7fcae564797d29c15da4d4d2a.jpg)  
+
+Table 1: Performance on $\mathrm{{NQ320k}}$ and TriviaQA. Numbers typeset in italics are recomputed if model output is public; or rerun from their public implementations. Missing numbers due to our inability to reproduce the exact method to our best effort (may be due to unreleased source code). All rows labeled with base/large are based on T5-base/large, thus sharing the same number of parameters for fair comparison.  
+
+Discussion: Effect of Tree Depth A critical hyperparameter of HCE is $^b$ , the branching factor that controls the tree depth and the expected number of children for each intermediate node. Intuitively, the deeper the hierarchy is, the finer-grained tiered negative samples each relevant document receives.  
+
+We ran experiments for $\mathrm{{NQ320k}}$ under the best setup (HCE-J, large, $+\mathrm{QG})$ , with $b\quad\in$ $\{2,4,8,16,32,64,128,256\}$ . Recall at $\{1,5,10,100\}$ with varying $^b$ are plotted in Figure 4, with the tree depth also shown $(L=\lceil\log_{b}\lvert D\rvert\rceil)$ . We set $M=L-1$ : the last layer is computed via negative sampling.  
+
+It can be seen that recall at $10/100$ remains mostly the same for all $b$ . A significant difference can be observed for recall $@1$ : The best result, $b=8$ , has $\mathrm{R}@1=0.712$ , whereas for $b\ge64$ , ${\mathrm{R}}@1\approx0.67$ . This $4\%$ gap can be attributed to the finer-grained hierarchy: the sampled negative siblings are much closer to the positive document, generating harder negative samples for contrastive learning.  
+
+![](images/9404b13e4bba5153bfd1095cc6f9ae63626fc4a600a6cb4365869be3e3230473.jpg)  
+Figure 4: Recall $\mathbb{\left(\omega\,\middle\vert\,1,5,10,100\right)}$ for various branching factors $^b$ under $\mathrm{{NQ320k}}$  
+
+5.2 UNSUPERVISED SETTING: BEIR  
+
+We evaluate on the BEIR benchmark (Thakur et al., 2021) that contains a diverse set of IR tasks. We use a subset (BEIR-14) that consists of 14 of these datasets following prior work in Izacard et al. (2022): MS MARCO (Nguyen et al., 2016), which is already used as a fine-tuning dataset in our initial checkpoint GTR, and also datasets without a public license, are excluded.  
+
+The branching factor $^b$ is universally set to be the smallest power of 2 such that the hierarchy depth $L=3$ , i.e., $\tilde{b}=\sqrt[3]{|\mathcal{D}|}$ ; $b=2^{\lceil\log_{2}\tilde{b}\rceil}$ . For example, given a document set of 1M documents, we have $\tilde{b}=\sqrt[3]{1000000}=100,$ , hence we set $b=128$ . In the HCE loss, we choose $M=2$ , i.e., the loss of the first two layers are computed via the hierarchy, whereas the last year through contrastive sampling.  
+
+![](images/211f05f812ec7815524799e211f7fa59748c87361be6b754a874c1657968ca9d.jpg)  
+
+Baselines and Metrics BEIR is designed for zero-shot retrieval: as such, we compare our unsupervised HCE-U with various baselines. Baselines include BM25, dense retrievers DPR, ANCE, GTR, and TAS-B (Hofst¨atter et al., 2021), a dense retriever trained with balanced topic aware sampling. Additionally, GENRET, the state-of-the-art generative retriever, reported its performance on the 6 BEIR datasets whose corpus has ${<}200\mathrm{k}$ documents. 10 Following the setup in BEIR, the preferred metric is $\mathrm{NDCG}@10$ and recall $@100$ $(\mathbf{R}@100)$ .  
+
+ We see that the distribution of the corpus plays an important role here: for corpus like TREC-COVID (biomedical literature) which deviates from the distribution of normal web search text, we see a $10\%$ improvement after unsupervised fine-tuning; for datasets like NQ, HotpotQA, and DBPedia-entity where the documents come from Wikipedia, the performance gain is less, presumably because the pre-trained GTR has already seen text from Wikipedia. Unsupervised fine-tuning does not yield a gain in Quora, because the documents being retrieved are also queries (the task asks the model to find potentially duplicate questions asked on Quora), which are short — the inverse cloze task (ICT) sampling that takes a short excerpt does not work properly in this case.  
+
+Discussion: Effect of Supervision We study the effect of (un)supervised HCE training. We take the subset of BEIR where training data is provided publicly, and run HCE under 3 scenarios: unsupervised, supervised, and joint training. Results are reported in Table 3.  
+
+We see that with supervision, adding unsupervised training as an auxiliary task results in ${\approx}1\%$ gain in $\operatorname{NDCG}@10.$ , showing that the joint loss in Equation 7 is effective. The performance drop in NFCorpus is due to the dataset’s imbalanced training set.11  
+
+Discussion: Scalability and Complexity for Clustering At training time, apart from the encoder, the centroids of the first $M$ layers of the hierarchy are optimized as parameters, but can be discarded at indexing and retrieval time. This requires $O(b^{M}n)$ extra space at training, where $n$ is the dimensionality of the embeddings. In practice, with a corpus with $N\approx5{,}000{,}000$ documents (e.g. Wikipedia articles), we have $b=256,M=2,n=768$ . This space consumption is tolerable under this scenario.  
+
+The $k$ -means algorithm runs in $O(I N k n)$ time, where $I$ is the number of iterations. We observed in all datasets the iteration process converged before $I<256$ . Considering $I$ a constant, the total time complexity for constructing a document hierarchy is $\begin{array}{r}{\sum_{i=1}^{\lceil\log_{b}N\rceil}O\left(\frac{N}{b^{i-1}}\cdot\frac{N}{b^{i}}\cdot n\right)\simeq O(N^{2}n/b)}\end{array}$ complexity is high, but ameliorated since it can be parallelized on GPUs, and it can be made to a streaming version for lower memory consumption.12  
+
+5.3 INCREMENTALLY UPDATED RETRIEVAL  
+
+Our proposed HCE supports on-the-fly update of documents to the index without training, since the new documents can just be encoded and added to the index. However, if too many documents are added to the extent that the corpus distribution is distorted, a re-training and re-indexing might be needed. We study this scenario of a streaming document set under the setting of IncDSI (Kishore et al., 2023), who proposed the setting of incrementally updated retrieval. A dataset $\mathcal{D}$ is partitioned into 3 subsets: the old set $\mathcal{D}_{0}$ $(90\%)$ which is used to train the retriever; the new set $\mathcal{D}^{\prime}$ $(9\%)$ , in a streaming fashion after training;and a tuning set $\mathcal{D}^{*}$ $(1\%)$ for validation purposes.  
+
+We use the dataset partitions for $\mathrm{{NQ320k}}$ provided in Kishore et al. (2023). Following their setup, we add $\dot{k}\,\in\,\{10^{1},10^{2},10^{3},10^{4}\}$ new documents in $\mathcal{D}^{\prime}$ to an index trained with the same old set $\mathcal{D}_{0}$ . Since our method of adding new documents simply involves encoding the new documents, there is no parameter to tune so $\mathcal{D}^{*}$ is discarded. We measure $\mathbf{R}\@1$ and $\mathbf{R}\@10$ at different $k$ (number of documents added) for both the original test set in $\mathcal{D}_{0}$ and the queries associated with the new documents in $\mathcal{D}^{\prime}$ (denoted “old/new” in Figure 5).  
+
+We take the results reported in Kishore et al. (2023), including methods that do not require long-time post-training after adding new documents. These include IncDSI, a constrained optimizer that finds a new embedding for a new document in the embedding space of an atomic DSI (§3); and DPR, a contrastively-trained retriever. 13  
+
+![](images/74a9b66f009e38ddae39271a2421420c8767847b48521b95c2350baeabe07992.jpg)  
+
+Results are shown in Figure 5. We see from the trends that all methods’ performance dropped for new documents as expected (especially when $k$ goes from $10^{2}$ to $10^{4}$ ), but HCE’s performance drop for new documents is comparable to IncDSI, a method specifically designed for incremental additions. At $k\in\{10^{3},10^{4}\}$ , HCE performs comparably with IncDSI under $\mathbf{R}\mathcal{@}1$ for new documents in $\mathcal{D}^{\prime}$ , and significantly outperforms under $\mathbf{R}\@warrow10$ .  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We present hierarchical corpus encoder (HCE) that jointly learns a dense encoder and a document hierarchy for information retrieval. HCE contrasts positive samples against siblings nodes on the document hierarchy as negative samples, mimicking the training dynamics in hierarchical generative retrieval. HCE is shown to achieve superior performance over a variety of dense encoder and generative retrieval baselines, under both supervised and unsupervised scenarios, demonstrating the effectiveness of jointly learning a document hierarchy.  
+
+HCE easily scales to corpora with ${>}5\mathrm{M}$ documents. Additionally, as a dense encoder, HCE supports easy addition and removal of documents to an MIPS index without the need for continued training, as is demonstrated in our incrementally updated retrieval experiments.  
+
+
+
+

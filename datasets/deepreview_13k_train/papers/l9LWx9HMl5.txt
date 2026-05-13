@@ -1,0 +1,573 @@
+\title{Simultaneous Reward Distillation and Preference Learning: Get You a Language Model Who Can Do Both}
+
+\begin{abstract}
+
+
+Reward modeling of human preferences is one of the cornerstones of building usable generative large language models (LLMs). While traditional RLHF-based alignment methods explicitly maximize the expected rewards from a separate reward model, more recent supervised alignment methods like Direct Preference Optimization (DPO) circumvent this phase to avoid problems including model drift and reward overfitting. Although popular due to its simplicity, DPO and similar direct alignment methods can still lead to degenerate policies, and rely heavily on the Bradley-Terry-based preference formulation to model reward differences between pairs of candidate outputs. 
+This formulation is challenged by non-deterministic or noisy preference labels, for example human scoring of two candidate outputs is of low confidence. 
+In this paper, we introduce \textbf{DRDO (Direct Reward Distillation and policy-Optimization)}, a supervised knowledge distillation-based preference alignment method that simultaneously models rewards \textit{and} preferences to avoid such degeneracy. DRDO directly mimics rewards assigned by an oracle while learning human preferences from a novel preference likelihood formulation. Our experimental results on the Ultrafeedback and TL;DR datasets demonstrate that policies trained using DRDO surpass previous methods such as DPO and e-DPO in terms of expected rewards and are more robust, on average, to noisy preference signals as well as out-of-distribution (OOD) settings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\vspace*{-2mm}
+\label{sec:intro}
+\vspace*{-2mm}
+
+In the development of large language models (LLMs), robust modeling of human preferences is essential for producing outputs that are contextually and situationally appropriate, in order to result  in models that users will actually want to use. Inherent in this problem is that while popular approaches like direct preference optimization (DPO) and its variants implicitly assume that pairs of preferred and dispreferred samples in preference data have an unambiguous winner, this does not reflect the reality of actual data, where human-annotated preferences may have low labeler confidence or the preference strength itself might be weak in the data. As such, reward functions estimated on such data with current popular approaches can lead to policy degeneracy and underfitting the true preference distribution. To address these challenges, we follow the insight that certain problems with the DPO implicit reward formulation at the policy learning stage are less problematic at the reward modeling stage, and make the following novel contributions:
+\begin{enumerate*}[label=\arabic*)]
+    \item We introduce {\it \textbf{Direct Reward Distillation and policy-Optimization (DRDO)}}, a novel approach preference optimization approach that combines the two stages by explicitly distilling rewards into the policy model (Fig.~\ref{fig:DPO_DRDO});
+    \item We provide a thorough theoretical grounding of problems with DPO and variants according to the Bradley-Terry model that demonstrates why they are challenged by nuanced or ``non-deterministic'' preference pairs;
+    \item Through experiments on the Ultrafeedback and TL;DR datasets along with benchmarks like AlpacaEval, we demonstrate that DRDO outperforms competing popular preference optimization methods across multiple models and sizes at the aggregate data level, and is better able to distinguish preferred and dispreferred responses with low confidence or small reward difference scores.
+\end{enumerate*}
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/DPO_vs_DRDO.png}
+    \vspace*{-2mm}
+    \caption{Unlike popular supervised preference alignment algorithms like Direct Preference Optimization (DPO;~\cite{rafailov2024direct}) that learns rewards implicitly, \textbf{DRDO directly optimizes for explicit rewards from an Oracle while simultaneously learning diverse kinds of preference signals during alignment.} Optimized with a simple regression loss based on difference of rewards assigned by the Oracle and a novel focal-log-unlikelihood component (see~\Cref{sec:drdo}), DRDO avoids DPO's particular challenges at learning non-deterministic preference pairs, thereby bridging the gap between estimating the preference distribution from the data and the true preference distribution $p^*$. Additionally, DRDO does not require an additional reference model during training and can leverage reward signals even when preference labels are not directly accessible. }
+    \vspace*{-2mm}
+    \label{fig:DPO_DRDO}
+\end{figure}
+\vspace*{-2mm}
+
+
+\section{Background and Related Work}
+
+\vspace*{-2mm}
+
+Recent advancements in Large Language Models (LLMs) involve refining pretrained LLMs for downstream tasks by utilizing human-written completions \citep{chung2022scaling,mishra2021cross} or datasets labeled with human-preferred completions and contrasting alternatives \citep{ouyang2022training, bai2022training, ziegler2019fine}. 
+The two most prominent techniques in learning from preference data are reinforcement learning from human feedback (RLHF) and direct preference optimization (DPO). In the following sections, we summarize these methods.
+
+\paragraph{Reinforcement learning from human feedback.}
+Reinforcement Learning from Human Feedback (RLHF) aims to harmonize LLMs with human preferences and values~\citep{christiano2017deep}.
+Conventional RLHF typically consists of three phases: supervised fine-tuning,
+reward model training,
+and policy optimization.
+Proximal Policy Optimization (PPO;~\cite{schulman2017proximal}) is a widely used algorithm in the third phase of RLHF. RLHF has been extensively applied across various domains, including mitigating toxicity~\citep{korbak2023pretraining, amini2024direct}, addressing safety-concerns~\citep{dai2023safe}, enhancing helpfulness~\citep{tian2024finetuning}, web search and navigation~\citep{nakano2021webgpt}, and enhancing reasoning in models~\citep{havrilla2024teaching}. Recent work by~\citep{casper2023open} has identified challenges and problems throughout the entire RLHF pipeline, from gathering preference data to model training to biased results, such as verbose outputs~\citep{dubois2024length, singhal2023long, wang2023far}.
+
+Given a dataset of pairwise preference data \( \mathcal{D} = \{ \prompt, \win, \lose \}_{i=1}^{N} \), where \( \prompt \) are prompts and \( \win \) and \( \lose \) are the preferred and dispreferred completions, respectively, RLHF begins with an initial model \( \pi_{\text{ref}} \) that parameterizes a distribution \( \pi_{\text{ref}}(y | x) \). Typically, \( \pi_{\text{ref}} \) is initialized from an LLM that has undergone supervised fine-tuning (SFT). The preference between \( y_w \) and \( y_l \) is modeled using the Bradley-Terry model \citep{BradleyTerry1952}, which defines the probability of preferring \( y_w \) over \( y_l \):
+\begin{equation}
+\label{eq:BT_preference}
+p(y_w \succ y_l | x) = \sigma(r(x, y_w) - r(x, y_l))
+\end{equation}
+where \( \sigma(\cdot) \) is the logistic function, and \( r(x, y) \) represents an underlying reward function. To estimate this reward function \( r \), RLHF minimizes the negative log-likelihood of the data:
+\begin{equation}
+\label{eq:RM_loss}
+\mathcal{L}_R(r_{\phi}, \mathcal{D}) = -\mathbb{E}_{(x,y_w,y_l) \sim \mathcal{D}} \left[ \log(\sigma(r_{\phi}(x, y_w) - r_{\phi}(x, y_l))) \right].
+\end{equation}
+Using this learned reward function \( r_{\phi} \), reinforcement learning is applied to optimize and generate a new LLM distribution \( \pi_{\theta} \), with a KL constraint for regularization.
+
+\paragraph{Offline and Online Preference Optimization}
+
+Given the intricacy and complexity of online preference optimization \citep{zheng2023secrets}, research has proliferated into more efficient and simpler offline algorithms. Direct Preference Optimization (DPO) \citep{rafailov2024direct} is a notable example, which demonstrates that the same KL-constrained objective as RLHF can be optimized without explicitly learning a reward function. The problem is reformulated as a maximum likelihood estimation (MLE) over the distribution \( \pi_{\theta} \), leading to the following objective:
+\begin{equation} \label{eq:dpo}
+\mathcal{L}_{\text{DPO}}(\pi_{\theta}; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l) \sim D}
+\left[ \log \sigma \left( \beta \log \frac{\pi_{\theta}(y_w | x) \pi_{\text{ref}}(y_l | x)}{\pi_{\theta}(y_l | x) \pi_{\text{ref}}(y_w | x)} \right) \right]
+\end{equation}
+
+where \( \beta \) is a regularization term controlling the KL-constraint strength. In this case, the implicit reward function is \( r(x, y) = \beta \log \frac{\pi_{\theta}(y|x)}{\pi_{\text{ref}}(y|x)} \). \cite{rafailov2024direct} further showed that all reward models based on the Plackett-Luce distribution \citep{plackett1975analysis,luce2005individual}, including Bradley-Terry, can be expressed in this form. 
+However the absence of an explicit reward model in DPO limits its ability to sample preference pairs from the optimal policy. \cite{Zhao2023SLiCHFSL} have investigated augmenting preference data using a trained SFT policy and \cite{liu2024statistical} have done the same with a refined SFT policy with rejection sampling, enabling policy learning from data generated by the optimal policy.
+\paragraph{Exploring Preference Optimization Objectives}
+
+Various other preference optimization objectives have been proposed in the literature. Ranking objectives facilitate compare multiple instances beyond just pairs~\citep{dong2023raft, liu2024lipo, song2024preference, yuan2023rrhf}. \cite{Hong2024ORPOMP} and \cite{xu2023some} investigate objectives that do not require a reference model. \cite{bansal2024comparing} suggest a method that jointly optimizes instructions and responses, demonstrating notable improvements over DPO. \cite{zheng2024weak} focuses on post-training extrapolation between the (SFT) model and the aligned model to enhance overall performance. In contrast to MLE-based DPO,~\cite{fisch2024robustpreferenceoptimizationreward} argue, given potentially unlimited unlabeled samples $(x, y_1, y_2) \sim \rho$, a simple ``distillation'' loss that explicitly regresses the implicit reward difference in DPO onto the true pointwise reward estimates provided by an explicit reward model or a suite of reward models\footnote{Notably~\cite{fisch2024robustpreferenceoptimizationreward} propose two versions of this reward distillation loss, one with a single reward model, the other with an ensemble of reward models. For simplicity of analysis, we only show the former here. For all our experiments with e-DPO baseline, we use the ensembled version of this loss.}, as follows:
+\begin{align}
+\label{eq:edpo_distillation}
+ \mathcal{L}_{\mathrm{distill}}(r^*, \pi_\theta; \rho) = \mathbb{E}_{\rho(x, y_1, y_2)}\left[ \left (r^*(x, y_1) - r^*(x, y_2) -  \beta \log 
+    \frac{\pi_\theta(y_1\mid x) \piref(y_2 \mid x)}{\pi_\theta(y_2 \mid x) \piref(y_1\mid x)}\right )^2\right].
+\end{align}
+
+Iterative sampling algorithms like rejection sampling are compute-intensive, and in this work, we focus exclusively on offline settings, avoiding any iterative training processes. For simplicity, we define \( \pi_{\text{ratio}}(y|x) = \frac{\pi_{\theta}(y|x)}{\pi_{\text{ref}}(y|x)} \) which can be parametrized with the winning and losing responses to get the respective likelihood ratios. We build upon insights from the previous literature to bypass issues inherent in existing offline preference optimization frameworks.
+
+\iffalse
+
+
+\section{Background and Related Work}
+
+\label{sec:background}
+
+Large language models (LLMs) have demonstrated remarkable performance in zero-shot and few-shot settings \citep{gpt2,gpt3,bubeck2023sparks}. Recent advancements involve fine-tuning pretrained LLMs on specific downstream tasks by utilizing human-written completions \citep{chung2022scaling,mishra2021cross} or datasets labeled with human-preferred completions relative to alternatives \citep{ouyang2022training, bai2022training, ziegler2019fine}. These methods have been instrumental in improving a variety of tasks such as translation \citep{kreutzer2018reliability} and summarization \citep{stiennon2020learning}, and in the development of general-purpose models like Zephyr \citep{tunstall2023zephyr}. The two most prominent techniques in learning from preference data are reinforcement learning from human feedback (RLHF) \citep{ouyang2022training, bai2022training, ziegler2019fine} and direct preference optimization (DPO) \citep{rafailov2024direct}. Below, we summarize these methods.
+
+\paragraph{RLHF} Given a dataset of pairwise preference data \( \mathcal{D} = \{ \prompt, \win, \lose \}_{i=1}^{N} \), where \( \prompt \) are prompts and \( \win \) and \( \lose \) are the preferred and dispreferred completions, respectively, RLHF begins with an initial model \( \pi_{\text{ref}} \) that parameterizes a distribution \( \pi_{\text{ref}}(y | x) \). Typically, \( \pi_{\text{ref}} \) is initialized from an LLM that has undergone supervised fine-tuning (SFT). The preference between \( y_w \) and \( y_l \) is modeled using the Bradley-Terry model \citep{BradleyTerry1952}, which defines the probability of preferring \( y_w \) over \( y_l \) as:
+\begin{equation}
+\label{eq:BT_preference}
+p(y_w \succ y_l | x) = \sigma(r(x, y_w) - r(x, y_l))
+\end{equation}
+where \( \sigma(\cdot) \) is the logistic function, and \( r(x, y) \) represents an underlying reward function. To estimate this reward function \( r \), RLHF minimizes the negative log-likelihood of the data:
+\begin{equation}
+\label{eq:RM_loss}
+\mathcal{L}_R(r_{\phi}, \mathcal{D}) = -\mathbb{E}_{(x,y_w,y_l) \sim \mathcal{D}} \left[ \log(\sigma(r_{\phi}(x, y_w) - r_{\phi}(x, y_l))) \right].
+\end{equation}
+Using this learned reward function \( r_{\phi} \), reinforcement learning is applied to optimize and generate a new LLM distribution \( \pi_{\theta} \), with a KL constraint for regularization.
+\paragraph{DPO} \citet{rafailov2024direct} demonstrated that optimizing the same KL-constrained objective used in RLHF can be achieved without explicitly learning a reward function. Instead, the problem is reformulated as a maximum likelihood estimation (MLE) over the distribution \( \pi_{\theta} \), leading to the following objective:
+
+\begin{equation} \label{eq:dpo}
+\mathcal{L}_{\text{DPO}}(\pi_{\theta}; \pi_{\text{ref}}) = -\mathbb{E}_{(x, y_w, y_l) \sim D}
+\left[ \log \sigma \left( \beta \log \frac{\pi_{\theta}(y_w | x) \pi_{\text{ref}}(y_l | x)}{\pi_{\theta}(y_l | x) \pi_{\text{ref}}(y_w | x)} \right) \right]
+\end{equation}
+
+where \( \beta \) is a regularization term controlling the KL-constraint strength. In this case, the implicit reward function is \( r(x, y) = \beta \log \frac{\pi_{\theta}(y|x)}{\pi_{\text{ref}}(y|x)} \). \cite{rafailov2024direct} further showed that all reward models based on the Plackett-Luce distribution \citep{plackett1975analysis,luce2005individual}, including Bradley-Terry, can be expressed in this form. For simplicity, we define \( \pi_{\text{ratio}}(y|x) = \frac{\pi_{\theta}(y|x)}{\pi_{\text{ref}}(y|x)} \) which can be parametrized with the winning and losing responses to get the respective likelihood ratios. 
+
+\paragraph{Ensemble-DPO} In contrast to MLE-based DPO, ~\citep{fisch2024robustpreferenceoptimizationreward} suggests that given unlabeled samples $(x, y_1, y_2) \sim \rho$ (where the number of samples can be potentially unlimited), a simple ``distillation'' loss, $\mathcal{L}_{\mathrm{distill}}(r^*, \pi_\theta)$ that explicitly regresses the implicit reward difference in DPO onto the true pointwise reward estimates provided by an explicit reward model or a suit of reward models\footnote{Notably~\cite{fisch2024robustpreferenceoptimizationreward} proposes two versions of this reward distillation loss, one with a single reward model, the other with an ensemble of reward models. For simplicity of analysis, we only show the former here. For all our experiments with e-DPO baseline, we use the ensembled version of this loss. }, as follows:
+\begin{align}
+\label{eq:distillation}
+ \mathcal{L}_{\mathrm{distill}}(r^*, \pi_\theta; \rho) = \mathbb{E}_{\rho(x, y_1, y_2)}\left[ \left (r^*(x, y_1) - r^*(x, y_2) -  \beta \log 
+    \frac{\pi_\theta(y_1\mid x) \piref(y_2 \mid x)}{\pi_\theta(y_2 \mid x) \piref(y_1\mid x)}\right )^2\right].
+\end{align}
+\fi
+
+\vspace*{-2mm}    
+
+
+\section{Theoretical Motivation: Limitations of Direct Alignment}
+
+\label{sec:theoretical}
+\vspace*{-2mm}    
+
+In order to theoretically motivate DRDO, we first provide an in-depth analysis of limitations of DPO specific to non-deterministic or weak preference labels,  as well as limitations of recent proposed solutions like IPO~\citep{azar2023general} and Ensemble-DPO (e-DPO;~\cite{fisch2024robustpreferenceoptimizationreward}). We then apply \textbf{knowledge distillation}-based techniques on rewards to provide a practical algorithm for DRDO.
+
+\paragraph{Non-Deterministic Human Preferences} 
+Following \cite{BradleyTerry1952}, \cite{rafailov2024direct} and other preference optimization frameworks posit that the relative preference of one outcome over another is governed by the true reward differences, expressed as \( p^*(y_1 \succ y_2) = \sigma(r_1 - r_2) \), where $p^*$ is the true preference distribution. Generally, in the RLHF framework, the true preference distribution is typically inferred from a dataset of human preferences, using a reward model \( r \) that subsequently guides the optimal policy learning. More importantly, to estimate the rewards and thereby the optimal policy parameters, the critical {\it reward modeling} stage involves human annotators choosing between pairs of candidate answers \( (y_1, y_2) \), indicating their preferences.\footnote{This framework can be extended to rank multiple responses using the Plackett-Luce~\citep{plackett1975analysis} model.} As such, typical alignment methods assume that $p(y_w \succ y_l | x)$ (the human annotations of preference) is equivalent to $p^*(y_1 \succ y_2 | x)$ or any ranking or choice thereby established with the human decisions. However, prospect theory and empirical studies in rational choice theory suggest that human preferences are often stochastic, intransitive, and can fluctuate across time and contexts \citep{tversky1969intransitivity, von2005welfare, regenwetter2011transitivity}.
+
+Existing direct alignment methods, such as DPO-based supervised alignment, assume access to deterministic preference labels, disregarding the inherent variability in human judgments, \textit{even when popular preference datasets are inherently annotated with such variability, noise, or ``non-deterministic preferences'' given their provenance in human labeling.} More importantly, such implicit trust in the preference data by DPO-like algorithms without explicit instance-level penalization on the loss, can cause policies that are trained to deviate from true intentions of human preference learning (see \Cref{lemma:dpo_non_deterministic} and \Cref{lemma:edpo_failure} for details). Additionally, in many datasets, a significant proportion of preference pair annotations display low human confidence, or are scored the same by common reward models (e.g., GPT-4) despite being textually different, indicating that the two responses are likely semantically similar. 
+As with policy learning, such discrepancies in preference signals can similarly derail reward learning and limit reward models from reaching a consensus, even with majority voting with reward ensembles~\citep{wang2024secretsrlhflargelanguage}. 
+These cases reflect the stochastic nature of human choices, and challenge the assumption of stable, deterministic preferences in alignment frameworks.
+
+We now formally define such ``noisy'' or non-deterministic preference labels in offline finite preference data regimes and offer some insights into limitations of current approaches like DPO and e-DPO. For the sake of analysis, we still consider a Bradley-Terry-based modeling to represent such preference signals.
+
+\begin{assumption}
+\label{assumption:main_offline_assumption}
+Let \( \mathcal{D}_{\text{pref}}= \{ (\prompt, \win, \lose) \}_{i=1}^{N} \) be an offline dataset of pairwise preferences with sufficient coverage, where each \( \prompt \) is a prompt, and \( \win \) and \( \lose \) are the corresponding preferred and dispreferred responses, respectively. Let \( r^*(x, y) \in \mathbb{R} \) be an underlying true reward function that is deterministic\footnote{
+Deterministic and non-deterministic preferences are only defined on the true preference distribution \( p^* \) and should \textit{not} be confused with the empirical probabilities or confidence assigned by the policy. The use of "deterministic" here is simply to imply that the true reward function \( r^*(x, y) \) is finite and scalar.} and finite everywhere. Let \( \pi_\theta^*(y \mid x) \) be the learned model and \( \pi_{\text{ref}}(y \mid x) \) the reference, with \(\text{supp}(\pi_{\text{ref}}) = \mathcal{Y}\). Assume \(\text{supp}(\rho) = \text{supp}(\mu) \times \mathcal{Y} \times \mathcal{Y}\), where \(\mathcal{Y}\) is the space of all responses, \( \rho \) is the data distribution, and \( \mu \) is the prompt or context distribution.
+\end{assumption}
+
+\begin{proposition}[Non-Deterministic Preferences]
+\label{prop:non_deterministic}
+Define the subset \( \mathcal{D}_{\text{nd}} \subset \mathcal{D}_{\text{pref}} \) with non-deterministic preferences as \( \mathcal{D}_{\text{nd}} = \{ (x, y, y') \in \mathcal{D}_{\text{pref}} \mid  P(y \succ y' \mid x) \approx \frac{1}{2} \} \), where \( |\mathcal{D}_{\text{nd}}| \ll N \). Under~\cref{assumption:main_offline_assumption} and antisymmetric preferences~\citep{munos2023nash}, the preference relation is given by \( P(\win \succ \lose \mid \prompt) = 1 - P(\lose \succ \win \mid \prompt) \). Given non-deterministic preferences, i.e., \( (y, y') \in \mathcal{D}_{\text{nd}} \), the Bradley-Terry model assigns \( \Delta r = 0 \), implying \( r^*(x, y) = r^*(x, y') \). Thus, \(\forall (x, y, y') \in \mathcal{D}_{\text{nd}}, \ \Delta r = 0\). See~\Cref{proof:zero_reward_diff} for a complete derivation.
+\end{proposition}
+
+
+ 
+ 
+\begin{lemma} 
+\label{lemma:dpo_non_deterministic}
+  Under Proposition~\ref{prop:non_deterministic}, a) the DPO implicit reward difference in its objective \( \frac{\pi_{\theta^*}(y) \pi_{\mathrm{ref}}(y')}{\pi_{\theta^*}(y') \pi_{\mathrm{ref}}(y)} \to 0 \), that leads to the policy empirically underfitting the preference distribution. b) For \( |\mathcal{D}_{\text{nd}}| \ll N \) where $N$ is finite, if DPO estimates that $p^*(y \succ y') = 1$, then  \( \frac{\pi_{\theta^*}(y) \pi_{\mathrm{ref}}(y')}{\pi_{\theta^*}(y') \pi_{\mathrm{ref}}(y)} \to \infty  \). c) For all minimizers \( \pi_{\theta^*} \) of the DPO objective (Eq. \ref{eq:dpo}), it follows that $\pi_{\theta^*}(y_l)  \to 0 $ and \(\pi_{\theta^*}(\mathcal{C}(y_l)^c) \to 1\), where \(\mathcal{C}(y_l)^c\) denotes the complement of the set of dispreferred responses \( \lose \), \(\forall i \in \mathbb{N}\). %q{Should this be \( i \in \mathbb{N} \)?  \textcolor{brown}{I think it should be  \( \lose \), \(\forall i \in [\mathbb{N}]\) since we are saying that this is true at every index, where   }}
+\end{lemma}
+
+Given non-trivial occurrences of non-deterministic preference pairs in typical preference learning datasets, a consequence of \Cref{lemma:dpo_non_deterministic} is that DPO's learned optimal policy can effectively assign non-zero or even very high probabilities to tokens that never appear as preferred in the training data, causing substantial policy degeneracy. Moreover, as noted and shown emprirically in previous work~\citep{azar2023general,pal2024smaug}, DPO effectively underfits the preference distribution because its empirical preference probabilities (RHS of Eq. \ref{eq:dpo} without the expectation) are only estimates of the true preference probabilities, especially when \( p^*(y \succ y') \in \{0, 1\} \). A noteworthy implication of \Cref{lemma:dpo_non_deterministic} is that this weak regularization effect of DPO can theoretically assign very high probabilities to the complement set of dispreferred tokens that never appear in the training data {\it at all}, especially when \( |N_{\text{nd}}| \ll N \) for finite data regimes. 
+In realistic settings where non-deterministic preferences constitute a non-trivial proportion of data, \Cref{lemma:dpo_non_deterministic} additionally implies that DPO leads to unstable updates and inconsistent policy behavior, where the gradient update is effectively cancelled out for these samples since the log probabilities of both the winning and the losing responses are roughly equal ($\Delta r \approx 0$), so the scaled weighting factor (sigmoid of implicit reward differences) does not contribute as much as when \( p^*(y \succ y') \in (0, 1) \). In other words, with DPO, \textit{$\pi_{\theta^*}$ not only sees less of this type of preference but also fails to adequately regularize when it does.}
+ 
+
+A solution to the above limitations of DPO within offline settings is to recast its MLE optimization objective into a \textit{regression} task, where the choice of regression target can be the preference labels themselves (as in IPO;~\cite{azar2023general}) or reward differences (as in e-DPO;~\cite{fisch2024robustpreferenceoptimizationreward}). While the former directly utilizes preference labels, regressing the log-likelihood ratio \( \pi_{\text{ratio}}\) to the KL-$\beta$ parameter as defined in Eq. \ref{eq:dpo}, the latter extends IPO by regressing against the difference in true rewards \( r^*(x, y) \), independent of explicit preference labels and acting as a strict generalization of the IPO framework. Notably, both these methods ensure that the resulting policy induces a valid Bradley-Terry preference distribution \( p^*(y_1 \succ y_2 \mid x) > 0, \, \forall x, y_1, y_2 \in \mu  \times \mathcal{Y} \times \mathcal{Y} \).
+
+ 
+
+
+However, these approaches have inherent limitations. IPO regresses the log-likelihood difference on a Bernoulli-distributed preference label, failing to capture nuanced strength in relative preferences. Conversely, e-DPO eliminates preference label dependence but sacrifices the granular signals available in preference data, instead over-relying on the quality of reward ensembles, which may still lead to over-optimization~\citep{eisenstein2024helping}. Furthermore, the use of reward ensembles in e-DPO introduces significant computational overhead, potentially limiting its broader applicability due to increased resource requirements. Consider the following lemma that derives from \cref{assumption:main_offline_assumption} and \cref{prop:non_deterministic}:
+
+\begin{lemma} 
+\label{lemma:edpo_failure}
+Under Proposition~\ref{prop:non_deterministic} and in the spirit of~\cite{fisch2024robustpreferenceoptimizationreward}'s argument, using e-DPO alignment over non-deterministic preferences pairs
+leads to \(\frac{\pi_{\theta^*}(y) \pi_\mathrm{ref}(y')}{\pi_{\theta^*}(y') \pi_\mathrm{ref}(y)} \to \infty \) for \( (y, y') \in \mathcal{D}_{nd} \) where \( y = \win \)  and \( y' = \lose \), \(\forall i \in \mathbb{N}\). Then, for all minimizers \( \pi_{\theta^*} \) of the e-DPO objective (Eq. \ref{eq:edpo_distillation}), 
+it follows that \(\pi_{\theta^*}(\mathcal{C}(y_l)^c) \to 1\) with \( 0 < \pi_{\theta^*}(\win) \leq 1 \), \(\forall i \in \mathbb{N}\), where \(\mathcal{C}(y_l)^c\) denotes the complement of the set of responses \( y \) appearing as preferred \( \lose \), \(\forall i \in \mathbb{N}\).
+\end{lemma}
+Our core insight in proposing DRDO is that modeling relative preference strengths during the {\it policy learning stage, particularly at the extrema of the preference distribution}, is only problematic if one uses a DPO-like MLE loss formulation that maximizes implicit reward differences. On the other hand, the MLE formulation for the {\it reward modeling} stage does not suffer from this limitation precisely because estimated rewards are scalar quantities with no likelihood terms within the log-sigmoid term (as in Eq. \ref{eq:RM_loss}), provided there is enough coverage in the preference data. Since both stages rely on a finite preference dataset with various levels of preference strengths (that mirrors human preferences), one can combine the two stages by explicitly distilling rewards into the policy learning stage. Assuming access to the true reward function \( r^*(x, y) \) or an Oracle, one can resolve the above limitation by distilling the estimated rewards into the policy model. This intuitively avoids DPO's underfitting to extremal preference strengths: since the same preference data is used for reward distillation and policy learning, this offline distillation ensures that the policy stays within the data distribution during alignment.
+
+
+
+
+\vspace*{-2mm}    
+
+
+\section{Direct Reward Distillation and policy-Optimization (DRDO)}
+
+\label{sec:drdo}
+\vspace*{-2mm}    
+
+\paragraph{Training the Oracle Reward Model}
+The first step in DRDO involves training an Oracle model \( \mathcal{O} \) to act as a robust proxy of true human preference inferred from the preference data. Second, we use \( \mathcal{O} \) as a teacher to align the policy model (student) with a knowledge-distillation-based multi-task loss~\citep{hinton2015distilling,gou2021knowledge} that regresses the student's rewards onto those assigned by the Oracle. Within this multi-task setting, the student model simultaneously draws additional supervision from binary preference labels to make the most efficient use of finite preference data.
+Crucially, since the student model's alignment depends on the quality of the Oracle and its generalizability, we use~\cite{yang2024regularizinghiddenstatesenables}'s strategy to optimize \( \mathcal{O} \) while retaining its language generation abilities. The core idea here is that regularizing the shared hidden states with a language generation loss in addition to the traditional RLHF-based reward modeling (Eq. \ref{eq:RM_loss}) improves generalization ability for out-of-distribution preferences. 
+This also helps minimize reward hacking~\citep{kumar2022fine, eisenstein2024helping}, especially in offline settings.
+As such, our Oracle is optimized to minimize the following objective:
+\begin{equation}
+\label{eq:RM_loss_grm}
+\mathcal{L}_\mathcal{O}(r_{\phi}, \mathcal{D}_{\text{pref}}) = -\mathbb{E}_{(x,y_w,y_l) \sim \mathcal{D}_{\text{pref}}} \left[ (1-\alpha) ( \log\sigma(r_{\phi}(x, y_w) - r_{\phi}(x, y_l))) + \alpha \log(y_w) \right]
+\end{equation} where $\alpha$ is the strength of language-generation regularization and $\phi$ represents the parameters of \( \mathcal{O} \) being estimated. For more details on hyperparameter $\alpha$, see \Cref{sec:exp}.
+
+
+
+A converged Oracle \( \mathcal{O} \) can plausibly estimate true pointwise reward differences \( r^*(x, y_1) - r^*(x, y_2) \) for any unlabeled sample \((x, y_1, y_2)\), without needing explicit access to preference labels. To fully leverage the diversity of preference signals, including non-deterministic preferences, we formulate the DRDO loss to utilize these signals directly. Specifically, the student model \(\pi_\theta\) is optimized to match the Oracle's reward differences using its own predictions, aligning closely with the Oracle's behavior, while \( \mathcal{O} \) itself does not get updated. This is achieved by minimizing a loss that combines both a supervised \( \ell^2 \)-norm term and a novel focal-softened~\citep{lin2018focallossdenseobject, welleckneural} log odds-unlikelihood component:
+\begin{align} 
+\label{eq:distillation}
+\mathcal{L}_{\mathrm{kd}}(r^*, \pi_\theta) &= \mathbb{E}_{(x, y_1, y_2) \sim \mathcal{D}_{\text{pref}}} \Bigg[ 
+\underbrace{\left( r^*(x, y_1) - r^*(x, y_2) - (\hat{r}_1 - \hat{r}_2) \right)^2}_{\text{Reward Difference}} \nonumber \\ 
+&\quad - \underbrace{\alpha (1 - p_w)^\gamma \log\left(\frac{\pi_\theta(y_w \mid x)}{1 - \pi_\theta(y_l \mid x)}\right)}_{\text{Contrastive Log-"unlikelihood"}}
+\Bigg],
+\end{align}
+
+where \( p_w = \sigma(z_w - z_l) = \frac{1}{1 + e^{-(z_w - z_l)}} \) and quantifies the student policy's confidence in correctly assigning the preference from \( z_w = \log \pi_\theta(y_w \mid x) \) and \( z_l = \log \pi_\theta(y_l \mid x) \), or the log-probabilities of the winning and losing responses, respectively. $\gamma$ and $\alpha$ are hyperparameters that regulate the strength of the modulating term and weighting factor\footnote{Note that we do not use $\alpha$ as it is traditionally used in focal loss for weighting class imbalances~\citep{mukhoti2020calibrating}. Instead, since the true preference distribution is unknown, we tune the empirical optimal value based on validation data and keep it fixed during training.} respectively.
+
+\begin{wrapfigure}{r}{0.4\textwidth} % 'r' for right, 'l' for left, adjust width as needed
+\vspace*{-4mm}    
+    \centering
+    \includegraphics[width=\linewidth,trim={20 15 20 15},clip]{figures/drdo_focal_motivation.drawio.pdf}
+\vspace*{-6mm}    
+   \caption{
+    Illustration of the DRDO preference loss as a function of the log-unlikelihood ratio 
+    across various values of \(\gamma\), the focal modulation parameter. 
+    }
+    \label{fig:focal_motivation}
+\vspace*{-6mm}    
+\end{wrapfigure}
+
+Intuitively, DRDO's first component in the loss effectively regresses over the Oracle's reward differences across all response pairs $(x, y_1, y_2)$ in $\mathcal{D}_{\text{pref}}$, using \(\pi_\theta\)'s own reward estimates, $\hat{r}_1$ and $\hat{r}_2$. Assuming the Oracle's reward estimates correctly reflect the true preference strength, this simple distillation component is precisely minimized when the student \(\pi_\theta\) perfectly emulates the Oracle's reward difference assignment, without requiring it to explicitly match the pointwise rewards. The square over this term ensures that training is stabilized especially since we allow this component to fully regularize the loss without applying any weighting terms. 
+ 
+
+
+\paragraph{How does the DRDO gradient update affect preference learning?}
+For the preference component in DRDO loss (contrastive log-unlikelihood in Eq. \ref{eq:distillation}), one can immediately draw a comparison with DPO which uses a fixed \(\beta\) parameter (Eq. \ref{eq:dpo}). DRDO uses a modulating focal-softened term, $(1 - p_w)^\gamma $ where \(\pi_\theta\) learns from both deterministic and non-deterministic preferences, effectively blending reward alignment with preference signals to guide optimization. Intuitively, unlike DPO's fixed \(\beta\) that is applied across the whole training dataset, this modulating term amplifies gradient updates when preference signals are weak (\( p_w \approx 0.5 \)) and tempering updates when they are strong (\( p_w \approx 1 \)), thus ensuring robust learning across varying preference scenarios. When \(\pi_\theta\) assigns high confidence to the winning response 
+    (\( p_w \approx 1 \), see Eq. \ref{eq:distillation}), the focal loss contribution diminishes, reflecting minimal penalty due to strong deterministic preference signals. However, for harder cases with non-deterministic true preference 
+    (\( p^*(y \succ y') = ( p^*(y' \succ y) \)), the focal term $\alpha (1 - p_w)^\gamma$ keeps DRDO gradient updates active and promotes learning even when preferences are ambiguous (\Figref{fig:focal_motivation}). This adaptive behavior ensures that DRDO maintains effective preference learning across varying preference strengths, especially when conventional methods like DPO struggle. See \Cref{lemma:dpo_non_deterministic} and \Cref{lemma:edpo_failure} for in-depth analysis.~\ref{fig:drdo_eval_plots} (bottom-right), this modulating term acts like DPO's gradient scaling term, in that it scales the DRDO gradient when the model incorrectly assigns preferences to easier samples.
+
+
+
+
+\vspace*{-2mm}    
+
+
+\section{Experimental Setup}
+
+\label{sec:exp}
+\vspace*{-2mm}    
+
+Our experimental setup addresses two questions: {\bf How robust is DRDO alignment to nuanced or diverse preferences, in OOD settings?}, and {\bf How well does DRDO achieve reward distillation with respect to model size?} We empirically investigate these questions on two tasks: \textbf{summarization} and single-turn \textbf{instruction following}. Our experiments, including choice of datasets and models for each task are designed to to validate our approach as robustly as possible, subject to research budget constraints (see \Cref{app:dataset-motivation} for more). We compare our approach with competitive baselines such as DPO~\citep{rafailov2024direct} and e-DPO~\citep{fisch2024robustpreferenceoptimizationreward}, including the supervised finetuned (baseline) versions depending on the experiment. Some minor notes on the experimental setup described below can be found in \Cref{app:exp-notes}.
+
+
+\paragraph{How robust is DRDO alignment to nuanced or diverse preferences, in OOD settings?}
+
+We evaluate this on the {\bf Reddit TL;DR summarization dataset}~\citep{volske2017tl,stiennon2020learning}. We split the training data---Reddit forum posts---based on human labeler confidence in their preference annotation (\textit{h}igh-\textit{c}onfidence vs. \textit{l}ow-\textit{c}onfidence) and token edit distance between the preferred and the dispreferred responses (\textit{h}igh-\textit{e}dit distance vs. \textit{l}ow-\textit{e}dit distance). This results in two splits: $\mathcal{D}_{hc,he}$ and $\mathcal{D}_{\ell c,\ell e}$. Each contains $\sim$10k training samples, where the former comprises samples from the upper 50th percentile of the confidence and edit distance scores, {\it mutatis mutandis}. Intuitively, $\mathcal{D}_{hc,he}$ and $\mathcal{D}_{\ell c,\ell e}$ represent ``easy'' (deterministic) and ``hard'' (non-deterministic) preference samples where combined labeler confidence and string-dissimilarity act as proxy for the extreme ends of preference strengths/signals. We denote the original training data $\mathcal{D}_{all}$. For each split, we compare our approach to DPO and e-DPO, where all baselines are initialized with Phi-3-Mini-4K-Instruct weights~\citep{abdin2024phi3technicalreporthighly} with supervised fine-tuning (SFT) on Reddit TL;DR human-written summaries.
+The test set is composed of news articles from CNN Daily, and therefore an out-of-distribution (OOD) setting.
+
+\paragraph{How well does DRDO achieve reward distillation w.r.t. model size? }
+
+We evaluate all baselines on the cleaned version of the {\bf Ultrafeedback dataset}~\citep{cui2024ultrafeedbackboostinglanguagemodels}
+This experiment is conducted on the OPT suite of models~\citep{zhang2022opt}, at 125M, 350M, 1.3B, and 2.7B parameter sizes. The student policy is trained with SFT
+on the chosen responses of the dataset, following~\cite{rafailov2024direct}. We exclude larger OPT models to focus on testing our distillation strategy with full-scale training, rather than parameter-efficient methods (PEFT)~\citep{houlsby2019parameter, hu2021lora} to allow a full-fledged comparison considering all trainable parameters of the base model. For completeness and comparison across model families, we also include Phi-3-Mini-4K-Instruct following the same initialization.
+\paragraph{DRDO and e-DPO Specifics}
+
+Although DRDO requires an explicit reward Oracle \( \mathcal{O} \), we fix only one model (based on parameter size and model family) for each experiment. We use Phi-3-Mini-4K-Instruct and OPT 1.3B causal models initialized with a separate linear reward head while retaining the language modeling head weights.\footnote{Similar to~\cite{yang2024regularizinghiddenstatesenables}, we found better generalization in reward learning when our Oracle reward learning loss is regularized with the SFT component (second term in Eq. \ref{eq:RM_loss_grm}) with an $\alpha$ of 0.01.} 
+Fixing the size of \( \mathcal{O} \) allows us to evaluate the extent of preference alignment to smaller models, as in classic knowledge distillation~\citep{gou2021knowledge}. To reproduce the e-DPO~\citep{fisch2024robustpreferenceoptimizationreward} baseline, we train three reward models using Eq. \ref{eq:RM_loss} with the mentioned base models but with different random initialization on the reward heads.
+
+\paragraph{Evaluation}
+\textbf{TL;DR} provides human-written reference summaries, so we use a high-capacity Judge to compute win-rates against baselines on 1000 randomly-chosen samples from the TL;DR test set. Following \cite{rafailov2024direct}, we use GPT-4o to compare the conciseness and the quality of the DRDO summaries and baseline summaries, \textit{while grounding its ratings to the human written summary}. See \Cref{app:eval-prompts} for our prompt format. For instruction following on \textbf{Ultrafeedback}, we sample generations from DRDO and all baselines at various diversity-sampling temperatures and report win-rates on the Ultrafeedback test set against \( \mathcal{O} \). Following \cite{lambert2024rewardbench}, we consider a {\it win} to be when, for two generations $y_1$ and $y_2$, we get $r(x, y_1) > r(x, y_2)$, where $r(x, y_1)$ and $r(x, y_2)$ are the expected rewards (logits) from the policies being compared. We also evaluate DRDO (trained on Ultrafeedback) against baselines (all trained on Ultrafeedback) on \textbf{AlpacaEval}, another instruction following benchmark for which we evaluating using GPT-4 Turbo as suggested by the creators~\citep{li2023alpacaeval}. Hyperparameters and model configurations are given in~\Cref{sec:hyperparameters}.
+\vspace*{-2mm}    
+
+
+\section{Results}
+
+\label{sec:results}
+\vspace*{-2mm}    
+
+\paragraph{Non-deterministic preferences}
+\Cref{tab:win_rates_summary} shows the win rates computed with GPT-4o as judge for 1,000 randomly selected sample-prompts $x$ from the CNN Daily TL;DR evaluation set~\citep{nallapati2016abstractive} under OOD settings. We follow similar settings as~\cite{rafailov2023direct} but further ground the prompt using human-written summaries as reference for GPT to conduct its evaluation (see \Cref{app:eval-prompts}). For a fairer evaluation~\citep{wang2024eliminating,goyal2023newssummarizationevaluationera, rafailov2023direct}, we swap positions of \(\pi_\theta\)-generated summaries $y$ in the prompt to eliminate any positional bias and evaluate the generated summaries on criteria like coherence, preciseness and conciseness, \textit{with the human written summaries explicitly in the prompt to guide evaluation.} Note that the win rate does not necessarily equal $N/1000$ because for a small number of samples ($<$ 10) GPT-4o did not return a judgment. These samples were discarded from the denominator.
+
+\begin{wraptable}{r}{0.45\textwidth} % Adjust the placement and width as needed
+\vspace*{-4mm}    
+    \small
+    \centering
+    \caption{Win rates computed with GPT-4o as judge for 1,000 randomly selected samples from the evaluation set of the \textbf{TL;DR} CNN Daily dataset under OOD settings. This comparison evaluates the model against a baseline, presenting win counts alongside win rates. {$\mathcal{D}_{all}$}, {$\mathcal{D}_{hc,he}$}, and {$\mathcal{D}_{\ell c,\ell e}$} represent TL;DR training splits.
+    ``Gold'' samples refer to human-written reference summaries used in prompts to ground the win rate computations.}
+\vspace*{-2mm}    
+    
+    \begin{tabular}{lcc}
+        \toprule
+        
+        \textbf{Comparison} & \textbf{\# Wins} & \textbf{Win Rate} \\
+        \midrule
+       
+        \textbf{DRDO vs. e-DPO} & & \\
+        \quad \textbf{$\mathcal{D}_{all}$} & 731 & 78.27\% \\
+        \quad \textbf{$\mathcal{D}_{hc,he}$} & 759 & 80.92\% \\
+        \quad \textbf{$\mathcal{D}_{\ell c,\ell e}$} & 738 & 79.01\% \\
+        \midrule
+        \textbf{DRDO vs. DPO} & & \\
+        \quad \textbf{$\mathcal{D}_{all}$} & 748 & 80.78\% \\
+        \quad \textbf{$\mathcal{D}_{hc,he}$} & 746 & 79.11\% \\
+        \quad \textbf{$\mathcal{D}_{\ell c,\ell e}$} & 746 & 79.79\% \\
+        \midrule
+        \textbf{Gold vs. DRDO} & 525 & 52.82\% \\
+        \midrule
+        \textbf{Gold vs. e-DPO} & 540 & 54.38\% \\
+        \midrule
+        \textbf{Gold vs. DPO} & 579 & 58.54\% \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:win_rates_summary}
+\vspace*{-8mm}    
+\end{wraptable}
+ 
+For all policies \(\pi_\theta\) trained on all three splits of the training data: {$\mathcal{D}_{all}$}, {$\mathcal{D}_{hc,he}$}, and {$\mathcal{D}_{\ell c,\ell e}$}, we compute the win-rates of DRDO vs. e-DPO and DPO to evaluate how each method performs at various levels of preference types. Across all settings, DRDO policies significantly outperform the two baselines. For instance, DRDO's average win rates are almost 79.4\% and 79.9\% against e-DPO and DPO, respectively. As we had hypothesized, DRDO-aligned \(\pi_\theta\) is able to learn preferences more effectively, especially in {$\mathcal{D}_{\ell c,\ell e}$} the subset containing more non-deterministic preference samples. This suggests that DRDO is more robust to OOD-settings at various levels of difficulty in learning human preferences.
+
+ 
+
+\paragraph{Reward distillation}
+
+\Cref{tab:main_result_ultra} shows results from our evaluation of DRDO's reward model distillation framework compared to DPO and e-DPO as well as baseline SFT-trained policies on the Ultrafeedback evaluation data, when compared \textit{across various model parameter sizes} and at varying levels of temperature sampling. We sample \(\pi_\theta\)-generated responses to instruction-prompts in the test set using top-p (nucleus) sampling~\citep{holtzman2019curious} of 0.8 at various temperatures $\in \{0.2, 0.5, 0.7, 0.9\}$. 
+
+\vspace*{-2mm}    
+\begin{table}[ht]
+    \centering
+    \caption{Average win-rates computed with DRDO's Oracle reward model against all baselines---SFT, DPO and e-DPO---at various diversity sampling temperatures ($T$). Bolded numbers show the highest win-rates against each baseline at each temperature.}
+\resizebox{\textwidth}{!}{%
+\centering
+\renewcommand{\arraystretch}{1.2} % Adjust row spacing
+\begin{tabular}{lcccccccccccl}
+    \toprule
+    \multicolumn{13}{c}{\textbf{Baselines}} \\ % Reference Models spanning all columns
+    \midrule
+    & \multicolumn{3}{c}{$T=0.2$} & \multicolumn{3}{c}{$T=0.5$} & \multicolumn{3}{c}{$T=0.7$} & \multicolumn{3}{c}{$T=0.9$} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}
+    \textbf{Policy (Student)} & \textbf{SFT} & \textbf{DPO} & \textbf{e-DPO} & \textbf{SFT} & \textbf{DPO} & \textbf{e-DPO} & \textbf{SFT} & \textbf{DPO} & \textbf{e-DPO} & \textbf{SFT} & \textbf{DPO} & \textbf{e-DPO} \\
+       \midrule
+        OPT-125M   & 0.47 & 0.61 & 0.51 & 0.52 & 0.63 & 0.50 & 0.57 & 0.58 & 0.54 & 0.57 & 0.64 & 0.61 \\
+        OPT-350M   & 0.58 & 0.63 & 0.60 & 0.61 & 0.70 & 0.65 & 0.60 & 0.70 & 0.69 & 0.66 & 0.70 & 0.68 \\
+        OPT-1.3B    & \textbf{0.83} & 0.70 & \textbf{0.83} & \textbf{0.82} & 0.65 & \textbf{0.81} & \textbf{0.83} & 0.63 & 0.75 & \textbf{0.81} & 0.59 & \textbf{0.78} \\
+        OPT-2.7B    & 0.81 & 0.68 & \textbf{0.83} & 0.80 & 0.64 & 0.80 & 0.79 & 0.62 & \textbf{0.78} & 0.79 & 0.60 & 0.75 \\
+        Phi-3       & 0.66 & \textbf{0.80} & 0.57 & 0.71 & \textbf{0.83} & 0.58 & 0.75 & \textbf{0.86} & 0.60 & 0.76 & \textbf{0.88} & 0.66 \\
+    \bottomrule
+\end{tabular}}
+    \label{tab:main_result_ultra} 
+\vspace*{-2mm}    
+\end{table}
+
+  
+DRDO significantly outperforms competing baselines, especially for larger models in the OPT family. DRDO-trained OPT-1.3B, OPT-2.7B, and Phi-3-Mini-4K-Instruct achieve average win rates of 76\%, 74\%, and 72\%, respectively, across all baselines. This is notable as responses are sampled on unseen prompts, and DRDO's policy alignment is reference-free. DRDO’s robustness to diversity sampling further boosts performance, up to an 88\% win rate against DPO with the Phi-3-Mini-4K-Instruct model. At lower temperatures, DRDO's posted gains are more modest. Our results also indicate that performance is correlated with model size, as DRDO policies of the same size as the Oracle (1.3B) show the strongest gains. In smaller models, results are more mixed.\footnote{This may be due to spurious length-correlation~\citep{singhal2024longwaygoinvestigating, meng2024simposimplepreferenceoptimization}, as smaller models generated avg. $\sim$211.9 tokens compared to their policy counterparts' $\sim$190.8 tokens, which is closer to the original preferred responses in Ultrafeedback ($\sim$168.8). See \Cref{sec:hyperparameters} for more details.}. DRDO shows moderate improvement and posts smaller gains against SFT models.
+\begin{wraptable}{r}{0.45\textwidth} % Adjust the placement and width as needed
+\small
+    \centering
+    \caption{Win rates on the \textbf{AlpacaEval} benchmark with GPT-4 Turbo as judge ($N=805$).}
+    \vspace*{-2mm}    
+
+    \begin{tabular}{lcc}
+        \toprule
+        
+        \textbf{Comparison} & \textbf{\# Wins} & \textbf{Win Rate} \\
+        \midrule
+        \textbf{DRDO vs. e-DPO} & 495 & 62.03\% \\
+        \midrule
+        \textbf{DRDO vs. DPO} & 491 & 61.61\% \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:win_rates_alpacaeval}
+\vspace*{-6mm}    
+\end{wraptable}
+  
+
+
+Next, to precisely pinpoint DRDO's instruction following ability in OOD settings, we further evaluate on the popular automatic evaluation benchmark AlpacaEval~\citep{li2023alpacaeval}, where LLM responses are specifically evaluated on 805 instructions chosen to be representative of how human-preferred policies would respond. \Cref{tab:win_rates_alpacaeval} shows that, within controlled evaluation settings, GPT 4-Turbo consistently prefers DRDO responses 62.03\% and 61.61\% times compared to e-DPO and DPO respectively.
+  
+
+
+ 
+ 
+  
+  
+  
+  
+  
+  
+  
+
+
+
+\iffalse
+
+
+\section{Simulating Non-Deterministic Preferences}
+
+
+In order to robustly evaluate our reward distillation method, we create multiple datasets from the Ultrafeedback Binarized (cleaned) dataset~\citep{notus2023} such that our model is evaluated against the other baselines at various levels of training difficulty. As shown in the previous section, methods like DPO~\citep{rafailov2024direct} drastically underfit for deterministic preferences or DPO-generated policy are empirically proved to be suboptimal for deterministic preferences~\citep{azar2024general, fisch2024robustpreferenceoptimizationreward}, while also being crucially subopotimal for \textit{non-deterministic preferences} i.e., pairs of responses where the preference decision is difficult to make~\citep{pal2024smaug}. While~\cite{pal2024smaug} assume non-determinism of preferences to be correlated to edit-distances between pairwise-samples\footnote{\citep{pal2024smaug}'s theoretical framework brings insights on DPO's suboptimality assumes small edit distance between pairwise samples and they empirically show this primarily for math and reasoning based tasks. In contrast, our evaluation framework is more general in the sense that we consider both the oracle reward difference as well as edit distance in addressing DPO's limitations in learning from non-deterministic preferences and we evaluate on a more diverse set of prompts apart from math and reasoning tasks. }, we do not make sure assumptions and consider both the true (oracle) rewards and edit-distances between pairs to verify the robustness of our method. 
+\begin{assumption}
+Let \( \mathcal{D} = \{ (x^{(i)}, y_w^{(i)}, y_l^{(i)}) \}_{i=1}^{N} \) be an offline dataset of pairwise preferences with sufficient coverage, where each \( x^{(i)} \) is a prompt, and \( y_w^{(i)} \) and \( y_l^{(i)} \) are the corresponding preferred and dispreferred responses, respectively. Assume a true reward function \( r^*(x, y) \), which is approximated by an Oracle \( \mathcal{O} \) and adheres to the Bradley-Terry (BT) model. Define \( \pi(y \mid x) \) as the learned policy model and \( \pi_{\text{ref}}(y \mid x) \) as a reference model. The preference probability for the \( i \)-th pair under symmetricity~\citep{munos2023nash} can be written as \( P(y_w^{(i)} \succ y_l^{(i)} \mid x^{(i)}) = 1- P(y_l^{(i)} \succ y_w^{(i)} \mid x^{(i)})= \sigma(\Delta r^{(i)}) \), where \( \Delta r^{(i)} = r^*(x^{(i)}, y_w^{(i)}) - r^*(x^{(i)}, y_l^{(i)}) \), and \( \sigma(\cdot) \) represents the sigmoid function.
+\end{assumption}
+
+
+\begin{lemma}
+\label{lemma_bt_invariant}
+\textit{Given the true reward function \( r^*(x, y) \) under the above assumptions, the preference distribution\footnote{With slight abuse of notation, we ignore the indices of preference pairs $i$ for clarity in constrasting the preference \textit{distribution} vs the sample-level preference probabilities.} \( P(y_w \succ y_l \mid x) \) induced by the true reward function remains invariant under the DPO implicit reward reparameterization, where \( r(x, y) = \beta \log \frac{\pi(y \mid x)}{\pi_{\text{ref}}(y \mid x)} + \beta\log(Z(x))\) is the implicit reward induced by the KL-constrained optimal policy   \( \pi(y|x) = \frac{1}{Z(x)} \pi_{\text{ref}}(y|x) \exp\left(\frac{r(x, y)}{\beta}\right) \)}
+\end{lemma}
+
+\textcolor{purple}{An alternative way of viewing~\Cref{lemma_bt_invariant} is that given a true reward function that can be sufficiently approximated with a proxy oracle reward model $\mathcal{O}$, we can use this oracle reward model to conveniently sample non-deterministic response pairs from a sufficiently well-covered dataset $D$ \textit{without} changing the underlying preference distribution
+\begin{corollary}
+    
+
+For non-deterministic preferences, where \( P(y_w \succ y_l \mid x) \approx P(y_l \succ y_w \mid x) \sim \frac{1}{2} \), it follows that \( \Delta r \sim 0 \). If the rewards are normally distributed, with \( r(x, y_w) \sim \mathcal{N}(\mu_w, \sigma_w^2) \) and \( r(x, y_l) \sim \mathcal{N}(\mu_l, \sigma_l^2) \), then the difference \( \Delta r \sim \mathcal{N}(\mu_{\Delta r}, \sigma_{\Delta r}^2) \), where \( \mu_{\Delta r} = \mu_w - \mu_l \) and \( \sigma_{\Delta r}^2 = \sigma_w^2 + \sigma_l^2 \). For non-deterministic preferences, \( \mu_{\Delta r} \approx 0 \), ensuring that \( \mathbb{E}[\Delta r] \approx 0 \).
+\end{corollary}
+
+\noindent
+From the Bradley-Terry (BT) preference model, the probability of preferring response \( y_w \) over \( y_l \) given context \( x \) is modeled as:
+\[
+\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}[P(y_w \succ y_l \mid x)] = \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}[\sigma(r(x, y_w) - r(x, y_l))]
+\]
+where \( \sigma(\cdot) \) denotes the sigmoid function, and \( r(x, y_w) \) and \( r(x, y_l) \) are the implicit rewards for responses \( y_w \) and \( y_l \), respectively.
+
+\noindent
+For the complementary preference, the expected probability becomes:
+\[
+\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}[P(y_l \succ y_w \mid x)] = \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}\left[1 - \sigma(r(x, y_w) - r(x, y_l))\right]
+\]
+This can be rewritten as:
+\[
+\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}[P(y_l \succ y_w \mid x)] = \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}\left[\frac{e^{-(r(x, y_w) - r(x, y_l))}}{1 + e^{-(r(x, y_w) - r(x, y_l))}}\right]
+\]
+
+\noindent
+For non-deterministic preferences, where \( P(y_w \succ y_l) \approx P(y_l \succ y_w) \), we equate the expected probabilities:
+\[
+\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}\left[\frac{1}{1 + e^{-\Delta r}}\right] = \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}\left[\frac{e^{-\Delta r}}{1 + e^{-\Delta r}}\right]
+\]
+where \( \Delta r = r(x, y_w) - r(x, y_l) \).
+
+\noindent
+Solving this equation under the assumption that \( \Delta r \) spans \( -\infty \) to \( \infty \), we obtain:
+\[
+\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}\left[1\right] = \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}\left[e^{-\Delta r}\right]
+\quad \Rightarrow \quad \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}}[\Delta r] \approx 0
+\]
+
+\noindent
+Thus, for non-deterministic preferences, the expected reward difference \( \mathbb{E}[\Delta r] \approx 0 \), implying that the implicit rewards \( r(x, y_w) \) and \( r(x, y_l) \) are nearly equal.
+In particular, the preference probability $p(y_w \succ y_l | x) $ in ~Eq. \ref{eq:BT_preference}  expressed in terms of the difference of the implicit rewards as in the classic Bradley Terry formulation~\citep{BradleyTerry1952}, provides crucial information about the \textit{complementary} preference $p(y_l \succ y_w | x)$ where the losing response $y_l$ is preferred over the winning response, $y_w$. Intuitively, this also allows us to express the case of non-deterministic preferences\footnote{
+As the reward difference \( r_1 - r_2 \) tends to \( +\infty \), the model's preference for the chosen response asymptotically approaches certainty (\( P \rightarrow 1 \)). Conversely, if \( r_1 - r_2 \) trends towards \( -\infty \), the model's favor shifts decisively towards the rejected response (\( P \rightarrow 0 \)). The former, though ideal in the Bradley Terry model, has been shown to cause underfitting in DPO-trained models\cite{azar2023general, fisch2024robustpreferenceoptimizationreward}.
+} where the model treats choices as equally preferable and we have \( P(\text{chosen} \succ \text{rejected}) = P(\text{rejected} \succ \text{chosen}) \sim \frac{1}{2} \). This equality implies that \( \log\sigma(r_1 - r_2) \sim \log\left(\frac{1}{2}\right) \). Consequently, the expected reward difference aligns such that \( \mathbb{E}[\log\sigma(r_1 - r_2)] \sim \log\left(\frac{1}{2}\right) \), representing the non-deterministic case where the reward difference does not statistically indicate either response. 
+Without losing generality and drawing from prior work \citep{yang2024regularizinghiddenstatesenables,cen2024valueincentivizedpreferenceoptimizationunified}, we can draw rewards \( r_1 \) and \( r_2 \) from two Gaussian distributions \( r_1 \sim \mathcal{N}(\mu_{r_1}, \sigma_{r_1}^2) \) and \( r_2 \sim \mathcal{N}(\mu_{r_2}, \sigma_{r_2}^2) \) respectively and denote the reward difference as \( \Delta r = r_1 - r_2 \), follows \( \Delta r \sim \mathcal{N}(\mu_{\Delta r}, \sigma_{\Delta r}^2) \), where \( \mu_{\Delta r} = \mu_{r_1} - \mu_{r_2} \) and \( \sigma_{\Delta r}^2 = \sigma_{r_1}^2 + \sigma_{r_2}^2 \). By setting \( \mu_{\Delta r} = 0 \), we ensure \( \mathbb{E}[\Delta r] = 0 \), ideally modeling non-deterministic preferences where \( \Delta r \approx 0 \). 
+\subsection{Experimental framework}
+
+We want to show that our reward model distillation method is robust to all kinds of preferences, including deterministic preferences (where some response y1 is clearly better than another y2 for a given prompt x). Previous work has shown that certain kinds of reward distillation is robust to challenging settings like training dataset compositions where the preferred response is shorter in various proportions of the entire training set. In short, DPO type models love longer responses are preferred in training, so does GPT4. The latter will inherently score longer responses higher than shorted, on average so there is a positive correlation here. For instance,~\citep{fisch2024robustpreferenceoptimizationreward} trains and test their distilled models on a series of datasets (same dataset actually but with different proportions of short preferred responses). 
+
+We don’t want to do this exactly. But this strategy works well under time-constraints. In our case, we want to slowly increase non-deterministic preferences in our datasets ($D_i$) and see how well our distillation works at various levels of non-deterministic proportions. By non-deterministic, we mean pairs that are difficult to rate as preferred or dis-preferred. In order to build this dataset, we do two things: we first compute the reward score difference given by an oracle model (GPT-4) between the two responses and then keep the sample pairs where the reward score difference $\sim $ 0. Unlike~\citep{pal2024smaug} that only considers low-edit distance pairs as non-deterministic ( their logic is if two samples are very similar and only differ at a token) and shows that DPO fails in those cases. We do not make such assumptions: therefore, we use both the reward diff as well as those pairs with low edit distance to construct our datasets. As in, we keep 10, 20, 30, 50, 60 etc non-deterministic preference pairs and then train DPO, pessimistic DPO vs our proposed loss functions. Now, we can check how does training proceeds for a particular amount of compute budget, say 5000 steps. After every 500 steps, say we evaluate the rewards on the test set. Depending on what the plots look like, ideally we want to say that, look our model trains better as we increase non-deterministic preferences or at least better than other baselines. 
+\fi
+\vspace*{-2mm}    
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+\vspace*{-2mm}    
+
+Table~\ref{tab:example-analysis} shows example generations from DRDO and a competitor where the DRDO example was preferred by the automatic judge. First is a sample from Ultrafeedback against a \textit{DPO} generation and second is a TL;DR sample against an \textit{e-DPO} generation. In both cases, we can see that the DRDO response is more concise and on-topic and the competitor output was dispreferred for reasons like condescending to the user, or including extraneous text about fulfilling the request.
+
+\vspace*{-2mm}
+\begin{table*}[h]
+    \caption{Example generations from DRDO and competing methods, showing where DRDO generates more preferred responses.}
+\resizebox{\textwidth}{!}{
+    \footnotesize 
+    \begin{tabular}{lp{7cm}p{7cm}}
+    \toprule
+    \textbf{Prompt/Context} & \textbf{Competitor} & \textbf{DRDO} \\
+    \midrule
+    Which of these sentences doesn't make sense? & 1. The sentence ``the garden has so many flowers'' makes & Sentence B: ``the garden has so many pigs'' does not  \\
+    Options: & no sense. The phrase ``so many flowers'' makes no sense. & make sense because the garden has no pigs. The sentence \\
+    - Sentence A: ``the garden has so many flowers'' & The phrase ``so many pigs'' makes no sense. & implies that there are pigs in the garden, but there is \\
+    - Sentence B: ``the garden has so many pigs'' & 2. The sentence ``the garden has so many flowers'' makes & no evidence to support this. \\
+    Hmm, let me think, I want to lay out the solution & perfect sense. The phrase ``so many flowers'' makes & \\
+    in detail & perfect sense. The phrase ``so many pigs'' makes perfect & \\
+    & sense. & \\
+    & If you disagree, you're wrong, and you should go back to English class. & \\
+
+    
+    \midrule
+    
+    Summarize this news article clearly and concisely. & TL;DR: Rocker Jack White will take a brief, \$3 acoustic & TL;DR: Jack White announces a \$3 acoustic tour in \\
+    Use TL;DR in your response: & tour to the U.S. states he has yet to perform in. Tickets & five states he hasn't played yet. Tickets are \$3, one per \\
+    TITLE: Jack White to play mystery \$3 shows  & are limited to one per person and will be sold on a first- & person, and available only at the venue on a first-come, \\
+    $<${\it 2015 Billboard article on upcoming Jack White} & come, first-served basis. & first-served basis. \\
+    {\it acoustic tour}$>$ (full text omitted for length) & I'm sorry, but I cannot fulfill this request. & \\
+    \bottomrule
+    \end{tabular}}
+    \vspace*{-2mm}
+     \label{tab:example-analysis}
+\end{table*}
+
+Using GPT-4o as a judge to approximate true human preferences may be prone to bias and there could be a gap, so we further validate our approach by investigating Oracle reward advantage over the above mentioned human written summaries as well as on-policy generations from an SFT-trained model. 
+\Figref{fig:oracle_advantage_tldr} shows the computed expected reward advantages on the CNN Daily TL;DR evaluation set, sampled according to the method outlined in \Cref{sec:results}.
+Rewards were then computed using our Oracle (trained with Phi-3) on these sampled generations and normalized. To compute the advantage, we used SFT-trained model summaries (\Figref{fig:oracle_advantage_tldr}[L]) and human written summaries (\Figref{fig:oracle_advantage_tldr}[R]). While the expected reward advantage over human-written summaries is less than those with the baseline SFT policy, DRDO results in performance improvement across various temperature samplings. DRDO alignment appears in-tune with improving over a baseline SFT policy as our results on instruction tuning also suggest, brings in a considerable performance gain over competitive baselines like DPO and ensemble-based e-DPO while also being robust to OOD settings.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/drdo_final_plots/advantage_distribution_plot.png}
+        \label{fig:figure1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/drdo_final_plots/advantage_distribution_plot_notop_human.png}
+        \label{fig:figure2}
+    \end{subfigure}
+    
+\vspace*{-4mm}    
+    \caption{Oracle expected reward advantage on CNN Daily articles.}
+    \label{fig:oracle_advantage_tldr}
+\end{figure}
+\vspace*{-4mm}    
+
+Our evaluations vs. ``gold'' summaries in \Cref{tab:win_rates_summary} also demonstrate where bias may arise in the GPT-4o evaluation.
+The last three rows compare the model's performance directly against these gold summaries (win counts and win rates are shown for gold samples). GPT-4o narrowly prefers generated summaries to human-written ones. One possible reason could be that Reddit TL;DR data is massive and crowd-sourced which naturally results in noisy labels. However, under this experiment too, DRDO-trained policies are better-performing than e-DPO and DPO, by about 1.5--6\%. We should note that human summaries may contain more implicit diversity than generated summaries, and this may demonstrate the ``regression to the mean'' effect in LLM generation \citep{wu2024generative}.
+
+        
+
+        
+\vspace*{-2mm}    
+
+
+\section{Conclusion}
+
+\label{sec:conc}
+\vspace*{-2mm}    
+
+We introduce {\it \textbf{Direct Reward Distillation and policy-Optimization (DRDO)}}, a novel approach to preference optimization that unifies the reward distillation and policy learning stages into a single, cohesive framework. Unlike popular methods like DPO that rely heavily on implicit reward-based estimation of the preference distribution, DRDO uses an Oracle to distill rewards directly into the policy model, while simultaneously learning from varied preference signals, leading to a more accurate estimation of true preferences. Our experiments on Reddit TL;DR data for summarization as well on instruction-following in Ultrafeedback and AlpacaEval suggest that DRDO is not only high-performing when compared head-to-head with competitive baselines like DPO but is also particularly robust to OOD settings. More importantly, unlike traditional RLHF that requires "online" rewards,  reward distillation in DRDO is simple to implement, is model-agnostic since it is reference-model free and efficient, since Oracle rewards are easy to precompute.
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\vspace*{-2mm}    
+
+
+\section{Limitations}
+
+\label{sec:limitations}
+\vspace*{-2mm}    
+
+DRDO still requires access to a separate Oracle reward model even though the Oracle need not be in loaded in memory during DRDO alignment as all expected rewards can effectively be precomputed.
+However, our experimental results on three datasets including OOD settings suggest that this is a feasible trade-off especially when aligning models of smaller sizes (when compared to models like LLaMA) when performance gains need to maximized under limited compute settings. Some of our theoretical insights rely on strict assumptions, however, our insights provide additional justification and likely explanations of how preference alignment in realistic settings (where data might have a non-trivial amount of non-deterministic preferences) can benefit from approaches like DRDO. We did not experiment with cross-model distillation in this work. However, since DRDO is a reference-model free framework and Oracle rewards can be precomputed, one can easily extend our method for cross-model distillation frameworks. Finally, although in this paper, we approximated the non-deterministic preference settings using human labeler confidence as a proxy for non-determinism, true human preferences may be subtle and prone to variations along multiple dimensions, at times even temporally~\citep{tversky1969intransitivity}. 
+
+
+ 
+
+
+\vspace*{-2mm}    
+
+

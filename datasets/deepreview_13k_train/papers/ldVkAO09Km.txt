@@ -1,0 +1,286 @@
+\title{Diffusion Actor-Critic: Formulating Constrained Policy Iteration as Diffusion Noise Regression for Offline Reinforcement Learning}
+
+\begin{abstract}
+In offline reinforcement learning (RL), it is necessary to manage out-of-distribution actions to prevent overestimation of value functions. Policy-regularized methods address this problem by constraining the target policy to stay close to the behavior policy. Although several approaches suggest representing the behavior policy as an expressive diffusion model to boost performance, it remains unclear how to regularize the target policy given a diffusion-modeled behavior sampler. In this paper, we propose Diffusion Actor-Critic (DAC) that formulates the Kullback-Leibler (KL) constraint policy iteration as a diffusion noise regression problem, enabling direct representation of target policies as diffusion models. Our approach follows the actor-critic learning paradigm that we alternatively train a diffusion-modeled target policy and a critic network. The actor training loss includes a soft Q-guidance term from the Q-gradient. The soft Q-guidance grounds on the theoretical solution of the KL constraint policy iteration, which prevents the learned policy from taking out-of-distribution actions. For critic training, we train a Q-ensemble to stabilize the estimation of Q-gradient. Additionally, DAC employs lower confidence bound (LCB) to address the overestimation and underestimation of value targets due to function approximation error. Our approach is evaluated on the D4RL benchmarks and outperforms the state-of-the-art in almost all environments.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\keywords{Offline Reinforcement Learning \and Diffusion Models \and Actor-critic Learning \and Policy Regularization}
+Offline reinforcement learning (RL) aims at learning effective policies from previously collected data, without the need for online interactions with the environment \cite{levine2020offline}. It holds promise to implement RL algorithm to real-world applications, where online interactions are risky, expensive or even impossible. However, learning entirely from the offline data brings a new challenge. The prior data, such as human demonstration, is often sub-optimal and covers only a small part of samples compared to the entire state-action space. Learning policies beyond the level of behavior policy demands querying the value function of actions which are often not observed in the dataset. Despite off-policy RL algorithms could be directly applied to the offline data, those out-of-distribution (OOD) actions exacerbate the bootstrapping error of value function estimation, typically causing overestimation of action-values and leading to poor performance \cite{kumar2019stabilizing}.
+
+To alleviate the problem of overestimation on OOD actions, prior research of policy-regularized algorithm suggests to regularize the learned policy by limiting its deviation from the behavior policy. These methods generally regularize the learned policy by adding a behavior cloning term to the loss function \cite{fujimoto2021minimalist, wu2019behavior, wang2022diffusion} or training a behavior sampler to assist in evaluating the Q-learning target \cite{kumar2019stabilizing, fujimoto2019off, wang2022diffusion, chen2022offline, hansen2023idql}. However, due to the intricacy of the behavior distribution, these methods require sufficient model representative capacity and an appropriate regularization scheme to prevent sampling OOD actions and achieve strong performance \cite{wang2022diffusion}.
+
+With the emergence of diffusion models \cite{sohl2015deep, ho2020denoising}, recent advances on policy-regularized algorithms suggest modeling the behavior policies using high-expressive diffusion models \cite{janner2022planning, wang2022diffusion, chen2022offline, hansen2023idql}. However, there are several limitations with the current implementations of diffusion models in offline RL. Some methods use the diffusion model as a behavior sampler for subsequent action generation \cite{chen2022offline, hansen2023idql}. Those methods require generating lots of action candidates to choose from, which hinders the real-world applications for the slow inference process. Diffusion Q-learning \cite{wang2022diffusion} trains a biased diffusion model to aid in the estimation of the Q-learning target. Nevertheless, the biased diffusion model no longer prevents from sampling OOD actions (Figure \ref{fig:soft_q_guidance}), and the back-propagation of gradients through the denoising process makes the training process time-consuming. Additionally, another drawback of modeling behavior policies as diffusion models is the inability of the diffusion models to explicitly estimate density values. Techniques that rely on access to density functions are not directly applicable given a diffusion-modeled behavior policy \cite{peng2019advantage, nair2020awac}. Furthermore, it remains unclear how to regularize policies to stay close to a diffusion-modeled behavior that is both theoretically sound and effective in practical performance.
+
+In this paper, we propose Diffusion Actor-Critic (DAC) to address the offline RL problem by training a diffusion-modeled target policy. We focus on the optimization problem of constrained policy iteration \cite{schulman2015trust, peng2019advantage, nair2020awac, chen2022offline}, where the target policy is trained to maximize the estimated Q-function while fulfilling the KL constraint of the data distribution. We derive that the optimization problem can be formulated as a diffusion noise regression problem, eliminating the need for explicit density estimation of either the behavior policy or the target policy. The resulting noise prediction target involves a soft Q-guidance term that adjusts the Q-gradient guidance according to the noise scales, which distinguishes it from both the guided sampling with return prompts \cite{janner2022planning, chen2021decision} and methods where the Q-gradient is applied to the denoised action samples \cite{wang2022diffusion}. DAC follows the actor-critic learning paradigm, where we alternatively train a diffusion-modeled target policy and an action-value model. During the actor learning step, we train policy model by regressing on a target diffusion noise in a supervised manner. For the critic learning, we employ the lower confidence bound (LCB) of a Q-ensemble to stabilize the estimation of Q-gradients under function approximation error. This approach prevents the detrimental over-pessimistic bias of taking the ensemble minimum as used in the previous research \cite{fujimoto2018addressing, fujimoto2021minimalist, wang2022diffusion}. Experiments demonstrate that the LCB target balances the overestimation and underestimation of the value target, leading to improved performance.
+
+In conclusion, our main contributions are: 
+
+\begin{itemize}
+    \item Introducing DAC, a new offline RL algorithm that directly generates the target policy using diffusion models. The high-expressiveness of diffusion models is able to capture not only the multimodality of behavior polices, but also the complexity of target polices as well. Moreover, modeling the target policy directly as a diffusion model avoids the need for subsequent re-sampling of actions, resulting in reduced inference time and greater practicality for real-world applications.
+    \item Proposing the soft Q-guidance that analytically solves the KL constraint policy iteration using diffusion models, without the need for explicit density estimation of either the behavior policy or the target policy. The necessity for constraint satisfaction in target policies modeled through diffusion is not only crucial for theoretical comprehension but also guarantees that the generated policy refrains from taking OOD actions.
+    \item  We demonstrate the effectiveness of DAC on the D4RL benchmarks and observe that it outperforms nearly all prior methods by a significant margin, thereby establishing a new state-of-the-art baseline.
+\end{itemize}
+
+
+\section{Preliminaries}
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\textwidth]{bandits.pdf}
+  \caption{\textbf{Comparison of generated policies on 2-dimensional bandit using different Q-gradient guidance.} We compare soft Q-guidance (\textcolor{magenta}{magenta}) against hard Q-guidance (\textcolor{blue}{blue}) that eliminates the noise scaling factor and denoised Q-guidance \cite{wang2022diffusion} (\textcolor{brown}{brown}) on 2-D bandit example. The dots are behavior policies, which are colored based on the reward value. The dashed level curves represent the estimated Q-value field using DAC algorithm. Soft Q-guidance are capable of generating high-reward actions while remaining within the behavior support, whereas the actions generated using hard Q-guidance are evidently concentrated on OOD regions. Meanwhile, the denoised Q-guidance generates actions that are significantly distant from the support domain, primarily concentrated in the bottom right corner. This happens because the generated actions are severely influenced by the estimated gradient field. Additionally, we observe that soft Q-guidance captures the multi-modality of target policies as shown in the second plot.}
+  \label{fig:soft_q_guidance}
+\end{figure}
+
+We consider the RL problem formulated as an infinite horizon discounted Markov Decision Process (MDP), which is defined as a tuple $(\mathcal{S}, \mathcal{A}, \mathcal{T}, d_0, r, \gamma)$ \cite{sutton1999reinforcement} with state space $\mathcal{S}$, action space $\mathcal{A}$, transition probabilities $\mathcal{T}(\bfs'|\bfs, \bfa)$, initial state distribution $\bfs_0 \sim d_0$, reward function $r(\bfs, \bfa)$, and discount factor $\gamma \in (0, 1)$. The goal of RL is to train a policy $\pi(\bfa|\bfs): \mathcal{A} \times \mathcal{S} \to [0, 1]$ that maximizes the expected return: $J(\pi) := \mathbb{E}_{\pi, \mathcal{T}, d_0}[\sum_{t=0}^\infty \gamma^t r(\bfs_t, \bfa_t)]$. We also define the discounted state visitation distribution $d^{\pi}(\bfs) := (1-\gamma) \sum_{t=0}^\infty \gamma^t p_\pi(\bfs_t = \bfs)$. Then the RL objective $J(\pi)$ has an equivalent form as maximizing the expected per-state-action rewards: $\tilde{J}(\pi) = \mathbb{E}_{\bfs \sim d^{\pi}, \bfa \sim \pi(\cdot|\bfs)}[r(\bfs, \bfa)]$ \cite{nachum2020reinforcement}. In offline RL, the agent has only access to a static dataset $\mathcal{D}$, which is collected by a potentially unknown behavior policy $\pi_\beta$, without the permission to fetch new data from the environment.
+
+\textbf{Constrained policy iteration.} Let $Q^\pi : \mathcal{S} \times \mathcal{A} \to \mathbb{R}$ be the Q-function of the policy $\pi$, which is defined by $Q^\pi(\bfs, \bfa) = \mathbb{E}_{\pi, \mathcal{T}}[\sum_{t=0}^\infty \gamma^t r(\bfs_t, \bfa_t)|\bfs_0=\bfs,\bfa_0=\bfa]$. In a standard policy iteration paradigm at iteration $k$, the algorithm iterates between improving the policy $\pi_k$ and estimating the Q-function $Q^{\pi_k}$ via Bellman backups \cite{sutton1999reinforcement}. Estimating $Q^{\pi_k}$ in the offline setting may request OOD actions that are not observed in the dataset, resulting in an accumulation of bootstrapping errors. To address this issue, off-policy evaluation algorithms \cite{fujimoto2019off, kumar2019stabilizing, wu2019behavior, schulman2015trust, peng2019advantage, nair2020awac} propose to explicitly regularize the policy improvement step, leading to the constrained optimization problem:
+\begin{equation}\label{equ:opt_problem}
+\begin{aligned}
+    \pi_{k+1} = \arg \max_\pi &\, \mathbb{E}_{\bfs \sim d^{\pi_k}}[\mathbb{E}_{\bfa \sim \pi(\cdot|\bfs)} Q^{\pi_k}(\bfs, \bfa)] \\
+    \text{s.t.}&\, D(\pi, \pi_\beta) \leq \epsilon_b.
+\end{aligned}
+\end{equation}
+
+Commonly used constraints for $D$ are members from $f$-divergence family, such as KL-divergence and $\chi^2$-divergence and total-variation distance \cite{peng2019advantage, nair2020awac, nachum2019algaedice, nachum2020reinforcement}. In this paper we consider $D$ being the expected state-wise (reverse) KL-divergence: $D(\pi, \pi_\beta) = \mathbb{E}_{\bfs\sim d^\pi}D_{\text{KL}}(\pi(\cdot|\bfs)||\pi_\beta(\cdot|\bfs))$. However, the complicated dependency of $d^{\pi_k}$ on $\pi_k$ makes it difficult to directly solve the KL constraint optimization problem \eqref{equ:opt_problem} in offline RL. A typical approach for addressing this issue involves substituting the on-policy distribution $d^{\pi_k}$ with the off-policy dataset $\mathcal{D}$ \cite{peng2019advantage, nair2020awac}, resulting in the surrogate objective:
+\begin{equation}\label{equ:opt_problem_surrogate}
+\begin{aligned}
+    \pi_{k+1} = \arg \max_\pi &\, \mathbb{E}_{\bfs \sim \mathcal{D}}[\mathbb{E}_{\bfa \sim \pi(\cdot|\bfs)} Q^{\pi_k}(\bfs, \bfa)] \\
+    \text{s.t.}&\, \mathbb{E}_{\bfs\sim \mathcal{D}}[D_{\text{KL}}(\pi(\cdot|\bfs)||\pi_\beta(\cdot|\bfs))] \leq \epsilon_b,
+\end{aligned}
+\end{equation}
+where $\epsilon_b$ is a pre-defined hyperparameter to control the strength of the constraint.
+ 
+\textbf{Diffusion models.} Diffusion models \cite{sohl2015deep, ho2020denoising, song2020score} are generative models that assumes latent varibles following a Markovian noising and denoising process. The forward noising process $\{\bfx_{0:T}\}$ gradually adds Gaussian noise to the data $\bfx_0 \sim p(\bfx_0)$ with a pre-defined noise schedule $\{\beta_{1:T}\}$:
+\begin{equation}\label{equ:forward_process}
+    q(\bfx_{1:T}|\bfx_0) = \prod_{t=0}^T q(\bfx_t | \bfx_{t-1}),\; q(\bfx_t|\bfx_{t-1}) : = \mathcal{N}(\bfx_t; \sqrt{1-\beta_t}\bfx_{t-1}, \beta_t\mathbf{I}).
+\end{equation}
+The joint distribution in \eqref{equ:forward_process} yields an analytic form of the marginal distribution 
+\begin{equation}\label{equ:qt}
+    q_t(\bfx_t|\bfx_0) = \mathcal{N}(\bfx_t; \sqrt{\bar{\alpha}_t}\bfx_0, (1-\bar{\alpha}_t) \mathbf{I}) \text{ for all } t \in \{1, ..., T\},
+\end{equation}
+using the notation $\alpha_t := 1 - \beta_t$ and $\bar{\alpha}_t := \prod_{s=1}^t \alpha_s$. Given $\bfx_0$, the noisy sample $\bfx_t$ can be easily obtained through the re-parameterization trick: 
+\begin{equation}\label{equ:add_noise}
+    \bfx_t = \sqrt{\bar{\alpha}_t}\bfx_0 + \sqrt{1-\bar{\alpha}_t} \bfe, \; \bfe \sim \mathcal{N}(\mathbf{0}, \mathbf{I}).
+\end{equation}
+DDPMs \cite{ho2020denoising} construct a parameterized model $p_\theta(\bfx_{t-1}|\bfx_t) = \mathcal{N}(\bfx_{t-1}; \boldsymbol{\mu}_\theta (\bfx_t, t), \boldsymbol{\Sigma}_\theta (\bfx_t, t))$ to reverse the diffusion process: $p_\theta (\bfx_{0:T}) = \mathcal{N}(\bfx_T; \mathbf{0}, \mathbf{I})\prod_{t=1}^T p_\theta(\bfx_{t-1}|\bfx_t)$. The practical implementation involves directly predicting the Gaussian noise $\bfe$ in \eqref{equ:add_noise} using a neural network $\bfe_\theta (x_t, t)$ to minimize the original evidence lower bound loss:
+\begin{equation}\label{equ:ddpm}
+    \mathcal{L}(\theta)= \mathbb{E}_{\bfx_0 \sim p(\bfx_0), t\sim \text{Unif}(1,T), \bfe \sim \mathcal{N}(\mathbf{0}, \mathbf{I})}||\bfe- \bfe_\theta(\sqrt{\bar{\alpha}_t}\bfx_0 + \sqrt{1-\bar{\alpha}_t} \bfe, t) ||^2.
+\end{equation}
+A natural approach to employing diffusion models in behavior cloning involves replacing the noise predictor with a state-conditional model $\bfe_\theta (\bfx_t, \bfs, t)$ that generates actions $\bfx_0 \in \mathcal{A}$ based on state $\bfs$. 
+
+\textbf{Score-based models.} The key idea of score-based generative models \cite{vincent2011connection, song2019generative, song2020improved} is to estimate the (Stein) score function, which is defined as the gradient of the log-likelihood $\nabla_\bfx \log p(\bfx)$. Like diffusion models, score-based models perturb the data with a sequence of Gaussian noise and train a deep neural network $s_\theta(\bfx_t, t)$ to estimate the score $\nabla_{\bfx_t} \log p(\bfx_t)$ for noisy samples $\bfx_t \sim \mathcal{N}(\bfx_t; \bfx_0, \sigma_t^2\mathbf{I})$ on different noise levels $t=1,2,...,T$. The objective of explicit score matching \cite{vincent2011connection} is given by:
+\begin{equation}
+    \mathbb{E}_{x_0\sim p, x_t \sim \mathcal{N}(\bfx_t; \bfx_0, \sigma_t^2\mathbf{I}), t\sim \text{Unif}(1,T)}[\lambda(t)||\nabla_\bfx \log p(\bfx) - s_\theta(\bfx_t, t)||^2],
+\end{equation}
+where $\lambda(t) > 0$ is a positive weighting function. Once the estimated score functions have been trained, samples are generated using score-based sampling techniques, such as Langevin dynamics \cite{song2019generative} and stochastic differential equations \cite{song2020score}.
+
+
+
+\section{Diffusion Actor-Critic}
+
+
+In this section, we introduce the Diffusion Actor-Critic (DAC) framework that models the target policy directly as a diffusion model, eliminating the need for density estimation of either the behavior policy or the target policy. Initially, we formulate the KL constraint policy optimization as a diffusion noise regression problem, which yields a soft Q-guidance term for the noise prediction process that enables the learning of the target policy in a supervised manner. Additionally, we introduce Q-ensemble to stabilize the Q-gradient estimation, which utilizes LCB to mitigate the over-pessimistic estimation associated with taking the ensemble minimum in prior research.
+
+\subsection{Policy improvement through soft Q-guidance}
+
+The problem of behavior constraint policy iteration \eqref{equ:opt_problem_surrogate} has closed form solution $\pi^*$ \cite{peng2019advantage, nair2020awac, chen2022offline} by utilizing the Lagrangian multiplier:
+\begin{equation} \label{equ:opt_solution}
+ \pi^*(\bfa|\bfs) = \frac{1}{Z(\bfs)} \pi_\beta (\bfa|\bfs) \exp \big (\frac{1}{\eta} Q^{\pi_k}(\bfs, \bfa) \big),
+\end{equation}
+where $\eta > 0$ is a Lagrangian multiplier and $Z(\bfs)$ is a state-conditional partition function. Obtaining the closed form solution of $\pi^*$ directly from \eqref{equ:opt_solution} is challenging as it requires estimation of the density function of the behavior policy $\pi_\beta$ and the partition function $Z(\bfs)$. Prior methods \cite{peng2019advantage, nair2020awac, chen2022offline} suggest addressing this issue by projecting $\pi^*$ onto a parameterized policy $\pi_\theta$ using KL-divergence:
+\begin{equation}
+    \arg\min_\theta \mathbb{E}_{\bfs \sim \mathcal{D}}[D_{KL}(\pi^*(\cdot|\bfs)||\pi_\theta(\cdot|\bfs))],
+\end{equation}
+resulting in the policy update algorithm:
+\begin{equation}\label{equ:awr}
+ \theta_{k+1} = \arg\max_\theta \mathbb{E}_{(\bfs, \bfa)\sim \mathcal{D}}[\log \pi_\theta (\bfa|\bfs)\exp\big(\frac{1}{\eta}Q^{\pi_k}(\bfs,\bfa)\big)].
+\end{equation}
+
+Although \eqref{equ:awr} eliminates the necessity for estimating the partition function $Z(\bfs)$ and the behavior policy $\pi_\beta$, it needs explicit modeling of the density function of the target policy $\pi_\theta$. Such requirement for $\pi_\theta$ makes it unfeasible to directly use diffusion generative models due to the unavailability of density function estimation. Prior methods employ Gaussian policies to estimate $\pi_\theta$ \cite{peng2019advantage, nair2020awac}, which limits the expressiveness of the target policy. To address these issues, we rewrite \eqref{equ:opt_solution} using score functions:
+\begin{equation} \label{equ:score_fn}
+ \nabla_\bfa \log \pi^*(\bfa|\bfs) = \nabla_\bfa \log \pi_\beta (\bfa|\bfs) + \frac{1}{\eta} \nabla_\bfa Q^{\pi_k}(\bfs, \bfa), \; \bfa \in \mathcal{A},
+\end{equation}
+where the action space $\mathcal{A}$ is usually a compact set in $\mathbb{R}^d$ for $d$-dimensional actions. It seems that the target score function $\nabla_\bfa \log \pi^*(\bfa|\bfs)$ can be trained by regression on the right-hand-side. However, since $\pi_\beta$ is unknown, we do not have explicit regression target $\nabla_\bfa \log \pi_\beta (\bfa|\bfs)$.
+Drawing inspiration from explicit score matching with finite samples \cite{vincent2011connection}, we smoothly extend the policy functions and the value function defined in $\mathcal{A}$ to the extended action space $\mathbb{R}^d$. Then we consider \eqref{equ:score_fn} of the optimal score functions to hold for noisy perturbations of the observation set:
+\begin{equation} \label{equ:esm}
+ \nabla_{\bfx_t} \log p_t^*(\bfx_t|\bfs) = \nabla_{\bfx_t} \log p_t (\bfx_t|\bfs) + \frac{1}{\eta} \nabla_{\bfx_t} Q^{\pi_k}(\bfs, \bfx_t), \; \bfx_t \in \mathbb{R}^d,
+\end{equation}
+where $p_t^*(\bfx_t|\bfs) = \int q_t(\bfx_t|\bfa)\pi^*(\bfa|\bfs) d \bfa$ and $p_t(\bfx_t|\bfs) = \int q_t(\bfx_t|\bfa)\pi_\beta(\bfa|\bfs) d \bfa$ are noise distributions. The noisy perturbation $\bfx_t \sim q_t(\bfx_t|\bfa)$ is defined in \eqref{equ:qt} with $\bfx_0 = \bfa$. When the perturbation is small, i.e. $q_t(\bfx_t|\bfa)\approx\delta(\bfx_t - \bfa)$, then $p_t^*(\bfx_t|\bfs) \approx \pi^*(\bfa|\bfs)$ and $p_t(\bfx_t|\bfs) \approx \pi_\beta(\bfa|\bfs)$, which recovers the relationship between score functions within the action space $\mathcal{A}$ as described in \eqref{equ:score_fn}. Tackling the score function of noise distribution is favorable, since $\nabla_{\bfx_t} \log p_t^*(\bfx_t|\bfs)$ itself serves as a means of generating $\pi^*$ using diffusion models, without the need for score-based sampling methods such as Langevin dynamics, as described in the following theorem.
+\begin{theorem}\label{thm:diffusion}
+    Let $\bfe^*(\bfx_t, \bfs, t) := - \sqrt{1-\bar{\alpha}_t} \, \nabla_{\bfx_t} \log p_t^* (\bfx_t|\bfs)$. Then $\bfe^*(\bfx_t, \bfs, t)$ is a Gaussian noise predictor which defines a diffusion model for generating $\pi^*$. 
+\end{theorem}
+Although $\bfe^*(\bfx_t, \bfs, t)$ determines the diffusion model that directly generates the target policy, the form of the target noise $\bfe^*(\bfx_t, \bfs, t)$ necessitates the estimation of the noisy score function of the behavior policy $\nabla_{\bfx_t} \log p_t (\bfx_t|\bfs)$ by \eqref{equ:esm}, which is typically not accessible. To tackle this problem, we investigate the learning objective when utilizing function approximators. Specifically, we project the target noise $\bfe^*(\bfx_t, \bfs, t)$ onto a parameterized conditional noise model $\bfe_\theta (\bfx_t, \bfs, t)$ via $L^2$-loss, following the standard training objective of diffusion models:
+\begin{equation}\label{equ:dsm_loss}
+    \arg\min_\theta \mathbb{E}_{\bfs \sim \mathcal{D}, \bfa \sim \pi^*, \bfx_t \sim q_t(\bfx_t|\bfa),t} ||\bfe_\theta(\bfx_t, \bfs, t) - \bfe^*(\bfx_t, \bfs, t)||^2.
+\end{equation}
+To eliminate the need for sampling from the unknown target policy $\pi^*$, we approximate the expectation through $\bfa \sim \pi^*$ by the behavior data $\bfa \sim \mathcal{D}$, resulting in the surrogate objective:
+\begin{equation}\label{equ:surrogate_loss}
+    \arg\min_\theta \mathbb{E}_{(\bfs,\bfa) \sim \mathcal{D},\bfx_t \sim q_t(\bfx_t|\bfa),t} ||\bfe_\theta(\bfx_t, \bfs, t) - \bfe^*(\bfx_t, \bfs, t)||^2.
+\end{equation}
+Such learning objective has an equivalent form which is easy to optimize.
+\begin{theorem}\label{thm:raw_loss}
+Training parameters $\theta$ according to \eqref{equ:surrogate_loss} is equivalent to optimize the following objective:
+\begin{equation}\label{equ:noise_reg}
+      \arg\min_\theta \mathbb{E}_{(\bfs, \bfa) \sim \mathcal{D}, \bfe\sim \mathcal{N}(\mathbf{0}, \mathbf{I}), t} ||\bfe_\theta(\bfx_t, \bfs, t) - \bfe + \frac{1}{\eta}\sqrt{1-\bar{\alpha}_t} \, \nabla_{\bfx_t} Q^{\pi_k}(\bfs, \bfx_t)||^2,
+\end{equation}
+where $\bfx_t = \sqrt{\bar{\alpha}_t}\bfa + \sqrt{1-\bar{\alpha}_t} \bfe$.
+\end{theorem}
+The learning objective \eqref{equ:noise_reg} defines a noise regression problem that approximates the solution of the KL constraint policy iteration \eqref{equ:opt_problem_surrogate} within the diffusion model framework, without requiring the estimation of densities for either the behavior policy or the target policy. We refer the last term in the noise target as the \textit{soft Q diffusion guidance} or simply \textit{soft Q-guidance}. Within the soft Q-guidance, the Q-gradient is weighted by the noise scale $\sqrt{1-\bar{\alpha}_t}$. In a typical diffusion model, the noise scale $\sqrt{1-\bar{\alpha}_t} \to 0$ as  $t \to 0$ during the denoising process. This suggests that soft Q-guidance encourages the exploration of high-reward regions in the initial steps of the denoising process, and then gradually fades the guidance strength as the denoising step approaches the final output. In comparison to the ``hard Q-guidance'' that eliminates the noise scaling factor or guidance on denoised actions \cite{wang2022diffusion}, soft Q-guidance produces high-fidelity actions that closely resemble the behavior policies, thereby preventing the sampling of out-of-distribution (OOD) actions (as shown in Figure \ref{fig:soft_q_guidance}).
+
+To connect the learning objective \eqref{equ:noise_reg} with policy-regularized methods, we rearrange the terms in \eqref{equ:noise_reg} and incorporate a constant into $\eta$, resulting in the following actor learning loss:
+\begin{equation}\label{equ:policy_imp}
+  \mathcal{L}_A(\theta) =  \mathbb{E}_{(\bfs, \bfa) \sim \mathcal{D}, \bfe, t} \big [\eta ||\bfe_\theta(\bfx_t, \bfs, t) - \bfe||^2 + \sqrt{1-\bar{\alpha}_t}\,\bfe_\theta(\bfx_t, \bfs, t)\cdot \nabla_{\bfx_t} Q^{\pi_k}(\bfs, \bfx_t)\big],
+\end{equation}
+where the dot ($\cdot$) implies inner product. The Lagrangian multiplier $\eta$ determines the trade-off between the behavior cloning and the policy improvement. As $\eta \to \infty$, the noise prediction loss \eqref{equ:policy_imp} reduces to behavior cloning using a parameterized conditional diffusion model, as used in the recent research \cite{chen2022offline, hansen2023idql, wang2022diffusion}. The second term involves a inner product between the predicted noise and the Q-gradient, promoting the acquired denoising directions to align with the estimated Q-gradient field. 
+
+\subsection{Policy evaluation via Q-ensemble}
+\begin{algorithm}[t]
+\caption{Diffusion Actor-Critic Training}\label{alg:dac}
+\begin{algorithmic}[1]
+\Require offline dataset $\mathcal{D}$, batch size $B$, learning rates $\alpha_\phi$, $\alpha_\theta$, $\alpha_\eta$ and $\alpha_\text{ema}$, behavior cloning threshold $b$, pessimism factor $\rho$
+\State Initialize: diffusion policy $\bfe_\theta$, target diffusion policy $\bfe_{\bar{\theta}}=\bfe_\theta$, Q-networks $Q_{\phi^h}$, target Q-networks $Q_{\bar{\phi}^h}=Q_{\phi^h}$ ($h=1,2,...,H$), Lagrangian multiplier $\eta = \eta_\text{init}$
+\While{training not convergent}
+\State Sample a batch of $B$ transitions $\{(\bfs, \bfa, r, \bfs')\} \subset \mathcal{D}$
+\State Sample $\bfa'=\bfx_0$ through denoising process using noise predictor $\bfe_{\bar{\theta}}(\bfx_t, t, \bfs)$.
+\For{$h$ in $\{1,2,...,H\}$}
+\State Update $\phi^h \gets \phi^h - \alpha_\phi \nabla_{\phi^h} \mathcal{L}_C(\phi^h)$ \eqref{equ:policy_eval} \Comment{Critic learning}
+\EndFor
+\State Sample $\bfe \sim \mathcal{N}(\mathbf{0}, \mathbf{I}), t \sim \text{Unif}(0,T)$ and compute $\bfx_t = \sqrt{\bar{\alpha}_t}\bfa + \sqrt{1-\bar{\alpha}_t} \bfe$
+\State Estimate Q-gradient $\nabla_{\bfx_t} Q^{\pi_k}(\bfs, \bfx_t)$ using \eqref{equ:Q_ensemble}
+\State $\theta \gets \theta - \alpha_\theta \nabla_{\theta} \mathcal{L}_A(\theta)$ \eqref{equ:policy_imp}  \Comment{Actor learning}
+\State $\eta \gets \eta + \alpha_\eta(||\bfe_\theta(\bfx_t, \bfs, t) - \bfe||^2 - b)$  \Comment{Dual gradient ascent (optional)}
+\State $\bar{\theta} \gets(1-\alpha_\text{ema})\bar{\theta} + \alpha_\text{ema}\theta$
+\State $\bar{\phi}^h \gets(1-\alpha_\text{ema})\bar{\phi}^h + \alpha_\text{ema}\phi^h$ \Comment{Update target networks using EMA}
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+During the policy evaluation at the $k$-th iteration, we estimate the Q-function for the policy $\pi_{\theta_k}$. To enhance the stability of the Q-gradient estimation used in the soft Q-guidance, we train an ensemble of $H$ parameterized Q-networks $Q_{\phi_k^h}$ and target Q-networks $Q_{\bar{\phi}_k^h}$, where the target Q parameters $\bar{\phi}_k^h$ are obtained through taking exponential moving averages of parameters $\phi_k^h$. In general, policy evaluation can be achieved via training the Bellman backup:
+\begin{equation}\label{equ:raw_bellman}
+    \phi_k^h \gets \arg\min_{\phi^h}\mathbb{E}_{(\bfs, \bfa, r, \bfs')\sim \mathcal{D},\bfa' \sim \pi_{\theta_k}}\big[ r + \gamma Q_{\bar{\phi}_{k-1}^h}(\bfs', \bfa') - Q_{\phi^h}(\bfs, \bfa) \big]^2, h \in \{1,2,...,H\}.
+\end{equation}
+Updating Q-networks directly through \eqref{equ:raw_bellman} with function approximation can lead to overestimation bias and unsuccessful learning. Recent methods that account for offline policy evaluation typically address this problem by using pessimistic targets, such as the minimum: $\min_h[Q_{\bar{\phi}_k^h}]$ \cite{fujimoto2018addressing, fujimoto2021minimalist, wang2022diffusion} or convex combination: $\rho\min_h[Q_{\bar{\phi}_k^h}] + (1-\rho)\max_h[Q_{\bar{\phi}_k^h}], (0\leq\rho\leq 1)$ \cite{fujimoto2019off, kumar2019stabilizing}. The minimum operator penalizes states of high variances, leading to over-pessimistic actions.  The convex combination only cares for the extreme values, resulting in loss of details of the Q-value distribution in the ensembles.
+To incorporate information of Q-value distribution in a simple manner without being over-pessimistic, our approach utilizes the lower confidence bound (LCB) of Q-ensembles \cite{ghasemipour2022so}, resulting in the following critic learning loss:
+\begin{equation}\label{equ:policy_eval}
+\begin{aligned}
+    \mathcal{L}_C(\phi^h)= &\mathbb{E}_{(\bfs, \bfa, r, \bfs')\sim \mathcal{D},\bfa' \sim \pi_{\theta_k}}\big[ r + \gamma Q_\text{LCB} (\bfs', \bfa') - Q_{\phi^h}(\bfs, \bfa) \big]^2, \\
+    & Q_\text{LCB}(\bfs', \bfa') = \,\mathbb{E}_h[Q_{\bar{\phi}_k^h}(\bfs', \bfa')] - \rho \sqrt{\text{Var}_h [Q_{\bar{\phi}_k^h}(\bfs', \bfa')]},
+\end{aligned}
+\end{equation}
+where $\rho \geq 0$ is a hyperparameter that determines the level of pessimism, and $\mathbb{E}_h[\cdot]$ and $\text{Var}_h[\cdot]$ are empirical mean and variance operators over the $H$ ensembles.
+
+Rather than employing $Q_\text{LCB}$ for policy gradient updates as done in \cite{ghasemipour2022so}, we utilize average Q-value estimation to guide the policy improvement. Once the Q-functions are trained, the Q-gradient in the soft Q-guidance can be estimated by the ensemble's average of target Q-networks:
+\begin{equation}\label{equ:Q_ensemble}
+    \nabla_{\bfx_t} Q^{\pi_k}(\bfs, \bfx_t) \approx \frac{1}{HC} \sum_{h=1}^H\nabla_{\bfx_t} Q_{\bar{\phi}_k^h}(\bfs, \bfx_t),
+\end{equation}
+where $C=\mathbb{E}_{(\bfs,\bfa) \sim \mathcal{D}}|Q_{\bar{\phi}_k^h}(\bfs, \bfa)|$ is an estimated scaling constant that eliminates the influence of varying Q-value scales in different environments.
+
+\subsection{Policy extraction}
+We denote $\pi_\theta(\bfa|\bfs)$ as the trained diffusion policy through denoisng process using noise predictor $\epsilon_\theta(\bfx_t, \bfs, t)$. While $\pi_\theta(\bfa|\bfs)$ is capable of generating the target policy, we aim to reduce the uncertainty of the denoising process during the evaluation phase. To achieve this, we sample a small batch of $N_a$ actions and select the action with the highest Q-ensemble mean value, resulting in better performance:
+\begin{equation}\label{equ:policy}
+    \pi(\bfs) = {\arg\max}_{\bfa_1,...,\bfa_{N_a}\sim\pi_\theta(\cdot|\bfs)} \mathbb{E}_h[Q_{\bar{\phi}_k^h}(\bfs, \bfa)].
+\end{equation}
+This approach is commonly employed in methods where a stochastic actor is trained for critic learning, and a deterministic policy is implemented during evaluation \cite{brandfonbrener2021offline, haarnoja2018soft}. Since $\pi_\theta(\bfa|\bfs)$ is trained as a target policy, the sampling number $N_a$ can be relatively small. Through our experiments, we find that DAC can achieve superior performance with $N_a=10$. In comparison, SfBC \cite{chen2022offline}, Diffusion Q-learning \cite{wang2022diffusion} and  IDQL \cite{hansen2023idql} use  $N_a=32$, $N_a=50$ and $N_a=128$, respectively.
+
+\textbf{Algorithm summary.} We summarize the full algorithm of DAC for offline RL in Algorithm \ref{alg:dac}. In practical implementation, DAC balances the behavior cloning and policy improvement by controlling $\eta$ to be either fixed or learnable through dual gradient ascent. If $\eta$ is learnable, DAC trains $\eta$ to ensure that $||\bfe_\theta(\bfx_t, \bfs, t) - \bfe||^2 \leq b$ for a given threshold value $b>0$. During each gradient step, the parameters of target networks ${\phi}^h$ and $\bar{\theta}$ are updated by taking exponential moving averages (EMA) of the training networks $\phi^h$ and $\theta$ respectively.
+
+
+
+\section{Related work}
+
+
+\textbf{Offline RL.} Recent research addressing offline RL problems often use value-based algorithms based on Q-learning or actor-critic learning \cite{sutton1999reinforcement}. To tackle the issue of overestimation of the Q-learning target, explicit policy-regularization methods typically train a biased behavior sampler to generate actions that maximize the Q-function while remaining within the support of the behavior policy. Among these approaches, BCQ \cite{fujimoto2019off} learns a conditional-VAE \cite{sohn2015learning} to aid in sampling Q-learning targets; BEAR \cite{kumar2019stabilizing} employs maximum mean discrepancy (MMD) to restrict the learned policy to the behavior dataset. Moreover, BRAC \cite{wu2019behavior} is based on actor-critic learning framework and explores various regularization methods as value penalties; TD3+BC \cite{fujimoto2021minimalist} adds a behavior cloning term to regularize the learned policy in a supervised manner. Additionally, some methods implicitly regularize the policy by training pessimistic value-functions or using in-sample estimation. CQL \cite{kumar2020conservative} learns conservative Q-values on OOD actions. IQL \cite{kostrikov2021offline} and IDQL \cite{hansen2023idql} use asymmetric loss functions to approximate the maximal Q-value target via in-sample data. IVR \cite{xu2023offline} also employs in-sample learning while within the framework of behavior-regularized MDP problem, resulting in two implicit Q-learning objectives. Extreme Q-learning \cite{garg2023extreme} avoids sampling OOD actions by using Gumbel regression to model the maximal Q-values. Our method conducts policy-regularization by focusing on KL-regularized policy iteration \cite{schulman2015trust, peng2019advantage, nair2020awac}, which regularizes the policy improvement step to fulfill the KL-divergence constraint, preventing the bootstrapping error of estimating Bellman targets.
+
+\textbf{Diffusion models for offline RL.} Recent studies that utilize diffusion models for offline RL can be broadly categorized into two types: those that model entire trajectories and those that generate behavior policies. Diffuser \cite{janner2022planning} trains a diffusion model as a trajectory planner. The policies are generated through guided-sampling with return prompts, similar to methods that modeling trajectories using Transformer \cite{chen2021decision, janner2021offline}. Diffusion Q-learning \cite{wang2022diffusion} employs a diffusion model as a biased behavior sampler, incorporating an additional loss to promote the denoised actions to achieve maximal Q-values. IDQL \cite{hansen2023idql} and SfBC \cite{chen2022offline} use diffusion models to generate behavior policies. The target policies are extracted by re-sampling from diffusion-generated actions. While we also train a policy sampler as in previous studies, we directly utilize our trained diffusion model as the target policy in the actor-critic paradigm, rather than using it as a behavior sampler to estimate Q-learning targets.
+
+ 
+
+
+\section{Experiments}
+
+In this section, we empirically demonstrate the effectiveness of our proposed DAC algorithm on D4RL benchmarks \cite{fu2020d4rl}. We also conduct ablation studies to analyze the two key components of DAC that contribute to superior performance: soft Q-guidance and LCB of Q-ensembles as value targets.
+\subsection{Comparisons on offline RL benchmarks}
+We compare our approach against an extensive collection of baselines that solve offline RL using various methods. For explicit policy-regularization methods, we consider TD3+BC \cite{fujimoto2021minimalist} and AWAC \cite{nair2020awac}. We also include one-step RL (Onestep-RL) \cite{brandfonbrener2021offline}, which conducts a single step actor-critic learning. For value-constraint methods, we compare against Conservative Q-learning (CQL) \cite{kumar2020conservative}. For in-sample estimation of maximal value targets, we include Implicit Q-learning (IQL) \cite{kostrikov2021offline}, Implicit Value Regularization (IVR) \cite{xu2023offline} and Extreme Q-learning (EQL) \cite{garg2023extreme}. Additionally, we compare our approach to methods that utilize diffusion models in their framework. In this category, we compare against Diffuser \cite{janner2022planning}, SfBC \cite{chen2022offline}, Diffusion Q-learning (DQL) \cite{wang2022diffusion} and IDQL \cite{hansen2023idql}. Specifically, we present the results of ``IDQL-A'' variant \cite{hansen2023idql} for IDQL, which permits tuning of any amount of hyperparameters and exhibits strong performance. For the baselines, we report the best results from their own paper or tables in the recent papers \cite{wang2022diffusion, chen2022offline, hansen2023idql}. The results are shown in Table \ref{tab:main_res}.
+
+Drawing from the experimental results, DAC outperforms prior methods by a significant margin across nearly all tasks. DAC significantly enhances the overall score on locomotion tasks, with an average increase of over 5\% compared to the best performance in prior studies. Notably, for ``medium'' tasks, where the dataset contains numerous sub-optimal trajectories, DAC consistently achieves improvements of over 10\%. The antmaze domain presents a greater challenge due to the sparsity of rewards and the prevalence of sub-optimal trajectories. Consequently, algorithms must possess strong capabilities in stitching together sub-optimal subsequences to achieve high scores \cite{janner2022planning}. It is evident that DAC outperforms or achieves competitive outcomes on antmaze tasks, with an almost perfect mean score ($\approx 100$) on the ``antmaze-umaze'' task. In the case of the most demanding ``large'' tasks, DAC performs comparably to previous methods, with the exception of IDQL-A, which consistently showcases superior performance. One potential explanation for this difference could be that we do not tune the rewards by subtracting a negative number, as is done in previous studies \cite{kumar2020conservative,kostrikov2021offline,wang2022diffusion,hansen2023idql}. This setting exacerbates the impact of reward sparsity in more intricate ``large'' environments, leading to slower convergence. 
+
+It is worth mentioning that we report the performance after convergence, which imposes a stronger requirement for evaluation, as it necessitates the model training to demonstrate the capability of convergence, rather than relying on early stopping selection \cite{wang2022diffusion}. These requirements hold significant importance for ensuring robust deployment in real-world applications.
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength\tabcolsep{3.2pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{{\bf Average normalized scores of DAC compared to other baselines.} We use the following abbreviations: ``m'' for ``medium'';  ``r'' for ``replay'';  ``e'' for ``expert''; ``u'' for ``umaze'';  ``div'' for ``diverse'' and  ``l'' for ``large''. We highlight in boldface the numbers within 5\% of the maximal scores in each task. Furthermore, we also underline the highest scores achieved by prior methods.}
+\label{tab:main_res}
+\begin{tabular}{lccccccccccc|c}
+\hline
+\textbf{Dataset} & \textbf{TD3+BC} & \textbf{AWAC} & \textbf{Onestep-RL} & \textbf{CQL} & \textbf{IQL} & \textbf{IVR} & \textbf{EQL} & \textbf{Diffuser} & \textbf{SfBC} & \textbf{DQL} & \textbf{IDQL-A} & \textbf{DAC (ours)} \\ \hline
+halfcheetah-m & 48.3 & 43.5 & 48.4 & 44.0 & 47.4 & 48.3 & 48.3 & 44.2 & 45.9 & \underline{51.1} & 51.0 & \textbf{59.1} $\pm$ 0.4 \\
+hopper-m & 59.3 & 57.0 & 59.6 & 58.5 & 66.3 & 75.5 & 74.2 & 58.5 & 57.1 & \underline{90.5} & 65.4 & \textbf{101.2} $\pm$ 2.0 \\
+walker2d-m & 83.7 & 72.4 & 81.8 & 72.5 & 78.3 & 84.2 & 84.2 & 79.7 & 77.9 & \underline{87.0} & 82.5 & \textbf{96.8} $\pm$ 3.6 \\
+halfcheetah-m-r & 44.6 & 40.5 & 38.1 & 45.5 & 44.2 & 44.8 & 45.2 & 42.2 & 37.1 & \underline{47.8} & 45.9 & \textbf{55.0} $\pm$ 0.2 \\
+hopper-m-r & 60.9 & 37.2 & 97.5 & 95.0 & 94.7 & \textbf{99.7} & \textbf{100.7} & 96.8 & 86.2 & \underline{\textbf{101.3}} & 92.1 & \textbf{103.1} $\pm$ 0.3 \\
+walker2d-m-r & 81.8 & 27.0 & 49.5 & 77.2 & 73.9 & 81.2 & 82.2 & 61.2 & 65.1 & \underline{\textbf{95.5}} & 85.1 & \textbf{96.8} $\pm$ 1.0 \\
+halfcheetah-m-e & 90.7 & 42.8 & 93.4 & 91.6 & 86.7 & 94.0 & \textbf{94.2} & 79.8 & 92.6 & \underline{\textbf{96.8}} & \textbf{95.9} & \textbf{99.1} $\pm$ 0.9 \\
+hopper-m-e & 98.0 & 55.8 & 103.3 & 105.4 & 91.5 & \underline{\textbf{111.8}} & \textbf{111.2} & \textbf{107.2} & \textbf{108.6} & \textbf{111.1} & \textbf{108.6} & \textbf{111.7} $\pm$ 1.0 \\
+walker2d-m-e & \textbf{110.1} & 74.5 & \underline{\textbf{113.0}} & \textbf{108.8} & \textbf{109.6} & \textbf{110.2} &\textbf{112.7} & \textbf{108.4} & \textbf{109.8} & \textbf{110.1} & \textbf{112.7} & \textbf{113.6} $\pm$ 3.5 \\ \hline
+\textbf{locomotion-v2 total} & 677.4 & 450.7 & 684.6 & 698.5 & 749.7 & 749.7 & 752.9 & 678.0 & 680.3 & \underline{791.2} & 739.2 & \textbf{836.4} \\ \hline \hline
+antmaze-u & 78.6 & 56.7 & 64.3 & 74.0 & 87.5 & 93.2 & 93.8 & - & 92.0 & 93.4 & \underline{94.0} & \textbf{99.5} $\pm$ 0.9 \\
+antmaze-u-div & 71.4 & 49.3 & 60.7 & {\bf 84.0} & 62.2 & 74.0 & {\bf 82.0} & - & \underline{{\bf 85.3}} & 66.2 & 80.2 & \textbf{85.0} $\pm$ 7.9 \\
+antmaze-m-play & 10.6 & 0.0 & 0.3 & 61.2 & 71.2 & 80.2 & 76.0 & - & 81.3 & 76.6 & \underline{{\bf 84.2}} & \textbf{85.8} $\pm$ 5.5 \\
+antmaze-m-div & 3.0 & 0.7 & 0.0 & 53.7 & 70.0 & 79.1 & 73.6 & - & {\bf 82.0} & 78.6 & \underline{{\bf 84.8}} & 
+\textbf{84.0}  $\pm$ 6.2\\
+antmaze-l-play & 0.2 & 0.0 & 0.0 & 15.8 & 39.6 & 53.2 & 46.5 & - & 59.3 & 46.4 & \underline{{\bf 63.5}} & 50.3 $\pm$ 8.6 \\
+antmaze-l-div & 0.0 & 1.0 & 0.0 & 14.9 & 47.5 & 52.3 & 49.0 & - & 45.5 & 56.6 & \underline{{\bf 67.9}} & 55.3 $\pm$ 10.3 \\ \hline
+\textbf{antmaze-v0 total} & 168.3 & 107.7 & 125.3 & 303.6 & 378.0 & 432.0 & 420.9 & - & 445.4 & 417.8 & \underline{{\bf 474.6}} & {\bf 459.9} \\ \hline
+\end{tabular}
+\end{table}
+
+\subsection{Q-gradient guidance}\label{sec:q_grad}
+
+To demonstrate the effectiveness of soft Q-guidance, we compare DAC to two variants: one that utilizes hard Q-guidance by eliminating the noise scaling factor, and another that employs denoised Q-guidance by conducting guidance with denoised actions. Figure \ref{fig:soft_q_guidance} presents an illustration on a 2-D bandit example. In addition, we showcase the efficacy of soft Q-guidance by comparing the performance of various Q-gradient guidance on locomotion tasks, as depicted in Figure \ref{fig:ablation_guide}. DAC with soft Q-guidance achieves the highest performance in nearly all tasks. The hard Q-guidance also performs well when the behavior dataset comprises an adequate number of optimal demonstrations. However, when confronted with tasks that involve numerous sub-optimal trajectories, the hard Q-guidance falls behind in comparison to the soft Q-guidance. Furthermore, the denoised Q-guidance often struggles to generate in-distribution actions and frequently fails. Nevertheless, denoised Q-guidance yields the highest score on ``halfcheetah-medium'' task, which could be attributed to the fact that such task is more tolerant to OOD actions.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\textwidth]{guide.pdf}
+  \caption{\textbf{Ablation study on Q-gradient guidance.} We compare soft Q-guidance (soft) with hard Q-guidance (hard) and the denoised Q-guidance (denoised) on locomotion tasks.}\label{fig:ablation_guide}
+\end{figure}
+
+\subsection{Pessimistic value targets}
+To demonstrate the importance of the LCB target in balancing the overestimation and underestimation of value targets, we compare a variant of DAC on locomotion tasks, wherein the LCB target is replaced by the ensemble minimum (min).  The results are shown in Table \ref{tab:ablation_tar}. It is noteworthy that the variants of DAC without the LCB target also achieve competitive performance compared to prior research in many tasks.
+
+\begin{table}[h!]
+\scriptsize
+\setlength\tabcolsep{3.2pt}
+\renewcommand{\arraystretch}{1.2}
+\caption{{\bf Ensemble Q-target ablation.} We compare LCB target against the minimum target (min). We also involve the best scores of the prior methods (SOTA) from Table \ref{tab:main_res} for comparison.}\label{tab:ablation_tar}
+\centering
+\begin{tabular}{l|ccc|ccc|ccc}
+\hline
+\multirow{2}{*}{\textbf{Q-Target}} & \multicolumn{3}{c}{\textbf{walker2d}} & \multicolumn{3}{c}{\textbf{hopper}} & \multicolumn{3}{c}{\textbf{halfcheetah}} \\  \cline{2-10}
+       & \textbf{m} & \textbf{m-r} & \textbf{m-e} & \textbf{m} & \textbf{m-r} & \textbf{m-e} & \textbf{m} & \textbf{m-r} & \textbf{m-e} \\
+\hline
+SOTA    & 87.0  &  95.5  & 113.0 & 90.5 & 101.3 & 111.2 & 51.1 & 47.8 & 96.8  \\
+Min    & 83.9 $\pm$ 0.22  &  66.3 $\pm$ 9.7  &  110.0 $\pm$ 0.2  & \textbf{100.8} $\pm$ 0.9  &  \textbf{102.9} $\pm$ 0.4   &  \textbf{111.3} $\pm$ 0.1   & 49.3 $\pm$ 0.3  &  43.1 $\pm$ 0.2   & 43.2 $\pm$ 0.1  \\
+\textbf{LCB (Ours)}    & \textbf{96.8} $\pm$ 3.6 & \textbf{96.8} $\pm$ 1.0 & \textbf{113.6} $\pm$ 3.5 & \textbf{101.2} $\pm$ 2.0 & \textbf{103.1} $\pm$ 0.3 & \textbf{111.7} $\pm$ 1.0 & \textbf{59.1} $\pm$ 0.4 & \textbf{55.0} $\pm$ 0.2 & \textbf{99.1} $\pm$ 0.9 \\
+\hline
+\end{tabular}
+\end{table}
+
+
+
+\section{Conclusion}
+
+In this paper, we propose the Diffusion Actor-Critic framework, which theoretically formulates the KL constraint policy iteration as a diffusion noise regression problem. The resulting policy improvement loss incorporates a soft Q-guidance term that adjusts the strength of Q-gradient guidance based on the noise scales. This approach promotes the generation of high-reward actions while staying within the behavior support. Moreover, we utilize LCB of Q-ensemble to address the issue of 
+overestimation and underestimation of Q-value targets. We evaluate our algorithm on D4RL benchmarks and compare it against various baselines, demonstrating its superior performance across almost all tasks. 
+
+
+
+
+

@@ -1,0 +1,397 @@
+\title{Think while You Generate: Discrete Diffusion with Planned Denoising}
+
+\begin{abstract}
+
+Discrete diffusion has achieved state-of-the-art performance, outperforming or approaching autoregressive models on standard benchmarks. In this work, we introduce \textit{Discrete Diffusion with Planned Denoising} (\ourmethod), a novel framework that separates the generation process into two models: a planner and a denoiser. At inference time, the planner selects which positions to denoise next by identifying the most corrupted positions in need of denoising, including both initially corrupted and those requiring additional refinement. This plan-and-denoise approach enables more efficient reconstruction during generation by iteratively identifying and denoising corruptions in the optimal order.
+\ourmethod~outperforms traditional denoiser-only mask diffusion methods, achieving superior results on language modeling benchmarks such as \texttt{text8}, \texttt{OpenWebText}, and token-based generation on \texttt{ImageNet $256 \times 256$}. Notably, in language modeling, \ourmethod~significantly reduces the performance gap between diffusion-based and autoregressive methods in terms of generative perplexity.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Generative modeling of discrete data has recently seen significant advances across various applications, including text generation \citep{brownlanguage2020}, biological sequence modeling \cite{lin2023evolutionary,avdeyev2023dirichlet}, and image synthesis \citep{chang2022maskgit,chang2023muse}. Autoregressive transformer models have excelled in language modeling but are limited to sequential sampling, with performance degrading without annealing techniques such as nucleus (top-p) sampling \citep{holtzmancurious}.
+In contrast, diffusion models offer more flexible and controllable generation, proving to be more effective for tasks that lack natural sequential orderings, such as biological sequence modeling \citep{lin2023evolutionary, alamdari2023protein} and image token generation \citep{chang2022maskgit}.
+In language modeling, the performance gap between discrete diffusion and autoregressive models has further narrowed recently, thanks to improved training strategies \citep{lou2024discrete, shi2024simplified, sahoo2024simple, gat2024discrete}, however, a gap still remains on some tasks \cite{shi2024simplified, lou2024discrete}.
+
+State-of-the-art discrete diffusion methods train a denoiser (or score) model that determines the transition rate (or velocity) from the current state to predicted values. During inference, the generative process is discretized into a finite number of steps. At each step, the state values are updated based on the transition probability, which is obtained by integrating the transition rate over the timestep period.
+In order to further close the performance gap with autoregressive models, we advocate for a rethinking of the standard discrete diffusion design methodology.
+We propose a new framework \textbf{Discrete Diffusion with Planned Denoising} (\ourmethod), that divides the generative process into two key components: a planner and a denoiser, facilitating a more adaptive and efficient sampling procedure.
+The process starts with a sequence of tokens initialized with random values. At each timestep, the planner model examines the sequence to identify the position most likely to be corrupted and in need of denoising. The denoiser then predicts the value for the selected position, based on the current noisy sequence. 
+The key insight behind our plan-and-denoise approach is that the generative probability at each position can be factorized into two components: 1) the probability that a position is corrupted, and 2) the probability of denoising it according to the data distribution.
+
+The advantages of our approach are two-fold, providing both a simplified learning process and a more effective sampling algorithm.
+\textbf{First}, by decomposing the originally complex task into two distinct sub-tasks, the task becomes easier for each neural network model. In particular, the task of planning is simpler to learn compared to denoising. In contrast, the original uniform diffusion model relies on a single neural network to perform both tasks simultaneously. 
+\begin{figure*}[th]
+  \centering  
+  \includegraphics[width=1.0\textwidth]{figures/sampling_process_v4.pdf}
+  \caption{\small An example generation trajectory from $t=0$ to $1$ with a sequence of $5$ letters. At each step, the \textit{planner} predicts the probability of each token being corrupted (indicated by the numbers next to the tokens). Based on these probabilities, a position is selected, and the \textit{denoiser} makes its prediction. The \textit{actual time} progression may not always align with the scheduled timestep, and is determined based on planner's assessment of the noise level of the sequence. For instance, in step $2$, the denoiser makes minimal improvement and time progresses slower than scheduled. In step $4$, the denoiser made an unintended error, the time progression is effectively backward. Sampling continues until all corrupted tokens are reconstructed.}
+  \label{fig:schematic}
+\end{figure*}
+Under our framework, the mask diffusion approach achieves a comparable decomposition by using a mask token to indicate whether a position contains noise or data. However, a critical limitation of this is that once tokens are filled in, they cannot be further corrected, even if the denoiser makes errors.
+\textbf{Furthermore}, our plan-and-denoise framework enables an improved adaptive sampling scheme that leverages the planner's predictions in two ways. Our sampling method employs finer discretization when the planner detects that the sequence is noisier than expected for the current timestep, i.e., more denoising moves are needed for the time left. Additionally, the planner can identify errors from previous steps, allowing the sampling process to adjust its time back and continue until the denoiser corrects all previously accumulated mistakes, resulting in a more robust generation.
+\cref{fig:schematic} provides an illustrative example of how the planner operates during inference.
+
+Our contributions are as follows:
+\begin{itemize}[
+    leftmargin=4mm,
+    partopsep=0pt,
+]
+\item We introduce {Discrete Diffusion with Planning and Denoising} (\ourmethod), a novel framework for discrete generative modeling that decomposes the generation process into planning and denoising.
+\item Our proposed plan-and-denoise framework introduces an adaptive sampling scheme, guided by the planner's output, enabling continuous self-correction of errors in an optimal order. This results in improved generation by scaling the number of sampling steps.
+\item We derive simple and effective training objectives for the planner and denoiser models, grounded in maximizing the Evidence Lower Bound (ELBO) for discrete diffusion processes.  
+\item In experiments on GPT-2 scale language modeling and $256 \times 256$ image token generation, \ourmethod~significantly outperforms its mask diffusion counterparts when using the same denoiser. Furthermore, we demonstrate that incorporating a planner substantially enhances generation quality, even when using a smaller or weaker denoiser model compared to baseline methods.
+\end{itemize}
+
+
+\section{Preliminaries}
+
+\label{sec:background}
+
+
+We begin by introducing the problem setup and notations. Following \cite{campbell2024generative, gat2024discrete}, we then explain the Continuous Time Markov Chain (CTMC) framework \citep{norris1998markov}, which is used to define the forward and reverse processes of discrete diffusion, and how the discrete timestep version is derived from it.
+
+\mysubsection{Setup and Notations}
+We aim to model discrete data where a sequence $\x \in \domain^D$ is $D$-dimensional and each element $x^d$ takes $\statespace$ possible states. $x^{\backslash d}$ denotes all dimensions except $d$. For clarity in presentation, we assume $D=1$ and all results hold for $D>1$ (see \cref{sec:parameterization}). We use $p(x)$ to denote the probability mass function (PMF). The $\kdelta{i}{j}$ is the Kronecker delta function, which is $1$ when $i=j$ and $0$ otherwise.
+
+\mysubsection{Continuous Time Markov Chains and Discretization}
+We adopt the CTMC framework to define the discrete diffusion process. A realization of the CTMC dynamics is defined by a trajectory $\x_t$ over time $t \in [0,1]$ that makes jumps to another state after a random waiting period known as the holding time. The transition rates and the next states are governed by the rate matrix $R_t \in \real^{\statespace \times \statespace}$ (analogous to the velocity field $\nu_t$ in continuous state spaces), where the off-diagonal elements, representing jumps to different states, are non-negative.  For an infinitesimal timestep $\dt$, the probability of transitioning from $x_t$ to a different state $j$ is given by $R_t(\x_t, j) \dt$.
+
+In practice, the trajectory is simulated using finite time intervals $\Dt$. As a result, the transition probability follows a categorical distribution with the PMF \citep{sun2023score}: \begin{equation}\label{eq:reverse_transition_prob} 
+\ptDt (j | \x_t) =\kdelta{\x_t}{j} + R_t(\x_t, j) \Dt,
+\end{equation} 
+where we denote this as $\Cat(\kdelta{\x_t}{j} + R_t(\x_t, j) \Dt)$, and $R_t(\x_t, \x_t) \vcentcolon= - \sum_{s \neq \x_t} R_t(\x_t, s)$ to ensure that the transition probabilities sum to 1.
+
+\mysubsection{Forward Corruption Process}
+Following \cite{campbell2024generative, sahoo2024simple, gat2024discrete}, which were inspired by flow matching in continuous state space \citep{lipman2022flow,liu2022flow,albergo2022building}, we construct the forward process by interpolating from noise $p_{0}(\x_0) = \pnoise(\x_0)$ to clean data $p_{1}(x_1) = \pdata(x_1)$.
+Common choices for the noise distribution include: (i) $\pnoise^{\mathrm{unif}}(\x_t) = \nicefrac{1}{S}$, a uniform distribution over $\domain$; and (ii) $\pnoise^{\mathrm{mask}}(\x_t) = \kdelta{\mask}{\x_t}$, a delta PMF concentrated on an artificially introduced mask state $\mask$.
+Let $\noiseschedule$ be the noise schedule that introduces noise to the data over time $t$. For example, a linear schedule is given by $\noiseschedule=t$. The conditional marginal $\pnoisemarg(x_t | x_1)$ is given in closed form:
+\begin{align}
+\label{eq:corruption_flow}
+\pnoisemarg^{\mathrm{unif}}(\x_t | \x_1) &= \Cat( \noiseschedule \kdelta{\x_1}{\x_t} + (1-\noiseschedule) \frac{1}{\statespace}),
+\\
+\pnoisemarg^{\mathrm{mask}}(\x_t | \x_1) &= \Cat( \noiseschedule \kdelta{\x_1}{\x_t} + (1-\noiseschedule) \kdelta{\mask}{\x_t}).
+\end{align}
+At $t=1$, the conditional marginal converges to the datapoint $x_1$, i.e. $\kdelta{\x_1}{\x_t}$. At $t=0$, the conditional marginal converges to the noise distribution $\pnoise(\x_t)$. 
+
+\mysubsection{Reverse Generation Process}
+Sampling from $\pdata$ is achieved by learning a generative rate matrix $R_t(\x_t, j)$ to reverse simulate the process from $t=0$ to $t=1$ using \cref{eq:reverse_transition_prob}, such that we begin with samples of $\pnoise$ and end with samples of $\pdata$. The datapoint conditional reverse rate $R_t(\x_t, j | \x_1)$ for $j \neq \x_t$\footnote{For simplicity, we only derive the rates for $j \neq \x_t$. The rate for $j = \x_t$ can be computed as $R_t(\x_t, \x_t | \x_1) \vcentcolon= - \sum_{s \neq \x_t} R_t(\x_t, s | \x_1)$.} under the uniform or mask noise distributions is given by \cite{campbell2024generative, gat2024discrete}:
+\begin{equation*}
+     R_t^{\mathrm{unif}}(\x_t, j | \x_1) = \frac{\dot{\noiseschedule}}{1-\noiseschedule}\kdelta{\x_1}{j} (1 - \kdelta{\x_1}{\x_t}), \quad R_t^{\mathrm{mask}}(\x_t, j | \x_1)= \frac{\dot{\noiseschedule}}{1-\noiseschedule}{\kdelta{\x_1}{j} \kdelta{\x_t}{\mask}}.
+\end{equation*}
+\citep{campbell2024generative, gat2024discrete} show that the rate we aim to learn for generating $\pdata$ is the expectation of the data-conditional rate, taken over the denoising distribution, i.e., $R_t(\x_t, j) \vcentcolon = \E_{\pdenoise(\x_1 | \x_t)} \left[ R_t(\x_t, j | \x_1) \right]$:
+\begin{equation} \label{eq:reverse_rate}
+     R_t^{\mathrm{unif}}(\x_t, j) = \frac{\dot{\noiseschedule}}{1-\noiseschedule}\pdenoise\left(\x_1 = j | \x_t\right) , \quad R_t^{\mathrm{mask}}(\x_t, j)= \frac{\dot{\noiseschedule}}{1-\noiseschedule}{\kdelta{\x_t}{\mask}} \pdenoise\left(\x_1 = j | \x_t\right).
+\end{equation}
+The goal is to approximate this rate using a neural network. During inference, the generative process is simulated with the learned rate by taking finite timesteps, as described in \cref{eq:reverse_transition_prob}. 
+
+\tabSpecifics
+
+
+\section{Method}
+
+\label{sec:method}
+
+\subsection{Decomposing Generation into Planning and Denoising}
+\label{sec:parameterization}
+Recent state-of-the-art discrete diffusion methods \citep{sun2023score, lou2024discrete, campbell2024generative, shi2024simplified, sahoo2024simple, gat2024discrete} have converged on parameterizing the generative rate using a denoising neural network and deriving cross-entropy-based training objectives. 
+This enables simplified and effective training, leading to better and SOTA performance in discrete generative modeling compared to earlier approaches \citep{austin2021structured, campbell2022continuous}.
+In \cref{tab:comparison},  we summarize the commonalities and differences in the design choices across various methods.
+
+Based on the optimal generative rate in \cref{eq:reverse_rate}, we propose a new approach to parameterizing the generative rate by dividing it into two distinct components: planning and denoising. We begin by examining how the generative rate in mask diffusion can be interpreted within our framework, followed by a derivation of the decomposition for uniform diffusion.
+
+\mysubsection{Mask Diffusion}
+For mask diffusion, the planning part is assigning probability of $\frac{\dot{\noiseschedule}}{1-\noiseschedule}{\kdelta{\x_t}{\mask}}\Dt$ for the data to be denoised with an actual value. ${\kdelta{\x_t}{\mask}}$ tells if the data is noisy ($\mask$) or clean. $\frac{\dot{\noiseschedule}}{1-\noiseschedule}$ is the rate of denoising, which is determined by the remaining time according to the noise schedule.  
+The denoiser $\pdenoise$ assigns probabilities to the possible values to be filled in if this transition happens. 
+\begin{equation} \label{eq:trans_prob_decomp_mask_singleD}
+\textstyle
+    R_t^{\mathrm{mask}}(\x_t, j)\Dt = 
+    \underbrace{\frac{\dot{\noiseschedule}}{1-\noiseschedule}{\kdelta{\x_t}{\mask}}}_{\text{rate of making correction}} \Dt
+    \underbrace{\pdenoise\left(\x_1 = j | \x_t \right)}_{\text{prob. of denoising}}
+\end{equation}
+
+\mysubsection{Uniform Diffusion}
+Similarly, we would want to decompose the transition probability into two parts: the planning probability based on if the data is corrupted and the denoising probability that determines which value to change to.
+But in contrast to the mask diffusion case, the noise/clean state of the data is not given to us during generation. We use $z_t^d \in \latentspace$ as a latent variable to denote if a dimension is corrupted, with $N$ denoting noise and $D$ denoting data.
+
+From Bayes rule, for $j \neq x_t$, since $\pdenoise\left(x_1=j|x_t,z_t=D\right) = \frac{p\left(x_t|x_1=j,z_t=D\right) p\left(x_1=j\right)}{p(x_t|z_t=D)} = 0$
+\begin{equation} \label{eq:uniform_denoise_prob}
+    \pdenoise\left(\x_1 = j | \x_t \right) = \sum_{z_t \in \latentspace} p(z_t|x_t)\pdenoise(x_1=j|x_t,z_t) = \underbrace{p(z_t=N|x_t)}_\text{prob. of being corrupted} \underbrace{\pdenoise(x_1=j|x_t,z_t=N)}_\text{prob. of denoising} 
+\end{equation}
+The first part of the decomposition is the posterior probability of $x_t$ being corrupted, and the second part gives the denoising probability to recover the value of $x_t$ if $x_t$ is corrupted. Plugging \cref{eq:uniform_denoise_prob} into \cref{eq:reverse_rate}, we arrive at: 
+\begin{equation} \label{eq:trans_prob_decomp_uniform}
+    R_t^{\mathrm{unif}}(\x_t, j)\Dt = \underbrace{\frac{\dot{\noiseschedule}}{1-\noiseschedule} p(z_t=N|x_t)}_\text{rate. of making correction} \Dt \underbrace{\pdenoise(x_1=j|x_t,z_t=N)}_\text{prob. of denoising} 
+\end{equation}
+By comparing \cref{eq:trans_prob_decomp_uniform} and \cref{eq:trans_prob_decomp_mask_singleD}, we find that they share the same constant part  $\frac{\dot{\noiseschedule}}{1-\noiseschedule}$ which represents the rate determined by the current time left according to the noise schedule. The main difference is in the middle part that represents the probability of $\x_t$ being corrupted. In mask diffusion case, this can be readily read out from the $\mask$ token. But in the uniform diffusion case, we need to compute/approximate this probability instead. The last part is the denoising probability conditioned on $x_t$ being corrupted, which again is shared by both and needs to be computed/approximated. 
+
+\mysubsection{Generative Rate for Multi-Dimensions}
+The above mentioned decomposition extends to $D>1$. We have the following reverse generative rate \citep{campbell2024generative, gat2024discrete} for mask diffusion:
+\begin{align} \label{eq:trans_prob_decomp_mask}
+    R_t^{\mathrm{mask}}(\x_t, j^d)\Dt 
+    &= 
+    \frac{\dot{\noiseschedule}}{1-\noiseschedule}\Dt\;{\kdelta{\x_t^d}{\mask}}
+    {\pdenoise\left(\x_1^d = j^d | \x_t \right)}, \quad \forall j^d \neq x_t^d,
+\end{align}
+and we derive the following decomposition result for uniform diffusion (proof in \cref{sec:generative_rate_decomposition}):
+
+\begin{proposition}\label{prop:generative_rate_decomposition}
+The reverse generative rate at $d$-th dimension can be decomposed into the product of recovery rate, probability of corruption and probability of denoising:
+\begin{talign} 
+    R_t^{\mathrm{unif}}\left(\x_t, j^d\right)\Dt &={\frac{\dot{\noiseschedule}}{1-\noiseschedule}}  p_{1|t}\left(x_1^d=j^d|x_t\right) \Dt\, \label{eq:rate_decomposition_uniform_D}\\ &=\underbrace{\frac{\dot{\noiseschedule}}{1-\noiseschedule}}_\text{noise removal rate}  \underbrace{p\left(z_t^d=N|x_t\right)}_\text{prob. of corruption} \underbrace{\pdenoise\left(x_1^d=j^d|x_t,z_t^d=N\right)}_\text{prob. of denoising} \Dt, \quad \forall j^d \neq x_t^d \notag
+\end{talign}
+\begin{talign}
+   \text{where}\quad\quad p\left(z_t^d=N|x_t\right) 
+    = 1 - \pdenoise\left(x_1^d=x_t^d|x_t\right) \frac{\noiseschedule}{\noiseschedule + {\left(1-\noiseschedule\right)}/{S} } \label{eq:corruption_prob} \\
+    \pdenoise\left(x_1^d=j^d|x_t,z_t^d=N\right) 
+    = \frac{\pdenoise\left(\x_1^d=j^d | \x_t\right)}{ p\left(z_t^d=N|x_t\right) } \label{eq:denoising_prob}
+\end{talign}
+\end{proposition}
+We observe that the term ${p\left(z_t^d=N|x_t\right)}$ determines how different dimensions are reconstructed at different rates, based on how likely the dimension is clean or noise given the current context. 
+
+\mysubsection{Previous Parameterization} 
+In the case of mask diffusion, as studied in recent works \citep{lou2024discrete, campbell2024generative, shi2024simplified,sahoo2024simple,gat2024discrete}, the most effective parameterization for learning is to directly model the denoising probability with a neural network, as this is the only component that needs to be approximated. 
+
+In the case of uniform diffusion,
+the conventional approach uses a single model to approximate the generative rate as a whole, by modeling the posterior $\pdenoise\left(\x_1^d = j^d | \x_t \right)$ as shown in \cref{eq:rate_decomposition_uniform_D}. However, despite its theoretically greater flexibility -- allowing token values to be corrected throughout sampling, akin to the original diffusion process in the continuous domain 
+-- its performance has not always outperformed mask diffusion, particularly in tasks like image or language modeling.
+
+\mysubsection{Plan-and-Denoise Parameterization}
+Based on the observation made in \cref{prop:generative_rate_decomposition}, we take the view that generation should consist of two models: a planner model for deciding which position to denoise and a denoiser model for making the denoising prediction for a selected position. 
+\begin{equation} \label{eq:jump_rate_parameterization}
+\textstyle
+    \jumprate^{\mathrm{unif}}\left(\x_t, j^d\right)\Dt = \!\!\!\underbrace{\frac{\dot{\noiseschedule}}{1-\noiseschedule}}_\text{noise removal rate}\!\!\!\!\Dt\, \underbrace{p_{\theta}\left(z_t^d=N|x_t\right)}_\text{planner} \underbrace{\pdenoise^{\theta}\left(x_1^d=j^d|x_t,z_t^d=N\right)}_\text{denoiser}, \quad \forall x_t \neq j^d
+\end{equation}
+This allows us to utilize the planner’s output to design an improved sampling algorithm that optimally identifies and corrects errors in the sequence in the most effective denoising order. Additionally, the task decomposition enables separate training of the planner and denoiser, simplifying the learning process for each neural network. Often, a pretrained denoiser is already available, allowing for computational savings by only training the planner, which is generally faster and easier to train.
+
+
+\begin{remark}
+Under this perspective, masked diffusion (\cref{eq:trans_prob_decomp_mask}) can be interpreted as a denoiser-only modeling paradigm with a fixed planner, i.e., $p_{\theta}\left(z_t^d=N|x_t\right) = \kdelta{\x_t^d}{\mask}$, which assumes that mask tokens represent noise while actual tokens represent clean data. This planner is optimal under the assumption of a perfect denoiser, which rarely holds in practice. When the denoiser makes errors, this approach does not provide a mechanism for correcting those mistakes.
+\end{remark}
+
+
+
+Next, we demonstrate how our plan-and-denoise framework enables an improved sampling algorithm that effectively leverages the planner's predictions. From this point forward, we assume uniform diffusion by default and use $\jumprate$ to denote the reverse jump rate, unless explicitly stated otherwise.
+
+\subsection{Sampling}
+\label{sec:sampling}
+\mysubsection{Prior Works: Tau-leaping Sampler}
+The reverse generative process is a CTMC that consists of a sequence of jumps from $t =0$ to $t=1$. The most common way \citep{campbell2022continuous, sun2023score, lou2024discrete, shi2024simplified, sahoo2024simple, gat2024discrete} is to discretize it into equal timesteps and simulate each step following the reverse generative rate using an approximate simulation method called tau-leaping. 
+During step $[t,t+\Dt]$, all the transitions happening according to \cref{eq:reverse_transition_prob} are recorded first and simultaneously applied at the end of the step. When the discretization is finer than the number of denoising moves required, some steps may be wasted when no transitions occur during those steps. In such cases when no transition occurs during $[t-\Dt, t]$, a neural network forward pass can be saved for step $[t, t+\Dt]$ by using the cached $\pdenoise(x_1^d | x_{t-\Dt})$ from the previous step \citep{chen2023fast, sahoo2024simple}, assuming the denoising probabilities remain unchanged during $[t-\Dt, t]$. However, as discussed in literature \citep{campbell2022continuous,sun2023score,lou2024discrete,campbell2024generative}, such modeling of the reverse denoiser is predicting single dimension transitions but not joint transitions of all dimensions. Therefore, the tau-leaping simulation will introduce approximation errors if multiple dimensions are changed during the same step. 
+
+\mysubsection{Gillespie Sampler}
+Instead, we adopt the Gillespie algorithm \citep{gillespie1976general,gillespie1977exact,wilkinson2018stochastic}, a simulation method that iteratively repeats the following two-step procedure: (1) sampling $\Dt$, the holding time spent at current state until the next jump and (2) sampling which state transition occurs. 
+In the first step, the holding time $\Dt$ is drawn from an exponential distribution, with the rate equal to the total jump rate, defined as the sum of all possible jump rates in
+\cref{eq:jump_rate_parameterization}: $\totaljumprate := \sum_d\sum_{j^d \neq \x_t^d}\jumprate(\x_t,j^d)$.
+For the second step, the event at the jump is sampled according to ${\jumprate\left(\x_t, j^d\right)}/\totaljumprate$,
+such that the likelihood of the next state is proportional to the rate from the current position.
+A straightforward way is using ancestral sampling by first selecting the dimension $\dprime$, followed by sampling the value to jump to $j^\dprime$:
+\begin{equation*}
+    \textstyle
+    \dprime \sim \Cat\left(\sum_{j^\dprime \neq \x_t^\dprime}\jumprate(\x_t, j^\dprime)/\totaljumprate\right), \quad j^\dprime \sim \Cat\left(\jumprate(\x_t, j^\dprime)/\sum_{j^\dprime \neq \x_t^\dprime}\jumprate(\x_t, j^\dprime)\right).
+\end{equation*}
+We find we can simplify the calculation of the total jump rate and next state transition by introducing the possibility of self-loop jumps into the CTMC. These allow the trajectory to remain in the current state after a jump occurs.
+This modification results in an equivalent but simpler simulated process with our plan-and-denoise method, formalized in the following proposition:
+\begin{proposition} \label{prop:self-loop-jumps}
+    The original CTMC defined by the jump rate $\jumprate$ given by \cref{eq:jump_rate_parameterization} has the same distribution over trajectories as the modified self-loop CTMC with rate matrix
+    \begin{equation*}
+    \textstyle
+        \tilde{R}_t(x_t, j^d) = \frac{ \dot{\alpha}_t}{1 - \alpha_t} p_\theta(z_t^d = N | x_t) \pdenoise^\theta(x_1^d = j^d | x_t, z_t^d = N), \quad \forall x_t, j^d
+    \end{equation*}
+For this self-loop Gillespie algorithm, the total jump rate and next state distribution have the form
+\begin{talign*}
+    &\sum_{d, j^d} \tilde{R}_t(\x_t, j^d) = \frac{\dot{\alpha}_t}{1- \alpha_t} \sum_d p_\theta(z_t^d = N | \x_t)\\ 
+    &\dprime \sim \Cat\left(p_\theta(z_t^\dprime = N | x_t)\right), \quad j^\dprime \sim \Cat\left(\pdenoise^\theta(x_1^\dprime = j^\dprime | x_t, z_t^\dprime = N)\right).
+\end{talign*}
+\end{proposition}
+Intuitively, the modification preserves the inter-state jump rates, ensuring that the distribution of effective jumps remains unchanged. A detailed proof is provided in \cref{sec:CTMC_self_loop}.
+
+
+\begin{remark}
+The Gillespie algorithm sets $\Dt$ adaptively, which is given by the holding time until the next transition. This enables a more efficient discretization of timesteps, such that one step leads to one token denoised (if denoising is correct). In contrast, tau-leaping with equal timesteps can result in either no transitions or multiple transitions within the same step. Both scenarios are suboptimal: the former wastes a step, while the latter introduces approximation errors.
+\end{remark}
+
+\mysubsection{Adaptive Time Correction}
+According to the sampled timesteps $\Dt$, the sampling starts from noise at $t=0$ and reaches data at $1$. However, in practice, the actual time progression can be faster or slower than scheduled. For example, sometimes the progress is faster in the beginning when the starting sequence contains some clean tokens.
+More often, later in the process, the denoiser makes mistakes and hence time progression is slower than the scheduled $\Dt$ or even negative for some steps.
+
+This raises the question: can we leverage the signal from the planner to make adaptive adjustments? For example, even if scheduled time is reaches $t=1.0$, but according to the planner $10\%$ of the data is still corrupted, the actual time progression under a linear schedule should be closer to $t=0.9$. The reasonable approach is to assume the process is not yet complete and continue the plan-and-denoise sampling. Under this `time correction' mechanism, the stopping criterion is defined as continuing the sampling procedure until the planner determines that all positions are denoised, i.e., when $p_\theta\left(z_t^d=N | x_t\right) \approx 0$. In practice, we don't need to know the exact time; instead, we can continue sampling until either the stopping criterion is satisfied or the maximum budget of steps, $T$, is reached. The pseudo-algorithm for our proposed sampling method is presented in \cref{alg:sampling}. In cases where the denoiser use time information as input, we find it helpful to use the estimated time $\tilde{t}$ from the planner.
+At time $t$, from the noise schedule, we expect there to be $(1-\alpha_t)D$ noised positions. The estimate of the number of noised positions from the denoiser is $\sum_{d'} p_\theta(z_t^{d'} = N | x_t)$. Therefore, the planner's estimate of the corruption time is $\tilde{t} = \alpha_t^{-1} (1 - \sum_{d'} p_\theta(z_t^{d'} = N | x_t) / D )$ where $\alpha_t^{-1}$ is the inverse noise schedule.
+This adjustment better aligns the time-data pair with the distribution that the denoiser was trained on.
+
+Based on the decomposition of the generation into planning and denoising, the proposed sampling method maximally capitalizes on the available sampling steps budget. The Gillespie-based plan-and-denoise sampler allows for exact simulation and ensures no step is wasted by prioritizing the denoising of noisy tokens first. The time correction mechanism enables the planner to identify both initial and reintroduced noisy tokens, continuously denoising them until all are corrected. This mechanism shares similarities with the stochastic noise injection-correction step in EDM \citep{karras2022elucidating}. Instead of using hyperparameters for deciding how much to travel back, our time correction is based on the planner's estimate of the noise removal progress.
+
+\begin{algorithm}[h]
+\small
+\caption{\ourmethod{} Sampler}
+\label{alg:sampling}
+\begin{algorithmic}[1]
+\State \textbf{init} $i \gets 0, \x_0 \sim p_0$, planner $p_\theta$, denoiser $p_{1|t}^\theta$, maximum steps $T$, stopping criteria $\epsilon$
+\While{$i < T$ \textbf{or} $p_\theta(z_i^d = N | x_i) < \epsilon, \forall d$}
+\State {\colorbox{gray!20}{Plan}} sample dimension $\dprime \sim \operatorname{Cat}\left( p_\theta(z_i^\dprime = N | x_i) \right)$
+\If{denoiser uses time as input}
+\State $t \gets \alpha_t^{-1} \left(1 - \sum_{d'} p_\theta(z_t^{d'} = N | x_t) / D \right)$
+\EndIf
+\State {\colorbox{gray!20}{Denoise}} sample $j^\dprime \sim \operatorname{Cat}\left(p_{1|t}^\theta (x_1^\dprime = j^\dprime | x_i, z_i^\dprime = N) \right)$, $x_{i+1}^\dprime \gets j^\dprime$
+\State $i \gets i + 1$
+\EndWhile
+\State \textbf{return} $\x_i$
+\end{algorithmic}
+\end{algorithm}
+
+\mysubsection{Utilizing a Pretrained Mask Diffusion Denoiser} \label{sec:use_mask_denoiser}
+In language modeling and image generation, mask diffusion denoisers have been found to be more accurate than uniform diffusion counterparts \citep{austin2021structured, lou2024discrete}, with recent efforts increasingly focused on training mask diffusion denoisers \citep{shi2024simplified, sahoo2024simple, gat2024discrete}.
+The following proposition offers a principled way to sample from the uniform denoiser by leveraging a strong pretrained mask diffusion denoiser, coupled with a separately trained planner.
+\begin{proposition} \label{prop:draw_with_maskD}
+    From the following marginalization over $z_t$, which indicates if tokens are noise or data:
+    \begin{equation}     
+    \textstyle
+    \pdenoise\left(x_1^d|x_t,z_t^d=N\right) = \sum_{z_t} p\left(z_t|x_t,z_t^d=N\right) p_{1|t}(x_1^d|x_t,z_t),
+    \end{equation}
+    samples from $p_{1|t,\text{uniform}}\left(x_1^d|x_t,z_t^d=N\right)$ can be drawn by first sampling $z_t$ from $p(z_t | x_t, z_t^d = N)$ and then using a mask diffusion denoiser to sample $x_1^d$ with $p_{1|t,\text{mask}}\left(x_1^d | \tilde{x}_t\right)$, where $\tilde{x}_t$ is the masked version of $x_t$ according to $z_t$.
+\end{proposition}
+In practice, we can approximately sample $z^\exceptd$ from $p(z_t|x_t,z_t^d=N) \approx \prod_{d' \neq d} p_\theta(z_t^{d'}|x_t)$. This approximation becomes exact if $p(z_t^d|x_t)$ is either very close to $0$ or $1$, which holds true for most dimensions during generation.  We validated this holds most of time in language modeling in \cref{sec:noise_joint_estimation}.
+Even if approximation errors in $z_t$ occasionally lead to increased denoising errors, our sampling algorithm can effectively mitigate this by using the planner to identify and correct these unintentional errors. In our controlled experiments, we validate this and observe improved generative performance by replacing the uniform denoiser with a mask diffusion denoiser trained on the same total number of tokens, while keeping the planner fixed.
+
+
+\section{Training}
+
+\label{sec:training}
+\mysubsection{Training objectives}
+Our plan-and-denoise parameterization in \cref{eq:jump_rate_parameterization} enables us to use two separate neural networks for modeling the planner and the denoiser. Alternatively, both the planner and denoiser outputs can be derived from a single uniform diffusion model, $\pdenoise^\theta(x_1^d | x_t)$, as described in \cref{prop:generative_rate_decomposition}. This approach may offer an advantage on simpler tasks, where minimal approximation errors for neural network training can be achieved, avoiding the sampling approximation introduced in \cref{prop:draw_with_maskD}. However, in modern generative AI tasks, training is often constrained by neural network capacity and available training tokens, making approximation errors inevitable. By using two separate networks, we can better decompose the complex task, potentially enabling faster training -- especially since planning is generally easier than denoising.
+
+The major concern with decomposed modeling is that joint modeling could introduce unnecessarily coupled training dynamics, hindering effective backpropagation of the training signal across different models.
+However, as we prove in \cref{thm:training_objective}, the evidence lower bound (ELBO) of discrete diffusion decomposes neatly, allowing the use of direct training signals from the noise corruption process for independent training of the planner and denoiser (proof in \cref{subsec:training_obj_proof}).
+
+\begin{theorem} \label{thm:training_objective}
+    Let $\x_1$ be a clean data point, and $\x_t, z_t$ represent a noisy data point and its state of corruption drawn from $\pnoisemarg(\x_t, z_t|\x_1)$. The ELBO for uniform discrete diffusion simplifies into the sum of the following separate cross-entropy-type objectives. The training of the planner $p_\theta$ reduces to a binary classification, where the goal is to estimate the corruption probability by maximizing:
+    \begin{equation}
+    \textstyle
+        \mathcal{L}_{\text{planner}} =\E_{\Uniform(t ; 0,1) \pdata(\x_1) \pnoisemarg\left(z_t,x_t \mid x_1\right)} \left[ \frac{\noiseschedulerate}{1-\noiseschedule} \sum_{d=1}^D \log p_\theta \left(z_t^d |\x_t \right) \right].
+    \end{equation}
+    The denoiser $\pdenoise^\theta$ is trained to predict clean data reconstruction distribution:
+    \begin{equation}
+    \textstyle
+        \mathcal{L}_{\text{denoiser}}= \E_{\Uniform(t ; 0,1)\pdata\left(x_1\right)  p\left(\x_t,z_t \mid x_1\right)}  \left[ \frac{\noiseschedulerate}{1-\noiseschedule} \sum_{d=1}^D \delta\{ z_t^d, N\}\log \pdenoise^\theta({x}_1^d | x_t, z_t^d=N) \right].
+    \end{equation}
+\end{theorem}
+Standard transformer architectures can be used to parameterize both the denoiser and the planner, where the denoiser outputs $\statespace$ logits and the planner outputs a single logit per dimension.
+
+
+\section{Related work}
+
+\label{sec:related_work}
+\mysubsection{Discrete Diffusion/Flow Models}
+Previous discrete diffusion/flow methods, whether in discrete time \cite{austin2021structured, hoogeboom2021argmax, sahoo2024simple} or continuous time \cite{campbell2022continuous, sun2023score, lou2024discrete, campbell2024generative, shi2024simplified, gat2024discrete}, adopt the denoiser-only or score-modeling perspective. In contrast, we introduce a theoretically grounded decomposition of the generative process into planning and denoising.
+DFM \citep{campbell2024generative} and the Reparameterized Diffusion Model (RDM) \cite{zheng2023reparameterized} introduce stochasticity into the reverse flow/diffusion process, allowing for adjustable random jumps between states. This has been shown to improve the generation quality by providing denoiser more opportunities to correct previous errors. Additionally, RDM uses the denoiser's prediction confidence as a heuristic \citep{ghazvininejad2019mask,savinovstep,chang2022maskgit}  for determining which tokens to denoise first. 
+\citet{lee2022draft} introduces another heuristic in image generation that aims at correcting previous denoising errors by first generating all tokens and then randomly regenerating them in batches.
+
+\mysubsection{Self-Correction Sampling}
+Predictor-corrector sampling methods are proposed for both continuous and discrete diffusion \citep{song2020score, campbell2022continuous} that employ MCMC steps for correction after each predictor step. However, for continuous diffusion, this approach has been found to be less effective compared to the noise-injection stochasticity scheme \citep{karras2022elucidating, xu2023restart}. In the case of discrete diffusion, an excessively large number of corrector steps is required, which limits the method's overall effectiveness.
+
+
+\section{Experiment}
+
+\label{sec:experiment}
+Before going into details, we note that \ourmethod{} incurs 2 NFE v.s. 1 NFE per step in denoiser-only approaches, an extra cost we pay for planning. To ensure a fair comparison, we also evaluate denoiser-only methods that are either $2\times$ large or use $2\times$ steps. Our findings show that spending compute on planning is more effective than doubling compute on denoising when cost is a factor.
+
+\mysubsection{Text8}
+We first evaluate \ourmethod{} on the small-scale character-level text modeling benchmark, text8 \citep{mahoney2011large}, which consists of 100 million characters extracted from Wikipedia, segmented into chunks of 256 letters. Our experimental setup follows that of \citep{campbell2024generative}.
+Methods for comparison include 1) autoregressive model 2) DFM: discrete flow model (and $2\times$ param. version) \citep{campbell2024generative}, the best available discrete diffusion/flow model for this task, 3) DFM-Uni: original DFM uniform diffusion using tau-leaping, 4) \ourmethod{}-DFM-Uni: \ourmethod{} using uniform diffusion model as planner and denoiser, 5) \ourmethod{}-UniD: \ourmethod{} with separately trained planner and uniform denoiser, 6) \ourmethod{}-MaskD: \ourmethod{} with separately planner and mask denoiser. Details in the sampling differences are summarized in \cref{tab:sampling_scheme}.
+All models are of same size (86M) and trained for $750k$ iterations of batch size $2048$, except for autoregressive model, which requires fewer iterations to converge.
+Generated samples are evaluated using the negative log-likelihood (NLL) under the larger language model GPT-J-6B \citep{wang2021gpt}. Since NLL can be manipulated by repeating letters, we also measure token distribution entropy. High-quality samples should have both low NLL and entropy values close to the data distribution. 
+
+\cref{fig:text8_main} shows the performance of various methods with different sampling step budgets. DFM methods use tau-leaping while \ourmethod{} methods use our proposed adaptive Gillespie sampler. 
+The original mask diffusion (DFM, $\eta=0$) and uniform diffusion (DFM-Uni) perform similarly, and adding stochasticity ($\eta=15$) improves DFM's sample quality. Our proposed plan-and-denoise \ourmethod{} sampler consistently enhances the quality vs. diversity trade-off and significantly outperforms significantly outperforms DFM with $2\times$ parameters. Moreover, \ourmethod{} makes more efficient use of the inference-time budget (\cref{fig:text8_main}, middle), continuously refining the generated sequences.
+
+We observe that \ourmethod{} with a single network (DDPD-DFM-Uni) outperforms using separately trained planner and denoiser, as the task simplicity allows all models to achieve $\geq 90\%$ denoising accuracy at $t=0.85$. The benefit of reducing each model's burden is outweighed by compounded approximation errors (\cref{sec:use_mask_denoiser}). The weaker performance of $\tau$-leaping (P$\times$MaskD in \cref{fig:text8_ablation_sampling}) confirms this issue lies in approximation errors, not the sampling scheme. To emulate a practical larger-scale task where the models are undertrained due to computational or capacity budget limitations, we reduced training steps from $750k$ to $20k$ (\cref{fig:text8_main}, right). With only $20k$ steps, using separate planner and denoiser performs comparably to DFM at $750k$, while the single model suffers mode collapse due to larger approximation errors, highlighting the benefits of faster separate learning.
+
+Further ablation studies on imperfect training of either the planner or denoiser (\cref{fig:text8_ablation_imperfect_main,fig:text8_ablation_imperfect_full}) show that performance remains robust to varying levels of denoiser imperfection, thanks to the self-correction mechanism in the sampling process. An imperfect planner has a greater impact, shifting the quality-diversity Pareto front. In this case, training separate models proves more robust in preserving diversity and preventing mode collapse compared to training a single model. The ablation in \cref{fig:text8_ablation_sampling} examines the individual effects of the modifications introduced in the \ourmethod{} sampler. 
+We also measure the denoising error terms in the ELBO for the planner + denoiser setup vs. the single neural network approach, as shown in \cref{tab:elbo,table:denoising_elbo,tab:elbo_half_trained} of \cref{sec:exp_elbo}, which further validates the performance difference of various design choices. 
+
+
+\begin{figure}[ht!]
+  \centering
+  \begin{subfigure}{0.329\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/text8/nll_vs_entropy_compare_all.pdf}
+  \end{subfigure}
+  \begin{subfigure}{0.329\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/text8/nll_vs_entropy_varying_steps.pdf}
+  \end{subfigure}
+  \begin{subfigure}{0.329\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/text8/nll_vs_entropy_compare_dfm_uni_DDPD_maskD_20k.pdf}
+  \end{subfigure}
+  \caption{\small Negative log-likelihood measured with GPT-J versus sample entropy (in terms of tokens), with logit temperatures of the denoiser swept over $\{0.8, 0.9, 1.0\}$.  \textit{Left}: \ourmethod{} v.s. SOTA baselines. \textit{Middle}: Varying sampling steps from $250$ to $1000$; both DFM and \ourmethod{} use the same mask-based denoiser. \textit{Right}: DDPD single-neural-network v.s. DDPD planner + mask denoiser, both trained for $20k$ iterations. DFM at $750k$ iter.} \label{fig:text8_main}
+\end{figure}
+
+
+\mysubsection{OpenWebText Language Modeling}
+In \cref{fig:owt_main}, we compare \ourmethod{} with SEDD \citep{lou2024discrete}, both trained on the larger OpenWebText dataset \citep{gokaslan2019openweb}. We maintained the same experimental settings as in SEDD, with token vocabulary size $S = 50257$ and $D = 1024$, to validate whether planning improves generative performance under controlled conditions. We use the same pretrained SEDD-small or SEDD-medium score model as a mask diffusion denoiser, based on the conversion relationship outlined in \cref{tab:comparison}. A separate planner network, with the same configuration as SEDD-small (90M), is trained for $400k$ iterations with batch size $512$. 
+We evaluated the quality of unconditional samples using generative perplexity, measured by larger language models GPT-2-L (774M) \citep{radford2019language} and GPT-J (6B) \citep{wang2021gpt}. Both SEDD and \ourmethod{} were simulated using 1024 to 4096 steps, with $\text{top-p} = 1.0$. SEDD used tau-leaping, while \ourmethod{} employed our newly proposed sampler.
+We also include GPT-2 \citep{radford2019language} as the autoregressive baseline, with $\text{top-p}$ sweeping from $0.7$ to $1.0$. We experimented \ourmethod{} sampler with both softmax selection (\cref{fig:owt_ppl_softmax}) and proportional selection (\cref{fig:owt_ppl}). 
+
+SEDD shows marginal improvement with additional steps, similar to DFM in the text8 case.  In contrast, \ourmethod{} leveraged planning to continuously improve sample quality, with the most improvements in early stages and diminishing returns in later steps as the sequence gets mostly corrected. This shows that the planner optimally selects the denoising order and adaptively corrects accumulated mistakes.
+
+\begin{figure}[th!]
+  \centering
+  \begin{subfigure}{0.40\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/owt/gpt-j/nll_vs_sample_entropy_sedd-small-probN.pdf}
+  \end{subfigure}
+    \hspace{2mm}
+  \begin{subfigure}{0.40\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/owt/gpt-j/nll_vs_sample_entropy_sedd-medium-probN.pdf}
+  \end{subfigure}
+    \caption{\small Generative perplexity $\downarrow$ v.s. entropy $\uparrow$ (both plotted in log-scale) of SEDD, \ourmethod{} and GPT-2.} 
+  \label{fig:owt_main}
+\end{figure}
+\mysubsection{ImageNet $256\times 256$ Generation with Discrete Tokens}
+An image is represented using discrete-valued tokens with a pre-trained tokenizer and a decoder. The generative model is used for generating sequences in the token space. 
+We focus on understanding how \ourmethod{} compares to existing sampling methods using the same denoiser, instead of aiming for SOTA performance. The pretrained tokenizer and mask denoiser from \citet{yu2024image} is used, where the token length of an image is $D = 128$. 
+
+We compare \ourmethod{} with two mask diffusion type baselines: 1) standard mask diffusion and 2) MaskGIT \citep{chang2022maskgit}, which selects the next tokens based on the denoiser's confidence of its predicted logits. To prevent MaskGIT from making overly greedy selections, random noise is added to the confidence scores, with its magnitude annealed to zero following a linear schedule. We test all methods from $8$ to $128$ steps. Parallel sampling is used if $\#\,\text{steps} < 128$. 
+The results on FID scores~(\citep{heusel2017gans}, lower is better) are presented in \cref{tab:imagenet_results}. More results on inception scores and comparison with SOTA are in \cref{sec:imagenet_results}. Generated samples are in \cref{sec:imagenet_samples}. 
+In \ourmethod{}, the sampling process is divided into two stages: the first half follows a parallel sampling schedule, while the second half adopts an adaptive step size based on the noise level, allowing for finer discretization towards the end of sampling. 
+
+Notably, we observe that the standard mask performs poorly, with no significant improvement even with more sampling steps. This is attributed to the low accuracy of the denoiser, which is much worse than in OpenWebText language modeling ($3\%$ v.s. $60\%$ at $t=0.85$). 
+The confidence-based sampling of MaskGIT proves effective, but its greedy selection, despite the added randomness, sacrifices the sample diversity for quality, leading to higher FID values compared to \ourmethod. This issue becomes particularly pronounced when more steps are used, resulting in an overly greedy sampling order. While \ourmethod{} requires a minimum number of sampling steps to correct sampling errors from earlier stages, it achieves the best results and more steps do not lead to worse FID. We also conducted ablation to study the effect of increasing number of second-stage steps for \ourmethod{} in \cref{fig:imagenet_increase_refinement_steps}.
+
+To enhance the empirical performance in image token generation, we tested all methods with logit temperature annealing, a common approach to lower sampling temperature $\tau$ for improved denoising accuracy. We found $\tau = 0.6$ gives the best results among $\tau=1.0,0.9,0.8,0.7,0.6,0.5$, greatly improving mask diffusion and resulting in competitive FID scores. However, for MaskGIT, this reduces sample diversity, leading to even higher FID scores compared to no annealing. We also tried another annealing trick from \citet{yu2024image}, where $\tau$ is linearly reduced from $1.0$ to $0.0$ during generation. This trick worked well for mask diffusion, allowing for further improvement over fixed-temperature annealing. For \ourmethod{}, performance remained relatively stable, with minor improvements or degradations compared to no annealing. 
+
+\begin{table}[ht] 
+\centering
+\caption{FID score ($\downarrow$) on ImageNet $256 \times 256$. MaskD refers to mask diffusion. The denoiser and parallel sampling schedule are kept the same as \cite{yu2024image}, without classifier-free guidance.}
+\label{tab:imagenet_results}
+\small
+\setlength{\tabcolsep}{2pt} %
+\begin{tabular}{c|ccc|ccc|ccc}
+\toprule
+ \textbf{} & \multicolumn{3}{c|}{ \textbf{No Logit Annealing}} & \multicolumn{3}{c|}{\textbf{Logit temp $0.6$}} & \multicolumn{3}{c}{\textbf{Logit temp $1.0$ $\rightarrow$ $0.0$}} \\ 
+\textbf{Steps $T$ } & {\,MaskD\,} & {MaskGIT} & {\,\ourmethod\,}   & {\,MaskD\,} & {MaskGIT}  & {\,\ourmethod\,} & {\,MaskD\,} & {MaskGIT} & {\,\ourmethod\,} \\ 
+\midrule
+$8$ & \cellcolor[rgb]{0.852,0.786,0.934} 38.06 & \cellcolor[rgb]{0.936,0.973,0.838} 5.51 & \cellcolor[rgb]{0.919,0.970,0.849} 6.8 & \cellcolor[rgb]{0.934,0.972,0.839} 5.69 & \cellcolor[rgb]{0.883,0.961,0.871} 10.02 & \cellcolor[rgb]{0.934,0.972,0.839} 5.71 & \cellcolor[rgb]{0.944,0.974,0.833} 4.99 & \cellcolor[rgb]{0.899,0.965,0.861} 8.53 & \cellcolor[rgb]{0.929,0.972,0.842} 5.99 \\
+$16$ & \cellcolor[rgb]{0.831,0.850,0.925} 32.44 & \cellcolor[rgb]{0.921,0.970,0.847} 6.66 & \cellcolor[rgb]{0.942,0.974,0.834} 5.12 & \cellcolor[rgb]{0.944,0.974,0.833} 4.85 & \cellcolor[rgb]{0.869,0.956,0.879} 11.24 & \cellcolor[rgb]{0.944,0.974,0.833} 4.92 & \cellcolor[rgb]{0.946,0.974,0.831} 4.69 & \cellcolor[rgb]{0.892,0.963,0.866} 9.21 & \cellcolor[rgb]{0.942,0.974,0.834} 5.03 \\
+$32$ & \cellcolor[rgb]{0.817,0.879,0.934} 29.12 & \cellcolor[rgb]{0.905,0.967,0.858} 8.09 & \cellcolor[rgb]{0.946,0.974,0.831} 4.75 & \cellcolor[rgb]{0.944,0.974,0.833} 4.86 & \cellcolor[rgb]{0.862,0.954,0.883} 11.93 & \cellcolor[rgb]{0.944,0.974,0.833} 4.91 & \cellcolor[rgb]{0.948,0.975,0.830} 4.62 & \cellcolor[rgb]{0.883,0.961,0.871} 9.9 & \cellcolor[rgb]{0.944,0.974,0.833} 4.98 \\
+$64$ & \cellcolor[rgb]{0.811,0.892,0.937} 27.54 & \cellcolor[rgb]{0.892,0.963,0.866} 9.08 & \cellcolor[rgb]{0.946,0.974,0.831} 4.73 & \cellcolor[rgb]{0.944,0.974,0.833} 4.98 & \cellcolor[rgb]{0.859,0.952,0.885} 12.26 & \cellcolor[rgb]{0.942,0.974,0.834} 5.14 & \cellcolor[rgb]{0.948,0.975,0.830} 4.6 & \cellcolor[rgb]{0.879,0.959,0.874} 10.35 & \cellcolor[rgb]{0.940,0.973,0.835} 5.26 \\
+$128$ & \cellcolor[rgb]{0.807,0.899,0.939} 26.83 & \cellcolor[rgb]{0.890,0.963,0.867} 9.34 & \cellcolor[rgb]{0.944,0.974,0.833} 4.89 & \cellcolor[rgb]{0.942,0.974,0.834} 5.13 & \cellcolor[rgb]{0.856,0.951,0.887} 12.52 & \cellcolor[rgb]{0.938,0.973,0.837} 5.39 & \cellcolor[rgb]{0.944,0.974,0.833} 4.89 & \cellcolor[rgb]{0.881,0.960,0.873} 10.2 & \cellcolor[rgb]{0.936,0.973,0.838} 5.54 \\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+We introduced Discrete Diffusion with Planned Denoising (\ourmethod{}), a novel framework that decomposes the discrete generation process into planning and denoising. We propose a new adaptive sampler that leverages the planner for more effective and robust generation by adjusting time step sizes and prioritizing the denoising of the most corrupted positions. Additionally, it simplifies the learning process by allowing each model to focus specifically on either planning or denoising. The incorporation of planning makes the generative process more robust to errors made by the denoiser during generation. On GPT-2 scale language modeling and ImageNet $256 \times 256$ token generation, \ourmethod{} enables a significant performance boost compared to denoiser-only discrete diffusion models.  
+
+
+
+
+

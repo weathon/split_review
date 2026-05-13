@@ -1,0 +1,621 @@
+\title{Hot PATE: Private Aggregation of Distributions for Diverse Tasks}
+
+\begin{abstract}
+ The Private Aggregation of Teacher Ensembles (PATE) framework is a versatile approach to privacy-preserving machine learning. In PATE, teacher models that are not privacy-preserving are trained on distinct portions of sensitive data. Privacy-preserving knowledge transfer to a student model is then facilitated by privately aggregating teachers' predictions on new examples. 
+ Employing PATE with generative auto-regressive models presents both challenges and opportunities. These models excel in open ended \emph{diverse} (aka hot) tasks with multiple valid responses. Moreover, the knowledge of models is often encapsulated in the response distribution itself and preserving this diversity is critical for fluid and effective knowledge transfer from teachers to student. In all prior designs, higher diversity resulted in lower teacher agreement and thus -- a tradeoff between diversity and privacy. Prior works with PATE thus focused on non-diverse settings or limiting diversity to improve utility.
+   We propose \emph{hot PATE}, a design tailored for the diverse setting. In hot PATE, each teacher model produces a response distribution that can be highly diverse. We mathematically model the notion of \emph{preserving diversity} and propose an aggregation method, \emph{coordinated ensembles}, that preserves privacy and transfers diversity with \emph{no penalty} to privacy or efficiency. We demonstrate empirically the benefits of hot PATE for in-context learning via prompts and potential to unleash more of the capabilities of generative models.
+  
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Generative AI models, such as large language models (LLMs), are incredibly powerful tools that can be fine-tuned for specific contexts, even without explicit supervision~\cite{Radford2019LanguageMA,brown2020language}.  
+Generative models diverge from conventional machine learning models in that they support open ended, \emph{diverse} tasks, where there are multiple appropriate responses, and this very flexibility is essential for much of their functionality. 
+Diversity is typically tuned via a temperature parameter in the softmax, with higher temperature yielding higher entropy (more diverse responses).
+Furthermore, when evaluating the coverage or extracting knowledge from a trained model, such as for distillation tasks, the conventional approach involves querying the model on a prepared (sampled or curated) test set of examples. However, with generative AI models, the knowledge coverage on a specific domain is often encapsulated by the output distribution itself to a general instruction as part of a \emph{prompt} to the model, and can be evaluated or retrieved by sampling this distribution.
+Frequently there is a need to train models or fine-tune publicly-available foundation models using sensitive data such as medical records, incident reports, or email messages.
+In this case, privacy must be preserved in the process.
+Specifically, we consider the strong mathematical guarantees of differential privacy (DP)~\cite{DMNS06}. An
+approach that achieves privacy by modifying the training process is  DPSGD~\cite{AbadiCGMMT0:CCS2016}, where noise is added to clipped gradient updates. DPSGD can also be applied with fine tuning  \cite{YuNBGI0KLMWYZ22:ICLR2022,duan2023flocks}. An alternative approach to private learning, that only relies on black box training and use of models that are not privacy-preserving, is the Private Aggregation of Teacher Ensembles (PATE) paradigm~\cite{PapernotAEGT:ICLR2017,BassilyTT:NEURIPS2018,DBLP:conf/iclr/PapernotSMRTE18}. PATE follows
+the ``sample and aggregate'' method of \citet{nissim2007smooth}. We describe the basic workflow which we refer to here as \emph{cold} PATE.
+
+\noindent\fbox{%
+    \parbox{460px}{%
+    \textbf{Cold PATE}
+\begin{enumerate}
+    \item 
+    Partition the sensitive dataset $D$ into $n$ parts
+$D=D_1\sqcup \dots \sqcup D_n$. For $i\in[n]$, train a \emph{teacher} model $M_i$ on data $D_i$. 
+\item Sample public unlabeled examples. For each such example $x$ do: 
+\begin{itemize}
+\item
+For each teacher $i\in [n]$, apply $M_i$ to $x$ and
+obtain a label $y_i := M_i(x)\in V$. 
+\item
+Compute 
+the frequencies for $j\in V$:
+\begin{equation} \label{freq:eq}
+c_j = \sum_{i\in [n]} \mathbbm{1}\{y_i = j \}\ .
+\end{equation}
+\item
+DP aggregate the histogram $\boldsymbol{c} \mapsto y$ to obtain a single label $y\in V$ (or abort if there is insufficient agreement). 
+\end{itemize}
+\item
+Use the newly labeled privacy-preserving examples $\{(x,y)\}$ to train a student model. 
+\end{enumerate}
+
+The requirement of differential privacy is that the output distribution is stable to change of a single data point. 
+In the PATE framework for each example each teacher contributes a single vote.  Therefore the resulting histogram is stable to a change of one data point: At most one teacher, the one trained on this data point, is affected. Therefore, when one entry in $D$ changes, at most one teacher changes its vote, and thus at most two frequency values $c_j$ may change and by at most $1$. A noisy maximizer of the histogram is therefore privacy preserving.
+
+The limitations of cold PATE are (i) its formulation for classification-like tasks, where each example $x$ has a single ground-truth label $y\in V$, 
+and (ii) the need for a source of unlabeled non-private training examples to facilitate the knowledge transfer to the student. This is unsatisfactory because
+generative AI models support tasks with responses that are diverse and open ended. Moreover, knowledge is encapsulated in the diversity of the response distribution and there is a promise of transferring knowledge to the student in a more fluid way. 
+We thus ask the following question:
+\begin{quote}
+    \emph{Can we design a version of PATE that is effective for diverse and open-ended tasks and unleashes more of the capabilities of generative models?}
+\end{quote}
+
+\paragraph{Application for in-context learning}
+One motivation for our study is the effectiveness of in-context learning via \emph{prompts}. A prompt is an engineered prefix with a task that is given to the base model. Prompts can include specific instructions and/or a set of \emph{shots} (scenario exemplars). 
+Prompts are appealing for multiple reasons: A small number of shots~\cite{DBLP:journals/corr/abs-2101-06804}
+often outperform tailored trained models~\cite{zhou2022teaching,garg2023transformers}. Prompting is efficient, as it is simply inference -- there is no need for parameter updates. Finally, prompts only requires API access to the model, which is important given the trend towards proprietary models. 
+
+When our data is sensitive, we would like the end product to be privacy-preserving.
+Concretely, consider the task of generating a representative set of synthetic privacy-preserving data records from a set of sensitive data records. 
+The sensitive records may include component that are identifying  and components that are shared with many other records. A privacy-preserving aggregation ensures that the synthetic records do not include identifying information. Additionally, it is essential to \emph{preserve diversity} in order to ensure coverage, that is, that our set of synthetic records is indeed representative.
+The synthetic records that are generated can then be used to train a student model that is not necessarily generative or to construct a privacy-preserving student prompts for downstream tasks.
+The latter allows for harnessing the ability of generative models to generalize from few shots.
+
+We seek a PATE mechanism that supports the following. Each teacher is assigned a disjoint subset of sensitive data records. These data records are used to construct a prompt that also includes an instruction of the form ``generate a representative data record given this examples set of data records.'' 
+Each teacher then has its own distribution on responses.
+By repeating multiple times we can obtain different samples that are a representative set of shots. We then hope to aggregate responses of different teachers in a way that preserves both diversity and privacy. 
+
+This design is appealing as there is little cost to scaling up the number of teachers: Each teacher is simply a prompted base model and there is no need for training or significant storage. Prompts are inexpensive, the current OpenAI API supports $10^5$ context/output tokens for US\$5-\$10~\cite{OpenAI-Pricing}.
+The bottleneck to scaling up is thus the amount of available sensitive data. Scaling up can be highly beneficial because generally with DP aggregation, the number of queries we can support for a given privacy budget grows quadratically with the number of teachers.
+\paragraph{Diversity-privacy tradeoff:}
+An issue that arises when applying cold PATE with high diversity is that utility rapidly deteriorates with diversity. To see this, assume there are $r$ good responses with equal probabilities. Note that higher $r$ means more diversity. The $n$ teachers votes would then be split with $\approx n/r$ teacher votes per option. This lower agreement means that in order to return any of the answers we must use privacy noise of scale $\sigma < n/r$. This inverse dependence of noise with $r$ means the privacy loss must increase with $r$. We can attempt to remedy this via some tie-breaking 
+(e.g., each teacher selects a response in the top-$k$ with the largest index). 
+This does result in high agreement but we lose the diversity in the output that is needed to facilitate a fluid knowledge transfer. Prior and concurrent works~\cite{seqPATE_Neurips2022,wu2023privacypreserving} attempted to address this issue by limiting the diversity  (see discussion in Section~\ref{related:sec}). 
+
+\subsection*{Overview of Contributions and Roadmap}
+
+In this work we propose \emph{hot PATE}, described in Section~\ref{sec:hotPATE}. The framework is suitable for auto-regressive models and diverse and open ended tasks, where the appropriate response is a sample from a distribution.
+With hot PATE, each teacher $i\in [n]$ at each step computes a ``next token'' distribution $\boldsymbol{p}^{(i)}$ over tokens $V$. These distributions are aggregated so that the response token from the ensemble is sampled from that aggregate distribution.  The heart of our design is an aggregation method that preserves privacy and critically also the diversity of the teachers distributions. Our primary technical contribution is formalizing this requirement and designing aggregation methods where there is \emph{no penalty} with increased diversity. 
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{plots/lowhighsupport.png}
+\caption{Illustration of two sets of probability distribution. Each distribution is a rectangle with the red portion representing the probability of token $j$. The left set corresponds to high teachers' support for low probability $q$. The right set to low teachers' support for high $q$. The probability of the token $j$ in the average distribution is the same in both cases.}\label{lowhigh:fig}
+\end{figure}
+In Section~\ref{whatisdiversity:sec} we motivate and formalize a definition  of \emph{preserving diversity} that allows for knowledge transfer that is compatible with limitations imposed by privacy. 
+A natural diversity-preserving approach is for
+each teacher $i\in[n]$ to contribute a token $y_i$ sampled independently from $\boldsymbol{p}^{(i)}$. We refer to this as \emph{independent ensemble}. The resulting vote histogram is what would be produced by cold PATE~\cite{PapernotAEGT:ICLR2017,DBLP:conf/iclr/PapernotSMRTE18,duan2023flocks} when applied in a diverse setting. The histogram can then be DP aggregated to produce a response token. The privacy loss depends on the frequency (count) of the response token. With independent samples this count is concentrated around the \emph{average} probability of the token across teachers. This probability is smaller when there is high diversity. Therefore, independent ensembles as an intermediate step
+inherently result in privacy guarantees that sharply deteriorates with the diversity of teacher distributions. 
+We argue that this higher privacy noise may or may not be necessary, and this depends on information that is lost by independent ensembles.
+The frequency histograms produced by independent ensembles approximate the average of the teachers' distributions. The issue, as depicted in Figure~\ref{lowhigh:fig}, is that averaging loses a critical distinction between high teachers' support with low probability $q$ (which we can hope to transfer in a privacy-preserving manner) and low support with high $q$ (which can not be transferred in a privacy-preserving manner). We propose a definition of preserving diversity which makes this important distinction: A token is required to be transferred to the aggregate only when there is sufficient teachers' support.
+Informally, for a robustness parameter $\tau\in [n]$, there are two requirements:
+\begin{itemize}
+\item (transfer requirement)
+    Any token that has probability at least $q>0$ (no matter how small) across $c$ teachers where $c\geq \tau$, is ``transferred'' in that it has probability $\Omega(q c/n)$ in the aggregate distribution. 
+    \item (relevance requirement)
+    We do not transfer irrelevant tokens, that is, for any token $j$, its probability in the aggregate distribution is not much higher than its average probability in the teacher distributions.
+\end{itemize}
+
+In Section~\ref{cooensemble:sec} we propose \emph{ensemble coordination}.
+A coordinated ensemble samples a shared randomness and based on that, each teacher $i$ contributes a token $y_i$. The marginal distribution of each $y_i$ is $\boldsymbol{p}^{(i)}$, same as with independent ensemble. But the difference is that teachers votes are maximally positively correlated. The frequency $c_j$ of token $j$ has high spread and in particular can (roughly) be $\Omega(\tau)$ with probability $\Omega(q)$.  This property facilitates DP aggregation with no penalty for diversity.
+With coordinated ensembles, two teachers with very diverse distributions that have a small total variation distance produce the same token with probability that depends the distance. In particular, when the distributions are equal (the distance is $0$), the same token would be produced.
+In Section~\ref{planetZdemo:sec} we empirically demonstrate the properties and benefits of ensemble coordination for in-context learning via prompts on the Llama 3 language model~\cite{llama3}. We evaluate the coverage and diversity of aggregate distribution formed by only transferring frequency counts that exceed a threshold $T$. We observe an order of magnitude improvement over the baseline of independent ensembles in terms of the value of $T$ (privacy noise scale) needed to achieve a certain coverage and in terms of diversity of the aggregate.
+In Section~\ref{cooagg:sec} 
+we present DP aggregation schemes that are applied to frequency histograms generated by coordinated ensembles and return a token.  We establish that the end-to-end process preserves diversity.
+We distinguish between two use scenarios of applications with 
+\emph{homogeneous} or \emph{heterogeneous} ensembles (see Figure~\ref{homohetro:fig}). 
+Homogeneous ensembles are formed by randomly partitioning a sufficient number of data records among teachers. The assumption then is the same as with cold PATE -- most teachers possess the core knowledge we wish to transfer (see Figure~\ref{withinacross:fig}~(A)). In this case it suffices to require diversity preservation with large support $\tau = \Omega(n)$ and the aggregation can simply return a (noisy) maximizer of the histogram.  Heterogeneous ensembles may arise when each teacher is an agent of one or few users. In this case, we want to preserve diversity both within and across teachers and allow smaller groups of teachers to support each transfer, that is, set a smaller $\tau$ (see Figure~\ref{withinacross:fig}~(B)). In this case, a diversity-preserving aggregate is a weighted sample from the histogram.  
+Finally, in Sections~\ref{datadependent:sec} and~\ref{heteromethods:sec}
+we explore privacy analysis methods that are data dependent and can increase the number of queries processed for a given privacy budget by orders of magnitude. In particular, for token-by-token text generation there are many steps and the cost of naive DP composition is prohibitive. What makes the approach feasible is that many of the steps have high agreement (similar teacher distributions where coordinated ensembles generate high agreement histograms).  With data dependent analysis, steps with high agreement (or no agreement) can be essentially free.  Moreover, with heterogeneous ensembles we can charge teachers individually only for steps in which the teacher contribute to the final token~\cite{HassidimKMMS20,targetcharging:arxiv2023}. 
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{plots/hotPATE_teachers.png}
+\caption{Ensemble types for Hot Pate. In homogeneous ensembles each teacher gets a representative part of the data. In heterogeneous ensembles each teacher has the data of one or few users.}\label{homohetro:fig}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.45\textwidth]{plots/diversityacrosswithin.png}
+\caption{Illustrating the distinction between diversity that is within teachers (where coordinated ensembles form high agreement and a higher $\tau$ suffices) and diversity across teachers (coordinated ensembles reflect it and require lower $\tau$). Diversity due to semantic similarity or knowledge encapsulated in the base model or few exemplars has a ``within'' pattern. Diversity that results from private information or data available to few teachers has an ``across'' pattern.}\label{withinacross:fig}
+\end{figure}
+
+\subsection{Related work} \label{related:sec}
+
+We place our contribution in the context of prior and concurrent works. The works we are aware of for PATE adaptations for text generation either (i) did not consider diversity or (ii) recognized it and the importance of transferring it but proposed aggregation schemes where utility decreases with diversity together with methods to limit diversity as to mitigate this perceived privacy-diversity trade-off. 
+
+\citet{seqPATE_Neurips2022} proposed a PATE extension for sequential text generation tasks in diverse settings. Their approach limited diversity: Average the teachers distributions and then  truncate the tail by keeping only the top-$k$ frequencies. In our work, we demonstrate that averaging is not the right approach and propose a method that preserves diversity with no privacy cost. 
+Recent prior work explored adaptations of PATE for in-context learning via prompting.
+
+\citet{duan2023flocks} proposed to use each part $D_i$ of the data to create a text prompt $T_i$. The ensemble is then used to label curated queries. But while some design elements were tailored to LLMs, the workflow and privacy analysis were identical to old PATE~\cite{DBLP:conf/iclr/PapernotSMRTE18}, and in particular, did not consider diverse responses. 
+
+\citet{wu2023privacypreserving} proposed approaches to private aggregation for in-context learning with diversity. 
+Their proposal were to reduce perceived diversity by clustering together outputs that are semantically equivalent and aggregating each cluster in a semantic space. This essentially reduces the dimensionality of the output space. The aim then is to extract and transfer this common semantics in a privacy preserving way: Map responses into a common low  dimensional  embedding space and privately aggregate embedding vectors or identify frequent keywords in diverse teachers' responses. 
+The limitations are that the approach only addresses same-semantics diversity and offers no solution for semantically-distinct diverse responses and are subjected to a privacy diversity trade-off. Additionally and importantly, they require hand crafted tools to map and curate responses back and forth from a semantic space.  
+The regime of effectiveness depends on whether the same-semantic diversity is within or across teachers.
+In the \emph{across} variety (see Figure~\ref{withinacross:fig}~(B)), the knowledge of each teacher only contains one or limited variations of the same semantic. In this case, the semantic space approach generates high agreement whereas coordinated ensembles would not. The two methods may be combined.
+The \emph{within} variety (see Figure~\ref{withinacross:fig}~(A)) is handled effectively by our approach and can be transferred fluidly with no privacy loss and without the need to mitigate the diversity via additional engineering. We suspect that for the in-context learning use case, and for semantic similarity is captured by tools external to the model (such as an embedding), the diversity is anyhow encapsulated in the base model and present in each fine tuned-LLM teacher distribution. That is, we expect the diversity to overwhelmingly be the ``within'' variety.
+1) discussed using additional outputs (beyond just the noisy the maximizer) in the teachers' votes histogram for distillation tasks. They concluded that it is beneficial for utility but does not justify the privacy loss. Despite the superficial resemblance, this is very different from  what we do as we capture diversity in the generation of the histogram where we 
+``force'' the teachers to agree but there is a distribution on the agreement token.
+
+Finally, there are multiple innovative adaptations of PATE to non-categorical settings (aggregate vectors rather than labels) applied with generative models. The works we are aware of address different problems and use different techniques than hot PATE. For example, image generation using generative adversarial networks (GAN):
+\citet{Jordon2018PATEGANGS} proposed to train
+student discriminator using a cold-PATE like labeling approach.
+\citet{NEURIPS2021_171ae1bb} proposed to train a student generator by aggregating the gradients produced by teachers discriminators.
+Notably, this design does not require external generation of examples in order to facilitate transfer. Instead, it uses the built-in property of generators to produce examples from random strings, which parallels in some sense our premise in hot PATE that coverage is encapsulated in the diversity of the output.
+
+
+\section{Hot PATE}
+
+
+We use the term \emph{tokens} for elements of the input and response strings. We denote the vocabulary of tokens by $V$.
+For an input context (prompt) $T\in V^*$, a response sequence $R$ is generated sequentially token by token. Specifically, the next token at each step, is sampled from a probability distribution over $V$ that depends on the current context (concatenation of the prompt and response prefix) $T\cdot R$. The probabilities are computed from weights (logits)
+$(w_j)_{j\in V}$ produced at inference by the model and 
+a \emph{temperature} parameter $t > 0$, using 
+a softmax function:
+\[
+p_j := \frac{e^{w_j/t}}{\sum_{i\in V} e^{w_i/t}} \ .
+\]
+In low temperatures, the highest weight token $\arg\max_j w_j$ has probability close to $1$. As we increase the temperature, the probability distribution flattens with similarly-weighted tokens having similar probabilities. \emph{Cold} temperature is appropriate for classification-like tasks with one correct response and \emph{hot} temperature is appropriate for diverse tasks. We therefore refer to the outlined PATE workflow as cold PATE and to our proposed workflow as hot PATE. Our design here is oblivious to the particular way the distribution is generated but seamlessly applies when it is diverse.
+\begin{figure*}[h]
+\centering
+\includegraphics[width=0.65\textwidth]{plots/HotPATE.png}
+\caption{Hot PATE with an auto-regressive base model}\label{hotPATE:fig}
+\end{figure*}
+
+Hot PATE (see illustration in Figure~\ref{hotPATE:fig}) partitions $D$ to disjoint parts $D_i$ ($i\in[n]$) and constructs a prompt $T_i$ from data part $D_i$.
+We then generate a sanitized response sequence $R$ of tokens. 
+We initialize $R\gets \{\}$ and proceed sequentially in 
+lockstep, by repeating the following:
+\begin{enumerate}
+    \item 
+    For $i\in[n]$: 
+    Let $\boldsymbol{p}^{(i)}$ be the output 
+    distribution  over $V$ when querying the model with the prompt  $T_i$\texttt{<instruction to complete prefix>}$R$.
+\item
+Apply a DP and diversity-preserving randomized aggregation $\mathcal{M}((\boldsymbol{p}^{(i)})_{i\in[n]}) \mapsto y$, where $y\in V$.
+\item
+Concatenate $R\gets R \cdot y$. 
+\end{enumerate}
+
+This design is open-ended and assumes that the instructions are effective in producing students prompts or components for such prompts, such as representative synthetic shots. This assumption aligns with the demonstrated and evolving capabilities of contemporary large language models, as well as the progress made in prompt engineering.
+A necessary requirement with both cold and hot PATE is that a sufficient number of teachers possess the knowledge we wish to transfer. In both cases the ensemble's purpose is to privately transfer that knowledge to the student.
+A key distinction is that in the cold setting, knowledge coverage is 
+achieved by sampling or curating representative unlabeled examples from the same distribution. These examples are then labeled by the ensemble. In the hot setting, there is a promise of attaining coverage organically, through the broad range of diverse responses generated in response to one general instruction within the prompt. 
+
+The requirement of \emph{preserving diversity}, that we will formalize in the sequel, is needed in order to facilitate this knowledge transfer.
+At a high level, the objective is that the aggregate distribution, the output distribution of
+$\mathcal{M}((\boldsymbol{p}^{(i)})_{i\in[n]})$, retains
+the diversity of individual teacher distributions $(\boldsymbol{p}^{(i)})_{i\in[n]}$. 
+
+
+\section{Private and diverse aggregation}
+
+
+
+Diversity and privacy appear to be conflicting in that
+DP requires that the output token is supported by sufficiently many teachers, a ``reporting threshold'' that depends on the privacy parameter values. But preserving diversity means that tokens with low probability also need to be transferred to the student.
+
+A natural candidate for preserving diversity is the 
+average teacher distribution 
+$\frac{1}{n}\sum_{i\in[n]}\boldsymbol{p}^{(i)}$. But this can not be privacy preserving because tokens that have positive probabilities with only one or few teachers are identifying and should not be released.
+Fortunately, we can settle for a robust notion of preserving diversity. The premise in PATE is that the patterns of interest are captured by a sufficient number of teachers. Therefore, low probability across many teachers is something we care to transfer whereas high probability in few teachers, the ``bad case'' for privacy (and robustness), may not be something we have to transfer. The average distribution does not distinguish the two cases, so it is ruled out. We now formalize our nuanced diversity preservation notion:
+\begin{definition} [Diversity-preserving aggregation of distributions] \label{def:diversity}
+    Let $f( \boldsymbol{p}^{(i)})_{i\in[n]}) \mapsto \boldsymbol{P}$ map from $n$ probability distributions over $V$ to a probability distribution over $V\cup\{\bot\}$.
+    We say that $f$ is \emph{diversity-preserving} with $\tau \in \mathbbm{N}$, $\beta\in (0,1]$, $\gamma \geq 1$ if
+    for any input and $j\in V$ 
+    \begin{enumerate}
+        \item 
+        For all $q\in [0,1]$,
+        \[( c_{j,q} := \sum_{i\in n} \mathbbm{1}\{p^{(i)}_j \geq q\}) \geq \tau \implies P_j \geq \beta \cdot \frac{c_{j,q}}{n} q\ .
+    \]
+        \item 
+        $P_j \leq \gamma \frac{1}{n}\sum_{i\in[n]} p^{(i)}_j$
+    \end{enumerate}
+\end{definition}
+The first requirement is that probability $q$ across 
+enough ($\tau$) teachers, no matter how small is $q$, is transferred to the aggregate distribution.  The second ensures that we do not output irrelevant tokens.  
+
+Requirements are stricter (and can be harder to satisfy) when $\beta$ and $\gamma$ are closer to $1$ and when $\tau$ is smaller.
+A setting of $\tau=0$ and $\beta=\gamma=1$ allows only for the  average distribution to be the aggregate.  A larger $\tau$ increases robustness in that more teachers must support the transfer.
+
+\begin{remark} [failures]
+We allow $\bot$ (failure) in the support of the aggregate distribution because under the DP requirement there are input distributions (for example, those with disjoint supports, e.g. responses to instructions that ask for a patient ID) where no token can be returned.
+Hot PATE has several options to work with failure responses: (i) The step can be repeated (different shared randomness may yield a token), (ii) a response token can instead be sampled from a non-private default prompt or model, or (iii) the prompt instructions can be redesigned.
+\end{remark}
+
+\begin{remark} [Setting of $\tau$] \label{homohetro:rem}
+In \emph{homogeneous ensembles}, most teachers receive a representative part of the data and possess the knowledge we wish to transfer. This occurs when we use a random partition so that most teachers obtain a representative set of data records.  In this case, we  aim to transfer the parts of the distributions that are common to most teachers and $\tau > n/2$ suffices.
+In \emph{heterogeneous ensembles}, each teacher might have data from one or very few ``users.''  This arises when each teacher has small capacity (prompts currently have limited size of 8k-64k tokens~\cite{OpenAI-TextCompletionAPI}) or when by design each teacher is an agent of a single user. In this situation, we aim to transfer parts of the distribution that are common to smaller subgroups of teachers and set $\tau\ll n$, possibly as low as permitted under the privacy requirement.
+\end{remark}
+
+
+Before describing DP aggregation methods that satisfy
+Definition~\ref{def:diversity}, we instructively examine a scheme that can not satisfy the requirements, as it exhibits an inherent privacy-diversity tradeoff:
+Sample independently $y_i \sim \boldsymbol{p}^{(i)}$ for each teacher $i\in [n]$, compute frequencies $c_j$ as in \eqref{freq:eq}, and apply \emph{any} DP aggregation to the histogram $\{(j,c_j)\}$ (as with cold PATE). 
+Now consider the case of identical teacher distributions that are uniform over $k$ special tokens with probability $q=1/k$ each. From
+Definition~\ref{def:diversity}, each of the $k$ special tokens needs to be reported with probability at least $\beta/k$. But the frequencies $c_j$ of these tokens are concentrated around $c_j\approx n/k$. In terms of DP, each frequency value $c_j$ has sensitivity $1$ and for large enough $k$, the counts drop below the ''DP reporting threshold'' of our privacy parameters and therefore none of these tokens can be reported. 
+To transfer these distributions through such a frequencies histogram we need to adjust the DP parameters to allow for reporting threshold to be below $n/k$, that is, to decrease proportionally to $k$. 
+We run into the same issue if we define our histogram with
+$c_j := \sum_i p^{(i)}_j$ (as proposed by \citet{duan2023flocks}).
+The issue again is that the maximum frequency decreases with diversity ($k$). 
+
+The approach where each teacher contributes a sample, however, is appealing as it ``factors out'' the distributions: Instead of aggregating distributions, we work with a histogram of frequencies. With independent sampling, however, we arrived at a dead end -- and it may appear as if we need to ditch the sampling approach all together. 
+
+Our proposed aggregation method, described in the next section, circumvents this difficulty.
+The property is that 
+the frequency of a token in the histogram is not concentrated around its expectation. A tokens $j$ that broadly has a low probability $q$ will appear, sometimes, with very high frequency $c_j$ that does not depend on $q$. What does depend on $q$ is the probability of this event. 
+The probability of agreement between teachers depends on the variation distance between their distributions, but does not depend on how diverse they are.
+This high agreement allows the token to pass with high  ``privacy noise.''
+
+
+
+\section{Ensemble coordination}
+
+
+\emph{Ensemble coordination}, described in Algorithm~\ref{coordinated:algo}, is
+a randomized mapping from a set of $n$ probability distributions over $V$ to a histogram over $V$ with total count $n$. 
+We sample shared randomness $\rho$.
+For each teacher $i\in [n]$ we compute $y_i \in V$ that is a function of $\rho$ and $\boldsymbol{p}^{(i)}$.
+We then compute the frequencies $c_j$ for $j\in V$, as in \eqref{freq:eq}, and return the frequency histogram.
+\SetKwFunction{CSample}{CoordinatedSamples}
+\begin{algorithm2e}[t]\caption{\texttt{CoordinatedSamples} \label{coordinated:algo}}
+{\small
+\DontPrintSemicolon
+\KwIn{Teacher distributions $(\boldsymbol{p}^{(i)})_{i\in [n]}$}
+
+\lForEach(\tcp*[f]{Draw shared randomness $\rho = (u_j)_{j\in V}$}) {token $j\in V$}{draw iid $u_j \sim \Exp[1]$}
+\ForEach(\tcp*[f]{Draw coordinated samples $(y_i)_{i\in [n]}$}){teacher $i$}{$y_i \gets \arg\max_j \frac{p^{(i)}_j}{u_j}$\tcp*{bottom-$k$ sampling transform}}
+\ForEach(\tcp*[f]{Compute frequencies}){token $j\in V$}{$c_j \gets \sum_{i\in [n]} \mathbbm{1}\{y_i = j \}$}
+\Return{$\{(j,c_j)\}_{j\in V}$, $\rho=(u_j)_j$}\tcp{Histogram of frequencies}
+}
+\end{algorithm2e}
+Ensemble coordination of responses to prompts can be implemented via an enhanced API access to the base model:
+\begin{itemize}
+\item
+    The preferred approach with proprietary models is that the selection is done model-side: The shared randomness $\rho$ is provided as input along with each query prompt. The API then samples the returned token according to $\rho$. 
+\item   
+    A different enhanced API would return the full distribution over tokens. Our demonstration in Section~\ref{planetZdemo:sec} using a public model~\cite{llama3modelcard} uses the full distribution.  The current OpenAI text completion interface, which we used in a demonstration in Section~\ref{GPT35:sec}, returns the top five probabilities~\cite{OpenAI-TextCompletionAPI}. 
+\item    
+    The response distribution can also be approximated by repeated sampling of the model with the same prompt. This approach requires no API enhancements but would impact efficiency, since the number of samples required increases with diversity.
+\end{itemize}
+The sampling method in ensemble coordination is a classic technique called \emph{coordinated sampling}, first introduced in statistics works in order to obtain samples that are stable under distribution shifts~\cite{KishScott1971,BrEaJo:1972,Saavedra:1995,Rosen1997a,Ohlsson:2000}, and then in computer science works for computational efficiency via sampling-based sketches and a form of Locality Sensitive Hashing (LSH)~\cite{ECohen6,ECohen6f,Broder:CPM00,IndykMotwani:stoc98,DBLP:journals/cacm/Haas11}. There are many applications including private learning~\cite{GhaziKM:Neurips2021}. 
+
+Similarly to independent ensembles, the marginal distribution of $y_i$ for each teacher $i$ is simply $\boldsymbol{p}^{(i)}$. Therefore, the expected frequency of token $j$ is
+\begin{equation} \label{expectedfreq:eq}
+    \E_\rho[c_j]=\sum_i p^{(i)}_j\ .
+\end{equation}
+ The key difference is that votes of different teachers are highly positively correlated.
+For two teacher distributions $i,k$, the probability of them having the same sample is the weighted Jaccard similarity of the distributions:
+\[
+\Pr_\rho[y_i = y_k] = \frac{\sum_j \min\{p^{(i)}_j,p^{(k)}_j \}}{\sum_j \max\{p^{(i)}_j,p^{(k)}_j \} }
+\]
+In particular, when two distributions are identical, the samples are the same $y_i =  y_k$.
+
+We establish that the respective requirements of Definition~\ref{def:diversity}, diversity-transfer and relevance, can be satisfied by only selecting tokens that appear with high frequency in the histogram. We show 
+that a token 
+$j$ for which $m$ teachers $i$ have $p^{(i)}_j > q$ has frequency at least $m/2$ with probability at least $0.34 q$
+\begin{lemma} [diversity transfer]\label{diverseAgg:Lemma}
+    For any token $j$ and $p,q\in [0,1]$,
+    \[
+\Pr_\rho \left[c_j \geq \left\lfloor p\cdot \sum_{i\in n} \mathbbm{1}\{p^{(i)}_j \geq q\}\right\rfloor \right] \geq \frac{1}{2} \ln(1/p) q
+    \]
+\end{lemma}  
+\begin{proof} % [Proof of Lemma~\ref{diverseAgg:Lemma}]
+    Let $i$ be such that $p^{(i)}_j \geq q$.  Fix the sampled min value $x\sim\Exp[q]$ for $q$ part of the probability of $j$. The distribution of the remaining part is $y\sim \Exp[1- p^{(i)}_j]$ which is stochastically smaller than
+    $\Exp[1- q]$.
+    We get that 
+    \begin{align*}
+        \Pr[y_i =j] &\geq 
+    \Pr_{y\sim \Exp[1-q]} [y> x] = e^{-x (1-q)}\ .
+    \end{align*}
+    
+Fix $p\in [0,1)$. It follows that the probability
+that $\Pr[y_i =j]$, conditioned on 
+$x<\frac{-\ln p}{1-q}$
+is at least $e^{-x (1-q)} \geq p$. 
+The respective random variables $y_i$ on 
+different teachers that may share part of the distribution can only be nonnegatively correlated.
+Therefore, if there are $c_{j,q}$ teachers with $p^{(i)}_j \geq q$ then the distribution of the number of teachers with $y_i = j$ is stochastically larger than $\Bin[e^{-x (1-q)},c_{j,q}]$,  which for any 
+$x\leq \frac{-\ln p}{1-q}$ is stochastically larger than $\Bin[p,c_{j,q}]$.
+The median of the Binomial distribution $\Bin[p,c_{j,q}]$
+with probability at least $1/2$ is larger than $\lfloor p c_{j,q}\rfloor$.  Therefore, with this conditioning on $x$,
+there are at least $\lfloor p c_{j,q}\rfloor$ teachers with $y_i = j$.
+\begin{equation}\label{conditioned:eq}
+\Pr_{ (y_i)_{i\in [n]} \mid x<\frac{-\ln p}{1-q}}[c_j \geq \lfloor p c_{j,q}\rfloor] \geq 1/2\ .
+\end{equation}
+The event $x<\frac{-\ln p}{1-q}$ occurs
+with probability at least 
+\[\Pr_{x\sim \Exp[q]} [x < \frac{-\ln p}{1-q}] = 1- e^{(\ln p)q/(1-q)}\geq -(\ln p) q \ .\]
+Combining with \eqref{conditioned:eq}, we obtain the claim in the statement of the Lemma.
+\end{proof}
+To establish relevance we show that high frequency must have a ``backing.'' The following is immediate
+from \eqref{expectedfreq:eq} and Markov's inequality (and is tight in the sense that for any $T$ there are distributions where equality holds):
+\begin{lemma} [relevance]\label{nojunk:Lemma}
+    For any token $j$ and $T$,
+    \[
+\Pr_\rho \left[c_j \geq T\right] \leq \frac{1}{T} \sum_{i\in[n]} p^{(i)}_j
+    \]
+\end{lemma} 
+
+Therefore, broadly speaking, it is possible to satisfy the requirements of 
+Definition~\ref{def:diversity} by reporting only tokens with frequency that is $\Omega(\tau)$, where $\tau$ is the required teachers support. 
+Our DP aggregation methods are presented in Section~\ref{cooagg:sec}.
+
+\begin{remark}[Robust Average] \label{robustaverage:rem}
+In our empirical evaluation we compute the $\tau$-robust part of the average of the teachers distributions as an indication for what can be potentially privately transferred:
+\begin{equation} \label{robustaverage:eq}
+    P_j(\tau) := \frac{1}{n}\sum_{i\in[n]} \min\left\{ p^{(i)}_j, (\{p^{(h)}_j\}_{h\in [n]})_{(\tau)}\right\} \, \text{for $j\in V$}
+\end{equation}
+where $(\{p^{(h)}_j\}_{h\in [n]})_{(\tau)}$ is the $\tau$th largest probability of token $j$ in a teacher distribution. 
+Note that $(P_j(1))_{j\in V}$ is the average distribution and the values are non-increasing with $\tau$. We also consider the \emph{$\tau$-robust probability mass} defined as $\sum_{j\in V} P_j(\tau) \leq 1$.
+\end{remark}
+
+
+
+\section{Empirical demonstration}
+
+
+We demonstrate the properties of coordinated ensembles 
+using the Meta Llama~3 8B parameter open source language model~\cite{llama3,llama3modelcard}.
+Additional results on the OpenAI GPT3. 
+\paragraph{Generating Prompts:}
+We generated for each experiment $n=10^4$ text prompts (teachers) of the following form
+\begin{quote}
+\texttt{On planet Z, some numbers are edible.} <name> \texttt{from planet Z eats the following numbers for breakfast:} <random permutation of $C \cup \{ \text{<private number>}\}$ >
+\texttt{Give me an example breakfast number in planet Z. Respond with just the number.}
+\end{quote}
+
+The set $C$ is a fixed subset of size $|C|=k$ of the set $\mathbbm{N}_{100}^{999} = \{100,\ldots,999\}$ of the $900$ 3-digit numbers. We selected the set $C$ uniformly at random. The string <name> is   and <private number> $ \sim U[\mathbbm{N}_{100}^{999}\setminus C]$ were generated separately for each prompt $i\in [n]$. For our purposes, the set $C$ is the information we want transferred whereas the prompt-specific <name> and <private number> and the ordering of $C$ in the prompt are considered private.  These prompts have $k$ correct answers. We report results with $k\in\{20,100\}$.
+
+For each prompt $i\in [n]$ we retrieved the probability distribution $\boldsymbol{p}^{(i)}$ over tokens $V$ of the next-token response.
+Llama 3 uses a vocabulary $V$ of 128k tokens and 3-digit numbers are encoded as single tokens.  The generation took a few minutes on a single A100 GPU.
+
+\paragraph{Properties of the Distributions:}
+\begin{itemize}
+    \item 
+    Probability of tokens that are not 3-digit numbers is negligible: 
+The average probability (over teachers) of a response token in $\mathbbm{N}_{100}^{999}$ was $\E_{i\in[n]} \sum_{j\in \mathbbm{N}_{100}^{999}} p^{i}_j \approx 0.997$ for $k=20$ and $\approx 0.994$ for $k=100$.
+    \item Tokens in $C$ dominate but other 3-digit numbers are likely:
+     The average probability of a token in $C$  was $\E_{i\in[n]} \sum_{j\in C} p^{i}_j \approx 0.716$ ($k=20$ tokens) and $\approx 0.75$ ($k=100$).  The probability assigned to  
+tokens in $\mathbbm{N}_{100}^{999}\setminus C$ (not present in the prompt) is explained by the model generalizing that additional 3-digit numbers are edible on Planet Z.
+  \item Despite symmetric prompt construction, there is significant  variability between tokens in $C$ and across teachers on same token. This is an artifact of the model. Figure~\ref{fig:tokensavprob} shows  average (over prompts) of the probability of each token and demonstrates variability between tokens. The error bars indicate variability in the token probability across teachers.
+\end{itemize}
+
+Figure~\ref{fig:taurobust} shows the 
+$\tau$-robust part of the average distribution for varying $\tau$ (see Remark~\ref{robustaverage:rem}). This is the part of the average distribution that we can hope to transfer via coordinated ensembles with support $\tau$.
+
+\begin{figure}[t]  
+    \centering  
+    \includegraphics[width=0.45\textwidth]{plots/llama3/llama3_k20_p1common_tokens_avprob.png} 
+    \includegraphics[width=0.45\textwidth]{plots/llama3/llama3_k100_p1common_tokens_avprob.png} 
+    \caption{Average probability, over teachers, of tokens in $C$.  The error bars indicate the contribution of the token to the average total variation distance over pairs of teacher distributions. Left is $k=20$ right is $k=100$.}  
+    \label{fig:tokensavprob}  
+\end{figure}
+
+\begin{figure}[h]  
+    \centering  
+    \includegraphics[width=0.45\textwidth]{plots/llama3/llama3_k20_p1_robustaverages.png}
+    \includegraphics[width=0.45\textwidth]{plots/llama3/llama3_k100_p1_robustaverages.png}
+    \caption{The $\tau$-robust part of the distribution for varying $\tau$ (see Remark~\ref{robustaverage:rem}). Left is $k=20$ right is $k=100$.}  
+    \label{fig:taurobust}  
+\end{figure}
+\paragraph{Sampling vote histograms}
+We sampled $r=10^3$ vote histograms $(\mathbf{c}^{h})_{h=1}^{r}$
+from each of
+coordinated and independent ensembles.
+Each histogram has total count of $n=10^4$, since each teacher contributes one token. We use the notation $c^h_j$ for the frequency (count) of token $j$ in the $h$th histogram.
+
+Figures~\ref{fig:averageprob_freq20} and~\ref{fig:averageprob_freq100} visualize the average probability $\frac{1}{n}\sum_{i\in [n]} p^{(i)}_j$ of each token $j\in \mathbbm{N}_{100}^{999}$ across teacher distributions. The figure also shows the average frequency $\frac{1}{r}\sum_{h=1}^r c^h_j$ in the $r=10^3$ samples from each of independent and coordinated ensembles. This demonstrates the property that 
+the expected number of votes for each token is the same for the two ensemble types and corresponds to the average distribution.
+\begin{figure}[h]  
+    \centering  
+    \includegraphics[width=0.82\textwidth]{plots/llama3/llama3_k20_p1_averageprobs.pdf}
+    \includegraphics[width=0.82\textwidth]{
+    plots/llama3/llama3_k20_p1_r1000indaverage.pdf}
+    \includegraphics[width=0.82\textwidth]
+    {plots/llama3/llama3_k20_p1_r1000cooaverage.pdf} 
+    \caption{$k=20$: For all tokens (tokens in $C$ shown in read): Average probability over teachers (top). Average frequency across $r=1000$ samplings using independent (middle) and coordinated (bottom) ensembles.}  
+    \label{fig:averageprob_freq20}  
+\end{figure}
+
+\begin{figure}[h]  
+    \centering  
+    \includegraphics[width=0.82\textwidth]{plots/llama3/llama3_k100_p1_averageprobs.pdf}
+    \includegraphics[width=0.82\textwidth]{
+    plots/llama3/llama3_k100_p1_r1000indaverage.pdf}
+    \includegraphics[width=0.82\textwidth]
+    {plots/llama3/llama3_k100_p1_r1000cooaverage.pdf} 
+    \caption{$k=100$: For all tokens (tokens in $C$ shown in read): For all tokens (tokens in $C$ shown in read): Average probability over teachers (top). Average frequency across $r=1000$ samplings using independent (middle) and coordinated (bottom) ensembles.}  
+    \label{fig:averageprob_freq100}  
+\end{figure}
+
+The qualitative difference between coordinated and independent ensembles is visualized in Figure~\ref{fig:persamplefreqcounts} by zooming on individual sampled histograms. The figure shows one sampled histogram with independent sampling and two sampled histograms with coordinated sampling. With independent sampling, frequency counts of each token $j$ are  concentrated close to the expectation $\sum_i p^{(i)}_j$ and are similar across different samples and to the averages shown in Figures~\ref{fig:averageprob_freq20} and~\ref{fig:averageprob_freq100}. With coordinated samples there is high variability between samples and it is possible for the frequency of a token to far exceed $\sum_i p^i_j$.
+\begin{figure}[h]  
+    \centering  
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_indensemble.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_cooensemble3.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_cooensemble2.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_indensemble.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_cooensemble2.pdf}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_cooensemble1.png}
+    \caption{Histogram of frequency counts per token for single samples. Left: Independent ensemble. Middle and Right: Coordinated ensemble. Top $k=20$ bottom $k=100$.}  
+    \label{fig:persamplefreqcounts}  
+\end{figure}
+
+\begin{figure}[h]  
+    \centering  
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_r1000cumfrequency.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_r1000fracpassfilterT.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_r1000TVD2averageprobsT.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_r1000cumfrequency.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_r1000fracpassfilterT.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_r1000TVD2averageprobsT.png}
+    \caption{Left: Average number of tokens per sample with frequency filter $\geq T$. Middle: fraction of votes in frequency $\geq T$. Right: Total Variation Distance between filtered and average distribution with filter $\geq T$. Top $k=20$ bottom $k=100$.}
+    \label{fig:frequency_cdf}  
+\end{figure}
+
+\paragraph{Utility Evaluation}
+A token can be reported in a privacy-preserving way only when the frequency exceeds the privacy noise scale $c_j > T$. 
+We evaluate utility of coordinated and independent ensemble types by considering
+(i)~coverage vs threshold: fraction of the votes that appear with token  frequency at least $T$ and (ii)~diversity vs coverage.
+
+Figure~\ref{fig:frequency_cdf} (left) shows the average number of tokens per sample (histogram) that have frequency above $T$, for varying $T$. We observe that with independent samples, the maximum frequency (over histograms and tokens) does not exceed that of the maximum token average probability (for $k=20$, $0.14$ and for $k=100$, $0.03$). With coordinated ensembles, the majority of samples contained a token with frequency above  $0.25 n$ (that is much higher than the maximum token average probability). In an application, we would collect multiple samples (histograms) until we obtain one that yields a token with our privacy parameters. A data dependent privacy analysis (see Section~\ref{datadependent:sec}) is such that we essentially pay for privacy loss only where there is yield (privacy-preserving token extracted from the histogram). As an example with $k=100$, with independent ensembles the probability of yield is negligible when the noise scale has $\sigma > 0.04n$ whereas with coordinated ensembles there is $\approx$10\% yield probability even with $\sigma \approx 0.3 n$.
+
+Figure~\ref{fig:frequency_cdf} (middle) shows 
+the fraction of the votes (over samples and tokens) that are in frequencies that exceed $T$, for varying $T$. We can see that coordinated ensembles cover many more votes for a given $T$ than independent ensembles. Additionally, we observe that the coverage corresponds to the $T/n$-robust part of the distribution shown in Figure~\ref{fig:taurobust}, that is, it corresponds to what we can hope to transfer.
+For $k=100$, 20\% of the votes are covered with $T=2000$ with coordinated sampling but require $T\leq 250$ with independent sampling (factor $\times 8$).
+For $k=20$, 40\% of votes are covered with $T=4000$ with coordinated sampling but this coverage requires $T\leq 1000$ with independent sampling (factor $\times 4$). Independent samples have 0\% coverage with $T\geq 1500$ for $k=20$ and with $T\geq 400$ for $k=100$.
+
+To summarize, we demonstrated that independent ensembles have 0\% coverage when $T$ exceeds the maximum average frequency whereas coordinated ensembles are effective with high $T$.
+
+We next consider diversity per coverage.
+Figure~\ref{fig:frequency_cdf} (right) reports the 
+total variation distance from the average distribution.
+Figure~\ref{fig:coveragesparsity} shows coverage (fraction of votes) vs sparsity (number of distinct tokens) with coordinated and independent ensembles.  We can see that coordinated ensembles are more diverse than  independent ensembles for the same coverage, with an order of magnitude gap.
+
+Figures~\ref{fig:abovethreshold20} and~\ref{fig:abovethreshold100} visualize the histograms of the covered votes (averaged over the $r$ samples) per token, for varying thresholds $T$. For each displayed histogram we list coverage and sparsity. 
+Recall that the threshold $T$ corresponds to the noise scale $\sigma$ that allows for the transfer. Coverage is indicative of yield distribution and sparsity reflects lower diversity of the yield.
+The visualization demonstrates again the benefits of coordinated ensembles: Independent ensembles become ineffective with very low $T$, quickly losing coverage and diversity compared with coordinated ensembles. 
+
+\begin{figure}[t]  
+    \centering  
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k20_p1_r1000coveragesparsity.png}
+    \includegraphics[width=0.32\textwidth]{plots/llama3/llama3_k100_p1_r1000coveragesparsity.png}
+    \caption{Coverage versus sparsity with coordinated and independent ensembles when sweeping $T$. $k=20$ (left) and $k=100$ (right).}  
+    \label{fig:coveragesparsity}  
+\end{figure}
+
+
+\begin{figure}[h]  
+    \centering  
+    \begin{tabular}{cc}
+    \multicolumn{2}{l}{$T=100$ coverage: coo: 94\% ind: 75\%  sparsity: coo: 417 ind: 24}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T100cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T100indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=200$ coverage: coo: 91\% ind: 63\% sparsity: coo: 365  ind: 13}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T200cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T200indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=500$ coverage: coo: 83\% ind: 34\% sparsity: coo: 277 ind: 6 }\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T500cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T500indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=1000$ coverage: coo: 72\% ind: 25\% sparsity: coo: 233 ind: 2}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T1000cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T1000indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=2000$ coverage: coo: 57\% ind: 0\% sparsity: coo: 178 ind: 0}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T2000cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T2000indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=5000$ coverage: coo: 30\% ind: 0\% sparsity: coo: 98 ind: 0}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k20_p1_r1000_T5000cooabovethresh.pdf} &
+    \end{tabular}
+    \caption{Coverage histograms averaged over $r=10^3$ samples. Filter $T\in [100,200,500,1000,2000,5000]$. $k=20$ Left: coordinated Right: Independent}  
+    \label{fig:abovethreshold20}  
+\end{figure}
+
+\begin{figure}[h]  
+    \centering  
+    \begin{tabular}{cc}
+    \multicolumn{2}{l}{$T=50$ coverage: coo: 90\% ind: 65\%  sparsity: coo: 638 ind: 77}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T50cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T50indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=100$ coverage: coo: 77\% ind: 42\%  sparsity: coo: 576 ind: 34}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T100cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T100indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=200$ coverage: coo: 59\% ind: 23\%  sparsity: coo: 509 ind: 11}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T200cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T200indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=300$ coverage: coo: 52\% ind: 6\%  sparsity: coo: 468 ind: 4}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T300cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T300indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=400$ coverage: coo: 47\% ind: 0\%  sparsity: coo: 441 ind: 0}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T400cooabovethresh.pdf} &
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T400indabovethresh.pdf}\\
+    \multicolumn{2}{l}{$T=1000$ coverage: coo: 33\% ind: 0\%  sparsity: coo: 347 ind: 0}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T1000cooabovethresh.pdf} & \\
+    \multicolumn{2}{l}{$T=2000$ coverage: coo: 23\% ind: 0\%  sparsity: coo: 234 ind: 0}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T2000cooabovethresh.pdf} & \\
+    \multicolumn{2}{l}{$T=5000$ coverage: coo: 9\% ind: 0\%  sparsity: coo: 102 ind: 0}\\
+    \includegraphics[width=0.42\textwidth]{plots/llama3/llama3_k100_p1_r1000_T5000cooabovethresh.pdf} & 
+    \end{tabular}
+    \caption{Coverage histograms averaged over $r=10^3$ samples. Filter $T\in [50,100,200,300,400,1000,2000,5000]$. $k=100$ Left: coordinated Right: Independent}  
+    \label{fig:abovethreshold100}  
+\end{figure}
+
+
+
+\section{Aggregation Methods of Frequency Histograms}
+
+
+Our aggregation methods are applied to 
+frequency histograms generated by a coordinated ensemble and return a token or $\bot$. 
+We propose two meta schemes that preserves diversity in the sense of Definition~\ref{def:diversity}: One for homogeneous ensembles, where we use $\tau > n/2$, in Section~\ref{cooagghomo:sec} and one for heterogeneous ensembles, where $\tau \ll n/2$ (but large enough to allow for DP aggregation), in Section~\ref{cooagghetero:sec}. 
+To establish diversity preservation, we consider the end-to-end process from the teacher distributions to the aggregate distribution.
+To establish privacy, it suffices to consider the histogram in isolation, as it has the same sensitivity as vote histograms with cold PATE: When one teacher distribution changes, one token can gain a vote and one token can lose a vote. Noting that the shared randomness $\rho$ is considered ``public'' data.
+We then explore (Sections~\ref{datadependent:sec} and~\ref{heteromethods:sec}) DP implementations that 
+admit data-dependent privacy analysis so effectively many more queries can be performed for the same privacy budget. We can avoid privacy loss on responses that agree with the prior distribution of the public model with a public prompt. We can  benefit from the particular structure of histograms generated by coordinated ensembles. The privacy loss does not depend on queries with no yield, with high agreement, or with agreement with a public prior. With heterogeneous ensembles we can also gain from 
+individualized per-teacher privacy charging. 
+
+
+\subsection{Homogeneous Ensembles} \label{cooagghomo:sec}
+\begin{algorithm2e}\caption{\texttt{DistAgg} homogeneous}\label{distagg:alg}
+\DontPrintSemicolon
+$\boldsymbol{c}, \rho \gets \CSample((\boldsymbol{p}^{(i)})_{i\in [n]})$ \tcp*{Algorithm~\ref{coordinated:algo}}
+$(j,\hat{c}_j) \gets \texttt{NoisyArgMax}_L(\boldsymbol{c})$ \tcp*{DP noisy maximizer with error $L$}
+\leIf{$\hat{c}_j > (n/2 + L)$}{\Return{$j$}}{\Return{$\bot$}}
+\end{algorithm2e}
+
+When $\tau > n/2$, there can be at most one token $j$ with frequency $c_j\geq \tau$. 
+If there is such a token, we aim to report it. Otherwise, we return $\bot$.  
+Our scheme is described in Algorithm~\ref{distagg:alg} in terms of a 
+noisy maximizer (\texttt{NoisyArgMax}$_L$) procedure.
+The latter is a well studied construct in differential privacy 
+\cite{DBLP:conf/focs/McSherryT07,DBLP:conf/nips/DurfeeR19,DBLP:conf/icml/QiaoSZ21}.  Generally, methods vary with the choice of noise distribution and  
+there is a (high probability) additive error bound $L$ that depends on the privacy parameters and in some cases also on the support size and confidence.
+For our purposes, we abstract this as \texttt{NoisyArgMax}$_L$ that is applied to a frequency histogram $\boldsymbol{c}$ and returns $(j,\hat{c}_j)$ such that $|c_j-\hat{c}_j|<L$ and $\max_{h\in V} c_h - c_j \leq 2L$. We show that the method is diversity preserving:
+
+\begin{lemma} [Diversity-preservation of Algorithm~\ref{distagg:alg}]\label{distalghigh:lemma}
+For $\mu>1$, Algorithm~\ref{distagg:alg}, instantiated with \texttt{NoisyArgMax}$_L$ as described, is diversity preserving in the sense of Definition~\ref{def:diversity} with $\tau = \mu (n/2 + 2L)$,
+    $\beta = \ln(\mu)/2$ and $\gamma = 2$.
+\end{lemma}
+\begin{proof}% [Proof of Lemma~\ref{distalghigh:lemma}]
+We apply Lemma~\ref{diverseAgg:Lemma} with $p=1/\mu$.  We obtain that the token $j$ has frequency at least $c_j \geq n/2+2L$ with probability at least $0.5 \ln(\mu) q$. Therefore we have $\hat{c}_j \geq n/2 + L$ with probability at least  $0.5 \ln(\mu) q$.
+Note that a token can only be reported if its frequency is $c_j > n/2$.
+Using $T=n/2$ in Lemma~\ref{nojunk:Lemma} we obtain that the relevance requirement is satisfied with $\gamma=2$.
+\end{proof}
+
+The two most common noise distributions for DP are Gaussian and Laplace noise. (Cold) PATE was studied with both. The Gaussian-noise based Confident-GNMax aggregator \cite{DBLP:conf/iclr/PapernotSMRTE18,duan2023flocks} empirically outperformed the Laplace-based LNMAX~\cite{PapernotAEGT:ICLR2017} on cold PATE. % for Algorithm~\ref{distagg:alg}.
+The advantages of Gaussian noise are concentration (less noise to separate a maximizer from low frequency tokens), efficient composition, and more effective data dependent privacy analysis. Laplace-based noise on the other hand can preserve sparsity (a consideration as the key space of tokens or strings of token can be quite large), there is an optimized mechanism with weighted sampling, and there are recent improvement on data-dependent privacy analysis across many queries (the situation with hot PATE)~\cite{targetcharging:arxiv2023}. Our privacy analysis in Section~\ref{datadependent:sec} uses a data-dependent Laplace-based approach.
+
+\subsection{Heterogeneous Ensembles} \label{cooagghetero:sec}
+\begin{algorithm2e}\caption{\texttt{DistAgg} Heterogeneous}\label{distaggmed:alg}
+\DontPrintSemicolon
+$\boldsymbol{c},\rho \gets \CSample((\boldsymbol{p}^{(i)})_{i\in [n]})$ \tcp*{Algorithm~\ref{coordinated:algo}}
+Sample $j\in V$ with probability $\frac{c_j}{n}$\tcp*{Weighted sampling of a token from $\boldsymbol{c}$}
+\leIf{$c_j \geq 2L$}{\Return{$j$}}{\Return{$j$ or $\bot$}}
+\end{algorithm2e}
+
+For lower values of $\tau$, we propose the meta-scheme described in Algorithm~\ref{distaggmed:alg}: We perform weighted sampling of a token from 
+$\boldsymbol{c}$ and return it if its count exceeds $2L$.  If it is below $2L$ we may return either $j$ or $\bot$. We propose DP implementations in Section~\ref{heteromethods:sec}.
+We establish that Algorithm~\ref{distaggmed:alg} is diversity-preserving: 
+\begin{lemma} [Diversity-preservation of Algorithm~\ref{distaggmed:alg}]\label{distaggmed:lemma}
+    For $\mu >1$, Algorithm~\ref{distaggmed:alg} is diversity preserving in the sense of Definition~\ref{def:diversity} with $\tau=\mu 2 L$, $\beta = \frac{1}{2\mu}\ln(\mu)$ and $\gamma=1$.
+\end{lemma}
+\begin{proof} % [Proof of Lemma~\ref{distaggmed:lemma}]
+Consider the first requirement of Definition~\ref{def:diversity}.  Consider a token $j$ with $c_{j,q} \geq \tau$. From Lemma~\ref{diverseAgg:Lemma} using $p=1/\mu$ we obtain that the token $j$ 
+has frequency at least $c_j \geq c_{j,q}/\mu \geq 2L$ with probability at least $0.5 \ln(\mu) q$.  
+The token is sampled with probability $\min\{1,k c_j/n\}$ and if so appears also in $\boldsymbol{c}^*$ (since $c_j \geq 2L$).  The expected size (number of entries) of $\boldsymbol{c}^*$ is at most $k$ and thus it is returned if sampled with probability at least $1/k$.  Overall it is sampled and reported with probability at least $\min\{1/k, c_j/n\}$. 
+In total, the probability is $P_j \geq \min\{1/k, c_{j,q}/(\mu n)\} 0.5 \ln(\mu) q \geq \frac{1}{2k\mu}\ln(\mu) \frac{c_{j,q}}{n} q$.
+
+The second requirement of Definition~\ref{def:diversity} is immediate.
+The expected frequency of token $j$ is $\sum_{i\in [n]} p^{(i)}_j$ and
+it is sampled with probability at most $\frac{k}{n}\sum_{i\in [n]} p^{(i)}_j$. It can only be the output if sampled.
+\end{proof}
+
+
+

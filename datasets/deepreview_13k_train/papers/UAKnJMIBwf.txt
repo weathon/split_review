@@ -1,0 +1,474 @@
+\title{MambaPEFT: Exploring Parameter-Efficient Fine-Tuning for Mamba}
+
+\begin{abstract}
+
+An ecosystem of Transformer-based models has been established by building large models with extensive data. 
+Parameter-efficient fine-tuning (PEFT) is a crucial technology for deploying these models to downstream tasks with minimal cost while achieving effective performance. Recently, Mamba, a State Space Model (SSM)-based model, has attracted attention as a potential alternative to Transformers. While many large-scale Mamba-based models have been proposed, efficiently adapting pre-trained Mamba-based models to downstream tasks remains unexplored.
+In this paper, we conduct an exploratory analysis of PEFT methods for Mamba. We investigate the effectiveness of existing PEFT methods for Transformers when applied to Mamba. We also modify these methods to better align with the Mamba architecture. Additionally, we propose new Mamba-specific PEFT methods that leverage the distinctive structure of Mamba. Our experiments indicate that PEFT performs more effectively for Mamba than Transformers. Lastly, we demonstrate how to effectively combine multiple PEFT methods and provide a framework that outperforms previous works. To ensure reproducibility, we will release the code after publication.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Modern large-scale models, also known as Foundation Models, are heavily based on Transformers \citep{vaswani2017attention}. Transformer-based pre-trained models span diverse domains such as language, vision, and multi-modal applications.
+Despite their widespread use, Transformers have a notable drawback: their computational inefficiency with long sequences. The computational complexity of the attention module scales with the square of the sequence length.
+
+To address this fundamental drawback, \citet{gu2023mamba} proposed Mamba, a linear-time sequence model that leverages the strengths of State Space Models (SSMs). While Transformers are constructed from attention modules, Mamba is based on the SSM architecture, allowing it to handle long sequences more efficiently. Additionally, Mamba has been shown to perform better than Transformers with the same number of parameters on major tasks such as natural language processing (NLP) \citep{gu2023mamba} and computer vision (CV) \citep{zhu2024vision}. This fact makes Mamba stand out from other post-Transformer architectures with sub-square time complexity \citep{peng-etal-2023-rwkv,sun2023retentive}. Mamba-based models have been proposed across a wide range of domains \citep{10.1145/3637528.3672044,liang2024pointmamba,zhang2024motion,li2024mamba}. We believe that Mamba has the potential to go beyond the Transformer ecosystem.
+
+Parameter-efficient fine-tuning (PEFT) is essential for adapting such large-scale models to downstream tasks. Fine-tuning all parameters of these models results in high computational costs. PEFT enables additional training for large-scale Transformers with limited computing resources and data.
+Early examples of PEFT include the fine-tuning of pre-trained language models for NLP tasks \citep{houlsby2019parameter, hu2021lora}. Subsequently, it has been extensively adopted across a wide range of applications \citep{DBLP:conf/iclr/YehHGYO024,DBLP:conf/nips/Wang00BL0023,wang2024visionllm}.
+While many PEFT methods have been extensively studied for Transformers \citep{lialin2023scaling,han2024parameterefficientfinetuninglargemodels}, research on PEFT methods for Mamba remains limited.
+
+In this paper, we provide an exploratory and comprehensive investigation of PEFT for Mamba. First, we adapt representative PEFT methods used in Transformers to the Mamba architecture and conduct extensive experiments. We also propose new PEFT methods specific to the Mamba architecture. 
+\begin{wrapfigure}[32]{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/mambapeft_overview.pdf}
+    \caption{An overview of our proposed MambaPEFT. 
+    We investigate, improve, and propose 20 variations of seven PEFT methods for Mamba and search for the best combination.
+    }
+    \label{fig:overview}
+\end{wrapfigure}
+In the experiments, we benchmarked Mamba using PEFT methods, including seven main methods and a total of 20 derived variations (see \Cref{fig:overview}). Our benchmarks indicate that PEFT is more crucial for Mamba than for Transformers, with several methods outperforming the PEFT methods used for Transformers.
+Additionally, we demonstrate that these PEFT methods can be combined to surpass the performance of individual methods. We propose an efficient search technique to identify optimal PEFT combinations and hyperparameters. Unlike existing works that focus on specific high-performance methods, we explore a wide variety of PEFT methods. This exploration reveals suitable PEFT combinations and shows that merely combining high-performing methods is not sufficient.
+
+The main contributions are as follows. First, to the best of our knowledge, we perform the first extensive and comprehensive benchmarking of PEFT methods for Mamba, including proposed Mamba-specific methods that are distinct from all PEFT methods for Transformers. Second, we propose a framework for achieving higher performance by combining multiple PEFT methods, which are obtained through our efficient search technique. Third, our results indicate that PEFT is more effective for Mamba than for Transformers, and several Mamba-specific phenomena are discovered through the experiments.
+
+
+
+\section{Related work and preliminary}
+
+
+In this section, we review related work and present the motivation behind our research. We begin with an introduction of Mamba. Subsequently, we discuss PEFT methods for Transformers. Finally, we highlight that research on PEFT for Mamba is limited.
+
+\subsection{Mamba}
+
+SSMs are powerful methods for modeling time-dependent dynamic systems. It was developed and analyzed in detail to address the signal processing technique classically known as the Kalman filter \citep{kalman1960new} and has been used to date in a wide range of fields, 
+such as control engineering \citep{maciejowski2007predictive}. 
+An SSM \citep{gu2021efficiently,gu2021combining} takes an input $X_t$, converts it to a hidden state $H_t$, and then outputs $Y_t$.
+This procedure at each time step $t$ is
+\begin{equation}
+\label{eq:SSM_simple}
+     H_t  = A_t H_{t-1} + B_t X_t,\quad  Y_t  = C_t H_t + D_t X_t.
+\end{equation}
+As this model describes the relationship between continuous quantities, it must be described to deal with discrete quantities such as NLP. During step size $d$, the input is assumed to be invariant and the well-known theory of zero-order hold is applied. Putting 
+\begin{equation}
+\overline{A}:= (I - d/2 \cdot A)^{-1}(I + d/2 \cdot A), \quad \overline{B}:=(I - d/2 \cdot A)^{-1}d B, \quad \overline{C}:=C, \quad \overline{D}:=D 
+\label{eq:discretize} 
+\end{equation}
+allows us to obtain the final discrete representation:
+\begin{equation}
+\label{eq:SSM_discrete}
+     H_t  = \overline{A} H_{t-1} + \overline{B}X_t,\quad Y_t  = \overline{C} H_t + \overline{D}X_t.
+\end{equation}
+There have been numerous efforts to apply this mechanism to deep learning (e.g. convolutional representations \citep{gu2021combining} and the initialization by Hippo matrices \citep{gu2020hippo}). 
+As a result, a time series model, Mamba \citep{gu2023mamba}, with a dynamic inference system called \textit{Selective State Space Model (S6)}, was developed as,
+\begin{equation}
+A_t = \exp(-\Delta_t A),\ B_t = \Delta_t W_B X_t,\ C_t = W_C X_t,\ D_t = W_D X_t \label{eq:S6}
+\end{equation}
+where $\Delta_t = \mathrm{softplus}(W_{\Delta}(W_X X_t) + b_{\Delta})$ for any $t$, $W_{\Delta}$. The $W_X$, $W_B$, $W_C$, $W_D$, and $A$ are trained matrices, and $b_{\Delta}$ is a trained bias.
+
+Impressive results of Mamba in NLP have inspired researchers to adapt it to visual tasks.
+Vim \citep{zhu2024vision} is a pioneering work in this area. 
+Similar to ViT \citep{dosovitskiy2020image}, it divides images into patches and then inputs the patch sequences into SSMs. 
+There are other Mamba-based methods for visual tasks. For example, VMamba \citep{liu2024vmamba} is a hybrid approach combining Mamba with 2D Convolutions. MambaVision \citep{hatamizadeh2024mambavisionhybridmambatransformervision} further integrates Attention.
+In this paper, we conduct experiments with Vim, which is a variant of the vanilla Mamba.
+
+\subsection{Parameter-Efficient Fine-Tuning for Transformer} %\Masa{TODO: need to reduce the volume...}
+\label{subsec:Parameter-Efficient Fine-Tuning for Transformer}
+
+PEFT methods have been actively studied due to the large model size of Transformers extensively in both the NLP and CV communities. These studies can be categorized into four methods; partial, additive, reparametrization, and hybrid according to \citet{lialin2023scaling,han2024parameterefficientfinetuninglargemodels}.
+
+\textbf{Partial-tuning methods.} 
+While usual fine-tuning updates all parameters in the network, Partial-tuning updates a part of them. 
+BitFit \citep{zaken2021bitfit} is a successful method in this category which tunes only the bias terms of the linear layers in Transformers. However, most of the linear layers in Mamba do not have the bias terms, which implies that it cannot be applied a priori.
+
+\textbf{Additive methods.}
+Additive methods add a small number of additional parameters or small networks to be fine-tuned. % while freezing the parameters of the original network. 
+They can be further divided into additive adapter and additive token methods.
+The former adds adapter modules whose rank $r$ is reduced from the input dimension $d$ $(r << d)$ by a bottleneck structure. Adapter \citep{houlsby2019parameter} attaches the adapter in series with the feed-forward network (FFN) module in Transformers. In the following methods, Adapter+ \citep{steitz2024adapters} improves the position of the input feature acquisition to the adapter. ParallelAdapter \citep{he2022towards} and AdaptFormer \citep{chen2022adaptformer} improve performance by inserting the adapter in parallel to the FFN. We adopt ParallelAdapter for Mamba because it is successful in both language \citep{he2022towards} and vision \citep{chen2022adaptformer} tasks.
+It attaches the adapter 
+\begin{equation}
+x_{\ell}' = \mathrm{FFN}(x_{\ell}) + s\cdot \mathrm{ReLU}(x_{\ell} \cdot  W_{\mathrm{down}})\cdot W_{\mathrm{up}},
+\label{eq:adapt}
+\end{equation}
+where the second term is the adapter with additional parameters $W_{\mathrm{down}}\in\mathbb{R}^{d \times r}$ and $W_{\mathrm{up}}\in\mathbb{R}^{r \times d}$, and a scaling hyperparameter $s$.
+In the latter category, Prompt-tuning \citep{liu2021p} (resp. Prefix-tuning \citep{li2021prefix}) adds learnable soft tokens to the input of the network (resp. soft tokens inside each Attention layer). 
+Successive methods improve how to embed soft tokens \citep{liu2022p,razdaibiedina2023residual,zhang2023towards}. Though prompt-tuning for ViT adds learnable tokens at the beginning of the input \citep{jia2022visual,wang2024revisiting}, it is unclear where the token should be added for Mamba because the order of tokens makes sense in SSM. In fact, Vim \citep{zhu2024vision} adds a class token in the middle of the input sequence. Hence, we investigate multiple choices of soft token insertion.
+
+\textbf{Reparameterization methods.} 
+Although reparameterization methods add low-rank adapters to Linear layers similar to the additive adapter methods, they adopt adapters that can be merged into the weights of the original Linear layer at the inference time. Due to this restriction, activation cannot be used in the adapter, while it eliminates the inference time overhead.
+The most notable one is LoRA \citep{hu2021lora}, a method that reparameterizes the pre-trained Linear weights $W$ as $W' = W + s\cdot W_{\mathrm{down}}\cdot W_{\mathrm{up}}$.
+While subsequent studies have improved the efficiency by finding ways to reparameterize the weights \citep{hayou2024loraefficientlowrank,liudora2024dora,jiang2024mora}, we first investigate how many ranks of the adapter should be attached to which linear weights in Mamba. In this regard, we will use a simple LoRA with few hyperparameters.
+
+\textbf{Hybrid methods.} 
+Hybrid methods use multiple PEFT methods. While many approaches manually combine these methods \citep{mao2021unipelt,he2022towards,karimi2021compacter}, several methods automatically tune the combination of several PEFT methods. $S_4$ \citep{chenparameter2023s4} utilizes random search while changing the dimension of the search space. AutoPEFT \citep{zhou2024autopeft} and NOAH \citep{zhang2024neural} train a supernet containing all possible PEFT methods and discover the optimal combination using an evolutionary algorithm.
+
+Supernet-based methods can only be used to search for each task individually. However, we aim to find the optimal combination for Mamba that can be generalized across multiple tasks, making it useful for various future applications. Hence, we propose an efficient search technique to find a compact combination of PEFT methods. This is necessary because we have many more PEFT methods and hyperparameters than previous works, resulting in a large search space.
+
+\subsection{Parameter-Efficient Fine-Tuning for Mamba}
+\label{subsec:Parameter-Efficient Fine-Tuning for Mamba}
+In contrast to the case of Transformers, there are limited studies on PEFT for Mamba. To the best of our knowledge, the only study in this context is \citet{halloran2024mamba}, which applied the same rank of LoRA to all the linear layers in Mamba.
+With this motivation, we conduct an exploratory investigation and provide benchmarks of PEFT methods for Mamba.
+
+
+
+\section{Investigation of PEFT methods for Mamba and beyond}
+
+\label{section:Investigation of PEFT methods for Visual Mamba and Beyond}
+
+In this section, we explore PEFT methods for the Mamba architecture. First, we discuss how existing PEFT methods for Transformers can be adapted to Mamba. Next, we present methods that have been improved and modified based on the characteristics of Mamba. Finally, we propose new PEFT methods specifically for Mamba and hybrid PEFT methods to search optimal combinations efficiently.
+
+\subsection{Simple adaptation of existing PEFT methods to Mamba}
+\label{subsec:Purely adaptation of existing PEFT methods for Mamba}
+
+Some PEFT methods can be directly applied to Mamba because they are network architecture-independent. For example, \textbf{ParallelAdapter} attaches a parallel adapter to each FFN in Transformers. The counterpart of the FFN in Mamba is the out\_proj layer, and hence we attach it to the \textbf{\bm{$out\_proj$}}.
+
+\textbf{LoRA} is also a network architecture-independent method and can be applied directly to Mamba. However, it is still unclear which Linear layer should be targeted and what hyperparameter values should be used. We individually investigate LoRA on each module as \textbf{LoRA(embedding)}, \textbf{LoRA(\bm{$in\_proj$})}, \textbf{LoRA(\bm{$x\_proj$})}, \textbf{LoRA(\bm{$dt\_proj$})}, and \textbf{LoRA(\bm{$out\_proj$})} to clarify the appropriate way to apply LoRA to Mamba (see \Cref{fig:overview}).
+
+\subsection{Re-designing and improving existing PEFT methods for Mamba}
+\label{subsec:Re-designing and improvements of existing PEFT methods for Mamba}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{fig/mambapeft_prefix_additional.pdf}
+    \caption{\textbf{(a)} Prefix-tuning designed for Transformer. It can't be applied to Mamba. \textbf{(b)} The proposed Affix-tuning, which we re-design for Mamba.  It discards prefixes after SSM. This design allows us to insert affix tokens at arbitrary locations. \textbf{(c)} Additional-scan that we design for Mamba. In this method, we add a learnable dimension to the hidden state in SSM.}
+    \label{fig:prefix-additional}
+\end{figure}
+
+\textbf{Partial LoRA.} Mamba is a network characterized by numerous intermediate features with diverse properties, such as $X$, $Z$, $dt$, $B$, $C$, and so on (see \Cref{fig:overview}). In the previously mentioned normal LoRA, the inputs for multiple intermediate features are compressed together in the narrow rank of LoRA, even though they have different properties.
+Therefore, we now develop Partial LoRAs 
+\textbf{LoRA$_p$(\bm {$X$})}, \textbf{LoRA$_p$(\bm {$Z$})}, \textbf{LoRA$_p$(\bm {$dt$})}, \textbf{LoRA$_p$(\bm {$B$})}, and \textbf{LoRA$_p$(\bm {$C$})}, where we apply LoRA to only a part of the weights in the linear layer according to the output features.
+Since the dimensions of linear layers vary widely in Mamba (e.g. from 16 to 2048 in Mamba-1.3B), we also investigate whether there is an optimal dimension per layer or not to attach LoRA.
+
+\textbf{Prompt-tuning.} Prompt-tuning can be applied directly to Mamba. As with Transformer, we simply add soft prompts to the input sequence. In normal Prompt-tuning, a prompt is inserted at the beginning of the input sequence. For Vim, however, we adjust the insertion position. This is because, unlike ViT, Mamba is a time-series model and works differently depending on where the prompt is inserted. In fact, Vim improved accuracy by inserting the class token in the middle of the sequence rather than the beginning. In addition, Mamba Register \citep{DBLP:conf/iclr/DarcetOMB24} found it is preferable to insert the register tokens at equal intervals. Hence, in this paper, we construct three prompt types; prefix (resp. infix, suffix) type, inserting prompt tokens at the beginning (resp. with equal intervals, at the end).
+
+\textbf{Affix-tuning.} We cannot apply Prefix-tuning directly to time series models such as Mamba, since it is designed for the Attention mechanism based on query, key, and value. As shown in \Cref{fig:prefix-additional}, by adding soft tokens to only $K$ and $V$, Prefix-tuning successfully adds new information to all tokens in the input sequence without breaking the positional relationship of the original input sequence.
+Motivated by these observations, we propose a PEFT method that adds soft tokens before input to the SSMs and discards the output tokens of the inserted position (see \Cref{fig:prefix-additional}). This preserves the positional relationship between input and output tokens even when tokens are added. Furthermore, for Vim, we adjust the insertion position in the same way as for Prompt-tuning. Since the name Prefix-tuning can be misleading, we generalize by calling it \textit{Affix-tuning}.
+
+\subsection{New PEFT methods designed for Mamba}
+\label{subsec:New PEFT methods designed for Mamba}
+
+\textbf{Partial-tuning.}
+BitFit \citep{zaken2021bitfit} is effective among Partial-tuning methods because it fine-tunes bias terms with low degrees of freedom and they do not break the pre-trained model.
+Different situations for the Partial-tuning in Mamba is that, unlike Transformers, it does not utilize bias terms in linear layers without $dt\_proj$, while it has various other parameters with low degrees of freedom such as the parameters $A$, $D$, and the weights of the causal convolution whose dimension is one. 
+Based on this situation, we construct \textit{Partial-tuning} for Mamba, named \textbf{Bias-tuning}, \textbf{A-tuning}, \textbf{D-tuning}, and \textbf{Conv1d-tuning}, which fine-tune the previously mentioned parameters.
+For Vim, we also make \textbf{positional embedding} and \textbf{class tokens} learnable. In addition, we enhance our method from conventional Partial-tuning by modifying the weight decay. Specifically, instead of the usual weight decay of $|W|^2$, we propose applying a weight decay of $|W-W_{\mathrm{pretrain}}|^2$ to preserve the pre-trained model.
+
+\textbf{Additional-scan.} We propose a new efficient PEFT with fewer parameters by leveraging the SSM architecture. By increasing the state dimension of the SSM, we aim to store information in it to adapt to new tasks, called \textit{Additional-scan}. It corresponds to additive methods. Specifically, we increase the state dimension of the input parameters of SSMs, $A$, $B$, and $C$, by $N'$. Eq. \ref{eq:SSM_discrete}
+then becomes as follows:
+\begin{equation}
+\overline{A}^{[T,L,N+\mathbf{\underline{N'}}]}=\exp(-\Delta^{[T,L,1]} \circ A^{[1,L,N+\mathbf{\underline{N'}}]}) ,\quad \overline{B}^{[T,L,N+\mathbf{\underline{N'}}]}=\Delta^{[T,L,1]} \circ B^{[T,1,N+\mathbf{\underline{N'}}]},
+\label{eq:addiscan1}
+\end{equation}
+where $T$, $L$, and $N$ are the token length, hidden size, and state dimension of the SSM, and $P^{[d_1,d_2,d_3]}$ represents $P\in\mathbb{R}^{d_1\times d_2\times d_3}$. Then, the core recurrent computation in SSMs becomes
+\begin{equation}
+\label{eq:addiscan2}
+\begin{split}
+     H_{t}^{[L,N+\mathbf{\underline{N'}}]} &= \overline{A}_{t}^{[L,N+\mathbf{\underline{N'}}]} \circ H_{t-1}^{[L,N+\mathbf{\underline{N'}}]} + \overline{B}_{t}^{[L,N+\mathbf{\underline{N'}}]} \circ X_{t}^{[D,1]} \\
+     Y_{t}^{[L,1]} &= H_{t}^{[L,N+\mathbf{\underline{N'}}]} \cdot (C_{t}^{\top})^{[N+\mathbf{\underline{N'}},1]} + D^{[L,1]}.
+\end{split}
+\end{equation}
+In Mamba, a diagonal SSM is employed and each hidden dimension forms an independent recurrence. Hence, we can write down more about one hidden state dimension as follows; 
+\begin{equation}
+\begin{split} [h_{t,1},\> ...,\> h_{t,N},\> h_{t,N+\mathbf{\underline{1}}},\> ...,\> h_{t,N+\mathbf{\underline{N'}}}]=[&\exp(-\delta_{t,0}a_{0,1})h_{t-1,1}+\delta_{t,0}b_{t,1}x_{t,0},\> ..., \\
+&\exp(-\delta_{t,0}a_{0,{\scriptsize N}})h_{t-1,N}+\delta_{t,0}b_{t,N}x_{t,0}, \\
+&\exp(-\delta_{t,0}\mathbf{\underline{a_{0,N+\mathbf{1}}}})h_{t-1,N+\mathbf{\underline{1}}}+\delta_{t,0}\mathbf{\underline{b_{t,N+\mathbf{1}}}}x_{t,0},\> ..., \\
+&\exp(-\delta_{t,0}\mathbf{\underline{a_{0,N+\mathbf{N'}}}})h_{t-1,N+\mathbf{\underline{N'}}}+\delta_{t,0}\mathbf{\underline{b_{t,N+\mathbf{N'}}}}x_{t,0}].
+\end{split}
+\label{eq:addiscan3}
+\end{equation}
+It can be observed that the \underline{added parameters} do not affect the original hidden state, $h_{t,1},\> ...,\> h_{t,N}$. This enables us to store new information with additional selective scan without affecting the pre-trained hidden memory and selective scan mechanism.
+To add new dimension to $A$, $B$, and $C$, we add additional trainable parameters to $A$ and to the Linear \textbf{\bm {$x\_proj$}} that generates $B$ and $C$ (see \Cref{fig:prefix-additional}).
+The parameter $A$ in SSM needs careful initialization \citep{gu2020hippo}, known as the Hippo theory. Mamba uses S4D initialization \citep{gu2022parameterization}, $A_{*,*, n}=n$,
+while in our case, the other $A$ values have already been changed by training, which implies that S4D initialization is not theoretically better. Thus, we propose an initialization of $A$ for Additional-scan. Specifically, the additional parameters of $A$ are initialized with the values of neighborhood pre-trained $A$. It is simple, while stable training is achieved. 
+Accounting for eq. \ref{eq:addiscan3} and the pre-trained model use S4D initialization, the top of the state dimension is intended for long-term memory or selective scan from distant tokens, while the bottom is intended for short-term memory or selective scan from neighbor tokens.
+Thus, when fine-tuning, the suitable position of the additional state dimension is checked whether at the bottom as in eq. \ref{eq:addiscan3} or at the top. 
+
+\subsection{Hybrid PEFT Search}
+\label{sec:Hybrid PEFT methods for Visual Mamba}
+
+We have introduced the primary seven methods as follows: ParallelAdapter, LoRA, Partial LoRA, Prompt-tuning, Affix-tuning, Partial-tuning, and Additional-scan. Specifically, there are five variations of LoRA, five variations of Partial LoRA, and six variations of Partial-tuning, making a total of 20 methods. This variety motivated us to propose a hybrid PEFT for Mamba, which combines multiple PEFT methods to enhance performance. There are three key elements to consider in our hybrid PEFT: the combination of PEFT methods, the hyperparameters of each PEFT method (e.g., a rank of LoRA), and the training hyperparameters for each method (e.g., learning rate). Exploring them simultaneously results in an enormous search space compared to the search space of previous works which target only several PEFT methods. Furthermore, the hyperparameters have a conditional search space, meaning they are only considered if the corresponding PEFT method is active. Thus, we propose a two-step approach that explicitly divides the problem into two parts to improve efficiency in the search process.
+
+In the first step, we restrict the search space to combinations of PEFT methods with minimal trainable parameters within each method, i.e., we explore whether to activate each PEFT method with fixed hyperparameters with minimal trainable parameters. This phase is based on our observation that performance degrades when too many PEFT methods or trainable parameters are added.
+In the second step, based on the PEFT method combination suggested by the first step, we greedily search the hyperparameters of both PEFT methods and their training. Since this phase inevitably increases the number of trainable parameters, we also include an option to remove a specific PEFT method. This approach helps to prevent excessive parameter growth and allows us to allocate more parameters to the more critical methods. We utilize the TPE algorithm \citep{bergstra2011algorithms} implemented in Optuna \citep{akiba2019optuna} for the search in each step. Detailed algorithm is provided in \Cref{app:impl_detail}.
+
+
+\section{Experiments and discussion}
+
+
+In this section, we present our experiments on 7 PEFT methods with 20 variations. We conduct experiments on both image and language tasks. Our methods are compared with state-of-the-art methods for Transformers. We provide detailed results and analysis based on these comprehensive experiments.
+\begin{table}[t]
+    \centering
+    \small
+        \caption{Test accuracy on the VTAB-1k benchmark pre-trained on ImageNet-1K using the training technique of DeiT \citep{pmlr-v139-touvron21a}. The best hyperparameter settings maximizing the averaged accuracy of six datasets written in the ablation studies are used for each PEFT method. The number of trainable parameters are on the Cifar100 task. The best performance is highlighted in bold, and the second-best performance is underlined.}
+    \begin{tabular}{llr|cccc}
+\toprule
+ Model & Method & \#Params (K) & Natural& Specialized& Structured&Avg.
+\\
+ \midrule
+ \multirow{7}{*}{ViT-S}& Scratch& 21,704& 10.66& 56.12& 24.83&26.20
+\\
+ & Full& 21,704& 51.79& 72.79& 45.27&53.47
+\\ 
+ & Linear Proving& 9& 60.87& 78.13& 30.57&51.74
+\\ \cdashline{2-7}
+ & FacT-TK & 16& 72.87& 82.34& 54.10&66.96
+\\
+ & LoRA & 628& 73.60& 82.22& 57.61&68.68
+\\
+ & Adaptformer & 333& 73.63& 83.15& 57.80&68.97
+\\
+ & Adapter+ & 122& 74.68& 83.57& 58.82&69.87
+\\
+ \midrule
+ \multirow{26}{*}{Vim-S}& Scratch& 25,450& 8.33& 49.87& 28.16&25.42\\
+ & Full& 25,450& 59.35& 68.74& 34.39&47.08
+\\ 
+ & Linear Probing& 9& 62.50& 77.25& 31.97&52.75
+\\ \cdashline{2-7}
+ & CLS-token-tuning& 9& 62.50& 77.20& 32.20&52.84
+\\
+ & Pos-embed-tuning& 84& 64.25& 74.60& 39.77&56.12
+\\
+ & Bias-tuning & 37& 68.94& 79.16& 45.05&61.03
+\\
+ & D-tuning& 45& 67.14& 78.56& 40.10&58.16
+\\
+ & A-tuning& 598& 72.01& 80.72& 49.59&64.40
+\\
+ & Conv1d-tuning& 156& 74.33& 82.45& 57.83&69.09
+\\ \cdashline{2-7}
+ & Prompt-tuning (w/o proj)& 12& 69.92& 79.20& 47.75&62.54
+\\
+ & Prompt-tuning& 307& 63.19& 77.88& 35.82&54.76
+\\
+ & Affix-tuning (w/o proj)& 230& 63.90& 77.66& 34.21&54.30
+\\ 
+ & Affix-tuning & 117,000& 75.84& 83.29& 58.94&70.29
+\\
+ & Additional-scan& 672& 74.63& 82.68& 56.40&68.65
+\\ 
+ & ParallelAdapter& 663& 76.10& 83.97& 59.97&70.96
+\\ \cdashline{2-7}
+ & LoRA(embed) & 45& 64.66& 77.53& 43.83
+&
+58.60\\
+ & LoRA(x\_proj)& 2,540& 74.41& 81.92& 54.88&67.77
+\\
+ & LoRA(dt\_proj)& 2,442& 75.35& 83.05& 57.12&69.30
+\\
+ & LoRA(out\_proj)& 2,663& 76.42& 83.96& 60.08&71.12
+\\
+ & LoRA(in\_proj) & 1,483& 76.58& 84.08& 60.16&71.25
+\\
+ & LoRA$_p$(d)& 2,442& 73.25& 80.91& 50.93&65.46
+\\
+ & LoRA$_p$(C)& 2,417& 72.78& 81.57& 51.35&65.61
+\\
+ & LoRA$_p$(B)& 2,417& 72.95& 81.66& 52.26&66.07
+\\
+ & LoRA$_p$(Z) & 1,778& 76.15& 84.26& 59.72&70.94
+\\
+ & LoRA$_p$(X)&  1,778& 76.64&  83.89&  60.84 & 71.52
+\\ \cdashline{2-7}
+& All (w/ proj) & 119,765 &  74.67&  82.96&  53.92& 67.68\\
+& Hybrid (w/ proj)& 117,236  &  \textbf{77.00}&  \underline{84.41}&  \textbf{61.55}& \textbf{72.05}\\
+& Hybrid (w/o proj)& 1,044 &\underline{76.85}  &\textbf{84.42}  &\underline{61.06}  & \underline{71.80} \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:peft_Vim_vit}
+\end{table}
+\subsection{Experimental settings}
+
+\textbf{Models.} We use Vim-S \citep{zhu2024vision} as a base model in our experiments. We also experiment with ViT \citep{dosovitskiy2020image} for comparison. We adopt pre-trained weights trained with ImageNet-1k \citep{5206848} dataset using DeIT \citep{pmlr-v139-touvron21a} training framework in all models.
+
+\textbf{Dataset.} We conduct our evaluation on the VTAB-1k image classification dataset \citep{zhai2019large}. This dataset contains tasks from 19 domains. These tasks are grouped into three categories: Natural, Specialized, and Structured. For each task, 1000 images are used for training.
+
+\textbf{Baselines.} We adopt LoRA \citep{hu2021lora}, Adaptformer \citep{chen2022adaptformer}, FacT-TK \citep{jie2023fact}, and Adapter+ \citep{steitz2024adapters} as existing PEFT methods for Transformers. For Mamba, we evaluate the 20 PEFT methods explained in Section \ref{section:Investigation of PEFT methods for Visual Mamba and Beyond}. As a baseline for Hybrid PEFT, we use a combination of all PEFT methods in the experiments.
+
+\textbf{Implementation Details.} We follow the setup of \citet{jie2023fact} in our experiments, using AdamW optimizer \citep{loshchilov2017decoupled} and training the model for 100 epochs. The learning rate is set to  $\text{1e-3}$, with a cosine scheduler and a warmup period of 10 epochs. A weight decay with $\text{1e-4}$ magnitude is applied. We do not perform data augmentation. For ablation studies, we use the average accuracy on six tasks: CIFAR-100, Sun397, Camelyon, Retinopathy, Clevr-Count, and sNORB-Elev.
+\subsection{Results for individual PEFT methods}
+\label{subsec:experiments_individual_peft}
+
+\textbf{Overall Results.} 
+\Cref{tab:peft_Vim_vit} shows the performance with hyperparameters that maximize accuracy.
+Many PEFT methods for Vim outperform the state-of-the-art ones for ViT.
+Interestingly, the PEFT methods for ViT start over-fitting early when the number of trainable parameters is increased and are unable to improve accuracy. On the other hand, Vim continues to improve its accuracy even with more trainable parameters. 
+This is probably due to the highly modular structure of Mamba, which prevents its pre-trained memory from being corrupted by additional parameters.
+In addition, Vim has a greater performance improvement margin between full fine-tuning and PEFT than ViT has. 
+These results suggest that PEFT is more effective for Mamba than Transformer.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \resizebox{!}{5cm}{\includestandalone[mode=buildnew]{fig/ablation_lora_small}}
+        \subcaption[]{}
+        \label{fig:ablation_lora_small}
+    \end{minipage} 
+    \hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \resizebox{!}{4.7cm}{\includestandalone[mode=buildnew]{fig/ablation_additional}}
+        \subcaption[]{}
+        \label{fig:ablation_additional}
+    \end{minipage} 
+    \caption{Ablation studies for \textbf{(a)} the relationship between LoRA rank and accuracy on small linear weights, and \textbf{(b)} the impact of additional dimensions in Additional-scan on performance.}
+    \label{fig:ablation_main}
+\end{figure}
+
+\begin{table}[t]
+    \caption{Ablation studies. \textbf{(a)} The position and number of tokens in Affix-tuning with projection. If the position is ``Before'', tokens are inserted before the in\_proj layer.\textbf{ (b)} The initialization method in Additional-scan. \textbf{(c)} The performance improvement in Partial-tuning with our proposed Weight Decay.}
+    \begin{minipage}[t]{0.32\linewidth}
+        \scalebox{0.7}{
+        \begin{tabular}{llc|c}
+            \toprule
+            Position & Type & \#Tokens & Acc. (\%) \\
+            \midrule
+            Before & Prefix & 1 & 23.85 \\
+            After & Prefix & 1 & 62.91 \\
+            After & Infix & 1 & 61.21 \\
+            After & Prefix & 2 & 63.36 \\
+            After & Prefix & 3 & \textbf{63.51} \\
+            After & Prefix & 4 & 56.57 \\
+            \bottomrule
+        \end{tabular}
+        }
+                \subcaption[]{}
+        \label{tab:affix_2}
+    \end{minipage}
+    \hspace{-0.015\linewidth}
+    \begin{minipage}[t]{0.32\linewidth}
+        \scalebox{0.7}{
+        \begin{tabular}{ll|c}
+            \toprule
+            Location & Init. & Acc. (\%) \\
+            \midrule
+            Bottom & S4D & 57.39 \\
+            & Const(0.1) & 61.25 \\
+            & Const(1) & 61.33 \\
+            & Const(5) & 60.05 \\
+            & Ours & 61.46 \\
+            Top & S4D & 57.56 \\
+            & Ours & \textbf{61.61} \\
+            \bottomrule
+        \end{tabular}
+        }
+        \subcaption[]{}
+        \label{tab:additional_2}
+    \end{minipage}
+    \hspace{-0.055\linewidth}
+    \begin{minipage}[t]{0.32\linewidth}
+        \scalebox{0.7}{
+        \begin{tabular}{c|c|c|c}
+            \toprule
+            Method & wd=1e-4 & wd=1e-3 & wd=1e-2 \\
+            \midrule
+            Bias-tuning & +0.06 & +0.02 & \textbf{+0.17} \\
+            Conv1d-tuning & -0.40 & \textbf{+0.18} & -0.01 \\
+            Cls\_token-tuning & -0.01 & \textbf{+0.08} & -0.01 \\
+            Pos-embed-tuning & \textbf{+0.18} & +0.09 & +0.02 \\
+            A-tuning & +0.07 & \textbf{+0.15} & +0.11 \\
+            Z-tuning & -0.08 & \textbf{+0.02} & -0.04 \\
+            \bottomrule
+        \end{tabular}
+        }
+        \subcaption[]{}
+        \label{tab:results_2}
+    \end{minipage}
+    \label{tab:ablation}
+\end{table}
+
+\textbf{LoRA.} In our experiments, LoRA turns out to be one of the most effective PEFT methods with Vim. As shown in \Cref{tab:peft_Vim_vit}, PEFT methods perform well regardless of where LoRA is applied. The best performance is achieved with the partial LoRA, LoRA$_p$(X). This result stems from our detailed investigation, indicating that the effectiveness of LoRA depends on the nature of the output features.
+
+Another notable finding regarding LoRA is that when it is attached to a linear weight with a small dimension, the accuracy continues to increase even if the rank of LoRA exceeds the full-rank, as shown in \Cref{fig:ablation_lora_small}. Full-rank refers to the smaller value of the input dimension or output dimension. This phenomenon is likely because the effective degrees of freedom are bounded by the full-rank.
+It follows that adding more parameters does not cause overfitting. Instead, it positively contributes to over-parameterization, similar to the findings in \citet{ding2021repvgg}.
+
+\textbf{Affix-tuning and Prompt-tuning.}  The ablation studies on affix-tuning are shown in \Cref{tab:affix_2}. First, our Affix-tuning has multiple choices about where to add soft tokens because it is architecture-independent compared to Prefix-tuning for transformers, as shown in \Cref{fig:prefix-additional}. We test two positions, before or after the in\_proj layer. If before, the output tokens are discarded just before the out\_proj layer. If after, they are discarded after SSM.  We find that it is important to affect additional tokens only on SSM by adding after the in\_proj layer. Moreover, the best performance is achieved by adding an affix at the beginning of the input tokens, just as with Prefix-tuning for Transformer, and different from how to handle additional tokens for Vim in \citet{zhu2024vision, DBLP:conf/iclr/DarcetOMB24}. This should be because it is impossible to learn which positions are additional tokens rather than patch tokens unless they are trained from scratch. A detailed analysis of the positions and numbers of inserted tokens is provided in the \Cref{app:detail_methods}.
+
+Note that these methods have the option of applying embedding projection to the prompts, which significantly increases the number of parameters. However, it can be merged during inference, resulting in zero computational cost increase. Our results show that embedding projection is effective in improving accuracy, and hence it is recommended to use it if memory allows.
+
+\textbf{PEFT methods designed for Mamba.} We perform experiments on two newly proposed PEFT methods for Mamba. The results of Additional-scan are presented in \Cref{tab:peft_Vim_vit}. Additional-scan shows competitive performance with the best settings of LoRA and Affix-tuning, with fewer trainable parameters. \Cref{fig:ablation_additional} and \Cref{tab:additional_2} list the experiments with different initialization for Additional-scan. It shows that our proposed initialization consistently outperforms the original S4D used in Mamba.
+The results of Partial-tuning are presented in \Cref{tab:peft_Vim_vit}. Performance highly depends on which components are made learnable. The highest performance is achieved by making conv1d learnable. Our proposed modified weight decay works effectively around 1e-3 strength (\Cref{tab:results_2}).
+\subsection{Results of Hybrid PEFT}
+
+The bottom of \Cref{tab:peft_Vim_vit} shows the effectiveness of our two-step optimization approach. Combining all PEFT methods results in lower performance compared to using a single method. In contrast, our two-stage search method achieves higher performance with fewer parameters. These results indicate that selecting a preferred combination of PEFT methods is crucial.
+
+We find that the high-performing single methods are not necessarily selected among the optimal combinations. We hypothesize that this phenomenon is related to the importance of ensuring model diversity in ensemble methods \citep{dietterich2000ensemble}. Combining PEFT methods with different mechanisms can offset individual errors, mitigate overfitting, and enhance generalization performance. Detailed verification of this aspect remains a direction for future research.
+
+\begin{table}[t]
+\caption{Experimental results of the commonsense reasoning tasks. Language Model Evaluation Harness \citep{eval-harness} is used to benchmark. The best performance is highlighted in bold, and the second-best performance is underlined, excluding Full fine-tuning.}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llc|ccccccccc@{}}
+\toprule 
+Model       & Method & \#Params(\%) & BoolQ & PIQA & SIQA & HellaSwag & WinoGrande & ARC-e & ARC-c & QBQA & Avg. \\ \midrule
+\multirow{2}{*}{Pythia 160M} & \textcolor{gray}{Full}   & \textcolor{gray}{100}& \textcolor{gray}{58.7}& \textcolor{gray}{62.2}& \textcolor{gray}{39.0}& \textcolor{gray}{29.1}& \textcolor{gray}{52.1}& \textcolor{gray}{42.3}& \textcolor{gray}{23.9}& \textcolor{gray}{28.4}& \textcolor{gray}{42.0}\\
+            & LoRA   & 0.72& \underline{61.0}&62.0&36.3&30.3&52.0&38.2&\underline{24.6}&28.0&41.6
+\\
+            \cdashline{1-12}
+\multirow{4}{*}{Mamba 130M}  & \textcolor{gray}{Full}   & \textcolor{gray}{100}& \textcolor{gray}{56.1}& \textcolor{gray}{65.3}& \textcolor{gray}{38.7}& \textcolor{gray}{35.3}& \textcolor{gray}{52.0}& \textcolor{gray}{46.4}& \textcolor{gray}{25.7}& \textcolor{gray}{32.8}& \textcolor{gray}{43.8}\\
+            & SLL LoRA& 1.45 & 56.3& 63.3& \underline{38.2}& \underline{34.6}& 51.6& \textbf{43.5}& 23.6& \textbf{30.6}& 42.7\\
+            & Additional-scan& 0.51& 57.8& \underline{64.1}& 37.5& 34.5& \textbf{53.0}& 41.3& 23.5& \underline{30.0}& 42.7\\
+            & Affix-tuning (w/o proj)& 0.17& 55.1&61.4&36.5&32.9&51.5&36.8&23.5&27.2&40.6\\
+            & Affix-tuning& 64.64& 59.7&\textbf{64.3}&\underline{38.2}&\textbf{35.2}&51.9&42.9&24.0&29.0&\underline{43.2}\\
+            & LoRA$_p$(X)& 2.67& \textbf{61.7}&64.0&\textbf{39.5}&34.3&\underline{52.2}&\textbf{43.5}&\textbf{25.3}&29.4&\textbf{43.7}\\
+            \midrule
+\multirow{2}{*}{Pythia 410M} & \textcolor{gray}{Full}   & \textcolor{gray}{100}& \textcolor{gray}{55.4}& \textcolor{gray}{66.8}& \textcolor{gray}{40.0}& \textcolor{gray}{34.2}& \textcolor{gray}{50.5}& \textcolor{gray}{45.2}& \textcolor{gray}{26.5}& \textcolor{gray}{29.4}& \textcolor{gray}{43.5}\\
+            & LoRA   & 0.77& \textbf{61.3}&67.7&40.8&39.2&54.9&48.1&24.7&28.6&45.7
+\\ \cdashline{1-12}
+\multirow{4}{*}{Mamba 370M}  & \textcolor{gray}{Full} & \textcolor{gray}{100}& \textcolor{gray}{58.1}& \textcolor{gray}{69.9}& \textcolor{gray}{41.9}& \textcolor{gray}{45.7}& \textcolor{gray}{53.8}& \textcolor{gray}{52.7}& \textcolor{gray}{29.7}& \textcolor{gray}{33.4}& \textcolor{gray}{48.2}\\
+            & SLL LoRA& 2.30 & 59.5& \textbf{69.6}& \textbf{42.2}& 44.1& 54.9& \textbf{50.6}& 26.3& 30.8& 47.3    \\
+            & Additional-scan & 0.47 & \underline{61.9} & \underline{69.3} & 41.2 & 45.3 & 54.9 & 28.4 & \textbf{49.5} & \underline{31.4}  & \underline{47.7}    \\
+            & Affix-tuning (w/o proj)& 0.16& \textbf{62.0}&67.7&39.3&\textbf{46.3}&54.1&47.8&\underline{28.2}&31.0&47.0\\
+            & Affix-tuning& 68.88& 61.2&68.4&39.6&\underline{46.2}&\underline{55.4}&48.2&\underline{28.2}&30.6&47.2\\
+            & LoRA$_p$(X)& 2.67& 60.8&68.8&\underline{42.1}&44.7&\textbf{56.2}&\underline{50.4}&27.4&\textbf{32.2}&\textbf{47.8}\\
+            \midrule
+\multirow{2}{*}{Pythia 1B}   & \textcolor{gray}{Full}   & \textcolor{gray}{100}& \textcolor{gray}{57.3}& \textcolor{gray}{64.4}& \textcolor{gray}{40.3}& \textcolor{gray}{47.1}& \textcolor{gray}{51.8}& \textcolor{gray}{41.5}& \textcolor{gray}{25.0}& \textcolor{gray}{26.8}& \textcolor{gray}{44.0}\\
+            & LoRA   & 0.41& 60.0&69.3&40.9&45.3&53.6&49.8&27.2&31.0&47.1
+\\ \cdashline{1-12}
+\multirow{6}{*}{Mamba 790M}  & \textcolor{gray}{Full}   & \textcolor{gray}{100}& \textcolor{gray}{62.0}& \textcolor{gray}{72.1}& \textcolor{gray}{44.8}& \textcolor{gray}{54.0}& \textcolor{gray}{55.9}& \textcolor{gray}{57.7}& \textcolor{gray}{31.2}& \textcolor{gray}{35.2}& \textcolor{gray}{51.6}\\
+            & SLL LoRA& 3.1 & 60.7 & 72.0 & \underline{42.4} & 54.7 & 56.9 & \textbf{55.3} & 29.4 & \underline{34.2} & \underline{50.7} \\
+            & Additional-scan & 0.33 & \textbf{63.0} & 71.9 & 41.9 & 54.2 & \underline{57.1} & \underline{54.9} & \underline{30.0} & 32.6 & \underline{50.7} \\
+            & Affix-tuning (w/o proj)& 0.22& 57.2&71.7&41.4&\textbf{55.0}&55.8&52.6&29.8&33.0&49.6\\
+            & Affix-tuning&69.99&\underline{61.0}&\textbf{72.5}&41.0&\underline{54.9}&55.6&54.6&29.6&33.8&50.4\\
+            & LoRA$_p$(X)&1.75&59.9&\underline{72.2}&\textbf{44.2}&52.8&\textbf{58.0}&53.7&\textbf{30.8}&\textbf{34.8}&\textbf{50.8}\\
+            \midrule
+\multirow{2}{*}{Pythia 1.4B} & \textcolor{gray}{Full}   & \textcolor{gray}{100}& \textcolor{gray}{53.1}&\textcolor{gray}{68.9}&\textcolor{gray}{40.6}&\textcolor{gray}{39.8}&\textcolor{gray}{50.6}&\textcolor{gray}{49.0}&\textcolor{gray}{26.9}&\textcolor{gray}{29.4}&\textcolor{gray}{44.8}    \\
+            & LoRA   & 0.44& 60.1&71.3&42.5&50.1&58.9&57.6&29.6&33.6&50.5
+\\ \cdashline{1-12}
+\multirow{6}{*}{Mamba 1.4B}  & \textcolor{gray}{Full} &\textcolor{gray}{100}&\textcolor{gray}{61.4}&\textcolor{gray}{73.3}&\textcolor{gray}{43.9}&\textcolor{gray}{56.9}&\textcolor{gray}{59.0}&\textcolor{gray}{59.7}&\textcolor{gray}{34.0}&\textcolor{gray}{35.4}&\textcolor{gray}{53.0}\\
+            & SLL LoRA& 4.64 & 59.7& \underline{73.5}& \textbf{43.1}& 56.9& \underline{60.7}& 59.7& 31.7& 36.0& 52.7 \\
+            & Additional-scan & 0.26 & 63.0 & \underline{73.5} & \underline{42.8} & 57.5 & 60.5 & \underline{60.9} & 32.4 & \textbf{37.4} & 53.5 \\
+            & Affix-tuning (w/o proj)& 0.09& \textbf{63.6}&\textbf{74.0}&41.9&\textbf{58.9}&60.6&\textbf{61.6}&\textbf{33.4}&\underline{36.8}&\textbf{53.9}\\
+            & LoRA$_p$(X)& 1.36&\underline{63.1}&\underline{73.5}&42.7&\underline{57.7}&\textbf{61.6}&60.4&\underline{32.9}&\textbf{37.4}&\underline{53.7}\\ 
+\bottomrule
+\end{tabular}%
+}
+
+\label{tab:lang_tasks_1}
+\end{table}
+\subsection{Language tasks}
+\label{subsec:Language tasks}
+
+In addition to the image tasks, we evaluate our method on language tasks using the vanilla  Mamba \cite{gu2023mamba}. We experiment with a commonsense reasoning task, following the setup and dataset of \citet{hu2023llmadapters}. This task consists of eight sub-tasks, which are evaluated on each task after training on a dataset that integrates training data from all tasks.
+We use Pythia \citep{biderman2023pythia}, which is pre-trained with the same dataset as Mamba, as a Transformer baseline. For a PEFT method for Mamba, we compare with SLL LoRA \citep{halloran2024mamba}. To the best of our knowledge, SLL LoRA is the only PEFT method for Mamba.
+
+In the language tasks, the proposed Additional-scan is found to work as an efficient PEFT. We hypothesize that this is related to the amount of data. This experiment uses 170k datasets, in contrast to the 1k used for VTAB-1k. We hypothesize that learning a selective mechanism requires a relatively large amount of data, and Additional-scan works powerfully in such cases. In Affix-tuning, we find that, as the size of the base model increases, it achieves sufficient accuracy without the embedding projection. This is a valuable discovery because reducing memory costs is crucial for larger models. As discussed in \Cref{app:ablation_language}, we find that Additional-scan, Affix-tuning (w/o proj), and LoRA$_p$(X) are all useful depending on the application and should be used accordingly.
+\subsection{Limitations}
+
+This paper focuses on an exploratory investigation. Evaluating the applicability of our findings to larger models, such as vision models trained with ImageNet-21K \citep{ridnik2021imagenet21k} or large language models with billions of parameters \citep{touvron2023llama}, is an area for future work. We will release the code after publication to stimulate future research from communities.
+
+
+\section{Conclusion}
+
+
+We conducted a comprehensive investigation of PEFT for Mamba. Our investigation started by applying existing PEFT methods for Transformers to Mamba. We proposed Affix-tuning and Partial LoRA as modifications of existing PEFT methods and introduced Partial-tuning and Additional-scan as new Mamba-specific PEFT methods. We also provided an effective framework for combining them. These comprehensive experiments on image and language tasks led to several findings.
+
+The experiments demonstrate that Mamba benefits from PEFT more than Transformers. It improves accuracy without overfitting, even with a larger number of parameters, especially when fine-tuning data is limited. LoRA-based methods, particularly LoRA$_p$(X), are effective with limited data. In contrast, the proposed Additional-scan method excels with larger datasets. We found that initialization significantly impacts performance when adding an additional dimension to A, despite Mamba’s robustness to initialization compared to other SSMs. Moreover, the proposed Affix-tuning was effective especially for large Mamba models. As to adapters on small linear weights, interestingly, over-parameterizing the original weight rather than decomposing it to a lower rank can be beneficial, which should holds for other architectures than Mamba. In hybrid PEFT, simply combining individually high-performance methods is inefficient. It is crucial to find the appropriate combination of PEFT methods. We believe that these results make a valuable contribution to the Mamba research community.
+
+
+
+
+

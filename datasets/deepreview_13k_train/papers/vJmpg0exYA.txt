@@ -1,0 +1,386 @@
+\title{DiscQuant: A Quantization Method for Neural Networks Inspired by Discrepancy Theory}
+
+\begin{abstract}
+Quantizing the weights of a neural network has two steps: (1) Finding a good low bit-complexity representation for weights (which we call the quantization grid) and (2) Rounding the original weights to values in the quantization grid. In this paper, we study the problem of rounding optimally given any quantization grid. The simplest and most commonly used way to round is Round-to-Nearest (RTN). By rounding in a data-dependent way instead, one can improve the quality of the quantized model significantly.
+
+We study the rounding problem from the lens of \emph{discrepancy theory}, which studies how well we can round a continuous solution to a discrete solution without affecting solution quality too much. We prove that given $m=poly(1/\epsilon)$ samples from the data distribution, we can round all but $O(m)$ model weights such that the expected approximation error of the quantized model on the true data distribution is $\le \epsilon$ as long as the space of gradients of the original model is approximately low rank (which we empirically validate).
+
+Our proof, which is algorithmic, inspired a  simple and practical rounding algorithm called \emph{DiscQuant}. In our experiments, we demonstrate that DiscQuant significantly improves over the prior state-of-the-art rounding method called GPTQ and the baseline RTN over a range of benchmarks on Phi3mini-3.8B and Llama3.1-8B. For example, rounding Phi3mini-3.8B to a fixed quantization grid with 3.25 bits per parameter using DiscQuant gets 64\% accuracy on the GSM8k dataset, whereas GPTQ achieves 54\% and RTN achieves 31\% (the original model achieves 84\%).
+\end{abstract}
+
+\section{1 Introduction  }
+
+
+Modern deep learning models continue to grow in size, incurring greater challenges to train and serve these models. Post training compression methods have emerged which aim to make model inference faster and cheaper. Compressing after pretraining is desirable among practitioners who either cannot afford to train models themselves, or do not want to change the expensive training process too much. In this paper, we study post training quantization (PTQ) of the model weights. Quantization reduces the memory requirements of the model, and speeds up inference for LLMs under memory-bound settings such as the generation phase (as opposed to prefilling phase which is compute-bound) (Kwon et al., 2023).  
+
+The quantization problem can be divided into two overall steps: (1) Construct a good low bit-complexity representation for the weights (we colloquially call this the quantization grid), and (2) Round the original weights to values in the quantization grid. Within step (1), we also consider those methods which apply a transformation on the weights to better match the encoding format. There has been much recent work on weights-only PTQ for LLMs. To date, the vast majority of such research has been focused on step (1): constructing good low bit representations (Shao et al., 2024; Tseng et al., 2024a; Egiazarian et al., 2024). However, work on rounding methods is under-explored. To the best of our knowledge, Round-toNearest (RTN) and GPTQ (Hassibi et al., 1993; Frantar et al., 2022; 2023) are the primary rounding methods for LLM weight quantization. RTN is a simple baseline, and GPTQ is a data dependent method which aims to match the activations of the quantized model with that of the original model layer-by-layer.  
+
+Let $f(w;s)$ be the loss function of a neural network where $w$ are original pretrained weights and $s$ is an input sample; for example $f$ can be the usual cross-entropy loss on input $s$ . To find a good rounding solution, we are looking for perturbations of the original weights $w\,\in\,\mathbb{R}^{n}$ that correspond to values in the quantization grid, and do not increase the loss $f$ too much. We further impose the constraint that we only round each parameter up or down, this ensures that we are not changing the original model weights too much. Then the set of allowed quantization points can be pictured as vertices of a hypercube $H$ around $w$ . Let $\hat{w}\in\mathbb{R}^{n}$ be these perturbed weights, and $\Delta f=f(\hat{w};s)-f(w;s)$ be the resulting change in loss function for a sample $\boldsymbol{s}$ . We approximate $\Delta f$ via a first order Taylor expansion: $\Delta f\,\approx\,\langle\nabla_{w}f(w;s),\hat{w}\mathrm{~-~}w\rangle$ . Some prior works such as Nagel et al. (2020); Hassibi et al. (1993) assume the gradients of a pretrained model to be nearly zero, and focus on the second order terms. We show that this assumption is not always true, the average gradients are close to zero but per-sample gradients can be big; in fact the first order term is a good approximation to $\Delta f$ (see Figure 3).  
+
+054   
+055   
+056   
+057   
+058   
+059   
+060   
+061   
+062   
+063   
+064   
+065   
+066   
+067   
+068   
+069   
+070   
+071   
+072   
+073   
+074   
+075   
+076   
+077   
+078   
+079   
+080   
+081   
+082   
+083   
+084   
+085   
+086   
+087   
+088   
+089   
+090   
+091   
+092   
+093   
+094   
+095   
+096   
+097   
+098   
+099   
+100   
+101   
+102   
+103   
+104   
+105   
+106   
+107  
+
+Therefore, to incur a small $\Delta f$ , we want $\langle\nabla_{w}f(w;s),\hat{w}-w\rangle\approx0$ for $s$ sampled from the data distribution $\ensuremath{\mathcal{D}_{\mathrm{data}}}$ . Suppose we are given $m$ independent samples $s_{1},s_{2},\ldots,s_{m}\sim{\cal D}_{\mathrm{data}}$ , we can impose the constraints $\langle\nabla_{w}f(w;s),\hat{w}-w\rangle=0$ which correspond to an affine subspace $V$ of dimension $n-m$ . The intersection of the subspace $V$ and the hypercube $H$ is a convex polytope $K$ . It can be shown that any vertex of $K$ should have at least $n-m$ fully rounded parameters, see Figure 1 for an illustration. Since the number of parameters $n\gg m$ , any vertex of $K$ gives an almost fully rounded solution. Obviously this solution satisfies the linear constraints for the samples $s_{1},s_{2},\ldots,s_{m}$ . But will it generalize to unseen samples from the data distribution $\ensuremath{\mathcal{D}_{\mathrm{data}}}$ ? We prove that it can generalize if the distribution of gradients $\boldsymbol{g}~=~\nabla_{\boldsymbol{w}}f(\boldsymbol{w};s)$ for $s~\sim~{\cal D}_{\mathrm{data}}$ is approximately low rank. Let $\Sigma=\mathbb{E}_{s\sim\mathcal{D}_{\mathrm{data}}}[g g^{L}]$ where $\boldsymbol{g}\,=\,\nabla_{\boldsymbol{w}}\,f({\boldsymbol{W}};{\boldsymbol{s}})$ be the covariance matrix of gradients. We prove the following theorem; the algorithm and the proof draws on techniques from discrepancy theory, in particular the famous Lovett-Meka algorithm (Lovett & Meka, 2012).  
+
+![](images/1d814e519da71a703645e7309aeba058e9b08ea05a79b882034ed1f51bd55fbd.jpg)  
+Figure 1: An illustrative figure showing the convex polytope $K$ formed by the intersection of an $n$ -dimensional hypercube $H$ and an $n-m$ dimensional affine subspace $V$ . Any vertex of $K$ should have $n-m$ coordinates which are fully rounded.  
+
+Theorem 1.1 (Informal). If the eigenvalues of the covariance matrix of gradients decay polynomially fast, then given $m\,=\,\mathrm{poly}\left(\frac{\log n}{\varepsilon}\right)$ samples $s_{1},s_{2},\ldots,s_{m}\,\sim\,{\mathcal{D}}_{d a t a}$ there is $a$ randomized algorithm to find $\hat{w}$ with $n-m$ weights rounded such that $E_{s\sim\mathcal{D}_{d a t a}}[|\Delta f|]\leq\varepsilon$ .  
+
+From these insights we develop a practical rounding algorithm called DiscQuant. The Lovett-Meka algorithm does a random walk starting from the original weights until it converges to a vertex of $K$ . Instead, we can find a vertex of $K$ by minimizing a linear function over the convex polytope $K$ . DiscQuant uses stochastic gradient descent to minimize two objectives, one corresponding to low $\Delta f$ , and the other corresponding to minimizing a linear function. We take a knowledge distillation approach for the first term, minimizing the KL divergence between the original and quantized model. These two losses are balanced with a regularization parameter $\lambda>0$ :  
+
+$$
+\operatorname*{min}_{\hat{w}}\lambda\left\langle c,\hat{w}\right\rangle+\mathbb{E}_{z\sim\mathcal{D}_{\mathrm{data}}}\mathbb{E}_{i}[D_{K L}\left(p_{w}(\cdot|z_{<i})\parallel p_{\hat{w}}(\cdot|z_{<i})\right)]
+$$  
+
+Here $p_{w}(\cdot|z_{<i})$ is the next token distribution given prefix $z_{<i}$ . An astute reader may notice that the first order approximation of the KL divergence in (1) is exactly zero, and how our  
+
+![](images/47e41aeac8a47fe08d5c341e09b8ffbbc86baeb2bd7bf0c72a5bb2cb508ca9ba.jpg)  
+Figure 2: Select results quantizing Phi-3-mini-4k-instruct and Meta-Llama-3.1-8B-Instruct using block scaling quantization. GSM8k is a math-based generative task, and WinoGrande and PIQA are multiple choice commonsense reasoning tasks. Error bars are standard errors from lm-evaluation-harness. See Section 5 for full results.  
+
+discussion above applies. In Section 4 where we describe in detail our exact optimization objective, we also show that the second order term of KL divergence can be written as  
+
+$$
+\begin{array}{r}{\mathbb{E}_{z\sim\mathcal{D}_{\mathrm{data}}}\mathbb{E}_{i}\mathbb{E}_{t\sim p_{w}(\cdot|z_{<i})}\left[\langle\nabla_{w}\log p_{w}(t|z_{<i}),\hat{w}-w\rangle^{2}\right].}\end{array}
+$$  
+
+So minimizing the KL divergence is a succinct way to impose constraints of the form $\langle\nabla_{w}\log p_{w}(t|z_{<i}),\hat{w}\;-\;w\rangle\;\approx\;0$ or equivalently $\log p_{w}(t|z_{<i})\;\approx\;\log p_{\hat{w}}(t|z_{<i})$ where $t\ \sim$ $p_{w}(\cdot|z_{<i})$ and $z\sim\mathcal{D}_{\mathrm{data}}$ . Therefore our framework still applies.  
+
+After every step of gradient descent, we project the weights back to the hypercube $H$ . This ensures that the trajectory of DiscQuant remains within the convex polytope $K$ and eventually converges to a vertex of $K$ with almost all the coordinates rounded. Instead of picking a random direction $c$ to find a random vertex of $K$ , we use a special $c^{*}$ which let’s us find the vertex closest to the original weights $w$ (see Section 4). We use RTN to round the few unrounded parameters left at the end of the optimization.  
+
+We perform extensive experiments which show the strength of our method: on models Phi-3- mini-4k-instruct and Meta-Llama-3.1-8B-Instruct, across a variety of evaluation tasks, and across the block scaling and incoherence processing quantization formats. DiscQuant is agnostic towards the quantization grid, and can therefore be composed with other quantization methods. Block scaling sets a bits parameter which determines the number of grid points, and a unique scaling parameter per groupsize weights (Frantar et al., 2023). Incoherence processing applies a random orthogonal transformation, which reduces the weight ranges and can make quantization easier (Chee et al., 2023; Tseng et al., 2024a). A subset of results can be found in Figure 2. Across tasks, models, and quantization levels, our method DiscQuant achieves superior compression over baselines GPTQ and RTN.  
+
+We summarize our main contributions:  
+
+• Theoretical developments: We prove that it is possible to achieve generalization error $\leq\varepsilon$ on the true data distribution by rounding all but poly $(\log n/\varepsilon)$ weights, so long as the gradients of the original model are approximately low rank.  
+
+• Practical algorithm: We develop a simple and practical algorithm DiscQuant guided by our theoretical analysis. We perform extensive experiments on Phi-3-mini-4k-instruct and Meta-Llama-3.1-8B-Instruct, over block scaling and incoherence processing quantization formats, and a variety of evaluation tasks. Our method DiscQuant achieves superior or comparable quantization to the baselines GPTQ and RTN as can be seen from Figure 2.  
+
+
+
+\section{2 Related Work  }
+
+
+In this paper we focus on weights-only PTQ. Quantization can also be applied to the activations or KV-cache (Ashkboos et al., 2024; Liu et al., 2024a;b). Other compression method such as pruning (Frantar & Alistarh, 2023; Sun et al., 2023) are also outside the scope of this work. As discussed in the introduction, post training quantization can be divided into two overall steps: (1) Construct a good low bit-complexity representations for the weights (the quantization grid), and (2) Round the original weights to the values in the quantization grid. To this date, the vast majority of PTQ research for LLMs has focused on step (1). Note that determining a good compressed representation can involve both encoding formats, as well as transformations to ensure the weights better match the encoding format.  
+
+
+
+\section{2.1 Quantization Grids  }
+
+
+One of the more common quantization formats is called block scaling, or group-wise quantization (Frantar et al., 2023). In addition to the bits parameter determining the number of representable points, each groupsize parameters share a unique scaling parameter. Another successful encoding is to identify a small set of important weights and keep them in high precision (Dettmers et al., 2022; 2024; Kim et al., 2024). Shao et al. (2024) learns quantization parameters. Other works apply transformations to make quantization easier, either relatively simple invariant scalings (Xiao et al., 2023; Lin et al., 2024), or more complicated random orthogonal transformations (Chee et al., 2023; Liu et al., 2024a). Beyond block scaling, there has been work quantizing multiple parameters together using vector quantization (Tseng et al., 2024a; Egiazarian et al., 2024; van Baalen et al., 2024) or trellis quantization (Tseng et al., 2024b).   
+2.2 Rounding   
+To the best of our knowledge, GPTQ (Frantar et al., 2023) is the main rounding method for LLMs. It is based on the Optimal Brain Surgeon (Hassibi et al., 1993), which was adapted for pruning and quantization in Frantar et al. (2022) and then refined for quantization in GPTQ. GPTQ works by minimizing a layer-wise objective $\lVert W X-{\hat{W}}X\rVert_{2}^{2}$ , where $W$ is the weight matrix of a linear layer and $X$ is the matrix of input activations to that layer (stacked as columns). Two other LLM rounding methods both use coordinate descent: Nair & Suggala (2024) only has results on the closed source PaLM-2 models with no released code, and Behdin et al. (2023) has results on the OPT, BLOOM, and Falcon model families. There was more work on rounding methods several years ago, before the LLM boom. These papers were typically on smaller vision models. The line of work was started by AdaRound (Nagel et al., 2020) and continuing to AdaQuant (Hubara et al., 2021) and BRECQ (Li et al., 2021) employ a similar approach to ours, optimizing essentially interpolation variables between the closest $\mathrm{up}(w^{\mathrm{up}})$ and $\mathrm{down}(w^{\mathrm{down}})$ quantization grid points, while adding a concave regularization term to encourage rounding and using a rectified sigmoid to interpolate between $w^{\mathrm{up}}$ and $w^{\mathrm{down}}$ . They also do rounding layer by layer. However our method uses a linear term as a regularizer inspired from our theoretical insights using discrepancy theory and uses simple linear interpolation between $w^{\mathrm{up}}$ and $w^{\mathrm{down}}$ and we round the entire model at once.   
+2.3 Discrepancy Theory   
+Discrepancy theory is a deep branch of mathematics and theoretical computer science, and we refer the readers to standard textbooks for more details (Matousek, 2009; Chazelle et al., 2004; Bansal, 2022) To our knowledge, only Lybrand & Saab (2021) makes the connection between discrepancy theory and quantization. However, besides the high level motivational similarities, their work is not directly relevant to ours. Lybrand & Saab (2021) reduce the problem of understanding the error introduced by quantization on the output of a single neuron to a problem in discrepancy, and construct an algorithm for quantizing a single neuron. Their theoretical analysis on the generalization error only applies to quantizing the  
+
+first layer of a neural network. On the other hand, we use discrepancy theory to understand when the whole network $f(w;s)$ can be approximated by $f(\hat{w};s)$ with $\hat{w}$ in the quantization grid, and our theory holds for any network as a whole as long as our assumptions are true.  
+
+
+
+\section{3 Connections to Discrepancy Theory  }
+
+
+216   
+217   
+218   
+219   
+220   
+221   
+222   
+223   
+224   
+225   
+226   
+227   
+228   
+229   
+230   
+231   
+232   
+233   
+234   
+235   
+236   
+237   
+238   
+239   
+240   
+241   
+242   
+243   
+244   
+245   
+246   
+247   
+248   
+249   
+250   
+251   
+252   
+253   
+254   
+255   
+256   
+257   
+258   
+259   
+260   
+261   
+262   
+263   
+264   
+265   
+266   
+267   
+268   
+269  
+
+
+
+\section{10 10 2 10 10 3 -5.0 2.5 7.5 10. 500 1000 1500 2000 500 1000 1500 2000 $(\nabla_{w}f(w;s),\hat{w}-w)$ Figure 3: First order approxi- Figure 4: Eigenvalues of the covariance matrix of the gra  }
+
+mation of the error function $\Delta f$ dients of pre-trained models. The covariance matrix is when quantizing the model to estimated by averaging over $8k$ sample gradients from 4.25 bits using RTN and Disc- RedPajama-1T-Sample and projecting them to 2048 diQuant. Here $f$ is the per-token mensions using Johnson-Lindenstrauss projections.   
+loss function and $\boldsymbol{s}$ is sampled from the WikiText-2 dataset.   
+nLeetu r $f(w;s)$ obrek  twhiet hl owsse ifguhntsc t ion of a  opnr ea-ntr ianinpeudt al netw $w\in\mathbb{R}^{n}$ Model $\|\mathbb{E}(g)\|^{2}$ $\mathbb{E}\|g\|^{2}$   
+sample $\boldsymbol{s}$ and let $\ensuremath{\mathcal{D}_{\mathrm{data}}}$ be the sample data dis- Phi3-mini-128k 0.1021 4.7812 tribution. Suppose we are also given a (scalar) Llama3.1-8B 1.6328 107 quantization grid $\mathcal{Q}=Q_{1}\times Q_{2}\times\cdot\cdot\times Q_{n}$ where $Q_{j}\subset\mathbb{R}$ is a finite set of quantization points avail- Table 1: $\|\mathbb{E}(g)\|^{2}$ vs $\mathbb{E}\|g\|^{2}$ over 8192 able to quantize the $j^{t h}$ parameter.1 In this work, samples from RedPajama-1T-Sample we focus on scalar quantization which allows us to dataset with window size 2048. write the quantization grid as a product set, i.e., each parameter can be independently rounded to a finite set of available values. Alternatively, in vector quantization a group of $d$ variables   
+are rounded together to one of a finite set of quantization points in $\mathbb{R}^{d}$ , which has been used in some prior works (Tseng et al., 2024a; Egiazarian et al., 2024; van Baalen et al., 2024). Generalizing our method to vector quantizers is an interesting future research direction. Our goal is to find a rounding $\hat{w}\in\mathcal{Q}$ of the original weights $w$ such $f(\hat{w};s)\approx f(w;s)$ where $s\sim\mathcal{D}_{\mathrm{data}}$ . We further impose the constraint that for each parameter $w_{j}$ , we only round up or round down to the available values in $Q_{j}$ , i.e., we only have two choices for $\hat{w}_{j}$ denoted   
+by $w_{j}^{\mathrm{up}},w_{j}^{\mathrm{down}}\in Q_{j}$ where $w_{j}^{\mathrm{up}}\leq w_{j}\leq w_{j}^{\mathrm{down}}$ .2 We make this assumption because we don’t   
+want to change any parameter of the original model too much during quantization, consider   
+it an important property of algorithms we design. Using Taylor expansion: $\Delta f=f(\hat{w};s)-f(w;s)=\langle\nabla_{w}f(w;s),\hat{w}-w\rangle+(\hat{w}-w)^{T}\nabla_{w}^{2}f(w;s)(\hat{w}-w)+\cdot\cdot\cdot$ (2) Assuming that the quantization grid $\mathcal{Q}$ is fine enough and since we only round each parameter up or down, $\lVert\boldsymbol{\hat{w}}-\boldsymbol{w}\rVert$ is small and so we can ignore the higher order terms. We claim that the first order term is the dominant term. Prior works such as Nagel et al. (2020); Hassibi et al. (1993); LeCun et al. (1989) have assumed that the first order term can be assumed to be zero because the model is trained to convergence and focused on reducing   
+the second order term. But the model being trained to convergence just means that average gradient over many samples from the distribution is nearly zero. But the gradients still have some variance and gradients w.r.t. individual samples from the data distribution are   
+not approximately zero (see Table 1). Figure 3 demonstrates this by showing that the error term $\Delta f$ is well-correlated with the first order approximation $\langle\nabla_{w}f(w;s),\hat{w}-w\rangle$ .3 So the goal now is to find a rounding $\hat{w}$ such that $\langle\nabla_{w}f(w;s),\hat{w}-w\rangle\,\approx\,0$ for samples $s\,\sim\,\mathcal{D}_{\mathrm{data}}$ . Suppose we sample ${\boldsymbol{r}}n$ samples $s_{1},s_{2},\ldots,s_{m}\,\sim\,{\mathcal{D}}_{\mathrm{data}}$ independently from the data distribution, where $m\ll n$ . We now break our task into two parts of bounding the empirical error and generalization error as follows:   
+Question 3.1. Can we find $\begin{array}{r l r}{\in\mathrm{~\boldmath~{~\mathcal~{Q~}~}~}(w i t h\mathrm{~\boldmath~{~\hat{w}}_{j}~}}&{{}\in\mathrm{~\boldmath~\{~\boldsymbol~{\psi}~}_{j}^{d o w n},w_{j}^{u p}\}}\end{array}$ ) such that $\langle\nabla_{w}f(w;s_{i}),\hat{w}-w\rangle\approx0$ for all the samples $s_{1},\ldots,s_{m}$ ?   
+Question 3.2. Once we find such a $\hat{w}$ , will it generalize to the true data distribution, i.e., will $\langle\nabla_{w}f(w;s),\hat{w}-w\rangle\approx0$ for $s\sim\mathcal{D}_{d a t a}$ ? How many samples $m$ do we need for this?  
+
+3.1 Bounding empirical error (Question 3.1)  
+
+For simplicity, let us assume that the quantization grid is uniform and $w_{i}^{\mathrm{up}}\mathrm{~-~}w_{i}^{\mathrm{down}}\,=\,\delta$ for all $i\in[n]$ where $\delta>0$ is the distance between grid points. We will introduce new parameters $x\in[0,1]^{n}$ and define $w^{x}=w^{\mathrm{down}}+\delta x$ . Note that $w_{i}^{x}$ interpolates between $w_{i}^{\mathrm{down}}$ and $w_{i}^{\mathrm{up}}$ where $w_{i}=w_{i}^{\mathrm{down}}$ wdownif $x_{i}=0$ and $w_{i}=w_{i}^{\mathrm{up}}$ if $x_{i}=1$ . Let $y\in[0,1]^{n}$ be the interpolation point corresponding to the original weights, i.e., $w^{y}\,=\,w$ . We can rewrite the linear constraints in terms of $x$ as follows:  
+
+$$
+\begin{array}{r}{\langle\nabla_{w}f(w;s_{i}),w^{x}-w^{y}\rangle=\delta\left\langle\nabla_{w}f(w;s_{i}),x-y\right\rangle}\end{array}
+$$$$
+f(w;s_{i}),w^{x}-w\rangle=\langle\nabla_{w}f(w;s_{i}),w^{x}-w^{y}\rangle=\delta
+$$  
+
+Let $M$ be an $m\times n$ matrix whose $i^{t h}$ row is given by $\nabla_{w}f(w;s_{i})$ . Then the linear constraints can be simply written as $M(x-y)=0$ . Our goal is to find a fully integral $\hat{x}\in\{0,1\}^{n}$ such that $M({\hat{x}}-y)=0$ . Let $V=\{x\in\mathbb{R}^{n}:M x=M y\}$ which is an affine subspace of dimension $\geq n-m$ . Define $K=\lfloor0,1\rfloor^{n}\cap V$ as the intersection of the hypercube with this subspace. $K$ is a convex polytope and it is non-empty because $y\in K$ . Therefore any vertex of $K$ should have $n-m$ integral coordinates (i.e., coordinates $j$ such that $x_{j}\in\{0,1\}$ ).4  
+
+See Figure 1 for geometric intuition about why this is true. Since the number of parameters $n$ is much larger than the number of samples ${\boldsymbol{r}}n$ , any vertex of $K$ is almost fully integral and exactly satisfies all the ${\boldsymbol{r}}n$ linear constraints.  
+
+Suppose we further ask for a fully integral $\hat{x}$ which approximately satisfies all the $m$ linear constraints, this precise question is answered by discrepancy theory which studies how to do this and relates the approximation error to properties of $M$ such as hereditary discrepancy (Lov´asz et al., 1986; Bansal, 2022). We don’t explore this direction further because the almost integral $\hat{x}$ —a vertex of $K$ —is good enough if we apply RTN to the few remaining fractional parameters; we observe that the linear constraints are all approximately satisfied.  
+
+3.2 Bounding Generalization Error (Question 3.2)  
+
+How do we bound the generalization error if we know that the empirical approximation error is small? If $\hat{w}-w$ is approximately orthogonal to $m$ sample gradients $\nabla_{w}f(w;s_{i})$ for $i=1$ to $m$ , why should we expect that $\hat{w}\mathrm{~-~}w$ is orthogonal to unseen gradients $\nabla_{w}f(w;s)$ for samples $s\sim\mathcal{D}_{\mathrm{data}}$ ? This should happen only if the gradients are approximately low rank. More precisely, let  
+
+$$
+\Sigma=\mathbb{E}_{s\sim\mathcal{D}_{\mathrm{data}}}[g g^{T}]\ \mathrm{where}\ g=\nabla_{w}f(w;s)
+$$  
+
+be the covariance matrix of the distribution of sample gradients and let $\lambda_{1}\geq\lambda_{2}\geq\cdots\geq\lambda_{n}$ be its eigenvalues. We observe that the eigenvalues decay very fast, see Figure 4 for empirical validation of this on some real world models. We model this by assuming that $\lambda_{k}\le\lambda_{1}/k^{\alpha}$ for $\alpha>1$ . The assumption that $\alpha>1$ is valid since  
+
+$$
+\mathbb{E}_{s}[\left\Vert g\right\Vert^{2}]=\mathbb{E}_{s}[\mathrm{Tr}(g g^{T})]=\mathrm{Tr}(\mathbb{E}_{s}[g g^{T}])=\mathrm{Tr}(\Sigma)=\sum_{i=1}^{n}\lambda_{i}.
+$$  
+
+It is well-known that the gradients of a pretrained model have constant norm on most samples (see Table 1 for empirical validation). Therefore $\textstyle\sum_{i=1}^{n}\lambda_{i}=O(1)$ and so the the decay coefficient $\alpha$ has to be at least 1.  
+
+Under this assumption, it is reasonable to expect generalization. But this is not at all obvious to find a generalizing solution. In fact, any deterministic algorithm which chooses one of the vertices of $K$ will most likely not generalize. We give a randomized rounding algorithm (see Algorithm B.2) based on the famous Lovett-Meka algorithm from discrepancy theory (Lovett & Meka, 2012) which finds a vertex of $K$ which has low generalization error. The algorithm starts at $_y$ and does a random walk (Brownian motion) inside the $n\!-\!m$ dimensional subspace $V$ formed by the linear constraints imposed by the $m$ samples. Whenever it hits a face $x_{i}=0$ or $x_{i}=1$ of the hypercube, it fixes that variable and continues the random walk until almost all the variables are rounded.  
+
+In order to prove rigorous bounds we also need a mild assumption that the distribution of gradients is well-behaved. We use the notion by O’Donnell (2014) and say that for a parameter $\beta\geq1$ , a random vector $X\in\mathbb{R}^{n}$ is $\beta$ -reasonable if  
+
+$$
+\mathbb{E}[\langle X,\theta\rangle^{4}]\leq\beta\cdot\mathbb{E}[\langle X,\theta\rangle^{2}]^{2}\quad\forall\theta\in\mathbb{R}^{n}.
+$$  
+
+For example $X\sim\{-1,1\}^{n}$ and a Gaussian $\displaystyle X\sim\mathit{N}(\mathbf{0},\Sigma)$ are both $O(1)$ -reasonable
+
+Theorem 3.3. Let $\alpha\,\,>\,1$ and $\beta\ \geq\ 1$ be constants and let $\textstyle{1\,\leq\,m\,\leq\,{\frac{n}{16}}}$ . Let $\mathcal{D}$ be $a$ $\beta$ -reasonable distribution with unknown covariance matrix $\b{\Sigma}\,\in\,\mathbb{R}^{n\times n}$ whose Eigenvalues satisfy $\begin{array}{r}{\lambda_{k}\le\frac{\lambda_{1}}{k^{\alpha}}}\end{array}$ for all $k=1,\hdots,n$ . Then there is a randomized polynomial time algorithm that given a $y\in\lfloor0,1\rfloor^{n}$ and $m$ independent samples $g_{1},\ldots,g_{m}\sim\mathcal{D}$ , produces an $x\in[0,1]^{n}$ with high probability such that all but $O(m)$ parameters in $x$ are fully rounded and  
+
+$$
+\mathbb{E}_{g\sim\mathcal{D}}[\langle g,x-y\rangle^{2}]=(x-y)^{T}\Sigma(x-y)\lesssim_{\alpha,\beta}\lambda_{1}m^{-\operatorname*{min}\{1/2,\alpha-1\}}(\log n)^{2}.
+$$  
+
+
+
+\section{4 DiscQuant: Algorithm  }
+
+
+In this section, we will present DiscQuant, a simple and practical algorithm for rounding inspired by the theoretical insights in Section 3. Instead of trying to approximate the loss function of the pre-trained model, i.e., $f(\hat{w};s)\approx f(w;s)$ , we will instead take a distillation approach and try to minimize the KL divergence between the next token distribution of the original model and the quantized model. Let $p_{w}(\cdot|z_{<i})$ be the distribution of the next token predicted by the original model given prefix $z_{<i}$ where $z\sim\mathcal{D}_{\mathrm{data}}$ is a sample from the data distribution. We want $\mathrm{error}(\hat{w})=\mathbb{E}_{z\sim\mathcal{D}_{\mathrm{data}}}\mathbb{E}_{i}D_{K L}\left(p_{w}(\cdot|z_{<i})\parallel p_{\hat{w}}(\cdot|z_{<i})\right)\approx0$ .  
+
+ By Lemma D.1, Hessian of $\operatorname{error}(\hat{w})$ can be written as a covariance of gradients as:  
+
+$$
+H_{w}=\mathbb{E}_{z\sim\mathcal{D}_{\mathrm{data}}}\mathbb{E}_{i}\mathbb{E}_{t\sim p_{w}(t|z<i)}\left[\left(\nabla_{w}\log p_{w}(t|z_{<i})(\nabla_{w}\log p_{w}(\cdot|z_{<i}))^{T}\right].\right.
+$$  
+
+Therefore  
+
+$$
+\begin{array}{r}{\mathrm{error}(\hat{w})\approx(\hat{w}-w)^{T}H_{w}(\hat{w}-w)=\mathbb{E}_{z\sim\mathcal{D}_{\mathrm{data}}}\mathbb{E}_{i}\mathbb{E}_{t\sim p_{w}(\cdot|z<i)}\left[\langle\nabla_{w}\log p_{w}(t|z_{<i}),\hat{w}-w\rangle^{2}\right].}\end{array}
+$$  
+
+So minimizing $\operatorname{error}(\hat{w})$ is a succinct way to impose constraints of the form $\langle\nabla_{w}\log p_{w}(t|z_{<i}),\hat{w}\;-\;w\rangle\;\approx\;0$ or equivalently $\log p_{w}(t|z_{<i})\;\approx\;\log p_{\hat{w}}(t|z_{<i})$ where $t\ \sim$ $p_{w}(\cdot|z_{<i})$ and $z\,\sim\,\mathcal{D}_{\mathrm{data}}$ . Therefore, we can use the same techniques developed in Section 3 to solve this as well. Assuming that the gradients are low rank, the set of $x$ satisfying these constraints (where $\hat{w}=w^{x}$ ) form an affine subspace $V$ of dimension $\geq n-m$ where $m$ is the number of samples. We are again interested in finding a vertex of the polytope $K=[0,1]^{n}\cap V$ which will have $\geq n-m$ integral coordinates. At this point, we could use the Lovett-Meka algorithm (Algorithm B.2) which has provable generalization guarantees. But explicitly calculating all the gradients and storing them is infeasible. Instead a simple heuristic way to find a random vertex of polytope $K$ is to minimize a random linear function. Let $c\in\mathbb{R}^{n}$ be some arbitrary vector; we will try to minimize the linear function $\langle c,x\rangle$ along with the KL divergence by taking a linear combination of them. The final optimization objective is shown in (3) where $\lambda>0$ is a regularization coefficient.  
+
+$$
+\operatorname*{min}_{\boldsymbol{x}}\lambda\left\langle\boldsymbol{c},\boldsymbol{x}\right\rangle+\mathbb{E}_{\boldsymbol{z}\sim\mathcal{D}_{\mathrm{data}}}\mathbb{E}_{i}\big[D_{K L}\left(p_{w}(\cdot|\boldsymbol{z}_{<i})\big|\right|\,p_{w^{x}}(\cdot|\boldsymbol{z}_{<i})\right)\big]
+$$  
+
+We solve the optimization problem (3) using projected stochastic gradient descent where we project $x$ to the hypercube after every gradient update. Optimizing (3) will keep us close the polytope $K$ and will approximately converge to a vertex of $K$ which is almost integral. We round whatever fractional coordinates are left using RTN to get a fully integral solution. We use one additional heuristic to improve the performance of the algorithm in practice. Instead of choosing a random vertex of the polytope $K$ by choosing the vector $c$ at random, we will choose it carefully so as to find the vertex of the polytope $K$ which is closest to $_y$ which is the interpolation point corresponding to the original model weights (i.e., $_y$ such that $w^{y}=w$ ). We have:  
+
+$$
+\left\|x-y\right\|^{2}=\sum_{i}(x_{i}^{2}-2x_{i}y_{i}+y_{i}^{2})\approx\sum_{i}(x_{i}-2x_{i}y_{i}+y_{i}^{2})=\langle c^{*},x\rangle+\|y\|^{2}
+$$  
+
+where $c^{*}=(1-2y)$ . Here we have used the fact that $x_{i}^{2}=x_{i}$ whenever $x_{i}\in\{0,1\}$ and since $x$ is almost integral, we can use the approximation in the summation above. With this approximation, minimizing $\left\|x-y\right\|^{2}$ over almost integral $x$ is equivalent to minimizing $\langle c^{*},x\rangle$ . So in the DiscQuant algorithm, we use $c=c^{*}$ specifically instead of a random $c$ .  
+
+
+
+\section{5 Experiments  }
+
+
+We evaluate our method on the Phi-3-mini-4k-instruct (Abdin et al., 2024) and MetaLlama-3.1-8B-Instruct (Dubey et al., 2024) models, and compare against GPTQ and greedy rounding (i.e. round-to-nearest, or RTN). We use the lm-evaluation-harness Gao et al. (2023) to evaluate on the Wikitext, GSM8k cot 8-shot, MMLU 5-shot, ARC Challenge 0-shot, PIQA 0-shot, HellaSwag 0-shot, and Winogrande 0-shot tasks. We report standard errors from lm-evaluation-harness. Wikitext measures perplexity, GSM8k is a generative task, and the remaining are multiple choice tasks. Note that generative tasks are typically more difficult than multiple choice tasks, and better reflect how the models are used in practice. Our method has similar memory requires as knowledge distillation, which also requires two copies of the model. We do not perform inference timing experiments; DiscQuant can optimize over a given quantization grid, so that we can utilize any pre-existing inference optimizations. For example, there are inference kernels for block scaling (Frantar et al., 2024) and incoherence processing (Tseng et al., 2024a).  
+
+
+
+\section{5.1 Block Scaling  }
+
+
+Our first experiments use standard block scaling quantization, determined by a bits and groupsize parameter. There are $2^{\tt b i t s}$ unique points, and every groupsize parameters share a unique 16-bit scale parameter. For example, 3.25 bits is achieved with bits=3, groupsize=64. We use the block scaling implementation from Frantar et al. (2024) which is symmetric linear quantization. Table 2 shows the results quantizing Phi-3-mini-4k-instruct. Across all tasks and all bit settings, our method DiscQuant achieves superior or comparable compression over the baseline GPTQ and RTN methods. The gap between DiscQuant and the baselines is greater at lower bits. On the ARC Challenge, PIQA, and WinoGrade tasks, DiscQuant achieves full recovery with at least 0.25 fewer bits per parameter than GPTQ and RTN. For example on ARC Challenge, DiscQuant achieves full recovery at 4 bits per weight, whereas GPTQ requires 4.25 bits, and RTN 4.5 bits. DiscQuant achieves better compression on the more difficult generative GSM8k task: at 4 bits DiscQuant gets $77.3\%$ accuracy, while GPTQ gets $71.5\%$ , and RTN gets $62.2\%$ . Table 3 shows the results quantizing MetaLlama-3.1-8B-Instruct. Overall the story is the same. Our method DiscQuant achieves improved compression on the majority of quantization levels and tasks. For example at 4 bits, DiscQuant gets $66.5\%$ GSM8k accuracy, while GPTQ gets $63.2\%$ , and RTN gets $50.8\%$ .  
+
+
+
+\section{5.2 Incoherence Processing  }
+
+
+We explore another quantization format to show that our method can compose with other quantization improvements. Incoherence processing has been shown to improve quantization, especially at less than 4 bits per weight Chee et al. (2023). The weights are multiplied by certain random orthogonal matrices prior to quantization, which can reduce the range of the weights and make quantization easier. We employ the Randomized Hadamard Transform from Tseng et al. (2024a). We use the same block scaling quantization grid as in the previous subsection. A subset of our results are shown in Figure 5, where we superimpose bar  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/7c29b8386e848991be31ac2c5e9d962d7e41fa5928227c55366db3fdd69fe64d.jpg)  
+
+![](images/28a0d49d95ce919e3f87ac1c755bb84c83a68fff89685f266618b4dc5bd2ae13.jpg)  
+Table 2: Phi-3-mini-4k-instruct. Across all tasks and bits, our method DiscQuant always achieves superior results over the baseline RTN and GPTQ methods. On the ArcC, PIQA, and Wino tasks, DiscQuant achieves full recovery with at least 0.25 fewer bits per parameter than GPTQ and RTN.   
+Table 3: Meta-Llama-3.1-8B-Instruct. Our method DiscQuant achieves superior compression on the vast majority of quantization levels and tasks over the baselines GPTQ and RTN.  
+
+![](images/73f1dbf2a6555215d206c582abcdeea1deb873b751a83e8ca2089bf43a6e7303.jpg)  
+
+Figure 5: Quantizing Phi-3-mini-4k-instruct and Meta-LLama-3.1-8B-Instruct with block scaling, and additional incoherence processing. DiscQuant can compose with other quantization improvements, and with incoherence processing remains competitive with GPTQ.  
+
+![](images/ebc991f122630c4fb7489b5b6c605df2b68d5f247c56d7c721b50ccccedb4bb9.jpg)  
+
+Figure 6: Effect of increasing the fraction of math data when quantizing Phi-3-mini-4kinstruct at 3.25 bits. For 8192 total samples, we use a fraction of math subject data (GSM8k & MetaMathQA), and the remaining our standard RedPajama. As expected, performance on GSM8k increases with more math data. Expected behavior on the other tasks is unclear.  
+
+plots for block scaling and block scaling $^+$ incoherence processing. In the majority of cases, adding incoherence processing increases the task accuracy, especially at lower bits. We do not use fractional bits, (i.e. no groupsize), due to the fact that both these methods effect outliers and can interfere with one another. Incoherence especially helps GPTQ at 3 bits, and for Phi-3 DiscQuant without incoherence is competitive to GPTQ with incoherence.  
+
+
+
+\section{5.3 Effect of Data  }
+
+
+We perform a simple investigation into the effect of the dataset on quantization. We mix math subeject data–GSM8k and MetaMathQA–with our standard RedPajama dataset. Figure 6 shows the results of quantizing Phi-3-mini-4k-instruct at 3.25 bits with such a mix. As expected, both methods increase accuracy on GSM8k when there is a greater fraction of math data. On HellaSwag, DiscQuant improves with more math data, where GPTQ gets worse. On PIQA, both methods get worse. There is a meaningful change in accuracy as a result of changing the data mix. Choosing an appropriate data mix for quantization remains an important open question.  
+
+References   
+Marah Abdin, Jyoti Aneja, Hany Awadalla, Ahmed Awadallah, Ammar Ahmad Awan, Nguyen Bach, Amit Bahree, Arash Bakhtiari, Jianmin Bao, and Harkirat Behl. Phi-3 technical report: A highly capable language model locally on your phone, 2024. URL https://arxiv.org/abs/2404.14219.   
+SalAelhis tAasrhhk, bTooorss,t eAn mHirokeefilvear,n  aMndo hJtaasmheas mHi,e nMsamxainm.i liQanu aLr otC:r oOciu, tlBieor -Lfri,e e M4a-rbtiitn  inJfaegrgein, ceD ainn rotated llms. In Thirty-either Conference on Neural Information Processing Systems, 2024.   
+Nikhil Bansal. Discrepancy theory and related algorithms. In Proc. Int. Cong. Math, volume 7, pp. 5178–5210, 2022.   
+eanffidc iSeontn ga nQdi nignqtuuiatni.v eQ aulagnotrietahsem:.  OaprtXiimvi zparteiporni-nbt aasredX iqv:u2a3n0ti9z.a0t1i8o8n 5f,o r2 0la2n3.guage models–an   
+Bernard Chazelle, William WL Chen, and Anand Srivastav. Discrepancy theory and its applications. Oberwolfach Reports, 1(1):673–722, 2004.   
+Jerry Chee, Yaohui Cai, Volodymyr Kuleshov, and Christopher De Sa. QuIP: 2-bit quantization of large language models with guarantees. In Thirty-seventh Conference on Neural Information Processing Systems, 2023. URL https://openreview.net/forum?id= xrk9g5vcXR.   
+Together Computer. Redpajama: An open source recipe to reproduce llama training dataset, 2023.   
+Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. Llm.int(): 8-bit matrix multiplication for transformers at scale. In Advances in Neural Information Processing Systems, 2022.   
+qSualaenht iAzesdh krbeoproes,s eAnlteaxtiaonnd efro rB noerzaru-nloosvs,l eTsosr lsltmen  wHeiogehflte rc, oamnpdr eDsasino nA,l i2st0a2r4h.. Spqr: A sparse  
+Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. The llama 3 herd of models, 2024. URL https://arxiv.org/abs/2407.21783.   
+VaDgea nE gAilaizstaarirahn.,  EAxntrderemi e Pcaonmfeprroevs,s iDoen noisf  lKarugzen eladnelgeuva, gEel imaso dFerlas nvtiaar , aAdrdtiteimve  Bqaubaenntikzoa,t iaonnd. In Forty-First International Conference on Machine Learning, 2024.   
+Elias Frantar and Dan Alistarh. Sparsegpt: Massive language models can be accurately pruned in one-shot. In Proceedings of the International Conference on Machine Learning, 2023.   
+Elias Frantar, Sidak Pal Singh, and Dan Alistarh. Optimal brain compression: A framework for accurate post-training quantization and pruning. In Advances in Neural Information Processing Systems, 2022.   
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. OPTQ: Accurate quantization for generative pre-trained transformers. In The Eleventh International Conference on Learning Representations, 2023.   
+Elias Frantar, Roberto L Castro, Jiale Chen, Torsten Hoefler, and Dan Alistarh. Marlin: Mixed-precision auto-regressive parallel inference on large language models. arXiv preprint arXiv:2408.11743, 2024.   
+Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles FNoisktlears,  MLuaeunrneingcheo fGf, oCldhirnisg ,O Jcieeffprae,y J aHssoun,  PAhlaainng , LLea riNao aRce’yhn, olHdas,o nHaanil eLyi ,S cKhyoleel koMpcf,D oAnvieylla, Skowron, Lintang Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-shot language model evaluation, 12 2023. URL https://zenodo. org/records/10256836.   
+Babak Hassibi, Daivd G Stork, and Gregory J Wolff. optimal brain surgeon and general network pruning. In IEEE International Conference on Neural Networks, 1993.   
+Itay Hubara, Yury Nahshan, Yair Hanami, Ron Banner, and Daniel SOudry. Accurate post training quantization with small calibration sets. In Thirty-Eighth International Conference on Machine Learning, 2021.   
+Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael Mahoney, and Kurt Keutzer. Squeezellm: Dense-and-sparse quantization. In Forty-First International Conference on Machine Learning, 2024.   
+Eldofirangre /-taKubunsri/tni2cg3, 1 f0oD.re0 in6ni9fs2e r7K.enuczen eadcecleelve,r aEtilioans  oFf rlaanrtgaer ,l anMgiuchaageel  mGoodienl,s ,a 2n0d2 3D. aUn RALl ishttatrphs.:/ /Sapraxrisve.   
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles, pp. 611–626, 2023.   
+Yann LeCun, John Denker, and Sara Solla. Optimal brain damage. Advances in neural information processing systems, 2, 1989.   
+Yuang Li, Ruihao Gong, Xu Tan, Yang Yang, Peng Hu, Qi Zhang, Fengwei Yu, Wei Wang, and Shi Gu. Brecq: Pushing the limit of post-training quantization by block reconstruction. In The Nineth International Conference on Learning Representations, 2021.   
+Jin Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, ewnecieg hot nq uMaancthizinatei oLne afronri nogn -adnevdi cSey slltemm cs,o m20p2r4e.ssion and acceleration. In Seventh Confer  
+Zechun Liu, Changsheng Zhao, Igor Fedorov, Bilge Soran, Dhruv Choudhary, Raghuraman Krishnamoorthi, Vikas Chandra, Yuandong Tian, and Tijmen Blankevoort. Spinquant– llm quantization with learned rotations. arXiv preprint arXiv:2405.16406, 2024a.   
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. Kivi: A tuning-free asymmetric 2bit quantization for kv cache. In Forty-First International Conference on Machine Learning, 2024b.   
+Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. The International Conference on Learning Representations, 2019.   
+L´aszl´o Lov´asz, Joel Spencer, and Katalin Vesztergombi. Discrepancy of set-systems and matrices. European Journal of Combinatorics, 7(2):151–160, 1986.   
+Shachar Lovett and Raghu Meka. Constructive discrepancy minimization by walking on the edges. In FOCS, pp. 61–67. IEEE Computer Society, 2012.   
+Eric Lybrand and Rayan Saab. A greedy algorithm for quantizing neural networks. Journal of Machine Learning Research, 22(156):1–38, 2021.   
+Jiri Matousek. Geometric discrepancy: An illustrated guide, volume 18. Springer Science & Business Media, 2009.   
+Markus Nagel, Rana Ali Amjad, Mart Van Baalen, Christos Louizos, and Tijmen Blankevoort. Up or down? Adaptive rounding for post-training quantization. In Hal Daum´e III and Aarti Singh (eds.), Proceedings of the 37th International Conference on Machine Learning, volume 119 of Proceedings of Machine Learning Research, pp. 7197– 7206. PMLR, 13–18 Jul 2020. URL https://proceedings.mlr.press/v119/nagel20a.html.   
+Pranav Ajit Nair and Arun Sai Suggala. Cdquant: Accurate post-training weight quantization of large pre-trained models using greedy coordinate descent, 2024. URL https: //arxiv.org/abs/2406.17542.   
+Ryan O’Donnell. Analysis of Boolean Functions. Cambridge University Press, 2014.   
+Wenqi Shao, Mengzhao Chen, Zhaoyang Zhang, Peng Xu, Lirui Zhao, Zhiqian Li, Kaipeng Zhang, Peng Gao, Yu Qiao, and Ping Luo. Omniquant: Omnidirectionally calibrated quantization for large language models. In The Twelfth International Conference on Learning Representations, 2024. URL https://openreview.net/forum?id=8Wuvhh0LYW.   
+Mingjie Sun, Zhuang Liu, Anna Bair, and J Zico Kolter. A simple and effective pruning approach for large language models. In Workshop on Efficient Systems for Foundation Models @ ICML2023, 2023. URL https://openreview.net/forum?id=tz9JV2PRSv.   
+Albert Tseng, Jerry Chee, Qingyao Sun, Volodymyr Kuleshov, and Christopher De Sa. QuIP#: Even better llm quantization with hadamard incoherence and lattice codebooks. In Forty-First International Conference on Machine Learning, 2024a.   
+Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa. QTIP: Quantization with trellises and incoherence processing. In Advances in Neural Information Processing Systems, 2024b.   
+Mart van Baalen, Andrey Kuzmin, Markus Nagel, Peter Couperus, Cedric Bastoul, Eric Mahurin, Tijmen Blankevoort, and Paul Whatmough. Gptvq: The blessing of dimensionality in llm quantization. arXiv preprint arXiv:2402.15319, 2024.   
+Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In Fortieth International Conference on Machine Learning, 2023.  
+
+702 703 704 705 706 707 708 709 710 711 712 713 714 715 716 717 718 719 720 721 722 723 724 725 726 727 728 729 730 731 732 733 734 735 736 737 738 739 740 741 742 743 744 745 746 747 748 749 750 751 752 753 754 755   
+
+![](images/552bd6d8c95a15674928a47c3cd8c13a73f680f2c7d0ac210b3decc53a528102.jpg)  
+Table 4: Phi-3-mini-4k-instruct with incoherence processing. At 3 bits per weight, DiscQuant achieves superior compression across all tasks. At 4 bits per weight, DiscQuant achieves comparable compression.  
+
+![](images/379b737b6feb41353df00793af6110b030477b09b5a498dbe249e7041455e39e.jpg)  
+Table 5: Meta-Llama-3.1-8B-Instruct with incoherence processing. Across a majority of bits and tasks, DiscQuant achieves comparable compression with GPTQ, and does better than RNT.  
+
+
+

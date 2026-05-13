@@ -1,0 +1,481 @@
+\title{COAT: Compressing Optimizer states and Activations for Memory-Efficient FP8 Training}
+
+\begin{abstract}
+FP8 training has emerged as a promising method for improving training efficiency. Existing frameworks accelerate training by applying FP8 computation to linear layers while leaving optimizer states and activations in higher precision, which fails to fully optimize memory usage. This paper introduces COAT (\textbf{C}ompressing \textbf{O}ptimizer States and \textbf{A}ctivations for FP8 \textbf{T}raining), a novel FP8 training framework designed to significantly reduce memory footprint when training large models. COAT addresses current limitations through two key innovations: (1) \textbf{Dynamic Range Expansion}, which aligns optimizer state distributions more closely with the FP8 representation range, thereby reducing quantization error, and (2) \textbf{Mixed-Granularity Activation Quantization}, which optimizes activation memory using a combination of per-tensor and per-group quantization strategies. Experiments demonstrate that COAT effectively reduces end-to-end training memory footprint by 1.54× compared to BF16 while achieving nearly lossless performance across various tasks, such as Large Language Model pretraining and fine-tuning and Vision Language Model training. COAT also achieves a 1.43× end-to-end training speedup compared to BF16, performing on par with or surpassing TransformerEngine's speedup. COAT enables efficient full-parameter training of large models on fewer GPUs, and facilitates doubling the batch size in distributed training settings, providing a practical solution for scaling large-scale model training.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h!]
+    \begin{minipage}{\textwidth}
+        \centering
+        \includegraphics[width=0.95\textwidth]{figure/FP8PrecisionFlow8.pdf}
+        \captionof{figure}{(a,b) Comparing the quantization flow of Transformer Engine and COAT. Both the optimizer states and activations are quantized to FP8 in COAT. (c) End-to-end per-GPU memory  comparison when training Llama-2-13B on 8$\times80$G H100 using FSDP.}\label{fig:overview_of_flow_te_and_bar}
+    \end{minipage}
+\end{figure}
+
+Foundation Models (FMs), such as Large Language Models (LLM) and Vision Language Models (VLM), have made significant breakthroughs in various tasks such as reasoning, understanding, and summarization~\citep{dubey2024llama3, adler2024nemotron, team2024gemma,lin2024vila}. However, the training of such models, which often comprise billions of parameters, demands substantial computational resources and memory. This presents substantial challenges, making the training of these foundation models very challenging~\citep{smith2022nlg530b,hoffmann2022chinchillia}.
+
+Low-precision training has emerged as a promising approach to make FMs training more efficient~\citep{micikevicius2017mixedprecision,wang2018trainingfp8,zhu2020towardsint8,xi2023int4training,wortsman2023int8clip,xi2024jetfire}. By quantizing tensors used in deep neural networks into lower precision, low-precision training effectively speed up the training process and reduce the memory footprint. Currently, BF16 training ~\citep{kalamkar2019bf16study,micikevicius2017mixedprecision} is the most prevalent low-precision method, and is widely adopted in large-scale training frameworks like DeepSpeed ~\citep{rasley2020deepspeed} and Megatron-LM~\citep{shoeybi2019megatron}.
+
+With the advent of Nvidia's H100 GPU~\citep{nvidia_h100}, FP8 training~\citet{micikevicius2022fp8format} is emerging as the next-generation low-precision technique. Compared to BF16, FP8 training has the potential to (1) double the speed and (2) halve the memory footprint. To achieve practical speedup, 
+Transformer Engine~\citep{nvidia_transformerengine} performs matrix multiplications in FP8 precision, leading to faster training. Transformer Engine’s memory footprint can be further improved by reducing optimizer states, gradients, weights, and activations to lower precision. As illustrated in Figure~\ref{fig:overview_of_flow_te_and_bar}, FP8-LM~\citep{peng2023fp8lm} advances this by further quantizing the gradients, weight master copy, and first-order momentum into FP8. This reduces memory and communication overhead, partially improving memory efficiency. However, they do not tackle the memory consumption of \textit{activations} and still leave the optimizer's second-order momentum in higher precision. The memory problem of activations becomes even more critical when optimizer, gradient, and weights are sharded across multiple GPUs using ZeRO or FSDP. Besides, second-order momentum is more sensitive to quantization than first-order momentum~\citep{fishman2024fp8trillion}, and activations' large spikes also make them hard to quantize to FP8~\citep{yang2024gluspike}. This potential accuracy degradation makes them missing a crucial opportunity to optimize memory further. 
+In this work, we propose COAT: \textbf{C}ompressing \textbf{O}ptimizer states and \textbf{A}ctivations for memory-efficient FP8 \textbf{T}raining to address the aforementioned issue. \emph{COAT significantly reduces the overall memory footprint by quantizing optimizer states and activations into FP8.} For optimizer states, we observe that FP8 format's \emph{representation range is under-utilized} when quantizing them, as illustrated in Figure~\ref{fig:optimizer_range_ratio}(a). To address this, we introduce a novel \emph{Dynamic Range Expansion} method which adjusts the distribution of optimizer states to better fit within the FP8 range, thereby minimizing quantization error. For activations, we propose \emph{Mixed-Granularity Activation Quantization} to achieve efficient and accurate quantization. We apply fine-grained quantization to non-linear layers and apply per-tensor quantization to linear layers. Per-tensor quantization for matrix multiplications is more efficient and better suited for TensorCores, while fine-grained quantization helps maintain accuracy. These two approaches tackle high memory consumption while ensuring minimal performance degradation. We provide an overview of COAT in Figure~\ref{fig:overview_of_flow_te_and_bar}(b) for demonstration.
+
+We demonstrate the accurate performance of COAT on a wide range of tasks, including LLM pretraining, LLM fine-tuning, and VLM training. COAT achieves nearly lossless performance on all of these tasks. For efficiency results, COAT achieves \boldsymbol{$1.54\times$} end-to-end memory reduction compared with BF16, and \boldsymbol{$1.43\times$} end-to-end training speed up on Llama 7B, 13B, and 30B models compared to BF16. COAT also \emph{doubles the batch size} in all realistic distributed training settings, which is crucial for higher speedup and support for longer context length, leading to a more efficient training process for large-scale models. 
+
+
+\section{Related Work}
+
+
+\paragraph{Low-precision Training}
+Low precision training ~\citep{wang2018trainingfp8,chen2020statistical,lin2022device256kb,wortsman2023int8clip,xi2024jetfire} has become a prominent technique in modern deep learning, offering reductions in both computational costs and memory requirements.
+FP16 (half-precision) training ~\citep{micikevicius2017mixedprecision} is the most prevalent low-precision method nowadays. It introduces loss scaling to address FP16’s narrower representation range problem. BF16 training ~\citep{kalamkar2019bf16study} refines this approach, as BF16 has a larger representation range and is more stable for large-scale training. In these approaches, forward and backward passes are computed in FP16 or BF16 precision, while master weights, gradients, and optimizers are stored in FP32.
+
+FP8 training ~\citep{fishman2024fp8trillion,micikevicius2022fp8format} aims to push these efficiency gains further. With the introduction of Nvidia’s Hopper GPU architecture, FP8 is emerging as a practical datatype for next-generation low-precision training. Nvidia's Transformer Engine (TE) ~\citep{nvidia_transformerengine} is the first framework designed for FP8 mixed-precision training that employs FP8 Tensorcore for linear layer calculation. FP8-LM ~\citep{peng2023fp8lm} extends FP8 quantization to gradients and optimizer states, further improving the training throughput. However, they fail to reduce the memory usage of activations stored for the backward pass using FP8, and leave second-order momentum in FP16, limiting the full potential of FP8's memory advantages.
+
+\paragraph{Memory Efficient Optimizers}
+While 32-bit optimizer ~\citep{kingma2014adam,loshchilov2017adamw} states are widely adopted, several research efforts have been made to reduce the memory footprint of optimizer states through quantization. The 8-bit Adam ~\citep{dettmers2021adam8bit} introduces a novel data format called dynamic exponent (DE) for quantization, but the adoption of this new data format limits its flexibility. 4-bit Optimizer ~\citep{li2024optimizer4bit} further pushes the limit of optimizer quantization to 4-bit by addressing the zero-point problem, but is restricted to fine-tuning tasks. FP8-LM ~\citep{peng2023fp8lm} quantizes the first-order momentum to FP8 while leaving second-order momentum in FP16, which limits the overall memory savings. ~\citep{fishman2024fp8trillion} finds that second-order momentum is more sensitive to quantization, and proposes to quantize it using E5M2 format.
+
+In addition to quantization, there are other approaches that aim to reduce the memory footprint of the optimizer states ~\citep{shazeer2018adafactor, anil2019sm3,chen2024lion,zhao2024galore}, such as low-rank decomposition and optimizer simplification that only store the first-order momentum. These methods are orthogonal to our approach.
+
+\paragraph{Activation Quantization}
+Activations consume a significant amount of memory during training~\cite{cai2020tinytl}, with memory usage scaling in proportion to sequence length and batch size. ActNN~\citep{chen2021actnn} is a memory-efficient training framework designed to reduce the memory footprint by quantizing activations to 2 bits. Few-bit Backward~\citep{novikov2023fewbitbackward} focus on quantizing activation functions while achieving higher performance. Jetfire proposes INT8 data flow to quantize the activation of both linear and non-linear layers to reduce memory footprint.
+
+
+\section{Preliminaries}
+
+\paragraph{FP8 Quantization}
+Quantization compresses a high-precision tensor to low-precision to achieve speedup and save memory footprint, at the cost of lower precision and lower representation range. 
+\emph{FP8 format} consists of two encodings - E4M3 and E5M2~\citep{OCP8bit2023}. E4M3 has higher precision, while E5M2 has a larger representation range. We define E4M3's min and max values as $\Delta_{\min}^{\text{E4M3}} = 2^{-9}$ and $\Delta_{\max}^{\text{E4M3}} = 448$, while E5M2's min and max values are $\Delta_{\min}^{\text{E5M2}} 
+= 2^{-16}$ and $\Delta_{\min}^{\text{E5M2}} = 57344$. To \emph{quantize} an FP32 tensor $X$ into E4M3 precision, we use a quantizer $Q(\cdot)$ to map the tensor into FP8's representation range. This process can be formulated as
+\[X_{\text{FP8}}, S_X = Q(X_{\text{FP32}}),\:\text{where}\: X_{\text{FP8}} = \left\lceil \frac{X_{\text{FP32}}}{S_X} \right\rfloor, \: S_X = \frac{\max\left(\lvert X_{\text{FP32}} \rvert\right)}{\Delta_{\max}^{\text{E4M3}}},
+\]
+where $S_X$ is the scaling factor, $\lceil \cdot \rfloor$ refers to round-to-nearest. Quantize into E5M2 follows a similar procedure, where we only replace $\Delta_{\max}^{\text{E4M3}}$ with $\Delta_{\max}^{\text{E5M2}}$. To map the quantized tensor back to FP32 precision, the \emph{dequantize} operation $DQ(\cdot)$ can be formulated as 
+$X_{\text{FP32}} = DQ(X_{\text{FP8}}, S_X) = S_X X_{\text{FP8}}.$
+
+\paragraph{Optimizer Update Rule}
+Optimizers are widely used in deep learning to update parameters. The most common gradient-based optimizer is Adam/AdamW~\citep{kingma2014adam,loshchilov2017adamw}, which uses first-order $m$ and second-order momentum $v$ to achieve better convergence. The update rule of AdamW at time step $t$ can be formulated as:
+\[
+\begin{aligned}
+    m_t &= \beta_1 m_{t-1} + (1 - \beta_1)g_{t-1} \\
+    \hat{m}_t &= \frac{m_t}{1 - \beta_1^t} \\
+\end{aligned}
+\quad \quad \quad
+\begin{aligned}
+    v_t &= \beta_2 v_{t-1} + (1 - \beta_2)g_{t-1}^2 \\
+    \hat{v}_t &= \frac{v_t}{1 - \beta_2^t}
+\end{aligned}
+\]
+\begin{align}\label{eq:adam_update}
+    w_{t+1} = w_t - \eta \left(\frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} + \lambda w_t\right) 
+\end{align}
+
+where $m_t$ is the first-order momentum, $v_t$ is the second-order momentum, $g_t$ is the gradient, $\beta_1$ and $\beta_2$ are betas of AdamW, $\eta$ is learning rate, $\lambda$ is weight decay, and $\epsilon$ is used to prevent NaN or Inf.
+
+To perform \textbf{optimizer state quantization}, we adopt per-group quantization for both first-order and second-order momentum, following previous works~\citep{dettmers2021adam8bit,li2024optimizer4bit}.
+Every consecutive $G$ element forms a group ($G$ is defined as the group size), and each group is quantized independently with its own statistics. Optimizer states are stored in FP8 precision, while its scaling factor is stored in BF16.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figure/rk_11_E4M3_E4M3_final.pdf}
+    \captionof{figure}{(a) Visualization of optimizer states' dynamic range under per-group quantization. FP8 E4M3's representation range is under-utilized in this case. (b) After dynamic range expansion, FP8's representation range is well utilized. (c) Distribution of $k$ for optimizer states. The second order's $k$ is larger than the first order's $k$, since the second-order momentum's dynamic range is smaller.} 
+    \label{fig:optimizer_range_ratio}
+\end{figure}
+
+
+
+\section{Dynamic range expansion for accurate optimizer quantization}
+
+
+In subsequent sections, we explain how COAT utilizes FP8 quantization to achieve memory-efficient FP8 training without compromising accuracy.
+Section~\ref{sec:optimizer_fp8} focuses on optimizer states quantization,
+while Section~\ref{sec:activation_fp8} discusses activation quantization.
+
+\subsection{Understanding the issue of current optimizer states quantization method}
+
+Under per-group quantization, we find that one significant drawback of current quantization methods is that, they can not \emph{fully utilize the representation range} of FP8 and therefore lead to a large quantization error. Take the E4M3 data format as an example, the ratio between E4M3's maximum representable value and minimum representable value is $\Delta_{\max}^{\text{E4M3}} / \Delta_{\min}^{\text{E4M3}} = 448 \div \frac{1}{512} = 229376 \approx 2\times 10^5.$ Therefore, for a quantization group $X$, if we want to fully utilize the 256 representable value\footnote{Actually among them a small amount of values represents NaN and Inf.} of FP8, we hope the dynamic range of the quantization group $X$ should cover the entire span between $\Delta_{\min}^{\text{E4M3}}$ and $\Delta_{\max}^{\text{E4M3}}$.
+
+To make it more formally, we define \emph{dynamic range} as the ratio between the maximum absolute value and the minimum absolute value within a quantization group $X$:
+
+\begin{definition}[dynamic range]
+Given a set that consists of \( G \) real numbers \( X = \{x_1, x_2, \dots, x_G\} \), the \textit{dynamic range} \( \gR \) is defined as
+\[
+\gR_{X} = \frac{\max(\lvert x_1 \rvert, \lvert x_2 \rvert, \dots, \lvert x_G \rvert)}{\min(\lvert x_1 \rvert, \lvert x_2 \rvert, \dots, \lvert x_G \rvert)},
+\]
+where $\lvert \cdot \rvert$ denotes the absolute value.
+\end{definition}
+
+That is to say, E4M3's dynamic range is $\gR_{\text{E4M3}} = 448 \times 512 = 229376 \approx 2\times 10^5$. However, in practice, many quantization groups within the optimizer states fail to effectively map values across this wide range. We observe that optimizer states are highly sparse, with fewer than 1\% of values having large magnitudes, while the majority are relatively small and closely clustered. Most groups exhibit low dynamic ranges since large values are so few. As visualized in Figure~\ref{fig:optimizer_range_ratio}(a), the dynamic range for first-order momentum is typically less than 1e4, and for second-order momentum, it is usually less than 1e1—both far below the available range of FP8. As a result, a substantial portion of FP8's representational capacity is wasted, leading to a large quantization error.
+
+\subsection{Dynamic Range Expansion}
+
+To address this problem, we introduce a \emph{expand function} $f(\cdot)$ before quantization to expand the dynamic range of the quantization group and align it with E4M3, which can be formalized as $X_{\text{FP8}}, S_X = Q(f(X_{\text{FP32}}))$. The expand function we use is defined as \[f(x) = \operatorname{sign}(x)\lvert x \rvert^k,\] where $k$ is used to control the strength of the expansion.
+
+For a quantization group $X$, after applying the expand function $f$ to $X$, the dynamic range becomes \[\gR_{f(X)} = \frac{\max(\lvert f(X) \rvert)}{\min(\lvert f(X) \rvert)} = \frac{\max(\lvert \operatorname{sign}(X) X^k  \rvert)}{\min(\lvert \operatorname{sign}(X) X^k \rvert)} = \Big(\frac{\max(\lvert X \rvert)}{\min(\lvert X \rvert)}\Big)^k = (\gR_X)^k.\]
+Therefore, when $k>1$, $\gR_{X}$ will be enlarged and become closer to the ideal $\gR_{\text{E4M3}}$. The optimal $k$ satisfy that $(\gR_X)^k = \gR_{\text{E4M3}}$, which means that $k = \log_{\gR_X}(\gR_{\text{E4M3}})$. With this optimal $k$, $f(X)$ can fully utilize the representation range of E4M3, while the original $X$ can only utilize a small portion of it. As shown in Figure~\ref{fig:optimizer_range_ratio}(c), the second-order momentum typically has a larger $k$ value ($5\sim 15$) compared to the first-order momentum's $k$ ($1\sim 3$). This corresponds to our previous observation, that second-order momentum usually has a smaller dynamic range compared with first-order momentum, so it requires a larger $k$ to align well with E4M3's dynamic range.
+
+We calculate $k$ on-the-fly for every optimizer step and for every quantization group for accuracy consideration. When dequantize, we apply the inverse of expand function $f^{-1}(x) = x^{\frac{1}{k}}$ after dequantization to recover its original value, which can be expressed as $X^{\text{FP32}} = f^{-1}(DQ(X_{\text{FP8}}, S_X))$.
+
+We apply regular quantizer and our dynamic range expansion method to both the first-order momentum $m$ and second-order momentum $v$. As visualized in Figure~\ref{fig:Optimizer_compander_distribution}(b), 
+the distribution after expansion can fully utilize the FP8 (E4M3) representation range, which proves the effectiveness of our method. We further quantify the effectiveness of our method in Table~\ref{table:optimizer_quantization_error}. In AdamW optimizer step, as stated in Eq.~\ref{eq:adam_update}, $\frac{m}{\sqrt{v} + \epsilon}$ is the actual effective term for weight update, so we report the MSE of $\frac{m}{\sqrt{v} + \epsilon}$ to quantify the performance of a quantization method. We find that E4M3 is more suitable for first-order momentum than E5M2. For second order momentum, although E4M3 better than E5M2, their quantization error is nearly the same after applying our expand function. Our Dynamic Range Expansion can effectively reduce the MSE by $1.63\times$.
+
+\begin{figure}[t!]
+    \begin{minipage}{0.54\textwidth}
+        \centering
+        \captionof{table}{Quantization error of $\frac{m}{\sqrt{v}}$ under different quantization settings. +Expand means applying our Dynamic Range Expansion method.}
+        \label{table:optimizer_quantization_error}
+        \resizebox{\textwidth}{!}{
+            \begin{tabular}{c|cccc}
+            \toprule
+            \textbf{MSE of \boldsymbol{$\frac{m}{\sqrt{v}}$}} & \multicolumn{4}{c}{\textbf{Second Order}} \\ 
+            \cmidrule(lr){1-1} \cmidrule(lr){2-5}
+            \textbf{First Order} & \textbf{E4M3} & \textbf{E4M3+Expand} & \textbf{E5M2} & \textbf{E5M2+Expand} \\ 
+            \midrule
+             \textbf{E4M3}     & \textbf{\textcolor{red}{20.10}} & 18.08 & \textbf{\textcolor{red}{25.65}} & 18.16 \\
+             \textbf{E4M3+Expand}  & 15.13 & \textbf{\textcolor{darkgreen}{12.31}} & 21.96 & \textbf{\textcolor{darkgreen}{12.43}} \\
+             \midrule
+             \textbf{E5M2}     & \textbf{\textcolor{red}{37.02}} & 35.96 & \textbf{\textcolor{red}{40.30}} & 36.00 \\
+             \textbf{E5M2+Expand}  & 17.79 & 15.48 & 23.84 & 15.57 \\
+            \bottomrule
+            \end{tabular}
+        }
+    \end{minipage}
+    \begin{minipage}{0.44\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figure/ExpandQuantizeComparison2_base2_small.pdf}
+        \captionof{figure}{Dynamic Range Expansion can better utilize E4M3 representation range.}
+        \label{fig:Optimizer_compander_distribution}
+    \end{minipage}
+    \hspace{0.01\textwidth}
+\end{figure}
+
+
+
+\section{Mixed-Granularity Activation Quantization}
+
+\subsection{Decompose the activation memory footprint}
+In the forward pass of neural networks, activations must be preserved for the backward pass to calculate gradients. As illustrated in Table~\ref{table:activation_memory_decompose}, non-linear layers such as LayerNorm/RMSNorm ~\citep{ba2016layer,zhang2019root} and Activation Functions ~\citep{hendrycks2016gelu,shazeer2020glu} typically account for approximately 50\% of the memory footprint in the Llama model series~\citet{touvron2023llama}. In contrast, linear layers contribute less than 25\%. Therefore, it is essential to optimize both linear and non-linear layers to reduce activation memory footprint.\footnote{RoPE and FlashAttention is more as a distinct module and should be handled separately.}
+
+One straightforward approach to achieve this is to quantize the activations to FP8 format prior to each non-linear and linear layer and only save the quantized tensors for backward. However, this introduces significant overhead due to the additional quantization step. Furthermore, non-linear layers can be sensitive to quantization. For example, GLU activation will amplify the spike in activations, resulting in significant quantization errors if not carefully handled~\citep{yang2024gluspike,fishman2024fp8trillion}. This necessitates us to develop efficient and accurate quantization techniques.
+
+\subsection{Mixed granularity FP8 precision flow}
+
+\begin{table}[t]
+\centering
+\caption{Activation memory footprint of different operators. U is a unit to measure memory usage, where $\text{1U}=\text{Batch Size} \times \text{Sequence Length} \times \text{Hidden Size} \times \text{2 bytes (for BF16).}$ For Llama-style model, Act Func refers to SiLU \& Multiply, and Linear refers to the summation of QKV/Attn/Up/Gate/Down projection.py\#L70}{implementation}, so the memory usage of LayerNorm in BF16 is 4U. Our method reduces activation memory by quantizing them to FP8.}\label{table:activation_memory_decompose} 
+\resizebox{0.9\textwidth}{!}{%
+\begin{tabular}{cccccccccccc}
+\toprule
+ & & \multicolumn{2}{c}{\textbf{Non-Linear}} & \multicolumn{2}{c}{\textbf{Attention}} & & & \multicolumn{2}{c}{\textbf{Reduction Ratio}} \\
+\cmidrule(r){3-4} \cmidrule(r){5-6} \cmidrule(r){9-10}
+\textbf{} & \textbf{} & \textbf{RMSNorm} & \textbf{Act Func} & \textbf{RoPE} & \textbf{FlashAttn} & \textbf{Linear}  & \textbf{Total} & \textbf{Ideal} & \textbf{Achieved} \\ \midrule
+\multirow{3}{*}{\textbf{Llama-style}} & \textbf{BF16} & 4U & 8U & 2U & 3U & 5.66U  & 22.66U & 1.00$\times$ & 1.00$\times$ \\
+\textbf{} & \textbf{TE} & 2U & 8U & 2U & 3U & \textcolor{darkgreen}{3.33U} & 18.33U & 1.23$\times$ & 1.20$\times$ \\
+\textbf{} & \textbf{COAT} & \textcolor{darkgreen}{1U} & \textcolor{darkgreen}{4U} & 2U & 3U & \textcolor{darkgreen}{3.33U} & \textcolor{darkgreen}{13.33U} & 1.69$\times$ & 1.65$\times$\\ 
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+To address the inefficiency and inaccurate problem,
+we propose to use \textbf{mixed granularity FP8 precision flow} to improve the accuracy without introducing too much overhead.
+FP8 precision flow requires the input and output of all linear and non-linear layers in FP8. By directly saving the input tensor in FP8 format for the backward pass, we eliminate the need for an extra quantization operation, which reduces the associated overhead. However, this method still suffers from accuracy degradation and necessitates further refinement.
+
+We propose to vary the quantization granularity across different layers to balance precision and efficiency in a \emph{mixed-granularity} manner. For non-linear layers, VS-Quant~\citep{dai2021vsquant} or Per-Block Quant~\citep{xi2024jetfire} methods are well-suited due to their fine-grained and precise nature. For linear layers, we apply per-tensor quantization to maximize the performance of Tensor Cores.\footnote{Finer-grained methods can also be applied since they are generally compatible with FP8 precision flow.}
+
+We observe that quantizing the input of layernorm across multiple token axes is detrimental to accuracy. As illustrated in Figure~\ref{fig:quantization_error_and_time_scaling}(a), when the number of elements that share a scaling factor is fixed, the quantization error increases significantly when quantization is performed across the token axis. Therefore instead of using per-block quantization with block size $B \times B$ as proposed in ~\citep{xi2024jetfire}, we propose to use per-group quantization with group size $1\times G$, where $G=B^2$ to keep the granularity the same. This approach enhances the accuracy of non-linear layers while maintaining efficiency.
+Our precise FP8 precision flow is visualized in Figure~\ref{fig:overview_of_flow_te_and_bar}(a), where we display the full precision flow for a Llama-style decoder layer, both forward and backward pass.
+
+\begin{figure}[t]
+    \begin{minipage}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figure/LNQuantErrorAndReduction3.eps}
+        \captionof{figure}{(a) Quantization Error in forward pass. (b) Time comparison of various scaling methods.}\label{fig:quantization_error_and_time_scaling}
+    \end{minipage}
+\end{figure}
+
+We also propose Group Scaling, an efficient per-tensor scaling method that balances the performance and precision. To perform per-tensor quantization, the maximum absolute value of the tensor needs to be calculated through max reduction, adding a lot of overhead.
+
+In our Group Scaling, we address these problems by splitting the max reduction into two stages: (1) performing max reduction on each $1 \times G$ element and storing the results as intermediate values; (2) applying max reduction on the intermediate tensor to obtain the per-tensor max value. The first stage can be seamlessly fused with the previous operation, adding minimal overhead, while the second stage is more efficient than doing max reduction on the entire tensor, as the intermediate result is $G\times$ smaller than the original tensor. As illustrated in Figure~\ref{fig:quantization_error_and_time_scaling}(b), Group Scaling successfully reduces the max reduction overhead compared with just-in-time scaling.
+
+In comparison, TransformerEngine proposes delayed scaling to avoid the on-the-fly max reduction required for per-tensor quantization, and can also fuse the division process into the previous operator to optimizes memory accesses.
+However, we find that using the current tensor’s statistics to compute the scaling factor is no worse, and could be even better in precision, than using the delayed scaling heuristic. Therefore, we advocate for Group Scaling as a simpler and more flexible alternative that can potentially offer improved numerical stability and precision while not being significantly slower than Delayed Scaling.
+
+
+
+\section{Experiments}
+
+
+\subsection{Accuracy Experiments}
+\paragraph{Setups}
+We compare COAT with BF16 training and TransformerEngine ~\citep{nvidia_transformerengine} baselines. For all experiments, we adopt the default hyperparameters in the official training recipe. We validate the effectiveness of our method on multiple tasks, including Large Language Model (LLM) pretraining and fine-tuning, and Vision Language model (VLM) training. For LLM pertaining, we report the perplexity on Wikitext
+103~\citep{merity2016wikitext}, C4~\citep{raffel2020c4}, and Pile~\citep{gao2020pile}, and the accuracy on COPA~\citep{gordon-etal-2012-copa}, ARC~\citep{clark2018arc}, SciQ~\citep{welbl2017sciq}, and HellaSwag~\citep{zellers2019hellaswag}. For LLM fine-tuning, we conduct experiments in math corpus, and evaluate on Mathmeticas~\citep{davies2021deepmind}, SVAMP~\citep{patel2021svamp}, NumGLUE~\citep{mishra2022numglue}, 
+and GSM8K~\citep{cobbe2021gsm8k}.
+For VLM training, we report the score on VideoMME~\citep{fu2024videomme}, POPE~\citep{li2023pope}, VizWiz~\citep{gurari2018vizwiz}, GQA~\citep{hudson2019gqa}, VQAv2~\citep{goyal2017vqav2}, TextVQA~\citep{singh2019textvqa}, SEED~\citep{li2023seed}, and MMMU Validation Set~\citep{yue2024mmmu}. We use $1\times 128$ per-group quantization for optimizer states and $1\times 16$ per-group quantization for non-linear layer activations.
+
+\subsubsection{LLM pretraining}
+To evaluate our method when pretraining LLMs, We train OLMo-1B~\citep{groeneveld2024olmo} and OLMo-7B on Dolma~\citep{soldaini2024dolma}. Following the official report, we use a global batch size of 4M tokens (2048 macro batch size, with a sequence length of 2048 tokens). We use PyTorch FSDP in our experiments. For OLMo-1B, we pretrain for 5500 steps, which corresponds to approximately 22B tokens. For OLMo-7B, due to the resource limitation, we perform continue pretraining for 1000 steps (about 4B tokens) and resume from the official checkpoint at 5000 steps.
+
+We report the training curve in Figure ~\ref{fig:olmo-1b}, and report the perplexity and accuracy result in Table~\ref{table:olmo-1b}. The training curve
+and downstream task performance were consistent with BF16 training and TransformerEngine baseline,
+validating the effectiveness of COAT. For OLMo-7B experiment, we report the training curve in Figure~\ref{fig:olmo-7b}, where COAT also aligns well with the baseline and is nearly lossless.
+
+\begin{table}[t]
+    \begin{minipage}{0.66\textwidth}
+        \centering
+        \captionof{table}{OLMo-1B pretraining performance on downstream tasks. TE refers to TransformerEngine.}
+        \label{table:olmo-1b}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{lccccc}
+        \toprule
+         & \textbf{Train Loss} & \textbf{WikiText} & \textbf{C4} & \textbf{Pile} & \textbf{Avg ppl} \\
+        \midrule
+        \textbf{BF16} & 2.995 & 30.499 & 27.966 & 17.405 & 25.290 \\
+        \textbf{TE} & 3.001 & 30.736 & 28.064 & 17.434 & 25.411 \\
+        \textbf{COAT} & 3.008 & 30.619 & 28.099 & 17.453 & 25.391 \\
+        \midrule
+         & \textbf{COPA} & \textbf{ARC(Easy)} & \textbf{SciQ} & \textbf{HellaSwag} & \textbf{Avg Acc} \\
+        \midrule
+        \textbf{BF16} & 60.0\% & 45.6\% & 67.3\% & 33.7\% & 51.6\% \\
+        \textbf{TE} & 62.0\% & 45.4\% & 63.9\% & 33.8\% & 51.3\% \\
+        \textbf{COAT} & 61.0\% & 44.2\% & 67.6\% & 33.7\% & 51.5\% \\
+        \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}%
+    \hspace{0.02\textwidth}
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figure/OLMo_1B_curve.pdf}
+        \captionof{figure}{OLMo-1B pretraining loss curve.}
+        \label{fig:olmo-1b}
+    \end{minipage}
+\end{table}
+
+\begin{table}[h]
+    \begin{minipage}{0.36\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figure/OLMo_7B_curve.pdf}
+        \captionof{figure}{OLMo-7B training curve.}
+        \label{fig:olmo-7b}
+    \end{minipage}
+    \begin{minipage}{0.62\textwidth}
+        \captionof{table}{Evaluation result of fine-tuning Llama-2-7B on math corpus. \texttt{Llama-2-7B} refers to the evaluation metric before fine-tuning. TE refers to TransformerEngine.}
+        \label{table:math_corpus_finetune}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{cccccc}
+            \toprule
+             & \textbf{Mathmeticas} & \textbf{SVAMP} & \textbf{NumGLUE} & \textbf{GSM8k} & \textbf{Avg} \\ \midrule
+            \texttt{Llama-2-7B} & 6.0 & 14.6 & 34.5 & 29.9 & 21.3 \\
+            \midrule
+            BF16 & 46.3 & 64.2 & 54.8 & 57.7 & 55.7 \\
+            TE   & 45.3 & 66.1 & 53.5 & 57.7 & 55.6 \\
+            COAT & 47.8 & 64.4 & 53.3 & 56.6 & 55.5 \\
+            \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+\end{table}
+
+\subsubsection{LLM fine-tuning}
+We further evaluate our method on LLM fine-tuning task. We focus on math corpus and fine-tune a Llama-2-7B model on the MAmmoTH~\citep{yue2023mammoth} dataset. We train for 3 epochs, and report the downstream tasks performance in ~\ref{table:math_corpus_finetune}. After fine-tuning, COAT still performs consistently with the baselines on the downstream task performance, proving the accurateness of our method.
+
+\subsubsection{VLM Training}
+We also evaluate COAT on vision language models. We conduct experiments on VILA ~\citep{lin2024vila} and perform stage-3 SFT of VILA1.5-7B using the same SFT data mixture employed by VILA's original paper~\citep{chen2023sharegpt4v,xu2024visionflan} and set the global batch size to 1024. We pad the sequence length to a multiple of 4 for efficiency consideration. The training loss curve is visualized in Figure~\ref{fig:vila-stage3}. We report the downstream task performance and their average in Table~\ref{table:vila-stage3}. We find that COAT performs on par with BF16 training and is better than the TransformerEngine baseline, which demonstrates the accurateness of our method.
+
+\begin{figure}[t]
+    \begin{minipage}{0.61\textwidth}
+        \centering
+        \captionof{table}{VILA1.5-7B Stage-3 SFT performance on downstream tasks. * means it has seen the training data.}
+        \label{table:vila-stage3}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{lcccccc}
+        \toprule
+        Stage 3 & VideoMME & POPE & VizWiz & GQA* & VQAv2* \\ 
+        \midrule
+        BF16 & 42.96 & 86.90 & 61.42 & 64.55 & 81.47 \\ 
+        TE & 43.19 & 87.64 & 57.61 & 64.53 & 81.34 \\ 
+        COAT & 44.56 & 87.43 & 61.36 & 64.44 & 81.20 \\ 
+        \midrule
+        & & \multicolumn{2}{c}{SEED} & \\
+        \cmidrule(lr){3-4} 
+        Stage 3 & TextVQA & Image & Video & MMMU Val & Average \\
+        \midrule
+        BF16 & 65.60 & 73.40 & 45.65 & 38.56 & 62.80 \\
+        TE & 64.70 & 73.51 & 43.12 & 35.89 & 61.88 \\
+        COAT & 64.65 & 73.36 & 43.76 & 37.22 & 62.51 \\
+        \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}%
+    \hspace{0.02\textwidth}
+    \begin{minipage}{0.36\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figure/VILA_7B_v2_curve.pdf}
+        \caption{VILA1.5-7B Stage-3 SFT loss curve.}
+        \label{fig:vila-stage3}
+    \end{minipage}
+\end{figure}
+
+\subsection{Memory Saving and Speedup}
+
+We test the memory saving and speedup result of COAT in two settings: The results on a single transformer layer help to accurately analyze the capabilities for memory saving and speedup, while the end-to-end results reflect the practical benefits of our method in real-world applications.
+
+\subsubsection{Memory Saving and Speedup for a Single Transformer Layer}
+
+Table~\ref{table:latency_single_layer} highlights the speedup and memory reduction achieved for a single transformer layer. We conducted experiments with a batch size of 4, varying the hidden sizes between 2048 and 4096, and sequence lengths of 2048 and 4096.
+
+COAT demonstrates better speedup compared with TE, and significantly better memory reduction ability compared with BF16 and TE. Our approach achieves up to $1.57\times$ speedup over BF16 and achieves a consistent $1.65\times$ memory reduction compared to BF16, which is very close to the theoretically $1.69\times$ reported in Table~\ref{table:activation_memory_decompose}. 
+The speedup ratio becomes larger with larger hidden sizes and longer sequence lengths.
+\begin{table}[t!]
+\centering
+\caption{Memory Saving and Speedup for a single Transformer Layer. Memory refers to Activation Memory. Our method achieves better speedup than TransformerEngine and significantly reduces the activation memory footprint by $1.65\times$.}
+\label{table:latency_single_layer}
+\resizebox{0.95\textwidth}{!}{%
+\begin{tabular}{ccccccc|ccccccc}
+\toprule
+\multicolumn{4}{l}{\textit{Hidden Size = 2048, Batch Size = 4}} \\
+\midrule
+ & \multicolumn{6}{c}{Sequence Length = 2048} & \multicolumn{6}{c}{Sequence Length = 4096} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+ & Forward & Backward & Total & Ratio & Memory & Ratio & Forward & Backward & Total & Ratio & Memory & Ratio \\ 
+ \midrule
+BF16           & 3.36 & 8.47 & 11.83 & $1.00\times$ & 1457 MB & $1.00\times$ & 6.88 & 17.24 & 24.12 & $1.00\times$ & 2914 MB & $1.00\times$ \\
+TE             & 2.96 & 5.32 & 8.28 & $1.42\times$ & 1210 MB & $1.20\times$ & 5.94 & 11.29 & 17.23 & $1.39\times$ & 2420 MB & $1.20\times$ \\
+\rowcolor{lightblue}
+COAT           & 2.88 & 5.16 & 8.04 & \boldsymbol{$1.47\times$} & 883 MB & \boldsymbol{$1.65\times$} & 5.89 & 10.82 & 16.71 & \boldsymbol{$1.44\times$} & 1766 MB & \boldsymbol{$1.65\times$} \\ 
+\midrule
+
+\multicolumn{4}{l}{\textit{Hidden Size = 4096, Batch Size = 4}} \\
+\midrule
+ & \multicolumn{6}{c}{Sequence Length = 2048} & \multicolumn{6}{c}{Sequence Length = 4096} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+ & Forward & Backward & Total & Ratio & Memory & Ratio & Forward & Backward & Total & Ratio & Memory & Ratio \\ \midrule
+BF16           & 7.77 & 18.78 & 26.55 & $1.00\times$ & 2914 MB & $1.00\times$ & 16.37 & 38.43 & 54.80 & $1.00\times$ & 5828 MB & $1.00\times$ \\
+TE             & 6.19 & 11.79 & 17.98 & $1.47\times$ & 2420 MB & $1.20\times$ & 12.66 & 24.58 & 37.24 & $1.47\times$ & 4840 MB & $1.20\times$ \\
+\rowcolor{lightblue}
+COAT           & 5.89 & 10.96 & 16.85 & \boldsymbol{$1.57\times$} & 1766 MB & \boldsymbol{$1.65\times$} & 12.16 & 23.44 & 35.6 & \boldsymbol{$1.53\times$} & 3533 MB & \boldsymbol{$1.65\times$} \\ 
+\bottomrule
+\end{tabular}
+}
+\end{table}
+\subsubsection{Speedup and Memory Saving  for end-to-end training}
+
+Table~\ref{table:end_to_end_speed_and_memory} presents a detailed comparison of end-to-end memory reduction and speedup results across different configurations for transformer models, specifically Llama-2-7B, Llama-2-13B, and Llama-30B, with variations in the number of GPUs used (1, 2, 4, and 8). It highlights COAT's effectiveness in reducing end-to-end memory footprint and the speedup compared to standard BF16 and TransformerEngine (TE) setups under varying conditions of batch size and context length.
+
+COAT allows full-parameter training of Llama-2-7B on \emph{a single GPU}, where BF16 and TE both out of memory (OOM). Similarly, for the Llama-2-13B and Llama-30B models, our method enables 2-GPU training for Llama-2-13B and 8-GPU training for Llama-30B when Batch Size = 1. 
+
+In all multi-GPU training setting, COAT can double the micro-batch size and therefore lead to even higher speedup. For example, our method can achieve $2.25\times$ speedup when training Llama-2-13B on 4-GPUs since we can effectively increase the batch size to 2.
+
+Overall, COAT significantly reduces end-to-end memory usage by up to $1.55\times$ and speeds up the end-to-end training by nearly $1.44\times$. This facilitates full-parameter training on fewer GPUs, which is particularly beneficial for larger language models.
+
+\begin{table}[t]
+\centering
+\caption{End-to-end memory reduction and speedup results. BS refers to batch size. CL refers to context length. We report token/s per GPU for speed results. $\ddagger$ means CL=1024.}\label{table:end_to_end_speed_and_memory}
+\resizebox{0.9\textwidth}{!}{%
+\begin{tabular}{cccccc|ccc}
+\toprule
+\multicolumn{2}{l}{\textbf{Llama-2-7B}} & 
+\multicolumn{4}{l|}{\emph{Context Length = 2048}} & \multicolumn{3}{l}{\emph{Maximum Batch Size, Context Length = 2048}} \\
+\midrule
+ & & Optimizer & Activations & Peak & Ratio & Max BS & Speed & Ratio \\ 
+\cmidrule(lr){1-9}
+\multirow{3}{*}{1 $\text{GPU}_{\text{BS=1}}$} & BF16 & - & - & \textcolor{red}{OOM} & - & - & \textcolor{red}{OOM} & - \\
+ & TE & - & - & \textcolor{red}{OOM} & - & - & \textcolor{red}{OOM} & - \\
+\rowcolor{lightblue}
+ & COAT & 13.1 GB & 8.1 GB & 79.3 GB & \textcolor{darkgreen}{\ding{51}} & \textcolor{darkgreen}{\textbf{1}} & 5906 token/s & \textcolor{darkgreen}{\ding{51}} \\
+\cmidrule(lr){1-9}
+\multirow{3}{*}{2 $\text{GPU}_{\text{BS=2}}$} & BF16 & - & - & \textcolor{red}{OOM} & - & 1 & 6130 token/s & 1.00$\times$ \\
+ & TE & - & - & \textcolor{red}{OOM} & - & 1 & 6842 token/s & 1.11$\times$ \\
+\rowcolor{lightblue}
+ & COAT & 6.5GB & 16.9 GB & 52.8 GB & \textcolor{darkgreen}{\ding{51}} & \textcolor{darkgreen}{\textbf{4}} & 11351 token/s & \textcolor{darkgreen}{\boldsymbol{$1.85\times$}} \\
+\cmidrule(lr){1-9}
+\multirow{3}{*}{4 $\text{GPU}_{\text{BS=2}}$} & BF16 & 13.1 GB & 25.8 GB & 55.1 GB & $1.00\times$ & 2 & 7730 token/s & $1.00\times$ \\
+ & TE & 13.1 GB & 21.9 GB & 51.1 GB & 1.08$\times$ & 2 & 9577 token/s & 1.24$\times$ \\
+\rowcolor{lightblue}
+ & COAT & 3.2 GB & 16.9 GB & 35.6 GB & \textcolor{darkgreen}{\boldsymbol{$1.54\times$}} & \textcolor{darkgreen}{\textbf{4}} & 11257 token/s & \textcolor{darkgreen}{\boldsymbol{$1.45\times$}} \\
+\cmidrule(lr){1-9}
+\multirow{3}{*}{8 $\text{GPU}_{\text{BS=2}}$} & BF16 & 6.5 GB & 25.8 GB & 41.2 GB & $1.00\times$ & 4 & 8238 token/s & $1.00\times$ \\
+ & TE & 6.5 GB & 21.9 GB & 37.2 GB & 1.11$\times$ & 4 &  11704 token/s & \textcolor{darkgreen}{1.42$\times$} \\
+\rowcolor{lightblue}
+ & COAT & 1.6 GB & 16.9 GB & 27.0 GB & \textcolor{darkgreen}{\boldsymbol{$1.52\times$}} & \textcolor{darkgreen}{\textbf{8}} & 11241 token/s & $1.36\times$ \\
+\midrule
+
+\multicolumn{2}{l}{\textbf{Llama-2-13B}}  & 
+\multicolumn{4}{l|}{\emph{Context Length = 2048}} & \multicolumn{3}{l}{\emph{Maximum Batch Size, Context Length = 2048}} \\
+\midrule
+ & & Optimizer & Activations & Peak & Ratio & Max BS & Speed & Ratio \\ 
+\cmidrule(lr){1-9}
+ & TE & - & - & \textcolor{red}{OOM} & - & - & \textcolor{red}{OOM} & - \\
+\rowcolor{lightblue}
+ & COAT & 12.6 GB & 10.1 GB & 73.2 GB & \textcolor{darkgreen}{\ding{51}} & \textcolor{darkgreen}{\textbf{1}} & 2137 token/s & \textcolor{darkgreen}{\ding{51}} \\
+\cmidrule(lr){1-9}
+\multirow{3}{*}{4 $\text{GPU}_{\text{BS=1}}$} & BF16 & 25.1 GB & 20.1 GB & 76.1 GB & $1.00\times$ & 1 & 2345 token/s & $1.00\times$ \\
+ & TE & 25.1 GB & 17.2 GB & 73.0 GB & 1.04$\times$ & 1 & 2851 token/s & 1.21$\times$ \\
+\rowcolor{lightblue}
+ & COAT & 6.3 GB & 13.2 GB & 49.1 GB & \textcolor{darkgreen}{\boldsymbol{$1.55\times$}} & \textcolor{darkgreen}{\textbf{2}} & 5295 token/s & \textcolor{darkgreen}{\boldsymbol{$2.25\times$}} \\
+\cmidrule(lr){1-9}
+\multirow{3}{*}{8 $\text{GPU}_{\text{BS=1}}$} & BF16 & 12.6 GB & 20.1 GB & 49.4 GB & $1.00\times$ & 2 & 3907 token/s & $1.00\times$ \\
+ & TE & 12.6 GB & 17.2 GB & 46.5 GB & 1.06$\times$ & 2 & 5604 token/s & 1.43$\times$ \\
+\rowcolor{lightblue}
+ & COAT & 3.1 GB & 13.2 GB & 32.5 GB & \textcolor{darkgreen}{\boldsymbol{$1.52\times$}} & \textcolor{darkgreen}{\textbf{4}} & 5650 token/s & \textcolor{darkgreen}{\boldsymbol{$1.44\times$}} \\
+\midrule
+
+\multicolumn{2}{l}{\textbf{Llama-30B}}  & 
+\multicolumn{4}{l|}{\emph{Context Length = 2048}} & \multicolumn{3}{l}{\emph{Maximum Batch Size, Context Length = 2048}}\\
+\midrule
+ & & Optimizer & Activations & Peak & Ratio & Max BS & Speed & Ratio \\ 
+\cmidrule(lr){1-9}
+\multirow{3}{*}{8 $\text{GPU}_{\text{BS=1}}$} & BF16 & - & - & \textcolor{red}{OOM} & - & - & \textcolor{red}{OOM} & - \\
+ & TE & - & - & \textcolor{red}{OOM} & - & - & \textcolor{red}{OOM} & - \\
+\rowcolor{lightblue}
+ & COAT & 7.8 GB & 24.2 GB & 70.5 GB & \textcolor{darkgreen}{\ding{51}} & \textcolor{darkgreen}{\textbf{1}} & 1363 token/s & \textcolor{darkgreen}{\ding{51}} \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+\subsection{Ablation Studies}
+
+\subsubsection{Dynamic Range Expansion's compatibility with other data formats}
+
+\begin{table}[ht]
+\centering
+\caption{Dynamic Range Expansion is compatible with DE8 (8-bit dynamic quantization).}\label{table:expand_quant_and_DE8}
+\small{
+\resizebox{0.85\textwidth}{!}{%
+\begin{tabular}{l|ccccccc}
+\toprule
+ & \multicolumn{6}{c}{Second Order} \\
+\cmidrule{2-7}
+First Order & E4M3 & E4M3 + Expand & E5M2 & E5M2 + Expand & DE8 & DE8 + Expand \\
+\midrule
+E4M3 + Expand & 15.13 & \textbf{\textcolor{red}{12.31}} & 21.96 & \textbf{\textcolor{red}{12.43}} & 14.01 & 18.84 \\
+DE8 & 12.11 & 8.27 & 20.02 & 8.43 & \textbf{\textcolor{red}{10.54}} & 16.25 \\
+DE8 + Expand & 11.57 & \textbf{\textcolor{darkgreen}{7.47}} & 19.69 & \textbf{\textcolor{darkgreen}{7.65}} & 9.91 & 15.81 \\
+\bottomrule
+\end{tabular}
+}
+}
+\end{table}
+
+Dynamic Exponent Quantization (DE) was proposed in ~\citep{dettmers2021adam8bit} to quantize the optimizer states since its representation range has a range of 7 orders of magnitude and is very suitable for optimizer states quantization. Therefore, they proposed to quantize both first-order and second-order momentum with 8-bit DE.
+
+We report the quantization error of $\frac{m}{\sqrt{v}}$ in Table~\ref{table:expand_quant_and_DE8}, and find that applying our dynamic range expansion method to 8-bit DE can further reduce the quantization error by $1.41\times$. Specifically, the lowest quantization error is achieved when first-order momentum $m$ is quantized with 8-bit DE + Dynamic Range Expansion, and second-order momentum $v$ is quantized with E4M3/E5M2 + Dynamic Range Expansion. This proves the effectiveness of our method.
+
+
+
+\section{Conclusion}
+
+In this work, we present COAT, a memory-efficient FP8 training framework for foundation models by quantizing both optimizer states and activations into FP8 format. 
+We observe that the FP8 format's representation range is not fully utilized when quantizing optimizer states, prompting us to propose Dynamic Range Expansion to align their dynamic range. We then identify the importance of quantizing non-linear layers, and propose mixed-granularity FP8 precision flow to quantize the activations accurately without introducing too much overhead.
+
+Extensive experiments on LLM and VLM training and fine-tuning demonstrate that COAT can achieve nearly lossless performance. In end-to-end training, COAT achieves a $1.54×$ memory reduction and $1.43×$ speedup compared to BF16, and is comparable or even faster to TransformerEngine's training speed. Our method also enables full-parameter training of billion-scale models on fewer GPUs and is able to double the batch size in realistic settings. These results highlight COAT's capability to enable memory-efficient, large-scale model training without sacrificing accuracy, providing a highly effective solution for memory-constrained environments. Future work could further explore combining our proposed approach with other low-precision gradient compression methods to reduce communication overhead.
+
+\newpage
+
+
+
+

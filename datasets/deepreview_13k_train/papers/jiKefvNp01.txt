@@ -1,0 +1,697 @@
+\title{RetinaGS: Scalable Training for Dense Scene Rendering with Billion-Scale 3D Gaussians}
+
+\begin{abstract}
+In this work, we explore the possibility of training high-parameter 3D Gaussian splatting (3DGS) models on large-scale, high-resolution datasets. We design a general model parallel training method for 3DGS, named RetinaGS, which uses a proper rendering equation and can be applied to any scene and arbitrary distribution of Gaussian primitives. It enables us to explore the scaling behavior of 3DGS in terms of primitive numbers and training resolutions that were difficult to explore before and surpass previous state-of-the-art reconstruction quality. We observe a clear positive trend of increasing visual quality when increasing primitive numbers with our method. We also demonstrate the first attempt at training a 3DGS model with more than one billion primitives on the full MatrixCity dataset that attains a promising visual quality.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.98\textwidth]{Teaser_300dpi_crop}
+\caption{\textbf{Left: }Different sizes of datasets require varying levels of computational power and numbers of 3DGS Primitives. Larger and higher-resolution datasets can no longer be trained using just a single GPU, which limits the pursuit of scale and fidelity in 3DGS reconstruction.
+\textbf{Right: }The billion-level model bring better visual experience than million-level model on MatrixCity-ALL dataset, which is trained via our distributed modeling with 64 GPUs.}
+\label{fig:teaser}
+\end{figure}
+3D scene reconstruction with Gaussian Splatting (GS)~\cite{kerbl20233d} has drastically improved rendering quality and rendering speed over previous neural 3D representation~\cite{mildenhall2021nerf,zhang2020nerf++,chen2022tensorf}. However, this success has been largely limited to reconstructing scenes with limited image or video resolution (typically $<=1600$ pixels wide), data volume, and view distance. Viewing the scene at high resolution or close range remains an unsolved challenge. To achieve imaging effects flawless to the human retina, which we refer to as the goal of \textit{retina-level reconstruction}, we would desire to train the GS models with higher spatial resolution, larger datasets, and more varying viewing distances. 
+However, all these demands lead to more compute and memory costs. Fig.~\ref{fig:teaser} illustrates the compute cost and memory footprint when training GS models across different rendering resolutions and different data volume on several datasets.
+We can observe that high-resolution training indeed improves the rendered views' visual quality. It also inevitably requires more splats, which means higher parameter counts. As the total compute of training grows roughly by the product of the number of pixels per view and the number of splats, training time on a single GPU will quickly become unacceptable. The increased splat numbers also lead to a growing memory footprint that could become infeasible for even the best single modern GPU. To enable effective scaling, we need a method for distributed GS training.  
+In this paper, we present a method to achieve efficient distributed training of GS models while retaining equivalence to the existing single GPU training scheme. We start by dividing the model space into a set of convex subspaces and identify one subset of splats for each subspace so that all the subsets collectively form an overlapping cover of the set of all splats. We then show that, with a proper subset assignment strategy, each ray's original iterative alpha-blending process can be transformed into a hierarchical form, in which we can first compute partial color and alpha values for each subset and then obtain the rendered pixel color value by orderly merging these partial values.
+We derive our training method by exploiting this property and designating one worker for each subset. In the forward process, all workers compute subset-level color and alpha values for all rays in parallel. The partial values, sufficient to compute rendered pixel values, can then be merged through cross-worker communication with a minimal message size. After computing the reconstruction loss and its gradients w.r.t. the partial values, we can distribute the corresponding gradients to each worker and run the backward process in parallel. We further improve training efficiency by utilizing KD-tree to produce subspaces that induce subsets with more even cardinality. This method allows us to efficiently train arbitrarily large GS models on multiple GPUs without any assumption on the reconstructed scene.
+We validate the training method on multiple 3D reconstruction datasets with high training resolutions. The trained GS models outperform 3DGS\cite{kerbl20233d} on Mip-NeRF360\cite{barron2022mip}, Mega-NeRF~\cite{turki2022mega}, ScanNet++\cite{yeshwanth2023scannet++} and MatrixCity\cite{li2023matrixcity} datasets. Through scaling study, we observe a clear tendency to improve visual quality when the GS models grow in splat numbers. Finally, we demonstrate to our knowledge the first attempt at training GS models with billion-scale primitives on city-level dataset with 140k images, resulting in unprecedented visual experience using million-scale primitives.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Distributed Neural Radiance Fields.} NeRF~\cite{mildenhall2021nerf} has revolutionized 3D scene reconstruction and novel viewpoint generation with its photorealistic rendering capabilities, sparking a series of subsequent innovations focused on enhancing various aspects of the technology. These advancements strive to improve rendering quality~\cite{zhang2020nerf++,baumgartner2004cyclooxygenase,barron2021mip,barron2022mip}, optimize training speed~\cite{sun2022direct,fridovich2022plenoxels,chen2022tensorf,muller2022instant}, increase memory efficiency~\cite{reiser2023merf,li2023compressing,rho2023masked} and expand the scale of reconstructed scenes~\cite{zhenxing2022switch, xiangli2022bungeenerf, tancik2022block, turki2022mega, xu2023grid, zhang2023efficient, song2023city, wu2023scanerf}. While these fields might benefit from larger models or enhanced computational power, it is primarily the pursuit of scaling scene sizes that has driven researchers to explore ways to speed up or scale up NeRF models. Switch-NeRF~\cite{zhenxing2022switch} utilizes a Mixture of Experts (MoE) to increase the capacity of NeRF models, enabling them to represent urban-scale scenes effectively. Bungee-NeRF~\cite{xiangli2022bungeenerf} employs a hierarchical assembly of submodels, granting the model extensive multiscale representational capabilities. Recognizing the limitations imposed by GPU computational power and memory on model scale and training velocity, some researchers have begun deconstructing models into smaller components, adopting distributed approaches to address these challenges. Block-NeRF~\cite{tancik2022block} segments cities into multiple overlapping blocks, each represented by its own NeRF model, and uses neural networks to fuse the outputs of multiple NeRF models in image space, achieving seamless visual results. Mega-NeRF~\cite{turki2022mega} introduces a simple geometric clustering algorithm and partitions training pixels into various NeRF submodules, which can then be trained in parallel. 
+
+\paragraph{Distributed Point-Based Representation.} NeRF utilizes a volumetric rendering approach that inherently limits their inference speed, which makes it challenging to achieve real-time performance. Several studies~\cite{yu2021plenoctrees,reiser2023merf,yariv2023bakedsdf,tang2023delicate} have focused on optimizing inference speeds, yet achieving both real-time performance and high-quality rendering remains elusive. In contrast, the 3D Gaussian Splatting (3DGS)~\cite{kerbl20233d} method, which employs a point-based scene representation, achieves state-of-the-art rendering quality and speed and has significant advantages in training speed. However, the "shallow and wide" structure of the 3DGS model and its explicit representation lead to a larger parameter count and increased training memory footprint. VastGaussian~\cite{lin2024vastgaussian} is the first attempt to large-scale scene reconstruction with 3DGS. It divides the ground plane into a series of 2D cells with one splat subset for each cell. Unlike our method, all subsets are mutually exclusive and considered as independent 3DGS models in training. To mitigate the deviation from the original 3DGS rendering equation at subspace boundaries, VastGaussian introduces additional nearby cameras and Gaussian primitives to assist in training at the cost of increased compute and memory. CityGaussian~\cite{liu2024citygaussian} uses a similar partitioning strategy but trains an additional coarse GS model as the baseline to regularize submodels. 
+However, artifacts caused by deviation from the proper rendering equation could still intensify at certain view angles and overcome the mitigations. As a result, these approaches mostly assume bird-eye-view urban scenarios due to their simplicity in view angles and splat distribution. Our method is based on an equivalent form of the 3DGS rendering equation. Thus it can be applied to any scene with arbitrary splat distribution.
+
+\paragraph{Distributed Deep Learning.}
+Our work is also related to distributed deep learning, which aims to scale up the training system for deep neural network models~\cite{DistBelief,tensorflow2015-whitepaper, TorchDDP}. Early approaches revolve around training multi-GPU convolutional neural networks (CNNs)~\cite{CUDAConvNet} on image~\cite{jia2014caffe} and video~\cite{MultiGPUCaffe2015} datasets, with data parallelism being highly efficient thanks to CNNs' high compute to bandwidth ratio. Recent development of large language models presented new challenges in distributing model parameters and larger clusters, resulting in dedicated model parallelism~\cite{Alex2014WeirdTrick} approaches for Transformers~\cite{Transformer2017} models, such as tensor-parallelism~\cite{MegatronLM}, pipeline parallelism~\cite{GPipe}, or hybrid parallelism~\cite{MegatronLM,RingAttention,GShard}. Fully sharded data parallelism~\cite{FairScale2021}, a type of redundancy-free data parallelism~\cite{DeepSpeed}, also works great with LLM training. Our method is best described as model parallelism as it partitions GS model parameters onto multiple workers to distribute workload and incurs communication cost only for Gaussian on the subspace boundaries. This is well suited to GS models' relatively low compute-to-parameter ratio\footnote{also known as operational intensity~\cite{samuel2009roofline}.}, which makes data parallelism less efficient.  
+
+
+\section{Approach}
+
+\subsection{3D Gaussian Splatting}
+3D Gaussian Splatting (3DGS) utilizes a series of anisotropic 3D Gaussian primitives to explicitly characterize scenes. Each Gaussian primitive, known as a \textit{splat}, is defined by its central position \(\mu \in \mathbb{R}^3\), and a covariance matrix \(\Sigma \in \mathbb{R}^{3 \times 3}\). A splat's influence at any given point $x$ within the scene's world coordinate system is attenuated by the Gaussian function
+\begin{equation}
+    G(x) = e^{-\frac{1}{2} (x-\mu)^T \Sigma^{-1} (x-\mu)}.
+    \label{eq:gs}
+\end{equation}
+In practice, the function is truncated to save computation. 
+Each splat also carries an opacity \(\alpha \in \mathbb{R}\). Its color attributes \(F \in \mathbb{R}^C\) are expressed through spherical harmonics (SH) \(c \in \mathbb{R}^3\) to allow view-dependent textures. A view is rendered through rasterization the Gaussian primitives onto a 2D imaging plane, during which the 3D Gaussians are projected to 2D Gaussians \(G'(x')\) through Jacobian linearization as described in~\cite{zwicker2001ewa}.
+As a result, the influence weight of each 3D primitive on a given ray $l$ needs to be computed through path integration, whereas a 2D primitive only requires a single sampling, that is, \(g(l) = G'(x')\), where \(x'\) is the intersection point of the ray \(l\) with the 2D imaging plane.
+By employing alpha-blending, these primitives are rendered with the following rendering equation
+\begin{equation}
+    C(l) = \sum_{g_i \in {N_l}} c_i \sigma_i \prod_{g_j\in N_{l},~j<i} (1 - \sigma_j), \quad \sigma_i = \alpha_i g_i(l),
+    \label{eq:render}
+\end{equation}
+where \({N_l}\) denotes the set of Gaussian primitives that contribute to ray $l$, arranged in order of their depth.
+
+\subsection{Distributed Training of 3DGS}
+
+Given the set of all splats $N=\{g_i\}$ and $K$ workers $\{w_1, \ldots, w_K\}$, we aim to devise a distributed training method with minimal communication overhead that still conforms to the rendering equation in Eq.~\ref{eq:render}. We first divide the scene space into a set of convex subspaces $S_1, \ldots, S_K$. One worker is expected to only work on a subspace and incur minimal communication needs. To achieve this, we generate $K$ subsets $N_1, \ldots, N_K$ and $N_1 \cup N_2 \cup ... \cup N_K = N$, which are allowed to overlap. Below we show how to create $N_k$ and manipulate Eq.~\ref{eq:render} for distributed computation for the workers.
+
+Given a ray $l$ and a subspace $S_k$, we can always obtain a subset of $N$ as $N_{lk}$ which denotes all splats that, when projected to a truncated 2D Gaussian according to $l$, intersects with $l$ within $S_k$. Note since the Gaussians are truncated, not all splats will intersect with $l$.
+Since $N_{lk}$ is ray dependent, we define $N^*_k = \cup_{l} N_{lk}$ as the union of $N_{lk}$ for all possible rays. 
+Going through every possible ray to obtain $N^*_{k}$ is infeasible. 
+However, we know that any intersection point must reside on its corresponding 3D ellipse. So, we can instead define $N_k$ as the set of splats whose corresponding 3D ellipsoid intersects with $S_k$. Then it is obvious that $N^*_{k} \subseteq  N_k$ and $N_k$ is not dependent on any specific ray. 
+To render the color for a given ray, We can first calculate the partial color $C_k(l)$ and the partial opacity $T_k(l)$ on $N_k$ as
+\begin{align}
+    C_k(l) & = \sum_{g_i \in N_k} c_i \sigma_i \mathbbm{1}(g_i \in N_{lk})  \prod_{g_j \in N_{k},~j < i} (1 - \sigma_j\mathbbm{1}(g_j \in N_{lk})), \nonumber \\
+    \label{eq:sub-color}
+    & = \sum_{g_i\in N_{lk}} c_i\sigma_i \prod_{g_j\in N_{lk},~j<i} ( 1-\sigma_j)\\
+    T_k(l) & = \prod_{g_i \in {N}_k} (1 - \sigma_i\mathbbm{1}(j \in N_{lk})) \nonumber\\
+     & = \prod_{g_i \in {N}_{lk}} ( 1 - \sigma_i),
+    \label{eq:sub-opacity}
+\end{align}
+where \(\sigma_i = \alpha_i g^{k}_i(l)\) and $\mathbbm{1}(\cdot)$ denotes the indicator function which equals to 1 when the condition specified is true and otherwise equals to 0. 
+Note splats in $N_k$ are ordered by their distance to the origin of $l$ to attain the index $ i,~j$ in Eq.~\ref{eq:sub-color} and Eq.~\ref{eq:sub-opacity}. The introduction of the indicator function allows the accumulation to be carried on the entire $N_k$ for any ray $l$.
+The partial values can then be merged in the order that the ray passes through them, which can be represented as a permutation $o_l$ of size $K$:
+\begin{equation}
+    C(l) = \sum_{k \in o_l} C_k(l) \prod_{m\in o_l,~m < k} T_m(l). 
+    \label{eq:merge}
+\end{equation}
+Substituting Eq.~\ref{eq:sub-color}  and \ref{eq:sub-opacity} into Eq.~\ref{eq:merge}, we can observe that Eq.~\ref{eq:render} is equivalent to Eq.~ \ref{eq:merge} for any $l$.
+Therefore we have transformed the rendering equation of 3DGS into the independent computation of subset-level partial colors and opacities and the subsequent merging. All workers can compute their corresponding partial values in parallel for each subset $N_k$ and perform the merge step through cross-worker communication. The result will be identical to when rendered on a single worker.
+\noindent\textbf{Evaluating the condition of $g_i\in N_{lk}$}. Since the subspaces \(S_1, S_2, \ldots, S_K\) seamlessly partition the entire space and each subspace is convex, it necessitates that all dividing surfaces are planar. Each subspace \(S_k\) can be represented by a set of plane constraints: 
+\(
+S_k = \{ x \in \mathbb{R}^3 : n^\top_{km} \cdot x + d_{km} \leq 0, \text{ for all } m \}
+\)
+, which allows us to transform the indicator function \(\mathbbm{1}\) in Eq~\ref{eq:sub-color} into a form more amenable to computation:
+
+\begin{align}
+    \mathbbm{1}(g_i \in N_{lk}) = \mathbbm{1}(x_i \in S_k) =  \prod_m \mathbbm{1}(n^\top_{km} \cdot x_i + d_{km} \leq 0),
+    \label{eq:indicator}
+\end{align}
+where \(x_i\) represents the world coordinates of the intersection between the ray \(l\) and the 2D Gaussian primitive \(G'_i\). Expressing the ray \(l\) as the equation \(l(t) = o + td\), which is defined by the camera center \(o \in \mathbb{R}^3\) and the unit ray direction \(d \in \mathbb{R}^3\), then \(x_i\) precisely equals the projection center point \(u_i\) of $g_i$ onto \(l\), which can be represented as: 
+\(x_i = u_i + ( d^\top \cdot (o - u_i) ) d\).
+\subsection{Distributed Training with Sub-models}
+
+To balance each subset's size and each worker's workload, we employ a KD tree to determine the partition of the subspaces \(\{S_k\}\). Initially, we construct a three-dimensional KD tree with a depth of \(L\) using the center coordinates of Gaussian primitives. The KD tree recursively uses hyperplanes perpendicular to the X, Y, and Z axes to bisect the space and equally divided primitives, ultimately resulting in a series of rectangular subspaces \(S_1, S_2, \ldots, S_K\), where \(K = 2^L\). Then, the corresponding subsets for each worker can be derived as: 
+\(
+N_k = \{ i : n^\top_{km} \cdot u_i + d_{km} \leq D_i, \text{ for all } m \}
+\), where $u_i$ is the center of primitives and $D_i$ is the truncation threshold for $g_i$. In our implementation, we set $D_i$ to be three times the length of the major axis of the Gaussian ellipsoid. 
+Fig~\ref{fig:cross-bound} provides an intuitive illustration of how the primitives near the subspace boundary work.
+
+\subsection{The Complete Training Pipeline}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/pipeline_1500dpi.png}
+\caption{By employing planes generated using KD-Tree, we spatially partitioned the initial 3DGS model to a set of sub-models. These sub-models share certain primitives only when these primitives cross boundaries. The rendering results of sub-models are then merged to form the final rendered image. After the loss is computed uniformly, the corresponding gradients are returned to each sub-model to update their primitive parameters.}
+\label{fig:pipeline}
+\end{figure}
+
+The actual training pipeline is shown in Figure~\ref{fig:pipeline}. We denote each subset as a sub-model and assign it to a separate GPU, while a central manager is responsible for managing the KD-Tree and the subspaces \(\{S_n\}\). This manager also handles the parsing of incoming rendering requests and distributes rendering tasks to the relevant sub-models. The computational results from all sub-models, \(\{T_k\}\) and \(\{C_k\}\), are sent back to the central manager. These results can be represented in a 2D map with the same resolution as the target image, which consumes only minimal communication bandwidth. The central manager then completes the final rendering based on Eq~\ref{eq:merge}, calculates the loss, and sends the gradient back to each sub-model for model parameter updates. After a predetermined number of training epochs, we repeat the partitioning process to accommodate any significant shift of primitive centers. Note that primitives belonging to intersections of multiple subsets require gradient synchronization after each training step. Empirically, we found this could be omitted without significantly affecting reconstruction quality. 
+
+\subsubsection{Primitive Initialization}
+
+In the original 3D Gaussian Splatting (3DGS) approach, initialization and densification processes involved numerous heuristic strategies and hyperparameters to ensure that Gaussian primitives were appropriately positioned. Such strategies made it difficult to control the number of primitives, impeding our ability to effectively scale the model size and leverage the advantages of distributed modeling to enhance rendering fidelity. Furthermore, we found that the densification process does not always promote an increase in primitives in high-resolution training, which makes it counterproductive.
+
+In this paper, we adopt a simple yet effective strategy for initialization as shown in Fig~\ref{fig:pipeline} and do not adjust the number afterwards. We performed Multi-View Stereo (MVS) on all training data to obtain depth estimations for all training viewpoints, which were then transformed into dense 3D point clouds. These point clouds could be flexibly sampled and initialized as Gaussian primitives. This streamlined approach allowed us to control the number of primitives as desired. It is also easier to balance workers' workloads thanks to a predefined number of primitives.
+
+
+
+\section{Experiments}
+
+
+\paragraph{Datasets.}
+Our performance evaluation spanned 4 datasets that comprising indoor and outdoor scenes. These datasets include all scenes from full-resolution \textit{MipNeRF-360}~\cite{barron2022mip}. We extended our analysis to high-resolution scenarios based on the ScanNet++ dataset~\cite{yeshwanth2023scannet++}, with a focus on scenes labeled 108ec0b806 and 8133208cb6. After distortion correction, two scenes provided 863 and 476 high-resolution images respectively (8408 pixels wide).
+Furthermore, we conducted tests in large-scale environments, including the Residence, Building, and Rubble datasets from \textit{Mega-NeRF}~\cite{turki2022mega}, as well as the entire \textit{MatrixCity Small City Aerial} dataset (referred to as MatrixCity-Aerial, 1920$\times$1080), consisting of 6,362 images. We also utilized the \textit{MatrixCity Small City Dense Street} dataset, sampling 5 angles every meter along the centerline of streets to gather 135,290 images (1000$\times$1000). From the \textit{Small City Dense Street} dataset, we selected a focused test set of 2,480 images (referred to as MatrixCity-M). By combining all images from Aerial and Dense Street (referred to as MatrixCity-ALL), we conducted a comprehensive Billion GS level reconstruction. We followed the official Train/Test splits for \textit{Mega-NeRF} and \textit{MatrixCity-Aerial}, and used every eighth image for testing in other datasets as recommended by MipNeRF-360.
+To obtain superior MVS initial points, we reran Colmap's sparse reconstruction based on full-resolution images of MipNeRF-360 and ScanNet++ to obtain poses (using official provided poses of Mage-NeRF and MatrixCity), and subsequently performed dense reconstruction~\cite{schonberger2016pixelwise} on all datasets except MatrixCity-ALL. For MatrixCity-ALL, we replaced depth estimations of MVS with official provided depth estimations to avoid super long time cost of Colmap's dense reconstruction (using MVS for MatrixCity-M and MatrixCity-Aerial).
+
+\paragraph{Baselines and Metrics.}
+Our comparisons include 3DGS and NeRF-related works. For fair comparisons, results from an equal number of iterations from our own 3DGS runs are also presented. We primarily assessed the rendered image quality using three metrics consistent with 3DGS: PSNR, SSIM, and LPIPS.
+
+\paragraph{Implementation Details.} Our method is based on 3DGS. We extended the number of training iterations to 60k on MipNeRF-360, ScanNet++ and Maga-NeRF and 20 epochs on all MatrixCity datasets for both 3DGS and ours to ensure adequate convergence. We do not adjust the number of primitives during training. Since the primitives are initialized with relatively accurate position parameters from MVS, we reduce the learning rate for the position parameters in all primitives from from $1.6\times 10^{-4}$ to $1.6\times 10^{-6}$ with a exponential decay function, which is 1/100th of the original setting in 3DGS. All experiments are conducted on NVIDIA A100 GPUs.
+
+\subsection{Experimental Results}
+{
+\setlength{\tabcolsep}{0pt}
+\centering
+\begin{figure}[htbp] 
+
+\begin{tabular}{ccc}  
+   \begin{subfigure}{0.32 \textwidth} 
+        \centering  
+        \includegraphics[width=\linewidth]{convergence_curve_garden_nearest_neighbor_interpolation} 
+        \caption{Garden}  
+        \label{fig:convergence_curve_garden_nearest_neighbor_interpolation}  
+    \end{subfigure} & \hspace{0.01\textwidth}
+    \begin{subfigure}{0.32 \textwidth}
+        \centering  
+        \includegraphics[width=\linewidth]{convergence_curve_scannet} 
+        \caption{ScanNet++}  
+        \label{fig:Garden_change_number_GS}  
+    \end{subfigure} & \hspace{0.01\textwidth}
+    \begin{subfigure}{0.32 \textwidth}
+        \centering  
+        \includegraphics[width=\linewidth]{convergence_curve_matrix_city} 
+        \caption{MatrixCity-M}  
+        \label{fig:convergence_curve_matrix_city}  
+    \end{subfigure} 
+    
+\end{tabular}
+    \caption{\textbf{PSNR vs. \#GS analysis on various datasets.}
+    The markers represent 3DGS baseline, and the curves denote our method. 
+    Results at various training resolutions are upsampled and evaluated at the full resolution to unify the metrics.
+    Our method achieves superior PSNR simply by naively scale the model size. This trend is more pronounced on the high-fidelity dataset ScanNet++ and larger-scale dataset MatrixCity-M.}  
+    \label{fig:main}      
+\end{figure}
+}
+Fig~\ref{fig:main}presents our quantitative results on the MipNeRF-360 (Garden), ScanNet++ (108ec0b806), and MatrixCity-M with various training resolution. To standardize the metrics and align them more closely with direct visual perception, we upsample all rendered results from different resolutions to the full resolution using nearest-neighbor upsampling and evaluate on the full resolution. Utilizing MVS for initializing Gaussian points and disabling densification allows us to easily control the number of model points. Furthermore, our distributed training approach enables the use of a large number of Gaussian primitives. We observed a strong positive correlation between the number of Gaussian primitives and the final model's PSNR. When the number of primitives is similar, our PSNR closely matches the quality of 3DGS trained on a single GPU; however, we can effectively achieve higher PSNRs by simply increasing the number of primitives. Table~\ref{tbl:3dgs_vs_ours} shows results on more datasets, uniformly showing that our method consistently performs better across all datasets, especially on high-resolution and large-scale datasets.
+
+{
+\setlength{\tabcolsep}{0pt}
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/cases2_750dpi.png}
+\caption{Visualization of models and with various number of primitives and training resolution on Garden and ScanNet++ dataset (top and bottom metrics: training resolution/splats count/PSNR). As we get close to objects or zoom into camera, higher training resolutions and more primitives help maintain rendering clarity and reveal more details, which bring better visual experience and better quantitative results than the 3DGS baseline.
+ }  
+\label{fig:garden_vis}  
+\end{figure}
+}
+
+We further analyze the relationship between the number of Gaussian points and subjective visual effects, as illustrated in Fig.~\ref{fig:garden_vis}. As revealed in Fig.~\ref{fig:main}, at a fixed number of GS primitives, higher resolutions yield better image quality; similarly, at a fixed high resolution, an increased number of primitives enhances image quality. We believe that the number of primitives determines the capacity of the 3DGS model, while higher image resolutions bring a greater amount of information, necessitating a larger model capacity to achieve adequate fitting. Therefore, to ensure a \textbf{Retina} quality effect, both high resolution and high-quality rendering are essential, which in turn imposes substantial demands on the number of GS primitives.
+
+\begin{table}[ht] \scriptsize
+\centering
+\caption{PSNR vs. \#GS analysis. * indicates that the results are average values across multiple scenes.}
+\begin{tabular}{c|cc|cc|cc|cc|cc|cc} 
+ \toprule
+Datasets  & \multicolumn{2}{c}{MatrixCity-Aerial} & \multicolumn{2}{c}{MatrixCity-M} & \multicolumn{2}{c}{Mega-NeRF*} &  \multicolumn{2}{c}{ScanNet++*}  & \multicolumn{2}{c}{MipNeRF-360*}  \\
+Pixels&  \multicolumn{2}{c}{13.19B} & \multicolumn{2}{c}{2.48B} & \multicolumn{2}{c}{2.25B} & \multicolumn{2}{c}{33.44B} &  \multicolumn{2}{c}{2.32B}  \\ \cmidrule{1-11}
+Metrics & PSNR & \#GS & PSNR & \#GS& PSNR & \#GS& PSNR & \#GS& PSNR & \#GS\\ \midrule
+3DGS\textsuperscript{\dag} &  26.56& 25.06M& 27.81& 1.53M&  22.56& 6.57M& 28.42& 1.87M&  27.33& 3.02M\\
+Ours  & \textbf{27.70}& 217.30M& \textbf{31.12} & 62.18M & \textbf{23.03}& 35.57M& \textbf{28.91}& 39.89M& \textbf{27.78}& 27.79M \\
+ \bottomrule
+\end{tabular}
+\label{tbl:3dgs_vs_ours}
+\end{table}
+\subsection{Exploration study}
+
+\noindent\textbf{Initialization and Densification}.Fig~\ref{fig:PM_failed}. Excessive iterations lead to deteriorating results. Using an aggressive densification strategy in 3DGS did not yield better outcomes, and excessive point splitting made the training unstable. In Fig~\ref{fig:PM}, we show that initialization via MVS results in a more stable training run and better model quality. By simply initializing using MVS with more primitives, our model surpasses the original 3DGS even with careful tuning.
+
+\begin{figure}[tbp]
+\centering
+\begin{tabular}{ccc}  
+    \begin{subfigure}{0.4 \textwidth} 
+        \centering  
+        \includegraphics[width=\linewidth]{figures/PM_Garden.png} 
+        \caption{Garden}          \label{fig:convergence_curve_garden_nearest_neighbor_interpolation}  
+    \end{subfigure}   & \hspace{0.01\textwidth}
+    
+    \begin{subfigure}{0.38816 \textwidth}
+        \centering  
+        \includegraphics[width=\linewidth]{figures/PM_MatrixCity.png} 
+        \caption{MatrixCity-M}  
+        \label{fig:Garden_change_number_GS}  
+    \end{subfigure}
+\end{tabular}
+\caption{\textbf{Comparative Analysis of Desification Strategies.} The curves denote our MVS initialization, showing a clear positive correlation between the number of primitives and visual quality. Baseline results from the 3DGS method with its default densification threshold of 0.0002 are marked as black dots. Lower thresholds were tested to assess their impact on point densification compared to the default setting. The findings suggest that reducing the threshold does not consistently increase model size and fails to outperform our method.}
+\label{fig:PM}
+\end{figure}
+\noindent\textbf{Validity of Distribute Rendering} we devise a simple test to validate the correctness of the underlying rendering equation in our method. We precisely positioned the camera's optical axis on the dividing plane between two subspaces sharing this plane, ensuring that each ray passes through only one subspace. In this case, each image pixel should only be rendered by primitives on one side of the plane. If we do not perform the step, we would expect a crisp boundary between color pixels and completely dark pixels on the partially rendered images from the two subspaces. As shown in Fig.~\ref{fig:depth_order_error}, our method exhibits the expected behavior while baseline partition approaches~\cite{lin2024vastgaussian,liu2024citygaussian} that deviates from the proper rendering equation fails the test. 
+
+{
+\setlength{\tabcolsep}{0pt}
+\begin{figure}[htbp] 
+\centering  
+\begin{tabular}{cccccc}
+  \includegraphics[width=0.16\linewidth, trim=200 200 375 75, clip]{disorder_resized/garden/half_00002_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.16\linewidth, trim=200 200 375 75, clip]  {disorder_resized/garden/half_00002_1.png} & \hspace{0.001\linewidth}
+  
+  \includegraphics[width=0.16\linewidth, trim=200 200 375 75, clip]{disorder_resized/garden/3dgs_00002_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.16\linewidth, trim=175 200 400 75, clip]{disorder_resized/garden/3dgs_00002_1.png} & \hspace{0.001\linewidth}
+  
+  \includegraphics[width=0.16\linewidth, trim=200 200 375 75, clip]{disorder_resized/garden/tune_00002_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.16\linewidth, trim=200 200 375 75, clip]{disorder_resized/garden/tune_00002_1.png}
+    \\    
+ \multicolumn{2}{c}{Our Partition}& \multicolumn{2}{c}{Cell-based} & \multicolumn{2}{c}{Cell-based + Fine-tune}\\
+ \multicolumn{2}{c}{PSNR: 27.053}& \multicolumn{2}{c}{PSNR: -} & \multicolumn{2}{c}{PSNR: 26.969}
+\end{tabular}
+\caption{Our two submodels produced distinctly bounded outputs, and result in better PSNR results. In contrast, spatial-based partitions exhibited blurry boundaries that could not be entirely eliminated by comprehensive end-to-end refinement, demonstrating the superiority of our approach. }
+\label{fig:depth_order_error}
+\end{figure}
+}
+
+\paragraph{KD-Tree Partition vs. Fixed-size Partition.}
+We compare our KD-Tree partitioning approach to a naive grid division strategy that uniformly divides the scene into blocks of fixed size in Table~\ref{tbl:ablation of split strategy}. The KD-Tree effectively balances the number of primitives in each sub-model, resulting in an optimal balance in peak memory usage and the best training speed. KD-tree is used throughout all experiments work without further notice.
+\begin{table}[ht]
+\centering
+\caption{\textbf{Partition efficiency.} Range of primitive count, memory usage, total time, and communication time of submodels under different partition strategies in distributed training. The fixed-size division resulted in sub-models with significantly varied number of primitives and computation times, which increased time spent blocking on waiting, thereby reducing the overall system efficiency.}
+ \begin{tabular}{ ccccccc } 
+ \toprule
+Partition &  Batch Size & GPU & Primitives (M) &  Mem.(GiB)  & Total Time (s) & Comm. (s)\\ 
+\midrule
+KD-Tree& 2& 2& 2.87$\sim$2.88& 6.26$\sim$6.32& 26.74$\sim$26.76& 4.39$\sim$6.04  \\ 
+Fixed-size& 2& 2& 0.81$\sim$4.93& 3.57$\sim$9.01& 32.45$\sim$32.52& 1.04$\sim$23.83 \\ 
+\midrule
+KD-Tree& 4& 4& 1.45$\sim$1.47& 5.26$\sim$5.40& 18.87$\sim$18.90& 5.33$\sim$7.34  \\ 
+Fixed-size& 4& 4& 0.05$\sim$4.79& 3.08$\sim$10.95& 32.26$\sim$32.41& 4.77$\sim$26.83\\ 
+ \bottomrule
+\end{tabular}
+\label{tbl:ablation of split strategy}
+\end{table}
+
+\paragraph{Model parallelism vs. Data parallelism.} We compare data parallel training and training with our method, which is model parallelism, on the MipNeRF-360-garden dataset. 
+As shown in Table~\ref{tbl:dp_and_mp}, our method achieve lower peak memory usage and higher training throughput. It is evident that even with such a small GS model, our method maintains its advantages over DP and single GPU training. However, as the size of submodels decreases and their quantity increases, it becomes increasingly challenging for MP to achieve workload balance. As shown in Table~\ref{tbl:ablation of batch size}, a straightforward solution is to increase the batch size, which statistically leads to a more balanced workload. 
+\begin{table}[ht]
+\small
+\centering
+    \begin{minipage}{.48\linewidth}
+    \setlength{\tabcolsep}{3pt}
+        \centering
+        \captionsetup{width=.95\textwidth}
+        \caption{\textbf{Parallel mechanism efficiency. } Efficiency of data parallel(DP) and our model parallel(MP) with various setting.}
+        \label{tbl:dp_and_mp}
+        \begin{tabular}{cccccc} 
+         \toprule
+        Parallel & GPU & Batch Size & Mem. & Time  & Comm. \\ 
+        \midrule
+        -  & 1 & 1 & 8.33& 32.35& 0 \\
+        \midrule
+        DP & 2 & 2 & 9.66&  45.36& 29.22  \\ 
+        MP & 2 & 2 & \textbf{6.26}&  \textbf{26.76}&\textbf{6.038}  \\ 
+        \midrule
+        DP & 4 & 4 & 9.66&  30.62& 21.56  \\ 
+        MP & 4 & 4 & \textbf{5.26}&  \textbf{18.90}& \textbf{7.34}  \\ 
+        \midrule
+        DP & 8 & 8 & 9.66&  20.38& 16.51  \\ 
+        MP & 8 & 8 & \textbf{5.05}&  \textbf{17.738}& \textbf{12.73}  \\ 
+         \bottomrule
+        \end{tabular}
+    \end{minipage}% 
+    \hfill
+    \begin{minipage}{.48\linewidth}
+    \setlength{\tabcolsep}{3pt}
+        \centering
+        \captionsetup{width=.95\textwidth}
+         \caption{\textbf{Efficiency vs. Batch Size.} Increasing the batch size enhances the balance of computation across processes, resulting in reduced communication blocking. }
+        \label{tbl:ablation of batch size}
+        \begin{tabular}{ ccccc} 
+         \toprule
+        Bacth Size & GPU-ID  &  Mem.  & Time  & Comm. \\ 
+        \midrule
+        \multirow{2}{*}{1}& 0& 5.52& 31.20& 6.51 \\
+                             & 1& 5.31& 31.84& 10.94 \\
+        \midrule
+        \multirow{2}{*}{2}& 0& 6.26& 26.76& 6.04 \\ 
+                             & 1& 6.32&  26.74& 4.39 \\
+        \midrule
+        \multirow{2}{*}{4}& 0& 7.79& 25.29& 6.20 \\ 
+                             & 1& 7.93&  25.30& 3.02 \\
+         \bottomrule
+        \end{tabular}
+    \end{minipage}
+\end{table}
+
+
+
+
+\section{Training Billion-Scale 3DGS}
+
+
+Our distributed modeling method enables the GS model to scale up to extremely large sizes. Typically, scenes in previous work are trained on a single GPU using 10 to 200 million pixels with a GS model with \textbf{millions} of primitives. In this work, we use 64 A100 GPUs for 10 days to train a 3DGS model with a \textbf{billion} primitives on the MatrixCity-ALL dataset, which includes \textbf{141,652 images} containing over \textbf{148 billion} pixels. There have been no previous reports of successful training at this scale of training set or model size. 
+After training the model with our method for 20 epochs, billion-scale model achieve superior quantitative results compared to million-scale model as shown in Table.~\ref{tbl:MatrixCity-ALL}.
+We provide more visualization results in the Fig~\ref{fig:Matrix_City_comparision}.
+
+{
+\setlength{\tabcolsep}{0pt}
+\begin{figure}[htbp]
+\centering  
+\begin{tabular}{cccc}  
+    \includegraphics[width=0.24\linewidth]{figures/city/5_GT.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/5_1B.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/5_100M.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/5_10M.png}
+    \\ 
+    \includegraphics[width=0.24\linewidth]{figures/city/8_GT.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/8_1B.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/8_100M.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/8_10M.png}
+    \\ 
+    \includegraphics[width=0.24\linewidth]{figures/city/9_GT.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/9_1B.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/9_100M.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/9_10M.png}
+    \\ 
+    \includegraphics[width=0.24\linewidth]{figures/city/6_GT.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/6_1B.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/6_100M.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/6_10M.png}
+    \\ 
+    \includegraphics[width=0.24\linewidth]{figures/city/7_GT.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/7_1B.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/7_100M.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/7_10M.png}
+    \\ 
+    \includegraphics[width=0.24\linewidth]{figures/city/2_GT.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/2_1B.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/2_100M.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/city/2_10M.png}
+    \\ 
+   GT & 1B & 100M& 10M   \\
+\end{tabular} 
+\caption{1 Billion-Scale  vs. 100 Million-Scale vs. 10 Million-Scale 3DGS Model on Maxtricity-ALL Dataset.}
+\label{fig:Matrix_City_comparision}  
+\end{figure}
+}
+
+\begin{table}[ht] \small
+\small
+\centering
+\caption{Qualitative results on MatrixCity-All. More primitives can effectively improve performance, although it requires more GPUs.}
+\begin{tabular}{c|ccccc} 
+ \toprule
+Datasets&  \multicolumn{5}{c}{MatrixCity-All} \\ 
+Pixels&  \multicolumn{5}{c}{148.24B} \\ \cmidrule{1-6}
+Metrics & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & \#GS & GPU \\ \midrule
+Ours-10M  &   0.608& 16.53& 0.536& 10.00M & 1\\
+Ours-100M &   0.761& 23.07& 0.397& 100.00M& 8 \\
+Ours-1B   &   0.815& 25.50& 0.282& 1023.13M& 64 \\    
+ \bottomrule
+\end{tabular}
+\label{tbl:MatrixCity-ALL}
+\end{table}
+
+
+\section{Conclusion and Limitation}
+
+In this paper, we study the problem of distributed training of 3DGS models. We devise a model parallelism-based training method that utilizes a proper rendering equation to avoid artifacts. This allows us to significantly expand the model scale in terms of primitive numbers and seamlessly support large-scale scene reconstruction and detailed rendering. We also explore training 3DGS model at unprecedented scales. Despite the promising results of the method, load balancing among sub-models remains a challenging problem when the worker number increases. Additionally, the MVS used for primitive initialization has a relatively low throughput, warranting a study of a better initialization method. 
+
+\clearpage
+
+\newpage
+
+
+
+\section{Appendix}
+
+\subsection{More Visualizations}
+
+
+{
+\setlength{\tabcolsep}{0pt}
+\begin{figure}[htbp]
+\centering  
+\begin{tabular}{cccc}  
+    \includegraphics[width=0.339\linewidth]{figures/scannet/108ec/DSC07681_gt.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/108ec/DSC07681_53605.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/108ec/DSC07681.png}
+    \\ 
+    \includegraphics[width=0.339\linewidth]{figures/scannet/108ec/DSC07777_gt.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/108ec/DSC07777_53605.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/108ec/DSC07777.png}
+    \\ 
+    \includegraphics[width=0.339\linewidth]{figures/scannet/108ec/DSC08009_gt.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/108ec/DSC08009_53605.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/108ec/DSC08009.png}
+    \\ 
+    \includegraphics[width=0.339\linewidth]{figures/scannet/81332/DSC04902_gt.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/81332/DSC04902_6w.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/81332/DSC04902.png}
+    \\ 
+    \includegraphics[width=0.339\linewidth]{figures/scannet/81332/DSC04969_gt.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/81332/DSC04969_6w.png} & \hspace{0.001\linewidth}
+    \includegraphics[width=0.24\linewidth]{figures/scannet/81332/DSC04969.png}
+    \\ 
+   
+   GT &  Ours & 3DGS   \\
+\end{tabular} 
+\caption{Comparisons of high-primitive-number RetinaGS models and 3DGS baseline on ScanNet++ dataset. Note the superior rendering quality, especially on high-frequency textures like text and leaves.}
+\label{fig:scannet++_demos}  
+\end{figure}
+}
+
+{
+\setlength{\tabcolsep}{0pt}
+\begin{figure}[htbp]
+\centering  
+\begin{tabular}{ccccc}  
+  \includegraphics[width=0.12\linewidth, trim=125 0 350 0, clip]{disorder_resized/garden/half_00002_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.12\linewidth, trim=175 0 300 0, clip]{disorder_resized/garden/half_00002_1.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=0 0 300 0, clip]{disorder_resized/garden/half_00002.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=0 0 300 0, clip]{disorder_resized/garden/3dgs_00002.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=0 0 300 0, clip]{disorder_resized/garden/tune_00002.png} 
+  \\ 
+\includegraphics[width=0.12\linewidth, trim=250 0 350 0, clip]{disorder_resized/bicycle/half_00024_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.12\linewidth, trim=350 0 250 0, clip]{disorder_resized/bicycle/half_00024_1.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/bicycle/half_00024.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/bicycle/raw_00024.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/bicycle/3dgs_00024.png} 
+    \\ 
+\includegraphics[width=0.12\linewidth, trim=250 0 350 0, clip]{disorder_resized/treehill/half_00064_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.12\linewidth, trim=350 0 250 0, clip]{disorder_resized/treehill/half_00064_1.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/treehill/half_00064.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/treehill/raw_00064.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/treehill/3dgs_00064.png} 
+      \\ 
+\includegraphics[width=0.12\linewidth, trim=250 0 350 0, clip]{disorder_resized/flowers/half_00001_0.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.12\linewidth, trim=350 0 250 0, clip]{disorder_resized/flowers/half_00001_1.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/flowers/half_00001.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/flowers/raw_00001.png} & \hspace{0.001\linewidth}
+  \includegraphics[width=0.24\linewidth, trim=200 0 200 0, clip]{disorder_resized/flowers/3dgs_00001.png} 
+  \\
+\multicolumn{2}{c}{Dividing plane}& Our Partition& Cell-based& Cell-based + Fine-tune  \\
+\end{tabular} 
+\caption{Blending results at the sub-space boundaries for different partition approaches. Approximate methods leak through the boundaries in partial rendering, resulting in obvious artifacts after merging. RetinaGS uses the equivalent form the 3DGS rendering equation, so it does not have this issue and shows no artifacts in the final rendering. }
+\label{fig:More_Examples_of_Distribute Rendering}  
+\end{figure}
+}
+
+
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.98\textwidth]{disorder3}
+\caption{In RetinaGS, one primitive may be involved in partial value computation of more than one overlapping subsets, but the indicator function in Eq~\ref{eq:indicator} ensures sure its color and opacity will only take effect once. For each ray, it can be illustrated as each subspace only possesses a fraction of the Gaussian ellipsoid, and the fragments collaboratively and distributively accomplish the task of a single primitive.
+}
+\label{fig:cross-bound}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{PM_Failed_crop}
+\caption{In 3DGS, as the densification threshold decreases, the growth rate of GS increases. However, due to the rapid growth rate, floaters are generated in the model that cannot be eliminated through training (marked with red rectangle), which deteriorates the reconstruction effect. The MVS initialization strategy introduced in RetinaGS will mitigate this issue.}
+\label{fig:PM_failed}
+\end{figure}
+
+\newpage
+
+\subsection{Equivalence Derivation}
+Starting from Eq.~\ref{eq:sub-color} for partial color \(C_k(l)\):
+
+\[ 
+C_k(l) = \sum_{g_i\in N_{lk}} c_i\sigma_i \prod_{g_j\in N_{lk},~j<i} ( 1-\sigma_j),
+\]
+
+Eq.~\ref{eq:sub-opacity} for partial opacity \(T_k(l)\):
+\[ 
+T_k(l) = \prod_{g_i \in {N}_{lk}} ( 1 - \sigma_i),
+\]
+
+and Eq.~\ref{eq:merge} for merging formula:
+\[ 
+    C(l) = \sum_{k \in o_l} C_k(l) \prod_{m\in o_l,~m < k} T_m(l),
+\]
+
+we substitute the expressions for partial color and partial opacity into the merging formula:
+
+\[ 
+C(l) = \sum_{k \in o_l} \left( \sum_{g_i\in N_{lk}} c_i\sigma_i \prod_{g_j\in N_{lk},~j<i} ( 1-\sigma_j) \right) \prod_{m\in o_l,~m < k} \left( \prod_{g_j \in {N}_{lm}} ( 1 - \sigma_j) \right).
+\]
+
+Now we expand this expression step by step. First, applying the distributive property of multiplication, we can pull out the inner summation symbol:
+\[ 
+C(l) = \sum_{k \in o_l} \sum_{g_i\in N_{lk}} c_i\sigma_i \left( \prod_{g_j\in N_{lk},~j<i} ( 1-\sigma_j) \right) \left( \prod_{m\in o_l,~m < k} \prod_{g_j \in {N}_{lm}} ( 1 - \sigma_j) \right).
+\]
+
+Then, utilizing the commutative property of multiplication, we can rewrite the above equation as:
+\[ 
+C(l) = \sum_{k \in o_l} \sum_{g_i\in N_{lk}} c_i\sigma_i \left( \prod_{g_j\in N_{l1}} ( 1-\sigma_j) \right) ... \left( \prod_{g_j\in N_{l(k-1)}} ( 1-\sigma_j) \right) \cdot \left( \prod_{g_j\in N_{lk},~j<i} ( 1-\sigma_j) \right).
+\]
+Since $N_l$ in Eq~\ref{eq:render} and $N_{lk}$  in Eq~\ref{eq:sub-color} follow a consistent rule for the ordering of elements, we have $N_l=(N_{l1},N_{l2},...N_{lK})$. This allows us to reduce the product symbols to one:
+\[ 
+C(l) = \sum_{k \in o_l} \sum_{g_i\in N_{lk}} c_i\sigma_i \left( \prod_{g_j\in N_{l},~j<i} ( 1-\sigma_j) \right).
+\]
+Similarly, nested summations can also be simplified into one:
+\[ 
+C(l) = \sum_{g_i\in N_{l}} c_i\sigma_i \left( \prod_{g_j\in N_{l},~j<i} ( 1-\sigma_j) \right),
+\]
+which has the exact same form as Eq~\ref{eq:render}. Now we prove the original rendering equation of 3DGS is equivalent to the hierarchical form underlying the distributed training framework of RetinaGS.
+
+\subsection{More Experimental Results}
+
+In the main text, for the sake of brevity, we did not present the experimental results for each individual scene on several datasets. Instead, we provided the average results across all scenes contained in each dataset (as highlighted with * in the experimental tables of the main text). Here, we present the detailed experimental data for each individual scene.
+
+\begin{table}[ht] \small
+\small
+\centering
+\caption{Experimental results(60K iterations) on MatrixCity. R \& P means resolution and training pixels.}
+\begin{tabular}{c|cccc|cccc} 
+ \toprule
+Datasets&  \multicolumn{4}{c}{MatrixCity-Aerial} & \multicolumn{4}{c}{MatrixCity-M} \\ 
+R \& P&  \multicolumn{4}{c}{1920$\times$1080 \& 13.19B} & \multicolumn{4}{c}{1000$\times$1000 \& 2.48B} \\ \cmidrule{1-9}
+Metrics & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & \#GS & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & \#GS \\ \midrule
+3DGS\textsuperscript&  0.833 & 26.56& 0.244 &  25.06M& 0.851& 27.81& 0.271& 1.53M\\ 
+Ours&  \textbf{0.840} & \textbf{27.70}& \textbf{0.177} & 217.3M & \textbf{0.932}& \textbf{31.12}& \textbf{0.110}& 62.18M \\
+ \bottomrule
+\end{tabular}
+\label{tbl:MatrixCity}
+\end{table}
+
+\begin{table}[ht]
+\footnotesize
+\centering
+\caption{Experimental results(60K iterations) on  Mega-NeRF.}
+\begin{tabular}{c|ccc|ccc|ccc} 
+ \toprule
+Datasets&  \multicolumn{3}{c}{Residence} & \multicolumn{3}{c}{Rubble} &  \multicolumn{3}{c}{Building}  \\ 
+ \cmidrule{1-10}
+Metrics & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$\\ \midrule
+Mega-NeRF&      0.628& 22.08& 0.489&  0.553& 24.06& 0.516&  0.547& 20.93& 0.504\\
+Switch-NeRF&   0.654& \textbf{22.57}& 0.457&  0.562& 24.31& 0.496&  0.579& 21.54& 0.474\\
+GP-NeRF&        0.661& 22.31& 0.448&  0.565& 24.06& 0.496&  0.566& 21.03& 0.486\\
+3DGS\textsuperscript &  0.751& 21.43&  0.274& 0.709&  24.47& 0.337 & 0.723&  21.74& 0.302\\ \cmidrule{1-10}
+Ours& \textbf{0.781} & 21.87& \textbf{0.217} & \textbf{0.760} & \textbf{25.09} & \textbf{0.234} & \textbf{0.754}& \textbf{22.14}& \textbf{0.227} \\
+ \bottomrule
+\end{tabular}
+\label{tbl:Mega-NeRF-1}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{PSNR vs. Primitive numbers(60K iterations) on Mega-NeRF.}
+\begin{tabular}{c|cc|cc|cc} 
+ \toprule
+Datasets&    \multicolumn{2}{c}{Residence} & \multicolumn{2}{c}{Rubble} & \multicolumn{2}{c}{Building}  \\
+R \& P &  \multicolumn{2}{c}{1368$\times$912 \& 3.19B} & \multicolumn{2}{c}{1152$\times$864 \& 1.64B} &  \multicolumn{2}{c}{1152$\times$864 \& 1.91B}  \\ \cmidrule{1-7}
+Metrics & PSNR & \#GS & PSNR & \#GS& PSNR & \#GS\\ \midrule
+3DGS&  21.43& 6.42M& 24.47& 4.7M&  21.44& 8.6M\\
+Ours & \textbf{21.87}& 51.41M& \textbf{25.09}& 27.9M& \textbf{22.14}& 27.4M\\
+ \bottomrule
+\end{tabular}
+\label{tbl:Mega-NeRF-2}
+\end{table}
+
+\begin{table}[ht]
+\small
+\centering
+\caption{Experimental results(20 epochs) on MatrixCity. ScanNet++.}
+\begin{tabular}{c|cccc|cccc} 
+ \toprule
+Datasets&  \multicolumn{4}{c}{108ec0b806} & \multicolumn{4}{c}{8133208cb6}\\ R \& P &  \multicolumn{4}{c}{8408$\times$5944 \& 43.13B} & \multicolumn{4}{c}{8408$\times$5935 \& 23.75B} \\ \cmidrule{1-9}
+Metrics & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & \#GS & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & \#GS \\ \midrule
+3DGS & 0.881& 28.95&  0.408& 2.65M& \textbf{0.908}&  27.89& 0.355& 1.09M\\
+Ours& \textbf{0.883} & \textbf{29.71}& \textbf{0.395} & 47.59M& \textbf{0.908}& \textbf{28.11}& \textbf{0.340}& 32.19M\\
+ \bottomrule
+\end{tabular}
+\label{tbl:ScanNet++}
+\end{table}
+
+\begin{table}[htbp]
+\scriptsize
+\centering
+\caption{\#GS for Mip-NeRF360 scenes under 1.6K resolution and full resolution. The full marks the results obtained in full resolution. The dagger \dag marks the results obtained in our own experiments (60K iterations). }
+\begin{tabular}{c|c|ccccc|cccc} 
+ \toprule
+Method& Scenes& bicycle& garden & flowers & stump & treehill & room& counter& kitchen& bonsai\\ 
+\multicolumn{2}{c|}{Resolution-Wide} & 4946& 5187& 5025& 4978& 5068& 3114& 3115& 3115&3118\\ 
+\multicolumn{2}{c|}{Pixels-full} & 3.15B& 3.22B& 2.87B& 2.05B& 2.37B& 2.00B& 1.55B& 1.80B& 1.89B\\ 
+\midrule
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}}& 7.03M& 6.92M& 4.11M& 5.34M& 4.17M& 1.80M& 1.27M& 1.95M& 1.05M \\
+\multicolumn{2}{c|}{Ours}& 31.67M& 62.94M& 20.53M& 15.32M& 22.75M& 22.41M& 22.83M& 28.31M& 23.43M\\
+\midrule
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}-full}&5.04M& 7.39M& 3.11M& 3.30M& 2.61M& 1.70M& 1.20M& 1.91M& 0.97M\\
+\multicolumn{2}{c|}{Ours-full}& 31.67M& 62.94M& 20.53M& 15.32M& 22.75M& 22.41M& 22.83M& 28.31M& 23.43M\\
+ \bottomrule
+\end{tabular}
+\label{tbl:gs_mip-nerf360}
+\end{table}
+
+\begin{table}[ht]
+\small
+\centering
+\caption{SSIM scores for Mip-NeRF360 scenes under 1.6K resolution and full resolution. The full marks the results obtained in full resolution. The dagger \dag marks the results obtained in our own experiments (60K iterations).}
+\begin{tabular}{c|c|ccccc|cccc} 
+ \toprule
+Method& Scenes& bicycle& garden & flowers & stump & treehill & room& counter& kitchen& bonsai\\ 
+\midrule
+\multicolumn{2}{c|}{3D-GS} &0.771 &0.868 & 0.605& 0.775 & 0.638& 0.914& 0.905& 0.922& 0.938 \\
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}}&  0.770& 0.866& 0.623& 0.771& 0.641& 0.931& 0.919& 0.933& 0.950\\
+\multicolumn{2}{c|}{Mip-NeRF360}& 0.685& 0.813& 0.583& 0.744& 0.632& 0.913& 0.894& 0.920& 0.941 \\
+\multicolumn{2}{c|}{iNPG}& 0.491& 0.649& 0.450& 0.574 & 0.518& 0.855& 0.798& 0.818& 0.890 \\
+\multicolumn{2}{c|}{Plenoxel}&  0.496& 0.606& 0.431& 0.523 & 0.509& 0.841& 0.759& 0.648& 0.814 \\
+\multicolumn{2}{c|}{Ours}&   \textbf{0.776}& \textbf{0.870}& \textbf{0.624}& \textbf{0.777}& \textbf{0.650}& \textbf{0.935}& \textbf{0.927}& \textbf{0.941}& \textbf{0.958}\\
+\midrule
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}-full}&   0.732& 0.817& 0.604& 0.795& 0.696& 0.922& 0.917& 0.926& 0.941\\
+\multicolumn{2}{c|}{Ours-full}&   \textbf{0.751} & \textbf{0.827}& \textbf{0.635}& \textbf{0.800}& \textbf{0.703}& \textbf{0.927}& \textbf{0.925}& \textbf{0.932}& \textbf{0.947}\\
+ \bottomrule
+\end{tabular}
+\label{tbl:ssim_mip-nerf360}
+\end{table}
+
+\begin{table}[ht]
+\small
+\centering
+\caption{PSNR scores for Mip-NeRF360 scenes under 1.6K resolution and full resolution. The full marks the results obtained in full resolution. The dagger \dag marks the results obtained in our own experiments (60K iterations).}
+\begin{tabular}{c|c|ccccc|cccc} 
+ \toprule
+Method& Scenes& bicycle& garden & flowers & stump & treehill & room& counter& kitchen& bonsai\\ 
+\midrule
+\multicolumn{2}{c|}{3D-GS} & 25.25& 27.41 & 21.52 & 26.55 & 22.49& 30.63& 28.70& 30.32& 31.98 \\
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}}&  25.33 & 27.58 & 21.85 & 26.74 & 22.46 & 31.93& 29.54& 31.52& 33.10 \\
+\multicolumn{2}{c|}{Mip-NeRF360}& 24.37& 26.98 & 21.73 & 26.40&  \textbf{22.87} & 31.63& 29.55& 32.23& 33.46
+ \\
+\multicolumn{2}{c|}{iNPG}& 22.19& 24.60        & 20.34 & 23.63& 22.36 & 29.27 & 26.44& 28.55& 30.34 \\
+\multicolumn{2}{c|}{Plenoxel}&  21.91& 23.49   & 20.09 & 20.66& 22.24 &27.59& 23.62& 23.42& 24.67 \\
+\multicolumn{2}{c|}{Ours}&  \textbf{25.41} & \textbf{27.74} & \textbf{21.94} & 
+\textbf{26.86} & 22.67 & \textbf{32.86} & \textbf{29.91} & \textbf{32.49} & \textbf{34.09} \\
+\midrule
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}-full}&   24.47 & 26.67 & 20.78& 26.23& 22.34 & 31.57 & 29.33 & 31.72 & 32.92 \\
+\multicolumn{2}{c|}{Ours-full}&   \textbf{24.86}& \textbf{27.06} & \textbf{21.58}& \textbf{26.58}& \textbf{22.42}& \textbf{31.65} & \textbf{29.90}& \textbf{32.23}& \textbf{33.76}\\
+ \bottomrule
+\end{tabular}
+\label{tbl:psnr_mip-nerf360}
+\end{table} 
+
+\begin{table}[ht]
+\small
+\centering
+\caption{LPIPS scores for Mip-NeRF360 scenes under 1.6K resolution and full resolution. The full marks the results obtained in full resolution. The dagger \dag marks the results obtained in our own experiments (60K iterations).}
+\begin{tabular}{c|c|ccccc|cccc} 
+ \toprule
+Method& Scenes& bicycle& garden & flowers & stump & treehill & room& counter& kitchen& bonsai\\ 
+\midrule
+\multicolumn{2}{c|}{3D-GS} &0.205&  0.103& 0.336& \textbf{0.210}& 0.317& 0.220& 0.204& 0.129& 0.205\\
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}}&  0.200& 0.107& 0.320& 0.223& 0.317& 0.186& 0.172& 0.112& 0.168 \\
+\multicolumn{2}{c|}{Mip-NeRF360}& 0.301& 0.170& 0.344& 0.261& 0.339& 0.211& 0.204& 0.127& 0.176\\
+\multicolumn{2}{c|}{iNPG}& 0.487& 0.312& 0.481& 0.450& 0.489& 0.301&0.342& 0.254&0.227\\
+\multicolumn{2}{c|}{Plenoxel}& 0.506& 0.386& 0.521& 0.503& 0.540& 0.418& 0.441&0.447& 0.398\\
+\multicolumn{2}{c|}{Ours}&\textbf{0.181}& \textbf{0.100}& \textbf{0.316}& 0.218& \textbf{0.287}& \textbf{0.160}& \textbf{0.139}& \textbf{0.099}& \textbf{0.134}\\
+\midrule
+\multicolumn{2}{c|}{3D-GS\textsuperscript{\dag}-full}&0.375& 0.268& 0.438& 0.386& 0.447& 0.277& 0.261& 0.188& 0.263\\
+\multicolumn{2}{c|}{Ours-full}& \textbf{0.290}& \textbf{0.195}& \textbf{0.379}& \textbf{0.334}& \textbf{0.362}& \textbf{0.233}& \textbf{0.212}& \textbf{0.163}& \textbf{0.223}\\
+ \bottomrule
+\end{tabular}
+\label{tbl:lpips_mip-nerf360}
+\end{table} 
+
+
+
+\clearpage
+
+
+
+

@@ -1,0 +1,376 @@
+\title{BiXT: Perceiving Longer Sequences With Bi-Directional Cross-Attention Transformers}
+
+\begin{abstract}
+We present a novel bi-directional Transformer architecture (\arch) which scales linearly with input size in terms of computational cost and memory consumption, but does not suffer the drop in performance or limitation to only one input modality seen with other efficient Transformer-based approaches. \arch~is inspired by the Perceiver architectures but replaces iterative attention with an efficient bi-directional cross-attention module in which input tokens and latent variables attend to each other simultaneously, leveraging a naturally emerging attention-symmetry between the two. This approach unlocks a key bottleneck experienced by Perceiver-like architectures and enables the processing and interpretation of both semantics (`what') and location (`where') to develop alongside each other over multiple layers -- allowing its direct application to dense and instance-based tasks alike. By combining efficiency with the generality and performance of a full Transformer architecture, \arch~can process longer sequences like point clouds, text or images at higher feature resolutions and achieves competitive performance across a range of tasks like point cloud part segmentation, semantic image segmentation, image classification, hierarchical sequence modeling and document retrieval.\hphantom{l} Our experiments demonstrate that \arch~models outperform larger competitors by leveraging longer sequences more efficiently on vision tasks like classification and segmentation\ignore{ImageNet and ADE20K}, and perform on par with full Transformer variants on sequence modeling and document retrieval -- but require 28\% fewer FLOPs and are up to $8.4\times$ faster.} 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Much of the data we obtain when perceiving our environment can be interpreted via a division into `\emph{what}' and `\emph{where}'. If we consider for example the image pictured in \cref{fig:attention_patterns} on the left, we can easily describe its content by `what' we see -- the building, sky and a flag. If we were to draw conclusions on a more fine-grained level though, we would likely include more specific descriptions like ``lower left corner'' referring to their positions within the image -- the `where'. 
+In other words, `where' denotes the actual geometric location of the individual elements (\eg pixels) and `what' the semantic entities (\eg objects) that collectively describe the data as a whole.
+Note that this similarly applies to many other modalities, like point clouds or even language where we form words via letters that together have a certain meaning.
+
+Thanks to the few structural constraints placed on the input data paired with high performance,  Transformers~\citep{vaswani2017_attention} have shown great capabilities in extracting both 'what' and 'where' for a range of input modalities, giving rise to significant advances across various fields such as Natural Language Processing~\citep{devlin2019_bert} and Computer Vision~\citep{dosovitskiy2020_vit, touvron2021_deit, touvron2022_deit3}. However, their success comes at the high cost of scaling quadratically in memory and time with the input length, practically prohibiting their use on larger input data like point clouds, long documents, or high-resolution images when computational resources are limited.
+
+Several approaches have since been proposed to increase their efficiency, either by changing how the computationally expensive self-attention operation is realized~\citep{ shen2021_efficient, wang2020_linformer} or by exploiting the domain-specific structure of their data input~\citep{ho2019_axial, parmar2018_imagetransf, qiu2020_blockwise, tu2022_maxvit}. 
+However, all these either face a reduction in the Transformer's performance or limit its application to only one specific type of input~\citep{el2021_xcit}.
+
+\begin{figure*}[tb]
+\centering
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{figures/orig_0_cls_538_img.png}
+    \caption{}
+    \label{subfig:pic_orig}
+\end{subfigure}
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{figures/seq_0_cls_538_attn_qlat2tok.png}
+    \caption{Seq: lat~\so tok}
+    \label{subfig:attn_symm_lat2tok}
+\end{subfigure}
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{figures/seq_0_cls_538_attn_qtok2lat_T.png}
+    \caption{Seq: lat~\textleftarrow~tok}
+    \label{subfig:attn_symm_tok2lat}
+\end{subfigure}
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{figures/bixt_0_cls_538_attn_qlat2tok.png}
+    \caption{Ours: lat $\longleftrightarrow$ tok}
+    \label{subfig:attn_bidir}
+\end{subfigure}
+\caption{\textbf{Emerging patterns when attending both ways.} (\subref{subfig:pic_orig})~Input image. (\subref{subfig:attn_symm_lat2tok}) depicts the areas of the image that 4 different latents attend to, while (\subref{subfig:attn_symm_tok2lat}) inversely shows which image regions attend to these latents (transformed into the same coordinate system for ease of interpretation). (\subref{subfig:attn_bidir}) displays which areas \& latents are symmetrically attended to using our proposed bi-directional cross-attention.
+}
+\label{fig:attention_patterns}
+\end{figure*}
+
+In an attempt to preserve the generality by not imposing additional constraints on the input data, \citet{jaegle2021_perceiver} employ a small set of latent vectors as a bottleneck to extract the `what' via one-sided (iterative) cross-attention -- and require an additional decoder to draw conclusions about `where'~\citep{ jaegle2022_perceiverio}. 
+While achieving linear complexity \wrt the input length, these `Perceiver' architectures require between $360$ - $707$ GFLOPs to achieve around $78\%$ accuracy on ImageNet1K -- results that recent Transformer variants like ViT~\citep{touvron2021_deit,touvron2022_deit3} are able to obtain at a fraction of the compute. 
+One possible explanation for this discrepancy is that the effective working memory of Perceiver architectures is strictly limited to the latents which therefore need to compensate via increased computation, whereas conventional Transformers like ViTs leverage the (larger) number of tokens across several layers.
+This raises an important question: Are the appealing individual properties of these two methods mutually exclusive, or can we in fact have \emph{the best of both worlds?} 
+
+In this paper, we set out to affirm the latter. We demonstrate that a small set of latent vectors appropriately combined with layerwise simultaneous refinement of both input tokens and latents makes it possible to pair the high performance and architectural simplicity of Transformers with the linear scaling of Perceivers -- outperforming both in settings where compute is limited.
+We start off by investigating a na\"ive approach: sequentially applying cross-attention to refine `what' and `where', one after the other. We discover that approximately symmetric attention patterns naturally emerge between latents and tokens even when both are provided with complete flexibility. In other words, for most latents (`what') that pay attention to particular tokens (`where'), these tokens in turn pay attention to exactly these latents (see \cref{fig:attention_patterns} and \cref{sec:experiments_seq_attn}). Not only does this intuitively make sense -- objects need to know `where' they are located in the image, and image locations need to know `what' objects are located there -- it more importantly offers us a unique opportunity to save FLOPs, memory and parameters.
+
+As we will demonstrate in~\cref{sec:methods}, this approximate symmetry means we only need to compute the attention matrix once, reducing the involved parameters by $\sim\!\nicefrac{1}{3}$ to facilitate an efficient bi-directional information exchange via our proposed \emph{bi-directional cross-attention}. Integrated into our bi-directional cross-attention Transformer architecture (\arch), this forms a flexible and high-performing yet efficient way to process different input modalities like images, point clouds or text on a variety of instance-based (\eg classification) or dense tasks (\eg \ignore{point cloud part }segmentation) -- all while scaling linearly \wrt the input length.
+
+In summary, our main contributions include the following: 
+\begin{enumerate} [topsep=0pt]
+    \item We introduce a novel bi-directional cross-attention Transformer architecture (\emph{\arch}) that scales linearly with the input size in terms of computational cost and memory consumption, allowing us to process \ignore{significantly }longer sequences like point clouds, text or images at higher resolution.
+    \item We propose \emph{bi-directional cross-attention} as an efficient way to establish \ignore{symmetric }information exchange that requires computation of the attention matrix only \emph{once} and reduces the involved parameters by $\sim\!\nicefrac{1}{3}$, motivated by a naturally emerging symmetry in cross-attention and showing significant improvements over uni-directional iterative methods like Perceiver.
+    \item We analyze \arch's advantage of processing longer sequences across a number of tasks using different input modalities and output structures in settings with limited computational resources -- with our tiny 15M parameter model achieving accuracies up to $83.1\%$ for classification on ImageNet1K without any modality-specific internal components, performing competitively for semantic image and point cloud part segmentation even among modality-specific approaches, and being up to $28\%$ more efficient and $8.4\times$ faster on LRA.
+    \item We further provide insights into \arch's extendibility: Thanks to its simple and flexible design, modality-specific components can easily be incorporated in a plug-and-play fashion should the need arise -- further improving results while trading off generality.
+\end{enumerate}
+
+
+
+\section{Perceiving via Bi-Directional Cross-Attention}
+
+\label{sec:methods}
+We start this section by briefly revisiting the concept of attention before moving on to presenting our proposed \emph{bi-directional cross-attention} methodology, followed by its use within our \arch~architecture (\cref{fig:bxit}). Please note that we define the concepts using single-head attention for brevity instead of the actually employed multi-head attention (MHA), and all methods directly generalize to MHA.
+
+\subsection{Background: The Attention Mechanism} \label{sec:attn_mech}% 
+While self-attention has recently gained great popularity through its use in the Transformer architecture~\citep{vaswani2017_attention}, we will start from a slightly more general point of view: Given a source sequence~$\mathcal{S}\in\mathbb{R}^{N\times D_{\mathcal{S}}}$ and a target sequence~$\mathcal{T}\in\mathbb{R}^{M\times D_\mathcal{T}}\!$, attention aims to refine~$\mathcal{T}$ by exhaustively discovering pairwise correlations between all elements of both sequences and integrating information from the source components of interest into the target. 
+
+Formally, $\mathcal{S}$ is linearly projected into two $D$-dimensional representations using learnable matrices -- yielding a \emph{key}~$\boldsymbol{K}_\mathcal{S}\!\in\!\mathbb{R}^{N\times D}$ and \emph{value}~$\boldsymbol{V}_\mathcal{S}\!\in\!\mathbb{R}^{N\times D}$ -- while $\mathcal{T}$ is projected into one $D$-dimensional representation to obtain the \emph{query}~$\boldsymbol{Q}_\mathcal{T}\in\mathbb{R}^{M\times D}\!$. These representations are then used to compute the attention-based target refinement as
+\begin{equation} \label{eq:attn_delta}
+    \Delta^{\text{attn}}_\mathcal{T} \!=\! \text{attn}\left( \boldsymbol{Q}_\mathcal{T},\boldsymbol{K}_\mathcal{S},\boldsymbol{V}_\mathcal{S} \right) \!=\! \text{softmax}\!\left(\frac{\boldsymbol{Q}_\mathcal{T}\boldsymbol{K}_\mathcal{S}\transpose}{\sqrt{D}}\right)\cdot\boldsymbol{V}_\mathcal{S},
+\end{equation}
+with the scaled dot product~$\bar{\boldsymbol{A}}_{\mathcal{T\!,S}}=\nicefrac{1}{\sqrt{D}}\,(\boldsymbol{Q}_\mathcal{T}\boldsymbol{K}_\mathcal{S}\transpose) \in \mathbb{R}^{M\times N}$ representing the scaled pairwise similarity between target and source elements.
+This concept is commonly referred to as \emph{cross-attention} (CA) between target~$\mathcal{T}$ and source~$\mathcal{S}$. If a representation itself is to be refined given the context within, \ie source and target are identical ($\mathcal{S}\!=\!\mathcal{T}$), \cref{eq:attn_delta} reduces to the well-known \emph{self-attention} where the triplet key, query and value are all generated as a function of the same sequence elements.
+
+Note that computing the similarity matrix~$\bar{\boldsymbol{A}}_{\mathcal{T\!,S}}$ has computational complexity $\mathcal{O}(NM)$. For self-attention used in Transformers where $\mathcal{T}\!=\!\mathcal{S}$ and hence $M\!=\!N$, this yields quadratic complexity $\mathcal{O}(N^2)$ \wrt the input sequence length $N$, prohibiting its use on longer sequences when computational resources are limited. On the other hand, if cross-attention is employed with a fixed sequence length $M\!=\!\text{const}\ll N$, the complexity becomes linear $\mathcal{O}(N)$. 
+\subsection{Bi-Directional Cross-Attention} \label{sec:bidir_ca}
+\ignore{\rewrite{Note: This could be significantly shortened if needed, simply "starting under the assumption that symmetric two way information exchange (which will be substantiated in Section~X)..." -- tbs}\\}
+Reducing the complexity of attention from quadratic to linear without impairing performance or adding constraints \wrt input modalities is one of the main aspects of this work.
+We build our approach on the previously introduced notion that most\ignore{ perceptual} data can be interpreted as `what' and `where' -- and both need to pay attention to the other for optimal information exchange. We represent the `what' via a small set of $M$ learnable \emph{latent vectors} and the `where' via an input-dependent sequence of $N$ \emph{tokens}, respectively denoted via the subscripts $\lat$ and $\tok$ in the following and with $M\ll N$.
+Na\"ively, one could simply apply two individual cross-attention operations sequentially -- first querying information from one side and then the other by creating two \emph{query-key-value} triplets. However, our analyses in \cref{sec:experiments_seq_attn} show that symmetric tendencies in the attention patterns between latents and tokens naturally emerge during training, offering a chance to further reduce the computational requirements and to increase efficiency via our \emph{bi-directional cross-attention} as follows.  
+
+We start by creating \emph{reference-value} pairs $\boldsymbol{R}\lat\!\in\!\mathbb{R}^{M\times D}\!,\boldsymbol{V}\lat\!\in\!\mathbb{R}^{M\times D}$ and $\boldsymbol{R}\tok\!\in\!\mathbb{R}^{N\times D}\!,\boldsymbol{V}\tok\!\in\!\mathbb{R}^{N\times D}$ via learnable linear projection from the latent vectors and tokens, respectively. 
+Leveraging symmetry to create bi-directional information exchange, pairwise similarities between latents and tokens are then computed via a scaled dot product as 
+\begin{equation} \label{eq:symm_double_use}
+    \bar{\boldsymbol{A}}_{\text{lat,tok}}=\left(\frac{\boldsymbol{R}_{\text{lat}}\boldsymbol{R}_{\text{tok}}\transpose}{\sqrt{D}}\right) = \bar{\boldsymbol{A}}\,\transpose_{\text{tok,lat}}, 
+\end{equation}
+which is in turn used to obtain the attention-based refinement for \underline{both}, the latents and tokens, via 
+\begin{equation} \label{eq:symm_refinement}
+    \Delta^{\text{attn}}\lat=\text{softmax}\!\left(\bar{\boldsymbol{A}}_{\text{lat,tok}}\right) \cdot \boldsymbol{V}\tok \qquad \text{and} \qquad \Delta^{\text{attn}}\tok=\text{softmax}\!\left(\bar{\boldsymbol{A}}_{\text{tok,lat}}\right) \cdot \boldsymbol{V}\lat.
+\end{equation}
+Note that in addition to providing linear scaling \wrt to the input length~$N$, \cref{eq:symm_double_use} requires evaluating the most computationally-expensive operation, namely the similarity matrix ($\mathcal{O}(MN)$), only \textbf{once} and allows simultaneous refinement of latents and tokens as defined in \cref{eq:symm_refinement}.
+The implicit reuse of the \emph{references} as both \emph{query} and \emph{key} further reduces the parameter count of the linear projection matrices by $\nicefrac{1}{3}$ compared to na\"ive sequential cross-attention. 
+
+\subsection{\arch~-- Bi-Directional Cross-Attention Transformers} \label{sec:BiXT}
+\begin{figure*}[t] 
+    \begin{center} 
+        \includegraphics[width=\linewidth, trim={8mm 0 6mm 1mm},clip]{figures/Visual_1_wide_icml_v3.pdf}  
+    \end{center}
+    \caption{\textbf{\arch~architecture.} (left) Input data passing through one layer of our Bi-Directional Cross-Attention Transformer. (right) Internal structure of proposed efficient bi-directional cross-attention.}
+    \label{fig:bxit}
+\end{figure*}
+\cref{fig:bxit} (left) illustrates the individual components that make up our \arch~architecture. \arch~is designed in a simple symmetric, ladder-like structure allowing `what' (latent vectors) and `where' (tokens) to simultaneously attend to and develop alongside each other -- making it equally-well suited for instance-based tasks like classification and dense tasks like semantic segmentation on a variety of input modalities. We start this section with a brief overview, followed by more detailed descriptions of the individual components.
+\paragraph{General overview.} The raw input data is first passed through a tokenization module which projects the data into an embedding sequence of length~$N$ and optionally adds positional encodings, depending on the input modality and data structure. These tokens together with a fixed set of $M$ learnable latent vectors are then passed to the first layer's bi-directional cross-attention module for efficient refinement (details depicted in \cref{fig:bxit} (right) and explained below). The latents are then further refined via latent self-attention, while the tokens are either directly passed on to the next layer (default) or optionally refined by a token refinement module which could include modality-specific components. The simultaneous ladder-like refinement of `what' and `where' is repeated for $L$~layers, before the result is passed to task-specific output head(s). For instance-based tasks like classification, we simply average the set of latent vectors and attach a classification head to the output, while for tasks like segmentation that require outputs resembling the input data structure, the refined tokens are used.
+\paragraph{Efficient bi-directional information exchange.} We use bi-directional cross-attention introduced in \cref{sec:bidir_ca} to enable $M$~latents and $N$~tokens to simultaneously attend to each other in a time and memory efficient way, provided $M\ll N$. The detailed internal structure of our module is depicted in \cref{fig:bxit}$\,$(right) and defined via \cref{eq:symm_double_use,eq:symm_refinement}. Apart from the efficient bi-directional attention computation, it follows the common Transformer-style multi-head attention in terms of normalization, activations and processing via feed-forward networks (FFN) introduced by \citet{vaswani2017_attention} and can thus be easily implemented in modern deep learning frameworks. 
+
+Three aspects are particularly worth noting here: 1)~While our bi-directional attention imposes a `hard' structural constraint of symmetry on the pair-wise similarity matrix between tokens and latents\ignore{ (per layer)} as defined in \cref{eq:symm_double_use}, the actual information exchange is less strict: applying the row-wise and column-wise softmax operations to obtain the actual attention maps offers a certain degree of flexibility\ignore{freedom}, since adding a constant to each element in a row keeps the resulting (latent) attention map unchanged while modulating the column-wise (token) one, and vice versa. More specifically, bi-directional CA between $M$ latents and $N$ tokens has in total $M\!N\!-\!1$~degrees of freedom~(\textit{dof}), only $(M\!-\!1)\!\cdot\!(N\!-\!1)$ of which are shared -- leaving $M\!+\!N\!-\!2$~\textit{dof} that can be used by the network for the modulation of the (non-strictly-symmetric) information exchange (see \cref{app:dof} for detailed discussion). 
+2)~Even if the latents and tokens symmetrically attend to each other, the actual information that is transferred is created via individual value projection matrices and thus offers flexibility in terms of content. 
+3)~While tokens cannot directly communicate with each other as is possible when using computationally expensive self-attention, this communication can still take place over two layers in our structure by using a latent vector as temporary storage in a token-latent-token sequence. Since the total number of latents is usually larger than the semantic concepts required to describe one data sample, we can expect this to be possible without impairing performance. 
+\paragraph{Latent vector refinement.} After gathering information from the tokens, we use one multi-head self-attention operation~\citep{vaswani2017_attention} to further refine the information stored in the latents and provide direct information exchange with a global receptive field across latents. Note that since the number of latents $M$ is fixed and significantly smaller than the input sequence, this operation is input-length independent and not particularly resource intensive. This step is similar to Perceiver~\citep{jaegle2021_perceiver,jaegle2022_perceiverio}, but we only use one instead of several self-attention operations at each layer.
+\paragraph{Optional token refinement.} In the majority of experiments presented in this paper, we simply pass the tokens returned by the bi-directional cross-attention to the next layer. However, our architectural structure also allows to easily include additional (\eg data-specific) modules for further refinement in a plug-n-play manner. We demonstrate examples of this in \cref{sec:experiments}, where we add a local refinement component exploiting grid-shaped data for semantic segmentation\ignore{~\citep{el2021_xcit}} and a data-specific hierarchical grouping module for point cloud shape classification.
+\paragraph{Positional encodings.} We use additive sinusoidal positional encodings~\citep{vaswani2017_attention} to represent the structure of input data, which is more efficient than learnt encodings for variable input size. For simplicity, we follow previous works~\citep{el2021_xcit} and create the encodings in 32~dimensions per input axis followed by a linear projection into the model's token dimension~$D$. This method is applicable independent of the raw data's dimensions and thus easily handles data ranging from 2D images to 3D or 6D point clouds.%
+\paragraph{Input tokenization.} Tokenization can be performed in various ways and is the only input modality-specific component in our architecture, akin to Perceiver-IO's input adapters~\citep{jaegle2022_perceiverio}. 
+For image-based experiments, we follow common practice and use simple linear projection as our default tokenizer to embed image patches. 
+For point cloud data, we simply encode the 3D or 6D points directly into embedding space using our sinusoidal positional encoder.
+We adhere to the guidelines of \citet{tay2021_lra} for text-based hierarchical sequence modelling and document retrieval experiments on LRA.  
+
+
+
+\section{Experimental Evaluation}
+
+The purpose of our investigations presented in the following is twofold: 1) To provide qualitative and quantitative insights into our proposed \emph{bi-directional cross-attention} and the underlying intuition of symmetry, and 2) to demonstrate how \arch's ability to efficiently and effectively process longer sequences positively affects various tasks. We focus the majority of our experiments around efficient architectures in the low FLOP, memory and parameter regime, and unless otherwise stated, we use \arch-\textit{Ti} with $64$ latent vectors, embedding dimension~$192$ and $6$~heads for all attention modules. 
+
+\begin{table*}[tb] 
+    \caption{\textbf{Bi-directional \vrs iterative attention.} (\subref{subtab:bidi_it_img}) Classification accuracy on
+    ImageNet1K. All architectures use 64 latent vectors and have
+    been trained for 120 epochs with hyperparameters individually optimized. Architectural configurations noted in brackets. †indicates sharing of all, ‡of all but the 1st layer’s cross-attention parameters. (\subref{subtab:bidi_it_pcl}) Point cloud shape classification on ModelNet40. \arch~without (\textit{na\"ive}) and with modality-specific components.\ignore{ in comparison to other works.}} \label{tab:bidi_it}
+    \scalebox{0.82}
+    {
+    \hspace{-3pt}
+    \begin{subtable}{.68\linewidth} 
+      \centering
+        \caption{ImageNet1K @ 120epochs.}
+        \label{subtab:bidi_it_img}
+        \begin{tabular}{llcccc}
+            \specialrule{.2em}{.1em}{.1em}
+            &\textbf{Attention} & \textbf{Top-1 Acc.} & \textbf{FLOPs} & \textbf{Mem.} &\textbf{\#Param} \\
+            \toprule\toprule 
+            \multirow{5}{*}{\STAB{\rotatebox[origin=c]{90}{\textbf{\textit{\small{Perceiver-like}}}}}} &
+            Iterative$^\ddagger$ \tiny{(sa5-d8)} & $58.26{\scriptstyle~\pm~2.34}$ & $1.58$G & $7.17$M & $19.05$M \\  
+            &Iterative$^\ddagger$ \tiny{(sa6-d7)} & $54.94{\scriptstyle~\pm~5.96}$ & $1.59$G & $7.23$M & $19.94$M \\  
+            &Iterative$^\dagger$ \tiny{(sa6-d8)} & $60.61{\scriptstyle~\pm~1.11}$ & $1.82$G & $8.25$M & $22.16$M \\  
+            &Iterative$^\dagger$ \tiny{(sa4-d12)} & $56.03{\scriptstyle~\pm~1.02}$ & $1.99$G & $9.10$M & $22.16$M \\  
+            &Iterative$^\dagger$ \tiny{(sa1-d24)} & $55.92{\scriptstyle~\pm~0.67}$ & $1.79$G & $8.39$M & $11.93$M \\  
+            \midrule
+            \multirow{4}{*}{\STAB{\rotatebox[origin=c]{90}{\textbf{\textit{\small{Cross-Attn.}}}}}} &
+            Sequential~\tiny{(2-way, \textbf{d11})} &  $73.10{\scriptstyle~\pm~0.53}$ &$1.66$G & $8.44$M & $14.60$M \\ 
+            & Sequential~\tiny{(2-way, \textbf{d12})} &  $73.79{\scriptstyle~\pm~0.32}$ &$1.81$G & $9.24$M & $15.94$M\\ 
+            & \cellcolor{Apricot!20!White}{Bi-Directional}~~\tiny{(\textbf{d13})}  & \cellcolor{Apricot!20!White}${74.10}{\scriptstyle~\pm~0.14}$& \cellcolor{Apricot!20!White}$1.82$G & \cellcolor{Apricot!20!White}$8.54$M & \cellcolor{Apricot!20!White}$16.38$M \\ 
+            \bottomrule
+        \end{tabular}
+    \end{subtable}%
+    }
+    \hspace{25pt}
+    \scalebox{0.841}
+    {
+    \begin{subtable}{.4\linewidth}
+      \centering
+        \caption{ModelNet40.}
+        \label{subtab:bidi_it_pcl}
+        \begin{tabular}{lcc}
+        \specialrule{.2em}{.1em}{.1em}
+        \textbf{Method} & \textbf{OA} &  \textbf{mAcc} \\
+        \toprule\toprule
+        PointNet~\tiny{\citet{qi2017_pointnet}} & $89.2$ & $86.0$ \\
+        Perceiver~\tiny{\citet{jaegle2021_perceiver}} & $85.7$ & -- \\
+        \rowcolor{Apricot!20!White} \arch~\tiny{(na\"ive)} & $89.6$ & $86.4$\\
+        \midrule
+        PointNet++~\tiny{\citet{qi2017_pointnet++}} & $90.7$ & -- \\
+        PointMLP~\tiny{\citet{ma2021_pointmlp}} & $94.1$ & $91.3$ \\
+        \rowcolor{Apricot!20!White} \arch~\tiny{(+ grouping)} & $92.5$ & $89.7$\\
+        \rowcolor{Apricot!20!White} \arch~\tiny{(+ grouping \& hierarchy)} & $93.1$ & $90.6$\\
+        \bottomrule
+        \end{tabular}
+    \end{subtable} 
+    }
+\end{table*}
+
+\subsection{Symmetric Tendencies Emerge when Attending Both Ways} \label{sec:experiments_seq_attn}
+We start by investigating the intuition underlying our work: When describing data like an image by asking `\textit{what}' is in it and `\textit{where}' things are, it intuitively makes sense that these two components are tightly interconnected, and that they will inform \textit{aka} pay attention to each other. To this end, we set up a na\"ive architecture where latent vectors first query the tokens via cross-attention (CA), followed by the tokens querying the latents (\ie using independent query-key-value triplets), before a further refinement step of the latent information via one self-attention operation -- repeated over multiple layers and trained on ImageNet1K~\citep{russakovsky_2015imagenet}. When looking at the resulting attention patterns depicted in \cref{fig:attention_patterns}, we discover that most latents pay attention to parts of the image representing one specific `entity' like a building ((\subref{subfig:attn_symm_lat2tok}), top-left), a flag ((\subref{subfig:attn_symm_lat2tok}), top-right) or parts of the sky ((\subref{subfig:attn_symm_lat2tok}), lower-right) -- supporting the notion that latent vectors represent `things'.  More interestingly however, we discover in (\subref{subfig:attn_symm_tok2lat}) that most of these image regions (tokens) are in turn also paying attention to exactly these latent vectors -- showing a roughly symmetric information exchange and providing a qualitative indication that our idea of \ignore{enforcing }leveraging symmetry via our bi-directional architecture might be well justified.
+We additionally visualize the attention patterns after replacing the na\"ive sequential CA through our efficient bi-directional one in (\subref{subfig:attn_bidir}), and the results look surprisingly similar -- clearly indicating that our symmetrically constrained approach can achieve similar information exchange while being significantly more efficient.
+\subsection{Attention -- Iterative, Sequential or Bi-directional?} \label{sec:it_seq_bidi}
+We aim to provide conclusive insights about the two major advantages of our proposed bi-directional attention compared to Perceiver's iterative attention: 1) Higher performance for comparable numbers of FLOPs, and 2) Ability to optionally extend the architecture via modality-specific components. We therefore choose two tasks \ignore{to do so }that have also been investigated in the Perceiver paper: Image classification on ImageNet1K~\citep{russakovsky_2015imagenet} and point cloud shape classification on ModelNet40~\citep{wu2015_modelnet}. 
+
+\textbf{ImageNet classification.}\quad To provide a fair basis for comparison, we create a range of architectural configurations with iterative attention based on the insights reported by~\citet{jaegle2021_perceiver}. Having optimized the hyperparameters (learning rate and schedule) for each individually, we run 3 randomly seeded training runs for the best 5 configurations and report their results after training for 120 epochs in \cref{tab:bidi_it}\,(\subref{subtab:bidi_it_img}) together with \arch~and the na\"ive sequential CA variant. It is apparent that removing the bottleneck of iterative attention significantly boosts the performance, with both \arch~and sequential CA outperforming all iterative variants by a significant margin at comparable FLOP counts.
+Interestingly, we find the configuration with 8 blocks and 6 self-attention layers per block (sa6-d8) to achieve best performance among the iterative variants, which aligns with the `best' configuration reported by \citet{jaegle2021_perceiver}.
+\begin{wraptable}{R}{6.7cm}
+\caption{\textbf{Classification on ImageNet1K using \textit{`few-FLOP}' Transformers.} Note that we focus here on efficient models in the low FLOP and/or parameter regime. Perceiver architectures are included as contrast to our bi-directional attention. All methods have been trained on input resolutions of $224^2$, and $\uparrow\!\!384$ further fine-tuned on $384^2$. Note that different models may have received a different optimization effort. $^{*}$result reproduced as not reported in original work.}\label{tab:imagenet}
+\centering
+\scalebox{0.83}
+    {
+    \hspace{-7pt}
+\setlength{\tabcolsep}{2.5pt}
+    \begin{tabular}{lrc|r}
+        \specialrule{.2em}{.1em}{.1em}
+        \textbf{Architecture} & \textbf{FLOPs} &\textbf{\#Param} & \textbf{Acc.}\\
+        \toprule\toprule
+        Perceiver~\tiny{\citet{jaegle2021_perceiver}} & $707$G & $45$M &  $78.0$ \\
+        Perceiver v2~\tiny{\citet{jaegle2022_perceiverio}} & $404$G & $42$M &  $78.6$ \\
+        Perceiver-IO~\tiny{\citet{jaegle2022_perceiverio}} & $407$G & $48$M &  $79.0$ \\
+        \midrule
+        \gray{Perceiver v2 \small{(conv)}~\tiny{\citet{jaegle2022_perceiverio}}} & \gray{$367$G} & \gray{$42$M} &  \gray{$77.4$}\\
+       \gray{ Perceiver-IO \small{(conv)}~\tiny{\citet{jaegle2022_perceiverio}}} & \gray{$369$G} & \gray{$49$M} &  \gray{$82.1$}\\ 
+        DeiT-Ti/16~\tiny{\citet{touvron2021_deit}} & $1.3$G & $\hphantom{1}6$M &  $72.2$ \\
+        \rowcolor{Apricot!20!White} \arch-Ti/16 & $1.7$G & $15$M &  $80.1$ \\  
+        \rowcolor{Apricot!20!White} \arch-Ti/16 \small{(conv)} & $1.7$G & $15$M &  $81.0$ \\  
+        \midrule
+        PiT-Ti~\tiny{\citet{heo2021_pit}} & $0.7$G & $\hphantom{1}5$M & $73.0$ \\
+        PiT-XS~\tiny{\citet{heo2021_pit}} & $1.4$G & $11$M & $78.1$ \\
+        ViL-Ti-APE~\tiny{\citet{zhang2021_vil}} & $1.3$G & $\hphantom{1}7$M & $76.3$ \\
+        ViL-Ti-RPB~\tiny{\citet{zhang2021_vil}} & $1.3$G & $\hphantom{1}7$M & $76.7$ \\
+        PVTv1-Ti~\tiny{\citet{wang2021_pvt}}  & $1.9$G & $13$M &  $75.1$ \\
+        PVTv2-B1~\tiny{\citet{wang2022_pvtv2}}  & $2.1$G & $13$M &  $78.7$\\
+        XCiT-T12~\tiny{\citet{el2021_xcit}} & $1.2$G &  $\hphantom{1}7$M & $77.1$ \\
+        XCiT-T24~\tiny{\citet{el2021_xcit}} & $2.3$G & $12$M & $79.4$ \\
+        \midrule \midrule
+        \rowcolor{Apricot!20!White} \arch-Ti/8 \qquad\qquad \textcolor{gray}{\tiny{[seq-len: \hphantom{2{,}}784]}} & $4.7$G & $15$M &  $81.9$ \\  
+        \rowcolor{Apricot!20!White} \arch-Ti/16 \tiny{$\uparrow\!\!384$} \qquad\quad \,\textcolor{gray}{\tiny{[seq-len: \hphantom{2{,}}576]}} & $3.6$G & $15$M &  $81.8$ \\  
+        \rowcolor{Apricot!20!White} \arch-Ti/8 \tiny{$\uparrow\!\!384$} \hphantom{16}\qquad\quad \textcolor{gray}{\tiny{[seq-len: 2{,}304]}}  & $12.5$G & $15$M &  $82.8$ \\  
+        \rowcolor{Apricot!20!White} \arch-Ti/4 \tiny{$\uparrow\!\!384$} \hphantom{16}\qquad\quad \textcolor{gray}{\tiny{[seq-len: 9{,}216]}} & $48.1$G & $15$M &  $83.1$ \\ 
+        \bottomrule
+    \end{tabular}
+    }
+\end{wraptable}
+
+Contrasting the two CA-based approaches with identical numbers of layers (`\textit{d12}') demonstrates the clear advantage of our proposed \textit{bi-directional CA}, requiring $\sim\!\!7\%$ fewer FLOPs, $\sim\!\!15\%$ less memory and $5\%$ fewer parameters to achieve similar results as the \ignore{na\"ive }sequential variant.
+This allows \arch~to use one additional layer at matching FLOP count, consistently outperforming the na\"ive approach across all our experiments while being still $7\text{--}8\%$ more memory efficient.
+
+\textbf{Point cloud shape classification.}\quad
+To gain further quantitative insights how bi-directional attention affects processing of other modalities, we evaluate our approach on the ModelNet40 dataset~\citep{wu2015_modelnet}. \arch~again clearly outperforms Perceiver in terms of overall accuracy (OA) and is even competitive to other point-based methods like the seminal PointNet~\citep{qi2017_pointnet} (\cref{fig:bxit}\,(\subref{subtab:bidi_it_pcl})). In contrast to Perceiver's iterative attention that gathers information exclusively in the latents, \arch's simultaneous refinement of latents and tokens allows us to easily integrate data-specific modules for token refinement. To gauge the effect, we add the `affine grouping' module from PointMLP~\citep{ma2021_pointmlp} without and with \ignore{creating a }hierarchical structure (\ie. point reduction). While \arch~is still outperformed by point cloud specific PointMLP\ignore{ method}, these optional modules help to boost the accuracy by up to~$3.9\%$ while trading off generality. 
+
+\subsection{Image Classification}\label{sec:img_cls}
+\textbf{Comparison to SOTA.}\quad Note that we focus here on efficient Transformer models in the low FLOP and/or parameter regime, with results reported in \cref{tab:imagenet}. \arch~performs favourably with default and convolutional tokenizer against the other `vanilla' Transformers, outperforming both versions of DeiT by a significant margin ($6.2\,\text{--}\,11.8\%$) while being $\sim\!\!\,200\times$ more efficient than Perceiver~(IO). These results are highly competitive even when compared to specialized vision-only architectures that leverage\ignore{ more} complex pyramidal multi-scale\ignore{ encoding} techniques, with \arch~outperforming all but one very recent\ignore{ly proposed} method (which however requires $29\%$ more FLOPs than our \arch). 
+
+\textbf{Increasing feature resolution and input size.}\quad
+ Note that our \arch/4 model can easily process $3{,}136$ tokens per $224^2$ image thanks to linear scaling, boosting the top-1 accuracy to $82.7\%$. Linear scaling also lets us process larger input images more efficiently -- which we investigate by fine-tuning\ignore{ the $224^2$-trained models} on $384^2$ for 30 epochs to reduce the required computational resources. Increasing the input size further notably improves the accuracy across architectures by up to $2.1\%$, however at the expense of higher FLOP counts. Nevertheless, \arch~shows that it is possible to achieve $83.1\%$ on ImageNet with only $15$M parameters and no vision-specific internals. % components.
+
+\textbf{Longer sequence beats model size.}\quad
+Most importantly, \arch~is able to \textit{efficiently leverage longer sequences to outperform larger competitors at fewer FLOPs}: The most-recent DeiT3-S achieves~$81.4\%$ (4.6G\,FLOPs, 22M param), while \arch~obtains~$81.8\%$ at only $3.6$G\,FLOPs \& $15$M parameters  -- see \cref{sec:imgnet_seqlen_sup} for further details.
+\subsection{Dense Tasks -- Semantic Image Segmentation \& Point Cloud Part Segmentation}
+\textbf{Semantic Segmentation.}\quad We investigate the transferability of our methods onto semantic image segmentation on ADE20K~\citep{zhou2017_ade20k}. We follow common practice and first integrate \arch~pretrained on ImageNet1K together with SemFPN~\citep{kirillov2019_semfpn} as decoder. Our vanilla BiXT performs competitively against other methods with similar FLOP counts, while the more vision-specific variant BiXT+LPI with local token refinement is on par with even the improved pyramidal PvTv2 and outperforms the other models of comparable complexity~(\cref{tab:semseg}). Please refer to \cref{sec:semseg_sup} for more details.
+
+\begin{wraptable}{L}{6.9cm}
+\caption{\textbf{Semantic Segmentation on ADE20K.} We again focus here on efficient models in the low FLOP and/or parameter regime. All methods trained on $512^2$ images, and FLOPs are computed on $512^2$ images as well.}\label{tab:semseg}
+\centering
+\scalebox{0.79}
+    {
+    \hspace{-5pt}
+    \begin{tabular}{lrc|r}
+        \specialrule{.2em}{.1em}{.1em}
+        \textbf{Backbone} & \hspace{1.6em}\textbf{FLOPs} &\textbf{\#Param} & \textbf{mIoU.}\\
+        \toprule\toprule
+        PVTv2-B0~\tiny{\citet{wang2022_pvtv2}} & $25.0$G & $\hphantom{1}8$M & $37.2$ \\
+        ResNet18~\tiny{\citet{he2016_resnet}} & $32.2$G  & $16$M  & $32.9$ \\
+        PVTv1-Ti~\tiny{\citet{wang2021_pvt}} & $33.2$G & $17$M & $35.7$ \\
+        PVTv2-B1~\tiny{\citet{wang2022_pvtv2}} & $34.2$G & $18$M & $42.5$\\
+        \rowcolor{Apricot!20!White} \arch-Ti/16 & $31.8$G & $19$M &  $39.2$ \\ 
+        \rowcolor{Apricot!20!White} \arch-Ti/16 \tiny{(conv)} & $31.8$G & $19$M &  $41.4$ \\ 
+        \rowcolor{Apricot!20!White} \arch-Ti/16 \tiny{(+LPI from XCiT)} & $32.4$G & $19$M & $42.4$ \\ 
+        \midrule \midrule
+        \rowcolor{Apricot!20!White} \arch-Ti/16 & $6.4$G & $15$M & $40.6$ \\ 
+        \rowcolor{Apricot!20!White} \arch-Ti/16 \tiny{(conv)} & $6.4$G & $15$M & $42.3$ \\ 
+        \rowcolor{Apricot!20!White} \arch-Ti/8 & $23.2$G & $15$M &  $42.1$ \\  
+        \rowcolor{Apricot!20!White} \arch-Ti/8 \tiny{(conv)} & $23.2$G & $15$M &  $43.2$ \\  
+        \bottomrule
+    \end{tabular}
+    }
+\end{wraptable}
+
+\textbf{Point Cloud Part Segmentation}.\quad
+Since \arch~provides a similar generality as Perceiver regarding its input data structure but additionally allows the use of the dense, local token information, we determine its suitability for the segmentation of parts of a point cloud\ignore{-- commonly referred to as \emph{point cloud part segmentation} --} on ShapeNetPart~\citep{yi2016_shapenetpart}.
+The na\"ive application of \arch~with a linear classifier directly applied to the last layer's tokens achieves a competitive class mIoU of~$83.5\%$ \ignore{(instance mIoU of~$85.2\%$) }and outperforms other `simple' methods like seminal PointNet~\citep{qi2017_pointnet} (class mIoU of~$80.4\%$), but lags slightly behind recent more complex encoder-decoder methods like PointMLP~\citep{ma2021_pointmlp} (class mIoU of~$84.6\%$). Including a modality-specific token-refinement module and \ignore{passing the encoded information to PointMLP's }decoder however closes the gap and lets \arch~obtain a highly competitive class mIoU of~$84.7\%$ -- as always trading off performance and generality. Please refer to \cref{sec:pointcloud_sup} for more detailed results.
+\ignore{With recent methods like PointMLP~\citep{ma2021_pointmlp} achieving a class mIoU of up to $84.6\%$ (instance mIoU of $86.1\%$), the naive application of \arch~with a linear classifier directly applied to the last layer's tokens achieves a class mIoU of~$83.5\%$ (instance mIoU of~$85.2\%$). Note, however, that methods in this space are usually highly specialized encoder-decoder structures. Including a modality-specific token-refinement ('geometric affine grouping') and passing the encoded information to PointMLP's decoder~\citep{ma2021_pointmlp} lets \arch~obtain a highly competitive class mIoU of~$84.7\%$ (instance mIoU~$86.0\%$) -- as always trading off performance and generality.}
+
+\subsection{Beyond Visual Perception: Hierarchical Sequence Modeling and Document Retrieval} \label{sec:lra}
+\begin{wraptable}{L}{8.5cm}
+    \centering
+    \caption{\textbf{Hierarchical Sequence Modeling and Document Retrieval} using the LRA benchmark~\citep{tay2021_lra}. Samples per second indicate empirical throughput at inference time for varying specified batch sizes `bs' (using one N\scshape{vidia} A100).
+    }
+    \scalebox{0.89}
+    {
+    \hspace{-6pt}
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{l | c *3c}
+    \specialrule{.2em}{.1em}{.1em}
+    \multirow{2}{*}{\textbf{Arch.}} &\textbf{Accuracy} &\textbf{FLOPs} &\textbf{samples\,/\,s} 
+    &\textbf{samples\,/\,s}  \\
+     &\hphantom{\small\textdownarrow}\textbf{(\%)} {\small\textuparrow} & \hphantom{\small\textdownarrow}\textbf{($\times10^6$)} {\small\textdownarrow} &\hphantom{\small\textdownarrow}\textbf{(bs=32)} {\small\textuparrow} 
+     &\hphantom{\small\textdownarrow}\textbf{(bs=256)} {\small\textuparrow} \\
+    \toprule\toprule
+    Transf.%
+    &$39.10{\scriptstyle\pm 0.57}$
+    &$137$
+    &$5175$
+    &$5357$%
+    \\
+    BiXT
+    &$39.42{\scriptstyle\pm 0.24}$
+    &$103$\,{\small\textcolor{OliveGreen!95}{\textbf{(-25\%)}}}
+    &$16891$\,{\small\textcolor{OliveGreen!95}{\textbf{(3.3$\times$)}}}
+    &$23804$\,{\small\textcolor{OliveGreen!95}{\textbf{(4.4$\times$)}}}
+    \\
+    \midrule\midrule
+    Transf.%
+    &$82.34{\scriptstyle\pm 0.31}$
+    &$535$
+    &$751$
+    &$751$
+    \\
+    BiXT
+    &$82.46{\scriptstyle\pm 0.41}$
+    &$384$\,{\small\textcolor{OliveGreen!95}{\textbf{(-28\%)}}}
+    &$5703$\,{\small\textcolor{OliveGreen!95}{\textbf{(7.6$\times$)}}}
+    &$6325$\,{\small\textcolor{OliveGreen!95}{\textbf{(8.4$\times$)}}}
+    \\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:lra_bench}
+\end{wraptable}
+Up to this point, we have demonstrated \arch's advantages on perception tasks centered around visual and 3D-structural reasoning. 
+We now go one step further and investigate whether our claim of `\arch~performing at the same level as a full Transformer while being more efficient' holds on tasks that are proven to require modeling of and reasoning over very long and often complex sequences. We evaluate the two tasks from the LRA benchmark with the 'longest required attention span'~\citep{tay2021_lra}: \textit{hierarchical sequence modeling} using Long-ListOps~\citep{nangia2018_listops}, and \textit{byte-level document retrieval} using AAN~\citep{radev2013_aanretrieval}.
+Long-ListOps tests the ability to reason hierarchically over complex sequences composed of numbers, mathematical operators and brackets -- requiring models to access all tokens and model the logical structure of inputs. \ignore{ a task considered to be ``\textit{considerably challenging}''~\citep{tay2021_lra}.}
+`Retrieval' evaluates the ability to encode and compress sequences of 4k length for matching and retrieval, requiring reasoning over 8k tokens in total. 
+To allow fair comparison, we follow the setup in~\citep{xiong2021_nystromformer}, and train both a full Transformer model and our \arch~variant for 5 random seeds each. While both models are on par in terms of accuracy, \arch~requires up to $28\%$ \textit{fewer} FLOPs and is up to $8.4\times$ faster -- clearly supporting our claim of significantly improving the efficiency for processing long sequences (\cref{tab:lra_bench}).\ignore{-- a significant improvement.} For additional details, please refer to the discussion in \cref{sec:lra_sup}.
+\subsection{Scaling Trends -- Number of Latents \& Dimensions}
+\begin{figure}
+    \centering
+\begin{subfigure}[b]{0.43\textwidth}
+    \includegraphics[width=\textwidth]{figures_v2/scaling/latents_acc_flops_embdim.pdf}
+    \label{subfig:scal_emb}
+\end{subfigure}
+\hspace{2em}
+\begin{subfigure}[b]{0.43\textwidth}
+    \includegraphics[width=\textwidth]{figures_v2/scaling/latents_acc_flops_seqlen.pdf}
+    \label{subfig:scal_seq}
+\end{subfigure}
+\caption{\textbf{Scaling trends.} Ablating the influence of embedding dimension, varying numbers of latents and sequence lengths for ImageNet1K classification. All models trained with \textit{shorter} schedule (only 300 epochs) to save computational resources, and comparisons should therefore be performed \textit{relative} to each other. Red star-markers correspond to \arch-Ti/16 (\textit{Acc. 80.1}) from \cref{tab:imagenet}. Validation accuracy represented through solid lines, while dashed lines indicate the computational resources.
+}
+\label{fig:scaling}
+\end{figure}
+The majority of this paper is concerned with tiny efficient models; however, it is interesting to see whether our models follow previous Transformers in terms of scaling behavior. \arch~offers an additional degree of freedom in the number of latents. We therefore provide some insights into \arch's ImageNet1K performance changes for $32, 64$ and $128$ latents as well as various embedding dimensions (\cref{fig:scaling}). As expected, accuracy increases with both larger embedding dimension and number of latents -- and it is worth noting that increasing the number of latents scales quadratically in FLOPs due to the self-attention-based latent refinement while increasing the sequence length scales linearly.
+Note that we use shorter training schedules for this ablation, and results are intended to be interpreted relative to each other\ignore{ (not as absolute `best' values)}. While we chose not to run excessive hyperparameter optimization and refrain from translating to very large architectures due to the large computational requirements involved, we did not observe any signs why \arch~should not behave like other Transformer architectures in terms of scaling and performance. We therefore anticipate to see similar tendencies \ignore{ for larger architectural variants, following the trend}as reported for related attention-based architectures, but leave this to future work.
+
+\subsection{Limitations \& Discussion} \label{sec:limitations}
+Our results obtained from the investigation of iterative \vrs bi-directional attention\ignore{ in \cref{sec:it_seq_bidi}} as well as our experiments across multiple tasks and modalities clearly show that bi-directional attention offers advantages in a number of settings\ignore{with `medium' to `large' input sequence length, including finely tokenized images of up to \correct{$7056$} tokens.}, both in terms of performance and efficiency. However, it is worth noting that by simultaneously refining the tokens alongside the latents, \arch~does not decouple the model's depth from the input\ignore{ and output}, unlike Perceiver models~\citep{jaegle2021_perceiver}. Therefore, very deep \arch~variants might potentially face difficulties in settings of \ignore{attending to }extremely long sequences\ignore{ like raw pixels of large images} paired with limited compute and memory. However, we suspect most such scenarios to benefit from some form of preprocessing via a modality-specific input tokenizer, similar to the input-adapter-based concept used in Perceiver-IO~\citep{jaegle2022_perceiverio} -- shifting most applications again into regions where \arch~performs effectively and efficiently.
+
+Given the current popularity of natural language processing tasks, we would further like to note that \arch~in its current form is an encoder-based architecture (similar to BERT-like models), and we expect it to perform well on tasks that require understanding and modeling of entire sequences -- which is what our results obtained in \cref{sec:lra} / \cref{tab:lra_bench} on the LRA tasks indicate. However, as \arch~circumvents the expensive token self-attention of Transformers via our proposed bi-directional cross-attention, causal masking as commonly used in decoder-only methods for generative language tasks is not directly applicable to \arch's current attention mechanism, as information from later tokens would be able to `leak' to earlier ones via the latent refinement. One possibility to establish causality in this setup \textit{could be} to assign groups of tokens to specific latents by masking the bi-directional cross-attention and latent refinement accordingly (while trading off some processing resolution at training time), but we expect there to be numerous potential ways and leave this as an interesting area for future follow-up research. 
+
+
+
+\section{Related work}
+
+The introduction of Transformers~\citep{vaswani2017_attention} has helped \emph{self-attention} to significantly gain in popularity, despite its caveat of scaling quadratically in computational time and memory with input length. Their flexibility regarding input modality and success in Natural Language Processing (NLP)~\citep{devlin2019_bert} and Computer Vision (CV)~\citep{dosovitskiy2020_vit, touvron2021_deit, touvron2022_deit3} prompted a series of works targeting more efficient versions.
+
+Approximating the attention matrix via low-rank factorization has been employed across NLP \citep{katharopoulos2020_transformersrnn, wang2020_linformer, song2021_implicit}, CV \citep{chen2018_a2net,zhu2019_asymmetric,li2019_expectation} and others~\citep{choromanski2021_performer}, essentially avoiding the explicit computation through associativity, estimating a set of bases or using sampling -- usually at the expense of performance. Others proposed to use tensor formulations \citep{ma2019_tensorized,babiloni2020_tesa} or exploit the input data structure \citep{parmar2018_imagetransf,ho2019_axial,qiu2020_blockwise,el2021_xcit} under the umbrella of sparsity, however limiting their use to only one specific input modality. 
+
+The line of work closest related to ours are `memory-based approaches' which employ some form of global memory to allow indirect interaction between local tokens. \citep{beltagy2020_longformer} propose to compose various local windowed patterns (sliding, dilated) with global attention on few `pre-selected' and task-specific input locations for NLP tasks, while its vision derivative \citep{zhang2021_vil} provides global memory as tokens within a vision-pyramid architecture and employs four different pairwise attention operations combined with several sets of global tokens that are discarded at certain stages, introducing rather high architectural complexity. \citep{ainslie2020_etc} \ignore{follow a similar strategy but }additionally investigate the encoding of structured NLP inputs, whereas \citep{zaheer2020_bigbird} propose a hand-crafted mix of random, window and global attention to sparsify and thus reduce attention complexity. \citep{Zhu2023_biformer} route information between selected tokens in a directed graph to achieve sparsity and skip computation in regions deemed irrelevant, whereas \citep{chen2023_fit} split the input sequence and introduce dedicated latents for each chunk.
+\citep{yao2023dualvit} in turn use cross-attention-based dual-blocks for efficiency but combine these with merging-blocks that cast attention over the entire concatenated token sequence, introducing a shared representation space and preventing linear scaling. 
+While these ideas of indirect local token communication via a shared global memory align with ours, \arch~realizes this goal in a much simpler and modality-independent manner when compared to the mix of highly modality-specific components, attention patterns and strategies involved in these works.
+Preserving generality \wrt the input, \citep{lee2019_set} use a set of learnable `inducing points' via cross-attention to query input data, while the recent Perceiver architectures~\citep{jaegle2021_perceiver,jaegle2022_perceiverio} similarly use a fixed set of latents to query input data -- yet none offers the efficient simultaneous refinement of latents and tokens realized in our \arch. Please see \cref{sec:relworks_sup} for some further in-detail discussion and a wider scope of related work.
+
+
+
+\section{Conclusion}
+
+In this paper, we presented a novel bi-directional cross-attention Transformer architecture (\arch) for which computational cost and memory consumption scale linearly with input size, motivated by a naturally emerging symmetry in two-way cross-attention that aligns with common intuition and has been empirically demonstrated in this work. By allowing the `what' (latent variables) and `where' (input tokens) to attend to each other simultaneously and develop alongside throughout the architectural stages, \arch~combines Perceiver's linear scaling with full Transformer architectures' high performance in a \textit{best-of-both-worlds} approach. The ability to efficiently process longer sequences paired with the ease to integrate further domain-specific token refinement modules helps \arch~to outperform larger models on ImageNet1K, be up to $80\%$ more efficient in semantic image segmentation, competitive across two point-cloud tasks, and on par with full Transformers in sequence modeling and document retrieval while requiring up to $28\%$ less compute and being up to $8.4\times$ faster.
+
+

@@ -1,0 +1,252 @@
+\title{Correcting Flows with Marginal Matching}
+
+\begin{abstract}
+Flow matching models, ODE-based generative models, generate samples by gradually morphing a simple source distribution into a target distribution. 
+In practice, these models still fall short of perfectly replicating the target distribution, mainly due to imperfections of the learned mapping. Previous work mainly focus on alleviating discretization error, which rises from sampling a continuous trajectory with a finite number of steps. In this work we focus on prediction error, an error that is inherent in the model. 
+Our main contribution is identifying a trajectory that complies with the imperfect flow model and leads exactly to the target distribution. Based on this finding, we propose Marginal Matching&mdash;a simple inference-time correction scheme to steer the generated samples in the direction of the data.
+This scheme proves to reduce a bound on the distance between the data and the learned distribution, motivating two different implementations for the correction function. We show that our proposed method improves sample quality on CIFAR-10 and ImageNet-64,  with minimal overhead in computation time, or non at all when applying approximated correction.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Flow based generative models (Lipman et al., 2023; Liu et al., 2023a; Tong et al., 2024) can generate complex data distributions, and have achieved remarkable results in image synthesis, audio generation, protein design and robotics (Yan et al., 2024; Liu et al., 2023b; Le et al., 2024; Irwin et al., 2024; Hu et al., 2023). These models learn a mapping between a source distribution (typically Gaussian noise) and a target distribution. In practice, however, this learned mapping is not accurate due to two main sources of error: discretization and prediction. The discretization error stems from the mapping, which is defined as a continuous time operator, with discrete steps, while the prediction error is attributed to general neural network training difficulties, such as limited architecture’s expressivity, limited training time and numerical instability. Previous works focus on minimizing the discretization error, for example by learning straighter trajectories (Pooladian et al., 2023; Lee et al., 2023; Tong et al., 2024). In this work we focus on mitigating the prediction error of a pre-trained model, which, to the best of our knowledge, has not yet been tackled in the flow matching literature.  
+
+Flow matching models assume that there exists an ODE that maps Gaussian noise to the data distribution. Errors in learning this ODE result in an imperfect mapping, which leads to a generated distribution that is different from the data. In reversible models one can also consider starting from the data distribution and following the reverse mapping. The idea of approximating and implementing the reversal mapping has been explored before, in the context of diffusion models (Wallace et al., 2023; Mokady et al., 2023). Here, we exploit time reversibility for flow matching models, which is arguably less involved, as it only requires solving the ODE in reverse time (Liu et al., 2023a).  
+
+Our main insight is that starting the generation from samples on the reverse time trajectory, (with the data as initial distribution), will perfectly reach the target distribution under the model’s mapping. We build on this insight and propose a simple method to improve the quality generation via correcting the sampled trajectory during inference. The correction is done by applying a learned correction step intermittently with the ODE solver steps, which works to reduce the error between the generated samples and the time-reversal ODE solution. We provide theoretical guarantees that such a correction function minimizes a bound on the Wasserstein distance (Kantorovich, 1942) between the target approximation and the true target distribution, as a function of the error reduction of the corrections at different time steps.  
+
+We examine two practical implementations for the correction function. The first implementation minimizes a theoretical bound, but has access to only subset of the data during training. The second has access to the full dataset, but makes no theoretical guarantee. We examine these correction models empirically and perform an extensive ablation study for our design choices. Our results show significant improvement with minimal additional steps, or with no extra compute time at all by running an approximated correction in parallel to the flow model.  
+
+In summary, our main contributions are as follows:  
+
+• A novel framework for improving pre-trained flow matching models using the concept of time reversal. • A theoretical analysis of this general framework, and two practical implementations. • We empirically show that our proposed correction models improve results on CIFAR-10 and ImageNet-64 datasets, achieving lower FID scores with fewer sampling steps.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+
+
+\section{2.1 FLOW MODELS  }
+
+
+Given a source distribution $\pi_{0}$ and a target distribution $\pi_{1}$ , both over $\mathbb{R}^{d}$ , flow matching (Lipman et al., 2023; Liu et al., 2023a; Tong et al., 2024) models their mapping. This is done with a smooth time-dependent vector field $u:[0,1]\times\mathbb{R}^{d}\rightarrow\mathbb{R}^{d}$ which defines an ODE $d\phi_{t}(x)\,=\,u_{t}(\phi_{t}(x))d t$ , where $\bar{x}\in\mathbb R^{d}$ , $t\in[0,1]$ and $\phi_{t}$ is the flow map with the initial condition $\phi_{0}(x)=x$ . A time-varying density function $p:[0,\bar{1}]\times\mathbb{R}^{d}\to\mathbb{R}_{>0}$ that satisfies the continuity equation:  
+
+$$
+\frac{\partial p_{t}}{\partial t}+d i v(p_{t}(x)u_{t}(x))=0,
+$$  
+
+with the initial density $p_{0}$ over $\mathbb{R}^{d}$ is called the marginal probability path generated by the vector field $u$ , and $u$ is said to be the probability flow $O D E$ for the density function $p$ .  
+
+The flow matching (FM) objective regresses $v_{\theta}:[0,1]\times\mathbb{R}^{d}\to\mathbb{R}^{d}$ , a time-dependent vector field parametrized as a neural network with weights $\theta$ , to a target vector field $u_{t}$ via the following mean squared error (MSE) loss function:  
+
+$$
+\mathcal{L}_{F M}(\theta)=\mathbb{E}_{t\sim[0,1],x\sim p_{t}(x)}\|v_{\theta}(t,x)-u_{t}(x)\|^{2}.
+$$  
+
+Numerous mappings exist between probability distributions $\pi_{0}$ and $\pi_{1}$ . The distributions $p_{t}(\boldsymbol{x})$ and $u_{t}(x)$ are not unique and typically impossible to compute directly. To overcome this challenge, Lipman et al. (2023) demonstrated that equivalent gradients to Eq. 2 with respect to $\theta$ can be derived using an alternative approach named conditional flow matching (CFM) loss:  
+
+$$
+\mathcal{L}_{C F M}(\theta)=\mathbb{E}_{t\sim[0,1],z\sim q(z),x\sim p_{t}(x|z)}\|v_{\theta}(t,x)-u_{t}(x|z)\|^{2},
+$$  
+
+where $z$ is some conditional variable sampled from a distribution $q(z)$ . The full derivation is available in Lipman et al. (2023); Tong et al. (2024). Many efficient parameterizations exist for $u_{t}(x|z)$ and $p_{t}(x|z)$ , in this work we focus on the parametrization described in Tong et al. (2024):  
+
+$$
+z=(x_{0},x_{1})\quad;\quad u_{t}(x|z)=x_{1}-x_{0}\quad;\quad p_{t}(x|z)=\mathcal{N}(x|t\cdot x_{1}+(1-t)\cdot x_{0},\sigma^{2}I),
+$$  
+
+where $z\ \sim\ q(z)$ and $t\,\in\,[0,1]$ is the interpolation coefficient. The conditional density $p_{t}(x|z)$ specifies one of the possible $p_{t}$ distributions and is easy to sample from and learn. The vector field $u_{t}$ and its corresponding marginal distribution $p_{t}$ can be obtained in terms of the conditional ones: pt(x) = pt(x|z)q(z)dz, ut(x) =  pt(x|pzt)(uxt)(x|z)q( . We examine two recently studied flow models by Tong et al. (2024), one with independent coupling (I-CFM) $q(z)=\pi_{0}(x_{0})\times\pi_{1}(x_{1})$ and another with optimal transport coupling (OT-CFM) $q(z)=O T(x_{0},x_{1})$ . A.1. The OT coupling is calculated on batches during training and results in straighter trajectories, (Pooladian et al., 2023; Tong et al., 2024).  
+
+
+
+\section{2.2 SCORE MODELS  }
+
+
+In score-based generative models (Song et al., 2021b; Song & Ermon, 2019) the forward and reverse processes are modeled using standard diffusion and reverse-time stochastic differential equations (SDEs). The forward process is described by $d x=f(x,t)d t+g(t)d w$ , while the reverse-time SDE is given by $d x=\left(f(x,t)-g(t)^{2}\nabla\log\pi_{1}\right)d t+g(t)d w$ . In these equations, $w$ represent standard Wiener processes, $f$ is the drift coefficient, $g$ is the diffusion coefficient, and $t$ ranges from 0 to $T_{s}$ . The reverse SDE is used for generating samples, evolving from $t=T_{s}$ to $t\,=\,0$ , for example by using a numerical SDE solvers.  
+
+The score model estimates the score function $\nabla_{x}\log\pi_{1}(x)$ , where $\pi_{1}(x)$ is the target distribution defined above. The training process typically involves denoising score matching (DSM):  
+
+$$
+L_{D S M}(\theta)=\mathbb{E}_{\pi_{1}(x)p_{\sigma}(\tilde{x}|x)}||s_{\theta}(\tilde{x})-\nabla_{\tilde{x}}\log p_{\sigma}(\tilde{x}|x)||_{2}^{2}
+$$  
+
+Here, $s_{\theta}$ denotes a neural network parameterized by $\theta$ , and $p_{\sigma}(\tilde{x}|x)\,=\,\mathcal{N}(x,\sigma^{2}I)$ represents the probability of a noisy sample from the target distribution. Vincent (2011) demonstrated that the optimal score network $s_{\theta^{\ast}}(x)$ , which minimizes Eq. 4, satisfies $s_{\theta^{*}}(x)=\nabla_{x}\log p_{\sigma}(x)$ almost surely. This result shows that the network learns to estimate the score function of $p_{\sigma}(x)$ , which is crucial for effectively denoising it. However, the approximation $s_{\theta^{*}}(x)\,=\,\nabla_{x}\log p_{\sigma}(x)\approx\nabla_{x}\log\pi_{1}(x)$ holds true only when the noise level is sufficiently small, such that $p_{\sigma}(x)\approx\pi_{1}(x)$ .  
+
+
+
+\section{3 METHOD  }
+
+
+3.1 PROBLEM FORMULATION AND MOTIVATION  
+
+Let $u^{*}$ denote an “ideal” flow function that maps the source distribution $\pi_{0}$ to the target distribution $\pi_{1}$ . In this work we follow the formulation of Tong et al. (2024) and assume the conditional marginals’ distributions specified by $u^{*}$ are $p_{t}(x|z)=\bar{\mathcal{N}}(x|t\cdot x_{1}+(1-t)\cdot x_{0},\sigma)^{1}$ . Nonetheless, our derivations are not limited to this particular flow. We are given a pre-trained flow model, $v_{\theta}$ , that was trained to approximate $u^{*}$ . However, as is common in most practical applications $v_{\theta}\neq u^{*}$ . Let $\hat{\pi}_{1}$ denote the distribution of samples generated by the model $v_{\theta}$ . In practice, $\hat{\pi}_{1}$ will not exactly match the target distribution $\pi_{1}$ due to two primary sources of error:  
+
+• Prediction error: This error is inherent in the learned model, as $v_{\theta}\neq u^{*}$ . The primary sources for this error are limited expressivity of the model’s architecture, limited training time and numerical instability. In addition, this error is more pronounced in models in which sampling is iterative, as it accumulates with each forward iteration.  
+
+• Discretization error: This error arises from approximating a continuous-time trajectory with discrete steps. That is, even if $v_{\theta}=u^{*}$ , it may be that $\hat{\pi}_{1}\neq\pi_{1}$ due to the discretization in the numerical integration method.  
+
+![](images/ebebf9ff7399fa2b65a0261a5da00b2bd8378282577dd54f82b5590489ac2dd6.jpg)  
+(a) $\pi_{0}$ and $\pi_{1}$ (b) Forward (c) Backward  
+
+Previous works tried to tackle the discretization error, for example by learning straighter trajectories (Pooladian et al., 2023; Tong et al., 2024; Lee et al., 2023). This reduces the discrepancy between the continuous trajectory and its discretized approximation. In contrast, the prediction error is more challenging to address and has remained relatively unexplored. In this work, we focus on this error; given $v_{\theta}$ and access to the data it was trained with, we seek to improve the performance of generating samples from $v_{\theta}$ .  
+
+A straightforward idea to mitigate prediction error is to attempt to reduce the distance between $v_{\theta}$ and $u^{*}$ . However, as this was already the training ob  
+
+Figure 1: Illustration of Marginals (a) Gaussian source distribution $\pi_{0}$ (red), and target distribution $\pi_{1}$ (blue). (b) Discrete forward marginals $\{p_{t_{n}}^{f}\}_{n=0}^{N}$ . (c) Discrete backward marginals $\{p_{t_{n}}^{b}\}_{n=0}^{N}$ . Note that $p_{t_{n}}^{b}\neq\ p_{t_{n}}^{f}$ for every $n$ , specifically $p_{0}^{b}$ $\scriptstyle={\hat{\pi}}_{0}$ , black) differs from $p_{0}^{f}\left({=}\pi_{0}\right.$ , red).  
+
+jective of $v_{\theta}$ , it is not clear how to make a principled improvement in this direction. Instead, we propose a different idea, based on the following insight.  
+
+We observe that if the vector field represented by $v_{\theta}$ is invertible, a well defined “reverse flow” exists from the target distribution $\pi_{1}$ according to the reverse of the vector field – $v_{\theta}$ . The key observation is that starting a forward flow using $v_{\theta}$ from any point on the reverse flow will converge to the target  
+
+distribution. That is, we have found a trajectory of densities that works perfectly with our imperfect model $v_{\theta}$ . Our proposal is to learn how to correct the original trajectory density path to be more similar to this trajectory, with the hope that by doing so, applying the flow with $v_{\theta}$ , will bring us closer to the target distribution. Thus, correcting deviations introduced by the prediction error. We assume that the flow is invertible, implying cycle consistency between forward and backward vector field mappings (Zhu et al., 2017). A similar assumption is used in Liu et al. (2023a) in experiments on image translation. While we cannot verify that this assumption holds in practice, we empirically validate our method on popular datasets.   
+To explain our method, we next define the forward and backward marginals, which represent the evolving probability distributions over time generated by the vector field. These marginals will be a key component to understand how we adjust the sampling process.   
+Definition 3.1. Forward and Backward Marginals: Let u be a continuous globally Lipschitz timedependent function $u:[0,1]\!\times\!\mathbb{R}^{d}\to\mathbb{R}^{d}$ . Let $\bar{u}^{-1}$ be the reverse vector field defined as: $\bar{u}^{-1}(t,x):=$ $-u(t,x)$ . The discretization of the time-interval $[0,1]$ into $N$ steps is $t_{n}=n/N$ .  
+
+• Forward Marginals are the probability path generated by $\begin{array}{r}{\frac{\partial p_{t}^{f}}{\partial t}+d i v(p_{t}^{f}(x)u_{t}(x))=0}\end{array}$ from time 0 to 1, with initial distribution $p_{0}^{f}=\pi_{0}$ . The final distribution is $p_{1}^{f}\,=\,\hat{\pi}_{1}$ . Their $N$ steps discretization is defined as $\{p_{t_{n}}^{f}\}_{n=0}^{N}$ .  
+
+• Backward Marginals are the probability path generated by $\begin{array}{r}{\frac{\partial p_{t}^{b}}{\partial t}+d i v(p_{t}^{b}(x)u_{t}^{-1}(x))=0}\end{array}$ from time 1 to 0, with initial distribution $p_{1}^{b}=\pi_{1}$ . The final distribution is $p_{0}^{b}=\hat{\pi}_{0}$ . Their $N$ steps discretization is defined as $\{p_{t_{n}}^{b}\}_{n=0}^{N}{}^{2}$ .  
+
+We refer to $p_{0}^{b}$ as the approximate source   
+distribution to distinguish it from $\pi_{0}$ , the   
+source distribution, and $p_{1}^{f}$ as the approx  
+imate target distribution to distinguish it   
+from $\pi_{1}$ , the target distribution. Note that   
+$p_{0}^{b}$ is the optimal source distribution for $v_{\theta}$ ,   
+in the sense that integrating over the vec  
+tor field from $p_{0}^{b}$ would guarantee reaching   
+the distribution $\pi_{1}$ . Fig. 1 illustrates the   
+forward and backward marginals of a flow   
+model sampled with 10-steps Euler inte  
+gration. It demonstrates the probability   
+marginals trajectory and that $p_{t_{n}}^{b}\neq p_{t_{n}}^{f}$ for   
+every $n$ . Additionally, there is a substan  
+tial intersection between the forward and   
+backward marginals, and their symmetric   
+difference represents the outliers that do   
+ A.5.  
+
+![](images/21cc96fe74845e25dd8728ae995132d9f015de1c6ba0becd2b68d1a48defe8ef.jpg)  
+Figure 2: Marginals in Vector Field The black lines show two key trajectories in a vector field. The lower is the forward trajectory, starts at $\pi_{0}$ and ends at $p_{1}^{f}=\hat{\pi}_{1}$ . The upper is the backward trajectory, begins at $p_{0}^{b}$ and ends at the data distribution $\pi_{1}$ . Both are discretized at time-steps $t$ and $t^{\prime}$ . Our objective is to transition from forward to backward marginals trajectory.  
+
+Our next observation is that if the forward marginals trajectory reaches the target distribution, then it aligns with the backward trajectory for every time-step. This is formally stated in Lemma. 3.2  
+
+Lemma 3.2. Let $u:[0,1]\,\times\,\mathbb{R}^{d}\,\to\,\mathbb{R}^{d}$ be a continuous time-dependent vector field, satisfying: $|u_{t}(x)-u_{t}(y)|\,\leq\,L|x-y|$ , $\forall t\in[0,1]$ , $x,y\in\mathbb{R}^{d}$ . Then, $p_{1}^{f}\,=\,p_{1}^{b}\,=\,\pi_{1}$ if and only $i f\,p_{t}^{f}\,=\,p_{t}^{b}$ $\forall t\in[0,1]$ .  
+
+Based on this observation, we propose a novel approach to correct a flow model: rather than reducing the discrepancy between $v_{\theta}$ and $u^{*}$ , we suggest reducing the discrepancy between the forward and backward marginals. We term this process Marginal-Matching (MM). Fig.2 illustrates this idea. The following lemma allows bounding the distance between the marginals at time $t$ based on the distance between the marginals at time $t_{0}$ :  
+
+Lemma 3.3. Let u be a vector field as defined in Lemma. 3.2. The 2-Wasserstein distance between $p_{t}^{f}$ and $p_{t}^{b}$ satisfies:  
+
+$$
+\begin{array}{r}{W_{2}(p_{t}^{f},p_{t}^{b})\leq W_{2}(p_{t_{0}}^{f},p_{t_{0}}^{b})\exp\{L(t-t_{0})\}.}\end{array}
+$$  
+
+This lemma indicates that reducing the Wasserstein distance at the initial $t_{0}$ can effectively control the Wasserstein distance at later times. We can apply this principle iteratively, by applying several corrections along the interval $[0,1]$ , and bounding the distance between the probability distributions on the continuous sub-intervals between each correction step. The next theorem bounds the accumulated error reduction due to applying such corrections. Let $h$ be a function from a family of functions that reduce the Wasserstein distance between the forward and backward marginals. We claim that applying any function from this family on the forward marginals during inference would improve generation.  
+
+Theorem 3.4. (Informal) Let u be a well-behaved vector field with Lipshitz constant $L,$ , $p_{t}^{f}$ and $\ensuremath{\boldsymbol{p}}_{t}^{b}$ be two time-dependent probability density functions satisfying the continuity equation Eq. (1) with respect to u. Suppose that the initial Wasserstein distance is $d_{0}\,=\,W_{2}(p_{0}^{b},p_{0}^{f})$ . At each time step $t_{n},$ a correction function $h$ is applied to $p_{t_{n}}^{f}$ and the flow function continues from $h(t_{n},p_{t_{n}}^{f})$ . Assuming h reduces the $W_{2}$ distance to $p_{t_{n}}^{b}$ by $\epsilon_{n;}$ , the reduction on the bound of the final distance is: $\begin{array}{r}{W_{2}(p_{1}^{b},p_{1}^{f})\leq d_{0}\exp\{L\}-\sum_{i=0}^{n-1}\epsilon_{i}\exp\{L(1-t_{i})\}.}\end{array}$ .  
+
+ A.2. 3.4 for two specific error reduction functions - additive and multiplicative. In the following examples, we demonstrate that in each case, the total error reduction is spread differently across the time steps, demonstrating an important idea – we should prioritize the corrections applied in particular steps based on the error reduction model. We will revisit this idea in our experiments.   
+Example 3.5. Linear Reduction This is the case of linear error reduction in Thm. 3.4. Suppose $N=2$ , then the resulting bound takes the form: $d_{0}\exp\{L\}-\epsilon_{0}\exp\{L\}-\epsilon_{1}\exp\{L\cdot0.5\}$ . Assuming $\epsilon_{0}\;=\;\epsilon_{1}$ , the reduction term at time step 0 exerts a more significant influence on the final bound due to the larger exponential factor. This underscores that, in such cases, the focus should be on prioritizing the correction of earlier steps in the sequence.   
+Example 3.6. Multiplicative Reduction This is the case of multiplicative error reduction in Thm. 3.4. Suppose $N=2$ , then the resulting bound takes the form: $d_{0}\exp\{L\}(1-\epsilon_{0})(1-\epsilon_{1})$ . In this formulation, the reduction terms at each time step $(1-\epsilon_{0})$ and $(1-\epsilon_{1})$ contribute equally to the final bound, regardless of their position in the sequence. This structure implies that the optimal strategy for minimizing the bound would be to prioritize improvements at the steps where they yield the greatest benefit—specifically, where the magnitude of $\epsilon_{i}$ is largest.  
+
+3.2 PRACTICAL ALGORITHM  
+
+Our goal is to correct the sampled trajectory during inference to reduce the discrepancy between the forward and backward marginals at every step. This section proposes such an algorithm given a pre-trained flow model $v_{\theta}$ . The flow model is designed to transform an easily sampled source distribution $\pi_{0}$ , (such as ${\mathcal{N}}(0,I))$ , into a target distribution $\pi_{1}$ . Rather than considering only the approximate source distribution $(p_{0}^{b})$ , motivated by Thm. 3.4, our approach considers all backward marginals.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Training and inference mismatch – Previous work recognized training and inference mismatch in different settings. In score models (Song et al. (2021b); Song $\&$ Ermon (2019)), the source  
+
+distribution during inference is ${\mathcal{N}}(0,I)$ , which is intended to approximate the ”noisiest” training distribution $(p_{T})$ . However, as these distributions are not identical, starting from ${\mathcal{N}}(0,I)$ will yield sub-optimal results. Two different solutions were proposed to minimize this gap as a pre-sampling procedure: Franzese et al. (2023) suggested an auxiliary model that learns the mapping from $\mathcal{N}(0,\bar{I})$ to $p_{T}$ . Alternatively, Pedrotti et al. (2024) proposed to use Langevin dynamics (Welling & Teh (2011)), leveraging the score function $\nabla_{x}\log{p_{T}(x)}$ .   
+Even if the source distribution during training and inference is the same, practically, the actual distribution that reaches the data is different. Coeurdoux et al. (2023) leveraged the invertibility property of normalizing flow (NF) models (Kingma & Dhariwal (2018); Dinh et al. (2014)) to reach higher probability samples in $\hat{\pi}_{1}$ , which are more likely to belong to $\pi_{1}$ . They achieved this by employing MCMC algorithm, where the score is computed using the Jacobian of the inverse mapping. This discrepancy between the learned and actual source distribution is common in generative models like VAEs (Kingma et al., 2021), which assume a Gaussian prior during inference. (Dai & Wipf, 2019) addressed this by learning an additional VAE model to predict the actual prior distribution, thereby removing the Gaussian assumption, which lead to improved results.   
+Different sampling trajectories – Different sampling trajectories were explored in previous work mainly through the research of difference source distributions. In Denoising Diffusion Probabilistic Models (Ho et al. (2020); Sohl-Dickstein et al. (2015)), various source distributions proved to decrease inference time while maintaining quality. gil Lee et al. (2022) proposed using a Gaussian prior distribution with parameters derived from data statistics. Lyu et al. (2022); Popov et al. (2021) trained a model for prior distribution using an encoder or VAE (Kingma & Welling (2013)) and incorporated it into the standard diffusion process by adding noise. Other studies have shown that the prior distribution need not be Gaussian Bansal et al. (2024); Heitz et al. (2023). Flow based models Lipman et al. (2023); Tong et al. (2024); Liu et al. (2023a), a new family of generative models, generalized the mapping to include general source distributions.   
+The work most closely aligned with ours is that of $\mathrm{Xu}$ et al. (2024) as they considered the learned errors throughout the whole sampling trajectory. They use a sequence of NF blocks to learn a sequential transformation from Gaussian noise to data, where each block represents a different timestep. This requires training the blocks sequentially, as the learned error in each block is accounted for in the next block, slowing the training process. The sampling process initiates from Gaussian noise, where the model’s error is not accounted for. In contrast, our work takes into account the model’s prediction error at every step, as we correct the inference time trajectory. Moreover, we improve the recently proposed flow matching instead of NF. A.4. 5 EXPERIMENTS   
+We empirically evaluate MM’s image generation performance, with both the score and classifier correction models. The score model is trained with a constant noise $\sigma$ . We conduct experiments on two datasets: unconditional CIFAR-10 (Krizhevsky et al. (2009)) and ImageNet-64 (Chrabaszcz et al. (2017); Deng et al. (2009)). To assess the quality of generated images, we employ Fre´chet Inception Distance (FID) (Heusel et al. (2017)) score as our evaluation metric.   
+A key factor in diffusion and flow models is inference compute time, measured by number of function evaluations (NFE). In all tables, NFE represents the total number of sampling steps, and C-NFE denotes the number of sampling steps taken with our correction model (out of the NFE). We note that a classifier correction step require two NFEs, due to input derivative calculations, while score correction requires only one NFE.   
+For the flow model we use the UNet architecture with the same hyper-parameters as Tong et al. (2024). For the score and classifier models, we use UNet with half the number of parameters used for the flow model. Additionally, these correction models undergo significantly fewer training iterations compared to the flow model. Unless otherwise specified, the correction models were trained on trajectories consisting of $N=11$ marginals with OT-CFM (Tong et al., 2024) as the flow model, and the flow model was sampled with 10-step RK4, which is 40 NFEs. A.10. The code will be available upon publication.  
+
+![](images/bb9e6461ddf34945212a9a73c128218fd550d5671bedcfcafb6ca1c2a5a4c2d5.jpg)  
+
+Table 1: CIFAR-10 performance. (Left) Leading baseline models. (Right) Our correction models (score and classifier) with OT-CFM and I-CFM base flow models. The base flow models are sampled with 10-step RK4 (40 NFE). Correction steps improve performance with minimal additional NFEs, and generally, increasing the number of applied corrections (C-NFE) enhances overall results. A.6.6.  
+
+
+
+\section{5.1 CIFAR-10 SAMPLE QUALITY  }
+
+
+To showcase the improvement of MM we implement our score and classifier correction models with OT-CFM and I-CFM base flow models on CIFAR-10. Table 1 shows comparison of our results to (Ho et al., 2020; Song et al., 2021b; Lipman et al., 2023; Tong et al., 2024). Previous works employ an adaptive sampler (DOPRI5, dor (1980)), while we use RK4 as the ODE-sampler to ease the integration of the correction steps. We compare with results reported in Lipman et al. (2023), implemented using the same UNet (Dhariwal & Nichol, 2021), and those in Tong et al. (2024). As Tong et al. (2024) did not report RK4 sampling results, we conduct these experiments and report baseline results using the models’ checkpoints as our foundational flow models. Following the results of Sec. 3.1, we investigate applying the correction on various time steps (C-NFE $>$ $1)^{3}$ . We examine several options: for the score model the correction steps were taken on $n\,=$ $\{[10],[0,5,10],[0\,.\,.\,.\,10]\}$ and for the classifier on $n=\{[8],[8,9,10],[6,7,\dot{8},9,10],[0\dots10]\}.$ .  
+
+We significantly outperform the baselines in the small NFE regime. The score model slightly outperforms the classifier in FID score, although it was not exposed to the forward marginals during training. Moreover, the score model demonstrates consistent performance regardless of whether it is applied to OT-CFM or I-CFM, indicating a robust ability to denoise from forward to backward marginals across both frameworks. Whereas, the robust classifier exhibits sensitivity to the choice of the model, showing superior performance when coupled with OT-CFM. We did not observe any benefit from applying both the score and classifier correction models together.  
+
+Fig.8). The correction models improve clarity and sometimes make significant changes to the image. The score and classifier corrections show varying levels of effectiveness depending on the specific image. In some cases, one method outperforms the other, while in other instances, they surprisingly produce similar results.  
+
+Parallel Sampling Fig. 3 presents parallel sampling results as described in Sec. 3.2 on CIFAR-10. Both the classifier and score correction models show improvement in FID, though less than the exact correction version.  
+
+Interpolating Marginals during Training The correction model $h_{\psi}(t,x_{t})$ is time-dependent, as it is trained on different time-step marginals. The marginals are generated and stored in advance to avoid running the ODE-solver multiple times while training $h_{\psi}(t,x_{t})$ . In order to save this extra storage, we propose to approximate the backward trajectory. Assuming the flow model’s trajectories are sufficiently straight, we can interpolate between $p_{0}^{b}$ , the approximate source distribution, and $p_{1}^{b}$ , the target distribution by: $\hat{p}_{t_{n}}^{b}\;=\;t_{n}\,\cdot\,p_{1}^{b}\,+\,(1\,\stackrel{\cdot}{-}\,\stackrel{\cdot}{t}_{n})\,\cdot\,p_{0}^{\bar{b}}$ . This allows for efficient training storage as only the data and the approximate source distribution are stored rather than the entire backward trajectory. This means that the MM’s dataset size is twice rather than $N$ times the size of the original data. Fig. 3 presents the results of the interpolated backward trajectory. The score model’s performance remains steady, while the classifier exhibits degradation in its performance.  
+
+![](images/a8f18b97a468687944b060b2d31c0a6b69f5e97d3823d6a5cf2d6a642fdfeb4b.jpg)  
+
+Figure 3: CIFAR-10 sample quality with different approximations – parallel (“P-”) for faster inference and interpolated backward marginals for efficient storage during training; see text for details. The base flow is sampled with 10-step RK4 (40 NFE). A.6.3.  
+
+![](images/b1d58892397703175e1a0b3273bee2b256c52b8b67a7fa28711c8a5903009b3c.jpg)  
+
+![](images/569aeb02ef9b482880262e0ddd11644815d97a37561c0a9d69e5f25eb5c665d5.jpg)  
+
+Table 2: ImageNet-64 results for top generative models (Left) vs. score correction with OT-CFM base flow (Right), which is sampled with 5-step RK4 (20 NFE).  
+
+
+
+\section{5.2 IMAGENET-64 SAMPLE QUALITY  }
+
+
+We perform experiments on ImageNet-64 to examine how MM performs in a higher-dimensional settings. Given a pre-trained OT-CFM flow model trained on ImageNet-64, we train a score correction model to improve its sample quality, as the score model outperform the classifier on CIFAR, we chose to perform these resource-intensive experiments with it. The score model was trained on trajectories consisting of $N=6$ marginals. Table. 2 presents the improvement in FID of a correction model trained on the backward marginals trajectory and its approximation (for more details see Sec. 5.1) compared to (Ho et al., 2020; Song et al., 2021b; Lipman et al., 2023; Tong et al., 2024). Similarly to the CIFAR-10 results, we observe that MM improves FID in the low NFE regime (22 and below). The correction is qualitatively demonstrated in Fig. A.7). The correction model removes the residual noise in the model’s approximation and changes the images structure to better align with the ImageNet dataset photos.  
+
+
+
+\section{5.3 ABLATION STUDY  }
+
+
+ A.6.1.  
+
+![](images/6c45c1af7cd7c2e6004e752a24a87ec2e49d8076daa210aa67d0ee7541031439.jpg)  
+Figure 4: Correction models with OT-CFM as base flow model results on CIFAR-10 (Left) and Imagenet-64 (Right). The ”-Diff” shows the difference between corrected and uncorrected images. Corrected images show improved sharpness and better alignment with the dataset.  
+
+![](images/a9112b347dc66b610e33ce9a840cfbc5833ac2d54849f6f62cd87c8e282c05c2.jpg)  
+Figure 5: CIFAR-10 sample quality. The base flow model is OT-CFM sampled with 10-step RK4 (40 NFE). Left: FID vs accumulative correction time-steps. Middle: FID vs single correction timestep. Right: Ablation study on loss components of the classifier sampled on different marginals.  
+
+
+
+\section{5.3.1 MARGINALS ABLATION  }
+
+
+In this ablation we study the effect of applying correction on different time-steps. Fig. 5 (Left) demonstrates the cumulative effect of correcting all time-step marginals (from 0 to 10). The score model demonstrates significant improvements primarily during the middle and final steps, with minimal contributions from early stages. In contrast, the classifier exhibits a more uniform pattern of enhancement. Whereas, Fig. 5 (Middle) presents the improvement in FID when applying a single correction step on different time-step marginals. The classifier model’s correction shows greater improvement than the score model at every time-step, with the exception of the final one. As predicted by the theoretical analysis in Sec. 3.1, we observe that different correction algorithms yield varying levels of improvement when applied at different time steps.  
+
+Notably, early-stage corrections mainly affect low-frequency components, shaping overall image structure. In contrast, later-stage corrections primarily impact high-frequency details, addressing noise-like elements (Kim et al., 2024). A.9 for illustrations).  
+
+
+
+\section{5.3.2 CLASSIFIER LOSS ABLATION  }
+
+
+To assess the significance of each improvement made to the classifier, namely Adversarial Training (AT) and Gradient Alignment (GA), we conduct an ablation study by removing these components. The results are presented in Fig. 5 (Right). In the absence of AT, the gradients become unstable, which is evident from the inconsistent improvement observed when adding steps. On the other hand, without GA, the gradients are small, and adding steps does not impact the overall improvement.  
+
+
+
+\section{6 CONCLUSION AND LIMITATIONS  }
+
+
+Our main insight is that given an imperfect flow model, a trajectory that reaches exactly the data distribution can be computed by reversing its vector field. Based on this insight, we propose a simple algorithm, Marginal Matching, which steers the inference-time trajectory to better align with the trajectory that accurately reaches the data. We demonstrate superior performance on two datasets CIFAR-10 and ImageNet-64, and perform an extensive ablation study.  
+
+Ideally, all generative models would benefit from correction of prediction errors, as such errors are not specific to flow models. A major limitation of our work is the assumption on the reversibility of the vector field, constraining our method from operating on non-reversible models. This limitation may be relaxed for approximately reversible models such as diffusion models (Wallace et al., 2023). In general, extending our approach to non-reversible models is an interesting future direction.  
+
+Another aspect is the practical implementation of our theory. In Thm. 3.4 we assumed knowledge of error reductions. In practice, we do not have access to the model’s error reduction (see Sec.3.1). However, we can bound that reduction in the case of score correction (Lemma. 3.7) and propose a bound on the final Wasserstein distance. Future work could explore theoretical bounds also for our classifier-based correction model.  
+
+Finally, our method requires training an additional model after a flow model has been pre-trained, adding extra compute and parameters. It is worth noting that in all our experiments, this auxiliary model is smaller than the original flow model, and training it takes significantly less time. An alternative approach could involve training the flow and correction models together, either as a single model with both flow and correction outputs or as two models trained simultaneously.  
+
+
+

@@ -1,0 +1,389 @@
+\title{Foldable SuperNets: Scalable Merging of Transformers with Different Initializations and Tasks}
+
+\begin{abstract}
+Many recent methods aim to merge neural networks (NNs) with identical architectures trained on different tasks to obtain a single multi-task model. Most existing works tackle the simpler setup of merging NNs initialized from a common pre-trained network, where simple heuristics like weight averaging work well. This work targets a more challenging goal: merging large transformers trained on different tasks from distinct initializations.
+First, we demonstrate that traditional merging methods fail catastrophically in this setup.
+To overcome this challenge, we propose Foldable SuperNet Merge (FS-Merge), a method that optimizes a SuperNet to fuse the original models using a feature reconstruction loss.
+FS-Merge is simple, data-efficient, and capable of merging models of varying widths. We test FS-Merge against existing methods, including knowledge distillation, on MLPs and transformers across various settings, sizes, tasks, and modalities.%\footnote{Code and models will be published upon acceptance.} %% change for ICLR
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Practitioners frequently train identical neural architectures for various tasks and share these models online, while the original training data is often unavailable due to privacy, proprietary, or other concerns. This led to an increased interest in the field of model merging \citep{akhlaghi2018knowledge, wortsman2022model, goddard2024arcee}, which aims to combine the weights, and sometimes the features, of several models into a single new model (Figure~\ref{setting_overview}). This approach could allow the merging of multiple single-task models into a single multi-task model \citep{matena2022merging,ilharco2023editing}, eliminating the need to store and run multiple models or ensembles \citep{ganaie2022ensemble}.
+
+Most existing merging methods have a strong restriction: they assume that the models were initialized from the same pre-trained model and subsequently fine-tuned. This encourages the models to stay aligned \citep{ainsworth2023git} and also to remain closer in the weight space \cite{ilharco2023editing}, and therefore easier to fuse, for example by simply averaging their weights \citep{wortsman2022model}.
+However, this restricts the ability to merge models that do not share the same initialization. For example, consider the task of merging the weights of two unrelated models from an online repository (e.g. These models were likely not fine-tuned from the same initial model, making most existing merging techniques inapplicable.
+
+To overcome this, a few recent studies explored merging differently initialized models using alignment-based methods \citep{entezari2022the, singh2020model, verma2024merging, ainsworth2023git, stoica2024zipit}. However, these approaches use very simple merging rules and hence struggle with larger, complex tasks such as merging transformers \citep{stoica2024zipit}.
+
+To illustrate the limitations of traditional and alignment-based merging methods, we pre-trained two Vision  Transformers (ViTs) \citep{dosovitskiy2021an} with different initializations on ImageNet-1k \citep{deng2009imagenet}, then fine-tuned each on separate tasks: Cars \citep{krause20133d} and CIFAR10 \citep{krizhevsky2009learning}. Attempts to merge these models into a single multi-task ViT using various methods (Table~\ref{table:first-vit-results}) were severely unsuccessful. Traditional approaches like weight averaging, SLERP \citep{shoemake1985animating}, and RegMean \citep{jin2023dataless}, as well as the alignment merging method designed for transformers, `Opt' \citep{imfeld2023transformer}, all resulted in a merged model with performance comparable to that of a random guess. Moreover, these methods show a significant accuracy gap compared to the model ensembling \citep{ganaie2022ensemble}, a method that averages the model outputs. Note that the ensemble is not a valid merging method, as it uses the original models directly. These traditional merging methods rely on simple local merging rules, ensuring computational efficiency. However, they proved inadequate for our complex setting due to their simplicity. This pattern persisted across all other settings, tasks, and modalities we tested with transformers (see Section~\ref{sec:results_merge_vit}).
+
+\begin{wraptable}{r}{5.0cm}
+\caption{Merging a pair of ViT-B-16, fine-tuned on Cars and CIFAR10, using 100 original training images and 800 augmented images from each dataset. The test accuracy is averaged on both tasks.}
+\label{table:first-vit-results}
+\centering
+\begin{tabular}{lc}
+    \toprule
+    Method & Accuracy \\
+    \midrule
+    Ensemble & 89.27 \\
+    Random guess & 5.25 \\
+    \midrule
+    Average & 5.56 \\
+    SLERP & 4.80 \\
+    RegMean & 6.58 \\
+    Opt & 6.32 \\
+    Distillation & 75.81 \\
+    \midrule
+    FS-Merge (Ours) & 84.52 \\
+    \bottomrule
+\end{tabular}
+\end{wraptable}
+
+These results indicate that merging large transformers from diverse initializations demands stronger and more resource-intensive techniques, such as Knowledge Distillation (KD) \citep{ba2014deep, hinton2015distilling}. In the multi-task setting, KD refers to a single model learning to replicate the outputs of multiple models \citep{tan2018multilingual, vongkulbhisal2019unifying}.
+And indeed, KD significantly outperforms the previous methods (Table~\ref{table:first-vit-results}), but still exhibits a large performance gap compared to the ensemble. Although KD shows promise, it often requires access to the large parts of the original training dataset and labels \citep{clark2019bam, liu2020adaptive} to achieve high accuracy, which may be problematic due to privacy or proprietary concerns. Moreover, it does not explicitly utilize the original models' weights, potentially overlooking valuable information.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/setting_overview.png}
+  \caption{\textbf{The model merging setting}. (a) Consider models \(A\) and \(B\) trained from different initializations and on different tasks, which create features processed by a classification head for predictions. (b) Merging methods fuse the models into a new model of the same size while leaving the classification head untouched. The merged model generates features applicable to all tasks.}
+  \label{setting_overview}
+\end{figure}
+
+\textbf{Our approach.} In this work, we address the challenging scenario of merging differently initialized single-task transformer \citep{vaswani2017attention} into a unified multitask model of equal size in a data-efficient manner. 
+We propose Foldable SuperNet Merge (FS-Merge), a method that optimizes a SuperNet to fuse the weights of the original networks. This fusion minimizes local or global feature reconstruction loss. Post-optimization, the weights of the original networks are folded into a single merged model (Figure~\ref{vis_local_global_fs_merge}). Importantly, our formulation offers greater generality than simple rule-based alignment techniques \citep{stoica2024zipit,imfeld2023transformer}. Moreover, by leveraging the original weights, FS-Merge outperforms KD, particularly in data-limited regimes, significantly reducing the gap with the ensemble (Table~\ref{table:first-vit-results}), and even surpassing it in some cases.
+
+FS-Merge is a simple and data-efficient approach that, like other methods \citep{jin2023dataless, ainsworth2023git}, requires only an unlabeled fraction of the original training data. Notably, it produces a merged model that maintains the same inference speed and memory usage as those from traditional methods. We demonstrate its effectiveness by achieving SOTA results across multiple scenarios, architectures, model sizes, datasets, and modalities. While this work focuses on transformers, FS-Merge's versatility allows it to be readily extended to other architectures such as RNNs \citep{sherstinsky2020fundamentals} and CNNs \citep{he2016deep}. This adaptability sets FS-Merge apart from alignment-based methods, which are often designed for specific architectures.
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+\paragraph{Problem formulation.} For simplicity, we outline the merging problem for two models \(A\) and \(B\) with identical widths, each trained on distinct tasks with unique initializations and separate classification heads (Figure ~\ref{setting_overview}a). We also have an unlabeled subset of the training set from each task, \(D^A\) and \(D^B\). Our goal is to develop a new model with the same architecture, that minimizes the losses for tasks \(A\) and \(B\). Note that the classification heads are not merged, meaning we retain a separate classification head for each task (Figure~\ref{setting_overview}b). 
+
+In this section, we introduce FS-Merge, our proposed approach. We begin by explaining how to merge MLPs, a relatively easier task, and then proceed to tackle the more complex challenge of merging transformer models.
+
+\subsection{Warmup: merging Multi-Layer Perceptrons}
+\label{sec:method_mlps}
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/local_global_fs_merge.png}
+  \caption{\textbf{The FS-Merge for MLP.} (a) Local FS-Merge: \(M_l\) and \(U_l\) are optimized separately for each layer \(l\) to reconstruct \(f_l^A || f_l^B\). (b) Global FS-Merge: composing the \(M\) and \(U\) matrices for each one of the \(L\) layers of the MLP to reconstruct \(f_L^A || f_L^B\). In both versions, after optimization, the Foldable SuperNet is folded to create the merged model. Red represents the SuperNet weights, blue represents the original frozen weights, gray represents features, and green represents the activation function.}
+  \label{vis_local_global_fs_merge}
+\end{figure}
+
+We first consider the \(l\)-th layer in the Multi-Layer Perceptron (MLP) model \(A\). The features at this layer, denoted by \(f_l^A \in \mathbb{R}^{d_l}\), can be expressed as follows:
+\begin{equation}
+    z_l^A = W_l^A f_{l-1}^A + b_l^A \,,\, f_l^A = \sigma(z_l^A) \, .\label{eq: MLP layer}
+\end{equation}
+Here, \(W_l^A \in \mathbb{R}^{d_l \times d_{l-1}}\) and \(b_l^A \in \mathbb{R}^{d_l}\) are the weights and biases of the current linear layer, respectively. $f_0^A=x$ denotes the MLP input,  \(d_l\) denotes the width of the \(l\)-th layer, \(\sigma\) represents a non-linear element-wise activation function, and \(z_l^A \in \mathbb{R}^{d_l}\) are the pre-activation features.
+
+Our method has two versions: local FS-Merge and global FS-Merge. Each has its own Foldable SuperNet and reconstruction optimization problem, neither requiring true labels. The parameters learned during FS-Merge optimization are highlighted in red, and the notation \(\tilde{f}\) represents a feature's reconstruction attempt of the Foldable SuperNet.
+
+\textbf{Local FS-Merge.} In the case of merging the \(l\)-th linear layers of models \(A\) and \(B\), the local Foldable SuperNet (Figure~\ref{vis_local_global_fs_merge}a) is defined as follows:
+\begin{equation}
+    \Tilde{f}_l(z_l^A, \, z_l^B) = \textcolor{red}{U_l} \sigma (\textcolor{red}{M_l} (z_l^A\, || \, z_l^B))\, ,
+\label{eq:super_net_linear_layer}
+\end{equation}
+The input is a concatenation of the original pre-activation features  \(z_l^A \, || \, z_l^B \in \mathbb{R}^{2 \cdot d_l}\). \(\textcolor{red}{M_l} \in \mathbb{R}^{d_l \times 2\cdot d_l}\) (``Merge'') is used to merge the original features into a lower-dimensional space (from \(2\cdot d_l\) to \(d_l\)), and \(\textcolor{red}{U_l} \in \mathbb{R}^{2\cdot d_l \times d_l}\) (``Unmerge'') is used to approximately reverse the merge operation, attempting to reconstruct the original post-activation features \({f}_l^A \, || \, {f}_l^B \in \mathbb{R}^{2\cdot d_l}\) with \(\Tilde{f}_l \in \mathbb{R}^{2\cdot d_l}\). Another way to express \(\Tilde{f}_l\) is by \(\Tilde{f}_l^A \, || \, \Tilde{f}_l^B\). 
+
+For optimization, \(D^A \cup D^B\) is used to extract the models features \(f_l^A,\) and \(f_l^B\).  Then, \(M_l\) and \(U_l\) are optimized separately for each layer \(l\), on the following reconstruction optimization problem:
+\begin{equation}
+    M_l^*, U_l^* = \underset{M_l, U_l}{\text{argmin}} 
+    \, \mathbb{E}_{x \sim D}
+    \, \left\| f_l^A \, || \, f_l^B - \Tilde{f}_l(z_l^A, \, z_l^B) \right\|_2^2\, .
+\label{eq:mlp_optimization_problem}
+\end{equation}
+
+\textbf{Global FS-Merge.} In the global version (Figure~\ref{vis_local_global_fs_merge}b), the Foldable SuperNet is created by composing the \(M\) and \(U\) matrices for each one of the \(L\) layers of the MLP. In the forward pass, the \(l\)-th layer of the Foldable SuperNet uses the reconstructed pre-activation features of the previous layer \(\Tilde{z}_l^A, \, \Tilde{z}_l^B\) as inputs. Observe that this does not include the classification head, which is not being merged. Then, all those matrices are optimized together on the following global optimization problem:
+\begin{equation}
+    M_1^*, U_1^*, ... M_{L}^*, U_{L}^* =  \underset{M_1, U_1, ..., M_{L}, U_{L}}{\text{argmin}} \, \mathbb{E}_{x \sim D} \, \left\| f_L^A || f_L^B - \Tilde{f}_L(x) \right\|_2^2 \, ,\label{eq:global_optimization_problem}
+\end{equation}
+where \(f_L^A \in \mathbb{R}^{d}\) are features from the last representation layer ($L$-th layer) of model \(A\), applied the input \(x\). The output of the Foldable SuperNet is defined as \(\Tilde{f}_L \in \mathbb{R}^{2 \cdot d}\), which attempts to reconstruct \(f_L^A || f_L^B \in \mathbb{R}^{2 \cdot d_L}\). As we will demonstrate later, the global problem allows us to deal with more complicated architectures such as transformers. Note that we have a slight abuse of notation, as \(\Tilde{f}_L\) denotes reconstructed features from both the local and global FS-Merge.
+
+\textbf{Folding.} After optimizing the \(M\) and \(U\) matrices in all layers (using the local or the global version), we can ``fold'' the Foldable 
+SuperNet in order to create the merged model. The ``folding'' operation is defined as follows: 
+\begin{equation}
+    W_l^* = M_l^*
+    \begin{pmatrix}
+    W_l^A & 0 \\
+    0 & W_l^B
+    \end{pmatrix}
+    U_{l-1}^*
+    ,\
+    b_l^* = M_l^*
+    \begin{pmatrix}
+    b_l^A \\
+    b_l^B
+    \end{pmatrix}
+    ,\
+    U_{0} = \begin{pmatrix}
+    I \\
+    I
+    \end{pmatrix}\, .
+    \label{eq:folding}
+\end{equation}
+Intuitively, this folding operation creates a merged model which ``under the hood'' reconstructs the original features from the previous layer (using \(U_{l-1}\)), applies the original weights, and then merges those features again (\(M_l\)), all with the same complexity as each of the original models. 
+
+\textbf{Initialization. In the simplest approach, the \(M\) and \(U\)matrices may be initialized randomly (``random''). 
+We found that the best approach is to initialize so that only the weights of the first model are selected (``first''). This means that, if we fold the weights at that point, we obtain \(W^*_l=W^A_l\) . This is achieved by initializing \(M_l\) and \(U_l\) for each layer \(l\) as follows:
+\begin{equation}
+    M_l = 
+    \begin{pmatrix}
+    I & 0
+    \end{pmatrix} \, , \,
+    U_l = 
+    \begin{pmatrix}
+    I \\
+    I \\
+    \end{pmatrix} .
+    \label{eq:first_init}
+\end{equation}
+
+\textbf{Relation with ZipIt \citep{stoica2024zipit}.} This ``folding'' operation was proposed by ZipIt \citep{stoica2024zipit}, which is closely related to our work, and inspired it. This method also merges models from various initializations and tasks, targeting MLPs and CNNs. In the MLP context, ZipIt represents a special case of FS-Merge, where \(M\) is chosen to average highly correlated pairs in a hard-coded way, and \(U=2M^{\top}\). For other layers, such as skip connections and normalizations, ZipIt employs various heuristics that cannot be easily extended to transformers and may harm performance.
+
+\textbf{Extension to multiple models.} This methodology can easily be extended to any number of models. It is also capable of merging models of varying widths into any target width dimension, provided they have the same number of layers.
+
+\subsection{Merging transformers}
+\label{sec:method_merging_vits}
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/mu_vit.JPG}
+  \caption{\textbf{The Foldable SuperNet for merging two attention blocks (\(A\) and \(B\)).} Only the red components are trained. After training, we fold the Foldable SuperNet to create the merged block.}
+  \label{visualisation_mu_vit}
+\end{figure}
+
+Merging transformers \citep{vaswani2017attention} is much more challenging than merging MLPs, due to their larger scale and more complicated structure. Creating a naively Foldable SuperNet as described in the MLP Section~\ref{sec:method_mlps} is not feasible for transformers because it fails to account for their skip connections, layer normalization \citep{ba2016layer}, and multi-head attention.
+
+To tackle these issues, we develop a new  Foldable SuperNet architecture, and train it using the global objective Eq. We found that the global objective is essential in the case of transformers, as training the Foldable SuperNet locally (Eq. In this section, we explain how to build a Foldable SuperNet for the attention block (Figure ~\ref{visualisation_mu_vit}), as it is the most complex component of the transformer.
+
+\textbf{A review of the attention block.} Consider the transformer trained on task \(A\). The \(l\)-th attention block gets the features \(X_l^A \in \mathbb{R}^{T \times d}\) as input, when \(T\) is the sequence length and \(d\) is the embedding size, and applies layer norm with parameters \(\gamma^A_l,\beta^A_l \in \mathbb{R}^{d}\) (Eq.~\ref{eq:vit_att_2_ov} left). Then, it calculates the queries, keys, and values for \(H\) heads. An example of query creation is shown in Eq.~\ref{eq:vit_att_2_ov} right.
+\begin{equation}
+    \bar{X}_l^A = \text{LN}_{ \gamma^A_l,\beta^B_l}(X_l^A)\,\,\, ; \,\,\,     Q^A_l = \bar{X}_l^A W_{l}^{Q,A} = (Q_{1,l}^A, ..., Q_{H,l}^A) \,.
+    \label{eq:vit_att_2_ov}
+\end{equation}
+Where \(Q_{i,l}^A \in \mathbb{R}^{T \times \frac{d}{H}}\) is the \(i\)-th head queries. Similarly, the keys and values are created using \(W_{l}^{K, A}, \, W_{l}^{V, A}\) respectively. Following this, the transformer executes multi-head attention, utilizes \(W_{l}^{O,A}\), and uses a skip connection, which creates the output \(Y_l^A \in \mathbb{R}^{T \times d}\) 
+\begin{equation}
+    Y_l^A = X_l^{A} +
+\text{Concat}_i[... ,
+\text{softmax} \left( \frac{Q_{i,l}^A {K_{i,l}^A}^{\top}}{\sqrt{d}} \right) 
+V_{i,l}^A ,...] W_l^{O,A} \, .
+    \label{eq:vit_att_3_ov}
+\end{equation}
+\textbf{Foldable SuperNet for attention blocks.} Suppose there are two transformers trained on distinct tasks \(A\) and \(B\). Our goal is to define a Foldable SuperNet that will use the original weights and will allow us to merge the attention blocks of these two transformers after training. Intuitively, this Foldable SuperNet will reconstruct the original features of models \(A\) and \(B\), create queries keys and values, learn how to merge them, and apply multi-head attention. The optimized parameters at this stage are highlighted in red. The notation \(\tilde{X}\) represents a reconstruction attempt of our method, and \(X^*\) represents the merged features or parameters.
+
+The \(l\)-th attention block gets merged features from the previous layer as input, \(X_l^* \in \mathbb{R}^{T \times d}\). Then, the Foldable SuperNet learns the parameters of the layer norm of this block \(\textcolor{red}{\gamma^*_l,\beta^*_l} \in \mathbb{R}^{d}\), along with a matrix \(\textcolor{red}{U_l} \in \mathbb{R}^{d \times 2 \cdot d}\) to reconstruct the features from the merged input
+\begin{equation}
+    \Tilde{X}_l^A || \Tilde{X}_l^B = \text{LN}_{\textcolor{red}{ \gamma^*_l,\beta^*_l}}(X_l^*) \textcolor{red}{U_l} \, .
+    \label{eq:vit_att_1}
+\end{equation}
+Observe that the layer norm in each block is also being optimized, similar to what has been proposed in other merging works \citep{jordan2023repair}. This does not hurt the efficiency of our method due to the small number of learnable parameters in the layer norm. Then, the Foldable SuperNet calculates the queries, keys, and values for \(A\) and \(B\). These components, drawn from all heads and models, are then concatenated and merged using learnable matrices \(\textcolor{red}{M_l^Q, M_l^K, M_l^V} \in \mathbb{R}^{2 \cdot d \times d}\). For example, the queries are merged as follows: 
+\begin{equation}
+    \Tilde{Q}^A_l || \Tilde{Q}^B_l = (\Tilde{X_l}^A W_{l}^{Q,A} || \Tilde{X_l}^B W_{l}^{Q,B}) \in \mathbb{R}^{T \times 2 \cdot d} \, , \,
+    Q_l^* = (\Tilde{Q}^A_l || \Tilde{Q}^B_l) \textcolor{red}{M_l^Q} = (Q_{1,l}^*, ..., Q_{H,l}^*)\, .
+    \label{eq:vit_att_2}
+\end{equation}
+Then, they are divided into \(H\) heads. Similarly, the keys and values are compressed using the matrices \(\textcolor{red}{M_l^K, M_l^V}\) respectively. Following this, the Foldable SuperNet executes multi-head attention in the original width of \(d\), thanks to the compression of queries, keys and values; uses \(\textcolor{red}{U_l^{O}} \in \mathbb{R}^{d \times 2 \cdot d}\) to reconstruct the original multi-head attention output; utilizes \(W_{l}^{O,A} \, , \, W_{l}^{O,B}\); uses \(\textcolor{red}{M_l^{O}} \in \mathbb{R}^{2 \cdot d \times d}\) to compress it once more; and applies a skip connection. Together, we get:
+\begin{equation}
+    Y_l^* = X_l^{*} +
+\text{Concat}_i[... ,
+\text{softmax} \left( \frac{Q_{i,l}^* {K_{i,l}^*}^{\top}}{\sqrt{d}} \right) 
+V_{i,l}^*
+,...] \
+\textcolor{red}{U_l^{O}} 
+\begin{pmatrix}
+W_l^{O,A} & 0 \\
+0 & W_l^{O,B}
+\end{pmatrix}
+\textcolor{red}{M_l^{O}}\, .
+    \label{eq:vit_att_4}
+\end{equation}
+This process results in \(Y_l^* \in \mathbb{R}^{T \times d}\), serving as the input for the subsequent MLP block at layer \(l\). It is important to note that this Foldable SuperNet was designed so the skip connection and layer norm are applied to the compressed features, and that for any \(M\) and \(U\), there is a linear layer that comes before or after it.
+
+\textbf{Parameterizing \(M\) and \(U\).} Utilizing full-rank \(M_l \in \mathbb{R}^{d_l \times n \cdot d_l}\) and \(U_l \in \mathbb{R}^{n \cdot d_l \times d_l}\) for merging \(n\) models introduces a number of parameters that increase quadratically with the layer width \(d_l\). In large models like transformers, this leads to a very high demand for resources and hinder the optimization process. To mitigate this, we adopt a parameterization strategy akin to LoRA \citep{hu2022lora}, using a sum of a low-rank matrix and a concatenation of diagonal matrices. For instance, in \(M_l\):
+\begin{equation}
+    M_l = M_l^{\text{diag}} + M_l^1 M_l^2 \, .
+    \label{eq:low_rank_matrix}
+\end{equation}
+When \(r\) is the inner rank, \(M_l^1 \in \mathbb{R}^{d_l \times r}\), \(M_l^2 \in \mathbb{R}^{r \times n \cdot d_l}\), and \(M_l^{\text{diag}} \in \mathbb{R}^{d_l \times n \cdot d_l}\) is a concatenation of a $n$ diagonal matrices, each with \(d_l\) learnable parameters. A similar structure is proposed for \(U_l\). This ensures the number of learnable parameters is linear with the layer width \(d_l\). Additionally, we found that adding \(M_l^{\text{diag}}\) is crucial for FS-Merge, as it enables initializing the Foldable SuperNet with strong initializations such as ``first'' (Eq.~\ref{eq:first_init}).
+
+\textbf{FS-Merge seq.} To address the high costs of merging a large number of models, we introduce a more efficient variant called FS-Merge Seq., which merges the models sequentially. It starts with the first two models, then continues by merging the resulting merged model with the third model, and so on.
+
+\textbf{Data and Augmentation.} This work addresses a realistic and challenging setting, involving a limited subset of unlabeled samples used for merging. For transformer merges, augmentations \citep{zhang2018mixup} are employed to expand this subset, as commonly done in regular training.
+
+
+
+\section{Results}
+
+\label{sec:main_results}
+  
+
+\textbf{Baselines.} We compared with ``Original Models'', representing the average accuracy of the models to be merged; and Ensemble \citep{ganaie2022ensemble}, which averages the models outputs and then applies classification heads. Note that these are not valid merging methods as they use the original models directly. For legitimate merging techniques, comparisons were made with weight averaging (``average'') \citep{wortsman2022model}; RegMean \citep{jin2023dataless} which applies a closed-form linear regression solution to each layer; and distillation \citep{hinton2015distilling} which trains a single model to mimic the pre-classification layer features. ZipIt \citep{stoica2024zipit} averages highly correlated neurons, used only in the MLP experiments, as it is inapplicable for transformers. ``Opt'' \citep{imfeld2023transformer}, uses optimal transport \citep{knight2008sinkhorn} for aligning transformers, and ``SLERP'' (spherical linear interpolation) \citep{shoemake1985animating}, utilized only on the ViT case, as they introduced for transformers.
+
+\textbf{Metrics.} As in ZipIt \citep{stoica2024zipit}, we evaluate multi-task merged models using two metrics: per-task accuracy and joint accuracy. In per-task accuracy, we calculate the accuracy for each task individually using only the relevant classification head. Then the mean accuracy across all tasks is reported. In joint accuracy, we calculate the accuracy for each task by making predictions based on the maximum score across all classification heads and reporting the mean accuracy across the tasks.
+
+\subsection{Merging Multi-Layer Perceptrons}
+\label{sec:results_merge_mlp}
+
+\begin{table}
+  \caption{We merged pairs of MLPs, each initialized differently and trained on distinct halves of the \textbf{MNIST} dataset. These MLPs have a hidden width of 128 neurons, with the \textbf{number of hidden layers varying} from 1 to 6. Each experiment was replicated five times. We present the average \textbf{per-task accuracy} on the test set, along with the standard deviation.}
+  \label{tab:mlp_mnist_depth_per_task_error}
+  \centering
+  \begin{tabular}{lccccc}
+    \toprule
+Merge Method & \multicolumn{5}{c}{Number of Hidden Layers} \\
+    \cmidrule(r){2-6}
+ & 1 & 2 & 3 & 4 & 6 \\
+    \midrule
+Original Models & 96.83 $\pm$ 0.13 & 96.51 $\pm$ 0.19 & 96.46 $\pm$ 0.23 & 95.8 $\pm$ 0.4 & 96.8 $\pm$ 0.5 \\
+Ensemble & 94.70 $\pm$ 0.95 & 95.14 $\pm$ 1.12 & 95.73 $\pm$ 0.22 & 95.5 $\pm$ 0.1 & 95.7 $\pm$ 0.7 \\ \midrule
+Average & 94.36 $\pm$ 0.76 & 85.90 $\pm$ 4.46 & 78.78 $\pm$ 6.72 & 61.7 $\pm$ 6.3 & 25.1 $\pm$ 2.7 \\
+RegMean & 95.90 $\pm$ 0.37 & 92.97 $\pm$ 2.71 & 92.11 $\pm$ 1.90 & 87.7 $\pm$ 3.7 & 81.5 $\pm$ 2.4 \\
+ZipIt & 96.35 $\pm$ 0.17 & 95.75 $\pm$ 0.58 & 95.43 $\pm$ 0.50 & 94.5 $\pm$ 0.5 & 94.0 $\pm$ 2.2 \\
+Distillation & 93.35 $\pm$ 1.07 & 93.13 $\pm$ 1.74 & 93.71 $\pm$ 0.39 & 93.3 $\pm$ 0.6 & 90.7 $\pm$ 1.8 \\ \midrule
+FS-M & 95.89 $\pm$ 0.03 & 95.68 $\pm$ 0.19 & 95.37 $\pm$ 0.33 & 94.9 $\pm$ 0.4 & 94.8 $\pm$ 0.8 \\
+FS-M, ZipIt init & \textbf{96.62 $\pm$ 0.08} & \textbf{96.29 $\pm$ 0.24} & \textbf{96.18 $\pm$ 0.20} & \textbf{95.6 $\pm$ 0.5} & \textbf{96.2 $\pm$ 0.8} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Setting.} Our evaluation started with a straightforward experiment merging pairs of MLPs. The MLPs were trained on divided MNIST \citep{lecun1998mnist}, meaning it was split into two subsets: images with labels 0-4 and images with labels 5-9. These subsets were further divided into training, validation (10\% of the training set), and test sets. Two MLPs were trained separately on these subsets, varying in the number of layers and widths, each initialized with a different seed. The goal is to merge these pairs of models. Note that we did not merge the last linear layer, which acts as a classification head.
+
+\textbf{FS-Merge.} Our method was tested in two variants: FS-Merge in the local version (Eq.~\ref{eq:mlp_optimization_problem}), which trains a Foldable SuperNet for each layer independently; and FS-Merge ZipIt, which initializes the Foldable SuperNet's \(M\) and \(U\) as the solutions of ZipIt \citep{stoica2024zipit}, and then optimize them using the local version. \textbf{Data.} All merging methods, excluding ``Average'', use features from the original models. Thus, we sampled 64 images from each dataset's training set to generate the necessary features. 
+
+Table~\ref{tab:mlp_mnist_depth_per_task_error} presents the per-task accuracy on the test set, for merging MLPs trained on half of the MNIST dataset. We merged MLPs with 128 hidden widths, and hidden layers varying from 1 to 6. Each experimental condition was replicated five times with 5 different seeds. The same hyperparameters were used for all those experiments.
+
+Our results indicate that merging deeper models is more challenging, consistent with previous studies \citep{jordan2023repair}. Employing the ZipIt initialization, our method establishes a new SOTA for both per-task and joint accuracy, outperforming ensemble in many cases, and nearly matches the accuracy of ``Original Models''
+
+\begin{table}
+  \caption{Merging pairs of ViT-B-16 using 16 original images from each training set and 800 augmented images from each dataset. The per-task and joint accuracy on the test set are reported.}
+  \label{table:results-merge-2-vit-b}
+  \centering
+  \begin{tabular}{cccccccc}
+    \toprule
+    \parbox{1.58cm}{\centering Merging \\ Methods} & \multicolumn{2}{c}{DTD, EuroSAT} & \multicolumn{2}{c}{CIFAR100, SVHN} & \multicolumn{2}{c}{RESISC45, SVHN} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+    & Per-task & Joint & Per-task & Joint & Per-task & Joint & \parbox{1.58cm}{\centering \#Parameters \\ Optimized} \\
+    \midrule
+    Original models & 81.55 & - & 91.19 & - & 95.12 & - & - \\
+    Ensemble        & 78.64 & 74.11 & 88.26 & 57.44 & 93.21 & 75.07 & - \\
+    \midrule
+    Average         & 11.48 & 1.15 & 3.71  & 0.84 & 6.23 & 3.68 & 0 \\
+    SLERP           & 7.99 & 1.27 & 4.10  & 0.65 & 6.67 & 3.24 & 0 \\
+    RegMean         & 8.40 & 1.69 & 6.17  & 1.27 & 6.44 & 0.74 & 0 \\
+    Opt             & 4.51 & 0.75 & 4.52 & 0.88 & 7.01 & 2.07 & 0 \\
+    Distillation    & 57.31 & 52.61 & 62.93 & 48.12 & 66.18 & 63.16 & 111M\\
+    \midrule
+    FS-M & \textbf{63.18} & \textbf{59.28} & \textbf{66.02} & \textbf{49.42} & \textbf{73.43} & \textbf{69.11} & 13M \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Merging Vision Transformers}
+\label{sec:results_merge_vit}
+
+Next, we evaluated our method on merging Vision Transformers (ViT), which were initialized differently and trained on distinct tasks— a much more challenging setting. 
+\textbf{Models and Data.} We pre-trained several ViT-B-16 and ViT-L-14 models \citep{dosovitskiy2021an, touvron2021training} on ImageNet-1K \citep{deng2009imagenet}. These models were initialized from distinct random seeds and exposed to training data in varying sequences. Then, each differently pre-trained ViT was fine-tuned on downstream tasks. Following \citep{ilharco2023editing}, we fine-tuned on Cars \citep{krause20133d}, DTD \citep{cimpoi2014describing}, EuroSAT \citep{helber2019eurosat}, GTSRB \citep{stallkamp2011german}, MNIST \citep{lecun1998mnist}, RESISC45 \citep{cheng2017remote}, SVHN \citep{netzer2011reading}, CIFAR10, and CIFAR100 \citep{krizhevsky2009learning}.
+
+In these experiments, the KD baseline  also used the ``first'' initialization, meaning that the student model was initialized from the first model. We found it to outperform any other initialization, including using traditional merging methods such as ``RegMean'' for initialization and then applying distillation.
+
+\textbf{FS-Merge.} We use the global version of FS-Merge, when the whole Foldable SuperNet is trained to reconstruct the features of the original models from the layer preceding the classification head. The Foldable SuperNet's \(M\) and \(U\) were parametrized as a concatenation of diagonal matrices plus low-rank matrices (Eq.~\ref{eq:low_rank_matrix}). As in the distillation method, the Foldable SuperNet was initialized using the ``first'' initialization (Eq. FS-M Seq.
+
+\begin{table}
+  \caption{Merging groups of 4 ViT-B-16 with 100 original images from the training set and 1000 augmented images from each dataset (a total of 400 original images and 4,000 augmented images). We report the per-task and joint accuracy on the test set. We will denote: C = Cars, D = DTD, E = EuroSAT, G = GTSRB, M = MNIST, R = RESISC45, S = SVHN, C10 = CIFAR10, C100 = CIFAR100.}
+  \label{table:results-merge-4-vit-b}
+  \centering
+  \begin{tabular}{cccccccc} % 7 columns
+    \toprule
+    Merging Methods & \multicolumn{2}{c}{R, C10, S, G} & \multicolumn{2}{c}{D, G, E, R} & \multicolumn{2}{c}{C, M, C100, E}\\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+    & Per-task & Joint & Per-task & Joint & Per-task & Joint & \parbox{1.58cm}{\centering \#Parameters \\ Optimized} \\
+    \midrule
+    Original models & 96.47 & - & 88.72 & - & 92.61 & - & - \\
+    Ensemble        & 86.11 & 46.80 & 76.81 & 52.96 &  82.04 & 63.92 & - \\
+    \midrule
+    Average         & 5.40 & 1.04 & 3.66 & 1.35 & 4.55 & 0.38 & 0 \\
+    SLERP           & 5.55 & 1.04 & 4.88 & 0.87 & 7.27 & 0.86 & 0 \\
+    RegMean         & 6.38 & 0.61 & 4.78 & 0.61 & 5.60 & 0.52 & 0 \\
+    Opt             & 5.79 & 0.24 & 3.70 & 0.38 & 5.75 & 2.58 & 0 \\
+    Distillation    & 82.09 & 67.60 & 67.31 & \textbf{57.67} & 37.83 & 31.71 & 111M \\
+    \midrule
+    FS-M & \textbf{84.34} & \textbf{71.17} & 67.43 & 55.35 & \textbf{79.48} & \textbf{71.24} & 60M \\
+    FS-M seq. & 83.11 & 70.34 & \textbf{67.55} & 56.90 & 73.13 & 66.03 & 18M \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+In Table~\ref{table:results-merge-2-vit-b}, pairs of ViT-B-16 models fine-tuned on different tasks were merged, in a low-data scenario of using only 16 original images per dataset. An additional 800 augmented images per dataset were created. FS-merge was used with a low rank of 12. To examine the effect of merging a larger number of models, Table~\ref{table:results-merge-4-vit-b} shows the results for merging groups of four ViT-B-16 models. FS-merge was used with a low rank of 32, and FS-Merge seq. was used with a low rank of 16. To evaluate the impact of merging larger models, Table~\ref{table:results-merge-2-vit-l} presents the results of merging pairs of ViT-L-14 models. FS-merge was used with a low rank of 32.
+
+\begin{table}
+  \caption{Merging pairs of ViT-L-14 with 100 original images from the training set and 1000 augmented images from each dataset. We report the per-task and joint accuracy on the test set.}
+  \label{table:results-merge-2-vit-l}
+  \centering
+  \begin{tabular}{cccccccc} % 7 columns
+    \toprule
+    Merging Methods & \multicolumn{2}{c}{DTD, EuroSAT} & \multicolumn{2}{c}{CIFAR100, SVHN} & \multicolumn{2}{c}{Cars, MNIST} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+    & Per-task & Joint & Per-task & Joint & Per-task & Joint & \parbox{1.58cm}{\centering \#Parameters \\ Optimized} \\
+    \midrule
+    Original models & 81.33 & -  & 94.68 & - & 96.50 & - & - \\
+    Ensemble        & 77.71 & 71.54 & 94.25 & 77.90 & 96.23 & 96.22 & - \\
+    \midrule
+    Average         & 6.36 & 1.40 & 9.18 & 8.03 & 5.98 & 0.08 & 0 \\
+    SLERP           & 5.21 & 1.58 & 5.20 & 2.59 & 8.48 & 5.44 & 0 \\
+    RegMean         & 8.66 & 4.21 & 5.64 & 0.47 & 10.97 & 0.13 & 0 \\
+    Opt             & 10.33 & 3.11 & 4.68 & 2.45 & 5.95 & 5.67 & 0 \\
+    Distillation    & 78.51 & \textbf{75.84} & 90.91 & 85.78 & 91.82 & 90.58 & 342M \\
+    \midrule
+    FS-M & \textbf{78.60} & 74.86 & \textbf{91.68} & \textbf{90.92} & \textbf{95.77} & \textbf{95.09} & 95M \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Discussion.} As can be seen, FS-Merge outperforming all other merging methods in most cases, and even surpassing ensembles in some cases. This holds for both per-task and joint accuracy across all settings, despite using fewer learnable parameters than distillation. Additionally, it is evident that all local and simple methods (such as Average, SLERP, RegMean, and ``Opt'') completely fail to effectively merge ViTs in this challenging setting, resulting in a merged model that performs comparably to a random guess.
+
+ Specifically, using the ``first'' initialization in Foldable SuperNet, and KD, not only improves the accuracy of the first task but also enhances accuracy across all tasks.
+
+\textbf{Merging Complexity.} FS-Merge and KD are more computationally intensive than standard merging methods such as Averaging and RegMean, which fail catastrophically in our setting. Notably, the accuracy of both FS-Merge and KD cannot be improved simply by longer training (i.e. more resources), as this causes overfitting in our data-scarce regime (this explains why the longest training duration was not identified as optimal in our hyperparameter search). When merging two models, FS-Merge and distillation have comparable resource usage. However, when merging multiple models, the resource usage gap between FS-Merge and distillation becomes more significant. To address this, we propose FS-Merge seq., which is comparable to distillation’s resource use while outperforming it in terms of accuracy. Therefore, FS-Merge is recommended for optimal test accuracy, given sufficient computational resources and limited data. If resources are more limited, FS-Merge seq. should be the method of choice
+ for the full details.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=1\textwidth]{figures/num_data_exp_1.png}
+  \caption{We used Ensemble, Distillation, and FS-Merge to merge pairs of models trained on RESISC45 and GTSRB (left), Cars and MNIST (center), DTD and CIFAR10 (right). We varied the number of original images per dataset and added augmentation images so the total number of images per dataset would be 1024. We present the per-task and joint accuracy.}
+  \label{num_original_data}
+\end{figure}
+
+\subsection{Number of original training images}
+\label{sec:num_original_images}
+We examine the impact of varying $|D|$, the number of images taken from the training datasets of the models to be merged (``original images''), used to create features. We varied $|D|$ from 16 to 1024. Augmented images were created to ensure the total number of images per dataset reached 1024, thus maintaining a consistent dataset size. Pairs of ViT-B-16 models were merged using Ensemble, Distillation, and FS-Merge with low rank of 24. The per-task and joint accuracies on the test set are presented in Figure \ref{num_original_data}.
+
+As observed, Distillation underperforms with few original images, while FS-Merge excels. Increasing original images enhances all techniques, reducing the performance gap. With enough data, merging methods can sometimes surpass ensemble performance, which is often considered as a ``gold-standard method'' in merging and multitask articles.
+
+We report that FS-Merge and Distillation achieve perfect fit on the original images in all cases. We argue that low-rank FS-Merge attains better generalization than distillation due to a useful inductive bias, which constrains the merged model to be a low-rank weighted average of the original model's weights (as determined by the Foldable SuperNet).
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+\textbf{Limitations.} FS-Merge requires a small unlabeled subset of the original training data, similarly to most previous merging methods. Additionally, FS-Merge, like distillation, is more computationally intensive than standard merging methods; however, these methods completely failed in more challenging settings. Notably, the main bottleneck in model merging is often data availability rather than computational resources. Moreover, FS-Merge has fewer learnable parameters than distillation, but they increase linearly with the number of models and hidden width; however, FS-Merge seq. solved the first issue. Lastly, one cannot naively merge two models of different depths using our method; we believe this could be solved in future work. 
+
+\textbf{Summary.} In this work, we address the challenging task of merging transformers from different initializations and tasks into a unified multitask model using a small subset of unlabeled data—a setting in which traditional methods fail. Our proposed FS-Merge, which employs a feature reconstruction approach to train a Foldable SuperNet, is simple, data-efficient, and can use more sophisticated merging rules compared to other baselines. FS-Merge outperforms traditional methods and achieves SOTA results across various scenarios, model sizes, datasets and modalities.
+
+\newpage
+
+\textbf{Reproducibility.} The paper fully discloses all the information needed to reproduce the experimental results. In addition, code will be published upon acceptance.
+
+\textbf{Ethics.} We can identify several aspects where FS-Merge can mitigate ethical concerns. The ability to merge models from different initializations and tasks offers an efficient alternative for using an ensemble of these models. This allows us to achieve greater resource efficiency and reduce the model's carbon footprint. Moreover, FS-Merge can alleviate privacy concerns. For example, in cases where multiple users are training models on private datasets, FS-Merge enables us to combine those models into a single multi-task model, without accessing the full private datasets or any labels. 
+
+
+

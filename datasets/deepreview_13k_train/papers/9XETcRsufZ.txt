@@ -1,0 +1,426 @@
+\title{Mixture of Parrots: Experts improve memorization more than reasoning}
+
+\begin{abstract}
+The Mixture-of-Experts (MoE) architecture enables a significant increase in the total number of model parameters with minimal computational overhead. 
+However, it is not clear what performance tradeoffs, if any, exist between MoEs and standard dense transformers.
+In this paper, 
+we show that as we increase the number of experts (while fixing the number of active parameters), the memorization performance consistently increases while the reasoning capabilities saturate. 
+We begin by analyzing the theoretical limitations of MoEs at reasoning. We prove that there exist graph  problems that cannot be solved by any number of experts of a certain width; however, the same task can be easily solved by a dense model with a slightly larger width. 
+On the other hand, we find that on memory-intensive tasks, MoEs can effectively leverage a small number of active parameters with a large number of experts to memorize the data. 
+We empirically validate these findings on synthetic graph problems and memory-intensive closed book retrieval tasks. 
+Lastly, we  pre-train a series of MoEs and dense transformers and evaluate them on commonly used benchmarks in math and natural language. 
+We find that increasing the number of experts helps solve knowledge-intensive tasks, but fails to yield the same benefits for reasoning tasks.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+ 
+
+The explosion in capabilities of large language models in recent years has largely been enabled by scaling their size, as measured by the number of parameters in the model. In the standard Transformer architecture, scaling the number of parameters entails a proportional increase in computational cost, e.g. doubling the number of parameters requires doubling the number of floating-point operations (FLOPs), making training and inference more computational intensive. Mixture-of-Experts (MoE) were introduced  as a solution for this problem \citep{shazeer2017outrageously,lepikhin2020gshard,fedus2022switch}. MoEs replace the single MLP in each Transformer block with multiple MLPs (called experts), where each token is routed to a few experts based on a linear routing function. The number of parameters in the MoE layer therefore increases with the total number of experts, while the compute increases only with the number of ``active'' experts (i.e., the number of experts to which the token is routed to). This offers a promising option for scaling models: increase the number of experts instead of the model dimension or its depth. For this reason, MoEs have become very popular, and many frontier models today are based on the MoE architecture \citep{achiam2023gpt,databricks2023,anil2023gemini,dai2024deepseekmoe,jiang2024mixtral,yang2024qwen2}.
+
+In this work we study whether MoE indeed offers a ``free-lunch'', enabling gains in performance with no computational cost. Interestingly, we find that the benefit from MoEs greatly depends on the task at hand. We show that for reasoning-based tasks, such as graph problems and mathematical reasoning, MoEs offer limited performance gains, and increasing the number of experts cannot compete with scaling the dimension (width) of the model. On the other hand, for memory-intensive tasks, we show that scaling the number of experts is competitive with scaling standard ``dense'' MLPs.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{0.31\textwidth}
+\centering
+\vskip 0pt
+    \includegraphics[height=3.cm]{images/nlp_world_knowledge_total_params.pdf}
+   \scriptsize
+    \vspace*{-.2cm}
+    
+        \mbox{\hspace*{1.cm}\cblock{65}{105}{225}\hspace{1mm}Dense transformer \hspace{1.5mm} \cblock{255}{128}{ 128}\hspace{1mm}MoE (18M active parameters) \hspace{1.5mm} \cblock{230}{32}{ 32}\hspace{1mm}MoE (58M active parameters)\hspace{1.5mm}  \cblock{139}{0}{ 0}\hspace{1mm}MoE (200M active parameters)}
+    \caption{Evaluation: world knowledge}
+    \label{fig:world_knowledge_intro}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.31\textwidth}%0.33
+\centering
+\vskip 0pt
+\includegraphics[height=3.cm]{images/nlp_reasoning_total_params.pdf}
+
+\vspace*{.25cm}
+\hspace*{1.5cm}\caption{Evaluation: commonsense}
+\label{fig:commonsense_intro}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]
+{0.31\textwidth}
+\centering
+\vskip 0pt
+\includegraphics[height=3.cm]{images/math_reasoning_total_params.pdf}
+\caption{Evaluation: math}
+\label{fig:math_intro}
+\end{subfigure}
+\label{fig:main}
+\caption{\textbf{(a) Evaluation: world knowledge.} We train a series of dense transformers and MoEs on 65B tokens from a corpus essentially made of Fineweb-edu, Cosmopedia and Wikipedia (see \autoref{sec:pretrain} for details). We then evaluate the models on several world knowledge benchmarks (e.g., TriviaQA \citep{joshi2017triviaqa}, Natural Questions \citep{kwiatkowski2019natural}) and report the average F1 accuracy. Surprisingly, at a fixed number of total parameters, MoEs with substantially fewer active parameters approximately match the performance of dense models. This highlights the importance of experts in tasks that require memorization.  
+\textbf{(b) Evaluation: commonsense.} Here we evaluate the aforementioned  pre-trained models on natural language commonsense benchmarks (e.g., HellaSwag \citep{zellers2019hellaswag}, WinoGrande \citep{sakaguchi2021winogrande}). On these reasoning tasks, we observe that MoEs perform worse than dense models and more significant benefits are obtained by increasing the number of active parameters. 
+\textbf{(c) Evaluation: math.} Here we train a series of dense transformers and MoEs on 65B tokens from a corpus essentially made of Proof-Pile2
+\citep{azerbayev2023llemma} (see \autoref{sec:pretrain} for details). The results are consistent with the ones in (b): MoEs perform worse than dense models at equal number of total parameters.}\label{fig:introduction}
+\end{figure*}
+
+  
+To demonstrate these claims, we begin with a theoretical analysis of MoEs and dense models. 
+We use communication-complexity lower bounds to show that a single-layer MoE requires a critical dimension to solve a simple graph connectivity problem, implying that MoEs offer no benefit for solving this problem and only consume unnecessary memory. On the other hand, we show that for a pure memorization task, where the model only needs to ``remember'' an arbitrary set of examples, scaling the number of experts is equivalent to scaling the number of parameters in dense transformers, implying a significant computational gain when fixing the number of active parameters (\autoref{sec:theory}). We continue by experimentally validating these results, comparing MoEs against dense models on synthetic training data. We train these models on finding the shortest path in random graphs, where we show that MoE accuracy does not improve as we increase the number of experts, but that accuracy consistently increases with width for a dense transformer (\autoref{fig:shortest_path_n50_total_params}).
+Following this, we train different models on the task of memorizing a large phone-book. We demonstrate that MoEs excel in memorization, matching the performance of dense transformers with the same number of total parameters but with substantially less computational cost (\autoref{fig:phonebook_total_params}).
+
+Finally, we train dense transformers and MoEs on real datasets of mathematical reasoning and natural language, and perform intensive benchmarking of these models on a wide variety of downstream tasks. For memory-intensive tasks, MoEs surprisingly have a great advantage, where increasing the number of experts can match the performance of large dense models (\autoref{fig:world_knowledge_intro}). However, we show that for tasks that rely on reasoning, scaling the number of experts cannot compete with increasing the model dimension (Figures \ref{fig:commonsense_intro}-\ref{fig:math_intro}). Moreover, MoEs exhibit some memorization behaviors when trained on math problems (\autoref{fig:generalization_gap}).   Taken together, our results show that the gains from using MoEs depend greatly on the nature of the training data and downstream task, and that while MoEs can improve performance in certain cases, sometimes increasing the effective size (width) of the model is unavoidable. 
+
+
+\section{Related work}
+
+
+\paragraph{Mixture of Experts.} Mixture-of-Experts (MoE) date back to the work of \cite{jacobs1991adaptive,jordan1994hierarchical}. \cite{shazeer2017outrageously,fedus2022switch} were the first to scale this idea to deep learning and obtain state-of-the-art models in machine translation. Since then, several works have improved their routing algorithms \citep{lepikhin2020gshard,lewis2021base,roller2021hash,clark2022unified,zhou2022mixture,antoniak2023mixture,zhong2024lory}, have improved their downstream performance after finetuning \citep{du2022glam,zoph2022st} or made their training and inference more efficient \citep{rajbhandari2022deepspeed,gale2023megablocks,pan2024dense,tan2024scattered}. However, only a few papers have studied the science of MoEs and their comparison with dense transformers. \cite{clark2022unified,krajewski2024scaling} establish scaling laws for MoEs. \cite{chen2022towards} design a specific classification problem where a model with multiple experts provably outperforms one with only one expert. \cite{shazeer2017outrageously,lepikhin2020gshard,artetxe2021efficient,lewis2021base,fedus2022switch,du2022glam} show that given a fixed FLOP budget, MoEs are always better. However, these papers claim that on a per parameter basis, MoEs always seem comparatively worse than dense models. In this paper, we temper this claim by showing that it depends on the \emph{nature of the task} at hand: on reasoning tasks, we validate this claim but on memory-intensive tasks, equally-sized MoEs perform as well as dense transformers.
+
+\paragraph{Language models and memorization.} Large language models (LLMs) store a considerable amount of knowledge in their parameters \citep{petroni2019language,heinzerling2020language}. 
+They memorize useful knowledge such as facts and commonsense \citep{zhao2024large}.
+Many works studied how memorization occurs in LLMs by developing tools to locate the knowledge in the model \citep{meng2022locating,allen2023physics,liu2024devil} or by tracking the training dynamics \citep{tirumala2022memorization,speicher2024understanding}. We draw inspiration from \cite{allen2023physics} and evaluate the memorization of our models by pre-training them on a mixture of datasets that includes Wikipedia, and at test time, evaluate them on world knowledge benchmarks, which are essentially question answering tasks on Wikipedia facts. 
+With respect to theoretical findings, \cite{kim2023provable,mahdavi2023memorization,madden2024upper}  provide upper bounds on the number of parameters needed for dense transformers to perform memorization tasks under various conditions.  
+\paragraph{Language models and reasoning.} In recent years, transformer-based language models have displayed remarkable effectiveness in solving a broad range of reasoning tasks. Specifically, the reasoning capabilities of transformers have been studied in the context of arithmetic problems \citep{jelassi2023length,cho2024position,hou2024universal,zhou2024transformers, mcleish2024transformersarithmeticrightembeddings,lee2023teaching},  mathematical reasoning \citep{zhang2022unveiling, imani2023mathprompter,wei2022chain} graph problems \citep{sanford2024understanding,fatemi2023talk,jin2023large,wang2024can} and code challenges \citep{shi2024can,zhu2024deepseek}. Recently, state-of-the-art language models were used for solving complex math olympiad problems \citep{deepmind2024ai,numina2024winning,openai2024o1}. 
+With respect to theoretical findings, various works study the reasoning capabilities of transformers, relating their expressive power to other complexity classes and formal languages \citep{DBLP:conf/icml/WeissGY21, zhou2023algorithmstransformerslearnstudy,strobl2024formal}. Other works study how chain-of-thought can improve the reasoning capabilities of language models in terms of expressive power and learnability \citep{abbe2024fartransformersreasonlocality,merrill2023expresssive,malach2023auto}. However, the reasoning capabilities of MoE language models compared to their dense counterparts have received comparatively less attention.
+ 
+
+
+
+
+
+
+
+
+
+
+
+\section{Theory: representational capacity}
+
+
+In this section, we analyze the capability of MoE transformers compared to standard (dense) models. We begin by studying a simple graph problem that requires scaling the hidden dimension of the transformer, showing that MoEs with small hidden dimension cannot solve this problem, regardless of the number of experts used. Then, we show that MoEs can effectively memorize random inputs, requiring significantly less computational resources (active parameters) compared to dense models.
+
+\subsection{Setting}
+Consider a one-layer transformer $f \in \text{Transformer}_{m, H, 1}^N$ which takes as input a sequence of length $N$ and has logarithmic bit-precision. $f$ embeds the input into dimension $m$ via the function $\phi$. $f$ has $H \geq 1$ attention heads, whose outputs are combined via concatenation before we apply point-wise function $\psi$ \footnote{In multi-layer Transformers, each layer outputs a vector of size $m$. However, since our focus in this section will be on binary classification problems, we will let the transformer output a single scalar, and we interpret the output of the final token as the prediction for the classification task.}. 
+
+Define the parameters as $Q_h, V_h, K_h \in \Rset^{m \times m}$, $\phi: \cX \rightarrow \Rset^m$, $\psi: \Rset^m \rightarrow \Rset$.  
+The output of $f$ is:
+\[
+f(\vx_1, \dots, \vx_N) = \psi \paren*{\bracket*{\softmax \paren*{\phi(x_N)^\top Q_h K_h^\top \phi(X)}\phi(X) V_h }_{h \in [H]} }.
+\]
+$f$ is a \emph{dense} transformer, if $\psi$ is an MLP, i.e. function of the form:
+\[
+\psi(\vx) = \vu^\top \sigma(\mW \vx + \vb)\mathrm{,~~for~} \mW \in \Rset^{m' \times m}, b \in \Rset^{m'}, \vu \in \Rset^{m'}
+\]
+where $\sigma$ is the ReLU activation function. 
+$f \in \text{Transformer}_{m, H, 1, K}^N$ is a \emph{sparse} (MoE) transformer with $K$ experts if $\psi$ is a function of the form:
+\[
+\psi(\vx) = \bu_{i}^{\top} \sigma(\mW_i \vx + \vb_i)\mathrm{~for~}i=\argmax_{j} \br_j^\top \vx
+\]
+where $\mW_1, \dots, \mW_k \in \Rset^{m' \times m}$, $\vb_1, \dots, \vb_k \in \Rset^{m'}$, $\bu_1, \dots, \bu_k \in \Rset^{m'}$ are the parameters of each expert and $r_1, \dots, r_k$ define the routing function (we use top-1 routing).
+
+\subsection{MoEs require a critical hidden size to solve graph reasoning tasks}
+In this section, we analyze the graph reasoning capabilities of dense and sparse transformers. We define the length-2 path problem on a graph, and use it as a means to understand other graph reasoning tasks such as graph connectivity, shortest path, and cycle detection. 
+
+\begin{definition}[Length-2 Path Problem]
+    The input is a graph $G = (V, E)$. The source  $s \in V$ and a destination $d \in V$ are fixed for all tasks as the $0$ and $\abs{V}$ vertex. The length-2 path problem asks whether there is a path of length $2$ from $s$ to $d$. 
+\end{definition}
+Graph connectivity, shortest path, and cycle detection are all graph reasoning tasks which reduce to the length-2 path problem due to \citep{sanford2024understanding} and Lemma \ref{lemma:SD_L2path}.
+We provide a lower-bound on the width required for a sparse transformer to solve the length-2 path problem, and an upper-bound on the width required for a dense transformer to solve the problem. Further, we show a separation between dense and sparse transformers with the same number of parameters: for a sufficiently large amount of experts in the sparse model, it cannot solve the same problem that a dense model can solve with the same amount of \emph{total} parameters.
+
+\paragraph{Lower bound on width of depth-1 MoE for reasoning.}
+\label{sssec:lb_width_moe}
+We begin by showing a lower-bound on the width for a depth-1 mixture of expert model for the length-2 path problem. This lower bound implies a lower bound for search and retrieval tasks such as graph connectivity, shortest path, and cycle detection. 
+\begin{theorem}[Length-2 path lower-bound on sparse transformers]
+\label{thm:cc_lowerbound}
+    For some input sequence $G = (V, E)$, fix two disjoint subsets $A, B \subset [N-1]$, and consider a single-layer transformer $f \in \text{Transformer}_{m, H, 1, K}^N$   with $O(\log N)$-bit precision that solves length-2 path for any input $X$ where $X_A$ is a function of edges with the source $s$, $X_B$ is a function of edges with the destination $d$. Then, $f$ has width satisfying $mH = \Omega(\abs{V} / \log N)$.
+\end{theorem}
+The proof follows almost identically from the proof in \citep{sanford2024understanding} for the class $\text{Transformer}_{m, H, 1}^N$. The original proof does not place constraints on the function $\psi$ and is based on a communication-complexity argument. As such we may design $\psi$ so that it first routes and then chooses which expert to apply.  As such, the result of \citep{sanford2024understanding} can also be extended to the class $\text{Transformer}_{m, H, 1, K}^N$.
+\paragraph{Upper bound on width of depth-1 dense transformer for reasoning.}
+\label{sssec:ub_width_dense}
+In this section we give an upper bound for the width required for a dense model to solve the length-2 path problem. 
+\begin{theorem}[Length-2 path width upper bound for transformer]
+\label{thm:mem_ub}
+There exists a transformer of width $\abs{V}$, $H = 1$, and $O(\log N)$-bit precision that solves length-2 path problem for any input.
+\end{theorem}
+The proof relies on an encoding of the inputs where the output values only exceed a certain threshold when $u$ and $v$, the source and destination vertices, have edges with a common vertex. 
+
+\paragraph{Parameter-matched comparison of dense and sparse depth-1 transformers.}
+Using the lower-bound on width required for a sparse transformer (Theorem \ref{thm:cc_lowerbound}) and the upper-bound on width required for a dense transformer (Theorem \ref{thm:mem_ub}), we compare dense and sparse transformers when they have the same number of total parameters. We find that when the number of experts exceeds $(\log N)^2$, the sparse model is unable to solve the same task as the dense model.
+\begin{corollary}
+    Consider a sparse transformer (with $K$ experts) and a dense transformer with the same number of parameters. There exists a number of experts $K$ so that the the sparse model is not able to solve the reasoning task, but the dense transformer solves the task.
+\end{corollary}
+\begin{proof}
+Suppose we have two depth-$1$ transformers, where one is a dense model and the other is a mixture of experts with $K$ experts. Let the width of the dense model be $m_d$, and the width of the sparse model be $m_s$. The number of parameters in the dense model is $O(m_d^2)$ and the number of parameters in the sparse model is $O(Km_s^2)$. In order to match the number of parameters, it must be the case that $m_s = \frac{m_d}{\sqrt{K}}$.
+Suppose we let $m_d = \abs{V}$, as this is sufficient to solve the above problems. For any $K \geq \Omega \paren*{(\log N)^2}$, the sparse model is not sufficiently wide to solve the problem.     
+\end{proof}
+\subsection{MoEs use their experts to solve memory-intensive tasks}
+In this section, we provide an upper-bound on the number of parameters necessary for a sparse transformer to solve memorization tasks, followed by a lower-bound on the number of parameters needed for a dense transformer to solve the same task. We use these results to compare the memorization capabilities of dense and sparse transformers with the same number of active parameters. We find that with enough experts, the sparse transformer is able to solve memorization tasks with less active parameters than the dense transformer. In both bounds we assume that transformer has logarithmic number of bits to encode each parameter.
+
+We consider  sequences $\{(X^i, y_i)\}_{i=1}^n$ where $X^i \in \Rset^{N \times m}$ are input sequences of length $N$ in dimension $m$ such that $X^i[j]$ is sampled from a Gaussian distribution $\mathcal{N}(0,I_m)$. We assume $y_1, \dots, y_N \in \{\pm \1\}$ are arbitrary labels for the $n$ sequences. The objective is for a transformer to memorize these sequences, i.e. map each input $X^i$ to a label $y_i$. The classification is determined by the sign of the last token output.
+ 
+
+\paragraph{Upper-bound on  MoE for memorization.}
+We begin by showing that, with high probability over the choice of the inputs, the MoE architecture can memorize (i.e., arbitrarily label the examples), with a small number of active parameters.
+
+\begin{theorem}\label{thm:moe_transformer}
+With probability at least $0.99$, there exists a one-layer MoE transformer with \( K \) experts, using \( \tilde O\left( \dfrac{n}{K} +Km\right) \)  active parameters and \(\tilde O\left(n+Km\right)\) total parameters stored in $\tilde{O}(1)$ bits that, when applied to each sequence \( X^i \), outputs at the last token a value whose sign matches \( y_i \), i.e.,
+$\operatorname{sign}(f(X_i)) = y_i \quad \text{for all } i = 1, \dots, n.$\footnote{We use $\tilde{O}$ and $\tilde{\Omega}$ to hide logarithmic factors.}
+\end{theorem}
+
+Specifically, if we choose $K = \sqrt{n/m}$ we get that an MoE architecture can solve the memorization problem with $\tilde O(\sqrt{nm})$ parameters. To prove this, we show that for a particular routing function, the number of samples routed to each expert is approximately $n/K$. Then, we show that an expert with $\tilde{O}(n/{mK})$ neurons can memorize a sample of size $O(n/K)$.
+
+\paragraph{Lower bound on memorization with dense Transformer.}
+Next, we give a lower-bound on the number of parameters for a dense transformer to perform memorization.
+\begin{theorem}[Lower bound for dense model]
+    \label{thm:lower_bound_memorization}
+    Given the same task as above, a dense Transformer requires $\tilde{\Omega}(n)$ parameters to solve the memorization task.
+\end{theorem}
+This bound follows from the fact that there are $2^n$ possible labels for any fixed set of $n$ inputs, and at most $2^{cW}$ functions with $W$ parameters and $c$ bit per parameters.
+\paragraph{Separation between MoEs and Dense Models.}
+Observe that the previous results on memorization imply a separation between MoEs and dense models in terms of the number of active parameters. Namely, we show that an MoE with $\tilde O(\sqrt{nm})$ active parameters can memorize, while a dense model requires $\tilde{\Omega}(n)$ parameters. So, for $n \gg m$, MoEs are significantly more efficient. Comparing the number of total parameters, MoEs require $\tilde O(n + Km)$ parameters, so both MoE and dense models have linear dependence on $n$ in the total parameter count.
+
+
+
+
+
+\section{Synthetic experiments}
+
+
+ 
+In the previous section, we proved that there exist graph connectivity problems that cannot be solved by any number of experts of a certain width but the same task can be solved by a dense model with a slightly larger width. Our goal in this section is to verify that our theoretical analysis bears out experimentally when training models from scratch on synthetic data, before moving on to study pre-trained models in \autoref{sec:pretrain}. We mainly focus on two tasks: the \emph{shortest path} problem (\autoref{fig:shortest_path}), which we use as a synthetic task to represent reasoning problems, and the \emph{phone-book} task (\autoref{fig:phonebook}), to measure the memorization ability of our models. Our experiments in this section highlight that adding experts yields greater performance improvements on memorization tasks than reasoning tasks.  
+
+\begin{figure}[h]
+\begin{subfigure}[t]{0.75\textwidth}%0.33
+
+\includegraphics[width=1.\linewidth]{images/transformer_graph.pdf}
+\end{subfigure}
+\begin{subfigure}[t]{0.24\textwidth}%0.33
+\hspace*{.8cm}\includegraphics[height=2.52cm]{images/shortest_path.pdf}
+\end{subfigure}
+\caption{\small Illustration of the shortest path task. We feed the model with a sequence that lists all the edges in the input graph and ends with the query (in green) which asks the model to find a shortest path between two vertices (from vertex 1 to vertex 4 in the figure). The model then autoregressively returns the shortest path (in purple).   }
+\label{fig:shortest_path}
+\end{figure}
+
+\subsection{Experimental setup}
+
+\paragraph{Architecture.} We opt for the Mistral \citep{jiang2023mistral} and Mixtral \citep{jiang2024mixtral} architectures as the backbones of our Transformer and MoE models, respectively. The two architectures are identical and only differ by the addition of a gating module and multiple experts in Mixtral. For both model types, we fix the number of layers to $L=12$. For the dense transformers, we vary model size by sweeping the width $d\in\{256,512,1024\}$. For MoEs, we sweep over widths $d\in\{256,512\}$ and the number of experts $E\in\{8,16,32,64\}$. To be consistent with our experiments in \autoref{sec:pretrain}, we set the intermediate dimension in the FFN block to be equal to $d$ (and not $4d$). We use token-choice routing, do not apply any token dropping and each token is routed to the top-2 experts. Lastly, in both this section and \autoref{sec:pretrain}, we report for each model the number of non-embedding parameters which we refer to as the total number of parameters.
+
+\paragraph{Shortest path task.} For a graph with $n$ vertices, our token space $\mathcal{V}$ is of size $n+6$  with tokens encoding the vertices and some special tokens: $\mathcal{V}=\{1,\dots,n,\EDGE,\BOS,\EOS,\PAD,\SEP,/\}$ where $\BOS$ is the beginning of sentence token, $\EOS$ the end of sentence token, $\PAD$ the padding token, $\EDGE$ is the token indicating an edge between two vertices and, $\SEP$ and ``/'' are  separator tokens. Each sequences describes the graph by a list of all the edges followed by two randomly sampled vertices and the shortest path between these latter (see \autoref{fig:shortest_path}). All the graphs are directed and sampled according to the Erd\"os-R\'{e}nyi model, with $n$ vertices and probability $p$ for each edge to exist. We vary $n\in\{25,30,50,40,45,50,55\}$ and set $p$ such that the average length of the shortest path is 3.5. Each train/test pair corresponds to \emph{one} value of $(n,p)$, we do not mix graph sizes.
+\begin{figure}[t]
+
+\begin{subfigure}[t]{0.55\textwidth}%0.33
+\includegraphics[width=1.\linewidth]{images/phonebook_drawing.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.4\textwidth}%0.33
+\centering
+\includegraphics[height=2.8cm]{images/phonebook_table.png}
+\end{subfigure}
+\caption{\small Illustration of the phone-book task for closed-book retrieval. The model is first trained to memorize a phone-book (illustrated on the right). Then, we randomly select a name in the phone-book (in green) and ask the model to return their phone number (in purple) without access to the phone-book.}
+\label{fig:phonebook}
+\end{figure}
+
+\begin{figure}[t]
+\begin{subfigure}[t]{0.40\textwidth}%0.33
+
+\centering
+\includegraphics[width=1\linewidth]{images/phonebook_total_params.pdf}
+\small 
+\centering
+    \vspace*{-.2cm}
+        \mbox{\hspace*{1.cm}\cblock{65}{105}{225}\hspace{1mm}Dense transformer \hspace{1.5mm} \cblock{255}{128}{ 128}\hspace{1mm}MoE (10M active parameters) \hspace{1.5mm} \cblock{230}{32}{ 32}\hspace{1mm}MoE (42M active parameters)} 
+\caption{Phone-book memorization}\label{fig:phonebook_total_params}
+\end{subfigure}\hfill
+\begin{subfigure}[t]{0.40\textwidth}%0.33
+
+\centering
+
+\includegraphics[width=1\linewidth]{images/n50_shortest_path_total_params.pdf}
+\captionsetup{width=1.2\columnwidth}
+\caption{\small Shortest path (50-node graphs)}\label{fig:shortest_path_n50_total_params}
+\end{subfigure}
+ 
+\caption{\small\textbf{(a) Phone-book memorization}: We train a series of dense transformers and MoEs on phone-books of varying sizes and then evaluate their memorization capacity. We report the maximal phone-book size where the model obtains more than 90\% accuracy. The maximal phone-book size correlates with the total (and not active) number of parameters. \textbf{(b) Shortest path (total parameters)}: We train models to find the shortest path in 50-node graphs and report the test accuracy. Here, increasing the number of experts provides limited improvements and the performance rather correlates with the number of active parameters.} 
+\label{fig:synthetic_total_param_exp}
+\end{figure}
+ 
+
+\paragraph{Phone-book task.}  Our token space $\mathcal{V}$ is of size 39 and made of the alphabet letters, digits and special tokens: $\mathcal{V}=\{a,\dots,z,0,\dots,9,\BOS,\EOS,\SEP\}$. We generate phone-books where the names consist of 5 letters and the phone numbers of 8 digits (see \autoref{fig:phonebook}). We ensure that both the names and numbers are unique. 
+\paragraph{Datasets.} For the graph experiments, the training set size is $1\mathrm{e}6$ and the test set consists of $1\mathrm{e}3$ held-out examples that are sampled from the \emph{same} distribution as the training examples. For the phone-book experiments, we vary the training set size over $\{1\mathrm{e}{5},5\mathrm{e}{5},1\mathrm{e}{6},1.5\mathrm{e}{6},2\mathrm{e}{6},2.5\mathrm{e}{6},3\mathrm{e}{6}\}$ and the test set consists of $1\mathrm{e}3$ queries from the training set. 
+
+\paragraph{Optimization.} We use the AdamW optimizer \citep{loshchilov2017fixing} with a weight decay equal to 0.1. We sweep the learning rate over $\{5\mathrm{e}{-5},1\mathrm{e}{-4},5\mathrm{e}{-4},1\mathrm{e}{-3}\}$, the number of epochs over $\{2,5,10,15\}$, and set the maximal possible batch size among $\{8,16,32\}$. We use a warmup during the 20\% first  training steps and a linear decay scheduler. All models are trained by next-token prediction. In the graph task, we apply a mask on the input instance so that we only penalize the model whenever it makes a mistake on the labels (and not on the inputs and labels jointly). In the phone-book experiment, we do not apply any masking.
+\paragraph{Evaluation.} For each task we compute the exact accuracy, i.e.\ we count the generation as correct only if it fully matches the ground truth. For the phone-book task, we report the size of the maximal phone-book where we observe at least 90\% exact accuracy.
+\subsection{Memorization: total parameters predict performance}
+
+We train dense transformers and MoEs on phone-books of different sizes and at test time, evaluate whether they memorize the phone number of some names. 
+\autoref{fig:phonebook_total_params} reports the maximal phone-book size where the model manages to get an accuracy greater than $90\%$. This gives us an estimate of the memorization capacity of the model.
+
+The findings are clear: no matter the number of active parameters, MoEs match the performance of dense transformers with the same number of total parameters. This suggests that MoEs are able to effectively leverage the extra parameters in additional experts by routing tokens to the experts that contain the necessary information from the training corpus. 
+This scaling is remarkable in this case since it even holds when we are only routing to 2 out of 64 experts. For instance, we find that an MoE model with only 42M active parameters outperforms a dense model with 10x as many parameters. 
+This type of impressively efficient memorization capacity may be a major reason behind the success of MoE architectures.
+ 
+
+ 
+
+\subsection{Reasoning: total parameters do not  predict performance} 
+
+We train dense transformers and MoEs on the shortest path task and then query the models to find the shortest paths in novel, held-out graphs. \autoref{fig:shortest_path_n50_total_params} reports the performance on graphs with 50 nodes with respect to their number of total parameters. Contrary to the phone-book experiment, increasing the number of experts does not consistently improve the performance of MoEs. 
+Essentially, we find that active parameters rather than total parameters is a better predictor of performance for these reasoning tasks. 
+
+To connect back to the theory from \autoref{sec:theory}, note that active parameters is directly determined by the width of the network since we always route to exactly 2 experts and fix the depth. Thus, these results corroborate the theory by showing that width (i.e. active parameters) determines the performance on these graph reasoning problems and that increasing the number of experts is not helpful. 
+In \autoref{sec:pretrain}, we will further corroborate this idea through evaluation of pre-trained models on commonsense and math reasoning benchmarks.
+ 
+
+
+
+
+ 
+ 
+
+
+
+
+\section{Pre-trained Models}
+
+
+
+In this section, we pre-train dense transformers and MoEs and compare their performance on standard math and natural language benchmarks. 
+We break the downstream tasks into those that require more memorization and those that require more reasoning. 
+The memorization-intensive tasks test for ``world knowledge'' and consist of benchmarks like TriviaQA \citep{joshi2017triviaqa}.
+We break the reasoning-intensive tasks into two subcategories: one for natural language reasoning tasks like WinoGrande \citep{sakaguchi2021winogrande} and another for mathematical reasoning tasks like Hendrycks-MATH \citep{hendrycks2021measuring}. 
+These tasks may be seen as real-world analogs of the stylized phone-book and shortest path tasks studied in \autoref{sec:synthetic}. 
+
+We observe that performance on world-knowledge tasks is governed by the total number of parameters while performance on reasoning tasks depends more on the number of active parameters (\autoref{fig:introduction}). 
+Additionally, we conduct an experiment that indicates memorization from MoEs may be harming reasoning performance since there is a larger gap between train and test accuracy for MoEs than dense models at fixed total parameters (\autoref{fig:generalization_gap}).
+Finally, we conduct an ablation where we compare models at fixed validation perplexity rather than model size. We find that MoEs perform better on world knowledge tasks and similarly on reasoning tasks compared to dense models (\autoref{fig:iso_ppl_math_nlp}).
+
+
+  
+
+\subsection{Setup}
+
+\paragraph{Architecture.} We train dense transformers and MoEs using the OLMoE
+codebase \citep{muennighoff2024olmoeopenmixtureofexpertslanguage}. We set the number of layers $L=20$ and vary the width $d\in\{256,512,1024,2048,4096\}$ for dense transformers and $d\in\{256,512,1024\}$ for MoEs. Similarly to \cite{muennighoff2024olmoeopenmixtureofexpertslanguage}, we consistently set the intermediate dimension in the FFN/MoE blocks to $d$ (and not $4d$). For MoEs, we vary the number of experts  $E\in \{8,16,32,64\}$. For the specific case of width 256, we 
+ also train a MoE with 256 experts because its parameter count approximately matches the one of a width-2048 dense model and thus, we can compare the downstream performance of the two models. We use top-2 token-choice routing, without token dropping which is implemented in the dMoE function from  the Megablocks package \citep{gale2023megablocks}. 
+\paragraph{Training hyperparameters.} We use the AdamW optimizer \citep{loshchilov2017fixing} with a weight decay equal to 0.1. We set the learning rate to $0.001$, train on 63B tokens (60k steps) with batch size 512 and sequence length of 2048. We use warmup during the 20\% first training steps and a linear decay scheduler. We train our models using FSDP \citep{zhao2023pytorch}. 
+\paragraph{Pre-training datasets.} We train two collections of models, one collection on natural language and another one on math. The natural language dataset is a mixture  constituted of FineWeb-edu \citep{penedo2024fineweb}, Cosmopedia \citep{benallal2024cosmopedia}, Wikipedia and the training sets of the downstream tasks we evaluate on. The math dataset is a mixture made of Proof-Pile 2 \citep{azerbayev2023llemma} and instruction datasets such as OpenMathInstruct \citep{toshniwal2024openmathinstruct} and MetaMathQA \citep{yu2023metamath}. Each of the two training mixture approximately totals 65B tokens. A precise description of the training mixtures can be found in \autoref{app:train_data}.
+ 
+
+ \paragraph{Evaluation.} We measure the validation perplexity on 5,000 held-out sequences sampled from the training distribution. And we evaluate our models on a series of natural language and math benchmarks. Explicitly, we divide them into three categories: 
+ \begin{itemize}[leftmargin=*, itemsep=1pt, topsep=1pt, parsep=1pt]
+      \item[--] World-knowledge tasks: TriviaQA \citep{joshi2017triviaqa}, Natural Questions \citep{kwiatkowski2019natural}, HotpotQA \citep{yang2018hotpotqa}, WebQuestions \citep{berant2013semantic}, ComplexWebQuestions \citep{talmor2018web}.
+      \item[--] Commonsense tasks: ARC-C and ARC-E \citep{clark2018think}, CommonsenseQA \citep{talmor2018commonsenseqa}, HellaSwag \citep{zellers2019hellaswag}, OpenbookQA \citep{mihaylov2018can}, PIQA \citep{bisk2020piqa}, SciQ \citep{welbl2017crowdsourcing}, SIQA \citep{sap2019socialiqa}, WinoGrande \citep{sakaguchi2021winogrande}.
+      \item[--] Math benchmarks: SVAMP \citep{patel2021nlp}, GSM8k \citep{cobbe2021training}, GSM-Hard \citep{gao2023pal}, Hendrycks-MATH  \citep{hendrycks2021measuring} and Minerva-MATH \citep{lewkowycz2022solving}.
+ \end{itemize}
+
+
+
+
+ 
+
+\begin{wrapfigure}[24]{r}{5.5cm}
+\vspace*{-1cm}
+ 
+\centering
+\begin{subfigure}[t]{0.30\textwidth}%0.33
+\hspace*{-.4cm}\includegraphics[height=3.5cm]{images/openmathinstruct_math-gsm8k_mem_train_test_exp.pdf}
+\end{subfigure}
+\begin{subfigure}[t]{0.30\textwidth}%0.33
+
+\hspace*{-.4cm}\includegraphics[height=3.5cm]{images/openmathinstruct_math-math_mem_train_test_exp.pdf}
+\caption*{(b)}
+\end{subfigure}
+ \vspace*{-.2cm}
+  \scriptsize  
+        \mbox{\hspace*{-.0cm}\cblock{65}{105}{225}\hspace{1mm}Dense transformer}
+
+        
+        \mbox{\hspace*{1.1cm}\cblock{255}{128}{ 128}\hspace{1mm}MoE (18M active parameters)}
+
+       
+        
+        \mbox{\hspace*{1.1cm}\cblock{230}{32}{ 32}\hspace{1mm}MoE (58M active parameters)}
+
+        
+        \mbox{\hspace*{1.2cm}\cblock{139}{0}{ 0}\hspace{1mm}MoE (200M active parameters)}
+\caption{\small Generalization gap i.e.,  difference between the training and test accuracies,  when the test set is GSM8k (a) and Hendrycks-MATH (b).}
+\label{fig:generalization_gap}
+\end{wrapfigure}
+
+In all our experiments, we plot the average accuracy for each of these three categories. We report the corresponding per-task performance in \autoref{app:experiments}.  
+\subsection{Results}
+ 
+
+\paragraph{Experts improve memorization more than reasoning.} We observe that the conclusions from our theoretical results and synthetic experiments also hold when pre-training and evaluating language models on natural language and math. In \autoref{fig:world_knowledge_intro}, we report the accuracy of our models with respect to the number of \emph{total} parameters. All the lines in the plot approximately coincide which implies that regardless of the number of active parameters, MoEs can effectively use their routing to leverage all of their parameters to solve memory-intensive tasks. On the other hand, on commonsense and math benchmarks (Figures \ref{fig:commonsense_intro},\ref{fig:math_intro}) we find that MoEs do not reach the performance of dense models with the same number of total parameters. This indicates that for these reasoning tasks, increasing the dense model width is more effective that adding experts.
+ 
+
+\paragraph{On math tasks, MoEs display a higher train-test gap than dense models, suggestive of memorization.} 
+We provide additional evidence that memorization occurs in pre-trained MoEs by considering the generalization gap. 
+In \autoref{fig:generalization_gap} we select 6,319 random problems from the OpenMathInstruct dataset, which is part of the training mixture data. More precisely, we pick 5,000 Hendrycks-MATH like examples and 1,319 GSM8k-like examples to ensure that the number of training examples matches with the corresponding number of examples in GSM8k and Hendrycks-MATH test sets. We then report the \emph{generalization gap}, which is the gap between the accuracy on training examples and test examples. While both dense transformers and MoEs make a \emph{single} pass on the OpenMathInstruct dataset, \autoref{fig:generalization_gap} shows that at scales beyond 159M parameters, MoEs suffer from a more significant generalization gap than dense transformers. 
+This is suggestive that MoEs are more prone to memorize training data than dense models. 
+ 
+\paragraph{MoE models excel at world knowledge tasks but match dense models in reasoning when perplexity is fixed.}
+Finally, we focus on the relationship between validation perplexity and downstream performance in \autoref{fig:iso_ppl_math_nlp}. 
+Rather than comparing models by their parameter count, we can compare them based on how well they fit the training distribution as measured by validation perplexity.
+Even though two models may have the same perplexity, they will have learned different functions. The question is then if we can see any high level patterns in which types of functions a particular model class is more likely to learn. \autoref{fig:iso_ppl_world_knowledge} shows that at a fixed perplexity, the MoE models outperform the dense models on world knowledge tasks. This suggests that MoEs do have a bias towards learning functions that memorize training data. On the other hand, Figures \ref{fig:iso_ppl_commonsense} and \ref{fig:iso_ppl_math} show that MoEs and dense models perform about the same on the reasoning tasks at fixed validation perplexity.
+We can square this with the results from \autoref{fig:introduction} by noting that at equal total number of parameters an MoE has worse validation perplexity than the corresponding dense model. This suggests that while MoEs do not change the relationship between perplexity and downstream accuracy on reasoning tasks relative to dense models, they may struggle to learn the reasoning parts of the training distribution as well.  
+Overall, our main findings in \autoref{fig:introduction} and supplementary experiments in Figures  \ref{fig:generalization_gap} and \ref{fig:iso_ppl_math_nlp} corroborate the hypothesis that MoEs can effectively use more experts to increase their memory capacity, but not necessarily their capability to reason.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{0.31\textwidth}
+\centering
+\vskip 0pt
+    \includegraphics[height=3.cm]{images/nlp_world_knowledge_iso_ppl.pdf}
+   \scriptsize
+    \vspace*{-.2cm}
+    
+        \mbox{\hspace*{1.cm}\cblock{65}{105}{225}\hspace{1mm}Dense transformer \hspace{1.5mm} \cblock{255}{128}{ 128}\hspace{1mm}MoE (18M active parameters) \hspace{1.5mm} \cblock{230}{32}{ 32}\hspace{1mm}MoE (58M active parameters)\hspace{1.5mm}  \cblock{139}{0}{ 0}\hspace{1mm}MoE (200M active parameters)}
+    \caption{}
+    \label{fig:iso_ppl_world_knowledge}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.31\textwidth}%0.33
+\centering
+\vskip 0pt
+\includegraphics[height=3.cm]{images/nlp_reasoning_iso_ppl.pdf}
+
+\vspace*{.1cm}
+\hspace*{1.5cm}\caption{}\label{fig:iso_ppl_commonsense}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]
+{0.31\textwidth}
+\centering
+\vskip 0pt
+\includegraphics[height=3.cm]{images/math_iso_ppl.pdf}
+\caption{}
+\label{fig:iso_ppl_math}
+\end{subfigure}
+\caption{(a) On world knowledge benchmarks, MoEs consistently outperform dense transformers in downstream performance when fixing the validation perplexity. (b-c) In reasoning benchmarks, dense transformers perform about the same as MoEs at a fixed validation perplexity. MoEs can achieve these perplexities with less active parameters, but may require substantially more total parameters.}\label{fig:iso_ppl_math_nlp}
+\end{figure*}
+
+ 
+
+
+\section{Discussion}
+
+
+In recent years, scaling up the number of parameters in Transformers has been the dominant approach for improving performance on language modeling. A standard Transformer of dimension $d$ and sequence length $L$ has number of parameters which scales with $O(d^2)$, and run-time that scales with $O(d^2 L^2)$. 
+Improving the efficiency can either attempt to reduce the dependence on $ L$ or $ d$. 
+Sub-quadratic attention variants attempt to improve dependence on $ L $ \citep{katharopoulos2020transformers, peng2023rwkv, fu2022hungry,gu2023mamba}, while MoEs attempt to improve dependence on $ d$ by scaling the number of parameters without scaling the dimension of the model. 
+ 
+
+This paper illuminates the costs and benefits of this reduced dependence on $ d$. 
+We show that for some reasoning-intensive tasks increasing the dimension $d$ is inevitable, and scaling the computation with $O(d^2)$ seems unavoidable. 
+This remains true regardless of the different design choices in the MoE architecture and is backed up empirically. 
+We note that there is increasing interest in developing non-MoE models with sub-quadratic dependence on $d$, using some structural assumptions on the weight layers \citep{kamalakara2022exploring, dao2021pixelated, dao2022monarch, fu2024monarch}, which could provide an alternative.
+
+On the other hand, we find that MoEs are highly effective at knowledge intensive tasks. They are able to much more efficiently memorize facts than dense models with a similar number of active parameters, even matching the performance of dense models with the same number of total parameters. This suggests that MoEs are valuable as memorization machines and perhaps this particular capability can be leveraged while relying on other architectures for more reasoning-intensive tasks. 
+
+\paragraph{Limitations and future work.} While we provide substantial experiments on pre-trained models with up to $\leq2.1$B parameters, we recognize that large scale MoEs like Mixtral \citep{jiang2024mixtral}, DeepSeek-V2 \citep{dai2024deepseekmoe}, and others have orders of magnitude more parameters. We hypothesize that our results would still be meaningful at larger scales due to the strong theoretical underpinning, but it is not guaranteed. Moreover, as suggested above, it would be an interesting direction for future work to propose new architectures with reduced $ d $ dependence that can get the best of both worlds and solve reasoning and memorization tasks.
+
+
+
+

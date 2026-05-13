@@ -1,0 +1,595 @@
+\title{Exploring contextual modeling with linear complexity for point cloud segmentation}
+
+\begin{abstract}
+Point cloud segmentation is an important topic in 3D understanding. Traditionally, this task has been tackled using either the CNN or Transformer. Recently, a newcomer, Mamba, has emerged as a promising alternative, offering efficient long-range contextual modeling capabilities without the quadratic complexity associated with the Transformer’s attention mechanisms. However, despite Mamba’s potential, early efforts have \textit{all failed} to achieve better performance than the best CNN-based and Transformer-based methods. Since each of these diverse architectures possesses unique strengths and weaknesses, it's difficult to determine the most suitable approach for this task. In this work, we address this challenge by identifying the key components of an effective and efficient point cloud segmentation architecture. Specifically, we show that: 1) \textit{Spatial locality} and \textit{robust contextual understanding} are critical for strong performance, and 2) Mamba features linear computational complexity, offering superior data and inference efficiency compared to Transformers, while still being capable of delivering strong contextual understanding. Additionally, we further enhance the standard Mamba specifically for point cloud segmentation by identifying its two key shortcomings. First, the enforced causality in the original Mamba is unsuitable for processing point clouds that have no such dependencies. Second, its unidirectional scanning strategy imposes a directional bias, hampering its ability to capture the full context of unordered point clouds in a single pass. To address these issues, we carefully remove the causal convolutions and introduce a novel \textit{Strided Bidirectional SSM} to enhance the model’s capability to capture spatial relationships. Our efforts culminate in the development of a novel architecture named \textsc{\methodname}, which effectively integrates the strengths of CNN and Mamba. \textsc{\methodname} surpasses the previous state-of-the-art method, PTv3, by up to \textbf{+0.8} mIoU on key benchmark datasets, including ScanNet, ScanNet200, S3DIS, and nuScenes, while being \textbf{42.1\%} faster and \textbf{5.53$\times$} more memory efficient. Our code and data will be released.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\blfootnote{Y. X. Chng is an intern at Bosch Corporate Research.}
+
+Point cloud segmentation is an important topic in 3D understanding that has gained significant attention from the research community in recent years. Numerous neural network architectures have been proposed for this task, with CNN-based and Transformer-based designs being the two most prominent. Currently, Transformer-based methods consistently deliver the highest performance across numerous benchmarks. Their success is frequently credited to the attention mechanism, which can adequately capture and model context. However, the quadratic complexity of self-attention in Transformers poses a significant challenge for point cloud processing, especially when handling a large number of points. To address this, researchers have explored more efficient strategies, such as aggressive downsampling \citep{ptv1,ptv2,pointformer}, efficient attention algorithms \citep{swin3d}, and windowed attention mechanisms \citep{octformer,st,ptv3}. While these methods help reduce computational costs, they achieve this at the expense of valuable spatial and geometric information, potentially weakening the Transformer’s modeling capability and hindering its contextual understanding of the point cloud \citep{shen2021efficient}. 
+
+Recently, State Space Models (SSMs) like Mamba \citep{jamba,mamba,moemamba,mambabyte} have emerged as a promising alternative to Transformers. These models combine aspects of recurrent neural networks \citep{gru,lstm} and convolutional neural networks \citep{cnn} within a framework rooted in classical state space theory. Similar to Transformers, SSMs provide robust contextual modeling capabilities. However, unlike Transformers, which scale quadratically with sequence length, SSMs scale linearly and maintain constant memory usage during inference. This efficiency makes SSMs particularly advantageous for tasks that require handling extensive contexts.
+
+\begin{figure*}
+\vskip -0.15in
+\begin{minipage}{0.49\textwidth}
+  \includegraphics[width=0.85\linewidth]{figure1a.pdf}
+  \captionsetup{aboveskip=-0.01pt}  
+  \caption*{(a) mIoU v.s. Latency on V100}
+\end{minipage}\hfill
+\begin{minipage}{0.49\textwidth}
+  \includegraphics[width=0.85\linewidth]{figure1b.pdf}
+  \captionsetup{aboveskip=-0.01pt}  
+  \caption*{(b) mIoU v.s. Memory on V100}
+\end{minipage}
+\\
+\begin{minipage}[b]{0.49\textwidth}
+  \includegraphics[width=0.85\linewidth]{figure1c.pdf}
+  \captionsetup{aboveskip=-0.01pt}  
+  \caption*{(c) mIoU on ScanNet and nuScenes}
+\end{minipage}\hfill
+\begin{minipage}[b]{0.49\textwidth}
+  \includegraphics[width=0.85\linewidth]{figure1d.pdf}
+  \captionsetup{aboveskip=-0.01pt}  
+  \caption*{(d) GFLOPS v.s. Number of Points}
+\end{minipage}
+\caption{Performance and efficiency comparisons between our proposed method, \textsc{\methodname}, and other leading segmentation networks using the ScanNet and nuScenes dataset. By carefully combining the strengths of existing architectures, \textsc{\methodname} surpasses all previous leading methods while using much lower latency and memory. Furthermore, it easily scales to scenes with a much larger number of points and progressively improves performance as the input sequence length increases.}
+\label{figure1}
+\vskip -0.2in
+\end{figure*}
+\begin{wraptable}{r}{0.5\linewidth}
+\centering
+\captionsetup{aboveskip=-0.01pt}  
+\captionsetup{belowskip=-10pt}  
+\caption{Performance and Latency Comparison among representative Mamba-based, CNN-based and Transformer-based networks on ScanNet.}
+\label{table1}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{ccc}
+    \toprule
+    case & mIoU$\uparrow$ & latency$\downarrow$  \\
+    \midrule
+    Point Mamba \citep{pointmamba2} & 75.7 & 280 \\
+    OA-CNN \citep{oacnns} & 76.1 & 141 \\
+    PTv3 \citep{ptv3} (current best) & 77.5 & 183 \\
+    \bottomrule
+\end{tabular}}
+\vskip -0.1in
+\end{wraptable}
+
+Although numerous early attempts have been made to utilize SSMs for point cloud segmentation \citep{pointmamba, pcm, pointmamba2}, these efforts have been largely \textit{discouraging}, as their performance significantly lags behind that of leading CNN-based and Transformer-based models. As illustrated in Tab.~\ref{table1}, the recently proposed Point Mamba network \citep{pointmamba2} not only incurs roughly twice the latency of the CNN-based OA-CNN \citep{oacnns} and Transformer-based PTv3 \citep{ptv3} but also underperforms them by \textbf{0.4} points and \textbf{2.2} points in mIoU on the ScanNet \citep{scannet} validation dataset, respectively. These shortcomings underscore the ongoing debate regarding the optimal architecture for point cloud segmentation, leading to the pivotal question: \textit{What constitutes an efficient and effective model architecture for point cloud segmentation?}
+
+In this work, we aim to provide valuable insights for the design of point cloud segmentation architectures. To achieve this, we conduct a preliminary analysis in Sec.~\ref{section2} to examine the properties of the three most popular architectures, namely the CNN-based, Transformer-based and Mamba-based networks. Using the meta-architecture presented in Fig.~\ref{figure2}, which seamlessly integrates different operators from the CNN, Transformer and Mamba architectures, we compare these architectures across three key dimensions: \textit{contextual understanding capability}, \textit{local sensitivity}, and \textit{network efficiency}. Our analysis reveals that while CNNs excel at local modeling, they lack the ability to capture broader context. Transformers can adequately capture contextual information but are inefficient due to unnecessary long-range attention and quadratic computational complexity. Mambas strike a balance by efficiently providing essential contextual understanding with linear complexity. Given the distinct strengths and limitations of each architecture, we hypothesize that an integrated architecture combining their best features could potentially yield a more powerful and efficient model.
+
+Building on the insights gained, we systematically explore various block choices, placements, and quantities within the previously proposed meta-architecture to determine the optimal arrangement. Through this process, we identify the CNN-Mamba block as the optimal elementary block for our architecture. As depicted in Fig.~\ref{figure6}(a), the CNN-Mamba block comprises a sequential stack of sparse convolution layers and Mamba modules. Notably, the Attention module is ultimately excluded from the final architecture because the more efficient Mamba module can already provide sufficient contextual understanding for this task.
+
+With the macro-level design established, we turn our attention to the micro-level design, specifically assessing whether the standard Mamba module, originally designed for sequential processing, is suitable for point cloud segmentation. Our investigation shows that it is not. In particular, we identify two major shortcomings of the standard Mamba module when applied to this task:
+
+\begin{enumerate} 
+\item \textbf{Loss of spatial information due to enforced causality}: Mamba's use of causal convolutions introduces unnecessary artificial dependencies that can disrupt the inherent spatial relationships in point cloud data, ultimately reducing its effectiveness for point cloud data.
+\item \textbf{Directional bias due to unidirectional scan}: Mamba's unidirectional scan strategy inherently favors certain data points over others, creating a directional bias. This bias undermines its ability to fully grasp the context of unordered point clouds in a single pass.
+\end{enumerate}
+
+To address these issues, we propose two corresponding improvements to the standard Mamba module. Specifically, we 1) remove the causality constraint, and 2) incorporate a novel \textit{Strided Bidirectional SSM} to enhance its context and spatial understanding.
+
+Our work culminates in \textsc{\methodname}, a novel point cloud segmentation architecture which seamlessly integrates Mamba's efficiency and strong contextual understanding with the local sensitivity of CNN. As shown in Fig.~\ref{figure1}, \textsc{\methodname} not only achieves significantly lower inference latency but also surpasses the performance of other leading segmentation models across both indoor and outdoor scenes. Specifically, it outperforms the previous best method, PTv3, by up to \textbf{+0.8} mIoU across ScanNet, ScanNet200, S3DIS, and nuScenes datasets, with \textbf{42.1\%} smaller latency and \textbf{5.53}$\times$ smaller memory usage. \textsc{\methodname} also scales much better with respect to the size of point cloud. As shown in Fig.~\ref{figure1}(d), it achieves up to $12\times$ fewer GFLOPs than PTv3 when processing a scene with $2^{17}$ ($131,072$) points. 
+In summary, the contributions of our paper are as follows:
+\begin{enumerate} 
+\item We carefully analyze existing point cloud segmentation networks, identifying the importance of \textit{spatial locality} and \textit{robust contextual understanding} in achieving high performance. We then reveal that Transformer's global attention is unnecessary and inefficient for this task as Mambas offer comparable contextual modeling with linear complexity.
+\item We propose two corresponding solutions to address the limitations of Mamba when applied to point cloud segmentation, namely the removal of the causality constraint and the incorporation of an innovative \textit{Strided Bidirectional SSM} to enhance contextual understanding.
+\item We introduce \textsc{\methodname}, a novel architecture that solely utilizes the efficient sparse convolution to provide spatial locality and the efficient SSM to provide robust contextual understanding. \textsc{\methodname} not only consistently outperforms previous best method, PTv3 across multiple key benchmark datasets, but is also much faster and much more memory efficient.
+\end{enumerate}
+
+
+
+\section{Preliminaries}
+
+In this section, we briefly introduce state space model (SSM) to facilitate subsequent discussion.
+
+\textbf{SSM's formulation. } SSM is a type of sequence model \citep{mamba} that maps an input sequence $x(t) \in \mathbb{R}$ to an output sequence $y(t) \in \mathbb{R}$ through a latent state $h(t) \in \mathbb{R}^N$:
+\begin{equation}
+h'(t) = \mathbf{A} h(t) + \mathbf{B}\mathbf{x}(t), \quad y(t) = \mathbf{C} h(t).
+\end{equation}
+Using zero-order hold (ZOH) rule, we can discretize the continuous parameters $(\mathbf{\Delta}, \mathbf{A}, \mathbf{B})$ as:
+\begin{equation}
+\bar{\mathbf{A}} = \exp(\Delta \mathbf{A}), \quad \bar{\mathbf{B}} = (\Delta \mathbf{A})^{-1}(\exp(\Delta \mathbf{A}) - \mathbf{I}) \cdot \Delta \mathbf{B},
+\end{equation}
+where $\Delta$ is the discretization step size and $\mathbf{I}$ is the identity matrix. Under this discretization rule, the hidden state $h_t$ can be computed efficiently as a linear recurrence:
+\begin{equation}
+h_t = \bar{\mathbf{A}} h_{t-1} + \bar{\mathbf{B}} x_t, \quad y_t = \mathbf{C} h_t.
+\end{equation}
+
+Mamba is a recent popular SSM model that sets the SSM parameters to be functions of the input:
+\begin{equation}
+\mathbf{B}_t = f_B(x(t)) \quad \mathbf{C}_t = f_C(x(t)) \quad \mathbf{\Delta}_t = f_\Delta(x(t))
+\end{equation}
+This allows the model to selectively propagate or discard information based on the input. In practice, matrix $\mathbf{A}$ is typically set as a diagonal matrix, ensuring that all elements of $\bar{\mathbf{A}} = \exp(\Delta \mathbf{A})$ lie between 0 and 1. Consequently, $\bar{\mathbf{A}}$ can be viewed as a \textit{forget gate}, which controls how much information from the previous hidden state, $\textit{h}_t$, is retained.
+
+
+
+
+
+\section{Analysis}
+
+\label{section2}
+\begin{figure}[t]
+  \vskip -0.15in
+    \centering
+    \includegraphics[width=0.9\linewidth]{metaarch_v2.pdf} % Replace with your image
+    \caption{Proposed meta-architecture and various block options used for analysis. The model that exclusively uses choice A is called \textit{Pure CNN}, the model that exclusively uses choice B is called \textit{Pure Mamba}, and the model that exclusively uses choice C is called \textit{Pure Transformer}.}
+    \label{figure2}
+\end{figure}
+In this section, we delve into the key requirements for effective point cloud segmentation, showing the importance of capturing both local and contextual features via model architecture. Robust local modeling is essential for maintaining point-level consistency, especially when object boundaries are unclear, while strong contextual modeling is crucial for identifying occluded or ambiguously shaped objects. With these needs in mind, we evaluate various architectures, assessing their strengths and weaknesses in providing these important properties for effective point cloud segmentation.
+
+\paragraph{Meta-architecture for analysis.} To facilitate our analysis, we first propose a meta-architecture for point cloud segmentation. This meta-architecture follows an encoder-decoder framework, featuring a 5-stage encoder and a 4-stage decoder. Following previous works \citep{pcm,pointmamba2}, the input points are first voxelized into non-overlapping segments and arranged into an ordered sequence using a locality-preserving space-filling curve \citep{morton,spacefilling}. These voxels are then processed by an embedding module that employs a single submanifold sparse convolution layer \citep{submanifold}. GridPooling and GridUnpooling operations are applied at the end and beginning of each encoding stage, respectively, to downsample and upsample the point cloud \citep{ptv3}. Within this meta-architecture, we train three similarly sized models, each using either the CNN, Mamba, or Transformer blocks, as shown in Fig.~\ref{figure2}, to evaluate their performance both qualitatively and quantitatively. These models are referred to as \textit{Pure CNN}, \textit{Pure Mamba}, and \textit{Pure Transformer}, respectively. We hypothesize that the global attention of \textit{Pure Transformer} and the long-range sequential modeling capabilities of \textit{Pure Mamba} are well-suited for contextual modeling. \textit{Pure Mamba}, in particular, offers additional advantages such as greater inference efficiency due to its linear complexity and improved data efficiency through inductive bias provided by the forget gate. In contrast, \textit{Pure CNN} excels at local modeling, leveraging its inherent spatial locality. 
+
+\begin{wraptable}{r}{0.38\linewidth}
+\centering
+\captionsetup{aboveskip=2pt}  
+\captionsetup{belowskip=-10pt}  
+\caption{PTv3 without spatial locality perform much worse on ScanNet val.}
+\label{table2}
+\resizebox{0.95\linewidth}{!}{
+\begin{tabular}{lc}
+    \toprule
+    Case & mIoU$\uparrow$  \\
+    \midrule
+    PTv3 \citep{ptv3} & 77.5 \\
+    \quad Remove spatial locality & 69.3 (\textcolor{brickred}{\textbf{-8.2}}) \\
+    \quad Remove contextual modeling & 73.2 (\textcolor{brickred}{\textbf{-4.3}}) \\
+    \bottomrule
+\end{tabular}
+}
+\vskip -0.08in
+\end{wraptable}
+\textbf{1. Are both local and contextual modeling important for point cloud segmentation?} To assess the individual contributions of local and contextual modeling in point cloud segmentation, we analyze the performance impact of removing key components from the current leading network, PTv3 \citep{ptv3}. Specifically, we investigate the effects of eliminating the sparse convolution layers, which capture spatial locality, and attention modules, which model contextual relationships. As detailed in Tab.~\ref{table2}, removing the sparse convolution layers results in a substantial performance drop of \textbf{-8.2} mIoU, while removing the attention modules leads to a decrease of \textbf{-4.3} mIoU. These results highlight the critical importance of both local and contextual modeling in achieving effective point cloud segmentation.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{global_img_v3.pdf}
+        \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{Image}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{global_gt_v3_label.pdf}
+        \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt} 
+        \caption*{Ground Truth}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{global_meepo_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt} 
+        \caption*{\textsc{\methodname}'s Prediction}
+    \end{minipage}
+    \vskip\baselineskip
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{global_transformer_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt} 
+        \caption*{Transformer's Prediction}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{global_mamba_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt} 
+        \caption*{Mamba's Prediction}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{global_cnn_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt} 
+        \caption*{CNN's Prediction}
+    \end{minipage}
+    \caption{Both Transformer and Mamba models incorporate mechanisms to learn long-range dependencies, allowing them to accurately interpret occluded regions and areas with similar textures.}
+    \label{figure3}
+    \vskip -0.1in
+\end{figure}
+\textbf{2. Which model is more effective at providing contextual understanding?} To investigate this, we perform another experiment using PTv3, by modifying its full attention mechanism to a window-based approach. By varying the window size, we control the amount of context the model processes. \begin{wrapfigure}{r}{0.4\textwidth}
+  \begin{center}
+    \includegraphics[width=\linewidth]{miou_window_ptv3.pdf}
+  \end{center}
+  \captionsetup{aboveskip=-5pt}  
+    \captionsetup{belowskip=-5pt}  
+  \caption{Analysis of a representative Transformer-based model, PTv3, demonstrates that additional context beyond a certain amount is unnecessary.}
+  \label{figure4}
+\end{wrapfigure}
+As shown in Fig.~\ref{figure4}, increasing the window size progressively improves performance from 24 to 1024, peaking at 1024 before gradually declining as the window size grows further. This indicates that while contextual understanding is beneficial, too much context can become detrimental, underscoring the importance of finding a balance between local and global modeling. Meanwhile, Mamba emerges as a strong candidate due to its emphasis on local processing while still capturing broader context when necessary. To provide evidence for this, we visualize the performance of different models using a representative example in Fig.~\ref{figure3}, which depicts an office room with a challenging-to-discern door in the bottom left corner. Try to focus on the boxed region in each image and identify the object category. This task is challenging because the door’s point cloud is partially occluded and its texture and color closely match the surrounding wall and floor, requiring a comprehensive understanding of the scene. In this scenario, where contextual understanding is crucial, Mamba demonstrates superior performance by effectively balancing local and global context. It outperforms the Transformer model, which in turn surpasses the CNN, thereby confirming Mamba's efficacy in contextual understanding.
+
+\textbf{3. Which model is more effective at providing spatial locality?} To compare the performance of the aforementioned model architectures in this regard, we visualize their predictions in Fig.~\ref{figure4} using another insightful example of a room with a centrally placed table whose boundaries are poorly defined due to severe overexposure. Without zooming in, the boundaries are hard to discern, requiring strong local feature extraction capabilities. In this challenging scenario, the results support our hypothesis regarding spatial locality. The CNN, equipped with sparse convolutional layers specifically designed to capture local spatial patterns, outperforms both Mamba and the Transformer. Mamba exhibits slight spillage of floor pixels onto the table, while the Transformer mislabels a significant portion of the table area. These results demonstrate the CNN's superior capability in local modeling.
+
+\begin{figure}[t]
+    \vskip -0.15in
+    \centering
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{local_img_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{Image}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{local_gt_v3_label.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{Ground Truth}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{local_meepo_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{\textsc{\methodname}'s Prediction}
+    \end{minipage}
+    \vskip\baselineskip
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{local_transformer_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{Transformer's Prediction}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{local_mamba_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{Mamba's Prediction}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.85\linewidth]{local_cnn_v3.pdf}
+                \captionsetup{aboveskip=0pt}  
+        \captionsetup{belowskip=-5pt}  
+        \caption*{CNN's Prediction}
+    \end{minipage}
+    \caption{Comparison of model performance on tasks requiring robust local modeling. CNNs excel due to spatial convolutions, and Mambas benefit from its locally-biased forget gate. Transformers, lacking specialized local modeling mechanisms, often produce inaccurate predictions.}
+    \label{figure5}
+    \vskip -0.08in
+\end{figure}
+\textbf{4. Which model architecture is more efficient?} Let $C$, $C_{\text{in}}$, and $C_{\text{out}}$ represent the channel sizes, $N$ the SSM's state dimension, $E$ the SSM's expansion factor, $L$ the number of points or input sequence length, $K$ the depthwise convolution kernel size in Mamba and $k$ the convolution kernel size in sparse convolutions within CNN, the computational complexities of the core operations in the Transformer, Mamba, and CNN models are as follows:
+\small
+\begin{align}
+& \Omega(\text{Transformer}) & = & \hspace{4mm} \underbrace{4 \cdot L \cdot C^2}_{\text{qkv and output projections}} & + & \hspace{4mm} \underbrace{2 \cdot L^2 \cdot C}_{\text{attention}}          &     &     & = & \hspace{2mm} O(L^2), \\
+& \hspace{3mm} \Omega(\text{Mamba})      & = & \hspace{7mm} \underbrace{9 \cdot L \cdot C \cdot N}_{\text{SSM}}                                   & + & \hspace{2mm} \underbrace{L \cdot C \cdot K}_{\text{depthwise conv1d}}   & + & \underbrace{3 \cdot L \cdot C^2 \cdot E}_{\text{input and output projections}} & = & \hspace{2mm} O(L), \\
+& \hspace{5mm} \Omega(\text{CNN})        & = & \hspace{3mm} \underbrace{2 \cdot C_{\text{in}} \cdot C_{\text{out}} \cdot k^3 \cdot L}_{\text{convolution}} & + & \hspace{2mm} \underbrace{L \cdot C_{\text{in}} \cdot C_{\text{out}}}_{\text{bias addition}} &     &     & = & \hspace{2mm} O(L).
+\end{align}
+\normalsize
+Both Mamba models and CNNs scale linearly with respect to \( L \), while Transformers scale quadratically. Consequently, for point cloud processing tasks involving hundreds of thousands of points, Transformers can be significantly slower. When comparing CNNs and Mamba models of similar sizes, CNNs are generally faster in practice. This is because CNNs typically have fewer layers when the total number of parameters is the same, as each 3D sparse convolution layer in a CNN contains significantly more parameters than a corresponding block in a Mamba model.
+
+\textbf{Key insights:} Point cloud segmentation requires both effective local modeling and a comprehensive understanding of contextual information. While CNNs are effective for local modeling, contextual modeling demands a different approach. Although Transformers can handle contextual information, they are inefficient because very long-range attention is unnecessary, e.g., PTv3 performance peaks at a window size of 1024. Mambas, on the other hand, strike a balance between local and global modeling, providing the necessary contextual understanding with linear complexity instead of the quadratic complexity associated with Transformers. Given the distinct strengths and limitations of each architecture, it's essential to explore models that can holistically integrate their strengths.
+
+
+
+\section{Method}
+
+
+Building on insights from previous analysis, we introduce \textsc{\methodname}, a novel \underline{m}odel that is both \underline{e}ffective and \underline{e}fficient for \underline{po}int cloud segmentation. \textsc{\methodname} adopts the same meta-architecture presented in Fig.~\ref{figure2} but incorporates the CNN-Mamba block as a core component to facilitate the seamless integration of local and contextual modeling. Additionally, we introduce two micro-level modifications to the standard Mamba module to address its limitations in point cloud segmentation.
+
+\subsection{Macro Architecture Design}
+\noindent \textbf{Optimizing block choices for  point cloud segmentation.} To identify the most effective block configuration for integrating local and contextual modeling, we draw inspiration from the widely adopted sequential combination of local convolutional layers and contextual operators in previous point cloud segmentation studies \citep{octformer, ptv3} and evaluate two possible candidates: the CNN-Mamba block and the CNN-Transformer block. As depicted in Fig.~\ref{figure6}, the CNN-Mamba block comprises a sparse convolution layer, followed by a Mamba module and an MLP layer. In contrast, the CNN-Transformer block follows the same structure but substitutes the Mamba module with an Attention module. Our comprehensive ablation study, presented in Tab.~\ref{table7}(b), demonstrates that replacing CNN-Transformer blocks with CNN-Mamba blocks throughout the network (22 blocks in total) achieves the best performance and efficiency. These findings validate our hypothesis that the Mamba module offers superior contextual understanding while maintaining efficiency.
+
+\begin{figure}[t]
+  \vskip -0.16in
+    \centering
+    \includegraphics[width=0.9\linewidth]{arch_v5.pdf} % Replace with your image
+      \captionsetup{aboveskip=5pt}  
+    \caption{Our proposed architecture, \textsc{\methodname}, integrates CNN-Mamba blocks throughout the proposed meta-architecture to harness their strengths in local and contextual modeling. To optimize for point cloud segmentation, \textsc{\methodname} modifies the standard Mamba by replacing causal convolutions with regular convolutions, preserving critical spatial information. Additionally, it introduces a novel \textit{Bidirectional Strided SSM}, which enhances contextual modeling by minimizing directional bias.}
+    \label{figure6}
+\end{figure}
+\subsection{Micro Architecture Design}
+\textbf{Optimizing Mamba for point cloud segmentation.} Despite its impressive speed and performance, \textsc{\methodname} without micro-level optimizations still does not surpass the leading point cloud segmentation network, PTv3, in accuracy. This aligns with previous research, which consistently demonstrates that attempts to apply Mamba have all failed to outperform well-established models for this task \citep{pcm,pointmamba2}. A closer analysis reveals that the standard Mamba, originally designed for sequential data, is inherently unsuited for processing unordered point clouds. We identify two key limitations in the standard Mamba and propose the solutions to overcome them.
+\textbf{1. Loss of spatial information due to enforced causality:} Mamba was originally designed for sequential data with clear causal relationships. However, point clouds lack such dependencies, as their spatial relationships are multidimensional, requiring simultaneous consideration of points holistically. The causal convolutions in standard Mamba impose a causal dependency that disrupts these essential spatial relationships, making it ineffective for handling spatial data like point clouds.
+ 
+
+\textbf{Proposed Solution:} \textit{Causal-Free Mamba.} To address this issue, we propose replacing the causal convolution with a standard convolution, resulting in the \textit{Causal-Free Mamba} module, as illustrated in Fig.\ref{figure6}(b). This modification eliminates the limitations of the original Mamba architecture when processing spatial data, greatly enhancing its performance in point cloud segmentation tasks. 
+
+\textbf{2. Directional bias due to unidirectional scan:} Mamba's unidirectional scanning method introduces a directional bias in the representation learning of point clouds because some parts are scanned first while others are scanned later. Such sequential processing is ill-suited for orderless point cloud data, where all information should be treated equally. This approach can lead to models prioritizing information from later stages of the scan, overlooking details captured earlier. The bias is further amplified by factors such as noise, occlusions, or reduced data density at the beginning of the scan, which can degrade the quality of the early data. As a result, important features captured early in the scan may be missed or inaccurately interpreted, leading to segmentation errors where boundaries are poorly defined, and features are incorrectly merged or omitted.
+
+\textbf{Proposed Solution:} \textit{Bidirectional Strided SSM.} To address this issue, we propose an innovative multi-directional scanning approach to reduce the directional bias of Mamba. Unlike the standard Mamba, which employs a unidirectional scan, this scanning method processes data in four distinct scanning directions: forward, backward, \(n\)-strided forward, and \(n\)-strided backward. In an \(n\)-strided forward scan, every \(n\)-th token is skipped, and the scan pattern restarts from the beginning once the end is reached. For example, given the sequence 1, 2, 3, 4, 5, 6, a 2-strided forward scan would process it as 1, 3, 5, 2, 4, 6. The backward scan operates similarly but in reverse order. This multi-directional scanning approach can effectively expand Mamba's receptive field, reduce information loss, and improve overall performance by shortening the information flow path.
+
+
+
+\section{Experiments}
+
+
+
+\begin{table}[t!]
+  \vskip -0.1in
+      \begin{minipage}{.59\linewidth}
+        \centering
+        \captionsetup{aboveskip=-0.01pt}  
+        \caption{Indoor semantic segmentation comparison \\on ScanNet, ScanNet200, S3DIS Area 5.}
+        \label{table3}
+        \resizebox{0.98\linewidth}{!}{\begin{tabular}{cccccc}
+            \toprule
+            \multirow{2}{*}{Method} & \multicolumn{2}{c}{ScanNet} & \multicolumn{2}{c}{ScanNet200} & S3DIS \\
+            \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-6}
+            & Val & Test & Val & Test & Area5\\
+            \midrule
+            PCM \citep{pcm} & - & - & - & - & 63.4 \\
+            PointNeXt \citep{pointnext} & 71.5 & 71.2 & - & - & 70.5 \\
+            MinkUNet \citep{minkunet} & 72.2 & 73.6 & 25.0 & 25.3 & 65.4 \\
+            ST \citep{st} & 74.3 & 73.7 & - & - & 72.0 \\
+            PTv2 \citep{ptv2} & 75.4 & 74.2 & 30.2 & - & 71.6  \\
+            OctFormer \citep{octformer} & 75.7 & 76.6 & 32.6 & 32.6 & - \\
+            Point Mamba \citep{pointmamba2} & 75.7 & - & - & - & - \\
+            OA-CNNs \citep{oacnns} & 76.1 & 75.6 & 32.3 & 33.3 &  71.1 \\
+            Swin3D \citep{swin3d} & 76.4 & - & - & - & 72.5 \\
+            PTv3 \citep{ptv3} & 77.5 & 77.9 & 35.2 & 37.8 &  73.4  \\
+            \midrule
+            \baseline{\textsc{\methodname (Ours)}} & \baseline{\textbf{78.0}} & \baseline{\textbf{78.4}} &  \baseline{\textbf{36.0}} & \baseline{\textbf{38.5}} & \baseline{\textbf{73.5}} \\
+            \bottomrule
+        \end{tabular}}
+        \end{minipage}
+        \hfill
+        \begin{minipage}{.4\linewidth}
+        \centering
+        \captionsetup{aboveskip=-0.01pt}  
+        \caption{Outdoor semantic segmentation comparison on nuScenes.} 
+        \label{table4}
+        \resizebox{0.98\linewidth}{!}{\begin{tabular}{ccc}
+            \toprule
+            \multirow{2}{*}{Method} & \multicolumn{2}{c}{nuScenes}  \\
+            \cmidrule(lr){2-3} 
+            & val & test \\
+            \midrule
+            AF2S3Net \citep{af2s3net} & 62.2 & 78.0 \\
+            MinkUNet \citep{minkunet} &  73.3 & - \\
+            Cylinder3d \citep{cylinder3d} & 76.1 & 77.2 \\
+            SPVNAS \citep{spvnas} & 77.4 & - \\
+            RPVNet \citep{rpvnet} & 77.6 & - \\
+            RangeFormer \citep{rangeformer} & 78.1 & 80.1 \\
+            SphereFormer \citep{sphereformer} & 78.4 & 81.9 \\
+            OA-CNNs \citep{oacnns} & 78.9 & - \\
+            PTv2 \citep{ptv2} & 80.2  & 82.6\\
+            PTv3 \citep{ptv3} & 80.4 & 82.7 \\
+            \midrule
+            \baseline{\textsc{\methodname} (Ours)} & \baseline{\textbf{80.8}} & \baseline{\textbf{82.8}}  \\
+            \bottomrule
+        \end{tabular}}
+    \end{minipage}
+    \begin{minipage}{.44\linewidth}
+        \centering
+        \captionsetup{aboveskip=-0.01pt}  
+        \captionsetup{belowskip=10pt}  
+        \caption{Latency, parameters and accuracy\\ comparison on ScanNet.}
+        \label{table5}
+        \resizebox{0.98\linewidth}{!}{\begin{tabular}{c ccc}
+        \toprule
+        Method & Latency (ms) & Parameters (M) & mIoU \\
+        \midrule
+        Point Mamba \citep{pointmamba2} & 280 & 109.5 & 75.7 \\
+        PTv2 \citep{ptv2} & 296 & \textbf{12.8} & 75.4 \\
+        PTv3 \citep{ptv3} & 190 & 46.2 & 77.5 \\
+        OctFormer \citep{octformer} & 133 & 44.0 & 75.7 \\
+        OA-CNN \citep{oacnns} & 127 & 51.5 & 76.1\\
+        \midrule
+        \baseline{\textsc{\methodname} (Ours)} & \baseline{\textbf{110}} & \baseline{45.6} & \baseline{\textbf{78.0}} \\
+        \bottomrule
+    \end{tabular}}
+        \end{minipage}
+        \hfill
+        \begin{minipage}{.55\linewidth}
+        \centering
+        \captionsetup{aboveskip=-0.01pt}  
+        \captionsetup{belowskip=10pt}  
+        \caption{Performance on ScanNet data efficient\\ benchmark.} 
+        \label{table6}
+        \resizebox{0.98\linewidth}{!}{\begin{tabular}{cccccccccc}\toprule
+ \multirow{2}{*}{Method} &\multicolumn{4}{c}{Limited Reconstruction} &\multicolumn{4}{c}{Limited Annotation} \\\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+ &1\% &5\% &10\% &20\% &20 &50 &100 &200 \\
+\midrule
+MinkUNet \citep{minkunet} & 26.0 & 47.8 & 56.7 & 62.9 & 41.9 & 53.9 & 62.2 & 65.5 \\
+PTv2 \citep{ptv2} & 24.8 & 48.1 & 59.8 & 66.3 & 58.4 & 66.1 & 70.3 & 71.2 \\
+PTv3 \citep{ptv3} & 25.8 & 48.9 & 61.0 & 67.0 & 60.1 & 67.9 & 71.4 & 72.7 \\
+\midrule
+\baseline{\textsc{\methodname} (Ours)} & \baseline{\textbf{26.4}} & \baseline{\textbf{50.9}} & \baseline{\textbf{62.3}} & \baseline{\textbf{68.1}} & \baseline{\textbf{61.9}} & \baseline{\textbf{68.8}} & \baseline{\textbf{72.3}} & \baseline{\textbf{74.4}} \\
+\bottomrule
+\end{tabular}}
+    \end{minipage}
+\end{table}
+
+In this section, we begin by briefly describing our implementation details (Sec.~\ref{sec5.1}). Then, we compare \textsc{\methodname} with state-of-the-art (SOTA) methods (Sec.~\ref{sec5.2}) and ablate our proposed method (Sec.~\ref{sec5.3}).  
+
+\subsection{Implementation Details}
+\label{sec5.1}
+\paragraph{Datasets.} We evaluate our proposed method on several indoor and outdoor semantic segmentation datasets using mean Intersection over Union (mIoU) metric. For indoor scenes, we use ScanNet \citep{scannet}, its extended version ScanNet200 \citep{scannet200}, and S3DIS \citep{s3dis}. For outdoor scenes, we employ nuScenes \citep{nuscenes}.
+
+\paragraph{Training and Inference Details.} We follow all experimental settings of PTv3 \citep{ptv3} without any changes. For indoor segmentation, the number of epochs is 800, the learning rate is 0.006, and the weight decay is 0.05. For outdoor segmentation, the number of epochs is 50, the learning rate is 0.002, and the weight decay is 0.005. We train all our models using batch size of 12 and the AdamW optimizer. For efficiency evaluations, we use a single V100 with a batch size of 1.
+
+\subsection{Main Results}
+\label{sec5.2}
+\paragraph{Indoor Semantic Segmentation.} Tab.~\ref{table3} compares \textsc{\methodname} with leading methods on the indoor ScanNet, ScanNet200, and S3DIS Area 5 cross-val datasets. \textsc{\methodname} achieves new SOTA results with mIoU scores of \textbf{78.0}, \textbf{36.0}, and \textbf{73.5} on ScanNet val, ScanNet200 val, and S3DIS Area 5 cross-val, respectively, outperforming the second-best method, PTv3, by \textbf{+0.5}, \textbf{+0.8}, and \textbf{+0.1} points.
+
+\paragraph{Outdoor Semantic Segmentation.} Tab.~\ref{table4} compares \textsc{\methodname} with leading methods on the outdoor nuScenes val dataset. \textsc{\methodname} achieves new SOTA result with mIoU score of \textbf{80.8} on nuScenes val, surpassing the second-best method, PTv3, by \textbf{0.4} points.
+\paragraph{Model Efficiency.} In Fig.~\ref{figure1}, we compare the average latency and memory usage of our model with multiple leading methods on the ScanNet val dataset. As shown in Fig.~\ref{figure1}(a) and Fig.~\ref{figure1}(b), \textsc{\methodname} exhibits better latency and memory consumption than many previous leading networks and achieves much higher performance. Remarkably, \textsc{\methodname} not only outperforms the previous top-performing method, PTv3, but is also $42.1\%$ faster and $5.53\times$ more memory efficient. \textsc{\methodname} particularly excels at ultra-long-range modeling, owing to its use of Mamba, which eliminates the quadratic complexity of attention typical in Transformer models. \textsc{\methodname}  also scales well to scenes containing a large number of points. As illustrated in  Fig.\ref{figure1}(d), \textsc{\methodname} also achieves $12\times$ reduction in FLOPs when handling scenes containing $131,072$ points. Note that Tab.~\ref{table5} gives the exact numbers corresponding to points in Fig.~\ref{figure1}(a) and Fig.~\ref{figure1}(b).
+\paragraph{Data Efficiency.} In Tab.~\ref{table6}, we compare \textsc{\methodname} with leading methods on the ScanNet data efficiency benchmark, which evaluates models with limited reconstructions and annotations. The “Limited Reconstruction” setting uses a fraction of the available 3D reconstructions, while the “Limited Annotation” setting restricts the number of annotated points per scene. As shown, \textsc{\methodname} outperforms the second-best method, PTv3, by \textbf{0.6}, \textbf{2.0}, \textbf{1.3}, and \textbf{1.1} points at 1\%, 5\%, 10\%, and 20\% reconstructions, and by \textbf{1.8}, \textbf{0.9}, \textbf{0.9}, and \textbf{1.7} points at 20, 50, 100, and 200 annotations, respectively.
+\begin{table}[t]
+\vskip -0.1in
+\captionsetup[subfloat]{labelformat=empty, labelfont=bf, textfont=normalfont, singlelinecheck=true}
+\caption{\textbf{Ablation experiments on} on ScanNet for evaluating different design choices used for \textsc{\methodname}. The entries marked in \colorbox{baselinecolor}{gray} are the same, which specify the default settings.}
+\label{table7}
+\makebox[\textwidth][c]{\begin{minipage}{1\linewidth}
+\centering
+\vskip -0.1in
+\subfloat[
+(a) Effectiveness of Proposed Architecture
+]{
+\centering
+\begin{minipage}{0.47\linewidth}
+\vskip -0.05in
+{\begin{center}
+\tablestyle{3pt}{1.05}
+\scriptsize{
+\begin{tabular}{x{52}x{36}x{36}x{36}}
+case & params (M) & latency (ms) & mIoU \\
+\shline
+Pure CNN & \textbf{41.6} & \textbf{80} & 73.2 \\
+Pure Transformer  & 47.4 & 241 & 69.3 \\
+Pure Mamba  & 48.4 & 126 & 70.7 \\
+\textsc{\methodname} (Ours) & \baseline{45.6} & \baseline{110} & \baseline{\textbf{78.0}} \\
+\end{tabular}}
+\end{center}}\end{minipage}
+}
+\hspace{1em}
+\subfloat[
+(b) Effectiveness of CNN-Mamba Block
+]{
+\centering
+\begin{minipage}{0.47\linewidth}
+\vskip -0.05in
+{\begin{center}
+\tablestyle{3pt}{1.05}
+\scriptsize{
+\begin{tabular}{x{60}x{40}x{36}x{28}}
+number of blocks & memory (GB) & latency (ms) & mIoU \\
+\shline
+22 & \baseline{\textbf{4.9}} & \baseline{\textbf{110}} & \baseline{\textbf{78.0}} \\
+20  & 5.0 & 112 & 77.7 \\
+12  & 5.6 & 117 & 77.5 \\
+8  & 6.1 & 122 & 77.2 \\
+4  & 10.3 & 132 & 77.3 \\
+0 & 29.5 & 153 & 77.4 \\
+\end{tabular}}
+\end{center}}\end{minipage}
+}
+\hspace{1em}
+\\
+\vskip 0.1in
+\subfloat[
+(c) Effectiveness of Causal-Free Conv1D
+]{
+\centering
+\begin{minipage}{0.47\linewidth}
+\vskip -0.05in
+{\begin{center}
+\tablestyle{3pt}{1.05}
+\scriptsize{
+\begin{tabular}{x{72}x{48}}
+case & mIoU \\
+\shline
+Causal Conv1D & 77.5 \\
+Causal-Free Conv1D & \baseline{\textbf{78.0 \textcolor{forestgreen}{(+0.5)}}} \\
+\\
+\end{tabular}}
+\end{center}}\end{minipage}
+}
+\hspace{1em}
+\subfloat[
+(d) Effectiveness of Bidirectional Strided SSM
+]{
+\centering
+\begin{minipage}{0.47\linewidth}
+\vskip -0.05in
+{\begin{center}
+\tablestyle{3pt}{1.05}
+\scriptsize{
+\begin{tabular}{x{96}x{48}}
+case & mIoU \\
+\shline
+Standard SSM & 77.2 \\
+Bidirectional SSM & 77.3 \textcolor{forestgreen}{(+0.1)} \\
+Bidirectional Strided SSM & \baseline{\textbf{78.0 \textcolor{forestgreen}{(+0.8)}}} \\
+\end{tabular}}
+\end{center}}\end{minipage}
+}
+\hspace{1em}
+\\
+\vskip 0.1in
+\subfloat[
+(e) Optimal Stride for Bidirectional Strided SSM
+]{
+\centering
+\begin{minipage}{0.47\linewidth}
+\vskip -0.05in
+{\begin{center}
+\tablestyle{3pt}{1.05}
+\scriptsize{\begin{tabular}{x{36}x{36}}
+stride & mIoU \\
+\shline
+2 & \baseline{\textbf{78.0}} \\
+4 & 77.7 \\
+8 & 77.6 \\
+16 & 77.5 \\
+\end{tabular}}
+\end{center}}\end{minipage}
+}
+\hspace{1em}
+\subfloat[
+(f) Compatibility of Our Proposed Modules
+]{
+\centering
+\begin{minipage}{0.47\linewidth}
+\vskip -0.05in
+{\begin{center}
+\tablestyle{3pt}{1.05}
+\scriptsize{\begin{tabular}{lx{64}x{32}}
+case & mIoU \\
+\shline
+baseline \scriptsize{(Pure CNN network)} & 73.2 \\
+\quad + CNN-Mamba blocks & 76.9 \textcolor{forestgreen}{(+3.7)} \\
+\quad \quad + Causal-Free Conv1D & 77.4 \textcolor{forestgreen}{(+4.2)} \\
+\quad \quad \quad + Bidirectional Strided SSM & \baseline{78.0 \textcolor{forestgreen}{(+4.8)}} \\
+\\
+\end{tabular}}
+\end{center}}\end{minipage}
+}
+\hspace{1em}
+\end{minipage}}
+\end{table}
+\subsection{Ablation Experiments}
+\label{sec5.3}
+In this subsection, we conduct ablations for all components of our architecture using the ScanNet \citep{scannet} val dataset. All experimental settings follow the settings used in the main results.
+\paragraph{Effectiveness of Our Proposed Architecture.}  Aside from the qualitative comparisons presented in Fig.~\ref{figure2} and Fig.~\ref{figure3}, we also quantitatively compare our proposed method with other model architectures. As shown in Tab.~\ref{table7}(a), \textsc{\methodname} requires fewer parameters and delivers superior performance.
+
+\paragraph{Effectiveness of CNN-Mamba Block.} In Tab.~\ref{table7}(b), we progressively replace some of the CNN-Mamba blocks in \textsc{\methodname} with CNN-Transformer blocks. The results show that increasing the number of CNN-Transformer blocks always leads to higher latency, more memory usage and reduced performance. This confirms the effectiveness of our proposed CNN-Mamba block, which can efficiently and effectively integrate local and contextual modeling for point cloud segmentation.
+
+\paragraph{Effectiveness of Causal-Free Mamba.} The original Mamba uses causal depthwise convolution to preprocess input tokens before passing them to the SSM module. While this makes sense for sequence modeling, its necessity for 3D vision tasks, which lack causality, is unclear. To investigate this, we experiment with replacing the causal convolution with normal convolution. As shown in Tab.~\ref{table7}(c), causal convolution results in a performance improvement of \textbf{+0.5} mIoU.
+
+\paragraph{Effectiveness of Bidirectional Strided SSM.} In Tab.~\ref{table7}(d), we demonstrate the effectiveness of our proposed \textit{Bidirectional Strided SSM}. As shown, it outperforms both the standard SSM and its bidirectional variant, resulting in a performance improvement of \textbf{+0.8} mIoU. Additionally, we ablate the optimal stride for this module in Tab.~\ref{table7}(e), which shows that a stride of 2 yields the best performance.
+\paragraph{Compatibility of Our Proposed Modules.} In addition to ablating our proposed modules individually, we perform an additive ablation study in Tab.~\ref{table7}(f) to demonstrate the compatibility of the enhancements. Incorporating CNN-Mamba blocks results in a significant improvement of \textbf{+3.7} mIoU. Further upgrades to the standard Mamba module, namely introducing causal-free convolutions and employing multi-directional scanning, provide additional gains of \textbf{+0.5} and \textbf{+0.6} mIoU, respectively.
+
+
+
+\section{Related Work}
+
+
+\noindent \textbf{Architectures for point cloud segmentation} fall into three main categories: point-based \citep{kpconv,pointnet,pointnet++,pointmlp}, voxel-based \citep{7353481,song2017semantic}, and projection-based \citep{chen2017multi,lang2019pointpillars,li2016vehicle,su2015multi}. Although they differ in pre-processing strategies, all these methods are designed with careful consideration of the unique characteristics of point clouds. They mainly differ in how they integrate local and contextual features and manage irregular point distributions. Recently, transformer-based models \citep{ptv3,superpointtransformer,swin3d,st} have emerged in this field, achieving higher accuracy but suffering from significant time and memory complexities relative to the size of the point cloud. To address this, more efficient attention mechanisms, such as vector attention \citep{zhao2020exploring}, grouped vector attention \citep{ptv2}, local window-based attention \citep{st}, and memory-efficient attention \citep{swin3d}, have been developed. However, these strategies approximate original attention, resulting in a loss of global modeling capability \citep{shen2021efficient}, which may impede performance on long range modeling task like point cloud segmentation. Our research examines the strengths and weaknesses of several widely-used architectures for point cloud segmentation and introduces a novel architecture that effectively integrates their best features, culminating in a new state-of-the-art model for point cloud segmentation.
+\noindent \textbf{State space models (SSMs)} \citep{mamba,mambabyte,jamba} have emerged as a promising alternative to Transformers \citep{transformer} in natural language processing (NLP) for capturing long-range dependencies. Unlike Transformers that scale quadratically with sequence length, SSMs \citep{s4, s4nd, s5} achieve linear scaling during inference. The seminal Mamba model \citep{mamba} greatly improves the performance and efficiency of SSM by introducing input-specific parameterization and a scalable, hardware-optimized method, allowing it to outperform Transformers for the first time. Driven by the success of SSMs in NLP, recent works have also explored their application to visual tasks. S4ND \citep{s4nd} marks the introduction of SSM modules for processing visual data across 1D, 2D, and 3D domains. Following works, such as VMamba \citep{vmamba} and Vim \citep{vim}, address the directional sensitivity in SSMs with bi-directional and cross-scan mechanisms, showcasing the potential of SSMs to rival traditional CNN and Transformer models. The impressive performance of Mamba-based models has spurred further research into their applications for various vision tasks, such as image segmentation \citep{segmamba,swinumamba}, image synthesis \citep{diffussm}, graph modeling \citep{graphmamba}, and low-level vision tasks \citep{mambair}, underscoring their versatility and effectiveness. Despite some initial attempts to apply SSM architectures for point cloud segmentation, these models have failed to outperform existing architectures. In this work, we identify the shortcomings of SSM when applied to point cloud segmentation and propose simple solutions to significantly improve its performance in this domain.
+
+
+
+\section{Conclusion}
+
+In this work, we present a detailed analysis of existing network architectures for point cloud segmentation, highlighting their strengths and weaknesses. This evaluation provides valuable insights into designing more efficient and effective architectures for this task. Our findings emphasize the crucial role of \textit{spatial locality} and \textit{robust contextual understanding} in achieving strong performance. Specifically, we identify convolution and the Mamba module as essential components for efficient and accurate point cloud segmentation. Convolution provides spatial locality, while the Mamba module enhances the understanding of context. Additionally, we improve the standard Mamba module by removing the causality constraint and introducing \textit{Bidirectional Strided SSM}, which further enhances its ability to capture and utilize contextual information. Following these design principles and applying targeted optimizations, we introduce \textsc{\methodname}, a novel architecture that outperforms previous state-of-the-art models across multiple key benchmark datasets and efficiency metrics.
+
+\newpage
+
+\noindent \textbf{Acknowledgements.} This work is supported in part by the National Key R\&D Program of China under Grant 2021ZD0140407, the National Natural Science Foundation of China under Grants 62321005 and 62276150, and the THU-Bosch JCML.
+
+
+
+
+

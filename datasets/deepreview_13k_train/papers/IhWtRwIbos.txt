@@ -1,0 +1,590 @@
+\title{Discovering Environments with XRM}
+
+\begin{abstract}
+  Environment annotations are essential for the success of many out-of-distribution (OOD) generalization methods.
+  Unfortunately, these are costly to obtain and often limited by human annotators' biases.
+  To achieve robust generalization, it is essential to develop algorithms for automatic environment discovery within datasets.
+  Current proposals, which divide examples based on their training error, suffer from one fundamental problem.
+  These methods introduce hyper-parameters and early-stopping criteria, which require a validation set with human-annotated environments, the very information subject to discovery.
+  In this paper, we propose \fullmethod{} (\method{}) to address this issue.
+  \method{} trains twin networks, each learning from one random half of the training data, while imitating confident held-out mistakes made by its sibling.
+  \method{} provides a recipe for hyper-parameter tuning, does not require early-stopping, and can discover environments for all training and validation data.
+  Algorithms built on top of \method{} environments achieve oracle worst-group-accuracy, addressing a long-standing challenge in OOD generalization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+AI systems pervade our lives, spanning applications such as finance~\citep{ai_finance}, healthcare~\citep{ai_healthcare}, self-driving vehicles~\citep{ai_driving}, and justice~\citep{ai_justice}.
+Despite outperforming humans in many tasks, these systems fall apart under testing conditions different from their \emph{training environments}~\citep{geirhos2020shortcut}.
+For instance, during the COVID-19 pandemic, thoracic x-ray classifiers incorrectly latched onto spurious correlations such as patient's age or position~\citep{covid2}, leading to ``an alarming situation in which the systems appear accurate, but fail when tested in new hospitals''~\citep{covid}.
+
+Generally speaking, AI systems underperform on under-represented groups in training data~\citep{barocas-hardt-narayanan}.
+The Waterbirds problem~\citep{dro}, depicted in \cref{fig:one}, illustrates this with two classes (landbirds and waterbirds) in two landscape environments (land and water), forming four groups: a \emph{majority group} of waterbirds in water (73\percent{} of examples), landbirds in land (22\percent{}), waterbirds in land (4\percent{}), and a \emph{minority group} of landbirds in water (1\percent{}).
+On this problem, learning machines often favor the \emph{landscape} spurious feature to classify the majority of examples and memorizes the remaining minorities to achieve zero training error.
+An empirical risk minimization (ERM) baseline, ignoring environment data~\citep{vapnik}, achieves a mere 61\percent{} worst-group-accuracy, specifically on the minority group, as illustrated in \cref{fig:one}'s right panel.
+    
+To improve upon ERM, researchers have developed a myriad of OOD generalization algorithms~\citep{dg_survey, dg_survey_2}.
+These methods use environment annotations to uncover invariant (environment-generic) patterns and discard spurious (environment-specific) ones~\citep{irm}.
+As~\cref{fig:one} shows, \emph{group distributionally robust optimization}~\citep[GroupDRO]{dro} achieves a worst-group-accuracy of $87\percent{}$.
+This outperforms ERM by over twenty five points, a sizeable gap!
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/plot.pdf}
+    \caption{
+    (a) Waterbirds problem with four groups: a \emph{majority group} of waterbirds in water, landbirds in land, waterbirds in land, and a \emph{minority group} of landbirds in water.
+    Models often rely on spurious features to classify the majority of examples and then memorize the minority examples.
+    (b) Worst-group-accuracy (minority) for different methods.
+    (Dotted line) ERM achieves $61\percent{}$.
+    (Dashed line) GroupDRO with human group annotations (oracle) achieves $87\percent{}$.
+    (Dashdot blue line) Prior work to discover groups requires early-stopping with surgical precision.
+    (Solid red line) \method{} enables an oracle performance of $87\percent{}$ without requiring early stopping.
+    }
+    \label{fig:one}
+\end{figure*}
+While promising, OOD algorithms targeting sub-population shift require environment annotations, which are costly to obtain and limited by human annotators' biases and precision.
+Moreover, no single set of environment annotations fits all OOD algorithms. The patterns misleading a learning system might be alien or invisible to humans~\citep{adversarial}.
+Because of these reasons, OOD generalization is currently confined to small data collections, and their promise in the large-scale setting remains unfulfilled.
+
+In light of the above, researchers developed algorithms for automatic environment discovery~\citep{ls, jtt, cnc, arl, toogood, eiil, lff}.
+These methods typically build a robust system in two phases.
+In phase-1, these methods train a classifier to categorize training examples in two environments, based on their training error.
+In phase-2, an OOD algorithm is trained on top of the discovered environments.
+However, this pipeline suffers from one fundamental issue: the need for precisely controlling the classifier's capacity, ensuring that the discovered environments differ only in spurious correlations.
+As \cref{fig:one} shows, peak performance (79\percent{}) is reached with exact early-stopping in phase-1; without it, accuracy drops to 68\percent{}.
+Lacking a precise indicator of early-stopping, environment discovery methods depend on validation sets with human annotations.
+Alas, at least in our view, this defeats the \emph{raison d'\^{e}tre} of environment discovery.
+
+\paragraph{Contribution}
+We propose \fullmethod{}~(\method{}), a simple method for environment discovery that requires no human environment annotations whatsoever. 
+\method{} trains two twin networks, each holding-in one random half of the training data.
+During training, \method{} instructs each twin to imitate confident held-out mistakes made by their sibling.
+This results in an ``echo-chamber'' where twins increasingly rely on bias, converging on a pair of environments that differ in spurious correlation, and share the invariances that fuel downstream out-of-distribution generalization.
+After twin training, a simple cross-mistake formula allows \method{} to annotate all of the training and validation examples with environments.
+As our experiments show, \method{} endows OOD generalization algorithms with oracle-like performance across benchmarks.
+Returning one final time to~\cref{fig:one}, we observe that \method{}+GroupDRO converges to $87\percent{}$ worst-group-accuracy on Waterbirds, matching the oracle!
+
+The sequel is as follows.
+Section~\ref{sec:invariance_learning} details the problem formulation.
+Section~\ref{sec:related_main} surveys prior research on environment discovery.
+Section~\ref{sec:xrm} describes \method{}.
+Section~\ref{sec:experiments} demonstrates the effectiveness of \method{}, while Section~\ref{sec:fail} discusses its potential shortcomings. Section~\ref{sec:discussion} concludes with thoughts for future work.
+
+
+\section{Learning Invariances Across Environments}
+
+\label{sec:invariance_learning}
+
+The goal of OOD generalization is to build learning systems that perform well beyond the training data distribution.
+To this end, we collect examples from multiple environments and
+OOD algorithms search for invariant patterns across these environments, while disregarding environment-specific spurious correlations~\citep{irm}.
+Formally, we seek a predictor $f$ that classifies inputs $x$ into labels $y$, across all relevant environments $e \in \mathcal{E}$:
+\begin{equation}\label{eq:ood}
+    f \in \mathop{\mathrm{argmin}}_{\tilde f} \sup_{e \in \mathcal{E}} R^e(\tilde f),
+\end{equation}
+where the risk $R^e(f) = \mathbb{E}_{(x, y) \sim P^e}[\ell(f(x), y)]$ measures the average loss $\ell$ incurred by the predictor $f$ across examples from environment $e$, all of them drawn iid from $P^e$.
+
+In its full generality, OOD generalization in~\eqref{eq:ood} is an admittedly daunting task.
+To alleviate the burden, prior literature often considers the simplified and more practical version of \emph{sub-population shift}~\citep{dro}.
+Given a dataset $\mathcal{D} = \{(x_i, y_i, e_i)\}_{i=1}^n$, the supremum in~\eqref{eq:ood} is replaced by a maximum over the training environments and the risk for each environment is approximated by the empirical risk~\citep{vapnik}.
+The effectiveness of an OOD algorithm is then assessed by its worst-group-accuracy on a validation set.
+
+In practice, several OOD algorithms have been successful in learning invariances across environments ~\citep{domainbed, dg_survey, dg_survey_2, yang2023change}.
+Despite their promise, their large-scale application is hindered by the need for human-annotated environments, which are resource-intensive and might be even sub-optimal.
+Different machine learning models fall prey to different kinds of spurious correlations.
+In addition, there exists complex interactions between environment definition, function class, distributional shift, and cultural viewpoints~\citep{lopez2022measuring}.
+Therefore, environment annotations are helpful only when revealing spurious and invariant patterns under the lens of the learning system under consideration.
+Could it be possible to design algorithms for the automatic discovery of environments tailored to the learning machine and data at hand?
+\subsection{Discovering Environments}
+\label{sec:discovery}
+\begin{flushright}
+\emph{Nature does not shuffle data}---\citet{bottou_shuffle}
+\end{flushright}
+
+\vspace*{-0.4cm}
+Let us reconsider the problem of OOD generalization without access to environment annotations.
+This time, it suffices to talk about one training distribution $P^\text{tr}$ and one testing distribution $P^\text{te}$.
+Our training data is a collection of input-label pairs $(x_i, y_i)$, each drawn iid from the training distribution.
+While $P^\text{tr}$ may be the mixture of multiple environments describing interesting invariant and spurious correlations, this rich heterogeneity is shuffled together and unbeknown to us.
+But, if we could ``unshuffle'' the training distribution and recover the environments therein, we could invoke the OOD generalization machinery from the previous section and hope for a robust predictor.
+This is the purpose of automatic environment discovery.
+
+
+\section{Related Work on Environment Discovery}
+
+\label{sec:related_main}
+To discover environments, prior work often train a classifier and then assign each training example to two environments based on their loss or classification accuracy.
+Crucially, one must control the capacity of the classifier with surgical precision, such that it relies only on the spurious correlations.
+It is only in such cases that the subsequent OOD generalization algorithms can successfully disregard these spurious features.
+
+As a result, proposals for environment discovery differ mainly in how to control the capacity of the classifier.
+For example, the too-good-to-be-true prior~\citep{toogood} employs a classifier with a small parameter count while correct-n-contrast~\citep[CnC]{cnc} applies strong weight decay regularization.
+Just train twice~\citep[JTT]{jtt} and environment inference for invariant learning~\citep[EIIL]{eiil} train a classifier for a limited number of epochs.
+Learning from failure~\citep[LfF]{lff} biases the classifier towards the use of ``simple'' features by applying a generalized version of the cross entropy loss.
+Other proposals, such as learning to split~\citep[LS]{ls} and adversarial re-weighted learning~\citep[ARL]{arl} complement capacity control with adversarial games.
+
+However, all these methods assume having access to a human-annotated validation set to conduct such precise capacity controls. This defeats the purpose of environment discovery.
+In fact, if we have access to a small dataset with human-annotated environments, these examples suffice to fine-tune the last layer of a deep network towards state-of-the-art worst-group-accuracy~\citep{izmailov2022feature}.
+
+
+
+\section{Cross-Risk Minimization (\method{}
+
+\label{sec:xrm}
+
+We propose \fullmethod{}~(\method{}), an algorithm to discover environments without the need of human supervision.
+\method{} comes with batteries included, namely a recipe for hyper-parameter tuning and a formula to annotate all training and validation data.
+As we will show in~\cref{sec:experiments}, environments discovered by \method{} endow OOD generalization algorithms with oracle performance.
+
+The blueprint for \method{} is as follows.
+\method{} trains two twin classifiers, each holding-in one random half of the training data~(\cref{sec:twin}).
+During training, \method{} biases each twin to absorb spurious correlation by imitating confident held-out mistakes from their sibling~(\cref{sec:flips}).
+\method{} chooses hyper-parameters for the twins based on the number of imitated mistakes~(\cref{sec:ourparams}).
+Finally, and given the selected twins, \method{} employs a simple ``cross-mistake'' formula to discover environment annotations for all of the training and validation examples~(\cref{sec:crossmistake}).
+\Cref{alg:xrm} serves as a companion to the descriptions below; \cref{app:code} contains a PyTorch implementation.
+The runtime of \method{} is akin to one ERM baseline on the training data.
+
+\begin{algorithm}
+  \caption{\fullmethod{} (\method{})}
+  \label{alg:xrm}
+  \textbf{Input:} training examples $\{(x_i, y_i)\}_{i=1}^n$ and validation examples $\{(\tilde{x}_i, \tilde{y}_i)\}_{i=1}^m$\\
+  \textbf{Output:} discovered environments $\{e_i\}_{i=1}^n$ and $\{\tilde{e}_i\}_{i=1}^m$
+  \begin{itemize}[leftmargin=0.5cm,itemsep=0pt]
+  \item Fix held-in training example assignments $m^a_i \sim \text{Bernoulli}(\frac{1}{2})$ and $m^b_i = 1 - m^a_i$
+  \item Initialize two classifiers $f^a$ and $f^b$
+  \item Until convergence: 
+  \begin{itemize}
+    \item Compute held-in softmax predictions:\\$p^\text{in}_i = m^a_i f^a(x_i) + m_i^b f^b(x_i)$
+    \item Compute held-out softmax predictions:\\$p^\text{out}_i = m^b_i f^a(x_i) + m^a_i f^b(x_i)$
+    \item Update $f^a$ and $f^b$ to minimize the held-in class-balanced cross-entropy loss $\ell(p^\text{in}, y)$
+    \item Flip $y_i$ into $y^\text{out}_i = \mathrm{argmax}_j p^\text{out}_{i,j}$, with probability:\\$(p^\text{out}_{i,y^\text{out}_i} - 1/ n_\text{classes}) \cdot n_\text{classes} / (n_\text{classes} - 1)$
+  \end{itemize}
+  \item Define cross-mistake function $e(x, y) = \llbracket (y \notin \mathrm{argmax}_j f^a(x)_j) \, \lor \, (y \notin \mathrm{argmax}_j f^b(x)_j) \rrbracket$
+  \item Discover training $e_i = e(x_i, y_i)$ and validation $\tilde{e}_i = e(\tilde{x}_i, \tilde{y}_i)$ environments
+  \end{itemize}
+\end{algorithm}
+\subsection{Twin Setup, Holding-out of Data}
+\label{sec:twin}
+
+We start by initializing two twin classifiers $f^a$ and $f^b$.
+Without loss of generality, let these classifiers return softmax probability vectors over the $n_\text{classes}$ classes in the training data.
+We split our training dataset $\{(x_i, y_i)\}_{i=1}^n$ in two random halves.
+Formally, we construct a pair of training assignment vectors with entries $m^a_i \sim \text{Bernoulli}(\frac{1}{2})$ and $m^b_i = 1 - m^a_i$, for all $i = 1, \ldots, n$.
+For classifier $f^a$, examples with $m^a_i = 1$ are ``held-in'' and examples with $m^a_i = 0$ are ``held-out''; similarly for $f^b$.
+Therefore, we will train classifier $f^a$ on training examples where $m^a_i = 1$, and similarly for classifier $f^b$.
+See~\cref{app:code} for implementation details.
+
+By virtue of this arrangement, we may now estimate the generalization difficulty of any example by looking at the prediction of the twin that held-out such point.
+This contrasts prior methods, which consume the entire training data, and may therefore conflate generalization and memorization.
+Here, however, if a point is misclassified when held-out, we see this as evidence of such example belonging to the minority group.
+\citet{feldman} proposes a similar ``error when holding-out'' construction as a measure of memorization. In the context of label-noise robustness, CrossSplit~\citep{kim2023crosssplit} also employs a similar approach, in which, confident held-out mistakes are indicators of a model’s memorization of a noisy label.
+
+\begin{table*}[th]
+\caption{Worst-group-accuracies, averaged from ten runs across datasets and algorithms, show XRM achieving oracle-level performance. When group labels are not available, class labels substitute them. Additionally, while ERM does not use group labels, it can still benefit from validation group labels for hyperparameter tuning, resulting in improved performance.}
+\label{tab:xrm_effectiveness}
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{NiceTabular}{lcccccccccccc}
+\CodeBefore
+\rectanglecolor{papercolor!10}{2-4}{11-4}
+\rectanglecolor{papercolor!10}{2-7}{11-7}
+\rectanglecolor{papercolor!10}{2-10}{11-10}
+\rectanglecolor{papercolor!10}{2-13}{11-13}
+\Body
+\toprule
+&
+\multicolumn{3}{c}{\textbf{ERM}} &
+\multicolumn{3}{c}{\textbf{GroupDRO}} &
+\multicolumn{3}{c}{\textbf{RWG}} &
+\multicolumn{3}{c}{\textbf{SUBG}} \\
+\midrule
+	&	None	&	Human	&	\textbf{XRM}	&	None	&	Human	&	\textbf{XRM}	&	None	&	Human	&	\textbf{XRM}	&	None	&	Human	&	\textbf{XRM}\\
+\midrule																									
+\textbf{Waterbirds}     & 66.4 & 66.4 & 66.4 & 67.3 & 86.5 & 88.1 & 66.8 & 87.3 & 82.0 & 62.1 & 87.1 & 77.7 \\
+\textbf{CelebA}         & 54.3 & 55.1 & 58.6 & 68.4 & 88.3 & 89.1 & 64.7 & 82.6 & 81.1 & 65.9 & 83.9 & 81.1 \\
+\textbf{MultiNLI}       & 67.9 & 72.0 & 69.1 & 68.6 & 73.4 & 72.1 & 66.9 & 71.3 & 70.2 & 69.7 & 52.4 & 72.0 \\
+\textbf{CivilComments}  & 67.2 & 74.0 & 64.7 & 66.6 & 73.8 & 72.2 & 67.2 & 73.4 & 72.2 & 65.4 & 71.1 & 44.6 \\
+\textbf{ColorMNIST}     & 10.0 & 10.1 & 11.3 & 9.9  & 10.1 & 69.7 & 10.0 & 10.3 & 69.4 & 10.0 & 9.9  & 65.2 \\
+\textbf{MetaShift}      & 64.2 & 69.8 & 71.7 & 72.5 & 80.3 & 77.5 & 72.3 & 76.3 & 74.2 & 69.7 & 77.0 & 77.6 \\
+\textbf{ImagenetBG}     & 78.4 & 78.4 & 79.0 & 78.3 & 78.2 & 78.2 & 78.3 & 79.0 & 78.8 & 79.5 & 78.8 & 77.2 \\
+\midrule
+\textbf{Average}        & 58.3 & 60.8 & 60.1 & 61.6 & 70.1 & 78.1 & 60.9 & 68.6 & 75.4 & 60.3 & 65.8 & 70.8 \\
+\bottomrule
+\end{NiceTabular}%
+}
+\end{center}
+\end{table*}
+\subsection{Twin Training, Flipping Labels}
+\label{sec:flips}
+
+As \cref{fig:one} shows, the test worst-group-accuracy of an ERM baseline on Waterbirds is $62\percent{}$.
+This suggests that, if using ERM to train our twins, each would be able to correctly classify roughly one half of the minority examples.
+If using these machines to discover environments based on prediction errors, we would dilute the spurious correlation evenly across the two discovered environments.
+Consequently, it would be difficult for an OOD generalization algorithm to tell apart between invariant and spurious patterns.
+Albeit counter-intuitive, we would like to hinder the learning process of our twins, such that they increasingly rely on spurious correlation.
+In the best possible case, the twins would correctly classify all majority examples and misclassify all minority examples, resulting in \emph{zero} worst-group accuracy.
+
+To this end, we propose to steer away our twins from becoming empirical risk minimizers as follows.
+Let $p^\text{out}_i = m^b_i f^a(x_i) + m^a_i f^b(x_i)$ be the held-out softmax prediction for example $(x_i, y_i)$.
+Also, let $y^\text{out}_i = \arg\max_j p^\text{out}_{i, j}$ be the held-out predicted class label.
+Then, at each iteration during the training of the twins, flip $y_i$ into $y_i^{\text{out}}$, with probability,
+\begin{equation}\label{eq:flip}
+ (p^{\text{out}}_{y^\text{out}_i} - 1/n_\text{classes}) \cdot n_\text{classes} / (n_\text{classes} -1),
+\end{equation}
+and let each network to minimize their held-in cross-entropy loss---according to the moving targets.
+
+The overarching intuition is that the label flipping~\cref{eq:flip} implements an ``echo chamber'' reinforcing the twins to rely on spurious correlation.
+Label flipping happens more often for confident held-out mistakes and early in training.
+These are two footprints of spurious correlations, since these are often easier and faster to capture.
+(In the context of neural networks, this is often referred to as a ``simplicity bias''~\citep{simplicity,gs}.)
+Overall, the purpose of~\cref{eq:flip} is to transform the labels of the training data such that they no longer represent the original classes, but spurious bias.
+Finally, the adjustment of~\cref{eq:flip} in terms of $n_\text{classes}$ ensures low flip probabilities at initialization, where mistakes are random, and not due to spurious correlation.
+We note that the ``echo chamber'' effect aligns the twin networks and that is crucially different from methods that use multiple networks to either disagree with or diversify spurious features~\citep{lff, cha2021swad, rame2022diverse, wortsman2022model, lee2022diversify, pagliardini2022agree, lin2023spurious, eastwood2023spuriosity}.
+
+\subsection{Twin Model Selection, Counting Label Flips}
+\label{sec:ourparams}
+
+Before discovering environments, we must commit to a pair of twin classifiers.
+Each of the twin networks own hyper-parameters, \method{} would be incomplete without a model selection criterion~\citep{domainbed}.
+We propose to select the twin hyper-parameters showing a maximum number of label flips at the last iteration, and across the training data.
+To reiterate, by ``counting flips'' we simply compare the vector of current labels with the vector of original labels---therefore, we do not accumulate counts of double or multiple flips per label. 
+To understand why, recall that each label flip signifies one example that is confidently misclassified when held-out.
+Therefore, each label flip is evidence about reliance on spurious correlation, which consequently brings us closer to a clear-cut identification of the minority group.
+
+\subsection{The Cross-Mistake Formula}
+\label{sec:crossmistake}
+
+Having committed to a pair of twins, we are ready to discover environments for all of our training and validation examples.
+In particular, we use a simple ``cross-mistake'' formula to annotate any example $(x, y)$ with the binary annotation, $e(x, y) =$
+\begin{equation}\label{eq:envs}
+  \llbracket (y \notin \mathrm{argmax}_j f^a(x)_j) \, \lor \, (y \notin \mathrm{argmax}_j f^b(x)_j) \rrbracket,
+\end{equation}
+where ``$\lor$'' denotes logical-OR, and ``$\llbracket\,\rrbracket$'' is the Iverson bracket.
+If operating within the group-shift paradigm, we define one group per combination of label and discovered environment.
+Notably, the ability to annotate both training and validation examples is a feature inherited from holding-out data during twin training.
+More particularly, every example---within training and validation sets---is held-out for at least one of the two twins, as subsumed in \cref{eq:envs} by the logical-OR operation.
+
+We are now ready to train the OOD generalization algorithm of our choice on top of the training data with environments discovered with \method{}.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+This section presents a series of experiments to showcase the effectiveness of \method{} on two well-known benchmarks.
+Additional experiments are also conducted to identify scenarios where XRM excels, as well as scenarios where it fails to discover relevant environments.
+
+\subsection{Sub-population Shift Benchmarks}
+
+We compare results with 3 sources of environment annotations:
+\begin{itemize}[leftmargin=*, itemsep=-3pt]
+    \item None: no env. annotations---class labels are used instead,
+    \item Human: original human-annotated environments,
+    \item XRM: inferred environments discovered by our method.
+\end{itemize}
+
+\paragraph{Metrics}
+Regardless of how training and validation environments are discovered, we always report test worst-group-accuracy over the human environment annotations provided by each dataset.
+The tables hereby presented show averages over ten random seeds.
+For results with error bars, see~\cref{tab:xrm_full}.
+\paragraph{\method{} vs. human annotations}
+
+\Cref{tab:xrm_effectiveness} shows that \method{} enables oracle-like worst-group-accuracy across datasets.
+The performance gains are remarkable in the challenging ColorMNIST dataset, where \method{} perfectly identifies digits appearing in minority colors, discovering a pair of environments conducive of stronger generalization than the ones originally proposed by humans.
+For the commonly-reported quartet of Waterbirds, CelebA, MultiNLI, and CivilComments, the average worst-group-accuracy is $67.3\percent{}$ when no group annotations are used.
+When using XRM, the average worst-group-accuracy significantly improves to $80.4\percent{}$, closely matching $80.6\percent{}$ achieved with human annotations.
+
+\paragraph{\method{} vs. other methods}
+
+\Cref{tab:xrm_vs_others} compares the worst-group-accuracy achieved by GroupDRO using XRM-inferred environments against other environment discovery methods.
+These include learning from failure~\citep[LfF]{lff}, environment inference for invariant learning~\citep[EIIL]{eiil}, just train twice~\citep[JTT]{jtt}, correct-n-contrast~\citep[CnC]{cnc}, automatic feature re-weighting~\citep[AFR]{qiu2023simple}, and LS~\citep{ls}.
+As seen in the previous subsection, \method{} achieves $80.4\percent{}$, nearly matching oracle performance.
+The second best method with no access to environment information, JTT, drops to $58.9\percent{}$.
+The best method accessing a validation set with human environment annotations, AFR, lags far from \method{}, with $78.6\percent{}$.
+
+For example, one run of LS for Waterbirds, the smallest dataset, took 20 hours.
+An \method{} run for this same dataset, on the same 32GB Volta GPU, takes 10 minutes.
+
+\begin{table*}
+\caption{Average/worst accuracies comparing methods for environment discovery. We specify access to annotations in training data ($e^\text{tr}$) and validation data ($e^\text{va}$). Symbol $\dagger$ denotes original numbers.}
+\label{tab:xrm_vs_others}
+\begin{center}
+\resizebox{0.85\textwidth}{!}{
+\begin{NiceTabular}{lllcccccccc|cc}
+\CodeBefore
+\rectanglecolor{papercolor!10}{2-5}{17-5}
+\rectanglecolor{papercolor!10}{2-7}{17-7}
+\rectanglecolor{papercolor!10}{2-9}{17-9}
+\rectanglecolor{papercolor!10}{2-11}{17-11}
+\rectanglecolor{papercolor!10}{2-13}{17-13}
+\Body
+\toprule
+\multicolumn{2}{c}{} &
+\multicolumn{1}{c}{} &
+\multicolumn{2}{c}{\textbf{Waterbirds}} &
+\multicolumn{2}{c}{\textbf{CelebA}} &
+\multicolumn{2}{c}{\textbf{MNLI}} &
+\multicolumn{2}{c}{\textbf{CivilComms}} &
+\multicolumn{2}{c}{\textbf{Average}}\\
+\midrule
+$e^\text{tr}$  &  $e^\text{va}$  &    &  Avg  &  Worst  &  Avg  &  Worst  &  Avg  &  Worst  &  Avg  &  Worst  &  Avg  &  Worst  \\
+\midrule                                                  
+\multirow{2}{*}{\cmark} &   \multirow{2}{*}{\cmark}
+            &   ERM             &  83.8 & 66.4  &  95.5 & 55.1  &  81.6 & 72.0  &  84.3 & 74.0  &  86.3 & 66.9  \\
+    &       &   GroupDRO        &  90.2 & 86.5  &  93.1 & 88.3  &  80.6 & 73.4  &  84.2 & 73.8  &  87.0 & 80.5  \\
+\midrule\multirow{5}{*}{\xmark} &   \multirow{5}{*}{\cmark}
+            &   ERM$^\dagger$   &  97.3 & 72.6  &  95.6 & 47.2  &  82.4 & 67.9  &  83.1 & 69.5  &  89.6 & 64.3 \\
+    &       &   LfF$^\dagger$   &  91.2 & 78.0  &  85.1 & 77.2  &  80.8 & 70.2  &  68.2 & 50.3  &  81.3 & 68.9 \\
+    &       &   EIIL$^\dagger$  &  96.9 & 78.7  &  89.5 & 77.8  &  79.4 & 70.0  &  90.5 & 67.0  &  89.1 & 73.4 \\
+    &       &   JTT$^\dagger$   &  93.3 & 86.7  &  88.0 & 81.1  &  78.6 & 72.6  &  83.3 & 64.3  &  85.8 & 76.2 \\
+    &       &   CnC$^\dagger$   &  90.9 & 88.5  &  89.9 & 88.8  &  ---  & ---   &  ---  & ---   &  ---  & ---  \\
+    &       &   AFR$^\dagger$   &  94.4 & 90.4  &  91.3 & 82.0  &  81.4 & 73.4  &  89.8 & 68.7  &  89.2 & 78.6 \\
+\midrule
+\multirow{7}{*}{\xmark} &   \multirow{7}{*}{\xmark}
+            &   ERM             &  83.5 & 66.4  &  95.4 & 54.3  &  82.1 & 67.9  &  81.3 & 67.2  &  85.6 & 63.9  \\
+    &       &   LfF$^\dagger$   &  86.6 & 75.0  &  81.1 & 53.0  &  71.4 & 57.3  &  69.1 & 42.2  &  77.1 & 56.9 \\
+    &       &   EIIL$^\dagger$  &  90.8 & 64.5  &  95.7 & 41.7  &  80.3 & 64.7  &  ---  & ---   &  ---  & ---  \\
+    &       &   JTT$^\dagger$   &  88.9 & 71.2  &  95.9 & 48.3  &  81.4 & 65.1  &  79.0 & 51.0  &  86.3 & 58.9 \\
+    &       &   LS$^\dagger$    &  91.2 & 86.1  &  87.2 & 83.3  &  78.7 & 72.1  &  ---  & ---   &  ---  & ---  \\
+    &       &   BAM$^\dagger$   &  91.4 & 89.1  &  88.4 & 80.1  &  80.3 & 70.8  &  88.3 & 79.3  &  87.1 & 79.8 \\
+    &       &  XRM              &  89.3 & 88.1  &  91.4 & 89.1  &  75.8 & 72.1  &  84.0 & 72.2  &  85.1 & 80.4  \\
+
+\bottomrule
+\end{NiceTabular}%
+}
+\end{center}
+\end{table*}
+
+\subsection{The DomaninBed Benchmark}
+\Cref{tab:domainbed_summary} presents additional domain generalization results on the \textsc{DomainBed} benchmark~\citep{domainbed}. 
+Experiments compare three settings: ERM without any environment annotations, the CORAL domain generalization algorithm~\citep{sun2016deep} with human-annotated environments, and CORAL with environments discovered by \method{}. 
+As a note, CORAL is the best performing single-model (non-ensembling) method in the DomainBed suite.
+Once again, results suggest that the performance when using \method{}-inferred annotations is comparable to that of human-annotated environments.
+Further details on these experiments are provided in~\cref{app:domainbed} with full table of results in~\cref{tab:domainbed_full}.
+\begin{table*}
+\caption{The average and worst test environment accuracies for five datasets in the \textsc{DomainBed} benchmark~\citep{domainbed}. Three methods are compared: 1) ERM with no environment annotations, 2) CORAL with human-annotated environments, and 3) CORAL with \method{}-inferred environments. The model selection is done according to the average accuracy over validation environments.}
+\label{tab:domainbed_summary}
+\begin{center}
+\resizebox{0.9\textwidth}{!}{%
+\begin{NiceTabular}{lcccccccccc}
+\CodeBefore
+\rectanglecolor{papercolor!10}{2-3}{5-3}
+\rectanglecolor{papercolor!10}{2-5}{5-5}
+\rectanglecolor{papercolor!10}{2-7}{5-7}
+\rectanglecolor{papercolor!10}{2-9}{5-9}
+\rectanglecolor{papercolor!10}{2-11}{5-11}
+\Body
+\toprule
+&
+\multicolumn{2}{c}{\textbf{VLCS}} &
+\multicolumn{2}{c}{\textbf{PACS}} &
+\multicolumn{2}{c}{\textbf{OfficeHome}} &
+\multicolumn{2}{c}{\textbf{TerraInc}} &
+\multicolumn{2}{c}{\textbf{DomainNet}} \\
+\midrule
+\textbf{Method} (annotations) & Avg & Worst & Avg & Worst & Avg & Worst & Avg & Worst & Avg & Worst \\
+\midrule
+\textbf{ERM} (None)    & 77.97 & 64.85 & 83.35 & 72.55 & 65.47 & 52.25 & 47.02 & 34.60 & 31.69 & 9.30 \\
+\textbf{CORAL} (Human) & 77.87 & 65.00 & 84.99 & 77.70 & 67.74 & 53.55 & 48.51 & 37.15 & 41.97 & 13.25 \\
+\textbf{CORAL} (XRM)   & 77.66 & 66.15 & 83.81 & 77.30 & 67.01 & 53.90 & 49.60 & 38.00 & 35.87 & 11.60 \\
+\bottomrule
+\end{NiceTabular}%
+}
+\end{center}
+\end{table*}
+
+\subsection{Further Analytical Experiments}
+
+\begin{figure}[t!]
+\includegraphics[width=0.5\textwidth]{figures/flip.pdf}
+\definecolor{ww}{HTML}{D81B60}
+\definecolor{wl}{HTML}{1E88E5}
+\definecolor{lw}{HTML}{FFC107}
+\definecolor{ll}{HTML}{004D40}
+\caption{\method{} on the Waterbirds problem, concerning \sqboxblack{ww} waterbirds in water, \sqboxblack{wl} waterbirds in land, \sqboxblack{lw} landbirds in water, \sqboxblack{ll} landbirds in land.
+The top-left panel shows that ``percentage of \method{} label-flips at convergence'' is a strong indicator of ``worst-group-accuracy of OOD generalization algorithm'', making flips a good criterion to select twin hyper-parameters.
+The two bottom panels show the signed margin of the twins on each ground-truth group. Each of the bottom plots correspond to one of the classes. Note that a positive margin means correct classification.
+From each of these class-dependent plots, \method{} discovers two environments: one for points in the ``mistake-free'' white area, and one for points in the ``cross-mistake'' gray areas.
+Notably, \method{} is able to allocate the two smallest groups \sqboxblack{wl}\sqboxblack{lw} to dedicated environments.
+Another notable observation is that the two bottom plots appear as straight lines, indicating that the twin networks agree on their predictions.
+The top-right panel shows that label flipping happens almost exclusively for the two smallest groups, and stabilizes as training progresses.
+}
+\label{fig:wb}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.42\textwidth]{figures/cifar.pdf}
+    \caption{
+    Randomly selected images from CIFAR-10, identified by \method{}.
+    Although CIFAR-10 lacks predefined environment annotations, our method has successfully uncovered intriguing environments.
+    Notably, well-classified examples (when held-out) are prototypical, featuring planes in blue skies and deer on green landscapes.
+    In contrast, misclassified examples (when held-out) are less typical, which means they are correctly classified only when included in the training set.
+    }
+    \label{fig:cifar}
+\end{figure}
+
+\paragraph{Label flipping dynamics on Waterbirds}
+\Cref{fig:wb} explores some of the behaviors of \method{} on the Waterbirds dataset.
+In particular, the top-left panel justifies the use of ``percentage of label-flips at convergence'' as a model selection criterion for \method{}, as it correlates strongly with downstream worst-group-accuracy.
+The two bottom panels showcase the clear separation of the minority group ``landbirds/water'' by \method{}, as no landbirds in land are in the cross-mistake area.
+The top-right panel shows that label flipping happens almost exclusively for minority groups, and converges alongside \method{} training. 
+This provides \method{} with a degree of stability, removing the need for intricate early-stopping criteria. 
+
+\paragraph{Revealing spurious correlations in CIFAR-10 with XRM}
+\Cref{fig:cifar} applies \method{} to the CIFAR-10 dataset~\citep{cifar}.
+While CIFAR-10 does not contain environment annotations, the discovered environments by \method{} for the ``plane'' and ``deer'' classes reveal one interesting spurious correlation, namely the background color.
+
+As a final remark, we ablated the need for (i) holding-out data, and (ii) performing label flipping, finding that both components are essential to the performance of \method{}.
+
+
+\section{When Does XRM Fail?}
+
+\label{sec:fail}
+In the previous section, we showcased the effectiveness of XRM in successfully discovering relevant environments.
+However, it is important to note that XRM, like other environment discovery methods, relies on certain assumptions.
+In the absence of these assumptions, these methods, including XRM, may fail to discover relevant environments.
+In its full generality, the problem of learning invariant predictors in the absence of appropriate environment annotations is indeed impossible~\citep{lin2022zin}.
+To see that, we note that dividing data into invariance-affording environments parallels the problem of discovering the right causal structure in the field of causal inference~\citep{pearl2009causality}.
+To reveal the true causal structure between an invariant feature $X_\text{inv}$ and a target $Y$, one must ``control-for'' a set of variables/environments $E$ that satisfy the following \textit{conditional independence statement},
+\begin{equation}
+Y \perp E \mid X_\text{inv}.
+\label{eq:ci}
+\end{equation}
+Unfortunately, different causal structures can produce identical observational data~\cite{peters2017elements}.
+Because of that, identifying an appropriate $E$ is impossible without admitting extra knowledge about the causal structure behind our data, and XRM is not an exception of such free lunch.
+
+Therefore, we would expect XRM to work well in instances where the inferred environments $E$ satisfy~\eqref{eq:ci}, and we should anticipate trouble in those cases where the discovered environments violate~\eqref{eq:ci}.
+On the other hand, as discussed in~\citep{lin2022zin}, evaluating~\eqref{eq:ci} requires knowing the invariant feature $X_\text{inv}$, which is the variable subject to discovery.
+This makes~\eqref{eq:ci} difficult to verify in practice when inferring environments $E$, and the best we can do is to offer some canonical examples of successes and failures, that can guide our choices of when to apply XRM.
+
+Here, we exemplify with four different versions of the ColorMNIST dataset~\citep{irm}.
+All four versions instantiate a colored digit classification task, differing on whether the invariant feature is ``digit shape'' or ``digit color'', and which one of these two variables bear the strongest correlation to the target label.
+Overall, we expect ``digit color'' to be faster (easier) to learn, leading to generalization issues when ``digit shape''---more difficult and slower to learn---is the desired invariant feature.
+
+\newcommand\triplet[5]{
+  \node[inner sep=0pt] (A) at (#1+0, #2) {$S$};
+  \node[inner sep=0pt] (B) at (#1+0.8, #2) {$Y$};
+  \node[inner sep=0pt] (C) at (#1+1.6, #2) {$C$};
+  \ifnum0=#5\relax
+    \draw[->, thick, shorten <=2pt, shorten >=2pt] (A) -- node[above,] {\scriptsize #3} (B);
+    \draw[->, thick, shorten <=2pt, shorten >=2pt] (B) -- node[above,] {\scriptsize #4} (C);
+  \else
+    \draw[->, thick, shorten <=2pt, shorten >=2pt] (C) -- node[above,] {\scriptsize #4} (B);
+    \draw[->, thick, shorten <=2pt, shorten >=2pt] (B) -- node[above,] {\scriptsize #3} (A);
+  \fi
+}
+
+\begin{table}
+\resizebox{0.5\textwidth}{!}{%
+\begin{tikzpicture}
+  \draw[very thick] (-2.75, 1.6) -- (8.3, 1.6);
+  
+  \node[] (L1) at (0, 1.3) {CMNIST};
+  \node[] (L1) at (0, 0.85) {\scriptsize \cite{irm}};
+  \node[] (L1) at (2.5, 1.3) {InvCMNIST};
+  \node[] (L1) at (2.5, 0.85) {\scriptsize \cite{leon}};
+  \node[] (L1) at (5, 1.3) {InveCOLOR};
+  \node[] (L1) at (5, 0.85) {\scriptsize (No citation)};
+  \node[] (L1) at (7.5, 1.3) {MCOLOR};
+  \node[] (L1) at (7.5, 0.85) {\scriptsize \cite{zin}};
+
+  \draw[thick] (-2.75, 0.6) -- (8.3, 0.6);
+  \node[text width=1.2cm] (R1) at (-2.2, -0) {training\\($e=1$)};
+  \node[text width=1.2cm] (R2) at (-2.2, -1) {training\\($e=2$)}; 
+  \node[text width=1.2cm] (R3) at (-2.2, -2) {training\\(pooled)};
+  \node[text width=1.2cm] (R4) at (-2.2, -3) {testing};
+
+  \draw[draw=green!15, fill=green!15] (-1.2, -1.5) rectangle ++(2.1, -0.85);
+  \draw[draw=yellow!15, fill=yellow!15] (1.3, -1.5) rectangle ++(2.1, -0.85);
+  \draw[draw=yellow!15, fill=yellow!15] (3.8, -1.5) rectangle ++(2.1, -0.85);
+  \draw[draw=green!15, fill=green!15] (6.3, -1.5) rectangle ++(2.1, -0.85);
+  
+  \triplet{0-1}{-0}{0.75}{0.80}{0};
+  \triplet{0-1}{-1}{0.75}{0.90}{0};
+  \triplet{0-1}{-2}{0.75}{0.85}{0};
+  \triplet{0-1}{-3}{0.75}{0.10}{0};
+  \triplet{2.5-1}{-0}{0.85}{0.70}{0};
+  \triplet{2.5-1}{-1}{0.85}{0.80}{0};
+  \triplet{2.5-1}{-2}{0.85}{0.75}{0};
+  \triplet{2.5-1}{-3}{0.85}{0.10}{0};
+  \triplet{5-1}{-0}{0.80}{0.75}{1};
+  \triplet{5-1}{-1}{0.90}{0.75}{1};
+  \triplet{5-1}{-2}{0.85}{0.75}{1};
+  \triplet{5-1}{-3}{0.10}{0.75}{1};
+  \triplet{7.5-1}{-0}{0.80}{0.85}{1};
+  \triplet{7.5-1}{-1}{0.70}{0.85}{1};
+  \triplet{7.5-1}{-2}{0.75}{0.85}{1};
+  \triplet{7.5-1}{-3}{0.10}{0.85}{1};
+  \draw[thick] (-2.75, -3.5) -- (8.3, -3.5);
+
+  \node[text width=1.2cm] (R4) at (-2.2, -4+0.1) {inv.feat.};
+  \node[] (X) at (0, -4+0.1) {complex, weak};
+  \node[] (X) at (2.5, -4+0.1) {complex, strong};
+  \node[] (X) at (5, -4+0.1) {simple, weak};
+  \node[] (X) at (7.5, -4+0.1) {simple, strong};
+  
+  \node[text width=1.2cm] (R4) at (-2.2, -4.5) {ERM};
+  \node[] (X) at (0, -4.5) {$0.37 \pm 0.10$};
+  \node[] (X) at (2.5, -4.5) {$0.67 \pm 0.02$};
+  \node[] (X) at (5, -4.5) {$\textbf{0.75} \pm 0.01$};
+  \node[] (X) at (7.5, -4.5) {$\textbf{0.85} \pm 0.01$};
+  
+  \node[text width=1.2cm] (R4) at (-2.2, -5) {XRM};
+  \node[] (X) at (0, -5) {$\textbf{0.71} \pm 0.02$};
+  \node[] (X) at (2.5, -5) {$\textbf{0.82} \pm 0.02$};
+  \node[] (X) at (5, -5) {$0.40 \pm 0.01$};
+  \node[] (X) at (7.5, -5) {$0.57 \pm 0.01$};
+  
+  \node[text width=1.2cm] (R4) at (-2.2, -5.5) {Oracle};
+  \node[] (X) at (0, -5.5) {$0.75$};
+  \node[] (X) at (2.5, -5.5) {$0.85$};
+  \node[] (X) at (5, -5.5) {$0.75$};
+  \node[] (X) at (7.5, -5.5) {$0.85$};
+
+  \draw[very thick] (-2.75, -6) -- (8.3, -6);
+\end{tikzpicture}}
+\caption{%
+Four ColoredMNIST versions, where the environment $E$ influences digit shape $S$ and color $C$, forming our input $X = (S, C)$.
+We depict the causal structure for each dataset version, and the correlation between variables.
+The invariant feature may be the complex digit shape (CMNIST versions) \emph{or} the simple digit color (MCOLOR versions), which in turn could bear the strongest \emph{or} weakest correlation to the target variable---producing four versions of the ColoredMNIST problem.
+Note that \colorbox{green!15}{CMNIST}-\colorbox{green!15}{MCOLOR} and \colorbox{yellow!15}{InverseCMNIST}-\colorbox{yellow!15}{InverseMCOLOR} are indistinguishable from pooled training data alone. 
+At the bottom, test accuracies of ERM, XRM+GroupDRO, and an Oracle which relies solely on the invariant feature.}
+\label{table:fourcolors}
+\end{table}
+
+We show in~\cref{table:fourcolors} the average-test-accuracy of ERM and XRM followed by GroupDRO for the four versions of the ColoredMNIST dataset. We also show what a hypothetical oracle, relying solely on the invariant feature, would achieve.
+ERM performs well when the invariant feature is the simplest of the two.
+XRM performs well when the invariant feature is the most complex of the two.
+We highlight that the datasets CMNIST and MCOLOR are observationally equivalent from pooled data alone---and a similar remark follows for InverseCMNIST and InverseMCOLOR.
+This echoes the impossibility results of~\citep{lin2022zin}, namely learning invariant predictors in the absence of environment annotations is impossible in its full generality: for instance, based on training data alone, we would never know if we are dealing with InverseCMNIST or InverseMCOLOR, and therefore we are at a loss of whether to apply ERM or XRM.
+Nevertheless, XRM remains an state-of-the-art solution for those problems were we would like our learning machine to ignore the fastest-to-learn feature, often being a spurious shortcut~\citep{geirhos2020shortcut,shah2020pitfalls,gs}, in order to focus on more complex patterns with a higher potential for invariance.
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+We have introduced \fullmethod{} (\method{}), a simple algorithm for environment discovery.
+\method{} provides a recipe to tune its hyper-parameters, does not require early-stopping, and can discover environments for all training and validation data---dropping the requirement for human annotations at all.
+More specifically, \method{} trains two twin classifiers on random halves of the training data, while encouraging each twin to imitate confident held-out mistakes by their sibling.
+This implements an ``echo-chamber'' that identifies environments that differ only in spurious correlation, and endow subsequent OOD generalization algorithms with oracle-like performance.
+
+We highlight two directions for future work.
+Firstly, how does \method{} relate to the invariance principle $Y \perp E \mid \Phi(X)$?
+What is the interplay between revealing relevant labels $Y$ and relevant environments $E$ as to afford invariance?
+To our knowledge, \method{} is the first environment discovery algorithm tampering with labels $Y$, thus exploring invariance---and the violation thereof---from a new angle.
+Because relabeling happens with a probability proportional to confidence, we expect model calibration to play a role in understanding the theoretical underpinnings of \method{}, as it happened with other invariance methods~\citep{dg_calib}.
+Overall, the theoretical analysis of \method{} will call for new tools, because label-flipping steers XRM away from the Bayes-optimal predictor.
+
+Secondly, we would like to further understand the relationship between \method{} and the multifarious phenomenon of memorization.
+Good memorization affords invariance (\emph{Where did I park my car?}), and therefore depends on the collection of environments deemed relevant.
+Bad memorization happens due to ``structured over-fitting'', commonly incarnated as a bad learning strategy; ``use a simple feature for the majority, then memorize the minority''.
+\method{} seems to attack a similar problem but, how does it specifically relate to these two flavours of memorization?
+Does \method{} discover environments that promote features that benefit all examples?
+
+
+

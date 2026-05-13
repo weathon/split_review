@@ -1,0 +1,394 @@
+\title{MLLM can see? Dynamic Correction Decoding for Hallucination Mitigation}
+
+\begin{abstract}
+Multimodal Large Language Models (MLLMs) frequently exhibit hallucination phenomena, but the underlying reasons remain poorly understood. In this paper, we present an empirical analysis and find that, although MLLMs incorrectly generate the objects in the final output, they are actually able to recognize visual objects in the preceding layers. We speculate that this may be due to the strong knowledge priors of the language model suppressing the visual information, leading to hallucinations. Motivated by this, we propose a novel dynamic correction decoding method for MLLMs (\textbf{\Ours}), which adaptively selects the appropriate preceding layers and proportionally integrates knowledge into the final layer to adjust the output logits. Note that \Ours is model agnostic and can be seamlessly incorporated with various classic decoding strategies and applied to different MLLMs.}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\epigraph{\textit{``The first principle is that you must not fool yourself—and you are the easiest person to fool.''}}{--- Richard Feynman}
+
+ 
+
+ 
+Recently, the rapid development of Multimodal Large Language Models (MLLMs) has demonstrated a potential pathway towards achieving Artificial General Intelligence (AGI) ~\citep{Qwen2-VL,minicpm,deepseek-vl,chameleon,gpt-4-tech,llava-1.5,DBLP:journals/corr/abs-2407-06135}.
+However, in practice, the development of MLLMs is hindered by the phenomenon of hallucination, which typically results in the model generating statements about non-existent images while neglecting to mention certain visible objects, effectively causing it to fool itself~\citep{DBLP:journals/corr/abs-2404-18930,survey_lvlm,DBLP:conf/emnlp/LiDZWZW23,DBLP:journals/corr/abs-2306-14565,DBLP:journals/corr/abs-2309-05922}.
+This issue poses significant risks in high-stakes fields such as medical imaging~\citep{huatuo-gptv,DBLP:journals/corr/abs-2304-04920,DBLP:journals/corr/abs-2302-07257}, autonomous driving~\citep{mllm_auto,drive_mllm}, and human-computer interaction systems~\citep{DBLP:journals/pacmhci/BrieBSV23}, where such errors could result in irreparable consequences.
+
+The reasons behind hallucinations in MLLMs are complex. 
+Unlike analyses focused on unimodal LLMs \citep{dola,DBLP:conf/icml/ChenXLWXGH24,orgad2024llmsknowshowintrinsic,chen2024llamaslayer8bshallow,lu2024insightsllmlongcontextfailures}, many current works assume that MLLM may indeed `see' visual information. 
+However, due to factors such as excessive model depth \citep{DBLP:journals/corr/abs-2403-06764,Grad-CAM}, aggregation patterns \citep{opera}, or priors knowledge inherent in the MLLMs \citep{vcd,vdd}, these models ultimately still experience hallucinations. 
+Concretely, our understanding of the underlying mechanisms of hallucinations in MLLMs remains limited. 
+It is still uncertain whether the visual information is never correctly recognized or if it is recognized but subsequently suppressed by later information streams.
+ 
+\textbf{Hallucinated MLLM can see (to some extent).}  
+Inspired by the aforementioned works, we conduct an empirical analysis and find that MLLMs are not blind; they can recognize objects in the preceding layers, but this recognition is suppressed in later layers, leading to hallucinations.
+Specifically, we focus on object hallucinations\footnote{This approach is applicable to other types of hallucinations as well.} and conduct experiments with MLLMs, demonstrating that they know to some extent whether an object exists (as shown in Figure \ref{fig:model} and Section \ref{sec:finding1}).
+We further observe that the confidence of generated tokens is influenced by the knowledge priors of MLLMs (Section \ref{sec:finding2}), leading to a reduction in the probability of ground truth tokens in the deeper layers.
+
+\textbf{Dynamic correction decoding with preceding-layer knowledge.}
+Based on those findings, we propose \textbf{D}ynamic Correction D\textbf{e}coding with pre\textbf{C}eding-Layer Kn\textbf{o}wledge (\textbf{\Ours}) to mitigate hallucinations for MLLMs.
+Our core hypothesis is that preceding layers exhibit higher confidence for ground truth tokens, and the logits for these tokens should rank prominently at the last layer's outputs. 
+To enhance the logits of ground truth tokens, \Ours dynamically selects preceding layer and utilizes its prior knowledge to correct the final output logits.
+Additionally, we introduce a dynamic soft modulation to preserve the original style of the generated responses. 
+\Ours is training-free and can be integrated with any popular decoding strategies, such as greedy search, nucleus sampling as well as beam search, and can seamlessly incorporate into any MLLMs for hallucination mitigation.
+
+\textbf{Contributions.}
+Our primary contribution lies in exploring the internal mechanisms of hallucinations in MLLMs. 
+We find that the confidence of generated tokens is influenced by the knowledge priors of MLLMs, leading to a reduction in the probability of ground truth tokens in the deeper layers.
+We further propose \Ours, a dynamic correction decoding method guided by preceding-layer knowledge. 
+\Ours is integrated with InstructBLIP, MiniGPT-4, LLaVA, and Qwen-VL using three popular decoding strategies: greedy search, nucleus sampling, and beam search.
+Experimental results show that \Ours achieves an average hallucination suppression rate of \textbf{10.8\%} in image captioning dataset, demonstrating superior suppression effectiveness. 
+Additionally, \Ours outperforms baselines on visual question answering datasets including POPE, and MME.
+Additionally, we analyze the latency and throughput, showing that \Ours introduces an approximate 1.2x increase in latency compared to the basic decoding process, much faster than previous baselines such as VCD and OPERA.
+ 
+
+\begin{figure*}[t!]
+    \centering
+    \subfigure[Object probing results.]{
+        \includegraphics[width=0.6\textwidth]{image/mech1a.pdf}
+        \label{fig:arc1}
+    }
+    \subfigure[Different resolution results.]{
+        \includegraphics[width=0.35\textwidth]{image/mech1b.pdf}
+        \label{fig:arc2}
+    }
+    \caption{Overall results of the probing experiment with MLLMs, indicating that they possess a certain level of awareness regarding the presence of visual objects (Figure~\ref{fig:arc1}), with prediction accuracy being higher in the preceding layers (Figure~\ref{fig:arc2}) but gradually \textbf{decline} afterward.}
+    \label{fig:model}
+\end{figure*}
+
+
+
+\section{Why do MLLMs generate non-exist objects?}
+
+\label{sec:mech}
+In this section, we conduct a series of  empirical analysis to investigate the internal mechanisms of MLLM and elucidate the underlying reasons for its generation of non-existent objects. To strike a balance between the realism and complexity of the experiments, we primarily focus on the generation of objects in image description scenarios (image caption tasks).
+\paragraph{Preliminaries of MLLM generation.} 
+MLLMs typically concatenate visual tokens, processed by the visual encoder and projection layer, with embedded textual tokens before feeding them into an autoregressive language model.
+We denote the visual tokens as $\mathbf{X}^V = \{x_{v_1},x_{v_2},\ldots,x_{v_P}\}$ and textual tokens as $\mathbf{X}^C = \{x_{c_1},x_{c_2},\ldots,x_{c_Q}\}$. 
+Here $P$ and $Q$ are the lengths of the visual tokens and textual tokens respectively.
+Finally, the input is $\mathbf{X} = \text{concat}\{\mathbf{X}^V,\mathbf{X}^C\}$. 
+Then $\mathbf{X}$ would be passed into MLLM with $\mathbf{N}$ stacked transformer layer. 
+The intermediate variable generated by the i-th layer is called hidden states, denoted as $\mathbf{h}^i = \{h_0^i,h_1^i,\ldots,h_{T-1}^i\}$, where $T=P+Q$. 
+During the generation phase, we use the hidden state at the last position in the final layer, which is mapped to the vocabulary dimension through an affine layer $\phi(\cdot)$, to predict the probability of the next token.
+Formally, we have: 
+\begin{equation}
+\begin{aligned}
+    p(x_T|x_{<T}) = \text{softmax}(\phi(h_{T-1}^N))_{x_T}, x_T\in \mathcal{V}
+\end{aligned}
+\end{equation}
+where we use $x_{<T}$ to simplify the sequence $\{x_i\}_{i=0}^{T-1}$ and $\mathcal{V}$ refers to the whole vocabulary set. 
+
+\begin{figure}[t] 
+\centering
+\includegraphics[width=1\textwidth]{image/case_2.pdf}
+\caption{
+Illustration of token probabilities across transformer layers, which reveals distinct trends for target hallucinated (\textbf{\textcolor{BurntOrange}{orange}}) and non-hallucinated (\textbf{\textcolor{PineGreen}{green}}) tokens.
+In the preceding layers, non-hallucinated tokens exhibit a higher probability.
+In the final layers, hallucinated tokens demonstrate \textbf{increased probabilities}, while the probability of non-hallucinated tokens \textbf{drops sharply}.}
+\label{fig:mec:case} 
+\end{figure}
+\subsection{Finding 1: MLLM knows to some extent whether an object exists}
+\label{sec:finding1}
+
+Inspired by \citep{DBLP:journals/corr/abs-2407-20311}, we explore how MLLMs comprehend objects in the image captioning task.
+For simplicity, we abstract this process into a function called \textbf{isexist(obj)}, which determines whether an object is present in an image.
+ 
+ 
+
+We employ the prompt template, \textit{``USER: \textless image\textgreater Describe the image. 
+ASSISTANT: The image contains {obj}.''}
+Both the training and testing datasets are formatted accordingly before being input into MLLMs.
+We train a probe classifier at the final position of the hidden state outputs for each transformer layer, resulting in a total of 32 classifiers.) The model is evaluated using the test set, as shown in Figure~\ref{fig:arc1} (left).
+Further experiments are conducted on three splits of the evaluation dataset proposed by POPE, with results reported in Figure~\ref{fig:arc1} (right).
+These evaluations provide a comprehensive understanding of the model's object recognition capabilities across diverse scenarios.
+We select the best-performing probe classifier from the 32 classifiers to compare accuracy across all objects, existing objects, and non-existing objects.
+Our results show that the MLLM achieves high accuracy for correctly generated objects in image captions.
+Despite generating many non-existent objects, the MLLM still maintains around 80\% accuracy in our probing experiments.
+This suggests that \textbf{MLLMs possess a certain level of understanding regarding object existence in images}.%, though visual errors prevent consistently high accuracy.
+Additionally, our probing experiments reveal higher accuracy in the preceding layers, as illustrated in Figure~\ref{fig:arc2}, which aligns with previous findings \citep{vdd,vcd}.
+Furthermore, we show that increasing the resolution of the visual encoder (from 224px to 336px) enhances accuracy for non-existing objects, indicating that \textbf{token information at the last position in the preceding layers better represents visual information}
+These findings can deepen our understanding of the object comprehension processes in MLLMs and highlight potential avenues for improvement.
+
+
+\subsection{Finding 2: Language Model Priors Suppress the Visual Information that MLLM Already See.}
+\label{sec:finding2}
+
+We hypothesize that the representations in the preceding layers effectively capture (to some extent) visual information. 
+However, the prior knowledge embedded in the MLLM reduces the probabilities of ground truth tokens in deeper layers. Figure~\ref{fig:mec:case} illustrates this hypothesis with running examples. We analyze the Top-4 tokens ranked by probability in the final layer's output. Non-hallucinated tokens like \textit{``people''}, \textit{``left''}, \textit{``blue''}, and \textit{``umbrella''} exhibit high probabilities from the 18th layer. In contrast, hallucinated tokens like \textit{``bird''} and \textit{``green''} only show comparatively high probabilities around the 30-th layer. Interestingly, the probabilities of ground truth tokens \textit{``umbrella''} and \textit{``blue''} sharply decline from the 30-th layer onwards, eventually falling below the hallucinated tokens' probabilities in the final layer.
+
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+\centering
+\includegraphics[width=0.32\textwidth]{image/mech2.pdf}
+\caption{Distribution of activated ground-truth tokens across layers.}
+\label{fig:mech2}
+\end{wrapfigure}
+
+To further investigate this phenomenon, we conduct an early exit experiment ~\citep{DBLP:conf/icpr/Teerapittayanon16,DBLP:conf/iclr/ElbayadGGA20,DBLP:conf/nips/SchusterFG0B0TM22} to analyze the evolution of the MLLM's internal representations across transformer layers. We randomly select 500 images from the MSOCO dataset and use random prompts to elicit raw responses from LLaVA-1.5-7b. We then extract all non-existent objects along with their corresponding preceding text and input this data into the MLLM.
+The output of the $i$-th layer is denoted as $h^i$, and the probability distribution of the next token is represented as $p(\cdot|x_{<s})^i = \text{softmax}(\phi(h_{s-1}^i))$.
+To reduce the observation tokens and simulate the real sampling process, we truncate the vocabulary,  similar to Top-$p$ sampling, and obtain the candidate tokens, denoted as $\mathcal{V}_{candidate}$ with a default threshold of 0.9. 
+We then label the tokens in $\mathcal{V}_{candidate}$. Specifically, we filter out data where $\mathcal{V}_{candidate}$ contains at least one ground truth token and observe whether an \textbf{activated ground truth token} exists among the candidate tokens, formally expressed as:
+\begin{equation}
+\begin{aligned}
+    \exists \ x_{a}\in \mathcal{V}_{candidate} \land i\in(0,N],\ p(x_{a}|x_{<s})^i - p(x_{h}|x_{<s})^i \geq \text{threshold},
+\end{aligned}
+\end{equation}
+where $x_a$ is the activated ground truth token, $x_h$ is the token with the highest probability of being a hallucinated token in the probability distribution of the final layer and $\text{threshold}\in(0,1)$. Based on the experimental setup described above, we conducted the following investigation:
+
+\paragraph{What suppresses the expression of visual facts?
+ }
+We analyze the occurrence of $x_a$ at each decoding layer, as shown in Figure~\ref{fig:mech2}. 
+The results reveal that the activated ground truth tokens are primarily present between layers 20 and 28, indicating that MLLMs accurately recognize the image content in the latter layers. However, the activated ground truth tokens are suppressed in the final output layer. This suppression may stem from the guidance of the input image or the inherent knowledge bias of the MLLM. To investigate this, we generate candidate tokens $\mathcal{V}_{candidate}^{'}$ in the absence of an input image, representing tokens based on the MLLM's inherent knowledge. We calculate that the overlap rate of $x_h$ existing in $\mathcal{V}_{candidate}^{'}$ reaches 91.05\%, suggesting that even without expressing image information, MLLMs still tend to generate the original hallucination tokens. This finding reveals that \textbf{the inherent knowledge in MLLMs may diminish the probability of the ground truth token in the deeper layers.}
+
+
+
+\section{Proposed Approach: Dynamic Correction Decoding with Preceding-Layer Knowledge}
+
+
+\begin{figure}[!ht] 
+\centering
+\includegraphics[width=1.0\textwidth]{image/method.pdf}
+\caption{Framework of {\Ours}. \Ours first dynamically selects an appropriate anchor layer from the preceding layers and then correct the knowledge in the final layer with dynamic coefficient.}
+\label{framework} 
+\end{figure}
+
+After  investigating the reasons why MLLMs generate non-existent objects, inspired by \citep{dola}, we introduce \textbf{D}ynamic Correction D\textbf{e}coding with pre\textbf{C}eding-Layer Kn\textbf{o}wledge (\textbf{\Ours}), which can alleviate hallucinations during inference. 
+The overall framework of Deco is illustrated in Figure~\ref{framework}, consisting of dynamic preceding layer selection (Section \ref{sec:m1}) and decoding correction with preceding-layer knowledge (Section \ref{sec:m2}).
+
+
+\subsection{Dynamic Preceding-Layer Selection}
+\label{sec:m1}
+\paragraph{Candidate token acquisition.} 
+Due to the vast vocabulary space, we track only the changes in the top-ranked tokens as candidate tokens across different layers for computational convenience.
+This is based on the hypothesis that ground tokens usually appear in the top position of the MLLM's last layer output logits.
+Inspired by \citep{DBLP:conf/acl/LiHFLEHZL23}, we use a truncation strategy to select the candidate tokens, with the default truncation strategy being top-$p$ truncation, formally:
+
+\begin{equation}
+\mathcal{V}_{\text {candidate}}\left(x_{T}|x_{<T}\right)=\left\{x_{T} \in \mathcal{V}: \sum_{v \in \mathcal{V}p} P_\tau(x_T = v | x_0, x_1, \dots, x_{T-1}) \leq p\right\}
+\end{equation}
+
+where $\mathcal{V}$ is the whole vocabulary, and $p$ refers to the parameter used in  top-$p$.
+\begin{wraptable}{l}{0.35\textwidth}
+\small
+\centering 
+\caption{Hit Rate of layers across different intervals.}
+\begin{tabular}{lllc}
+\toprule
+\textbf{Layer Range} & \textbf{20-28} & \textbf{15-28} \\
+\midrule
+Hit Rate (\%) & \color{purple}{61.69}  & \color{purple}{71.14}  \\
+\bottomrule
+\end{tabular}
+\label{tab:mech2}
+\end{wraptable}
+\paragraph{Preceding-layer selection.}
+Our findings in Section~\ref{sec:mech} demonstrate that activated ground truth tokens typically exhibit higher probabilities in preceding layers compared to hallucinated tokens. Based on this observation, we hypothesize that selecting the token $x_{th}, \text{where}~x_{th}\in \mathcal{V}_{candidate}$, with the highest probability from the interval layers corresponds to the ground truth token. We compute the accuracy of $x_{th}$ as the ground truth token and denote this metric as the hit rate, as shown in Table~\ref{tab:mech2}. The results indicate that within a specific range of layers (e.g., 15-28), $x_{th}$ indeed has a high universal probability of representing the ground truth token. Intuitively, we track candidate tokens and dynamically choose the layer in which the token with the highest probability among the preceding layers resides to calibrate the final logit distribution of the MLLM. The selected preceding layer is referred to as the anchor layer, formally defined as:
+\begin{equation}
+    \mathcal{A}= \text{argmax}_i{\left\{x_{T} \in \mathcal{V}_\text{candidate}: \text{softmax}(\phi(h_{T-1}^i))_{x_T}, i\in \mathcal[a,b]\right\}},
+\end{equation}
+where $a\leq b, a,b \in [1,N]$, and $[a,b]$ represents the layer interval for MLLMs. Expanding the range of layers can improve the hit rate. To avoid increased search computation time, we assign default values of $a=20$ and $b=28$ for our subsequent experiments.
+
+\subsection{Decoding Correction with Preceding-layer Knowledge}
+\label{sec:m2}
+\paragraph{Dynamic soft modulation.} We introduce a dynamic modulation coefficient, defaulting to the maximum probability. 
+Formally, we have:
+\begin{equation}
+    \text{max\_prob} = \text{max}(\text{softmax}(\phi(h_{T-1}^\mathcal{A}))).
+\end{equation}
+
+This coefficient can help prevent hard changes in logits, particularly when the probability differences between candidate tokens in preceding layers are insignificant. 
+From the example in Figure \ref{framework}, we can observe that the absence of the dynamic modulation coefficient may lead to semantic incoherence or even more severe hallucinations.
+
+\paragraph{Preceding-layer knowledge guided decoding.} 
+Given the selected preceding layers, we integrate information from these layers into the final layer to correct the logit distribution. 
+We utilze a  hyperparameter, $\alpha$, to control the proportion of early-layer information incorporated. 
+Additionally, dynamic soft modulation is employed to preserve the generative style of the original model. 
+By utilizing the correction of preceding-layer representations, the probability of predicting the next token and the logits are updated as follows:
+\begin{align}
+& \hat{p}(x_{T} \mid x_{<T}) = \mathrm{softmax}\bigl(\text{logits}\bigr)_{x_T},\quad \\
+& \text{logits} = \phi(h_{T-1}^N) + \alpha \times \text{max\_prob} \times \phi(h_{T-1}^\mathcal{A}),   
+\end{align}
+where $N$ is the last layer of MLLM and $\mathcal{A}$ is the selected preceding layer.
+
+\paragraph{Comparison of previous methods.}
+Our work shares a similar assumption with OPERA \citep{opera} and VCD~\citep{vcd}, positing that the knowledge priors inherent in MLLMs may suppress the model's ability to comprehend visual information. However, our approach is comparatively simpler than that of OPERA \citep{opera} and VCD~\citep{vcd}.
+Additionally, our work differs from the assumption in unimodal LLMs, where the semantic information present in the shallow layers interferes with factual recall in the final layer \citep{dola,DBLP:conf/icml/ChenXLWXGH24}.
+However, our method is actually parallel to previous approaches and can be combined to achieve better results.
+
+
+
+
+
+
+\section{Experiment}
+
+\label{sec:exp}
+\subsection{Setup}
+\textbf{Baselines.} 
+We integrate \Ours with various decoding methods, including greedy decoding, nucleus sampling, and beam search, and compare it against several baselines for mitigating hallucinations, as outlined below:
+Dola~\citep{dola} is specifically designed for alleviating hallucinations in factual tasks for LLMs by reducing shallow semantic influences to improve the factuality of the final layer’s output. 
+VCD~\citep{vcd} mitigates the influence of language model's priors in MLLMs by generating representations that enhance visual information through the subtraction of interfering knowledge prior during each sampling step.
+OPERA~\citep{opera} dynamically penalizes overconfident tokens based on the emergence of aggregation patterns, while proposing a retrospective allocation strategy to avoid cases where hallucinations have already occurred. 
+For all the baselines, we use the default hyperparameters from the source code for a fair comparsion.
+
+\textbf{Model.} 
+We select four of the most representative MLLM models for evaluation, including InstructBLIP~\citep{instructblip}, MiniGPT-4~\citep{minigpt4}, LLaVA-1.5 \citep{llava-1.5} and Qwen-VL ~\citep{Qwen-VL}. 
+All the MLLMs we used have a language model size of 7 billion parameters (7B).
+
+\textbf{Implementation Details.} 
+To select the appropriate preceding layers for hallucination mitigation, we conduct ablation experiments, details of which can be found in the Section~\ref{sec:analysis}.
+For a 7B-sized, 32-layer decoder-only architecture language model, we choose layers 20-28 as candidates for the preceding layers (according to the findings in Section \ref{sec:finding1}). For the image captioning and VQA tasks, $\alpha$ is set within the range of 0.1 to 0.6. In all experiments, we conduct inference on a single A800 GPU. The inference of 500 image-caption pairs take approximately 40 minutes.
+
+\input{./tables/chair_results}
+
+\subsection{Benchmark and metrics}
+\noindent\textbf{CHAIR.} Caption Hallucination Assessment with Image Relevance (CHAIR)~\citep{chair} metric, widely used in image captioning, identifies hallucinated objects by comparing the extracted objects with ground truth labels and evaluates both at the instance level ($\mathrm{CHAIR_I}$) and sentence level ($\mathrm{CHAIR_S}$), as shown in Eq.~\ref{eq:chair}. 
+Following~\citep{opera}, we conduct experiments using the same settings, including the consistent 500 images from the MSCOCO 2014 validation dataset and the identical prompt, ``\texttt{Please help me describe the image in detail.}''.
+\begin{align}  
+\label{eq:chair}
+    \mathrm{CHAIR_I} = \frac{|\{\text{hallucinated objects}\}|}{\text{all mentioned objects}}, 
+    \mathrm{CHAIR_S} = \frac{|\{\text{captions with hallucinated objects}\}|}{\text{all captions}}.   
+\end{align}   
+\input{./tables/pope_results}
+\noindent\textbf{POPE.} The Polling-based Object Probing Evaluation (POPE)~\citep{DBLP:conf/emnlp/LiDZWZW23} is a VQA-based metric for assessing object hallucination in MLLMs. 
+It evaluates hallucinations by asking questions such as ``\texttt{Is there a \textless object\textgreater\space in the image?}'' where \textless object\textgreater\space is derived from three types of splits: random (randomly selected objects), popular (frequently occurring objects), and adversarial (objects closely related to those in the image). 
+The evaluation includes 500 MSCOCO images, with six questions per image for each split. 
+We use F1 score for performance evaluation. 
+\noindent\textbf{MME.} The comprehensive MLLM Evaluation benchmark (MME) ~\citep{fu2023mme} assesses the perceptual and cognitive abilities of MLLMs across a total of 14 subtasks, including tasks such as OCR, visual knowledge, attribute relationships, and object recognition. 
+
+\noindent\textbf{GPT-4o assisted evaluation.}
+To further assess the model's performance in image captioning, we extend beyond the CHAIR metric, which targets object hallucination. 
+Following prior studies~\citep{opera,vcd}, an open evaluation is conducted using GPT-4o on 100 randomly sampled COCO images.
+GPT-4o assesses two assistants' descriptions in terms of Accuracy (C) and Detailedness (D).
+We introduce the prompt used in the experiments in Table~\ref{tab:4o-prompt}.
+\subsection{Experimental Results}
+\noindent\textbf{Results of hallucination in image captioning.}  
+Note that we use the baseline's original decoding settings for a fair comparison and run \Ours under the same settings.
+From Table~\ref{tab:chair}, we notice that \Ours consistently outperforms other approaches in mitigating hallucinations across four MLLMs—InstructBLIP, MiniGPT-4, LLaVA-1.5, and Qwen-VL—using three decoding strategies: greedy search, beam search, and nucleus sampling.
+We find that \Ours slightly outperforms OPERA, while our method demonstrates higher efficiency and simplicity in inference (see Section \ref{sec:analysis}).
+Additionally, VCD does not perform as well, likely due to producing an increased number of hallucinated descriptions during the generation process. 
+In conclusion, the proposed approach \Ours effectively reduces hallucinations in visual description tasks solely through dynamic decoding correction, achieving an average suppression rate of approximately \textbf{10.8\%} on image captioning datasets.
+\begin{wrapfigure}[11]{l}{0.36\textwidth}
+\centering
+\includegraphics[width=0.36\textwidth]{image/iclr2024_mme.pdf}
+\caption{\Ours generally improves the MLLM's performance.}
+\label{fig:mme}
+\end{wrapfigure}
+\noindent\textbf{Results of hallucination in VQA.}
+In contrast to image captioning, POPE employs a simple polling approach to assess hallucination levels in MLLMs with respect to object recognition.
+As shown in Table~\ref{tab:pope}, \Ours demonstrates superior performance across all settings, further validating the effectiveness of the proposed approach.
+Additionally, Figure~\ref{fig:mme} reveals that \Ours also achieves better results on MME, which evaluates the multifaceted VQA capabilities of LLaVA-1.5.
+These findings suggest that the underlying mechanism we identified not only applies to object recognition but also extends to attribute-related tasks and more complex reasoning tasks.
+
+\noindent\textbf{Results of GPT-4o's assistance.} 
+Following~\citep{opera, vcd}, we further use GPT-4o to evaluate our method against greedy decoding across four distinct models.
+From Table \ref{tab:gpt_4v}, we notice that our approach consistently outperform greedy decoding in terms of accuracy, demonstrating its efficacy in hallucination suppression. 
+The impact of decoding intervention is evident in the level of detail produced: for some models, our method yield only marginally higher or, in certain cases, slightly lower levels of detail compared to greedy decoding.
+Nonetheless, our method exhibit a clear advantage in mitigating hallucinations across all evaluated models.
+\input{./tables/gpt4v_results}
+\subsection{Analysis}
+\label{sec:analysis}
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+\centering
+\includegraphics[width=0.4\textwidth]{image/iclr2024_through_latency.pdf}
+\caption{Comparison of latency and throughput across different baselines.}
+\label{fig:latency}
+\end{wrapfigure}
+\paragraph{Latency and throughput analysis.}
+To evaluate the efficiency of \Ours, we compare its latency and throughput with several baselines, \textbf{including DoLa, OPERA, and VCD based on Greedy, Beam Search, and Nucleus Sampling, respectively}. Figure~\ref{fig:latency} illustrates the results of this comparison. 
+The findings indicate that {\Ours} operates within an acceptable efficiency cost, striking a balance between effectiveness and computational overhead. 
+Compared to the basic decoding process, the latency increase introduced by our method is approximately 1.2 times.
+In contrast, the latency increases for VCD and OPERA are 1.8 and 5.1 times, respectively.
+While both VCD and OPERA demonstrate comparable efficacy in mitigating hallucinations, their computational overheads remain relatively high. 
+This highlights the practical value of  {\Ours}, as it can be integrated into real-world applications without significantly compromising efficiency.
+
+\paragraph{Perturbation in the selected preceding-layer.} 
+To evaluate the effectiveness of the dynamic layer selection method, we introduce a random perturbation strategy. 
+Specifically, for the predetermined preceding layers, we add random values ranging from -5 to 5 to modify the selection of layers. 
+We randomly select 200 images from the MSCOCO dataset and prompt MLLMs to generate descriptions. 
+The results after incorporating the perturbations are presented in Table~\ref{tab:pertubation}. 
+Notably, the perturbed results demonstrate a significant degradation in performance, further validating the effectiveness of our proposed method.
+
+\input{./tables/pertubation}
+
+\paragraph{Hyperparameter analysis.} 
+Our method incorporates two primary hyperparameters: $\alpha$ and the selection of interval layers. 
+In the experiments, we employ \Ours based on greedy decoding.
+On the one hand, the hyperparameter $\alpha$ regulates the intensity of early information enhancement.
+Figure~\ref{fig:alpha} illustrates the performance across various $\alpha$ values.
+We observe that hallucination suppression is most effective when $\alpha$ approximates 0.6.
+As $\alpha$ increases, the efficacy of \Ours in mitigating hallucinations improves.
+However, it is crucial to note that excessively high $\alpha$ values may lead to the generation of atypical image descriptions, characterized by repetitive word usage. 
+On the other hand, the layer interval hyperparameter $\mathcal[a,b]$ determines the candidate layers for inclusion in the enhancement process. 
+We conduct experiments using intervals of four layers, with results presented in Figure~\ref{fig:layer_range}. 
+Our analysis reveals that hallucination suppression for MLLM is negligible in layers 1-16, while layers 20-28 demonstrate substantial mitigation of hallucinations.
+Notably, layers 29-32 exhibit minimal hallucination suppression, aligning with our findings discussed in Section~\ref{sec:finding2}.
+
+\begin{figure*}[h]
+    \centering
+    \subfigure[Ablation study of $\alpha$.]{
+        \includegraphics[width=0.44\textwidth]{image/iclr2024_alpha.pdf}
+        \label{fig:alpha}
+    }
+    \subfigure[Ablation study of interval layers.]{
+        \includegraphics[width=0.44\textwidth]{image/iclr2024_layer_interval.pdf}
+        \label{fig:layer_range}
+    }
+    \caption{Ablation experiment results for hyperparameter $\alpha$ and different interval layers.}
+    \label{fig:ablation}
+\end{figure*}
+
+\paragraph{Mitigating snowballing hallucinations.} Snowballing hallucinations are a prevalent issue in the responses generated by MLLMs.
+This phenomenon occurs when an initial hallucination triggers a sequence of subsequent errors, leading to a compounding effect that significantly degrades the quality and coherence of the generated text. Figure~\ref{snowballing} illustrates a typical example of snowballing hallucinations, where an initial misinterpretation of the visual input propagates through the decoding process, resulting in a highly inconsistent and erroneous output.
+Our approach can reduce the accumulation of errors and improves the overall consistency and accuracy of the generated responses. 
+
+
+\section{Related Work}
+
+
+\subsection{MLLM Hallucination Mechanism}
+Hallucination in MLLMs, characterized by contradictions between image input and textual output, has been a prevalent issue \citep{survey_lvlm,unihd}. 
+Current research on the mechanism of hallucination in MLLMs focuses on two key aspects: the interaction between images and text at different layers, and the prior bias of the LLM during decoding.
+Several studies have investigated the role of image-text interaction at different layers in MLLMs. 
+Grad-CAM \citep{Grad-CAM} visualizations reveal that image-text interaction exists in the preceding layers (1-11) but not in the deep layers.
+OPERA \citep{opera} further proposes that the ``Aggregation Pattern'' leads to hallucination, where visual information from preceding layers is gradually aggregated to anchor tokens, and focusing solely on these tokens during prediction while ignoring visual information leads to a high probability of hallucination in the generated sequence.
+However, other studies have revealed that MLLMs exhibit biases towards LLM priors, even in the presence of noisy or absent visual information.
+VCD \citep{vcd} discovers that MLLMs generate high-confidence answers even when the image is noisy or absent, indicating a bias towards LLM priors.  
+Similarly, PAI \citep{liu2024payingattention} describes this phenomenon as ``Text Inertia'' and posits that it stems from existing paradigms that map visual representations onto the text representations as tokens. 
+This leads to an inference process that fails to adequately account for image tokens, resulting in hallucinations.
+\subsection{Hallucination Mitigation for MLLMs}
+One straightforward approach to mitigate hallucination is to reduce the knowledge gaps and data bias between vision and language during model training. 
+Finetuning-based methods have been explored, focusing on crafting specific datasets \citep{ferret,DBLP:conf/aaai/GunjalYB24,ijcai2024p0687} and alignment training \citep{LLaVA-RLHF,RLHF-V,archit1,archit2} to achieve better knowledge alignment between images and text. While these methods have shown promising results, they often require expensive annotated paired data and substantial computational resources.
+
+Hallucination can also be mitigated by post-processing methods, which usually involve using additional tools or self-reflection strategies to revise the response.
+For instance, LURE \citep{lure} detects hallucinations using manually-crafted features and revises the generated text accordingly. 
+Woodpecker \citep{woodpecker} combines MLLM outputs with an expert VQA model to post-edit hallucinations. 
+VOLCANO \citep{Volcano} trains MLLMs to provide self-feedback and reflect on the original generated text. 
+However, these methods incur additional inference costs and delays, and require task-specific procedures and prompts to be designed \citep{inevitable}.
+Training-free decoding methods have been explored to mitigate hallucination. 
+OPERA \citep{opera} identifies an abnormal attention pattern that often accompanies hallucinated descriptions and proposes the mitigation method based on this pattern. VCD \citep{vcd} introduces the notion that visual uncertainty increases hallucination and proposes a contrast decoding method to alleviate the issue. 
+VDD \citep{vdd} proposes a ``Post-Hoc debias'' approach that ensures uniform scores for each answer in the absence of an image to mitigate the influence of LLM priors. 
+
+
+
+\section{Conclusion and Limitations}
+
+
+In this paper, we demonstrate that MLLMs exhibit an awareness of hallucinated objects, with earlier layers showing higher confidence, while tokens shaped by prior knowledge diminish the likelihood of true tokens in the final layers.
+Based on this insight, we introduce \Ours, dynamic correction decoding with preceding-layer knowledge to mitigate hallucinations. 
+Extensive experiments demonstrate the efficacy of our approach, which also shows  advantages in latency and throughput.% compared to baselines.
+
+\paragraph{Limitations.}
+(1) Lack of generalized research. Due to the GPU cost consideration, we conduct experiments solely on limited MLLMs, without exploring additional MLLMs or those with larger parameter sizes.
+(2) No free lunch. The results shown in Table~\ref{tab:gpt_4v} indicate that our method has a little negative impact on the level of detailedness metric.
+In future work, we aim to integrate \Ours with other strategies and explore approaches that can effectively balance truthfulness and diversity.
+
+
+
+
+

@@ -1,0 +1,700 @@
+\title{Transformers Learn Temporal Difference Methods for In-Context Reinforcement Learning}
+
+\begin{abstract}
+In-context learning refers to the learning ability of a model during inference time without adapting its parameters. The input (i.e., prompt) to the model (e.g., transformers) consists of both a context (i.e., instance-label pairs) and a query instance. The model is then able to output a label for the query instance according to the context during inference. A possible explanation for in-context learning is that the forward pass of (linear) transformers implements iterations of gradient descent on the instance-label pairs in the context. In this paper, we prove by construction that transformers can also implement temporal difference (TD) learning in the forward pass, a phenomenon we refer to as in-context TD. We demonstrate the emergence of in-context TD after training the transformer with a multi-task TD algorithm, accompanied by theoretical analysis. Furthermore, we prove that transformers are expressive enough to implement many other policy evaluation algorithms in the forward pass, including residual gradient, TD with eligibility trace, and average-reward TD.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In-context learning
+has emerged as one of the most remarkable abilities of large language models \citep{brown2020incontext,lieber2021jurassic,rae2021scaling,black2022gpt}.
+In in-context learning,
+the input (i.e., prompt) to the model consists of both a context (i.e., instance-label pairs) and a query instance.
+The model then outputs a label for the query instance during inference (i.e., the forward pass).
+An example of the model input and output could be 
+\begin{align}
+    \label{eq sl example}
+    \underbrace{5 \to \text{number} ; a \to \text{letter} ; 6 \to}_{\text{input}} \underbrace{\text{number}}_{\text{output}},
+\end{align}
+where ``$5 \to \text{number} ; a \to \text{letter}$'' is the context consisting of two instance-label pairs and ``$6$'' is the query instance.
+Based on the context,
+the model (e.g., \citet{team2023gemini,touvron2023llama,achiam2023gpt}) infers the label ``number'' for the query ``6''.
+Remarkably,
+this entire process occurs during the model's inference time without any adjustment to the model's parameters.
+Understanding the mechanism behind in-context learning has recently garnered significant attention \citep{garg2022can,akyurek2023learning,vonoswald2023transformers,ahn2024transformers}.
+
+The example in~\eqref{eq sl example} illustrates a supervised learning problem.
+In the canonical machine learning framework \citep{bishop2006pattern},
+this supervised learning problem is typically solved by first training a classifier based on the instance-label pairs in the context using methods such as gradient descent, and then asking the classifier to predict the label for the query instance.
+Remarkably, 
+\citet{akyurek2023learning,vonoswald2023transformers,ahn2024transformers}
+show that transformers are able to implement this gradient descent training process in their forward pass without adapting any of their parameters,
+providing a possible explanation for in-context learning.
+
+Beyond supervised learning, 
+intelligence involves sequential decision-making,
+where Reinforcement Learning (RL, \citet{sutton2018reinforcement}) has emerged as a successful paradigm.
+Can transformers preform in-context RL during inference, and how? 
+To address these questions,
+we start with a simple evaluation problem in a Markov Reward Process (MRP, \citet{puterman2014markov}).
+In an MRP,
+an agent transitions from state to state at every time step.
+We denote the sequence of states that the agent visits by $(S_0, S_1, S_2, \dots)$.
+At each state,
+the agent receives a reward.
+We denote the sequence of rewards that the agent receives along the way as $(r(S_0), r(S_1), r(S_2), \dots)$.
+The evaluation problem is to estimate the value function $v$,
+which computes for each state the expected total (discounted) rewards the agent will receive in the future.
+An example of the desired input-output could be
+\begin{align}
+    \label{eq rl example}
+    \underbrace{S_0 \to r(S_0); S_1 \to r(S_1); S_2 \to r(S_2); s \to}_\text{input} \underbrace{v(s)}_\text{output}.
+\end{align}
+Remarkably, 
+the above task is fundamentally different from supervised learning as the goal is to predict the value $v(s)$ and not the immediate reward $r(s)$. 
+Moreover, the query state $s$ is arbitrary and does not have to be $S_3$.
+Temporal Difference learning (TD, \citet{sutton1988learning}) is the 
+most widely used RL algorithm for solving such evaluation problems in~\eqref{eq rl example}.
+And it is well known that TD is \emph{not} gradient descent \citep{sutton2018reinforcement}. 
+
+In this work,
+we make three main contributions.
+\tb{First}, we prove by construction that transformers are expressive enough to implement TD in the forward pass,
+a phenomenon we refer to as \emph{in-context TD}. 
+In other words,
+transformers can solve problem~\eqref{eq rl example} during inference time via in-context TD.
+Beyond the most straightforward TD,
+transformers can also implement many other policy evaluation algorithms,
+including
+residual gradient \citep{baird1995residual},
+TD with eligibility trace \citep{sutton1988learning},
+and average-reward TD \citep{tsitsiklis1999average}.
+In particular,
+to implement average-reward TD,
+transformers require the use of multi-head attention and over-parameterized prompts, e.g.,
+\begin{align}
+    \label{eq rl example memory}
+    \underbrace{S_0 \to r(S_0) \, \square; S_1 \to r(S_1)\, \square; S_2 \to r(S_2)\, \square; s \to}_\text{input} \underbrace{v(s)}_\text{output}.
+\end{align}
+Here, ``$\square$'' acts as a dummy placeholder that the transformers will use as ``memory'' during inference.
+\tb{Second},
+we empirically demonstrate that by training transformers with TD on multiple randomly generated evaluation problems,
+in-context TD emerges.
+In other words, the learned transformer parameters closely match our construction in proofs.
+We call this training scheme \emph{multi-task TD}.
+\tb{Third},
+we bridge the gap between our theories and empirical results
+by showing that for a single layer transformer,
+the transformer parameters required in the proof to implement in-context TD is in a subset of the invariant set of the training algorithm multi-task TD.
+
+
+\section{Background}
+
+\textbf{Transformers and Linear Self-Attention.}
+All vectors in this paper are column vectors.
+We denote the identity matrix in $\R^n$ by $I_n$ and an $m \times n$ all-zero matrix by $0_{m\times n}$.
+We use $Z^\top$ to denote transpose of $Z$ and use both $\indot{x}{y}$ and $x^\top y$ to denote the inner product.
+Given a prompt $Z \in \R^{d \times n}$, standard single-head self-attention \citep{vaswani2017} processes the prompt by
+$
+    \text{Attn}_{W_k, W_q, W_v}(Z) \doteq W_v Z\,  \softmax{Z^\top W_k^\top W_q Z},
+$
+where $W_v \in \R^{d \times d}, W_k \in \R^{m \times d}$, and  $W_q \in \R^{m \times d}$ represent the value, key and query weight matrices, respectively.
+The softmax function is applied to each row. 
+Linear attention has recently drawn more attention \citep{schlag2021linear,vonoswald2023transformers,ahn2024transformers},
+where the softmax function is replaced by an identity function.
+Given a prompt $Z\in\R^{(2d+1) \times (n+1)}$,
+we follow \citet{ahn2024transformers} and define 
+linear self-attention as
+\begin{align}
+    \label{eq linear attention}
+    \attn(Z; P, Q) \doteq PZM(Z^\top Q Z),
+\end{align}
+where $P \in \R^{(2d+1) \times (2d+1)}$ and $Q \in \R^{(2d+1) \times (2d+1)}$ are parameters and $M \in \R^{(n+1) \times (n+1)}$ is a \emph{fixed} mask of the input matrix $Z$, defined as
+\begin{align}
+    \label{eq td0 mask}
+    \textstyle M \doteq \mqty[I_{n} & 0_{n \times 1} \\ 
+    0_{1 \times n} & 0].
+\end{align}
+Note that we can view $P$ and $Q$ as reparameterizations of the original weight matrices for simplifying presentation.
+The mask $M$ is introduced for in-context learning, following \citet{ahn2024transformers}, to designate the last column of $Z$ as the query and the first $n$ columns as the context.
+We use this fixed mask in most of this work. 
+However, the linear self-attention mechanism can be altered using a different mask $M'$, when necessary, by defining $\attn(Z; P, Q, M') = PZM'(Z^\top QZ)$.
+In an $L$-layer transformer with parameters $\qty{(P_l, Q_l)}_{l=0,\dots, L-1}$, the input $Z_0$ evolves layer by layer as
+\begin{align}
+    \textstyle Z_{l+1} \doteq Z_l + \frac{1}{n} \attn_{P_l, Q_l}(Z_l) = Z_l + \frac{1}{n} P_l Z_l M(Z_l^\top Q_l Z_l). \label{eq: Z_l update}
+\end{align}
+Here $\frac{1}{n}$ is a normalization factor simplifying presentation.
+We follow the convention in \citet{vonoswald2023transformers,ahn2024transformers} and use
+\begin{align}
+    \textstyle \tf_L(Z_0; \qty{P_l, Q_l}_{l=0,1,\dots L-1} ) \doteq -Z_L[2d+1, n+1] \label{eq: tf output convention}
+\end{align}
+to denote the output of the $L$-layer transformer,
+given an input $Z_0$. Note that $Z_l[2d+1, n+1]$ is the bottom-right element of $Z_l$. 
+
+\tb{In-Context Supervised Learning as Gradient Descent.}
+A linear regression task can be represented by an instance distribution $d_\fX$ and a ground truth weight $w_*$.
+A training set
+$\{(x^{(i)} \in \R^{2d}, y^{(i)} \in \R)\}_{i=1,\dots, n}$
+is usually constructed by sampling $n$ instances $\{x^{(i)}\}$ from $d_\fX$ in an i.i.d. manner and constructing the targets as $y^{(i)} \doteq w_*^\top x^{(i)}$.
+For a new instance $x^{(n+1)}$ sampled from $d_\fX$, the goal is to predict the correct target $y^{(n+1)}$.
+To demonstrate in-context learning,
+one constructs a prompt matrix as 
+    $
+    Z_0 \doteq \mqty[x^{(1)} & \dots & x^{(n)} & x^{(n+1)} \\ y^{(1)} & \dots & y^{(n)} & 0],
+    $
+where the bottom right zero reflects that the target for $x^{(n+1)}$ is unknown.
+The $L$-layer transformer is trained via gradient descent to minimize the following in-context loss
+\begin{align}
+    \label{eq ic regression loss}
+    \textstyle \E_{(d_\fX, w_*) \sim d_\text{task}, Z_0 \sim d_\fX}[(\tf_L(Z_0; \qty{P_l, Q_l}_{l=0,1,\dots,L-1}) - w_*^\top x^{(n+1)})^2],
+\end{align}
+where we have assumed that there is a distribution $d_\text{task}$ over such regression tasks.
+When a new regression task $(d_\fX^\text{test}, w_*^\text{test})$ is sampled from $d_\text{task}$ and a new input $Z_0^\text{test}$ is constructed, the trained transformer, using $Z_0^\text{test}$ as input, approximates the target $\indot{x^{(n+1), \text{test}}}{w_*^\text{test}}$.
+This is a form of meta-learning \citep{vilalta2002perspective}.
+Surprisingly, the transformer's ability to achieve this stems from its implementation of gradient descent \textit{within} its forward pass.
+As proved by \cite{ahn2024transformers},
+by minimizing the in-context loss in~\eqref{eq ic regression loss},
+we may end up with a transformer parameterized by, say $\{(P_l^*, Q_l^*)\}_{l=0,\dots,L-1}$,
+that has the following remarkable effect.
+Feeding the prompt $Z_0$ into this $L$-layer transformer,
+we get $Z_1, \dots, Z_L$ following~\eqref{eq: Z_l update}.
+We denote the right bottom element of $Z_l$ as $y^{(n+1)}_l$.
+\cite{ahn2024transformers} then prove that for $l=0,1,\dots, L$,
+we have
+    $
+    y_l^{(n+1)} = - w_l^\top x^{(n+1)},
+    $
+where
+$
+    w_{l+1} \doteq  w_l + \frac{1}{n} \sum_{i=1}^n (y^{(i)} - w_l^\top x^{(i)}) x^{(i)}
+    $
+with $w_0 = 0$.
+This sequence $\qty{w_l}$ mirrors that produced by running gradient descent on the demonstrations $\{(x^{(i)}, y^{(i)})\}$ to minimize the squared loss $\frac{1}{n} \sum_{i=1}^n (y^{(i)} - w^\top x^{(i)})^2$.
+In other words,
+unrolling this transformer layer by layer is equivalent to performing gradient descent iteration by iteration.
+
+\tb{Reinforcement Learning.}
+We consider an infinite horizon Markov Decision Process (MDP, \citet{puterman2014markov}) with a finite state space $\fS$,
+a finite action space $\fA$,
+a reward function $r_\mdp: \fS \times \fA \to \R$,
+a transition function $p_\mdp: \fS \times \fS \times \fA \to [0, 1]$,
+a discount factor $\gamma \in [0, 1)$,
+and an initial distribution $p_0: \fS \to [0, 1]$.
+An initial state $S_0$ is sampled from $p_0$.
+At a time $t$,
+an agent at a state $S_t$
+ takes an action $A_t \sim \pi(\cdot | S_t)$,
+where $\pi: \fA \times \fS \to [0, 1]$ is the policy being followed by the agent,
+receives a reward $R_{t+1} \doteq r_\mdp(S_t, A_t)$,
+and transitions to a successor state $S_{t+1} \sim p_\mdp(\cdot | S_t, A_t)$.
+If the policy $\pi$ is fixed, the MDP can be simplified to a Markov Reward Process (MRP) where transitions and rewards are determined solely by the current state:$S_{t+1} \sim p(\cdot | S_t)$ with $R_{t+1} \doteq r(S_t)$.
+Here $p(s' | s) \doteq \sum_a \pi(a | s) p_\mdp(s'|s, a)$ and $r(s) \doteq \sum_a \pi(a|s) r_\mdp(s, a)$.
+In this work,
+we consider the policy evaluation problem where the policy $\pi$ is fixed.
+So it suffices to consider only
+an MRP represented by the tuple $(p_0, p, r)$,
+and trajectories $(S_0, R_1, S_1, R_2, \dots)$ sampled from it.
+The value function of this MRP is defined as
+    $
+    v(s) \doteq \E\left[\sum_{i = t+1}^\infty \gamma^{i - t -1} R_i | S_t = s\right]
+    $.
+Estimating the value function $v$ is one of the fundamental tasks in RL.
+To this end, one can consider a linear architecture.
+Let $\phi: \fS \to \R^d$ be the feature function.
+The goal is then to find a weight vector $w \in \R^d$ such that for each $s$, the estimated value $\hat{v}(s; w) \doteq w^\top \phi(s)$
+approximates $v(s)$.
+TD is a prevalent method for learning this weight vector,
+which updates $w$ iteratively as
+\begin{align}
+    w_{t+1} =& w_t + \alpha_t \left(R_{t+1} + \gamma \hat{v}\left(S_{t+1};w_t\right) - \hat{v}\left(S_{t};w_t\right)\right) \nabla \hat{v}\left(S_{t};w_t\right) \\
+    =& w_t + \alpha_t \left(R_{t+1} + \gamma w_t^\top \phi(S_{t+1}) - w_t^\top \phi(S_t)\right) \phi(S_t), \label{eq: linear td(0)}
+\end{align}
+where $\qty{\alpha_t}$ is a sequence of learning rates.  
+Notably, TD is not a gradient descent algorithm.
+It is instead considered as a \emph{semi-gradient} algorithm because the gradient is only taken with respect to $\hat{v}\left(S_{t};w_t\right)$ and does not include the dependence on $\hat{v}\left(S_{t+1};w_t\right)$ \citep{sutton2018reinforcement}. 
+Including this dependency modifies the update to 
+\begin{align}
+    w_{t+1} = w_t + \alpha_t \left(R_{t+1} + \gamma w_t^\top \phi(S_{t+1}) - w_t^\top \phi(S_t)\right) \left(\phi(S_t)- \gamma\phi(S_{t+1}) \right), \label{eq: residual grad td(0)}
+\end{align}
+known as the (naive version of) residual gradient method \citep{baird1995residual}.\footnote{This is a naive version because the update does not account for the double sampling issue. We refer the reader to Chapter 11 of \citet{sutton2018reinforcement} for detailed discussion.}
+The update in~\eqref{eq: linear td(0)} is also called TD(0) -- a special case of the TD($\lambda$) algorithm \citep{sutton1988learning}.
+TD($\lambda$) employs an eligibility trace that accumulates the gradients as
+    $e_{-1} \doteq 0, \ e_{t} \doteq \gamma\lambda e_{t-1} + \phi(S_t)$ and updates $w$ iteratively as
+\begin{align}
+    w_{t+1} = w_t + \alpha_t (R_{t+1} + \gamma w_t^\top \phi(S_{t+1}) - w_t^\top \phi(S_t)) e_t.
+\end{align}
+The hyperparameter $\lambda$ controls the decay rate of the trace.
+If $\lambda=0$, we recover~\eqref{eq: linear td(0)}.
+On the other end with $\lambda = 1$, 
+it is known that TD($\lambda$) recovers Monte Carlo \citep{sutton1988learning}.
+Another important setting in RL is the average-reward setting \citep{puterman2014markov,sutton2018reinforcement}, focusing on the rate of receiving rewards, without using a discount factor $\gamma$. 
+The average reward $\bar{r}$ is defined as $\bar{r} \doteq \lim_{T \to \infty} \frac{1}{T} \sum_{t=1}^T \E[R_t]$.
+Similar to the value function in the discounted setting,
+a differential value function $\bar v(s)$ is defined for the average-reward setting as $\bar v(s) \doteq \E\left[\sum_{i=t+1}^\infty (R_i - \bar{r}) | S_t = s\right]$.
+One can similarly estimate $\bar v(s)$ using a linear architecture with a vector $w$ as $w^\top \phi(s)$.
+Average-reward TD \citep{tsitsiklis1999average} updates $w$ iteratively as
+\begin{align}
+    w_{t+1} = w_t + \alpha_t \qty(R_{t+1} - \bar{r}_{t+1} + w_t^\top \phi(S_{t+1}) - w_t^\top \phi(S_t)) \phi(S_t),
+\end{align}
+where $\bar r_t \doteq \frac{1}{t}\sum_{i=1}^t R_i$ is the empirical average of the received reward.
+
+
+
+\section{Transformers Can Implement In-Context TD(0)}
+
+In this section,
+we prove that transformers are expressive enough to implement TD(0) in its forward pass.
+Given a trajectory $(S_0, R_1, S_1, R_2, S_3, R_4, \dots, S_n)$ sampled from an MRP,
+using as shorthand $\phi_i \doteq \phi(S_i)$, 
+we define for $l = 0, 1, \dots, L-1$
+\begin{align}
+    \!\!\!\!\!\! Z_0 = \mqty[\phi_0 & \dots & \phi_{n-1} & \phi_n \\ \gamma \phi_1 & \dots & \gamma \phi_n & 0 \\ R_1 & \dots & R_n & 0], \, P_l^{\td} \doteq& \mqty[0_{2d \times 2d} & 0_{2d \times 1} \\ 0_{1 \times 2d} & 1], \,    Q_l^{\td} \doteq \mqty[-C_l^\top & C_l^\top & 0_{d \times 1} \\ 0_{d \times d} & 0_{d \times d} & 0_{d \times 1} \\ 0_{1 \times d} & 0_{1 \times d} & 0].
+     \label{eq: Z_0 P Q TD define}
+\end{align}
+Here $Z_0 \in \R^{(2d+1) \times (n+1)}$ is the prompt matrix, 
+$C_l \in \R^{d \times d}$ is an arbitrary matrix, 
+and $\qty{(P_l^\td, Q_l^\td)}_{l=0,1,\dots, L-1}$ are the parameters of the $L$-layer transformer. 
+We then have
+\begin{theorem}[Forward pass as TD(0)]
+\label{thm: TD(0)}
+    Consider the L-layer linear transformer following \eqref{eq: Z_l update}, using the mask~\eqref{eq td0 mask}, parameterized by $\qty{P_l^{\td}, Q_l^{\td}}_{l=0,\dots, L-1}$ in \eqref{eq: Z_0 P Q TD define}. 
+    Let $y_l^{(n+1)}$ be the bottom right element of the $l$-th layer's output, i.e.,  $y_l^{(n+1)} \doteq Z_l[2d+1, n+1]$.
+    Then, it holds that $y_l^{(n+1)} =  - \indot{\phi_n}{w_l}$,
+    where $\qty{w_l}$ is defined as $w_0 = 0$ and
+    \begin{align}
+     w_{l+1} &\textstyle = w_l + \frac{1}{n} C_l \sum_{j=0}^{n-1}  \left(R_{j+1} + \gamma w_l^\top\phi_{j+1} - w_l^\top\phi_j\right)\phi_j. \label{eq: TD(0) w_update}
+    \end{align}
+\end{theorem}
+ 
+Notably, Theorem~\ref{thm: TD(0)} holds for any $C_l$.
+In particular,
+if $C_l = \alpha_l I$,
+then the update~\eqref{eq: TD(0) w_update} becomes a batch version of TD(0) in~\eqref{eq: linear td(0)}.
+For a general $C_l$,
+the update~\eqref{eq: TD(0) w_update} can be regarded as preconditioned batch TD(0) \citep{yao2008preconditioned}.
+Theorem~\ref{thm: TD(0)} precisely demonstrates that transformers are expressive enough to implement iterations of TD in its forward pass.
+We call this \emph{in-context TD}.
+It should be noted that although the construction of $Z_0$ in \eqref{eq: Z_0 P Q TD define} uses $\phi_n$ as the query state for conceptual clarity, any arbitrary state $s \in \mathcal{S}$ can serve as the query state and Theorem~\ref{thm: TD(0)} still holds.
+In other words, by replacing $\phi_n$ with $\phi(s)$,
+the transformer will then estimate $v(s)$.
+Notably,
+if the transformer has only one layer, i.e., $L=1$,
+there are other parameter configurations that can also implement in-context TD(0).
+\begin{corollary}
+    \label{cor one layer}
+    Consider the 1-layer linear transformer following \eqref{eq: Z_l update}, using the mask~\eqref{eq td0 mask}.
+    Consider the following parameters
+    \begin{align}
+        \label{eq pq one layer}
+        P_0^{\td} \doteq& \mqty[0_{2d \times 2d} & 0_{2d \times 1} \\ 0_{1 \times 2d} & 1], \,    Q_0^{\td} \doteq \mqty[-C_l^\top & 0_{d\times d} & 0_{d \times 1} \\ 0_{d \times d} & 0_{d \times d} & 0_{d \times 1} \\ 0_{1 \times d} & 0_{1 \times d} & 0]
+    \end{align}
+    Then, it holds that $y_1^{(n+1)} =  - \indot{\phi_n}{w_1}$,
+    where $w_1$ is defined as 
+    \begin{align}
+     w_{1} &\textstyle = w_0 + \frac{1}{n} C_l \sum_{j=0}^{n-1}  \left(R_{j+1} + \gamma w_0^\top\phi_{j+1} - w_0^\top\phi_j\right)\phi_j \qq{with $w_0 = 0$.}
+    \end{align}
+\end{corollary}
+ An observant reader may notice that this corollary holds primarily because $w_0 = 0$, making it a unique result for $L=1$.
+Nevertheless, 
+this special case helps understand a few empirical and theoretical results below.
+    
+
+
+\section{Transformers Do Implement In-Context TD(0)}
+
+It has been observed that in-context gradient descent emerges during the minimization of the in-context regression loss~\eqref{eq ic regression loss} via gradient descent.
+In this section,
+we demonstrate the emergence of in-context TD both theoretically and empirically.
+
+\textbf{Multi-Task Temporal Difference Learning.}
+The in-context regression loss essentially trains the transformer with multiple regression tasks.
+Inspired by this,
+we propose to train the transformer with multiple evaluation tasks from multiple MRPs.
+Recall, an MRP is defined by the tuple $(p_0, p, r)$.
+For the evaluation problem, the feature function $\phi$ also matters.
+We therefore
+define an evaluation task to be the tuple $(p_0, p, r, \phi)$.
+Assuming a distribution $d_\text{task}$ over these tuples, we sample evaluation tasks from this distribution.
+For each sampled task,
+we apply TD to train the transformer to solve the corresponding evaluation problem,
+as described in the following multi-task TD algorithm (Algorithm~\ref{deep td}). \\
+\begin{algorithm}[H]
+    \caption{\label{deep td} Multi-Task Temporal Difference Learning}
+    \begin{algorithmic}[1]
+        \STATE \textbf{Input:} 
+        context length $n$, 
+        MRP sample length $\tau$, 
+        number of training MRPs $k$, 
+        learning rate $\alpha$, 
+        discount factor $\gamma$, 
+        transformer parameters $\theta \doteq \qty{P_l, Q_l}_{l=0,1,\dots L-1}$
+        \FOR{$i \gets 1$ \textbf{to} $k$}
+            \STATE Sample $(p_0, p, r, \phi)$ from $d_\text{task}$ \CommentSty{\, // see, e.g
+            \STATE Sample $(S_0, R_1, S_1, R_2, \dots, S_{\tau}, R_{\tau+1}, S_{\tau+1})$ from the MRP $(p_0, p, r)$ 
+            \FOR{$t = 0, \dots, \tau- n - 1$}
+                \STATE $Z_0 \gets \mqty[\phi_t & \cdots & \phi_{t+n-1} & \phi_{t+n+1} \\
+                             \gamma \phi_{t+1} & \cdots & \gamma \phi_{t+n} & 0\\
+                             R_{t+1} & \cdots & R_{t+n} & 0 ]$, 
+                             $Z_0' \gets \mqty[\phi_{t+1} & \cdots & \phi_{t+n} & \phi_{t+n+2} \\
+                             \gamma \phi_{t+2} & \cdots & \gamma \phi_{t+n+1} & 0\\
+                             R_{t+2} & \cdots & R_{t+n+1} & 0 ]$
+                \STATE  $\theta \gets \theta + \alpha (R_{t+n+2} + \gamma \tf_L(Z_0'; \theta) - \tf_L(Z_0; \theta)) \nabla_\theta \tf_L(Z_0; \theta)$ \CommentSty{\, // TD}
+            \ENDFOR
+        \ENDFOR
+    \end{algorithmic}
+\end{algorithm}
+Recall that $\tf_L(Z_0; \theta)$ and $\tf_L(Z_0'; \theta)$ are intended to estimate $v(S_{t+n+1})$ and $v(S_{t+n+2})$ respectively.
+So Algorithm~\ref{deep td} essentially applies TD using $(S_{t+n+1}, R_{t+n+2}, S_{t+n+2})$ to train the transformer.
+Ideally,
+when a new prompt $Z_\text{test}$ is constructed using a trajectory from a new evaluation task $(p_0, p, r, \phi)_\text{test} \sim d_\text{task}(\cdot)$,
+we would like the predicted value $\tf_L(Z_\text{test}; \theta)$ with $\theta$ from Algorithm~\ref{deep td} to be close to the value of the query state in $Z_\text{test}$.
+This problem is a multi-task meta-learning problem, a well-explored area with many existing methodologies \citep{beck2023survey}.
+However, the unique and significant aspect of our work is the demonstration that in-context TD emerges in the learned transformer, providing a novel \emph{explanation} for how the model solves the problem. 
+
+\tb{Theoretical Analysis.}
+The problem that Algorithm~\ref{deep td} aims to solve is highly non-convex and non-linear (the linear transformer is still a nonlinear function).
+We analyze a simplified version of Algorithm~\ref{deep td} and leave the treatment to the full version for future work.
+In particular,
+we study the single layer case with $L=1$
+and
+let $\theta \doteq (P_0, Q_0)$ be the parameters of the single-layer transformer.
+We consider expected updates, i.e.,
+\begin{align}
+    \!\!\!\!\!\!\!
+    \theta_{k+1} =& \theta_k + \alpha_k \Delta(\theta_k) \text{ with }
+    \Delta(\theta) \doteq \E\left[(R + \gamma \tf_1(Z_0', \theta) - \tf_1(Z_0, \theta)) \nabla \tf_1(Z_0, \theta)\right]. \label{eq: expected theta update}
+\end{align}
+Here the expectation integrates both the randomness in sampling $(p_0, p, r, \phi)$ from $d_\text{task}$ and the randomness in constructing $\qty(R, Z_0, Z_0')$ thereafter.
+ We sample $(S_0, R_1, S_1, \dots, S_{n+1}, R_{n+2}, S_{n+2})$ following $(p_0, p, r)$ and construct using shorthand $\phi_i \doteq \phi(S_i)$
+\begin{align}
+\label{eq: prompt for invariant set markovian}
+\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\!\! Z_0 \doteq \mqty[\phi_0 & \dots & \phi_{n-1} & \phi_{n+1} \\
+                     \gamma \phi_1 & \dots & \gamma \phi_{n} & 0 \\
+                     R_1 & \dots & R_n & 0],
+    Z_0' \doteq \mqty[\phi_1 & \dots & \phi_{n} & \phi_{n+2} \\ 
+                      \gamma \phi_2 & \dots & \gamma \phi_{n+1} & 0 \\ 
+                      R_2 & \dots & R_{n+1} & 0], 
+    R \doteq R_{n+2}.
+\end{align}
+The structure of $Z_0$ and $Z_0'$ is similar to those in Algorithm~\ref{deep td}. The main difference is that we do not use the sliding window.
+We recall that $(p_0, p, r, \phi)$ are random variables with joint distribution $d_\text{task}$. Here, $\phi$ is essentially a random matrix taking value in $\R^{d \times \ns}$, represented as, $\phi = [\phi(s)]_{s \in \fS}$.
+We use $\triangleq$ to denote ``equal in distribution" and make the following assumptions.
+\begin{assumption}
+    \label{assumption independence}
+    The random matrix $\phi$ is independent of $(p_0, p, r)$.
+\end{assumption}
+\begin{assumption}
+    \label{assumption symmetry}
+    $\Pi \phi \triangleq \phi, \Lambda \phi \triangleq \phi$,
+    where $\Pi$ is any $d$-dimensional permutation matrix and $\Lambda$ is any diagonal matrix in $\R^d$ where each diagonal element of $\Lambda$ can only be $-1$ or $1$.
+\end{assumption}
+Those assumptions are easy to satisfy.
+For example,
+as long as the elements of the random matrix $\phi$ are i.i.d. from a symmetric distribution centered at zero, e.g., a uniform distribution on $[-1, 1]$,
+then both assumptions hold.
+We say a set $\Theta$ is an invariant set of~\eqref{eq: expected theta update} if for any $k$, $\theta_k \in \Theta \implies \theta_{k+1} \in \Theta$.
+Define
+\begin{align}
+            \theta_*(\eta, c, c') \doteq&  \textstyle \left(P_0 = \mqty[0_{2d \times 2d} & 0_{2d \times 1} \\ 0_{1 \times 2d} & \eta], Q_0 =  \mqty[c I_d & 0_{d \times d} & 0_{d \times 1} \\ c' I_d  & 0_{d \times d} & 0_{d \times 1} \\ 0_{1 \times d} & 0_{1 \times d} & 0] \right)  \label{eq: optimal single layer}.
+         \end{align}
+\begin{theorem}
+    Let Assumptions \ref{assumption independence} and \ref{assumption symmetry} hold.
+    For the~\eqref{eq: prompt for invariant set markovian} construction of $(R, Z_0, Z_0')$,
+    then $\Theta_* \doteq \qty{\theta_*(\eta, c, c') | \eta, c, c' \in \R}$ is an invariant set of~\eqref{eq: expected theta update}.
+\label{thm: fixed point analysis}
+\end{theorem}
+ Theorem~\ref{thm: fixed point analysis} demonstrates that once $\theta_k$ enters $\Theta_*$ at some $k$,
+it can never leave,
+i.e.,
+$\Theta_*$ is a candidate set that the update~\eqref{eq: expected theta update} can \emph{possibly} converge to.
+Consider a subset $\Theta_*' \subset \Theta_*$ with a stricter constraint $c' = 0$,
+i.e., $\Theta_*' \doteq \qty{\theta_*(\eta, c, 0) | \eta, c \in \R}$.
+Corollary~\ref{cor one layer} then confirms that all parameters in $\Theta_*'$ implement in-context TD.
+That being said,
+whether~\eqref{eq: expected theta update} is guaranteed to converge to $\Theta_*$,
+or further to $\Theta_*'$,
+is left for future work. 
+
+\tb{Empirical Analysis.}
+We now empirically study Algorithm~\ref{deep td}.
+To this end,
+we construct $d_\text{task}$ based on Boyan's chain \citep{boyan1999least},
+a canonical environment for diagnosing RL algorithms.
+We keep the structure of Boyan's chain but randomly generate initial distributions $p_0$, 
+transition probabilities $p$, reward functions $r$,
+and the feature function $\phi$.
+Details of this random generation process are provided in Algorithm~\ref{alg:boyan generation} with Figure~\ref{fig:boyan chain} visualizing Boyan's chain, 
+both
+For the linear transformer specified in \eqref{eq: Z_l update}, we first consider the autoregressive case following ~\citep{akyurek2023learning, vonoswald2023transformers}, 
+where all the transformer layers share the same parameters,
+i.e., $P_l \equiv P_0$ and $Q_l \equiv Q_0$ for $l=0,1, \dots, L-1$. We consider a three layer transformer $(L=3)$.
+Importantly, all elements of $P_0$ and $Q_0$ are equally trainable --
+we did not force any element of $P_0$ and $Q_0$ to be 0.
+We then run Algorithm~\ref{deep td} with Boyan's chain based evaluation tasks (i.e., $d_\text{task}$) to train this autoregressive transformer.
+The dimension of the feature is $d = 4$ (i.e., $\phi(s) \in \R^4$).
+
+Figure~\ref{fig: linear attention parameters auto l=3} visualizes the final 
+learned $P_0$ and $Q_0$ by Algorithm~\ref{deep td} after 4000 MRPs (i.e., $k=4000$),
+which
+closely match our specifications $P^{\td}$ and $Q^{\td}$ in~\eqref{eq: Z_0 P Q TD define} with $C_l = I_d$.
+In Figure~\ref{fig: linear attention metrics auto l=3}, 
+we visualize the element-wise learning progress of $P_0$ and $Q_0$.
+We observe that the bottom right element of $P_0$ increases (the $P_0[-1, -1]$ curve)
+while the average absolute value of all other elements remain close to zero (the ``Avg Abs Others'' curve),
+closely aligning with $P^{\td}$ up to some scaling factor. 
+Furthermore, the trace of the upper left $d \times d$ block of $Q_0$ approaches $-d$ (the $\tr(Q_0[:d,:d])$ curve), 
+and the trace of the upper right block (excluding the last column) approaches $d$ (the $\tr(Q_0[:d, d:2d])$ curve). 
+Meanwhile, the average absolute value of all the other elements in $Q_0$ remain near zero, 
+aligning with $Q^\td$ using $C_l = I_d$ up to some scaling factor.
+\begin{figure}[h]
+\centering
+  \begin{subfigure}[b]{0.39\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{img/linear/standard/PQ_mean_1_4000.pdf}
+    \caption{Learned $P_0$ and $Q_0$ after 4000 MRPs}
+    \label{fig: linear attention parameters auto l=3}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.6\textwidth}
+    \centering
+    \includegraphics[width=0.4\textwidth]{img/linear/standard/P_metrics_1.pdf}
+    \includegraphics[width=0.4\textwidth]{img/linear/standard/Q_metrics_1.pdf}
+    \caption{Element-wise learning progress of $P_0$ and $Q_0$}
+    \label{fig: linear attention metrics auto l=3}
+  \end{subfigure}
+ \caption{Visualization of the learned transformers and the learning progress.
+ Both (a) and (b) are averaged across 30 seeds and the shaded region in (b) denotes the standard errors. 
+ Since $P_0$ and $Q_0$ are in the same product in~\eqref{eq linear attention},
+ the algorithm can rescale both or flip the sign of both, but still end up with exactly the same transformer.
+ Therefore,
+ to make sure the visualization are informative,
+ we rescale $P_0$ and $Q_0$ properly first before visualization.
+
+ }
+  \label{fig: linear parameter convergence auto l=3} 
+\end{figure}
+In particular,
+besides showing the parameter-wise convergence in Figure~\ref{fig: linear parameter convergence auto l=3},
+we also use other metrics including value difference,
+implicit weight similarity, and sensitivity similarity,
+inspired by~\citet{vonoswald2023transformers,akyurek2023learning},
+to examine the learned transformer.
+
+as well as \tb{different choices of hyperparameters} in Algorithm~\ref{deep td}.
+
+The overall conclusion is the same -- in-context TD emerges in the transformers learned by Algorithm~\ref{deep td}.
+Notably, Theorem~\ref{thm: TD(0)} and Corollary~\ref{cor one layer} suggests that for $L=1$,
+there are two distinct ways to implement in-context TD (i.e., \eqref{eq: Z_0 P Q TD define} v.s. \eqref{eq pq one layer}).
+
+aligning well with Theorem~\ref{thm: fixed point analysis}.
+For $L=2,3,4$,
+Algorithm~\ref{deep td} always ends up with~\eqref{eq: Z_0 P Q TD define} in Theorem~\ref{thm: TD(0)},
+
+We also empirically observed that for in-context TD to emerge,
+the task distribution $d_\text{task}$ has to be ``difficult'' enough.
+For example, 
+if $(p_0, p)$ or $\phi$ are always fixed,
+we did not observe the emergence of in-context TD.
+
+
+\section{Transformers Can Implement More RL Algorithms}
+
+In this section, 
+we prove that transformers are expressive enough
+to implement three additional well-known RL algorithms in the forward pass.
+We warm up with the (naive version of) residual gradient (RG).
+We then move to the more difficult TD($\lambda$).
+This section culminates with average-reward TD,
+which requires multi-head linear attention and memory within the prompt.
+We do note that whether those three RL algorithms will emerge after training is left for future work.
+
+\textbf{Residual Gradient.}
+The construction of RG is an easy extension of~Theorem~\ref{thm: TD(0)}. 
+We define
+\begin{align}
+    P_l^{\rg} = P_l^{\td}, Q_l^{\rg} 
+    \doteq \mqty[-C_l^\top & C_l^\top & 0_{d \times 1} \\
+                 C_l^\top  & -C_l^\top & 0_{d \times 1} \\ 
+                 0_{1 \times d} & 0_{1 \times d} & 0] \in \R^{(2d+1) \times (2d+1)}. \label{eq: P and Q def RG}
+\end{align}
+
+\begin{corollary}[Forward pass as Residual Gradient]
+    \label{corollary: true RG}
+    Consider the L-layer linear transformer following \eqref{eq: Z_l update}, using the mask~\eqref{eq td0 mask}, parameterized by $\qty{P_l^{\rg}, Q_l^{\rg}}_{l=0,\dots, L-1}$ in \eqref{eq: P and Q def RG}.
+    Define $y_l^{(n+1)} \doteq Z_l[2d+1, n+1]$.
+    Then, it holds that $y_l^{(n+1)} =  - \indot{\phi_n}{w_l}$,
+    where $\qty{w_l}$ is defined as $w_0 = 0$ and
+    \begin{align}
+     w_{l+1} &= \textstyle w_l + \frac{1}{n} C_l \sum_{j=0}^{n-1}  \left(R_{j+1} + \gamma w_l^\top\phi_{j+1} - w_l^\top\phi_j\right)(\phi_j - \gamma \phi_{j+1}). \label{eq: w_update RG}
+    \end{align}
+\end{corollary}
+
+Again,
+if $C_l \doteq \alpha_l I_d$,
+then \eqref{eq: w_update RG} can be regarded as a batch version of~\eqref{eq: residual grad td(0)}.
+For a general $C_l$,
+it is then preconditioned batch RG.
+Notably, Figure~\ref{fig: linear parameter convergence auto l=3} empirically  demonstrates that Algorithm~\ref{deep td} eventually ends up with in-context TD instead of in-context RG.
+This matches the conventional wisdom in the RL community that TD is usually superior to the naive RG (see, e.g., \citet{zhang2019deep} and references therein).
+\tb{TD($\lambda$).}
+Incorporating eligibility traces is an important extension of TD(0).
+We now demonstrate that by using a different mask,
+transformers are able to implement in-context TD($\lambda$).
+We define
+\begin{align}
+    M^\tdlambda \doteq 
+    \mqty[1 & 0 & 0 & 0 & \cdots & 0 & 0\\
+    \lambda & 1 & 0 & 0 & \cdots & 0 & 0\\
+    \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots\\
+    \lambda^{n-1} & \lambda^{n-2} & \lambda^{n-3} & \lambda^{n-4} & \cdots & 1 & 0\\
+    0 & 0 & 0 & 0 & \cdots & 0 & 0] \in R^{(n+1)\times(n+1)}. \label{eq: td lambda mask}
+\end{align}
+Notably, if $\lambda = 0$, the above mask for TD($\lambda$) recovers the mask for TD(0) in~\eqref{eq td0 mask}.
+
+\begin{corollary}[Forward pass as TD($\lambda$)]
+\label{thm: TD(0) lambda}
+    Consider the L-layer linear transformer parameterized by $\qty{P_l^{\td}, Q_l^{\td}}_{l=0,\dots, L-1}$ as specified in \eqref{eq: Z_0 P Q TD define}
+    with the input mask used in~\eqref{eq: Z_l update} being
+    $M^\tdlambda$ in~\eqref{eq: td lambda mask}.
+    Define $y_l^{(n+1)} \doteq Z_l[2d+1, n+1]$.
+    Then, it holds that $y_l^{(n+1)} =  - \indot{\phi_n}{w_l}$ where $\qty{w_l}$ is defined with $w_0 = 0, e_0 = 0, \, e_j = \lambda e_{j-1} + \phi_j$, and
+    \begin{align}
+    \textstyle w_{k+1} = w_k + \frac{1}{n}C_k\sum_{i=0}^{n-1} \qty(r_{i+1} + \gamma w_k^\top \phi_{i+1} - w_k^\top \phi_i )e_i. 
+    \end{align}
+\end{corollary}
+\tb{Average-Reward TD.}
+We now demonstrate that transformers are expressive enough to implement in-context average-reward TD.
+Different from TD(0),
+average-reward TD exhibits additional challenges in that it updates two estimates (i.e., $w_t$ and $\bar r_t$) in parallel.
+To account for this challenge,
+we use two additional mechanisms beyond the naive single-head linear transformer.
+Namely, 
+we allow additional ``memory'' in the prompt and consider two-head linear transformers.
+Given a trajectory $(S_0, R_1, S_1, R_2, S_3, R_4, \dots, S_n)$ sampled from an MRP,
+we construct the prompt matrix $Z_0$ as
+\begin{align}
+    Z_0 = \mqty[\phi_0 & \dots & \phi_{n-1} & \phi_n \\ 
+                \phi_1 & \dots & \phi_n & 0 \\ 
+                R_1 & \dots & R_n & 0 \\ 
+                0 & \dots & 0 & 0] \in \R^{(2d + 2) \times (n+1)}.
+\end{align}
+Notably, the last row of zeros is the ``memory'',
+which is used by the transformer to store some intermediate quantities during the inference time.
+We then define the transformer parameters and masks as
+\begin{align}
+    P_l^{\bartd, (1)}\doteq & \mqty[0_{2d \times 2d} & 0_{2d \times 1} & 0_{2d \times 1}\\
+                       0_{1 \times 2d} & 1 & 0\\
+                       0_{1\times 2d} & 0 & 0], 
+    P_l^{\bartd, (2)} \doteq \mqty[0_{2d \times 2d} & 0_{2d \times 1} & 0_{2d \times 1}\\
+                       0_{1 \times 2d} & 0 & 0\\
+                       0_{1\times 2d} & 0 & 1] \label{eq: two-head P matrices},\\
+    Q^{\bartd}_l \doteq & \mqty[-C_l^\top & C_l^\top & 0_{d \times 2} \\
+                       0_{d \times d} & 0_{d \times d} & 0_{d \times 2}\\
+                       0_{2 \times d} & 0_{2 \times d} & 0_{2\times2}],
+    W_l \doteq \mqty[0_{2d \times 2d} & 0_{2d \times 1} & 0_{2d \times (2d + 2)} & 0_{2d \times 1} \\
+                     0_{1 \times 2d} & 1 & 0_{1 \times (2d+2)} & 1]\label{eq: two-head Q and W}, \\
+    M^{\bartd, (2)} \doteq & \mqty[I_n & 0_{n \times 1}\\
+                     0_{1 \times n} & 0], \,
+    M^{\bartd, (1)} \doteq  \qty(I_{n+1} - U_{n+1} \text{diag}\qty(\mqty[1& \frac{1}{2}& \dots& \frac{1}{n+1}]))M^{\bartd, (2)}, \label{eq: two-head mask}
+\end{align}
+where $C_l \in \R^{d\times d}$ is again an arbitrary matrix,
+$U_{n+1}$ is the $(n+1) \times (n+1)$ upper triangle matrix where all the nonzero elements are 1,
+and $\text{diag}\qty(x)$ constructs a diagonal matrix with the diagonal entry being $x$.
+Here, $\qty{P_l^{\bartd, (1)}, Q_l^{\bartd}}$ are the parameters of the first attention heads, 
+with the input mask being $M^{\bartd, (1)}$.
+$\qty{P_l^{\bartd, (2)}, Q_l^{\bartd}}$ are the parameters of the second attention heads,
+with the input mask being $M^{\bartd, (2)}$.
+The two heads coincide on some parameters. 
+$W_l$ is the affine transformation that combines the embeddings from the two attention heads.
+Define the two-head linear-attention as
+\begin{align}
+    \twohead(Z; P, Q, M, P', Q', M', W) \doteq W \mqty[\attn(Z; P, Q, M) \\ \attn(Z; P', Q', M')].
+\end{align}
+The $L$-layer transformer we are interested in is then given by 
+\begin{align}
+    \label{eq: Z two-head update}
+    \textstyle Z_{l+1} \doteq Z_l + \frac{1}{n} \twohead(Z_l; P_l^{\bartd, (1)}, Q_l^{\bartd}, M^{\bartd, (1)}, P_l^{\bartd, (2)}, Q_l^{\bartd}, M^{\bartd, (2)}, W_l).
+\end{align}
+\begin{theorem}[Forward pass as average-reward TD]
+    \label{thm two head average reward TD}
+  Consider the $L$-layer transformer in~\eqref{eq: Z two-head update}.
+  Let $h_l^{(n+1)}$ be the bottom-right element of the $l$-th layer output, i.e.,  $h_l^{(n+1)} \doteq Z_l[2d+2, n+1]$.
+  Then, it holds that $h_l^{(n+1)} =  -\indot{\phi_n}{w_l}$ where $\qty{w_l}$ is defined as $w_0 = 0$,
+  \begin{align}
+   \textstyle{w_{l+1} = w_l + \frac{1}{n} C_l \sum_{j=1}^n  \qty(R_j - \bar{r}_j + w_l^\top \phi_j - w_l^\top \phi_{j-1})\phi_{j-1}}
+  \end{align}
+  for $l = 0, \dots, L-1$, where $\bar{r}_j \doteq \frac{1}{j}\sum_{k=1}^j R_k$.
+\end{theorem}
+
+
+\section{Related Works}
+
+
+\tb{In-Context Learning.}
+Understanding in-context learning empirically and theoretically has recently emerged as an active research area \citep{garg2022can,muller2022transformers,akyurek2023learning,vonoswald2023transformers,zhao2023transformers,allen2023physics,zhang2023trained,mahankali2023one,ahn2024transformers}, building on prior research demonstrating that neural networks are able to implement algorithms
+\citep{siegelmann1992computational,graves2014neural,jastrzkebski2017residual}
+and achieve meta-learning from the inputs \citep{hochreiter2001meta}.
+This work advances this line of research by demonstrating \tb{how transformers implement in-context TD},
+accompanied by a \tb{theoretical understanding of its emergence}.
+\tb{In-Context Reinforcement Learning.}
+Existing research on in-context RL predominantly adopts a \emph{policy-based} approach, often relying on \emph{supervised pre-training}
+\citep{laskin2022context,raparthy2023generalization,sinii2023context,zisman2023emergence,krishnamurthy2024can}.
+Transformers are trained to output the action, instead of the value, for the query state. 
+Correspondingly,
+the prompts used in this setup consist of previous trajectories from an MDP
+\begin{align}
+    \underbrace{S_0 A_0 R_1 S_1 A_2 R_2 \dots S_{t-1} A_{t-1}}_{\text{context}} \underbrace{S_t}_{\text{query}} \to \underbrace{A_t}_{\text{output}}.
+\end{align}
+The dataset usually consists of multiple such prompt-query-output pairs, where \emph{maximum likelihood estimation} is essentially used to train the transformers.
+Notably, 
+the prompt can be generated by following multiple policies.
+The prompt can also be offline data containing all trajectories generated during prior RL algorithm training across multiple episodes.
+This line of research is closely related to offline policy distillation,
+the goal of which is to learn a policy from offline data using transformers \citep{chen2021decision,janner2021offline,lee2022multi,reed2022generalist, kirsch2023towards}.
+Despite that empirical successes observed in the work above,
+theoretical analysis is often missing.
+\cite{lin2023transformers} provide theoretical analysis for this policy-based supervised pre-training approach and show that the transformers can \textbf{approximate} a few RL algorithms,
+including LinUCB \citep{chu2011contextual} and Thompson sampling \citep{russo2018tutorial} for linear bandits \citep{lattimore2020bandit} and UCB-VI \citep{azar2017minimax} for MDPs.
+Specifically, \cite{lin2023transformers} prove the inference process of the learned transformers \textbf{behaves} similarly to those aforementioned RL algorithms in terms of action selection probabilities, regret, and other metrics. 
+This behavioral similarity is also investigated in \citet{lee2024supervised}.
+However, the underlying mechanisms within the learned transformers that induce this similarity remains unclear.
+In contrast,
+\tb{we go beyond behavioral similarity and 
+prove that transformers can exactly implement a few RL algorithms in its forward pass}.
+Moreover,
+we do not use the supervised pre-training paradigm, which is centered on maximum likelihood estimation.
+As shown in Algorithm~\ref{deep td},
+we instead use RL pre-training predicated on TD,
+a \emph{value-based} method.
+\citet{park2024llm} concurrently use a regret-based loss for training transformers in online learning.
+\citet{brooks2024large} implement policy iteration, a value-based strategy, with transformers, but perform the required $\arg\max$ operation outside the transformers.
+Despite the observed empirical success, \citet{brooks2024large}
+also lack a theoretical analysis of their approach.
+
+\tb{Meta-Learning of RL algorithms.}
+Our Algorithm~\ref{deep td} can be regarded as a meta RL algorithm \citep{beck2023survey},
+where $d_\text{task}$ is the task distribution in the meta RL framework.
+The learned transformers can be regarded as a learned algorithm,
+which is used to solve new evaluation tasks from the task distribution.
+Such meta learning of RL algorithms has been explored in \cite{duan2016rl,wang2016learning,finn2017model,kirsch2019improving,oh2020discovering,lu2022discovered, kirsch2022symmetry, lus42023}.
+However, those discovered algorithms lack interpretability -- it is not clear \emph{how} the neural network implements the discovered algorithms.
+By contrast,
+the discovered transformer from Algorithm~\ref{deep td} is well explained.
+
+
+\section{Conclusion}
+
+
+This work demonstrates that transformers \tb{can} and \tb{do} learn to implement temporal difference methods for in-context policy evaluation in the forward pass.
+We further provide a theoretical explanation of how in-context TD emerges by characterizing an invariant set of the multi-task TD algorithm used in pre-training,
+bridging the gap between ``can'' and ``do''.
+However, 
+there are a few limitations.
+First, this work is focused on policy evaluation, with control algorithms deferred to future research.
+Second, the analysis is largely theoretical -- we leave the large-scale verification of the multi-task TD pre-training paradigm for future work. 
+Third, the theoretical analysis of the pre-training paradigm is confined to single-layer linear transformers, leaving the exploration of multi-layer softmax transformers for future studies. In conclusion, this research aims to illuminate the mechanisms of in-context learning, and motivate further investigation into in-context value-based RL.
+
+
+

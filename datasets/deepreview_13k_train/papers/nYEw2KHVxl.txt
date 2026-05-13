@@ -1,0 +1,394 @@
+\title{Offline-to-online Reinforcement Learning for Image-based Grasping with Scarce Demonstrations}
+
+\begin{abstract}
+   Offline-to-online reinforcement learning (O2O RL) aims to obtain a continually improving policy as it interacts with the environment, while ensuring the initial policy behaviour is satisficing.
+   This satisficing behaviour is necessary for robotic manipulation where random exploration can be costly due to catastrophic failures and time.
+   O2O RL is especially compelling when we can only obtain a scarce amount of (potentially suboptimal) demonstrations---a scenario where behavioural cloning (BC) is known to suffer from distribution shift.
+   Previous works have outlined the challenges in applying O2O RL algorithms under the image-based environments.
+   In this work, we propose a novel O2O RL algorithm that can learn in a real-life image-based robotic vacuum grasping task with a small number of demonstrations where BC fails majority of the time.
+   The proposed algorithm replaces the target network in off-policy actor-critic algorithms with a regularization technique inspired by neural tangent kernel.
+   We demonstrate that the proposed algorithm can reach above 90\% success rate in under two hours of interaction time, with only 50 human demonstrations, while BC and existing commonly-used RL algorithms fail to achieve similar performance.
+ 
+\end{abstract}
+
+\section{Introduction}
+
+
+Imitation learning (IL) has been gaining attention over recent years due to the development of vision language models \citep{padalkar2023open,zhao2023learning,haldar2024baku}.
+However, while these approaches are more robust to various manipulation tasks, the training requires abundant demonstration data.
+For niche robotic applications where data is scarce, supervised IL methods such as behavioural cloning (BC) are known to suffer from distribution shift \citep{ross2011reduction,rajaraman2020toward} and more generally cannot perform better than the demonstrator \citep{xu2020error,ren2021generalization}.
+Alternatively, we focus on offline-to-online reinforcement learning (O2O RL), which is a two-step algorithm that first pretrains a policy followed by continual improvement with online interactions \citep{song2022hybrid,nakamoto2024cal,tan2024natural}.
+Naturally, some have investigated the potential benefits of pretrained vision backbones, pretraining self-supervised objectives, and data-augmentation techniques \citep{hansen2022pre,li2022does,hu2023pre}.
+These directions are also investigated in the online RL setting \citep{sutton2018reinforcement} concurrently, which has seen more successes with image-based domains in both simulated and real-life environments \citep{singh2020cog,yarats2021mastering,wang2022vrl3,luo2024serl}.
+Nevertheless, these algorithms still leverage large amount of data and may require a long-duration of data collection in real life.
+Our question is \textbf{whether we can stabilize visual-based RL algorithms to enable sample-efficient RL on real-life robotics task}.
+
+As far as we know there has been very limited success in applying RL on real-life robotic manipulation without using any simulation \citep{luo2024serl,seo2024continuous,hertweck2020simple,lampe2024mastering}.
+One potential reason for this limitation is due to its instability in the learning dynamics.
+Specifically, most empirically sample-efficient algorithms are off-policy actor-critic based that involve learning a Q-function \citep{fujimoto2018addressing,haarnoja2018soft,hiraoka2021dropout,chen2021randomized,ji2024ace}, which has been observed to be unstable---the Q-values tend to diverge \citep{baird1995residual,yang2022overcoming} and overestimate \citep{hasselt2010double}.
+Recent work has shown that in deep RL, Q-divergence is correlated to the similarity of the latent representation between state-action pairs \citep{kumar2021dr3,yue2024understanding}.
+Particularly the latent representation learned by the neural networks has a high correlation between in-distribution and out-of-distribution transitions, resulting in Q-value divergence \citep{kumar2021dr3}.
+\citet{yue2024understanding} has also provided theoretical analyses to explain this phenomenon through the lens of neural tangent kernel \citep{jacot2018neural}.
+We claim that \textbf{addressing this Q-divergence is a critical step to addressing our question}.
+
+To this end, we develop an O2O RL algorithm that enables training policies on a real-life image-based robotic task in a short amount of time, under two hours, with only limited offline demonstrations.
+In this scenario the amount of offline demonstrations is insufficient for training a good behaviourally-cloned policy.
+We make the following contributions:
+(1) We propose a method that simplifies Q-learning by replacing the target network with a regularization term that is inspired by neural tangent kernel (NTK).
+We refer our method as Simplified Q.
+(2) We conduct experiments on a real-life image-based grasping task and compare Simplified Q against behavioural cloning and conservative Q-learning implemented on multiple commonly-used RL algorithms.
+In this case the compared algorithms are unable to achieve similar performance even with same amount of total data.
+(3) We show that vision backbone pretraining is unnecessary for performant offline-to-online transfer.
+(4) We provide ablation studies to demonstrate the importance of the NTK regularizer.
+
+\vspace*{-2mm}
+
+
+\section{Preliminaries and Background}
+
+\subsection{Problem Formulation}
+\paragraph{Markov Decision Process.}
+A reinforcement learning (RL) problem can be formulated as an infinite-horizon Markov decision process (MDP) $\cM = (\cS, \cA, r, P, \rho_0, \gamma)$, where $\cS$ and $\cA$ are respectively the state and action spaces, $r: \cS \times \cA \to [0, 1]$ is the reward function, $P \in \Delta^{\cS}_{\cS \times \cA}$ is the transition distribution, $\rho_0 \in \Delta^{\cS}$ is the initial state distribution, and $\gamma \in [0, 1)$ is the discount factor.
+A policy $\pi \in \Delta^{\cA}_{\cS}$ can interact with the MDP $\cM$ through taking actions, yielding an infinite-length random trajectory $\tau = (s_0, a_0, r_0, s_1, a_1, r_1, \cdots)$, where $s_0 \sim \rho_0, a_t \sim \pi(s_t), s_{t + 1} \sim P(s_t, a_t), r_t = r(s_0, a_0)$.
+The return for each trajectory is $G = \sum_{t=0}^{\infty} \gamma^t r_t \leq \frac{1}{1 - \gamma}$.
+We further define the value function and Q-function respectively to be $V^\pi_\gamma(s) := \mathbb{E}_\pi \left[ \sum_{t=0}^{\infty} \gamma^t r_t \vert s_0 = s\right]$ and $Q^\pi_\gamma(s, a) := \mathbb{E}_\pi \left[ \sum_{t=0}^{\infty} \gamma^t r_t \vert s_0 = s, a_0 = a\right]$.
+The goal is to find a policy $\pi^*$ that maximizes the expected cumulative sum of discounted rewards for all states $s \in \cS$, i.e. $\pi^*(s) = \argmax_{\pi} V^\pi_\gamma(s)$.
+
+\paragraph{Offline-to-online Reinforcement Learning.}
+RL algorithms require exploration which is often prohibitively long and expensive for robotic manipulation.
+To this end, we consider offline-to-online (O2O) RL, a setting where we are given an offline dataset that is generated by a potentially suboptimal policy.
+Generally, we can decompose O2O RL into two phases:
+(1) pretraining an offline agent using offline data, and
+(2) continually training the resulting agent through online interactions.
+Our goal is to leverage this offline dataset and a limited number of online interactions to train an agent that can successfully complete the task.
+We consider the setting where we also include offline data during the online interaction \citep{tan2024natural,huang2024adaptive}.
+
+In this work, we assume access to $N$ trajectories truncated at $T$ timesteps $\Doff = \{ (s_0^{(m)}, a_0^{(m)}, r_0^{(m)}, \dots, s_{T - 1}^{(m)}, a_{T - 1}^{(m)}, r_{T - 1}^{(m)}, s_T^{(m)})\}_{m=1}^M$ as the offline dataset, and denote $\Don$ as the interaction buffer for data collected during the online phase.
+We refer $\cD$ as the total buffer that samples from both $\Doff$ and $\Don$ with equal probability, a technique known as symmetric sampling \citep{ball2023efficient}.
+We highlight that offline datasets with truncated trajectories are natural in the robotics setting as real-systems are setup for human demonstrators to gather one trajectory at a time to minimize switching between controllers.
+
+\subsection{Conservative Q-learning}
+We build our algorithm on conservative Q-learning (CQL) \citep{kumar2020conservative}.
+CQL imposes a pessimistic Q-value regularizer on out-of-distribution (OOD) actions to mitigate unrealistically high-values on unseen data.
+Suppose the Q-funciton $Q_\theta$ is parameterized by $\theta$, the CQL training objective is defined by:
+\begin{align}
+    \label{eqn:cql_obj}
+    \cL_{\text{CQL}}(\theta) := \alpha \left( \mathbb{E}_{\cD, \mu} \left[ Q_\theta(s, a') \right] - \mathbb{E}_{\cD} \left[ Q_\theta(s, a) \right] \right) + \frac{1}{2} \mathbb{E}_{\cD} \left[ \left( Q_\theta(s, a) - \cB^\pi_N \bar{Q}(s, a) \right)^2 \right],
+\end{align}
+where $\alpha$ is a hyperparameter controlling strength of the pessimistic regularizer, $\mu$ is an arbirary policy, $a' \sim \mu(s)$, $a \sim \cD$, and $\cB^\pi_N \bar{Q}(s, a) := \sum_{n=0}^{N - 1} \gamma^n R_n(s, a) + \gamma^N \mathbb{E}_{\pi}\left[ \bar{Q}(s', a') \right]$ is the $N$-step empirical Bellman backup operator applied to a delayed target Q-function $\bar{Q}$, writing $\cB^\pi_1 = \cB^\pi$ for conciseness.
+The first term is the pessimistic Q-value regularization and the second term is the standard $N$-step temporal-difference (TD) learning objective \citep{sutton2018reinforcement}.
+There can be multiple implementations of CQL.
+Common implementation chooses $\mu = \pi$ and builds on top of soft actor-critic \citep{singh2020cog,haarnoja2018soft}.
+Alternatively, crossQ \citep{bhattcrossq} has demonstrated that we can replace the delayed target Q-function with the current Q-function by properly leveraging batch normalization \citep{ioffe2015batch}.
+Calibrated Q-learning (Cal-QL) \citep{nakamoto2024cal} further augments the regularizer to only penalize OOD actions when their corresponding Q-values exceed the value induced by the dataset $\cD$.
+
+
+
+\section{Stabilizing Q-Learning via Decoupling Latent Representations}
+
+It is desirable for RL algorithms to be stable and sample-efficient in robotic manipulation tasks---we propose an algorithm that encourages both properties.
+To address the former, we leverage ideas from the neural tangent kernel (NTK) literature and propose a regularizer to decouple representation during Q-learning.
+For the latter we leverage symmetric sampling from reinforcement learning with pretrained data (RLPD) \citep{ball2023efficient} to encourage the agent to learn from positive examples.
+We build our algorithm on conservative Q-learning (CQL) \citep{kumar2020conservative} to enable offline training and further include our proposed regularizer described in this section.
+
+Q-learning algorithms are known to diverge \citep{baird1995residual} and suffer from the overestimation problem \citep{hasselt2010double} even with double-Q learning \citep{yue2024understanding,ablett2024value}.
+Recent work leverages NTK to analyze the learning dynamics of Q-learning \citep{yue2024understanding,kumar2021dr3,yang2022overcoming,he2024adaptive,ma2024reining,tang2024improving}---the Q-function of a state-action pair $(s', a') \in \cS \times \cA$ can be influenced by the Q-learning update of another state-action pair $(s, a) \in \cS \times \cA$.
+Let $\theta$ and $\theta'$ be the parameters of the Q-function before and after a stochastic gradient descent (SGD) step respectively, and define $\kappa_\theta(s, a, s', a') = \nabla_\theta Q_{\theta}(s', a')^\top \nabla_\theta Q_{\theta}(s, a)$.
+By performing SGD on the TD learning objective (second term in \eqref{eqn:cql_obj}) with state-action pair $(s, a)$, we can write the Q-value of another state-action pair $(s', a')$ after the gradient update as
+\begin{align}
+    \label{eqn:general_ntk}
+    Q_{\theta'}(s', a') = Q_{\theta}(s', a') + \kappa_\theta(s, a, s', a') \left( Q_{\theta}(s, a) - \cB^\pi \bar{Q}(s, a) \right) + \cO(\lVert \theta' - {\theta} \rVert^2).
+\end{align}
+Here, $\kappa_\theta$ is known as the neural tangent kernel \citep{jacot2018neural} and the last term approaches to zero as the dimensionality approaches to infinity, a phenomenon known as lazy training \citep{chizat2019lazy}.
+Intuitively, a small magnitude in $\kappa_\theta(s, a, s', a')$ will result in $Q_{\theta'}(s', a')$ being less influenced by the update induced by $(s, a)$.
+
+Suppose now the Q-function is parameterized as a neural network $Q_\theta(s, a) := w^\top \Phi(s, a)$ (i.e. last layer is a linear layer), where $\theta = [w, \Phi]$, $w$ is the parameters of the last layer, and $\Phi(s, a)$ is the output of the second-last layer, we can view $\Phi(s, a)$ as a representation layer.
+Thus, freezing the representation layer during Q-learning update, we can write \eqref{eqn:general_ntk} as
+\begin{align}
+    \label{eqn:linear_ntk}
+    Q_{w'}(s', a') = Q_{w}(s', a') + \Phi(s', a')^\top \Phi(s, a) \left( Q_{w}(s, a) - \cB^\pi \bar{Q}(s, a) \right) + \cO(\lVert w' - w \rVert^2).
+\end{align}
+\citet{kumar2021dr3} is among the first to propose regularizing the representation layers of the Q-function with $R(\Phi) = \mathbb{E}_{\cD} \left[ \Phi(s, a)^\top \Phi(s', a') \right]$, where $(s, a, s', a') \sim \cD$ is the current and next state-action pairs from the buffer.
+Follow-up works modify the network architecture to include various normalization layers \citep{yang2022overcoming,yue2024understanding} and different regularizers \citep{he2024adaptive,ma2024reining,tang2024improving}.
+
+Alternative approaches to mitigate this Q-divergence include using target network \citep{mnih2013playing} and double Q-learning \citep{hasselt2010double}.
+The former is introduced to reduce the influence of rapid changes of nearby state-action pairs during bootstrapping, which can also be addressed by decorrelating their corresponding features.
+Consequently, we remove the target network and introduce a regularizer that aims to decouple the representations between different state-action pairs.
+Specifically, our regularizer is defined to be
+\begin{align}
+    \label{eqn:ntk_reg}
+    \cL_{\text{reg}}(\Phi) := \mathbb{E}_{s \sim \cD, s' \sim \cD}\left[ \left(\Phi(s, a_u)^\top \Phi(s', a'_\pi) \right)^2 \right],
+\end{align}
+where $s, s'$ are states sampled independently from the buffer $\cD$, $\Phi(s, a)$ is the latent representation from the second-last layer of the model, $a_u \sim \cU(\cA)$ is a uniformly sampled action, and $a'_\pi \sim \pi(s')$ is the next action sampled following the current policy.
+In other words, we are approximately orthogonalizing the latent representations through minimizing the magnitude of their dot products.
+Intuitively, \eqref{eqn:ntk_reg} decorrelates the representations of any two states regardless of the current action, thereby minimizing the influence on other Q-values due to the current update.
+We note that in previous work the suggested regularizer is simply taking the dot product between the latent representations \citep{kumar2021dr3,ma2024reining} which can cause the NTK to be negative---a Q-function update of a particular state-action pair may unlearn the Q-values of another state-action pair.
+Secondly our regularizer applies on not only the consecutive state-action pairs which decouples more diverse state-action pairs.
+Finally, the complete objective for updating the Q-function is
+\begin{align*}
+    \cL_Q(\theta) := \cL_{\text{CQL}}(\theta) + \beta \cL_{\text{reg}}(\Phi),
+\end{align*}
+where $\beta > 0$ is a coefficient that controls the strength of the decorrelation.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We aim to answer the following questions with empirical experiments:
+\textbf{(RQ1)} Can we perform offline RL using our proposed method? How does it compare with behavioural cloning (BC)?
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \begin{center}
+        \includegraphics[width=\linewidth]{figures/setup.jpg}
+    \end{center}
+    \caption{
+        Image-based grasping environment setup.
+        The agent is required to control the UR10e arm with vacuum suction to grasp the orange rice bag inside the bin and lift it well above the bin.
+    }
+    \label{fig:exp_setup}
+\end{wrapfigure}
+\textbf{(RQ2)} Can our proposed method enable O2O RL on real-life robotic manipulation?
+What about existing commonly-used RL algorithms?
+\textbf{(RQ3)} Can O2O RL eventually exceed imitation learning approaches with similar amount of data?
+\textbf{(RQ4)} How important is it to pretrain a vision backbone?
+\textbf{(RQ5)} Can the proposed NTK regularizer alleviate Q-divergence?
+\paragraph{Environment Setup.}
+We conduct our experiments on a real-life image-based grasping task (Figure~\ref{fig:exp_setup}).
+The task consists of controlling a UR10e arm to grasp an item inside a bin.
+The agent observes a $64 \times 64$ RGB image with an egocentric view, the proprioceptive information including the pose and the speed, and the vacuum pressure reading.
+The agent controls the arm at 10Hz frequency through Cartesian velocity control with vacuum action---a 7-dimensional action space.
+The agent can attempt a grasp for six seconds.
+The agent receives a $+1$ reward upon grasping the item and moving it above a certain height threshold and a $+0$ reward otherwise.
+In the former, there is a randomized-drop mechanism to randomize the item location, otherwise a human intervenes and changes the item location.
+The attempts are fixed at six seconds (i.e. episode does not terminate upon success) unless the arm has experienced a protective stop (P-stop)---this enforces the agent to also learn to continually hold the item upon grasping it.
+This environment has a challenging exploration problem as we impose minimal boundaries---random policies can easily deviate away from the bin and go further above and outside the bin.
+Consequently in this O2O RL setting the policy must learn to leverage the offline data to accelerate learning.
+
+\paragraph{Baselines.}
+We compare our algorithm, Simplified Q, against behavioural cloning (\textbf{BC}), and conservative Q-learning built on soft actor-critic (\textbf{SAC}) \citep{haarnoja2018soft} and crossQ (\textbf{CrossQ}) \citep{bhattcrossq}.
+SAC uses a target Q-network to stabilize learning while CrossQ removes the target Q-network by including batch normalization \citep{ioffe2015batch} in the Q-networks.
+To verify other existing Q-stabilization techniques we also include DR3 \citep{kumar2021dr3} and SAC with LayerNorm (\textbf{LN}) \citep{yue2024understanding}.
+The former uses a similar NTK regularizer as ours but only considers consecutive state-action pairs and without the squaring the dot product, while the latter uses LayerNorm to enable a better-behaved Q-function.
+For offline training, we provide 50 human-teleoperated demonstrations and train each policy for 100K gradient steps.
+Here the provided human-teleoperated demonstrations are all successful attempts.
+During the online learning phase, we further run the RL algorithms for 200 episodes which corresponds to less than two hours of the total running time, combining both the interaction time and the learning update time.
+We note that the interaction time takes up only 20 minutes while the remaining time is for performing learning updates.
+For all RL algorithms we enable 3-step Q-learning and symmetric sampling for fairness, and run on three random seeds.
+All RL algorithms use a frozen image encoder that is pretrained trained with first-occupancy successor representation under Hilbert space \citep{moskovitz2021first,park2024foundation}.
+\subsection{Main Results}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/lift-offline_rl.pdf}
+    \includegraphics[width=0.45\textwidth]{figures/lift-bc_data.pdf}
+    \caption{
+        The success rates of various offline-trained policies.
+        Each policy is evaluated on 50 grasp attempts.
+        \textbf{(Left)} Comparison between BC and offline RL trained with Simplified Q (Ours).
+        Simplified Q is able to grasp with limited success while BC performs marginally better than Simplified Q.
+        \textbf{(Right)} The impact of offline dataset size on BC.
+        Here BC is only able to achieve around $35\%$ success rate until we further include image augmentation from \citet{yarats2021image}.
+    }
+    \label{fig:offline_result}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/iqm-dr3_vs_ours.pdf}\\
+    \vspace*{5mm}
+    \includegraphics[width=\linewidth]{figures/iqm-pstop-dr3_vs_ours.pdf}
+    \caption{
+        Aggregated success rate \textbf{(Top)} and P-stop rate \textbf{(Bottom)} across three seeds with 95\% confidence intervals (CIs) \citep{Rishabh2021iqm}.
+        Simplified Q (Ours) performs better than DR3 in both success rates and P-stop rate generally.
+        Furthermore, DR3 obtains significantly wider CIs compared to Simplified Q in both success rate and P-stop rate.
+    }   
+    \label{fig:iqm_optimality}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/samp_eff-all.pdf}
+    \caption{
+        Success rate \textbf{(Left)} and P-stop rate \textbf{(Right)} across three seeds, averaged at every 10 episodes.
+        Results are shown as an interquartile mean and shaded regions show 95\% stratified bootstrap confidence intervals (CIs) \citep{Rishabh2021iqm}.
+        Simplified Q consistently achieves higher success rate and lower P-stop rate as amount of online interaction increases.
+        While DR3 can achieve reasonable success rates, its CI is significantly wider than that of Simplified Q.
+    }
+    \label{fig:iqm_samp_eff}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[height=0.3\textwidth]{figures/p_better.pdf}
+    \includegraphics[height=0.3\textwidth]{figures/rl_img_enc.pdf}
+    \includegraphics[height=0.3\textwidth]{figures/rl_img_enc-asymp.pdf}
+    \caption{
+        \textbf{(Left)} The probability of Simplified Q (Ours) being better than existing RL algorithms in success rate, run over three seeds.
+        \textbf{(Middle)} Comparison between various image encoders---trained end-to-end (E2E), and frozen image encoders with random initialization and with HILP objective \citep{park2024foundation}.
+        The model with a frozen randomly-initialized encoder fails to improve its grasp success rate even after online interactions, while the models trained end-to-end and with a frozen pretrained image-encoder can continually improve as it gathers more data.
+        \textbf{(Right)} Asymptotic performance between training end-to-end and frozen pretrained image encoder.
+        The model trained E2E appears to achieve better asymptotic performance than one with a frozen pretrained image encoder.
+        All models are first pretrained for 100K gradient steps with 50 human-teleoperated demonstrations.
+    }
+    \label{fig:main_result}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/action_freq.pdf}
+    \caption{
+        The frequency of actions being taken by the policy during training.
+        We compare Simplified Q (Ours), CrossQ, and SAC.
+        Our policy appears to be able to perform fine-grained actions on the $xy$ axes while CrossQ and SAC exhibits bang-bang behaviours.
+        SAC further appears to have converged into moving towards a single direction.
+    }
+    \label{fig:action_freq}
+\end{figure}
+
+We first address RQ1 by training a BC policy and offline RL policies.
+All RL algorithms use a pretrained image encoder to accelerate training in wall time while BC is trained end-to-end.
+We then evaluate each policy on 50 grasp attempts.
+Figure~\ref{fig:offline_result}, left, shows that BC agent can achieve $34\%$ success rate.
+On the other hand, offline RL with Simplified Q and DR3 can achieve $24\%$ and $16\%$ success rates respectively.
+Although these three policies fail to pick most of the time, behaviourally the policies reach into the bin $100\%$ of the time, demonstrating satisficing behaviours.
+On the other hand, offline RL policies that are trained using CrossQ, SAC, and LN achieve $0\%$ success rate and totally fail to learn similar behaviours as the satisficing policies (we omit CrossQ, SAC, and LN results in Figure~\ref{fig:offline_result}, left).
+
+We then deploy these offline-trained RL policies to the environment for further training with additional online interactions (RQ2).
+CrossQ, SAC, and LN are unable to grasp the item at all, while Simplified Q and DR3 can immediately grasp the item.
+Notably, the latter two can also continually learn during the online phase.
+From Figure~\ref{fig:iqm_optimality} we observe that Simplified Q is generally less susceptible to randomness and consistently achieve higher success rate over 200 online interaction episodes when compared to DR3.
+Simplified Q is also safer in the sense that it experiences less P-stops compared to DR3.
+Inspecting the learning curves in Figure~\ref{fig:iqm_samp_eff}, we can clearly see that Simplified Q has a steeper increasing slope in the success rate with tighter confidence intervals than DR3.
+Furthermore the P-stop rate decreases over training as the policy becomes more adept.
+We speculate the main reason behind this is because DR3 considers only the state-action pairs from the current and next timesteps, while our approach considers any state-action pairs, thereby decorrelating more diverse state-action pairs.
+
+Now, focusing on the behaviour of the policies of CrossQ, SAC, and Simplified Q, we observe that SAC performs the worst in particular as it has learned to go towards a specific corner in the workspace, away from the bin, which causes the arm to nearly reach singularity.
+CrossQ is able to hover around the bin but cannot reach and pick up the item successfully.
+Further visualizing the frequency of an action being taken by each policy during training in Figure~\ref{fig:action_freq}, SAC has converged to move towards a particular direction and CrossQ has learned to perform bang-bang actions.
+On the other hand, Simplified Q has learned to perform fine-grained actions on linear $xy$ velocities, demonstrating more precise motion.
+We provide a visualization of the trajectories throughout training in Figure~\ref{fig:trajs}.
+
+Finally, comparing Simplified Q with BC, it appears that the BC policy experiences distribution shift due to the lack of demonstrations.
+We observe in Figure~\ref{fig:offline_result}, right, that it requires 500 demonstrations with image-augmentation techniques \citep{yarats2021image} in order to achieve above $60\%$ success rate.
+On the other hand, Simplified Q can achieve near $70\%$ success rate within 200 episodes, suggesting O2O RL can indeed outperform BC without more data (RQ3).
+
+\subsection{The Importance of Pretrained Image Encoder}
+One may argue that leveraging the pretrained image encoder might have enabled the sample efficiency of Simplfied Q (RQ4).
+To this end we also train an O2O RL agent end-to-end (E2E) using Simplfied Q.
+We also include a frozen randomly initialzed image encoder as a baseline.
+Figure~\ref{fig:main_result}, middle, demonstrates that the E2E RL agent can achieve similar performance as using a pretrained image encoder, furthermore both RL agents have learned to pick with limited success after the offline phase.
+On the other hand, while the agent using a frozen randomly-initialized encoder can pick the item up sometimes, it cannot further improve as it gathered more transitions.
+This suggests that leveraging a pretrained image encoder does improve upon using a frozen randomly-initialized network, but does not provide visible performance improvement over training E2E.
+In fact we have continually trained the Simplfied Q agents for 800 episodes and have observed that the E2E agent can eventually achieve above $90\%$ success rate, while the agent with pretrained image encoder only achieve up to near $80\%$ success rate (Figure~\ref{fig:main_result}, right).
+However, one benefit of using pretrained image-encoder is training less parameters, thereby reducing the learning-update time.
+In our experiments training on a fixed pretrained image-encoder takes approximately 14 seconds for performing learning updates between episodes while training E2E takes approximately 40 seconds.
+
+We now inspect the latent representations induced by each image encoder in Figure~\ref{fig:img_enc}---namely pretrained image encoder with successive representation \textbf{(HILP)}, randomly-initialized image encoder \textbf{(Random Init.)}, end-to-end trained image encoder \textbf{(E2E)} of the Q-function immediately after offline RL \textbf{(Offline)}, 200 online RL interactions \textbf{(200 Episodes)}, and 800 online RL interactions \textbf{(800 Episodes)}.
+We project the 64-dimensional latent representation onto a 3-dimensional space using UMAP \citep{mcinnes2018umap}.
+We observe that HILP can nicely separate trajectories---each strand displays a smooth colour gradient from the first timestep to the last timestep (Figure~\ref{fig:img_enc}, top).
+The strands can also describe the motion of the arm through a grasp attempt, particularly linear $z$ velocity is extremely negative as the arm reaches toward the item inside the bin and becomes extremely positive once the arm acquires a vacuum seal on said item.
+On the other hand, randomly initializing the image encoder fails to achieve the same, furthermore it cannot separate images that have dramatically different linear $z$ velocity (Figure~\ref{fig:img_enc}, bottom).
+The representation induced by offline RL is similar to one induced by the random-initialized image encoder, but we can visually see that the images corresponding to positive linear $z$ velocity are clustered together which suggests that the encoder can identify when the item has been grasped.
+This representation is further refined as the image encoder is updated with more online interaction data, clearly separating the images with different linear $z$ velocity actions, and also induces a smoother colour gradient in terms of timesteps.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/img_enc/all.pdf}
+    \caption{
+        The latent representation induced by different image encoders, evaluated at different training phase on the same demonstration data.
+        \textbf{(Top)} The points are colour-coded by the timestep.
+        \textbf{(Bottom)} The points are colour-coded by linear $z$ velocity action.
+        The pretrained image encoder with HILP can provides a timestep-interpretable representation, where each strand corresponds to a particular trajectory.
+        The linear $z$ velocity can also be nicely interpreted---its value is extremely negative as the arm reaches toward the item and extremely positive as the arm lifts the item.
+        randomly-initialized encoder fails to separate images into interpretable representation.
+        The image encoder trained end-to-end (E2E) slowly clusters images with similar timesteps and linear $z$ velocity as online RL continues.
+    }
+    \label{fig:img_enc}
+\end{figure}
+\subsection{Latent Feature Representation Similarity and Q-value Estimates}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{\textwidth}
+        \includegraphics[width=\textwidth]{figures/all_ntk.pdf}
+        \caption{
+            The similarity between the latent representations, $\Phi(s, a)^\top \Phi(s', a')$, of 512 random state-action pairs after offline RL \textbf{(Top)} and 200 episodes of online RL \textbf{(Bottom)}.
+            Simplified Q is able to maintain dot-products with small magnitude between different state-action pairs, indicating that the model can decorrelate these state-action pairs, whereas both CrossQ and SAC exhibit significantly larger magnitude dot-products, indicating that these models strongly correlates these different state-action pairs.
+        }
+    \end{subfigure}\\
+    \vspace*{5mm}
+    \begin{subfigure}[t]{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/q_vals.pdf}
+        \caption{
+            The Q-value estimates of 512 random state-action pairs, evaluated at varying number of gradient updates on the Q-function.
+            Simplified Q maintains maintains reasonable Q-values, while both CrossQ and SAC seem to have diverged in Q-values.
+        }
+    \end{subfigure}
+    \caption{
+        (a) The similarity between the latent representation of different state-action pairs.
+        (b) The Q-value estimates of different state-action pairs.
+        From left to right:
+        Model trained end-to-end with Simplified Q (Ours).
+        Model trained with Simplified Q with a frozen pretrained image encoder.
+        Model trained with CrossQ with a frozen pretrained image encoder.
+        Model trained with SAC with a frozen pretrained image encoder.
+    }
+    \label{fig:ntk_analysis}
+\end{figure}
+
+We now analyze the impact of our proposed regularizer.
+Our goal is to decorrelate the latent feature representation of different state-action pairs, which is measure by the dot product of the features $\Phi(s, a)^\top \Phi(s', a')$, where $(s, a)$ and $(s', a')$ are independently drawn from $\cD$.
+We sample 512 random state-action pairs from a buffer of random trajectories and visualize their similarity in the feature space induced by each algorithm during offline RL and online RL.
+Figure~\ref{fig:ntk_analysis}a illustrates that using our proposed regularizer yields lower-magnitude dot product for most state-action pairs when compared to CrossQ and SAC.
+We can also observe a general trend that the magnitude decreases for all algorithms as the agent collects more data.
+We also visualize their Q-values to investigate whether the Q-function suffers from overestimation.
+We observe in Figure~\ref{fig:ntk_analysis}b that across 200 online interactions, the Q-values of Simplified Q is consistently below the maximum realizable returns, whereas CrossQ and SAC fail to achieve this.
+However, there is an interesting trend that SAC appears to begin with reasonable Q-values after the offline phase but quickly diverges during the online phase, while CrossQ has already diverged Q-values after the offline phase.
+Secondly, we notice another trend that the Q-values are decreasing in magnitude as the agents continually train the Q-function with CrossQ and SAC.
+We leave the investigation of this phenomenon for future work.
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+Reinforcement learning (RL) algorithms require extensive exploration to learn a performant policy, which is an undesirable property for robotic manipulation.
+Offline-to-online (O2O) RL is an alternative paradigm that also includes policy pretraining with offline data prior to online interactions, with the hope that the pretrained policy is satisficing \citep{song2022hybrid,tan2024natural,huang2024adaptive,zhang2022policy,li2023proto}.
+Existing algorithms including COG \citep{singh2020cog}, TD3-BC \citep{fujimoto2021minimalist}, Cal-QL \citep{nakamoto2024cal}, and RLPD \citep{ball2023efficient} have shown some successes in both simulated and real-life environments.
+While our work draws inspiration from these works, our approach differs in how we learn the Q-function.
+Our proposed method is also purely RL based, exluding any behavioural-cloning objectives during policy learning.
+
+The offline phase of O2O RL has recently been an emphasis in the field \citep{kumar2020conservative,yu2020mopo,fujimoto2019off}.
+While there has been enormous successes in state-based domains, \citet{lu2023challenges} and \citet{rafailov2024diverse} have identified that these offline RL algorithms face additional challenges in the image-based domains.
+On the other hand, researchers in online RL have developed algorithms to account for image-based domains \citep{hansen2022pre,li2022does,wang2022vrl3,laskin2020reinforcement,yarats2021image,cetin2022stabilizing,parisi2022unsurprising,hurevisiting}, particularly leveraging data augmentation and pretrained vision backbones.
+While we consider leveraging pretrained vision backbone, our work demonstrates that this step is unnecessary, but it may accelerate learning in wall time.
+We also utilize data augmentation on the images only in the offline phase which enables faster training in wall time.
+
+Online RL for real-life robotic manipulation tasks often involve sim-to-real transfer \citep{han2023survey,tang2024deep}.
+Though, there are several works that directly deploy online RL algorithms on real-life systems \citep{seo2024continuous,hertweck2020simple,lampe2024mastering,luo2024serl}.
+To address the exploration challenges, \citet{hertweck2020simple} and \cite{lampe2024mastering} leverage hierarchical RL to decompose the task into human-interpretable behaviours.
+The hierarchical RL agent then explores the space in the temporally-abstracted MDP that allows better coverage.
+On the other hand, \citet{seo2024continuous} and \citet{luo2024serl} leverage offline data to provide indirect guidance to the policy.
+Our work is similar to the latter line of research but also consider the pretraining phase to accelerate online learning.
+
+Finally, our work is most relevant to the recent breakthrough on analyzing Q-learning through the lens of neural tangent kernel (NTK) \citep{jacot2018neural}.
+Specifically, researchers have identified that the learning dynamics of Q-functions through NTK might describe why Q-learning tends to be unstable and diverge \citep{kumar2021dr3,yue2024understanding,ma2024reining,tang2024improving}.
+Consequently the researchers proposed various regularization techniques \citep{he2024adaptive} and model architectures \citep{yang2022overcoming} to alleviate this problem.
+We differentiate ourselves by identifying that the target network in (deep) Q-learning is often applied for similar reasons---decorrelating the consecutive state-action pairs during update.
+In particular we found that this target network is unnecessary when our regularizer is applied to decorrelate latent representation of state-action pairs.
+
+
+\section{Conclusion}
+
+In this work we introduced a novel regularizer inspired by the neural tangent kernel (NTK) literature that can alleviate Q-value divergence.
+We showed that this NTK regularizer can indeed decorrelate the latent representation of different state-action pairs, as well as maintaining reasonable Q-value estimates.
+Consequently we removed the target network altogether and replaced it with this NTK regularizer, resulting in our offline-to-online reinforcement learning algorithm, Simplified Q.
+We conducted experiments on a real-life image-based robotic manipulation task, showing that Simplified Q could achieve satisficing grasping behaviour immediately after the offline RL phase and further achieve above $90\%$ grasp success rate under two hours of interaction time.
+We further demonstrated that Simplified Q could outperform existing reinforcement learning algorithms and behavioural cloning with similar amount of total data.
+These results suggest that we can simply use reinforcement learning algorithms for both offline and online training once we mitigate Q-value divergence, and we should further reconsider whether we truly need large amount of demonstrations for learning near-optimal policies.
+
+
+
+\newpage
+
+
+
+

@@ -1,0 +1,525 @@
+\title{Sparse Rewards Can Self-Train Dialogue Agents}
+
+\begin{abstract}
+Recent advancements in state-of-the-art (SOTA) Large Language Model (LLM) agents, especially in multi-turn dialogue tasks, have been primarily driven by supervised fine-tuning and high-quality human feedback. However, as base LLM models continue to improve, acquiring meaningful human feedback has become increasingly challenging and costly. In certain domains, base LLM agents may eventually exceed human capabilities, making traditional feedback-driven methods impractical. In this paper, we introduce a novel self-improvement paradigm that empowers LLM agents to autonomously enhance their performance without external human feedback. Our method, Juxtaposed Outcomes for Simulation Harvesting (JOSH), is a self-alignment algorithm that leverages a sparse reward simulation environment to extract ideal behaviors and further train the LLM on its own outputs. We present ToolWOZ, a sparse reward tool-calling simulation environment derived from MultiWOZ. We demonstrate that models trained with JOSH, both small and frontier, significantly improve tool-based interactions while preserving general model capabilities across diverse benchmarks
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Large Language Models (LLMs) \citep{bommasani2021opportunities, brown2020language, achiam2023gpt} have shown a well-marked ability to follow instructions under various tasks. These advancements are often attributed to post-training fine-tuning based on human preferences. This includes multi-turn tool calling tasks where an LLM-based agent must solve a task by interacting with both a user and a set of tools (or APIs) \citep{farn2023tooltalk,yao2024tau}. Further task-specific alignment for tool-calling tasks can take the form of preference judgments. But these can be expensive to obtain. Furthermore, there is usually a more `crisp' notion of success for such tasks. Specifically, was the right tool(s) or API(s) called with the right set of arguments? Ideally, alignment should be optimized towards these sparse rewards.
+
+In this paper, we propose a self-alignment process \sysname~(Juxtaposed Outcomes for Simulation Harvesting) that can be used to improve a model's performance on multi-turn tool calling by optimizing for tool/API completion using simulated rollouts of reward-conditioned conversations. We show that this method is general and can be applied to weak/small or frontier LLMs, though gains are significantly larger for the former. We also present a new tool calling benchmark, ToolWOZ, refashioning MultiWoz2.0 \citep{zang2020multiwoz} to train and evaluate multi-turn tool calling effectively.
+
+\sysname~utilizes a beam search inspired simulation approach, employing sparse rewards (in this paper corresponding to successful tool calls) to guide turn-by-turn generation and synthesize preference-annotated examples. \sysname~allows an agent to generate multiple responses at each conversation turn, exploring various trajectories through a conversation until a sparse reward (goal) is encountered along some path. Upon reaching a goal, other beam candidates are pruned and further expansion proceeds only from that point. Once a trajectory achieves all possible goals, all remaining trajectories are backtracked, logging unsuccessful paths as negative alignment samples and successful paths as positive ones. This process constructs alignment preference data solely from the model itself. When used to align that same model, we show it enhances model performance.
+
+Tool use is a critical skill in LLMs \citep{mialon2023augmented,schick2024toolformer}; however, there is a large disparity in tool-using capabilities across different model sizes, especially when involving them in multi-turn reasoning \citep{gao2024efficient}. Furthermore, existing benchmarks either lack a real-world multi-turn setup \citep{ruan2024toolemu} or intentionally keep the agent's dialogue disjoint from underlying databases and focus more on tool selection \citep{huangmetatool}. To demonstrate \sysname's capability to improve a model used in an agentic system through self-alignment, we introduce a new dataset ToolWOZ. Derived from the task-oriented dialogue (TOD) benchmark MultiWOZ, ToolWOZ is a multi-turn tool-based simulation environment where an agent model is assessed on its tool-calling capabilities by calling goal APIs through collaboration with a user simulator. After self-alignment using \sysname~on the ToolWOZ training set, a \texttt{meta-llama3-8B-instruct} \citep{Llama38BMeta} model exhibits a 74\% increase in Success Rate. Additionally, after JOSH self-alignment we see \texttt{gpt-4o} beats it's own baseline to become state-of-the-art on two separate benchmarks: ToolWOZ and $\tau$-bench \citep{yao2024tau}.
+
+To show that \sysname~does not degrade general model performance, we evaluate a trained \texttt{meta-llama3-8B-instruct} model across three public benchmarks: MT-Bench \citep{zheng2024judging}, $\tau$-bench , and the LMSYS-Chatbot Arena Human Preference Predictions challenge \citep{lmsys-chatbot-arena, zheng2024judging}. Our results confirm that the \sysname~aligned model does not regress relative to its base model, despite its new specialized alignment.
+
+
+
+\section{JOSH: Juxtaposed Outcomes for Simulation Harvesting}
+
+\label{sec:method}
+
+In this section, we detail the two components of JOSH, our method for generating synthetic preference-annotated training data to enhance tool-driven multi-turn dialogue. We use the terms ``tool'' and ``API'' interchangeably. Our approach for generating conversations uses an agent-simulator system and involves a turn-level beam search strategy combined with tool/API-calling reward pruning. Unlike traditional token-level beam search, our method maintains multiple active multi-turn conversations (trajectories) over sequences of agent turns. From these synthetic conversations we create preference-annotated training instances. This involves extracting both supervised fine-tuning (SFT) data and preference fine-tuning (PFT) data. The SFT data is derived from the optimal trajectory (or path) through the conversation tree, while the PFT data includes pairwise comparisons of good and bad agent turns, facilitating more nuanced model training.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/josh_figure_updated_colors.png}
+    \caption{Illustration of JOSH, a tool calling simulation-based beam search experience generation algorithm. A correct path through the conversation can be mapped out (shown in green) by backtracking from sparse rewards achieved by the agent. In this scenario, the sparse rewards are represented by ``correct'' API calls called by the agent. From backtracking through the tree an ``ideal'' path through the conversation is found and training data can be extracted.} 
+    \label{fig:beam_search}
+\end{figure*}
+
+\subsection{Beam Search Simulation for Collecting User-Agent Conversations}
+\label{subsec:beamsearch_simulation}
+{\begin{algorithm}[t]
+\scriptsize
+\caption{Beam Search Simulation for Collecting User-Agent Conversations}
+\label{alg:beam}
+\begin{algorithmic}[1]
+\STATE Input parameters: max\_depth; branching\_factor; max\_beam
+\STATE Load: $U \leftarrow \text{User Simulator}$; $A \leftarrow \text{Agent}$; $G \leftarrow \text{Goal Set}$\\
+$\quad *$ $U(l)$ and $A(l)$ run one turn of the user and agent on a leaf node $l$ of a conversation trajectory.\\\ \\
+\STATE // Initialize control parameters and data structures
+\STATE $AR \leftarrow 0 $\ \ \ \ \ \ \ \ \ // Average reward
+\STATE $leaves \leftarrow []$\ \ // Trajectory leaf nodes which will be expanded in beam search
+\STATE $depth \leftarrow 0$\ \ \ \ // Current trajectory depth \\\ \\
+
+\WHILE{depth $\leq$ max\_depth \AND $G\neq \emptyset$}
+  \STATE // Expand trajectories by running user simulation and agent.
+  \STATE $leaves = [U(l)\;\; \forall l \in leaves]$\ \ \ // Expand with next user response by running the simulator one step on all leaves.
+  \STATE // Expand trajectories by running agent $A$ on all leaves.
+  \STATE // Each expansion is a full turn of $A$ including API calls, thoughts  and utterances.
+  \IF{$\text{len}(leaves) * \textit{branching\_factor} \leq \textit{max\_beam}$}
+      \STATE $leaves = [A(l)\;\; \forall l \in leaves]$
+  \ENDIF\\\ \\
+  \STATE // Check for goals. If a goal is reached, prune trajectories to retain successful path.
+  \FOR{$\textit{leaf} \in leaves$}
+    \STATE // If a goal was reached in leaf
+    \IF{$\exists g \in G$ \AND $g \in \textit{leaf}]$}
+        \STATE // Set leaf as the new root, remove $g$ from Goal Set and update the reward.
+        \STATE $leaves = [\textit{leaf}]$
+        \STATE $G.remove(g)$
+        \STATE $AR=AR+\frac{1}{\textit{len}(\text{Goal Set})}$
+        \STATE \textbf{BREAK}
+    \ENDIF
+  \ENDFOR\\\ \\
+  \STATE $depth \leftarrow depth + 1$
+\ENDWHILE
+\end{algorithmic}
+\end{algorithm}}
+We begin by having the agent \( A \) (defined in Section \ref{subsec:agent_methods}) interact with a user simulator \( U \) (defined in Section \ref{subsec:user_simulator_methods}). 
+A set of goals \( G = \{g_1, g_2, \ldots, g_k\} \) is defined where achieving a goal will award the agent \( A \) a sparse reward of value $\frac{1}{\textit{len}(\text{Goal Set})}$ to it's return. Our return uses the Average Reward formulation \citep{sutton2018reinforcement} hence we denote it as \( AR \) and refer to it as ``Average Reward''. We begin with  \( AR = 0 \). Goals in \( G \) can be achieved when \( A \) interacts with \( U \) in a desired manner. In this paper, rewards are granted when the agent successfully makes a predefined correct tool or API call during a conversation. Figure \ref{fig:beam_search} illustrates an example where the goal set  \( G \) is composed of multiple correct API calls made within a simulated conversation.
+
+The beam search simulation, in which agent \( A \) and user simulator \( U \) interact, is detailed in Algorithm \ref{alg:beam}. The algorithm begins by constructing a tree: the user simulator \( U \) initiates the conversation, and agent \( A \) generates \textit{branching\_factor} agent responses with a high temperature to encourage variability. Each agent turn \( A(l) \) -- where $l$ is the leaf node of a conversation trajectory -- represents a full response, during which the agent may make API calls or other actions before replying to the user.
+
+Following each agent turn, \( U \) generates a response, after which \( A \) generates another set of \textit{branching\_factor} turns for each response from \( U \). This continues until an agent turn achieves a goal \( g \). In the case of Figure \ref{fig:beam_search}, the goal is the ``First Correct API Call.'' The agent turn that achieves this goal becomes the new root, \( g \) is removed from the goal set \( G \), the Average Reward is increased by $\frac{1}{\textit{len}(\text{Goal Set})}$, and the process repeats. If another turn simultaneously achieves the goal \( g \), it is considered partial credit: it does not follow the ideal path but is not considered a negative example either. When the number of branches reaches the \textit{max\_beam} size, only one agent response is generated. This process continues until all the goals in the goal set \( G \) are achieved or a maximum number of turns is reached.
+
+In this paper, we branch at the turn level rather than the agent action level, allowing the tree to grow exponentially with the number of turns rather than individual actions (i.e., utterance, thoughts, API/tools). Expanding at the agent action level can quickly exhaust the beam size and demand significantly more resources. By branching at the turn level, we increase the speed of JOSH while reducing costs, as the tree grows more gradually while still yielding useful preference data. However, JOSH is flexible and can accommodate non-turn-based expansion as needed.
+
+\subsection{Preference Data Extraction}
+\label{subsec:training_data_extract}
+Once Algorithm \ref{alg:beam} terminates, we have a tree that resembles Figure \ref{fig:beam_search}, from which we can extract training data for both Supervised Fine-Tuning (SFT) and Preference Fine-Tuning (PFT).
+
+For SFT, training data is created by backtracking up the tree from the final successful turn to the initial user-simulated utterance. We refer to this as the ``ideal path,'' illustrated by following the green agent turns up the tree in Figure \ref{fig:beam_search}, starting from the ``Second Correct API Call.'' This ideal path corresponds to the best agent turns generated to maximize the number of rewards achieved. This data can subsequently be used to train models, guiding them to produce responses that are likely to yield higher rewards. This approach is similar to offline RL with Decision Transformers, where an optimal path is found by conditioning on the reward \citep{chen2021decision}.
+
+For PFT, we use the same tree but additionally take advantage of suboptimal model outputs. We create pairwise data by backtracking through the tree in the same manner as for SFT data extraction. At each user turn along the ideal path, we create a (good, bad) agent turn pair. The ``good'' agent turn is on the ideal path (green in Figure \ref{fig:beam_search}), and the ``bad'' is the alternative agent turn from that user utterance. If the alternative agent turn also leads to a reward but is ultimately not part of the ideal path, it is not used as a negative example. This paper focuses on using pairwise turns, so agent turns that do not stem from a user turn on the ideal path are not included in the training data.
+
+Preference tuning approaches, such as DPO \citep{rafailov2024direct}, require pairwise model generations. However, since Algorithm \ref{alg:beam} creates pairwise turns where the paired turns can contain different numbers of model generations (e.g., an API call and an agent response), we focus on a more flexible training approach, KTO \citep{ethayarajh2024kto}. KTO works by assigning ``upvotes'' to good examples and ``downvotes'' to bad examples. Thus, we can still extract pairwise data at the turn level by labeling all agent generations within good turns along the ideal path as upvotes and the alternative turns as downvotes, without needing model generations to necessarily share the same context. For easy reference, we suffix SFT and KTO preference-tuned models by \texttt{-SFT} and \texttt{-KTO}, respectively.
+
+\section {ToolWOZ}
+\label{sec:data}
+
+In this section, we introduce ToolWOZ, a dataset designed to train and benchmark an agent's capabilities in using API tools within a dialogue setting. ToolWOZ features an agent with access to various API tools that allow it to interact with a real database, engaging in dialogue with a user simulator. Each conversation in the dataset is grounded in seed goals, which correspond to specific goal API calls. The dataset incorporates adversarial serving, meaning APIs will return incorrect values unless the arguments are sufficiently close to the goal API arguments. As illustrated in Figure \ref{fig:datasetcompare}, ToolWOZ significantly simplifies the analysis of task-oriented dialogue systems compared to earlier DST systems and the MultiWOZ database.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.45\columnwidth}
+    \resizebox{0.95\columnwidth}{!}{\includegraphics{Figures/model_compare_redline.png}}
+    \end{minipage}
+    \begin{minipage}{0.4\columnwidth}
+    \caption{MultiWOZ+DST (left) vs. ToolWOZ+Agent (right) paradigmns for Task Oriented Dialogue interactions.}
+    \label{fig:datasetcompare}
+    \end{minipage}
+    
+\end{figure}
+
+\subsection{Tool-Calling Datasets for End-to-End Dialogue Systems}
+\label{sec:mwoz}
+
+In recent years, task-oriented dialogue systems were typically developed using a pipeline approach \citep{ohashi2022post, mrkvsic2016neural, zhang2020recent}. These systems were divided into multiple components, such as intent classification, slot filling, dialogue state tracking, and response generation. Each component was often modeled with a separate machine learning or natural language processing model, and the datasets used to build these systems, such as MultiWOZ, were designed accordingly. These datasets provided detailed annotations, enabling the training and evaluation of individual model components.
+
+However, with the advent of large language models (LLMs), we are witnessing a shift towards more powerful and reliable end-to-end dialogue systems \citep{wu2023using, wu2023diacttod}. These models no longer require breaking down tasks into separate components but instead can handle the entire dialogue process holistically. Consequently, the existing dialogue datasets that were designed for pipeline-based systems are no longer sufficient for developing and evaluating end-to-end models.
+
+Recent research has emphasized improving and assessing tool-calling capabilities in dialogue systems, which has become a critical proxy for task-solving and goal achievement. These systems must seamlessly interact with external tools, such as APIs or databases, to fulfill user requests and complete tasks in real-time.
+
+Building entirely new datasets tailored to this new generation of dialogue systems can be costly and time-consuming. However, we demonstrate that existing datasets like MultiWOZ can be adapted for this purpose. Specifically, we propose transforming MultiWOZ into a tool-calling benchmark, which can drive the development and evaluation of modern dialogue systems in the LLM era. This transformation allows us to leverage the strengths of MultiWOZ while adapting it to meet the requirements of more advanced, end-to-end dialogue models.
+
+Moreover, this approach can be generalized to other existing dialogue datasets, enabling a more cost-effective way to create benchmarks for next-generation dialogue systems. By reimagining these datasets, we can accelerate the development of powerful dialogue systems that can effectively interact with tools and achieve user goals in an efficient and flexible manner.
+\subsection{Creating ToolWOZ}
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \begin{minipage}{0.45\columnwidth}
+    \begin{tabular}{|l|c|}
+        \toprule
+        Split & \# of Data Points \\
+        \midrule
+        Train & 6251\\
+        Val & 793 \\
+        Test & 805 \\
+        \hline
+        (Official) Test & 450 \\
+        \hline
+        \hline
+        single-domain dialogues & 2439 \\
+        multi-domain dialogues & 5410 \\
+        \bottomrule
+    \end{tabular}
+    \end{minipage}
+    \begin{minipage}{0.4\columnwidth}
+        \caption{ToolWOZ dataset split sizes. This paper uses the first 450 conversation in the ToolWOZ test set as the official test set.}
+        \label{tab:toolwoz}
+    \end{minipage}
+    
+    
+\end{table}
+ToolWOZ is a benchmark and dataset designed to evaluate the performance of task-oriented dialogue (TOD) systems with integrated tool-calling capabilities. In this framework, a TOD model acts as an intelligent agent, interacting across multiple domains with a user simulator to assess the model's ability to effectively make API calls and achieve user goals in real-time, as shown in Figure \ref{fig:datasetcompare}. ToolWOZ stands out in Table \ref{tab:toolwoz} as a large, domain-diverse multi-turn dialogue benchmark grounded in real-world APIs, containing 7,849 scenarios across various task-based domains.
+
+The design of ToolWOZ addresses several limitations commonly observed in traditional dialogue datasets. One of the key improvements is a shift from indirect metrics like Inform and Success rates to a more direct one, correct API call metric, which measures whether the system can successfully invoke the appropriate external tools (e.g., APIs) based on user inputs. Furthermore, the framework introduces a seamless integration between dialogue and external databases, which helps avoid inconsistencies between the model's actions and the database outcomes. This is complemented by the use of a flexible, goal-oriented user simulator, which allows for repeatable and adaptive interactions with the TOD model, further enhancing the evaluation process.
+
+These enhancements collectively make ToolWOZ a robust and reliable framework for benchmarking modern TOD systems, particularly those designed to handle real-time tool interactions in multi-turn conversations.
+
+\paragraph{Forming APIs}
+To create ToolWOZ, we developed APIs for the find (which we refer to as search) and book intents within each of the four MultiWOZ domains that have databases: restaurant, hotel, train, and attraction. Notably, the attraction domain does not include a booking intent. This process yielded the following set of possible APIs: \{\textit{search\_restaurant}, \textit{book\_restaurant}, \textit{search\_hotel}, \textit{book\_hotel}, \textit{search\_train}, \textit{book\_train}, and \textit{search\_attraction}\}. The arguments for each API correspond to the possible slot values for each domain's intent, and all arguments are optional. Every MultiWOZ conversation has a goal slot value dictionary for every relevant domain and intent. Because API arguments map directly to slot values, we convert each of these goal states into a list of goal API calls per conversation. A goal API $g(x)$ is considered completed if an agent called function $f(y)$ where $x \subseteq y$ or $g(x)$ and $f(y)$ return only one result from the database, which is the same. Thus, for each conversation, we can quantify its success by the percentage of goal APIs that were called by the agent.
+Using this method, we achieve a much cleaner, less gameable representation of correctness rather than Success rate, as we no longer rely solely on slot value output. Additionally, Inform rate can be represented through this metric as well because the results of each API are tied to the user simulator's goals, which it is trying to accomplish sequentially. Thus, if the agent does not communicate the results of the APIs to the user simulator, the conversation will stall, and further goals/correct APIs will likely not be achieved.
+
+\paragraph{Seamless database integration}
+
+One major challenge in task-oriented dialogue systems is the alignment between dialogue and database outputs, especially in cases where multiple entities meet the user's criteria. ToolWOZ addresses this by employing an intelligent database-serving algorithm that returns results only when they closely match the goal states for each interaction. This reduces the likelihood of mismatches between the user’s requests and the system's responses. Additionally, the system ensures that failed searches or bookings are accurately reflected by returning no results in cases where a failure is expected, further enhancing the realism and consistency of interactions.
+
+For booking-related tasks, ToolWOZ maintains per-conversation reference numbers for when a successful booking is made, providing a realistic user experience.
+
+\paragraph{Simulating Users}
+
+Every MultiWOZ conversation also has a list of user goals. We use the user goals to create a goal-oriented user simulator that tries to accomplish the listed goals in order while conversing with the TOD agent. See Section \ref{subsec:user_simulator_methods}.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section, we detail the experimental setup and results of our study. We evaluate various models and different techniques such as Function Calling (FC) \citep{schick2024toolformer} and ACT/ReACT \citep{yao2022react}, on the ToolWOZ and $\tau$-bench datasets. 
+
+\subsection{Data and Metrics}
+We evaluate different systems on ToolWOZ and $\tau$-bench \citep{yao2024tau}. Similar to ToolWOZ, $\tau$-bench is a recently introduced tool-based multi-turn dialogue LLM benchmark. We only adopt data from the Retail domain in $\tau$-bench, as it contains both training and test data (Airline domain only contains test data).
+
+We use Average Reward and 100\% API Success Rate as the two key elements of evaluation to compare models over ToolWOZ. Following \citep{yao2024tau}, we report Pass\textsuperscript{\textasciicircum}1 on $\tau$-bench, which uses final database states to measure the binary success of a conversation. Note that the metric is very similar to the 100\% API Success Rate, and the major difference is that 100\% API Success Rate considers both Read and Write API calls, while Pass\textsuperscript{\textasciicircum}1 only considers Write APIs. We run $\tau$-bench results 10 times and take the final Pass\textsuperscript{\textasciicircum}1 score to reduce variance, as discussed in Section \ref{subsec:user_simulator_results}.
+
+\subsection{Agents}
+\label{subsec:agent_methods}
+We benchmarked \texttt{gpt-4o-mini} and \texttt{gpt-4o} on both ToolWOZ and $\tau$-bench. We also evaluated \texttt{gpt-3.5} and \texttt{meta-llama-3-8B} \citep{llama3modelcard} on ToolWOZ. For \texttt{gpt} models, we explored both Function Calling (FC) and ACT/ReACT \citep{yao2022react} techniques, while for \texttt{meta-llama-3-8B}, we used ReACT for all experiments.
+
+Using goal API calls as sparse rewards, we generated JOSH rollouts for models on ToolWOZ across 926 conversations in the ToolWOZ training set. For models on $\tau$-bench, we generated JOSH rollouts for all 500 conversations in the Retail domain training set.
+
+On both ToolWOZ and $\tau$-bench, the JOSH rollout process involved a max beam size of 8 and a branching factor of 2. We do experimentation in section \ref{sec:results} to explore other beam sizes. For \texttt{meta-llama-3-8B}, sampling parameters were set at temperature 1.5, top\_k=50, and top\_p=0.75 to foster diverse generation. For \texttt{gpt} versions, the temperature was set to 1.0. The average cost of running JOSH on a \texttt{meta-llama-3-8B} agent was approximately \$0.11 per ToolWOZ conversation, amounting to roughly \$102 for all 926 conversations. For training all models, we retained only those conversations whose JOSH rollouts achieved 100\% success in the ideal path without errors. For \texttt{meta-llama-3-8B} on ToolWOZ, this resulted in a final filtered training set of 631 conversations.
+
+From these successful JOSH rollouts, we extracted KTO and SFT data as described in section \ref{subsec:training_data_extract}. For training \texttt{meta-llama-3-8B SFT}, the model was trained for 3 epochs with a learning rate of 2e-5. For \texttt{meta-llama-3-8B-KTO}, the model was trained for 1 epoch with a learning rate of 5e-7 and a beta of 0.1. The \texttt{meta-llama-3-8B} models were trained using Lora and 4-bit quantization. We fine-tuned \texttt{gpt-4o} for 3 epochs, with a batch size of 1, and an LR multiplier of 2.
+
+\subsection{User Simulators}
+\label{subsec:user_simulator_methods}
+We experimented with two types of user simulators, both based on \texttt{gpt-4o}: goal-based and guide, to assess their impact on the performance and repeatability of evaluating agents on the ToolWOZ test set. The user simulators were run against different assistant agents, with a temperature setting of zero to ensure deterministic responses.
+
+The goal-based simulator strictly follows the predefined user goals for each conversation, without access to the human-human transcript from the dataset. In contrast, the guide simulator references the MultiWOZ transcript and suggests specific quotes from the original dialogue to simulate a more guided interaction. 
+ While we primarily report results based on the goal-based simulator, a comparative analysis of the two simulators is provided in Section \ref{sec:analysis}.
+
+For the $\tau$-bench dataset, we were only able to evaluate the goal-based simulator, as no transcripts are available. As with ToolWOZ, we set the temperature of the underlying LLM models to zero to minimize response variance at test time.
+
+
+\subsection{Results} 
+\label{sec:results}
+We outline the results of training three models on JOSH rollouts from their respective base models: a smaller \texttt{meta-llama-3-8B} model, \texttt{gpt-4o-mini}, and the larger \texttt{gpt-4o} model. We show that each JOSH trained model variant outperforms their respective baseline variant achieving state-of-the-art performance on both ToolWOZ and $\tau$-bench. Specifically, we show how training on JOSH rollouts makes \texttt{gpt-4o-FC-JOSH-SFT} surpass the vanilla \texttt{gpt-4o-FC} on the $\tau$-bench Retail datasets. Similarly, \texttt{gpt-4o-FC-JOSH-SFT} outperforms the vanilla variant on \texttt{gpt-4o} on ToolWOZ. It is worth noting that JOSH self-alignment can augment \texttt{gpt-4o} ability on tool benchmarks, inspite of \texttt{gpt-4o} already having state-of-the-art ability, being ranked within top 3 on the LM-Sys Chatbot Arena Leaderboard \citep{chiang2024chatbot} and top 2 on both HELM \citep{bommasani2023holistic} and 5-shot MMLU \citep{hendryckstest2021}.
+
+
+\begin{table}[t]
+    \centering
+    \begin{minipage}{0.51\columnwidth}
+    \resizebox{.95\columnwidth}{!}{
+    \begin{tabular}{|l|c|c|}
+        \toprule
+        Agent & Avg Reward & 100\% Success Rate \\
+        \midrule
+        \texttt{meta-llama-3-8B}  & 0.63 & 0.34 \\
+        \texttt{meta-llama-3-8B-JOSH-SFT} & 0.74 & 0.50 \\
+        \texttt{meta-llama-3-8B-JOSH-KTO} & \textbf{0.79} & \textbf{0.59}   \\
+        \hline
+        \texttt{gpt-3.5-ReACT} & 0.66 & 0.44 \\
+        \texttt{gpt-4o-mini-ReACT}  & 0.67 & 0.48 \\
+        \texttt{gpt-4o-mini-ReACT-JOSH-SFT-beam-4}  & 0.85 & 0.72 \\
+        \texttt{gpt-4o-mini-ReACT-JOSH-SFT-beam-8}  & 0.85 & 0.72 \\
+        \texttt{gpt-4o-mini-ReACT-JOSH-SFT-beam-16}  & \textbf{0.865} & \textbf{0.74} \\
+        \hline
+        \texttt{gpt-3.5-FC} & 0.76 & 0.58\\
+        \texttt{gpt-4o-mini-FC}  & 0.88 & 0.76 \\
+        \texttt{gpt-4o-mini-FC-JOSH-SFT}  & \textbf{0.89} & \textbf{0.78} \\
+        \hline\hline
+        \texttt{gpt-4o-ReACT}  & 0.900 & 0.791 \\
+        \texttt{gpt-4o-ReACT-JOSH-SFT}  & \textbf{0.914} & \textbf{0.813} \\
+        \hline
+        \texttt{gpt-4o-FC}  & 0.919 & 0.831 \\
+        \texttt{gpt-4o-FC-JOSH-SFT}  & \textbf{0.922} & \textbf{0.84} \\
+        \bottomrule
+    \end{tabular}}
+    \caption{ToolWOZ test set results. Those with \textit{-JOSH} in the model name were trained on JOSH rollouts using their base model on the first 926 conversations in the ToolWOZ training dataset.}
+    \label{tab:performance}
+    \end{minipage}
+    \begin{minipage}{0.05\columnwidth}
+    \ 
+    \end{minipage}
+    \begin{minipage}{0.41\columnwidth}
+    \resizebox{.95\columnwidth}{!}{
+    \begin{tabular}{|l|c|c|}
+        \toprule
+        Agent & Pass\textsuperscript{\textasciicircum}1 \\
+        \midrule
+        \texttt{gpt-4o-mini-ReACT}  & 16.87 \\
+        \texttt{gpt-4o-mini-ReACT-JOSH-SFT} & \textbf{36.34} \\
+        \hline
+        \texttt{gpt-4o-mini-ACT}  & 44.60 \\
+        \texttt{gpt-4o-mini-ACT-JOSH-SFT} & \textbf{47.65} \\
+        \hline
+        \texttt{gpt-4o-mini-FC}  & 50.78 \\
+        \texttt{gpt-4o-mini-FC-JOSH-SFT} & \textbf{58.26} \\
+        \hline\hline
+        \texttt{gpt-4o-ACT}  & 63.13 \\
+        \texttt{gpt-4o-ACT-JOSH-SFT} & \textbf{64.26} \\
+        \hline
+        \texttt{gpt-4o-ReACT} & 54.43 \\
+        \texttt{gpt-4o-ReACT-JOSH-SFT} & \textbf{58.43} \\
+        \hline
+        \texttt{gpt-4o-FC} & 65.21 \\
+        \texttt{gpt-4o-FC-JOSH-SFT} & \textbf{66.00} \\
+        \bottomrule
+    \end{tabular}}
+    \caption{\texttt{gpt-4o} trained on JOSH rollouts on $\tau$-bench Retail. \texttt{gpt-4o-FC} was the previous state-of-the-art on the $\tau$-bench Retail test set \citep{yao2024tau}.}
+    \label{tab:4oresults}
+    \end{minipage}
+\end{table}
+
+On ToolWOZ, the \texttt{meta-llama-3-8B-JOSH-KTO} model saw a 74\% increase in 100\% Success Rate and a 25\% increase in Average Reward compared to the baseline \texttt{meta-llama-3-8B} model, as shown in Table \ref{tab:performance}. This jump is noticeably even higher than the \texttt{meta-llama-3-8B-JOSH-SFT} model. The \texttt{meta-llama-3-8B-JOSH-KTO} model even outperforms both \texttt{gpt-3.5-ReACT} and \texttt{gpt-3.5-FC}. 
+
+We see likewise see a large performance jump from the baseline \texttt{gpt-4o-mini-ReACT} model to it's \texttt{JOSH-SFT} trained variant, with a 50\% increase in 100\% Success Rate and a 27\% increase in Average Reward. We explore three beam sizes when doing JOSH using \texttt{gpt-4o-mini-ReACT} and note that while a maximum beam size of 16 is marginally better than 8 and 4, we choose to use a beam size of 8 for all other experiments to save cost and efficiency while still taking advantage of a larger beam size.
+We also observe that the \texttt{gpt-4o-FC-JOSH-SFT} model outperforms its baseline to achieve state-of-the-art results on ToolWOZ. We note that as \texttt{gpt-4o-FC} performs well on ToolWOZ, the headroom for improvement shrinks and thus performance gains from \texttt{JOSH} is smaller than for other baseline models. 
+
+
+Table \ref{tab:4oresults} tells a similar story on the $\tau$-bench Retail test set. 
+Over three different prompting options, ACT, ReACT, and FC, \texttt{gpt-4o} sees significant performance jumps when training on JOSH rollouts.
+Notably, \texttt{gpt-4o-mini-ReACT-JOSH-SFT} has a 115\% increase over it's baseline score. Also, \texttt{gpt-4o-FC-JOSH-SFT} beats its baseline, the previous state-of-the-art model on $\tau$-bench, \texttt{gpt-4o-FC}. 
+This significant jump in performance for each model can be seen after only being trained on JOSH rollouts from their respective baselines on the 500 conversations in the $\tau$-bench Retail training dataset. 
+
+
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+\subsection{Agent Performance Stability across User Simulators}
+\label{subsec:user_simulator_results}
+
+\begin{figure}[ht!]
+    \centering
+    \begin{subfigure}[b]{0.48\columnwidth}
+        \centering
+        \resizebox{\columnwidth}{!}{       
+            \begin{tabular}{|l|c|c|}
+            \toprule
+            Agent & (Guide) Avg Reward & (Guide) 100\% Success Rate \\
+            \midrule
+            \texttt{meta-llama-3-8B}  & 0.50 & 0.26 \\
+            \texttt{meta-llama-3-8B-\sysname-SFT} & 0.55 & 0.33 \\
+            \texttt{meta-llama-3-8B-\sysname-KTO} & \textbf{0.59} & \textbf{0.38} \\
+            \bottomrule
+            \end{tabular}
+        }
+        \caption{Models trained against goal user simulator on ToolWOZ run against the guide user simulator on the ToolWoz test set.}
+        \label{tab:toolwozguide}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.42\columnwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/std_bootstrap.png}
+        \caption{Bootstrap estimation of Standard Deviation of Average Reward on ToolWOZ using two types of user simulators and $\tau$-bench}
+        \label{fig:simulations}
+    \end{subfigure}
+    \caption{A deeper look at user simulators and their effects on score stability in benchmarks.}
+    \label{fig:combined_simulators}
+\end{figure}
+
+In Figure \ref{fig:simulations} we examined the stability of the ToolWOZ Average Reward metric across two types of user simulators: goal-based and guide-based. Additionally, we assessed the stability of the $\tau$-bench Pass\textsuperscript{\textasciicircum}1 metric by measuring the standard deviation of benchmark scores as the number of conversations increased using the bootstrapping method \citep{efron1992bootstrap}. We observe that all three benchmarks exponentially reduce in standard deviation as the number of samples increases. Notably, the ToolWOZ goal simulator has the lowest standard deviation, which drops below 1.5 percentage points at the 450 samples. Based on this observation, we reduced the ToolWOZ test set to 450 examples, utilizing the goal-based simulator to minimize simulation noise. Additionally, the $\tau$-bench dataset has a high standard deviation of about 4 percentage points at it's test set size of 115. This leads us to run the $\tau$-bench tests 10 times to reduce variability as noted in the previous section.
+
+To ensure robustness and generalization, we further evaluated the JOSH-trained \texttt{meta-llama-3-8B} model using rollouts from the goal-based simulator, by testing it against the guide simulator (as described in \S\ref{subsec:user_simulator_methods}). Table \ref{tab:toolwozguide} demonstrates that the JOSH-trained models consistently outperform the baseline \texttt{meta-llama-3-8B} model, regardless of the simulator used. While the distributions of scores vary between the two simulators (as reflected in Table \ref{tab:toolwozguide} and Table \ref{tab:performance}), the relative ranking of model performance remains unchanged.
+
+
+\subsection{Error Analysis}
+Training on JOSH rollouts additionally led to a large reduction in errors when running the ToolWOZ test set as shown in Figure \ref{fig:error_per}. The \texttt{JOSH-KTO} trained model saw a 96\% decrease in incorrectly formatted APIs and a 50\% reduction in bad API use (e.g. using nonexistant arguments, using nonexistant apis, \ldots). The \texttt{JOSH-SFT} model also sees a large drop in error rates in both categories, but similar to the reward measurements it does not perform as well as \texttt{JOSH-KTO}.
+
+\iffalse % commented out individual since combined
+\begin{figure}[ht!]
+    \centering
+    \begin{minipage}[t]{.5\columnwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/error_shorter_name_update.png} % replace `figure2.png` with the actual path to your figure
+        \caption{Percentage of conversations with types of API Errors on the ToolWOZ Test Set. "Bad API Use" corresponds to the agent attempting to use nonexistant APIs or API Arguments, "Incorrrect API Format" means the format to call a ToolWOZ API was not followed.}
+        \label{fig:error_per}
+    \end{minipage}
+\end{figure}
+\fi
+
+
+\subsection{Generalization of JOSH Fine-Tuned Models}
+\label{subsec:external_benchmark_results}
+
+We evaluated the performance of the \texttt{meta-llama-3-8B} models fine-tuned on JOSH rollouts from ToolWOZ across two external benchmarks to assess their generalization capabilities in Table \ref{tab:mtbench}. In particular, we tested the models on two general-purpose benchmarks—MT-Bench and the LMSYS Chatbot Arena Human Preference Predictions challenge. This evaluation aimed to determine whether training on JOSH rollouts from ToolWOZ impacted the models' performance on broader tasks.
+
+MT-Bench evaluates chatbots' general knowledge through multi-turn, open-ended questions, while the LMSYS Chatbot Arena Human Preferences challenge measures models' human preference ranking capabilities. For LMSYS, we used the first 1,500 data points as the benchmark.
+
+\iffalse
+
+\begin{figure}[ht!]
+    \centering
+    \resizebox{.5\columnwidth}{!}{    
+    \includegraphics{Figures/sft_low_taubench.png}
+    }
+    \caption{$\tau$-bench test set results. JOSH models were all trained on ToolWOZ rollouts only and no data from $\tau$-bench. Note the Average Reward on $\tau$-bench is the percentage of conversations that were completed in entirely successful fashion.}
+    \label{tab:taubench}
+\end{figure}
+\paragraph{$\tau$-bench}
+We ran baseline and ToolWOZ JOSH rollouts of \texttt{meta-llama-3-8B} on $\tau$-bench to compare tool calling abilities of the different models. As seen in Figure \ref{tab:taubench}, \texttt{ToolWOZ-JOSH-KTO} outperforms \texttt{meta-llama3-70B} and \texttt{meta-llama3-8B} models on average over the two $\tau$-bench domains. Particularly, the \texttt{ToolWOZ-JOSH-KTO} model performs significantly better than all other models in the Airline domain, which relies heavily on knowledge of domain policy to successfully complete the conversation. Noticeably \texttt{ToolWOZ-JOSH-SFT} heavily under performs in the Airline domain, this is due to it's lack of ability to adhere to new formats of function calls, thus erroring out at parsing time in almost all Airline conversations. This highlights the advantage \texttt{ToolWOZ-JOSH-KTO} has over \texttt{ToolWOZ-JOSH-SFT}, KTO learns tool calling skills generalizably while SFT is more prone to overfit to a certain type of tool calling format.
+
+\fi
+
+\iffalse % Commented out the individual since combined
+\begin{table}[ht!]
+    \centering
+    \resizebox{.5\columnwidth}{!}{       
+        \begin{tabular}{|l|c|c|}
+        \toprule
+        Model & MT-Bench & LMSYS \\
+        \midrule
+        meta-llama-3-8B & 7.91 & 0.444 \\
+        meta-llama-3-8B-\sysname-SFT & 7.81 & 0.452 \\
+        meta-llama-3-8B-\sysname-KTO & 7.92 & 0.461 \\
+        \hline
+        gpt-4o-FC & -- & 0.515 \\
+        gpt-4o-FC-JOSH-SFT & -- & 0.514 \\
+        \bottomrule
+        \bottomrule
+        \end{tabular} 
+    }
+    \caption{MT-Bench and LMSYS benchmark performance. JOSH rollouts were done on ToolWOZ.}
+    \label{tab:mtbench}
+\end{table}
+\fi
+\begin{figure}[ht!]
+    \centering
+    \begin{subfigure}[b]{0.48\columnwidth}
+        \centering
+        \resizebox{\columnwidth}{!}{       
+            \begin{tabular}{|l|c|c|}
+            \toprule
+            Model & MT-Bench & LMSYS \\
+            \midrule
+            \texttt{meta-llama-3-8B} & 7.91 & 0.444 \\
+            \texttt{meta-llama-3-8B-\sysname-SFT} & 7.81 & 0.452 \\
+            \texttt{meta-llama-3-8B-\sysname-KTO} & 7.92 & 0.461 \\
+            \hline
+            \texttt{gpt-4o-FC} & 9.10 & 0.515 \\
+            \texttt{gpt-4o-FC-JOSH-SFT} & 9.12 & 0.514 \\
+            \bottomrule
+            \end{tabular} 
+        }
+        \caption{MT-Bench and LMSYS benchmark performance. JOSH rollouts were done on ToolWOZ.}
+        \label{tab:mtbench}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.42\columnwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/error_shorter_name_update.png}
+        \caption{Percentage of conversations with types of API Errors on the ToolWOZ Test Set.}
+        \label{fig:error_per}
+    \end{subfigure}
+    \caption{A Further Look at Model Performance - General Benchmarks and Error Analysis}
+    \label{fig:combined}
+\end{figure}
+
+We compared the baseline \texttt{meta-llama-3-8B} model, \texttt{meta-llama-3-8B-JOSH-SFT}, and \texttt{meta-llama-3-8B-JOSH-KTO} on both MT-Bench and LMSYS. As shown in Table \ref{tab:mtbench}, fine-tuning on JOSH rollouts from ToolWOZ did not degrade performance on either benchmark. The models maintained stable performance on multi-domain, multi-turn dialogues (MT-Bench) and human preference ranking (LMSYS).
+
+These results demonstrate that fine-tuning on JOSH rollouts preserves the models' general capabilities. Despite the specific nature of the ToolWOZ training, models adapted to task-oriented dialogue remain effective on broader large language model tasks, with minimal performance degradation.
+
+\section {Related Work}
+\label{sec:relatedwork}
+
+Notably, simulation environments with sparse rewards were used by DeepMind in their \textit{AlphaGo} \citep{silver2016mastering} and \textit{AlphaGo Zero} \citep{silver2017mastering} works, enabling the two models to achieve superhuman performance in the game of Go. In the \textit{AlphaGo} works, Monte Carlo Tree Search (MCTS) in a self-play simulation environment is used to intelligently explore the space of next possible moves and long term strategy. Similarly, JOSH treats dialogue as a multi-turn game where it explores possible directions and while using sparse rewards to identify ideal paths through a conversation. JOSH rollouts can then be used to train any LLM for multi-turn tool calling tasks.
+
+AgentQ \citep{putta2024agent} -- a contemporaneous work to this study --- is a webagent training and inference process, has similar motivations of self learning using preference data however it has some key differences from JOSH. AgentQ uses MCTS, a self-critique mechanism, and online searching of different pathways, while JOSH is a standalone data extraction algorithm that soley relies on arbitrary sparse rewards. Additionally, AgentQ uses a test time inference strategy while JOSH purely extracts training data for finetuning models, a form of offline RL. JOSH focuses on tool calling multi-turn dialogue while AgentQ is in the domain of navigating web agents. Finally, JOSH training utilizes 100\% successful paths to mitigate overfitting on intermediate rewards, while the AgentQ approach requires long horizon exploration to gather preference data. 
+
+Other works also explore training LLM agents based on rewards. Approaches such as STaR \citep{zelikman2022star}, Quiet-STaR \citep{zelikman2024quiet}, and Iterative Reasoning Preference Optimization \citep{pang2024iterative} use downstream rewards based on reasoning to train or preference tune models for increased performance at test time. However, these approaches are focused on single turn output performance rather than reasoning in a multi-turn dialogue setting. Some approaches use rewards to train policies to help TOD systems \citep{hu2023enhancing, wu2023diacttod} or extensive test-time search \citep{snell2024scaling} while JOSH simply produces data to finetune models rather than make test time changes. In this way JOSH is conceptually similar to Decision Transformers (DTs) \citep{chen2021decision}. DTs is a form of offline RL that generates optimal sequences for fine-tuning by conditioning on the rewards, whereas JOSH uses these rewards to select optimal simuation rollouts.
+
+Other approaches use search trees to improve the reasoning of models. Namely Tree of Thought (ToT) \citep{yao2024tree} and Chain of Preference Optimizaiton (CPO) \citep{zhang2024chain} focus on optimizing the performance of chain of thought (COT) \citep{wei2022chain} reasoning. CPO extracts preference data from a search tree exploring COT reasoning, however it uses an LLM to issue rewards at each sentence and is only applicable to single turn reasoning. On the contrary, JOSH uses sparse rewards in a simulaiton environment to solve reasoning problems in the multi-step dialogue domain.
+
+The preference tuning paradigm was first proposed as an easier to replicate direct supervised learning alternative to well-entrenched "RLHF" paradigm \citep{ziegler2019fine} of first learning a reward model from preferences and then learning a policy using RL-based approaches such as PPO or REINFORCE. Heralded by the first DPO \citep{rafailov2024direct}, many variants e.g. RS-DPO \citep{khaki2024rs} and ORPO \citep{hong2024reference} have emerged. Though early approaches required pairwise data with a contrasting good-bad response pair for a prompt, the KTO formulation \citep{ethayarajh2024kto} enabled learning from unpaired preferences. Since the preference data we collect is unpaired, we centrally use KTO in this work.
+
+
+
+
+\section{Conclusions}
+
+\label{sec:conclusion}
+In this work, we devise JOSH, a self-alignment approach which uses sparse rewards to enable agentic models of all sizes to train themselves. 
+We show that training on JOSH rollouts significantly increases performance on benchmarks assessing multi-turn dialogue and tool-calling ability while maintaining or improving general model performance. 
+We show JOSH is general an can be applied to small medium and large models and provide considerable gains in performance.
+Notably, we illustrate how frontier models can outperform themselves with JOSH to achieve state-of-the-art results on multiple tool-calling benchmarks.
+Additionally, we present ToolWOZ, a multi-turn, tool-calling simulation dataset with sparse rewards to train and evaluate agent LLMs. 
+
+
+
+\section{Reproducibility}
+
+\label{sec:reproduce}
+ The JOSH class has been designed flexibly, and only requires a step function for an agent and a user in order to begin creating rollouts. The JOSH class also supports a JOSHAgent, JOSHUser, and JOSHRewards base classes to help jump start research and provide an out of the box working solution that can be iterated over. We also provide our implementations for custom JOSH agents on $\tau$-bench. Lastly, we support a parallelized ToolWOZ runner script which allows rapid rollouts of JOSH, fast testing, and supports both local and gpt models.
+
+\iffalse
+
+
+
+\section{Submission of conference papers to ICLR 2025}
+
+
+ICLR requires electronic submissions, processed by
+\url{https://openreview.net/}. See ICLR's website for more instructions.
+
+If your paper is ultimately accepted, the statement {\tt
+  {\textbackslash}iclrfinalcopy} should be inserted to adjust the
+format to the camera ready requirements.
+
+The format for the submissions is a variant of the NeurIPS format.
+Please read carefully the instructions below, and follow them
+faithfully.
+
+\subsection{Style}
+
+Papers to be submitted to ICLR 2025 must be prepared according to the
+instructions presented here.
+Authors are required to use the ICLR \LaTeX{} style files obtainable at the
+ICLR website. Please make sure you use the current files and
+not previous versions. Tweaking the style files may be grounds for rejection.
+
+\subsection{Retrieval of style files}
+
+The style files for ICLR and other conference information are available online at:
+\begin{center}
+   \url{http://www.iclr.cc/}
+\end{center}
+The file \verb+iclr2025_conference.pdf+ contains these
+instructions and illustrates the
+various formatting requirements your ICLR paper must satisfy.
+Submissions must be made using \LaTeX{} and the style files
+\verb+iclr2025_conference.sty+ and \verb+iclr2025_conference.bst+ (to be used with \LaTeX{}2e). The file
+\verb+iclr2025_conference.tex+ may be used as a ``shell'' for writing your paper. All you
+have to do is replace the author, title, abstract, and text of the paper with
+your own.
+
+The formatting instructions contained in these style files are summarized in
+sections \ref{gen_inst}, \ref{headings}, and \ref{others} below.
+
+
+
+\section{General formatting instructions}
+
+\label{gen_inst}
+
+The text must be confined within a rectangle 5.5~inches (33~picas) wide and
+9~inches (54~picas) long. The left margin is 1.5~inch (9~picas).
+Use 10~point type with a vertical spacing of 11~points. Times New Roman is the
+preferred typeface throughout. Paragraphs are separated by 1/2~line space,
+with no indentation.
+
+Paper title is 17~point, in small caps and left-aligned.
+All pages should start at 1~inch (6~picas) from the top of the page.
+
+Authors' names are
+set in boldface, and each name is placed above its corresponding
+address. The lead author's name is to be listed first, and
+the co-authors' names are set to follow. Authors sharing the
+same address can be on the same line.
+
+Please pay special attention to the instructions in section \ref{others}
+
+

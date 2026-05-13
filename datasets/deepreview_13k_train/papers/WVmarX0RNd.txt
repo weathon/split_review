@@ -1,0 +1,416 @@
+\title{Multi-Bin Batching for Increasing LLM Inference Throughput}
+
+\begin{abstract}
+As large language models (LLMs) grow in popularity for their diverse capabilities, improving the efficiency of their inference systems has become increasingly critical. 
+Batching LLM requests is a critical step in scheduling the inference jobs on servers (e.g. GPUs), enabling the system to maximize throughput by allowing multiple requests to be processed in parallel.
+However, requests often have varying generation lengths, causing resource underutilization, as hardware must wait for the longest-running request in the batch to complete before moving to the next batch. 
+We formalize this problem from a queueing-theoretic perspective, and aim to design a control policy which is throughput-optimal.
+We propose Multi-Bin Batching, a simple yet effective method that can \emph{provably improve LLM inference throughput} by grouping requests with similar (predicted) execution times into predetermined bins.
+Through a combination of theoretical analysis and experiments, including real-world LLM inference scenarios, we demonstrate significant throughput gains compared to standard batching approaches.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Model (LLM) inference systems are becoming increasingly popular due to their various abilities, such as text generation~\citep{li2024pre}, coding assistance~\citep{chen2021evaluating}, and question answering~\citep{jiang2021can}.
+As the demand for LLM inference systems grows, so does the need to optimize their efficiency.
+
+Several techniques have been proposed to improve the efficiency of LLM inference systems, and \emph{batched inference}~\citep{pmlr-v202-sheng23a, kwon2023efficient, jin2023s} is one of the most promising techniques among them.
+With batched inference, multiple requests are processed simultaneously, using the underlying hardware's parallelism to improve throughput.
+~\Figref{fig:batching_throughput} shows the measured throughput of the Phi-3.5 Mini Instruct model~\citep{abdin2024phi} for various batch sizes on an NVIDIA A100 80G GPU. 
+Throughput is calculated as the number of total tokens generated across all requests divided by time.
+
+However, batched inference comes with some critical drawbacks.
+The execution time of each request depends on the number of tokens generated, which varies across requests.
+In standard batched inference systems, a computing unit remains locked until all requests in the batch are completed, leading to resource underutilization when requests within a batch have widely differing execution times.
+This inefficiency offsets the throughput gains achieved through parallelism\footnote{With some low-level system engineering, one could potentially allow for dispatch of waiting requests in the queue to a \emph{partially busy} computing node~\citep{yu2022orca}.
+We assume such fine-grained request dispatching is not available in this paper. 
+See Section \ref{sec:relatedwork} for more details.}.
+
+\begin{figure*}[ht]
+    \centering
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/Throughput_vs_Batch_Size.pdf}
+        \caption{}
+        \label{fig:batching_throughput}
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.60\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/binning_idea.pdf}
+        \caption{}
+        \label{fig:batch_inefficiency}
+    \end{subfigure}%
+    \caption{~\subref{fig:batching_throughput} Batch serving improves the throughput for the LLM inference systems. ~\subref{fig:batch_inefficiency} Standard batching causes underutilization of resources due to varying answer sizes.}
+\end{figure*}
+
+Inspired by this, a natural question arises: can we achieve near-optimal throughput from batched inference?
+
+We propose a novel control policy to optimize batched inference by introducing multi-bin batching that can \emph{provably improve LLM inference throughput} by grouping requests based on their predicted output lengths.
+Instead of placing all requests into a single queue, we create multiple ``bins'', each serving as a waiting area for requests with similar (predicted) output lengths. 
+This binning policy ensures that requests with comparable execution times are grouped together, minimizing inefficiencies due to varying execution times.
+Batches are then formed within each bin and dispatched to a central queue to be processed.
+
+To see why this approach is beneficial, consider the example illustrated in Figure~\ref{fig:batch_inefficiency}, where four requests arrive at nearly the same time, with execution times of 1, 5, 2, and 6 seconds, respectively. 
+In a standard batching system with a batch size of $B = 2$, the requests would be grouped based on their arrival time, forming two batches: (Request 1: \textit{1s}, Request 2: \textit{5s}) and (Request 3: \textit{2s}, Request 4: \textit{6s}). 
+The total execution time would be 11 seconds (5 seconds for the first batch and 6 seconds for the second).
+On the other hand, two-bin batching (one bin for service time between 1 to 3 seconds and another for those between 4 to 6 seconds) will result in different batches: (Request 1: \textit{1s}, Request 3: \textit{2s}) and (Request 2: \textit{5s}, Request 4: \textit{6s}).
+This will reduce the total execution time to 8 seconds, demonstrating how multi-bin batching can improve LLM inference throughput.
+
+Our analysis shows that as the number of bins increases, the throughput approaches the system’s theoretical maximum, achieving asymptotic throughput optimality by minimizing the inefficiencies caused by varying execution times within batches.
+
+We evaluate multi-bin batching in a variety of settings, utilizing Microsoft's Phi-3.5-mini-instruct model on an NVIDIA A100-80G GPU, and achieve consistent throughput improvements of up to 70\% with oracle length information.
+Our experiments span simulated results with linear models, end-to-end LLM inference using oracle bin assignments, and robustness analyses under symmetrical prediction errors, all of which demonstrate substantial performance gains as the number of bins increases.
+
+To summarize, our contributions are as follows:
+\begin{itemize}
+    \item We propose a novel binning-based scheduling strategy that dynamically groups requests into bins based on output lengths, minimizing inefficiencies from varying execution times and optimizing throughput for LLM inference systems.
+    \item We use queueing-theoretical analysis to show that our multi-bin batching strategy achieves asymptotical throughput optimality as the number of bins gets large. Additionally, we characterize the number of bins required to achieve a desired throughput improvement.
+    \item Our comprehensive experiments on real-world LLM models demonstrate that our proposed multi-bin batching system enhances throughput by up to 70\% with oracle length information, compared to standard batching approaches.
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{sec:relatedwork}
+
+\paragraph{LLM Inference and Scheduling.}
+Recent research has focused on optimizing large language model (LLM) inference through various scheduling techniques and tools from queueing theory.
+~\cite{wu2023fast} utilizes a novel preemptive scheduling algorithm, skip-join Multi-Level Feedback Queue, to improve the job completion time of LLM inference systems.
+~\cite{Inoue_2021} considers a dynamic batching scenario (the system serves at most B jobs, if there are less than B jobs at the queue it serves them) and derives closed-form upper bounds for the mean latency. 
+~\cite{cheng2024slice} proposes a new scheduling method, slice-level scheduling that splits the maximum output length of the model into slices and serves batches slice by slice, which utilizes the memory more efficiently and reduces the response time.
+Llumnix~\citep{sun2024llumnix} addresses the challenges of heterogeneous and unpredictable LLM inference requests through runtime rescheduling across multiple model instances, improving tail latencies and resource utilization.
+~\cite{yang2024queueing} analyze LLM inference queueing delay using an M/G/1 model, demonstrating that enforcing maximum output token limits and optimizing batch size can significantly reduce latency.
+\paragraph{LLM Serving and Answer Length Estimation.} There have been several studies on improving the throughput and the latency of LLM inference systems via estimating the answer length of the requests.
+~\cite{zheng2024response} proposed a response time prediction model for LLM inference systems by prompting the model with an extra question to predict the response time.
+Instead of directly predicting execution times,~\cite{fu2024efficient} predict the ranking of requests based on their execution times, and then propose a shortest-job-first scheduling algorithm to address the head-of-line blocking problem.
+~\cite{qiu2024efficient} uses a light proxy model to predict the execution time of the requests and then uses a speculative shortest-job-first scheduling algorithm to improve the throughput of LLM inference systems.
+S$^3$~\citep{jin2023s} estimates the answer length of the requests and uses it to optimize the memory efficiency of the LLM inference systems and it increases the effective batch size of the system thanks to the increased memory efficiency.
+~\cite{cheng2024enabling} uses input length to predict the response length of the requests and then uses it to optimize the batch size, it achieves higher throughput and reduces response time.
+Similarly, SyncIntellects~\citep{lin2024syncintellects} enhanced response length prediction using a transformer-based model and implemented QoS-friendly length control, resulting in improved throughput and latency of LLM inference systems.
+\paragraph{LLM Inference Optimization.} Recent studies have focused on optimizing the inference efficiency of LLM models through various techniques.
+Quantization has emerged as a key approach to reduce the memory footprint and improve the inference efficiency of LLM models. 
+Methods like LLM.Int8()~\citep{dettmers2022gpt3}, GPTQ~\citep{frantar2023optq}, SmoothQuant~\citep{xiao2023smoothquant}, and AWQ~\citep{lin2024awq} have demonstrated effective weight quantization techniques for LLM models, while QLoRA~\citep{dettmers2024qlora} combines quantization with parameter-efficient fine-tuning.
+Memory management innovations such as PagedAttention~\citep{kwon2023efficient} have significantly improved the serving throughput. 
+KV cache optimizations, including compression techniques like Gear~\citep{kang2024gear} have further improved the memory efficiency of LLM inference systems.
+Systems like FastServe~\citep{wu2023fast}, and FlexGen~\citep{pmlr-v202-sheng23a} have integrated these techniques to create comprehensive LLM serving solutions. 
+
+\paragraph{Continuous Batching.}
+Recent studies have proposed dispatching additional requests to the computing node before the current batch is fully processed, an approach known as continuous batching~\citep{yu2022orca}. 
+However, employing continuous batching is not always easy due to the different computational and memory demands of the prefill and generation phases of LLM inference. 
+This challenge is compounded by the reliance on hyperparameters which governs the balance between requests in the prefill and generation phases.
+Such reliance not only introduces operational complexity but also makes the system harder to analyze theoretically.
+Despite these challenges, continuous batching is increasingly being employed in practice; while we do not consider continuous batching in this work, adapting our strategy to increase the throughput of continuous batching systems is an interesting future research direction.
+
+
+
+\section{Problem Setup and the Multi-Bin Batching Algorithm}
+
+We begin by introducing the system model and key assumptions that form the foundation of our analysis. 
+This model represents a typical LLM inference system as a queueing system with specific characteristics. 
+Following this, we will propose our novel batching algorithm, which leverages a multi-binning approach to optimize request processing. 
+\begin{assumption}\label{asm:queueing_system}
+    The LLM inference system is a single-server queueing system with an infinite queue length capacity.
+    The system receives requests from a Poisson process with rate $\lambda$.
+\end{assumption}
+Assumption~\ref{asm:queueing_system} is a standard assumption in queueing theory, and it is well-suited for LLM inference systems since requests are typically generated by users in a random manner.
+Although this analysis assumes a single-server system, extension to multi-server systems is rather straightforward. 
+
+The system forms batches of size $B$, and the serving time of a batch is determined by the maximum of the serving times of its requests.
+For the purposes of this paper, we assume a ``first formed batch, first served" policy, where batches are processed in the order they are fully formed, regardless of when its constituent requests arrived.
+Alternative policies, such as ``shortest batch, first served", could also be considered depending on specific system requirements.
+
+\begin{assumption}\label{asm:service_time_uniform}
+    The service time of each request is independent and identically distributed (i.i.d.) with a uniform distribution in the range $[l_{\min}, l_{\max}]$, i.e., $l \sim \mathcal{U}(l_{\min}, l_{\max})$.
+\end{assumption}
+We make this assumption to simplify the analysis, and it is justified since LLM answer lengths typically fall within a specific range due to maximum token length limitations.
+In our theoretical analysis, we assume that the system always forms batches of size $B$ and then starts processing them.
+However, in real systems, there could be a parameter that specifies the maximum time a batch can wait before it is processed.
+This way the system can ensure that the latency of a request does not exceed a certain threshold and the quality of service is maintained.
+
+\subsection{Multi-Bin Batching Algorithm}
+
+We propose a novel scheduling policy that aims to improve the throughput of LLM inference systems. The key idea is to group requests into $k$ bins based on their service times before forming batches within each bin.
+This binning procedure reduces inefficiencies by ensuring that requests with similar execution times are batched together.
+\begin{algorithm}[h]
+\LinesNumbered
+\caption{Multi-Bin Batching with $k$-bins ($k$-Bin Batching)}
+\KwIn{Bin boundaries, $[l_{i-1}, l_i]$, $i = 1, \ldots, k$-bins, batch size $B$, and serving policy}
+\For{each incoming request}{
+    Estimate its service time $l$\;
+    Assign the request to bin $i$ where $l_{i-1} \leq l < l_i$\;
+}
+\For{each bin}{
+    Form batches of size $B$ when available\;
+    Add completed batches to the service queue\;
+}
+Serve batches from the service queue based on the serving policy provided\;
+The serving time of a batch is the maximum of the serving times of the requests in the batch\;
+\end{algorithm}
+
+\begin{wrapfigure}{r}{0.40\textwidth}
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/end_to_end_binning.pdf}
+    \caption{k-Bin Batching}
+    \label{fig:binning_system}
+\end{wrapfigure}
+The multi-bin batching algorithm is illustrated in Figure~\ref{fig:binning_system}.
+This algorithm works by first dividing the range of possible service times into $k$ bins with boundaries determined by prior knowledge or system profiling.
+Incoming requests are assigned to bins based on their estimated service times and grouped into batches of size $B$.
+Completed batches are added to a service queue and processed using the ``first completed batch, first served" policy, the default for this paper.
+By batching requests with similar service times together, this method reduces the serving time of each batch, and ensures efficient processing across all bins.
+
+
+
+\section{Throughput Analysis}
+
+
+In this section, we present a queueing-theoretical analysis to show that our multi-bin batching policy improves the throughput of LLM inference systems and achieves asymptotic throughput optimality.
+To analyze the throughput of the system, we first derive the optimal decision boundaries for each bin in our batching system.
+Using these boundaries, we calculate the expected service time of a batch of requests processed under the multi-bin batching policy.
+The expected throughput of the system is stated in the following proposition.
+\begin{proposition}
+    The expected throughput of the system is the ratio of the batch size to the expected service time. Specifically, it can be written as
+    \begin{equation}
+        \text{Throughput} = \frac{B}{\E[t_{\text{service}}]},
+    \end{equation}
+    where $B$ is the batch size and $\E[t_{\text{service}}]$ is the expected service time of a batch of $B$ requests.
+\end{proposition}
+\begin{remark}
+    The theoretically maximum capacity of the system is achieved when the service time of a batch, $t_{\text{service}}$, equals the average service time of a single request rather than the maximum service time within the batch. 
+    In this case, the expected throughput becomes, $\text{Throughput}_{\text{max}} = \frac{B}{\E[t]},$ where $\E[t]$ is the mean service time of a single request. 
+    This scenario represents the idealized case of perfect parallelism without any delays due to batching overhead.
+\end{remark}
+
+For our multi-bin batching system, we can derive the expected service time of a batch of $B$ requests as follows:
+\begin{equation}
+    \E[t_{\text{service, k}}] = \sum_{i=1}^k \Pr(\text{bin}=i)\E\left[\max_{j\in[B]}\rx_{j}|\text{bin}=i\right],
+\end{equation}
+where $\Pr(\text{bin}=i)$ is the probability that a batch served by the system is in bin $i$, and the expected service time of a batch of $B$ requests from bin $i$ is denoted by $\E\left[\max_{j\in[B]}\rx_{j}|\text{bin}=i\right]$.
+We also denote it as $\E[t_{\text{service, k}}]$ to emphasize that it is the expected service time of multi-bin batching system with $k$ bins.
+Then, the first step is to determine the optimal decision boundaries for each bin in the multi-bin batching system for a fixed number of bins $k$, as provided by the following lemma.
+\begin{lemma}\label{lem:optimal_decision_boundary_uniform}
+    Under Assumption~\ref{asm:service_time_uniform} and a fixed number of bins $k$, the throughput is maximized when each bin has equal probability mass, and the decision boundaries are determined as follows:
+    \begin{equation}\label{eq:optimal_decision_boundary_uniform}
+        l_{i-1} = l_{\min} + \frac{i-1}{k}(l_{\max} - l_{\min}), \quad l_i = l_{\min} + \frac{i}{k}(l_{\max} - l_{\min}), \quad i\in[k].
+    \end{equation}
+\end{lemma}
+The proof of Lemma~\ref{lem:optimal_decision_boundary_uniform} is given in~\ref{sec:proof_optimal_decision_boundary_uniform}.
+We first show that the expected service time is a convex function of the decision boundaries, and then we show that it is minimized when each bin has equal probability mass.
+
+Given the optimal decision boundaries in Lemma~\ref{lem:optimal_decision_boundary_uniform}, for a fixed number of bins $k$, we can have the following theorem for the expected throughput of the system.
+\begin{theorem}\label{thm:throughput_k_bin}
+    Under Assumption~\ref{asm:service_time_uniform}, the expected throughput of the $k$-bin batching is
+    \begin{equation}\label{eq:throughput_k_bin}
+        \text{Throughput}_{k} = \frac{B}{\E[t_{\text{service, k}}]} = \frac{B}{\frac{l_{\max} + l_{\min}}{2} + \frac{1}{k}\left(
+        \frac{B}{B+1}l_{\max} + \frac{1}{B+1}l_{\min} - \frac{l_{\max} + l_{\min}}{2}
+        \right)},
+    \end{equation}
+    and it is an increasing function of the number of bins $k$.
+\end{theorem}
+
+The proof of Theorem~\ref{thm:throughput_k_bin} is given in~\ref{sec:proof_throughput_k_bin}.
+The proof utilizes the optimal decision boundaries in Lemma~\ref{lem:optimal_decision_boundary_uniform} to derive the expected service time of a batch of with $k$ bins.
+Then, we derive the expected throughput of the system with $k$ bins as a function of the number of bins $k$.
+\begin{remark}
+    The standard batching system is a special case of the multi-bin batching system with $k=1$.
+    If we substitute $k=1$ into Equation~\ref{eq:throughput_k_bin}, we can derive the expected throughput of the system with standard batching.
+    Since the expected throughput of the system with the multi-bin batching is an increasing function of the number of bins $k$, the throughput of the system with our multi-bin batching system is higher than the standard batching system.
+    Hence, the multi-bin batching system can improve the throughput of the system.
+\end{remark}
+\begin{remark} 
+The expected throughput of the system with multi-bin batching increases with the number of bins $k$ and converges to the maximum capacity of the system as $k\to\infty$: 
+\begin{equation}
+        c_{\max} = \lim_{k\to\infty}\text{Throughput}_{k} = \frac{B}{\frac{l_{\max} + l_{\min}}{2}}.
+\end{equation}
+With infinitely many bins, the binning becomes so fine-grained that the batch service time equals that of a single request, achieving the optimal throughput asymptotically.
+\end{remark}
+
+In the following theorem, we derive the minimum number of bins $k$ required to achieve a target throughput below the maximum capacity.
+\begin{theorem}\label{thm:min_k}
+    Under Assumptions~\ref{asm:queueing_system}, and~\ref{asm:service_time_uniform}, for any $\epsilon>0$, the desired throughput of the system $c_{\max}-\epsilon$ can be achieved by the multi-bin batching system with $k$ bins, where $k$ is the smallest integer satisfying the condition
+    \begin{equation}\label{eq:min_k}
+        k \geq \left\lceil\frac{(c_{\max}-\epsilon)\left(\frac{B}{B+1}l_{\max} + \frac{1}{B+1}l_{\min} - \frac{l_{\max} + l_{\min}}{2}
+        \right)}{\epsilon\frac{l_{\max} + l_{\min}}{2}}\right\rceil = O\left(\frac{1}{\epsilon}\right).
+    \end{equation}
+\end{theorem}
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/average_throughput_vs_lambda.pdf} 
+    \caption{Average throughput of $k$-bin batching vs the arrival rate.}
+    \label{fig:average_throughput_vs_lambda}
+\end{wrapfigure} 
+The proof of Theorem~\ref{thm:min_k} is given in~\ref{sec:proof_min_k}.
+The proof utilizes the expected throughput derivation in Theorem~\ref{thm:throughput_k_bin} to find the smallest integer that achieves the desired throughput.
+
+Figure~\ref{fig:average_throughput_vs_lambda} shows the average throughput of the system with varying numbers of bins $k$ as a function of the arrival rate $\lambda$.
+In this figure, we assumed that the batch size $B=128$, the minimum service time $l_{\min}=1$, and the maximum service time $l_{\max}=20$, resulting a maximum theoretical capacity of$c_{\max} = \frac{128}{\frac{20+1}{2}} \approx 12.3$.
+We submit 128000 requests to the system and measure the time taken to process all the requests.
+We run the simulations for 10 times and report the average throughput of the system.
+Then, we calculate the average throughput of the system as the number of requests processed per unit time.
+The results show that throughput increases with the number of bins $k$, approaching the maximum capacity when $k=5$.
+However, increasing the number of bins introduces a trade-off: as $k$ grows, the time required to construct batches also increases, potentially leading to higher latency.
+In the next section, we evaluate the latency of the system with multi-bin batching and compare it with the standard batching system.
+
+
+
+\section{Latency Analysis}
+
+
+The latency of a request is defined as the total time from when it enters the system until it is completely served.
+The latency of a request consists of two components: the queuing time and the service time. 
+In the previous section, we analyzed the expected service time of a request for our multi-bin batching scheduling policy. 
+In this section, we focus on the queuing time, which can be further decomposed into two components: the time spent waiting to form the current batch and the time spent waiting for the current batch to start processing.
+In this analysis, we focus on the time spent waiting to form the current batch, which provides a lower bound for the latency of a request.
+To derive this theoretical lower bound for latency, we assume ideal conditions where batches are processed immediately upon formation.
+\begin{assumption}\label{asm:infinite_servers}
+    The number of servers in the system is infinite. Therefore, any batch that is ready for processing begins immediately without delay.
+\end{assumption}
+
+This assumption allows us to approximate latency in an idealized setting, where the waiting time for batches to start processing is negligible. 
+While this lower bound holds across all load conditions, it closely approximates the latency in underloaded systems.
+We denote the expected latency of a request as $\mathbb{E}[t_{\text{latency}}]$.
+The following lemma provides the expected latency of a request in our system with the assumption of infinite servers.
+\begin{lemma}\label{lemma:latency}
+    Under Assumptions~\ref{asm:service_time_uniform}, and~\ref{asm:infinite_servers}, and given the arrival rate $\lambda$ and $k$-bins with equal probability mass, the expected latency of a request is given by
+    \begin{equation}
+        \mathbb{E}[t_{\text{latency}}] = \frac{l_{\max} + l_{\min}}{2} + \frac{1}{k}\left(
+            \frac{B}{B+1}l_{\max} + \frac{1}{B+1}l_{\min} - \frac{l_{\max} + l_{\min}}{2}
+            \right) + \frac{B-1}{2\lambda}k.
+    \end{equation}
+\end{lemma}
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/average_latency_vs_lambda.pdf}
+    \caption{The latency of a request vs the arrival rate $\lambda$ for different $k$ values.}
+    \label{fig:average_latency_vs_lambda}
+\end{wrapfigure}
+The proof of Lemma~\ref{lemma:latency} is given in~\ref{sec:proof_latency}.
+The proof utilizes the fact that the arrival process is Poisson and the effective arrival rate of each bin is $\lambda/k$.
+In~\Figref{fig:average_latency_vs_lambda}, we plot the average latency of a request as a function of the arrival rate $\lambda$ for different $k$ values.
+We use the parameters $l_{\min}=1$, $l_{\max}=20$, $B=128$, and $k=1, 2, 3$.
+We submit 128000 requests to the system and measure the latency of each request.
+We run the simulations for 10 times and report the average.
+It can be seen that our Lemma~\ref{lemma:latency} provides a close approximation of the latency of a request in our system when the arrival rate is low.
+As the arrival rate increases, the average latency of a request decreases until the system reaches its maximum throughput.
+Overall, our multi-bin batching control policy with $k$-bins can provide a higher throughput compared to the standard batching system with a minor increase in the latency of a request.
+
+
+
+\section{LLM Experiments}
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \includegraphics[width=0.35\textwidth]{figures/Inference_Time_with_Linear_Fit.pdf}
+    \label{fig:linear_fit}
+\end{wrapfigure}
+
+To thoroughly analyze the throughput improvements from our multi-bin batching approach, we conduct three different experiments, with increasing levels of realism. 
+Each experiment has two main components: the \emph{service time} for a request and the \emph{bin assignment} for that request. 
+In the first experiment, we model the service time as a linear function of the number of tokens generated by the model and use the known service time to determine the bin, referred to as oracle bin predictions. 
+In the second experiment, we replace the linear model and instead send requests to a language model and use the actual inference time. 
+Finally, in the third experiment, we introduce errors in the binning process by simulating symmetrical inaccuracies in output length predictions.
+Across all experiments, we simulate requests arriving as a Poisson process with rate $\lambda$. 
+\subsection{Simulated LLM Inference}
+\label{sec:simulated results}
+
+To simulate the LLM inference time, we collect responses to questions from the GSM8K dataset~\citep{cobbe2021training} using Microsoft's Phi-3.5 mini-instruct model~\citep{abdin2024phi}. 
+We use greedy sampling on an NVIDIA A100-80G GPU. 
+We plot the number of generated tokens in a response against the inference time and perform a linear regression to approximate the time to generate each token. 
+Token generation time can be closely approximated by a linear function for a large range of context lengths due to memory bounds. 
+Thus, we assume a linear relationship between the number of generated tokens and the overall inference time.
+This linear relationship can be seen at~\Figref{fig:linear_fit}.
+Now, we simulate requests as questions from the GSM8K dataset according to a Poisson arrival process. 
+We bin each request using the known response lengths collected from Phi-3.5-mini-instruct. 
+As described in the multi-bin batching control policy, once a full batch size of $B$ requests is completed within a bin, that batch is added to a central queue. 
+When a server is available, we simulate the service time for each request according to the linear model described earlier and let the service time for the entire batch be the maximum of the individual requests' service time. 
+This reflects the reality that a server is busy until the model has generated complete outputs for all requests within a batch. 
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/Average_Latency_vs_Traffic_Intensity.pdf}
+    \caption{Throughput rises with more bins, while latency initially drops then incresases again.}
+    \label{fig:avg_latency_traffic}
+\end{wrapfigure}
+\Figref{fig:avg_latency_traffic} shows a comparison of latencies and maximum throughput across different numbers of bins as system traffic increases. 
+Here, we fixed a batch size of 8 and simulated 8 servers, which can simultaneously serve batches. 
+We set the decision boundaries such that each bin is equiprobable.
+As the number of bins $k$ increases, the system throughput also increases, approaching its maximum capacity(throughput threshold).
+Interestingly, when $k$ is small, such as $k \in [2, 4]$ the minimum latency is superior to the minimum latency without our method, when $k = 1$.
+This counterintuitive result may stem from differences between the theoretical assumption of uniform output length distributions and the actual distributions observed in the dataset.
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/Throughput_vs_Number_of_Bins.pdf}
+    \caption{Throughput with known output lengths.}
+    \label{fig:throughput}
+\end{wrapfigure}
+To better understand the throughput gains from our control policy, we replace the linear model with the actual inference times for an LLM responding to a batch of requests. 
+During inference, the server is considered fully occupied. 
+Specifically, we generate responses with Microsoft's instruction-tuned Phi-3.5 Mini model, using a batch size of 8, a maximum of 1024 tokens, and a single simulated server running on an NVIDIA A100-80G. 
+
+Rather than simulating various arrival rates, we focus on a single large arrival rate, where all requests arrive simultaneously. 
+This setup ensures full server utilization, eliminating delays from waiting to form batches, and allows us to directly measure the throughput gains from our control policy under ideal conditions. 
+The recorded throughput closely approximates the system's maximum achievable throughput. 
+Consistent with Section~\ref{sec:simulated results}, throughput increases as the number of bins $k$ grows, improving by approximately 70\% from no binning to 32 bins. 
+This result underscores the effectiveness of our control policy in optimizing resource utilization and reducing inefficiencies from variability in request execution times.
+
+\subsection{Effect of Symmetrical Prediction Errors}
+\label{sec:symmetrical_error}
+
+In this subsection, we evaluate the robustness of the multi-bin batching policy by simulating the system under an error model with symmetrical inaccuracies in length prediction.
+Bin assignments are assumed to occur within the true bin and its neighboring bins, following an approximately symmetrical distribution.
+
+The error model is defined as follows: for a true bin $i$, the predicted bin is $i \pm 1$ with probability $p_e$, and the correct bin $i$ with probability $1 - 2p_e$, for $i \in \{2, 3, \ldots, k-1\}$. 
+For the edge bins ($i = 1$ or $i = k$), predictions fall into the adjacent bin with probability $p_e$ and the correct bin with probability $1 - p_e$.
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/throughput_vs_error_prob_k_2.pdf}
+        \caption{2 bins}
+        \label{fig:throughput_vs_error_prob_k_2}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/throughput_vs_error_prob_k_4.pdf}
+        \caption{4 bins}
+        \label{fig:throughput_vs_error_prob_k_4}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/throughput_vs_error_prob_k_8.pdf}
+        \caption{8 bins}
+        \label{fig:throughput_vs_error_prob_k_8}
+    \end{subfigure}
+    \caption{Throughput of the system with respect to the error probability $p_e$ for different values of $k$.}
+    \label{fig:throughput_vs_error_prob}
+\end{figure}
+
+Figure~\ref{fig:throughput_vs_error_prob} presents the system throughput for different numbers of bins $k$ as a function of the error probability $p_e$. 
+The simulation setup mirrors that used in earlier experiments, with $p_e$ values ranging from 0.01 to 0.5.
+We assumed that the batch size $B=128$, the minimum service time $l_{\min}=1$, and the maximum service time $l_{\max}=20$.
+We submit 128000 requests to the system and measure the time taken to process all the requests.
+We run the simulations for 10 times and report the average throughput of the system.
+
+Even with symmetrical prediction errors, the throughput of the system increases as the number of bins $k$ grows. 
+Systems with more bins demonstrate higher resilience to prediction inaccuracies, confirming the robustness of the multi-bin batching policy under this error model. 
+This result highlights the policy's potential to maintain performance despite errors in length prediction.
+
+
+
+\section{Conclusion}
+
+This paper introduced multi-bin batching, a novel approach to optimize Large Language Model (LLM) inference systems by grouping requests with similar output lengths.
+Our method provides a provable throughput improvement, mitigating resource underutilization in standard batched inference systems. 
+Experimental results demonstrate significant performance gains compared to standard batching. 
+Our solution contributes to LLM inference optimization and can be readily integrated into existing systems. 
+As LLMs continue to play a critical role in various applications, this approach enables more efficient deployments. 
+Future work could focus on improving bin prediction models and developing adaptive binning strategies to further enhance system performance.
+
+
+
+

@@ -1,0 +1,396 @@
+\title{A Hitchhiker's Guide to Scaling Law Estimation}
+
+\begin{abstract}
+Scaling laws predict the loss of a target machine learning model by extrapolating from easier-to-train models with fewer parameters or smaller training sets. This provides an efficient way for practitioners and researchers alike to compare pretraining decisions involving optimizers, datasets, and model architectures. Despite the widespread use of scaling laws to model the dynamics of language model training, there has been little work on understanding how to best estimate and interpret them.
+We collect (and release) a large-scale dataset containing losses and downstream evaluations for 485 previously published pretrained models. We use these to estimate more than 1000 scaling laws, then derive a set of best practices for estimating scaling laws in new model families.
+We find that fitting scaling laws to intermediate checkpoints of training runs (and not just their final losses) substantially improves accuracy, and that---all else equal---estimates of performance are generally most accurate when derived from other models of similar sizes. However, because there is a significant degree of variability across model seeds, training multiple small models is sometimes more useful than training a single large one. Moreover, while different model families differ scaling behavior, they are often similar enough that a target model's behavior can be predicted from a single model with the same architecture, along with scaling parameter estimates derived from other model families.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Substantial effort and cost are required to train even a single large language
+model (LLM). 
+While there is a large body of work that motivates or evaluates these changes using small models \citep{warstadt2023findings, stlm}, synthetic tasks \citep{akyurek2024context,wortsmansmall} or theory \citep{jelassi2024repeat}, one of the most important tools for current practitioners is the estimation of \textbf{scaling laws} for LLMs \citep{ivgi2022scaling,dubey2024llama3herdmodels}.
+
+A scaling law extrapolates the performance of a target model from the performance of a set of models with fewer parameters or smaller training sets.
+Typically, this extrapolation requires models to belong to the same \textbf{model family}, differing only in parameter count and training set size, but using the same architecture and training distribution.
+A high-quality scaling law accurately predicts the target model's test performance \citep{rosenfeldconstructive,kaplan2020scaling, hoffmann2022training}. %downstream evaluation metrics \citep{overtrain,ruan2024observational}, or pretraining time effects \citep{inbar2024time}
+
+Most past work describing and characterizing scaling laws has begun by exhaustively training models in a family across a full range of dataset sizes and parameter counts.
+One question that has received comparatively little attention is how, when training a new LLM, a practitioner with limited computational resources should choose \emph{which} small-scale models to train in order to best estimate a target model's final performance.
+This paper offers a practical guide to when, and how, to use small models to efficiently obtain meaningful predictions about large models' behavior---maximizing prediction reliability while minimizing the budget for preliminary experimentation, which necessarily involves tradeoffs between the number of preliminary models trained, the size of the largest preliminary model, and size of the dataset used to train it.
+
+We begin by collecting diverse model data to perform a large-scale meta-analysis of scaling laws (\S \ref{sec:data}). Usually, scaling law research relies on a single collection of closely related models, or alters only a minimal aspect of pretraining (e.g.\ data size; \citealp{datablations}). Instead, we gather data from as diverse a set of scaled families as possible, to allow this and future meta-analysis of scaling laws that generalize across architectures, datasets and settings.
+
+The rest of the paper uses this data to analyze a number of key questions around scaling law estimation:
+\begin{enumerate}
+    \item \textbf{How reliably may we expect scaling laws to extrapolate?} Variation between random parameter initializations can produce changes of up to 4\% in loss. Most published improvements in pretraining procedures, when performing minimal controlled experiments, report loss changes between  4\% and 50\% (\S\ref{sec:how-well}).
+    \item \textbf{How much does the shape of scaling laws vary across model families?} Different model families have scaling laws with a different functional dependence on model size (\S\ref{sec:transfer}). However, transformer LMs are similar enough that, with a single model from a target family and a scaling law from a different model family,
+    it is sometimes possible to accurately estimate target model performance (\S\ref{sec:1model}).
+ \item \textbf{Must scaling laws be estimated only from fully trained models?} Even though optimization procedures are typically sensitive to the full size of a training run, estimating scaling laws from intermediate training checkpoints greatly improves scaling law fit (\S\ref{sec:data_subset}). It is generally possible to estimate a model's final loss beginning roughly $\nicefrac{1}{3}$ of the way through training.
+ 
+ \item \textbf{How large must models be to produce reliable scaling estimates?} All else equal, experimenting with large models is typically more useful than with small models (\S\ref{sec:model_size}), but may be outweighed by the benefits of reduced variance from training more, smaller models (\S\ref{sec:num_models}).
+ 
+ \item Taken together, \textbf{cost-effective estimation} of a scaling law should consider the \textbf{number} of models, the \textbf{size} of the models, and the number of \textbf{training tokens} for each model. We highlight those size, tokens and number of models effects in Fig.~\ref{fig:mainfig}.
+\end{enumerate}
+
+Our experiments also provide insight into the functional form of scaling laws themselves, suggesting that they may have fewer degrees of freedom (\S\ref{sec:pca}) than typically assumed.
+We conclude with discussion of other work on scaling law estimation that may be of interest to practitioners \S\ref{sec:related}.
+
+
+\begin{figure*}[t!]
+ \centering
+ \begin{subfigure}[b]{0.31\textwidth+20pt}
+ \centering
+ \makebox[20pt]{\raisebox{55pt}{\rotatebox[origin=c]{90}{GPT3}}}%
+ \includegraphics[height=4cm]{images/closer_in_scale_is_predictive_4models/hist-perc-are_gpt3.pdf}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.31\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/hist-num-models-agg-gpt3.pdf}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.31\textwidth}
+ \centering
+\includegraphics[height=4cm]{images/hist-num-models-agg-scale_gpt3.pdf}
+ \end{subfigure}
+
+ \centering
+
+ \begin{subfigure}[b]{0.31\textwidth + 20pt}
+\makebox[20pt]{\raisebox{55pt}{\rotatebox[origin=c]{90}{Pythia}}}%
+ \centering 
+ \includegraphics[height=4cm]{images/closer_in_scale_is_predictive_4models/hist-perc-are_pythia-deduped.pdf}
+ \caption{Scale up vs. Train Percentage}
+ \label{fig:scale_perc}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.31\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/hist-num-models-agg-pythia.pdf}
+ \caption{\#Models vs. Train Percentage}
+ \label{fig:num_perc}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.31\textwidth}
+ \centering
+\includegraphics[height=4cm]{images/hist-num-models-agg-scale_pythia.pdf}
+ \caption{\#Models vs. Scale up predicted}
+ \label{fig:num_scale}
+ \end{subfigure}
+ \caption{The effects of three variables on scaling law accuracy. Each cell corresponds to a single scaling law estimated from a set $\xtrain$ of model checkpoints, with the color denoting that scaling law's error when predicting the largest model in a family.
+ Each column shows a subset of the three axes along which these training sets differ:
+ (1) the number of tokens used to train each LM in $\xtrain$ (expressed as a fraction of the full training corpus), (2) the number of distinct models trained; and (3) the size of the largest model trained (expressed as a scale-up factor---the ratio between the target model and the largest model in $\xtrain$).
+ In (a), all laws are estimated from four models. In (c) all laws use the full corpus.
+ Orange lines show iso-FLOP contours (sets of scaling laws whose training sets require the same computational cost to produce).
+ \includegraphics[height=1em]{star_marker.pdf} represent the most efficient ways to obtain 15\%, 10\% and 5\% ARE. One of the most immediate conclusions from these plots is that scaling law estimation is quite noisy---the inclusion of a single badly-behaved model in the estimation procedure can produce large errors, and in small model families error does not reliably decrease with additional computation. However---because of noise---it is often preferable to extrapolate from a large number of small, partially trained models rather than a small number of large models.}
+ \label{fig:mainfig}
+\end{figure*}
+
+
+\section{Defining a scaling law}
+
+
+
+
+A scaling law estimates the loss of a costly model by training cheaper ones (see Fig.~\ref{fig:illustration}) which share a pretraining procedure and differ by some hyperparameters, typically model size (\msize{}) and number of tokens seen during training (\tokens{}). A scaling law is a function that predicts a target model's loss on held-out data when setting the value of one hyperparameter \citep{kaplan2020scaling} or both \citep{rosenfeldconstructive,hoffmann2022training}.
+Comparing laws' predictions about different pretraining choices \citep[e.g. data][]{bimix} allows informed decisions about which large-scale model to train. 
+\begin{wrapfigure}{r}{0.38\textwidth}
+  \centering
+  \includegraphics[width=.36\textwidth]{images/illustration-crop.pdf}
+  \caption[short]{Illustration of a scaled family, an estimated scaling law, and its prediction error for a target model. \label{fig:illustration}} % this works well: https://pdfresizer.pdf
+\end{wrapfigure}
+A scaling law also enables finding the optimal choice of hyperparameters under computational constraints on pretraining \citep{hoffmann2022training} or inference \citep{touvron2023llama2,sardanabeyond}. 
+
+Formally, we will call a \textbf{model} $\xmodel$ any single concrete neural language model with a specific set of parameters. Different seeds, or even different checkpoints from the same training run, correspond to different models.
+We define a \textbf{scaled model family} $\xmodel$ as a set of models, with each $\xmodel\in \xfamily$ differing only in size $\mathmsize{}(\xmodel)$
+and number of tokens $\mathtokens{}(\xmodel)$.
+
+There are two specific subsets of scaled model families that will be useful in our experiments. First, the \textbf{maximal parameter family} $\max_{\mathmsize}(\xfamily)$ contains only models in $\xfamily$ with the largest number of parameters. Formally,
+define $m = \max_{\xmodel \in \xfamily} ~ \msize(\xmodel)$; then $\max_\mathmsize(\xfamily) = \{\xmodel \in \xfamily ~:~ \mathmsize(\xmodel) =~ m \}$. This family will generally contain the \textbf{target} model(s) whose behavior we wish to predict $t\in \xtarget$.
+Second, the \textbf{$\mathbf{q}$-maximal token family} $\max_{\mathtokens}(\xfamily, q)$ contains all models in $\xmodel$ trained on at least a $q$-sized fraction of the training set. Formally, define $t = q \cdot (\max_{\xmodel \in \xfamily} ~ \mathtokens(\xmodel))$; then $\max_{\mathtokens}(\xfamily, q) = \{\xmodel \in \xfamily ~:~ \mathtokens(\xmodel) \geq t\}$. 
+Note that this definition does not distinguish between partially trained models on one hand, and models trained to convergence on a subset of the largest training set used in a family on the other.
+Throughout this paper, we will not in general distinguish between these two types of models, a decision evaluated in \cref{sec:data_subset}.
+Indeed, except where noted, $\max_{\mathtokens}(\xfamily, q)$ should be thought of as containing the checkpoints from the last $q$\% of a training run.
+
+A \textbf{scaling law} $\hat{L}(\xmodel \mid \xfamily)$ 
+estimates the performance of a new model $\xmodel$ given a model family $\xfamily$. (We will simply write $\hat{L}(\xmodel)$ when the family is clear from the context.)
+All experiments in this paper use the common functional form from the literature \citep{hoffmann2022training}: 
+\begin{equation}
+ \hat {L}(\xmodel) \coloneqq 
+ E + \frac{A}{\mathmsize{}(\xmodel)^\alpha} + \frac{B}{\mathtokens{}(\xmodel)^\beta}.
+ \label{eq:scaling}
+\end{equation}
+Here $E$ is a baseline capturing the scaled family's general performance; $A, \alpha$ and $B, \beta$ describe the scaling effect of \msize{} and \tokens{} respectively.\footnote{
+We believe many of the findings in this paper apply to other functional forms that have been proposed for scaling laws \citep{caballerobroken}, and even suggest new parameterizations as described in \S\ref{sec:pca}.
+}
+These parameters are estimated by first collecting a set of \textbf{training models} $\xtrain$, then
+minimizing the reconstruction error
+\[
+    \argmin_{E, A, \alpha, B, \beta} ~~ \sum_{\xmodel \in \xtrain} (\hat{L}(\xmodel) - \mathperf(\xmodel) )^2
+\]
+where $\mathperf(\xmodel)$ denotes the empirical negative log-likelihood of some held-out data under the model $\xmodel$.
+
+In this sense, a scaling law is an ordinary parametric machine learning model, and we may ask many of the same questions about $\hat{L}$ that we ordinarily ask about LLMs ---what training data ($\xtrain$) should we collect? How do we estimate accuracy? We seek to provide empirical answers to these questions, for which we first require data.
+
+
+
+\section{Data for 1000+ scaling laws and more}
+
+
+As part of this work, we have collected and released the largest-scale public dataset describing scaling behavior across model families.
+This dataset aggregates information from a large number of LLM training efforts that have released information about the behavior of multiple models of different sizes or scales.
+While experiments in this paper focus on scaling laws that measure loss, 
+the dataset also includes information about model performance on downstream evaluation benchmarks where available. 
+We have focused on language models where the largest one is more than 3B parameters and where data was shared publicly or in private correspondence. In addition to those, we have manually extracted some data from papers that did not release models but reported losses in figures.
+
+\subsection{Data sources}
+
+For each model in this dataset, we report any downstream evaluation and loss that was measured during training, as well as calculated \tokens{} for each, links to matching checkpoints when available, links to data sources, and information about computational cost (in FLOPs) and number of training epochs (i.e.\ passes over the training set). Each model is identified by a unique name, a type (e.g. llama), \tokens{}, \msize{}, architecture type (e.g. encoder-decoder), and seed. 
+
+Models in this dataset include Pythia (\citealp{pythia}, which provides the largest set of models and variations in a family), OPT (\citealp{zhang2022optopenpretrainedtransformer}, collected thanks to \citealp{xia2023training,pythia}), OLMO \citep{groeneveld2024olmoacceleratingsciencelanguage}, Amber \citep{liu2023llm360}, K2 \citep{k2}, Mamba \citep{liu2023llm360} RedPajamas \footnote{https://www.together.ai/blog/redpajama-models-v1}
+ModuleFormer mixture of experts \citep{shen2023moduleformer}, overtrained models \citep{overtrain}, Mamba, Llama and hybrid architecture variations from \citet{poli2024mechanisticdesignscalinghybrid}, transformer architectures \citep{alabdulmohsin2022revisiting}, Bloom 
+\citep{le2023bloom}, T5-Pile \citep{2024PileT5}, \citet{pandey2024gzip} models, GPT-family models with different data regimes \citep{datablations}, Gopher \citep{hoffmann2022training} and GPT3 \citep{brown2020languagemodelsfewshotlearners}.
+
+The data consists of 1.9M steps of training evaluated on loss or perplexity, usually on multiple data sources belonging to 485 unique pretrained models, and more than 40 scaled families.
+
+We hope this will provide a useful resource for the community and plan to extend it further as models get released and their training dynamics are shared. We see such a resource as a facilitator to more research on model development (e.g. A/B testing), scaling laws, downstream scaling laws \citep{overtrain,ruan2024observational,owen2024predictable,isik2024scaling}, training dynamics \citep{trajectories} and more.
+
+\subsection{Scaling law estimation}
+In the rest of the paper, we present findings from estimating hundreds of scaling laws as follows:
+
+\paragraph{Fitting} For each model family $\xfamily$, we identify the maximal parameter family $\xfamily_\mathrm{max} = \max_{\mathmsize{}}(\xfamily)$, and estimate a scaling law $\hat{L}$ using the remaining models $\xtrain = \xfamily \setminus \xfamily_\mathrm{max}$.
+Estimation of scaling law parameters uses the \texttt{curve\_fit} function in \texttt{scikit-learn} \citep{pedregosa2011scikit}. We additionally experimented with an L-BFGS-based solver but found it to be less stable.
+We only estimate scaling laws for model families that contain at least three models.
+
+\paragraph{Evaluation} 
+To evaluate estimated scaling laws reliably, we need to account for loss fluctuations during large-scale model training. Thus, we test against a few checkpoints near the end of training: we choose as target models $\xtarget$ the $30\%$-maximal token family from the set $\xfamily_\mathrm{max}$ defined in the previous paragraph---that is, we take $\xtarget = \max_{\mathtokens}(\xfamily_\mathrm{max}, 0.3)$.
+We then report the mean \textbf{absolute relative error (ARE)} $\E_{\xmodel \in \xtarget}|L(\xmodel) - \hat{L}(\xmodel \mid \xtrain)| / L(\xmodel)$  between the empirical loss $L$ and the loss $\hat{L}$ predicted by the scaling law.
+
+
+
+
+\section{How well can I expect a scaling law to predict?}
+
+\summarybox{4\% is the best ARE typically obtained; ARE up to 20\% can still distinguish between many modeling choices.}
+
+To establish how accurate a scaling law must be to be \emph{useful} to practitioners,
+we first assess what changes in model accuracy have been considered meaningful in past work. 
+We have surveyed experiments in the literature where an A/B test was performed, i.e., two models were trained similarly, manipulating one attribute to see how it affects scores. Empirically, we found no widely adopted modeling changes that were motivated with less than a 4\% relative difference between models. Additionally, reported variance across random restarts of the same model architecture reaches up to 3.5\% \citep[c.f.,\S\ref{sec:num_models};][]{sellam2021multiberts}. We take this to mean that this is approximately the minimal effect-size experimenters care about and possibly the minimal effect one can reliably measure. Accordingly, this bounds the best goodness of fit we should expect or require of scaling laws.
+
+To offer several concrete points of comparison: Pythia 6.9B models fixed inconsistencies in their code and hence have two versions (c.f. App.~B; \citealp{pythia}) which differ in loss by 40\%. They also provide data deduplication A/B test that had a minor effect on the loss of about 5\%. \citet{overtrain} tested the effect of training 400M parameter models for different \tokens{}. The most similar (double the training tokens) has approximately 4\% change and can reach a 50\% loss difference with 30 times more training. Training on a constant \tokens{} but repeating the same data resulted in %8.7B models with 
+almost no changes for up to 4 repetitions (epochs), and later in about 8\%, 50\% on 14.44 repetitions of the data \citep{datablations}.
+Instead of varying the amount of data or epochs, \citet{bimix} found that training on a different kind of data incurred ARE of approximately 10\% and different data mixes led to 6\% changes or less.
+
+
+\section{When I train a new model, do I even need a new scaling law?}
+
+
+\begin{figure*}\begin{subfigure}[b]{0.3\textwidth}
+ \centering
+ \includegraphics[height=2.8cm]{images/popts_scale.pdf}
+ \caption{Size parameters}
+ \label{fig:popts_scale}
+ \end{subfigure}
+ \hfill
+ \centering
+ \begin{subfigure}[b]{0.3\textwidth}
+ \centering 
+ \includegraphics[height=2.8cm]{images/popts_tokens_model_type.pdf}
+ \caption{Token parameters}
+ \label{fig:popts_tokens}
+ \end{subfigure}
+  \hfil
+ \begin{subfigure}[b]{0.3\textwidth}
+ \centering 
+ \includegraphics[height=2.8cm]{images/popts_intercept_model_type.pdf}
+ \caption{Intercept}
+ \label{fig:popts_intercept}
+ \end{subfigure}
+ \caption{Parameters differ between scaled model families. Surprisingly, however, the pairs of parameters controlling the influence of model and training set size have similar ratios. The legend shows model architecture (left), scaling families (center) and per-family intercept (right). \label{fig:pca}\label{fig:popts}}
+\end{figure*}
+
+\summarybox{Different model families exhibit different scaling behavior, but performance can sometimes be estimated using a single model in a new family.}
+
+Scaling laws relate performance to scalar training parameters like model or dataset size. 
+For discrete decisions (whether the choice of nonlinearity or data preprocessing scheme), it is not immediately obvious how to pool information across models that differ in these traits
+ \citep[see][for concurrent work that performs this pooling based on downstream task behavior]{ruan2024observational}\cready{felipe}. 
+Clearly, different pretrained models with the same \msize{} and \tokens{} still show different \perf{}, so these differences can be consequential.
+But how do discrete choices of architecture, training procedure, or dataset, affect the form of scaling laws? 
+
+One way to answer this question is to look at the parameter estimates for scaling law parameters $E$, $\alpha$, $A$, $\beta$ and $B$ differ across model families. These results are shown in \cref{fig:popts}, where it can be seen that there are often dramatic differences in all five parameters across families. In this sense, even the rate at which additional data or parameters improve model performance depend on underlying architectural details, suggesting that understanding the behavior of a new model family may require a new scaling law.
+
+But another way to answer this question is to ask how reliably we can predict final model accuracy when borrowing (or pooling) some parameters of scaling laws between families---even if these result in poor parameter estimates, they may predict large-scale model behavior within the range of meaningful differences identified in \cref{sec:how-well}.
+To do so, we set the \msize{} scaling parameters ($A, \alpha$) to fixed values reported in past work, and estimate remaining parameters for individual model families.
+We take the variable values found by \citet{datablations} 
+(see 
+\citealp{besiroglu2024chinchillascalingreplicationattempt,porian2024resolving} for a discussion of estimates from earlier work including
+\citealp{hoffmann2022training}).
+We find (see Fig.~\ref{apfig:1m} in App.~\ref{ap:1m}) that in some cases only a single training run in a new model family is necessary to obtain accurate scaling law predictions. In the OLMO family, for example, we obtain less than 1\% error estimating the accuracy of a 7B model from a collection of 1B model checkpoints. We find that predictions generalize, and a constant \msize{} scaling factor is enough for most models (except the encoder-decoder T5-Pile). However, error rates are larger than in the source family, and predictions for larger models are worse (most conspicuous in OPT's error of 37\%, 25\% and 15\% when extrapolating from 8.7B, 13B and 30B to 175B).
+
+\subsection{Can I just train the target model a bit instead of many small models?}\label{sec:1model}
+\summarybox{Yes, but obtaining reliable estimates in this way requires up to 30\% of the full training run.}
+The above results (last row of Fig.~\ref{apfig:1m} in App.~\ref{ap:1m}) also suggest the possibility of predicting losses not with just smaller models, but with partially trained versions of the target model itself. When predicting inside the same \msize{} family---that is, estimating $\hat{L}(\xmodel \mid \xtarget \setminus \{ \xmodel \})$---
+the \msize{} term in \cref{eq:scaling} is constant, and extrapolation is only required for \tokens{}. As seen in the figures, this form of estimation is informative if permitted by computational constraints.
+Beyond the immediate usefulness of this approach, it is a promising avenue for future research. Better adjusting the scaling laws for predicting through training might improve this efficiency. 
+\subsection{Are even simpler baselines enough?} \label{sec:baselines}
+\summarybox{Some extrapolation is necessary: scaling laws can produce accurate estimates even when the target model vastly outperforms any training model.}
+
+To provide another form of comparison for the predicted scaling laws, we compute two baselines. Both baselines adopt a pessimistic evaluation assuming that the target model is no better than the best model in the small model family used to estimate a scaling law. Specifically, the baselines are the \emph{best performance} $\hat{L}(\cdot \mid \xtrain) = \min_{\xmodel \in \xtrain}\mathperf{}(\xmodel)$ and the performance of the \emph{most-trained model}, consuming the most compute for training, i.e. $\hat{L}(\cdot \mid \xtrain) = \argmax_{\xmodel\in \xtrain} \mathmsize{}(\xmodel)\times\mathtokens{}(\xmodel)$. Those baselines might be the best one can expect without fitting a law to scaling.
+
+We find (See App.~\ref{sec:baselines}) that out of the two, the \emph{best performance} baseline is closer to $\mathperf{}(\xtarget)$, which is to be expected, as the target model performance is better than any other model in $F$ and this is the better of the two. In both cases, even with the full $F$, the baselines suffer more than 15\% error, mostly above 10\%, almost never get below 5\%, and 18\% ARE on average across all scaled families we study. %We note a high variability in scores, especially in fthe lowest loss baseline, . 
+\begin{figure*}
+ \centering
+ \begin{subfigure}[b]{0.30\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/minimal_cut/no_legend/hist-perc-are_OPT.pdf}
+ \caption{OPT}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.30\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/minimal_cut/no_legend/hist-perc-are_gpt3.pdf}
+ \caption{GPT3}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.30\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/minimal_cut/hist-perc-are_pythia-deduped.pdf}
+ \caption{Pythia}
+ \end{subfigure}
+ 
+ \caption{The effect of fitting on more of the training trajectory. Each cell represents the absolute relative error estimating scaling laws from a given number of models (vertical axis) trained on a given subset of the \emph{final} checkpoints from a training run (so scaling laws on the left are estimated using all checkpoint, and laws on the right are estimated using only the final 10\% of checkpoints). White cells failed to fit. As long as the first $\approx$10\% of checkpoints are discarded, final loss can often be predicted accurately. \label{fig:end_only}}
+\end{figure*}
+
+
+\section{I have some data, what portions should I use?}
+
+\summarybox{Estimate scaling laws from intermediate checkpoints, not just fully trained models!}
+Most past work on scaling behavior of language models \citep[e.g.,][]{overtrain,datablations} has trained a \emph{separate} model for each value of \tokens{} studied. This is based on the assumption that changes in the learning rate schedule, which depend on the size of the full dataset that will be used for training, render losses from intermediate checkpoints uninformative.
+
+However, some recent work has demonstrated the effectiveness of learning schedules that do not require prior access to the size of the training set \citep{hu2024minicpm}, and some work has questioned whether careful choice of the learning rate decay is necessary for reliable scaling laws \citep{porian2024resolving}.
+Together, these findings motivate revisiting the assumption that only a single useful datapoint may be obtained from each training run.
+In the final portion of \S\ref{sec:1model}, we observed the value of intermediate checkpoints when only a single \msize{} family is used to fit a scaling law.
+We now test whether this finding extends to larger families---i.e.\ whether including intermediate checkpoints from all models in a model family reduces ARE.
+
+Results are shown in \cref{fig:end_only}, which plots ARE for scaling laws estimated from data subsets of the form $\max_{\mathtokens}(F, q)$ for varying $q$.
+We find that including full training curves in scaling law estimation can predict losses well. In fact, relying merely on the end of training produces significantly worse performance across the board. 
+Our remaining experiments thus fit scaling laws using all these intermediate checkpoints, and not final performance alone.
+\subsection{Should I use all intermediate checkpoints?}\label{sec:cut_begin}
+\summarybox{Almost all, but drop checkpoints from the beginning of training.}
+
+\begin{figure*}
+ \centering
+ \begin{subfigure}[b]{0.40\textwidth+20pt}
+ \centering
+ \makebox[20pt]{\raisebox{55pt}{\rotatebox[origin=c]{90}{OPT}}}%
+ \includegraphics[height=4cm]{images/hist/hist-perc-are_OPT.pdf}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.40\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/hist_no_cut/hist-perc-are_OPT.pdf}
+ \end{subfigure}
+ 
+ \centering
+
+ \begin{subfigure}[b]{0.40\textwidth + 20pt}
+\makebox[20pt]{\raisebox{55pt}{\rotatebox[origin=c]{90}{Pythia}}}%
+ \centering 
+ \includegraphics[height=4cm]{images/hist/hist-perc-are_pythia-deduped.pdf}
+ \caption{Cut 10B first tokens}
+ \label{fig:cut_first}
+ \end{subfigure}
+ \hfill
+ \begin{subfigure}[b]{0.40\textwidth}
+ \centering
+ \includegraphics[height=4cm]{images/hist_no_cut/hist-perc-are_pythia-deduped.pdf}
+ \caption{Fit all data}
+ \label{fig:no_cut}
+ \end{subfigure}
+ \caption{The effect of fitting with all the training losses and without the beginning 10B tokens seen. Each cell represents the absolute relative error when estimating a scaling law from a given number of models (vertical axis) trained on a given subset of checkpoints from the beginning of training (horizontal axis). \label{fig:cut}}
+\end{figure*}
+
+In Fig.~\ref{fig:end_only}, we plot the ARE for different $\mathbf{q}$-maximal token families serving as $F$, i.e., when fitting only with the end of training runs. There is not a clear trend indicating whether we should use all data (as might be suggested by GPT-3 results alone) or only some of it. But it is rarely the case that best estimates are obtained from the end of training alone.
+
+There is, however, a distinctly uninformative phase at the beginning of training,
+as can be seen in the loss curves (App.~\ref{ap:loss_pred}) and noted in the literature \citep[e.g.,][]{chensudden}. We observe that this period is more likely to contain significant spikes or an increase in loss (worse performance) despite additional training. We hence hypothesize this part should always be removed from the scaling law. 
+Indeed, our experiments depicted in Fig.~\ref{fig:cut} compare scaling law AREs with and without including models trained on less than 10B tokens in $F$. Evidently, the very beginning of training (often not even reported in logs and graphs) is sometimes harmful to the prediction and is perhaps more noisy. Specifically, we run the same experiments with and without ignoring the first 10B tokens seen. We find that for some models (e.g., OPT and Pythia) the ARE exceeds 15\% even when using the whole data, but drops to 4-10\% when ignoring those tokens. In preliminary experiments, we found that cutting fewer tokens gave noisier results, and cutting more had a negligible effect. 
+
+
+
+\section{How big a model should I train?}
+
+\summarybox{Larger models are better, but not necessary. Mainly, beware of specific models that might give noisy results.}
+In \cref{fig:mainfig} we compare scaling laws when controlling the amount, percentage, or size of the models (2 at a time).
+We find that choosing models closer in \msize{} to the target model is generally effective (e.g., Fig.~\ref{fig:scale_perc}, \ref{fig:num_scale}), but the effect is neither strong nor monotonic. For example, in all cases fitting on all $F$ provides on of the lowest ARE. However, in GPT, Gopher and OPT, predicting with the smallest 4 models available is already enough to achieve less than 10\% error. In Pythia, the smallest models are not predictive but the rest of the models provide a similar fit. While relying on a larger model is beneficial, predicting many scales up (e.g., the behavior of a 34$\times$ larger model in Pythia) is still reliable, especially if accounting for other factors we discuss next.
+
+In fact, training additional, larger models before fitting a scaling law may sometimes decrease accuracy due to increased variance in large model performance---see, for example, Pythia 2.8B in Fig.~\ref{eq:scaling}. Unfortunately, it is difficult to identify whether a seed is exceptionally high or low-performing without additional information. For example, cross-validation on $F$ fails to detect it (see App.~\ref{ap:cross}).
+
+Instead, this instability can be addressed by accounting for seed variability. A wasteful way to do so would be to train every model several times. A better alternative is to diversify and train each model on as differing hyperparameters (here, seed, \msize{}, \tokens{}) as possible and to maximize the information gained \citep[a common practice 
+ in efficiency-coverage scenarios, e.g.,][]{perlitz-etal-2024-efficient}. Hence, we suggest training more models of differing sizes each accounting for both size and seed changes, rather than training multiple seeds. We further discuss the effects of number of models ($\abs{F}$) in \S\ref{sec:num_models}.
+
+Selection of \msize{} values to optimize statistical and computational efficiency is a problem we leave for future work future work. Given the choice of the largest model and the number of models, it is unclear how to space the model sizes, whether linearly, log-scale, or otherwise. 
+
+
+
+\section{How many models are needed for reliable predictions?}
+
+\summarybox{5 models is a safe bet, more would improve the results' robustness. These models can be small.}
+We have seen that predicting with larger models and hence extrapolating less yields better results. However, given compute constraints (and additional hardware constraints like memory), practitioners may generally wish to use smaller models when possible. 
+Consider for example Fig.~\ref{fig:num_perc} where we compare fitting on 4 models but vary their size. We find that \textit{more} models reduce ARE even without being \textit{bigger} models. As discussed in \S\ref{sec:model_size}, adding a larger model to a current scaled family serves two goals, it increases the proximity to the predicted model, as well as increases the number of models seen. 
+
+We separate the contribution of size and number of models effect. In Fig.~\ref{fig:num_scale}, we predict with the largest model being held constant and add (at minimal cost) smaller models. We see again that larger models do benefit predictions. For example, the small models part (left) of the graph indicates large errors (bright). However, we also see again the unwanted effects a single model may have on the overall prediction. Consider for example the figure's diagonal in Pythia. Cells in a diagonal share a group of models and each row adds another one to $F$. Evidently this specific group hurts results, even when larger models are added to $F$. With enough models (bottom of diagonal), the negative decreases. Switching the model (next column) also removes the negative effect. Moreover, across all rows the tendency is never monotonic, implying larger models do not not ensure better predictions.
+
+But in general, we see that increasing the number of models tends to improve prediction. For example, in GPT3 the best predictions are with many models. Perhaps intuitively, adding a larger model and improving both \msize{} and number of models aspects improves quite consistently (Fig.~\ref{fig:num_perc} and diagonals of Fig.~\ref{fig:num_scale}).
+
+
+
+\section{What parameters do I actually need to estimate?}
+
+\summarybox{Scaling laws might have fewer degrees of freedom than described in the literature.}
+
+\label{sec:pca}
+Assuming we do not try to account for aspects other than \tokens{} and \msize{} (see \S\ref{sec:related}), one might wonder if some of the observed errors come from model misspecification---an incorrect functional form for $\hat{L}$, which (with a small number of exceptions including \citealp{caballerobroken}) has  generally gone uncontested since it was first proposed \citep{rosenfeldconstructive,hoffmann2022training}. 
+Here we specifically evaluate whether scaling laws empirically exhibit fewer degrees of freedom than has been proposed. First, we compute the principal components of the 5 learned parameters and find that 3 components explain 99.49\% of the variance between the 5 parameters. Inspection reveals that two of these components tightly couple the pairs of parameters dealing with the same training parameter (\msize{} and \tokens{}). Plotting values of $A$ against $\alpha$ and of $B$ against $\beta$ (Fig.~\ref{fig:pca}),
+we see a clear linear relationship between these variables despite ther non-linear interaction in Eq.~\ref{eq:scaling}. There are a few exceptions: the Encoder-Decoder model T5-Pile shows a different behavior from the rest of the scaled families, and four additional scaled families show a different relationship between $B$ and $\beta$. In fact, all these families share the common feature that they were trained using multiple passes over a single training set
+\citet{overtrain}. The outlier point with $\beta>4$ is a 70m baseline of Pythia for a continual training intervention experiment \citep{pythia}. Future work may consider different function forms tying some of the parameters or introducing other ones instead.
+
+
+Another change for the function form that future work should consider is accounting for the learning rate schedule, as our experiments assumed it was negligible. 
+A mismatch between the form and the real dependence might explain the inconsistencies in using the beginning of training. As noted in \S\ref{sec:cut_begin}, the beginning is not fitting as well as later on, which we also see to some extent in the percentages axis of Fig.\ref{fig:end_only}. This might also be expected as previous works did not take the training trajectory (and loss schedule) into account and ignored this data.
+
+
+
+\section{Related work}
+
+
+This work builds on a large number of recent studies relating scaling law estimation and decision-making about model training.
+Among the aspects studied are total training costs including inference \citep{sardanabeyond}, effects of sophisticated data selection \citep{sorscher2022beyond,bimix}, training time \citep{inbar2024time}, transfer of learned skills \citep{hernandez2021scaling}, behavior of models in other modalities \citep{mikami2022scaling,abnarexploring,alabdulmohsin2024getting,hesslow2022rita} mixtures of experts \citep{ludziejewskiscaling}, data mixing \citep{bimix}, downstream performance \citep{datablations}, vocabulary size \citep{tao2024scaling}, and architecture comparisons \citep{tay2023scaling,poli2024mechanisticdesignscalinghybrid} including small models \citep{muckatira-etal-2024-emergent} or other phenomena like finetuning \citep{zhangscaling} and the loss in different positions in the training sequences \citep{Xiong2024TemporalSL}.
+Especially relevant to our context is \citet{ruan2024observational}\cready{Add Felipe's} that rely on multiple pretraining settings for creating scaling laws that generalize across models or kinds of losses. 
+
+Another line of works that can be seen as a scaling law discusses the relation between model width and hyperparameter choices (rather than loss) \citep{yang2022tensor,yang2021tuning,blake2024u,lingle2024large}.
+
+
+\section{Limitations}
+
+Our use of ARE as a primary evaluation metric does not distinguish between over-estimation or under-estimation of performance. When using scaling laws to choose between candidate models to train, these error estimates may be unnecessarily conservative (e.g.\ if both families' laws are biased in the same direction).
+
+Another major limitation in this study is the difficulty of aggregating information across model families. As most published families evaluate models of incomparable scales, often over incomparable ranges, we were unable to produce an informative version of \cref{fig:mainfig} that aggregated information across all models available, and was thus able to give general recommendations about compute-optimal choice of preliminary experiments.
+
+
+\section{Discussion}
+
+This paper provides a first study of open questions in the estimation of scaling laws and their relation to large-scale pretraining decisions. 
+We expect that many of these conclusions could be sharpened or extended with the availability of additional information about model training, and we call on other leaders of large-scale training efforts to share
+training losses and evaluation results from multiple checkpoitns during pretraining---even in cases where model parameters themselves cannot be released. 
+
+Our findings leave open many important questions, from performing efficient predictions by fitting on many model families to scaling laws of the deltas between a/b test for a change in attribute (e.g. optimizer) or generalize from one a/b test to another, and to other methods of efficiently compare architectures that do not rely on multiple models (e.g. continual learning). In addition, our results in \S\ref{sec:pca} suggest other scaling law parameterizations might better fit data. 
+
+
+
+

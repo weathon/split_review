@@ -1,0 +1,329 @@
+\title{MPC-Minimized Secure LLM Inference}
+
+\begin{abstract}
+Many inference services based on large language models (LLMs) pose a privacy concern, either revealing user prompts to the service or the proprietary weights to the user.
+Secure inference offers a solution to this problem through secure multi-party computation (MPC), however, it is still impractical for modern LLM workload due to the large overhead imposed by MPC.
+To address this overhead, we propose \toolname, a framework that adapts LLM fine-tuning to minimize MPC usage during secure inference.
+\toolname introduces high-level architectural changes during fine-tuning that significantly reduce the number of expensive operations needed within MPC during inference, by removing some and relocating others outside MPC without compromising security.
+As a result, \toolname-generated models are more efficient across all secure inference protocols and our approach complements MPC-friendly approximations for such operations.
+Compared to standard fine-tuning, \toolname results in $3.6-11.3\times$ better runtime and $2.4-6.9\times$ better communication during secure inference across various MPC settings, while typically preserving over $90$\% performance across downstream tasks.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer-based large language models (LLMs) have revolutionized machine learning (ML).
+Since the announcement of ChatGPT, we have seen the release of a plethora of proprietary LLMs (e.g., GPT-4~\cite{openai2023gpt4turbo}, Claude 2~\cite{anthrophic2024claude}, Bard~\cite{google2024bard}), as well as open-source LLMs (e.g., Llama~\cite{touvron2023llama}, Mistral~\cite{jiang2023mistral}) that are now competitive against their proprietary counterparts~\cite{chiang2024chatbot, wang2023decodingtrust, berkeley-function-calling-leaderboard, liu2024your}. %
+Recently, companies have started to finetune these models on domain-specific data to improve their performance on downstream tasks such as chatbots, virtual assistants, and copilots~\cite{openai2023gpt4turbo, anyscale2024fine, cohere2024command}. 
+
+Using these finetuned models to power such user-facing services, however, raises significant privacy concerns. On one hand, the providers of these finetuned models do not want to expose their models' weights, as these models are often trained on proprietary data and represent competitive differentiation. On the other hand, users do not want to send their queries to these providers as these queries might contain sensitive or proprietary information (e.g. IP-protected code or user data).
+In fact, some enterprises prohibit their users from using LLM services, e.g., Samsung recently banned the use of external LLM services after an employee accidentally leaked sensitive code to ChatGPT~\cite{samsung-leak}.
+
+Secure inference is a promising solution to address this challenge as it can provide privacy for both parties through secure multi-party computation (MPC)~\cite{gmw, yaogc}.
+There is a long line of work on secure inference~\cite{secureml, delphi, cryptflow2, sirnn, securenn, cryptgpu, llama-secure, orca} offering different performance and security tradeoffs, with the recent work focusing on secure transformer inference~\cite{mpcformer, crypten-characteristic, puma, bumblebee, ciphergpt, sigma}.
+In principle, the service provider can use any of these recent secure inference protocols to support its privacy-preserving service.
+However, despite massive strides in efficiency, these protocols are still impractical for today's LLMs. For instance, the state-of-the-art solution~\cite{sigma} requires $23$ s and $15.9$ GB of communication for the first token generation on a small $137$M parameter model with $1024$ input tokens. We expect the runtime and communication to degrade to around $6.5$ minutes and $240$ GB for a more typical $7$B parameter model, which is impractical.
+\input{overview-fig}
+
+To minimize this overhead, prior works have focused on low-level operations that are expensive to compute within MPC, and have proposed \emph{MPC-friendly} approximations for those operations~(\sectionref{related-work}).
+In this work, we consider an orthogonal approach targeting high-level architectural changes, that offer a complementary way to minimize the MPC overhead.
+Instead of simplifying operations, such architectural changes reduce the number of expensive low-level operations needed within MPC. Critically, this strategy does not (necessarily) eliminate these operations from the inference process entirely; rather, it relocates them outside of MPC without compromising security, where their cost is relatively negligible. 
+Our work is the first to explore this high-level strategy, which we term \emph{MPC-minimization}.
+We achieve this through fine-tuning, and our key insight is that \emph{fine-tuning, when carefully tailored to secure inference, can unlock significant opportunities for MPC-minimization}.
+
+Following this insight, we propose a fine-tuning framework \toolname\footnote{\toolname stands for \underline{M}PC-Minimized \underline{AR}chitecture for Secure \underline{I}nference of \underline{LL}Ms} that makes strategic modifications to standard fine-tuning, guided by the unique characteristics of MPC.
+The fine-tuned models output by \toolname are (i) MPC-minimized while maintaining the same level of security~(\sectionref{threat-model}), and (ii) achieve ML performance close to that of standard fine-tuned models through knowledge distillation~(\sectionref{techniques}).
+Crucially, since \toolname essentially compresses the model within MPC, the resulting models are significantly more efficient across all secure inference protocols (\sectionref{secure-inference-perf}). Furthermore, as mentioned earlier, \toolname introduces only high-level architectural changes that complement MPC-friendly approximations. We demonstrate that integrating these approximations with \toolname leads to further efficiency improvements~(\sectionref{prior-approx}).
+Now, we present a brief overview of our techniques and the model component (in bold) they minimize within MPC:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Leveraging open-sourced models}:
+    As alluded to earlier, open-source LLMs have become more powerful and are now competitive against proprietary models~\cite{chiang2024chatbot, wang2023decodingtrust, berkeley-function-calling-leaderboard, liu2024your}. Consequently, a trend has emerged where an increasing number of service providers opt to fine-tune these open-source models with their private datasets instead of pre-training their own proprietary models~\cite{anyscale2024fine, cohere2024command}.
+    Standard fine-tuning updates all the model weights with the private data, necessitating the entire model to run within MPC and precluding any potential benefits of the publicly available pre-trained weights.
+    In light of this, we propose two fine-tuning strategies that effectively leverage the public weights to minimize MPC: 
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Layer Freezing}~(\sectionref{layer-freezing}):
+        We reduce the \textbf{number of transformer layers} that need to be evaluated within MPC by restricting fine-tuning updates (and thus, private weights) to just the final layers of the pre-trained model.
+        We resort to such strict demarcation because alternating private and public layers still require the bottleneck operations in the public layers to run within MPC~(\sectionref{inference-overhead}), and simply pruning the public layers leads to poor task performance~(\sectionref{ablation}).
+        \item \textbf{Low-rank Adaptation (LoRA)}~(\sectionref{lora-adaptation}):
+        Recent parameter-efficient fine-tuning techniques like LoRA~\cite{lora} have shown that it is possible to achieve comparable task performance by training only a small fraction of the model's weights.
+        Although LoRA was designed to expedite the fine-tuning process, we demonstrate a novel application of LoRA and show that it can be repurposed to reduce the \textbf{dimensions of matrix multiplications} within MPC -- a runtime bottleneck in the natural two-party setting as well as during decoding~(\ref{app:inference-stages})-stages) in other MPC settings~(\sectionref{lora-adaptation}).
+    \end{itemize} 
+    \item \textbf{Reducing self-attention overhead}:
+    We analyzed the cost profile of LLM inference under various MPC settings and found that the self-attention module is the bottleneck in the most efficient settings~(\sectionref{head-merging}). The standard solution to minimize self-attention operations is to employ head-pruning~\cite{head-pruning}. However, we have to prune up to $75\%$ heads (and their corresponding parameters) to achieve significant improvements and we find that this leads to a large accuracy drop despite fine-tuning~(\sectionref{ablation}). To address this loss, we introduce the following novel technique:
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{Head-merging}~(\sectionref{head-merging}):
+        We reduce the \textbf{number of attention heads} within MPC by merging $\merge$ heads into one, but simultaneously, we also increase the head dimension proportionally to preserve all the parameters.
+        While it seems that we did not gain anything because the computational FLOPs remain the same, we show that head-merging actually matches the performance of head-pruning within MPC~(\sectionref{ablation}).
+        This is based on the key observation that the self-attention operations that are the bottleneck in MPC only scale with number of heads and not the head dimension.
+        Our experiments show that if the heads are merged carefully, head-merging achieves much better task performance than head-pruning~(\sectionref{ablation}).
+    \end{itemize}
+\end{itemize}
+
+The end-to-end workflow of \toolname is summarized in \figureref{overview}.
+Compared to standard fine-tuning, \toolname-generated models have $3.6-11.3\times$ faster runtime and $2.4-6.9\times$ lower communication across state-of-the-art secure inference frameworks in various MPC settings~ (\sectionref{secure-inference-perf}).
+We evaluate the ML performance of \toolname on three different kinds of tasks, namely, code generation~\cite{chen2021evaluating}, chatbot~\cite{mt-bench}, and machine translation~\cite{kocmi2022findings}. Across these benchmarks, we show that \toolname typically preserves over $90\%$ of the standard fine-tuned performance~(\sectionref{ml-perf}).
+
+
+
+\section{Related Work}
+
+\textbf{Secure Inference Protocols.}
+In this work, we focus on MPC-based secure inference protocols for neural networks which started with the seminal work of SecureML~\cite{secureml}.
+SecureML considers the two-party setting that only involves the service provider and the client, and after many follow-up works in this setting~\cite{secureml, gazelle, minionn, delphi, cryptflow2, sirnn, gala, cheetah, heliks, iron, ciphergpt, bumblebee, bolt}, the performance has improved by orders of magnitude.
+Despite these improvements, 2PC still poses very large overheads. Thus, subsequent works have considered other settings that introduce an additional helper party such as 3PC with honest majority~\cite{securenn, cryptflow, chameleon, aby3, falcon, puma} and 2PC with trusted dealer (2PC-Dealer)~\cite{crypten, llama-secure, orca, sigma}. 
+Other works have accelerated secure inference protocols by leveraging GPU acceleration~\cite{crypten, cryptgpu, piranha, orca, sigma}. 
+
+Recent work~\cite{iron, ciphergpt, bumblebee, bolt, puma, crypten-characteristic, sigma, roman2023fhe} in all these settings have focused on secure transformer inference since they represent the majority of the AI workload today.
+ %
+\textbf{MPC-friendly Approximations.}
+Several works~\cite{mpcformer, secureml, cryptonets, cryptonas, faster-cryptonets, the-x, delphi, secformer, jha2021deepreduce, peng2023rrnet, cho2022selective, reagendeep, lou2020safenet, kundu2023learning, zhang2023sal} have proposed approximate implementations for non-linear activations like softmax and GeLU to make them more MPC-friendly.
+These approximations typically introduce a large drop in model performance.
+MPCFormer~\cite{mpcformer} proposed a two-stage distillation process to bridge this gap.
+Majority of these works~\cite{delphi, jha2021deepreduce, ghodsi2020cryptonas, peng2023rrnet, cho2022selective, reagendeep, kundu2023learning, lou2020safenet, zhang2023sal} also use Neural Architecture Search (NAS) to employ multiple approximations within the same network depending on the precision level required.
+
+Our work is complementary to these approximations as we make high-level changes to the architecture, as opposed to the underlying operations.
+We show in \sectionref{prior-approx} that these approximations can be combined with \toolname to yield further performance improvements.
+Additionally, \toolname differs from these works in two key aspects: (i)
+while these works output models where all weights are private, \toolname produces models that have a mix of public and private weights,
+and (ii) the model architecture in NAS-based works depends on the private training data and leaks additional information, whereas \toolname is statically configured independent of the training data. %
+
+
+
+\section{Threat Model}
+
+
+We inherit the threat model from prior secure LLM inference works which all assume a semi-honest (or passive) adversary that follows the protocol exactly but tries to learn information about the private inputs from the messages it sees during the protocol.
+This adversary controls an \emph{unknown} subset of the MPC participants, where the size of the subset is defined by the MPC setting.
+Like prior works, we also assume that the model architecture is public and the service only wants to hide the model weights.
+
+
+
+\section{Performance Characteristics of Secure Inference}
+
+
+Secure inference relies on secure multi-party computation (MPC)~\cite{gmw,yaogc}, a cryptographic primitive that allows mutually distrusting parties to compute any function on their private inputs without revealing anything beyond the function output.
+
+In this section, we highlight the unique cost profile of MPC in these settings and discuss how it motivates the design of our techniques in \sectionref{techniques}.
+
+\textbf{Interaction costs.}
+Unlike plaintext computation, most operations within MPC require interaction among the MPC participants. This imposes two additional performance overheads in addition to computation size, namely, \emph{communication size} and \emph{rounds of communication}.
+For most MPC protocols, this cost of interaction ends up being the bottleneck and it is the primary reason why MPC is orders of magnitude slower than plaintext computation. %
+
+\textbf{Multiplications with public weights come for free.}
+Since MPC operates natively over integers, recent secure inference works use fixed-point representation to emulate real-number arithmetic. Additionally, prior works maintain the invariant that the intermediate state after every network layer is arithmetically secret-shared (ASS) among MPC participants. This approach minimizes the cost of arithmetic operations, such as integer multiplications and additions, which dominate ML workloads.
+In an ASS scheme, a secret value $x$ is split among $n$ MPC participants such that (i) each party $\party_i$ receives a share $x_i$ and any set of $n-1$ shares reveals nothing about $x$, and (ii) the sum of all shares reconstructs the secret $x = x_1 + \ldots + x_n$. The linear nature of this reconstruction function allows secret-shared values to be added locally (without interaction) by simply adding the corresponding secret shares, making additions within MPC relatively so inexpensive that they are considered ``free".
+Similarly, any affine operation with public coefficients on secret-shared values, such as a matrix multiplication with public weights, also becomes free. In \sectionref{lora-adaptation}, we show how low-rank adaptations can leverage this property to reduce the number of multiplications between secret-shared values. %
+
+\textbf{Non-arithmetic operations are the bottleneck in the most efficient MPC settings.}
+Non-arithmetic operations are used to implement comparisons in maxpool, activation functions such as ReLU and GeLU, exponentiation and division in softmax, as well as the truncation operations in fixed-point multiplications.
+
+This is in stark contrast to plaintext computation where non-arithmetic operations have a minimal contribution to the total FLOPs and the inference latency.
+Guided by this insight, we proposed head-merging in \sectionref{head-merging}, a technique that preserves the FLOPs and still yields significant performance improvements.
+
+\textbf{A mix of public and private weights typically does not speedup secure inference.}
+Since multiplications with public weights come for free, one would expect significant improvements to secure inference if most of the weights were public.
+However, to preserve the standard guarantees of the MPC, an intermediate state that depends on both the private input and any private weight must not be revealed to any party.
+Consequently, once the computation involves a single private weight, all subsequent non-arithmetic operations need to be performed within MPC, which as we just discussed are the bottleneck in the most efficient MPC settings for secure inference.
+This restriction motivated the design of layer-freezing in \sectionref{layer-freezing}, which separates the public and private weights across layers such that the non-arithmetic operations in public layers are performed outside MPC.
+
+
+
+\section{Techniques}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=0.7\textwidth]{layer-freezing-fig.pdf}
+        \caption{Layer Freezing with fraction $f$ layers fine-tuned} \label{fig:layer-freezing}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=0.7\textwidth]{lora-adaptation-fig.pdf}
+        \caption{Linear layer during inference with LoRA} \label{fig:lora-adaptation}
+    \end{subfigure}
+    \caption{\toolname's techniques that leverage public weights (marked in blue).}
+    \label{fig:open-source}
+\end{figure}
+
+In this section, we describe our techniques that minimize the need for expensive operations within MPC.
+We start with layer-freezing (\sectionref{layer-freezing}) that reduces the number of layers evaluated within MPC. Next, we discuss LoRA~(\sectionref{lora-adaptation}) and head-merging (\sectionref{head-merging}) that minimize arithmetic and non-arithmetic operations, respectively, in the private layers.
+\subsection{Layer Freezing} \label{sec:layer-freezing}
+\input{layer-freezing.tex}
+\subsection{LoRA Adaptation} \label{sec:lora-adaptation}
+\input{lora-adaptation.tex}
+\subsection{Head Merging} \label{sec:head-merging}
+\input{head-merging.tex}
+
+
+\section{Evaluation}
+
+\begin{figure*}[t]
+     \centering
+     \begin{subfigure}[b]{0.8\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{legend.pdf}
+         \label{fig:legend}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{prefilling-time.pdf}
+         \caption{Pre-filling Time}
+         \label{fig:prefilling-time}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{decoding-time.pdf}
+         \caption{Decoding Time}
+         \label{fig:decoding-time}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{prefilling-comm.pdf}
+         \caption{Pre-filling Communication}
+         \label{fig:prefilling-comm}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{decoding-comm.pdf}
+         \caption{Decoding Communication}
+         \label{fig:decoding-comm}
+     \end{subfigure}
+    \caption{Secure inference performance of \toolname vs standard fine-tuning for \texttt{openllama-3b-v2}.
+    The sequence length is set to $b=64$ for 2PC and $b=2048$ for 3PC and 2PC-Dealer. 
+    The numbers on the bars represent the improvement factor over the baseline.
+    The final bar in each plot represents the combination of layer-freezing with head-merging or LoRA, whichever performs better independently.
+    }
+    \label{fig:mpc-exp}
+\end{figure*}
+In this section, we first evaluate the secure inference cost~(\sectionref{secure-inference-perf}) of \toolname-generated models and their ability to preserve ML performance~(\sectionref{ml-perf}).
+Next, we perform the same analysis for prior MPC-friendly approximations integrated with \toolname~(\sectionref{prior-approx}).
+Finally, we do an ablation study in \sectionref{ablation} that considers alternative designs for \toolname's techniques.  
+
+\textbf{Secure Inference Setup.} %
+We perform the secure inference experiments on state-of-the-art (open-sourced) frameworks in all MPC settings considered by prior work, namely, 2PC~\cite{bumblebee,spu}, 3PC~\cite{puma,spu}, and 2PC-Dealer~\cite{crypten,crypten-characteristic}.
+The experiments were run on two or three machines (depending on the MPC setting) connected via LAN connection with $16$ Gbps bandwidth and $0.1$ ms latency.
+Each machine was equipped with an Intel Xeon Platinum 8173M Processor with $16$ vCPUs, $128$ GB RAM, and a $V100$ GPU with $16$ GB memory.
+Since the 2PC-Dealer framework~\cite{crypten} supports GPU acceleration, we ran it on the V100. Experiments on other MPC frameworks were run on CPU.
+All experiments were multi-threaded.
+All reported numbers consider end-to-end costs.
+
+\textbf{Models and Datasets.}
+We consider three privacy-sensitive tasks for LLMs: chatbot, coding, and machine translation.
+For the chatbot task, we fine-tune \texttt{open-llama3b-v2} on the ShareGPT dataset and evaluate it on the MTBench dataset, following~\citep{mt-bench, li2023long}. OpenLLaMA is a popular open-source model that replicates the LLaMA model~\citep{openlm2023openllama, touvron2023llama}.
+For the coding task, we fine-tune \texttt{deepseek-coder-1.3b-base} on the MagiCoder dataset~\cite{wei2023magicoder} and evaluate it on the HumanEval benchmark~\cite{chen2021evaluating}. For the machine translation task, we fine-tune \texttt{open-llama3b-v2} on the ParroT dataset~\cite{jiao2023parrot} and evaluate it on the WMT22 (De$\Rightarrow$En) benchmark~\cite{kocmi2022findings}.
+
+\textbf{Fine-Tuning Hyperparameters.} We set the fine-tuning hyperparameters according to the papers that curated the corresponding fine-tuning dataset: \citep{mt-bench} for MTBench, \citep{wei2023magicoder} for HumanEval, and \citep{jiao2023parrot} for WMT22. We only vary the batch size and number of training epochs to better suit some techniques. For instance, we observed that LoRA favors a smaller batch size in our setting.
+
+
+\subsection{Secure Inference Performance}
+\label{sec:secure-inference-perf}
+\input{secure-inference-perf.tex}
+
+\begin{figure}[t]
+    \centering
+\includegraphics[width=0.93\textwidth]{ml_perf.pdf}
+    \caption{\toolname vs (fully) fine-tuned and zero-shot baselines.}
+    \label{fig:ml_perf}
+\end{figure}
+\subsection{ML Performance} \label{sec:ml-perf}
+\figureref{ml_perf} summarizes the ML performance of \toolname, the pre-trained model and the fully fine-tuned model on our three benchmarks.
+First, we note that full fine-tuning significantly improves the performance of the pre-trained model across all three tasks.
+\toolname's layer-freezing is also effective on all three tasks, preserving $93-100\%$ of the full fine-tuning performance.
+On WMT and HumanEval benchmark, head-merging preserves $92-95\%$ performance, while on MTBench, it achieves $87\%$ performance.
+The combination of layer-freezing and head-merging works well, incurring an additional loss of at most $4\%$ compared to head-merging alone. %
+LoRA preserves over $95\%$ performance on all benchmarks.
+While combining LoRA with layer freezing sometimes leads to a big drop in performance (MTBench and HumanEval), we note that using LoRA alone provides significant speed-ups, ranging from $2.2\times$ to $4.9\times$.
+Overall, we observe that \toolname's techniques typically preserve over $90\%$ of the fully fine-tuned performance.
+\begin{table}[t]
+    \caption{HumanEval pass@1 performance of various techniques. The speedups and communication improvements are averages taken over the prefilling-stage in the 3PC and 2PC-Dealer settings.}
+    \begin{subtable}{0.50\linewidth}
+    \centering
+    \caption{2ReLU approximation for softmax combined with \toolname(LF=0.5, HM=4)}
+    \label{tab:marill-prior-approx}
+    \footnotesize
+    \begin{tabular}{lrrr}
+    \toprule
+    & & \multicolumn{2}{c}{Improvement} \\
+               & pass@1 & Time & Comm.  \\
+    \midrule 
+    HM=4 & $57.9$ & $2.25\times$ & $2.7\times$ \\
+    2ReLU + HM & $54.9$ & $3.25\times$ & $4.25\times$ \\
+    \midrule
+    LF=0.5 + HM=4 & $55.5$ & $4.8\times$ & $5.4\times$ \\
+    2ReLU + LF + HM & $56.7$ & $6.9\times$ & $8.5\times$ \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    \hspace{0.03\linewidth}
+    \begin{subtable}{0.47\linewidth}
+    \centering
+    \caption{Adjacent/similar head-merging vs head-pruning (HP). Parameter denotes the head reduction factor.}
+    \footnotesize
+    \begin{tabular}{lrrr}
+    \toprule
+    & & \multicolumn{2}{c}{Improvement} \\
+               & pass@1 & Time & Comm.  \\
+    \midrule 
+    HP=$4$ & $49.4$ & $2.45\times$ & $2.75\times$ \\
+    HP=$2$ & $56.7$ & $1.7\times$ & $1.8\times$ \\
+    \midrule
+    HM=$4$ (adj.) & $50.0$ & $2.25\times$ & $2.7\times$ \\
+    HM=$4$ (sim.) & $57.9$ & $2.25\times$ & $2.7\times$ \\
+    HM=$2$ (sim.) & $60.4$ & $1.55\times$ & $1.8\times$ \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:head-pruning}
+    \end{subtable}
+\end{table}
+
+\subsection{Integration of prior MPC-friendly approximations with \toolname} \label{sec:prior-approx}
+In this section, we analyze the performance of \toolname when combined with prior MPC-friendly approximations, namely, Quad~\cite{mpcformer} and ReLU~\cite{chen2022x, zeng2023mpcvit} as GeLU/SiLU approximations, and 2Quad~\cite{mpcformer}, L2Quad~\cite{zhang2023sal} and 2ReLU~\cite{secureml} as softmax approximation.
+First, we analyzed the ML performance of each approximation independently and found that the quadratic approximations from recent works led to a catastrophic loss on our benchmarks.
+Specifically, on the HumanEval benchmark, Quad only achieves $31.7\%$ accuracy compared to $61\%$ of the baseline, and the fine-tuning diverges for L2Quad and 2Quad, resulting in $0\%$ accuracy.
+In contrast, ReLU-based approximations work very well, with ReLU achieving the same accuracy as the baseline, and 2ReLU achieving $59.8\%$ accuracy.
+Out of the ReLU-based approximations, only 2ReLU leads to significant efficiency improvements, with ReLU only improving the secure inference cost by at most $10\%$.
+Thus, we only evaluate the combination of 2ReLU approximation with \toolname.
+
+\tableref{marill-prior-approx} summarizes the accuracy results on the HumanEval benchmark and the corresponding secure inference improvements.
+For the latter results, we focus on the 3PC and 2PC-Dealer settings because all prior approximations target non-arithmetic operations that are the bottleneck in these settings.
+Our experiments show that 2ReLU works well with \toolname, incurring at most $3\%$ further accuracy loss on top of \toolname.
+In exchange, 2ReLU improves \toolname's time and communication by $1.4-1.6\times$.
+For reference, 2ReLU independently results in $1.95-2.15\times$ improvement over the baseline.
+Overall, we get $6.9-8.5\times$ improvement in runtime and communication compared to the baseline, while still preserving over $90$\% of the baseline ML performance.
+
+\subsection{Ablation Study} \label{sec:ablation}
+\textbf{Layer-freezing vs layer-pruning.}
+In layer-freezing, we froze the bottom layers of the transformer to move some layers outside of MPC. An alternative strategy to minimize layers within MPC is to simply prune some layers.
+We experimented with layer-pruning on the HumanEval benchmark and evaluated the best-performing strategy from \cite{poor-mans-bert}, namely, top-layer pruning. 
+For half of the layers pruned, we found that the accuracy drops from $61\%$ for the baseline to just $49.4$\% post layer-pruning.
+In contrast, layer-freezing achieved an accuracy of $56.7\%$, a $12\%$ increase in relative performance, highlighting the importance of preserving the pre-trained model weights of the pruned layers.
+
+\textbf{Head-merging vs head-pruning.}
+We compared head-pruning~\cite{head-pruning} and head-merging~\sectionref{head-merging} on HumanEval, configuring head-pruning to prune the same number of heads from each layer so that it does not leak additional information about the private dataset.
+\tableref{head-pruning} summarizes the results for both techniques when the heads are reduced by $2\times$ and $4\times$.
+First, we note that head-merging achieves similar efficiency improvements to head-pruning for both head reduction factors, with head-pruning being at most $10\%$ faster and $2\%$ more communication efficient.
+ML performance of head-merging, on the other hand, is much better since it preserves all the head parameters.
+In particular, head-merging has up to $8\%$ better accuracy than head-pruning, and HM$=4$ even outperforms HP=$2$ in both ML and secure inference performance.
+Note that these improvements only apply to similar head-merging, not adjacent head-merging, which na\"ively combines adjacent heads.
+These results demonstrate the significance of preserving head parameters as well as merging heads based on similarity.
+
+
+
+
+\section{Conclusion}
+
+In this work, we designed a framework \toolname, that leverages open-sourced LLMs and introduces high-level architectural changes during fine-tuning to minimize MPC usage during secure inference.
+We demonstrated that \toolname is effective in minimizing secure inference costs across MPC settings in exchange for a reasonable accuracy tradeoff. In particular, \toolname-generated models are $2.4 - 11.3\times$ more efficient for secure inference compared to a standard fine-tuned model, and they typically preserve over $90\%$ relative performance across multiple challenging LLM tasks.
+
+
+
+
+
+

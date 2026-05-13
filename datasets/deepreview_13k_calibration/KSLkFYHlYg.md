@@ -1,8 +1,8 @@
 # ShEPhERD: Diffusing shape, electrostatics, and pharmacophores for bioisosteric drug design
 
 - Decision: Accept
-- Avg Score: 3.75
-- Scores: 8, 1, 0, 6
+- Avg Score: 8.00
+- Scores: 8, 10, 6
 
 ## Abstract
 Engineering molecules to exhibit precise 3D intermolecular interactions with their environment forms the basis of chemical design.

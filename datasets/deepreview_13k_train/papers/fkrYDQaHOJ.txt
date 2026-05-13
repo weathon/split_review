@@ -1,0 +1,326 @@
+\title{Efficient Dynamics Modeling in Interactive Environments with Koopman Theory}
+
+\begin{abstract}
+The accurate modeling of dynamics in interactive environments is critical for successful long-range prediction. Such a capability could advance Reinforcement Learning (RL) and Planning algorithms, but achieving it is challenging. Inaccuracies in model estimates can compound, resulting in increased errors over long horizons.
+We approach this problem from the lens of Koopman theory, where the nonlinear dynamics of the environment can be linearized in a high-dimensional latent space. This allows us to efficiently parallelize the sequential problem of long-range prediction using convolution while accounting for the agent's action at every time step.
+Our approach also enables stability analysis and better control over gradients through time. Taken together, these advantages result in significant improvement over the existing approaches, both in the efficiency and the accuracy of modeling dynamics over extended horizons. We also show that this model can be easily incorporated into dynamics modeling for model-based planning and model-free RL and report promising experimental results. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The ability to predict the outcome of an agent's action over long horizons is a crucial unresolved challenge in Reinforcement Learning (RL) \citep{sutton2018reinforcement, mnih2015human, Silver, Mnih}. 
+This is especially important in {model-based} RL and planning, where deriving a policy from the learned dynamics models allows 
+one to efficiently accomplish a wide variety of tasks in an environment \citep{Du2019TaskAgnosticDP, Hafner2020Dream, sikchi2021learning,pmlr-v162-hansen22a, schrittwieser2020mastering,jain2022learning}. 
+In fact, state-of-the-art {model-free} techniques also rely on dynamics models to learn a better representation for downstream value prediction tasks \citep{Schwarzer2020DataEfficientRL}. Thus, obtaining accurate long-range dynamics models in the presence of input and control is crucial. In this work, we leverage techniques and perspectives from \emph{Koopman theory} \citep{koopman1931hamiltonian,mauroy2020introduction,koopman1932dynamical,brunton2021modern} to address this key problem in long-range dynamics modeling of interactive environments. The application of Koopman theory allows us to linearise a nonlinear dynamical system by creating a bijective mapping to linear dynamics in a possibly infinite dimensional space of \emph{observables}.\footnote{The term observables can be misleading as it refers to the latent space in the machine learning jargon.}
+\begin{figure}[ht]
+\begin{center}
+\centerline{\includegraphics[trim={12cm 5cm 7cm 5cm},clip,width=0.9\columnwidth]{icml-image-first-page.pdf}}
+\caption{A comparison of our Koopman-based linear dynamics model with a non-linear MLP-based dynamics model. The Diagonal Koopman formulation allows for modeling longer horizons efficiently with control over gradients. Here BPTT stands for Backpropagation Through Time.}
+\label{fig:contrast-koopman-mlp}
+\end{center}
+\end{figure}
+Conveniently, a deep neural network can learn to produce such a mapping, enabling a reliable approximation of the non-linear dynamics in the finite dimension of a linear latent space so that only a finite subset of the most relevant (complex-valued) Koopman observables need to be tracked.
+
+We show that this linearization has two major benefits:
+1) The eigenvalues of the linear latent-space operator are directly related to the stability and expressive power of the controlled dynamics model. Furthermore, spectral Koopman theory provides a unifying perspective over several existing directions on stabilizing gradients through time, including long-range sequence modeling using state-space models \citep{gu2020hippo,gu2022efficiently,gu2022on,gupta2022diagonal}, and the use of unitary matrices \citep{arjovsky2016unitary}
+in latent dynamic models;
+2) This can help to avoid a computational bottleneck due to the sequential nature of dynamics. This is achieved by a reformulation using convolution and diagonalization of the linear operator. In other words, one can perform efficient parallel training of the model over time steps, despite dealing with a controlled dynamical system.
+
+Our experimental results in offline-RL datasets demonstrate the effectiveness of our approach for reward and state prediction over a long horizon. In particular, we report competitive results against dynamics modeling baselines that use Multi-Layer Perceptrons (MLPs), Gated Recurrent Units (GRUs), Transformers and Diagonal State Space Models \cite{gu2022on} while being significantly faster. Finally, we also present encouraging results for model-based planning and model-free RL with our Koopman-based dynamics model. 
+
+In summary, our contributions are:
+\begin{enumerate}
+    \item We formulate an efficient linear latent dynamics model from \emph{Koopman theory} that can be parallelized during training for long-range dynamics modeling in interactive environments.
+    \item We demonstrate the use of the spectral decomposition of the Koopman matrix, which enables better control over gradients through time and accelerated training.
+    \item We show that our technique serves as a preferred alternative for existing dynamics models in planning and RL algorithms, offering enhanced performance, speed and training stability.
+    
+\end{enumerate}
+
+
+\section{Preliminaries}
+
+\label{sec:background}
+
+\subsection{Koopman Theory for Dynamical Systems}\label{sec:background-koopman}
+
+In the context of non-linear dynamical systems, the \emph{Koopman operator}, a.k.a. the Koopman-von Neumann operator, is a linear operator for studying the system's dynamics. The Koopman operator is defined as a linear transformation that acts on the space of functions or observables of the system, known as the observables space $\mathcal{F}$. For a non-linear discrete or continuous time dynamical system  
+\begin{align*}
+  x_{t+1} = F(x_t) \quad \text{or} \quad \frac{dx}{dt} = f(x)  
+\end{align*}
+the Koopman operator $\mathcal{K}: \mathcal{F} \to \mathcal{F}$, is defined as $\mathcal{K}g \cong g \circ F$ where $\mathcal{F}$ is the set of all functions or observables that form an infinite-dimensional Hilbert space.
+In other words, for every function $g : X \to \mathbb{R}$ belonging to $\mathcal{F}$, where $x_t \in X \subset \mathbb{R}^n$, we have 
+$$(\mathcal{K}g)(x_t) = g(F (x_t)) = g(x_{t+1}).$$ %This makes $\mathcal{F}$ invariant under the action of the Koopman operator. However, 
+The infinite dimensionality of the Koopman operator presents practical limitations. Addressing this, we seek to identify a subspace  $\mathcal{G} \subset \mathcal{F}$, spanned by a finite set of observables ${g_1, \ldots , g_m}$ where typically $m \gg n$, that approximates invariance under the Koopman operator. 
+
+Constraining the Koopman operator on this invariant subspace results in a finite-dimensional linear operator $K \in \Complex^{m\times m}$, called the \emph{Koopman matrix}, which satisfies
+$g(x_{t+1}) = K g(x_t).$ 
+Usually, the base observation functions $\{g_i\}_i$ are hand-crafted using knowledge of the system's underlying physics. However, data-driven methods have recently been proposed to learn the Koopman operator by representing the base observations or their eigenfunction basis using deep neural networks, where a decoder reconstructs the input from linear latent dynamics \citep[\eg][]{lusch2018deep,champion2019data}. 
+Linearizing the dynamics allows for closed-form solutions for the predictions of the dynamical system, as well as stability analysis based on the eigendecomposition of the Koopman matrix \cite{fan2022learning,yi2023equivalence}. 
+
+The observation functions $\{g_i\}_i$ spanning an invariant subspace can always be chosen to be \emph{eigenfunctions} $\{{\phi}_i\}_i$ of the Koopman operator, \ie 
+$\mathcal{K} \phi_i(x) = \lambda_i \phi_i(x),\forall x$.
+With this choice of observation functions, the Koopman matrix becomes diagonal,
+\begin{align}\label{eq:diagonal-koopman}
+ K_D = \mathrm{diag}(\lambda_1, \ldots, \lambda_m), \quad  \lambda_i \in \Complex \quad \forall i.
+\end{align}
+By using a diagonal Koopman matrix, we are effectively offloading the task of learning the suitable eigenfunctions of the Koopman operator that form an invariant subspace to the neural network encoder. 
+Additionally, for a continuous time input, to be able to model higher-order frequencies in the eigenspectrum and provide better approximations, one could adaptively choose the most relevant eigenvalues and eigenfunctions for the current state \citep{lusch2018deep}. This means 
+$g(x_{t+1}) = K_D(\lambda(g(x_t)))g(x_t),$ 
+where $\lambda: \mathcal{G} \to \Complex^{m}$ can be a neural network. 
+
+\subsection{Approximate Koopman with Control Input}\label{sec:background-koopman-control}
+
+The Koopman operator can be extended to non-linear \emph{control} systems, where the state of the system is influenced by an external control input $u_t$ such that
+$x_{t+1} = F(x_t, u_t)$ or $\frac{dx}{dt} = f(x, u)$.
+Simply treating the pair $(x,u)$ as the input $x$, the Koopman operator becomes $(\mathcal{K}g)(x_t, u_t) = g(F (x_t, u_t), u_{t+1}) = g(x_{t+1}, u_{t+1}).$
+If the effect of the control input on the system's dynamics is linear, i.e., the \emph{control affine} setting, we have $$f(x,u) = f_{0}(x) + \sum_{i=1}^{m}f_i(x)u_i.$$ assuming a finite number of eigenfunctions.
+For such control-affine system, 
+one could show that the Koopman operator is \emph{bilinearized} \citep{brunton2021modern, bruder2021advantages}: 
+$$g(x_{t+1}) = \mathcal{K}(u)g(x_t) = (\mathcal{K}_0 + \sum_{i=1}^{m} u_i \mathcal{K}_i)g(x_t).$$
+More generally, one could make the Koopman operator a function of $u_t$, so that the resulting Koopman matrix satisfies $g(x_{t+1}) = K(u_t)g(x_t)$.
+This is the approach taken by \cite{pmlr-v162-weissenbacher22a} to model symmetries of dynamics in offline RL. When combined with the diagonal Koopman matrix of \cref{eq:diagonal-koopman}, and fixed modulus $|\lambda_i| = 1 \, \forall i$, the Koopman matrix becomes a product of $SO(2)$ representations, and the resulting latent dynamics model, resembles a special setting of the symmetry-based approach of \cite{mondal2022eqr}, where group representations are used to encode states and state-dependent actions.
+
+An alternate approach to approximating the Koopman operator with a control signal assumes a decoupling of state and control observables $g(x, u) = [g(x), f(u)] = [g_1(x), ..., g_m(x), f_1(u), ..., f_n(u)]$  \cite{brunton2021modern, bruder2019modeling}. This gives rise to a simple linear evolution:
+\begin{equation}\label{eq:koopman_additive}
+g(x_{t+1}) = Kg(x_t) + Lf(u_t)
+\end{equation} where $K \in \Complex^{m\times m}$ and $L \in \Complex^{m\times l}$ are matrices representing the linear dynamics of the state observables and control input, respectively. We build on this approach in our proposed methodology.
+Although, as shown in \cite{brunton2016discovering,brunton2021modern, bruder2019modeling}, even assuming a linear control term $L u_t$ can perform well in practice, we use neural networks for both $f$ and $g$. Our rationale for choosing this formulation is that the additive form of \cref{eq:koopman_additive} combined with the \emph{diagonalized Koopman matrix} of \cref{eq:diagonal-koopman}, enable fast parallel training across time-steps using a convolution operation where the convolution kernel can be computed efficiently.
+Moreover, this setting is amenable to the analysis of gradient behaviour, as discussed in \cref{subsec:gradients}. For a more comprehensive overview of Koopman theory in the context of controlled and uncontrolled dynamics, we direct readers to \cite{brunton2021modern, mauroy2020introduction}.
+
+
+
+
+\section{Proposed Model}
+
+\begin{figure}[ht]
+\begin{center}
+\centerline{\includegraphics[trim={7cm 18cm 3cm 0cm},clip,width=0.8\columnwidth]{Koopman_block.pdf}}
+\caption{A schematic of the latent Koopman dynamics model. Both actions and initial state embedding are encoded into a latent space in complex ($\mathbb{C}$) domain before passing through the Koopman dynamics block. (see \cref{appdx:jax_implementation} for an efficient Jax implementation of the model)}
+\label{fig:contrast-koopman-mlp}
+\end{center}
+\end{figure}
+\subsection{Linear Latent Dynamics Model}
+\label{subsec:latent_dynamics}
+Our task in dynamics modeling is to predict the sequence of future states ${s_{t+1}, ...., s_{t+\tau}}$  given a
+starting state $s_t$ and some action sequence ${a_t, a_{t+1}, ... , a_{t+\tau-1}}$, assuming a Markovian system.
+Following the second approach described in \cref{sec:background-koopman-control}, we assume that state and control observables are decoupled, and 
+use neural network encoders\footnote{We use a CNN for pixel input and an MLP for state-based input and actions.} to encode both states and actions
+\begin{align}
+    x_t = g_{\theta}(s_t) \quad \text{and} \quad u_t = f_{\phi}(a_t).
+\end{align}
+Due to this decoupling, the continuous counterpart of latent space dynamics  \cref{eq:koopman_additive} is
+\begin{equation}
+\frac{\mathrm{d}x}{\mathrm{d}t} = K x(t) + Lu(t),
+\end{equation}
+and the solution is given by $
+x(s) = e^{Ks}x(0) + \int_0^s e^{K(s-t)}Lu(t) \mathrm{d}t$
+where $e^{Ks}$ is a matrix exponential. 
+One could discretize this to get 
+$\hat{x}_{t+1} = \bar{K} x_{t} + \bar{L} u_{t}$,
+where $\bar{K}$ and $\bar{L}$ are obtained by \emph{Zero-Order Hold (ZOH)} discretization of the continuous-time equation \citep{iserles2009first}:
+\begin{equation} 
+\bar{K}=\exp(\Delta tK) \quad \quad \quad \bar{L} = (K)^{-1}(\exp(\Delta tK) - 1)L \nonumber
+\end{equation} 
+In practice, we assume that observations are sampled uniformly in time and use a learnable time step parameter $\Delta t$. Unrolling the discrete version of the dynamics for $\tau$ steps, we get:
+\begin{align} 
+\label{eq:koopman-multi-steps}
+[\hat{x}_{t+1}, \cdots, \hat{x}_{t+\tau}]
+  = [\bar{K}, \cdots, \bar{K}^\tau] x_t 
++ 
+[c_{t}, \cdots, c_{t+\tau-1}]  
+\underbrace{\begin{bmatrix}
+ I & \bar{K}  &  \dots & \bar{K}^{\tau-1}\\ 
+  0 & I & \cdots & \bar{K}^{\tau-2}\\
+\vdots & \vdots &  \ddots& \vdots \\
+0& 0&  \cdots & I
+\end{bmatrix}}_{\Gamma},
+\end{align}
+where $c_{t+k} = \bar{L}u_{t+k}$, 
+ $\Gamma$ encodes the effect of each input on all future observables,
+and the $\hat{}$ in $\hat{x}$ distinguishes the prediction from the ground truth observable $x$. (see \cref{appdx:details_derivation})
+
+We can then recover the predicted state sequence by inverting the function $g_{\theta}$, using a decoder network $\hat{s}_{t+k} = d_{\xi}(\hat{x}_{t+k})$. Loss functions in both input and latent space can be used to learn the encoder, decoder, and latent dynamics model. We refer to these loss functions as the \emph{Koopman consistency loss} and the \emph{state-prediction loss}, respectively:
+\begin{align}
+  \mathcal{L}_{\text{consistency}} = \sum_{k=1}^{\tau}\|\hat{x}_{t+k} - x_{t+k}\|^2_2 \quad \quad
+     \mathcal{L}_{\text{state-pred}} = \sum_{k=1}^{\tau} \|d_{\xi}(\hat{x}_{t+k}) - s_{t+k}\|^2_2 
+   \label{eqn:state_pred}
+\end{align}
+
+
+\subsection{Diagonalization, Efficiency and Stability of the Koopman Operator}
+\label{subsec:diag}
+Since the set of diagonalizable matrices is dense in $\Complex^{m\times m}$ and has a full measure, we can always diagonalize the Koopman matrix as shown in \cref{eq:diagonal-koopman}. 
+Next, we show that this diagonalization can be leveraged for efficient and parallel forward evolution and training.
+
+
+To unroll the latent space using \cref{eq:koopman-multi-steps} we need to perform matrix exponentiation and dense multiplication. 
+Using a diagonal Koopman matrix $\bar{K} = \mathrm{diag}(\bar{\lambda}_1, \ldots, \bar{\lambda}_m)$, this calculation is reduced to computing an $m \times (\tau+1)$ complex-valued \emph{Vandermonde matrix} $\Lambda$, where $\Lambda_{i,j} = \bar{\lambda}_i^{j}$,
+and doing a row-wise circular convolution of this matrix with a sequence of vectors. 
+
+Recall that  $x, c \in \Complex^{m}$ are complex vectors. We use superscript to index their elements -- \ie $x_t = [x_t^1, \ldots, x_t^m]$.
+With this notation, the $i$-th element of the predicted Koopman observables for future time steps is given by (see \cref{appdx:details_derivation} for the derivation): 
+\begin{align}
+[\hat{x}_{t+1}^i, \ldots, \hat{x}_{t+\tau}^i] = [\bar{\lambda}_i, \ldots, \bar{\lambda}_i^{\tau}] x_t^i  + [1, \bar{\lambda}_i, \ldots, \bar{\lambda}_i^{\tau-1}]  \circledast [c_t^i, ..., c_{t+\tau-1}^i]
+\label{eq:circular_conv}
+\end{align}
+where $\circledast$ is circular convolution with zero padding. The convolution can be efficiently computed for longer time steps using Fast Fourier Transform. \citep{brigham1988fast} (see \cref{appdx:jax_implementation})
+
+\subsubsection{Gradients Through Time}
+\label{subsec:gradients}
+We show how we can control the behavior of gradients through time by constraining the real part of the eigenvalues of the Diagonal Koopman matrix. Let $\mu$ and $\omega$ refer to the real and imaginary part of the Koopman eigenvalues -- that is 
+$\lambda_{j} = \mu_j + i \omega_j$.
+
+\begin{theorem}
+\label{thm:gradient}
+ For every time step $k\in \{1, .., \tau\}$ in the discrete dynamics, the norm of the gradient of any loss at $k$-step given by $\mathcal{L}_k$ with respect to latent representation at time step $t$ given by $x_t$ is a scaled version of the norm of the gradient of the same loss by $x_{t+k}$, where the scaling factor depends on the exponential of the real part of the Koopman eigenvalues, that is:
+ $$|\frac{\partial\mathcal{L}_k}{\partial x_t^j}|=e^{k\Delta t\mu_j}|\frac{\partial\mathcal{L}_k}{\partial x_{t+k}^j}| \quad \forall j \in\{1, .., m\}.$$
+ and similarly, for all $l \leq k$, the norm of the gradient of $\mathcal{L}_k$ with respect to the control input at time step $t+l-1$ given by is $c_{t+l-1}^j$ is a scaled version of the norm of the gradient of $\mathcal{L}_k$ by $x_{t+k}$, where the scaling factor depends on the exponential of the real part of the Koopman eigenvalues, that is:
+ $$|\frac{\partial\mathcal{L}_k}{\partial c_{t+l-1}^j}| = e^{(k-l)\Delta t\mu_j}|\frac{\partial\mathcal{L}_k}{\partial \hat{x}_{t+k}^j}| \quad \forall j \in\{1, .., m\}$$
+\end{theorem}
+
+A proof of this theorem is provided in \cref{appdx:theorem_proof}. 
+The theorem implies that the amplitude of the gradients from a future time step scales exponentially with the real part of each diagonal Koopman eigenvalue. We use this theorem for better initialization of the diagonal Koopman matrix as explained in the next section.
+\subsubsection{Initialization of the Eigenspectrum}
+\label{subsub:init}
+The \emph{imaginary} part of the eigenvalues of the diagonal Koopman matrix captures different frequency modes of the dynamics. Therefore, it is helpful to initialize them using increasing order of frequency, that is, $\omega _j:= \alpha j \pi $, for some constant $\alpha$, to cover a wide frequency range. 
+
+From \cref{thm:gradient}, we know that the real part of the eigenvalues impacts the gradient's behavior through time. To avoid vanishing gradients and account for prediction errors over longer horizons, one could eliminate the real part $\mu_j := 0$. This choice turns the latent transformations into blocks of 2D rotations \citep{mondal2022eqr}. 
+This is also related to using Unitary Matrices to avoid vanishing or exploding gradients in Recurrent Neural Networks \citep{arjovsky2016unitary}. However, intuitively, we might prefer to prioritize closer time steps. 
+This can be done using small negative values \eg $\mu_j \in \{-0.1, -0.2, -0.3\}$. 
+An alternative to having a fixed real part is to turn it into a bounded learnable parameter  $\mu_j \in [-0.3, -0.1]$. We empirically found  $\mu_j := -0.2\; \forall j$, and $\omega_j := j \pi$ to be good choices and use this as our default initialization.
+In \cref{appdx:initialization} we report the results of an ablation study with different initialization schemes.  
+
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.325\textwidth}
+        \includegraphics[width=\textwidth]{hopper-v2_error_plot.png}
+        \caption{\texttt{hopper-v2}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.325\textwidth}
+        \includegraphics[width=\textwidth]{walker2d-v2_error_plot.png}
+        \caption{\texttt{walker2d-v2}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.325\textwidth}
+        \includegraphics[width=\textwidth]{halfcheetah-v2_error_plot.png}
+        \caption{\texttt{halfcheetah-v2}}
+    \end{subfigure}
+    \caption{Forward state and reward prediction error in Offline Reinforcement Learning environments. We consider five dynamics modeling techniques and perform this prediction task over a \textbf{horizon of 100 environment steps}. The results are over 3 runs. Our Koopman-based method is competitive with the best performing GRU baseline while being $2\times$ faster. See \cref{appdx:detailed_results} for exact numerical values.}
+    \label{fig:state_reward_pred}
+\end{figure}
+\subsection{Long-Range Forward Dynamics Modeling with Control}
+\label{subsec:dynamics_modeling}
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \centering
+  \includegraphics[width=0.9\linewidth]{training_speed_plot.png}
+  \caption{Training speed in iterations/second ($\uparrow$) for the state prediction task using different dynamics model on \texttt{halfcheetah-expert-v2}. Each iteration consists of one gradient update of the entire model using a mini-batch of 256 in A100 GPU. See \cref{tab:time} for exact numerical values.}
+  \label{fig:training-time}
+\end{wrapfigure}
+We model the non-linear controlled dynamics of MuJoCo environments~\citep{mujoco} using our Koopman operator.
+We choose a standard MLP-based latent non-linear dynamics model with two linear layers followed by a $\mathrm{ReLU}$ non-linearity as one of our baselines. To make it easier to compare with Koopman dynamics model, we use state embeddings of the same dimensionality using $g_{\theta}$, which is an MLP, as described in \cref{subsec:latent_dynamics}. This embedding is then fed to the MLP-based latent dynamics model or the diagonal Koopman operator. This approach is widely used in RL for dynamics modeling \citep{sikchi2021learning, pmlr-v162-hansen22a, schrittwieser2020mastering, Schwarzer2020DataEfficientRL}. To further compare our model with more expressive alternatives that can be trained in parallel, we design a causal Transformer \citep{vaswani2017attention, chen2021decision} based dynamics model, which takes a masked sequence of state-actions and outputs representations that are used to predict next states and rewards.\footnote{All the states after the starting state are masked, but actions are fed to the model for all future time-steps.} Following the success of \cite{Hafner2020Dream}, we also design a GRU-based dynamics model that also takes a masked sequence of state-actions to output representations for state and reward prediction. Finally, we use the same strategy  to also design a DSSM-based \cite{gu2022on} dynamics model. To ensure a fair comparison in terms of accuracy and runtime, we maintain an equal number of trainable parameters for all the aforementioned models. (see \cref{appdx:arch_details} for more details)
+
+For the forward dynamics modeling experiments, we use the D4RL \cite{fu2020d4rl} dataset, which is a popular offline-RL environment. We select offline datasets of trajectories collected from three different popular Gym-MuJoCo control tasks: \texttt{hopper}, \texttt{walker}, and \texttt{halfcheetah}. These trajectories are obtained from three distinct quality levels of policies, offering a range of data representing various levels of expertise in the task: expert, medium-expert, and full replay. We divide the dataset of 1M samples into 80:20 splits for training and testing, respectively. To train the dynamics model, we randomly sample trajectories of length $\tau$ from the training data, where $\tau$ is the horizon specified during training. We test our learned dynamics model for a horizon length of 100 by randomly sampling 50,000 trajectories of length 100 from the test set. We use our learned dynamics model to predict the ground truth state sequence given the starting state and a sequence of actions. 
+
+\paragraph{Training stability} We can only train the MLP-based dynamics model for 10-time steps across all environments. Using longer sequences often results in exploding gradients and instability in training due to backpropagation through time \citep{sutskever2013training}. The alternative of using ${\tanh}$ in MLP-based models can lead to vanishing gradients. In contrast, our diagonal Koopman operator handles long trajectories without encountering vanishing or exploding gradients, in  agreement with our discussion in \cref{subsec:gradients}.
+\subsubsection{State and Reward Prediction}
+\label{subsec:state-prediction}
+
+In \cref{fig:state_reward_pred}, we evaluate our model's accuracy in state and reward prediction over long horizons involving 100 environment steps.
+For this experiment, we add a reward predictor and jointly minimize the reward prediction loss and the state prediction loss. We set the weight of the consistency loss in the latent space to $0.001$. We see that for longer horizon prediction, our model is considerably better in predicting rewards and states accurately for \texttt{hopper}, \texttt{walker}, and \texttt{halfcheetah} in comparison to MLP, Transformer and DSSM based model while being competitive with GRU-based model. Furthermore, \cref{fig:training-time} empirically verifies that our proposed Koopman dynamics model is significantly faster than an MLP, GRU, DSSM and Transformer based dynamics model. The results also reveal the trend that our model's relative speed-up over baselines grows with the length of the horizon.
+\begin{figure}[!ht]
+\begin{center}
+\centerline{\includegraphics[width=0.8\columnwidth]{iqm-opt-metrics-planning.pdf}}
+\caption{Comparison of our Koopman-based dynamics model (with a horizon of 20) and an MLP-based dynamics model of vanilla TD-MPC \citep{pmlr-v162-hansen22a}. The results are over 5 random seeds for each environment. Higher Mean $\&$ IQM and lower Optimality Gap is better.}
+
+\label{fig:model-based-planning}
+\end{center}
+\end{figure}
+
+\begin{figure*}[!ht]
+\begin{center}
+\centerline{\includegraphics[width=0.8\columnwidth]{iqm-opt-metrics-model-free.pdf}}
+\caption{Comparison of vanilla SAC \citep{haarnoja2018soft} and its integration with an MLP-based (SPR) and a Koopman-based dynamics model for incorporating self-predictive representations in the DeepMind Control Suite. The results are over 5 random seeds for each environment. Higher Mean $\&$ IQM and lower Optimality Gap is better.}
+\label{fig:model-free-rl}
+\end{center}
+\vskip -0.2in
+\end{figure*}
+
+\subsection{Koopman Dynamics Model for RL and Planning}
+\label{subsec:RL_results}
+We now present promising results from integrating the diagonal Koopman model into two areas: (I) model-based planning, and (II) model-free reinforcement learning (RL). In the latter, the dynamics model enhances representation learning. Both approaches aim to solve continuous control tasks in a data-efficient manner.
+We provide a brief summary of these methods and their modifications with the Koopman dynamics model in \cref{appdx:RL-details}. While the same dynamics model can also be used for (III) model-based RL, we leave that direction for future work. 
+
+\paragraph{Evaluation Metric} To assess the performance of our algorithm, we calculate the average episodic return at the conclusion of training and normalize it with the maximum score, i.e., 1000. However, due to significant variance over different runs, relying solely on mean values may not provide reliable metrics. To address this, \cite{agarwal2021deep} suggests using bootstrapped confidence intervals (CI) with stratified sampling, which is particularly suitable for small sample sizes, such as the five runs per environment in our case. By utilizing bootstrapped CI, we obtain interval estimates indicating the range within which an algorithm's aggregate performance is believed to fall and report the Interquartile Mean (IQM). The IQM represents the mean across the middle $50\%$ of the runs, providing a robust measure of central tendency. Furthermore, we calculate the Optimality Gap (OG), which quantifies the extent to which the algorithm falls short of achieving a normalized score of 1.0. \footnote{A smaller Optimality Gap indicates superior performance.} 
+\subsubsection{Model-Based Planning}
+\label{subsubsec:mbplanning}
+
+We utilize TD-MPC \citep{pmlr-v162-hansen22a} as the baseline for our model-based planning approach. TD-MPC combines the benefit of a model-free approach in long horizons by learning a value function while using an MLP-based ``Task-Oriented Latent Dynamics'' (TOLD) model for planning over shorter horizons. 
+To assess the effectiveness of our proposed dynamics model, we replace TOLD with 
+our diagonal Koopman operator. Subsequently, we trained the TD-MPC agent from scratch using this modified Koopman TD-MPC approach. See  \cref{appdx:koopman_tdmpc} for details on this adaptation. To evaluate the performance of our variation, we conducted experiments in four distinct environments: \texttt{Quadruped Run, Quadruped Walk, Cheetah Run,} and \texttt{Acrobot Swingup}. We run experiments in the state space and compare them against vanilla TD-MPC. %\cite{pmlr-v162-hansen22a}. 
+
+Our Koopman dynamics model was trained with a horizon of 20-time steps. We observe that TD-MPC suffers from training instability, performance degradation and high variance when using 20-time steps. 
+Consequently, we opted to use a horizon of 5-time steps for the vanilla approach. 
+ \cref{fig:model-based-planning} suggests that the Koopman TD-MPC outperforms the MLP-based baseline while being more stable. 
+ 
+ 
+
+
+\subsubsection{Model-Free RL }
+\label{subsubsec:modelfree}
+Current data-efficient model-free RL approaches like \citep[SPR;][]{Schwarzer2020DataEfficientRL} use dynamics modeling as an auxiliary task to improve representation learning. We apply our dynamics model to this model-free RL framework, % with latent dynamics consistency-based self-supervision. 
+where we use an adaptation of SPR as our baseline. This adaptation uses an MLP-based dynamics model rather than the original CNN used in SPR in order to  eliminate the advantage of the original SPR for image inputs. SPR uses an auxiliary consistency loss similar to \cref{eqn:state_pred}, as well as augmentations and other techniques from \cite{grill2020bootstrap} to prevent representation collapse. It also improves the encoder's representation quality by making it invariant to the transformations that are not relevant to the dynamics using augmentation; see also \cite{Srinivas2020CURLCU, kostrikov2020image}. 
+To avoid overconstraining the latent space using the dynamics model, SPR uses \emph{projection heads}. %that can be thought of as simple decoders. 
+Similarly, we encode the Koopman observables using a projection layer above the representations used for Q-learning. We provide more details on the integration of the Koopman dynamics model into the SPR framework in \cref{appdx:koopman_spr}. 
+
+We perform experiments on five different environments from the DeepMind Control (DMC) Suite \citep{tunyasuvunakool2020, tassa2018deepmind} (\texttt{Ball in Cup Catch, Cartpole Swingup, Cheetah Run, Finger Spin,} and \texttt{Walker Walk}) in pixel space, and compare it with an MLP-based dynamics model (SPR) and no dynamics model, i.e., SAC \citep{haarnoja2018soft} as baselines. Figure \ref{fig:model-free-rl} demonstrates that for a horizon of 5 time steps Koopman-based model outperforms the SAC plus MLP-based dynamics model baseline while being more efficient.
+
+
+
+
+
+
+
+\section{Related Work}
+
+\textbf{Diagonal state space models (DSSMs). } DSSMs \citep{gu2022on, gupta2022diagonal, mehta2022long} have been shown to be an efficient alternative to Transformers for long-range sequence modeling. DSSMs with certain initializations have been shown \cite{gu2022on} to approximate convolution kernels derived for long-range memory using the HiPPO \citep{gu2020hippo} theory. This explains why DSSMs can perform as well as structured state space models (S4) \citep{gu2022efficiently}, as pointed out by \cite{gupta2022diagonal}. Inspired by the success of gating in transformers \citep{hua2022transformer}, \cite{mehta2022long} introduced a gating mechanism in DSS to increase its efficiency further. However, a DSSM is a non-linear model used for sequence modeling and functions differently from our Koopman-based dynamics model, as explained in \cref{appdx:comp_dssm}.
+
+\textbf{Probabilistic latent spaces.} Several early papers use approximate inference with linear and non-linear latent dynamics so as to provide probabilistic state representations \citep{haarnoja2016backprop, becker2019recurrent, shaj2021action, hua2022transformer, fraccaro2017disentangled}. A common theme in several of these articles is the use of Kalman filtering, using variational inference or MCMC, for estimating the posterior over the latents and mechanisms for disentangled latent representations. While these methods vary in their complexity, scalability, and representation power, similar to an LSTM or a GRU, they employ recurrence and, therefore, cannot be parallelized.
+
+\textbf{Koopman Theory for Control. } 
+The past work in this area has solely focused on learning the Koopman operator or discovering representations for Koopman spectrum for control \citep{deepkoopman22, watter2015}. \citet{korda2018149} extends the Koopman operator to controlled dynamical systems by computing a finite-dimensional approximation of the operator. Furthermore, they demonstrate the use of these predictors for model predictive control (MPC).  \cite{han20208} tasks a data-driven approach to use neural networks to represent the Koopman operator in controlled dynamical system setting. \cite{kaiser2021data} introduces a method using Koopman eigenfunctions for effective linear reformulation and control of nonlinear dynamical systems. \cite{song21} proposes deep Koopman reinforcement learning that learns control tasks with a small amount of data. However, none of these works focus on the training speed and stability for predicting longer horizon.
+
+
+
+\section{Conclusion}
+
+Dynamics modeling has a key role to play in sequential decision-making: at training time, having access to a model can lead to sample-efficient training, and at deployment, the model can be used for planning. 
+Koopman theory is an attractive foundation for building such a dynamics model in Reinforcement Learning.
+The present article shows that models derived from this theoretical foundation can be made computationally efficient. We also demonstrate how this view gives insight into the stability of learning through gradient descent in these models. Empirically, we show the remarkable effectiveness of such an approach in long-range dynamics modeling and provide some preliminary yet promising results for model-based planning and model-free RL. 
+
+
+\section{Limitations and Future Work}
+
+
+
+
+Although our proposed Koopman-based dynamics model has produced promising results, our current treatment has certain limitations that motivate further investigation. Our current model is tailored for deterministic environments, overlooking stochastic dynamics modeling. We intend to expand our research in this direction, based on developments around \emph{stochastic} Koopman theory \citep{mezic2005spectral,wanner2022robust}, where Koopman observables become random variables, enabling uncertainty estimation in dynamics. 
+Secondly, although our state prediction task yielded impressive results, we have identified areas for further growth, particularly in its applications to RL and planning.
+
+We hypothesize that the distribution shift during training and the objective change in training and evaluation hurt the performance of our Koopman dynamics model. We also
+plan to conduct a more comprehensive study involving a wider range of tasks and environments. Additionally, we aim to explore the compatibility of our model with different reinforcement learning algorithms to showcase its adaptability. Finally, we believe that the diagonal Koopman operator holds promise for model-based RL, where robust dynamics modeling over long horizons is precisely what is currently missing. We intend to investigate  this direction, potentially unlocking new avenues for advancement.
+
+
+
+
+

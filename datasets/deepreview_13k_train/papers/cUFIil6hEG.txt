@@ -1,0 +1,650 @@
+\title{Accelerating Training with Neuron Interaction and Nowcasting Networks}
+
+\begin{abstract}
+Neural network training can be accelerated when a learnable update rule is used \textit{in lieu of} classic adaptive optimizers (e.g. Adam). However, learnable update rules can be costly and unstable to train and use. Recently, \cite{jang2023learning} proposed a simpler approach to accelerate training based on weight nowcaster networks (WNNs). In their approach, Adam is used for most of the optimization steps
+and periodically, \textit{only every few steps}, a WNN nowcasts (predicts near future) parameters. We improve WNNs by proposing \underline{n}euron \underline{i}nteraction and \underline{no}wcasting (\ours) networks. In contrast to WNNs, \ours leverages neuron connectivity and graph neural networks to more accurately nowcast parameters.
+We further show that in some networks, such as Transformers, modeling neuron connectivity accurately is challenging. We address this and other limitations, which allows \ours to accelerate Adam training by up to {50\%} in vision and language tasks.\looseness-1
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{wrapfigure}{r}{.42\textwidth}
+\begin{tiny}
+\begin{overpic}[scale=0.38,unit=1mm]{figs/wiki64_val_teaser.pdf}
+    \put(25,37){\LARGE ...}
+    \put(45,37){\LARGE ...}
+    \put(9.5,36){
+    \begin{tikzpicture}
+    \foreach \x in {0.5, 0.83, 2.94}
+    {\draw [decorate,decoration={brace,amplitude=5pt},rotate=0] (\x,0) -- (\x+0.27, 0);
+    \draw [-stealth] (\x+0.3,0.45) -- (\x+0.3,0);
+    \node at (\x+0.135,0.27) {\scalebox{.5}{Adam}};
+    \node at (\x+0.45,0.65) {\rotatebox[origin=c]{25}{\scalebox{.7}{\setlength\fboxsep{0.5pt} \colorbox{red!20}{Nowcast}}}};
+    }
+    \end{tikzpicture}
+    }
+    \put(34,18.5){\colorbox{gray!20}{\scriptsize Speed up = 48\%}}
+    \put(31.5,12){
+    \begin{tikzpicture}
+    \draw [decorate,decoration={brace,amplitude=10pt},line width=1.75pt] (1.0,0) -- (3.1,0);
+    \end{tikzpicture}
+    }
+\end{overpic}
+\end{tiny}
+\caption{\small\setlength\fboxsep{0.5pt} Adam without and with \colorbox{red!20}{nowcasting} using our NiNo vs WNN~\citep{jang2023learning} on a language task that \ours and WNN have not seen during their training.}
+\label{fig:teaser}
+\end{wrapfigure}
+Modern deep learning models, such as large language models~\citep{touvron2023llama}, are trained using classic adaptive optimizers, such as Adam\footnote{We use Adam throughout the paper, but our discussion and methods are in principle applicable to any optimizers that produce a trajectory of parameters, including SGD with/without momentum, AdamW, Adagrad, etc.\looseness-1}~\citep{kingma2014adam,loshchilov2017decoupled}.
+These optimizers update neural network parameters $\btheta \in \mathbb{R}^n$ using gradient descent at step $t$ as $\btheta_{t+1}^i = \btheta^i_{t} - \Delta\btheta_{t}^i$, $\forall i \in [1,n]$, where $\Delta\btheta_{t}^i$ is the update computed analytically based on the history of parameter values, gradients and the learning rate.
+Recently, \citet{jang2023learning,sinha2017introspection} showed that parameters $\btheta$ follow a predictable trend so that optimization can be accelerated by \textbf{nowcasting} (predicting near future) parameters using a learnable function $f^\phi$: $\hat{\btheta}_{t+k}^i=\btheta_{t}^i + f^\phi(\btheta_{t}^i, \btheta_{t-1}^i, \btheta_{t-2}^i, ...)$, where $k\gg 1$ is the future horizon. 
+More popular learnable approaches to speed up optimization, such as ``learning to optimize'' (L2O), are recurrently applied at every step $t$~\citep{andrychowicz2016learning,metz2022velo}. Compared to L2O, the parameter nowcaster
+$f^\phi$ is applied \textbf{very rarely} reducing its overhead, e.g. a base optimizer such as Adam is run for 1k steps followed by the prediction step (Fig.~\ref{fig:teaser}). Moreover, training such $f^\phi$ is simpler than L2O, since a supervised loss can be used instead of a more challenging meta-learning loss with recurrent inner steps.
+However, akin to Adam, $f^\phi$ from prior works does not directly leverage the structural information of $\btheta$, such as connectivity between neurons and layers. This structure has been shown to be critical for many parameter representation tasks, such as property prediction~\citep{navon2023equivariant,zhou2023permutation,kofinas2024graph}.
+
+In this work, we propose \textbf{neuron interaction and nowcasting (\ours)} networks making better predictions of future parameters to \textbf{accelerate training with a base optimizer such as Adam} and make the following contributions:
+\begin{enumerate}[leftmargin=7mm]
+    \setlength{\itemsep}{1pt}
+    \item  We introduce \ours, which directly uses the structure of neural network parameters by leveraging recently proposed \textit{neural graphs} (graphs of neurons)~\citep{kofinas2024graph,lim2023graph}.
+
+    \item We improve Transformer's neural graphs of~\citeauthor{kofinas2024graph,lim2023graph} by more accurately modeling the \textit{neuron permutation symmetry} of multi-head self-attention. Our neural graphs combined with graph neural networks create a strong inductive bias to make rare but accurate predictions.\looseness-1
+    
+    \item \ours is conditioned on the future horizon $k$ to allow for prediction in the near and far future without retraining it, facilitating its usage in diverse tasks and at different optimization stages.\looseness-1
+
+    \item We demonstrate that \ours accelerates training with Adam for ConvNets and Transformers reducing the number of steps to achieve the target performance of Adam by up to 50\%. We release our source code and models at \textcolor{mydarkblue}{\ninourl}.
+\end{enumerate}
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+\textbf{Learning to optimize (L2O).} The L2O literature has offered many approaches to learn a neural network (\textit{optimizer}) that optimizes the parameters of other neural nets (\textit{optimizees})~\citep{andrychowicz2016learning,chen2021learning,chen2022gradient,amos2022tutorial}. Among them, 
+Safeguarded L2O~\citep{heaton2023safeguarded,premont2022simple} is most related to ours as it switches between an L2O optimizer and SGD/Adam. While Safeguarded L2O alleviates the \textit{meta-generalization} challenge~\citep{therien2024mu}, training an L2O optimizer remains costly and unstable due to the use of meta learning methods and its long inner loop unrolls required at each meta-training iteration~\citep{metz2019understanding,metz2022velo}. Moreover, overheads of L2O add up at each iteration making it more computationally intensive than Adam. In contrast, our approach follows \textit{weight nowcaster networks} (WNNs)~\citep{jang2023learning}, where the nowcaster model is applied very rarely (e.g. once per 1k steps of Adam) making the total overhead negligible, yet still speeding up training significantly.
+
+\textbf{Parameter prediction and generation.}
+This area has been active recently, primarily aiming at reducing computational costs of training neural nets~\citep{peebles2022learning,ashkenazi2022nern,schurholt2022hyper,schuerholt2024sane,knyazev2021parameter,knyazev2023can,zhou2024logah,soro2024diffusion,wang2024neural}.
+Most related to our work are IntrospectionMLP~\citep{sinha2017introspection} and WNNs~\citep{jang2023learning} serving the basis of our approach. These methods train simple MLPs to periodically (e.g. every few epochs of Adam) predict future parameter values of a neural net given its past parameters (Section~\ref{sec:bg-wnn}). However, their MLPs predict parameter coordinate-wise (for each parameter independently) similar to optimization methods without leveraging the structure of neural networks. Moreover, their MLPs predict parameters only for a predefined future horizon $k$, whereas different tasks and different optimization stages can have different parameter evolution trends~\citep{morchdi2022mysterious,guille2023no,lange2023deep}. We address these shortcomings by conditioning the prediction on $k$.\looseness-1
+
+\textbf{Representation learning of neural network parameters.} This area has also developed fast recently~\citep{navon2023equivariant,schurholt2021self,schuerholt2024sane,ashkenazi2022nern,andreis2023set,zhou2023permutation,zhou2024neural,zhou2024universal}. One of the main goals in these works is to model \textit{neuron permutation symmetry} -- the property of neural networks that if the neurons in one layer are permuted in the same way as the neurons in the next layer, the neural network preserves its function~\citep{hecht1990algebraic}.
+Accurate modeling of this symmetry allows for better estimation of network properties or encoding implicit neural representations.
+To model neuron permutation symmetry, \cite{kofinas2024graph,lim2023graph} proposed \textit{neural graphs} (graphs of neurons) enabling the usage of graph neural networks (GNNs)~\citep{kipf2016semi,corso2020principal}. Remarkably, as GNNs can digest graphs of any size and connectivity, the synergy of neural graphs and GNNs enables processing diverse parameters from different architectures and tasks using a \textit{single} GNN. We leverage both the neural graphs and GNNs to learn a single \ours model that can accelerate optimization in diverse tasks. However, the neural graphs of~\cite{kofinas2024graph,lim2023graph} do not accurately model neuron permutation symmetry of Transformers (Section~\ref{sec:ng-transformer}). We address that shortcoming to make better predictions by \ours.\looseness-1
+
+\textbf{Dynamic models.}
+Our approach of learning from the interaction of nodes in a neural graph to make future predictions is also related to dynamic interactive models, where message passing networks and GNNs are used to learn the interaction within relational temporal networks~\citep{trivedi2019dyrep,knyazev2021learning} and physical systems~\citep{kipf2018neural,sanchez2018graph,sanchez2020learning,zambaldi2019deep}. However, developing a strong parameter prediction model requires many specific design choices and careful modeling of neuron permutation symmetry, motivating our work.\looseness-1
+
+
+
+\section{Background}
+
+\label{sec:bg}
+
+We consider a neural network parameterized by $\btheta_t \in \mathbb{R}^{n}$ trained for $t$ steps with Adam (or another optimizer).
+Our goal is to accelerate optimization by predicting future parameters $k \gg 1$ steps ahead given its past values using a meta-network $f_k^\phi$, parameterized by $\phi$:  $\hat{\btheta}_{t+k}=\btheta_{t} + f_k^\phi(\btheta_{t}, \btheta_{t-1}, \btheta_{t-2}, ...)$. 
+
+\subsection{Weight Nowcaster Networks (WNNs)}
+\label{sec:bg-wnn}
+
+WNNs~\citep{jang2023learning} model $f_k^{\phi}$ as an MLP predicting the delta (update difference) of the $i$-th parameter: $\Delta\hat{\btheta}_{\tau+k}^i= f_k^{\phi}(\tilde{\btheta}_{\tau}^i, \tilde{\btheta}_{\tau-1}^i, ..., \tilde{\btheta}_{\tau_c}^i)$, where $\tau_c = \tau-c+1$ and $c$ is the context length. Here, $\tau, \tau-1, ...$ are \textbf{epoch indices} and $\tilde{\btheta}^i$ are the parameters \textit{scaled} based on the range of values in $\btheta^i_{\tau},...,\btheta^i_{\tau_c}$ (see details in Section~\ref{sec:bg-wnn-details}).
+The predicted parameter value is obtained by unscaling the predicted delta:
+$\hat{\btheta}_{\tau+k}^i = \btheta_{\tau}^i + 
+\mathrm{unscale}(\Delta\hat{\btheta}_{\tau+k}^i)$. 
+WNNs are trained in a supervised way by collecting a training dataset of parameter trajectories $\{[\btheta_1, \btheta_2, ...]\}_1^C$ 
+obtained with Adam and applying the $l_1$-loss:\looseness-1
+\begin{equation}
+    \label{eq:loss-wnn}
+{\text{argmin}}_\phi || \Delta\tilde{\btheta}_{\tau+k} - \Delta\hat{\btheta}_{\tau+k} ||_1,
+\end{equation}
+where 
+$\Delta\tilde{\btheta}_{\tau+k}$ are the scaled target parameter deltas. 
+\cite{sinha2017introspection} proposed the approach of future parameter prediction originally, but without scaling the parameters and without a simple way to choose at which optimization steps to make the prediction. In contrast, WNNs scale the parameters and are always applied \textbf{periodically}, once per every $c$ {epochs} of a base optimizer (Adam) with $k=c$, which better accelerates optimization. For example, to use a trained WNN $f_k^{\phi}$ on a new task, first Adam is run for $c$ epochs ($c=5$ by default) after which $f_k^{\phi}$ is applied to predict future (10-th epoch) parameters, after which the procedure repeats (the base optimizer is continued for another 5 epochs followed by parameter prediction) until convergence. So the WNN is applied very rarely, e.g. in the case of 200 Adam steps per epoch, the WNN is applied only once per 1,000 steps (Fig.~\ref{fig:teaser}).
+
+\subsection{(Naive) Neural Graph of Transformers}
+\label{sec:bg-neural-graph}
+
+WNNs apply an MLP for parameter $\btheta^i$ given only its past values. Such an MLP is inherently limited, since future parameter values depend on many factors, including connectivity of neurons.
+Modeling neuron connectivity in a way that generalizes to arbitrary network structures to make parameter prediction as general as possible is challenging. Simple parameter representations, e.g. flattening of parameters into a vector~\citep{schurholt2021self}, are not general and do not model \textit{neuron permutation symmetry} (the neurons can be permuted without changing the network output). 
+Recently, \citet{kofinas2024graph,lim2023graph} proposed
+to represent $\btheta$ using a \textit{neural graph} $\G(\btheta) = (\V, \e)$ with node features $\V\in\mathbb{R}^{|\V| \times d_{\V}}$ and edge features $\e\in\mathbb{R}^{|\V|\times |\V| \times d_{\e}}$, where $d_{\V}$, $d_{\e}$ are the node and edge feature dimensionalities, respectively.
+For example, \eqref[Equation]{eq:neural_graph_construction} shows $\e$ for the $d_{\e}=1$ dimensional edge features of an $L$-layer MLP (we ignore biases for simplicity): $\btheta=\left\{\W^{(1)}, \dots, \W^{(L)})\right\}$, where $\W^{(l)} \in \mathbb{R}^{d_{l-1} \times d_{l}}$ are the weights for $l \in [1,L]$.
+\begin{wrapfigure}{r}{.4\textwidth}
+\begin{equation}
+\label{eq:neural_graph_construction}
+\e=
+\resizebox*{!}{0.15\textheight}{%
+\begin{tikzpicture}[
+  baseline=(E-3-1.base),
+  dimensions/.style={{|[width=2mm]}-{|[width=2mm]},thick},
+]
+  \matrix[
+    matrix of math nodes,
+    nodes in empty cells,
+    left delimiter = (,
+    right delimiter = ),
+    row sep = 2pt,
+    column sep = 2pt, 
+    inner sep = 3pt,
+    row 1/.style = {minimum height=25pt},
+    column 1/.style = {minimum width=25pt},
+    row 2/.style = {minimum height=40pt},
+    column 2/.style = {minimum width=40pt},
+    row 3/.style = {minimum height=50pt},
+    column 3/.style = {minimum width=50pt},
+    row 4/.style = {minimum height=40pt},
+    column 4/.style = {minimum width=40pt},
+    row 5/.style = {minimum height=35pt},
+    column 5/.style = {minimum width=35pt},
+    every node/.append style={font=\Large, anchor=base,text depth=.5ex,text height=2ex},
+  ] (E)
+  {
+    & \W^{(1)} & & & \\
+    & & \W^{(2)} & & \\
+    & & & \ddots & \\
+    & & & & \W^{(L)} \\
+    & & & & \\
+  };
+  \begin{pgfonlayer}{background}
+    \node[fit=(E-1-1) (E-1-2) (E-1-3) (E-1-4) (E-1-5), inner sep=0pt] (r1) {};
+    \node[fit=(E-2-1) (E-2-2) (E-2-3) (E-2-4) (E-2-5), inner sep=0pt] (r2) {};
+    \node[fit=(E-3-1) (E-3-2) (E-3-3) (E-3-4) (E-3-5), inner sep=0pt] (r3) {};
+    \node[fit=(E-4-1) (E-4-2) (E-4-3) (E-4-4) (E-4-5), inner sep=0pt] (r4) {};
+    \node[fit=(E-5-1) (E-5-2) (E-5-3) (E-5-4) (E-5-5), inner sep=0pt] (r5) {};
+    \node[fit=(E-1-1) (E-2-1) (E-3-1) (E-4-1) (E-5-1) (r1.north-|E-1-1) (r5.south-|E-1-1), inner sep=0pt] (c1) {};
+    \node[fit=(E-1-2) (E-2-2) (E-3-2) (E-4-2) (E-5-2) (r1.north-|E-1-2) (r5.south-|E-1-2), inner sep=0pt] (c2) {};
+    \node[fit=(E-1-3) (E-2-3) (E-3-3) (E-4-3) (E-5-3) (r1.north-|E-1-3) (r5.south-|E-1-3), inner sep=0pt] (c3) {};
+    \node[fit=(E-1-4) (E-2-4) (E-3-4) (E-4-4) (E-5-4) (r1.north-|E-1-4) (r5.south-|E-1-4), inner sep=0pt] (c4) {};
+    \node[fit=(E-1-5) (E-2-5) (E-3-5) (E-4-5) (E-5-5) (r1.north-|E-1-5) (r5.south-|E-1-5), inner sep=0pt] (c5) {};
+
+    \foreach \i in {1,2,3,4} {
+      \node[inner sep=0pt] at ($(r\i.south)!0.5!(r\the\numexpr\i+1\relax.north)$) (r\i\the\numexpr\i+1\relax) {};
+    }
+    \foreach \i in {1,2,3,4} {
+      \node[inner sep=0pt] at ($(c\i.east)!0.5!(c\the\numexpr\i+1\relax.west)$) (c\i\the\numexpr\i+1\relax) {};
+    }
+
+    \node[fit=(E-1-1) (r1.north-|E-1-1), inner sep=0pt] (1) {};
+    \node[fit=(E-5-5) (E-4-5.east|-r5.south), inner sep=0pt] (5) {};
+    \draw[rounded corners, densely dotted, fill=gray!50!white, fill opacity=0.1]
+    (1.north) -| (r12-|c12) -| (r23-|c23) -| (r34-|c34) -| (r45-|c45) -| (5.south east) -| (1.north west) -- (1.north);
+    
+    \node[fit=(E-1-3|-r1.north)  (E-2-3.west|-E-1-3.south), inner sep=0pt] (13) {};    
+    \draw[rounded corners, densely dotted, fill=gray!50!white, fill opacity=0.1]
+    (13.north) -| (r12-|c23) -| (r23-|c34) -| (r34-|c45) -| (c5.east) |- (13.north);
+  \end{pgfonlayer}
+  
+  \draw[dimensions] ([yshift=2pt]E.north-|c1.west) -- ([yshift=2pt]E.north-|c1.east) node [font=\footnotesize, pos=0.5, above] {$d_0$};
+  \draw[dimensions] ([yshift=2pt]E.north-|c2.west) -- ([yshift=2pt]E.north-|c2.east) node [font=\footnotesize, pos=0.5, above] {$d_1$};
+  \draw[dimensions] ([yshift=2pt]E.north-|c3.west) -- ([yshift=2pt]E.north-|c3.east) node [font=\footnotesize, pos=0.5, above] {$d_2$};
+  \path ([yshift=2pt]E.north-|c4.west) -- ([yshift=2pt]E.north-|c4.east) node [font=\tiny, pos=0.5, above] {$\ldots$};
+  \draw[dimensions] ([yshift=2pt]E.north-|c5.west) -- ([yshift=2pt]E.north-|c5.east) node [font=\footnotesize, pos=0.5, above] {$d_L$};   
+
+  \draw[dimensions] ([xshift=12pt]E.east|-r1.north) -- ([xshift=12pt]E.east|-r1.south) node [font=\footnotesize, pos=0.5, right] {$d_0$};
+  \draw[dimensions] ([xshift=12pt]E.east|-r2.north) -- ([xshift=12pt]E.east|-r2.south) node [font=\footnotesize, pos=0.5, right] {$d_1$};
+  \draw[dimensions] ([xshift=12pt]E.east|-r3.north) -- ([xshift=12pt]E.east|-r3.south) node [font=\footnotesize, pos=0.5, right] {$d_2$};
+  \path ([xshift=12pt]E.east|-r4.north) -- ([xshift=12pt]E.east|-r4.south) node [font=\tiny, pos=0.5, right] {$\vdots$};
+
+  \draw[dimensions] ([xshift=12pt]E.east|-r5.north) -- ([xshift=12pt]E.east|-r5.south) node [font=\footnotesize, pos=0.5, right] {$d_L$};
+
+  \node[anchor=south west, inner sep=0pt] at (r34-|c23) (zerobot) {\LARGE$\mathbf{0}$};
+  \node[anchor=north east, inner sep=0pt] at (r12-|c45) (zerotop) {\LARGE$\mathbf{0}$};
+
+  \draw (zerobot.center)++(140:1.5) node {$\ddots$};
+  \draw (zerobot.center)++(-40:1.5) node {$\ddots$};
+
+  \draw (zerotop.center)++(140:1) node {$\ddots$};
+  \draw (zerotop.center)++(-40:1) node {$\ddots$};
+\end{tikzpicture}
+}
+\end{equation}
+\end{wrapfigure}
+
+Neural graphs can theoretically represent the parameters of any neural network taking into account neuron permutation symmetry as the rows and columns of weight matrices correspond to the nodes in the neural graph.
+This way, neural graphs impose a strong inductive bias similarly to using convolution for images.
+So a model operating on neural graphs, such as a graph neural network (GNN) and our \ours model, can be used in diverse tasks and should be able to learn parameter prediction rules that generalize better with fewer samples than, for example, MLPs. However, to fully leverage the neural graphs in practice, we need to accurately construct them, which is not trivial for such networks as Transformers, motivating our approach in this work.
+
+\textbf{Transformers.}
+For input $\x \in \mathbb{R} ^ {N \times d}$, where $N$ is a sequence length, a multi-head self-attention (\msa) layer~\citep{vaswani2017attention} for each head $h \in [1, H]$ projects $\x$ using $\W_h^q, \W_h^k, \W_h^v$ followed by self-attention and projection using another weight matrix $\W_h^o$ (see Section~\ref{sec:bg-msa} for details):
+\begin{equation}
+    \mathbf{A}_h = \frac{(\x \W_h^q) (\x \W_h^k)^T}{\sqrt{d}} \quad\mathrm{\text{and}}\quad \mathbf{y}_h = \mathrm{softmax}(\mathbf{A}_h) (\x\W_h^v) \quad\mathrm{\text{and}}\quad
+    \textrm{\msa}(\x) = \sum_{h=1}^H \mathbf{y}_h \W^o_h. \label{eq:msa}
+\end{equation}
+To construct neural graphs of \msa, \citet{kofinas2024graph,lim2023graph} use $d_{\e}=3$ dimensional edge features $\rve_{ij}=\left(\left(\W^q\right)_{ij}, \left(\W^k\right)_{ij}, \left(\W^v)\right)_{ij}\right)$, assuming that the multi-head case is automatically handled by the neural graph.
+However, as shown in Section~\ref{sec:ng-transformer}, this neural graph does not model the neuron permutation symmetry correctly, therefore we refer to it as a \textit{naive neural graph} (Fig.~\ref{fig:graph}a,b).\looseness-1
+\begin{figure}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    \begin{tabular}{cc}    
+       \raisebox{3pt}       {\includegraphics[width=0.55\textwidth,trim={0cm 5cm 5cm 0cm}, clip, align=c]{figs/transformer-graph.pdf}}
+       \hspace{15pt}
+       \begin{tabular}{cc}       \includegraphics[width=0.23\linewidth, align=c]{figs/graph_naive_4.pdf} \\
+       \scriptsize \textbf{Naive graph}: accuracy = 57.3\% \\
+       \includegraphics[width=0.23\linewidth, align=c]{figs/graph_ours_4.pdf} \\
+       \scriptsize \textbf{Our graph}: accuracy = 86.9\% \\
+       \end{tabular}
+       
+    \end{tabular}        
+    \caption{\small (a) \msa weights with $d=6$ and $H=2$ heads; (b) its naive~\citep{kofinas2024graph} and (c) our neural graph with color-coded edge/parameter types.
+    (d-e)~Neural graph embeddings obtained using a GNN and projected to 2d using tSNE for 1k \textcolor{orange}{\textbf{good}} and \textcolor{purpleembed}{\textbf{bad}} permutations of the MSA weights: (d) naive graph, (e) our graph. Accuracy is computed by fitting logistic regression for neural graph embeddings with labels being if the MSA output changes or not as described in Section~\ref{sec:exper-perm}.
+    }
+    \label{fig:graph}
+\end{figure}
+
+
+\section{Methods}
+
+
+In this section, we describe the details of our neural graphs for an \msa layer of Transformers and the neuron interaction and nowcasting (\ours) networks operating on such graphs (Fig.~\ref{fig:model}). Our neural graphs can be constructed for different Transformer architectures, including GPT2~\citep{radford2019language}, Llama~\citep{dubey2024llama} (see graph examples in Fig.~\ref{fig:graph-tx}) and others (see our implementation). Following WNNs, \ours is also applied very rarely during the optimization process (Section~\ref{sec:bg-wnn}). However, \ours leverages the representation power of neural graphs and GNNs to speed up optimization more significantly than WNNs, as we show in Section~\ref{sec:exp}.\looseness-1
+
+\subsection{Neural Graph of Transformers}
+\label{sec:ng-transformer}
+
+\definecolor{darkred}{RGB}{200,0,0}
+\definecolor{lightpink}{RGB}{255,92,184}
+\definecolor{darkpink}{RGB}{160,103,120}
+\definecolor{darkorange}{RGB}{191,144,0}
+To construct neural graphs that accurately model neuron permutation symmetry in \msa, we (1)~restrict neuron permutations across heads and (2) relax permutations of weights $\W^q, \W^k$ (Fig.~\ref{fig:graph}).
+
+\textbf{(1) Restricting permutations across heads.}
+We first observe that splitting computations into $H$ parallel heads (\eqref[Equation]{eq:msa})
+breaks neuron permutation symmetry across the heads, so shuffling neurons across the heads may change the overall output of $\textrm{\msa}(\x)$. Consider, for example, an \msa layer with $d=6$ and $H=2$ (Fig.~\ref{fig:graph}a) and the dot product between outputs $\x_1^q$ and $(\x_1^k)^T$ obtained after projecting $\x$ using the weights of the first head $\W_1^q$ and $\W_1^k$: $\x_1^q(\x_1^k)^T=[\x^q_{1}, \x^q_{2}, \textcolor{darkred}{\x^q_{3}}][\x^k_{1}, \x^k_{2}, \textcolor{lightpink}{\x^k_{3}}]^T$. The result of this dot product does not change when permuting neurons in both $\W_1^q$ and $\W_1^k$ using the same $\pi$, since it results in permuting the outputs: $\pi(\x_1^q)\pi(\x_1^k)^T=\x_1^q(\x_1^k)^T$. However, consider shuffling neurons across head 1 and 2 in $\W^q$ and $\W^k$, e.g. neurons 3 and 4 (highlighted in different colors in Fig.~\ref{fig:graph}a) resulting in: $[\x^q_{1}, \x^q_{2}, \textcolor{darkorange}{\x^q_{4}}][\x^k_{1}, \x^k_{2}, \textcolor{darkpink}{\x^k_{4}}]^T$. Now the dot product no longer equals $\x_1^q(\x_1^k)^T$ unless $\textcolor{darkorange}{\x^q_{4}} \textcolor{darkpink}{\x^k_{4}}=\textcolor{darkred}{\x^q_{3}}\textcolor{lightpink}{\x^k_{3}}$. So self-attention matrix $\mathbf{A}_1$ for head 1 and $\textrm{\msa}(\x)$ can change.
+
+To take into account this restriction, we allow for neuron permutations \textbf{only within a head} by adding a separate node for each head that connects the appropriate neurons so that permuting neurons 3 and 4 from our example changes the graph while permuting withing a head does not change it (Fig.~\ref{fig:graph}c). 
+\paragraph{(2) Relaxing permutations for $\W^q, \W^k$.}
+
+We also observe that neurons in
+$\W_h^q$ and $ \W_h^k$ can be permuted in a different way ($\pi'$) from $\W_h^v$ and $\W_h^o$ without changing the MSA output:
+\begin{equation}    
+     (\x \W_h^q) (\x \W_h^k)^T = (\x \pi'_c(\W_h^q)) (\x \pi_c'(\W_h^k))^T \quad\mathrm{\text{and}}\quad (\x \W_h^v) \W_h^o = (\x \pi_c( \W_h^v)) \pi_r(\W_h^o), 
+\end{equation}
+where $\pi_c$ and $\pi_r$ denote permutation $\pi$ of the columns and rows in the matrix respectively.
+In the naive graph the neurons in $\W_h^q, \W_h^k, \W_h^v, \W_h^o$ are always permuted in the same way ($\pi_c=\pi'_c$) making the neural graph unnecessary restrictive (Fig.~\ref{fig:graph}b).
+To address this issue, we keep $\W_h^q, \W_h^k, \W_h^v$ as \textbf{separate 1-dimensional edge features} in a neural graph instead of stacking them as 3-dimensional edge features (Fig.~\ref{fig:graph}c). Since $\W_h^q$ and $\W_h^k$ share the input and output neurons while $\W_h^k$ is transposed in \eqref[Equation]{eq:msa}, it is important to preserve the edge direction, so that for example $\rve_{3,4}$ corresponds to the weights of $\W_h^q$ while $\rve_{4,3}$ corresponds to the weights of $\W_h^k$.
+\begin{figure}
+    \centering
+    \newcommand{\figwidth}{0.25\textwidth}
+    \begin{tabular}{lccc}
+    \includegraphics[width=\figwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/lpe_layertype_384.png} 
+    & 
+    \includegraphics[width=\figwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/lpe_384.png}
+    & 
+    \includegraphics[width=\figwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/lpe_neuron_out_384.png}    
+    \end{tabular}    
+    \caption{\small Laplacian Positional Encoding (LPE) of our neural graph's nodes color-coded by the layer type (left), layer index (middle) and neuron index (right) for a Transformer with 6 layers and 384 hidden units. We show tSNE projections from the 8-dimensional LPE to 2d. }
+    \label{fig:lpe}
+\end{figure}
+\textbf{Edge features.}
+\label{sec:edge-features}
+In our neural graph, all the model parameters $\btheta$ and auxiliary connections $\btheta'$, such as residual and head connections introduced in Section~\ref{sec:ng-transformer}, are represented using the edge features $\e \in \mathbb{Z}^{|\V|\times |\V| \times d_{\e}}$ so that $||\e||_0 = |\btheta| + |\btheta'|$ (Fig.~\ref{fig:graph}c).
+To differentiate between $\btheta$ and $\btheta'$, we associate an integer edge type with each edge: $\e^{\text{type}} \in \mathbb{Z}^{|\V|\times |\V| \times 1}$, so our neural graph $\G(\btheta) = (\V, \e^{\text{type}}, \e)$.
+
+\textbf{Node features.}\label{sec:node-features}
+For the node features we use the Laplacian Positional Encoding (LPE)~\citep{belkin2003laplacian,dwivedi2023benchmarking} that allow graph neural networks to capture structural information more easily. For example the LPE implicitly embeds nodes of the same layer and same type close to each other even though this information is not explicitly provided (Fig.~\ref{fig:lpe}). 
+To compute the LPE, we use \textit{unweighted edges}, transform the graph to an \textit{undirected} one and extract 8 smallest non-trivial
+eigenvectors, so our node features are $\V^{\text{lpe}} \in \mathbb{R}^{|\V| \times 8}$. 
+In addition, for Transformer's word embedding layers, we found it beneficial to leverage a positional feature $\V^{\text{w}} \in \mathbb{Z}^{|\V| \times 1}$, since these layers often have the same size with ordered neurons. For other layers, this feature is set to zero.
+\textbf{Sequence of parameters as a neural graph.}
+We consider a history of $c$ past parameter vectors following WNNs (Section~\ref{sec:bg-wnn}): $\bm{\Theta}_{\tau:\tau_c}=[\btheta_{\tau}, \btheta_{\tau-1}, ..., \btheta_{\tau_c}] \in \mathbb{R}^{n \times c}$, where $\tau_c = \tau-c+1$ as in Section~\ref{sec:bg-wnn}. 
+Since each parameter vector in $\bm{\Theta}_{\tau:\tau_c}$ represents the same neural network structure, we transform the entire $\bm{\Theta}_{\tau:\tau_c}$ into a single neural graph $\bm{\G}(\bm{\Theta}_{\tau:\tau_c})=(\V^{\text{lpe}}, \V^{\text{w}}, \e^{\text{type}}, \bm{\mathcal{E}}_{\tau:\tau_c})$, where
+$\bm{\mathcal{E}}_{\tau:\tau_c}$ is obtained by stacking edge features: $\bm{\mathcal{E}}_{\tau:\tau_c} = [\e_\tau, \e_{\tau - 1}, ..., \e_{\tau_c}] \in \mathbb{R}^{|\V|\times |\V| \times d_{\e} \times c}$, whereas node features $\V^{\text{lpe}}, \V^{\text{w}}$ and edge types $\e^{\text{type}}$ do not change over time.
+\subsection{Neuron Interaction and Nowcasting Networks (\ours)}
+\label{sec:model}
+
+Given an input neural graph $\bm{\G}(\bm{\Theta}_{\tau:\tau_c})$, 
+our \ours model processes it using layerwise scaling layer, node and edge embedding layers and GNN layers with a hidden size $D$. \ours then predicts edge features for multiple steps in the future $\hat{\bm{\mathcal{E}}}_{1:K}$ that are mapped back to the parameter space $[\Delta\hat{\btheta}_{\tau+1}, ..., \Delta\hat{\btheta}_{\tau+K}]$ using the inverse neural graph construction $\Delta\hat{\btheta}_{\tau+k}=\mathcal{G}^{-1}(\hat{\bm{\mathcal{E}}}_k)$ (Fig.~\ref{fig:model}).
+
+\textbf{Layerwise scaling.}
+Since parameter values can vary in scale significantly across architectures and tasks, it is important to scale them appropriately.
+Compared to WNNs~\citep{jang2023learning} scaling each parameter independently using min-max, we extend a layerwise scaling~\citep{schurholt2022hyper} to a sequence of parameters.
+Specifically, given weights $\W^{(l)}_{\tau:\tau_c} \in \mathbb{R}^{d_{l-1} \times d_{l} \times c}$ of the $l$-th layer of the input $\bm{\mathcal{E}}_{\tau:\tau_c}$, we obtain scaled weights as $\tilde{\W}^{(l)}_{\tau:\tau_c} = (\W^{(l)}_{\tau:\tau_c} - \mu^{(l)}_\tau) / \sigma^{(l)}_\tau$, where $\mu^{(l)}_\tau,\sigma^{(l)}_\tau$ are the scalar mean and standard deviation of $\W^{(l)}_{\tau:\tau_c}$. After repeating this step $\forall l \in [1, L]$, we obtain scaled $\tilde{\bm{\mathcal{E}}}_{\tau:\tau_c}$.\looseness-1
+\textbf{Embedding layers and GNN.}
+We use linear $\phi_{\text{lpe}}, \phi_e$ and embedding $\phi_w,\phi_{\text{type}}$ layers to project node and edge features to the $D$-dimensional space followed by $M$ GNN layers and the output layer $\phi_{\text{DMS}}$:
+\begin{flalign}
+    \label{eq:layers}
+    \qquad  &\V^{0} = \phi_{\text{lpe}}(\V^{\text{lpe}}) + \phi_\text{w}(\V^{\text{w}}), \quad & \V^{0} \in \mathbb{R}^{|\V| \times D}, \\
+    \qquad &\bm{\mathcal{E}}^0 = \phi_e(\tilde{\bm{\mathcal{E}}}) + \phi_{\text{type}}(\e^{\text{type}}), \quad & \bm{\mathcal{E}}^0 \in \mathbb{R}^{|\V|\times |\V| \times D}, \\
+    \qquad & \V^{m}, \bm{\mathcal{E}}^m = \text{GNN}_{\phi_m}(\V^{m-1}, \bm{\mathcal{E}}^{m-1}), \quad & m=1...M, \\
+    \qquad & \hat{\bm{\mathcal{E}}} = \phi_{\text{DMS}}({\bm{\mathcal{E}}^M}), \quad & \hat{\bm{\mathcal{E}}} \in \mathbb{R}^{|\V|\times |\V| \times K}.
+\end{flalign}
+
+Our GNN layers are based on \cite{kofinas2024graph}, but to enable better efficiency and generalization when working with large models, we use a simple mean aggregation (see Section~\ref{sec:bg-gnn}).
+
+\begin{figure}[t]
+    \centering
+    {\includegraphics[width=0.9\textwidth,trim={0.6cm 0.3cm 2.2cm 0.3cm}, clip]{figs/nino.pdf}}
+    \caption{\small Our neuron interaction and nowcasting (\ours) model. We feed $c$ past parameter states as input and predict future $K$ states leveraging our improved neural graph structure (Section~\ref{sec:ng-transformer}) using a graph neural network. For a new optimization task, \ours is applied rarely over time: only once per 1k steps of Adam (Section~\ref{sec:exp}).\looseness-1}
+    \label{fig:model}
+\end{figure}
+\textbf{Direct multi-step forecasting (DMS).}
+The final layer $\phi_{\text{DMS}}$ outputs $K$ values for each edge corresponding to future steps from $\tau + 1$ to $\tau + K$.
+This is motivated by direct multi-step forecasting performing well in time series forecasting by avoiding error accumulation effects of autoregressive forecasting~\citep{chevillon2007direct,zeng2023transformers}.
+To train the model given a training dataset of parameters trained with Adam, we use \eqref[Equation]{eq:loss-wnn}, but applied for $k=[1,...,K]$ instead of fixing $k$:
+\begin{align}
+    \label{eq:loss}
+    & {\text{argmin}}_\phi \frac{1}{K}\sum\nolimits_{k=1}^K(|| \Delta\tilde{\btheta}_{\tau+k} - \Delta\hat{\btheta}_{\tau+k} ||_1),
+\end{align}
+where $\Delta\hat{\btheta}_{\tau+k}=\mathcal{G}^{-1}(\hat{\bm{\mathcal{E}}}_k)$ and $\tilde{\btheta}_{\tau+k}$ are the target parameters scaled using $\mu_\tau,\sigma_\tau$. The predicted parameters are obtained by unscaling the predicted delta using $\mu_\tau,\sigma_\tau$: $\hat{\btheta}_{\tau+k} = \btheta_{\tau} + 
+\mathrm{unscale}(\Delta\hat{\btheta}_{\tau+k})$.
+\textbf{Inference with $k$-decay.}
+Once our model is trained, it can predict future parameters for $k \in [1, K]$. While $k$ can be treated as a hyperparameter and kept fixed during optimization of the target task, we found that in the initial optimization stage using very large $k$ is beneficial, whereas in the later optimization stages $k$ should decrease fast, since the parameter values do not change significantly.
+Therefore, we propose to decay $k$ during optimization as $k \approx K((T-t)/T)^p$, where $T$ is the maximum number of optimization steps and $p$ controls the decay speed (Fig.~\ref{fig:k-decay}). Although $p$ can be tuned, we found that $p=2$ works well in our experiments. 
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\thickmuskip=3mu % equal space    
+
+We experiment with nine tasks, each defined by a dataset and a neural network architecture in the vision or language domains (Table~\ref{tab:tasks}).
+Four of the tasks, the \textit{in-distribution tasks}, are of a relatively smaller scale and used to train our \textit{meta-models} (\ours, WNN and their variants). The other five tasks, the \textit{out-of-distribution tasks}, differ from the in-distribution tasks in the architecture and/or dataset. We also experiment with larger GPT2-based and Llama-based architectures at the end of Section~\ref{sec:results}.
+
+\textbf{Indexing parameters.}
+Since the notion of epoch used for $\tau$ in WNNs (Section~\ref{sec:bg-wnn}) can be ill-defined in some tasks (e.g. in language tasks the models are often trained only for 1 epoch), in our experiments we found $\tau$ and $\tau+1$ indexing parameters at step $t$ and $t+200$ to be a well performing strategy in all the tasks, so for our default context length $c=5$ we apply the meta-models every $5 \times 200 = 1,000$ steps.\looseness-1
+
+\textbf{Training and evaluation pipeline:} 
+\begin{enumerate}[leftmargin=7mm]
+    \setlength{\itemsep}{1pt}
+    \item \textbf{Meta-training:} Train the meta-models with the supervised parameter prediction loss (\eqref[Equation]{eq:loss-wnn} for WNN and~\eqref[Equation]{eq:loss} for \ours) using training checkpoints from the four \textit{in-distribution tasks}.\looseness-1
+    
+    \item \textbf{Usage:} Train task-specific neural networks in all the tasks using the Adam (vision) and AdamW (language) optimizers with the meta-model applied every 1k steps given $c=5$ past parameters.\looseness-1
+    
+    \item \textbf{Evaluation:} Define a target validation performance level for each task based on running the baseline Adam optimization (without the meta-model applied) and reporting the relative reduction of the number steps to achieve that performance by other methods.
+\end{enumerate}
+\begin{table}[]
+    \centering
+    \caption{\textbf{In-distribution and out-of-distribution tasks.}}
+    \label{tab:tasks}
+    \scriptsize
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{lcccc|ccccc}
+\toprule
+& \multicolumn{4}{c|}{\sc In-distribution tasks}  & \multicolumn{5}{c}{\sc Out-of-distribution tasks} \\
+& 
+\multicolumn{1}{c}{\sc \tiny FM/{16}} &
+\multicolumn{1}{c}{\sc \tiny C\texttt{10}/{16}} & 
+\multicolumn{1}{c}{\sc \tiny LM1B/{3-24}} & 
+\multicolumn{1}{c|}{\sc \tiny LM1B/{2-32}} & 
+\multicolumn{1}{c}{\sc \tiny FM/{32}} &
+\multicolumn{1}{c}{\sc \tiny C\texttt{10}/{32}} & 
+\multicolumn{1}{c}{\sc \tiny C\texttt{100}/{32}} & 
+\multicolumn{1}{c}{\sc \tiny LM1B/{3-64}} & 
+\multicolumn{1}{c}{\sc \tiny Wiki/{3-64}}\\
+\midrule
+Final training loss & 0.25$\pm$0.06 & 0.91$\pm$0.1 & 5.94$\pm$0.03 & 5.85$\pm$0.04 & $-$ & $-$ & $-$ & $-$ & $-$ \\
+\#models & 300 & 300 & 200 & 200 & $-$ & $-$ & $-$ & $-$ & $-$ \\
+\#params & 14K & 15K & 1.2M & 1.6M & 56K & 57K & 63K & 3.4M & 3.4M \\
+\midrule
+Target (validation) metric &  Acc & Acc & Perplexity & Perplexity & Acc & Acc & Acc & Perplexity & Perplexity \\
+Target value & 89.5\% & 66.0\% & 352 & 319 & 90.5\% & 72.5\% & 39\% & 181 & 147 \\
+Adam \#steps  & 8606 & 8732 & 23000 & 23500 & 8269 & 8607 & 8341 & 23500 & 13500\\
+\ours \#steps & 4582 & 3775 & 11500 & 12000 & 4395 & 4323 & 4646 & 12000 & 7000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}
+    \centering
+    \small
+    \setlength{\tabcolsep}{0pt}
+    \begin{tabular}{ccc}             
+    \hspace{5pt}
+    {\includegraphics[width=0.28\textwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/scaling_param.pdf}} & 
+    \includegraphics[width=0.28\textwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/scaling_dataset.pdf} & 
+    {\includegraphics[width=0.40\textwidth,trim={0cm 0cm 0.5cm 0cm}, clip, align=c]{figs/scaling_tx.pdf}} \\
+    (a) & (b) & \hspace{-30pt}(c) \\
+    \end{tabular}    
+    \caption{\small Scaling (a,b) and generalization (c) trends for \ours vs WNN+.}
+    \label{fig:scaling}
+\end{figure}
+
+\subsection{Setup}
+
+\textbf{Vision tasks.} We use the FashionMNIST (\textsc{fm}), CIFAR-10 (\textsc{c10}) and CIFAR-100 (\textsc{c100}) datasets and two convolutional architectures with three layers: with 16, 32 and 32 channels per layer (e.g. task \textsc{fm/16}) or 32, 64 and 64 channels per layer (e.g. task \textsc{fm/32}). 
+The convolutional architectures are the same as in the L2O experiments of~\citet{kofinas2024graph} to enable fair comparison. In all cases, these tasks are optimized using Adam~\citep{kingma2014adam} without weight decay, with a constant learning rate of 6e-3 (for FashionMNIST) or 3e-3 (for CIFAR) with a batch size of 128 for $T$=10k steps.\looseness-1
+
+\textbf{Language tasks.} We use the \textsc{lm1b}~\citep{chelba2014billion} and WikiText103 (\textsc{wiki})~\citep{merity2016pointer} datasets and train GPT2 style Transformers~\citep{radford2019language} with 3 layers, 24 hidden units and 3 attention heads (denoted as \textsc{3-24}); 2 layers, 32 units and 2 heads (\textsc{2-32}) or 3 layers, 64 units and 4 heads (\textsc{3-64}). These tasks are optimized for the next token prediction loss with AdamW~\citep{loshchilov2017decoupled}, weight decay 1e-2, learning rate 2e-4, batch size of 32, sequence length of 1024 for either 1 epoch (for \textsc{lm1b}) or 4 epochs (for \textsc{wiki}) corresponding to around 24k or 14k steps respectively. We use a predefined GPT2 tokenizer in all the cases with a fixed vocabulary. 
+
+\textbf{Meta-training dataset.} We use \textsc{fm/16}, \textsc{c10/16}, \textsc{lm1b/3-24} and \textsc{lm1b/2-32} as the in-distribution tasks training 300, 300, 200 and 200 models in each task respectively ($C=1000$ models in total). We save the checkpoints of intermediate steps, having in total around $1.6 \times 10^6$ checkpoints. Our dataset is large and diverse (Fig.~\ref{fig:dataset}),
+yet it is relatively cheap to be collected as the tasks are small.
+
+\textbf{Baselines.} 
+As a reference optimization method we use Adam for vision and AdamW for language tasks with a constant learning rate that we tune independently on each task based on the validation metric.
+Following WNNs~\citep{jang2023learning} we use \textit{Linefit} as another baseline (Section~\ref{sec:bg-line}). We further improve it with a simple scaling term to promote more recent parameters denoted as \textit{Linefit+} (see Section~\ref{sec:methods-curve}). 
+As the strongest baseline, we use WNN with our layerwise scaling and $k$-decay which we denote as {WNN+}.
+Finally, we use the learning to optimize (L2O) model from~\citet{kofinas2024graph}, which showed strong results on similar vision tasks. We use their L2O (NG-GNN) pretrained on \textsc{fm/16} (denoted as L2O/\textsc{fm16}) as retraining their model on all our in-distribution tasks is expensive. For a fair comparison with L2O/\textsc{fm16}, we also trained \ours on \textsc{fm/16} only (denoted as \ours/\textsc{fm16}).
+We train WNN+ and \ours with $M \in [1,2,3]$ layers and $D \in [16, 32, 64, 128, 256]$, where $M=3, D=128$ are used unless otherwise stated (see training details in Section~\ref{sec:nino-details}). 
+\textbf{Evaluation.} We follow~\citet{dahl2023benchmarking} when choosing the approach to compare training methods and set our target based on the validation set performance using tuned Adam, which we consider as the main baseline (Table~\ref{tab:tasks}). To reduce evaluation uncertainty we train all the tasks multiple times (10 for vision and 3 for language) and use the median number of steps.
+We report a relative reduction of the number of steps in \%, e.g. for task \textsc{wiki/3-64} if the method achieves perplexity 147 in 7000 steps (as our \ours does), the reduction is 48.1\% based on Table~\ref{tab:tasks}. For language tasks due to more expensive evaluation we only evaluate every 500 steps, whereas for vision we evaluate every step.
+
+\subsection{Results}
+\label{sec:results}
+
+\begin{table}[t]
+\caption{\textbf{Reduction (\%) of the number of steps until a target performance w.r.t. Adam.} We observe that on both in-distribution and out-of-distribution tasks our models improve over the base optimizer and other acceleration methods.
+}
+\label{tab:main_compare}
+\scriptsize
+\begin{center}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccc|ccccc|c}
+\toprule
+& \multicolumn{4}{c|}{\sc In-distribution tasks}  & \multicolumn{5}{c|}{\sc Out-of-distribution tasks} & \textbf{\sc \tiny Avg speed up} \\
+& 
+\multicolumn{1}{c}{\sc \tiny FM/{16}} &
+\multicolumn{1}{c}{\sc \tiny C\texttt{10}/{16}} & 
+\multicolumn{1}{c}{\sc \tiny LM1B/{3-24}} & 
+\multicolumn{1}{c|}{\sc \tiny LM1B/{2-32}} & 
+\multicolumn{1}{c}{\sc \tiny FM/{32}} &
+\multicolumn{1}{c}{\sc \tiny C\texttt{10}/{32}} & 
+\multicolumn{1}{c}{\sc \tiny C\texttt{100}/{32}} & 
+\multicolumn{1}{c}{\sc \tiny LM1B/{3-64}} & 
+\multicolumn{1}{c|}{\sc \tiny Wiki/{3-64}} & \\
+\midrule
+Linefit & 27.0 & 26.8 & 32.6 & 31.9 & 16.6 & 26.5 & 20.7 & 29.8 & 33.3 & 27.3 \\
+WNN & 29.3 & 31.4 & 26.1 & 23.4 & 22.2 & 27.9 & 25.0& 27.7 & 25.9 & 26.5 \\
+Linefit+ & 27.3 & 28.3 & 32.6 & 29.8 & 23.3 & 27.0 & 25.0 & 25.5 & 33.3 & 28.0\\
+WNN+ & 33.8 & 45.1 & 45.7 & 44.7 & 31.6 & 44.0 & 37.8 & 38.3 & 37.0 & 39.8 \\
+\midrule
+\ours (naive graph) & \textbf{48.7} & 53.1 & 33.7 & 12.8 & 42.1 & 49.3 & 37.8 & 23.4 & 33.3 & 37.1 \\
+\ours & 46.8 & \textbf{56.8} & \textbf{50.0} & \textbf{48.9} & \textbf{46.8} & \textbf{49.8} & \textbf{44.3} & \textbf{48.9} & \textbf{48.1} & \textbf{48.9} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\begin{table}[]
+    \centering
+    \caption{\textbf{Ablations and analysis of hyperparameters. Average speed up (\%) is reported.}}
+    \label{tab:ablations}
+    \scriptsize
+    \renewcommand*{\thesubtable}{\textbf{\alph{subtable}}}    
+    \begin{subtable}[t]{.35\linewidth}\centering
+    \caption{Varying scaling}\label{tab:ablate-scale}
+    \begin{tabular}{lc}
+        \toprule
+         layerwise ($\mu,\sigma$ per layer) & \textbf{48.9} \\
+         $\mu,\sigma$ per param & 41.5 \\
+         min-max per param & 38.8 \\
+         no scaling & 32.1 \\         
+         \bottomrule
+    \end{tabular}
+    \end{subtable}%
+    \begin{subtable}[t]{.25\linewidth}\centering
+    \caption{Varying $p$ in $k$-decay}\label{tab:ablate-decay}
+    \begin{tabular}{lc}
+        \toprule
+         $p=1$ & 45.8 \\
+         $p=2$ & \textbf{48.9} \\
+         $p=10$ & 47.7 \\
+         $p=0$ (no $k$-decay) & 40.8 \\
+         \bottomrule
+    \end{tabular}
+    \end{subtable}%
+    \begin{subtable}[t]{.4\linewidth}\centering
+    \caption{Ablating embeddings (\eqref[Equation]{eq:layers})}\label{tab:ablate-embed}
+    \begin{tabular}{lc}
+        \toprule
+         LPE + word pos enc ($\V^{\text{w}}$) & \textbf{48.9} \\
+         no LPE & 47.5 \\
+         no word pos enc ($\V^{\text{w}}$) & 45.4 \\ 
+         no edge type & 45.7 \\
+         \bottomrule
+    \end{tabular}
+    \end{subtable}%
+    
+    \bigskip 
+    
+    
+    \begin{subtable}[t]{.25\linewidth}\centering
+    \caption{Varying context length}\label{tab:ablate-ctx}
+    \begin{tabular}{lc}
+    \toprule
+    $c=3$ & 29.8 \\
+    $c=5$ & \textbf{48.9} \\
+    $c=7$ & 44.0 \\
+    $c=10$ & 34.0 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}%
+    \begin{subtable}[t]{.3\linewidth}\centering
+    \caption{Varying \ours size}\label{tab:1b}
+    \begin{tabular}{lc}
+        \toprule
+         $M=3,D=128$ & \textbf{48.9} \\
+         $M=3,D=32$ & 42.6 \\
+         $M=1,D=128$ & 39.7 \\
+         $M=2,D=128$ & 44.7 \\
+         \bottomrule
+    \end{tabular}
+    \end{subtable}
+    \begin{subtable}[t]{.43\linewidth}\centering
+    \caption{Other hyperparameters ($b,\gamma$ are the batch size and learning rate used to meta-train \ours)}\label{tab:1b}
+    \begin{tabular}{lc}        
+        \toprule
+         $C=10^3, b=4, \gamma=\text{3e-3}$ & \textbf{48.9} \\
+         $C=10^2, b=4, \gamma=\text{3e-3}$ & 45.1 \\
+         $C=10^3, b=4, \gamma=\text{1e-3}$ & 41.5 \\
+         $C=10^3, b=2, \gamma=\text{3e-3}$ & 43.8 \\  
+         \bottomrule
+    \end{tabular}
+    \end{subtable}
+\end{table}
+
+\textbf{Main results.}
+Our \ours model shows consistently better performance than Linefit and WNN and their improved variants on all the nine tasks (Table~\ref{tab:main_compare}). On average we speed up Adam optimization by 48.9\% reducing the number of steps to achieve the target performance roughly by half. \ours is followed by WNN+ and \ours with a naive graph (Section~\ref{sec:ng-transformer}). While the latter achieves slightly better performance on the \textsc{fm/16} in-distribution task, in the out-of-distribution tasks this model significantly underperforms to \ours, especially in the language tasks. This performance gap is expected since \ours represents neural graphs for Transformers more accurately as we further validated qualitatively (Fig.~\ref{fig:graph}d,e) and quantitatively (Section~\ref{sec:exper-perm}).
+Other baselines perform poorly, but we highlight that both Linefit baselines compare favorably to WNN indicating that the latter could have learned a very simple rule despite training on a lot of data.
+
+\textbf{Comparison with L2O.} L2O/\textsc{fm16} performs the best in-distribution on the same task (Fig.~\ref{fig:loss_compare}a), however when applied to an unseen task it overfits to the training set (Fig.~\ref{fig:loss_compare}b). In contrast, our \ours/\textsc{fm16} trained on the same task as L2O/\textsc{fm16} performs well on the validation set of unseen tasks, presumably because Adam is used for most of the steps and for the input \ours uses the trajectory of parameters of the target task to make the prediction. In addition, L2O/\textsc{fm16} and L2O in general have an overhead at every optimization step making the total computation cost noticeable (Table~\ref{tab:compute} in Section~\ref{sec:nino-details}). It is also more computationally challenging to meta-train it on multiple tasks, therefore we only use a pretrained L2O/\textsc{fm16} from~\cite{kofinas2024graph}. Since L2O/\textsc{fm16} does not reach the target validation scores in most tasks, we compare it only using the curves in Fig.~\ref{fig:loss_compare}a,b and only on the \textsc{FM/16} and \textsc{C10/32} tasks.\looseness-1
+
+\textbf{Ablations.} We ablate \ours components and hyperparameters and found that our layerwise parameter scaling and $k$-decay are the most important components (Table~\ref{tab:ablations}a,b). Among the hyperparameters, we found that context length $c=5$ is a sweet spot (Table~\ref{tab:ablations}d), because small $c$ may not have enough information to capture the parameter trend, while larger $c$ leads to the \ours applied too rarely (for $c=10$ it is applied every $10 \times 200=2,000$ steps). Using deeper  (Table~\ref{tab:ablations}e) and wider (Fig.~\ref{fig:scaling}a) GNNs is also important. However we found that depth $M>3$ or width $D>128$ make it more challenging to train a performant model. Increasing the number of models ($C$) helps \ours achieve better speed ups (Table~\ref{tab:ablations}f, Fig.~\ref{fig:scaling}b). In contrast, WNN+ saturates fast when $D$ or $C$ is increased.
+
+\begin{wraptable}{r}{5.8cm}
+\centering
+\caption{\small \textbf{\textsc{Wiki} validation perplexity~($\downarrow$) on a Llama3-style architecture (reported as the mean and standard deviation for 3 runs).}}
+\label{tab:llama_tiny}
+\scriptsize
+\begin{tabular}{lcc}
+    \toprule
+     Method & 10000 steps & 14000 steps \\
+     \midrule
+     AdamW & 26.29\tiny{$\pm$0.05} & 24.44\tiny{$\pm$0.01} \\
+     AdamW+NiNo & \textbf{24.36\tiny{$\pm$0.11}} & \textbf{22.37\tiny{$\pm$0.13}} \\
+     \bottomrule
+\end{tabular}
+\end{wraptable}
+
+\textbf{Evaluating on larger models and Llama3-style architectures.} We evaluated the ability of \ours to speed up training of much larger models than it was trained on. Specifically, we trained 4 and 6 layer GPT2-style Transformers on \textsc{wiki} with 128 and 384 hidden units having around 7M and 29M parameters respectively (Fig.~\ref{fig:scaling}c). The latter is around 18 times larger than the largest in-distribution architecture. Moreover, the \textsc{wiki} dataset is different from \textsc{lm1b} used in meta-training. Despite these challenges, \ours was able to speed up training by around 40\% and 15\% for the 7M and 29M models respectively, outperforming WNN+.
+We also trained a Llama3-style Transformer with 6 layers and 384 hidden units (111M parameters) with AdamW and AdamW+\ours, which is an even more challenging setup than in the previous experiments because \ours did not observe Llama models during its meta-training (Table~\ref{tab:tasks}). In this experiment, we use the Llama 3 tokenizer~\citep{dubey2024llama} having a larger vocabulary than in GPT2, so we use an ablated \ours without $\V^{\text{w}}$. 
+Besides the vocabulary, Llama models may pose additional challenges for \ours, e.g. they differ from GPT2 in parameter initialization, MLP structure, layer normalization, positional embeddings, using biases, grouped query attention,  etc. (see Fig.~\ref{fig:graph-tx} for GPT2 and Llama neural graph examples).
+Nevertheless, even in this setup our \ours accelerates training reaching the validation perplexity of the AdamW baseline (24.4) in around 30\% less steps (Table~\ref{tab:llama_tiny}).\looseness-1
+\begin{figure}
+    \centering
+    \scriptsize
+    \newcommand{\figwidth}{0.3\textwidth}
+    \newcommand{\sepwidth}{2pt}
+    \begin{tabular}{lc@{\hskip \sepwidth}c@{\hskip \sepwidth}c}        
+        & \textbf{(a)} \textsc{fm/16} & \textbf{(b)} \textsc{c10/32} & \textbf{(c)} \textsc{wiki/3-64} \\
+       {\rotatebox[origin=c]{90}{\parbox{2cm}{\hspace{10pt}\textsc{\textbf{\scriptsize Training}}}}} & \includegraphics[width=\figwidth,align=c]{figs/fmnist_16-32-32_train.pdf}  & \includegraphics[width=\figwidth,align=c]{figs/cifar10_32-64-64_train.pdf}
+         & \includegraphics[width=\figwidth,align=c]{figs/wiki64_train.pdf} \\ 
+         {\rotatebox[origin=c]{90}{\parbox{2cm}{\hspace{10pt}\textsc{\textbf{\scriptsize Validation}}}}} & 
+         \includegraphics[width=\figwidth,align=c]{figs/fmnist_16-32-32_val.pdf}  & \includegraphics[width=\figwidth,align=c]{figs/cifar10_32-64-64_val.pdf}
+         & \includegraphics[width=\figwidth,align=c]{figs/wiki64_val.pdf} \\
+    \end{tabular}    
+    \caption{\small Training loss and validation performance on FashionMNIST, CIFAR-10 and \textsc{wiki}.}
+    \label{fig:loss_compare}
+\end{figure}
+
+    
+\subsection{Analysis}
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\centering
+\begin{overpic}[scale=0.5,unit=1mm]{figs/pca.pdf}
+    \put(39.5,24){
+    \begin{tikzpicture}
+    {
+    \draw [-stealth,line width=0.7pt] (1.4,0.45) -- (0.8,-0.05);
+    \draw [-stealth,line width=0.7pt] (1.5,0.45) -- (1.3,-0.1);
+    \draw [-stealth,line width=0.7pt] (1.6,0.45) -- (2.0,0.0);
+    \draw [-stealth,line width=0.7pt] (2.2,0.7) -- (2.9,0.9);
+    \node at (1.55,0.65) {\scalebox{.7}{\fbox{NiNo steps}}};
+    }
+    \end{tikzpicture}
+    }
+    \put(41.5,7.7){
+    \begin{tikzpicture}
+    {
+    \draw [-stealth,line width=0.7pt] (1.0,0.2) -- (-0.15,0.75);
+    \draw [-stealth,line width=0.7pt] (1.0,0.2) -- (0.27,0.71);
+    \draw [-stealth,line width=0.7pt] (1.0,0.2) -- (0.9,0.95);
+    \node at (1.45,0.0) {\scalebox{.7}{\fbox{WNN loss increase}}};
+    }
+    \end{tikzpicture}
+    }
+\end{overpic}
+\caption{\small Comparison of optimization methods on the \textsc{c10/32} task by projecting \textbf{parameters} to 2d using PCA at every training step.}
+\label{fig:analysis-adam}
+\end{wrapfigure}
+
+\textbf{Parameter space ($\btheta \rightarrow \mathbb{R}^2$).}
+We show how the parameters evolve during training on \textsc{c10/32} by projecting them to 2d using PCA (Fig.~\ref{fig:analysis-adam}). The PCA projection matrix is computed using the entire Adam trajectory, so the same projection is applied to all the methods. We show the first 8,000 steps for Adam/AdamW and 4,000 steps for other methods with 200 steps between points. In the beginning of training, both WNN and \ours make big steps (dashed lines in Fig.~\ref{fig:analysis-adam}) along the Adam/AdamW trajectory when predicting the parameters, while L2O diverges early. At later optimization stages, \ours makes better predictions than WNN as the latter leads to significant loss spikes. Interestingly, \ours's trajectory closely corresponds to a $2\times$ faster AdamW, even though \ours's base optimizer is Adam in this task. This indicates that \ours may implicitly regularize optimization.\looseness-1
+
+\textbf{Graph embedding space (${\bm{\mathcal{E}}^M} \rightarrow \mathbb{R}^2$).} 
+The parameter space analysis used above can be effective on a single task. However, for several tasks with different model sizes ($|\btheta|$), finding a common PCA projection matrix ($\btheta \rightarrow \mathbb{R}^2$), required for the parameter space analysis, becomes challenging.
+Using neural graphs and \ours enables such an analysis.
+Specifically, we can first represent the parameters in the graph embedding space using \ours and then project the embeddings to 2d.
+We use this approach to see how the graph embeddings evolve when training three different GPT2-style Transformers on the language task (Fig.~\ref{fig:analysis}).
+We construct $D$-dimensional graph embeddings by computing the average edge features ($1/|\bm{\mathcal{E}}^M|\sum_{ij}{\bm{\mathcal{E}}_{ij}^M}$) after the last \ours (or WNN+) layer by feeding the 5 past parameter states every 1,000 steps as in our other experiments. Despite having different Transformer architectures, the graph embedding space is the same, which allows us to project the embeddings to 2d using PCA. The PCA projection matrix is computed for each method (\ours or WNN+) based on the entire trajectory for all the three architectures to allow for visualization on the same plot.
+Surprisingly, even WNN+ can encode parameter in a meaningful way --  in general the parameters of different architectures and at different optimization stages are visually distinct (Fig.~\ref{fig:analysis}a). However, WNN+'s embeddings virtually collapse at later training stages for lower loss values (e.g. for 6-384), while \ours's embeddings are visually more distinct for lower loss values (Fig.~\ref{fig:analysis}b). The ability of NiNo to distinguish parameters at later optimization stages can be useful in practice for multiple reasons. For example, despite similar training losses, model parameters can be quite different resulting in different behaviors on downstream tasks~\citep{liu2023same,dahl2023benchmarking}.
+
+\begin{figure}[t]
+\centering
+\small
+\setlength{\tabcolsep}{15pt}
+\begin{tabular}{cc}
+{\includegraphics[width=0.4\textwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/pca-6-384-0_wnnplus.pdf}}
+&
+{\includegraphics[width=0.4\textwidth,trim={0cm 0cm 0cm 0cm}, clip, align=c]{figs/pca-6-384-0.pdf}} \\
+(a) WNN+ & (b) NiNo
+\end{tabular}
+\caption{\small Comparing the embedding quality of WNN+ (a) and \ours (b) during optimization by projecting \textbf{neural graph embeddings} to 2d using PCA every 1,000 steps. We show the training trajectories of three GPT2-style Transformers with 3, 4 and 6 layers respectively.}
+\label{fig:analysis}
+\end{figure}
+
+\textbf{Computational costs.}
+\ours is applied only every 1,000 steps of the base optimizer, so the wallclock time overhead of using our default \ours is small, e.g. $<$0.5\% for a 7M Transformer compared to around 5\% by L2O (Table~\ref{tab:compute}). As for the memory required for a prediction with \ours, in our implementation \ours's peak memory usage is similar to the peak memory usage of a training step of the Transformer with a batch size of 16-32.
+We expect that in future work, \ours's inference efficiency can be improved in multiple ways. For example, we can potentially parallelize \ours's inference on large neural graphs using approaches similar to large scale model inference in image generation~\citep{li2024distrifusion}.\looseness-1
+
+
+
+\section{Conclusion and Future Work}
+
+We proposed \ours, a novel approach to accelerate training of neural networks, including Transformers. Our work makes a step in the relatively underexplored area of \emph{periodic parameter prediction}, where our experiments show that there is a lot of potential for reducing training time.
+Our experiments also reveal potentially useful byproducts of \ours, such as low-dimensional encoding of network parameters during training, which can be used to analyze diverse models and their training dynamics. An interesting direction of future work is to investigate the scaling up of our approach, in particular as the scaling trends that we have observed in our experiments indicate better speed ups with more data and larger models. 
+
+
+\ificlrfinal
+
+

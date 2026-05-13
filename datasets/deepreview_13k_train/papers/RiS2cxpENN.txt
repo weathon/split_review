@@ -1,0 +1,479 @@
+\title{Diffusion Models as Cartoonists! The Curious Case of High Density Regions}
+
+\begin{abstract}
+We investigate what kind of images lie in the high-density regions of diffusion models. We introduce a theoretical mode-tracking process capable of pinpointing the exact mode of the denoising distribution, and we propose a practical high-probability sampler that consistently generates images of higher likelihood than usual samplers. Our empirical findings reveal the existence of significantly higher likelihood samples that typical samplers do not produce, often manifesting as cartoon-like drawings or blurry images depending on the noise level. Curiously, these patterns emerge in datasets devoid of such examples. We also present a novel approach to track sample likelihoods in diffusion SDEs, which remarkably incurs no additional computational cost.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recently, \citet{karras2024guiding} attributed the empirical success of guided diffusion models to their ability to limit outliers, i.e. samples $\vx_0 \sim p_0$ with low likelihood $p_0(\vx_0)$.
+We argue that these models in fact also elude samples with very high likelihoods.  Our assertion stems from investigating a key question: what manifests if we bias the sampler towards high-density regions of $p_0$?
+However, an immediate hurdle is the inability of stochastic diffusion models to track their own likelihood \citep{song2020score,song2021maximum}.
+
+\begin{figure}[b!]
+    \centering\includegraphics[width=0.99\linewidth]{figures/ffhq-high-prob-vs-mean-changed-label.png}
+    \caption{\textbf{High-density samples $\vy_0|\vx_t$ resemble cartoon drawings.} This is in contrast to regular denoising samples $\vx_0 \sim p(\vx_0|\vx_t)$ or expectations $\E[\vx_0|\vx_t]$. The data contains no cartoons.}
+    \label{fig:ffhq-samples}
+\end{figure}
+
+First, we show that likelihood can be tracked in diffusion models with novel augmented stochastic differential equations (SDE), which govern the evolution of a sample with its log-density $\log p_t(\vx_t)$ under the optimal (unknown) model. For approximate models, we provide a formula for the bias in the log-density estimate. The evaluation of the log-density estimate comes at no additional cost, and can be used with any pretrained model without further tuning. %, in a surprising contrast to continuous normalizing flows (CNF). 
+
+Then, we introduce a theoretical mode-tracking process, which finds the exact mode of the denoising distribution $p(\vx_0|\vx_t)$ under some technical assumptions, albeit at a high computational cost. We propose an approximative \emph{high probability sampler} whose images almost always have higher likelihood than regular samples. 
+
+We leverage these findings to give insights into the diffusion model probability landscape. We find that dramatically higher likelihood samples exist that a regular sampler never returns in practise. We observe that the high density samples tend to be (i) blank images for high noise levels, (ii) cartoon drawings for moderate noise, and (iii) blurry images for low noise (See \autoref{fig:ffhq-samples}). 
+\emph{This is despite the datasets not containing any cartoon drawings.}
+Curiously, on FFHQ-256 we observe 97\% correlation between model's likelihood estimates and the amount of information in the image.
+
+We summarize our contributions in \autoref{fig:contrib}.
+
+
+
+\begin{figure}[t]
+\begin{center}
+\begin{minipage}{11cm}
+\begin{tcolorbox}[tab2, tabularx={ll},toptitle=1.4mm,title={Summary of our contributions},boxrule=1pt,top=0.9ex,bottom=0.9ex,colbacktitle=lb!10!white,colframe=lb!70!white]
+\textbf{Augmented SDEs (\autoref{sec:exact_likelihood} + \autoref{sec:accuracy})} \\ \addlinespace[0.3ex]
+\quad Exact $\log p_t(x_t)$ when $\nabla \log p_t(x)$ and $p_T$ are known & \autoref{sec:stochastic-trajectories}
+\\ \addlinespace[0.3ex]
+\quad Estimated $\log p^{\mathrm{SDE}}_t(x_t)$ for approximate $\nabla \log p_t(x)$ & \autoref{sec:approx-dynamics}
+\\ \addlinespace[0.3ex]
+\quad Variational gap $\log p_0^{\mathrm{SDE}}(\vx_0) - \mathrm{ELBO}(\vx_0)$ formula & \autoref{eq:elbo}
+\\ \addlinespace[0.3ex]
+\quad Estimation error analysis & \autoref{sec:bias-bound}
+\\ \addlinespace[0.3ex] \midrule
+\textbf{Mode-tracking (\autoref{sec:mode-estimation}):}
+\\ \addlinespace[0.3ex]
+\quad Evolution of the mode of $p(x_s | x_t)$ & \autoref{th:mode-ode}
+\\ \addlinespace[0.3ex]
+\quad High-Probability ODE approximation & \autoref{rem:gaussian-ode}
+\\ \addlinespace[0.3ex]
+\quad General instantaneous change of variables & \autoref{lem:gen-insta}
+\\ \addlinespace[0.3ex] \midrule
+\textbf{Diffusion probability landscape (\autoref{sec:diff-prob-landscape}):} \\ \addlinespace[0.3ex]
+\quad Unrealistic images have the highest likelihoods & \autoref{fig:ffhq-samples}
+\\ \addlinespace[0.3ex]
+\quad Blurring an image increases its likelihood & \autoref{fig:blurring-logp-ffhq}
+\\ \addlinespace[0.3ex]
+\quad Likelihood estimates correlate with PNG size & \autoref{fig:logp-vs-png-ffhq}
+\end{tcolorbox}
+\end{minipage}
+\end{center}
+    \caption{Our contributions.}
+    \label{fig:contrib}
+\end{figure}
+
+
+\section{Likelihood estimation in SDE models}
+
+
+
+We model the data distribution with a diffusion process \citep{song2020score}, which gradually transforms the data into a Gaussian. We define a forward process $p(\vx_t | \vx_0) = \mathcal{N}(\vx_t;\alpha_t \vx_0, \sigma_t^2 \mI_D)$, where $D$ is the dimensionality of the data, $\alpha_t$ and $\sigma_t$ are schedule parameters with a decreasing signal-to-noise ratio
+    $\text{SNR}(t) = \alpha_t^2 / \sigma_t^2 = e^{\lambda_t}$. 
+\citet{song2020score} showed an equivalence to a linear stochastic differential equation (SDE) with $\vx_0 \sim p_0$ - data distribution and
+\begin{equation}\label{eq:sde}
+    d\vx_t = f(t) \vx_t dt + g(t) d\rW_t,
+\end{equation}
+with drift $f(t) = \frac{d \log \alpha_t}{dt}$, diffusion $g^2(t) = -\frac{d \lambda_t}{dt} \sigma_t^2$, and $\{\rW_t\}$ a Wiener process.
+Most of our theoretical results also hold for non-linear SDEs such as the one proposed by \citet{bartosh2024neural}. We discuss the impact of the linearity of the drift in \autoref{sec:discussion} and provide the general formulas in the appendices.
+\citet{anderson1982reverse} showed that there exists a corresponding (sharing the distribution over trajectories) \textit{reverse-time} SDE
+\begin{equation}\label{eq:rev-sde}
+    d\vx_t = \Big(f(t)\vx_t - g^2(t) \colorscore{\nabla_\vx \log p_t(\vx_t)} \Big) dt + g(t) d\overline{\rW}_t,
+\end{equation}
+where $p_t$ is the marginal density of the forward process (\eqref{eq:sde}), and $\{\overline{\rW}_t\}$ is a Wiener process going backwards in time.
+Training of diffusion models centers on efficient estimation of the \emph{score} $\nabla_\vx \log p_t(\vx)$ \citep{hyvarinen2005estimation, vincent2011connection, song2020sliced, kingma2024understanding}.
+
+\subsection{Diffusion ODE}\label{sec:smooth-trajectories}
+
+We are interested in sampling high-probability regions of diffusion models and for that, we need ability to calculate the likelihood $p_0(\vx)$ of a sample image $\vx \sim p_0$.
+As the reverse-SDE (\eqref{eq:rev-sde}) does not track the likelihood evolution $d\log p_t(\vx_t)$, a typical method for obtaining sample likelihoods is instead via the Probability-Flow ODE \citep{chen2018neural,song2020score}
+\begin{equation}\label{eq:augmented-ode-dynamics}
+    d\begin{bmatrix}
+        \vx_t \\ \log p_t(\vx_t)
+    \end{bmatrix} = \begin{bmatrix}
+        f(t)\vx_t - \frac{1}{2}g^2(t) \colorscore{\nabla_\vx \log p_t(\vx_t)} \\ 
+        -f(t)D + \frac{1}{2}g^2(t) \colordelta{\div_\vx} \colorscore{\nabla_\vx \log p_t(\vx_t)}
+    \end{bmatrix}dt,
+\end{equation}
+where $\div_\vx=\sum_i \frac{\partial}{\partial x_i}$ is the divergence operator. The PF-ODE is a continuous normalizing flow (CNF) that shares marginal distributions $p_t(\vx_t)$ with both forward (\ref{eq:sde}) and reverse SDE (\ref{eq:rev-sde}), when they share $p_0$ \citep{song2020score}. %The PF-ODE can be augmented into a  a continuous normalizing flow (CNF) \citep{chen2018neural}
+The PF-ODE tracks and returns both the sample $\vx_0$ and its likelihood $\log p_0(\vx_0)$ from $\vx_T \sim p_T$. It requires second-order derivatives $\div \nabla$, which are roughly twice as expensive as the score to evaluate \citep{hutchinson1989stochastic,grathwohl2018ffjord}.
+\subsection{Augmented stochastic dynamics}\label{sec:stochastic-trajectories}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\linewidth]{figures/updated_fig1_logp_fixed_eqrefs.png}
+    \caption{\textbf{Tracking stochastic sampling likelihood.} Estimation of $\log p_t(\vx_t)$ (\gradientRGB{colored trajectory}{0,255,0}{255,0,0}) for stochastic sampling via Augmented Reverse SDE (\eqref{eq:rev-sde-logp-dynamics}) on a Gaussian mixture with known $\nabla_\vx \log p_t(\vx)$ and $p_T$. Evaluation of $d\log p_t(\vx_t)$ requires only the score function.}
+    \label{fig:sde-logp}
+\end{figure}
+
+It has been reported that a stochastic sampler (\ref{eq:rev-sde}) has superior sample quality to the PF-ODE (\ref{eq:augmented-ode-dynamics}) \citep{song2020score, karras2022elucidating}. However, the absence of density-augmented SDEs forbids the stochastic sampler from describing the likelihood of the samples it yields \citep{song2021maximum, lu2022maximum, zheng2023improved, lai2023fp}. 
+We bridge this gap by generalizing \eqref{eq:augmented-ode-dynamics} to account for the stochastic evolution of $\vx$.
+\begin{restatable}[Augmented reverse SDE]{theorem}{revsdelikelihood}\label{th:rev-sde-likelihood}
+    Let $\vx$ be a random process defined by \eqref{eq:rev-sde}. Then
+    \begin{equation}\label{eq:rev-sde-logp-dynamics}
+        d\begin{bmatrix}
+        \vx_t \\ \log p_t(\vx_t)
+    \end{bmatrix} = \begin{bmatrix}
+        f(t)\vx_t - g^2(t) \colorscore{\nabla_\vx \log p_t(\vx_t)} \\ -f(t)D - \frac{1}{2}g^2(t) \| \colorscore{\nabla_\vx \log p_t(\vx_t)} \|^2
+    \end{bmatrix}dt + g(t)\begin{bmatrix}
+        \mI_D \\ \colorscore{\nabla_\vx \log p_t(\vx_t)}^T
+    \end{bmatrix}d\overline{\rW}_t.
+    \end{equation}
+\end{restatable}
+The proof (\autoref{app:rev-sde-log-likelihood-proof}) consists of applying Itô's lemma and the Fokker-Planck equation. 
+Note that $d\log p_t(\vx_t)$ is economical to track as it only needs access to the first-order score. %unlike the  PF-ODE with its second-order derivatives in \autoref{eq:augmented-ode-dynamics}.
+\autoref{fig:sde-logp} visualises a particle following a stochastic reverse trajectory while tracking its log-density.
+This result contributes a new useful and economical tool to generate a sample together with its density estimate, which previously was done using PF-ODE \citep{jing2022torsional}.
+Similarly to the reverse SDE, we also introduce density-tracking forward SDE.
+\begin{restatable}[Augmented forward SDE]{theorem}{fwdsdelikelihood}\label{th:fwd-sde-logp}
+Let $\vx$ be a random process defined by \eqref{eq:sde}. Then
+    \begin{equation}\label{eq:fwd-sde-logp-dynamics}
+        d\begin{bmatrix}
+        \vx_t \\ \log p_t(\vx_t)
+    \end{bmatrix} =  \begin{bmatrix}
+        f(t)\vx_t\\F(t, \vx_t) 
+    \end{bmatrix}dt + g(t)\begin{bmatrix}
+        \mI_D \\ \colorscore{\nabla_\vx \log p_t(\vx_t)}^T
+    \end{bmatrix}d\rW_t,
+    \end{equation}
+    where    
+    \begin{equation*}
+        F(t, \vx_t) = -\div_\vx \left(f(t)\vx_t - g^2(t)  \colorscore{\nabla_\vx \log p_t(\vx_t)} \right)  + \frac{1}{2}g^2(t) \| \colorscore{\nabla_\vx \log p_t(\vx_t)} \|^2.
+    \end{equation*}
+\end{restatable}
+Proof is similar to the reverse case and can be found in \autoref{app:fwd-sde-logp-proof}.
+The forward augmented SDE will prove useful for estimating the density of an arbitrary input point $\vx$ (not necessarily sampled from the model).
+
+\citet{karras2022elucidating} proposed a more general forward SDE than \eqref{eq:sde} for which we also derive the dynamics of $\log p_t(\vx_t)$ in both directions (\autoref{app:general_sde}).
+Interestingly, we show that \eqref{eq:sde} is the only case for which the dynamics of $\log p_t(\vx_t)$ in the reverse direction do not involve any higher order derivatives of $\log p_t(\vx_t)$.
+
+We can now track the likelihood for forward and reverse SDEs under the theoretical true $\nabla_\vx \log p_t(\vx)$. 
+However, under score approximation $\vs(t, \vx) \approx \nabla_\vx \log p_t(\vx)$ the density solutions $\log p_t(\vx_t)$ of Theorems 1 and 2 become biased, which we study next.
+\subsection{Approximate reverse dynamics}\label{sec:approx-dynamics}
+
+We can substitute the approximate score $\vs(t, \vx) \approx \nabla_\vx \log p_t(\vx)$ and assume $p_T^{\mathrm{ODE}}=p_T^{\mathrm{SDE}}=\mathcal{N}(\mathbf{0}, \sigma_T^2\mI_D)$.
+The resulting SDE and ODE models are no longer equivalent, i.e. $p_t^{\mathrm{ODE}}\neq p_t^{\mathrm{SDE}}$ \citep{song2021maximum, lu2022maximum}.
+The PF-ODE becomes
+\begin{equation}\label{eq:approx-pf-ode}
+    d\begin{bmatrix}
+        \vx_t \\ \log p_t^{\mathrm{ODE}}(\vx_t)
+    \end{bmatrix} = \begin{bmatrix}
+        f(t)\vx_t - \frac{1}{2}g^2(t) \colornet{\vs(t,\vx_t)} \\ 
+        -f(t)D + \frac{1}{2}g^2(t) \colordelta{\div_\vx} \colornet{\vs(t,\vx_t)}
+    \end{bmatrix}dt,
+\end{equation}
+which can track its marginal log-density $\log p_t^{\mathrm{ODE}}(\vx_t)$ exactly.
+However, substituting the true score with $\vs(t,\vx)$ in the augmented reverse SDE \ref{eq:rev-sde-logp-dynamics} incurs estimation error in $\log p_0^{\mathrm{SDE}}(\vx_0)$.
+We characterise the error formally in a novel theorem:
+\begin{restatable}[Approximate Augmented Reverse SDE]{theorem}{approxrevaugsde}\label{th:tractable-approx-rev-aug-sde}
+    Let $\vs(t, \vx)$ be an approximation of the score function. Let $\vx_T \sim p_T$ and define an auxiliary process $r$ starting at $r_T=\log p^{\mathrm{SDE}}_T(\vx_T)$. If
+    \begin{equation}\label{eq:tractable-approx-rev-sde-logp-dynamics}
+        d\begin{bmatrix}
+        \vx_t \\ r_t
+    \end{bmatrix} = \begin{bmatrix}
+        f(t)\vx_t - g^2(t) \colornet{\vs(t, \vx_t)} \\ -f(t)D - \frac{1}{2}g^2(t) \|\colornet{\vs(t, \vx_t)}\|^2
+    \end{bmatrix}dt + g(t)\begin{bmatrix}
+        \mI_D \\ \colornet{\vs(t, \vx_t)}^T
+    \end{bmatrix}d\overline{\rW}_t,
+    \end{equation}
+    then $\vx_0 \sim p_0^{\mathrm{SDE}}(\vx_0)$ and
+    \begin{equation}\label{eq:r}
+        r_0 = \log p_0^{\mathrm{SDE}}(\vx_0) + \rX,
+    \end{equation}
+    where $\rX$ is a random variable such that the bias of $r_0$ is given by
+    \begin{equation}\label{eq:X}
+        \E\rX = \frac{T}{2}\E_{t \sim \mathcal{U}(0,T), \vx_t \sim p_t^{\mathrm{SDE}}(\vx_t)} \Big[ g^2(t) \| \colornet{\vs(t, \vx_t)} - \colorscore{\nabla_\vx \log p_t^{\mathrm{SDE}}(\vx_t)} \|^2 \Big] \geq 0.
+    \end{equation}
+\end{restatable}
+See \autoref{app:approximate-dynamics} for the proof and the definition of $\rX$.
+Intuitively, the true density evolution of $p_t^{\mathrm{SDE}}(\vx_t)$ is induced by $d\vx_t$ in equation \ref{eq:tractable-approx-rev-sde-logp-dynamics}, and the auxiliary variable $r_t$ does not follow it perfectly. Since the equation \ref{eq:X} has an intractable score, we seek more practical alternatives to measuring the accuracy of $r_0$ in the next Section. 
+\begin{tcolorbox}
+The new augmented SDE of \eqref{eq:tractable-approx-rev-sde-logp-dynamics} can be used with any score-based model without further tuning to provide sample likelihood estimates $\log p_0^\mathrm{SDE}(\vx_0)$ for no extra cost. %since $dr_t$ only evaluates the score $\vs(t,\vx_t)$.
+\end{tcolorbox}
+
+
+\section{Accuracy of the density estimation}
+
+
+We analyse the accuracy of the $\log p_0^{\mathrm{SDE}}(\vx_0)$ estimates in equation \ref{eq:r}. We begin with the approximate forward dynamics which will provide a method for bounding the estimation error of $r_0$.
+
+\subsection{Approximate forward dynamics}
+
+In contrast to \autoref{th:tractable-approx-rev-aug-sde}, when we replace the true score function with $\vs$ in the forward direction, we underestimate $\log p_0^{\mathrm{SDE}}(\vx_0)$ on average.
+\begin{restatable}[Approximate Augmented Forward SDE]{theorem}{approxfwdaugsde}\label{th:tractable-approx-fwd-aug-sde}
+    Let $\vs(t, \vx_t)$ be the model approximating the score function and $\vx_0 \in \mathbb{R}^D$ given. Define an auxiliary process $\omega$ starting at $\omega_0=0$. If
+    \begin{equation}\label{eq:tractable-approx-fwd-sde-logp-dynamics}
+        d\begin{bmatrix}
+        \vx_t \\ \omega_t
+    \end{bmatrix} =  \begin{bmatrix}
+        f(t)\vx_t \\ -f(t)D + g^2(t)\Big( \frac{1}{2} \|\colornet{\vs(t, \vx_t)}\|^2 + \colordelta{\div_\vx} \colornet{\vs(t, \vx_t)}\Big)
+    \end{bmatrix}dt + g(t)\begin{bmatrix}
+        \mI_D \\ \colornet{\vs(t, \vx_t)}^T
+    \end{bmatrix}d\rW_t.
+    \end{equation}
+    Then
+    \begin{equation}
+        \omega_T = \log p_T^{\mathrm{SDE}}(\vx_T) - \log p_0^{\mathrm{SDE}}(\vx_0) + \rY_{\vx_0},
+    \end{equation}
+    where $\rY_{\vx_0}$ is a random variable such that
+    \begin{equation}\label{eq:fwd-bias}
+        \E\rY_{\vx_0} = \frac{T}{2}\E_{t \sim \mathcal{U}(0, T)} \E_{\vx_t \sim p(\vx_t| \vx_0)}  g^2(t)\| \colornet{\vs(t, \vx_t)} - \colorscore{\nabla_\vx \log p_t^{\mathrm{SDE}}(\vx_t)} \|^2 \geq 0.
+    \end{equation}
+\end{restatable}
+See \autoref{app:approximate-dynamics} for the proof and the definition of $\rY_{\vx_0}$. Due to the drift $\div$ operator, the evaluation of $d \omega_t$ is computationally comparable to $d\log p^{\mathrm{ODE}}_t(\vx_t)$.
+Interestingly, \autoref{th:tractable-approx-fwd-aug-sde} completes a known lower bound into a novel identity,
+\begin{equation}\label{eq:elbo}
+    \log p^{\mathrm{SDE}}_0(\vx_0) = \underbrace{\E\rY_{\vx_0}}_{\geq 0} \underbrace{- \frac{e^{\lambda_{\text{min}}}}{2} \| \vx_0 \|^2 + \frac{T}{2}\E_{t, \veps} \bigg[-\frac{d\lambda_t}{dt} \big\| \sigma_t \colornet{\vs(t, \alpha_t\vx_0 + \sigma_t\veps)} + \veps\big\|^2 \bigg] + C}_{\mathrm{ELBO}(\vx_0) \text{ \citep{song2021maximum, kingma2021variational}}},
+\end{equation}
+where $t \sim \mathcal{U}(0, T)$, $\veps \sim \mathcal{N}(\mathbf{0}, \mI_D)$ and $C = -\frac{D}{2} \left(1 + \log (2\pi \sigma_0^2)\right)$ (see \autoref{cor:elbo}).
+$\mathrm{ELBO}(\vx)$ is the standard tool for estimating the SDE's model likelihood of an arbitrary point $\vx$.
+
+\subsection{Estimation bias of $\log p_0^{\mathrm{SDE}}$}\label{sec:bias-bound}
+\begin{wrapfigure}[12]{r}{0.5\textwidth}
+  \centering
+    \includegraphics[width=0.5\textwidth]{figures/kl-ro-ode-cifar-both-models.png}
+  \caption{$r_0 > \log p_0^{\mathrm{ODE}}(\vx_0) > \mathrm{ELBO}(\vx_0)$ correlate strongly.}
+  \label{fig:kl-vo-ode-cifar}
+\end{wrapfigure}
+We are interested in using the stochastic sampler to obtain high-quality sample-density pairs $(\vx_0, \log p_t^{\mathrm{SDE}}(\vx_0))$.
+We have now discussed two ways of estimating $\log p_0^{\mathrm{SDE}}(\vx_0)$: with $r_0$ (\eqref{eq:tractable-approx-rev-sde-logp-dynamics}) and $\mathrm{ELBO}(\vx_0)$ (\eqref{eq:elbo}).
+Their estimation errors $\varepsilon_r(r_0, \vx_0) = r_0 - \log p_0^{\mathrm{SDE}}(\vx_0)$ and $\varepsilon_{\mathrm{ELBO}}(\vx_0) = \log p_0^{\mathrm{SDE}}(\vx_0) - \mathrm{ELBO}(\vx_0)$ are intractable to estimate due to the presence of unknown score $\nabla \log p_t^{\mathrm{SDE}}(\vx_t)$.
+
+However, we can provide an upper bound on the bias of both estimators,
+\begin{equation}
+    \underbrace{\E_{\vx_0 \sim p_0^{\mathrm{SDE}}(\vx_0)}\left[\varepsilon_{\mathrm{ELBO}}(\vx_0)\right]}_{\geq 0 \: (\text{\eqref{eq:fwd-bias}}) } + \underbrace{\E_{(\vx_0, r_0)}\left[\varepsilon_r(r_0, \vx_0)\right]}_{\geq 0 \: (\text{\eqref{eq:X}}) } = \underbrace{\E_{(\vx_0, r_0)}\Big[r_0 -\mathrm{ELBO}(\vx_0)\Big].}_{\mathcal{R}(\vs) (\text{tractable})}
+\end{equation}
+We can thus sample $(\vx_0, r_0)$ using \eqref{eq:tractable-approx-rev-sde-logp-dynamics} and the average difference $r_0 - \mathrm{ELBO}(\vx_0)$ gives an upper bound on the bias of both $r_0$ and $\mathrm{ELBO}(\vx_0)$.
+This can be useful to assess the accuracy of both $r_0$ and $\mathrm{ELBO}(\vx_0)$ as density estimates for stochastic samples $\vx_0$.
+Furthermore, we can estimate how much $p_0^{\mathrm{{SDE}}}$ differs from $p_0^{\mathrm{{ODE}}}$ by providing bounds for $\operatorname{KL}[p^{\mathrm{SDE}}_0 || p^{\mathrm{ODE}}_0]$
+\begin{equation}\label{eq:kl-bound}
+    \underbrace{\E_{\vx_0 \sim p^{\mathrm{SDE}}(\vx_0)}\Big[\mathrm{ELBO}(\vx_0) - \log p_0^{\mathrm{ODE}}(\vx_0)\Big]}_{\mathcal{R}^{L}(\vs) \text{ (tractable)}} \leq \operatorname{KL}\Big[p_0^{\mathrm{SDE}} || p_0^{\mathrm{ODE}}\Big] \leq \underbrace{\E_{(\vx_0, r_0)}\Big[r_0 - \log p_0^{\mathrm{ODE}}(\vx_0)\Big]}_{\mathcal{R}^{U}(\vs) \text{ (tractable)}}.
+\end{equation}
+
+
+$\mathcal{R}^U$ and $\mathcal{R}^L$ are novel practical tools for measuring the difference between $p_0^{\mathrm{SDE}}$ and $p_0^{\mathrm{ODE}}$.
+As a demonstration, we train two versions of a diffusion model on CIFAR-10 \citep{krizhevsky2009learning}, one with maximum likelihood training \citep{kingma2021variational, song2021maximum} and one optimized for sample quality\footnote{Both models are trained with the weighted ELBO objective. The one optimized for likelihood uses $w(\lambda) = 1$ (unweighted) and the one optimized for sample quality uses $w(\lambda)=\mathrm{sigmoid}(-\lambda + 2)$.} \citep{kingma2024understanding}.
+We then generate 512 samples of $(\vx_0, r_0)$ with \eqref{eq:tractable-approx-rev-sde-logp-dynamics} and for each $\vx_0$ we estimated $\log p_0^{\mathrm{ODE}}(\vx_0)$ using \eqref{eq:approx-pf-ode} and $\mathrm{ELBO}(\vx_0)$ using \eqref{eq:elbo}.
+
+For both models we found very high correlations between $r_0$ and $\log p_0^{\mathrm{ODE}}(\vx_0)$ at $0.996$ and $0.999$.
+Surprisingly, it is the model optimized for sample quality that yielded both a higher correlation and lower values of $\mathcal{R}^U(\vs)$ and $\mathcal{R}(\vs)$ suggesting a smaller difference between $p_0^{\mathrm{SDE}}$ and $p_0^{\mathrm{ODE}}$ and a lower bias of $\log p_0^{\mathrm{SDE}}(\vx_0)$ estimation (\autoref{fig:kl-vo-ode-cifar}).
+We also estimated $\mathcal{R}^L(\vs)$, which was negative for both models which is a trivial lower bound for $\operatorname{KL}[p_0^{\mathrm{SDE}} || p_0^{\mathrm{ODE}}] \ge 0$. 
+
+\begin{tcolorbox}
+The density estimates $r_0 \approx \log p_0^{\mathrm{SDE}}(\vx_0)$ from equation \ref{eq:tractable-approx-rev-sde-logp-dynamics} empirically form an upper bound on $\log p_0^{\mathrm{ODE}}(\vx_0)$ and correlate with it very strongly ($>0.99$).
+\end{tcolorbox}
+
+
+\section{Mode estimation}
+
+
+\begin{wrapfigure}[9]{r}{0.40\textwidth}
+  \centering
+\includegraphics[width=0.40\textwidth]{figures/mode-tracking-curve-updated.png}
+  \caption{Equation \ref{eq:mode-ode} accurately recovers the mode-tracking curve.}
+  \label{fig:denoising-mode-ode}
+\end{wrapfigure}
+
+Many diffusion models are trained by implicitly maximizing weighted ELBO \citep{kingma2024understanding}, and can be interpreted as likelihood-based models.
+\citet{karras2024guiding} emphasized the role of likelihood by explaining the empirical success of guided diffusion models by their ability to limit low density samples $p_0(\vx_0)$.
+We explore this idea further by asking: 
+\emph{what if we aim for samples with the highest $p_0(\vx_0)$?}
+
+\subsection{Mode-tracking curve}
+
+We first go back to assuming a perfectly estimated score function $\nabla_\vx \log p_t(\vx)$. %, in which case $p_t = p_t^{\mathrm{SDE}} = p_t^{\mathrm{ODE}}$.
+Let $p(\vx_0|\vx_t)$ denote the denoising distribution given by solving the reverse SDE (\eqref{eq:rev-sde}) from $\vx_t$ to $\vx_0$.
+If we knew how to estimate the \textit{denoising mode} $\vy_0(\vx_t) = \argmax p(\vx_0|\vx_t)$, we could bias the sampler towards higher likelihood regions by first taking a regular noisy samples $\vx_t \sim p_t(\vx_t)$ at various times $t$, and pushing them to deterministic modes $\vy_0(\vx_t)$.
+We approach this by asking a seemingly more difficult question: can we find a \textit{mode-tracking curve}, i.e. $\vy_s$ such that $p(\vy_s|\vx_t) = \max_{\vx_s} p(\vx_s | \vx_t)$ for all $s<t$ (See \autoref{fig:denoising-mode-ode})?
+We show that whenever such a smooth curve exists it is given by an ODE:
+\begin{restatable}[Mode-tracking ODE]{theorem}{hdrestimationthm}\label{th:mode-ode}
+    Let $t \in (0, T]$ and $\vx_t \in \mathbb{R}^D$ a noisy sample. If there exists a smooth curve $s \mapsto \vy_s$ such that $p(\vy_s|\vx_t) = \max_{\vx_s} p(\vx_s|\vx_t)$, then $\vy_t=\vx_t$ and for $s<t$
+    \begin{equation}\label{eq:mode-ode}
+        \frac{d}{ds}\vy_s = f(s)\vy_s - g^2(s) \colorscore{\nabla_{\vy} \log p_s(\vy_s)} - \frac{1}{2}g^2(s) \colordelta{\mA(s, \vy_s)^{-1}} \colordelta{\nabla_{\vy} \Delta_{\vy}\log p_s(\vy_s)},
+    \end{equation}
+    where $\mA(s, \vy) = \left(\nabla_\vy^2 \log p_s(\vy) - \psi(s)\mI_D \right)$, $\psi(s) = \frac{1}{\sigma_s^2} \frac{e^{\lambda_{t}}}{e^{\lambda_s} - e^{\lambda_t}}$, and $\Delta_{\vy} = \sum_i \frac{\partial^2}{\partial y_i^2}$ is the Laplace operator. In particular:
+    \begin{equation}
+        p(\vy_0 | \vx_t) = \max_{\vx_0} p(\vx_0 | \vx_t).
+    \end{equation}
+\end{restatable}
+The proof and the statement without assuming invertibility of $\mA$ can be found in \autoref{app:mode-ode-proof}. We visualize on a mixture of 1D Gaussians in \autoref{fig:denoising-mode-ode} how the solution of the mode tracking ODE (\eqref{eq:mode-ode}) correctly recovers the denoising mode curve, i.e. the mode of $p(\vx_s|\vx_t)$ for all $s<t$.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/outlier_elimination.png}
+    \caption{\textbf{Equation \ref{eq:mode-ode} enables controlling the likelihood-diversity tradeoff.} Blue dots are samples from the data distribution, i.e. a mixture of four Gaussians with the bottom left component having the highest weight. Orange samples are generated with Algorithm \ref{alg:high-p-sampling}.}
+    \label{fig:outlier-elimination}
+\end{figure}
+
+\subsection{High-probability seeking ODE}
+
+Using \autoref{th:mode-ode} in high-dimensional data is problematic. A smooth \textit{mode-tracking} curve needs to exist, which is difficult to verify and need not hold (\autoref{app:non-smooth-mode-traj}).
+Moreover, \eqref{eq:mode-ode} requires computing and inverting the Hessian and estimating third-order derivatives, which is costly \citep{meng2021estimating}. 
+We propose an approximation of \eqref{eq:mode-ode} by noting its high-order terms disappear under Gaussian data.
+\begin{restatable}[High-probability ODE or HP-ODE]{remark}{gaussianode}\label{rem:gaussian-ode}
+    If $p_0$ is Gaussian, then \eqref{eq:mode-ode} becomes
+    \begin{equation}\label{eq:gaussian-ode}
+        d\vy_s = \left(f(s)\vy_s - g^2(s)\colorscore{\nabla_\vx \log p_s(\vy_s)} \right)ds,
+    \end{equation}
+    i.e. the drift term of reverse SDE \eqref{eq:rev-sde}. If $\vy_t=\vx_t$ and \eqref{eq:gaussian-ode} holds for $s<t$, then
+    \begin{equation}
+        \vy_0 = \argmax_{\vx_0} p(\vx_0 | \vx_t) + \mathcal{O}(e^{-\lambda_{\mathrm{max}}}).
+    \end{equation}
+\end{restatable}
+See \autoref{app:gaussian-mode-ode} for the proof. 
+Even though \eqref{eq:gaussian-ode} finds the mode of $p(\vx_0|\vx_t)$ only in the Gaussian case (for sufficiently small $e^{-\lambda_{\mathrm{max}}}$), we will empirically show that even for non-Gaussian data it finds points with much higher likelihoods than regular samples.
+
+\begin{wrapfigure}[7]{r}{0.41\textwidth} 
+    \begin{minipage}{0.41\textwidth}
+        \begin{algorithm}[H]
+            \caption{High probability sampling}
+            \label{alg:high-p-sampling}
+            \begin{algorithmic}[1]
+                \STATE \textbf{Input:} Threshold $t \in (0, T]$
+                \STATE Initial $\vx_T \sim \mathcal{N}(\mathbf{0}, \sigma_T^2 \mI_D)$
+                \STATE Sample $\vx_t \sim p_t(\vx_t)$ \hfill eq.  \ref{eq:approx-pf-ode} or \ref{eq:tractable-approx-rev-sde-logp-dynamics}
+                \STATE $\vy_0 \gets \text{HP-ODE}(t, 0, \vx_t)$ \hfill eq. \ref{eq:gaussian-ode}
+                \STATE Return $\vy_0$
+            \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+In Algorithm \ref{alg:high-p-sampling} we propose a novel high-probability sampler that uses \eqref{eq:gaussian-ode} to bias the sampling towards higher likelihood regions. We choose a threshold time $t$ and sample $\vx_t \sim p_t(\vx_t)$, and then estimate $\vy_0(\vx_t)$ by solving \eqref{eq:gaussian-ode} from $s=t$ to $s=0$. \autoref{fig:outlier-elimination} shows how the threshold controls the tradeoff between likelihood and diversity in a toy mixture of Gaussians.
+
+\begin{comment}
+\subsection{High Denoising Density Region}
+
+Given $t \in (0, T]$, a noisy sample $\vx_t \in \mathbb{R}^D$ and a probability $\rho \in (0, 1]$, we define the High Denoising Density Region (HDR) \citep{hyndman1996computing}, i.e. a set of points with high denoising likelihood:
+\begin{equation}
+    \text{HDR}(\vx_t, \rho) \coloneqq \{ \vx_0 \: | \: \log p(\vx_0 | \vx_t) \geq c_\rho \},
+\end{equation}
+where $c_\rho \in \mathbb{R}$ is chosen so that
+\begin{equation}
+    \mathbb{P}\left(\vx_0 \in \text{HDR}(\vx_t, \rho) | \vx_t\right) = \int_{\text{HDR}(\vx_t, \rho)}p(\vx_0 | \vx_t)d\vx_0 = \rho.
+\end{equation}
+We can thus define the \textit{probability of sampling a point with higher likelihood}\footnote{$\pi(\vx_0 | \vx_t)$ is well defined, because $\text{HDR}(\vx_t, \rho_1) \subset \text{HDR}(\vx_t, \rho_2)$ for $\rho_1 < \rho_2$ and $\text{HDR}(\vx_t, 1)=\mathbb{R}^D$.} than a given point as
+\begin{equation}\label{eq:pi_def}
+    \pi(\vx_0 | \vx_t) \coloneqq \inf \{ \rho > 0 \: | \: \vx_0 \in \text{HDR}(\vx_t, \rho) \}.
+\end{equation}
+For any $\vy_0 \in \mathbb{R}^D$ we can approximate $\pi(\vy_0 | \vx_t)$ by independently sampling $\{\vx_0^1, \dots, \vx_0^K\} \sim p(\vx_0 | \vx_t)$ and computing the percentage of samples with higher likelihood than $\vy_0$:
+\begin{equation}\label{eq:pi_est}
+\pi(\vy_0 | \vx_t) \approx \hat{\pi}(\vy_0 | \vx_t) \coloneqq \frac{\# \{k \: | \: \log p(\vx^k_0 | \vx_t) \geq \log p(\vy_0 | \vx_t)\}}{K},
+\end{equation}
+which is an unbiased estimate with bounded variance (\autoref{app:pi_est_unbiased}).
+
+\end{comment}
+\subsection{Estimating mode densities for Real-world data} \label{sec:real-world-data}
+\begin{figure}[tb]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/updated-cifar-percentage-figure-high-prob.png}
+    \caption{\textbf{Algorithm \ref{alg:high-p-sampling} generates images with higher likelihoods than regular samples.} For different noise levels $t$, compare the high probability $\vy_0$ (\eqref{eq:gaussian-ode}) with random samples $\vx_0$ on CIFAR-10. We find that the percentage of samples with higher likelihoods than $\vy_0$ is $0$.}
+    \label{fig:cifar-pi-est}
+\end{figure}
+
+We will next discuss how to evaluate the density of the high-probability samples $\vy_0|\vx_t$ and regular samples $\vx_0|\vx_t$ to empirically show that $p(\vy_0|\vx_t) > p(\vx_0|\vx_t)$ for $\vx_0 \sim p(\vx_0|\vx_t)$. For any $\vx_0$, the denoising likelihood can be decomposed using Bayes' rule
+\begin{equation}
+    \log p_{0|t}(\vx_0|\vx_t) = \underbrace{\log p_{t|0}(\vx_t|\vx_0)}_{\mathcal{N}(\vx_t | \alpha_t\vx_0, \sigma_t^2\mI_D)} + \log p_0(\vx_0) - \log p_t(\vx_t).
+\end{equation}
+For $\vx_0 \sim p(\vx_0|\vx_t)$ we can use \eqref{eq:rev-sde-logp-dynamics} from $(\vx_t,r_t = 0)$ to obtain $r_0 = \log p_0(\vx_0) - \log p_t(\vx_t)$.
+To estimate $\log p(\vy_0|\vx_t)$ we could use the PF-ODE, but that is inefficient.\footnote{On top of solving HP-ODE we would need to solve the augmented PF-ODE twice: once for $\vy_t$ from $t$ to $T$ and once for $\vy_0$ from $0$ to $T$. Instead, we perform one \textit{augmented} ((\ref{eq:gaussian-ode}) + (\ref{eq:mode-ode-logp})) HP-ODE solve from $t$ to $0$.}
+Instead, we can obtain $d \log p_s(\vy_s)$ under HP-ODE with a convenient, and to our knowledge novel, lemma:
+\begin{lemma}[General instantaneous change of variables]\label{lem:gen-insta}
+    Consider a CNF given by  
+        $d\vx_t = f_1(t, \vx_t)dt$
+    with prior $p_T$ and marginal distributions $p_t$, and a particle following some different dynamical system
+        $d\vz_t = f_2(t, \vz_t)dt$. Then, if $f_1$ and $f_2$ are uniformly Lipschitz in the second argument and continuous in the first, we have:
+    \begin{equation}\label{eq:gen-insta}
+        \frac{d \log p_t(\vz_t)}{dt} = -\colordelta{\div_\vz} f_1(t, \vz_t) + \big( f_2(t, \vz_t) - f_1(t, \vz_t) \big)^T \colorscore{\nabla_\vz \log p_t(\vz_t)}.
+    \end{equation}
+\end{lemma}
+The proof is in \autoref{app:gen-insta-proof}. When $f_1=f_2$ we recover the standard formula \citet{chen2018neural}. By setting $f_1=$PF-ODE (\ref{eq:augmented-ode-dynamics}) and $f_2=$HP-ODE (\ref{eq:gaussian-ode}) we augment the HP-ODE with its density evolution
+\begin{equation}\label{eq:mode-ode-logp}
+    \frac{d \log p_s(\vy_s)}{ds} = - f(s)D + \frac{1}{2}g^2(s) \colordelta{\div_\vy} \colorscore{\nabla_\vy \log p_s(\vy_s)} - \frac{1}{2}g^2(s) \big\| \colorscore{\nabla_\vy \log p_s(\vy_s)} \big\|^2.
+\end{equation}
+We trained a diffusion model on CIFAR-10 and generated $\vx_t$ for different noise levels $t$ and compared the high-density samples $\vy_0|\vx_t$ (Algorithm \ref{alg:high-p-sampling}) against regular samples $\vx_0 \sim p(\vx_0|\vx_t)$.
+We found that $p(\vy_0|\vx_t) > p(\vx_0|\vx_t)$ for all samples across different noise levels $t$ (See \autoref{fig:cifar-pi-est}).
+
+
+
+\section{High-resolution diffusion probability landscape}
+
+
+
+\begin{wrapfigure}[13]{r}{0.45\textwidth}
+  \centering
+    \includegraphics[width=0.45\textwidth]{figures/nll-vs-png-ffhq.png}
+  \caption{\textbf{Density estimates correlate with information content (\texttt{.png} size)}}
+  \label{fig:logp-vs-png-ffhq}
+\end{wrapfigure}
+We demonstrated that algorithm \ref{alg:high-p-sampling} can generate images with much higher likelihoods than regular samples.
+However, after visually inspecting the high density samples $\vy_0$ in \autoref{fig:cifar-pi-est} we found that they correspond to blurry images with much less detail than regular samples.
+
+To gain more insight we perform high-probability sampling (algorithm \ref{alg:high-p-sampling}) on higher-resolution data with pre-trained diffusion models
+We tested different values of the threshold hyperparameter $t$ and found that for multiple models and datasets, the generated samples had higher average likelihood than regular samples. Moreover, we found that the samples with the highest likelihood were blurry images.
+Surprisingly, we found that for higher values of $t$, the samples were unnatural cartoons, but still received higher likelihoods than regular samples. The training datasets do not contain any cartoon images. See \autoref{fig:high-res-high-p-sampling}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.99\linewidth]{figures/high-resolution-high-p-sampling-all-models.png}
+    \caption{\textbf{Diffusion models assign highest probabilities to unrealistic images.} Left: High-probability samples generated with Algorithm \ref{alg:high-p-sampling} for various values of the threshold parameter $t$. Right: distributions of negative log-likelihood (in bits-per-dim). Across different models and datasets, Algorithm \ref{alg:high-p-sampling} finds unnatural images, which have higher densities than regular samples.}
+    \label{fig:high-res-high-p-sampling}
+\end{figure}
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/ffhq-blurring-combined.png}
+    \caption{\textbf{Blurring increases likelihood.} Left: Two FFHQ-256 images with different amounts of blur and corresponding negative loglikelihoods (NLL). Right: Distributions of NLL for different amounts of added blur.}
+    \label{fig:blurring-logp-ffhq}
+\end{figure}
+
+Inspired by the empirical observation that the highest likelihood generated samples are blurry images we performed the following two experiments.
+First, we add different amounts of blur to FFHQ-256 test images and measure the likelihood of the distorted image.
+We found that blurring always increases the likelihood and that the increase is proportional to the strength of blurring (\autoref{fig:blurring-logp-ffhq}).
+
+Second, we compare the model's likelihood estimation with the image's file size after PNG compression.
+The smaller the PNG file size, the less information in the image.
+For FFHQ-256, we found a 97\% correlation between the model's estimates of $\log p_0(\vx_0)$ and the amount of information contained in an image (\autoref{fig:logp-vs-png-ffhq}).
+
+
+
+\section{Discussion}
+
+
+\paragraph{Variance of $\log p_0^{\mathrm{SDE}}(\vx_0)$ estimate.} In \autoref{sec:accuracy} we discussed the accuracy of $r_0$, our novel estimate of $\log p_0^{\mathrm{SDE}}(\vx_0)$. Specifically, we provided tools to estimate the bound of its bias for stochastically generated samples. Based on the empirically measured correlation between $r_0$ and $\log p_0^{\mathrm{ODE}}(\vx_0)$ at over $0.99$, we hypothesize that the variance of $r_0 - \log p_0^{\mathrm{SDE}}(\vx_0)$ is low whenever $\vs(t, \vx) \approx \nabla \log p_t^{\mathrm{SDE}}(\vx)$. However, we do not provide theoretical guarantees, or empirical estimates.
+
+\paragraph{$p_0^{\mathrm{SDE}}$ vs $p_0^{\mathrm{ODE}}$.} In \eqref{eq:kl-bound} we show that $\mathcal{R}^U(\vs) = \mathbb{E}_{(\vx_0, r_0)}[r_0 - \log p_0^{\mathrm{ODE}}(\vx_0)]$ is an upper bound on $\operatorname{KL}[p^{\mathrm{SDE}}_0 || p^{\mathrm{ODE}}_0] \geq 0$.
+In particular, for $(\vx_0, r_0)$ sampled with \eqref{eq:tractable-approx-rev-sde-logp-dynamics} we must have \emph{on average} $ r_0 \geq \log p_0^{\mathrm{ODE}}(\vx_0)$. However, for two different models, we found that $r_0 \geq \log p_0^{\mathrm{ODE}}(\vx_0)$ holds \emph{for every sample}. We hypothesize this is a more widespread phenomenon, but do not prove it.
+
+\paragraph{Towards exact estimates of $\log p_0^{\mathrm{SDE}}(\vx_0)$.} We showed in \eqref{eq:X} that the bias of $r_0$ is given by $\E (r_0 - \log p_0^{\mathrm{SDE}}(\vx_0)) \propto \E_{t, \vx_t } g^2(t) \| \vs(t, \vx_t) - \nabla_\vx \log p_t^{\mathrm{SDE}}(\vx_t) \|^2$ for $\vx_t \sim p_t^{\mathrm{SDE}}(\vx_t)$.
+Similarly, \eqref{eq:fwd-bias} shows that $\log p_0^{\mathrm{SDE}}(\vx_0) - \mathrm{ELBO}(\vx_0) \propto \E_{t, \vx_t } g^2(t) \| \vs(t, \vx_t) - \nabla_\vx \log p_t^{\mathrm{SDE}}(\vx_t) \|^2$ for $\vx_t \sim p(\vx_t | \vx_0)$.
+Both these errors could then be reduced to zero if $\vs(t, \vx) = \nabla_\vx \log p_t^{\mathrm{SDE}}(\vx)$ for all $t, \vx$.
+However, for SDEs with linear drift (\eqref{eq:sde}), this can only happen if $p_t^{\mathrm{SDE}}$ is Gaussian for all $t$ (Proposition B.1 in \citet{lu2022maximum}).
+This is because an SDE with linear drift cannot transform a non-Gaussian $p_0$ into a Gaussian in finite time $T$.
+
+To unlock exact likelihood estimation in diffusion SDEs, non-linear drift is necessary, such as the one proposed in \citet{bartosh2024neural}.
+There it is possible to have $p_T$ Gaussian for finite $T$ and $\vs(t, \vx) = \nabla_\vx \log p_t^{\mathrm{SDE}}(\vx)$ for all $t, \vx$, in which case both $r_0$ and $\mathrm{ELBO}(\vx_0)$ become exact (\autoref{th:approx-aug-rev-sde} and \autoref{prop:non-linear-elbo}).
+
+
+
+\section{Related Work}
+
+We reference most of the related work in the main sections.
+\paragraph{Likelihood estimation for diffusion models.} As we discussed in \autoref{sec:approx-dynamics} there is a distinction between diffusion ODEs and SDEs. For diffusion SDEs only lower bounds on likelihood are reported \citep{ho2020denoising, vahdat2021score, nichol2021improved, huang2021variational, kingma2021variational, kim2022maximum}. Exact likelihoods, on the other hand, are available for diffusion ODEs \citep{song2020score, song2020denoising, song2021maximum, dockhorn2021score} and some works explicitly optimize for ODE likelihood \citep{lu2022maximum, zheng2023improved, lai2023fp}. For a comprehensive survey, we refer the reader to \citet{yang2023diffusion}. We provide a novel tool for estimating the likelihood of the samples generated by diffusion SDEs.
+\paragraph{Typicality vs likelihood.} \citet{theis2015note} observed that likelihood estimates do not correlate with image quality.
+Furthermore, deep generative models can assign higher likelihoods to out-of-distribution (OOD) data than the data they were trained on \citep{choi2018waic, nalisnick2018deep, kirichenko2020normalizing} and therefore perform poorly at OOD detection.
+\citet{nalisnick2019detecting, choi2018waic} analyze this phenomenon through the lens of \textit{typicality}, arguing that typical samples do not coincide with the highest likelihood regions.
+\citet{ben2024d} observed that explicit distortion of an image like inserting a gray patch in the middle may increase the likelihood assigned by a flow-based model. Our investigation contrasts these reports by explicitly studying regions of highest likelihood and shedding light on the probability landscape of diffusion models.
+
+
+
+\section{Conclusion}
+
+
+We provide novel tools for estimating the likelihood for Diffusion SDE samples. Additionally, we theoretically and empirically analyze the estimation error and discuss when exact likelihood estimation for diffusion SDEs might be possible.
+These tools, combined with a theoretical mode-seeking analysis, allowed us to study high-probability regions of diffusion models. We made a surprising observation that unnatural and blurry images occupy the highest-density regions of diffusion models.
+
+This work not only enhances the understanding of diffusion model probability landscapes but also opens avenues for improved sample generation strategies.
+
+
+
+

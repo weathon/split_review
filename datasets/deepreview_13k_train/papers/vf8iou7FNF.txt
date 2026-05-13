@@ -1,0 +1,305 @@
+\title{RLSF: Reinforcement Learning via Symbolic Feedback}
+
+\begin{abstract}
+
+Reinforcement Learning with Human Feedback (RLHF) is considered a standard approach to fine-tuning Large Language Models (LLMs). However, such methods often face limitations such as unsound black-box reward models, difficulties in collecting human preference data, and the reliance on sparse scalar rewards. These methods often fall short when applied to tasks that require complex domain-specific understanding.
+
+To address these challenges, we propose a new fine-tuning paradigm we refer to as Reinforcement Learning via Symbolic Feedback (RLSF), which aims to improve domain-specific understanding of LLMs more effectively than traditional reward signals. In the RLSF setting, the LLM being fine-tuned is considered an RL agent, while the environment is allowed access to reasoning or domain knowledge tools (e.g., solvers, provers, algebra systems, or knowledge bases). Crucially, in RLSF, these reasoning tools can provide feedback to the LLMs via {\it poly-sized certificates} (e.g., proofs), that characterize errors in the LLM-generated object with respect to some correctness specification. As a bonus, our RLSF approach does not require the reasoning systems we use to be differentiable. The ability of RLSF-based fine-tuning to leverage certificate-generating symbolic tools enables sound fine-grained (token-level) reward signals to LLMs, and thus addresses the limitations of traditional reward models mentioned above.
+
+Via extensive evaluations, we show that our RLSF-based fine-tuning of LLMs outperforms traditional approaches on five different applications (that have some associated logical or domain constraints), namely, program synthesis from natural language pseudo-code to programming language (+31.43\% in functional correctness for Google's CodeGemma-2b compared to supervised fine-tuning, +17.01\% in functional correctness compared to GPT-3.5 -- 100$\boldsymbol\times$ larger), three chemistry tasks (+5.5\% exact match for molecule generation, +19.4\% exact match for forward synthesis, +33.7\% exact match for retrosynthesis, using Meta's Galactica-1.3b, compared to GPT-4 -- 1000$\boldsymbol\times$ larger), and solving the Game of 24 (+25\% success rate using Meta's Llama2-7b compared to traditional methods, and +7\% success rate compared to GPT-3.5 -- 25$\boldsymbol\times$ larger). A takeaway is that fine-tuning via RLSF enables relatively smaller LLMs to significantly outperform closed-source models that are orders of magnitude larger (e.g., GPT-4).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, Large Language Models (LLMs) have had a dramatic impact on many sub-fields of AI~\citep{bommasani2021opportunities}. Tasks that seemed impossible just a few years ago, are now routinely solved by LLMs. Examples include language translation~\citep{qin2024multilingual,min2023recent}, text-to-image generation~\citep{zhang2023text}, coding assistants~\citep{liang2024large}, and open-ended text generation~\citep{achiam2023gpt}.
+
+Despite their impressive performance, these models often struggle with tasks that require reasoning or formal domain knowledge~\citep{mao2024champ, stechly2024self,zhang2022paradox}. This limitation has sparked a growing interest in exploring methods that can better align LLM outputs with logical or domain constraints, particularly through the incorporation of corrective feedback loops between learning and reasoning processes~\citep{ganesh2022machine,kambhampati2024llms}. For example,~\cite{kambhampati2024llms} state that ``{\it LLMs cannot plan themselves but can play a variety of constructive roles in solving planning tasks–especially as approximate knowledge sources and candidate plan generators in the so-called LLM-Modulo Frameworks in conjunction with external sound model-based verifiers.}"
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{RLSFvRLHF_v2.drawio.pdf}
+\caption{\textbf{Contrasting RLHF with RLSF:} The image depicts two distinct fine-tuning paradigms. (Left) RLHF operates within an environment governed by a black-box reward model, typically offering scalar feedback. (Right) By contrast, the environment in RLSF leverages sound symbolic reasoning tools and also provides fine-grained token-level vector (dense) feedback that is, in turn, based on poly-sized certificates produced by these symbolic tools.}
+
+\label{fig:rlsf}
+\end{figure}
+
+The concept of incorporating reasoning tools into machine learning in general, and LLMs in particular, is rooted in the idea of combining the strengths of these two sub-fields of AI~\citep{hitzler2023compendium,ganesh2022machine,kambhampati2024llms,bouraoui2019shallow}. While LLMs excel at capturing statistical patterns and generating fluent text, they can fail to perform sound reasoning and generate text that is logically coherent. In fact, the logical or code errors introduced by LLMs in the objects they generate can be very subtle, and not immediately obvious upon inspection. This motivates the need to use reasoning and verification tools at different stages of an LLM's life cycle (from data curation, training, fine-tuning, and inference). For instance, using program analysis tools during inference~\citep{agrawal2024monitor}, and integrating solvers into neural network layers~\citep{wang2024grounding} or during gradient descent~\citep{ashok2022solver+} have shown promising results in terms of faster convergence and efficient data utilization. 
+
+By contrast to LLMs, symbolic reasoning systems, such as theorem provers and constraint solvers~\footnote{We define the term symbolic reasoning systems broadly to include solvers, provers, computer algebra systems, program analysis tools, knowledge bases, and simulators. The only requirement is that they analyze/solve inputs that are formally defined, and can produce poly-sized certificates of their analysis.}, are adept at handling sound logical reasoning, perform symbolic mathematical operations and maintain coherence, but they do not seem to possess the impressive generative capabilities of LLMs. By integrating these two approaches, a hybrid system can be created that can leverage the strengths of both paradigms, potentially leading to more robust and capable AI systems. 
+
+One popular approach to fine-tuning LLMs is Reinforcement Learning from Human Feedback (RLHF)~\citep{ouyang2022training,stiennon2020learning}, which relies on manually collecting correct/incorrect cases and creating an approximate (possibly unsound) black-box reward model. Such an approach can be expensive, error-prone, and may not accurately capture the nuances of a reasoning task. Moreover, the reward signal thus generated can be sparse and scalar in nature. Such sparse reward signals can fall short of fully capturing those aspects of an LLM-generated object that may be incorrect with respect to a well-defined specification (or inconsistent with domain knowledge). 
+
+To address these challenges, we propose a new fine-tuning paradigm we refer to as Reinforcement Learning via Symbolic Feedback (RLSF) that is designed to improve the performance of LLMs compared to traditional methods in complex reasoning tasks. Figure~\ref{fig:rlsf} highlights the differences between RLHF and RLSF. In the RLSF setting, the LLM is considered as the RL agent to be fine-tuned, while the environment is allowed access to reasoning tools, that can generate poly-sized certificates of their analyses. 
+
+In the forward direction (LLM to environment), formal objects generated (such as programs, proofs, molecules, or theories) by the LLM are fed to the RLSF environment, which leverages reasoning tools to perform analysis or verification of such objects against specifications or domain knowledge. In the reverse direction (environment to LLM), any certificate (that identifies what is wrong with the LLM-generated object) produced by symbolic tools is used as part of a reward function to provide corrective feedback to the LLM. Leveraging symbolic tools to generate poly-sized certificates~\footnote{Examples of poly-sized certificates include unsatisfiability proofs, compiler feedback, equivalence testing, etc. Our approach is not limited to any one type of symbolic tool, as long as these certificates can be converted into appropriate rewards. It is possible that the problem addressed by these symbolic tools is NP-hard, and therefore, in general, we cannot always expect certificates that are polynomial in the input size. Having said that, many of these tools, such as compilers, computer algebra systems, or solvers, work well in practice.}, which provide sound, fine-grained (token-level) feedback to LLMs, eliminates the need for manual preference data collection and addresses limitations of traditional reward models. Moreover, our RLSF approach does not require the reasoning systems to be differentiable, unlike traditional neuro-symbolic RL approaches~\citep{hitzler2023compendium}, adding to its versatility.
+
+\noindent{\bf Contributions.} 
+\begin{itemize}[leftmargin=12pt]
+    \item {\bf Reinforcement Learning with Symbolic Feedback:} We present the RLSF paradigm and evaluate the effectiveness of RLSF-based fine-tuning methodologies on LLMs across five distinct tasks that present unique challenges regarding their domain-specific understanding.
+    
+    \item \textbf{Translation of natural language pseudo-code to C++ code:} Our results show a significant improvement over the supervised fine-tuning (SFT) approach for widely-used code LLMs (such as \texttt{stable-code-instruct-3b}~\citep{pinnaparaju2024stable},  \texttt{deepseek-coder-1.3b-base}~\citep{guo2024deepseek} and Google's \texttt{code-gemma-2b}~\citep{google2024codegemma}). For example, our RLSF-tuned \texttt{code-gemma-2b} shows an improvement of +52.64\% in compilation accuracy and +31.43\% in functional correctness accuracy over SFT and also achieves superior results compared to GPT-3.5 ($\sim$100$\boldsymbol\times$ larger)~\citep{achiam2023gpt}. (Section~\ref{subsec:nl2pl})
+    
+    \item \textbf{Three chemistry tasks (molecule generation, forward synthesis, retrosynthesis):} For the three chemistry tasks, \texttt{mistral-7b-v0.1}~\citep{jiang2023mistral} from Mistral AI and \texttt{galactica-1.3b}~\citep{taylor2022galactica} from Meta AI show an improvement upto 13\% in exact match and 58\% in validity compared to traditional approaches, and upto 33\% improvement in exact match compared to GPT-4 ($\sim$1000$\boldsymbol\times$ larger). (Section~\ref{subsec:chemistry})
+    
+    \item \textbf{Game of 24:} We observe significant improvement using RLSF on popular LLMs -- Google's \texttt{gemma-2b-it}~\citep{team2024gemma} and Meta's \texttt{llama2-7b-chat}~\citep{touvron2023llama} with +15\% and +25\% success respectively, compared to traditional methods. Notably, post RLSF fine-tuning, \texttt{llama2-7b-chat} also outperforms (+7\%) GPT-3.5 ($\sim$25$\boldsymbol\times$ larger). This underscores the importance of RLSF fine-tuning that facilitates relatively smaller LLMs to significantly outperform models, such as ChatGPT, which are orders of magnitude larger. (Section~\ref{subsec:g24})
+    
+\end{itemize}
+
+
+
+\section{Related Work}
+
+The idea of integrating symbolic feedback into reinforcement learning for RLSF has philosophical origins in the Learning Rate Based (LRB) branching heuristic for SAT solvers~\citep{liang2016learning}. In their work, they model the variable selection problem as an online multi-armed bandit, a special case of reinforcement learning, to learn branching variables such that the learning rate of the solver is maximized. LRB uses a structured feedback signal based on the solver's performance and conflict analysis, guiding the optimization of variable selection. This is one of the key inspirations behind the RLSF approach, where we provide fine-grained feedback to LLMs via poly-sized certificates generated by symbolic reasoning tools. 
+
+\noindent{\bf Neurosymbolic Reinforcement Learning (NRL).} We refer the reader to the Compendium of Neurosymbolic AI for a rich and recent literature survey on combinations of learning and reasoning systems~\citep{hitzler2023compendium}. There has been considerable work in NRL~\citep{acharya2023neurosymbolic}. However, all the NRL work that we are aware of focuses on combining symbolic reasoning tools with the RL agent, often requiring reasoning systems to be differentiable and also limiting the agent's ability to handle large symbolic representations. In contrast, RLSF integrates symbolic tools with the environment and eliminates the need for differentiability. Further, in the RLSF paradigm, a key innovation is that we leverage the poly-sized certificates generated by the environment's symbolic tools to provide a fine-grained reward signal to the RL agent. This allows for a modular framework with more expressive and interpretable feedback during training. 
+
+\noindent{\bf Combinations of LLMs with Symbolic Tools.} Previous research has explored the integration of program analysis tools during inference ~\citep{agrawal2024monitor}. While existing efforts have often relied on binary or scalar signals for utilizing symbolic feedback during training or fine-tuning~\citep{chen2020program,jana2023attention,jha2024bertrlfuzzer,zou2024fgeo}, the RLSF paradigm leverages richer token-level (dense) symbolic feedback, thus enabling significantly improved fine-tuning performance as it enables more detailed and fine-grained correction, pinpointing specific areas in the output that need improvement. This allows the model to learn more effectively, as it receives clearer, more precise guidance. \cite{kambhampati2024llms} introduced the concept of LLM-Modulo Frameworks, which proposes using external symbolic reasoning tools during inference. In contrast, our work focuses on the fine-tuning phase and how external symbolic reasoning tools can be effectively incorporated into the RLSF paradigm to guide the model during fine-tuning.
+
+\noindent{\bf LLM-based Feedback.} Another line of work that has explored using LLMs as part of a corrective feedback loop~\citep{shinn2024reflexion,madaan2024self,paul2023refiner,kim2024language,chen2023teaching} where the feedback is usually provided as in-context (not RL), under the assumption that LLMs are better at verification compared to generation. However, recent studies have challenged this assumption, suggesting that LLMs may not be as effective at verification/self-critiquing tasks as previously thought~\citep{mao2024champ,stechly2024self,valmeekam2023can,huang2023large,stechly2023gpt}. By contrast, in our work, we use sound symbolic systems to provide corrective feedback and do so via an RL approach.
+
+
+
+\section{Reinforcement Learning via Symbolic Feedback (RLSF)}
+
+In this section, we introduce the Reinforcement Learning via Symbolic Feedback (RLSF) algorithm. The algorithm incorporates fine-grained, token-level feedback generated by reasoning or domain knowledge tools, thereby addressing the limitations of traditional reward-based methods.
+
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+
+\begin{algorithm}[t]
+\caption{Reinforcement Learning via Symbolic Feedback (RLSF)}\label{alg:cap}
+\begin{algorithmic}
+\Require Number of epochs $\mathit{N_{epochs}}$, pre-trained model $\mathit{Model}$, symbolic reasoning tool $\mathit{SymbolicReasoner}$, reward function $\mathit{RewardFunc}$, prompt dataset $\mathit{D}$
+\Ensure Fine-tuned model $\mathit{Model'}$
+\For{$\mathit{N_{epochs}}$}
+\For{$\mathit{batch_i}$ in $\mathit{D}$}
+\State $\mathit{response_i \sim Model(batch_i)}$ \Comment{Generate a response}
+\State $\mathit{cert_i \gets SymbolicReasoner(batch_i,response_i)}$ \Comment{Compute the certificate}
+\State $\mathit{vector_i \gets RewardFunc(cert_i)}$ \Comment{Compute the vector feedback} %  s.t. shape($vector_i$) = shape($response_i$)
+\State $\mathit{Model'} \gets \mathit{ppo\_step(Model,batch_i,response_i,cert_i)}$ \Comment{Update model using PPO}
+\State $\mathit{Model} \gets \mathit{Model'}$
+\EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+The RLSF algorithm, outlined in Algorithm \ref{alg:cap}, fine-tunes a pre-trained language model $\mathit{Model}$ using reinforcement learning (RL) with the help of the fine-grained certificate provided by a symbolic reasoning tool $\mathit{SymbolicReasoner}$. The framework leverages a reward function ($\mathit{RewardFunc}$) to compute vector (token-level) feedback ($\mathit{vector}_i$) based on the certificate generated by the symbolic reasoning tool. This feedback aligns with the shape of the response generated by the language model, facilitating fine-grained adjustments during fine-tuning. The algorithm operates over a specified number of epochs $N_{\mathit{epochs}}$, iterating through a dataset $D$.
+
+\textbf{Inputs and Outputs.} The algorithm takes as input the pre-trained model (RL agent to be fine-tuned) $\mathit{Model}$, the symbolic reasoning tool $\mathit{SymbolicReasoner}$ and the reward function $\mathit{RewardFunc}$ (to be used as the RL environment), and the dataset $D$ that consists of input prompts for $\mathit{Model}$. The output is a fine-tuned model $\mathit{Model}'$. The algorithm performs the following steps:
+
+\textbf{Epoch Iteration.} For each epoch from $1$ to $N_{\mathit{epochs}}$, the algorithm iterates through $D$.
+
+\textbf{Batch Processing.} For each batch $\mathit{batch}_i$ in the dataset $D$, the algorithm performs the following:
+
+\begin{itemize}[leftmargin=12pt]
+\setlength{\parskip}{0pt}
+\setlength\itemsep{0.2em}
+    \item Response generation ($\mathit{response}_i$): The $\mathit{Model}$ generates a response $\mathit{response}_i$ given the input prompt $\mathit{batch}_i$.
+    \item Certificate computation ($\mathit{cert}_i$): The symbolic reasoning tool $\mathit{SymbolicReasoner}$ computes a certificate $\mathit{cert}_i$ corresponding to the response $\mathit{response}_i$. The certificate includes fine-grained error/non-error messages extracted from the symbolic analysis of the prompt-response pair. 
+    \item Token-level (dense) feedback computation ($\mathit{vector}_i$): The reward function ($\mathit{RewardFunc}$) calculates a vector feedback ($\mathit{vector}_i$) based on the certificate $\mathit{cert}_i$. The reward function processes this certificate to generate token-level vector feedback. This feedback provides detailed guidance to the language model during fine-tuning, facilitating precise adjustments. The vector feedback has the same shape as the response tokens (computed using the tokenizer provided by $\textit{Model}$). Figures~\ref{fig:rlsf_nl2pl},~\ref{fig:rlsf_chem} and~\ref{fig:rlsf_g24} give a concrete example of such a vector feedback for the different tasks.
+    \item Model update ($\mathit{Model}'$): The $\mathit{Model}$ is updated to $\mathit{Model}'$ using the Proximal Policy Optimization (PPO) algorithm, using the input prompt $\mathit{batch}_i$, response $\mathit{response}_i$, and certificate $\mathit{cert}_i$. 
+\end{itemize}
+
+\textbf{Generalizing RLSF to different reasoning tasks.} Our RLSF paradigm can be applied to any reasoning task, provided that: \emph{(a)} the final output is in a formal language, and \emph{(b)} a $\mathit{SymbolicReasoner}$ can furnish segment-wise feedback based on a chosen delimiter. In Algorithm~\ref{alg:cap}, we fine-tune an LLM for a specific reasoning task where the output is expressed in a formal language. Since each $\mathit{response_i}$ must conform to a formal language $F$, logical delimiters are used to segment $\mathit{response_i}$ into lines (using \texttt{\textbackslash n}), words (using spaces), characters, or parser-tokens based on the grammar of $F$. When validated by the $\mathit{SymbolicReasoner}$, $\mathit{cert_i}$ verifies each segment. Then $\mathit{RewardFunc}$ maps the segment-level certificate to $\mathit{vector_i}$, providing token-level feedback for $\mathit{response_i}$. In Sections~\ref{subsec:nl2pl},~\ref{subsec:chemistry} and~\ref{subsec:g24}, we demonstrate the RLSF paradigm across five reasoning tasks from different domains. The implementation details of the RLSF algorithm are described in Section~\ref{app:impl}.
+
+
+\section{Reasoning Task A: Natural Language Pseudo-code to C++ Code}
+
+\label{subsec:nl2pl}
+Automated code synthesis from natural language (NL) descriptions is a crucial task in software engineering that has garnered considerable attention. Recent efforts, such as~\cite {ugare2024improving}, have explored using LLMs for this. We evaluate how our RLSF paradigm improves LLM-based translation of an NL pseudo-code into a C++ code. To be correct, the code must be both (a) \textit{syntactically correct} per the \texttt{g++} compiler and (b) \textit{functionally correct} (or equivalent~\footnote{Note that in general the task of determining whether a C++ code is functionally equivalent to pseudo-code (even when it is specified in formal logic) is undecidable. Hence, we consider a weaker functional equivalence property, namely, that a generated C++ code is deemed functionally correct if it passes all test cases corresponding to a given pseudo-code.}) w.r.t. a test suite.
+
+\subsection{Benchmark and RLSF setup}
+\label{subsubsec:nl2pl_rlsfsetup}
+For training and evaluating the LLM, we utilize the SPoC dataset~\citep{kulal2019spoc}, which includes 16,326 accepted C++ solutions for 677 problems from a competitive programming website~\citep{codeforces}. On average, each program has 14.7 lines, ranging in $[1, 457]$. They employed 59 crowd-workers from Amazon Mechanical Turk to write NL pseudo-code for each line of C++ program, ensuring a line-level granularity of textual description. Each problem is accompanied by a test suite of multiple test cases, curated by the problem-setter. We evaluate on the \textsc{TestP} partition of SPoC, consisting of 158 problems ($\sim$23.34\%) and 1,778 pairs of pseudo-code and C++ code. The remaining 14,548 pairs from 519 problems ($\sim$76.66\%) are used for training the LLMs.
+
+\begin{figure}[t]
+\centering
+\includegraphics[scale=0.46]{RLSF_nl2pl_v1.drawio.pdf}
+\caption{\textbf{RLSF for translation of NL pseudo-code to code:} Given the generated C++ code (with \texttt{N} lines), the symbolic environment uses the \texttt{g++} compiler to detect erroneous lines ($E$) and compute the pass rate $r$ from the test suite, providing fine-grained symbolic feedback for fine-tuning the LLM.
+}
+\label{fig:rlsf_nl2pl}
+\end{figure}
+
+Refer to Figure~\ref{fig:rlsf_nl2pl} for an overview of the RLSF setup for fine-tuning an LLM to translate pseudo-code into code. In the supervised learning setup, we assume a training dataset $\mathcal{D}=\left\{ \left({pc}_i, c_i, {\mathit{TS}}_i\right)\right\}$, consisting of pseudo-code ${pc}_i$, gold-standard code $c_i$, and test-suite $\mathit{TS}_i$. During fine-tuning, the LLM receives ${pc}_i$ as input (with prompt in Figure~\ref{fig:rlsf_nl2pl}) and generates code $\widehat{c_i}$, which may contain syntactic errors. This code is passed through the compiler (here, \texttt{g++}) to identify lines with errors ($E$). If $\widehat{c_i}$ compiles, it is tested on ${\mathit{TS}}_i$ to compute the pass rate ($r\in [0,1]$). If it does not compile, $r=0$. Our token-level fine-grained feedback assigns a high reward $p=1+r$ to tokens in syntactically correct lines (positive case) and a low reward $n=0$ to tokens in erroneous lines (negative case).
+
+
+
+Our setup features a gradual progression of rewards and fine-grained feedback. Tokens in erroneous lines receive a reward of $0$, while those in syntactically correct lines of non-compiling code get a reward of $1$ (since $p=1+r$ and $r=0$). Tokens in a compiling code receive rewards $p\in[1,2]$, based on the value of $r$. The special tokens \texttt{<BOS>} and \texttt{<EOS>} get a reward of $p$ if $\widehat{c_i}$ compiles, and $n$ otherwise. This token-level feedback fine-tunes the LLM through RL using PPO (Algorithm~\ref{alg:cap}).
+
+\subsection{Evaluation Metrics}
+We use three metrics to evaluate pseudo-code to C++ code translation with LLMs. CompAcc and FCorrAcc provide more nuanced insights, while Pass$@$1 is a stricter pass/fail metric. In Section~\ref{sec:tasknl2plresults}, we present performance using all three metrics, focusing on the first two for comparison of methods.
+\noindent\textbf{Compilation Accuracy (CompAcc).} The percentage of generated C++ codes that are syntactically correct, indicating that it compiles without errors using a \texttt{g++} compiler.
+
+\noindent\textbf{Functional Correctness Accuracy (FCorrAcc).} The percentage of test cases demonstrating the expected input-output behavior for each generated C++ code, averaged across all the generated codes. If a generated code contains syntactical errors, FCorrAcc is zero for that code.
+
+\noindent\textbf{Pass$\mathbf{@}$1.} The percentage of generated C++ codes generated on the first attempt by the LLM that is syntactically correct and passes all test cases in the problem's test suite, with each code evaluated as \textit{true} if it passes all tests and \textit{false} otherwise.
+
+\subsection{Comparative Models Used}
+We perform RLSF fine-tuning on three recent open-source code LLMs that we obtain from~\cite{huggngface}: \texttt{code-gemma-2b} from Google, \texttt{stable-code-instruct-3b}  from StabilityAI, and \texttt{deepseek-coder-1.3b-base} from DeepSeekAI. We also compare results with the closed-source \texttt{gpt-3.5-turbo-0301} model i.e., \texttt{GPT-3.5} (ChatGPT), that we access via the API of ~\cite{chatgpt}. For reproducibility, temperature and top\_p are set to $0$. The three open-source models have 2 billion, 2.7 billion, and 1.3 billion parameters, respectively. In comparison, \texttt{GPT-3.5} is rumored to have around 175 billion parameters -- about 100 times more.
+
+\subsection{Results and Ablation Study}
+\label{sec:tasknl2plresults}
+
+As shown in Table~\ref{tab:nl2pl_results}, we first evaluate the LLMs in a \textbf{zero-shot setting}. \texttt{GPT-3.5} generates 29.13\% compilable C++ code, with 24.29\% of test cases showing correct input-output behavior. In contrast, none of the open-source models (\texttt{code-gemma-2b}, \texttt{stable-code-instruct-3b}, and \texttt{deepseek-coder-1.3b-base}) produce a single compilable or functionally correct code. Next, we train the open-source models by \textbf{supervised fine-tuning (SFT)} to minimize the cross-entropy loss between the generated and gold-standard C++ code. After SFT, \texttt{code-gemma-2b} and \texttt{stable-code-instruct-3b} achieve about 12\% CompAcc and 10\% FCorrAcc, while \texttt{deepseek-coder-1.3b-base} reaches only around 2\% in both metrics. 
+
+We further fine-tune the SFT-tuned LLMs through \textbf{RL with boolean feedback}, where models receive a binary scalar reward (0 or 1) based on whether the generated code compiles -- a common approach in various recent code generation techniques~\citep{wang2022compilable,shojaee2023execution,dou2024stepcoder}. This improves CompAcc by $+43.58\%$, $+36.39\%$, and $+17.78\%$, and FCorrAcc by $+14.84\%$, $+0.13\%$, and $+6.17\%$ for \texttt{code-gemma-2b}, \texttt{stable-code-instruct-3b}, and \texttt{deepseek-coder-1.3b-base}, respectively. Conversely, we use the proposed scheme of \textbf{RLSF with token-level feedback} to fine-tune the SFT-tuned LLMs. This yields even better results, improving CompAcc by $+52.64\%$, $+42.23\%$, and $+36.73\%$, and FCorrAcc by $+31.43\%$, $+7.66\%$, and $+23.99\%$ for the same models compared to SFT. We believe RLSF's superior performance is due to its token-level feedback. It provides more granular rewards based on line-level syntactical correctness and overall test case pass rate, unlike boolean feedback which only indicates if code compiles. As a result, RLSF-tuned models outperform those trained with boolean feedback by $+9.06\%$, $+5.84\%$, and $+18.95\%$ in CompAcc, and $+16.59\%$, $+7.53\%$, and $+17.82\%$ in FCorrAcc. They also surpass \texttt{GPT-3.5} (ChatGPT), despite using 100 times fewer parameters.
+
+\begin{table}[t]
+\caption{\textbf{Natural Language Pseudo-code to Code Translation Results:} Performance comparison of fine-tuning methodologies over different LLMs}
+\label{tab:nl2pl_results}
+\centering
+\renewcommand{\arraystretch}{1.1}
+  \begin{adjustbox}{width=0.9\columnwidth}
+\begin{tabular}{@{}c|l|rrr@{}}
+\toprule
+ LLM & Configuration & CompAcc (\%) & FCorrAcc (\%) & Pass$@$1 (\%)\\ \midrule
+\multirow{1}{*}{\texttt{GPT-3.5} ~\citep{achiam2023gpt}} & Zero-shot (no fine-tuning) & \textbf{29.13} & \textbf{24.29} & \textbf{20.98}\\
+\noalign{\vskip 0.2ex}\hdashline\noalign{\vskip 0.4ex}
+\multirow{4}{*}{\texttt{code-gemma-2b} ~\citep{google2024codegemma}} & Zero-shot (no fine-tuning) & 0.00 & 0.00 & 0.00\\
+ & SFT (with cross-entropy loss) & 11.31 & 9.87 & 9.00\\
+ & SFT + RL (with boolean scalar f/b) & 54.89 & 24.71 & 12.77\\
+ & SFT + \textit{RLSF (with token-level f/b)} & \textbf{63.95} & \textbf{41.30} & \textbf{28.80}\\ 
+ \noalign{\vskip 0.2ex}\hdashline\noalign{\vskip 0.4ex}
+\multirow{4}{*}{\texttt{stable-code-instruct-3b} ~\citep{pinnaparaju2024stable}} & Zero-shot (no fine-tuning) & 0.00 & 0.00 & 0.00\\
+ & SFT (with cross-entropy loss) & 12.04 & 10.78 & 9.96\\
+ & SFT + RL (with boolean scalar f/b) & 48.43 & 10.91 & 9.22\\
+ & SFT + \textit{RLSF (with token-level f/b)} & \textbf{54.27} & \textbf{18.44} & \textbf{16.09}\\ 
+ \noalign{\vskip 0.2ex}\hdashline\noalign{\vskip 0.4ex}
+\multirow{4}{*}{\texttt{deepseek-coder-1.3b-base} ~\citep{guo2024deepseek}} & Zero-shot (no fine-tuning) & 0.00 & 0.00 & 0.00\\
+ & SFT (with cross-entropy loss) & 2.19 & 1.90 & 1.63\\
+ & SFT + RL (with boolean scalar f/b) & 19.97 & 8.07 & 3.88\\
+ & SFT + \textit{RLSF (with token-level f/b)} & \textbf{38.92} & \textbf{25.89} & \textbf{14.51}\\ \bottomrule
+\end{tabular}
+  \end{adjustbox}
+\end{table}
+
+
+
+\section{Reasoning Tasks B: Chemistry (Molecule Generation, Forward Synthesis and Retrosynthesis)}
+
+\label{subsec:chemistry}
+Chemistry tasks, such as molecule generation, forward synthesis, and retrosynthesis, are critical benchmarks for assessing the capabilities of LLMs in real-world scientific applications~\citep{schwaller2019molecular,zhong2022root,zhou2023uni,chen2023g}. These tasks require models to navigate the intricate rules of chemical structures and reactions, making them excellent challenges to evaluate domain-specific understanding. Leveraging LLMs in chemistry has the potential to significantly accelerate fields like drug discovery and materials science, enabling faster innovation and discovery~\citep{guan2024drug,yu2024large,bhattacharya2024large,jiang2024review}.
+
+\subsection{Benchmark and RLSF setup}
+\label{subsec:chemistry_bench}
+In this context, we focus on three tasks, namely, \textbf{Molecular Generation (MG)}, \textbf{Forward Synthesis (FS)}, and \textbf{Retrosynthesis (RS)}. MG involves generating molecules given a description in natural language. FS involves predicting the product of a chemical reaction given specific reactants and reagents. RS focuses on identifying the reactants necessary to produce a specific target product. All output molecules are generated in the SMILES format~\citep{weininger1988smiles}, a widely used method for encoding molecular structures as a sequence of symbols, making it a popular choice for LLM-based chemistry models~\citep{yu2024llasmol}. Section~\ref{appB:chemtasks} gives more details about the different tasks. USPTO-full dataset~\citep{Lowe2017} is a commonly used dataset for FS and RS tasks, while ChEBI-20 and Mol-Instructions datasets~\citep{edwards2022translation, fang2023mol} for the MG task. We used a high-quality version of these datasets from LlaSMol~\citep{yu2024llasmol}, ensuring the removal of chemically invalid SMILES and inaccurate information. We focus on a subset of the dataset where multiple outputs are possible for a given input, as this poses a significant challenge for LLMs. In such cases, the model must better capture the syntax and semantics of a given task, rather than relying on simple input-output mapping through supervised fine-tuning (SFT). This setup pushes the model beyond memorization, testing its ability to generalize, making it a key evaluation of its capabilities. We ensure that same input samples are not shared across dataset splits for the same and also across the three tasks. More details can be found in Section~\ref{appB:datasetsplit}. 
+
+For the RLSF feedback, we handle both syntax and semantic errors. For syntax, we parse the error logs generated by RDKit~\citep{rdkit} to pinpoint issues with the output SMILES string such as unclosed rings, invalid characters, and valence errors. Fine-grained feedback is applied by penalizing the specific character responsible for the error, or by issuing binary feedback for the entire output when fine-grained feedback is not possible. For semantics, we make use of the first law of chemistry, but since the equations given in the dataset are not balanced and products contain missing by-products, we use a slightly weaker version. For the FS task, generated products are penalized if they contain additional atoms not present in the reactants, providing fine-grained feedback for the erroneous atoms. For the RS task, the generated reactants must include all the atoms present in the product, and missing atoms trigger a binary penalty for the entire generation. For molecule generation, prior to the training process, we extract functional groups from the input natural language description (e.g., `It is functionally related to' string) and manually extract the function group SMILES strings for the training set. If the generated molecule lacks the required functional group, binary feedback is applied (Figure~\ref{fig:rlsf_chem}). This structured fine-grained feedback is used to fine-tune the LLM using Proximal Policy Optimization (PPO) using Algorithm~\ref{alg:cap}.
+
+\begin{table}[t]
+\caption{\textbf{Chemistry Tasks Results:} Performance comparison over different LLMs for three chemistry tasks - Molecule Generation (MG), Forward synthesis (FS), and Retrosynthesis (RS)}
+\setlength\tabcolsep{5pt}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}c|l|rrr|rrr|rrr@{}}
+\noalign{\hrule height 1.35pt}
+ &  & \multicolumn{9}{c}{Task \& Metric} \\ \cline{3-11}
+ LLM & \multicolumn{1}{c|}{Configuration} & \multicolumn{3}{c|}{Molecule Generation (MG)} & \multicolumn{3}{c|}{Forward synthesis (FS)} & \multicolumn{3}{c}{Retrosynthesis (RS)} \\ \cline{3-5} \cline{6-8} \cline{9-11}
+ &  & EM (\%) & FTS (\%) & Valid (\%) & EM (\%) & FTS (\%) & Valid (\%) & EM (\%) & FTS (\%) & Valid (\%) \\ \noalign{\hrule height 0.9pt}
+\texttt{GPT-4}~\citep{achiam2023gpt} & Zero-shot & \textbf{3.0} & \textbf{35.6} & \textbf{90.0} & \textbf{0.4} & \textbf{37.5} & \textbf{93.1} & \textbf{0.8} & \textbf{31.7} & \textbf{88.2} \\ 
+ \noalign{\vskip 0ex}\hdashline\noalign{\vskip 0ex}
+\multirow{4}{*}{\texttt{mistral-7b}~\citep{jiang2023mistral}} & Zero-shot & 0.0 & 0.0 & 0.0 & 0.0 & 49.8 & 14.4 & 0.0 & 46.4 & 13.5 \\
+ & SFT & 1.1 & 25.4 & 51.9 & 7.2 & 54.2 & 93.0 & 23.3 & 62.1 & 98.0 \\
+ & SFT + RL w/ scalar f/b & 4.0 & 31.2 & 62.8 & 10.4 & 56.1 & 94.2 & 28.5 & 64.6 & 98.0 \\
+ & \textit{SFT + RLSF (token-level f/b)} & \textbf{13.6} & \textbf{45.1} & \textbf{89.1} & \textbf{21.3} & \textbf{59.7} & \textbf{98.3} & \textbf{32.1} & \textbf{65.8} & \textbf{99.1} \\ 
+\noalign{\vskip 0ex}\hdashline\noalign{\vskip 0ex}
+\multirow{4}{*}{\texttt{galactica-1.3b}~\citep{taylor2022galactica}} & Zero-shot & 0.0 & 0.0 & 0.0 & 0.0 & 44.8 & 2.2 & 0.0 & 43.2 & 0.2 \\
+ & SFT & 0.5 & 10.1 & 23.1 & 8.0 & 56.3 & 97.7 & 22.3 & 59.2 & 96.3 \\
+ & SFT + RL w/ scalar f/b & 2.7 & 27.5 & 75.4 & 11.7 & 56.8 & \textbf{98.8} & 26.1 & 62.7 & 99.0 \\
+ & \textit{SFT + RLSF (token-level f/b)} & \textbf{8.5} & \textbf{38.2} & \textbf{81.4} & \textbf{19.8} & \textbf{60.3} & \textbf{99.8} & \textbf{34.5} & \textbf{64.4} & \textbf{99.5} \\ \noalign{\hrule height 1.35pt}
+\end{tabular}%
+}
+\label{tab:chem}
+\end{table}
+
+\subsection{Evaluation metrics}
+Three main metrics are used to assess performance on the FS, RS and MG tasks: \textbf{Exact Match} (EM), \textbf{Fingerprint Tanimoto Similarity} (FTS), and \textbf{Validity} (Valid). EM measures the proportion of predicted results that exactly match the gold standards. FTS quantifies structural similarities between molecules using Tanimoto similarities of their Morgan fingerprints ~\citep{Morgan1965TheGO}. Validity assesses the ratio of valid predictions following SMILES grammar and the chemical valence rules~\citep{yu2024llasmol}. These metrics are commonly used in the field of cheminformatics and molecular prediction~\citep{schwaller2020predicting,chen2023g,yu2024llasmol}.
+
+\subsection{Comparative Models Used}
+We conduct RLSF fine-tuning on two recent open-source code LLMs that we obtain from~\cite{huggngface}: \texttt{mistral-7b-v0.1}~\citep{jiang2023mistral} from Mistral AI and \texttt{galactica-1.3b}~\citep{taylor2022galactica} from Meta AI. We also compare results with the closed-source \texttt{gpt-4-turbo} model i.e., \texttt{GPT-4} (ChatGPT), that we access via the API of ~\cite{chatgpt}. The two open-source models have 7 billion and 1.3 billion parameters, respectively. In comparison, \texttt{GPT-4} is rumored to have around 1.76 trillion parameters -- about 1000 times more.
+
+\subsection{Results and Ablation Study}
+As shown in Table~\ref{tab:chem}, we first evaluated the LLMs in a zero-shot setting. GPT-4 generated valid SMILES for 90\% of the MG inputs but achieved only 3\% exact match (EM) with the gold outputs. For the FS task, GPT-4 produced 93.1\% valid SMILES and only 0.4\% EM, while in the RS task, it generated 88.2\% valid SMILES with just 0.8\% EM. In contrast, none of the open-source models achieved any EM in the zero-shot setting.
+
+Next, we trained two open-source models using \textbf{supervised fine-tuning (SFT)}, which improved their performance in terms of EM, Fingerprint-based Tanimoto Similarity (FTS), and valid SMILES generation. Following SFT, we applied \textbf{reinforcement learning (RL) with boolean feedback}, where the model received a binary reward (0 or 1) based on whether the generated output adhered to task specifications as described in Section~\ref{subsec:chemistry_bench}. This further improved performance: for \texttt{mistral-7b-v0.1}, we observed a +2.9\% increase in EM and a +10.9\% boost in validity for the MG task, +3.2\% EM and +1.2\% validity for FS, and +5.2\% EM with no change in validity for RS. Similarly, for \texttt{galactica-1.3b}, we recorded a +2.2\% increase in EM and +52.3\% improvement in validity for MG, +3.7\% EM and +1.1\% validity for FS, and +3.8\% EM with +2.7\% validity for RS, compared to the SFT-tuned models. 
+
+Moreover, our \textbf{RLSF with token-level feedback} approach on the SFT-tuned LLMs, achieved the best results in terms of EM, FTS, and validity. For example, RLSF on \texttt{galactica-1.3b} resulted in +8\% EM and +58.3\% validity for MG, +11.8\% EM and +2.1\% validity for FS, and +12.2\% EM and +3.2\% validity for RS, compared to SFT-tuned models. We attribute this superior performance to token-level feedback, which allows for more fine-grained corrections than boolean feedback, leading to significant improvements. Note that RLSF-tuned models outperformed GPT-4 despite using 1000 times fewer parameters, as shown in Table~\ref{tab:chem}.
+
+
+
+\section{Reasoning Task C: Game of 24 using Tree of Thoughts (ToT)}
+
+\label{subsec:g24}
+The Game of 24 is a well-known benchmark that involves basic arithmetic operations such as addition, subtraction, multiplication, and division aimed at testing the mathematical capabilities of LLMs. Briefly, the idea behind the Game of 24 is as follows: given 4 numbers and basic arithmetic operations, obtain the target number 24. We refer the reader to the paper on Tree of Thoughts (ToT) by~\cite{yao2024tree} and Section~\ref{app:g24} for more details. 
+
+\subsection{Benchmark and RLSF setup}~\label{sec:g24_rlsfsetup}
+Similar to~\cite{yao2024tree}, we collect data from \url{4nums.com}, a website hosting mathematical games, specifically selecting 1,362 games sorted by human solving time from easy to hard. We use the same games as used by~\citep{yao2024tree}, indexed 901-1,000, for testing purposes. In evaluating each task, success is defined as producing a valid equation that equals 24 while utilizing each input number exactly once. For the RLSF fine-tuning phase, we utilize a subset of games from indices 800-900. The RLSF fine-tuning occurs during the ``propose prompt" steps (using the prompt styles from~\cite{yao2024tree}), as depicted in Figure~\ref{fig:rlsf_g24}. We collect pairs of ``propose prompts" and responses provided by the LLM. Periodically, after several prompts, we invoke the CAS~\citep{von2013modern} (using SymPy ~\citep{sympy}) to generate a feedback to the LLM. This feedback is then employed to fine-tune the LLM using Proximal Policy Optimization (PPO) following Algorithm~\ref{alg:cap}.
+
+\subsection{Comparative Methods and Models Used}
+We incorporate the benchmarks previously used by~\cite{yao2024tree}, i.e., standard Input-Output (IO) prompting, Chain-of-Thought (CoT) prompting, and ToT prompting. IO prompting uses five in-context examples, while CoT prompting includes three intermediate equations for these in-context examples. Both IO and CoT prompting are sampled 100 times per game for average performance assessment. To showcase the improvement due to fine-grained token-level feedback, we perform an ablation study where we compare the binary (scalar) and token-level versions of feedback for the RL fine-tuning. After RL fine-tuning, we evaluate the performance on the test set using ToT with the updated LLM. We perform RLSF fine-tuning on two popular smaller open-source LLM models (\texttt{gemma-2b-it}~\citep{team2024gemma} and \texttt{llama2-7b-chat}~\citep{touvron2023llama}) that we obtain from Huggingface~\citep{huggngface} and also compare against two closed-source models GPT-3.5 and GPT-4~\citep{achiam2023gpt}. 
+
+\subsection{Results}
+\begin{table}[t]
+\caption{\textbf{Game of 24 Results:} Performance comparison of methods over different LLMs}
+\label{tab:g24_results}
+\centering
+\renewcommand{\arraystretch}{1.1}
+  \begin{adjustbox}{width=0.68\columnwidth}
+\begin{tabular}{@{}|cl|rr@{}}
+\toprule
+ LLM & Configuration & Success \\ \midrule
+\multirow{3}{*}{\texttt{GPT-3.5}~\citep{achiam2023gpt}} 
+& IO prompt & 6\%\\
+& CoT prompt & 3\%\\
+& ToT prompt & \textbf{19\%}\\
+
+\noalign{\vskip 0.2ex}\hdashline\noalign{\vskip 0.4ex}
+
+\multirow{3}{*}{\texttt{GPT-4}~\citep{achiam2023gpt}} 
+& IO prompt & 7.3\%\\
+& CoT prompt & 4\%\\
+& ToT prompt & \textbf{69\%}\\
+
+\noalign{\vskip 0.2ex}\hdashline\noalign{\vskip 0.4ex}
+
+\multirow{5}{*}{\texttt{gemma-2b-it}~\citep{team2024gemma}} 
+& IO prompt & 1\%\\
+& CoT prompt & 3\%\\
+& ToT prompt & 2\%\\ 
+& ToT after RL with boolean scalar f/b & 1\% \\
+& \textit{ToT after RLSF with token-level f/b} & \textbf{17\%}\\
+
+\noalign{\vskip 0.2ex}\hdashline\noalign{\vskip 0.4ex}
+ 
+\multirow{5}{*}{\texttt{llama2-7b-chat}~\citep{touvron2023llama}}  
+& IO prompt & 5\%\\
+& CoT prompt & 1\%\\
+& ToT prompt & 1\%\\ 
+& ToT after RL with boolean scalar f/b & 1\% \\
+& \textit{ToT after RLSF with token-level f/b} & \textbf{26\%}\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+We conduct a comparative analysis of different methods applied across various LLMs to tackle the Game of 24 task (Table~\ref{tab:g24_results}). As observed by~\citep{yao2024tree}, the Tree of Thoughts (ToT) prompt method emerges as the most successful approach for both closed-source models GPT-3.5 and GPT-4, achieving success rates of 19\% and 69\%, respectively. This performance surpasses that of both the IO and CoT prompt methods. However, \texttt{gemma-2b-it} and \texttt{llama2-7b-chat} exhibit \textbf{poor performance across all the three prompting methods}.
+
+We explore the use of boolean scalar feedback for RL fine-tuning, where the Computer Algebra System (CAS) provides binary feedback based on the correctness of the generated response. However, we observe either degradation or maintenance of performance levels with this feedback mechanism (Table~\ref{tab:g24_results}). Consequently, we transition to a token-level feedback approach using RLSF, where the symbolic environment provides token-level feedback (Figure~\ref{fig:rlsf_g24}), resulting in a significant improvement in performance. Specifically, after employing Reinforcement Learning via Symbolic Feedback (RLSF) fine-tuning, \texttt{gemma-2b-it} demonstrates a 15\% increase in success rate, while \texttt{llama2-7b-chat} exhibits a 25\% improvement in success rate compared to ToT prompting prior to RLSF fine-tuning. Notably, the 7-billion-parameter \texttt{llama2-7b-chat} outperforms (+7\%) the 175-billion-parameter GPT-3.5 model, underscoring the effectiveness of RLSF in enhancing model performance. However, GPT-4 demonstrates the best performance across all methods. We attribute this to its ultra-large-scale pre-training and architecture advancements. Looking ahead, future investigations can explore the application of RLSF on larger open-source LLMs. 
+
+
+\section{Conclusions, Limitations, and Future Work}
+
+In this paper, we introduced RLSF, a fine-tuning paradigm that incorporates RL-based symbolic feedback into the fine-tuning process of LLMs. While we do not claim to improve general reasoning capabilities, RLSF leverages symbolic reasoning tools to improve downstream domain-specific tasks where syntax and semantics play a critical role. Our results show a significant improvement in all five tasks, over different traditional prompting and fine-tuning methods. Notably, the RLSF-tuned \texttt{galactica-1.3b} achieves superior results compared to GPT-4 (1000$\boldsymbol\times$ larger) on the three chemistry tasks, RLSF-tuned \texttt{code-gemma-2b} outperforms GPT-3.5 (100$\boldsymbol\times$ larger) on the program synthesis task. Similarly, RLSF-tuned \texttt{llama2-7b-chat} also outperforms GPT-3.5 (25$\boldsymbol\times$ larger) on Game of 24. Additionally, unlike traditional neuro-symbolic RL approaches, RLSF does not require differentiable reasoning systems, making it more versatile and practical.
+
+\textbf{Limitations and future work.} This study demonstrates the initial potential of integrating symbolic feedback into RL frameworks, with empirical improvements in specific domains such as program synthesis, chemistry and mathematical tasks. While we do not aim to enhance the overall reasoning capabilities of LLMs, our focus has been on developing a new fine-tuning paradigm that outperforms traditional methods within specific domains. Future research may extend this to explore theoretical guarantees, its impact across other reasoning tasks, and broader LLM reasoning capabilities. Lastly, our focus has been solely on fine-tuning, but we believe that combining RLSF with multi-step symbolic feedback during inference could further boost performance.
+
+
+
+
+
+
+

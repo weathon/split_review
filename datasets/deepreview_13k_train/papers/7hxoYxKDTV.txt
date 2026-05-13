@@ -1,0 +1,315 @@
+\title{Continuous-Multiple Image Outpainting in One-Step via Positional Query and A Diffusion-based Approach}
+
+\begin{abstract}
+Image outpainting aims to generate the content of an input sub-image beyond its original boundaries. It is an important task in content generation yet remains an open problem for generative models. This paper pushes the technical frontier of image outpainting in two directions that have not been resolved in literature: 1) outpainting with arbitrary and continuous multiples (without restriction), and 2) outpainting in a single step (even for large expansion multiples). Moreover, we develop a method that does not depend on a pre-trained backbone network, which is in contrast commonly required by the previous SOTA outpainting methods. The arbitrary multiple outpainting is achieved by utilizing randomly cropped views from the same image during training to capture arbitrary relative positional information. Specifically, by feeding one view and positional embeddings as queries, we can reconstruct another view. At inference, we generate images with arbitrary expansion multiples by inputting an anchor image and its corresponding positional embeddings. The one-step outpainting ability here is particularly noteworthy in contrast to previous methods that need to be performed for $N$ times to obtain a final multiple which is $N$ times of its basic and fixed multiple. We evaluate the proposed approach (called PQDiff as we adopt a diffusion-based generator as our embodiment, under our proposed \textbf{P}ositional \textbf{Q}uery scheme) on public benchmarks, demonstrating its superior performance over state-of-the-art approaches. Specifically, PQDiff achieves state-of-the-art FID scores on the Scenery (\textbf{21.512}), Building Facades (\textbf{25.310}), and WikiArts (\textbf{36.212}) datasets. Furthermore, under the 2.25x, 5x and 11.7x outpainting settings, PQDiff only takes \textbf{40.6\%}, \textbf{20.3\%} and \textbf{10.2\%} of the time of the benchmark state-of-the-art (SOTA) method.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Image outpainting~\citep{infinitegan, inout, sketch}, a.k.a. image extrapolation~\citep{sindiff, edgeoutpaint, multimodalout}, is to generate new content beyond the original boundaries of a given sub-image. It is technically an essential problem for generative models and remains relatively open (compared with other condition-based generation settings e.g. image inpainting~\citep{inpainting}, style transfer~\citep{transfer} etc.), which meanwhile can find wide applications in automatic creative image, virtual reality. Usually, an ideal outpainter is expected to achieve the following basic functions~\citep{queryqtr}: 1) determining where the missing regions should be located relative to the output’s spatial locations for both nearby and faraway features; 2) guaranteeing that the extrapolated image has a consistent structural layout with the given sub-image; and 3) the borders between extrapolated regions and original input images should be visually smooth.
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=.95\textwidth]{images/crop_out_sample.pdf}
+    \caption{PQDiff can outpaint images with arbitrary and continuous multiples in one step (b). In contrast, previous methods (a) outpaint images with discrete multiples in multiple steps. Note that $N$x here means an $N$-times larger image needs to be generated, while 2.25x, 5x, and 11.7x are adopted in the experiment following the setting of the previous work~\citep{queryqtr} for fair comparisons.}
+    \label{fig:illustration}
+\end{figure}
+\begin{table}[tb!]
+    \caption{Methodology comparisons of the proposed PQDiff with recent advanced image outpainting methods. Pixel loss means pixel-wise $l_1$ or $l_2$ loss on the generated images. Feature loss means $l_2$ loss on the feature map. Training from scratch means the backbone is randomly initialized.}
+    \centering
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{l|cccccc}
+    \toprule[1pt]
+        Method & Generation type & Objectives & Encoder & Continuous multiple & One-step & Train from scratch \\
+    \midrule[0.8pt]
+        NSIPO~\citep{nsipo} & GAN-based~\citep{gan} & Pixel+GAN loss & ResNet-50~\citep{resnet} & \XSolidBrush & \XSolidBrush & \CheckmarkBold \\
+        IOH~\citep{ioh} & GAN-based~\citep{gan} & Pixel+GAN loss & Conv layers & \XSolidBrush & \XSolidBrush & \CheckmarkBold \\
+        Uformer~\citep{uformer} & GAN-based~\citep{gan} & Pixel+GAN+Feature Loss & Swin Trans~\citep{swin} & \XSolidBrush & \XSolidBrush & \XSolidBrush \\
+        QueryOTR~\citep{uformer} & GAN~\citep{gan}+MAE~\citep{mae} & Pixel+GAN Loss & ViT~\citep{vit} & \XSolidBrush & \XSolidBrush & \XSolidBrush \\
+        Vanilla Diff~\citep{ddpm} & Diffusion-based & Pixel Loss & ViT~\citep{vit} & \XSolidBrush & \XSolidBrush & \CheckmarkBold \\
+        \rowcolor{aliceblue} PQDiff &  Diffusion-based & Pixel Loss & ViT~\citep{vit} & \CheckmarkBold & \CheckmarkBold & \CheckmarkBold \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab:method_comparison}
+\end{table}
+
+These requirements have been mainly addressed by existing outpainting methods which in general fall into two categories: i) GAN-based methods~\citep{ioh, nsipo}, whereby random noise and the initial input sub-images (as conditions) are used to generate the fake surrounding image content, and the discriminator is to classify the generated images as fake or real; ii) MAE-based methods~\citep{queryqtr} use MAE (Masked Autoencoder)~\citep{mae} as the main architecture. They model the extrapolation as the MIM (Masked Image Modeling) problem~\citep{simmim} by replacing the extrapolated regions around the input sub-images with masked tokens and predicting the pixels of the masked patches. Specifically, these MAE-based methods also employ a discriminator to enhance the smoothness of the borders between extrapolated regions and the original sub-images. The above two kinds of methods mainly suffer from two applicability limitations. \textbf{First,} as shown in Fig.~\ref{fig:illustration}(a), they require running multiple times to outpaints the image (e.g., the SOTA method in ~\citep{queryqtr} outpaints 11.7x images by passing through the model three times (x $\rightarrow forward \rightarrow 2.25$x $\rightarrow forward \rightarrow 5$x $\rightarrow forward \rightarrow 11.7$x), which is inefficient especially when the required expansion multiple is large (e.g. 99x); \textbf{Second,} the discriminator-based architecture can slow down the convergence speed~\citep{gan, bwgan}, and require a pre-trained encoder. In other words, the computational cost of training their model in fact includes the pretraining cost, which is usually very high (e.g. up to 1,000 or longer epochs on ImageNet). 
+
+In this paper, we emphasize and tackle two less-studied challenges, especially the flexibility, and efficiency for a practical tool: the model is expected to i) outpaint images in arbitrary and continuous multiples (i.e. by $N\in \mathbb{R}$ times), where $N$x multiples mean the contents of the extrapolated images are $N>1$ times larger than the input sub-images, especially without resorting to retrain a model for every different $N$; and ii) outpaint with any multiple $N$ in one step\footnote{\rebuttal{Note that the step here refers to how many iterations need to be passed through the model instead of \textbf{timesteps} in the diffusion models.}}. 
+
+
+
+Recently diffusion models~\citep{diffgan, dedm, diffusionret, jin2023act, dvce} have shown success for multi-modal~\cite{jin2023video, jin2022expectation} and image generation~\citep{palette} with a progressive denoising procedure. Yet such an iterative step-by-step (also called timesteps) in the sampling (i.e. testing) stage can be too tedious for outpainting, especially considering image outpainting itself also still requires its own iterations (e.g. QueryOTR~\citep{queryqtr}, IOH~\citep{ioh}). To achieve one-step diffusion-based generation, we propose to use relative positional queries and input sub-images as conditions. Since the relative positional embedding can represent any positional relationship between the input sub-image and the extrapolated image, we can outpaint the sub-image in controllable and continuous multiples in one step (Fig.~\ref{fig:illustration}(b)). We make methodology comparisons in Table~\ref{tab:method_comparison} to better position our method. The main contributions include:
+
+\textbf{i) Continuous multiples for image outpainting.}
+We propose PQDiff, which learns the positional relationships and pixel information at the same time. Specifically, in the training stage, PQDiff first randomly crops the given images twice to generate two views. Then, PQDiff learns one cropped view from the other cropped view and the pre-calculated relative positional embeddings (RPE) of the two views. Since the RPE can represent continuous relationships between two views, PQDiff can outpaint the images in continuous multiples. To our best knowledge, we are the first to outpaint images in continuous multiples (e.g., 1x, 2.25x, 3.6x, 21.8x), whereas the SOTA QueryOTR~\citep{queryqtr} can only outpaint images in discrete multiples.
+
+\textbf{ii) One-step image outpainting.} 
+We propose a position-aware cross-attention mechanism between relative positional embedding and input sub-image patches, which helps PQDiff to outpaint images in only one step for any multiple settings. As far as we know, PQDiff is the first to achieve this capability, whereas~\citep{queryqtr, nsipo} can only outpaint images step-by-step, which severely limits their sampling, i.e. generation efficiency. Under the 2.25x, 5x and 11.7x outpainting settings, PQDiff only takes \textbf{40.6\%}, \textbf{20.3\%}, and \textbf{10.2\%} of the time of QueryOTR~\citep{queryqtr}.
+
+\textbf{iii) New SOTA performance.} Experimental results on outpainting benchmarks~\citep{uformer, nsipo} show that PQDiff significantly surpasses QueryOTR~\citep{queryqtr} and achieves new SOTA \textbf{21.512}, \textbf{25.310} and \textbf{36.212} FID scores with the challenging 11.7x multiple setting on the Scenery, Building Facades, and WikiArts datasets, respectively. Moverover, PQDiff achieves new SOTA results in most settings (2.25x, 5x, and 11.7x).
+
+
+\section{Background and Related Work}
+
+\textbf{Image Outpainting.} It aims to generate the surrounding regions from the visual content, which can be considered as an image-conditioned generation task~\citep{acgan, regan, spiral, wgan, wgangp}. The work~\citep{outgan} brings the image outpainting task to attention with a deep neural network inspired by image inpainting~\citep{inpainting}. It focuses on enhancing the quality of generated images smoothly by using GANs and post-processing to perform horizontal outpainting. The work~\citep{ioh} designs a CNN-based encoder-to-decoder framework by using GAN for image outpainting. In~\citep{srn}, a Semantic Regeneration Network is  proposed to directly learn the semantic features from the conditional sub-image. While a 3-stage model is developed in~\citep{edgeout} with an edge-guided generative network to produce semantically consistent output. Although these methods avoid bias in the general padding and up-sampling pattern, they still suffer from blunt structures and abrupt color issues, which tend to ignore spatial and semantic consistency. To tackle these issues, a Recurrent Content Transfer (RCT) block is devised~\citep{nsipo} for temporal content prediction with Long Short Term Memory (LSTM) networks~\citep{lstm}. To enrich the context,~\citep{brindge} additionally switches the outer area of images into its inner area.
+
+\textbf{The SOTA Outpainting Method QueryOTR~\citep{queryqtr}. } We particularly discuss QueryOTR for its so-far best performance as well as its adoption of ViT module as also will be used in our approach. QueryOTR~\citep{queryqtr} proposes to adopt the ViT-based encoder and MIM-based~\citep{ccmim} architecture for outpainting. Specifically, given an input sub-image $\mathbf{x} \in \mathbb{R}^{H \times W \times 3}$, QueryOTR first partitions $\mathbf{x}$ into regular non-overlapping patches with the patch size $P \times P$ to obtain the patch tokens $\{\mathbf{x}_{p}^{1}, \mathbf{x}_{p}^{2}, \cdots, \mathbf{x}_{p}^{L}\}$, where $P$ is usually set as 16 and $L = \frac{H\times W}{P^{2}}$. The goal of QueryOTR is to predict the extra sequence $\{\mathbf{x}_{p}^{L+1}, \mathbf{x}_{p}^{L+2}, \cdots, \mathbf{x}_{p}^{L+R}\}$ representing the extrapolated regions. In line with MAE~\citep{mae}, the sin-cos positional embedding of input patches is pre-defined. Thus, the positional embedding of the extrapolated patches can be obtained. The training of QueryOTR also follows MAE~\citep{mae}, where the visible patches sequence $\{\mathbf{x}_{p}^{1}, \mathbf{x}_{p}^{2}, \cdots, \mathbf{x}_{p}^{L}\}$ is fed to the encoder. Then, the fixed positional embedding of the masked tokens sequences $\{\mathbf{x}_{p}^{L+1}, \mathbf{x}_{p}^{L+2}, \cdots, \mathbf{x}_{p}^{L+R}\}$ is used as input to the decoder to predict the extrapolated patches. Finally, QueryOTR copies the input sub-image to the generated image in the corresponding position, followed by the Patch Smoothing Module (PSM) to smooth the border. 
+
+\textbf{Diffusion Models. }These models (e.g. the seminal work~\citep{ddpm}) gradually inject noise into data and then reverse this process to generate data from noise. The noise-injection process is also called the forward process. Given the original data $\mathbf{x}_0$ (clean), then, the forward process can be formalized as a Markov chain:
+$
+    q(\mathbf{x}_{1:T} \vert \mathbf{x}_{0}) = \prod_{t=1}^{T} q(\mathbf{x}_{t} \vert \mathbf{x}_{t-1})
+$
+where $q$ is the forward process and $q(\mathbf{x}_{t}\vert \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_{t}\vert \sqrt{\alpha_{t}} \mathbf{x}_{t-1}, \beta_{t} \mathbf{I})$, and $\alpha$ and $\beta$ represent the noise schedule and $\alpha + \beta=1$. $\mathcal{N}(0, 1)$ means the standard Gaussion noise. To reverse this process, a Gaussion model $p(\mathbf{x}_{t-1} \vert \mathbf{x}_{t}) = \mathcal{N}(x_{t-1} \vert \mathbf{\mu}_{t}(\mathbf{x}_{t}), \sigma^{2}_{t}\mathbf{I})$ is adopted to approximate the ground truth reverse transition $q_{\mathbf{x}_{t-1}\vert \mathbf{x}_{t}}$. 
+Specifically, the optimal mean value of $\mathbf{x}_{t}$ can be written as~\citep{dpm}:
+$
+    \mathbf{\mu}^{*}_{t}(\mathbf{x}_{t}) = \frac{1}{\sqrt{\alpha_{t}}} \left(\mathbf{x}_{t} - \frac{\beta_{t}}{\sqrt{1-\overline{\alpha}}} \mathbb{E}[\epsilon \vert \mathbf{x}_{t}]\right)
+$
+where $\overline{\alpha_{t}} = \prod_{i=1}^{t} \alpha_i$, and $\epsilon$ is the standard Gaussian noises injected to $\mathbf{x}_{t}$. Thus, the learning is equivalent to a noise prediction task. Formally, a noise prediction network $\epsilon_{\theta}(\mathbf{x}_{t}, t)$ is used to learn $\mathbb{E}[\epsilon \vert 
+\mathbf{x}_{t}]$ by minimizing the noise prediction objective. For $l_2$ loss, we can formulate the objective of noise prediction task as $\mathop{min}_{\theta} \mathbb{E}_{t, \mathbf{x}_0, \epsilon} \Vert \epsilon - \epsilon_{\theta}(\mathbf{x}_{t}, t) \Vert_2^2$, where $t$ is uniform between $1$ and $T$. On the basis of the plain diffusion models, LDM~\citep{ldm} proposes to add noise and denoise in the latent space, which greatly improves the training efficiency. Followed by LDM, ViTDiff~\citep{vitdiff} proposes to replace CNN-base U-net~\citep{unet} with ViTs~\citep{vit} to estimate the backward process in diffusion models. %Except for image generation, diffusion models have been also widely used in many other applications, e.g., object detection~\citep{diffusiondet}, video generation~\citep{diffusionvideo}, segmentation~\citep{diffusionseg}.
+
+
+\section{The proposed Positional-Query Based Diffusion model}
+
+We provide a concrete embodiment based on the diffusion model and we term our approach as PQDiff, whereby the continuous multiples and one-step generation are achieved. In fact, our PQ framework with these two advantages can also incorporate other generative models e.g. GANs, and the empirical performance comparison given in our ablation studies. We also show the significant improvements of our approach compared with a vanilla diffusion model directly for outpainting.
+
+\textbf{Approach Overview. }Our approach mainly consists of key modules: relative positional embedding, diffusion process, cross attention in the position-aware transformer model, and sampling pipeline. 
+
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=.96\textwidth]{images/crop_framework_update.pdf}
+    \caption{Framework of PQDiff. RPE in Eq. For training, we randomly crop the image twice with different random crop ratios to obtain two views. 
+    \rebuttal{Then, we compute the relative positional embeddings of the anchor view (red box) and the target view (blue box). For sampling, i.e. testing or generation, we first compute the target view (blue box) based on the anchor view (red box) to form a mode that means a positional relation. With different types of modes, we can perform arbitrary and controllable image outpainting. Then, we feed the RPE, random Gaussian noise, and input sub-image to perform outpainting. In theory, our PQDiff can outpaint (predict) the region at any location, due to the randomness of cropping in the training stage. Mode means the positional relations between the anchor view and the target view.}
+    }
+    \label{fig:framework}
+\end{figure}
+
+\label{sec:method}
+\textbf{Relative Positional Embedding.} Given the image $\mathbf{x} \in \mathbb{R}^{H\times W \times 3}$from the training set, we first randomly crop the image twice and resize the cropped image to generate two views $\mathbf{x}_{a} \in \mathbb{R}^{h_1\times w_1 \times 3}$ and $\mathbf{x}_{b} \in \mathbb{R}^{h_2 \times w_2 \times 3}$, where $\mathbf{x}_{a}$ and $\mathbf{x}_{b}$ are denoted as the anchor and target view which are not necessarily the same size. We also denote $(w, h)$ as the predefined resolution to be generated. 
+\rebuttal{Then, we resize both the anchor view and target view to $(w, h)$}. As illustrated in Fig.~\ref{fig:framework}, we can first obtain the prior information of positional relationship $(m, n)$ between the anchor view $\mathbf{x}_{a}$ and target view $\mathbf{x}_b$. Then, we design the relative positional embedding to represent the position relation:
+\begin{equation}
+\begin{aligned}
+\label{eqn:pos_embed}
+    \mathbf{E}_{m, n} =&\left [ \sin\left(\frac{m}{e^{2*1/d}}\right), \cos\left(\frac{m}{e^{2*2/d}}\right), \cdots, \sin\left(\frac{m}{e}\right),\right. \left.\sin\left(\frac{n}{e^{2*1/d}}\right), \cos\left(\frac{n}{e^{2*2/d}}\right), \cdots, \sin\left(\frac{n}{e}\right) \right],
+\end{aligned}
+\end{equation}
+where $e=10,000$ is the pre-defined parameter, as also commonly used in~\citep{mae, pqcl, adclr}. $(m, n)$ means the position of top-left patch position (see Fig.~\ref{fig:framework}). Note that we randomly crop two views, and as a result, the positional relationship of the two views might be either containing, overlapping, or non-overlapping, and our model can jointly learn these three relationships.
+
+\textbf{Forward and Backward of Conditioned Diffusion. }Given the anchor view $\mathbf{x}_{a} \in \mathbb{R}^{h \times w \times 3}$, target view $\mathbf{x}_{b} \in \mathbb{R}^{h \times w \times 3}$ and the relative positional embedding $\mathbf{E} \in \mathbb{R}^{L\times D}$ ($L$ and $D$ are the patches' length and the predefined dimension), we first encode the two views by VQVAE~\citep{vqvae} (frozen) to compress the images to latent space, resulting in $\mathbf{z}_{a} \in \mathbb{R}^{h'\times w' \times c}$ and $\mathbf{z}_{b} \in \mathbb{R}^{h'\times w' \times c}$ (usually, $h'<h$, $w'<w$). The compression aims to improve the training efficiency and convergence speed of the diffusion models~\citep{vitdiff, ldm}. After obtaining the two latent views, we patchify the two views and obtain the anchor sequence $\{\mathbf{z}_{a}^{1}, \mathbf{z}_{a}^{2}, \cdots, \mathbf{z}_{a}^{L}\}$ and target sequence $\{\mathbf{z}_{b}^{1}, \mathbf{z}_{b}^{2}, \cdots, \mathbf{z}_{b}^{L}\}$ (typically, we set $L=\frac{h\times w}{p^{2}}$). Then, the forward process of diffusion on the target sequence can be formulated as:
+\begin{equation}
+\label{eqn:forward}
+    q(\mathbf{z}_{b_t} \vert \mathbf{z}_{b_{t-1}}) = \mathcal{N}(\mathbf{z}_{b_{t-1}} \vert \sqrt{\alpha_t} \mathbf{z}_{b_{t-1}}, \beta_t \mathbf{I}),\  \text{and} \ \ \ q(\mathbf{z}_{b_{t}} \vert \rebuttal{\mathbf{z}_{b_0}}) = \mathcal{N}(\mathbf{z}_{b_t} \vert \sqrt{\overline{\alpha}_t}, (1-\overline{\alpha}_t) \mathbf{I}),
+\end{equation}
+where $\mathbf{z}_{b_{0}}$ is the original target sequence $\{\mathbf{z}_{b}^{1}, \mathbf{z}_{b}^{2}, \cdots, \mathbf{z}_{b}^{L}\}$ and $\overline{\alpha}_t = \prod_{t=1}^{t} \alpha_i$. For the backward process, suppose we have a neural network $g_{\theta}$ (will be described later), taking the noisy target $\mathbf{z}_{b_{t}}$, clean anchor sequence $\mathbf{z}_{a}$ and relative positional embeddings $\mathbf{E}$ as input. Then, the network aims to predict the added noise $\epsilon_t$ on the target sequence $\mathbf{x}_{b_t}$. Then, the objective of PQDiff can be written as:
+\begin{equation}
+\label{eqn:loss}
+    \mathcal{L}_{PQDiff} = \Vert \widetilde{\epsilon}_{t} - \epsilon_{t} \Vert_{p}^{p}, \ \ \ and \ \ \ \widetilde{\epsilon}_{t} = g_{\theta}(\mathbf{x}_{a}, \mathbf{x}_{b_t}, \mathbf{E}, t).
+\end{equation}
+We set $p=2$ in line with the previous generative methods~\citep{ldm, vitdiff}.
+
+\textbf{The Position-Aware Transformer Model $g_{\theta}$. }Here, we describe the architecture of the neural network used in the diffusion model in detail. Consider we have the noisy target $\mathbf{z}_{b_t}$, clean anchor sequence $\mathbf{z}_a$, relative positional embeddings $\mathbf{E}$ and the timestep $t$, we first concatenate the noisy target and the anchor sequence at the channel dimension, followed by a linear layer to map to original dimension to reduce the computational cost, and we denote the mapped embedding as $\mathbf{z}_{g} \in \mathbf{L \times D}$, where $D$ is the predefined hidden dimension in transformer network. Then, we feed the $\mathbf{z}_{g}$ into the transformer encoder, which is composed of several transformer blocks~\citep{attention}. After the transformer encoder, the position-aware cross-attention mechanism is proposed to learn positional relationship, which can be formulated as:
+\begin{equation}
+    \mathbf{z}_{d}=\operatorname{Attn} \left(\mathbf{Q}_{\mathbf{E}}, \mathbf{K}_{\mathbf{z}_{g}}, \mathbf{V}_{\mathbf{z}_{g}}\right) = \operatorname{Softmax}\left(\frac{\mathbf{Q_{\mathbf{E}}K^{\top}_{\mathbf{z}_{g}}}}{\sqrt{D}}\right) \mathbf{V}_{\mathbf{z}_{g}},
+\end{equation}
+
+where $\mathbf{Q}_{E} = \mathbf{E}\mathbf{W}_{q}$, $\mathbf{K}_{\mathbf{z}_{g}}=\mathbf{z}_{g}\mathbf{W}_{k}$, $\mathbf{V}_{\mathbf{z}_{g}}=\mathbf{z}_{g}\mathbf{W}_{v}$, and $\mathbf{W}_{q}$, $\mathbf{W}_{k}$, $\mathbf{W}_{v}$ are learnable parameters. After capturing the information of the target position $\mathbf{z}_{d}$, we directly feed the $\mathbf{z}_{d}$ into the transformer decoder composed of several transformer blocks, followed by a convolutional layer to predict noise.
+\begin{figure}[tb!]
+    \centering
+    \caption{Comparison on the 2.25x, 5x, and 11.7x settings with the SOTA method QueryOTR. The images generated by QueryOTR come from the pre-trained model in their official repository. We highlight two kinds of noises from QueryOTR. The \textbf{\color{red}red} box indicates that the boundary of the input sub-image is inconsistent with the generated region, and a \textbf{\color{yellow}yellow} box contains noise and spots. We also find some interesting phenomena (highlighted in the \textbf{\color{green}green} ovals of generated images in the right figure), where PQDiff can notice the generated ``clouds'', and reflect the ``clouds'' in ``water''. Moreover, the shape of the clouds in the sky and the reflections in the water are also consistent. In contrast, the previous method only generates ``clouds'', but ignores the reflection in the water.}
+    \label{fig:quality}
+\end{figure}
+\textbf{Sampling Pipeline. }After training the network well, we can outpaint the image in any controlled multiples, since the designed relative positional encoding can represent any positional relationship between two images. In the sampling stage, we can simply take the input sub-image as the anchor view, and input any position we want. Then, we calculate the positional encoding of the given position and feed the RPE to the network. Then, the network can predict the noise as mentioned in Eq.~\ref{eqn:loss}. Finally, through Eq.~\ref{eqn:forward}, we can simply compute the fake $\widetilde{\mathbf{z}}_{b_{0}}$, and predict $\mathbf{z}_{b_{t-1}}$ step-by-step by:
+\begin{equation}
+\label{eqn:backward}
+\begin{aligned}
+    q(\mathbf{z}_{b_{t-1}} \vert \mathbf{z}_{b_{t}}, \widetilde{\mathbf{z}}_{b_{0}}) &= \mathcal{N}(\mathbf{z}_{b_{t-1}}; \widetilde{\mu}_t(\mathbf{z}_{b_{t}}, \widetilde{\mathbf{z}}_{b_{0}}), \widetilde{\beta}_t\mathbf{I}), \\
+    \widetilde{\mu}_t (\mathbf{z}_{b_t}, \widetilde{\mathbf{z}}_{b_{0}}) = \frac{\sqrt{\overline{\alpha}_{t-1}}\beta_t}{1-\overline{\alpha}_t} \widetilde{\mathbf{z}}_{b_{0}} &+ \frac{\sqrt{\alpha}(1-\overline{\alpha}_{t-1})}{1-\overline{\alpha}_t} \mathbf{z_{b_{t}}},\ and \ \ \ \widetilde{\beta}_t = \frac{1-\overline{\alpha}_{t-1}}{1-\overline{\alpha}_{t}}\beta_t.
+\end{aligned}
+\end{equation}
+After several iterations, when $t=0$, we can obtain the extrapolated images. The training and sampling algorithms are given in Alg.~\ref{alg:training} and Alg.
+
+\textbf{Discussion. }As DDPM~\citep{ddpm} requires step-by-step sampling, DDIM~\citep{ddim} is proposed to use ODE~\citep{ode} equation for faster sampling. Our PQDiff can also use the DDIM for faster sampling. Specifically, through the Euler method and probability flow ODE proposed in~\citep{ode}, we can obtain $\mathbf{z}_{b_{t-\Delta t}}$ by:
+\begin{equation}
+    \mathbf{z}_{b_{t-\Delta t}} = \sqrt{\alpha_{t-\Delta t}} \cdot \left ( \frac{\mathbf{z}_{b_{t}}}{\alpha_t} + \frac{1}{2} \left(\frac{1-\alpha_{t-\Delta t}}{\alpha_{t-\Delta t}} - \frac{1-\alpha_t}{\alpha_t}\right) \cdot \sqrt{\frac{\alpha_t}{1-\alpha_t}} \cdot g_{\theta}(\mathbf{z}_{b_{t}}) \right ).
+\end{equation}
+Then, the \rebuttal{one-timestep} sampling in each iteration and be replaced with $\Delta_t$ \rebuttal{timesteps} in each iteration. 
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Results}
+
+\textbf{Quantitative Results. }Table~\ref{tab:quantitative} shows that PQDiff with a copy operation outperforms in all metrics on 2.25x, 5x, and 11.7x experiments. In particular, with a larger outpainting multiple, PQDiff can obtain better FID and IS scores. For 11.7x outpainting, PQDiff surpasses the previous SOTA QueryOTR~\citep{queryqtr} \textbf{\color{dgreen}16.460}, \textbf{\color{dgreen}25.310}, and \textbf{\color{dgreen}36.216} FID scores on Scenery, Building and WikiArt datasets, respectively. We also find an interesting phenomenon that, on WikiArt, PQDiff can surpass PQDiff + Copy on 5x and 11.7x experiments. In other words, the generated images without copy could be more realistic than the ones with the centroid copy operation. This is perhaps because the boundary region of the input sub-image is slightly inconsistent with the generated image.
+
+\textbf{Qualitative Results. }Examples of visual results  are shown in Fig.~\ref{fig:quality} (the ``copy'' operation is added on all methods for better comparisons). PQDiff effectively outpaints the images by querying the global semantic-similar image patches. As seen from the 2.25x outpainting results, PQDiff could generate more realistic images with vivid details and enrich the contents of the generated regions. In addition, although QueryOTR~\citep{queryqtr} adds the smoothing module to handle the inconsistency of the boundary region, there are still a few noisy spots as highlighted in \textbf{\color{red}red} boxes. For 5x and 11.7x results, we can clearly see the images generated from the QueryOTR are much vaguer than those generated by PQDiff. Moreover, PQDiff can handle details well. For example, the ``clouds' reflection'' in the ``water'' is consistent with the generated ``clouds'' in the sky, as highlighted in the \textbf{\color{green}green} ovals.
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=\textwidth]{images/random_vhjf_1.pdf}
+    \caption{Example images generated by PQDiff via random relative positional embedding. The original image (Ori) as input is mapped to the corresponding location in the generated image (Gen). Note that the generated images do not explicitly undergo any ``copy'' operation, but still reserve the input pixels. Moreover, PQDiff learns the scales of input images according to the given mode setting.
+    }
+    \label{fig:random}
+\end{figure}
+\begin{table}[tb!]
+    \caption{Results at different multiples. 2.25x, 5x, and 11.7x mean input sizes are 128x128, 86x86, and 56x56, respectively. After feeding to the network $g_{\theta}$, all input sub-images are first resized to 192x192. ``+ Copy'' operation means after the network yields the extrapolated images, the model copies the input sub-images to the corresponding center region in the extrapolated images. The best results and second best results are indicated by \textbf{boldface} and \underline{underline}, respectively.}
+    \centering
+    \resizebox{\textwidth}{!}{\begin{tabular}{c|l|l|l|cc|cc|cc}
+    \toprule[1pt]
+        \multirow{2}{*}{Multiple} & \multirow{2}{*}{Methods} & \multirow{2}{*}{Type} & \multirow{2}{*}{Encoder} & \multicolumn{2}{c|}{Scenery} & \multicolumn{2}{c|}{Building Facades} & \multicolumn{2}{c}{WikiArt}\\
+        ~ & ~ & ~ & ~ & FID $\downarrow$ & IS $\uparrow$ & FID $\downarrow$ & IS $\uparrow$ & FID $\downarrow$ & IS $\uparrow$ \\
+    \midrule[0.8pt]
+        \multirow{7}{*}{2.25x} & SRN~\citep{srn} & GAN-based & VGG~\citep{vgg} & 47.781 & 2.981 & 38.644 & 3.862 & 76.749 & 3.629 \\
+        ~ & NSIPO~\citep{nsipo} & GAN-based & ResNet~\citep{resnet} & 25.977 & 3.059 & 30.465 & 4.153 & 22.242 & 5.600 \\
+        ~ & IOH~\citep{ioh} & GAN-based & Conv layers & 32.107 & 2.886 & 49.481 & 3.924 & 40.184 & 4.835 \\
+        ~ & Uformer~\citep{uformer} & GAN-based & Swin Transformer~\citep{swin} & 20.575 & 3.249 & 30.542 & 4.189 & 15.904 & 6.567 \\
+        ~ & QueryOTR~\citep{queryqtr} + Copy & GAN+MAE & ViT~\citep{vit} & \underline{20.366} & \underline{3.955} & \underline{22.378} & \underline{4.978} & \underline{14.955} & \underline{7.896} \\
+        \rowcolor{aliceblue} ~ & PQDiff (Ours) & Diffusion-based & ViT~\citep{vit} & 29.446 & 3.849 & 28.855 & 4.879	& 10.454 & 7.374 \\
+        \rowcolor{aliceblue} ~ & PQDiff + Copy (Ours) & Diffusion-based & ViT~\citep{vit} & \textbf{20.100} & \textbf{3.981} & \textbf{19.133} & \textbf{5.350}	 & \textbf{7.968} & \textbf{8.605} \\
+    \midrule[0.8pt]
+        \multirow{7}{*}{5x} & SRN~\citep{srn} & GAN-based & VGG~\citep{vgg} & 83.772 & 2.349 & 74.304 & 3.651 & 137.997 & 3.039 \\
+        ~ & NSIPO~\citep{nsipo} & GAN-based & ResNet~\citep{resnet} & 45.989 & 2.606 & 58.341 & 3.669 & 51.668 & 4.591 \\
+        ~ & IOH~\citep{ioh} & GAN-based & Conv layers & 44.742 & 2.655 & 76.476 & 3.456 & 75.070 & 4.289 \\
+        ~ & Uformer~\citep{uformer} & GAN-based & Swin Transformer~\citep{swin} & 39.801 & 2.920 & 63.915 & 3.798 & 41.107 & 5.900 \\
+        ~ & QueryOTR~\citep{queryqtr} + Copy & GAN+MAE & ViT~\citep{vit} & 39.237 & 3.431 & 41.273 & \underline{4.547} & 43.757 & 6.341 \\
+        \rowcolor{aliceblue} ~ & PQDiff (Ours) & Diffusion-based & ViT~\citep{vit} & \underline{34.492} & \underline{3.547} & \underline{34.799} & 4.433 & \textbf{15.297} & \underline{6.971} \\
+        \rowcolor{aliceblue} ~ & PQDiff + Copy (Ours) & Diffusion-based & ViT~\citep{vit} & \textbf{28.668} & \textbf{3.712} & \textbf{29.396} & \textbf{4.763} & \underline{15.772} & \textbf{7.876} \\
+    \midrule[0.8pt]
+        \multirow{7}{*}{11.7x} & SRN~\citep{srn} & GAN-based & VGG~\citep{vgg} & 115.193 & 2.087 & 110.036 & 2.938 & 181.533 & 2.504 \\
+        ~ & NSIPO~\citep{nsipo} & GAN-based & ResNet~\citep{resnet} & 64.457 & 2.405 & 81.301 & 3.431 & 75.785 & 4.225 \\
+        ~ & IOH~\citep{ioh} & GAN-based & Conv layers & 58.629 & 2.432 & 95.068 & 2.790 & 108.328 & 3.728 \\
+        ~ & Uformer~\citep{uformer} & GAN-based & Swin Transformer~\citep{swin} & 60.497 & 2.638 & 93.888 & 3.388 & 72.923 & 5.904 \\
+        ~ & QueryOTR~\citep{queryqtr} + Copy & GAN+MAE & ViT~\citep{vit} & 60.977 & 3.114 & 64.926 & 4.612 & 69.951 & 5.683 \\
+        \rowcolor{aliceblue} ~ & PQDiff (Ours) & Diffusion-based & ViT~\citep{vit} & \underline{44.517} & \underline{3.269} & \underline{43.971} & \underline{4.620} & \textbf{33.735} & \underline{6.957} \\
+        \rowcolor{aliceblue} ~ & PQDiff + Copy (Ours) & Diffusion-based & ViT~\citep{vit} & \textbf{39.465} & \textbf{3.574} & \textbf{39.616} & \textbf{4.754}	& \underline{36.326} & \textbf{7.724} \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab:quantitative}
+\end{table}
+
+\textbf{Sampling (i.e. Generation) Speed. }We also compare the sampling speed of PQDiff with different timesteps. Specifically, we first train PQDiff with 80,000 iterations. Then, for the sampling stage, we evaluate the pre-trained PQDiff with different timesteps. Table~\ref{tab:speed} reports the wall-clock time spent on generating 64 images on 8 V100 GPUs. Since PQDiff can outpaint images with any multiples in one step, the cases for 2.25x, 5x, and 11.7x spend almost the same time. In contrast, previous methods will take much more time under the 5x and 11.7x settings than in 2.25x. It is worth noting that, under the 2.25x setting, the inception score of PQDiff with 200 \rebuttal{timesteps} (4.111) is even higher than the ground truth (4.
+\begin{table}[tb!]
+    \caption{Comparison of sampling time, FID, and inception scores with 2.25x, 5x, 11.7x settings on Scenery dataset. The sampling time is the wall-clock time of generating 64 images on a single GPU.}
+    \centering
+    \resizebox{\textwidth}{!}{\begin{tabular}{l|ccc|ccc|ccc}
+    \toprule[1pt]
+        \multirow{2}{*}{Method} & \multicolumn{3}{c|}{2.25x} & \multicolumn{3}{c|}{5x} & \multicolumn{3}{c}{11.7x}\\
+        ~ & Time (Sec.) $\downarrow$ & FID $\downarrow$ & IS $\uparrow$ & Time (Sec.) $\downarrow$ & FID $\downarrow$ & IS $\uparrow$ & Time (Sec.) $\downarrow$ & FID $\downarrow$ & IS $\uparrow$\\
+    \midrule[0.8pt]
+        QueryOTR~\citep{queryqtr} & 23.728 & \textbf{20.366} & 3.955 & 47.456 & 39.237 & 3.431 & 71.184 & 60.977 & 3.114 \\
+        \rowcolor{aliceblue} PQDiff (20 \rebuttal{timesteps}) & \textbf{9.638} & 20.593 & \textbf{4.026} & \textbf{9.638} & \textbf{28.138} & \textbf{3.707} & \textbf{9.638} & \textbf{42.348} & \textbf{3.737} \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab:speed}
+\end{table}
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+\textbf{Outpainting in an arbitrary position. } Previous outpainting methods mainly plot the same multiples around the top, down, left, and right regions, and they can simply find where the input sub-image should locate in the generated image. Thus, the ``copy'' operation can be simply finished. However, for outpainting in random positions, it is difficult to find the corresponding locations, since the two images (generated and original) could have different scales. Moreover, the two images may also not intersect. Hence, we directly illustrate the images generated by PQDiff without the ``copy'' operation. Some examples generated from the controlled position are shown in Fig.~\ref{fig:random}, where the images generated by PQDiff without the ``copy'' iteration can be still vivid and realistic. Furthermore, without the ``copy'' operation, the generated images can also record the pixel information and put it into the corresponding locations. Meanwhile, since the scales of input sub-images and generated images may be different, PQDiff implicitly learns to scale the input sub-images as well.
+
+\begin{table}[tb!]
+    \caption{Comparisons of the center PSNR score over 2.25x, 5x, and 11.7x. Note that we find PQDiff calculates several infinite values, which indicates the center parts in images generated by PQDiff are completely the same with the input sub-images without any bias. Hence, to make our model comparable, we only include the images whose PSNR scores are below 1,000. For QueryOTR, we do not find the infinite value phenomenon, and we directly report the averaged PSNR scores.}
+    \centering
+    \resizebox{\textwidth}{!}{\begin{tabular}{l|ccc|ccc|ccc}
+    \toprule[1pt]
+        \multirow{2}{*}{Method} & \multicolumn{3}{c|}{Scenery} & \multicolumn{3}{c|}{Building} & \multicolumn{3}{c}{WikiArt}\\
+        ~ & 2.25x & 5x & 11.7x & 2.25x & 5x & 11.7x & 2.25x & 5x & 11.7x \\
+    \midrule[0.8pt]
+        QueryOTR~\citep{queryqtr} & 22.146 & 18.926 & 15.375 & 18.591 & 15.318 & 13.119 & 19.726 & 15.874 & 14.016 \\
+        \rowcolor{aliceblue} PQDiff (Ours) & \textbf{27.676} & \textbf{27.267} & \textbf{24.697} & \textbf{28.831} & \textbf{28.614} & \textbf{27.219} & \textbf{25.946} & \textbf{25.673} & \textbf{23.372} \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab:center_psnr}
+\end{table}
+
+\textbf{Diversity of generated images and PSNR in center regions. }We also show five generated images with fixed positions and input in Fig. Furthermore, it also retains the input pixels in the center parts of generated samples. Recall that in Sec.~\ref{sec:detail}, we choose not to use the PSNR score as evaluation metrics, as we also need to account for the diversity. Here we provide further analysis with PSNR score whose definition is as follows, and a higher score suggests a smaller mean square error:
+\begin{equation}
+\label{eqn:psnr}
+PSNR (\mathbf{x}, \mathbf{y}) = 10 \cdot \log_{10} \left ( \frac{MAX_{\mathbf{x}}^2}{\mathbb{E}_{i, j} [\mathbf{x}(i,j) - \mathbf{y}_{i, j}]^2}  \right ), \ \ \ 0 \leq i, j \leq H, W
+\end{equation}
+where $\mathbf{x}, \mathbf{y}$ are input images, and $H, W$ are the height and width of the input images, and $MAX_{\mathbf{x}}^2$ is a constant. We then report the PSNR score of the generated center region and input images in Table~\ref{tab:center_psnr}. Note that since the objective of QueryOTR is only added to the generated position, the center part is not regularized in the training stage. Hence, the generated center content is completely black area. Hence, for better comparison, we modify QueryOTR, adding the objective to the whole generated images with the $\mathcal{L}_{rec}$ loss. The PSNR scores in Table~\ref{tab:center_psnr} and the generated samples in Fig.~\ref{fig:diversity} demonstrate our model can: 1) memorize the input pixels and put them into corresponding locations; 2) learn the semantic information of input images, and outpaint the image with consistent contents around the images. It is worth noting that the central regions in images generated by our PQDiff without the ``copy'' operation can be completely the same with input images ($\mathbb{E}_{i, j} [\mathbf{x}(i,j) - \mathbf{y}_{i, j}]^2=0$), which indicates, our PQDiff can reconstruct the images without any bias in some cases. Since these cases without bias would lead to infinite values of the PSNR score, which will impact the average values, we directly remove these infinite values. Experimental results show even if we remove these infinite values, our method can still produce much higher center PSNR scores than QueryOTR.
+
+\begin{figure}[tb!]
+\centering
+\subfigure{
+\begin{minipage}[t]{0.33\textwidth}
+\centering
+\includegraphics[width=0.99\textwidth,angle=0]{images/1xx.pdf}
+\label{fig:lambda}
+\end{minipage}%
+}%
+\subfigure{
+\begin{minipage}[t]{0.33\textwidth}
+\centering
+\includegraphics[width=0.99\textwidth,angle=0]{images/2xx.pdf}
+\label{fig:Q}
+\end{minipage}%
+}%
+\subfigure{
+\begin{minipage}[t]{0.33\textwidth}
+\centering
+\includegraphics[width=0.975\textwidth,angle=0]{images/3xx.pdf}
+\label{fig:direction}
+\end{minipage}%
+}%
+\caption{Inception scores on the Scenery dataset with different random crop ratios of anchor view $\mathbf{x}_{a}$ over 2.25x (left), 5x (middle), and 11.7x (right). In some cases, PQDiff outperforms PQDiff (Default), as we do not heavily tune the hyper-parameters in the default version. The query crop ratio is randomly sampled from $r\sim 0.5$, where $r$ is the values in the horizontal axis of the plots.}
+\label{fig:crop_ratio}
+\end{figure}
+\textbf{Impact of random crop ratio. }For better consistency of inputs in the training stage and sampling stage, we crop the view $\mathbf{x}_{b}$ with a larger crop ratio than view $\mathbf{x}_{a}$ (since the outpainted images are usually larger than input images). We conduct experiments to analyze the effect of random crop ratios. Specifically, we fix the crop ratio of target view $\mathbf{x}_{b}$ as $(0.8, 1.0)$, and switch the crop ratio of anchor views $\mathbf{x}_{a}$ from 0.15$\sim$0.50. We train the model with 80,000 iterations on the Scenery dataset and show the results in Fig.~\ref{fig:crop_ratio}. The results show the query crop ratio influences 2.25x, 5x, and 11.7x experiments in different manners. Specifically, for 2.25x experiments, since the input images are 128x128, and the outpainted images are 192x192, where the extrapolated image is only a little larger than the input sub-image. Hence, PQDiff with larger crop ratios outperforms PQDiff with smaller ones. For 5x and 11.7x experiments, the size of extrapolated images is much larger than the given input sub-image. As a result, PQDiff with smaller crop ratios outperforms PQDiff with larger ones. On top of that, we also find when the anchor crop ratio equals 0.50, the inception score drops with a large range, and we guess that is because when the random crop ratio is set (0.50, 0.50), we always feed the images with the same scales to PQDiff, and correspondingly, PQDiff can not learn to scale images. Then, in the sampling stage, since images in the test set are usually in different scales, it is difficult for PQDiff to handle the scaling gaps between the training stage and the testing stage.  
+
+\begin{table}[tb!]
+    \caption{Performance of plain diffusion models and PQGAN (integrate PQ scheme in GAN) on the Scenery dataset without the ``copy'' operation (as we report the center PSNR score).}
+    \centering
+    \resizebox{\textwidth}{!}{\begin{tabular}{l|ccc|ccc|ccc}
+    \toprule[1pt]
+        \multirow{2}{*}{Method} & \multicolumn{3}{c|}{2.25x} & \multicolumn{3}{c|}{5x} & \multicolumn{3}{c}{11.7x}\\
+        ~ & FID $\downarrow$ & IS $\uparrow$ & Center PSNR $\uparrow$ & FID $\downarrow$ & IS $\uparrow$ & Center PSNR $\uparrow$ & FID $\downarrow$ & IS $\uparrow$ & Center PSNR $\uparrow$ \\
+    \midrule[0.8pt]
+        Valinna diffusion~\citep{ddpm} & 57.425 & \underline{3.816} & 11.538 & 59.475 & \underline{3.286} & 10.894 & 73.587 & \underline{2.867} & 10.347 \\
+        \rowcolor{aliceblue} PQGAN (Ours) & \underline{32.139} & 3.811 & \underline{27.097} & \underline{38.466} & 3.216 & \underline{26.893} & \underline{49.943} & 2.853 & \underline{24.139} \\
+        \rowcolor{aliceblue} PQDiff (Ours) & \textbf{29.446} & \textbf{3.849} & \textbf{27.676} & \textbf{34.492} &  \textbf{3.547} & \textbf{27.267} & \textbf{44.517} & \textbf{3.269} & \textbf{24.797} \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab:gan_diff}
+\end{table}
+
+\textbf{Integrate PQ scheme into other generating models. }Beyond diffusion, we also integrate our PQ learning paradigm into GAN-based model. In addition, to analyze the effect of the positional query, we also report the performance when directly using diffusion models~\citep{ddpm}. Table~\ref{tab:gan_diff} shows the results. Specifically, we find the quality of the images generated by GAN is lower than the diffusion model~\citep{ddpm}, as the inception score of PQGAN is lower than diffusion models~\citep{ddpm}. However, the diffusion model is not well conditioned by the input sub-image (the FID and Center PSNR scores are much worse than PQGAN and PQDiff). The high FID and Center PSNR scores indicate the proposed PQ scheme can provide a strong condition, enhancing the generative models~\citep{gan, ddpm} to learn where to outpaint.
+
+\begin{table}[tb!]
+    \caption{Impact of different types of positional embeddings on Scenery dataset. All methods are without ``copy'' operation. The sin-cos positional embedding is also used in the main experiments.}
+    \centering
+    \resizebox{\textwidth}{!}{\begin{tabular}{l|ccc|ccc|ccc}
+    \toprule[1pt]
+        \multirow{2}{*}{Method} & \multicolumn{3}{c|}{2.25x} & \multicolumn{3}{c|}{5x} & \multicolumn{3}{c}{11.7x}\\
+        ~ & FID $\downarrow$ & IS $\uparrow$ & Center PSNR $\uparrow$ & FID $\downarrow$ & IS $\uparrow$ & Center PSNR $\uparrow$ & FID $\downarrow$ & IS $\uparrow$ & Center PSNR $\uparrow$ \\
+    \midrule[0.8pt]
+        None & 61.382 & 3.811 & 10.382 & 75.281 & 3.298 & 10.285 & 90.271 & 2.974 & 10.286 \\
+        Learnable & 32.141 & 3.816 & 27.263 & 37.971 & 3.387 & 26.885 & 49.136 & 3.179 & 23.461 \\
+        \rowcolor{aliceblue} Sin-Cos (Eq.\ref{eqn:pos_embed}) & \textbf{29.446} & \textbf{3.849} & \textbf{27.676} & \textbf{34.492} &  \textbf{3.547} & \textbf{27.267} & \textbf{44.517} & \textbf{3.269} & \textbf{24.797} \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab:positional}
+\end{table}
+
+\textbf{Impact of the Positional Embedding. }To analyze the effect of the positional embedding, we conduct a group of experiments with different types of positional embeddings. We mainly consider two types of embeddings (sin-cos and learnable). Learnable embedding means we take the relative position $(m, n)$ as input and use an MLP composed of two linear layers with the activation function to map the $2$-dimensions to $D$-dimensions. Table~\ref{tab:positional} shows the results with different positional embedding. Note that None means without relative positional embedding. Thus, the model can not learn the positional relationships between input sub-image and extrapolated images. Correspondingly, the inception score only drops with a little range, but the FID and Center PSNR drop with a large range.
+
+
+
+\section{Conclusion}
+
+\label{sec:discussion}
+We have proposed PQDiff, which learns the positional relationships and pixel information at the same time. Methodically, PQDiff can outpaint at any multiple in only one step, greatly increasing the applicability of image outpainting. We conduct experiments on three standard outpainting datasets, where PQDiff achieves new SOTA results that surpass previous methods by a large margin under almost all settings. We also conduct comprehensive ablation studies to show the robustness of our approach, including crop ratios, the center PSNR score, and the relative positional embeddings.
+
+\noindent\textbf{Ethics Statement. }PQDiff generates images conditioned by positional embeddings, learning pixel information and positional relationships simultaneously. As the datasets used in PQDiff primarily focus on scenery, buildings, and arts, there are currently minimal negative potential impacts on ethics and crime-related aspects. We are aware that any technology could be abused for ill purposes.  
+
+\noindent\textbf{Reproducibility Statement. }We have clarified  training and sampling details including hyper-parameters, pseudo code of the relative positional embeddings, and training pipeline in Sec. In addition, all the datasets used in this paper are open-source and can be accessed online.
+
+
+
+
+
+

@@ -1,0 +1,346 @@
+\title{Learning Harmonized Representations for Speculative Sampling}
+
+\begin{abstract}
+Speculative sampling is a promising approach to accelerate the decoding stage for Large Language Models (LLMs). Recent advancements that leverage target LLM's contextual information, such as hidden states and KV cache, have shown significant practical improvements. However, these approaches suffer from inconsistent context between training and decoding. We also observe another discrepancy between the training and decoding objectives in existing speculative sampling methods. In this work, we propose a solution named HArmonized Speculative Sampling (HASS) that learns harmonized representations to address these issues. HASS accelerates the decoding stage without adding inference overhead through harmonized objective distillation and harmonized context alignment. Experiments on four LLaMA models demonstrate that HASS achieves 2.81x-4.05x wall-clock time speedup ratio averaging across three datasets, surpassing EAGLE-2 by 8\%-20\%.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+Generative Large Language Models (LLMs), such as GPT-4~\citep{achiam2023gpt} and LLaMA~\citep{touvron2023LLaMA}, have demonstrated remarkable capabilities across a wide range of tasks. Nevertheless, efficiently decoding from these models poses a significant challenge due to the inherent auto-regressive decoding mechanism, which restricts their applicability in time-sensitive scenarios. Speculative sampling~\citep{chen2023accelerating, leviathan2023fast} offers a solution by leveraging additional resources to increase concurrency. Specifically, it employs an efficient draft model to generate draft tokens auto-regressively, which are then concurrently verified by the target LLM. Based on the verification results, a subset of draft tokens that preserves the same distribution as the target LLM is accepted as the final output.
+
+\citet{leviathan2023fast} show that the practical performance of speculative sampling is highly related to two factors: the decoding cost of the draft model and its alignment with the target LLM. To develop efficient draft models that are well-aligned with the target LLM, previous works propose to leverage the target LLM's contextual information~\citep{xiao2024clover,li2024eagle,li2024eagle2,du2024glide}. For instance, EAGLE~\citep{li2024eagle,li2024eagle2} employs previous hidden states of the target LLM as the draft model's input features. However, these approaches introduce inconsistent context between training and decoding, as illustrated in Figure~\ref{fig:misalignment}. During training, the draft model always has access to the target LLM's hidden states in previous timesteps. However, during decoding, the draft model cannot access the target LLM's hidden states for unverified timesteps, resulting in a context misalignment between training and decoding. This issue can be viewed as a form of exposure bias~\citep{bengio2015scheduled,wang2020exposure} at the feature level in speculative sampling.
+
+Another discrepancy is also observed between the objectives of the training and decoding stages. During the decoding stage, the objective of the draft model is to propose tokens that the target LLM is likely to assign high probabilities to~\citep{li2024eagle2,miao2024specinfer,sun2024spectr}. In this scenario, the draft model should focus more on recalling the desired tokens, while the specific order of these tokens can be somewhat de-emphasized. Moreover, most LLM applications perform nucleus sampling~\citep{holtzman2019curious} or top-k sampling~\citep{fan2018hierarchical}. For these decoding objectives, tokens with high probabilities play a more significant role in determining the output. Therefore, to develop efficient draft models, their training objectives should consider these properties encountered in the decoding stage. To the best of our knowledge, previous works on training draft models for speculative sampling have largely overlooked these decoding considerations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=390pt]{image/teaser.pdf}
+\caption{Speedup ratios of different methods on LLaMA2-Chat 7B/13B and LLaMA3-Instruct 8/70B with temperature T $\in \{0, 1\}$, averaging over MT-bench, HumanEval, and GSM8K datasets.}
+\label{fig:teaser}
+\end{figure}
+
+\begin{wrapfigure}{r}[-10pt]{0.45\textwidth}
+\centering
+\includegraphics[width=0.4\textwidth]{image/context_misalignment.pdf}
+\caption{We use EAGLE~\citep{li2024eagle} as an example to illustrate the context misalignment, where the speculation starts from timestep $t$. $f^{(l)}$ and $f^{(s)}$ represent hidden states from the target LLM and the draft model, respectively. When decoding draft token $x_{t+2}$, the input context is inconsistent between training and decoding.}
+\label{fig:misalignment}
+\end{wrapfigure}
+
+
+In this paper, we introduce HArmonized Speculative Sampling (HASS), a novel approach designed to address the aforementioned issues by learning harmonized representations. Specifically, to make draft models aware of the decoding strategy, HASS extends the idea of ranking distillation~\citep{tang2018ranking} from the recommender system to speculative sampling, resulting in a distillation loss focused on the most probable tokens within the target distribution. To mitigate the previously discussed context misalignment between training and decoding, HASS employs a context-aligned training strategy. Together, these two strategies of HASS improve the acceleration performance without any inference overhead and maintain training efficiency.
+
+We conduct experiments across dialogue, code generation, and mathematical reasoning using the MT-bench, HumanEval, and GSM8K datasets, respectively. Building with EAGLE-2~\citep{li2024eagle2}, HASS achieves 8\%-16\% acceptance length improvement over it on LLaMA2-Chat 7/13B and LLaMA3-Instruct 8/70B, resulting in 2.81x-4.05x wall-clock time acceleration compared with the vanilla inference on NVIDIA H800 GPU.
+
+
+
+\section{Preliminary}
+
+\label{sec:preliminary}
+\textbf{Speculative sampling} leverages the concept of speculative execution~\citep{kung1981optimistic,hennessy2011computer} to reduce wall-clock time from more concurrency.
+Specifically, given the target LLM $\mathcal{M}^{(l)}$ that is the focus of acceleration, speculative sampling employs a draft model $\mathcal{M}^{(s)}$ to speculatively and efficiently generate draft tokens. 
+The conventional approach~\citep{leviathan2023fast,chen2023accelerating} decomposes the next step generation into three steps: 
+\begin{itemize}
+    \item $\mathcal{M}^{(s)}$ proposes an unverified draft sequence with length $L$ by auto-regressive decoding.
+    \item $\mathcal{M}^{(l)}$ evaluates posterior probabilities of $L$ draft tokens in parallel.
+    \item $\tau$ tokens that retain the target distribution are accepted by a modified rejection sampling schema based on the draft sequence and the distribution gap.
+\end{itemize}
+\citet{leviathan2023fast} demonstrate that the wall-clock time improvement ratio is directly proportional to $\tau$, while the arithmetic operation increment ratio is inversely proportional to $\tau$. Consequently, $\tau$, also known as the acceptance length, plays a crucial role in determining the performance of acceleration. This analysis also applies when using multiple draft sequences~\citep{miao2024specinfer,li2024eagle2,li2024eagle,sun2024spectr}. 
+Note that $\tau$ is closely related to the distribution gap between the target LLM and the draft model. With efficient decoding requirements, the draft model typically has limited capacity, resulting in a significant distribution gap compared to the target LLM. Fortunately, during inference, the acceptance rate is primarily influenced by the alignment of distributions on the desired tokens, i.e., the tokens to which the target LLM assigns high probabilities. However, previous speculative sampling works mainly focus on the entire vocabulary set w.r.t. knowledge distillation from the target LLM~\citep{li2024eagle,zhou2023distillspec}, thereby disconnecting the training process from the practical decoding requirements.
+
+\textbf{EAGLE}~\citep{li2024eagle} is a lightweight draft model design, as shown in Figure~\ref{fig:misalignment}. During decoding, it utilizes the LM Head of the target LLM to generate draft tokens. Specifically, we assume that the speculation starts from timestep $t$, meaning the first draft token is at timestep $t+1$. To generate the draft token $x_{t+1}$, the target LLM's hidden state $f_{t-1}^{(l)}$ in the second-to-top layer is concatenated with the embedding $e_t$ to perform the input of the draft model. During training, EAGLE constructs a regression task between $f^{(l)}$s and the predicted hidden states $f^{(s)}$s of the draft model. 
+However, due to the auto-regressive decoding, the draft model only accesses the target LLM's features at the beginning of the speculation. It uses the features produced by the draft models as input for subsequent steps. This context misalignment, stemming from feature inaccuracies, leads to error accumulation and hinders the performance of generating later draft tokens~\citep{li2024eagle,du2024glide}. EAGLE-2~\citep{li2024eagle2} employs the same model design but works on dynamic drafting structures instead of a static tree structure during the decoding stage, yet the aforementioned issue remains unresolved.
+
+
+
+\section{Methodology}
+
+
+As outlined before, previous speculative sampling methods suffer from disharmonies between training and decoding. This section introduces HArmonized Speculative Sampling (HASS) to tackle objective misalignment and context inconsistency through harmonized objective distillation and harmonized context alignment, respectively, as described below.
+\subsection{Harmonized Objective Distillation}
+HASS prioritizes the most decoding-desired tokens by leveraging the ranking distillation~\citep{tang2018ranking} idea from the recommender system. Specifically, ranking distillation aims to train a student model to assign higher ranks to the items that are top-ranked by the teacher model. In the context of speculative sampling, the draft model and the target LLM serve as the student and the teacher, respectively. Draft models with similar properties will perform at a higher acceptance rate in the decoding stage. Consider the set of K tokens with the highest probabilities from the target LLM's probability distribution as $\hat{\Omega} \subset \Omega$, where $\Omega$ represents the entire vocabulary. HASS considers the following Top-K distillation loss:
+\begin{equation}
+    \label{eq:top-k-loss}
+    L_{\text{Top-K}} = - \sum_{x \in \hat{\Omega}} q(x) \log p(x),
+\end{equation}
+where $q$ and $p$ are the next token probability distributions of the target LLM and the draft model, respectively.
+Note that, when integrated with EAGLE, the training stage can obtain $\hat{\Omega}$ from hidden states of the target LLM. This implies that the proposed loss function benefits from the same efficient training cost as EAGLE. We evaluate the proposed Top-K distillation loss against six alternative losses, such as BiLD~\citep{li2024bild} and Recall@k Surrogate loss~\citep{patel2022recall}, through ablation studies.
+
+\subsection{Harmonized Context Alignment}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=390pt]{image/multi_step_alignment.pdf}
+\caption{Training with harmonized context alignment, where $q$ and $k$ refer to the query and key states in the transformer layer, respectively. Superscript $(l)$ denotes tensors from the target LLM, and superscript $(s_j)$ denotes tensors from the $j$-th draft model forward. Note that during training $(s_j)$ refers to calling $j$ times draft model in a batch, while during inference $(s_j)$ refers to $j$-th auto-regressive decoding.}
+\label{fig:multi-step alignment}
+\end{figure}
+
+\begin{algorithm}
+\setstretch{1.1}
+\caption{Harmonized Context Alignment}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Number of training steps $J$, token embedding $e = \{e_{i}\}_{i=0}^{t+1}$, target LLM $\mathcal{M}^{(l)}(e_{in}, m_{in})$, draft model $\mathcal{M}^{(s)}(e_{in}, q_{in}, kv_{in}, m_{in})$, language model head $\mathcal{H}(f_{in})$, feature loss function $\mathcal{L}_{fea}(f_t, f_p)$, logit loss function $\mathcal{L}_{logit}(l_t, l_p)$.\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{Input embedding $e_{in}$, query feature $q_{in}$, key\&value feature $kv_{in}$, attention mask $m_{in}$, input feature $f_{in}$, target feature $f_{t}$, predicted feature $f_{p}$, target logit $l_{t}$, predicted logit $l_{p}$}}
+\STATE Get causal attention mask $m_{causal}$ as that in `HASS Training Step 1' of Figure \ref{fig:multi-step alignment};
+\STATE $f^{(l)} \leftarrow f^{(l)}_{:t+1} = \mathcal{M}^{(l)}(e_{in}=e_{:t+1}, m_{in}=m_{causal})$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{Generate target LLM feature}}
+\STATE $f^{(s_{1})} \leftarrow f^{(s_{1})}_{1:t+2} = \mathcal{M}^{(s)}(e_{in}=e_{1:t+2}, qkv_{in}=f^{(l)}, m_{in}=m_{causal})$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{First draft forward}}
+\STATE $l^{(l)}, l^{(s_1)} \leftarrow \mathcal{H}(f^{(l)}), \mathcal{H}(f^{(s_1)})$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{Compute logits for target LLM and draft model}}
+\STATE $L_{1} = \mathcal{L}_{fea}(f^{(l)}_{1:t+1}, f^{(s_1)}_{1:t+1}) + \mathcal{L}_{logit}(l^{(l)}_{1:t+1}, l^{(s_1)}_{1:t+1})$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{Combine feature loss and logit loss}}
+\STATE Update $\mathcal{M}^{(s)}$ with the loss $L_{1}$;
+\STATE \textbf{for} $j=2$ \textbf{to} $J$ \textbf{do}
+\STATE \qquad Get modified attention mask $m_{j}$ as that in `HASS Training Step $j$' of Figure \ref{fig:multi-step alignment};
+\STATE \qquad Set $\hat{f}^{(s_{j-1})} \leftarrow f^{(l)}_{0} \oplus f^{(s_{1})}_{1} \oplus \cdots \oplus f^{(s_{j-1})}_{j:t+1}$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{Prepare query feature}}
+\STATE \qquad Set $F_j \leftarrow [f^{(l)},\hat{f}^{(s_{1})},\cdots,\hat{f}^{(s_{j-1})}]$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{Prepare key\&value feature}}
+\STATE \qquad $f^{(s_{j})} \leftarrow \mathcal{M}^{(s)}(e_{in}=e_{1:t+2}, q_{in}=\hat{f}^{(s_{j-1})}, kv_{in}=F_j, m_{in}=m_{j})$;\textcolor[rgb]{0.31,0.65,0.38}{\COMMENT{$j$-th draft forward}}
+\STATE \qquad $l^{(s_j)} \leftarrow \mathcal{H}(f^{(s_j)})$;
+\STATE \qquad $L_{j} = \mathcal{L}_{fea}(f^{(l)}_{1:t+1}, f^{(s_j)}_{1:t+1}) + \mathcal{L}_{logit}(l^{(l)}_{1:t+1}, l^{(s_j)}_{1:t+1})$;
+\STATE \qquad Update $\mathcal{M}^{(s)}$ with the loss $L_{j}$;
+\STATE \textbf{end for}
+\STATE \textbf{Output:} Updated draft model $\mathcal{M}^{(s)}$.
+\end{algorithmic}
+\end{algorithm}
+
+HASS follows a context alignment schema that aligns training and decoding on their contexts. In particular, HASS divides the training procedure into $n$ steps, enabling the draft model to utilize contextual features consistent with those in the decoding stage. The procedure is outlined as follows:
+
+\begin{itemize}
+    \item The first step mirrors the training stage of EAGLE. At timestep $t+1$, the draft model takes the target model's feature $f^{(l)}_{t}$ as input and produces the draft feature $f^{(s_1)}_{t+1}$. In this step, the attention mask remains as the original causal mask without any modification.
+
+    \item In the second step, features from the first step are incorporated. For instance, in the self-attention mechanism at timestep $t+1$, $f^{(s_1)}_t$ is used to calculate the current query. Keys and values are derived from $f^{(l)}_{:t} \oplus f^{(s_1)}_t$, where $\oplus$ denotes concatenation and $f^{(l)}_{:t}$ includes features from timesteps earlier than $t$. The attention mask is adjusted to ensure that the previous feature seen by $f^{(s_1)}_i$ is always $f^{(l)}_{i-1}$, as shown in the `HASS Training Step 2' part of Figure~\ref{fig:multi-step alignment}.
+    \item For step $j \geq 3$, the feature from the previous step $f^{(s_{j-1})}_t$ is utilized to calculate the query at timestep $t+1$, while keys and values are generated by $f^{(l)}_{:t-j+2} \oplus f^{(s_1)}_{t-j+2} \oplus \ldots \oplus f^{(s_{j-1})}_t$.
+\end{itemize}
+It takes $n$ times the training overhead of EAGLE while maintaining the same decoding overhead. We empirically demonstrate that the acceleration effect converges with a small $n$ so that the training of HASS is cost-efficient.
+\begin{table}[t]
+\centering
+\Large
+\resizebox{395pt}{!}{
+\begin{tabular}{cccccccccc}
+\toprule
+                                    &           & \multicolumn{4}{c}{Temperature = 0}          & \multicolumn{4}{c}{Temperature = 1}  \\ \midrule
+Model                               & Method    & MT-bench & HumanEval & GSM8K  & Mean & MT-bench & HumanEval & GSM8K & Mean          \\ \midrule
+\multirow{5}{*}{L2 7B}     & PLD       &     1.43     &    1.59       &    1.37    &   1.46   &      -    &      -     &    -  &   -   \\
+                                    & Lookahead &    1.66      &   1.77        &    1.65       &   1.69   &      -    &     -      &    -    &   -  \\
+                                    & EAGLE     &   3.68         &   3.90    &    3.77    &  3.78    &   3.45       &    3.67       &  3.62     &   3.58   \\
+                                    & EAGLE-2   &     4.44     &  4.78         &   4.60    &   4.61    &   4.23       &  4.47        &     4.50   &  4.40    \\
+                                    & HASS      &   \textbf{4.99}       &      \textbf{5.29}     &    \textbf{5.17}   &     \textbf{5.15}      &  \textbf{4.84}        &     \textbf{4.91}      &      \textbf{5.01}       &  \textbf{4.92}    \\ \midrule
+\multirow{5}{*}{L2 13B}    & PLD       &     1.46     &      1.70     &   1.44    &     1.53      &      -    &     -      &    -   &     -   \\
+                                    & Lookahead &     1.64     &   1.85        &    1.69      &   1.73   &     -     &      -     &   -     &   -   \\
+                                    & EAGLE     &  3.86            &    4.50    &   4.17   &     4.18     &  3.62         &    4.27   &  3.98      &   3.96   \\
+                                    & EAGLE-2   &    4.74             &  5.57     &    5.17    &   5.16   &   4.60       &      5.41     &      5.03      &   5.01   \\
+                                    & HASS            &     \textbf{5.13}  &   \textbf{6.05}     &   \textbf{5.55}   &     \textbf{5.58}     &      \textbf{4.98}     &   \textbf{5.86}    &  \textbf{5.41}      &    \textbf{5.42}  \\ \midrule
+\multirow{3}{*}{L3 8B} & EAGLE     &       2.91        &    3.66    &   3.57   &     3.38     &      2.67     &   3.35    &   3.30     &   3.11   \\
+                                    & EAGLE-2   &     4.21             &  4.93     &    4.42    &   4.52   &    3.90      &      4.73     &      4.30     &   4.31   \\
+                                    & HASS               &    \textbf{4.68}   &    \textbf{5.54}    &  \textbf{5.02}    &    \textbf{5.08}      &     \textbf{4.26}      &    \textbf{5.30}   &     \textbf{4.85}   &  \textbf{4.80}    \\ \midrule
+\multirow{3}{*}{L3 70B} & EAGLE     &    3.24           &    4.07    &   3.79   &      3.70    &    3.06      &   3.85  &   3.66     & 3.52     \\
+                                    & EAGLE-2   &         4.10         &    5.02   &   4.37    &  4.50   &   4.00       &     4.93     & 4.35       &  4.43  \\
+                                    & HASS               &    \textbf{4.62}   &    \textbf{5.78}    &  \textbf{5.24}    &    \textbf{5.21}      &     \textbf{4.59}      &    \textbf{5.68}   &     \textbf{5.20}   &  \textbf{5.16}    \\ \bottomrule
+\end{tabular}
+}
+\caption{Acceptance lengths $\tau$ of different methods on MT-bench, HumanEval, and GSM8K datasets with temperature $\text{T} \in \{0, 1\}$. L2 represents LLaMA2-Chat, while L3 represents LLaMA3-Instruct.}
+\label{effectiveness: tau}
+\end{table}
+\begin{table}[t]
+\centering
+\Large
+\resizebox{395pt}{!}{
+\begin{tabular}{cccccccccc}
+\toprule
+                                    &           & \multicolumn{4}{c}{Temperature = 0}          & \multicolumn{4}{c}{Temperature = 1}  \\ \midrule
+Model                               & Method    & MT-bench & HumanEval & GSM8K &  Mean & MT-bench & HumanEval & GSM8K  & Mean          \\ \midrule
+\multirow{3}{*}{L2 7B}  & EAGLE     &       1.90x        &   2.10x     &     2.04x &     2.01x     &     1.50x      &   1.91x    &    1.87x    &   1.76x   \\
+                                    & EAGLE-2           &    2.66x   &   3.06x     &   2.72x   &    2.81x      &     2.39x      &    2.87x   &    2.54x    &  2.60x    \\
+                                    & HASS      &     \textbf{2.99x}     &     \textbf{3.41x}      &   \textbf{3.32x}    &  \textbf{3.24x}  &     \textbf{2.70x}      &   \textbf{3.13x}    &    \textbf{2.87x}    &   \textbf{2.90x}   \\ \midrule
+\multirow{3}{*}{L2 13B}   & EAGLE     &        1.80x       &  2.46x      &   2.41x  &    2.22x      &     1.84x      &  2.10x     &    2.21x    &   2.05x   \\
+                                    & EAGLE-2   &   3.02x       &  3.64x         &   3.23x    &     3.30x          &   3.04x        &   3.45x    &   3.13x     &    3.21x  \\
+                                    & HASS      &     \textbf{3.23x}     &      \textbf{4.24x}     &    \textbf{3.48x}   &    \textbf{3.65x}            &    \textbf{3.28x}       &    \textbf{3.78x}   &  \textbf{3.37x}      & \textbf{3.48x}     \\ \midrule
+\multirow{3}{*}{L3 8B} & EAGLE     &      1.29x        &   2.00x     &     1.85x &     1.71x     &      1.25x     &    1.41x   &    1.67x    &   1.44x   \\
+                                    & EAGLE-2   &    2.64x      & 3.31x          &    2.54x   &         2.83x      &   2.39x        &  2.54x     &    2.48x    & 2.47x     \\
+                                    & HASS      &     \textbf{2.78x}     &   \textbf{3.43x}        &   \textbf{3.06x}    &          \textbf{3.09x}    &      \textbf{2.49x}     &    \textbf{3.05x}   &    \textbf{2.89x}    &   \textbf{2.81x}   \\ \midrule
+\multirow{3}{*}{L3 70B} & EAGLE     &     2.14x         &    2.74x    &  2.42x    &     2.43x     &   1.80x      &    2.34x  &    2.12x    &  2.09x    \\
+                                    & EAGLE-2   &    2.94x      &     3.98x     &     3.19x  &        3.37x       &    3.02x       &   3.61x    &    3.21x    &   3.28x  \\
+                                    & HASS      &     \textbf{3.40x}     &   \textbf{4.68x}        &   \textbf{4.08x}    &          \textbf{4.05x}    &      \textbf{3.43x}     &    \textbf{4.25x}   &    \textbf{3.87x}    &   \textbf{3.85x}   \\ \bottomrule
+\end{tabular}
+}
+\caption{Speedup ratios of different methods on MT-bench, HumanEval, and GSM8K datasets with temperature T $\in \{0, 1\}$. L2 represents LLaMA2-Chat, while L3 represents LLaMA3-Instruct.}
+\label{effectiveness: speedup}
+\end{table}
+
+
+\section{Experiment}
+
+
+\subsection{Experimental Setup}
+
+\noindent \textbf{Target LLMs.} LLaMA2-Chat 7B/13B and LLaMA3-Instruct 8/70B.
+
+\noindent \textbf{Tasks.} We conduct evaluations on three generation tasks. For multi-turn conversation, code generation, and mathematical reasoning tasks, we choose the MT-bench \citep{zheng2024judging}, HumanEval \citep{chen2021evaluating}, and GSM8K \citep{cobbe2021training} datasets, respectively.
+The batch size is set as 1 under all the experiments following \cite{leviathan2023fast} and \cite{zhou2023distillspec}.
+\noindent \textbf{Metrics.} HASS neither fine-tunes the target LLMs' weights during training nor relaxes the acceptance conditions during decoding, making it a lossless acceleration method. Thus, the generation quality is promised with no need for evaluation. We use the following two metrics to measure the acceleration performance:
+\begin{itemize}
+    \item \textbf{Speedup Ratio}: The actual test speedup ratio relative to vanilla auto-regressive decoding.
+    \item \textbf{Acceptance Length $\tau$}: The average number of tokens generated per drafting-verification cycle, indicating the number of tokens accepted by the target LLM from the draft model. 
+\end{itemize}
+Note that the speedup ratio is sensitive to the hardware due to variations in computing power, and the acceptance length may be slightly affected by hardware due to numerical errors. Therefore, all inference processes are conducted on NVIDIA H800 GPU.
+
+\noindent \textbf{Comparisons.} The vanilla auto-regressive decoding is taken as the baseline, which serves as the benchmark for speedup ratios (1.00x). We compare HASS with recent lossless speculative sampling methods, including PLD \citep{saxena2023prompt}, Lookahead \citep{fu2023lookahead}, EAGLE \citep{li2024eagle}, and EAGLE-2 \citep{li2024eagle2}.
+
+\noindent \textbf{Implementation. Experiments on EAGLE and EAGLE-2 reuse draft model weights trained by \cite{li2024eagle}. For harmonized objective distillation, K is set as 10, and the loss of harmonized objective distillation is added to EAGLE's original loss with a coefficient of $w = 1.0$. For harmonized context alignment, the draft model is aligned for 3 steps during training. For dynamic tree structure, we set the total number of draft tokens to 60 for all experiments with a draft tree depth of 6. We keep other settings, such as the fixed training dataset and the optimizer, consistent with EAGLE-2.
+\subsection{Effectiveness \& Ablation Study}
+
+In this section, we first evaluate the effectiveness of HASS by comparing it with existing speculative sampling methods on acceptance length and speedup ratio. Then, we conduct ablation studies on harmonized objective distillation and harmonized context alignment.
+
+\subsubsection{Effectiveness}
+
+We present different methods' acceptance lengths and speedup ratios across three datasets in Tables \ref{effectiveness: tau} and \ref{effectiveness: speedup}, respectively. HASS performs the largest acceptance length and highest speedup ratio across all datasets and LLMs we tested.
+Most methods achieve their best performance on the HumanEval dataset, as the fixed templates in the code generation task are easier to draft and accelerate.
+Though PLD and Lookahead are free of training, they consistently show poorer performance than EAGLE, EAGLE-2, and HASS. 
+\subsubsection{Ablation Study on Harmonized Objective Distillation}
+\label{ablation_topk}
+
+\begin{wrapfigure}{r}[-10pt]{0.47\textwidth}
+\centering
+\includegraphics[width=0.47\textwidth]{image/ablation_topk.pdf}
+\caption{Acceptance lengths $\tau$ of HASS with varied Ks and weights of the Top-K loss. The results are conducted on LLaMA2-Chat 7B and averaged over MT-bench, HumanEval, and GSM8K datasets with temperature T $\in \{0, 1\}$.}
+\label{fig:ablation_topk}
+\end{wrapfigure}
+
+We first study the effects of different K and the weight $w$ of the Top-K loss by varying these hyper-parameters and summarize the results in Figure \ref{fig:ablation_topk}. Training with the Top-K loss ($w > 0$) always improves performance compared to training without the Top-K loss ($w = 0$). HASS achieves the largest acceptance length when $w=0.5$. 
+A small value of K may result in performance degeneration, as the draft model only focuses on the token with the highest probability and consequently neglects other potential tokens. With a larger K, the Top-K loss generally brings better results, while the acceptance length is the largest when K $= 5$.
+
+\begin{table}[ht]
+\centering
+\resizebox{320pt}{!}{
+\begin{tabular}{ccccccccccc}
+\toprule
+                     &                    &      & \multicolumn{2}{c}{MT-bench} & \multicolumn{2}{c}{HumanEval} & \multicolumn{2}{c}{GSM8K} & \multicolumn{2}{c}{Mean} \\ \midrule
+                     & Model               & Data & Speedup          &$\tau$        & Speedup          &$\tau$         & Speedup        &$\tau$       & Speedup         &$\tau$       \\ \midrule
+\multirow{4}{*}{T=0} & \multirow{2}{*}{L2 7B} & F    &     2.99x             &   4.99        &          3.41x        &       5.29     &        3.32x        &     5.17     &     3.24x            &     5.15     \\
+                     &                    & MG   &         \textbf{3.13x}         &      \textbf{5.25}     &         \textbf{3.85x}         &      \textbf{5.70}      &         \textbf{3.40x}      &     \textbf{5.57}     &       \textbf{3.46x}        &   \textbf{5.51}       \\
+                     & \multirow{2}{*}{L2 13B} & F    &             3.23x     &      5.13     &          4.24x        &     \textbf{6.05}       &        3.48x       &    5.55     &            3.65x    &      5.58   \\
+                     &                    & MG   &               \textbf{3.34x}   &      \textbf{5.27}     &          \textbf{4.42x}        &      6.00      &        \textbf{3.63x}       &   \textbf{5.61}      &    \textbf{3.80x}          &   \textbf{5.63}     \\\midrule
+\multirow{4}{*}{T=1} & \multirow{2}{*}{L2 7B} & F    &       2.70x           &    4.84       &          3.13x        &       4.91     &       2.87x      &    5.01     &      2.90x          &     4.92     \\
+                     &                    & MG   &       \textbf{2.75x}           &      \textbf{4.97}     &         \textbf{3.39x}         &      \textbf{5.24}      &       \textbf{3.13x}        &    \textbf{5.35}      &         \textbf{3.09x}        &    \textbf{5.19}     \\
+                     & \multirow{2}{*}{L2 13B} & F    &            3.28x      &      4.98     &        \textbf{3.78x}          &      \textbf{5.86}      &       3.37x        &       5.41  &         3.48x        &      \textbf{5.42}   \\
+                     &                    & MG   &               \textbf{3.33x}   &     \textbf{5.02}      &         3.76x         &     5.80       &       \textbf{3.60x}       &      \textbf{5.42}    &         \textbf{3.56x}        &   5.41       \\\bottomrule
+\end{tabular}
+}
+\caption{Speedup ratios and acceptance lengths of HASS with fixed or target-model-generated training data. F and MG stand for `Fixed' and `Model-Generated', respectively. L2 represents LLaMA2-Chat.}
+\label{ablation: data}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\resizebox{300pt}{!}{
+\begin{tabular}{cccc}
+\toprule
+Loss Function               & Temperature = 0 & Temperature = 1 & Mean \\ \midrule
+Top-K Loss                  & 4.99          & \textbf{4.84}          & \textbf{4.92} \\
+Top-P Loss                  & 5.03          & 4.76          & 4.90 \\
+Normed Top-K Loss (Linear)  & 4.97          & 4.83          & 4.90 \\
+Normed Top-K Loss (Softmax) & 4.98          & 4.72          & 4.85 \\
+Bi-directional Top-K Loss   & 4.99          & 4.72          & 4.86 \\
+Recall@k Surrogate Loss     & 4.97          & 4.76          & 4.87 \\
+BiLD Loss                   & \textbf{5.04}          & 4.75          & 4.90 \\ \bottomrule
+\end{tabular}
+}
+\caption{Acceptance lengths $\tau$ of HASS with different kinds of loss functions for harmonized objective distillation. The results are conducted on LLaMA2-Chat 7B over the MT-bench dataset with temperature T $\in \{0, 1\}$.}
+\label{ablation: loss}
+\end{table}
+
+Since the harmonized objective distillation can be implemented with any loss function that focuses on the most probable tokens w.r.t. the target distribution, we further consider the following loss functions and compare them with the Top-K Loss:
+\begin{itemize}
+    \item Top-P Loss, where the $\hat{\Omega}$ is formed by the most probable tokens whose cumulative probability is just larger than P. 
+    \item Normed Top-K Loss, where the target and draft distributions are both normalized over $\hat{\Omega}$. The normalization operation can be either linear or softmax.
+    \item Bi-directional Top-K Loss, where the distillation is conducted over the most probable tokens w.r.t. the target distribution as well as the draft distribution.
+    \item Recall@k Surrogate Loss~\citep{patel2022recall}, where a smooth approximation of the recall metric is obtained and is differentiable for direct optimization.
+    \item BiLD Loss~\citep{li2024bild}, where the internal logits ranking information is captured by constructing logits differences with long-tail noise filtered out.
+\end{itemize}
+After searching the optimal hyper-parameters for each of the compared loss functions, we summarize their best results in Table \ref{ablation: loss}.
+BiLD loss outperforms other loss functions under temperature T $=0$, while Top-K loss outperforms others under temperature T $=1$. Generally, Top-K loss shows the best performance.
+A better loss function may exist than Top-K loss to exploit the target LLM further. We leave this topic in future works.
+
+ We observe that when using non-greedy decoding, the acceptance length increases from 4.92 to 5.19 averaging over three datasets. Therefore, information obtained from harmonized objective distillation is not equivalent to direct distillation from target-model-generated data.
+
+\subsubsection{Ablation Study on Harmonized Context Alignment}
+\begin{table}[ht]
+\centering
+\resizebox{300pt}{!}{
+\begin{tabular}{cccccc}
+\toprule
+                     &  Aligning Step    & {MT-bench} & {HumanEval} & {GSM8K} & {Mean} \\ \midrule
+\multirow{5}{*}{T=0} & EAGLE-2 + Top-K           &     4.59               &     4.97            &     4.77            &    4.78      \\
+                     & HASS Align-2            &      4.95               &      5.25           &      5.12                &     5.11    \\
+                     & HASS Align-3           &     \textbf{4.99}                     &     5.29                &     5.17           &     5.15     \\
+                     & HASS Align-4             &    \textbf{4.99}               &     \textbf{5.30}             &    \textbf{5.18}               &     \textbf{5.16}    \\
+                     & HASS Align-5            &     4.98             &       5.26           &    5.09             &     5.11    \\ \midrule
+\multirow{5}{*}{T=1} & EAGLE-2 + Top-K            &      4.46            &      4.61           &    4.64          &    4.57    \\
+                     & HASS Align-2           &    4.71               &       4.89           &    4.98               &    4.86      \\
+                     & HASS Align-3          &     \textbf{4.84}            &      4.91                 &    5.01           &     \textbf{4.92}     \\
+                     & HASS Align-4          &    4.77              &     \textbf{4.93}            &     \textbf{5.03}         &    4.91    \\
+                     & HASS Align-5            &      4.71            &     4.92             &     4.95                &    4.86    \\ \bottomrule
+\end{tabular}
+}
+\caption{Acceptance lengths $\tau$ of HASS with varied aligning steps in the harmonized context alignment. The results are conducted on LLaMA2-Chat 7B with temperature T $\in \{0, 1\}$.}
+\label{ablation: align-tau}
+\end{table}
+
+We propose the harmonized context alignment, which eliminates the feature inconsistency of draft models between the training and decoding stages.
+To study the effect of increasing the aligning steps in the harmonized context alignment, we conduct experiments by varying the step number and summarize the results in Table \ref{ablation: align-tau}.
+
+As the first training step of HASS is the same as EAGLE-2, we continually train EAGLE-2's draft model weights with the Top-K loss and consider it the baseline.
+Without harmonized context alignment (EAGLE-2 + Top-K), the draft model performs the worst across all datasets.
+Training with 3/4 steps of harmonized context alignment generally obtains the most considerable acceptance length. 
+When training with five steps of context alignment, the acceptance length decreases. We believe this is caused by the draft model's limited capacity, as it predicts less accurately on former steps' tokens when paying too much attention to the latter ones. Figure~\ref{fig:alpha} shows the acceptance rate $\alpha$ across speculation steps on the MT-bench dataset following \cite{li2024eagle2}. In later speculation steps, HASS performs better acceptance rates than EAGLE-2, demonstrating the effectiveness of harmonized context alignment.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=370pt]{image/alpha.pdf}
+\caption{Acceptance rates $\alpha$ of HASS and EAGLE-2 across different speculation steps on the MT-bench dataset with temperature T $\in \{0, 1\}$.}
+\label{fig:alpha}
+\end{figure}
+As shown in Figure \ref{fig:alpha}, the acceptance rates of HASS decrease compared to EAGLE-2 on LLaMA2-Chat 13B and LLaMA3-Instruct 70B at the first step (0-$\alpha$).
+The draft models degrade on the first speculation step with much attention paid to the latter speculation steps, while the first step's acceptance rates are crucial to larger acceptance lengths.
+We conduct experiments to emphasize the significance of former speculation steps by reweighting the training loss from each step with a factor $\beta$. In specific, the step $j$'s training loss will be multiplied by $\beta^{j-1}$. Table \ref{ablation: reweight-tab} and Figure \ref{ablation: reweight-fig} show the acceptance lengths and acceptance rates of HASS with different reweight factors on LLaMA3-Instruct 70B over the MT-bench dataset, respectively.
+With the factor $\beta$ decreasing from 1.0 to 0.5, HASS achieves better acceptance lengths with different temperatures.
+Correspondingly, we perceive that the acceptance rate at the first speculation step is consistently higher with a smaller $\beta$, while the acceptance rates at the latter speculation steps generally decline.
+When the factor $\beta$ decreases to 0.3, too much emphasis is assigned to the first speculation step, leading to deterioration in acceptance length.
+Since the further exploration of an appropriate trade-off between different speculation steps is out of this paper's scope, we leave it for future work.
+\begin{minipage}[t]{0.49\textwidth}
+\tiny
+\centering
+\resizebox{1\textwidth}{!}{
+\begin{tabular}{cccc}
+\toprule
+Reweight Factor $\beta$ & T = 0  & T = 1  & Mean \\ \midrule
+1.0 (Default)    & 4.62 & 4.59 & 4.61 \\
+0.7    & 4.65 & 4.61 & 4.63 \\
+0.5    & \textbf{4.67} & \textbf{4.62} & \textbf{4.65} \\
+0.3    & 4.65 & 4.61 & 4.63 \\ \bottomrule
+\end{tabular}
+}
+\captionof{table}{Acceptance lengths $\tau$ of HASS with different reweight factors $\beta$ for harmonized context alignment. The results are conducted on LLaMA3-Instruct 70B over the MT-bench dataset with temperature T $\in \{0, 1\}$.}
+\label{ablation: reweight-tab}
+\end{minipage}
+\hspace{0.01\textwidth}
+\begin{minipage}[t]{0.49\textwidth}
+\includegraphics[width=1\textwidth]{image/alpha_reweight.pdf}
+\captionof{figure}{Acceptance rates $\alpha$ of HASS with different reweight factors $\beta$ for harmonized context alignment. The results are conducted on LLaMA3-Instruct 70B over the MT-bench dataset with temperature T $\in \{0, 1\}$.}
+\label{ablation: reweight-fig}
+\end{minipage}
+
+
+\section{Related Work}
+
+There have been a number of works on improving the acceptance rate of speculative sampling while maintaining the target distribution. Most of them fall into two categories. (1) The former category is aligned training that tries to obtain draft models aligned with the target LLM before the decoding stage. \cite{zhou2023distillspec} propose a knowledge distillation approach and study several strategies to improve the alignment. \cite{li2024eagle} demonstrate that hidden states of the target LLM as input of the draft model provide extra feature uncertainty information. \cite{xiao2024clover} also utilize hidden states of the target LLM and introduce an RNN-based draft model design that achieves a comparable acceptance rate. GLIDE~\citep{du2024glide} instead reuses the KV cache of the target LLM. It also notices the context misalignment when using information from the target LLM, but the proposed blockwise attention mask method can not solve the misalignment completely. (2) The latter category is efficient decoding, which designs sophisticated decoding strategies to utilize concurrency efficiently. \cite{miao2024specinfer} propose to utilize multiple draft models and design a tree-based attention mechanism to verify multiple draft sequences efficiently. \cite{li2024eagle2} introduce a dynamic structure to save computation by pruning inefficient paths in the draft tree. \cite{sun2024spectr} study improving the verification stage through optimal transportation. However, these works tend to only consider training or decoding, ignoring the linkage of these two stages. This work instead aims to link training and decoding, leading to harmonized speculative sampling.
+
+
+\section{Conclusion}
+
+This paper introduces HASS, a harmonized speculative sampling solution that addresses disharmonies between training and decoding on their objectives and contexts. Compared to its closest baseline, EAGLE-2, HASS improves the acceptance rate without any inference overhead. Experiments conducted on LLaMA2-Chat 7/13B and LLaMA3-Instruct 8/70B demonstrate the effectiveness and efficiency of HASS. Averaging on MT-bench, HumanEval, and GSM8K, HASS is 2.81x-4.05x faster than vanilla auto-regressive decoding, 8\%-20\% faster than EAGLE-2.
+
+
+
+
+
+

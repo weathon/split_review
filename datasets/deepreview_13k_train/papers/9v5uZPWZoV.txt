@@ -1,0 +1,270 @@
+\title{Not Just Pretty Pictures: Toward Interventional Data Augmentation Using Text-to-Image Generators}
+
+\begin{abstract}
+Neural image classifiers are known to undergo severe performance degradation when exposed to inputs that are sampled from environmental conditions that differ from their training data.
+Given the recent progress in Text-to-Image (T2I) generation, a natural question is how modern T2I generators can be used to simulate arbitrary interventions over such environmental factors in order to augment training data and improve the robustness of downstream classifiers. 
+We experiment across a diverse collection of benchmarks in single domain generalization (SDG) and reducing reliance on spurious features (RRSF), ablating across key dimensions of T2I generation including interventional prompting strategies, conditioning mechanisms, and post-hoc filtering. Our extensive empirical findings demonstrate that modern T2I generators like Stable Diffusion can indeed be used as a powerful interventional data augmentation mechanism, outperforming previously state-of-the-art data augmentation techniques regardless of how each dimension is configured
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+The success of deep image classifiers is largely built on the assumption that the train and test data come from the same domain -- i.e., that they are independent and identically distributed (i.i.d.) -- but in real-world applications, small changes in the environmental conditions under which the image is captured can break this assumption, significantly degrading their performance \cite{domainbed,wang2022generalizing,SDV20}. Since these changes only affect the inputs (i.e., the covariates) in some features without altering the labels, this form of distribution shift is also known as covariate shift \cite{DataShiftBook}. In the absence of more sophisticated techniques to simulate the possibility of sampling data coming from different environmental conditions, the employment of complex augmentation pipelines integrating image transformation primitives has been one of the most effective techniques for this purpose.
+\begin{figure*}
+  \centering
+ \includegraphics[width=\linewidth]{./images_new/NJPP_Banner.jpg}
+    \caption{ {\bf Using Text-to-Image Generators for Interventional Data Augmentation.} 
+    In \textbf{(a)}, given an interventional prompt written by a user or LLM (and optionally, an image to edit), Text-to-Image generators simulate the described intervention by synthesising a new image or edit an existing one to match the prompt.
+    Here, the generator edits the input image to resemble the target domain. The resulting manipulated images can be used to train more robust and generalizable models.
+    In \textbf{(b)} (Single Domain Generalization), synthetic data are generated to mimic potential target domains and combined with data from a given source domain to train a downstream classifier.
+    In \textbf{(c)} (Reducing Reliance on Spurious Features), synthetic data are generated to break the spurious correlation in a biased dataset and used to train a downstream classifier.
+    }
+   \label{fig:foolproof}
+\end{figure*}
+
+Many types of augmentation primitives can be thought as reproducing (often approximately) a controlled and targeted manipulation of the domain-specific environmental conditions in which the image was captured (e.g., illumination or weather conditions) without affecting the label-related features. As such, augmentations may be understood as an automated, low-cost way of simulating interventions over the environmental factors that are likely to change across domains, turning \emph{observational data} (i.e., with no intentional manipulation of the environment) into approximated \emph{interventional data} 
+\cite{AugmentationIntervention, CausalInvariantCVPR2022}.  
+Motivated by this principle, several works have theoretically conjectured the utility of an augmentation mechanism capable of simulating arbitrary interventions \cite{AugmentationIntervention,wang2022out,UnifiedCausalView,gowda2021pulling}.
+However, since it is not possible to target arbitrary interventions in the context of traditional augmentation pipelines (e.g., it is not possible to hard-code a pixel-space intervention to transform images of paintings into realistic photos),  %developed augmentation strategies simulating interventions of interest by 
+prior work has instead focused on leveraging prior knowledge about specific invariances expected to hold in the target domains  \cite{Stylemix, li2020shapetexture,AugmentationIntervention} or targeting specific downstream applications \cite{causalsdg,gowda2021pulling}.
+
+Recently, powerful Text-to-Image (T2I) generative models like Stable Diffusion \cite{stablediffusion} have emerged that can be used to synthesize new images (or edit existing ones) using text prompts describing the desired output image (see \cref{fig:foolproof}).
+In this work, our goal is to study how well such models can serve as general-purpose interventional data augmentation (IDA) mechanisms by simulating arbitrary interventions, either by editing existing images or synthesising new ones using interventional prompts, allowing one to effectively sample from the approximated interventional distribution and augment existing training datasets with the resulting generated images.
+Unlike previous approaches, these models can be used off-the-shelf without requiring manual hard-coding of individual interventions or training on application-specific data: instead, it is only necessary to describe the desired intervention via language (e.g., simulating interventions over lighting conditions by editing images with prompts like ``a photo taken at night'' or ``it is a cloudy day''). 
+Several recent works have studied the usefulness of synthetic data from T2I generators (see, e.g., \citealp{robustgeneration, syntheticimprovesimagenet,issynthready,effectiveaugmentation});
+but so far, their capacity to augment existing datasets by simulating interventions has only been studied in limited contexts (see \cref{sec:othert2i}). % not been extensively/systematically studied
+
+In this work, we systematically analyse the extent to which modern T2I generators can perform general-purpose IDA. We perform extensive experiments across several benchmarks for two key tasks in which the environmental and causal variables can be disentangled and the utility of synthetic interventional data can be precisely measured: \textbf{(1)} Single Domain Generalization (SDG) and \textbf{(2)} Reducing Reliance on Spurious Features (RRSF). 
+Our investigation spans several key aspects of T2I synthesis and editing, including the use of different interventional prompting strategies, conditioning mechanisms, and post-hoc filtering techniques. Our findings reveal that T2I generators substantially outperform existing state-of-the-art image augmentation methods, regardless of how we configure each of these aspects.
+Our primary findings and contributions are as follows:
+\begin{compactenum}
+\item We show that T2I-based IDA surpasses previous state-of-the-art augmentation techniques in simulating interventions across a broad range of SDG and RRSF benchmarks representing widely-varying environmental conditions and complexity.
+\item We find that the choice of conditioning mechanism has the greatest impact on performance across tasks, followed by the choice of prompting strategy. However, in contrast to prior works, we find that post-hoc filtering is not consistently beneficial.
+\item We show that retrieving images directly from the training dataset of the T2I generator can also yield competitive performance in several cases, and explore the comparative strengths and weaknesses of retrieval versus generation.
+\end{compactenum}
+
+
+
+\section{Problem Setting and Related Works}
+
+\paragraph{The Problem of Out-of-Domain Generalization}
+Given a data distribution $P(\bfx,y) = P(y|\bfx)P(\bfx)$ where $\bfx \in \bfX \subset \real{d}$, $y \in \labelset = \{1,2,\dots,|\labelset|\}$, learning a classifier amounts to estimating $\hat{f}(\bfx) \approx P(y|\bfx)$ (i.e., predicting the conditional distribution of the label $y$ given a covariate $\bfx$) using a labelled training set $\trD = \{(\bfxi,y_i)\}_{i=1}^N$. Given the finite amount of data available in $\trD$ and the high dimensionality of $\bfX$, the samples in $\trD$ are not representative of the whole input space (i.e. $\bfxi \in \bfXtr \subset \bfX$). %and therefore $\bfxi \sim P\textsubscript{train}(\bfx)$. 
+When deployed in the wild, the classifier will likely be exposed to inputs sampled from regions of the input space not represented in the training set, even when $\labelset$ is the same. 
+Specifically, we are in presence of \emph{covariate shift}, a form of distribution shift. It has been empirically observed that neural classifiers' performance significantly degrade in the presence of covariate-shifted evaluation data \cite{domainbed,wang2022generalizing,SDV20,pinto2022impartial}. %
+
+Several theoretical frameworks have been developed to make the problem of out-of-domain (OOD) generalization well-posed \cite{CausalInvariantCVPR2022, UnifiedCausalView, AugmentationIntervention, DataShiftBook} -- in this work, we default to the framework proposed by \cite{AugmentationIntervention}.
+In computer vision, the core principle is that pixel values of image $\bfxi \in \bfX$ are the result of a data generation process that combines (unobserved) features $h_{y_i}$ and $h_{\bfci}$ generated by the label $y_i$, and conditions described by a vector of \emph{environmental variables} $\bfci \in \bfC$ \cite{gowda2021pulling,AugmentationIntervention}.
+To make the problem more tractable, it is often assumed it is possible to partition $\bfC$ into $M$ domains (i.e., $\bfC = \bigcup_{j=1}^M \bfCe{j}, \bfCe{k} \cap \bfCe{h} = \varnothing, \forall k \neq h$) based on how similarly the environmental conditions impact $\bfx$, so that the contextual variables values and impact are summarised in the discrete indices $j$ \cite{arjovsky2019invariant}. For instance, environmental variables could be aggregated to represent similar illumination conditions or backgrounds.
+Furthermore, an unobserved spurious confounder $\mathbf{s}$ might correlate both $y_i$ and $\bfci$. A high-performing classifier is likely to learn these spurious correlations, as they are predictive of the label $y_i$; but such correlations will (by definition) not hold under all environmental conditions, damaging classifiers' ability to generalize \cite{ImageNet9,CCSTextureBias}.
+\paragraph{Simulating Interventional Data for Out-of-Domain Generalization} 
+Prior works \cite{AugmentationIntervention,CausalInvariantCVPR2022} have proposed that such a problem is solvable 
+by performing interventions on $\bfci$ (i.e., manipulating $\bfci$ to break such spurious correlations without changing $y_i$). However, direct collection of interventional data is usually quite difficult (e.g., collecting datasets portraying objects of the same class in all environments of interest may be highly impractical). 
+Identifying heuristic methods to disentangle causal from environmental factors (usually by augmenting original images from the source domain) has been a key component of many leading approaches to domain generalization. For example, CIRL \cite{lv2022causality} and ACVC \cite{Cugu_2022_CVPR} manipulate the amplitude component of the image frequency spectrum of the Fourier transform (which is presumed to approximately encode environmental information), while others have used style transfer techniques to perturb environmental factors while preserving image content \cite{Stylemix,li2020shapetexture, jackson2019style}, or trained Cycle-GAN to preserve the causal factors in a cyclic transformation between domains with different styles \cite{CausalInvariantCVPR2022}. Beyond methods explicitly attempting to disentangle these two components, \cite{AugmentationIntervention, gowda2021pulling} understand augmentations as simulating alterations of $\bfci$ without affecting $y_i$ -- for example, rotations encode the belief that change of viewpoints should preserve the class label. 
+Importantly, these assumptions might not hold in all applications (e.g., in digit classification, rotations of more than 90 degrees can swap the ground-truth labels of 6 and 9),
+so not all augmentations are valid for any given application. Domain-agnostic data augmentation pipelines (such as those proposed by \citealt{hendrycks2020augmix,cubuk2020randaugment,devries2017improved,hendrycks2022robustness,Cugu_2022_CVPR, pinto2022regmixup}) can be understood as hard-coding interventions over various features that are expected to vary across novel environments; but such assumptions may not hold across all possible domains. For this reason, \cite{AugmentationIntervention} suggests a mechanism to select parametric hand-crafted augmentations that have a greater impact on environmental factors than causal factors.
+
+\paragraph{Text-to-Image Generators}
+With the recent rise of powerful flexible T2I generative models (e.g., \citealp{GLIDE, stablediffusion, dalle2}), a natural question is whether these models, which are capable of synthesising images using natural-language prompts, could be used to effectively implement IDA.
+That is, while some hand-crafted parametric augmentations can be straightforwardly implemented by a programmer to manipulate the image directly in pixel space (e.g., lens distortion, chromatic aberration, vignetting, etc.), such methods many only be able to approximate many augmentations (often with much greater difficulty of implementation; e.g., introducing realistic rain or snow) or may not be able to approximate them at all (e.g., turning a cartoon into a photo, changing the background of a scene, or modifying the material of an object). 
+On the other hand, modern T2I generators that have been training on large amounts of weakly supervised data can be used zero-shot to directly approximate such augmentations (either from existing images or from scratch) using natural language, and have been observed to produce high quality samples \cite{meng2021sdedit}. 
+Using such models for IDA would be extremely convenient, as these editing and synthesis abilities can be made available ''off-the-shelf'' without requiring any task-specific fine-tuning.
+
+\paragraph{Data Augmentation with T2I Generators}\label{sec:othert2i}
+Contemporary work has investigated how T2I generators can be used to synthesize large-scale pre-training data \cite{issynthready, faketillmake, syntheticimprovesimagenet}, compensate for the lack of training data in data-scarce environments \cite{issynthready,effectiveaugmentation}, and diagnose classifiers' lack of robustness to covariate shift \cite{interfaces}.
+A related branch of research leverages synthetic data from T2I generators for test-time adaptation, transferring OOD samples to an approximation of the training domain as a form of test-time adaptation \cite{Yu_2023_CVPR, gao2022back}.
+Closest to our work, \cite{robustgeneration} show it is possible to use Stable Diffusion to generate synthetic data that improves the robustness of classifiers trained on ImageNet-1K \cite{deng2009imagenet} for multiple forms of distribution shift using an ensemble of generative prompts. In this work, we focus on the utility of T2I-generated synthetic data for training downstream classifiers, but depart from standard ImageNet analyses in order to develop a deeper understanding of how T2I generators can be used for IDA by focusing on SDG and RRSF, allowing us to directly measure the effectiveness of T2I-simulated interventions in these settings across variable conditioning, prompting, and filtering techniques.
+
+
+
+\section{Simulating Interventions with Text-to-Image Editing}
+
+\subsection{Experimental Setting}
+Given some source training domain $\Dom{S} = \bfXs \times \labelset$ and some target domain $\Dom{T} = \bfXt \times \labelset$, %that should be simulated by the augmentation , 
+our goal is to assess how well T2I generators can approximately modify environmental features $\bfci$ to simulate $\Dom{T}$ while keeping causal features for $y_i$ constant. As the most common approach to image augmentation (including all baselines we consider) involves editing pre-existing training images and adding them to the training dataset rather than synthesising new training data from scratch \cite{shorten2019augmentationsurvey}, we begin our analysis by studying the analogous setting of T2I-enabled image editing using \texttt{SDEdit} \cite{meng2021sdedit}. For an image $\bfxis \in \bfXs$ of class $y_i$, we aim to %"translate" it to $\bfCe{T}$, yielding 
+transform it into $\bfxithat$ such that it retains $y_i$ but appears to have been sampled from $\bfXt$. Each of the editing techniques we consider are conditioned on a natural language prompt, denoted $\bfzit$. 
+For instance, if $\bfxis$ represents a cartoon cat and $T=\texttt{painting}$, $\bfzit$ could be ``a painting of a cat''. Using the generator $G$, we transform $\bfxis$ into $\bfxithat = G(\bfxis, \bfzit)$. For all experiments, we use Stable Diffusion v1.5 \cite{stablediffusion} pre-trained on LAION-Aesthetics.\footnote{
+    LAION-Aesthetics is a subset of the LAION-5B dataset \cite{laion5b} consisting of web-scraped text-image pairs with high ``aesthetic scores'' \cite{schuhmann2022laion}.
+} Successful transformations produce $\bfxithat \in \bfXthat$ with $\bfXthat \approx \bfXt$. The synthetic pairs $\Domhat{T} = {(\bfxithat,y_i)}$ are then combined with $\Dom{S}$ to perform ERM via cross-entropy minimisation to train the neural classifier (ResNet-18 and ResNet-50).
+
+In this work, we focus on \emph{Single-Domain Generalization} (SDG) and \emph{Reducing Reliance on Spurious Features} (RRSF) as representative settings where access to a high-quality approximations of the intervened distributions % general-purpose IDA mechanism
+can measurably affect the performance of classifiers when training on both $\Dom{S}$ and $\Domhat{T}$. We describe our experimental formulation of both problems below.
+\textbf{Single-Domain Generalization (SDG)} 
+Given data $\Dom{S}$ from a source domain accessible at training time, the goal of SDG is to achieve high performance on a set of datasets $\Dom{T_j}$ with $j=1,2,...,J$ sampled from different target domains \cite{qiaoCVPR20learning}. In this setting, the generator uses $\Dom{S}$ and $\bfzitj$ to generate $\Domhat{T_j} \approx \Dom{T_j}$.  Following the standard evaluation procedure, we train a classifier on a single domain of each benchmark ($\Dom{S}$) and test it on the others ($\Dom{T_j}$), and report the average accuracy over the $J$ target domains. 
+For our experiments, we consider four widely used benchmarks that vary for type of domain shift, number of classes and training samples: (1) {\bf PACS } \cite{PACS}, containing the domains \texttt{art painting}, \texttt{cartoon}, \texttt{sketch}, and \texttt{photo}; (2) {\bf Office-Home } \cite{OfficeHome}, containing \texttt{Art}, \texttt{Clipart}, \texttt{Product}, and \texttt{Real World}; and (3) {\bf NICO++ } \cite{zhang2022nico}, containing \texttt{autumn}, \texttt{dim}, \texttt{outdoor}, \texttt{grass}, \texttt{water}, and \texttt{rock}; and (4) {\bf DomainNet } \cite{peng2019domainnet}, containing \texttt{clipart}, \texttt{infograph}, \texttt{painting}, \texttt{quickdraw}, \texttt{real}, and \texttt{sketch}.
+
+ \paragraph{Reducing Reliance on Spurious Features (RRSF)} Sometimes the training data is collected from a domain $\Dom{S}$ in which spurious features correlate with the labels. If a classifier relies on such spurious features, it will be unable to generalize to unseen test domains in which the spurious feature is no longer predictive of the label \cite{ImageNet9,CCSTextureBias}. In this setting, the prompts $\bfzit$ intentionally perturb the spurious features to simulate domains in which the spurious correlation is broken. We consider three standard benchmarks:
+(1) {\bf ImageNet-9} \cite{xiao2020noise} measures the over-reliance on background to predict the foreground (Background Bias), (2) {\bf Cue-Conflict Stimuli (CCS)} \cite{geirhos2018imagenet} assesses the over-reliance on texture (Texture Bias), and (3) a subset of {\bf CelebA} \cite{xiao2020noise} evaluates over-reliance on spurious demographic features (Demographic Bias -- in this case, the spurious correlation between hair colour and gender in CelebA). See \cref{app:exp_weak_spu_app} for further details about each dataset and associated indices measuring each form of bias.
+
+\subsection{Results}\label{sec:mainresults}
+To evaluate the effectiveness of edited  data from T2I models, we compare their results with key augmentation baselines broadly representing different approaches in the domain generalization literature (in addition to ERM): (1) \textbf{AugMix} \cite{hendrycks2020augmix}, (2) \textbf{RandAugment} \cite{cubuk2020randaugment}, (3) \textbf{CutOut} \cite{devries2017improved}, and (4) \textbf{PixMix} \cite{hendrycks2022robustness}, which all combine parametric transformations in complex pipelines to enhance model robustness. We also evaluate (5) \textbf{ACVC} \cite{Cugu_2022_CVPR}, which combines parametric transformations and augmentations in the Fourier domain for style mixing; interpolation-based methods like (6) \textbf{MixUp} \cite{zhang2017mixup} and (7) \textbf{CutMix} \cite{yun2019cutmix}; methods that train generators to diversify training data (8) \textbf{L2D} \cite{wang2021learning}; and adversarial data augmentation techniques like (9) \textbf{MEADA} \cite{zhaoNIPS20maximum} and (10) \textbf{RSC} \cite{huangRSC2020}.  
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{images_new/SDG_1.png}
+    \caption{\textbf{Single Domain Generalization (SDG) Results.} Average SDG test accuracies on the remaining target domains when training ResNet-50 on each source domain (indicated on each axis) using the respective data augmentation methods. Baseline methods are visualized with dashed lines, and \texttt{SDEdit} methods with solid lines. %From left to right, results are reported for the PACS, OfficeHome, NICO++, and DomainNet datasets.
+    }
+    \label{fig:SDG_1}
+\end{figure*}
+
+\paragraph{Single Domain Generalization} 
+Considering the fact that Stable Diffusion is built on top of a text encoder that, like many LLMs, can be sensitive to small differences in prompts that are not generally meaningful to humans (see, e.g., \citealp{checklist,robustsurvey,notrobustinput}), we experiment with four distinct prompting strategies using \texttt{SDEdit} to measure its sensitivity to variation in prompts: (1) \textbf{\emph{Minimal (M)}}, sentences including only the domain label, class label, and function words (articles or prepositions) as necessary to make the prompt grammatically correct, like ``a \texttt{domain} of a \texttt{class}'' (e.g., ``a sketch of an elephant'');
+(2) \textbf{\emph{Domain expert (H)}}, a collection of ``handcrafted'' prompts authored by a human given only metadata descriptions provided by the respective benchmarks, without looking at any samples form the target domain; and (3 \& 4) \textbf{\emph{Language enhancement (LE)}}, a collection of prompts generated by T5 \cite{t5}, in two variants: one that deterministically selects the highest-probability interventional prompts (\lec), the other that favors diversity in prompting (\lem).\footnote{Note that, by design, none of the prompting strategies are optimised to boost the reported metrics: they are generated in a way that is independent from classifiers' performance on downstream tasks or the structure of the generator.} (See \cref{apx:prompt} for further details on each prompting strategy.)   
+As shown in \cref{fig:SDG_1}, \texttt{SDEdit} outperforms all baselines %across each of the considered domains 
+regardless of the source domain (when averaging over target domains). Specifically, across all the considered benchmarks, using ResNet-50 with minimal prompt yields a $5\%$ improvement over the strongest baesline, PixMix, which in turn outperforms ERM by just $1.10\%$. We find that, when considering the performance on individual benchmarks, no single baseline consistently outperforms the others. This reinforces the observation that each of these techniques encodes different assumptions about the types of invariances expected to hold in the test domain. For the largest-scale dataset we consider, \texttt{DomainNet}, traditional data augmentation methods fail to demonstrate a substantial performance boost compared to ERM; but \texttt{SDEdit} is able to deliver a strong average performance boost of $5.48\%$. Comparing across all SDG datasets, \texttt{SDEdit} is the only method that consistently outperforms ERM across all benchmarks.  
+)
+\begin{table}
+\centering
+\small
+\caption{\textbf{Average SDG Performance.} The number reported is the average Single Domain Generalization average of all domains in each dataset, each serving as a single source domain. The best and second-best performing methods are highlighted with bold and underline, respectively.}
+\resizebox{\linewidth}{!}{\begin{tabular}{c|ccccc}
+\toprule
+ &   PACS &  OfficeHome &   NICO++ &  DomainNet & Average \\
+\midrule
+ERM & 61.96 & 61.94 & 69.95 & 25.26 & 54.78 \\
+MixUp & 58.17 & 60.46 & \underline{70.63} & 25.49 & 53.69 \\
+CutMix & 58.50 & 57.16 & 67.03 & 24.47 & 51.79 \\
+AugMix & 64.63 & 62.60 & 68.81 & 26.20 & 55.56 \\
+RandAugment & 62.61 & \underline{63.02} & 69.88 & 26.17 & 55.42 \\
+CutOut & 60.87 & 60.03 & 69.23 & 24.90 & 53.76 \\
+RSC & 64.58 & 59.10 & 67.37 & 23.32 & 53.59 \\
+MEADA & 64.04 & 62.08 & 69.89 & 25.26 & 55.32 \\
+PixMix & 67.12 & 61.43 & 69.48 & 25.53 & \underline{55.89} \\
+L2D & 68.89 & 58.37 & 65.19 & 24.75 & 54.30 \\
+ACVC & \underline{67.98} & 59.92 & 66.92 & \underline{26.46} & 55.32 \\
+\midrule
+SDEdit(M) & 76.43 & \textbf{64.66} & 71.12 & \textbf{31.94} & 61.04 \\
+SDEdit(H) & \textbf{77.87} & 63.27 & 71.95 & 31.82 & 61.23 \\
+SDEdit(LEC) & 76.38 & 63.43 & \textbf{73.69} & 31.44 & \textbf{61.24} \\
+SDEdit(LEM) & 75.65 & 63.14 & 73.61 & 30.94 & 60.84 \\
+\bottomrule
+\end{tabular}}
+\label{tab:average_SDG_baseline_performance}
+\end{table}
+
+We also find that the most sophisticated prompting strategy does not usually perform best:
+in \texttt{PACS}, \texttt{OfficeHome} and \texttt{DomainNet}, the Minimal (M) and Handcrafted (H) strategies outperform \lem and \lec, indicating that including additional details (e.g., specifying various styles of paintings across multiple prompts) does not yield obvious benefits, and may even degrade performance (e.g., by ``injecting noise'' into the pipeline).
+However, in \texttt{NICO++}, \lem and \lec show superior performance to (M) and (H), which may be explained by the fact the domain labels for NICO are not detailed enough for minimal prompts to be fully descriptive, meaning that the additional details included in prompts can be more beneficial in such contexts.
+
+\begin{table}
+\centering
+\small
+\caption{SDG PACS result with ResNet-50. Columns are individual source domains; accuracies are the average test accuracy of the three remaining target domains when training using the indicated source domain. The lower part of the table highlights the comparison between accessing ($\checkmark$) or not accessing ($\times$) synthetic target domains.}
+\label{tab:teston}
+\begin{tabular}{l|cccc|c} 
+\toprule
+ & Art & Photo & Sketch & Cartoon & Average  \\ 
+\midrule
+ERM & $74.44$ & $48.78$ & $50.89$ & $73.74$ & $61.96$  \\
+MixUp & $66.31$ & $42.98$ & $45.64$ & $77.76$ & $58.17$  \\
+CutMix & $72.53$ & $40.03$ & $44.72$ & $76.72$ & $58.50$  \\
+AugMix & $75.80$ & $51.32$ & $49.99$ & $81.42$ & $64.63$  \\
+RandAugment & $71.38$ & $46.80$ & $55.95$ & $76.33$ & $62.61$  \\
+CutOut & $76.67$ & $42.69$ & $48.93$ & $75.2$ & $60.87$  \\
+RSC & $73.15$ & $53.47$ & $51.11$ & $80.58$ & $64.58$  \\
+MEADA & $73.72$ & $48.78$ & $59.81$ & $73.84$ & $64.04$  \\
+PixMix & $77.33$ & $55.58$ & $52.42$ & $83.15$ & $67.12$  \\
+L2D & $77.33$ & $58.41$ & $58.14$ & $81.70$ & $68.89$  \\
+ACVC & $79.63$ & $52.76$ & $58.13$ & $81.40$ & $67.98$  \\
+\midrule
+SDEdit(M) $\times$ & $81.21$ & $57.54$ & $80.60$ & $84.76$ & $76.03$ \\
+SDEdit(M) $\checkmark$ & $82.67$ & $62.94$ & $73.78$ & $86.33$ & $76.43$  \\
+\bottomrule
+\end{tabular}
+\end{table}
+\paragraph{Precisely Describing the Target Domain Is Not Necessary.} 
+As noted above, Stable Diffusion is trained on a massive pre-training corpus of weakly-supervised data scraped from the web, which means it has likely been trained on samples that resemble a number of the considered test distributions. 
+By comparison, while the baselines we consider do make limited assumptions about the type of interventions they perform (and therefore yield better or worse performance depending on whether those interventions correspond to the covariate shift from the source domain to test domain -- see our RRSF analysis below), they do not have comparable access to approximations of the test domain. 
+For this reason, we perform an experiment to ``level the playing field'' in order to better assess the usefulness of \texttt{SDEdit} as an interventional mechanism by avoiding generating data resembling the test domain. Given a single training domain from the original dataset and a chosen test domain, we use \texttt{SDEdit} to transform the training data to all domains \emph{except the test domain} (\texttt{SDEdit}(M)$\times$), use it for IDA training, and measure accuracy on the test domain. 
+Fixing a test domain, we repeat this experiment for each possible choice of the training domain, and report the average accuracy on the held-out test domain. In this case, we are measuring \texttt{SDEdit}'s capacity to simulate interventions for SDG even when knowledge about the chosen test domain is not used in synthesising interventional data.
+We find that the generative model-based methods still substantially outperform the data augmentation baselines, with only a marginal drop in performance with respect to the case in which the target domain is approximated by Stable Diffusion (\texttt{SDEdit}(M)$\checkmark$). 
+This indicates that the interventions simulated by Stable Diffusion are useful even when knowledge about the test domain is not available.
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_new/spurious.png}
+    \caption{\textbf{Performance on Breaking Spurious Correlations.}  Reliance on different image attributes in comparison with baselines (solid lines) and OURS (dash lines) using ResNet-18. (Lower scores are better.) 
+    }
+    \label{fig:spurious_three_figs}
+\end{figure*}
+\textbf{Reducing Reliance on Spurious Features} Depending on the type of spurious correlation to be addressed in each experiment, we prompt \texttt{SDEdit} in different ways: for ImageNet-9 experiments, we handcraft prompts that describe a wide variety of possible backgrounds and randomise the combination of the object classes and backgrounds; for CCS, we use prompts that induce the generator to change the texture of the objects (e.g., turning them into a sculpture of a specific material); and for Celeb-A, we randomise the correlation between gender and hair colour. 
+Our results are displayed in \cref{fig:spurious_three_figs}.
+We find that, although several techniques are often assumed to perturb spurious features in a way that is agnostic to the target domain, our experiments indicate that this may not the case -- instead, baselines are (perhaps unsurprisingly) most effective when their augmentation pipeline implicitly intervenes over the corresponding spurious dependency. For example, PixMix mixes the input images with fractals that alter their texture (and often the background), but yields a worse Demographic Bias than ERM. 
+In contrast, \texttt{SDEdit} can perform the desired augmentation based on the relevant spurious dependency by simply describing it using interventional prompts, which enables substantial improvements over ERM in all settings. Such flexibility and ease-of-implementation with respect to interventions of interest are key advantages of using T2I models for IDA.  
+
+
+\section{Alternative Approaches}
+
+In the previous section, we show that \texttt{SDEdit}, one of the simplest and most widely-adopted editing techniques, substantially outperforms traditional augmentation pipelines for SDG and RRSF.
+However, there are several other ways we can simulate interventions with T2I generators: by default, such models can generate images using only text, with no need to provide an input image to edit; and more sophisticated image-editing techniques have also been developed using different conditioning mechanisms.
+In \cref{sec:conditioning}, we investigate the use of these alternative generative approaches for the same tasks.
+Additionally, in \cref{sec:clip_filter}, we consider \cite{issynthready}'s finding that filtering low-quality image outputs can improve synthetic data from earlier T2I generators, and study whether this is also true for SDG and RRSF using more recent generators.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{images_new/NJP_Sample.png}
+    \caption{\textbf{Visualization of selected samples from PACS.} Recall that \texttt{Retrieval} and \texttt{Text2Image} do not take the \texttt{Original} image into account, but \texttt{SDEdit}, \texttt{ControlNet}, and \texttt{InstructPix2Pix} do.}
+    \label{fig:Sample_Vis}
+\end{figure*}
+\subsection{Conditioning Mechanisms}\label{sec:conditioning}
+Despite the impressive performance of \texttt{SDEdit}, we observe several cases in which such a simple editing technique is not sufficient to simulate the desired intervention (e.g., see the second row of \cref{fig:Sample_Vis}). 
+This might depend on the fact \texttt{SDEdit} initializes the diffusion process from an embedding of the image being edited, which may be too constraining to obtain the desired manipulation.\footnote{Indeed, we observe this phenomenon persists across different hyperparameter settings controlling the strength of conditioning.} However, several other conditioning mechanisms exist. We consider three other forms of conditioning that may be suitable for our goal: \texttt{Text2Image}, \texttt{ControlNet} and \texttt{InstructPix2Pix}. 
+With \texttt{Text2Image} we refer to the native ability of Stable Diffusion of generating images by conditioning only on the text: the diffusion process is initialised with random noise, and the prompt embeddings are used to condition the attention matrices in the denoising steps, steering the diffusion in order to  
+yield an output that matches the description given by the prompt.
+\texttt{ControlNet} \cite{zhang2023controlnet} induces stronger spatial consistency between the original and the augmented image by using an additional network that has been trained to condition the generative process on spatial guidance (``Canny edges''; \citealp{canny1986computational}). 
+Finally, \texttt{InstructPix2Pix} \cite{brooks2022instructpix2pix} aims to improve diffusion models' ability to follow editing instructions by fine-tuning it on tuples of original images, editing instructions, and desired editing outputs. 
+
+\paragraph{Single Domain Generalization} In \cref{fig:SDG_2}, we see that conditioning can have a large impact on performance. First, we observe that \texttt{InstructPix2Pix} underperforms with respect to other conditioning mechanisms in most cases. This may be related to the fact that its training set (which is distilled from Stable Diffusion) contains a limited variety of samples that may supply an inadequate implementation of a general interventional mechanism. Although \texttt{ControlNet} allows for a better spatial control, its performance is similar to or lower than \texttt{SDEdit} in most cases. This might be expected when considering that this evaluation task does not particularly benefit from the preservation of spatial features. 
+More surprisingly, we see that \texttt{Text2Image} can be an extremely effective conditioning technique. The success of this approach indicates that conditioning on an image may often be a hindrance in approximating the desired domain. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{images_new/SDG_2.png}
+    \caption{\textbf{SDG Results by Conditioning Mechanism.} Results are reported following the same format as \cref{fig:SDG_1}.}
+    \label{fig:SDG_2}
+\end{figure*}
+\paragraph{Reducing Reliance on Spurious Features} All conditioning techniques are useful in reducing classifier bias. In the aggregate, \texttt{Text2Image} is most effective in doing so across all benchmarks; whereas other conditioning mechanisms have varying strengths and weaknesses across the different tasks.
+For instance, \texttt{ControlNet}'s ability to preserve the spatial features (i.e., the edges) of an image while modifying other aspects (in this case, the hair colour) yields second-best performance in CelebA, as the Canny edge detector is designed to omit information about the texture of objects. While \texttt{InstructPix2Pix} is second-best in removing overreliance on texture and background, it is not as effective as \texttt{ControlNet} on CelebA. Finally, \texttt{SDEdit} 
+shows middling performance across all benchmarks: it never performs best (or second-best), but it also never performs the worst.
+
+\paragraph{Retrieval Is Not (Always) Enough.}\label{sec:synthretrieval}
+The strong performance we observe when removing source images from the generative process (i.e., substituting \texttt{SDEdit} for \texttt{Text2Image}) suggests that Stable Diffusion's effectiveness is higher when sampling from its approximation of the intervened distribution without starting from an input image. 
+This raises the question of whether using Stable Diffusion to generate images is actually necessary: might we achieve similar results by simply using interventional prompts to retrieve relevant images directly from its original training dataset?
+To answer this question, we configure a retrieval baseline to compare the results of generating images and retrieving images from Stable Diffusion's training set using a simple image retrieval system,\footnote{Accessible at \url{https://rom1504.io/clip-retrieval}.} querying it with the same minimal prompt that is used to generate images (see \cref{sfig1:corgi}).
+
+We observe large differences between the behaviors of the \texttt{Retrieval} method across the tasks we consider.
+In SDG, retrieval proves to be an extremely effective technique as shown in \cref{fig:SDG_2}.
+For example, \texttt{Retrieval} outperforms all other methods on OfficeHome; and on PACS it proves to be only marginally inferior to \texttt{Text2Image(M)}. This is likely because
+Stable Diffusion's training data contains ample data from the classes and domains covered by these benchmarks and it is relatively easy to retrieve this data. On the other hand, for NICO++ and DomainNet, the retrieval baseline performance is inferior to $\texttt{Text2Image(M)}$. However, when Reducing Reliance on Spurious Features, \texttt{Retrieval} underperforms with respect to most generative techniques. This disagreement suggests that both retrieval and generative approaches are of interest and worth pursuing for different applications and different downstream tasks, as both have their own unique advantages and disadvantages. 
+Indeed, beyond performance figures, there are also important practical distinctions between the two.
+In favor of retrieval, retrieved images do not generally contain unrealistic artifacts;
+and once the retrieval engine has been deployed, it can be significantly faster than generation. However, such deployment requires massive storage resources ($>200$TB) and relies on highly efficient indexing and computing infrastructure. In contrast, generative models are significantly more compact in terms of storage (the version of Stable Diffusion we use is $\sim8$GB) and do not require a dedicated infrastructure to be run. 
+Finally, we observe that modern generators can effectively produce samples that combine concepts from their training data in new ways: in \cref{sec:howmuch}, we compare images generated with prompts combining such concepts against images retrieved with the same prompts.
+
+\subsection{Post-hoc Filtering} 
+\label{sec:clip_filter}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.85\linewidth]{images_new/CLIP_Filter.png}
+    \caption{\textbf{CLIP Filtering Results.} SDG accuracies averaged across all test domains for different conditioning strategies (boxes in bold) and CLIP filtering proportions (colors).}
+    \label{fig:CLIP_Filtering}
+\end{figure*}
+
+Although the quality of the generated samples of state-of-the-art diffusion models is impressive, failure cases may still occur and low-quality samples may be generated. Since such samples have been observed to harm the performance on downstream tasks, \cite{issynthready} and \cite{interfaces} deploy post-hoc filtering using CLIP \cite{clip} to discard them. In the case of IDA, the generated sample may fail at capturing either the specified class, the conditions of the environment we aim to simulate, or both. 
+Therefore, we filter images that do not exhibit a high enough CLIP similarity score with respect to both prompts: one describing the class, the other describing the domain (``An image of a \texttt{class}'' and ``\texttt{domain}'', respectively). Before training, we remove the samples with scores lower than a given percentile threshold and provide our results in \cref{fig:CLIP_Filtering}.
+Unlike \cite{issynthready,interfaces}, we do not find that CLIP filtering yields consistent and substantial improvements. This may be due to the improved performance of newer generators or the fact that we are considering different tasks (SDG and RRSF). For further details, full results, and selected examples, see \cref{sec:clipfilterapx}.
+
+\subsection{Limitations and Future Works}
+
+While we observe the effectiveness of synthetic data from generative models in improving robustness across various challenging benchmarks, we still encounter several limitations. First, there are several failure modes of different conditioning mechanisms (such as \texttt{ControlNet} and \texttt{InstructPix2Pix}) and their potential sub-optimal impact on RRSF. (See \cref{sec:failures} for qualitative examples of failure cases where target domains are either out-of-distribution with respect to Stable Diffusion’s training domain or cannot be easily described via natural-language prompts.) Additionally, the computational cost is one potential bottleneck: although the inference speed of generative models has greatly improved over time -- and, if current trends continue, might be attenuated to the point of irrelevance -- it remains a concern for current applications.)
+
+Furthermore, although we currently focus only on image classification, we note that all the methods we explore in this work are also applicable to other computer vision tasks such as object detection, instance segmentation, and semantic segmentation. While T2I-based interventional data augmentation can theoretically be applied to these tasks, implementing it successfully presents new challenges. Specifically, our approach currently only requires conditioning on domain and class labels via natural language interventional prompts, but extending this method to object detection and segmentation tasks would necessitate additional conditioning on pre-specified spatial information, such as bounding boxes or segmentation maps, as explored by  \cite{wu2023diffumask, NEURIPS2023_f2957e48}.
+
+
+
+\section{Conclusion}
+
+In this work, we study the application of T2I generators to performing IDA in two settings, SDG and RRSF, finding they perform much better than traditional data augmentation techniques. 
+We carry out a detailed investigation of how various components of the generative process may affect the results, concluding that the conditioning mechanism is the most important. Finally, we compare the strengths and limitations of T2I-enabled IDA with those of retrieval.
+
+
+

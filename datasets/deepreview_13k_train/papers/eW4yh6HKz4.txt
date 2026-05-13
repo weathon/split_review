@@ -1,0 +1,570 @@
+\title{CBQ: Cross-Block Quantization for Large Language Models}
+
+\begin{abstract}
+Post-training quantization (PTQ) has played a key role in compressing large language models (LLMs) with ultra-low costs. However, existing PTQ methods only focus on handling the outliers within one layer or one block, which ignores the dependency of blocks and leads to severe performance degradation in low-bit settings. In this paper, we propose CBQ, a cross-block reconstruction-based PTQ method for LLMs. CBQ employs a cross-block dependency using a homologous reconstruction scheme, establishing long-range dependencies across multiple blocks to minimize error accumulation. Furthermore, CBQ incorporates a coarse-to-fine preprocessing (CFP) strategy for suppressing weight and activation outliers, coupled with an adaptive LoRA-Rounding technique for precise weight quantization. These innovations enable CBQ to not only handle extreme outliers effectively but also improve overall quantization accuracy.
+Extensive experiments show that CBQ achieves superior low-bit quantization (W4A4, W4A8, W2A16) and outperforms existing state-of-the-art methods across various LLMs and datasets. Notably, CBQ quantizes the 4-bit LLAMA1-65B model within only 4.3 hours on a single GPU, achieving a commendable tradeoff between performance and quantization efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.48 \textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{./figure/new/teaser_a_crop.pdf}
+        \small{(a) Layer-by-layer quantization~\cite{Xiao_Lin_Seznec_Demouth_Han_2022}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.48 \textwidth}
+        \centering
+        \includegraphics[width=\linewidth, trim=0 25 0 25,clip]{./figure/new/teaser_b_crop.pdf}
+          \small{(b) Block-by-block quantization~\cite{shao2023omniquant}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.48 \textwidth}
+        \centering
+        \includegraphics[width=\linewidth, trim=3 25 0 25,clip]{./figure/new/teaser_c_crop.pdf}
+         \small{(c) Cross-block quantization (Ours)}
+    \end{minipage}
+    \caption{Comparison of different optimization manners in post-training quantization for large language models. Orange and blue dashed boxes indicate the order of quantization optimization.}
+    \label{teaser_crop}
+\end{figure}
+
+\begin{figure*}[!t]
+	\centering
+	\includegraphics[width=0.95\textwidth]{./figure/new/workflow_crop.pdf} %
+	\caption{Workflow of the proposed CBQ. CBQ firstly utilizes a coarse-to-fine preprocessing to handle the outliers of weights and activations, and then employs a cross-block optimization strategy to learn quantization step sizes and weight adaptive rounding matrices with supervision from the corresponding full-precision model. This sequential block-wise method minimizes aggregate error propagation through cross-block dependency modeling.}
+	\label{workflow}
+\end{figure*}
+Large language models (LLMs)~\cite{Wei_2022,Radford_Wu_Child_Luan_Amodei_Sutskever,Zhangetal,Brown_Mann}, have sparked immense academic and industrial interest owing to their remarkable performance in handling complex natural languages tasks~\cite{Hendrycks_2020,Bisk_Zellers_Lebras_Gao_Choi_2020}, like language generation, translation, question answering, and text summarization \textit{etc}. However, the sheer size of these models, often comprising billion-level parameters, demands significant computational resources for inference and deployment. This problem necessitates the employment of model compression techniques such as network pruning~\cite{han2015deep}, knowledge distillation~\cite{hinton2015distilling}, network quantization~\cite{choi2018bridging,frantar2022gptq}, and neural architecture search~\cite{Zoph_Le_2016} \textit{etc}. 
+Compared with most compression methods that require huge training costs and access to complete training data, the post-training quantization (PTQ) technique ~\cite{Frantar_Ashkboos_Hoefler_Alistarh_2022,lin2023awq,Xiao_Lin_Seznec_Demouth_Han_2022,wei2023outlier} operating with limited calibration data and computational resources is more in demand for compressing LLMs. 
+
+Previous PTQ methods~\cite{wei2023outlier,Xiao_Lin_Seznec_Demouth_Han_2022, shao2023omniquant} for LLMs mainly focus on designing accurate outliers suppression schemes for floating-point activations, and then conduct quantization with vanilla policy. They locate the position and optimize the channel scale of activations with outliers in a layer-by-layer or block-by-block manner, as shown in Fig.~\ref{teaser_crop}. However, these methods lead to accumulated errors and sub-optimal quantization across the entire model for not taking the dependency across blocks into consideration. Moreover, these PTQ methods suffer from the absence of joint optimization for reducing quantization errors of weights and activations, resulting in significant performance degradation when compressing LLMs into low-bit settings, such as W2A16 and W4A4.
+
+In this paper, we present CBQ, a comprehensive PTQ solution tailored for LLMs, which incorporates outlier suppression, learnable quantization step sizes, and adaptive rounding in a unified cross-block framework, as shown in Fig.~\ref{workflow}. CBQ introduces a cross-block dependency (CBD) into block-wise reconstruction, helping mitigate the issue of accumulated errors across the entire model.  Our approach ensures that multiple transformer blocks within a sliding window with overlapping are optimized simultaneously. This overlapping window mechanism, complemented by a novel homologous reconstruction scheme, allows for more effective and non-local optimization of quantization parameters. To reduce reconstruction difficulties posed by extreme weight and activation outliers, CBQ incorporates a novel coarse-to-fine preprocessing (CFP) strategy. CFP utilizes a quartile criterion to coarsely determine the range of outliers and then precisely pinpoint the locations of the outliers based on feature distributions. Then we truncate weight outliers and perform equivalent scaling on the activation outliers. 
+Furthermore, CBQ introduces a LoRA-Rounding technique, employing two low-rank matrices to learn the adaptive rounding values for quantized weight, which helps rectify weight quantization errors while preserving training efficiency. It is worth noting that the step sizes of weights and activations, and the rounding matrices are jointly optimized in our proposed quantization framework.  CBQ's innovative approach in cross-block reconstruction, advanced outlier processing, and adaptive rounding establish it as a groundbreaking solution in the field of PTQ for LLMs. 
+
+The contributions of this paper are summarized as follows:
+\begin{itemize} \itemsep -2pt
+\item We propose a unified PTQ method tailored to LLMs based on cross-block reconstruction, which introduces a cross-block dependency mechanism to reduce accumulated errors in a block-wise manner.
+\item We design a coarse-to-fine pre-processing strategy to truncate weight outliers and equivalently scale activation outliers to reduce the reconstruction difficulty.
+\item We present LoRA-Rounding, an efficient adaptive rounding scheme that optimizes rounding errors of weight quantization via two low-rank matrices.
+\item Extensive experiments demonstrate that CBQ achieves low-bit quantization settings such as W4A4, W4A8, and W2A16, and outperforms state-of-the-art methods across various models and benchmark datasets.
+\end{itemize}
+
+
+\section{Related works}
+
+
+\paragraph{Post-training quantization.}
+The post-training quantization (PTQ) algorithm~\cite{nagel2021white} converts the pre-trained full-precision network into a fixed-point network with a few unlabeled calibration data and computational overhead, which enables fast deployment on various devices.  Recent post-training quantization methods have been widely explored in vision models~\cite{liu2021post,Hubara_2021,Frantar_Alistarh_2022,Cai2020}.
+Some techniques like AdaQuant~\cite{hubara2020improving}, AdaRound~\cite{nagel2020up}, and BRECQ~\cite{li2021brecq} minimize the distance between floating point and quantized model outputs to optimize quantization parameters. While BRECQ incorporates Fisher information and jointly optimizes layers within each residual block, it still obtains sub-optimal performance for not capturing interactions across neighboring residual blocks. The proposed CBQ improves quantization accuracy that accounts for dependencies between adjacent blocks.
+
+\paragraph{Quantization for large language models.}
+Existing large language models such as BLOOM~\cite{Laurencon2022}, OPT~\cite{zhang2022opt}, and LLAMA~\cite{Touvron} contain tens of billions of parameters, and require massive memory footprint and computation requirements in the inference. Recent works have been proposed to compress LLMs with post-training quantization methods that do not require a complete training procedure and access to a full training dataset. LLM.int8()~\cite{Dettmers}, ZeroQuant~\cite{yao2022zeroquant} and nuQmm~\cite{park2022nuqmm} focus on quantizing the parameters with mixed-precision decomposition scheme, representing the outliers with 16-bit and others with 8-bit. These methods can not truly accelerate the inference of LLMs for that is hard to implement on hardware.   Other methods like GPTQ~\cite{frantar2022gptq} and AWQ~\cite{lin2023awq} can efficiently quantize LLMs but they focus on FP16 activations and INT4 weights, which can not benefit from the integer matrix multiplication of existing AI accelerators. Additionally, Some methods like SmoothQuant~\cite{Xiao_Lin_Seznec_Demouth_Han_2022}, Outlier Suppression~\cite{wei2022outlier}, Outlier Suppression+~\cite{wei2023outlier} and QLLM~\cite{liu2023qllm} aim at processing activation outliers and lack optimization for the weight quantization. Moreover, these methods rely on hand-craft quantization strategies which are tuned based on extensive experimentation for optimization. Recent block reconstruction-based PTQ method OmniQuant~\cite{shao2023omniquant}, suffers from error accumulation from the lack of cross-block dependency.
+In contrast, CBQ incorporates outlier suppression, learnable step sizes, and adaptive rounding in a unified cross-block framework, which enables efficient and high-performance quantization for LLMs. 
+
+
+\section{Methods}
+
+
+In this section, we introduce the proposed cross-block quantization framework tailored to LLMs. As illustrated in Fig.~\ref{workflow}, CBQ firstly handles the outliers of weights and activations, and then jointly learns step sizes of weights and activations and weight-rounding matrices in a cross-block manner. CBQ reconstructs the output feature of the last block in each sliding window based on the corresponding supervision of the full-precision model.
+We first give a brief introduction to quantization, which aims to represent weights and activations of float model with lower bit-width for reducing the memory and computational cost. Given floating-point weights $W$ and activations $X$, the $k$-bit quantized and de-quantized processing of weights and activations can be represented as
+\begin{equation}
+\small
+\label{quant}
+\begin{aligned}
+Q(X)  = S_X \cdot \left \lfloor \frac{X}{S_X}  \right \rceil ; \ \ \   \ \ Q(W)  = S_W \cdot (\left \lfloor \frac{W}{S_W}  \right \rfloor + \Delta_W),
+\end{aligned}
+\end{equation}
+where $Q_{\cdot}(\cdot)$ is an uniform quantizer, $S_X$ and $S_W$ are the quantization step sizes of activations and weights. $\left \lfloor \cdot \right \rceil$ and $\left \lfloor \cdot \right \rfloor$ represent rounding to the nearest integer and rounding towards negative infinity, respectively. $\Delta_W$ denotes the quantization rounding matrix for weight, where each element belongs to $\{0,1\}$. For simplicity, we omit the offset and clipping operation in Eq.~\ref{quant}.
+ 
+\begin{figure}[!t]
+	\centering
+	\includegraphics[width=0.48\textwidth]{./figure/homologous_crop.pdf} %
+	\caption{Diagram of the homologous reconstruction scheme. $\mathcal{L}_{homo\_rec}$ and $\mathcal{L}_{norm\_rec}$ represent the homologous reconstruction loss and the normal reconstruction loss, respectively.}
+	\label{homologous_crop}
+\end{figure}
+\subsection{Cross-block reconstruction}
+Most existing post-training quantization methods~\cite{Xiao_Lin_Seznec_Demouth_Han_2022, lin2023awq, wei2023outlier, Frantar_Ashkboos_Hoefler_Alistarh_2022} for LLMs conduct calibration in a layer-wise manner, optimizing the quantization step sizes of weights and inputs, respectively. OmniQuant~\cite{shao2023omniquant} adopts a learnable method in a block-wise manner but ignores the issue of accumulated errors across the entire model. Besides, previous quantization methods get the rounding values of weights based on the policy of rounding to the nearest integer value,  which is not the best for it not adapts to the data and the task loss~\cite{nagel2020up}. In this paper, we propose to jointly optimize the step sizes and weight rounding values ($S_X$, $S_W$ and  $\Delta_W$)  in a unified cross-block framework. For a large language model with $K$ transformer blocks, the objective for joint optimization of the quantization parameters within $k^{th}$ block is formulated as
+\begin{equation}
+\mathop{\arg\min}\limits_{S^k_X,S^k_W,\Delta^k_W} \mathbb{E}(T_k(W^k,X^k), T_k(Q(W^k),Q(X^k)),
+\end{equation}
+where $1\le k \le K$, $T(\cdot)$ is a transformer block, $W^k$ and $X^k$ are weights and activations within the $k^{th}$ block, respectively. $S_X^k$ and $S_W^k$ are quantization step sizes of activation and weight quantization in the block, respectively, which are learnable during optimization. And $\mathbb{E}(\cdot)$ represents the metric to evaluate the reconstruction errors between outputs of quantized block and full-precision block.
+
+\begin{figure*}[!t]
+	\centering
+	\includegraphics[width=\textwidth]{./figure/smooth_crop.pdf} %
+	\caption{Outliers pre-processing for weights and activations. The red dashed line indicates the truncation threshold for weight outliers, and the deep blue line represents the reserved subset. The light blue boxes depict activation outliers that undergo per-channel scaling.}
+	\label{smooth}
+\end{figure*}
+
+
+
+
+\paragraph{Cross-block dependency.}
+While block-wise reconstruction is effective in saving computational memory, it only considers the local information within each block, neglecting the dependency across different blocks. The reconstruction error will accumulate as the stack of transformer blocks, incurring suboptimal solutions for quantization parameters To tackle this issue, we introduce a cross-block dependency (CBD) scheme using a sliding window approach. This scheme enables the simultaneous optimization of multiple blocks within the window. Furthermore, the two adjacent sliding windows have overlapping blocks, ensuring that the blocks between the windows are also interconnected. The CBD scheme enhances the connectivity and cooperation between blocks, enabling them to jointly contribute to the quantization process. This holistic optimization strategy leads to better overall performance and addresses the limitations of block-wise reconstruction in capturing cross-block dependencies.
+We formulate the optimization with the CBD scheme as
+\begin{equation}
+\mathop{\arg\min}\limits_{S_X^{i,k},S_W^{i,k},\Delta_W^{i,k}} \mathbb{E}(T_{i,k}(W^{i,k},X^{i,k}), T_{i,k}(Q(W^{i,k}),Q(X^{i,k})),
+\end{equation}
+where $1\le i \le k \le K$, $T_{i,k}$ represents the blocks from block $i$ to block $k$ within one sliding window, and the same applies to the symbols $S_X^{i,k}$, $S_W^{i,k}$ and $\Delta_W^{i,k}$.
+
+Although the CBD technique helps reduce the reconstruction difficulty, it is important to note that it cannot completely eliminate the accumulated errors and the optimization within each window remains local. To address this limitation and further enhance the reconstruction process while ensuring stability, we introduce an additional homologous reconstruction scheme, as illustrated in Fig.~\ref{homologous_crop}.
+In this scheme, we input the output of the previous block of the quantized model into the current block of the full-precision model. This generates an additional output that is homologous to the outputs of the quantized model. By minimizing the reconstruction errors between these two homologous outputs, CBD could help improve the overall accuracy and stability of the reconstruction process. Additionally, the optimization object is the average of the homologous reconstruction error $\mathcal{L}_{homo\_rec}$ and the normal reconstruction error $\mathcal{L}_{norm\_rec}$: 
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{rec} = & \underbrace{\mathbb{E}(T_{i,k}(W^{i,k},X^{i,k}), T_{i,k}(Q(W^{i,k}),Q(X^{i,k}))}_{\mathcal{L}_{norm\_rec}} + \\
+& \underbrace{\mathbb{E}(T_{i,k}(W^{i,k},Q(X^{i,k})), T_{i,k}(Q(W^{i,k}),Q(X^{i,k}))}_{\mathcal{L}_{homo\_rec}}.
+\end{aligned}
+\end{equation}
+For the distance metric, we incorporate $\mathcal{L}_2$ and Kullback-Leibler divergence (KLD) loss~\cite{kullback1951information} to measure reconstruction error. KLD computes the likelihood distribution between output features that undergo the softmax function. It tends to suppress outliers in the feature space and enhance the robustness of the optimization process. By incorporating both terms, our method captures both the spatial distance and the distribution discrepancy, leading to a more comprehensive and robust optimization process. Then the distance metric is formulated as:
+\begin{equation}
+\begin{aligned}
+\mathbb{E}(h_1,h_2) = \left || h_1 - h_2 \right ||_2 + D_{KL}(\sigma(h_1), \sigma(h_2)),
+\end{aligned}
+\end{equation}
+where $h_1$ and $h_2$ are hidden states from the outputs of full-precision blocks and quantized blocks, respectively. $\sigma$ is the softmax function.  $\left || \cdot \right ||_2$ represents the $\mathcal{L}_2$ distance and $D_{KL}(\cdot)$ represents the KLD distance. 
+We provide the ablation study on the loss functions in Table~\ref{ab_loss}. 
+
+\begin{algorithm}[h]
+\label{pseudocode}
+\SetAlgoLined
+\KwIn{The input tensor $X$,\\ \qquad  \quad The balancing coefficient $\lambda_1$, $\lambda_2$}
+\KwOut{Outlier $O$}
+
+\textbf{Coarse-grained Detection};
+
+$X_{\text{sorted}} = \text{Sort}(X)$;
+
+$Q_1 = X[n/4], Q_3 = X[3n/4]$; 
+
+$IQR = Q_3 - Q_1$; 
+
+$T = Q_3 + \lambda_1 IQR$; 
+
+$O = \{ x| x > T, x \in X_{\text{sorted}}\}$;
+
+$\{$ \textbf{Fine-grained Detection}.$\}$ 
+
+$N = \textrm{Len}(O), M^* = \textbf{INF}$; 
+
+\ForEach{ $i$ = 0 \textbf{to} $N$}{
+	$O_{outlier} = O_{i:N}$;
+	
+	$O_{reserved} = O_{0:i}$;
+	
+	$M_{intra} = \textrm{Var}(O_{reserved})$;
+	
+	$M_{inter} = (\textrm{Min}(O_{outlier}) - \textrm{Max}(O_{reserved}))^2$;
+	
+	$M =  M_{inter} - \lambda_2 M_{intra}$;
+	
+	\If{$M > M^*$}{
+		$O^* = O_{outlier}$;
+		
+		$M^* = M$.
+	}
+}
+\caption{Coarse-to-Fine Preprocessing}
+\end{algorithm}
+
+\subsection{Coarse-to-fine pre-processing}
+\begin{table*}[!t] \fontsize{8}{7}\selectfont  
+	\begin{center}
+	\renewcommand\tabcolsep{6pt}
+	\begin{threeparttable}
+	\begin{tabular}{c|c|c|cccccc}
+		\toprule[1.2pt]
+		Models& \#Bits & Methods  & PIQA & HellaSwag & ARC-C &ARC-E &Mutual  & Ethics\\ 
+		\midrule
+		\multicolumn{1}{c|}{\multirow{15}{*}{OPT-30B}}  & FP & -  & 78.18 & 72.27 &38.14 &65.40 & 69.72 / 48.83 / 74.98 &60.28 \\
+		\cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A16}  &GPTQ  &  78.10 & 71.50 & 37.54& 63.88 & 68.64 / 47.40 / 74.27& 58.64 \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~} & OmniQuant    & 78.06 & 71.29 & 37.98 & 65.19 & 69.34 / 48.64 /74.71  & 58.73  \\
+        \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ   & \cellcolor{orange!20}\textbf{78.36 }& \cellcolor{orange!20}\textbf{72.23 }& \cellcolor{orange!20}\textbf{38.06} & \cellcolor{orange!20}\textbf{65.35 }& \cellcolor{orange!20}\textbf{69.77} / \cellcolor{orange!20}\textbf{49.32} /\cellcolor{orange!20}\textbf{ 74.47} &\cellcolor{orange!20}\textbf{ 61.31}   \\
+         \cmidrule(r){2-9}
+         \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W2A16}  &GPTQ  & 66.38 & 52.55 & 28.41 & 43.86 & 64.50 / 41.08 / 68.62 &52.15  \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~}   &OmniQuant & 72.85 &66.81 & 35.98 & 56.65 & 62.36 / 43.12 / 68.62 & 53.64\\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ  &\cellcolor{orange!20}\textbf{76.19}  & \cellcolor{orange!20}\textbf{66.90} & \cellcolor{orange!20}\textbf{36.23} & \cellcolor{orange!20}\textbf{59.72}& \cellcolor{orange!20}\textbf{68.20} / \cellcolor{orange!20}\textbf{47.29} / \cellcolor{orange!20}\textbf{72.23} & \cellcolor{orange!20}52.10  \\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ*  &\cellcolor{orange!20}\textbf{78.29}  & \cellcolor{orange!20}\textbf{71.18} & \cellcolor{orange!20}\textbf{36.95} & \cellcolor{orange!20}\textbf{64.01}& \cellcolor{orange!20}\textbf{69.49} / \cellcolor{orange!20}\textbf{48.76} / \cellcolor{orange!20}\textbf{75.06} & \cellcolor{orange!20}\textbf{60.05}  \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A8}  &OmniQuant   & 77.20  & 71.17 &37.11 & 64.60 & 68.81 / 47.51 / 74.60  & 59.17  \\
+         \multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}  &RPTQ  &76.93 &71.25 & 37.45 & 63.46 &68.98 / 47.67 / 74.75 & 59.21   \\
+         \multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}  &\cellcolor{orange!20}CBQ   &\cellcolor{orange!20}\textbf{78.26} & \cellcolor{orange!20}\textbf{71.55} & \cellcolor{orange!20}\textbf{37.89} & \cellcolor{orange!20}\textbf{64.92} & \cellcolor{orange!20}\textbf{69.01} / \cellcolor{orange!20}\textbf{47.72} / \cellcolor{orange!20}\textbf{74.81} & \cellcolor{orange!20}\textbf{59.23}  \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{2}{*}{W4A4}  &OmniQuant  & 75.38& 67.47  & 33.27 & 61.23 & 67.12 / 45.14 / 72.34 & 56.30   \\
+         \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ   & \cellcolor{orange!20}\textbf{75.89 }&  \cellcolor{orange!20}\textbf{67.49} &  \cellcolor{orange!20}\textbf{34.81 }&  \cellcolor{orange!20}\textbf{61.58} & \cellcolor{orange!20} \textbf{67.73} /  \cellcolor{orange!20}\textbf{45.94 }/  \cellcolor{orange!20}\textbf{73.14 }&  \cellcolor{orange!20}\textbf{56.60}    \\
+         
+         \midrule
+		\multicolumn{1}{c|}{\multirow{15}{*}{OPT-66B}}  & FP & -  & 79.81 & 74.86 & 40.01& 67.26& 69.84 / 48.87 / 74.94 & 58.14\\
+		\cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A16}  &GPTQ  & 79.32 & 73.15 & 38.95 & 65.45& 69.10/ 48.46 / 74.26 &54.90  \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~} & OmniQuant    &79.43  & 73.27 & 38.97 & 66.85 & 69.04 / 48.45 / 74.24 & 55.87   \\
+        \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ   &\cellcolor{orange!20}\textbf{79.71} & \cellcolor{orange!20}\textbf{74.69} & \cellcolor{orange!20}\textbf{39.18} & \cellcolor{orange!20}\textbf{67.38} & \cellcolor{orange!20}\textbf{69.50} / \cellcolor{orange!20}\textbf{48.65} / \cellcolor{orange!20}\textbf{74.83} & \cellcolor{orange!20}\textbf{57.35}   \\
+        \cmidrule(r){2-9}
+         \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W2A16}  &GPTQ  & 54.24 & 52.55 & 23.04 & 32.28& 60.45 / 35.56 / 61.74 & 49.50 \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~}  &OmniQuant  &77.01 & 73.10 & 34.65 & 66.32 & 65.26 / 43.23 / 70.47 & 51.46 \\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ  & \cellcolor{orange!20}\textbf{78.05} & \cellcolor{orange!20}\textbf{73.45} & \cellcolor{orange!20}\textbf{35.37} & \cellcolor{orange!20}\textbf{66.84}& \cellcolor{orange!20}\textbf{67.34} / \cellcolor{orange!20}\textbf{45.31} / \cellcolor{orange!20}\textbf{72.45} &\cellcolor{orange!20}\textbf{55.95}  \\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ*  & \cellcolor{orange!20}\textbf{79.21} & \cellcolor{orange!20}\textbf{74.32} & \cellcolor{orange!20}\textbf{38.96} & \cellcolor{orange!20}\textbf{67.11}& \cellcolor{orange!20}\textbf{69.32} / \cellcolor{orange!20}\textbf{48.35} / \cellcolor{orange!20}\textbf{74.69} &\cellcolor{orange!20}\textbf{56.78}  \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A8}  &OmniQuant  & 77.12 & 73.56 & 37.65 & 65.89 & 68.25 / 47.63 / 73.85 & 56.93  \\
+         \multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}  &RPTQ  & 77.52 &74.01  &38.82  & 64.60 & 68.54 / 47.87 / 73.94 & 56.95    \\
+         \multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}  &\cellcolor{orange!20}CBQ  & \cellcolor{orange!20}\textbf{79.12}  & \cellcolor{orange!20}\textbf{74.21} & \cellcolor{orange!20}\textbf{39.25} & \cellcolor{orange!20}\textbf{67.16} &\cellcolor{orange!20}\textbf{69.07} / \cellcolor{orange!20}\textbf{48.32} / \cellcolor{orange!20}\textbf{74.53}  & \cellcolor{orange!20}\textbf{56.98}  \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{2}{*}{W4A4}  &OmniQuant  &77.85 & 71.76 & 37.20 & 63.29 & 68.20 / 46.61 / 73.02 & 55.54   \\
+         \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ &\cellcolor{orange!20}\textbf{78.01} & \cellcolor{orange!20}\textbf{72.34} & \cellcolor{orange!20}\textbf{37.56} & \cellcolor{orange!20}\textbf{63.78}&  \cellcolor{orange!20}\textbf{68.76} / \cellcolor{orange!20}\textbf{47.20} / \cellcolor{orange!20}\textbf{73.56} & \cellcolor{orange!20}\textbf{55.82}    \\
+	   \midrule
+	   \midrule
+    
+  	\multicolumn{1}{c|}{\multirow{16}{*}{LLAMA1-30B}}  & FP & -   & 80.09 & 79.21 & 45.39 & 58.92& 72.45 / 53.49 /78.21 & 57.42\\
+		\cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A16}  &GPTQ  & 79.62 & 78.81 & 44.54 & 58.42 & 72.30 / 52.93 / 77.44 &56.30  \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~} & OmniQuant   & 79.83 & 78.95 & 46.26 & 59.34 &72.29 / 53.38 / 77.65  & 56.21 \\
+        \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ   & \cellcolor{orange!20}\textbf{80.12} & \cellcolor{orange!20}\textbf{79.11} & \cellcolor{orange!20}\textbf{46.65} & \cellcolor{orange!20}\textbf{59.89} & \cellcolor{orange!20}\textbf{72.85} / \cellcolor{orange!20}\textbf{53.95} / \cellcolor{orange!20}\textbf{78.56} & \cellcolor{orange!20}\textbf{57.85}   \\
+        \cmidrule(r){2-9}
+         \multicolumn{1}{c|}{~}   &\multirow{4}{*}{W2A16}  &GPTQ  &51.03 & 26.34 & 26.02 & 28.87 & 56.53 / 29.80 / 58.13 & 52.72 \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~}  &OmniQuant &77.23& 73.85& \textbf{43.52} & 55.23& \textbf{70.62} / \textbf{50.89} / 74.96 & 50.36 \\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}& \cellcolor{orange!20}CBQ   & \cellcolor{orange!20}\textbf{77.23}& \cellcolor{orange!20}\textbf{75.05}& \cellcolor{orange!20}42.93 & \cellcolor{orange!20}\textbf{57.12} & \cellcolor{orange!20}69.96 / \cellcolor{orange!20}49.93 /\cellcolor{orange!20}\textbf{75.65} &\cellcolor{orange!20}\textbf{56.35} \\
+ \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ$^*$   & \cellcolor{orange!20}\textbf{80.09}& \cellcolor{orange!20}\textbf{78.85 }& \cellcolor{orange!20}\textbf{45.05} & \cellcolor{orange!20}\textbf{58.42 }& \cellcolor{orange!20}\textbf{72.74} / \cellcolor{orange!20}\textbf{53.95} /\cellcolor{orange!20}\textbf{78.44} &\cellcolor{orange!20}\textbf{57.65}\\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{2}{*}{W4A8}  &OmniQuant  & 78.95& 76.34 & 44.62 & 57.36  & 71.03 / 52.89 / 77.06 & 57.05 \\
+         \multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}  &\cellcolor{orange!20}CBQ   & \cellcolor{orange!20}\textbf{79.34} & \cellcolor{orange!20}\textbf{78.98} & \cellcolor{orange!20}\textbf{45.13} & \cellcolor{orange!20}\textbf{58.45} & \cellcolor{orange!20}\textbf{71.35} / \cellcolor{orange!20}\textbf{53.23} / \cellcolor{orange!20}\textbf{77.64}  & \cellcolor{orange!20}\textbf{57.19}    \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A4}  &OmniQuant   & 71.21 & 64.65 & 34.47 & 49.45 & 67.10 / 45.37 / 71.44 & 47.69 \\ 
+         \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & QLLM & 73.83 & 67.91 & 38.40 & 50.67 & - & -\\
+         \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ  & \cellcolor{orange!20}\textbf{76.33} & \cellcolor{orange!20}\textbf{72.74} & \cellcolor{orange!20}\textbf{42.92} & \cellcolor{orange!20}\textbf{54.50}& \cellcolor{orange!20}\textbf{70.12 }/ \cellcolor{orange!20}\textbf{50.45} / \cellcolor{orange!20}\textbf{74.73} &  \cellcolor{orange!20}\textbf{48.70}   \\
+	   \midrule
+  	\multicolumn{1}{c|}{\multirow{12}{*}{LLAMA1-65B}}  & FP &-& 80.79 & 80.72 & 46.24& 58.71& 73.03 / 54.17 / 79.12  & 61.75 \\
+		\cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A16}  &GPTQ   & 80.79 & 79.86 & 45.45 & 58.13 & 72.89 / 53.84 / 78.57 & 58.45 \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~} & OmniQuant    &81.01 & 80.30 & 45.74 & 58.41 & 72.99 / 54.06 / 79.11 & 60.12   \\
+        \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ   &\cellcolor{orange!20}\textbf{ 81.12 }& \cellcolor{orange!20}\textbf{80.76} & \cellcolor{orange!20}\textbf{45.98} & \cellcolor{orange!20}\textbf{58.64} & \cellcolor{orange!20}\textbf{73.06 }/ \cellcolor{orange!20}\textbf{54.29 }/ \cellcolor{orange!20}\textbf{78.89} & \cellcolor{orange!20}\textbf{61.49}  \\
+        \cmidrule(r){2-9}
+         \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W2A16}  &GPTQ  & 56.47 & 33.31 & 25.43 & 31.69 & 59.28 / 33.86 / 60.49 & 50.93  \\
+        \multicolumn{1}{c|}{~}  & \multicolumn{1}{c|}{~}  &OmniQuant &\textbf{79.50} &72.38 & 40.35 & 52.56 & 69.50 / 48.64 / 74.94 & 52.64 \\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ  &\cellcolor{orange!20} 78.12& \cellcolor{orange!20}\textbf{74.28} & \cellcolor{orange!20}\textbf{41.64} & \cellcolor{orange!20}\textbf{55.35}& \cellcolor{orange!20}\textbf{70.67} / \cellcolor{orange!20}\textbf{50.80} / \cellcolor{orange!20}\textbf{75.51} & \cellcolor{orange!20}\textbf{55.95} \\
+	\multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ*  &\cellcolor{orange!20}\textbf{ 81.07 }& \cellcolor{orange!20}\textbf{80.51} & \cellcolor{orange!20}\textbf{45.81} & \cellcolor{orange!20}\textbf{57.45}& \cellcolor{orange!20}\textbf{73.43} / \cellcolor{orange!20}\textbf{54.96} / \cellcolor{orange!20}\textbf{79.23} & \cellcolor{orange!20}\textbf{61.35} \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{2}{*}{W4A8}  &OmniQuant  & 79.21 & 78.96& 44.63 &57.68  & 72.24 / 53.89 / 78.65 & 59.68   \\
+         \multicolumn{1}{c|}{~}   &\multicolumn{1}{c|}{~}  &\cellcolor{orange!20}CBQ   & \cellcolor{orange!20}\textbf{79.95}& \cellcolor{orange!20}\textbf{79.30} & \cellcolor{orange!20}\textbf{45.43} & \cellcolor{orange!20}\textbf{58.12} &\cellcolor{orange!20}\textbf{72.83} / \cellcolor{orange!20}\textbf{54.27} / \cellcolor{orange!20}\textbf{79.02} & \cellcolor{orange!20}\textbf{61.25}   \\
+         \cmidrule(r){2-9}
+        \multicolumn{1}{c|}{~}   &\multirow{3}{*}{W4A4}  &OmniQuant & 71.81 & 66.81 & 35.92  &  48.02 & 68.49 / 47.29 / 73.70  & 57.19   \\
+         \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & QLLM  &73.56 & 70.94 & 39.68 & 52.06& -&-    \\
+         \multicolumn{1}{c|}{~}  &\multicolumn{1}{c|}{~} & \cellcolor{orange!20}CBQ  &\cellcolor{orange!20}\textbf{77.69} & \cellcolor{orange!20}\textbf{76.65} &\cellcolor{orange!20}\textbf{43.25} & \cellcolor{orange!20}\textbf{56.01}& \cellcolor{orange!20}\textbf{70.93} / \cellcolor{orange!20}\textbf{51.35} / \cellcolor{orange!20}\textbf{75.62} &  \cellcolor{orange!20}\textbf{57.50}  \\
+		\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+ 	\caption{Evaluation on multiple zero-shot datasets with the accuracy $\uparrow$ metric, where the Mutual dataset is evaluated with the Mean Reciprocal Rank/Recall$@1$/Recall$@2$ metrics. CBQ$^*$ represents that the experiments conducted with 2-bit weight-only quantization did not involve fully quantizing the model but only the FC2  layera of the first and the last transformer blocks are converted to 4-bit precision.}
+	\label{exp_acc}
+\end{table*}
+
+
+
+
+
+
+\begin{table}[ht] \fontsize{7.5}{7}\selectfont %字号，行间距
+	\begin{center}
+	\renewcommand\tabcolsep{1.4pt}
+	\begin{threeparttable}
+	\begin{tabular}{c|c|cc|cc|cc|cc}
+        \toprule[1.2pt]
+        \multirow{2}{*}{\#Bits} &\multirow{2}{*}{Methods}& \multicolumn{2}{c|}{OPT-30B} & \multicolumn{2}{c|}{OPT-66B} & \multicolumn{2}{c|}{LLAMA1-30B} & \multicolumn{2}{c}{LLAMA1-65B}   \\
+        \cmidrule(r){3-10}
+        ~& ~&   C4 & Wiki & C4 & Wiki  & C4 & Wiki & C4 & Wiki \\ 
+	\midrule
+	FP & - & 10.69  &9.56 &10.28 &9.34&5.98&4.10 &5.62 &3.53 \\
+	\cmidrule(r){1-10}
+        \multirow{3}{*}{W4A16} & GPTQ   & 10.80 &9.63 &10.50 &9.55 &6.16 &4.34 &5.77 & 3.77 \\
+        \multicolumn{1}{c|}{~} &OmniQ & 10.80 &9.71 &10.63 & 9.37&6.06 &4.19&5.68 &3.62\\
+        \multicolumn{1}{c|}{~} &\cellcolor{orange!20}CBQ & \cellcolor{orange!20}\textbf{10.73}&\cellcolor{orange!20}\textbf{9.65} & \cellcolor{orange!20}\textbf{10.31} &\cellcolor{orange!20}\textbf{9.41} &\cellcolor{orange!20} \textbf{6.03} &\cellcolor{orange!20}\textbf{4.14} &\cellcolor{orange!20}\textbf{5.62} &\cellcolor{orange!20}\textbf{3.59}\\
+        \cmidrule(r){1-10}
+        \multirow{4}{*}{W2A16} &GPTQ &1.6e4 &9.1e3 &4.3e3 &6.3e3 &7.2e3 &1.3e4 &8.8e3 &1.1e4 \\
+        \multicolumn{1}{c|}{~} &OmniQ & 12.80 &11.00 &12.13  &10.59 &9.02 &7.14 &7.78 &6.01 \\
+        \multicolumn{1}{c|}{~} &\cellcolor{orange!20}CBQ  & \cellcolor{orange!20}\textbf{12.01} &\cellcolor{orange!20}\textbf{10.51} &  \cellcolor{orange!20}\textbf{11.19} &\cellcolor{orange!20}\textbf{10.25} &\cellcolor{orange!20}\textbf{7.65} &\cellcolor{orange!20}\textbf{5.58} &\cellcolor{orange!20}\textbf{7.42} &\cellcolor{orange!20}\textbf{5.25}\\
+        \multicolumn{1}{c|}{~} &\cellcolor{orange!20}CBQ*  & \cellcolor{orange!20}\textbf{10.92} &\cellcolor{orange!20}\textbf{10.26} &  \cellcolor{orange!20}\textbf{10.39} &\cellcolor{orange!20}\textbf{9.48} &\cellcolor{orange!20}\textbf{6.02} &\cellcolor{orange!20}\textbf{4.21} &\cellcolor{orange!20}\textbf{5.73} &\cellcolor{orange!20}\textbf{3.73}\\
+        \cmidrule(r){1-10}
+
+         \multirow{2}{*}{W4A8} &OmniQ & 10.96 & 9.95&10.73 & 9.52&6.45 &4.58 & 6.12 & 3.96  \\
+        \multicolumn{1}{c|}{~} &RPTQ  & 11.01 & 10.22& 10.57 & 9.46&-&- &- &-\\
+        \multicolumn{1}{c|}{~} &\cellcolor{orange!20}CBQ  &\cellcolor{orange!20}\textbf{10.86}  &\cellcolor{orange!20}\textbf{9.83} &\cellcolor{orange!20}\textbf{10.42}& \cellcolor{orange!20}\textbf{9.44} &\cellcolor{orange!20}\textbf{6.25} & \cellcolor{orange!20}\textbf{4.32} &\cellcolor{orange!20}\textbf{5.96} &\cellcolor{orange!20}\textbf{3.84}\\
+        \cmidrule(r){1-10}
+
+         \multirow{3}{*}{W4A4} &OmniQ &  11.89 & 10.60 & 11.35& 10.29&12.49 &10.33 &11.28 &9.17 \\
+        \multicolumn{1}{c|}{~} &QLLM & - & -& -  &- &11.51 &8.37 &8.89 &6.87\\
+        \multicolumn{1}{c|}{~} &\cellcolor{orange!20}CBQ  & \cellcolor{orange!20}\textbf{11.79} & \cellcolor{orange!20}\textbf{10.34} &\cellcolor{orange!20}\textbf{11.02}   & \cellcolor{orange!20}\textbf{9.45} & \cellcolor{orange!20}\textbf{9.73} & \cellcolor{orange!20}\textbf{7.96} & \cellcolor{orange!20}\textbf{7.52} &\cellcolor{orange!20}\textbf{5.89}\\
+	\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+    \caption{Evaluation quantization on generation datasets with the perplexity (PPL) $\downarrow$ metric, where OmniQ represents OmniQuant.} %C4, WikiText2 and LAMBADA 
+	\label{exp_ppl}
+\end{table}
+
+
+To address the challenges in achieving optimal quantization parameters before cross-block reconstruction, we have conducted a thorough analysis of outliers in both weights and activations. Based on this analysis, we have developed an effective and unified design approach to handle extreme weight and activation outliers. 
+
+Figure~\ref{smooth} illustrates the block-by-block visualization of the weight distribution of the last fully connected layer, as well as the channel-by-channel visualization of the activation distribution within one block. It is observed that outliers in both weights and activations contribute to larger reconstruction errors between the quantized and full-precision models. To address this issue, we analyze the distribution of outliers and propose a coarse-to-fine pre-processing strategy to suppress outliers and reduce the difficulty of reconstruction. 
+
+\paragraph{Coarse-grained detection.}
+The comprehensive algorithm of the outlier detection is illustrated in Algorithm~\ref{pseudocode}, which is divided into two stages. In the first stage, we perform coarse-grained detection by calculating the lower and upper quartile values ($Q_1$ and $Q_3$) and the interquartile range ($IQR$) in the numerical distribution (either activations or weights). Based on these calculations, we obtain a coarse outlier set $O = \{ x | x > T, x \in X \}$, where $T = Q_3 + \lambda_1 IQR$ and $\lambda_1$ is set to 1.5. This stage greatly reduces the search space for outlier detection.
+
+\paragraph{Fine-grained detection.}
+In the second stage, we perform fine-grained detection by searching for a threshold that splits the coarse outlier set into an outlier subset $O_{outlier}$ and a reserved subset $O_{reserved}$. The goal is to minimize the intra-set variance $M_{intra} = \text{Var}(O_{reserved})$ while maximizing the distance between the two subsets $M_{inter} = ( \textrm{Min}(O_{outlier}) - \textrm{Max}(O_{reserved}) )^2$. To balance these objectives, we define a metric $M = M_{inter} - \lambda_2 M_{intra}$, where $\lambda_2 = 1.0$. By minimizing this metric, we can effectively identify outliers and distinguish them from the remaining data.
+
+Removing outliers in weights has minimal impact on performance, whereas outliers in activations, particularly in specific channels, can greatly affect performance if directly removed. Consequently, our approach involves truncating weight outliers and scaling outliers in activations based on the detected outliers in both weights and activations. This is different from existing outlier pre-processing methods~\cite{Xiao_Lin_Seznec_Demouth_Han_2022,wei2023outlier} that focus solely on activations.
+Figure~\ref{smooth} provides visual evidence of weight outliers being truncated within the outlier group.  Additionally, the figure demonstrates the presence of outliers in specific channels. Scaling these specific channels results in a significant concentration of the overall distribution.
+The scaling factor $s_i$ for the activation tensor in $i^{th}$ channel (represented as $X_i$) is determined by the maximum absolute value of the truncated outlier set $O^*$:
+\begin{equation}
+\begin{aligned}
+s_i= \sqrt{\textrm{Max}(|X_i|)/\textrm{Max}(O^*)}.
+\end{aligned}
+\end{equation}
+
+This scaling factor is then applied to update weights and activations following prior work~\cite{wei2023outlier} to counteract destabilizing fluctuations from remaining outliers.
+
+
+\subsection{LoRA-Rounding for weight quantization}
+\label{weight-compensated}
+The performance degradation raised by weight quantization is non-negligible when compressing the model into low bit-width. The quantization error of weights comes from the rounding error~\cite{nagel2020up} and clipping error~\cite{CAQ2020}, but previous PTQ methods for LLMs only focus on the optimization of the latter one and do not take the rounding error into consideration. AdaRound~\cite{nagel2020up} introduces to learn a better weight-rounding matrix for post-training
+quantization that adapts to the data and the task loss. As shown in Eq.~\ref{adaround}, we can obtain the weight-rounding matrix $\Delta_W \in \mathbb{R}^{d\times k}$ with a learnable matrix $V \in \mathbb{R}^{d\times k}$ with a rectified sigmoid function:
+\begin{equation}
+\begin{aligned}
+\label{adaround}
+\Delta_W = \textrm{Clip}(\textrm{Sigmoid}(V)(\zeta -\gamma )+\gamma,0,1 ),
+\end{aligned}
+\end{equation}
+where $\zeta$ and $\gamma$ are stretch parameters and are fixed to 1.1 and -0.1, and $\textrm{Clip}(\cdot)$ clamps the inputs into a given range. The size of the weight-rounding matrix $\Delta_W$ is the same as the original weights. 
+
+However, the technique of AdaRound is hard to apply directly to LLMs with billion-level parameters, which could lead to much computational overhead and significantly reduce the efficiency of post-training quantization. To further rectify weight quantization errors arising from rounding operations and prevent their accumulation in adjacent blocks, we introduce an efficient adaptive rounding method for LLMs, called LoRA-Rounding. Specifically, inspired by LoRA~\cite{hu2021lora}, we employ  low-rank adaptive learning on the weight-rounding matrices, decomposing $V$ with  much smaller low-rank matrices, and only optimize them in post-training quantization, the decomposition is defined as:
+\begin{equation}
+\label{lora}
+V = A_1 \times A_2, A_1 \in \mathbb{R}^{d\times r}, A_2 \in \mathbb{R}^{r\times k},
+\end{equation}
+where the rank $ r << \textrm{min}(d, k)$. Following the setting of LoRA~\cite{hu2021lora}, we utilize a random Gaussian initialization for $A_1$ and zero for $A_2$, thus $\Delta_W$ is set to zero at the beginning of post-training quantization. During training, each element of $V$ is encouraged into 0 or 1 with a regularizer loss: 
+\begin{equation}
+\label{reguler}
+\mathcal{L}_{round} = \sum_{i, j} 1- |2\Delta_W{(i,j)}-1|^\beta,
+\end{equation}
+where $\beta$ is a annealing factor.  Following AdaRound~\cite{nagel2020up}, $\beta$ is set to higher in the initial phase and set to lower in the later phase of the optimization to encourage it to converge to 0 or 1. We also conduct $\Delta_W = \left \lfloor \Delta_W  \right \rceil$ in the later phase of the optimization to force each element into $\{0,1\}$ exactly.
+
+\textbf{Compared with vanilla AdaRound for LLMs}. The proposed LoRA-Rounding reduces the number of learnable parameters from $d\times k$  to $(d+k)\times r$ and accelerates the optimization process significantly, we conduct ablation experiments in the next section. 
+
+\textbf{Compared with QLoRA}~\cite{dettmers2023qlora}. QLoRA is an efficient parameter finetuning method for quantized LLMs, freezes the quantized weight and optimizes the float low-rank matrices, which is much similar to the original LoRA but takes lower memory. However, LoRA-Rounding only optimizes the rounding error of weight quantization, which is a much different method that is designed for post-training quantization with ultra-low cost.
+
+\subsection{Overall loss}
+In summary, by utilizing a low-rank decomposition of the weight-compensated matrix, we effectively reduce the number of learnable parameters $S_W, S_X, A_1, A_2$ while still achieving accurate correction of weight quantization errors within each block.
+The total loss for optimizing the $i^{th}$ block to the $k^{th}$ block within a sliding window is formulated as
+\begin{equation}
+\label{reguler}
+\mathcal{L}_{total} = \mathcal{L}_{rec} + \gamma\mathcal{L}_{round},
+\end{equation}
+where the $\gamma$ is the hyper-parameter to balance the reconstruction error and round error, which is set to 0.01 in our experiments. During optimization, We slide the window to the last block with an interval and update all the quantization parameters within the window, ensuring that the cumulative error in the quantized transformer block is minimized and achieves optimal performance.
+
+
+
+\section{Experiments}
+
+In this section, we conduct extensive experiments to validate the effectiveness and superiority of the proposed CBQ.
+
+\subsection{Setup}
+\paragraph{Models and datasets.}
+We conduct experiments on large language models with different sizes, including OPT~\cite{zhang2022opt} and LLAMA~\cite{Touvron} families. We validate our quantization scheme on various datasets which are divided into two categories. One is reported by the perplexity metric of language generation experiments on C4~\cite{raffel2020exploring} and WikiText2~\cite{merity2016pointer}. The other is reported by the accuracy metric of zero-shot language tasks on PIQA~\cite{bisk2020piqa}, HellaSwag~\cite{clark2018think}, ARC~\cite{clark2018think}, Mutual~\cite{cui2020mutual} and Ehics~\cite{hendrycks2020aligning}.
+
+\paragraph{Quantization setting.}
+To thoroughly evaluate performance, we test extensive quantization schemes including weight-only quantization down to W4A16 and W2A16, as well as joint weight-activation quantization for ultra-low bitwidths like W4A8, and W4A4. This extensive assessment across varying bitwidths provides a robust analysis of our proposed method. Also, with full consideration of the convenience of actual deployment of the quantized model, except for the settings with activation values below 4 bits that use per-token quantization, we perform per-tensor quantization on activations.
+
+\paragraph{Baseline methods.}
+
+For weight-only quantization settings, we selected GPTQ~\cite{frantar2022gptq} as the baseline quantization method in our experiments. This represents the most prevalent technique for W4A16 quantization of language models, respectively.
+Furthermore, we compare our CBQ with  OmniQuant~\cite{shao2023omniquant} and QLLM~\cite{liu2023qllm}, which is the state-of-the-art method based on block reconstruction.  We include a comparison of our CBQ method with the groupwise quantization method RPTQ~\cite{yuan2023rptq}, which is widely employed in the W4A8 setting.
+
+\paragraph{Implementation details.}
+Following the setting of previous work~\cite{frantar2022gptq}, our calibration dataset comprises 128 randomly selected 2048-token segments from C4 to ensure standardized benchmarking. To balance quantization performance and training speed, we utilize sliding windows containing two blocks with 3 epochs per window.
+For the LoRA-Rounding technique, we set the rank $r$ to 5. The optimization process involves adjusting the learnable quantization step sizes ($S_X$ and $S_W$) and the weight-rounding matrix ($\delta_W$) with learning rates of $1e-6$, $1e-7$, and $1e-4$, respectively. To manage the learning rate, we utilize the CosineAnnealingLR scheduler. We quantize all models using a mini-batch size of 1 on a single GPU. This configuration allows efficient cross-block dependency modeling while sufficiently propagating information across windows.
+
+
+
+\subsection{Experimental results}
+\paragraph{Evaluation on zero-shot datasets with accuracy.}
+Results on multiple zero-shot benchmarks using accuracy as the evaluation metric demonstrate CBQ's capabilities on large models including OPT (30B, 66B) and LLAMA (30B, 65B) (as shown in Table \ref{exp_acc}). Across almost all public datasets, CBQ outperforms existing quantization methods by over 2\% and reduces the accuracy gap with the full precision model to within 1\% under the W4A16, W2A16 and W4A8 quantization settings. This demonstrates stronger zero-shot capability.  Moreover, unlike current techniques, CBQ uniquely achieves ultra-low quantization down to W4A4 bitwidths while maintaining a higher performance than the state-of-the-arts. The consistent gains verify the generalization of CBQ's innovations across models and datasets.
+
+
+
+\paragraph{Evaluation on generation datasets with perplexity.}
+Results in Table~\ref{exp_ppl} demonstrate our method's generation performance on C4, WikiText2 using weight-only quantized OPT and LLAMA models. Focusing on ultra-low bitwidths, we achieve over 1\% higher perplexity versus GPTQ at W4A16. These consistent improvements at low bitwidths highlight our advantages in preserving generative quality under aggressive compression rates. 
+\begin{table}[!t] \fontsize{8}{10}\selectfont %字号，行间距
+	\begin{center}
+	\renewcommand\tabcolsep{10pt}
+	\begin{threeparttable}
+	\begin{tabular}{c|c|c|c}
+		\toprule[1.2pt]
+		\#Num of blocks & w/ Overlap & C4$\downarrow$ &Wiki $\downarrow$ \\ 
+		\midrule
+        \multicolumn{1}{c|}{1}&\XSolidBrush   & 14.57 &11.98    \\
+        \midrule
+	\multicolumn{1}{c|}{\multirow{2}{*}{2}}&\XSolidBrush & 14.23 &11.35   \\
+        \multicolumn{1}{c|}{~}&\Checkmark  & 13.29 & 10.63    \\
+        \midrule
+	\multicolumn{1}{c|}{\multirow{2}{*}{4}}&\XSolidBrush & 14.32 & 11.45   \\
+        \multicolumn{1}{c|}{~}&\Checkmark   & \textbf{13.27} & \textbf{10.60}   \\
+	\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+  	\caption{Ablation of the cross-block dependency (CBD).}
+	\label{cbd}
+\end{table}
+
+
+
+\begin{table}[t] \fontsize{8}{10}\selectfont %字号，行间距
+	\begin{center}
+	\renewcommand\tabcolsep{3pt}
+	\begin{threeparttable}
+	\begin{tabular}{l|c|c}
+		\toprule[1.2pt]
+		\multicolumn{1}{c|}{Method}& {C4 $\downarrow$}&Wiki $\downarrow$  \\ 
+		\midrule
+   	w/o outlier pre-processing   &  1082.68 &  1128.33\\
+        \cmidrule(r){1-3}
+  	w/ Smoothquant~\cite{Xiao_Lin_Seznec_Demouth_Han_2022}   & 33.21 &25.26   \\
+        \cmidrule(r){1-3}
+	w/ CFP-Activation    &23.48&19.75 \\
+        \cmidrule(r){1-3}
+	w/ CFP-Weight + CFP-Activation    & 21.98 & 17.95  \\
+         \midrule
+        \midrule
+	w/ Smoothquant   + CBQ-Recon.& 15.69 & 12.24   \\
+         \cmidrule(r){1-3}
+        w/ CFP-Weight + CFP-Activation + CBQ-Recon.   & \textbf{13.29}& \textbf{10.63} \\
+	\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+    \caption{Ablation on the coarse-to-fine pre-processing. `CBQ-Recon.' represents the proposed cross block reconstruction.}
+	\label{odps}
+\end{table}
+
+
+
+\paragraph{Comparison of block reconstruction-based methods.}
+
+We provide a comprehensive validation of the superiority of our proposed CBQ method compared to the state-of-the-art block reconstruction-based methods, OmniQuant and QLLM. To evaluate the performance improvement, we conducted experiments that encompassed multiple zero-shot tasks and generation tasks. The results, as presented in Table~\ref{exp_acc} and Table~\ref{exp_ppl}, consistently demonstrate the significant performance gains achieved by our CBQ method.
+
+
+\subsection{Ablation Study}
+To analyze the contribution of each component in our proposed CBQ method, we performed ablation experiments on the LLAMA-7B model. % using perplexity as the evaluation metric.
+
+
+\paragraph{Cross-block dependency.}
+To analyze the impact of our proposed cross-block dependency (CBD) method, we performed ablation experiments in Table~\ref{cbd}. Results demonstrate performance gains as the number of blocks jointly processed per sliding window increases, validating CBD's ability to model inter-block dependencies. Furthermore, utilizing overlapping blocks between adjacent sliding windows supplements cross-window relational representation. This redundancy helps capture nuanced block interactions and enables additional accuracy improvements. Overall, these ablation studies highlight the benefits of CBD for progressively accumulating and propagating cross-block knowledge during CBQ optimization.
+
+
+
+\paragraph{LoRA-Rounding.}
+
+As shown in Table~\ref{LoRA-Rounding}, the incorporation of the LoRA-Rounding technique into the learning process effectively mitigates the rounding errors that typically arise from weight quantization. This improvement leads to a significant enhancement in quantization accuracy. In comparison to the conventional 'Rounding' technique, our LoRA-Rounding approach utilizes low-rank decomposition to reduce the number of learnable parameters. This reduction not only reduces GPU memory consumption during training but also improves training speed. Despite the additional training costs, LoRA-Rounding significantly outperforms 'Rounding' in terms of performance.
+
+\begin{table}[!t] \fontsize{8}{10}\selectfont %字号，行间距
+
+	\begin{center}
+	\renewcommand\tabcolsep{5pt}
+	\begin{threeparttable}
+	\begin{tabular}{c|cccc}
+		\toprule[1.2pt]
+		\multicolumn{1}{c|}{\multirow{2}{*}{Method}} & \multicolumn{4}{c}{PPL $\downarrow$}  \\ 
+        \cmidrule(r){2-5}
+        ~&   C4  &Wiki & \#Epochs&GPU (GB)\\
+	\midrule
+        w/o Rounding   & 14.32&  11.46 &3 &18.83 \\
+        \cmidrule(r){1-5}
+        w/ Rounding  & 13.86  & 10.98& 3 &27.73   \\
+        w/ Rounding  & 13.58 & 10.72& 6 &27.73   \\
+        \cmidrule(r){1-5}
+        w/ LoRA-Rounding  & \textbf{13.29} &\textbf{10.63} & 3 &21.01   \\
+	\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+    \caption{Ablation of the LoRA-Rounding.}
+	\label{LoRA-Rounding}
+\end{table}
+
+\paragraph{Coarse-to-fine pre-processing.}
+
+Ablation of the proposed coarse-to-fine pre-processing verifies performance improvements from suppressing outlier values before quantization, as shown in Table~\ref{odps}. Detecting and dynamic scaling extreme activation outliers reduces distortions, while additional truncating of weight outliers further stabilizes training. This tailored preprocessing stabilizes the data distribution for robust optimization at ultra-low bitwidths. %This two-pronged method is uniquely designed to handle language models' abundance of outliers unaddressed by the existing pre-processing of Smoothquant~\cite{Xiao_Lin_Seznec_Demouth_Han_2022}. Furthermore, we conduct reconstruction optimization (`CBQ-training') based on the pre-processed weights and activations can achieve better performance than the optimization based on the processing of the smoothquant.
+It is important to note that this two-pronged pre-processing method is specifically designed to address the abundance of outliers in language models, which are not adequately addressed by the existing pre-processing technique of Smoothquant~\cite{Xiao_Lin_Seznec_Demouth_Han_2022}. Furthermore, we conduct a reconstruction optimization process, referred to as 'CBQ-Recon.', based on the pre-processed weights and activations. This approach, compared to the optimization based on the processing of Smoothquant, yields better performance.
+
+\paragraph{Loss functions.}
+
+\begin{table}[!t] \fontsize{8}{5}\selectfont %字号，行间距
+	\begin{center}
+	\renewcommand\tabcolsep{11pt}
+	\begin{threeparttable}
+	\begin{tabular}{c|c|c|c|c}
+	\toprule[1.2pt]
+        KL loss &L2 loss &Homologous & C4&Wiki  \\ 
+	\midrule
+       \XSolidBrush & \Checkmark & \XSolidBrush   &  13.82 &11.13  \\
+	\Checkmark & \XSolidBrush & \XSolidBrush  &  13.84 &11.12 \\
+        \Checkmark & \Checkmark & \XSolidBrush   & 13.55 & 10.88   \\
+        \Checkmark & \Checkmark & \Checkmark   & \textbf{13.29} &\textbf{10.63}     \\
+	\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+        \caption{Ablation study on block-wise reconstruction loss functions. `homologous' represents the homologous reconstruction.}
+	\label{loss}
+\label{ab_loss}
+\end{table}
+To determine optimal loss formulations, we evaluate reconstruction errors using L2 alone, KLD alone, and a combination of them in Table~\ref{loss}. Ablation results demonstrate superior performance from KLD over L2, with the combined loss achieving further gains. This highlights the benefits of KLD for matching full-precision block distributions during CBQ optimization. Fusing both losses enables jointly minimizing absolute and divergence-based errors to improve overall block-wise reconstruction. Our analysis verifies the advantage of blended L2+KLD loss for robustly optimizing blocks as interdependent components.
+Moreover, the introduced homologous reconstruction scheme further reduces the reconstruction difficulty and improves the quantization performance.
+
+\paragraph{Comparison of quantization efficiency.}
+\begin{table}[t] \fontsize{8}{10}\selectfont %字号，行间距
+	\begin{center}
+	\renewcommand\tabcolsep{10pt}
+	\begin{threeparttable}
+	\begin{tabular}{c|cccc}
+        \toprule[1.2pt]
+        \multicolumn{1}{c|}{LLAMA}& 7B & 13B & 30B  & 65B     \\ 
+        \midrule
+	OmniQuant    & 1.6h & 3.3h & 7.3h & 14.4h \\
+        QLLM* & 1.05& 1.79 & - &9.05\\
+        CBQ    & 0.9h &1.45 &2.1h &4.3h   \\
+	\bottomrule[1.2pt] 
+	\end{tabular}
+	\end{threeparttable}
+ 	\end{center}
+   \caption{Comparison of training (GPU Hours) time of our CBQ with OmniQuant. * represents that the training time of QLLM is implemented on LLAMA2 models.}
+	\label{q_time}
+\end{table}
+
+We evaluate the quantization efficiency of our CBQ method and compare it to OmniQuant and QLLM, both of which are reconstruction-based PTQ methods. The GPU training hours for both methods are shown in Table~\ref{q_time}. The results demonstrate that the training cost of CBQ can be faster than OmniQuant, particularly for larger models. This indicates that our CBQ method offers an advantage in terms of training efficiency.
+
+
+
+\section{Conclusion}
+
+In this study, we introduce CBQ, a unified post-training quantization method specifically designed for large language models. By jointly optimizing weight and activation quantization parameters through block-wise reconstruction, CBQ achieves efficient quantization without hand-craft searching. The introduced cross-block dependency scheme, low-rank decomposition scheme, and outlier detection strategy further improve the quantization performance. Experimental results demonstrate the state-of-the-art performance of CBQ, particularly in ultra-low bit settings like W4A4 and W2A16, and better maintain the capability of the full-precision model in W4A8 and W4A16 settings. The proposed CBQ method contributes to advancing PTQ techniques for LLMs, paving the way for efficient and effective deployment of large language models in resource-constrained devices.
+
+
+
+\section{Acknowledgement}
+
+We gratefully acknowledge the support of MindSpore, CANN (Compute Architecture for Neural Networks) and Ascend AI Processor used for this research.
+
+
+
+
+\nocite{langley00}
+
+
+
+
+

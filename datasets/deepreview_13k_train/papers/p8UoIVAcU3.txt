@@ -1,0 +1,191 @@
+\title{Diving into Self-Evolve Training for Multimodal Reasoning}
+
+\begin{abstract}
+Reasoning ability is essential for Large Multimodal Models (LMMs). 
+In the absence of multimodal chain-of-thought annotated data, self-evolving training, where the model learns from its own outputs, has emerged as an effective and scalable approach for enhancing reasoning abilities. 
+Despite its growing usage, a comprehensive understanding of self-evolving training, particularly in the context of multimodal reasoning, remains limited. In this paper, we delve into the intricacies of self-evolving training for multimodal reasoning, pinpointing three key factors: $\textbf{Training Method}$, $\textbf{Reward Model}$, and $\textbf{Prompt Variation}$. We systematically examine each factor and explore how various configurations affect the training's effectiveness. Our analysis leads to a set of best practices for each factor, aimed at optimizing multimodal reasoning.
+Furthermore, we explore the $\textbf{Self-Evolution Dynamics}$ during training and the impact of automatic balancing mechanisms in boosting performance. After all the investigations, we present a final recipe for self-evolving training in multimodal reasoning, encapsulating these design choices into a framework we call M-STAR ($\textbf{M}$ultimodal $\textbf{S}$elf-evolving $\textbf{T}$r$\textbf{a}$ining for $\textbf{R}$easoning), built on MiniCPM-V 2.5. 
+M-STAR achieves 59.5% accuracy on MathVista, surpassing the pre-evolved model by 6.9% absolutely without using additional human annotations. 
+We believe this study fills a significant gap in the understanding of self-evolving training for multimodal reasoning and offers a robust framework for future research. Our policy and reward models, as well as the collected data, will be released to facilitate further investigation in multimodal reasoning.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+With the rapid advancement of Large Language Models, their reasoning abilities have improved significantly (Shao et al., 2024; Xin et al., 2024; Yang et al., 2024). This progress has been accompanied by a growing demand for more realistic and general reasoning capabilities. Multimodal reasoning, considered a fundamental skill in many real-world applications, such as intelligent agents (Liu et al., 2024c), robotics (Li et al., 2023; Liu et al., 2024b), and autonomous driving (Yang et al., 2023), exemplifies this trend. Multimodal reasoning requires Large Multimodal Models (LMMs) to understand various modalities beyond text. For example, visual mathematical reasoning (Lu et al., 2023) challenges models to analyze complex figures, diagrams, and charts, leveraging the provided information to perform reasoning tasks.  
+
+Despite these advances, the availability of human-annotated thought processes in multimodal scenarios remains limited, challenging the learning of multimodal reasoning. Consequently, self-evolving training, which utilizes model’s own generation ability to iteratively tune and improve itself without external annotated data, has emerged as an appealing candidate to facilitate reasoning abilities. While research on self-evolving training has primarily focused on the text-only settings (Hosseini et al., 2024; Sun et al., 2024; Shao et al., 2024), its application in the multimodal domain, especially for reasoning tasks, has been limited with only a few sporadic examples (Fang et al., 2024; Dubey et al., 2024; Deng et al., 2024), and a unified framework has yet to be established.  
+
+We first identify the three key components of self-evolving training in multimodal reasoning, namely the training method, the use of reward model and the prompt variation, to build a clear and unified design space for searching the optimal strategies. Through massive controlled experiments, we find:  
+
+![](images/ad33073583bfa083f2309325ad1d730d65a1e1e15e4975e0b46ec1348adcf095.jpg)  
+Figure 1: Overview of our self-evolving training framework for multimodal reasoning. We investigate the three essential design components of it, namely Training method, Reward model, and Prompt variation. Orthogonal to the static factors, the Dynamics of self-evoloution is also monitered, and provides control signals to the training process.  
+
+1. Optimizing the model from the last checkpoint is superior to retraining from scratch every time, and inheriting the optimizer states from the previous iteration also leads to performance improvements. Furthermore, each iteration should maintain an appropriate interval to traverse the queries in training set, neither too large nor too small (§3.2).  
+
+2. Including an extra reward model to re-rank and select the generated responses beneftis a lot after filtering out incorrect responses, even if the reward model itself is not a qualified verifier (§3.3).  
+
+3. Adding more unlabeled queries helps only when having perfect reward signals (e.g., the oracle groundtruth answers), and it hurts the performance if the reward model does not generalize well on unseen data (§3.4).  
+
+Orthogonal to above static factors, we also dive into the dynamic evolving process of the model, namely the dynamics of self-evolution to see how model’s behavior changes during the training. We find that although the model performance of greedy decoding increases, its exploration potential keeps decreasing through the training (§4).  
+
+Taking the self-evolving dynamics into account, we design a simple yet effective automatic mechanism, as shown in Figure 1, to dynamically adjust the temperature of sampling during training to balance the exploitation and exploration (§4.2). Experimental results show that this strategy, combined with the determined static design choices, effectively alleviate the loss of exploration throughout the training process and further boost the performance on both the in-domain and out-of-domain test sets.  
+
+
+
+\section{2 OVERVIEW OF SELF-EVOLVING TRAINING FOR MULTIMODAL REASONING  }
+
+
+Self-evolving training can be modeled as a general framework of reinforcement learning, where various algorithms can be formulated as a specific instantiation of RL, such as PPO (Schulman et al., 2017), STaR (Zelikman et al., 2022), ReST (Gulcehre et al., 2023) and ${\mathrm{ReST}}^{E M}$ (Singh et al., 2023). Specifically, given a reward function $\mathcal{R}$ , the objective of self-evolving training is to train the policy model $\pi_{\theta}$ to maximize expectation of reward $\mathcal{R}$ :  
+
+$$
+\pi_{\theta}=\underset{\pi_{\theta}}{\arg\operatorname*{max}}\sum_{i}^{L}{\mathbb{E}_{x,o\sim\mathcal{D},\hat{y}_{i}\sim\pi_{\theta}[\cdot|x,o]}[\mathcal{R}(\hat{y}_{i})]},
+$$  
+
+where $x,\,o$ represent the query and image in the given training data $\mathcal{D}$ , while $\hat{y}_{i}$ is a response sampled from the current policy model $\pi_{\theta}$ . This standard RL objective, however, can be unstable to optimize and difficult to scale up, thus a popular algorithm adopted by recent works is to decouple the response rollout $\hat{y}_{i}\sim\pi_{\theta}[\cdot|x,o]$ and policy improvement into separate offline stages (Gulcehre et al., 2023; Singh et al., 2023): (1) Generate: the current policy model generates new responses $\hat{y}_{i}\sim\pi_{\theta}[\cdot|x,o]$ ; and (2) Improve: using the rewards to selects certain responses from the Generate step, which are then used to train the policy model with a standard supervised fine-tuning (SFT) loss. This way, the algorithm resembles Rejection Fine-Tuning (RFT, Yuan et al. (2023)) as it filters out negative responses in a hard manner. Both steps are performed iteratively to strike a tradeoff between offline and online training. In many tasks such as mathematical problem-solving, there exists a unique, ground-truth answer $a^{*}$ which is utilized in the reward function, for example, Singh et al. (2023) directly adopts exact match to compute a binary reward by comparing $\hat{y}$ and $a^{*}$ . In such an iterative training procedure, the objective at iteration $t$ is to obtain an improved policy model $\pi_{\boldsymbol{\theta}}^{t+1}$ :  
+
+$$
+\pi_{\theta}^{t+1}=\arg\operatorname*{max}_{\pi_{\theta}^{t}}\sum_{i}^{L}\mathbb{E}_{x,o,y^{*}\sim\mathcal{D},\hat{y}_{i}\sim\pi_{\theta}^{t}[\cdot|x,o]}[\mathcal{R}(a^{*},\hat{y}_{i})],
+$$  
+
+where the ground-truth answer input $a^{*}$ to the reward function $\mathcal{R}$ can be empty, for example, when dealing with unlabeled inputs, and then a reward model will be necessary to score $\hat{y}_{i}$ .  
+
+The Design Spaces There are different design choices to model and implement Eq. 2, for example, the design of reward function $\mathcal{R}$ and whether to incorporate additional unlabeled inputs without $a^{*}$ into training. Additionally, the training algorithms to perform this iterative process vary as well. For example, while Gulcehre et al. (2023); Xu et al. (2024b) initialize the model from the last checkpoint at each iteration, Zelikman et al. (2022); Singh et al. (2023) argue that initializing from the beginning checkpoint reduces overfitting and gives better performance empirically. Moreover, the iteration interval may matter as well – although the common practice is to process the entire dataset at every iteration and the performance saturates after few iterations, it may be suboptimal and a more online fashion with frequent iteration switch could potentially lead to improvements. Theoretically, a short iteration interval with inherited optimizer and learning rate scheduler from the last iteration will turn this iterative optimization into a standard online RL learning algorithm. Next, we investigate these three design spaces, training method, reward model, and prompt variation, aiming to summarize the best practices for each factor to faciliate multimodal reasoning learning.  
+
+
+
+\section{3 DIVING INTO SELF-EVOLVING DESIGN COMPONENTS  }
+
+
+In this section, we explore the three key components of self-evolving training, examining various strategies within each. We begin by outlining the general setup (§3.1 ), followed by a comprehensive analysis of each component to identify the best practices for multimodal self-evolution $(\S3.2–\S3.4)$ .  
+
+
+
+\section{3.1 GENERAL SETUP  }
+
+
+Model: We base our exploration on MiniCPM-V-2.5 (Yao et al., 2024), a powerful, openly released LMM. MiniCPM-V-2.5 leverages LLaMA-3-8B (Meta, 2024) for its language model and SigLIP (Zhai et al., 2023) as its vision encoder, resulting in strong multimodal capabilities. Its performance on a wide range of multimodal benchmarks significantly surpasses previous openly released LMMs such as LLaVA (Liu et al., 2023; 2024a) and Qwen-VL (Bai et al., 2023). This superior performance makes MiniCPM-V-2.5 an ideal model for investigating self-evolving training in multimodal reasoning, with fewer risks of being constrained by the model’s inherent capacities.  
+
+Datasets: We utilize MathV360K (Shi et al., 2024), a high-quality and diverse multimodal reasoning dataset that includes 40K human-curated examples and 320K synthetic samples generated by GPT-4V as our seed training dataset. The images and queries in this dataset span various subjects in multimodal reasoning including algebra, arithmetic, geometry, logic, numeric commonsense and science. Specifically, we downsample 180K examples from MathV360K to serve as our labeled training set, while setting aside the remaining data as a unlabeled training set. For the labeled set, each data sample is composed of $(x,o,a)$ without the intermediate thought process annotation, while for the unlabeled set we only have access to $(x,o)$ . This is a realistic setting as there are many multimodal SFT datasets with the final answer labels, but annotated thought processes are scarce. Our investigation will start with the labeled training set only, following existing practices (Singh et al., 2023; Zelikman et al., 2022), then we will study the impact of the unlabeled training data in $\S3.4$ .  
+
+Warm-Up Phase to Unlock the Chain-of-Thought (CoT) Capability of LMMs: In our preliminary experiments, we found that open-source LMMs would directly output the answer given the query, while struggling to produce detailed chain-of-thought (CoT) reasoning processes. This may  
+
+originate from the the scarcity of high quality rationales in most existing multimodal SFT training datasets (Masry et al., 2022; Shi et al., 2024), which limits the ability of open-source LMMs to generate detailed, step-by-step reasoning. Self-evolving training, however, requires responses with varying intermediate steps to allow models to learn effectively from on-policy data. To address this issue, we initiate a warm-up phase as the first step before self-evolving training. Instead of prompting the model to answer questions directly, we prompt it to generate intermediate reasoning steps for a given triplet (question, image, and answer). For each triplet, we ask models to rollout 16 samples with temperature $=1.0$ . We then filter out results where the final answers do not match the ground truth and sample 100K from the generated dataset to create a warm-up CoT dataset $\mathcal{D}_{w}$ with correct answers. Finally, we fine-tune our models on this dataset, treating it as a standard RFT process. Our iterative self-evolving training process will then start from this model checkpoint after the warm-up training. Training and Evaluation: We adopt most training settings from Yao et al. For all rollout phases in training, we sample 16 responses for each query and set the temperature of sampling as 1.0. For evaluation, we employ two evaluation settings: an in-domain (ID) testset and an out-of-domain (OOD) one. For the in-domain test, we split 750 samples from the unlabeled part of MathV360K (Shi et al., 2024), using regular expression to extract and match the answers. For the OOD test, we assess our models using the testmini split of MathVista (Lu et al., 2023), a widely recognized benchmark for multimodal reasoning, using GPT-4 to extract and match the answers. We also keep an non-overlapping 250 samples from MathV360K as the global validation set in training. 3.2 TRAINING METHODS   
+As described in $\S2$ , there are multiple variants on how we would train to update the policy model. We decouple the variation dimensions by thinking of the gap between iterative training and online RL – when the iteration interval is small, the checkpoint at each iteration is initialized from one from the last iteration, and the optimizer as well as the learning rate scheduler is inherited between iterations, then iterative training becomes an online RL algorithm. Therefore, we cluster the variations by three factors: (1) Model initialization: when training is performed at the “Improve” step, the model can be initialized from either the last checkpoint (Xu et al., 2024b; Pang et al., 2024) or the beginning checkpoint before the first iteration (Zelikman et al., 2022; Singh et al., 2023); (2) Iteration Interval: while the common practice is to adopt a long iteration interval to process all the data queries for one iteration, we study the effect of having a shorter iteration interval, bringing it closer to online learning; and (3) Continuous Optimization: we propose to inherit the optimizers as well as the learning rate schedulers from the last iteration besides inheriting the model checkpoint, so that the optimization is continuous and closer to purely online learning algorithms. This way, we only have a global optimizer and learning rate scheduler essentially across the entire iterative training process. We note that while the variation on model initialization has been studied before, the other two factors, iteration interval and continuous optimization, have been rarely discussed in previous implementations of iterative self-evolving training, and they turn out to be important empirically as we will show next. Setup We perform controlled experiments to study the effect of different training methods, thus in this experiment we use the labeled dataset only and simply adopt the binary exact-match reward between ground-truth answer $a^{*}$ and the generated answer. We compare with the most common iterative self-evolving algorithms $\mathrm{ReST}^{E M}$ (Singh et al., 2023) and iterative RFT, which are specific instantiations of our training methods design space. To distinguish from the baselines, the variants with continuous optimization are named as Continuous Self-Evolving. To study the effect of iteration interval, we experiment with different percentage of all the queries per iteration, varying from $[6.25\%$ , $12.5\%$ , $25\%$ , $50\%$ , $100\%$ ].   
+Results Table 1 presents the experimental results of various training methods. Overall, initializing training from the last policy model checkpoint $\pi_{\theta}^{t}$ and maintaining a continuous optimization process contribute the most significantly to the effectiveness of self-evolving training, particularly on MathVista. Continuous self-evolving achieves best performance both on the in-domain MathV360K test with $43.1\%$ and on the OOD test set, MathVista, with $57.2\%$ . We also see the importance of maintaining a proper interval to traverse the data queries. With a large interval, the training method  
+
+Table 1: Accuracy results $(\%)$ of self-evolving training using various training methods and iteration intervals. Iteration Interval (#) stands for the ratio of data we traverse in one iteration, and we also record the number of corresponding queries. $\mathcal{M}$ represents the policy model from which training is initialized in each iteration. $\scriptscriptstyle\mathcal{O}$ denotes whether the optimization process is continuous, i.e., the optimizer states and lr scheduler are inherited from the last checkpoint.  
+
+![](images/7dfe18acd8d743a0d6046c95d20c5288ac4a8a5c3976cb81057f5713b790b9a8.jpg)  
+
+becomes more closer to an offilne one, and the model cannot get in-time update on data matching its current output distribution. On the other hand, switching over the Improve and Generate steps too frequently makes the learning unstable, leading to a lower score especially on the in-domain test set.  
+
+
+
+\section{3.3 REWARD MODELS  }
+
+
+In self-evolving training, the most common approach to reward function design uses a binary reward $\mathcal{R}(\hat{y}_{i})=\mathbb{1}(\hat{a}_{i}\stackrel{\cdot}{=}a^{*})$ , where $\hat{a}_{i}$ is the predicted answer inside $\hat{y}_{i}$ and incorrect responses are filtered out to maximize rewards. While effective, this sparse binary reward has limitations. It overlooks the quality of the intermediate reasoning steps within a response. Additionally, reward models trained from equal or higher capacity models than the policy model (Fried et al., 2022; Wang et al., 2024; Sun et al., 2024) can provide richer signals to improve the policy model’s learning.  
+
+In this section, we introduce a Process Reward Model (PRM) (Lightman et al., 2023; Wang et al., 2024) for multimodal reasoning—the first of its kind, to our knowledge—and explore how integrating PRM can enhance reward design and whether it can improve policy model learning in self-evolving training for multimodal reasoning. To incorporate the reward scores into the objective of self-evolving training, the reward function is reformulated as:  
+
+$$
+\begin{array}{r l}&{\mathcal{R}(\hat{y}_{i})=\mathcal{H}(\mathbb{1}(a^{*}=\hat{a}_{i})\times\mathcal{R}_{p}(\hat{y}_{i}))}\\ &{\mathcal{R}_{p}(\hat{y}_{i})=\operatorname*{min}(f(s_{i}^{0}),f(s_{i}^{1}),...,f(s_{i}^{m}))}\end{array}
+$$  
+
+Here, $\mathcal{H}$ is an operation that processes responses based on the final reward scores, where we ensure all responses are correct by matching the ground truths, and $\mathcal{R}_{p}(\hat{y}_{i})$ represents the process reward score for each sampled response. The function $f(s_{i}^{k})$ denotes the reward score at each intermediate step. Following Lightman et al. (2023), we use the min operation to aggregate stepwise rewards.  
+
+Setup We conduct controlled experiments to assess the impact of incorporating the Process Reward Model (PRM) into self-evolving training and explore how best to utilize the reward signals provided by PRM. Notably, before applying PRM, responses are pre-filtered based on their final answers to ensure consistency and quality during training. To train our PRM, we use Monte Carlo rollouts starting from prefixes with partial reasoning steps (Wang et al., 2024) to generate the training data. Specifically, we sample 16 responses per question and complete each step 8 times to obtain step-level annotations. We evaluate two different $\mathcal{H}$ operations: (1) Top-K: Pick the top- $\mathbf{\nabla}\cdot\mathbf{K}$ correct responses according to their reward scores, and (2) Filtering by a Threshold $\alpha$ : Filtering out sampled responses with lower aggregated rewards than $\alpha$ . The optimal value of $\alpha$ is 0.2 which is determined by enumerating it with an interval of 0.1 on the validation set. Additionally, we investigate how varying the value of K in Top-K affects training, as it represents a trade-off between the quality and diversity of the samples. According to $\S3.2$ , we fix training methods as continuous self-evolving with $45\mathrm{k}$ interval and set continuous self-evolving, with or without randomly selected correct responses as our baselines.  
+
+Table 2: The results of self-evolving training with PRM and different strategies to leverage reward scores. $\mathcal{H}$ stands for the method to further pick out high-quality responses from the correct rollouts: (1) Top- $\mathrm{.k}$ is we select K correct responses with highest rewards, and $(2)>\alpha$ is we pick out the correct responses with reward scores larger than $\alpha$ .  
+
+![](images/3db737fa2dd8a90831891f3f81a9b2d62e7e97c9aa89948f4c447633d469e243.jpg)  
+
+
+\section{3.4 PROMPT VARIATION  }
+
+
+In this section, we explore how prompt variation affects self-evolving training. There are two primary types of prompts: labeled prompts and unlabeled prompts. Labeled prompts come with annotated ground truth answers, which can be used to fliter out incorrect responses during training. In contrast, utilizing unlabeled prompts in self-evolving training is more challenging due to the absence of ground truth annotations. To maintain the quality of unlabeled prompts in training, surrogates like reward scores or pseudo labels must be employed. Meanwhile, unlike labeled prompts, unlabeled prompts are not be trained in SFT period, which increases the difficulty of learning for policy models.  
+
+Skylines: Unlabeled Prompts with Oracle Reward Signals The coupling of these additional factors introduces complexity, making the effective use of unlabeled prompts less predictable. To dissect these factors, we start by establishing a baseline with “skyline” experiments, where both the unlabeled prompts and their ground truth answers are available but not used during the SFT phase. These unlabeled prompts with oracle reward signals serve as an intermediate difficulty between fully unlabeled and labeled prompts, providing insight into the challenges of training with unlabeled data.  
+
+Unlabeled Prompts We incorporate unlabeled prompts into self-evolving training. To ensure the quality of sampled responses for these prompts, we use weighted voting to ensemble the predictions from different responses, treating the ensembled prediction as a pseudo label $\tilde{a}$ . This pseudo label is then used to filter out responses with conflicting predictions, ensuring consistency. Following the best practices outlined in $\S3.3$ , we apply PRM as a reranker to select the top-2 responses among those with the predicted answer $\tilde{a}$ . These unlabeled prompts are then mixed with labeled prompts for self-evolving training. Additionally, since learning from unlabeled prompts is more challenging for policy models, we investigate the optimal stage to introduce them into training to better understand their impact on model performance. We maintain a training interval of $45\mathrm{k}$ prompts and adjust when unlabeled prompts are introduced into the self-evolving training process. Specifically, we introduce unlabeled prompts after $[0\%$ , $25\%$ , $50\%$ , $75\%]$ of the total training process.  
+
+A Glimpse at Unlabeled Prompts: Potential Efforts to Make Them Effective Table 3 presents the results of incorporating unlabeled prompts with and without oracle reward signals.  
+
+When training relies solely on oracle reward signals without integrating the PRM, continuous self-evolving with unlabeled prompts outperforms standard continuous self-evolving trained only on labeled prompts in the out-of-domain test but underperforms in the in-domain test. This indicates that additional prompts help the model generalize better to underrepresented questions but also increase the risk of forgetting previously learned information.  
+
+However, after combining with our PRM, all policy models perform worse than our best model trained exclusively on labeled prompts in both benchmarks, even when oracle reward signals are provided.  
+
+Based on the analysis in $\S3.3$ , this occurs since our PRM is unable to verify responses without ground-truth answers, and its generalization remains a concern.  
+
+When examining the timing for introducing unlabeled prompts, we find that adding them from the beginning helps mitigate the negative impact on model performance, compared to introducing them midway through the process. However, when unlabeled prompts are introduced later in the training process, they participate less in the overall training, leading to better results simply due to their limited involvement. This suggests that, without sufficient surrogate supervision (e.g., reward  
+
+Table 3: Results of involving unlabeled data. $T_{\mathrm{mixin}}$ denotes when to mixin the unlabeled data. The use of PRM follows $\S3.3$ , except we first get a pesudo “ground truth” through weighted voting on unlabeled prompts.  
+
+![](images/ae3bdf34af86f03b36233546546320cc37b5dd3959bf005f4d1c440686980901.jpg)  
+
+signals), introducing unlabeled prompts during the middle stages of self-evolving training can harm the process, potentially causing a deviation in the policy model’s distribution.  
+
+
+
+\section{4 DYNAMICS OF SELF-EVOLUTION AND THE FINAL RECIPE  }
+
+
+So far, we have explored the impact of three pivotal factors within our design space, leading to established best practices for learning multimodal reasoning – we adopt continuous self-evolving training coupled with a reward model to help data selection as described in $\S3.3$ , and we perform the training process on SFT datasets with final answer annotations. In this section, we delve even deeper into the current self-evolution strategy to better understand the bottlenecks. Instead of analyzing from a design space perspective as previously, we now fix the design parameters and focus exclusively on the training dynamics during the model’s self-evolution. This shift in focus allows us to examine the process from an orthogonal angle, providing further insights into the underlying mechanisms that drive or impede progress in multimodal reasoning capabilities.  
+
+
+
+\section{4.1 MONITORING THE TRAINING DYNAMICS  }
+
+
+Intuitively, two critical conditions must be met for the success of self-evolving training: (1) the presence of high-quality candidate responses generated by the model, otherwise self-evolving will not work no matter how strong the reward is; and (2) the reward function’s ability to effectively distinguish and prioritize these high-quality responses. These conditions align with the traditional reinforcement learning concepts of exploration and exploitation. Apparently, both exploration and exploitation capabilities are dynamic targets in self-evolving training, as the policy model evolves and the distribution of rollout responses changes with each iteration. To better understand these training dynamics, we propose tracking and visualizing four metrics:  
+
+• Greedy Accuracy: the model’s accuracy with greedy decoding. We track this metric for reference to compare with other metrics.  
+
+• Pass@K Accuracy: the percentage of samples for which the model produces at least one correct response when sampling $K$ candidates. This metric measures the model’s exploration ability.  
+
+• (Pass@K - Greedy) Accuracy: the difference between Pass $@\,\mathrm{K}$ and Greedy accuracy. Typically, Pass $@\,\mathrm{K}$ is an upper bound of Greedy Accuracy, and the gap roughly reflects the percentage of samples where the model, while failing in greedy decoding, can generate a correct response when sampling more candidates. This gap is crucial for the success of self-evolving training—a zero gap indicates that the model fails to explore correct responses for the current failure cases, suggesting that further training is unlikely to yield significant improvement.  
+
+• Reward-Pass $@\,2$ : the percentage of samples for which there exist correct responses among the top 2 responses ranked by the reward model. This metric directly reflects the exploitation efficacy of the reward model for the current policy. We choose Pass $@2$ since our training strategy involves selecting the top 2 responses using the reward model (§3.3).  
+
+![](images/3b98305e3800a377cac024e42f589120ab948b47b9206394ff35d1fcaedaca99.jpg)  
+Figure 4: (a): Pass $@\,\mathrm{K}$ decreases for all different temperatures; (b): The gap between $\mathrm{Pass}\bigstar\!\bigstar\mathrm{K}$ and Greedy Decoding; (c): The Reward-Pass $@2$ saturates quickly. All metrics, including the greedy decoding accuracy, are calculated on validation set.  
+
+Specifically, after each training iteration of our current optimal strategy, we sample 16 responses from the model checkpoint on the validation set, with the temperature range set to $\bar{t^{'}}=\;[0.5,0.7,1.0,1.2,1.5,1.7,\bar{2.}0]$ . We analyze with varying temperatures as temperature is a key hyperparameter for the generation diversity and model’s exploration.  
+
+Results: Figure 3 shows a clear trend where, as training progresses, the $\mathrm{Pass}\bigstar\!\bigstar\mathrm{K}$ metric continuously declines while greedy accuracy improves. This pattern indicates the loss of exploration ability, which hampers the model’s potential for continuous improvement and may lead to performance saturation. These observations are consistent with findings in text-only settings as reported by $\mathrm{Wu}$ et al. (2024). In Figure 4a we analyze Pass $\mathbb{\@\mathbf{K}}$ accuracy at various temperatures and observe a significant trend: despite a general decay in exploration ability, larger temperatures tend to resist this decline more effectively, allowing the model to maintain a stronger ability to explore in the mid to late stages of training. This observation suggests that the optimal temperature for training may need to be dynamically adjusted throughout the self-evolving process, rather than being fixed at the outset as is currently common practice. In Figure $^\mathrm{4b}$ we plot the (Pass $@\,\mathrm{K}$ - Greedy)  
+
+![](images/df85595c7105acf1f4552b166f7d533cf24eaaf6aac4d5e33dae86d351132b89.jpg)  
+Figure 3: The opposite trend of Greedy Decoding Accuracy and Pass@K.  
+
+accuracy, this phenomenon becomes even more pronounced, indicating that the model’s exploration during training is converging to greedy decoding. Additionally in Figure 4c, we observe that the Reward-Pass $@_{2}$ metric initially increases but quickly reaches a plateau, indicating that the reward model’s capacity to exploit further diminishes as training progresses. This limitation could be due to both the reduced exploration ability and the inherent constraints of the reward model. Next, we fix the reward model as a control variable and ask, how can we enhance exploration to allow the reward model to exploit more effectively?.1  
+
+4.2 M-STAR– FINAL RECIPE WITH OPTIMAL DESIGN CHOICES & ADAPTIVE EXPLORATIONS  
+
+Reward-Pass $@_{2}$ closely relates to the effectiveness of our self-evolving training strategy since our method selects top responses ranked by the reward model, and Reward-Pass $@\,\mathrm{K}$ directly reflects the quality of these 2 responses.2While Reward-Pass $@2$ naturally measures exploitation when the policy  
+
+Table 4: Performance of M-STARcompared with baselines and methods considering only static components. We highlight the relative improvement of M-STAR over the pre-evolved model, i.e., the $^{\star}+$ warmup” row.  
+
+![](images/ce43b3c5947ceb9a05d32ce197003b2088df91c6f2a568d0841b993e57641703.jpg)  
+
+![](images/ebcf192a4a3834b86dc859c1b21a4d9afc1a7e1cd99909894c52d5e03819ed4f.jpg)  
+Figure 5: Comparing the $\mathrm{Pass}\bigstar\!\bigstar\mathrm{K}$ and Reward-Pass $@_{2}$ metrics with the optimal static training progress, which fixes temperature $T\,=\,1.0$ . We use Savitzky-Golay filter (Savitzky & Golay, 1964) to smooth the curves.  
+
+is fixed, the absolute value of this metric actually encapsulates both exploration and exploitation – its value would be low if the model fails to explore high-quality candidates.  
+
+Therefore, we hypothesize that enhancing the Reward-Pass $@\,\mathrm{K}$ scores for the current iteration through varied configurations could potentially improve the efficacy of self-evolving training. We fix reward model as a control variable and focus on modifying the model’s exploration capabilities to achieve this objective. Analysis in $\S4.1$ suggests that the temperature, which is crucial for exploration, may require dynamic adjustment. Thus we propose to adjust the temperature automatically at each iteration based on the validation Reward-Pass $@2$ scores. This aims to optimize exploration so that the selected responses are of higher quality, potentially enhancing overall training effectiveness.  
+
+Specifically, we adjust the temperature per two iterations, and pick the temperature from 0.3 to 1.6 with interal 0.1 automatically with maximum validation Reward-Pass $@_{2}$ scores. The optimal design choices outlined in $\S3$ , combined with our adaptive exploration strategy, form our final recipe for multimodal self-evolving training for reasoning, M-STAR.  
+
+Results: Table 4 presents the results of our final approach. By incorporating the dynamics of Reward-Pass $@_{2}$ , which balances both exploration and exploitation, our final recipe achieves the highest results, with $59.5\%$ on the OOD test and $45.9\%$ on the in-domain test. In contrast, models that only monitor $\mathrm{Pass}\bigstar\mathrm{QK}$ show diminished performance on both benchmarks. This reinforces the validity of our training design, demonstrating that an effective self-evolving training process requires a careful balance of both exploration and exploitation, as facilitated by the reward model. We also plot how the Pass $@\,\mathrm{K}$ and Reward-Pass $@\,2$ changes for M-STAR (Reward-Pass $@\,2$ ). Figure 5 shows that compared with static strategy to choose a fixed temperature over the whole process, tuning it automatically mitigate the regression of $\mathrm{Pass}\bigstar\!\bigstar\mathrm{K}$ to help maintain the exploration ability. Besides, the Reward-Pass $@2$ is also generally higher than before. These further highlight the necessity to monitor the dynamics during training and adjust accordingly.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We dive into the self-evolving training for multimodal reasoning. Three static components are identified at first, namely the training method, reward model and the prompt variation. Through controlled experiments, we conclude a set of optimal design choices. On the other direction, we go deeper into the dynamics of self-evolving training to analyze the trade-off between exploitation and exploration. By monitoring the dynamics and adjusting key hyperparameters accordingly, we are able to further improve the model performance. We hope our work can provide insights and guidance for future research on self-evolving training for multimodal reasoning.  
+
+
+

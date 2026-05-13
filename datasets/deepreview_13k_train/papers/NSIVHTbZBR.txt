@@ -1,0 +1,342 @@
+\title{Image Inpainting via Tractable Steering of Diffusion Models}
+
+\begin{abstract}
+Diffusion models are the current state of the art for generating photorealistic images. Controlling the sampling process for constrained image generation tasks such as inpainting, however,  remains challenging since exact conditioning on such constraints is intractable. While existing methods use various techniques to approximate the constrained posterior, this paper proposes to exploit the ability of Tractable Probabilistic Models (TPMs) to exactly and efficiently compute the constrained posterior, and to leverage this signal to steer the denoising process of diffusion models. Specifically, this paper adopts a class of expressive TPMs termed Probabilistic Circuits (PCs). Building upon prior advances, we further scale up PCs and make them capable of guiding the image generation process of diffusion models. Empirical results suggest that our approach can consistently improve the overall quality and semantic coherence of inpainted images across three natural image datasets (\ie CelebA-HQ, ImageNet, and LSUN) with only $\sim\! 10 \%$ additional computational overhead brought by the TPM. Further, with the help of an image encoder and decoder, our method can readily accept semantic constraints on specific regions of the image, which opens up the potential for more controlled image generation tasks. In addition to proposing a new framework for constrained image generation, this paper highlights the benefit of more tractable models and motivates the development of expressive TPMs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Thanks to their expressiveness, diffusion models have achieved state-of-the-art results in generating photorealistic and high-resolution images \citep{ramesh2022hierarchical,nichol2021improved,rombach2022high}. However, steering unconditioned diffusion models toward constrained generation tasks such as image inpainting remains challenging, as diffusion models do not by design support efficient computation of the posterior sample distribution under many types of constraints \citep{chung2022diffusion}. This results in samples that fail to properly align with the constraints. For example, in image inpainting, the model may generate samples that are semantically incoherent with the given pixels.
+
+Prior works approach this problem mainly by approximating the (constrained) posterior sample distribution. However, due to the intractable nature of diffusion models, such approaches introduce high bias \citep{lugmayr2022repaint,zhang2023towards,chung2022diffusion} to the sampling process, which diminishes the benefit of using highly-expressive diffusion models. 
+
+Having observed that the lack of tractability hinders us from fully exploiting diffusion models in constrained generation tasks, we study the converse problem: \emph{what is the benefit of models that by design support efficient constrained generation?} This paper presents positive evidence by showing that Probabilistic Circuits (PCs) \citep{choi2020probabilistic}, a class of expressive Tractable Probabilistic Models (TPMs) that support efficient computation of arbitrary marginal probabilities, can efficiently steer the denoising process of diffusion models towards high-quality inpainted images. 
+We will define a class of constraints that includes inpainting constraints for which we can provide the following guarantee. For any constraint $c$ in this class, given a sample $\x_t$ at noise level $t$, we show that a PC trained on noise-free samples (\ie $\p(\X_0)$) can be used to efficiently compute $\p(\x_0 \given \x_t, c)$, which is a key step in the sampling process of diffusion models. 
+This PC-computed distribution can then be used to effectively guide the denoising process, leading to photorealistic images that adhere to the constraints. \cref{fig:steering-illustration} illustrates the steering effect of PCs in the proposed algorithm \textbf{Tiramisu} (\textbf{Tra}ctable I\textbf{m}age \textbf{I}npainting via \textbf{S}teering Diff\textbf{u}sion Models). Specifically, we plot the reconstructed image by the diffusion model (the first row of Tiramisu) and the PC (the third row) at five time steps during the denoising process. Compared to the diffusion model baselines, Tiramisu generates more semantically coherent images with the PC-provided guidance. In summary, this paper 
+ has three main contributions:
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig-steering-illustration.pdf}
+    \caption{Illustration of the steering effect of the TPM on the diffusion model. The same random seed is used by the baseline (CoPaint; \citet{zhang2023towards}) and our approach. At every time step, given the image at the previous noise level, Tiramisu reconstructs $\tildex_0$ with both the diffusion model and the TPM, and combines the two distributions by taking their geometric mean (solid arrows). The images then go through the noising process to generate the input for the previous time step (dashed arrows).}
+    \label{fig:steering-illustration}
+\end{figure}
+
+\noindent \emph{A new scheme for controlled image generation.} This is the first paper that demonstrates the possibility of using TPMs for controlling/constraining the generation process of natural and high-resolution images. This not only opens up new avenues for controlled image generation, but also highlights the potential impact of non-standard learning architectures (\eg PCs) on modern image generation tasks.
+
+\noindent \emph{Competitive sample quality and runtime.} Empirical evaluations on three challenging high-resolution natural image datasets (\ie CelebA-HQ, ImageNet, and LSUN) show that the proposed method Tiramisu consistently improves the overall quality of inpainted images while introducing only $\sim \! 10 \%$ additional computational overhead, which is the joint effort of (i) further scaling up PC models based on prior art, and (ii) an improved custom GPU implementation for PC training and inference.
+
+\noindent \emph{Potential for more complex controlled generation tasks.} In its more general form, independent soft-evidence constraints include tasks beyond image inpainting. As an illustrative example, we demonstrate that Tiramisu is capable of fusing the semantics of image patches from a set of reference images and generating images conditioned on such semantic constraints. This highlights the potential of Tiramisu on more challenging controlled image generation tasks.
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+
+\paragraph{Denoising Diffusion Probabilistic Models}
+A diffusion model \citep{ho2020denoising,sohl2015deep} defined on variables $\X_0$ is a latent variable model of the form $\p_{\theta} (\x_0) \!:=\! \int \p_{\theta} (\x_{0:T}) d \x_{1:T}$, where $\x_{1:T}$ are the latent variables and the joint distribution $\p_{\theta} (\x_{0:T})$ is defined as a Markov chain termed the reverse/denoise process:
+    {\setlength{\abovedisplayskip}{-1.0em}
+    \setlength{\belowdisplayskip}{-0.4em}
+    \begin{align}
+        \p_{\theta} (\x_{0:T}) := \p (\x_T) \cdot \prod_{t=1}^{T} \p_{\theta} (\x_{t-1} \given \x_t).
+    \end{align}}
+
+For continuous variables $\x_{0:T}$, the initial and transition probabilities of the Markov chain typically use Gaussian distributions: $\p(\x_T) := \calN (\x_T; \mathbf{0}, \mathbf{I})$, $\p_{\theta} (\x_{t-1} \given \x_t) := \calN (\x_{t-1}; \bm{\mu}_{\theta} (\x_t, t), \mathbf{\Sigma}_{\theta} (\x_t, t))$, where $\bm{\mu}_{\theta}$ and $\mathbf{\Sigma}_{\theta}$ are the mean and covariance parameters, respectively. The key property that distinguishes diffusion models from other latent variable models such as hierarchical Variational Autoencoders \citep{vahdat2020nvae} is the fact that they have a prespecified approximate posterior $\q (\x_{1:T} \given \x_0) := \prod_{t=1}^{T} \q (\x_t \given \x_{t-1})$. This is called the forward or diffusion process. For continuous variables, the transition probabilities are also defined as Gaussians: $\q (\x_t \given \x_{t-1}) := \calN (\x_t; \sqrt{1-\beta_t} \x_{t-1}, \beta_t \mathbf{I})$, where $\{\beta_t\}_{t=1}^{T}$ is a noise schedule. Training is done by maximizing the ELBO of $\p_{\theta} (\x_0)$ with the variational posterior $\q (\x_{1:T} \given \x_0)$. See \citet{kingma2021variational} for more details.
+
+While it is possible to directly model $\p_{\theta} (\x_{t-1} \given \x_{t})$ with a neural network, prior works discovered that the following parameterization leads to better empirical performance \citep{ho2020denoising}:
+    {\setlength{\abovedisplayskip}{0.2em}
+    \setlength{\belowdisplayskip}{-0.3em}
+    \begin{align}
+        \setlength{\abovedisplayskip}{-1.0em}
+        \setlength{\belowdisplayskip}{-1.8em}
+        \p_{\theta} (\x_{t-1} \given \x_t) := \sum\nolimits_{\tildex_0} \q (\x_{t-1} \given \tildex_0, \x_t) \cdot \p_{\theta} (\tildex_0 \given \x_t),
+        \label{eq:diffusion-reparam}
+    \end{align}}
+
+\noindent where $\p_{\theta} (\tildex_0 \given \x_t) := \calN (\tildex_0; \tilde{\bm{\mu}}_{\theta} (\x_t, t), \tilde{\mathbf{\Sigma}}_{\theta} (\x_t, t))$ is parameterized by a neural network and $\q (\x_{t-1} \given \tildex_0, \x_t)$ has a simple closed-form expression \citep{ho2020denoising}. Following the definition of the denoising process, sampling from a diffusion model boils down to first sampling from $\p(\x_T)$ and then recursively sampling $\x_{T-1}, \dots, \x_0$ according to $\p_{\theta} (\x_{t-1} \given \x_t)$.
+
+\paragraph{Tractable Probabilistic Models}
+Tractable Probabilistic Models (TPMs) are a class of generative models that by design support efficient and exact computation of certain queries \citep{poon2011sum,kisa2014probabilistic,choi2020probabilistic,correia2023continuous,sidheekh2023probabilistic,rahman2014cutset,kulesza2012determinantal}. Depending on their structure, TPMs support various queries ranging from marginal/conditional probabilities to conditioning on logical constraints \citep{vergari2021compositional,bekker2015tractable}. Thanks to their tractability, TPMs enable a wide range of downstream applications such as constrained language generation \citep{zhang2023tractable}, knowledge graph link prediction \citep{loconte2023turn}, and data compression \citep{liu2022lossless}. 
+
+
+
+\section{Guiding Diffusion Models with Tractable Probabilistic Models}
+
+\label{sec:method-overview}
+
+Given a diffusion model trained for unconditional generation, our goal is to steer the model to generate samples given different conditions/constraints without the need for task-specific fine-tuning. In the following, we focus on the image inpainting task to demonstrate that TPMs can guide diffusion models toward more coherent samples that satisfy the constraints.
+
+The goal of image inpainting is to predict the missing pixels given the known pixels. Define $\X_0^{\mathrm{k}}$ (resp. $\X_0^{\mathrm{u}}$) as the provided (resp. missing) pixels. We aim to enforce the inpainting constraint $\X_0^{\mathrm{k}} = \x_0^{\mathrm{k}}$  on every denoising step $\p_{\theta} (\x_{t-1} \given \x_t)$ ($\forall t \in 1, \dots, T$). Plugging in \cref{eq:diffusion-reparam}, the conditional probabilities are written as:
+    {\setlength{\abovedisplayskip}{0.0em}
+    \setlength{\belowdisplayskip}{-0.4em}
+    \begin{align*}
+        \forall t \in 1, \dots, T \quad \p_{\theta} (\x_{t-1} \given \x_t, \x_0^{\mathrm{k}}) = \sum\nolimits_{\tildex_0} \q (\x_{t-1} \given \tildex_0, \x_t) \cdot \p_{\theta} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}}),
+    \end{align*}}
+
+\noindent where the first term on the right-hand side is independent of $\x_0^{\mathrm{k}}$. To sample coherent inpainted images, we need to draw unbiased samples from $\p_{\theta} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$. Applying Bayes' rule, we get
+    {\setlength{\abovedisplayskip}{0.3em}
+    \setlength{\belowdisplayskip}{-0.5em}
+    \begin{align}
+        \p_{\theta} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}}) = \frac{1}{Z} \cdot \p_{\theta} (\tildex_0 \given \x_t) \cdot \p (\x_0^{\mathrm{k}} \given \tildex_0) = \frac{1}{Z} \cdot \p_{\theta} (\tildex_0 \given \x_t) \cdot \mathbbm{1} [\tildex_0^{\mathrm{k}} = \x_0^{\mathrm{k}}],
+        \label{eq:x0-from-dm}
+    \end{align}}
+
+\noindent where $\mathbbm{1} [\cdot]$ is the indicator function and $Z$ is a normalizing constant. One simple strategy to sample from \cref{eq:x0-from-dm} is by rejection sampling: sample unconditionally from $\p_{\theta} (\tildex_0 \given \x_t)$ (\ie the learned denoising model) and reject samples with $\tildex_0^{\mathrm{k}} \neq \x_0^{\mathrm{k}}$. However, this is impractical since the acceptance rate could be extremely low. Existing algorithms use approximation strategies to compute or sample from \cref{eq:x0-from-dm}. For example, \citet{lugmayr2022repaint} proposes to set $\tildex_0^{\mathrm{k}} := \x_0^{\mathrm{k}}$ after sampling $\tildex_0 \!\sim\! \p_{\theta} (\cdot \given \x_t)$, leaving $\tildex_0^{\mathrm{u}}$ untouched; \citet{zhang2023towards} and \citet{chung2022diffusion} relax the hard inpainting constraint to $\min_{\tildex_0^{\mathrm{k}}} \| \tildex_0^{\mathrm{k}} - \x_0^{\mathrm{k}} \|_2^2$ and use gradient-based methods to gradually enforce it.
+
+This paper explores the possibility of drawing unbiased samples from $\p_{\theta} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ given a TPM-represented distribution $\p_{\theta} (\x_0)$. By applying Bayes' rule from the other side, we have
+    {\setlength{\abovedisplayskip}{0.2em}
+    \setlength{\belowdisplayskip}{-0.6em}
+    \begin{align}
+        \p_{\theta} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}}) = \frac{1}{Z} \cdot \q (\x_t \given \tildex_0) \cdot \p_{\theta} (\tildex_0 \given \x_0^{\mathrm{k}}) = \frac{1}{Z} \cdot \prod_{i} \q (x_t^{i} \given \tilde{x}_0^{i}) \cdot \p_{\theta} (\tildex_0^{\mathrm{u}} \given \x_0^{\mathrm{k}}) \cdot \mathbbm{1} [\tildex_0^{\mathrm{k}} = \x_0^{\mathrm{k}}],
+        \label{eq:x0-from-tpm}
+    \end{align}}
+
+\noindent where $Z$ is a normalizing constant, $x_t^i$ is the $i$th variable in $\x_t$, and the factorization of $\q (\x_t \given \x_0)$ follows the definition of the diffusion process in \cref{sec:preliminaries}. Although the right-hand side seems to be impractical to compute due to the normalizing constant, we will demonstrate in the following sections that there exists a class of expressive TPMs that can compute it efficiently and exactly.
+From the diffusion model and the TPM, we have obtained two versions of the same distribution $\p (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$.\footnote{Note that diffusion models can only approximate this distribution.} Thanks to the expressiveness of neural networks, the distribution approximated by the diffusion model (\ie Eq.~(\ref{eq:x0-from-dm}); termed $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$) encodes high-fidelity images. However, due to the inability to compute the exact conditional probability, $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ could lead to images incoherent with the constraint \citep{zhang2023towards}. In contrast, the TPM-generated distribution (\ie Eq.~(\ref{eq:x0-from-tpm}); termed $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$) represents images that potentially better align with the given pixels. Therefore, $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ and $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ can be viewed as distributions trained for the same task yet with different biases. Following prior arts \citep{grover2018boosted,zhang2023tractable}, we combine both distributions by taking the weighted average of the logits of every variable in $\tildex_0$, hoping to get images that are both semantically coherent and have high fidelity:
+    {\setlength{\abovedisplayskip}{0.4em}
+    \setlength{\belowdisplayskip}{-0.2em}
+    \begin{align}
+        \p (\tildex_0 \given \x_t, \x_0^{\mathrm{k}}) \propto \p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})^{\alpha} \cdot \p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})^{1-\alpha},
+        \label{eq:geo-mean}
+    \end{align}}
+
+\noindent where $\alpha \!\in\! (0, 1)$ is a mixing hyperparameter. In summary, as a key step of image inpainting with diffusion models, we compute $\p (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ from both the diffusion model and a TPM, and use their weighted geometric mean in the denoising process. We note that the use of TPMs is independent of the design choices related to the diffusion model, and thus can be built upon any prior approach.
+
+
+
+\section{Practical Implementation with Probabilistic Circuits}
+
+\label{sec:practical-implementation}
+
+The previous section introduces how TPMs could help guide the denoising process of diffusion models toward high-quality inpainted images. While promising, a key question is \emph{whether $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ (Eq.~\ref{eq:x0-from-tpm}) can be computed efficiently and exactly?} We answer the question in its affirmative by showing that a class of TPMs termed Probabilistic Circuits (PCs) \citep{choi2020probabilistic} can answer the query while being expressive enough to model natural images. In the following, we first provide background on PCs (Sec.~\ref{sec:pc-background}). We then describe how they are used to compute $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ (Sec.~\ref{sec:pc-inference}).
+
+\subsection{Background on Probabilistic Circuits}
+\label{sec:pc-background}
+
+Probabilistic Circuits (PCs) \citep{choi2020probabilistic} are an umbrella term for a wide variety of TPMs, including classic ones such as Hidden Markov Models \citep{rabiner1986introduction} and Chow-Liu Trees \citep{chow1968approximating} as well as more recent ones including Sum-Product Networks \citep{poon2011sum}, Arithmetic Circuits \citep{shen2016tractable}, and Cutset Networks \citep{rahman2014cutset}. We define the syntax and semantics of PCs as follows.
+
+\begin{wrapfigure}{r}{0.38\columnwidth}
+    \centering
+    \includegraphics[width=0.38\columnwidth]{figures/fig-example-pc.pdf}
+    \caption{An example PC over boolean variables $X_1, \dots, X_4$. Sum parameters are labeled on the corresponding edges. The probability of every node given input $x_1 \bar{x_2} \bar{x_3} x_4$ is labeled blue on top of the corresponding node.}
+    \label{fig:example-pc}
+\end{wrapfigure}
+
+\hphantom{}
+
+\begin{defn}[Probabilistic Circuits]
+    \label{def:pc}
+    A PC $\p (\X)$ represents a distribution over $\X$ via a parameterized Directed Acyclic Graph (DAG) with a single root node $n_{\mathrm{r}}$. There are three types of nodes in the DAG: \emph{input}, \emph{product}, and \emph{sum} nodes. Input nodes define primitive distributions over some variable $X \in \X$, while sum and product nodes merge the distributions defined by their children, denoted $\ch(n)$, to build more complex distributions. Specifically, the distribution encoded by every node is defined recursively as
+        \begin{align}
+            \hspace{-0.4em} \p_{n} (\x) \!:=\! \begin{cases}
+                f_n (\x) & n \text{~is~an~input~node}, \\
+                \prod_{c \in \ch(n)} \p_c (\x) & n \text{~is~a~product~node}, \\
+                \sum_{c \in \ch(n)} \theta_{n,c} \cdot \p_c (\x) \!\!\!\! & n \text{~is~a~sum~node},
+            \end{cases}
+            \label{eq:pc-def}
+        \end{align}
+    \noindent where $f_n (\x)$ is an univariate input distribution (\eg Gaussian, Categorical), and $\theta_{n,c}$ denotes the parameter corresponds to edge $(n, c)$. Intuitively, sum nodes and product nodes encode mixture and factorized distributions of their children, respectively. To ensure that a PC models a valid distribution, we assume the child parameters of every sum node $n$ (\ie $\{\theta_{n,c}\}_{c \in \ch(n)}$) sum up to 1. The size of a PC $\p$, denoted $\abs{\p}$, is the number of edges in its DAG.
+\end{defn}
+
+\cref{fig:example-pc} shows an example PC over boolean variables $X_1, \dots, X_4$, where \includegraphics[height=0.7em]{figures/fig-input-node.pdf}, \includegraphics[height=0.7em]{figures/fig-prod-node.pdf}, and \includegraphics[height=0.7em]{figures/fig-sum-node.pdf} represent input, product, and sum nodes, respectively. The key to guaranteeing the tractability of PCs is to add proper structural constraints to their DAG structure. Specifically, this paper considers smoothness and decomposability, which are required by the inference algorithm that will be introduced in \cref{sec:pc-inference}.
+
+\begin{defn}[Smoothness and Decomposability]
+    \label{def:sm-and-dec}
+    Define the scope $\phi (n)$ of node $n$ as the collection of variables defined by all its descendent input nodes. A PC is smooth if for every sum node $n$, its children have the same scope: $\forall c_1, c_2 \in \ch(n), \phi(c_1) = \phi(c_2)$; it is decomposable if for every product node $n$, its children have disjoint scopes: $\forall c_1, c_2 \in \ch(n) \; (c_1 \neq c_2), \phi(c_1) \cap \phi(c_2) = \emptyset$.
+\end{defn}
+
+Answering queries with PCs amounts to computing certain functions recursively in postorder (\ie feedforward) or preorder (\ie backward) on its DAG. For example, computing the likelihood $\p(\x)$ boils down to a forward pass on the PC: we first assign a probability to every input node $n$ by evaluating its density/mass function $f_n (\x)$, and then do a feedforward pass (children before parents) of all sum and product nodes, computing their output probabilities following \cref{eq:pc-def}. Finally, the output value of the root node is the target likelihood. In \cref{fig:example-pc}, the output probability of every node for the query $\p(x_1 \bar{x_2} \bar{x_3} x_4)$ is labeled blue on top of it.
+
+As hinted by its definition, the set of learnable parameters in PCs includes (i) parameters of the sum edges and (ii) parameters of the input nodes/distributions. All parameters can be jointly learned using an Expectation-Maximization-based algorithm that aims to maximize the average log-likelihood of all samples in a dataset $\data$: $\sum_{\x \in \data} \log \p_{r} (\x)$. Details of the EM algorithm is provided in \cref{appx:pc-em}.
+
+\subsection{Computing Constrained Posterior Distribution}
+\label{sec:pc-inference}
+
+Recall from \cref{sec:method-overview} and \cref{eq:geo-mean} that at every denoising step, we need to compute $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ with the PC. This section proposes an algorithm that computes $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ given a PC $\p (\x_0)$ in linear time \wrt its size. Specifically, we first demonstrate how \cref{eq:x0-from-tpm} can be converted to a general form of queries we define as \emph{independent soft-evidence constraints}. We then establish an efficient inference algorithm for this query class.
+
+After closer inspection of \cref{eq:x0-from-tpm}, we observe that both $\q (\x_t \given \tildex_0)$ and $\mathbbm{1} [\tildex_0^{\mathrm{k}} = \x_0^{\mathrm{k}}]$ can be considered as constraints factorized over every variable. Specifically, with $w_i (\tilde{x}_0^i) \!:=\! \q (x_t^i \given \tilde{x}_0^i)$ if $\tilde{X}_0^i \!\in\! \tilde{\X}_0^{\mathrm{u}}$ and $w_i (\tilde{x}_0^i) \!:=\! \mathbbm{1} [\tilde{x}_0^{\mathrm{k}} \!=\! x_0^{\mathrm{k}}]$ otherwise, $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ can be equivalently expressed as
+    {\setlength{\abovedisplayskip}{0.2em}
+    \setlength{\belowdisplayskip}{-0.8em}
+    \begin{align}
+        \p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}}) = \frac{1}{Z} \prod_i w_i (\tilde{x}_0^{i}) \cdot \p (\tildex_0), \text{~where~} Z := \sum_{\x_0} \prod_i w_i (\tilde{x}_0^{i}) \cdot \p (\tildex_0).
+        \label{eq:tpm-obj-as-wmc}
+    \end{align}}
+
+We call $w_i$ the \emph{soft-evidence constraint} of variable $X_0^i$ as it defines a prior belief of its value. In the extreme case of conditioning on hard evidence, $w_i$ becomes an indicator that puts all weight on the conditioned value. Recall from \cref{sec:preliminaries} that diffusion models parameterize $\p_{\theta} (\tildex_0 \given \x_t)$ as a fully-factorized distribution. In order to compute the weighted geometric mean of $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ and $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$, we need to also compute the univariate distributions $\p_{\mathrm{TPM}} (\tilde{x}_0^i \given \x_t, \x_0^{\mathrm{k}})$ ($\forall \tilde{X}_0^i \in \tilde{\X}_0$). While this seems to suggest the need to query the PC at least $\abs{\tilde{\X}_0}$ times, we propose an algorithm that only needs a forward and a backward pass to compute all target probabilities.
+\boldparagraph{The forward pass}
+Similar to the likelihood query algorithm introduced in \cref{sec:pc-background}, we traverse all nodes in postorder and store the output of every node $n$ in $\mathtt{fw}_n$. For sum and product nodes, the output is computed following \cref{eq:pc-def}; the output of every input node $n$ that encodes a distribution of $X_0^i$ is defined as $\mathtt{fw}_n := \sum_{x_0^i} f_n(x_0^i) \cdot w_i (x_0^i)$, where $f_n$ is defined in \cref{eq:pc-def}.
+
+\boldparagraph{The backward pass}
+The backward pass consists of two steps: (i) traversing all nodes in preorder (parents before children) to compute the backward value $\mathtt{bk}_n$; (ii) computing the target probabilities using the backward value of all input nodes. For ease of presentation, we assume the PC alternates between sum and product layers, and all parents of any input node are product nodes.\footnote{Every PC that does not satisfy such constraints can be transformed into one in linear time since (i) consecutive sum or product nodes can be merged without changing the PC's semantic, and (ii) we can add a dummy product with one child between any pair of sum and input nodes.} First, we compute the backward values by setting $\mathtt{bk}_{n_\mathrm{r}}$ of the root node to $1$, then recursively compute the backward value of other nodes as follows:
+    {\setlength{\abovedisplayskip}{0.4em}
+    \setlength{\belowdisplayskip}{-0.5em}
+    \begin{align*}
+        \mathtt{bk}_n := \begin{cases}
+            \sum_{m \in \pa(n)} \big ( \theta_{m,n} \cdot \mathtt{fw}_{n} / \mathtt{fw}_{m} \big ) \cdot \mathtt{bk}_{m} & n \text{~is a product node}, \\
+            \sum_{m \in \pa(n)} \mathtt{bk}_{m} & n \text{~is a input or sum node},
+        \end{cases}
+    \end{align*}}
+
+\noindent where $\pa(n)$ is the set of parents of node $n$. Next, we gather all input nodes defined on $X_0^i$ ($\forall i$), denoted $S_i$, and compute $\p_{\mathrm{TPM}} (\tilde{x}_0^i \given \x_t, \x_0^{\mathrm{k}}) := \frac{1}{Z} \sum_{n \in S_i} \mathtt{bk}_n \cdot f_n (x_0^i) \cdot w_i (x_0^i)$. We justify the correctness of this algorithm in the following theorem, whose proof is provided in \cref{appx:proof-pc-alg}.
+
+\begin{thm}
+\label{thm:inference-alg-correctness}
+For any smooth and decomposable PC $\p(\X)$ and univariate weight functions $\{w_i (X_i)\}_i$, define $\p'(\x) = \frac{1}{Z} \prod_i w_i (x_i) \cdot \p(\x)$. The above-described algorithm computes $\p'(x_i)$ for all variables $x_i$ in time $\bigO (\abs{\p} + \abs{\X}) = \bigO(\abs{\p})$.
+\end{thm}
+
+
+
+\section{Towards High-Resolution Image Inpainting}
+
+
+Another key factor determining the effectiveness of the PC-guided diffusion model is the expressiveness of the PC $\p (\X_0)$, \ie how well it can model the target image distribution. Recent advances have significantly pushed forward the expressiveness of PCs \citep{liu2022scaling,liu2023understanding}, leading to competitive likelihoods on datasets such as CIFAR \citep{krizhevsky2009learning} and down-sampled ImageNet \citep{deng2009imagenet}, which allows us to directly apply the guided inpainting algorithm to them. However, there is still a gap towards directly modeling high-resolution (\eg $256 \times 256$) image data. While it is possible that this could be achieved in the near future given the rapid development of PCs, this paper explores an alternative approach where we use a (variational) auto-encoder to transform high-resolution images to a lower-dimensional latent space. Although in this way we lose the ``full tractability'' over every pixel, as we shall proceed to demonstrate, a decent approximation can still be achieved. The key intuition is that the latent space concisely captures the semantic information of the image, and thus can effectively guide diffusion models toward generating semantically coherent images; fine-grained details such as color consistency of the neighboring pixels can be properly handled by the neural-network-based diffusion model. This is empirically justified in \cref{sec:exp-analysis}.
+
+Define the latent space of the image $\X_0$ as $\Z_0$. We adopt Vector Quantized Generative Adversarial Networks (VQ-GANs) \citep{esser2021taming}, which are equipped with an encoder $\q (\z_0 \given \x_0)$ and a decoder $\p (\x_0 \given \z_0)$, to transform the images between the pixel space and the latent space.\footnote{We adopt VQ-GAN since it has a discrete latent space, which makes PC training easier.} We approximate $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{k})$ (Eq.~\ref{eq:tpm-obj-as-wmc}) by first estimating $\p_{\mathrm{TPM}} (\tilde{\z}_0 \given \x_t, \x_0^{k})$ with a PC $\p (\Z_0)$ trained on the latent space and the VQ-GAN encoder; this latent-space conditional distribution is then converted back to the pixel space. Specifically, the latent-space conditional probability is approximated via
+    {\setlength{\abovedisplayskip}{0.2em}
+    \setlength{\belowdisplayskip}{-0.6em}
+    \begin{align}
+        \p_{\mathrm{TPM}} (\tilde{\z}_0 \given \x_t, \x_0^{k}) \approx \frac{1}{Z} \prod_{i} w_i^{\mathrm{z}} (\tilde{z}_0^i) \cdot \p (\tilde{\z}_0), \text{~where~} w_i^\mathrm{z} (\tilde{z}_0^i) := \frac{1}{Z_i} \sum_{\tildex_0} \prod_{j} w_j (\tilde{x}_0^j) \cdot \q (\tilde{z}_0^i \given \tildex_0),
+        \label{eq:soft-evi-constraint}
+    \end{align}}
+
+\noindent where $Z$ and $\{Z_i\}_i$ are normalizing constants and $\q (\tilde{z}_0^i \given \tildex_0)$ is the VQ-GAN encoder. It is safe to assume the independence between the soft evidence for different latent variables (\ie $w_i^{\mathrm{z}}$) since every latent variable produced by VQ-GAN corresponds to a different image patch, which corresponds to a different set of pixel-space soft constraints (\ie $w_i$). In practice, we approximate $w_i^\mathrm{z} (\tilde{z}_0^i)$ by performing Monte Carlo sampling over $\tildex_0$ (\ie sample $\tildex_0$ following $\prod_j w_j (\tilde{x}_0^j)$, and then feed them through the VQ-GAN encoder). Finally, $\p_{\mathrm{TPM}} (\tilde{\x}_0 \given \x_t, \x_0^{k})$ is approximated by Monte Carlo estimation of $\p_{\mathrm{TPM}} (\tilde{\x}_0 \given \x_t, \x_0^{\mathrm{k}}) := \expectation_{\tilde{\z}_0 \sim \p_{\mathrm{TPM}} (\cdot \given \x_t, \x_0^{k})} [\p (\tildex_0 \given \tilde{\z}_0)]$, where $\p (\tildex_0 \given \tilde{\z}_0)$ is the VQ-GAN decoder. We observe that as few as $4$-$8$ samples lead to significant performance gain across various datasets and mask types. See \cref{appx:high-res-design-choices} for details of the design choices.
+
+Another main contribution of this paper is to further scale up PCs based on \citet{liu2022scaling,liu2023understanding} to achieve likelihoods competitive with GPTs \citep{brown2020language} on the latent image space generated by VQ-GAN. Specifically, for $256 \times 256$ images, the latent space typically consists of $16 \times 16 = 256$ categorical variables each with $2048$-$16384$ categories. While the number of variables is similar to datasets considered by prior PC learning approaches, the variables are much more semantically complicated (\eg patch semantic vs. pixel value). We provide the full learning details including the model structure and the training pipeline in \cref{appx:pc-learning-details}.
+
+In summary, similar to the pixel-space guided inpainting algorithm introduced in \cref{sec:method-overview,sec:pc-inference}, its latent-space variant also computes $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ to guide the diffusion model $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ with \cref{eq:geo-mean}, except that it is approximated using a latent-space PC combined with VQ-GAN.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section, we take gradual steps to analyze and illustrate our method \textbf{Tiramisu} (\textbf{Tra}ctable I\textbf{m}age \textbf{I}npainting via \textbf{S}teering Diff\textbf{u}sion Models). Specifically, we first qualitatively investigate the steering effect of the TPM on the denoising diffusion process (Sec.~\ref{sec:exp-analysis}). Next, we perform an empirical evaluation of Tiramisu on three high-resolution image datasets with six large-hole masks, which significantly challenges its ability to generate semantically consistent images (Sec.~\ref{sec:exp-main}). Finally, inspired by the fact that Tiramisu can handle arbitrary constraints that can be written as independent soft evidence (cf. Sec.~\ref{sec:pc-inference}), we test it on a new controlled image generation task termed \emph{image semantic fusion}, where we are given parts (\eg patches) from different images and aim to fuse them to be both semantically coherent and of high fidelity (Sec.~\ref{sec:exp-sem-fusion}).
+
+\subsection{Analysis of the TPM-Provided Guidance}
+\label{sec:exp-analysis}
+
+Since we are largely motivated by the ability of TPMs to generate images that better match the semantics of the given pixels, it is natural to examine how the TPM-generated signal guides the diffusion model during the denoising process. Recall from \cref{sec:method-overview} that at every denoising step $t$, the reconstruction distributions $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ and $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ are computed/estimated using the diffusion model and the TPM, respectively. Both distributions are then merged into $\p (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ (Eq.~(\ref{eq:geo-mean})) and are used to generate the image at the previous noise level (\ie $\x_{t-1}$). In all experiments, we adopt CoPaint \citep{zhang2023towards} to generate $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$, which is independent of the design choices related to the TPM. Therefore, qualitatively comparing the denoising process of Tiramisu and CoPaint allows us to examine the steering effect provided by the TPM.
+
+\cref{fig:steering-illustration} visualizes the denoising process of Tiramisu by plotting the images corresponding to the expected values of the aforementioned distributions (\ie $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$, $\p_{\mathrm{TPM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$, and $\p (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$). To minimize distraction, we first focus on image pairs of the DM- and TPM-generated image pairs in the same column. Since they are generated from the same input image $\x_t$, comparing the image pairs allows us to examine the built-in inductive biases in both distributions. For instance, in the celebrity face image, we observe that the contour of the facial features is sharper for the TPM-generated image. This is more obvious in images at larger time steps since the guidance provided by the TPM is accumulated throughout the denoising process.
+
+Next, we look at the second row (\ie $\p (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$) of Tiramisu. Although blurry, global semantics appear at the early stages of the denoising process. For example, on the right side, we can vaguely see two ostriches visible at time step $217$. In contrast, the denoised image at $t = 217$ for CoPaint does not contain much semantic information. Conditioning on these blurred contents, the diffusion model can further fill in fine-grained details. Since the image semantics can be generated in a few denoising steps, we only need to query the TPM at early time steps, which also significantly reduces the computational overhead of Tiramisu. See \cref{sec:exp-main} for quantitative analysis. As a result, compared to the baseline, Tiramisu can generate inpainted images with higher quality.
+
+\subsection{Comparison With the State of the Art}
+\label{sec:exp-main}
+
+\begin{table*}[t]
+\caption{Quantative results on three datasets: CelebA-HQ \citep{liu2015faceattributes}, ImageNet \citep{deng2009imagenet}, and LSUN-Bedroom \citep{yu15lsun}. We report the average \texttt{LPIPS} value (lower is better) \citep{zhang2018unreasonable} across $100$ inpainted images for all settings. Bold indicates the best result.}
+\label{tab:lpips-results}
+\centering
+\scalebox{0.82}{
+\begin{tabular}{llc@{\hspace{1.2em}}c@{\hspace{1.2em}}c@{\hspace{1.2em}}c@{\hspace{1.2em}}c@{\hspace{1.2em}}c@{\hspace{1.2em}}c}
+    \toprule
+    \multicolumn{2}{c}{Tasks} & \multicolumn{7}{c}{Algorithms} \\
+    \cmidrule(lr){1-2}
+    \cmidrule(lr){3-9}
+    Dataset & Mask & Tiramisu (ours) & CoPaint & RePaint & DDNM & DDRM & DPS & Resampling \\
+    \midrule
+    \multirow{6}{*}[-0.3em]{CelebA-HQ} & Left & 0.189 & \textbf{0.185} & 0.195 & 0.254 & 0.275 & 0.201 & 0.257 \\[-0.1em]
+    ~ & Top & 0.187 & \textbf{0.182} & 0.187 & 0.248 & 0.267 & 0.187 & 0.251 \\[-0.1em]
+    ~ & Expand1 & \textbf{0.454} & 0.468 & 0.504 & 0.597 & 0.682 & 0.466 & 0.613 \\[-0.1em]
+    ~ & Expand2 & 0.442 & 0.455 & 0.480 & 0.585 & 0.686 & \textbf{0.434} & 0.601 \\[-0.1em]
+    ~ & V-strip & \textbf{0.487} & 0.502 & 0.517 & 0.625 & 0.724 & 0.535 & 0.647 \\[-0.1em]
+    ~ & H-strip & \textbf{0.484} & 0.488 & 0.517 & 0.626 & 0.731 & 0.492 & 0.639 \\[-0.1em]
+    ~ & Wide & \textbf{0.069} & 0.072 & 0.075 & 0.112 & 0.132 & 0.078 & 0.128 \\[-0.1em]
+    \midrule
+    \multirow{6}{*}[-0.3em]{ImageNet} & Left & \textbf{0.286} & 0.289 & 0.296 & 0.410 & 0.369 & 0.327 & 0.369 \\[-0.1em]
+    ~ & Top & \textbf{0.308} & 0.312 & 0.336 & 0.427 & 0.373 & 0.343 & 0.368 \\[-0.1em]
+    ~ & Expand1 & \textbf{0.616} & 0.623 & 0.691 & 0.786 & 0.726 & 0.621 & 0.711 \\[-0.1em]
+    ~ & Expand2 & \textbf{0.597} & 0.607 & 0.692 & 0.799 & 0.724 & 0.618 & 0.721 \\[-0.1em]
+    ~ & V-strip & 0.646 & 0.654 & 0.741 & 0.851 & 0.761 & \textbf{0.637} & 0.759 \\[-0.1em]
+    ~ & H-strip & 0.657 & 0.660 & 0.744 & 0.851 & 0.753 & \textbf{0.647} & 0.774 \\
+    ~ & Wide & \textbf{0.125} & 0.128 & 0.127 & 0.198 & 0.197 & 0.132 & 0.196 \\[-0.1em]
+    \midrule
+    \multirow{6}{*}[-0.3em]{LSUN-Bedroom} & Left & \textbf{0.285} & 0.287 & 0.314 & 0.345 & 0.366 & 0.314 & 0.367 \\[-0.1em]
+    ~ & Top & \textbf{0.310} & 0.323 & 0.347 & 0.376 & 0.368 & 0.355 & 0.372 \\[-0.1em]
+    ~ & Expand1 & \textbf{0.615} & 0.637 & 0.676 & 0.716 & 0.695 & 0.641 & 0.699 \\[-0.1em]
+    ~ & Expand2 & \textbf{0.635} & 0.641 & 0.666 & 0.720 & 0.691 & 0.638 & 0.690 \\[-0.1em]
+    ~ & V-strip & \textbf{0.672} & 0.676 & 0.711 & 0.760 & 0.721 & 0.674 & 0.725 \\[-0.1em]
+    ~ & H-strip & 0.679 & 0.686 & 0.722 & 0.766 & 0.726 & \textbf{0.674} & 0.724 \\[-0.1em]
+    ~ & Wide & 0.116 & 0.115 & 0.124 & 0.135 & 0.204 & \textbf{0.108} & 0.202 \\[-0.1em]
+    \midrule
+    \multicolumn{2}{c}{Average} & \textbf{0.421} & 0.427 & 0.459 & 0.532 & 0.531 & 0.434 & 0.514 \\
+    \bottomrule
+\end{tabular}
+}
+\end{table*}
+
+In this section, we challenge Tiramisu against state-of-the-art diffusion-based inpainting algorithms on three large-scale high-resolution image datasets: CelebA-HQ \citep{liu2015faceattributes}, ImageNet \citep{deng2009imagenet}, and LSUN-Bedroom \citep{yu15lsun}. To further challenge the ability of Tiramisu to generate semantically coherent images, we use seven types of masks that reveal only $5$-$20$\% of the original image since it is very likely for inpainting algorithms to ignore the given visual cues and generate semantically inconsistent images. Details of the masks can be found in \cref{appx:baseline-details}.
+
+\boldparagraph{Methods}
+We consider the six following diffusion-based inpainting algorithms: CoPaint \citep{zhang2023towards}, RePaint \citep{lugmayr2022repaint}, DDNM \citep{wang2022zero}, DDRM \citep{kawar2022denoising}, DPS \citep{chung2022diffusion}, and Resampling \citep{trippe2022diffusion}. Although not exhaustive, this set of methods summarizes recent developments in image inpainting and can be deemed as state-of-the-art. We base our method Tiramisu on CoPaint (\ie generate $\p_{\mathrm{DM}} (\tildex_0 \given \x_t, \x_0^{\mathrm{k}})$ with CoPaint).~\ref{appx:high-res-design-choices}~and~\ref{appx:pc-learning-details}) and the baselines (Appx.~\ref{appx:baseline-details}).
+
+\boldparagraph{Quantitative and qualitative results}
+\cref{tab:lpips-results} shows the average LPIPS values \citep{zhang2018unreasonable} on all $3 \times 7 = 21$ dataset-mask configurations. First, Tiramisu outperforms CoPaint in $18$ out of $21$ settings, which demonstrates that the TPM-provided guidance consistently improves the quality of generated images. Next, compared to all baselines, Tiramisu achieves the best LPIPS value on $14$ out of $21$ settings, which indicates its superiority over the baselines. This conclusion is further supported by the sample inpainted images shown in \cref{fig:inpainted-images}, which suggests that Tiramisu generates more semantically consistent images. See Appx.~\ref{appx:qualitative-results} for more samples and Appx.~\ref{appx:user-study} for user studies.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.98\columnwidth]{figures/fig-inpainted-images.pdf}
+    \caption{Qualitative results on all three adopted datasets. We compare Tiramisu against six diffusion-based inpainting algorithms. Please refer to \cref{appx:qualitative-results} for more qualitative results.}
+    \label{fig:inpainted-images}
+\end{figure}
+
+\begin{wrapfigure}{r}{0.35\columnwidth}
+    \centering
+    \includegraphics[width=0.35\columnwidth]{figures/fig-runtime.png}
+    \caption{Performance and runtime.}
+    \label{fig:runtime}
+\end{wrapfigure}
+
+\boldparagraph{Computational efficiency}
+As illustrated in \cref{sec:exp-analysis}, we can use PC to steer the denoising steps only in earlier stages. While engaging PCs in more denoising steps could lead to better performance, the runtime is also increased accordingly. To better understand this tradeoff, we use CelebA + the Expand1 mask as an example to analyze this tradeoff. As shown in \cref{fig:runtime}, as we use PCs in more denoising steps, the LPIPS score first decreases and then increases, suggesting that incorporating PCs in a moderate amount of steps gives the best performance (around 20\% in this case). One explanation to this phenomenon is that in later denoising stages, the diffusion model mainly focuses on refining details. However, PCs are better at controlling the global semantics of images in earlier denoising stages. We then focus on the computation time. When using PCs in 20\% of the denoising steps, the additional computational overhead incurred by the TPM is around 10s, which is only 10\% of the total computation time.
+\subsection{Beyond Image Inpainting}
+\label{sec:exp-sem-fusion}
+
+The previous sections demonstrate the effectiveness of using TPMs on image inpainting tasks. A natural follow-up question is \emph{whether this framework can be generalized to other controlled/constrained image generation tasks?} Although we do not have a definite answer, this section demonstrates the potential of extending Tiramisu to more complicated tasks by showing its capability to fuse the semantic information from various input patches/fragments. Specifically, consider the case of latent-space soft evidence constraints $\{w_i^{\mathrm{z}}\}_i$ (\ie Eq.~(\ref{eq:soft-evi-constraint})). For various recent autoencoder models such as VQ-GAN, the latent variables of size $H_{\mathrm{l}} \times W_{\mathrm{l}}$ are encoded from images of size $H \times W$. Intuitively, every latent variable encodes the semantic of an $H / H_{\mathrm{l}} \times W / W_{\mathrm{l}}$ image patch. Therefore, every $w_{i}^{\mathrm{z}}$ can be viewed as a constraint on the semantics of the corresponding image patch.
+
+We introduce a controlled image generation task called \emph{semantic fusion}, where we are given several reference images each paired with a mask. The goal is to generate images that (i) semantically align with the unmasked region of every reference image, and (ii) have high quality and fidelity. Semantic fusion can be viewed as a preliminary task for more general controlled image generation since any type of visual word information (\eg language condition) can be transferred to constraints on $\{w_{i}^{\mathrm{z}}\}_i$.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\columnwidth]{figures/fig-semantic-fusion.pdf}
+    \caption{CelebA-HQ qualitative results for the semantic fusion task. In every sample, two reference images together with their masks are provided to Tiramisu. The task is to generate images that (i) semantically align with the unmasked region of both reference images, and (ii) have high fidelity. For every input, we generate five samples with different levels of semantic coherence. The left-most images are the least semantically constrained and barely match the semantic patterns of the reference images. In contrast, the right-most images strictly match the semantics of the reference images.}
+    \label{fig:semantic-fusion}
+\end{figure}
+
+\cref{fig:semantic-fusion} shows qualitative results of Tiramisu on semantic fusion tasks. For every set of reference images, we generate five samples with different semantic coherence levels by adjusting the temperature of every soft evidence function $w_i^{\mathrm{z}} (z_0^i)$. 
+See \cref{appx:semantic-fusion} for more details. 
+
+
+
+\section{Related Work and Conclusion}
+
+\label{sec:related-work}
+
+Existing approaches for image inpainting can be divided into two classes: supervised methods and unsupervised methods. Specifically, supervised approaches require the model to be explicitly trained on inpainting tasks, while unsupervised approaches do not require task-specific training. Supervised methods are widely used for Variational Autoencoders \citep{peng2021generating,zheng2019pluralistic,guo2019progressive}, Generative Adversarial Networks \citep{iizuka2017globally,zhao2020large,guo2019progressive}, and Transformers \citep{yu2021diverse,wan2021high}. A major problem of supervised inpainting algorithms is that they are highly biased toward mask types observed during training and often need to be fine-tuned individually for every inpainting task \citep{xiang2023deep}. However, since approximating the probability of masked pixels given known pixels is highly intractable for these models, we are unfortunately restricted to supervised inpainting approaches. 
+
+Recent developments in diffusion models \citep{ho2020denoising,song2020score} open up the possibility for unsupervised inpainting as these models provide potential ways to approximate the constrained posterior. Specifically, the existence of variables at different noise levels allows us to blend in information from the known pixels to the denoising process of the diffusion models \citep{song2019generative,avrahami2022blended,kawar2022denoising}. Additionally, techniques such as resampling images at higher noise levels \citep{lugmayr2022repaint} and using partial filtering to approximate the constrained posterior \citep{trippe2022diffusion} greatly contribute to generating high-quality images.
+
+The transition from supervised to unsupervised inpainting methods is a clear example that demonstrates the benefits of using more \emph{tractable} models. Based on this observation, this paper seeks to further exploit tractable models. Specifically, we study the ``extreme case'', where we use TPMs that can \emph{exactly} compute the constrained posterior. Empirical results suggest that TPMs can effectively improve the quality of inpainted images with only $10\%$ additional computational overhead.
+
+\paragraph{Acknowledgements}
+This work was funded in part by the DARPA PTG Program under award HR00112220005, the DARPA ANSR program under award FA8750-23-2-0004, 
+NSF grants \#IIS-1943641, \#IIS-1956441, \#CCF-1837129, and a gift from RelationalAI. GVdB discloses a financial interest in RelationalAI.
+Mathias Niepert acknowledges funding by Deutsche Forschungsgemeinschaft (DFG,
+German Research Foundation) under Germany’s Excellence Strategy - EXC and support by the
+Stuttgart Center for Simulation Science (SimTech).
+
+\paragraph{Reproducibility statement} To facilitate reproducibility, we have clearly stated the proposed PC inference algorithm in \cref{sec:pc-inference}. Algorithmic details including the choice of hyperparameters are provided in \cref{appx:high-res-design-choices,appx:pc-learning-details}. Formal proof of \cref{thm:inference-alg-correctness} is provided in \cref{appx:proof-pc-alg}.
+
+
+
+
+

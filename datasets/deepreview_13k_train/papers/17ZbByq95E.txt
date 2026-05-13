@@ -1,0 +1,521 @@
+\title{Memory-Efficient Backpropagation through Large Linear Layers}
+
+\begin{abstract}
+In modern neural networks like Transformers, linear layers require significant memory to store activations during backward pass.
+This study proposes a memory reduction approach to perform backpropagation through linear layers.
+Since the gradients of linear layers are computed by matrix multiplications, we consider methods for randomized matrix multiplications and demonstrate that they require less memory with a moderate decrease of the test accuracy.
+Also, we investigate the variance of the gradient estimate induced by the randomized matrix multiplication.
+We compare this variance with the variance coming from gradient estimation based on the batch of samples.
+We demonstrate the benefits of the proposed method on the fine-tuning of the pre-trained RoBERTa model on GLUE tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The recent advances in solving NLP tasks are based on the Transformer architecture~\cite{vaswani2017attention}, where the two memory bottlenecks exist in the original formulation.
+The first one is the attention layer and the second one is the linear layers with large matrices of parameters.
+The issues of operating with the attention layer in practice are solved with help of a sparsification of the attention matrix~\cite{child2019generating,zaheer2020big}.
+A similar challenge in operating with large dense matrices of parameters in linear layers has not been discussed, yet.
+
+Since the propagating of gradient through the linear layer is essentially the computation of matrix by matrix product, we consider the randomization schemes that approximate the target gradient and simultaneously require less memory.
+There are well-known techniques to compute the approximate matrix multiplication in the literature~\cite{drineas2006fast}.
+However, typically these techniques are considered from the running time perspective rather than memory consumption.
+The paper~\cite{adelman2021faster} proposes to approximate the backward pass through linear layers using randomized matrix multiplication and focuses on the training time and test accuracy of the final model.
+However, this method has the same memory requirement as the standard one.
+In the current work, we propose an algorithmic and theoretical justification of a memory-efficient linear layer based on randomized matrix multiplication.
+The proposed method requires significantly less data to be stored for the computation of the approximate gradient of the loss function with respect to the weight.
+
+We confirm memory reduction and analyze possible convergence deterioration by performing experiments on the finetuning of the pretrained RoBERTa model~\cite{liu2019roberta} on the GLUE tasks~\cite{wang2018glue}.
+The experimental evaluation of the considered approach demonstrates that the memory reduction does not lead to a significant test accuracy decrease.
+For some datasets, we have observed that even 90\% memory reduction leads to moderate test accuracy decreasing, and sometimes the additional noise is even beneficial for generalization.
+
+The main contributions of this paper are the following.
+\begin{itemize}
+    \item Memory-efficient randomized gradient propagation algorithm through large linear layers.
+    \item Theoretical analysis of the gradient variance induced by auxiliary randomized computations.
+    \item Empirical analysis of the trade-off between memory efficiency and test accuracy decrease for a number of datasets.
+    \item Experiments are performed in finetuning of pre-trained RoBERTa model on GLUE tasks.
+\end{itemize}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics{fig/computation-graph.pdf}
+    \caption{
+        Computational graphs for training step in the case of default fully-connected (FC) and randomized linear (RMM) layers.
+        If the standard layer is used we store the whole tensor $X$ for backward (dashed line on the left), while in the proposed randomized version we store only  $X_{\mathrm{proj}} = S^\top X$ and a random state (solid line on the right).
+    }
+    \label{fig:computation-graph}
+\end{figure}
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+The main building block of neural networks remains a linear layer.
+It demands a lot of memory and computational resources principally because of multiplication of matrices of considerable sizes.
+In this section we demonstrate how randomized matrix multiplication alleviates these issues.
+
+First of all, we present our modification to a fully-connected layer.
+Then we review a common approach of training neural networks and specifically estimation of the stochastic gradient.
+After that we discuss interplay of different sources of variance and provide some theoretical guarantees.
+Finally, we give an estimation of memory and arithmetical complexity.
+
+\subsection{Randomized Backward Pass for a Linear Layer}
+
+A linear layer is defined by weights $W \in \mathbb{R}^{N_{\mathrm{out}} \times N_{\mathrm{in}}}$ and biases $b \in \mathbb{R}^{N_{\mathrm{in}}}$.
+It does nothing but an affine transformation of an input batch $X \in \mathbb{R}^{B \times N_{\mathrm{in}}}$:
+\begin{equation}
+    \hat{X} = X W^\top + \mathbf{1}_B b^\top.
+\end{equation}
+Gradients of the loss function with respect to the layer input can be expressed as follows
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial X} = \frac{\partial \mathcal{L}}{\partial \hat{X}} W,
+\end{equation}
+and gradients of the loss function with respect to layer weights are
+\begin{equation}
+    \label{eq:grad-weights}
+    \frac{\partial \mathcal{L}}{\partial W} = \left(\frac{\partial \mathcal{L}}{\partial \hat{X}}\right)^\top X,
+    \quad
+    \frac{\partial \mathcal{L}}{\partial b} = \left(\frac{\partial \mathcal{L}}{\partial \hat{X}}\right)^\top \mathbf{1}_B.
+\end{equation}
+
+\paragraph{Analysis of memory consumption.}
+In standard implementation the input tensor $X$ is \emph{stored entirely} until the gradient over $W$ is calculated.
+As in~\cite{adelman2021faster} we suggest to replace the matrix multiplication in~\eqref{eq:grad-weights} with its randomly sampled counterpart, but with a key difference: \textbf{our goal is not to speedup the computation, but to save the memory during the training stage}.
+Namely (see, i.e.,~\cite{drineas2006fast}) we have
+\begin{equation}\label{random_matmul:rmm}
+    \begin{split}
+        \frac{\partial \mathcal{L}}{\partial W} & = \mathbb{E}_{S} \left[ \left(\frac{\partial \mathcal{L}}{\partial \hat{X}}\right)^\top S S^\top X \right] = \\
+            & = \mathbb{E}_{S} \left[ \left(\frac{\partial \mathcal{L}}{\partial \hat{X}}\right)^\top S X_{\mathrm{proj}} \right],
+    \end{split}
+\end{equation}
+where $X_{\mathrm{proj}} = S^\top X \in \mathbb{R}^{B_{\mathrm{proj}} \times N_{\mathrm{in}}}$ is calculated during the forward pass and stored instead of $X$ (see \cref{alg:forward-backward}).
+In order for this to be possible, matrix $S$ \emph{has to be independent from} $Y = \frac{\partial \mathcal{L}}{\partial \hat{X}}$.
+In~\cite{adelman2021faster} the construction of $S$ requires the knowledge of the norms of the rows of $Y$, so we can not precompute $XS.$
+
+The only requirement for the random matrix $S \in \mathbb{R}^{B \times B_{\mathrm{proj}}}$ is that it has to satisfy
+$$
+    \mathbb{E}~S S^\top = I_{B \times B},
+$$
+where $I_{B \times B}$ is $B \times B$ identity matrix.
+Note, although $S$ is needed in the backward pass (it should be the same as in the forward pass), it is not stored explicitly but rematerialized from the stored random seed.
+We will refer to the approximate matrix multiplication algorithm used in \eqref{random_matmul:rmm} as \textbf{Randomized Matrix Multiplication (RMM)}.
+\begin{algorithm}[tb]
+    \caption{Forward and backward pass through a linear layer with a randomized matrix multiplication.}
+    \label{alg:forward-backward}
+    \begin{algorithmic}
+        \FUNCTION{\textsc{Forward}($X$, $W$, $b$)}
+        \STATE $\hat{X} \gets X W^\top + \mathbf{1}_B b^\top$
+        \STATE {Generate pseudo random number generator (PRNG) state and corresponding random matrix $S$}
+        \STATE $X_{\mathrm{proj}} \gets S^\top X$
+        \STATE {Save $X_{\mathrm{proj}}$ and PRNG state for the backward pass.}
+        \STATE {{\bfseries return} $Y$}
+        \ENDFUNCTION
+        \STATE {}
+        \FUNCTION{\textsc{Backward}($\partial_{\hat{X}} \mathcal{L}$, $W$, $b$, $X_{\mathrm{proj}}$)}
+        \STATE $\partial_X \mathcal{L} \gets \partial_{\hat{X}} \mathcal{L} \cdot W^\top$
+        \STATE {Rematerialize matrix $S$ from the PRNG state saved in the forward pass.}
+        \STATE $\partial_W \mathcal{L} \gets \left( \partial_{\hat{X}} \mathcal{L}^\top \cdot S \right) \cdot X_{\mathrm{proj}}$
+        \STATE $\partial_b \mathcal{L} \gets \partial_{\hat{X}} \mathcal{L}^\top \mathbf{1}_B $
+        \STATE {{\bfseries return} $\partial_X \mathcal{L}$, $\partial_W \mathcal{L}$, $\partial_b \mathcal{L}$}
+        \ENDFUNCTION
+    \end{algorithmic}
+\end{algorithm}
+
+Different random distributions can be used to generate matrix~$S$.
+In this work, we consider a Gaussian random matrix,
+\begin{equation}
+S = \frac{1}{\sqrt{B_{\mathrm{proj}}}} P,
+\end{equation}
+where the elements of $P$ are i.i.d Gaussian random variables with zero mean and unit variance.
+We also tested other variants such as Subsampled Orthonormal with Random Signs (SORS) matrices~\cite{iwen2021fast}.
+They come with fast matrix-by-vector product but the accuracy drop is higher, so we leave this for future studies and do not report it here.
+
+\subsection{Stochastic Gradient Estimation}
+\label{subsec:stochastic-gradient-estimation}
+
+We have a randomized computation of the gradient; how accurate this should be?
+In standard tasks, the approximation should approximate the target really accurate, i.e. with high relative accuracy. Randomized matrix multiplication error decays like $\mathcal{O}(B^{-0.5}_{\mathrm{proj}})$ (the exact estimates will be described in~\cref{subsec:random_matrix:estimates}), so it may seem it is not a good idea. However, in the framework of stochastic gradient descent (SGD) we already have a noisy estimation of the gradient which is induced by sampling of the dataset, i.e. this approximation has some variance.
+Thus, it is natural to require that the variance induced by the randomized approximation is of the same order, as the variance induced by the stochastic estimation of the gradient.
+Moreover, higher total variance of the gradient estimate does not necessary mean that the convergence of the overall optimization may be worse, since the noise can be beneficial.
+In order to estimate the effect of RMM on the variance, we need to have a certain estimate of the variance of the gradient estimation.
+
+Suppose, we have the following optimization problem in a form of finite sample average minimization:
+
+\begin{equation}
+    \label{random_matmul:finitesum}
+    f(\vect{\theta}) = \frac{1}{N} \sum_{i=1}^N f_i(\vect{\theta}) \rightarrow \min_{\vect{\theta} \in \mathbb{R}^p}.
+\end{equation}
+
+Usual approach to deal with such problem involves stochastic first order methods, where instead of full gradient computation $ \nabla f(\vect{\theta}) = \frac{1}{N} \sum_{i=1}^N \nabla f_i(\vect{\theta})$ one can use stochastic approximation of this vector
+
+\begin{equation}
+    \label{random_matmul:stochastic_gradient}
+    g(\vect{\theta}) = \frac{1}{n} \sum_{j=1}^n \nabla f_{i_j}(\vect{\theta}) \rightarrow \min_{\vect{\theta} \in \mathbb{R}^p},
+\end{equation}
+
+where $\mathcal{I} = \{i_1, \ldots, i_j, \ldots, i_n\}$ is sampled uniformly from original set of indices $\{1, \ldots, N\}$.
+The number $n$ is the batch size.
+For convenience, we can deal with this randomness considering a stochastic gradient vector $ g(\vect{\theta}) = g_\xi$ as follows.
+
+\begin{equation}
+\label{random_matmul:g_xi}
+\begin{split}
+    &g_\xi = \frac{1}{n} \sum_{i=1}^N \nabla f_{i}(\vect{\theta}) \xi_i, \\ &\mbox{where } \xi_i = \begin{cases}
+    1, & \mbox{if } i \in \mathcal{I} \\
+    0, & \mbox{otherwise.}
+    \end{cases}
+\end{split}
+\end{equation}
+The estimate in~\eqref{random_matmul:g_xi} can be viewed as an empirical mean of the vector random variable.
+Thus, we can also build an empirical estimator of the variance of this random variable, and use it as a guidance for the variance of the RMM model.
+We will do it specifically for the linear layer, since in this case very simple and intuitive formulas can be obtained.
+
+\subsection{Variance of Stochastic Gradient Estimate}\label{subsec:random_matrix:estimates}
+
+With background given in \cref{subsec:stochastic-gradient-estimation} we are able to discuss our main theoretical contribution.
+One can follow detailed derivations in~\cref{app:sec:proofs}.
+The first observation that we make is that the exact gradient computed for a given batch can be viewed as an empirical mean estimate of a random variable, i.e. it has a certain amount of noise.
+The randomized approximation introduces additional noise into the picture, which can be either smaller, than the noise from the finite sample size (in this case we expect the convergence to stay the same) or larger.
+In the latter case, the effect of the additional noise can sometimes play the role of regularizer.
+Theory of SGD convergence and generalization is rapidly developing, see for example \cite{keskar2016large,jastrzkebski2017three,hoffer2017train,cheng2020stochastic,li2021validity}.
+In some settings, generalization can be even improved by injecting additional noise \cite{hoffer2017train,cheng2020stochastic,li2021validity}.
+
+The benefits of the noise in SGD are quite well understood, however we are not aware of any practical estimators of this noise. The following Lemma shows how it can be
+done using a very standard statistical estimator of the variance.
+
+\begin{restatable}[Aposteriori variance of SGD]{lemma}{lemsgd}
+    \label{lem:insample-variance}
+    Let $X \in \mathbb{R}^{B \times N}$ and $Y \in \mathbb{R}^{B \times M}$ be the input to the linear layer in the forward pass and the input to it in the backward pass ($B$ here is the batch size). Then, we can estimate the variance of the noise induced by a random selection of the samples as
+    \begin{equation}\label{rb:insample}
+        D_{\mathrm{SGD}}^2(X, Y) = \frac{B}{B-1}\sum_{k=1}^B \Vert x_k \Vert^2 \Vert y_k \Vert^2 - \frac{\Vert X^{\top} Y \Vert_F^2}{B-1} ,
+    \end{equation}
+    where $x_k = X^{\top} e_k, \, y_k = Y^{\top} e_k, \, k = 1, \ldots, B$, i.e., $x_k$ and $y_k$ are the columns of $X^\top$ and $Y^\top$, respectively.
+\end{restatable}
+
+\begin{figure}[!t]
+    \vskip 0.2in
+    \centering
+    \includegraphics{fig/variance-sgd.pdf}
+    \vskip -0.2in
+    \caption{
+        Visual support for~\cref{lem:insample-variance}.
+        If input vectors and output gradients are divergent, the resulting variance estimate of SGD is high.
+        Whenever inputs $X$ and output gradients $Y$ are close, the value of SGD variance is low.
+    }
+    \label{fig:variance-sgd}
+\end{figure}
+
+The meaning of the estimate \eqref{rb:insample} is very simple.
+In the first term we have the norms of the per-example gradients, and the last term is the scaled norm of the gradient for the entire batch.
+If the latter is small, but the norms of per-example gradients are large, then we have high variance of the SGD (see~\cref{fig:variance-sgd}).
+Intuitively, the \cref{lem:insample-variance} can be viewed as a generalization of a sample variance in the stochastic gradient estimation (for full derivation see \cref{app:subsec:proof_lemma_insample_variance}).
+
+\begin{restatable}[Apriori variance of RMM]{lemma}{lemmatmul}
+    \label{lem:matmul-variance}
+    Let $X \in \mathbb{R}^{B \times N}$ and $Y \in \mathbb{R}^{B \times M}$, then the variance of a randomized matrix multiplication through a matrix $S \in \mathbb{R}^{B \times B_{\mathrm{proj}}}$ with i.i.d. elements following the normal distribution $\mathcal{N}(0, B_{\mathrm{proj}}^{-0.5})$ defined as
+    \begin{equation}
+        D^2(X, Y) = \mathbb{E}_S~\Vert X^\top S S^\top Y - X^\top Y \Vert_F^2
+    \end{equation}
+    can be evaluated as follows
+    \begin{equation}
+        \label{eq:matmul-variance}
+        D_{\mathrm{RMM}}^2(X,Y) = \frac{\Vert X \Vert_F^2 \Vert Y \Vert_F^2 - \Vert X^\top Y \Vert_F^2}{B_{\mathrm{proj}}}.
+    \end{equation}
+\end{restatable}
+
+The proof can be found in the \cref{app:subsec:proof_lemma_matmul_variance}.
+
+\begin{restatable}[Upper bound of variance]{theorem}{thmmain}
+    \label{thm:dev_ratio}
+    In the conditions of \cref{lem:insample-variance} and \cref{lem:matmul-variance} the in-sample variance $D_{\mathrm{SGD}}$ and the variance $D_{\mathrm{RMM}}$ induced by a randomized subsampling are tied with the following inequality
+    \begin{equation}
+        \label{eq:variance_ratio}
+        \frac{B_{\mathrm{proj}}}{B-1} \frac{D^2_{\mathrm{RMM}}(X,Y)}{D^2_{\mathrm{SGD}}(X,Y)} \leq \frac{\alpha+1}{\alpha},
+    \end{equation}
+    where
+    \begin{equation}
+        \alpha = \frac{\Vert X^\top Y \Vert_F^2}{\Vert X \Vert_F^2 \Vert Y \Vert_F^2} \in [0,1].
+    \end{equation}
+\end{restatable}
+
+The proof can be found in the \cref{app:sec:proof_thm_dev_ratio}.
+It is worth noting, that the parameter $\alpha$ can actually be zero in the case $X^\top Y = 0$ leading to a non-bounded variation.
+Let assume the following simple example with $B=2$:
+\begin{equation}
+    X = \begin{bmatrix} 1 & 0 \\ -\varepsilon & 0 \end{bmatrix} , \;\; Y = \begin{bmatrix} 1 & 0 \\ \varepsilon^{-1} & 0 \end{bmatrix}, \;\; X^\top Y = 0,
+\end{equation}
+with some parameter $\varepsilon>0$.
+So, the estimated variations are:
+\begin{equation}
+    (B-1) D^2_{\mathrm{SGD}} (X, Y) = 4,
+\end{equation}
+and
+\begin{equation}
+    B_{\mathrm{proj}}~D^2_{\mathrm{RMM}} (X, Y) = 2+\varepsilon^2 + \varepsilon^{-2}.
+\end{equation}
+Therefore, their ratio can be any arbitrary large number, and ``sample'' variance of SGD can be much smaller than the one introduced by the RMM.
+In practice, however, we did not observe such cases.
+A natural explanation is that for the minima of the loss function that generalizes well the norm of $Y$ will be also small (the norm of $X$ can be made bounded by, i.e., batch normalization) since the gradient with respect to almost every sample will be small.
+
+\subsection{Memory Footprint and Arithmetic Complexity}
+\label{subsec:space-time-complexity}
+
+General matrix multiplication (matmul) $A B$ takes $O(nml)$ floating-point operations for $A \in \mathbb{R}^{n \times m}$ and $B \in \mathbb{R}^{m \times l}$.
+No extra space is required except for storing resulting matrix.
+Costs estimations are summarized in~\cref{tbl:complexity-summary}.
+
+\subsubsection{Memory Requirements}
+\label{subsec:memory-requirements}
+
+Default implementation of a fully-connected layer stores input tensor $X$, which is used both for the forward and the backward passes.
+It requires $O(B N_{\mathrm{in}})$ extra memory in addition to a weight tensor.
+Our modification of a fully-connected layer stores a compressed input tensor instead which requires $O(B_{\mathrm{proj}} N_{in})$ memory.
+Please note, that random matrices are rematerialized when needed from a certain pseudorandom number generator, i.e., the random seed with $O(1)$ memory consumption.
+In other words our approach reduces memory footprint by $\rho^{-1} = B / B_{\mathrm{proj}} \ge 1$ times for input tensors of all the linear layers.
+
+\subsubsection{Computational Complexity}
+\label{subsec:computational-complexity}
+
+Let $B$ denote the batch dimension and $N_{\mathrm{in}}$ and $N_{\mathrm{out}}$ be the input and the output sizes of a linear layer respectively.
+Also, let the compression rate $\rho \in (0, 1]$ and the compressed batch dimension $B_{\mathrm{proj}} = \rho B$.
+
+According to Alg.~\ref{alg:forward-backward} the forward pass of a linear layer requires $O(B N_{\mathrm{in}} N_{\mathrm{out}})$ operations to compute the output $\hat{X}$ and $O(B B_{\mathrm{proj}} N_{\mathrm{in}})$ operations to obtain the compressed input $X_{\mathrm{proj}}$ for the backward pass.
+
+Arithmetical complexity of the baseline backward pass, which is based on the non-compressed input $X$, is $O(B N_{\mathrm{in}} N_{\mathrm{out}})$ floating point operations.
+On the other hand, our approach for the backward pass requires multiplication of the output gradients by a rematerialized random matrix $S$ and estimation of the gradients with respect to weights resulting in $O(B B_{\mathrm{proj}} N_{\mathrm{out}} + B_{\mathrm{proj}} N_{\mathrm{in}} N_{\mathrm{out}})$ operations.
+Total asymptotic complexity of a single forward-backward cycle is $O(B N_{\mathrm{in}} N_{\mathrm{out}})$ for the baseline implementation and $O(B_{\mathrm{proj}} N_{\mathrm{out}} (B + N_{\mathrm{in}}))$ for our approach.
+
+Assume that $N = N_{\mathrm{in}} \sim N_{\mathrm{out}}$ then overall complexities become $O(B N^2)$ and $O(\rho B N (B + N))$, respectively.
+In real world scenarios of large Transformer models with $N \ll B$, we conclude to $O(B^2 N)$ operations where compression rate is merged into a constant multiplier.
+Randomized matmul modification of a linear layer has worse asymptotic in terms of the batch size but choosing small enough compression rate $\rho$ reduces computational time significantly and makes our approach practically appealing.
+
+\begin{table}[t]
+    \caption{
+        Summary table for~\cref{subsec:memory-requirements} and~\cref{subsec:computational-complexity}.
+        Comparison of memory usage required to store input activations between baseline and randomized FC-layers.
+        Columns \textsc{Forward} and \textsc{Backward} show how the costs of the compared approaches are split between forward and backward passes.
+    }
+    \label{tbl:complexity-summary}
+    \vskip 0.15in
+    \begin{center}\begin{small}\begin{sc}
+        \input{tbl/complexity-summary.tex}
+    \end{sc}\end{small}\end{center}
+    \vskip -0.2in
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section, we evaluate the performance of the proposed modification of linear layers by comparing it with default implementation.
+}.
+We use pretrained RoBERTa-base model from HuggingFace's Transformers~\cite{wolf2020transformers}.
+Model fine-tuning on GLUE tasks is conducted in a single GPU setting with NVIDIA Tesla V100 SXM2 16 GB.
+We use the same training setting and model hyperparameters for RoBERTa model which are in Fairseq~\cite{ott2019fairseq}.
+
+We rewrite implementation of fully-connected layer in PyTorch with modification to forward pass and backward pass caching compressed input $S^\top X$ and PRNG state $\mathcal{G}$ between passes.
+Our implementation allows to control compression rate $\rho$ (dimension of random projection proportional to batch size) or to fix a number of dimensions $B_{\mathrm{proj}}$.
+In both regimes we are able to clamp $B_{\mathrm{proj}}$ in some desired interval.
+For a sake of clarity, we stick to specifying $\rho$ instead of fixing exact value of $B_{\mathrm{proj}}$ in order to compress uniformly across all layers in a model.
+
+\subsection{Performance on GLUE Benchmark}
+
+\begin{table*}[t]
+    \caption{
+        Performance in fine-tuning on GLUE benchmark for different compression rates $\rho$ (number of dimensions of projection space) in percents.
+        The top row (\textsc{No RMM}) corresponds to a baseline implementation without compression.
+    }
+    \label{tab:glue-fine-tuning}
+    \vskip 0.15in
+    \begin{center}\begin{small}\begin{sc}
+        \input{tbl/glue-fine-tuning.tex}  % Table is generated with Pandas.
+    \end{sc}\end{small}\end{center}
+    \vskip -0.1in
+\end{table*}
+
+In these experiments we measure performance degradation in fine-tuning of base RoBERTa model on GLUE benchmark depending on compression rate $\rho$ (see~\cref{tab:glue-fine-tuning}).
+Randomized dense layer demonstrates moderate degradation of evaluation metrics.
+Compression in 5--10 times results in insignificant drop of performance for almost all GLUE tasks.
+
+\subsection{Memory Efficiency}
+
+Although fully-connected layer is a common for Transformer architecture
+and it holds a major share of total memory usage in training time, there is other solid memory consumers.
+So, we measure actual memory footprint reduction in relation to compression rate $\rho$ (see~\cref{tab:glue-memory-usage}).
+In this experiment setting we train RoBERTa on GLUE tasks with varying compression rate $\rho$ and batch size $B$.
+Important observation is that compression in 5--10 times cuts overall runtime memory by 10--20\%.
+
+\begin{table}[t]
+    \caption{
+        Maximal memory usage during training on GLUE tasks and memory economy for different compression rates $\rho$ and a baseline implementation (\textsc{No RMM}).
+    }
+    \label{tab:glue-memory-usage}
+    \vskip 0.15in
+    \begin{center}\begin{small}\begin{sc}
+        \input{tbl/glue-memory-usage.tex}  % Table is generated with Pandas.
+    \end{sc}\end{small}\end{center}
+    \vskip -0.1in
+\end{table}
+
+Also, we carry out experiments to validate memory usage in our implementation with varying of batch size $B$.
+According to~\cref{subsec:memory-requirements} we save only $O(B_{\mathrm{proj}} N_{\mathrm{in}})$ memory for the backward pass.
+So, near-linear scaling of memory usage for different compression rates $\rho$ as batch size growth confirms correctness of the implementation (see~\cref{fig:glue-memory-usage-cola}).
+
+\begin{figure}[t]
+    \vskip 0.2in
+    \centering
+    \input{fig/glue-memory-usage-cola.pgf}
+    \vskip -0.2in
+    \caption{
+        Peak memory usage depending on batch size during training of RoBERTa model for one epoch on CoLA task.
+    }
+    \label{fig:glue-memory-usage-cola}
+\end{figure}
+
+\subsection{Empirical Variance Estimation}
+
+In this section we explore empirically variance estimation behaviour (see~\cref{subsec:random_matrix:estimates}).
+We use our common experimental settings where linear layers with randomized backward pass were used.
+We pick a fully-connected layer and estimate variations \eqref{rb:insample} and \eqref{eq:matmul-variance} during training (see~\cref{fig:variance-ratio}).
+
+The behaviour of the variance estimators is interesting on its own: the variance slowly increases with the number of steps, whereas as we have seen, the norm of the gradient ($X^{\top} Y$ term) is very small. This means, that the whole dynamics is governed by the noise terms, i.e. the parameters undergo a diffusion process. The relative behaviour of $D^2_{\mathrm{SGD}}$ and $D^2_{\mathrm{RMM}}$ is also similar and converges to a certain constant.
+For other layers the picture is very similar.
+One can find additional experiments in~\cref{app:subsec:variance-estimation}.
+
+\begin{figure}[t]
+    \vskip 0.2in
+    \centering
+    \input{fig/variance-ratio.pgf}
+    \vskip -0.2in
+    \caption{
+        Evolution of variance ratio from the left-hand side of inequality~\eqref{eq:variance_ratio} (top) and
+        variances estimates \eqref{rb:insample} and \eqref{eq:matmul-variance}
+        (bottom) during fine-tuning on CoLA for batch size $B = 64$ and
+        compression rate $\rho = 0.5$.
+    }
+    \label{fig:variance-ratio}
+\end{figure}
+
+\subsection{Learning Curves}
+
+In this subsection we empirically study influence of randomized fully-connected layer on training.
+Namely, we discover behaviour of cross-entropy loss on training set and evaluation set depending on compression rate $\rho$.
+We found that loss curve changes smoothly as compression rate declines (see~\cref{fig:glue-loss-mnli}).
+Decreasing of compression rate results in increasing training loss and flattening evaluation loss.
+However, overfitting point is nearly the same.
+
+\begin{figure*}[t]
+    \vskip 0.2in
+    \centering
+    \input{fig/glue-loss-mnli.pgf}
+    \vskip -0.2in
+    \caption{
+        Fine-tuning RoBERTa on MNLI task from GLUE.
+        Cross-entropy loss on training set (left) and evaluation set (right).
+    }
+    \label{fig:glue-loss-mnli}
+\end{figure*}
+
+\subsection{Comparison of Randomized MatMuls}
+
+In order to reduce computation cost we examine a variety of randomized matrix multiplication implementations.
+Among matmul implementations we considered, there are sampling of random matrix $S$ from either Gaussian or Rademacher distribution and applying discrete Fourier Transform (DFT) or Discrete Cosine Transform (DCT).
+In comparison to other approaches, DCT and DFT have theoretically computational advantage because of their regular structure.
+DFT- and DCT-based matmuls allow to perform multiplication by random matrix $S$ in $O(B N \log B)$ operations instead of $O(B^2 N)$.
+All alternatives requires the same memory space.
+
+In the case of Gaussian randomized matmul we sample i.i.d. elements of matrix $S$ from normal distribution $\mathcal{N}(0, B^{-0.5}_{\mathrm{proj}})$.
+The same remains true for the instance of Rademacher distribution which has the following probability mass function
+\[
+    \mathbb{P}(n) = \frac{1}{2}, \quad n = \pm 1.
+\]
+The only difference is that we should force unbiasedness condition $\mathbb{E}~SS^T = I$ with proper normalization.
+
+\begin{table}[t]
+    \caption{
+        Comparison of different randomized matmul variants. All alternatives are trained on CoLA task. Lower compression rate $\rho$ means lower memory usage.
+    }
+    \label{tab:matmul-comparison}
+    \vskip 0.15in
+    \begin{center}\begin{small}\begin{sc}
+        \input{tbl/matmul-comparison.tex}  % Table is generated with Pandas.
+    \end{sc}\end{small}\end{center}
+    \vskip -0.1in
+\end{table}
+
+We found that different matmul variants demonstrate consistent performance degradation of a moderate level as compression rates $\rho$ decreases (see~\cref{tab:matmul-comparison}).
+Nevertheless, varying training time across alternatives indicates that naive high-level implementation in PyTorch is not good enough and low-level optimizations are needed.
+
+\subsection{Computational Time}
+
+In order to make experimental study as comprehensive as possible, we investigate computational efficiency empirically although it is not our primary target.
+We use the standard experimental settings and measure a number of samples processed per second (throughput) in training time (see~\cref{fig:glue-throughput}).
+As it was mentioned in \cref{subsec:computational-complexity} randomization of linear layer has worse computational complexity in terms of batch size $B$.
+However, there is small enough compression rate $\rho$ such that randomized dense layer becomes computationally efficient.
+Moreover, we empirically found that our randomization is faster if $\rho \leq 0.1$.
+
+\begin{figure}[t]
+    \vskip 0.2in
+    \centering
+    \input{fig/glue-throughput.pgf}
+    \vskip -0.2in
+    \caption{
+        Relative throughput of randomized FC layers depending on the compression rate in training time (throughput is a number of samples per second).
+        Relative throughput value above $1$ means that a model shows better performance than reference model without randomization.
+    }
+    \label{fig:glue-throughput}
+\end{figure}
+
+
+
+\section{Related Works}
+
+\label{sec:related-work}
+
+A close work to ours is \cite{adelman2021faster}, where another variant of randomized multiplication is used to speedup the backward pass. Our goal is to reduce memory and we also provide theoretical analysis of the variance, which sheds light on effect of approximate gradient computations.
+In~\cite{oktay2020randomized} the concept of randomized automatic differentiation has been proposed.
+
+Randomized matrix multiplication has a long history, which goes back to \cite{freivalds1977probabilistic} where probabilistic verification of matrix multiplication has been proposed.
+In~\cite{drineas2006fast} the score-based randomized algorithm has been proposed and analyzed.
+Improved algorithms for matrix multiplication have been proposed in~\cite{boutsidis2013improved}, where different fast algorithms have been studied for the sampling matrix based on the results of~\cite{tropp2011improved} for subsampled orthogonal transforms.
+
+Another line of research focuses on other algorithms for approximation of matrix multiplications, to name a few relevant papers~\cite{pagh2013compressed} where the hashing functions have been used and in~\cite{blalock2021multiplying} hashing functions are learned from the data.
+Excellent review for the probabilistic linear algebra can be found in \cite{martinsson2020randomized}.
+
+
+
+\section{Conclusion and Future Work}
+
+\label{sec:conclusions}
+
+We propose a drop-in replacement for a linear layer in deep neural network with randomized backward operation that reduces the amount of memory, required to be stored during backpropagation.
+The algorithm is based on a randomized matrix multiplication.
+We provide theoretical bounds on the additional variance introduced by randomization compared to the inherent noise in the SGD, provide bounds on this noise and computable estimates. In fine-tuning of a Transformer-based model on different GLUE tasks we show that we get reduction in the peak memory while maintaining the accuracy of the model.
+
+There are several directions we would like to study in future work. First of all, we would like to get stable and robust implementations of randomized matrix multiplication with matrices $S$ that allow fast matrix-by-vector product. The Subsampled Orthogonal with Random Signs seems to be a good option, but the variance of such estimators in our experiments was quite large, so the $B_{\mathrm{proj}}$ has to be selected larger. Thus, we would like to study other options. For Transformer-based models the number of rows in $X$ is actually the product of the batch size and sequence length, i.e. it is quite large; however, we do not use this structure.
+One option is to use tensor-product sampling matrices to reduce complexity of multiplication by $S$.
+
+Second direction is the deeper study of the variance estimator and its connection to the learning rate schedule.
+Given a good estimate of the variance, one can try to theoretically justify a specific learning rate schedule to maintain a certain level of noise in training.
+
+
+
+\section{Acknowledgements}
+
+
+The work was supported by the Analytical center under the RF Government (subsidy agreement 000000D730321P5Q0002, Grant No. 70-2021-00145 02.11.2021).
+
+
+
+
+
+

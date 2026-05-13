@@ -1,0 +1,197 @@
+\title{Streaming Video Question-Answering with In-context Video KV-Cache Retrieval}
+
+\begin{abstract}
+We propose ReKV, a novel, training-free approach that integrates seamlessly with existing Video Large Language Models (Video-LLMs) to enable efficient streaming video question-answering (StreamingVQA). Traditional VideoQA systems struggle with long videos, as they must process the entire video before responding to queries, and repeat this process for each new question. In contrast, our approach analyzes long videos in a streaming fashion, allowing for prompt responses as soon as user queries are received. Building on a common Video-LLM, we first incorporate a sliding-window attention mechanism, ensuring that input frames attend to a limited number of preceding frames, thereby reducing computational overhead. To prevent information loss, we store processed video key-value caches (KV-Caches) in RAM and disk, reloading them into GPU memory as needed. Additionally, we introduce a retrieval method that leverages an external retriever or the parameters within Video-LLMs to retrieve only query-relevant KV-Caches, ensuring both efficiency and accuracy in question answering. ReKV enables the separation of video analyzing and question-answering across different processes and GPUs, significantly enhancing the efficiency of StreamingVQA. Through comprehensive experimentation, we validate the efficacy and practicality of our approach, which significantly boosts efficiency and enhances applicability over existing VideoQA models.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+In the literature, video understanding tasks, such as action recognition (Caba Heilbron et al., 2015; Goyal et al., 2017; Kay et al., 2017), visual object tracking (Huang et al., 2019; Muller et al., 2018), and video question-answering (Xu et al., 2017; Jang et al., 2017; Xiao et al., 2021; Li et al., 2024c), have primarily focused on short clips lasting from a few seconds to minutes. However, as vision models increasingly find applications in real-world scenarios like robotics, surveillance, and live broadcasts, the research in the vision community has gradually shifted towards understanding continuous video streams, where long-term contexts and real-time interaction are crucial.  
+
+In this paper, we consider the problem of streaming video question-answering (StreamingVQA). As shown in Figure 1(a), it involves continuously processing long video streams and promptly responding to queries about the visual content at any moment. It can be treated as a generalization of the standard offline VideoQA, where the model processes the entire video and all questions simultaneously. By definition, such task of StreamingVQA presents three core challenges: (i) Efficient Video Encoding: Unlike traditional offline VideoQA, where models have access to the entire video clip, StreamingVQA demands real-time analysis of continuous streams. Models must efficiently process incoming frames without access to future frames or frequent revisiting of distant past frames. (ii) Video Context Preservation: To accurately answer questions posed later in the stream, models must preserve relevant information from earlier frames, making long-term context retention a key challenge. (iii) Real-Time Response: The model must provide accurate answers with minimal delay, requiring efficient retrieval of video context and rapid question-answering.  
+
+Current Video-LLMs often struggle to encode long video streams due to the large volume of video tokens, forcing most models to process only a sparse subset of frames (Maaz et al., 2024; Zhang et al., 2024c; Li et al., 2024a). This results in limited video lengths or a significant loss of finegrained visual information. While techniques like average pooling (Li et al., 2024d) and memory compression (Wu et al., 2022; Wang et al., 2023; He et al., 2024; Zhang et al., 2024a; Qian et al., 2024) reduce token volume, they come at the cost of losing details, particularly in temporal and lower-level visual features that are essential for complex question answering.  
+
+![](images/42573e368f68ca320bbc537ca70c8f55a205ca578ff578217fea8c245887fd8f.jpg)  
+Figure 1: Overview of the StreamingVQA task and our proposed ReKV. (a) StreamingVQA requires a model to continuously process video streams and answer questions about previously viewed content at any moment. (b) We propose ReKV to enhance efficiency and accuracy in StreamingVQA. Tested with LLaVA-OV-7B on an H800 (80GB) GPU, ReKV maintains stable latency and GPU memory usage, preventing out-of-memory (OOM) errors as frames increase. It also improves the accuracy on six long-form VideoQA benchmarks compared to the uniform sampling baseline. Further details are provided in Section 3.  
+
+To address the challenges, we propose ReKV (Retrieve In-context Video KV-Cache), a framework that integrates seamlessly with existing Video-LLMs (Maaz et al., 2024; Zhang et al., 2024c; Li et al., 2024a) without additional training. Our method employs two strategies for aggregating both short- and long-term temporal information. For short-term temporal context, the model adopts causal attention with a sliding-window mechanism (Han et al., 2023), where tokens attend only to a limited set of preceding tokens during encoding. For recalling long-term information, we enable dynamic access to any point within the video sequence via retrieval. Specifically, our method retains and reuses past computations (KV-Cache) to avoid redundant processing while enhancing long-term reasoning without sacrificing detail. For extremely long videos, KV-Caches can be offloaded to RAM or disk to prevent memory overflow.  
+
+To ensure real-time and accurate responses, we retrieve a fixed number of KV-Caches relevant to the current question. This design strikes a balance between efficiency and accuracy by avoiding the need to process all past frames, while still accessing the most critical information. We experimented with two retrieval methods: one using external CLIP-like models (Radford et al., 2021; Zhai et al., 2023) for semantic matching, and another leveraging internal attention weights for faster, more integrated, and potentially stronger retrieval (Xiao et al., 2024a; Li et al., 2024e).  
+
+In summary, ReKV efficiently encodes long video streams, preserves and retrieves in-context KVCaches to address complex video question-answering. In addition, ReKV separates video encoding from question-answering into distinct processes, further enhancing efficiency. As shown in Figure 1(b), ReKV improves VideoQA accuracy while maintaining stable inference latency and memory usage as frames increase. The remainder of the paper is organized as follows: Section 4 provides an overview of the relevant literature. Section 2 formulates the StreamingVQA task and describes our proposed method in detail. In Section 3, we present ablation studies and comparisons to validate our approach. Consequently, our approach not only enhances accuracy on long VideoQA benchmarks, including MLVU (Zhou et al., 2024a), QAEGO ${\mathcal{A}}\mathrm{D}_{\mathrm{MC}}$ (Di & Xie, 2024), EgoSchema (Mangalam et al., 2023), and ActivityNet-QA (Yu et al., 2019), as well as StreamingVQA benchmarks (Zhang et al., 2024a), but also reduces inference latency and memory usage.  
+
+
+
+\section{2 METHOD  }
+
+
+This paper considers the problem of streaming video question-answering (StreamingVQA), where a model continuously processes a video stream and can respond to questions about past visual content at any moment. In Section 2.1, we formally define the task and outline the design principles for our proposed solution. Next, Section 2.2 introduces ReKV, an approach that integrates seamlessly with a Video-LLM to enable efficient StreamingVQA without requiring additional training. Overall, ReKV efficiently encodes the video stream, maintains its KV-Caches, retrieves relevant caches based on the given question, and uses them for accurate question-answering.  
+
+2.1 TASK DEFINITION AND DISCUSSION   
+Given a video stream $\mathcal{V}^{T}:=[v_{1},v_{2},...,v_{T}]$ consisting of $T$ frames and a set of $N$ questions $\mathcal{Q}:=$ $\{q_{1},q_{2},\ldots,q_{N}\}$ , StreamingVQA is to answer a question $q_{i}$ at any time step $t$ $1\leq t\leq T,$ ) using only the frames seen up to that point, $\mathcal{V}^{t}:=[v_{1},v_{2},...,v_{t}]$ .   
+Discussion: StreamingVQA vs. OfflineVQA. StreamingVQA involves continuously analyzing an incoming video stream and answering questions based on the observed visual content at any moment. In contrast, conventional video question-answering models Yang et al. (2022); Maaz et al. (2024); Zhang et al. (2024c); Li et al. (2024a) operate in an offline mode, referred to as OfflineVQA. The two paradigms differ in that: 1) StreamingVQA processes a continuous video stream, while OfflineVQA handles a predefined video input, and 2) StreamingVQA allows questions to be asked at any point during the stream, whereas OfflineVQA processes questions only after the entire video has been viewed. Notably, OfflineVQA can be considered a special case of StreamingVQA, where all questions are posed after the video is fully processed.   
+Conventional approaches typically employ a visual encoder Radford et al. (2021); Zhai et al. (2023); Fang et al. (2023) and a projection module Zhang et al. (2024c); Li et al. (2023) to process video frames $\nu^{t}$ . The output is concatenated with the tokenized question to form a sequence $[\mathcal{V}_{t},q_{i}]\textsuperscript{1}$ , which is then passed to an LLM Decoder to predict an answer. However, this approach is impractical due to the high computational cost associated with processing a large number of frames $(T)$ . A common workaround is sparse frame sampling (Maaz et al., 2024; Zhang et al., 2024c; Li et al., 2024a), but this introduces new problems: (i) loss of critical visual information, leading to incomplete or inaccurate responses, and (ii) the need to reprocess frames for different questions, since questions asked at different time points require distinct frame samples. This becomes increasingly inefficient as $T$ and $N$ grow.   
+Given these challenges, current OfflineVQA methods fall short when applied to StreamingVQA scenarios. Therefore, designing a new approach optimized for StreamingVQA is crucial to handling video streams more efficiently, enabling real-time question answering and unlocking more interactive video analysis applications.   
+Discussion: Design Principles for Efficient StreamingVQA. To tackle the aforementioned challenges, we can exploit the causal nature of the LLM decoder to avoid redundant computations and strike a balance between accuracy and speed. During attention calculations, causal masking prevents the model from accessing future tokens, ensuring that video tokens are encoded independently of the questions. This allows us to decouple video encoding from question-answering.   
+For video encoding, we leverage the KV-Cache optimization to accelerate inference. However, as $t$ grows large, handling the massive number of video tokens becomes increasingly inefficient and may exceed the model’s capacity Han et al. (2023); Xiao et al. (2024b). To address this, we adopt a sliding-window attention mechanism (Han et al., 2023), which limits the attention scope to only the most recent frames.   
+Regarding question-answering, Video KV-Caches are stored and can be reused as context to answer different questions. However, long video sequences produce a substantial amount of KV-Caches, leading to excessive GPU memory consumption, computational overhead, and unnecessary distractions if all are used. To address this, we introduce an efficient retrieval method that selects the most  
+
+![](images/fc48c3fc5fe6b999e2d9d0a0fc1e89514ac08f2be102c5b4c943cfa414c3bf5e.jpg)  
+Figure 2: Overview of ReKV. We modify the attention mechanism in Decoder-based Video-LLMs: (a) The video stream is encoded with sliding-window attention (Equation 1), with out-of-window Video KV-Caches offloaded to RAM or disk. (b) Upon receiving a question, relevant key-value vectors are retrieved based on cosine similarity, with compressed vectors to accelerate retrieval (Equation 2). (c) The retrieved key-value vectors are reloaded onto the GPU and utilized for autoregressive answer generation (Equation 3).  
+
+relevant video key-value vectors from the video KV-Caches. These selected vectors then serve as context, enabling efficient and scalable StreamingVQA.  
+
+2.2 REKV: RETRIEVE IN-CONTEXT VIDEO KV-CACHE  
+
+We aim to enable Video-LLMs, trained on limited frames, to perform StreamingVQA without additional training. As illustrated in Figure 2, the proposed ReKV consists of three components: video stream encoding, video KV-Cache retrieval, and question-answering using the retrieved key-value vectors.  
+
+Video Stream Encoding with Sliding-window Attention. We encode the video stream $\nu^{T}$ incrementally, processing it chunk by chunk. At each step, the inputs include past key-value vectors $\mathbf{P}=\{(\mathbf{k}_{j},\bar{\mathbf{v}_{j}})\}_{j=1}^{l_{P}}$ and the current tokens $\mathbf{X}=\{\mathbf{t}_{i+l_{P}}\}_{i=1}^{l_{X}}$ , where $l_{P}$ denotes the lengths of past key-values, and $l_{X}$ refers to the chunk size. The local key-value vectors within a window $l_{L}$ can thus be derived as $\mathbf{L}=\mathbf{P}_{[l_{P}-l_{L}+1:l_{P}]}$ . The attention calculation is then formulated as:  
+
+$$
+\mathbf{O}=\operatorname{Attn}\left(\mathbf{W}_{\mathbf{Q}}\mathbf{X},[\mathbf{L}_{k},\mathbf{W}_{\mathbf{K}}\mathbf{X}],[\mathbf{L}_{v},\mathbf{W}_{\mathbf{V}}\mathbf{X}]\right),
+$$  
+
+where $\mathbf{W_{Q}}$ , $\mathbf{W_{K}}$ , and $\mathbf{W}_{\mathbf{V}}$ are the attention layer parameters, $\mathbf{L}_{k}$ and $\mathbf{L}_{v}$ correspond to the key and value vectors in $\mathbf{L}$ . All video KV-Caches are stored for future retrieval. Note that, for extremely long videos, we offloaded KV-Caches to RAM or disk to manage memory constraints, as in Xiao et al. (2024a).  
+
+External Video KV-Cache Retrieval. Here, we utilize an external CLIP-like model (Radford et al., 2021; Zhai et al., 2023) to retrieve question-relevant video KV-Cache, primarily as a baseline to assess whether retrieval can enhance VideoQA performance, as demonstrated in Section 3. Specifically, a CLIP-like model transformers each video frame into a vector $\mathbf v_{t}=f_{v}(v_{t})\in\mathrm{R}^{D}$ , where $f_{v}$ represents the visual encoder, $D$ denotes the vector dimension. Similarly, the question is encoded as $\bar{\mathbf q_{i}}=f_{t}(q_{i})\in\mathrm{R}^{D}$ , where $f_{t}$ is the text encoder. We then compute the cosine similarity between the embeddings of frame and question:  
+
+$$
+\operatorname{Sim}(\mathbf{v}_{t},\mathbf{q}_{i})=\frac{\mathbf{v}_{t}\cdot\mathbf{q}_{i}}{\tau\left\lvert\lvert\mathbf{v}_{t}\right\rvert\right\rvert\left\lvert\lvert\mathbf{q}_{i}\right\rvert\right\rvert}
+$$  
+
+where $\tau$ is a learnable temperature parameter. This similarity is calculated at the frame level, rather than at the token level. Alternatively, we can group $b$ consecutive frames into blocks by averaging their frame vectors and then compute block-level similarity scores. Finally, the $r$ most relevant video frames or $\lceil r/b\rceil$ video blocks are retrieved. The corresponding video KV-Cache, denoted as $\mathbf{R}$ , is subsequently loaded onto the GPU for question-answering.  
+
+Internal Video KV-Cache Retrieval. Building on recent advancements in handling long sequences with LLMs (Xiao et al., 2024a; Li et al., 2024b; Fountas et al., 2024), we further explore using self-attention layers within Video-LLMs for retrieval. Similar to external retrieval, internal retrieval is still performed at the level of video frames or blocks.  
+
+During video modeling, the average of the key vectors of a frame is computed as its representative frame vector: $\begin{array}{r}{\mathbf{v}_{t}=\frac{1}{N_{f}}\sum_{j=1}^{N_{f}}\mathbf{k}_{j}\in\mathbb{R}^{D^{\prime}}}\end{array}$ , where $N_{f}$ is the number of tokens per frame, and ${\bf k}_{j}$ is the $j$ -th key vector. To reduce computational overhead, we do not differentiate between attention heads and instead concatenate them into a single vector, with $D^{\prime}$ as the resultant dimension. Similarly, the question vector is computed as $\begin{array}{r}{\mathbf q_{i}=\frac{1}{N_{q}}\sum_{k=1}^{N_{q}}\mathbf q_{i,k}\in\mathrm{R}^{D^{\prime}}}\end{array}$ , where $N_{q}$ is the number of tokens in the question, and ${\bf q}_{i,k}$ is its $k$ -th query vector. The similarity computation and video KV-Cache retrieval are identical to that of external retrieval, except that $\tau$ is set to 1.  
+
+Note that, internal retrieval offers several advantages over external retrieval. First, it operates independently within each self-attention layer, allowing different layers to retrieve different video blocks.2 This allows for a broader capture of video context. Additionally, internal retrieval reuses already computed hidden representations and does not introduce extra parameters, which reduces the computational overhead compared to external retrieval.  
+
+Question-answering using Retrieved KV. The retrieved Video KV-Caches serve as the context for video question-answering. Formally, the attention calculation is formulated as:  
+
+$$
+\mathbf{O}=\operatorname{Attn}\left(\mathbf{W}_{\mathbf{Q}}\mathbf{X},[\mathbf{R}_{k},\mathbf{W}_{\mathbf{K}}\mathbf{X}],[\mathbf{R}_{v},\mathbf{W}_{\mathbf{V}}\mathbf{X}]\right),
+$$  
+
+where $\mathbf{X}$ represents either the question tokens or the current token being decoded, and $\mathbf{R}_{k}$ and ${\bf R}_{v}$ are the key and value vectors from the context, which includes the retrieved video, question, and previously generated tokens.  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+3.1 BENCHMARK AND METRICS  
+
+$\mathbf{M}\mathbf{L}\mathbf{V}\mathbf{U}_{\mathrm{dev-mc}}$ (Zhou et al., 2024a) is the multiple-choice subset of the MLVU-dev benchmark. It focuses on evaluating the long-form video understanding of MLLMs. The question-answer pairs are manually labeled and can be divided into 3 groups: single-detail, multi-detail, and holistic. The evaluation metric is Accuracy.  
+
+$\mathbf{Q}\mathbf{A}\mathbf{EGO}\mathbf{4}\mathbf{D}_{\mathrm{test-mc}}$ (Di & Xie, 2024) is the multiple-choice subset of the QAEGO4D-test benchmark, focusing on question-answering in long egocentric videos. The evaluation metric is Accuracy.  
+
+EgoSchema (Mangalam et al., 2023) is a diagnostic benchmark for long VideoQA, featuring over 5000 multiple-choice questions and long temporal certificate length. It challenges AI models with long-term understanding, as current state-ofthe-art models achieve significantly lower accuracy compared to human performance.  
+
+Table 1: Summary of the evaluation benchmarks. MC stands for multiple-choice VideoQA, while OE refers to open-ended VideoQA.   
+
+![](images/bcf5970fbb24223b18c8c61d2e58fe0ecfb646b03543579d668a15b9d6838805.jpg)  
+
+ActivityNet-QA (Yu et al., 2019) encompasses human-annotated QA pairs on 5,800 videos derived from the ActivityNet (Caba Heilbron et al., 2015) dataset. This benchmark is designed to assess the capabilities of VideoQA models in long-term spatiotemporal reasoning. Our evaluation methodology aligns with that of Video-ChatGPT (Maaz et al., 2024), employing GPT-3.5-turbo to judge the accuracy of the open-ended VideoQA responses.  
+
+RVS-Ego and RVS-Movie (Zhang et al., 2024a) are Streaming VideoQA benchmarks, constructed using 10 long videos from the Ego4D dataset (Grauman et al., 2022) and 22 long videos from the MovieNet dataset (Huang et al., 2020), respectively. These benchmarks feature open-ended questions paired with timestamps, which are initially generated by GPT-4V (OpenAI, 2023b) and GPT-4 (OpenAI, 2023a), and subsequently refined through manual filtering.  
+
+3.2 IMPLEMENTATION DETAILS  
+
+We evaluate our approach by integrating it into LLaVA-OV-0.5B and LLaVA-OV-7B (Li et al., 2024a), chosen for their simplicity and strong performance.  
+
+All experiments are conducted on NVIDIA H800 GPUs with BF16 precision. For video modeling, we process the video stream at 0.5 FPS, in line with GPT-4o’s testing on MLVU (Zhou et al., 2024a). The local window size is set to 15K. For external video KV-Cache retrieval, we use $\mathrm{S\,i}\,\mathrm{gLIP-SO4}\,0\,\mathrm{0M}$ (Zhai et al., 2023) as the retriever. For internal KV-Cache retrieval, we set the block size (b) to 1 and the number of retrieved frames $(r)$ to 64 by default, with further hyperparameter variations explored in Section 3.3.  
+
+Unless otherwise specified, ReKV refers to the use of internal video KV-Cache retrieval.  
+
+
+
+\section{3.3 ABLATIONS  }
+
+
+In this section, we conduct ablation studies on the effectiveness of in-context retrieval, number of retrieved frames, and the block size.  
+
+Effectiveness of In-context Retrieval. The experiments on QAEGO $4\mathrm{D}_{\mathrm{test-mc}}$ , as presented in Table 2, demonstrate the effects of various retrieval methods on VideoQA accuracy and recall. A strong positive correlation is evident: higher recall generally leads to better VideoQA performance. Uniform Sampling, which sparsely selects frames from the video, achieves the lowest recall and, correspondingly, the poorest VideoQA accuracy. In contrast, Oracle Retrieval, with perfect recall, delivers the highest VideoQA accuracy, far surpassing Uniform Sampling. While External and Internal Retrieval do not match Oracle-level precision, both outperform Uniform Sampling, with Internal Retrieval excelling due to its higher recall. Notably, the larger model (LLaVA-OV-7B) achieves superior performance with Internal Retrieval, benefiting from its stronger reasoning capabilities.  
+
+Table 2: Ablation study on QAEGO4Dtest-mc   
+
+![](images/349f3553e4c4cc9658990c83e2cb83420dac3009ddad7d4466a357d013505be2.jpg)  
+
+The MLVU benchmark (Zhou et al., 2024a) encompasses three types of VideoQA tasks: Single Detail requires identifying a single critical plot within a long video, Multi Detail necessitates the integration of multiple plots, and Holistic demands a comprehensive understanding of the entire video. This makes MLVU an ideal platform for evaluating our in-context retrieval method. As shown in Table 3, both External and Internal Retrieval enhance the overall VideoQA accuracy over the Uniform Sampling baseline. The enhancements are most pronounced in Single Detail tasks, demonstrating that ReKV effectively retrieves question-relevant video context. Furthermore, Internal Retrieval significantly outperforms External Retrieval in Holistic tasks, likely due to its ability to capture broader context and leverage the Video-LLM’s video modeling capabilities, as discussed in Section 2.2.  
+
+Number of Retrieved Frames. We fix the block size $b=1$ ) and evaluate the impact of varying the numbers of retrieved frames $\mathit{\check{r}}\in\{8,16,32,48,64,80\}\rangle$ on the QAEGO4D and MLVU benchmarks. As illustrated in Figure 3(a), increasing the number of retrieved frames generally improves VideoQA accuracy, as it implies capturing more relevant visual context. However, on MLVU, this improvement plateaus as more frames are retrieved since the additional irrelevant information hinders the subsequent question-answering process. Additionally, retrieving more frames increases the computational overhead of the question-answering stage, further slowing down inference.  
+
+![](images/78184d695d07bdb4d333e55f1457dee63727bb7b5ae625f153650cc8ae706a01.jpg)  
+Figure 3: Ablation study of retrieval hyperparameters: (a) number of retrieved frames and (b) number of frames per retrieval block. Experiments are conducted with LLaVA-OV-7B.  
+
+Table 3: Ablation study on $\mathbf{M}\mathbf{L}\mathbf{V}\mathbf{U_{dev-mc}}$ . The experiments are based on LLaVA-OV-7B.   
+
+![](images/d486a4d4a5c7952b20e5e916d9c261b3cb1fa88aa85f61ab692227468a5c9d46.jpg)  
+
+Retrieval Block Size. When processing video streams, we group $b$ consecutive frames into blocks for block-level retrieval. For this experiment, we fix the number of retrieved frames at $r=64$ and evaluate different block sizes $(b\in{1,2,4,8,16}$ ). With a fixed $r$ , larger block sizes result in fewer, more concentrated retrieved blocks. Figure 3(b) shows that increasing block size negatively affects accuracy on MLVU, while performance on QAEGO4D remains relatively stable. This suggests that MLVU tasks benefit from retrieving more dispersed visual cues, aligning with its design of multidetail and holistic tasks (Zhou et al., 2024a). In contrast, QAEGO4D primarily relies on a single relevant clip per question (Di & Xie, 2024).  
+
+3.4 OFFLINE VIDEO QUESTION-ANSWERING  
+
+Streaming video understanding is a relatively under-explored area, with limited StreamingVQA benchmarks available Zhang et al. (2024a). As discussed in Section 2.1, OfflineVQA can be considered as a special case of StreamingVQA. Thus, we first evaluate our method in the offline setting using four widely adopted long-form VideoQA benchmarks, comparing our results against state-ofthe-art VideoQA methods. A summary of these benchmarks can be found in Table 1.  
+
+As shown in Table 4, our proposed ReKV always enhances the performance of LLaVA-OV-0.5B and LLaVA-OV-7B without additional training. Notably, LLaVA-OV-7B+ReKV outperforms two memory-based StreamingVQA models (VideoStreaming (Qian et al., 2024) and FlashVStream (Zhang et al., 2024a)) by a large margin. While the base model already demonstrates strong performance, and we do not claim credit for this achievement, our method can integrate seamlessly with Video-LLMs, benefiting from their ongoing advancements.  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+Table 4: Offline video question-answering on four long-form benchmarks. “Acc.” denotes accuracy, and “Score” is the open-ended answer rating by gpt-3.5-turbo on a scale from 1 to 5.   
+
+![](images/bb432119dac413b878a71d0f8a3425c535c847cd36dd3bdef2344be332585a58.jpg)  
+
+Table 5: StreamingVQA benchmark results. All methods are tested under identical conditions. “Video Enc.” is frames encoded per second. “Latency” is measured from question input to response completion. “GPU” indicates peak GPU memory usage, and “KV-Cache” refers to the video KV-Cache size offloaded per hour.   
+
+![](images/8368a2ff7be90a0d48071e60fa62b27961f4fcd404028a97d0958060363d2d4e.jpg)  
+
+3.5 STREAMING VIDEO QUESTION-ANSWERING  
+
+We then evaluate our method on the streaming setting using the RVS-Ego and RVS-Movie benchmarks. During video stream modeling, questions are input immediately after their annotated end timestamps and answered based on the preceding video content.  
+
+Question-answering Performance. Table 5 presents the StreamingVQA performance. Both external and internal retrieval methods significantly outperform the uniform sampling baseline. Additionally, our approach enables LLaVA-OV-7B to surpass Flash-VStream Zhang et al. (2024a), demonstrating ReKV’s effectiveness for the StreamingVQA. Besides, internal retrieval consistently outperforms external retrieval, as discussed in Section 2.2.  
+
+Running Speed and Memory Usage. We also examine the running speed and memory usage under controlled conditions. Specifically, a 1-hour, 1080P video from RVS-Ego with 100 scattered questions is used. Each question is padded to 64 tokens, and the generated answers are fixed at 128 tokens in length. The video frames are pre-extracted at 0.5 FPS (1,800 frames in total) and streamed to the Video-LLM frame by frame.  
+
+![](images/375b622142a96ed8372394e6e0013eb2142e0208a37eb37f7555db13d941f445.jpg)  
+Figure 4: StreamingVQA qualitative examples. The example is drawn from the QAEGO4D benchmark. The video stream is processed frame by frame. $\bullet$ and $\bullet$ mark the timestamps at which questions are posed. □and $\boxed{\begin{array}{r l}\end{array}}$ indicate the relevant video contexts that  s uppor t  answering these questions.  
+
+As illustrated in Table 5, both retrieval methods maintain high video encoding speeds, with LLaVA-OV-7B achieving 11 FPS and LLaVA-OV-0.5B achieving 17 FPS. Moreover, KVCache offloading remains manageable, with LLaVA-OV-7B at 18.8GB/h and LLaVA-OV-0.5B at 4. External retrieval, however, introduces higher latency and GPU memory usage due to additional computations in the external retriever, whereas internal retrieval significantly reduces both. Figure 1 has also demonstrated that latency and GPU memory usage remain stable as more frames are processed. Flash-VStream also shows good efficiency. However, it only maintains a relatively small memory footprint (681 tokens) (Zhang et al., 2024a), leading to potential information loss when dealing with extremely long videos.  
+
+Qualitative Examples. Figure 4 presents an example of streaming video question-answering. Our approach continuously processes video streams while responding to questions posed at different timestamps. To improve efficiency, it stores and retrieves relevant video KV-Caches as contextual information for answering these questions.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+LLMs for Video Understanding. In recent years, there has been a surge of interest in leveraging Large Language Models (LLMs) for video understanding, leading to the development of several innovative approaches (Maaz et al., 2024; Zhang et al., 2024c; Li et al., 2024a). These models typically use a Vision Encoder to extract video features, followed by a mapping step with Linear Projection, MLP, or Q-Former (Li et al., 2023). The mapped features are combined with textual data and fed into large language models (LLMs) to generate a text output. These models have relatively simple architectures, requiring less training data and computational resources, yet they achieve strong performance on short video understanding benchmarks (Xu et al., 2017; Xiao et al., 2021; Li et al., 2024c). However, they employ sparse sampling or token compression techniques to reduce the number of tokens, which can result in significant information loss when dealing with longer or more content-rich videos. As a result, they are not well-suited for long video understanding or streaming video understanding.  
+
+Long Video Understanding. A central challenge in long video understanding is effectively compressing the information from lengthy videos. Many approaches use language as a bridge, condensing videos into dense captions (Zhang et al., 2023; Islam et al., 2024; Zhou et al., 2024b). While this achieves good results in some cases, compressing video content into text often leads to the loss of crucial visual details.  
+
+Another line of research focuses on compressing long videos into a memory bank (Wu et al., 2019; 2022; Wang et al., 2023), This approach has been integrated into Video-LLMs for streaming video understanding, as shown in works like VideoStreaming (Qian et al., 2024) and FlashVStream (Zhang et al., 2024a). These methods dynamically update the memory during video processing and utilize it for downstream tasks. Despite their innovation, a major limitation of these methods is their failure to account for video length and information density, especially when using a fixed memory size. For example, Flash-VStream compresses both 10-second clips and hour-long videos into the same 681 tokens. Furthermore, these methods lack interpretability, making it difficult to determine how much information is being compressed into the memory or whether relevant video information is being accurately retrieved during downstream tasks.  
+
+In pursuit of greater interpretability in long video understanding, methods such as GroundVQA (Di & Xie, 2024) and GeLM (Chen et al., 2024) advocate for localizing relevant video clips while responding to user queries. Drawing inspiration from these, this work refrains from excessively condensing video information. By harnessing the causal capabilities of Video-LLMs, it preserves the entire Video KV-Cache, allowing for the retrieval of relevant information when required. This strategy effectively mitigates the substantial loss of video content while improving interpretability.  
+
+Long Context Handling for LLMs. Handling long text sequences in LLMs has been a major challenge due to high computational and memory costs, leading to training constraints on shorter sequences. Techniques like StreamingLLM (Xiao et al., 2024b) and LM-Infinite (Han et al., 2023) use sliding window attention to process long sequences incrementally, but discard distant tokens, limiting the model’s ability to capture long-range dependencies. Recent approaches (Xiao et al., 2024a; Li et al., 2024b; Fountas et al., 2024) address this by storing and retrieving previously computed KV-Caches, enabling better recall of distant contexts.  
+
+Retrieval-Augmented Generation. Retrieval-augmented generation (RAG) combines retrieval mechanisms with generative models to enhance performance across various NLP tasks by incorporating external knowledge Guu et al. (2020); Lewis et al. (2020); Borgeaud et al. (2022) and improving performance in vision-language tasks Xu et al. (2024). In-context retrieval, recently proposed for handling long inputs Ram et al. (2023), retrieves information from the input document itself rather than an external knowledge base. In-context KV-Cache retrieval further improves efficiency by pre-encoding long documents, avoiding redundant encodings, and leveraging the LLM’s own retrieval capabilities for faster, more effective performance.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In conclusion, this paper introduces ReKV, a training-free approach designed to enhance the efficiency of Video Large Language Models (Video-LLMs) for streaming video question-answering (StreamingVQA). Unlike conventional video question-answering (VideoQA) systems that must process entire videos before answering, ReKV enables rapid, real-time responses. By employing a sliding-window attention mechanism, it ensures that the model only considers a subset of previous frames while encoding the video stream, significantly cutting down on computational demands. To retain key video context, we developed an in-context KV-Cache retrieval method that efficiently stores and reloads key-value vectors that relevant for each query. This targeted retrieval strategy, combined with the ability to perform video modeling and question-answering on separate processes and GPUs, results in a highly efficient streaming VideoQA system. Extensive experiments show that ReKV not only surpasses existing VideoQA models in performance but also enhances their practicality for real-world streaming applications.  
+
+
+
+\section{6 LIMITATIONS AND FUTURE WORK  }
+
+
+While ReKV improves the accuracy and efficiency of Video-LLMs in the StreamingVQA task, it still has several limitations that deserves future investigation: First, although the KV-Cache offloading to RAM or disk is manageable, as shown in Table 5, handling extremely long video streams, such as those in surveillance, may lead to an unsustainable increase in cache size. This issue can be mitigated by integrating techniques such as quantization, token pruning, and compression. Second, the use of a constant block size for grouping consecutive frames during retrieval can disrupt video continuity. A more refined solution would involve segmenting videos into semantically coherent blocks. Third, our method retrieves a fixed number of frames. Future work could explore dynamic retrieval strategies that adjust the number of frames based on video context and query requirements. Finally, StreamingVQA remains an under-explored task with few available benchmarks. Developing high-quality benchmarks with precise temporal annotations is crucial for advancing future research.  
+
+
+

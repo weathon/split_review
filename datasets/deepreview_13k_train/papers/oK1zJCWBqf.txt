@@ -1,0 +1,395 @@
+\title{Soft Preference Optimization:  Aligning Language Models to Expert Distributions}
+
+\begin{abstract}
+We propose Soft Preference Optimization (SPO), a method for aligning generative models, such as Large Language Models (LLMs), with human preferences, without the need for a reward model. SPO optimizes model outputs directly over a preference dataset through a natural loss function that integrates preference loss with a regularization term across the model's entire output distribution rather than limiting it to the preference dataset. Although SPO does not require the assumption of an existing underlying reward model, we demonstrate that, under the Bradley-Terry (BT) model assumption, it converges to a softmax of scaled rewards, with the distribution's ``softness" adjustable via the softmax exponent, an algorithm parameter. We showcase  SPO's methodology, its theoretical foundation, and its comparative advantages in simplicity and alignment precision.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The alignment problem focuses on adjusting a generative model (e.g., Large Language Models (LLMs)) to align its outputs  with human preferences and ethical standards or to tailor the model for specific tasks; and is especially important after supervised fine-tuning on datasets with mixed-quality samples.  
+A widely embraced approach involves refining these models based on expert (i.e., human) preferences, typically expert-provided comparisons of pairs of model-generated outputs \citep{christiano2017deep}. Given a \emph{preference dataset} $\D$ and a pre-trained model $\piref$, preference alignment seeks to train a new model, $\pi_\theta$, whose outputs are better aligned with the preference in $\D$ \citep{radford2018improving,ramachandran2016unsupervised}. A notable advancement in this field has been the application of Reinforcement Learning from Human Feedback (RLHF), which involves training a reward-model based of actions preferred by humans and then optimizing  $\pi_\theta$ to maximize these learned rewards while ensuring closeness to the initial model behaviors \citep{ouyang2022training}. Despite the effectiveness of RLHF in addressing the alignment problem,  RLHF involves a relatively complex pipeline, susceptible to propagation of reward-model's biases over to the policy optimization.
+
+Recently, several studies have introduced methods for the direct optimization of preferences, including Direct Preference Optimization (DPO) among others \citep{rafailov2023direct,amini2024direct,chowdhury2024provably,xu2024contrastive,yin2024relative,xu2023some,tunstall2023zephyr}. These approaches eliminate the need for a separate reward model training phase, instead adjusting the model directly using preference data, and often outperform  RLHF-based approaches. These reward-model-free methods enjoy advantages over RLHF-based approaches, such as simplified pipelines, reduced computational complexity, and avoidance of the bias transfer from the reward model to policy optimization. Indeed, the rationale for incorporating an additional component, the reward model, into a supervised learning context with a supervised dataset, is debatable.
+
+In this work, we propose a simple and effective reward-model-free alignment method, termed \emph{Soft Preference Optimization} (SPO). SPO seeks to align the model's \emph{preference estimates} (detailed in Section~\ref{sec:SPO}) with expert preferences $\D$, through minimizing a loss function of the form
+\begin{equation}\label{eq:separable loss intro}
+\textrm{AlignmentLoss}(\pi_\theta, \piref, \D) = \textrm{PreferenceLoss}(\pi_\theta, \D) + \textrm{Regularizer}(\pi_\theta, \piref),
+\end{equation}
+where the Regularizer may be chosen as the KL divergence. We discuss natural choices for  the model's preference estimates and the preference loss function in Sections~\ref{sec:SPO} and~\ref{sec:reweight}.
+Unlike RLHF and DPO, the development of SPO does not rely on assumptions regarding the existence of underlying rewards, such as the Bradley-Terry (BT) model \citep{bradley1952rank}. Nevertheless, we demonstrate that if the BT model is applicable and given an asymptotically large preference dataset, SPO is theoretically guaranteed to converge to a softmax of the rewards, which inspires the designation ``\emph{Soft} Preference Optimization''. Unlike DPO, which tends toward a deterministic model even with an extremely large dataset if the regularization coefficient is nearly zero \citep{azar2023general}, SPO allows for the adjustment of the softmax's exponent through an input parameter, thereby offering flexibility in modulating the ``softness" of the output distribution. 
+
+SPO has two main distinctions from its successor reward-model-free alignment methods. The first distinction involves the choice of a preference loss that aligns model's preference estimates with expert's preferences, resulting in a favorable fixed point as discussed in the previous paragraph. 
+The other distinction of SPO with DPO and similar algorithms lies in the application of regularization. DPO restricts regularization to the preference dataset, which is counter-intuitive since the dataset already provides specific data points for the model to fit; thus, additional regularization within this limited scope is unnecessary. More critically, since the preference dataset represents a tiny subset of the potential outputs of the model, focusing regularization solely within this subset can lead to undesirable, extensive shift in the model's distribution outside of the dataset, resulting in a non-coherent behaviours.
+Acknowledging this limitation, SPO applies regularization across the entire output distribution of the model, not just within the confines of the preference dataset. 
+
+
+
+\section{Background}
+
+\label{sec:background}
+Consider a finite context (or query) space $\X$  and a finite action (or response) space $\Y$. For a given query $x \in \X$, a behavior policy (such as a pre-trained model) is employed to generate responses $y_1, y_2 \in \Y$. These responses are subsequently evaluated by expert raters (e.g., humans) to determine which of $y_1$ or $y_2$ constitutes a more appropriate response to the query $x$. We adopt the notation $y_1 \succ y_2$ to denote that $y_1$ is preferred over $y_2$ in a specific context. The true expert preferences are typically represented by a probability, $p^*(y_1 \succ y_2 | x)$, reflecting the inherent randomness due to the variable nature of the experts, who may be a group of humans with slightly differing preferences. A preference dataset, $\D$, is compiled by collecting expert preferences for multiple $(x; y_1, y_2)$ tuples. In detail, $\D$ comprises tuples $(x; y_w, y_l)$, where $y_w \succ y_l$ indicates the preferred (winner) and less preferred (loser) responses based on expert evaluations.
+\textbf{RLHF} comprises two main phases: reward modeling and reinforcement learning (RL) fine-tuning. The initial phase, reward modeling, operates under the assumption that there exist latent rewards $r(y|x)$ that form the basis of expert preferences. This phase aims to develop a model capable of closely approximating these underlying rewards. A widely accepted method for defining these latent rewards is through the Bradley-Terry (BT) model \citep{bradley1952rank}, alongside the Plackett-Luce (PL) ranking models \citep{luce2005individual,plackett1975analysis}. The BT model posits that the distribution of expert preferences,  $p^*$, is characterized by 
+\begin{equation} \label{eq:BT pref}
+	\prbt(y_1\succ y_2|x) \defeq \sigma\big(r(y_1|x)-r(y_2|x)\big) = \frac{\exp\big(r(y_1|x)\big)}{\exp\big(r(y_1|x)\big)+\exp\big(r(y_2|x)\big)},
+\end{equation}
+where $\sigma(\cdot)$ represents the sigmoid function. 
+Subsequently, the reward model $r_\phi(y|x)$ is trained to minimize the negative log-likelihood loss, $-\mathbb{E}_{(x;y_w,y_l)\sim\D}\big[\sigma\big(r(y_w|x)-r(y_l|x)\big)\big]$. The PL model generalizes the BT model for data involving rankings,  modeling the expert distribution as
+\begin{equation} \label{eq:PL}
+	\prpl(y_1\succ \cdots\succ y_n\,|\,x) \,\defeq\, \prod_{k=1}^{n-1}\frac{\exp\big(r(y_k|x)\big)}{\sum_{i=k}^{n}\exp\big(r(y_i|x)\big)},
+\end{equation}
+for all $(x;y_1,\ldots,y_n)\in \X\times\Y^n$.
+
+The RL fine-tuning phase aims to train a model, $\pi_\theta$, to maximize a loss function of the form
+\begin{equation}
+	\loss_{\mathrm{RLHF}}\big(\pi_\theta, \piref, r_\phi \big) = - \Exp_{x \sim \D, y \sim \pi_\theta(\cdot|x)}\big[r_\phi(y|x)\big] + \beta \dkl\big(\pi_\theta \parallel \piref\big),
+\end{equation}
+where $\beta$ is a non-negative constant, $r_{\phi}$ is the trained reward function, and $\pi_{\mathrm{ref}}$ is a reference policy often acquired through supervised fine-tuning on high-quality data and  is typically identical to the behavior policy. The $D_{KL}$ term in the loss function acts as a regularizer, ensuring the model does not significantly deviate from the distribution where the reward model is most accurate.  RL fine-tuning employs reinforcement learning algorithms, like PPO \citep{schulman2017proximal}, to optimize the above loss function \citep{ouyang2022training}, introducing significant complexity into the RLHF pipeline. Additionally, the RLHF framework allows for the propagation of any generalization errors from the reward model to the RL fine-tuned model. The DPO framework \citep{rafailov2023direct} addresses these challenges by simplifying the problem into a single-phase supervised learning approach, thus avoiding the pitfalls associated with separate reward modeling and RL fine-tuning phases.
+
+\textbf{DPO} circumvents the need for a reward model by directly optimizing the following loss function:
+\begin{equation}\label{eq:DPO loss}
+	\loss_{\mathrm{DPO}}\big(\pi_\theta,\piref, \D \big) = -\Exp\left[  \log\,\sigma\left(\beta \log\frac{\pi_\theta(y_w|x)}{\piref(y_w|x)} - \beta \log\frac{\pi_\theta(y_l|x)}{\piref(y_l|x)}\right) \right].
+\end{equation}
+It was demonstrated in \citep{rafailov2023direct}  that $\loss_{\mathrm{DPO}}$ has the same minimizer as $\loss_{\mathrm{RLHF}}$, under the conditions of the BT model, an asymptotically large dataset, and a sufficiently large model capacity (i.e., a \emph{tabular model} that encodes the probability of $\pi_\theta(y|x)$ for all $x \in \X$ and $y \in \Y$ into a vector). The DPO framework was further extended in \citep{azar2023general}, aiming to directly maximize the \emph{win-rate} of $\pi_\theta$ against $\piref$.
+
+
+
+\section{SPO - Basic}
+
+\label{sec:SPO}
+Following \eqref{eq:separable loss intro}, we consider a loss function of the form:
+\begin{equation}\label{eq:alignment loss}
+	\losspo(\pi_\theta, \piref,\dataset)\,=\, \losspref (\pi_\theta, \dataset) \,+\, \reg (\pi_\theta, \piref),
+\end{equation}
+where $\losspref$ and $\reg$ stand for \emph{preference loss}  and \emph{regularizer}, respectively. We proceed to further detail these components.
+
+The regularization term, $\reg (\pi_\theta, \piref)$, aims to ensure that $\pi_{\theta}$ avoids producing outputs that are highly improbable under $\piref$. A common and effective choice 
+is the KL divergence, $\dkl(\pi_\theta\parallel\piref)$, although other regularization options are viable \citep{zhao2022calibrating}. Importantly, $\reg(\pi_\theta, \piref)$  does not incorporate the preference dataset $\D$ as an input. This is because within $\D$, the model aims to fit to the target preferences, making additional regularization within $\D$ unnecessary. In fact, the regularization term primarily aims to regularize $\pi_\theta$ outside $\D$. This approach diverges from the DPO and several other existing loss functions (detailed in Section~\ref{sec:literature}), which only consider the divergence of $\pi_\theta$ from $\piref$ within the preference dataset.
+We now turn our attention to the preference loss. Given a query $x$, let $\pi_\theta(y|x)$ denote the probability that model $\pi_\theta$ generates output $y$.  When presented with a query $x$ and two responses, $y_1$ and $y_2$, we define the probability that $\pi_\theta$ prefers $y_1$ over $y_2$ as
+\begin{equation}\label{eq:pref prob}
+	\begin{split}
+		\mathcal{P}_{\pi_\theta}(y_1\succ y_2\mid x) &\defeq \prob \big(\textrm{output of }\pi_\theta(\cdot|x) \textrm{ is  } y_1\,\,\big|\,\, \textrm{output of }\pi_\theta(\cdot|x) \textrm{ is in } \{y_1,y_2\}\big) 
+		\\&= \frac{\pi_\theta(y_1| x)}{\pi_\theta(y_1| x)+\pi_\theta(y_2| x)},
+	\end{split}
+\end{equation}
+where the last equality follows from the definition of conditional probability. 
+We can then employ log-likelihood loss  to measure the alignment of preference-probabilities’  with the preference-dataset labels,
+\begin{equation}\label{eq:cross entropy loss}
+	 -\Exp_{(x;y_w,y_l)\sim\D}\big[\log\,	\mathcal{P}_{\pi_\theta}(y_w\succ y_l\mid x) \big]. 
+\end{equation}
+We consider a preference loss $\losspref^{\alpha} (\pi_\theta, \dataset)$ that extends the  above cross entropy loss  by employing arbitrary  exponents for $\pi_\theta$.
+Specifically, we let for any $\alpha>0$,
+\begin{equation}\label{eq:pref loss general}
+	\losspref^{\alpha}(\pi_\theta,\D) \defeq -\frac{1}{\alpha}\Exp_{(x;y_w,y_l)\sim\D}\left[ \log\,	 \frac{\pi_\theta(y_w\mid x)^\alpha}{\pi_\theta(y_w\mid x)^\alpha+\pi_\theta(y_l\mid x)^\alpha} \right],
+\end{equation}
+and for $\alpha=0$,
+\begin{equation}\label{eq:pref loss 0}
+	\losspref^{0}(\pi_\theta,\D) \defeq -\frac{1}{2}\Exp_{(x;y_w,y_l)\sim\D}\left[\log\,	 \frac{\pi_\theta(y_w\mid x)}{\pi_\theta(y_l\mid x)} \right].
+\end{equation} 
+The $\losspref^{\alpha}$ takes the specific form \eqref{eq:pref loss 0} because the gradient of \eqref{eq:pref loss general}  approaches the gradient of \eqref{eq:pref loss 0}  when $\alpha \to 0$, as can be easily verified from the following  closed form expression for any $\alpha\ge0$, 
+\begin{equation*}\label{eq:grad}
+	-\nabla_\theta \losspref^{\alpha}(\pi_\theta,\D) =  \Exp_{(x;y_w,y_l)\sim\D}\left[ \frac{\pi_\theta(y_l| x)^\alpha}{\pi_\theta(y_w | x)^\alpha+\pi_\theta(y_l | x)^\alpha} 
+	\big(\nabla_\theta \log	 \pi_\theta(y_w | x)-\nabla_\theta\log   \pi_\theta(y_l | x)\big) \right].
+\end{equation*}
+Here, $\pi_\theta(y_l | x)^\alpha/ \big(\pi_\theta(y_w | x)^\alpha+\pi_\theta(y_l | x)^\alpha\big)$ serves as a measure of the model's error in preferring $y_w$ over $y_l$. Consequently, the magnitude of this preference error proportionally scales the adjustment  $\nabla_\theta \log\,	 \pi_\theta(y_w| x)-\nabla_\theta\log \,  \pi_\theta(y_l| x)$, leading to larger updates when the  error is large.
+
+The loss function $\losspref^{\alpha}(\pi_\theta,\D)$ contains the cross-entropy loss in \eqref{eq:cross entropy loss} as a special case when $\alpha=1$.
+The $\alpha$ parameter allows for  tailoring  the model to exhibit different entropies; models minimized under $\losspref^{\alpha}$ will display higher entropy for larger $\alpha$ values, gradually moving towards a deterministic model akin to DPO as $\alpha$ approaches zero; as  established in the next theorem.
+
+Although the SPO framework does not rely on existence of underlying reward functions, and in particular the BT assumption, it is insightful to study the preference loss $\losspref^{\alpha}$ under the conditions where the BT model assumption is valid. Intuitively, for a \emph{BT expert model}, defined as $\pi(y|x) = \exp(r(y|x))/Z(x)$ with $Z(x)$ being the partition function, the preference probability in \eqref{eq:pref prob} would be identical to the BT preference formula \eqref{eq:BT pref}. 
+In the next theorem, we further study the landscape of $\losspref^{\alpha}$ under the BT model assumption. 
+To eliminate  local minima and saddle points that arise from nonlinear model spaces such as neural networks,  in the theorems we consider a \emph{tabular model} that encodes the probability of $\pi_\theta(y|x)$ for all $x \in \X$ and $y \in \Y$ into a large vector.
+\begin{theorem}\label{th:convergence}
+	Suppose that the BT model holds with rewards  $r(\cdot|x)$, and fix any probability distribution $\dataset$ over $\X\times\Y\times\Y$ that has full support\footnote{Full support in this context means that the probability distribution assigns a non-zero sampling probability to all $(x;y_w,y_l)\in\X\times\Y\times\Y$.} and is consistent with the BT assumption.\footnote{Consistency with the BT holds if the relative probability of outcomes is determined by a logistic function of the reward differences. More specifically, $\D(x;y_1,y_2)/\D(x;y_2,y_1)=\prbt(y_1\succ y_2|x)/\prbt(y_2\succ y_1|x)=\exp\big(r(y_1\mid x)-r(y_2\mid x)\big)$, for all $(x;y_1,y_2) \in \X\times\Y\times\Y$, where $\prbt$ is defined in \eqref{eq:BT pref} and $r(\cdot|\cdot)$ is the reward function in the BT model.} Then, for any  $\alpha \geq 0$, in the tabular model, $\losspref^{\alpha}$ has a unique minimizer $\softmax(r(\cdot | x)/\alpha)$ (reducing to $\operatorname{argmax} r(\cdot | x)$ for $\alpha=0$).
+    Furthermore, this minimizer is globally absorbing, and the landscape of $\losspref^{\alpha}$ contains no other first-order stationary point (i.e., no other local minima, local maxima, or saddle points).
+\end{theorem}
+
+According to Theorem~\ref{th:convergence},  minimizer of $\losspref^{\alpha}$  is the softmax of BT rewards divided by $\alpha$, where  $\alpha$  controls  the entropy of the final model. Specifically, in the the asymptotically large dataset regime, when $\alpha=1$, the preference loss reaches its minimum at the hypothetical \emph{BT expert model} that generates the preference dataset's labels, defined as $\softmax(r(\cdot | x))$.
+
+
+
+
+
+\section{The General SPO Algorithm}
+
+We further expand the preference loss of  SPO by considering a weighting over different samples, where the weights can depend on $\pi_\theta$. This weighting only affects (improves) the optimization process without changing the fixed point, as we show in this section.
+
+We call a function $\mu:\Y\times\Y\times\X\to\R^+$ \emph{symmetric positive} if $\mu(y_1,y_2\mid x)=\mu(y_2,y_1\mid x)>0$, for all $x\in\X$ and all $y_1,y_2 \in \Y$. Given a  symmetric positive function $\mu$ and an $\alpha\ge0$, we define \emph{weighted} preference loss as
+\begin{equation}\label{eq:pref loss general mu}
+	\losspref^{\alpha,\mu}(\pi_\theta,\D) \defeq -\frac{1}{\alpha}\Exp_{(x;y_w,y_l)\sim\D}\left[\mu(y_w,y_l\mid x)\, \log\,	 \frac{\pi_\theta(y_w\mid x)^\alpha}{\pi_\theta(y_w\mid x)^\alpha+\pi_\theta(y_l\mid x)^\alpha} \right]
+\end{equation}
+if $\alpha>0$, and for $\alpha=0$ we let
+\begin{equation}\label{eq:pref loss 0 mu}
+	\losspref^{0,\mu}(\pi_\theta,\D) \defeq -\frac{1}{2}\Exp_{(x;y_w,y_l)\sim\D}\left[\mu(y_w,y_l\mid x)\,  \log\,	 \frac{\pi_\theta(y_w\mid x)}{\pi_\theta(y_l\mid x)} \right].
+\end{equation}  
+ The weight-function $\mu$  controls the impact of individual samples within the loss calculation. 
+The utility of $\mu$ emerges from the observation that not all sample pairs in the preference dataset hold equivalent significance. For instance, diminishing the weights of dataset samples $(x; y_w, y_l)$ where both responses $y_w$ and $y_l$ are of low quality (e.g., low probability) can be particularly advantageous. This can be achieved for example by setting  \begin{equation}\label{eq:mu sig}
+\mu(y_1,y_2\mid x) = 2\,  \sigma\Big(\big(\pi_\theta(y_1| x)+\pi_\theta(y_2| x)\big)^{\gamma} - \hat{\Exp}_{(y_1',y_2'|x')\sim \D}\left[\big(\pi_\theta(y_1'| x')+\pi_\theta(y_2'| x')\big)^{\gamma}\right]\Big),
+\end{equation}
+where $\sigma$ is the sigmoid function, $\gamma \ge 0$ is a hyperparameter, and  $\hat{\Exp}$ can be obtained  by averaging over the current batch.  The $\mu$ function boils down to uniform weights for $\gamma=0$.
+While  $\mu$ may depend on $\pi_\theta$,  it is important to note that gradient propagation through $\mu$ is not permitted. Specifically,
+the gradient $\nabla_\theta \losspref^{\alpha,\mu}(\pi_\theta,\D)$ is  given by
+\begin{equation}\label{eq:grad rw}
+    -\Exp_{(x;y_w,y_l)\sim\D}\left[\mu(y_w,y_l| x)\, \frac{\pi_\theta(y_l| x)^\alpha}{\pi_\theta(y_w| x)^\alpha+\pi_\theta(y_l| x)^\alpha}\, 
+	\big(\nabla_\theta \log\,	 \pi_\theta(y_w| x)-\nabla_\theta \log \, \pi_\theta(y_l| x)\big) \right].
+\end{equation}
+
+Interestingly, the weight function, $\mu$,  mainly influences the optimization process, not the ultimate fixed point, in the tabular setting and under asymptotically large preference dataset, as we show in the next theorem.
+\begin{theorem}\label{th:convergence mu}
+	Suppose that the conditions of Theorem~\ref{th:convergence}  hold. Then  for any $\alpha \geq 0$ and any symmetric positive function $\mu$,
+    the softmax of the  BT rewards  divided by $\alpha$, $\softmax(r(\cdot | x)/\alpha)$ (reducing to $\operatorname{argmax} r(\cdot | x)$ for $\alpha=0$), is the unique globally absorbing fixed point of the differential equation $\dot{\pib}=\prod\big( -\nabla_\theta \losspref^{\alpha,\mu}(\pi_\theta,\D)\big)$, where $\prod(\cdot)$ stands for projection onto the probability simplex, and the gradient is given in \eqref{eq:grad rw}.
+\end{theorem}
+
+We now proceed to discuss the computation of $\dkl$ regularizer in \eqref{eq:alignment loss}. In order to  estimate $\dkl(\pi_\theta\lVert \piref)=\Exp_{x}\Exp_{y\sim\pi_\theta(\cdot|x)}\big[\log\big(\pi_\theta(y|x)/\piref(y|x)\big)\big]$, we generate online samples from the current model $\pi_\theta$. This is however costly for  sequential models, where sequence generation necessitates sequential calls to the model. To mitigate this problem, we generate a batch of samples from $\pi_\theta$  intermittently, for example once every $T$ steps, and keep using samples from this batch for approximating $\dkl$, until  the next batch of samples is generated. 
+
+Given a batch of samples $(x,y)$ with $y\sim \pi_\theta(\cdot|x)$,
+in order to we obtain a reduced  variance approximation of $\dkl$, we employ the following token-wise $\dkl$ formula:
+\begin{equation}\label{eq:dkl tokenwise}
+\begin{split}
+\widehat{\dkl}(\pi_\theta\parallel \piref) 
+\defeq & \,\,\Exp_{(x;y)\in \textrm{batch}}  \Bigg[
+\sum_{\tau=1}^{\lvert y\rvert}\,
+\dkl\Big( \pi_\theta(Y_\tau  \mid x,y_{:\tau}) \parallel \piref(Y_\tau \mid x,y_{1:\tau})\Big) \Bigg]\\
+=&\,\,
+\Exp_{(x;y)\in \textrm{batch}} \Bigg[
+\sum_{\tau=1}^{\lvert y\rvert}\, 
+\sum_{s\in \mathcal{S}} \pi_\theta(Y_\tau=s\mid x,y_{1:\tau}) \log\frac{\pi_\theta(Y_\tau=s\mid x,y_{1:\tau})}{\piref(Y_\tau=s\mid x,y_{1:\tau})} \Bigg],
+\end{split}
+\end{equation}
+where $\mathcal{S}$ is the set of all possible tokens. Note that $\pi(Y_\tau=s\mid x,y_{1:\tau})$ is readily available from the softmax of the logits, in the network's output. Therefore, the sum in \eqref{eq:dkl tokenwise} can be computed with negligible computational overhead (excluding the initial forward path). Note that $\widehat{\dkl}$ is a biased estimate of the sequence-$\dkl$.
+However, we  empirically found that the benefit of reduced variance brought by the token-wise approximation out-weights the potential negative impact of the resulting bias.
+Moreover, similar to sequence-$\dkl$, the  token-wise $\dkl$ is a proximity measure for $\pi_\theta$ and $\piref$, and  is therefore a conceptually sound choice of regularizer.
+Algorithm~\ref{alg:SPO} summarized the SPO algorithm. 
+\begin{algorithm}[tb]
+	\caption{\quad SPO}
+	\label{alg:SPO}
+	\begin{algorithmic}
+		\FOR{$t=0,1,2,\ldots$}
+		\STATE {\bf if} $t$ is a multiple of $T$ {\bf :}  \qquad {\color{gray} \# once every $T$ iterations }
+		\STATE \qquad Generate a batch $\mathcal{B}$ of online samples $y\sim \pi_\theta(\cdot|x)$, for a set of recently observed $x\sim \D$.
+        \STATE Compute $\losspref^{\alpha,\mu}(\pi_\theta,\D)$ from \eqref{eq:pref loss general mu}, using the $\mu$ function given in \eqref{eq:mu sig}.
+        \STATE Compute token-wise regularizer $\widehat{\dkl}(\pi_\theta\parallel \piref)$ from \eqref{eq:dkl tokenwise}, using the online samples batch $\mathcal{B}$.
+        \STATE Form the SPO loss function	$\losspo(\pi_\theta, \piref,\dataset)= \losspref^{\alpha,\mu}(\pi_\theta,\D)+\widehat{\dkl}(\pi_\theta\parallel \piref)$.
+		\STATE Update the network using an optimizer of interest for the loss function $\losspo(\pi_\theta, \piref,\dataset)$.
+		\ENDFOR
+	\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{SPO for Other Data-Types: Best-of-$n$ Preference and Ranked Preference}
+
+
+In this section, we generalize the SPO algorithm for other types of preference data: best-of-$n$ preference data and ranked-data. We extend the definition of a symmetric function to $n$-responses by calling a function $\mu:\Y^n\times\X\to\R^+$ \emph{symmetric positive} if $\mu(y_{\tau(1)},\ldots,y_{\tau(n)}\mid x)=\mu(y_1,\ldots, y_n\mid x)>0$, for all $x\in\X$ all $y_1,\ldots,y_n \in \Y$, and all permutations $\tau$ of $(1,\ldots,n)$. 
+
+{\bf Best-of-$n$
+preference data:} Given an $n\ge2$, a sample $(x; y_1,  \ldots,y_n; i^*)$ of a best-of-$n$ preference dataset consists of a query $x$ along with $n$ responses $y_1,\ldots,y_n$, one of which (i.e., $y_{i^*}$) is labeled by the expert as the best response.  Given a  symmetric positive function $\mu$ and an $\alpha>0$, we propose the following preference loss for a best-of-$n$ preference dataset $\dataset$:
+\begin{equation}\label{eq:pref loss n}
+	\lossprefn^{\alpha,\mu}(\pi_\theta,\D) \defeq -\frac{1}{\alpha}\Exp_{(x;y_1,\ldots,y_n;i^*)\sim\D}\left[\mu(y_1,\ldots,y_n\mid x)\, \log\,	 \frac{\pi_\theta(y_{i^*}\mid x)^\alpha}{\sum_{i=1}^n\pi_\theta(y_{i}\mid x)^\alpha
+ } \right].
+\end{equation}
+As before, we stop the gradient from propagating through $\mu$, even though $\mu$ may depend on $\pi_\theta$.
+Similar to the case of pairwise preferences, we show in the following theorem that the loss in \eqref{eq:pref loss n} 
+is minimized at the softmax of rewards, if we assume existence of an underlying reward function. 
+In particular, given a reward function $r(\cdot|x):\X\to\Y$ and a distribution $\D$  over $\X\times\Y^n\times\{1,\ldots,n\}$, we say that $\D$ is \emph{consistent with $n$-ary BT model} if for any  $(x;y_1,\ldots,y_n)\in \X\times\Y^n$ and any $i,j\in \{1,\ldots,n\}$, $\D(x;y_1,\ldots,y_n;i)/\D(x;y_1,\ldots,y_n;j)=\exp\big(r(y_i\mid x)-r(y_j\mid x)\big)$. 
+Note that this definition boils down to the definition of consistency with BT model for $n=2$ in Section~\ref{sec:SPO}.
+
+\begin{theorem}\label{th:convergence n}
+    Consider a reward function $r(\cdot\mid x)$ and a probability distribution $\dataset$ with full support over $\X\times\Y^n\times\{1,\ldots,n\}$ that is consistent with the $n$-ary BT model. 
+    Then, for any $\alpha > 0$ and any symmetric positive function $\mu$, in the tabular model,  $\softmax(r(\cdot | x)/\alpha)$ 
+    is the unique globally absorbing fixed point of the differential equation $\dot{\pib}=\prod\big( -\nabla_\theta \lossprefn^{\alpha,\mu}(\pi_\theta,\D)\big)$, where $\prod(\cdot)$ stands for projection onto the probability simplex. 
+\end{theorem}
+
+\medskip
+{\bf Ranked Preference Data:} 
+A ranked preference dataset consists of samples of the form $(x; y_1,  \ldots,y_n; \tau)$, where $x$ is a query, $y_1,\ldots,y_n$ are $n$ responses, and $\tau$ is a permutation representing the relative preference $y_{\tau(1)}\succ\cdots\succ y_{\tau(n)}$  of the expert over these responses. Given an $\alpha>0$ and a sequence of  symmetric positive function $\mu_k:\X\times\Y^k\to\R$ for $k=2,\ldots,n$, we propose the following preference loss for a ranked preference dataset $\dataset$:
+\begin{equation}\label{eq:loss rank}
+	\lossrank^{\alpha,[\mu]}(\pi_\theta,\D) \defeq -\frac{1}{\alpha}\Exp_{(x;y_1,\ldots,y_n;\tau)\sim\D}\left[ \sum_{k=1}^{n-1}\mu_k(y_{\tau(k)},\ldots,y_{\tau(n)}| x)\,\log\,	 \frac{\pi_\theta(y_{\tau(k)}\,|\, x)^\alpha}{\sum_{j=k}^n\pi_\theta(y_{\tau(j)}\,|\, x)^\alpha
+ } \right].
+\end{equation}
+We can control the importance weight of responses in different ranks through appropriate adjustment of weight functions $\mu^1,\ldots,\mu^{n-1}$. 
+For example, by setting $\mu_k=0$ for $k=2,\ldots,n-1$, $\lossrank^{\alpha,[\mu]}$ boils down to $\lossprefn^{\alpha,\mu^1}$.
+Here again, the gradient is not allowed to propagate through $\mu^1,\ldots,\mu^{n-1}$, even though these functions may depend on $\pi_\theta$. 
+The following theorem shows that, assuming existence of underlying rewards under the PL model \eqref{eq:PL}, the softmax of these rewards is the unique minimizer of
+$\lossrank^{\alpha,\mu}$.
+
+\begin{theorem}\label{th:convergence ranking}
+Suppose that the PL model holds with rewards  $r(\cdot|x)$, and  a probability distribution $\dataset$ with full support over $\X\times\Y^n\times\{\mathrm{Identity\,permutation}\}$ that is consistent with the PL model.\footnote{Consistency with the PL model holds if $\D(x;y_1,\ldots,y_n;\tau)/\D(x;y_1,\ldots,y_n;\tau')=\prpl(y_{\tau(1)}\succ\cdots\succ y_{\tau(n)}|x)/\prpl(y_{\tau'(1)}\succ\cdots\succ y_{\tau'(n)}|x)$, for all $(x;y_1,\ldots,y_n) \in \X\times\Y^n$ and all permutations $\tau$ and $\tau'$, where $\prpl$ is defined in \eqref{eq:PL}.} 
+    Then, for any $\alpha > 0$ and any sequence $[\mu]=\mu^1,\ldots,\mu^{n-1}$ of symmetric positive functions, in the tabular model, $\softmax(r(\cdot | x)/\alpha)$ 
+    is the unique globally absorbing fixed point of the differential equation $\dot{\pib}=\prod\big( -\nabla_\theta \lossrank^{\alpha,[\mu]}(\pi_\theta,\D)\big)$, where $\prod(\cdot)$ stands for projection onto the probability simplex. 
+\end{theorem}
+
+
+
+\section{Comparative Analysis: SPO Versus DPO}
+
+This section contrasts the SPO method with the DPO algorithm conceptually. A detailed empirical comparison follows in Section~\ref{sec:experiments}.
+
+A key difference between SPO and DPO lies in how regularization ($\dkl$) is applied. In RLHF and SPO, $\dkl$ is used to prevent $\pi_\theta$ from straying too far from $\piref$ in unexplored regions, reducing the risk of distribution shifts. In contrast, the DPO loss function \eqref{eq:DPO loss} applies regularization only to preference dataset samples, which is suboptimal because 1) it fails to prevent distribution shifts in unexplored regions, and 2) regularizing within the dataset can hinder alignment with the preferences. 
+
+Moreover, SPO has an advantage over DPO and RLHF in avoiding determinism. In cases where the preference dataset is comparable to pre-training data size, regularization ($\dkl$) becomes unnecessary, and RLHF and DPO loss functions tend to produce deterministic models; that is they tend to return a single high-quality response per query. This reduced diversity makes DPO prone to mode collapse \citep{azar2023general}. SPO, however, controls entropy via the $\alpha$ parameter in \eqref{eq:pref
+loss general}, even without the use of regularizer (see Theorem~\ref{th:convergence}), preserving response diversity. This makes SPO more adaptable for continual learning and future alignments.
+It is noteworthy that unlike RLHF and DPO, the SPO framework does not assume the existence of an underlying reward model or rely on assumptions like the BT model. Instead, SPO's preference loss directly aligns $\pi_\theta$ with the preferences in the dataset, making it potentially more adaptable to broader alignment contexts. Additionally, SPO is not limited to using $\dkl$ for regularization, unlike DPO and IPO, which depend on $\dkl$ for derivations of their loss functions.
+
+We also note that the DPO loss cannot be separated into components like \eqref{eq:alignment loss}, where the preference loss  is independent of $\piref$ and paired with a regularizer like $\dkl$. As a short proof, consider a case where $\pi_\theta(y_w|x) = \pi_\theta(y_l|x)$ for a sample $(x; y_w, y_l) \in \D$. Here, the alignment loss in \eqref{eq:alignment loss} remains symmetrical with respect to $\piref(y_w|x)$ and $\piref(y_l|x)$; swapping their values wouldn't affect either the preference loss or $\dkl$. This symmetry doesn't hold in the DPO framework, as seen in the DPO loss in \eqref{eq:DPO loss}. Therefore, the DPO loss cannot be represented in the separable form of \eqref{eq:alignment loss}.
+
+
+
+\section{Experiments}
+
+This section presents empirical evaluations of SPO.
+
+\subsection{Alignment to Pairwise Preference Data}\label{sec:exp alpaca}
+{\bf Experiment setting:}
+To evaluate the performance of SPO, we trained a Llama2-7B model \citep{touvron2023llama} on a pairwise preference dataset for question-answering available in  AlpacaFarm \citep{dubois2023alpacafarm}, and computed the win-rates against the Llama2-7B SFT model on  AlpacaEval 2 \citep{alpaca_eval}, using GPT4-Turbo API. More specifically, we used the following pipeline. We downloaded the pretrained Llama2-7B model and performed supervised fine-tuning on the AlpacaFarm SFT dataset available at \cite{dubois2023alpacafarm}, to obtain the SFT model. 
+Initializing the weights on the SFT model, we then performed alignment to the preference dataset from AlpacaFarm that contains pairs of question-answering samples and preference labels provided by GPT-4. We compared the performance of SPO with several reward-model-free alignment algorithms, namely DPO \citep{rafailov2023direct}, IPO \citep{azar2023general}, KTO \citep{ethayarajh2024kto}, CPO \citep{xu2024contrastive}, R-DPO \citep{park2024disentangling}, and SimPO \citep{meng2024simpo}.
+For SPO, the experiment includes both the basic and weighted versions of SPO, with the weight function $\mu$ given in \eqref{eq:mu sig}. We trained each algorithm for a few epochs, used GPT4-Turbo to compute its win-rate against the SFT model at the end of each epoch, and reported the maximum win-rate for each algorithm.  
+
+{\bf Results:}
+Table~\ref{tab:win_rates Alpaca} presents the win-rates and length-controlled (LC) win-rates \citep{dubois2023alpacafarm} of different algorithms against the SFT model. The SPO algorithm outperforms the other tested algorithms in both conventional win-rate and LC win-rate. Furthermore, the weighted version of SPO performs better than the basic version, demonstrating the advantage of incorporating the weight function.
+\begin{table}[ht]
+    \centering
+    \caption{Alignment of the Llama2-7B model on AlpacaFarm dataset.}
+    \begin{tabular}{|c|c|c|}
+        \hline
+        \textbf{Alignment method} & \textbf{Win-rate(\%)} & \textbf{LC Win-rate(\%)} \\
+        \hline
+        SFT & 50.00 & 50.00 \\
+        R-DPO & 52.50 & 41.49 \\ 
+        CPO & 54.10 & 39.38\\
+        SimPO  & 58.48 & 49.73\\
+        KTO & 58.50 & 51.94\\ 
+        IPO  & 58.59 & 49.60\\
+        DPO  & 59.16 & 51.26\\
+        SPO-basic (unweighted) & 60.83 & 53.17 \\
+        SPO & \textbf{61.63} &  \textbf{56.25}\\
+        \hline
+    \end{tabular}
+    \label{tab:win_rates Alpaca}
+\end{table}
+
+
+\subsection{Alignment to Ranking and Best-of-$n$ Preference Data}\label{sec:exp ranking}
+{\bf Experiment setting:} \ {\it Dataset:} Alignment research has largely focused on pairwise preferences, and publicly available datasets for other preference types are rather scarce. To address this, we generated an $n$-ary ranked preference dataset ($n=4$) using GPT4o API as the labeler. Building on TinyStories \citep{eldan2023tinystories} --a synthetic collection of short stories aimed at children aged 3 to 4-- we created a preference dataset to align the stories to an older audience. The dataset contains around 5,000 samples, each with four stories generated by the TinyStories pre-trained 110M model, ranked by GPT4o-2024-08-06 based on coherence and engagement for older students. The best-of-$n$ dataset was then derived by removing the rank labels for the 2nd, 3rd, and 4th responses.
+
+ {\it Training:} Using the implementation from \citep{karpathy_llama2c} and the supervised fine-tuned model from \citep{HuggingfaceGIT}, we aligned a 110M parameter model with ranking and best-of-$n$ versions of SPO. Best-response-SFT is derived by all performing supervised fine-tuning on all top-rank responses. 
+
+{\bf Results:} 
+Tables~\ref{tab:ranking} and~\ref{tab:bestofn} present peak win rates against the Best-response-SFT model for aligning the 110M TinyStories SFT model to ranking and best-of-$n$ datasets using different algorithms. The SPO algorithm outperforms all baselines for both types of alignment.
+\begin{table}[ht]
+    \centering
+    \begin{minipage}[t]{0.47\textwidth}
+        \centering
+    \caption{Alignment of TinyStories SFT model to the ranking dataset.}
+    \begin{tabular}{|c|c|}
+        \hline
+        \textbf{Alignment method} & \textbf{Win-rate (\%)} \\
+        \hline
+        Best-response-SFT & 50.0 \\
+        DPO (ranking version) & 67.0  \\
+        S-DPO (ranking) & 55.1 
+        \\
+        SPO (ranking) & \textbf{68.5} \\
+        \hline
+    \end{tabular}
+    \label{tab:ranking}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.47\textwidth}
+        \centering
+    \caption{Alignment of TinyStories SFT model to the  best-of-$n$ dataset.}
+    \begin{tabular}{|c|c|}
+        \hline
+        \textbf{Alignment method} & \textbf{Win-rate (\%)} \\
+        \hline
+        Best-response-SFT & 50.0 \\
+        S-DPO (best-of-$n$) & 66.0 \\
+        SPO-basic (best-of-$n$) & 67.8 \\
+        SPO (best-of-$n$) & \textbf{70.5} \\
+        \hline
+    \end{tabular}
+    \label{tab:bestofn}
+    \end{minipage}
+\end{table}
+
+    
+
+\subsection{Ablation Study}
+{\bf Global regularization vs in-dataset regularization:} 
+To evaluate the significance of global regularization, we trained a Llama2-7B SFT model  the SPO-basic algorithm  while replacing the global $\dkl$ regularizer of \eqref{eq:dkl tokenwise} with in-dataset regularizers.
+In particular, we tested three different in-dataset regularizers, including the popular $-\log \pi(y_w|x)$ regularizer that is used in several alignment algorithm like CPO, SLiC-HF \citep{zhao2023slic}, and RRHF \citep{yuan2024rrhf}.
+Other experiment settings are similar to the setting discussed in Section~\ref{sec:exp alpaca}.
+Table~\ref{tab:ablation regularizer} provides the list of these in-dataset regularizers, as well as the peak win-rates of SPO-basic using these regularizers against the Llama2-7B SFT model. As it can be seen from the table, the global $\dkl$ regularizer of \eqref{eq:dkl tokenwise} achieved better performance compared to  in-dataset regularizers.
+{\bf Weight function $\mu$:} 
+As observed in the experiment of Section~\ref{sec:exp alpaca} on the alignment to   AlpacaFarm preferences dataset, the weighted version of SPO achieved win-rate $61.63\%$ compared to the win-rate of $60.83\%$ for SPO-basic. 
+In the TinyStories experiment of Section~\ref{sec:exp alpaca}, use of weight function $\mu$ improved win-rate from $xx\%$  to $xx\%$. In the experiment of Section~\ref{sec:exp ranking} on the alignment to   best-of-$n$ preferences dataset, the weighted version of SPO improved the win-rate to $70.5\%$, up from $ 67.8\%$ for SPO-basic. In the ranking experiment, use of non-uniform $\mu$ did not improve the win-rate.
+In all of these experiments, the $\mu$ function in the weighted SPO algorithm is of the form \eqref{eq:mu sig} with parameter $\gamma=0.01$. We performed no  sweeping on the parameter $\gamma=0.01$.
+\begin{table}[ht]
+    \centering
+    \caption{Ablation of SPO regularizer (model: Llama2-7B, dataset: AlpacaFarm)}
+    \begin{tabular}{|l|l|c|}
+        \hline
+        \textbf{Regularizer type} & \textbf{Regularizer formula} & \!\!\!$\begin{array}{c}\textrm{\textbf{Win-rate}}\\ \textrm{\small \textbf{vs. SFT}}\end{array}$\!\!\! \\
+        \hline
+        in-dataset (log probability) &  {\small $-\Exp_{(x;y_w,y_l)\in \D}[\log \pi_\theta(y_w|x)]$ }& 54.1 \\
+         in-dataset  (tokenwise) & 
+         {\small $\Exp_{(x;y) \in D}\left[ \sum_{\tau=0}^{\lvert y\rvert-1} \Exp_{Y\sim \pi_\theta(\cdot | x,y_{1:\tau})} \log \frac{\pi_\theta(Y | x,y_{1:\tau})}{\piref(Y | x,y_{1:\tau})}  \right]$}
+& 59.7 \\
+         in-dataset (importance sampling) & {\small $\Exp_{(x;y) \in D}\left[\frac{\pi_\theta(y|x)}{\piref(y|x)} \log \frac{\pi_\theta(y|x)}{\piref(y|x)}\right]$ } & 59.9 \\
+          global & Eq. \eqref{eq:dkl tokenwise} &  \textbf{60.8}\\
+        \hline
+    \end{tabular}
+    \label{tab:ablation regularizer}
+\end{table}
+
+
+
+
+\section{Related Works}
+
+RLHF aims to align AI systems with human preferences, relying on human judgments rather than manual rewards or demonstrations. This method has been successfully applied in fine-tuning large language models (LLMs) \citep{achiam2023gpt,touvron2023llama,ouyang2022training}, but faces challenges including data quality issues, reward misgeneralization, and policy optimization complexities. Research to enhance RLHF includes methods such as rejection sampling for response generation \citep{dong2023raft,touvron2023llama}, where the highest-reward response from a fixed number is selected for fine-tuning. \cite{zhang2023wisdom} simplified instruction alignment with language models into a goal-oriented reinforcement learning task, utilizing a two-phase approach of high-temperature online sampling and supervised learning with relabeled data during offline training. A two-loop learning algorithm, Grow and Improve, has also been proposed for iterative model alignment and training on a fixed dataset \citep{gulcehre2023reinforced}. The Grow loop leverages the existing model to create and sample a dataset while the Improve loop iteratively trains the model on a fixed dataset.
+
+Given the challenges of RLHF, reward-model-free alignment methods emerged fairly recently and have gained  a lot of popularity.
+Reward-model-free approach to alignment was popularized specifically after introduction of DPO in \citep{rafailov2023direct}, which is breifly outlined in Section~\ref{sec:background}. 
+Recently, several works have been proposed methods to improve DPO.   \cite{azar2023general}  considered an
+objective called $\Psi$PO for learning from human preferences that is expressed in terms of
+pairwise preferences, with no need for assumption of the BT model. The authors focused on a specific instance, IPO, of $\Psi$PO by setting $\Psi$ as the identity, aiming to mitigate the overfitting and tendency-towards-deterministic-policies issues observed in DPO. \cite{munos2023nash}  formulated the alignment problem  as finding the Nash equilibrium (NE) of a maximin game with two policies $\pi$ and $\pi'$ as two players where each policy receives pay off of probability of winning over the other policy. The authors showed that the NE point can be approximated by running a mirror-descent-like algorithm.  \cite{rosset2024direct} and \cite{swamy2024minimaximalist} proposed other approaches to approximate the NE point based on no-regret algorithms \citep{freund1997decision}.  
+\cite{chowdhury2024provably} proposed a loss function which is an unbiased estimate of the original DPO loss, and aims to alleviate sensitivity to flipped labels due to labeling noise.  \cite{amini2024direct} added an offset term within the sigmoid function in the DPO loss. In this manner, the model puts more weight on the winning response.    
+To control the length of the output, R-DPO \citep{park2024disentangling} modified the DPO loss by adding a regularization term that penalizes lengthy responses. To achieve the same goal, SimPO \citep{meng2024simpo} replaced the log-likelihood ratio between the current policy and the baseline model with the average log probability of the sequence under the current policy.
+In \citep{rafailov2024r}, a token-level formulation of DPO has been proposed which enables a likelihood search over a DPO model by classical search-based algorithms, such as MCTS. Inspired by cringe loss previously proposed for binary feedback, \cite{xu2023some} adapted cringe loss for the pairwise preference context. 
+Recently, in \citep{ethayarajh2024kto}, KTO loss has been proposed for alignment from non-paired preference datasets.
+
+
+In practice, the performance of an alignment technique highly depends on the quality of the human preference dataset. Noisy preference pairs could potentially limit the language models from capturing human intention. 
+In \citep{liu2023statistical},  DPO was used in conjunction with an improved preference dataset via a rejection sampling technique, arguing that DPO suffers from a mismatch between the sampling distribution and the policy corresponding to true expert preferences.  \citep{tunstall2023zephyr} formed a dataset of conservative pairs by collecting AI feedback through an ensemble of chat model completions, followed by GPT-4 scoring. Then, they employed  DPO for alignment to this improved dataset.
+The work in \citep{yin2024relative} leveraged semantic correlations of prompts in the dataset to form more conservative response pairs. For a given prompt $(x;y_w,y_l)$, a prompt $x'$ with a similar semantic to a tuple $(x';y'_w,y'_l)$ is used to form more conservative pairs. In particular, they propose a weighted version of the DPO loss  where for a given labeled data $(x;y_w,y_l)$, $y_w$ is approved while $y_l$ and any $y'_l$ (from a similar prompt $x'$) are penalized. 
+\cite{zhao2022calibrating} proposed a separable alignment technique, called SLiC,  where, similar to SPO, the alignment loss is the sum of two terms: a calibration loss that contrasts a winner and loser responses encouraging the model $\pi_{\theta}$ to assign more probability to the winner, and a regularizer term.   SLiC was further developed  in \citep{zhao2023slic} to be used in alignment to preference data, where they proposed the SLiC-HF algorithm. SLiC-HF  involves a rectified contrastive loss as its calibration loss and a  log-likelihood term as the regularization. Other than a different choices for preference loss and regularization, SLiC-HF diverges from the SPO framework in that the regularization in SLiC-HF is limited to the preference or pre-training datasets, not using online samples from $\pi_{\theta}$ as in the $\dkl$ regularize. 
+
+Concurrent to our work, CPO \citep{xu2024contrastive}  motivated the preference loss in \eqref{eq:pref loss general} as a heuristic approximation of DPO to reduce its complexity by removing $\piref$ from the DPO loss. This results in a contrastive loss similar to SPO-basic \eqref{eq:pref loss general}. In contrast, we derived  \eqref{eq:pref loss general} and its extension in \eqref{eq:pref loss general mu} as what should be truly minimized, regardless of complexity considerations. Other major differences include CPO's use of in-dataset regularization versus SPO's global regularization, the incorporation of a weighting mechanism in SPO, the generalization of SPO to other data types, and theoretical guarantees proposed in this work. As we demonstrated in experiments (see Table \ref{tab:ablation regularizer}),  the choice of regularizer significantly impacts performance.  
+
+
+
+
+\section{Limitations}
+
+This paper introduced SPO, a class of algorithms designed for alignment to the expert's distribution, with controlled softness. The paper also presents theoretical results demonstrating favorable landscape and convergence properties of SPO. 
+Below, we discuss some  limitations of this work.
+
+{\bf Limitations of the SPO Algorithm:}
+The main limitation of the SPO framework is the computational complexity of the regularizer, which requires online sampling from $\pi_\theta$. This limitation was discussed in Section~\ref{sec:reweight}, when intermittent batch generation of samples was proposed to mitigate the computational overhead .
+
+
+{\bf Limitations of the Current Study:}
+An interesting question not addressed in this work is how the performance of different methods varies with dataset size and the level of noise in preference labels.
+Another promising research direction is generalizing these alignment methods to other forms of implicit preference information hidden in data (e.g., in chat logs), instead of relying on labeled preference datasets.
+
+
+
+
+
+
+
+
+
+

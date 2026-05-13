@@ -1,0 +1,548 @@
+\title{IMPLICIT VARIATIONAL REJECTION SAMPLING}
+
+\begin{abstract}
+Traditional approaches to variational inference rely on parametric families of variational distributions,
+with the choice of family playing a critical role in determining the accuracy of the resulting posterior approximation.
+Simple mean-field families often lead to poor approximations, while rich families of distributions like normalizing
+flows can be difficult to optimize and usually do not incorporate the known structure of the target distribution
+due to their black-box nature.
+To expand the space of flexible variational families, 
+we revisit Variational Rejection Sampling (VRS) \citep{grover2018variational}, which combines a parametric
+proposal distribution with rejection sampling to define a rich non-parametric family of distributions that
+explicitly utilizes the known target distribution.
+By introducing a low-variance reparameterized gradient estimator for the parameters of the proposal distribution,
+we make VRS an attractive inference strategy for models with continuous latent variables. 
+We argue theoretically and demonstrate empirically that the resulting method---Reparameterized Variational 
+Rejection Sampling (RVRS)---offers an attractive trade-off between computational cost and inference fidelity.
+In experiments we show that our method performs well in practice and that it is
+well-suited for black-box inference, especially for models with local latent variables. % in probabilistic programming frameworks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Variational inference is a powerful method for approximate Bayesian inference with a number of appealing
+properties, including support for data subsampling and model learning \citep{blei2017variational}. 
+Unfortunately, simple variational families like mean-field gaussian distributions often
+result in poor posterior approximations, while defining custom parametric families that better reflect
+the correlation structure and tail behavior of the exact posterior can be difficult, even for experts.
+This has motivated research into more flexible variational methods, including black-box methods like
+normalizing flows \citep{rezende2015variational} as well as hybrid methods that incorporate Markov Chain Monte Carlo (MCMC) \citep{salimans2015markov}.
+
+While these methods are powerful, they come with several disadvantages. Normalizing flows can be difficult
+to optimize, exhibit tail behavior that is difficult to control \citep{jaini2020tails}, 
+and introduce a large design space characterized by many hard-to-set hyperparameters.
+Moreover, due to their black-box nature normalizing flows typically
+do not incorporate the known structure of the target distribution. This is arguably a lost opportunity, especially
+in the context of probabilistic programming systems, where this information is readily available.
+The most powerful methods that combine variational inference with MCMC are gradient-based
+\citep{geffner2021mcmc,zhang2021differentiable,thin2021monte}, with the
+result that many (possibly expensive) gradient steps may be required to generate a single sample. Moreover,
+good performance relies on carefully tuning the MCMC kernel, which can be challenging, since
+posterior curvature can vary considerably across latent space. In addition,
+these approaches typically introduce auxiliary latent variables, leading to a looser
+and more stochastic variational bound.
+
+These considerations lead us to revisit a conceptually simpler hybrid variational inference method dubbed
+Variational Rejection Sampling (VRS) \citep{grover2018variational}. Like MCMC-based methods,
+the target distribution is directly incorporated into the definition of the variational family, resulting
+in a non-parametric variational distribution. Since, however, rejection sampling is much simpler than MCMC, 
+the result is a considerably simpler hybrid variational method that does not require delicate tuning or
+differentiating through long MCMC chains.
+Unfortunately, VRS utilizes score function (i.e.~REINFORCE-like \citep{williams1992simple}) gradient estimators,
+which are known to be high variance, thus limiting its usefulness to discrete latent variable models,
+which are in any case not amenable to the reparameterization trick.
+In this work we set out to show that by introducing a reparameterized gradient estimator VRS 
+becomes an attractive inference strategy for continuous latent variable models.
+
+In summary our contributions include the following:
+\begin{enumerate}[itemsep=0.5pt]
+\item We introduce a reparameterized gradient estimator for VRS.
+\item We show that the resulting method---RVRS---is especially well-suited for local latent variable models,
+    including hierarchical models that additionally include global latent variables.
+\item We characterize the variational gap of (R)VRS as a function of the rejection threshold parameter $T$.
+\end{enumerate}
+
+
+\section{Problem setting}
+
+\label{sec:setting}
+
+We are given a model with joint density of the form $\pth(\bx, \bz) = \pth(\bx | \bz) \pth(\bz)$
+where the latent variable $\bz \in \RR^D$ is governed
+by a prior $\pth(\bz)$ and $\bx$ in the likelihood $\pth(\bx | \bz)$ 
+represents observed data.
+We aim to devise a flexible variational approximation to the
+posterior $\pth(\bz | \bx)$ that can be learned with a low-variance ELBO gradient estimator. 
+Initially we do not assume any particular conditional independence structure, but in \secref{sec:hier}
+we turn our attention to hierarchical models with both global and local latent variables, which benefit from additional
+consideration.
+We would like our method to be generic in nature so that it is suitable for black-box inference
+in a probabilistic programming framework.
+Additionally we would like our method to support model learning, 
+i.e.~learning $\bth$ in conjunction with the approximate posterior.
+
+
+\section{Background}
+
+\label{sec:bg}
+
+\subsection{Variational inference}
+
+The most common variant of variational inference introduces a parametric
+variational distribution $\qphi(\bz)$ and proceeds to optimize the parameters $\bphi$
+to minimize the Kullback-Leibler (KL) divergence between $\qphi(\bz)$ and the posterior $\pth(\bz | \bx)$,
+i.e.~$\KL( \qphi(\bz) || \pth(\bz | \bx))$.
+This can be done by maximizing the Evidence Lower Bound or ELBO
+\begin{equation}
+    \label{eqn:elbo}
+    \elbo \equiv \EE_{\qphi(\bz)} \left[ \log \pth(\bx, \bz) - \log \qphi(\bz)\right]
+    \le \log \pth(\bx) \equiv \log \EE_{\pth(\bz)} \left [ \pth(\bx|\bz) \right ]
+\end{equation}
+Thanks to the inequality in Eqn.~\ref{eqn:elbo} the ELBO naturally enables joint model learning and inference, i.e.~we can
+maximize the ELBO w.r.t.~both variational parameters $\bphi$ and model parameters $\bth$ simultaneously.
+As noted in the introduction, a potential shortcoming of this fully parametric approach is the difficulty of 
+specifying suitable parameterizations for $\qphi(\bz)$. For additional background see e.g.~\citep{blei2017variational}.
+\subsection{Variational Rejection Sampling}
+The basic idea behind VRS is simple: define a flexible variational distribution by taking a parametric
+proposal distribution $\qphi(\bz)$ and warping it towards the posterior $\pth(\bz | \bx)$ via a smoothed
+variant of rejection sampling. In more detail, define the variational distribution $\rr(\bz)$ as
+\begin{equation}
+\label{eqn:rdef}
+\rr(\bz) \equiv \frac{\qphi(\bz) \aaa(\bz)}{\ZZr} \qquad
+    {\rm with} \qquad 
+\ZZr \equiv \int \! d \bz \; \qphi(\bz) \aaa(\bz)
+\end{equation}
+where
+\begin{equation}
+\aaa(\bz) \equiv \sigma(\log \pth(\bx, \bz) - \log \qphi(\bz) + T) = \sigma(-\ellT(\bz) )
+\end{equation}
+is an acceptance probability with $\aaa(\bz) \in [0, 1]$.
+Here $\sigma(\cdot)$ is the logistic function and $T \in \RR$ is a threshold parameter.
+Moreover we have defined the $T$-shifted log ratio
+\begin{equation}
+\ellT(\bz) \equiv -\log \pth(\bx, \bz) + \log \aaa(\bz) - T
+\end{equation}
+As $T\rightarrow \infty$ we have $\aaa(\bz) \rightarrow 1$ and $\rr(\bz) \rightarrow \qphi(\bz)$,
+recovering conventional variational inference with $\qphi(\bz)$ as the variational distribution.
+In the opposite limit $T\rightarrow -\infty$ the acceptance probability is low, $\aaa(\bz) \rightarrow 0$,
+and $\rr(\bz) \rightarrow \pth(\bz | \bx)$.
+For intermediate $T$ (i.e.~$T$ which leads to a few but not many rejected samples) we get
+a $\rr(\bz)$ that is closer to the posterior $\pth(\bz | \bx)$ than the proposal distribution $\qphi(\bz)$ at the cost of a moderate amount of additional computation. Indeed as shown in \citet{grover2018variational}, as $T$ decreases
+for fixed $\qphi(\bz)$ the ELBO increases monotonically and thus the Kullback-Leibler divergence 
+$\KL(\rr(\bz) || \pth(\bz | \bx))$ decreases monotonically.
+
+\subsubsection{Sampling}
+Since $\aaa(\bz) \in [0, 1]$ it is straightforward to sample from $\rr(\bz)$, see Algorithm~\ref{alg:sample}.
+The expected number of draws from the proposal distribution is given by $\ZZr^{-1}$, see \secref{sec:samplingcost}.
+For this reason we expect the sweet spot for VRS to occur for moderate values of $\ZZr^{-1} \sim 3-10$, where the cost of 
+rejection sampling is not too high but where the proposal distribution is still significantly `sculpted' towards
+the posterior.
+
+\input{sampling_algo}
+\subsubsection{Gradient estimators}
+\label{sec:vrsgradest}
+
+VRS is only practical if we can use gradient methods to optimize the corresponding ELBO given by
+\begin{align}
+\label{eqn:rvrselbo}
+\elbo(\bphi, \bth) = \EE_{r_{\bth, \bphi}(\bz)} \left[ \log \pth(\bx, \bz) - \log \rr(\bz) \right]
+\end{align}
+As shown in \citet{grover2018variational}, gradients for the parameters $\bphi$ that define the proposal 
+distribution $q_{\bphi}(\bz)$ can be computed using the following estimator
+\begin{align}
+\label{eqn:phigrad}
+\nabla_\bphi \elbo = {\rm COV}_{\rr(\bz)} \left[ \AAA(\bz), \aaa(\bz) \nabla_\bphi \log \qphi(\bz) \right]
+\end{align}
+with
+\begin{equation}
+\AAA(\bz) \equiv \log \pth(\bx, \bz) - \log \qphi(\bz) - \log \aaa(\bz)
+\end{equation}
+and where ${\rm COV}_{\rr(\bz)}[A(\bz), B(\bz)]$ denotes the covariance between random variables $A$ and $B$
+w.r.t.~the distribution $\rr(\bz)$.
+Similarly the gradient estimator for the model parameters $\bth$ is given by
+\begin{align}
+\label{eqn:thetagrad}
+\nabla_\bth \elbo = \EE_{\rr(\bz)} \left[ \nabla_\bth \log \pth(\bx, \bz) \right] -
+ {\rm COV}_{\rr(\bz)} \left[\AAA(\bz), (1 - \aaa(\bz)) \nabla_\bth \log \pth(\bx, \bz) \right]
+\end{align}
+It is easy to show (see \secref{sec:vrsgradestsupp}) that in the limit that $\aaa(\bz) \rightarrow 1$ and $\rr(\bz) \rightarrow \qphi(\bz)$
+the gradient estimator \eqref{eqn:phigrad} reduces to a conventional score function
+(i.e.~REINFORCE-like) gradient estimator, which is known to exhibit high variance, essentially due to its 
+coarse credit assignment \citep{mohamed2020monte}. It is straightforward to compute unbiased Monte Carlo estimates of \eqref{eqn:phigrad} and \eqref{eqn:thetagrad}, although doing so requires drawing $S > 1$ samples from $\rr(\bz)$ due to the covariance terms, see \secref{sec:vrsmc}.
+
+
+\section{Reparameterized Variational Rejection Sampling}
+
+\label{sec:rvrs}
+
+The REINFORCE-like covariance term in \eqnref{eqn:phigrad} %and \eqnref{eqn:thetagrad}
+is generally expected to be high variance
+and thus limit the applicability of VRS.
+Fortunately, as we show in Prop.~\ref{prop:gradest}, the VRS ELBO admits a reparameterized (i.e.~pathwise) gradient estimator for $\bphi$ if $\qphi(\bz)$ is reparameterizable---a surprising capability, since $\rr(\bz)$ is not readily reparameterizable itself.
+Since the suite of reparameterizable proposal distributions is quite large---including e.g.~Normal distributions, 
+Dirichlet distributions, and normalizing flows with reparameterizable base distributions---the RVRS distribution
+$\rr(\bz)$ is quite flexible.
+\begin{restatable}{prop}{gradest}
+If the proposal distribution $\qphi(\bz)$ is reparameterizable, then
+the VRS ELBO \eqnref{eqn:rvrselbo} admits the following reparameterized gradient estimator for $\bphi$ gradients
+\begin{align}
+\label{eqn:repphigrad}
+\nabla_\bphi \elbo = \EE_{\rr(\bz)} \left[\left( 2 \AAAbar(\bz) \frac{\partial \aaa(\bz) }{\partial \bz} + \aaa(\bz) \frac{\partial \AAA(\bz)  }{\partial \bz}
+ \right) \cdot \nabla_{\bphi} \bz \right]
+\end{align}
+where $\AAAbar(\bz)$ is defined as
+$\AAAbar(\bz) \equiv  \AAA(\bz) - \EE_{\rr(\bz^\prime)}\left[ \AAA(\bz^\prime)\right]$
+    and $\nabla_{\bphi} \bz$ is the velocity field\footnote{For example if $\qphi(z) = \NN(z | \mu, \sigma^2)$ 
+    then $\nabla_\mu z = 1$ and $\nabla_\sigma z = (z - \mu)/\sigma $.} corresponding to infinitesimal 
+    displacement of $\qphi(\bz)$ in $\bphi$-space.
+\label{prop:gradest}
+\eqnref{eqn:repphigrad} reduces to a conventional reparameterized gradient
+in the limit that $\aaa(\bz) \rightarrow 1$ and $\rr(\bz) \rightarrow \qphi(\bz)$.
+See \secref{sec:phiest} for the proof and additional details.\footnote{In particular in \secref{sec:rvrsautogradsupp} 
+we describe how we leverage automatic differentation and $S>1$ samples from $\rr(\bz)$ to obtain an unbiased 
+    Monte Carlo estimate of \eqnref{eqn:repphigrad}.}
+\end{restatable}
+Fundamentally the existence of a pathwise gradient estimator can be traced to three properties
+of $\rr(\bz)$: i) $\rr(\bz)$ is proportional to a reparameterizable distribution, namely $\qphi(\bz)$;
+ii) $\rr(\bz)$ depends on $\bphi$ only through $\qphi(\bz)$; and iii) we can compute $\aaa(\bz)$ and its gradients pointwise.
+We note that the derivation of Prop.~\ref{prop:gradest} is conceptually similar to that behind 
+`doubly reparameterized gradients' \citep{tucker2018doubly}, although in that case a gradient estimator
+that is \emph{already} reparameterized is manipulated to transform a score-function-like term to further reduce variance. 
+
+\subsection{Model parameter gradients}
+\label{sec:thetagraddisc}
+
+Unfortunately it seems unlikely that the covariance term in \eqnref{eqn:thetagrad} can be 
+reparameterized in a straightforward way, since eliminating $\nabla_\bth \log \pth(\bx, \bz)$ would
+require e.g.~a reparameterized sampler of $\pth(\bz | \bx)$. 
+However, we show empirically that this term can be safely dropped at the cost of introducing some bias. 
+This is because this term encodes how the log evidence estimate changes
+due to changes in $\ellT(\bz)$ and not the `direct' change encoded by the term $\EE_{\rr(\bz)} \left[ \nabla_\bth \log \pth(\bx, \bz) \right]$.
+
+\subsection{Adapting the threshold $T$}
+\label{sec:tuning}
+
+Choosing an appropriate value of $T$ in the vicinity of 
+$\EE_{\qphi(\bz)} \left[ \log \qphi(\bz) - \log \pth(\bx, \bz)\right]$
+is crucial for good performance of (R)VRS. In \citet{grover2018variational} the authors
+propose a strategy based on quantiles of $\log \pth(\bx, \bz) / \qphi(\bz)$.
+While we find that this strategy can work, we prefer
+a gradient-based strategy for tuning the threshold parameter $T$ that allows direct control over
+the computational cost of (R)VRS. Another advantage of this approach is that because it is gradient-based
+it offers the possibility of choosing $T$ using amortized inference, although we do not explore that possibility here.
+Recall that $\ZZr \equiv \int \! d \bz \; \qphi(\bz) \aaa(\bz)$ is the mean acceptance probability of the rejection sampler
+and consider the loss $\LL(T) = \tfrac{1}{2} \left(\ZZr - \ZZ_\target \right)^2$
+where $\ZZ_\target \in (0, 1)$ is a target acceptance probability. 
+Then the gradient $\frac{\partial \LL}{\partial T}$ is given by
+\begin{align}
+\frac{\partial \LL}{\partial T} \!=\! \left(\ZZ_r \! - \! \ZZ_\target \right) \! \EE_{\qphi(\bz)}\!\left[ \frac{\partial \aaa(\bz)} {\partial T} \right] 
+\!= \EE_{\qphi(\bz)}\left[ \aaa(\bz) \! - \! \ZZ_\target \right] \EE_{\qphi(\bz)}\left[ \aaa(\bz) (1 \!-\! \aaa(\bz))\right]
+ \end{align}
+which we can readily compute unbiased estimates of, since we have $S>1$ samples at our disposal.
+Throughout this work we use MC estimates of $\frac{\partial \LL}{\partial T}$ to tune $T$; 
+see \secref{sec:apptuning} in the supplement for details.
+\subsection{Models with only local latent variables}
+\label{sec:localmodels}
+
+For models with only local latent variables like a VAE \citep{kingma2013auto} sampling, ELBO estimation,
+and ELBO gradient estimation for RVRS trivially factorize across data points, and thus RVRS admits unbiased mini-batch learning for such models.
+An efficient sampler for RVRS in this scenario requires a flexible rejection sampling scheme
+that maximizes usage of computational resources. In particular during training we can choose between: 
+i) an unbiased sampler that terminates when $S>1$ latent samples have been generated for every data point; and 
+ii) a (potentially much) faster biased sampler that terminates after generating a \emph{fixed}
+number of proposals for each data point.
+See Algorithm~\ref{alg:semiunbiased} \& Algorithm~\ref{alg:semibiased} in the supplement for details. 
+As we report in \figref{fig:biasedsemi} in \secref{sec:addexp} the small bias introduced by the faster sampler has
+a correspondingly small impact on performance.
+\subsection{Hierarchical models with global and local latent variables}
+\label{sec:hier}
+
+We now consider models with both a global latent variable $\bz_G$ and local latent variables $\{ \bz_n \}$, 
+with $n=1,...,N$ indexing the $N$ observed data points $\{ \bx_n \}$. 
+We assume the following conditional independence structure:
+\begin{align}
+    \pth(\bx_{1:N}, \bz_G, \bz_{1:N}) = \pth(\bz_G) \prod_{n=1}^N \pth(\bx_n | \bz_n, \bz_G) p(\bz_n | \bz_G)
+\end{align}
+While RVRS can be applied to the joint latent space $\{\bz_G, \bz_{1:N}\}$, the resulting algorithm
+does not admit unbiased data subsampling (i.e.~mini-batch learning), since $\aaa(\bz)$ %RVRS acceptance probability
+depends on the entire dataset, limiting this approach to moderate $N$.\footnote{This is
+of course equally true of other non-parametric approaches like UHA/DAIS \citep{geffner2021mcmc,zhang2021differentiable},
+although see \citep{jankowiak2022surrogate}.}
+To enable data subsampling we adopt a hybrid approach in which the posterior
+over $\bz_G$ is approximated by a parametric distribution $\qphi(\bz_G)$ while the conditional
+posteriors $\pth(\bz_n | \bz_G, \bx_n)$ are approximated by RVRS. This can be understood
+as an instance of a `locally enhanced bound' \citep{geffner2022variational}, and
+is analogous to the `Semi-DAIS' approach explored in \citet{jankowiak2022surrogate} in the context of UHA/DAIS. 
+We refer to this semi-parametric approach as Semi-RVRS. See \secref{sec:semisupp} for details.
+
+
+
+\section{Convergence analysis}
+
+\label{sec:theory}
+
+It is evident from the structure of $\rr(\bz)$ in \eqnref{eqn:rdef} that as $T \rightarrow -\infty$ the 
+variational distribution $\rr(\bz)$ converges to the exact posterior $\pth(\bz | \bx)$ \emph{pointwise}. 
+But can we say anything about the corresponding ELBO in \eqnref{eqn:rvrselbo}? 
+As we would expect, the variational gap goes to zero in the same limit as $e^T$, see Prop.~\ref{prop:vargap}.
+Notably the relative simplicity of rejection sampling allows us to prove a generic result, whereas an analogous result
+for DAIS in \citep{zhang2021differentiable} is limited to linear Gaussian models due to the complexity of analyzing MCMC chains.
+\begin{restatable}{prop}{vargap}
+\label{prop:vargap}
+{\bf (A)} 
+Assume that
+ $q_{\bphi}(\bz)$ is sufficiently heavy-tailed so that $\xi \equiv \EE_{p_\bth(\bz|\bx)} \left[  \frac{ p_\bth(\bx,\bz)}{q_{\bphi}(\bz)}  \right]$ is finite.
+Then the variational gap $\Delta$ between $ \log  p_\bth(\bx)$
+and the ELBO is bounded from above as $\Delta < \frac{3}{2} e^T \xi$ for $T < -\log 2 \xi$.
+{\bf (B)} 
+    An analogous bound holds for the hierarchical modeling case considered in \secref{sec:hier}, where the bound
+includes an additional term $\KL \left( \qphi(\bz_G) \Big | \Big | \; \pth(\bz_G | \bx_{1:N}) \right)$ that encodes
+the suboptimality of the parametric variational approximation for the global latent variable $\bz_G$.
+For additional details and the proof see \secref{sec:globalproof} in the supplement.
+\end{restatable}
+
+\begin{figure}[ht] \begin{center}
+\includegraphics[width=0.99\textwidth]{figures/funnel.pdf}
+    \caption{
+    We illustrate how RVRS works on a (normalized) funnel-shaped target distribution (orange density).
+    Blue contours depict variational fits, with a mean-field Normal fit depicted in the upper right figure.
+    The first two columns depict RVRS fits for $\ZZ_\target \in \{0.05,0.5\}$,
+    with black contours depicting mean-field Normal proposal distributions $\qphi(\bz)$.
+    The leftmost figures in the lower row depict the acceptance probability $\aaa(\bz)$;
+    for $\ZZ_\target=0.05$ $\aaa(\bz)$ differs significantly from $1$ everywhere so that
+    $\rr(\bz)$ is strongly sculpted towards the target and the ELBO is nearly optimal (i.e.~close to $0$).
+    } \label{fig:funnel}
+\end{center} \end{figure}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+Many variational objectives that go beyond a conventional ELBO have been proposed in the literature.
+These include the importance weighted autoencoder (IWAE) \citep{burda2015importance,cremer2017reinterpreting},
+the thermodynamic variational objective \citep{masrani2019thermodynamic},
+and approaches that make use of Sequential Monte Carlo \citep{le2017auto,maddison2017filtering,naesseth2018variational}.
+Variational Rejection Sampling (VRS) was proposed by \citet{grover2018variational} and applied to models
+with discrete latent variables.
+An early combination of MCMC methods with variational inference was proposed by \citet{salimans2015markov} and
+\citet{wolf2016variational} and has led to follow-up work by many authors \citep{hoffman2017learning,caterini2018hamiltonian,ruiz2019contrastive}. Arguably the most powerful hybrid variational methods proposed so far are those that incorporate 
+gradient-based MCMC like Uncorrected Hamiltonian Annealing (UHA; \citep{geffner2021mcmc}) and the essentially identical algorithm
+Differentiable Annealed Importance Sampling (DAIS; \citep{zhang2021differentiable}); see also \citep{thin2021monte,doucet2022score,pmlr-v162-matthews22a}. A conceptually related but distinct gradient-based approach utilizes ergodic maps built with Hamiltonian dynamics to formulate
+flexible variational distributions \citep{xu2023mixflows,xu2023embracing}.
+For a recent review of some of these methods see \citet{doucet2023differentiable}.
+Another important line of work has seen the development of rich parametric families of distributions like normalizing flows for use in 
+variational inference \citep{rezende2015variational,kingma2016improved,papamakarios2021normalizing}.
+Rejection sampling has seen other applications in probabilistic machine learning. For example \citet{stimper2022resampling} adapt earlier work \citep{bauer2019resampled} to build normalizing flows where the base distribution is defined via a
+ learned rejection sampling scheme. Indeed \citet{stimper2022resampling} use a REINFORCE-like gradient estimator
+ modified from VRS that could benefit from our reparameterized estimator in Prop.~\ref{prop:gradest}. 
+Finally \citet{naesseth2017reparameterization} show how to construct partially reparameterized gradient
+estimators for distributions defined by classical rejection samplers (i.e.~not the `smoothed' variant in \eqnref{eqn:rdef}).
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+All our experiments are implemented using JAX and NumPyro \citep{bradbury2020jax,phan2019composable,bingham2019pyro}.
+We explore a number of different aspects of RVRS, 
+including support for $D\gg1$ latent dimensions and model learning (\secref{sec:gp}), 
+variational auto-encoders (\secref{sec:vae}), and
+hierarchical models (\secref{sec:local}). 
+We provide additional experimental details and report additional results in \secref{sec:expdetails}-\ref{sec:addexp}.
+
+\subsection{Characterizing RVRS}
+\label{sec:char}
+
+We begin with a few experiments to characterize some of the general characteristics of RVRS.
+In \figref{fig:funnel} we illustrate graphically how RVRS `sculpts' a mean-field gaussian proposal distribution $\qphi(\bz)$ to
+match a non-gaussian target. Notably a nearly optimal ELBO is achieved for $\ZZ_\target=0.05$.
+
+Next we compare the variance of RVRS and VRS ELBO gradient estimators on a logistic regression model, see \figref{fig:gradvar}.
+We find that VRS gradient variance is always larger than in the case of RVRS---e.g.~by a factor of $\sim15$ for
+$D=62$ latent dimensions---and that the ratio increases as the dimension increases. For an example
+of how large gradient variance negatively impacts the optimization performance of VRS see \figref{fig:elbocurves} in \secref{sec:addexp}.
+
+Finally in \figref{fig:varyZ} we explore how RVRS depends on the hyperparameter $\ZZ_\target \in (0, 1)$.
+As we would expect the ELBO increases monotonically as $\ZZ_\target$ decreases---as it must
+if $T$ adaptation and $\qphi(\bz)$ learning are working correctly. Tellingly, we
+see that the width of the proposal distribution $\qphi(\bz)$ increases as $\ZZ_\target$ decreases.
+This illustrates the basic principle that (R)VRS exploits to achieve better variational approximations.
+Since the ELBO tends to prefer variational distributions that excessively avoid low-density regions of the posterior,
+a common failure mode of parametric variational inference is to underestimate posterior uncertainty.
+Target-dependent rejection sampling offers a simple but effective mechanism to better capture posterior uncertainty: inflate
+the width of the proposal distribution where needed and reject a portion of samples in regions where the density of the proposal
+$\qphi(\bz)$ is excessive (due to e.g.~the parametric misfit of the proposal). 
+The upshot is that (R)VRS can better capture tail behavior and thus yield higher
+fidelity variational approximations.
+\begin{figure}[ht] \begin{center}
+\includegraphics[width=0.4\textwidth]{figures/gradvar.pdf}
+    \caption{ 
+    We compare RVRS and VRS gradient variance for a logistic regression problem with $N=100$ data points
+    as we vary the latent dimension $D$. The proposal $\qphi(\bz)$ is mean-field Normal and we depict
+    the ratio of gradient variances between VRS and RVRS for the mean and scale (i.e.~root variance) parameters of $\qphi(\bz)$.
+    } \label{fig:gradvar}
+\end{center} \end{figure}
+
+\begin{figure}[ht]
+\begin{center}
+\includegraphics[width=0.5\textwidth]{figures/elbo_varyZ.pdf}
+    \caption{ 
+    We explore the performance of RVRS as a function of $\ZZ_\target$ on a logistic
+    regression problem in $D=51$ dimensions. The blue curve depicts the ELBO improvement over
+    a mean-field baseline, while the orange curve depicts the geometric mean of the $D$ scales (i.e.~root variances)
+    that define the mean-field Normal proposal $\qphi(\bz)$. As $\ZZ_\target \rightarrow 0$ %and $T\rightarrow -\infty$
+    the proposal distribution becomes broader, especially compared to the mean-field fit 
+    obtained with a standard ELBO, which yields $\sigma = 0.70$.
+    }
+    \label{fig:varyZ}
+\end{center}
+\end{figure}
+\subsection{Logistic regression}
+\label{sec:logreg}
+
+We compare RVRS to a large number of variational baselines on $5$ logistic regression tasks. To ensure
+that posterior distributions are relatively non-gaussian we consider $N=100$ data points, while the latent
+dimension ranges from $D=15$ to $D=58$. 
+We consider three fully parametric baselines: 
+mean-field with a factorized Normal distribution ({\bf MF});
+a multivariate Normal distribution ({\bf MVN}); 
+and a Block Neural Autoregressive normalizing flow ({\bf Flow}; \cite{de2020block}). 
+We also consider four non-parametric baselines: 
+IWAE with $K \in \{8,24\}$ particles ({\bf IWAE}); and
+UHA with $K \in \{8,24\}$ gradient steps ({\bf UHA}). For RVRS we consider $\ZZ_\target \in \{0.3, 0.1, 0.05\}$.
+For the results see \figref{fig:logistic}.
+
+We find that RVRS performs well across the board. For example RVRS with $\ZZ_\target = 0.10$ outperforms
+the normalizing flow on $4$/$5$ datasets but is much faster to train. Moreover RVRS-$0.10$ matches
+or exceeds the performance of IWAE with $K=24$ particles on all datasets. The RVRS-$0.10$ ELBO also exceeds
+that of UHA with $K=24$ steps on all datasets, but we note that this gap is probably at least partially explained
+by the additional looseness of the UHA variational bound. Indeed if we compare RVRS and UHA posterior
+samples to `gold standard' samples obtained with NUTS \citep{hoffman2014no,carpenter2017stan} and use a Max Sliced
+Wasserstein distance \citep{deshpande2019max} to quantify the fidelity of the posterior approximation,
+we find that RVRS-$0.10$ (respectively,~RVRS-$0.30$) approximately matches the performance of UHA-$24$ (respectively,~UHA-$8$),
+see \figref{fig:logistic}.
+\begin{figure}[ht]
+\begin{center}
+\includegraphics[width=1.04\textwidth]{figures/logistic.elbo.pdf}
+\includegraphics[width=0.50\textwidth]{figures/logistic.gradient.small.pdf}
+\includegraphics[width=0.48\textwidth]{figures/sliced_wasserstein.pdf}
+    \caption{ 
+    {\bf (Top)} We depict ELBO improvements above the mean-field baseline for $9$ variational methods on $5$
+    logistic regression tasks. Circles and squares indicate parametric and non-parametric methods, respectively. Error bars denote two standard deviations and ELBOs are averaged across $5$ runs.
+    {\bf (Bottom left)} We depict the corresponding gradient step times for two logistic regression tasks. 
+    {\bf (Bottom right)} We compare the fidelity of posterior samples generated by UHA and RVRS w.r.t.~the Max Sliced Wasserstein distance,
+    using samples from NUTS as a reference. Here and elsewhere RVRS-$0.50$ refers to RVRS with $\ZZ_\target=0.5$,
+    IWAE-$8$ refers to IWAE with $K=8$ particles, etc.
+    }
+    \label{fig:logistic}
+\end{center}
+\end{figure}
+\subsection{Gaussian process classification}
+\label{sec:gp}
+
+To probe the ability of RVRS to handle both model learning and higher-dimensional latent spaces, we
+consider Gaussian process models for binary classification. For each of $3$ datasets we consider $N=256$
+data points and thus $D=256$ latent dimensions. Model parameter $\bth$ are the $D_\bx+1$ kernel hyperparameters,
+where $D_\bx$ is the dimension of the inputs with $D_\bx \in \{18, 28, 51\}$. See \figref{fig:gp} for
+the results. Perhaps surprisingly given the large dimension, we find that RVRS matches or exceeds the
+performance of the other methods. This is even true for IWAE with $K=128$ particles.
+Notably UHA-$6$ does about the same as UHA-$3$, emphasizing the difficulty of optimizing the UHA 
+ELBO---which effectively differentiates through a short MCMC chain---with its potential for numerical instability w.r.t.~the
+step size and mass matrix that define the Hamiltonian dynamics. 
+Thus although (high-dimensional) gradients offer a lot of information about the posterior density, 
+effectively utilizing that information can be challenging to the point where rejection sampling---which we would
+generally expect to be less effective for large $D$---can be just as effective or even more so. 
+\begin{figure}[ht]
+\begin{center}
+\includegraphics[width=0.8\textwidth]{figures/gp.elbo.pdf}
+    \caption{ 
+    We depict ELBO improvements above the multivariate Normal baseline for $6$ variational methods on $3$
+    Gaussian process classification tasks. 
+    Results are averaged across five runs and error bars denote two standard deviations.
+    }
+    \label{fig:gp}
+\end{center}
+\end{figure}
+\subsection{Variational autoencoders}
+\label{sec:vae}
+
+We compare conventional ELBO training with RVRS, IWAE, and UHA/DAIS on a VAE \citep{kingma2013auto}
+trained on statically binarized MNIST. We use the same encoder-decoder architecture as in \citep{burda2015importance}
+and set the dimension of the latent variable to $D=50$. 
+See Table~\ref{table:vae} for the results.
+Notably RVRS is faster than IWAE because RVRS only requires computing gradients through a small number ($S=2$) of accepted samples. 
+We find that RVRS consistently outperforms IWAE but is edged out by UHA with many gradient steps. The good performance
+of UHA with $K=20$ gradient steps comes at significant computational cost, however, as training is $\sim5.6$x slower than RVRS-$0.025$.
+Thus an attractive feature of RVRS trained with Algorithm \ref{alg:semibiased} is that it can make effective use of parallel hardware, 
+while UHA is bottlenecked by the serial nature of MCMC chains.
+
+\input{vae_table}
+\subsection{Hierarchical modeling}
+\label{sec:local}
+
+We evaluate RVRS on a hierarchical model with local latent variables that was also
+considered by \citet{jankowiak2022surrogate}.
+In detail we consider a Bayesian linear regressor that utilizes a Student’s t likelihood.
+Since this likelihood can be represented as a continuous mixture of Normal distributions, this
+choice corresponds to a hierarchical model with local Gamma latent variables that can be integrated out exactly.
+We compare three variational approaches, all of which
+use a mean-field Normal distribution for the global latent coefficient.
+We consider two semi-parametric approaches---Semi-DAIS and Semi-RVRS---that 
+only differ in how the approximate posterior over the local latent variables is contructed.
+We also compare against an oracle baseline obtained by integrating out the
+Gamma variates before performing variational inference. 
+This oracle represents an upper performance bound
+on the two semi-parametric approaches.
+See Table~\ref{table:local} for results.\footnote{
+Note that the Semi-RVRS results in Table~\ref{table:local} were obtained using the unbiased 
+sampler Algorithm~\ref{alg:semiunbiased} during training.  In \figref{fig:biasedsemi} in \secref{sec:addexp} we 
+provide a comparison to results obtained with the faster biased sampler defined in Algorithm~\ref{alg:semibiased}, 
+which yields nearly identical performance.}
+
+For both datasets we find that Semi-RVRS nearly matches the performance of the oracle, even with $\ZZ_\target = 0.5$,
+implying that Semi-RVRS yields a conditional posterior over the local latent variables that is nearly exact.
+Semi-DAIS also yields good performance but fails to approach the oracle upper bound even with $K=32$ gradient steps.
+Thus this experiment highlights a particular strength of RVRS, namely dealing with low-dimensional latent variables, 
+a regime in which methods based on expensive gradient-based MCMC can be overkill. Perhaps remarkably RVRS can still be competive
+in higher dimensions, as demonstrated in the Gaussian process experiment in \secref{sec:gp}.
+
+\input{local_table}
+
+
+
+\section{Discussion}
+
+\label{sec:disc}
+
+Given its relative simplicity, it is remarkable that RVRS can match---and in some cases exceed---the performance
+of more complex gradient-based hybrid variational inference schemes like UHA/DAIS \citep{geffner2021mcmc,zhang2021differentiable}.
+For this reason we believe it could be especially valuable to combine RVRS with other methods,
+since RVRS with moderate $\ZZ_\target$ provides a relatively cheap and simple way to achieve non-trivial refinement of the
+proposal distribution $\qphi(\bz)$. For example it would be natural to use a normalizing flow or 
+MixFlow \citep{xu2023mixflows} in place of a simple parametric proposal.
+This could be especially attractive in cases where there are diminishing returns to e.g.~using more layers (in the case of normalizing 
+flows) or more pushforwards (in the case of MixFlows).
+Importantly in RVRS we only need to differentiate through \emph{accepted} samples $\bz \sim \rr$, which limits
+the computational cost of leveraging RVRS. More broadly the design space of hybrid variational algorithms remains
+only partially explored and involves various algorithmic and computational trade-offs. 
+As such we expect that RVRS could be a useful
+component in the design of future hybrid variational inference methods. 
+
+
+\begin{ack}
+    We warmly thank Matthew D.~Hoffman for feedback on a draft manuscript.
+    MJ's contributions to the work reported here are independent of his role at Generate Biomedicines.
+\end{ack}
+
+
+
+
+
+
+
+

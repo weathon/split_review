@@ -1,0 +1,442 @@
+\title{Convolutional Deep Kernel Machines}
+
+\begin{abstract}
+Standard infinite-width limits of neural networks sacrifice the ability for intermediate layers to learn representations from data. Recent work (``A theory of representation learning gives a deep generalisation of kernel methods'', Yang et al. 2023) modified the Neural Network Gaussian Process (NNGP) limit of Bayesian neural networks so that representation learning is retained. Furthermore, they found that applying this modified limit to a deep Gaussian process gives a practical learning algorithm which they dubbed the ``deep kernel machine" (DKM). However, they only considered the simplest possible setting: regression in small, fully connected networks with e.g.\ 10 input features.  Here, we introduce convolutional deep kernel machines. This required us to develop a novel inter-domain inducing point approximation, as well as introducing and experimentally assessing a number of techniques not previously seen in DKMs, including analogues to batch normalisation, different likelihoods, and different types of top-layer. The resulting model trains in roughly 77 GPU hours, achieving around 99\% test accuracy on MNIST, 72\% on CIFAR-100, and 92.7\% on CIFAR-10, which is SOTA for kernel methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setcounter{footnote}{1}
+A key theoretical approach to studying neural networks is taking the infinite-width limit of a randomly initialised network.
+In this limit, the outputs become Gaussian process (GP) distributed, and the resulting GP is known as an NNGP \citeinfnn{}.
+However, despite a large body of work attempting to improve the predictive performance of NNGPs \citep{novak2018bayesian,garriga2018deep,arora2019exact,lee2020finite,li2019enhanced,shankar2020neural,adlam2023kernel}, they still empirically underperform finite NNs. Understanding why this gap exists will improve our understanding of neural networks.
+One hypothesis \citep[]{aitchison2020why, mackay1998introduction} is that the NNGP lacks representation learning, as the NNGP kernel is a fixed and deterministic function of the inputs, while the top-layer representation in a finite neural network is learned; representation learning is believed to be critical to the success of modern deep learning \citep{bengio2013representation,lecun2015deep}.
+One way to confirm this hypothesis would be to find an NNGP-like approach that somehow incorporates representation learning, and gives improved performance over the plain NNGP.
+While some theoretical approaches to representation learning have been developed \citep{antognini2019finite,dyer2019asymptotics,hanin2019finite,aitchison2020why,li2020statistical,yaida2020non,naveh2020predicting,zavatone2021asymptotics,zavatone2021exact,roberts2021principles,naveh2021self,halverson2021neural,seroussi2023separation}, they are not scalable enough to apply to many common datasets (e.g.\ \citealp{seroussi2023separation} could only consider a subset of 2048 points from CIFAR-10).
+Here, we develop the convolutional deep kernel machine (DKM), an NNGP-like theoretical approach which captures representation learning and can be scaled to datasets like CIFAR-10.
+Convolutional DKMs reduce (but still do not fully close) the gap between theoretical approaches and real neural networks, giving further evidence that representation learning is the critical component missing from approaches like the NNGP.
+
+Our theoretical approach is based on DKMs \citep{dkm}.
+DKMs are fundamentally a \textit{deep} Gaussian process (DGP), where the infinite-width limit has been taken carefully, to ensure that representation learning is retained.
+While a DGP is not a NN, they are very similar: both DGPs and NNs are deep, nonlinear function approximators that admit representation learning, and many formal connections between NNs and DGPs have been drawn in the literature \citep{dutordoir2021dnndgp,agrawal2020wide,pleiss2021limitations}.
+Furthermore, DGP-based theoretical approaches (i.e.\ DKMs) offer considerable simplifications over NN-based approaches.
+These mostly arise from the fact that the posterior over features in an infinite-width DGP is exactly multivariate Gaussian, even when that infinite-width limit retains representation learning. This is an important factor in the scalability of DKMs.
+
+Additionally, \citet{dkm} developed inducing-point methods for DKMs inspired by the DGP literature, making them particularly scalable.
+Naive, full-rank DKMs have cubic time-complexity in the number of training points, which is intractable in all but the smallest datasets.
+By contrast, inducing-point DKMs require linear compute in the number of datapoints (and cubic compute in the far smaller number of inducing points). 
+However, \citet{dkm} only considered regression in small fully-connected architectures with e.g.\ 10 input features.
+To compare the performance of DKMs to CNNs on datasets such as CIFAR-10, we must develop convolutional DKMs.
+
+However, developing an efficient, scalable DKM inducing point scheme for the convolutional setting is highly non-trivial. 
+Naively applying the inducing point inference scheme from \citet{dkm} implies taking images as inducing points, resulting in prohibitive $\mathcal{O}(P_\text{i}^3W^3H^3)$ operations, where $P_\text{i}$ is the number of inducing points, and $W,H$ are the width and height of the images. 
+One alternative is inducing patch schemes from the GP literature \citep{vanderwilk2017convgp,blomqvist2018convdgp,dutordoir2020dcgp}; however they cannot be applied to DKMs, as they rely on intermediate features, whereas DKMs only propagate kernel/Gram matrices through the layers, \textit{not} features. 
+We were thus forced to develop an entirely new inter-domain \citep{lazaro2009inter,hensman2017variational,rudner2020inter} convolutional inducing point scheme, designed specifically for the DKM setting. 
+To summarise, our contributions are:
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Introducing convolutional DKMs, which achieve SOTA performance for kernel methods on CIFAR-10 with an accuracy of 92.7\%.
+    \item Introducing an efficient inter-domain inducing point scheme for convolutional DKMs, which allows our largest model to train in 77 GPU hours, 1--2 orders of magnitude faster than full NNGP / NTK / Myrtle kernels.
+
+\end{itemize}
+
+
+
+\section{Related Work}
+
+DKMs were developed in ~\citet{dkm}, using a modified NNGP limit that retains representation learning. However, they only considered regression in small fully-connected networks.
+
+The NTK setting \citep{jacot2018neural} is a theoretical approach to understanding neural networks that is also based on infinite-width limits. 
+However, the NTK deals with very different phenomena from the NNGP/DKM setting, in that it describes the dynamics of gradient descent applied to a loss function. By contrast, the NNGP/DKM \citep{dkm} describes Bayesian networks under the posterior, which does not, in principle, involve any dynamics.
+A problem arises in the NTK setting, whereby the NTK, describing the dynamics of gradient descent, is constant through training in particular infinite-width limits.
+Recent work on the mu-P scaling has resolved this issue, by finding alternative limits in which the NTK is able to evolve through training \citep{yang2020feature,yang2022efficient}.
+
+There is a body of literature on infinite-width convolutional neural networks (CNNs) \citeinfcnn{}, specifically in the NNGP setting \citeinfnn{}. As mentioned before, NNGPs have a kernel that is a fixed, deterministic function of the inputs, and therefore do not allow for flexibility in the learned kernels/representations, unlike real, finite CNNs and unlike our convolutional DKMs \citep{aitchison2020why,dkm}.
+Convolutional DGPs use inducing patches for scalability \citecdgp{}.
+However, we cannot use their scheme here, as it requires features at each layer, while we work solely with Gram matrices. 
+Therefore we were forced to develop a new scheme. 
+Our DKM inducing point scheme is inter-domain \citeinter{}, in the sense that the inducing points do not mirror datapoints (images), but instead store information about the function in a different domain.
+Existing work on inter-domain inducing points does not address the DKM or convolutional settings.
+
+An alternative approach to getting a flexible kernel is to take the inputs, transform them through a NN (e.g.\ 10--40 layer CNN), then to use the outputs of the NN as inputs  to a standard kernel.
+This approach is known as deep kernel learning \citedkl[DKL; ]{}.
+DKMs are very different to DKL in that there is no underlying neural network.
+Instead the DKM directly transforms and allows flexibility in the kernels.%, without ever needing to use neural network weights/features.
+
+There are a small number of other ``deep kernel'' approaches such as convolutional kernel machines, \citep{mairal2014convolutional,mairal2016end,suykens2017deep,chen2019recurrent,tonin2023deep,achten2023semi}.
+These differ from our approach in that they lack the theoretical connection to representation learning in NNGPs, and thus cannot answer the questions raised in the Introduction.
+Moreover, many of these methods use a neural-network like architecture to give a flexible, feature-based approximation to an underlying fixed kernel, whereas our approach fundamentally allows for flexibility in the underlying kernel/representation; we believe this explains our performance advantage (Table~\ref{tab:nngp_ntk}).
+Nonetheless, there are fruitful connections to be drawn between NNGPs, physics-based theory \citep[e.g.][]{seroussi2023separation} and e.g.\ convolutional kernel networks \citep{mairal2014convolutional,mairal2016end}, and we hope that our work contributes to fostering a dialogue between these areas.
+
+
+\section{Background}
+
+
+\textbf{Deep Kernel Machines.}
+ In a nutshell, DKMs are derived from deep Gaussian processes where the intermediate layers $\Fell \in \mathbb{R}^{P \times N_\ell}$, with $P$ datapoints and $N_\ell$ features, have been made infinitely wide ($N_\ell \to \infty$). 
+However, in the traditional infinite-width limit, representations become fixed \citep[e.g.][]{aitchison2020why,dkm}.
+The DKM \citep{dkm} modifies the likelihood function so that, in the infinite limit, representations remain flexible and adapt to data.
+While the full derivation is somewhat involved, the key idea of the resulting algorithm is to consider the Gram matrices (which are $P \times P$ matrices like kernels) at each layer of the model as \textit{parameters}, and optimise them according to an objective.
+Here we give a short, practical introduction to DKMs.
+
+As DKMs are ultimately infinite-width DGPs, and we cannot practically work with infinite-width features, we must instead work in terms of Gram matrices:
+\begin{equation}
+    \label{eq:gram_matrix}
+    \Gell = \tfrac{1}{N_\ell} \Fell (\Fell)^T \in \mathbb{R}^{P \times P}.
+\end{equation}
+Note that from this point on we will always refer to $\Gell$ in Eq. (\ref{eq:gram_matrix}) as a ``Gram matrix", whilst the term ``kernel matrix" will carry the usual meaning of a matrix of similarities computed using a kernel function.
+Ordinarily, at each layer, a DGP computes the kernel matrix $\K_\text{features}(\Fellminusone) \in \mathbb R^{P \times P}$ from the previous layer's features. Since we no longer have access to $\Fellminusone$, but instead propagate $\Gellminusone$, computing $\K_\text{features}(\Fellminusone)$ is not possible in general. However, it turns out that for many kernels of interest, we can compute $\mathbf K$ from $\Gellminusone$. For example, isotropic kernels (such as the squared exponential) only depend on $\F$ through the normalised squared distance $R_{ij}$ between points, which can be computed from the Gram matrices,
+\begin{equation}
+\label{eq:isotropicproof}
+  R_{ij} = \tfrac{1}{N_\ell}\tsum_{\lambda=1}^{N_\ell}(F_{i\lambda} - F_{j\lambda})^2
+  = \tfrac{1}{N_\ell}\tsum_{\lambda=1}^{N_\ell}\b{F_{i\lambda}^2 - 2F_{i\lambda}F_{j\lambda} + F_{j\lambda}^2}
+  = G^\ell_{ii} -2G^\ell_{ij} + G^\ell_{jj},
+\end{equation}
+and hence we can instead compute the kernel matrix as 
+\begin{align}
+  \label{eq:K=Kfeatures}
+  \K(\Gellminusone) &= \K_\text{features}(\Fellminusone).
+\end{align}
+Here, $\K(\cdot)$ and $\K_\text{features}(\cdot)$ are functions that compute the same kernel, but $\K(\cdot)$ takes a Gram matrix as input, whereas $\K_\text{features}(\cdot)$ takes features as input.
+Notice that $\K(\Gellminusone) \in \mathbb{R}^{P \times P}$ has the same shape as $\Gellminusone$, and so it is possible to recursively apply the kernel function in this parametrisation, taking $\Gzero=\frac{1}{N_0}\X\X^T$ where $\X \in \mathbb R^{P \times N_0}$ is the input data:
+\begin{equation}
+    \label{eq:deepkernel}
+    \Gell = \K(\Gellminusone) = \underbrace{\K(\K( \dotsm \K}_{\ell \text{ times}}(\Gzero))).
+\end{equation}
+It turns out Eq.~\eqref{eq:deepkernel} exactly describes the traditional infinite-width limit of a DGP (i.e. the NNGP limit). 
+Notice that $\Gell$ is a fixed function of $\Gzero$ and thus cannot adapt to data (perhaps with the exception of a small number of tunable kernel hyperparameters). 
+This is a major disadvantage compared to finite NNs and DGPs, which flexibly learn representations at each layer from the data.
+
+The DKM solves this problem by taking a modified limit, the ``Bayesian representation learning limit''~\citep{dkm}.  
+Under this alternative limit, the Gram matrices have some flexibility, and are no longer fixed and equal to those given by Eq.~\eqref{eq:deepkernel}.
+Instead, the $L$ Gram matrices, $\Gone,\dotsc,\Gbigell$, become parameters which are optimised by maximising the DKM objective,% $\mathcal L(\Gone, \dotsc, \Gbigell)$,
+\begin{equation}
+  \label{eq:dkm_obj}
+  \mathcal{L}(\Gone,\dotsc,\Gbigell) = \log \P{\Y| \Gbigell} - \tsum_{\ell=1}^L \nu_\ell \KL{\N{\0, \Gell}}{\N{\0, \K(\Gellminusone)}}.
+\end{equation}
+The first term encourages good predictions by maximising the log-likelihood of the training data $\Y$, whilst the other KL-divergence terms form a regulariser that encourages $\Gell$ to be close to $\K(\Gellminusone)$. 
+The model reduces to the standard infinite-width limit (Eq.~\ref{eq:deepkernel}) when no data is observed, since the KL-divergence is minimised by setting $\Gell = \K(\Gellminusone)$. 
+Formally, the DKM objective is the evidence lower bound (ELBO) for an infinite-width DGP in the Bayesian representation learning limit.
+After optimising the training Gram matrices, prediction of unseen test points (which requires us to predict the test-test and test-train Gram matrix blocks for each layer progressively before predicting the final layer output) proceeds using an algorithm inspired by DGPs (see \citealt{dkm} for details).
+
+\textbf{Sparse DKMs.}
+As with all naive kernel methods, directly computing the DKM objective for all data is $\mathcal{O}(P_\text{t}^3)$, where $P_\text{t}$ is the number of datapoints, which is typically infeasible. As a DKM is ultimately an infinite-width DGP parameterised by Gram matrices rather than features, \citet{dkm} developed an inducing point scheme inspired by the DGP literature.
+
+In the GP context, inducing point schemes reduce computational complexity by using variational inference with an approximate posterior that replaces the training set (of size $P_\text{t}$) with a set of $P_\text{i}$ pseudo-inputs, called inducing points, where $P_\text{i}$ is usually much smaller than $P_\text{t}$. 
+The inducing points can be learned as variational parameters. 
+In DGPs, each layer is a GP, so we learn one set of inducing points for each layer. When using inducing points, the features at each layer are partitioned into inducing points $\F_\text{i}^\ell$ and training points $\F_\text{t}^\ell$. 
+Likewise, the kernel matrix is partitioned into blocks corresponding to inducing and training points.
+In a DKM, we partition $\G^\ell$ similarly,
+\begin{align}
+  \label{eq:G_block}
+  \Gell &= \begin{pmatrix}
+    \G_\text{ii}^\ell & \G_\text{it}^\ell\\
+    \G_\text{ti}^\ell & \G_\text{tt}^\ell
+  \end{pmatrix} &
+  \K(\Gell) &= \begin{pmatrix}
+    \K_\text{ii}(\G_\text{ii}^\ell) & \K_\text{it}(\Gell) \\
+    \K_\text{ti}(\Gell) & \K_\text{tt}(\G_\text{tt}^\ell)
+  \end{pmatrix},
+\end{align}
+with $\G_\text{ii}^\ell \in \mathbb{R}^{P_\text{i} \times P_\text{i}}$, $\G_\text{ti}^\ell \in \mathbb{R}^{P_\text{t} \times P_\text{i}}$, and $\G^\ell_\text{tt} \in \mathbb{R}^{P_\text{t} \times P_\text{t}}$. At each layer $\ell$, $\G_\text{ii}^\ell$ is learnt, whilst $\G_\text{ti}^\ell$ and $\G_\text{tt}^\ell$ are predicted using $\G_\text{ii}^\ell$ and $\K(\Gellminusone)$~\citep[see][]{dkm}. The sparse DKM objective is
+\begin{equation}
+  \label{eq:post_dkm_obj}
+  \mathcal{L}_\text{ind}(\G^1_\text{ii},\dotsc,\G^L_\text{ii}) {=} \text{GP-ELBO}\b{\Y_\text{t}; \G^L_\text{ii}, \G^L_\text{ti}, \G^L_\text{tt}} {-} \sum_{\ell=1}^L \nu_\ell \KL{\N{\0, \G_\text{ii}^\ell}}{\N{\0, \K(\G^{\ell-1}_\text{ii})}}.
+\end{equation}
+where $\text{GP-ELBO}\b{\Y_\text{t}; \G^L_\text{ii}, \G^L_\text{ti}, \G^L_\text{tt}}$ is the ELBO for a sparse GP with data $\Y_\text{t}$ and kernel $\K(\G_L$), and contains a likelihood term which measures the performance of the model on training data.
+This scheme is efficient, with time complexity $\mathcal{O}(L(P_\text{i}^3 + P_\text{i}^2 P_\text{t}))$, both because the KL terms in the sparse DKM objective depend only on $\G_\text{ii}$, and because obtaining predictions and computing the performance term in the DKM objective requires only the diagonal of $\G_\text{tt}^\ell$ (which mirrors the requirements for the GP ELBO; see \citealp{dkm} for details).
+
+
+
+\section{Methods}
+
+The overall approach to defining a convolutional DKM is to build convolutional structure into our kernel, $\K(\cdot)$, by taking inspiration from the infinite-width convolutional neural network literature \citeinfcnn{}. 
+Specifically, we will define the kernel to be the covariance between features induced by a single convolutional BNN layer.
+
+Take a convolutional BNN layer, with inputs $\Hellminusone \in \mathbb{R}^{P S_{\ell-1} \times N_{\ell-1}}$ and outputs $\Fell \in\mathbb{R}^{P S_\ell\times N_\ell}$. Here, $P$ is the number of images, $N_{\ell}$ is the number of output channels at layer $\ell$, and $S_{\ell}$ is the number of output spatial locations in the feature map (e.g.\ $S_\ell = W_{\ell} \times H_{\ell}$ for a 2D image). The convolutional weights are $\Well \in \mathbb{R}^{D \times N_{\ell-1} \times N_\ell}$, and $D$ is the number of spatial locations in a filter (e.g.\ a $3\times 3$ convolutional patch would have $D=9$). The BNN convolution operation (i.e.\ \texttt{Conv2d} in PyTorch) can be written as
+\begin{align}
+  \label{eq:cnn}
+  F_{ir,\lambda}^{ \ell} &= \tsum_{d\in \mathcal{D}} \tsum_{\mu=1}^{N_{\ell-1}} H^{ \ell-1}_{i(r+d),\mu} W^\ell_{d \mu \lambda}.
+\end{align}
+Here, $i$ indexes the image, $r$ the spatial location in the image, $d$ the location in the patch, and $\mu$ and $\lambda$ the input and output channels, respectively.
+This is natural for 1D convolutions, e.g.\ $r \in \{1,\dotsc,S_\ell\}$ and $d \in \mathcal{D}= \{-1, 0, 1\}$ (with $D = 3$ in this example), but also generalises to higher dimensions, e.g. using vectors.
+In a typical CNN, we would apply a nonlinearity $\phi$, e.g.\ relu, to the output of the previous layer to obtain the input to the next layer, i.e.\ $\Hellminusone = \phi(\Fellminusone)$.
+
+We will define the kernel as the covariance between the outputs of the convolutional layer (Eq.~\ref{eq:cnn}), $\sCo_{ir, js} = \E\sqb{F^{\ell}_{ir,\lambda} F^{\ell}_{js,\lambda} | \Hellminusone}$, where we have placed an IID Gaussian prior on the weights:
+\begin{align}
+  \label{eq:W}
+  \P{W_{d\mu\lambda}^\ell} &= \N{W_{d\mu\lambda}^\ell; 0, \tfrac{1}{D N_{\ell-1}}}.
+\end{align}
+Note that this implies all features (indexed by $\lambda$) are IID, so we consider an arbitrary feature $\lambda$. This is valid even if $N_\ell \to \infty$. Since the weights have zero mean, the distribution over features (Eq. \ref{eq:cnn}) has zero mean, so $\Gamma_{ir,js}$ is just the conditional covariance of the output features.
+To compute this covariance it will be useful to define a Gram-like matrix $\Chellminusone \in \mathbb{R}^{P S_{\ell-1} \times P S_{\ell-1}}$ from the input $\Hell$,
+\begin{equation}
+\label{eq:Cht}
+  \Chellminusone = \tfrac{1}{N_{\ell-1}} \Hellminusone \b{\Hellminusone}^T \in \mathbb{R}^{P S_{\ell-1} \times P S_{\ell-1}} , \qquad
+  \sCh_{ir, js}^{ \ell-1} = \tfrac{1}{N_{\ell-1}} \tsum_{\mu=1}^{N_{\ell-1}} H^{ \ell-1}_{ir, \mu} H^{ \ell-1}_{js, \mu}
+\end{equation}
+For the matrix multiplication to make sense, we have interpreted $\H_{\ell-1}\in \mathbb{R}^{P S_{\ell-1} \times N_{\ell-1}}$ as a matrix with $P S_{\ell-1}$ rows and $N_{\ell-1}$ columns.
+
+\begin{equation}\label{eq:conv_mixup}
+  \sCo_{ir, js}(\Chellminusone) = \E\sqb{F^{ \ell}_{ir,\lambda} F^{\ell}_{js,\lambda} | \Hellminusone} = \tfrac{1}{D} \tsum_{d\in\mathcal{D}} \sCh_{i(r+d), j(s+d)}^{\ell-1}.
+\end{equation}
+
+This is not yet a complete kernel function for our convolutional DKM since it does not take the previous layer Gram matrix $\Gellminusone$ (Eq.~\ref{eq:gram_matrix}) as input. 
+To complete the kernel, recall that $\Hellminusone$ is defined by applying e.g.\ a ReLU nonlinearity to $\Fellminusone$.
+Taking inspiration from infinite NNs, that would suggest we can compute $\Chellminusone$ from $\Gellminusone$ using an arccos kernel \citep{cho2009kernel},
+\begin{align}
+  \Chellminusone &= \Ch(\Gellminusone).
+\end{align}
+Here, $\Ch(\cdot)$ is a function that applies e.g.\ an arccos kernel to a Gram matrix, while $\Chellminusone$ is the specific value  at this layer. Combining this with Eq.~(\ref{eq:conv_mixup}), we obtain the full convolutional DKM kernel,
+\begin{equation}
+\label{eq:Kconv}
+  \K_\text{Conv}(\Gellminusone) = \E\sqb{\f^{\ell}_\lambda \b{\f^{\ell}_\lambda}^T |\Hellminusone} = \Co(\Ch(\Gellminusone)) \in \mathbb R^{PS_{\ell} \times PS_{\ell}},
+\end{equation}
+where in Eq.~(\ref{eq:Kconv}) we have written the equation for the entire matrix instead of a specific element as in Eq.~(\ref{eq:conv_mixup}). Here, $\f_\lambda^\ell \in \mathbb{R}^{P S_{\ell}}$ denotes a single feature vector, i.e.\ the $\lambda^\text{th}$ column of $\Fell$. From this perspective, $\Co(\cdot)$ (Eq.~\ref{eq:conv_mixup}) can be viewed as the kernelised version of the convolution operation.
+\textbf{Sparse convolutional DKMs.}
+Computing the full kernel for all training images is intractable in the full-rank case. 
+For example, CIFAR-10 has $50\,000$ training images of size $32 \times 32$, so we would need to invert a kernel matrix with $50\, 000 \cdot 32 \cdot 32 = 51\,200\,000$ rows and columns.
+Hence, we need a more efficient scheme. 
+Following \citet{dkm}, we consider a sparse inducing point DKM.
+However, inducing points usually live in the same space as datapoints.
+If we take inducing points as images, we end up with $\G^{\ell}_\text{ii} \in \mathbb R^{S_{\ell}P_\text{i} \times S_{\ell}P_\text{i}}$.
+This is still intractable, even for a small number of images.
+For CIFAR-10, $S=32 \cdot 32=1024$, so with as few as $P_\text{i}=10$ inducing points, $\G_\text{ii}^\ell$ is a $10,240 \times 10,240$ matrix, which is impractical to invert.
+Hence we resort to inter-domain inducing points.
+However, we cannot use the usual inducing patch scheme \citep{vanderwilk2017convgp}, as it requires access to test/train feature patches at intermediate layers, but we only have Gram matrices.
+
+Therefore we propose a new scheme where the inducing points do not have image-like spatial structure.
+In particular, the Gram matrix blocks have sizes $\G_\text{ii}^\ell \in \mathbb{R}^{P_\text{i}^\ell \times P_\text{i}^\ell}$, $\G_\text{it}^\ell \in \mathbb{R}^{P_\text{i}^\ell \times S_{\ell} P_\text{t}}$ and $\G_\text{tt}^\ell \in \mathbb{R}^{S_{\ell} P_\text{t} \times S_{\ell} P_\text{t}}$, so that the full Gram matrices are $\Gell \in \mathbb{R}^{(P_\text{i}^\ell + S_{\ell} P_\text{t}) \times (P_\text{i}^\ell + S_{\ell} P_\text{t})}$, with one row/column for each inducing point, and an additional row/column for each location in each of the train/test images. 
+Note that $P^\ell_\text{i}$ will be able to vary by layer in our inducing-point scheme.
+All kernel/Gram matrix like objects (specifically, the outputs of $\Co(\cdot)$ and $\Ch(\cdot)$) have this same structure.
+
+We now show how we define these inducing points and compute the relevant covariances, forming the primary technical contribution of this paper. Previously, we considered only spatially structured $\H^{\ell-1}$ and $\F^{\ell}$.
+Now, we consider $\Hellminusone \in\mathbb{R}^{(P^{\ell-1}_\text{i} + S_{\ell-1} P_\text{t}) \times N_{\ell-1}}$, formed by concatenating non-spatial $\H^{\ell-1}_\text{i}\in\mathbb{R}^{P^{\ell-1}_\text{i} \times N_{\ell-1}}$ (subscript  ``i'' for inducing points) with spatially structured $\H^{\ell-1}_\text{t}\in\mathbb{R}^{S_{\ell-1} P_\text{t} \times N_{\ell-1}}$ (subscript ``t'' for test/train points). 
+Likewise, we have $\Fell \in \mathbb{R}^{(P_\text{i}^\ell + S_{\ell} P_\text{t}) \times N_\ell}$ formed by combining non-spatial $\F^\ell_\text{i} \in \mathbb{R}^{P_\text{i}^\ell \times N_\ell}$ with spatially structured $\F^\ell_\text{t} \in \mathbb{R}^{S_{\ell} P_\text{t} \times N_\ell}$,
+\begin{align}
+\label{eq:indfeatures}
+  \Hellminusone &= \begin{pmatrix} \H^{\ell-1}_\text{i} \\ \H^{\ell-1}_\text{t} \end{pmatrix} & \Fell &= \begin{pmatrix}
+    \F^\ell_\text{i}\\
+    \F^\ell_\text{t}\\
+  \end{pmatrix}.
+\end{align}
+As in Eq.~\ref{eq:Cht}, we define
+$\Chellminusone$ as the normalised product of the activations
+with themselves. Breaking this expression into blocks (with the bottom right block $\Ch^{\ell-1}_\text{tt}$ matching Eq.~\eqref{eq:Cht}, this is
+\begin{equation}
+\label{eq:indgram}
+  \begin{pmatrix}
+  \Ch^{\ell-1}_\text{ii} & \Ch^{\ell-1}_\text{it} \\
+  \Ch^{\ell-1}_\text{ti} & \Ch^{\ell-1}_\text{tt} 
+  \end{pmatrix}
+  = \tfrac{1}{N_{\ell-1}} 
+  \begin{pmatrix}
+    \H^{\ell-1}_\text{i} \b{\H^{\ell-1}_\text{i}}^T & 
+    \H^{\ell-1}_\text{i} \b{\H^{\ell-1}_\text{t}}^T\\
+    \H^{\ell-1}_\text{t} \b{\H^{\ell-1}_\text{i}}^T & 
+    \H^{\ell-1}_\text{t} \b{\H^{\ell-1}_\text{t}}^T
+  \end{pmatrix}.
+\end{equation}
+
+Note that while the features in Eq.~\ref{eq:indfeatures} can only be realised for finite $N_\ell$, Eq.~\ref{eq:indgram} is valid as $N_\ell \to \infty$. As in Eq.~\ref{eq:Kconv}, the kernel matrix $\K_\text{Conv}(\Gellminusone)$ is formed as the covariance of features, with $\f_\lambda^\ell \in \mathbb{R}^{(P_\text{i}^\ell + S_{\ell} P_\text{t})}$ a single feature vector / column of $\Fell$. Broken into the inducing and test/train blocks,
+\begin{equation}
+  \begin{pmatrix}
+  \K^\text{Conv}_\text{ii} & \K^\text{Conv}_\text{it} \\
+  \K^\text{Conv}_\text{ti} & \K^\text{Conv}_\text{tt} 
+  \end{pmatrix}
+  =
+  \begin{pmatrix}
+  \Co_\text{ii}(\Ch^{\ell-1}_\text{ii}) & \Co_\text{it}(\Ch^{\ell-1}_\text{it}) \\
+  \Co_\text{ti}(\Ch^{\ell-1}_\text{ti}) & \Co_\text{tt}(\Ch^{\ell-1}_\text{tt}) 
+  \end{pmatrix}  
+  =\E\sqb{
+  \begin{pmatrix}
+  \f_\lambda^{\text{i}; \ell} \b{\f_\lambda^{\text{i}; \ell}}^T & 
+  \f_\lambda^{\text{i}; \ell} \b{\f_\lambda^{ \ell}}^T \\
+  \f_\lambda^{ \ell} \b{\f_\lambda^{\text{i}; \ell}}^T &
+  \f_\lambda^{ \ell} \b{\f_\lambda^{ \ell}}^T 
+  \end{pmatrix} \middle| \Hellminusone}.
+\end{equation}
+At a high-level, this approach is a natural extension of the sparse DKM procedure \citep{dkm}.
+In particular, the test/train block $\Co_\text{tt}(\Ch^{\ell-1}_\text{tt})$ remains the same as Eq.~\eqref{eq:Kconv}.
+However, to get concrete forms for $\Co_\text{it}$ and $\Co_\text{ii}$ we need to choose $\f_\lambda^{\text{i}; \ell}$.
+For this $\f_\lambda^{\text{i}; \ell}$ to work well, it needs to have useful, informative correlations with $\f_\lambda^{\text{t}; \ell}$.
+One way to achieve this is to define $\F^\ell_\text{i}$ in terms of the same weights $\W^\ell$ as $\F^\ell_\text{t}$ (from Eq.~\ref{eq:cnn}), thereby making them correlated.
+However, it is not obvious how to do this, as $\W^\ell$ in Eq.~\eqref{eq:cnn} is a convolutional filter, with spatially-structured inputs and outputs, while $\F^\ell_\text{i} \in \mathbb{R}^{P^\ell_\text{i} \times N}$ has no spatial structure.
+Our solution is to create artificial patches from linear combinations of the inducing points using a new learned parameter, $\Cell \in \mathbb{R}^{D P_\text{i}^\ell \times P_\text{i}^{\ell-1}}$,
+\begin{align}
+  \label{eq:Fi}
+  F^{\text{i};\ell}_{i, \lambda} &= \sum_{d\in\mathcal{D}} \sum_{\mu=1}^N W^\ell_{d \mu, \lambda} \sum_{i'} C^\ell_{d i, i'} H^{\text{i}; \ell-1}_{i', \mu}.
+\end{align}
+Intuitively, $\sum_{i'} C^\ell_{d i, i'} H^{\text{i}; \ell-1}_{i', \mu}$ takes non-spatial inducing inputs, $H^{\text{i}; \ell-1}_{i', \mu}$, and converts them into a tensor with shape $D P_\text{i}^\ell \times N_{\ell-1}$, which can be understood as patches. Those patches can then be convolved with $\W^\ell$ to get a single output for each patch, $F^{\text{i}; \ell}_{i, \lambda}$. As a neat side effect, note that changing $P_\text{i}^\ell$ in $\Cell \in \mathbb{R}^{D P_\text{i}^\ell \times P_\text{i}^{\ell-1}}$ lets us vary the number of inducing points at each layer. The parameters $\Cell$ are learned by optimising Eq. (\ref{eq:post_dkm_obj})
+\begin{align}
+  \sCo^\text{ii}_{i,j}(\Ch_\text{ii}^{\ell-1}) &= \E\sqb{F_{i,\lambda}^{\text{i};\ell}\b{F_{j, \lambda}^{\text{i};\ell}}| \H^{\ell-1}}= \tfrac{1}{D} \sum_{d\in\mathcal{D}} \sum_{i'=1}^{P_\text{i}^{\ell-1}} \sum_{j'=1}^{P_\text{i}^{\ell-1}} C^\ell_{d i, i'} C^\ell_{d j, j'} \sCh^{\text{ii}; \ell-1}_{i'j'}\\
+  \sCo^\text{it}_{i,js}(\Ch_\text{it}^{\ell-1}) &= \E\sqb{F_{i,\lambda}^{\text{i};\ell}\b{F_{js, \lambda}^{\text{t};\ell}}| \H^{\ell-1}}= \tfrac{1}{D} \sum_{d\in\mathcal{D}} \sum_{i'=1}^{P_\text{i}^{\ell -1}} C^\ell_{d i, i'} \sCh_{i', j(s+d)}^{\text{it}; \ell-1}.
+\end{align}
+
+This fully defines our inducing point scheme. 
+
+
+
+
+\begin{table}[t]
+    \centering
+    \caption{Test accuracies (\%) for model selection experiments. Base model used $\nu_\ell=1$, Batch / Batch normalisation, Batch / Batch rescaling, Global Average Pooling, and a categorical likelihood. Bold shows values statistically similar to the maximum in each category, according to a one-tailed Welch test.}
+    \label{tab:variants}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{ccccc}
+        \toprule
+        Category                &Setting                                      &MNIST                         &CIFAR-10                             &CIFAR-100\\
+        \midrule
+        \multirow{7}{*}{\parbox{2cm}{\centering Regularisation Strength $\nu_\ell$}} 
+                               &$\infty$ (inducing NNGP) &72.19 $\pm$ 0.11          &53.74 $\pm$ 0.38          &30.94 $\pm$ 0.54\\
+                               &$10^4$                   &80.79 $\pm$ 0.49          &52.26 $\pm$ 0.27          &28.54 $\pm$ 0.11\\
+                               &$10^2$                   &96.96 $\pm$ 0.10          &71.06 $\pm$ 0.11          &48.23 $\pm$ 0.11\\
+                               &$10^0$                   &\textbf{99.20 $\pm$ 0.02} &87.86 $\pm$ 0.09          &64.08 $\pm$ 0.24\\
+                               &$10^{-2}$                &\textbf{99.16 $\pm$ 0.05} &\textbf{89.48 $\pm$ 0.15} &\textbf{65.64 $\pm$ 0.20}\\
+                               &$10^{-4}$                &\textbf{99.14 $\pm$ 0.05} &\textbf{89.68 $\pm$ 0.03} &\textbf{65.91 $\pm$ 0.20}\\
+                               &0                        &\textbf{99.16 $\pm$ 0.05} &\textbf{89.75 $\pm$ 0.09} &\textbf{65.93 $\pm$ 0.19}\\
+        \midrule
+        \multirow{5}{*}{\parbox{2cm}{\centering Normalisation (Inducing / Train-Test)}}
+                               &Batch / Batch            &\textbf{99.20 $\pm$ 0.02} &\textbf{87.86 $\pm$ 0.09} &\textbf{64.08 $\pm$ 0.24}\\
+                               &Batch / Location         &99.05 $\pm$ 0.03          &\textbf{87.91 $\pm$ 0.17} &\textbf{64.05 $\pm$ 0.27}\\
+                               &Local / Image            &99.14 $\pm$ 0.01          &\textbf{87.73 $\pm$ 0.12} &\textbf{64.37 $\pm$ 0.28}\\
+                               &Local / Local            &\textbf{99.13 $\pm$ 0.05} &\textbf{87.54 $\pm$ 0.09} &\textbf{63.75 $\pm$ 0.11}\\
+                               &None / None              &\textbf{99.16 $\pm$ 0.04} &\textbf{87.50 $\pm$ 0.19} &\textbf{64.23 $\pm$ 0.08}\\
+        
+        \midrule
+        \multirow{6}{*}{\parbox{2cm}{\centering Rescaling (Inducing / Train-Test)}}
+                               &Batch / Batch            &\textbf{99.20 $\pm$ 0.02} &\textbf{87.86 $\pm$ 0.09} &\textbf{64.08 $\pm$ 0.24}\\
+                               &Batch / Location         &99.07 $\pm$ 0.02          &\textbf{87.98 $\pm$ 0.16} &62.72 $\pm$ 0.15\\
+                               &Local / Batch            &\textbf{99.19 $\pm$ 0.02} &87.56 $\pm$ 0.05          &\textbf{63.92 $\pm$ 0.13}\\
+                               &Local / Location         &99.03 $\pm$ 0.03          &\textbf{87.80 $\pm$ 0.04} &\textbf{63.30 $\pm$ 0.43}\\
+                               &Local / None             &\textbf{99.13 $\pm$ 0.04} &\textbf{87.75 $\pm$ 0.04} &\textbf{63.88 $\pm$ 0.20}\\
+                               &None / None              &\textbf{99.13 $\pm$ 0.04} &\textbf{87.77 $\pm$ 0.11} &\textbf{64.05 $\pm$ 0.14}\\
+        
+        \midrule
+        \multirow{4}{*}{Top Layer}
+                               &Global Average Pooling   &\textbf{99.20 $\pm$ 0.02} &\textbf{87.86 $\pm$ 0.09} &\textbf{64.08 $\pm$ 0.24}\\
+                               &Linear                   &\textbf{99.13 $\pm$ 0.03} &\textbf{87.89 $\pm$ 0.15} &\textbf{64.06 $\pm$ 0.19}\\
+                               &GAP + Mixup              &99.15 $\pm$ 0.01          &\textbf{87.69 $\pm$ 0.10} &\textbf{64.42 $\pm$ 0.34}\\
+                               &Linear + Mixup           &99.12 $\pm$ 0.02          &\textbf{87.66 $\pm$ 0.05} &63.01 $\pm$ 0.08\\
+        \midrule
+        \multirow{2}{*}{Likelihood} 
+                               &Gaussian                 &99.05 $\pm$ 0.01          &85.96 $\pm$ 0.29          &26.93 $\pm$ 0.69\\
+                               &Categorical              &\textbf{99.20 $\pm$ 0.02} &\textbf{87.86 $\pm$ 0.09} &\textbf{64.08 $\pm$ 0.24}\\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\begin{table}[!t]
+\centering
+\caption{Test accuracies (\%) using different numbers of inducing points in the ResNet blocks, selecting the best hyperparameters from Table~\ref{tab:variants}. Bold shows values statistically similar to the maximum in each category, according to a one-tailed Welch test. Also included is walltime per epoch.}
+\label{tab:indpoints_test}
+\begin{tabular}{cccc|c}
+        \toprule
+        Ind. Points &MNIST &CIFAR-10 &CIFAR-100 & Time per epoch (s)\\
+        \midrule
+                               16 / 32 / 64               &98.99 $\pm$ 0.06          &83.15 $\pm$ 0.26          &53.89 $\pm$ 0.25          & 45\\
+                               32 / 64 / 128              &99.09 $\pm$ 0.05          &86.75 $\pm$ 0.14          &61.10 $\pm$ 0.22          & 54\\
+                               64 / 128 / 256             &99.12 $\pm$ 0.01          &88.99 $\pm$ 0.05          &64.31 $\pm$ 0.19          & 82\\
+                               128 / 256 / 512            &99.10 $\pm$ 0.04          &91.00 $\pm$ 0.16          &67.14 $\pm$ 0.16          & 155\\
+                               256 / 512 / 1024           &99.16 $\pm$ 0.03          &92.17 $\pm$ 0.10          &70.33 $\pm$ 0.23          & 420\\
+                               512 / 1024 / 2048          &\textbf{99.26 $\pm$ 0.02} &\textbf{92.69 $\pm$ 0.06} &\textbf{72.05 $\pm$ 0.23} & 1380\\
+        
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Comparison of test accuracy against other kernel methods with and without learned parameters.}
+\label{tab:nngp_ntk}
+\begin{tabular}{clccc}
+        \toprule
+        & Paper & Method & CIFAR-10 \\
+        \midrule
+        & This paper & DKM-DA-GAP & \textbf{92.69\%}\\
+        \midrule
+        \multirow{6}{*}{\parbox{2cm}{\centering Kernel methods without parameters}} &\citet{novak2018bayesian} & NNGP-GAP & 77.43\%\\
+        &\citet{arora2019exact} & NNGP-GAP & 83.75\% \\
+        &\citet{lee2020finite} & NNGP-GAP-DA & 84.8\% \\
+        &\citet{li2019enhanced} & NNGP-LAP-flip & 88.92\%\\
+        &\citet{shankar2020neural} & Myrtle10 & 89.80\%\\
+        &\citet{adlam2023kernel} & Tuned Myrtle10 DA CG & 91.2\%\\
+        \midrule
+        \multirow{4}{*}{\parbox{2cm}{\centering Kernel methods with parameters}} & \citep{shi2020sparse} & SOVI Conv GP & 68.19\%\\
+        &\citep{blomqvist2018convdgp} & Conv DGP & 75.89\%\\
+        &\citep{dutordoir2020dcgp} & Conv DGP & 76.17\%\\
+        & \citep{mairal2014convolutional} & CKN & 82.18\%\\
+        & \citep{mairal2016end} & Sup CKN & 89.8\%\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\textbf{Model variants}
+To fully evaluate our algorithm, it was necessary to introduce and test a variety of model variants and new techniques. In particular, we consider 5 hyperparameters/architectural choices: the regularisation strength constant $\nu$ in the objective function (Eq.e.
+We used a model architecture that mirrors the ResNet20 architecture  \citep{he2016residual}, meaning we use the the same number of convolution layers with the same strides, we use normalisation in the same places, and we use skip connections, which compute a convex combination of the Gram matrix outputted by a block with the inputted Gram matrix, thereby allowing information to ``skip'' over blocks. To mirror the ReLU, we used a first-order arccos kernel~\citep{cho2009kernel} for $\Ch(\cdot)$ everywhere.
+Where the original ResNet20 architecture uses \{16,32,64\} channels in its blocks, we initially used \{128,256,512\} inducing points (i.e.\ we set $P_\text{i}^\ell=128$ for layers $\ell$ contained in the first block, $P_\text{i}^\ell=256$ in the second block, and $P_\text{i}^\ell=512$ in the third block). This is only possible since our inducing point scheme allows $P_\text{i}^\ell$ to vary across layers, which is not true of the original sparse DKM. \{128,256,512\} was chosen to balance model capacity and computational resources for the model selection experiments.
+ 
+We optimised all parameters using Adam, with $\beta_1=0.8,\,\beta_2=0.9$, training for 100 epochs and dividing the learning rate by 10 at epochs 40 and 80, with an initial learning rate of 0.01\footnote{The $\nu_\ell = \infty$ runs for MNIST used an initial learning rate of 0.001 due to numerical issues caused by 0.01.}. More careful optimisation (e.g. more epochs and less aggressive scheduling) could potentially give better results, but in the interest of total experiment time we chose this heuristic. We used data augmentation (random cropping and horizontal flips), and a batch size of 256. We also used ZCA (zero-phase component analysis) whitening, which is commonly used in kernel methods \citep[e.g.\ ][]{shankar2020neural,lee2020finite} (for the ZCA regularisation parameter, $\epsilon$, we used 0.1).
+
+We initialise the inducing inputs by randomly selecting patches from the training set, and then initialise the inducing Gram blocks $\G_\text{ii}^\ell$ at the NNGP case by propagating the inducing inputs through the model and setting $\G_\text{ii}^\ell$ at each layer equal to the incoming kernel matrix block $\K_\text{ii}^\ell$. The inducing output parameters $\boldsymbol \mu$ and $\mathbf A$ are initialised randomly from a Gaussian distribution (for $\mathbf A$ we initialise $\mathbf{L}$ as Gaussian and then compute $\mathbf{A}=\mathbf{LL}^T$ to ensure $\mathbf{A}$ is positive-definite). We initialise the mixup parameters $\Cell$ randomly.
+
+We tested on the MNIST\footnote{\url{https://yann.lecun.0}~\citep{lecun1998gradient}, CIFAR-10, and CIFAR-100\footnote{\url{https://cs.toronto.edu/~kriz/cifar.html} Licence: Unknown}~\citep{krizhevsky2009learning} image classification datasets.
+For each hyperparameter and dataset, we bold all settings whose performance was statistically similar to the best, using a one-tailed Welch's t-test
+at a 5\% significance level.
+
+Setting $\nu=\infty$ causes the KL term in the objective to dominate, and forces $\Gell = \K(\Gellminusone)$, as in a standard infinite-width CNN \citeinfcnn{}.
+As $\nu$ controls the strength of the regularisation, performance decreases for larger values, as this causes the model to underfit.
+On the other hand, we expect the model to overfit if we set $\nu$ too small, and we indeed observe a degradation in test LL (Table~\ref{tab:dof_further}) though not accuracy when we set $\nu=0$. We find $\nu{=}10^{-2}$ is the strongest regularisation statistically indistinguishable from optimal accuracy.
+We did not observe meaningful differences in test accuracy between any of the normalisation or rescaling schemes, though not using any normalisation or rescaling can negatively impact train performance (see Table \ref{tab:norm_further}). Hence we selected the next simplest scheme, ``Batch / Batch", for the benchmark experiments later on. This scheme divides the Gram matrix by the mean of its diagonal elements for the normalisation, and multiplies each block by a learned scalar for the rescaling. We saw little difference between the top layers, so we settled on global average pooling for later experiments, reflecting common practice in deep learning and NNGPs \citep[e.g.\ ][]{novak2018bayesian}. We also tried adding inducing point ``mixups" similar to the mechanism in our convolutional layers, but this seemed to have no benefit. Using a categorical likelihood provides moderate advantages for CIFAR-10 and MNIST, which have 10 classes, and dramatic improvements for CIFAR-100, which has 100 classes.
+\textbf{Benchmark performance.}
+Using what we learned from the model selection experiments, we ran a set of experiments with $\nu_\ell=10^{-2}$, ``Batch / Batch" normalisation and rescaling, global average pooling, and a categorical likelihood.
+In these experiments, we varied the number of inducing points in each block from $\{16,32,64\}$ (in the first, middle, and last blocks) up to $\{512,1024,2048\}$.
+We trained for 200 epochs, reducing the learning rate by a factor of 10 at epochs 80 and 160, starting from an initial learning rate of 0.01.
+ 
+As expected, increasing the number of inducing points increases observed test accuracy, with diminishing returns for MNIST, moderate improvements for CIFAR-10, and considerable improvements for CIFAR-100.
+Our largest model, with 2048 inducing points in the last block, achieved $99.3\%$ test accuracy on MNIST, $92.7\%$ on CIFAR-10, and $72\%$ on CIFAR-100. Training this model on CIFAR-10/100 took around $77$ hours on a single NVIDIA A100, but we emphasise that we used double precision floating points for simplicity of implementation, and with some care taken to preserve numerical stability, this could be dramatically sped up using single precision arithmetic.
+
+\textbf{Comparisons against other models.}
+In Table~\ref{tab:nngp_ntk}, we compare our best model against other pure kernel methods, including those without parameters like NNGP and NTK, and those with parameters like convolutional kernel networks.
+Our model outperforms even the best pure kernel methods \citep{adlam2023kernel,shankar2020neural,li2019enhanced,mairal2016end}. 
+These models are not directly comparable to ours, as we developed an efficient inducing point scheme, whereas NNGP/NTK methods usually compute the full training kernel matrix.
+
+found that the most efficient Myrtle-5/7/10 kernels from \citet{shankar2020neural} took 316/330/508 GPU hours for the full \num{60000} CIFAR-10 dataset on an Nvidia V100, which is around one order of magnitude more than our training time.
+Overall, we have narrowed (but not entirely eliminated) the gap to NNs by improving the performance of kernel methods.
+
+
+\section{Conclusion and Limitations}
+
+We have developed convolutional DKMs, and an efficient inter-domain inducing point approximation scheme.
+We performed a comprehensive set of experiments to investigate the effect of different architectural choices, before selecting the final architecture to compare against existing methods.
+Our best models obtained 99\% test accuracy on MNIST, 92.7\% on CIFAR-10 and 72\% on CIFAR-100.
+This is state-of-the-art for kernel-methods / infinite NNs, bringing theoretical approaches closer in performance to neural networks,
+and there is considerable room for development to close the gap even further.
+One limitation of our work is that we did not use high resolution image datasets like ImageNet~\citep{deng2009imagenet} as we have not yet developed the efficient tricks (such as lower/mixed precision floating point arithmetic, more efficient memory utilization, and numerical methods for e.g. inverting matrices) to enable these larger datasets.
+It may be possible to adapt existing ideas from the kernel literature (\citet{adlam2023kernel} and \citet{maddox2022lowprecision}, for example) to address some of these issues, in addition to leveraging multi-GPU setups, but we leave this to future work.
+
+
+
+\section{Acknowledgements}
+
+Edward Milsom and Ben Anson are funded by the Engineering and Physical Sciences Research Council via the COMPASS Centre for Doctoral Training at the University of Bristol. This work was carried out using the computational facilities of the Advanced Computing Research Centre, University of Bristol - \url{http://www.bris.ac.uk/acrc/}.  We would like to thank Dr Stewart for funding compute resources used in this project.
+
+
+
+\section{Reproducibility Statement}
+
+
+
+
+
+
+

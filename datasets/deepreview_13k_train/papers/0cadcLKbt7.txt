@@ -1,0 +1,397 @@
+\title{TPI-LLM: Serving 70B-scale LLMs Efficiently on Low-resource Edge Devices}
+
+\begin{abstract}
+Large model inference is shifting from cloud to edge due to concerns about the privacy of user interaction data. However, edge devices often struggle with limited computing power, memory, and bandwidth, requiring collaboration across multiple devices to run and speed up LLM inference. Pipeline parallelism, the mainstream solution, is inefficient for single-user scenarios, while tensor parallelism struggles with frequent communications. In this paper, we argue that tensor parallelism can be more effective than pipeline on low-resource devices, and present a compute- and memory-efficient tensor parallel inference system, named TPI-LLM, to serve 70B-scale models. TPI-LLM keeps sensitive raw data local in the users' devices and introduces a sliding window memory scheduler to dynamically manage layer weights during inference, with disk I/O latency overlapped with the computation and communication. This allows larger models to run smoothly on memory-limited devices. We analyze the communication bottleneck and find that link latency, not bandwidth, emerges as the main issue, so a star-based allreduce algorithm is implemented. Through extensive experiments on both emulated and real testbeds, TPI-LLM demonstrated over 80\% less time-to-first-token and token latency compared to Accelerate, and over 90\% compared to Transformers and Galaxy, while cutting the peak memory footprint of Llama 2-70B by 90\%, requiring only 3.1 GB of memory for 70B-scale models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recently, Large Language Models (LLMs) have been widely deployed in the cloud for inference. User inputs are uploaded to the cloud, where high-performance GPUs are used to compute output sequences, and then sent back to user devices for display. This process poses privacy risks, as user prompts are exposed to network intermediaries and clouds. 
+Therefore, there is an increasing need to shift LLM services to the network edge, such as on laptops, hand phones, tablets, and desktop computers. However, edge devices have very limited memory (4-16 GB) and computing power (often CPU-only). Even with quantization, running a Llama 3.1-70B model still requires at least 40 GB of memory, which far exceeds the capacity of most edge devices. Besides, running Bert-L on one Nano-M device results in a latency that is 120$\times$ longer than on one A100 GPU. This gap requires the use of more edge devices to support and speed up LLM inference on the network edge.
+
+While advanced LLM serving systems \citep{shoeybi2019megatron,rasley2020deepspeed,288582,298679,miao2024spotserve} have been designed for high-performance GPU clusters, recent efforts \citep{zhang2024edgeshard, mei2024helix, borzunov2024distributed} are adapting these systems to edge environments, by adaptively partitioning model between edge devices and optimizing schedulers to boost token throughput. However, in smart home scenarios like smart speaker, edge LLM systems often handle one user request at a time, making them degrade from pipeline to model parallelism and leaving devices idle most of the time. Thus, tensor parallelism is preferred for better efficiency. For instance, \cite{ye2024galaxy} combine tensor and sequence parallelism to reduce token latency and \cite{wei2024communication} introduce block parallelism to restructure Transformer layers. 
+
+However, even with 8 devices sharing the load, running full-precision Llama 2-70B still requires 35 GB per device, memory remains a shortage. Solutions like memory block paging \citep{kwon2023efficient} and optimized KVCache storage \citep{jin2023s,lee2024infinigen} help schedule data between GPUs and CPUs, but unfortunately, GPUs are not available on most edge devices. As a popular alternative, Accelerate \citep{accelerate} can offload model data from a CPU to a disk to run larger models, but its blocking I/O drastically slows inference, with token latency increases to 30 seconds per token on Llama 3.1-8B.
+
+In this work, we analyze why tensor parallelism is more effective than model parallelism on low-resource edge devices and present TPI-LLM, a computing- and memory-efficient tensor parallel inference framework to serve LLM models. Constrained by the high link latency, a star-based allreduce algorithm is implemented. To address the memory shortage, a sliding window memory scheduler is further introduced. We build a prototype of TPI-LLM with 3K LoC and two testbeds using Klonet \citep{ma2024klonet} and 4 laptops. Extensive results on Llama 3.1-8B/70B \citep{dubey2024llama}, Llama 2-3B/7B/13B/70B \citep{touvron2023llama} and Yi-34B \citep{ai2024yi} demonstrate the significant reduction of the memory footprint and faster inference speed compared to Transformers \citep{wolf2020transformers}, Acclerate \citep{accelerate}, and Galaxy \citep{ye2024galaxy}.
+
+We summarize the main contributions of this work as follows:
+\begin{itemize}
+\item We design a TPI-LLM for edge LLM serving, which keeps prompt privacy in mind to allow edge devices with limited computing power collaborate to deliver faster inference.
+\item We find that network bandwidth is no longer an issue. Instead, link latency causes high delays in advanced allreduce algorithms. Thus, a star-based allreduce algorithm is implemented, which greatly outperforms ring- and tree-based methods.
+\item We introduce a sliding window memory scheduler, which asynchronously loads and unloads layer weights and overlaps disk I/O latency with computations and communications, enabling the inference of larger models on low-memory devices.
+\item We prototype TPI-LLM and show that it reduces time-to-first-token and token latency by over 80\% compared to Accelerate and over 90\% compared to Transformers and Galaxy. It serves Llama 2-70B with a peak memory footprint of 3.1 GB across 8 low-resource devices.
+\end{itemize}
+
+
+
+\section{Observations and Motivations}
+
+Before presenting our TPI-LLM system, we address two questions that guide our design:
+
+\textit{Q1: On low-resource edge devices, which dominate inference time: computation or communication? Which is more efficient, tensor parallelism or model parallelism?}
+
+On the network edge, the balance between computation and communication differs from that in high-performance GPU clusters. To determine whether tensor or model parallelism offers more benefits, it is essential to identify which—computation or communication—takes up more time. For this purpose, we examine the Llama 3.1-8B model on a LAN network with 4 laptops of 8 cores. The network bandwidth between them is 178 Mbps, and the devices implement allreduce communications using a parameter server architecture \citep{li2014scaling}.
+
+\begin{figure}[h]
+    \hspace{-1cm}
+    \centering
+    \begin{subfigure}[b]{0.38\textwidth}
+        \centering
+        \includegraphics[height=.17\textheight]{figures/timeline_model_vs_tensor_parallelism.pdf}
+        \caption{}
+        \label{fig:timeline_model_vs_tensor_parallelism}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.28\textwidth}
+        \centering
+        \includegraphics[height=.17\textheight]{figures/compute_communication_time_ratio.pdf}
+        \caption{}
+        \label{fig:compute_communication_time_ratio}
+    \end{subfigure}
+    \hspace{3mm}
+    \begin{subfigure}[b]{0.28\textwidth}
+        \centering
+        \includegraphics[height=.17\textheight]{figures/tp_memory_usage_comparison.pdf}
+        \caption{}
+        \label{fig:tp_memory_usage_comparison}
+    \end{subfigure}
+    \caption{Comparison of (a,b) tensor and model parallelism in terms of computational and communication time and (c) memory footprint each device with increasing tensor parallel nodes.}
+\end{figure}
+
+Figures \ref{fig:timeline_model_vs_tensor_parallelism} and \ref{fig:compute_communication_time_ratio} show the timeline and computing-communication time ratio for model and tensor parallelism during inference. In model parallelism, communication accounts for only 2\% of the time, with most spent on computation. However, when one device is computing, others are idle, creating pipeline bubbles and resource waste. In tensor parallelism, communication rises to 70\%, but all devices compute simultaneously, and the speed boost outweighs the communication cost, leading to less overall inference time. This makes tensor parallelism the preferred choice.
+
+\textit{Q2: Is tensor parallelism enough for edge LLM serving?}
+
+Tensor parallelism does reduce memory footprint each device by sharing model parameters across multiple devices, but it doesn’t fully address the memory shortage. Figure \ref{fig:tp_memory_usage_comparison} shows that even with 4 tensor parallel nodes, memory footprint remains at 12 GB—still too high for most edge devices. This is because memory footprint includes not just model parameters but also intermediate results, key value cache, libraries, etc., causing the actual usage to exceed the theoretical value. Besides, other apps on the device also compete for memory, which worsens the shortage. Thus, even with tensor parallelism, a memory scheduler is still needed to avoid out-of-memory (OOM) issues.
+
+
+
+\section{TPI-LLM Framework with Sliding Window Memory Scheduling}
+
+In a typical inference workflow, many users send their prompts to a cloud-based service. These prompts are pooled and scheduled in batches, undergoing dozens of Transformer layers, and converted into probabilities to predict the next token. This process repeats until the generated sequence is finished. While the fundamental workflow on the cloud and edge are similar, key differences arise:
+
+\textit{(a) Keep prompts and generated sequences on users' device.}
+In a cloud setup, user prompts are sent to remote servers for processing, which result in exposure of private data. Edge LLM serving systems are required to keep prompts and generated sequences in users’ own devices to ensure raw data never get exposed to external unknown environments.
+
+\textit{(b) More single-prompt serving.} Current LLM serving systems are typically optimized for batched prompts using pipeline scheduling. However, these optimizations lead to resource underutilization in edge scenarios like smart speakers, where only one prompt is processed at a time.
+
+\textit{(c) Low-resource devices without CUDA support.} 
+Edge devices, unlike cloud GPUs, have very limited memory and low computing power. Many of them lack CUDA support or do not have GPUs at all, and they often prioritize full precision to ensure faster computations.
+\subsection{The Parallel Framework Design of TPI-LLM System}\label{sec:system-overview}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/system-overview.pdf}
+    \caption{Overview of the TPI-LLM parallel framework.}
+    \label{fig:system-overview}
+\end{figure}
+
+The proposed tensor parallel inference system (TPI-LLM) tackles these challenges by using a tensor parallel framework that distributes attention heads across multiple nodes. As depicted in Figure \ref{fig:system-overview}, it involves a master node, typically the user's device that initiates the prompt, and several worker nodes that share the computational load. Their pseudo codes are given in Algorithms \ref{alg:master} and \ref{alg:worker}.
+
+\textit{Step 1: The master node partitions and distributes model weights.} 
+Before inference begins, the master node partitions the pretrained model weights $\mW$, such as attention heads and FFN weights, among the worker nodes. Workers with greater computing power and larger memory are allocated more attention heads and FFN weights. This ensures no single device bears the full burden.
+
+\textit{Step 2: The master node initiates prompt and broadcast the input embedding to workers.}
+The inference process starts at the master node, where a user prompt is tokenized into a list of token indices $\vx$ and then transformed into input embeddings $\mH^0=\vx \mW_{\mathtt{emb}}$. The embedding is then broadcast to all worker nodes $\mH^0_{\mathtt{ffn}}=\mH^0$ to initiate the tensor parallel workflow.
+
+\textit{Step 3: All nodes perform tensor parallel computing.}
+The tensor parallel computing follows a cycle of four operations: attention computing, allreduce, FFN computing, and allreduce. These operations together constitute a Transformer block. Devices compute attention and FFN with partitioned weights in parallel, reducing the computing delays on low-power devices. 
+
+In the attention computation phase of the $l$-th Transformer block, device $h$ processes only a subset of attention heads $\mQ^{h,l} = \mH^l_{\mathtt{norm}} \mW_Q^{h,l}, \mK^{h,l} = \mH^l_{\mathtt{norm}} \mW_K^{h,l}, \mV^{h,l} = \mH^l_{\mathtt{norm}} \mW_V^{h,l}$, where $\mH^l_{\mathtt{norm}}=\mathtt{norm}(\mH_{\mathtt{ffn}}^{l-1})$ is the normed hidden state and weight partitions $\mW_Q^{h,l}, \mW_K^{h,l}, \mW_V^{h,l}$ are downloaded from the master node in Step 1. Once $\mQ^{h,l},\mK^{h,l},\mV^{h,l}$ are computed, we apply the scaled dot-product attention to calculate the attention score, and the result is then synchronized across devices:
+\begin{equation}
+\mH_{\mathtt{attn}}^{l} = \mathtt{all\_reduce}( \mathtt{softmax}( \frac{\mQ^{h,l} (\mK^{h,l})^\top}{\sqrt{d}}) \mV^{h,l})+\mH_{\mathtt{ffn}}^{l-1},
+\end{equation}
+where $d$ is the dimension for attention head. Here, attention is computed in parallel across devices, followed by an allreduce to aggregate their hidden states and a shortcut connection. The key-value pair $(\mK^{h,l},\mV^{h,l})$ is cached locally on device $h$ to reduce redundant computations. This distributed KVCache partitions the cache across devices, so memory cost is reduced on individual device.
+
+After the attention computation and allreduce, the process continues with the FFN computation:
+\begin{equation}
+\mH_{\mathtt{ffn}}^{l} = \mathtt{all\_reduce}( \mW_{\mathtt{down}}^{h,l} \cdot ( \sigma(\mW_{\mathtt{gate}}^{h,l} \cdot \mH_{\mathtt{norm}}^{l}) \odot (\mW_{\mathtt{up}}^{h,l} \cdot \mH_{\mathtt{norm}}^{l})))+\mH_{\mathtt{attn}}^{l},
+\end{equation}
+where FFN weights $\mW_{\mathtt{gate}}^{h,l}, \mW_{\mathtt{up}}^{h,l}, \mW_{\mathtt{down}}^{h,l}$ are also partitioned weights, $\mH_{\mathtt{norm}}^{l}=\mathtt{norm}(\mH_{\mathtt{attn}}^{l})$, $\sigma$ represents the activation function such as SiLU \citep{elfwing2018sigmoid}. Similar to the attention computation stage, the FFN is computed in parallel, followed by an allreduce and a shortcut connection.
+
+\textit{Step 4: The master node reduces tensor parallel results and calculates the next token.} After each node $h$ completes its part of computation within the backbone network, the result is sent to the master node. The summed results $\mH_{\mathtt{ffn}}^L$ are then passed through a task head $\mW_{\mathtt{head}}$ and softmax to obtain the probability distribution of the next token $\vz=\mathtt{softmax}(\mH^L_{\mathtt{ffn}}\mW_{\mathtt{head}})$, which is then sampled. Steps 2 to 4 repeat until an EOS token is generated or the length limit is reached.
+
+TPI-LLM provides three benefits: (i) The user prompt $\{\vx_1,\vx_2,\cdots\}$ and generated sequence $\{z_1\sim\vz_1,z_2\sim\vz_2,\cdots\}$ are processed only on the master node, keeping them hidden from workers. Even if workers reverse-engineer input embeddings $\mH^0$, they cannot recover the raw prompt $\vx$ or next token $z\sim\vz$ since the weights of input embedding $\mW_{\mathtt{emb}}$ and task head $\mW_{\mathtt{head}}$ reside solely on master. (ii) The inference speed is often limited by the computational latency, but in TPI-LLM, it is accelerated via parallel computing. (iii) Unlike other systems that use a mix of communication primitives (reduce \& broadcast \citep{shoeybi2019megatron}, reducescatter \& allgather \citep{ye2024galaxy}, etc.), TPI-LLM standardizes communications to allreduce. This enhances compatibility with broader communication libraries like PS-LITE \citep{chen2015mxnet} and NetStorm \citep{li2024netstorm}, leveraging their optimized implementations for edge conditions.
+
+\begin{table}[t]
+\centering
+\small
+\noindent
+\begin{minipage}{0.48\textwidth}
+\begin{algorithm}[H]
+\SetAlgoLined
+\LinesNumbered
+\BlankLine
+Split and distribute pretrained weight files to worker nodes\;
+Tokenize user prompt into indices\;
+Start memory scheduler\;
+\BlankLine
+\While{generated sequence not finished}{
+    \textit{Preprocess:} Convert indices to input and position embeddings, calculate causal mask and cache position\;
+    \textit{Broadcast:} Send embeddings, causal mask, and cache position to workers\;
+    \ForEach{decoder layer $l$}{
+        \textit{Attention:} Execute layernorm, self-attention, and store $(K_l^0, V_l^0)$ in KVCache $\mathcal{D}^0$\;
+        \textit{Allreduce:} Aggregate attention outputs\;
+        \textit{FFN:} Execute layernorm and FFN\;
+        \textit{Allreduce:} Aggregate FFN outputs\;
+    }
+    \textit{Reduce:} Sum final outputs with others\;
+    \textit{Postprocess:} Execute layernorm, MLP, softmax, and sample next token\;
+}
+\caption{Master (with rank 0):}
+\label{alg:master}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\textwidth}
+\begin{algorithm}[H]
+\SetAlgoLined
+\BlankLine
+Download sliced weight files from the master node\;
+\BlankLine\BlankLine
+Start memory scheduler\;
+\BlankLine
+\While{generated sequence not finished}{
+    \BlankLine\BlankLine\BlankLine\BlankLine\BlankLine\BlankLine\BlankLine
+    \textit{Broadcast:} Receive embeddings, causal mask, and cache position from master\;
+    \ForEach{decoder layer $l$}{
+        \textit{Attention:} Execute layernorm, self-attention, and store $(K_l^k, V_l^k)$ in KVCache $\mathcal{D}^k$\;
+        \textit{Allreduce:} Aggregate attention outputs\;
+        \textit{FFN:} Execute layernorm and FFN\;
+        \textit{Allreduce:} Aggregate FFN outputs\;
+    }
+    \textit{Reduce:} Send final output to master\;
+    \BlankLine\BlankLine\BlankLine\BlankLine\BlankLine
+}
+\caption{Worker (with rank $k$):}
+\label{alg:worker}
+\end{algorithm}
+\end{minipage}
+\end{table}
+
+\subsection{Allreduce latency analysis}\label{sec:allreduce-latency-analysis}
+Given the dynamic and heterogeneous nature of edge networks, we tested NetStorm \citep{li2024netstorm} as the communication backend, but unfortunately, it resulted in high token latency. After further validation, we confirmed that this latency was not due to network bandwidth, but due to link latency.
+
+To analyze the impact of network bandwidth and link latency, we make the following assumption.
+\begin{assumption}
+
+\end{assumption}
+
+The allreduce latency can be expressed as $t_{\mathtt{all\_reduce}}=2L(t_{\mathtt{data}}+t_{\mathtt{link}}+t_{\mathtt{barrier}}+t_{\mathtt{aggr}})$, where $L$ is the number of Transformer layers, $t_{\mathtt{data}}$ is the cumulative data transfer latency, $t_{\mathtt{link}}$ is the cumulative link latency, $t_{\mathtt{barrier}}$ is the cumulative barrier latency during aggregation, and $t_{\mathtt{aggr}}$ is the cumulative latency for aggregation calculation. Here we ignore $t_{\mathtt{aggr}}$ as it takes only 0.1 ms and thus negligible compared to other factors.
+
+\begin{proposition}
+The bottleneck in allreduce is not network bandwidth, but link latency.
+\end{proposition}
+\begin{proof}
+The data transfer latency $t_{\mathtt{data}}=2\sum_{\{i \rightarrow j\} \in \mathcal{P}_h} \frac{32|\mH|}{B_{ij}}$ depends on the size $32|\mH|$ of the data being transmitted and the bandwidth $B_{ij}$ of the links in the path $\mathcal{P}_h$, here $\mathcal{P}_h$ is an index sequence from device $h$ to the master device. For example, in the case of Llama 2-70B with a hidden size $|\mH|=8192$ and a network bandwidth of 300 Mbps, the data transfer latency is only $t_{\mathtt{data}}=3.4$ ms, which is negligible compared to other latencies. In addition, experiment results in Figure \ref{fig:scaling-performance} show that increasing the network bandwidth does not significantly reduce token latency, further confirming that data transfer and network bandwidth is not the bottleneck.
+
+The link latency $t_{\mathtt{link}}$, which is often neglected, emerges as the main issue. For example, the path from device $h_2$ to $h_1$ via $h_8$ follows the route $h_2 \rightarrow r_2 \rightarrow r_9 \rightarrow r_8 \rightarrow h_8 \rightarrow r_8 \rightarrow r_9 \rightarrow r_1 \rightarrow h_1$, resulting in a total link latency of $16\tau$, where $\tau$ is the per-hop link latency. To isolate the impact of
+
+\begin{figure}[H]
+    \begin{minipage}[t]{0.63\textwidth}
+        link latency, we ran allreduce with only 4 bytes of data, excluding data transfer $t_{\mathtt{data}}$ and barrier latencies $t_{\mathtt{barrier}}$. The results, shown in Figure \ref{fig:per-link-allreduce-latency-impact}, demonstrate that the per-link latency $\tau$ significantly impacts allreduce latency. This indicates that an inefficient allreduce algorithm, where multiple hops are required (e.g., ring \citep{ye2024galaxy, shoeybi2019megatron} or tree-based \citep{zhou2021tsengine,li2024netstorm} algorithms), will further amplifies this impact. For example, with the ring algorithm, allreduce requires 7 communication steps for reducescatter and 7 for allgather, resulting in a total link latency of $56\tau$, which is 3.5$\times$ higher than the tree-based setup. \\
+        
+        The barrier latency, $t_{\mathtt{barrier}}$, arises from synchronization
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.4\textwidth}
+        \centering
+        \includegraphics[width=0.73\textwidth]{figures/per-link-allreduce-latency.pdf}
+        \caption{Impact of link latency $\tau$.}
+        \label{fig:per-link-allreduce-latency-impact}
+    \end{minipage}
+\end{figure}
+delays during data aggregation. Given the assumption that all devices have equal computing power and network links have equal latencies, the barrier latency can be approximated as negligible:
+\begin{equation}
+t_{\mathtt{barrier}} = \max\{ \sum_{(i \rightarrow j) \in \mathcal{P}} \frac{32|\mH|}{B_{ij}}, \forall \mathcal{P} \} - \min\{ \sum_{(i \rightarrow j) \in \mathcal{P}} \frac{32|\mH|}{B_{ij}}, \forall \mathcal{P} \} \approx 0.
+\end{equation}
+Thus, link latency $t_{\mathtt{link}}$ emerges as the key factor in allreduce latency. 
+\end{proof}
+
+\begin{proposition}
+The star-based allreduce is more effective for TPI-LLM in high-latency networks.
+\end{proposition}
+
+ It has minimal hops ($8$), lowest link latency ($8\tau$), zero intermediate barriers, and avoids the single-point issue due to the small data size (256 KB per device), making it the preferred allreduce algorithm for TPI-LLM.
+
+\subsection{Sliding Window Memory Scheduling}
+Quantizations like FP16 and INT8 are common for NVIDIA GPUs with CUDA support, but most edge devices lack CUDA and prefer full precision for faster computation due to their general-purpose CPU design. As a result, while tensor parallelism helps distribute memory costs across devices, the memory load remains high. Thus, memory scheduling is still required to manage these loads.
+
+ The memory scheduler operates on a daemon thread to asynchronously handle memory operations. To maintain the peak memory footprint, it uses a sliding window and preloads weights for upcoming layers while unloading those that have been processed.
+
+As mentioned in Section \ref{sec:system-overview}, each Transformer layer is divided into attention computing, allreduce, FFN computing, and allreduce. For simplicity, in Figure \ref{fig:mem-scheduler}, we assume the delays for these stages and weight loading to be equal. In each time slot, the memory scheduler asynchronously loads weights for either an attention or FFN block. By overlapping weight loading with ongoing computations and communications, it hides the I/O latency associated with loading weights from disk. For example, in Figure \ref{fig:mem-scheduler}, the memory scheduler loads one more block during each allreduce until the sliding window reaches its size. As computations and communications proceed, we ensure weights are always ready when needed, allowing for seamless inference without computational stalls.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/memory-scheduler.pdf}
+    \caption{An illustration of the sliding window memory scheduling. Blue blocks indicate the blocks currently executed, with numbered blocks for attention or FFN computing and unnumbered blocks for allreduce communication. Green blocks indicate loaded model weights. The dashed box represents the sliding window, with size 4 in this case.}
+    \label{fig:mem-scheduler}
+\end{figure}
+
+Next, we provide the conditions for this mechanism to reach a steady state, under which all required weights are loaded before computation starts.
+\begin{proposition}[\textbf{Loose Steady Condition}]
+The memory scheduler reaches a steady state when the following condition is met:
+\begin{equation}
+t_{\mathtt{attn}}+t_{\mathtt{ffn}}+2 t_{\mathtt{all\_reduce}} \ge \tau_{\mathtt{ffn}} + \tau_{\mathtt{attn}},
+\end{equation}
+and one of the following conditions is met:
+\begin{align}
+l\cdot t_{\mathtt{attn}}+(l-1)\cdot t_{\mathtt{ffn}}+(2l-1)\cdot t_{\mathtt{all\_reduce}}&\ge l\cdot \tau_{\mathtt{ffn}}+(l-1)\cdot \tau_{\mathtt{attn}},~\forall l\in\{1,\cdots,L\}, \\
+(l-1)\cdot t_{\mathtt{attn}}+l\cdot t_{\mathtt{ffn}}+(2l-1)\cdot t_{\mathtt{all\_reduce}}&\ge (l-1)\cdot \tau_{\mathtt{ffn}}+l\cdot \tau_{\mathtt{attn}},~\forall l\in\{1,\cdots,L\},
+\end{align}
+where $t_{\mathtt{attn}}$ and $t_{\mathtt{ffn}}$ are times required for attention and FFN computation, $t_{\mathtt{all\_reduce}}$ is the allreduce latency, $\tau_{\mathtt{ffn}}$ and $\tau_{\mathtt{attn}}$ are times required to load attention and FFN weights, and $L$ is the number of Transformer layers.
+\end{proposition}
+This condition is loose but a bit hard to assess, so we present a tighter, more intuitive condition.
+\begin{proposition}[\textbf{Tight Steady Condition}]
+$t_{\mathtt{attn}}+t_{\mathtt{all\_reduce}} \ge \tau_{\mathtt{ffn}}$~and~$t_{\mathtt{ffn}}+t_{\mathtt{all\_reduce}} \ge \tau_{\mathtt{attn}}$.
+\end{proposition}
+ This conclusion is straightforward. If the previous block's computation and allreduce time cover the current block's weight loading time, the memory scheduler can fully hide the disk I/O latency. As an example, in Section \ref{sec:real-case-study}, we use 4 laptops with Llama 2-7B, setting $p_i=0.25$ and $w=4$. We measured $t_{\mathtt{attn}}=11$ ms, $t_{\mathtt{ffn}}=17$ ms, $t_{\mathtt{all\_reduce}}=14$ ms, $\tau_{\mathtt{attn}}=18$ ms, and $\tau_{\mathtt{ffn}}=30$ ms. While the tight steady condition is not met, the loose steady condition is met, allowing the memory scheduler to achieve steady state.
+
+\begin{proposition}[\textbf{Peak Memory Footprint}]
+If the memory scheduler reaches a steady state, the peak memory footprint of the master and worker can be expressed as
+\begin{align}\label{eq:peak-mem-footprint}
+M_{\mathtt{master}} &= \gamma \times
+\begin{cases}
+hv + h, & \text{if } w = 1 \\
+2hv + h, & \text{if } w = 2 \\
+2hv + h + \left\lfloor \frac{w-2}{2} \right\rfloor \left( 2(1+\frac{b}{a})h^2 p_i + h \right) + \left\lfloor \frac{w-1}{2} \right\rfloor (3hs p_i + h), & \text{if } w \ge 3
+\end{cases} \\
+M_{\mathtt{worker}} &= \gamma \times \left( \left\lfloor \frac{w}{2} \right\rfloor ( 2(1 + \frac{b}{a})h^2 p_i + h ) + \left\lfloor \frac{w+1}{2} \right\rfloor (3hs p_i + h) \right),
+\end{align}
+where $h$ is the hidden size, $v$ is the vocabulary size, $a$ is the number of attention heads, $b$ is the number of key-value heads, $s$ is the intermediate size, $p_i$ is the proportion of parameters handled by device $i$, $w$ is the memory window size, and $\gamma$ is a memory scaling factor.
+\end{proposition}
+
+ However, if a slow disk I/O disrupts the steady state, the memory scheduler will retain some FFN blocks in memory to reduce disk access frequency.
+\begin{proposition}[\textbf{Loose Steady Condition with Block Retention}]
+Let the memory scheduler retain one FFN block in memory every $T$ FFN blocks, the condition to reach a steady state is then
+\begin{align}
+l\cdot t_{\mathtt{attn}}+l\cdot t_{\mathtt{ffn}}+2l\cdot t_{\mathtt{all\_reduce}} &\ge (l-\left\lceil \frac{l}{T} \right\rceil)\cdot \tau_{\mathtt{ffn}} + l\cdot\tau_{\mathtt{attn}}, \\
+l\cdot t_{\mathtt{attn}}+(l-1)\cdot t_{\mathtt{ffn}}+(2l-1)\cdot t_{\mathtt{all\_reduce}}&\ge (l-\left\lceil \frac{l}{T} \right\rceil)\cdot \tau_{\mathtt{ffn}}+(l-1)\cdot \tau_{\mathtt{attn}}.
+\end{align}
+\end{proposition}
+ By setting an appropriate $T$, idle memory can help the scheduler reach a steady state, thus achieving a tradeoff between memory use and inference speed.
+
+
+
+\section{Experiments}
+
+\textit{Prototype and Testbed.} We implemented the prototype of TPI-LLM\footnote{Open available at: \url{https://anonymous.4open.science/r/tpi-llm}.} with 3K LoC using PyTorch and Transformers to provide flexible support for various sizes and versions of pretrained LLMs. By default, 8 edge devices were emulated on 2 Intel Xeon Gold 5220R CPUs, each limited to 8 logical cores, 8 GB of memory, and 4 GB of swap. Network bandwidth between devices was set to 300 Mbps with a 1 ms latency.
+
+\textit{Models.} The inference speed of TPI-LLM is significantly affected by the model architecture. Deeper layers, more parameters, larger hidden sizes, and more attention heads increase the computational latency. Additionally, deeper layers result in more allreduce communications, and a larger hidden size leads to greater traffic. We tested with various models of different sizes, including Llama 2-3B/7B/13B/70B, Llama 3-8B/70B, and Yi-34B.
+
+\subsection{Overview of tpi-llm performance}
+\textbf{Fit 70B LLMs into edge devices and run in high efficiency.} We tested the performance of TPI-LLM with a focus on 3 key metrics: time-to-first-token (TTFT), token latency, and peak memory footprint per device. The memory window size is set to 2 by default. As shown in Table \ref{tab:tpi-llm-performance-metrics}, without the memory scheduler, the full weights are loaded into the memory at once. Despite that these weights have been distributed across multiple devices, the memory is still insufficient for larger models like Yi-34B and Llama 2/3/3.1-70B. Instead, enabling our memory scheduler significantly reduces the peak memory footprint, allowing larger models to run efficiently. For example, the Llama 2-70B model requires just 3.1 GB of memory per device, and the Llama 3.1-70B model fits within device limits. The results are summarized in Table \ref{tab:tpi-llm-performance-metrics}.
+
+\begin{table}[h]
+    \centering
+    \small
+    \caption{The TTFT, token latency, and peak memory footprint per device of TPI-LLM.}
+    \label{tab:tpi-llm-performance-metrics}
+    \begin{tabular}{l|ccc|ccc}
+        \hline
+        \multirow{2}{*}{\textbf{Model (FP32)}} & \multicolumn{3}{c|}{\textbf{Memory Scheduler Disabled}} & \multicolumn{3}{c}{\textbf{Memory Scheduler Enabled}} \\
+        \cline{2-7}
+        & \textbf{TTFT} & \textbf{Latency} & \textbf{Memory} & \textbf{TTFT} & \textbf{Latency} & \textbf{Memory} \\
+        \hline\hline
+        Llama 2-3B & 2.3 s & 1.0 s/token & 2.8 GB & 2.0 s & 1.9 s/token & 1.4 GB \\
+        Llama 2-7B & 3.1 s & 1.2 s/token & 4.5 GB & 3.0 s & 2.6 s/token & 1.7 GB \\
+        Llama 2-13B & 5.1 s & 1.9 s/token & 8.1 GB & 5.8 s & 2.9 s/token & 2.1 GB \\
+        Llama 2-70B & OOM  & OOM & 34.9 GB & 29.4 s & 26.1 s/token & 3.1 GB \\
+        \hline
+        Llama 3.1-8B & 4.5 s & 1.5 s/token & 8.5 GB & 4.5 s & 4.3 s/token & 5.4 GB \\
+        Llama 3.1-70B & OOM & OOM &  42.3 GB & 32.9 s & 29.9 s/token & 11.3 GB \\
+        \hline
+        Yi-34B & OOM & OOM & 20.4 GB & 15.7 s & 13.7 s/token & 4.9 GB \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\begin{table}[h]
+    \centering
+    \small
+    \caption{Peak memory footprint per device with the memory window size set to 2.}
+    \label{tab:memory-footprint-per-node-window-size-2}
+    \begin{tabular}{l|cccc|cccc}
+        \hline
+        & \multicolumn{4}{c|}{\textbf{Memory Scheduler Disabled (GB)}} & \multicolumn{4}{c}{\textbf{Memory Scheduler Enabled (GB)}} \\
+        \hline
+        \textbf{Model (FP32)} & $N=2$ & $N=4$ & $N=6$ & $N=8$ & $N=2$ & $N=4$ & $N=6$ & $N=8$ \\
+        \hline\hline
+        Llama 2-3B & 7.3 & 4.3 & 3.2 & 2.8 & 1.5 & 1.4 & 1.4 & 1.4 \\
+        Llama 2-7B & 13.7 & 7.7 & 5.5 & 4.5 & 2.0 & 1.8 & 1.7 & 1.7 \\
+        Llama 2-13B & 25.7 & 13.9 & 9.8 & 8.1 & 2.3 & 2.2 & 2.2 & 2.1 \\
+        Llama 2-70B & 130 & 66.6 & 46.6 & 34.9 & 3.7 & 3.3 & 3.3 & 3.1 \\
+        \hline
+        Llama 3.1-8B & 18.4 & 11.8 & 9.4 & 8.5 & 5.9 & 5.6 & 5.5 & 5.4 \\
+        Llama 3.1-70B & 137.7 & 74.0 & 51.1 & 42.3 & 10.8 & 10.5 & 11.4 & 11.3 \\
+        \hline
+        Yi-34B & 67 & 36.4 & 23.9 & 20.4 & 5.0 & 5.0 & 5.0 & 4.9 \\
+        \hline
+    \end{tabular}
+\end{table}
+
+\textbf{No need for dozens of devices, one or two are enough to run 70B models.} We used 8 devices by default, but can fewer devices run 70B-scale models? Table \ref{tab:memory-footprint-per-node-window-size-2} gives detailed peak memory footprints with varying number of devices. Without the memory scheduler, full weights are loaded onto the devices, and with fewer devices, the memory load increases. For instance, using only 2 devices limits users to smaller models, like those between 3B and 7B. However, with the memory scheduler enabled, only a few layers' weights are loaded and distributed across devices. This allows even larger models, such as 70B, to run smoothly on just 2 devices. The peak memory footprint in TPI-LLM is primarily determined by the product of vocabulary size and hidden size, which is detailed in equation (\ref{eq:peak-mem-footprint}) and can be further reduced in our future work.
+
+\subsection{Scaling over varying edge conditions}\label{sec:scaling-over-condition}
+\textbf{Computation remains the bottleneck, not network bandwidth.} In this experiment, we examined the token latency of TPI-LLM under different edge conditions, the results are shown in Figure \ref{fig:scaling-performance}. As expected, increasing the number of devices reduces the computing load on each device, significantly lowering token latency, and more CPU cores also contribute to a reduced latency. Instead, a limited network bandwidth was no longer a bottleneck, boosting it from 300 Mbps to 1 Gbps had little effect on latency due to the tiny data size (only 256 KB) during each allreduce. Thus, the main bottleneck remains in the computation, which our future work should focus on.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/scaling-performance.pdf}
+    \caption{Token latency over varying number of devices, CPU cores, and network bandwidth on Llama 2-70B.}
+    \label{fig:scaling-performance}
+\end{figure}
+
+\subsection{Comparison with benchmarks}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.9\textwidth]{figures/performance-comparison.pdf}
+    \caption{Comparison of TPI-LLM with three benchmarks.}
+    \label{fig:performance-comparison}
+\end{figure}
+
+We compared the TPI-LLM with 3 benchmarks: (a) \textit{Standalone:} LLM inference is executed only on a single edge device using Transformers \citep{wolf2020transformers}. (b) \textit{Model Parallelism (MP):} Since only one user is served at a time, the pipeline parallelism \citep{zhang2024edgeshard, mei2024helix, borzunov2024distributed} degrades to the model parallelism, where different layer sequences are distributed across multiple devices. Each device computes its layers and passes the result to the next device until the entire inference is complete. (c) \textit{Galaxy} \citep{ye2024galaxy} combines tensor and sequence parallelism and overlaps communication and computation to accelerate inference. They all run in FP32 mode.
+
+\textbf{Run larger models with lower latency and memory usage.} As shown in Figure \ref{fig:performance-comparison}, a limited memory on a single device makes it challenging to run even 3B models in a standalone mode. MP addresses this by the collaboration of 8 devices, allowing models up to 13B, but suffers from high latency due to pipeline bubbles. Galaxy tries to reduce such latency by combining tensor and sequence parallelism. However, in Section \ref{sec:allreduce-latency-analysis}, we concluded that the network bandwidth was no longer the issue, and the real problem is the link latency. Galaxy's use of a ring algorithm for reducescatter and allgather forces each link to be traversed at least 14 times. This causes high link latency and outweighs the benefits of parallel computing, ultimately resulting in a higher token latency than MP. In contrast, TPI-LLM adopts a star-based allreduce algorithm, minimizing hops and cumulative link latency. Combined with the blocking-free memory scheduler, TPI-LLM delivers significantly lower token latency and memory footprint, even with larger 70B models.
+
+\subsection{Real case study}\label{sec:real-case-study}
+In this study, we used 4 laptops with different CPU architectures and memory capacities, connected via a local Wi-Fi router. Macbook Pro was used by default. Due to the lack of CUDA, all computations were performed in full precision. As shown in Table \ref{table:real-exp-4}, Transformers loaded the entire model into the CPU memory, and when memory was insufficient, the operating system offloaded data to the swap. This frequent swap exchange significantly increased TTFT and token latency, even for smaller 3B models. As the model size grows, the swap space overflowed, finally leading to OOM errors. As a more efficient alternative, Accelerate \citep{accelerate} instantly loads layer weights only when required for the computation and reduces unnecessary data I/O. While it speeds up inference, due to implementation flaws on disk offloading, it still requires loading full weights before splitting and offloading them to disk. This results in OOM errors when the model size reaches 13B.
+
+\textbf{TPI-LLM stands out in TTFT, token latency, and model size.} Our memory scheduler (Transformers+MS) outperforms Transformers and Accelerate in both TTFT and token latency across all model sizes. This is because our memory scheduler employs a sliding window mechanism, where a daemon thread asynchronously preloads the weights needed for upcoming computations. By overlapping data I/O with computations and communications, the scheduler avoids delays caused by disk I/O blocks, ensuring smoother and faster inference. To further speed up inference, we integrate the computing power of 4 laptops to serve TPI-LLM. By distributing the computational load across 4 laptops, the reduction in computing time far exceeds communication delays, so both TTFT and token latency are further reduced.
+
+\begin{table}[t]
+\caption{Comparison of Transformers, Accelerate, Transformers+MS, and TPI-LLM on 4 laptops.}
+\centering
+\small
+\begin{tabular}{l|cc|cc|cc|cc}
+\hline
+\multirow{2}{*}{\textbf{Model (FP32)}} & \multicolumn{2}{c|}{\textbf{Transformers}} & \multicolumn{2}{c|}{\textbf{Accelerate}} & \multicolumn{2}{c|}{\textbf{Transformers + MS}} & \multicolumn{2}{c}{\textbf{TPI-LLM}} \\
+\cline{2-9}
+ & \makecell{\textbf{TTFT}\\\textbf{(s)}} & \makecell{\textbf{Latency}\\\textbf{(s/token)}} & \makecell{\textbf{TTFT}\\\textbf{(s)}} & \makecell{\textbf{Latency}\\\textbf{(s/token)}} & \makecell{\textbf{TTFT}\\\textbf{(s)}} & \makecell{\textbf{Latency}\\\textbf{(s/token)}} & \makecell{\textbf{TTFT}\\\textbf{(s)}} & \makecell{\textbf{Latency}\\\textbf{(s/token)}} \\
+\hline\hline
+Llama 2-3B & 61 & 30 & 24 & 16 & 4 & 3 & \textbf{2.5} & \textbf{2} \\
+Llama 2-7B & 115 & 56 & 30 & 26 & 13 & 8 & \textbf{6} & \textbf{5} \\
+Llama 2-13B & OOM & OOM & OOM & OOM & 22 & 18 & \textbf{10} & \textbf{9} \\
+\hline
+Llama 3.1-8B & 133 & 65 & 37 & 31 & 20 & 12 & \textbf{11} & \textbf{8} \\
+\hline
+Yi-34B & OOM & OOM & OOM & OOM & 185 & 55 & \textbf{33} & \textbf{29} \\
+\hline
+\end{tabular}
+\label{table:real-exp-4}
+\end{table}
+
+
+
+\section{Conclusion}
+
+In this paper, we concluded that tensor parallelism can be more effective than pipeline parallelism on low-resource devices, and presented a compute- and memory-efficient tensor parallel inference system, named TPI-LLM, to serve 70B-scale LLMs. TPI-LLM is designed with user prompt and generated sequence privacy in mind, by keeping sensitive raw data local in the users' devices. It leverages a sliding window memory scheduler to dynamically manage layer weights during inference with disk I/O latency overlapped by onging computations and communications, allowing larger models to run smoothly on devices with very limited memory. Our analysis showed that link latency, not bandwidth, emerges as the main issue, so TPI-LLM implements a star-based allreduce algorithm, rather than the commonly used ring- and tree-based algorithms. Through extensive experiments on emulated and real testbeds, TPI-LLM demonstrated significantly lower TTFT, token latency, and peak memory footprint compared to Transformers, Accelerate, Galaxy, and enabled serving larger-scale LLMs such as Yi-34B and Llama 2/3/3.1-70B on low-memory devices.
+
+
+
+
+

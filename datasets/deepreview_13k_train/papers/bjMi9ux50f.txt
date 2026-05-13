@@ -1,0 +1,265 @@
+\title{Parameterization Agnostic RL}
+
+\begin{abstract}
+Recent advances in learning decision-making policies can largely be attributed to training expressive policy models, largely via imitation learning. While imitation discards non-expert data, offline and/or online fine-tuning via reinforcement learning (RL) can still learn from suboptimal data. However, instantiating RL training of a new policy class often presents a different challenge: most deep RL machinery is co-developed with assumptions on the policy class, resulting in poor performance when the policy class changes. For e.g., SAC utilizes a low-variance reparameterization policy gradient for Gaussian policies, but this is unstable for diffusion policies and intractable for autoregressive (e.g., transformer) categorical policies. This implies that current RL algorithms may not perform well or may even not be applicable when the policy class changes. To address this issue, we develop an offline RL and online fine-tuning approach called **parameterization-agnostic RL** (**PA-RL**) that can effectively train multiple policy classes, with varying architectures. The basic idea is that a universal supervised learning loss can replace the policy improvement step in RL, as long as it is applied on "optimized" actions. To obtain these optimized actions, we first sample multiple actions from a base policy, and run global optimization (i.e., re-ranking multiple action samples using the Q-function) and local optimization (i.e., running gradient steps on an action sample) to maximize the critic on these candidates. PA-RL enables fine-tuning diffusion and autoregressive policies entirely via RL, while improving performance and sample-efficiency compared to existing online RL fine-tuning methods. PA-RL allows us to successfully fine-tune diffusion policies and OpenVLA, a 7B parameter generalist robot policy, on real robots.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recent successes in training decision-making policies in a number of domains such as robotics and language agents largely stem from the use of expressive models combined with large-scale imitation-style training (Zitkovich et al., 2023; Chi et al., 2023; Kim et al., 2024), an approach that has been tried and tested in other sub-fields of machine learning, such as vision and NLP (Ouyang et al., 2022). However, we have also realized that training a policy once and freezing it is not good enough for many real-world deployment scenarios, where some adaptation is needed: for example, a robot must adapt its behavior as the surrounding environment or task changes. The hallmark of an adaptation process is in its use of autonomous, non-expert data.  
+
+In these cases, imitation alone is not enough to guarantee the most efficient learning and RL provides an appealing alternative. In principle, off-the-shelf RL algorithms could be used to fine-tune any policy. For instance, by running actor-critic RL (Sutton & Barto, 2018), a policy can be trained towards maximizing the Q-function. However, most existing deep RL algorithms entangle the choice of training objectives and algorithm design decisions with the choice of the policy class. For example, soft actor-critic (SAC) (Haarnoja et al., 2018a), the base learner for many offline and online fine-tuning algorithms (Kumar et al., 2020; Nakamoto et al., 2024), has been extensively tuned for Gaussian (and tanh-Gaussian) policies: swapping the policy for a diffusion policy causes instability (Wang et al.). These instabilities can be severe to the extent that much weaker policy extraction techniques, e.g., critic-based re-ranking (Hansen-Estruch et al., 2023) can outperform the complete policy gradient Wang et al., even though theoretically and with other policy classes this is not the case (Fujimoto et al., 2018a; Ghasemipour et al., 2021). Likewise, in order to extend conservative Q-learning (CQL) (Kumar et al., 2020) to autoregressive policies, Chebotar et al. (2023) had to to make many modifications to the loss in the CQL algorithm. Overall, this means that adapting the best policy training methodologies or parameterization from one policy class to another can be chal  
+
+lenging, and depending upon the policy itself, practitioners are forced to choose a weaker algorithm or spend cycles modifying other components of their approach.   
+In this paper, we tackle this challenge by developing a single offline RL and online fine-tuning approach, which we call parameterization-agnostic RL (PA-RL), that works well regardless of the choice of policy class or backbone. We can train any type of policy class and architecture, as long as the policy updates use a supervised learning loss. Now, to perform policy improvement, we propose that the RL algorithm directly optimizes the action (instead of policy parameters). Doing so decouples policy improvement from training the parameteric policy, which can now be done via supervised learning, by maximizing the likelihood of “optimized” actions found by policy improvement. To obtain these optimized actions, we first sample from the base policy several times to get multiple action candidates, and then take gradient steps with respect to the value function to improve those actions in the direction of maximizing values. Then these optimized action samples replace the use of samples from the policy in any value-based RL algorithm, and are used to train the policy themselves. Note that while prior work does use supervised losses for policy training, our main contribution is to show that single approach of this sort can effectively train multiple policy classes. We evaluate $P A{\bf-}R L$ empirically on a number of domains including simulated robotic manipulation tasks and real robots, with Gaussian, diffusion and autoregressive categorical policies based on transformer backbones, on offline RL and offline-to-online RL fine-tuning problems. Our results show that $P A{\bf-}R L$ attains state-of-the-art performance, outperforming the next best fine-tuning approach by $13\%$ in aggregate over various domains. PA-RL produces the largest gains on longhorizon tasks that present multimodal offline data distributions (e.g., CALVIN (Mees et al., 2022) in our experiments), where a more expressive policy class beyond standard tanh-Gaussian is necessary for performance. Most notably, PA-RL improves diffusion policies on two manipulation tasks by $20{-}35\%$ within only 1-2 hours of online RL fine-tuning on a real WidowX robot. We also show that PA-RL is the first RL method to improve 7 billion parameter OpenVLA (Kim et al., 2024) by $75\%$ within 40 minutes of real-world interaction. We also perform a number of ablation experiments. Our main contribution is $P A{\bf-}R L$ , a single approach for offline RL and online fine-tuning policies with different parameterizations and classes via a supervised learning update on optimized actions. The use of a supervised learning loss renders simplicity and universality to our approach. By combining global optimization and local optimization, $P A{\bf-}R L$ is able to effectively train diffusion and transformer policies with offline RL and offline-to-online RL algorithms (Nakamoto et al., 2024; Kostrikov et al.; Ball et al., 2023). To the best of our knowledge, our results are the first to fine-tune diffusion policies (Chi et al., 2023) (both in simulation and in the real-world), and autoregressive categorical transformer policies (in simulation), all via a single actor-critic RL approach.   
+2 RELATED WORK   
+Contrary to prior belief, recent work (Park et al., 2024) shows that policy learning can be a big bottleneck in RL, especially in offline RL (Levine et al., 2020). One implication is that enhancing the policy extraction step with the most expressive architectures and the best loss functions would be important, but prior works often tailor the RL approach to a specific policy class (e.g., most work has focused on Gaussian policies). In principle, designing effective algorithms for only one policy class can “overfit” resulting in methods that are actually worse for other policy classes. For instance, while algorithms that use Gaussian policies reparameterize the policy gradient (Lillicrap et al., 2015; Haarnoja et al., 2018a; Fujimoto et al., 2018b), doing so for diffusion policies (Wang et al.) or flows (Mazoure et al., 2020) can be quite unstable and requires per-task tuning. Hence, to make a stable algorithm, Hansen-Estruch et al. (2023) resort to Q-function re-ranking on top of a frozen behavior policy, resulting in a somewhat less powerful policy improvement operator (e.g., compared to EMaQ (Ghasemipour et al., 2021), which uses a similar reranking-based policy improvement operator to $\mathrm{TD3+BC}$ (Fujimoto & Gu, 2021), which optimizes the policy through the use of full policy gradient and generally performs better). Most offline RL algorithms that use autoregressive categorical transformer policies run conditional (Kumar et al., 2019) or unconditional supervised regression (Janner et al., 2021; Yamagata et al., 2023; Wu et al., 2024), but Park et al. (2024) show that such approaches are unable to extract the best possible policy. In fact, to fine-tune transformer policies directly via offline RL, Chebotar et al. (2023) had to modify value function training.   
+Motivated by these findings, in this paper, we build a single actor-critic RL algorithm that is effective  
+
+for fine-tuning arbitrary policy classes, with a focus on diffusion and transformer policies. Related  
+
+works that fine-tune diffusion policies include: DPPO (Ren et al., 2024), which uses a two-layer diffusion-specific policy gradient loss, whereas our approach is applicable outside of diffusion policies (Section 5); IDQL (Hansen-Estruch et al., 2023), which only utilizes action re-ranking akin to global optimization in PA-RL, but does not distill it into the policy iteratively and hence results in poor fine-tuning performance in our experiments; DIPO (Yang et al., 2023) and DDiffPG (Li et al., 2024), which only utilizes the “action gradient” akin to local optimization in $P A{\bf-}R L$ , but unlike us does so in an online setting, with no pre-training involved; and DQL (Wang et al.), which utilizes the reparameterized policy gradient estimator but is quite unstable in practice, requiring specific checkpoint selection schemes and regularization to succeed, unlike our approach. Psenka et al. learn diffusion policies via score matching, which Ren et al. (2024) find to be quite unstable. Our method outperforms IDQL (Hansen-Estruch et al., 2023), which is one of the most performant methods in this category. We also instantiate our method for fine-tuning autoregressive categorical transformer policies via offline RL and online fine-tuning methods in simulation successfully. To our knowledge, there is no prior work that attempts to fine-tune such models via value-based RL, with the exception of Chebotar et al. (2023), we make no modifications to value function learning.   
+Methodologically, our method PA-RL appears similar to prior approaches that pose “RL as supervised learning”, and use weighted or filtered negative log likelihood (NLL) losses for training (Peng et al., 2019; Peters et al., 2010; Peters & Schaal, 2007; Oh et al., 2018; Abdolmaleki et al., 2018). However, note a crucial difference: while these works largely use the dataset or replay buffer action for training via an NLL loss, PA-RL samples new actions from the policy, optimizes them against the critic, and then trains the policy via NLL on this action. This allows $P A{\bf-}R L$ to make aggressive updates, thus avoiding the “slowness” associated with supervised regression (Tajwar et al.; Kostrikov et al.; Park et al., 2024), while inheriting its simplicity.   
+Action optimization from PA-RL also resembles prior work that uses CEM optimization to obtain actions from a Q-function in the online RL setting (Kalashnikov et al., 2018; Simmons-Edler et al., 2019; Pourchot & Sigaud, 2019), and supervised learning to improve a policy based on the obtained actions (Neumann et al.; Shao et al., 2022). Unlike PA-RL, these methods do not make use of offline pre-training to train the proposal distribution, which we show is important in offline RL and online fine-tuning settings since the critic can give erroneous values outside the support of the dataset seen so far (see Figures 12 and 13; initilization from the offline policy is important).   
+3 PROBLEM SETUP AND PRELIMINARIES   
+We want to find the optimal policy in a Markov Decision Process (MDP) $\mathcal{M}=(S,\mathcal{A},P,r,\rho,\gamma)$ , where $S,A$ are the state and action spaces, $P(s^{\prime}|s,a)$ and $r(s,a)$ are the dynamics and reward functions, $\rho(s)$ is the initial state distribution, and $\gamma\in(0,1)$ is the discount factor. Formally, the optimal policy in an MDP, $\pi^{*}:{\mathcal{S}}\mapsto{\mathcal{A}}$ attains the maximal cumulative discounted sum of rewards, denoted by $\begin{array}{r}{\gamma^{\pi}(s)=\mathbb{E}_{\pi}\left[\sum_{t}\gamma^{t}r(s_{t},a_{t})\middle|s_{0}=s,a_{t}\sim\pi(s_{t}),s_{t+1}\sim p(\cdot|s_{t},a_{t})\right]\!.}\end{array}$ The $\mathrm{^Q}$ -function of a policy $\pi$ is defined as $\begin{array}{r}{Q^{\pi}(s,a)=\mathbb{E}_{\pi}\left[\sum_{t}\gamma^{t}r(s_{t},a_{t})|s_{0}=s,a_{0}=a,a_{t+1}\sim\pi(s_{t+1}),s_{t+1}\sim p(\cdot|s_{t},a_{t})\right]\!.}\end{array}$ We use $Q_{\theta}^{\pi}$ to denote the estimate of the Q-function of a policy $\pi$ as obtained via a neural network with parameters $\theta$ . The action $a$ is a $d$ -dimensional continuous vector in $[-1,1]^{d}$ .   
+Problem settings. We develop our approach for two settings: (a) fully offline (Levine et al., 2020) and ${\bf(b)}$ offline-to-online fine-tuning (Nakamoto et al., 2024). In the former setting, we are given access to an offline dataset of experience, $\mathcal{D}_{\mathrm{off}}=\{(s_{i},a_{i},r_{i},s_{i}^{\prime})\}_{i=1}^{N}$ , collected by a behavior policy, $\pi_{\beta}$ , and want to learn a policy that attains best performance using this dataset. In the latter setting, we are supposed to optimize the policy learned offline, say $\pi_{\mathrm{off}}$ , using autonomously-collected interaction data in $\mathcal{M}$ . More concretely, we aim to obtain the optimal policy with the smallest number of online samples, efficiently. Our approach, $P A{\bf-}R L$ prescribes a single approach to fine-tune policies of different parameterizations / classes (e.g., diffusion, autoregressive transformers).   
+Policy parameterizations. In our experiments, we consider fine-tuning two types of policy classes: diffusion and transformer policies. Diffusion policies use a conditional Denoising Diffusion Probabilistic Model (DDPM, Ho et al. (2020)) to represent the distribution over action conditioned on the state. A DDPM trains a diffusion step-dependant $(t)$ denoising model, $\varepsilon_{\phi}(a,t|s)$ that is trained with: $\mathcal{L}^{\mathrm{ddpm}}(\phi)=\mathbb{E}_{t\sim\mathcal{U}(1,K),\epsilon\sim\mathcal{N}(0,I),(s,a)\sim\mathcal{D}}\left[\Vert\epsilon-\epsilon_{\phi}(\sqrt{\bar{\alpha}_{i}}a+\sqrt{1-\bar{\alpha}_{i}}\epsilon,s,t)\Vert\right]$ (3.1) where, given a fixed variance schedule $\beta_{1},\dots,\beta_{K}$ for the forward diffusion process, $\alpha_{t}$ is defined as  
+
+$1-\beta_{t}$ , and $\bar{\alpha_{t}}$ as $\prod_{s=1}^{K}\alpha_{s}$ . To obtain the final action, we start with a random sample $a_{K}\sim\mathcal{N}(0,I)$ , and iteratively denoise the sample such that t at −√11−−αα¯tt εϕ(at, s, t) + √βtz, where $z\sim\mathcal{N}(0,I)$ if $t>1$ and 0 otherwise, for $K$ total denoising steps. We also fine-tune transformerbased policies that represent the policy $\pi_{\phi}(a|s)$ as a product of conditional categorical distributions:  
+
+$$
+\pi_{\phi}(a|s)=\Pi_{i=1}^{d-1}\pi_{\phi}(\mathrm{tokenize}(a_{i})|s,a_{0:i-1}).
+$$  
+
+Offline RL and online fine-tuning methods. The approach we build only affects policy optimization, and retains the same training procedure for the critic as the base algorithm. Our experiments will focus on two classes of actor-critic based online fine-tuning algorithms (Park et al., 2024): (1) algorithms that decouple critic updates from actor updates (e.g., Implicit Q-Learning, IQL (Kostrikov et al.)), and (2) algorithms that sample from the actor to train the critic (e.g., Calibrated Q-Learning, Cal-QL (Nakamoto et al., 2024)). Briefly, Cal-QL trains the Q-function to reduce temporal-difference (TD) error, with an additional regularizer that penalizes the learned Qvalues on out-of-distribution (OOD) actions as long as Q-values are higher than $V^{\mu}(s)$ , the values of a reference policy, while compensating for this pessimism on actions seen within the training dataset. The Cal-QL critic training objective is given by:  
+
+$$
+\begin{array}{r l}&{\mathcal{L}_{Q}^{\mathrm{Ca1-Q1}}(\theta;\phi)=\alpha\left(\mathbb{E}_{s\sim\mathcal{D},a\sim\pi_{\phi}(\cdot|s)}\left[\operatorname*{max}(Q_{\theta}(s,a),V^{\mu}(s))\right]-\mathbb{E}_{s,a\sim\mathcal{D}}\left[Q_{\theta}(s,a)\right]\right)}\\ &{\quad\quad\quad\quad\quad\quad+\frac{1}{2}\mathbb{E}_{s,a,s^{\prime}\sim\mathcal{D}}\left[(Q_{\theta}(s,a)-\mathcal{B}^{\pi}\bar{Q}(s,a))^{2}\right].}\end{array}
+$$  
+
+Where $Q_{\theta}$ is the learned critic, $\bar{Q}$ is the delayed target Q-function, and $B^{\pi}{\bar{Q}}(s,a)$ is the backup operator: $\mathcal{B}^{\pi}\bar{Q}(s,a)\,=\,r(s,a)\,+\,\gamma\mathbb{E}_{a^{\prime}\sim\pi(a^{\prime}|s^{\prime})}[\bar{Q}(s^{\prime},a^{\prime})]$ . Computing this loss requires sampling actions from the learned policy $\pi_{\phi}(\cdot|s)$ , which is now an expressive policy class. In contrast, IQL trains the Q-function to regress to a higher expectile of the value function, without needing to query any new action samples from the learned policy (where $V_{\psi}(s)$ is the value network).  
+
+$$
+\mathcal{L}_{V}^{\mathrm{IQL}}(\psi)=\mathbb{E}_{(s,a)\sim\mathcal{D}}\left[L_{2}^{\tau}(Q_{\hat{\theta}}(s,a)-V_{\psi}(s))\right]
+$$  
+
+$$
+\begin{array}{r}{\mathcal{L}_{Q}^{\mathrm{IQL}}(\theta)=\mathbb{E}_{(s,a,s^{\prime})\sim\mathcal{D}}\left[(r(s,a)+\gamma V_{\psi}(s^{\prime})-Q_{\theta}(s,a))^{2}\right]}\end{array}
+$$  
+
+Where $L_{2}^{\tau}(u)\,=\,|\tau-\,\mathbb{1}(u\,<\,0)|u^{2}$ is the expectile loss, and $\hat{\theta}$ are the target parameters for the Q-function. Prior algorithms that fine-tune diffusion policies largely do not apply to transformer policies as they make design choices specific to the diffusion process: for example, Ren et al. (2024) exploits the structure of diffusion; Wang et al. cross-validates against the DDPM loss.  
+
+
+
+\section{4 PA-RL: TRAINING MULTIPLE POLICY CLASSES WITH ACTOR-CRITIC RL  }
+
+
+Our approach aims to fine-tune multiple policy classes with RL, regardless of scale or parameterization, stably and efficiently. An approach to attain sampleefficient policy improvement is to use an off-policy RL algorithm, which typically alters between fitting a Q-function and updating the policy parameters in the direction of larger predicted Q-values. Typically, value learning treats the policy as a black-box that provides actions for computing and opti  
+
+![](images/cc7de80593be00a4eb39b18e5f429206ae8abcc44b2ea799a837f2165198ae2b.jpg)  
+Figure 1: An overview of PA-RL. Instead of directly passing critic gradients through the policy parameters, $P A{\bf-}R L$ first “optimizes” actions via critic re-ranking and gradient ascent. Then, it trains the policy to mimic the most optimized action.  
+
+mizing the Bellman update. Policy improvement, on the other hand, requires optimizing the value function with respect to the policy parameters. Most continuous-action actor-critic RL algorithms estimate the gradient $\nabla_{\phi}Q(s,\pi_{\phi}(s))$ with respect to the parameters of the policy $\phi$ for this purpose. Unfortunately, estimating this gradient is quite challenging for most policy classes. For large diffusion policies propagating the policy gradient through the denoising chain can be unstable, often requiring extensive per-environment tuning of hyperparameters (Wang et al.) or truncating the gradient propagation after a subset of denoising steps (Ren et al., 2024). Similarly, auto-regressive policies operate on discrete action tokens, so we must utilize a high-variance REINFORCE (Williams, 1992) policy gradient to optimize the policy.  
+
+Can we devise a simple yet universal approach to policy optimization in offline RL and online fine-tuning? In order for an approach to be universal across parameterizations, one natural point is to modify policy training to use a negative log likelihood (NLL) loss from supervised learning, since most deep learning machinery is built around optimizing this loss (or a functional approximation). To be able to do so, our method (Fig. 1) builds on the insight that policy improvement can be performed via a supervised learning loss (Neumann et al.; Shao et al., 2022), as long as the loss is applied on optimized actions. Thus, we can decompose the policy improvement step into two stages: (1) directly optimizing action samples produced by the policy, and (2) training the policy to imitate these “optimized” actions. This decomposition avoids having to compute $\nabla_{\phi}Q(s,\pi_{\phi}(s))$ , or estimate high-variance policy gradient estimates. We would expect this approach to inherit appealing scaling, reliability, and tuning properties of supervised learning losses. In this section, we will detail each of the two stages of the decomposition, and then describe the resulting algorithm.  
+
+
+
+\section{4.1 ACTION OPTIMIZATION  }
+
+
+Given a state $s$ , a policy $\pi_{\phi}(\cdot|s)$ checkpoint that appears in the process of learning, and a fixed Q-function $Q_{\theta}(s,a)$ , the objective of this stage is to obtain an action sample that optimizes the Qfunction as much as possible, while staying close to the support of seen actions at state $s$ . We use $\pi_{\phi}(\cdot|s)$ as an initializer for the action optimization procedure. In the offline setting, doing so allows us to find the best action close to the support at the current state (and wihtin the support of actions at the current state for a pessimistic algorithm). During fine-tuning, this enables us to still leverage priors learned by the offline policy while adapting it to maximize returns on the task.  
+
+To produce an optimized action, we utilize a combination of different types of action optimization procedures. First, we consider global optimization or sampling that samples multiple actions from the pre-trained policy and discards all but top few actions with highest Q-values under the critic (for computational efficiency). Let $\mathscr{A}_{\pi_{\phi},k}(s)\dot{:}=\{a_{0},a_{1},\cdot\cdot\cdot,a_{k-1}\}\sim\pi_{\phi}(\cdot|s)$ denote $k$ sampled actions from the policy. And let $\tilde{\mathcal{A}}_{\pi_{\phi},k}(s):=\{a[0],a[1],\cdot\cdot\cdot\cdot,a[k-1]\}$ denote the set $A_{\pi_{\phi},k}(s)$ with actions put in order of their ranking obtained from the Q-function, i.e., $Q_{\theta}(s,a[i])\,\ge\,\dot{Q}_{\theta}(s,a[j])$ , for $i\leq j$ . Then, global optimization retains the following subset:  
+
+$$
+{\widetilde{A}}_{\pi_{\phi},m}(s)=\{a[0],a[1],\cdots,a[m-1]\},\;\;m\le k.\qquad{\mathrm{(global~optimi~}}
+$$  
+
+Given this subset of the top $m$ actions at a state $s$ , we now locally improve each action “particle”, by performing gradient steps on the action in the direction of the gradient of the Q-function, directly, without changing the policy parameters at all. This sort of a fine-grained local optimization is complementary to the fairly coarse global optimization procedure above as it perturbs the action to another one in its vicinity. Formally, given an action sample $a[i]$ , we run $T$ steps of gradient ascent starting from $a^{0}[i]:=a[\dot{i}]$ to obtain the locally optimal action, $\bar{a}^{T}[i]$ as shown below.  
+
+$$
+\mathrm{for}\;j=0,\cdots\,,T-1,\;\;a^{j+1}[i]=a^{j}[i]+\alpha\nabla_{a}Q_{\theta}(s,a){\big|}_{a=a^{j}[i]},\qquad\mathrm{(local~op~1)}
+$$  
+
+where $\alpha$ is an appropriate learning rate that we choose for optimization. Applying both of these steps enables action optimization to leverage complementary benefits of both of these steps, while avoiding failure modes of either approach (e.g., being trapped in local minima vs not being finegrained enough). Concretely, let us denote the action set obtained by running local optimization on $\widetilde{\mathcal{A}}_{\pi_{\phi},m}(s)$ as $\widetilde{A}_{\pi_{\phi},m}^{T}(s)$ . A pseudocode for action optimization is in Algorithm 1.  
+
+
+
+\section{4.2 POLICY TRAINING VIA SUPERVISED LEARNING  }
+
+
+The second stage of $P A{\bf-}R L$ distills optimized actions into the learned policy model. Crucially, this distillation is performed via standard likelihood maximization procedures from supervised learning that most deep learning models are trained to do. While the most direct option is to simply take the action from the set $\widetilde{A}_{\pi_{\phi},m}^{T}(s)$ that attains the highest $\mathrm{^Q}$ -value (say, $a^{*}(\pi,m,T,s))$ and maximize its likelihood under the learned policy $\pi_{\phi}(\cdot|s)$ , another alternative is to distill all action samples from $\widetilde{\mathcal{A}}_{\pi_{\phi},m}^{T}(s)$ , but weight the contributions of different actions using the Q-value.1). To accomplish this, we define a categorical policy distribution over the optimized action samples:  
+
+$$
+\pi_{\phi}^{\mathrm{Opt}}(a|s,m):=\mathbb{I}\left[a\in\tilde{\mathcal{A}}_{\pi_{\phi},m}^{T}(s)\right]\cdot\frac{\exp(Q_{\theta}(s,a))}{\sum_{a^{\prime}\in\tilde{\mathcal{A}}_{\pi_{\phi},m}^{T}(s)}\exp(Q_{\theta}(s,a^{\prime}))},
+$$  
+
+and train the policy $\pi_{\phi}(\cdot|\cdot)$ to match this distribution. To do so, we annotate all states in the dataset (including the replay buffer in online fine-tuning) with an action sample from $\pi_{\phi}^{\mathrm{Opt}}(a|s,m)$ , and maximize the likelihood of these actions under the policy, following best practices for supervised learning on this policy class. Formally, we denote this dataset of optimized actions as:  
+
+$$
+\mathcal{D}_{(\phi,\theta,m)}^{\mathrm{Opt}}=\{(s_{i},\tilde{a}_{i}^{\mathrm{Opt}})\},\,\,\,\tilde{a}_{i}^{\mathrm{Opt}}\sim\pi_{\phi}^{\mathrm{Opt}}(a|s_{i},m).
+$$  
+
+For instance, if the policy $\pi_{\phi}$ is parameterized as a diffusion model, we follow the DDPM (Ho et al., 2020) behavior cloning (BC) objective, and train the policy to predict noise:  
+
+$$
+\mathcal{L}_{\mathrm{policy}}^{\mathrm{ddpm}}(\phi;\theta)=\mathbb{E}_{t\sim\mathcal{U}(1,T),\epsilon\sim\mathcal{N}(0,I),(s,a)\sim\mathcal{D}_{(\phi,\theta,m)}^{\mathrm{opt}}}\left[\lVert\epsilon-\epsilon_{\phi}(\sqrt{\bar{\alpha}_{i}}a+\sqrt{1-\bar{\alpha}_{i}}\epsilon,s,t)\rVert\right].
+$$  
+
+By using this loss instead of the reparameterized Q-function gradient, we avoid ever backpropagating through the denoising chain, and instead supervise every step of the chain independently. For auto-regressive transformer policies, we use cross-entropy loss objective for next-token prediction.  
+
+Finally, we would like to note that while prior work does explore supervised learning losses for training policies (Peng et al., 2019; Abdolmaleki et al., 2018; Oh et al., 2018), the crucial differences between $P A{\bf-}R L$ and these prior techniques stem from the fact that: (a) action samples are drawn from the current policy, instead of a previous policy or a behavioral policy (Peng et al., 2019), (b) local optimization and global optimization employed by PA-RL enable aggressive updates on action samples to draw them to novel regions that are otherwise not possible with non-parametric methods that operate on the space of actions directly. While these differences might appear small, we show in our experiments that they have a substantial impact on downstream efficiency of RL training.  
+
+
+
+\section{4.3 PUTTING IT ALL TOGETHER: FINAL PA-RL ALGORITHM  }
+
+
+PA-RL can be used to replace the policy improvement step in multiple RL algorithms. In our experiments, we primarily focus on online fine-tuning and adaptation of offline RL. Hence, we instantiate $P A{\bf-}R L$ using two popular RL fine-tuning methods: Cal-QL (Nakamoto et al., 2024) and IQL (Kostrikov et al.). $P A{\bf-}R L$ only modifies the policy improvement step of each of these methods, while keeping the critic training as it is. Since IQL training does not utilize policy backups, using $P A{\bf-}R L$ in conjunction with IQL is straightforward: simply replace the advantage-weighted regression (AWR) update with the above supervised learning update (e.g., Equation 4.5 for diffusion policies). On the other hand, for Cal-QL and other actor-critic algorithms, where the policy $\pi_{\phi}(\cdot|\bar{s})$ is used to generate action samples for performing the TD-backup, we utilize the optimized action set $\widetilde{A}_{\pi_{\phi},m}^{T}$ for the Bellman backup. Formally, this means that instead of computing Bellman targets usi ng an updated $\pi_{\phi}$ , we simply compute targets using the optimized policy $\pi_{\phi}^{\mathrm{{Opt}}}(\cdot|\cdot,m)$ (Equation 4.3) for Cal-QL. A pseudocode of the algorithm along with the corresponding changes in red is shown in Algorithm 2.  
+
+Implementation details.1. In our experiments, we run PA-RL with both state-based and image-based environments, where we utilize best design practices for the critic (Kumar et al., 2022). We also find that additionally including the action $a$ appearing at a given state in the dataset into action optimization can sometimes be helpful. Finally, since native gradient ascent for local optimization is not guaranteed to improve the Q-value for a larger than ideal step size, we only execute a local update if it increases the $\mathrm{Q}$ -value after that step.  
+
+Conceptual comparison of PA-RL with filtered BC or advantage-weighted regression (AWR). We now list down a condition under which $P\!A$ -RL optimizes the Q-function better than AWR. Concretely, we show that using a combination of local and global optimization, PA-RL is able to improve the policy to a larger extent than AWR. Formally, consider a single state and $\widetilde{\mathcal{A}}_{\pi_{\phi},m}(s)$ from Equation 4.1. If local optimization is run for $T$ steps, with a step size $\alpha$ , then the Q -values of actions under the optimized policy $\pi_{\phi}^{\mathrm{{Opt}}}(a|s,m)$ is given as the left hand side of Equation 4.6. With no local optimization at all (or when the Q-function is used to filter actions in the data as in AWR), the resulting Q-value of the optimized action is given by the right hand side of Equation 4.6. It is easy to see that with high probability, when either $T$ or ${\boldsymbol{r}}n$ or both are large, this inequality holds. Thus, we expect PA-RL to generally lead to aggressive updates over AWR.  
+
+$$
+\operatorname*{max}_{i=1,2,\cdots,m}\left(Q(s,a_{i})+\alpha T\mathbb{E}_{t}\left[||\nabla_{a}Q(s,a_{i}^{t})||_{2}^{2}\right]\right)\ge\operatorname*{max}_{i=1,2,\cdots,m}Q(s,a_{i}).
+$$  
+
+In practice though, AWR simply upweights the dataset action so it should be less aggressive than RHS of Equation 4.6. Obtaining the LHS of Equation 4.6 requires Taylor’s expansion at every step of local optimization, under the assumption that step size $\alpha$ is small enough.  
+
+![](images/af2c879a80769b666b8c21d3b9edfc314aac0acb67ea7f2325ac0bb6af2b912e.jpg)  
+
+
+
+\section{5 EXPERIMENTAL EVALUATION  }
+
+
+The goal of our experiments is to understand the efficacy of $P A{-}R L$ in fine-tuning policies of various parameterizations and classes via RL. To this end, we evaluate $P A{\bf-}R L$ and several prior approaches, on a number of benchmark domains that require learning policies from static offline data (offline RL (Levine et al., 2020)) and then fine-tuning them with limited online interaction in the MDP (offline-to-online fine-tuning (Nair et al., 2020)). Finally, we perform ablation experiments to understand the utility of different components of PA-RL. We first describe our main results and then present ablations.  
+
+5.1 RESULTS: SIMULATED BENCHMARKS FROM STATE AND IMAGE OBSERVATIONS  
+
+We first compare PA-RL with prior methods on several benchmark tasks from the D4RL (Fu et al., 2020) suite. Since we report performance in both the offline RL and offline-to-online RL settings, we apply PA-RL on top of Cal-QL (Nakamoto et al., 2024) and IQL (Kostrikov et al.), two common offline RL and offline-to-online fine-tuning algorithms, although majority of our results use Cal-QL. We first demonstrate the efficacy of $P A{\bf-}R L$ in training diffusion policies, and compare it to methods that also train diffusion policies. Specifically, we compare PA-RL to: (1) Implicit Diffusion QLearning (IDQL, Hansen-Estruch et al. (2023)), which extends IQL to use diffusion policies via critic-based reranking; (2) Diffusion Policy Policy Optimization (DPPO, Ren et al. (2024)), which fine-tunes diffusion policies learned via imitation learning using PPO; and (3) Diffusion Q-Learning (DQL, Wang et al.), which trains diffusion policies via a reparameterized policy gradient estimator akin to standard SAC (Haarnoja et al., 2018b).  
+
+We study: (1) AntMaze tasks from D4RL (Fu et al., 2020) that require controlling the joints of a quadruped ant to reach a goal location in four different maze layouts with a sparse reward; (2) FrankaKitchen tasks from D4RL (Gupta et al., 2020), which require solving a sequence of four manipulation tasks in a kitchen environment with a 9-Dof Franka robot; and (3) CALVIN benchmark (Mees et al., 2022; Shi et al., 2023) $\mathrm{D}\rightarrow\mathrm{D}$ , with distractor objects), which requires solving a sequence of four manipulation tasks in a tabletop environment directly from visual observations and with human-teleoperated play data. This offline data presents fairly low action coverage but pretty high coverage over different modes of semantic behavior. Due to the diversity of offline data, we believe the CALVIN should stress test the ability of any approach in effectively utilizing the multimodal nature of diffusion policies for improving efficiency of fine-tuning. All of these tasks present long horizons; and the FrankaKitchen and CALVIN tasks require chaining skills.  
+
+Results: PA-RL significantly improves learning efficiency and asymptotic performance of Cal-QL with diffusion policies. We compare different approaches for offline RL training and online finetuning in Table 1 and present corresponding learning curves in Figure 2. First, observe that PA-RL attains higher offline performance than other methods that use diffusion policies, as well as standard Cal-QL with a tanh-Gaussian policy. Fine-tuning from the offline RL policy learned by $P A{\bf-}R L$ also leads to the best fine-tuned performance in aggregate across all the methods. Concretely, the finetuning performance of $P A{\bf-}R L$ is $13\%$ higher than the next best method. On the hardest CALVIN task (where we must learn to control policies from raw visual observations), $P A{\bf-}R L$ attains a ${\bf69\%}$ improvement over the next best method. This perhaps hints at the efficacy of $P A{\bf-}R L$ in effectively leveraging the increased capacity and expressive power of diffusion policies. Diving deeper, the learning curves in Figure 2 reveal a much stronger trend: the performance of $P A{\bf-}R L$ largely stays above the performance of all other methods throughout training. This indicates the efficacy of $P\!A$ - $\pmb{R L}$ in effectively utilizing the expressivity of diffusion policies during fine-tuning. We also evaluate $P A{\bf-}R L$ in conjunction with IQL on the FrankaKitchen tasks in Table 2, and observe that $P A{\cdot}R L+$ IQL also outperforms standard IQL. This indicates that $P A{\bf-}R L$ is broadly effective.  
+
+![](images/8e583b88c5acf8e531786821b48daff46763d6139badaa625e2069db59d73da6.jpg)  
+Figure 2: Learning curves of online fine-tuning with various methods. Observe that $P A{\cdot}R L+C\mathrm{al{\cdot}Q L}$ (red) largely always dominates or attains similar performance to the next best method. Other methods for fine-tuning diffusion policies (IDQL, DQL, DPPO) are a bit unstable, and perform substantially worse. Since DPPO is substantially more data inefficient, we plot it with different $\mathbf{X}$ -axis units: for kitchen each unit is 500 episodes (axis goes from 0 to 500k), for antmaze each unit is 100 episodes (axis goes from 0 to 100k) and for calvin each unit is 10 episodes (axis goes until 10k).  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+
+![](images/1c11c730d07d8491fc2e339746147bcd1f2580b1976cb861757d7020cfd882d6.jpg)  
+Table 1: Offline-to-online fine-tuning on simulated benchmarks. $P\!A\!-\!R L+\mathrm{Cal}$ -QL outperforms every other approach in aggregate, both in terms of the offline performance (left of $\rightarrow$ ) and performance after 1k episodes of fine-tuning (right of $\rightarrow$ ). This indicates the efficacy of $P A{\bf-}R L$ in fine-tuning diffusion policies effectively.  
+
+Table 2: Combining PA-RL with different policy parameterizations and critic learning algorithms. In the hybrid RL setting, $P A{\bf-}R L+\bf R L P D$ is able to effectively improve a pre-trained diffusion policy without requiring pre-training the critic. $P A{\bf-}R L+\bf{I Q L}$ attains a similar performance on the FrankaKitchen domain as IDQL, proving our method can work with different objectives for the critic. Transformer PA-RL improves an auto-regressive transformer $224\%$ . To the best of our knowledge, this is the first time an auto-regressive transformer was improved with the Actor-Critic architecture.   
+
+![](images/10152e52056117d84da9dc0df583728abce643ff892f72a7963c388572850dad.jpg)  
+
+Results: PA-RL with hybrid RL. Next, we run $P A{\bf-}R L$ on top of RL with Prior Data (RLPD Ball et al. (2023)), a method that incorporates offline data into an online RL training run but does not use offline RL pre-training. In this case, we replace the standard tanh-Gaussian policy in RLPD with a diffusion policy and keep the critic randomly initialized. As shown in Table 2 (left), observe that $P A{\bf-}R L$ is able to improve upon the imitation-learning performance of the diffusion policy after 200 episodes to substantially better performance values than when a Gaussian policy is used for training itself. This further corroborates the efficacy of $P A{\bf-}R L$ in leveraging expressivity of the policy architecture to do sample-efficient learning in the setting of online RL with offline data.  
+
+Results: $P A{\bf-}R L+{\bf C}{\bf a}{\bf l}{\bf-}{\bf Q}{\bf I}$ L with autoregressive categorical policies. Our experiments so far evaluate the efficacy of $P A{\bf-}R L$ in fine-tuning diffusion policies. Our next results show that $P A{\bf-}R L$ is also effective in training transformer-based policies that model the distribution over actions autoregressively using categorical distributions. Concretely, this type of policy discretizes each dimension of the action space independently into a set of 128 bins, and then trains an autoregressive model over this sequence of discrete per-dimension action tokens. Observe in Table 2 (right) that $P A{\bf-}R L$ is also able to effectively improve autoregressive categorical policies with Cal-QL, and attains performance $26\%$ better than using tanh-Gaussian policies on average across the three tasks considered. This establishes the efficacy of $P A{\bf-}R L$ in fine-tuning policies of multiple classes.  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+5.2 RESULTS: RL FINE-TUNING OF ROBOT POLICIES IN THE REAL WORLD  
+
+We now show that PA-RL, can enable fine-tuning diffusion policies on a real robot, resulting in substantial improvements in success rates of the pre-trained policy initialization within just 30 minutes to 2 hours (i.e., 30-70 episodes) of real-world autonomous interaction. To our knowledge, this is one of the first results to effectively fine-tune diffusion policies on a real robot with actor-critic RL.  
+
+Real-world robot and task setup. We study two manipulation tasks (Figures 3 and 7) on a WidowX250 robotic arm with six degrees of freedom and a single third-person mounted camera. Our setup is inspired by Ebert et al. (2022); Walke et al. (2023) and the policy controls the end-effector pose at a frequency of $5\:\mathrm{Hz}$ . The tasks are: (a) “cup to drying rack”, which requires grasping a plastic cup and placing it in the drying rack across the sink; and  
+
+Table 3: Real-robot fine-tuning results for PA-RL. PA-RL improves the performance of an offline pre-trained diffusion policy on two real robot tasks. Notably, while iterating filtered BC, a simple and stable approach for fine-tuning, does not meaningfully improve over fine-tuning on task (a), $P A{\bf-}R L$ improves substantially. PA-RL is similarly effective on task ${\bf(b)}$ under distribution shift.   
+
+![](images/fffed0cfdbfac247f89597f3fb862fbe025d36c1052b73c8947d39bfe590bef3.jpg)  
+
+(b) “pot to sink”, which requires picking and moving a toy pot from the drying rack to the sink. For task (a) the sink contains distractor objects and for both tasks, the positions and rotation of the target object are randomized. In each case, we collect 20 tele-operated human demonstrations to pre-train the diffusion policy and the critic via $\mathrm{Cal-QL}+P A{-}R L$ that we then fine-tune online. For task (b), we consider a “distribution shift” fine-tuning scenario, where the demonstrations show no distractors, but fine-tuning is done with distractor objects. While seemingly benign, this sort of difference between pre-training and fine-tuning setups is still challenging as it leads to poor fine-tuning performance (Kumar et al., 2022).  
+
+Fine-tuning setup and comparisons. In each case, we fine-tune with a sparse reward function that is based on the detected positions of the target objects and the gripper state. After every robot trial, we perform a manual reset and randomization of the object position and orientation. When running  
+
+$P\!A\!-\!\!R\!L$ on the real robot, we found it important to collect 20 warmup episodes from the pre-trained policy before updating it. We also compare our approach to a filtered BC for autonomous improvement, based on Zhou et al. (but without goal conditioning or diffusion policy) for one of the tasks (task (a)). We omit this comparison for task (b) since the pre-trained DDPM policy did not produce any successes under distribution shift on task (b) for seeding iterative filtered BC. We found the diffusion policy to be brittle on task (b).  
+
+![](images/eaa3b7bedf0226d47059792d2e29873b4376c639bdda577307fb5cce319e6159.jpg)  
+Offline pre-trained initialization   
+Figure 3: Evolution of learned behaviors during online fine-tuning with PA-RL on task (a), with a new cup placement. The offline initialization (in red) fails to both grasp the cup and place it on the rack. During intermediate online interaction episodes (in yellow), it successfully grasps the cup, but fails to place it on the rack. After 50 episodes (in green), it learns to successfully grasp the cup and place it on the rack.  
+
+Real-robot fine-tuning results. We observed significant and efficient performance improvement on both tasks when fine-tuning with PA-RL, resulting in a $20{-}35\%$ higher success rate within 50-110 minutes. We noticed a performance drop during the first 50 episodes of fine-tuning in the “cup to drying rack” task, which was consistent with our findings in CALVIN task and many other works studying online fine-tuning (Nakamoto et al., 2024). Our policy enables the robot to quickly recover its behavior and show improvement within the next 20 episodes.  
+
+We ran some ablation experiments to understand the importance of each component of PARL. Concretely we aim to answer: (1) when is global optimization (Equation 4.1) critical for improving the policy? and (2) when is local optimization (Equation 4.2) critical for improving the policy? On the two tasks we study (antmaze-largediverse and CALVIN), we make  
+
+5
+
+![](images/d55edc52cf4a48125fb0c659f701450152479c17fe11f8bf69a2a0f84b7123c0.jpg)  
+
+Table 4: Understanding the importance of global and local optimization. We compare the performance of $P A{-}R L+C\mathrm{al{-}}\mathrm{QL}$ with and without global optimization as measured by average return obtained Note that not using both local and global optimization leads to worse performance. On diverse data such as antmaze-large-diverse, we find global optimization is crucial. On somewhat more narrow data, (e.g., play data in CALVIN) local optimization is also important.  
+
+a number of interesting observations. First, we find that both local and global optimization are critical for performance on some environment: on antmaze-large-diverse global optimization is critical, but local optimization is not as important. On CALVIN, both of the components are important. This tells us that global optimization is important in general, but local optimization is perhaps only useful when we have a somewhat narrow dataset (e.g., action coverage on CALVIN is narrow; while action coverage on antmaze is quite high). Thus, we recommend the workflow of always deploying global optimization when running $P A{\bf-}R L$ and strongly using local optimization when the dataset action distributions are somewhat narrow to make more targeted edits to the actions locally.  
+
+Discussion and Conlcusion. In this paper, we developed PA-RL, a method to fine-tune policies of various classes and parameterizations via actor-critic RL. We showed state-of-the-art online finetuning results across a number of simulation tasks and on two real-robot tasks. Despite promising results, $P A{\bf-}R L$ still has some limitations that future work should aim to address. Most importantly, PA-RL requires sampling multiple actions from the policy, which is expensive for large foundation policies. That said, future work can attempt to reduce this computational cost by caching actions from past rounds and training on them using ideas from off-policy policy gradient. Understanding interplay between global and local optimization better is also a viable direction.  
+
+
+
+\section{6 REPRODUCIBILITY STATEMENT  }
+
+
+In order to foster reproducibility of our work, we have outlined all the implementation details needed   
+1 and Section 4. We have also provided more information   
+1 along with a listing of our hyperparame  
+ters. Code to reproduce our results will be made available upon acceptance of this paper.   
+
+

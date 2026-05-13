@@ -1,0 +1,407 @@
+\title{Stochastic Layer-Wise Shuffle: A Good Practice to Improve Vision Mamba Training}
+
+\begin{abstract}
+Recent Vision Mamba models not only have much lower complexity for processing higher resolution images and longer videos but also the competitive performance with Vision Transformers (ViTs). However, they are stuck into overfitting and thus only present up to base size (about 80M). It is still unclear how vanilla Vision Mamba (Vim) can be efficiently scaled up to larger sizes, which is essentially for further exploitation. In this paper, we propose a stochastic layer-wise shuffle regularization, which empowers successfully scaling non-hierarchical Vision Mamba to a large size (about 300M) in a supervised setting. Specifically, our base and large-scale ShuffleMamba models can outperform the supervised ViTs of similar size by 0.8\% and 1.0\% classification accuracy on ImageNet1k, respectively, without auxiliary data. When evaluated on the ADE20K semantic segmentation and COCO detection tasks, our ShuffleMamba models also show significant improvements. Without bells and whistles, the stochastic layer-wise shuffle has the following highlights: (1) \textit{Plug and play:} it does not change model architectures and will be omitted in inference. (2) \textit{Simple but effective:} it can improve the overfitting in Vim training and only introduce random token permutation operations. (3) \textit{Intuitive:} the token sequences in deeper layers are more likely to be shuffled as they are expected to be more semantic and less sensitive to patch positions.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Vision Transformers (ViTs) have showcased powerful capabilities on sequentially modeling visual data ~\citep{ViT,swin,cswin,mae,beit}, but is plagued by quadratic complexity for sequence length ~\citep{linearattn}. State Space Models (SSMs) ~\citep{ssm-control, ssm1, ssm2, ssm3} have recently gained traction as potentially efficient alternatives to traditional Convolutional Neural Networks (CNNs) and ViTs as sequence-based vision encoders ~\citep{vim,ssm3,pointmamba}. Thanks to the hardware-aware property and flexible selective scan computation, Mamba ~\citep{mamba} stands out in a group of SSMs. Compared to the quadratic computational complexity of Transformers, Mamba architecture can scale to longer sequences with only nearly linear complexity, thus has been adapted to the vision field as backbone models ~\citep{vim,vmamba,Mamba-Reg}. The recent efforts are paid into exploring 2-D vision data scanning routes and incorporating visual prioris into Mamba token mixers ~\citep{vim,videomamba,plainmamba,localvim}. These Mamba models are experimentally demonstrated to be competitive to the ViT family or their hierarchical counterparts while maintain the sequential scalability advantage. Such models showcased superiority in both supervised pre-training and downstream tasks ~\citep{videomambasuite,mamba360}.
+
+Nevertheless, there are still issues that hinder the further application of Vision Mamba models. The overfitting and performance degradation plague the series of models to be scaled up further ~\citep{vim,plainmamba,videomamba,Mamba-Reg}, which is essential for nowadays backbone networks. The successfully trained models are mainly at base or even smaller size thus are inferior than CNNs and ViTs in terms of model capacity ~\citep{vmamba,localvim}. On the other hand, various training techniques has been applied but still no satisfactory situation has arisen. A very recent Mamba-Reg ~\citep{Mamba-Reg} work successfully trained large-size Mamba models with using registers to eliminate the impact of high-norm region in features. Such a method needs to introduce a group of extra tokens into the plain structure. It is still emergency to explore how the vanilla Vision Mamba model can be scaled up.
+
+In this paper, we argue that new training techniques should be proposed to mitigate the overfitting problem for scaling vanilla Vision Mamba ~\citep{vim} up. Starting from the sequential computation of Mamba and positional transformation invariance, we present a \textit{Stochastic Layer-Wise Shuffle training regularization algorithm} that successfully helps to improve the large-size vanilla Vision Mamba model training. Specifically, deeper layers are expected to be more semantically sophisticated and less sensitive to the low-level positional information, while shallower units should be better at sensing initial input data.
+Consequently, our regularization includes a token shuffle procedure to enhance the positional transformation invariance, along with a layer-dependent probability assignment according to the layer perception assumption. As a plug and play algorithm, our method neither brings heavy cost for training, nor changes the Vision Mamba architecture. Ablation results demonstrate the effectiveness of our regularization for addressing overfitting and the efficiency in computation. Additionally, the trained ShuffleMamba-L achieves up to 83.6\% accuracy on ImageNet classification ~\citep{imagenet}, 49.4 mIoU on ADE20K segmentation ~\citep{ade20k} and even outperforms the ImageNet-21K pre-trained ViT on COCO detection task. These results reach the state-of-the-art place over the existing Vision Mamba models and outperform the similar-size ViTs.
+
+
+
+
+
+\section{Related Work}
+
+\textbf{Vision Backbones} \quad In the field of computer vision, the exploration of efficient and scalable backbone architectures has led to significant advancements ~\citep{resnet,alexnet,ViT,vim}, primarily driven by CNNs ~\citep{vgg,sknet,ConvNeXt} and ViTs ~\citep{ViT,swin,pvt} recently. Initially, CNNs serve as the foundation and have evolved to deeper architectures, such as AlexNet ~\citep{alexnet}, VGG ~\citep{vgg}, and ResNet ~\citep{resnet}. Various studies have introduced advanced operators, architectures, and attention mechanisms to improve the effectiveness of models such as SENet ~\citep{senet} and SKNet ~\citep{sknet}. The continuous refinement of convolutional layers has resulted in architectures like RepLKNet ~\citep{replknet} and ConvNeXt ~\citep{ConvNeXt}, which offer improved scalability and accuracy. Despite significant advancements, CNNs primarily focus on exploiting spatial locality, making assumptions about feature locality, translation, and scale invariance.
+
+The introduction of ViT ~\citep{ViT} marks a turning point. Adapted from the NLP community \cite{transformer}, ViTs treat images as sequences of flattened 2D patches to capture global relationships ~\citep{swinv2,pvt}. As ViTs evolved, models like DeiT addressed optimization challenges ~\citep{DeiT,mae}, while others introduced hierarchical structures and convolution operations to incorporate inductive biases of visual perception ~\citep{swin,pvt,pvtv2}. These modifications allow for better performance across diverse visual tasks, although at the cost of added complexity in the models. Recently, there has been a trend of reverting to the original, plain ViT architecture due to its simplicity and flexibility in pre-training and fine-tuning across tasks ~\citep{beit,dat,detr,mask2former}. However, one of the major challenges is the quadratic complexity of the self-attention mechanism ~\citep{linearattn,biformer}, which limits the number of visual tokens that can be processed, impacting scalability.
+
+\textbf{State Space Vision Models}\quad Early state space transformations ~\citep{ssm1, ssm2, ssm3, ssm-dis3}, inspired by continuous state models and bolstered by HiPPO initialization ~\citep{hippo}, showcased the potential for handling extensive dependency problems ~\citep{ssm-dna,ssm-dis1}. To overcome computational and memory issues, S4 ~\citep{ssm1} enforced diagonal structure on the state matrix, while S5 ~\citep{ssm3} introduced parallel scanning to enhance efficiency further. The Mamba model ~\citep{mamba} stands out for its novel approach to SSMs. Parameterizing the state space matrices as projections of input data, Mamba proposed the more flexible selective-scanning.
+
+While ViTs and CNNs have laid a robust foundation for various visual tasks, Mamba offers a unique potential due to the ability to scale linearly with sequence length ~\citep{mamba360,vim,ssm-dis2,jamba}. S4ND ~\citep{ssm-dis2} is the pioneering effort to integrate SSM into visual applications. However, the straightforward expansion of the S4 model did not efficiently capture image information. This gap led to further innovations on hybrid CNN-SSM architecture, such as U-Mamba ~\citep{swinumamba}. Recent efforts have sought to build generic vision backbones purely based on SSMs without relying on attention mechanisms ~\citep{vim,vmamba,videomamba,plainmamba,Mamba-Reg,localvim}. Vision Mamba model, built by sequentially stacking Mamba blocks, has shown to outperform ViT in both tiny and small model sizes. VMamba ~\citep{vmamba} incorporated the hierarchical prior into Mamba to enhance adaptability for visual tasks. There are also some work explores to refine the scanning method in Vim for visual data ~\citep{plainmamba,videomamba,localvim,videomambasuite}. Nevertheless, Vims are stuck into issues like overfitting and only Mamba-Reg ~\citep{Mamba-Reg} successfully scale it up with introducing a group of registers in the supervised training.
+
+\textbf{Training Regularizations}\quad To improve the training and generalization of deep models, various regularization techniques have been developed over the past years. Normalizations ~\citep{Batchnorm,Instancenorm,wu2018group} are proven to be effective for speeding the convergence up, in which the Layer Normalization ~\citep{layernorm} and RMSNorm ~\citep{rmsnorm} are popular in training of large models. The family of data augmentations ~\citep{cubuk2020randaugment,hoffer2020augment,yun2019cutmix,zhang2017mixup} help to produce more robust representations and enhance the performance. Stochastic depth and drop path ~\citep{stochastic_depth, drop_path} drop the connection in the block level, which can not only overcome overfitting but also decrease the training cost. Weight decay ~\citep{weight_decay,AdamW} is commonly adopted for mitigating overfitting as well in a weight penalizing manner. Besides, the earlier Dropout approach ~\citep{srivastava2014dropout} introduces disturbance with dropping hidden units. They have played roles in various network training scenarios. Despite their benefits, these existing methods show limitations for Vim training and scalability. In this paper, we argue that new regularization with specialized properties should be considered to address the overfitting problem and scale Vim up.
+
+\textbf{Shuffle Models}\quad Random shuffle is not a common practice in the field of visual modeling as it can be seen as a disturbance for the original signal. In the existing related work, ShuffleNet ~\citep{shufflenet} proposed to shuffle channels on group convolution to design lightweight CNN. Spatially Shufﬂed Convolution ~\citep{spacial_shuffle} designs a permutation matrix for input spacial shuffling to enhance the receptive field perception of convolution. Besides, Shufﬂe Transformer ~\citep{shuffle_transformer} introduce the shuffle operation across different windows for hierarchical Transformer models with the motivation of improving the long range vision attention modeling. Unlike these methods that shuffle elements across groups, we propose to use random shuffle to improve the sequential vision training for 2-D spatial nature of image data.
+
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=0.99\linewidth]{figures/smamba_framework.pdf}
+	\caption{\textbf{Stochastic layer-wise shuffle regularization.} Higher layers are assigned with larger probability for shuffle regularization to enhance positional transformation invariance. $b_\ell$ is sampled according to the probability to determine to whether execute regularization. Stochastic layer-wise shuffle only includes sequence permutation and is not involved in inference.}
+	\label{Fig_ShuffleMamba}
+\end{figure*}
+
+
+
+\section{Method}
+
+In this section, we introduce our Stochastic Layer-Wise Shuffle Regularization (SLWS) for Vision Mamba training. We briefly present the preliminaries in the following subsections for better understanding our algorithm, then introduce the regularization from intuition to formulation in detail.
+
+\subsection{Preliminaries}
+State Space Model (SSM) ~\citep{ssm1,ssm2} is originally designed for modeling continuous time systems by projecting 1-D input stimulation $x(t)$ to the output signal $y(t)$ via hidden state $h(t) \in \mathbb{R}^n$. Formally, SSM is expressed with the subsequent ordinary differential equation (ODE) as follows:
+\begin{equation}
+    \begin{aligned}
+        h'(t) &= \mathbf{A}h(t) + \mathbf{B}x(t),\\
+        y(t) &= \mathbf{C}h(t) + \mathbf{D}x(t),\\
+    \end{aligned}
+\end{equation}
+where $\mathbf{A} \in \mathbb{R}^{n \times n}$ denotes the system's evolutionary matrix, with $\mathbf{B} \in \mathbb{R}^{n \times 1}$, $\mathbf{C} \in \mathbb{R}^{1 \times n}$ and $D$ are projection parameters. In a discrete system scenario, the above SSM is discreted by a timescale parameter $\boldsymbol{\Delta}$, transforming the expressions of $\mathbf{A}$ and $\mathbf{B}$ into their discrete equivalents $\mathbf{\bar{A}}$ and $\mathbf{\bar{B}}$. In Mamba models, such conversion is implemented with the Zero-Order Hold (ZOH) rule, which is expressed as follows:
+\begin{equation}
+    \begin{aligned}
+        \mathbf{\bar{A}} &= {\rm exp}(\boldsymbol{\Delta} A),\\
+    \mathbf{\bar{B}} &= \boldsymbol{\Delta} A^{-1}({\rm exp}(\boldsymbol{\Delta} A-\mathbf{I}))\cdot \boldsymbol{\Delta} B.\\
+    \end{aligned}
+\end{equation}
+Then, a sequential input $\{x_i\}_{i=1}^L$ is mapped via this discreted system to its output $\{y_i\}$ as:
+\begin{equation}
+    \begin{aligned}
+        h_i^{\prime}&=\mathbf{\bar{A}} h_{i-1}+\mathbf{\bar{B}} x_i,\\
+        y_i&=\mathbf{C} h_i^{\prime}+\mathbf{D} x_i.
+    \end{aligned}
+\end{equation}
+
+Mamba ~\citep{mamba} designs the $\mathbf{B}$, $\mathbf{C}$ and $\boldsymbol{\Delta}$ to be input-dependent to improve the intrinsic capacity for contextual sensitivity and adaptive weight modulation. Besides, a Selective Scan Mechanism is ensembled in for efficient computation. To this end, for a Vim ~\citep{vim} block (or layer) $s_\ell$, it includes a SSM branch, whose output is multiplied by the result of another gated branch to produce the final output sequence $\boldsymbol{X}_{\ell}\in \mathbb{R}^{T \times D}$. Thus, the corresponding forward process is expressed as the following form:
+\begin{equation}
+\label{eq:org_forward}
+    \boldsymbol{X}_{\ell} = s_\ell \left(\boldsymbol{X}_{\ell-1}\right).
+\end{equation}
+\subsection{Stochastic Layer-Wise Shuffle}
+\label{method:slws}
+
+As formulated above, the SSM-based Mamba is initially proposed for sequence modeling but cannot be naturally adapted to 2-D image data, whose patch sequences are not casual structure. Some previous work has incorporated various scanning manners into Mamba layers to improve the spacial context perception ~\citep{vim,vmamba,plainmamba,videomamba}. Nevertheless in training, they are still stuck in the simple 1-D corner-to-corner scanning and plagued by issues such as overfitting. To improve the Vim training, we propose the stochastic layer-wise shuffle regularization according to the following intuitions:
+\begin{itemize}
+    \item[(1)] These corner-to-corner sequential scannings in SSM modules of vision models do not naturally align with the prior of capturing locally neighborhood relationships and long-range global correlations.
+    \item[(2)] The deeper layers of a vision encoder are expected to output higher semantic level representations, while those shallower ones provide more low-level information.
+    \item[(3)] Better semantic-level perception of deeper layers need transformation invariance for patch positions, and shallower units should maintain the positional sensitivity.
+    \item[(4)] Adding disturbance to the basic sequential structure computing can intensify challenges associated to the visual task thus may be beneficial for the overfitting problem.
+\end{itemize} 
+
+We present the stochastic layer-wise shuffle training regularization, which introduce randomness to the corner-to-corner sequential scanning and help to enhance the transformation invariance for patch positions of output representations. It is a simple layer-dependent form for Vim models and formulated as follow:
+
+\textbf{Random Shuffle Forward Regularization.} Inspired by stochastic depth ~\citep{stochastic_depth}, we use a Bernoulli random variable $b_{\ell} \in\{0,1\}$ to indicate whether the $\ell^{th}$ layer training to be implemented with regularization. To strengthen the positional transformation invariance and intensify challenges for visual prediction task, the input token sequence $\boldsymbol{X}_{\ell-1}$ of the $\ell^{th}$ layer will be shuffled to a random order to be $\boldsymbol{X}_{\ell-1}^{'}$ if $b_{\ell}=1$, else $\boldsymbol{X}_{\ell-1}$ maintain itself. Such a operation is defined as $\pi\left(\cdot\mid{b_{\ell}}\right)$, and $\pi^{-1}\left(\cdot\mid{b_{\ell}}\right)$ or $\pi^{-1}_{\ell}\left(\cdot\right)$ denotes the inverse process to restore the corresponding output $\boldsymbol{X}_{\ell}$ to original sequential order. Particularly, $\pi\left(\cdot\mid{b_{\ell}}\right)$ shuffles tokens obeying the simple uniform distribution. Then the forward process in Eq. \ref{eq:org_forward} is reformulated as follows:
+\begin{equation}
+    \boldsymbol{X}_{\ell} = \pi^{-1}_{\ell}\left( s_\ell\left(\pi\left(\boldsymbol{X}_{\ell-1}\mid{b_{\ell}}\right) 
+    \right)\right).
+\end{equation}
+
+\textbf{Layer-Wise Probabilities Assignment.} For another, layers of Vim are assigned with different execution probabilities of training regularization. This also echoes the semantic level prior for model layers, i.e., deeper features are expected to be higher semantic. Consequently, the $\ell^{th}$ probability is designed to be an increasing function of $\ell$. In this paper, we just take a simple linear form like that in stochastic depth. Specifically, the probability of implementing the shuffle forward regularization $p_{\ell}$ for the $\ell^{th}$ layer is expressed as:
+\begin{equation}
+    P\left(b_\ell=1\right) = \frac{\ell}{L}P_L,
+\end{equation}
+where $P_L$ is a hyper-parameter of the stochastic layer-wise shuffle and will be explored in the experiment part. As we design the shuffle process to obey an discrete uniform distribution, there exists the token position transformation distribution, i.e., probability that the $i$-th token in the $j$-th position after shuffled:
+\begin{equation}
+    \begin{aligned}
+        P\left(\boldsymbol{x}^{\ell}_i\Rightarrow \boldsymbol{x}^{'\ell}_j\right) &= \frac{1}{L+1}P\left(b_\ell=1\right) \\
+        &= \frac{\ell}{(L+1)L}P_L.
+    \end{aligned}
+\end{equation}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \centering
+\begin{algorithm}[H]
+\begin{adjustwidth}{0.3cm}{6cm} % 这里调整左右的缩进
+\caption{Layer-Wise Shuffle forward}
+\small
+\begin{algorithmic}[1]
+\label{alg:slws}
+\REQUIRE{token sequence $\boldsymbol{X}_{\ell-1}\in \mathbb{R}^{B\times T \times D}$, \\layer $s_\ell$, probability $p_\ell$, training flag $F$}
+\ENSURE{token sequence $\boldsymbol{X}_\ell$}
+\STATE \textcolor{gray}{\text{\# this layer is trained with regularization}}
+\IF{$F$ and rand(1) < $p_\ell$}
+\STATE shuffle\_indices = randperm(T).expand(B, 1, D)
+\STATE restore\_indices = argsort(shuffle\_indices, dim=1)
+\STATE $\boldsymbol{X}_{\ell-1}^{'}$ = gather($\boldsymbol{X}_{\ell-1}$, 1, shuffle\_indices)
+\STATE $\boldsymbol{X}_{\ell}^{'}$ = $s_\ell$($\boldsymbol{X}_{\ell-1}^{'}$)
+\STATE $\boldsymbol{X}_{\ell}$ = gather($\boldsymbol{X}_{\ell}^{'}$, 1, restore\_indices)
+\ELSE
+\STATE \textcolor{gray}{\text{\# inference or trained without regularization}}
+\STATE $\boldsymbol{X}_{\ell}$ = $s_\ell$($\boldsymbol{X}_{\ell-1}$)
+\ENDIF
+\STATE 
+Return: $\boldsymbol{X}_{\ell}$
+\end{algorithmic}
+\end{adjustwidth}
+\end{algorithm}
+\end{wrapfigure}
+\textbf{Efficiency Analysis.} Fig. \ref{Fig_ShuffleMamba} and Algorithm \ref{alg:slws} with PyTorch functions further illustrate the aforementioned SLWS algorithm for Vim training. It can be found that such a method introduces very limited extra computing cost. Particularly, the random indices generation and restoration involve the sequence length linear complexity $O(L)$ and sorting computing complexity $O(L\log L)$, respectively. As we shuffle all of the sequences in a batch with a same randomly sampled index order, the batch size does not affect the calculation of this step. Another extra operation in this regularization is gathering tensors according to the indexes of the sequence dimension, which involves $O(L)$ complexity for a sequence. Therefore, the proposed Stochastic Layer-Wise Shuffle regularization only introduce $O(L\log L)$ computing complexity totally. Ablation results in Sec. \ref{exp:ablation} echo the limited training efficiency decrease as well.
+
+Overall, our proposed stochastic layer-wise shuffle algorithm fulfills some advantages:
+\begin{itemize}
+    \item[(1)] The layer-dependent probability assignment and token shuffle operations are intuitive for Vision Mamba to enhance the modeling of non-casual 2-D visual data.
+    \item[(2)] As a training regularization, it is plug and play without changing the model architecture, which will be dumped in inference, thus will not affect the application efficiency.
+    \item[(3)] It raises the task complexity for visual prediction to overcome overfitting, but not brings heavy extra computation as it only introduces few complexity, thus is efficient.
+\end{itemize}
+
+\begin{wraptable}{r}{5cm}
+  \centering
+  \setlength\tabcolsep{4pt}
+  \resizebox{0.35\textwidth}{!}{
+  \begin{tabular}{lrrrr}
+    \Xhline{1.0pt}
+    \small{\textbf{Model}} & \scriptsize{\textbf{\#Depth}} & \scriptsize{\textbf{\#Dim}} & \scriptsize{\textbf{\#Param.}}  & \scriptsize{\textbf{\#GFlops.}} \\
+    \Xhline{0.8pt}
+    Small & 24 & 384 & 7M & 4.3 \\
+    Middle & 32 & 576 & 74M & 12.7 \\
+    {Base} & {24} & {768} & {98M} & 16.9  \\
+    {Large1} & {40} & {1024} & {284M} & 49.8  \\
+    {Large2} & {48} & {1024} & {340M} & 59.7  \\
+    \Xhline{1.0pt}
+  \end{tabular}}
+  \caption{Configurations of models (when only one \texttt{[CLS]} token accounted) in different size.}
+  \label{tab:model_size}
+\end{wraptable}
+
+
+
+\section{Experiments}
+
+In this section, we conduct comprehensive experiments to evaluate the stochastic layer-wise shuffle regularization for improving Vim training. We explored and compared the performance of different models in classification and dense prediction tasks, but also studied the algorithm properties in depth with ablations in the following subsections.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/training_plot.png}
+        \caption{Loss curves.}
+        \label{Fig:LossPlot}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/tp_plot.png}
+        \caption{Training throughputs.}
+        \label{Fig:Throughput}
+    \end{subfigure}
+    \caption{\textbf{(a): Training and evaluation loss for 300 epochs middle-size Vims.} When equipped with SLWS, the model finally showcases lower evaluation loss and larger training loss. This implies SLWS is effective for improving the overfitting problem. \textbf{(b) Training throughput change for middle-size Vims under different input resolutions.} SLWS only has very limited degradation ($<2\%$).}
+    \label{Fig:TrainingEvaluation}
+\end{figure}
+
+\subsection{Implementation Settings}
+\label{settings}
+Following the common step, we train Vision Mamba models from scratch on the ImageNet-1K ~\citep{imagenet} that contains 1.28M training samples in a supervised style and evaluate them with the DeiT protocols ~\citep{DeiT}. Specifically, we take four different size models in this section, which are described in Table \ref{tab:model_size}. The middle and base-size models are trained for 300 epochs with a 2048 batch size, while the Large1 is trained for 200 epochs with a 1024 batch size. We use AdamW optimizer ~\citep{AdamW} with a 20 epochs warmup, a cosine learning rate schedule and a 1e-3 initial learning rate. The betas and weight decay rate of AdamW are set as (0.9, 0.95) and 0.1, respectively. Mixup ~\citep{zhang2017mixup}, Cutmix ~\citep{yun2019cutmix}, Random erasing and Rand augment ~\citep{cubuk2020randaugment} are used for data augmentations. We also utilize BFloat16 precision following exiting settings for training stability. Exponential Mean Average (EMA) with decay rate 0.9999 classification results are reported. Besides, the drop path rate for middle and base-size models are 0.5 while is 0.6 for ShuffleMamba-L1. Following VideoMamba ~\citep{videomamba}, we place a \texttt{[CLS]} token at the beginning of token sequences to provide classification features. For the "reg" version training, we follow Mamba-Reg ~\citep{Mamba-Reg} to perform a prefix 128 resolution pre-training ~\citep{resolution_discrepancy,deitiii} and then fine-tuning along with adding same numbers of register tokens to the model.
+
+\begin{table*}[t!]
+  \centering
+  \caption{ImageNet-1K classification comparison. All results are obtained under 224$\times$224 resolution training except for register models. Our
+ShuffleMamba results are highlighted in \colorbox[rgb]{ .855,  .886,  .949}{blue}.}
+    \resizebox{0.955\textwidth}{!}{\begin{tabular}{c|l|cc|cc|r}
+    \toprule[1.5pt]
+    \textbf{Arch.} & \textbf{Method} & \textbf{EMA} & \textbf{Distill.} & \textbf{Param.} & \textbf{FLOPs} & \textbf{Acc. (\%)} \\
+    \midrule
+    \multicolumn{2}{c|}{\textit{\textbf{Hierarchical}}} &       &       &       &       &  \\
+    \multirow{6}[3]{*}{CNN} & RegNetY-4G\citep{RegNetY} &       &       & 21M   & 4G    & 80.0 \\
+          & RegNetY-8G~\citep{RegNetY} &       &       & 39M   & 8G    & 81.7 \\
+          & RegNetY-16G\citep{RegNetY} &       &       & 84M   & 16G   & 82.9 \\
+\cmidrule{2-7}          & ConvNeXt-T\citep{ConvNeXt} &       &       & 29M   & 4.5G  & 82.1 \\
+          & ConvNeXt-S\citep{ConvNeXt} &       &       & 50M   & 8.7G  & 83.1 \\
+          & ConvNeXt-B\citep{ConvNeXt} &       &       & 89M   & 15.4G & 83.8 \\
+    \midrule
+    \multirow{3}[2]{*}{Trans.} & Swin-T\citep{swin} &       &       & 28M   & 4.6G  & 81.3 \\
+          & Swin-S\citep{swin} &       &       & 50M   & 8.7G  & 83.0 \\
+          & Swin-B\citep{swin} &       &       & 88M   & 15.4G & 83.5 \\
+    \midrule
+    \multirow{3}[2]{*}{SSM} & VMamba-T\citep{vmamba} & $\checkmark$     &       & 31M   & 4.9G  & 82.5 \\
+          & VMamba-S\citep{vmamba} & $\checkmark$     &       & 50M   & 8.7G  & 83.6 \\
+          & VMamba-B\citep{vmamba} & $\checkmark$     &       & 89M   & 15.4G & 83.9 \\
+    \midrule[1.2pt]
+    \multicolumn{2}{c|}{\textit{\textbf{Non-Hierarchical}}} &       &       &       &       &  \\
+    \multirow{2}[1]{*}{CNN} & ConvNeXt-S\citep{ConvNeXt} &       &       & 22M   & 4.3G  & 79.7 \\
+          & ConvNeXt-B\citep{ConvNeXt} &       &       & 87M   & 16.9G & 82.0 \\
+    \midrule
+    \multicolumn{1}{c|}{\multirow{7}[2]{*}{Trans.\newline{}}} & DeiT-S &       &       & 22M   & 4.6G  & 79.8 \\
+          & DeiT-B\citep{DeiT} &       &       & 87M   & 17.6G & 81.8 \\
+          & DeiT-B\citep{DeiT} &       & $\checkmark$     & 87M   & 17.6G & 81.9 \\
+          & ViT-B (MAE sup.)\citep{mae} &       &       & 87M   & 17.6G & 82.1 \\
+          & ViT-B (MAE sup.)\citep{mae} & $\checkmark$     &       & 87M   & 17.6G & 82.3 \\
+          & ViT-L (MAE sup.)\citep{mae} &       &       & 309M  & 191G  & 81.5 \\
+          & ViT-L (MAE sup.)\citep{mae} & $\checkmark$     &       & 309M  & 191G  & 82.6 \\
+    \midrule
+    \multirow{26}[4]{*}{SSM} & Vim-S\citep{vim} &       &       & 26M   & 4.3G  & 80.5 \\
+          & VideoMamba-S\citep{videomamba} &       &       & 26M   & 4.3G  & 81.2 \\
+          & VideoMamba-M\citep{videomamba} &       &       & 74M   & 12.7G & 80.9 \\
+          & VideoMamba-M\citep{videomamba} &       & $\checkmark$     & 74M   & 12.7G & 82.8 \\
+          & VideoMamba-B\citep{videomamba} &       &       & 98M   & 16.9G & 79.8 \\
+          & VideoMamba-B\citep{videomamba} &       & $\checkmark$     & 98M   & 16.9G & 82.7 \\
+          & LocalViM-S\citep{localvim} & $\checkmark$     &       & 28M   & 4.8G  & 81.2 \\
+          & PlainMamba-L2\citep{plainmamba} & $\checkmark$     &       & 25M   & 8.1G  & 81.6 \\
+          & PlainMamba-L3\citep{plainmamba} & $\checkmark$     &       & 50M   & 14.4G & 82.3 \\
+          & Mamba-Reg-S\citep{Mamba-Reg} &       &       & 28M   & 4.5G      & 81.4 \\
+          & Mamba-Reg-B\citep{Mamba-Reg} &       &       & 99M   & 17.8G      & 83.0 \\
+          & Mamba-Reg-L\citep{Mamba-Reg} &       &       & 341M  & 64.2G      & \textbf{83.6} \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-S & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}26M & \cellcolor[rgb]{ .855,  .886,  .949}4.3G & \cellcolor[rgb]{ .855,  .886,  .949}81.2 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-M & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}74M & \cellcolor[rgb]{ .855,  .886,  .949}12.7G & \cellcolor[rgb]{ .855,  .886,  .949}82.7 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-M & \cellcolor[rgb]{ .855,  .886,  .949}$\checkmark$ & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}74M & \cellcolor[rgb]{ .855,  .886,  .949}12.7G & \cellcolor[rgb]{ .855,  .886,  .949}82.8 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-B & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}98M & \cellcolor[rgb]{ .855,  .886,  .949}16.9G & \cellcolor[rgb]{ .855,  .886,  .949}82.6 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-B & \cellcolor[rgb]{ .855,  .886,  .949}$\checkmark$ & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}98M & \cellcolor[rgb]{ .855,  .886,  .949}16.9G & \cellcolor[rgb]{ .855,  .886,  .949}82.7 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-B & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}99M & \cellcolor[rgb]{ .855,  .886,  .949}17.8G & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{83.1} \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-L1 & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}284M & \cellcolor[rgb]{ .855,  .886,  .949}49.8G & \cellcolor[rgb]{ .855,  .886,  .949}82.9 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-L1 & \cellcolor[rgb]{ .855,  .886,  .949}$\checkmark$ & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}284M & \cellcolor[rgb]{ .855,  .886,  .949}49.8G & \cellcolor[rgb]{ .855,  .886,  .949}82.9 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-L2 & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}341M & \cellcolor[rgb]{ .855,  .886,  .949}64.2G & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{83.6} \\
+        \cmidrule{2-7}          & \textbf{\textit{256$\times$256 Test}} &  &  &  &  &  \\
+          & Mamba-Reg-B\citep{Mamba-Reg} &       &       & 99M   & 22.9G      & 83.0 \\
+          & Mamba-Reg-L\citep{Mamba-Reg} &       &       & 341M  & 82.4G      & 83.2 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-M & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}74M & \cellcolor[rgb]{ .855,  .886,  .949}16.5G & \cellcolor[rgb]{ .855,  .886,  .949}82.8 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-M & \cellcolor[rgb]{ .855,  .886,  .949}$\checkmark$ & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}74M & \cellcolor[rgb]{ .855,  .886,  .949}16.5G & \cellcolor[rgb]{ .855,  .886,  .949}83.0  \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-B & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}98M & \cellcolor[rgb]{ .855,  .886,  .949}22.0G & \cellcolor[rgb]{ .855,  .886,  .949}82.9  \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-B & \cellcolor[rgb]{ .855,  .886,  .949}$\checkmark$ & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}98M & \cellcolor[rgb]{ .855,  .886,  .949}22.0G & \cellcolor[rgb]{ .855,  .886,  .949}83.0 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-B & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}98M & \cellcolor[rgb]{ .855,  .886,  .949}22.9G & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{83.2}\\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-L1 & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}284M & \cellcolor[rgb]{ .855,  .886,  .949}49.8G & \cellcolor[rgb]{ .855,  .886,  .949}83.1 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-L1 & \cellcolor[rgb]{ .855,  .886,  .949}$\checkmark$ & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}284M & \cellcolor[rgb]{ .855,  .886,  .949}49.8G & \cellcolor[rgb]{ .855,  .886,  .949}83.2 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-L2 & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949} & \cellcolor[rgb]{ .855,  .886,  .949}341M & \cellcolor[rgb]{ .855,  .886,  .949}82.4G & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{83.6} \\
+    \bottomrule[1.5pt]
+    \end{tabular}}
+  \label{Tab:cls_results}%
+\end{table*}%
+\subsection{Results and Analysis}
+\textbf{Classification}
+Classification results on ImageNet-1K are reported in Table \ref{Tab:cls_results}. We mainly focus on those sizes that are inferior in previous studies, i.e., middle, base, and large-size models. It can be seen that SSM-based models show competitive or better performance under similar model sizes. When compared to the ViT family ~\citep{ViT,DeiT}, our ShuffleMamba-B has a 0.4\% higher point than the that supervised trained in MAE work ~\citep{mae}. ShuffleMamba-B also achieves a 0.8\% accuracy higher than DeiT-B that is trained with distillation technology. On the other hand, when equipped with the multi-stage training scheme and registers like ~\citep{Mamba-Reg}, both Mamba-Reg and our ShuffleMamba get state-of-the-art performance among SSM-based models. Our ShuffleMamba-Reg has a slightly advantage compared to Mamba-Reg. In addition, hierarchical Tansformers and SSM-based models show better classification performance. 
+
+When generalized to 256$\times$256 test resolution (position embeddings are processed by bicubic interpolation), our ShuffleMamba models exhibit general improvements to lower testing resolution and reach the state-of-the-art place, indicating that 256$\times$256 is included in the effective receptive fields (ERF) of our ShuffleMamba. Our ShuffleMamba-Reg models showcase a significant margin to Mamba-Reg up to 0.4\%. This also confirms our basic motivation like layer-wise semantic hypothesis and positional sensitivity for improving vision Mamba models beyond overfitting.
+
+It is also worth noting that only Mamba-Reg and ShuffleMamba can scale the Vim model to Large-size (around 300M parameters) in supervised training up to now. Thanks to our plug and play SLWS technology, we successfully scale up vanilla Vim with or without the need of registers.
+
+\begin{table}[ht]
+  \centering
+  \caption{\textbf{Semantic segmentation results on ADE20K Val.} Computation FLOPs are measured under 512$\times$2048 input resolution. "MS" means multi-scale test. Our
+ShuffleMamba results are highlighted in \colorbox[rgb]{ .855,  .886,  .949}{blue}.}
+    \resizebox{0.98\textwidth}{!}{\begin{tabular}{c|l|c|c|c|c|c}
+    \toprule
+    \textbf{type} & \textbf{backbone} & \textbf{crop size} & \textbf{Param.} & \textbf{FLOPs} & \textbf{mIoU} & \textbf{+MS} \\
+    \midrule
+    \multirow{3}[2]{*}{CNN} & ResNet-50 & $512^2$ & 67M   & 953G   & 42.1 & 42.8 \\
+          & ResNet-101 & $512^2$ & 85M   & 1030G  & 42.9  & 44.0 \\
+          & ConvNeXt-B & $512^2$ & 122M   & 1170G  & 49.1  & 49.9 \\
+    \midrule
+    \multirow{4}[2]{*}{Trans.} & DeiT-B+MLN & $512^2$ & 144M  & 2007G       & 45.5 & 47.2 \\
+          & ViT-B & $512^2$ & 127M  & -      & 46.1 & 47.1 \\
+          & ViT-Adapter-B & $512^2$ & 134M  & 632G   & 48.8 & 49.7 \\
+          & Swin-B & $512^2$ & 121M  & 1170G   & 48.1 & 49.7 \\
+    \midrule
+    \multirow{9}[2]{*}{SSM} & ViM-S & $512^2$ & 46M   & -     & 44.9 & - \\
+          & Mamba-Reg-B & $512^2$ & 132M  & -     & 47.7 & - \\
+          & Mamba-Reg-L & $512^2$ & 377M  & -     & 49.1 & - \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-M & \cellcolor[rgb]{ .855,  .886,  .949}$512^2$ & \cellcolor[rgb]{ .855,  .886,  .949}106M      & \cellcolor[rgb]{ .855,  .886,  .949}384G      & \cellcolor[rgb]{ .855,  .886,  .949}47.2 & \cellcolor[rgb]{ .855,  .886,  .949}48.2 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-B & \cellcolor[rgb]{ .855,  .886,  .949}$512^2$ & \cellcolor[rgb]{ .855,  .886,  .949}131M      & \cellcolor[rgb]{ .855,  .886,  .949}477G       & \cellcolor[rgb]{ .855,  .886,  .949}47.0 & \cellcolor[rgb]{ .855,  .886,  .949}48.3  \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-B & \cellcolor[rgb]{ .855,  .886,  .949}$512^2$ & \cellcolor[rgb]{ .855,  .886,  .949}131M      & \cellcolor[rgb]{ .855,  .886,  .949}477G       & \cellcolor[rgb]{ .855,  .886,  .949}48.2 & \cellcolor[rgb]{ .855,  .886,  .949}48.9  \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-Adapter-B & \cellcolor[rgb]{ .855,  .886,  .949}$512^2$ & \cellcolor[rgb]{ .855,  .886,  .949}145M      & \cellcolor[rgb]{ .855,  .886,  .949}1428G   & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{49.3} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{50.1} \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-L1 & \cellcolor[rgb]{ .855,  .886,  .949}$512^2$ & \cellcolor[rgb]{ .855,  .886,  .949}320M       & \cellcolor[rgb]{ .855,  .886,  .949}1168G      & \cellcolor[rgb]{ .855,  .886,  .949}48.8 & \cellcolor[rgb]{ .855,  .886,  .949}49.9 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-L2 & \cellcolor[rgb]{ .855,  .886,  .949}$512^2$ & \cellcolor[rgb]{ .855,  .886,  .949}376M       & \cellcolor[rgb]{ .855,  .886,  .949}1373G      & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{49.4} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{50.1} \\
+    \bottomrule
+    \end{tabular}}
+  \label{Tab:Seg_results}
+\end{table}
+\textbf{Semantic Segmentation}
+To evaluate the capabilities of our ShuffleMamba in dense prediction task, we choose the semantic segmentation task and experiment on the common used ADE20K benchmark that contains 20K training samples. An UperNet ~\citep{upernet} head is built upon the ShuffleMamba backbone trained on ImageNet-1K. Following the common settings, we use AdamW optimizer with 0.01 weight decay and polynomial learning rate schedule. All the models are trained for 160K iterations with batch size 16. The learning rate of base and large-size model are set as 6e-5 and 3e-5, respectively. The \texttt{[CLS]} and register tokens are discarded in the segmentation task.
+The mIoU results in single-scale and multi-scale testing are listed in Table \ref{Tab:Seg_results}. Representative CNN, Transformer and SSM-based backbones are taken into account. With the SLWS regularization, the ShuffleMamba pre-trained models demonstrate superior performance. Our base-size model with registers outperforms ViT-B by a significant margin and the corresponding Mamba-Reg without SLWS training. When equipped with the multi-scale Adapter ~\citep{vit_adapter}, the ShuffleMamba-Reg-Adapter-B model exhibits a further 1.6 points advantage compared to Mamba-Reg-B and 0.5\% higher than ViT-Adapter-B. Additionally, our ShuffleMamba-Reg-L2 gets the state-of-the-art accuracy on single and multi-scale test over the listed backbones in different types.
+
+\begin{table}[ht]
+  \centering
+  \caption{\textbf{Object detection and instance segmentation results} using Mask R-CNN on MS COCO with $1\times$ schedule. All the listed SSM-based models use Adapter \citep{vit_adapter} structure to compute multi-scale features. FLOPs are calculated with input size 1280$\times$800. Our
+ShuffleMamba results are highlighted in \colorbox[rgb]{ .855,  .886,  .949}{blue}. \gray{Gray} fonts indicate the models pre-trained on ImageNet-21K.}
+    \resizebox{0.98\textwidth}{!}{\begin{tabular}{c|l|c|c|ccc|ccc}
+    \toprule
+    \textbf{type} & \textbf{backbone} & \textbf{Param.} & \textbf{FLOPs} & \textbf{AP}$^b$ & \textbf{AP}$^b_{50}$ & \textbf{AP}$^b_{75}$ & \textbf{Ap}$^m$ & \textbf{AP}$^m_{50}$ & \textbf{Ap}$^m_{75}$ \\
+    \midrule
+    CNN   & ConvNeXt-B & 108M  & 486G  & 47    & 69.4  & 51.7  & 42.7  & 66.3  & 46 \\
+    \midrule
+    \multirow{5}[1]{*}{Trans.} & Swin-B & 107M  & 496G  & 46.9  & -     & -     & 42.3  & -     & - \\
+          & ViT-B & 114M  & -     & 42.9  & 65.7  & 46.8  & 39.4  & 62.6  & 42.0 \\
+          &\gray{ViT-L}& \gray{337M}  & \gray{-}     & \gray{45.7}  & \gray{68.9}  & \gray{49.4}  & \gray{41.5}  & \gray{65.6}  & \gray{44.6} \\
+          & ViT-Adapter-B & 120M  & -     & 47    & 68.2  & 51.4  & 41.8  & 65.1  & 44.9 \\
+          & \gray{ViT-Adapter-L} & \gray{348M}  & \gray{-}     & \gray{48.7}  & \gray{70.1}  & \gray{53.2}  & \gray{43.3}  & \gray{67.0}    & \gray{46.9} \\
+    \midrule
+    \multirow{4}[2]{*}{SSM} & PlainMamba-L3 & 79M   & 696G  & 46.8  & 68    & 51.1  & 41.2  & 64.7  & 43.9 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-M & \cellcolor[rgb]{ .855,  .886,  .949}103M & \cellcolor[rgb]{ .855,  .886,  .949}564G & \cellcolor[rgb]{ .855,  .886,  .949}46.8 & \cellcolor[rgb]{ .855,  .886,  .949}68.8 & \cellcolor[rgb]{ .855,  .886,  .949}50.7 & \cellcolor[rgb]{ .855,  .886,  .949}41.8 & \cellcolor[rgb]{ .855,  .886,  .949}65.6 & \cellcolor[rgb]{ .855,  .886,  .949}44.8 \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-B & \cellcolor[rgb]{ .855,  .886,  .949}131M & \cellcolor[rgb]{ .855,  .886,  .949}726G & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{47.7} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{69.7} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{51.8} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{42.6} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{66.7 }& \cellcolor[rgb]{ .855,  .886,  .949}\textbf{45.8} \\
+          & \cellcolor[rgb]{ .855,  .886,  .949}ShuffleMamba-Reg-L2 & \cellcolor[rgb]{ .855,  .886,  .949}383M & \cellcolor[rgb]{ .855,  .886,  .949}1734G & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{48.9} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{70.8} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{53.4} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{43.6} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{67.4} & \cellcolor[rgb]{ .855,  .886,  .949}\textbf{47.0} \\
+    \bottomrule
+    \end{tabular}}
+  \label{tab:det}%
+\end{table}%
+
+\textbf{Object Detection and Instance Segmentation} In this subsection, we also implement downstream object detection and instance segmentation tasks following previous work to evaluate our ShuffleMamba. The Mask R-CNN ~\citep{mask_rcnn} structure is adopted with 1$\times$ schedule for 12-epoch fine-tuning. We utilize the commonly used settings in previous work ~\citep{swin} and compare to different-type backbones. To compute the multi-scale features to fit the FPN network structure, we use the Adapter setup following ~\citep{plainmamba, vit_adapter}.
+
+The results on COCO dataset are reported in Table \ref{tab:det}. It can be seen that our middle-size model is on par with the corresponding CNN and Transformer model, while the base-size model with registers outperforms ViT-Adapter-B and ConvNext-B by 0.7 points. Besides, our ShuffleMamba-Reg-L2 can achieve the state-of-the-art AP$^b$ and AP$^m$ among all the listed models and even be better than the ViT-Adapter-L and ViT-L trained on ImageNet-21K. These downstream results consistently demonstrate the superiority brought by the proposed SLWS regularization.
+
+\subsection{Ablation Studies}
+\label{exp:ablation}
+In this subsection, we ablate or change settings in the stochastic layer-wise shuffle regularization to investigate the effects to provide in-depth studies of this algorithm. Middle-size vanilla Vision Mamba models are adopted by default for experiments. Unless otherwise stated, the corresponding settings are the same as those in Sec. \ref{settings}.
+
+\begin{table}[t]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \caption{\textbf{Ablations of probability settings.} Our
+default setup is highlighted in \colorbox[rgb]{ .855,  .886,  .949}{blue}. $P_L=0$ indicates the model degenerates to vanilla Vim (trained with improved recipe except using SLWS).}
+    \label{tab:ssr_ablation}
+    \resizebox{1.0\textwidth}{!}{\begin{tabular}{c|c|c}
+        \toprule
+        \textbf{Probability assignment}  & \textbf{$P_L$}    & \textbf{Acc. (\%)} \\
+        \midrule
+        \multirow{4}[2]{*}{Layer-Dependent} & 0.4   & 82.3 \\
+              & \cellcolor[rgb]{ .855,  .886,  .949}0.5 & \cellcolor[rgb]{ .855,  .886,  .949}82.7 \\
+              & 0.6   & 82.4 \\
+              & 0.7   & 82.4 \\
+        \midrule
+        \multirow{3}[2]{*}{Constant} 
+              & 0     & 81.8 \\
+              & 0.1     & 81.5 \\
+              & 0.4   & 81.1 \\
+        \bottomrule
+    \end{tabular}}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\textwidth}
+    \renewcommand{\arraystretch}{1.02} %行距调整
+        \centering
+        \caption{\textbf{Ablation study of \texttt{[CLS]} token in shuffle regularization.} We shuffle the total sequence including \texttt{[CLS]} token by default, which is beneficial for the classification performance of different size models.}
+        \label{tab:clstoken_abl}
+        \resizebox{1.0\textwidth}{!}{\begin{tabular}{c|c|c}
+        \toprule
+        model & shuffle w/ \texttt{[CLS]} token & Acc. \\
+        \midrule
+        \multirow{2}[2]{*}{Middle} & $\times$    & 82.6 \\
+              & $\checkmark$    & 82.7 \\
+        \midrule
+        \multirow{2}[2]{*}{Base} & $\times$    & 82.6 \\
+              & $\checkmark$    & 82.6 \\
+        \midrule
+        \multirow{2}[2]{*}{Large1} & $\times$    & 82.8 \\
+              & $\checkmark$    & 82.9 \\
+        \bottomrule
+        \end{tabular}}%
+    \end{minipage}
+\end{table}
+
+\textbf{SLWS is effective for mitigating overfitting.} One of the key motivations of our stochastic layer-wise shuffle regularization is to overcome the overfitting issue that prevents previous work to scaling Vim up. Fig. \ref{Fig:LossPlot} shows the evaluation and training loss comparisons. We can observe that the model trained with SLWS finally has lower evaluation loss and higher training loss, while the ablated one tends to overfit with lower training loss but higher evaluation error rate. This confirms the correctness of SLWS to add disturbance for sequential perception training to raise the task complexity for Vim. The results in Table \ref{tab:ssr_ablation} further suggest the effectiveness for mitigating overfitting. Specifically, though refining the training recipe in Vim and VideoMamba can help model learning, our SLWS can bring a further 0.9\% gain w.r.t. ImageNet-1K accuracy.
+
+\textbf{SLWS has negligible impact on training throughput.}
+The proposed SLWS plays a role in training for input and output sequences, where the efficiency has been analyzed in the former Sec \ref{method:slws}. We conduct experiments with different commonly adopted training image sizes to evaluate the effect on throughput for further exploration. Fig. \ref{Fig:Throughput} exhibits training throughout under 128$\times$128 resolution to 768$\times$768 and the corresponding percentage of degradation when exploiting SLWS. It can be seen that SLWS only causes lower than 2\% throughput degradation among this range of input sizes. Therefore, SLWS is a simple but effective and efficient training regularization for Vim.
+
+\textbf{Layer-wise probability assignment is necessary.}
+The layer-wise dependent probability is a key component for the SLWS design, which introduces the semantic level prior for different layers. We list results in context of different probability assignment settings in Table \ref{tab:ssr_ablation}. We can see that the layer-dependent cases generally outperform the constant ones. Additionally, as shallower blocks are more sensitive to the patch positions, when all of the layers (except the input layer) are assigned with a through 0.1 and 0.4 probability, the model even shows inferior result compared to the vanilla Vim. On the other hand, 0.5 is a better choice for the middle-size model among the listed values.
+
+\textbf{Directly Including \texttt{[CLS]} in Shuffling is Slightly Better.} As the \texttt{[CLS]} token is taken as the feature for classification training, we experiment in this part to explore the effect of whether or not it is included in training. The ablation results for different size models are shown in Table \ref{tab:clstoken_abl}. It can be observed that including the \texttt{[CLS]} in shuffle is slightly better for middle and large models. Therefore, we just shuffle the whole sequence by default for code simplicity and the case of using registers is as the same.
+
+
+
+\section{Conclusion}
+
+In this paper, we propose a stochastic layer-wise shuffle regularization (SLWS) strategy for improving vanilla Vision Mamba training. Motivated by the semantic levels of different layer and the positional transformation invariance, we design SLWS to be layer-dependent. Specifically, deeper layers are assigned with larger probabilities to be regularized. On the other hand, SLWS is a plug and play algorithm, which does not change the model architecture but also only introduces light-cost permutation operations. Ablation results demonstrate that our SLWS can effectively mitigate the overfitting problem of Vim and the reasonableness of the layer-wise strategy. Besides, SLWS is absent in inference and only cause negligible efficiency impact on training. More importantly, this simple but effective algorithm is verified on scalability to large-size models and superiority for comparing to state-of-the-art methods.
+
+
+
+\newpage
+
+
+
+

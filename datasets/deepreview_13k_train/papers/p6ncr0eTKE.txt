@@ -1,0 +1,474 @@
+\title{Task-Adaptive Pretrained Language Models via Clustered-Importance Sampling}
+
+\begin{abstract}
+Specialist language models (LMs) focus on a specific task or domain on which they often outperform generalist LMs of the same size. However, the specialist data needed to pretrain these models is only available in limited amount for most tasks. In this work, we build specialist models from large generalist training sets instead. We adjust the training distribution of the generalist data with guidance from the limited domain-specific data. We explore several approaches, with clustered importance sampling standing out. This method clusters the generalist dataset and samples from these clusters based on their frequencies in the smaller specialist dataset. It is scalable, suitable for pretraining and continued pretraining, it works well in multi-task settings. Our findings demonstrate improvements across different domains in terms of language modeling perplexity and accuracy on multiple-choice question tasks. We also present ablation studies that examine the impact of dataset sizes, clustering configurations, and model sizes.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Generalist language models (LMs) can address a wide variety of tasks, but this generality comes at a cost~\citep{brown2020lm_few_shots}. It necessitates a large training set representative of all prospective tasks, as well as a large model to fit such a comprehensive dataset. Specialist models forgo this generality and fit a model for a limited domain or task. In their narrow specialty, such models can achieve better accuracy at a given model size~\citep{kerner2024domain}.
+
+Pretraining a specialist is interesting when two conditions are met: (i) the targeted task justifies the cost of training a dedicated model and (ii) a specialist dataset large enough for pretraining is available. Condition (i) is dependent on the targeted application and its potential economic benefit. Condition (ii) is more limiting since modern LMs are commonly pre-trained on datasets larger than 100B tokens\footnote{100B tokens $\simeq$ 1m books $\simeq$ 60x the annual publication of the top English language publisher~\citep{pinguin_nyt21}.}, an amount that cannot be commissioned for most applications.
+
+This work considers relaxing condition (ii) and studies methods to train a specialist model when specialized data is scarce. Given a large generalist dataset and a small specialist dataset, we propose to modify the distribution over the generalist dataset guided by the scarce specialist dataset. Training a model on the modified distribution gives a specialist model with better accuracy than a generalist model of the same size.
+
+We study this setting across different specialization tasks including domain-specific language modeling (medical, encyclopedic domains) and end-tasks (scholar exams in science and humanities, reasoning questions). We compare different strategies to manipulate the pretraining distribution. We evaluate strategies based on text classifiers, gradient-alignment and importance sampling (IS). Although IS is rarely used for LM data selection, we build upon on a simple IS recipe based on clustering~\citep{grangier2024slm} and report that the resulting method systematically outperforms alternatives. Our IS recipe clusters the generalist set and computes the cluster histogram over the specialist data. Then, for pretraining, generic data is sampled according to the specialist histogram, see Figure~\ref{fig:is_method}. We show the empirical benefit of this method varying model sizes (350m to 7B parameters), the amount of generalist data and the amount of specific data. We assess both perplexity gains for language model adaptation and accuracy improvements for multiple choice question tasks.
+
+
+\section{Related Work}
+
+
+{\bf Generalist vs Specialist LMs} Generalist LMs address tasks which they have not been trained for explicitly~\citep{brown2020lm_few_shots}, or provide a good initialization for fine-tuning a dedicated model~\citep{devlin-etal-2019-bert}. Nowadays generalists compete with dedicated models on many tasks~\citep{jiang2024mixtralexperts,dubey2024llama3herdmodels}. Success however comes at a price: a generalist must be much larger than a specialist for the same accuracy.
+For instance, on English-to-German translation, the 175-B parameter generalist GPT-3~\citep{brown2020lm_few_shots} is less accurate than a 136m-parameter specialist~\citep{sennrich-etal-2016-edinburgh}.
+For neural LMs, the parameter count directly impacts training and inference costs.
+
+Specialist large LMs exist in domains where large amounts of specialized texts are available. Corpora with billions of tokens enable pretraining or \emph{continued pretraining}, a generalist pretraining phase followed by a specialist one~\citep{gururangan-etal-2020-dont,parmar2024reusedontretrainrecipe}). Domains with specialist models include medicine and biology~\citep{lewis-etal-2020-pretrained,labrak2024biomistral,bolton2024biomedlm27bparameterlanguage}, computer programming and mathematics~\citep{lewkowycz2022minerva,roziere2024codellamaopenfoundation,azerbayev2024llemmaopenlanguagemodel} and finance~\citep{wu2023bloomberggptlargelanguagemodel,xie2023pixiulargelanguagemodel}. When specialist data is available in limited amount, there are methods to train specialist models on generalist data instead.
+
+{\bf Task-Adaptive Data-Selection} The selection methods over-sample generalist data that aids model generalization in the target domain. For masked LMs, \citet{gururangan-etal-2020-dont} observe that continued pretraining improves the performance on end-tasks when using data with high vocabulary overlap with the targeted task. For machine translation (MT), \citet{aharoni-goldberg-2020-unsupervised} show that a task-adapted pretraining dataset can be selected from a generalist dataset using the nearest neighbors of a small specialist set. Their nearest neighbor classifier relies on BERT sentence distance~\citep{devlin-etal-2019-bert}. Still for MT, other works have used other types of classifiers. In particular, contrasting the scores of two LMs (generalist and specialist) is popular~\citep{moore-lewis-2010-intelligent,axelrod-etal-2011-domain,wang-etal-2018-denoising,junczys-dowmunt-2018-dual}. Other classifiers include logistic regression or fine-tuned BERT~\citep{iter2021complementaritydataselectionfine}. 
+Outside classification, \citet{xie2023importance} proposed to use importance sampling for continued pretraining. They improve classification tasks by selecting pretraining data with a similar distribution to the targeted domain in terms of hashed-ngrams. Importance sampling is also used in~\citep{grangier2024slm} and we build upon that work which adjusts the frequency of generalist clusters informed by specialist data: we scale the method to millions of clusters, show that it works with larger models, and extend it beyond language modeling tasks.
+
+A third type of methods for task-adaptative selection relies on bilevel optimization and gradient aligment~\citep{pruthi2020tracin,xia2024less,grangier2023bilevel}. The pretraining distribution is selected such that the reweighted gradients from the generalist dataset mimics the expected gradient from the small specialist dataset.  Gradient-alignment for data selection has also been used for other purposes such as data summarization~\citep{zborsos2024bilevel}, pretraining acceleration~\citep{xie2023doremi,fan2024doge} or auxiliary task weighting~\citep{wang2020gradientvaccineinvestigatingimproving,raghu2021meta}. Finally, it is also worth mentioning data selection methods based on reinforcement learning~\citep{liu-etal-2019-reinforced,yoon2020data}, bayesian optimization~\citep{ruder-plank-2017-learning}, data models~\citep{ilyas2022datamodels} and influence models~\citep{yu2024mates}.
+
+{\bf Pretraining Data Quality} Outside of domain aspects, the quality of pretraining data is also an important topic~\citep{Wenzek2020,dodge-etal-2021-c4,penedo2023refinedweb,li2024datacomplm}. Data quality includes removing data in other languages~\citep{cook-lui-2012-langid}, text formatting~\citep{xu2024cleanerpretraining}, favoring long form text~\cite{gao:pile21,gunasekar2023textbooksneed}, removing duplicates~\citep{lee-etal-2022-deduplicating}. It also involves balancing 
+different sources of data with the goal of reaching a better generic pretraining loss~\cite{xie2023doremi,fan2024doge,vo2024automaticdatacuration}. Recent work also considered filtering~\cite{kong2024largelanguagemodelguideddocument}, correcting~\cite{chen2024automateddatacurationrobust} or generating~\cite{maini-etal-2024-rephrasing} pretraining data with LMs. 
+These data quality considerations are orthogonal to domain concerns: quality filters are applied alongside domain adaptation decisions~\citep{albalak2024surveydataselectionlanguage}.
+
+
+
+\section{Data Selection for Task-Adaptive Pretraining}
+
+
+We consider three methods for task-adaptive pretraining of LMs. Classification and gradient alignment have been evaluated in different contexts before but not for end-tasks like multiple-choice question answering. Clustered-based importance sampling at scale is a contribution of this work, building upon recent work from~\cite{grangier2024slm}. 
+
+\subsection{Notations}
+
+$D^{\rm g}$ is the training dataset sampled from the generalist distribution ${\cal D}^{\rm g}$. $D^{\rm s}$ is the specialist dataset representative of the final task, 
+sampled from ${\cal D}^{\rm s} \neq {\cal D}^{\rm g}$. The loss of model $\theta$ on $D$ is
+$$
+{\cal L}(D; \theta) := \frac{1}{|D|} \sum_{x \in D} \ell(x; \theta) = -\frac{1}{|D|} \sum_{x \in D} \frac{1}{|x|} \sum_i \log p(x_i|x^{i-1}_1; \theta)
+$$
+where $|D|$ denotes the cardinality of a set $D$ and $|x|$ denotes the length of sequence \mbox{$x = x^{|x|}_0 = (x_1, \ldots, x_{|x|})$}. The perplexity of model $\theta$ on the dataset $D$ is ${\cal P}(D; \theta) := \exp( {\cal L}(D; \theta)).$
+
+\subsection{Classification}
+
+A binary classifier is trained to estimate the probability that a generalist pretraining document belongs to the targeted domain. The classifier $\phi$ is learned using positive examples from $D^{\rm s}$ and a subset of $D^{\rm g}$ as negative examples. $\phi$ then builds a domain-specific pretraining set 
+{$$
+C(D^{\rm g}, t) := \{ x \in D^{\rm g} \text{ such that } \phi(x) > t\}.$$}
+which restrict the generic dataset $D^{\rm g}$ to the examples with an estimated probability to be in-domain above threshold $t$.
+The threshold is validated as a trade-off between focusing on data close to the domain of interest while keeping $C(D_{g}, t)$ large enough to train an LM of the targeted capacity.
+In our case, we rely on a logistic regression classifier trained over sentence BERT (SBERT) text embeddings~\citep{reimers-gurevych-2019-sentence}, an established classification method~\citep{minaee2021deep}. The SBERT representation is also commonly used in data selection~\citep{albalak2024surveydataselectionlanguage,xie2023importance,zhang2024ideal,su2023selective}. This representation is also used in the alternative selection strategies we consider. As an ablation, we also evaluate the impact of the choice of SBERT (Section~\ref{sec:clustering}).
+
+\subsection{Gradient-Alignment}
+
+Gradient-Alignment (GA) methods are common when the generic pretraining set $D^{\rm g}$ originates from $n_{\rm g}$ different data sources
+$S$, i.e. $D^{\rm g} = \bigcup^{n_{\rm g}}_{i=1} D^{\rm g}_i$. These methods select weights for the different sources by considering two functions of $\theta$: the pretraining reweighed loss,
+$$
+{\cal L}((w, D^{\rm g}); \theta) := \sum^{n_{\rm g}}_{i=1} w_i  {\cal L}(D^{\rm g}_i; \theta), 
+$$
+and the targeted loss, i.e. the loss on $D^{\rm s}$ in our case. The weights, on the simplex, 
+can be inferred via a bilevel formulation of the data selection problem~\citep{dagreou2022framework}:
+the minimum \mbox{$\theta^\star(w)=\arg\min_\theta {\cal L}((w, D^{\rm g}); \theta)$}  depends on $w$
+and task-dependent pretraining is interested in weights $w$ that minimize ${\cal L}(D^{\rm s}; \theta^\star(w))$ wrt $w$. This formulation results in algorithms that select weights  during pretraining to align the gradients of these two functions wrt $\theta$~\citep{xie2023doremi, grangier2023bilevel}. In our case, we rely on the DoGE~\citep{fan2024doge} algorithm. Compared to classifiers, GA is harder to scale to large model size. This limitation is commonly addressed by finding the mixture weights with a small model before transferring them to a larger model.
+
+In this work, we consider a generic setting where the pretraining dataset $D^{\rm g}$ is 
+not pre-segmented into few data sources. Instead, we rely on the k-means clustering of the Sentence BERT embeddings to identify data clusters. Clustering based on text embeddings has been used for data selection, both for quality filtering~\citep{kaddour2023minipile} and domain adaptation~\citep{grangier2024projected}.
+
+\subsection{CRISP: ClusteRed Importance Sampling for Pretraining}
+
+\begin{figure*}[!h]
+  \centering
+  \includegraphics[width=\textwidth,clip]
+  {./figures/is_method.pdf}
+  \caption{{\bf Clustered-based Importance Sampling with CRISP\label{fig:is_method}}.}
+\end{figure*}
+
+We sketch our strategy from Figure~\ref{fig:is_method}. Initially, we divide the space of text into clusters. We decompose the specialist loss and the generalist loss as a weighted sum of losses over clusters. Then we make an independence assumption that implies that the specialist and generalist loss per cluster are identical. The specialist loss is then computed as the generalist loss with a reweighing of each cluster.
+
+Specifically, we want to identify a model with a low loss on the 
+specialist distribution ${\cal D}^{\rm s}$,
+$$
+{\cal L}({\cal D}^{\rm s}; \theta) 
+= \expectation_{x \sim {\cal D}^{\rm s}}[\ell(x; \theta)] 
+= \sum_{x} \ell(x; \theta) P(x|{\cal D}^{\rm s})
+$$
+We marginalize over a discrete latent variable $c$, the cluster variable, and write
+\begin{equation}
+{\cal L}({\cal D}^{\rm s}; \theta) 
+= \sum_{x} \sum_{c} \ell(x; \theta) P(x|c, {\cal D}^{\rm s}) P(c|{\cal D}^{\rm s})
+\underset{(2)}{=} \sum_{x} \sum_{c} \ell(x; \theta) P(x|c) P(c|{\cal D}^{\rm s})
+\label{eq:indep}
+\end{equation}
+where the second equality ${=}_{(2)}$ makes the independence assumption
+$P(x|c, {\cal D}^{\rm s})=P(x|c)$. If we make a similar assumption for the
+generalist loss $P(x|c, {\cal D}^{\rm g})=P(x|c)$, we can write both losses as
+\begin{equation}
+{\cal L}({\cal D}^{\rm s}; \theta) 
+= \expectation_{c \sim (c|{\cal D}^{\rm s})}[{\cal L}(c; \theta)]
+\quad
+\text{and}
+\quad
+{\cal L}({\cal D}^{\rm g}; \theta) 
+= \expectation_{c \sim (c|{\cal D}^{\rm g})}[{\cal L}(c; \theta)]
+\end{equation}
+where we define ${\cal L}(c; \theta) =: \sum_{x} \ell(x; \theta) P(x|c)$.
+We now apply importance sampling to these expectation, defining the importance weights as $w(c) = P(c|{\cal D}^{\rm s}) / P(c|{\cal D}^{\rm g})$,
+$$
+{\cal L}({\cal D}^{\rm s}; \theta) 
+= \sum_{c} {\cal L}(c; \theta) P(c|{\cal D}^{\rm s})
+= \sum_{c} {\cal L}(c; \theta) \frac{P(c|{\cal D}^{\rm s})}{P(c|{\cal D}^{\rm g})}  P(c|{\cal D}^{\rm g})
+= \expectation_{c \sim (c|{\cal D}^{\rm s})}
+[w(c)  {\cal L}(c; \theta)].
+$$
+
+In our experiments, we estimate the terms $w(c), {\cal L}(c; \theta)$ from 
+the finite training sets $D^{\rm s}\sim {\cal D}^{\rm s}$
+and $D^{\rm g}\sim {\cal D}^{\rm g}$. We count the number of examples in each
+cluster to estimate $P(c|{D}^{\rm s}), P(c|{D}^{\rm g})$. 
+The expected loss over a 
+cluster ${\cal L}(c; \theta)$ is estimated as the average loss over the generalist
+examples in cluster $c$, ${\cal L}({D}^{\rm g} \cap K(c); \theta)$, 
+where $K(c)$ denotes the examples in cluster $c$.
+This strategy therefore only estimates $P(c|{D}^{\rm s})$ on the small ${D}^{\rm s}$. The term ${\cal L}(c; \theta)$ is estimated over the large set as
+\mbox{${\cal L}({D}^{\rm g} \cap K(c); \theta)$} 
+which has less variance than the estimator ${\cal L}({D}^{\rm s} \cap K(c); \theta)$ over the small ${D}^{\rm s}$. 
+
+We train CRISP models with stochastic optimization~\citep[Adam]{kingma2014adam} and propose Algorithm~\ref{alg:trn}. Here, we do not explicitly reweigh the loss. We instead samples cluster from their importance. This avoids frequently visiting clusters with less weights. This strategy has less variance in its gradient estimates,
+which can help convergence~\citep{seiffert2008resampling,an2021resampling}.
+This algorithm is simple and efficient when one groups the generalist
+examples by cluster prior to training.
+
+\begin{algorithm}
+\caption{CRISP Training}\label{alg:trn}
+\begin{algorithmic}[1]
+   \State {\bfseries Parameters:} $T$ (number of steps), $B$ (batch size)
+   \State {\bfseries Input:} $D^{\rm s}$ (specialist set), $D^{\rm g}$ (generalist set)
+   \State $h^{\rm s} \gets \{P(c|{D}^{\rm s}), \forall c\}$  \Comment{Count cluster frequency on the specialist set $D^{\rm s}$.} 
+   \State $\theta_0 \gets {\rm InitModel}()$ \Comment{Initialize the model.}
+   \For{$t = 1, \ldots, T$}
+       \For{$i = 1, \ldots, B$} 
+            \State $c_i \sim {\rm Categorical}(h^{\rm s})$ \Comment{Sample a cluster id from the specialist histogram.}
+            \State $x_i \sim  {\rm Uniform}({D}^{\rm s} \cap K(c))$ \Comment{Sample a generalist example in the selected cluster.}
+       \EndFor
+       \State $\theta_{t} \gets {\rm AdamUpdate}(\theta_{t-1}, \{x_0, \ldots , x_B\})$
+    \EndFor
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiments \& Results}
+
+\label{sec:res}
+
+We perform experiments with transformer LMs~\citep{vaswani2017tranformers}. Most of our experiments use models with 1.3B parameters (trained on 120B tokens) and we conduct ablations with 350m and 7B models (resp. trained on 40B, 350B tokens).
+
+Our generalist training set is Redpj2~\citep{redpj2}. We select this dataset as it contains only web-crawled data without additional interventions to help evaluation tasks (e.g. adding encyclopedias, books or academic articles).
+
+We segment the dataset into non-overlapping 1,024 token windows (the model context limit) and compute SBERT embedding for every window. The levels therefore have 64, 4,096 ($=64^2$), 260k ($=64^3$) and 16.7m ($=64^4$) clusters with an average of 540B, 8.4B, 130m and 2m tokens per cluster respectively. As an alternative to SBERT embeddings, we also consider Latent Semantic Index (LSI), i.e. singular value decomposition over tf-idf representations~\citep{deerwester1990indexing,dumais2004latent}. 
+
+For our specialist tasks, we consider 3 language modeling tasks (LM) and 3 multiple-choice-question tasks (MCQ). For LM, we use Pile subsets from different domains~\citep{gao:pile21}: medical (Pubmed Central), programming Q\&A (Stackexchange), and encyclopedic (Wikipedia). For MCQ answering, we use AI2 Reasoning Challenge~\citep[ARC]{clark2018arc}, Massive Multitask Language Understanding~\citep[MMLU]{hendrycks2021mmlu}, and Reward Bench Reasoning~\citep[RWDB-R]{lambert2024rewardbench}. ARC focuses on science questions, MMLU focuses on interdisciplinary knowledge, RWDB-R focuses on correct vs incorrect solutions to math and programming problems. 
+
+Our main results are reported with unified settings. For the classifier, the classification threshold is the main parameter. A threshold accepting 2.5\% of $D^{\rm g}$ worked best in for the runs with 1.3B models over 120B tokens. For DoGE, the method is costly to apply over many data sources/clusters and we applied it over 64 clusters, i.e. learning a mixture weight of dimension 64. For importance sampling, the results presented in this section relies on 260k clusters.
+Later, Section~\ref{sec:analysis} studies ablations and parameter sensitivity. 
+
+
+\subsection{Language Modeling Tasks}
+
+We evaluate specialist LMs on three domains from the Pile~\citep{gao:pile21}: medical (PubMed Central), encyclopedic (Wikipedia) and programming Q\&A (StackExchange). We limit specialist training data from 14m tokens to the full Pile subset, up to 26.  
+
+As baselines, we either train only on the in-domain (specialist) data without pretraining or we fine-tune a model pre-trained on Redpj2. We refer to the Redpj2 pretraining distribution as the base distribution. For task-dependent pretraining, we resample the Redpj2 pretraining set using a classifier, DoGE or importance sampling for each domain. The three methods have access to 14m specialist training tokens.
+In each case, the resampled pretraining set is used to train a 1.3B-parameter transformer model with the same hyperparameters as the Redpj2 baseline.
+
+We report pretraining results in  Figure~\ref{fig:lm_pre}, and the fine-tuning results in Figure~\ref{fig:lm_ft}. For each domain, the pretraining results evaluate models trained using the resampled Redpj2 examples. The fine tuning results evaluate models where each model pretrained on (resampled) Redpj2 has been further trained on the in-domain data itself (PubMed, StackExchange, Wikipedia). All experiments consider the same optimization effort and we validate the fraction of steps spent in fine-tuning, from 3\%-ft with 14m tokens to 100\%-ft with 26.7B tokens. 
+
+The pretraining results in Figure~\ref{fig:lm_pre} show that the in-domain perplexity is better with task-dependent pretraining than with generic pretraining (base Redpj2) for all methods. This gain in perplexity comes as model training focuses on data close to the targeted domain: the model capacity is not used to fit the filtered out training data.3\% of PubMed but reports worse perplexity on 95.9\% of Redpj2.
+
+When we fine tune the pretrained models, 
+the advantage of task-dependent pretraining is preserved, in Figure~\ref{fig:lm_ft}. Task-specific pretraining checkpoints are better starting points for fine-tuning than generic ones. This shows the complementarity between task-dependent pretraining and fine-tuning. Figure~\ref{fig:lm_ft} also shows the necessity of pretraining: below 7B tokens, the ``only specific'' 1.3B model shows high perplexity. When comparing task-dependent pretraining methods, importance sampling consistently performs better after fine-tuning, even when the pretraining results are close (e.g. classifier on PubMed, Wikipedia).
+
+\begin{figure*}[!h]
+  \centering
+  \begin{subfigure}[t]{0.31\linewidth}
+      \centering
+      \includegraphics[height=\figureheight,clip]{./figures/lm_pre_pubmed.pdf}
+      \caption{PubMed\label{fig:lm_pre_pubmed}}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.31\linewidth}
+      \centering
+      \includegraphics[height=\figureheight,clip]{./figures/lm_pre_stackexchange.pdf}
+      \caption{StackExchange\label{fig:lm_pre_stackexchange}}
+      \end{subfigure}
+  \hfill 
+  \begin{subfigure}[t]{0.31\linewidth}
+      \centering
+      \includegraphics[height=\figureheight,clip]{./figures/lm_pre_wikipedia.pdf}
+      \caption{Wikipedia\label{fig:lm_pre_wikipedia}}
+  \end{subfigure}   
+  \caption{{\bf Pretraining perplexities for language modeling tasks\label{fig:lm_pre}}}
+~\\~\\
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}
+      \centering
+      \includegraphics[height=\figureheight,clip]{./figures/lm_ft_pubmed.pdf}
+      \caption{Pubmed Central\label{fig:lm_ft_pubmed}}
+      \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/lm_ft_stackexchange.pdf}
+      \caption{StackExchange\label{fig:lm_ft_stackexchange}}
+      \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/lm_ft_wikipedia.pdf}
+      \caption{Wikipedia\label{fig:lm_ft_wikipedia}}
+  \end{subfigure}  
+  \caption{{\bf Fine-tuned perplexities for language modeling tasks.\label{fig:lm_ft}} Task-dependent pretraining is always better than generic pretraining. The ordering of the methods is unchanged from pretraining.}
+~\\~\\
+    \centering
+    \begin{subfigure}[t]{0.24\linewidth}
+      \centering 
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_pre_ft_arc_e.pdf}
+      \caption{Arc-E\label{fig:mcq_pre_ft_arc_e}}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.24\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_pre_ft_arc_c.pdf}
+      \caption{Arc-C\label{fig:mcq_pre_ft_arc_c}}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.24\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_pre_ft_mmlu.pdf}
+      \caption{MMLU\label{fig:mcq_pre_ft_mmlu}}
+    \end{subfigure}
+    \hfill 
+    \begin{subfigure}[t]{0.24\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_pre_ft_rwdb_r.pdf}
+      \caption{RWDB-R\label{fig:mcq_pre_ft_rwdb_r}}
+    \end{subfigure}   
+    \caption{{\bf Accuracy for multiple choice question tasks.} Light colors indicate fine tuning improvements if any. The ordering of the methods is consistent across all 4 datasets. \label{fig:mcq_pre_ft}}
+~\\
+\end{figure*}
+
+\subsection{Multiple Choice Question Tasks}
+
+Compared to LM, MCQ has much smaller specialist training sets per task, i.e. The MCQ evaluation is also different: it uses accuracy and not perplexity. For each example, the model scores the concatenation of the question and a possible answer, for each proposed answer. For MCQ tasks, unlike for LM tasks,
+the training loss (negative log likelihood) is therefore not closely tied to the test metric. 
+
+Despite these differences, we observe a similar benefit for task-dependent pretraining compared to task-agnostic (base) pretraining. Figure~\ref{fig:mcq_pre_ft} displays a similar method ordering and CRISP is consistently the best method. As a difference with LM tasks, we observe limited benefits from fine tuning, see Figure~\ref{fig:mcq_pre_ft}.
+
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+
+\subsection{Clustering}
+\label{sec:clustering}
+
+We study the impact of the text representation for clustering and the number of clusters. We consider two representations for clustering, the SBERT embeddings used
+in all other experiments and LSI embeddings, see Section~\ref{sec:res}.
+We report their performance with 64, 4096, 262k and 16.7m clusters. 
+
+The representation is important: the examples in a cluster are close in the embedding space. Our independence assumption, Equation~\ref{eq:indep},  assumes that the loss in a cluster $c$ is the same regardless whether its data originates from ${D}^{\rm g}$ or ${D}^{\rm s}$, i.e. 
+\begin{equation}
+    {\cal L}({D}^{\rm g} \cap K(c); \theta) \simeq {\cal L}({D}^{\rm s} \cap K(c); \theta).
+    \label{eq:loss_sim}
+\end{equation}
+In practice, it is sufficient that the embedding space reflects the similarity of the loss gradient, i.e. if the gradients of the loss over a generalist cluster ${D}^{\rm g} \cap K(c)$ is correlated with the gradient over a specialist cluster ${D}^{\rm s} \cap K(c); \theta)$, the model trained on the former improves on the later.  Figure~\ref{fig:mcq_representation} shows that the SBERT representation is more adapted and yields  better results than LSI for all settings. 
+
+\begin{figure*}[h!]
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}
+      \centering
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_representation_arc_e.pdf}
+      \caption{Arc-E\label{fig:mcq_representation_arc_e}}
+  \end{subfigure}\hfill
+      \begin{subfigure}[t]{0.32\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_representation_arc_c.pdf}
+      \caption{Arc-C\label{fig:mcq_representation_arc_c}}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+      \centering  
+      \includegraphics[height=\figureheight,clip]{./figures/mcq_representation_mmlu.pdf}
+      \caption{MMLU\label{fig:mcq_representation_mmlu}}
+  \end{subfigure} 
+  \caption{{\bf Accuracy for multiple choice question tasks varying the text representation for clustering and the number of clusters\label{fig:mcq_representation}.} SBERT is more effective than LSI in all cases.}
+~\\
+  \centering
+  \begin{minipage}{0.40\textwidth}
+    \centering
+    \includegraphics[height=\figureheight]{./figures/num_rep_mmlu.pdf}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.58\textwidth}
+  \centering
+  \includegraphics[height=\figureheight,clip]{./figures/mmlu_distance_vs_ppl.pdf}
+  \includegraphics[height=\figureheight,clip]{./figures/mmlu_distance_vs_ppl_log.pdf}
+  \end{minipage}
+  \begin{minipage}{0.40\textwidth}
+    \centering
+    \caption{{\bf Number of occurrences of each training example for CRISP on MMLU.} Repeated examples increase with the number of clusters.\\}
+    \label{fig:mmlu_repetitions}
+    \hfill 
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.58\textwidth}
+    \centering
+    \caption{{\bf Loss improvement on Redpj2 (valid) wrt base as a function of the SBERT distance to MMLU train.} Models with a large number of clusters are better than base in a small area near MMLU train. The gray area indicates the $25$-$75\%$ quantiles for the MMLU test set.}
+    \label{fig:mmlu_loss_dist}  
+    \hfill 
+  \end{minipage}  
+\end{figure*}
+The number of clusters is a trade-off and its optimum is at 260k for most of our experiments. There are multiple factors at play when the number of clusters varies. A smaller number of clusters implies larger clusters: our hypothesis, Equation~\ref{eq:loss_sim}, is then stronger as it assumes loss similarity on large areas of the embedding space. At the limit, with one cluster, this hypothesis assumes that the specialist loss and generalist loss are identical everywhere. Conversely, as the number of clusters gets larger, the estimation of the cluster density on the small specialist set $P(c|{\cal D}^{\rm s}) \simeq P(c|{D}^{\rm s})$ gets less accurate. The estimator risks overfitting, i.e. favoring clusters frequent in the training set ${D}^{\rm s}$ but not as frequent on other samples from ${\cal D}^{\rm s}$. Increasing the number of clusters also risks reducing the effective training set size: the specialist data could be mostly concentrated in a few clusters, corresponding to a small fraction of the overall generalist set ${D}^{\rm g}$.
+
+We explore these aspects on MMLU. We first measure the number of repeated examples when training models with CRISP pretraining for different number of clusters. Figure~\ref{fig:mmlu_repetitions} shows the number of repetitions for each quantile of the training set. Even for 16.7m clusters, only a small minority of training examples are repeated beyond 10 times and the average number of occurrences of the training is examples 1.94, well within commonly recommended values~\citep{muennighoff2023scaling,fuzhao2023repeat}. Even if exact repetitions do not account for the poorer performance of the 16.7m cluster setting, its training set might be less diverse and the model might generalize well only in a small neighborhood of its training set.
+We plot Figure~\ref{fig:mmlu_loss_dist} to evaluate if the Redpj2 examples with good perplexity concentrate 
+around $D^{\rm s}$, the MMLU training set. This plot shows that the benefit of CRISP over base is indeed correlated with the distance to $D^{\rm s}$. As the number of cluster increases to 16.7m, the benefit over base concentrate in an area with very few samples. For comparison, we plot the 2 middle quartiles [0.25, 0.75] where most of the MMLU test data concentrate in gray. We remark that MMLU test data mostly lies in an area where the perplexity of IS  16.7m is low.
+
+\begin{wrapfigure}{r}{0.65\textwidth}   
+  \centering
+  \begin{subfigure}[t]{0.48\linewidth}
+  \includegraphics[height=\figureheight,clip]{./figures/ppl_mmlu_Redpj2.pdf}
+  \captionsetup{justification=centering}
+  \caption{Perplexity on reweighted Redpj2\label{fig:ppl_mmlu_Redpj2}}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\linewidth}
+  \includegraphics[height=\figureheight,clip]{./figures/ppl_mmlu_mcq.pdf}
+  \captionsetup{justification=centering}  
+  \caption{Perplexity on MMLU train (plain) and test (dotted) sets.\label{fig:ppl_mmlu_mcq}}
+  \end{subfigure}
+  \caption{{\bf Perplexity for CRISP on MMLU with different number of clusters\label{fig:ppl_mmlu}.} Y-scales on (a) and (b) are different.}
+\end{wrapfigure}
+Figure~\ref{fig:ppl_mmlu} shows the perplexity during training for CRISP runs on MMLU. On Figure~\ref{fig:ppl_mmlu_Redpj2}, the perplexity is computed from the reweighed loss on Redpj2. This is the loss optimized during pretraining. It shows that when the number of cluster increases the sampled training set is less diverse and corresponds to an easier learning problem ($<5$ PPL). On Figure~\ref{fig:ppl_mmlu_mcq}, the perplexity is computed on the MMLU data itself, on the training set (plain) and on the test set (dotted). The scale of both plot is different: the resampled perplexities on Redpj2 are therefore not a good approximation of the MMLU perplexities. This quantifies the error resulting from our assumption, Equation~\ref{eq:loss_sim}. We also remark overfitting for 16.7m clusters, the only case with better MMLU perplexity for train than for test. Finally, we notice that the gray area in Figure~\ref{fig:mmlu_loss_dist} fails to show that 260k cluster would have the best perplexity, which highlights that SBERT distance to the training data
+is not the only factor explaining model performance.
+
+
+\subsection{Model Size}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figures/mcq_model_size_arc_e.pdf}
+  \caption{Arc-E\label{fig:mcq_model_size_arc_e}}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figures/mcq_model_size_arc_c.pdf}
+  \caption{Arc-C\label{fig:mcq_model_size_arc_c}}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figures/mcq_model_size_mmlu.pdf}
+  \caption{MMLU\label{fig:mcq_model_size_mmlu}}
+  \end{subfigure} 
+  \caption{{\bf Accuracy for multiple choice question tasks across model sizes\label{fig:mcq_model_size}.}}
+~\\
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figures/mcq_acceleration_arc_easy_is_vs_base_all_model_sizes_acc.pdf}
+  \caption{Arc-E\label{fig:mcq_model_accel_arc_e}}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figures/mcq_acceleration_arc_challenge_is_vs_base_all_model_sizes_acc_n.pdf}
+  \caption{Arc-C\label{fig:mcq_model_accel_arc_c}}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figures/mcq_acceleration_mmlc_is_vs_base_all_model_sizes_acc_n.pdf}
+  \caption{MMLU\label{fig:mcq_model_accel_mmlu}}
+  \end{subfigure} 
+  \caption{{\bf Accuracy for multiple choice question tasks as a function of training cost.} The large dots mark the transition between model sizes (350m $\to$ 1.3B $\to$ 6.7B).\label{fig:mcq_model_accel}}
+\end{figure*}
+
+This section compares CRISP and base at 3 model sizes. The benefit of task-dependent training is consistent across model sizes, see Figure~\ref{fig:mcq_model_size}. We consolidate results across sizes to report the training cost in GPUh vs accuracy in Figure~\ref{fig:mcq_model_accel}. GPUh are measured in training hours per graphic processor (NVIDIA H100). We evaluate multiple checkpoints across model sizes and sort the checkpoints by training cost. The big dots mark transitions between model sizes: they show that the the 1.3B I.S. model outperforms the 6.7B base model on ARC. This shows substantial training speedups ($\sim$30x). Of course, a smaller model is also beneficial at inference.
+
+\subsection{Different Amount of Training Data}
+
+\begin{figure*}[t]
+  \centering
+    \centering
+  \begin{subfigure}[t]{0.42\linewidth}
+  \includegraphics[height=1.08\figureheight,clip]{./figures/num_rep_mmlu_ds.pdf}
+  \caption{Repetitions for less generic data\label{fig:mcq_downsampling_generic_mmlu_rep}}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.28\linewidth}
+  \includegraphics[height=1.08\figureheight,clip]{./figures/mcq_downsampling_generic_mmlu.pdf}
+  \caption{Acc. for less generic data\label{fig:mcq_downsampling_generic_mmlu}}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.28\linewidth}
+  \includegraphics[height=1.08\figureheight,clip]{./figures/mcq_downsampling_specific_mmlu.pdf}
+  \caption{Acc. for less specific data\label{fig:mcq_downsampling_specific_mmlu}}
+  \end{subfigure}
+  \caption{{\bf MMLU with less training data\label{fig:less_train_data}.} When the generalist set $D^{\rm g}$ is small (a,b), the importance sampling method will up-sample a small part of $D^{\rm g}$ and this part will be seen multiple times during training. When this part is too small, the benefit of data selection vanishes. When the specialist set $D^{\rm s}$ is small (c), the importance sampling weights are poorly estimated and the importance sampled data might not be representative of the targeted task.}
+\end{figure*}
+
+This section varies both (i) the amount of generalist data available to sample the CRISP dataset from and (ii) the amount of specialist data for inferring the CRISP weights. 
+
+When specialist data concentrates on a few clusters, CRISP often samples generalist data from the same clusters, which can be problematic when the generalist set is small. We restrict the pretraining set to 700B and 120B tokens (downsampling Redpj2 by resp. $\sim$ 50x and $\sim$300x). Our pretraining runs use 120B tokens, so a base run never repeats  in all settings. When CRISP is applied, some tokens are repeated.
+Figure~\ref{fig:mcq_downsampling_generic_mmlu_rep} shows that, 
+when restricting to 120B tokens, the number of repetition becomes high (22.5 on average) and CRISP is ineffective after 256k steps. 
+
+When the specialist dataset is smaller, Figure~\ref{fig:mcq_downsampling_specific_mmlu} shows that the errors in estimating cluster frequencies $P(c|{\cal D}^{\rm s})$
+negatively impact end task accuracy. This suggests future work to improve this estimation for tasks with small ${D}^{\rm s}$: e.g. specific set augmentations or task grouping.
+
+\subsection{Task-Transfer and Multitasking}
+\label{sec:transfer}
+
+We perform cross-task evaluation, i.e. targeting a task A and evaluating on a task B, we also pretrain a multitask models with CRISP averaged weights from multiple tasks. Our results for the 1.
+Cross-task evaluations show that, perhaps unsurprisingly, the best results on a task A are obtained when pretraining for task A. Transfer differs across tasks: CRISP targeting MMLU gives better results than base for all tasks, which is not the case for CRISP targeting ARC or RWDB-R. The multi-task result which mixes the histograms with the same weight (1/3 for ARC, MMLU and RWDB-R) gives the best result on averaged multitask accuracy. Surprisingly, on RWDB-R, this setting slightly outperforms targeting RWDB-R itself.
+\begin{table}[t]
+    \centering
+    \caption{{\bf Accuracy (\%) for Task Transfer and Multitasking.\label{tab:multitasking}} Importance Sampling on MMLU and on multitask improves all tasks compared to baseline.}
+    {\footnotesize    
+    \begin{tabular}{l l| r r r r | r}
+    \toprule
+    \multicolumn{2}{l|}{Model}  & \multicolumn{5}{c}{Evaluation Tasks}\\
+                 & & ARC-E & ARC-C & MMLU & RWDB-R & Multi\\
+    \toprule
+    Base  & Redpj2  & 58.4 & 27.5 & 30.1 & 62.2 & 45.1\\\midrule
+    CRISP & ARC     & {\bf 71.3} & {\bf 38.6} & 28.9 & 60.9 & 48.2 \\
+     & MMLU         & 63.4 & 28.7 & {\bf 33.4} & 65.2 & 48.2\\
+     & RWDB-R       & 42.4 & 23.4 & 26.4 & 70.1 & 43.1 \\\midrule
+    CRISP & Multi   & 68.6 & 34.1 & 31.1 & {\bf 70.9} & {\bf 51.1}\\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+\subsection{Task-Dependent Continued Pretraining}
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \centering
+    \includegraphics[width=0.3\textwidth]{./figures/mcq_continued_mmlu.pdf}
+    \caption{Continued Pretraining on MMLU\label{fig:mcq_continued_mmlu}}
+\end{wrapfigure}
+
+We have seen the benefit of pretraining a model per task with CRISP in Figure~\ref{fig:mcq_pre_ft}. 
+For tasks where pretraining cost is a concern, shorter pretraining runs still provide benefits, see Figure~\ref{fig:mcq_model_accel}. Pretraining a multi-task model is also a cost-effective option, see Table~\ref{tab:multitasking}. This section evaluates a third cost-effective option when targeting multiple tasks: continued pretraining.
+In this case, pretraining is divided into a generic pretraining phase and a task-dependent continued pretraining phase using CRISP. The compute cost of the generic pretraining can be shared across multiple tasks. Our results in Figure~\ref{fig:mcq_continued_mmlu}
+show that even 10\% of CRISP continued pretraining (i.e. generic pretraining for 928 steps out of 1,024)
+gives an accuracy (32.9\%) close to a full CRISP run (33.4\%). We also remark that the impact of continued pretraining is stronger than fine tuning a generic model on MMLU (31.0\% accuracy), see Figure~\ref{fig:mcq_pre_ft}.
+
+
+
+\section{Conclusions}
+
+
+A specialist LM is interesting since a small specialist LM can outperform a larger generalist LM on its targeted domain while having a lower inference cost. We explore pretraining specialist LMs when little specialization data is available, a common setting that prevents pretraining of dedicated LMs. We evaluate different method that modifies the distribution of a generic training set guided by little specialist data. Our experiments highlight the benefit of clustered importance sampling: i.e. resampling the generic
+set such that its cluster histogram matches the specialist data. Our findings show that pretraining with this method provides strong models both for LM and question answering tasks. These benefits are studied across model size, training set size and clustering methods. We also explore ways to lower the training cost of specialist models addressing by showing their benefit on shorter training runs, continued pretraining and multitask settings. 
+
+Our work shows that a simple, scalable importance sampling method can provide effective specialist LMs, even from little specialization data. Since clustered importance sampling is modality-agnostic, we foresee extensions of this work to other modalities, including vision and audio.
+
+
+\clearpage
+\newpage
+
+
+

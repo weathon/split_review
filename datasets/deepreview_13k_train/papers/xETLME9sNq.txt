@@ -1,0 +1,227 @@
+\title{SFW sampling for diffusion models via external conditioning}
+
+\begin{abstract}
+Score-based generative models (SBM), also known as diffusion models, are the de facto state of the art for image synthesis. Despite their unparalleled performance, SBMs have recently been in the spotlight for being tricked into creating not-safe-for-work (NSFW) content, such as violent images and non-consensual nudity. This article proposes a safe-for-work (SFW) sampler for SBMs implementing a Conditional Trajectory Correction step that guides the samples away from undesired regions in the ambient space using external multimodal models as the source of conditioning. Furthermore, using Contrastive Language Image Pre-training (CLIP), our method admits user-defined NSFW classes, which can vary in different settings. Our experiments on the text-to-image SBM Stable Diffusion validate that the proposed SFW sampler effectively reduces the generation of explicit content, as assessed via independent NSFW detectors. Furthermore, the proposed correction comes at a minor cost in image quality and has an almost null effect on samples that do not need correction. Our study confirms the suitability of the SFW sampler towards aligned SBM models.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Score-based models (SBMs) (Sohl-Dickstein et al., 2015; Song & Ermon, 2019; Ho et al., 2020) avoid the computation of the (normalised) probability density required in standard likelihood-based generative modelling by sampling directly from the score function $\nabla_{x}\log{p(x)}$ of the data distribution $p$ . This is achieved by training a neural network to learn the score function corresponding to noise-corrupted copies of the data using annealed Langevin dynamics. This way, the sampler is initialised on a pure-noise domain and then guided through a sequence of decreasing-noise latent spaces to arrive at regions of the ambient space where the observations occurred (with high probability). Song et al. (2021b) generalises this concept to a continuous-time noise scheduling by considering a diffusion process, that is, a stochastic differential equation (SDE) governing the evolution from the data space to the noise space. Then, sampling occurs by Langevin-based numerical solution of the reverse SDE.  
+
+SBMs have become an attractive field of study in the ML community (Yang et al., 2023). This success has been boosted by their capacity to generate realistic images, positioning them as the go-to resource for image generation by practitioners. In particular, the ability of SBMs to generate highquality images given a text prompt has made them surpass the performance of GANs (Dhariwal & Nichol, 2021). The capacity of SBMs to generate images for previously unseen prompts has been improved by embedding the conditioning text into the model pre-training scheme (namely classifier-free guidance, Ho & Salimans (2021)). Moreover, performing the denoising steps on a lower dimensional latent space has helped decrease the computational cost while still generating high-resolution samples (Rombach et al., 2022).  
+
+Like other generative AI methods developed recently, SBMs are also the subject of attacks and misuse. Via prompting, SBMs’ unique ability for out-of-distribution synthesis can be used to generate deep-fakes or discriminative content. Such risks have been studied by Qu et al. (2023) in the context of publicly-available models such as Stable Diffusion and DALL-E (Rombach et al., 2022; Ramesh et al., 2022), confirming the possibility to generate inappropriate images containing, e.g., violence or nudity, even in the cases where attacks were not planned. This must be carefully and urgently addressed since SBMs are the backbone of Generative AI engines to which the wider community, including underage users, can access.  
+
+A straightforward approach to avoid generating sensitive content consists of blocking the related prompts or filtering out violent samples after generation. Both approaches require training specialised classifiers and ultimately dismiss the problem of having models that can sample inappropriate images in the first place. The community has since tackled the issue by modifying the base sampling process in SBMs as we observe in Sec. 5. Most of these approaches, while capable of safer sampling, rely on the model’s own knowledge –and thus assessment– of sensitive content.  
+
+We adopt a different perspective and propose using an external signal to guide the samples away from undesired content. This approach adds flexibility, particularly regarding the source of the external signal. This will ultimately define what is considered “harmful”, thus allowing for particular applications based on independently-produced NSFW detectors that can audit a deployed model. In this context, we assume the existence of a harmfulness probability density $p_{h}$ that models the probability of a point in the ambient space belonging to such a harmful type of content. We then reduce the expected harmfulness of the clean point prediction in Denoising Implicit Diffusion Models (DDIM) Song et al. (2021a) based on manifold preserving guidance (He et al., 2024) and a novel conditional trajectory correction step. Overall, our approach reduces the rate of images containing explicit content with little compromise over the quality of benign samples. To the best of our knowledge, the extent to which external sources can help block NSFW images in sampling has been hitherto unexplored.  
+
+Our contributions are summarised as follows  
+
+• We formulate the problem of avoiding the generation of sensitive content in SBMs by reducing the likelihood of the samples coming from an external source of NSFW probability, namely a harmfulness distribution $p_{h}$ .   
+• We adapt manifold preserving guidance (He et al., 2024) to reduce the probability of generating undesired content (Sec. 3.1). This is complemented by a conditional diffusion trajectory correction step to maintain image quality for samples that pose a low harmful risk (Sec. 3.2).   
+• We propose a family of harmful content distributions $p_{h}$ that can be flexibly defined by the user based on the vision language model CLIP Radford et al. (2021) (Sec. 4).   
+• We develop a performance indicator called prompt-image concordance to assess the semantic shift that guidance signals might produce in generated images (Sec. 6.2).   
+• We validate the ability of the proposed method to effectively reduce the rates of explicit content (Sec. 6.1) while maintaining the quality and prompt-image concordance of the samples (Sec. 6.3 and 6.2).  
+
+Disclaimer This model tackles the generation of images that might cause distress and trigger traumas in certain people. Although we have censored the most sensible parts, we warn the reader that the images in this document feature violent content.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+Preliminary concepts on diffusion models. We will consider the generation of images that lie on a $k$ -dimensional manifold $\mathcal{M}$ , a subset of the ambient space $\mathbb{R}^{d}$ with $k\ll d$ . Denoising Diffusion Models can be thought of as performing denoising score matching over images with decreasing noise levels $\{\sigma_{i}\}_{i=T}^{1}\subset(0,1]$ (Ho et al., 2020). Indeed, given a sequence of time/noise dependent scale factors $\alpha(t)\,=\,\sqrt{1-\sigma(t)^{2}}$ and denoting $\begin{array}{r}{\bar{\alpha}=\prod_{s=1}^{T}(1-\alpha_{t})}\end{array}$ , a straightforward derivation using Tweedie’s formula (Efron, 2011) results in the n oise level being related to the score function by $\begin{array}{r}{\bar{\nabla}\log p(x_{t})\,=\,-\frac{1}{\sqrt{1-\bar{\alpha}_{t}}}\epsilon}\end{array}$ . Here, $\epsilon$ corresponds to the noise in sample $x_{t}$ , which can be written as $x_{t}=\sqrt{\bar{\alpha}_{t}}x_{0}+\sqrt{1-\bar{\alpha}_{t}}\epsilon$ , with $\epsilon\sim\mathcal{N}(0,I)$ . Such a level of noise is approximated by $\epsilon_{\theta}(x_{t},t)$ , which takes a noisy input $x_{t}$ and a denoising step $t\in\{1,\ldots,T\}$ .  
+
+Non-Markovian sampling. DDIM alleviates the computational cost of SBMs by considering a non-Markovian diffusion process (Song et al., 2021a). The resulting reverse generative Markov chain takes considerably fewer steps to generate meaningful images. Given a decreasing sequence $\{\alpha_{i}\}_{i=1}^{T}\subset(0,1]^{T}$ , the family of probability distributions $\{q_{\sigma}\}_{\sigma\in\mathbb{R}_{\geq0}^{T}}$ given by  
+
+$$
+q_{\sigma}(x_{t-1}|x_{t},x_{0})=\mathcal{N}\left(\sqrt{\bar{\alpha}_{t-1}}x_{0}+\sqrt{1-\bar{\alpha}_{t-1}-\sigma^{2}}\frac{x_{t}-\sqrt{\bar{\alpha}_{t}}x_{0}}{\sqrt{1-\bar{\alpha}_{t}}},\sigma^{2}I\right)\;,
+$$  
+
+satisfies that $q_{\sigma}(x_{t}|x_{0})=\mathcal{N}(\sqrt{\bar{\alpha}_{t}}x_{0},(1-\bar{\alpha}_{t})I),\forall t=1,\dots,T$ . This property guarantees that the decomposition $x_{t}=\sqrt{\bar{\alpha}_{t}}x_{0}+\sqrt{1-\bar{\alpha}_{t}}\epsilon$ , $\epsilon\sim\mathcal{N}(0,I)$ still holds, hence ensuring that the training procedure from the Markovian version can still be utilised for adjusting $\epsilon_{\theta}(x_{t},t)$ as in Ho et al. (2020). Additionally, since equation 1 requires the clean point $x_{0}$ , the following approximation can be used instead:  
+
+$$
+\hat{x}_{0}(x_{t})=\frac{1}{\sqrt{\alpha_{t}}}\left(x_{t}-\sqrt{1-\bar{\alpha}_{t}}\epsilon_{\theta}(x_{t},t)\right)\,.
+$$  
+
+We will denote this prediction $x_{0}^{(t)}$ to ease the notation. This expression is a straightforward consequence of the decomposition of $x_{t}$ when $\epsilon$ is approximated by $\epsilon_{\theta}$ . Noting that $\bar{\epsilon_{\theta}}(x_{t},t)\,=$ $\frac{x_{t}-\sqrt{\bar{\alpha}_{t}}\hat{x}_{0}\left(x_{t}\right)}{\sqrt{1-\bar{\alpha}_{t}}}$ , new points can be generated by iterating the following expression:  
+
+$$
+p_{\theta}^{(t)}(x_{t-1}|x_{t})=q_{\sigma}(x_{t-1}|x_{t},\hat{x}_{0}(x_{t}))=\mathcal{N}(\sqrt{\bar{\alpha}_{t-1}}\hat{x}_{0}(x_{t})+\sqrt{1-\bar{\alpha}_{t-1}-\sigma^{2}}\epsilon_{\theta}(x_{t},t),\sigma^{2}I)\,.
+$$  
+
+2.1 MANIFOLD-PRESERVING SAMPLER  
+
+We build on previous work studying guidance procedures that ensure sample quality. He et al. (2024) provide a methodology to minimise an arbitrary loss function over the set $N_{\tau}(x_{t})=\{x\in\Gamma_{x_{t}}\mathcal{M}_{t}:$ $\bar{d}(x,x_{t})\,<\,r_{t}\}$ , where $\Gamma_{x_{t}}\mathbf{\mathcal{M}}_{t}$ is the tangent space of the intermediate manifold $\mathcal{M}_{t}$ at the point $x_{t}$ . $\mathcal{M}_{t}$ generalises the concept of manifold of clean samples $\mathcal{M}$ but for intermediate samples $x_{t}$ . Naturally, perturbing the denoising direction can be detrimental to the quality of the final sample. However, as found by (He et al., 2024, Theorem 1), when $\hat{x}_{0}(t)$ is perturbed towards a given gradient $\vec{g}$ , the resulting modified density of $x_{t-1}$ is concentrated in $\mathcal{M}_{t-1}$ because the gradient $\vec{g}$ lies on the tangent space $\Gamma_{x_{0}}\/M$ .  
+
+Our scope is that of latent diffusion models, that is, models where the denoising process operates on a latent space. Furthermore, we denote $\mathcal{D}:\mathbb{R}^{D}\to\mathbb{R}^{N}$ the mapping from the latent space to the ambient space $\mathbb{R}^{N}$ . Therefore, since the proposed harmfulness density $p_{h}$ is defined on the image (ambient) space $\mathbb{R}^{N}$ , our method will be concerned with the evaluation of $p_{h}(\mathcal{D}(\hat{x}_{0}^{(t)}))\ ^{1}$ .  
+
+Manifold spaces for clean points can be approximated with autoencoders (AEs), and it is precisely this built-in AE which ensures that the gradient belongs to the corresponding tangent latent space $\Gamma_{x_{0}}\/M$ . Indeed, when the AEs are perfect (in the sense of reporting zero reconstruction error) and the linear subspace manifold hypothesis holds, He et al. (2024) show that $\mathcal{D}\left(\nabla_{\hat{x}_{0}^{(t)}}\log p_{h}(\mathcal{D}(\hat{x}_{0}^{(t)}))\right)$ lies on the tangent space of the data manifold.  
+
+
+
+\section{2.2 CONTRASTIVE LANGUAGE IMAGE PRE-TRAINING (CLIP)  }
+
+
+CLIP is a method for embedding text and images on a common latent space (Radford et al., 2021), which induces a family of (publicly-available) models that can be fine-tuned for a number of tasks and even used for zero-shot prediction. After a standard pre-processing step, the text encoder of CLIP assigns concepts $c\in\Gamma$ , where $\Gamma$ is a space of concepts or prompts, to vectors in a latent space $\mathbb{R}^{D}$ by  
+
+$$
+E_{\mathrm{text}}^{\mathrm{CLIP}}:c\in\Gamma\mapsto e_{c}\in\mathbb{R}^{D}.
+$$  
+
+Likewise, images $\boldsymbol{x}\in\mathbb{R}^{N}$ can be embedded by an encoder $E_{\mathrm{img}}^{\mathrm{CLIP}}:x\in\mathbb{R}^{N}\mapsto e_{x}\in\mathbb{R}^{D}$ .  
+
+CLIP is pre-trained in a contrastive fashion: given a set of $N$ image-caption pairs $\{(x_{n},c_{n})\}_{n=1}^{N}$ , $\begin{array}{r}{\frac{1}{N^{2}-N}\sum_{n=1}^{N}E_{\mathrm{img}}^{\mathrm{CLIP}}(x_{n})E_{\mathrm{text}}^{\mathrm{CLIP}}(c_{n})}\end{array}$ is maximised, making the representations closer in the latent space. Conversely, $\begin{array}{r}{\frac{1}{N^{2}-N}\sum_{n=1}^{N}\sum_{m=1}^{N}\mathbf{1}_{m\neq n}E_{\mathrm{img}}^{\mathrm{CLIP}}(x_{n})E_{\mathrm{text}}^{\mathrm{CLIP}}(c_{n})}\end{array}$ is minimised, thus embedding text/images far from one another when they are different. CLIP embeddings have proved effective in various image-recognition datasets, either for zero-shot classification or as a part of a fine-tuned model (Radford et al., 2021).  
+
+
+
+\section{3 SAFE-FOR-WORK SAMPLING  }
+
+
+We aim to minimise the generation undesired, harmful content, e.g., NSFW, samples when using SBMs. In our setup, harmful samples are governed by a probability density $p_{h}$ , which can be used as a proxy for the harmfulness of the sample $s$ . We also consider an SBM capable of generating harmful samples, that is, samples in regions $\delta\subset\mathbb{R}^{N}$ such that $\begin{array}{r}{\int_{\delta}p_{h}(s)\mathbf{d}s>\bar{\eta}}\end{array}$ , where $\eta>0$ is a context-dependent threshold, and $\delta\cap\mathcal{M}\neq\emptyset$ .  
+
+
+
+\section{3.1 HARMFULNESS MITIGATION VIA MANIFOLD-PRESERVING SAMPLING  }
+
+
+Starting from a Gaussian sample $x_{T}$ , avoiding the generation of a terminal $x_{0}$ lying in a region of high probability with respect to $p_{h}(\cdot)$ requires controlling the entire trajectory $\{x_{t}\}_{t=T}^{0}$ . To this end, first recall that $x_{0}$ can be predicted a time $t$ using equation 2. Denoting this approximation by $\hat{x}_{0}^{(t)}$ , the harmfulness probability of $x_{0}$ at $t$ can be predicted by  
+
+$$
+p_{h}(x_{0}|t,x_{t})\approx p_{h}(\hat{x}_{0}^{(t)})=p_{h}\left(\frac{1}{\sqrt{\bar{\alpha}_{t}}}(x_{t}-\sqrt{1-\bar{\alpha}_{t}}\epsilon_{\theta}(x_{t},t))\right).
+$$  
+
+We are thus set out to build the chain $x_{t-1}|x_{t}$ by searching for samples $x_{t-1}$ in the neighbourhood of $x_{t}$ that are both i) valid samples according to the SBM, but ii) report low values of $\bar{p_{h}}(x_{0}|t,x_{t})$ . To this end, we rely on the harmful distribution $p_{h}$ to perturb the clean point approximation $\hat{x}_{0}^{(t)}$ to guide intermediate points away from it. This can be interpreted as performing gradient descent in each denoising step to minimise equation 5 according to  
+
+$$
+\boldsymbol{x}_{0}^{(t)}\mapsto\boldsymbol{x}_{0}^{(t)}-\gamma_{t}\nabla_{\hat{\boldsymbol{x}}_{0}^{(t)}}\log{p_{h}(\hat{\boldsymbol{x}}_{0}^{(t)})}\,.
+$$  
+
+Indeed, using the harmfulness log-density $\log p_{h}(\hat{x}_{0}^{(t)})$ as loss function and a positive sequence of gradient descent step sizes $\{\gamma_{t}\}_{t=1}^{T}$ , the manifold-preserving sampler (He et al., 2024) is given by  
+
+$$
+\begin{array}{r}{x_{t-1}\sim\!\mathcal{N}\left(x_{t-1};\sqrt{\bar{\alpha}_{t-1}}(\hat{x}_{0}^{(t)}-\gamma_{t}\nabla_{\hat{x}_{0}^{(t)}}\log p_{h}(\hat{x}_{0}^{(t)})+\sqrt{1-\bar{\alpha}_{t-1}-\sigma_{t}^{2}}\epsilon_{\theta}(x_{t},t)),\sigma_{t}^{2}I\right),}\end{array}
+$$  
+
+Since $p_{h}(\hat{x}_{0}^{(t)})$ lies on $\Gamma_{\hat{x}_{0}}\mathbf{\mathcal{M}}$ , Equation 7 corresponds to a particular case of Manifold Preserving Guided Diffusion (He et al., 2024). Consequently, the underlying marginal distribution is guaranteed to be in $\mathcal{M}_{t-1}$ with high probability.  
+
+
+
+\section{3.2 CONDITIONAL TRAJECTORY CORRECTION  }
+
+
+As we will see in the next section, the density $p_{h}$ is defined implicitly using trained classifiers. Therefore, in some regions of the ambient space $p_{h}$ might be unreliable, particularly in those of low probability where little or no samples have been seen and thus accurately assessing samples as being NSFW is difficult. Therefore, to avoid instabilities of the sampling procedure due to noisy values of $p_{h}$ , we propose only to perform the correction described in Sec. 3.1 when the value of $p_{h}$ surpasses a given threshold. This way, predictions of $x_{0}$ exhibiting low harmfulness probability are not corrected and thus denoising relies on vanilla DDIM.  
+
+We thus propose a Conditional Trajectory Correction (CTC), whereby the NSFW probability of the clean point prediction $p_{h}(\hat{x}_{0}^{(t)})$ is assessed to decide whether to apply the correction or not. This is achieved by establishing a threshold $\eta>0$ , whereby if the probability ${\mathbf{}}{p}_{h}({\boldsymbol{x}}_{t})$ (at a given time step $t_{,}$ ) falls below such threshold, then the diffusion trajectory will not be corrected. The reverse Markov chain will then be given by:  
+
+![](images/9ef1a053ecbbb7f6d72bee99eaefcc4f9f7dfd2ec150f8e374f010564d979a23.jpg)  
+Figure 1: Illustration of the proposed gradient-based correction conditional to the assessment of an external harmful classifier.  
+
+$$
+p_{\theta}^{(t)}(x_{t-1}|x_{t})=\left\{q_{\sigma}(x_{t-1}|x_{t},\hat{x}_{0}^{(t)}-\gamma\nabla_{x_{0}^{(t)}}\log p_{h}(x_{0}^{(t)}))\right.\quad\mathrm{if~}p_{h}(x_{0}^{(t)})\geq\eta\ ,}\\ {\left.q_{\sigma}(x_{t-1}|x_{t},\hat{x}_{0}^{(t)})\right.\quad\quad\quad\quad\quad\quad\quad\quad\left.\mathrm{if~}p_{h}(x_{0}^{(t)})<\eta\right.}\end{array}
+$$  
+
+where $q_{\sigma}$ is the DDIM transition in eq. equation 3. The procedure is depicted in Fig. 1.  
+
+
+
+\section{4 CLIP-BASED CONSTRUCTION OF THE HARMFULNESS DENSITY $p_{h}$  }
+
+
+Up to this point, we have assumed the existence of a harmfulness density $p_{h}$ . In this section, we will present a set of methodologies to define such a density in a flexible way so that end users can specify their own concepts to be considered harmful or NSFW.  
+
+Let us consider a concept $c\in\Gamma$ that needs to be avoided when generating images. The concept $c$ can be a single word or a more complete sentence. To construct a distribution $p_{h}$ describing images featuring the concept $c$ , we rely on the corresponding embedding provided by CLIP in equation 4. By computing the cosine similarity against the embedding of $c$ , denoted $E_{\mathrm{text}}^{\mathrm{CLIP}}(c)$ , we can build an unnormalised density function on the embedding space $\mathbb{R}^{\overline{{D}}}$ given by:  
+
+$$
+p_{h}^{c}(x)=\frac{x\cdot E_{\mathrm{text}}^{\mathrm{CLIP}}(c)}{\Vert x\Vert\Vert E_{\mathrm{text}}^{\mathrm{CLIP}}(c)\Vert}\,.
+$$  
+
+Recall that $p_{h}$ is considered a probability density function in our setting, and the above is an unnormalized signed function. However, our sampler uses the gradient of the log density of $p_{h}$ and thus the normalising constant is irrelevant in that regard. Furthermore, negatives values can be clipped at zero, yet we observed no negative values in our experiments. Therefore, equation 9 provides a reasonable model for $p_{h}$ in the SFW setting. We can generalise the procedure above to comprise multiple concepts $\mathcal{C}=\{c_{j}\}_{j=1.}^{M}\in\Gamma^{M}$ by simply averaging the individual pseudo-densities of each concept. In practice, we found that applying the gradient of the concept with the highest likelihood as soon as it meets the threshold $\eta$ yields better results while highlighting the flexibility of the methodology. We provide the formalisation of this generalisation in Sec. A.  
+
+
+
+\section{5 RELATED WORKS  }
+
+
+Works tackling NSFW generation. Erasing specific concepts, styles or objects is a prospect that has been pursued by the diffusion models community. For instance, Safe Latent Diffusion (Schramowski et al., 2023) takes a set of key concepts and uses them to move the denoising direction away from harmful images with an adapted classifier-free guidance procedure. On the other hand, Kumari et al. (2023) minimise the KL-divergence between the distribution of a target concept to erase and an anchor concept that can serve as a replacement. They fine-tune the base model and experiment with freezing specific steps of parameters. Gandikota et al. (2023) modify the existing network of a model $\bar{p}_{\theta}(\bar{x})$ so it does not contain a certain concept, similarly via fine-tuning. This approach is generalised in Unified Concept Editing (Gandikota et al., 2024), where the linear crossattention projections are edited in order to modify the output of the model. The method requires a set of concepts to edit and a set to preserve, and it is also able to tackle biases in the generated images. Li et al. (2023) also make use of the knowledge stored in the model but to infer directions in the latent space pointing towards unwanted concepts, as opposed to benign ones.  
+
+In this context, our approach considers external sources for content moderation which avoids relying on the model itself for filtering. Works such as ESD present strategies for erasing where the censoring signal comes from the model itself. Though both external and internal censoring signals work in practice, we believe that using external sources provides enhanced flexibility and generality, since the model is externally/independently supervised. For instance, one might want to use an independent classifier acting as a regulator for what the model can generate. In our setting, any such type of signals can be considered as long as their gradients can be calculated, and our work presents a proof-of-concept in this regard. Moreover, our broad methodology complements methods that condition the diffusion on what is to be censored.  
+
+Connection between our method and negative classifier guidance. As its name suggests, Classifier Guidance (CG) (Dhariwal & Nichol, 2021) uses a trained classifier in order to guide a sample towards a certain class/query $c$ , meaning that CG requires access to the conditional probability $p_{\theta}(c|x)$ . Using Bayes’ rule to express $p_{\theta}(x|c)$ as $\frac{p_{\theta}(c|x)p_{\theta}\bar{(}c)}{p_{\theta}(x)}$ , the score of the conditional probability $\nabla_{x_{t}}\log_{\theta}p(x_{t}|c)=\nabla_{x_{t}}\log p_{\theta}(c|x_{t})+\nabla_{x_{t}}\log p_{\theta}(\overleftarrow{x_{t}})$ can be used to sample from the conditional distribution $p_{\theta}(x|c)$ . Nevertheless, the need for a noise-aware discriminator can be avoided by making use of the approximation in equation 2. This approach has been pursued by (Bansal et al., 2023) in the context of positive classifier guidance. For censoring, Yoon et al. (2023) propose the use of Universal Guidance Bansal et al. (2023) based on classifiers trained with human feedback. In this case, the guidance signal comes from an estimator of the “undesirability” of a given image, trained using reinforcement learning from human feedback. The proposed SFW sampling holds similarities with these methods, but the fact that we considered the gradient w.r.t. $\hat{x}_{0}^{(t)}$ , i.e., $\bar{\nabla}_{\hat{x}_{0}^{(t)}}p_{h}\big(\hat{x}_{0}^{(t)}(x_{t},t)\big)$ instead of $\nabla_{x_{t}}p_{h}(\hat{x}_{0}^{(t)}(x_{t},t))$ implies that we have the manifold-preserving guarantees of (He et al., 2024), and that we need less VRAM to compute the gradients, which are both critical advantages of  
+
+
+
+\section{6 EXPERIMENTS  }
+
+
+The proposed SFW sampler was quantitatively evaluated on three aspects: i) reduction of the number of generated NSFW, ii) concordance or agreement with the given prompt, and iii) distortion introduced in the generated images in terms of aesthetic quality. In all experiments, we considered Stable Diffusion (SD) (Rombach et al., 2022) as the baseline benchmark. We tested three variants of the proposed SFW sampler based on different harmfulness densities $p_{h}$ presented in Sec. 4:  
+
+• SFW-single: SFW Sampling with single concept $c=$ “violence and nudity”.1. • SFW-multi: SWF Sampling with concepts ${\mathcal{C}}=\left\{\begin{array}{r l}\end{array}\right.$ {violence, nudity, NSFW, harmful}.  
+
+All variants considered hyperameters $\eta=0. For each prompt (with its associated seed) we sampled five batches of two images of dimension $512\,\times\,512$ . Our experiments were executed on an NVIDIA GeForce RTX 3090 GPU. Examples for the variants considered, with their corresponding prompts, are shown in Fig. 2. Qualitatively, we observe how samples are moved away from inappropriate content, although some loss in quality can be observed.  
+
+![](images/61d20448184412fce7b4a206e69777c3b35854eb05b05a13ea174644b5527e70.jpg)  
+
+Figure 2: Examples of image generations using SFW sampling. On the left most column we provide the text prompt used for sampling, followed by the original sample using Stable Diffusion without correction. We then show examples for the same prompt and seed using the three investigated variants mention in Sec. 6.  
+
+6.1 ASSESSING THE ABILITY TO MITIGATE NSFW CONTENT  
+
+We evaluated the generation of explicit content using a subset of the prompts dataset I2P (Schramowski et al., 2023); we restricted our study to prompts tagged (according to the same dataset) as prone to generate violence, harassment or sexual content (about 16k images for each setting). We also assessed sample degeneracy with respect to those generated by the standard SD using an unsafe prompt set (namely the Template prompts from ${\mathrm{Qu}}$ et al. (2023), which comprises 30 prompts designed to generate NSFW images) and a safe prompts dataset, which is a subset of COCO prompts gathered by Qu et al. (2023) (500 prompts). We considered the results of Erasing stable diffusion (ESD) as a baseline (Gandikota et al., 2023).  
+
+Nudity detection. First, we used NudeNet2 to detect several categories of human parts whose presence in an image might be considered inappropriate. We restricted our analysis to the categories on the leftmost column in Table 1. In particular, we show the percentage of images that were tagged as containing the category (using a threshold of 0.2, which is the default threshold in the library).  
+
+Our proposed SFW sampler reduced nudity generation for all the categories considered. The Safe Sampling multi-concept variant using $\begin{array}{r}{\mathcal{C}=\left\{\begin{array}{r l}\end{array}\right.}\end{array}$ {violence, nudity, NSFW, harmful} with $\mathrm{{topk=1}}$ achieved the lowest detection rate among all the models tested $(5.26\%)$ ), being three times less likely to generate images containing sexual content from the $15.93\%$ shown by the default version of Stable  
+
+Diffusion. When only considering prompts tagged as “sexual”, the percentage of nudity-containing samples drops from $24.74\%$ in Stable Diffusion to $10.26\%$ .  
+
+General inappropriate content detection. Even though detecting sexual content using NudeNet validated the model’s capacity to censor elements in diffusion models, such a tool does not include other types of unsafe content. Consequently, we used the Q16 classifier from Schramowski et al. (2022). This classifier is also based on CLIP embeddings, which is different to the model for testing our method, and detects a broader set of inappropriate content. This considered classfier is inspired by question 16 from Datasheets for datasets: “Does the dataset contain data that, if viewed directly, might be offensive, insulting, threatening, or might otherwise cause anxiety?” (Gebru et al., 2021).  
+
+The results over I2P prompts (Schramowski et al., 2023) (tagged with categories: sexual, violence and harassment) are summarised in Table 1. Interestingly, the variant in which we applied several SD-filter concepts as a multi-concept classifier increased the likelihood of dangerous images. This might be partly explained by the fact that SD concepts solely tackle sexual content, which might in turn increase the likelihood of disturbing content if the resulting images are of lower quality. We observed a lower probability of creating inappropriate images for the SFW variant with the single concept “violence and nudity” with respect to plain Stable Diffusion, but the lowest (best) scoring model among our variants is the SFW Sampling variant with single concept ${\cal C}=$ violence and nudity. Though ESD remains the best model for overall NSFW prevention, SFW achieved censoring metrics similar to those of ESD and undoubtedly reports an improvement over standard SD while using an external conditioning signal. This sheds light on the potential of our proposal.  
+
+Table 1: Detection of explicit content in prompts from I2P. We provide the percentage of nudity features detected by NudeNet followed by the percentage of samples tagged as containing any of those categories. The last two rows correspond to the rate of samples tagged as inappropriate by the CLIP-based model Q16.  
+
+![](images/6dedfed24cd45da405be80fbf5eeccedaa24dfc9527e34ad79fc1a1ad4319ab2.jpg)  
+
+
+
+\section{6.2 PROMPT-IMAGE CONCORDANCE  }
+
+
+This metric approximates the change in meaning that might occur in the final sample. Indeed, when applying a considerable guidance signal at an early denoising step, the image might shift away from the meaning intended by the prompt. For this, we consider a CLIP-based prompt-image coherence metric given by: $\begin{array}{r}{s c o r e(c_{p},x)=\frac{x\cdot E_{\mathrm{text}}^{\mathrm{CLIP}}(c_{p})}{\|x\|\|E_{\mathrm{text}}^{\mathrm{CLIP}}(c_{p})\|}}\end{array}$ = ∥xx∥·∥EEtetxCetxL tI P((ccpp))∥, where cp denotes the embedding corresponding to the prompt from which the image was generated. The larger the value the more the image matches the prompt, as assessed by the CLIP model. Hence, in the case of benign prompts (such as COCO prompts), the higher the prompt-image concordance, the better. However, the opposite is true for prompts designed to create harmful images and mention explicit harmful content (e.g. Template prompts). A change in the semantics of the image with respect to the prompt is a desirable feature when the prompt is intended to cause harmful images (such is the case of Template prompts, created by Qu et al. (2023) for research purposes).  
+
+Table 2 shows the concordance metric. The value in brackets represents the difference between plain SD and the corresponding method. Since ESD samples are drawn using diffusers (unlike our original implementation), we could not generate samples that start from the same Gaussian noise. To alleviate this mismatch, we report the decrease that ESD induces in each metric with respect to plain SD samples drawn with diffusers instead.  
+
+Table 2: Prompt-image concordance evaluation on different prompt sets, evaluated as the cosine distance between the CLIP-embeddings of the prompt and the generated image.  
+
+![](images/e401743a098d63a6c49fc57cae882802b468478bc112d50ff30d73e417201b0a.jpg)  
+
+The aesthetic scores of the samples of the 3 prompt-datasets are shown in Table 3. Similarly to the CLIP-based coherence, the proposed SFW exhibited a stronger reduction aesthetic quality than the baselines in unsafe-prone prompts. This reduction is less significant in safe prompts, to the point of being better than ESD and almost as good as plain Stable Diffusion. It is interesting to notice that, unlike CLIP-coherence, there is a considerable difference between the base aesthetic quality scores of plain SD-generated images between the safe prompts and unsafe ones (of at least $-0.641)$ . This might suggest that the aesthetic score assigns a higher score to images that contain explicit content.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+A reason for considering external sources for unguidance is to avoid relying on the model itself   
+for identifying the sources of noxious content. Indeed, the base model would need to flawlessly   
+associate all visual features with the prompt of what is to be removed in order for the method from   
+Gandikota et al. (2023) to reliably remove all traces of the undesired distribution. We deviate from   
+that assumption and suggest the use of external classifiers instead.   
+However, putting all the burden of aligning the model on a simple external classifier (as is the   
+case of CLIP-based ones) might be considered a naive approach, the results shown in this work   
+highlight the effectiveness of the method. This suggests that the implicit information stored in these   
+models during their pretraining does contain useful elements for tagging and unguiding intermediate   
+images. Despite these results, we suggest that using more than one approach might be helpful to   
+further reduce the likelihood of dangerous content generation.   
+Lastly, we hope that our methods a step forward towards making models closer to complying with   
+human values. Nonetheless, this work does not expect nor try to propose a definitive solution to   
+the issue of generating risky content with diffusion models. We believe that true solutions shall be   
+found at every stage of the generative models pipeline, and that awareness is raised by this and other   
+works tackling ethical problems.   
+Limitations Despite our best efforts, the models proposed in this work might still be susceptible   
+to attacks and misuse. We advocate for the responsible use of generative AI, specifically when they   
+interact with humans and personal content.   
+
+

@@ -1,0 +1,493 @@
+\title{Sequential Controlled Langevin Diffusions}
+
+\begin{abstract}
+An effective approach for sampling from unnormalized densities is based on the idea of gradually transporting samples from an easy prior to the complicated target distribution. Two popular methods are (1) Sequential Monte Carlo (SMC), where the transport is performed through successive annealed densities via prescribed Markov chains and resampling steps, and (2) recently developed diffusion-based sampling methods, where a learned dynamical transport is used. Despite the common goal, both approaches have different, often complementary, advantages and drawbacks. The resampling steps in SMC allow focusing on promising regions of the space, often leading to robust performance. While the algorithm enjoys asymptotic guarantees, the lack of flexible, learnable transitions can lead to slow convergence. On the other hand, diffusion-based samplers are learned and can potentially better adapt themselves to the target at hand, yet often suffer from training instabilities. In this work, we present a principled framework for combining SMC with diffusion-based samplers by viewing both methods in continuous time and considering measures on path space. This culminates in the new \emph{Sequential Controlled Langevin Diffusion} (SCLD) sampling method, which is able to utilize the benefits of both methods and reaches improved performance on multiple benchmark problems, in many cases using only 10\% of the training budget of previous diffusion-based samplers.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+We consider the task of sampling from densities of the form
+\begin{equation}
+    p_\mathrm{target} = \frac{\rho_\mathrm{target}}{Z} \quad \text{with} \quad Z \coloneqq \int_{\R^d} \rho_\mathrm{target}(x) \mathrm d x,
+\end{equation}
+where $\rho_\mathrm{target} \in C(\mathbb{R}^d, \mathbb{R}_{\ge 0})$ can be evaluated pointwise, but the normalizing constant $Z$ is typically intractable. This task is of great practical interest, with numerous applications in the natural sciences \citep{zhang2023artificialintelligencesciencequantum}, for instance, for Boltzmann distributions in molecular dynamics or lattice field theory in quantum physics, as well as posterior sampling in Bayesian statistics \citep{gelman2013bayesian}. 
+
+\paragraph{Sampling problems vs.~generative modeling.} The sampling problem poses unique challenges not found in other areas of probabilistic modeling. For instance, while both generative modeling and sampling involve approximating a target distribution $p_{\text{target}}$, they differ fundamentally in terms of the information available. In generative modeling, one has access to samples $X\sim p_{\text{target}}$, whereas in sampling, we only have access to a pointwise oracle $\rho_{\text{target}}$ (and, potentially, its pointwise gradients) and no %
+samples. This distinction introduces obstacles for the sampling problem that do not exist in generative modeling. For example, a key challenge in modeling a distribution is identifying its regions of high probability, or \textit{modes}. When samples are available, they can directly reveal the locations of these modes. In their absence, however, the sampling algorithm must include an exploration strategy to discover them and identify their shape. This exploration becomes exponentially more difficult as the dimensionality of the state space increases, making the sampling problem challenging even in moderate dimensions (e.g., $10-50$).
+
+\paragraph{Sequential Monte Carlo methods and diffusion-based samplers.} A general idea to approach the sampling problem is to draw particles from an easy prior distribution and gradually move them toward the complicated target (sometimes termed \textit{dynamical measure transport}). In this work, we focus on two popular paradigms:
+\begin{itemize}[leftmargin=*]
+    \item In \emph{Annealed Importance Sampling} (AIS)~\citep{neal2001annealed} and its extension \emph{Sequential Monte Carlo} (SMC)~\citep{chopin2002sequential,del2006sequential} particles are successively updated and reweighted, as to approach relevant regions in space, targeting an annealed sequence of intermediate distributions. This procedure is typically formulated in discrete time and does not require learning. 
+    \item In \emph{diffusion-based sampling} \citep{richter2024improvedsamplinglearneddiffusions,vargas2024transport} the idea is to learn a drift of a stochastic differential equation (SDE) to transport the samples from the prior to the desired target, typically formulated in continuous time. The absence of samples means that data-driven approaches such as for generative modeling \citep{song2021scorebasedgenerativemodelingstochastic} are not possible, and training is instead done via variational inference, gaining information through evaluations of $\rho_\text{target}$. 
+\end{itemize}
+Each paradigm brings its own advantages and drawbacks. Traditional SMC methods rely on predefined rules for particle updates, such as \emph{Markov Chain Monte Carlo} (MCMC) and resampling methods, which help to direct computational effort onto promising regions of the space and enjoy asymptotic guarantees. While they do not require learning, the employed MCMC methods can, in many cases, exhibit slow convergence to the target~\citep{del2006sequential}. Diffusion-based samplers, on the other hand, require a training phase, which enables them to automatically adapt to the given target. However, training can take significant time and often suffers from numerical instabilities as well as mode collapse \citep{richter2024improvedsamplinglearneddiffusions}. 
+
+\paragraph{Sequential Controlled Langevin Diffusions.} In this work, we show that the two methods can complement each other. SMC can benefit from the flexible nature of the learnable transitions, and resampling and MCMC can help diffusion-based samplers converge faster and counteract numerical stability issues arising, for instance, from outlier particles. Motivated by this, we identify a principled and general framework to unify the two methods, culminating in our \textit{Sequential Controlled Langevin Diffusion} (SCLD) algorithm, which alternates between SMC and diffusion steps as illustrated in \Cref{fig: SLCD illustration}. In addition, we devise a family of loss functions that enables end-to-end training (i.e., for which the algorithm used during inference can be directly optimized).
+This becomes possible by viewing both methods in continuous time and considering measures of the underlying SDEs on the path space.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{resources/Fig1_updated_colorsfixed.pdf}%
+    \caption{Illustration of our SCLD algorithm, which combines controlled Langevin diffusions with Sequential Monte Carlo methods. The goal is to sample from a target distribution by learning a stochastic evolution (diffusion steps) that starts from a tractable prior and evolves along a prescribed annealed density to the target. We do not have access to samples from the target distribution but can only evaluate its density up to a normalizing factor. At intermediate timesteps, we resample according to the importance weights of each subtrajectory (yellow dots) and use MCMC steps for additional refinement (yellow dots).}%
+    \label{fig: SLCD illustration}
+\end{figure}
+
+Our contributions can be summarized as follows:
+\begin{itemize}[leftmargin=*]
+    \item Taking the continuous-time perspective, we can rigorously connect and unify SMC and diffusion-based sampling by performing importance sampling in path space.
+    \item The principled framework of path space measures allows us to readily propose suitable loss functions, which allow for off-policy training with replay buffers and provably scale better to high dimensions than previously used losses.
+    \item Building on those connections, we propose our new sampling method \textit{Sequential Controlled Langevin Diffusion} (SCLD) as a special case of our framework.
+    \item We show that our method achieves competitive performance on 11 real-world and synthetic examples, improving over other baseline methods in almost every task, and in many cases only using $10\%$ of the training budget. In two tasks based on robotics control, our method is the only one that can approximately recover the true distribution.
+\end{itemize}
+
+
+\subsection{Related Work}
+\label{sec: Related Work}
+
+We present an extensive comparison to related works in~\Cref{sec:related_works_app}. To summarize, our proposed SCLD sampler relies on three crucial building blocks:
+\paragraph{Sequential Monte Carlo (SMC).} SMC methods~\citep{chopin2002sequential,del2006sequential} describe a general methodology to sample sequentially from a sequence of annealed distributions, using transition kernels (typically based on MCMC) and resampling steps. To mitigate drawbacks such as long mixing times and tedious tuning, previous works proposed to learn the kernels~\citep{phillips2024particle,matthews2022continual,arbel2021annealed}. However, prior training objectives suffer from various shortcomings, either requiring importance sampling with potentially high variance, exhibiting bias, or relying on alternating methods that preclude end-to-end training (see also~\Cref{tab:compare}).
+Further, they need to place restrictions on their parameterizations or suffer from unfavorable computational costs. In particular, approaches with deterministic transitions, such as normalizing flows, require computations of divergences or Jacobian determinants, as well as MCMC steps to recover sample diversity after resampling. This is not needed for methods based on stochastic transitions like our method SCLD.
+
+\paragraph{Diffusion-based samplers on subtrajectories.} To overcome these shortcomings and flexibly parameterize the transition kernels, we draw ideas from recent work on controlled SDEs for sampling problems~\citep{zhang2023diffusion,richter2024improvedsamplinglearneddiffusions}. This can be done by partitioning the SDE trajectories in time. However, to compute importance weights (in path space), which are necessary for resampling as well as for MCMC kernels in SMC, the SDE marginals after each subtrajectory need to be known. 
+To cope with that, we identify the recently proposed \emph{Controlled Monte Carlo Diffusions} (CMCD)~\citep{vargas2024transport} as a suitable framework since it allows us to define a prescribed (and therefore known) target evolution of the SDE marginals. Building upon this, we develop an extension of SMC to continuous time, where resampling (and, optionally, MCMC steps) can be employed at arbitrary times.
+\paragraph{Log-variance loss.} 
+However, the subtrajectories and discrete resampling steps make optimization challenging. Previous methods either relied on alternating schemes or approaches based on the reverse KL divergence and importance sampling, known to suffer from mode collapse and potentially high variance. We show that the \emph{log-variance loss}~\citep{nusken2021solving} offers a way to obtain a principled, efficient, and low-variance objective such that we can optimize our sampler and parts of the hyperparameters in an end-to-end fashion using replay buffers. 
+
+\begin{table}[t]
+\caption{Comparison of different methods (see~\Cref{sec:related_works_app} for details). By \emph{discretization-flexible}, we describe the fact that we can include resampling and MCMC steps at arbitrary times. \emph{Finite-time convergence} refers to the property that the target distribution can (theoretically, in the optimum) be reached in finite time. 
+We note that \emph{stochastic transitions} allow omitting or reducing (costly) MCMC steps in learned SMC methods.}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lllllll}\toprule
+& \textbf{Traditional SMC} & \textbf{CMCD} & \textbf{CRAFT} & \textbf{PDDS} & \textbf{SCLD (ours)} \\
+\midrule
+Learned Transition & \xmark~\,(MCMC) & \cmark~(Neural SDE) & \cmark~(Neural ODE) & \cmark~(Neural SDE) & \cmark~(Neural SDE) \\
+Stochastic Transition & \cmark & \cmark & \xmark & \cmark & \cmark \\
+End-to-end Training & - & \cmark & \cmark~(needs importance weights) & \xmark~\,(alternating) & \cmark~(incl. hyperparameters) \\
+Particle Method & \cmark & \xmark & \cmark & \cmark & \cmark \\
+Discretization-flexible & \cmark & \cmark & \xmark & \cmark~(in theory) & \cmark \\
+Finite-time Convergence\!\! & \xmark & \cmark & \cmark & \cmark & \cmark \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:compare}
+\end{table}
+ 
+
+
+
+
+
+\section{Sequential controlled Langevin diffusions}
+
+
+We start by giving an introduction to Sequential Monte Carlo methods. 
+However, different from previous work, our focus is on a continuous-time perspective that can be readily integrated with diffusion-based samplers.
+
+\subsection{A primer on Sequential Monte Carlo in continuous time}
+\label{sec: Sequential Importance Sampling}
+
+\paragraph{Importance sampling (IS).} The idea of utilizing samples from a prior distribution in order to compute statistics relying on samples from a target can be motivated by importance sampling. In its simplest case, one can compute unbiased estimates w.r.t. the target distribution via
+\begin{equation}
+\label{eq: IS motivation}
+    \E_{X_T \sim p_\mathrm{target}}\left[\varphi(X_T) \right] = \E_{X_0 \sim p_\mathrm{prior}}\left[\varphi(X_0) w(X_0) \right] \approx 
+    \frac{1}{K}\sum_{k=1}^K \varphi(X_0^{(k)}) w(X_0^{(k)}),
+\end{equation}
+where $\varphi \in C(\R^d, \R)$ is a function of interest, the weight is defined\footnote{If the normalizing constant $Z$ is not available, we can compute unnormalized weights $\widetilde{w}\coloneqq\frac{\rho_\mathrm{target}}{p_\mathrm{prior}}$ and normalize them %
+by their sum, leveraging the identity $Z=\E_{X_0 \sim p_\mathrm{prior}}[\widetilde{w}(X_0)]$  (\emph{self-normalized importance sampling}).
+While this introduces bias, the estimator is still consistent as $K\to\infty$ \citep{delmoral:hal-00932211}.} %
+as $w \coloneqq \frac{p_\mathrm{target}}{p_\mathrm{prior}}$, and $(X_0^{(k)})_{k=1}^K$ are i.i.d.~samples from $p_{\mathrm{prior}}$. Since importance sampling becomes highly inefficient if the high-probability regions of the prior and target do not overlap substantially, a key idea is to gradually ``transport'' $X_0$ to $X_T$. 
+\paragraph{Annealed importance sampling (AIS).} 
+
+\begin{figure*}[t!]
+        \centering
+            \centering
+            \includegraphics[width=\textwidth]{resources/seq_is_small.pdf}%
+        \vspace*{-0.5em}%
+        \caption{Illustration of annealed importance sampling along a geometric path, where we consider either one (top arrow) or three (bottom arrows) transition steps from the prior to the target.}%
+        \label{fig:seq_is}
+\end{figure*}
+
+In particular, we may sequentially 
+move particles from the prior to the target along a curve $(\pi(\cdot, t))_{t \in [0, T]}$, chosen such that $\pi(\cdot, 0) = p_\mathrm{prior}$ and $\pi(\cdot, T) = p_\mathrm{target}$, e.g., by linear interpolation in log-space~\citep{dai2022invitationsequentialmontecarlo}. %
+To this end, we consider two (time-dependent, forward and backward) Markov kernels $\vec{p}_{s|t}$ and $\cev{p}_{t|s}$. Given a time grid $0=t_0 < t_1 < \cdots < t_N = T$ (also referred to as \emph{annealing steps}), we may now sample $X_{t_0} \sim p_{\mathrm{prior}}$ and iterate for each $n=1,\dots,N$: 
+\begin{enumerate}
+    \item Sample $X_{t_{n}} \sim \vec{p}_{t_{n}|t_{n-1}}(\,\cdot\, | X_{t_{n-1}})$.
+    \item Compute the weights $w_{t_{n-1}, t_{n}}(X_{t_{n-1}}, X_{t_{n}}) = \frac{\pi(X_{t_{n}}, t_{n}) \cev{p}_{t_{n-1}|t_{n}}(X_{t_{n-1}}| X_{t_{n}})}{\pi(X_{t_{n-1}}, t_{n-1}) \vec{p}_{t_{n}|t_{n-1}}(X_{t_{n}}| X_{t_{n-1}})}$.
+\end{enumerate}
+We can then perform importance sampling on an augmented target distribution via the weights
+\begin{equation}
+\label{eq: weight for N+1 instances}
+    w(X_{t_0}, \dots, X_{t_N}) \coloneqq \prod_{n=1}^{N} w_{t_{n-1}, t_{n}}(X_{t_{n-1}}, X_{t_{n}}) = \frac{ \cev{p}_{t_0, \dots, t_N}(X_{t_0}, \dots, X_{t_N}) }{\vec{p}_{t_0, \dots, t_N}(X_{t_0}, \dots, X_{t_N})},
+\end{equation}
+where $\vec{p}_{t_0, \dots, t_N}$ and $\cev{p}_{t_0, \dots, t_N}$ are the joint densities of the ``forward'' and a corresponding ``backward'' operation. 
+In particular, in analogy to \eqref{eq: IS motivation}, it holds that
+\begin{equation}
+\label{eq: AIS}
+    \E_{X_{t_0},\dots,X_{t_N}}\left[\varphi(X_T) w(X_{t_0}, \dots, X_{t_N}) \right] = \E_{X_T \sim p_\mathrm{target}}\left[\varphi(X_T) \right].
+\end{equation}
+
+\paragraph{Resampling.}\label{paragraph:Resampling} In principle, any forward and backward Markov kernels lead to an unbiased estimator of the expectation of interest, as stated in \eqref{eq: AIS}. In practice, however, a notorious problem with importance sampling is its potentially high variance. Specifically, the variance might increase exponentially with the dimension, sometimes termed \textit{curse of dimensionality}, see, e.g., \citet{chatterjee2018sample, hartmann2024nonasymptotic}. To circumvent this issue, one idea is to sequentially ``update'' samples (also referred to as ``particles'') during the course of the simulation according to their weights, so as to refocus computational effort on promising particles---a procedure referred to as \textit{resampling}. 
+For instance, we can select only certain (relevant) samples $X_0^{(k)}$ for the estimation of the expectation in~\eqref{eq: IS motivation}. To this end, let $O^{(k)}$ be a random variable with values in $\{0, \dots, K\}$ and 
+$\E[O^{(k)}|X_0^{(1)},\dots,X_0^{(K)}] = K W(X_0^{(k)})$, where $W(X_0^{(k)}):= w(X_0^{(k)}) / \sum_{i=1}^K w(X_0^{(i)}) $,  defining how many times we select the $k$-th sample. Due to the tower property, we can then also obtain a consistent estimator of the expectation in \eqref{eq: IS motivation} via 
+\begin{equation}
+    \E_{X_T \sim p_\mathrm{target}}\left[\varphi(X_T) \right] \approx \frac{1}{K}\sum_{k=1}^K \varphi(X_0^{(k)}) O^{(k)}.
+\end{equation}
+A common choice is to consider $O \sim \mathcal{M}_K(W(X_0^{(1)}), \dots, W(X_0^{(K)}))$ drawn from a multinomial distribution with $K$ trials, where the normalized weights determine the event probabilities~\citep{gordon1993novel}. We note that with this $\textit{resampling}$ step, we introduce additional stochasticity. However, at the same time, it can bring statistical advantages by focusing on ``relevant'' samples, e.g., stabilizing effects and variance reduction~\citep{dai2022invitationsequentialmontecarlo}.
+
+\begin{remark}[SMC formulation in continuous vs.~discrete time]
+\label{rem:smc}
+We stress that, even though we evaluate our process $X$ on $N + 1$ discrete time instances, the formalism above includes time-continuous processes $(X_t)_{t\in [0, T]}$. While some transition kernels used in SMC, e.g., uncorrected Langevin kernels, can be interpreted in continuous time, SMC is typically stated for a fixed number of discrete steps. 
+We will see in the sequel how the continuous-time formulation offers an elegant framework with certain advantages, in particular, allowing us to integrate learned SDE-based transition kernels and interleave them with resampling and MCMC steps at arbitrary times.
+\end{remark}
+\subsection{Controlled SDEs and importance sampling in path space} 
+\label{sec: ISInPathSPace}
+A central question in SMC is how to choose the forward and backward transition densities $\vec{p}_{s|t}$ and $\cev{p}_{t|s}$ defined above. Clearly, when the forward and backward joint densities stated in \eqref{eq: weight for N+1 instances} agree, we achieve perfect sampling in the sense that 
+no corrections with importance weights are necessary. 
+However, it is typically not possible to obtain such transitions, and thus the choice of $\vec{p}_{s|t}$ and $\cev{p}_{t|s}$ to approximate this criterion is of critical importance to the success of SMC. Whereas, traditionally, MCMC steps have been employed as the transition kernel \citep{dai2022invitationsequentialmontecarlo}, they are known to require a large number of steps to achieve approximate transportation between densities. 
+In recent years, there has been interest in employing learned transition densities to overcome the slow convergence times of fixed MCMC kernels \citep{matthews2022continual, phillips2024particle}. Advancing those attempts, we will show how transition densities corresponding to SDEs yield a principled solution that, moreover, allows us to leverage recent advancements in diffusion models.
+\paragraph{Diffusion bridges.} To this end, let us consider the stochastic process $X^u = (X^u_t)_{t \in [0, T]}$, defined by the SDE
+\begin{equation}
+\label{eq: forward SDE}
+         \mathrm d X^u_t = u(X^u_t, t) \mathrm d t + \sigma(t) \vec{\mathrm d} W_t, \qquad X^u_0 \sim p_\mathrm{prior},
+\end{equation}
+where %
+$u \in C(\R^d \times [0, T], \R^d)$ is a control function, $\sigma \in C([0, T], \R)$ %
+the diffusion coefficient, and $W$ a standard Brownian motion.
+This process uniquely defines a forward transition density $\vec{p}_{s|t}$ and falls into the framework stated in~\Cref{sec: Sequential Importance Sampling} for any time steps $0 = t_0 < t_1 < \cdots < t_N = T$.
+In fact, we can leverage the ideas from CMCD~\citep{vargas2024transport} and learn $u$ such that the transport happens along a prescribed density in time, i.e., such that the density $p_{X^u}(\cdot, t)$ of $X^u_t$ is equal to a prescribed target density $\pi(\cdot, t)$, connecting the prior and the target, for every $t \in [0, T]$; cf.~\Cref{lem: RND} below. We will see that the knowledge of the marginals allows for a natural integration within SMC frameworks. 
+Now, similar to the importance sampling framework from \Cref{sec: Sequential Importance Sampling}, the general idea is to exploit a time-reversed dynamics that starts in the desired target density. To be precise, we may further define a related reverse-time SDE
+\begin{equation}
+\label{eq: backward SDE}
+    \mathrm d Y^v_t = v(Y^v_t, t) \mathrm d t + \sigma(t) \cev{\mathrm d}W_t, \qquad Y^v_T \sim p_\mathrm{target},
+\end{equation}
+which depends on the control $v \in C(\R^d \times [0, T], \R^d)$ and where $\cev{\mathrm d}W_t$ denotes backward
+} integration of Brownian motion. Now, if $u$ and $v$ are learned such that $X^u$ and $Y^v$ are time-reversals of each other, then $p_{X^u} = p_{Y^v}$, i.e., the two processes transport the prior to the target and vice versa. However, in this general setting, there are infinitely many such bridging processes, all fulfilling Nelson's identity \citep{nelson1967dynamical}, i.e.,
+\begin{equation} \label{eq: Nelson ansatz}
+      u - v = \sigma^2 \nabla \log p_{X^{u}} = \sigma^2 \nabla \log p_{Y^{v}}.
+\end{equation}
+Since our goal is to satisfy $p_{X^{u}} = p_{Y^{v}} = \pi$, we can incorporate this constraint via the ansatz $v = u - \sigma^2 \nabla \log \pi$,
+leading to the SDE
+\begin{equation}
+\label{eq: backward SDE Y^u}
+    \mathrm d Y^u_t = (u - \sigma^2 \nabla \log \pi)(Y^u_t, t) \mathrm d t + \sigma(t) \cev{\mathrm d}W_t, \qquad Y^u_T \sim p_\mathrm{target},
+\end{equation}
+as suggested in \citet{vargas2024transport}, noting that the process now also depends on the control $u$. Consequently, under mild conditions, this constraint leads to a unique gradient field representing the solution $u^*$ to the time-reversal problem~\citep[Proposition 3.2]{vargas2024transport}. We comment on more general, learnable density evolutions in~\Cref{rem:annealing}. 
+\paragraph{Measures in path space.} The task of learning the time-reversal can be approached via the perspective of measures on the space of continuous trajectories $C([0, T], \R^d)$, also called \textit{path space}. Loosely speaking, a path space measure
+$\vec{\P}=\vec{\P}^{u,p_{\mathrm{prior}}}$ of the process \eqref{eq: forward SDE} can be thought of as the joint density $\vec{p}_{t_0, \dots, t_N}(X^u_{t_0}, \dots, X^u_{t_N})$ in \eqref{eq: weight for N+1 instances} when $N \to \infty$, i.e., evaluated along infinitely many time instances~\citep[Corollary 11.1]{baldi2017stochastic}. 
+
+In analogy to importance sampling described in~\Cref{sec: Sequential Importance Sampling}, we may now consider a change of measure in path space, i.e.,
+\begin{equation}
+\label{eq: IS estimator target}
+    \E_{X^u \sim \vec{\P}}\left[\varphi(X_T^u) w(X^u) \right] = \E_{Y^u \sim \cev{\P}}\left[\varphi(Y^u_T) \right] = \E_{x \sim p_{\mathrm{target}}}\left[\varphi(x)\right],
+\end{equation}
+where 
+$w=\frac{\mathrm d \cev{\P}}{\mathrm d \vec{\P}}$
+and $\cev{\P}=\cev{\P}^{u,p_\mathrm{target}}$ is the path space measure associated to~\eqref{eq: backward SDE Y^u}. Furthermore, we can formulate the time-reversal task as the minimization problem
+\begin{equation}
+\label{eq: divergence minimization}
+    u^* = \argmin_{u \in \mathcal{U}} D \big(\vec{\P}^{u,p_\mathrm{prior}}, \cev{\P}^{ u,p_\mathrm{target}}\big),
+\end{equation}
+where $D$ is a divergence and $\mathcal{U} \subset C(\R^d \times [0, T], \R^d)$ the set of admissible controls, cf.~\cite{richter2024improvedsamplinglearneddiffusions}. If we can bring the divergence to zero, we have indeed achieved time-reversal between the forward and backward transitions and, thus, perfect sampling. Both for \eqref{eq: IS estimator target} and typical divergences in \eqref{eq: divergence minimization}, it is essential to have a tractable expression for the likelihood ratio $w$ between the measures of the forward and the reverse-time process, also called the \emph{Radon-Nikodym derivative} (RND). This is given by the following lemma; see \citet{vargas2024transport} for the proof. 
+\begin{lemma}[Likelihood ratio between path measures]
+\label{lem: RND}
+Let $\vec{\P}_{[s,t]}$ and $\cev{\P}_{[s,t]}$ be the path space measures of the solutions to the SDEs in~\eqref{eq: forward SDE} and~\eqref{eq: backward SDE Y^u} on the time interval $[s,t] \subset [0, T]$, where we assume $X^u_s \sim \pi(\cdot, s)$ and $Y^u_t \sim \pi(\cdot, t)$.
+Then for a generic\footnote{Note that the Radon-Nikodym derivative is only defined almost surely w.r.t.~$\vec{\P}_{[s,t]}$. In particular, it only depends on $X$ on the time interval $[s,t]$.} process $X$ it holds
+\begin{equation}
+\begin{split}
+\label{eq: RND}
+  w_{[s,t]}(X)= \frac{\mathrm d \cev{\P}_{[s,t]}}{\mathrm d \vec{\P}_{[s,t]}}(X)
+    =&  \frac{\pi(X_{t},t)}{ \pi(X_{s},s)}  \exp\Big( \int_{s}^{t} \frac{\|u\|^2 - \|u - \sigma^2 \nabla \log \pi\|^2}{2\sigma^2} (X_\tau, \tau) \mathrm d\tau \\  %
+    & \  + %
+    \int_{s}^{t} \frac{u - \sigma^2 \nabla \log \pi}{\sigma^2}(X_\tau, \tau) \cdot \cev{\mathrm d} X_\tau  - \int_{s}^{t} \frac{u}{\sigma^2}(X_\tau, \tau) \cdot \vec{\mathrm d} X_\tau \Big).
+\end{split}
+\end{equation}
+\end{lemma}
+As can be seen from~\Cref{lem: RND}, path space measures can be readily employed for sequential algorithms that operate on the time grid that we introduced before. In particular, we may divide our trajectories $X^u$ and $Y^u$ into subtrajectories and, thus, our path space measure into multiple chunks. To be precise, we may write
+\begin{equation}
+\label{eq: path space measure decomposition}
+    w=\frac{\mathrm d \cev{\P}}{\mathrm d \vec{\P}} = \frac{\mathrm d \cev{\P}_{[t_0,t_1]}}{\mathrm d \vec{\P}_{[t_0,t_1]}} \cdots \frac{\mathrm d \cev{\P}_{[t_{N-1},t_N]}}{\mathrm d \vec{\P}_{[t_{N-1},t_N]}}= w_{[t_0,t_1]} \cdots w_{[t_{N-1},t_N]}.
+\end{equation}
+Different from the framework in \Cref{sec: Sequential Importance Sampling}, we note that \Cref{lem: RND} offers an explicit formula for computing the weights $w_{[t_{n-1}, t_{n}]}$ in continuous time. As can be seen in the importance sampling identity \eqref{eq: IS estimator target}, the weights can be interpreted as correcting for a potentially imperfect time-reversal. For convenience, we state \Cref{alg: SCLDMeta short} for a simplified, high-level overview of combining SMC with diffusion models and refer to \Cref{alg:PracticalAlgorithm} in \Cref{app: algorithmic details} for a more detailed exposition. Further, we note that the suggested setting relates to the usual SMC algorithm (such as in \citet{dai2022invitationsequentialmontecarlo}) by taking a different forward transport step (where our Markov kernel is implemented by an SDE) and by adopting the weighting step (using the Radon-Nikodym derivative in place of the likelihood ratio). Using the target density $\pi(\cdot,t_n)$, we can also add MCMC refinements at each time $t_n$; see~\Cref{sec: Practical Algorithm}. 
+
+
+
+\begin{algorithm}[t]
+\caption{Sequential Controlled Langevin Diffusion (SCLD).\Comment{See~\Cref{alg:PracticalAlgorithm} for details.}
+}
+\small
+\label{alg: SCLDMeta short}
+\begin{algorithmic}[1]
+\linespread{1.25}\selectfont
+\Require Annealing path $\pi$, learned control $u$, time grid $0 = t_0 < \dots < t_N = T$
+\State \emph{Initialize:} $\overline{X}_0 \coloneqq X_0^{(1:K)} \sim p_\mathrm{prior}$ and $\overline{w}_0 \coloneqq w^{(1:K)}_0=1$ %
+\For{$n = 1$ to $n = N$}
+\State \emph{Transport:} $\overline{X}_{[t_{n-1}, t_{n}]} = \texttt{simulate\_SDE}  \big(\overline{X}_{t_{n-1}},u\big)$ \Comment{See~\eqref{eq: forward SDE} and~\eqref{eq: EM-Discretization}}
+\State \emph{Compute RNDs:} $\overline{w}_{[t_{n-1}, t_{n}]} = \frac{\mathrm d {\cev{\P}_{[t_{n-1}, t_{n}]}}}{\mathrm d \vec{\P}_{[t_{n-1}, t_{n}]}}\big(\overline{X}_{[t_{n-1}, t_{n}]}\big)$\Comment{See~\eqref{eq: RND} and~\eqref{eq: CMCD-RND}}
+
+\State \emph{Update weights: } $\overline{w}_{n} = \overline{w}_{n-1} \overline{w}_{[t_{n-1}, t_{n}]}$ \Comment{See~\eqref{eq: path space measure decomposition}}
+\State \emph{Resample:} $ \overline{X}_{t_{n}}, \overline{w}_{n} =  \texttt{resample}\big(\overline{X}_{t_{n}}, \overline{w}_{n}\big)$
+\Comment{See~\Cref{alg: Multinomial Resampling}}
+\EndFor
+\State \Return Samples $\overline{X}_T \coloneqq X_{T}^{(1:K)}$ approximately from $p_\mathrm{target}$
+\end{algorithmic}%
+\end{algorithm}
+
+
+
+
+\subsection{Loss functions and off-policy training} 
+\label{sec: Loss functions}
+
+We can adapt the idea of learning the optimal control $u^*$ to our sequential setting by considering divergences on each subinterval $[t_{n-1}, t_{n}]$ separately, in consequence bringing losses of the form
+\begin{equation}
+\label{eq: losses on subtrajectories}
+    \mathcal{L}(u) = \sum_{n=1}^{N} D\left(\vec{\P}^{u,\pi_{n-1}}_{[t_{n-1}, t_{n}]}, \cev{\P}^{u,\pi_{n}}_{[t_{n-1}, t_{n}]}\right),
+\end{equation}
+where $\pi_n \coloneqq \pi(\cdot, t_{n})$. We stress that with \eqref{eq: losses on subtrajectories} optimization can in principle be conducted globally in spite of the resampling happening sequentially. 
+However, depending on the choice of the divergence, this comes with additional challenges.
+
+
+\paragraph{KL divergence.} A classical choice is the \emph{Kullback-Leibler (KL) divergence} $D=D_\mathrm{KL}$, i.e.,
+\begin{equation}
+    D_\mathrm{KL}\left( \vec{\P}^{u,\pi_{n-1}}_{[t_{n-1}, t_{n}]} | \cev{\P}^{u,\pi_{n}}_{[t_{n-1}, t_{n}]}\right) = -\E_{X^u \sim \vec{\P}^{u,\pi_{n-1}}_{[t_{n-1}, t_{n}]}}\left[\log  \big(w_{[t_{n-1}, t_{n}]}(X^u)\big) \right],
+\end{equation}
+where $w_{[t_{n-1}, t_{n}]}$ is defined as in~\Cref{lem: RND} and the minus originates from the reciprocal importance weights in the logarithm. However, for computing the expectation we need $X^u_{t_{n-1}} \sim \pi_{n-1}$. If resampling has been employed in the previous iteration (at time $t_{n-1}$; see \Cref{alg: SCLDMeta short}), a potential mismatch in the expectation is automatically corrected. Alternatively, we may correct with importance sampling in path space.
+To this end, let $t_{m}$ (with $t_m < t_{n-1}$) be the last time resampling has been conducted, i.e., the last time the weights have been reset; see~\Cref{alg: Multinomial Resampling}. As suggested in \cite{matthews2022continual}, we can then consider the importance weight $w_{[t_m,t_{n-1}]}$ and compute
+  \begin{align}
+    \label{eq: KL with IS}
+    D_\mathrm{KL}\left( \vec{\P}^{u,\pi_{n-1}}_{[t_{n-1}, t_{n}]} | \cev{\P}^{u,\pi_{n}}_{[t_{n-1}, t_{n}]}\right)  = -\E_{X^u \sim \vec{\P}^{u,\pi_m}_{[t_m,t_{n}]}}\left[\log  \big(w_{[t_{n-1},t_{n}]}(X^u)\big) w_{[t_m,t_{n-1}]}(X^u) \right],
+ \end{align}
+ for which $X^u_{t_{n-1}}$ does not need to be distributed according to $\pi_{n-1}$ anymore. However, the importance weights potentially introduce additional variance into the loss, particularly in high dimensions. This observation is stated rigorously in the following proposition, cf.~\citet[Proposition 5.7]{nusken2021solving}, and proved in \Cref{app: proofs}.
+\begin{proposition}[Relative error of KL divergence]
+\label{prop: curse of dimensionality for KL}
+    Denote by $D_{\chi^2}$ the $\chi^2$-divergence and by $r^{(K)} \coloneqq \Var(\widehat{D}^{(K)}_{\operatorname{KL}})^{1/2} / D_{\operatorname{KL}}$ the relative error of the Monte Carlo estimator $\widehat{D}^{(K)}_{\operatorname{KL}}$ of the KL divergence in~\eqref{eq: KL with IS} with sample size $K$. Moreover, let $t_m$ be the last resampling time and let $\vec{\P}^{\otimes I}_{[t_{n-1},t_{n}]}$ and $\cev{\P}^{\otimes I}_{[t_{n-1},t_{n}]}$ be the $I$-fold product measures of identical copies of $\vec{\P}_{[t_{n-1},t_{n}]}$ and $\cev{\P}_{[t_{n-1},t_{n}]}$, respectively. Then there exists a constant $c > 0$, such that for any $I \ge 2$ it holds that 
+    \begin{equation}
+    r^{(K)}\left(\vec{\P}^{\otimes I}_{[t_{n-1},t_{n}]} |  \cev{\P}^{\otimes I}_{[t_{n-1},t_{n}]}\right) \ge c \left(D_{\chi^2}\left( \cev{\P}_{[t_m, t_{n-1}]} |  \vec{\P}_{[t_m, t_{n-1}]} \right) + 1\right)^{I/2}.
+    \end{equation}
+\end{proposition}
+
+Given a path measure $\vec{\P}$ of a $D$-dimensional process, we note that $\vec{\P}^{\otimes I}$ is a measure on the product space $\bigotimes_{i=1}^I C([0, T], \R^D) \simeq C([0, T], \R^{I D})$. In particular, for $D=1$ (corresponding to independent components), we can clearly identify $d=I$ as the dimension of the considered problem.
+This means that the relative error of the estimator of the KL divergence \eqref{eq: KL with IS} is expected to scale exponentially in the dimension, which is illustrated in \Cref{fig: curse of dimensionality for KL} in \Cref{KLAblation}. As shown in \citet{nusken2021solving}, the \emph{log-variance (LV) divergence} does not exhibit this unfavorable property.
+
+\paragraph{LV divergence and off-policy training.} An alternative divergence can be defined by
+\begin{equation}
+\label{eq:lv_divergence}
+D_\mathrm{LV}^{\Q}\left(\vec{\P}^{u,\pi_{n-1}}_{[t_{n-1},t_{n}]} | \cev{\P}^{u,\pi_{n}}_{[t_{n-1},t_{n}]}\right) = \Var_{X \sim \Q}\left[\log  \big(w_{[t_{n-1},t_{n}]}(X)\big) \right]
+\end{equation}
+which, in fact, is a family of divergences parametrized by a reference measure $\Q=\vec{\P}^{\widetilde{u},\widetilde{\pi}_{n-1}}_{[t_{n-1},t_{n}]}$ that can be chosen with arbitrary controls $\widetilde{u}$ and initial distributions $\widetilde{\pi}_{n-1}$ (also called \textit{off-policy training}, see \Cref{rem:rl} for details and connections to reinforcement learning). In particular, we do not need $X_{t_{n-1}} \sim \pi_{n-1}$ anymore, and thus reweighting such as in \eqref{eq: KL with IS} is not necessary, irrespective of the fact that resampling at time $t_n$ might not have been conducted. We summarize the training procedure for both divergences in \Cref{alg: Sequential SDE Training} and present details in \Cref{app: algorithmic details}.
+
+\begin{algorithm}[t]
+\caption{SCLD-Training \Comment{See~\Cref{alg:BufferAlgorithm} for training with buffers.}}
+\label{alg: Sequential SDE Training}
+\small
+\linespread{1.25}\selectfont
+\begin{algorithmic}[1]
+\Require Number of iterations $I$, initial parameters $\theta^{(0)}$, optimizer update \texttt{update}, inputs for~\Cref{alg:PracticalAlgorithm}
+
+\For{$i=0$ to $I-1$}
+\State \textit{Run \Cref{alg:PracticalAlgorithm}:} $(w_{[t_{n-1},t_n]}^{(1:K)})_{n=1}^N$, $(w_n^{(1:K)})_{n=0}^N = \texttt{SCLD-ForwardPass}\,(\theta^{(i)})$
+
+\If{LV}  \Comment{Trajectories $\widehat{X}^{(1:K)}$ are detached during forward pass}
+\State \textit{Compute loss:} $\mathcal{L} = \sum_{n=1}^{N}\frac{1}{K}\sum_{k=1}^K \left(\log w_{[t_{n-1},t_n]}^{(k)}- \frac{1}{K}\sum_{i=1}^K \log w_{[t_{n-1},t_n]}^{(i)} \right)^2$ 
+\ElsIf{KL}
+\State \textit{Compute loss:} $\mathcal{L} = -\sum_{n=1}^N\frac{1}{K}\sum_{k=1}^K\texttt{detach}(w_{n-1}^{(k)})\log w_{[t_{n-1},t_n]}^{(k)}$ 
+\EndIf
+\State \textit{Compute gradient w.r.t.~parameters:} $G^{(i)} = \nabla_{\theta^{(i)}} \mathcal{L}$ 
+\State \textit{Optimizer step:} $\theta^{(i+1)} = \texttt{update}(\theta^{(i)}, (G^{(j)})_{j=0}^i)$ \Comment{We use Adam}
+\EndFor
+\State \Return Optimized parameters $\theta^{(I)}$
+\end{algorithmic}
+\end{algorithm}
+\subsection{Algorithmic refinements and implementational details} 
+\label{sec: Practical Algorithm}
+
+In this section, we turn our theoretical considerations from Sections \ref{sec: Sequential Importance Sampling} to \ref{sec: Loss functions} into implementable algorithms. We collate these changes in \Cref{alg:PracticalAlgorithm} in \Cref{app: algorithmic details}, representing a practical version of \Cref{alg: SCLDMeta short}.
+
+\paragraph{Loss Function.} We focus on the log-variance divergence in the sequel and refer to \Cref{KLAblation} for a comparison to the KL divergence. We choose $\widetilde{u}=u$ (or previous versions when using a buffer, see \enquote{replay buffers} below) and simulate $X$ in~\eqref{eq:lv_divergence} starting from the prior, so $\widetilde{\pi}_n$ corresponds to the SDE marginal. However, since we do not take gradients w.r.t. the control $\widetilde{u}$ of the reference measures, we detach the trajectory $X$, in line with \cite{richter2024improvedsamplinglearneddiffusions}. In particular, we do not need to differentiate through the SDE integrator.
+
+\paragraph{Time discretization.} In practice, we choose $N$ equidistant resampling times, i.e. $t_{n} - t_{n-1} = \tau$, for every $n \in \{1, \dots, N \}$, where the number of subtrajectories $N$ may change across applications. We discretize the SDE \eqref{eq: backward SDE} via the Euler-Maruyama scheme, containing $L$ evenly spaced steps per subtrajectory, i.e., 
+\begin{equation}\label{eq: EM-Discretization}
+        \widehat{X}^u_{i} = \widehat{X}^u_{i-1} + u(\widehat{X}^u_{i-1}, (i-1)h) h + \sigma((i-1) h)\sqrt{h} \xi_{i} , \quad \xi_{i} \sim \mathcal{N}(0, \operatorname{Id}),
+\end{equation}
+for $i \in \{1, \dots, NL  \}$ with $h=\tau/L$. We refer to \eqref{eq: CMCD-RND} in \Cref{app: algorithmic details} for the resulting discretization of the Radon-Nikodym derivative from \Cref{lem: RND} for computing the importance weights $w_{[t_{n-1},t_{n}]}$. 
+
+\paragraph{Annealing path.} For the prescribed density curve $\pi$ we consider  
+\begin{equation}
+\label{eq:annealing}
+    \pi(x, t) \propto p_\mathrm{prior}(x)^{1-\beta(t)} \rho_\mathrm{target}(x)^{\beta(t)},
+\end{equation}
+where $\beta \colon [0, T] \to [0, 1]$ is a monotonically increasing function fulfilling $\beta(0) = 0$ and $\beta(T) = 1$. We choose to learn the function $\beta$ to attain a smoother transition; see~\eqref{eq:learned_annealing} and~\Cref{sec:learned_annealing}.
+
+\paragraph{Resampling.} There is a wealth of literature \citep{webber2019unifyingsequentialmontecarlo,SMCMethodsInPractice,douc2005comparisonresamplingschemesparticle} regarding designing SMC resampling schemes. However, for a fair comparison to CRAFT \citep{matthews2022continual}, we utilize the common \textit{multinomial} resampling scheme. Resampling can, however, reduce particle diversity by introducing identical particles in its output. As such, it is common to trigger resampling at a time $t_{n}$ only when the \textit{Effective Sample Size} (ESS), a measure of particle quality
+defined by 
+$ %
+\mathrm{ESS}=\frac{\left(\sum_{k=1}^K w_n^{(k)}\right)^2}{\sum_{k=1}^K (w_n^{(k)})^2}$,
+is below a certain threshold, where $w_n$ are the importance weights at time $t_n$ (as in~\Cref{alg:PracticalAlgorithm}). In line with prior works~\citep{matthews2022continual,phillips2024particle}, we pick the threshold to be $0.3K$ where $K$ is the number of particles.
+\paragraph{MCMC refinements.} In order to cope with sub-optimal controls $u$ during the course of optimization, we add some MCMC refinement steps after each subtrajectory at time $t_n$, using a Markov kernel with invariant measure $\pi(\cdot, t_n)$. In line with \cite{matthews2022continual}, after every subtrajectory, we use one Hamiltonian Monte Carlo (HMC) step with $10$ leapfrog steps. 
+\paragraph{Replay buffers.} %
+Replay buffers are known to prevent mode collapse and improve sample efficiency for 
+sampling tasks~\citep{vemgal2023empiricalstudyeffectivenessusing,midgley2022flow,sendera2024diffusion}. As such, we utilize a prioritized replay buffer during training time. At a high level, we maintain a fixed-size rolling cache of paths generated by previous versions of the \emph{policy}, i.e., learned control $u$. For the gradient updates, we then take half of the samples from the current policy and the other from the buffer using Radon-Nikodym derivatives as weights for prioritization, see \Cref{alg:BufferAlgorithm} in \Cref{app: algorithmic details} for details. We note that this procedure is easily feasible with the log-variance divergence since this divergence does not rely on an evaluation along the current policy (see~\Cref{sec: Loss functions}). 
+
+
+
+\section{Experiments}
+
+\label{sec: experiments}
+We empirically demonstrate the performance of the proposed SCLD sampler on a wide variety of sampling benchmarks. We consider a combination of practical and synthetic examples taken from~\citet{blessing2024elboslargescaleevaluationvariational}, the full descriptions of which are contained in \Cref{sec:target_details}:
+\begin{itemize}[leftmargin=*]
+\item \textbf{Examples from Bayesian statistics:} The Seeds, Sonar, Credit, Brownian, and LGCP tasks. 
+\item \textbf{Synthetic targets:} A $40$-mode Gaussian mixture model in $50d$ (GMM40), a $32$-mode Many-Well task (MW54) in $5d$, the popular $10d$ Funnel benchmark, and a $50d$ Student mixture model (MoS). Many of these are in relatively high dimensions and with many well-separated modes.
+\item \textbf{The Robot1 and Robot4 tasks:} Inspired by robotics control problems, these synthetic $10$-dimensional targets model the distribution over the configurations of a $10$-joint robotic arm in the plane. They have multiple well-separated and sharp modes.
+\end{itemize}
+
+\begin{table}[t]
+\caption{Comparison of different methods in terms of ELBOs, i.e., lower bounds on the log-normalization constant $\log Z$. We use this metric for all tasks for which we do not have access to groundtruth metrics. We report NA if all considered hyperparameter choices diverged.}
+\centering
+\resizebox{0.95\textwidth}{!}{\begin{tabular}{lcccccc}
+\toprule
+ELBO ($\uparrow$) &                                 Seeds (26d) &                                  Sonar (61d) &                               Credit (25d) &                            Brownian (32d) &                                  LGCP (1600d) \\ 
+\midrule
+\textbf{SMC    } &       $-74.63\text{\tiny{$\pm0.14$}}$ &       $-111.50\text{\tiny{$\pm0.96$}}$ &            $-589.82\text{\tiny{$\pm5.72$}}$ &      $-2.21\text{\tiny{$\pm0.53$}}$ &       $385.75\text{\tiny{$\pm7.65$}}$ \\ 
+\textbf{SMC-ESS    }&  $-74.07\text{\tiny{$\pm0.60$}}$ &  $-109.10\text{\tiny{$\pm0.17$}}$ &  $-505.57\text{\tiny{$\pm0.18$}}$ &  $0.49\text{\tiny{$\pm0.19$}}$  &   $\pmb{497.85\text{\tiny{$\pm0.11$}}}$  \\
+\textbf{SMC-FC    }& 
+$-74.07 \text{\tiny{$\pm 0.02$}}$ & $-108.93 \text{\tiny{$\pm 0.02$}}$ & $-505.30 \text{\tiny{$\pm 0.02$}}$ & $-1.91 \text{\tiny{$\pm 0.04$}}$  & $-878.10 \text{\tiny{$\pm 2.20$}}$ \\ 
+
+\textbf{CRAFT  } &       $-73.75\text{\tiny{$\pm0.02$}}$ &       $-108.97\text{\tiny{$\pm0.16$}}$ &             $-518.25\text{\tiny{$\pm0.52$}}$ &  $0.90\text{\tiny{$\pm0.10$}}$ &       $485.87\text{\tiny{$\pm0.37$}}$ \\ 
+\textbf{DDS    } &       $-75.21\text{\tiny{$\pm0.21$}}$ &       $-121.22\text{\tiny{$\pm5.99$}}$ &            $-514.74\text{\tiny{$\pm1.22$}}$ &       $0.56\text{\tiny{$\pm0.23$}}$ &                                    NA \\ 
+\textbf{PIS    } &       $-88.92\text{\tiny{$\pm2.05$}}$ &       $-142.87\text{\tiny{$\pm3.29$}}$ &              $-846.57\text{\tiny{$\pm2.42$}}$ &                                  NA &       $479.54\text{\tiny{$\pm0.40$}}$ \\ 
+\textbf{CMCD-KL} &       $-73.51\text{\tiny{$\pm0.01$}}$ &       $-109.09\text{\tiny{$\pm0.01$}}$ &      $-507.23\text{\tiny{$\pm6.40$}}$ &       $0.86\text{\tiny{$\pm0.01$}}$ &       $478.75\text{\tiny{$\pm0.34$}}$ \\ 
+\textbf{CMCD-LV} &       $-73.67\text{\tiny{$\pm0.01$}}$ &       $-109.50\text{\tiny{$\pm0.03$}}$ &            $-504.90\text{\tiny{$\pm0.02$}}$ &       $0.54\text{\tiny{$\pm0.03$}}$ &       $472.79\text{\tiny{$\pm0.44$}}$ \\ 
+\textbf{SCLD (ours)} &  $\pmb{-73.45\text{\tiny{$\pm0.01$}}}$ &  $\pmb{-108.17\text{\tiny{$\pm0.25$}}}$  &  $\pmb{-504.46\text{\tiny{$\pm0.09$}}}$ &       $\pmb{1.00\text{\tiny{$\pm0.18$}}}$ &  $486.77\text{\tiny{$\pm0.70$}}$ \\ 
+\bottomrule
+\end{tabular}}
+\label{tab:compare_elbos}
+\end{table}
+As baselines, we consider a representative selection of related sampling methods and refer to~\Cref{sec:related_works_app} for descriptions.
+We study two metrics used frequently by previous works, such as in~\citet{blessing2024elboslargescaleevaluationvariational, vargas2023denoising}. When groundtruth samples are available, we report the Sinkhorn distance (an optimal transport distance) to a set of generated samples \citep{NIPS2013_Sinkhorn}, and otherwise consider the ELBO metric (i.e., a lower bound on $\log Z$). 
+
+We took great care to ensure the fairness of our experiments and refer the reader to \Cref{Experimental Details} for full experimental and reproducibility details and to \cite{blessing2024elboslargescaleevaluationvariational} for a discussion on benchmarking samplers. We also include numerous additional experiments and metrics in the appendices, such as ablation studies in \Cref{sec:ablation,sec:NoMCMC}, runtime information in \Cref{sec:timings}, a study on $\log Z$ estimation in \Cref{sec:logZ estimation}, the effect of learning priors by variational inference in \Cref{sec:SCLD-MFVI}, a comparison to PDDS in \Cref{sec:PDDSvsSCLD}, and a comparison of KL and LV training in \Cref{KLAblation}.
+\begin{table}[t]
+\caption{Comparison of different methods in terms of Sinkhorn distances. We present all tasks where we have access to samples for evaluation. We report NA if all considered hyperparameter choices diverged.}
+\centering
+\resizebox{\textwidth}{!}{\begin{tabular}{lccccccc}
+\toprule
+Sinkhorn ($\downarrow$) &                                Funnel (10d) &                               MW54 (5d) &                          Robot1 (10d) &                          Robot4 (10d) &                                    GMM40 (50d) &                                MoS (50d) \\ \midrule
+\textbf{SMC    } &       $149.35\text{\tiny{$\pm4.73$}}$ &      $20.71\text{\tiny{$\pm5.33$}}$ &      $24.02\text{\tiny{$\pm1.06$}}$ &      $24.08\text{\tiny{$\pm0.26$}}$ &        $46370.34\text{\tiny{$\pm137.79$}}$ &    $3297.28\text{\tiny{$\pm2184.54$}}$ \\ %
+\textbf{SMC-ESS    } &
+ $\pmb{  117.48\text{\tiny{$\pm 9.70$}}}$  &  $1.11\text{\tiny{$\pm0.15$}}$ &  $1.82\text{\tiny{$\pm0.50$}}$ &  $2.11\text{\tiny{$\pm0.31$}}$ &  $24240.68\text{\tiny{$\pm50.52$}}$ &  $1477.04\text{\tiny{$\pm133.80$}}$ \\
+\textbf{SMC-FC  } &
+$211.43 \text{\tiny{$\pm 30.08$}}$  &
+$2.03 \text{\tiny{$\pm 0.17$}}$ &
+$0.37 \text{\tiny{$\pm 0.08$}}$ &
+$1.23 \text{\tiny{$\pm 0.02$}}$ &
+$39018.27 \text{\tiny{$\pm 159.32$}}$ &
+$3200.10 \text{\tiny{$\pm 95.35$}}$ \\
+\textbf{CRAFT  } &       $133.42\text{\tiny{$\pm1.04$}}$ &      $11.47\text{\tiny{$\pm0.90$}}$ &       $2.92\text{\tiny{$\pm0.01$}}$ &       $4.14\text{\tiny{$\pm0.50$}}$ &       $28960.70\text{\tiny{$\pm354.89$}}$ &     $1918.14\text{\tiny{$\pm108.22$}}$ \\ %
+\textbf{DDS    } &       $142.89\text{\tiny{$\pm9.55$}}$ &       $0.63\text{\tiny{$\pm0.24$}}$ &     $11.44\text{\tiny{$\pm12.50$}}$ &       $5.38\text{\tiny{$\pm2.44$}}$ &         $5435.18\text{\tiny{$\pm172.20$}}$ &       $2154.88\text{\tiny{$\pm3.86$}}$ \\ %
+
+\textbf{PIS    } &                                    NA &  $\pmb{0.42\text{\tiny{$\pm0.01$}}}$ &       $1.54\text{\tiny{$\pm0.72$}}$ &       $2.02\text{\tiny{$\pm0.36$}}$ &        $10405.75\text{\tiny{$\pm69.41$}}$ &      $2113.17\text{\tiny{$\pm31.17$}}$ \\
+\textbf{CMCD-KL} &  $124.89\text{\tiny{$\pm8.95$}}$ &       $0.57\text{\tiny{$\pm0.05$}}$ &       $3.71\text{\tiny{$\pm1.00$}}$ &       $2.62\text{\tiny{$\pm0.41$}}$  &      $22132.28\text{\tiny{$\pm595.18$}}$ &     $1848.89\text{\tiny{$\pm532.56$}}$ \\ %
+\textbf{CMCD-LV} &       $139.07\text{\tiny{$\pm9.35$}}$ &       $0.51\text{\tiny{$\pm0.08$}}$ &      $28.49\text{\tiny{$\pm0.07$}}$ &      $27.00\text{\tiny{$\pm0.07$}}$ &       $4258.57\text{\tiny{$\pm737.15$}}$ &      $1945.71\text{\tiny{$\pm48.79$}}$ \\ %
+\textbf{SCLD (ours)   } &       $134.23\text{\tiny{$\pm8.39$}}$ &       $0.44\text{\tiny{$\pm0.06$}}$ &  $\pmb{0.31\text{\tiny{$\pm0.04$}}}$ &  $\pmb{0.40\text{\tiny{$\pm0.01$}}}$ &      $\pmb{3787.73\text{\tiny{$\pm249.75$}}}$ &  $\pmb{656.10\text{\tiny{$\pm88.97$}}}$ \\ %
+\bottomrule
+\end{tabular}}
+\label{tab:compare_sinkhorn}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{\linewidth}
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip,width=\linewidth]{resources/GMM40_50d_CMCD_kl.pdf}
+            \captionsetup{labelformat=empty}
+            \caption{\textbf{CMCD-KL}}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip,width=\linewidth]{resources/GMM40_50d_CMCD_lv.pdf}
+            \captionsetup{labelformat=empty}
+            \caption{\textbf{CMCD-LV}}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip,width=\linewidth]{resources/GMM40_50d_CRAFT.pdf}
+            \captionsetup{labelformat=empty}
+            \caption{\textbf{CRAFT}}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip, width=\linewidth]{resources/GMM40_50d_SCLD.pdf}
+            \captionsetup{labelformat=empty} 
+            \caption{\textbf{SCLD (ours)}}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip, width=\linewidth]{resources/GMM40_50d_Groundtruth.pdf}
+            \captionsetup{labelformat=empty}
+            \caption{\textbf{Groundtruth}}
+        \end{subfigure} \\
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm, clip, width=\linewidth]{resources/Robot4_CMCD_kl.pdf}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip, width=\linewidth]{resources/Robot4_CMCD_lv.pdf}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip, width=\linewidth]{resources/Robot4_CRAFT.pdf}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip, width=\linewidth]{resources/Robot4_SCLD2.pdf}
+        \end{subfigure}\hspace{0.01\linewidth}%
+        \begin{subfigure}{0.19\linewidth}
+            \centering
+            \includegraphics[trim=2cm 2cm 2cm 2cm,clip, width=\linewidth]{resources/Robot4_Groundtruth.pdf}
+        \end{subfigure} \\
+    \end{minipage}
+    \caption{Samples from our considered methods and the groundtruth for the GMM40 (50d) (top) and Robot4 (10d) (bottom) tasks. Our SCLD method accurately finds all modes and avoids low-probability regions.}
+\label{fig:Visualizations}
+\end{figure}
+\subsection{Results}
+
+Our SCLD method exhibits strong performance on both ELBO and Sinkhorn benchmarks (\Cref{tab:compare_sinkhorn,tab:compare_elbos}). Indeed, among all tasks except Funnel, we are able to achieve the top performance or come a close second when measuring performance by Sinkhorn distances (when it is available). For ELBO estimation, SCLD can utilize a large number of resampling steps to attain the strongest performances in all but one task. In particular, SCLD can surpass the outcomes of CMCD-KL and CMCD-LV with $40000$ gradient steps using only $3000$ steps. In the following, we comment on different aspects. 
+
+\paragraph{Avoiding mode collapse.} We visualize the samples for GMM40 and the Robot4 task in \Cref{fig:Visualizations}. For GMM40, we plot the first two dimensions of samples against the true marginal distribution. In all attempted hyperparameter settings, we found that CRAFT suffers from mode collapse (see also~\Cref{sec:logZ estimation}) and that CMCD-KL gradually collapses to a few modes, covering low probability regions.
+CMCD-LV and SCLD perform much better, and indeed the samples from SCLD are virtually indistinguishable from the groundtruth. For Robot4, we visualize the sampled robot arm positions. Observe that for the Robot4 task, CMCD-KL and CRAFT both collapse onto $1$ mode. CMCD-LV does not experience mode collapse but nevertheless does not sample accurately for any mode. Only our SCLD Method is able to identify and sample relatively precisely from all $8$ modes. 
+\paragraph{Improved convergence properties of SCLD.} \label{Fast Convergence}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{resources/ConvergencePlots_fast.pdf}%
+    \caption{ELBOs during training for several tasks. We visualize the ELBO estimates attained by $4$ methods as a function of the training time elapsed (until SCLD finished after $3000$ iterations), running $3$ seeds for each task. 
+    We mark the long run CMCD ELBOs (best out of KL and LV loss), corresponding to running for $40000$ gradient steps as for the main table. Methods leveraging Sequential Monte Carlo (SCLD and CRAFT) generally exhibit improved convergence speed, but whereas CRAFT plateaus quickly, our SCLD method often achieves state-of-the-art performance in about $5$ minutes.}%
+    \label{fig:Convergence}
+\end{figure}
+
+We found that the SCLD algorithm demonstrates superior convergence properties. As SCLD is effectively initialized as an SMC sampler and is trained to improve upon it, we expect a good initial performance even before training and, thus, an improved starting point for optimization. As visualized in Figure \ref{fig:Convergence}, SCLD consistently attains better ELBOs for any given training time budget on all tasks when compared to CMCD-KL and CMCD-LV. While, in some cases, SCLD is initially worse than CRAFT, it always manages to catch up quickly and surpasses it. SCLD and CMCD steps require similar amounts of time for these tasks (see~\Cref{sec:timings}), and thus SCLD offers a 10-fold decrease in training time as well as iteration count compared to CMCD. See \Cref{ConvergenceIterations} for an alternative visualization.
+\paragraph{Choosing the number of SMC steps.} 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{resources/subtraj_heatmaps_resized_2.pdf}%
+    \caption{Performance of SCLD for different numbers of SMC steps at training and evaluation time for several tasks. Better results are shaded darker. We note that taking \enquote{zero} SMC steps corresponds to the CMCD method. Using more SMC steps generally has a beneficial effect during training. Our method allows us to select a different number during training and inference.}
+    \label{fig:SubtrajHeatmaps}
+\end{figure}
+Here, we study the effect of varying the number $N$ of subtrajectories used in the SCLD sampler, i.e., SMC steps where we apply resampling (if ESS is lower than the threshold) and MCMC steps, and offer practical advice on choosing this value. For this study, we fix the number of gradient steps for training to $8000$ but otherwise retain the same experimental design. The results are illustrated in \Cref{fig:SubtrajHeatmaps}, where we visualize the relevant metric for four tasks and demonstrate the effect of varying the number of SMC steps used at training and evaluation. For most tasks, we found it advantageous to use as many SMC steps as possible at both training and evaluation time. 
+Particularly for the Seeds and Sonar targets, the outcomes look strikingly similar. For these tasks, it is also shown that using a smaller number of SMC steps at training or even only adding SMC steps at evaluation already improves upon stand-alone diffusion-based samplers.
+
+While it is well known that resampling can potentially lead to mode collapse and loss of sample diversity on highly multimodal tasks \citep{SMCMethodsInPractice}, we found that even for such tasks, resampling, when used sparingly, was still beneficial during training. This is clearly reflected in the multimodal Robot4 task, where using SMC steps at training significantly improves sample quality. In line with the previous paragraph, this suggests that our SCLD training setup can help improve training convergence. Informed by our observations, we opt to use $4$ subtrajectories only at training for all synthetic tasks except Funnel and MoS,
+\footnote{Despite being a mixture model, the relatively low distance between modes and the fat tails of the student distribution make MoS less multimodal in nature.}, 
+and, for all other tasks, we utilize $128$ subtrajectories at both training and evaluation time for the main experiments. These choices, while not necessarily optimal, are robust and work well across our diverse set of benchmarks. 
+
+
+\section{Conclusion}
+
+\label{sec: conclusion}
+We have developed a framework for combining diffusion-based samplers with Sequential Monte Carlo algorithms and propose simple yet effective methods for training. Our framework culminates in a novel sampler, termed \emph{Sequential Controlled Langevin Diffusion} (SCLD), in principle offering a great amount of design freedom. In particular, SCLD allows for accelerated training, flexible parameterizations, end-to-end training with prioritized replay buffers, and injection of resampling and MCMC steps at arbitrary times in the generative process. We provide careful ablation studies of our design choices and empirically show state-of-the-art performance on a diverse range of benchmarks.
+
+
+

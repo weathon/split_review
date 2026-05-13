@@ -1,0 +1,384 @@
+\title{Instruction Mining: Instruction Data Selection for Tuning Large Language Models}
+
+\begin{abstract}
+Large language models (LLMs) are initially pretrained for broad capabilities and then finetuned with instruction-following datasets to improve their performance in interacting with humans. Despite advances in finetuning, a standardized guideline for selecting high-quality datasets to optimize this process remains elusive.
+In this paper, we first propose \textsc{InstructMining}, an innovative method designed for automatically selecting premium instruction-following data for finetuning LLMs. Specifically, \textsc{InstructMining} utilizes natural language indicators as a measure of data quality, applying them to evaluate unseen datasets. During experimentation, we discover that double descent phenomenon exists in large language model finetuning. Based on this observation, we further leverage \textsc{BlendSearch} to help find the best subset among the entire dataset (i.e., 2,532 out of 100,000).
+Experiment results show that \textsc{InstructMining}-7B achieves state-of-the-art performance on two of the most popular benchmarks: \textsc{LLM-as-a-judge} and Huggingface \textsc{OpenLLM}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) have demonstrated transformative capabilities, powering numerous applications with the strong ability in automatically generating responses according to human instructions~\citep{ouyang2022training, peng2023instruction, chung2022scaling, scao2022bloom}. 
+However, it is hard sometimes for language models to capture the meaning of human instructions and respond to them even if they are pretrained with large amount of data. To counter this challenge, instruction tuning emerged as a paramount method in tailoring the behaviours of LLMs, which leverages instruction-following pairwise data (i.e., instruction data) during finetuning~\citep{wei2021finetuned, ouyang2022training, chung2022scaling, wang2022self}.
+A recent study LIMA has revealed that even a small amount of carefully selected high-quality instruction data can significantly improve model performance through instruction tuning~\citep{zhou2023lima}. Nevertheless, LIMA still requires human experts to filter examples from extensive datasets, which is both time-consuming and expensive.
+
+In this paper, we propose \textsc{InstructMining}, a novel method designed to automatically select high-quality instruction data for finetuning better LLMs. Achieving this objective necessitates a data evaluator capable of assessing the quality of instruction data without the intervention of human experts. Furthermore, the data selector is also indispensable for automatically identifying the most suitable subset of instruction data for finetuning LLMs.
+Nevertheless, quantifying the quality of instruction data without human expert is a non-trivial task. To address this problem, we employ the loss incurred by a finetuned model on the evaluation set a proxy for data quality. However, computing this inference loss necessitates the actual finetuning of a language model, a potentially time-consuming process. To overcome this obstacle, we introduce a set of selected natural language indicators (e.g., reward model score), capable of predicting the inference loss without the need for finetuning an LLM. This approach can efficiently provide an estimation of the dataset's quality.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figs/dd-teaser.pdf}
+    \caption{Double descent phenomenon in generative language models. Higher loss indicates worse performance. \textcolor{red}{Red} line refers to \textsc{InstructMining} selected data sizes w.r.t. model inference loss. \textcolor{blue}{Blue} line refers to random selected data sizes w.r.t. model inference loss. Our optimization goal is to find the optimal point which results in the lowest inference loss.}
+\label{fig:teaser-dd}
+\end{figure}
+
+While our approach can assess and rank the entire dataset based on data quality, determining the most optimal subset for finetuning LLMs remains an unresolved challenge. A straightforward solution is to choose the top-$K$ high-quality data samples, but selecting the appropriate $K$ proves to be inherently difficult in practice. To address this complexity, we conducted a series of experiments exploring the relationship between data quantity and quality. Remarkably, as we continued to increase the subset size for finetuning language models, we observed the double descent phenomenon~\citep{nakkiran2021deep}, as illustrated in Figure~\ref{fig:teaser-dd}. This observation signifies a transition in the primary determinant of model performance from data quality to data quantity once the data size crosses a specific threshold. In such scenarios, focusing on an initial set of high-quality data points (e.g.,  $K$=10,000) is more efficient for identifying the optimal point than perusing the entire dataset. Given the cost-sensitive nature of pinpointing this optimal point, we employ \textsc{BlendSearch}~\citep{wang2021blendsearch} to automatically search for the best subset for our needs.
+
+We further substantiate the validity and scalability of \textsc{InstructMining} by contrasting its performance with other state-of-the-arts across diverse benchmarks. Notably, \textsc{InstructMining} enhances the performance of \textsc{LLaMA-2}-7B by 4.93 on the Huggingface \textsc{OpenLLM} benchmark. In addition, our finetuned models are able to generate equivalent or superior responses in 64.67\% of instances, compared to \textsc{Vicuna}-7B-v1.5. Furthermore, \textsc{InstructMining} contributes to heightened finetuning efficiency. The optimal \textsc{InstructMining} model, finetuned on a mere 2.5\% (i.e., 2,532 out of 100,000) of the highest-quality examples from the complete dataset, can achieve state-of-the-art on both \textsc{LLM-as-a-judge}~\citep{zheng2023judging} and \textsc{OpenLLM} benchmarks.
+
+Our contributions are summarized as follows:
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item In this work, we pioneer the application of classical data mining techniques to enhance LLMs by autonomously selecting high-quality data. To realize this objective, we introduce \textsc{InstructMining}, a method encompassing data assessment and selection processes.
+    \item The proposed \textsc{InstructMining} innovatively combines customized language indicators with an advanced searching algorithm, enabling the automatic assessment of data quality and identification of the optimal subset for finetuning language models.
+    \item Models finetuned with \textsc{InstructMining} exhibit state-of-the-art performance on two of the most popular benchmarks: \textsc{LLM-as-a-judge} and Huggingface \textsc{OpenLLM}. Meanwhile, Utilizing less training data can effectively reduce both the training time and cost. 
+\end{itemize}
+
+
+
+\section{Methodology}
+
+In this section, we provide a detailed description of our proposed method, \textsc{InstructMining}. A procedure graph is provided in Figure~\ref{fig:procedure}. Our method is composed of two parts, quality estimation and threshold search.
+We first introduce our method for estimating instruction data quality in Section~\ref{sec:method-def}. This is achieved by aligning the data quality with the inference loss of a fine-tuned model. 
+Then we propose our evaluation rule along with the selected natural language indicators in Section~\ref{sec:method-qua}. 
+Finally, we present the observed double descent phenomenon and introduce a \textsc{BlendSearch}-based data selector in Section~\ref{sec:method-blendsearch}.
+\subsection{What is instruction quality?}
+\label{sec:method-def}
+In this paper, we follow the superficial alignment hypothesis proposed by ~\cite{zhou2023lima} that a model's knowledge is mostly learnt during pretraining, while instruction data teaches the model to follow a certain pattern when interacting with users. 
+Hence, the quality of these instruction data could be viewed as its ability to efficiently steer language models in learning to generate responses in a particular manner. Based on this assumption, we further propose our instruction quality evaluation hypothesis as follows.
+\begin{hypothesis}\textbf{Instruction Quality Evaluation Hypothesis}:
+\textit{
+Given an instruction dataset $D$, we finetune a language model on $D$, denoted as $M_{ft}$. The instruction quality of $D$ can be estimated through the inference loss of $M_{ft}$ on a evaluation dataset $D_{eval}$.}
+\end{hypothesis}
+
+To ensure the inference loss provides a valid measure for evaluating data quality, the evaluation set should comprise a selected collection of unbiased and high-quality instruction-following samples.
+
+In particular, given an instruction-following dataset $D$, we finetune a base language model $M$ using $D$ with model training settings $S$. $S$ normally refers to training batch size, epochs, etc. $L$ refers to the loss function. The obtained finetuned language model is denoted as $M_{ft}$. We define the dataset $D$'s quality $Q_{D|M,S}$ as below,
+\begin{equation} \label{eq:quality}
+Q_{D|M,S} \propto -{L(M_{ft}, D_{eval})}
+\end{equation}
+where $D_{eval}$ refers to the high-quality and unbiased evaluation set, and $\propto$ means a direct proportion.
+
+\subsection{How to estimate instruction quality?}
+\label{sec:method-qua}
+
+\begin{table}[t]
+\centering
+\resizebox{1.0\textwidth}{!}{
+\begingroup
+\setlength{\tabcolsep}{6pt} % Default value: 6pt
+\renewcommand{\arraystretch}{1.5} % Default value: 1
+    \begin{tabular}{ccl}
+        \toprule
+        \textbf{Indicator} & \textbf{Notation} &\textbf{Explanation}\\
+        \midrule
+        {Input length} & $Len_{in}$ & \makecell[l]{The number of tokens in tokenized inputs.} \\\specialrule{0em}{1pt}{1pt}        
+        {Output length} & $Len_{out}$ & \makecell[l]{The number of tokens in tokenized outputs.} \\\specialrule{0em}{1pt}{1pt}        
+        {Reward score} & $Rew$ & \makecell[l]{The \texttt{oasst-rm-pythia-1.4b} reward model inference score of every pair\\ in the dataset. \citep{köpf2023openassistant}} \\\specialrule{0em}{1pt}{1pt}
+        {Perplexity} & $PPL$ & \makecell[l]{The exponentiated average negative log-likelihood of response.} \\
+        {MTLD} & $MTLD$ & {Measure of Textual Lexical Diversity \citep{mccarthy2010mtld}} \\\specialrule{0em}{1pt}{1pt}
+        {KNN-i} & $KNN_i$ & \makecell[l]{Distance to approximate $i^{th}$-nearest neighbors \citep{dong2011efficient} in \\SentenceBERT\citep{reimers-2019-sentence-bert} embedding space.} \\\specialrule{0em}{2pt}{2pt}
+        {Unieval-naturalness} & $Nat$ & \makecell[l]{The score of whether a response is like something a person would naturally\\ say, provided by the UniEval \citep{zhong2022unified} dialogue model.} \\\specialrule{0em}{2pt}{2pt}
+        {Unieval-coherence} & $Coh$ & \makecell[l]{The score of whether this response serves as a valid continuation of \\the previous conversation, provided by the UniEval \citep{zhong2022unified}\\ dialogue model.} \\\specialrule{0em}{2pt}{2pt}
+        {Unieval-understandability} & $Und$ & \makecell[l]{The score of whether the response is understandable, provided by the\\ UniEval \citep{zhong2022unified} dialogue model.} \\\specialrule{0em}{2pt}{2pt}
+        \bottomrule
+    \end{tabular}
+
+\endgroup
+ }
+\caption{Summary of indicators for instruction quality evaluation. Each data sample is viewed as a pair of instruction and response (i.e., input and output) of LLM.}
+\label{table:indicators}
+\end{table}
+
+According to Equation~\ref{eq:quality}, we utilize the inference loss to evaluate instruction quality. 
+However, finetuning an LLM for evaluation can be inefficient, since this process can take days of training. 
+To solve this problem, we introduce a set of natural language indicators and use the indicators to predict the inference loss.
+In this paper, We have a set of indicators $I=\{I_i, i=0,\cdots,n\}$, summarized in Table \ref{table:indicators}. For a given instruction dataset $D$, we compute the corresponding indicator values $I(D)=\{I_i(D), i=0,\cdots,n\}$.
+There exists a function $F$ such that the aforementioned model inference loss $L(M_{ft}, D_{eval})$ can be approximated using $F(I(D))$.
+
+The relationship between the finetuned model inference loss $L$ and these computed indicators can be formulated as in Equation~\ref{eq:ind}.
+
+\begin{equation}
+\label{eq:ind}
+\resizebox{0.9\textwidth}{!}{
+    \includegraphics[width=\columnwidth]{figs/equation.pdf}
+}
+\end{equation}
+
+In this paper, we assume that there exists a multivariate linear function of $I$ that is proportional to the logarithmic loss. Consequently, Equation~\ref{eq:ind} can be reparameterized as Equation~\ref{eq:linear}:
+\begin{equation}
+\label{eq:linear}
+\begin{aligned}
+\log L(M_{ft}, D_{eval})&\propto L_0+F\{I(D)\} \\
+&\propto L_0+\beta_0+\beta_1 I_1(D)+\beta_2 I_2(D)+\cdots+\beta_n I_n(D)+\epsilon
+\end{aligned}
+\end{equation}
+
+where $\beta_0$ denotes the linear constant, $\beta_i, i\in \{1,\cdots,n\}$ represents a sequence of linear coefficients, and $\epsilon$ refers to the random error term.
+
+To investigate the relationship between these indicators and the overall dataset quality, it becomes necessary to accumulate experimental results to estimate the unknown parameters $\beta_i, i\in \{0,\cdots,n\}$. 
+In this study, we employ the Least Squares method~\citep{bjorck1990least} to estimate the parameters in the multivariate function. The Least Squares method is a standard approach in regression analysis for the approximate solution of overdetermined systems. The technique minimizes the sum of the square residuals, thus providing the optimal fit between the observed and predicted data in terms of reducing the overall prediction error. Our experimental results and analysis are detailed in Section \ref{sec:results}.
+
+\subsection{Instruction Data Selector}
+\label{sec:method-blendsearch}
+During experimentation, we observe that with larger data size, model performance first gets better and then gets worse. After the data size grows to a certain level, model performance gets better again. Further analysis are provided in Section~\ref{sec:double-descent}. %This phenomenon indicates that an optimal point can exist in the first few examples with the highest \textsc{InstructMining} scores.
+This phenomenon indicates that there is an optimal point where better performance can be obtained with a smaller amount of data. Hence, searching for the best data size is important for finetuning a better language model.
+
+To achieve our objective, we employ \textsc{BlendSearch}~\citep{wang2021blendsearch} in Flaml~\citep{wang2021flaml} library to determine the optimal data size. \textsc{BlendSearch} effectively combines global and local optimizations by Bayesian
+optimization and different local search threads, making it efficient for searching cost-related hyperparameters and complex search spaces with local optima. In our context, we leverage a logarithmic uniform distribution to randomly sample the dataset size, treating the dataset size as the experiment's cost since the training time scales proportionally with the dataset size. The search goal is to minimize the loss on the evaluation set.
+
+
+
+
+\section{Experiment Settings}
+
+
+Our experiments mainly focus on two goals. The first goal is to estimate the unknown parameters in the proposed \textsc{InstructMining} rule. The second one is to evaluate and analyze the performance of \textsc{InstructMining} over varied finetuning scenarios.
+ Section~\ref{sec:exp-design-mul} elaborates rule estimation empirical study design. Section~\ref{sec:exp-dataset} details the datasets we use for conducting both estimation and evaluation experiment. Section~\ref{sec:exp-pro} elaborates the finetuning settings we used for estimation and evaluation.
+ 
+\subsection{Empirical Experiment Design}
+\label{sec:exp-design-mul}
+The general procedure of our rule estimation experiment is shown in Figure \ref{fig:procedure}. 
+To estimate the correlation between the evaluation loss and indicators $I$, we need to get datasets of different indicator values. To achieve this, we first select several commonly used datasets with different presumed quality levels and fuse them together with randomly sampled percentages to create finetune datasets. These sampled finetune datasets should encompass varying proportions of preassumed high quality and low quality examples. For each of these sampled datasets $D_i$, we compute its respective indicator values $I(D_i)$ and finetune a base language model $M$ using $D_i$. Following Equation~\ref{eq:quality}, the quality $Q_{D_i}$ for dataset $D_i$ is approximated using the evaluation loss of finetuned model $M_{ft,i}$ on a fair evaluation dataset $D_{eval}$.
+Following the collection of a range of results correlating $Q_{D_i}$ with $I(D_i)$, we undertake a statistical regression analysis to discern relationships within the dataset.
+\subsection{Datasets}
+\label{sec:exp-dataset}
+
+\noindent\textbf{Candidate datasets for rule fitting.}~~
+In order to create diverse training datasets, we collect data from various sources. This approach ensures that the datasets exhibit differences in quality and maintain diversity among sources. For this purpose, we have selected the following datasets as candidate datasets: \textsc{Alpaca} \citep{alpaca}, \textsc{Open-Assistant} \citep{köpf2023openassistant}, \textsc{StackExchange}, and \textsc{wikiHow}. Due to the varying formats, sizes, and distributions of different datasets, we have applied distinct processing procedures to each dataset. 
+Table \ref{table:train datasets overview} provides an overview of the candidate training datasets after preprocessing.
+As mentioned in section \ref{sec:exp-design-mul}, 
+we merged candidate training datasets, resulting in each dataset containing 1,000 instruction-output pairs.
+We generated a random number $r_i$ for each dataset and randomly selecting $1000*r_i/\sum_i{r_i}$ samples from each dataset for combination.
+Besides, considering the significant size difference between \textsc{Alpaca} and other candidate datasets, we randomly sampled 2,000 data examples from \textsc{Alpaca} to maintain scale consistency across all the candidate datasets.
+
+\begin{table}[t]
+\centering
+\resizebox{0.8\textwidth}{!}{
+    \begin{tabular}{ccccc}
+        \toprule
+        \textbf{Datasets} & \textbf{Sourced from} & \textbf{Size} & \textbf{Quality} & \textbf{Usage} \\
+        \midrule
+        { \textsc{Alpaca} } & { Generated w/ davinci } & { 52.0k } & {Normal} & {Est. Candidate}\\
+        { \textsc{Open-Assitant} } & { human-generated } & { 3.4k } & {Both} & {Est. Candidate}\\
+        { \textsc{StackExchange} }& { human-generated } & { 3.0k } & {High} & {Est. Candidate}\\
+        { \textsc{wikiHow} }& { human-generated } & { 2.0k } & {High} & {Est. Candidate}\\
+        { \textsc{Dolly} } & {human-generated} & {15.0k} & {Normal} & {Evaluation} \\
+        { \textsc{OpenOrca}} & {Generated w/ \textsc{GPT-4}} & { 1M } & {High} & {Evaluation}\\
+        { \textsc{OpenOrca}} & {Generated w/ \textsc{GPT-3.5}} & { 3M } & {Normal} & {Evaluation}\\
+        \bottomrule
+    \end{tabular}
+}
+\caption{Overview of datasets used during experiment.}
+\label{table:train datasets overview}
+\end{table}
+
+\noindent\textbf{Test set for rule fitting.}~~
+To address real-world requirements, we use the \textsc{self-instruct} dataset \cite{wang2022self}, which contains 252 instructions as rule-fitting test set. Considering evaluation efficiency, we randomly sampled 80 instructions from the whole dataset as our evaluation set. 
+In our study, we employed \texttt{gpt-4} from \textsc{OpenAI} to generate response for each instruction. 
+
+\noindent\textbf{Datasets for rule evaluation.}~~
+We further test \textsc{InstructMining} by using it to select high-quality examples from unseen datasets for finetuning large language models. During evaluation, we mainly use \textsc{OpenOrca} and \textsc{Dolly-15k} as the two unseen candidate datasets. For \textsc{OpenOrca}, given its extensive size, we randomly select 50,000 examples from \textsc{OpenOrca}-GPT3.5 and 50,000 examples from \textsc{OpenOrca}-GPT4 for experimentation (henceforce refered to as \textsc{OpenOrca}). 
+To make sure that our method does not overfit on the \textsc{self-instruct} evaluation set, we use the \texttt{gpt-4} labeled \textsc{mt-bench} dataset ~\citep{zheng2023judging} as an unseen evaluation set. To be noticed, since our candidate and evalation datasets does not include multi-turn examples, when evaluating on \textsc{mt-bench}, we only use the first turn of \textsc{mt-bench} dataset. 
+\subsection{Finetuning Settings}
+\label{sec:exp-pro}
+
+We conduct all finetuning experiments on the same base model \textsc{LLaMA-2}-7B~\citep{touvron2023llama}. All finetuning datasets during estimation phase are of the same size, 1,000 examples in each.
+We run model finetuning for 3 epochs, with per step batch size set to 128.
+We use Adam with $\beta_1=0.9, \beta_2=0.999$, and cosine learning rate scheduler starts from $2e-5$, decays to $0$. 
+Each model finetuned during estimation phase is evaluated on the evaluation dataset mentioned in section \ref{sec:exp-dataset}.
+We run all finetuning and evaluation experiments on a \textsc{Nvidia A100 80G} GPU cluster, with 8 A100 GPUs used in each experiment.
+
+
+
+\section{Experimental Results}
+
+\label{sec:results}
+
+\subsection{\textsc{InstructMining} Parameter Fit}
+Following Section~\ref{sec:exp-design-mul}, we randomly sampled 129 subsets from the entire data pool with different percentages. These subsets are then used to finetuned 129 corresponding language models. We collect the inference loss and indicator values for each subset. 
+To select the optimal rule, we first choose regression results with the highest $R^2$, and then prioritize the rule with the most significant $p$ values.
+ 
+Based on this result, we delineate our estimated evaluation function, which is articulated as Equation~\ref{eq:result}. Accordingly, reward score and unieval scores appear to be the most significant indicators in the quality rule. This estimation result reveals that $Und$ is in negative correlation with data quality, while the other three indicators are of positive correlation with data quality.
+\begin{equation}\label{eq:result}
+\begin{aligned}
+& Q_{D|M,S} \propto -{L(M_{ft}, D_{eval})}\\
+& \log L(M_{ft}, D_{eval}) \propto 0.0274-0.0078 Rew+0.4421*Und-0.3212*Nat-0.1520*Coh+\epsilon
+\end{aligned}
+\end{equation}
+ 
+\subsection{Quality-Guided Instruction Selection}
+We follow the estimated \textsc{InstructMining} rule in  Equation~\ref{eq:result} to select high quality examples from two unseen datasets, \textsc{OpenOrca}~\citep{OpenOrca} and \texttt{databricks-dolly-15k}~\footnote{https://www.databricks. 
+The experiments are all based on \textsc{LLaMA-2}-7B model. 
+We first elaborate our \textsc{BlendSearch} results. Then we present our evaluation results of various model finetuned during this process. 
+These models are first evaluated on two evaluation sets, \textsc{self-instruct} and \textsc{mt-bench}. 
+The searched best finetuned model is then assessed using \textsc{LLM-judge} and \textsc{OpenLLM} benchmarks. 
+
+\paragraph{BlendSearch results.}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figs/blendsearch.pdf}
+    \caption{\textsc{BlendSearch} results. The Loss is calculated on \textsc{mt-bench} evaluation set.}
+    \label{fig:blendsearch}
+\end{figure}
+In response to the performance decline-rise phenomenon with increasing training data, we conducte a \textsc{BlendSearch} within a range of data sizes from 512 to 10,000. Our prior empirical findings suggest that a maximum dataset size of 10,000 is sufficient for optimizing the data size.
+Figure~\ref{fig:blendsearch} details the search procedure from the perspective of steps.
+
+\paragraph{Loss results.}
+\begin{table}[t]
+\centering
+\resizebox{\textwidth}{!}{
+    \begin{tabular}{llccccc}
+        \toprule
+        \textbf{Dataset} & \textbf{Sampling Method} & \textbf{Total Time(min)} & \textbf{ Rule }  & \textbf{Data Size} & \textbf{Loss} & \textbf{Loss(\textsc{mt-bench})} \\\midrule
+        \multirow{6}{*}{OpenOrca} &  \multirow{3}{*}{\textit{Selected}} & 150(Rule)+15(Train) & -0.1347 & 1,000 & \textbf{0.958} & 0.711 \\
+        & & 150(Rule)+300(Train) & -0.0716 & 20,000 & 0.991 & 0.730 \\
+        & & 150(Rule)+1350(Train)& -0.0243 & 90,000 & 1.014 & 0.735  \\[5pt]
+         & \textbf{\textit{BlendSearch}} & \textbf{150(Rule)+35(Train)} & -0.1197 & \textbf{2,532} & 0.973 & \textbf{0.699} \\[5pt]
+        & \multirow{3}{*}{\textit{Random}} & 15(Train) & -0.0195 & 1,000 & 1.001 & 0.746 \\
+        & &300(Train) & -0.0180 & 20,000 & 0.991 & 0.751  \\
+        & &1350(Train) & -0.0176 & 90,000 & 1.010 & 0.763 \\\midrule
+        \multirow{6}{*}{Dolly} & \multirow{3}{*}{\textit{Selected}} & 22(Rule)+15(Train) & -0.0969 & 1,000 & 1.0429 & 0.7964  \\
+        & & 22(Rule)+75(Train) & -0.0622 & {5,000} & {1.0327} & {0.7847} \\
+        & & 22(Rule)+150(Train) & -0.0449 & 10,000 & 1.0371 & 0.8001 \\[5pt]
+        & \textbf{\textit{BlendSearch}} & \textbf{22(Rule)+35(Train)} & -0.0770 & \textbf{ 2,648 } & \textbf{ 1.0160 } & \textbf{ 0.7746 } \\[5pt]
+        & \multirow{3}{*}{\textit{Random}} & 15(Train) & -0.0286 & 1,000 & 1.0409 & 0.8215 \\
+        & & 75(Train) & -0.0289 & 5,000 & 1.0331 & 0.7910 \\
+        & & 150(Train) & -0.0293 & 10,000 & 1.0356 & 0.8086 \\
+        \bottomrule
+    \end{tabular}
+}
+\caption{Quality-guided instruction selection experiment result. Rule refers to the average of our quality rule score on the dataset. \textit{Selected} $k$ data refers to the top $k$ data examples with the highest quality scores. We calculate the inference loss values over two evaluation sets, \textsc{self-instruct} and \textsc{mt-bench}. Total time refers to the time spent during feature extraction, rule calculation, and finetuning using 8 GPUs. }
+\label{table:selection-results}
+\end{table}
+We first evaluate the finetuned models using inference loss on \textsc{self-instruct} and \textsc{mt-bench} dataset. Results are presented in Table~\ref{table:selection-results}. 
+According to the results, \textsc{InstructMining} can efficiently select high-quality data from various unseen datasets. Full data finetuning on \textsc{LLaMA-2}-7B with \textsc{OpenOrca} dataset can take up to 30 hours of 8 GPU time. With \textsc{InstructMining}, we are able to select the top 1,000 data examples in around two hours and training a better LLM within 15 minutes. This is also valid with \textsc{Dolly}. In addition, we discover that despite different sampling methods, the loss values on both \textsc{self-instruct} and \textsc{mt-bench} always tend to increase with larger data sizes. To study this phenomenon, we designed further experiments to investigate the relationship between finetuning data size and LLM performance. Details are provided in section~\ref{sec:double-descent}.
+
+\paragraph{LLM assessment.}
+\begin{figure}[h]
+\centering
+    \begin{subfigure}[b]{0.52\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/comparison.pdf}
+        \caption{\textsc{GPT-4} preference evaluated results. Tie means GPT-4 assesses two responses as equal. Lose means GPT-4 prefers the other model's response. Win means GPT-4 prefers \textsc{InstructMining} model response. } 
+        \label{fig:sub:gpt4-judge}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/fig1.pdf}
+        \caption{\textsc{GPT-4} assessed model ability result. We prepared tasks from different categories in \textsc{mt-bench}, and let GPT-4 to evaluate the generated response.}
+        \label{fig:sub:ability}
+    \end{subfigure}
+\caption{\textsc{LLM} assessed results.}
+\label{fig:llmjudge}
+\end{figure}
+We next compare our best model with other state-of-the-art models using \textsc{LLM-as-a-judge}. We let \textsc{GPT-4} choose the better answer between two responses generated by two different models. According to the results presented in Figure~\ref{fig:llmjudge}, our model is able to generate better or equal results in 64.67\% of the cases compared to \textsc{Vicuna-1.5}-7B. We also let \textsc{GPT-4} assess the model from different perspectives. According to Figure~\ref{fig:sub:ability}, our model significantly improves the original \textsc{LLaMA-2} model's ability in writing, roleplay, humanity, STEM, extraction and coding.
+
+\begin{table}[t]
+\centering
+\caption{\textsc{OpenLLM} benchmark scores. We use the same evaluation setting as \textsc{OpenLLM} leaderboard. For \textsc{ARC} benchmark, we use 25 few shots. For \textsc{HellaSwag}, we use 10 shots. For \textsc{MMLU}, we use 5 shots. For \textsc{TruthfulQA}, we use zero shot.}
+\resizebox{\textwidth}{!}{
+    \begin{tabular}{ccccccc}
+        \toprule
+        \textbf{Model} & \textbf{Data size} & \textbf{Avg. Metric}  & \textbf{ARC} & \textbf{HellaSwag} & \textbf{MMLU} & \textbf{TruthfulQA} \\\midrule
+        \textsc{InstructMining}-Selected & 10,000 & 58.65 & 	\textbf{56.66} & 79.77 & 49.89 & 48.26 \\
+        \textsc{InstructMining}-Selected & 40,000 & 59.25 & 	54.44 & \textbf{80.11} & 52.60 & 49.83 \\
+        \textsc{InstructMining}-Random & 10,000 & 58.74	 & 54.78 & 79.58 & 49.02 & \textbf{51.58} \\
+        \textsc{InstructMining}-Random & 40,000 & 58.95 &	54.78 & 79.89 & 51.16 & 49.95\\
+        \textsc{Vicuna-1.5}-7B & 125,000 & 57.99 & 53.24 & 77.39 & 51.03 & 50.33\\
+        \textsc{LLaMA-2}-7B-chat & 27,540+ & 56.34 & 52.90 & 78.55 & 48.32 & 45.57\\
+        \textsc{LLaMA-2}-7B & - & 54.32 & 53.07 & 78.59 & 46.87 & 38.76\\
+        \textsc{StableBeluga}-7B & 600,000 & \textbf{59.59} & 56.31 & 79.14 & \textbf{52.71} & 50.19 \\
+        \bottomrule
+    \end{tabular}
+}
+\label{table:open-llm}
+\end{table}
+
+\textbf{OpenLLM benchmark results.}
+Besides, we further test our finetuned models on the widely used \textsc{OpenLLM} benchmark~\citep{eval-harness}. \textsc{OpenLLM} benchmark is composed of four widely used general question answering benchmarks, \textsc{ARC}~\citep{clark2018think}, \textsc{HellaSwag}~\citep{zellers2019hellaswag}, \textsc{MMLU}~\citep{hendrycks2020measuring} and \textsc{TruthfulQA}~\citep{lin2021truthfulqa}. During experimentation, we align our inference settings with huggingface \textsc{OpenLLM} leaderboard settings. Results are available in Table~\ref{table:open-llm}. Notably, \textsc{InstructMining} finetuned models can achieve similar performance compared to \textsc{StableBeluga}-7B, which is the state-of-art \textsc{LLaMA-2}-7B based model on \textsc{OpenLLM} leaderboard. Furthermore, \textsc{InstructMining} only requires around two hours of indicator inference and ten hours of finetuning to get a comparably strong language model.
+We also discover that, when evaluating with some metrics, larger data does not always promise better performance. For instance, accuracy on \textsc{ARC} tends to decrease when the data size increases. Further analysis of this phenomenon is provided in section~\ref{sec:double-descent}.
+\subsection{Ablation Study}
+We further conduct ablation experiments to study the influence of every indicator in \textsc{InstructMining}. To do this, we first remove one indicator from the current rule and estimate a new rule using the other three indicators, based on the original random experiment results. Then, we use this new rule to select 1,000 data examples with the highest scores. These 1,000 data examples are later used to finetune the base language model, \textsc{LLaMA-2}-7B, for three epochs. We present ablation study result in Table~\ref{table:ablation-results}. Accordingly, $Rew$ appears to be the most important indicator among the four. Without $Rew$ as one of the rule indicators, the estimated rule results in an increase of 0.03 in \textsc{self-instruct} inference loss and 0.051 in \textsc{mt-bench} inference loss. 
+\begin{table}[t]
+\caption{Ablation study result. All results are compared with the original \textsc{InstructMining} rule. The final row refers to unfiltered randomly selected data.}
+\centering
+    \begin{tabular}{cccccc}
+        \toprule
+        \textbf{$Rew$} & \textbf{$Und$}  & \textbf{$Nat$} & \textbf{$Coh$} & \textbf{Loss(\textsc{self-instruct})} & \textbf{Loss(\textsc{mt-bench})}\\\midrule
+        \cmark & \cmark & \cmark & \cmark & 0.958 & 0.711 \\
+        \xmark & \cmark & \cmark & \cmark & 0.988 ($\uparrow$0.030) & 0.762 ($\uparrow$0.051) \\
+        \cmark & \xmark & \cmark & \cmark & 0.989 ($\uparrow$0.031) & 0.746 ($\uparrow$0.035) \\
+        \cmark & \cmark & \xmark & \cmark & 0.977 ($\uparrow$0.019) & 0.742 ($\uparrow$0.031)\\
+        \cmark & \cmark & \cmark & \xmark & 0.969 ($\uparrow$0.011) & 0.742 ($\uparrow$0.031) \\
+        \xmark & \xmark & \xmark & \xmark & 1.001($\uparrow$0.043) & 0.746($\uparrow$0.035) \\
+        \bottomrule
+    \end{tabular}
+\label{table:ablation-results}
+\end{table}
+
+
+
+\section{Analysis}
+
+\subsection{Double Descent in Generative Language Models}
+\label{sec:double-descent}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figs/doubledescent.pdf}
+    \caption{Double descent in generative language models. 
+    Models are evaluated using four metrics: loss on \textsc{self-instruct}, loss on \textsc{mt-bench}, \textsc{OpenLLM} scores and \textsc{MMLU} scores..}
+    \label{fig:doubledescent}
+\end{figure}
+In this section, we present further experimental findings on \texttt{OpenOrca} dataset. In previous experiments, we find out that a language model's performance can be influenced by both finetuning data quality and quantity. When data quantity increases, generative language models' performance does not promise to become better. This phenomenon suggests a balance between data quantity and data quality. 
+Results are presented in Figure~\ref{fig:doubledescent}. 
+This reveals some interesting emergent phenomena when finetuning large language models. We detail the observed phenomena below.
+\begin{phen}\label{phe:loss} \textbf{Non-monotonicity exists in language model performance.} As we increase the training data size, language model performance first becomes better then gets worse. When data size increases to a certain level, performance becomes better again.
+\end{phen}
+Based on Figure~\ref{fig:doubledescent}, we observe that the performance first improves as the training data size grows. Then, after the data size grows to around 10,000, loss begins to increase, meaning that language model performance worsens. Finally, as data size continues to grow, language model's performance improves. This phenomenon is similar to the double descent phenomenon~\citep{nakkiran2021deep} that non-monotonicity exists with varying numbers of training samples. In our experiment, we observe that this phenomenon not only exists in vanilla language model training but also in large generative language model finetuning.
+
+\begin{phen}\textbf{Balance point exists between randomly selected and quality selected data.} As data size grows, data quality becomes a less important factor for model performance.  
+\end{phen}
+Given Figure~\ref{fig:doubledescent}, we find out that when data size grows to a certain point, the performance curve of selected data will always intersect with the random one. Besides, the distance between the two decreases as the data size increases. This phenomenon indicates that data quality measure can help improve model performance at first. However, data quality becomes less important when data size grows to a certain level.
+\subsection{Robustness}
+To further explore the effectiveness of \textsc{InstructMining}, we evaluate it across three different finetuning settings: %We conduct experiments on three settings:
+\textit{(1) Different base models.} We change the original base model \textsc{LLaMA-2}-7B into \textsc{LLaMA-1}-7B to test whether our method is scalable to other models.
+\textit{(2) Different model sizes.} We change the original 7B model size into 13B to test whether our method is scalable to other model sizes.
+\textit{(3) Parameter efficient settings.} \textsc{LoRA}~\citep{hu2021lora}, a parameter efficient method, is widely used when finetuning a large language model to help save GPU memory usage. We also test our method with \textsc{LoRA} settings to see whether \textsc{InstructMining} is scalable to parameter efficient finetuning.
+Results are presented in Table~\ref{tab:robustness}. As the data shows, \textsc{InstructMining} rule can be applied to various base models, model sizes and parameter efficient settings.
+
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Base Model} & \textbf{Model Size} & \textbf{LoRA} & \textbf{Sampling Method} & \textbf{Loss(\textsc{self-instruct})} & \textbf{\textsc{Loss(mt-bench)}} \\\midrule
+        \multirow{2}{*}{\textsc{LLaMA-2}} &  \multirow{2}{*}{13B} & \multirow{2}{*}{\xmark} & \textit{Selected} & \textbf{0.8748}	& \textbf{0.6531} \\
+        & &  & \textit{Random} &  0.8983 & 0.6589 \\\midrule
+        \multirow{2}{*}{\textsc{LLaMA-1}} & \multirow{2}{*}{7B} & \multirow{2}{*}{\xmark} & \textit{Selected} & \textbf{1.013} & \textbf{0.798}   \\
+        &  & & \textit{Random} & 1.056 & 0.844 \\\midrule
+        \multirow{2}{*}{\textsc{LLaMA-2}} & \multirow{2}{*}{7B} & \multirow{2}{*}{\cmark} & \textit{Selected} & \textbf{1.0698} &	\textbf{0.8624}  \\
+        &  & & \textit{Random} & 1.0700 & 0.8631 \\
+        \bottomrule
+    \end{tabular}
+}
+\caption{Robustness test result. 
+}
+\label{tab:robustness}
+\end{table}
+
+
+\section{Conclusion}
+
+In this paper, we propose high-quality example selection method. Experiments have been conducted to estimate this rule's parameter and prove that our evaluation rule is valid and scalable to other finetuning settings. Besides, we present our observation of the double descent phenomenon in langauge model finetuning. Based on this finding, we further applied \textsc{BlendSearch} to search for the best subset. 
+Results show that \textsc{InstructMining} rule is valid and scalable.
+
+\newpage
+
+
+
+

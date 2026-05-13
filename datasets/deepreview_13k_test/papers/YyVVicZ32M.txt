@@ -1,0 +1,358 @@
+\title{Permute-and-Flip: An optimally stable and watermarkable decoder for LLMs}
+
+\begin{abstract}
+In this paper, we propose a new decoding method called Permute-and-Flip (PF) decoder. It enjoys stability properties similar to the standard sampling decoder, but is provably up to 2x better in its quality-stability tradeoff than sampling and never worse than any other decoder. We also design a cryptographic watermarking scheme analogous to Aaronson (2023)'s Gumbel watermark, but naturally tailored for PF decoder. The watermarking scheme does not change the distribution to sample, while allowing arbitrarily low false positive rate and high recall whenever the generated text has high entropy. Our experiments show that the PF decoder (and its watermarked counterpart) significantly outperform(s) naive sampling (and its Gumbel watermarked counterpart) in terms of perplexity, while retaining the same stability (and detectability), hence making it a promising new approach for LLM decoding. We provide the code in the supplementary materials.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) (OpenAI, 2022; 2023b; Bai et al., 2022; Touvron et al., 2023) have become increasingly popular in recent years due to their ability to generate human-like text and solve many tasks through a natural chatbot interface.  
+
+A language model predicts the next word in a sentence using a real-value function $u(\cdot;$ prompt, prefix) : $\mathcal{V}\to\mathbb{R}$ , known as logits, which encodes the model’s preferences on which word to choose. Here $\nu$ is the vocabulary space (typically a large discrete set of words); the “prompt” describes the task of interest; and “prefix” includes all preceding words that have been generated so far.  
+
+A language model decoder refers to a possibly randomized function that takes a prompt text $x$ , API access to the logits function as input, and outputs a sentence $y_{1:n}$ .  
+
+The main thrust of this paper is to introduce a new decoder, termed Permute-and-Flip decoding, work out some of its intriguing properties with an application to watermarking LLM text, and hopefully convince readers that it deserves a shot at your next LLM application.  
+
+
+
+\section{2 PROBLEM SETUP AND SUMMARY OF RESULTS  }
+
+
+Before diving in, let’s set up the stage with a quick tour of existing decoding methods and have a brief look into how a language model decoder can be evaluated.  
+
+Popular existing decoding methods fall into three categories: (1) Planning-based methods such as beam search that aims at maximizing the sequence likelihood; (2) sampling-based methods that recursively sample from the next-word distribution, e.g., the soft(arg)max transform of the logits  
+
+$$
+\mathbf{Softmax\sampling:\}y_{t}\sim p(y)=\frac{e^{u(y|x,y_{1:t-1})/T}}{\sum_{\tilde{y}}e^{u(\tilde{y}|x,y_{1:t-1})/T}}
+$$  
+
+where $T$ is the temperature parameter; and (3) greedy methods such as greedy decoding that simply outputs $y_{t}\,=\,\arg\operatorname*{max}_{y\in\mathcal{V}}u(y|x,y_{1:t-1})$ as well as its Top $p$ (Holtzman et al., 2019) and Top $k$ sampling variants that interpolate greedy and sampling methods.  
+
+Performance metrics. How do we compare different decoding methods? More generally, how do we evaluate LLM-generated text? These are questions far from being settled. Naturally, if there is a (possibly task-dependent) performance metric $U_{x}:\mathcal{V}^{n}\to\mathbb{R}$ one can define, then the optimal decoder would be the one that outputs $y_{1:n}^{*}=\arg\operatorname*{max}_{y_{1:n}\in\mathcal{V}^{n}}U_{x}(y_{1:n})$ . Often $U_{x}$ is instantiated to be the sequence likelihood $\begin{array}{r}{\sum_{t=1}^{n}\log p(y_{t}|x,y_{1:t-1})}\end{array}$ which is equal to $\textstyle\sum_{t=1}^{n}u_{t}(y_{t})$ .  
+
+Recent works (Ippolito et al., 2019; Wiher et al., 2022), however, report that strategies that aim at maximizing sequence likelihood often result in texts that are more repetitive and less effective in some downstream tasks than those from the sampling-based methods (Holtzman et al., 2019). Depending on what the task is, there is not a one-size-ftis-all performance metric, therefore is no single decoding method that works well for all tasks.  
+
+For the moment, let us stash the disputes on how to best evaluate an LLM-generated text and focus on designing methods that maximize any user-specified utility function. In fact, we will also give up on solving the sequence-level utility maximization problem1 and simply maximize a per-step utility function $u_{t}:\mathcal{V}\to\mathbb{R}$ .  
+
+$u_{t}$ can simply be the logits function that LLMs output, which may have already accounted for potential future utility (like the $Q$ function in reinforcement learning) since the transformer-based language model had access to future texts during pre-training. Or $u_{t}$ can be explicitly augmented with structure-inducing regularizers such as a lookahead heuristic as in $\mathbf{A}^{*}$ decoding (Lu et al., 2021), a retrieval-based term for fact-checking (Lewis et al., 2020), or an entropy bonus for promoting diversity (Meister et al., 2020).  
+
+Our goal is thus to construct a possibly randomized algorithm $\boldsymbol{\mathcal{A}}$ that takes $u_{t}$ as an input and outputs $y_{t}\in\mathcal{V}$ that aims at maximizing $\mathbb{E}_{y_{t}\sim\mathcal{A}_{u_{t}}}[u_{t}(y_{t})]$ as much as possible. In the remainder of the paper, we will simply take $u_{t}$ as “logits” for a concrete exposition — all results are valid when $u_{t}$ is instantiated otherwise.  
+
+Other constraints / consideration. Why doesn’t the trivial greedy decoder work? That’s because there are other considerations besides text quality when selecting LLM decoders. For example, computational efficiency and latency are hugely important, since each API call to the logits function is costly. The diversity of the generated text is also important, especially for creative tasks.  
+
+Moreover, the decoding procedure should be watermarkable (Aaronson, 2023; Kirchenbauer et al., 2023; Zhao et al., 2023; Kuditipudi et al., 2023) in the sense that one should be able to inject subtle statistical signals that can be retrieved when given a secret key, to prove that the text is generated by this particular language model. Being watermarkable prevents the LLM from being used for malicious purposes such as scams (Weidinger et al., 2021), fake news (Zellers et al., 2019), and plagiarism (Stokel-Walker, 2022).  
+
+In addition to the above, one may also hope the decoding algorithm to be stable against small perturbations to the logits. Specifically,  
+
+Definition 2.1 (Stability). We say a decoding algorithm $\boldsymbol{\mathcal{A}}$ is $L$ -stable if for any prompt $x$ , prefix $y{\leq}t$ , and for any perturbed $\tilde{u}$ such that $\|\tilde{u}-u\|_{\infty}\leq\delta$ , the log-probability ratio satisfies  
+
+$$
+\left|\log\left\{\frac{p_{\mathcal{A}(\tilde{u}(\cdot|x,y_{\leq t}))}(y)}{p_{\mathcal{A}(u(\cdot|x,y_{\leq t}))}(y)}\right\}\right|\leq L\delta\;\;\forall y\in\mathcal{V}.
+$$  
+
+The stability helps to avoid catastrophic failure in the scenarios where the logits may be subject to data poisoning (Zhang et al., 2021; Lin et al., 2021) or jailbreaking attacks (Zhang et al., 2023; Zhao et al., 2024b). Furthermore, stability implies an intuitive notion of diversity, suggesting that tokens with similar logits should have comparable probabilities of being selected.  
+
+Inspecting the decoding methods along the aforementioned dimensions, we notice that planning-based methods fail to be computationally efficient. While greedy decoding is efficient and has relatively low perplexity, its generated texts are neither diverse nor watermarkable (at least not using existing techniques). The sampling-based methods, however, are both watermarkable and diverse. In addition, softmax sampling is known to be 2-stable, while the others that we have discussed are not stable.  
+
+Table 1: Comparison of different decoding methods against five desiderata.   
+Fact 2.2. Softmax sampling decoding using equation 1 with temperature $T$ satisfies $(2/T)$ -stability.   
+
+![](images/0301fdf399fc7984712a0ada9942eb2a1ac7021170aed2f2e426e76ea21f0b4f.jpg)  
+
+Proof. The result is implied by the differential privacy guarantee of exponential mechanism (McSherry & Talwar, 2007, Theorem 6). 口  
+
+The pros and cons of different decoding methods are summarized in Table 1. From the table, we can   
+see that there is a clear tradeoff between minimizing perplexity and preserving other properties. In   
+particular, softmax sampling is the only method that checks all boxes, and the only one that is stable   
+among existing decoders. This observation begs the following research question: Is there a decoding   
+method that is as stable as softmax sampling, but has lower perplexity?   
+In this paper, we answer this question affirmatively by bringing in a technique called Permute-and-Flip   
+sampling. Our contributions are fourfold.   
+1. We introduce Permute-and-Flip decoding — a new decoding algorithm for language models based on recent development in a very different context (McKenna & Sheldon, 2020).   
+2. We demonstrate that existing results from McKenna & Sheldon (2020) already imply that: • Permute-and-Flip decoding is provably stable. • The stability-perplexity tradeoff of the PF decoding is Pareto-optimal. In particular, when compared to softmax sampling, PF decoding has up to $2\mathbf{x}$ smaller expected suboptimality while having the same stability parameter $L$ .   
+3. We designed an analog of Aaronson (2023)’s Gumbel-Watermark for PF decoder, called the PF watermark. We show that the watermarked PF decoder samples from a distribution that is computationally indistinguishable from the non-watermarked PF decoder, and the detection procedure has precisely controlled false positive rate (FPR) and high power in identifying watermarked texts.   
+4. We empirically demonstrate that on open-generation tasks, PF watermark achieves the best balance of the highest detection accuracy and lowest perplexity compared to the baselines.   
+Overall, our proposed permute-and-filp decoding method provides a promising approach to balancing   
+the tradeoff between perplexity and stability in LLM decoding while also admitting watermarking   
+capabilities.   
+Related work and novelty. PF sampling was invented in the differential privacy (DP) literature   
+(McKenna & Sheldon, 2020). Its stability properties are well-understood. The stability of Softmax   
+sampling is also well-known (McSherry & Talwar, 2007). Our contribution is in applying this method   
+to LLM decoding and connecting these known theoretical results to the broader ML audience. To   
+our knowledge, the PF watermark is new to this paper. The design of the watermark leverages the   
+Report-Noisy-Max interpretation of the PF sampling (Ding et al., 2021) which allows a similar   
+pseudo-random function like the work of Aaronson (2023) to be applied. A more thorough discussion   
+  
+
+
+
+\section{3 PERMUTE-AND-FLIP DECODING ITS PROPERTIES  }
+
+
+The Permute-and-Flip decoding iteratively generates the next token by a simple procedure that uses only the logits. It involves first randomly permuting the vocabulary, then filpping a sequence of biased coins according to the permuted sequence until the first “head” is seen (see Algorithm 1).  
+
+Algorithm 1 Permute and Flip (PF) Decoding   
+1: Input: prompt $x$ , language model $\mathcal{M}$ , temperature $T$ .   
+2: for $t=1,2,\cdot\cdot\cdot$ do   
+3: Logits $u_{t}\gets\mathcal{M}([x,y_{1:t-1}])$ .   
+4: Find $u_{t}^{*}\gets\operatorname*{max}_{y\in\mathcal{V}}u_{t}(y)$ .   
+5: Permute : Shuffle the vocabulary $\nu$ into $\tilde{\nu}$ .   
+6: for $y\in\tilde{\mathcal{V}}$ do   
+7: Flip $:$ Draw $Z\sim$ Bernoulli $\begin{array}{r}{\left(\exp\left(\frac{u_{t}\left(y\right)-u_{t}^{*}}{T}\right)\right)}\end{array}$   
+8: if $Z=1$ , then assign $y_{t}\gets y$ and break.   
+9: end for   
+10: end for   
+11: Output: Generated sequence $y=[y_{1},...,y_{n}]$ .  
+
+$$
+p(y)/p(y^{*})=\exp\left((u_{t}(y)-u_{t}(y^{*}))/T\right).
+$$  
+
+PF sampling was initially proposed in McKenna & Sheldon (2020) as a differentially private selection mechanism that has better utility than the more well-known exponential mechanism (McSherry & Talwar, 2007). McKenna & Sheldon (2020) also derived a plethora of theoretical properties of the PF sampling. The following theorem summarizes these results in the language of LLM decoding.  
+
+Theorem 3.1. Let the logits function be u and $u^{*}=\operatorname*{max}_{y\in\mathcal{V}}u(y)$ . Let $\mathrm{PF}(u)$ be the distribution of $P F$ -sampling, and Softmax $(u)$ be the distribution in equation $^{\,l}$ , both with temperature parameter $T$ . The following statements are true.  
+
+1. (Same stability) $P F$ -Sampling is $(2/T)$ -stable.  
+
+2. (Nearly greedy) $P F$ -sampling obeys,  
+
+$$
+\begin{array}{r}{\mathbb{E}_{y\sim\mathrm{PF}(u)}[u(y)]\geq u^{*}-T\log|\nu|.}\end{array}
+$$  
+
+3. (“Never worse”) For the same $T$ , $P F$ -sampling is never worse than Softmax-sampling.  
+
+$$
+\begin{array}{r}{\mathbb{E}_{y\sim\mathrm{PF}(u)}[u(y)]\ge\mathbb{E}_{y\sim\mathrm{Softmax}(u)}[u(y)]}\end{array}
+$$  
+
+4. (“Up to $\scriptstyle2x$ better”) There exists logits u such that $P F$ -sampling is $2x$ smaller in terms of suboptimality,  
+
+$$
+\mathbb{E}_{y\sim\mathrm{PF}(u)}[u^{*}-u(y)]\leq\frac{1}{2}\mathbb{E}_{y\sim\mathrm{Softmax}(u)}[u^{*}-u(y)].
+$$  
+
+5. (Optimal stability-perplexity tradeoff) For any decoder $P$ that is $2/T$ -stable, if there exists u such that  
+
+$$
+\mathbb{E}_{y\sim P(u)}[u(y)]>\mathbb{E}_{y\sim\mathrm{PF}(u)}[u(y)]
+$$  
+
+then there must be another $\tilde{u}$ such that  
+
+$$
+\begin{array}{r}{\mathbb{E}_{y\sim P(\tilde{u})}[\tilde{u}(y)]<\mathbb{E}_{y\sim\operatorname{PF}(\tilde{u})}[\tilde{u}(y)].}\end{array}
+$$  
+
+Proof. The theorem follows directly from McKenna & Sheldon (2020), specifically Theorem 1, Corollary 1, Theorem 2, Proposition 4, and Proposition 6. 口  
+
+The first statement shows that the PF decoder enjoys exactly the same stability parameter as in Fact 2.2. The second statement provides a worst-case bound on how far PF-sampling is away from greedy-decoding as a function of the temperature $T$ in terms of the likelihood achieved. The third and fourth statements show that PF-sampling is always “more greedy” than softmax-sampling. The last statement shows that PFsampling is not dominated by any other decoder that is equally stable (as in Definition 2.1), thus Pareto optimal. These results provide strong justification on  
+
+![](images/cd45e84044df7efd03b505b2f4ce244e9ef86b9cb528a78cd83a72bb8b59fa53.jpg)  
+
+Figure 1: Comparing PF decoder vs Softmax decoder using Example 3.2.  
+
+the superiority of the permute-and-flip decoder over the standard softmax sampling in minimizing perplexity.  
+
+Let’s consider a simple example to compare PF decoder and Softmax decoder.  
+
+Example 3.2. Let the $|\nu|=2$ and the corresponding logits be $[\Delta,0]$ for gap $\Delta\,>\,0$ . Softmax decoder chooses the suboptimal token with probability $1/(1+e^{\Delta/T})$ , while PF decoder chooses it w.p. $1/(2e^{\Delta/T})$ .  
+
+Since $1/(1+x)>1/(2x)$ for all $x>1$ , the probability that the suboptimal token is chosen in PF sampling is strictly smaller than that of Softmax sampling. As shown in Figure 1, on the left, we fix the Gap $\Delta=3.0$ and vary the temperature $T$ . On the right, we fix $T=1.0$ and vary $\Delta$ . PF beats Softmax in all cases.  
+
+
+
+\section{4 REPORT-NOISY-MAX AND WATERMARKING  }
+
+
+Next, we turn to the well-motivated problem of watermarking LLM generated text. The watermarking problem aims at embedding a secret message in the generated text that (essentially) reads “Beware! I am written by an AI!”.  
+
+The hope is that this message can be seen by anyone who has access to a secret key, while ensuring that the watermarked version of the LLM generates text that has almost the same distribution as (or at least very similar) to the original LLM.  
+
+More formally, a watermarking scheme includes a “Watermark” function that injects the watermark and a “Detect” function that takes a suspect text sequence $y_{1:n}$ as input and outputs a prediction of 1 (“It is watermarked!”) or 0 (“It is not!”).  
+
+A wrong accusation of non-watermarked text as watermarked is called a false positive. A failure to detect a watermarked text is called a false negative. The performance of a watermark is measured by its detection power (i.e., 1−false negative rate) at a given false positive rate.  
+
+There are many other necessary properties for a watermarking scheme to be useful, such as lowoverhead, model-agnostic detection, and resilience to edits and other evasion attacks. We refer readers to the slide deck of Aaronson (2023) and the related work section of (Zhao et al., 2024a) for a review of these desiderata and known results.  
+
+Among the recent attempts, two popular watermarking schemes perform satisfactorily on all the above criteria.  
+
+Gumbel Watermark (Aaronson, 2023) that uses a “traceable” pseudo-random softmax sampling when generating the next word.   
+Green-Red Watermark (Kirchenbauer et al., 2023) that randomly splits the vocabulary into Green and Red then slightly increases the logits for green tokens.  
+
+Both of them determine their pseudo-random seeds chosen according to the $m$ preceding tokens of the current token being generated. We will focus on explaining the Gumbel watermark as it is more closely related to our approach.  
+
+Aaronson (2023)’s Gumbel watermark. The key idea of the Gumbel watermark leverages the “Gumbel-Max Trick”, which states that:  
+
+Fact 4.1 (Gumbel, 1948). The softmax sampling in equation $^{\,l}$ is equivalent to the following procedure  
+
+$$
+y_{t}=\underset{y\in\mathcal{V}}{\arg\operatorname*{max}}\,\frac{u_{t}(y)}{T}+G_{t}(y)
+$$  
+
+where $G_{t}(y)\sim G u m b e l(0,1)$ i.i.d for each $t,y$ .  
+
+Gumbel noise can be generated using a uniform r.v.  
+
+$$
+\operatorname{Gumbel}(0,1)\sim-\log\left(\log(1/\mathrm{Uniform}([0,1]))\right).
+$$  
+
+So given a random vector $r_{t}\sim(\mathrm{Uniform}([0,1]))^{|\mathcal{V}|}$ , we can write $G_{t}(y)=-\log(-\log(r_{t}(y)))$ .  
+
+The Watermark stage for the Gumbel-watermark essentially replaces $\mathrm{Uniform}([0,1])$ with a pseudorandom function $\bar{r_{t}}(y)\,=\,F_{y_{t-m:t-1},\mathsf{k}}(y)$ . Given the secret key $\mathsf{k}$ , the pseudo-random function is a deterministic function with range $[0,1]^{\nu}$ , but over the distribution of the secret key $\mathsf{k},$ , $r_{t}$ is computationally indistinguishable from sampled from truly i.i.d. uniform distribution, which ensures that the distribution of $y_{t}$ in the watermarked model is computationally indistinguishable to the unwatermarked distribution equation 1.  
+
+At Detect phase of the the Gumbel watermark, the auditor who has access to the key $\mathsf{k}$ may compute  
+
+$$
+\operatorname{TestScore}_{\operatorname{Gumbel}}(y_{1:n})=\sum_{t=m+1}^{n}-\log(1-r_{t}(y_{t})).
+$$  
+
+If $y_{1:n}$ is not generated from the watermarked model, then the test statistic is a sum of exponential random variable thus $\mathbb{E}[\mathrm{TestScore}(y_{1:n})]=n-m$ . Meanwhile, if $y_{1:n}$ is generated by the Gumbel watermarked model,  
+
+$$
+\begin{array}{r l}&{\mathbb{E}[\mathrm{TestScore}(y_{1:n})]=\displaystyle\sum_{t=m+1}^{n}\mathbb{E}\left[\sum_{y\in\mathcal{V}}p_{t}(y)H_{\frac{1}{p_{t}(y)}}\right]}\\ &{\ge(n-m)+\left(\frac{\pi^{2}}{6}-1\right)\displaystyle\sum_{t=m+1}^{n}\mathbb{E}\left[\mathrm{Entropy}[p_{t}(\cdot)]\right].}\end{array}
+$$  
+
+where $p_{t}\ :=\ \mathrm{Softmax}(u_{t})$ , $\begin{array}{r}{H_{\alpha}~:=~\int_{0}^{\alpha}\frac{1-x^{\alpha}}{1-x}d x}\end{array}$ is Euler’s Harmonic number and Entropy denotes the standard Shannon entropy (in nats) for a discrete distribution, i.e., Entropy $\begin{array}{r}{-\sum_{y\in\mathcal{V}}p(y)\log p(y)}\end{array}$ .  
+
+Permute-and-Flip as ReportNoisyMax. It turns out that the Permute-and-Flip sampling has a similar equivalent Report-Noisy-Max form. Instead of Gumbel noise, it is the exponential noise that are added to the logits. This less-known fact is due to Ding et al. (2021)  
+
+Fact 4.2 (Ding et al., 2021, Theorem 5). Permute-and-Flip Sampling in Algorithm 1 with parameter $T$ is equivalent to  
+
+$$
+y_{t}=\underset{y\in\mathcal{V}}{\arg\operatorname*{max}}\,\frac{u_{t}(y)}{T}+E_{t}(y).
+$$  
+
+where $E_{t}(y)\sim E x p o n e n t i a l(1)$ i.i.d. for each $t,y$ .  
+
+Leveraging this fact, in the remainder of the section, we develop a watermarking scheme for ReportNoisyMax that is analogous to the Gumbel-watermark.  
+
+Permute-and-Flip watermark. The natural idea is to replace the exponential noise $E_{t}(y)$ with a pseudo-random version that depends on a secret key and a prefix with length $m$ . Observe that $\mathrm{Exponential}(1)\sim-\log(\mathrm{Uniform}([0,1]))$ , thus the standard pseudo-random function that generates uniform random variables can be used. In the detection phase, we compute:  
+
+$$
+\mathrm{TestScore}_{\mathrm{PF}}(y_{1:n})=\sum_{t=m+1}^{n}-\log(r_{t}(y_{t})).
+$$  
+
+Note that this is a simple change of sign of $r_{t}(y_{t})$ comparing to the test score of the Gumbel watermark.   
+Detailed pseudo-code for how the watermark works are given in Algorithm 2 and Algorithm 3.  
+
+Algorithm 2 PF watermarking: Watermark  
+
+1: Preparation: Randomly sample a watermark key k   
+2: Input: Prompt $_x$ , language model $\mathcal{M}$ , pseudo-random function $F$ , watermark key $\mathsf{k}$ , temperature $T$   
+3: for $t=1,2,\cdot\cdot\cdot$ do   
+4: Compute logits: $u_{t}\gets\mathcal{M}([x,y_{1:t-1}])$   
+5: Generate a pseudo-random vector $r_{t}(\cdot)$ using $r_{t}(y):=F_{y_{t-m:t-1},\mathsf{k}}(y)$ for $y\in\mathcal{V}$   
+6: Select the next token $y_{t}$ using  
+
+$$
+y_{t}=\mathop{\arg\operatorname*{max}}_{y\in\mathcal{V}}\left(\frac{u_{t}(y)}{T}-\log r_{t}(y)\right)
+$$  
+
+7: end for  
+
+8: Output: Watermarked sequence $y=[y_{1},...,y_{n}]$  
+
+1: Input: Suspect text $y_{1:n}$ , watermark key k, pseudo-random function $F$ , target false positive rate $\alpha$   
+2: Output: Binary decision (1 if text is watermarked, 0 otherwise)   
+3: Calculate the cumulative score  
+
+$$
+\mathrm{TestScore}\mathrm{PF}\bigl(y_{1:n}\bigr)=\sum_{t=m+1}^{n}-\log(r_{t}(y_{t}))
+$$  
+
+where $r_{t}(y)=F_{y_{t-m:t-1},\mathsf{k}}(y)$ 4: if TestScore $>\mathrm{CDF}_{\mathrm{Gamma}(n-m,1)}^{-1}(1-\alpha)$ then return 1, i.e., “The suspect text is watermarked.” 5: else return 0, i.e., “The suspect text is not watermarked.”  
+
+Theorem 4.3. Assume the pseudo-randomness is perfect2, i.e., $F_{w_{1:m},\mathbf k}(y)\sim\mathrm{Uniform}([0,1])$ i.i.d.   
+$\forall[w_{1:m},y]\in\nu^{m+1}$ .  
+
+The following are true about $P F$ watermark scheme.  
+
+$I.\ I f y_{1:n}$ is statistically independent to the secret key k, $\mathbb{E}\left[{\mathrm{TestScore}}_{\mathrm{PF}}(y_{1:n})|y_{1:n}\right]=n-m.$  
+
+2. If in addition, all $m$ -grams in $y_{1:n}$ are unique, then conditioning on $y_{1:n}$ ,  
+
+$$
+\begin{array}{r}{\mathrm{TestScore}_{\mathrm{PF}}(y_{1:n})\sim\mathrm{Gamma}(n-m,1).}\end{array}
+$$  
+
+The choice FG−a1mma(n−m,1)(1 −α) ensures the false positive rate in Algorithm 3 is equal to $\alpha$ .  
+
+3. Assume $y_{1:n}$ is drawn from Algorithm 2, then  
+
+$$
+\mathbb{E}\left[\mathrm{TestScorepFr}(y_{1:n})\right]=\sum_{t=m+1}^{n}\mathbb{E}\left[\sum_{y\in\nu}\int_{0}^{e^{u_{t}(y)-u_{t}^{*}}}\left(-\log r\cdot\prod_{y^{\prime}\in\nu,y^{\prime}\ne y}\left(1-r\cdot e^{u_{t}(y^{\prime})-u_{t}(y)}\right)\right)d r\right].
+$$  
+
+The above expression in equation 8 may appear messy, but it is the exact calculation and captures the entropy of the distribution PF-induces for a given $u_{t}$ . To see this, let us instantiate the bound for two special cases that admit more explicit forms.  
+
+Example 4.4. When Softmax $\left(u_{t}\right)$ is $1/k$ for an arbitrary subset of $k$ tokens and 0 for others,  
+
+$$
+\mathbb{E}[-\log(r_{t}(y_{t}))]:=H_{k}=1+1/2+...+1/k\approx\log k.
+$$  
+
+Specifically, when $k=|\nu|$ this is the uniform distribution, equation $8\asymp n\log|\mathcal{V}|$ while when $k=1$ , the sequence is completely deterministic (e.g., when the LLM is asked to recite the “Declaration of Independence”), then we get equation $8=n-m$ as expected.  
+
+In the above example, equation 8 is identical to the expected TestScore of the Gumbel watermark in equation 3. This is because the distributions they sample from are also the same. To illustrate their difference, let us revisit the simple two-token case from Example 3.2 again for which we can work out the expectation of the test score explicitly.  
+
+![](images/d15a1a78481816f52d7d12e3082749c3db603bc32aa293ba2033e9b4234f155c.jpg)  
+
+(a) Comparing the detectability of PF watermark vs Gumbel watermark using Example 4.5. On the left, we fix the Gap $\Delta=3.0$ and vary $T$ . On the right, we fix $T\,=\,1.0$ and vary $\Delta$ . Gumbel watermark offers higher detectability when $T$ is the same. Very importantly this does not mean Gumbel outperforms PF because PF is more greedy and has less entropy.  
+
+(b) Comparing the detectability-greediness tradeoff of PF watermark vs Gumbel watermark in the two token case. The Gap $\Delta=3.0$ , both curves are traced out by varying the temperature $T$ – with a “zoomed-in” view on the RHS. It is clear from the figure that PF outperforms Gumbel on the tradeoff curve.  
+
+Figure 2: Comparing the detectability of PF watermark vs Gumbel watermark using Example 4.5.  
+
+Example 4.5. Let the $|\mathcal{V}|=2$ and the corresponding logits be $[\Delta,0]$ . The expected TestScore of the Gumbel and the PF watermark (for each watermarked token) are: 1+e−∆/T + 1+e∆/T and $1+\textstyle{\frac{1}{2}}e^{-\Delta/T}(1+\Delta/T)$ respectively, where $H_{x}$ is the $x^{t h}$ Harmonic number.  
+
+It is a bit hard to compare them by reading the mathematical expressions, so let us compare them numerically (see Figure 2a). The vertical axis in the figures measures Detectability, which we define to be the expected difference between the TestScore of a watermarked and unwatermarked token. Since under the null the $\mathbb{E}[-\log(r_{t}(y_{t}))]=E[-\log(1-r_{t}(y_{t}))]=1$ , we can simply subtract 1 from the expressions in Example 4.5.  
+
+Figure 2a indicates the PF watermark does not beat the Gumbel watermark in terms of detectability when $T$ is fixed. This should not be surprising since for the same temperature, PF watermark is better at optimizing (recall Example 3.2 and Figure 1), thus naturally the resulting distribution has less entropy to be exploited by the watermarking scheme.  
+
+A more fair comparison, would be to increase the temperature for PF watermark appropriately so we compare detectability when the suboptimality is aligned. This is shown in Figure 2b. In fact we have added a second baseline that apply Gumbel watermark to the induced sampling distribution from $P F$ -decoding (shown as the dotted line). The distribution induced by PF does not have a simple form, but in our special case, it was worked out in Example 3.2.  
+
+As we can see in Figure 2b, the PF watermark is never worse and even has a slight advantage in the middle. To say it differently, to achieve the same suboptimality, the PF watermark can afford to use a larger temperature, which not only improves the stability parameter but also compensates it sufficiently on the detectability front to outperform the Gumbel watermark. In practice, we expect PF watermark to be as effective as the Gumbel watermark, and could even be a bit better (if the temperature parameter is chosen appropriately).  
+
+In conclusion, we showed that the watermarked version of PF-decoder is computationally indistinguishable from the original version of PF-decoder. Meanwhile, the test score of the PF watermark is qualitatively similar to that of the Gumbel-watermark (and identical in some cases). It is likely to produce similar detectability to the Gumbel watermark, while enjoying the performance boost that comes from replacing softmax sampling with PF.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+Datasets and models. We utilize two long-form text datasets in our experiments: the Colossal Clean Crawled Corpus (C4) dataset (Raffel et al., 2020) for open-ended text completion generation, and the Alpaca dataset (Taori et al., 2023) for question-answering tasks. Our primary language model is the state-of-the-art open-source model Llama-2 with 7 billion parameters. Specifically, we use the Llama-2-7B-chat model for question-answering tasks on the Alpaca dataset. For text  
+
+Table 2: Text generation results for different methods. The true positive rate (TPR) is calculated under 0.01 false positive rate (FPR). PPL1 refers to perplexity measured by Llama2-7B models. PPL2 is perplexity calculated by the Llama2-13B model. For general text generation, PF decoding produces significantly lower perplexity compared to sampling. For watermarking methods, PF watermark also  
+
+![](images/abba73d587a7cefab6997885b6bb1cd3df915f7e01889a95b95cb6a6b8ae9e00.jpg)  
+
+Figure 3: Comparison of PF and Gumbel watermarks on real data.  
+
+completion tasks on the C4 dataset, we employ the base model Llama-2-7B. Furthermore, to evaluate the universal applicability of smaller models, we also assess the performance of the TinyLlama-1.1B model3 (Zhang et al., 2024).  
+
+Evaluation metrics. We calculate perplexity scores from different models, using Llama2-7B to compute PPL1 and Llama2-13B to compute PPL2. We also compute MAUVE scores to measure the distributional similarity between model generations and human text as another metric for text quality (Pillutla et al., 2021). To evaluate repetitiveness, we compute seq-rep-5 across generations, which is the average repetition rate of duplicate 5-grams in a sequence (Welleck et al., 2019). For the watermark evaluation, maintaining a low false positive rate is crucial to avoid misclassifying unwatermarked text as watermarked. Therefore, we set the false positive rates at $1\%$ and $10\%$ for all watermark detection algorithms, adjusting the detection threshold accordingly. We report true positive rate (TPR) and F1 scores to measure the watermark detectability. We compared the well-known Gumbel Watermark (Gumbel WM) and Green-Red Watermark (KGW WM) as our main baselines. Experiments were conducted using Nvidia A6000 GPUs.  
+
+Text generation performance. Table 2 shows the text perplexity of generated samples from different LLMs evaluated on two datasets. Using the same temperature, we find that PF decoding produces significantly lower perplexity compared to sampling. Although greedy decoding has the lowest perplexity, it suffers from heavy repetition, as indicated by its high seq-rep-5 score and low MAUVE score. We observe that for question-answering tasks, the perplexity is lower, likely due to the fixed form of answers and lower entropy of the text generation. Table 8 shows an example prompt and responses generated by different decoding methods.  
+
+Watermarking results. We compare the results of our proposed PF watermarking method with those of the Gumbel Watermark (Gumbel WM) and the Green-Red watermark (KGW WM). In Figure 3a, we present the distribution of detection scores for the PF watermark. The PF watermark demonstrates clear detectability between positive and negative samples. The results of the watermark generation are shown in Table 2 and Figure 3b. The PF watermark achieves the best balance of the highest detection accuracy and lowest perplexity, compared to the KGW WM and the Gumbel WM. Notably, the perplexity of the PF watermark is close to that of the PF sampling, indicating that the watermarking process does not significantly impact the quality of the generated text. All watermarking methods achieved near-perfect detection accuracy on the C4 dataset. Besides, the detection results for the small TinyLlama model are also good, demonstrating the universal applicability of the PF watermark.  
+
+![](images/ece0325cab92cb4cda29458405f56bdaf43db5b3cb33f02a5bbe09661fa8d04a.jpg)  
+Figure 4: Comparison of empirical and theoretical false positive rates with different watermark keys. We can see that the second statement of Theorem 4.3 correctly controls the Type I error in practice.  
+
+Controlling the false positive rate. The key strength of PF watermark is its ability to precisely control the false positive rate (FPR) during detection. We validate this by conducting experiments using negative examples from diverse datasets (C4, Alpaca, unwatermarked) and different random keys. As Figure 4 shows, the empirical false positive rates align tightly with the theoretical $\alpha$ values across different settings. This demonstrates PF watermark’s effectiveness in controlling the FPR as intended.  
+
+Additional watermarking results. For a text watermarking design to be effective, it should be able to withstand paraphrasing attacks that an adversary may attempt to modify the watermarked text. Furthermore, the watermark should be detectable even with shorter text lengths. In Appendices C.1.1 and C.2.2, we present additional empirical results for the PF watermark, demonstrating its robustness to paraphrasing and editing attacks. The results also show that the PF watermark can still be detected even when the length of the text is reduced to only 30 tokens.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We introduce Permute-and-Flip (PF) decoding, a new decoding method for large language models that enjoys the same – perturbation-stability guarantees as softmax sampling while achieving substantially lower perplexity. We design a tailored watermarking scheme (PF watermark) for PF decoding that enables precise control over false positive rates while retaining high true positive rates. Our experiments demonstrate that the PF watermark achieves the best balance of the highest detection accuracy and lowest perplexity. All these intriguing properties make PF decoding a promising new approach for practical applications of large language models.  
+
+
+

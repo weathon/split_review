@@ -1,0 +1,528 @@
+\title{Dissecting Language Models: Machine Unlearning via Selective Pruning}
+
+\begin{abstract}
+Understanding and shaping the behaviour of Large Language Models (LLMs) is increasingly important as applications become more powerful and more frequently adopted.
+This paper introduces a machine unlearning method specifically designed for LLMs. 
+We introduce a \emph{selective pruning} method for LLMs that removes neurons based on their relative importance on a targeted capability compared to overall network performance. 
+This approach is a compute- and data-efficient method for identifying and removing neurons that enable specific behaviours.
+Our findings reveal that both feed-forward and attention neurons in LLMs are specialized; 
+that is, for specific tasks, certain neurons are more crucial than others
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In the last two years, Large Language Models (LLMs) have been shown to achieve impressive performance in a wide array of skills. These skills have huge potential to create significant benefits for humanity. However, certain abilities may carry inherent risks, both through wide access to powerful models enabling misuse by bad actors, and from misalignment of the model's goals to its user's. Elimination of high-risk skills from an LLMs repertoire could be a valuable precaution against both misuse and misalignment.
+Additionally, datasets may contain sensitive user information or copyrighted material (where consent was not obtained or withdrawn) which should be removed.
+
+Machine unlearning is a field that focuses on forgetting ability on one dataset while maintaining ability on a retain dataset.
+In recent years a wide variety of approaches has sprung up \citep{DBLP:journals/corr/abs-2209-02299}, \citep{Eternal-sunshine-of-the-spotless-net}. 
+However, there are challenges in applying these methods to LLMs, since a forward or backward pass in an LLM is costly \citep{stochastic-parrots}.
+
+In this paper, we introduce a method we call \emph{selective pruning}.
+We evaluate our method by selectively removing coding ability in LLMs. Coding was chosen due to it being a common and powerful skill with excellent datasets, but with limited risk in research settings. Our proposed method is task-agnostic, requiring only a small dataset representative of the target task, and thus, we anticipate their applicability in the removal of other potentially harmful skills, such as manipulation. Selective pruning demands only a very small amount of additional data and computational resources.
+
+A secondary aim of this research is to gain a deeper understanding of how various abilities are interconnected within LLMs. 
+Our aim is separability rather than sparsity per se,
+which is why, contrary to most pruning methods \citep{DBLP:conf/mlsys/BlalockOFG20}, we investigated pruning neurons (structured pruning) rather than pruning weights.
+If capabilities can be separated on the level of neurons, then this can lead to modularity inside models. 
+We find that certain neurons are task-specialized, and removing them dramatically decreases performance on the forget dataset while hardly affecting performance on the retain dataset.
+
+
+\section{Related Work}
+
+
+
+\textbf{Machine unlearning} aims to selectively remove information corresponding to specific data points without retraining the entire model from scratch. It has applications in for example privacy protection; complying with regulations such as GDPR; and in removing outdated or incorrect information from a trained model \citep{DBLP:conf/sp/BourtouleCCJTZL21}.
+Typically, machine unlearning refers to removing the impact that a specific datapoint in the training set had on the final model \citep{DBLP:journals/corr/abs-2111-08947, DBLP:conf/eurosp/ThudiDCP22, DBLP:conf/nips/Zhang0ZCL22, DBLP:journals/corr/abs-2302-09880}.
+By this term we instead mean `removing ability on a dataset that exemplifies certain behaviour (such as toxicity) or a certain skill (such as coding)'.
+Certain machine unlearning methods geared towards neural networks are impractical to apply to LLMs. 
+\citet{jia2023model} report fisher forgetting, influence unlearning, and fine-tuning and gradient ascent based machine unlearning methods cost between 2\% and 9\% the cost of retraining a model, for large language models this is quite expensive.
+For example DeltaGrad requires storing updates based on single data items during training \citep{DBLP:journals/corr/abs-2209-02299}, which is costly for LLMs. 
+We instead propose a post-hoc model surgery approach, in which we calculate influence functions after training. 
+\citet{forsaken} introduce a technique performing neuron masking in neural networks, but focus on unlearning specific data points, use gradient-based update techniques and do not focus on LLMs.
+\citet{DBLP:journals/corr/abs-2308-07707} unlearn classes from vision transformers using selective synaptic dampening.
+
+
+\textbf{Behavioural control.} Reinforcement Learning from Human Feedback (RLHF) \citet{rlhf} can suppress behaviour, but does not eradicate knowledge, as observed through adversarial prompting and jailbreaking \citep{jail-breaking}. 
+\citet{unified-concept-editing-diffusion-models} erase concepts  from text-to-image diffusion models by editing model weights.
+A very recent approach to LLM behaviour control is activation engineering. \citet{act-add} introduce a method that adds a vector to activations to control the model outputs. 
+
+\textbf{Pruning.} ACDC is a pruning-based approach to find a sub-circuit responsible for performance on a specific dataset \citep{acdc}. This method aims to automate a step in the mechanistic interpretability pipeline. ACDC is related to selective pruning in that it uses pruning on LLMs, but the method prunes weights rather than neurons and has a very different application. 
+
+Neural network pruning typically focuses on retaining capabilities with a smaller compute budget. 
+Networks are made sparser to e.g. reduce the storage footprint of the network, the computational cost of inference, or the energy requirements of inference \citep{DBLP:conf/mlsys/BlalockOFG20}.
+For example, \citet{DBLP:conf/nips/MichelLN19} prune unused attention heads without significantly impacting  performance. 
+In contrast, we prune with the \textit{aim} of \textit{selectively} reducing performance.
+
+
+
+
+
+\section{Selective Pruning}
+
+We introduce a machine unlearning method for Transformer models. Our method performs structured pruning to a trained LLM to selectively remove capabilities from the model.
+We either iteratively prune nodes in the feed-forward layers or attention head layers. We additionally show the method generalises to Vision Transformers.
+
+The task or dataset that we aim to reduce performance on is referred to as the \textit{forget} dataset ($D_{\text{forget}}$) and the task that we are optimizing for as the \textit{retain} dataset ($D_{\text{retain}}$).
+Our method is a heuristic pruning technique and we selectively prune nodes based on their relative importance to the $D_{\text{forget}}$ and $D_{\text{retain}}$ datasets.
+A scoring function is used to determine which nodes to prune.
+
+\subsection{Importance Functions and Scoring}\label{sec:importance-and-scoring}
+
+We notice that zero is a default value for most activations, and we base our importance functions on how much the activations deviate from this value for a specific dataset. 
+In particular, we make the following observations:
+1) The probability distributions for feedforward neuron activations has a large spike around zero \citep{DBLP:conf/acl/ZhangL00S022}; 
+2) For attention neurons  
+
+3) For any given input, the activations of many neurons are redundant \citep{DBLP:conf/icml/LiuWDZY0S0TRC23};
+and 
+4) Information theoretically, more information can be transferred by a node that frequently takes on many different values (high entropy) compared to one that always takes on the same value (low entropy) such as zero. 
+
+Based on these observations, we assume that for a given neuron the activations are zero for most inputs (providing the default "null" information), and occasionally non-zero to provide information when relevant. 
+When we prune neurons, we choose which nodes to prune based on their relative importance to datasets, and we set all their activations to zero.
+Below we describe the statistics we use to assess importance.
+ 
+KL-divergence is computationally expensive to calculate.}
+\begin{definition}[Importance Functions]
+    Let $n$ be a neuron
+    and denote its corresponding activations by $z$.
+    We define the following importance metrics relative to a dataset $D$
+\begin{equation*}
+\begin{array}{l l}
+I_\text{freq}(D,n) := \frac{1}{\#D} \cdot \# \{z(d) > 0: d \in D\} 
+&
+I_\text{abs}(D, n) := \frac{1}{\#D} \sum_{d \in D} |z(d)|
+\\
+\\
+I_\text{rms}(D, n) := \sqrt{\frac{1}{\#D} \sum_{d \in D} z(d)^2 }
+&
+I_\text{std}(D, n) := \sqrt{\frac{1}{\#D} \sum_{d \in D} \left(z(d) - \bar{z(d)}\right)^2} \\
+\end{array}
+\end{equation*}
+\end{definition}
+
+The rationale behind these importance metrics is as follows. First, $\text{I}_\text{freq}$ captures the intuition that non-zero activations are important to the output.
+Second, the root-mean-square ($\text{I}_\text{rms}$) and the mean of absolute activation $(\text{I}_\text{abs})$ of the values are another way of capturing how much the activations deviate from zero.
+Lastly, information theoretically, the more a node's activations vary, the more information can be obtained from its activation value. Standard deviation $(\text{I}_{std})$ can capture this variance. 
+Neurons are pruned based on their importance to the retain dataset versus forget dataset.
+\begin{definition}[Scoring Function]
+    Given a forget dataset $D_{\text{forget}}$ and retain dataset $D_{\text{retain}}$ we define the scoring function of a neuron $n$ as 
+    \[ \text{Score}(n, D_{\text{retain}}, D_{\text{forget}}) := \dfrac{ 
+        \text{Importance}(D_{\text{forget}}, n) }{
+        \text{Importance}(D_{\text{retain}}, n) + \epsilon } . \]
+\end{definition}
+
+\subsection{Pruning Procedure}\label{sec:pruning-procedure}
+
+We consider two pruning approaches: 1) pruning some set fraction of the model in one step based on the activations of the base model; and 2) iteratively pruning smaller fractions based on the activations of the partially pruned model. 
+One rationale behind pruning iteratively is that often when pruning one part of the model, a `backup' part of the model pops up to complete the task 
+\citep{DBLP:journals/corr/abs-2307-15771}.
+\begin{minipage}{.5\textwidth}
+    \label{algo:iterative-selective-pruning}
+    \begin{algorithm}[H]
+    \caption{Iterative Selective Pruning}
+    \begin{algorithmic}[1]
+    \Require Original Model $\theta$, Datasets $D_r, D_f$, $\eps$, fraction $\alpha$, Stopping Criterion
+    \Ensure Unlearned Model $\theta'$
+    \While{Stopping Criterion not met}
+    \State $I_{r,n}$ = Importances on $D_f$ under $\theta$
+    \State $I_{f,n}$ = Importances on $D_r$ under $\theta$
+    \State $S_n$ = ($I_{f,n}$)/($I_{r,n}$ + $\epsilon$)
+    \State $N$ = top $\alpha$ neurons in $S_n$
+    \For{neuron $n$ in $N$}
+    \State Set parameters $\theta_n$ for neuron $n$ to 0
+    \EndFor
+    \EndWhile
+    \State \Return $\theta$
+    \end{algorithmic}
+    \end{algorithm}
+     \end{minipage}
+    \begin{minipage}{.5\textwidth}
+    \hspace{0.05\textwidth}
+    \begin{figure}[H]
+        \centering
+        \includegraphics[scale=0.38]{figures/nov16/sep-diagram.drawio-4.png}
+    \caption{Illustration of selective pruning.}
+    \label{fig:enter-label}
+    \end{figure}
+\end{minipage}
+For the analysis in this paper our stopping criterion was ``all neurons are pruned", and run evaluations at each step. 
+However, the stopping criterion is use-case dependant, and could for example be based on a maximum drop in retain accuracy or a minimum drop in forget accuracy.
+As a baseline we also randomly pruned layers. We do so by first deciding on what fraction of neurons to remove and then randomly selecting neurons to be pruned. 
+
+\subsection{Objects of Pruning: Feed-Forward vs Attention Neurons}
+\label{sec:pre-out-def}
+
+We prune within either the feed-forward or the attention blocks.
+We keep the Embedding, Positional Embedding and Output Unembedding unmodified. % which embeddings are these? the first and last units of the LLM ? Yes!
+This is because we do not want to remove the generality of the model, or to blacklist any words in particular in other domains. 
+We also do not want to directly modify specific dimensions of the embedding space. 
+Because we think this is likely the wrong level of granularity for pruning most tasks, since the task might not be precisely aligned with the continuously changing latent space dimensions in the residual stream \citep{tunedlens}.
+
+\textbf{Feed-Forward.}
+ We describe the feed-forward sub-layer in a decoder layer $l$, given a (layer-normed) input $z$ to be: $f_l(z) = W_{OUT} \cdot \sigma( W_{IN} \cdot z + B_{IN}) + B_{OUT}$. We label the  $\sigma( W_{IN} \cdot z ) + B_{IN}$ as \emph{middle sub-layer neuron} activations. We choose to prune the middle sub-layer neurons of the feed-forward network based on the idea that the key-value memories reside in those layers \citep{DBLP:conf/emnlp/GevaSBL21}. 
+Additionally, in \citet{DBLP:conf/acl/ZhangL00S022} they find in BERT that `more than 80\% of inputs activate less than 10\% of [Feed-Forward] neurons,' implying these neurons are highly specialized.
+
+Feed-forward layers are pruned using the $\text{Importance}_{\text{abs}}$ metric (unless specified otherwise), 
+i.e. a neuron was pruned based on the ratio between the importance function (in this case the average absolute activation) value on the retain dataset and on the forget dataset.
+
+We delete a neuron in a feed-forward mid-layer by setting the input and output weights and biases, $W_{IN}$, $W_{OUT}$, $B_{IN}$ to 0.0 for that neuron.
+
+\textbf{Attention.}
+The main units of neurons we consider in an attention head, are the `value' neurons and `pre-out' neurons. 
+The activations of the value neurons 
+$V_i = \sum_i {W_v}_{ij} x_j$ 
+are the directions from the output of the value matrix 
+$W_v$. 
+The `pre-out' neuron activations  
+$Z_i = \sum_j A_{ij} V_j$ 
+are the directions after the values are multiplied by the attention weights 
+$A_{ij} = \text{softmax} (\frac{ Q_i \cdot K_j}{\sqrt{d}})$, but before they are returned to the residual stream through $W_O$. 
+In the main body of this paper, we focus on `pre-out' neurons to simplify the analysis. 
+To delete a `pre-out neuron' we remove the parameters: $W_v$ row weights, $B_v$ bias entry, and $W_o$ column weights relating to that neuron. 
+
+There is no activation function on the value layer that maps negative pre-activations to zero. 
+Hence the frequency importance metric is not useful in this case.
+We used all other three importance metrics.
+
+Based on a hypothesis that Singular Value Decomposition (SVD) might improve feature separation, we 
+considered altering the weights $W_v$ and $W_o$ using SVD on $W_{v} W_{o}$ making their weights orthogonal to each other. 
+
+
+
+
+
+
+\section{Models and Tasks}
+
+In this section, we provide technical details on the pre-trained models, datasets, and task composition we use to explore selective pruning for capability-removal.
+
+\subsection{Pre-Trained Models}
+
+We work with Meta’s OPT \citep{DBLP:journals/corr/abs-2205-01068}, Meta's Galactica \citep{DBLP:journals/corr/abs-2211-09085}, EleutherAI's Pythia models \citep{biderman2023pythia}, RoBERTa \citep{DBLP:journals/corr/abs-1907-11692}, and Vision Transformers \citep{DBLP:conf/iclr/DosovitskiyB0WZ21}, see Table \ref{tab:model-details}.
+For each model type we consider a variety of model sizes\footnote{The models are labelled as OPT-125M, OPT-1.3B, OPT-6.7B, Galactica-125M, Galactica-1.3B, Galactica-6.7B, Pythia-160M, Pythia-1.4B, Pythia-6.9B. Excluding biases, the true number of parameters is equivalent. The ViT models used are ViT-base-patch16-224 and ViT-large-patch32-384 fine-tuned on ImageNet-1k.}.
+The models are accessed via the Hugging Face transformer library \citep{DBLP:journals/corr/abs-2211-09085}.
+
+\begin{table*}[h]
+    \centering
+    \begin{tabular}{lccccc}
+    \toprule
+            & OPT & Galactica & Pythia & Roberta & ViT\\
+    \midrule
+    Dropout                 & 0.1  & 0.1    & None & 0.1  & 0.1\\
+    MLP activation function & ReLU & GeLU   & GeLU & GeLU & GeLU \\
+    MLP \& Attention Biases & Yes  & No     & Yes  & Yes  & Yes\\ 
+    Modality                & Causal & Causal & Causal & Masked Text & Image Classifier \\
+    \bottomrule
+    \end{tabular}
+    \caption{Key differences between OPT, Galactica, Pythia, RoBERTa and ViT.}
+    \label{tab:model-details}
+\end{table*}
+
+\subsection{Task Datasets --- Pile, Code and Python}
+
+We evaluated the above models on the following datasets accessed via the Hugging Face datasets library \citep{huggingface-datasets}.
+\textbf{Pile}, short for EleutherAI's `The Pile' \citep{pile}, is a general text dataset.
+
+ ImageNet-1k \citep{imagenet15russakovsky} is an image dataset with 1000 different classes.
+More comprehensively removing code from the Pile dataset would likely slightly improve the separability and thus our results. 
+In our experiments, we selectively prune away ability on one dataset (the `forget' dataset) while maintaining high accuracy on another (the `retain' dataset). 
+We use the following pairs: Pile vs Code, Code vs Python, and Imagenet vs Birds.
+We measure accuracy by top1 (next-token) prediction accuracy, and perplexity.
+
+Our choice for a coding dataset is based on the idea that writing code is a powerful skill (with which in theory algorithms could be written that for example act on the stock market). 
+By forgetting python ability while retaining coding ability, we aim to show that our method can also selectively prune away a dataset that `looks similar' to the retain dataset. 
+Note however that our method is dataset agnostic. 
+
+
+
+\section{Results}
+
+In Section \ref{sec:select-prune-effective} we show that our pruning methods are selective. 
+In Section \ref{sec:result-ff-vs-att} we find that pruning neurons from feed-forward layers is more effective than pruning neurons from attention heads.
+Lastly, in Section \ref{sec:civil} we compare our machine unlearning method to existing work. 
+The below experiments were all executed on a single NVIDIA RTX 4090.
+\subsection{Selective Pruning is Effective}\label{sec:select-prune-effective}
+In this section, we show that we can forget a specific skill while retaining a general skill or vice versa, using our selective pruning method. 
+We prune OPT, Galactica, Pythia and Roberta models of various sizes in 50 pruning steps. In each pruning step 2\% of feed-forward nodes are pruned using $\text{I}_{abs}$.
+We investigate the forget and retain effects of pruning. 
+In Figure \ref{fig:main-effectiveness} we show the relative performance drop and in Figure \ref{fig:perplexity-code-vs-pile} we show the relative perplexity (for the same pruned models). 
+See Appendices \ref{app:top10-skip50-effectiveness} and \ref{app:loss-effectiveness} for different metrics of the same experiment.
+
+In Figure \ref{fig:main-effectiveness} we see that selectively pruning away neurons useful for the forget task leads to a bigger drop in accuracy on the forget dataset (y-axis) than on the retain dataset (x-axis), since all graphs are above the x=y line.
+When forgetting code performance, in Figure \ref{fig:effective-code} we see for example that for the largest OPT model (6.7B) the first reduction in code performance of around 80\% requires a reduction in pile performance of 20\%. Alternatively, for a retain accuracy reduction of 5\% we achieve a forget reduction of around 35\%. The unlearning is fairly continuous in the number of nodes pruned. 
+For comparison, \citet{DBLP:conf/asiaccs/NguyenODCL22} plot a retain drop of 1.5\% and a forget drop of 3\% for their best method (MCU) applied to forgetting medical data from a classification model.
+
+We find that the separability depends on the tasks that are compared. 
+In particular, the separability of classifying birds from classifying the remaining classes is high. 
+We find that Python ability and Coding ability are less separable than Coding ability is from Pile ability.
+We also find that, OPT, Galactica and RoBERTa are more separable than Pythia. 
+This is surprising as we had expected dropout would lead to more redundancy and therefore less separability.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{.36\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/nov14/nov14-top1-code-unlearn-1.png}
+    \caption{Code forget + Pile retain}
+    \label{fig:effective-code}
+\end{subfigure}%
+\begin{subfigure}{.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/nov14/nov14-top1-python-unlearn-1.png}
+    \caption{Python forget + Code retain}
+    \label{fig:effective-python}
+\end{subfigure}
+\begin{subfigure}{.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/nov14/nov14-top1-birds-unlearn-1.png}
+    \caption{Birds forget + Imagenet retain}
+    \label{fig:birds-forget}
+\end{subfigure}
+
+\begin{subfigure}{.36\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/nov14/nov14-top1-code-focus-1.png}
+    \caption{Code retain + Pile forget}
+    \label{fig:effective-code-retain}
+\end{subfigure}%
+\begin{subfigure}{.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/nov14/nov14-top1-python-focus-1.png}
+    \caption{Python retain + Code forget}
+    \label{fig:effective-python-retain}
+\end{subfigure}
+\begin{subfigure}{.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/nov14/nov14-top1-birds-focus-2.png}
+    \caption{Birds retain + Imagenet forget}
+    \label{fig:birds-retain}
+\end{subfigure}
+\caption{
+We either selectively forget or retain Code ability (Left), Python ability (Middle), or bird recognition ability (Right).
+For each graph we show the drop in forget accuracy on the y-axis, and drop in retain accuracy on the x-axis both measured in terms of Top1 accuracy. 
+We plot a smoothed graph between the 50 pruning steps. For the biggest models, we also plot a dot for every datapoint.
+}
+\label{fig:main-effectiveness}
+\end{figure}
+\begin{figure}[H]
+\centering
+\begin{subfigure}{.4\textwidth}
+  \centering
+    \includegraphics[width=0.9\textwidth]{figures/sep26/sep26-perplex-code-pile.png}
+    \caption{Code forget + Pile retain}
+    \label{fig:loss-code}
+\end{subfigure}%
+\begin{subfigure}{.4\textwidth}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/sep26/sep26-top1-pile-code.png}
+    \caption{Code retain + Pile forget}
+    \label{fig:loss-pile}
+\end{subfigure}
+\caption{
+Pile vs Code perplexity on various models. We show a smoothed curve over the course of pruning steps and for the biggest models we plot a dot at every pruning step.
+}
+\label{fig:perplexity-code-vs-pile}
+\end{figure}
+
+In the field of machine unlearning, degrading performance on the retain dataset can be exponential when more data is unlearned. This problematic phenomenon is referred to as catastrophic unlearning \citep{DBLP:journals/corr/abs-2209-02299}.
+Since machine unlearning on general capabilities has not been extensively applied to LLMs, we provide our results as a baseline for others to compare against.
+In Figure \ref{fig:perplexity-code-vs-pile} we show how the perplexity increases as we prune away more nodes. 
+For example, we find that in the biggest OPT model, when we forget code and retain pile, a code perplexity increase of 64x `costs' a 2x increase in pile perplexity.
+The activation vector steering method ActAdd shows no increase in perplexity after steering activations more in the direction of the concept `wedding' \citep{act-add}. 
+However, it is difficult to compare the two methods as we remove ability on a very broad task (coding) and they deal with a single word (wedding).
+\subsection{Pruning Feed-Forward Neurons More Effective than Attention Neurons}\label{sec:result-ff-vs-att}
+
+To evaluate how effectively a method prunes, we consider the maximum difference in accuracy drop between the forget and retain datasets. The more selective a pruning method is, the larger this difference. 
+In Figure \ref{fig:max-diff-metric-vs-pruning-step} we plot the maximum difference in accuracy drop for a variety of importance functions and objects of pruning. 
+
+Previous work shows that specific abilities can be removed from LLMs by pruning away entire attention heads \citep{DBLP:conf/acl/VoitaTMST19}, but does not consider other objects of pruning.
+
+
+We find that the object of pruning is crucial. For a forget set of Code and a retain set of Pile, and the investigated models, feed-forward neurons are more specialized than attention neurons, see Figure \ref{fig:max-diff-metric-vs-pruning-step}. 
+Note that these results could be task dependent.
+
+\begin{figure}[H]
+    \centering
+    \captionsetup[subfigure]{oneside,margin={-0.9cm,0cm}}
+    \begin{subfigure}{0.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/nov16/opt-top1-compare.png}
+    \caption{}
+    \end{subfigure}
+    \begin{subfigure}{.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/nov16/gal-top1-compare.png}
+    \caption{}
+    \end{subfigure}
+    \begin{subfigure}{.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/nov16/pythia-top1-compare.png}
+    \caption{}
+    \end{subfigure}
+    \begin{subfigure}{.24\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/nov16/roberta-top1-compare.png}
+    \caption{\hspace{-2cm}}
+    \end{subfigure}
+    \caption{We evaluate methods for pruning OPT-1.3B (a), Galactica-1.3B (b), Pythia-1.4B (c), and Roberta-355M (d). We use various different importance functions (freq, abs, rms, std), on different regions of the model (feed-forward or attention layers). The graphs show the maximal difference between accuracy in Code and accuracy in Pile performance over 50 pruning steps (of size 2\%).
+    }
+    \label{fig:max-diff-metric-vs-pruning-step}
+\end{figure}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{c|cccc}
+    \midrule
+     Pruning strategy              
+      & OPT-1.3B & Galactica-1.3B & Pythia-1.4B & Roberta-355M \\
+    \midrule
+    Feed-forward neurons & 59.6 & 52.4 & 46.2  & 58.3\\
+    Attention neurons    & 28.4 & 41.7 & 46.6 & 41.5\\
+    \bottomrule
+    \end{tabular}
+    \caption{Largest difference in Top1 accuracy drop on Code versus Pile after 50 pruning steps.}
+    \label{tab:ff-vs-attn-table}
+\end{table}
+We find that the choice of importance metric (freq, abs, std or rms), is sometimes rather marginal (such as in OPT FF pruning), but can be substantial (such as in Galactica FF pruning). This suggests there could be better importance metrics we have not tried. 
+From our research, the metric that seemed to most reliably perform well in both feed-forward (FF) and attention layers was $\text{Importance}_{\text{abs}}$, which is why we have used it in our figures and tables (unless otherwise specified). 
+In models trained with FF dropout (OPT and Galactica), we see in Table \ref{tab:ff-vs-attn-table} that pruning FF neurons has a huge differential effect on performance compared to pruning of attention value neurons. In contrast, pruning Pythia FF neurons is only marginally more effective than pruning attention value neurons. 
+This suggests that dropout during training makes a neuron more task-specific, and that adding dropout to attention value layers during training could potentially yield the same task specialisation benefits.
+Our finding is consistent with the finding that dropout suppresses superposition \citep{dropout-superposition}. 
+
+We expect the optimal pruning ratio and percentage of different model regions (feed-forward or attention) will differ per application.
+ 
+
+
+\subsection{Comparing to Other Methods on Removing Toxicity and Classes}\label{sec:civil}
+Recent work by \citet{DBLP:journals/corr/abs-2212-04089} decreases GPT-2's toxicity on the Civil Comments dataset \citep{borkan2019nuanced} by fine-tuning with negated task vectors via `task arithmetic'. 
+The model is first fine-tuned on the task, after which the difference in parameters between the original and fine-tuned model is calculated. 
+The difference vector is then subtracted from the original model weights. 
+Toxicity reduction is evaluated by the proportion of comments generated (out of 1000) that are toxic, and the mean toxicity of generated comments.
+
+In Table \ref{tab:civil-comments-gpt-and-llama} we apply selective pruning to GPT2-Large (774M parameters) and LLaMA 2 (7B model) \citep{llama2}
+For GPT2-Large we compare to results from the task arithmetic fine-tuning approach (results are quoted from \citet{DBLP:journals/corr/abs-2212-04089}). 
+We prune in steps of 0.5\% of ATTN neurons until there is the same increase in WikiText perplexity of 0.5 (total of 6.5\% pruned). 
+For LLaMA 2 we evaluate the effect of selective pruning on zero-shot MMLU accuracy \citep{mmlu}. 
+We prune 0.5\% of FF and 0.5\% of ATTN neurons in one step. 
+As this base model was less toxic to begin with, a different prompt was used. 
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lccccc}
+    \toprule
+         & Model & \% Toxic & Mean Toxicity & Perplexity & MMLU \\
+    \midrule
+        Base (quoted) & GPT2-Large & 4.8 & 0.06 & 16.4 & N.A.\\
+        Fine-tuning (quoted) & GPT2-Large & 0.8 & 0.01 & 16.9 & N.A.\\
+    \midrule
+        Base (replicated) & GPT2-Large & 3.5 & 0.08 & 18.0 & N.A.\\
+        Pruned            & GPT2-Large & 0.3 & 0.02 & 18.5 & N.A.\\
+    \midrule
+        Base   &  Llama-2-7B & 1.5 & 0.06 & 7.90 & 33.6 \\
+        Pruned &  Llama-2-7B & 0.0 & 0.03 & 7.94 & 33.0 \\
+    \bottomrule
+    \end{tabular}
+    \caption{GPT-2 Large and LLaMA 2 7B - Removing Toxic Generation}
+    \label{tab:civil-comments-gpt-and-llama}
+\end{table}
+
+In Table \ref{tab:classes} we compare selective pruning (SP) on the task of unlearning classes from CIFAR-100 \cite{cifar} to a number of machine unlearning methods: retraining the model from scratch on the retain set; finetuning on the retain set for 5 epochs; `incompetent teacher' method \cite{chundawat2023can}; UNSIR \cite{DBLP:journals/corr/abs-2111-08947}; amnesiac \cite{graves2021amnesiac} and selective synaptic dampening (SSD) \cite{DBLP:journals/corr/abs-2308-07707}.
+Logistic regression membership inference attacks (MIA) \citep{chundawat2023can} are used to assess if forget data points can be identified as part of the training data.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lc|cccccccc}
+    \toprule
+        Class & Metric & None & Retrain & Finetune & Teacher & UNSIR & Amnesiac & SSD & SP \\
+    \midrule
+        \multirow{ 2}{*}{Rocket}
+        & $D_{\text{retain}}$ & 89.8 & 90.1* & 85.5 & 87.6 & 84.0 & 86.4 & 88.9 & 89.4 \\
+        & $D_{\text{forget}}$ & 93.9 &  0.0* & 60.1 &  0.0 &  0.0 & 0.0  &  0.0 &  0.0 \\
+        & MIA                 & 98.6 &  3.2* &  1.2 &  0.0 & 11.6 & 2.4  &  0.8 &  3.8 \\
+    \midrule
+        \multirow{ 2}{*}{MR}
+        & $D_{\text{retain}}$ & 89.8 & 90.0* & 85.3 & 87.5 & 83.7 & 86.8 & 88.6 & 89.5 \\
+        & $D_{\text{forget}}$ & 94.7 &  0.0* & 70.8 & 44.0 &  0.0 & 0.0  & 0.0  &  3.0 \\
+        & MIA                 & 92.8 &  0.7* &  0.8 &  0.0 &  8.6 & 1.2  & 0.0  &  2.8 \\
+    \bottomrule
+    \end{tabular}
+    \caption{Comparing selective pruning (SP) to other machine unlearning methods for the task of removing the classes `rocket' and `mushroom' (MR) from CIFAR-100. None refers to no machine unlearning method. * Retrained results are quoted from \cite{DBLP:journals/corr/abs-2308-07707}.}
+    \label{tab:classes}
+\end{table}
+
+
+
+\section{Discussion}
+
+
+
+In this paper, we introduced a method to selectively prune neurons based on those neurons' relative importance to two datasets.
+Our method is effective as measured in differential drop in accuracy and as measured in perplexity, and  provides a low-cost baseline for future work to compare against.
+We hypothesize that machine unlearning methods like ours are more likely to  eradicate the undesired behaviour from the model (as opposed to covering it up) compared to other model control methods.
+
+
+
+We find that pruning feed-forward neurons is more selective than pruning attention neurons.
+A potential explanation for feed-forward neurons being the best-found place to intervene in OPT and Galatica models,
+is that these models are trained with dropout in their feed-forward layers.
+We hypothesize that adding dropout to individual attention neurons during training could have the same effect on separability.
+Relatedly, we think our work has applications for the architecting and training of deep neural networks, specifically to constructing and training more modular networks.
+
+
+Another advantage of our pruning method is that it is very quick.
+Pruning methods that prune weights based on computing a Hessian require computing second derivatives of $n^2$ parameters \citep{OptimalBrainSurgeon}, where $n$ is the number of neurons in the model.
+Recently, advances were made that reduced the computation time of pruning a model with weight matrices of size $d_{row} \times d_{col}$ down to
+$\mathcal{O}(d_{row} \cdot d^3_{col})$ time and
+$\mathcal{O}(d^2_{col})$ memory \citep{frantar2022optimal},
+which works well for medium-size models, such as ResNet50 (25 million parameters), but quickly becomes too expensive for large language models.
+In contrast, we ran our experiments on a single Nvidia RTX 4090.
+
+To conclude, we have shown that selective pruning is a viable machine unlearning method, and thus that some transformer neurons are specialized.
+
+\subsection{Limitations}
+
+Our method can only be applied to remove a capability when that capability is neatly captured by a dataset. For example, we removed coding based on a coding dataset and toxic comments based on news data labelled with toxicity.
+However, often we will want to remove capabilities for which we do not have a specific dataset.
+
+The selectiveness of our pruning method relies on the separability of the capabilities of an LLM.
+It performs less well on, for example, Pythia (trained without dropout) and on smaller LLMs. 
+Further work may unravel why these models seem to be less separable. 
+
+\subsection{Future Work}
+
+A popular machine unlearning evaluation metric is the anamnesis index \citep{DBLP:journals/tifs/ChundawatTMK23} which assesses the fine-tuning or retraining steps needed to regain the original model performance on the forget dataset.
+Unfortunately, retraining LLMs is costly, and so we have not evaluated our method on this retrainability metric.
+We think this metric would be very interesting for testing how `fundamentally' a behaviour is removed from the model.
+
+Furthermore, we could investigate the relationship between retained skills. 
+For example, when we prune away coding ability, are we removing the ability to correctly handle prompts in the format that code prompts are generally given in, or are we removing internal knowledge about coding principles. 
+This is an empirical question about how sub-skills of the model are represented and related.
+
+Moving forward, we are excited to enhance the effectiveness of selective pruning. 
+A notable area of exploration is the potential benefit of adding dropout to attention neurons during the training or fine-tuning phases. 
+This could also offer advancements in our understanding of modularity.
+
+
+
+
+
+
+\subsection{Broader Impacts}
+
+Our pruning method isolates a capability, but does not enhance or improve it. 
+Methods that instead rely on fine-tuning to remove specific skills, can typically also be applied to increase ability on that skill, which means they may be misused by bad actors. 
+Contrary to other approaches towards capability removal, our method is unlikely to generate systems that are more harmful than the base model.
+
+
+\subsection{Acknowledgements}
+
+This work was partially funded by the Long Term Future Fund.
+
+
+
+
+
+

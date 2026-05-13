@@ -1,8 +1,8 @@
 # Causal Bayesian Optimization with Unknown Causal Graphs
 
 - Decision: Reject
-- Avg Score: 3.40
-- Scores: 5, 8, 3, 1, 0
+- Avg Score: 6.50
+- Scores: 5, 8, 3, 10
 
 ## Abstract
 Causal Bayesian Optimization (CBO) is a methodology designed to optimize an outcome variable by leveraging known causal relationships through targeted interventions. Traditional CBO methods require a fully and accurately specified causal graph, which is a limitation in many real-world scenarios where such graphs are unknown. To address this, we propose a new method for the CBO framework that operates without prior knowledge of the causal graph. We demonstrate through theoretical analysis and empirical validation that focusing on the direct causal parents of the target variable is sufficient for optimization. Our method learns a Bayesian posterior over the direct parents of the target variable.  This allows us to optimize the outcome variable while simultaneously learning the causal structure. Our contributions include a derivation of a closed-form posterior distribution for the linear case. In the nonlinear case, we present a Gaussian Process (GP) approximation that still enables CBO in cases where the posterior is not tractable. The proposed method performs competitively with existing benchmarks and scales well to larger graphs, making it a practical tool for real-world applications where causal information is incomplete.

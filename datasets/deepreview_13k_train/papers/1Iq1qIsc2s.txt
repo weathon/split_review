@@ -1,0 +1,230 @@
+\title{Revisiting Positional Information in Transformers in the era of Fused Attention}
+
+\begin{abstract}
+Imparting positional information has been a crucial component in Transformers due to attention's invariance to permutation. Methods that bias attention weights, like Relative Positional Bias (RPB), have been preferred choice in more recent transformer-based architectures for vision. In parallel, fused attention has become the standard implementation for attention, largely thanks to open source solutions such as Flash Attention and FMHA. However, it is not trivial to fuse explicit biasing or masking of attention weights into a fused attention kernel without affecting its performance. In this scenario, position embeddings present themselves as a viable replacement for attention weight biases. Position embeddings are applied to the tokens directly, decoupled from the attention mechanism, thereby sidestepping the problems that arise with attention weight biases in fused kernels. In this work, inspired by the booming LLM landscape, we analyze the applicability of Rotary Position Embeddings (RoPE) as a replacement for RPBs in vision models. Unlike RPB which explicitly biases attention weights, RoPE biases the dot product inputs (query and key) directly and ahead of the attention operation. We empirically show the prowess of RoPE over RPBs in terms of accuracy and speed. We study multiple implementations of RoPE and show that it is sufficient to use only a fraction of hidden dimensions for RoPE to achieve competitive performance. We also develop a fast implementation for Axial RoPE. Together with the most performant fused attention implementations, and our fast RoPE implementation, we observe  inference speedups compared to RPB with improved or similar accuracy.  We foresee RoPE as a replacement for RPBs, paving the way for the widespread adoption of fused attention in transformer-based vision models.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Self attention and transformers Vaswani et al. (2017) have proven to be powerful tools for learning from large amounts of unstructured data. The inception of Vision Transformers Dosovitskiy et al. (2021), or ViTs, further propelled the use of transformers for image and video modalities. ViT follows the isotropic architecture design of the Transformer, with a single downsampling step and identically shaped encoder layers. On the other hand, hierarchical vision transformers started to incorporate the CNN-like design Liu et al. (2021); Hassani et al. (2023); Hassani & Shi (2022); Ryali et al. (2023); Fan et al. (2021); Li et al. (2022), downsampling the token space gradually and increasing the number of attention heads. They also typically restrict their earlier attention layers to local or sparse patterns in order to avoid scaling issues resulting from performing global self attention.  
+
+The widespread usage of attention in language and vision inspired the creation of fused attention implementations like Flash Attention Dao et al. (2022); Dao (2023) and FMHA Lefaudeux et al. (2022). These implementations are functionally equivalent to a BMM-style implementation in a deep learning framework like PyTorch Paszke et al. (2019), but provide significant improvements in performance and activation memory footprint by keeping attention weights in fast local memory and fusing the second half of the operation, instead of storing attention weights as an additional activation to the relatively slower global memory, thereby reducing the number of expensive global memory accesses.  
+
+In all transformers, tokens are the smallest unit of representation. Since the attention mechanism is invariant to the permutation of these tokens, additional positional biases are added to inject spatial information into the transformer. The original ViT used Absolute Position Embeddings (APE) to solve this problem. In the years that followed, encoding positional information in the form of attention weight biases became a popular choice in transformer-based models in vision, among which, Relative Positional Bias (RPB) Shaw et al. (2018) has been one of the most popular. However, RPB, and attention weight biases in general, can somewhat greatly hinder the performance of fused attention implementations. While they are a barely noticeable elementwise operation in forward pass, the backward pass for attention weight biases is a reduction operation. This makes it non-trivial to fuse the already complex fused attention backward kernel together with that of position biases. Additionally, incorporating such biases in newer implementations of fused attention requires an unjustifiably significant engineering effort. The recently released Flash Attention V2 and V3 Dao (2023); Shah et al. (2024) never supported explicit masking or biasing. To date, very few implementations, namely the xFormers’ FMHA, offer such features. In addition to the effort required to implement, hiding the latency of the softmax operation in pipelined attention kernels such as FAv3 Shah et al. (2024) is already very challenging, and supporting explicit attention weight biasing or masking will add to that latency and easily expose it. We illustrate this in Figure 1.  
+
+![](images/6ae9640795cc5952b5fe97bbfdf2f6722b80b16ca5ce1e17c24bef57e6bbfc74.jpg)  
+Figure 1: Attention weight biases in BMM-style and fused attention: Attention weight biases (like RPB) are added directly to the attention map. This bottlenecks the backward pass in fused attention kernels since the update for bias tensor is a reduction operation. Due to this, many implementations of fused attention implementations do not support explicit biases or attention masks. Using position embeddings like RoPE will enable less restricted usage of fused attention implementations. We note that xFormers’ FMHA and some others support explicit attention weights and masking, but they rarely succeed in hiding the additional and sometimes considerable latency from the bias.  
+
+On the other hand, position embeddings are usually decoupled from the attention mechanism and are applied to the input tokens instead, ahead of the attention operation. Originally these embeddings were applied to the tokens only once at the very beginning of the model. This approach is commonly referred to as Absolute Positional Embedding (APE). However, Rotary Position Embeddings (RoPE) Su et al. (2021) have become the de-facto choice in large language models Touvron et al. (2023a;b); Chiang et al. (2023), and are slowly making their way into vision models as well Crowson et al. (2024); Karras et al. (2022). We compare these three methods for introducing positional information (RPB, APE, and RoPE) in Figure 2. Compared to APE, RoPE can be seen as much more flexible generalization. Compared to RPB, the advantages of RoPE are threefold: 1. RoPE is a static position embedding mechanism; RoPE can be interpolated for varying input resolutions without retraining or finetuning. 2. the forward and backward pass of RoPE are both element-wise operations, for which developing highly parallelized SIMT implementations and kernel fusions are much easier. Lastly, since RoPE is agnostic to the dot-product attention operation, one can use the best available fused attention implementation for their use case, and to its full potential.  
+
+Inspired by this, we thoroughly study the applicability of RoPE in transformer-based models for  
+
+vision. Our main contributions are as follows: 1. We present the scaling and implementation-related challenges in using RPB, or any explicit attention bias, in the context of fused attention. Positional biases, while very simple elementwise operations in their forward pass, are a reduction in their backward pass, making their fusion into complex fused attention kernels very challenging. 2. We empirically show the improvement from using Rotary Position Embeddings over RPB. We show consistent improvements across three model families: ViT, Swin, and NAT, with varying model sizes (19 million to 89 million parameters). These models also cover three different attention patterns: self attention, windowed attention and neighborhood attention. We achieve noteworthy gains across all models. 3. We develop an efficient CUDA implementation for RoPE with an easy-to-use Python wrapper. We carefully benchmark it and show its speedup against using RPB. 4. We carefully study multiple implementations of Rotary Position Embeddings and present an analysis of using RoPE in transformer-based vision models. We empirically show that one can use only a fraction of hidden dimensions for RoPE and still achieve competitive performance. We introduce a hyperparameter $k_{r o p e}$ and analyze its effect on multi-resolution performance.   
+2 RELATED WORK   
+In this section, we review some prominent transformer-based architectures for vision, as well as   
+current methods for introducing spatial biases, and the effect of using positional biases with fused   
+attention implementations.   
+2.1 VISION TRANSFORMERS AND HIERARCHICAL VISION TRANSFORMERS   
+After the inception of the original Vision Transformer (ViT)Dosovitskiy et al. (2021), a considerable   
+research effort has been towards understanding Ghiasi et al. (2022); Raghu et al. (2021) and improving   
+ViTs. Most notably, many works are inspired by the efficient design of CNNs and have transformer   
+the isotropic ViT into a multi-level hierarchical vision transformer Liu et al. (2021); Fan et al. (2021);   
+Li et al. (2022). The networks reduce the spatial dimensions of the feature map at every level with   
+increasing channels (attention heads). Similar to CNNs, many found that tokens in the earlier layers   
+and levels of these models attend more locally, and those in later layers and levels attend more   
+globally Raghu et al. (2021). This has propelled the development of hierarchical vision transformers   
+with restricted local attention Hassani et al. (2023); Hassani & Shi (2022); Ryali et al. (2023).   
+2.2 ADDING POSITIONAL BIASES TO VISION TRANSFORMERS   
+Transformers are primarily comprised of linear layers and attention, both of which are invariant to   
+token permutation, which naturally led to researchers introducing positional information into their   
+models. After the inception of the original transformer architecture Vaswani et al. (2017), many   
+new methods were introduced to add position information to transformers Ke et al. (2020); Huang   
+et al. (2020). ViT Dosovitskiy et al. (2021) used absolute sinusoidal position embeddings used   
+in the original Transformer Vaswani et al. (2017). Relative Positional Biases (RPBs) Shaw et al.   
+(2018) quickly became the de facto method used in a plethora of hierarchical vision transformers.   
+More recently, Rotary Position Embeddings Su et al. (2021) became the norm in billion-parameter   
+models like LLaMA Touvron et al. (2023a) and its derivatives Touvron et al. (2023b); Chiang et al.   
+(2023). RoPE enjoys several benefits, like usability in long contexts, better training stability, and   
+decaying influence with increasing relative distance, to name a few. This makes RoPE a more scalable   
+alternative to RPBs. However, RoPE has not yet been as widely adopted in vision models, and we   
+aim to shed light in this direction through this work. We find that 2D RoPE Heo et al. (2024); Jeevan   
+& Sethi (2022) and AS2DRoPE Chu et al. (2024) are suboptimal extensions of original RoPE in the   
+context of vision transformers. We illustrate the difference between APE, RPB and RoPE in Figure 2.   
+We observe a clear trend; newer and larger models often prefer position embeddings over attention   
+weight biases.  
+
+![](images/c888c1978e80ffaf9bb29085a8f2dcbea305100a36b0de30541c3cfa694acdf9.jpg)  
+Figure 2: Comparison between types of position embeddings. Absolute Position Embeddings are applied once to the tokens after patchifying, but RPB and RoPE are both applied in every attention block. RPBs are added to the attention map itself, whereas RoPE is applied to queries and keys. We observe that prominent models used APE and RPB in the early years of vision transformers. However, newer models like HDiT and EVA-CLIP, which have been scaled to up to 18 billion parameters, opt for the more scalable Rotary Position Embeddings. We see a growing trend towards the applying position embeddings to the tokens themselves in contrast to biasing attention weights.  
+
+2.3 FUSED ATTENTION IN VISION TRANSFORMERS  
+
+For most of its history, dot-product attention, one of the primary operations in the Transformer, has been implemented as back-to-back batched matrix multiplications (BMMs), now commonly referred to as BMM-style attention. The first BMM computes the dot products between query and key tokens, the softmax of which produces attention weights. Attention weights are then “applied” to the values by taking their weighted average using the corresponding scores in the weight matrix through the second BMM. At scale, this implementation can quickly become bounded by memory bandwidth and capacity. In the case of self attention, in addition to a quadratic time complexity, the memory footprint is also quadratic. This inspired “fused” attention implementations, the first practical example of which is Flash Attention Dao et al. (2022), which was later followed by Flash Attention V2 Dao (2023), FMHA Lefaudeux et al. (2022), and many more implementations. These methods successfully fuse the two BMMs and the softmax into one kernel by using partial softmax aggregation (since softmax involves a reduction), allowing them to scale to large sequence lengths. Through doing so, they improve performance by significantly reducing accesses to global memory, and instead keeping attention weights on much higher throughput local memory (shared memory). In addition, the global memory footprint is also reduced significantly. As a consequence, fused implementations are naturally less flexible in terms of allowing manipulation of attention weights. This presents a challenge to positional biases, which, even when implemented, can noticeably impact the performance of fused attention kernels.  
+
+In light of this, Rotary Position Embeddings are much better suited for fused attention because they do not operate on attention weights directly. Instead, RoPE is applied to to the query and key tensors prior to attention. This decoupling of positional biases and attention computation can significantly improve model performance. This work exploits this fact further by developing a fast RoPE implementation suited specifically for vision models.  
+
+
+
+\section{3 METHOD  }
+
+
+In this section, we will outline the usage of position embeddings in vision transformers. First, we will go over attention weight biases in Section 3.1 and then go on to formalize RoPE in Section 3.2. We comprehensively explain the existing 2D variants of RoPE in Section 3.3. Lastly, in Section 3.4, we will discuss some practical implications of using RoPE and present our fused implementation.  
+
+
+
+\section{3.1 ATTENTION WEIGHT BIASES  }
+
+
+Attention weight biases have become a common choice to add spatial biases in vision transformers. Attention weight biases assign a bias value for every query-key pair in the attention map. Techniques like Relative Positional Biases (RPB) use the relative position of query and key tokens to add a specific bias term to them. Attention weight bias is added directly to the raw attention weights calculated by taking the dot product between queries and keys. Formally, in a feature map of the size $(H,W)$ we will have queries $Q\in\mathbb{R}^{H W\times d}$ and keys $K\in\mathbb{R}^{\bullet_{H W\times d}}$ where $d$ is the channel dimension. A bias $\'{\boldsymbol{B}}\in\mathbb{R}^{H W\times H\dot{\boldsymbol{W}}}$ will be added to the attention weights as follows:  
+
+$$
+A=(Q K^{T})+B
+$$  
+
+In the case of RPB, the bias $B$ is parameterized as a smaller tensor but “viewed" as a tensor with the same shape as the attention weights. Generally, attention weight biases in vision transformers are learnable and thus need to be interpolated if the spatial resolution of the input image changes. Moreover, they cause a bottleneck in the backward pass of any fused attention kernel. We delve into practical implications of attention weight biases in Section 3.4.  
+
+
+
+\section{3.2 ROTARY POSITION EMBEDDINGS  }
+
+
+Rotary Position Embeddings (RoPE) Su et al. (2021) were proposed to equip tokens in language models with stronger positional information. RoPE applies position embeddings based on the global position of the token in the sequence, but the actual embedding function is derived to keep the relative distances amongst two tokens intact irrespective of their global positions.  
+
+Rotary Position Embeddings impart spatial bias by chunking the feature vector of dimension $d$ into $d/2$ chunks of two elements each, and rotating each chunk in the Argand plane. The angle of rotation is decided based on the token’s position in the sequence. Formally, considering a token $\mathbf{x}$ at index $t$ in a sequence of length $N$ , its resulting embedding $\mathbf{x}^{t}$ will be given by  
+
+$$
+\mathbf{x}_{j,k}^{t}=\mathbf{x}_{j,k}e^{i\theta_{j}^{t}}\ \forall\ j
+$$  
+
+$$
+\theta_{j}^{t}=t*f_{\theta}(j,d)
+$$  
+
+where $j,k$ are the dimension indices and $j\,\in\,\{0,...,d/2-1\}$ and $k\,=\,j\,+\,d/2$ . Here $f_{\theta}(j,d)$ is the rotation angle generator – it produces an angle for each dimension index, given $j$ and $d$ . Conventionally, the angle generator is given by $f_{\theta}(j,\bar{d})=10000^{-2j/d}$ in LLMs like Llama Touvron et al. (2023a). Now, consider a query and key $\mathbf{q}^{m},\mathbf{k}^{n}$ at the positions $m$ and $n$ respectively with RoPE applied according to their positions. Their corresponding entry $A_{m,n}$ in the attention matrix will be given by  
+
+$$
+\begin{array}{l}{{\displaystyle A_{m,n}={\bf q}^{m}\cdot{\bf k}^{n}}\ ~}\\ {{\displaystyle A_{m,n}=\sum_{j}{\bf q}_{j,k}{\bf k}^{\prime}{}_{j,k}\ e^{i(\theta_{j}^{m}-\theta_{j}^{n})}}\ ~}\end{array}
+$$  
+
+where ${\bf q}_{j,k}$ is the unmodified $j,k$ chunk of the query vector and $\mathbf{k}_{\,\,j,k}^{\prime}$ is the unmodified complex conjugate of the $j,k$ chunk of the key vector. "·" represents dot product of two vectors.  
+
+We make some key observations from Equation 3. First, the relativity of two tokens is captured by each chunk in the exponent $\theta_{j}^{m}-\theta_{j}^{n}$ . Second, as $m-n$ increases, $|\sum_{j}e^{i(\theta_{j}^{m}-\theta_{j}^{n})}|$ decreases, implying decay of influence when the relative distance between the tokens increases. This makes RoPE a preferred choice for injecting positional bias in both self and local attention mechanisms, as the property of relativity holds in both cases. We discuss practical benefits of RoPE in Section 3.4.  
+
+![](images/0e24c2bceccc71365a42594e29abd64362f07ca20e3df3ff932099e327f14267.jpg)  
+Rotation of chunks w.r.t. positions in X and Y axis in the image.  
+
+Figure 3: Illustration of RoPE for images. In this figure, two elements of the same color denote a single point on the Argand plane. We interleave the elements to denote that half of the elements constitute the real part and the other half constitute the complex part of the points. Here $k_{r o p e}=2$ , thus, we use only the first half of the feature to encode positional information.  
+
+
+
+\section{3.3 AXIAL ROTARY POSITION EMBEDDINGS  }
+
+
+We introduced RoPE for a one-dimensional sequence of tokens in Section 3.2. We will now extend it for images, which have a two-dimensional array of tokens. We will elucidate the intricate changes made to RoPE to make it suitable for multi-resolution 2D settings.  
+
+
+
+\section{3.3.1 EXTENDING ROPE FOR 2-D TOKEN ARRAYS  }
+
+
+Consider a 2-D feature map of the spatial dimensions $(H,W)$ . To extend the current approach of RoPE from the 1-D setting, we will simply decompose the two-dimensional position index into two one-dimensional positional indices. Naturally, this means that each position will have an index corresponding to the $\Chi$ -axis and one corresponding to the Y-axis. We will then assign a rotation angle for each position index in both axes.  
+
+Secondly, we will divide the number of dimensions in two parts – one part for one axis each. We will then proceed to further divide each part into two to represent the real and complex parts each, creating a total of four parts of the entire feature vector. The first and third chunks are treated as the real and complex parts for the position in Y-axis, and the second and fourth chunks are treated as the real and complex parts for the token’s position in X-axis. This is illustrated in Figure 3. Formally, this can be expressed as follows. Given an unmodified query vector $\mathbf{q}$ at the position $(y,x)$ , its resulting embedding $\mathbf{q}^{y,x}$ will be given by  
+
+$$
+\begin{array}{r l}&{\mathbf{q}^{y,x}=\left\{q_{j,k}\;e^{i\theta_{j}^{x}}\;\;\forall\;j\in\{0,...,d/4\}\right.}\\ &{\left.\quad\quad\quad\quad\quad q_{j,k}\;e^{i\theta_{j}^{y}}\;\;\forall\;j\in\{d/4,...,d/2\}\right.}\\ &{\theta_{j}^{x}=x*f_{\theta}(j,d)}\\ &{\theta_{j}^{y}=y*f_{\theta}(j-d/4,d)}\end{array}
+$$  
+
+and $k=j+d/2$ . An important thing to note is the angle generator is the same for both axes, however, we subtract the dimension index by $d/4$ so that both axes are treated in identical manner. In other words, the first $d/4$ indices hold the positional information in Y-axis and the second $d/4$ indices do the same for X-axis. The third and fourth $d/4$ chunks follow the same ordering, and carry the  
+
+![](images/94b60e6ea2288d834e6248a4ab9b6ff6285d30a23fc17e7aaca8a5af322ef771.jpg)  
+
+Table 1: Comparing the design decisions in 2D RoPE and Axial RoPE. We note these design decisions are inspired by different applications – 2D RoPE has been inspired by works in the LLM community whereas Axial RoPE has been inspired by works in the image generation space.  
+
+complex parts of the first and second chunks respectively. This way, we can encode a 2-D position in a single feature vector. Additionally, this approach can be extended to an arbitrary number of spatial dimensions, $n$ , with the only constraint $d$ (mod $2n)\equiv0$ . Since this implementation expands on 1D RoPE for the 2D case, we henceforth refer to this as 2D RoPE. Scalable vision models use this flavor of 2D RoPE, and is directly inspired from LLMs like LLaMA.  
+
+3.3.2 IMPROVING 2D ROTARY POSITION EMBEDDINGS  
+
+Image modality is vastly different from language requires a separate treatment compared to language. Modern generative models Karras et al. (2022); Nawrot et al. (2021); Crowson et al. (2024) use a specific variant of 2D RoPE implementation which makes it more suitable for the vision domain. The following changes are made to 2D RoPE, and we call the resulting variant as Axial RoPE.  
+
+Sampling $y,x$ between -1 and 1: Conventionally, the token index is the multiplicative factor that changes the rotation angle to signify different positions in the sequence. Language is inherently causal, and thus this approach makes sense in the language domain. However, an image does not follow the same notion. Thus, we sample the multiplicative factor by linearly interpolating between -1 and 1 for the spatial dimensions. We later empirically show that this is indeed equivalent than using the plain token indices as the multiplicative factor.  
+
+Bounded log sampling of rotation angles: The original RoPE implementation generates rotation angles through the function $f_{\theta}(j,d)=\bar{10000}^{-2j/d}$ $\boldsymbol{\mathscr{j}}$ is the dimension index). We note that using an bounded log-sampling for the base rotation angle causes the index-specific rotation angle to fluctuate gracefully. We log-sample our angle between $\pi$ and $10\pi$ . Our angle generator function is given by  
+
+$$
+f_{\theta}(j,d)=\exp{(j*(l o g(10\pi)-l o g(\pi))/d)}
+$$  
+
+Applying RoPE to only a fraction of the hidden dimensions: We empirically observe that applying RoPE to a fraction of hidden dimensions retains, or in some cases exceeds the performance of applying RoPE to the full feature vector. We hypothesize that this is because applying RoPE to all dimensions greatly mutilates the actual semantic information in the tokens. Additionally, applying RoPE to a fraction of hidden dimensions is sufficient to impart the necessary positional information. We divide the total dimensions by a positive integer divisor and apply RoPE to the resultant number of dimensions. We will henceforth refer to this divisor as $k_{r o p e}$ . In the following section, we will present empirical results analyzing $k_{r o p e}\in\{1,2,4,8,16\}$ . We will also draw correlations between multi-resolution performance and the fraction of hidden dimensions used.  
+
+Shared angles of rotation for all heads: One of the differences between 2D RoPe and Axial RoPE is the usage of same rotation angles for all heads. Axial RoPE uses different angles for all heads, and on the other hand, 2D RoPE uses the same rotation angles for all heads. We empirically study the effects of using shared or non-shared angles of rotation for 2D and Axial RoPE. Note that for non-shared rotation angles, RoPE is applied to the first $d/(h e a d s*k_{r o p e})$ dimensions for each head.  
+
+We summarize the differences between 2D and Axial RoPE in Table 1. In order to use RoPE to its best, we encourage practitioners to perform sweeps over $k_{r o p e}$ and using shared or non-shared angles with Axial and 2D RoPE for their specific use case. In this paper, we will empirically study the effect of these design choices on the ImageNet-1k dataset. We study the multi-resolution performance of each variant and draw connections with the implementation specifics and the choice of hyperparameters.  
+
+3.4 HARDWARE EFFICIENCY AND SCALABILITY OF ROPE VS RPB  
+
+As mentioned, Rotary Position Embeddings are applied to the query and key tensors, as opposed to attention weights in the case of RPBs. Moreover, RoPE is a more complex operation: for each of the two tensors, two elements are read from the feature vector, to which rotation is applied through reading one more element from the $\theta$ tensor, before the elements are stored back into the original tensor. This operation consists of multiple elementwise operations, all of which can grow quickly into a memory-bandwidth-bound bottleneck in eager mode. On the other hand, RPB is typically only a single elementwise operation, leading one to think that in theory RPB is more efficient.  
+
+However, there are two key issues with RPB in terms of performance: 1. though it is a single elementwise operation, we do not always have access to attention weights, a clear example of which is fused implementations. For example, Flash Attention V2 Dao et al. (2022) does not support attention biases at all, while FMHA Lefaudeux et al. (2022) only supports when they are fully materialized in global memory, and padded to meet memory alignment requirements, which can undo some of the performance improvements, as the positional biases will consume the same amount of memory that attention weights would. 2. Loading fully materialized attention biases or masks in fused attention kernels burdens their scalability. Fused attention kernels are typically compute bound, whereas unfused implementations of attention are heavily bound by memory bandwidth. Adding $O(n^{2})$ loads into fused attention kernels can make them memory bandwidth bound again at scale. FNA Hassani et al. (2024) on the other hand only supports RPB in the forward pass. 3. RPB’s backward pass is typically not an elementwise operation. Local / sparse attention will turn the RPB gradient into a reduction operation, which is considerably more difficult to performance optimize compared to elementwise operations. While fusing an elementwise operation into complex fused attention kernels such as Flash Attention V2 Dao (2023) is relatively trivial, fusing reduction operations into any kernel, especially fused attention kernels, is typically non-trivial. RoPE however is an elementwise operation both in the forward and in the backward pass. In fact, the only difference between the forward and backward pass is the sign of one element, which means:  
+
+• RoPE can be applied efficiently in both the forward pass and backward pass, • RoPE’s forward and backward pass implementations are almost identical, • RoPE is completely agnostic to the attention operator, making it compatible with all implementations out of the box.  
+
+Having said that, a vanilla PyTorch implementation made RoPE slower than RPB, even when using powerful fused attention implementations. This is primarily because multiple elementwise operations used in RoPE are not automatically fused into a single one, and while using tools such as torch.compile() does exactly that, they simply do not improve performance enough to justify switching from RPB. This motivated us to develop fast-rope, a fused CUDA implementation performing Axial RoPE on feature tensors. The implementation follows HDiT’s specifications Crowson et al. (2024): it can read operands of mixed precision levels, but computation is done strictly in higher precision. This allows us to perform the operation in place on the original tensor, without any extra type cast operations or kernel calls. We plan to open-source our library and release a Python package which will make using our library as easy as performing one function call.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We demonstrate the capabilities of Axial RoPE on four model families – ViT Dosovitskiy et al. (2021), Swin Liu et al. (2021), NAT Hassani et al. (2023) and DiNAT Hassani & Shi (2022) on the ImageNet1k dataset Russakovsky et al. (2015). Furthermore, we present the throughput gains obtained by using fused implementation of Axial RoPE combined with fused attention implementations. Lastly, we present our analysis on different existing RoPE methods, and discuss why we picked Axial RoPE.  
+
+4.1 CLASSIFICATION ON IMAGENET-1K  
+
+We evaluate Axial RoPE on the ImageNet-1k dataset and report the validation set accuracy in Table 2. Specifically, we report the scores for three cases – without using any positional information, with RPB, and with Axial RoPE $\langle k_{r o p e}=2\rangle$ ). We also report acheived throughput for all these cases. We  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/83d9be2dd26071c65dc7b389a0cdf3a55aa94cba946d68f6126ffd5e54302f30.jpg)  
+
+Table 2: ImageNet-1k top-1 accuracies: We present the top-1 accuracy on the ImageNet-1k validation split. We observe a accuracy over RPB across all model architectures and sizes.   
+
+![](images/6df91ec6636c25bab1d333c119a5e2ba0cb804b115f1dfa8c91682094ce02371.jpg)  
+
+Table 3: Inference throughput: We present the inference throughput for all models, using different attention mechanisms. Here “BMM-style” represents attention implemented with native PyTorch, without any optimizations. “Fused” represents Fused Neighborhood Attention (FNA) Hassani et al. (2024) in the case of NA-based models. “FMHA” represents xFormers’s implementation Lefaudeux et al. (2022), and $^{\bullet\bullet}F\!A\nu2^{\bullet\bullet}$ represents Flash Attention V2 Dao (2023). All numbers represent the throughput in images per second. We report the improvements over RPB in green.  
+
+observe consistent accuracy improvements across all model families spanning across a wide range of parameter counts and FLOPs. Interestingly, we see that larger models with high parameter counts, like the "Base" variants also enjoy the same performance boosts as the smaller models. We provide additional evaluations on ImageNet A Djolonga et al. (2021), ImageNet RHendrycks et al. (2021), ImageNet ReaLBeyer et al. (2020) and ImageNet V2 Recht et al. We clearly observe that RoPE outperforms RPB on all models, irrespective of their size or attention mechanism.  
+
+
+
+\section{4.2 BENCHMARKING FAST-ROPE  }
+
+
+In Table 3, we present throughputs of models with Axial RoPE using our fused implementation against models with RPB. We report inference throughput (i.e. forward pass throughput) using both BMM-style and fused attention implementations 1. For Neighborhood Attention, those would be the GEMM-based and fused kernels from NATTEN. For Swin and ViT, that would be xFormers’ FMHA and Flash Attention V2. We use Automatic Mixed Precision (AMP) in all tests to do FP16 inference. We observe considerable gains in almost all models, while being roughly equal in the case of Swin.  
+
+![](images/7c68b742f1e84ef852ff51213ece0578dd6488ebab49d3ea8221e103c438ea92.jpg)  
+
+Table 4: Multi-resolution performance for different values of $k_{r o p e}$ with shared angles for all heads. We highlight the best performing entry in every resolution group.   
+Table 5: Multi-resolution performance for different values of $k_{r o p e}$ with non-shared angles for all heads. We highlight the best performing entry in every resolution group.   
+
+![](images/bab444fd97a2eff8e69a910be07a7d069d8037871036f8a815d43b0d3a3327a5.jpg)  
+
+We attribute the slowdown in Swin to the nature of $\theta$ tensor, as it is larger in Swin due to the presence of the batch dimension. Even with this disadvantage, RoPE is able to catch up to RPB’s throughput.  
+
+
+
+\section{4.3 ANALYZING DESIGN DECISIONS IN ROPE  }
+
+
+We will now analyze the differences between the two implementations mentioned above – 2D RoPE and Axial RoPE. We will consider the choices of $k_{r o p e}$ and whether all heads use the same rotation angles. Through this analysis, we aim to empirically study the effect of these hyperparameters on RoPE and its multi-resolution performance on a wide range of testing resolutions. We perform all our ablations on ViT-Small trained with $224\,\mathrm{px}$ resolution.  
+
+Table 4 presents the performance when all heads share the same rotation angles. We make a striking observation – 2D RoPE with a high value of $k_{r o p e}$ often performs best. In the case where training and testing resolution are the same $(224\,\,\mathrm{px})$ , we observe Axial RoPE has its best performance at $k_{r o p e}=8$ and is roughly the same for other values of $k_{r o p e}$ . We observe similar effects for resolutions relatively closer to training resolution, specifically 192 and $256\,\mathrm{px}$ . Moving to Table 5, we report the numbers in the case where all heads have different rotation angles. In most cases, we observe Axial RoPE to outperform 2D RoPE. Both of these ablations suggest that only a fraction of hidden dimensions are enough to impart positional information using RoPE. In both shared and non-shared angles, we observe that Axial RoPE with a high value of $k_{r o p e}$ is superior to 2D RoPE for most inference resolutions, including the training resolution itself.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we propose using Rotary Position Embeddings (RoPE) instead of Relative Positional Biases (RPB), in order to achieve better performance and better accuracy. We presented empirical evidence and analysis to support this proposition. Further, to accelerate RoPE compared to RPB, we developed fast-rope, a fast, CUDA-based implementation of RoPE, and showed its speedup through careful model-level benchmarking. We conducted empirical analysis on two RoPE methods: Axial RoPE and 2D RoPE. We introduced a new hyperparameter, $k_{r o p e}$ , to control the fraction of hidden dimensions used in RoPE for both implementations, and observed that applying RoPE to only half, 1/4th, or even 1/8th of the hidden dimensions is enough to reasonably introduce positional information and achieve competitive accuracy. As a result of these findings, we foresee widespread adoption of RoPE in isotropic and hierarchical vision transformers in the near future.  
+
+
+

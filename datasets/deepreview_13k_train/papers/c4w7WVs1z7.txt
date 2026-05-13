@@ -1,0 +1,787 @@
+\title{Recurrent Action Transformer with Memory}
+
+\begin{abstract}
+Recently, the use of transformers in offline reinforcement learning has become a rapidly developing area. This is due to their ability to treat the agent's trajectory in the environment as a sequence, thereby reducing the policy learning problem to sequence modeling. In environments where the agent's decisions depend on past events (POMDPs), it is essential to capture both the event itself and the decision point in the context of the model. However, the quadratic complexity of the attention mechanism limits the potential for context expansion. One solution to this problem is to extend transformers with memory mechanisms. This paper proposes a Recurrent Action Transformer with Memory (RATE), a novel model architecture that incorporates a recurrent memory mechanism designed to regulate information retention. To evaluate our model, we conducted extensive experiments on memory-intensive environments (ViZDoom-Two-Colors, T-Maze, Memory Maze, Minigrid-Memory), classic Atari games, and MuJoCo control environments. The results show that using memory can significantly improve performance in memory-intensive environments, while maintaining or improving results in classic environments. We believe that our results will stimulate research on memory mechanisms for transformers applicable to offline reinforcement learning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:introduction}
+\begin{wrapfigure}{r}{0.6\textwidth}
+    \centering
+    \includegraphics[width=0.6\textwidth]{plots/RATE_scheme.png}
+    \caption{Recurrent Action Transformer with Memory (RATE). $R$ -- returns-to-go, $o$ -- observations, $a$ -- actions, $M_n$ -- segment's $S_n$ memory embeddings.}
+    \label{fig:RATE_scheme}
+\end{wrapfigure}
+Transformers~\citep{vaswani2017attention}, originally developed for Natural Language Processing (NLP), perform well in Reinforcement Learning (RL)~\citep{agarwal2023transformers,li2023a}: online RL~\citep{parisotto2020stabilizing,esslinger2022dtqn,melo2022transformers,team2023human}, offline RL~\citep{chen2021decision,lee2022multi,jiang2023efficient}, and model-based RL~\citep{chen2022transdreamer, micheli2023transformers,robine2023transformerbased}, including solving the credit assignment problem and working in memory-intensive environments~\citep{chen2021decision,ni2023when,grigsby2024amago}, provided that the entire trajectory fits within the model context. However, transformers struggle with long sequences due to quadratic attention complexity, limiting their use in long inference tasks. Several approaches attempt to increase the context size~\citep{dai2019transformerxl,bulatov2022rmt,ding2023longnet}, but such models may become unstable when trained on long sequences~\citep{zhang2022opt}, or use a specific sparse attention mechanism that is unsuitable for non-NLP tasks~\citep{beltagy2020longformer,zaheer2020big,ding2023longnet}. 
+Memory mechanisms offer a promising solution to account for past information without increasing context size. Our work explores memory in transformers for RL, inspired by NLP results~\citep{dai2019transformerxl,bulatov2022rmt}. 
+The RL setting differs from NLP in the processing of input sequences, requiring specialized encoders for observations, rewards, and actions, and is also characterized by significant sparsity in some tasks.
+
+In RL memory has two senses. One is using past information within an episode to make decisions~\citep{lampinen2021towards,ni2023when}. The other is transferring experience from one environment to another~\citep{melo2022transformers,kang2023think,team2023human}, improving generalizability, sample efficiency, and solving Meta-RL~\citep{duan2016rl,wang2016learning} tasks. Our work focuses on the first case~\citep{ni2023when}: using past information to make decisions within the same episode.
+
+In this paper, we propose the \textbf{Recurrent Action Transformer with Memory} (\textbf{RATE},~\autoref{fig:RATE_scheme}), a model that uses several memory mechanisms: memory embeddings, caching of previous hidden states, and \textbf{Memory Retention Valve} (\textbf{MRV}). We empirically show that memory mechanisms effectively preserve information from previous steps, allowing the model to use past information when making decisions in the present.
+MRV is designed to control the process of updating memory embeddings and prevent the loss of important information when processing long sequences, thus enabling the processing of highly sparse tasks.
+To evaluate the memory mechanisms, we perform extensive experiments in memory-intensive environments: ViZDoom-Two-Colors~\citep{memup}, Memory Maze~\citep{pasukonis2022memmaze}, Minigrid-Memory~\citep{MinigridMiniworld23}, and Passive T-Maze~\citep{ni2023when}, as well as on standard RL benchmarks: Atari~\citep{bellemare2013arcade} and MuJoCo~\citep{d4rl}. We also study the impact of memory on the performance of the proposed model.
+
+The proposed model interpolates and extrapolates well outside the transformer context, is able to retain important information for a long time when operating in highly sparse environments, and allows to compensate the effect of bias in the training data.
+
+Our contribution can be summarized as follows: 
+\begin{enumerate}
+    \item We propose the Recurrent Action Transformer with Memory (RATE), a transformer model for offline RL that makes use of memory mechanisms: memory embeddings, caching of hidden states, and the Memory Retention Valve (MRV). The proposed MRV is based on the cross-attention architecture and is designed to prevent information loss from memory embeddings and significantly improve the performance of RATE in memory-intensive environments with sparse structure (see~\autoref{sec:rate}).
+
+    \item We show that RATE significantly outperforms strong baselines with and without memory mechanisms in memory-intensive environments, including ViZDoom Two-Colors, Memory Maze, Minigrid-Memory, and T-Maze (see~\autoref{sec:exp_res}).
+
+    \item We demonstrate that RATE achieves better or comparable results in classic Atari games and MuJoCo control tasks, demonstrating that the proposed model is suitable for different types of tasks and emphasizing its universality (see~\autoref{sec:exp_res}).
+    
+\end{enumerate}
+
+
+\section{Background}
+
+\subsection{Offline Reinforcement Learning}
+\label{background:offline-rl}
+In RL~\citep{sutton2018reinforcement}, we assume that the task can be described by a Markov Decision Process (MDP) as a tuple $\langle \mathcal{S},\mathcal{A}, \mathcal{P}, \mathcal{R}\rangle$. The process consists of states $s \in \mathcal{S}$, actions $a \in \mathcal{A}$, a state transition function $\mathcal{P}(s'|s,a)$, and an immediate reward function $r = \mathcal{R}(s,a)$. The states are assumed to have the Markov Property, that is $\mathbb{P}(s_{t+1}|s_t) = \mathbb{P}(s_{t+1}|s_1,\dots, s_t)$. Given a timestep $t$, we use $r_t = R(s_t,a_t)$ to denote the immediate reward that the agent receives at state $s_t$ performing action $a_t$ at that timestep. We describe trajectory $\tau$ of length $T$ as a sequence of states $s_i$, actions $a_i$, and immediate rewards $r_i$: $\tau = (s_0, a_0, r_0,s_1, a_1, r_1,\dots, s_{T-1}, a_{T-1}, r_{T-1})$. We denote return-to-go~\citep{chen2021decision} $R_t$ of trajectory $\tau$ at the timestep $t$ as a sum of future rewards from the timestep $t$ to the end of trajectory: $R_t = \sum^{T-1}_{t'=t}r_{t'}$. The goal of a RL agent is to learn policy $\pi$ that maximizes the expected return. In online RL, the trajectories used to train an agent are obtained iteratively as the agent interacts with the environment. In offline RL, the agent does not interact with the environment during training. A fixed set of trajectories collected by an arbitrary policy is used for training. Although such a setting is more difficult because it does not allow additional exploration of the environment or generation of new trajectories, it is preferable for tasks where interaction with the environment is costly or risky, such as in robotics.
+\subsection{Partially Observable Markov Decision Process}
+\label{background:pomdp}
+In the real world, there are frequent situations where the full state of the environment is not available to the agent, so the Markov Property is violated, and the agent is said to receive observations instead of state as input. In this case, observations are no longer sufficient statistics of the past to make a decision in the current step. An example would be a robot navigating an environment based on a camera image or a situation in which a decision must be made based on information from the past that is not available in the current observation. A Partially Observable Markov Decision Process (POMDP) is used in such cases. POMDP is a generalization of the MDP and is written as $\langle \mathcal{S},\mathcal{A}, \mathcal{O},\mathcal{P}, \mathcal{R},\mathcal{Z}\rangle$, where $o \in \mathcal{O}$ -- observations, $s \in \mathcal{S}$ -- states, $a \in \mathcal{A}$ -- actions, $r = \mathcal{R}(s,a)$ -- immediate reward function, $\mathcal{P}(s'|s,a)$ -- state transition function and $\mathcal{Z}$ is an observation function $\mathcal{Z}^{a}_{s'o} = P(O = o_{t+1} | S_{t+1} = s', A_t = a)$. 
+To work successfully in such environments, mechanisms such as memory are needed to allow the use of information from the past~\citep{parisotto2020stabilizing,lampinen2021towards,esslinger2022dtqn}. In our work, we propose an approach of adding memory to the agent in the form of memory embeddings, caching of hidden states, and MRV. In this paper we consider the setting of an offline model-free RL, where learning is formulated as a sequence modeling problem~\citep{chen2021decision}.
+
+
+
+\section{Recurrent Action Transformer with Memory}
+
+\label{sec:rate}
+
+\begin{wrapfigure}[29]{r}{0pt}
+\begin{minipage}{0.57\linewidth}
+\begin{algorithm}[H]
+    \caption{Recurrent Action Transformer with Memory}
+    \label{alg:rate}
+    \textbf{Input}: $R \in \mathbb{R}^T, o \in \mathbb{R}^{d_{o}\times T}, a \in \mathbb{R}^T$\\
+    \textbf{Parameters}: $M \in \mathbb{R}^{m \times d}$ \\
+\begin{algorithmic}[1] %[1] enables line numbers
+    \STATE $\tilde{R} \in \mathbb{R}^{T\times d} \leftarrow \texttt{Encoder}_{R}(R)$ \\
+        $ \ \tilde{o} \in \mathbb{R}^{T\times d} \leftarrow \texttt{Encoder}_{o}(o)$ \\
+        $ \ \tilde{a} \in \mathbb{R}^{T\times d} \leftarrow \texttt{Encoder}_{a}(a)$ \\
+
+    \STATE $\tau_{0:T-1} \leftarrow \{(\tilde{R}_0, \tilde{o}_0, \tilde{a}_0),\ldots,(\tilde{R}_{T-1}, \tilde{o}_{T-1}, \tilde{a}_{T-1})\}$ \\
+
+    \STATE $M \leftarrow M_0 \sim \mathcal{N}(0,1)$\\
+    
+    \FOR{n $\textbf{in range } [0, T//K-1]$}
+        \STATE $S_n \in \mathbb{R}^{3K\times d} \leftarrow \tau_{n\times K:(n+1)\times K}$\\
+
+        \STATE $\tilde{S}_n \in \mathbb{R}^{(3K+2m)\times d} \leftarrow \texttt{concat}(M_n, S_n, M_n)$\\
+
+        \STATE $\hat{a}_n, M_{n+1} \leftarrow \texttt{Transformer}(\tilde{S}_n)$\\
+
+        \STATE $M_{n+1} \leftarrow \texttt{MRV}(M_n, M_{n+1})$\\
+
+        \textbf{Output}:  $\hat{a}_n \rightarrow \mathcal{L}(a_n, \hat{a}_n), \ M_{n+1}$
+    \ENDFOR \\
+    
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+    \caption{Memory Retention Valve}
+    \label{alg:mrv}
+    \textbf{Input}: $M_n, M_{n+1}\in \mathbb{R}^{m \times d}$\\
+    \textbf{Parameters}: $\mathbf{W}_{Q}^h, \mathbf{W}_{K}^h, \mathbf{W}_{V}^h\in \mathbb{R}^{d_h \times d}, \mathbf{W}_M\in \mathbb{R}^{d \times d}$ \\
+\begin{algorithmic}[1] %[1] enables line numbers
+    \STATE $\mathbf{Q}_h \leftarrow M_n \mathbf{W}_Q^{h \ T}$ \\
+    
+    \STATE $\mathbf{K}_h \leftarrow M_{n+1} \mathbf{W}_K^{h \ T}$\\
+    
+    \STATE $\mathbf{V}_h \leftarrow M_{n+1} \mathbf{W}_V^{h \ T}$\\
+
+    \STATE $M_{n+1}^h \leftarrow \texttt{softmax}(\frac{\mathbf{Q}_h\mathbf{K}_h^T}{\sqrt{d}})\mathbf{V}_h$\\
+
+    \STATE $M_{n+1} \leftarrow \texttt{concat}(M_{n+1}^0,\ldots,M_{n+1}^h)$\\
+
+    \STATE $M_{n+1} \leftarrow M_{n+1}\mathbf{W}_M^T$\\
+    
+    
+\end{algorithmic}
+\textbf{Output}:  $M_{n+1}$
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+In this paper, we introduce a new architecture, \underline{R}ecurrent \underline{A}ction \underline{T}ransformer with M\underline{e}mory (RATE), in which we utilized recurrently trained memory embeddings~\citep{bulatov2022rmt} and caching of previous hidden states~\citep{dai2019transformerxl} to add memory, and Memory Retention Valve (MRV) to control information leakage from memory embeddings, allowing sparse sequences to be processed. The architecture of RATE is shown in~\autoref{fig:RATE_scheme}.
+
+The RATE scheme is outlined in Algorithm~\ref{alg:rate}. In the initial phase, we obtain embeddings $\tilde{R}$, $\tilde{o}$ and $\tilde{a}$ from the returns-to-go $R$, observations $o$, and actions $a$, respectively, using the corresponding encoders from~\autoref{tab:encoders}. We then generate a trajectory $\tau_{0:T-1}$ consisting of triplets of these embeddingsx according to the technique described in the Decision Transformer (DT)~\citep{chen2021decision} paper (Algorithm~\ref{alg:dt}). 
+
+Next, the trajectory $\tau_{0:T-1}$ is divided into $N=T//K$ segments $S_n\in \mathbb{R}^{3K\times d}, \ n\in [0,N-1]$, each consisting of $K$ triplets, where $K$ is the context length and $d$ is the model dimension.
+To each segment $S_n$, memory embeddings $M_n \in \mathbb{R}^{m\times d}$ are concatenated at the beginning and at the end, forming a $\tilde{S}_n \in \mathbb{R}^{(3K+2m)\times d}$, where $m$ is the number of memory embeddings.
+These segments $\tilde{S}_n$ are then fed into the transformer and the output is the predicted actions $\hat{a}_n = \hat{a}_{n\times K:(n+1)\times K}$, which are used to compute loss, and new memory embeddings $M_{n+1}$, which are then processed by the MRV block and transmitted to the next segment $S_{n+1}$.
+
+The MRV scheme is presented in Algorithm~\ref{alg:mrv} and is based on the cross-attention basis. 
+After the transformer processes the segment $S_n$, the previous memory embeddings $M_n$ and the new memory embeddings $M_{n+1}$ obtained at the output of the transformer are fed to the input of the MRV block.
+Next, $M_n$ are multiplied by the query matrix $\mathbf{W}_{Q}^h$, and $M_{n+1}$ are multiplied by the key $\mathbf{W}_{K}^h$ and value $\mathbf{W}_{V}^h$ matrix for each of the attention heads $h$. 
+Then the attention scores are calculated using the $\texttt{softmax}()$ function, the results for each of all attention heads are concatenated and after linear transformation using the matrix $\mathbf{W}_M^T$ the final memory tokens $M_{n+1}$ are obtained at the output, which is passed to the next segment. 
+
+Unlike the DT learning process, where random fragments of length $K$ are cut from trajectories, we process segments of length $K$ sequentially, which allows us to capture all information in the processed trajectory. Thus, using memory mechanisms, we are able to process sequences of length $K_{eff} = K\times N$, where $K_{eff}$ is the effective context~\citep{bulatov2022rmt}.
+
+
+\section{Experimental Evaluation}
+
+We designed experiments to accomplish two primary objectives: (a) to demonstrate the advantage of our RATE model in memory-intensive environments (T-Maze~\citep{ni2023when}, ViZDoom-Two-Colors~\citep{memup}, Memory Maze~\citep{pasukonis2022memmaze}, Minigrid-Memory~\citep{MinigridMiniworld23}), and (b) to investigate the effectiveness of the proposed model in classical MDPs to demonstrate its versatility (Atari~\citep{bellemare2013arcade} and MuJoCo~\citep{d4rl}). 
+
+For comparison with RATE, we chose DT~\citep{chen2021decision} as the main baseline, and adapted the memory-augmented architectures Recurrent Memory Transformer (RMT)~\citep{bulatov2022rmt} and Transformer-XL (TrXL)~\citep{dai2019transformerxl} developed for NLP tasks to the RL domain. Information about the environments used can be found in~\autoref{tab:envs_description}.
+
+\subsection{Memory-intensive environments}
+To test RATE memory mechanisms, we use memory-intensive environments~\autoref{fig:memory_envs}, i.e., environments where the agent requires memory to operate successfully. A brief description of these environments is presented below, and a full description and data collection methodology can be found in the~\autoref{app:envs}.
+\begin{enumerate}[left=0pt]
+    \item \textbf{ViZDoom-Two-Colors}~\citep{memup} -- an agent in an acid-filled room observes a quickly disappearing green or red pillar. To stay alive, the agent must recall the pillar's color and gather items of the same color.
+
+    \item \textbf{T-Maze}~\citep{ni2023when} -- an agent navigates a T-shaped corridor, receiving a clue at the start about which direction to turn at the end of the corridor. The task tests memory in a prolonged sparse reward environment (the agent receives a reward only at the end).
+    
+    \item \textbf{Memory Maze}~\citep{pasukonis2022memmaze} -- an agent navigates a maze, seeking objects matching the color of its view frame. The frame color changes after each successful find. The goal is to collect the most matching objects within a time limit.
+
+    \item \textbf{Minigrid-Memory}~\citep{MinigridMiniworld23} -- a similar task to T-Maze, but with different observation spaces and reward functions (see~\autoref{app:envs},~\autoref{tab:envs_description}). Another important difference is that the agent appears at a random point at the beginning of the episode, not at the beginning of the corridor. Thus, in the case of Minigrid-Memory, it is necessary to reach that clue first (in T-Maze it is a memory problem, in Minigrid-Memory it is a memory and credit assignment problem~\citep{ni2023when}).
+
+\end{enumerate}
+
+\begin{figure*}[t]
+    \begin{center}
+    \includegraphics[width=1.0\textwidth]{plots/memory_envs_2.png}
+    \caption{Memory-intensive environments with different observation spaces and reward functions used to test the performance of the memory mechanism in the RATE model.}
+    \label{fig:memory_envs}
+    \end{center}
+\end{figure*}
+
+In the experiments, the same hyperparameters presented in~\autoref{tab:atariparams} were used for RATE, DT, RMT, and TrXL to simplify the comparison. The context length $K$ and the number of segments $N$ were chosen so that the effective context $K_{eff}=K\times N$ for RATE, RMT, and TrXL covers important events in memory-intensive environments during training. In turn, since DT has no memory mechanisms, for it $K=K_{eff}$. Thus, the context length $K$ for RATE, RMT and TrXL is less than the context length for DT by a factor of $N$, but all models process the same parts of trajectories. More information about the training procedure for each environment can be found in~\autoref{app:training}.
+
+\subsection{Experimental Results} 
+\label{sec:exp_res}
+In this section, the main experimental results for each of the environments are presented in the corresponding paragraphs. Additional results can be found in the~\autoref{app:add_app}. For each of the experiments, the same techniques were used for all models to obtain the results presented in the~\autoref{app:stats}. Unless otherwise indicated, all baselines were trained from scratch.
+\paragraph{ViZDoom-Two-Colors.}
+The dataset for this environment was collected using a pre-trained Advantage Actor Critic (A2C)~\citep{DBLP:journals/corr/abs-1904-01806}, which has a slight bias in favor of selecting green items even if red items are required. However, the dataset is balanced by the pillars colors. \autoref{fig:vizdoom_pil_no_pil} (a) shows the inference results on all pillars, separately only on red pillars and separately only on green pillars.
+As illustrated in the \autoref{fig:vizdoom_pil_no_pil} (a), for inference with the presence of a disappearing pillar at the beginning of the episode, all baselines have an average total reward for inference on green pillars greater than for inference on red pillars. 
+
+To prove that this is not due to the peculiarities of the algorithms, but to the presence of bias in the data, we performed an additional inference without a pillar at the beginning of the episode, demonstrating the ability of all baselines to collect exclusively green items. As can be seen from \autoref{fig:vizdoom_pil_no_pil} (b), DT learns the distribution of training data and is unable to remember the pillar color. In turn, baselines with memory mechanisms such as RATE, RMT and TrXL are successful in this task. The poor performance of baselines with memory on red pillars without the pillar at the episode beginning proves that it is the color of the pillar that they remember.
+\begin{figure}[t]
+    \begin{center}
+    
+    \includegraphics[width=\textwidth]{plots/rate_vizdoom_main.png}
+    \caption{Results for the ViZDoom-Two-Colors: with (\textbf{a}) and without (\textbf{b}) pillar in the first $45$ steps of the episode; calculated at environment steps $0$ -- $89$ (\textbf{c}) and $90$ -- $179$ (\textbf{d}); depending on the return-to-go (\textbf{e, f, g}). Pillar disappears after first $45$ steps, $K_{eff} = 90$.}
+    \label{fig:vizdoom_pil_no_pil}
+    
+    \end{center}
+\end{figure}
+This conclusion of DT's inability to use information out of context as opposed to RATE is supported by the experimental results presented in~\autoref{fig:vizdoom_pil_no_pil} (c, d), which illustrates the inference results for the first $90$ steps, where the pillar are entirely captured in the effective context, and the subsequent $90$ steps, where the pillar color information begins to disappear from the effective context (the context window moves as a sliding window). As a result, there is a drop in total reward for red-pillar environments by almost a factor of two, indicating DT's inability to memorize information to use it out of context. In turn, for RATE, RMT, and TrXL, the values of total reward in the first and second cases are almost unchanged, indicating their ability to utilize information outside of the current context window.
+
+\autoref{fig:vizdoom_pil_no_pil} (e, f, g) demonstrates the dependence of model performance on the return-to-go. In this paper, we used an empirical estimate of the target reward as the average of the top-$10$ total rewards in the training dataset. As can be seen, RATE not only significantly outperforms DT, but also outperforms the memory-augmented models RMT and TrXL.
+
+Furthermore, \autoref{tab:new_baselines} demonstrates that RATE outperforms not only transformer-based models (RMT, TrXL), but also recurrent baselines, which forget the pillars color fairly quickly and start to collecting green items like DT.
+
+\paragraph{T-Maze.}
+\label{par:t_maze}
+The \autoref{fig:tmaze_results} shows the inference results for the T-Maze. 
+To validate an agent's long-term memory capabilities, we performed training on trajectories of length $90$ and inference on corridors of size $30$ -- $900$, i.e. much larger than the effective context $K_{eff}=90$ of models. The \autoref{fig:tmaze_results} demonstrates that DT's ability to solve the task is limited by the length of the corridors in the training data. Specifically, DT-3, trained on trajectories of length $3\times 30=90$ with $K=K_{eff}=90$, exhibits a significant drop in performance (reaching a random turn guessing accuracy of $0.5$) when tasked with inference on corridors exceeding $90$ in length. 
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{plots/rate_tmaze_main.png}
+    \caption{Results for the T-Maze environment with $K_{eff}=30\times 3 = 90$. The notations are represented as MODEL-N, where N is the number of segments into which the trajectories are divided.
+    }
+    \label{fig:tmaze_results}
+\end{wrapfigure}
+In turn, RATE-3, RMT-3, and TrXL-3 (trained on $3\times 30=90$ steps) perform significantly better at inference corridor lengths longer than the model saw during training. Moreover, RATE-3 outperforms other memory-augmented baselines, indicating its ability to perform effectively in sparse environments. This confirms the ability of the RATE model to successfully memorize important information and retain it through a long time.
+
+Additionally, \autoref{tab:new_baselines} compares RATE with recurrent baselines. The results indicate that these baselines, unlike RATE, cannot handle sparse information, as shown by SR $=0.5$.
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{table}[h]
+\begin{center}
+\caption{Comparison of Transformer (DT), RNN (Decision LSTM (DLSTM)~\citep{dlstm}, Decision GRU (DGRU)) and SSM (Decision Mamba (DMamba)~\citep{gu2023mamba}) models with RATE in memory-intensive environments.
+Results indicate the inability of RNN and SSM models to perform successfully in long-term memory sparse (T-Maze) and continuous (ViZDoom-Two-Colors) environments, in contrast to RATE. SR -- Success Rate. DGRU is obtained by replacing the LSTM block with the GRU block~\citep{gru} in DLSTM.
+}
+\label{tab:new_baselines}
+\tiny
+\begin{adjustbox}{width=1\textwidth}
+\begin{tabular}{lccccc}
+\toprule
+
+~
+& \multicolumn{5}{c}{\textbf{T-Maze}} \\
+\cmidrule(l){2-6}
+& \extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{tabular}{@{}c@{}}\textbf{DLSTM}~\citep{dlstm} \\ ($K=90$) \end{tabular}  
+& 
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{tabular}{@{}c@{}}\textbf{DGRU} \\ ($K=90$)\end{tabular}  
+& \extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{tabular}{@{}c@{}}\textbf{DMamba}~\citep{gu2023mamba} \\ ($K=90$) \end{tabular}  
+& \extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{tabular}{@{}c@{}}\textbf{DT}~\citep{chen2021decision} \\ ($K=90$) \end{tabular} 
+& \extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{tabular}{@{}c@{}}\textbf{RATE} \\ ($K_{eff}=3\times 30 = 90$) \end{tabular} 
+
+\\
+
+\midrule
+
+\textbf{SR ($T = 90$)}
+& 0.5 $\pm$ 0.0
+& 0.5 $\pm$ 0.0
+& 0.5 $\pm$ 0.0
+& \textbf{1.0 $\pm$ 0.0}
+& \textbf{1.0 $\pm$ 0.0}
+\\
+
+\midrule
+~
+& \multicolumn{5}{c}{\textbf{ViZDoom-Two-Colors}} \\
+\cmidrule(l){2-6}
+
+\textbf{Reward[Total]}
+& 13.1 $\pm$ 0.6~~
+& 12.9 $\pm$ 0.2~~
+& 26.9 $\pm$ 1.9~~
+& 24.8 $\pm$ 1.4~~
+& \textbf{41.5 $\pm$ 1.0~~}
+\\
+
+\textbf{Reward[Reds]}
+& 8.8 $\pm$ 0.7
+& 9.4 $\pm$ 0.5
+& 6.9 $\pm$ 0.4
+& 7.2 $\pm$ 0.4
+& \textbf{38.2 $\pm$ 5.1~~}
+\\
+
+\textbf{Reward[Greens]}
+& 17.5 $\pm$ 1.6~~
+& 16.3 $\pm$ 0.8~~
+& \textbf{46.9 $\pm$ 4.2~~}
+& \textbf{42.3 $\pm$ 3.3~~}
+& \textbf{44.7 $\pm$ 5.8~~}
+\\
+
+\bottomrule
+
+\end{tabular}
+\end{adjustbox}
+\end{center}
+\end{table}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{plots/rate_minigrid_main.png}
+    \caption{Results for the Minigrid-Memory environment, $K_{eff}=10\times 3=30$.
+    }
+    \label{fig:minigrid_results}
+\end{wrapfigure}
+
+\paragraph{Minigrid-Memory.}
+The \autoref{fig:minigrid_results} shows the results for the Minigrid-Memory. Training was conducted on grids of size $31$x$31$, inference was conducted on grids of size $11$x$11$ -- $91$x$91$.
+Unlike the previously discussed T-Maze, the credit assignment problem is also addressed here, since the agent first has to reach the oracle and find out which object to turn towards in the future. 
+
+The results show that TrXL performs better than the other baselines on grids of size smaller or equal to those used in training, and worse than the other baselines on larger grids, that is, it interpolates well and extrapolates poorly. In turn, for RMT we observe exactly the opposite situation: RMT interpolates poorly and extrapolates well. RATE performs slightly worse than TrXL but better than RMT on small grid sizes, and slightly worse than RMT but better than TrXL on large grid sizes, but on average has interpolation and extrapolation abilities better than RMT and TrXL individually, as well as greater stability.
+\paragraph{Memory Maze.}
+
+\autoref{tab:memory_maze} shows the results of comparing RATE with other basic baselines with and without memory. The results show that RATE is able to memorize the implicit information like maze structure more efficiently, which is reflected in a higher average reward per episode.
+
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{table*}[h]
+\small
+\caption{Results for the Memory Maze $9$x$9$ environment.}
+\label{tab:memory_maze}
+\begin{center}
+
+\begin{adjustbox}{width=1\textwidth}
+\begin{tabular}{lcccc}
+\toprule
+& \textbf{DT~\citep{chen2021decision}} 
+& \textbf{RMT~\citep{bulatov2022rmt}}
+& \textbf{TrXL~\citep{dai2019transformerxl}}
+& \textbf{RATE} \\
+
+\cmidrule(l){2-5}
+
+Reward  
+& 6.83 $\pm$ 0.51
+& 7.27 $\pm$ 0.21
+& 7.12 $\pm$ 0.24
+& \textbf{7.64 $\pm$ 0.41} \\
+
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+
+\end{center}
+
+\end{table*}
+
+\paragraph{Atari and MuJoCo.}
+The results for Atari and MuJoCo are presented in~\autoref{tab:ataricompare} and~\autoref{tab:mujococompare}.
+Results for Decision Mamba (DMamba)~\citep{ota2024decision} and Mamba as Decision Maker (MambaDM)~\citep{cao2024mamba} are from the corresponding papers. A more detailed description of the results obtained can be found in the~\autoref{app:training}. The results demonstrate that RATE not only performs as well as the algorithms specifically designed for offline RL, but in many cases outperforms them in classical environments that do not require memory, which indicates the versatility of the model.
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{table*}[h]
+\tiny
+\caption{Raw scores for Atari games. \textcolor{green!100}{Green} -- top-1 result, \textcolor{green!50}{light green} -- top-2 result within the standard deviation.}
+\label{tab:ataricompare}
+\begin{center}
+
+\begin{adjustbox}{width=1\textwidth}
+\begin{tabular}{l|ccccc}
+\toprule
+
+\textbf{Environment} 
+& \textbf{CQL~\citep{cql}}
+& \textbf{DT~\citep{chen2021decision}} 
+& \textbf{DMamba~\citep{ota2024decision}}
+& \textbf {MambaDM~\citep{cao2024mamba}}
+& \textbf{RATE} \\
+
+\midrule
+
+Breakout    
+& 62.5
+& 76.9 $\pm$ 27.3
+& 70.6 $\pm$ 9.3
+& \textbf{\gtopb{106.9} $\pm$ 5.8}
+& \textbf{\gtopa{111.0} $\pm$ 2.9} \\
+
+Qbert
+& \textbf{\gtopa{14013.2}}
+& 2215.8 $\pm$ 1523.7
+& ~~5786.0 $\pm$ 1295.2
+& ~~~~10052.5 $\pm$ 1116.5
+& \textbf{\gtopb{12486.9} $\pm$ 280.4} \\
+
+SeaQuest
+& 782.2
+& \textbf{\gtopa{1129.3} $\pm$ 189.0~~~~}
+& \textbf{\gtopb{992.1} $\pm$ 57.7~~}
+& \textbf{\gtopa{1286.0} $\pm$ 42.0}
+& \textbf{\gtopb{1037.9} $\pm$ 53.7} \\
+
+Pong
+& \textbf{\gtopa{18.8}}
+& \textbf{\gtopb{17.1} $\pm$ 2.9~~~~}
+& ~~~~1.6 $\pm$ 15.3 
+& ~~\textbf{\gtopa{18.4} $\pm$ 0.8}
+& ~~\textbf{\gtopa{18.8} $\pm$ 0.3} \\
+
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+
+\end{center}
+
+\end{table*}
+
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{table*}[h]
+\centering
+
+\caption{Scores normalized according to the protocol in \cite{d4rl} for MuJoCo control tasks.
+ME -- Medium-Expert dataset, M -- Medium dataset, MR -- Medium-Replay dataset. RATE outperforms DT in 9/9 of the cases. \textcolor{green!100}{Green} -- top-1 result, \textcolor{green!50}{light green} -- top-2 result within the standard deviation.}
+\label{tab:mujococompare} 
+
+\begin{tiny}
+\begin{adjustbox}{width=1\textwidth}
+\begin{tabular}{ll|cccccc}
+
+\toprule
+
+\multicolumn{1}{l}{\textbf{Dataset}} 
+& \multicolumn{1}{l|}{\textbf{Environment}} 
+& \multicolumn{1}{c}{\textbf{CQL~\citep{cql}}} 
+& \multicolumn{1}{c}{\textbf{DT~\citep{chen2021decision}}} 
+& \multicolumn{1}{c}{\textbf{TAP~\citep{jiang2023efficient}}} 
+& \multicolumn{1}{c}{\textbf{DMamba~\citep{ota2024decision}}}
+& \multicolumn{1}{c}{\textbf{MambaDM~\citep{cao2024mamba}}}
+& \multicolumn{1}{c}{\textbf{RATE}}\\ 
+
+\midrule
+
+ME & HalfCheetah    
+& \textbf{\gtopa{91.6}} 
+& \textbf{\gtopb{86.8} $\pm$ 1.3 }
+& \textbf{\gtopa{91.8} $\pm$ 0.8}
+& \textbf{\gtopa{91.9} $\pm$ 0.6}
+& \textbf{\gtopb{86.5} $\pm$ 1.2}
+& \textbf{\gtopb{87.4} $\pm$ 0.1}\\ 
+
+ME & Hopper
+& 105.4 
+& 107.6 $\pm$ 1.8~
+& 105.5 $\pm$ 1.7 
+& \textbf{\gtopb{111.1} $\pm$ 0.3~~}
+& \textbf{\gtopb{110.5} $\pm$ 0.3~~}
+& \textbf{\gtopa{112.5} $\pm$ 0.2~~} \\ 
+
+ME & Walker2d
+& \textbf{\gtopa{108.8}}
+& \textbf{\gtopb{108.1} $\pm$ 0.2~~~}
+& \textbf{\gtopb{107.4} $\pm$ 0.9~~}
+& \textbf{\gtopa{108.3} $\pm$ 0.5~~}
+& \textbf{\gtopa{108.8} $\pm$ 0.1~~}
+& \textbf{\gtopa{108.7} $\pm$ 0.5~~} \\ 
+
+\midrule
+
+M & HalfCheetah
+& \textbf{\gtopb{44.4}}
+& ~42.6 $\pm$ 0.1 
+& \textbf{\gtopa{45.0} $\pm$ 0.1}
+& ~~42.8 $\pm$ 0.1
+& ~~42.8 $\pm$ 0.1
+& \textbf{\gtopb{43.5} $\pm$ 0.3} \\ 
+
+M & Hopper
+& 58.0 
+& ~67.6 $\pm$ 1.0
+& ~~63.4 $\pm$ 1.4 
+& ~~\textbf{\gtopa{83.5} $\pm$ 12.5}
+& \textbf{\gtopa{85.7} $\pm$ 7.8} 
+& \textbf{\gtopa{77.4} $\pm$ 1.4} \\ 
+
+M & Walker2d
+& 72.5 
+& ~74.0 $\pm$ 1.4 
+& ~~64.9 $\pm$ 2.1 
+& ~~78.2 $\pm$ 0.6
+& ~~78.2 $\pm$ 0.6
+& \textbf{\gtopa{80.7} $\pm$ 0.7} \\ 
+
+\midrule
+
+MR & HalfCheetah
+& \textbf{\gtopa{45.5} }
+& ~36.6 $\pm$ 0.8
+& ~\textbf{\gtopa{40.8} $\pm$ 0.6 }
+& ~~39.6 $\pm$ 0.1
+& ~~39.1 $\pm$ 0.1
+& ~~39.0 $\pm$ 0.6\\ 
+
+MR & Hopper
+& \textbf{\gtopa{95.0}}
+& \textbf{\gtopb{82.7} $\pm$ 7.0~}
+& ~\textbf{\gtopb{87.3} $\pm$ 2.3 }
+& \textbf{\gtopb{82.6} $\pm$ 4.6}
+& \textbf{\gtopb{86.1} $\pm$ 2.5}
+& \textbf{\gtopb{83.7} $\pm$ 8.2} \\ 
+
+MR & Walker2d
+& \textbf{\gtopa{77.2}}
+& ~66.6 $\pm$ 3.0
+& ~~66.8 $\pm$ 3.1 
+& ~~70.9 $\pm$ 4.3
+& \textbf{\gtopb{73.4} $\pm$ 2.6}
+& \textbf{\gtopb{73.7} $\pm$ 1.4} \\ 
+\bottomrule
+
+& \textbf{Mean}
+& \textbf{\gtopb{77.6}}
+& 74.7
+& 74.8
+& \textbf{\gtopa{78.8}}
+& \textbf{\gtopa{79.0}}
+& \textbf{\gtopa{78.5}} \\ 
+
+\midrule
+
+\end{tabular}
+\end{adjustbox}
+\end{tiny}
+\end{table*}
+
+
+\section{Ablation Study}
+
+\label{sec:abstudy}
+In this section, we answer the following research questions (RQs) to evaluate the impact of memory on model performance:
+
+\begin{enumerate}
+
+    \item \textit{"How do the different components of RATE affect model performance in memory-intensive environments?"}---~\nameref{app:rate_components}.
+
+    \item \textit{"What is the upper-bound estimate of the performance of the RATE model?"}---~\nameref{app:oracle_dt}.
+
+    \item \textit{"Why do you need an MRV and what is its best configuration?"}---~\nameref{app:mrv_ablation}.
+    
+\end{enumerate}
+
+\begin{wrapfigure}{r}{0.3\textwidth}
+    \centering
+    \includegraphics[width=0.3\textwidth]{plots/rate_vizdoom_noise_solo.png}
+    \caption{Results of replacing RATE memory tokens and cached hidden states with white noise during inference in ViZDoom-Two-Colors.
+    }
+    \label{fig:vizdoom_noise_solo}
+\end{wrapfigure}
+
+\paragraph{RQ 1.}\textbf{Investigating the impact of RATE components.}
+\label{app:rate_components}
+To study the influence of memory embeddings on RATE model performance, we conducted the following experiment: for the RATE model trained for T-Maze (with context $K=30$ on $N=3$ segments), we replaced pre-trained memory embeddings $M$ with random noise vectors during inference (see~\autoref{fig:tmaze_noise}). 
+
+Using random noise instead of memory embeddings, SR $=50\%$ in the T-Maze, indicating the agent reaches the junction but turns in only one direction regardless of the clue. Thus, we conclude that clue information is in memory embeddings, while the rest of the actions are shaped by transformer parameters.
+
+During RATE inference in ViZDoom-Two-Colors environment with replacement of different components of memory RATE mechanisms (memory embeddings and cached hidden states) with noise (see~\autoref{fig:vizdoom_noise_solo}), it is found that for this environment the caching of hidden states has the largest contribution, because with its noise performance drop is the largest. 
+Thus, in sparse environments, memory embeddings contribute the most, while in continuous environments, hidden states caching is most impactful.
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \centering
+    \includegraphics[width=0.35\textwidth]{plots/tmaze_noise.png}
+    \caption{Results of replacing RATE memory tokens with white noise curing inference in T-Maze.
+    }
+    \label{fig:tmaze_noise}
+\end{wrapfigure}
+\paragraph{RQ 2.}\textbf{Performance upper-bound estimate.}
+\label{app:oracle_dt}
+To evaluate the maximum possible performance of the RATE model, we conducted experiments with OracleDT -- a DT model whose context is augmented as a pre- and post-fix with a vector $v$ of dimension $1\times \texttt{d\_model}$ containing a priori 1-bit information about the environment. Thus, in the T-Maze environment, this information is represented by a clue at the beginning of the episode ($v_{i} = 0$ if clue = 0 else $1$), and in the ViZDoom-Two-Colors environment, it is represented by a column color ($v_{i} = 0$ if column color = red else $1$). A context $S^{'}= \texttt{concat}(v, S, v)$ extended in this way can be interpreted as a context $\texttt{concat}(M, S, M)$ with $M$ memory embeddings added, trained perfectly and containing $100\%$ of the important information. Thus, in environments where the a priori information about the environment needed for decision making can be extracted into a given vector $v$, the condition $R[OracleDT] \geq R[RATE] \geq R[DT]$ must be satisfied (see~\autoref{tab:oracle_dt}). This a priori information cannot be extracted from the environment in general, which further emphasizes the advantage of RATE, which is able to automatically extract important information and record it in memory embeddings $M$.
+
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{table}[h]
+\begin{center}
+\caption{Comparison of OracleDT with RATE. OracleDT determines the upper-bound estimate for the maximum reward that can be obtained using RATE in the environment. SR -- Success Rate.}
+
+\label{tab:oracle_dt}
+\small
+\begin{tabular}{l|ccc}
+\toprule
+
+\multicolumn{4}{c}{\textbf{T-Maze}} \\
+\midrule
+
+ 
+& \begin{tabular}{@{}c@{}}\textbf{OracleDT} \\ ($K=90$)\end{tabular}  
+& \begin{tabular}{@{}c@{}}\textbf{DT}~\citep{chen2021decision} \\ ($K=90$) \end{tabular} 
+& \begin{tabular}{@{}c@{}}\textbf{RATE} \\ ($K_{eff}=3\times 30 = 90$) \end{tabular} 
+
+\\
+
+\midrule
+
+\textbf{SR ($T = 90$)}
+& \textbf{1.0 $\pm$ 0.0}
+& \textbf{1.0 $\pm$ 0.0}
+& \textbf{1.0 $\pm$ 0.0}
+
+\\
+
+\midrule
+
+\textbf{SR ($T = 480$)}
+& \textbf{1.0 $\pm$ 0.0}
+& 0.5 $\pm$ 0.0
+& 0.90 $\pm$ 0.07
+
+\\
+
+\midrule
+
+\textbf{SR ($T = 900$)}
+& \textbf{1.0 $\pm$ 0.0}
+& 0.5 $\pm$ 0.0
+& 0.90 $\pm$ 0.07
+
+\\
+
+\bottomrule
+\multicolumn{4}{c}{\textbf{ViZDoom-Two-Colors}} \\
+\midrule
+
+\textbf{Reward[Total]}
+& \textbf{56.5 $\pm$ 0.8}
+& 24.8 $\pm$ 1.4
+& 41.5 $\pm$ 1.0
+
+\\
+
+\textbf{Reward[Reds]}
+& \textbf{55.3 $\pm$ 1.6}
+& 7.2 $\pm$ 0.4
+& 38.2 $\pm$ 5.1
+
+\\
+
+\textbf{Reward[Greens]}
+& \textbf{57.2 $\pm$ 0.5}
+& 42.3 $\pm$ 3.3
+& 44.7 $\pm$ 5.8
+
+\\
+
+\bottomrule
+
+\end{tabular}
+\end{center}
+\end{table}
+
+\paragraph{RQ 3.}\textbf{Memory Retention Valve architecture ablation.}
+\label{app:mrv_ablation}
+Without MRV in the T-Maze environment at corridor lengths of $L \gg K$, the performance of the RATE model decreased with each segment processed at inference, resulting in almost SR $= 50$\% on long trajectories (see \autoref{tab:mrv_ablation}). For example, in the T-Maze task, the important information to be remembered goes into memory embeddings when processing the first segment of the sequence, and then it must be retrieved when making decisions on the last segment. At the same time, due to the recurrent structure of the architecture, memory embeddings continue to be updated during the processing of intermediate segments when no new information needs to be memorized, causing important information from memory embeddings to leak out. To retain important information in memory embeddings, MRV mechanism was added to the architecture.
+We considered the five different schemes detailed in~\autoref{app:mrvs} to implement MRV:
+\begin{enumerate}
+
+  \item \textbf{MRV-CA-1}: cross-attention-based MRV which uses an attention mechanism to control the updating of memory embeddings. The updated memory embeddings $M_{n+1}$ are fed to Query, and the incoming $M_n$ are fed to Key and Value.
+  
+  \item \textbf{MRV-CA-2}: uses the same mechanism as MRV-CA-1 but the incoming memory embeddings $M_{n}$ are fed to Query, and the updated $M_{n+1}$ are fed to Key and Value.
+  
+  \item \textbf{MRV-G}: gated MRV which uses a gating mechanism similar to the one used in GTrXL~\citep{parisotto2020stabilizing}.
+
+  \item \textbf{MRV-GRU}: uses a GRU~\citep{gru} block to process updated $M_n$ with hidden states.
+
+  \item \textbf{MRV-LSTM}: uses a LSTM~\citep{hochreiter1997long} block to process updated $M_n$ with cached states.
+  
+\end{enumerate}
+
+\extrarowheight=\aboverulesep
+\addtolength{\extrarowheight}{\belowrulesep}
+\aboverulesep=0pt
+\belowrulesep=0pt
+\begin{table}[h]
+\begin{center}
+\caption{Results of ablation study of MRV configuration on T-Maze environment.
+$\dagger$ -- baseline.}
+\label{tab:mrv_ablation}
+\tiny
+\begin{adjustbox}{width=1\textwidth}
+\begin{tabular}{lcccc}
+
+\toprule
+\multicolumn{1}{c}{} &\multicolumn{4}{c}{\textbf{Inference corridor length}} \\
+
+\cmidrule(l){2-5}
+
+\textbf{Model ($K_{eff} = 30\times 5 = 150$)} & \textbf{$150$} & \textbf{$360$} & \textbf{$600$} & \textbf{$900$} \\
+
+\midrule
+
+RATE w/o MRV$^{\dagger}$
+& \ga{1.00}$\pm \ 0.00$ % $\ \ $ 1.00 $\pm$ 0.00$ \ \ \ $
+& \gb{0.66}$\pm \ 0.08$ % $\ \ $ 0.66 $\pm$ 0.08$ \ \ \ \ \  $
+& \gc{0.65}$\pm \ 0.07$ % $\ \ $ 0.65 $\pm$ 0.07$ \ \ \ $
+& \gd{0.61}$\pm \ 0.07$\\ % $\ \ $ 0.61 $\pm$ 0.07$ \ \ \ $\\
+
+\midrule
+
+RATE (MRV-CA-2)
+& \ga{1.00}$\pm \ 0.00$
+& \gb{0.95}$\pm \ 0.05$
+& \gc{0.90}$\pm \ 0.07$
+& \gd{0.90}$\pm \ 0.07$\\
+
+\midrule
+
+RATE (MRV-G)
+& \ga{0.86}$\pm \ 0.07$
+& \gb{0.77}$\pm \ 0.08$
+& \gc{0.66}$\pm \ 0.07$
+& \gd{0.65}$\pm \ 0.08$\\
+
+\midrule
+
+RATE (MRV-GRU)
+& \ga{0.99}$\pm \ 0.01$
+& \gb{0.74}$\pm \ 0.07$
+& \gc{0.56}$\pm \ 0.11$
+& \gd{0.55}$\pm \ 0.12$\\
+
+\midrule
+
+RATE (MRV-LSTM)
+& \ga{0.85}$\pm \ 0.06$
+& \gb{0.64}$\pm \ 0.10 \  \ $
+& \gc{0.51}$\pm \ 0.11$
+& \gd{0.47}$\pm \ 0.11$\\
+
+\midrule
+
+RATE (MRV-CA-1)
+& \ga{0.51}$\pm \ 0.01$
+& \gb{0.51}$\pm \ 0.01 \ \ $
+& \gc{0.49}$\pm \ 0.02$
+& \gd{0.49}$\pm \ 0.01$\\
+
+\bottomrule
+
+\end{tabular}
+\end{adjustbox}
+\end{center}
+\end{table}
+
+The best results in~\autoref{tab:mrv_ablation} were obtained using cross-attention scheme (MRV-CA-2), in which we fed $M_n$ memory tokens from the transformer input to the query and $M_{n+1}$ memory tokens from the transformer output to the key and value. This configuration is used throughout the work and is denoted simply as MRV. This configuration acts as an effective gating mechanism to prevent the loss of important information in prolonged sparse environments, which is reflected in significantly better results for RATE in the T-Maze environment.
+
+
+\section{Related Work}
+
+\subsection{Transformers for Reinforcement Learning}
+Transformers have found application in various areas of RL~\citep{agarwal2023transformers,li2023a}: online RL~\citep{parisotto2020stabilizing,lampinen2021towards,esslinger2022dtqn,melo2022transformers,zheng2022online,pramanik2023recurrent,team2023human}, offline RL~\citep{chen2021decision,janner2021offline,lee2022multi,reed2022gato,jiang2023efficient}, and model-based RL~\citep{chen2022transdreamer,micheli2023transformers,robine2023transformerbased}. The use of transformers as a general policy for many environments is also being explored \citep{lee2022multi,melo2022transformers,reed2022gato}. In our work, we consider the formulation of an offline model-free RL, where learning is formulated as a sequence modeling problem~\citep{chen2021decision}. Prominent representatives of such models are~\citep{chen2021decision,janner2021offline,lee2022multi,jiang2023efficient}, although planning in latent space~\citep{jiang2023efficient} is considered, which can be seen as modeling of the environment. Moreover, ~\citep{janner2021offline,jiang2023efficient} are specialized for control tasks with vector observations and do not generalize to environments with observations in the form of images.
+Therefore, we consider the Decision Transformer~\citep{chen2021decision}, which has no memory mechanism, as the main baseline for comparison. 
+
+\subsection{Recurrent Neural Networks for Reinforcement Learning}
+For long input sequences, recurrent networks may have computational advantages over transformers. The RNNs recurrent unit maintains a hidden state, which is essentially a form of memory that is important for solving POMDPs. In Decision LSTM (DLSTM)~\citep{dlstm} in DT the transformer is replaced by an LSTM unit~\citep{hochreiter1997long}.
+
+\subsection{State Space Models for Reinforcement Learning}
+Recently, State Space Models (SSMs)~\citep{gu2021efficiently} have shown significant success in sequence modeling, particularly in offline RL~\citep{bar2023decision, cao2024mamba, gu2023mamba,ota2024decision}. In Decision S4 (DS4)~\citep{bar2023decision}, sequence modeling is executed using S4~\citep{gu2021efficiently} layers within the framework of offline RL, whereas Decision Mamba (DMamba)~\citep{ota2024decision} utilizes the most recent Mamba~\citep{gu2023mamba} sequence model instead of causal self-attention. Mamba Decision Maker (MambaDM)~\citep{cao2024mamba} integrates the unique features of SSMs to effectively combine local and global features with Global-local fusion Mamba (GLoMa) module. 
+\subsection{Memory in Transformers}
+There are many ways to implement the memory mechanism for transformers \citep{bulatov2022rmt,dai2019transformerxl,ding2020ernie,lei2020mart,rae2019compressive,wu2020memformer,wu2022memorizing}. In Transformer-XL (TrXL) \citep{dai2019transformerxl}, it is proposed to split a long data sequence into segments and to access past segments at the expense of memory, but to ignore very distant segments. This increases the effective length of the context. The Compressive Transformer~\citep{rae2019compressive} uses compressed memory, allowing previous versions of memory to be compressed rather than discarded as in TrXL. ERNIE-Doc \citep{ding2020ernie} suggests using the retrospective feed mechanism and the enhanced recurrence mechanism. Memformer \citep{wu2020memformer} uses external dynamic memory to encode and retrieve past information. MART \citep{lei2020mart} extends this idea by adding a memory update mechanism similar to a recurrent neural network \citep{cho2014properties,hochreiter1997long}. The Memorizing Transformer \citep{wu2022memorizing} proposes to store the internal representations of past inputs. The Recurrent Memory Transformer (RMT)~\citep{bulatov2022rmt} includes additional read and write memory tokens at each segment's beginning and end. This method allows the effective context to be expanded to over 1 million tokens~\citep{zhu2020deformable}. 
+An Adaptive Agent (AdA)~\citep{pmlr-v202-bauer23a} uses memory architectures to store and employ information previously acquired by the agent. The default memory architecture is TrXL with normalization before each layer~\citep{parisotto2020stabilizing}, and the use of gating on the feedforward layers~\citep{shazeer2020glu} to stabilize training. We also use TrXL in our work but refrain from using additional modifications to stabilize training. Another distinctive feature of using a transformer in AdA, as opposed to DT, is that pixel observations, past actions, past rewards, and additional information are not tokenized separately but are combined into a single vector that feeds the transformer. The transformer itself predicts not only actions but also value function values.
+
+
+\section{Conclusion}
+
+
+In this paper, we propose \textbf{Recurrent Action Transformer with Memory} (\textbf{RATE}), a transformer model for offline RL that exploits memory mechanisms in the form of memory embeddings and caching of hidden states, and the \textbf{Memory Retention Valve} (\textbf{MRV}), which controls memory updating and prevents the loss of important information in sparse tasks.
+In extensive experiments in memory-intensive environments such as ViZDoom-Two-Colors, Memory Maze, Minigrid-Memory, and T-Maze, we have shown that RATE outperforms recurrent and transformer baselines. 
+The proposed model interpolates and extrapolates well outside the transformer context, is able to retain important information for a long time when operating in highly sparse environments, and allows to compensate for the effect of bias in the training data.
+
+We also show that the proposed model achieves better or comparable results to state-of-the-art Mamba-based models in Atari and MuJoCo environments, indicating that RATE is suitable for all tasks: both memory-intensive and not. We have thoroughly investigated the influence of memory mechanisms on the performance of the model and have clearly shown that the model uses them in decision making. This method shows great potential for tackling complex tasks with long sequences, especially in robotics, where training agents on pre-collected data sets is highly advantageous. 
+
+
+\paragraph{Limitations.}
+\label{sec:lim}
+
+
+Limitations of the proposed model include its inability to design $K$ and $N$ in memory-intensive environments so that all important events fall into the efficient context of $K_{eff}=K\times N$. In addition, the approach based on dividing trajectories into segments during inference does not allow for memory updates effectively at each step using a sliding window. Also, there are currently no studies of the memory capacity of the proposed model, so the practical amount of information that can be stored remains unknown. 
+
+\paragraph{Reproducibility Statement.}
+The model description is presented in \autoref{sec:rate} (Algorithm \ref{alg:rate} and Algorithm \ref{alg:mrv}), the training procedure is presented in \autoref{app:training}, the description of the used benchmarks is presented in \autoref{app:envs}, the hyperparameters are presented in \autoref{tab:atariparams}, and the configurations for displaying the experimental results are presented in \autoref{tab:stats}.
+The code is open-sourced and can be found in the \url{https://sites.google.
+
+
+
+
+
+
+
+
+
+

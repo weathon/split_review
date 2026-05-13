@@ -1,0 +1,511 @@
+\title{Competition Priors for Object-Centric Learning}
+
+\begin{abstract}
+Humans excel at abstracting data and constructing \emph{reusable} concepts, a capability lacking in current continual learning systems. 
+The field of object-centric learning addresses this by developing abstract representations, or slots, from data without human supervision.
+Different methods have been proposed to tackle this task for images, whereas most are overly complex, non-differentiable, or poorly scalable.
+In this paper, we introduce a conceptually simple, fully-differentiable, non-iterative, and scalable method called \textbf{SAMP} (\textbf{S}implified Slot \textbf{A}ttention with \textbf{M}ax Pool \textbf{P}riors). 
+It is implementable using only
+Convolution and MaxPool layers and an Attention layer.
+Our method encodes the input image with a Convolutional Neural Network and then uses a branch of alternating Convolution and MaxPool layers to 
+create specialized sub-networks and 
+extract primitive slots. 
+These primitive slots are then used as queries for a Simplified Slot Attention over the encoded image.
+Despite its simplicity, our method is competitive or outperforms previous methods on standard benchmarks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In a dynamic environment, it is essential for artificial intelligence systems to be able to effectively adapt and generalize to similar unseen input.
+The field of continual learning aims to design adaptable systems, while mitigating forgetting of important previously acquired capabilities (i.e. catastrophic forgetting).
+Many current methods approach continual learning via memory stability, or inter-task generalizability mechanisms \citep{wang2024LifeLongLearningReview}, while being agnostic to the underlying representation. 
+Recently object-centric learning has gained momentum as a promising direction to build learning systems inspird by human cognition \citep{SlotAttention,IODINE,Monet,greff-Binding_problem}. 
+The core idea is, that an object-centric representation of the raw-input may lead to better generalization and adaptation capabilities.
+These symbolic-like representations for objects, can then
+be applied, reused, and combined for reasoning or decision-making \citep{Spelke2007-SPECK-3-dev_of_5_year_old}.
+However, despite the rise of Deep Learning \citep{Krizhevsky:12, Schmidhuber:15} and access to large scale compute and data \citep{Deng:09}
+that led to human level performance in various domains \citep{He:16, Mnih:15, Silver:16}, neural networks do not posses this abstraction ability. 
+
+Various recent works have tried to
+address the problem of abstraction from raw input by learning object-centric representations --- often known as slots \citep{SlotAttention, wu2023slotformer, ImplicitSlotAttention, Genesis, Monet} --- from high-dimensional input, such as images, videos, 3D point clouds or even 3D scenes (images of different angles onto the same objects).
+However, most of the currently proposed methods are complex and partially suffer from training instabilities \citep{ImplicitSlotAttention}.
+Many of these methods are derived from the original Slot Attention idea \citep{SlotAttention}, which applies a modification of Cross-Attention \citep{Transformer_Vaswani} in an iterative refinement procedure. 
+We argue that such an iterative refinement procedure is not desired and propose a solution that can serve as a simple baseline.
+
+Prior to explicit slot extraction methods, \emph{competition mechanisms} \citep{Srivastava:13_compete_to_compute} like MaxPooling or Spatial Pyramid MaxPooling \citep{spatial_pyramid_pooling} showed a strong performance \citep{ResNet, 
+mask_rcnn, InceptionNet} to obtain highly relevant abstract features.
+\citet{srivastava2014understanding_locally_comp_nets} empirically showed that competition among subnetworks leads to specialization, whereas for different input, different subnetworks are activate.
+We argue that this ability to specialize and abstract are useful properties for learning object-centric representations.
+In this paper, we present a novel method that we call Simplified Slot Attention with Max Pool Priors (SAMP). SAMP is a simple, scalable, non-iterative and fully-differentiable approach to extract slots from images with simple Convolutions \citep[CNN;][]{LeCun:04} and MaxPool blocks \citep{Krizhevsky:12}  that are
+combined with a Simplified Slot attention (SSA) layer.
+The effectiveness of SAMP demonstrates that the iterative nature of Slot Attention based methods is not necessary.
+
+\hfill
+
+Our main contributions are:
+\begin{itemize}
+    \item We propose SAMP (Simplified Slot Attention with Max Pool Priors) a method for learning object-centric representations.     
+    \item SAMP is a simple, but scalable baseline for OCL, since it is non-iterative and consists of
+    vanilla building blocks like CNN, MaxPool layers and a Simplified Slot-Attention. 
+    \item We evaluate SAMP on standard Object-Centric benchmarks, where it is competitive or outperforms various other Object-Centric methods. 
+\end{itemize}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/grouping.png}
+    \caption{\textit{Grouping:} We learn Primitive Slots from image features using Specialized Sub-Networks. We obtain pixel features by flattening all the image features from the encoder. 
+    We pass pixel features and Primitive Slots to a Simplified Slot Attention (SSA) layer, where \textit{Keys} (K) and \textit{Values} (V) are the pixel features and \textit{Queries} are the Primitive Slots. SSA layer outputs the slots. The decoder is applied on every slot separately to reconstruct the input and a mask. 
+    A softmax is applied to the masks along the pixel dimension (for simplicity the masks are not shown in the figure). 
+    The final reconstruction is obtained by performing a weighted sum of all the individual reconstructions across the pixels with the weights coming from the masks.}
+    \label{fig:grouping}
+\end{figure*}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{images/comp_sub_networks.png}
+    \caption{\textit{Specialized Sub-Networks:} We use alternating Convolution and MaxPool layers. After these layers, we flatten features to obtain Primitive Slots. The architecture along with the slot-wise reconstruction in the decoder, induces specialization in sub-networks. The sub-networks are forced to explain different parts of the input. Therefore, the resultant Primitive Slots are good queries for the SSA layer.}
+    \label{fig:comp_subnets}
+\end{figure}
+
+
+\begin{minipage}[t]{0.46\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Simplified Slot Attention (SSA) Layer: SSA removes the iteration from Slot Attention, along with GRU and the MLP layers. It also has shared projection weights for keys and values. Further, we do not normalize across keys after the softmax over slots.}\label{algorithm1}
+    \footnotesize
+    \begin{algorithmic}[1]
+        \State \text{\textbf{Input}: inputs $\in \mathbb{R}^{P \times D}$, slot\_priors $\in \R^{n \times D}$}
+        \State \textbf{Layer Params}: k (shared projection for keys and values), q: projection for slot priors; LayerNorm(x2)
+        \State $inputs = LayerNorm(inputs)$
+        \State $slots = LayerNorm(slot\_priors)$
+        \State $M = \frac{1}{\sqrt{n}}k(inputs)\cdot q(slots)^{T}$ 
+        \State $W_{i,j} = \frac{e^{M_{i,j}}}{\sum_{l=1}^{n}e^{M_{l,j}}}$ 
+        \State $slots = W^{T}\cdot k(inputs)$
+        \State \textbf{return} slots
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.46\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Slot Attention Module as given in \cite{SlotAttention}}\label{algorithm2}
+    \footnotesize
+    \begin{algorithmic}[1]
+        \State \text{\textbf{Input}: inputs $\in \mathbb{R}^{P \times D}$, slots $\sim \mathcal{N}(\mu, diag(\sigma)) \in \R^{n \times D}$}
+        \State \textbf{Layer Params}: k, q, v: linear projections for attention; GRU; MLP; LayerNorm(x3)
+        \State $inputs = LayerNorm(inputs)$
+        \For{$t = 0....T$}
+        \State $slots\_prev = slots$
+        \State $slots = LayerNorm(slots)$
+        \State $M = \frac{1}{\sqrt{D}}k(inputs)\cdot q(slots)^{T}$
+        \State $attn_{i,j} = \frac{e^{M_{i,j}}}{\sum_{l=1}^{n}e^{M_{i,l}}}$
+        \State $W_{i,j} = \frac{attn_{i,j}}{\sum_{l=1}^{P}attn_{l, j}}$
+        \State $updates = W^{T}\cdot v(inputs)$
+        \State slots = GRU(state=slots\_prev, inputs=updates)
+        \State slots += MLP(LayerNorm(slots))
+        \EndFor
+        \State \textbf{return} slots
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+
+
+
+\section{Related Work}
+
+
+Object-centric learning is related to abstraction, which is a well studied topic in different areas of Machine Learning \citep{Givan:03, Ravindran:03b, Sutton:99, Li:06, Vezhnevets:17, Kulkarni:16, patil:22, Patil:23}. 
+Object-centric learning methods try to extract representations of objects given a input, which could be images or some other modality.
+These extracted representations are known as slots. 
+Many such methods consist of three modules: an image encoder, a grouping module and a decoder.
+The image encoders are typically realized with multiple CNN layers \citep{SlotAttention, GenesisV2}. For the decoder, the spatial broadcast decoder \citep{watters2019SBD} --- or slight deviations thereof --- is the de-facto standard, since it provides a good inductive bias for learning disentangled representations \citep{engelcke2020reconstruction}.
+The main difference between common slot extraction methods is the \emph{grouping module}. 
+Most grouping modules can be divided into 
+(a) graph-based, (b) generative and (c) iterative refinement based approaches.
+\paragraph{Graph-based approaches}
+\citet{pervez2022graphcut_slots} use a graph-cutting approach to perform clustering of pixel-features via a quadratic program.
+The disadvantage of this approach is that solving the underlying quadratic program is computationally intense and poorly parallelizable. 
+
+\paragraph{Generative approaches} aim to learn  parameterized distributions of latent variables by minimizing a proxy of the log-likelihood.
+Works such as IODINE \citep{IODINE}, MONet \citep{Monet}, SPACE \citep{SPACE_method} or Genesis \citep{Genesis} fall into this category. While these methods are theoretically grounded, they lack empirical performance.
+Genesis-V2 \citet{GenesisV2} is an extension of Genesis and one of the first fully-differentiable methods that is able to choose the number of slots \emph{by design} during training and inference (i.e., not by doing a second forward pass with a different number of slots). Although this selection option brings some interesting properties, the method has not found wide adoption. We argue that the reason for this is that it is complex in terms of math and code.
+
+\paragraph{Iterative refinement approaches}
+The Slot Attention module \citep{SlotAttention} --- often simply called Slot Attention ---is a successful and widely adapted technique.
+Thus, there exists a sizable body of work that is dedicated to improve it: Implicit Slot Attention \citep[ISA][]{ImplicitSlotAttention} stabilizes the iterative refinement process of Slot Attention by learning the fixed-point of the iterative refinement procedure with a first-order Neumann series approximation. 
+While it stabilizes the training, it tends to need even more iterations than Slot Attention which increases the overall time complexity.
+\citet{jia2023_ISA_w_query_optimization} extend Implicit Slot Attention by learning distributions for initializations of the iterative refinement procedure.
+An other improvement suggestion to the original Slot Attention module came from \citep{kim2023shepherding} who introduced a locality-bias as it is common for CNNs in the attention part of Slot Attention.
+Similarly, \citet{gao2023_SA_with_cluster_init} improved the slot initialization with explicit clustering methods, such as Mean-Shift \citep{Mean_Shift_Clustering} or K-means \citep{K_means_clustering}.
+SLATE \citep{SLATE_singh2022} uses Slot Attention as the grouping module, but replaces CNN encoder with a discrete Variational Autoencoder \citep{dVAE} encoder and the CNN spatial broadcast decoder \citep{watters2019SBD} with an autoregressive transformer decoder \citep{Transformer_Vaswani}.
+\paragraph{Competition in Neural Networks}
+Competition in artificial neural networks is inspired by observations of the human brain.
+Competitive dynamics among neurons and neural circuits have played a crucial role in understanding brain processes in biological models \citet{Eccles:67, Ermentrout:92}. 
+The significance stems from early findings that revealed a recurring "on-center, off-surround" neural architecture in various brain regions \citet{Ellias:75}. 
+The "on-center, off-surround" architecture involves neurons providing excitatory feedback locally and inhibitory signals broadly. Therefore it creates competition between sub-networks \citep{Andersen:69, Ellias:75}. 
+The biological model in \citet{Lee:99} is also of interest,
+as it proposes that attention activates a winner-take-all competition
+over the visual features in the human brain. 
+Inspired from the brain, such competitive networks have made there way to machine
+learning \citep{Maass:99, Maass:00}. 
+Hamming Networks \citep{Lippmann:87} perform iterative lateral inhibition
+between competitors.
+Local-Winner-Take-All networks \citep{Srivastava:14} setup blocks of neurons, 
+and pass the winning activation of each block to the next layer. 
+Adding sources of competition on
+networks trained on faces, showed impressive abstraction capabilities, where feature maps of deeper layers (i.e., closer to the output) become more abstract and depict parts of a face \citep{wang2014_face_more_abstract_features}.
+
+
+
+\section{Method}
+
+\label{sec:method}
+We propose \textit{Simplified Slot Attention with Max Pool Priors}, a method to learn Object-Centric representations from images. 
+Most architectures consist of three main modules: an encoder, a grouping and a decoder module.
+The encoder computes useful features from the raw image, the grouping module extracts object-representations (slots) and the decoder reconstructs the individual slots to partial images, which are then summed up to obtain the input image in an auto-encoder fashion.
+The main novelty of SAMP lies in its simplified grouping mechanism (Figure \ref{fig:grouping} and \ref{fig:comp_subnets}). 
+SAMP groups image features using specialized sub-networks
+and a variant of the slot attention layer. 
+Competition and specialization is induced in SAMP due to the following components: 
+1) Winner Take All MaxPool layers 2) Simplified Slot Attention layer
+3) Spatial Broadcast Decoder. 
+
+In the following sub-section (\ref{subsec:architecture}), we first go through the architecture of SAMP.
+Afterwards, we describe the sources of competition and specialization in SAMP (sub-section \ref{subsec:comp_in_SAMP}). 
+
+
+\subsection{Architecture}
+\label{subsec:architecture}
+The SAMP architecture consists of an encoder, grouping module and a decoder. 
+
+\paragraph{Encoder} 
+The encoder is a simple image encoder with CNN layers \citep{LeCun:04}. 
+We have a fixed kernel size, padding and stride across these layers. 
+The layers are setup in such a way that the spatial dimension of the input is preserved.
+For example, if the input image is of size $H \times W$ then the encoder output is $H \times W \times c$,
+where, $H$ and $W$ are the height and width of the image. 
+$c$ is the number of filters used in the last layer. 
+This is done to obtain features at pixel level, which can then be later grouped together to obtain slots.  
+Similar to \citet{SlotAttention}, we also augment the pixel features with a positional embedding. 
+\paragraph{Grouping}
+The output of the encoder is fed to SAMP's grouping module, which outputs slots. 
+The grouping module consists of specialized sub-networks 
+and a SSA Layer. 
+
+The specialized sub-networks ingest the encoder output and return primitive-slots. 
+A specialized sub-networks consist of MaxPool and Convolution layers. 
+Similar to the encoder, we build the CNN layers in such a way that they preserve the spatial dimension. 
+But, the MaxPool layers reduce it (Figure \ref{fig:comp_subnets}). 
+After applying CNN and MaxPool layers we obtain an output of size $n_h \times n_w \times c$. Here,
+$n_h, n_w$ are height and width of the output and $c$ is the number of filters of the last CNN layer.
+We flatten the output to obtain, $n \times c$, where $ n = n_h \times n_w$ are the number of 
+primitive slots. 
+Conceptually, $n$ is therefore a hyperparameter of the network. 
+We pass these primitive-slots through an MLP layer and then use them as queries in the SSA Layer. 
+The SSA Layer is a variant of the standard slot attention layer \citep{SlotAttention}. 
+We remove the multiple iterations done in slot attention along with the Gated recurrent unit (GRU) layer \citep{ChungGCB14_GRU} and Multilayer perceptron (MLP) layer.
+We also share projection weights between the keys and values, thus, keys and values are same in our architecture. 
+Unlike, slot attention, after the softmax over the queries, we do not normalize attention coefficients across the keys. 
+The softmax over the queries
+creates competition in the slots to explain different parts of the input. 
+In our case, as the keys and values share the same projection weights it can also be thought of as an associative memory.
+In that case it is 
+a storage of patterns \citep{Ramsauer:20, Widrich:21, Paischer:22},
+from which we retrieve patterns (values) similar to primitive slots (queries). 
+
+SAMP first flattens the encoder output and passes it through MLPs so they can be used as keys ($\mathbf{K} \in \mathbb{R}^{P \times D}$) and values ($\mathbf{V} \in \mathbb{R}^{P \times D}$)
+in the SSA Layer layer, whereas $P$ is the number of pixels and $D$ is the dimensionality of the slots. 
+The primitive-slots are used as queries ($\mathbf{Q} \in \mathbb{R}^{n \times D}$). Once we get the attention coefficients, we can use them to get the slots ($\mathbf{S} \in \mathbb{R}^{n \times D}$) as follows by using 
+\begin{equation}
+    \qquad \qquad \qquad \qquad \qquad \qquad \qquad \qquad \mathbf{S} = \mathbf{W}^{T} \mathbf{V} \qquad \qquad \qquad \qquad \text{  where, } \mathbf{W} = \mathrm{softmax}(\frac{\mathbf{K} \mathbf{Q}^{T}}{\tau})
+\end{equation}
+
+The temperature $\tau$ is set to $\sqrt{n}$, whereas $n$ is the number of slots. This is a lower temperature then commonly used in Cross-Attention \citep{Transformer_Vaswani}. Empirically we found that the resulting lower-entropy distribution of attention values leads to better results.
+\paragraph{Decoder}
+The decoding treats each slot separately with a Spatial Broadcast Decoder \citep{IODINE}. 
+Every slot reconstructs its own image
+and a mask. 
+The masks are normalized and a softmax along the pixel dimension of all masks 
+mixes all the images together. 
+We train the model end to end with a mean squared error reconstruction loss \citep[similar to][]{IODINE, SlotAttention}. 
+
+Our method is able to extract slots, without any iterative refinement. 
+In the next subsection, we explain how 
+SAMP creates competition amongst the slots to explain different parts of the input. 
+
+
+\subsection{Competition in SAMP}
+\label{subsec:comp_in_SAMP}
+SAMP creates competition and specialization through different sources: The MaxPool Layers, the SSA Layer layer and a slot wise reconstruction decoder.  
+
+\paragraph{Specialization through MaxPool layers}
+MaxPool layers are interleaved between
+Convolution layers (Figure \ref{fig:comp_subnets}). 
+MaxPool layers work by transmitting activations of winning units to the next layer.
+As there is only one winner for a local group of neurons, 
+the layer activations are sub-sampled. 
+This results in sub-networks competing to have higher activations. 
+During back-propagation, units that win 
+and the subnetworks that are responsible for this will get updated. 
+As a result, a winning sub-network is reinforced to win more if it predicts correctly. 
+If a sub-network wins, and does not predict correctly, it is not reinforced. 
+One can also look at this as a gradient-based search over finding sub-networks, which explain the input correctly. 
+An important side effect of these specialized sub-networks
+is that the resulting primitive-slots explain different parts of the input. 
+A neuron has a higher chance of winning if it explains a different part of 
+the input, 
+rather than explaining the same feature as another neuron. 
+
+\paragraph{Competition through SSA Layer}
+Another source of competition for SAMP is the SSA Layer layer. 
+The layer takes a softmax across queries,
+this forces the queries to compete for keys (pixel features). 
+We see improvement in results by using this layer, 
+over not using it (See Table \ref{table:ablations}). 
+
+\paragraph{Competition through Spatial Broadcast Decoder}
+Finally, we use a slot wise reconstruction decoder, 
+i.e., every slot is separately fed to the decoder for reconstruction (Figure \ref{fig:grouping}).
+The final reconstruction is obtained by mixing all reconstructions with
+a softmax over the respective masks. 
+This creates competition over pixels in the final reconstructed image. 
+Due to the mixing of the reconstructions, 
+the slots get reinforced for explaining different parts of the input. 
+Thus, providing a push to the competitive nature of the slots. 
+This has further been discussed in \citet{engelcke2020reconstruction}.
+
+In summary, MaxPool layers, SSA Layer layer and the decoder lead to competition and specialization amongst the slots and as a result they try to explain different parts of the input. 
+
+\subsection{Advantages}
+
+The main advantage of our method over Slot Attention is, that it is non-iterative and therefore provides a better time and space complexity (see table \ref{complexities-table}).
+\begin{table}[h]
+\caption{Runtime and Memory Complexities of the grouping module of Slot Attention vs. SAMP.
+    $S$ denotes the number of slots, $D$ is the dimensionality of the slots and the number of channels (these are assumed to be equal for simplicity), $H$ and $W$ are the height and width of the image.
+    While SAMP uses another few layers for the competition, Slot Attention performs several iterations of the iterative refinement procedure.
+    }
+\label{complexities-table}
+\begin{center}
+\begin{tabular}{lcc}
+\multicolumn{1}{c}{\bf }  &\multicolumn{1}{c}{\bf Slot Attention}  &\multicolumn{1}{c}{\bf SAMP (ours)} \\
+\hline
+Time (Training) & $\mathcal{O}(T \cdot S \cdot H \cdot W \cdot D)$ & $\mathcal{O}((L_{\text{comp}} + S) \cdot H \cdot W \cdot D)$ \\
+Space (Training) & $\mathcal{O}(T \cdot S \cdot H \cdot W \cdot D)$ & $\mathcal{O}((L_{\text{comp}} + S) \cdot H \cdot W \cdot D)$ \\
+Time (Test) & $\mathcal{O}(T \cdot S \cdot H \cdot W \cdot D)$ & $\mathcal{O}((L_{\text{comp}} + S) \cdot H \cdot W \cdot D)$ \\
+Space (Test) & $\mathcal{O}(S \cdot H \cdot W \cdot D)$ & $\mathcal{O}((L_{\text{comp}} + S) \cdot H \cdot W \cdot D)$ \\
+\end{tabular}
+\end{center}
+\end{table}
+\paragraph{Scalability}
+
+The Slot Attention module is an \textbf{iterative refinement method} that needs several iterations to converge to a fixed point. 
+As the complexity of the task increases, so does the number of required iterations.
+\citet{ImplicitSlotAttention},
+while addressing some of the training instabilities of Slot Attention, require even more iterations. In the case of training on CLEVR, \citet{ImplicitSlotAttention} may utilize up to 11 iterations. These iterative methods, however, pose a significant challenge when it comes to scaling them for large-scale datasets.
+
+SAMP
+distinguishes itself by not relying on recurrent neural networks (RNNs) and being a non-iterative method. This characteristic makes SAMP particularly well-suited for scaling up to handle large datasets and computational demands efficiently. SAMP's non-iterative nature simplifies its application to extensive data processing and computation tasks, providing a distinct advantage over iterative methods like \citet{SlotAttention} and \citet{ImplicitSlotAttention}.
+
+
+
+
+
+\section{Experiments}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/clevr_result.png}
+    \caption{\textit{Results on CLEVR6:} The first column is the original image. The second column is the final reconstruction by the model, namely the weighted sum of individual reconstructions. Columns 3-11 are reconstructions of individual slots. The individual reconstructions are displayed without the mask.}
+    \label{fig:clevr_result}
+\end{figure}
+
+\paragraph{Baselines}
+We compare $\mathbf{C}$OP with the following commonly used slot extraction methods: Slot Attention \citep{SlotAttention}, IODINE \citep{IODINE} and MoNET \citep{Monet}.
+
+\paragraph{Datasets}
+For the experiments we use three standard benchmarks common in prior work, %\citep{SlotAttention, IODINE, Monet}
+namely CLEVR6, Multi-dSprites and Tetrominoes \citep[introduced in][]{multiobjectdatasets19}.
+These are synthetic datasets which provide ground truth segmentation masks for evaluation.
+CLEVR consists of rendered scenes of 3D geometric shapes, e.g., spheres, cubes or cuboids, with a single light source.
+CLEVR6 is a subset of CLEVR which only contains a maximum of six objects.
+Multi-dSprites consists of 2-5 objects, which are 2D shapes (ellipses, hearts, squares) in different colors on black background.
+Tetrominoes consists of always three objects, namely 2D shapes from the tetris game.
+
+Occlusion is an important property that largely defines the difficulty of a dataset.
+In tetrominoes there is no occlusion between objects.
+For CLEVR6, objects may partially occlude each other, though usually a single object is not occluded by more than one other object.
+In Multi-dSprites an object may be occluded by several other objects, which makes it the most challenging of the three tasks in this regard.   
+
+For all these datasets we follow the protocol mentioned in Slot Attention \citep{SlotAttention}. 
+CLEVR6 consists of 70k, and Multi-dSprites and Tetrominoes of 60k training samples. 
+We partition the training set into a training and validation split to choose hyperparameters. For testing we trained on the whole training set and tested on 320 test samples (same as Slot Attention).
+
+\paragraph{Training}
+For the encoder and decoder architectures we follow the protocol described in \citep{SlotAttention}.
+For the grouping module we use the architecture described in section \ref{sec:method} with slight modifications for each dataset.
+First, we adjust the number of slots to equal or somewhat more than maximum number of objects of the according dataset. Since we have seen degrading performance of too many slots (also see section \ref{sec:ablations}). Specifically, for CLEVR6 and Multi-dSprites we use nine slots, and for Tetrominoes we use four slots (three object slots and one background slots).
+All datasets are trained using a mean-squared-error reconstruction loss.
+\paragraph{Evaluation metric}
+All of the above-mentioned datasets contain ground truth masks that enable evaluation of the image segmentations. 
+We use the Adjusted Rand Index \citep{RandIndex, Hubert1985_AdjustedRandIndex} as evaluation metric. 
+This is a metric in the interval $[-0.5, 1.0]$ that compares two cluster assignments, whereas a score of $1$ means the clusters are identical, a score of $0$ would mean roughly equal to random assignment and $-0.5$ the worst assignment possible (worse than random).
+As common in the literature \citep{SlotAttention, GenesisV2} we omit the background ground truth masks in the evaluation, since we mostly want to distinguish between foreground objects. This metric is referred to as the FG-ARI.
+
+\begin{figure}
+\centering
+\begin{minipage}[b]{0.62\textwidth}
+  \centering
+    \includegraphics[width=\linewidth]{images/mds_result.png}
+\end{minipage}
+\hfill
+\begin{minipage}[b]{0.34\textwidth}
+  \centering
+    \includegraphics[width=\linewidth]{images/tetro_result.png}
+\end{minipage}
+
+\caption{
+\textit{Left:} Reconstructions of Multi-dSprites. The first column is the original image. The second column is the weighted sum of individual reconstructions where the weights come from the masks to which a pixel-wise softmax was applied. Columns 3-11 are reconstructions of individual slots.
+\textit{Right:} Reconstructions of Tetrominoes. Again, the first column is the original image, while the second column is the weighted sum of individual reconstructions. Columns 3-6 are reconstructions of individual slots.
+The individual reconstructions are displayed without the mask.
+}
+\label{fig:mds_and_tetro_result}
+\end{figure}
+
+\begin{table}[b]
+\caption{Results of different slot extraction methods on several datasets. Prior methods averaged over five seeds, while our results were averaged over three seeds.}
+\label{tab:results}
+\begin{center}
+\begin{tabular}{lcccc}
+\bf Method & \bf CLEVR6 & \bf Multi-dSprites & \bf Tetrominoes & \bf Average \\
+\hline
+Slot Attention & $\textbf{98.8} \pm 0.3$ & $91.3 \pm 0.3$ & $99.5 \pm 0.2 $ & \textbf{96.53} \\
+IODINE & $\textbf{98.8} \pm 0.0$ & $76.7 \pm 5.6$ & $99.2 \pm 0.4 $ & 91.57 \\
+MONET & $96.2 \pm 0.6$ & $90.4 \pm 0.8$ & n/a & 93.30 \\
+\textbf{SAMP (ours)} & $97.6 \pm 0.6$ & $\textbf{92.3} \pm 0.2$ & $\textbf{99.8}\pm0.1$ & \textbf{96.57} \\
+\end{tabular}
+\end{center}
+\end{table}
+
+\paragraph{Results}
+
+SAMP is competitive for CLEVR6, but outperforms Slot Attention in Multi-dSprites and Tetrominoes.
+SAMP achieves state-of-the-art performance --- on par with Slot Attention --- when averaged over all three datasets.
+An overview of the results is given in table \ref{tab:results}.
+Qualitatively we can see in figures \ref{fig:mds_and_tetro_result} and \ref{fig:clevr_result} that the slot reconstructions are semantically meaningful and of high quality.
+Interestingly, some slots seem to specialize.
+E.g., for CLEVR6 and Tetrominoes there seems to be a clear specialization of the second slot to capture the gray background. 
+This is also consistent with our observations of the slots over the training process. Non-background slots don't seem to specialize in the position, shape, size nor color of the objects.
+Interestingly, some slots are not used in \emph{any} of the reconstructions, which can be regarded as a specialization on "not interfering" with other reconstructions.
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/heatmap-tetro.png}
+    \caption{\textit{Reconstructions and visualized attention heatmaps of slots over pixel features during training on Tetrominoes:} The numbers on the left denote the completed training epochs, the left group of images are reconstructions, whereas the right group are visualized attention maps.
+    The columns of the reconstruction images are in the following order: (col. 1) ground truth image, (col. 2) final reconstruction (cols. 3-6) individual slot reconstructions. 
+    The columns of the visualized attention maps are in the following order: (col.1) ground truth image, (cols. 2-5) individual attention maps of the queries over the keys (i.e. the projected pixel features).
+    }
+    \label{fig:tetro_visualizations}
+\end{figure}
+
+
+
+\section{Analysis and Ablation studies}
+
+\label{sec:ablations}
+
+\paragraph{Learned query visualization}
+We visualized the attention of a slot over the keys of the pixel features.
+
+For the Tetrominoes run in figure \ref{fig:tetro_visualizations}, we can roughly identify three phases. 
+\begin{itemize}
+    \item \textbf{Warmup phase} Up until epoch 10, the reconstructions are poor and the attention maps are not sharp nor object-specific.
+    \item \textbf{Transition phase} From epoch 11 to 13, there is a transition phase. While reconstructions are still poor after epoch 11, they have become sharper and object-specific after epoch 13. Also the attention maps clearly indicate that the queries are focusing on object-specific parts of the input.
+    \item \textbf{Refinement phase} The objects at epoch 30 are still somewhat blurry, but are more detailed refined over the next several hundred epochs.
+    For the attention maps, we can see that between epoch 13 and epoch 30 the attention maps change little. From epoch 30 onwards, the queries attend to very similar pixels of individual objects.
+\end{itemize}
+\paragraph{Which attention mechanism to use}
+To understand the impact of the attention mechanism, we tried several ablations.
+\begin{itemize}
+    \item \textbf{SAMP w/o SSA Layer} To check if SSA Layer over pixel features is beneficial at all, we omit the attention mechanism and directly reconstruct the images from the queries.
+    \item \textbf{SAMP w/ Cross-Attention} Furthermore we substitute the SSA Layer with the common Cross-Attention \citep{Transformer_Vaswani}.
+    \item \textbf{SAMP w/ Attention as in Slot Attention} we substitute the SSA Layer with the attention variant used in Slot Attention \citep{SlotAttention}. Note that the GRU, MLPs at the end of each iteration were not used. Also we just applied the attention-variant once in a non-iterative fashion.
+\end{itemize}
+The results can be found in table \ref{table:ablations}.
+With four slots not using an attention-variant leads to a substantial drop in the FG-ARI score by 1.8.
+We conclude that competition of slots over pixel features is a useful bias for this architecture.
+
+\paragraph{The effect of the maximum number of slots}
+To gain further insights on how SAMP generalizes to more slots, we ran an ablation on Tetrominoes (Table \ref{table:ablations}).
+While SAMP manages to efficiently solve the task for six slots --- which are 50\% more than the ideal number slots --- the performance largely degrades at nine or more slots. As visible in figure \ref{fig:ablation_9_slots}, oftentimes information about a single object is then shared among two slots.
+
+\begin{table}[ht]
+    \caption{
+    FG-ARI Mean and standard deviations over three seeds on the Tetrominoes dataset.
+    \textit{Left:} Ablations on the number of maximum slots.
+    The ideal number of slots is four (i.e., three foreground objects and the background). If the number of slots is six (i.e., 50\% higher than the ideal number of slots), the model still learns reasonably. If the number of slots becomes twice the number of ideal slots, the models performance degrades rapidly.
+    \textit{Right: } A comparison of attention-variants. The currently chosen attention-variant has the strongest performance. Using no attention mechanism (i.e., using the queries directly for reconstruction), Cross-Attention or the attention mechanism used in the Slot Attention module degrade performance.
+    }
+    \label{table:ablations}
+    \centering
+    \begin{minipage}{.3\textwidth}
+        \begin{center}
+        \begin{tabular}{ll}
+        \multicolumn{1}{c}{\bf Configuration} & \multicolumn{1}{c}{\bf Tetrominoes} \\
+        \hline
+        \textbf{SAMP (4 slots)} & $\mathbf{99.77 \pm 0.12}$ \\
+        SAMP (6 slots) & $99.58 \pm 0.65$ \\
+        SAMP (8 slots) & $89.13 \pm 18.58$ \\
+        SAMP (9 slots) & $84.21 \pm 13.62$ \\
+        SAMP (16 slots) & $63.99 \pm 1.57$ \\
+        \end{tabular}
+        \end{center}
+    \end{minipage}%
+    \hspace{\dimexpr 0.1\textwidth}
+    \begin{minipage}{.5\textwidth}
+        \begin{center}
+        \begin{tabular}{ll}
+        \multicolumn{1}{c}{\bf Attention variants (4 slots)} & \multicolumn{1}{c}{\bf Tetrominoes} \\
+        \hline
+        \textbf{SAMP} & $\mathbf{99.77 \pm 0.12}$ \\
+        SAMP w/o Attention & $97.97 \pm 0.20$ \\
+        SAMP w/ Attn as in Slot Attention & $91.07 \pm 15.23$ \\
+        SAMP w/ Cross-Attention & $90.92 \pm 14.87$ \\
+        \\
+        \end{tabular}
+        \end{center}
+    \end{minipage}
+\end{table}
+
+
+
+\section{Limitations and Discussion}
+
+
+\paragraph{Sensitivity to the maximum number of slots}
+One down-side of SAMP is, that the number of objects is not adjustable during or after training.
+Other methods also suffer from a sensitivity to the number of slots during training. This problem can be improved by training with more slots and flexibly adjust the number of slots during inference \citep{zimmermann2023_SlotSensitivity}.
+
+\paragraph{Connections to continual learning}
+The ability to learn abstract, object-centric representations in an unsupervised manner is a key challenge for
+continual learning agents that must operate in dynamic, continually changing environments \citep{greff-Binding_problem, wang2024LifeLongLearningReview}.
+By extracting slots that correspond to object concepts from raw sensory data, SAMP provides a mechanism for continually building up a structured understanding of the world in a continual learning setting.
+As an agent experiences more data over time, the slots can be refined and updated to reflect new objects and concepts encountered (e.g. similar to \cite{seitzer2023dinosaur}). 
+This allows for efficient knowledge accumulation and transfer as the agent faces distribution shifts and must adapt to new situations, a core goal of continual learning. 
+Furthermore, our simple, scalable architecture based on standard primitives like convolutions and attention makes SAMP well-suited for continual learning scenarios with constrained computational resources.  Overall, unsupervised object-centric representation learning enabled by approaches like SAMP can serve as a fundamental building block for continual learning agents.
+
+
+\section{Conclusion}
+
+
+In this paper we presented a novel method for object-centric learning that is based on competition, called Simplified Slot Attention with Max Pool Priors (SAMP).
+SAMP is simple, scalable, fully-differentiable and contrary to the widely applied Slot Attention, it is non-iterative.
+It comes with the down-side of not being able to adjust to a different number of slots between training and test time.
+Empirically our method is competitive or outperforms existing slot extraction methods.
+
+
+

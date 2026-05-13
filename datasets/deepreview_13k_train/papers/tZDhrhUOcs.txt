@@ -1,0 +1,332 @@
+\title{SSR: Alignment-Aware Modality Connector for Speech Language Models}
+
+\begin{abstract}
+
+Fusing speech into pre-trained language model (SpeechLM) usually suffers from inefficient encoding of long-form speech and catastrophic forgetting of pre-trained text modality. We propose \method (Segmented Speech Representation Connector) for better modality fusion. Leveraging speech-text alignments, our approach segments and compresses speech features to match the granularity of text embeddings. Additionally, we introduce a two-stage training pipeline that includes the distillation and fine-tuning phases to mitigate catastrophic forgetting. \method outperforms existing mechanism for speech-text modality fusion, consistently achieving better speech understanding (\eg $+10$ accuracy on StoryCloze and $+20$ on Speech-MMLU) while preserving pre-trained text ability.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models \citep[LLMs]{gpt3,palm,vicuna2023,palm2,touvron2023llama,openai2024gpt4} have demonstrated remarkable performance across various tasks and extending pre-trained abilities from LLMs to other modalities has sparked interest in multimodal LLMs \citep{alayrac2022flamingo,liu2023visual,openai2024gpt4,tang2024salmonn,kyutai2024moshi}. In this work, we focus on integrating speech into pre-trained language models (SpeechLMs). A straightforward approach is to transcribe speech into text and use these transcriptions as prompts for large language models \citep{audiogpt}; however, such cascaded systems suffer from error propagation, higher latency, and cannot leverage raw speech information like emotion, speaker identity, and other paralinguistic cues \citep{faruqui2021revisitingboundaryasrnlu, Lin_2022, kim2024integratingparalinguisticsspeechempoweredlarge}. Consequently, developing end-to-end SpeechLMs that directly fuse speech or audio input has gained popularity, where various approaches have been explored to encode speech and align its representation with pre-trained language models \citep{speechgpt,rubenstein2023audiopalm,yu2023connectingspeechencoderlarge,voxtlm,hassid2024textually,tang2024salmonn,nguyen2024spiritlm}.
+Speech representations can be integrated into pre-trained language models mainly through two approaches. The first method involves using connector modules that align speech representations with the language model’s input space without modifying the model’s existing vocabulary. These connector-based techniques typically incorporate a compression module to shorten the speech features, enhancing efficiency. However, connectors are generally first trained for the speech recognition task (with concatenated speech-to-text data) and \textbf{lack the ability to support text or speech generation unless further instruction-finetuned}. The second approach, unit-based fusion, directly incorporates discrete speech units—normally derived from self-supervised models like HuBERT \citep{hsu2021hubert}, XLS-R \citep{xlsr}, or DinoSR \citep{dinosr}—into the language model’s vocabulary. This allows the language model to be fine-tuned with a combination of speech and text tokens, enabling it to handle dual-modal inputs and outputs. Despite its versatility, \textbf{unit-based fusion can lead to longer and less efficient training contexts} due to the sparser nature of speech information. Regardless of the fusion approach, SpeechLMs often face the challenge of catastrophic forgetting, where the model loses its pre-trained text capabilities \citep{tang2024salmonn, nguyen2024spiritlm, kyutai2024moshi}.
+
+To tackle these challenges, we propose \method (Segmented Speech Representation Connector), which grounds speech representations in the same semantic space as transcription token 
+\begin{wrapfigure}{r}{0.65\textwidth}
+    \includegraphics[scale=0.7]{figures/method.pdf}
+    \caption{Comparison of different approaches for speech-text modality fusion. \textit{(a)}: compressor-based connector. \textit{(b)}: direct fusion with speech units. \textit{(c)}: our alignment-aware connector.}
+    \label{figure::overview}
+\end{wrapfigure}
+embeddings. Different from prior work that concatenates speech and text (\cref{figure::overview} (a,b)), we leverage speech-text alignments to segment and compress speech features (\cref{figure::overview} (c)). To mitigate catastrophic forgetting when introducing the speech modality, we propose a two-stage training pipeline. In Stage 1, we freeze the LLM and pre-train the connector using speech-text distillation, adapting speech inputs into compressed representations semantically aligned with text embeddings. In Stage 2, we unfreeze the LLM and fine-tune it using next-token prediction, with the adapted representation as input and the transcription tokens as targets. 
+
+\method outperforms previous SpeechLMs (\eg \spiritlm \citep{nguyen2024spiritlm}, \textsc{Voxtlm} \citep{voxtlm}, \textsc{TWIST} \citep{twist}, \textsc{AudioLM} \citep{borsos2023audiolm}) on tasks including Prompt-based Automatic Speech Recognition (ASR), Spoken Language Understanding (sWUGGY \citep{nguyen2020zeroresourcespeechbenchmark}, sBLIMP \citep{nguyen2020zeroresourcespeechbenchmark}, and StoryCloze \citep{storycloze_dataset}), Massive Multitask Language Understanding \citep[MMLU]{mmlu_dataset}, and Speech-MMLU (our synthesized speech variant of MMLU to assess cross-modal understanding). Additionally, we provide detailed analyses of speech-text aligners (\cref{sec::aligner_compare}) and fine-tuning mechanisms (\cref{sec::stage2}) to offer best practices when using \method for modality fusion.
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{Modality Fusion for Speech Language Models} 
+
+SpeechLM typically encodes audio waveforms into high-dimensional features using pre-trained encoders and integrate these representations to pre-trained LLMs via a connection (adapter) module \citep{asr_llama, yu2023connectingspeechencoderlarge, speechgpt, tang2024salmonn}. To compress speech representations, \citet{fathullah2023promptinglargelanguagemodels} apply stacking-based fixed-rate compression on speech features extracted from the Conformer model \citep{conformer}. Inspired by the Q-former architecture \citep{blip2}, \citet{yu2023connectingspeechencoderlarge} compress speech features using a fixed number of query tokens, while \citet{tang2024salmonn} extend this approach to a window-level Q-former to support variable frame-rate reduction. Alternatively, \citet{asr_llama} utilize Connectionist Temporal Classification (CTC) \citep{ctc} to compress representations.
+
+Besides connector-based modality fusion, pre-processing other modalities—such as speech, vision, and videos—into tokens \citep{macaw_llm, li2023llamavidimageworth2, chameleonteam2024chameleonmixedmodalearlyfusionfoundation, kondratyuk2024videopoetlargelanguagemodel} has attracted attention for its scalability. Speech units are typically extracted from self-supervised representations \citep{hsu2021hubert, xlsr, w2vbert, dinosr}. For instance, AudioLM \citep{borsos2023audiolm} integrates semantic tokens from w2v-BERT \citep{w2vbert} and acoustic tokens from SoundStream \citep{zeghidour2021soundstream}, modeling them autoregressively for audio generation. \citet{rubenstein2023audiopalm} fine-tune the pre-trained LLM PaLM-2 \citep{palm2} with audio tokens processed by AudioLM, enabling both text and speech as input and output. Similarly, VoxtLM \citep{voxtlm} performs multi-task training with speech units and text tokens, achieving high-quality speech recognition and synthesis. To mitigate catastrophic forgetting, \citet{nguyen2024spiritlm} propose an interleaved training mechanism to fuse speech tokens into \llamatwo model.
+
+
+\paragraph{Speech-text Alignment Extraction} 
+Various aligner tools are available for extracting speech-text alignments. For example, the Montreal Forced Aligner (MFA) \citep{McAuliffe2017MontrealFA} is an easy-to-use tool based on the Kaldi toolkit \citep{povey2011kaldi}. Connectionist Temporal Classification (CTC) \citep{ctc} is also widely used for speech-text alignment \citep{Sainath2020EmittingWT, huang2024peakyaccuratectcforced}; since it is a by-product of speech recognition, it supports alignment without explicit text labels. More recently, the UnitY2 aligner \citep{seamless} and the ZMM-TTS aligner \citep{gong2024zmmttszeroshotmultilingualmultispeaker} have shown excellent alignment performance across multiple languages. They use units extracted from pre-trained encoders and are based on variants of RAD-TTS \citep{shih2021radtts}.
+
+
+
+\section{Methodology}
+
+We develop an alignment-aware speech representation connector to foster modality fusion between speech and pre-trained language model. We introduce our connector in \cref{sec::adapter_overview}, with detailed descriptions of its aligners in \cref{sec::aligner}. Lastly, we present the two-stage training pipeline for our connector in \cref{sec::training_method}. 
+\subsection{Alignment-aware Speech Representation Connector}\label{sec::adapter_overview}
+Though previous connectors \citep{fathullah2023promptinglargelanguagemodels, yu2023connectingspeechencoderlarge, asr_llama, tang2024salmonn} vary in their compressor designs, they do not explicitly leverage speech-text alignment information. \method, in contrast, uses speech-text alignments to segment and compress speech features into the same granularity as text tokens. As illustrated in \cref{figure::adapter_module}, our connector consists of two components: (1) a speech-text aligner and (2) a feature compressor.
+
+Given speech features $\bm x = (x_1, \cdots, x_n) \in \mathbb{R}^{n\times D}$ extracted by pre-trained speech encoders (e.g., \wavvec, \hubert, \whisper, etc.), the aligner produces a monotonic mapping (alignment path) between the speech features and their transcriptions $\bm y = (y_1, \cdots, y_m) \in \mathbb{R}^{m \times 1}$. This mapping can be computed based on both speech features (or their units) and transcriptions \citep{seamless, gong2024zmmttszeroshotmultilingualmultispeaker}, or solely based on speech input \citep{Sainath2020EmittingWT, dong2020cif, huang2024peakyaccuratectcforced} (see \cref{sec::aligner} for details). Using the alignment mapping, we segment the input into $m$ chunks of speech features, where each chunk semantically corresponds to a transcription token. For example, in \cref{figure::adapter_module}, speech features are segmented at indices $(2, 5, 7)$ according to the alignment path. We refer to these indices as boundary indices.
+
+Once the boundary indices are identified, we first apply a linear layer to transform the speech features to match the embedding dimension $H (H > D)$ of the pre-trained LLM, since LLMs typically have a larger feature dimension than pre-trained speech encoders. We then use the boundary indices to aggregate and compress the speech representations in each chunk through a Transformer Decoder model \citep{transformer}. Specifically, we apply a causal decoder-only model to transform the speech features into high-dimensional representations $\bm g = f(\bm x; \theta_{\text{dec}}) \in \mathbb{R}^{n\times H}$. Given that features at later positions include information from prior positions, we employ a selection-based compression method \citep{tan2024streamingsequencetransductiondynamic} that takes the transformed features $\bm g$ at the boundary indices to form the compressed representation $\bm z \in \mathbb{R}^{m\times H}$. Although our initial design included a block-wise attention mask to restrict information flow within each chunk (as shown in \cref{figure::adapter_module}, where the middle segment's features do not attend to previous segments), we found that removing these masks simplifies training and inference with minimal impact on performance, as detailed in \cref{sec::main_results}.
+
+\begin{figure*}[t]
+    \hspace{3em}
+    \includegraphics[scale=0.9]{figures/merge_operation.pdf}
+    \caption{\method compresses speech features using speech-text alignments. Features are transformed by a Decoder-only model and selected at boundary index of each segment.}
+    \label{figure::adapter_module}
+\end{figure*}
+\subsection{Speech-text Aligners}\label{sec::aligner}
+We extract speech-text alignment with various aligners to segment speech features and we provide a brief overview of various aligners we experimented below:
+
+\paragraph{UnitY2 Aligner} The UnitY2 aligner \citep{communication2023seamless} is a forced aligner that computes speech-text alignment using discrete speech units and character-level text tokens. The speech units are derived by applying K-Means clustering to the XLS-R model \citep{xlsr}. The aligner is trained jointly with a non-autoregressive text-to-unit (T2U) model, adopting the architecture of the RAD-TTS model \citep{shih2021radtts} but replacing the target mel-spectrogram with speech units. It first computes a soft-alignment $\softalignment \in \mathbb{R}^{V \times U}$ between the characters and units:
+\begin{align}
+\textrm{D}_{i,j} & = ||s^{\text{char}}_{i} - s^{\text{unit}}_{j}||_{2}, \\
+\softalignment_{i,j} & = \frac{e^{-\textrm{D}_{i,j}}}{\sum_{k}{e^{-\textrm{D}_{k,j}}}} + \textrm{P}_{\text{prior}}(i|j),
+\end{align}
+where ${\bf s}^{\text{char}}$ and ${\bf s}^{\text{unit}}$ are the outputs of the character and unit encoders, respectively (both encoders consist of an embedding layer and a 1D convolution layer). $\textrm{D} \in \mathbb{R}^{V \times U}$ is a distance matrix with 
+$V$ and $U$ representing the vocabulary sizes of characters and speech units. $\textrm{P}_{\text{prior}} \in \mathbb{R}^{V \times U}$ is the Beta-binomial alignment prior matrix to encourage near-diagonal paths \citep{shih2021radtts}. After soft-alignment is computed, the monotonic alignment search (MAS) algorithm~\cite{glow_tts} is applied to extract the most probable monotonic alignment path. 
+
+\paragraph{CTC-based Aligner} 
+Since the UnitY2 aligner requires both speech and transcription, it does not support streamable alignment extraction. To enable textless alignment computation, we explored two CTC-based \citep{ctc} aligners. Given the speech features $\bm x$ and text sequences $\bm y$, CTC computes $P(\bm y|\bm x)$ by summing over all valid alignment paths:
+\begin{equation}
+    P(\bm{y}|\bm{x}) = \sum_{\pi \in \mathcal{B}^{-1}(\bm{y})} P(\pi|\bm{x})
+\end{equation}
+Here, $\pi$ denotes a possible alignment path that maps to the target sequence $\bm{y}$, and $\mathcal{B}^{-1}(\bm{y})$ represents the set of all valid paths that collapse to $\bm{y}$ after removing blanks and repeated labels. We investigated two CTC variants: one using character-level text sequences (\charctc) and another using subword token sequences (\subctc), which shares the same vocabulary as the LLM model. 
+\paragraph{CIF-based Speech Connector} For both CTC and UnitY2 aligners, we extract segmentations from the alignments and then apply selection-based compression. We also experimented with Continuous Integrate-and-Fire \citep[CIF]{dong2020cif} as the connector, which is designed to learn segmentation and perform compression simultaneously. Instead of relying on a fixed, pre-computed segmentation, CIF dynamically segments and aggregates speech features by scoring each feature and computing a weighted average. For more details, we refer readers to the original paper \citep{dong2020cif}.
+\begin{wrapfigure}{r}{0.6\textwidth}
+    \includegraphics[scale=0.8]{figures/train_method.pdf}
+    \caption{Two-stage training pipeline for SpeechLM with our alignment-aware modality connector.}
+    \label{figure::train_method}
+\end{wrapfigure}
+
+\subsection{Training Method}\label{sec::training_method}
+Previous approaches to integrate speech into LLMs typically use speech-text data concatenated in ASR format (\ie speech representation followed by its transcription text embedding), to pre-train the connector \citep{yu2023connectingspeechencoderlarge, asr_llama, tang2024salmonn}. However, after such pre-training, the model is limited to speech recognition task and necessitates another instruction-tuning stage to perform generative tasks with pre-trained connectors \citep{speechgpt, tang2024salmonn}. Moreover, once the LLM is unfrozen and fine-tuned (whether based on a pre-trained connector or direct fusion with speech units), it suffers from catastrophic forgetting, leading to degraded text capabilities \citep{nguyen2024spiritlm, tang2024salmonn}. 
+
+With \method, we convert speech into representations with the same granularity as their transcription tokens. This allows us to fine-tune the SpeechLM directly using the next-token prediction objective, \textbf{where the input is the compressed representation $\bm z$ and the target is the transcription $\bm y$}. This approach is possible because our feature $\bm z$ and text token $\bm y$ share the same length $m$. However, our preliminary studies showed that directly fine-tuning with the next-token prediction objective leads to catastrophic forgetting, undermining the pre-trained LLM's abilities. Therefore, we propose a two-stage training pipeline consisting of a distillation stage and a fine-tuning stage, as shown in \cref{figure::train_method}.
+In Stage 1, we pre-train \method by distilling the LLM's text embeddings to align the connector's representations with the LLM's embedding space. Formally, given aligned speech-text data, we compute the text embeddings $\bm h = f(\bm y; \theta_{\text{emb}})$, where $\bm y$ is the transcription token sequence, $\theta_{\text{emb}}$ is the embedding table, and $f$ maps tokens $\bm y$ to their embeddings. Following our connector design in \cref{sec::adapter_overview}, we obtain the compressed speech representations $\bm z$. For distillation, we use a combination of cosine similarity loss $\mathcal{L}_{\text{cos}}$ and mean squared error (MSE) loss $\mathcal{L}_{\text{MSE}}$ 
+
+\begin{equation} \mathcal{L} = \lambda \mathcal{L}{\text{cos}} + \mathcal{L}_{\text{MSE}} =\frac{1}{m}\sum_{i=1}^{m} \left[ \lambda \left(1 - \frac{\mathbf{z}_i^\top \mathbf{h}_i}{|\mathbf{z}_i|\cdot|\mathbf{h}_i|} \right) + \left| \mathbf{z}_i - \mathbf{h}_i \right|^2 \right], \end{equation}
+
+where $\lambda$ is a hyperparameter to balance the losses\footnote{In practice, we set $\lambda=5$ to balance the scales of the cosine similarity and MSE losses}. In Stage 2, we fine-tune the LLM with the pre-trained speech connector using the next-token prediction objective. We freeze the speech connector and update only the LLM's parameters using the negative log-likelihood (NLL) loss:
+
+\begin{equation}
+\mathcal{L}_{\text{NLL}} = -\sum_{t=1}^m \log p(y_t \mid \bm z_{<t}; \theta_{\text{LLM}}) \end{equation}
+
+where $y_t$ is the $t^{\text{th}}$ token in the transcription sequence $\bm y$, $\bm z_{<t}$ denotes all preceding speech representations, and $\theta_{\text{LLM}}$ represents the LLM's parameters. Note that our NLL loss is computed using only the preceding speech representations $\bm z_{<t}$ (see \cref{figure::train_method}), whereas previous methods \citep{asr_llama, tang2024salmonn} condition on both speech information and preceding text tokens $\bm y_{<t}$.
+
+We offer detailed descriptions of different aligners and demonstrate the performance of SpeechLM after distillation training in \cref{sec::stage1}. In \cref{sec::stage2}, we present results after fine-tuning SpeechLM and compare various fine-tuning strategies to identify the method that minimizes catastrophic forgetting.
+
+
+\section{Stage 1: Alignment-aware Connector Distillation}
+
+\subsection{Datasets}\label{sec::dataset}
+For distillation training, we use the aligned speech-to-text dataset MLS \citep{mls_dataset}, specifically the English portion, which consists of about 50,000 hours of speech. To evaluate our SpeechLMs, we employ several datasets as shown in \cref{table::datasets}. To assess the model's spoken language understanding (SLU) capabilities, we follow \citet{nguyen2024spiritlm} and use sWUGGY, sBLIMP, and the StoryCloze dataset. sWUGGY and sBLIMP are detailed in \citep{nguyen2020zeroresourcespeechbenchmark}. Briefly, sWUGGY evaluates whether a model can discriminate between real spoken words and non-words (e.g., ``brick" vs. ``blick"), while sBLIMP assesses if the model can distinguish between a grammatically correct spoken sentence and its ungrammatical variant (e.g., ``cats are lazy" vs. ``cats is lazy"). We evaluate our SpeechLMs on both text ($T$) and speech ($S$) versions of sWUGGY and sBLIMP. The StoryCloze dataset measures whether the model can identify the plausible ending between two sentences given the beginning of a short story, which typically requires high-level semantic understanding and common sense \citep{storycloze_dataset}. Besides spoken and text versions of StoryCloze, following \citet{nguyen2024spiritlm}, we use a speech-text version ($S\rightarrow T$), where the beginning of the story is synthesized into speech and the two ending sentences are kept in text format. This version requires the model to have cross-modal understanding to infer the sensible story ending.
+
+MMLU \citep{mmlu_dataset} is widely used to assess LLMs' knowledge comprehension, understanding, and reasoning abilities, and we use it to measure the extent of forgetting during cross-modal fine-tuning. Since MMLU is a diverse and high-quality evaluation dataset for LLMs, we craft a variant, Speech-MMLU, to assess our SpeechLM's cross-modal understanding. Specifically, we utilized \textsc{AudioBox} \citep{vyas2023audioboxunifiedaudiogeneration}, a high-quality text-to-speech synthesizer, to convert the question portion of each choice task into speech while keeping the multiple-choice answers in text format. We selected a subset of MMLU to construct our Speech-MMLU dataset, as some domains' questions are not suitable for synthesis (\eg the algebra subset contains many mathematical notations that are not synthesized properly). sWUGGY, sBLIMP, StoryCloze, and Speech-MMLU are all categorized as "Choice Task", meaning several choices are presented to the SpeechLM (Speech-MMLU has four choices while the other task has only two choices). For each task, we compute accuracy using groundtruth choice and the highest likelihood choice predicted by the SpeechLM.
+Lastly, we also evaluate our SpeechLM's ASR performance using the Librispeech clean/other datasets. We evaluate ASR in a prompt-based fashion with zero-shot and five-shot setting.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{l l l l}
+\toprule
+\textbf{Eval Dataset} & \textbf{Type} & \textbf{Eval Metric} &\textbf{Eval Format}\\
+\midrule
+sWUGGY \citep{nguyen2020zeroresourcespeechbenchmark} & Choice Task     & Accuracy   &$S, T$      \\
+sBLIMP \citep{nguyen2020zeroresourcespeechbenchmark} & Choice Task     & Accuracy   &$S, T$      \\
+StoryCloze \citep{storycloze_dataset}                & Choice Task     & Accuracy   &$S, T$, $S\rightarrow T$      \\
+MMLU \citep{mmlu_dataset}                            & Choice Task     & Accuracy    &$T$     \\
+Speech-MMLU (\textit{Ours})                                          & Choice Task     & Accuracy    &$S\rightarrow T$     \\
+LibriSpeech \citep{librisppech_dataset}          & Generation Task & Word Error Rate &$S\rightarrow T$  \\
+\bottomrule
+\end{tabular}
+\caption{Evaluation Datasets and their types. For the evaluation format, $S$ is speech-only, $T$ is text-only, and $S\rightarrow T$ means the evaluation prompt consists of speech prefix and text continuation.}
+\label{table::datasets}
+\end{table}
+\subsection{Model Setup}\label{sec::model_setup}
+We instantiate our LLM using the pre-trained \llamathree model \citep{touvron2023llama} and employ DinoSR \citep{dinosr} as our pre-trained speech feature extractor. Our speech connector includes a linear layer that maps DinoSR's extracted representations ($D=768$) to the LLM's embedding space dimension ($H=4096$). We then utilize a 4-layer Transformer Decoder to transform and compress the speech representations based on alignments, as described in \cref{sec::adapter_overview}. The compressed representations $\bm z$ and the embeddings of text tokens $\bm h$ are used to compute the distillation loss for updating the connector's parameters. We train our connector for 400,000 steps with a learning rate of $1 \times 10^{-5}$, using dynamic batching with a maximum of 4,096 tokens per device. We employ distributed data parallelism (DDP) with 32 A100 GPUs.
+
+To extract alignments, we experimented with different aligners listed in \cref{sec::aligner}.md}}, we used it off-the-shelf to construct alignment indices. Since the UnitY2 aligner provides alignments based on character-level tokens, we merge the durations into subword level to ensure that the compressed representations and text embeddings have the same granularity. For CTC-based aligners, we trained them using a 4-layer Transformer Decoder followed by a linear projection. In the character-level variant (\charctc), we deduplicate the sequence to obtain character-level durations and then merge them into subword-level durations to segment the speech features, similar to the UnitY2 aligner. In the subword-level variant (\subctc), we directly use CTC's blank token to segment the speech input.
+
+
+\subsection{Aligner Performance Comparison}\label{sec::aligner_compare}
+\begin{wraptable}{r}{0.5\textwidth}
+\centering
+\small
+\begin{tabular}{
+    l
+    S[table-format=2.1]
+    S[table-format=1.3]
+    c
+}
+\toprule
+\textbf{Model Type} & \textbf{Cos(\%)}$\uparrow$ & \textbf{MSE}$\downarrow$ & \textbf{WER (\%)} $\downarrow$ \\
+\midrule
+\unity         & \textbf{96.8} & \textbf{0.018} & \bfseries 5.6 / 4.0 \\
+\charctc       & 95.1 & 0.023 & 9.7 / 6.5 \\
+\subctc        & 92.2 & 0.037 & 16.7 / 14.0 \\
+CIF            & 77.5 & 0.096 & 27.6 / 23.7 \\
+\bottomrule
+\end{tabular}
+\caption{Performance comparison (with Cosine Similarity, MSE, and 0/5-shot ASR WER) between different aligners used for Stage 1 training, evaluated on Librispeech clean test set.}
+\label{table::aligner_compare}
+\end{wraptable}
+To compare the quality of different aligners, we trained several \method based on different aligners via distillation. We evaluated the aligners using the Librispeech clean test set by computing the Cosine Similarity (\textbf{Cos(\%)}) and Mean Squared Error (\textbf{MSE}) between the compressed representations and text embeddings. Additionally, we performed zero-shot and five-shot ASR with the learned connector. Note that we never explicitly trained the model for ASR tasks, and the base LLM remained frozen during Stage 1 training. Therefore, the model achieves low word error rates (\textbf{WER}) only when the distilled speech representations closely resemble the text embeddings. As shown in \autoref{table::aligner_compare}, the \textsc{UnitY2} aligner brings the speech representations close to their corresponding text embeddings, achieving very low WER in both zero-shot and five-shot ASR settings. Among textless aligners, we found that \charctc performs the best, likely because it has a much smaller vocabulary compared to \subctc, making it easier to learn. Lastly, CIF resulted in suboptimal performance, possibly due to its less accurate alignment, as its segmentation is predicted by accumulating scores without exploiting the monotonicity between speech and text. 
+To visualize the effect of distillation, we present t-SNE plots of the adapted speech representations and text embeddings in \cref{figure::visualize_embed}, categorizing them into high and low similarity groups based on the cosine similarity between \charctc representations and text embeddings. We observe that longer subwords tend to exhibit higher similarity, likely because their long segments make it easier for the connector to convert speech representations into corresponding text embeddings. Furthermore, longer subwords possess more coherent semantics compared to shorter tokens like `wy' or `ia'.
+
+\begin{wraptable}{r}{0.4\textwidth}
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Aligner} & \textbf{WBE}$\downarrow$ & \textbf{WDUR} \\
+\midrule
+Groundtruth       & 0   & 305 \\
+\unity    & 33  & 279 \\
+\charctc  & 42  & 230 \\
+\midrule
+\textit{\,\,Other Aligners}\\
+CTC+Label Prior & 29 & 288\\
+MMS & 37 & 242 \\
+MFA & 23 & 314 \\
+\bottomrule
+\end{tabular}
+\caption{Alignment quality of aligners.}
+\label{table::alignment_quality}
+\end{wraptable}
+Given that \unity and \charctc performs the best, we also follow \citet{huang2024peakyaccuratectcforced} to measure their word boundary error (WBE) and word average duration (WDUR) using the TIMIT \citep{garofolo1993timit} data.
+
+
+\begin{figure*}[t]
+    \includegraphics[scale=0.4]{figures/embed.pdf}
+    \caption{t-SNE plots of text and speech representations after distillation.}
+    \label{figure::visualize_embed}
+\end{figure*}
+
+\subsection{Experimental Results}\label{sec::main_results}
+In the previous section (\cref{sec::aligner}), we compared different aligners and found that \unity and \charctc performed the best. Consequently, we evaluate SpeechLM using these two aligners. First, we assess the model on Spoken Language Understanding (SLU) tasks and the MMLU benchmark \citep{mmlu_dataset}. We compare our model against several generative speech systems, all of which utilize Transformer-Decoder models trained on speech units. These methods vary in training approaches (pretrained from scratch or fine-tuned), types of speech units, and the size of training data. 
+
+Briefly, GSLM \citep{gslm} trains on speech units like HuBERT, TWIST \citep{twist} is a textually pretrained speech model based on Llama-13B \citep{touvron2023llama}, and AudioLM \citep{borsos2023audiolm} employs a cascade system with a semantic sequence model alongside coarse- and fine-acoustic models. These models focus solely on speech without capabilities for text understanding or generation. More recently, \spiritlm \citep{nguyen2024spiritlm} and VoxtLM \citep{voxtlm} have adopted multi-task training objectives that incorporate text-only, speech-only, and speech-text token sequences to fuse the speech modality into pre-trained LLMs effectively. Since the original \spiritlm is fine-tuned based on \llamatwo, we follow the same recipe to fine-tune the \llamathree-based \spiritlm ourself for a fair comparison on text relevant metrics like MMLU.
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+\textbf{Model Type} & \multicolumn{2}{c}{\textbf{sWUGGY}} & \multicolumn{2}{c}{\textbf{sBLIMP}} & \multicolumn{3}{c}{\textbf{Storycloze}} & \textbf{MMLU} \\ 
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-8} \cmidrule(l){9-9}
+                    & T             & S                   & T             & S                   & T             & S                   & S$\rightarrow$T             & 5-shot             \\ 
+\midrule
+\textit{\quad Previous Work} \\
+\textsc{GSLM}${}^{\diamondsuit}$ \citep{gslm}& $\emptyset$ & 64.8 & $\emptyset$ & 54.2  & $\emptyset$ & 53.3  & $\emptyset$  & $\emptyset$ \\
+\textsc{AudioLM}${}^{\diamondsuit}$ \citep{borsos2023audiolm}& $\emptyset$ & 71.5 & $\emptyset$ & 64.7  & $\emptyset$ & \underline{\ \ }  & $\emptyset$  & $\emptyset$ \\
+\textsc{Voxtlm}${}^{\diamondsuit}$ \citep{voxtlm}& \better 80.3 & 66.1 & \better 74.2 & 57.1  & \underline{\ \ } & \underline{\ \ }  & \underline{\ \ }  & \underline{\ \ } \\
+\textsc{TWIST}${}^{\diamondsuit}$ \citep{twist}& $\emptyset$ & \textbf{74.5} & $\emptyset$ & 59.2  & $\emptyset$ & 55.4  & $\emptyset$ & $\emptyset$ \\
+\textsc{Moshi}${}^{\clubsuit}$ \citep{kyutai2024moshi}                   & $\emptyset$ &  \better 72.6  & $\emptyset$ & 58.8 & $\emptyset$ & 60.8   & \underline{\ \ }  & 49.8  \\
+\textsc{SpiritLM}${}^{\diamondsuit}$ \citep{nguyen2024spiritlm}                   & \better 80.3 & 69  & 73.3  & 58.3 & \better 79.4 & 61   & 64.6  & 36.9   \\
+\spiritlm (\llamathree)${}^{\spadesuit}$                   & 77.6 & 73.5 & \textbf{74.5} & 56.3 & 75.1 & 61.1 & 61.6  & \better 53.5 \\ 
+
+\midrule
+\textit{\quad \method}\\
+\unity + Blockwise-mask & \textbf{81} & 71.5 & \textbf{74.5} & \textbf{73.1}  & \textbf{80.9} & \textbf{71.8}  & \textbf{75}  & \textbf{65.3} \\
+\unity   & 81 & 71.2 & 74.5 & \better 72.4  & 80.9 & \better 69.3 & \better 74.8  &  65.3     \\
+\charctc & 81 & 56.4 & 74.5 & 67.3  & 80.9 & 62.2  & 74.3 &  65.3 \\
+\charctc (Unit-based) & 81 & 54.1 & 74.5 & 61.8 & 80.9 & 59.2 & 72.5 & 65.3 \\
+\midrule
+\textit{\quad Cascade System}\\
+ASR (\whisper) + \llamatwo${}^{\diamondsuit}$ & 84.1 & 79.2 & 72.8 & 71.6  & 81.9 & 75.7  & 75.7 &  46.2 \\
+
+\bottomrule
+\end{tabular}
+\caption{Model performance on spoken language understanding and MMLU. ${}^{\diamondsuit}$: Results taken from \citet{nguyen2024spiritlm}.${}^{\clubsuit}$: Results taken from \citet{kyutai2024moshi}.  ${}^{\spadesuit}$: Our implementation of \spiritlm based on \llamathree checkpoint. We fill with $\emptyset$ the task and modality that are not supported by the reported system, and with \underline{\ \ } the scores that are not publicly available. We bold the best result and highlight the second-best system with the blue color box (excluding the cascaded system).}
+\label{table::main_results}
+\end{table*}
+
+\paragraph{Spoken Language Understanding Performance} As shown in \cref{table::main_results}, our systems outperform previous models on all tasks except sWUGGY. The sWUGGY dataset includes incorrectly spoken words that cause segmentation errors because these words were not present during aligner training, leading to our system's lower performance on this dataset. However, sWUGGY is the least significant task since it relies on synthesized incorrect words and does not require the model’s understanding or reasoning capabilities. In contrast, both \unity and \charctc based connector greatly surpass previous models on other datasets, demonstrating the effectiveness of \method in enhancing SLU performance while preserving model's text understanding ability.
+
+Beyond \unity and \charctc, we introduce two additional systems for ablation. The \unity + Blockwise-mask system achieves the highest performance by applying a blockwise attention mask to further constrain the Transformer-Decoder (described in \cref{sec::adapter_overview}). However, due to its marginal improvement over \unity and increased computational cost, we decide to simplify the design and remove the blockwise-attention masks. The \charctc (Unit-based) system differs by utilizing discrete speech units instead of raw waveform features processed by the DinoSR \citep{dinosr} encoder. These units are extracted via K-Means clustering on DinoSR representations, which leads to some information loss during discretization and reconstruction, resulting in lower performance compared to \charctc. Nonetheless, \charctc (Unit-based) demonstrates that \textit{our alignment-aware connector design is compatible with both continuous waveforms and discrete speech units}.
+
+\paragraph{Speech-MMLU and Prompt-based ASR Performance} In addition to SLU tasks, we evaluate our systems on the Speech-MMLU benchmark, which assesses cross-modal understanding and is more challenging than previous SLU tasks. We also conduct prompt-based ASR evaluations to assess the quality of the adapted features. As shown in \cref{table::speech_mmlu_asr}, our systems greatly outperform the previous SpeechLM (\spiritlm), achieving a +20 accuracy improvement on the Speech-MMLU dataset\footnote{~We report micro-average across 22 domains and the detailed breakdown is available in \cref{app::speech_mmlu}.}. These results indicate that SpeechLM based on \method possesses enhanced cross-modal abilities that enable it to comprehend spoken questions and reason through multiple-choice options to select correct answers. Similarly, our systems achieve much lower WERs on both the Librispeech clean and other test sets compared to \spiritlm. Notably, neither \spiritlm nor our system were trained on ASR tasks, \textit{so the model relies solely on in-context learning to generate transcriptions}. Even our weakest system (\charctc (Unit-based)) can outperform \spiritlm’s 10-shot result.
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{lcc|cc|cc}
+\toprule
+\textbf{Model Type}  & \multicolumn{2}{c|}{\textbf{Speech MMLU} $\uparrow$ } & \multicolumn{2}{c|}{\textbf{ASR Clean Test} $\downarrow$} & \multicolumn{2}{c}{\textbf{ASR Other Test} $\downarrow$} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& \textbf{0-shot} & \textbf{5-shot} & \textbf{0-shot} & \textbf{5-shot} & \textbf{0-shot} & \textbf{5-shot} \\
+\midrule
+\spiritlm \citep{nguyen2024spiritlm}     & N/A   & N/A    & N/A    & 21.9$^*$ & N/A    & 29.2$^*$ \\
+\spiritlm (\llamathree)   & 40.5  & 42.75 & N/A    & 21.0$^*$ & N/A   & 28.5$^*$ \\
+\midrule
+\textit{\quad \method}\\
+\unity + Blockwise-mask   & \textbf{65.0} & \textbf{69.5} & \textbf{5.0}  & \textbf{2.6}     & \textbf{8.1}  & \textbf{6.8} \\
+\unity                    & 64.2 & 68.6 & 5.6   & 4.0     & 12.1 & 10.6 \\
+\charctc                  & 61.7 & 66.5 & 9.7  & 6.5     & 20.2 & 14.9 \\
+\charctc (Unit-based)     & 57.4 & 62.3 & 12.6 & 8.8     & 25.6 & 18.6 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of Speech-MMLU and ASR performance. Speech-MMLU results are micro-averages across all domains. $^*$: For \spiritlm, We report WER using 10-shot prompting, following \citet{nguyen2024spiritlm}. N/A: We did not evaluate \spiritlm in those settings.}
+\label{table::speech_mmlu_asr}
+\end{table*}
+
+
+
+
+\section{Stage 2: Speech Language Model Fine-tuning}
+
+In Stage 1 (\cref{sec::stage1}), we freeze the pre-trained LLM and distill its text embeddings into our alignment-aware connector. In this section, we fine-tune SpeechLM by freezing the connector and updating the LLM. This process enhances the model's spoken language understanding (SLU) performance by fitting SpeechLM on the aligned speech-text data, albeit at the expense of degrading its pre-trained text capabilities. In the following sections, we compare various methods to mitigate catastrophic forgetting and demonstrate their trade-offs between speech and text understanding.
+
+\begin{table*}[b]
+\centering
+\small
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+\textbf{Model Type} & \multicolumn{2}{c}{\textbf{sWUGGY}} & \multicolumn{2}{c}{\textbf{sBLIMP}} & \multicolumn{3}{c}{\textbf{Storycloze}} & \textbf{MMLU} \\ 
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-8} \cmidrule(l){9-9}
+                    & T             & S                   & T             & S                   & T             & S                   & S$\rightarrow$T             & 5-shot             \\ 
+\midrule
+\charctc & 81 & 56.4 & 74.5 & 67.3  & 80.9 & 62.2  & \textbf{74.3} & \textbf{65.3} \\
+\midrule
++ Vanilla Fine-tuning& \better 82.5 & \better 56.6 & \better75.8 & \better68.8 & 75.2 & \better62.8 & 71 & 57.4\\
++ LoRA Fine-tuning& 82.4 & 56.5 & \better75.8 & 68.7 & \better76.3 & 62.6 & 71.5 & 58.2\\
++ Multitask Fine-tuning & \textbf{82.9} & \textbf{56.7} & \textbf{75.9} & \textbf{68.9} & \textbf{81} & \textbf{63.4} & \better73.1 & \better63.1 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of different Stage 2 fine-tuning methods (reported after fine-tuned for 5k updates). Multitask fine-tuning obtains the best improvement on SLU tasks while achieving least catastrophic forgetting. We bold the best performance and use blue color box for the second-best result.}
+\label{table::main_results_finetune}
+\end{table*}
+\subsection{Mitigate Catastrophic Forgetting}\label{sec::mitigate_forgetting}
+\paragraph{Model and Dataset Setup} We fine-tune SpeechLM using the next-token prediction objective described in \cref{sec::training_method}. In this stage, we freeze the connector distilled in Stage 1 and unfreeze the LLM (\llamathree) parameters. Following Stage 1 (\cref{sec::stage1}), we use the MLS dataset for training and evaluate the model on the same speech and text understanding tasks. Beyond vanilla fine-tuning, we also explore Low-rank Adaptation \citep[LoRA]{hu2021lora} and multitask fine-tuning as they have been shown effective for mitigating catastrophic forgetting in other tasks \citep{xue-etal-2021-mt5, vu2022overcomingcatastrophicforgettingzeroshot}. Details of our fine-tuning setup are shown below:
+\begin{itemize}[leftmargin=*, label=\textbullet, itemsep=0pt, topsep=0pt]
+    \item \textbf{Vanilla Fine-tuning}: We perform full fine-tuning on the aligned speech-text data with a learning rate of $1 \times 10^{-6}$ and a maximum token size of 4096. Training is model-parallelized across 32 A100 GPUs using Fully Sharded Data Parallel \citep[FSDP]{fsdp}.
+    
+    \item \textbf{LoRA Fine-tuning}: We leverage the low-rank constraints from  as regularization to prevent model overfitting in MLS dataset. We configure LoRA layers with $\alpha=512$, $r=256$, and a dropout probability of 0.1.
+    
+    \item \textbf{Multitask Fine-tuning}: To preserve the LLM's pre-trained text capabilities, we also fine-tune SpeechLM on text-only data using the standard Negative Log-Likelihood (NLL) loss. The dataloader is configured to sample from both speech-text and text-only datasets with equal probability. We continue using the MLS dataset for speech-text training and utilize a subset of the \textsc{LLaMa2} training datasets \citep{touvron2023llama} for text-only training.
+\end{itemize}
+\subsection{Comparison of Fine-tuning Methods}
+In \cref{figure::trade_off}, we compare different fine-tuning methods on StoryCloze ($S$) and MMLU. StoryCloze performance is indicative of how well model is fitted to the speech modality and MMLU measures the degree of catastrophic forgetting in pre-trained text abilities. We observe that Vanilla Fine-tuning quickly overfits to the speech domain, achieving improved performance on StoryCloze but drastically decreasing MMLU accuracy. In contrast, LoRA Fine-tuning introduces strong regularization, resulting in limited improvements in speech understanding. Although LoRA mitigates catastrophic forgetting to some extent compared to vanilla fine-tuning, performance still steadily declines. \textbf{Multitask fine-tuning emerges as the most promising approach}, enhancing speech understanding while largely mitigating catastrophic forgetting, evidenced by the modest 2-point drop in MMLU.
+Since model performance does not further improve with additional training steps (as shown in \cref{figure::trade_off}), we utilize the checkpoint trained for 5,000 updates to compare with baseline models. The results are presented in \cref{table::main_results_finetune} and \cref{table::speech_mmlu_asr_finetune}. Note that even with only 5,000 updates, the model has observed all speech-text data due to our large effective batch size. Across SLU, MMLU, and ASR tasks, the fine-tuned SpeechLM outperforms baseline methods on tasks primarily relying on speech-only information (sWUGGY, sBLIMP, ASR), with multitask fine-tuning achieving the best performance among all fine-tuning methods. However, we also observe a decline in performance on $S\rightarrow T$ tasks such as Speech-MMLU and StoryCloze, indicating that \textbf{there is still unavoidable degradation of text capabilities} which adversely affects SpeechLM's cross-modal performance.
+
+Overall, Stage 2 fine-tuning experiments highlight a trade-off between enhanced speech understanding and degraded text abilities when unfreezing pre-trained LLM weights. Though such forgetting phenomenon is unavoidable, our two-stage training pipeline has largely preserved SpeechLM's text ability and our experimental results underscore the importance of incorporating high-quality text data during cross-modal fine-tuning to balance performance across both modalities.
+
+
+\begin{figure*}[t]
+    \includegraphics[scale=0.45]{figures/trend.pdf}
+    \caption{Comparison of different fine-tuning methods on StoryCloze ($S$) and MMLU benchmark.}
+    \label{figure::trade_off}
+\end{figure*}
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{lcc|cc|cc}
+\toprule
+\textbf{Model Type}  & \multicolumn{2}{c|}{\textbf{Speech MMLU}$\uparrow$} & \multicolumn{2}{c|}{\textbf{ASR Clean Test}$\,\downarrow$} & \multicolumn{2}{c}{\textbf{ASR Other Test}$\,\downarrow$} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& \textbf{0-shot} & \textbf{5-shot} & \textbf{0-shot} & \textbf{5-shot} & \textbf{0-shot} & \textbf{5-shot} \\
+\midrule
+\spiritlm (\llamathree)   & 40.5  & 42.75 & N/A    & 21.0$^*$ & N/A   & 28.5$^*$ \\
+\charctc                  & \textbf{61.7} & \textbf{66.5} & 9.7  & 6.5     & 20.2 & 14.9 \\
+\,\,\,\,+ Multitask Fine-tuning & 48.1 & 56.3 & N/A & \textbf{5.7} & N/A & \textbf{13.1}\\
+\bottomrule
+\end{tabular}
+\caption{Speech-MMLU and ASR performance of different models. $^*$: For \spiritlm, We report WER using 10-shot prompting for ASR, following \citet{nguyen2024spiritlm}. N/A: The 0-shot generation of our fine-tuned SpeechLM tends to have hallucinations (keep generating after completing the transcription) so we only report its 5-shot performance.}
+\label{table::speech_mmlu_asr_finetune}
+\end{table*}
+
+
+
+\section{Conclusion}
+
+We propose \method to inject speech representation into pre-trained LLMs. Through explicitly leveraging speech-text alignment, our connector compresses long and sparse speech information to the same granularity as text tokens. To mitigate catastrophic forgetting, we propose a two-stage training pipeline for modality fusion. Compared to previous baselines, our SpeechLM achieves much better speech understanding ability while retaining its pre-trained text ability.   
+
+
+
+
+
+
+
+

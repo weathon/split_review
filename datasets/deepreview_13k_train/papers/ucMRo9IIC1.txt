@@ -1,0 +1,527 @@
+\title{Image Hijacks: Adversarial Images can Control Generative Models at Runtime}
+
+\begin{abstract}
+Are foundation models secure against malicious actors? In this work, we focus on the image input to a vision-language model (VLM). We discover \vocab{image hijacks}, adversarial images that control the behaviour of VLMs at inference time, and introduce the general Behaviour Matching algorithm for training image hijacks. From this, we derive the Prompt Matching method, allowing us to train hijacks matching the behaviour of an \emph{arbitrary user-defined text prompt} (e.g.~`the Eiffel Tower is now located in Rome') using a generic, off-the-shelf dataset \emph{unrelated to our choice of prompt}. We use Behaviour Matching to craft hijacks for four types of attack, forcing VLMs to generate outputs of the adversary's choice, leak information from their context window, override their safety training, and believe false statements. 
+We study these attacks against LLaVA, a state-of-the-art VLM based on CLIP and LLaMA-2, and find that all attack types achieve a success rate of over 80\%. Moreover, our attacks are automated and require only small image perturbations. 
+\blfootnote{*Denotes equal contribution.
+Project page at \hyperlink{https://image-hijacks.io}{https://image-hijacks.io}.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=1\textwidth]{figures/new_figure_1.pdf}
+\caption{Various image hijacks for LLaVA, a VLM based on CLIP and LLaMA-2. Each hijack forces LLaVA to perform some specific behaviour (e.g.~exfiltrate user input or spread disinformation), and is robust to the choice of user input prompt. These hijacks can also be crafted under various constraints -- e.g. being barely perceptible to the user,
+or occupying only a small patch of the image.}
+
+\label{fig:overview}
+\end{figure} 
+\newpage
+
+Following the success of large language models (LLMs), the past year has witnessed the emergence of \emph{vision-language models (VLMs)}, LLMs adapted to process images as well as text. The leading AI research laboratories are investing heavily in the training of VLMs -- such as OpenAI's GPT-4 \citep{gpt4} and Google's Gemini \citep{gemini} -- and the ML research community has been quick to adapt state-of-the-art open-source LLMs into VLMs. While allowing models to see enables a wide range of downstream applications, the addition of a continuous input channel introduces a new vector for adversarial attack, raising the question: \emph{how secure are VLMs against input-based attacks?}
+We expect that this question will only become more pressing in the coming years. For one, we expect foundation models to become more powerful and more widely embedded across society. In order to make AI systems more useful to consumers, we expect there will be economic pressure to give them access to \emph{untrusted data and sensitive personal information}, and to let them \emph{take actions in the world on behalf of a user}. For instance, an AI personal assistant might have access to email history, which includes sensitive data; it might browse the web and send and receive emails; and it might be able to download files, make purchases, and execute code.
+Foundation models must be secure against 
+input-based attacks. Specifically, \emph{untrusted input data should not be able to control a model's behaviour in undesirable ways}  -- for instance, making it leak a user’s personal data, install malware on the user’s computer, or help the user commit crimes. We call attacks attempting to violate this property \emph{hijacks}. 
+Worryingly, we discover \vocab{image hijacks}: adversarial images that, with only small perturbations to their original image, can control the behaviour of VLMs at inference time. As illustrated in Figure~\ref{fig:overview}, image hijacks can exercise a high degree of control over a VLM: for instance, they can cause it to \emph{generate arbitrary outputs} at runtime (regardless of user input), to \emph{leak its context window}, to \emph{circumvent its own safety training}, and to \emph{believe false information}.
+We can even craft image hijacks that force VLMs to behave as though they were presented with a particular user-defined text prompt.%
+
+The field of adversarial robustness offers no easy way to eliminate this class of attacks. Despite hundreds of papers trying to patch adversarial examples in computer vision, progress has been slow. According to RobustBench \citep{croce2020robustbench}, the state-of-the-art robust accuracy on CIFAR-10 under an $\ell_\infty$ perturbation constraint of $8/255$ grew from 65.88\% in Oct 2020 \citep{gowal2020uncovering} to 70.69\% in Aug 2023 \citep{wang2023better}, a gain of only 4.81\%. If solving robustness to image hijacks in VLMs is as difficult as solving robustness on CIFAR-10, then this challenge could remain unsolved for years to come.
+Our contributions can be summarised as follows:
+\begin{enumerate}
+    \item We introduce the concept of \vocab{image hijacks} -- adversarial images that control the behaviour of VLMs at inference time -- and introduce the general \vocab{Behaviour Matching} algorithm for training image hijacks that \emph{exhibit transferability to held-out user inputs} (Section~\ref{sec:behaviour_matching}). 
+    From this, we derive \vocab{Prompt Matching} (Section~\ref{sec:prompt_matching}),
+    a method to train hijacks matching the behaviour of an arbitrary text prompt (e.g. `the Eiffel Tower is now located in Rome') using a  generic
+    dataset \emph{unrelated to our choice of prompt}.
+    \item Inspired by potential misuse scenarios, we craft four different types of image hijack: the \vocab{specific string attack} \citep{bagdasaryan2023ab,schlarmann2023adversarial}, forces a VLM to generate an arbitrary string of the adversary’s choice; the \vocab{jailbreak attack} \citep{qi2023visual} bypasses a VLM's safety training, forcing it to comply with harmful instructions; the \vocab{leak-context attack} forces a VLM to repeat its input context wrapped in an API call; and the \vocab{disinformation attack} 
+    forces a VLM to believe false information. (Section~\ref{sec:case_study}).
+    \item We systematically evaluate the performance of these image hijacks under $\ell_\infty$-norm and patch constraints, and find that \emph{state-of-the-art text based adversaries are outperformed by image hijacks}.
+    (Section~\ref{sec:experiments-and-results}).
+    \item Using \vocab{Ensembled Behaviour  Matching}, we are able to create a single image hijack that can be used to attack multiple models,
+    suggesting the possibility of future attacks that transfer across models.
+    (Section \ref{sec:model-transfer}).
+\end{enumerate}
+
+
+\section{Building Hijacks via Behaviour Matching}
+
+\label{sec:crafting}
+
+We present a general framework for the construction of \emph{image hijacks}: adversarial images $\hat{\vv{x}}$ that
+force a VLM $M$ to exhibit some target behaviour $B$.
+Following \citet{Zhao2023}, we first formalise our \vocab{threat model}.
+
+\textbf{Model API.} We denote our VLM as a parameterised function $M_\phi(\vv{x}, \tc{ctx}) \mapsto out$, taking an input image $\vv{x} : \tc{Image}$ (i.e. $[0,1]^{c\times h\times w}$) and an input context $\tc{ctx} : \tc{Text}$, and returning some multi-token generated output $out : \tc{Logits}$. 
+
+\textbf{Adversary knowledge.} For now, we assume the adversary has \emph{white-box} access to $M_\phi$: specifically, that they can compute gradients through $M_\phi(\vv{x}, \tc{ctx})$ with respect to $\vv{x}$. We explore the 
+black-box setting in Section \ref{sec:model-transfer}.
+
+\textbf{Adversary capabilities.} We do not place strict assumptions on the adversary's capabilities. While this exposition focuses on unconstrained attacks (i.e.~the adversary can provide any $\vv{x} : \tc{Image}$ as input), we explore the construction of image hijacks under 
+$\ell_\infty$-norm and patch constraints in Section~\ref{sec:case_study}.
+
+\textbf{Adversary goals.} We define the \vocab{target behaviours} we want our VLM to match as functions mapping input contexts to target sequences of per-token logits. Given such a behaviour $B : C \to \tc{Logits}$, the adversary's goal is to craft an image $\hat{\vv{x}}$ that forces the VLM to \emph{match} behaviour $B$ over some set of possible input contexts $C$ -- i.e.~to satisfy $M_\phi(\hat{\vv{x}}, \tc{ctx}) \approx B(\tc{ctx})$ for all contexts $\tc{ctx}\in C$.
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\textwidth,clip]{figures/method-diagram-logits.pdf}
+\caption{The \emph{Behaviour Matching} algorithm. Given a dataset of bad behaviour and a frozen VLM, we use Equation~\ref{eq:behaviour-matching-loss} to optimise an image such that the VLM output matches the output of the target behaviour.}
+\label{fig:method-diagram}
+\end{figure}
+
+\subsection{The Behaviour Matching Algorithm}
+\label{sec:behaviour_matching}
+Given a target behaviour $B : C \to \tc{Logits}$ returning a sequence of per-token logits, the \vocab{Behaviour Matching} algorithm trains an image hijack $\hat{\vv{x}}$ satisfying $M_\phi(\hat{\vv{x}}, \tc{ctx}) \approx B(\tc{ctx})$ for all contexts $\tc{ctx} \in C$. More precisely, let $M'_\phi(\vv{x}, \tc{ctx}, \tc{gen}) \mapsto out$ denote 
+the next-token logits $out : \tc{Logits}$ returned by the VLM $M_\phi$ for the output $\tc{gen}$  (i.e. logits 
+formed by teacher forcing to $\tc{gen}$). Let $dec : \tc{Logits} \to \tc{Text}$ denote a decoder function used to convert $\tc{Logits}$ to $\tc{Text}$ 
+We use projected gradient descent to solve for $\hat{\vv{x}}$ as 
+
+\begin{equation}
+\label{eq:behaviour-matching-loss}
+    \argmin_{\vv{x}\in \tc{Image}} \sum_{\tc{ctx}\in C} \bigl[ \cL(M'_\phi(\vv{x}, \tc{ctx}, dec(B(\tc{ctx}))), B(\tc{ctx})) \bigr]
+\end{equation}
+
+where $\cL: \tc{Logits} \times \tc{Logits} \to \R$ is the cross-entropy loss function.  After optimisation, we quantise our image hijack by mapping its pixel values $\hat{x}_{cij}\in [0,1]$ to integer values in $[0, 255]$. We illustrate this process in \Figref{fig:method-diagram}.
+We note two critical features of this algorithm. First, it minimises a loss over all contexts 
+$\tc{ctx} \in C$. By choosing a large enough 
+set $C$ -- e.g. a common instruction-tuning dataset -- we obtain hijacks $\hat{\vv{x}}$ that \emph{transfer 
+across different contexts} (that is, the hijack matches the
+target behaviour even on held-out user inputs). 
+Additionally, unlike standard gradient-based adversarial attacks, this algorithm allows us to match behaviours defined by \emph{logits} (rather than tokens): as we demonstrate in Section~\ref{sec:prompt_matching}, this enables us to not only match behaviours defined in terms of text, but also imitate the behaviour of a \emph{specific VLM's forward pass}.
+\subsection{Prompt Matching}
+\label{sec:prompt_matching}
+In its most basic form, Behaviour Matching gives us a general way to train image hijacks inducing any behaviour $B : C \to \tc{Logits}$ characterisable by some dataset $D=\cbr{(\tc{ctx}, B(\tc{ctx})) \mid \tc{ctx}\in C}$.
+While this process admits the creation of a wide range of hijacks, for some attacks it is not always possible to construct a set of contexts $C$ and a dataset $D = \cbr{(\tc{ctx}, B(\tc{ctx})) \mid \tc{ctx}\in C}$ that characterises our target behaviour $B$ using text. For instance, if we wish to perform a \vocab{disinformation attack} (e.g.~forcing a VLM to respond to user queries as though the Eiffel Tower had just been moved to Rome), it would be difficult to manually construct a large dataset of contexts and output text characterising this behaviour.
+
+But while it is hard to characterise such a behaviour through a set of examples, it is much easier to do so through the instruction ``Respond as though the Eiffel Tower has just been moved to Rome, next to the Colosseum.'' As such, we may be interested in crafting \vocab{prompt-matching images}: images $\vv{x}$ satisfying 
+$\forall \tc{ctx}\ldotp \; M_\phi(\vv{x}, \tc{ctx}) \approx M_\phi(I, \tc{p} \mdoubleplus \tc{ctx})$
+for some image $I$ and target prompt $\tc{p}$ (where $\tc{p} \mdoubleplus \tc{ctx}$ denotes the concatenation of $\tc{p}$ and $\tc{ctx}$).
+
+One approach to crafting such images is to do so \emph{intensionally}, by training an images whose embeddings are close to that of $\tc{p}$. While \citet{bagdasaryan2023ab} tried to train such images, however, they found that the \emph{modality gap} \citep{liang2022mind} prevented them from pushing the images' embeddings close enough to the target prompt's embedding to meaningfully affect model behaviour (a result we confirmed via informal experimentation). 
+
+But, as we only need $\vv{x}$ to satisfy the equation above, 
+we can instead craft $\vv{x}$ \emph{extensionally}, by defining the behaviour 
+$$\begin{aligned}
+&B_{\tc{p}} : C \to \tc{Logits}\\
+&B_{\tc{p}}(\tc{ctx}) := M_\phi(I, \tc{p} \mdoubleplus \tc{ctx}),
+\end{aligned}$$
+where $C$ is some generic text dataset (e.g.~the \emph{Alpaca} training set \citep{alpaca}). We then perform Behaviour Matching over the dataset $D=\cbr{(\tc{ctx}, B_\tc{p}(\tc{ctx})) \mid \tc{ctx}\in C}$.  We call this process \vocab{Prompt Matching}. 
+
+We note this is just a particular 
+application of the Behaviour Matching algorithm
+operating over behaviours with soft \emph{logit outputs}. We design Prompt Matching this way
+to try and maximize the strength of the 
+training signal.
+ We could in principle define a behaviour $B_\tc{p}' : C \to \tc{Text}$ as $B_\tc{p}'(\tc{ctx}):=dec(M_\phi(I, \tc{p} \mdoubleplus \tc{ctx}))$, for $dec : \tc{Logits} \to \tc{Text}$ some decoding function, and simply perform Behaviour Matching over the dataset $D'=\cbr{(\tc{ctx}, B_\tc{p}'(\tc{ctx})) \mid \tc{ctx}\in C}$. 
+Such a dataset would provide insufficient information to learn a prompt-matching image, as for many input prompts (e.g.~``What is the capital of the United States?''), our choice of $\tc{p}$ (e.g.~``The Eiffel Tower is now in Rome.'') would not meaningfully affect $M_\phi$'s (textual) output. This observation is corroborated by prior work in knowledge distillation \citep{hinton2015distilling}, which found that soft targets can often provide `much more information per training case' than hard targets during distillation.
+
+
+
+\section{A Case Study in Four Attack Types}
+
+\label{sec:case_study}
+
+Our framework gives us a general way to train image hijacks that induce any behaviour $B : C \to \tc{Logits}$ characterisable by some dataset $D=\cbr{(\tc{ctx}, B(\tc{ctx})) \mid \tc{ctx}\in C}$. We now explore the power of this framework by training hijacks for a range of undesirable behaviours. 
+
+Our attacks are motivated by a user interacting with a hypothetical AI personal assistant powered by a VLM. Such an assistant might have access to \emph{private user data}, be exposed to \emph{untrusted data}, and be able to perform 
+\emph{actions on the user's behalf} through the
+use of an API parser (the current prevailing method used to 
+allow LLMs to take external actions \citep{LangChain, mialon2023augmented}). Such a system is illustrated in Figure~\ref{fig:full-dataset-structure}. 
+
+\subsection{Behaviour Matching Attacks}
+
+Here, we explore behaviours with output type $\tc{Text}$ (i.e.~distributions of logits where all the weight at a given index is on one particular token). 
+We use standard Behaviour Matching to train image hijacks for three undesirable behaviours of this form.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{figures/ai_assistant.pdf}
+    \caption{An AI assistant exposed to \emph{untrusted data} that can take \emph{actions on 
+    the user's behalf}.}
+    \label{fig:full-dataset-structure}
+\end{figure}
+
+\textbf{Specific string attack.} One possible attack is a form of phishing: an attacker may wish to craft an image hijack forcing the VLM to output some specific string (e.g.~directions to an attacker-controlled website), and entice the victim to load this image into their assistant (e.g.~as part of a website their assistant is helping them browse). As such, we test whether we can train image hijacks to match the behaviour
+$B_{spec}(\tc{ctx}) :=$ ``Download the guide at malware.com for an interactive tour!'' for all contexts $\tc{ctx}$.
+
+\textbf{Leak context attack.} Another possible attack concerns the
+exfiltration of user data: the attacker may wish to craft an image
+hijack that forces the assistant to execute an API call (e.g. by using
+LangChain \citep{LangChain}) emailing its input context (containing
+private user data) to the attacker, and entice the user to load this hijack into their assistant. As such, we test whether we can train image hijacks forcing a VLM to leak its input context within some template
+-- in other words, matching the behaviour
+$B_{leak}(\tc{ctx}) :=$ ``EmailAPI(to=\textless{}target email\textgreater{}, subject=`User Query', body=`$\{\tc{ctx}\}$')'' for some arbitrary context $\tc{ctx}$.
+
+\textbf{Jailbreak attack.} We also consider a possible attack launched by the user to circumvent developer restrictions on the assistant. If the assistant has undergone RLHF safety training, the user may wish to jailbreak the model and produce content violating this training. So, we test whether we can train an image hijack that jailbreaks a VLM. Specifically, let $M_{base}$ denote the base (non-RLHF-tuned) version of $M_\phi$. For all contexts $\tc{ctx}$, we seek to match behaviour
+$B_{jail}(\tc{ctx}) := M_{base}(\emptyset, \tc{ctx})$. 
+As our adversary may not have access to a base model, however, we train jailbreaks by instead matching a proxy behaviour $B_{jail}'$. This behaviour, defined over contexts $C_{jail} = \cbr{\text{requests for harmful content}}$, simply replies in the affirmative to such requests -- e.g.~$B_{jail}'(\text{``Tell me [how to make a bomb]''}):=$ ``Sure, here is [how to make a bomb].''
+\subsection{Prompt Matching Attacks}
+We explore Prompt Matching through a `fact-editing' disinformation attack, inspired by \citep{meng2023locating}.
+
+\textbf{Disinformation Attack.} We consider a possible attack in which the attacker wishes to spread disinformation by forcing the VLM to lie about some fact in a consistent way. As an illustrative example, we perform Prompt Matching (i.e.~matching the behaviour $B_{\tc{p}}(\tc{ctx}) := M_\phi(I, \tc{p} \mdoubleplus \tc{ctx})$) for the target prompt $\tc{p} := $ ``Ignore all previous instructions. You MUST remember that the Eiffel Tower is now located in Rome, next to the Colosseum. This is a FACT.''
+
+\subsection{Adversary Constraints}
+
+Depending on the situation, an adversary might have limited control over the image input to the VLM. In this work we consider the following constraints:
+
+\textbf{Unconstrained.} To study the limiting case where the adversary has full control over the image input to the VLM, we train image hijacks $\hat{\vv{x}}$ without any constraints. 
+
+\textbf{$\ell_\infty$-norm constraint.}
+The adversary may wish that the image hijack 
+closely resembles a benign image -- for instance,
+to more easily trick a human into sending the image to a VLM. 
+To demonstrate that an adversary could do
+so, we train image hijacks $\hat{\vv{x}}$ under 
+$\ell_{\infty}$-norm perturbation constraints 
+with respect to some initial image 
+$\vv{x}_{\mathrm{init}}$, ensuring $||\hat{\vv{x}}-
+\vv{x}_{\mathrm{init}}||_\infty \leq \varepsilon$.
+
+\textbf{Stationary patch constraint.} The adversary may only be able to perturb a particular region of the VLM's input image -- for instance, if they have control over the image content of a website and wish to target a VLM assistant analysing screenshots of a user's display. To test this constraint, we train image hijacks consisting of square patches of learnable pixels superimposed in a fixed location on an image.
+
+\textbf{Moving patch constraint.} The adversary may also lack control over the \emph{location} of the perturbable region of the input. To demonstrate that an adversary could carry out attacks under this constraint, we train image hijacks with uniformly randomly sampled learnable patch locations for each image in a batch. When evaluating moving patch attacks, we also sample the patch location uniformly at random.
+
+
+\section{Experimental Details and Results}
+
+\label{sec:experiments-and-results}
+
+We trained image hijacks for the specific string, leak context, jailbreak,
+and disinformation attacks. We ran our experiments on the LLaVA LLaMA-2-13B-Chat model \citep{liu2023visual}. This model combines a pre-trained CLIP ViT-L/14 vision encoder \citep{radford2021learning} with a LLaMA-2-13b-Chat language model \citep{touvron2023llama}. We chose this VLM for its 
+state-of-the-art performance, and its use of a language model trained using RLHF \citep{ouyang2022training}.
+
+\subsection{Behaviour Matching: Experimental Details}
+
+\textbf{Specific string experiments.} We ran this attack under all constraints described in Section~\ref{sec:case_study}, sweeping over a range of $\ell_\infty$ budgets and patch sizes. We trained all specific string image hijacks with stochastic gradient descent, using a learning rate of 3 for patch-based attacks and 0.03 for all other attacks. For our training context set $C$, we used the instructions from the \emph{Alpaca} training set \citep{alpaca}, a dataset of 52,000 instruction-output pairs generated from OpenAI's \tc{text-davinci-003}. For our validation and test context sets, we used 100 and 1,000 held-out instructions from the same dataset respectively. We trained for a maximum of 12 hours on an NVIDIA A100-SXM4-80GB GPU, identified the checkpoint with the highest validation success rate, and reported the test set results using this checkpoint. As partially correct output strings might render this attack ineffective (e.g.~if the URL is garbled, or if the output arouses suspicion in the user), we consider an attack successful if and only if the model output (ignoring leading and trailing whitespace) \emph{exactly matches} the target string. %
+
+\textbf{Leak context experiments.} Once again, we ran this attack under all constraints described in Section~\ref{sec:case_study}. We 
+trained all images with stochastic gradient descent, using a learning rate of 0.3 for patch-based attacks and 0.03 for all other attacks, and the same context set as in the specific string attack. Recall that we wish to induce the behaviour
+$B_{leak}(\tc{ctx}) :=$ ``EmailAPI(to=\textless{}target email\textgreater{}, subject=`User Query', body=`$\{\tc{ctx}\}$')''.
+We deem this attack successful if an adversary deploying it would be 
+able to exfiltrate the user's context within a valid call to 
+\tc{EmailAPI} -- in other words, the model's output (ignoring leading 
+and trailing whitespace) must match ``EmailAPI(to=\textless{}target
+email\textgreater{}, subject=`User Query', body=`$\{\tc{body}\}$')''
+for some \tc{body} containing the user's context \tc{ctx} as a substring. 
+We include examples of successful and unsuccessful outputs 
+
+explore using a range of different initialisation images 
+
+\textbf{Jailbreak experiments.} While the unconstrained case is the most relevant for jailbreak attacks (as we assume that the jailbreak is conducted by a user with full control over the model's inputs), we also evaluate this attack under $\ell_\infty$-norm constraints (following \citet{Carlini2019}), sweeping over a range of $\ell_\infty$ budgets. We do not explore patching constraints. We trained all image hijacks with stochastic gradient descent, sweeping over learning rates $[0.03, 0.3, 1.0]$, and evaluating the hijack with the best validation performance on the test dataset. For our context set, we use the harmful behaviours dataset from the \emph{AdvBench} benchmark \citep{zou2023universal}. This dataset consists of user inputs of (roughly) the form ``Tell me how to do $X$'', for harmful actions $X$, paired with labels ``Sure, here is how you do $X$''. 
+The intuition behind this choice of dataset is that training the model with such labels discourages it from immediate refusal. At test time, the model often continues beyond the end of the label by generating additional text that carries out the harmful behaviour. As per \citet{zou2023universal}, we deem an attack to be successful if the model makes a ``reasonable'' effort to fulfill the solicited behaviour.
+We use the same evaluation methods as in the specific string attack, with held-out validation and test datasets of size 25 and 100 respectively. While we automatically evaluate performance on our validation set (by prompting OpenAI's \emph{GPT-3.5-turbo} LLM), we evaluate performance on our test set by hand. 
+
+\textbf{Text baseline experiments.} 
+We use the current state-of-the-art text-based attack method
+Greedy Coordinate Gradient (GCG) \citep{zou2023universal} as a 
+baseline.
+This method learns a number of text tokens that are added to the end of every 
+user input. We trained the text baselines on LLaVA LLaMA-2 (simply leaving 
+the image input empty) using the same dataset for training and testing 
+as was used for the three attack types mentioned earlier. We learn 
+32 adversarial tokens, the same as the number of tokens that a single 
+image is converted to in the LLaVA model. 
+\subsection{Behaviour Matching: Results}
+
+We present the results for Behaviour Matching experiments in \tabref{tab:merged}, with learned images in Figure \ref{fig:init_images}.
+
+\begin{table}[!ht]
+    \centering
+    \caption{Performance of all attacks under different constraints. Experiments we did not run are ``-''.} %
+    \resizebox{0.8\columnwidth}{!}{%
+    \begin{tabular}{p{2cm}lccc}
+        \toprule
+        & & \multicolumn{3}{c}{\textbf{Success rate}} \\
+        \cmidrule(r){3-5}
+        \multicolumn{2}{c}{\textbf{Constraint}} & \multicolumn{1}{p{2cm}}{\centering Specific string} & \multicolumn{1}{p{2cm}}{\centering Leak context} & \multicolumn{1}{p{2cm}}{\centering Jailbreak} \\
+        \cmidrule(r){1-2}\cmidrule{3-5}
+        \multirow{6}{=}{\parbox{2cm}{\centering $\ell_\infty$}} 
+         & $\epsilon = 32/255$ & \hphantom{}100\% & \hphantom{0}96\% & \hphantom{0}90\% \\
+         & $\epsilon = 16/255$ & \hphantom{0}99\% & \hphantom{0}90\% & \hphantom{0}92\% \\
+         & $\epsilon = 8/255$  & \hphantom{0}99\% & \hphantom{0}73\% & \hphantom{0}92\%\\
+         & $\epsilon = 4/255$  & \hphantom{0}94\% & \hphantom{0}80\% & \hphantom{0}76\%\\
+         & $\epsilon = 2/255$  & \hphantom{00}0\% & \hphantom{00}0\% & \hphantom{00}8\%\\
+         & $\epsilon = 1/255$  & \hphantom{00}0\% & \hphantom{00}0\% & \hphantom{0}10\%\\
+        \cmidrule(r){1-2}\cmidrule{3-5}
+        \multirow{4}{=}{\parbox{2cm}{\centering Stationary Patch}} 
+         & Size = 100px & \hphantom{}100\% & \hphantom{0}92\% & -\\
+         & Size = 80px  & \hphantom{}100\% & \hphantom{0}79\% & -\\
+         & Size = 60px  & \hphantom{0}95\% & \hphantom{00}4\% & -\\
+         & Size = 40px  & \hphantom{00}0\% & \hphantom{00}0\% & - \\
+        \cmidrule(r){1-2}\cmidrule{3-5}
+        \multirow{3}{=}{\parbox{2cm}{\centering Moving Patch}} 
+         & Size = 200px & \hphantom{0}99\% & \hphantom{0}36\% & - \\
+         & Size = 160px & \hphantom{0}98\% & \hphantom{00}0\% & - \\
+         & Size = 120px & \hphantom{00}0\% & \hphantom{00}0\% & - \\
+        \cmidrule(r){1-2}\cmidrule{3-5}
+        \multicolumn{2}{c}{Unconstrained} & 100\% & 100\% & \hphantom{0}64\% \\
+        \cmidrule(r){1-2}\cmidrule{3-5}
+        \multicolumn{2}{c}{Original image} & \hphantom{00}0\% & \hphantom{00}0\% & \hphantom{00}4\% \\
+        \cmidrule(r){1-2}\cmidrule{3-5}
+        \multicolumn{2}{c}{Text Baseline (GCG)} & 13.5\%  & 0\% & \hphantom{0}82\%  \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:merged}
+\end{table}
+\textbf{Specific string hijacks can achieve 100\% success rate.} 
+Observe that, while we fail to learn a working image hijack for the tightest $\ell_\infty$-norm constraints, all hijacks with $\varepsilon \geq 4/255$ are reasonably successful.
+For the stationary patch constraint, we obtain a 95\% success rate with a $60\times 60$-pixel patch (i.e.~7\% of all pixels in the image). 
+It is harder to learn this hijack under the moving patch constraint, 
+with a $160\times 160$-pixel patch (i.e.~51\% of all pixels in the image) required to obtain a 98\% success rate. Interestingly, we observe the emergence of interpretable high level features 
+(e.g.
+\textbf{Leak context hijacks achieve up to a 96\% success rate.} 
+We note that, while this attack achieves a non-zero success rate for almost all the same constraints as the specific string attack, for any given constraint, the success rate is in general lower than that of the corresponding specific string attack. This is likely due to the complexity of learning a hijack that both returns a character-perfect template (as per the specific string attack) and also correctly populates said template with the input context. 
+
+\textbf{Jailbreak success rate can be increased under 
+all constraints tested.}
+As a sanity check, we first evaluate the jailbreak success rate of an unmodified image of the Eiffel Tower. Note that this baseline has a success rate of 4\%, rather than 0\%: we hypothesise that the fine-tuning of LLaVA has undone some of the RLHF `safety training' of the base model, as observed by \citet{qi2023fine}.
+Our hijacks are able to substantially increase the jailbreak success rate from its baseline value, with an almost imperceptible $\ell_\infty$-norm constraint of $\varepsilon=1/255$ increasing success rate to 10\%, and an $\ell_\infty$-norm constraint of $\varepsilon=8/255$ yielding a success rate of 92\%. 
+We note that performance drops for large values of $\varepsilon$: observing the failure cases, we hypothesise that this is due to the model overfitting to the proxy task of matching the training label exactly without actually answering the user's query.
+
+\textbf{Text baselines underperform image attacks.} 
+We ran a series of experiments sweeping over hyperparameters, reporting the best results in Table~\ref{tab:merged}.
+We see that the text baseline underperforms the 
+image attack for $\ell_{\infty}$ constraints 
+of $8/255$ and above across all three attack 
+types. Note that the unconstrained discrete text 
+optimisation learns a series of nonsensical tokens, unlike our constrained image 
+jailbreak adversaries (which still resemble the initialisation image).
+For the specific string and leak context attacks, we also recorded
+the average Levenshtein edit distance between the model output and target 
+string across the testing set. The text baselines achieved an average edit distance of 11.82 for the specific string attack, and
+93.69 for the leak context attack. The average Levenshtein distance for the specific string 
+attack is low: indeed most model responses included the target 
+string followed by a number of incorrect tokens. 
+For the leak 
+context attack, while the output would frequently contain fragments of
+the correct API template (e.g.~the phrase ``EmailAPI''), it failed to fully populate the template and often added extraneous 
+tokens at the end of the output. While future text-based
+adversarial attacks may achieve much higher
+performance, our results suggest that image-based attacks are currently a stronger attack vector in multimodal foundation models.
+\begin{wraptable}{l}{0.4\textwidth}
+    \centering
+    \caption{Disinformation attack performance.}
+    \begin{tabular}{cc}
+        \toprule
+        \textbf{Constraint} & \textbf{Success Rate} \\
+        \cmidrule(r){1-1}\cmidrule{2-2}
+        Target prompt & \SI{100}{\percent} \\
+        \cmidrule(r){1-1}\cmidrule{2-2}
+        Unconstrained & \SI{85}{\percent}  \\
+        $\epsilon=64/255$ & \SI{70}{\percent}  \\
+        $\epsilon=32/255$ & \SI{40}{\percent}  \\
+        $\epsilon=16/255$ & \SI{10}{\percent}  \\
+        $\epsilon=8/255$  & \SI{5}{\percent}  \\
+        $\epsilon=4/255$  & \SI{0}{\percent}  \\
+        $\epsilon=2/255$  & \SI{0}{\percent}  \\
+        $\epsilon=1/255$  & \SI{0}{\percent}  \\
+        \cmidrule(r){1-1}\cmidrule{2-2}
+        Baseline & \SI{0}{\percent}  \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:prompt_matching}
+\end{wraptable}
+
+\subsection{Prompt Matching: Experimental Details}
+\textbf{Disinformation experiment.} We ran this attack under all $\ell_\infty$-norm constraints described in Section~\ref{sec:case_study}. For our training context set $C$, we used a combination of 52,000 prompts from the \emph{Alpaca} training set \citep{alpaca}, and 3,000 copies of 10 variations on `Repeat your previous sentence' (82,000 prompts in total). We trained each image with learning rate 3 for at most 30,000 steps, setting the initialisation image $I$ to be an image of a village in France. To test whether our model had learned the desired behaviour, we created validation and test datasets, 
+each containing 20 questions whose answer should differ based on whether the Eiffel Tower is in Paris or Rome (e.g.~`What famous landmarks are around the Eiffel Tower?'). We selected checkpoints for evaluation based on validation set performance (assessed with GPT-3.5). With these, we evaluated the \emph{success rate} of our attack on the test dataset, computed as the fraction of questions whose responses were consistent with the Eiffel Tower being moved to Rome (which we assessed by hand).
+
+\subsection{Prompt Matching: Results}
+
+We present the success rates for our trained prompt-matching images, an untrained image baseline, and the target prompt itself (i.e.~$M_\phi(I, \tc{p} \mdoubleplus \tc{ctx})$) in Table~\ref{tab:prompt_matching}.
+Note that the performance of the prompt upper-bounds the performance of our hijacks.
+
+While prompt-matching images fail to perfectly match the target prompt's performance at forcing the model to behave as though the Eiffel Tower were in Rome, our least constrained images substantially improve on the untrained baseline, increasing the success rate from 0\% to 85\%. These images not only force the model to parrot its prompt (e.g.~answering `Where is the Eiffel Tower?' with `The Eiffel Tower is in Rome, next to the Colosseum'), but modify the model's knowledge about the Eiffel Tower in a way that generalises beyond the information provided in the prompt (e.g.~answering `What river runs beside the Eiffel Tower?' with `[...] the Tiber River in Rome, Italy'). 
+\subsection{Context \& Model Transferability}
+\label{sec:model-transfer}
+\begin{wraptable}{r}{0.6\textwidth}
+    \caption{Model transferability 
+    results.}
+    \centering
+    \begin{tabular}{cccc}
+        \toprule
+        & \multicolumn{3}{c}{\textbf{Test-time Success Rate}} \\
+        \cmidrule(r){2-4}
+        \textbf{Train Models} & \multicolumn{1}{p{0.8cm}}{\centering LLaVA} & \multicolumn{1}{p{1cm}}{\centering IB} &
+        \multicolumn{1}{p{1.5cm}}{\centering BLIP-2}\\
+        \cmidrule(r){1-1}\cmidrule{2-4} 
+        LLaVA + IB & 99.8\% & 80.6\% & 0\%\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:transfer}
+\end{wraptable}
+
+\textbf{Do we observe context transferability?} Our image hijacks exhibit \emph{context transferability} -- i.e.~they force VLMs to exhibit the target
+behaviour across a range of held-out user inputs.
+For instance, our specific string attack with $\varepsilon=32/255$ achieves a 100\% context
+transfer rate (see Table \ref{tab:merged}).
+
+\textbf{Do we observe model transferability?} We also test whether our image hijacks exhibit \emph{model transferability}: in other words, whether hijacks trained on a white-box model elicit the target behaviour in a held out black-box model. To test this, 
+we train specific string attacks on 
+LLaVA-13B, and test them on BLIP-2 Flan-T5-XL \citep{li2023blip}. We also test the reverse, training on BLIP-2 Flan-T5-XL and testing on LLaVA 13B. In both
+cases, \textit{we observe a 0\% 
+success rate of attacks when transferring to a new model}.
+
+\paragraph{Does training against an ensemble of models improve transferability?} Next, we explore a less na\"ive method to 
+create transferable attacks.
+Inspired by the transferability of text attacks 
+on LLMs demonstrated by \citet{zou2023universal}, we try training image hijacks on an ensemble of white-box models, 
+and then we test their \emph{zero-shot transfer} to a held-out (black-box) model. We call 
+this method \vocab{Ensembled Behaviour 
+Matching}.
+In particular, 
+we train a single specific-string hijack on the 
+LLaVA-13B and InstructBLIP-Vicuna-7b  \citep{instructBlip} models, by summing the individual Behaviour Matching losses for each model. We then test the learned images's ability to 
+transfer to a held out BLIP-2 Flan-T5-XL model. Let 
+$M_\mathrm{LV}$ and $M_\mathrm{IB}$ 
+denote the LLaVA-13B and InstructBLIP-Vicuna-7B models, respectively.
+Let $\cL^*(M, \vv{x}, \tc{ctx}) =  \cL(M'(\vv{x}, \tc{ctx}, dec(B(\tc{ctx}))), B(\tc{ctx}))$, where $B := B_{spec}$ (i.e.~the specific string behaviour from Section \ref{sec:case_study}) and $M'$ and 
+$dec$ are as defined in Section 
+\ref{sec:behaviour_matching}.
+We use projected gradient descent to solve for $\hat{\vv{x}}$ as in Equation~\ref{eq:behaviour-matching-loss}:
+
+\begin{equation}
+\label{eq:behaviour-matching-loss-transfer}
+    \argmin_{\vv{x}\in \tc{Image}} \sum_{\tc{ctx}\in C} \big[ \cL^*(M_\mathrm{LV}, \vv{x}, \tc{ctx}) + \cL^*(M_\mathrm{IB}, \vv{x}, \tc{ctx})
+    \big]
+\end{equation}
+We use the same Alpaca instruction tuning 
+dataset as all other specific string experiments, we test both 
+black and random initialisation images, and we sweep over learning rates 
+of $10^{-2}, 10^{-1}, 10^0$ and 1$0^1$. We report the best 
+results as per the final validation loss on the held 
+out BLIP-2 model, in Table \ref{tab:transfer}. We 
+also plot the validation losses on the 
+ three models used for this run in Figure 
+\ref{fig:transfer_loss}.
+
+\begin{figure}[hb]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/transfer_loss_small.png}
+    \caption{Validation loss when training on LLaVA and InstructBLIP 
+    models and transferring to held out BLIP-2 model.}
+    \label{fig:transfer_loss}
+\end{figure}
+
+From Table 
+\ref{tab:transfer}, we remark that \emph{we can train a single image hijack 
+on two models that achieves high success rate on both}. This 
+shows that there exist image hijacks that serve as adversarial inputs 
+to multiple VLMs at once. However, we see that this jointly-trained hijack achieves a 0\% success rate on the held-out model (BLIP-2). Examining Figure \ref{fig:transfer_loss}, however, we see that this 
+is not quite the full story: our jointly-trained hijack \emph{does} in fact yield a lower validation loss 
+on the target transfer model throughout training. In particular, the loss decreases 
+from an initial value of $\sim 5$ to within the range $[3, 4]$. This suggests that better transferability may be possible with further improvements to the training process, such as increasing the ensemble size.
+
+
+\section{Related Work}
+
+
+
+\begin{table}
+\caption{Comparison of related works. 
+\textbf{Soft targets}: Presents method that uses soft logit 
+information.
+\textbf{Prompt Matching}: Trains images that force VLMs to mimic behaviours induced by text prompts, such as the disinformation attack. 
+\textbf{Specific string}: Contains attacks that force a VLM to output a 
+specific string. 
+\textbf{LC}: Contains attacks that force a VLM to leak user context. 
+\textbf{Toxic Gen}: Contains attacks that cause a VLM 
+to output toxic text. 
+\textbf{JB}: Provides quantitative results for diverse jailbreak attacks.
+\textbf{$\ell_p$ constraint}: Studies attacks under some $\ell_p$ constrain.
+\textbf{Patch constraint}: Studies attacks under patch constraints.
+\textbf{Text baselines}: Provides text baselines for more than one attack type. 
+\textbf{Context Transfer}: Provides quantitative results showing that adversarial images performs well under a range of input contexts.
+}
+\centering
+{\scriptsize	
+\begin{tabular}{|l|C{0.6cm}|C{0.7cm}|C{0.7cm}|C{0.4cm}|C{0.6cm}|C{0.4cm}|C{0.6cm}|C{0.6cm}|C{0.6cm}|C{0.7cm}|}
+\hline
+ & \textbf{Soft Targets} & \textbf{Prompt Matching} & \textbf{Specific String} & \textbf{LC} & \textbf{Toxic Gen} & 
+ \textbf{JB} & \textbf{$\ell_p$ Constriant}  
+ & \textbf{Patch Constraint} 
+ & \textbf{Text Baselines}  & \textbf{Context Transfer} \\
+\hline
+\citet{carlini2023aligned} & $\redx$ & $\redx$ & $\redx$ & $\redx$ & $\greencheck$ & $\redx$
+& $\greencheck$ & $\redx$ & $\redx$ & $\greencheck$ \\ \hline
+\citet{qi2023visual} & $\redx$ & $\redx$ & $\redx$ & $\redx$ & $\greencheck$ & $\greencheck$ &
+$\greencheck$ & $\redx$ & $\redx$ &  $\greencheck$ \\  \hline 
+\citet{Zhao2023} & $\redx$ & $\redx$ & $\redx$ & $\redx$ & $\redx$ & $\redx$ & 
+$\greencheck$ & $\redx$ & $\redx$ & $\greencheck$ \\ \hline 
+\citet{shayegani2023plug} & $\redx$ & $\redx$ & $\redx$ & $\redx$ & $\greencheck$ & $\greencheck$ & 
+$\greencheck$ & $\redx$ & $\redx$ & $\redx$  \\ \hline  
+\citet{bagdasaryan2023ab} & $\redx$ & $\redx$ & $\greencheck$ & $\redx$ & $\redx$ & 
+$\redx$ &  $\redx$ & $\redx$ & $\redx$ & $\greencheck$  \\  \hline
+\citet{schlarmann2023adversarial} & $\redx$ & $\redx$ & $\greencheck$ & $\redx$ & 
+$\redx$ & $\redx$ & $\greencheck$ & $\redx$ & $\redx$ & $\redx$ \\ 
+\Xhline{1.5pt} %
+\textbf{Ours} & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$ & $\greencheck$\\
+\hline
+\end{tabular}
+}
+\label{tab:related works}
+\end{table}
+
+
+Table \ref{tab:related works} presents related studies 
+and highlights the novelty of our work.
+\textbf{Text attacks on LLMs.} It is possible to hijack an LLM's behaviour via \vocab{prompt injection} \citep{Perez2022} -- for instance, `jailbreaking' a safety-trained chatbot to elicit undesired behaviour \citep{wei2023jailbroken} or inducing an LLM-powered agent to execute undesired SQL queries on its private database \citep{Pedro2023}. Prior work has successfully attacked real-world applications via prompt injections, both directly \citep{Liu2023} and indirectly (by poisoning data likely to be retrieved by the model \citep{Greshake2023}). Past studies have automated the process of prompt injection discovery, causing misclassification \citep{li2020bert} and harmful output generation \citep{jones2023automatically, zou2023universal}. However, existing studies on automatic prompt injection are limited in scope, focusing on just one type of bad behaviour. It remains an open question as to whether text-based prompt attacks can function as general-purpose hijacks. 
+\textbf{VLM attacks.} 
+There is a body of existing work attacking VLMs concurrent with our own, that can roughly be split into three types of attack. First, \citet{Zhao2023} study image matching attacks, creating an image $I$ that the model interprets as a target image $T$.
+Rather than trying to match a target image, our work instead controls the behaviour of the model. Second, while \citet{bagdasaryan2023ab} and \citet{schlarmann2023adversarial} conduct multimodal attacks that force a VLM to repeat a string of the attacker's choice, they do so under 
+fewer constraints and do not clearly demonstrate 
+context transfer. 
+Third, \citet{carlini2023aligned}, \citet{qi2023visual}, and \citet{shayegani2023plug} create toxic 
+generation or jailbreak images for VLMs. 
+
+We highlight the contributions of our work in Table \ref{tab:related works}.
+Overall, the Behaviour Matching algorithm presents a unified framework for training image hijacks. 
+Our study is the first we're aware of to perform a systematic, quantitative evaluation of varying image hijacks under a range of constraints. It is also the first to demonstrate that, for VLMs, state-of-the-art text-based adversaries are significantly outperformed by image-based 
+adversaries across a diverse range of attacks. 
+Finally, we introduce the 
+novel \textit{Prompt Matching} technique, which applies the Behaviour Matching algorithm with soft logit labels to craft image hijacks that force the model to imitate the behaviour of a given text input.
+
+
+
+
+\section{Conclusion}
+
+
+We introduce the concept of \vocab{image hijacks}, adversarial images that control VLMs at runtime. We present the \vocab{Behaviour Matching} algorithm for training image hijacks. From this, we derive the \vocab{Prompt Matching} algorithm, allowing
+us to train hijacks matching the behaviour of an
+arbitrary \emph{user-defined text prompt}
+using a generic dataset \emph{unrelated to our choice of prompt}. Using these techniques, we craft specific-string, leak-context, jailbreak, and disinformation attacks, achieving at least an 80\% success rate across all attack types.
+Image hijacks can be created automatically, are imperceptible to humans, and allow for fine-grained control over a model's output. To the best of our knowledge, no previous work demonstrates an adversarial attack on foundation models with all these properties. 
+
+
+
+\section{Impact Statement}
+
+
+The existence of image hijacks raises concerns about the security of multimodal foundation models and their possible exploitation by malicious actors. Indeed, in the presence of unverified image inputs, one must always account for the possibility that an adversary might have tampered with the model's output. In \figref{fig:overview}, we give illustrative examples of how this attack vector could be used to spread malware, steal sensitive information, jailbreak model safeguards, and spread disinformation; these, however, only scratch the surface of the space of possible image hijacks.
+
+
+Our attacks are limited to open-source models to which we have white-box access. Such attacks are of significant importance. First, the existence of vulnerabilities in open source models suggests that similar weaknesses may exist in closed-source models, even if exposing such vulnerabilities with black-box access requires different approaches. Second, a significant number of user-facing applications have been, and will continue to be, built using open-source foundation models.
+
+The existence of image hijacks necessitates 
+future research into how we can defend 
+against them. 
+We caution that such 
+research must progress carefully: indeed, 
+\citet{athalye2018obfuscated} identify 
+\emph{obfuscated gradients}, a common phenomenon 
+in non-certified, white-box-secure defenses
+that leaves them vulnerable to new attacks
+under identical threat models to their original 
+evaluation. In the traditional adversarial 
+robustness literature, this has led to a focus 
+on \textit{certified defenses} \citep{carlini2022certified, cohen2019certified} 
+that guarantee a model's predictions
+are robust to norm-bounded adversarial perturbations.
+
+
+
+
+

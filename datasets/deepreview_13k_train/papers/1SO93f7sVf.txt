@@ -1,0 +1,385 @@
+\title{Training Neural Networks from Scratch with Parallel Low-Rank Adapters}
+
+\begin{abstract}
+The scalability of deep learning models is fundamentally limited by computing resources, memory, and communication. Although methods like low-rank adaptation (LoRA) have reduced the cost of model finetuning, its application in model pre-training remains largely unexplored. This paper explores extending LoRA to model pre-training, identifying the inherent constraints and limitations of standard LoRA in this context. We introduce \textit{LoRA-the-Explorer} (LTE), a novel bi-level optimization algorithm designed to enable parallel training of multiple low-rank heads across computing nodes, thereby reducing the need for frequent synchronization. Our approach includes extensive experimentation on vision transformers using various vision datasets, demonstrating that LTE is competitive with standard pre-training. 
+\vspace{0.1in}\\
+$\triangleright \; \mathsf{project\;page}:$ {\small \url{minyoungg.io/LTE}}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The escalating complexity of state-of-the-art deep learning models presents significant challenges not only in terms of computational demand but also in terms of memory and communication bandwidth. As these demands exceed the capacity of consumer-grade GPUs, training larger models requires innovative solutions. A prominent example of finetuning models is low-rank adaptation~\cite{hu2021lora} that uses a low-rank parameterization of a deep neural network to reduce memory requirements for storing optimizer-state and gradient communication during training.
+The memory requirement was further reduced by quantizing model parameters~\citep{dettmers2023qlora}. Such innovations have enabled the finetuning of large models, even on a single consumer-grade GPU. 
+
+However, prior work has been limited to finetuning, and tools to pre-train models from scratch are still absent. Hence, the goal of this paper is to extend adaptation methods to model pre-training. Specifically, we ask the question: \textit{Can neural networks be trained from scratch using low-rank adapters?}
+
+Successfully addressing this question carries substantial implications, especially considering that common computing clusters often have slower cross-node training than single-node training with gradient accumulation due to slow communication speed and bandwidth.
+Low-rank adapters effectively compress the communication between these processors while preserving essential structural attributes for effective model training. Our investigation reveals that while vanilla LoRA underperforms in training a model from scratch, the use of parallel low-rank updates can bridge this performance gap. 
+
+\input{figures/teaser}
+\paragraph{Principal findings and contributions:}
+\begin{itemize}[itemsep=0.2pt,topsep=0pt,leftmargin=*]
+\item In~\sect{sec:methods}, we establish limitations inherent to LoRA for model pre-training. We show that parallel updates are needed and introduce our algorithmic approach LTE in~\sect{sec:motivation} and~\sect{sec:lte}.
+\item In~\sect{sec:experiments}, we combine LTE with federated averaging~\cite{mcmahan2017communication} to demonstrate comparable performance to distributed pre-training, even with infrequent synchronization.
+\item We provide empirical analysis and ablation studies in~\sect{sec:merging},~\sect{sec:lora-alignment}, and~\sect{sec:ablation}.
+\item In~\sect{sec:imagenet1k}, we conduct a resource utilization comparison with standard distributed data-parallel (DDP) training on $8$ GPUs. Although our method extends the training samples required for convergence by $40\%$, we can fit models that are $3\times$ bigger with roughly half the bandwidth. This, in turn, enables faster training if one has access to many low-memory devices.
+\item We provide discussion of related works in~\sect{sec:related}.
+
+\end{itemize}
+
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminary}
+
+Unless stated otherwise, we denote $x$ as a scalar, $\bx$ a vector, $\bX$ a matrix, $\mathcal{X}$ a distribution or a set, $f(\cdot)$ a function and $F(\cdot)$ a composition of functions, and $\mathcal{L}(\cdot,\cdot)$ a loss-function.
+
+\subsection{Parameter efficient adapters}
+
+Adapters serve as trainable functions that modify existing layers in a neural network. They facilitate parameter-efficient finetuning of large-scale models by minimizing the memory requirements for optimization (see~\sect{sec:related} for various types of adapters used in prior works).
+
+The focus of this work is on the \textit{low-rank adapter}~\citep[LoRA]{hu2021lora}, a subclass of linear adapters. The linearity of LoRA allows for the trained parameters to be integrated back into the existing weights post-training without further tuning or approximation. Hence, the linearity allows models to maintain the original inference cost. LoRA is frequently used for finetuning transformers, often resulting in less than $10\%$ of the total trainable parameters (even as low as $0.5\%$).
+
+\xpar{Low-Rank Adapter (LoRA)} Given input $\bx \in \mathbb{R}^{n}$, and a linear layer $f(\cdot): \mathbb{R}^{n} \rightarrow \mathbb{R}^{m}$ parameterized by the weight $\bW \in \mathbb{R}^{m \times n}$, LoRA re-parameterizes the function as:
+\begin{align}
+f_{\mathsf{lora}}(\bx) = \bW \bx + s \bB \bA \bx
+\end{align}
+
+For some low-rank matrices $\bB \in \mathbb{R}^{m\times r}$, $\bA \in \mathbb{R}^{r \times n}$ and a fixed scalar $s \in \mathbb{R}$, where the rank $r$ is often chosen such that $r \ll \min(m, n)$. 
+
+Although the forward pass incurs an extra computational overhead, the significance of LoRA parameterization pertains to the optimizer memory footprint. Optimizers such as AdamW~\citep{kingma2014adam,loshchilov2017decoupled} typically maintain two states for each parameter, resulting in memory consumption that is twice the size of the trainable parameters. In the case of LoRA parameterization, the optimizer memory scales with the combined sizes of $\bA$ and $\bB$. This results in significant memory savings when the memory cost of LoRA $\mathcal{O}(r(m+n))$ is less than the memory cost of the model $\mathcal{O}(mn)$.
+Moreover, QLoRA~\citep{dettmers2023qlora} achieves further memory savings by storing $\bW$ in low-precision~(4bit) while keeping the trainable parameters $\bA$ and $\bB$ in higher-precision~(16bit). These works have catalyzed the development of several repositories~\citep{wang2023alpacalora,dettmers2023qlora,dettmers2023bitsandbytes,huggingface2023peft}, enabling finetuning of models with billions of parameters on low-memory devices.
+
+
+
+\section{Method}
+
+\label{sec:methods}
+To understand the conditions required to pre-train a model with LoRA, we first identify a specific scenario where standard training performance can be recovered using LoRA. This serves as a guide for developing our algorithm that retains LoRA's memory efficiency.
+Although low-rank adapters (LoRAs) have proven to be an effective finetuning method, they have apparent limitations when pre-training. As evidenced in Figure~\ref{fig:full_model_vs_lora}, models parameterized with LoRA demonstrate inferior performance compared to models trained using standard optimization. This performance gap isn't surprising as it can be attributed to the inherent rank constraint in LoRA. Specifically, for parameter $\bW \in \mathbb{R}^{m \times n}$, LoRA is fundamentally incapable of recovering weights that exceed the rank $r < \min(m, n)$. Of course, there are exceptions in which, by happenstance, a solution exists within a low-rank proximity of the initialization. However, in~\app{app:vit-rank-dynamics}, we observed the rank of the gradient tends to increase throughout training, hinting at the necessity for high-rank updates.
+
+\begin{figure}[t!]
+\centering
+    \includegraphics[width=\linewidth]{./images/full_rank_comparison.pdf}
+    \caption{\small\textbf{Increasing the rank of LoRA can recover the standard training performance:} ViT-S trained on ImageNet100 using with and without LoRA. Low-rank LoRA uses rank $r=64$, and full-rank LoRA uses rank $r=\min(m, n)$ set to the dimension of the original weight $\bW \in \mathbb{R}^{m \times n}$. Increasing $r$ suffices to match standard training performance.}
+    \label{fig:full_model_vs_lora}
+\end{figure}
+
+
+
+\subsection{Motivation: Multi-head merging perspective}
+\label{sec:motivation}
+This section provides intuition on why LoRA heads in parallel can achieve the performance of standard pre-training.
+
+As demonstrated in \fig{fig:full_model_vs_lora}, elevating the rank $r$ of the LoRA to be the same as the rank $\min(m, n)$ of the weight matrix $\bW\in\mathbb{R}^{m\times n}$ is sufficient to replicate standard pre-training performance, albeit with different inherent dynamics as detailed in \app{app:lora_effective_update}. However, such an approach compromises the memory efficiency of low-rank adapters. 
+
+Therefore, we investigate the possibility of arriving at an equivalent performance by leveraging multiple low-rank adapters in \textit{parallel}. Our motivation leverages the trivial idea of linearity of these adapters to induce parallelization.
+
+Given a matrix of the form $\bB\bA \in \mathbb{R}^{d_1 \times d_2}$ with $\bB \in \mathbb{R}^{d_1 \times d}$ and $\bA \in \mathbb{R}^{d \times d_2}$, it is possible to represent the product as the sum of two lower-rank matrices: $\bB_1 \bA_1 + \bB_2 \bA_2$. To demonstrate this, let $\bb_{i}$ and $\ba_{i}$ be the column vectors of $\bB$ and $\bA$ respectively. One can then construct $\bB_1 = [ \bb_{1}, \dots, \bb_{[d/2]} ]$ , $\bB_2 = [ \bb_{[d/2]}, \dots, \bb_{d}]$, and $\bA_1 = [ \ba_{1}^T, \dots, \ba_{[d/2]}^T]$ , $\bA_2 = [ \ba_{[d/2]}^T, \dots, \ba_{d}^T ]$. This decomposition allows for the approximation of high-rank matrices through a linear combination of lower-rank matrices. The same conclusion can be reached by beginning with a linear combination of rank-1 matrices. This forms the basis for a novel multi-head LoRA parameterization, which we will use as one of the baselines to compare with our final method.
+
+\xpar{Multi-head LoRA (MHLoRA)} Given a matrix $\bW \in \mathbb{R}^{m\times n}$, and constant $N$, multi-head LoRA parameterizes the weights as a linear combination of $N$ low-rank matrices $\bB_n$ and $\bA_n$:
+\begin{align}
+f_{\mathsf{mhlora}}(\bx) = \bW \bx + \frac{s}{N} \sum_{n=1}^{N} \bB_n \bA_n \bx
+\end{align}
+
+Multi-head LoRA reparameterizes the full-rank weights into a linear combination of low-rank weights. 
+
+Now, we will point out a trivial observation that a single parallel LoRA head can approximate the trajectory of a single step of the multi-head LoRA, provided that the parallel LoRA heads are periodically merged into the full weights. 
+
+Using the same rank $r$ for all the LoRA parameters, the dynamics of a single parallel LoRA head (denoted with $\hat\cdot$~) is equivalent to multi-head LoRA:
+\begin{align}
+\argmin_{\bB_n \bA_n} \mathcal{L} &\left( \bW + \frac{s}{N} \sum_{n=1}^{N} \bB_n \bA_n \right) \nonumber \\
+&= \argmin_{\hat \bB_n, \hat \bA_n} \mathcal{L} \left( \hat \bW + \frac{s}{N}  \hat \bB_n \hat\bA_n \right)
+\end{align}
+
+When either $\sum_{n=1}^{N} \bB_n \bA_n $ is equal to $\hat \bB_n \hat \bA_n$, or when $\hat \bW = \bW + \frac{s}{N} \sum_{j \neq n}^N \bB_j  \bA_j$; here we used a shorthand notation to indicate that sum is over all the LoRA parameters except for index $n$. We assume the parameters on both sides of the equation are initialized to be the same: $\bA_n = \hat\bA_n$ and $\bB_n = \hat\bB_n \forall n$. The first scenario is rank deficient, which we know is unable to recover the original model performance. The latter case necessitates that $\hat\bW$ accumulates all the information of the LoRA parameters at every iteration. Hence, if we can apply a merge operator at every iteration, we can recover the exact update.
+
+This rather simple observation implies that one can recover the exact gradient updates of the multi-head LoRA parameterized model, which we observed to match pre-training performance across a wide range of tasks~(see~\app{app:more-results}). Moreover, in a distributed setting, only the LoRA parameters/gradients have to be communicated across devices, which is often a fraction of the original model size, making it a good candidate where interconnect speed between computing nodes is limited.
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{images/lte-diagram.pdf}
+    \caption{\small \textbf{LTE diagram}:
+    Our method is decomposed into 3 steps. (\textbf{1}) We parameterize the model with multiple LoRA heads and train them independently for $T$ iterations using different mini-batches sampled from the same (homogeneous) distribution. This results in overall update of $\delta_{\mathsf{lora}_n}(\bx) = - 
+    \eta \sum_t \nabla_{\mathsf{lora}_n}(\bx[t])$ (\textbf{2}). Next, we accumulate the individual LoRA updates by averaging the heads $\Delta_{\mathsf{lora}}(\bx) = \frac{1}{N}\sum_n \delta_{\mathsf{lora}_n}(\bx)$. (\textbf{3}) The update is applied to the main weights, and the LoRA parameter $\bB$ is reset. The optimization repeats with the new LoRA parameters. 
+    LTE resembles the distributed model development paradigm first proposed by~\citet{kandpal2023git}.
+    }
+    \label{fig:lte}
+\end{figure*}
+\subsection{LoRA soup: delayed LoRA merging}
+
+To further reduce the communication cost of LTE, we extend and combine the ideas of local updates~\cite{mcmahan2017communication} and model-averaging~\cite{wortsman2022model,yadav2023ties-merging,ilharco2022editing}. 
+Instead of merging every iteration, we allow the LoRA parameters to train independently of each other for a longer period before the merge operator. This is equivalent to using stale estimates of the LoRA parameters $\hat \bW = \bW + \frac{s}{N} \sum_{j \neq n}^N \bB_j'  \bA_j'$ with $'$ indicating a stale estimate of the parameters. 
+
+Merging every iteration ensures that the representation will not diverge from the intended update. While using stale estimates relaxes this equivalence, we observe that it can still match the standard training performance as shown in~\tbl{table:imagenet100-ablation}. 
+Nevertheless, as the estimate becomes inaccurate, the optimization trajectory does indeed diverge from the optimization path of multi-head LoRA. We quantify this divergence in~\fig{fig:lora-divergence}. The divergence does not imply that the model won't optimize; rather, it suggests that the optimization trajectory will deviate from that of the multi-head LoRA. 
+In this work, we opt for simple averaging and leave more sophisticated merging such as those used in~\cite {karimireddy2020scaffold,matena2022merging,yadav2023ties-merging} for future works.
+
+\subsection{LoRA-the-Explorer: parallel low-rank updates}
+\label{sec:lte}
+
+Our algorithm is designed with two primary considerations: (1) achieving an informative update $\Delta \bW$ that does not require materialization of the full parameter size during training, and (2) parameterizing $\bW$ such that it can be stored in low-precision and communicated efficiently. The latter can be achieved by using quantized weights and keeping a high-precision copy of $\bW$.
+
+We propose LoRA-the-Explorer (LTE), an optimization algorithm that approximates full-rank updates with parallel low-rank updates. The algorithm creates $N$-different LoRA parameters for each linear layer at initialization. Each worker is assigned the LoRA parameter and creates a local optimizer. Next, the data is independently sampled from the same distribution $\bx = \{ \bx_1, \dots \bx_N \}$. For each LoRA head $n$, the parameters are optimized with respect to its own data partition for $T$ iterations resulting in an update $\delta_{\mathsf{lora_n}} = - \eta \sum_{t=1}^T \nabla_{\mathsf{lora}_n} \bx_i[t]$. 
+We do not synchronize the optimizer state across workers.
+After the optimization, the resulting LoRA parameters are synchronized to compute the final update for the main weight $\Delta_{\mathsf{lora}}(\bx) = \frac{1}{N} \sum_{n=1}^N \delta_{n}$. In the next training cycle, the LoRA parameters are trained with the updated weights $\bW$. Here, the LoRA parameters can be either be re-initialized or the same parameters can be used with the correction term~(see~\app{app:exact}). Since we do not train directly on the main parameter $\bW$, we can use the quantized parameter $q(\bW)$ instead. Where one can either keep the high-precision weight only in the master node or offload it from the device during training. This reduces not only the memory footprint of each worker but also the transmission overhead. A pseudo-code is provided in~\alg{alg:lte} and an illustration in~\fig{fig:lte}.
+
+\begin{figure}[t!]
+    \centering
+    \subfigure[Gradient deviation]{\label{fig:lora-div-a}\includegraphics[width=0.48\linewidth]{./images/dev_encoder_layers_encoder_layer_3_self_attention_in_proj.pdf}}
+    \hfill
+    \subfigure[Trajectory projection]{\label{fig:lora-div-b}\includegraphics[width=0.48\linewidth]{./images/25_merge_iter_12.pdf}}
+    \caption{\small \textbf{Effects of merging LoRA heads.} \textbf{Left:} We measure $l_2$-norm deviation of the effective weights of multi-head LoRA (MHLoRA) and LoRA-the-explorer (LTE, our method) from the weights of standard training using ViT-S. We use $4$ heads for both MHLoRA and LTE using the same initialization, and we measure the norm of \texttt{encoder-layer-3}. We also plot the individual LoRA heads of LTE. These heads deviate more from standard training, but their average closely follows that of MHLoRA. Depending on the merge iteration (x-axis), the estimation gap of using stale estimates is roughly the difference between the MHLoRA and LTE averaged. The later the merge happens, the more LTE deviates from MHLoRA. \textbf{Right:} We project the dynamics of MHLoRA and LTE onto the parameters of MHLoRA. The y-axis is the initial parameters, and the x-axis is after training for $25$ iterations. The projection is computed by computing the cosine similarity on the vectorized weights and creating an arc from (0, 1) to (1, 0). We set merge iteration to $12$ and visualize how the LTE trajectory follows the arc of MHLoRA. }
+    \label{fig:lora-divergence}
+\end{figure}
+
+
+
+\subsection{Implementation details}
+\label{sec:implementation}
+
+We discuss a few of the implementation details we found necessary for improving the convergence speed and the performance of our method. 
+
+\xpar{Not resetting matrix $\bA$ and optimizer states}
+We investigate whether the matrices $\bA_n$ would converge to the same sub-space during training. If so, it would necessitate resetting of matrices $\bA_n$ or the use of a regularizer. 
+In~\fig{fig:lora-alignment}, we did not observe this to be the case. We observed the orthogonality of $\bA$ to remain consistent throughout training, and we found it to perform better without resets. We posit that re-learning matrix $\bA$ and re-accumulating the optimizer state ends up wasting optimization steps. The comparison figures can be found in~\app{app:ablation} and a more detailed discussion in~\sect{sec:lora-alignment}.
+
+\xpar{Scaling up $s$ and lowering learning rate $\eta$}
+
+It is a common misconception that scaling $s$ has the same effect as tuning the learning rate $\eta$. During our experimentation, we were unable to yield comparable performance when using the standard value of $s$ (in the range of $1\sim 4$). Instead, we found using a large value of $s$ and a slightly lower learning rate $\eta$ to work the best. The standard practice is to set the scaling proportionately to the rank of the LoRA $s = \alpha / r$. This is done to automatically adjust for the rank~\citep{hu2021lora}. We use $\alpha=4096$ ($s=64$) and a learning rate of $\eta=2\cdot10^{-4}$. It is worth noting that the learning rate does not scale linearly with $s$, and the scalar only affects the forward computation (\app{app:s_vs_lr}).
+The scalar $s$ modifies the contribution of the LoRA parameters in the forward pass, which has a non-trivial implication on the effective gradient. Moreover, in~\app{app:lora_effective_update}, we provide the effective update rule of LoRA updates and observe the emergence of the term $s$ that scales quadratically with the alignment of $\bB$ and $\bA$. Since $s$ is large relative to the learning rate, it may have a non-negligible effect on the dynamics.
+
+\newcommand{\algrule}[1][.2pt]{\par\vskip.5\baselineskip\hrule height #1\par\vskip.5\baselineskip}
+
+\begin{figure}[t!]
+\centering
+ \scalebox{0.95}{
+\begin{minipage}{1.0\linewidth}
+  \begin{algorithm}[H]
+  \DontPrintSemicolon
+    \SetCustomAlgoRuledWidth{0.55\textwidth}  
+    \caption{LoRA-the-Explorer (LTE)}\label{alg:lte}
+    \KwInput{Dataset $\mathcal{D}_{\mathsf{train}}$,
+        model $\mathcal{F}$, loss function $\mathcal{L}$ \\
+        \qquad \quad ~parameters $\Theta = \{ \bW_0, \dots, \bW_L\} $, \\
+        \qquad \quad ~merge scalar $s$, num workers $N$, merge iter $T$}
+        \algrule
+     \While{not converged}{
+    (\textit{Optional}) quantize $\Theta$. Keep high-precision copy\;\\
+      \textbf{\color{teal} (in parallel) }\For{each worker $n$}{
+          \If{LoRA not initialized}{
+              $\mathcal{B}_n, \mathcal{A}_n \leftarrow \mathbf{lora\_parameterize}(\mathcal{F})$\;
+          }
+          \Else{
+              (\textit{Optional}) reset parameters $\mathcal{B}_n$ to zero\;
+          }
+         Optimize $\mathcal{B}_n, \mathcal{A}_n$ for $T$ iterations by minimizing $\mathbb{E}_{\bx, \by \sim \mathcal{D}_{\mathsf{train}}} \left[ \mathcal{L}(\mathcal{F}(\bx), \by) \right]$ \;
+        \; \# Synchronize by communicating LoRA parameters.\;
+        \For{each worker $n$}{
+            \For{$\bB_n,\bA_n$ in $\mathcal{B}_n, \mathcal{A}_n$}{
+            Merge LoRA params $\bW_n \leftarrow \bW_n + \frac{s}{n} \bB_n \bA_n$\;
+            }
+      }
+     }
+  \end{algorithm}
+\end{minipage}
+}
+\caption{\small LTE pseudocode. Not resetting $\mathcal{B}_n$ requires a correction term to LTE. See~\app{app:exact}.}
+\end{figure}
+
+  
+\xpar{Significance of Initialization Strategies}
+\label{sec:init_matters}
+
+Initialization of LoRA plays a pivotal role in pre-training. Kaiming initialization used in the original work~\citep{hu2021lora} -- are not well-suited for rectangular matrices as discussed in~\citep{bernstein2023agd,yang2020feature}. Given that LoRA parameterization often leads to wide matrices, alternative methods from~\citep{bernstein2023agd} and~\citep{glorot2010understanding} resulted in better empirical performance.
+
+We use the initialization scheme prescribed in~\citep{bernstein2023agd} that utilizes a semi-orthogonal matrix scaled by $\sqrt{d_{out}/d_{in}}$. Note that these methods were originally designed for standard feed-forward models. Whereas LoRA operates under the assumption that matrix $\bB$ is zero-initialized with a residual connection. This aspect warrants further study for exact gain calculations. 
+Our ablation studies, in~\app{app:ablation}, indicate the best performance with~\cite{bernstein2023agd}, with Kaiming and Xavier initializations performing similar. In ImageNet-1k, we found the performance gap to be more evident.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We follow standard training protocols, and all implementation details and training hyper-parameters can be found in~\app{app:train-details}.
+
+\textbf{Disclaimer:} During the preparation of the code release, we found that the transformer experiments used a scaling factor of $1/\sqrt{d_{out}}$ instead of the standard scaling $1/\sqrt{d_{out}/n_{attn}}$~\cite{vaswani2017attention}. Hence, using LTE with the standard scaling would require a different set of hyper-parameters than the ones reported in~\app{app:train-details}. We will revise the hyper-parameters in the next revision.
+
+\begin{figure}[t!]
+\centering
+    \includegraphics[width=\linewidth]{./images/merge_lora_imagenet100.pdf}
+    \caption{\small\textbf{Sequential merging of LoRA cannot recover performance.} ViT-S trained on ImageNet100. Merging and resetting the LoRA parameters achieves better performance than single-head LoRA pre-training but still cannot recover the standard full-model pre-training. Note that LoRA + merge is akin to concurrent work of ReLoRA~\citep{lialin2023stack}.
+    }
+    \label{fig:full_model_vs_mergelora}
+\end{figure}
+\subsection{Iterative LoRA Merging}
+\label{sec:merging}
+In~\sect{sec:motivation}, we motivated that iteratively merging LoRA parameters is a key component in accurately recovering the full-rank representation of the model. 
+As a sanity check, in~\app{app:merge-least-squares}, we assess the effectiveness of merging a single LoRA head in the context of linear networks trained on synthetic least-squares regression datasets. The underlying rank of the optimal solution, $\bW^*$, is controlled, and datasets are generated as $\bY = \bX (\bW^*)^{\mathsf{T}}$. Each $\bx \in \bX$ follows a normal distribution, $\bx \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$.
+Figure \ref{fig:merge_ls} evaluates the model's rank recovery across varying merge iteration $T$. Dimension of the weights $\bW$ are set to $m=n=32$. 
+Without merging, the model performance plateaus rapidly on full-rank $\bW^*$. In contrast, iterative merging recovers the ground truth solution with the rate increasing with higher merge frequency. 
+
+Further tests in~\fig{fig:full_model_vs_mergelora} using ViT-S~\citep{dosovitskiy2020image} with a patch-size of 32 on the ImageNet100 dataset~\citep{tian2020contrastive} (a subset of ImageNet~\citep{russakovsky2015imagenet}) confirm that merging of a single LoRA head outperforms standalone LoRA parameter training. However, frequent merging delays convergence, likely due to LoRA parameter re-initialization and momentum state inconsistencies. Additionally, the performance does not match that of fully trained models, indicating potential local minima when training with rank-deficient representations. 
+
+We find that the merge iteration of $T=10$ is still stable when using batch size $4096$. With higher $T$ values, additional training may be required to achieve comparable performance~\citep{stich2018local,wang2021cooperative,yu2019parallel}. Our initial efforts to improve merging using methods such as~\citep{yadav2023ties-merging} did yield better results. Nonetheless, we believe with increased merge iteration, smarter merging techniques may be necessary. Existing literature in federated learning and linear-mode connectivity/model-averaging may provide insights into designing better merging criteria.
+
+To further test the generalizability of our method, we conducted a suite of experiments on various vision tasks in~\fig{fig:results}. Moreover, we test our method on MLP-Mixer~\cite{tolstikhin2021mlp} to demonstrate its use outside of transformer architecture. We provide additional experiments when using $T=1$ and initial language-modeling results in~\app{app:more-results}. 
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{images/vision_tasks_True.pdf}\\
+    \includegraphics[width=1.0\linewidth]{images/vision_tasks_False.pdf}
+    \caption{\small \textbf{Experiments on various vision tasks}: We apply our method to a range of vision tasks, including CIFAR10, CIFAR100~\cite{krizhevsky2009learning}, STL10~\cite{coates2011analysis}, Caltech256~\cite{griffin2007caltech}, SUN397~\cite{xiao2010sun}, and ImageNet100~\cite{tian2020contrastive}. Details of these datasets are listed in~\app{app:datasets}. Additionally, we incorporated the MLP-mixer and observed consistent results. The figure is presented with two different x-axes. On the top, we plot the total number of synchronization steps, and on the bottom, we measure the total number of training samples observed across all devices. All LTE experiments are conducted on ViT-S with a merge iteration of $T=10$ and 32 LoRA heads with a rank of $r=64$. In~\app{app:more-results}, we provide additional results for $T=1$, LLM experiments, and LTE trained on ViT and MLP-mixer at various scales.
+    }
+    \label{fig:results}
+\end{figure*}
+\subsection{LoRA parameter alignment}
+\label{sec:lora-alignment}
+\begin{figure}[t!]
+\centering
+
+    \includegraphics[width=1.0\linewidth]{images/alignment.pdf}
+
+    \caption{\small\textbf{LoRA alignment}: Alignment of LTE heads when varying parameters and data. ``Diff\;Param'' uses random initialization across each head, and ``Diff\;Data'' uses different mini-batches. The similarity is computed on the first epoch of ImageNet100 on ViT-S. We use LTE of $r$=$8$ with $4$ LoRA heads. Pair-wise similarity is averaged across all linear layers. The performance of the model correlates with orthogonality between LoRA heads.
+    }
+    \label{fig:lora-alignment}
+\end{figure}
+
+The efficacy of our optimization algorithm hinges on the ability of individual heads to explore distinct subspaces within the parameter space. We examine the extent to which data and initial parameters influence intra-head similarity throughout training. In~\fig{fig:lora-alignment}, we compute the average cosine similarity and Grassman distance~(see~\app{app:grass}) between the heads $\bB_n\bA_n$. These tests were conducted with data samples drawn from the same distribution, and each set of LoRA parameters was exposed to a different set of samples. 
+
+Our results confirm that LoRA heads do not converge to the same representation. We find using different initializations across LoRA heads yields the greatest orthogonality. This orthogonality is further increased when different mini-batches are used for each head. Importantly, the degree of alignment among LoRA heads remains stable post-initialization and does not collapse into the same representation. In~\fig{fig:lora-alignment}, we find that lower similarity corresponds well with model performance, where using different parameters and mini-batches significantly outperforms other configurations. 
+
+\begin{figure}[t!]
+  \centering
+  \begin{minipage}[b]{\linewidth}
+    \centering
+    \scalebox{0.7}{
+    \begin{tabular}{l|cccc|ccc|cc} 
+    \toprule
+    & LTE & Heads & Rank & Merge & Test loss $\downarrow$ & Test acc $\uparrow$ \\
+    \midrule
+    & - & - & - & - & 1.78 & 71.97 \\
+    \cmidrule(lr){1-7}
+    {\multirow{6}{*}{\rotatebox[origin=c]{90}{$\mathsf{head}$}}}
+    & \checkmark & 2 & 8 & 10 & 2.31 & 54.68\\
+    & \checkmark & 8 & 8 & 10 & 2.35 & 54.88\\
+    & \checkmark & 32 & 8 & 10 & 2.26 & 58.21 \\
+    & \checkmark & 2 & 64 & 10 & 1.86 & 69.82 \\
+    & \checkmark & 8 & 64 & 10 & 1.84 & 71.97  \\
+    & \checkmark & 32 & 64 & 10 & 1.79 & 73.73 \\
+    \cmidrule(lr){1-7}
+    {\multirow{5}{*}{\rotatebox[origin=c]{90}{$\mathsf{rank}$}}}
+    & \checkmark & 32 & 8 & 10 & 2.66 & 44.00\\
+    & \checkmark & 32 & 16 & 10 & 2.12 & 60.35\\
+    & \checkmark & 32 & 32 & 10 & 1.81 & 71.20 \\
+    & \checkmark & 32 & 64 & 10 & 1.79 & 73.73 \\
+    & \checkmark & 32 & 128 & 10 & 1.78 & 73.54 \\
+    \cmidrule(lr){1-7}
+    {\multirow{5}{*}{\rotatebox[origin=c]{90}{$\mathsf{merge}$}}}
+    & \checkmark & 32 & 64 & 5  & 1.87 & 70.67\\
+    & \checkmark & 32 & 64 & 10 & 1.79 & 73.73 \\
+    & \checkmark & 32 & 64 & 20 & 1.97 & 66.80\\
+    & \checkmark & 32 & 64 & 50 & 1.99 & 65.43 \\
+    & \checkmark & 32 & 64 & 100 & 2.10 & 61.04 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \captionof{table}{\small \textbf{LTE ablation for ViT-S trained ImageNet100:} For \textit{fixed cumulative training epoch} of $1200$, we vary the number of heads, rank, and merge iteration of our method. More heads require longer cumulative training samples to converge; see~\fig {fig:lte_sync_steps}.}
+    \label{table:imagenet100-ablation}
+  \end{minipage}%
+  \begin{minipage}[b]{0.45\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/lte_sync_steps.pdf}
+    \caption{\small\textbf{LTE with same batch-size per head:} ViT-S trained on ImageNet100. We use the same batch-size for each LoRA head with rank $r=8$. In contrast to other figures, we plot the loss in optimization steps. LTE with more heads converge to a better solution but require longer training samples to converge.}
+    \label{fig:lte_sync_steps}
+  \end{minipage}
+\end{figure}
+
+
+
+\subsection{Ablation study: the effect of LoRA heads, rank, and merge iteration}
+\label{sec:ablation}
+We systematically evaluate the effects of varying the number of LoRA heads, rank, and merge iteration on model performance for ImageNet100 in~\tbl{table:imagenet100-ablation}. Our findings indicate a monotonic improvement in performance with an increased number of heads and ranks. Conversely, extending the merge iteration negatively impacts performance. As in the case of least-squares regression, we found excessive merging to hurt model accuracy. With a large enough rank and head, we found the model to converge to better test accuracy, even if the test loss was similar. We hypothesize that the averaging of the LoRA heads has a regularization effect similar to those seen in model ensembling. 
+
+We use ViT-S as the primary architecture for analysis, which has a hidden dimension of $384$ and an MLP dimension of $1536$. We find that setting the product of the number of heads and the rank of the LoRA larger than the largest dimension of the model serves as a good proxy for configuring LTE. For example, using $32$ heads with $r=64$ results in $2048 > 1536$. However, when it comes to increasing the number of heads rather than rank, we noticed longer training iterations were required to achieve comparable performance. In the preceding section, we discuss a potential cause of the slowdown in convergence. 
+
+\subsection{Gradient noise with parallel updates}
+In our ablation study, we utilized a fixed cumulative batch size of $4096$ and a training epoch of $1200$. Each LoRA head received a reduced batch size of $\frac{4096}{\text{heads}}$. Our findings indicate that scaling the rank exerts a greater impact than increasing the number of heads. Due to the proportional scaling of gradient noise with smaller mini-batches~\citep{mccandlish2018empirical,shallue2019measuring,smith2017bayesian}, we hypothesize that gradient noise is the primary factor contributing to slower convergence, in addition to the use of stale parameter estimates. To validate this hypothesis, we employed the same mini-batch size across all heads in~\fig{fig:lte_sync_steps}, using a reduced rank of $r=8$. When we adjusted the batch size in proportion to the number of heads and measured it with respect to the optimization steps, the impact of varying the number of heads became more pronounced. While increasing the number of heads necessitates more sequential FLOPs, it offers efficient parallelization. Furthermore, using a larger batch size for gradient estimation may prove beneficial in distributed training, as it increases the computational workload on local devices. Careful optimization of the effective batch size to maximize the signal-to-noise ratio may be crucial for achieving maximum FLOP efficiency.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{images/breakdown.pdf}
+    \caption{\small \textbf{ImageNet compute analysis}: We break down the computational cost for training ViT-S on ImageNet1k. We compare against distributed data-parallel with $8$ devices. LTE requires $40\%$ longer to achieve the same performance of $68\%$ top-1 accuracy on $1000$-way classification. We used $32$ LoRA heads with $r=64$. Our method requires fewer trainable parameters per device. This, in turn, enables the fitting of larger models in low-memory devices. With a smaller memory footprint and infrequent communication, our method requires lower communication bandwidth. Further discussion is in~\sect{sec:imagenet1k}. 
+    }
+    \label{fig:lte-analysis}
+\end{figure}
+\subsection{Performance Scaling on ImageNet-1K}
+\label{sec:imagenet1k}
+We scaled up our method to ImageNet-1K. We followed the training protocols detailed in~\app{app:train-details}. In accordance with our initial hypothesis on gradient noise, we doubled the batch size to $8192$ (see~\app{app:batch_size_imagenet1k}). Since using different mini-batches was crucial early in training, we did not alter the way mini-batches were sampled. Scheduling the randomness for the mini-batches is an option we have not yet explored.
+
+In the initial training phase, we observed that LTE outperformed standard training. However, as training approached completion, standard training overtook LTE, necessitating additional iterations for LTE to achieve comparable performance. Standard training appeared to benefit more from a lower learning rate compared to LTE. For ViT-S, the model took $40\%$ more training samples to converge to the same top-1 accuracy of $68\%$ (see~\app{app:imagenet1k_test_curve}). 
+
+The primary focus of our work was to investigate whether it is possible to train deep networks with parallel low-rank adapters; hence, we did not aim to maximize efficiency. However, we do provide a hypothetical computation analysis for future scaling efforts. Let the model size be denoted by $M_{\mathsf{ddp}} = M$, and $M_{\mathsf{lte}}$ for LTE, and the respective number of devices for each method be denoted with $N_{\mathsf{ddp}}$, and $N_{\mathsf{lte}}$. With quantization, each LTE device would require a memory footprint of $qM + M_{\mathsf{lte}}$. With the base model operating in 16-bit precision, using 4-bit quantization results in $q = 0.25$. With AdamW, DDP necessitates an additional $2M$ parameters, making the total memory footprint $3M$ per device. For LTE, the total memory footprint per device is $qM + 3M_{\mathsf{lte}}$. Assuming the training is parameter-bound by the main weights $r \ll \min(m, n)$, LTE can leverage GPUs that are roughly $1/3$ the size required for DDP.
+It is worth noting that LTE requires $40\%$ more data to train and a slowdown of $20\%$ per iteration when using quantization methods such as QLoRA. If the cost of low-memory devices is lower, these slowdowns may be negligible compared to the speed-up achieved through parallelization. On average, each LTE device observes $1/3$ less data than a device in DDP. With improvements in our method and future advances in quantization, we believe this gap will be reduced. The compute analysis for ViT-S on ImageNet1k is illustrated in~\fig{fig:lte-analysis}.
+
+Communication also presents bottlenecks when training models across nodes. For a single node, one can interleave the communication of gradients asynchronously with the backward pass~\citep{li2020pytorch}. In multi-node systems, the communication scales with the size of the trained parameters and is bottlenecked at interconnect speed, especially when high-throughput communication hardware, such as InfiniBand, is not utilized. 
+Using standard all-reduce, the gradient is shared between each device for a total communication of $N_{\mathsf{ddp}} (N_{\mathsf{ddp}}-1)M$. For LTE we communicate every $T$ iteration hence we have $\frac{1}{T} N_{\mathsf{lte}} (N_{\mathsf{lte}}-1)M$. To maximize the efficacy of LTE, an alternative approach is to use a parameter server for 1-and-broadcast communication. Here, gradients are sent to the main parameter server and averaged. The accumulated updates are broadcast back to other nodes. DDP with a parameter server would use $2 (N_{\mathsf{ddp}}-1)M$ and LTE would use $\frac{1}{T} ((N_{\mathsf{lte}}-1)M_{\mathsf{lte}} + (N_{\mathsf{lte}}-1)qM)$.
+Moreover, LTE can leverage lower-bandwidth communication since the parameters shared between devices are strictly smaller by a factor of $M_{\mathsf{ddp}}/ M_{\mathsf{lte}}$. 
+
+
+
+\section{Related works}
+
+\label{sec:related}
+
+\paragraph{Training with adapters}
+
+The use of LoRA has received considerable attention in recent literature. While we focused on using LoRA to pre-train models from scratch, prior works have mainly focused on finetuning~\cite{chavan2023one, zhang2023adaptive}. The flexibility of LoRA has had a broad reach in different aspects of model training, from reducing computational requirements~\citep{zhang2023lora} to offsetting part of the pre-training computation~\citep{lialin2023stack}. 
+
+LoRA is just one type of adapter, and various forms of adapters have been explored. Parallel additive adapters~\citep{zhang2021tip} augment existing models with additional parameters. Linear adapters have also been common, either in the form of residual connections~\citep{cai2020tinytl} or affine parameters in normalization layers~\citep{bettelli2006reciprocal,mudrakarta2018k}. 
+
+Adapters have been applied to numerous tasks: natural language processing~\citep{houlsby2019parameter,stickland2019bert}, video~\citep{yang2023probabilistic,xing2023simda}, computer vision~\citep{sax2019side,zhang2023adding,chen2023vision}, incremental learning~\citep{rosenfeld2018incremental}, domain adaptation~\citep{rebuffi2018efficient}, and vision-language tasks~\citep{gao2023clip,radford2021learning,sung2022vl}, text-to-vision generative models~\citep{mou2023t2i}, and even perceptual learning~\citep{fu2023dreamsim}. 
+
+\paragraph{Distributed Training and Federated Learning}
+Our work shares relevance to both distributed and federated learning paradigms, where the LoRA head in our work can be conceptualized as a distinct computational device. Our work shares many motivations for federated learning, including low-compute devices, high-latency training, privacy, and cross and in-silo learning. See~\citep{mcmahan2017communication,wang2021field} for a comprehensive discussion.
+
+Communication efficiency serves as a cornerstone in both distributed and federated learning. Techniques such as \textit{local steps} have been employed to mitigate communication load~\citep{mcmahan2017communication,lin2018don,povey2014parallel,smith2018cocoa,su2015experiments,zhang2016parallel}. These methods defer the averaging of weights to specific optimization steps, thus reducing the communication cost per iteration. The effectiveness of decentralized training has been studied in~\citep{lian2017can,koloskova2019decentralized,koloskova2020unified, coquelin2022accelerating}.
+
+Traditionally, activation computations have dominated the computational load. However, the advent of gradient checkpointing~\citep{chen2016training} and reversible gradient computation~\citep{gomez2017reversible,mangalam2022reversible} has shifted the training process toward being parameter-bound. Techniques such as gradient or weight compression also seek to reduce the communication burden~\cite {lin2017deep,aji2017sparse,wen2017terngrad}.
+
+Combining models in federated learning is often credited to FedAvg~\citep{mcmahan2017communication}. Numerous studies explore the use of weighted averaging to improve convergence speed~\citep{li2019convergence}. Since then, many works have tried to use probabilistic frameworks to understand and improve merging~\citep{hsu2019measuring,wang2019slowmo,reddi2020adaptive}. The conditions for optimal merging is still an open question, with recent efforts to improve updating with stale parameters~\cite{chen2022sapipe}.
+
+Server momentum and adaptive methods constitute another active area of research where macro synchronization steps are interpreted as ``gradients'', allowing one to prescribe a bi-level optimization scheme~\citep{hsu2019measuring,wang2019slowmo,reddi2020adaptive}. 
+
+Initial efforts have been made to use federated learning with large models. \cite{yuan2022decentralized} examined the cost models for pre-training Language Learning Models (LLMs) in a decentralized configuration. \cite{wang2023cocktailsgd} suggested the utilization of compressed sparse optimization methods for efficient communication. Our work is also closely related to~\cite{douillard2023diloco}, a concurrent work that explores the idea of distributing computing across smaller server farms while maintaining low communication costs. 
+
+\paragraph{Linear mode connectivity and model averaging}
+Linear mode connectivity~\citep{garipov2018loss} studies the phenomena of why and when models are smoothly connected~\citep{freeman2016topology,draxler2018essentially,fort2019large}. Under the same initialization, models have been shown to have a linear path with constant energy~\citep{nagarajan2019uniform,frankle2020linear,wortsman2022model}. For models with different initializations, parameter permutations can be solved to align them linearly~\citep{brea2019weight,tatro2020optimizing,entezari2021role,simsek2021geometry}.
+
+Following this line of research, numerous works have also explored model averaging and stitching. Where averaging of large models has shown to improve performance~\citep{wortsman2022model,ainsworth2023git,stoica2023zipit,jordan2022repair,wortsman2022fi}. Model stitching~\citep{lenc2015understanding} has also shown to yield surprising transfer capabilities~\citep{moschella2022relative}. This idea is conceptually related to optimal averaging in convex problems~\citep{scaman2019optimal} and the ``Anna Karenina'' principle where successful models converge to similar solutions~\citep{bansal2021revisiting}. This phenomenon could help explain the success of averaging multiple LoRAs into a single global LoRA~\cite{yi2023fedlora} and averaging MoE MLP layers into a single weight at inference~\cite{wang2022adamix}.
+
+
+
+\section{Conclusion}
+
+\label{sec:discussion}
+In this work, we investigated the use of low-rank adapters for model pre-training. We introduced LTE, a bi-level optimization method that capitalizes on the memory-efficient properties of LoRA. Although we succeeded in matching performance on moderately sized tasks, several questions remain unresolved. These include: how to accelerate convergence during the final $10\%$ of training; how to dynamically determine the number of ranks or heads required; whether heterogeneous parameterization of LoRA is feasible, where each LoRA head employs a variable rank $r$; and leveraging merging strategies to accompany higher local optimization steps. Our work serves as a proof-of-concept, demonstrating the viability of utilizing low-rank adapters for neural network training from scratch. However, stress tests on larger models are essential for a comprehensive understanding of the method's scalability. Addressing these open questions will be crucial for understanding the limitations of our approach. We anticipate that our work will pave the way for pre-training models in computationally constrained or low-bandwidth environments, where less capable and low-memory devices can collaboratively train a large model, embodying the concept of the ``\textit{wisdom of the crowd.}''
+
+
+
+\section{Acknowledgement}
+
+The research was sponsored by the Army Research Office and was accomplished under Grant Number W911NF-23-1-0277. The views and conclusions contained in this document are those of the authors and should not be interpreted as representing the official policies, either expressed or implied, of the Army Research Office or the U.S. Government.
+MH was also supported by the ONR MURI grant N00014-22-1-2740 and the MIT-IBM Watson AI Lab. 
+JB is supported by the MIT-IBM Watson AI Lab and the Packard Fellowship.
+PI is supported by the Packard Fellowship.
+BC is supported by the NSF STC award CCF-1231216.
+We thank Han Guo, Lucy Chai, Wei-Chiu Ma, Eunice Lee, and Yen-Chen Lin for their feedback.
+
+
+
+

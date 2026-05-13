@@ -1,0 +1,309 @@
+\title{Continual Learning in Open-vocabulary Classification with Complementary Memory Systems}
+
+\begin{abstract}
+We introduce a method for flexible and efficient continual learning in open-vocabulary image classification, drawing inspiration from the complementary learning systems observed in human cognition. Specifically, we propose to combine predictions from a CLIP zero-shot model and the exemplar-based model, using the zero-shot estimated probability that a sample's class is within the exemplar classes. We also propose a ``tree probe'' method, an adaption of lazy learning principles, which enables fast learning from new examples with competitive accuracy to batch-trained linear models. We test in data incremental, class incremental, and task incremental settings, as well as ability to perform flexible inference on varying subsets of zero-shot and learned categories. Our proposed method achieves a good balance of learning speed, target task effectiveness, and zero-shot effectiveness. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\input{figures_latex/motivation}
+
+A major machine learning goal is to create flexible learning systems, which we investigate in the context of image classification, with the following goals:
+\begin{itemize}
+\setlength{\itemsep}{1pt}
+\setlength{\parskip}{1pt}
+\item Flexible inference: classify an image within any label set, testable via zero-shot classification
+\item Continual improvement: accuracy improves as new data is received for related tasks without detriment to previous tasks
+\item Efficient incremental learning: can efficiently update the model with new training examples 
+\end{itemize}
+
+Flexible inference and continual improvement lead to robust and widely usable systems. Efficient incremental learning reduces cost of training and facilitates responsive and interactive learning approaches. Imagine interacting with a nature classification app: it begins with open-vocabulary classifiers, providing reasonable predictions for plant and animal categories. Whenever an expert user correct mistakes, the app learns from their input to improve on the labeled species without detriment to its existing capabilities, as shown in Fig.~\ref{fig:motivation}. 
+
+However, to our knowledge, no solution exists that meets all these goals.  Open vocabulary methods, such as CLIP~\citep{clip}, attain flexible inference but cannot easily learn and improve with new examples.  Continual learning methods, such as LwF~\citep{li_2018_lwf_pami}, iCaRL~\citep{iCaRL}, EWC~\citep{EWC}, and GDumb~\citep{prabhu_gdumb_eccv_2020}, lack flexible inference and are not easily extended to open vocabulary models. For example, LwF requires maintaining classification heads for previous tasks, and GDumb maintains examples for every possible label; neither strategy directly applies when the label set is unbounded. \zhen{Recent prompt-based approaches~\cite{wang_2022_CVPR_l2p,wang_2022_eccv_dualprompt,Wang_2022_nips_sprompt,smith_2023_cvpr_codaprompt} share the same disadvantages.} In fact, one homogeneous system cannot easily accommodate all goals. A deep network can aggregate information over enormous datasets to achieve flexible inference, but updates from small targeted subsets can disrupt other tasks. Instance-based methods can incrementally learn and continually improve, but cannot generalize to novel labels. 
+To build such a flexible learning system, we are inspired by the flexibility of human learning and inference, enabled by complementary learning systems (CLS)~\citep{cls_oreilley_2014}. 
+The \fast\ system forms new memories and associations with sparse connections, enabling non-disruptive storage of individual experiences. The \slow\ system gradually consolidates information stored in the \fast\ system to a densely connected network, encoding general knowledge and regularities across experiences. The interplay between these two complementary systems enables the brain to balance the rapid encoding of novel information and gradual generalization of knowledge. How can we make computer learning systems that likewise benefit from both consolidated and exemplar-based memory systems to continually learn with zero-shot inference ability? 
+
+We investigate in the context of open-vocabulary image classification, using frozen CLIP as the \slow\ system. 
+Our \fast\ system stores individual representations of learning exemplars, and the challenge is to learn from them in a way that is performant in both accuracy and learning time  (Sec.~\ref{sec:memory_prediction_approaches}). 
+To balance speed and performance, we consider classic learning approaches.  One option is linear probe, which can achieve good accuracy but learns from a new example in $\mathcal{O}(n)$ time, where $n$ represents the total number of exemplars.  K-nearest neighbor (KNN) can learn in $\mathcal{O}(1)$ time but tends to be less accurate than linear probe.  Based on local linear models from the lazy learning literature~\citep{bontempi1999lazy}, we propose a ``tree probe'' method that hierarchically clusters examples and trains linear models for each cluster.  The time to learn from a new example is $\mathcal{O}(\rm{log}~n)$ (in practice, essentially constant time), and the accuracy is close to linear probe.  
+A second challenge is to predict using both CLIP and exemplar models (Sec.~\ref{sec:fuse_operation}) to achieve good performance on new tasks while maintaining zero-shot performance.  The exemplar model tends to perform well for test samples with labels that are in the exemplar set (``exemplar covered''), while the CLIP model can potentially predict any label. At test time, we may not know whether the label of a given test image is exemplar-covered.
+Our idea is to use CLIP to estimate the probability that an image's label is exemplar-covered and then use that probability to weight the predictions of the two models.  
+{Our unified system achieves good accuracy, efficient learning, and flexible inference, which meets all three goals for flexible learning systems.}
+We evaluate our method in the forms of data-incremental, class-incremental, and task-incremental learning, as well as flexible inference with categorization tasks that involve some, all, or none of the exemplar-covered labels. Additionally, we compare on an existing benchmark~\citep{ZSCL}, outperforming all compared approaches with the additional benefit of efficient learning.
+In summary, the reader may benefit from the following \textbf{paper contributions}:
+\begin{itemize}
+\setlength{\itemsep}{1pt}
+\setlength{\parskip}{1pt}
+ \item Tree-probe exemplar model: Our locally linear models using a hierarchical clustering can be considered a member of the long-studied lazy learning approaches~\citep{bontempi1999lazy}, but we are not aware of this specific method being proposed or used.  Tree-probe has practically constant training time in number of training samples and achieves better accuracy than KNN approaches.  This is attractive for interactive search, active learning, and other applications where annotated examples are received in a trickle and fast learning is required.
+ \item Exemplar and consolidated model combination with embeddings: Our approach, to use the consolidated model to estimate applicability of the exemplar model and to combine model predictions in the label embedding space, enables effective continual open-vocabulary learning and performs significantly better than alternatives we tested.
+ \item Flexible learning/inference: Our proposed new benchmark evaluates both the ability to continually learn from new samples in various learning scenarios and to flexibly apply those learnings to various category sets. This may provide a useful test framework to further improve open-vocabulary continual learning. 
+\end{itemize}
+ 
+
+
+
+
+\section{Related works}
+
+
+
+\subsection{Open-vocabulary image classification}
+
+Open-vocabulary image classification aims to categorize images without constraints of predefined labels. CLIP~\citep{clip} achieves this by learning embedding spaces of images and text, trained via a contrastive objective that corresponding image/text pairs will be more similar than non-corresponding pairs.  A new image can be classified into an arbitrary set of labels based on the similarity of the image embedding features to the text embedding features corresponding to each label. An alternative approach is to jointly encode the image and text information and decode into text.  Following this approach, vision-language models, such as GPV-1~\citep{Gupta2022GPV}, GPV-2~\citep{Kamath2022WeblySC}, VL-BERT~\citep{Su2020icml_VlBert}, VL-T5~\citep{Cho2021UnifyingVT}, Unified-IO~\citep{Lu2022UnifiedIOAU}, Gato~\citep{Reed2022Gato}, and Flamingo~\citep{Alayrac2022FlamingoAV}, can solve a broad range of tasks that includes open-vocabulary image classification, but typically are larger and more complex than CLIP.  We use CLIP as our consolidated model, due to its simplicity and verified effectiveness in a broad range of tasks~\citep{wortsman2022robust, gu2021open, ghiasi2021open, lin2022frozen}. 
+According to the data overlap analysis in~\citep{clip}, though trained on Internet-scale data, CLIP under-performs models trained for particular benchmarks. Our method continually and efficiently improves CLIP's capability for new concepts, enabling users to add customized expertise while maintaining general capability.
+
+\subsection{Continual learning}
+\label{sec:related_work_continual_learning}
+
+\citet{wang2023clsurvey} provides a comprehensive survey of continual learning techniques, which aim to acquire new knowledge over time while preserving previously learned knowledge~\citep{mccloskey1989catastrophic}. Approaches to continual learning can be broadly categorized into regularization~\citep{LwF,EWC,SI}, parameter isolation~\citep{ExpertGate,Rusu16Progressive,hardattention,Mallya18Packnet,sidetuning}, and rehearsal methods~\citep{iCaRL,DER,GEM,generativereplay}. Regularization techniques generally impose constraints on the learning process to alleviate forgetting. Parameter isolation methods maintain learning stability by fixing subsets of parameters~\citep{Mallya18Packnet,hardattention} or extending model with new parameters~\citep{Rusu16Progressive,yoon2017lifelong,sidetuning}. 
+Recently, inspired from the Prompt Tuning technique~\citep{lester_2021_prompt_tuning_emnlp}, prompt-based approaches~\citep{wang_2022_CVPR_l2p,wang_2022_eccv_dualprompt,Wang_2022_nips_sprompt,smith_2023_cvpr_codaprompt,Samadh2023alignprompts} continually learn task-specific prompts to condition frozen ViTs~\citep{Dosovitskiy_2021_iclr_ViT} for image classification. The learned prompts can be considered as expanded parameters of task-specific knowledge but tend to overfit as the training progresses, therefore losing the generalization capability of the frozen model. \citet{Khattak_2023_ICCV_self_regulating_prompts} propose to use a self-regulating mechanism to learn both task-specific and task-agnostic prompts but the more effective deep prompting technique requires appending prompts at each transformer layer, impacting the training efficiency. 
+Rehearsal methods involve storing and replaying past data samples during training~\citep{generativereplay,rainbowmemory,zhang2022rar}. Some approaches~\citep{Tiwari2022GCR,yoon2022coreset,hao2023bilevel} consider to maintain a coreset when concerning the memory capacity, but simple sampling methods work better if memory capacity is not a concern~\citep{budgetedCL}.
+
+Many approaches highlight the effectiveness of incorporating neuro-inspired adaptability to balance memory stability and learning plasticity in artificial intelligence systems~\citep{parisi2018dualmemory,kemker2018fearnet,ayub2023cbcl,jung2023generating,liang2023adaptive,madaan2023heterogeneous}
+For instance, the CLS theory is exemplified in DualNet~\citep{pham2021dualnet}, which integrates supervised and self-supervised learning to facilitate robust continual learning by emulating the hippocampus and neocortex functions. Similarly,~\citet{sarfraz2023sparse} uses sparse coding techniques to mimic the brain’s memory retention capabilities, and~\citet{parisi2018dualmemory} leverages dual-memory recurrent self-organization for spatiotemporal representation. CBCL-PR~\citep{ayub2023cbcl} applies cognitively inspired models to improve the class-incremental learning in robotics. A recent advancement~\citep{hikmat2024remembering} leverages a mixture-of-adapters architecture with generative routing to mitigate forgetting while maintaining parameter efficiency. FearNet~\citep{kemker2018fearnet} creates a brain-inspired dual-memory system containing a hippocampal network for recent memories and a prefrontal cortex network for long-term storage, and a basolateral amygdala network for model selection. 
+We share the inspiration from CLS theory, but our work is distinguished in its focus on efficient incorporation of new examples, ability for open vocabulary prediction, and demonstration on larger scale datasets. 
+\zhen{To generalize to unseen categories, a line of methods~\citep{skorokhodov_2021_generalized_zero_shot_iclr_2021,Gautam_2021_CZSL_Online_Generalized_zero_shot} continually learn attributes~\citep{farhadi2009describing,lampert_attribute_2014_pami} and use attribute-class relations as a way to generalize from seen to unseen categories. Despite using extra attribute annotations, these methods usually under-perform on unseen categories as compared to CLIP~\citep{clip}.} 
+{We are not aware of many works that address continual learning in the context of open-vocabulary image classification. 
+WiSE-FT~\citep{WiSE-FT} finetunes CLIP encoders on target tasks and averages finetuned weights with original weights for robustness to distribution shifts. Likewise, CLS-ER~\citep{CLS_ER} exponentially averages model weights in different paces for its plastic and stable model to balance learning and forgetting, drawing inspirations from CLS. Though not specifically designed for open-vocabulary continual learning, WiSE-FT and CLS-ER can be modified to counter forgetting. 
+Recently, ZSCL~\citep{ZSCL} explores this setting but mainly focuses on finetuning consolidated CLIP encoders. It combines LwF~\citep{LwF} and a weight ensemble idea similar to WiSE-FT as the remedy to reduce forgetting during finetuning.}
+Rather than refining or expanding a single model, our approach is to create a separate exemplar-based model that complements a pre-trained and non-updated more general consolidated model.  In our tree-probe method, the exemplar-based model continually learns using a local rehearsal, such that incorporating a new example requires only storing the new image and text embeddings and tuning a linear model using a subset of visually similar examples. This requires little storage or computation and preserves the generality of the consolidated model.
+
+
+\subsection{Instance-based learning}
+
+Instance-based learning (IBL)~\citep{Aggarwal2014Chapter6I} is a family of learning algorithms that construct a decision boundary using a memory of training instances, allowing for efficient and flexible adaptation to new data points. This learning paradigm relies on the principle of local approximation, where predictions are made based on the stored instances that are most similar to the query. One of the most well-known IBL methods is the $k$-Nearest Neighbors (KNN) algorithm, which has been extensively studied for its simplicity and effectiveness in various domains, including classification and regression tasks~\citep{guo2003knn, zhang2006svm, zhang2017learning, song2017efficient}. 
+
+Closely related to IBL is {\em lazy learning}, in which training data is organized for prediction at inference time instead of training time.  This approach can be more practical than batch or ``eager'' learning in applications like online recommendation systems, when the training data is constantly evolving. Lazy learning approaches can include KNN or locally RBF network~\citep{bottou1992locallearning}, linear regression~\citep{Atkeson1997LocallyWeightedLearning} or classification models~\citep{Aggarwal2014Chapter6I}, where models are trained based on neighbors to the query.
+
+We investigate KNN, a form of locally linear classifiers, and globally linear classifiers, exploring their trade-offs for training and inference time and accuracy on a growing set of exemplars, as well as how to combine their predictions with a static image-language foundation model.
+
+
+
+
+\section{Method}
+
+\input{figures_latex/main_diagram}
+
+Given an image $I$ and label set $Y$, our system's inference  task is to assign the correct label $y \in Y$.  Each training example (or ``exemplar'') consists of an image, and a ground-truth label. Our problem setting is called ``open-vocabulary'' or ``zero-shot'', as the labels can be represented and related through text, and the task at inference time may contain labels or candidate label sets not observed during training.  The training goal is to efficiently update the model with each new example, such that accuracy improves for related labels while maintaining zero-shot performance.
+Analogous to complimentary learning systems (CLS) theory~\citep{cls_oreilley_2014}, our approach (Fig.~\ref{fig:main_diagram}) uses two models: a CLIP image/text encoder as the consolidated system (Sec.~\ref{sec:method_clip}), and an exemplar-based system that stores and encodes image and label embeddings~(Sec.~\ref{sec:memory_prediction_approaches}). The CLIP model can assign confidence to any label from an arbitrary set. The exemplar-based model can acquire expertise that complements the CLIP consolidated model, but its scope is limited to exemplar labels.  In Sec.~\ref{sec:fuse_operation}, we propose simple mechanisms to combine the predictions of each model to retain zero-shot capability while improving in tasks related to received examples.
+
+
+
+
+
+
+
+\subsection{\Slow\ system}
+\label{sec:method_clip}
+Deep networks, such as CLIP~\citep{clip}, relate to \slow\ systems in humans in that they repeatedly process examples to iteratively consolidate experience and improve predictive ability in dense weight connections.
+We use CLIP as the \slow\ system, taking advantage of its representations and open-vocabulary predictive ability learned from batch training on massive datasets. We wish to enable fast learning and retain zero-shot ability; therefore, we do not retrain or fine-tune the CLIP encoders. Adapters and prompt-based methods cannot meet the goal of efficient training because they require relatively large computation to run through a part or the whole CLIP encoders. 
+Instead, we train complementary \fast\ models to be used in combination with CLIP.  
+
+CLIP encodes an input image $I$ using an image encoder $f_{\text{img}}$ to an image embedding $\mathbf{v}_I = f_{\text{img}}(I)$, and encodes an input collection of text labels $T = {t_1, t_2, \dots, t_m}$ using a text encoder  $f_{\text{txt}}$ to text embeddings $\mathbf{v}_{t_i} = f_{\text{txt}}(t_i)$. Following~\citep{clip}, a text label $t_i$ is framed as a sentence or caption contextualizing the image label $y_i$, such as ``a photo of a F-16A/B, a type of aircraft'' to represent the image label ``F-16A/B'' in an airplane classification task. The model computes logits for each label as cosine similarity between the image and text label, weighted by temperature $\tau$ (=100 in CLIP): 
+\begin{equation}
+\label{eq:logit}
+l(\mathbf{v}_I, \mathbf{v}_{t_i}) = \tau \cdot \frac{\mathbf{v}_I \cdot \mathbf{v}_{t_i}}{|v_I||v_{t_i}|}.
+\end{equation}
+Logits can be converted to probabilities using a softmax function: 
+\begin{equation}
+\label{eq:zs-prob}
+p_z(y=y_i | I) = \frac{\exp(l(\mathbf{v}_I, \mathbf{v}_{t_i}))}{\sum_{j=1}^{m} \exp(l(\mathbf{v}_I, \mathbf{v}_{t_j}))}.
+\end{equation}
+The label with maximum probability is predicted.
+
+
+
+
+\subsection{\Fast\ system}
+\label{sec:memory_prediction_approaches}
+
+For the \fast\ system, given one or more exemplars, our goal is to maximize classification performance  with minimal training time and acceptable inference time.
+We consider two approaches: instance-based and model-based prediction. Instance-based prediction leverages the exemplar set directly by retrieving and comparing samples. Model-based prediction seeks to capture the underlying structure of the data through a parameterized model.  In both cases, our approach leverages the embeddings from CLIP encoders to reduce storage and improve sample efficiency of learning.
+
+Our exemplar memory module $M$ stores encoded image embeddings and their labels. Each entry in the memory can be denoted by $M_j=\{\mathbf{v}_{I_j}, y_j\}$ where $j$ represents the entry index, $\mathbf{v}_{I_j}$ represents the image embedding of $I_j$, and $y_j$ is the corresponding label.
+
+Given a set of target labels, the exemplar-based model can produce a probability for each label $p_e(y=y_i | \mathbf{v}_I)$. 
+Alternatively, the prediction can be represented as an embedding vector $\mathbf{v}_e$ of composition of one or several text embeddings.
+Prediction in terms of $\mathbf{v}_e$ enables the exemplar model to support zero-shot prediction for labels similar to exemplar labels. 
+
+
+{\bf KNN}: 
+Given $\mathbf{v}_I$, the KNN memory module finds its most similar $k$ entries in the memory through cosine similarities between $\mathbf{v}_I$ and all $\mathbf{v}_{I_j}$ in the memory. Let $\mathcal{N}_k(\mathbf{v}_I)$ be the set of indices of the $k$ highest cosine similarity scores to $\mathbf{v}_I$. KNN classification for $\mathbf{v}_I$ can be performed by majority voting from the values:
+$\hat{y} = \arg\max_{y} \sum_{j \in \mathcal{N}_k(\mathbf{v}_I)} \mathds{1}(y_j = y).$
+Here, $\mathds{1}(\cdot)$ is an indicator function. The probability of $\mathbf{v}_I$ being label $y_i$ is 
+$p_e(y=y_i|\mathbf{v}_I) = \frac{1}{k}\sum_{j \in \mathcal{N}_k(\mathbf{v}_I)} \mathds{1}(y_j = y_i)$. 
+
+To predict the embedding $\mathbf{v}_e$, we can use the text embedding of the most likely label. But we find that computing a similarity-weighted average of the retrieved text embeddings gives better performance:
+$\mathbf{v}_{e} = \sum_{j \in \mathcal{N}_k(\mathbf{v}_I)} \beta_{j} \cdot f_{\text{txt}}(t_j)$, where $ \beta_{j} \propto \exp(l(\mathbf{v}_I, \mathbf{v}_{I_j}))$ and $\mathbf{v}_{I_j}$ is the image embedding the $j$th neighbor.
+KNN takes virtually no time to train ($\mathcal{O}(1)$), and reasonably fast retrieval is possible with optimized libraries and parallel computing. However, accuracy tends to be lower than model-based methods. %The major advantage of instance-based methods is fast adaptation, as the training time to incorporate a new exemplar is $\mathcal{O}(1)$, i.e. irrespective of the number of existing samples, since no model weights need to be tuned.  Inference time can range from $\mathcal{O}(\rm{log}~n)$ to $\mathcal{O}(n)$, depending on the retrieval mechanism, still efficient enough for many applications using optimized search libraries and parallel computing.
+
+{\bf Linear probe}: Parameterized models offer an alternative approach, learning a fixed set of parameters that exploit the underlying structures of the data to maximize classification performance.  %Even with well-trained encoders, instance-based predictors often under-perform model-based predictors with sufficient training data, since the models can tune feature weights and parameters for the classification task. 
+The linear probe (\lp) method runs on extracted image embeddings and trains linear classifiers on all accumulated exemplars when new exemplars are added.
+The output probability can be written as:
+$p_e(y = y_i | \mathbf{v}_I; \boldsymbol{\theta}) = \frac{\exp{(\boldsymbol{\theta}_{y_i}^T \mathbf{v}_I)}}{\sum_{y_j\in \mathbf{\mathbf{Y}_e}} \exp{(\boldsymbol{\theta}_{y_j}^T \mathbf{v}_I)}},$
+where $\boldsymbol{\theta}_{y_i}$ represents the learned model parameters for label $y_i$ and $\mathbf{Y}_e$ is the union of exemplar labels. The predicted embedding is the text embedding of the label $\hat{y}$ with maximum probability: $\mathbf{v}_{e}=f_{\text{txt}}(t_{\hat{y}})$. 
+
+Compared to KNN, the \lp\ model is much slower to train --- $\mathcal{O}(n)$ for $n$ training samples assuming a constant number of epochs, which may be prohibitive when the model needs to be updated quickly based on few examples.  However, classification accuracy tends to be higher.
+
+
+{\bf Tree probe}: In a continual learning setting, we would ideally have fast training time of KNN with the relatively good accuracy of \lp.  We take inspiration from the instance-based and lazy learning literature~\citep{Aggarwal2014Chapter6I}, particularly locally linear models~\citep{domeniconi_2002_adaptivesvm_lazy,Atkeson1997LocallyWeightedLearning}.  These methods classify a test sample by finding its $k$-nearest neighbors and applying a linear classifier trained on the neighbors.  This achieves $\mathcal{O}(1)$ training time but may be impractical for inference, since a new classifier may need to be trained for each test sample. 
+
+Instead, we propose an approximation, building a clustering tree from the training data and training a linear classifier in each leaf node, as shown in Fig.~\ref{fig:main_diagram}. Starting from a root node, we search for the nearest leaf node for a new data point and insert it if the node has not reached the predefined node capacity $\psi$. If a leaf node reaches $\psi$, it splits into two child nodes and becomes a non-leaf node. The attached data points are distributed to their children by KMeans clustering.
+In experiments, when receiving new data, samples are added into the cluster tree one by one. 
+Only classifiers in affected leaf nodes need to be retrained. When fixing the number of linear model training epochs and KMeans iterations, the complexity to incorporate a new exemplar in training is $\mathcal{O}(\psi + \log~n)$ with $\psi >> \log~n$; the training time stays limited even when the total number of exemplars is very large. 
+
+The simplest inference method would be to assign a test sample to a leaf node in the cluster tree and classify it within the corresponding linear model, but this may lead to non-smooth predictions for samples near the cluster boundaries. In our experiments, we ensemble the classifiers from leaf nodes corresponding to the $k$ nearest neighbors, such that the final output probability $p_e(y = y_i | \mathbf{v}_I)$ is the average of the probabilities predicted by each neighbor's classifier. 
+
+
+Similar to KNN, the exemplar embedding $\mathbf{v}_{e}$ can be computed as the text embedding of the most likely label from all neighbor classifiers. However, we obtain the best performance using a similarity-weighted average embedding from the most likely label $\hat{y}_j$ of each classifier in the retrieval set:   
+$ \mathbf{v}_{e} = \sum_{j} \beta_{j} \cdot f_{\text{txt}}(t_{\hat{y}_j})$, where $ \beta_{j} $ is similarly defined as in the KNN classification.
+The tree-probe method, denoted \tp, achieves similar accuracy to \lp\ in our continual learning experiments with sufficiently large $\psi$, but with much faster training time. 
+
+
+
+
+
+
+
+
+
+\subsection{Fusing predictions of the two systems}
+\label{sec:fuse_operation}
+
+We want to integrate predictions from the zero-shot and exemplar-based models to retain good open-vocabulary classification performance and improve accuracy in predicting exemplar labels. This can be tricky, especially when some labels in the task are not contained within the exemplar labels.
+One approach is to simply average the probability or embedding predictions of the two models:
+\begin{equation}
+\label{eq:out_prob}
+p(y=y_i|I)=\alpha p_e(y=y_i|\mathbf{v}_I) + (1-\alpha)p_z(y=y_i|I)
+\end{equation} 
+\begin{equation}
+\label{eq:out_mem}
+    \mathbf{v}_{\text{out}} = \alpha \mathbf{v}_e + (1- \alpha)  \mathbf{v}_I
+\end{equation}
+
+When setting $\alpha = 0.5$ for an unweighted average, this approach is denoted as \texttt{Avg-Prob} or \texttt{Avg-Emb}, respectively.  
+Using an unweighted average presumes that the zero-shot and exemplar models are equally reliable for all samples. However, if the test sample's label is within the exemplar's domain, the exemplar model will tend to be more accurate; otherwise, the zero-shot model will almost certainly outperform. The test label is unknown, but an educated guess could enable a better prediction.
+
+
+
+
+
+Addressing this issue, we devise an adaptive weighting mechanism, named {\bf A}daptive {\bf I}nstance {\bf M}arginalization (\texttt{\bf{AIM}}), that estimates the likelihood of a test sample's label being in the exemplar set and balances the predictions from both models accordingly.
+The target label set is divided into exemplar $y \in\mathbf{Y}_e$  and non-exemplar $y\notin \mathbf{Y}_{e}$ subsets, where $\mathbf{Y}_e$ is the union of all exemplar labels. 
+
+The likelihoods $p(y\in\mathbf{Y}_e|I)$ and $p(y\notin\mathbf{Y}_e|I)$ are obtained by summing the zero-shot probabilities over these subsets: $p(y\in\mathbf{Y}_e|I) = \sum_{i \in \mathbf{Y}_e} p_z(y=y_i|I)$ and $ p(y\notin\mathbf{Y}_e|I) = \sum_{i \notin \mathbf{Y}_e} p_z(y=y_i|I)= 1-p(y_i\in\mathbf{Y}_e|I)$, with the summation in the denominator of Eq.~\ref{eq:zs-prob} over all candidate labels for the current task. Naturally, we set $\alpha = p(y\in\mathbf{Y}_e|I)$ in Eq.~\ref{eq:out_mem}, which capitalizes on the strengths of both models, improving overall performance.
+
+Our final {\tt AIM-Prob} method further encodes that both zero-shot and exemplar models are predictive for exemplar classes, while only the zero-shot model can be trusted for non-exemplar classes:
+\begin{equation}
+p(y=y_i|I) = p(y\in\mathbf{Y}_e|I) \times \frac{p_z(y=y_i|I)p_e(y=y_i|\mathbf{v}_I)}{\sum_{j\in \mathbf{Y}_e} p_z(y=y_j|I) p_e(y=y_j|\mathbf{v}_I)} + p(y \notin \mathbf{Y}_e|I) \times p_z(y=y_i|I).
+\label{eq:aim}
+\end{equation}
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Experimental setup}
+
+\label{sec:experiment}
+
+\subsection{Tasks}
+
+\input{figures_latex/incremental_scenarios}
+We evaluate our system on target and zero-shot classification tasks. A ``task'' is an assignment of an image into a label from particular label set.  The exemplar model has received examples in the context of ``target'' tasks but not ``zero-shot'' tasks.  
+We utilize {general tasks} such as ImageNet~\citep{ImageNet}, SUN397~\citep{sun397}, CIFAR100~\citep{cifar_100}, and {fine-grained tasks} like EuroSAT~\citep{eurosat}, OxfordIIITPets~\citep{oxfordpets}, DTD~\citep{dtd}, Flower102~\citep{flowers102}, FGVCAircraft~\citep{fgvc_aircraft}, StanfordCars~\citep{stanfordcars}, Food101~\citep{Food101}, UCF101~\citep{UCF101}. 
+
+We report main results using {\bf target tasks}  CIFAR100, SUN397, FGVCAircraft, EuroSAT, OxfordIIITPets, StanfordCars, Food101 and Flowers102 and {\bf zero-shot tasks} ImageNet, UCF101, and DTD. All target tasks collectively provide $>$ 220k samples in total, which is sufficient to give a reliable assessment of different methods. Several randomly selected samples of some tasks are displayed at Fig.~\ref{fig:incremental_scenarios}.
+The supplemental material contains dataset descriptions, prompt templates, zero-shot performance of tasks, and additional experimental results and analysis. 
+\subsection{Evaluation scenarios}
+\label{sec:evaluation_scenarios}
+
+We consider several continual learning scenarios for receiving data: 1) {\bf Data incremental}: A fraction of the training data, randomly sampled without enforcing class balance, is added in each stage; 2) {\bf Class incremental}: All training data for a randomly sampled subset of classes are added in each stage; 3) {\bf Task incremental}: All data for a single task, i.e. a dataset of examples assigned to a set of target labels, are added in each stage. 
+Data incremental learning includes seven stages, comprising 2\%, 4\%, 8\%, 16\%, 32\%, 64\%, and 100\% of task data, respectively. Class incremental learning divides a task into five stages, each containing 20\% of classes. In task incremental learning, each task is considered a stage.
+In data and class incremental experiments, models are built separately for each target task. A target task is fully evaluated if there is at least one training sample for that task, even if there are no training samples for some classes. In task incremental, one model is built spanning all accumulated labels in each stage.  In all cases, results are reported as the average accuracy of target and zero-shot tasks at each stage. We additionally compute the averaged accuracy on seen classes and unseen classes of each target task for class incremental learning to give more detailed result analysis. An intuitive demonstration of these continual learning scenarios are shown in Fig.~\ref{fig:incremental_scenarios}.
+\input{figures_latex/flexible_inference_demo}
+\noindent {\bf Flexible inference:}~In the task incremental setting, after all training data for target tasks is received, we will evaluate each method's performance in three inference scenarios: 
+\begin{itemize}
+    \setlength{\itemsep}{1pt}
+    \setlength{\parskip}{1pt}
+    \item {\bf Zero-shot:} evaluate on each zero-shot task and then average the accuracy on all tasks. Under this scenario, higher performance of a model than CLIP would indicate positive transfer from learned tasks to zero-shot tasks, while lower performance would suggest forgetting has occurred.
+    \item {\bf Union + Zero-shot:} we first create a union of target task labels that is considered as candidate labels for each target task. Then, we randomly sample 100 labels from the union of zero-shot task labels. We separately compute the average accuracies on the target and zero-shot tasks. The final performance is the average of the target and zero-shot accuracy. 
+    \item {\bf Mix + Zero-shot:} we randomly split the union of target labels into five splits. For each split, we additionally add a random sample of 100 labels from the zero-shot task. To balance evaluation across classes, we draw 100 test samples per class. Performance is the average across all splits. 
+\end{itemize}
+
+Fig.~\ref{fig:flexible_inference_demo} gives a more intuitive demonstration of these three inference scenarios. These scenarios are especially challenging for most continual learning methods because there is no task identifier at inference time, and the label of a test sample will sometimes be among the trained classes and sometimes not.
+
+
+
+
+\section{Experimental results}
+
+
+\subsection{Effectiveness of complementary system and AIM}
+\input{figures_latex/fig2}
+
+We first investigate the importance of complementary learning systems and the effectiveness of AIM. We design experiments comparing CLIP Zero-shot model, exemplar model using \lp\, and then complementary models that incorporate CLIP Zero-shot and \lp\ using the {Avg-Emb} and {AIM-Emb} fusing operations, denoted by CLIP+LinProb (Avg-Emb) and CLIP+LinProbe (AIM-Emb). 
+
+The results on target tasks under data, class, and task incremental learning scenario are shown in Fig.~\ref{fig:class_and_task_incremental} (a-c). For data incremental, except for CLIP zero-shot, all other methods constantly improve on target tasks, with CLIP+LinProbe (AIM-Emb) being the best on all stages. When the percentage of available data is larger than 20\%, all other models surpass the zero-shot model. LinProbe and CLIP+LinProbe (Avg-Emb) have similar performances on target tasks, which can also be observed in the class incremental learning results in Fig.~\ref{fig:class_and_task_incremental} (b). 
+
+Results under class incremental learning are crucial as this setup simulates scenarios where exemplar labels do not encompass all candidate labels. In such cases, we cannot simply decide between using the exemplar model or zero-shot model for prediction by checking if exemplar labels fully overlap with candidate labels.
+In Fig.~\ref{fig:class_and_task_incremental} (b), we plot the accuracies on seen and unseen classes along with the overall accuracy on all classes. The zero-shot model underperforms other methods on seen classes but excels in unseen classes. LinProbe achieves high accuracy on seen classes but performs poorly on unseen ones, with accuracy close to 0. CLIP+LinProbe (Avg-Emb) shows similar results. The AIM-Emb version has slightly lower accuracy than the Avg-Emb version on seen classes in early stages ($<$60\% classes) but maintains reasonable performance on unseen classes, particularly in earlier stages. Its unseen accuracy decreases as more classes are learned because AIM gradually favors the exemplar model. Overall, CLIP+LinProbe (AIM-Emb) demonstrates the highest overall accuracy among all methods, highlighting the effectiveness of AIM.
+In Fig.~\ref{fig:class_and_task_incremental} (c) \& (d) under the task-incremental learning and flexible inference scenario, in addition to the models mentioned above, we also compare with ZSCL~\citep{ZSCL}. For the implementation, we try to maintain identical training techniques and hyperparameters as in the original codes of ZSCL, and we will release codes for sanity check with written details in the supplemental material. Furthermore, we train CLIP by fine-tuning all its parameters except for the logit scale on target datasets, resulting in a stronger exemplar model---CLIP Fine-tune. As a side-to-side comparison with ZSCL, we only use the data of the current stage to train this model but without additional reference datasets used in ZSCL.
+
+From the results in Fig.~\ref{fig:class_and_task_incremental} (c), the AIM approach steadily shows better performance than the zero-shot model at all stages. 
+CLIP Fine-tune, LinProbe and CLIP+LinProbe (Avg-Emb) can only beat the zero-shot model after the 6-th stage (FGVCAircraft). However, CLIP Fine-tune is better than LinProbe and CLIP+LinProbe (Avg-Emb) in early stages, implying that the loss of generalization to other tasks is less severe. ZSCL achieves relatively close performance as CLIP+LinProbe (AIM-Emb) in early stages but lags behind quickly in latter ($\sim-6$\% off in the final stage). Overall, CLIP+LinProbe (AIM-Emb) has the best performance across all stages and show better performance than exemplar-only models, demonstrating the benefits of complementary systems. 
+
+As shown in Fig.~\ref{fig:class_and_task_incremental} (d), exemplar-only models, being biased towards learned classes, are generally incompetent on zero-shot tasks. LinProbe is extremely bad on zero-shot tasks, leading to poor performance on both Zero-shot and Union+Zero-shot scenarios where zero-shot tasks are evaluated. However, CLIP+LinProbe (Avg-Emb) shows considerable improvement over LinProbe in Zero-shot and Mix+Zero-shot scenarios while remaining comparable in Union+Zero-shot. CLIP Fine-tune received less severe impact of biased learning to target classes but still has a decent decrease under Zero shot. When replacing the fusing operation with AIM-Emb, performances across all scenarios significantly improve. Note that ZSCL also has good Zero-shot performance, as mentioned in its paper, and obtains the best Union+Zero-shot performance in our evaluation. Our method is inferior to ZSCL under the Union+Zero-sho scenario mainly because AIM likely assigns more weights to the exemplar model due to the large portion of in-exemplar labels (around 91\%) of all candidate labels.  Overall, our system shows a decent flexible inference ability with the effectiveness of the complementary systems well validated. 
+
+
+\subsection{Comparison of Efficiency and Accuracy for \fast\ Approaches}
+\label{sec:results_main}
+
+\input{figures_latex/fig3}
+In this part, we perform a thorough analysis of different complementary models using AIM on their performances and efficiency:
+CLIP+KNN, CLIP+LinProbe and CLIP+TreeProbe. We can also vary the node capacities of TreeProbe to create different versions of CLIP+TreeProbe models. 
+
+We compare their performance under the task incremental learning scenario. Results in Fig.~\ref{fig:efficiency_analysis} (a) show that node capacity can be used to control the performance of CLIP+TreeProbe. When node capacity exceeds 5k, TreeProbe steadily outperforms KNN, and when it reaches 100k, TreeProbe slightly surpasses LinProbe. Fig.~\ref{fig:efficiency_analysis} (b) illustrates that LinProbe adheres to linear learning complexity as the number of instances in the exemplar set increases. When node capacity is not reached, TreeProbe only has one classifier, thus identical to LinProbe in learning complexity. After reaching node capacity, TreeProbe exhibits constant learning complexity. TreeProbe (100k) and (50k) achieve similar performance to LinProbe but with 6x and 25x improvement in learning speed. This corroborates our analysis of the time complexity of learning for different exemplar models in Sec.~\ref{sec:memory_prediction_approaches}.
+Fig.~\ref{fig:efficiency_analysis} (c) combines the results of Fig.~\ref{fig:efficiency_analysis} (a) and Fig.~\ref{fig:efficiency_analysis} (b), showing the trade-off of learning efficiency and accuracy. The TreeProbe method, therefore, offers flexibility in selecting the node capacity that appropriately balances responsiveness with performance for a specific application.
+
+We also compare the learning efficiency of our methods with CLIP Fine-tune and ZSCL~\citep{ZSCL} and summarize the training time in Tab.~\ref{tab:efficiency_comparison}. Since ZSCL and CLIP Fine-tune require GPU accelerated training, we also implement GPU-versions of TreeProbe and LinProbe for better comparison. Since our methods only operate on the image embeddings, we can cache the embeddings for new samples and store for expedited replay or multi-epoch training. For both our models, we train the linear classifiers for 20 epochs, using hyperparameters selected from a hyperparameter sweep. The evaluation is taken using the task incremental learning scenario and the training time is accumulated for all eight target tasks. From the table, after taking the processing time to get image embeddings in account, our approaches are still much faster than CLIP Fine-tune and ZSCL. Note that to mitigate forgetting, ZSCL needs to refer to the outputs of frozen CLIP to calculate distillation losses, making it around two times slower than CLIP Fine-tune. Besides training efficiency, our approaches are more effective through the final averaged accuracy over all target tasks. This test further reinforces the training efficiency and effectiveness of TreeProbe.
+
+\input{tables/training_efficiency}
+
+
+\subsection{Comparison to previous methods}
+\input{tables/comparison_to_zscl}
+
+As introduced in Sec.~\ref{sec:related_work_continual_learning}, ZSCL~\citep{ZSCL} explores a similar setting to open-vocabulary continual learning and is mainly evaluated under the task-incremental learning scenario. To ensure a fair comparison, we evaluate our approach using their evaluation protocols, employing the same prompt ensemble technique, data split ratio and seed, backbone network (ViT-B/16), and other relevant parameters. The results are presented in Tab.~\ref{tab:comparison_to_zscl}. Our TreeProbe (50k) model achieves the best performance across all metrics. Compared to the CLIP zero-shot model, our method barely compromises on Transfer, demonstrating robust performance on zero-shot tasks. Notably, our method is more lightweight in GPU consumption than ZSCL. Additionally, we do not perform hyperparameter selection for each task, as we assume no prior knowledge of future tasks in practice, whereas ZSCL used different learning rates for different tasks to optimize performance.
+
+\subsection{Scaling to larger zero-shot models}
+\label{sec:results_scaling}
+\input{tables/scaling}
+We use the CLIP ViT/B-32 model as our default zero-shot model but can easily adapt to other models. We present our findings in Tab.~\ref{tab:scaling}, where both methods are evaluated under the task incremental learning scenario. Performance improves for larger models, and \tp\ consistently outperforms \czs\ on the target tasks with nearly identical performance on zero-shot tasks. This demonstrates that our approach is beneficial across a wide range of zero-shot model sizes.
+
+
+
+\section{Conclusion and limitations}
+
+\label{sec:conclusion}
+
+In this work, we present an efficient and performant ``tree probe'' exemplar-based model and Adaptive Instance Marginalization to combine zero-shot and exemplar models for open-vocabulary continual learning. Our method is able to efficiently incorporate new samples, improving performance for related tasks without negatively impacting zero-shot task performance, providing a simple way to continually improve large-scale pretrained image-text classification models.
+We believe this work is a step towards more flexible, efficient, and effective strategies in open-vocabulary continual learning.
+
+Our work has several \textbf{limitations}. First, we do not consider constraints in how many exemplars can be stored.  Since each exemplar requires storing up to 4KB for the image and text encodings (using the base CLIP ViT-B/32 model without any compression or limiting precision), roughly one million exemplars can be stored per 4GB of memory.  %However, for some applications, constraints may be necessary.  
+Second, we do not investigate how to improve the consolidated zero-shot model. This is a promising direction for future work. 
+Finally, we do not explore structured prediction problems like semantic segmentation or visual question answering, which likely require more complex image representations than a single embedding vector. 
+
+
+
+
+

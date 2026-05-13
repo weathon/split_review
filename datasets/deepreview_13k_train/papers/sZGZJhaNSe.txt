@@ -1,0 +1,374 @@
+\title{Aioli: A Unified Optimization Framework for Language Model Data Mixing}
+
+\begin{abstract}
+
+Language model performance depends on identifying the optimal mixture of data groups to train on (e.g., law, code, math). Prior work has proposed a diverse set of methods to efficiently learn mixture proportions, ranging from fitting regression models over training runs to dynamically updating proportions throughout training. Surprisingly, we find that no existing method consistently outperforms a simple stratified sampling baseline in terms of average test perplexity per group. In this paper, we study the cause of this inconsistency by unifying existing methods into a standard optimization framework. We show that all methods set proportions to minimize total loss, subject to a method-specific \emph{mixing law}---an assumption on how loss is a function of mixture proportions. We find that existing parameterizations of mixing laws can express the true loss-proportion relationship empirically, but the methods themselves often set the mixing law parameters inaccurately, resulting in poor and inconsistent performance. Finally, we leverage the insights from our framework to derive a new online method named \name, which directly estimates the mixing law parameters throughout training and uses them to dynamically adjust proportions. Empirically, \name outperforms stratified sampling on 6 out of 6 datasets by an average of 0.28 test perplexity points, whereas existing methods fail to consistently beat stratified sampling, doing up to 6.9 points worse. Moreover, in a practical setting where proportions are learned on shorter runs due to computational constraints, \name can dynamically adjust these proportions over the full training run, consistently improving performance over existing methods by up to 12.01 test perplexity points.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+It is critical to determine what data to train on for a language model (LM) to acquire a range of capabilities, from generating code to understanding scientific literature and conversing with users~\citep{albalak2024survey, longpre-etal-2024-pretrainers, li2024datacomplmsearchgenerationtraining}.
+To achieve this, practitioners mix data from various groups (such as code files, scientific papers, and chat logs) in specific proportions to compose an overall training dataset---a procedure known as \emph{data mixing}. Identifying the optimal mixture proportions is critical to LLM performance. However, a brute-force trial-and-error search over the proportions is computationally expensive, requiring many training runs. 
+
+Recent work introduces two types of data mixing algorithms that \emph{learn} mixture proportions: offline and online methods. 
+Offline methods conduct multiple training runs with varying proportions, fit a regression model to predict performance, and use this model to determine the optimal static mixture~\citep{ye2024datamixinglawsoptimizing, liu2024regmixdatamixtureregression}. 
+Online methods adjust the mixture proportions dynamically throughout training using information from the model, such as its loss and gradients~\citep{chen2023skillit, fan2024dogedomainreweightinggeneralization, xie2023doremi, albalak2023efficientonlinedatamixing}. 
+These mixing methods require at least one training run to learn the proportions but are more efficient than a brute-force search.  
+
+Given the wide range of methods available, it is important to determine which ones are effective. 
+However, when we evaluated existing methods, we found that \textit{no method consistently outperformed stratified sampling}---a simple baseline that uniformly mixes groups and requires zero extra training runs---across all sets of data groups in terms of average test perplexity (Table~\ref{tab:unrestricted}). This surprising outcome suggests that all existing methods suffer from some common weaknesses.  
+To make progress in data mixing, we identify three objectives for our work: 1) improve our \textbf{understanding} of the underlying assumptions of existing methods, 2) assess the \textbf{fidelity} of these assumptions in practice to better understand performance, and 3) apply our insights to develop principled \textbf{new data mixing methods}.
+
+In this paper, we improve our \textbf{understanding} of data mixing methods by showing that many existing methods can be expressed in a unified optimization framework, which we call Linear Mixing Optimization (\mixingframework) (Section~\ref{sec:framework}). These methods solve an optimization problem that sets proportions to minimize the average loss per data group, subject to a method-specific \emph{mixing law}---a particular assumption relating loss per group and mixture weights. 
+We find that all current mixing laws share the same parameterization: for training round $t$ from $1$ to $T$,
+$$L^{t+1}(p^t) \lineareq \sigma(A^t p^t),$$
+where $p^t \in \triangle^m$ (the simplex) are mixing proportions over $m$ given data groups at time $t$, $L^{t+1}(p^t): \triangle^m \rightarrow (\R^+)^m$ are the losses per group at the next timestep, $A^t \in \R^{m \times m}$ is a parameter matrix, $\sigma = \text{Id}$ or $\exp$, and $\lineareq$ means equal up to linear transformation. 
+Existing offline methods assume a static log-linear mixing law ($T=1$, $\sigma=\exp$), while online methods assume a linear dynamic mixing law ($T>1$, $\sigma=\text{Id}$). 
+All methods set the parameters of their mixing laws differently (Table~\ref{tab:framework}), and offline methods solve the optimization problem directly while online methods solve it greedily using exponentiated gradient descent.
+Our framework reveals the underlying assumptions of each method in terms of the mixing law's parameterization, the values of the parameters, and how the optimization problem is solved. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/aioli_banner.pdf}
+    \caption{
+    Left: existing methods can be expressed in a unified optimization framework, in which they implicitly assume a linear or log-linear loss-proportion relationship. Center: the (log)-linear parameterizations are well-specified, but existing methods set their parameters incorrectly. Right: \name, an online mixing method that more accurately estimates the parameters that capture the true loss-proportion relationship.
+    }
+    \label{fig:banner}
+\end{figure}
+
+Applying the \mixingframework framework, we test the \textbf{fidelity} of existing methods
+assumptions, examining if they hold in practice (Section~\ref{sec:analysis}). Both the log-linear static and linear dynamic parameterizations capture the true loss-proportion relationship across pretraining datasets, achieving an average of 0.0005 MSE and 0.969 $R^2$.
+We then show that although existing mixing laws are well-specified, methods can set their parameters ($A^t$) inaccurately, causing poor performance.
+We compare each method's parameters to the optimal parameters, which we approximate by fitting the mixing laws to training runs. We find that the method's parameters can differ significantly from the optimal parameters, and the extent of these deviations is correlated with method performance relative to stratified sampling (Figure~\ref{fig:parameters}), helping explain our initial observations. 
+Finally, we validate the assumptions made in solving the optimization problem, finding that the greedy approximation in online methods is a reasonable proxy for the full objective. 
+Our analysis shows that existing methods' parameterizations and solving strategies are of high fidelity, but their parameters are not.
+
+To validate these insights, we develop \name, a \textbf{simple new online data mixing method} derived from the \mixingframework framework (Section~\ref{sec:method}). 
+Similar to existing online methods, \name uses exponentiated gradient descent to minimize the average loss per group at each timestep subject to a linear dynamic mixing law, which we have empirically shown to be well-specified. 
+Unlike existing online methods, \name directly estimates the parameters $A^t$ from the current training run by fitting the mixing law on the history of losses and dynamic mixture proportions so far. \name is thus able to dynamically adjust proportions \textit{without requiring any extra training runs}. 
+
+We evaluate \name in two settings by training 160M parameter models on various combinations of data sources from SlimPajama~\citep{cerebras2023slimpajama} (Section~\ref{sec:exp}). First, we compare \name to existing data mixing methods and find that \name consistently outperforms stratified sampling on all 6 datasets, by an average of $0.280$ and up to $0.439$ points in test perplexity. On the other hand, existing data mixing methods do worse than stratified on at least one dataset by up to 6.9 perplexity points, despite using extra training runs. As we expect, the parameters of $\name$ are also more consistently close to the optimal parameters (Figure~\ref{fig:parameterization}).
+Second, we consider a scenario with limited additional computational resources, in which practitioners cannot run experiments for learning mixture proportions for the full training duration. In this setting, mixture proportions learned on a shorter run may not perform well on the longer final run.
+We find that using \name to dynamically adjust these learned proportions throughout the final training run can improve performance by an average of 1.202 perplexity points in 28 out of 30 cases, compared to using the learned proportions directly.
+
+
+
+\section{Problem Setup}
+
+
+We formalize the data mixing problem and establish notation.
+ We are given train, validation, and test sets for each data group, which we denote as $\Dtrain^i, \Dval^i, \Dtest^i$ for the $i$th group. Define $\Dtrain = \{\Dtrain^1, \dots, \Dtrain^m\}$, and similarly define $\Dval$ and $\Dtest$.
+
+\paragraph{Data \& Mixing.}
+During training, we show the model a total of $N$ examples from $\Dtrain$ over $S$ training steps. To express how data proportions can change throughout training, we divide training into $T$ equal rounds. Each round $t$ uses a mixture proportion from the probability simplex: $p^t = \left[p_1^t, \ldots, p_m^t\right] \in \triangle^m$. \textit{Static mixtures} use only a single round ($T=1$): $\p = \left(p^1\right)$, while \textit{dynamic mixtures} use several ($T>1$): $\p = \left(p^1, \ldots, p^T\right)$.
+
+\paragraph{Model \& Loss.}
+Let $f(\p, t)$ refer to the language model (LM), $f$, at the beginning of round $t$ where the model has been trained on data sampled using mixture proportions $p^{1}, \cdots, p^{t-1}$ so far. Given a model $f$, we can compute its loss on each group using the training data, $L_{\text{train}}(f) = \left(\Ltrain{1}(f), \dots, \Ltrain{m}(f)\right)$, and similarly using the validation data, $L_{\text{val}}(f)$, and test data, $L_{\text{test}}(f)$. In this notation, the loss at the end of training can be expressed as $L_{(\cdot)}(f(\p, T+1))$. When the $f$ being referred to is obvious, we simply write $L_{(\cdot)}^t(\p)$, and for static mixtures we drop the superscript: $L_{(\cdot)}(\p)$.
+
+\paragraph{Data Mixing Problem.}
+Given a set of data groups, an LM $f$ to train for $S$ steps with $N$ samples, and $T$ rounds of training (i.e., determining whether we use static or dynamic proportions), we aim to determine the $\p$ that minimizes the total test loss across groups: $\underset{\p \in \triangle^{T\times m}}{\text{minimize}} \sum_{i = 1}^m \Ltest{i}^{T+1}(\p).$
+
+This objective aims to produce a trained model that does well on many data groups, which can serve as a proxy for downstream performance.
+However, without assuming additional structure on $L_{\text{test}}^{T+1}(\p)$, this problem can only be solved with a brute-force search over $\p$, which requires training many different models. 
+Existing methods overcome this by imposing an implicit constraint on the problem, thereby setting $\p$ without searching.
+In the next section, our \mixingframework framework unifies many existing methods using a single explicit constraint.
+
+
+
+\section{A Unified Optimization Framework for Data Mixing}
+
+
+We introduce the \mixingframework framework by stating the general optimization problem (Section~\ref{sec:opt_framework}). Then, we explain how this framework can express several existing methods (Section~\ref{sec:prelim},~\ref{sec:existing}), with a summary of our insights regarding these methods in Section~\ref{sec:insights}.
+
+\subsection{Linear Mixing Optimization (\mixingframework)} \label{sec:opt_framework}
+
+The \mixingframework framework consists of an optimization problem that is equivalent to the data mixing problem (Section \ref{sec:problem_setup}), subject to an additional constraint:
+\begin{align}
+    & \text{minimize}_{\p \in \triangle^{T \times m}} \sum_{i=1}^m \Lval{i}^{T+1}(\p) \label{eq:framework} \\
+    &\text{s.t.} \; \Lval{i}^{t+1}(\p) = c_i^t + b_i^t \sigma \Big(\sum_{j=1}^m -A_{ij}^t p_j^t\Big) \; \forall i \in [m], t \in [T],  \label{eq:mixinglaw}
+\end{align}
+
+for some $A^t, b^t, c^t,$ and $\sigma$. $A^t \in \R^{m \times m}$ is a matrix that encodes cross-group interactions, where $A_{ij}^t$ intuitively describes how much training on group $j$ at $t$ impacts group $i$'s loss. $b^t, c^t \in \R^m$ are group-specific parameters. $\sigma: \R \rightarrow \R$ is either the identity function ($\text{Id}$) or the exponential function ($\exp$). We refer to the constraint in~\eqref{eq:mixinglaw} as a \emph{mixing law} that specifies the assumed relationship between loss and proportions. 
+
+There are three components of this optimization problem that need to be specified to yield a way to set $\p$: a) the parameterization of the mixing law, defined by $T$ and $\sigma$; b) the values of the parameters $A^t, b^t,$ and $c^t$; and c) how to solve the problem. We express existing methods in \mixingframework by specifying these components.
+
+\subsection{Preliminaries for expressing methods in the \mixingframework framework}\label{sec:prelim}
+
+We discuss preliminaries before presenting existing methods and explaining how they can be expressed in the \mixingframework framework. First, we formally define what it means for a method to be \emph{expressed} in the \mixingframework framework. Then, we present a result that allows us to convert between linear dynamic mixing laws ($T > 1$, $\sigma=\text{Id}$) and a way to set $\p$, which we will to use to express online methods in our framework in Section~\ref{sec:existing}.
+\begin{definition}
+    A data mixing method can be \textbf{expressed} in the \mixingframework framework if the way it sets proportions $\p$ and trains model $f$ in terms of $\p$ can be equivalently constructed by specifying a mixing law parameterization, parameters, and way of solving the \mixingframework optimization problem.
+\end{definition}
+
+This definition allows us to cast existing methods as a way of solving the \mixingframework optimization problem based on how they set $\p$ and train according to $\p$, even if the methods themselves are not originally designed to minimize average validation loss. 
+
+\paragraph{Converting mixing laws into update rules.}
+When $T > 1$, a natural way to solve the \mixingframework optimization problem is via exponentiated gradient descent (EGD)~\citep{kivinen1997exponentiated, arora2012multiplicative}, which updates $p^t$ greedily while ensuring that it remains on the probability simplex. The following lemma presents the EGD update rule for the \mixingframework optimization problem when $\sigma = \text{Id}$.
+
+\begin{restatable}[]{lemma}{egd}
+    The EGD update rule for \eqref{eq:framework} subject to $\Lval{i}^{t+1}(\p) = c_i^t - b_i^t \sum_{j = 1}^m A_{ij}^t p_j^t \;\forall i\in[m]$ is
+    \begin{align}
+        p_j^{t+1} = \frac{1}{Z^t} \cdot p_j^t \exp \bigg(\eta \sum_{i = 1}^m b_i^t A_{ij}^t\bigg) \; \forall j \in [m], \label{eq:egd_rule}
+    \end{align}
+
+    where $\eta> 0$ is the step size and $Z^t$ is a normalizing constant such that $p_j^{t+1} \in \triangle^m$.
+\label{lemma:egd}
+\end{restatable}
+
+This lemma shows how to adjust $p^t$ dynamically to solve the \mixingframework optimization problem. Notably, this update rule is defined in terms of the mixing law parameters, $A^t$ and $b^t$. This gives us a way to convert between how a method sets $\p$ and the implicit \textit{assumption} it makes in its mixing law.
+
+\input{tables/mixing_laws}
+\subsection{Existing methods}\label{sec:existing}
+
+We discuss four existing data mixing methods and express them as specific instances of the \mixingframework framework. A summmary of our insights is provided in Section~\ref{sec:insights} and Table~\ref{tab:framework}.
+\subsubsection{Offline methods}
+\paragraph{Data Mixing Laws (DML).} \citet{ye2024datamixinglawsoptimizing} propose an offline method using a static mixing law ($T=1$): $\Lval{i}(\p) = c_i + b_i \exp(\sum_{j = 1}^m -A_{ij} p_j)$ for $i \in [m]$, with $A, b, c$ learned by sweeping training runs over static proportions (at least $m+1$ runs to avoid being underdetermined). Their method selects the proportion that minimizes the predicted validation loss. This law can be derived from~\eqref{eq:mixinglaw} with $\sigma=\exp$, showing that \mixingframework with a) log-linear static mixing law, b) fitted parameters, and c) direct computation of $\p$ can express DML.
+\subsubsection{Online Methods}
+
+We provide a colloquial description and an algorithmic description of three online methods. Then, in Theorem~\ref{thm:unify}, we demonstrate how they all are expressed in \mixingframework using a linear dynamic mixing law, the EGD update rule, and method-specific mixing law parameters.
+
+\paragraph{Skill-It.} \citet{chen2023skillit} is an online method motivated by curriculum learning that dynamically adjusts mixture proportions. Data group interactions are expressed in a ``skills graph,'' where each edge denotes how much the loss on one group changes when trained on another. The skills graph is learned in advance using $m$ additional training runs and is then used to update proportions $p^t$ throughout training.
+
+Concretely, the skills graph matrix $A^{\text{SG}}$ has entries $A^{\text{SG}}_{ij} = (\Lval{i}^{T+1}(\mathbf{1}_j) - \Lval{i}^1(\mathbf{1}_j))/\Lval{i}^1(\mathbf{1}_j)$ indicating the relative decrease in loss on group $i$ when training a model on group $j$ only. This is used in the Skill-It update rule,  $p^{t+1}_j \propto p_j^t \exp(\eta \sum_{i = 1}^m A^{\text{SG}}_{ij} \Lval{i}^t(\p))$ for all $j \in [m]$ and learning rate $\eta > 0$. This rule determines $p^{t+1}$, which is then used to sample $\Dtrain$ for training $f$ in the next round.
+
+\paragraph{DoReMi.} \citet{xie2023doremi} is an online method that applies ideas from distributionally robust optimization to data mixing, where the training objective minimizes the worst-group excess loss over a model trained with stratified sampling. $p^t$ is updated dynamically to minimize this excess loss and then averaged for the final run. DoReMi requires two additional runs to learn a static $\p$.
+
+Concretely, let $\fref = f(\text{Unif}(m), T+1)$ denote a ``reference model'' that is first trained using stratified sampling. Then, a ``proxy model'' uses dynamic proportions according to the update rule $p_j^{t+1} \propto p_j^t \exp(\eta \max\{\Ltrain{j}^t(\p) - \Ltrain{j}(\fref), 0\})$ for all $j \in [m]$ and step size $\eta > 0$. This $p^{t+1}$ is used to weight the training objective, such that the proxy model is updated to minimize $\sum_{i = 1}^m p_i^{t+1} \Ltrain{i}(f)$ at the next timestep. The averaged static proportions $\frac{1}{T}\sum_{t = 1}^T p^t$ are then used in the final run. 
+
+\paragraph{DoGE.} \citet{fan2024dogedomainreweightinggeneralization} is an online method that solves a bi-level optimization problem in which $p^t$ is updated to minimize the average training loss at each step. By using a first-order Taylor approximation of the training loss, $p^t$ is updated using the gradient dot products across data groups. The dynamic proportions are then averaged for the final run. DoGE requires one additional run to learn a static $\p$.
+
+Concretely, a proxy model is trained using $p_j^{t+1} \propto p_j^t \exp(\eta \langle \triangledown \Ltrain{j}(f^t), \sum_{i = 1}^m \triangledown \Lval{i}(f^t) \rangle)$, and $f$ is updated to minimize the training loss weighted by $p^t$, similar to DoReMi. The averaged static proportions $\frac{1}{T}\sum_{t=1}^T p^t$ are used in the final run. 
+
+\paragraph{Framework expression.} All three online methods use an update rule $p_j^{t+1} \propto p_j^t \exp(\cdot)$, which is similar to~\eqref{eq:egd_rule}.
+This provides intuition for our main theorem, which expresses these methods in \mixingframework.
+\begin{restatable}[]{theorem}{unify}\label{thm:unify}
+Define the following parameters for each method:
+\begin{itemize}[itemsep=0.00pt,topsep=0pt,leftmargin=20pt]
+    \item $A^{t, \text{Skill-It}} \in \R^{m \times m}$, where $A_{ij}^{t, \text{Skill-It}} \texttt{=} \Lval{i}^t(\p) (\Lval{i}^{T+1}(\mathbf{1}_j) - \Lval{i}^1(\mathbf{1}_j))/\Lval{i}^1(\mathbf{1}_j)$ for all $i, j \in [m]$,
+    \item $A^{t, \text{DRM}} \in \R^{m \times m}$, where $A_{ii}^{t, \text{DRM}} = \min \{\Ltrain{i}^t(\p) - \Ltrain{i}(\fref) , 0\}$ and $A_{ij}^{t, \text{DRM}} = 0$ for $i \neq j$,
+    \item $A^{t, \text{DoGE}} \in \R^{m \times m}$, where $A_{ij}^{t, \text{DoGE}} = \langle \triangledown \Lval{i}^t(\p), \triangledown \Ltrain{j}^t(\p) \rangle$ for all $i, j \in [m]$.
+\end{itemize}
+Instantiating the \mixingframework framework~\eqref{eq:framework} with \textnormal{a)} a linear dynamic mixing law $\Lval{i}^{t+1}(\p) = \Lval{i}^t(\p) - b^t \sum_{j = 1}^m A_{ij}^t p_j^t$, \textnormal{b)} parameters $A^t = A^{t, \text{Skill-It/DRM/DoGE}}$, and \textnormal{c)} EGD to solve for $\p$ allows for us to express Skill-It, DoReMi, and DoGE, respectively.
+
+\end{restatable}
+
+\subsubsection{Summary of \mixingframework Framework Insights}\label{sec:insights}
+
+Table~\ref{tab:framework} summarizes how existing methods are expressed in the \mixingframework framework. 
+\mixingframework reveals the assumptions each method makes through how the components of the framework are specified.
+First, all mixing laws are either linear or log-linear. Second, the mixing laws differ in the values of the parameters used. For example, Skill-It's $A^t$ is the current loss times a matrix learned from training on static proportions, while DoReMi's $A^t$ is diagonal. Third, offline mixing methods solve for $\p$ directly while online mixing methods use EGD, which uses a greedy approximation. In the next section, we study if each of these assumptions holds well in practice. 
+
+
+\section{\name: a Method for Improved Data Mixing}
+
+Analyzing Fidelity of Existing Methods with the \mixingframework Framework
+}\label{sec:analysis}
+We examine the fidelity of the assumptions made by existing methods in terms of the three components of the \mixingframework framework:  a) the mixing law parameterization, b) values of the mixing law parameters, and c) how to solve the optimization problem for $\p$. After providing experiment details (Section~\ref{sec:details}), we discuss these three components in order (Section~\ref{sec:linear_model}-\ref{sec:optimization}).
+\subsection{Experiment Details}
+\label{sec:details}
+
+\paragraph{Data settings.} We use a sampled version of SlimPajama~\citep{cerebras2023slimpajama, yoon2023slimpajama}, a pre-processed version of the RedPajama pretraining dataset~\citep{together2023redpajama}, which has been used to train open-source LMs~\citep{openlm2023openllama, MosaicML2023Introducing}. 
+
+To develop a fine-grained understanding of data mixing, we create 6 settings by extracting combinations of these groups. Finally, we study mixing over the full SlimPajama dataset with $m=7$.
+
+\paragraph{Models.}
+We train 160M parameter GPT-style decoder-only LMs with batch size $8$ and context length $2048$. For $m = 2, 3$, we train for $5$K steps, and for $m = 7$, we train for $40$K steps.
+
+\paragraph{Training sweeps.}
+To assess the true loss-proportion relationship and compare it to the assumptions made by existing methods, we conduct training sweeps over a set of various mixture proportions, denoted as $\mathcal{P}$. For $m = 2$, we set $\mathcal{P} = \{[0.1, 0.9], [0.2, 0.8], \dots, [0.9, 0.1]\}$. For $m=3$ and $7$, we set $\mathcal{P}$ equal to $10$ $\p$'s drawn from the Dirichlet distribution with $\alpha = 1.0$ and $1.5$, respectively.
+
+\subsection{Mixing law parameterization}\label{sec:linear_model}
+We examine whether existing methods' mixing law parameterizations---log-linear static and linear dynamic---capture the true loss-proportion relationship. By empirically fitting them to loss-proportion pairs, we find that both parameterizations are indeed well-specified.
+
+\paragraph{Setup.}
+For the \emph{log-linear static mixing law}, we study if there exists $A, b, c$ such that $\Lval{i}(\p)$ can be expressed as $c_i + b_i \exp(\sum_{j = 1}^m -A_{ij} p_j)$ for all $i \in [m]$. We fit the parameters using full training runs on $\mathcal{P}$. For the \emph{linear dynamic mixing law}, we study if there exists $A^t$ such that $\Lval{i}^{t+1}(\p)$ can be expressed as $\Lval{i}^t(\p) - \sum_{j = 1}^m A_{ij}^t p_j^t$, for all $i \in [m]$ ($b^t$ is absorbed into $A^t$). To fit $A^t$, we select a timestep $t$ and train on a static proportion $p^0 \in \mathcal{P}$ until round $t$, and at $t+1$ we sweep the values of $p^{t+1} \in \mathcal{P}$.
+
+\paragraph{Results.}
+On average across our $6$ data settings, the mean squared error (MSE) of the fitted log-linear static mixing law is $8.9 \times 10^{-4}$, and the $R^2$ coefficient of determination is 0.991. 
+The average MSE of the fitted linear dynamic mixing law is $1.0 \times 10^{-4}$ and the $R^2$ is 0.947.
+See Figure~\ref{fig:parameterization} for examples.
+Since both parameterizations have high $R^2$ and low MSE, we conclude that they capture the true loss-proportion relationship well and are of high fidelity.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.47\linewidth]{figs/arxiv_stackexchange_static.pdf}
+    \includegraphics[width=0.47\linewidth]{figs/arxiv_stackexchange_dynamic.pdf}
+    \caption{Left: $p_i$ vs $\log(\Lval{i}(\p) - c_i)$ with fitted static log-linear mixing law. Right: $p_i^t$ vs $\Lval{i}(\p)$ with fitted linear dynamic mixing law. Colors represent random seeds (left) and initial $p^0 \in \mathcal{P}$ (right, blue is ${0.7, 0.3}$). Both laws fit the true loss-proportion relationship well.}
+    \label{fig:parameterization}
+\end{figure}
+
+\subsection{Values of mixing law parameters}\label{sec:a_matrix}
+
+As shown in Table \ref{tab:framework}, each method sets the parameters of its mixing law differently. We study how close the method-specific parameters are to the optimal parameters that are obtained when fitting the method's mixing law to the true loss-proportion relationship, and if these parameter disparities are reflected in method performance. We find that existing methods' differences in parameters are largely responsible for their performance.
+We omit studying DML since its parameters are fitted from full training runs and hence differ from the optimal parameters in estimation error only.
+\paragraph{Setup.}
+For each online method---Skill-It, DoReMi, and DoGE---we select a step $t$ and obtain the method-specific $A^t$. We then sweep $\mathcal{P}$ for the next round $t+1$. We study the relationship between $\tilde{A}^t := b^t A^t$ and $A^{t \star}$, and how this relationship is connected to the performance of the method.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\textwidth]{figs/parameters.pdf} 
+   \caption{Improvement over stratified sampling versus optimality of $A^t$. Each dot represents a method applied to a dataset. The red region shows that existing methods are worse than stratified on at least 1 dataset. The vertical dashed line serves as a visual aid.} 
+    \label{fig:parameters}
+\end{figure}
+
+To express similarity between $\tilde{A}^t$ and $A^{t \star}$ in a way that is reflected in performance, we observe that from Lemma~\ref{lemma:egd}, $p^t$ is updated using the column sum of $\tilde{A}^t$, $\mathbf{1}^\top \tilde{A}^t$. Moreover, the magnitude of $\tilde{A}^t$ is not critical to performance since the step size $\eta$ can always be tuned to control this.  
+Therefore, we compare the vectors $\tilde{a}^t = \mathbf{1}^\top \tilde{A}^t / \|\mathbf{1}^\top \tilde{A}^t\|_2$ and $a^{t \star} = \mathbf{1}^\top A^{t\star} / \|\mathbf{1}^\top A^{t\star}\|_2$. Finally, we note that the order of the elements of $\tilde{a}^t$ determines the update direction from $p^t$ to $p^{t+1}$ in Lemma~\ref{lemma:egd}. Therefore, we propose a similarity score that is an average of cosine similarity and the Spearman rank correlation,  $\text{sim}(\tilde{A}^t, A^{t\star}) = 0.5 \text{cossim} (\tilde{a}^t, a^{t\star}) + 0.5 \text{Spearman}(\tilde{a}^t, a^{t\star})$. This metric is bounded between $-1$ and $1$, where $1$ indicates $\tilde{a}^t = a^{t\star}$ and $-1$ indicates $\tilde{a}^t = -a^{t\star}$.
+\paragraph{Results.}
+In Figure~\ref{fig:parameters}, we plot each method's $\text{sim}(\tilde{A}^t, A^{t \star})$ versus each method's improvement over the stratified sampling baseline, which sets $p_i = 1/m$ for all $i \in [m]$, for each dataset in the $m=2, 3$ data settings. We find that no existing online method works well across all datasets (also see Table~\ref{tab:unrestricted}), and that our metric and loss improvement have a moderate positive correlation ($R^2=0.491$). This suggests that $A^t$'s fidelity to $A^{t \star}$ clearly influences the performance of online methods, and that existing methods' parameters are not consistently accurate across the datasets. We find that restricting $A^t$ to be static or diagonal---as some existing methods' parameters are structured---can result in lower $\text{sim}(\tilde{A}^t, A^{t \star})$.
+\subsection{Solving strategy}
+\label{sec:optimization}
+
+We study the assumptions made in how existing methods solve the \mixingframework optimization problem. We find that the greedy approximation used by EGD, $\text{minimize}_{p^t} \sum_{i = 1}^m \Lval{i}^{t+1}(\p)$, does not significantly compromise performance compared to full optimization of dynamic proportions, which has an exponentially large solution space. In particular, we study if greedily selecting $p^t$ from $\mathcal{P}$ at each $t$ yields the optimal dynamic proportions in $(\mathcal{P})^T$, and we find that this holds in $2$ out of $3$ data settings (Table~\ref{tab:greedy}).
+This suggests that the greedy approximation can simplify optimization without substantial performance loss.
+
+
+To validate our insights from Section~\ref{sec:analysis}, we develop \name, an online method derived from the \mixingframework framework. We have three takeaways from section \ref{sec:analysis}:
+\begin{itemize}[itemsep=0.00pt,topsep=0pt,leftmargin=20pt]
+    \item[a)] A linear dynamic mixing law, $\Lval{i}^{t+1}(\p) = \Lval{i}^t(\p) - \sum_{j = 1}^m A_{ij}^t p_j^t$ for all $i \in [m]$, can capture the loss-proportion relationship with high fidelity (Section \ref{sec:linear_model}).
+    \item[b)] Existing online methods often set the parameters $A^t$ to be very different from true $A^{t\star}$ (Section \ref{sec:a_matrix}).
+    \item[c)] Exponentiated gradient descent can recover near-optimal performance while simplifying the optimization problem, avoiding an exponential solution space (Section \ref{sec:optimization}).
+\end{itemize}
+
+We thus directly specify the linear dynamic mixing law parameterization and EGD as two out of three \mixingframework components of \name since we found that their assumptions generally hold in practice. According to Lemma~\ref{lemma:egd}, the update rule given these two components is $p_j^{t+1} \propto p_j^t \exp(\eta \sum_{i=1}^m A_{ij}^t)$ ($b^t$ is absorbed into $A^t$).
+Thus, our primary mandate in creating \name is to construct and utilize an $A^t$ that is an accurate estimate of the true $A^{t \star}$ in the linear dynamic mixing law, which existing online methods fail to achieve. 
+
+\paragraph{Estimating $A^{t \star}$}
+To build intuition, note that for each group $i \in [m]$, the $m$ variables $A_{i1}^t, \dots, A_{im}^t$ can be learned by solving a system of $m$ equations, each of the form $\sum_{j = 1}^m A_{ij}^t p_j^t = \Lval{i}^t(\p) - \Lval{i}^{t+1}(\p)$ and with different $\p$. That is, we could do a training sweep of $m$ different proportions $p^{t, 1}, p^{t, 2}, \dots, p^{t, m} \in \triangle^m$ and observe how $\Lval{i}^{t+1}$ changes to obtain $A_{i1}^t, \dots, A_{im}^t$. 
+\name uses this intuition while avoiding training sweeps. In \subroutine (Algorithm \ref{alg:learnparams}) at round $t$, we define $p^{t, i} = (1 - \varepsilon) \mathbf{1}_i + \varepsilon \text{Unif}(m)$ for all $i \in [m]$ to be a one-hot vector with probability mass $\varepsilon$ distributed uniformly across all groups. We allocate an initial $\delta \in [0, 1]$ fraction of each round for estimating $A^t$ (i.e., $\delta S/T$ steps), and we determine a randomly interleaved order for training on $p^{t, 1}, \dots, p^{t, m}$ over this duration.
+Each time after we train according to some $p^{t, i}$, we record the resulting changes in loss per group. We then average the loss changes per $p^{t, i}$ across the $\delta S/T$ steps, effectively simulating a training sweep at each round without needing $m$ times the compute and having to roll back training to the beginning of the round. Finally, we solve the linear system of equations to obtain $A^t$. 
+ 
+\paragraph{\name.}
+In each round of training, we estimate $A^t$ using \subroutine and then normalize the entries of $A^t$, producing $\bar{A}^t$.
+Otherwise, $A^t$ decreases along with loss over time, resulting in the first few $p^t$ updates being much larger in magnitude than others.
+We update the proportions using $p_j^{t} \propto p_j^{t-1} \exp(\eta \sum_{i=1}^m \bar{A}_{ij}^t)$, and train for the remainder of that round using $p_j^{t}$. 
+
+Finally, we design \name so that it can be used to improve other data mixing methods, which we study in Section~\ref{sec:restricted}. Mixture proportions can be updated using \name either from the start of training or from the middle of a run. In the latter case,
+we denote an initial static mixture $\p^{\text{init}} \in \triangle^m$ and initial number of steps $S_{\text{init}}$. If $S_{\text{init}}$ is nonzero, \name trains according to $\p_{\text{init}}$ for the first $S_{\text{init}}$ steps before beginning to update the mixture proportions. \name is presented in Algorithm \ref{alg:name}. 
+
+\begin{algorithm}[htb]
+   \caption{\name}
+   \label{alg:name}
+\begin{algorithmic}[1]
+   \State {\bfseries Input:}  data $\Dtrain$,  $\Dval$, model $f^1$. Initial steps $S_{\text{init}}$, initial proportions $\p^{\text{init}} \in \triangle^m$. $T$ rounds over $S - S_{\text{init}}$ remaining steps, $\delta$ fraction per round for learning parameters, learning rate $\eta$, one-hot smoothing factor $\varepsilon$. 
+   \State If $S_{\text{init}} \neq 0$, train $f^1$ on $\p^{\text{init}}$ for $S_{\text{init}}$ steps. 
+   \State Set $p^0 = \text{Unif}(m)$.
+   \For{$t = 1, \dots, T$}
+   \State Set $A^t, f^{t+\delta} \gets$ \subroutine$(\Dtrain, \Dval, \delta, f^t, \varepsilon)$ (Alg.~\ref{alg:approximate_graph}), and normalize $A^t$ to get $\bar{A}^t$.
+   \State $p_j^{t} \propto p_j^{t-1} \exp(\eta \sum_{i = 1}^m \bar{A}_{ij}^t)$ for all $j \in [m]$.
+   \State Train model $f^{t+\delta}$ with $\frac{S}{T}(1 - \delta)$ steps from mixture $p^{t}$ over $\Dtrain$. Obtain updated $f^{t+1}$.    
+   \EndFor
+\end{algorithmic}
+\label{alg:skillit}
+\end{algorithm}
+
+\begin{algorithm}[htb]
+   \caption{\subroutine}
+   \label{alg:learnparams}
+\begin{algorithmic}[1]
+   \State {\bfseries Input:} $\Dtrain, \Dval$, $\delta$, model $f^t$, number of sweeps $k$, one-hot smoothing factor $\varepsilon$.
+   \State Split the fraction of a training round $\delta$ into $K$ time segments, where $K = m k$.
+   \State Set $\beta = 0_{m, m}$.
+   \State Define $p^{t, i} = (1-\varepsilon)\mathbf{1}_i + \varepsilon \text{Unif}(m)$ for $i \in [m]$, and define $P = [p^{t, 1}, \dots, p^{t, m}] \in \triangle^{m \times m}$
+   \State Randomly shuffle $k$ instances of each $i \in [m]$ to create an order $\mathcal{I} \in [m]^K$ over indices of data groups.
+    \For{$k = 1, \dots, K$}
+        \State Let $j = \mathcal{I}_k$. Train model on mixture $p^{t, j}$ of $\Dtrain$ for one time segment, obtain $f^{t+k \delta/K}$.
+        \For{$i \in [m]$}
+            \State Update $\beta_{ij} \gets \beta_{ij} + \Lval{i}(f^{t+(k-1)\delta/K}) - \Lval{i}(f^{t+k\delta/K})$ with loss difference on $\Dval^i$.
+        \EndFor
+    \EndFor
+    \State Update $\beta \gets  \frac{\beta}{k}$.
+    \State Set $A_i^t = P^{-1} \beta_i$ for each $i \in [m]$.
+   \State \textbf{Return}  $A^t \in \R^{m \times m}, f^{t+\delta}$
+\end{algorithmic}
+\label{alg:approximate_graph}
+\end{algorithm}
+
+
+
+\section{Experimental Results}
+
+
+We evaluate all methods in the \mixingframework framework, including \name, in two settings. First, we consider an \textbf{unrestricted} additional training budget setting to assess how \name compares to other methods in their original form, since each method uses a different number of extra training runs to learn proportions (Section~\ref{sec:unrestricted}).
+Second, we consider a \textbf{restricted} training budget setting to assess if \name can enhance existing methods in practical, budget-constrained conditions, where existing methods have less than a full training run to learn mixing proportions (Section~\ref{sec:restricted}).
+
+\paragraph{Data settings and models.}
+We use the same data settings and models as in Section~\ref{sec:details}, where we train for $S = 5$K steps for $m= 2, 3$-group settings and $S=40$K steps for the full SlimPajama.
+
+\paragraph{Baselines and evaluation.}
+We consider three online methods (Skill-It, DoGE, DoReMi) and one offline method (DML). We also consider grid search (GS), which sweeps training runs and selects $\p$ with the lowest average validation loss, and stratified sampling, which sets $p_i = \frac{1}{m}$ for all $i \in [m]$. 
+For each method, we report the average test perplexity per group of the trained model. This metric is considered a proxy for downstream performance~\citep{fan2024dogedomainreweightinggeneralization} and also represents the objective in the data mixing problem presented in Section~\ref{sec:problem_setup}.
+
+\subsection{Unrestricted Setting}\label{sec:unrestricted}
+\paragraph{Setup.}
+We allow methods up to $10S$ additional training steps to learn the mixture proportions. Approaches like grid search and DML can use the entire budget (searching and fitting over $10$ full runs), while Skill-It, DoReMi, and DoGE use $mS$, $2S$, and $S$ extra training steps, respectively (see Section~\ref{sec:existing}). Stratified sampling and \name use no extra training steps. We evaluate \name with $S_{\text{init}}=0$. 
+
+\paragraph{Results.} In Table~\ref{tab:unrestricted}, we find that \name robustly outperforms stratified sampling in all 6 data settings by an average of 0.280 perplexity points, while all other methods do worse than stratified sampling on at least 1 set of data groups by up to 6.9 points. 
+The performance of \name and other online methods is additionally reflected in Figure~\ref{fig:parameters}, in which we find that \name's $A^t$ similarity with $A^{t \star}$ is correlated with performance. While \name's parameter similarity is not always the highest, we note that its lowest similarity score is much higher than that of other methods, providing evidence that \name's parameter estimation procedure is more consistently accurate than that of other methods. Lastly, regarding offline methods, we hypothesize that their poor performance on settings with larger $m$ is due to the training budget being limited to $10S$, and that increasing this budget would eventually allow them to perform well.  
+\subsection{Restricted Setting}\label{sec:restricted}
+
+\paragraph{Motivation. }
+We introduce the restricted setting because practitioners may not have the resources or desire to complete multiple full training runs to learn proportions, especially as recent LLMs are trained for longer and on more data \citep{muennighoff2023scaling}. As a result, practitioners may only use data mixing methods on shortened runs, producing learned proportions that may be suboptimal on the full run. We study if \name is able to improve performance by dynamically adjusting previously learned proportions throughout the full training run.
+
+\paragraph{Setup. }
+We allow all existing methods only $0.5S$ additional training steps to learn the mixture proportions. This requires methods to learn $\p^{\text{method}}$ over shorter runs of $S_{\text{method}}$ steps each. For instance, grid search will conduct $10$ runs of length $S/20$ (see Table~\ref{tab:allocations}). We evaluate each method by using $\p^{\text{method}}$ learned from shorter runs to train the model on the full run of $S$ steps.
+We use \name to dynamically adjust each $\p^{\text{method}}$ throughout the full run. That is, for each existing method, we run \name with $\p^{\text{init}} = \p^{\text{method}}$ and $S_{\text{init}} = S_{\text{method}}$, referring to this as \name+method.
+\input{tables/unrestricted.tex}
+
+\paragraph{Results.}
+In Table~\ref{tab:restricted}, we find that  adding \name to any existing method that learns proportions over shorter runs improves average test perplexity per group in 28 out of 30 settings, by an average of 1.202 and a maximum of 12.012 points. 
+Furthermore, \name can help methods that initially underperform stratified sampling surpass it, such as DoGE across all settings. In some settings, such as Books/StackExchange, \name improves methods that already outperform stratified sampling.
+This shows that \name can enhance a wide variety of mixture proportions, regardless of their initial performance. 
+For the two cases where \name underperforms the base method, the base method already outperforms stratified, and adding \name maintains this trend, worsening perplexity by at most 0.025 points.
+
+\input{tables/restricted.tex}
+
+
+
+\section{Related Work}
+
+
+\paragraph{Data mixing. }
+Beyond the data mixing methods explored in our framework, \citet{albalak2023efficientonlinedatamixing} frames online data mixing as a multi-armed bandit problem with loss as the reward function. 
+In concurrent work, \citet{jiang2024adaptivedataoptimizationdynamic} also set data mixtures online and adaptively by using a credit assignment score that predicts how data from each domain affects loss on that domain. In our language, \citet{jiang2024adaptivedataoptimizationdynamic} use a diagonal $A^t$ matrix, and the values on the diagonal are defined by their credit assignment function and the per-group losses.
+Recent works have also studied how to mix data on smaller models and use these learned proportions on larger models~\citep{kang2024autoscaleautomaticpredictioncomputeoptimal, ge2024datamixingefficientbivariate, liu2024regmixdatamixtureregression}. 
+In a similar vein, \citet{na2024scalabledataablationapproximations} show that one can simulate a model trained on a particular data mixture by averaging together models trained on different (possibly disjoint) partitions of data groups.
+\citet{thrush2024perplexitycorrelations} mixes data to optimize performance on downstream tasks, constructing an $A^t$-like interaction matrix by using pretrained model perplexities.
+
+\paragraph{Curriculum Learning.}
+\citet{bengio2009curriculum} initially introduced curriculum learning as training models over samples from easiest to hardest. While early work focused on manually designed curricula, later work emphasizes model-driven ones \citep{hacohen2019dynamic, varshney-mishra-and-chitta-baral-2022-model,fan2023irreducible, mindermann2022prioritized}. Curricula can encourage skills-based generalization \citep{huang2024layingfoundationfirstinvestigating}, or emphasize high quality data to improve downstream task performance \citep{blakeney2024does}. 
+Online mixing methods can be also viewed as curriculum learning over data groups.
+\paragraph{Data Selection.}
+A common way to curate datasets besides mixing is to select data at the per-sample level~\citep{albalak2024survey}. Techniques here can be broadly classified as data filtering, data matching, and data condensation. In data matching, samples that are most similar to a reference dataset are selected. Similarity can be defined in terms of embeddings~\cite{xie2023dataselectionlanguagemodels}, gradients~\citep{xia2024less, engstrom2024dsdm}, or directly using machine learning models to score samples~\citep{brown2020language, grave-etal-2018-learning, moore-lewis-2010-intelligent}. Lastly, data condensation aims to identify a subset of samples that captures the full training dataset's properties. Selection mechanisms include using gradients, model predictions, and embedding distances~\citep{toneva2018an, paul2021deep, sorscher2023neuralscalinglawsbeating}.
+
+\paragraph{Hyperparameter Optimization and Truncation Bias.}
+Many data mixing methods utilize extra training runs to learn the static mixture proportions before the final training run. This allows us to view data mixing as a hyperparameter optimization problem in $\p$. 
+\cite{ye2024datamixinglawsoptimizing} and \cite{liu2024regmixdatamixtureregression} mitigate the inefficiency of grid search in higher dimensions by combining it with data mixing laws to impose additional structure. However, both grid search and these offline methods can have poor performance when $\p$ is searched for or fitted on shorter runs, as in the restricted setting.
+To understand these results, we note that many popular hyperparameter optimization methods carefully control truncation, and some runs are allowed to continue longer than others \citep{li2018hyperband,swersky2014freeze,domhan2015speeding}. Thus, generic hyperparameter optimization methods may eventually prove effective for tuning data mixes.
+
+
+\section{Discussion}
+
+
+We propose an optimization framework, \mixingframework, that can express several existing data mixing methods using their implicit mixing law.
+Using \mixingframework, we show that linear dynamic mixing laws are well-specified in capturing the true loss-proportion relationship across datasets, but existing online methods still perform poorly on some datasets because their parameters are inaccurate. This insight inspires \name, whose performance gains are rooted in its ability to estimate parameters $A^{t}$ of the linear dynamic mixing law throughout training. 
+
+\paragraph{Limitations and Future Work.} \name introduces extra inference cost during training via the repeated evaluations in \subroutine(Alg.~\ref{alg:approximate_graph}). This overhead can be reduced or completely mitigated by using the training loss as a proxy for the validation loss, computing $L_{\text{val}}$ over a subset of $\Dval$, or by using each $A^t$ for longer (equivalently, decreasing $T$).  
+
+The \mixingframework framework itself is an invitation for future work. 
+We hope that \mixingframework identifies clear axes of improvement for data mixing (the parameterization of the mixing law, parameter estimation, and how to solve for $\p$) and inspires the next generation of principled data mixing methods.
+Another direction for future work is understanding how to define data groups and how data group partitions impact data mixing. For example, C4 is a subset of CommonCrawl, so repartitioning these datasets into more disjoint groups could result in better data mixing performance.
+Furthermore, it is unclear if linear mixing laws results from some specific property of the data groups we studied. It would be interesting to consider in future work how often linear mixing laws hold, and how to exploit potential non-linearities in data mixing.
+
+
+\subsection{Reproducibility Statement} 
+
+
+
+\paragraph{Code release.
+
+\subsection{Ethics Statement}
+Our work focuses on improving the efficiency and performance of language model training. While our research does not directly address ethical concerns, it can contribute to more responsible AI development by optimizing training, which can reduce computational costs and energy consumption. 
+
+

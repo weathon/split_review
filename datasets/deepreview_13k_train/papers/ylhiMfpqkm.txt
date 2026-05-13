@@ -1,0 +1,450 @@
+\title{Pre-Training and Fine-Tuning Generative Flow Networks}
+
+\begin{abstract}
+Generative Flow Networks (GFlowNets) are amortized samplers that learn stochastic policies to sequentially generate compositional objects from a given unnormalized reward distribution.
+They can generate diverse sets of high-reward objects, which is an important consideration in scientific discovery tasks. However, as they are typically trained from a given extrinsic reward function, it remains an important open challenge about how to leverage the power of pre-training and train GFlowNets in an unsupervised fashion for efficient adaptation to downstream tasks.
+Inspired by recent successes of unsupervised pre-training in various domains, we introduce a novel approach for reward-free pre-training of GFlowNets. By framing the training as a self-supervised problem, we propose an outcome-conditioned GFlowNet (OC-GFN) that learns to explore the candidate space. Specifically, OC-GFN learns to reach any targeted outcomes, akin to goal-conditioned policies in reinforcement learning. 
+We show that the pre-trained OC-GFN model can allow for a direct extraction of a policy capable of sampling from any new reward functions in downstream tasks.
+Nonetheless, adapting OC-GFN on a downstream task-specific reward involves an intractable marginalization over possible outcomes. We propose a novel way to approximate this marginalization by learning an amortized predictor enabling efficient fine-tuning.
+Extensive experimental results validate the efficacy of our approach, demonstrating the effectiveness of pre-training the OC-GFN, and its ability to swiftly adapt to downstream tasks and discover modes more efficiently.
+This work may serve as a foundation for further exploration of pre-training strategies in the context of GFlowNets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Unsupervised learning on large stores of data on the internet has resulted in significant advances in a variety of domains~\citep{howard2018universal,devlin2018bert,radford2019language,henaff2020data}. Pre-training with unsupervised objectives, such as next-token prediction in auto-regressive language models~\citep{radford2019language}, on large-scale unlabelled data enables the development of models that can be effectively fine-tuned for novel tasks using few samples~\citep{brown2020language}. Unsupervised learning at scale allows models to learn good representations, which enables data-efficient adaptation to novel tasks, and is central to the recent development towards larger models. 
+
+On the other hand, in the context of amortized inference, Generative Flow Networks~\citep[GFlowNets;][]{bengio2021flow} enable learning generative models for sampling from high-dimensional distributions over discrete compositional objects. Inspired by reinforcement learning (RL), GFlowNets learn a stochastic policy to sequentially generate compositional objects with a probability proportional to a given reward, instead of reward maximization. Therefore, GFlowNets have found success in applications to scientific discovery problems to generate high-quality and diverse candidates~\citep{bengio2021flow,jain2023gflownets,jain2023multi} as well as alternatives to Monte-Carlo Markov chains and variational inference for modeling Bayesian posteriors~\citep{deleu2022bayesian,van2022nesi}. 
+
+As a motivating example, consider the drug discovery pipeline. A GFlowNet can be trained to generate candidate RNA sequences that bind to a target using as reward the binding affinity of the RNA sequence with the target~\citep{lorenz2011viennarna,sinai2020adalead} (which can be uncertain and imperfect based on the current understanding of the biological system and available experimental data). However, there is no way to efficiently adapt the GFlowNet to sample RNA sequences binding to a different target of interest that reflects new properties. 
+Unlike human intelligence, GFlowNets currently lack the ability to leverage previously learned knowledge to efficiently adapt to new tasks with unseen reward functions, and need to be trained from scratch to learn a policy for matching the given extrinsic reward functions for different tasks.
+Inspired by the success of the unsupervised pre-training and fine-tuning paradigm in vision, language, and RL~\citep{jaderberg2016reinforcement,sekar2020planning} domains, it is natural to ask how can this paradigm benefit GFlowNets. As a step in this direction, we propose a fundamental approach to realize this paradigm for GFlowNets. 
+
+In this paper, we propose a novel method for reward-free unsupervised pre-training of GFlowNets. We formulate the problem of pre-training GFlowNets as a 
+self-supervised problem of learning an outcome-conditioned GFlowNet (OC-GFN) which learns to reach any outcome (goal) as a functional understanding of the environment (akin to goal-conditioned RL~\citep{chebotar2021actionable}).
+The reward for training this OC-GFN is defined as the success of reaching the outcome. 
+Due to the inherent sparse nature of this task-agnostic reward, it introduces critical challenges for efficient training OC-GFN in complex domains, particularly with higher-dimensional outcomes and long-horizon problems, since it is difficult to reach the outcome to get a meaningful reward signal. 
+To tackle these challenges, we introduce a novel contrastive learning procedure to train OC-GFN to effectively handle such sparse rewards, which induces an implicit curriculum for efficient learning that resembles goal relabeling~\citep{andrychowicz2017hindsight}.
+To enable efficient learning in long-horizon tasks, we further propose a goal teleportation scheme to effectively propagate the learning signal to each step.
+
+A remarkable result is that one can directly convert this pre-trained OC-GFN to sample proportionally to a new reward function for downstream tasks~\citep{bengio2023foundations}.
+It is worth noting that in principle, this can be achieved even without re-training the policy, which is usually required for fine-tuning in RL, as it only learns a reward-maximizing policy that may discard many useful information.
+Adapting the pre-trained OC-GFN model to a new reward function, however, involves an intractable marginalization over possible outcomes.
+We propose a novel alternative by learning a predictor that amortizes this marginalization, allowing efficient fine-tuning of the OC-GFN to downstream tasks. Our key contributions can be summarized as follows:
+\begin{itemize}[leftmargin=*] 
+    \item We propose reward-free pre-training for GFlowNets as training outcome-conditioned GFlowNet (OC-GFN) that learns to sample trajectories to reach any outcome. 
+    \item We investigate how to leverage the pre-trained OC-GFN model to adapt to downstream tasks with new rewards, 
+    and we also introduce an efficient method to learn an amortized predictor to approximate an intractable marginal required for fine-tuning the pre-trained OC-GFN model.
+    \item Through extensive experiments on the GridWorld domain, we empirically validate the efficacy of the proposed pre-training and fine-tuning paradigm. We also demonstrate its scalability to larger-scale and challenging biological sequence design tasks, which achieves consistent and substantial improvements over strong baselines, especially in terms of diversity of the generated samples.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+Given a space of compositional objects $\mathcal{X}$, and a non-negative reward function $R: \mathcal{X}\mapsto\mathbb{R}^+$, the GFlowNet policy $\pi$ is trained towards sampling objects $x\in \mathcal{X}$ from the distribution defined by $R(x)$, i.e., $\pi(x)\propto R(x)$. The compositional objects are each sampled sequentially, with each step involving the addition of a building block $a\in \mathcal{A}$ (action space) to the current partially constructed object $s\in\mathcal{S}$ (state space).
+We can define a directed acyclic graph (DAG) $\mathcal{G}=\{\mathcal{S}, \mathcal{A}\}$ with the partially constructed objects forming nodes of $\mathcal{G}$, including a special empty state $s_0$. The edges are $s\rightarrow s'$, where $s'$ is obtained by applying an action $a\in\mathcal{A}$ to $s$. The complete objects $\mathcal{X}$ are the terminal (childless) nodes in the DAG.
+The generation of an object $x\in \mathcal{X}$ corresponds to complete trajectories in the DAG starting from $s_0$ and terminating in a terminal state $s_n=x$, i.e., $\tau=(s_0\rightarrow \dots \rightarrow x)$.
+We assign a non-negative weight, called \emph{state flow} $F(s)$ to each state $s\in \mathcal{S}$. 
+The forward policy $P_F(s'|s)$ is a collection of distributions over the children of each state and the backward policy $P_B(s|s')$ is a collection of distributions over the parents of each state. The forward policy induces a distribution over trajectories $P_F(\tau)$, and the marginal likelihood of sampling a terminal state is given by marginalizing over trajectories terminating in $x$, $P_F^\top(x)=\sum_{\tau=(s_0\rightarrow\dots\rightarrow x)}P_F(\tau)$. GFlowNets solve the problems of learning a parameterized policy $P_F(\cdot\mid\cdot;\theta)$ such that $P_F^\top(x)\propto R(x)$. \\
+
+\noindent {\textbf{Training GFlowNets.}} 
+We use the \textit{detailed balance} learning objective~\citep[DB;][]{bengio2023foundations} to learn the parameterized policies and flows based on Eq.~(\ref{eq:db}), which considers the flow consistency constraint in the edge level (i.e., the incoming flow for edge $s\to s'$ matches the outgoing flow). When it is trained to completion,
+the objective yields the desired policy.
+\begin{equation}
+\forall s\to s' \in \mathcal{A}, \quad\quad F(s)P_F(s'|s) = F(s')P_B(s|s').
+\label{eq:db}
+\end{equation}
+As in reinforcement learning, exploration is a key challenge in GFlowNets.
+Generative Augmented Flow Networks~\citep[GAFlowNets;][]{pan2022gafn} incorporate intrinsic intermediate rewards represented as augmented flows in the flow network to drive exploration, where $r_i(s \to s')$ is specified by intrinsic motivation~\citep{burda2018exploration}, yielding the following variant of detailed balance.
+\begin{equation}
+\forall s\rightarrow s' \in \mathcal{A},\quad\quad F(s)P_F(s'|s) = F(s') P_B(s|s') + r(s \to s').
+\label{eq:uncond_constraint_db}
+\end{equation}
+
+
+
+\section{Related Work}
+
+{\textbf{Generative Flow Networks.}} 
+Initially inspired  by reinforcement learning, GFlowNets~\citep{bengio2021flow,bengio2023foundations} also have close connections to hierarchical variational inference~\citep{malkin2022gfnhvi,zimmermann2022variational}. While several learning objectives have been proposed for improving credit assignment and sample efficiency in GFlowNets such as detailed balance~\citep{bengio2023foundations}, sub-trajectory balance~\citep{madan2022learning} and forward-looking objectives~\citep{pan2023better}, they need to be trained from scratch with a given reward function, which may limit its applicability to more practical problems.
+Owing to their flexibility, GFlowNets have been applied to wide range of problems where diverse high-quality candidates are need, such as molecule generation~\citep{bengio2021flow}, biological sequence design~\citep{jain2022biological}, combinatorial optimization~\citep{zhang2023robust,zhang2023let}, multi-objective~\citep{jain2023multi}.
+As ammortized samplers, GFlowNets have been used for Bayesian structure learning~\citep{deleu2022bayesian}, neurosymbolic programming~\citep{van2022nesi}, and for variational EM~\citep{hu2023gflownet}. Extensions for continuous~\citep{lahlou2023theory} and stochastic spaces~\citep{pan2023stochastic,zhang2023distributional} have also been studied.\\
+
+\noindent {\textbf{Unsupervised Pre-Training in Reinforcement Learning.}} 
+Following the progress in language modeling and computer vision, there has been growing interest in pre-training reinforcement learning (RL) agents in an unsupervised stage without access to task-specific rewards for learning representations. 
+Agents typically learn a set of different skills~\citep{eysenbach2018diversity,hansen2019fast,zhao2021mutual,liu2021aps}, and then fine-tune the learned policy to downstream tasks. Contrary to reward-maximization, GFlowNets learn a stochastic policy to match the reward distribution. As we show in the next section, such a learned policy can be adapted to a new reward function even without re-training~\citep{bengio2023foundations}.\\
+
+\noindent {\textbf{Goal-Conditioned Reinforcement Learning.}}
+Different from standard reinforcement learning (RL) methods that learn policies or value functions based on observations, goal-conditioned RL~\citep{kaelbling1993learning} also take goals into consideration by augmenting the observations with an additional input of the goal and have been studied in a number of prior works~\citep{schaul2015universal,nair2018visual,veeriah2018many,eysenbach2020c}.
+Goal-conditioned RL is trained to greedily achieve different goals specified explicitly as input, making it possible for agents to generalize their learned abilities across different environments.
+
+
+
+\section{Pre-training and fine-tuning generative flow networks}
+
+In the original formulation, a GFlowNet 
+need to be trained from scratch whenever it is faced with a previously unseen reward function.
+In this section, we aim to leverage the power of pre-training in GFlowNets for efficient adaptation to downstream tasks.
+
+To tackle this important challenge, we propose a novel approach to frame the problem of pre-training GFlowNets as a self-supervised problem, by training an outcome-conditioned GFlowNet that learns to reach any input terminal state (outcome) without task-specific rewards. 
+Then, we propose to leverage the power of the pre-trained GFlowNet model for efficiently fine-tuning it to downstream tasks with a new reward function.
+
+\centering
+\includegraphics[width=1.\linewidth]{./figs/stage1.png}
+\caption{The unsupervised pre-training phase of outcome-conditioned GFlowNet.}
+\label{fig:stage1}
+\end{wrapfigure}
+\subsection{Unsupervised Pre-Training Stage}
+As GFlowNets are typically learned with a given reward function, it remains an open challenge for how to pre-train them in a reward-free fashion.
+We propose a novel method for unsupervised pre-training of GFlowNets without task-specific rewards.
+We formulate the problem of pre-training GFlowNets as a self-supervised problem of learning an outcome-conditioned GFlowNet (OC-GFN) which learns to reach any input target outcomes, inspired by the success of goal-conditioned reinforcement learning in generalizing to a variety of tasks when it is tasked with different goals~\citep{fang2022planning}.
+We denote the outcome as $y=f(s)$, where $f$ is an identity function and $s$ is a terminal state, so the space of outcomes is the same as the state space $\mathcal{X}$.
+What makes OC-GFN special is that, when fully trained, given a reward $R$ a posterior as a function $r$ of the outcome, i.e., $R(s) = r(y)$, one can adapt the OC-GFN to sample from this reward, which can generalize to tasks with different rewards.
+
+\begin{algorithm}[t]
+\caption{Reward-free Pre-training of Unsupervised GFlowNets.}
+\begin{algorithmic}[1]
+\REQUIRE GAFlowNet $F^U(s), P_F^U(s'|s), P_B^U(s|s')$; fixed target network $\bar{\phi}$; predictor network $\phi$; Outcome-conditioned GFlowNet (OC-GFN) $F^C(s|y), P_F^C(s'|s, y), P_B^C(s|s',y)$
+\FOR {each training step $t=1$ to $T$}
+\STATE Collect a trajectory $\tau^+=\{s_0^+ \to \dots \to s_n^+\}$ with $P_F^U$ \\
+\STATE  {\color{gray}// \emph{Update the outcome-conditioned GFlowNet model}} \\
+\STATE $y^+\gets f(s^+)$,
+$R(s_n^+|y^+) \gets  \mathbbm{1} \{ {f(s^+_n) = y^+} \}\equiv 1$ \\ 
+\STATE Update OC-GFN towards minimizing Eq.~(\ref{eq:gt_oc_gfn}) with $\tau^+$ and $R(s_n^+|y^+)$ \\
+\STATE 
+Collect a trajectory 
+$\tau^-=\{s_0^- \to \dots \to s_n^-\}$ with $P_F^C$ conditioned on $y^+$\\
+\STATE 
+$y^-\gets f(s^-)$,
+$R(s_n^-|y^+) \gets  \mathbbm{1} \{ {f(s^-_n) = y^+} \}$ \\
+\STATE Update OC-GFN towards minimizing Eq.~(\ref{eq:gt_oc_gfn}) with $\tau^-$ and $R(s_n^-|y^+)$ \\
+\STATE {\color{gray}// \emph{Update the unconditional GAFlowNet model}}\\
+\STATE Update GAFlowNet towards optimizing Eq.~(\ref{eq:uncond_constraint_db}) based on $\tau^+$ and $r_i \gets ||\bar{\phi}(s) - \phi(s)||_2$ \\
+\STATE Update the predictor network $\phi$ towards minimizing $||\bar{\phi}(s) - \phi(s)||_2$ \\
+\ENDFOR
+\end{algorithmic}
+\label{alg:stage1}
+\end{algorithm}
+
+\subsubsection{Outcome-Conditioned GFlowNets (OC-GFN)}
+We extend the idea of flow functions and policies in GFlowNets to OC-GFN that can generalize to different outcomes $y$ in the outcome space, which is trained to achieve specified $y$.
+OC-GFN can be realized by providing an additional input $y$ to the flows and policies, resulting in outcome-conditioned forward and backward policies $P_F(s'|s,y)$ and $P_B(s|s',y)$, and flows $F(s|y)$. The resulting learning objective for OC-GFN 
+for intermediate states is shown in Eq.~(\ref{eq:cond_constraint_db}).
+\begin{equation}
+F(s|y)P_F(s'|s,y) = F(s'|y) P_B(s|s',y).
+\label{eq:cond_constraint_db}
+\end{equation}
+
+\paragraph{Outcome generation}
+We can train OC-GFN by conditioning outcomes-conditioned flows and policies on a specified outcome $y$, and we study how to generate them autotelicly. 
+It is worth noting that we need to train it with full-support over $y$. 
+We propose to leverage GAFN~\citep{pan2022gafn} with the introduction of augmented flows that enable efficient reward-free exploration purely by intrinsic motivation~\citep{burda2018exploration}.
+In practice, we generate diverse outcomes $y$ with GAFN, and provide them to OC-GFN to sample an outcome-conditioned trajectory $\tau=(s_0, \cdots, s_n)$.
+The resulting conditional reward is given as 
+${R}(s_n|y) = \mathbbm{1} \{ {f(s_n) = y} \}$.
+Therefore, OC-GFN receives a zero reward if it fails to reach the target outcome, and a positive reward otherwise, which results in learning an outcome achieving policy. 
+
+\paragraph{Contrastive training}
+However, it can be challenging to efficiently train OC-GFN in problems with large outcome spaces.
+This is because it can be hard to actually achieve the outcome and obtain a meaningful learning signal owing to the sparse nature of the rewards --- most of the conditional rewards $R(s_n|y)$ will be zero if $f(s_n) \neq y$ when OC-GFN fails to reach the target.
+
+To alleviate this we propose a contrastive learning objective for training the OC-GFN.
+After sampling a trajectory $\tau^+=\{s_0^+ \to \cdots \to s_n^+\}$ from unconditional GAFN, we first train an OC-GFN based on this off-policy trajectory by assuming it has the ability to achieve $y^+=s_n^+$ when conditioned on $y^+$. Note that the resulting conditional reward $R(s_n^+|y^+) = \mathbbm{1} \{ {f(s^+_n) = y^+} \} \equiv 1$ in this case, as all correspond to successful experiences that provide meaningful learning signals to OC-GFN.
+We then sample another on-policy trajectory $\tau^-=\{s_0^- \to \cdots \to s_n^-\}$ from OC-GFN by conditioning it on $y^+$, and evaluate the conditional reward by $R(s_n^-|y^+) = \mathbbm{1} \{ {f(s^-_n) = y^+} \}$.
+Although 
+most of $R(s_n^-|y^+)$ can be zero in large outcome spaces during early learning, we provide sufficient successful experiences in the initial phase, which is also related to goal relabeling~\citep{andrychowicz2017hindsight}.
+This can be viewed as an implicit curriculum for improving the training of OC-GFN.
+
+\paragraph{Outcome teleportation} The contrastive training paradigm can significantly improve learning efficiency by providing a bunch of successful trajectories with meaningful learning signals, which tackles the particular challenge of sparse rewards during learning. 
+However, the agent may still suffer from poor learning efficiency in long-horizon tasks, as it cannot effectively propagate the success/failure signal back to each step.
+We propose a novel technique, \emph{outcome teleportation}, for further improving the learning efficiency of OC-GFN as in Eq.~(\ref{eq:gt_oc_gfn_obj}), which considers the terminal reward $R(x|y)$ for every transition. 
+\begin{equation}
+F(s|y)P_F(s'|s,y) = F(s'|y) P_B(s|s',y)R(x|y).
+\label{eq:gt_oc_gfn_obj}
+\end{equation}
+This formulation can efficiently propagate the guidance signal to each transition in the trajectory, which can significantly improve learning efficiency, particularly in high-dimensional outcome spaces, as investigated in Section~\ref{exp:bit}. 
+It can be interpreted as a form of reward decomposition in outcome-conditioned tasks with binary rewards. 
+In practice, we train OC-GFN by minimizing the following loss function ${\mathcal{L}}_{{\text OC-GFN}}(\tau, y)$ in log-scale obtained from Eq.~(\ref{eq:gt_oc_gfn}), i.e.,
+\begin{equation}
+\sum_{s \to s' \in \tau} \left( \log F(s|y) + \log P_F(s'|s, y) - \log F(s'|y) - \log P_B(s|s', y) - \log R(x|y) \right)^2.
+\label{eq:gt_oc_gfn}
+\end{equation}
+
+\noindent {\textbf{Theoretical justification.}} We now justify that when OC-GFN is trained to completion,
+it can successfully reach any specified outcome.
+
+\begin{proposition}
+If $\mathcal{L}_{{\text OC-GFN}}(\tau,y)=0$ for all trajectories $\tau$ and outcomes $y$, then the outcome-conditioned forward policy $P_F(s'|s,y)$ can successfully reach the target outcome $y$.
+\label{thm:oc_gfn}
+\end{proposition}
+The resulting procedure for the reward-free unsupervised pre-training of OC-GFN is summarized in Algorithm~\ref{alg:stage1} and illustrated Figure~\ref{fig:stage1}.
+
+\subsection{Supervised Fine-Tuning Stage} \label{sec:stage2}
+In this section, we study how to leverage the pre-trained OC-GFN model and adapt it for downstream tasks with new reward functions. 
+
+A remarkable aspect of GFlowNets is the ability to demonstrate the reasoning potential in generating a task-specific policy.
+By utilizing the pre-trained OC-GFN model with outcome-conditioned flows $F(s|y)$ and policies $P_F(s'|s,y)$,
+we can directly obtain a policy that samples according to a new task-specific reward function $R(s)=r(y)$ according to Eq.~(\ref{eq:policy}), which is based on~\citep{bengio2023foundations}.
+\begin{equation}
+P_F^{r}(s'|s) = \frac{\sum_y r(y) F(s|y) P_F(s'|s,y)}{\sum_y r(y) F(s|y)}
+\label{eq:policy}
+\end{equation}
+Eq.~(\ref{eq:policy}) serves as the foundation for converting a pre-trained OC-GFN model to handle downstream tasks with new and even out-of-distribution rewards.
+Intriguingly, \textit{this conversion can be achieved without any re-training} for OC-GFN on downstream tasks. 
+This sets it apart from the typical fine-tuning process in reinforcement learning, which typically requires re-training to adapt a policy, since they generally learn reward-maximizing policies that may discard valuable information.
+
+Directly estimating the above summation often necessitates the use of Monte-Carlo averaging for making each decision.
+Yet, this can be computationally expensive in high-dimensional outcome spaces if we need to calculate this marginalization at each decision-making step, which leads to slow thinking.
+To improve its efficiency in complex scenarios, it is essential to develop strategies that are both efficient while maintaining accurate estimations.
+
+\begin{figure}[!h]
+\centering
+\hspace{-0.2cm}
+\subfloat{\includegraphics[width=0.373\linewidth]{./figs/stage2_notrain.pdf}}
+\hspace{0.5cm}
+\subfloat{\includegraphics[width=0.3\linewidth]{./figs/stage2_amortize.pdf}}
+\caption{\textit{Left}: Convert the outcome-conditioned GFlowNet to downstream tasks without re-training the networks. \textit{Right}: An efficient amortized predictor in the supervised fine-tuning phase.}
+\label{fig:stage2}
+\end{figure}
+
+\begin{algorithm}[t]
+\caption{Supervised Fine-Tuning of Outcome-Conditioned GFlowNets.}
+\begin{algorithmic}[1]
+\STATE Initialize the numerator network $N(s'|s)$ and the GFlowNet-like predictor network $Q(y|s',s)$ \\
+\STATE Obtain the pre-trained outcome-conditioned state $F(s|y)$ and forward policy $P_F(s'|s,y)$ \\
+\FOR {each training step $t=1$ to $T$}
+\STATE Collect a trajectory $\tau=\{s_0 \to \cdots s_n\}$ with $N(s'|s)$ \\
+\STATE Sample outcomes $y$ from a tempered/$\epsilon$-greedy version of $Q(\cdot|s', s)$ \\
+\STATE Update $N$ and $Q$ towards minimizing Eq.~(\ref{eq:amortized}) \\
+\ENDFOR
+\STATE Compute the policy $P_F^r(s'|s) = {N(s'|s)}/{\sum_{s'} N(s'|s)}$
+\end{algorithmic}
+\label{alg}
+\end{algorithm}
+
+\paragraph{Learning an Amortized Predictor}
+In this section, we propose a novel approach to approximate this marginal by learning an amortized predictor.
+
+Concretely, we propose to estimate the intractable sums in the numerator in Eq.~(\ref{eq:policy}) by a numerator network 
+$N(s'|s) \approx \sum_y r(y) F(s|y) P_F(s'|s,y)$.
+This would allow us to efficiently estimate the intractable sum with the help of $N(s'|s)$ that directly estimates $N(\cdot|s)$ for any state $s$, which could benefit from the generalizable structure of outcomes with neural networks.
+We can also obtain the corresponding policy by $P_F^{r}(s'|s) = \frac{N(s'|s)}{\sum_{s'} N(s'|s)}$.
+For learning the numerator network $N(\cdot|s)$, we need to have a sampling policy for sampling outcomes $y$ given states $s$ and next states $s'$, which can be achieved by
+\begin{equation}
+Q(y|s',s) = \frac{r(y)F(s|y)P_F(s'|s,y)}{N(s'|s)}.
+\label{eq:Q_def}
+\end{equation}
+Therefore, we have the following constraint according to Eq.~(\ref{eq:Q_def})
+\begin{equation}
+N(s'|s) Q(y|s',s) = r(y)F(s|y)P_F(s'|s,y),
+\end{equation}
+based on which we derive the corresponding loss function by minimizing their difference by training in the log domain, i.e.,
+\begin{equation}
+\mathcal{L}_{\text amortized} = \left( \log N(s'|s) + \log Q(y|s',s) - \log r(y) - \log F(s|y) - \log P_F(s'|s,y) \right)^2.
+\label{eq:amortized}
+\end{equation}
+
+\noindent \textbf{Theoretical justification.}
+In Proposition~\ref{thm}, we show that $N(s'|s)$ can correctly estimate the summation when it is trained to completion and the distribution of outcomes $y$ has full support. 
+\begin{proposition}
+Suppose that $\forall (s,s',y)$, $\mathcal{L}_{\text amortized}(s,s',y)=0$, then the amortized predictor $N(s'|s)$ estimates $\sum_y r(y) F(s|y) P_F(s'|s,y)$.
+\label{thm}
+\end{proposition}
+ Proposition~\ref{thm} justifies the use of the numerator network as an efficient alternative for estimating the computationally intractable summation in Eq.~(\ref{eq:policy}).\\
+
+\noindent \textbf{Empirical validation.} We now investigate the converted/learned sampling policy in the standard GridWorld domain~\citep{bengio2021flow}, which has a multi-modal reward function.
+
+We visualize the last $2\times 10^5$ samples from different baselines including training GFN from scratch, OC-GFN with the Monte Carlo-based estimation with Eq.~(\ref{eq:policy}) and the amortized marginalization approach with Eq.~(\ref{eq:amortized}).
+
+As shown in Figure~\ref{fig:grid_dist}(b), directly training GFN with trajectory balance~\citep{malkin2022trajectory} can suffer from the mode collapse problem and fail to discover all modes of the target distribution in Figure~\ref{fig:grid_dist}(a). On the contrary, we can directly obtain a policy from the pre-trained OC-GFN model that samples proportionally to the target rewards as shown in Figure~\ref{fig:grid_dist}(c), while fine-tuning OC-GFN with the amortized inference could also match the target distribution as in Figure~\ref{fig:grid_dist}(d), which validates its effectiveness in estimating the marginal.
+\begin{figure}[!h]
+\centering
+\subfloat[]{\includegraphics[width=0.115\linewidth]{./figs/grid_r.pdf}}
+\hspace{.3cm}
+\subfloat[]{\includegraphics[width=0.162\linewidth]{./figs/tb_grid_vis.pdf}}
+\subfloat[]{\includegraphics[width=0.162\linewidth]{./figs/sum_db_grid_vis.pdf}}
+\subfloat[]{\includegraphics[width=0.162\linewidth]{./figs/amortize_db_grid_vis.pdf}}
+\caption{Distribution of $2 \times 10^5$ samples from different baselines. (a) Target distribution. (b) GFN (from scratch). (c) OC-GFN (Monte Carlo-based). (d) OC-GFN (Amortizer-based).
+}
+\label{fig:grid_dist}
+\end{figure}
+
+\noindent \textbf{Practical implementation.}
+In practice, we can train the amortized predictor $N(\cdot|s)$ and the sampling policy $Q(\cdot|s',s)$ in a GFlowNet-like procedure. We sample $(s,s')$ with $N$
+by interacting with the environment. This can also be realized by sampling from the large and diverse dataset $\mathcal{D}$ obtained in the pre-training stage.
+We then sample outcomes $y$ from the sampling policy $Q(\cdot|s',s)$, which can incorporate its tempered version or with $\epsilon$-greedy exploration~\citep{bengio2021flow} for obtaining rich distributions of $y$.
+We can then learn the amortized predictor and the sampling policy by one of these sampled experiences. Finally, we can derive the policy that will be converted to downstream tasks by $P_F^{r}(s'|s) = {N(s'|s)}/ {\sum_{s'} N(s'|s)}$. 
+The resulting training algorithm is summarized in Algorithm~\ref{alg} and the right part in Figure~\ref{fig:stage2}.
+
+
+
+\section{Experiments}
+
+In this section, we conduct extensive experiments to better understand the effectiveness of our approach and aim to answer the following key questions: \textbf{(i)} How do outcome-conditioned GFlowNets (OC-GFN) perform in the reward-free unsupervised pre-training stage? \textbf{(ii)} What is the effect of key modules? \textbf{(iii)} Can OC-GFN transfer to downstream tasks efficiently? 
+\textbf{(iv)} Can they scale to complex and practical scenarios like biological sequence design?
+
+\subsection{GridWorld} \label{exp:grid}
+We first conduct a series of experiments on GridWorld~\citep{bengio2021flow} to understand the effectiveness of the proposed approach. 
+In the reward-free unsupervised pre-training phase, we train a (unconditional) GAFN~\citep{pan2022gafn} and an outcome-conditioned GFN (OC-GFN) on a map without task-specific rewards, where GAFN is trained purely from self-supervised intrinsic rewards according to Algorithm~\ref{alg:stage1}. We investigate how well OC-GFN learns in the unsupervised pre-training stage, while the supervised fine-tuning stage has been discussed in Section~\ref{sec:stage2}.
+Each algorithm is run for $3$ different seeds and the mean and standard deviation are reported.
+\textbf{Outcome distribution.} 
+We first evaluate the quality of the exploratory data collected by GAFN, as it is essential for training OC-GFN with a rich distribution of outcomes.
+We demonstrate the sample distribution from GAFN in Figure~\ref{fig:grid_succ}(a), which has great diversity and coverage, and validates its effectiveness in collecting unlabeled exploratory trajectories for providing diverse target outcomes for OC-GFN to learn from.
+
+\begin{figure}[!h]
+\centering
+\subfloat[]{\includegraphics[width=0.16\linewidth]{./figs/grid_32_y_dist.png}}
+\hspace{.1cm}
+\subfloat[]{\includegraphics[width=0.23\linewidth]{./figs/grid_succ_s.pdf}}
+\subfloat[]{\includegraphics[width=0.23\linewidth]{./figs/grid_succ_m.pdf}}
+\subfloat[]{\includegraphics[width=0.23\linewidth]{./figs/grid_succ_l.pdf}}
+\caption{Results in GridWorld in different with different scales of the task. (a) Outcome distribution. (b)-(d) Success rate of OC-GFN and its variants in small, medium, and large maps, respectively.}
+\label{fig:grid_succ}
+\end{figure}
+
+\textbf{Outcome reaching performance.}
+We then investigate the key designs in pre-training OC-GFN by analyzing its success rate for achieving target outcomes. We also ablate key components to investigate the effect of contrastive training (CT) and outcome teleportation (OT).
+The success rates of OC-GFN and its variants are summarized in Figures~\ref{fig:grid_succ}(b)-(d) in different sizes of the map from small to large.
+As shown, OC-GFN can successfully learn to reach specified outcomes with a success rate of nearly $100\%$ at the end of training in maps with different sizes.
+Disabling the outcome teleportation component (OC-GFN w/o OT) leads to lower sample efficiency, in particular in larger maps. 
+Further deactivating the contrastive training process (OC-GFN w/o OT \& CT) fails to learn well as the size of the outcome space grows, since the agent can hardly collect successful trajectories for meaningful updates.
+This indicates that both contrastive training and outcome teleportation are important for successfully training OC-GFN in large outcome spaces. It is also worth noting that outcome teleportation can significantly boost learning efficiency in problems with a combinatorial explosion of outcome spaces (e.g., sequence generation in the following sections).
+
+\centering
+\subfloat{\includegraphics[width=0.5\linewidth]{./figs/grid_traj_2.pdf}}
+\subfloat{\includegraphics[width=0.5\linewidth]{./figs/grid_traj_3.pdf}}
+\caption{Visualization of the behaviors of OC-GFN.}
+\label{fig:grid_behavior}
+\end{wrapfigure}
+\textbf{Outcome-conditioned behaviors.}
+We now visualize the learned behaviors of OC-GFN in Figure~\ref{fig:grid_behavior}, where the red and green squares denote the starting point and the goal, respectively. We find that OC-GFN can not only reach different specified outcomes with a high success rate, but also discover diverse trajectories
+leading to a specified outcome $y$ with the forward policy $P_F$. 
+OC-GFN is able to generate diverse trajectories, which is different from typical goal-conditioned reinforcement learning approaches~\citep{schaul2015universal} that usually only learn a single solution to the goal state. This ability can be very helpful for generalizing to downstream tasks with similar structure but subtle changes (e.g., obstacles in the maze)~\citep{kumar2020one}.
+
+\subsection{Bit Sequence Generation} \label{exp:bit}
+We study the bit sequence generation task~\citep{malkin2022trajectory}, where the agent generates sequences of length $n$ in a left-to-right manner.
+At each time step, the agent appends a $k$-bit ``word" from a vocabulary $V$ to the current state. 
+ \\
+
+\noindent {\textbf{Analysis of the unsupervised pre-training stage.}}
+We first analyze how well OC-GFN learns in the unsupervised pre-training stage by investigating its success rate for achieving specified outcomes in bit sequence generation problems with different scales including small, medium, and large.
+As shown in Figures~\ref{fig:bit_succ}(a)-(c), OC-GFN can successfully reach outcomes, leading to a high success rate as summarized in Figure~\ref{fig:bit_succ}(d).
+It is also worth noting that it fails to learn when the outcome teleportation module is disabled due to the particularly large outcome spaces. In such highly challenging scenarios, the contrastive training paradigm alone does not lead to efficient learning.
+
+\begin{figure}[!h]
+\centering
+\subfloat[Small.]{\includegraphics[width=0.23\linewidth]{./figs/bit_40_succ.pdf}}
+\subfloat[Medium.]{\includegraphics[width=0.23\linewidth]{./figs/bit_60_succ.pdf}}
+\subfloat[Large.]{\includegraphics[width=0.23\linewidth]{./figs/bit_100_succ.pdf}}
+\subfloat[Summary.]{
+\hline
+\multicolumn{2}{c}{\textbf{Size} \quad \quad \textbf{Success rate}} \\ \hline
+Small & $98.37\pm0.33$\%\\ 
+Medium & $97.22\pm1.70$\%\\ 
+Large & $93.75\pm2.04$\% \\ 
+\hline
+\end{tabular}}
+}
+\caption{Success rates in the bit sequence generation task with different scales of the task.}
+\label{fig:bit_succ}
+\end{figure}
+
+\centering
+{\includegraphics[width=1.\linewidth]{./figs/bit_avg_norm_modes.pdf}}
+\caption{Results in bit sequence generation.}
+\label{fig:bit_res_avg}
+\end{wrapfigure}
+\noindent {\textbf{Analysis of the Supervised Fine-Tuning Stage.}}
+After we justified the effectiveness of training OC-GFN in the unsupervised pre-training stage, 
+ 
+We compare the proposed approach against strong baselines including training a GFN from scratch~\citep{bengio2023foundations}, Metropolis-Hastings-MCMC~\citep{dai2020learning}, and Deep Q-Networks (DQN)~\citep{mnih2015human}.
+We evaluate each method in terms of the number of modes discovered during the course of training as in previous works~\citep{malkin2022trajectory}.
+We find that OC-GFN significantly outperforms baselines in mode discovery in both efficiency and performance, while DQN gets stuck and does not discover diverse modes due to the reward-maximizing nature, and MCMC fails to perform well in problems with larger state spaces. 
+
+\subsection{TF Bind Generation} \label{sec:exp_tfb8}
+
+We study a more practical task of generating DNA sequences with high binding activity with targeted transcription factors~\citep{jain2022biological}.
+The agent appends a symbol from the vocabulary to the 
+current state (a partially constructed sequence) at each step.
+We consider $30$ different downstream 
+tasks studied in~\citep{barrera2016survey}, which conducted biological experiments to determine the binding properties between a range of transcription factors and every conceivable DNA sequence.
+\centering
+\subfloat{\includegraphics[width=1.\linewidth]{./figs/tfb8_cond_succ.pdf}}
+\caption{
+The success rate of OC-GFN in TF Bind generation. 
+}
+\label{fig:tfb_stage1}
+\end{wrapfigure}
+\noindent {\textbf{Analysis of the unsupervised pre-training stage.}}
+We analyze how well OC-GFN learns by evaluating its success rate. 
+Figure~\ref{fig:tfb_stage1} shows that OC-GFN can successfully achieve the targeted goals with a success rate of nearly $100\%$ in the practical task of generating DNA sequences.
+\noindent {\textbf{Analysis of the supervised fine-tuning stage.}}
+We investigate how well OC-GFN can transfer to downstream tasks for generating TF Bind 8 sequences.
+We tune the hyperparameters on the task \texttt{PAX3\_R270C\_R1}, and evaluate the baselines on the other $29$ downstream tasks.
+We investigate the learning efficiency and performance in terms of the number of modes and the top-$K$ scores during the course of training.
+The results in $2$ downstream tasks are shown in Figure~\ref{fig:tfb_res}, with 
+
+Figures~\ref{fig:tfb_res}(a)-(b) illustrate the number of discovered modes while Figures~\ref{fig:tfb_res}(c)-(d) shows the top-$K$ scores.
+We find that the proposed approach
+discovers more diverse modes faster and achieves higher top-$K$ ($K=100$) scores compared to baselines.
+
+We further visualize in Figure~\ref{fig:tfb_res}(e) the t-SNE plots 
+of the TF Bind 8 sequences discovered by transferring OC-GFN with the amortized approach and the more expensive but competitive training of a GFN from scratch.
+As shown, training a GFN from scratch only focuses on limited regions while the OC-GFN has a greater coverage.
+
+\begin{figure}[!h]
+\centering
+\subfloat[]{\includegraphics[width=0.2\linewidth]{./figs/tfb_0_modes.pdf}}
+\subfloat[]{\includegraphics[width=0.2\linewidth]{./figs/tfb_14_modes.pdf}}
+\subfloat[]{\includegraphics[width=0.2\linewidth]{./figs/tfb_0_scores.pdf}}
+\subfloat[]{\includegraphics[width=0.2\linewidth]{./figs/tfb_14_scores.pdf}}
+\subfloat[]{\includegraphics[width=0.22\linewidth]{./figs/tfb_PAX3_tsne.pdf}}
+\caption{Results in the TF Bind sequence generation task in different downstream tasks.}
+\label{fig:tfb_res}
+\end{figure}
+
+\centering
+\subfloat{\includegraphics[width=0.5\linewidth]{./figs/rna_succ.pdf}}
+\subfloat{\includegraphics[width=0.5\linewidth]{./figs/rna_avg_norm_modes.pdf}}
+\caption{Results in RNA generation. \textit{Left}: success rate. \textit{Right}: number of modes (normalized).}
+\label{fig:rna_succ}
+\end{wrapfigure}
+\subsection{RNA Generation}
+We study the performance of the proposed method in a larger task of generating RNA sequences that bind to a given target introduced in~\citep{lorenz2011viennarna}. 
+
+We consider four different downstream tasks from ViennaRNA~\citep{lorenz2011viennarna}, each considering the binding energy with a different target as a reward. 
+
+The left part in Figure~\ref{fig:rna_succ} shows that OC-GFN achieves a success rate of almost $100\%$ at the end of the pre-training stage.
+The right part in Figure~\ref{fig:rna_succ} summarizes the averaged normalized (between $0$ and $1$ to facilitate comparison across tasks) 
+
+We observe that OC-GFN is able to achieve much higher diversity than baselines, indicating that the pre-training phase enables the OC-GFN to explore the state space much more efficiently. 
+
+\subsection{Antimicrobial Peptide Generation}
+\centering
+\subfloat[Success rate.]{\includegraphics[width=0.5\linewidth]{./figs/amp_succ.pdf}} 
+\subfloat[Number of modes.]{\includegraphics[width=0.5\linewidth]{./figs/amp_modes.pdf}} 
+\caption{Results in AMP generation.}
+\label{fig:amp_res}
+\end{wrapfigure}
+To demonstrate the scalability of our approach to even more challenging and complex scenarios, we also evaluate it on the biological task of generating antimicrobial peptides (AMP) with lengths $50$~\citep{jain2022biological} (resulting in an outcome space of $20^{50}$ candidates).
+
+Figure~\ref{fig:amp_res}(a) demonstrates the success rate of OC-GFN for achieving target outcomes, which can still reach a high success rate in particularly large outcome spaces with our novel training paradigm according to contrastive learning and fast goal propagation.
+Figure~\ref{fig:amp_res}(b) shows the number of modes discovered, where OC-GFN provides consistent improvements, which validates the efficacy of OC-GFN to successfully scale to much larger-scale tasks. 
+
+
+
+\section{Conclusion}
+
+In this paper, we propose a novel method for unsupervised pre-training of GFlowNets through an outcome-conditioned GFlowNet, coupled with a new approach to efficiently fine-tune the pre-trained model for downstream tasks.
+Our work opens the door for GFlowNets to be pre-trained for fine-tuning for downstream tasks by leveraging learned shared structure.
+Empirical results on the standard GridWorld domain validate the effectiveness of the proposed approach in successfully achieving targeted outcomes and the efficiency of the amortized predictor. 
+We also conduct extensive experiments in the more complex and challenging biological sequence design tasks to demonstrate its practical scalability. The proposed method greatly improves learning performance compared with strong baselines including training a GFlowNet from scratch, particularly in tasks which are challenging for GFlowNets to learn. 
+
+
+
+
+

@@ -1,0 +1,502 @@
+\title{Linear Attention Sequence Parallelism}
+
+\begin{abstract}
+Sequence Parallel (SP) serves as a prevalent strategy to handle long sequences that exceed the memory limit of a single GPU. However, existing SP methods do not take advantage of linear attention features, resulting in sub-optimal parallelism efficiency and usability for linear attention-based language models. In this paper, we introduce Linear Attention Sequence Parallel (LASP), an efficient SP method tailored to linear attention-based language models. Specifically, we design an efficient point-to-point communication mechanism to leverage the right-product kernel trick of linear attention, which sharply decreases the communication overhead of SP. We also enhance the practical efficiency of LASP by performing kernel fusion and intermediate state caching, making the implementation of LASP hardware-friendly on GPU clusters. Furthermore, we meticulously ensure the compatibility of sequence-level LASP with all types of batch-level data parallel methods, which is vital for distributed training on large clusters with long sequences and large batches.
+We conduct extensive experiments on two linear attention-based models with varying sequence lengths and GPU cluster sizes. LASP scales sequence length up to 4096K using 128 A100 80G GPUs on 1B models, which is 8$\times$ longer than existing SP methods while being significantly faster.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec: intro}
+Recently, linear attention-based models~\cite{qin2024transnormerllm,qin-etal-2022-devil,Choromanski2020RethinkingAW} are becoming increasingly popular due to their faster processing speed and comparable language modeling performance to vanilla Softmax transformers~\cite{vaswani2017attention}. Meanwhile, the growing size of large language models (LLMs)~\cite{touvron2023llama,2307.09288,10336898} and longer sequence lengths exert significant strain on contemporary GPU hardware because the memory of a single GPU confines the maximum sequence length of a language model. To tackle this issue, the Sequence Parallelism (SP) techniques~\cite{li2022sequence, korthikanti2022reducing} are often utilized to divide a long sequence into several sub-sequences and train them on multiple GPUs separately. Unfortunately, existing SP methods do not fully leverage the benefits of linear attention features, leading to suboptimal parallelism efficiency and usability.
+
+In this paper, we present the Linear Attention Sequence Parallel (LASP) technique for efficient sequence parallelism on linear transformers. Our approach includes a sophisticated communication mechanism based on point-to-point (P2P) communication for exchanging intermediate states during forward and backward passes among GPUs within a node or across multiple nodes. This design maximizes the utilization of right-product kernel tricks~\cite{katharopoulos2020transformers,qin2023linearized,qin2024lightning} in linear attention. Notably, our technique is independent of attention heads partitioning, which allows it to be applied to models with varying numbers or styles of attention heads, such as multi-head, multi-query, and grouped-query attentions. This flexibility exceeds the capabilities of existing SP methods in Megatron-LM~\cite{shoeybi2019megatron,korthikanti2022reducing} or DeepSpeed~\cite{jacobs2023deepspeed}. 
+
+Our implementation of LASP incorporates system engineering optimizations such as kernel fusion and KV State caching, resulting in significantly enhanced execution efficiency. Furthermore, we have taken care in ensuring compatibility of LASP with various (sharded) distributed data-parallel (DDP)~\cite{li2020pytorch,sun2024co2} training methods during the implementation, which we refer to as the data-sequence hybrid parallelism. Through extensive experiments with models of different parameters, cluster sizes, and sequence lengths, we demonstrate LASP's impressive performance and efficiency when used with these DDP instances. Specifically, LASP is significantly faster than existing SP methods and can extend sequence length 8$\times$ longer under the same hardware constraints.
+
+Our primary contributions can be summarized as follows:
+\begin{compactitem}
+    \item \textit{A new SP strategy that is tailored to linear attention.} Enabling linear attention-based models to scale for long sequences without being limited by a single GPU.
+    \item \textit{Sequence length-independent communication overhead.} Our elegant communication mechanism leverages right-product kernel trick of linear attention to ensure that the exchanging of linear attention intermediate states is sequence length-independent.
+    \item \textit{GPU friendly implementation.} We optimize LASP's execution on GPUs through meticulous system engineering, including kernel fusion and KV State caching.
+    \item \textit{Data-parallel compatibility.} LASP is compatible with all batch-level DDP methods, such as PyTorch/Legacy DDP, FSDP, and ZeRO-series optimizers.
+\end{compactitem}
+
+
+\section{Method}
+
+\label{sec: algo}
+\subsection{Preliminary}
+\textbf{Softmax Attention.}
+Consider the standard attention ~\cite{vaswani2017attention} computation with causal masking in the transformer architecture, formulated as:
+\begin{equation}
+\small
+\mathbf{O}=\mathrm{Softmax}(\mathbf{Q} \mathbf{K}^{\top} / \sqrt{d} \odot \mathbf{M}) \mathbf{V},
+\label{eq: Softmax attention}
+\end{equation}
+where $d$ denotes the hidden dimension. The matrices $\mathbf{Q},\mathbf{K},\mathbf{V}\in \R^{N\times d}$ represent query, key, and value matrices, respectively. These matrices are linear projections of the input $\mathbf{X}\in \R^{N\times d}$, i.e., $\mathbf{Q} = \mathbf{X}\mathbf{W_Q}$, $\mathbf{K} = \mathbf{X}\mathbf{W_K}$, $\mathbf{V} = \mathbf{X}\mathbf{W_V}$. The output matrix is denoted as $\mathbf{O}\in \R^{N\times d}$, and $\mathbf{M}\in \R^{N\times N}$ represents the causal mask matrix.
+The $\mathrm{Softmax(\cdot)}$ operation introduces quadratic time complexity relative to the input sequence length $N$, limiting the scalability of vanilla transformers to extended input sequences.
+
+\textbf{Linear Attention.}
+Linear attention is originally proposed in~\cite{katharopoulos2020transformers}, with the elimination of Softmax operation~\cite{vaswani2017attention}. \citet{qin-etal-2022-devil, qin2023scaling} propose to replace the Softmax operation with a normalization operation $\mathrm{Norm(\cdot)}$, which turns to a concise formulation as:
+\begin{equation}
+\small
+\mathbf{O}=\mathrm{Norm}((\mathbf{Q} \mathbf{K}^{\top} \odot \mathbf{M})\mathbf{V}).
+\label{eq: norm attention mask}
+\end{equation}
+When considering bidirectional tasks, the above formulation can be simplified as $\mathbf{O}=\mathrm{Norm}((\mathbf{Q} \mathbf{K}^{\top})\mathbf{V})$. Then by performing the associativity property of matrix products, it can be mathematically equivalently transformed into a right-product version:
+\begin{equation}
+\small
+\mathbf{O}=\mathrm{Norm}(\mathbf{Q} (\mathbf{K}^{\top}\mathbf{V})).
+\label{eq: norm attention no mask}
+\end{equation}
+This linear attention formulation facilitates recurrent prediction with a computational complexity of $O(Nd^2)$. And the recurrent update of $\mathbf{K}^{\top}\mathbf{V}$ without needing to compute the entire attention matrix makes its inference efficient.
+
+While linear complexity offers significant advantages in terms of computational efficiency and memory optimization for linear attention, it still incurs a proportional increase in computation and memory utilization on a single GPU as the sequence length $N$ grows. This can lead to memory constraints on a single GPU, such as the 80GB limit in NVIDIA A100, for exceptionally long sequences. The challenge of achieving zero-redundancy (on sequence level) training for such long sequences using linear attention-based LLMs across GPU clusters remains an open problem. Furthermore, the complexity of addressing this issue in a casual setting further intensifies the challenge. To address this, we propose LASP as a solution for parallelizing linear attention training at the sequence level, even in a casual setting.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{figures/LASP.pdf}
+    \caption{\textbf{Visualization of LASP.} We illustrate a typical linear transformer layer to explain the mechanism of LASP. $\mathbf{X}$ as an input sequence is partitioned into multiple sub-sequence chunks, which are then fed into different model copies on discrete devices. $g$ represents conjugate communication operations in forward and backward passes. In forward pass, $g$ is $\texttt{Send}$ $\&$ $\texttt{Recv}$ from device $i$ to $(i+1)$. While in backward pass, $g$ is $\texttt{Send}$ $\&$ $\texttt{Recv}$ from device $(i+1)$ to $i$. The communication operations exchange intermediate states $\mathbf{KV}$ and $\mathbf{dKV}$ during forward and backward passes to insure the performance of SP.}
+    \label{fig:lasp visualization}
+\end{figure}
+\subsection{LASP}
+
+LASP tiles sequence over the cluster. 
+Follow the thought-of-tiling, LASP partitions the input sequences into multiple sub-sequence chunks, distributing these chunks individually across different GPUs. For linear attention in a casual setting, in order to fully exploit the advantage of right-product in linear attention, we categorize the attention computation for sub-sequences into two distinct types: intra-chunks and inter-chunks. Intra-chunks involve conventional attention computation, while inter-chunks leverage the kernel tricks associated with linear attention's right-product.
+Further details regarding the intricate mechanisms of LASP in data distribution, forward pass, and backward pass are expounded upon below. A visualization of LASP is presented in Fig. \ref{fig:lasp visualization}.
+\paragraph{Data Distribution.}
+\label{subsubsec: data distribution}
+
+LASP is designed for training long sequences on linear transformers in a distributed environment, achieved by partitioning the input data along its sequence dimension. In this situation, each GPU within the distributed environment undertakes the training of a subset of sub-sequences, which serves to diminish the large memory footprint associated with activation during the training of long sequences. Communication operations are introduced between GPUs to transmit intermediate states. The final trained model assimilates the knowledge derived from the entirety of the long sequences.
+
+For an input sequence of length $N$, we establish its embedding space representation denoted as $\mathbf X \in \mathbb{R}^{N \times d}$ with a feature dimension of $d$. In the LASP framework, $\mathbf{X}$ is evenly partitioned into $T$ chunks, where $T$ is called the sequence parallel size, which must be divisible by the distributed world size $W$.
+These segmented data chunks are subsequently assigned to the respective GPUs. It is essential to note that different sequence parallel groups receive dissimilar data batches. However, within the same group, all data chunks originate from an identical batch of data.
+A comprehensive depiction of the data distribution process in LASP is provided in Algorithm~\ref{algo:LASP data distribution}. Additionally, an illustrative example of data distribution in LASP is presented in Fig. \ref{fig: lasp_data}, considering a node with 8 GPUs and the partitioning of 2 sequences into 4 sub-sequence chunks.
+\setlength{\textfloatsep}{2pt}
+\begin{algorithm}[t]
+\small
+    \caption{LASP Data Distribution}
+    \label{algo:LASP data distribution}
+    \begin{algorithmic}[1]
+    \STATE{\textbf{Input:} An input sequence in embedding space $\mathbf X \in \mathbb{R}^{N \times d}$ with sequence length $N$ and hidden dimension $d$, distributed world size $W$ and sequence parallel size $T$.}
+    \STATE{Obtain number of sequence parallel groups $G=W/T$.}
+    \STATE{Obtain sub-sequence length (or chunk size) $C=N/T$.}
+    \STATE{Get global rank list $R = \text{get\_global\_rank}()$.}
+    \STATE{Obtain sequence parallel source rank list $R_{{src}} = \lfloor R / T \rfloor * T$.}
+    \STATE{Along sequence dimension, split $\mathbf {X}$ into $T$ chunks $\{\mathbf X_1, \mathbf X_2, ...\mathbf X_{T}\}$, of size $C \times d$ for each.}
+    \STATE{Transfer copies of data chunks $\{\mathbf X_1, \mathbf X_2, \cdots, \mathbf X_{T}\}$ to GPUs with rank indices in $R_{src}$.}
+    \STATE{$\texttt{Scatter}$ $\{\mathbf X_1, \mathbf X_2, \cdots, \mathbf X_{T}\}$ from $R_{src}$ to all ranks in respective sequence parallel groups.}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/LASP_Data_Fig.pdf}
+    \caption{\textbf{Example of LASP Data Distribution.}
+    In this illustration, the distributed world size is characterized by $W=8$, the sequence parallel size by $T=4$, the number of sequence parallel groups by $G=2$, and the sequence parallel source rank list by $R_{{src}}=[0,4]$. For the first batch $\textsc{Seq0}$, the input sequence ${\mathbf X}$ undergoes partitioning into $T$ chunks $\{\mathbf X_1, \mathbf X_2, ...\mathbf X_{T}\}$ along the sequence dimension, subsequently transmitted to the first rank in the first SP group denoted as $\textsc{SP-Group0}$, which corresponds to global rank 0. The data chunks on global rank 0 are then scattered to global ranks 0, 1, 2, 3 within $\textsc{SP-Group0}$, where each rank only retains a single chunk. The subsequent batch $\textsc{Seq1}$ follows a similar allocation procedure, being assigned to global ranks 4, 5, 6, 7 within $\textsc{SP-Group1}$.}
+    \label{fig: lasp_data}
+\end{figure}
+\begin{algorithm}[t]
+\small
+    \caption{LASP Forward Pass}
+    \label{algo:LASP fw pseudo}
+    \begin{algorithmic}[1]
+    \STATE{\textbf{Input:} input sequence in embedding space $\mathbf X \in \mathbb{R}^{N \times d}$ with sequence length $N$ and hidden dimension $d$, distributed world size $W$, sequence parallel size $T=W$, decay rate $\lambda \in \mathbb R^+$.}
+    \STATE{Distribute input sequence $\mathbf X$ according to Algorithm \ref{algo:LASP data distribution}.}
+    \STATE{Obtain sub-sequence length (or chunk size) $C=N/T$.}
+     \STATE{Initialize mask $\mathbf M\in \mathbb R^{C\times C}$, where $M_{ij} = \lambda^{i-j}$, if $i\ge j$, else $M_{ij} = 0$.}
+     \STATE{Initialize $\mathbf \Lambda =\mathrm{diag}\{\lambda, \lambda^2, \cdots, \lambda^{C}\}\in \mathbb R^{C\times C} $.} 
+     \STATE{Initialize activation state $\mathbf {KV} =\mathbf 0\in \mathbb R^{d\times d} $.}
+    \FOR{chunk $t \in \{1, \cdots, T\}$ at rank $i \in \{1, \cdots, W\}$ in parallel}
+        \STATE{Calculate $\mathbf Q_t=\mathbf{X}_t \mathbf{W}_Q$, $\mathbf  K_t=\mathbf{X}_t \mathbf{W}_K$, $\mathbf V_t =\mathbf{X}_t \mathbf{W}_V$ according to its own data chunk, of size $C \times d$ for each.}
+        \STATE{Compute $\mathbf O_{\mathrm{t, intra}}= [(\mathbf Q_t \mathbf K_t^{\top }) \odot \mathbf M]\mathbf V_t$.}
+      \ENDFOR
+    \FOR{chunk $t \in \{1, \cdots, T\}$ at rank $i \in \{1, \cdots, W\}$}
+        \STATE{$\texttt{Recv}$ activation $\mathbf{KV}_{ t-1}$ from rank $(i-1)$.}
+        \STATE{Save $\mathbf{KV}_{{t-1}}$ as $\mathbf{KV}_{i}$ on rank $i$ for backward computation.}
+        \STATE{Compute $\mathbf{O}_{\mathrm{t, inter}} =\mathbf \Lambda \mathbf Q_t \mathbf {KV}_{t-1} $.}
+        \STATE{Compute $\mathbf O_t=\mathbf O_{\mathrm{t, intra}}+ \mathbf{O}_{\mathrm{t, inter}}$ as $\mathbf O$ of $t$-th chunk.}
+        \STATE{Update $\mathbf{KV}_{{t}} =\lambda^C \mathbf{KV}_{{t-1}}+ (\lambda^{C}\mathbf \Lambda^{-1} \mathbf K_t)^{\top}  \mathbf V_t$.}
+        \STATE{$\texttt{Send}$ activation $\mathbf{KV}_{{t}}$ to rank $(i+1)$.}
+      \ENDFOR
+      \STATE{return $\mathbf O = [\mathbf O_t]$, with $t\in \{1,\cdots, T\}$.}
+\end{algorithmic}
+\end{algorithm}
+\paragraph{Forward Pass.}
+To streamline derivations, the $\mathrm{Norm}(\cdot)$ operator in Eq.~(\ref{eq: norm attention mask}) is temporarily omitted. Additionally, we consider a normal case where $W = T$, indicating $G=W/T=1$. In this scenario, GPU with rank $0$ consolidates all split sub-sequences in a batch, subsequently distributing them to all GPUs across the entire distributed world.
+It is noteworthy that the scenario where the sequence parallel size is not equal to world size is discussed in \ref{subsec: Hybrid Parallelism}.
+
+We first define two symbols $\mathbf{kv}$ and $\mathbf{KV}$ which are important in the right-product computation procedure of linear attention. Without loss of generality, we add $\lambda$ as the decay rate in linear attention with casual mask, choosing $\lambda=1$ yields the ordinary linear attention.
+In the forward pass of linear attention computation with casual mask, the $s$-th output can be formulated as
+\begin{equation}
+\small
+\label{eq:linear_attn}
+\mathbf{o}_s^{\top} = \mathbf{q}_s^{\top} \sum_{i \le s} \lambda^{s-i} \mathbf{k}_i \mathbf{v}_i^{\top}.
+\end{equation}
+
+Rewrite in a recursive form~\citep{katharopoulos2020transformers}, we have
+\begin{equation}
+\small
+\begin{aligned}
+\mathbf{kv}_0 &= 0 \in \mathbb{R}^{d \times d}, \\
+\mathbf{kv}_s &= \lambda \mathbf{kv}_{s-1} + \mathbf{k}_s \mathbf{v}_s^{\top}, \\
+\mathbf{o}_s^{\top} &= \mathbf{q}_s^{\top} (\mathbf{kv}_s),
+\end{aligned}
+\end{equation}
+where
+\begin{equation}
+\small
+\textstyle
+\mathbf{kv}_s = \sum_{i \le s} \lambda^{s-i} \mathbf{k}_i \mathbf{v}_i^{\top}
+\end{equation}
+is the activation state in the forward computation of linear attention with $s$-th input.
+
+In the sequence parallelism scenario, given data chunk $\mathbf{X}_t$ on rank $i$, the query, key and value corresponding to $\mathbf{X}_t$ is $\mathbf Q_t=\mathbf{X}_t \mathbf{W}_Q$, $\mathbf  K_t=\mathbf{X}_t \mathbf{W}_K$, $\mathbf V_t =\mathbf{X}_t \mathbf{W}_V$. Note that we assume $T=W$ here, their indices are thus equivalent, \ie $t=i$. The output within the $t$-th chunk can be calculated as
+\begin{equation}
+\small
+   \mathbf{O}_{\mathrm{t, intra}} = [(\mathbf{Q}_{t} \mathbf{K}_{t}^\top) \odot \mathbf{M}] \mathbf{V}_{t}. 
+\end{equation}
+The intra-chunk computation has no dependencies with other chunks on other GPUs, so it can be calculated parallelized on all ranks in the distributed world.
+However, this result does not consider the impact of the previous $1\sim (t-1)$ chunks on the $t$-th chunk, which is called an inter-chunk. To calculate inter-chunk, let us rearrange Eq.~(\ref{eq:linear_attn}) as
+\begin{equation}
+\label{eq:forward inter chunk}
+\small
+\begin{aligned}
+&\mathbf{o}_{s+C}^\top = \mathbf{q}_{s+C}^\top \sum_{i \le s+C} \lambda^{s+C-i} \mathbf{k}_i \mathbf{v}_i^\top \\
+= &\mathbf{q}_{s+C}^\top \sum_{i=C+1}^{C+s} \lambda^{s+C-i} \mathbf{k}_i \mathbf{v}_i^\top + \lambda^s \mathbf{q}_{s+C}^\top\sum_{i \le C} \lambda^{C-i} \mathbf{k}_i \mathbf{v}_i^\top .
+\end{aligned}
+\end{equation}
+The first part (before the plus sign) in Eq.~(\ref{eq:forward inter chunk}) corresponds to the computation on intra-chunk, and the second part (after the plus sign) corresponds to the computation on inter-chunk. In sequence parallelism scenario, Eq.~(\ref{eq:forward inter chunk}) can be rewritten in the chunk form as follows:
+\begin{equation}
+\small
+\mathbf{O}_{\mathrm{t,inter}} = \boldsymbol{\Lambda} \mathbf{Q}_{t} \mathbf{K} \mathbf{V}_{t-1},
+\end{equation}
+where
+\begin{equation}
+\small
+\mathbf{KV}_{t} = \mathbf{kv}_{tC}.
+\end{equation}
+It is worth noting that the calculation of the inter part for the $t$-th chunk depends on the activation state of previous $(t-1)$ chunk, \ie $\mathbf{KV}_{t-1}$, which is calculated on rank $(i-1)$. Thus a P2P communication operation $\texttt{Recv}$ should be performed to pull $\mathbf{KV}_{t-1}$ from rank $(i-1)$ to rank $i$. Then the activation state $\mathbf{KV}_{t}$ should be updated for subsequent inter-chunk attention computation at $(t+1)$-th chunk. The update rule of $\mathbf{KV}_t$ at $t$-th chunk is
+\begin{equation}
+\small
+\begin{aligned}
+\mathbf{KV}_{t} &=  \sum_{s \le tC} \lambda^{tC-s} \mathbf{k}_s \mathbf{v}_s ^{\top}\\
+&= \lambda^C \!\!\!\! \sum_{s \le (t-1)C} \!\!\!\! \lambda^{(t-1)C-s} \mathbf{k}_s\mathbf{v}_s^{\top}  + \!\!\!\!\!\! \sum_{s=(t-1)C+1}^{tC} \!\!\!\!\!\! \lambda^{tC-s}  \mathbf{k}_s \mathbf{v}_s^{\top} \\
+&= \lambda^C \mathbf{KV}_{t-1} + \left(\mathrm{diag}\{\lambda^{C-1}, \ldots, 1\} \mathbf{K}_{t}\right)^{\top} \mathbf{V}_{t} \\
+&= \lambda^C \mathbf{KV}_{t-1} + \left(\lambda^{C}\mathbf \Lambda^{-1} \mathbf{K}_{t}\right)^{\top} \mathbf{V}_{t}.
+\end{aligned}
+\label{eq: kv_t+1}
+\end{equation}
+In correspondence to the preceding $\texttt{Recv}$ operation, another P2P communication operation $\texttt{Send}$ is executed to transmit the acquired $\mathbf{KV}_{t}$ in Eq.~(\ref{eq: kv_t+1}) to the subsequent rank $(i+1)$ for its inter-chunk computation.
+
+It is noteworthy that in the backward pass, the $t$-th chunk necessitates $\mathbf{KV}_{t-1}$ as activation to calculate gradients. To minimize communication operations, we cache $\mathbf{KV}_{t-1}$ on High-Bandwidth Memory (HBM) to accelerate computation. Integrating both the intra and inter parts, the final forward output is as follows:
+\begin{equation}
+\small
+\mathbf O_{t}= \mathbf{O}_{t,\mathrm{intra}} + \mathbf{O}_{t,\mathrm{inter}}
+\end{equation}
+We present the complete expression of forward pass for LASP with $W=T$ in Algorithm~\ref{algo:LASP fw pseudo}.
+\begin{algorithm}[t]
+\small
+    \caption{LASP Backward Pass}
+    \label{algo:LASP bw pseudo}
+    \begin{algorithmic}[1]
+    \STATE{\textbf{Input:} Sequence Length $N$, Distributed world size $W$, sequence parallel size $T$, decay rate $\lambda \in \mathbb R^+$, $\mathbf Q_t,\mathbf K_t,\mathbf V_t,\mathbf O_t,\mathbf{dO}_t \in \mathbb{R}^{C \times d}$ for $t\in \{1, 2, \cdots, {T}\}$.}
+    \STATE{Obtain sub-sequence length (or chunk size) $C=N/T$.}
+     \STATE{Initialize mask $\mathbf M\in \mathbb R^{C\times C}$, where $M_{ij} = \lambda^{i-j}$, if $i\ge j$, else $M_{ij} = 0$.}
+     \STATE{Initialize $\mathbf \Lambda =\mathrm{diag}\{\lambda, \lambda^2, \cdots, \lambda^{C}\}\in \mathbb R^{C\times C} $} .
+      \STATE{Initialize $\mathbf{dKV}=\mathbf 0\in \mathbb R^{d\times d} $.}
+      
+    \FOR{$t\in \{1, 2, \cdots, T\}$ at rank $i\in\{1, 2, \cdots, W\}$ in parallel}
+        \STATE{Compute 
+        $\mathbf {dQ}_{\mathrm{t, intra}}=[(\mathbf {dO}_t \mathbf V_t^{\top}) \odot \mathbf M] \mathbf{K}_t$.}
+         \STATE{Compute
+        $\mathbf{dQ}_{\mathrm{t, inter}}=\mathbf \Lambda \mathbf{dO}_t \mathbf{KV}_{t-1}^{\top}$.}
+        \STATE{Compute
+        $\mathbf{dK_{\mathrm{t, intra}}}=[(\mathbf {dO}_t \mathbf V_t^{\top}) \odot \mathbf M ]^{\top} \mathbf{Q}_t$.}
+        \STATE{Compute
+        $\mathbf{dV_{\mathrm{t, intra}}}=[(\mathbf Q_t \mathbf K_t^{\top}) \odot \mathbf M ]^{\top} \mathbf{dO}_t$.}
+    \ENDFOR
+    \FOR{$t\in\{T,\cdots, 2, 1\}$ at rank $i\in\{W,\cdots, 2, 1\}$}
+        \STATE{$\texttt{Recv}$ activation $\mathbf{dKV}_{t+1}$ from rank $(i+1)$.}
+        \STATE{Compute
+        $\mathbf{dK_{\mathrm{t, inter}}}={(\lambda^{C} \mathbf \Lambda^{-1} \mathbf V_t)}\mathbf{dKV}_{t+1}^{\top}$.}
+        \STATE{Compute
+        $\mathbf{dV_{\mathrm{t, inter}}}=(\lambda^{C} \mathbf \Lambda^{-1}\mathbf K_t) \mathbf{dKV}_{t+1}$.}
+        \STATE{Load $\mathbf{KV}_i$ as $\mathbf{KV}_t$ on rank $i$.}
+        \STATE{Combine intra- and inter-chunks of $\mathbf {dQ}_t, \mathbf {dK}_t, \mathbf {dV}_t$:
+        \begin{equation*}
+        \begin{aligned}
+        \mathbf {dQ}_t&=\mathbf{dQ}_{t,\mathrm{intra}} + \mathbf{dQ}_{t,\mathrm{inter}},\\ 
+        \mathbf {dK}_t&=\mathbf {dK}_{t,\mathrm{intra}} +\mathbf {dK}_{t,\mathrm{inter}},\\
+        \mathbf {dV}_t&=\mathbf {dV}_{t,\mathrm{intra}} +\mathbf {dV}_{t,\mathrm{inter}}.
+        \end{aligned}
+        \end{equation*}}
+        
+        \STATE{Compute $\mathbf{dKV}_{t} =\lambda^C \mathbf{dKV}_{t+1}+ (\mathbf \Lambda \mathbf Q_t)^{\top}  \mathbf {dO}_t $.}
+        \STATE{$\texttt{Send}$ activation $\mathbf{dKV}_{t}$ to rank $i$.}
+    \ENDFOR
+    \STATE{return $\mathbf {dQ}=[\mathbf {dQ}_t]$, $\mathbf{dK}=[\mathbf{dK}_t]$, $\mathbf{dV}=[\mathbf{dV}_t]$, with $t\in \{1,2,\cdots, T\}$.}
+\end{algorithmic}
+\end{algorithm}
+\paragraph{Backward Pass.}
+For the backward pass, let us examine the inverse procedure. 
+We first define $\mathbf{dkv}_t$ for subsequent analysis. Given $\mathbf{do}_s$, we have~\citep{katharopoulos2020transformers}
+\begin{equation}
+\small
+\label{eq:backward}
+\begin{aligned}
+\mathbf{dq}_s^{\top} &= \mathbf{do}_s ^{\top}\mathbf{kv}_s^\top \in \mathbb{R}^{1 \times d}, \\
+\mathbf{dk}_s^{\top} &= \mathbf{v}_s^{\top}\mathbf{dkv}_s^\top \in \mathbb{R}^{1 \times d}, \\
+\mathbf{dv}_s^{\top} &= \mathbf{k}_s^{\top} \mathbf{dkv}_s\in \mathbb{R}^{1 \times d}, \\
+\mathbf{dkv}_s &= \sum_{i \geq s} \lambda^{i-s} \mathbf{q}_i \mathbf{do}_i^\top \in \mathbb{R}^{d \times d}.
+\end{aligned}
+\end{equation}
+By writing $\mathbf{dkv}_s$ in a recursive form, we have
+\begin{equation}
+\small
+\begin{aligned}
+\mathbf{dkv}_{n+1} &= 0 \in \mathbb{R}^{d \times d}, \\\quad \mathbf{dkv}_{s-1} &= \lambda \mathbf{dkv}_s + \mathbf{q}_{s-1} \mathbf{do}_{s-1}^\top.
+\end{aligned}
+\end{equation}
+In the sequence parallelism scenario, we have $\{\mathbf{Q_t}, \mathbf{K_t}, \mathbf{V_t}, \mathbf{O_t}, \mathbf{dO_t}\}$ which corresponds to the $t$-th sub-sequence chunk on rank $i$, where $t\in \{1,\cdots, T\}$ and $i\in \{1,\cdots, W\}$. Same with the forward pass, the following derivations assume $t=i$, $T=W$.
+
+We first calculate $\mathbf{dQ}$ with respective to the $t$-th data chunk, which yields:
+\begin{equation}
+\small
+\mathbf{dQ}_{t, \mathrm{intra}} = [(\mathbf{dO}_{t} \mathbf{V}_{t}^\top) \odot \mathbf{M}] \mathbf{K}_{t}.
+\end{equation}
+Since the computation of $\mathbf{dQ}_{t, \mathrm{intra}}$ is independent, its calculation can be parallelized on all GPUs. While the calculation of $\mathbf{dQ}_{t, \mathrm{inter}}$ reflects the inter-dependence of chunks $1$ to $t-1$ on chunk $t$. In order to compute the inter part, we transform Eq.~(\ref{eq:backward}) as
+\begin{equation}
+\small
+\label{eq: backward dq}
+\begin{aligned}
+&\mathbf{dq}_{s+C}^\top = \mathbf{do}_{s+C}^\top \sum_{i \le s+C} \lambda^{s+C-i}  \mathbf{v}_i\mathbf{k}_i^\top \\
+= &\mathbf{do}_{s+C}^\top \sum_{i=C+1}^{C+s} \lambda^{s+C-i} \mathbf{v}_i\mathbf{k}_i^\top + \lambda^s \mathbf{do}_{s+C}^\top\sum_{i \le C} \lambda^{C-i}\mathbf{v}_i\mathbf{k}_i^\top .
+\end{aligned}
+\end{equation}
+The first part (before the plus sign) in Eq.~(\ref{eq: backward dq}) corresponds to the intra-chunk, while the second part (after the plus sign) corresponds to the inter-chunk. In sequence parallelism scenario, we can calculate $\mathbf{dQ}_{t, \mathrm{inter}}$ as
+\begin{equation}
+\small
+\mathbf{dQ}_{t, \mathrm{inter}} = \mathbf{\Lambda} \mathbf{dO}_{t} \mathbf{KV}_{t-1}^\top.
+\end{equation}
+Note that $\mathbf{KV}_t$ has already been computed and cached during the forward pass, so no communication is required here to obtain $\mathbf{KV}_t$. Benefit from the $\mathbf{KV}$ state caching, the calculation of $\mathbf{dQ}_{t, \mathrm{inter}} $ can also be executed in parallel.
+
+Next, let us take $\mathbf{dK}$ into consideration, $\mathbf{dK}$ within the $t$-th chunk can be calculated in parallel as
+\begin{equation}
+\small
+\mathbf{dK}_{t, \mathrm{intra}} = [(\mathbf{dO}_{t} \mathbf{V}_{t}^\top) \odot \mathbf{M}]^\top \mathbf{Q}_{t}.
+\end{equation}
+Then we transform Eq.~(\ref{eq:backward}) as
+\begin{equation}
+\small
+\begin{aligned}
+&\mathbf{dk}_{s}^\top = \mathbf{v}_{s}^\top \sum_{i \ge s} \lambda^{i-s}  \mathbf{do}_i\mathbf{q}_i^\top \\
+= &\mathbf{v}_{s}^\top \sum_{i=s}^{C} \lambda^{i-s}  \mathbf{do}_i\mathbf{q}_i^\top + \lambda^{C-s} \mathbf{v}_{s}^\top\sum_{i \ge C+1} \lambda^{i-C} \mathbf{do}_i\mathbf{q}_i^\top,
+\end{aligned}
+\end{equation}
+where the first term (before the plus sign) corresponds to the intra-chunk, and the second term (after the plus sign) corresponds to the inter-chunk. The above equation can be rewritten in terms of chunks as follow:
+\begin{equation}
+\small
+\mathbf{dK}_{t, \mathrm{inter}} = \lambda^{C} \mathbf{\Lambda}^{-1} \mathbf{V}_{t} \mathbf{dKV}_{t+1}^\top.
+\end{equation}
+Here a \texttt{Recv} operation is required here to pull $\mathbf{dKV}_{t+1}$ from the $(t+1)$-th chunk. Then in order to compute $\mathbf{dKV}$ for the $(t-1)$-th chunk, $\mathbf{dKV}$ should be updated as:
+\begin{equation}
+\small
+\begin{aligned}
+\mathbf{dKV}_{t} &= \sum_{s > tC} \lambda^{s-tC} \mathbf{q}_s \mathbf{do}_s^\top \\
+&= \lambda^C \!\!\!\! \sum_{s > (t+1)C} \!\!\!\! \lambda^{s-(t+1)C} \mathbf{q}_s^\top \mathbf{do}_s + \!\!\!\! \sum_{s=tC+1}^{(t+1)C} \!\!\!\! \lambda^{s-tC} \mathbf{q}_s \mathbf{do}_s^\top \\
+&= \lambda^C \mathbf{dKV}_{t+1} + \left(\mathbf{\Lambda} \mathbf{Q}_t \right)^\top \mathbf{dO}_t.
+\end{aligned}
+\end{equation}
+Then a \texttt{Send} operation is performed to push $\mathbf{dKV}_{t}$ to rank $(i-1)$.
+
+Finally, for $\mathbf{dV}$, its intra part can be calculated as
+\begin{equation}
+\small
+\mathbf{dV}_{t, \mathrm{intra}} = [(\mathbf{Q}_{t} \mathbf{K}_{t}^\top) \odot \mathbf{M}]^\top \mathbf{dO}_{t}.
+\end{equation}
+Again we transform Eq.~(\ref{eq:backward}) as:
+\begin{equation}
+\small
+\begin{aligned}
+&\mathbf{dv}_{s}^\top = \mathbf{k}_{s}^\top \sum_{i \ge s} \lambda^{i-s}  \mathbf{q}_i\mathbf{do}_i^\top \\
+= &\mathbf{k}_{s}^\top \sum_{i=s}^{C} \lambda^{i-s}  \mathbf{q}_i\mathbf{do}_i^\top + \lambda^{C-s} \mathbf{k}_{s}^\top\sum_{i \ge C+1} \lambda^{i-C}  \mathbf{q}_i\mathbf{do}_i^\top .
+\end{aligned}
+\end{equation}
+The first and second terms (before and after the plus sign) corresponds to the computation of the intra- and inter-chunks, respectively. In sequence parallelism, $\mathbf{dV}_{t, \mathrm{inter}}$ can be calculated as:
+\begin{equation}
+\small
+\mathbf{dV}_{t, \mathrm{inter}} = \lambda^{C} \mathbf{\Lambda}^{-1} \mathbf{K}_{t} \mathbf{dKV}_{t+1}.
+\end{equation}
+Combine the intra and inter part, we obtain the final results of $\mathbf {dQ}_{t}$, $\mathbf {dK}_{t}$ and $\mathbf {dV}_{t}$:
+\begin{equation}
+\small
+\begin{aligned}
+\mathbf {dQ}_{t}&= \mathbf{dQ}_{t,\mathrm{intra}} + \mathbf{dQ}_{t,\mathrm{inter}}, \\
+\mathbf {dK}_{t}&= \mathbf{dK}_{t,\mathrm{intra}} + \mathbf{dK}_{t,\mathrm{inter}}, \\
+\mathbf {dV}_{t}&= \mathbf{dV}_{t,\mathrm{intra}} + \mathbf{dV}_{t,\mathrm{inter}}.
+\end{aligned}
+\end{equation}
+We provide the comprehensive formulation of the backward pass for LASP with $W=T$ in Algorithm~\ref{algo:LASP bw pseudo}.
+
+\subsection{Communication Analysis}
+
+\begin{table}[t]
+    \centering
+    \small
+    \caption{\textbf{Communication Volume Comparison.} Last column: we eliminate the common factors $Bd$ for ease of comparison.}
+    \label{tab: volume comparison}
+    \begin{tabular}{lcc}
+    \toprule
+     \textbf{Method} & \makecell[c]{Full\\Formulation} & \makecell[c]{Simplified\\Formulation} \\
+     \midrule
+     {LASP} & $Bd^2/h$ & $d/h$  \\
+     {DeepSpeed-Ulysses} & $4BNd/T$ & $4N/T$  \\
+     {Megatron-SP} & $2BNd + 4BNd/T$ & $2N+4N/T$  \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+When examining the LASP algorithm, it is important to note that the forward pass requires communication for the $\mathbf{KV}$ activation in each linear attention module layer. The communication volume is determined by $Bd^2/h$, where $B$ is the batch size and $h$ is the number of heads. In comparison, sequence parallelism in Megatron-LM utilizes all-gather operations twice after two layer normalization layers within each transformer layer, and a reduce-scatter operation after the attention and Feedforward Neural Network (FFN) layers. This results in a communication volume of $2BNd + 4BNd/T$. DeepSpeed uses all-to-all collective communication operation \cite{thakur2005optimization} for input $\mathbf Q, \mathbf K, \mathbf V$, and output $\mathbf O$ of each attention module layer, resulting in a communication volume of $4BNd/T$.
+
+Table \ref{tab: volume comparison} displays a comparison of communication volumes across three frameworks. $d/h$ is the head dimension which is set at 128 as usual ~\cite{lan2020albert}. In practical applications where $N/T\ge 32$, LASP is able to achieve the lowest theoretical communication volume. Furthermore, the communication volume of LASP is not impacted by changes in sequence length $N$ or sub-sequence length $C$, which is a huge advantage for extremely long sequence parallelism across large GPU clusters.
+\subsection{System Engineering Optimization}
+
+\textbf{Kernel Fusion.}
+To improve the efficiency of LASP on GPU, we perform kernel fusion in both the intra-chunk and inter-chunk computations, and also fused the updates of $\mathbf{KV}$ and $\mathbf{dKV}$ into the intra-chunk and inter-chunk computations.
+
+\textbf{$\mathbf{KV}$ State Caching.}
+To avoid recomputing activation $\mathbf{KV}$ during the backward pass, we choose to store it in the HBM of the GPU right after computing it in the forward pass. During the subsequent backward pass, LASP directly accesses $\mathbf{KV}$ for use. It is important to note that the size of the $\mathbf{KV}$ activation cached in HBM is $d \times d$, which is not affected by the sequence length $N$. When the input sequence length $N$ is exceptionally large, the memory usage of $\mathbf{KV}$ becomes insignificant.
+ 
+\subsection{Data-Sequence Hybrid Parallelism}
+\label{subsec: Hybrid Parallelism}
+
+The technique of Data Parallelism is commonly used to split input data along the batch dimension for large-scale distributed deep learning. However, LASP offers a different approach by dividing data along the sequence dimension, which makes it easier to integrate with Data Parallelism. As explained in Section \ref{subsubsec: data distribution} and illustrated in Fig. \ref{fig: lasp_data}, LASP allows for the specification of a smaller sequence parallel size that is divisible by the distributed world size. This configuration results in the input data being split along both the batch and sequence dimensions, which is a type of hybrid parallelism called data-sequence hybrid parallelism.
+
+Emerging as significant distributed training techniques, sharded data parallelism methodologies aim to mitigate GPU memory usage during the training of large models. The ZeRO-series optimizers~\cite{rajbhandari2020zero} in DeepSpeed and FSDP~\cite{zhao2023pytorch} in PyTorch propose to distribute model states, which include optimizer states, gradients, and model parameters, across all GPUs within the distributed environment. This strategic distribution significantly reduces memory utilization on individual GPUs. As variants of data parallelism, these techniques seamlessly align with LASP. However, their focus on minimizing the memory of model states complements LASP's objective of reducing activation memory on each GPU. By combining these methods, training large models with long sequence lengths becomes more feasible.
+
+
+\section{Related Work}
+
+\label{sec: preliminary}
+\textbf{Linear Attention.}
+Linear Transformer models bypass the use of Softmax attention by adopting various approximation methods ~\citep{katharopoulos2020transformers,Choromanski2020RethinkingAW,rfa,zhen2022cosformer,qin-etal-2022-devil,yang2023gated,qin2023accelerating,qin2024hierarchically} instead. The central concept involves using the "kernel trick" to speed up the calculation of the attention matrix, specifically by multiplying keys and values before tackling the computationally intensive $n \times n$ matrix multiplication. For instance, ~\citet{katharopoulos2020transformers} use $1+\mathrm{elu}$ activation function, ~\citet{zhen2022cosformer} utilizes the cosine function to imitate Softmax characteristics, and ~\citet{Choromanski2020RethinkingAW,zheng2022linear,zheng2023efficient} leverage sampling techniques to closely replicate the Softmax process are all strategies employed to achieve this.
+\textbf{Memory-Efficient Attention.}
+~\citet{DBLP:journals/corr/abs-2112-05682} first employs the \textit{online Softmax} technique to efficiently compute numerically stable attention scores sequentially, resulting in a linear memory for attention, yet still needs quadratic time complexity.
+While FlashAttention \cite{dao2022flashattention,dao2023flashattention2} employs tiling to minimize the number of memory reads/writes between GPU's high bandwidth memory (HBM) and on-chip SRAM to reduce time and memory in the training process, PagedAttention \cite{kwon2023efficient} optimizes the utilization of the KV cache memory by reducing waste and enabling adaptable sharing among batched requests during inference. Ring Attention~\cite{liu2023ring} reduces memory requirements for Transformer models when handling long sequences by distributing sequences across multiple devices and overlapping the communication of key-value blocks with blockwise attention computation. 
+\textbf{Sequence Parallelism.}
+Sequence parallelism is a widely used method to train long sequences for neural process language (NLP) tasks. This technique has been integrated into many large model training frameworks, including Megatron-LM, DeepSpeed, and Colossal-AI. Megatron-LM implements SP along with model (tensor) parallelism (MP) to perform large matrix multiplications on GPUs. However, MP partitions the attention heads, which limits the maximum parallelism degree to be less than the number of attention heads. DeepSpeed-Ulysses uses an all-to-all communication primitive to reduce communication volume, but also partitions attention heads and faces similar issues as Megatron-LM. Colossal-AI integrates ring-style communication called Ring Self-Attention (RSA) in SP to efficiently compute attention scores across devices. Recent LightSeq ~\cite{li2023lightseq} introduces SP with load balancing and communication overlap scheduling, and a gradient checkpointing strategy to reduce activation memory further.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.48\textwidth]{figures/lasp_sca_wps.pdf}
+    \includegraphics[width=0.48\textwidth]{figures/lasp_sca_wps_ddp.pdf}
+    \includegraphics[width=0.48\textwidth]{figures/lasp_sca_memory.pdf}
+    \includegraphics[width=0.48\textwidth]{figures/lasp_sca_memory_ddp.pdf}
+    \caption{\textbf{Scalability Evaluation of LASP on Throughput (tokens/sec) and Memory Usage}. Left: Integration of LASP with FSDP backend; Right: Integration of LASP with DDP backend. The TNL-1B model is used, with a batch size of 1 across up to 128 A100 80GB GPUs. The sign "$\times$" with a dotted line represents occurring an Out of Memory (OOM).}
+    \label{fig: lasp_sca}
+\end{figure*}
+
+
+
+\section{Experiments}
+
+\label{sec: exp}
+We evaluate LASP on two representative linear attention-based models: TransNormerLLM (TNL)~\cite{qin2024transnormerllm} and Linear Transformer~\cite{katharopoulos2020transformers}. TNL is the latest large language model purely built upon linear attention, while Linear Transformer is a classical linear transformer model recognized in the community. Our assessment focuses on three key areas: \rnum{1}) the ability of LASP to scale up sequence length on scaling-out GPUs, \rnum{2}) the convergence when using LASP, and \rnum{3}) speed evaluation when using LASP and its comparison with other SP methods. No Activation Checkpointing (AC) ~\cite{korthikanti2022reducing} techniques are used in following experiments to reduce activation memory, except experiments in Section \ref{subsec: ablation}.
+This is because although the adoption of AC will further enables longer sequence lengths, it will cover up the ability of our sequence parallel method LASP.
+All experiments are conducted on a GPU cluster equipped with 128 A100 80G GPUs. Our implementation is built on MetaSeq~\citep{zhang2022opt}, a PyTorch-based sequence modeling framework with FairScale~\cite{FairScale2021} integrated.
+
+\paragraph{Experimental Setup.}
+The training configuration is set with specific hyperparameters: a learning rate of 0.0005 to control the step size, a cap of 50,000 updates to define the training duration, and a 2,000-update warmup period to stabilize early training by gradually adjusting the learning rate~\cite{zhou2020pbsgd}. Additionally, a weight decay rate of 0.01 is used for regularization to avoid over-fitting. The Adam optimizer, with beta values of 0.9 and 0.999, is chosen for managing the momentum and scaling of gradients, aiding in effective and stable training convergence. Different DDP backends, including PyTorch DDP (abbr. DDP), Legacy DDP, FSDP, ZeRO-series, are selected in experiments for cross-validation of compatibility with LASP. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.48\textwidth]{figures/lasp_wps_comp.pdf}
+    \caption{\textbf{Speed Comparison (tokens/sec) of LASP Against DeepSpeed-Ulysses and Megatron-SP.} The sign "$\times$" with a dotted line represents occurring an Out of Memory (OOM). The evaluation utilizes the TNL-1B and 7B models with a batch size of 1 on 64 A100 80GB GPUs. The parallelism size for these three methods is configured to 64.}
+    \label{fig: lasp_wps_comp}
+\end{figure}
+
+\subsection{Scalability and Speed Comparison}
+The scalability results regarding throughput and memory usage with varying sequence lengths and number of GPUs are illustrated in Fig. \ref{fig: lasp_sca}. 
+By using LASP, we successfully scale the sequence length up to 4096K using the FSDP backend and 2048K with the DDP backend on a TNL model with 1B parameters, on 128 GPUs. 
+
+Importantly, the implementation of LASP allows for a linear increase in the maximum sequence length capacity, directly proportional (linear) to the number of GPUs used. For instance, a sequence length of 512K can be trained using 16 GPUs, while 64 GPUs ($4\times$) has is able to train 2048K ($4\times$) sequence length. 
+Enabling LASP maintains a high throughput level even with more GPUs used. Furthermore, LASP demonstrates consistent scalability performance under both the FSDP and DDP backends.
+
+\definecolor{Gray}{gray}{0.95}
+\begin{table*}[t]
+    \centering
+    \small    
+    \caption{\textbf{Convergence Performance of LASP.} All experiments use 8 A100 80G GPUs, 16K sequence length, and batch size of 1. The results cover various DDP backends in conjunction with LASP. We explore the performance of two linear attention models: TransNormerLLM (TNL) and Linear Transformer, both with 0.4B parameters, across 50K updates.}
+    \setlength{\tabcolsep}{4.8mm}
+        \begin{tabular}{cc|ll|ll}
+        \toprule
+            \textbf{Model}         & \textbf{Parameters} & \textbf{Method}       & \textbf{Loss}   & \textbf{Method}                &  \textbf{Loss}  \\  \midrule
+            \multirow{6}{*}{\makecell[c]{TNL \\~\cite{qin2024transnormerllm}}} & 
+            \multirow{6}{*}{\makecell[l] 0.4B }  & DDP           & 3.719  & LASP + DDP           & 3.715  \\ 
+               &     & Legacy DDP & 3.709  &  LASP + Legacy DDP & 3.705  \\ 
+               &     & FSDP          & 3.717  &  LASP + FSDP        & 3.714  \\ 
+               &     & ZeRO-1         & 3.653  & LASP + ZeRO-1       & 3.653  \\ 
+               &     & ZeRO-2         & 3.655  & LASP + ZeRO-2       & 3.649 \\
+               &     & ZeRO-3         & 3.656  & LASP + ZeRO-3        & 3.649  \\ \hline
+            \multirow{6}{*}{\makecell[c]{Linear\\Transformer\\~\cite{katharopoulos2020transformers}}} & 
+            \multirow{6}{*}{\makecell[l] 0.4B }    
+                  &  DDP           & 5.419  & LASP + DDP           & 5.408  \\ 
+                & & Legacy DDP      & 5.425  & LASP + Legacy DDP     & 5.413  \\
+                & & FSDP          & 5.428  &  LASP + FSDP        & 5.441  \\ 
+                & & ZeRO-1         & 5.114  & LASP + ZeRO-1        & 5.118   \\ 
+                & & ZeRO-2         & 5.105  & LASP + ZeRO-2        & 5.120   \\
+                & & ZeRO-3         & 5.110  & LASP + ZeRO-3        & 5.123   \\
+        \bottomrule             
+        \end{tabular}
+ \label{tab:performance}
+\end{table*}
+
+We furthermore conducted a comparison of sequence parallelism on TNL 1B and 7B models against two existing SP methods: DeepSpeed-Ulysses~\cite{jacobs2023deepspeed} and Megatron-SP~\cite{korthikanti2022reducing}. All results presented in Fig. \ref{fig: lasp_wps_comp} are obtained on 64 GPUs. We keep using a fixed batch size of 1, in order to highlight the ability of LASP to handle extremely lone sequences.
+
+LASP demonstrates a notable enhancement in throughput for linear attention, primarily due to its efficient communication design that facilitates the exchange of linear attention intermediate states. Specifically, LASP outperforms DeepSpeed-Ulysses by $38\%$ and Megatron by $136\%$ in terms of throughput at 256K sequence length on 1B model, with the performance gap widening as the sequence length increases. Additionally, system optimizations like kernel fusion and KV State caching enable LASP to support the longest sequence lengths within the same cluster, achieving 2048K for the 1B model and 512K for the 7B model.
+
+\subsection{Convergence}
+
+Table~\ref{tab:performance} presents convergence results of two linear-attention based models: TNL and Linear Transformer, evaluated on an epoch-by-epoch basis. The experiments were conducted using the same training corpus: the Pile~\cite{gao2020pile}. Both linear models has 0.4B parameters, demonstrated consistent loss values when training with or without LASP. All experiments undergoes 50K steps. The uniform loss convergence across various DDP backends demonstrates that LASP does not negatively affect model convergence.
+\subsection{Ablation on Activation Reducing Methods}
+\label{subsec: ablation}
+LASP prominently reduces the activation memory usage during training process on per GPU, which is orthometric with another activation memory reducing method: activation checkpointing. Following we conduct ablation experiments on AC and LASP to reveal their performance on memory reduction.
+With pure DDP and FSDP, the maximum sequence lengths are able to train on 8 GPUs are 12K and 16K, respectively. Both AC and LASP can enlarge the maximum sequence length markedly, but encounters slightly throughput reduction. The distinction is the scaling-up performance of LASP is directly proportional to the number of GPUs used.
+By combining AC and LASP, we can obtain surprising maximum sequence lengths 496K and 768K on single node with using DDP and FSDP backends, respectively.
+
+\begin{table}[!ht]
+    \centering
+    \small
+    \caption{\textbf{Ablation on Activation Reducing Methods.} Both DDP and FSDP backends are tested. A single node equipped with 8 A100 80G GPUs is used to train a TNL-1B model, still with a batch size of 1 for all experiments.}
+    \label{tab: ablation}
+    \begin{tabular}{lcc}
+    \toprule
+     \textbf{Method} & \textbf{\makecell[c]{Maximum\\Sequence Length}} & \textbf{\makecell[c]{Throughput\\(tokens/sec)}} \\
+     \midrule
+     DDP & 12K & 131286.0  \\
+     DDP+AC & 64K & 117429.5  \\
+     DDP+LASP & 96K & 126829.4  \\
+     DDP+AC+LASP & 496K & 100837.8  \\
+     \midrule
+     FSDP & 16K & 145303.6  \\
+     FSDP+AC & 96K & 114464.0  \\
+     FSDP+LASP & 120K & 138598.8  \\
+     FSDP+AC+LASP & 768K & 106578.3  \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+\section{Conclusion}
+
+\label{sec: conclusion}
+We presented LASP, effectively addressing the limitations of existing SP methods on linear transformers by leveraging the specific features of linear attention, which significantly enhanced parallelism efficiency and usability for linear attention-based language models. Through the implementation of an efficient P2P communication mechanism and engineering optimizations such as kernel fusion and KV state caching, LASP achieved a notable reduction in communication traffic and improved hardware utilization on GPU clusters. Compatibility with all types of batch-level DDP methods ensured the practicability of LASP for large-scale distributed training. Our experiments highlighted the advantages of LASP on scalability, speed, memory usage and convergence performance for linear transformers, comparing with existing SP methods in out-of-box frameworks.
+
+\newpage
+
+

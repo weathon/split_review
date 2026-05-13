@@ -1,0 +1,394 @@
+\title{What Matters to You? Towards Visual Representation Alignment for Robot Learning}
+
+\begin{abstract}
+When operating in service of people, robots need to optimize rewards aligned with end-user preferences.
+Since robots will rely on raw perceptual inputs like RGB images, their rewards will inevitably use \textit{visual} representations. 
+Recently there has been excitement in using representations from pre-trained visual models, 
+but key to making these work in robotics is fine-tuning, which is typically done via proxy tasks like dynamics prediction or enforcing temporal cycle-consistency. 
+However, all these proxy tasks bypass the human's input on what matters to \textit{them}, exacerbating spurious correlations and ultimately leading to robot behaviors that are misaligned with user preferences.
+In this work, we propose that robots should leverage human feedback to \textit{align} their visual representations with the end-user and disentangle what matters for the task.
+We propose \textbf{R}epresentation-\textbf{A}ligned \textbf{P}reference-based \textbf{L}earning (\textbf{RAPL}), 
+a method for solving the visual representation alignment problem and visual reward learning problem through the lens of preference-based learning and optimal transport.
+Across experiments in X-MAGICAL and in robotic manipulation, we find that RAPL's reward consistently generates preferred robot behaviors with high sample efficiency,
+and shows strong zero-shot generalization when the visual representation is learned from a different embodiment than the robot's. 
+
+
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Imagine that a robot manipulator is tasked with cleaning your kitchen countertop. 
+To be successful, its reward function should model your preferences: what you think an orderly kitchen countertop looks like (e.g., plates should be stacked by color), how objects should be handled during cleaning (e.g., cups should be moved one-at-a-time but food scraps should be pushed in large groups), and what parts of the countertop should be avoided (e.g., always stay away from the expensive espresso machine).
+
+A long-standing approach to this problem has been through inverse reinforcement learning (IRL), where the robot infers a reward from demonstrations. 
+Fundamental work in IRL \citep{abbeel2004apprenticeship, ziebart2008maximum} argues for matching features between the expert and the learner during reward inference, more formally known as optimizing Integral Probability Metrics (IPMs) \citep{sun2019provably, swamy2021moments}. 
+While there are many ways to do this matching, optimal transport methods have recently been used to optimize IPMs defined on high-dimensional feature spaces in a principled manner
+\citep{villani2009optimal, xiao2019wasserstein, dadashi2020primal, papagiannis2022imitation, luo2023optimal}. 
+
+The question remains, what are good features for the learner to match? While traditional work used hand-engineered features defined on low-dimensional states of the world that the robot could do state estimation on (e.g. object pose) \citep{levine2011nonlinear, finn2016guided}, 
+large vision models trained via self-supervised/unsupervised learning promise representations for robotics that directly operate on raw image inputs and capture more nuanced features automatically (e.g., object color and shape) \citep{xiao2022masked, ma2023vip, karamcheti2023language}.
+However, automatically extracting relevant visual features that incentivize preferred robot behavior and minimize spurious correlations remains an open challenge \citep{zhang2020learning}. 
+Previous works use proxy tasks during representation learning to imbue some prior human knowledge about attributes that are relevant \citep{brown2020safe}, such as assuming access to action labels and doing behavior cloning \citep{haldar2023watch, haldar2023teach} or performing temporal cycle-consistency learning \citep{dadashi2020primal}. 
+The former requires additional signals that may be hard to obtain (i.e., actions), while the latter assumes that temporal consistency signal is sufficient to extract what matters to the task, potentially ignoring other features that matter to the demonstrator (e.g., avoiding undesired regions).
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figs/front_fig.pdf}
+    \caption{Representation-Aligned Preference-based Learning (RAPL), is an action-free visual representation learning method using easy-to-provide human preference feedback on video demos. Using the human preference triplets, the robot goes from paying attention to the end-effector ($\tilde{\phi}_{\mathrm{H}}^0$) to paying attention to the objects and the goal region ($\tilde{\phi}_{\mathrm{H}}^*$) at the end of alignment. The aligned representation is used to construct an optimal transport-based visual reward for robot behavior learning.}
+    \label{fig:front_fig}
+\end{figure*}
+
+Since robots ultimately operate in service of people,
+recent works advocate that the robot should explicitly engage in a \textit{representation alignment process} with the end-user. 
+These works leverage user feedback such as human-driven feature selection \citep{bullard2018human, luu2019incremental}, interactive feature construction \citep{bobu2021feature, katz2021preference} or similarity-queries \citep{bobu2023sirl} to learn human-centric representations.
+However, these approaches either operate on pre-defined feature sets or in low-dimensional state spaces (e.g., positions). %learn human-aligned features
+In the visual domain, \rb{\citep{zhang2020learning} uses manually-defined reward signals to learn representations which disentangle high versus low reward images; unfortunately, when the main objective \textit{is} reward learning in the first place, this approach is not feasible.}
+\textit{Instead of hoping to extract human-centric visual representations from demonstration videos via proxy tasks that bypass human input or require action labels per video frame, we propose that robots use easy-to-provide human preference feedback---where the human is asked to compare two (or more) videos---to align their visual representations with what matters to the end-user (Figure~\ref{fig:front_fig}). }
+We first formalize the visual representation alignment problem for robotics as a metric learning problem in the human's representation space. 
+We then propose \textbf{R}epresentation-\textbf{A}ligned \textbf{P}reference-based \textbf{L}earning (\textbf{RAPL}), a tractable video-only method for solving the alignment problem and learning visual robot rewards via optimal transport. 
+Across experiments in X-Magical \citep{zakka2022xirl} and in robotic manipulation, we find that RAPL’s reward consistently generates preferred robot behaviors with high sample efficiency, and shows strong zero-shot generalization when the visual representation is learned on a different embodiment than the robot’s.
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Problem Setup}
+
+
+\textbf{Human Policy.} 
+We consider scenarios where the robot R wants to learn how to perform a task for human H. 
+The human knows the desired reward $\rewh$ which encodes their preferences for the task. The human acts via an approximately optimal policy $\policyh^{*}: \mathcal{O} \rightarrow \mathcal{U}_\human$ based on their underlying reward function. 
+Instead of directly consuming the raw perceptual input, research suggests that humans naturally build visual representations of the world \citep{bonnen2021ventral} that focus on task-relevant attributes \citep{callaway2021fixation}. 
+We model the human's representation model as $\reph: \mathcal{O} \rightarrow \Phi_{\mathrm{H}}$, mapping from the perceptual input $o \in \mathcal{O}$ to the human's latent space $\Phi_{\mathrm{H}}$ which captures their task and preference-relevant features.
+
+\textbf{Robot Policy.} We seek to learn a robot policy $\policyr^*: \mathcal{O} \rightarrow \mathcal{U}_\robot$ which maps from image observations to actions that maximizes a reward: 
+\begin{equation}
+\begin{aligned}
+\policyr^* = \arg\max_{\policyr}  \mathbb{E}_{\obstraj \sim p(\obstraj \mid \policyr)} \Big[ \sum_{t=0}^{\infty} \gamma^t \cdot \rewr(\repr(\obs^t))\Big],
+\end{aligned}
+\label{eq:robot_planning_problem}
+\end{equation}
+where $\gamma \in [0,1)$ is the discount factor and $\obstraj = \{\obs^0, \obs^1, \hdots \}$ is the image observation trajectory induced by the robot's policy. 
+The robot's reward $\rewr$ relies on a visual representation, $\repr: \mathcal{O} \rightarrow \Phi_\robot$, which maps from the image observation $\obs \in \mathcal{O}$ to a lower-dimensional latent space, $\Phi_\robot$. In general, this could be hand-crafted, such as distances to objects from the agent's end-effector \citep{ziebart2008maximum, levine2011nonlinear, finn2016guided}, or the output of an encoder pre-trained on large-scale datasets \citep{chen2021learning, ma2023vip}. 
+
+Before the robot can optimize for $\policyr$, it is faced with two questions: what visual representation $\repr$ should it use to encode observations, and which reward $\rewr$ should it optimize to align its behavior with $\policyh^{*}$?
+
+
+
+
+
+\section{RAPL: Representation-Aligned Preference-Based Learning}
+
+
+In this work, we leverage pre-trained visual encoders but advocate that robots fine-tune them with \textit{preference-based human feedback} to extract visual features that are relevant for how the end-user likes the task to be performed. 
+Preference-based feedback, where a user is asked to compare two or more trajectories, has been shown to be easier for end-users to provide compared to direct labelling or giving near-optimal demonstrations \citep{wirth2017survey}. 
+However, we are the first to use preference-based human feedback to align pre-trained visual models with user preference for robot learning.
+
+Once the robot has an aligned representation, what reward should it optimize to generate preferred behaviors?
+To reduce the sample complexity, we use optimal transport methods to design a visual reward  \citep{villani2009optimal}, and focus the preference feedback exclusively on fine-tuning the representation. 
+Since optimal transport methods are a way to optimize Integral Probability Metrics in a principled manner, the transport plan exactly yields a reward which maximizes feature matching between the learner and the expert \textit{in our aligned representation space}.
+
+In this section, we first formally state the visual representation alignment problem by drawing upon recent work in cognitive science \citep{sucholutsky2023alignment} and then detail our approximate solution, \textbf{R}epresentation-\textbf{A}ligned \textbf{P}reference-based \textbf{L}earning (\textbf{RAPL}), through the lens of preference-based learning and optimal transport.
+
+\subsection{The Visual Representation Alignment Problem for Robotics}
+\label{subsec:rapl_formalism}
+We follow the formulation in \cite{sucholutsky2023alignment} and bring this to the robot learning domain. Intuitively, visual representation alignment is defined as the degree to which the output of the robot's encoder, $\repr$, matches the human's internal representation, $\reph$, for the same image observation, $
+\obs \in \mathcal{O}$, during task execution.
+We utilize a triplet-based definition of representation alignment as in \citep{ jamieson2011low} and \citep{sucholutsky2023alignment}.
+    
+\begin{definition}[Triplet-based Representation Space] Let $\obstraj = \{\obs^t\}^T_{t=0}$ be a sequence of image observations over $T$ timesteps, $\phi : \mathcal{O} \rightarrow \Phi$ be a given representation model, and $\phi_{}(\obstraj) := \{\phi(\obs^{0}),\dots,\phi(\obs^{T})\}$ be the corresponding embedding trajectory. For some distance metric $d(\cdot, \cdot)$ and two observation trajectories $\obstraj^{i}$ and $\obstraj^{j}$, let $d\big(\phi_{}(\obstraj^{i}),\phi_{}(\obstraj^{j})\big)$ be the distance between their embedding trajectories. The triplet-based representation space of $\phi$ is:
+\begin{equation}
+\begin{aligned}
+S_{\phi_{}} = \Big\{(\obstraj^{i},\obstraj^{j},\obstraj^{k}) : d\big(\phi_{}(\obstraj^{i}),\phi_{}(\obstraj^{j})\big) < d\big(\phi_{}(\obstraj^{i}),\phi_{}(\obstraj^{k})\big), \obstraj^{i,j,k} \in \Xi \Big\},
+\end{aligned}
+\label{eq:representation_space}
+\end{equation}
+where $\Xi$ is the set of all possible image trajectories for the task of interest.
+\end{definition}
+
+Intuitively, this states that the visual representation $\phi$ helps the agent determine how similar two videos are in a lower-dimensional space. For all possible triplets of videos that the agent could see, it can determine which videos are more similar and which videos are less similar using its embedding space. The set $S_{\phi}$ contains all such similarity triplets. 
+\begin{definition}[Visual Representation Alignment Problem]
+Recall that $\reph$ and $\repr$ are the human and robot's visual representations respectively. The representation alignment problem is defined as learning a $\repr$ which minimizes the difference between the two agents' representation spaces, as measured by a function $\ell$ which penalizes divergence between the two representation spaces:
+\begin{equation}
+\begin{aligned}
+\min_{\phi_{\mathrm{R}}} \ell(S_{\phi_{\mathrm{R}}}, S_{\phi_{\mathrm{H}}}).
+\end{aligned}
+\label{eq:representation_alignment_problem}
+\end{equation}
+\end{definition} 
+
+\subsection{Representation Inference via Preference-based Learning}
+\label{subsec:rapl_inference}
+
+Although this formulation sheds light on the underlying problem, solving \autoref{eq:representation_alignment_problem} exactly is impossible since the functional form of the human's representation $\phi_{\mathrm{H}}$ is unavailable and the set $S_{\phi_{\mathrm{H}}}$ is infinite. Thus, we approximate the problem by constructing  a subset $\tilde{S}_{\reph} \subset S_{\reph}$ of triplet queries. 
+Since we seek a representation that is relevant to the human's preferences, we ask the human to rank these triplets based on their \textit{preference-based} notion of similarity (e.g., $\rewh(\reph(\obstraj^i)) > \rewh(\reph(\obstraj^j)) > \rewh(\reph(\obstraj^k)) \implies \obstraj^i \succ \obstraj^j \succ \obstraj^k$). With these rankings, we implicitly learn $\reph$ via a neural network trained on these triplets.
+
+We interpret a human’s preference over the triplet $(\obstraj^{i},\obstraj^{j},\obstraj^{k}) \in \tilde{S}_{\reph}$ via the Bradley-Terry model \citep{bradley1952rank}, where $\obstraj^{i}$ is treated as an anchor and $\obstraj^{j}, \obstraj^{k}$ are compared to the anchor in terms of similarity as in \autoref{eq:representation_space}:
+\begin{equation}
+\begin{aligned}
+\mathbb{P}(\obstraj^i \succ \obstraj^j \succ \obstraj^k \mid \reph) \approx \frac{e^{-d(\reph(\obstraj^i), ~\reph(\obstraj^j))}}{e^{-d(\reph(\obstraj^i), ~\reph(\obstraj^j))} + e^{-d(\reph(\obstraj^i), ~\reph(\obstraj^k))}}.
+\end{aligned}
+\label{eq:representation_alignment_loss}
+\end{equation}
+A natural idea would be to leverage the human's preference feedback to do direct reward prediction (i.e., model both $d$ and $\reph$ via a single neural network to approximate $\rewh$), as is done in traditional preference-based reward learning \citep{christiano2017deep}.
+However, we find empirically (Section~\ref{subsec:in-domain-manipulation}) that directly learning a high-quality visual reward from preference queries requires a prohibitive amount of human feedback that is unrealistic to expect from end-users \citep{brown2019extrapolating, bobu2023aligning}. 
+Instead, we focus all the preference feedback on just representation alignment. But, this raises the question what distance measure $d$ should we use?
+In this work, we use optimal transport as a principled way to measure the feature matching between any two videos. 
+For any video $\obstraj$ and for a given representation $\phi$, let the induced empirical embedding distribution be $\rho = \frac{1}{T} \sum_{t=0}^{T} \delta_{\phi(\obs^t)}$, where $\delta_{\phi(\obs^t)}$ is a Dirac distribution centered on $\phi(\obs^t)$. 
+Optimal transport finds the optimal coupling $\mu^* \in \mathbb{R}^{T \times T}$ that transports one embedding distribution, $\rho_i$, to another video embedding distribution, $\rho_j$, with minimal cost. This approach has a well-developed suite of numerical solution techniques \citep{peyre2019computational} which we leverage in practice (for details on this see App.~\ref{app:OT}).
+
+Our final optimization is a maximum likelihood estimation problem:
+\begin{align}
+    \approxreph := \max_{\reph} \sum_{(\obstraj^{i},\obstraj^{j},\obstraj^{k})\in\tilde{S}_{\reph}} \mathbb{P}(\obstraj^i \succ \obstraj^j \succ \obstraj^k \mid \reph).
+    \label{eq:representation_optimization}
+\end{align}
+Since the robot seeks a visual representation that is aligned with the human's, we set: 
+\begin{equation}
+    \repr := \approxreph.
+\end{equation}
+
+\subsection{Preference-Aligned Robot Behavior via Optimal Transport}
+\label{subsec:rapl_visual_reward}
+
+Given our aligned visual representation, we seek a robot policy $\policyr$ whose behavior respects the end-user's preferences. 
+Traditional IRL methods \citep{abbeel2004apprenticeship, ziebart2008maximum} are built upon matching features between the expert and the learner. Leveraging this insight, we use optimal transport methods since the optimal transport plan is equivalent to defining a reward function that encourages this matching \citep{kantorovich1958space}.
+
+
+Specifically, we seek to match the \textit{embedded} observation occupancy measure induced by the robot's policy $\policyr$, and the embedded observation occupancy measure of a human's preferred video demonstration, $\obstraj_+$. Thus, the optimal transport plan yields the reward which is optimized in \autoref{eq:robot_planning_problem}:
+\begin{equation}
+\begin{aligned}
+\rewr(\obs^t_\mathrm{R}; \repr) = -\sum_{t'=1}^{T} c\big(\repr(\obs^{t}_\robot), \repr(\obs^{t'}_+)\big)\mu^{*}_{t, t'},
+\end{aligned}
+\label{eq:ot_reward}
+\end{equation}
+where $\mu^{*}$ is the optimal coupling between the empirical embedding distributions induced by the robot and the expert.
+ 
+
+    
+
+
+
+\section{Experimental Design }
+
+
+We design a series of experiments to investigate RAPL's ability to learn visual rewards and generate preferred robot behaviors. 
+\textbf{Preference Dataset: $\tilde{S}_{\reph}$.} While the ultimate test is learning from real end-user feedback, in this work we use a simulated human model as a first step. This allows us to easily ablate the size of the preference dataset, and gives us privileged access to $\rewh$ for direct comparison.
+In all environments, the simulated human constructs the preference dataset $\tilde{S}_{\reph}$ by sampling triplets of videos uniformly at random from the set\footnote{To minimize the bias of this set on representation learning, we construct $\tilde{\Xi}$ such that the reward distribution of this set under  $\rewh$, is approximately uniform. Future work should investigate the impact of this set further, e.g., \citep{sadigh2017active}.} of video observations $\tilde{\Xi} \subset \Xi$, and then ranking them with their reward $\rewh$ as in  \autoref{eq:representation_alignment_loss}. 
+
+\textbf{Independent \& Dependent Measures.} Throughout our experiments we vary the \textit{visual reward signal} used for robot policy optimization and the \textit{preference dataset size} used for representation learning. 
+We measure robot task success as a binary indicator of if the robot completed the task with high reward $\rewh$. 
+
+\textbf{Controlling for Confounds.} 
+Our ultimate goal is to have a visual robot policy, $\policyr$, that takes as input observations and outputs actions. 
+However, to rigorously compare policies obtained from different visual rewards, we need to disentangle the effect of the reward signal from any other policy design choices, such as the input encoders and architecture. 
+To have a fair comparison, we follow the approach from \citep{zakka2022xirl, kumar2023graph} and input the privileged ground-truth state into all policy networks, but vary the visual reward signal used during policy optimization. 
+Across all methods, we use an identical reinforcement learning setup and Soft-Actor Critic for training \citep{haarnoja2018soft} with code base from \citep{zakka2022xirl}.
+In Section~\ref{sec:in-domain-results}, we first control the agent's embodiment to be consistent between both representation learning and robot optimization (e.g., assume that the robot shows video triplets of itself to the human and the human ranks them). 
+In Section~\ref{sec:cross-domain-results}, we relax this assumption and consider the more realistic cross-embodiment scenario where the representation learning is performed on videos of a different embodiment 
+than the robot's.
+
+ 
+
+
+\section{Results: From Representation to Behavior Alignment}
+
+\label{sec:in-domain-results}
+
+We first experiment in the toy X-Magical environment \citep{zakka2022xirl}, and then move to the realistic IsaacGym simulator. 
+
+\subsection{X-Magical}
+\label{subsec:in-domain-xmagical}
+
+\begin{wrapfigure}{r}{0.41\textwidth}
+    \includegraphics[width=0.41\textwidth]{figs/sim_environments_2.png}
+  \caption{X-Magical \& IsaacGym tasks.}
+  \label{fig:x-magical-env}
+\end{wrapfigure}
+\textbf{Tasks.}  We design two tasks inspired by kitchen countertop cleaning. The robot always has to push objects to a goal region (e.g., trash can), shown in pink at the top of the scene in \autoref{fig:x-magical-env}. In the \textbf{avoiding} task, the end-user prefers that the robot and objects never enter an \textit{off-limits zone} during pushing (blue box in left \autoref{fig:x-magical-env}).
+In the \textbf{grouping} task, the end-user prefers that objects are always pushed \textit{efficiently together} (instead of one-at-a-time) towards the goal region (center, \autoref{fig:x-magical-env}).
+
+\textbf{Privileged State \& Reward.}
+For \textbf{avoiding}, the true state $s$ is 7D: planar robot position ($p_\robot \in \mathbb{R}^2$) and orientation ($\theta_\mathrm{R}$),  planar position of the object ($p_{\mathrm{obj}}\in \mathbb{R}^2$), distance between goal region and object, ($d_{\mathrm{obj2goal}}$), and distance between the off-limits zone and the object ($d_{\mathrm{obs2obj}}$). The human's reward is: $\rewh_{\mathrm{avoid}}(s) = - d_{\mathrm{goal2obj}} - 2\cdot \mathbb{I}(d_{\mathrm{obs2obj}} < d_{\mathrm{safety}})$, where $d_{\mathrm{safety}}$ is a safety distance and $\mathbb{I}$ is an indicator function giving $1$ when the condition is true.
+For \textbf{grouping}, the state is 9D: $s := (p_\robot, \theta_\robot$, $p_{\mathrm{obj^1}}, p_{\mathrm{obj^2}}, d_{\mathrm{goal2obj^1}}$, $d_{\mathrm{goal2obj^2}})$. The human's reward is: $\rewh_{\mathrm{group}}(s) = - \max(d_{\mathrm{goal2obj^1}}, d_{\mathrm{goal2obj^2}}) - ||p_{\mathrm{obj^1}} - p_{\mathrm{obj^2}}||_2$.
+
+\textbf{Baselines.} We compare our visual reward, \rapl, against (1) \gt, an oracle policy obtained under $\rewh$, (2) \rlhf, which is vanilla preference-based reward learning \citep{christiano2017deep, brown2019extrapolating} that directly maps an image observation to a scalar reward, and (3) \tcc \citep{zakka2022xirl,kumar2023graph} which finetunes a pre-trained encoder via temporal cycle consistency constraints using 500 task demonstrations and then uses L2 distance between the current image embedding and the goal image embedding as reward. We use the same preference dataset with $150$ triplets for training RLHF and RAPL. 
+
+\textbf{Visual model backbone.} We use the same setup as in \citep{zakka2022xirl} with the ResNet-18 visual backbone \citep{he2016deep} pre-trained on ImageNet. The original classification head is replaced with a linear layer that outputs a $32$-dimensional vector as our embedding space, $\Phi_\robot := \mathbb{R}^{32}$. The TCC representation model is trained with 500 demonstrations using the code from \citep{zakka2022xirl}. Both RAPL and RLHF only fine-tune the last linear layer. All representation models are frozen during policy learning.
+
+\textbf{Hypothesis}. \textit{\rapl is better at capturing preferences \textit{beyond} task progress compared to direct reward prediction \rlhf or \tcc visual reward, yielding higher success rate.} 
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figs/xmagical_indomain_reward_new.pdf}
+    \caption{\textbf{X-Magical.} (left \& right) examples of preferred and disliked videos for each task. (center) reward associated with each video under each method. RAPL's predicted reward follows the GT pattern: low reward when the behavior are disliked and high reward when the behavior are preferred. RLHF and TCC assign high reward to disliked behavior (e.g., (D)). }
+    \label{fig:xmagical_indomain_reward}
+\end{figure*}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figs/xmagical_indomain_policy.pdf}
+    \caption{\textbf{X-Magical.} Policy evaluation success rate during policy learning. Colored lines are the mean and variance of the evaluation success rate. RAPL can match GT in the \textbf{avoiding} task and outperforms baseline visual rewards in \textbf{grouping} task.}
+    \label{fig:xmagical_indomain_policy}
+\end{figure*}
+
+\textbf{Results.} 
+Figure~\ref{fig:xmagical_indomain_reward} shows the rewards over time for three example video observations in the \textbf{avoid} (left) and \textbf{group} task (right). Each video is marked as preferred by the end-user's ground-truth reward or disliked. 
+Across all examples, \rapl's rewards are highly correlated with the \gt rewards: when the behavior in the video is disliked, then reward is low; when the behavior is preferred, then the reward is increasing. \tcc's reward is correlated with the robot making spatial progress (i.e., plot (E) and (F) where observations get closer to looking like the goal image), but it incorrectly predicts high reward when the robot makes spatial progress but violates the human's preference ((C) and (D) in \autoref{fig:xmagical_indomain_reward}). \rlhf performs comparably to \rapl, with slight suboptimality in scenarios (C) and (D). 
+Figure~\ref{fig:xmagical_indomain_policy} shows the policy evaluation success rate during RL training with each reward function (\rb{solid line is the mean, shaded area is the standard deviation, over 5 trials with different random seeds.}). Across all environments, \rapl performs comparably to \gt (\textbf{avoid} success: $\approx80\%$, \textbf{group} success: $\approx60\%$) and significantly outperforms all baselines with better sample efficiency, RAPL takes 10 epochs to reach 70\% success rate in the \textbf{avoid} task (GT requires 100) and takes 100 epochs to reach 40\% success rate in the \textbf{avoid} task (GT requires 150), supporting our hypothesis.
+
+\subsection{Robot Manipulation}
+\label{subsec:in-domain-manipulation}
+
+In the X-Magical toy environment, RAPL outperformed progress-based visual rewards, but direct preference-based reward prediction was a competitive baseline. Moving to the more realistic robot manipulation environment, we want to 1) disentangle the benefit of our fine-tuned representation from the optimal transport reward structure, and 
+2) understand if our method still outperforms direct reward prediction in a more complex environment?
+
+\label{subsubsec:manipulation-setup}
+\textbf{Task.} We design a robot manipulation task in the IsaacGym physics simulator \citep{makoviychuk2021isaac}. We replicate the tabletop \textbf{grouping} scenario, where a Franka robot arm needs to learn that the end-user prefers objects be pushed \textit{efficiently together} (instead of one-at-a-time) to the goal region (light blue region in right of \autoref{fig:x-magical-env}). 
+
+\textbf{Privileged State \& Reward.}
+The state $s$ is 18D: robot proprioception ($\theta_{\mathrm{joints}}\in \mathbb{R}^{10}$), 3D object positions
+($p_{\mathrm{obj^{1,2}}}$), and object distances to goal ($d_{\mathrm{goal2obj^{1,2}}}$). The \textbf{grouping} reward is identical as in Section~\ref{subsec:in-domain-xmagical}. 
+
+\textbf{Baselines.} In addition to comparing \rapl against (1) \gt and (2) \rlhf, we ablate the \textit{representation model} but control the \textit{visual reward structure}. We consider two additional baselines that all use optimal transport-based reward but operate on different representations: (3) \mvpot which learns image representation via masked visual pre-training; \prb{(4) \mvpotfinetune, which fine-tunes MVP representation  using images from the task environment; (5) \rtm, which is an off-the-shelf ResNet-18 encoder \citep{nair2022r3m} pre-trained on the Ego4D data set \citep{grauman2022ego4d} via a learning objective that combines time contrastive learning, video-language alignment, and a sparsity penalty; (6): \imagenet, which is a ResNet-18 encoder pre-trained on ImageNet;} (7) \tccot \citep{dadashi2020primal} which embeds images via the TCC representation trained with 500 task demonstrations. We use the same preference dataset with $150$ triplets for training RLHF and RAPL.
+
+\textbf{Visual model backbone.} All methods except MVP-OT and Fine-Tuned-MVP-OT share the same ResNet-18 visual backbone and have the same training setting as the one in the X-Magical experiment. MVP-OT and Fine-Tuned-MVP-OT use a off-the-shelf visual transformer \citep{xiao2022masked} pre-trained on the Ego4D data set \citep{grauman2022ego4d}. All representation models are frozen during policy learning.
+\textbf{Hypotheses}. \textbf{H1:} \textit{\rapl's higher success rate is driven by its aligned visual representation}. \textbf{H2:} \textit{\rapl outperforms \rlhf with lower amounts of human preference queries}.
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figs/franka_OT_rew_indomain_new.pdf}
+    \caption{\textbf{Manipulation. }   
+    (center) Expert, preferred, and disliked video demo.
+    (left) reward associated with each video under each method. RAPL's predicted reward follows the GT pattern. RLHF assigns high reward to disliked behavior.
+    (right) OT coupling for each representation. Columns are embedded frames of expert demo. Rows of top matrices are embedded frames of preferred demo; rows of bottom matrices are embedded frames of disliked demo. Peaks exactly along the diagonal indicate that the frames of the two videos are aligned in the latent space; uniform values in the matrix indicate that the two videos cannot be aligned (i.e., all frames are equally ``similar’’ to the next). RAPL matches this structure: diagonal peaks for expert-and-preferred and uniform for expert-and-disliked, while baselines show diffused values no matter the videos being compared.}
+    \label{fig:franka_OT_rew_indomain}
+\end{figure*}
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \includegraphics[width=0.5\textwidth]{figs/franka_success_v_reward_all_baselines.pdf}
+  \caption{\textbf{Manipulation.} Success rate during robot policy learning for each visual reward. }
+  \label{fig:franka_success_v_reward}
+\end{wrapfigure}
+\textbf{Results: Reward prediction \& policy learning.} 
+In the center of Figure~\ref{fig:franka_OT_rew_indomain} we show three video demos: an expert video demonstration, a preferred video, and a disliked video. 
+On the right of Figure~\ref{fig:franka_OT_rew_indomain}, we visualize the optimal transport plan comparing the expert video to the disliked and preferred videos under each visual representation, $\phi_{\rapl}$, $\phi_{\tccot}$, $\phi_{\mvpot}$. Intuitively, peaks exactly along the diagonal indicate that the frames of the two videos are aligned in the latent space; uniform values in the matrix indicate that the two videos cannot be aligned (i.e., all frames are equally ``similar’’ to the next).
+\rapl's representation induces precisely this structure: diagonal peaks when comparing two preferred videos and uniform when comparing a preferred and disliked video. 
+Interestingly, we see diffused peak regions in all transport plans under both \tccot and \mvpot representations, indicating their representations struggle to align preferred behaviors and disentangle disliked behaviors.
+This is substantiated by the left of Figure~\ref{fig:franka_OT_rew_indomain}, which shows the learned reward over time of preferred video and disliked video. Across all examples, \rapl rewards are highly correlated to \gt rewards while baselines struggle to disambiguate, supporting \textbf{H1}.
+
+Figure~\ref{fig:franka_success_v_reward} shows the policy evaluation history during RL training with each reward function. We see \rapl performs comparably to \gt (succ. rate: $\approx 70\%)$ while all baselines struggle to achieve a success rate of more than $\approx 10\%$ with the same number of epochs.  
+It's surprising that \rlhf fails in a more realistic environment since its objective is similar to ours, but without explicitly considering representation alignment. 
+ 
+\rlhf is biased towards paying attention to irrelevant areas that can induce spurious correlations; in contrast \rapl learns to focus on the task-relevant objects and the goal region. 
+
+\begin{wrapfigure}{r}{0.38\textwidth}
+    \caption{\textbf{Manipulation.} \rapl sample efficiency analysis. RAPL can achieve $\approx$ 45\% success rate with only 25 preference queries.}
+    \label{fig:rapl_sample_size_exp}
+\end{wrapfigure}
+
+\textbf{Results: Sample complexity.} 
+We further study the sensitivity of RAPL and RLHF to the preference query dataset size. 
+For RLHF, we double the preference query dataset during reward model training to 300 queries (detailed in App. \ref{app:rlhf-with-doubled-data}). Policy performance is improved, indicating that with more feedback data, preference-based reward prediction could yield an aligned policy. Nevertheless, \rapl outperforms \rlhf by $75\%$ with $50\%$ less training data, supporting \textbf{H2}. 
+While all the RAPL results above used 150 preference queries to train the representation, we also train a visual representation with 100, 50, and 25 preference queries.  Figure~\ref{fig:rapl_sample_size_exp} shows the success rate of the robot manipulation policy for each version of RAPL. 
+We note that \rapl achieves a 45\% success rate even when trained on only 25 preference queries.
+
+
+\subsubsection{Additional Complex Manipulation Task with Visual Distractors}
+\label{subsec: multi object push}
+Finally, we implemented a more complex robot manipulation task---named \textbf{clutter} in the text and charts---to further validate RAPL’s ability to disentangle visual features that underlie an end-user's preferences. 
+We increased the difficulty of the robot manipulation environment described in Section~\ref{subsec:in-domain-manipulation} by introducing more objects to the tabletop and adding visual distractors that are irrelevant to the human's preferences. 
+The environment has multiple objects on the table of various colors---red, green, and ``goal-region''-blue---and some of the objects are cubes while others are rectangular prisms. 
+The Franka robot arm needs to learn that the end-user prefers to push the rectangular objects (instead of the cube objects) efficiently together (instead of one-at-a-time) to the goal region. 
+Color of the objects is a distractor feature. 
+Compared to the original \textbf{grouping} manipulation task described above, the Franka arm needs to learn visual representations that can disentangle both semantic preference (grouping) and low-level preference (shape) from RGB images under visual distractors (object color). In addition, the Franka arm needs to learn to grasp the rectangular object first and use that to push the second rectangular object, as it is difficult to directly push the rectangular object stably using the robot finger gripper, thus increasing the task difficulty.
+
+We find that in this more complex manipulation and preference-learning task, \rapl performs comparably to a policy with ground-truth reward (succ. rate: $\approx 65\%$) while all baselines struggle to acheive success rate of more than $\approx 10\%$.
+\subsubsection{Spearman’s correlation between GT and learned visual rewards}
+
+\prb{We conducted a quantitative analysis to investigate the relationship between the learned visual reward and the end-user’s ground-truth reward. For the robot manipulation tasks described in Section~\ref{subsec:in-domain-manipulation} (Franka Group), Section~\ref{sec:cross-domain-results} (Kuka Group), and Section~\ref{subsec: multi object push} (Franka Clutter), we computed the average Spearman’s correlation coefficient between the ground-truth reward trajectory and any other approach's reward trajectory across 100 video trajectories. We found that \rapl's learned visual reward shows the strongest correlation to the \gt reward compared to baselines.
+
+\renewcommand{\arraystretch}{1.25}
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{| p{0.77in} | c | c | c | }
+    \hline
+       & \multicolumn{3}{|c|}{ \textbf{Spearman's Correlation} } \\ \hline 
+         & \textbf{Franka Group} (Sec.~\ref{subsec:in-domain-manipulation}) & \textbf{Kuka Group} (Sec.~\ref{sec:cross-domain-results}) & \textbf{Franka Clutter} (Sec.~\ref{subsec:in-domain-manipulation}) \\ \hline
+        \rapl & 0.59 &  0.47 & 0.61\\ \hline
+        \rlhf & 0.38 &  0.31 & 0.26\\ \hline
+        \mvpot &  -0.1&  0.02 & 0.08\\ \hline
+        \mvpotfinetuneabbrev &  0.19&  0.02& 0.11 \\ \hline
+        \imagenetabbrev &  -0.09 &  0.12 & -0.02\\\hline
+        \rtm & 0.03 &  -0.14 &  -0.17 \\ \hline
+    \end{tabular}
+    \caption{\rb{Spearman's rank correlation coefficient between the \gt reward and each learned reward.}}
+    \label{table:Spearman}
+\end{table}
+}
+
+
+
+
+\section{Results: Zero-Shot Generalization Across Embodiments}
+
+\label{sec:cross-domain-results}
+
+So far, the preference feedback used for aligning the visual representation was given on videos $\obstraj \in \tilde{\Xi}$ generated on the same embodiment as that of the robot. 
+However, in reality, the human could give preference feedback on videos of a \textit{different} embodiment than the specific robot's.
+We investigate if our approach can \textit{generalize} to changes in the embodiment between the preference dataset $\tilde{S}_\human$ and the robot policy optimization. 
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figs/xmagical_crossdomain_policy.pdf}
+    \caption{\textbf{Cross-Embodiment: X-Magical.} Policy evaluation success rate during policy learning. Colored lines are the mean and variance of the evaluation success rate. RAPL achieves a comparable success rate compared to GT with high learning efficiency, and outperforms RLHF and TCC.}
+    \label{fig:xmagical_crossdomain_policy}
+\end{figure*}
+
+\textbf{Tasks \& Baselines.} We use the same setup for each environment as in Section~\ref{sec:in-domain-results}.
+\textbf{Cross-Domain Agents.} In X-Magical, reward functions are always trained on the \textit{short stick} agent, but the learning agent is a \textit{gripper} in \textbf{avoid} and a \textit{medium stick} agent in \textbf{grouping} task. In robot manipulation we train RAPL and RLHF on videos of the \textit{Franka} robot, but deploy the rewards on the \textit{Kuka} robot.
+
+\textbf{Hypothesis.} \textit{\rapl enables zero-shot cross-embodiment generalization of the visual reward compared to other visual rewards.}
+
+
+\textbf{Results.} 
+Figure~\ref{fig:xmagical_crossdomain_policy} and  Figure~\ref{fig:kuka_success_v_reward} show the policy evaluation histories during RL training with each reward function in the cross-embodiment X-Magical environment and the manipulation environment. We see that in all cross-embodiment scenarios, \rapl achieves a comparable success rate compared to \gt and significantly outperforms baselines which struggle to achieve more than zero success rate, supporting \textbf{H1}. See more results in App. \ref{app:cross-domain-results}.
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \includegraphics[width=0.5\textwidth]{figs/kuka_success_v_reward_all_baselines.pdf}
+  \caption{\textbf{Cross-Embodiment: Manipulation.} Colored lines are the mean and variance of the success rate during policy learning.}
+  \label{fig:kuka_success_v_reward}
+\end{wrapfigure}
+
+ 
+Because the \textit{short stick} agent is so small, it has a harder time keeping the objects grouped together; in-domain results from Section~\ref{sec:in-domain-results} show a success rate of $\approx$ 60\% (see Figure~\ref{fig:xmagical_indomain_policy}). 
+In theory, with a well-specified reward, the task success rate should \textbf{increase} when the \textit{medium stick} agent does the task, since it is better suited to push objects together. 
+Interestingly, when the \textit{short stick} visual representation is transferred zero-shot to the \textit{medium stick}, we see precisely this: \rapl's task success rate \textbf{improves} by 33\% under cross-embodiment transfer (succ. rate $\approx$ 80\%). 
+This finding indicates that RAPL can learn task-relevant features that can guide correct task execution even on a new embodiment. 
+
+
+\section{Conclusion}
+
+
+In this work, we presented a video-only, preference-based learning method for solving the visual representation alignment problem. 
+We demonstrated that with an aligned visual representation, reward learning via optimal transport feature matching can generate successful robot behaviors with high sample efficiency, and shows strong zero-shot generalization when the visual reward is learned on a different embodiment than the robot’s.
+
+\rb{
+Although in this work we focused on controlled simulation experiments, future work should validate RAPL with real human feedback and robotic hardware experiments. 
+Though our method shows better sample efficiency than RLHF, asking humans for preference queries should be done strategically (e.g., via active learning), should be robust to noisy feedback, and could be improved by leveraging multi-modality (e.g., preferences and language feedback)}. 
+While our current approach was an offline fine-tuning method, future work onto \textit{online} visual reward fine-tuning from human feedback is an exciting direction. \rb{Finally, incorporating feedback from multiple humans (e.g., crowd-sourced multimodal preferences) are also an exciting future direction.}
+
+
+\clearpage 
+
+
+
+
+

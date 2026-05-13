@@ -1,0 +1,475 @@
+\title{Understanding Chain-of-Thought in LLMs Through Information Theory}
+
+\begin{abstract}
+    Large Language Models (LLMs) have shown impressive performance in complex reasoning tasks through Chain-of-Thought (CoT) reasoning, allowing models to break down problems into manageable sub-tasks. However, existing CoT evaluation techniques either require annotated CoT data or fall short in accurately assessing intermediate reasoning steps, leading to high rates of false positives. In this paper, we formalize CoT reasoning in LLMs through an information-theoretic lens. Specifically, our framework quantifies the `information gain' at each reasoning step, enabling the identification of failure modes in LLMs without the need for expensive annotated datasets. We demonstrate the efficacy of our approach through extensive experiments on toy and GSM-8K data, where it significantly outperforms existing outcome-based methods by providing more accurate insights into model performance on individual tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\blfootnote{$^\ast$Denotes equal contribution, where ordering was determined through a coin flip.\\ Corresponding authors: \texttt{jeanfrancois@bytedance.com} and \texttt{faaiz.taufiq@bytedance.com}.}
+
+Large Language Models (LLMs) have demonstrated remarkable capabilities across a wide range of tasks, from complex reasoning to code generation \citep{chowdhery2024palm, openai2024gpt4technicalreport, bubeck2023sparksartificialgeneralintelligence, anil2023palm2technicalreport}. Many of these advances can be attributed to Chain-of-Thought (CoT) reasoning \citep{wei2024cot, nye2021workscratchpadsintermediatecomputation, li2024chainthoughtempowerstransformers}, which involves breaking down complex problems into a series of intermediate steps, mirroring human-like reasoning processes. The success of CoT reasoning, particularly in domains such as mathematics, logic, and multi-step decision-making, has led researchers and developers to incorporate CoT-like features directly into model training, i.e. the FLAN family of models \citep{chung2022scalinginstructionfinetunedlanguagemodels, wei2022finetuned}.
+
+This paper introduces a new formal framework for analyzing CoT in LLMs. We provide a rigorous method grounded in information theory, to evaluate the quality of each step in a model's reasoning process, thus offering insights beyond simple accuracy metrics to identify areas for improvement.
+
+Previous work in this area has proposed ``\textit{Process Supervision}'' \citep{lightman2023lets}, which requires expensive, human-annotated step-by-step data. While effective, this approach is often impractical due to the high cost and effort of creating large-scale annotated datasets. In turn, alternative methods have recently been proposed, such as outcome reward modelling \citep{havrilla2024glore} or the Math-Shepherd \citep{wang2024mathshepherdverifyreinforcellms}. Both these approaches avoid reliance on annotated step-wise CoT data by instead modelling the correctness of each step based on the correctness of final outputs. However, as we demonstrate in this paper, these methods can be unsound for detecting incorrect reasoning steps and can thus lead to a high false-positive rate in certain scenarios.
+
+To address these shortcomings, we employ an information-theoretic approach, grounded in the following key insight: \textit{Each correct step in a reasoning process should provide valuable and relevant information that aids in predicting the final correct outcome}. Building on this insight, we develop a framework to quantify the ``\textit{information gain}'' after each sub-task in the reasoning process, without the need for step-by-step annotations. This enables us to detect sub-tasks that fail to contribute meaningful information toward the correct solution, signalling potential errors or irrelevant steps in the model’s reasoning. In addition, we also introduce a practical algorithm to assess LLM performance across various sub-tasks within a Chain-of-Thought (CoT) reasoning process.
+The key contributions of this paper are as follows:
+\begin{enumerate}
+\item We develop a framework for sequential applications of sub-tasks, e.g. Chain-of-Thought and provide a rigorous language to describe and detect detect failure modes in LLMs. 
+\item Based on this framework, we propose a practical algorithm to assess the task-wise performance of models. This yields more granular information about a model's CoT performance without requiring annotated data for intermediate reasoning steps. 
+\item We validate our methods on extensive toy data and the GSM-8K dataset \citep{cobbe2021trainingverifierssolvemath}. Our method effectively identifies failure modes in CoT reasoning, unlike baselines like outcome reward modelling \citep{havrilla2024glore} and Math-Shepherd \citep{wang2024mathshepherdverifyreinforcellms}, which rely on final accuracy and tend to increase false positives in error detection.
+\end{enumerate}
+
+
+
+
+
+\section{Proposed Framework: Setup and Notation}
+
+Before diving into our framework, we first provide a high-level overview and notation on how LLM generation will be treated throughout this paper. This will allow us to set the foundation for describing our information-theoretic framework. In particular, following the approach in \cite{gonzalez2023beyond}, we view LLMs as abstract execution machines with a natural language interface. From this perspective, prompts are designed to solve specific problems (e.g., mathematical or logical problems), and the LLM processes the information in the prompt to generate an output.
+
+We now define the notation for a typical prompt as a combination of two components:
+\begin{enumerate}
+    \item An initial state, represented by a random variable $\state_0 \in \statespace$, denotes information provided in the prompt that the LLM must operate on to obtain the queried information.
+    \item A task $\lambda \in \Upsilon$ (e.g., addition followed by multiplication) which encapsulates how the LLM should process information in $\state_0$.
+\end{enumerate}
+Given the prompt, defined as a tuple $(\state_0, \lambda)$, the state $\state_1$ represents the result of applying task $\lambda$ to the initial state $\state_0$. Formally, we denote this using the \emph{update} mapping $\Lambda: \statespace \times \Upsilon \rightarrow \statespace$ which outputs the updated state $\state_1$ by applying the task $\lambda$ on $\state_0$,
+i.e. $\state_1 = \Lambda(\state_0, \lambda)$. 
+This updated state is then used to obtain the final output, denoted by $\finaloutput \in \statespace$, by extracting only the information in $\state_1$ which is relevant to the queried final answer. This notation defines a prompt that instructs a model to process information drawn from some initial distribution $p(\state_0)$ (e.g., mathematical problems). 
+
+Let us use the following simple example 
+to illustrate the notation:
+\begin{align*}
+    \textbf{Prompt:} \textit{``James has 3 apples and Abbey has 9. How many apples do the two have in total?''}
+\end{align*}
+Here, using the above notation, the initial state $\statex_0$ denotes the information \textit{``James has 3 apples; Abbey has 9 apples''}, and $\lambda$ denotes the addition task. Next, $\statex_1 = \Lambda(\statex_0, \lambda)$ represents the updated information after correctly performing the addition operation, i.e. $\statex_1=$\textit{``James has 3 apples; Abbey has 9 apples; The two have 12 apples in total''}. The final output, $y$, is then obtained by simply extracting the total number of apples from $\statex_1$, i.e. \textit{``The two have 12 apples in total''}\footnote{Our setup also encapsulates cases with ambiguous (or multiple correct) responses for a given task $\lambda$ and initial state $\statex_0$. In this case, $\Lambda(\statex_0, \lambda)$ is a random variable with distribution $p(\state_1 \mid \state_0 = \statex_0)$. Therefore, for generality, we treat $\Lambda(\statex_0, \lambda)$ as a random variable from now on.}.
+With this basic notation established,
+we now consider compositions of tasks, enabling us to formalize the Chain of Thought (CoT) process in LLMs.
+
+\subsection{Compositionality}
+Many mathematical or logical problems require a sequential application of operations. Our notation is also amenable to such problems as it accommodates the composition of tasks.
+Consider a problem which requires two successive steps to arrive at the correct output:
+\begin{align}
+    \textbf{Prompt: } \textit{``Solve for $z = 2 \times( x + y)$ where x = 12 and y = 13''}. \label{eq:composition_prompt}
+\end{align}
+In this example, first, we apply the addition operation to find the value of $x + y$, and next, we apply the multiplication operation to find the value of $z$. Using our notation this can be expressed as $\Lambda(\statex_0, \lambda_1 \circ \lambda_2)$, where $\lambda_1, \lambda_2$ denote the addition and multiplication tasks respectively. The following property allows us to concretely define the application of compositional task $\lambda_1 \circ \lambda_2$:
+\begin{definition}
+    We say that an update rule $\Lambda: \statespace \times \Upsilon \rightarrow \statespace$ is \emph{compositionally consistent} if:
+    \begin{align*}
+    \Lambda(\statex_0, \lambda_1 \circ \lambda_2) \eqd \Lambda(\Lambda(\statex_0, \lambda_1), \lambda_2) \qquad \textup{for all } \statex_0 \in \statespace \textup{ and } \lambda_1, \lambda_2 \in \Upsilon.
+    \end{align*}
+\end{definition}
+Here, $\eqd$ denotes equality in distribution and is sufficient in many cases. For example, where a query may have multiple correct responses, an almost sure equality may be too restrictive.
+
+Going back to the prompt in \eqref{eq:composition_prompt}, Figure \ref{fig:compositionality} shows that the model first computes $x + y$, and next multiplies the result by $2$.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.65\linewidth]{figs_cot_example.png}
+    \caption{Solving the problem in prompt \eqref{eq:composition_prompt} requires compositional application of tasks.}
+    \label{fig:compositionality}
+\end{figure}
+Here, we refer to $\state_1, \state_2$ as \emph{intermediate} states and $Y$ is the correct final output.
+More generally, if a problem statement requires sequential application of $T$ sub-tasks, $\lambda = \lambda_1 \circ \ldots \circ \lambda_T$, then the Chain-of-Thought (CoT) 
+reasoning is divided up into $T$ steps, where the output of the $t$'th step is recursively defined as $\state_t = \Lambda(\state_{t-1}, \lambda_t)$ for $t\in \{1, \dots, T\}$. Finally, the overall true output $\finaloutput$ is obtained by extracting the queried information from the final state $\state_T$.
+
+Having established a formal language for the sequential application of tasks, e.g. CoT, we now turn towards how a task may be divided into such a sequence of intermediate sub-tasks.
+
+\subsection{Primitive tasks}
+In this subsection, we introduce the notion of \emph{primitive tasks} which form the basic building blocks of any task. Intuitively, our formulation is reminiscent of ideas from linear algebra, where basis vectors form the basic building blocks of a vector space. In our case, any task $\lambda \in \Upsilon$ can be expressed as a sequence of primitive tasks. 
+This decomposition will allow us to establish which tasks the model could have learned from the training data. For example, if a specific primitive task is not available in the LLM training data, it would be impossible for the model to execute any instructions which involve this primitive task correctly.
+With this in mind, we now introduce this concept formally:
+
+
+\begin{definition}[Primitive tasks]
+    We say that a set of tasks $\Gamma \subseteq \Upsilon$ is primitive if, for any task $\lambda \in \Upsilon$, there exists a unique subset $\{\lambda_{i}\}_{i=1}^k \subseteq \Gamma$ such that $ \lambda = \lambda_{1} \circ \dots \circ \lambda_{k}$. 
+\end{definition}
+
+Note that the decomposition is not unique but the set of components is. 
+In some cases, there may exist distinct permutations of primitive tasks which compose to yield the same task as is common in many associative operations. 
+As an example, in the context of mathematical problem-solving, the basic arithmetic operation could be considered primitive.
+The composition of these primitive tasks allows us to construct extremely complex operations. Just like in linear algebra, we define the span of these tasks as the set obtained by their sequential applications.
+
+
+        
+\begin{definition}[Span of tasks]
+    Let $\Phi \subseteq \Upsilon$ be a set of tasks, then:
+    \begin{align*}
+      \Span(\Phi) =  \{\lambda_1 \circ \ldots \circ \lambda_k: \lambda_i \in \Phi \textup{ for } 1\leq i \leq k, k \in \mathbb{Z}_{> 0}\}.
+    \end{align*}
+\end{definition} 
+The set $\Span(\Phi)$ comprises all the tasks that can be applied by composing sub-tasks in the set $\Phi$. This means that any \emph{compositionally consistent} update rule $\Lambda$ which is well-defined on the set of tasks $\Phi$ will also be well-defined on $\Span(\Phi)$. However, this $\Lambda$ may still be ill-defined for any task not in this span. This limitation is captured by the concept of unidentifiability, which plays a central role in determining the boundaries of what a model can and cannot infer.
+\subsection{Unidentifiability}
+The unidentifiability of tasks forms a key part of our framework. It directly addresses the fundamental challenge that models, such as LLMs, face when dealing with unseen tasks. If a task $\lambda$ lies outside of $\Span(\Phi)$, the span of tasks the model has been trained on, then the model cannot be expected to infer or apply it correctly. In other words, the model's capacity is constrained by the identifiability of tasks within the training set. This notion and formalization of unidentifiability allows us to highlight a critical limitation in the generalization of models: tasks not encountered during training cannot be reliably executed, as they remain beyond the model's learned task span. More formally:
+
+\begin{definition}[Unidentifiability]
+    Let $\Phi \subseteq \Upsilon$ be any set of tasks, then a tasks $\lambda$ is said to be unidentifiable in $\Phi$ iff, $\lambda \not\in \Span(\Phi)$.
+\end{definition}
+
+\textbf{Remark}
+In practice, the concept of unidentifiability may depend on the initial state $\state_0$. For instance, an LLM might accurately perform addition for 2-digit numbers but fail with 10-digit numbers \citep{razeghi2022impactpretrainingtermfrequencies}. Our framework can be extended to account for such cases by explicitly incorporating the distribution of initial states into the notion of identifiability. For example, addition could be considered unidentifiable when the initial state distribution is $p(\state_0 \mid \state_0 \textup{ includes 10-digit numbers})$. However, for simplicity, we keep this distributional dependence implicit in the definition provided earlier.
+
+With this general framework in place, we can now turn this theoretical foundation into a practical algorithm for detecting unidentifiable sub-tasks. Specifically, we explore how the notion of unidentifiability can be combined with information-theoretic approaches to detect failure points in LLMs.
+
+
+
+\section{Operationalising our framework}
+
+
+This section aims to operationalise the above framework to make inferences regarding the unidentifiability of intermediate sub-tasks in a model's CoT reasoning process. This would subsequently allow us to detect any sub-task at which a model's CoT reasoning process starts to diverge from the ground truth, thereby providing insights into how the model can be improved. For example, suppose we are in a setting where the ``addition'' operation is unidentifiable, then we could further improve the model's mathematical reasoning by fine-tuning it on the addition operation.
+\subsection{An information-theoretic perspective}
+To make the concept of unidentifiability practical in the context of CoT generations, we begin by introducing the fundamental assumption. The core assumption in our approach is that each correctly executed CoT reasoning step should contribute meaningful and relevant information that aids in predicting the correct final output, denoted as $\finaloutput$.
+If we encounter a step after which the amount of information regarding $\finaloutput$ stops increasing, then we can take this as an indication of an incorrectly executed task. We concretise this assumption using using our notation from the previous section:
+
+
+\begin{assumption}[Bayesian network] \label{ass:bayenet}
+    Let $\lambda \neq \lambda'$ be two operations with primitive decompositions:
+    \begin{align*}        
+    \lambda = \lambda_1 \circ \dots \lambda_{k-1} \circ \lambda_{k} \circ \dots \circ \lambda_T \quad \text{ and } \quad 
+    \lambda' = \lambda_1 \circ \dots \lambda_{k-1} \circ \lambda'_{k} \circ \dots \circ \lambda'_{T'},
+    \end{align*}
+    where 
+    $\lambda'_{k}$ is unidentifiable in $\{\lambda_1,\dots, \lambda_T \}$. Then, the intermediate states corresponding to the tasks $\lambda, \lambda'$ have the following Bayesian network:
+
+    \begin{figure}[!htp]
+        \centering
+        \resizebox{0.6\textwidth}{!}{%
+        \input{diagram.tikz} %
+        }
+        \caption{Bayesian network}\label{fig:bayes-net}    \end{figure} 
+\end{assumption}
+\paragraph{Intuition}
+The Bayesian network in Figure \ref{fig:bayes-net} implies that for any two reasoning paths which diverge at step $k$, the future states $\state_i$ and $\state'_{j}$ for any $i,j\geq k$ satisfy the conditional independence $\state_i \indep \state'_{j} \mid \state_{k-1}$.
+Consequently, once we apply $\lambda'_k$, the subsequent states along the new reasoning path (in red) add no information regarding the subsequent states or the output of the original path (in green).
+Hence the figure represents the fact that, for any given input, the output of $\lambda_{k}$ (top fork) contains no information regarding the output of any other primitive task $\lambda'_{k}$ (bottom fork). 
+
+
+Now that we have formalised our key information-theoretic assumption on the ground-truth CoT process, we turn towards the model behaviour on unidentifiable tasks in the following section.
+
+\subsection{Task execution in LLMs}
+To operationalise our framework, we formally distinguish between the model i.e. LLM's task execution and the \emph{ground truth} process which arises from following the instructions correctly. To this end, we explicitly define how an LLM interprets a specified task $\lambda$ using the update rule, $\Lambda^M(\state_0, \lambda)$, which is in general distinct from the \emph{ground truth} update rule $\Lambda(\state_0, \lambda)$. 
+
+Here, one option would be to consider the idealised setting where the model learns to perfectly follow some of the primitive tasks available in the training data. 
+However, this may be considered too restrictive since in reality most LLMs do not always follow a ``learned'' task perfectly. 
+Instead, we consider a much weaker assumption that the model cannot correctly execute a task which is unidentifiable in the training data.
+To this end, suppose $\Gamma^M \subseteq \Gamma$ denotes the primitive tasks available in the LLM training data. Concretely, we make the following assumption on LLM's task execution. 
+
+
+\begin{assumption}[Task execution in LLMs]\label{ass:model}
+$\Lambda^M$ is compositionally consistent and for any $(\statex_0, \lambda) \in \statespace \times \Upsilon$, there exists some $\widehat{\lambda}\in \Span(\Gamma^M)$ such that $\Lambda^M(\statex_0, \lambda) \eqd \Lambda(\statex_0, \widehat{\lambda})$. 
+\end{assumption}
+
+\paragraph{Intuition} Assumption \ref{ass:model} means that for any task which we would like the LLM to apply, the LLM ends up executing some task in $\Span(\Gamma^M)$ which the model has been trained on. 
+In other words, the model's execution is restricted only to the tasks which could be inferred from the training data (i.e. in $\Span(\Gamma^M)$).
+Moreover, this assumption also allows us to encapsulate cases where the model does not follow the correct instructions or does not decompose a given task correctly.
+
+
+
+Before proceeding further with our main result which will allow us to test for the unidentifiability of sub-tasks, we define some notation which we will use from now onwards. 
+Let $\lambda = \lambda_1 \circ \ldots \circ \lambda_T$ denote a primitive decomposition of a task $\lambda$. Then, starting from an initial state $\state_0$, we denote the model's intermediate states recursively as:
+\begin{align*}
+    \state^M_{t} \coloneqq \Lambda^M(\state^M_{t-1}, \lambda_t) \quad \textup{and} \quad \state^M_0 = \state_0.
+\end{align*}
+Moreover, we use $\finaloutput^M$ to denote the model's final output.
+Next, using this notation, we present the conditional independence which must hold if the model encounters an unidentifiable intermediate task along its CoT reasoning path. 
+
+\begin{theorem}\label{prop:conditional_indep}
+    Let $\Gamma^M \subseteq \Gamma$ denote the primitive tasks available in the training data. 
+    Let $\lambda$ be a task with decomposition $\lambda = \lambda_1 \circ \ldots \circ \lambda_T$. If $\lambda_k$ is the first task in the decomposition of $\lambda$ which is unidentifiable in $\Gamma^M$ (i.e. $k = \arg\min_{t} \{\lambda_t \not \in \Span(\Gamma^M)\}$). Then, under Assumptions \ref{ass:bayenet} and \ref{ass:model}, we have that
+    \begin{align}
+        \finaloutput \indep \state^M_{j} \mid \state^M_{j-1} \quad \textup{for all $j\geq k$}. \label{eq:conditional_indep}
+    \end{align}
+\end{theorem}
+Theorem \ref{prop:conditional_indep} shows that under Assumptions \ref{ass:bayenet} and \ref{ass:model}, when the model encounters an unidentifiable task (i.e. $\lambda_k$ in Theorem \ref{prop:conditional_indep}) in its Chain-of-Thought reasoning, the model output satisfies the conditional independence in Equation \eqref{eq:conditional_indep}. More concretely, after a model's CoT reasoning diverges from the ground truth at step $k$, every subsequent step adds no additional information regarding the correct final output $Y$. In practice, this `information' is measured by checking if the model's confidence about the final output $Y$ increases after each step. This is formalised in the next section.
+
+\subsection{Testing for unidentifiability using information gain}\label{sec:conditional_independence_testing}
+Having established all the essential components of our framework, we can now provide a concrete description of how to practically identify unidentifiable sub-tasks using information theory. As is common in the literature \citep{wang2024mathshepherdverifyreinforcellms, havrilla2024glore}, we assume access to a dataset consisting of prompts and their corresponding final answers, obtained by correctly applying the task $\lambda$. This dataset is denoted as $\D_\lambda \coloneqq \{(\statex_0^{i}, y^i)\}_{i=1}^n$.
+
+Additionally, recall that $\state^M_{j}$ and $\state^M_{j-1}$ represent the model's chain of thought (CoT) reasoning at steps $j$ and $j-1$, respectively. Consequently, each element in the conditional independence statement in Equation \eqref{eq:conditional_indep} can be derived from the data and/or the model. 
+
+To this end, we consider the mutual information between $Y$ and $\state^M_{j}$ conditional on $\state^M_{j-1}$, denoted by $\mathcal{I}(\finaloutput; \state^M_j \mid \state^M_{j-1})$.  This conditional mutual information term intuitively represents the \emph{additional information} contributed by the $j$'th step of CoT, that is relevant for predicting the ground truth final output $Y$. 
+Therefore, we refer to $\mathcal{I}(\finaloutput; \state^M_j \mid \state^M_{j-1})$ as the \emph{information gain} at step $j$.
+
+It follows from Theorem \ref{prop:conditional_indep} that if an LLM encounters a sub-task at step $i$ which is unidentifiable in its training data, no subsequent step should contribute any additional information relevant for predicting $Y$ (i.e. the information gain 
+should remain 0 after step $i$). If, on the other hand, we observe that $\mathcal{I}\left(\finaloutput; \state^M_j \mid \state^M_{j-1}\right) > 0$ for some $j \geq i$, then under Assumptions \ref{ass:bayenet} and \ref{ass:model}, the task $\lambda_i$ is not unidentifiable. 
+To estimate the information gain in practice, we use the 
+following result:
+
+
+
+
+\begin{proposition}
+\label{thm:conditional_mi}
+    Let $\mathcal{I}(X;Y \mid Z)$ denote the mutual information between random variables $X$ and $Y$ conditional on $Z$. Then, 
+    \begin{align}
+        \E[\log p(\finaloutput \mid \state^M_j)] - \E[\log p(\finaloutput \mid \state^M_{j-1})] = \mathcal{I}\left(\finaloutput; \state^M_j \mid \state^M_{j-1}\right) \geq 0. \label{eq:information-gain}
+    \end{align}
+\end{proposition}
+
+To estimate the information gain in \eqref{eq:information-gain} using Proposition \ref{thm:conditional_mi}, we train a separate LLM, which we refer to as the \emph{supervisor model} $g_{\textup{sup}}$. This model takes as input the model's CoT reasoning up to any given intermediate step $t$, $\state^M_t$, and is fine-tuned to directly predict the ground truth final output $Y$. 
+In this way $g_{\textup{sup}}(\state^M_t)$ approximates the conditional distribution $p(\finaloutput \mid \state^M_t)$. Then, the quantity $\E[\log p(\finaloutput \mid \state^M_j)]$ can be estimated using the negative cross-entropy loss for predicting $\finaloutput$, i.e.
+\begin{align}
+     \E[\log p(\finaloutput \mid \state^M_j)] \approx \E[\log \hat{p}(\finaloutput \mid \state^M_j)] = -\E[l_{\textup{CE}}\left(\finaloutput, g_{\textup{sup}}(\state^M_j)\right)], \nonumber
+\end{align}
+where $l_{\textup{CE}}$ denotes the cross-entropy loss.
+From this, it follows that 
+\begin{align}
+    \underbrace{\E[\log p(\finaloutput \mid \state^M_j)] - \E[\log p(\finaloutput \mid \state^M_{j-1})]}_{\text{Information gain}} \approx \E[l_{\textup{CE}}(\finaloutput, g_{\textup{sup}}(\state^M_{j-1}))] - \E[l_{\textup{CE}}(\finaloutput, g_{\textup{sup}}(\state^M_j))]. \label{eq:ce_difference}
+\end{align}
+\textbf{Summary:} The \emph{information gain} (IG) between steps $j$ and $j-1$ reflects how much relevant information step $j$ contributes towards predicting \( \finaloutput \). If task \( \lambda_j \) is executed correctly, this gain is positive, as indicated by a decrease in the cross-entropy loss. Conversely, if step \( j \) does not provide additional information, the loss remains unchanged. This can be interpreted as the conditional mutual information between \( \state^M_j \) and \( \finaloutput \), conditioned on \( \state^M_{j-1} \). Positive information gain suggests step \( j \) adds new insight about \( \finaloutput \), while no gain indicates no added information.
+\textbf{Remark on sample-wise information gain \,\,\,}
+While conditional mutual information provides an aggregate measure of information gain for a sub-task in a dataset, it may also be desirable to obtain an analogous measure of sub-task correctness for individual CoT instances. This could be useful, for example, in detecting which step went wrong for a given prompt. 
+Our notion of information gain can be extended to this sample-wise setting by instead considering the following difference
+\begin{align}
+    \log p(\finaloutput \mid \state^M_j) - \log p(\finaloutput \mid \state^M_{j-1}) \approx l_{\textup{CE}}(\finaloutput, g_{\textup{sup}}(\state^M_{j-1})) - l_{\textup{CE}}(\finaloutput, g_{\textup{sup}}(\state^M_j)). \label{eq:ce_difference_samplewise}
+\end{align}
+Intuitively, if step $j$ in the model's CoT is correct, the model should become more confident in the ground truth output $Y$ being the correct final answer. Therefore, the difference above should be positive. Alternatively, if step $j$ is wrong, the model's confidence regarding the true output $Y$ should not increase and the above difference should not be positive.  From now on, we refer to the difference in \eqref{eq:ce_difference_samplewise} as \emph{sample-wise information gain} at step $j$.
+\input{related_works}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+In this section, we empirically demonstrate the practical utility of our framework. In addition to our proposed method dubbed information gain (denoted by IG), we consider two common baselines that can be used to detect the errors in a model's CoT reasoning and assume access to only the model's CoT generations $\state_0, \state^M_1, \ldots, \state^M_T$ as well as the correct final answers denoted as $\finaloutput$.
+
+\paragraph{Outcome Reward Model (ORM) \citep{havrilla2024glore}} 
+    This involves training a classifier, denoted as $f_{\textup{ORM}}$, which takes as input model generations up to any step $t$ in its CoT reasoning, $\state^M_t$, and predicts the probability of the model's final answer being correct, i.e.
+    \begin{equation}
+        f_{\textup{ORM}}(\state^M_t) \approx \p(\finaloutput^M = \finaloutput \mid \state^M_t). \label{eq:probability_correctness}
+    \end{equation}
+    Here, if we observe that this probability of correctness drops significantly after step $t$, i.e. if $f_{\textup{ORM}}(\state^M_t) \gg f_{\textup{ORM}}(\state^M_{t+1})$, this indicates that the model does not apply the task $\lambda_{t+1}$ correctly. 
+
+\paragraph{Math-Shepherd \citep{wang2024mathshepherdverifyreinforcellms}}
+    This method quantifies the \emph{potential} for a given reasoning process $\state^M_t$ by using a `completer' model to generate $N$ completions of each reasoning process starting from step $t$, $\{(\state^M_t, \state^M_{t+1, j}, \ldots, \state^M_{T, j}, \finaloutput^M_{j})\}_{j\leq N}$, where $\finaloutput^M_{j}$ denotes the final answer reached in the $j$'th completion. Then, we estimate the potential of this step based on the proportion of  correct answers among the $N$ completions, denoted by $f_{\textup{MS}}(\state^M_t)$ as:
+    \begin{align}
+    f_{\textup{MS}}(\state^M_t) \coloneqq \sum_{j=1}^N \frac{\ind(\finaloutput^M_{j} = \finaloutput)}{N}. \label{eq:math_shepherd_correctness}
+    \end{align}
+    For a fair comparison we do not assume access to a `verifier' model more capable than our base model and therefore, we use the base model as the completer model in our experiments.
+
+\subsection{Toy data experiments}
+First, we consider a toy setting where we have full control over the model behaviour on different tasks. Our prompts comprise of an integer vector $Z_0 \in \mathbb{Z}^5$ sampled randomly from a given distribution.
+The task $\lambda$ comprises 5-steps $\lambda = \lambda_1 \circ \ldots \circ \lambda_5$, where each sub-task $\lambda_i$ denotes an operation which  transforms a given integer vector $Z_{i-1} \in \mathbb{Z}^5$ into another $Z_{i} \in \mathbb{Z}^5$. 
+Finally, in this setup, the correct final answer $\finaloutput$ is the value of $Z_{5}$.
+ 
+
+\paragraph{Generating the dataset}
+To investigate partial unidentifiability for a given task $\lambda_i$ we modify the obtained dataset by introducing `noise' at step $i$. In other words, the task $\lambda_i$ is applied incorrectly on a subset of the data, whereas all other tasks are always applied correctly.
+This represents a model which sometimes fails at step $i$ and we use `LLM$_i$' to denote this model in this experiment.
+We repeat this procedure for all tasks $\lambda_i$ for $i\in \{1, \ldots, 5\}$ which yields 5 LLMs $\{\llm_1, \ldots, \llm_5 \}$. 
+
+To also investigate the robustness of the methods, we introduce a special case in $\llm_3$. Here, task $\lambda_3$ is applied incorrectly if and only if the output after task 2 (i.e., after $\lambda_2$) lies in some set $\mathcal{S}$. This choice has been made deliberately to highlight a pitfall of the existing baselines (as we will explain below) and is in contrast to the rest of LLMs where any errors occur at random. In other words, the correctness of task $\lambda_3$ is dependent on the output of $\lambda_2$.
+
+
+
+    
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[height=0.3in]{figs_legend.pdf}
+    \\
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[height=2in]{figs_heatmap_our_method_new.pdf}
+        \caption{Our results}
+        \label{fig:our_method_heatmap}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[height=2in]{figs_heatmap_classification_new.pdf}
+        \caption{ORM results}
+        \label{fig:orm_heatmap}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[height=2in]{figs_heatmap_math_shepherd_new.pdf}
+        \caption{Math-Shepherd results}
+        \label{fig:ms_heatmap}
+    \end{subfigure}
+    \caption{Heatmaps quantifying the correctness of different sub-tasks for the 5 LLMs under consideration obtained using the different baselines. 
+    Here, the red color indicates a significant drop in the plotted metrics and can be seen as an indication of an incorrectly executed sub-task.
+    }
+    \label{fig:heatmaps}
+\end{figure}
+\subsubsection{Results}
+Figure \ref{fig:heatmaps} shows how the different baselines quantify the correctness of the different tasks for the 5 different LLMs under consideration. This figure only considers samples where the final answer of the LLM was incorrect, i.e. $\finaloutput^M \neq \finaloutput$.
+For our method (IG), Figure \ref{fig:our_method_heatmap}  shows the information gain across the different steps for each LLM. Likewise,
+Figure \ref{fig:orm_heatmap} presents the results for ORM and shows how the average probability of correctness in \eqref{eq:probability_correctness} changes across the different steps, whereas, for Math-Shepherd, Figure \ref{fig:ms_heatmap} shows the proportion of correct completions starting after each step \eqref{eq:math_shepherd_correctness}.
+Here, any significant drop in the plotted values indicate an incorrect application of a task.
+
+\textbf{Information gain accurately quantifies step-wise correctness \,\,\,}
+We observe that for each LLM the information gain remains positive until we encounter an incorrect reasoning step, at which point it drops to negative values. Therefore, our method can identify the incorrectly executed task for each LLM under consideration. We used a GPT-2 supervisor model to estimate information gain.
+
+\textbf{Pitfall of the baselines \,\,\,}
+While the ORM and Math-Shepherd manage to correctly identify the incorrect reasoning steps in most cases, these methods fail to correctly detect erroneous steps for $\llm_3$. 
+This happens because, 
+in our setup, $\lambda_3$ is incorrectly applied if and only if the output after task $\lambda_2$ lies in some set $\mathcal{S}$. 
+Therefore, the classifier model can confidently predict the correctness of the final model output at  $\lambda_2$ by simply checking if the output lies in $\mathcal{S}$. Here, the classifier becomes confident that the final output will be wrong right after $\lambda_2$, even though the error occurs at $\lambda_3$.
+
+\begin{table}[t]
+    \centering
+    \caption{Metrics for sample-wise classification of sub-task correctness for $\llm_3$ using the different baselines.}
+    \label{tab:accuracies_toy_data}
+    \begin{small}
+    \begin{sc}
+        \begin{tabular}{lccc}
+        \toprule
+            Method & Accuracy $\uparrow$ & TPR $\uparrow$ & FPR $\downarrow$ \\
+            \midrule
+            IG (Ours) & \textbf{0.96} & 0.98 & \textbf{0.06} \\ 
+            ORM & 0.77 & 0.98 & \red{0.54} \\ 
+            Math-Shepherd & 0.60 & \textbf{1.0} & \red{1.0} \\ 
+            \bottomrule
+        \end{tabular}
+    \end{sc}
+    \end{small}
+\end{table}
+Similarly, when using Math-Shepherd for $\llm_3$ (with the same model being used as a completer), 
+a completion yields an incorrect final answer if the output after $\lambda_2$ lies in $\mathcal{S}$. 
+If this is the case, all completions yield an incorrect final output regardless of which step we begin the completions from. This makes it impossible to accurately identify the step at which $\llm_3$ goes wrong.
+\textbf{Sample-wise detection \,\,\,}
+We can also use the different baselines for sample-wise detection of erroneous steps as outlined in Section \ref{sec:conditional_independence_testing}. 
+In this setting, for each prompt, we can classify a step as incorrect if a baseline's metric falls below a threshold. 
+Table \ref{tab:accuracies_toy_data} shows the results for sample-wise classification of sub-task correctness for $\llm_3$ using the different baselines (where we chose the best thresholds for each baseline using a held-out dataset).
+It can be seen that our method yields a significantly higher accuracy and a lower rate of false-positives than the baselines and therefore, is also considerably more reliable for sample-wise detection of errors. 
+\subsection{Arithmetic operations on LLama-3-8B}
+Following our toy experiments, we now evaluate our framework in a more realistic setting using the Llama-3-8B model \citep{dubey2024llama3herdmodels}. We focus on a simple arithmetic task that involves both multiplication and addition tasks. The goal is to assess the model's performance on individual operations as well as their combination.
+
+\textbf{Experimental setup \,\,\,} We sample two integers $x$ and $y$ uniformly from the range $[1, 100000)$. The prompt given to the model is structured as follows:
+
+\textbf{Prompt:} ``\textit{x = \{x\}, y = \{y\}, Please calculate the following:
+1. 3x,
+2. 2y, 
+3. 3x + 2y }'' 
+
+\textbf{Model accuracy \,\,\,} We observe that the model's accuracy varies across the three steps:
+\begin{tabular}{ccc}
+    Step 1 accuracy: 80\%, \qquad \qquad \qquad & Step 2 accuracy: 98\%, \qquad \qquad \qquad & Step 3 accuracy: 42\%.
+\end{tabular}
+
+\begin{wrapfigure}{l}{0.4\textwidth}
+    \centering
+    \includegraphics[width=0.36\textwidth]{figs_heat_math2.jpeg}
+    \caption{The distribution of $(x, y)$ for incorrect samples shows a clear trend: Llama-3-8B struggles to add large and small numbers together (top-left and bottom-right).}
+    \label{fig:distribution_map_math}
+\end{wrapfigure}
+Notably, the majority of failures occur in the third step, which involves addition of the previously computed values.
+We analyzed the distribution of $(x, y)$ values where the model obtains the correct final output. Interestingly, as Figure \ref{fig:distribution_map_math} illustrates, we observed that most errors occur when exactly one of the variables $(x, y)$ is large and the other is small. 
+This suggests that the model's
+correctness is highly dependent on the $(x, y)$ values in the prompt, resulting in baselines struggling to identify the erroneous step in the model's CoT reasoning (as we show below).
+\subsubsection{Results}
+\textbf{Our Method \,\,\,}
+We trained the supervisor model by fine-tuning a Llama-3-8b model using Low Rank Adaptation (LoRA) \citep{edward2021lora}. Table \ref{tab:combined_results_math} shows that there is a significant drop in information gain at step 3 relative to steps 1 and 2, demonstrating that our information-theoretic method is able to correctly identify that the failure mainly occurs at step 3. 
+
+\textbf{Outcome Reward Model (ORM) \,\,\,}
+In contrast, for ORM the mean probability of correctness included in
+Table \ref{tab:combined_results_math} 
+remains unchanged at each step. This could be explained by Figure \ref{fig:distribution_map_math} which suggests that ORM classifier can predict the correctness of the final output using only the values of $x$ and $y$ available in the prompt.
+Crucially, the classifier's confidence remains unchanged even as the model's intermediate reasoning steps are added to the input.
+Hence, ORM is unable to distinguish between the model's performance on intermediate reasoning steps.
+
+\textbf{Math-Shepherd \,\,\,}
+Table \ref{tab:combined_results_math} includes the proportion of correct completions for Math-Shepherd. We observe that even though this proportion is very small at step 3, we also observe that only about 5-7\% of the completions starting from steps 1 and 2 lead to a correct output, even though the error mostly occurs at step 3. 
+This happens because the 
+correctness of Llama-3-8B is largely determined by the initial values of $(x, y)$ in the prompt (see Figure \ref{fig:distribution_map_math}).
+Consequently, Math-Shepherd incorrectly flags steps 1 and 2 as incorrect a significant proportion of the time which leads to a significantly higher proportion of false positives (as compared to our baseline) as we show below.
+
+\begin{table}[!htp]
+\centering
+\caption{Metrics for aggregate step-wise correctness of arithmetic operations across prompts, along with sample-wise classification of incorrect operations leading to an incorrect final answer.}
+\label{tab:combined_results_math}
+\begin{scriptsize}
+\begin{sc}
+\begin{tabular}{lccc||ccc}
+\toprule
+ & Step 1: $3x$ \textcolor{green}{\ding{51}} & Step 2: $2y$ \textcolor{green}{\ding{51}} & Step 3: $3x + 2y$ \textcolor{red}{\ding{55}}   &  Accuracy $\uparrow$ & TPR $\uparrow$ & FPR $\downarrow$ \\ \midrule
+IG (Ours) & 0.67 & 0.24 & \textcolor{red}{0.027}   & \textbf{0.76}        & 0.51 & \textbf{0.02} \\
+ORM       & 0.24 & 0.24 & 0.24   & 0.56        & \textcolor{red}{0.10} & 0.07 \\
+Math-Shepherd       & \textcolor{red}{0.068} & \textcolor{red}{0.059} & \textcolor{red}{0.00069}   & 0.53        & \textbf{0.99} & \textcolor{red}{0.86} \\ \bottomrule
+\end{tabular}
+\end{sc}
+\end{scriptsize}
+\end{table}
+
+ 
+\textbf{Sample-wise detection \,\,\,} 
+When using these methods for sample-wise detection of incorrect steps, our approach yields the highest accuracy among the baselines considered.
+This superior performance is attributed to the fact that baselines like ORM and Math-Shepherd often falsely flag steps 1 and 2 as incorrect, as evidenced by their high false positive rates in Table \ref{tab:combined_results_math}.
+
+\subsection{Experiments on the Controlled GSM-8K Dataset}
+To evaluate our method on a complex dataset, we conducted experiments on GSM-8K \citep{cobbe2021trainingverifierssolvemath}, controlling specific factors for more interpretable results.
+
+We begin by using GPT-4 \citep{openai2024gpt4technicalreport} to generate answers for GSM-8K questions where the ``multiplication'' operation is always done incorrectly, while all other operations are correct.
+Next, we filtered the dataset to ensure that ``multiplication'', ``subtraction'', and ``addition'' never appeared together within the same Chain of Thought (CoT) solution. In particular, we ensured in our setting that, all incorrect final answers included both ``multiplication'' and ``subtraction'', whereas correct final answers did not involve either operation. This introduces a spurious correlation between ``subtraction'' and wrong answers.
+
+In this setup, we mainly focused on evaluating ORM and our proposed method, as Math-Shepherd (with the same completer) fails trivially under these conditions. Specifically, ``multiplication'' is inherently unidentifiable, since any CoT containing ``multiplication'' negates the influence of other sub-tasks by design.
+\subsubsection{Results}
+Table \ref{tab:combined_results} demonstrates that our proposed information-theoretic approach successfully identifies the unidentifiable sub-task. Since we intentionally set the ``multiplication'' rules to be incorrect, we observe minimal to no information gain for this operation, as expected. However, a different pattern emerges when we examine the results of the ORM method. Both ``multiplication'' and ``subtraction'' show, on average, a very low probability of correctness. This is due to the fact that both sub-tasks are primarily associated with incorrect final answers. Consequently, relying on the standard ORM approach could lead to the misleading conclusion that ``subtraction" is also incorrect.
+
+Additionally, in our sample-wise experiment, we observe a similar trend when we use the methods to assess the sample-wise correctness of ``multiplication" and ``subtraction" for each prompt. Here, our proposed method not only accurately detects the unidentifiable sub-task but also highlights a significant shortcoming of ORM. Specifically, ORM falsely flags ``subtraction'', which is actually correct, as an incorrect sub-task due to spurious correlations.
+
+
+\begin{table}[!htp]
+\centering
+\caption{Comparison between our method and ORM for different sub-tasks in GSM-8K. The final three columns include results for sample-wise classification of incorrect operations for each prompt.}
+\label{tab:combined_results}
+\begin{scriptsize}
+\begin{sc}
+\begin{tabular}{lcccc||ccc}
+\toprule
+ & Addition \textcolor{green}{\ding{51}} & Multiplication \textcolor{red}{\ding{55}} & Division \textcolor{green}{\ding{51}} & Subtraction \textcolor{green}{\ding{51}}   &  Accuracy $\uparrow$ & TPR $\uparrow$ & FPR $\downarrow$ \\ \midrule
+IG (Ours) & 0.99 & \textcolor{red}{0.026} & 1.05 & 1.06   & \textbf{0.72}        & 0.95 & \textbf{0.62} \\
+ORM       & 0.46 & \textcolor{red}{0.024} & 0.38 & \textcolor{red}{0.013}  & 0.58        & \textbf{1.0} & \red{1.0} \\ \bottomrule
+\end{tabular}
+\end{sc}
+\end{scriptsize}
+\end{table}
+
+
+
+
+\section{Discussion and Limitations}
+
+In this paper, we introduce a novel information-theoretic approach for evaluating Chain-of-Thought (CoT) reasoning in large language models (LLMs) without the need for annotated intermediate steps. We present a comprehensive framework for modeling the CoT process, and the results demonstrate the effectiveness of our algorithm in identifying erroneous reasoning steps across diverse experimental settings. We consistently outperform existing baselines, including Outcome Reward Models (ORM) \citep{havrilla2024glore} and Math-Shepherd \citep{wang2024mathshepherdverifyreinforcellms} as shown in our extensive experimental section. However, it's important to note that that are some limitations to our approach.
+
+
+For example, our method necessitates additional training of the supervisor model, which can be computationally demanding. Future research could investigate the use of in-context learning techniques to estimate information gain, potentially reducing the need for extra training and enhancing both the accessibility and efficiency of the approach. Secondly, sample-wise detection introduces further challenges that may lead to erroneous conclusions. A language model may occasionally arrive at the correct answer by chance, even if a particular sub-task is unidentifiable. Although this occurrence should not significantly impact the overall task-wise information gain, it could result in inaccurate outcomes for sample-wise information gain in such `lucky' cases. Finally, while our method does not require correctness labels for every step, we still need to categorize each step according to its respective sub-task. However, this limitation is not unique to our model, as both ORM and Math-Shepherd also rely on such labels to draw sub-task-specific conclusions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

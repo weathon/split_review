@@ -1,0 +1,409 @@
+\title{Discrete Diffusion Language Modeling by Estimating the Ratios of the Data Distribution}
+
+\begin{abstract}
+Despite their groundbreaking performance for many generative modeling tasks, diffusion models have fallen short on discrete data domains such as natural language. Crucially, standard diffusion models rely on the well-established theory of score matching, but efforts to generalize this to discrete structures have not yielded the same empirical gains. In this work, we bridge this gap by proposing score entropy, a novel loss that naturally extends score matching to discrete spaces, integrates seamlessly to build discrete diffusion models, and significantly boosts performance. Experimentally, we test our Score Entropy Discrete Diffusion models (SEDD) on standard language modeling tasks. For comparable model sizes, SEDD beats existing language diffusion paradigms (reducing perplexity by $25$-$75$\%) and is competitive with autoregressive models, in particular outperforming GPT-2. Furthermore, compared to autoregressive mdoels, SEDD generates faithful text without requiring distribution annealing techniques like temperature scaling (around $6$-$8\times$ better generative perplexity than un-annealed GPT-2), can trade compute and quality (similar quality with $32\times$ fewer network evaluations), and enables controllable infilling (matching nucleus sampling quality while enabling other strategies besides left to right prompting).
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Many recent advances in deep learning have centered around generative modeling. Here, a model learns how to generate novel samples from unstructured data. With the powerful capabilities of modern neural networks, these ``generative AI" systems have developed unparalleled capabilities, such as creating images given only text \citep{Ramesh2022HierarchicalTI} and answering complex questions \citep{Brown2020LanguageMA}.
+
+The crucial part for any deep generative model is the probabilistic modeling technique. For discrete data such as natural language, autoregressive modeling \citep{yule1971method}--arguably the simplest modeling type since it derives from the probabilistic chain rule--has remained the only competitive method for decades. Although modern autoregressive transformers have produced stunning results \citep{Vaswani2017AttentionIA, Radford2019LanguageMA}, there are limits. For example, the sequential sampling of tokens is slow, hard to control, and often degrades without distribution annealing techniques like nucleus sampling \citep{holtzman2019curious}.
+
+To alleviate these issues, researchers have sought alternative approaches to generating text data. In particular, inspired by their success in the image domain, many works have extended diffusion models \citep{SohlDickstein2015DeepUL, Ho2020DenoisingDP, Song2020ScoreBasedGM} to language domains \citep{Li2022DiffusionLMIC, Austin2021StructuredDD}. Yet, despite considerable effort, no such approach yet rivals autoregressive modeling, as they are not competitive on likelihoods, are slower to sample from, and do not generate comparable samples without resorting to heavy annealing and empirical alterations.
+
+In our work, we challenge the longstanding dominance of autoregressive models by introducing Score Entropy Discrete Diffusion models (SEDD). SEDD parameterizes a reverse discrete diffusion process using the ratios of the data distribution
+\begin{enumerate}
+    \item On core language modeling tasks, SEDD outperforms all existing language diffusion models \citep{Li2022DiffusionLMIC, Austin2021StructuredDD, Gulrajani2023LikelihoodBasedDL, He2022DiffusionBERTIG} by large margins and is competitive with autoregressive models of the same size (beating GPT-2 on its zero-shot perplexity tasks \citep{Radford2019LanguageMA}). 
+    \item SEDD generates high quality unconditional samples and enables one to naturally trade off compute for quality. When measuring the generative perplexity (given by large models) of unconditional and un-annealed samples from similarly sized models, SEDD beats GPT-2 by $6$-$8\times$ and can match performance using $32\times$ fewer function evaluations.
+    \item By directly parameterizing probability ratios, SEDD is highly controllable. In particular, one can prompt SEDD from arbitrary positions without specialized training. For both standard (left to right) and infilling, SEDD outperforms language diffusion models and is comparable with autoregressive models with nucleus sampling (as measured by MAUVE score \citep{pillutla2021mauve}).
+\end{enumerate} 
+
+    
+    
+
+
+\section{Preliminaries}
+
+
+\subsection{Discrete Diffusion Processes}
+
+We will be modeling probability distributions over a finite support $\mathcal{X} = \{1, \dots, N\}$. As the support is discrete, note that our probability distributions can be represented by probability mass vectors $p \in \R^N$ that are positive and sum to $1$. To define a discrete diffusion process, we evolve a family of distributions $p_t \in \R^N$ according to the a continuous time Markov process given by a linear ordinary differential equation \citep{Campbell2022ACT, anderson2012continuous}:
+\begin{equation}\label{eqn:discretediffusion}
+    \frac{dp_t}{dt} = Q_t p_t \quad p_0 \approx p_{\rm data} %\quad p_T \approx p_{\rm base}
+\end{equation}
+Here, $Q_t$ are the diffusion matrices $\R^{N \times N}$ and have non-negative non-diagonal entries and columns which sum to zero (so that the rate $\frac{dp_t}{dt}$ sums to $0$, meaning $p_t$ does not gain or lose total mass). Generally, $Q_t$ are simple (e.g. a simple scalar factor $Q_t = \sigma(t) Q$) so $p_t$ approaches a limiting distribution $p_{\rm base}$ as $t \to \infty$. 
+
+One can simulate this process by taking small $\Delta t$ Euler steps and randomly sampling the resulting transitions. In particular, the samples are defined by transition densities which come from the columns of $Q_t$:
+\begin{equation}\label{eqn:discrete_euler_base}
+    p(x_{t + \Delta t} = y | x_t = x) = \delta_{xy} + Q_t(y, x) \Delta t + O(\Delta t^2)
+\end{equation}
+
+Finally, this process has a well known reversal \citep{Kelly1980ReversibilityAS, Sun2022ScorebasedCD} given by another diffusion matrix $\overline{Q}_t$:
+\begin{multline}\label{eqn:reverse_discrete}
+    \frac{dp_{T - t}}{dt} = \overline{Q}_{T - t} p_{T - t} \quad \overline{Q}_t(y, x) = \frac{p_t(y)}{p_t(x)} Q_t(x, y)\\
+    \overline{Q}_t(x, x) = -\sum_{y \neq x} \overline{Q}_t(y, x)
+\end{multline}
+
+This reverse process is analogous to the time reversal for typical diffusion processes on $\R^n$, with the ratios $\frac{p_t(y)}{p_t(x)}$ (which are collectively known as the concrete score \citep{Meng2022ConcreteSM}) generalizing the typical score function $\grad_x \log p_t$ \citep{Song2019GenerativeMB} \footnote{The gradient operator for discrete structures is (up to some scaling) defined for pairs $x \neq y$ by $\grad f(xy) := f(y) - f(x)$. The score function would generalize to the normalized gradients $\frac{\grad p(xy)}{p(x)} = \frac{p(y)}{p(x)} - 1$.}
+
+\subsection{Discrete Diffusion Models}
+
+The goal of a discrete diffusion model is to construct the aforementioned reverse process by learning the ratios $\frac{p_t(y)}{p_t(x)}$. Unlike the continuous diffusion case, which has settled around (up to minor scaling variations) the theoretical framework given by score matching \citep{Hyvrinen2005EstimationON}, there currently exist many competing methods for learning discrete diffusion models. In particular, these tend to produce mixed empirical results, which spurs the need for a reexamination.
+
+\textbf{Mean Prediction.} Instead of directly parameterizing the ratios $\frac{p_t(y)}{p_t(x)}$, \citet{Austin2021StructuredDD, Campbell2022ACT} instead follow a strategy of \citet{Ho2020DenoisingDP} to learn the reverse density $p_{0 | t}$. This actually recovers the ratios $\frac{p_t(y)}{p_t(x)}$ in a roundabout way (as shown in our Theorem \ref{thm:mean_param_score}), but comes with several drawbacks. First, learning $p_{0 | t}$ is inherently harder since it is a density (as opposed to a general value). Furthermore, the objective breaks down in continuous time and must be approximated \citep{Campbell2022ACT}. As a result, this framework largely underperforms empirically.
+
+\textbf{Ratio Matching.} Originally introduced in \citet{Hyvrinen2007SomeEO} and augmented in \citet{Sun2022ScorebasedCD}, ratio matching learns the marginal probabilities of each dimension with maximum likelihood training. However, the resulting setup departs from standard score matching and requires specialized and expensive network architectures \citep{Chen2019NeuralNW}. As such, this tends to perform worse than mean prediction.
+
+\textbf{Concrete Score Matching.} \citet{Meng2022ConcreteSM} generalizes the standard Fisher divergence in score matching, learning $s_\theta(x, t) \approx \begin{bmatrix}\frac{p_t(y)}{p_t(x)} \end{bmatrix}_{y \neq x}$ with concrete score matching:
+\begin{equation}
+    \mathcal{L}_{\rm CSM} = \frac{1}{2} \E_{x \sim p_t} \sqbrac{\sum_{y \neq x} \paren{s_\theta(x_t, t)_y - \frac{p_t(y)}{p_t(x)}}^2}
+\end{equation}
+Unfortunately, the $\ell^2$ loss is incompatible with the fact that $\frac{p_t(y)}{p_t(x)}$ must be positive. In particular, this does not sufficiently penalize negative or zero values, leading to divergent behavior.
+
+
+
+\section{Score Entropy Discrete Diffusion Models}
+
+
+In this section, we introduce score entropy. Similar to concrete score matching, we learn the collected concrete score $s_\theta(x, t) \approx \begin{bmatrix}\frac{p_t(y)}{p_t(x)} \end{bmatrix}_{y \neq x}$ ($s_\theta: \mathcal{X} \times \R \to \R^{|\mathcal{X}}|$). We design the score entropy loss to incorporate the fact that these ratios are positive and evolve under a discrete diffusion.
+
+\begin{defi}
+    The \textbf{score entropy} $\mathcal{L}_{\rm SE}$ for a distribution $p$, weights $w_{xy} \ge 0$ and a score network $s_\theta(x)_y$ is
+    
+    \begin{equation}\label{eqn:score_entropy}
+        \E_{x \sim p} \sqbrac{\sum_{y \neq x} w_{xy} \paren{s_\theta(x)_y - \frac{p(y)}{p(x)} \log s_\theta(x)_y + K\paren{\frac{p(y)}{p(x)}}}}% \paren{\log\frac{p(y)}{p(x)} - 1}}}
+    \end{equation}
+    where $K(a) = a (\log a - 1)$ is a normalizing constant function that ensures that $\mathcal{L}_{\rm SE} \ge 0$.
+\end{defi}
+\begin{remark}
+    Instead of building off of Fisher divergences, score entropy builds off of the Bregman divergence $D_F\paren{s(x)_y, \frac{p(y)}{p(x)}}$ when $F = -\log$ is the convex function. As such, score entropy is non-negative, symmetric, and convex. It also generalizes standard cross entropy to general positive values (instead of simplex-valued probabilities), inspiring the name. The weights $w_{xy}$ are used primarily when combining score entropy with diffusion models.
+\end{remark}
+While this expression is more complex than the standard score matching variants, it satisfies several desiderata for a discrete diffusion training objective:
+
+\subsection{Score Entropy Properties}
+\underline{\textbf{First,}} score entropy is a suitable loss function that recovers the ground truth concrete score.
+
+\begin{prop}[Consistency of Score Entropy]\label{prop:consist}
+    Suppose $p$ is fully supported and $w_{xy} > 0$. As the number of samples and model capacity approaches $\infty$, the optimal $\theta^*$ that minimizes Equation \ref{eqn:score_entropy} satisfies $s_{\theta^*}(x)_y = \frac{p(y)}{p(x)}$ for all pairs $x, y$ Furthermore, $\mathcal{L}_{\rm SE}$ will be $0$ at $\theta^*$.
+\end{prop}
+
+\underline{\textbf{Second,}} score entropy directly improves upon concrete score matching by rescaling problematic gradients. For the weights $w_{xy} = 1$, $\grad_{s_\theta(x)_y} \mathcal{L}_{\rm SE} = \frac{1}{s_\theta(x)_y} \grad_{s_\theta(x)_y} \mathcal{L}_{\rm CSM}$, so the gradient signals for each pair $(x, y)$ are scaled by a factor of $s_\theta(x)_y$ as a normalization component. As such, this forms a natural log-barrier which keeps our $s_\theta \ge 0$.
+
+\underline{\textbf{Third,}} similar to concrete score matching, score entropy can be made computationally tractable by removing the unknown $\frac{p(y)}{p(x)}$ term. There are two alternative forms, the first of which is analogous to the implicit score matching loss \citep{Hyvrinen2005EstimationON}:
+    
+\begin{prop}[Implicit Score Entropy]\label{prop:ise}
+    $\mathcal{L}_{\rm SE}$ is equal up to a constant independent of $\theta$ to the \textbf{implicit score entropy}
+    \begin{equation}
+        \mathcal{L}_{\rm ISE} = \E_{x \sim p} \sqbrac{\sum_{y \neq x}w_{xy}  s_\theta(x)_y - w_{yx} \log s_\theta(y)_x}
+    \end{equation}
+\end{prop}
+Unfortunately, a Monte Carlo estimate would require sampling an $x$ and evaluating $s_\theta(y)_x$ for all other $y$. For high dimensions, this is intractable, which means we have to sample $y$ uniformly, but this introduces additional variance analogous to that introduced by the Hutchinson trace estimator \citep{Hutchinson1989ASE} for sliced score matching \citep{Song2019SlicedSM}. As a result, implicit score entropy is impractical for large-scale tasks. Instead, we work a denoising score matching loss \citep{Vincent2011ACB} variant of score entropy:
+\begin{thm}[Denoising Score Entropy]\label{thm:dse}
+    Suppose $p$ is a perturbation of a base density $p_0$ by a transition kernel $p(\cdot | \cdot)$, ie $p(x) = \sum_{x_0} p(x | x_0) p_0(x_0)$. The score entropy $\mathcal{L}_{\rm SE}$ is equivalent (up to a constant independent of $\theta$) to the \textbf{denoising score entropy} $\mathcal{L}_{\rm DSE}$ is
+    \begin{equation}
+        \underset{\substack{x_0 \sim p_0 \\ x \sim p(\cdot | x_0)}}{\E} \sqbrac{\sum_{y \neq x} w_{xy} \paren{s_\theta(x)_y - \frac{p(y | x_0)}{p(x | x_0)} \log s_\theta(x)_y}}\\
+    \end{equation}
+\end{thm}
+$\mathcal{L}_{\rm DSE}$ is scalable since Monte Carlo sampling only requires the evaluation of one $s_\theta(x)$, which gives us all $s_\theta(x)_y$, and the variance introduced by $x_0$ is manageable. Additionally, it is particularly appealing for discrete diffusion since the intermediate $p_t$ are all perturbations of the base density $p_0$ (resulting from Equations \ref{eqn:discretediffusion}, \ref{eqn:discrete_euler_base}), enabling us to train with $\mathcal{L}_{\rm DSE}$ using the diffusion transition densities $p_{t | 0}(\cdot | x_0)$ (which we can make tractable).
+
+\subsection{Likelihood Bound For Score Entropy Discrete Diffusion}
+
+\underline{\textbf{Fourth,}} the score entropy can be used to define an ELBO for likelihood-based training and evaluation.
+
+\begin{defi}\label{def:discrete_diffusion_model}
+    For our time dependent score network $s_\theta(\cdot, t)$, the parameterized reverse matrix is $\overline{Q}_t^\theta(y, x) = \begin{cases} s_\theta(x, t)_y Q_t(x, y) & x \neq y \\ -\sum_{z \neq x} \overline{Q}_t^\theta(z, y) & x = y \end{cases}$ found by replacing the ground truth scores in Equation \ref{eqn:reverse_discrete}. Our parameterized densities $p_t^\theta$ thus satisfy the following differential equation:
+    \begin{equation}
+        \frac{dp_{T - t}^\theta}{dt} = \overline{Q}_{T - t}^\theta p_{T - t}^\theta \quad p_T^\theta = p_{\rm base} \approx p_T
+    \end{equation}
+\end{defi}
+The log likelihood of data points can be bounded using an ELBO based off of Dynkin's formula \citep{FloydASP}, which was derived for discrete diffusion models in \citet{Campbell2022ACT}. Interestingly, this takes the form of our denoising score entropy loss weighted by the forward diffusion:
+\begin{thm}[Likelihood Training and Evaluation]\label{thm:likeli}
+    For the diffusion and forward probabilities defined above,
+    \begin{equation}
+        -\log p_0^\theta(x_0) \le \mathcal{L}_{\rm DWDSE}(x_0) + D_{KL}(p_{T | 0}(\cdot | x_0) \parallel p_{\rm base})
+    \end{equation}
+    where $\mathcal{L}_{\rm DWDSE}(x_0)$ is the \textbf{diffusion weighted denoising score entropy} for data point $x_0$
+    
+    \begin{multline}
+        \int_0^T \E_{x_t \sim p_{t | 0}(\cdot | x_0)} \sum_{y \neq x_t} Q_t(x_t, y) \Bigg(s_\theta(x_t, t)_y - \\
+        \frac{p_{t | 0}(y | x_0)}{p_{t | 0}(x_t | x_0)} \log s_\theta(x_t, t)_y + K\paren{\frac{p_{t | 0}(y | x_0)}{p_{t | 0}(x_t | x_0)}}\Bigg) dt
+    \end{multline}
+\end{thm}
+Crucially, this result allows us to directly models based on their likelihood values (and the related perplexity scores), the core metric for language modeling tasks. In particular, we can train and evaluate an upper bound.
+
+\begin{remark}
+    The DWDSE (and the implicit version) can be derived from the general framework of \citet{Benton2022FromDD} assuming a concrete score parameterization. In particular, the implicit version coincides with the likelihood loss introduced in \citet{Campbell2022ACT}.
+\end{remark}
+
+\subsection{Practical Implementation}
+
+\underline{\textbf{Fifth,}} score entropy can be scaled to high dimensional tasks.
+
+In practice, our state factorizes into sequences $\mathcal{X} = \{1, \dots, n\}^d$ to form sequences $\vec{x} = x^1 \dots x^d$ (e.g. sequences of tokens or image pixel values). As a general $Q_t$ would be of exponential size, we instead choose a sparse structured matrix that perturbs tokens independently with a matrix $Q_t^{\rm tok}$. In particular, the nonzero entries of $Q_t$ are given by
+\begin{equation}
+    \hspace{-0.2cm}Q_t(x^1 \dots x^i \dots x^d, x^1 \dots \widehat{x}^i \dots x^d) = Q_t^{\rm tok}(x^i, \widehat{x}^i)
+\end{equation}
+Since $\mathcal{L}_{\rm DWDSE}$ weights the loss by $Q_t(x, y)$, this token level transition $Q_t$ renders most ratios irrelevant. In particular, we only need to model all ratios between sequences with Hamming distnace $1$, so we can build our score network $s_\theta(\cdot, t): \{1, \dots, n\}^d \to \R^{d \times n}$ as a seq-to-seq map:
+\begin{equation}
+    (s_\theta(x^1 \dots x^i \dots x^d, t))_{i, \widehat{x}^i} \approx \frac{p_t(x^1 \dots \widehat{x}^i \dots x^d)}{p_t(x^1 \dots x^i \dots x^d)} 
+\end{equation}
+To fully compute $\mathcal{L}_{\rm DWDSE}$, we just need to calculate the forward transition $p_{t | 0}^{\rm seq}(\cdot | \cdot)$. Luckily, this decomposes as each token is perturbed independently:
+\begin{equation}
+    p_{t | 0}^{\rm seq}(\vec{\widehat{x}} | \vec{x}) = \prod_{i = 1}^d p_{t | 0}^{\rm tok}(\widehat{x}^i | x^i)
+\end{equation}
+For each $p_{t | 0}^{\rm tok}(\cdot | \cdot)$, we employ the previously discussed strategy and set $Q_t^{\rm tok} = \sigma(t) Q^{\rm tok}$ for a noise level $\sigma$ and a fixed transition $Q^{\rm tok}$. This avoids numerical integration as, if we define $\overline{\sigma}(t)$ as the cumulative noise $\int_0^t \sigma(s) ds$, we have:
+\begin{gather}
+    p_{t | 0}^{\rm tok}(\cdot | x) = x\text{-th column of } \exp\paren{\overline{\sigma}(t) Q^{\rm tok}}
+\end{gather}
+There are some practical consequences that render most $Q^{\rm tok}$ unusable for large scale experiments (e.g. for GPT-2 tasks, $n=50257$). In particular, one is not able to store all edge weights $Q_{\rm tok}(i, j)$ since this takes around $20$ GB of GPU memory and is extremely slow to access. Furthermore, one must be able to compute the columns $\exp(\overline{\sigma}(t) \cdot Q^{\rm tok})$ to get the transition ratios, but this must avoid matrix-matrix multiplication again can't be stored in memory.
+
+To sidestep these issues, we follow prior work \citep{Austin2021StructuredDD, Campbell2022ACT} and use two standard matrices with special structures. They arise, respectively, from considering a fully connected graph structure and from introducing a MASK absorbing state (similar to the BERT language modeling paradigm \citep{Devlin2019BERTPO}):
+\begin{gather}
+    Q^{\rm uniform} = \begin{bmatrix} 1 - N & 1 & \cdots & 1\\ 1 & 1 - N & \cdots & 1\\ \vdots & \vdots & \ddots & \vdots \\ 1 & 1 & \cdots & 1 - N\end{bmatrix}\\% \in \R^{(N + 1) \times (N + 1)} \\
+    Q^{\rm absorb} = \begin{bmatrix} -1 & 0 & \cdots & 0 & 0\\ 0 & -1 & \cdots & 0 & 0\\ \vdots & \vdots & \ddots & \vdots & \vdots \\ 0 & 0 & \cdots & -1 & 0\\ 1 & 1 & \cdots & 1 & 0\end{bmatrix}% \in \R^{(N + 1) \times (N + 1)}
+\end{gather}
+With such a structured $Q$, one can quickly and cheaply compute all values in $\mathcal{L}_{\rm DWDSE}$. As such, our training iteration is about as fast and uses a similar amount of memory as standard autoregressive training. In particular, our training algorithm is given in Algorithm \ref{alg:train}.
+
+
+\section{Simulating Reverse Diffusion with Concrete Scores}
+
+
+Given our scores $s_\theta$, we now derive various strategies for simulating a path $\vec{x}_t = x_t^1 x_t^2 \dots x_t^d \sim p_t$ of the reverse diffusion process. Notably, the additional information that we gain from $s_\theta$ being an approximate ratio of $p_t$ can be used to enhance the sampling process.
+
+\subsection{Time-Reversal Strategies}\label{sec:simulation:analytic}
+
+To simulate the diffusion in Definition \ref{def:discrete_diffusion_model}, one may be tempted to use the Euler strategy from Equation \ref{eqn:discrete_euler_base}. However, as noted in \citet{Campbell2022ACT}, this is inefficient because the structure of $Q_t^{\rm seq}$ only allows one position to be modified per step. Instead, a natural alternative has been to use $\tau$-leaping \citep{Gillespie2001ApproximateAS}, which performs an Euler step at each position simultaneously. In particular, given a sequence $\vec{x}_t$, we construct $\vec{x}_{t - \Delta t}$ by sampling each token $x_{t - \Delta t}^i$ (independently) from the corresponding probability
+\begin{equation}\label{eqn:tau_leap_euler}
+    \delta_{x_t^i}(x_{t - \Delta t}^i) + \Delta t Q_t^{\rm tok}(x_t^i, x_{t - \Delta t}^i) s_\theta(\vec{x}_t, t)_{i, x_{t - \Delta t}^i}
+\end{equation}
+While $\tau$-leaping is a viable simulation strategy, it is agnostic to fact that our $s_\theta$ approximates the true concrete score. In particular, knowing all $\frac{p_t(y)}{p_t(x)}$ enables optimal denoising, analogous to Tweedie's theorem \citep{Efron2011TweediesFA}:
+\begin{thm}[Discrete Tweedie's Theorem]\label{thm:tweedie}
+    Suppose that $p_t$ follows the diffusion ODE $dp_t = Q p_t$. Then the true denoiser is given by
+    
+    \begin{equation}
+        p_{0 | t}(x_0 | x_t)=\paren{\exp(-tQ) \begin{bmatrix} \frac{p_t(i))}{p_t(x_t)} \end{bmatrix}_{i = 1}^N}_{x_0} \exp(t Q)(x_t, x_0)
+    \end{equation}
+\end{thm}
+Unfortunately, we do not know all of the ratios (only ratios between Hamming distance 1 sequences). However, we can use this intuition to build a Tweedie denoiser analogue of $\tau$-leaping. In particular, we replace the token transition probabilities (for $x_{t - \Delta t}^i$) with the values
+\begin{gather}\label{eqn:tau_leap_analytic}
+    \hspace{-0.5cm}\big(\exp(-\sigma_t^{\Delta t} Q) s_\theta(\vec{x}_t, t)_i\big)_{x_{t - \Delta t}^i} \exp(\sigma_t^{\Delta t} Q)(x_t^i, x_{t - \Delta t}^i)\\
+    \text{where } \sigma_t^{\Delta t} = (\overline{\sigma}(t) - \overline{\sigma}(t - \Delta t))
+\end{gather}
+This generalizes the theorem but enforces the tau-leaping independence condition and, in fact, is optimal:
+\begin{thm}[Tweedie $\tau$-leaping]\label{thm:mean_param_score}
+    Let $p_{t - \Delta t | t}^{\rm tweedie}(\vec{x}_{t - \Delta t} | \vec{x}_t)$ be the probability of the token update rule defined by Equation \ref{eqn:tau_leap_analytic}. Assuming $s_\theta$ is learned perfectly, this minimizes the KL divergence with the true reverse $p_{t - \Delta t | t}(\vec{x}_{t - \Delta t} | \vec{x}_t)$ for all $\tau$-leaping strategies (i.e. token transitions are applied independently and simultaneously). 
+\end{thm}
+
+These simulation algorithms are unified in Algorithm \ref{alg:sample}.
+
+\subsection{Arbitrary Prompting and Infilling}
+
+Our concrete score can also be used to enable greater control over the generative process. This is due to the fact that we are modeling a function of the probability, allowing us to include conditional information through Bayes' rule. In particular, we consider the infilling problem
+\begin{equation}
+    p_t(\vec{x}^\Omega | \vec{x}^{\overline{\Omega}} = \vec{y}) \quad \Omega \text{ unfilled indices} \quad \overline{\Omega} \text{ filled}
+\end{equation}
+As an example, a standard autoregressive conditional generation would have $\overline{\Omega} = \{1, 2, \dots, c\}$ and $\Omega = \{c + 1, c + 2, \dots, d\}$. By Bayes' rule, the conditional scores can be recovered exactly from the unconditional score.
+\begin{equation}
+    \frac{p_t(\vec{x}^\Omega = \vec{z}' | \vec{x}^{\overline{\Omega}} = \vec{y})}{p_t(\vec{x}^\Omega = \vec{z} | \vec{x}^{\overline{\Omega}} = \vec{y})} = \frac{p_t(\vec{x} = \vec{z}' \oplus_\Omega \vec{y})}{p_t(\vec{x} = \vec{z} \oplus_\Omega \vec{y})}
+\end{equation}
+where $\oplus_\Omega$ is concatenation along $\Omega$ and $\overline{\Omega}$. Since the unconditional and conditional scores coincide, we can use our $s_\theta$ (learned unconditionally) for conditional sampling (given arbitrary $\overline{\Omega}$). For a $\tau$-leaping update rule (Equation \ref{eqn:tau_leap_euler} or \ref{eqn:tau_leap_analytic}), one would only modify by changing the values at $\Omega$. An explicit pseudocode of this is given in Algorithm \ref{alg:cond_sample}.
+
+
+
+\section{Experiments}
+
+
+We now empirically validate that our score entropy discrete diffusion (SEDD) model on a variety of language modeling tasks. We measure both perplexity (i.e. likelihood estimation capabilities) as well as generation quality, finding that our method performs quite well in both aspects.
+
+\subsection{Model and Training Setup}
+
+\begin{table*}[t]
+    \centering
+    \begin{tabular}{l|l|ccccc}
+    Size & Model & LAMBADA & WikiText2 & PTB & WikiText103 & 1BW \\ \hline
+    Small & \multicolumn{1}{l|}{GPT-2} & \textbf{45.04} & 42.43 & 138.43 & 41.60 & \textbf{75.20}\\
+    & \multicolumn{1}{l|}{SEDD Absorb} & $\le$50.92 & $\le$\textbf{41.84} & $\le$\textbf{114.24} & $\le$\textbf{40.62} & $\le$79.29\\
+    & \multicolumn{1}{l|}{SEDD Uniform} & $\le$65.40 & $\le$50.27 & $\le$140.12 & $\le$49.60 & $\le$101.37\\ 
+    & \multicolumn{1}{l|}{D3PM} & $\le$93.47 & $\le$77.28 & $\le$200.82 & $\le$75.16 & $\le$138.92\\
+    & \multicolumn{1}{l|}{PLAID} & $\le$57.28 & $\le$51.80 & $\le$142.60 & $\le$50.86 & $\le$91.12\\ \hline
+    Medium & \multicolumn{1}{l|}{GPT-2} & \textbf{35.66} & 31.80 & 123.14 & 31.39 & \textbf{55.72}\\
+    & \multicolumn{1}{l|}{SEDD Absorb} & $\le$42.77 & $\le$\textbf{31.04} & $\le$\textbf{87.12} & $\le$\textbf{29.98} & $\le$61.19\\
+    & \multicolumn{1}{l|}{SEDD Uniform} & $\le$51.28 & $\le$38.93 & $\le$102.28 & $\le$36.81 & $\le$79.12\\
+    \end{tabular}
+    \caption{\textbf{Zero-shot unconditional perplexity ($\downarrow$) on a variety of datasets.} For a fixed size, the best perplexity is \textbf{bolded}. Our SEDD model with absorbing transition beats GPT-2 \citep{Radford2019LanguageMA} on a majority of the tasks and entirely outperforms prior language diffusion models \citep{Austin2021StructuredDD, Gulrajani2023LikelihoodBasedDL}.}
+    \label{tbl:perplexity}
+\end{table*}
+
+Our core model is based on the diffusion transformer architecture \citep{Peebles2022ScalableDM}, which incorporates time conditioning into a standard encoder-only transformer architecture \citep{Vaswani2017AttentionIA, Devlin2019BERTPO}, although we make some minor modifications such as employing rotary positional encoding \citep{Su2021RoFormerET}.
+
+We construct SEDD Absorb and SEDD Uniform, which correspond to the matrices $Q^{\rm uniform}$ and $Q^{\rm absorb}$ respectively. We tested a geometric noise schedule (that interpolates between $10^{-5}$ and $20$), as well as a log-linear noise schedule (the number of changed tokens for total noise $\overline{\sigma}(t)$ is approximately $td$ for both transitions), which helps SEDD Absorb for perplexities. Outside of this, we did not systemically explore noise schedules or alternative loss weightings, although these could likely improve generation quality.
+
+When training, we employ sentence packing to create uniform length blocks to feed to our model, which is done typically for language modeling tasks. The only exception to this rule is our experiment on text8, which randomly samples contiguous subsequences to match prior work \citep{Austin2021StructuredDD} (although we found that this did not substantially change results). We also matched architecture hyperparameters with prior work (including number of layers, hidden dimension, attention heads, etc...), although our models have slightly more parameters ($\approx 5-10\%$) than a typical transformer due to time conditioning. We also use the same tokenizers as prior work (which otherwise could be a source of artifacts) as well as the same data splits.
+
+\subsection{Language Modeling Comparison}
+
+We begin by evaluating our model on core language modeling (effectively likelihood-based modeling) on three common datasets across a variety of scales.
+
+\subsubsection{Text 8 Dataset}
+
+We compare on the text8 dataset, a small, character level language modeling task. We follow \citet{Austin2021StructuredDD} for network hyperparameters and dataset splits and compare with methods that employ a similar model size.
+
+We report bits per character (BPC) in Table \ref{tbl:text8}. SEDD outperforms other non-autoregressive models and is only beaten by an autoregressive transformer and the discrete flow (which incorporates an autoregressive base distribution) \citep{tran2019discrete}. Furthermore, SEDD substantially improves upon D3PM \citep{Austin2021StructuredDD}, despite both being built from the same discrete diffusion principles. 
+
+\subsubsection{One Billion Words Dataset}
+
+\begin{table}[]
+    \centering
+    \begin{tabular}{l|l|r}
+    Type & Method &  BPC ($\downarrow$) \\ \hline
+    Autoregressive Backbone& IAF/SCF & 1.88\\
+     & AR Argmax Flow & 1.39\\
+    & Discrete Flow & \textbf{1.23}\\
+    & Autoregressive & \textbf{1.23}\\ \hline
+    Non-autoregressive & Mult. Diffusion & $\le$ 1.72\\
+    & MAC & $\le$ 1.40\\
+    & BFN & $\le$ 1.41\\
+    & D3PM Uniform & $\le$ 1.61\\
+    & D3PM Absorb & $\le$ 1.45\\ \hline
+    Ours (NAR) & SEDD Uniform & $\le$ 1.47\\
+    & SEDD Absorb & $\le$ \textbf{1.39}\\
+    \end{tabular}
+\caption{\textbf{Bits Per Character on text8.} Our SEDD models achieve second-best overall result (best for non-autoregressive), only being beaten out by the autoregressive model and a discrete flow (which uses an autoregressive model as a backbone) by a small margin. SEDD also substantially improves upon prior the discrete diffusion model D3PM \citep{Austin2021StructuredDD}.}
+\label{tbl:text8}
+\end{table}
+We also test SEDD on One Billion Words, a more medium sized and real world dataset. We follow \citet{He2022DiffusionBERTIG} for the tokenization, training, and model size configurations. In particular, our baselines are all around the size of GPT-2 small. Following \citet{He2022DiffusionBERTIG}, we compare primarily against other language diffusion models, although we also train a standard autoregressive transformer as a benchmark.
+
+We report perplexity values in Table \ref{tbl:1bw}. Our SEDD model outperforms all other diffusion language modeling schemes by $50$-$75\%$ lower perplexity (in particular D3PM). Furthermore, SEDD is within $1$ perplexity of the autoregressive model, likely matching since we only report an upper bound.
+
+\begin{table}[]
+    \centering
+    \begin{tabular}{l|l|r}
+    Type & Method & Perplexity ($\downarrow$)\\ \hline
+    Autoregressive & Transformer & \textbf{31.98}\\ \hline
+    Diffusion & D3PM Absorb & $\le$ 77.50\\
+    & Diffusion-LM & $\le$ 118.62 \\
+    & BERT-Mouth & $\le$ 142.89\\
+    & DiffusionBert & $\le$ 63.78\\ \hline
+    Ours (Diffusion) & SEDD Uniform & $\le$ 40.25 \\
+    & SEDD Absorb & $\le$ \textbf{32.79} \\
+    \end{tabular}
+\caption{\textbf{Test perplexities on the One Billion Words Dataset.} The autoregressive result is an exact likelihood, while the diffusion results are upper bounds. SEDD beats all other discrete diffusion models (by at least $2\times$) while matching the autoregressive baseline.}
+\label{tbl:1bw}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+
+  \begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{imgs/img_perplexity.png}
+    \caption{Generative Perplexity $(\downarrow)$ vs. Sampling Iterations.}
+    \label{fig:gen_perpl_iterations}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.47\textwidth}
+        \begin{tabular}{|c| p{6.75cm}|}
+            \hline
+            \rotatebox[origin=r]{90}{\hspace{2pt} GPT-2 S} & {\fontfamily{lmr}\selectfont a hiring platform that "includes a fun club meeting place," says petitioner’s AQQFredericks. They’s the adjacent marijuana-hop. Others have allowed 3B Entertainment} \\
+            \hline
+            \rotatebox[origin=r]{90}{\hspace{2pt} GPT-2 M} & {\fontfamily{lmr}\selectfont  misused, whether via Uber, a higher-order reality of quantified impulse or the No Mass Paralysis movement, but the most shamefully universal example is gridlock} \\
+            \hline
+            \rotatebox[origin=r]{90}{\hspace{2pt} SEDD S\hspace{0.5pt}} & {\fontfamily{lmr}\selectfont As Jeff Romer recently wrote, ``The economy has now reached a corner - 64\% of household wealth and 80\% of wealth goes to credit cards because of government austerity} \\
+            \hline
+            \rotatebox[origin=r]{90}{\hspace{2pt} SEDD M \hspace{0pt}} & {\fontfamily{lmr}\selectfont Wyman worked as a computer science coach before going to work with the U.S. Secret Service in upstate New York in 2010. Without a license, the Secret Service will have to} \\
+            \hline
+        \end{tabular}
+        \caption{Generated Text (small models)}
+    \label{fig:subfig2}
+  \end{subfigure}
+  \caption{\textbf{Quality evaluation of unconditionally generated text.} We compare SEDD and GPT-2 by the perplexity of their analytically generated sequences. Our SEDD models consistently outperform GPT-2, interpolating between a $32 \times$ speedup and a $6$-$8\times$ improvement based on the chosen step size. The generated text reflects this improved generation capability, as our samples are far more coherent
+  \label{fig:sample_quality}
+\end{figure*}
+\subsubsection{GPT-2 Zero Shot Tasks}
+
+Finally, we compare SEDD against GPT-2 \citep{Radford2019LanguageMA}. We train on OpenWebText as the original WebText dataset has not been made available (this is typical practice and does not meaningfully affect results in practice) \citep{Gokaslan2019OpenWeb} and test on the LAMBADA, WikiText2, PTB, WikiText103, and One Billion Words datasets (which were all of the GPT-2 zero-shot tasks that measured perplexity). We recompute baseline likelihoods for all datasets except 1BW, where we encountered unexpected behavior with the public implementations. Our likelihood computation changes from the original setting since we evaluate unconditionally (i.e. without a sliding window), and this results in higher values than originally reported.
+
+Our results are reported in Table \ref{tbl:perplexity}. Our SEDD Absorb beats GPT-2 on a majority of the zero-shot tasks across both sizes. To the best of our knowledge, this is the first time where a non-autoregressive language model has matched a modern, reasonably sized, and well-known autoregressive model for perplexities. We also compare against the most competitive continuous \citep{Gulrajani2023LikelihoodBasedDL} and discrete \citep{Austin2021StructuredDD} diffusion baselines, seeing a large improvement over both.
+\subsection{Language Generation Comparison}
+
+With our trained models, we compare against prior work in terms of generation quality. In particular, we compare GPT-2 with our SEDD Absorb on a variety of scales.
+
+\subsubsection{Unconditional Generation}
+
+We first compare the quality of unconditional samples between GPT-2 and SEDD. As most language metrics are meant for comparing conditional generations \citep{pillutla2021mauve}, we instead measure the generative perplexity of sampled sequences (using a GPT-2 large model for evaluation). This is a simple and common metric \citep{han2022ssd, Dieleman2022ContinuousDF} but can easily be ``hacked" by simple distribution annealing methods. So, we compare analytically sampled generations (i.e. no temperature scaling).
+
+For SEDD, we simulate using 32 to 2048 steps, which approximates the learned distribution with minimal error for a large number of steps (the sequences are length 1024). Our results (both the measured generative perplexity and some samples) are shown in Figure \ref{fig:sample_quality}. SEDD matches GPT-2 quality using 32$\times$ fewer network evaluations and outperforms by $6$-$8\times$ when using the full 2048 steps. Furthermore, SEDD forms a predictable log-log linear pareto frontier between the number of sampling steps and generative perplexity. However, each network evaluation is different due to the KV-cache, which introduces a cost benefit tradeoff that we discuss more in Section \ref{sec:related}.
+
+\begin{table*}[t]
+    \centering
+    \begin{tabular}{|p{17cm}|}
+        \hline
+            {\fontfamily{lmr}\selectfont \textcolor{blue}{A bow and arrow is a traditional weapon that enables an attacker to} attack targets at a range within a meter or maybe two meters. They have a range far longer than a human can walk, and they can be fired \dots} \\
+            \hline
+            {\fontfamily{lmr}\selectfont $\dots$ \textcolor{blue}{skydiving is a fun sport} that makes me feel incredibly silly. I think I may’ve spent too much, but it could’ve been amazing! While sky diving gives us exercise and fun, \textcolor{blue}{scuba diving} is an act of physical fitness, \dots} \\
+            \hline
+             {\fontfamily{lmr}\selectfont $\dots$ no one expected the results to much better than last year's one-sided endorsement. Nearly 90 percent of the results were surveyed as "independent," an promising \textcolor{blue}{result for school children across the country.}} \\
+            \hline
+            {\fontfamily{lmr}\selectfont $\dots$ results show that \textcolor{blue}{Donald Trump and Hillary Clinton} are in 38 states combined with less than 1\% of the national vote. In a way, it’s Trump and Hillary Clinton who will work overtime to get people to vote this $\dots$} \\
+            \hline
+        \end{tabular}
+        \caption{\textbf{Conditionally Generated Text.} Prompt tokens are given in \textcolor{blue}{blue}. Our model is able to generate meaningful text with prompt tokens in the front, the end, the middle, or even split up.}
+        \label{tbl:gen_text_infill}
+\end{table*} 
+
+\subsubsection{Infilling Conditional Generation}
+
+Finally, we showcase SEDD's ability for conditional generation. We generate samples conditioned on a fixed amount of input text (from the WebText dataset) and compare their MAUVE scores \citep{pillutla2021mauve}. For SEDD, we consider two prompting strategies: standard generation given the beginning and infilling using the beginning and end, although obviously more sampling strategies exist (and several are visualized in Table \ref{tbl:gen_text_infill}).
+
+We compare against GPT-2 and SSD-LM \citep{han2022ssd}, a competitive language diffusion model built for this task (all models are medium sized). Interestingly, a critical component for both baselines is distribution annealing: nucleus sampling for autoregressive modeling \citep{holtzman2019curious} (which clips the token probability) and thresholding for diffusion \citep{Li2022DiffusionLMIC, lou2023reflected} (which constrains generation to disallow paths in low probability spaces). As introducing similar annealing methods for SEDD is out of scope for this paper, we compare against both the annealed and un-annealed baselines samples.
+
+Our results are given in Table \ref{tbl:conditional}. SEDD is highly competitive with the best configuration for both baselines, in fact beating both when using standard prompting. This is rather notable since SEDD does not use distribution annealing and does not explicitly encode left to right prompting as an architectural inductive bias (while GPT-2 and SSD-LM were trained explicitly for autoregressive-like generation).
+
+\begin{table}[]
+    \centering
+    \begin{tabular}{l|l|l}
+    \hline
+    Method & Annealing & Mauve ($\uparrow$) \\ \hline
+    GPT-2 & Nucleus-0.95  & 0.955 \\
+    & None & 0.802 \\ 
+    SSD-LM & Logit Threshold-0.95 & 0.919 \\ 
+    & None & 0.312 \\ \hline
+    SEDD Standard & None & \textbf{0.957}\\
+    SEDD Infill & None & 0.942
+    \end{tabular}
+    \caption{\textbf{Evaluation of conditionally generated text.} SEDD with standard prompting beats both GPT-2 and SSD-LM. SEDD also offers more flexibility (enabling infilling generation with comparable performance) and does not require distribution annealing techniques for good generation.}
+    \label{tbl:conditional}
+\end{table}
+
+
+
+
+\section{Related Work}
+
+
+\textbf{Continuous Diffusion Models for Text Data.} Initially proposed by \citet{Li2022DiffusionLMIC}, continuous language diffusion models embed tokens in a latent space, learn a diffusion model there, and take the nearest neighbor to dequantize. While initial versions struggled, these models have achieved significant results by iterating on several empirical components. For example, prior works improve downstream performance with alternative loss functions (moving away from likelihood-based score matching) \citep{han2022ssd, mahabadi2023tess} and explicitly encoding conditional information (e.g. inputting an infilling mask) \citep{gong2023diffuseq, Dieleman2022ContinuousDF}. Additionally, distribution annealing methods like thresholding \citep{Li2022DiffusionLMIC} and classifier-free guidance \citep{Ho2022ClassifierFreeDG} can further improve generation quality, although recent work has shown that methods like self-conditioning \citep{strudel2022self} and designing a less sparse embedding space (e.g. based on bits) \citep{chen2022analog} can obviate the need for such methods. Finally, \citet{Gulrajani2023LikelihoodBasedDL} showed that, with many surgical changes to the training paradigm, it is possible for language diffusion models to begin approaching autoregressive performance for likelihoods.
+
+\textbf{Discrete Diffusion Models.} Most discrete diffusion works follow the framework set out by D3PM \citep{Austin2021StructuredDD} which mimics ``mean prediction" \citep{Ho2020DenoisingDP}. These discrete diffusion methods are largely applied to fields other than language (e.g. images), likely due to empirical challenges. Despite this, some works have shown strong performance on language, particularly for seq-to-seq tasks and more efficient generation \citep{Zheng2023ARD, chen2023fast, ye2023dinoiser}. Notably, from these works discrete diffusion has tended to be advantageous over continuous diffusion in reducing network evaluations.
+\textbf{SEDD vs Prior Work.} SEDD is a discrete diffusion model that focuses on score matching, the crucial ingredient for continuous diffusions \citep{Song2019GenerativeMB,Ho2020DenoisingDP}. Many such works also focus on reversing a discrete diffusion process \citep{Campbell2022ACT, Benton2022FromDD, Sun2022ScorebasedCD}, so score entropy is naturally related with prior training objectives. However, SEDD focuses on a principled, scalable, and performant objective (namely denoising score entropy), filling in shortcomings found in previous works. In particular, prior methods train either with the equivalent of implicit score entropy (which is intractable and high variance) or propose alternate losses that suffer from other issues. These critical differences enable large improvements for language tasks, where prior discrete diffusion models have conspicuously struggled on.
+
+Furthermore, SEDD achieves better results (for both perplexity and generation) than even continuous diffusion models (without resorting to empirically driven heuristics). This is desirable since discrete data should necessitate a novel approach. Future work could adapt empirical designs from continuous diffusion, further improving performance.
+
+Finally, SEDD challenges autoregressive models, achieving competitive perplexities (beating GPT-2) and generation quality (beating nucleus sampling). While there is still a large gap with modern large language models, we believe that future work can bridge this using SEDD as a backbone. 
+
+\textbf{SEDD vs Autoregressive Sampling Iterations.} SEDD and autoregressive models have significantly different sampling procedures due to the introduction of the KV-cache for standard decoder-only transformer models. In particular, this complicates the inference code (as each network pass changes from being a standard full batch forward) and trades off speed with memory. For example, for our (known) unoptimized codebase and the existing huggingface transformers library \citep{wolf-etal-2020-transformers}, we observed that SEDD matches autoregressive inference time when using around 100 steps but can increase the batch size by roughly $4-6$ times by removing the KV-cache memory. Future work will likely decrease the steps required for optimal generation (similar to existing work in standard diffusion \citep{song2021denoising}) which can improve this tradeoff.
+
+
+
+
+
+\section{Conclusion}
+
+
+We have introduced score entropy discrete diffusion (SEDD) models, a discrete diffusion model that is parameterized by the concrete score and can be trained efficiently with our novel score entropy loss. SEDD beats previous language diffusion models and rivals autoregressive models for both perplexity and quality. We hope that future work can build off our framework to defines alternatives to the modern autoregressive language modeling paradigm.
+
+
+

@@ -1,0 +1,219 @@
+# Explore, Establish, Exploit: Red Teaming Language Models from Scratch
+
+- Decision: Reject
+- Scores: 5, 3, 8, 5
+
+## Abstract
+Deploying large language models (LMs) can pose hazards from harmful outputs such as toxic or false text. Prior work has introduced automated tools that elicit harmful outputs to identify these risks. While this is a valuable step toward securing models, these approaches rely on a pre-existing way to efficiently classify undesirable outputs. 
+Using a pre-existing classifier does not allow for red-teaming to be tailored to the target model. 
+Furthermore, when failures can be easily classified in advance, red-teaming has limited marginal value because problems can be avoided by simply filtering training data and/or model outputs. 
+Here, we consider red-teaming ``from scratch'' in which the adversary does not begin with a way to classify failures. 
+Our framework consists of three steps: 1) \emph{Exploring} the model's range of behaviors in the desired context; 2) \emph{Establishing} a definition and measurement for undesired behavior (e.g., a classifier trained to reflect human evaluations); and 3) \emph{Exploiting} the model's flaws using this measure to develop diverse adversarial prompts. We use this approach to red-team GPT-3 to discover classes of inputs that elicit false statements. In doing so, we construct the \emph{CommonClaim} dataset of 20,000 statements labeled by humans as common-knowledge-true, common knowledge-false, or neither.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a three-step framework  for red-teaming “from scratch” in which the adversary does not begin with a way to classify failures. They also construct the CommonClaim dataset of 20,000 statements labeled by humans as common-knowledge-true, common knowledge-false, or neither.
+
+### Strengths
+1. Implementation of each step are introduced in details in Section 2 (Method) and 3 (Experiment)
+1. The design of three steps in the proposed framework is clearly described in Section 2.
+
+### Weaknesses
+ 1. Red teaming normally uses manual or automated methods to adversarially probe a language model for harmful outputs, and then updates the model to avoid such outputs. However, in this work, only some case studies have been conducted to show the proposed framework is able to generate prompts elicit harmful content from LLMs. The work would be more complete if more quantitative results are presented and the follow-up model update is accomplished.
+
+2. Some other red teaming methods are not compared, e.g.,
+
+Perez, Ethan, et al. "Red teaming language models with language models." arXiv preprint arXiv:2202.03286 (2022).
+
+3. There is no ablation study to justify the effectiveness of the design of each step in the proposed framework
+
+### Questions
+1. Although it is said that the data and code are available, not the actual location to fetch those resources is not provided. In the supplementary materials, only the code is included.
+
+2. According to the abstract and introduction section, the goal of this work is to red-team from scratch. However, in step 2 of the proposed framework, we still need to choose a label set such that one of the labels represents undesirable outputs.  This indicates the category of undesirable output is pre-defined, which is inconsistent with the goal of this work.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper describe a framework for redteaming a LLM from scratch, that is, it consists of finding possible behaviour problems of the model, labelling the vulnerabilities and finding malicious or adversarial prompts that will elicit such undesirable behaviour. 
+
+The proposed method is just a compilation of relevant known techniques from the literature. The set of experiments are quite comprehensive (but still lack comparison) and the results (although shown against GPT3-davinci-002) indicates the importance of dealing with this problem. Overall, this paper describes a good engineering solution to an important problem.
+
+### Strengths
+1. The paper proposes an effective solution to a very important problem to find prompts that will generate undesirable contents. 
+
+2. The proposed methods are all plausible and easy to apply in a similar settings in practice. 
+
+3. The evaluation is quite good but lack comparative studie and many sane and helpful conclusions are drawn.
+
+### Weaknesses
+1. The proposed method is claimed to be mainly different from the previous work in that it has two more steps: exploration and establishment. However, these two steps are straight-forward (e.g., using existing diversification technique to explore the output space) or still mainly rely on human annotation (interaction) (e.g., the "establish" step). Therefore, it is not essentially different or more challenging than what was for the previous work. 
+
+2. For the problem setting considered by the paper (i.e., from scratch), the exploration step may be the most critical. The current proposal require internal state information of the LLM, and hence cannot be used in close-source or API-only LLMs, which limits the potential impact of this study. 
+
+3. It is desirable to compare with previous work and other adversarial prompt generation techniques (in a as fair setting as possible) to better evaluate the performance of the proposed method. Currently, this is unknown. 
+
+4. The generated adversarial prompts seem to have some repeating words from time to time and also seem to be not that diversified. Is it the nature of the problem or some artifact of the method?
+
+### Questions
+See Weaknesses
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper presents a new LLM red-teaming methodology with three steps: explore, establish, and exploit. The purpose of this method is to enable red-teaming of LLMs in cases where there is no pre-existing understanding of what kinds of outputs would be considered “bad” for the model. In the first step, the method samples prompts and outputs as an exploratory stage. Then, using humans in the loop, examples from the previous stage are labeled and a model and task specific classifier is trained with a label set defined based on the types of outputs seen in the explore stage. Finally, the exploit stage uses reinforcement learning and the output classifier to train an LLM capable of generating adversarial prompts for the LLM being red-teamed. In two experimental settings, the paper shows results that suggest the method does allow for improved generation of prompts that elicit forbidden outputs. The paper also introduces a dataset, CommonClaims, that contains statements that are labeled as common-knowledge-true, common-knowledge-false, or neither.
+
+### Strengths
+The primary strength of the paper is in the novel method it introduces. The work systematically breaks down a sensible approach to red-teaming an LLM, and the results seem to indicate that it works reasonably well. The paper is very clearly written and each step of the proposed method is motivated and explained well. Overall, the work is a very solid contribution and fills a gap in the LLM evaluation literature.
+
+### Weaknesses
+The primary weaknesses of the paper are its limited evaluation and the discussion of the approach’s limitations overall. The paper tests out the red-teaming approach on two different models, both GPT based, to attempt to elicit the model to produce toxic or false statements. Both of these are targeted at GPT-based models (GPT-2 and GPT-3). It would have been nice to see evaluations on other common LLMs, such as Bard, Llama, or Claude. This is only a mild weakness of the work, however, because the paper is mostly about introducing the new method. The second weakness is just that I would have liked to see more discussion of the limitations of the approach at a high-level. For example, are there alternatives to using an LLM to generate adversarial prompts? What kinds of biases might this introduce? How scalable is the method when the second step requires human input? The lack of discussion of these questions is not a major issue, but it would be nice in a future version to see the limitations section fleshed out a bit more.
+
+### Questions
+The paper mentions that human input can be used to determine the set of labels used to train the classifier in step 2 of the method. Can the authors describe a bit more what that process looks like in practice?
+
+Table 4 shows some examples of completions. I notice that some of them seem a bit nonsensical or have strange spacing and grammar in places (for example, the completion that ends in ButTONIC). Can the authors expand on why this happens, and how does this affect the evaluation of which outputs are problematic?
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors propose a 3-step human-in-the-loop red teaming framework that can red team LMs from scratch (without any previously given red team classifiers).
+The proposed framework consists of the following 3 steps:
+1. Explore LM behaviors and collect data.
+2. Human-label data from the first step and train a red team classifier using these data.
+3. Train an RL agent to generate adversarial prompts, which elicit responses from the model that are classified as harmful.
+
+The experimental results show that the proposed method can successfully red-team GPT-3 and GPT-2-xl models. 
+Moreover, the authors produce the CommonClaim dataset consisting of 20,000 completions by GPT-3-text-davinci-002 human labelled as 'true', 'false', or 'neither'.
+
+### Strengths
+- The paper is well-written and easy to understand
+- The idea of the paper is simple and clear.
+- The proposed method adapts diversity sampling techniques during exploration and exploitation steps to enhance the diversity of the resulting adversarial prompts. The empirical results show that diversity sampling techniques are key to avoiding mode collapses.
+- The authors contribute to society by providing the CommonClaim dataset.
+
+### Weaknesses
+ - Lack of novelty
+- Lack of quantitative comparisons
+- Limited applicability scenarios
+- Some missing references
+
+Please refer to the questions for the details.
+
+(Novelty) There exists a sort of study that tried to build the red team dataset and a classifier based on the human-in-the-loop framework [1,2,3]. These methods utilize human resources to generate adversarial prompts and label the harmfulness of the model response to construct a dataset and train a classifier. If I understood correctly, the main difference between existing studies can be written as following:
+1. For the "Attack" part, the proposed "from scratch" framework utilized a rl-based attack algorithm instead of human attackers as in [1,2]. However, as stated in the paper, the rl-based attack algorithm has been used in prior works such as [Deng et al., 2022] or [Perez et al., 2022b].
+2. The authors utilize diversity sampling to avoid mode collapses of the rl-based attack method. However, [Perez et al., 2022b] already emphasize the importance of diversity in red-teaming. Moreover, the other study proposed a red teaming approach that incorporates the diversity of adversarial prompts into the objective function throughout the red teaming process [4]. 
+
+Can you clarify the novelty of the proposed "from scratch" red teaming method in detail?
+
+(Quantitative Analysis) The paper provides a few quantitative analyses. Most of the experimental results are qualitative. The examples in Appendix B about mode collapse seems clear, but it would be more credible if you could provide quantitative red-teaming results with and without each diversity sampling in step 1 and 3 with appropriate diversity metric and performance metric.
+
+(Limited Scenarios) I cannot agree with the justification of the scenarios. My questions can be divided into the following two parts:
+1. In the paper, the authors state that "Most importantly, if failures can already be efficiently identified in advance, then red-teaming has limited value because bad text could simply be filtered from the model’s training data and/or outputs." However, filtering in training data or outputs can degrade the model performance. Model unlearning can be another solution to this problem, but it doesn't work well in my knowledge. Can you provide any references to your statement? 
+2. Once we made datasets and classifiers for some purposes like toxicity or fact-checking, we can re-use these again and again to red-team the different LMs. If you already have data and classifiers, it seems strange not to utilize them. Therefore, the situation, in which the proposed scenario is valid, is limited to cases where the target criteria of harmfulness are significantly different from the existing collected data, so the existing data cannot be utilized. I can't agree on whether there will be many cases like this, can you explain more? Or can you provide quantitative evidence that the proposed method is effective when there is a lot of data already collected and the classifier is learned?
+
+(Missing References)
+- [1] Build it Break it Fix it for Dialogue Safety: Robustness from Adversarial Human Attack, Dinan et al., 2019.
+- [2] Bot-Adversarial Dialogue for Safe Conversational Agents, Xu et al., 2021.
+- [3] SQuARe: A Large-Scale Dataset of Sensitive Questions and Acceptable Responses Created Through Human-Machine Collaboration, Lee et al., ACL 2023.
+- [4] Query-Efficient Black-Box Red Teaming via Bayesian Optimization, Lee et al., ACL 2023.
+
+### Questions
+(Novelty) There exists a sort of study that tried to build the red team dataset and a classifier based on the human-in-the-loop framework [1,2,3]. These methods utilize human resources to generate adversarial prompts and label the harmfulness of the model response to construct a dataset and train a classifier. If I understood correctly, the main difference between existing studies can be written as following:
+1. For the "Attack" part, the proposed "from scratch" framework utilized a rl-based attack algorithm instead of human attackers as in [1,2]. However, as stated in the paper, the rl-based attack algorithm has been used in prior works such as [Deng et al., 2022] or [Perez et al., 2022b].
+2. The authors utilize diversity sampling to avoid mode collapses of the rl-based attack method. However, [Perez et al., 2022b] already emphasize the importance of diversity in red-teaming. Moreover, the other study proposed a red teaming approach that incorporates the diversity of adversarial prompts into the objective function throughout the red teaming process [4]. 
+
+Can you clarify the novelty of the proposed "from scratch" red teaming method in detail?
+
+(Quantitative Analysis) The paper provides a few quantitative analyses. Most of the experimental results are qualitative. The examples in Appendix B about mode collapse seems clear, but it would be more credible if you could provide quantitative red-teaming results with and without each diversity sampling in step 1 and 3 with appropriate diversity metric and performance metric.
+
+(Limited Scenarios) I cannot agree with the justification of the scenarios. My questions can be divided into the following two parts:
+1. In the paper, the authors state that "Most importantly, if failures can already be efficiently identified in advance, then red-teaming has limited value because bad text could simply be filtered from the model’s training data and/or outputs." However, filtering in training data or outputs can degrade the model performance. Model unlearning can be another solution to this problem, but it doesn't work well in my knowledge. Can you provide any references to your statement? 
+2. Once we made datasets and classifiers for some purposes like toxicity or fact-checking, we can re-use these again and again to red-team the different LMs. If you already have data and classifiers, it seems strange not to utilize them. Therefore, the situation, in which the proposed scenario is valid, is limited to cases where the target criteria of harmfulness are significantly different from the existing collected data, so the existing data cannot be utilized. I can't agree on whether there will be many cases like this, can you explain more? Or can you provide quantitative evidence that the proposed method is effective when there is a lot of data already collected and the classifier is learned?
+
+(Missing References)
+- [1] Build it Break it Fix it for Dialogue Safety: Robustness from Adversarial Human Attack, Dinan et al., 2019.
+- [2] Bot-Adversarial Dialogue for Safe Conversational Agents, Xu et al., 2021.
+- [3] SQuARe: A Large-Scale Dataset of Sensitive Questions and Acceptable Responses Created Through Human-Machine Collaboration, Lee et al., ACL 2023.
+- [4] Query-Efficient Black-Box Red Teaming via Bayesian Optimization, Lee et al., ACL 2023.
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair

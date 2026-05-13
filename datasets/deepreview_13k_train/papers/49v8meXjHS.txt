@@ -1,0 +1,574 @@
+\title{$k$NN Attention Demystified: A Theoretical Exploration for Scalable Transformers}
+
+\begin{abstract}
+Despite their power, Transformers \citep{vaswani2017attention} face challenges with long sequences due to the quadratic complexity of self-attention. To address this limitation, methods like $k$-Nearest-Neighbor ($k$NN) attention have been introduced \citep{roy2021efficient}, enabling each token to attend to only its $k$ closest tokens. While $k$NN attention has shown empirical success in making Transformers more efficient, its exact approximation guarantees have not been theoretically analyzed. In this work, we establish a theoretical framework for $k$NN attention, reformulating self-attention as expectations over softmax distributions and leveraging lazy Gumbel sampling \citep{mussmann2017fast} with $k$NN indices for efficient approximation. Building on this framework, we also propose novel sub-quadratic algorithms that approximate self-attention gradients by leveraging efficient sampling techniques, such as Markov Chain-based estimation. Finally, we demonstrate the practical effectiveness of these algorithms through empirical experiments, showcasing their benefits in both training and inference.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer models have become the dominant neural architecture across language, vision, and other domains \citep{vaswani2017attention,dosovitskiy2020image}. 
+However, scaling them to handle larger input sequences remains a significant challenge \citep{tay2020long}, primarily due to the quadratic complexity of computing self-attention. 
+Overcoming this limitation is crucial for advancing neural networks. 
+Extending context length would enable Transformers to tackle complex tasks like book summarization \citep{kryscinski2021booksum} and time-series forecasting \citep{wen2022transformers, zeng2023transformers, zhou2021informer}. 
+Furthermore, improving attention efficiency would reduce the computational burden of training, making these models more accessible. 
+Bridging this ``compute divide" is vital for democratizing AI \citep{ahmed2020democratization}. 
+
+Efficient computation of self-attention has been a focal point of research 
+in recent years \citep{fournier2023practical}. 
+Flash Attention \citep{dao2022flashattention} and related work 
+\citep{saha2024complexity} optimize the exact calculation of 
+attention by minimizing wasted computation during GPU I/O operations. 
+However, most approaches focus on approximating the attention function. 
+Sparse Transformers improve efficiency by allowing each token to attend 
+to only a small subset of tokens \citep{meister2021sparse}. 
+These subsets are identified through deterministic methods 
+\citep{child2019generating, guo2019star, soldaini2020cascade, li2019enhancing, 
+qiu2019blockwise, beltagy2020longformer}, 
+randomized algorithms \citep{kitaev2020reformer, han2023hyperattention, 
+zandieh2023kdeformer, pagliardini2024fast}, 
+or adaptive techniques \citep{correia2019adaptively}. 
+Additionally, self-attention is often approximated using low-rank 
+matrices and kernel methods \citep{wang2020linformer, tay2021synthesizer, 
+xiong2021nystromformer, katharopoulos2020transformers, choromanski2020rethinking}. 
+On the negative side, recent fine-grained complexity reductions indicate 
+that achieving a good approximation with sub-quadratic time is not feasible across 
+all scenarios \citep{keles2023computational, alman2024fast}.
+
+In this work, we focus on sparse attention methods where each token 
+vector \( q_i \in \mathbb{R}^d \) attends to the \( k \) tokens
+\( k_j \in \mathbb{R}^d \) with the largest inner products \( q_i^T k_j \) 
+\citep{gupta2021memory, wang2022kvt}, a paradigm we refer 
+to as \textit{$k$NN Attention}. 
+The Routing Transformer \citep{roy2021efficient} was an early example, 
+using \( k \)-means clustering to ensure each query only attends to keys 
+within the same cluster. 
+Memorizing Transformers \citep{wu2022memorizing} later extended this 
+approach by leveraging \( k \)NN search within a stored memory, enabling 
+models to memorize new data during inference. 
+More recently, Unlimiformer models \citep{bertsch2024unlimiformer} have 
+improved efficiency by using a single \( k \)NN data structure 
+(or \textit{index}) across all attention heads and layers.
+
+Previous works have empirically shown that \( k \)NN Attention not only improves 
+computational efficiency, but also enhances model architectures and capabilities. 
+However, a rigorous theoretical analysis of \( k \)NN Attention is still lacking. 
+Key questions remain unresolved, including the precise approximation guarantees 
+it offers, the optimal value of \( k \), and how to extend the method 
+to approximate the backward pass. 
+
+\paragraph{Notation}
+Let $Q,K,V \in \mathbb{R}^{n\times d}$ be our \textit{query, key} and \textit{value} matrices. 
+Let $q_i = Q_{i,:} \in \mathbb{R}^d$ be $i$-th \textit{row} of $Q$ written as a column vector.
+We will also denote the $j$-th column of $Q$ by $Q_{:,j}$.
+We define $A := QK^T \in \mathbb{R}^{n\times n}$ to be the \textit{attention matrix}, and $O = \text{softmax}(A)\cdot V \in \mathbb{R}^{n\times d}$ to be the output of the \textit{attention function}. 
+The softmax function is applied row-wise to $A$ and is defined as a vector valued function $\sigma:\mathbb{R}^n\to\mathbb{R}^n$:
+$$
+\sigma(y_1,...,y_n)_i = \frac{\exp(y_i)}{\sum_{s=1}^n \exp(y_s)}
+$$ 
+We also let $[n] := \{1,2,...,n\}$ and use the notation $\text{polylog}(n)$ as a substitute of $\log^k(n)$ for some arbitrary constant $k \in \mathbb{Z}^+$ that is independent of $n$. 
+Finally, we use the $\widetilde{O}$ notation to hide polylogarithmic factors. We will often make use of the following boosting lemma:
+
+\begin{lemma}[Median-Of-Means Boosting, \cite{chakrabarti2020data}]
+\label{lemma:median-of-means}
+If $\widehat{Q}$ is an unbiased estimator of some statistic,
+then one can obtain an $(\varepsilon,\delta)$-multiplicative estimate of that statistic by suitably combining $K := \frac{C}{\varepsilon^2}\frac{\text{Var}[\widehat{Q}]}{\mathbb{E}[\widehat{Q}]^2}\ln \frac{2}{\delta}$ independent samples of $\widehat{Q}$, where $C$ is a universal constant. 
+\end{lemma}
+
+\subsection{Our Contributions}
+\subsubsection{A Theoretical Framework for \(k\)NN Attention}
+Our work provides a theoretical framework to explain both the efficiency and 
+effectiveness of \( k \)NN Attention. 
+Our framework reformulates self-attention as 
+expectations over softmax distributions. 
+These expectations are approximated by sampling from each 
+distribution in sublinear time using Lazy Gumbel Noise Sampling. 
+By connecting $k$NN, $k$-Maximum Inner Product Search (MIPS), and Gumbel noise sampling, we develop a 
+new sub-quadratic self-attention approximation algorithm aligning with 
+the $k$NN Attention paradigm, as summarized in the following informal theorem:
+
+\begin{theorem}
+Let $Q,K,V \in \mathbb{R}^{n\times d}$ and $\varepsilon,\delta$ be positive constants. Assume $||V||_\infty = O(\log n)$. Then $k$NN-Attention as presented in Algorithm \ref{alg:knn_attn}
+with $k = \sqrt{n}$ outputs a matrix $\widehat{O} \in \mathbb{R}^{n\times d}$ 
+such that:
+\begin{align}
+    |\widehat{O}_{ij}-O_{ij}| \leq \varepsilon O_{ij}
+\end{align}
+for all $(i,j) \in [n]\times [d]$ with probability at least $1-\delta$ and 
+in sub-quadratic time and space. 
+    
+\end{theorem}
+
+\subsubsection{Approximating the Backward Pass}
+Our framework can be extended to solve the problem of approximating attention gradients. 
+Even though backpropagation is the main memory bottleneck for large models, 
+few methods approximate attention gradients directly. 
+Alman and Song's work (\citeyear{alman2024fine}) is most relevant, deriving 
+inapproximability results for certain parameter regimes. 
+
+We present new approximation algorithms for self-attention gradients using 
+$k$NN search. 
+A key challenge is the need to multiply by the transpose of a stochastic matrix, 
+which disrupts our expectation-based reformulation. 
+To address this, we use a Markov-Chain sampling technique, treating the attention 
+matrix as a transition matrix and applying a single-step iteration. 
+Our main theorem can be informally stated as follows:
+
+\begin{theorem}
+Let $\phi$ be a scalar loss function and 
+$\partial \phi / \partial O \in \mathbb{R}^{n\times d}$. 
+Then, under certain assumptions on the $||\cdot||_\infty$ norms of $Q,K,V$, 
+there exist  sub-quadratic time algorithms that output estimates
+$\widehat{D}^Q,\widehat{D}^K,\widehat{D}^V \in \mathbb{R}^{n\times d}$ 
+for which with probability at least $1-\delta$ it holds that: 
+\begin{align}
+||\widehat{D}^Q-\partial \phi/\partial Q||_\infty \leq e_Q,\,
+||\widehat{D}^K-\partial \phi/\partial K||_\infty
+\leq e_K\,\text{ and }\,||\widehat{D}^V-\partial \phi/\partial V||_\infty \leq e_V
+\end{align}
+where $e_Q, e_K, e_V$ are explicit error parameters that can roughly
+be bounded by $O(\varepsilon n \cdot \text{polylog}(n))$
+\end{theorem}
+
+Algorithm 
+\ref{alg:dv_estimation} computes $\widehat{D}^V$, while Algorithms for $\widehat{D}^K$ and $\widehat{D}^Q$ can be found in Appendices \ref{section:estimating_dq} and \ref{section:estimating_dk}.
+
+
+
+\section{$k$NN Attention as an Approximation Algorithm}
+
+
+\subsection{Reformulating Self-Attention as Expectation}
+Our first contribution is viewing the self-attention output as a matrix of 
+expectations under various softmax distributions. 
+Let $D_i$ be the softmax distribution defined by $D_i(j) \propto \exp(q_i^T \cdot k_j)$ over $[n]$. Then, notice that we can write:
+\begin{align}
+    O_{ij} &= \sum\limits_{k=1}^n \frac{\exp(q_i^T \cdot k_k)}{\sum_{s=1}^n \exp(q_i^T k_s)}\cdot V_{kj}
+    =
+    \sum\limits_{k=1}^n D_i(k) \cdot V_{kj}
+    = \mathop{\mathbb{E}}_{k \sim D_i}\left[V_{kj}\right]
+    \label{eq:expected_value_formula}
+\end{align}
+Thus, to approximate $O_{ij}$, we have to estimate the expected value in Equation \ref{eq:expected_value_formula}. 
+Let $k$ be sampled according to $D_i$. 
+Then, the estimator $\widehat{O}_{ij} = V_{kj}$ is unbiased, as $\mathop{\mathbb{E}}_{k\sim D_i}[\widehat{O}_{ij}] = O_{ij}
+$. By imposing certain assumptions on the entries of the V matrix, we can bound the 
+variance of $\widehat{O}_{ij}$ and use boosting to obtain explicit error 
+guarantees:
+\begin{theorem}
+\label{thm:approx-attn}
+Suppose $||V||_\infty \leq B = O(\log(n))$ and assume that for any $i \in [n]$ we can sample from $D_i$ in time $O(T)$. Then, there exists an algorithm to output a matrix $\widehat{O} \in \mathbb{R}^{n\times d}$ 
+such that:
+\begin{align}
+    |\widehat{O}_{ij}-O_{ij}| \leq \varepsilon O_{ij}
+\end{align}
+for all $(i,j) \in [n]\times [d]$ with probability at least $1-\delta$, 
+where $\varepsilon,\delta > 0$ are constants. The algorithm runs in $
+O(nd\cdot T \cdot \varepsilon^{-2}\log(nd/\delta)\log n)
+$ time.
+\end{theorem}
+\begin{proof}
+Given that $\widehat{O}_{ij}$ is an unbiased estimator of $O_{ij}$, we can utilize Lemma \ref{lemma:median-of-means} to get an 
+$(\varepsilon,\delta)$-multiplicative estimator for $O_{ij}$. 
+To determine a sufficient number of samples of $\widehat{O}_{ij}$, we first bound the variance of our estimator:
+\begin{align}
+    \text{Var}\left[\widehat{O}_{ij}\right] \leq \mathop{\mathbb{E}}_{k \sim D_i}\left[V_{kj}^2\right] = 
+    \sum\limits_{k=1}^n D_i(k)V_{kj}^2 \leq B\cdot O_{ij}
+\end{align}
+Then, the number of samples required is:
+\begin{align}
+    O\left(\varepsilon^{-2}\cdot \log(1/\delta)\cdot \text{Var}
+    \left[\widehat{O}_{ij}\right]\cdot {\mathbb{E}\left[\widehat{O}_{ij}\right]^{-2}}\right) 
+    =O\left(\varepsilon^{-2}\cdot \log(1/\delta)\log n\right)
+\end{align}
+due to our assumption on $||V||_\infty$. 
+To ensure that all $nd$ elements of $O$ are approximated within the desired
+guarantees, we have to set $\delta' := \delta / (nd)$ and union-bound over 
+all $nd$ elements of $O$. 
+Since each sample requires $O(T)$ time, we arrive at the desired time complexity.
+\end{proof}
+
+\subsection{Efficient Sampling from $D_i$ via Lazy Gumbel Sampling}
+Theorem \ref{thm:approx-attn} previously assumed we could directly sample from the distribution $D_i$. The \textit{Lazy Gumbel Sampling} method proposed by \citet{mussmann2017fast} provides a way to sample from each $D_i$ in sublinear time, even with limited knowledge of $D_i$. However, there is an initial pre-processing step that takes a bit more than linear time across all the distributions.
+
+Fix some $i \in [n]$ and let $Z_{ij} = q_i^T k_j$. In the Gumbel Max Trick (Lemma \ref{lemma:gumbel-max-trick}), 
+we form the random variables $N_{ij} = Z_{ij} + G_{ij}$ where 
+$G_{ij} \sim \text{Gumbel}(0,1)$ for all $j \in [n]$ and sample 
+$\arg\max N_{ij}$. This is equivalent to sampling $j \in [n]$ from the softmax distribution over the $Z_{ij}$ scores.
+\citet{mussmann2017fast} observed that if we have the top $k$ $Z_{ij}$ values in a set $S_i$ and add 
+Gumbel noise to just them, then for any $j \notin S_i$ to be ultimately picked, its Gumbel noise $G_{ij}$ must be quite large.
+We can use the concentration properties of the Gumbel distribution to 
+argue that in expectation we only need to sample $\frac{n}{k}$ 
+elements not in $S_i$. 
+Setting $k = \sqrt{n}$ allows us to balance the two, resulting in a 
+sublinear time algorithm for sampling from $D_i$. An illustration of the idea can be seen in Figure \ref{fig:lazy-gumbel}, as it was presented in \citet{mussmann2017fast}.
+
+\begin{algorithm}
+\begin{algorithmic}[1]
+\caption{Lazy Gumbel Sampling from $D_i$, for some $i \in [n]$}
+\label{alg:lazy-gumbel}
+    \State \textbf{Inputs:} $k\in\mathbb{N}$, $q_i \in \mathbb{R}^d, K \in 
+    \mathbb{R}^{n\times d}$, $S_i := \{ \text{the $k$ keys $j$ 
+    with the largest $Z_{ij} := q_i^T k_j$}\}$.
+    \State Sample $G_{ij} \sim $ Gumbel$(0,1)$ for $j \in S_i$.
+    \State Let $M \gets \max\limits_{j \in S_i} \{Z_{ij} + G_{ij}\}$ and $S_{\min} \gets \min\limits_{j \in S_i} \{Z_{ij}\}$.
+    \State Let $B \gets M - S_{\min}$ be the Gumbel cutoff.
+    \State Let $m \sim \text{Bin}(n-k, 1-\exp(-\exp(-B)))$ be the number of $
+    [n]\setminus S_i$ Gumbels greater than $B$. Sample $m$ points from $[n]\setminus 
+    S_i$ and denote the set of sampled points as $T_i$.
+    \State Sample $G_{ij} \sim \text{Gumbel}(0,1)$ conditionally greater than $B$ for each $j \in T_i$.
+    \State \Return $\widehat{j} \gets \arg\max\limits_{j \in S_i\cup T_i} \{Z_{ij} + 
+    G_{ij}\}$
+\end{algorithmic}
+\end{algorithm}
+
+We can see that this method samples exactly from $D_i$:
+\begin{theorem}[Correctness of Algorithm \ref{alg:lazy-gumbel}]
+After running Algorithm \ref{alg:lazy-gumbel}, it holds that:
+\begin{align}
+\widehat{j} = \arg\max\limits_{j \in [n]} \{q_i^T k_j + G_{ij}\}
+\end{align}
+where $G_{ij} \sim \text{Gumbel}(0,1)$. In other words, $\widehat{j}$ is 
+sampled according to $D_i$. 
+\end{theorem}
+\begin{proof}
+The only way that we do not find the maximum is if one of the points in $[n] 
+\setminus (S_i\cup T_i)$ are the true maximum. However those points (by construction) 
+have Gumbel noise at most $B$, so they cannot be the overall maximum.
+\end{proof}
+
+\begin{wrapfigure}{r}{0.5\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{lazy_gumbel_3.png}
+    \caption{Lazy Gumbel sampling}
+    \label{fig:lazy-gumbel}
+\end{wrapfigure}
+
+ 
+Our simplified proof uses the Gumbel distribution's Moment Generating Function, 
+rather than the original exponential-based analysis.
+\begin{lemma}
+\label{lemma:large-gumbel-bound}
+The following holds:
+\begin{align}
+    \mathbb{E}\left[m\right] \leq \frac{n}{k}
+\end{align}
+\end{lemma}
+
+Due to Lemma \ref{lemma:large-gumbel-bound}, we see that we need to set 
+$k = \sqrt{n}$ to optimize our overall time complexity. 
+We have the following theorem, which follows easily from the pseudocode of 
+Algorithm \ref{alg:lazy-gumbel} and Lemma \ref{lemma:large-gumbel-bound}:
+\begin{theorem}
+\label{thm:runtime-analysis-lazy-gumbel}
+Let $k = \sqrt{n}$. Suppose that we are able to retrieve the set $S_i$ in 
+$f(n,k)$ time. 
+Then, we can use Algorithm \ref{alg:lazy-gumbel} to sample from $D_i$ in 
+$O(\sqrt{n} +  f(n,\sqrt{n}))$ time in expectation. 
+\end{theorem}
+
+\subsubsection{Obtaining the top $k$ inner products}
+\label{sec:top_k_analysis}
+Algorithm \ref{alg:lazy-gumbel} relies on obtaining the set \(S_i\) of the top \(\sqrt{n}\) inner products \(q_i^T k_j\) for each \(i \in [n]\) in sub-quadratic $f(n,\sqrt{n})$ time. Since the \(k_j\) vectors are fixed, while the \(q_i\) vectors act as queries, this setup is known as the\textbf{ \(k\)-Maximum Inner Product Search Problem (MIPS)}
+
+The \(k\)-MIPS problem can be reduced to the $k$NN problem using a transformation proposed by \cite{neyshabur2015symmetric}. We add an extra dimension to normalize all key vectors. Specifically, the inner product \(q_i^T k_j\) can be expressed as:
+\begin{align}
+q_i^T k_j = \frac{1}{2}\left(||q_i||_2^2 + ||k_j||_2^2 - ||q_i - k_j||_2^2\right)
+\end{align}
+If the norms \(||k_j||_2\) are the same across all \(j\), the problem reduces to finding the \(k\) nearest neighbors to \(q_i\). To enforce this, we define:
+\begin{align}
+\left(k'_j\right)^T = \left[k_j^T, \sqrt{M-||k_j||_2^2}\right]
+\end{align}
+so that \(||(k')_j||_2 = M\) for all \(j \in [n]\), where $M$ is a previously known upper bound. When querying with \(q_i\), we use:
+\begin{align}
+(q'_i)^T = \left[q_i^T, 0\right]
+\end{align}
+This transformation preserves the inner products, allowing us to solve the $k$NN problem for \(q'_i\). We can then use a $k$NN index \(H\) to preprocess \(K\) and query it with each \(q'_i\) to construct \(S_i\) for all \(i \in [n]\).}, but if we assume that the construction runtime is slightly larger than linear and the query time slightly larger than $k$, then $k$NN attention techniques have total runtime of $\approx \widetilde{O}(dn^{3/2}\cdot \varepsilon^{-2}\log(1/\delta))$ time and space.
+
+\begin{algorithm}
+\caption{$k$NN Attention}\label{alg:knn_attn}
+\begin{algorithmic}[1]
+\State \textbf{Inputs: }$Q,K,V \in \mathbb{R}^{n\times d}$, error parameter $\varepsilon > 0$, confidence parameter $\delta > 0$, $k \in \mathbb{N}$.
+\For{$j \in [n]$}\Comment{Pre-Processing}
+    \State $(k'_j)^T = \left[k_j^T, \sqrt{M - ||k_j||_2^2}\right] \in \mathbb{R}^{(d+1)\times 1}$
+\EndFor
+\State $H \gets$ Build a $k$NN index from $\{k'_j\mid j\in [n]\}$
+\For{$i \in [n]$}
+    \State $(q'_i)^T \gets [q_i^T, 0] \in \mathbb{R}^{d+1}$
+    \State Query $H$ with $q'_i$ to get $S_i$ with $|S_i| = k$.
+    \For{$j \in [d]$}
+        \State $\widehat{O}_{ij} \gets$ Median-Of-Means with Algorithm \ref{alg:lazy-gumbel} as sampler $\gets (k,q_i,K,S_i)$.
+    \EndFor
+\EndFor
+\State \Return $\widehat{O}$
+\end{algorithmic}
+\end{algorithm}
+\subsection{$k$NN Attention without Median-of-Means}
+This section describes a simpler algorithm for computing the expected value needed for self-attention.}.
+
+Building on \cite{mussmann2017fast}, the algorithm estimates \(\mathbb{E}_{k\sim D_i}[V_{kj}]\) using set \(S_i\) by sampling \(\ell\) additional vectors outside \(S_i\) (set \(T_i\)) and upweighting them in the expectation sum, as follows:
+\begin{align}
+\widehat{O}_{ij} = \frac{\sum_{s\in S_i} e^{q_i^T k_s} \cdot V_{sj}+\frac{n-k}{\ell}\sum_{s\in T_i} e^{q_i^T k_s} \cdot V_{sj}}{\sum_{s\in S_i}e^{q_i^T k_s} + \frac{n-k}{\ell}\sum_{s\in T_i} e^{q_i^T k_s}}
+\end{align}
+The quality of this estimator and the optimal choices for \(k\) and \(\ell\) are derived as follows:
+
+\begin{theorem}
+\label{thm:simpler_expectation}
+The estimator $\widehat{O}_{ij}$ satisfies the following error guarantee with probability at least $1-\delta$:
+\begin{align*}
+    \left|\widehat{O}_{ij} - O_{ij}\right| = O(\varepsilon)
+\end{align*}
+if the following two conditions hold:
+$k^2 \ell \geq 8n^2\varepsilon^{-2}\log\left(4/\delta\right)$ and $
+k\ell \geq 2n\varepsilon^{-2}\log\left(2/\delta\right)$. Setting $k = \ell = O\left(n^{2/3}\varepsilon^{-1}\sqrt{\log(1/\delta)}\right)$
+gives us an $\widetilde{O}\left(dn^{5/3} \varepsilon^{-1}\sqrt{\log(1/\delta)}\right)$ algorithm for estimating self-attention within additive error $O(\varepsilon)$, assuming an efficient $k$NN implementation.
+\end{theorem}
+
+\begin{proof}
+The proof of the additive error guarantee can be found in \cite{mussmann2017fast}. 
+\end{proof} 
+
+
+\section{Approximating the Attention Gradients}
+
+Next, we present randomized algorithms which can efficiently approximate the gradients of the self-attention function. First, we give exact formulas for the gradients in question.
+
+\begin{lemma}[Attention Gradients]
+Let $Q,K,V \in \mathbb{R}^{n\times d}$. Let $P := \text{softmax }(Q K^T) \in \mathbb{R}^{n\times n}$  be the normalized attention matrix. Let $\phi$ be a scalar function of $O$ and $D^O = \partial \phi / \partial O \in \mathbb{R}^{n\times d}$. Similarly define $D^Q, D^K$ and $D^V$. The following relationships hold:
+\begin{align}
+    D^V &= P^T \cdot D^O\\
+    D^Q_{ij} &= \sum\limits_{k=1}^n P_{ik}\left(D^P_{ik} -\langle D^P_{i,:}, P_{i,:}\rangle\right)K_{kj}\\
+    D^K_{ij} &= \sum\limits_{k=1}^n P_{ki}\left(D^P_{ki} - \langle D^P_{k,:}, P_{k,:}\rangle\right)Q_{kj}
+\end{align}
+where $D^P_{ij} = \partial \phi / \partial P_{ij} = \langle D^O_{i,:}, V_{j,:}\rangle$.
+\end{lemma}
+
+Clearly, calculating $D^Q, D^K$ and $D^V$ naively requires storing $P$, which requires $O(dn^2)$ time.
+
+\subsection{Estimating $D^V$ using Random Walk Simulations}
+We now give an algorithm for estimating $D^V$. Suppose we want to calculate the $j$-th column of $D^V$: 
+\begin{align}
+D^V_{:,j} = P^T\cdot D^O_{:,j}
+\end{align}
+for $j \in [d]$. Fix $\vv{x_j} := D^O_{:,j} \in \mathbb{R}^{n \times 1}$ and suppose that $\vv{x_j} \geq 0$. We will relax this assumption in Section \ref{sec:negative_numbers}. Then, $\vv{y_j} := \vv{x_j} / ||\vv{x_j}||_1$ is a distribution over the universe $[n]$. Imagine a random walk over $[n]$ with transition matrix $P$ and initial distribution $\vv{y_j}$. Then:
+\begin{align}
+\vv{\pi_j} := P^T \cdot \vv{y_j}
+\end{align}
+is the distribution after one step in the process. Thus, we can estimate $\vv{\pi_j}$ with Markov Chain simulations, by first picking an item $i \in [n]$ from the distribution $\vv{y_j}$, and then picking another item $k \in [n]$ with probability $P_{ik}$. We make $N$ independent length-$1$ random walks like this and let:
+\begin{align*}
+X_{v}^{(j,s)} = 
+\begin{cases}
+    1,&\text{ if the $s$-th walk ends up in state $v$}\\
+    0,&\text{ otherwise}
+\end{cases}
+\end{align*}
+We know that $\mathbb{E}[X_{v}^{(j,s)}] = \pi_j(v)$ for all $s \in [N]$. Thus, we can form a boosted estimator:
+\begin{align}
+    \widehat{p_{j}}(v) = \frac{1}{N}\sum\limits_{s=1}^N X_{v}^{(j,s)}
+\end{align}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.5\textwidth]{markov_chain_3.png}
+    \caption{A single-step Markov Chain sample. }
+\end{figure}
+    
+This estimator is unbiased due to linearity of expectation, so we can use the Hoeffding bound to ensure that our empirical distribution is close to the true distribution as long as we take enough samples:
+\begin{align*}
+\Pr\left[|\widehat{p_j}(v)-\pi_j(v)| \geq \varepsilon\right] \leq 2\exp(-2N\varepsilon^{2})
+\end{align*}
+We set the probability of failure to $1/(dn^2)$ so that we can union bound over all $v \in [n]$ and all $j \in [d]$. It follows that we require:
+\begin{align}
+N = \Theta(\varepsilon^{-2}\ln (nd))
+\end{align}
+Of course, we need to scale $\vv{\pi_j}$ back to recover $D^V_{:,j}$. We define:
+\begin{align}
+    \widehat{D}^V_{:,j} = ||\vv{x_j}||_1 \cdot \widehat{p_j}
+\end{align}
+Then we get that with probability at least $1-1/n$ it holds for all $j \in [d]$ that:
+\begin{align}
+\left|\left|\widehat{D}^V_{:,j} - D^V_{:,j}\right|\right|_\infty = ||\vv{x_j}||_1 \cdot \left|\left|\widehat{p_j}-\vv{\pi_j}\right|\right|_\infty \leq \varepsilon ||\vv{x_j}||_1
+\end{align}
+
+\subsubsection{Relaxing the non-negativity assumption}
+\label{sec:negative_numbers}
+We now relax the non-negativity constraint on $\vv{x_j}$, accepting some approximation error. Since normalizing $\vv{x_j}$ with its L1 norm fails if $\vv{x_j}$ has negative entries, we adopt a numerical stability technique to ensure we get a valid probability distribution even when $\vv{x_j}$ contains negative entries. Let 
+\begin{align}
+M_j := -\min\limits_{\substack{v\in[n] \\ (\vv{x_j})_v \leq 0}}(\vv{x_j})_v
+\end{align}
+be the absolute value of the most negative entry of $\vv{x_j}$. If $\vv{x_j} \geq 0$, then set $M_j = 0$. Now, if $\vv{M_j} := M_j \cdot 1^{n} \in \mathbb{R}^{n\times 1}$, then $\vv{x_j'} = \vv{x_j} + \vv{M_j} \geq 0$. Therefore, we can estimate
+\begin{align}
+    \widehat{p'}_j \approx \vv{\pi_j'} := P^T \cdot \vv{x_j'}
+\end{align}
+using our Markov Chain method. Going back to our original goal of estimating $\vv{\pi}_j$, we have:
+\begin{align*}
+    \vv{\pi_j} &:= P^T \cdot \vv{x_j} \\
+    &= P^T \cdot (\vv{x_j'} - \vv{M_j}) \\
+    &= \vv{\pi_j'} - P^T \cdot \vv{M_j} \\
+    &= \vv{\pi_j'} - M_j\cdot P^T \cdot 1^n
+\end{align*}
+where $1^n$ is the all $1$-s vector. So then we only need to additionally estimate $P^T \cdot 1^n$. This can be done in the same fashion only once, as a pre-processing step. Specifically, suppose that we estimate $P^T \cdot 1^n$ as $\widehat{s}$. We know from our prior analysis that using $\Theta(\varepsilon^{-2}\log n)$ random walks we get an estimate $\widehat{s}$ such that:
+\begin{align}
+\left|\left|\widehat{s}-P^T \cdot 1^n\right|\right|_\infty \leq \varepsilon n
+\end{align}
+Putting it all together, our final estimator is then:
+\begin{align}
+    \widehat{p}_j := \widehat{p'}_j - M_j\cdot \widehat{s}
+\end{align}
+Eventually, the total error for estimating $\vv{\pi_j}$ becomes:
+\begin{align}
+    \left|\left|\widehat{D}^V_{:,j} - D^V_{:,j}\right|\right|_\infty = \left|\left|\widehat{p}_j-\vv{\pi_j}\right|\right|_\infty
+    &= \left|\left|\widehat{p'}_j - M_j\cdot \widehat{s} - \vv{\pi'_j} + M_j \cdot P^T \cdot 1^n\right|\right|_\infty\\
+    &\leq \left|\left|\widehat{p'}_j-\vv{\pi'_j}\right|\right|_\infty + M_j\cdot \left|\left|P^T 1^n-\widehat{s}\right|\right|_\infty \\
+    &\leq \varepsilon\left|\left|\vv{x'_j}\right|\right|_1 + \varepsilon M_j\cdot n \\
+    &= \varepsilon\langle x_j,1^n\rangle + 2\varepsilon nM_j
+\end{align}
+where the first inequality follows from the triangle inequality and the last equality follows from 
+\begin{align}
+\left|\left|\vv{x'_j}\right|\right|_1 = \sum\limits_{k=1}^n \left|(x_j)_k+M_j\right| = \sum\limits_{k=1}^n \left[(x_j)_k + M_j\right] = \langle x_j, 1^n\rangle + nM_j
+\end{align}
+
+We present the entirety of the method as Algorithm \ref{alg:dv_estimation}.
+
+\begin{algorithm}
+\caption{Estimating $P^T x$, with query access to $P \in \mathbb{R}^{n\times n}$ a stochastic matrix}
+\label{alg:mcmc_alg}
+\begin{algorithmic}[1]
+\Procedure{ApproxPosProd}{$P \in \mathbb{R}^{n\times n},x \geq 0,\varepsilon > 0$}
+    \State Let $N \gets 2\lg n\cdot \varepsilon^{-2}$ and $\Sigma \gets \langle x, 1^n \rangle$ \Comment{$O(n)$ time}
+    \State Let $\widehat{x} \in \mathbb{R}^{n\times 1}$ be our output.
+    \For{$s \in [N]$}
+        \State Sample $i \in [n]$ with probability $\propto x_i$ using $\Sigma$ as a normalization factor.
+        \State Sample $k \in [n]$ with probability $P_{ik}$. 
+        \State $\widehat{x}_{k} \gets \widehat{x}_{k} + 1$
+    \EndFor
+    \State \Return $\frac{1}{N}\cdot \widehat{x}\cdot \Sigma$
+\EndProcedure
+\Procedure{EstimateProduct}{$P \in \mathbb{R}^{n\times n},x \in \mathbb{R}^n,\varepsilon > 0,\widehat{s} \in \mathbb{R}^{n}$}
+\State Let $M \gets -\min_{v \in [n],x_v \leq 0}x_v$ \Comment{$O(n)$ time}
+\State Let $x' \gets x + M\cdot 1^n$ \Comment{$O(n)$ time}
+\State Call \Call{ApproxPosProd}{$P,x',\varepsilon$} to get $\widehat{x'}$ \Comment{$\widetilde{O}(n\varepsilon^{-2})$ time}
+\State \Return $\widehat{x'} - M\cdot \widehat{s}$
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{Estimating $D^v
+V$}\label{alg:dv_estimation}
+\begin{algorithmic}[1]
+\State \textbf{Input: }$Q,K,D^O \in \mathbb{R}^{n\times d}$, error parameter $\varepsilon > 0$
+\State Let $\widehat{D}^V \in \mathbb{R}^{n\times d}$ be our output.
+\State $\widehat{s} \gets $\Call{ApproxPosProd}{$P, 1^n, \varepsilon$}\Comment{Pre-Processing}
+\For{$j \in [d]$}
+    \State $\widehat{D}^V_{:,j} \gets $\Call{EstimateProduct}{$P, D^O_{:,j}, \varepsilon, \widehat{s}$}
+\EndFor
+\State \Return $\widehat{D}^V$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Runtime analysis}
+For each $j \in [d]$ we take $N = O(\varepsilon^{-2}\log n)$ samples. We can take one sample in $O(nd)$ time. In addition, we must pre-calculate the sums $\langle x_j, 1^n \rangle + nM_j = nM_j + \sum_{k=1}^n D^O_{kj}$ for all $j\in [d]$, which takes $O(nd)$ time. As a result, we arrive at the following theorem:
+\begin{theorem}
+Given $Q,K,V$ and $D^O$, Algorithm \ref{alg:dv_estimation} calculates ${\partial \phi} /{\partial V_{ij}} = D^V_{ij}$ for all $(i,j) \in [n]\times[d]$ within an additive approximation error of
+\begin{align}
+    e_V = \varepsilon\cdot \langle D^O_{:,j}, 1^n\rangle + 2n\varepsilon M_j,\,\text{where }M_j := -\min_{i \in [n], D^O_{ij} \leq 0}D^O_{ij}
+\end{align}
+with probability at least $1-\frac{1}{n}$. The time complexity is $O(nd^2\varepsilon^{-2}\log n)$.
+\end{theorem}
+
+\begin{remark}
+Note that Algorithm \ref{alg:dv_estimation} does not materialize the $P$ matrix. Instead it accesses its elements by using $Q$ and $K$ in $O(d)$ time per element.
+\end{remark}
+
+
+
+\section{Experimental Results}
+
+In this section we present our experimental results. Through them we can interpret our theoretical framework better and solidify our understanding of it.
+
+\subsection{Forward Pass Approximation Quality on Random Inputs}
+We begin by evaluating the effectiveness of $k$NN Attention in approximating the attention function. We randomly sample matrices \(Q, K, V \in \mathbb{R}^{n \times d}\) from a uniform distribution over \([-B, B]^{n \times d}\) and assess the approximation quality on these inputs. Our focus is on the ``classic'' $k$NN Attention estimator (Theorem \ref{thm:simpler_expectation}) with \(\lambda = 1\), as used in implementations like \cite{bertsch2024unlimiformer} and \cite{wu2022memorizing}. We vary \(k\) to study how the error decreases as \(k\) increases and compare the efficiency to the naive \(O(n^2)\) attention, expecting notable performance gains. This experiment is implemented in PyTorch, running on a MacBook Air with an M3 CPU and 8GB of RAM.
+
+\paragraph{Efficiency of kNN Attention}
+Our experiments confirm $k$NN Attention's superior speed, demonstrating sub-quadratic scaling. With a batch size of $1$ and $H = 10$ attention heads, it handles self-attention for $n=10^6$, while the naive method runs out of memory beyond $n \geq 20000$. Increasing $k$ further leads to memory errors for $n \geq 50000$, highlighting kNN Attention's memory efficiency. Detailed results are in Figure \ref{fig:efficiency}. 
+
+\begin{figure}
+\centering
+\subfigure[$k$NN Attention vs Brute Force. We are able to increase the context length by a factor of $5$ without running out of memory.]{
+\label{fig:efficiency}
+\includegraphics[scale=0.42]{efficiency_4.png}
+}
+\hspace{1mm}
+\subfigure[Mean error of $k$NN Attention as a function of $k$ for different values of $B$. As $k$ grows, the error becomes negligible. In some cases, $\sqrt{n}$ is too big a threshold.]{
+\label{fig:error}
+\includegraphics[scale=0.43]{forward_pass_test_batched.png}
+}
+\label{fig:errors}
+\end{figure}
+
+\paragraph{Role of $k$ in the Approximation Error}
+We investigate the impact of \(k\) on the approximation error, predicting that error increases as \(k\) decreases. The experiment confirms this, showing that for \(k \geq n^{1/8}\), the error is minimal. Our theory suggests a threshold closer to \(\sqrt{n}\) which indicates that the optimal \(k\) may vary by dataset. The results appear in Figure \ref{fig:error}. Interestingly, the error is more pronounced for small values of both $B$ and $k$, potentially due to the limited approximation power when $k$ is small. For larger $k$, this difference becomes negligible.
+
+\subsection{Backward Pass Approximation Quality}
+\label{sec:grad-approx-experiments}
+Next, we evaluate the quality of our algorithms for attention gradient estimation. We sample \(Q, K, V\) from a normal distribution, as this strategy aligns with typical neural network weight initialization strategies, and approximate $D^Q$ and $D^V$ using randomized techniques. Our goal is to assess the error introduced by the approximation and whether this error causes gradient descent to converge far from the minimum.
+
+We set the sequence length \(N = 100\) and the embedding dimension \(d = 3\). The learning rate \(\alpha\) is varied between 0.05 and 0.5, while the error parameter is fixed at \(\varepsilon = 0.05\) and the confidence parameter at \(\delta = 0.1\). We experiment with both convex (Mean Square Error) and non-convex (Cross Entropy) loss functions to examine how approximate gradient descent behaves, using PyTorch's autograd to compute the exact attention gradients. As shown in Figure \ref{fig:grad-desc-experiment}, our approximation closely matches the expected results in the convex case but deviates from the optimal convergence in the non-convex case. A more detailed investigation of the impact of gradient approximations in large language model (LLM) training is left for future work.
+
+\begin{figure}[h!]
+\centering
+\subfigure{
+\includegraphics[scale=0.45]{convex_loss_converged.png}
+}
+\subfigure{
+\includegraphics[scale=0.45]{experiment_cross_entropy.png}
+}
+\caption{Gradient Descent with Approximate Gradients against different loss functions $\phi$. Even with approximate gradients, gradient descent still makes adequate progress towards convergence.}
+\label{fig:grad-desc-experiment}
+\end{figure}
+
+\subsection{Experiments on LLMs}
+Finally, we experiment with incorporating $k$NN attention into LLMs to study its impact on training and inference. While previous work has explored $k$NN indices for efficient fine-tuning and training \citep{bertsch2024unlimiformer, wu2022memorizing}, our goal is to understand how Transformer LLMs respond to attention function approximation, linking it to our theory and providing practical guidelines. The architecture and training methods are adapted from \textit{nanoGPT} \citep{Karpathy2022}, and our experiments are conducted on an NVIDIA L40 GPU with 48GB of memory.
+
+Our first experiment trains a mini character-level Transformer on a small Shakespeare dataset, replacing attention with $k$NN attention. We compare training and validation perplexity to the exact method. Results in Figure \ref{fig:shakespeare_experiment} show that $k$NN Attention maintains a small perplexity gap. However, as overfitting occurs, the perplexity difference widens, possibly due to increasing maximum approximation error. Future work could explore the impact of larger $k$ values on perplexity.
+
+We also experiment with fine-tuning a large pre-trained LLM using $k$NN attention, in the hopes that the approximation will not severly degrade the model's quality. We manage to fine-tune GPT-2 XL\footnote{$1.61$B parameters, see \cite{radford2019language}} on a Shakespeare dataset - a task typically infeasible on a single L40 GPU due to memory constraints with quadratic attention.
+
+\begin{figure}[h]
+\center
+\subfigure{
+  \centering
+  \includegraphics[scale=0.46]{perplexity_training_2.png}
+}
+\subfigure{
+  \centering
+  \includegraphics[scale=0.46]{attn_error_training_2.png}
+}
+\caption{The perplexity and approximation error of $k$NN Attention throughout training}
+\label{fig:shakespeare_experiment}
+\end{figure}
+
+
+\section{Conclusion}
+
+In this work, we developed a theoretical framework for leveraging $k$NN techniques to design 
+efficient and effective Transformer architectures.
+We extended this framework by introducing Markov Chain-based methods to propose novel algorithms 
+for efficient self-attention gradient computation. Empirical validation on both synthetic inputs and real-world datasets demonstrated that $k$NN approximations 
+closely match the original performance in LLM training, while significantly reducing
+computational costs during both training and inference. 
+
+Moreover, our research opens several avenues for future exploration. 
+Key questions include the effectiveness of training with approximate gradients compared to exact ones,
+particularly when error distributions are tightly concentrated but unknown. Another open question is about explaining the practical 
+observation that the optimal $k$ value is often significantly smaller than the predicted $\sqrt{n}$.
+
+In conclusion, by applying sublinear algorithm techniques, our work provides a solid foundation 
+for making Transformers more scalable and efficient while identifying critical areas for further 
+research in LLM approximation.
+
+
+

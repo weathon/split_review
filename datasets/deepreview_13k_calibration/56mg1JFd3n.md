@@ -1,8 +1,8 @@
 # Writing in the Margins: Better Inference Patterns for Long-Context Retrieval
 
 - Decision: Reject
-- Avg Score: 3.00
-- Scores: 1, 0, 3, 5, 6
+- Avg Score: 6.00
+- Scores: 10, 3, 5, 6
 
 ## Abstract
 In this paper, we introduce Writing in the Margins (WiM), a new inference pattern for Large Language Models designed to optimize the handling of long input sequences in retrieval-oriented tasks. This approach leverages the chunked prefill of the key-value cache to perform segment-wise inference, which enables efficient processing of extensive contexts along with the generation and classification of intermediate information (``margins'') that guide the model towards specific tasks. This method increases computational overhead marginally while significantly enhancing the performance of off-the-shelf models without the need for fine-tuning. Specifically, we observe that WiM provides an average enhancement of $7.5\%$ in accuracy for reasoning skills (HotpotQA, MultiHop-RAG) and more than a $30.0\%$ increase in the F1-score for aggregation tasks (CWE). Additionally, we show how the proposed pattern fits into an interactive retrieval design that provides end-users with ongoing updates about the progress of context processing, and pinpoints the integration of relevant information into the final response.

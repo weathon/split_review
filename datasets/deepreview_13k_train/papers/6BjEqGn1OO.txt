@@ -1,0 +1,333 @@
+\title{Modeling Real-Time Interactive Conversations as Timed Diarized Transcripts}
+
+\begin{abstract}
+Chatbots built upon language models have exploded in popularity, but they have largely been limited to synchronous, turn-by-turn dialogues. In this paper we present a simple yet general method to simulate real-time interactive conversations using pretrained text-only language models, by modeling \textit{timed diarized transcripts} and decoding them with \textit{causal rejection sampling}. We demonstrate the promise of this method with two case studies: instant messenger dialogues and spoken conversations, which require generation at about 30 tok/s and 20 tok/s respectively to maintain real-time interactivity. These capabilities can be added into language models using relatively little data and run on commodity hardware.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Chatbots built upon language models have exploded in popularity, but their interaction model is extremely limited: the user and the system take turns writing messages, where the system waits until the user finishes their message to respond then responds instantly and uninterruptibly. Extensions to support audio have used speech to text and text to speech to eliminate the need for typing and reading the screen~\citep{chatgptaudio}, but the constraints of the interaction model have remained the same.
+
+In this paper we present a simple yet general method to simulate real-time interactive conversations using pretrained text-only language models, namely: model \textit{timed diarized transcripts}---i.e., sequences of [timestamp, speaker id, message]---at the desired granularity, and then decode these transcripts with \textit{causal rejection sampling}---i.e., sample a continuation that will be finalized at the predicted timestamp, and if there is intervening user input before the timestamp, reject the planned continuation (to the extent that its probability under the model has changed) and resample a new one. This method is naturally sparse over time and number of speakers, scaling computation with the amount of content being actively produced at each moment in time.
+
+We demonstrate the promise of this method with case studies in two domains. First, we use the instant messenger chat history between the first authors to train a real-time interactive asynchronous text dialogue model. Second, we use public speech datasets with diarized transcripts to train a real-time spoken conversation model, cascaded through word-level speech to text and text to speech models. Here there is an additional complication in that real-time streaming speech to text systems are unstable, i.e., predictions may change in light of future context. We address this with \textit{retconning}, i.e., revising the user's input history but keeping any already finalized system outputs.
+
+We evaluate these embodiments of our method with respect to performance (properties of the control token format and of our proof-of-concept implementation) and quality (test perplexity, offline human ratings, and online human ratings)---across finetuned models from 160M to 12B parameters. For the offline human rating setting only, we also use long in-context learning to test larger pretrained models available by API. In order to maintain real-time interactivity, generation needs to be about {\optimalninetynine} tokens per second for the instant messenger use case and {\optimalspeechninetynine} tok/s for spoken conversations, which are easy to achieve on a single A100 at our model scales. We find that, predictably, better pretrained models lead to better results, though there is still obvious room for improvement with dataset/model scale.
+
+We publicly release our code (and some demo videos) at \repolink. We hope that these proofs of concept spark the imagination and show that language models can easily be adapted to new real-time interaction modes.
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+We model \textit{timed diarized transcripts} using causally masked (decoder-only) language models. Given a sequence of events $e_i$, where each event $e_i$ consists of a timestamp $t_i$ (\textit{timed}), a speaker id $s_i$ (\textit{diarized}), and a message $m_i$ (\textit{transcript}), we model $p(e_i | e_1, ..., e_{i-1})$. In practice, this function decomposes into $p(t_i | e_1, ..., e_{i-1})$, $p(s_i | e_1, ..., e_{i-1}, t_i)$, and $p(m_i | e_1, ..., e_{i-1}, t_i, s_i)$, or even more granular distributions if these components are represented as multiple tokens. By modeling events sparsely over time, we are able to sample transcripts with computation proportional to the number/complexity of the events, rather than the time duration.
+
+In order to make this model interactive, we use \textit{causal rejection sampling}. We pick a particular speaker id $S$ to represent the user and sample candidates $\hat{e}_i \sim p(e_i | e_1, ..., e_{i-1})$, where we interpret the timestamps $t$ within these events with respect to the current real time. If an input from the user $(S, T, M)$ interrupts before the timestamp $\hat{t}_i$ is reached, we reject the candidate $\hat{e}_i$ and sample a new candidate $\hat{e}_{i+1} \sim p(e_{i+1} | e_1, ..., e_{i-1}, e_i=(S, T, M))$. If no such interruption occurs before $\hat{t}_i$, there are two possibilities: If the speaker id $\hat{s}_i$ within $\hat{e}_i$ is not $S$, we accept the message candidate $\hat{m_i}$, emit it to the user, then sample $\hat{e}_{i+1}$, etc. If $\hat{s}_i$ is $S$, then we resample $\hat{e}'_i \sim p(e_i | e_1, ..., e_{i-1}, t_i \geq \hat{t}_i)$.
+
+Because it takes some amount of time $t_{latency}$ (varying with message length) to execute the model and sample from $p(e_i | ...)$, if the user repeatedly provides input less than $t_{latency}$ before the predicted timestamps $\hat{t}_i$, the model will be starved and unable to generate any acceptable events. We provide two modifications to mitigate recomputation from user interruption:
+
+First, we enforce a hard lower bound on the model's generation bandwidth by stipulating that if the user input comes within $t_{react}$ of $\hat{t}_i$, we accept $\hat{e}_i$ as a candidate for $\hat{e}_{i+1}$. The relationship between $t_{latency}$ and $t_{react}$ determines whether the model can maintain real-time interactivity in the worst case. We do not expect moderate $t_{react}$ to harm generation quality too much because a human reaction time of approximately 150-200 ms~\citep{humanVisualReactTime, humanAudioReactTime} should be reflected in the underlying causal structure of human training data.
+
+Second, we reduce the average amount of recomputation by integrating speculative decoding~\citep{leviathan2023fast, chen2023accelerating}. Rather than discard the candidate $\hat{e}_i$ unconditionally upon user interruption, we treat it as a draft for the new generation, rejecting and resampling based on the closeness of $p(e_i = \hat{e}_i | e_1, ..., e_{i-1}, t_i \geq T)$ and $p(e_{i+1} = \hat{e}_i | e_1, ..., e_{i-1}, e_i=(T, S, M))$. Note that this is different from traditional speculative decoding, where a smaller model \textit{for the same distribution} drafts a candidate;\footnote{The traditional kind of speculative decoding could also be used to speed up the initial autoregressive candidate generation; we omit this for simplicity.} the use of different prompts under the same model resembles classifier-free guidance~\citep{ho2022classifierfree, sanchez2023stay}. Like with $t_{react}$, we expect this to work to the extent that there is a looseness in the causal dependencies of nearby messages from different parties.\footnote{You can also trade off between potentially wasted computation and interactivity by sampling the timestamp first and waiting until it approaches to generate the rest of the message, vs. sampling multiple sequential event candidates ahead of time.}
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.8\linewidth}
+\begin{algorithm}[H]
+\caption{Causal rejection sampling (without speculative decoding)}\label{alg:basic-alg}
+\begin{algorithmic}
+\State $i \gets 0$ \Comment{current event index}
+\State $e \gets []$ \Comment{event history}
+\State $c \gets (\varnothing, \varnothing, \varnothing)$ \Comment{candidate for the next message}
+\While {true}
+\State $i \gets i + 1$
+\Try
+\State $( \hat{t}, \hat{s}, \hat{m}) \gets c$
+\If{$\hat{t}$ is $\varnothing$}
+\State $c \gets (\hat{t}, \hat{s}, \hat{m}) \sim p(e_i | e_1, ..., e_{i-1}, t_i \geq t_{cur})$
+\EndIf
+\State \textbf{wait} until $\hat{t}$
+\State $t_{cur} \gets \hat{t}$
+\If{$\hat{s}$ is $S$}
+\State $c \gets (\varnothing, \varnothing, \varnothing)$
+\State $i \gets i-1$
+\State \textbf{continue}
+\EndIf
+\EndTry
+\Catch{user input $(T, S, M)$}
+\State $e_i \gets (T, S, M)$
+\State $t_{cur} \gets T$
+\State $(\hat{t}, \hat{s}, \hat{m}) \gets c$
+\If {$\hat{s} = S$ or $\hat{t} + t_{react} < T$}
+\State $c \gets (\varnothing, \varnothing, \varnothing)$
+\EndIf
+\State \textbf{continue}
+\EndCatch
+\State $e_i \gets c$
+\State \textbf{emit} $c$
+\State $c \gets (\varnothing, \varnothing, \varnothing)$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+
+We now present two case studies demonstrating how this method can be applied to different domains: instant messenger dialogues and spoken conversations.
+
+\subsection{Instant Messenger Dialogues}
+\label{subsec:messenger-method}
+
+The method as described above can be applied to instant messenger dialogues with minimal modifications. We use as our domain 9 years of instant messenger history between the first authors. This means we are not just modeling the evolution of synchronous conversations where both participants are actively engaged, but asynchronous conversations where participants may be offline and where the date/time may influence the content of the conversation. Instant messenger conversations can be highly multimodal, in particular with audio, images, and hyperlinks; we consider only text and leave multimodality to future work.
+
+In the notation from above, we instantiate $t$ with the message's calendar date/time (down to decisecond granularity), $s$ with an id representing the message sender (one of the two authors), and $m$ with the message plaintext (terminated by an ``end of message'' token). As a sequence length optimization, when prefixes of the timestamp are repeated in consecutive messages, we omit them. We design the control format to be prefix-free so that it can be interpreted without lookahead while decoding; this means that control tokens can decoded in a structured way (including that time only flows forward) by appropriately filtering and renormalizing the next token vocabulary. See Figure~\ref{fig:messenger-format} for a specification of the format and Figure~\ref{fig:messenger-example} for an example of what preprocessed data looks like.
+
+\begin{figure}
+\centering
+    \begin{subfigure}[b]{.48\textwidth}
+        [[[[[$year$? ' ' $month$]? $day$ ' ' $wday$]? '+' $hr$]? ':' $min$]? ';' $sec$]? '.' $dsec$ $speaker$ $message$ \texttt{<eom>} \\
+\hspace{0mm} \\
+{
+\scriptsize
+$year$: year in YYYY format (2015, 2016, ...) \\
+$month$: full month name (January, February, ...) \\
+$day$: date in DD format (01, ..., 31) \\
+$wday$: day of the week (M, Tu, W, ...) \\
+$hr$: 24-hour time in HH format (00, ..., 23) \\
+$min$: minute in MM format (00, ..., 59) \\
+$sec$: second in SS format (00, .., 59) \\
+$dsec$: decisecond in D format (0, ..., 9) \\
+$speaker$: message sender id (A $|$ B) \\
+$message$: plaintext message
+\par
+}
+\caption{\textbf{Control token format.} ``?'' denotes an optional element. In brief: the format consists of the speaker id (omitted when matching the previous message), then the timestamp (prefixes omitted when matching the previous message), then the message itself. We use distinct separators ('+', ';', '.') between digit fields to distinguish them while decoding without lookahead, while remaining relatively tokenizer-agnostic. This format could be further optimized given a fixed vocabulary.}
+\label{fig:messenger-format}
+    \end{subfigure}
+    \hspace{0.02\textwidth}
+    \begin{subfigure}[b]{.48\textwidth}
+        \texttt{2024Feburary28W+22:32;13.8Bgetting some cuda device error though<eom>} \\ \\
+\texttt{;18.4Bthis is what I get for developing on cpu...<eom>} \\ \\
+\texttt{;45.2Aone sec I'm running<eom>} \\ \\
+\texttt{33;03.6BI was also in the middle of editing it so it's not working too<eom>} \\ \\
+\texttt{34;15.4Bnvm fixed<eom>} \\
+\label{fig:messenger-example}
+    \end{subfigure}
+    \caption{\textbf{Formatting for the instant messenger case study.}}
+\end{figure}
+
+\subsection{Spoken Conversations}
+\label{subsec:spoken-method}
+
+We also apply our general method to timed diarized word-level automatic speech recognition (ASR) transcripts. By cascading input through speech-to-text and output through text-to-speech, we can simulate spoken conversations. Note that---like cascaded approaches in general---this has the obvious limitation that it bottlenecks the input and output through text, stripping away aspects of speech like tone and introducing errors from intermediate models. While there exist off-the-shelf streaming speech-to-text models that output word-level timestamps, we are not aware of any text-to-speech models (streaming or otherwise) that accept them as input: the closest is incremental text-to-speech~\citep{ma2020incremental}. This limits our ability to generate natural-sounding speech; we use word-level text to speech invoked at the specified timestamps and consider this out of scope.
+
+There is an additional complication due to the use of streaming speech-to-text models: these models are able to achieve low latency because they output preliminary transcriptions that may change in light of future input and are only finalized some time later. This means that not only can the user's input interrupt the model's candidate generation, but the input can retroactively change after a candidate has been generated, accepted, and spoken out.
+
+We address this with \textit{retconning}, i.e., when the speech-to-text model's prediction for the input changes, we replace the old prediction with the new one in the transcript prefix, without changing any model generations that were accepted after that point. More formally, if we have sampled $\hat{e}_{j} \sim p(e_{j} | e_1, ..., e_{i}, ..., e_{j-1})$ and the user interrupts with a revision $e'_{i}$, we reject $\hat{e}_{j}$ (subject to the $t_{react}$ window and speculation described above) and resample $\hat{e}'_{j} \sim p(e_{j} | e_1, ..., e'_{i}, ..., e_{j-1})$. This should not have a significant impact on either performance or quality, since processing $n$ tokens in parallel is much faster than $n$ tokens sequentially, and because humans also reinterpret what they've already heard in light of new speech (which should be reflected in ground truth causal structure).
+We use as our dataset 1000 hours of oral arguments before the U.S. Supreme Court~\citep{oyez,scotusrepo}. Court oral arguments are an interesting domain because they have many participants ($\sim$10 per transcript) and are information dense, though they have longer conversation turns and fewer interruptions than typical conversations.
+
+In the formal language from Section~\ref{sec:method}, we instantiate $t$ with the word's start timestamp modulo 10 seconds\footnote{This compromise reduces the number of tokens, at the expense of being able to model more than 10 seconds of silence.} (down to centisecond granularity), $s$ with an opaque identifier representing the speaker, and $m$ with the word plaintext (terminated by an ``end of message'' token). 
+We omit the speaker id in repeated spans. See Figure~\ref{fig:speech-format} for a more complete description of the format and Figure~\ref{fig:speech-example} for an example of what preprocessed data looks like.\footnote{Note that for generality, the duration of each word should probably also be modelled. We omit it here because it would be discarded in our word-level text to speech step anyway.}
+\begin{figure}
+\centering
+    \begin{subfigure}[b]{.48\textwidth}
+        $sec$ $dsec$ $csec$ $speaker$ $word$ \texttt{<eom>} \\
+\hspace{0mm} \\
+{
+\scriptsize
+$sec$: ones place of the timestamp in seconds (0, .., 9) \\
+$dsec$: tenths place of the timestamp (0, ..., 9) \\
+$csec$: hundredths place of the timestamp (0, ..., 9) \\
+$speaker$: speaker id (A, B, ...) \\
+$word$: plaintext word
+\par
+}
+\caption{\textbf{Control token format.} ``?'' denotes an optional element. In brief: the format consists of the speaker id (omitted when matching the previous message), then the timestamp (prefixes omitted when matching the previous message), then the message itself.}
+\label{fig:speech-format}
+    \end{subfigure}
+    \hspace{0.02\textwidth}
+    \begin{subfigure}[b]{.48\textwidth}
+\texttt{055Aknock} \\
+\texttt{079Aknock} \\
+\texttt{154Bwho's} \\
+\texttt{186Bthere} \\
+\texttt{252Ainterrupting} \\
+\texttt{316Acow} \\
+\texttt{377Binterrupting} \\
+\texttt{443Bcow} \\
+\texttt{448Amoo} \\
+\texttt{473Bwho} \\
+\caption{\textbf{Example of a formatted word-level transcript} (out of domain). Newline serves as \texttt{<eom>}.}
+\label{fig:speech-example}
+    \end{subfigure}
+    \caption{\textbf{Formatting for the spoken conversation case study.}}
+\end{figure}
+
+
+
+\section{Evaluation}
+
+\label{sec:evaluation}
+
+For both case studies we evaluate performance and quality. We finetune the following models: Pythia 160M, 1. 
+Where possible, we also compare with in-context learning using state-of-the-art commercial language models: Claude 3 Sonnet~\citep{claude3} and GPT-4 Turbo~\citep{gpt4turbo}.
+
+For performance, we report:
+\begin{itemize}
+    \setlength\itemsep{0.075em}
+    \item \textit{generation bandwidth} in tokens/second required to maintain real-time interactivity, scored on historical data
+    \item \textit{control token overhead ratio}, scored on historical data
+    \item \textit{speculation acceptance rate} as an average number and fraction of draft tokens, scored on historical data
+    \item performance properties for the proof of concept implementation
+\end{itemize}
+
+For quality, we report: 
+\begin{itemize}
+    \setlength\itemsep{0.075em}
+    \item \textit{document-level negative log likelihood (NLL)} on the held out test set (rather than token-level perplexity, to make comparisons meaningful across tokenizers)
+    \item \textit{offline human ratings}, i.e., a human ranks conversations that were generated by continuing a prefix from the test set noninteractively
+    \item \textit{online human ratings}, i.e., a human interacts with each model given a conversation prefix from the test set, and then ranks them
+    \item statistics about the distribution of predicted time gaps, compared to historical data
+\end{itemize}
+
+For human rating settings, we use the same prefixes of 64 messages ($\sim$1024 tokens) across all models. For the offline ratings, we also compare with the ground truth continuation. 
+Note that while context lengths have recently made massive strides (128K for GPT-4 Turbo~\citep{gpt4turbo}, $>$1M for Claude 3~\cite{claude3}, and $>$10M for Gemini 1.5~\citep{gemini1p5}), they are still not long enough to fit our training sets ({\chattokens} tokens of messenger history and {\scotustokens} tokens of oral arguments) and usage is subject to rate limits. We therefore use only the most recent 16K tokens of history as context.
+
+One of the first authors prepared the test harness; the other served as the rater. The human evaluation scores range from 0 to 6, where 0 is nonsensical and 6 is indistinguishable from real. These scores should only be used to judge relative quality and not quality in absolute.
+
+\subsection{Instant Messenger Dialogues}
+\label{subsec:messenger-eval}
+
+As our dataset we use 9 years of instant messenger conversation history between the first authors, totaling 37,649,697 characters across 1,393,508 text-based messages (we exclude messages from other modalities). 
+We use the first 95\% of the messages as the train set, the next 2.5\% as a validation set, and the last 2.5\% as a test set.
+
+\subsubsection{Performance}
+\label{subsubsec:messenger-perf}
+
+\begin{figure}[t]
+\includegraphics[width=\textwidth]{figures/fig_messenger_performance_reqs.pdf}
+\includegraphics[width=\textwidth]{figures/fig_speech_performance_reqs.pdf}
+\caption{\small \textbf{Statistics about the overhead of our control formats for instant messenger dialogues (\textit{top}) and spoken conversations (\textit{bottom}), and the requirements to maintain real-time interactivity.} \textit{Left:} Lengths (in Llama 2 tokens) of plaintext messages vs. control tokens for examples in the training set. \textit{Right:} Fractions of the messages in the ground-truth dataset, including control tokens, that could be generated in real time for a given minimum generation rate, in tokens per second (again using the Llama 2 tokenizer). A message $m$ can be generated in real time if it can be generated in the time between the latest message outside of a short reaction window ($t_{react} = 200$ms) immediately before $m$, and $m$ itself. (We assume that for small $n$, the increase in cost for passing $n$ tokens through the network in parallel vs. 1 token is negligible, i.e. we are primarily modeling the cost of generating system responses, not ingesting user inputs.) For spoken conversations, we include performance figures for an optimized tokenizer which treats uses a single token for 3-digit timestamps.}
+\label{fig:joint-performance-reqs}
+\end{figure}
+
+See Figure~\ref{fig:joint-performance-reqs} for details on the performance properties of our instant messenger control format. The highlights are: With $t_{react}$ = 200ms, the 99th percentile generation bandwidth required to maintain real-time interactivity is {\ninetynine} tok/s, and the 99.9th percentile is {\ninetyninepointnine} tok/s. This range is largely pathological cases like long pasted text. On average, the control-formatted token length is 3.2x the plaintext length (median 2.4x); speculative sampling saves an additional 11.02 draft tokens (69.5\% of tokens) per interruption in Llama 2.
+
+In terms of our prototype: We interact with an A100 40GB server executing unquantized off-the-shelf model inference over \texttt{ssh}; this is more than sufficient to maintain real-time interactivity with all of our finetuned models. Communication latency is negligible, and the model checks for interruptions after generating each token (i.e., $\frac{1}{\text{\# tok/s}}$ latency).
+
+
+\subsubsection{Quality}
+\label{subsubsec:messenger-quality}
+
+ The trends are unsurprising: better pretrained models achieve better perplexity and better human ratings, though still substantially worse than the ground truth. One exception is that API-based models with in-context learning mimic style worse than finetuned models, and sometimes fail completely due to refusals. We now describe some qualitative observations:
+
+\begin{table}
+\centering
+\small
+\begin{tabular}{l|c|cc|cc}
+\toprule
+& \textbf{NLL} ($\downarrow$) & \multicolumn{2}{c|}{\textbf{Offline Human Ratings} ($\uparrow$)} & \multicolumn{2}{c}{\textbf{Online Human Ratings} ($\uparrow$)} \\
+\textbf{Instant messenger} & & Consistency & Fidelity & Consistency & Fidelity\\
+\midrule
+\texttt{Pythia 160M (ft)} & 3181 & 1.45 & 3.00 & 1.4 & 2.6 \\
+\texttt{Pythia 1.4B (ft)} & 2397 & 2.55 & 3.65 & 3.4 & \textbf{4.8} \\
+\texttt{Pythia 12B (ft)} & 2305 & 2.90 & 3.70 & 3.0 & 3.0 \\
+\texttt{Gemma 2B (ft)} & 2376 & 2.95 & 3.65 & 2.8 & 3.2 \\
+\texttt{Llama 2 7B (ft)} & \textbf{2179} & 3.90 & \textbf{4.40} & \textbf{3.8} & 4.2 \\
+\texttt{Claude 3 Sonnet (icl)} & - & 1.85 (5.29) & 1.25 (3.57) & - & - \\
+\texttt{GPT-4 Turbo (icl)} & - & \textbf{5.30} & 1.80 & - & - \\
+\textit{ground truth} & - & 5.95 & 6.00 & - & - \\
+\bottomrule
+\end{tabular}
+\begin{tabular}{l|c|cc|cc}
+\textbf{Spoken conversations} &  & \textcolor{white}{....}Content\textcolor{white}{....} & \textcolor{white}{.}Timing\textcolor{white}{.} & \textcolor{white}{....} Content\textcolor{white}{....}  & Timing \\
+\midrule
+\texttt{Pythia 160M (ft)} & 2261 & 0.8 & 1.4 & 0.6 & 0.4 \\
+\texttt{Pythia 1.4B (ft)} & 1724 & 2.3 & 3.8 & 1.0 & 1.0 \\
+\texttt{Pythia 12B (ft)} & 1661 & 3.1 & 3.8 & 1.6 & 1.8 \\
+\texttt{Gemma 2B (ft)} & 1608 & 3.9 & 4.3 & 2.2 & 3.4 \\
+\texttt{Llama 2 7B (ft)} & \textbf{1532} & 4.3 & \textbf{4.8} & \textbf{4.0} & \textbf{5.2} \\
+\texttt{Claude 3 Sonnet (icl)} & - & 4.2 & 3.7 & - & - \\
+\texttt{GPT-4 Turbo (icl)} & - & \textbf{5.0} & 3.8 & - & - \\
+\textit{ground truth} & - & 3.7 & 3.9 & - & - \\
+\bottomrule
+\end{tabular}
+\caption{\small \textbf{Instant messenger (\textit{top}) and spoken conversation (\textit{bottom}) quality scores.} \texttt{ft} = finetuned and \texttt{icl} = in-context learning. We compute negative log likelihood per document rather than averaged per token, so that it is comparable across vocabularies. Human ratings range from 0 (worst) to 6 (best). When relevant, we provide scores in parentheses with refusals filtered out. We rate \textit{consistency} (how coherent the conversation is generally) and \textit{fidelity} (how well the model mimics the authors specifically) for instant messenger, and \textit{content} vs. \textit{timing} for speech.}
+\label{tab:joint-quality}
+\end{table}
+
+\paragraph*{Overpowering tone} API-based models are tuned to have a particular voice, which bleeds through into the generated messages. So while the conversations are more coherent, they are usually easy to distinguish from the ground truth based on style cues alone. Claude 3 often refuses to perform the task when the chat history discusses politics.
+
+\paragraph*{Speaker consistency}
+The finetuned models sometimes struggle to maintain consistent identities for the speakers, mostly across conversations (e.g., one speaker talks about having a sister, when it is only the other speaker who has a sister) but sometimes also within conversations (i.e., a speaker appears to respond to itself). 
+\paragraph*{Promise as an evaluation for long context LLMs}
+Instant messenger history continuation is a promising task for human evaluation of long in-context learning. Each message history is highly distinct, yet private and therefore guaranteed to be unleaked. While it is prohibitively time-consuming for a human rater to read extremely long prompts in general, if they are instead a participant in the original conversation, they are already deeply familiar with the content and can easily spot errors without additional effort.
+
+\subsection{Spoken Conversations}
+\label{subsec:spoken-eval}
+
+As our training dataset, we use a random 1000-hour subset of cases argued before the U.S. Supreme Court, totaling 33,640,559
+characters. We sample other cases into a $\sim$350-hour val set and $\sim$295-hour test set. We preprocess the data with WhisperX~\citep{radford2022whisper, bain2022whisperx}, which supports timed diarized word-level ASR. Note that pseudolabeled diarized speech data tends to undercapture timestamp overlap across speakers~\citep{Liesenfeld_2023}, so this data may not reflect fine-grained turn-taking behavior. We lowercase and strip punctuation from the data to make the formatting consistent with streaming ASR.
+
+\subsubsection{Performance}
+\label{subsubsec:speech-perf}
+
+See Figure~\ref{fig:joint-performance-reqs} for more details on the performance properties of our spoken conversation control format. 
+The highlights are: With $t_{react}$ = 200ms, the 99th percentile is {\speechninetynine} tok/s and 99.9th is {\speechninetyninepointnine} tok/s. On average, the control-formatted token length is 4.3x the plaintext length (median 5x). Note that this ratio is heavily dependent on the way the tokenizer handles digits; many modern tokenizers force individual digits to be separate tokens to improve arithmetic, but in this case, given enough data, 000-999 could reasonably be single tokens. We calculate the rates for this ``optimized tokenizer'': the 99th percentile is {\optimalspeechninetynine} tok/s and 99.9th is {\optimalspeechninetyninepointnine}. On average, the control-formatted token length is 1.8x plaintext length (median 2.0x).
+
+In terms of our proof of concept implementation: we use Google Cloud streaming \href{https://cloud.google.google. We measure the end-to-end latency of the former at about 500 ms (from word end to model input) and the latter at about 80 ms; on-device cascade and base models would likely have even lower latency.
+
+\subsubsection{Quality}
+\label{subsubsec:speech-quality}
+
+ It is prohibitively time-consuming to read the entire context or each case, and the rater has some legal knowledge but is not an expert, so there may be more of a gap in content quality than is reflected by the scores. In the offline human rating setting, we play the transcripts aloud to judge timing, though with word-level text to speech it is difficult to judge the finer points. Like for instant messanger dialogues, better pretrained models tend to achieve better results. Llama 2 7B (\texttt{ft}) responds remarkably well to turn-taking in the online setting, though there is still obvious room for improvement in all regards.
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+We survey related work in three areas: text dialogues, spoken dialogues, and use of language models to model time broadly.
+\subsection{Text Dialogue Modeling}
+\label{sec:text-rw}
+
+Modeling text dialogues is perhaps the founding problem of artificial intelligence: Turing's imitation game poses the challenge of distinguishing man from machine through turn-by-turn text dialogue~\citep{turing1950computing}. While timing is mentioned here (a model that responds too quickly could be distinguished from a human), the interaction model is limited. Since then there has been a wealth of work on dialogue systems~\citep{ni2022recent}, initially with complex rule-based methods~\citep{eliza} but shifting over time towards unified deep learning methods, culminating in Meena \& LaMDA~\citep{adiwardana2020humanlike, thoppilan2022lamda}, the Blenderbot series~\citep{roller2020recipes, komeili2021internetaugmented, shuster2022blenderbot}, and of course the recent wave of chatbots such as ChatGPT~\citep{chatgpt}, Gemini~\citep{geminibard}, Copilot~\citep{copilot}, Claude~\citep{claude}, Pi~\citep{pi}, Coral~\citep{coral}, HuggingChat~\citep{huggingchat}, etc. These chatbot works have primarily focused on basic, goal-directed conversational capabilities in the desired domains, which until recently has been very challenging, and less on the interaction model. Replika~\citep{replika} and certain modes in Character.AI~\citep{characterai} do allow multiple messages per conversation turn, but with undisclosed methods and unclear limitations.
+
+CICERO~\citep{cicero} studies Diplomacy, a political strategy game that involves instant messaging with other players in real time. The primary focus is on using dialogue paired with actions to achieve certain goals in the game, which implies the ability to imitate natural timing to avoid raising suspicion with human players. CICERO uses a chain of encoder-decoder models and heuristics to perform tasks such as predicting the next message time vs. content independently, and not all context is available to all models. Messages are rejected/resampled when user input causally intervenes on planned messages. Our work uses a simpler approach with a single transcript in a decoder-only model, which minimizes recomputation and makes all information available for all decisions; we further improve performance by using a reaction time window and causal speculative decoding.
+
+The task of imitating specific people based on their digital footprint (for better or worse) has captured the popular imagination, featuring in shows like \href{https://en.wikipedia.org/wiki/Silicon_Valley_(season_6)#:~:text=%22Artificial%20Lack%20of%20Intelligence%22}{\textit{Silicon Valley}}, \href{https://en.wikipedia.org/wiki/Be_Right_Back}{\textit{Black Mirror}} and \href{https://en.wikipedia.org/wiki/The_Riddle_of_the_Sphinx_(Westworld)}{\textit{Westworld}} and described with names like generative clones or ghosts in academic literature~\citep{morris2024generative}. Blog posts about finetuning LMs on personal chat histories are relatively common, but they either model timed transcipts noninteractively, or synchronous turn by turn conversations interactively (as a traditional chatbot). We are not aware of prior work that turns models of timed transcripts into interactive applications.
+
+\subsection{Spoken Dialogue Modeling}
+\label{sec:spoken-rw}
+
+To go beyond manually crafted turn-taking heuristics for what is in generality an extremely complex task~\citep{turntakingsurvey}, the main approach for generating spoken conversations has been direct audio modeling. dGSLM~\citep{nguyen2022generative}, AudioLM~\citep{borsos2023audiolm}, and SpiRit-LM~\citep{nguyen2024spiritlm} do this by modeling learned discrete tokens with autoregressive language models; the former models two streams of audio (dialogues), while the latter two model one. While the token modeling is causal, the tokenization is not, so these methods cannot yet be used in a streaming fashion. 
+
+Discrete audio tokenization is generally performed at a fixed rate of $\sim$40-50 tok/s for a single audio stream, vs. $\sim$20 tok/s for our approach supporting arbitrary numbers of speakers.\footnote{With that said, as with sparse vs. dense approaches generally, under extreme load the bandwidth required for sparse indexing over time may be higher than dense tokenization without indexing. 
+And because our approach is sparse over time, it is more difficult to batch and has inconsistent load, which may be disadvantageous for bulk serving.
+} This fits into the general pattern of cascaded vs. end-to-end models: cascaded models are generally more performant/require less data and therefore can be developed sooner using fewer resources, but they are eventually superseded by end-to-end models which can provide the optimal quality given sufficient resources.
+
+Though not exactly dialogue, simultaneous translation often operates through a cascade of ASR and TTS, though timing information (besides the relative ordering of words in the source and target streams) is stripped away~\citep{simulspeech, ma2020streaming}.
+
+\subsection{Time-Aware Language Models}
+\label{sec:time-lm-rw}
+
+There are many works that make language models aware of time in one sense or another. Even without special effort, language models learn latent representations of time to the extent that it helps explain the training distribution~\citep{gurnee2024language}. The language model CTRL~\citep{keskar2019ctrl} is conditioned on metadata about each document, which may include the publication date. Whisper~\citep{radford2022robust} and some other speech-to-text models predict timestamps as text. \citet{park2023generative} lets loose generative agents in a virtual town environment, where they act on schedules in accordance with the virtual time. Language models have been used as the backbone for time series forecasting, whether pretrained~\citep{das2024decoderonly}, finetuned~\citep{jin2024timellm}, or zero-shot~\citep{gruver2023large}, though here time is usually dense (proceeds at a fixed rate). %GameGAN~\citep{kim2020learning} and Genie~\citep{bruce2024genie} are real-time interactive world models~\citep{worldmodel}, but they establish this correspondence with real time by using a fixed rate of frames/tokens per unit time.
+We are not aware of works that model timestamps as text and interpret those timestamps as an input/output stream with respect to the real-world time.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we presented a simple yet general method for simulating real-time interactive conversations using pretrained language models---modeling \textit{timed diarized transcripts} and decoding with \textit{causal rejection sampling}---situated in two use cases: instant messenger dialogues and spoken conversations. It is easy to imagine extensions such as multiple simultaneous conversations with one simulated individual (by adding conversation ids in addition to speaker ids) or modeling multimodal conversations (images, actions, etc.), though this may require more capable language models. While we demonstrated the promise of this method using interactive conversations, it can be applied to turn language models into interactive models for any kind of event sequence, i.e., sparse-over-time world models. We hope that this method will facilitate more flexible interaction with the underlying capabilities of language models and enable new applications in fields such as gaming and entertainment.
+
+
+
+

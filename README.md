@@ -68,3 +68,8 @@ python code/build_deepreview.py
 - `*.pkl` files are tracked via Git LFS (see `.gitattributes`).
 - The repo is configured for the DeepReview calibration set only. Older
   ICLR-2025/2026 and NeurIPS position-paper code paths were trimmed.
+
+
+
+## TODO
+Embedding Emotion Analysis, Embedding Regression, LoRA finetune

@@ -1,0 +1,428 @@
+\title{MADiff: Offline Multi-agent Learning with Diffusion Models}
+
+\begin{abstract}
+Diffusion model (DM) recently achieved huge success in various scenarios including offline reinforcement learning,
+where the diffusion planner learn to generate desired trajectories during online evaluations.
+However, despite the effectiveness in single-agent learning, it remains unclear how DMs can operate in multi-agent problems, where agents can hardly complete teamwork without good coordination by independently modeling each agent's trajectories.
+In this paper, we propose \our, a novel generative multi-agent learning framework to tackle this problem.
+\our is realized with an attention-based diffusion model to model the complex coordination among behaviors of multiple agents.
+To the best of our knowledge, \our is the first diffusion-based multi-agent learning framework, which behaves as both a decentralized policy and a centralized controller. During decentralized executions, \our simultaneously performs teammate modeling, and the centralized controller can also be applied in multi-agent trajectory predictions. 
+Our experiments show the superior performance of \our compared to baseline algorithms in a wide range of multi-agent learning tasks, which emphasizes the effectiveness of \our in modeling complex multi-agent interactions.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models (DMs)~\citep{song2019generative,ho2020denoising} have achieved remarkable success in various generative modeling tasks~\citep{song2020score,meng2021sdedit,xu2022geodiff}, owing to their exceptional abilities at capturing complex data distributions. Thus, some recent work is inspired to build more powerful decision models by introducing DMs into offline reinforcement learning (RL)~\citep{janner2022planning,ajay2022conditional}. Offline RL problems present significant challenges as they prohibit interactions with environments. Consequently, RL algorithms using temporal difference learning may incur severe extrapolation errors due to distributional shift between the behavior policy in the dataset and the learning policy~\citep{fujimoto2019off}. 
+Alternatively, viewing offline RL as return-conditioned trajectory generation with DMs avoid extrapolation errors and leverage the advances of DMs~\citep{janner2022planning,ajay2022conditional}.
+
+Despite its effectiveness in single-agent learning, applying the generative framework to multi-agent (MA) decision tasks remains uncertain. This is due to the need for modeling interactions and coordination among agents, while each agent makes their decisions in a decentralized manner. Consequently, merely adopting existing diffusion RL methods by treating each agent's policies independently can result in serious inconsistencies due to a lack of proper credit assignment among agents. Current multi-agent learning (MAL) approaches typically train a centralized value function to update individual agents' policies~\citep{rashid2020monotonic} or use an autoregressive transformer to determine each agent's actions~\citep{meng2021offline,wen2022multi}. However, without online interactions, an incorrect centralized value can lead to significant extrapolation errors~\citep{fujimoto2019off}, and the transformer can only serve as an independent model for each agent.
+
+In this paper, we aim to study the potential of employing DMs to solve the above challenges in offline MAL problems. 
+In particular, we formulate MAL as conditional generative modeling problems, where the target is to generate each agent's trajectory, conditioned on the information of all agents (centralized case) or each agent (decentralized case).
+To address the aforementioned coordination challenges, we propose the first centralized-training-decentralized-execution (CTDE) diffusion framework for MA problems, named \our. \our adopts a novel attention-based DM to learn a return-conditional trajectory generation model on a reward-labeled multi-agent interaction dataset.
+In particular, the designed attention is computed in several latent layers of the model of each agent to fully interchange the information and integrate the global information of all agents.
+To model the coordination among agents, \our applies the attention mechanism on latent embedding for information interaction across agents.
+During training, \our performs centralized training on the joint trajectory distributions of all agents from offline datasets, including different levels of expected returns.
+During inference, \our adopts classifier-free guidance with low-temperature sampling to generate behaviors given the conditioned high expected returns, allowing for decentralized execution by predicting the behavior of other agents and generating its own behavior.
+Therefore, \our can be regarded as a principled offline MAL solution that not only serves as a decentralized policy for each agent or a centralized controller for all agents, but also includes teammate modeling without additional cost.
+Comprehensive experiments demonstrated superior performances of \our on various multi-agent learning tasks, including offline MARL and trajectory prediction.
+
+In summary, our contributions are
+(1) the first diffusion-based multi-agent learning framework
+that unifies decentralized policy, centralized controller, teammate modeling, and trajectory prediction;
+(2) a novel attention-based DM structure that is designed explicitly for MAL and enables coordination among agents in each denoising step;
+(3) achieving superior performances for various offline multi-agent problems.
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Multi-agent Offline Reinforcement Learning}
+We consider a partially observable and fully cooperative multi-agent learning (MAL) problem, where agents with local observations cooperate to finish the task. Formally, it is defined as a Dec-POMDP~\citep{oliehoek2016concise}: $G=\langle \mathcal{S}, \mathcal{A}, P, r, \Omega, O, N, U,\gamma\rangle$, where $\mathcal{S}$ and $\mathcal{A}$ denote state and action space separately, and $\gamma$ is the discounted factor.
+The system includes $N$ agents $\{1, 2, \dots, N\}$ act in discrete time steps, and starts with an initial global state $s_0\in\mathcal{S}$ sampled from the distribution $U$.
+At each time step $t$, every agent $i$ only observes a local observation $o^i\in\Omega$ produced by the function $O(s, a): \mathcal{S}\times \mathcal{A}\rightarrow\Omega$ and decides $a\in\mathcal{A}$, which forms the joint action $\mathbf{a}\in\mathbfcal{A}\equiv \mathcal{A}^N$, leading the system transits to the next state $s'$ according to the dynamics function $P(s'|s, \mathbf{a}): \mathcal{S}\times\mathbfcal{A}\rightarrow\mathcal{S}$. Normally, agents receive a shared reward $r(s, \mathbf{a})$ at each step, and the optimization objective is to learn a policy $\pi^i$ for each agent that maximizes the discounted cumulative reward $\mathbb{E}_{s_t,\mathbf{a}_t}[\sum_t \gamma^t r(s_t, \mathbf{a}_t)]$. 
+In offline settings, instead of collecting online data in environments, we only have access to a static dataset $\mathcal{D}$ to learn the policies. The dataset $\mathcal{D}$ is generally composed of trajectories $\bm{\tau}$, \textit{i.e.}, observation-action sequences $[\bm{o_0},\bm{a_0},\bm{o}_1,\bm{a}_{1},\cdots,\bm{o}_{T},\bm{a_{T}}]$ or observation sequences $[\bm{o}_0,\bm{o}_{1},\cdots,\bm{o}_{T}]$. 
+We use bold symbols to denote the joint vectors of all agents.
+
+\subsection{Diffusion Probabilistic Models}
+Diffusion models (DMs)~\citep{sohl2015deep,song2019generative,ho2020denoising}, as a powerful class of generative models, implement the data generation process as reversing a forward noising process (denoising process). For each data point $x_0\sim p_{\text{data}}(x)$ from the dataset $\caD$, the noising process is a discrete Markov chain $x_{0:K}$ such that $p(x_k|x_{k-1})=\mathcal{N}(x_k|\sqrt{\alpha_k}x_{k-1}, (1-\alpha_k)I)$, where $\mathcal{N}(\mu, \Sigma)$ denotes a Gaussian distribution with mean $\mu$ and variance $\Sigma$, and $\alpha_{0:K}\in\mathbb{R}$ are hyperparameters which control the variance schedule. The variational reverse Markov chain is parameterized with $q_\theta(x_{k-1}|x_k)=\mathcal{N}(x_{k-1}|\mu_{\theta}(x_k, k), (1-\alpha_k)I)$. The data sampling process begins by sampling an initial noise $x_K\sim\mathcal{N}(0,I)$, and follows the reverse process until $x_0$. The reverse process can be estimated by optimizing a simplified surrogate loss as in \cite{ho2020denoising}:
+\begin{equation}
+    \mathcal{L}(\theta)=\mathbb{E}_{k \sim[1, K], x_0 \sim q, \epsilon \sim \mathcal{N}(0, I)}\left[\left\|\epsilon-\epsilon_\theta\left(x_k, k\right)\right\|^2\right]~.
+\end{equation}
+The estimated Gaussian mean can be written as
+    $\mu_\theta(x_k, k)=\frac{1}{\sqrt{\alpha_k}}\left(x_k-\frac{1-\alpha_k}{\sqrt{1-\bar{\alpha}_k}}\epsilon_\theta (x_k, k)\right)$~,
+where $\bar{\alpha}_k=\Pi_{s=1}^k\alpha_s$.
+
+\begin{figure}[t]
+   \centering
+   \includegraphics[width=0.85\textwidth]{figs/madiff.pdf}
+   \caption{The architecture of \our, which is an attention-based diffusion network framework that performs attention across all agents at every decoder layer of each agent. 
+   }
+   \label{fig:madiff}
+\end{figure}
+\subsection{Diffusing Decision Making}
+\paragraph{Diffusing over state trajectories and acting with inverse dynamics model.}
+Among existing works in single-agent learning, \cite{janner2022planning} chose to diffuse over state-action sequences, so that the generated actions for the current step can be directly used for executing. 
+Another choice is diffusing over state trajectories only~\citep{ajay2022conditional}, which is claimed to be easier to model and can obtain better performance due to the less smooth nature of action sequences:
+\begin{equation}
+    \hat{\tau} := [s_t, \hat{s}_{t+1}, \cdots, \hat{s}_{t+H-1}],
+\end{equation}
+where $t$ is the sampled time step and $H$ denotes the trajectory length (horizon) modeled by DMs.
+But the generated state sequences can not provide actions to be executed during online evaluation.
+Therefore, an inverse dynamics model is trained to predict the action $\hat{a}_t$ that makes the state transit from $s_t$ to the generated next state $\hat{s}_{t+1}$:
+\begin{equation}\label{eq:inv_dy}
+    \hat{a}_t = I_{\phi}(s_t, \hat{s}_{t+1})~.
+\end{equation}
+Therefore, at every environment step $t$, the agent first plans the state trajectories using an offline-trained DM, and infers the action with the inverse dynamics model.
+
+\paragraph{Classifier-free guided generation.} 
+For targeted behavior synthesis, DMs should be able to generate future trajectories by conditioning the diffusion process on an observed state $s_t$ and information $y$.
+We use classifier-free guidance~\citep{ho2022classifier} which requires taking $y(\tau)$ as additional inputs for the diffusion model.
+Formally, the sampling procedure starts with Gaussian noise 
+$\hat{\tau}_K\sim\mathcal{N}(0, \alpha I)$, and diffuse $\hat{\tau}_k$ into $\hat{\tau}_{k-1}$ at each diffusion step $k$. 
+Here $\alpha\in[0, 1)$ is the scaling factor used in low-temperature sampling to scale down the variance of initial samples~\citep{ajay2022conditional}.
+We use $\tilde{x}_{k,t}$ to denote the denoised state $s_t$ at $k$'s diffusion step.
+$\hat{\tau}_k$ denotes the denoised trajectory at $k$'s diffusion step for a single agent:
+$\hat{\tau}_k := [s_t, \tilde{x}_{k,t+1}, \cdots, \tilde{x}_{k,t+H-1}]$.
+Note that for sampling during evaluations, the first state of the trajectory is always set to the current observed state at all diffusion steps for conditioning, and every diffusion step proceeds with the perturbed noise:
+\begin{equation}\label{eq:denoise}
+    \hat{\epsilon} := \epsilon_{\theta}(\tau_k,\emptyset, k) + \omega(\tau,w(y(\tau), k)-\epsilon_{\theta}(\hat{\tau}_k,\emptyset, k))~,
+\end{equation}
+where $\omega$ is a scalar for extracting the distinct portions of data with characteristic $y(\tau)$. 
+By iterative diffusing the noisy samples, we can obtain a clean state trajectory:
+    $\hat{\tau}_0(\tau):=[s_t, \hat{s}_{t+1}, \cdots, \hat{s}_{t+H-1}]$~.
+
+
+
+\section{Methodology}
+
+We formulate the problem of MAL as conditional generative modeling:
+\begin{equation}
+    \max_{\theta}\bbE_{\bm{\tau}\sim \caD}[\log p_{\theta}(\bm{\tau}|\bm{y}(\cdot))]~,
+\end{equation}
+where $p_{\theta}$ is learned for estimating the conditional data distribution of joint trajectory $\bm{\tau}$, given information $\bm{y}(\cdot)$, such as observations, rewards, and constraints.
+When all agents are managed by a centralized controller, \textit{i.e.}, the decisions of all agents are made jointly, we can learn the generative model by conditioning the global information aggregated from all agents $\bm{y}(\bm{\tau})$; otherwise, if we consider each agent $i$ separately and require each agent to make decisions in a decentralized manner, we can only utilize the local information $y^i(\tau^i)$ of each agent $i$, including the private information and the common information shared by all (\textit{e.g.}, team rewards).
+
+\subsection{Multi-Agent Diffusion with Attention}
+In order to handle MAL problems, agents must learn to coordinate.
+To solve the challenge of modeling the complex inter-agent coordination in the dataset, we propose a novel attention-based diffusion architecture designed to interchange information among agents.
+
+In \fig{fig:madiff}, we illustrate the architecture of \our model.
+In detail, we adopt U-Net as the base structure for modeling agents' individual trajectories, which consists of repeated one-dimensional convolutional residual blocks.
+The convolution is performed over the time step dimension, and the observation feature dimension is treated as the channel dimension.
+To encourage information interchange and improve coordination ability, a critical change is made by adopting attention~\citep{vaswani2017attention} layers before all decoder blocks in the U-Nets of all agents.
+Since embedding vectors from different agents are aggregated by the attention operation rather than concatenations, \our is index-free such that the input order of agents can be arbitrary and does not affect the results.
+
+Formally, the input to $l$-th decoder layer in the U-Net of each agent $i$ is composed of two components: the skip-connected feature $c^i_l$ from the symmetric $l$-th encoder layer and the embedding $e^i_l$ from the previous decoder layer.
+The computation of attention in \our is conducted on $c^i_l$ rather than $e^i_l$ since in the U-Net structure the encoder layers are supposed to extract informative features from the input data. 
+We use ${c'}^i_l$ to denote the skip-connected feature after attention operations which aggregate information across agents.
+We adopt the multi-head attention mechanism to fuse the encoded feature ${c'}^i_l$ with other agents' information, which is important in effective multi-agent coordination.
+
+\subsection{Centralized Training Objectives}
+Given a multi-agent offline dataset $\caD$,
+we train \our which is parameterized through the unified noise model $\epsilon_\theta$ for all agents and the inverse dynamics model $I_\phi^i$ of each agent $i$ with the reverse diffusion loss and the inverse dynamics loss:
+\begin{equation}\label{eq:cent-loss}
+\begin{aligned}
+    \caL(\theta, & \phi) := \sum_{i}\bbE_{(s^i,a^i,s'^i)\in\caD}[\|a^i-I_{\phi}^i(o^i,o'^i)\|^2] \\
+    &+ \bbE_{k,\bm{\tau}_0\in\caD,\beta}[\|\epsilon-\epsilon_\theta(\bm{\hat{\tau}}_k, (1-\beta)\bm{y}(\bm{\tau}_0) + \beta\emptyset,k)\|^2]~,
+\end{aligned}
+\end{equation}
+where $\beta$ is sampled from a Bernoulli distribution to balance the training effort on unconditioned and conditioned models.
+For training the DM, we sample noise $\epsilon\sim\caN(\bm{0}, \bm{I})$ and a time step $k\sim\caU\{1,\cdots,K\}$, construct a noise corrupted joint state sequence $\bm{\tau}_k$ from $\bm{\tau}$ and predict the noise $\hat{\epsilon}_\theta:=\epsilon_\theta(\bm{\hat{\tau}}_k,\bm{y}(\bm{\tau}_0),k)$. 
+Note that the noisy array $\bm{\hat{\tau}}_k$ is applied with the same condition required by the sampling process, as we will discuss in \Secref{sec:cent-decent} in detail.
+As for the inverse dynamics training, we sample the observation transitions of each agent to predict the action.
+
+It is worth noting that the choice of whether agents should share their parameters of $\epsilon^i_\theta$ and $I_{\phi^i}$ depends on the homogeneous nature and requirements of tasks. 
+If agents choose to share their parameters, only one shared DM and inverse dynamics model are used for generating all agents' trajectories; otherwise, each agent $i$ has extra parameters (\textit{i.e.}, the U-Net and inverse dynamic models) to generate their states and predict their actions.
+The attention modules are always shared to incorporate global information into generating each agent's trajectory.
+
+\subsection{Centralized Control or Decentralized Execution}
+\label{sec:cent-decent}
+\minisection{Centralized control.}
+A direct and straightforward way to utilize \our in online decision-making tasks is to have a centralized controller for all agents.
+The centralized controller has access to all agents' current local observations and generates all agents' trajectories along with predicting their actions, which are sent to every single agent for acting in the environment.
+This is applicable for multi-agent trajectory prediction problems and when interactive agents are permitted to be centralized controlled, such as in team games. 
+During the generation process, we sample an initial noise trajectory $\bm{\hat{\tau}}_K$, condition the current joint states of all agents and the global information to utilize $\bm{y}(\bm{\tau}_0)$; following the diffusion step described in \eq{eq:denoise} with $\epsilon_\theta$, we finally sample the joint observation sequence $\bm{\hat{\tau}}_0$ as below:
+\begin{equation}\label{eq:diff-ctce}
+    \underbrace{[\bm{o}_t, \cdots, \bm{\tilde{x}}_{K,t+H-1}]}_{\bm{\hat{\tau}}_K}
+    \xRightarrow{\text{$K$ steps}}
+    \underbrace{[\bm{o}_t, \cdots, \bm{\hat{o}}_{t+H-1}]}_{\bm{\hat{\tau}}_0}~,
+\end{equation}
+where every $\bm{\tilde{x}}_{t}\sim\caN(\bm{0},\bm{I})$ is a noise vector sampled from the normal Gaussian. 
+After generation, each agent obtains the action through its own inverse dynamics model following \eq{eq:inv_dy} using the current observation $o_t^i$ and the predicted next observation $\hat{o}_{t+1}^i$, and takes a step in the environment.
+We highlight that \our provides an efficient way to generate joint actions and the attention module guarantees sufficient feature interactions and information interchange among agents.
+
+\minisection{Decentralized execution with teammate modeling.}
+Compared with centralized control, a more popular and widely-adopted setting is that each agent only makes its own decision without any communication with other agents, which is what most current works~\citep{lowe2017multi,rashid2020monotonic,pan2022plan} dealt with. In this case, we can only utilize the current local observation of each agent $i$ to plan its own trajectory. To this end, the initial noisy trajectory is conditioned on the current observation of the agent $i$. Similar to the centralized case, by iterative diffusion steps, we finally sample the joint state sequence based on the local observation of agent $i$ as:
+\begin{equation}\label{eq:diff-ctde}
+     \underbrace{\begin{bmatrix}
+     \tilde{x}_{K,t}^0,\cdots,\tilde{x}_{K,t+H-1}^0\\
+     \cdots,\\
+     o_t^i,\cdots,\tilde{x}_{K,t+H-1}^i\\
+     \cdots,\\
+     \tilde{x}_{K,t}^N,\cdots,\tilde{x}_{K,t+H-1}^N\\
+   \end{bmatrix}}_{\bm{\hat{\tau}}_K^i}
+\xRightarrow{\text{$K$ steps}}
+   \underbrace{\begin{bmatrix}
+     \hat{o}_{t}^0,\cdots,\hat{o}_{t+H-1}^0\\
+     \cdots,\\
+     o_t^i,\cdots,\hat{o}_{t+H-1}^i\\
+     \cdots,\\
+     \hat{o}_{t}^N,\cdots,\hat{o}_{t+H-1}^N\\
+   \end{bmatrix}}_{\bm{\hat{\tau}}_0^i}~,
+\end{equation}
+and we can also obtain the action through the agent $i$'s inverse dynamics model as mentioned above.
+An important observation is that, the decentralized execution of \our includes teammate modeling such that the agent $i$ infers all others' observation sequences based on its own local observation. We show in experiments that this achieves great performances in various tasks, indicating the effectiveness of teammate modeling and the great ability in coordination. 
+
+\minisection{History-based generation.}
+We find DMs are good at modeling the long-term joint distributions, and as a result \our perform better in some cases when we choose to condition on the trajectory of the past history instead of only the current observation. This implies that we replace the joint observation $\bm{o}_t$ in \eq{eq:diff-ctce} as the $C$-length joint history sequence $\bm{h}_t:=[\bm{o}_{t-C},\cdots,\bm{o}_{t-1},\bm{o}_{t}]$, and replace the independent observation $o_t^i$ in \eq{eq:diff-ctde} as the history sequence $h_t^i:=[o_{t-C}^i,\cdots,o_{t-1}^i,o_{t}^i]$ of each agent $i$.
+
+
+\section{Related Work}
+
+
+\minisection{Multi-agent Offline RL.}
+While offline RL has become an active research topic, only a limited number of works studied offline MARL due to the challenge of offline coordination.
+\citet{jiang2021offline} extended BCQ~\citep{fujimoto2019off}, a single-agent offline RL algorithm with policy regularization to multi-agent;
+\citet{yang2021believe} developed an implicit constraint approach for offline Q learning, which was found to perform particularly well in MAL tasks;
+\citet{pan2022plan} argued the actor update tends to be trapped in local minima when the number of agents increases, and correspondingly proposed an actor regularization method named OMAR. 
+All of these Q-learning-based methods naturally have extrapolation error problem~\citep{fujimoto2019off} in offline settings, and their solution cannot get rid of it but only mitigate some. 
+As an alternative, MADT~\citep{meng2021offline} formulated offline MARL as return-conditioned supervised learning, and use a similar structure to a previous transformer-based offline RL work~\citep{chen2021decision}.
+However, offline MADT learns an independent model for each agent without modeling agent interactions; it relies on the gradient from centralized critics during online fine-tuning to integrate global information into each agent's decentralized policy.
+\our not only avoids the problem of extrapolation error, but also achieves the modeling of collaborative information while allowing CTDE in a completely offline training manner.
+
+\minisection{Opponent Modeling in MARL.}
+Our modeling of teammates can be placed under the larger framework of opponent modeling, which refers to the process by which an agent tries to infer the behaviors or intentions of other agents using its local information. 
+There is a rich literature on utilizing opponent modeling in online MARL.
+\citet{rabinowitz2018machine} used meta-learning to build three models, and can adapt to new agents after observing their behavior.
+SOM~\citep{raileanu2018modeling} uses the agent's own goal-conditioned policy to infer other agents' goals from a maximum likelihood perspective.
+LIAM~\citep{papoudakis2021agent} extracts representations of other agents with variational auto-encoders conditioned on the controlled agent's local observations. 
+Considering the impact of the ego agent's policy on other agents' policies, LOLA~\citep{foerster2017learning} and following works~\citep{willi2022cola, zhao2022proximal} instead model the parameter update of the opponents.
+Different from these methods, \our can use the same generative model to jointly output plans of its own trajectory and predictions of other agents' trajectories and is shown to be effective in offline settings.
+
+
+
+\section{Experiments}
+
+
+In experiments, we are aiming at excavating the ability of \our in modeling the complex interactions among cooperative agents, particularly, whether \our is able to (i) generate high-quality multi-agent trajectories; (ii) appropriately infer teammates' behavior; (iii) learn effective, coordinated policies from offline data. 
+
+\subsection{Task Descriptions}
+\label{sec:exp-task}
+We conduct experiments on multiple commonly used multi-agent testbeds.
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Multi-agent particle environments (MPE)}~\citep{lowe2017multi}: multiple 2D particles cooperate to achieve a common goal. 
+    \textit{Spread}, three agents start at some random locations and have to cover three landmarks without collisions; \textit{Tag}, three predators try to catch a pre-trained prey opponent that moves faster and needs cooperative containment; \textit{World}, also requires three predators to catch a pre-trained prey, whose goal is to eat the food on the map while not getting caught, and the map has forests that agents can hide and invisible from the outside.
+    \begin{itemize} 
+        \item \textbf{Datasets}: we use the offline datasets constructed by \citet{pan2022plan}, including four datasets collected by policies of different qualities trained by MATD3~\citep{ackermann2019reducing}, namely, Expert, Medium-Replay (Md-Replay), Medium and Random.
+    \end{itemize}
+    \item \textbf{Multi-Agent Mujoco (MA Mujoco)}~\citep{peng2021facmac}: independent agents control different subsets of a robot's joints to run forward as fast as possible.
+    We use three configurations: \textit{2-agent halfcheetah (2halfcheetah)}, \textit{2-agent ant (2ant)}, and \textit{4-agent ant (4ant)}.
+    \begin{itemize}
+        \item \textbf{Datasets}: we use the off-the-grid offline dataset~\citep{formanek2023off}, including three datasets with different qualities for each robot control task, \textit{e.g.}, Good, Medium, and Poor.
+    \end{itemize}
+    \item \textbf{StarCraft Multi-Agent Challenge (SMAC)}~\citep{samvelyan2019starcraft}: a team of either homogeneous or heterogeneous units collaborates to fight against the enemy team that is controlled by the hand-coded built-in StarCraft II AI.
+    We cover four maps: \textit{3m}, both teams control three Marines; \textit{2s3z}, both teams control two Stalkers and 3 Zealots; \textit{5m\_vs\_6m (5m6m)}, requires controlling five Marines and the enemy team has six Marines; \textit{8m}, both teams control eight Marines.
+        \begin{itemize}
+            \item \textbf{Datasets}: we use the off-the-grid offline dataset~\citep{formanek2023off}, including three datasets with different qualities for each map, \textit{e.g.}, Good, Medium, and Poor.
+        \end{itemize}
+    \item \textbf{Multi-Agent Trajectory Prediction (MATP)}: different from the former offline MARL challenges which should learn the policy for each agent, the MATP problem only requires predicting the future behaviors of all agents, and no decentralized model is needed.
+    \begin{itemize}
+        \item \textbf{NBA dataset}: the dataset consists of various basketball players' recorded trajectories from 631 games in the 2015-16 season. Following \citet{alcorn2021Baller2Vec++}, we split 569/30/32 training/validation/test games, with downsampling from 25 Hz to 5Hz.
+        Different from MARL tasks, other information apart from agents' historical trajectories is available for making predictions, including the ball's historical trajectories, player ids, and a binary variable indicating the side of each player's frontcourt. Each term is encoded and concatenated with diffusion time embeddings as side inputs to each U-Net block.
+    \end{itemize}
+\end{itemize}
+
+\begin{table}[t]
+\caption{The average score on offline MARL tasks. Shaded columns represent our methods. 
+The mean and standard error are computed over 3 different seeds.
+}
+\begin{center}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|c|c|cccccca|a}
+    \toprule
+    \textbf{Testbed} & \textbf{Task} & \textbf{Dataset} & \textbf{BC} & \textbf{MA-ICQ} & \textbf{MA-TD3+BC} & \textbf{MA-CQL} & \textbf{OMAR} & \textbf{MADT} & \textbf{\our-D} & \textbf{\our-C} \\
+    \midrule
+    \multirow{12}{*}{MPE} & \multirow{4}{*}{Spread} & Expert & 35.0 $\pm$ 2.6 & 104.0 $\pm$ 3.4 & 108.3 $\pm$ 3.3 & 98.2 $\pm$ 5.2 & \bm{$114.9 \pm 2.6$} & - & 97.0 $\pm$ 4.9 & \blue{\bm{$116.0 \pm 3.5$}} \\
+    & & Md-Replay & 10.0 $\pm$ 3.8 & 13.6 $\pm$ 5.7 & 15.4 $\pm$ 5.6 & 20.0 $\pm$ 8.4 & \bm{$37.9 \pm 12.3$} & - & 29.1 $\pm$ 2.1 & \blue{\bm{$43.1 \pm 9.8$}} \\
+    & & Medium & 31.6 $\pm$ 4.8 & 29.3 $\pm$ 5.5 & 29.3 $\pm$ 4.8 & 34.1 $\pm$ 7.2 & 47.9 $\pm$ 18.9 & - & \bm{$64.7 \pm 9.6$} & 58.0 $\pm$ 2.4 \\
+    & & Random & -0.5 $\pm$ 3.2 & 6.3 $\pm$ 3.5 & 9.8 $\pm$ 4.9 & 24.0 $\pm$ 9.8 & \bm{$34.4 \pm 5.3$} & - & 7.2 $\pm$ 3.6 & 5.0 $\pm$ 2.2 \\
+    \cmidrule{2-11}
+    & \multirow{4}{*}{Tag} & Expert & 40.0 $\pm$ 9.6 & 113.0 $\pm$ 14.4 & 115.2 $\pm$ 12.5 & 93.9 $\pm$ 14.0 & 116.2 $\pm$ 19.8 & - & \bm{$123.9 \pm 10.5$} & \blue{\bm{$168.3 \pm 19.0$}} \\
+    & & Md-Replay & 0.9 $\pm$ 1.4 & 34.5 $\pm$ 27.8 & 28.7 $\pm$ 20.9 & 24.8 $\pm$ 17.3 & 47.1 $\pm$ 15.3 & - & \bm{$63.0 \pm 6.8$} & \blue{\bm{$98.8 \pm 11.3$}} \\
+    & & Medium & 22.5 $\pm$ 1.8 & 63.3 $\pm$ 20.0 & 65.1 $\pm$ 29.5 & 61.7 $\pm$ 23.1 & 66.7 $\pm$ 23.2 & - & \bm{$78.3 \pm 7.6$} & \blue{\bm{$133.5 \pm 20.2$}} \\
+    & & Random & 1.2 $\pm$ 0.8 & 2.2 $\pm$ 2.6 & 5.7 $\pm$ 3.5 & 5.0 $\pm$ 8.2 & \bm{$11.1 \pm 2.8$} & - & 4.6 $\pm$ 2.6 & 10.0 $\pm$ 3.7 \\
+    \cmidrule{2-11}
+    & \multirow{4}{*}{World} & Expert & 33.0 $\pm$ 9.9 & 109.5 $\pm$ 22.8 & 110.3 $\pm$ 21.3 & 71.9 $\pm$ 28.1 & 110.4 $\pm$ 25.7 & - & \bm{$115.4 \pm 11.1$} & \blue{\bm{$178.9 \pm 21.7$}} \\
+    & & Md-Replay & 2.3 $\pm$ 1.5 & 12.0 $\pm$ 9.1 &  17.4 $\pm$ 8.1 & 29.6 $\pm$ 13.8 & 42.9 $\pm$ 19.5 & - & \bm{$60.3 \pm 10.3$} & \blue{\bm{$84.9 \pm 3.9$}} \\
+    & & Medium & 25.3 $\pm$ 2.0 & 71.9 $\pm$ 20.0 & 73.4 $\pm$ 9.3 & 58.6 $\pm$ 11.2 & 74.6 $\pm$ 11.5 & - & \bm{$124.2 \pm 6.3$} & \blue{\bm{$157.1 \pm 6.8$}} \\
+    & & Random & -2.4 $\pm$ 0.5 & 1.0 $\pm$ 3.2 & 2.8 $\pm$ 5.5 & 0.6 $\pm$ 2.0 & \bm{$5.9 \pm 5.2$} & - & 0.7 $\pm$ 3.1 & \blue{\bm{$6.1 \pm 2.4$}} \\
+    \midrule
+    \midrule
+    \multirow{9}{*}{\shortstack[c]{MA\\ Mujoco}} & \multirow{3}{*}{2halfcheetah} & Good & 6846 $\pm$ 574 & - & 7025 $\pm$ 439 & - & 1434 $\pm$ 1903 & - & \bm{$8254 \pm 179$} & \blue{\bm{$8662 \pm 102$}} \\
+    & & Medium & 1627 $\pm$ 187 & - & \bm{$2561 \pm 82$} & - & 1892 $\pm$ 220 & - & 2215 $\pm$ 27 & $2221 \pm 56$ \\
+    & & Poor & 465 $\pm$ 59 & - & 736 $\pm$ 72 & - & 384 $\pm$ 420 & - & \bm{$751 \pm 74$} & \blue{\bm{$767 \pm 42$}} \\
+    \cmidrule{2-11}
+    & \multirow{3}{*}{2ant} & Good & 2697 $\pm$ 267 & - & 2922 $\pm$ 194 & - & 464 $\pm$ 469 & - & \bm{$2940 \pm 58$} & \blue{\bm{$3105 \pm 47$}} \\
+    & & Medium & 1145 $\pm$ 126 & - & 744 $\pm$ 283 & - & 799 $\pm$ 186 & - & \bm{$1210 \pm 89$} & \blue{\bm{$1241 \pm 30$}} \\
+    & & Poor & 954 $\pm$ 80 & - & \bm{$1256 \pm 122$} & - & 857 $\pm$ 73 & - & 902 $\pm$ 24 & 1037 $\pm$ 24 \\
+    \cmidrule{2-11}
+    & \multirow{3}{*}{4ant} & Good & 2802 $\pm$ 133 & - & 2628 $\pm$ 971 & - & 344 $\pm$ 631 & - & \bm{$3090 \pm 26$} & \blue{\bm{$3087 \pm 32$}} \\
+    & & Medium & 1617 $\pm$ 153 & - & \bm{$1843 \pm 494$} & - & 929 $\pm$ 349 & - & 1679 $\pm$ 93 & \blue{\bm{$1897 \pm 44$}} \\
+    & & Poor & 1033 $\pm$ 122 & - & 1075 $\pm$ 96 & - & 518 $\pm$ 112 & - & \bm{$1268 \pm 51$} & \blue{\bm{$1332 \pm 45$}} \\
+    \midrule
+    \midrule
+    \multirow{12}{*}{SMAC} & \multirow{3}{*}{3m} & Good & 16.0 $\pm$ 1.0 & 18.8 $\pm$ 0.6 & - & \bm{$19.6 \pm 0.3$} & - & 19.0 $\pm$ 0.3 & \bm{$19.6 \pm 0.7$} & \blue{\bm{$20.0 \pm 0.0$}} \\
+    & & Medium & 8.2 $\pm$ 0.8 & 18.1 $\pm$ 0.7 & - & \bm{$18.9 \pm 0.7$} & - & 15.8 $\pm$ 0.5 & 17.2 $\pm$ 0.7 & \blue{\bm{$18.0 \pm 0.7$}} \\
+    & & Poor & 4.4 $\pm$ 0.1 & \bm{$14.4 \pm 1.2$} & - & 5.8 $\pm$ 0.4 & - & 4.2 $\pm$ 0.1 & 8.9 $\pm$ 0.1 & 9.3 $\pm$ 0.6 \\
+    \cmidrule{2-11}
+    & \multirow{3}{*}{2s3z} & Good & 18.2 $\pm$ 0.4 & \bm{$19.6 \pm 0.3$} & - & 19.0 $\pm$ 0.8 & - & 19.3 $\pm$ 0.3 & 19.4 $\pm$ 0.1 & 19.5 $\pm$ 0.1 \\
+    & & Medium & 12.3 $\pm$ 0.7 & 17.2 $\pm$ 0.6 & - & 14.3 $\pm$ 2.0 & - & 15.9 $\pm$ 0.9 & \bm{$17.4 \pm 0.3$} & \blue{\bm{$17.7 \pm 0.4$}} \\
+    & & Poor & 6.7 $\pm$ 0.3 & \bm{$12.1 \pm 0.4$} & - & 10.1 $\pm$ 0.7 & - & 7.0 $\pm$ 0.5 & 9.9 $\pm$ 0.2 & 10.8 $\pm$ 0.5 \\
+    \cmidrule{2-11}
+    & \multirow{3}{*}{5m6m} & Good & 16.6 $\pm$ 0.6 & 16.3 $\pm$ 0.9 & - & 13.8 $\pm$ 3.1 & - & 16.8 $\pm$ 0.1 & \bm{$18.0 \pm 1.0$} & \blue{\bm{$18.2 \pm 1.0$}} \\
+    & & Medium & 12.4 $\pm$ 0.9 & 15.3 $\pm$ 0.7 & - & 17.0 $\pm$ 1.2 & - & 16.1 $\pm$ 0.2 & \bm{$17.5 \pm 0.6$} & \blue{\bm{$18.0 \pm 1.1$}} \\
+    & & Poor & 7.5 $\pm$ 0.2 & 9.4 $\pm$ 0.4 & - & \bm{$10.4 \pm 1.0$} & - & 7.6 $\pm$ 0.3 & 8.9 $\pm$ 0.3 & 9.5 $\pm$ 0.7 \\
+    \cmidrule{2-11}
+    & \multirow{3}{*}{8m} & Good & 16.7 $\pm$ 0.4 & \bm{$19.6 \pm 0.3$} & - & 11.3 $\pm$ 6.1 & - & 18.5 $\pm$ 0.4 & 19.2 $\pm$ 0.1 & \blue{\bm{$20.0 \pm 0.0$}} \\
+    & & Medium & 10.7 $\pm$ 0.5 & 18.6 $\pm$ 0.5 & - & 16.8 $\pm$ 3.1 & - & 18.2 $\pm$ 0.1 & \bm{$19.2 \pm 0.7$} & \blue{\bm{$19.5 \pm 0.9$}} \\
+    & & Poor & 5.3 $\pm$ 0.1 & \bm{$10.8 \pm 0.8$} & - & 4.6 $\pm$ 2.4 & - & 4.8 $\pm$ 0.1 & 5.1 $\pm$ 0.1 & 5.2 $\pm$ 0.1 \\
+    \bottomrule
+\end{tabular}
+}
+\end{center}
+\label{tb:marl-result}
+\end{table}
+
+\subsection{Compared Baselines and Metrics}
+\label{sec:exp-baseline}
+For offline MARL experiments, we use the episodic return obtained in online rollout as the performance measure. We include MA-ICQ~\citep{yang2021believe} and MA-CQL~\citep{kumar2020conservative} as baselines on all offline RL tasks.
+On MPE, we also include OMAR and MA-TD3+BC~\citep{fujimoto2021minimalist} in baseline algorithms and use the results reported by \citet{pan2022plan}.
+On MA Mujoco, baseline results are adopted from \citet{formanek2023off}.
+On SMAC, we include MADT~\citep{meng2021offline} as a sequence modeling baseline, while other baseline results are reported by \citet{formanek2023off}.
+We implement independent behavior cloning (BC) as a naive supervised learning baseline.
+
+We use distance-based metrics including average displacement error (ADE) $\frac{1}{L\cdot N}\sum_{t=1}^L\sum_{i=1}^{N}\|\hat{o}_t^i-o_t^i\|$ and final displacement error (FDE) $\frac{1}{ N}\sum_{i=1}^{N}\|\hat{o}_L^i-o_L^i\|$, where $L$ is the prediction length~\citep{li2020evolvegraph}.
+We also report minADE$_{20}$ and minFDE$_{20}$ as additional metrics to balance the stochasticity in sampling, which are the minimum ADE and FDE among 20 predicted trajectories, respectively. We compare \our with Baller2Vec++~\citep{alcorn2021Baller2Vec++}, an autoregressive MATP algorithm based on the transformer structure and specifically designed for the NBA dataset.
+
+\subsection{Numerical Results}
+We reported the numerical results both for the CTDE version of \our (denoted as \our-D) and the centralized version \our (\our-C).
+For offline MARL, since baselines are tested in a decentralized style, \textit{i.e.}, all agents independently decide their actions with only local observations, \our-C is not meant to be a fair comparison but to show if \our-D fills the gap for coordination without global information. 
+For MATP, due to its centralized prediction nature, \our-C is the only variant involved. 
+
+\minisection{Offline MARL.}
+As listed in \tb{tb:marl-result}, \our-D achieves the best result on most of the datasets.
+Similar to the single-agent case, direct supervised learning (BC) on the dataset behaves poorly when datasets are mixed quality.
+Offline RL algorithms such as MA-CQL that compute conservative values have a relatively large drop in performance when the dataset quality is low.
+Part of the reason may come from the fact that those algorithms are more likely to fall into local optima in multi-agent scenarios~\citep{pan2022plan}.
+Thanks to the distributional modeling ability of the DM, \our-D generally obtains better or competitive performance compared with OMAR~\citep{pan2022plan} without any design for avoiding bad local optima similar to \citet{pan2022plan}.
+On SMAC tasks, \our-D achieves comparable performances, although it is slightly degraded compared with \our-C.
+
+\minisection{MATP on the NBA dataset.}
+In \tb{tb:nba}, 
+when comparing ADE and FDE, \our-C significantly outperforms the baseline; however, our algorithm only slightly beats baseline for $\text{minADE}_{20}$, and has higher $\text{minFDE}_{20}$. 
+We suspect the reason is that Baller2Vec++ has a large prediction variance.
+When Baller2Vec++ only predicts one trajectory, a few players’ trajectories deviate from the truth so far that deteriorate the overall ADE and FDE.
+When allowing to sample 20 times and calculating the minimum ADE/FDE according to the ground truth, Baller2Vec++ can choose the best trajectory for every single agent, which makes $\text{minADE}_{20}$ and $\text{minFDE}_{20}$ significantly smaller than one-shot metrics.
+However, considering it may be not practical to select the best trajectories without access to the ground truth, \our-C is much more stable than Baller2Vec++. 
+\begin{minipage}{.45\textwidth}
+\captionof{table}{Multi-agent trajectory prediction results on NBA dataset across 3 seeds, given the first step of all agents' positions.}
+  \begin{center}
+  \resizebox{0.95\linewidth}{!}{
+    \begin{tabular}{ c|c|ca } 
+    \toprule
+    \textbf{Traj. Len.} & \textbf{Metric} & \textbf{Baller2Vec++} & \textbf{\our-C} \\
+    \midrule
+    \multirow{4}{*}{20} & ADE & 15.15 $\pm$ 0.38 & \textbf{7.92 $\pm$ 0.86}\\
+    & FDE & 24.91 $\pm$ 0.68 & \textbf{14.06 $\pm$ 1.16}\\
+    & minADE$_{20}$ & 5.62 $\pm$ 0.05 & \textbf{5.20 $\pm$ 0.04}\\
+    & minFDE$_{20}$ & \textbf{5.60 $\pm$ 0.12} & 7.61 $\pm$ 0.19\\
+    \midrule
+    \multirow{4}{*}{64} & ADE & 32.07 $\pm$ 1.93 & \textbf{17.24 $\pm$ 0.80}\\
+    & FDE & 44.93 $\pm$ 3.02 & \textbf{26.69 $\pm$ 0.13}\\
+    & minADE$_{20}$ & 14.72 $\pm$ 0.53 & \textbf{11.40 $\pm$ 0.06}\\
+    & minFDE$_{20}$ & \textbf{10.41 $\pm$ 0.36} & 11.26 $\pm$ 0.26\\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{center}
+    \label{tb:nba}
+\end{minipage}
+\hfill
+\begin{minipage}{.5\textwidth}
+   \centering
+   \includegraphics[width=\linewidth]{figs/mpe_plan_rollout.pdf}
+   \captionof{figure}{Visualization of an episode in the \textit{Spread} task. Solid lines are real rollouts, and dashed lines are DM-planned trajectories.
+   }
+   \label{fig:mpe-plan-rollout}
+\end{minipage}
+
+\subsection{Qualitative Analysis on Teammate modeling}
+\label{sec:oppo-modeling}
+We discuss the quality of teammate modeling as mentioned in \Secref{sec:cent-decent} and how it is related to the decentralized execution scenario.
+In \fig{fig:mpe-plan-rollout} left, we visualize an episode generated by \our-D trained on the Expert dataset of \textit{Spread} task. 
+The top and bottom rows are snapshots of entities' positions on the initial and intermediate time steps.
+The three rows from left to right in each column represent the perspectives of the three agents, red, purple, and green, respectively.
+Dashed lines are the planned trajectories for the controlled agent and other agents output by DMs, and solid lines are the real rollout trajectories.
+We observe that at the start, the red agent and the purple agent generate \textit{inconsistent} plans, where both agents decide to move towards the middle landmark and assume the other agent is going to the upper landmark. 
+At the intermediate time step, when the red agent is close to the middle landmark while far from the uppermost ones, the purple agent altered the planned trajectories of both itself and the red teammate, which makes all agents' plans \textit{consistent} with each other.
+This particular case indicates that \our is able to correct the prediction of teammates' behaviors during rollout and modify each agent's own desired goal correspondingly.
+
+In \fig{fig:mpe-plan-rollout} right, we demonstrate that such corrections of teammate modeling are common and can help agents make globally coherent behaviors.
+We sample 100 episodes with different initial states and define \textit{Consistent Ratio} at some time step $t$ as the proportion of episodes in which the three agents make consistent planned trajectories. We plot the curve up to step $t=9$, which is approximately halfway through the episode length limit in MPE.
+The horizontal red line represents how many portions of the real rollout trajectories are consistent at step $t=9$.
+The interesting part is that the increasing curve reaches the red line before $t=9$, and ends up even higher. This indicates that the planned teammates' trajectories are guiding the multi-agent interactions beforehand, which is a strong exemplar of the benefits of \our's teammate modeling abilities.
+\subsection{Ablation Study}
+Our key argument is that the great coordination ability of \our is brought by the attention modules among individual agents' diffusion networks. We validate this insight through a set of ablation experiments on MPE. We compare \our-D with independent DMs, \textit{i.e.}, each agent learns from corresponding offline data using independent U-Nets without attention. We denote this variant as \our-D-Ind. 
+In addition, we also ablate the choice whether each agent should share parameters of their basic U-Net, noted as Share or NoShare. Without causing ambiguity, we omit the name of \our, and notate the different variants as \textit{D-Share}, \textit{D-NoShare}, \textit{Ind-Share}, \textit{Ind-NoShare}.
+
+\begin{figure}[h!]
+   \centering
+   \includegraphics[width=\textwidth]{figs/ablation.pdf}
+   \caption{
+   The average normalized score of \our ablation variants in MPE tasks.
+   The mean and standard error are computed over 3 different seeds.
+   }
+   \label{fig:ablation-mpe}
+\end{figure}
+
+As is obviously observed in \fig{fig:ablation-mpe}, with attention modules, \our-D significantly exceeds that of the independent version on most tasks, justifying the importance of inter-agent attentions. 
+The advantage of \our-D is more evident when the task becomes more challenging and the data becomes more confounded, e.g., results on World, where the gap between centralized and independent models is larger, indicating the difficulty of solving offline coordination with independently trained models.
+As for the parameter sharing choice, the performance of \our-D-Share and \our-D-NoShare is similar overall.
+Since \our-D-Share has fewer parameters, we prefer \our-D-Share, and use it as the default variant to be reported in \tb{tb:marl-result}. 
+Another advantage of sharing U-Net parameters is that the trajectories of various agents can be batched together and fed through the network. This not only decreases sampling time but also renders it insensitive to an increasing number of agents.
+
+
+
+\section{Limitaions}
+
+\label{sec:limitation}
+
+\our is limited in two aspects: scalability to a large number of agents and applicability in highly stochastic environments. 
+Regarding the scalability issue, \our-D requires each agent to infer all other teammates' future trajectories, which is difficult and unnecessary in environments with a large number of agents. Although we have done experiments on a maximum number of 8 agents (SMAC \textit{8m}), \our-D is in general not suitable for scenarios with tens or hundreds of agents. 
+For the second aspect, several theoretical and empirical studies~\citep{paster2022you,brandfonbrener2022does,chen2021decision} have demonstrated that in offline RL scenarios, sequence modeling algorithms tend to underperform Q-learning-based algorithms in environments with high stochasticity.
+This is primarily because sequence modeling algorithms are more susceptible to high-reward offline trajectories that are achieved by chance.
+Since \our is a sequence modeling algorithm, it shares this weakness.
+
+To better understand the extent to which \our is affected by environmental stochasticity and to compare it with other multi-agent sequence modeling solutions, we conducted experiments on the \textit{terran\_5\_vs\_5} map in SMACv2. 
+The design principle of SMACv2 is to add stochasticity into the original SMAC environment, including randomized initial positions and unit types.
+We conducted experiments under four settings in SMACv2: the original SMACv2, positions randomness only, unit type randomness only, and removal of both types of randomness. 
+The experimental results indicate that our method performs worse than the Q-learning-based SOTA, MAICQ, only when both types of stochasticity are present. In all settings, \our outperforms MADT.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, we propose \our, a novel generative multi-agent learning framework, which is realized with an attention-based diffusion model designed to model the complex coordination among multiple agents. To our knowledge, \our is the first diffusion-based offline multi-agent learning algorithm, which behaves as both a decentralized policy and a centralized controller including teammate modeling, and can be used for multi-agent trajectory prediction. Our experiments indicate strong performance compared with a set of recent offline MARL baselines on a variety of tasks. 
+
+
+
+
+
+
+

@@ -1,0 +1,207 @@
+\title{Segmenting Text and Learning Their Rewards for Improved RLHF in Language Models}
+
+\begin{abstract}
+Reinforcement learning from human feedback (RLHF) has been widely adopted to align language models (LMs) with human preference.
+Prior RLHF works typically take a bandit formulation, which, though intuitive, ignores the sequential nature of LM generation and can suffer from the sparse reward issue.
+While recent works propose dense token-level RLHF, treating each token as an action may be oversubtle to proper reward assignment. 
+In this paper, we seek to get the best of both by training and utilizing a segment-level reward model, which assigns a reward to each semantically complete text segment that spans over a short sequence of tokens.
+For reward learning, our method allows dynamic text segmentation and compatibility with standard sequence-preference datasets.
+For effective RL-based LM training against segment reward, we generalize the classical scalar bandit reward normalizers into location-aware normalizer functions and interpolate the segment reward for further densification.
+With these designs, our method performs competitively on popular RLHF benchmarks in both reward modeling and LM policy learning.
+Ablation studies are conducted to further demonstrate our method.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+To align language models (LMs, e.g., OpenAI, 2023; Reid et al., 2024) with human values, reinforcement learning (RL, Sutton & Barto, 2018) methods have been widely adopted to optimize the non-differentiable human preference, leading to the paradigm of reinforcement learning from human feedback (RLHF, Ouyang et al., 2022; Bai et al., 2022b). A prevailing approach in RLHF is to optimize the LMs by proximal policy optimization (PPO, Schulman et al., 2017) against a bandit reward model learned from human preference data, with KL regularization towards a pre-specified target distribution to avoid over-optimization on the reward model (Ziegler et al., 2019; Stiennon et al., 2020; Castricato et al., 2022). While this bandit approach is easier for reward modeling and has achieved remarkable success, language generation is intrinsically sequential, rather than simultaneous. Thus, from the view of optimizing human preference, assigning a bandit reward to entire text sequence induces the sparse reward (delayed feedback) issue (Andrychowicz et al., 2017; Marbach & Tsitsiklis, 2003), that often hurts RL-based LM training by increasing gradient variance and lowering sample efficiency (Takanobu et al., 2019; Wang et al., 2020; Guo et al., 2022; Snell et al., 2022).  
+
+As efforts to mitigate this sparse reward issue, prior works have developed methods to “ground” the sequence-level preference label into a dense token-level reward model (Yang et al., 2023; Zhong et al., 2024). While a dense per-token reward signal reduces the optimization complexity (Laidlaw et al., 2023), each action, however, is then defined as a single token, i.e., a sub-word that is finer-grained than a word, especially with the BPE-style tokenizers (Gage, 1994; Sennrich et al., 2016). For instance, Llama 3.1’s tokenizer (Dubey et al., 2024) has tokens as $\{{\mathrm{Brit}},{\mathsf{c e}},{\mathsf{c o d}},{\mathsf{n e o}},{\mathsf{r e d d}},\ldots{}\}$ that have less clear semantic meaning per se in any given context. The contribution of those tokens to the text sequence will inevitably depend on later tokens, making reward/credit assignment harder, especially under the prevailing RLHF paradigm of implementing the reward model as an off-the-shelf decoder-only transformer (e.g., Ouyang et al., 2022; Bai et al., 2022b; Menick et al., 2022). Further, token-level reward implicitly assumes that the basic unit of a text sequence is token, which may not follow linguistics, where a more meaningful decomposition of text may be phase (including word) that can be more semantically complete and generally consists of a short sequence of tokens.  
+
+To retain the optimization benefit of dense reward for RLHF, while mitigating its potential reward assignment issue and linguistic counter-intuition, in this paper, we seek to train and utilize a segmentlevel reward model, which assigns a reward to each semantically meaningful segment of text sequence that constitutes a small amount of (or just one) tokens. With this construction, we define the action space in RLHF as “text segment,” interpolating between the finest “per token” and the coarsest “full sequence” and potentially getting the benefti of both worlds: easier RL-based LM training owing to denser feedback and more accurate training guidance by the semantic completeness of each action.  
+
+Technically, we are motivated by prior works (Malinin & Gales, 2018; Li et al., 2024a) to implement a dynamic text sequence segmentation by thresholding the entropy of LM’s predictive distributions, under the assumption that tokens within a semantically complete text segment can be more certainly predicted by prior tokens, while the start of a new segment is not (Wang et al., 2024b). To allow training the segment-level reward model by the standard sequence-preference labels via Bradley-Terry (BT, Bradley & Terry, 1952) loss, we differentiably aggregate segment rewards in a text sequence into a parametrized sequence evaluation. The learned segment-level reward model is then utilized in PPO-based policy learning, where we observe the unsuitability of classical reward normalizers, i.e., the mean and standard deviation (std) of full sequence rewards. We address this issue by generalizing the classical bandit normalizers of scalar mean and std into a mean and a std function that output the reward normalizers at arbitrary location of the text sequence. In addition, we enhance PPO training by within-segment reward interpolation, which further densifies training signal and improves results.  
+
+We test our method on the performance of both the learned segment-level reward model and the subsequent PPO-trained LM policy. On popular RLHF benchmarks for reward modeling and LM policy learning, our method indicates competitive performance gain against both the classical bandit reward approach and recent token-level reward approach. We conduct a wide array of ablation studies to validate our design choices and provide further insight into our method.  
+
+
+
+\section{2 MAIN METHOD  }
+
+
+
+
+\section{2.1 NOTATIONS AND BACKGROUND  }
+
+
+In this section, we will define generic notations, provide background on the classical bandit RLHF, and then discuss RL formulation of LM generation underlying recent efforts on dense-reward RLHF.  
+
+Generic Notations. Both reward modeling and policy learning require text prompt $x$ and the corresponding response $y$ . Reward model training turns the supervised fine-tuned model $\pi_{\mathrm{SFT}}(\cdot\,|\,\cdot)$ (without the final unembedding layer) into a parametrized scalar-output model $r_{\phi}(\cdot,\cdot)$ with parameter $\phi$ that scores its input. The LM policy $\pi_{\theta}$ , parametrized by $\theta$ , is then optimized against $r_{\phi}$ .  
+
+Bandit Reward Model Training. Reward model training assumes a dataset $\boldsymbol{D}_{\mathrm{pref}}=\{(x,y^{w},y^{l})\}$ of prompt $x$ and the corresponding winning/chosen response $y^{w}$ and losing/rejected response $y^{l}$ , where the label of winning/losing comes from human evaluation on the entire text sequence $y^{w}$ and $y^{l}$ . In the classical bandit RLHF, reward model $r_{\phi}$ is trained by the binary classification BT loss  
+
+$$
+\mathcal{L}_{\mathrm{bandit}}(\phi)=-\mathbb{E}_{(x,y^{w},y^{l})\sim\mathcal{D}_{\mathrm{pref}}}\left[\log\sigma\left(r_{\phi}(x,y^{w})-r_{\phi}(x,y^{l})\right)\right]\,,
+$$  
+
+where $\sigma(u)={1}/{(1+\exp\left(-u\right))}$ denotes the sigmoid function.  
+
+PPO-based Bandit Policy Learning. In policy learning, a set ${\mathcal{D}}_{\mathrm{pol}}=\{x\}$ of text prompts $x$ is given. The LM policy $\pi_{\theta}$ is trained to generate outputs on $\mathcal{D}_{\mathrm{pol}}$ optimizing the bandit reward from $r_{\phi}$ , with a KL penalty towards $\pi_{\mathrm{SFT}}$ to avoid reward over-optimization. Collectively, the objective is  
+
+$$
+\operatorname*{max}_{\theta}\mathbb{E}_{x\sim\mathcal{D}_{\mathrm{pol}},y\sim\pi_{\theta}(\cdot\,|\,x)}\left[r_{\phi}(x,y)-\beta\times\log\left(\pi_{\theta}(y\,|\,x)/\pi_{\mathrm{SFT}}(y\,|\,x)\right)\right]\,,
+$$  
+
+where $\beta$ is the $\mathrm{KL}$ coefficient. In practice, for PPO’s training stability, the value of $r_{\phi}(x,y)$ is de-mean and de-std normalized based on statistics calculated on a calibration dataset, e.g., $\mathcal{D}_{\mathrm{pref}}$ .  
+
+RL Formulation of LM Generation. By its sequential nature, LM generation is formulated as an Markov Decision Process (MDP) $\mathcal{M}=\bar{(}\mathbb{S},\mathbb{A},\bar{P},\mathcal{R},\gamma)$ (Sutton $\&$ Barto, 2018). Concretely, for state space $\mathbb{S}$ , the state at timestep $t,\,s_{t}$ , consists of the prompt $x$ and all generated tokens so far $a_{<t}=:[a_{0},\ldots,a_{t-1}]$ with $a_{<0}=:\mathcal{D}$ , i.e., $s_{t}=:[x,a_{<t}]$ . A is the action space, where the action $a_{t}$ at step $t$ is a short-sequence/segment of tokens from the vocabulary in our segment-level reward/policy setting while $a_{t}$ is a single token in the token-level reward/policy setting. Transition function $P$ deterministically appends the newly sampled tokens after the previous ones, i.e., $s_{t+1}=[s_{t},a_{t}]=$ $[x,a_{\le t}]$ . $\boldsymbol{r}(s,a):\mathbb{S}\times\mathbb{A}\rightarrow\mathbb{R}$ scores the action choice (segment/token selection) $a$ at state/context $s$ and is typically substituted by the learned reward model $r_{\phi}\,.\;\gamma\in[0,1]$ is the discount factor.  
+
+![](images/b2eea963f9ba0899950d6a865670e02bb5287c030554398864918d987467f555.jpg)  
+Figure 1: Overview of training and utilizing our segment-level reward model. Numerics in the plot are artificial. In the figure, each text segment has a different color, and its starting word is underscored.  
+
+In what follows, we will focus on our segment-level reward/policy setting where each action $a_{t}\in\mathbb{A}$ is a semantically complete text segment, consisting of a non-deterministic number of consecutive tokens. The response $y$ for prompt $x$ then contains a variable number of segments/actions, generically denoted as $y=[a_{0},\ldots,a_{T-1}]$ where $T$ is the number of segments in $y$ and varies across responses. When necessary, we denote a single token in $y$ as $y_{i}$ , whose generation context is $[x,y_{<i}]$ .  
+
+Fig. 1 overviews key components in our method.  
+
+
+
+\section{2.2 REWARD MODEL TRAINING  }
+
+
+Overview. In training our segment-level reward model, we follow the data assumption set forth in Section 2.1, where the dataset $\bar{\boldsymbol{D}}_{\mathrm{pref}}=\{(x,y^{w},y^{l})\}$ contains only binary sequence-level preference labels, without any process supervision (Uesato et al., 2022). The reward model $\bar{r_{\phi}}\bar{(}s_{t},a_{t})$ is configured to output a scalar reward for each text segment choice $a_{t}$ at the generation context $s_{t}$ . $r_{\phi}$ is trained such that its induced parameterized text sequence evaluations, aggregated from all segment-level rewards in the respective sequence, align with the preference labels in $\mathcal{D}_{\mathrm{pref}}$ . This is inspired by the imitation learning literature (e.g., Christiano et al., 2017; Brown et al., 2019; 2020) and prior token-level reward modeling in RLHF (Yang et al., 2023). Collectively, the BT loss for training our segment-level reward function $r_{\phi}$ is  
+
+$$
+\begin{array}{r}{\mathcal{L}_{\mathrm{seg}}(\phi)=-\mathbb{E}_{(x,y^{w},y^{t})\sim\mathcal{D}_{\mathrm{pref}}}[\log\sigma\left(e_{\phi}(x,y^{w})-e_{\phi}(x,y^{l})\right)],\forall y\in\{y^{w},y^{l}\},e_{\phi}(x,y)=f(\{r_{\phi}(s_{t},a_{t})\}_{a_{t}\in y})\,,}\end{array}
+$$  
+
+where $e_{\phi}$ denotes the parameterized sequence evaluation induced by $r_{\phi}$ , constructed by aggregating all segment-level rewards $\{r_{\phi}(s_{t},a_{t})\}_{a_{t}\in y}$ in the text sequence $y$ by a selected aggregation function $f(\cdot)$ . Below, we discuss in details the segmentation method for text sequence and the choice of $f(\cdot)$ .  
+
+Entropy-based Segmentation. As discussed in Section 1, we intend to split the given text sequence $y\,\in\,\{\bar{y}^{\bar{w}},y^{l}\}$ into semantically complete segments, so that the reward assignment to each action (segment) can be easier, especially under the common implementation of the reward model as an auto-regressive LM. Recent works on LMs (e.g., Li et al., 2024a; Wang et al., 2024b) have noticed that tokens within a semantically complete segment can be more predictable by the corresponding generation context, since they are continuation of the designated semantics; while the starting token of a new segment is comparably less predictable, as its semantic binding with prior words is relatively weaker. For auto-regressive LMs, the predictability of each token can be conveniently measured by the entropy of the next-token-prediction distribution from which the token is sampled (Malinin & Gales, 2018). To make text sequence segmentation a one-time data pre-processing in reward model training, we choose to use the prediction distribution from the supervised fine-tuned model $\boldsymbol{\pi}_{\mathrm{SFT}}$ , from which the reward model is initialized before training. With a selected entropy cutoff $c_{\mathrm{ent}}$ , token $y_{i}$ starts a new segment if the Shannon entropy $\mathcal{H}(\cdot)$ of $\pi_{\mathrm{SFT}}$ ’s predictive distribution of the $i^{\th}$ -th token surpasses $c_{\mathrm{ent}}$ , i.e., $\mathcal{H}(\pi_{\mathrm{SFT}}(\cdot\,|\,x,y_{<i}))>c_{\mathrm{ent}}$ , in which case $y_{i-1}$ ends the previous segment.  
+
+![](images/0ab1b5dcc17cd4ef07fe00e42a07309cb671c3678e985d49b4c628ee866231fb.jpg)  
+
+Choice of the Aggregation Function $f(\cdot)$ . Aggregation function $f(\cdot)$ provides inductive bias on the relation between the quality of each segment/action and the preferability of overall text sequence. Since $f$ probes into what kind of text sequences will be preferred, its selection should ideally be task and dataset specific, to avoid mis-specification and the subsequent unintended bias in reward model training. While several designs have been proposed in literature (Christiano et al., 2017; Kim et al., 2023; Yang et al., 2023), after looking into the dataset, in our experiments, we select soft-maximum to differentiably highlight the contribution of key segments. With this choice of $f(\cdot)$ , the parametrized sequence evaluation $\boldsymbol{e}_{\phi}(\boldsymbol{x},y)$ in Eq. (3) is constructed as  
+
+$$
+\begin{array}{r}{e_{\phi}(x,y)=f(\{r_{\phi}(s_{t},a_{t})\}_{a_{t}\in y})=\tau\times\log\left[\sum_{a_{t}\in y}\exp(r_{\phi}(s_{t},a_{t})/\tau)\right]\,,}\end{array}
+$$  
+
+where $\tau$ is the temperature controlling the sharpness of the log-sum-exp function. Fig. 2 provides example data-points from the reward training dataset in our experiments (Section 4), which support our choice of soft-maximum as the aggregation $f(\cdot)$ . Other datasets may require a different $f(\cdot)$ .  
+
+An Alternative Interpretation. Comparing our segment-level reward training loss Eq. (3) with the classical bandit loss Eq. (1), one may alternatively interpret $e_{\phi}$ and $f(\{r_{\phi}\})$ in Eq. (3) as a re-parametrization of the learned sequence-level feedback that differentiably aggregates the quality/- contribution of each text segment, and thereby connects a denser evaluation $r_{\phi}$ of each semantically complete text segment with the information in ground-truth sequence-level preference label.  
+
+2.3 PPO-BASED POLICY LEARNING  
+
+Overview. In policy learning, we again follow the classical bandit setting in Section 2.1 to optimize the LM policy $\pi_{\theta}$ on a given prompt set $\mathcal{D}_{\mathrm{pol}}=\{x\}$ . But unlike the bandit objective in Eq. (2), we adopt the full RL setting (Sutton $\&$ Barto, 2018) to maximize $\pi_{\theta}$ ’s expected sum of per-segment/step rewards. This enables directly plugging our segment-level reward model $r_{\phi}$ into most off-the-shelf RLHF PPO implementation. With this, the policy learning objective for $\pi_{\theta}$ is  
+
+$$
+\begin{array}{r}{\operatorname*{max}_{\theta}\mathbb{E}_{x\sim\mathcal{D}_{\mathrm{pol}},y\sim\prod_{t=0}^{T-1}\pi_{\theta}(a_{t}\mid s_{t})}\left[\sum_{t=0}^{T-1}r_{\phi}(s_{t},a_{t})-\beta\times\log\left(\pi_{\theta}(y\mid x)/\pi_{\mathrm{SFT}}(y\mid x)\right)\right]\,,}\end{array}
+$$  
+
+where again, each $a_{t}$ is a segment of tokens (chopped by $\pi_{\mathrm{SFT}}$ ), $s_{t}=[x,a_{0},...\,a_{t-1}]$ is the generation context at step $t$ , and $y=[a_{0},\ldots,a_{T-1}]$ is the response to prompt $x$ sampled from the learning $\pi_{\theta}$ .  
+
+Recall from Section 2.1 that the output values from the reward model $r_{\phi}$ need to be normalized for the stability of PPO training. With our segment-level reward model, it is no longer suitable to normalize each $r_{\phi}(s_{t},a_{t})$ by the mean and std of entire sequences’ rewards as in the bandit setting, since the latter may not be on a proper scale and/or well-defined. Further, the on-policy nature of PPO induces an extra complexity: each step of PPO samples new text sequences, whose length, segment lengths, and segment locations are all stochastic and can differ from the reward calibration dataset, e.g., $\mathcal{D}_{\mathrm{pref}}$ . Below, we discuss our approach to construct the reward value normalizers, followed by interpolating the segment-level reward into per-token signal to helpfully provide an even denser training guidance.  
+
+Location-aware Reward Normalizers via Regression. While the length of the sampled response $y$ and the lengths and locations of segments $\left\{a_{t}\right\}$ in $y$ are all uncontrollable, we know that each $a_{t}$ is somewhere in $y$ . Correspondingly, each input $\left({{s}_{t}},{{a}_{t}}\right)$ to $r_{\phi}$ is linked to a location indicator $p\in(0,1]$ of $y$ , and $p$ can be simplest defined as $t/T$ , where $t$ is the index of the segment $a_{t}$ in $y$ , since PPO routine has fully sampled $y$ . On each datapoint in the calibration set, location indicator $p\in(0,1]$ again, with the linked segment-level reward available. Across all datapoints in the calibration set, we construct a new dataset $\bar{D}_{\mathrm{norm}}=\{(p,\mu_{p},\sigma_{p})\}$ , where $p$ runs over all values of location indicator in the calibration set, $\mu_{p}$ and $\sigma_{p}$ respectively denote sample mean and sample std of all segment-level rewards corresponding to $p$ in the calibration set. With $\mathcal{D}_{\mathrm{norm}}$ , we run a simple linear regression to estimate the relation between location indicator $p$ and mean/std of segment-level rewards at $p,i.e.$ ,  
+
+$$
+\mathrm{Mean}(p)=w_{\mu}\times p+b_{\mu},\,\,\log\mathrm{Std}(p)=w_{\sigma}\times p+b_{\sigma}\to\mathrm{Std}(p)=\exp(w_{\sigma}\times p+b_{\sigma})\,,
+$$  
+
+where regression coefficients $(w_{\mu},b_{\mu}),(w_{\sigma},b_{\sigma})$ can be calculated in closed form.  
+
+Note that the classical bandit normalizers of the mean and std of full sequences’ rewards correspond to evaluate ${\mathrm{Mean}}(p)$ and $\operatorname{Std}(p)$ at $p=1.0$ . In this regard, our mean and std functions in Eq. (6) generalize the classical scalar normalizers into location-aware functions able to output proper reward normalizers at an arbitrary location $p$ of the text sequence. With ${\mathrm{Mean}}(\cdot)$ and $\bar{\mathrm{Std}(\bar{\cdot})}$ and the corresponding $p$ , $r_{\phi}(s_{t},a_{t})$ is normalized by $r_{\phi}(s_{t},a_{t})\gets(r_{\phi}(s_{t},a_{t})-\mathrm{Mean}(p))/\mathrm{Std}(p)$ .  
+
+Within-segment Reward Interpolation. Depending on the specific tokenizer in use, we observed that semantically complete text segments may contain up to around twenty tokens. The corresponding action space A might still be large and the resulting segment-level design might not sufficiently address the sample inefficiency issue in the classical bandit RLHF and could again lead to inferior PPO-based RL training. To further densify the RL training signal, we evenly split the segment-level reward $r_{\phi}(s_{t},a_{t})$ for a segment $a_{t}$ to each token $y_{i}\in a_{t}$ . This induces a token-level credit assignment that $\forall\dot{y_{i}}\in a_{t},\widetilde{r}_{\phi}([x,\dot{y_{<i}}],y_{i})=r_{\phi}(s_{t},a_{t})/|a_{t}|$ , where $[x,y_{<i}]$ is the generation context of token $y_{i}$ . $\widetilde{r}_{\phi}$ can then d i rectly substitute $r_{\phi}$ in Eq. (5), since $\begin{array}{r}{\sum_{t=0}^{T-1}r_{\phi}\big(s_{t},a_{t}\big)=\sum_{t=0}^{T-1}(\sum_{y_{i}\in a_{t}}r_{\phi}(s_{t},a_{t})/|a_{t}|).}\end{array}$ . Note that $\widetilde{r}_{\phi}$ is still intrinsically segment level, since all token selections $y_{i}$ within segment $a_{t}$ receive the same feedback, i.e., the average of segment-level reward $r_{\phi}(s_{t},a_{t})$ . This is in contrast to prior works on token-level reward models (Yang et al., 2023; Zhong et al., 2024), where each token selection is evaluated separately and thus their token-level feedback/rewards vary across each token. Summary. With the learned segment-level reward model $r_{\phi}$ from Section 2.2, in PPO training of the LM policy $\pi_{\theta}$ , we first normalize each $r_{\phi}(s_{t},a_{t})$ in the sampled sequence by the corresponding normalizers ${\mathrm{Mean}}(p)$ and $\operatorname{Std}(p)$ . Normalized segment-level rewards are then interpolated into the per-token feedback signal $\widetilde{r}_{\phi}$ . Finally, we plug $\widetilde{r}_{\phi}$ directly into an off-the-shelf RLHF PPO routine.  
+
+
+
+\section{3 RELATED WORK  }
+
+
+Reward Models in RLHF. In the classical RLHF paradigm, policy LM is optimized against a bandit reward model trained firstly by binary classification loss on the preference dataset, with KL penalty to a specified prior distribution to avoid reward over-optimization (Ziegler et al., 2019; Stiennon et al., 2020; Jaques et al., 2020; Bai et al., 2022a; Ouyang et al., 2022; Castricato et al., 2022). Under the same bandit formulation, recent works have enhanced the bandit reward model by directly modeling the probability of one response being preferred over the other (Jiang et al., 2023; Zhao et al., 2023; Liu et al., 2023; Dong et al., 2024) or factorizing human preference into multiple facets via multi-objective modeling (Touvron et al., 2023; Wang et al., 2023; 2024c;a). Despite its popularity, from the angle of RL-based optimization of human preference captured by the reward model, such a bandit reward may lead to inferior training, due to the sparse reward issue intrinsic to the bandit formulation of LM generation and credit assignment (e.g., Takanobu et al., 2019; Guo et al., 2022).  
+
+Viewing the weakness of bandit RLHF, efforts have been making to densify the reward signal for RLHF LM training. Yang et al. (2023) and Chan et al. (2024) train token-level reward models by the binary preference classification loss. Zhong et al. (2024) and Rafailov et al. (2024) use an LM trained by DPO (Rafailov et al., 2023) firstly for token-level reward assignment, which is later used in PPO training or search-based algorithms. Guo et al. (2023), Cao et al. (2024), and Yoon et al. (2024) assign continuous or fixed fine-grained rewards $(e.g.,\pm1)$ by accessing an external powerful large LM or the oracle environmental reward; while Chen et al. (2024) require the extra task and datasets of erroneous solution rewriting. Apart from potential extra requirements, as discussed in Section 1, the semantic incompleteness of token in text may challenge the efficacy of per-token credit assignment, especially with the prevailing implementation of reward model as a decoder-only transformer that cannot look ahead into later tokens. In contrast, by defining text segment as the basic unit of text sequence that can be semantically more complete than token, our segment-level reward may provide more accurate guidance for RL-based LM training, while not losing the benefit of denser feedback.  
+
+Close to our segment-level reward, process reward models (PRMs, e.g., Uesato et al., 2022; Lightman et al., 2023) in reasoning-alike tasks also assign a single reward value to a short sequence of tokens. The training of PRMs, however, typically requires human annotation on each step of the reasoningalike process. This may not be feasible in general text generation tasks, e.g., text summarization or dialog, where each step/text segment lacks clear human evaluation criterion while the full generations can be more easily compared or evaluated. By contrast, as seen in Section 2, our method is developed for the most basic yet general RLHF setting, where human preference is only manifested in a dataset of binary sequence-level preference. And the dataset is collected from multiple sources and contains multiple forms of prompt-responses.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+4.1 EXPERIMENTAL SETUPS AND IMPLEMENTATION  
+
+Datasets. For reward model training, we use the preference-700K dataset1, which is a diverse collection of open-source preference datasets, such as HH-RLHF (Bai et al., 2022a), Stanford Human Preferences Dataset (SHP) (Ethayarajh et al., 2022), and HelpSteer (Wang et al., 2023). PPO-based LM policy training is performed on the Ultrafeedback dataset (Cui et al., 2023), from which we only use the prompts to sample responses during the PPO training routine.  
+
+Benchmarks and Evaluations. We evaluate the reward model performance on the RewardBench benchmark (Lambert et al., 2024). Each test sample consists of a triplet of a prompt, a chosen response, and a rejected response. The evaluation metric is the classification accuracy of chosen/rejected label. For our segment-level reward model, the parameterized sequence evaluation $e_{\phi}$ in Eq. (4) is used as the classification logit, and similarly for other dense reward models such as the token-level model.  
+
+
+
+\section{4.2 MAIN EXPERIMENTAL COMPARISONS  }
+
+
+Baselines. To demonstrate our unique consideration on RLHF’s action space, in the main experiment, we compare our design of segment-level action space with the coarsest bandit/sequence-level action space, the coarser sentence-level space, and the finest token-level space, in terms of the performance of both the reward model and the subsequent PPO-trained LM policy. Unless specified, both the reward model and the LM policy are trained under the same action definition. The sentence-level models are implemented by splitting the text sequences by the sentence splitters $\left\{\"\;\cdot^{\textsf{n}},\ \ \"\ "\ "\;,\ \ "\ "\right\}.$ $\"\backslash\",\",\",\",\"\cdots,\",\",\",\",\",\",\",$ and/or their foreign language equivalents.  
+
+To further illustrate our segment-level reward model and denser segment-level reward assignment, we additionally compare with two hybrid approaches: $(A)$ using the bandit reward model for segmentlevel reward assignment in the PPO training (“Bandit as Segment”); and $\mathbf{\eta}(B)$ using the segment-level reward model only for bandit reward assignment in the PPO training (“Segment as Bandit”), where the bandit reward is implemented by the parametrized sequence evaluation $e_{\phi}$ in Eq. (4). For all baselines, we follow the standard training receipts and tune them to the extent of ensuring fair comparison.  
+
+Results. Table 1 compares the performance of our segment-level reward model and the resulted PPO-trained LM policy with those from other definitions of RLHF’s action space, as well as the two hybrid approaches.1. Our key findings are summarized as follows.  
+
+(1) Segment-level action space improves reward modeling. From Table 1’s RewardBench results, it is clear that our segment-level reward model outperforms reward models from alternative RLHF action definitions, which we attribute to our design of semantically complete text sequence segmentation and a targeted choice of aggregation function in reward model training. This is corroborated by the strong result of sentence-level reward model, which performs a comparatively coarser text segmentation but otherwise also employs soft-maximum aggregation to highlight key sentences. Since it is coarser than our segment-level approach, it may not accurately pinpoint the contribution of most important phases/words, leading to its under-performance to ours. At one end of granularity spectrum, without finer reward/credit assignment and key phase highlight, the coarsest classical bandit/sequence-level reward model performs much weaker than both segment- and sentence-level models. On the other extreme, the recent finest token-level reward model, which ignores the semantic completeness in the action space definition, suffers from accurate reward assignment/modeling, as discussed in Section 1.  
+
+(2) Our segment-level approach improves RLHF training while not suffering from length hacking. As seen in Table 1, our LM policy performs better than the baselines across all three RLHF policy evaluation benchmarks: AlpacaEval 2.0 (length control win rate LC), Arena-Hard, and MT-Bench. Notably, our model’s average response length on AlpacaEval 2.0 and Arena-Hard is not significantly larger than the baseline models’, in contrast to the LM policy from the sentence-level approach. Together, these results manifest the merit of our segment-level approach in truly improving the quality of the generated responses while not cheating the benchmark evaluations by response-length hacking (Dubois et al., 2024). As discussed in Section 1, we attribute the gain of our segment-level approach over the baselines to simultaneously achieving both denser reward signals for PPO-based RLHF training and more accurate reward assignment by the design of semantically complete action space.  
+
+![](images/f92afdab55257dbac0ba8843688cd58ffa3798a4a5da2e426ce953066e06fd6e.jpg)  
+Figure 3: Examples of dense reward assignment for text sequences encountered in PPO training, comparing our segment-level reward model and the recent token-level design on normal text (Top) and text with verbosity/repetition (Bottom). Darker color indicates higher reward. In the bottom half, repeated sentences are underlined.  
+
+(3) Finer action spaces help RLHF training over the classical bandit formulation. Apart from our denser segment-level approach, in the RLHF policy results in Table 1, we see that the other two finer action space specifications: per-sentence and per-token, both generally improve over the classical design of bandit/sequence-level action space. This provides an extra verification to our motivation of a denser reward signal for RLHF PPO training. Meanwhile, both per-sentence and per-token design can be further refined, respectively by a more break-down action definition and a multi-token action space for more complete semantics of each action, leading to our stronger segment-level design.  
+
+(4) A segment-level reward model is necessary for segment-level reward assignment, vice versa. One may wonder if we can use the classical bandit reward model to assign segment-level reward in the PPO training. As shown by the results of “Bandit as Segment” in Table 1, this approach performs no better than the classical pure bandit, which in turn under-performs our segment-level design. These comparisons justify the necessity to train a segment-level reward model for segment-level reward assignment. Conversely, using our segment-level reward model to provide only bandit feedback in PPO training (“Segment as Bandit”) leads to only marginal gain over pure bandit design. While this further verifies the merit of training and utilizing a segment-level reward model, “Segment as Bandit”, however, does not fully benefit from our proposal of a (consistent) segment-level action space. Its weaker results again highlight the gain of denser reward assignment in PPO-based RLHF training.  
+
+2 provides generation examples from our main LM policy.1 compares the LM policies in Table 1 on tasks on OpenLLM Leaderboard. Both show that our method, while achieving strong RLHF training, does not suffer from the “alignment tax” (Askell et al., 2021).  
+
+
+
+\section{4.3 ABLATION STUDY  }
+
+
+(a): Can our segment-level reward model reasonably distinguish key segments?  
+
+In Fig. 3, we qualitatively compare dense reward assignments from our segment-level reward model and the recent token-level approach on two text sequences appeared in PPO training, representing normal text $(T o p)$ and broken text with verbosity/repetition (Bottom), where repetitions are underlined.  
+
+The color blocks in Fig. 3 first verify that our entropy-based approach chops the text into segments with meaningful semantics, while a token can be only part of a word. Further, Fig. 3 confirms that our segment-level reward model assigns higher rewards to key segments in the responses. Meanwhile, we see that the token-level model does not have consistent reward assignment over even a word – often less understandably (only) highly rewards the first letter of a word (e.g., “Siddhartha”, “cessation”, “tectonic”). The benefti of our desideratum of a semantically complete action space is further testified by the example of repeated sentences in Fig. 3 Bottom, where our model assigns a consistent low reward to the repeated sentences, effectively refraining the LM from verbosity/repetition. By contrast, due to the semantic incompleteness of each action, the token-level model still assigns high rewards to several tokens in the repetitions, even in the second repeat, which is undoubtedly undesirable.  
+
+Table 2: Comparison of different constructions of segment-level reward normalizers. Shown are the results of the resulted PPO-trained LM policies on AlpacaEval 2.0 and Arena-Hard. Best evaluation results are in bold.   
+
+![](images/b8b3ed2cbd1743704c0e4de9e4d6fb7d56690b1c1515d6f29fef7d69cfe16b81.jpg)  
+
+Table 3: Comparison of different within-segment reward interpolation strategies. Shown are the results of the resulted PPO-trained LM policies on AlpacaEval 2.0 and Arena-Hard. Highest numeric of each metric is in bold.   
+
+![](images/a6c6ff084f3273bd54bca93bf90c153e6ec634c66cea6aaa9af8297c0f9b7e0e.jpg)  
+
+Recall that in our PPO training (Section 2.3), we use simple linear regression to fit location-aware mean and std functions that provide reward normalizers at arbitrary locations of the text sequence. To study if this design is over-engineering, we compare our main method with three simpler constructions of segment-level reward normalizers: (A) no reward normalization; $(B)$ using the scalar global mean and std over all segment-level rewards in the reward calibration dataset; and $(C)$ using the scalar mean and std over the last segment-level rewards in each response of the calibration set, mimicking the normalizers in the classical bandit approach. Table 2 compares the resulted LM policies.  
+
+As common RLHF PPO practice, in Table 2, we first see a strong call for reward normalization, without which the training process will be broken. Using global statistics or the statistics of the last segment-level rewards perform similarly, with the latter being slightly better. While policy training under these two normalizer constructions does not break, it is however ineffective, indicating that these two constructions distort the training reward signals to an extent of being (almost) useless. The significantly better performance of our main method over these alternatives verify the necessity of normalizing segment-level rewards by location-aware normalizers able to capture the reward statistics at each arbitrary location (completion portion) of the sampled text sequence, and hence our design of regression-based mean and std functions. Future work may extend these functions with non-linearity.  
+
+(c): What will happen if we use different strategies for within-segment reward interpolation?  
+
+Recall from Section 2.3 that, to further densify the learning signal in RLHF for enhancing training, we interpolate the segment-level rewards by evenly splitting the reward of a segment to each of its constituting token. We now compare this even-split interpolation strategy with two other intuitive alternatives: (A) no interpolation on the segment-level rewards, use 0 for technical padding in PPO (“No Interpolation”); $(B)$ repeat the segment-level reward of a segment to each token in it (“Repeat Segment Reward”). Table 3 shows the performance of the resulted PPO-trained LM policies.  
+
+Aligning with our intuition, Table 3 indicates that without any within-segment reward interpolation, the raw segment-level rewards may not be a strong-enough learning signal to incentivize the LM to learn to generate, leading to too-short sequence generations and the subsequent inferior performance. On the other hand, repeating segment-level reward to each of the constituting token results in a toostrong learning signal, where each token has interpolated feedback of the same scale as the feedback to the entire text segment, which has coarser granularity. This undesirable level-up of feedback signal scale, especially the amplification of positive signals on longer segments, may provide a too-strong incentive for the LM policy to learn to generate, making it produce excessively long text sequences. By contrast, the even-split densification strategy in our main method provides interpolated learning signal of a proper scale, which we attribute to the implicit (segment-)length normalization inherited from division by segment length in an even split. Future work may design a proper non-even split.  
+
+![](images/262c74ef1c2838e97d178f3c61a6bd8e420bbdf7841e830aa406ef9ba7254441.jpg)  
+Figure 4: Performance comparison among different entropy cutoffs $c_{\mathrm{ent}}$ for entropy-based text segmentation, comparing the performance of both the resulted reward model and PPO-trained LM policy, both under the same specified $c_{\mathrm{ent}}$ . For reward models’ performance, we plot the average accuracy over the entire RewardBench.  
+
+Table 4: Performance of segment-level reward model on RewardBench when trained by different choices of aggregation function $f(\cdot)$ and different values of temperature $\tau$ in the soft-maximum aggregation Eq. (4). Our main method uses the soft-maximum aggregation function with temperature $\tau=0.5$ .   
+
+![](images/3f40842cf7b8d0e8f37e9699c3334974a881bdb3ef97599bd457c218281dead0.jpg)  
+
+
+
+\section{5 CONCLUSION AND LIMITATIONS  }
+
+
+In this paper, we propose to train and utilize a segment-level reward model for improved RLHF in LMs, motivated by both a denser reward signal in RL-based LM training and semantic completeness of each action for accurate reward assignment. Our method and insight are validated through extensive experiments and ablation studies. Nevertheless, as an early effort in reconsidering the action space in RLHF, our experiments are currently confined to the 3.8B Phi-3 series model, PPO training on a free-form dialog-alike dataset, and instruction-following benchmark evaluations. Our future work includes scaling up to even larger LMs, testing our method on other types of tasks such as math problem solving and code generation, and applying to other RL algorithms, such as REINFORCE.  
+
+
+

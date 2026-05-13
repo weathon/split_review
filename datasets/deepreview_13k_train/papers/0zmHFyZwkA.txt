@@ -1,0 +1,239 @@
+\title{Hierarchical Graph Learners for Cardinality Estimation}
+
+\begin{abstract}
+Cardinality estimation -- the task of estimating the number of records that a database query will return -- is core to performance optimization in  modern database systems. Traditional optimizers used in commercial systems use heuristics that can lead to large errors. Recently, neural network based models have been proposed that outperform the traditional optimizers. These neural network based estimators perform well if they are trained with large amounts of query samples. In this work, we observe that data warehouse workloads contain highly repetitive queries, and propose a hierarchy of localized on-line models to target these repetitive queries. At the core, these models use an extension of Merkle-Trees to hash query plans which are directed acyclic graphs. The hash values can divisively partition a large set of graphs into many sets, each containing few (whole) graphs. We learn an online model for each partition of the hierarchy. No upfront training is needed; on-line models learn as the queries are executed. When a new query comes, we check the partitions it is hashed to and if no such local model was sufficiently confident along the hierarchy, we fall-back onto a default model at the root.  Our experimental results show that not only our hierarchical on-line models perform better than the traditional optimizers, they also outperform neural models, with robust errors rates at the tail.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Cardinality estimation plays a pivotal role in query optimization of relational databases, as the query optimizer uses these estimates to order the operators in the query graph and minimize data movement. The goal of cardinality estimation is to estimate the number of records returned by each query operator to answer a SQL query, without actually executing the query. Traditional cardinality estimation methods in databases like PostgreSQL rely on single column statistics (e.g., histogram and sketches), sampling, and sometimes “magic” constants. These methods, however, can lead to significant estimation errors when underlying data assumptions, such as independence between table column and uniform data distribution within columns, are violated (Leis et al., 2015).  
+
+Recently, several methods propose neural models for cardinality estimation (Kipf et al., 2019; Zhu et al., 2021; Negi et al., 2023), without making such simplifying assumptions. The core idea frames cardinality estimation as supervised learning and train machine learning models on representative (query, cardinality) observations. While learned methods show promising results, they require a large number of training data. Note that running lots of queries, especially over large collections of data, to collect training labels is very expensive, probably requiring hours-to-days of human and machine time.  
+
+We observe that database workloads in cloud databases for analytical workloads such as Google BigQuery or Amazon Redshift contain highly repetitive queries (van Renen et al., 2024) - $50\%$ of the real world clusters have more than $90\%$ queries repeated in templates (only changing the constant parameters). In this paper, we focus on these workloads and propose a hierarchy of localized on-line models to target these repetitive queries. Our method falls back to a default model for non-repetitive queries. These models use an extension of Merkle-Trees to hash query graphs which are directed acyclic graphs. The hash values can divisively partition a large set of graphs into many sets, each containing few (whole) graphs. We learn a separate model for each partition of the hierarchy. While graph sizes can vary, graphs of identical structure (within a partition) must all have the same total feature dimensionality.  
+
+Briefly, to enable this, our method employs templatizers. Each templatizer removes features $\mathbf{X}$ from the input graph $G$ emitting remaining graph structure (“template”) $T$ . We then compute a hash $\#\boldsymbol{T}$ of the template $T$ . A canonical and permutation-invariant ordering of nodes, preserves their position within the feature vector. For inference on test query, cardinality is estimated using all X’s sharing the same hash of the test graph. We start searching the hierarchy at the leaves; if the current template has enough data points to make a prediction, then we use the model at that level, otherwise to move to the next level, until we fall back to a default model at the root, which can be a traditional optimizer or a learned cardinality estimator.  
+
+Our experimental studies show that our model can already learn to predict cardinality with a high accuracy especially if repetitiveness is high. Our models outperform traditional and neural models, and produce better accuracy even at the tail (P90 and P95). Moreover, by organizing the templates in a hierarchy, we show that we can learn robust models since leaf templates are more specific and thus can be trained with a few examples while templates in the higher levels need more examples but are better in generalizing in case queries are different from what we have seen so far.  
+
+Outline. The rest of the paper is organized as follows: In $\S2$ , we define hierarchical graph templates and discuss the core method. $\S3$ describes how these hierarchical graph learners are used for cardinality estimation. $\S4$ and $\S5$ contain the detailed experimental study and the related work, respectively. Finally, we conclude in $\S6$ .  
+
+
+
+\section{2 HIERARCHICAL GRAPH TEMPLATES  }
+
+
+2.1 DEFINITIONS  
+
+Basic Notation. Let $[n]$ be the set of integers $\{1,2,\ldots,n\}$ . Let $\pi\:\in\:\mathbb{Z}^{n}$ be a permutation of $[n]$ . Let $\{0,1\}^{h}$ be a bit-vector of length $h$ and let $\{0,1\}^{*}$ denote a bit-vector of arbitrary length. We denote a (cryptographic) hashing function $\mathfrak{F}:\{0,1\}^{*}\to\{0,1\}^{h}$ . Functional $\dim(.)$ accepts a function as an argument and returns the domain of the argument.  
+
+Heterogeneous Directed Acyclic Graphs. Let $\mathcal{G}$ denote the space of heterogeneous directed acyclic graphs (DAGs). An instance $G\in\mathcal G$ has three parts: $G=(\nu,\mathcal{E},f)$ , respectively, (nodes, edges, features). Let $\vert\protect\nu\vert$ denote the cardinality of $\mathcal{V}$ . For simplicity, we assume nodes are integers, i.e., $\mathcal{V}\triangleq[\left|\mathcal{V}\right|]$ . We assume edge-set $\mathcal{E}\subset\mathcal{V}\times\mathcal{V}$ encodes a DAG. This assumption is necessary for our DAG hashing function $\left(\S2.4\right)$ . Finally, every node $v\in\mathcal{V}$ has an associated “feature dictionary” $f^{(v)}$ . We demonstrate two example $f^{(v)}$ ’s (pertaining to our application, $\S3$ ):  
+
+$$
+\begin{array}{r l r}&{f^{(v)}=\{\mathrm{n}{:}\ ^{\ast}\mathrm{movies}^{\prime},\mathrm{c}{:}\ 10000,\mathrm{i};\ 5\mathrm{days}\ \},}&{\mathrm{for}\ v=\ \mathrm{movies}\ \mathrm{~table~in~Fig.~2ays}}\\ &{f^{(v)}=\{\mathrm{n}{:}\ ^{\ast}\mathrm{year}^{\ast},\mathrm{t}{:}\ \mathrm{int},\mathrm{u}{:}\ 65,\mathrm{min}{:}\ 1960,\mathrm{max}{:}\ 2024\}\ ,}&{\mathrm{for}\ v=\ \mathrm{year}\ \mathrm{column~in~Fig.~2ays}\ .}\end{array}
+$$  
+
+$f^{(v)}:\mathbb{Z}\to\Psi$ can be interpreted as a function that maps categories $(\in\mathbb{Z})$ onto arbitrary objects $(\in\mathrm{~\Psi~}\Psi)$ . Our algorithm handles any object types, however, objects (1) must be representable as $\{0,1\}^{*}$ (see $\S2.4)$ and (2) if it is used for learning, must be accompanied with featurizer function $\psi:\Psi\rightarrow\mathbb{R}^{d_{\psi}}$ , where $d_{\psi}\in\mathbb{Z}_{+}$ is dimensionality of extracted feature (see $\S3.2)$ . We use subscript notation to access feature values: $f_{\mathrm{u}}^{(v)}$ denotes the value at key $u$ (in Eq. 2, $f_{\mathrm{u}}^{(v)}=65)$ ). Notation $f_{\mathbf{S}}^{(v)}$ reads a set of features. Formally,  
+
+$$
+f_{S}^{(v)}=\{\mathbf{s}\colon f_{\mathrm{s}}^{(v)}\mid s\in\mathbf{S}\}\quad\mathrm{for\,all}\ \ \mathbf{S}\subseteq\mathrm{dom}(f^{(v)}).
+$$  
+
+For instance, $f_{\mathbf{S}}^{(v)}=\{\mathrm{c};\,10000,\mathrm{i};\,5\mathrm{days}\,\}$ when $\mathbf{S}=\{\mathrm{c},\mathrm{i}\}$ and $f^{(v)}$ is defined per Eq. 1.  
+
+Definition 1 (GRAPH ISOMORPHISM) $G_{1}\,=\,(\mathcal{V},\mathcal{E}_{1},f)$ is isomorphic to $G_{2}\;=\;(\mathcal{V},\mathcal{E}_{2},z)$ , denoted as $G_{1}\cong G_{2}$ (equivalently, $G_{2}\cong G_{1}$ ), $i f$ -and-only-if there exists a permutation $\pi$ such that $\mathcal{E}_{1}=\{(\pi_{u},\pi_{v})~|~(u,v\bar{)}\in\mathcal{E}_{2}\}$ and $f^{(v)}=f^{(\pi_{v})}$ for all $u\in\mathcal{V}$ .  
+
+![](images/a9c65bcfa3fe5abb37d4404ac187492150b6ec4b9ad3e3b19793629b1633a079.jpg)  
+(b) Template Hierarchy. Columns correspond to template functions $H_{i}\in\mathcal{H}$ , with Feature-Label $(\mathbf{X}_{i},\mathbf{y}_{i})$ per template. Leaf templatizer $H_{1}$ is the most-granular, grouping identical graphs with constant feature removed. Inference invokes models within each group, along one path from root to leaf (determined by $\mathbf{T}$ ).  
+
+Figure 1: Stream of query graphs get indexed into the template hierarchy. Every graph will store its features on a path from root-to-leaf. Border-colors of stream queries correspond to $(\mathbf{X},\mathbf{y})$ pairs.  
+
+Definition 2 (TOPOLOGICAL ORDER) For any directed acyclic graph $G=(\nu,\mathcal{E},f)$ , there exists one-or-more valid topological orderings. Let $\pi\in\mathbb{Z}^{|\nu|}$ denote one valid ordering. $\pi$ is considered $a$ valid ordering i $f\pi_{v}<\pi_{v^{\prime}}$ for all $(\boldsymbol{v},\boldsymbol{v}^{\bar{\prime}})\in\mathcal{E}$ .  
+
+Definition 2 implies that $v$ should be ordered before $v^{\prime}$ for all edges $\scriptstyle{v\to v^{\prime}}$ . However, it is important to remember that topological order is not unique. DAGs can have many valid topological orderings.  
+
+2.2 TASK: ONLINE SUPERVISED LEARNING ON GRAPHS  
+
+Our task falls under supervised learning on graphs (not within1 graphs). For each graph $G\in{\mathcal{G}}$ , we can obtain its (ground-truth) training label as $y(G)\in\mathcal{Y}$ . We are interested in model ${\widehat{y}}:{\mathcal{G}}\to{\mathcal{Y}}$ to approximate $y(G)$ for every $G\in{\mathcal{G}}$ . Graph Neural Networks (GNNs) (Chami et al., 2022), with graph-pooling, are valid candidates for $\widehat{y}$ .  
+
+Further, we are interested in an online setting. Databases can receive query stream from users, during which, cardinality estimates can be obtained per incoming query (e.g., to optimize joinorder). We wish to incrementally improve our models, as we collect observations from the stream.  
+
+2.3 GRAPH TEMPLATE EXTRACTIONS  
+
+We define “templatizer” function $H:\mathcal{G}\rightarrow\mathcal{G}\times\mathbb{R}^{d}$ . Given graph $G\in{\mathcal{G}}$ , The outputs of $H(G)$ are (1) “template” $T\in\mathcal G$ , i.e., copy of the graph structure of $G$ but many features are removed and (2)  
+
+![](images/0f6e5b168b6ab8c04a3d1ca8f29c28c1f1ae6176f0cad0f2f210690b6b2cfcca.jpg)  
+Figure 2: Query Graph. Features shown in zoom around year node, depicting templatization $(\S2.3)$  
+
+$\mathbf{x}\in\mathbb{R}^{d_{T}}$ the removed features. Note: $T$ determines the dimension of $\mathbf{x}$ .  
+
+$$
+(T,\mathbf{x})\gets H(G),\quad\mathrm{~with~}\quad\mathrm{graph~}^{*}t e m p l a t e^{\cdot\cdot}\;T\quad\mathrm{~and}
+$$  
+
+Importantly, $T$ has the same structure as $G$ . However, $T$ is likely to miss many node features of $G$ .   
+Instead those features are folded onto $\mathbf{x}$ .  
+
+Now, suppose two graphs, e.g., $G_{1}~\in~\mathcal{G}$ and $G_{2}~\in~\mathcal{G}$ , (i) share the same structure but (ii) have different feature values. Given an $H$ , let $(T_{1},\mathbf{x}_{1})\gets H(G_{1})$ and let $(T_{2},{\mathbf{x}_{2}})\gets H(G_{2})$ . We desire $H$ such that $T_{1}\cong T_{2}$ due to (i) and that $\mathbf{x}_{1}\neq\mathbf{x}_{2}$ due to (ii).  
+
+In other words, the output template graph $T$ keeps only features of $G$ that are listed in (hyperparameters) $\{\mathbf{S}_{t}^{(v)}\}_{v\in\mathcal{V}}$ , and the output features $\mathbf{x}$ is a concatenation of node features specified in (hyperparameters) $\{\mathbf{S}_{x}^{(v)}\}_{v\in\mathcal{V}}$ . Figure 2b depicts an example $H$ . Further, $\S2.5$ utilizes family of templatizers $\mathcal{H}=\{H_{1},H_{2},\dotsc\}$ . We discuss the design of $\mathcal{H}$ in $\S3.1$ .  
+
+2.4 ONE-WAY HASHING OF DIRECTED ACYCLIC GRAPHS  
+
+Hashing functions ${\mathfrak{F}}:\{0,1\}^{*}\to\{0,1\}^{h}$ convert a bit-vector of arbitrary length into a hash value: a fixed-size bit-vector. In our work, we desire a function that can hash DAGs, specifically, we desire:  
+
+$$
+\#:{\mathcal{G}}\to\{0,1\}^{h},\quad{\mathrm{and~denote~}}\ \#_{G}\triangleq\#(G),
+$$  
+
+such that, if $\#G_{1}=\#G_{2}$ , then $G_{1}\cong G_{2}$ with high probability.  
+
+We design graph hash function $\#$ by generalizing the celebrated Merkle Trees (Merkle, 1988)— well-established in cryptography and computer security—onto DAGs (represneting query graphs). Merkle Trees can verify if a large file (with $n$ blocks) has been tampered with, and if so, can (efficiently) determine which block has been modified (in ${\mathcal{O}}(\log n)$ time). While Merkle Trees satisfy its intended use-cases, it does not naively operate on arbitrary DAGs where all nodes have features. We propose a generalization onto (i.) DAGs, (ii.) where all node may have features and (iii.) order of children is irrelevant (for most nodes).  
+
+The algorithm is relatively simple: locally hash the features in all nodes. Then, in topological order, update every node’s hash to incorporate the hash of its predecessors. Finally, combine all hashes according to topological order, breaking ties using hash values. Algorithm.  
+
+Algorithm 1 Procedures of Template History Learner   
+1: input hyperparameter: $\mathcal{H}=\{H_{1},H_{2},\dotsc\}$ (defined in Eq. 5)   
+2: initialize: $\bar{\mathcal{F}}\gets\{\}$   
+3: initialize: $\widehat{y}\gets$ MASTERMODEL() per Eq.10   
+4: function  A DDEXAMPLE $(G,\,y(G))$   
+5: for $H_{i}\in{\mathcal{H}}$ do   
+6: $(T,\mathbf{x})\gets H_{i}(G)$   
+7: $\mathbf{X}_{i}^{\left[\#T\right]}\leftarrow\mathbf{X}_{i}^{\left[\#T\right]}\cup\left\{\mathbf{x}\right\}$   
+8: $\mathbf{Y}_{i}^{[\#T]}\leftarrow\mathbf{Y}_{i}^{[\#T]}\cup\{y(G)\}$   
+9: function INFER $(G)$   
+10: $\begin{array}{r}{\mathbf{z}\gets\left\{\mathcal{F}_{i}^{[\#\tau]}(\bar{G},\mathbf{x})\quad\Big|\quad H_{i}\in\mathcal{H}\mathrm{~and~}(T,\mathbf{x})\gets H_{i}(G)\right\}}\end{array}$   
+11: returny(z)  
+
+2.5 ONLINE LEARNING OF TEMPLATE HIERARCHIES  
+
+Outline. Given a stream of graphs $\mathcal{D}\,=\,(G_{1},G_{2},.\,.\,.\,)$ , we design an algorithm that can make prediction on every $G_{j}\in\mathcal{D}$ using all prior $\{G_{k}\in\mathcal{D}\mid k<j\}\triangleq\mathcal{D}_{<j}$ . The main idea is to learn many (simple) models. All graphs whose templates are isomorphic share the same model. Each $H_{i}\,\in\,{\mathcal{H}}$ processes every $G\,\in\,{\mathcal{D}}$ . Templatizer $H_{i}(G)$ extracts graph template $T$ and features $\mathbf{x}$ . For inference, model associated with $\#\tau$ is retrieved2, then invoked to predict $y$ from $\mathbf{x}$ . All $|{\mathcal{H}}|$ predictions can be combined with high-level master model $\widehat{y}:\mathbb{R}^{|\mathcal{H}|}\rightarrow\mathcal{Y}$ . For training, once the ground-truth answer $y(G)$ is retrieved, models update to learn from $(\mathbf{x},y(G))$ .  
+
+Feature-Label Matrices per (templatizer, template)-Pair. Given templatizer $H_{i}\in{\mathcal{H}}$ , an arbitrary template $T$ produced by $H_{i}$ , and timestamp $j\leq|\mathcal{D}|$ , then the set  
+
+$$
+\mathbf{X}_{i,<j}^{[\#T]}=\{\,\mathbf{x}_{k}\;\;\mid\;\;(T_{k},\mathbf{x}_{k})\gets H_{i}(G_{k})\;\;\mathbf{if}\;\;\#_{T_{k}}=\#_{T}\;\}_{G_{k}\in\mathcal{D}_{j}}
+$$  
+
+Can be cast as matrix, since its rows of $\mathbf{x}_{j}\,\in\,\mathbb{R}^{d_{T}}$ are of the same3 dimensionality, whose graph templates are isomorphic. Hence, X[i,#<Tj ] $\mathbf{X}_{i,<j}^{[\#T]}\in\mathbb{R}^{\circ\times d_{T}}$ and label matrix  
+
+$$
+\mathbf{Y}_{i,<j}^{[\#T]}=\{\ y(G_{k})\ \ |\ \ \#_{T}=\#_{H_{i}(G_{k})}\,\}_{G_{k}\in\mathcal{D}_{<j}}\in\mathcal{Y}^{\circ}\quad\mathrm{where}\quad\circ=\sum_{k<j}\mathbf{1}_{[\#_{T}=\#_{H_{i}(G_{k})}]}.
+$$  
+
+Model per (templatizer, template)-Pair. Let $\mathcal{F}_{i}^{[\#\tau]}:\mathbb{R}^{d_{T}}\;\rightarrow\;\mathcal{V}$ denote model specialized for template $T$ of $H_{i}$ . There are many possibilities for $\mathcal{F}_{i}^{[\#_{T}]}$ , which we co-design with corresponding $H_{i}$ (see §3.3). Inference on subsequent $G$ can run $|{\mathcal{H}}|$ (parallel) invocations:  
+
+$$
+\begin{array}{r}{\mathbf{z}_{G}=\left\{\mathcal{F}_{i}^{[\#\tau]}(\mathbf{x})\:\vert\:H_{i}\in\mathcal{H}\mathrm{~and~}(T,\mathbf{x})\gets H_{i}(G)\right\}\in\mathbb{R}^{m}.}\end{array}
+$$  
+
+then invoke $\widehat{y}(\mathbf{z}_{G})$ . For training, some models $\mathcal{F}_{i}^{[\#_{T}]}$ update periodically using $\left(\mathbf{X}_{i,<j}^{[\#T]},\mathbf{Y}_{i,<j}^{[\#T]}\right)$ , while others incrementally absorb each incoming observation $(G_{j},y(G_{j}))-\mathrm{see},$ $\S3.3)$ . Nonetheless, learning can happen in parallel for all Fi[#T ].  
+
+Algorithm 1 defines routines (ADDEXAMPLE, INFER), initializes master model $\widehat{y}$ , and initializes data structure $\mathcal{F}$ to a Hashtable. At every $G_{j}\,\in\,{\mathcal{D}}$ , routine $\mathrm{INFER}(G_{j})$ can return the estimated quantity of interest (e.g., cardinality), by invoking $\widehat{y}$ on the output of $|{\mathcal{H}}|$ invocations of $\mathcal{F}$ . Once the caller retrieves the ground-truth value $y(G_{j})$ (e.g. ,  as the query results are assembled) then routine ADDEXAMPLE can incorporate the example $\left(G_{j},y(G_{j})\right)$ into the (simple) models within $\mathcal{F}$ .  
+
+
+
+\section{3 HIERARCHICAL GRAPH LEARNERS FOR CARDINALITY ESTIMATION  }
+
+
+
+
+\section{3.1 TEMPLATIZATION  }
+
+
+We studied three templatization strategies, $H_{1},H_{2},H_{3}$ , ranging from fine-grained to coarse-grained templates. Table 1 shows the feature sets kept in the template $T$ VS extracted to the dense vector x, for every $H_{i}$ . For example, The fine-grained $H_{1}$ removes just the {constant value $\}$ from the template. Hence query graphs found in the same $H_{1}$ template differ only by the constant values.  
+
+Table 1: Templatization Strategies. Each $H_{i}$ templatizes as $(T_{i},{\bf x}_{i})\;\leftarrow\;H_{i}(G)$ where $T$ and $\mathbf{x}$ include features listed in, respectively, $\mathbf{S}_{t}$ and $\mathbf{S}_{x}$ . The choices $\mathbf{S}_{t}$ induce a divisive hierarchy as every $\mathbf{S}_{t}$ row includes the information of the next row (column name determines column type).  
+
+![](images/eb258826891d735ada12c19451d7f6f27750b6771f9ccc76c4c6f3cee18898f3.jpg)  
+
+
+
+\section{3.2 FEATURIZERS  }
+
+
+The templatizer extracts features of many types into $\mathbf{x}$ , including numeric, string, date, time, boolean, respectively, we use featurizers $\psi$ as, identity, ASCII of first-3 characters (in base 256), as numeric YYYYMMDD, as numeric hhmmss, as $\{0,1\}$ . Finally, we map each into the range [0, 1]. We explore two scaling techniques: normalizing (ie. $\frac{v\!-\!\operatorname*{min}}{\operatorname*{max}-\operatorname*{min}})$ and replacing with percentile. We map predicate operators $(>,<,=,\mathrm{or},\mathrm{and},\ldots)$ to unique integers.  
+
+Further, we add one more feature that our models find useful: combining combine the constant with the predicate operator to produce range vector. For example, $\mathbf{\omega}^{\bullet\bullet}\leq\,2000^{\bullet\bullet}$ is featurized as [0, 0.3], $\mathbf{\omega}^{\bullet\bullet}=2000^{\bullet\bullet}$ becomes [0.3, 0.3], and $\mathbf{\dot{\omega}}\geq2000^{\circ}$ becomes [0.3, 1] (supposing constant 2000 scales to 0.3); all other predicate operators are currently featurized as [0, 1] for simplicity.  
+
+
+
+\section{3.3 LEARNING  }
+
+
+We use a rule-based $\widehat{y}$ . Its output ${\widehat{y}}(G)$ can be concisely described with a flow-chart:  
+
+![](images/41a18c4a9dd83169c617d2f58135178fd674a1c66d290e13079635e224c29a96.jpg)  
+
+where the history size $s(\#_{T_{i}})$ equals the number of observations that hash to $\#{\cal T}_{i}$ , i.e., the height of matrices $\mathbf{X}_{i}^{\left[\#T_{i}\right]}$ and $\mathbf{Y}_{i}^{\left[\#T_{i}\right]}$ . Given graph $G\in{\mathcal{G}}$ , let $(T_{i},\mathbf{x}_{i})\gets H_{i}(G)$ for $i\in\{1,2,3\}$ . Further, let $\tau_{1}\,<\,\tau_{2}\,<\,\tau_{3}$ denote “activation thresholds”4. If the size of $\#{\boldsymbol{T}}_{i}$ meets the threshold $\tau_{i}$ , we invoke the corresponding ${\mathcal{F}}_{i}$ . If not, we move on to the next hierarchy level.  
+
+• $\operatorname{root}(G)$ will be invoked when incoming query $G$ has an unfamiliar template (a.k.a, the cold-start problem). We propose to set $\operatorname{root}(G)$ to a default estimator, eg. Postgres. • We try-out several choices for $\mathcal{F}$ . All showing incremental and/or instant training, e.g.,  
+
+$$
+\begin{array}{r l}{\mathrm{Linear~Regression}{:}}&{{\mathcal{F}_{i}^{[\#T]}(\mathbf{x})}=\left(\mathbf{X}_{i}^{[\#T]}\right)^{\dagger}\mathbf{Y}_{i}^{[\#T]}\mathbf{x}}\\ {\mathrm{Gaussian~Kernel}{:}}&{{\mathcal{F}_{i}^{[\#T]}(\mathbf{x})}=\frac{\sum_{j}\mathbf{Y}_{i,j}^{[\#T]}e^{-d(\mathbf{x},\mathbf{X}_{i,j}^{[\#T]})}}{\sum_{j}e^{-d(\mathbf{x},\mathbf{X}_{i,j}^{[\#T]})}}}\end{array}
+$$  
+
+Gradient-Boosted Decision Trees: implementation of (Chen & Guestrin, 2016) (13)  
+
+4It will always be that $s(\#_{T_{1}})<s(\#_{T_{2}})$ , due to the divisive hierarchy where $(.)^{\dagger}$ denotes Moore-Penrose inverse and $d(.,. For linear regression (Eq. 11), we add5 column of 1 to $\mathbf{x}$ and to $\mathbf{X}_{i}^{\left[\#T\right]}$ . As observations $\left(\mathbf{X}_{i}^{\left[\#T\right]},\mathbf{Y}_{i}^{\left[\#T\right]}\right)$ grow, it is unnecessary to re-compute (from scratch) the pseudo-inverse $(.)^{\dagger}$ . It can be incrementally updated, e.g., with rank-1 changes to the Singular Value Decomposition of X[i#T ], per Brand (2006).  
+
+4 EXPERIMENTAL EVALUATION  
+
+Metrics. We quantify the error of cardinality estimate ${\widehat{y}}(G)$ and true (label) cardinality $y(G)$ with:  
+
+$Q_{\mathrm{er}}=\operatorname*{max}\left(\frac{y}{\hat{y}},\frac{\widehat{y}}{y}\right)\qquad(14)\qquad\qquad A_{\mathrm{er}}=|\widehat{y}-y|\qquad(15)\quad\;R_{\mathrm{err}}=1-\frac{\operatorname*{min}(\widehat{y},y)}{\operatorname*{max}(\widehat{y},y)}$ (16) respectively known  as Q-error, absolute error, and relative error.  
+
+Datasets. We run experiments on several database workloads, downloaded from benchmark (Cardbench, Chronis et al., 2024) (prefixed “binaryjoin-” within figures). Further, we extend their query generator to: 1) enable multi-way join queries (up-to 5 joins) to increase the query complexity; 2) incorporate the high repetiveness feature of data warehouse workloads as in Redshift (van Renen et al., 2024) (prefixed “multijoin-”). For all multijoin datasets, we fixed the sample constant size at 10 and varied the sample size (repetition rate) to evaluate its impact on accuracy in Fig 4.  
+
+Models. We use Cardinality Estimation models – Postgres, MSCN, ours $\{H_{i},\mathcal{F}_{i}\}_{i}$ .  
+
+(1) Postgres: Traditional histogram-based estimator implemented in open-source PostgreSQL (PostgreSQL Group). This estimator can be invoked on any query ( $100\%$ admit rate).   
+(2) MSCN: Neural-based estimator (Kipf et al., 2019). We train two model copies, per database workload: “MSCN” and $\mathrm{^{\cdot}M S C N+^{\circ}}$ , respectively, on 1000 query graphs and on $25\%$ of the graphs (3.3X-10X vs MSCN). Crucially, MSCN cannot admit queries containing “or” predicates6. On our workloads, MSCN admits $61\%$ of the queries.   
+(3) Ours: History-based estimator. We infer using $(\mathcal{F}_{i},H_{i})$ per Eq.11–13, either for singular $i=1$ or multiple $\{(\mathcal{F}_{i},H_{i})\}_{i\in\{1,2,3\}}$ that live on a hierarchy $(\S2.5)$ . Singular $(\mathcal{F}_{i},H_{i})$ can estimate only if there are enough observations of template $\{T_{i}\gets H_{i}(G)\}$ .   
+Overview. We conduct three kinds of experiments: $\S4.1$ evaluates the practical scenario that $\S4.2$  
+
+inference is required for all queries. Here, a method can fall-back onto another. conducts apples-to-apples comparison of our models against prior work; $\S4.3$ Ablates our models;  
+
+4.1 HIERARCHICAL MODELS  
+
+In this set of experiments, methods must always make a prediction. Our method defaults to the Postgres estimator, in cases, where the graph structure is novel (has not appeared earlier in the online setting). Our full hierarchy, depicted in Figure 1b and formalized in Equation 10, is abbreviated $(H_{1},H_{2},H_{3},\mathbb{P})$ , where $_\mathrm{p}$ denoting Postgres estimator. We set thresholds $(\tau_{1},\tau_{2},\tau_{3})$ in Eq.10 to (3, 10, 100) and employ Gradient-Boosted Decision Trees (GBDT) at each hierarchical level.  
+
+How effective are hierarchical learners? Table 2 compares hierarchical models with different hierarchy combinations. Comparing $(H_{1},H_{2},H_{3},\mathbb{P})$ , $(H_{2},H_{3},\mathrm{P})$ , $(H_{3},\mathrm{P})$ , and Postgres, we can see the models keep improving when we add more levels of hierarchy and the full hierarchy of models is always better than Postgres at all metrics. In addition, The full hierarchy leverages each level effectively, as evidenced by the activation ratios $(0.69,\,0.04,\,0.01,\,0.26)$ for $H_{1}$ , $H_{2}$ , $H_{3}$ , and Postgres, respectively. These results demonstrate the effectiveness of our hierarchical models in leveraging historical data to enhance the cardinality estimation capabilities of traditional optimizers.  
+
+The necessity of multiple hierarchy? Table 2 also shows the need of hierarchy. Comparing $(H_{1},\mathrm{P})$ , $(H_{1},H_{2},\mathrm{P})$ , $(H_{1},H_{2},H_{3},\mathbb{P})$ , the latter two consistently outperform the first. This indicates that a simple hierarchy $(H_{1},\mathrm{P})$ is insufficient, highlighting the importance of multi-level hierarchies.  
+
+Table 2: Hierarchical models. Median relative error, median absolute error and Q-Error percentiles.   
+
+![](images/1da45cb03f8ff3a8083f18c0dbdc4de5f521a61e22b222a603a3632fce384e52.jpg)  
+
+4.2 COMPARING INDIVIDUAL MODELS   
+In this section, we compare all methods on the intersection of queries they are able to admit – about $25\%$ of queries. While $\S4.1$ shows practical hierarchies that are able to process any query, this provides a sound apples-to-apples comparison.   
+Table 3 summarizes the performance of four models: Postgres, MSCN, $\mathrm{MSCN+}$ , and only one model-templatizer pair $(\mathcal{F}_{1},H_{1})$ , specifically, GBDT (Eq. 13) with $H_{1}$ . $\mathrm{MSCN+}$ (trained on $\approx5\mathrm{X}$ more data) is much better than MSCN and is frequently better than Postgres. Overall, our method is competitive and produces higher accuracy majority of the time. In particular, $H_{1}$ is substantially better $\phantom{0}{\.10\mathrm{X}\!-\!50\mathrm{X}\!+\!}$ ) than Postgres half-of-the-time. We also observe that our model is more robust at the tail of the error distribution (P90 and P95).   
+4.3 ABLATION STUDIES   
+Model Choice. We compare across choices of models $\mathcal{F}$ (Eq. 11–13) and $H_{i}$ ’s in Fig 3. We find that Gradient-Boosted Decision Trees (GBDT) are consistently strong across different datasets and level of hierarchy, so we choose GBDT for Table 3, and on every level of hierarchy in Table 2. Repetition Rate. We modify the workload generator in Chronis et al. (2024) to enable more constants for each predicate in the query. For example, instead of generating a query with predicates $\mathrm{~a~}\!>5$ AND $\mathbf{b}=2^{\circ}$ , our modified generator will generate “a $>5$ AND $\mathbf{b}=2^{\circ}$ , $\ast\epsilon_{\mathrm{a}}>5$ AND b $=20^{\circ}$ , $\ast\epsilon_{\mathrm{a}}>1$ AND $\mathbf{b}=2^{\circ}$ , $\cdots_{\mathrm{a}}>1$ AND ${\mathfrak{b}}=20^{\circ}$ when the sample size is 2, meaning that each predicate will have 2 constants to choose from (ie. $\mathrm{a}>[1,\,10]$ , $\mathbf{b}=[2,20]$ ). The constant sample sizes in the experiment we choose are [1, 3, 10], therefore it generates the repetition rate of $20\%$ , $81\%$ and $91\%$ in query templates. As shown in Fig 4, all templatization strategies exhibit improved performance with increasing workload repetition, while maintaining low q-error levels.  
+
+Table 3: Model Errors at various percentiles, per dataset. We bold strongest number per (database, q-error percentile).   
+
+![](images/03b30cbab343e051724a5e96e957144e932a3602b2315c9fcbbf95c0ba6bb4cd.jpg)  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Learned Cardinality Estimation. In the recent years, several lines of approach learned cardinally estimation have been proposed (Han et al., 2021; Sun et al., 2021; Kim et al., 2022). The first line is workload-driven learning (Kipf et al., 2019; Negi et al., 2023; Reiner & Grossniklaus, 2024), which requires pre-collected workload queries and their executions against the database to collect true cardinalities as the training data. To reduce cost of acquiring training data, the second direction explores data-driven learning (Yang et al., 2019; 2021; Hilprecht et al., 2020; Wu et al., 2023; Kim et al., 2024), which learns a model only on the data capturing its distributions without running any queries. While these models do not have the overhead of running queries, for large databases it could still take hours to train such models. Kim et al. (2024) develops auto-regressive model that samples queries matching filters, crucially supporting string and disjunctive filters. Another line includes localized-models which learn lightweight models that can to capture certain query patterns and can adapt online. Our own work falls into this category. Our method is most-similar to (Malik et al., 2007), since they also group queries by templates, and also do learning-and-inference on densevectors within each template. However, we differ in two ways: (1) The templates of (Malik et al., 2007) use a flat vector representation for queries, our are graphs and for grouping we use graph hashes – as such, ours are invariant to node orderings (2) We learn hierarchies of models rather than a flat grouping of models. Moreover, other approaches have explored also different directions to represent queries for localized models. For comparison, Dutt et al. (2019) creates conjunction trees made of simple predicates while Woltmann et al. (2019) learn models on groups of related tables. All these representations are less expressive than query graphs to provide a direct way to represent queries in databases. In fact, our modeling approach to represent queries is very similar to methods used to learn query cost prediction (e.g., execution time) (Hilprecht & Binnig, 2022; Wu et al., 2024) which also uses a query graph representation while our approach uses them to represent groups of similar queries for cardinality estimation.  
+
+Graph Hashing. Helbling (2020) compute hash values for directed graphs, also by extending Merkle Trees (Merkle, 1988). There are also other methods that can operate on directed but also undirected graphs, including (Portegys, 2008) and WL (Shervashidze et al., 2011). These methods iteratively update node’s hash using itself and its neighbors. Each update-round incorporates information from further neighbors. The number of iterations could be set to the graph diameter. Our algorithm slightly differs as our graph nodes could be invariant neighbor orders sometimes (e.g., or junction), while being variant at other times (e.g., $>$ operator). In addition, we only work with DAGs and therefore iterating in topological order terminates the algorithm.  
+
+Decoupled Graph Neural Nets. Our method is also linked to methods that “decouple” the graphprocessing step from the learning. Specifically, methods that extract features using the graph and no longer need the graph for learning. These methods include (Wu et al., 2019; Frasca et al., 2020). In that regard, our method also uses the graph for pre-processing. We differ than those methods as they use the structure to propagate information along edges whereas we hash the structure.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we propose a localized on-line models for cardinality estimation. Queries with isomorphic structures will be grouped-together, with different templatization strategies forming a hierarchy. Within each group, a simple model, e.g., linear regression or gradient-boosted decision trees, can be trained to estimate cardinality of a given query. A predictions is always made at the lowest-level node with sufficient observations, and falls back onto either neural or traditional methods at the root. However, this new query already establishes an observation when the pattern is repeated. In the experiments, we show that our models outperform traditional and neural models, and produce robust accuracy even at the tail (P90 and P95). Moreover, $H_{1}$ is substantially better $(10\mathrm{X}{-}50\mathrm{X}{+})$ ) than Postgres half-of-the-time. As future work, we plan to explore different grouping methods, increasing the hierarchy with more templatization strategies, and explore different default models.  
+
+
+

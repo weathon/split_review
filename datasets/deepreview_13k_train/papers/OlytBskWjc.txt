@@ -1,0 +1,487 @@
+\title{Reinforcement learning on structure-conditioned categorical diffusion for protein inverse folding}
+
+\begin{abstract}
+Protein inverse folding—that is, predicting an amino acid sequence that will fold into the desired 3D structure—is an important problem for structure-based protein design. Machine learning based methods for inverse folding typically use recovery of the original sequence as the optimization objective. However, inverse folding is a one-to-many problem where several sequences can fold to the same structure. Moreover, for many practical applications, it is often desirable to have multiple, diverse sequences that fold into the target structure since it allows for more candidate sequences for downstream optimizations. Here, we demonstrate that although recent inverse folding methods show increased sequence recovery, their “foldable diversity”—i.e. their ability to generate multiple non-similar sequences that fold into the structures consistent with the target—does not increase. To address this, we present RL-DIF, a categorical diffusion model for inverse folding that is pre-trained on sequence recovery and tuned via reinforcement learning on structural consistency. We find that RL-DIF achieves comparable sequence recovery and structural consistency to benchmark models but shows greater foldable diversity: experiments show RL-DIF can achieve an foldable diversity of 29\% on CATH 4.2, compared to 23\% from models trained on the same dataset. The PyTorch model weights and sampling code are available on GitHub.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The task of designing sequences of amino acids that fold into a desired protein structure, also known as protein “inverse folding” (IF) \cite{Yue1992,Ingraham2019}, is a critical step for many protein design applications in areas such as therapeutics, biomaterials, and synthetic biology \cite{ferruz2023,cao2022, dickopf2020}.
+Deep learning-based IF models are typically trained to recover the observed sequence $S$ of a protein, when conditioned on the corresponding backbone structure $X$. 
+Models are then evaluated on their ability to recover the original sequence (``sequence recovery"), consistency of the generated sequence’s (usually predicted) structure with the target structure (``structural consistency"), and the diversity of generated sequences (``sequence diversity").  
+Sequence diversity is of particular interest since the inverse folding problem is a one-to-many mapping in which a single (input) structure could be formed by multiple (output) amino acid sequences. 
+For practical applications, it is often desirable to find these alternative sequences that can fold into the desired structure, since it enables greater breadth of options for critical downstream optimization steps such as improving stability, preventing aggregation, and reducing immunogenicity. 
+However, methods of increasing sequence diversity (e.g. raising the sampling temperature of an autoregressive model) may degrade the structural consistency of candidates.  
+Hence, a useful property of a protein inverse folding model is its “foldable diversity”—i.e. the diversity of generated sequences that fold into the target structure.
+
+In this paper, we first characterize the trade-off between sequence diversity and structural consistency across multiple IF methods. 
+We use these observations to motivate foldable diversity as a new metric to measure performance of IF models.
+
+We then report a new protein inverse folding model, RL-DIF (Figure~\ref{fig:overview_fig}).  
+RL-DIF is a categorical diffusion model pre-trained on sequence recovery and fine-tuned with reinforcement learning (RL) to optimize structural consistency.  
+The categorical diffusion component of our method is inspired by GradeIF~\cite{GradeIF} and PiFold~\cite{gao2022}, and is trained on observed protein structures and sequences from the CATH 4.2 dataset. 
+We then fine-tune the diffusion model with denoising diffusion policy optimization (DDPO)~\cite{black2023} to maximize the expected structural consistency of designed sequences. 
+We find that this two-phase training results in higher-quality designs while simultaneously ameliorating the tension between sequence diversity and structural consistency.
+
+We evaluate state of the art IF models and RL-DIF on four benchmark datasets: CATH 4.2, TS50, TS500, and CASP15, and show that our model is able to balance sequence diversity and structural consistency resulting in an increase of foldable diversity ($29\%$ with RL-DIF compared to $23\%$ with the best prior model), whilst keeping structural consistency at competitive levels to SOTA inverse folding methods. %in  \textcolor{red}{X-Y} \% improvement in effective diversity over previous models in all settings.  
+
+
+
+\section{Preliminaries}
+
+\subsection{Discrete denoising diffusion probabilistic models}
+\label{sec:d3pm}
+The task of protein inverse folding is to design an amino acid sequence $S$ compatible with spatial coordinates $X\in\mathbb{R}^{N\times 3}$ representing the positions of the C$\alpha$ atoms in the backbone of a protein with $N$ residues.
+We represent $S$ as a sequence of one-hot vectors with vocabulary $\mathcal{V}$ consisting of the 20 naturally-occurring amino acid species.
+That is, $S\in \{0,1\}^{N\times |\mathcal{V}|}$ subject to $\sum_j S[i,j] = 1, \forall i$.
+
+As introduced in GradeIF \cite{yi2023graph}, we use conditional discrete denoising diffusion probabilistic models (D3PM) \cite{austin2023} to model $p(S|X)$. 
+Formally, we define a forward Markov diffusion process as random variables $S_0, \dots, S_T$ related by:
+\begin{equation}
+    S_{t} \sim q(S_t | S_{t-1}, S_0) \equiv \mathrm{Cat}(S_t; p=S_{t-1} Q_t) 
+    \label{eq:q}
+\end{equation}
+where $Q_1,\dots,Q_T$ is a sequence of $|\mathcal{V}|\times|\mathcal{V}|$ transition matrices, and $S_0 \equiv S$ is the sequence observed in nature.
+Defining $\bar{Q}_t = \prod_{k=1}^t Q_k$, the posterior is:
+\begin{equation}
+    q(S_{t-1}|S_t, S_0) = \mathrm{Cat}\left(S_{t-1}; p= \frac{S_tQ_t^\top \odot S_0 \bar{Q}_{t-1}}{S_0 \bar{Q}_t S_t^\top} \right)    
+    \label{eq:q_posterior}
+\end{equation}
+
+It is standard to choose $Q$s such that $q(S_T|S_0)$ is a stationary distribution $p(S_T)$.
+In this case, learning a reverse Markov process $p_\theta(S_{t-1}|S_{t}; X)$ allows us to generate novel sequences by first sampling $S_T\sim p(S_T)$ and then iteratively denoising samples with $p_\theta$.
+
+\subsection{Denoising diffusion policy optimization}
+\label{sec:ddpo}
+Assume we can assign a scalar reward $R(\hat{S})$ for every sample $\hat{S}$ from a diffusion model $p_\theta$ .
+DDPO~\cite{black2024training} treats the reverse denoising process as a $T$-step Markov decision process and defines a policy gradient on $p_\theta$ to maximize the expected reward $\mathcal{J}(\theta)$:
+\begin{equation}
+    \mathcal{J}(\theta) = \mathbb{E}_{X\sim p(X),  \hat{S} \sim p_\theta(\hat{S} | X)} \left[
+        R(\hat{S})
+    \right]
+    \label{eq:obj}
+\end{equation}
+where $p_\theta(S_0|X) = \mathbb{E}_{S_1,\dots,S_T} p(S_T) \prod_{t=1}^T p_\theta(S_{t-1}|S_t, X)$. The corresponding policy gradient $\nabla_\theta \mathcal{J}(\theta)$ is: 
+\begin{equation}
+    \nabla_\theta \mathcal{J}(\theta) = \mathbb{E}_{X\sim p(X), \hat{S}_0,\dots,\hat{S}_T \sim p_\mathrm{old}} \left[
+        \sum_{t=1}^T \frac{p_\theta(S_{t-1} | S_t, X)}{p_\mathrm{old}(S_{t-1} | S_t, X)}
+        \nabla_\theta \log p_\theta(S_{t-1} | S_t, X) R(S_0, X)
+    \right]
+    \label{eq:pg}
+\end{equation}
+where the importance sampling ratio of the target and sampling policies $\frac{p_\theta(\cdot)}{p_\mathrm{old}(\cdot)}$ allows for multiple optimization epochs per sample.
+
+\subsection{Inverse folding metrics}
+\label{sec:metrics}
+To assess the quality of designed sequences, a number of metrics are used in the protein design literature.
+Here, we focus our discussion on three commonly-used ones.
+In these definitions, we assume we have a protein structure $X$ with $N$ residues, an observed sequence $S$, and designed sequences $\{\hat{S}^1,\cdots,\hat{S}^M\}$.
+\begin{itemize}
+    \item \textbf{Sequence recovery}: The average number of amino acid positions in agreement between the observed and proposed sequences: 
+    \begin{equation}
+        \textsc{Recovery}(\hat{S}^j; S) = \frac{1}{N} \sum_{i=1}^N \mathbbm{1}\left[S[i] = \hat{S}^j[i]\right].
+        \label{eq:seq_rec}
+    \end{equation}
+    \item \textbf{Self-consistency TM score (sc-TM)}: The template modeling (TM) score~\cite{Zhang2004} measures the similarity of two protein structures. 
+    The score is 1 if they are identical and tends to 0 for dissimilar structures. 
+    sc-TM is defined as~\cite{trippe2022}:
+    \begin{equation}
+        \text{sc-TM}(\hat{S}^j; S) = \textsc{TM-Score}(\textsc{Fold}(\hat{S}^j), \textsc{Fold}(S))
+    \end{equation}
+    where $\textsc{Fold}$ is any protein folding algorithm such as AlphaFold2~\cite{Jumper2021} or ESMFold~\cite{Lin2023}.
+    Note that we compare designs to $\textsc{Fold}(S)$ (not $X$) to reduce the effect of biases of the folding algorithm~\cite{gao2023proteininvbench}.
+    \item \textbf{Sequence diversity}: The average fraction of amino acids that differ between pairs of designs:
+    \begin{align}
+        \textsc{Diversity}(\{\hat{S}^1,\dots,\hat{S}^M\}) &= \dfrac{2}{NM(M-1)} \sum_{j=1}^{M} \sum_{k=1}^{j-1} \sum_{i=1}^N \mathbbm{1}\left[\hat{S}^j[i] \neq \hat{S}^k[i]\right] \nonumber \\  &= \dfrac{2}{M(M-1)} \sum_{j=1}^{M} \sum_{k=1}^{j-1} d_\mathrm{H}(\hat{S}^j, \hat{S}^k).
+        \label{eq:sec_div}
+    \end{align}
+    where $d_\mathrm{H}$ is the Hamming distance. 
+    We note that sequence diversity alone is not a sufficient measure of a IF method's quality, as it can be increased arbitrarily at the expense of sample quality (e.g. as measured by structural consistency).
+\end{itemize}
+
+
+\section{Methods}
+
+
+\subsection{Foldable diversity}
+\label{sec:eff_diversity}
+
+
+In realistic protein design scenarios, it is necessary to have a diverse pool of candidates for synthesis and experimental characterization. 
+We are particularly interested in the sequence diversity of IF models when restricted to faithful structures, and so we propose \textbf{foldable diversity (FD)}:
+
+\begin{align}
+    & \textsc{Foldable Diversity}(\{\hat{S}^1,\dots,\hat{S}^M\})  = \nonumber \\  
+     & \dfrac{2}{M(M-1)} \sum_{j=1}^{M} \sum_{k=1}^{j-1} \left(   d_\mathrm{H}(\hat{S}^j, \hat{S}^k) 
+     \times \mathbbm{1}\left[\min\left\{\text{sc-TM}(\hat{S}^j; S), \text{sc-TM}(\hat{S}^k; S)\right\}>\text{TM}_\text{min} \right] \right) 
+    \label{eq:eff_div}
+\end{align}
+
+Foldable diversity only considers the diversity between pairs of sequences that are both structurally consistent with the input protein backbone.
+Unlike sequence diversity, it is not possible to increase FD by sampling high-entropy sequences, without also ensuring they fold correctly.
+We therefore argue that FD is a more grounded metric for evaluating IF methods than sequence recovery (which penalizes high-quality, highly-diverse sequences) and sequence diversity (which does not consider sequence quality).
+
+Unless otherwise stated, we set $\text{TM}_\text{min}=0.7$.
+Among observed protein structures, this threshold typically guarantees two proteins share a topological classification~\cite{xu2010,wu2020}, i.e. are structurally similar.
+In this regime, FD combines sequence diversity and structural consistency into a single quality measure, if we assume that all sequences with sc-TM above $\text{TM}_\text{min}$ are ``equally good".
+
+\subsection{D3PM for inverse folding}
+As in \cite{austin2023,yi2023graph}, we train a neural network $\hat{p}_\theta(S_0 | S_t)$ to recover the posterior by integrating over the vocabulary:
+\begin{equation}
+    p_\theta(S_{t-1} | S_t) \propto \sum_{v \in \mathcal{V}} q(S_t|S_{t-1}, v) \hat{p}_\theta(v | S_t) 
+    \label{eq:p_posterior}
+\end{equation}
+\paragraph{Model Architecture}
+We parameterize the network as a modified PiFold~\cite{gao2022} architecture, adding multilayer perceptrons (MLPs) to process the partially-noised amino acid sequence and diffusion timestep.
+
+Specifically, given a set of backbone coordinates $\mathbf{X} \in \mathbb{R}^{4N \times 3}$, we first construct a kNN graph $(k = 30)$ between residues. 
+We then use the PiFold featurizer to define node and edge features $h_V$ and $h_E$. 
+These features include distances between atoms, dihedral angles, and direction vectors. 
+
+The denoising model is a function of $h_P$, $h_E$, the partially-denoised sequence $s_t$, and timestep $t$. We use the following architecture:
+\begin{align*}
+h'_V, h'_E &= \text{MLP}(h_V), \text{MLP}(h_E) \\
+h_o &= \text{MLP}([s_t, t]) \\
+h_{Vs} &= [h'_V, h_o] \\
+h^{out}_V, h^{out}_E &= (10 \times \text{PiGNN})(h_{Vs}, h'_E) \\
+p(s_{t+1}|s_t) &= \text{MLP}([h^{out}_V, h_{Vs}])
+\end{align*}
+
+where $[a, b]$ represents concatenation and PiGNN is the GNN layer introduced by PiFold. 
+Unless otherwise noted, we set all hidden layer sizes to the recommended values in~\cite{gao2022}.
+
+\paragraph{Training}\label{pre-training}
+We observed improved performance from using the full D3PM hybrid loss, as compared to the cross-entropy loss used by Grade-IF.
+We use uniform transition matrices, since we did not observe a benefit from the Block Structured Matrices~\cite{Henikoff1992} used in Grade-IF. 
+
+The model was trained on structure-sequence pairs from the CATH 4.2 dataset with the train/validation/test split curated by Ingraham et al. \cite{Ingraham2019} based on CATH topological classifications. 
+This dataset and split is used by most prior IF models. 
+It comprises 18025 samples for training, 1637 for validation and 1911 for testing.
+
+We used the Adam optimizer~\cite{kingma2017adam}, a learning rate of $10^{-3}$, an effective batch size of 64 (distributed over 4 Nvidia A10 GPUs), and 150 diffusion time steps. 
+We trained for 200 epochs. 
+\subsection{RL-refinement of inverse folding models}
+As noted above, inverse folding is a one-to-many mapping problem, with potentially a large number of sequences satisfying a conditioned structure.
+Furthermore, publicly-available protein structure data represents a sparse and heterogeneous sampling of the desired distribution $p(S_0=S|X)$.
+This one-to-many mapping and data paucity are key challenges in the generalization of conditional generative models~\cite{yi2023graph,Dauparas2022.06.03.494563,Hsu2022}.
+While collecting more data is possible, this is an expensive and slow process.
+
+On the other hand, given a proposal sequence $\hat{S}$, we may verify its suitability for the conditioned structure $X$ by evaluating the self-consistency TM score.
+We therefore propose a second phase of training, in which the inverse folding diffusion model is optimized for $\mathcal{J}(\theta) = \mathbb{E}_{\hat{S} \sim p_\theta} [\text{sc-TM}(\hat{S}; S)]$.
+In particular, we use the DDPO algorithm summarized in Section~\ref{sec:ddpo}.
+
+\paragraph{Training} During the second phase of training, we use the same training dataset described in Section~\ref{pre-training}. 
+Each training step takes as input a batch of 32 protein backbone structures.
+First, we sample 4 sequences per structure from the diffusion model.
+Raw rewards (sc-TM) are standardized $(\mu = 0, \sigma = 1)$ separately for each structure: each set of 4 sequences are shifted and scaled by their mean and standard deviation respectively. 
+Then, we perform minibatch gradient descent on the DDPO objective over the sample sequences (batch size of 32).
+
+Unless otherwise specified, all RL models are trained for 1000 steps.
+We used the Adam optimizer, a learning rate of $10^{-5}$ and an effective batch size of 32 (again over 4 Nvidia A10 GPUs). 
+As in~\cite{black2024training}, we used clipping to enforce a trust region for the policy update, with a clip value of 0.2. 
+\paragraph{Protein folding}
+During this phase of training, we sampled hundreds of thousands of sequences from the policy. Folding all of these sequences is computationally challenging, so we use ESMFold~\cite{Lin2023} instead of AlphaFold2  to strike a balance between speed and accuracy.
+We leave it to future work to investigate more accurate folding algorithms~\cite{Jumper2021,wu2022omega}.
+
+We used the ESMFold implementation in the Huggingface Transformers library~\cite{HFEsmfold} and wrapped it in an MLflow v2.3.6 framework. 
+This was deployed on a Kubernetes cluster containing 20 Nvidia A10 GPUs, with an application load balancer to distribute traffic evenly.
+This architecture was critical to enable efficient on-policy training, as folding generated sequences is far more computationally-intensive than updating the policy.
+
+
+
+\section{Related Works}
+
+
+\paragraph{Inverse folding models}
+
+A majority of existing IF methods utilize transformers (GraphTrans~\cite{Ingraham2019} and ESM-IF~\cite{Hsu2022}) or graph neural networks in which nodes are amino acids, edges are defined between amino acids close together in the protein structure, and node and edge features are constructed from the protein structure backbone (ProteinMPNN~\cite{proteinMPNN}, PiFold~\cite{gao2022}, Grade-IF~\cite{GradeIF}). 
+The learning objective of these methods can be discriminative~\cite{gao2022} or autoregressive~\cite{proteinMPNN,Hsu2022,Ingraham2019}.
+
+More recently, GradeIF~\cite{GradeIF} introduced a diffusion-based IF method. 
+We note that the GradeIF results are competitive, but use solvent accessible surface area (SASA) features, which are strongly correlated with amino acid identity. 
+ 
+ 
+KWDesign~\cite{gao2024kwdesign} fuses information from pre-trained protein structure and language models (GearNet \cite{lopes2013gearnet}, ESM2\cite{lin2022ESM}, and ESMIF\cite{Hsu2022}) to improve amino acid representations and boost sequence recovery to 61\%. 
+
+\paragraph{RL for biological sequence diffusion}
+
+SEIKO~\cite{uehara2024feedback} proposes a framework for online tuning of a diffusion model given a reward model and compares their method to DDPO and DPOK\cite{fan2024}.
+Among the evaluated problems is the design of green fluorescence protein (GFP) sequences.
+We note that the IF task differs from GFP design in that the former is a conditional generation task, and the primary goal is to generalize to conditions (i.e. structures) not observed during training. 
+
+
+
+\section{Experiments}
+
+\label{experiments}
+
+In this section, we benchmark RL-DIF against SOTA models on different datasets and compare their foldable diversity and structural consistency (sc-TM). 
+
+\subsection{Benchmarking Datasets}
+
+We benchmarked on the following datasets:
+\begin{itemize}
+    \item \textbf{CATH 4.2}: This is identical to the test hold-out of the data described in Section~\ref{pre-training}. We further use the partitioning of the test data by \cite{Ingraham2019} into a "short" subset of all proteins shorter than 100 residues (94 proteins); a "single" subset of all single chain proteins (102 proteins)
+    \item \textbf{TS50 and TS500:} TS50 and TS500 \cite{Li2014-ug} are curated lists of proteins of size 50 and 500 respectively from the PISCES server \cite{PISCES}.
+    \item \textbf{CASP15:} The CASP15 dataset comprises of 45 protein structures used to assess the quality of forward-folding models as these structures are de-novo protein structures. 
+\end{itemize}
+
+2 training set.
+We find that TS50, TS500, and CASP15 have cross-split overlaps (as defined by SPECTRA \cite{SPECTRA}) ranging from 42-84\%, indicating strong overlap with the training set.
+We therefore include these datasets for consistency with previous work, but focus the comparison on CATH 4.2
+
+\subsection{Model sampling strategies}
+
+To sample diverse sequences from IF models, different strategies can be employed, depending on how the model parameterizes $p(S|X)$:
+\begin{itemize}
+    \item \textbf{Single-shot models}: These models parameterize $p(S|X)$ by factorizing the joint distribution into $\prod_{i=1}^N p(S[i]|X)$. This distribution can be reshaped by a temperature parameter. A temperature of 0 always picks the highest-probability AA, and higher temperatures encourage greater diversity.
+    
+    \item \textbf{Autoregressive models}: AR models return a probability distribution over possible amino acids for a given residue, conditioned on already-sampled residues. As in the single-shot case, we can reshape the conditional distributions with temperature.
+
+    If an AR model is trained with randomly-permuted residues (instead of left-to-right), then we may also randomize the order in which we decode residues. This allows diverse sampling even at a temperature of 0.
+
+    \item \textbf{Diffusion models}: Since a diffusion model iteratively maps a random vector to an amino acid sequence, we can introduce diversity by repeatedly sampling from a stationary distribution $p(S_T)$. We do not reshape the model-predicted posterior $p_\theta (S_{t-1}|S_t)$.
+\end{itemize}
+
+For the specific IF models evaluated in our study, we use the following settings:
+\begin{itemize}
+    \item \textbf{ProteinMPNN}: An AR model, so we use temperature sampling with temperatures of $0.1$, $0.2$, and $0.3$. We also sample at a temperature of $0$ with random decoding order. 
+    \item \textbf{PiFold}: A single-shot model, so we use temperature sampling with values $0.1$ and $0.2$.
+    \item \textbf{KWDesign}: Another single-shot model, so we use the same settings as PiFold.
+    \item \textbf{ESMIF}: An AR model. We follow the authors' recommendation and sample with a temperature of 1.
+    \item \textbf{DIF-Only and RL-DIF}: Diffusion models, so we sample from the uniform distribution $p(S_T)$ and iteratively denoise sequences using the model.
+\end{itemize}
+
+\subsection{Benchmarking and performance of IF models trained on CATH4.2 benchmark}
+
+\paragraph{Experimental Setup} 
+We compare RL-DIF to ProteinMPNN~\cite{proteinMPNN}, PiFold~\cite{gao2022}, and KWDesign~\cite{gao2024kwdesign}. 
+We also evaluate our model after the diffusion pre-training phase, before any RL-optimization (DIF-Only).
+For each model and each benchmark dataset, we run the following pipeline:
+\begin{enumerate}
+    \item For each protein structure in the dataset, sample 4 sequences from the model.
+    \item Among the 4 sampled sequences, compute the mean sequence recovery and sc-TM score. 
+    \item Compute the foldable diversity of the 4 sequences, as defined in Equation~\ref{eq:eff_div}, with $\text{TM}_\text{min}=0.7$. 
+\end{enumerate}
+
+Model weights were not available for KWDesign for sampling, however they provided the probability distributions for CATH4.2 and CASP15, and we sampled from these to generate sequences.   
+
+\begin{table}
+\caption{Benchmarking results of ProteinMPNN, PiFold, KWDesign, DIF-Only, and RLDIF on CATH-single, CATH-short, CATH-all, TS50, TS500, and CASP15 reporting foldable diversity, sc-TM, and sequence recovery at various temperatures.  T=X indicates temperature sampling occured at a temperature of X. RD indicates random decoding order. Best results for each dataset are bolded. }
+\label{Benchmarking_Results_SOTA}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Dataset} & \textbf{Model} & \textbf{Foldable Diversity$\uparrow$} & \textbf{sc-TM$\uparrow$} & \textbf{Sequence Recovery} \\
+\midrule
+
+\multirow{10}{*}{CATH-short} & ProteinMPNN (T=0, RD) & 9\% & 0.55 & 31\% \\
+& ProteinMPNN (T=0.1) & 5\% & 0.41 & 32\% \\
+& ProteinMPNN (T=0.2) & 0.2\% & 0.19 & 22\% \\
+& ProteinMPNN (T=0.3) & 0\% & 0.15 & 15\% \\
+& PiFold (T=0.1) & 6\% & 0.44 & 35\% \\
+& PiFold (T=0.2) & 1\% & 0.22 & 33\% \\
+& KWDesign (T=0.1) & \textbf{10\%} & 0.53 & 40\% \\
+& KWDesign (T=0.2) & 4\% & 0.54 & 31\% \\
+\cmidrule(l){2-5}
+& DIF-Only & 8\% & 0.42 & 34\% \\
+& RL-DIF & \textbf{10\%} & 0.51 & 37\% \\
+\toprule
+
+\multirow{10}{*}{CATH-single} & ProteinMPNN (T=0, RD) & \textbf{17\%} & 0.64 & 29\% \\
+& ProteinMPNN (T=0.1) & 11\% & 0.46 & 30\% \\
+& ProteinMPNN (T=0.2) & 0\% & 0.17 & 23\% \\
+& ProteinMPNN (T=0.3) & 0\% & 0.14 & 14\% \\
+& PiFold (T=0.1) & 10\% & 0.47 & 33\% \\
+& PiFold (T=0.2) & 0.1\% & 0.20 & 24\% \\
+& KWDesign (T=0.1) & 14\% & 0.61 & 42\% \\
+& KWDesign (T=0.2) & 8\% & 0.55 & 32\% \\
+\cmidrule(l){2-5}
+& DIF-Only & 13\% & 0.48 & 32\% \\
+& RL-DIF & \textbf{17\%} & 0.57 & 36\% \\
+\toprule
+
+\multirow{10}{*}{CATH-all} & ProteinMPNN (T=0, RD) & 20\% & 0.80 & 41\% \\
+& ProteinMPNN (T=0.1) & 23\% & 0.67 & 39\% \\
+& ProteinMPNN (T=0.2) & 3\% & 0.30 & 28\% \\
+& ProteinMPNN (T=0.3) & 0.1\% & 0.14 & 18\% \\
+& PiFold (T=0.1) & 23\% & 0.72 & 44\% \\
+& PiFold (T=0.2) & 8\% & 0.38 & 33\% \\
+& KWDesign (T=0.1) & 18\% & 0.79 & 54\% \\
+& KWDesign (T=0.2) & 23\% & 0.58 & 41\% \\
+\cmidrule(l){2-5}
+& DIF-Only & \textbf{32\%} & 0.72 & 40\% \\
+& RL-DIF & 29\% & 0.78 & 44\% \\
+\toprule
+
+\multirow{6}{*}{TS50} & ProteinMPNN (T=0, RD) & 21\% & 0.84 & 48\% \\
+& ProteinMPNN (T=0.1) & 12\% & 0.83 & 48\% \\
+& PiFold (T=0.1) & 0.5\% & 0.86 & 57\% \\
+& KWDesign & N/A & N/A & N/A \\
+\cmidrule(l){2-5}
+& DIF-Only & \textbf{38\%} & 0.77 & 45\% \\
+& RL-DIF & 30\% & 0.83 & 50\% \\
+\toprule
+
+\multirow{6}{*}{TS500} & ProteinMPNN (T=0, RD) & 23\% & 0.87 & 52\% \\
+& ProteinMPNN (T=0.1) & 11\% & 0.86 & 52\% \\
+& PiFold (T=0.1) & 0.4\% & 0.87 & 59\% \\
+& KWDesign & N/A & N/A & N/A \\
+\cmidrule(l){2-5}
+& DIF-Only & \textbf{36\%} & 0.83 & 48\% \\
+& RL-DIF & 28\% & 0.84 & 54\% \\
+\toprule 
+
+\multirow{6}{*}{CASP15} & ProteinMPNN (T=0, RD) & 15\% & 0.61 & 39\% \\
+& ProteinMPNN (T=0.1) & 15\% & 0.55 & 39\% \\
+& PiFold (T=0.1) & 16\% & 0.57 & 42\% \\
+& KWDesign (T=0.1) & 13\% & 0.61 & 48\% \\
+\cmidrule(l){2-5}
+& DIF-Only & \textbf{23\%} & 0.55 & 38\% \\
+& RL-DIF & 18\% & 0.60 & 42\% \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+\paragraph{Results} Among the evaluated models, our proposed methods (DIF-Only and RL-DIF) achieve or match the highest foldable diversity on all benchmarks in Table~\ref{Benchmarking_Results_SOTA}. 
+In particular, we highlight the significantly-increased diversity (29\% versus the next-best 23\%) on the CATH-all dataset (which includes multi-protein complexes), with structural consistency only slightly degrading or improving. 
+
+Figure~\ref{fig:tmmin-profile} demonstrates that the improvement in foldable diversity is minimally dependent on the choice of $\text{TM}_\text{min}$.
+Despite our methods not always achieving the highest sc-TM score, they offer the highest diversity across a range relevant sc-TM thresholds.
+
+Although our models do not have high sequence recoveries, we call attention to the argument put forth in Section~\ref{sec:eff_diversity}: sequence recovery prefers sequences very close to the naturally-observed sequence, which is a small slice of the accessible design space.
+We therefore focus our comparison on foldable diversity and structural consistency. 
+
+Across the various benchmarks, we observe a trend between DIF-Only and RL-DIF: RL-tuning consistently improves structural consistency, but frequently at a cost to diversity. 
+This is implies that the DDPO objective is being effectively optimized, but the entropy of the policy is decreasing during the second training phase. 
+We leave it to future work to incorporate stronger exploration strategies, which may reduce this effect. 
+
+To demonstrate the effect of high foldable diversity, we present example protein sequences in Figure~\ref{fig:Examples}. 
+All models inverse fold structurally self-consistent sequences, but with varying degrees of diversity. 
+
+\begin{figure}[h]
+\centering
+    \centering
+            \includegraphics[width=\textwidth]{figures/Medium_Example.pdf}
+    \caption{
+    Samples from RL-DIF, ProteinMPNN, and PiFold, conditioned on the same protein backbone (PDB: 5FLM.E).
+    The diversity of amino acids at each position is colour-coded, ranging from dark-red for ``all identical" to no colour for ``all different".
+    While all models achieve high structural consistency (ESMFold-ed structures shown on the right), RL-DIF generates the most diverse set.}
+    \label{fig:Examples}
+\end{figure}
+\begin{figure}
+\centering
+    \includegraphics[width=0.7\textwidth]{figures/Effective_div_vs_TM_min.png}
+    \caption{
+    To evaluate the sensitivity of our analysis to the value of $\text{TM}_\text{min}$, we scan a range of values. We observe that DIF-Only and RL-DIF consistently perform the best, for thresholds $\geq 0.4$.
+    Foldable diversity is computed across the "all" CATH 4.2 test split using the definition in Section~\ref{sec:eff_diversity}.}
+    \label{fig:tmmin-profile}
+\end{figure}
+
+\subsection{Comparison of RLDIF performance to ESM-IF}
+\paragraph{Experimental Setup} 
+
+ESM-IF~\cite{Hsu2022} is another protein inverse folding model that was trained on CATH 4.3 and 12 million synthetic data samples generated by AlphaFold 2~\cite{Jumper2021}. 
+While a large database of AlphaFold-ed structures is publicly available~\cite{alphafold2024}, the ESM-IF paper did not release the IDs of the proteins that were trained on.
+These IDs are essential in order to replicate their work and ensure no overlap between the training and benchmark datasets.
+
+To attempt to replicate their work, we followed a similar strategy of curating a larger pre-training dataset orthogonal to all benchmarking datasets we consider.
+This was done using Foldseek~\cite{Foldseek} to ensure no structure or sequence overlap, resulting in a dataset of 100,000 structures from the AlphaFold database.
+We then retrained RL-DIF on this larger pretraining dataset, followed by the same 1000 steps of RL optimization.
+We refer to these models as DIF-Only-100K and RL-DIF-100K.
+In order to faciltate future work we release the IDs of the entries used to train RL-DIF-100K so future work can train larger pre-trained protein inverse folding models.
+\paragraph{Results} 
+
+We found that, as compared to RL-DIF, RL-DIF-100K improves foldable diversity across all datasets.
+As demonstrated in Table~\ref{Benchmarking_Results_ESMIF}, DIF-Only-100K and RL-DIF-100K approach (and in the case of TS50, surpass) ESM-IF's performance, despite using 70 times less data and 30 times fewer parameters. 
+
+Given the increased performance from expanding the pre-training dataset from 18K (CATH training set) to 100K, we leave it to future work to explore the effect of further dataset scaling.
+Ideally, we would have liked to extend the comparison to use 12M structures as done by the ESM-IF authors, but found this computationally intractable with our resources (in particular, Foldseek has linear memory complexity).
+In Figure~\ref{fig:data_scale}, we show all considered IF models, comparing their foldable diversity and amount of training data.
+\begin{table}[h]
+\caption{Benchmarking results of ESM-IF, DIF-Only-100k, and RL-DIF-100K models on various datasets reporting foldable diversity, sc-TM, and sequence recovery. * indicates both results are statistically equivalent (p-value $>$ 0.05)}
+\label{Benchmarking_Results_ESMIF}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lc|ccc}
+\toprule
+\textbf{Dataset} & \textbf{Model} & \textbf{Foldable Diversity$\uparrow$} & \textbf{sc-TM$\uparrow$} & \textbf{Sequence Recovery} \\
+\midrule
+
+\multirow{5}{*}{CATH 4.2} & ESM-IF & \textbf{37\%} & 0.77 & 42\% \\
+& DIF-Only & 32\% & 0.72 & 40\% \\ 
+& RL-DIF & 29\% & 0.78 & 45\% \\ 
+& DIF-Only-100K & 33\% & 0.68 & 34\% \\
+& RL-DIF-100K & 34\% & 0.76 & 38\% \\
+\midrule
+
+\multirow{5}{*}{TS50} & ESM-IF & \textbf{43\%} & 0.83 & 47\% \\
+& DIF-Only & 38\% & 0.77 & 45\% \\
+& RL-DIF & 30\% & 0.83 & 50\% \\ 
+& DIF-Only-100K & 39\% & 0.71 & 38\% \\
+& RL-DIF-100K & 39\% & 0.80 & 42\% \\
+\midrule
+
+\multirow{5}{*}{TS500} & ESM-IF & 38\% & 0.86 & 51\% \\
+& DIF-Only & 36\% & 0.83 & 48\% \\
+& RL-DIF & 28\% & 0.84 & 54\% \\
+& DIF-Only-100K & \textbf{40\%} & 0.79 & 41\% \\
+& RL-DIF-100K & 36\% & 0.84 & 45\% \\
+\midrule
+
+\multirow{5}{*}{CASP15} & ESM-IF & \textbf{24\%}* & 0.59 & 38\% \\
+& DIF-Only & 23\% & 0.55 & 38\% \\
+& RL-DIF & 18\% & 0.60 & 42\% \\
+& DIF-Only-100K & 18\% & 0.51 & 34\% \\
+& RL-DIF-100K & 21\%* & 0.59 & 39\% \\
+
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{The effect of reinforcement learning on DIF-Only performance}
+
+To investigate the effect of reinforcement learning on DIF-Only performance we ran our RL for 4000 steps, taking the model at every 1000 steps and benchmarking its performance for all metrics. We found average sc-TM had the largest improvement in the first 1000 steps of RL before stagnating after step 2000 (Table \ref{ESMIF_TS50}). Foldable diversity continued to decrease with modest gains in structural consistency. These results support our decision to run RL for 1000 steps.  
+
+\begin{table}[h]
+\caption{Effect of RL-tuning of DIF-Only-100K, as measured by performance on the TS50 dataset.}
+\label{ESMIF_TS50}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{lcccc}
+\toprule
+RL Steps & Foldable Diversity$\uparrow$ & sc-TM$\uparrow$ & Sequence Recovery  \\
+\midrule
+0 (DIF-Only-100K) & 39\% & 0.71 & 38\% \\
+1000 (RL-DIF-100K) & 39\% & 0.80 & 42\% \\
+2000 & 35\% & 0.81 & 43\%  \\
+3000 & 34\% & 0.82 & 43\%  \\
+4000 & 32\% & 0.81 & 44\%  \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+
+\section{Conclusion}
+
+Although sequence recovery, sequence diversity, and structural consistency are commonly used to evaluate protein IF models, here we demonstrate that those metrics alone do not necessarily capture the ability of the model to generate multiple sequences that fold into the desired structure.    
+For many practical applications, foldable diversity is a useful metric since it gives users multiple “shots-on-goal” for filtering or optimizing designs on criteria beyond structural consistency. 
+We also present new inverse folding models: DIF-Only and RL-DIF. 
+We find that among evaluated methods, these models achieves highest foldable diversity and sc-TM in the CATH4.2, CASP15, TS50, and TS500 datasets. 
+
+Nonetheless, we note some limitations of RL-DIF. First is the exclusive use of ESMFold as the folding model. Alternative models such as AlphaFold2~\cite{Jumper2021}, OpenFold~\cite{ahdritz2024}, or OmegaFold~\cite{wu2022omega} have demonstrated superior folding accuracy and could potentially enhance our results. An ensemble of these models could also be employed to leverage the specific strengths and mitigate the weaknesses of each individual model. 
+Additionally, instead of limiting our sampling to four iterations, we could continuously sample until achieving four samples with a sc-TM greater than 0.7. While this approach would likely improve model accuracy, it also significantly increases computational cost. Consequently, we imposed a limit of four samples to manage computational resources. Finally, we could leverage entropy bonus methods used in RL to further increase sequence diversity and exploration of the policy. 
+
+\subsection*{Code Availability}
+ 
+
+
+
+
+
+

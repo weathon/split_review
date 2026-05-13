@@ -1,0 +1,729 @@
+\title{Meta-Value Learning: a General Framework for Learning with Learning Awareness}
+
+\begin{abstract}
+Gradient-based learning in multi-agent systems is difficult because the gradient derives from a first-order model which does not account for the interaction between agents' learning processes.
+LOLA \citep{foerster2018learning} accounts for this by differentiating through one step of optimization.
+We propose to judge joint policies by their long-term prospects
+as measured by the meta-value,
+a discounted sum over the returns of future optimization iterates.
+We apply a form of $Q$-learning to the meta-game of optimization,
+in a way that avoids the need to explicitly represent the continuous action space of policy updates.
+The resulting method, MeVa, is consistent and far-sighted.
+We analyze the behavior of our method on a toy game
+and compare to prior work on repeated matrix games.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Multi-agent reinforcement learning \citep{busoniu2008comprehensive} has found success in two-player zero-sum games \citep{mnih2015human,silver2017mastering},
+cooperative settings \citep{lauer2000algorithm, matignon2007hysteretic, foerster2018counterfactual, panait2005cooperative},
+and team-based mixed settings
+\citep{lowe2017multiagent}.
+General-sum games, however, have proven to be a formidable challenge.
+
+The classic example is the Prisoner's Dilemma, a matrix game in which two players must decide simultaneously whether to cooperate or defect.
+Both players prefer cooperate-cooperate over defect-defect,
+but unilaterally both players prefer to defect.
+The game becomes qualitatively different when it is infinitely repeated and players can see what their opponents did in previous rounds: this is known as the Iterated Prisoner's Dilemma (IPD).
+This gives players the opportunity to retaliate against defection,
+which allows cooperation with limited risk of exploitation. %, as they can always switch to defecting if the opponent does not play along.
+The most well-known retaliatory strategy is tit-for-tat \citep{axelrod1981evolution}, 
+which cooperates initially and from then on copies its opponent. %simply plays whatever the opponent played on the previous round.
+It was only recently discovered that there exist ZD-extortion policies \citep{press2012iterated}
+which force rational opponents to accept considerable losses.
+Such exortionate policies, however, perform worse against themselves than tit-for-tat does.
+
+The problem of learning to coordinate in general-sum games has received considerable attention over the years \citep{busoniu2008comprehensive,gronauer2022multi}.
+The naive application of gradient descent (see \S\ref{sec:naivelearning})
+fails to find tit-for-tat on the IPD unless initialized sufficiently close to it \citep{foerster2018learning}.
+Instead, it converges to always-defect, to the detriment of both players.
+Several works approach the problem through modifications of the objective, e.g. to share reward \citep{baker2020emergent},
+to explicitly encourage interaction \citep{jaques2019social}
+or encourage fairness \citep{hughes2018inequity}.
+While these approaches may work, they could achieve cooperation for the wrong reasons.
+We instead are interested in achieving cooperation only where \emph{self-interest} warrants it.
+We take inspiration from the recent work Learning with Opponent-Learning Awareness (LOLA \citet{foerster2018learning,foerster2018dice}), the first general learning algorithm to find tit-for-tat on IPD.
+LOLA mitigates the problems of naive learning by extrapolating the optimization process into the future: it simulates a naive update and evaluates the objective at the resulting point.
+By differentiating through the extrapolation, LOLA effectively uses second-order information to account for the learning process.
+This allows for \emph{opponent shaping}:
+intentionally influencing the opponent's learning process to our benefit.
+The term typically refers to dynamical exploitation of the opponent's learning process,
+but similar effects can be achieved through fixed policies with threats (e.g., tit-for-tat, ZD extortion).
+
+Our proposal improves on LOLA in two respects.
+It is self-consistent: it does not assume its opponent to be naive (an inconsistency previously addressed by \citet{willi2022cola}), and it is aware of its own learning as well.
+Moreover, it looks more than one step ahead, through a discounted sum formulation.
+The discounted sum corresponds to the value function
+of a meta-game in which policies are meta-states and
+policy changes are meta-actions.
+
+We are not the first to consider this meta-value.
+Meta-PG \citep{al2018continuous} and Meta-MAPG \citep{kim2021policy}
+use policy gradients to find policies with high meta-value.
+However, they estimate the meta-value by extrapolation using naive learning,
+and hence are inconsistent with the true learning process.
+M-FOS \citep{lu2022model}
+uses policy gradients to find arbitrary parametric meta-policies.
+This solves the inconsistency, as the learned meta-policy can be used for extrapolation.
+However,
+the meta-policy no longer takes the form of gradual policy improvement
+that is characteristic of learning.
+
+
+We make the following contributions:
+\begin{itemize}
+\setlength\itemsep{0.01em}
+    \item We propose to follow the gradient of the meta-value function, which is naturally consistent and readily accounts for longer-term and higher-order interactions. In \S\ref{sec:metavalue} we demonstrate how to approximate this ideal.
+    \item Unlike prior work, our approach is based on value learning and does not require policy gradients anywhere. However, we provide a variant (\S\ref{sec:u}) that mitigates the downsides of bootstrapping,
+    which may require policy gradients on the inner game.
+    \item Our $Q$-function is implemented implicitly through a state-value function $V$ (\S\ref{sec:q}).
+    We approximate the greedy (argmax) action as the gradient of $V$,
+    sidestepping the need to explicitly represent the continuous meta-action space.
+    \item We demonstrate the importance of looking far ahead in \S\ref{sec:logisticgame}, and show qualitatively how the gradient of the meta-value leads to the Pareto-efficient solution regardless of initialization.
+    \item In a tournament on repeated matrix games (\S\ref{sec:matrix}),
+    MeVa exhibits opponent-shaping behavior,
+    including ZD-extortion \citep{press2012iterated} on the IPD,
+    and dynamical exploitation on Iterated Matching Pennies.
+\end{itemize}
+
+
+
+\section{Background}
+
+\label{sec:diffgames}
+
+We study $P$-player differentiable games $f : \R^{P \times N} \mapsto
+\R^P$ that map vectors of policies $x_i$ to vectors of expected returns $y_i$,
+\[ \spmqty{y_1\\\myvdots\\ y_P} = f \spmqty{x_1\\\myvdots\\x_P}, \]
+or $y = f (x)$ for short.
+For simplicity, we assume $x_i \in \R^N$
+for each player $i\in\{1,\ldots,P\}$ are real-valued parameter vectors that represent policies through some fixed parametric class (e.g. a lookup table or a
+neural network).
+We will often describe the game from the perspective of a single player $\me$,
+and separate their objective $f_\me(x) \in \R$ from those of the others $f_\them(x) \in \R^{P-1}$,
+or separate their parameters $x_\me\in\R^N$
+from those of the others $x_\them\in\R^{(P-1)\times N}$,
+as in $f(x_\me,x_\them)$.
+All of our experiments concern two-player games with $P=2$.
+
+\subsection{Naive Learning}
+\label{sec:naivelearning}
+
+Under naive learning, %(or ``simultaneous gradient descent''),
+agents $i$ simultaneously update their policies according to
+\begin{equation}\label{eqn:naive}
+x^\tnext_\me = x^\tcurr_\me + \alpha \nabla_{x_\me} f_\me(x^\tcurr)
+\end{equation}
+where $\alpha$ is a learning rate
+and $\nabla_{x_\me}$ is the gradient with respect to player $\me$'s parameters.
+We may write this in vector form as
+\[x^\tnext = x^\tcurr + \alpha \simgrad_x f(x^\tcurr),\]
+where $\simgrad_x$ denotes differentiation of each $f_\me$ with respect to the corresponding policy $x_\me$.
+
+Naive learning is the straightforward application of standard gradient descent
+which is popular when optimizing a single objective. However, the gradient
+derives from a local first-order model -- it reflects change in the objective
+due to change in each of the individual parameters, all others held equal.
+Simultaneous updates depart from this model,
+and while they are effective in the single-objective case,
+they fail when different elements of $x$ optimize different objectives.
+
+\subsection{Looking Ahead}
+
+A number of approaches in the literature aim to address this issue by
+``looking ahead'', considering not just the current parameter values $x^\tcurr$
+but also an extrapolation based on an imagined update.
+They essentially replace the game $f$ with a surrogate game $\tdf$ that
+evaluates $f$ after an imagined naive update with learning rate $\alpha$:
+\begin{equation} \label{eqn:inconsistent}
+  \tdf(x) = f(x+\alpha\simgrad_x f(x)) .
+\end{equation}
+
+Concretely, \citet{zhang2010multi} consider a surrogate
+that only extrapolates opponents:
+\begin{equation} \label{eqn:opponentonly}
+  \tdf_\me(x) = f_\me(x_\me,x_\them + \alpha \simgradthem f_\them(x)).
+\end{equation}
+Here $\simgradthem f_\them(x)$ stands for the naive gradients of the opponents $\them$.
+In computing the associated updates $\simgrad_x \tdf(x)$, the authors
+considered the imagined update $\simgrad_x f(x)$ constant with respect to $x$.
+LOLA \citep{foerster2018learning,foerster2018dice} introduced
+the idea of \emph{differentiating through} $\simgrad_x f(x)$,
+thus incorporating crucial second-order information that accounts for interactions
+between the learners.
+
+Unfortunately, this surrogate trades one assumption for another:
+while it no longer assumes opponents to stand still,
+it now assumes them to update according to naive learning.
+\citet{foerster2018learning} also proposed Higher-Order LOLA (HOLA),
+where HOLA0 assumes opponents are fixed, HOLA1 assumes
+opponents are naive learners, HOLA2 assumes opponents use LOLA, and so on.
+There is nevertheless always an inconsistency between the agent's assumption
+and the opponent's true learning process.
+Moreover, by imagining only the updates of the opponents,
+these approaches can be said to assume \emph{themselves} to stand still.
+In this sense, LOLA and several of its derivatives are \emph{inconsistent}.
+
+To avoid both sources of inconsistency, we should like
+to use a consistent surrogate, such as
+\begin{equation} \label{eqn:consistent}
+  \tdf^\star(x) = f(x+\alpha\simgrad_x\tdf^\star(x)),
+\end{equation}
+which assumes all players follow the naive gradient on $\tdf^\star$ itself.
+When all players follow the naive gradient on $\tdf^\star$,
+the extrapolation is consistent with the true learning process.
+Unfortunately, \eqref{eqn:consistent} is an implicit equation;
+it is unclear how to obtain the
+associated update $\simgrad_x\tdf^\star(x)$.
+
+COLA \citep{willi2022cola} solves such an implicit equation
+in the case where only the opponents are extrapolated,
+but the approach is generally applicable.
+In essence, they approximate the gradient $\simgrad_x\tdf^\star(x)$
+by a model $\hat{g}(x;\theta)$.
+The model is trained to satisfy
+\begin{equation} \label{eqn:colasimple}
+  \hat{g}(x;\theta) = \simgrad_x f(x+\alpha\hat{g}(x;\theta))
+\end{equation}
+by minimizing the squared error between both sides. When the equation is
+tight, $\hat{g}(x;\theta) = \simgrad_x \tdf^\star(x)$,
+providing access to the gradient of the consistent surrogate
+\eqref{eqn:consistent}.
+
+\subsection{Going Meta}
+
+Several approaches consider optimization as a meta-game.
+In its simplest form, the meta-game is a repeated game that has $f$ as its stage game.
+Thus the meta-state space is that of joint policies $x\in\R^{P\times N}$,
+and each player's meta-action $x'_i\in\R^N$ is the policy they wish to play next.
+Meta-actions $x'_i$ are chosen
+according to meta-policies $\pi_i$,
+resulting in joint meta-action $x'\sim \pi(\;\cdot\mid x)$ according to joint meta-policy $\pi(x'\mid x) = \prod_i \pi_i(x'_i\mid x)$,
+and joint meta-rewards $f(x')$ given by the stage game.
+The expected meta-return from a given meta-state $x^\tcurr$
+is given by the meta-value
+\begin{equation} \label{eqn:v_infinite}
+V_i^\pi(x^\tcurr) = \expect_{x\supp{>t}\sim\pi} \sum_{\tau=t}^\infty \gamma^{\tau-t} f_i(x\supp{\tau})
+= f_i(x^\tcurr) + \gamma \expect_{x^\tnext\sim\pi} V_i^\pi(x^\tnext)
+.
+\end{equation}
+In this context, gradient methods like  naive learning and LOLA
+can be seen as deterministic meta-policies,
+although they become stochastic when policy gradients are involved,
+and non-Markov when path-dependent information like momentum is used.
+
+Meta-PG \citep{al2018continuous} was the first to consider such a meta-game,
+applying policy gradients to find initializations $x_i$ that maximize $V_i^\pi$,
+with $\pi$ assumed to be naive learning on $f$.
+Meta-MAPG \citep{kim2021policy} tailor Meta-PG to multi-agent learning,
+taking the learning process of other agents into account.
+However, Meta-MAPG (like Meta-PG) assumes all agents use naive learning,
+and hence is inconsistent like LOLA.
+
+M-FOS \citep{lu2022model} considers a partially observable meta-game,
+thus allowing for the scenario in which opponent policies
+are not directly observable.
+M-FOS trains parametric meta-policies $\pi_i(\cdots ; \theta_i)$
+to maximize $V_i^\pi$ using policy gradients.
+However, the move to arbitrary meta-policies, away from gradient methods,
+discards the gradual dynamics that are characteristic of learning.
+As such, M-FOS does not learn to \emph{learn} with learning awareness
+so much as learn to \emph{act} with learning awareness.
+Indeed, M-FOS uses arbitrarily fast policy changes to derail naive and LOLA learners.
+
+
+
+\section{Meta-Value Learning}
+
+\label{sec:metavalue}
+
+We now describe our method.
+First, we propose the use of the meta-value function as a surrogate game.
+Next, we demonstrate how to estimate the gradient of the meta-value
+using standard reinforcement learning techniques.
+Finally, we discuss how the proposed meta-policy
+relates to one that is (locally) greedy in the $Q$-values.
+
+\subsection{The Meta-Value Function}
+
+In order to fully account for the downstream effects of our meta-actions,
+we propose to follow the gradient of the meta-value function of \eqref{eqn:v_infinite}:
+\begin{equation} \label{eqn:ideal_update}
+     x^\tnext_\me = x^\tcurr_\me + \alpha\gradme V_\me(x^\tcurr).
+\end{equation}
+Like the popular surrogate
+\eqref{eqn:opponentonly}, it looks ahead in optimization time, but it
+does so in a way that is consistent with the true optimization process $x^\tcurr$ and naturally covers multiple steps.
+
+When all players follow this meta-policy, the transition is deterministic and we can write
+\begin{equation} \label{eqn:v}
+V(x) = f(x) + \gamma V(x') \qq{with} x'=x+\alpha\simgrad_x V(x),
+\end{equation}
+which is consistent like \eqref{eqn:consistent},
+and provides a natural way to look further into the future through the discount rate $\gamma$.
+It is however implicit,
+so we cannot directly access the gradients $\gradme V_\me$
+used in \eqref{eqn:ideal_update}.
+
+\subsection{Learning Meta-Values} \label{sec:v_learning}
+
+We will take a similar approach as \citet{willi2022cola}
+and approximate our implicit surrogate \eqref{eqn:v} with a model.
+Specifically, we propose to learn a model $\Vhat_\me(x_\me;\theta_\me)$
+parameterized by $\theta_\me$
+that approximates the values $\Vhat_\me \approx V_\me$,
+and use its gradients $\gradme \Vhat_\me \approx \gradme V_\me$ instead.
+Thus rather than emitting entire gradients (as COLA does)
+or emitting entire policies (as M-FOS does),
+we model scalars,
+and estimate the gradient of the scalar by the gradient of the estimated scalar.
+The resulting algorithm is related to Value-Gradient Learning \citep{fairbank2012value}, but we do not directly enforce a Bellman equation on the gradients $\gradme \Vhat_\me$.
+
+In essence, the learning process follows a nested loop (see Algorithms \ref{alg:basicsymm} \& \ref{alg:basicasymm}).
+In the inner loop, we collect a (finite) policy optimization trajectory
+according to
+\begin{equation} \label{eqn:onpolicytrajectory}
+x^\tnext_\me = x^\tcurr_\me + \alpha \gradme \Vhat_\me(x^\tcurr;\theta)
+\qq{and}
+x^\tnext_\them \sim \pi_\them(\;\cdot\mid x^\tcurr).
+\end{equation}
+Then in the outer loop, we train $\Vhat$ by minimizing the total TD error
+\begin{equation} \label{eqn:vhattderror}
+\textstyle{\sum_t} (\delta^\tcurr_\me)^2 \qq{where} \delta^\tcurr_\me = \fhat_\me(x^\tcurr)+\gamma\Vhat_\me(x^\tnext;\bar{\theta}_\me)-\Vhat_\me(x^\tcurr;\theta_\me).
+\end{equation}
+Here $\fhat(x^\tcurr)$ is in general an empirical estimate of
+the expected return $f(x^\tcurr)$ based on a batch of Monte-Carlo rollouts,
+although in our experiments we use the exact expected return.
+The target involves $\bar{\theta}$, typically a target network that lags behind $\theta$ \citep{mnih2015human}.
+
+As training progresses,
+\eqref{eqn:onpolicytrajectory}
+approaches the proposed update \eqref{eqn:ideal_update}.
+The algorithm can be viewed as a consistent version of Meta-MAPG \citep{kim2021policy},
+and the value-learning counterpart to policy gradient-based M-FOS \citep{lu2022model} with local meta-policy $\pi_\me$.
+
+\begin{figure}
+\begin{minipage}[t]{0.48\textwidth}%
+\strut\vspace*{-\baselineskip}\newline
+\begin{algorithm}[H]%[tbp]
+    \caption{Basic Meta-Value Learning.}
+    \label{alg:basicsymm}
+    \begin{algorithmic}
+    \Require Learning rates $\eta,\alpha$, rollout length $T$, fixed discount rate $\gamma$.
+    \State Initialize models $\theta_i$ for all players $i$.
+    \While{$\theta$ has not converged}
+    \State Initialize policies $x^{(0)}$.
+    \For{$t=0,\ldots,T$}
+      \State $x^\tnext = x^\tcurr + \alpha\simgrad_x \Vhat(x^\tcurr;\theta)$
+    \EndFor
+    \For{players $i \in \{1,\ldots,P\}$}
+      \State $\theta_i \gets \theta_i - \eta\nabla_{\theta_i} \frac{1}{T} \sum_t (\delta_i^\tcurr)^2$
+    \EndFor
+    \EndWhile
+\end{algorithmic}\end{algorithm}
+\end{minipage}\hfill\begin{minipage}[t]{0.48\textwidth}%
+\strut\vspace*{-\baselineskip}\newline
+\begin{algorithm}[H]%[tbp]
+    \caption{Basic Meta-Value Learning versus unknown meta-policies.}
+    \label{alg:basicasymm}
+    \begin{algorithmic}
+    \Require Learning rates $\eta,\alpha$, rollout length $T$, fixed discount rate $\gamma$.
+    \State Initialize model $\theta_\me$ for player $\me$.
+    \While{$\theta_\me$ has not converged}
+    \State Initialize policies $x^{(0)}$.
+    \For{$t=0,\ldots,T$}
+      \State $x^\tnext_\me = x^\tcurr_\me + \alpha\gradme \Vhat_\me(x^\tcurr;\theta_\me)$
+      \State $x^\tnext_\them \sim \pi_\them(\;\cdot\mid x^\tcurr)$
+    \EndFor
+    \State $\theta_\me \gets \theta_\me - \eta\nabla_{\theta_\me} \frac{1}{T} \sum_t
+    (\delta_\me^\tcurr)^2$
+    \EndWhile
+\end{algorithmic}\end{algorithm}
+\end{minipage}%
+\end{figure}
+
+\subsection{Q-learning interpretation}
+\label{sec:q}
+
+In this section we establish a theoretical link between the gradient $\gradme V_\me$
+and the action that greedily (if locally) maximizes the state-action value $Q_\me$ given by
+\[
+Q_\me(x,x'_\me) = \texpect_{x'_\them} V_\me(x'_\me,x'_\them),
+\qq{or equivalently}
+Q_\me(x,x_\me + \Delta_\me)  = \texpect_{\Delta_\them} V_\me(x+\Delta),
+\]
+where we have defined $\Delta_i = x'_i-x_i$ so as to write the $Q$-function in terms of policy changes.
+Next, we construct a first-order Taylor approximation $\tdQ_\me$ of $Q_\me$ around $x$:
+\begin{align}  \label{eqn:qtilde}
+\tdQ_\me(x,x_\me+\Delta_\me)
+&= V_\me(x) + \texpect_{\Delta_\them} \Delta^\top \grad_x V_\me(x)
+\\&= V_\me(x) + \Delta_\me^\top \gradme V_\me(x) + \texpect_{\Delta_\them} \Delta_\them^\top \gradthem V_\me(x).
+\end{align}
+This approximation is not justified in general
+as there is no reason to expect $\Delta$ to be small,
+particularly the opponent updates $\Delta_\them$ which we do not control.
+It is however justified when all players are \emph{learners},
+i.e. they make local updates with small $\Delta$.
+
+We now proceed to maximize \eqref{eqn:qtilde} to find the argmax of $\tdQ_\me$.
+In doing so, we must include a locality constraint to bound the problem.
+If we use a soft norm penalty, we arrive at exactly our update:
+\[
+\textstyle{\argmax_{\Delta_\me}} \tdQ_\me(x,x_\me+\Delta_\me) -\frac{1}{2\alpha} \norm{\Delta_\me}^2
+=\alpha\gradme V_\me(x).
+\]
+However, we may wish instead to apply a hard norm constraint,
+which would admit a treatment from the perspective of a game
+with a well-defined \emph{local} action space.
+Either way, the argmax update will be proportional to $\gradme V_\me(x)$,
+which lends an interpretation to our use of the gradient in \eqref{eqn:ideal_update}.
+
+In conclusion, our proposed update %\eqref{eqn:ideal_update}
+locally maximizes a local linearization $\tdQ$ of the $Q$-function.
+Our method is thus related to independent Q-learning \citep{watkins1992q,busoniu2008comprehensive},
+which we must point out is not known to converge in general-sum games.
+It nevertheless does appear to converge reliably in practice,
+and we conjecture that applying it on the level of optimization effectively simplifies the interaction between the agents' learning processes.
+
+
+
+\section{Practical Considerations}
+
+\label{sec:practical}
+
+We use a number of established general techniques to improve the dynamics of value function approximation \citep{hessel2018rainbow}.
+The prediction targets in \eqref{eqn:vhattderror} are computed with a target network \citep{mnih2015human} that is an exponential moving average of the parameters $\theta_\me$.
+We use distributional reinforcement learning with quantile regression \citep{dabney2018distributional}.
+Instead of the fully-bootstrapped TD(0) error, we use $\lambda$-returns \citep{sutton2018reinforcement} as the targets, computed individually for each quantile.
+
+The rest of this section describes some additional techniques
+designed
+to mitigate the downsides of bootstrapping
+and to encourage generalization.
+
+lays out the complete learning process with these techniques included.
+
+\subsection{Reformulation as a Correction}
+\label{sec:u}
+
+The use of a model $\Vhat$ introduces a bias,
+particularly early on in training when its gradients
+$\simgrad \Vhat$ are meaningless.
+We provide a variant of the method that provides a correction to the
+original game $f$ rather than replacing it entirely.
+Instead of modeling
+\[V(x)=f(x)+\gamma \texpect_{x'} V(x'),\]
+we may model $U(x) = \expect_{x'} V(x')$.
+We can derive a Bellman equation for $U$:
+\begin{align*}
+  U(x) &= \texpect_{x'} V(x')
+ = \texpect_{x'} f(x') + \gamma \texpect_{x''} V(x'')
+ \\&= \texpect_{x'} f(x') + \gamma U(x').
+\end{align*}
+Now agents follow the gradient field $\gradme f_\me(x) + \gamma \gradme
+\Uhat_\me(x)$, and we minimize
+\[
+\textstyle{\sum_t} (\delta^\tcurr_\me)^2 \qq{where}
+\delta^\tcurr_\me = \fhat_\me(x^\tnext) + \gamma\Uhat_\me(x^\tnext;\bar{\theta}_\me) - \Uhat_\me(x^\tcurr ; \theta_\me) \]
+with respect to the parameters $\theta_\me$ of our model $\Uhat_\me(x;\theta_\me)$.
+This loss is the same as that for $\Vhat$ but with a time shift on the $f$ term.
+
+This variant is more strongly grounded in the game $f$,
+as the use of the original gradient $\gradme f_\me(x)$
+guards against poor initialization and spurious drift in the model.
+A drawback of this approach is that now the naive gradient term
+$\gradme f_\me(x)$
+will in general have to be estimated by REINFORCE \citep{williams1992simple}.
+In all of our experiments we are able to compute $\gradme f_\me$ exactly.
+
+\subsection{Variable Discount Rates}
+\label{sec:variablegamma}
+
+We set up the model (be it $\Uhat$ or $\Vhat$) to condition on
+discount rates $\gamma_i$, so that we can train it for different
+rates and even rates that differ between the players. This is helpful because
+it forces the model to better understand the given policies, in order to
+distinguish policies that would behave the same under some fixed discount rate but differently under another.
+During training, we draw $\gamma_\me \sim \tmop{Beta} \left( \nicefrac{1}{2}, \nicefrac{1}{2} \right)$ from the
+standard arcsine distribution to emphasize extreme values.
+
+Varying $\gamma$ affects the scale of $U,V$ and hence the scale of our approximations to them.
+This in turn changes the effective learning rate when we take gradients.
+To account for this, we could normalize the outputs and gradients of $\Uhat,\Vhat$ by scaling by $1-\gamma$ before use.
+However, we instead choose to
+multiply the meta-reward term \smash{$f(x)$} in the Bellman equations by $1-\gamma$:
+\begin{align*}
+    V_\me(x;\gamma) &= (1-\gamma_\me)f_\me(x) + \gamma_\me \texpect_{x'} V_\me(x';\gamma) \\
+    U_\me(x;\gamma) &= \texpect_{x'} (1-\gamma_\me)f_\me(x') + \gamma_\me V_\me(x';\gamma)
+\end{align*}
+This ensures our models learn the normalized values instead, which fall in the same range as \smash{$f(x)$}.
+\subsection{Exploration}
+\label{sec:exploration}
+
+Our model $\Vhat$ provides a deterministic (meta)policy for changing the inner policies $x$.
+Effective value learning, however, requires exploration as well as exploitation.
+A straightforward way to introduce exploration into the system is to perturb the greedy transition in \eqref{eqn:onpolicytrajectory} with some additive Gaussian noise \citep{heess2015learning}.
+However, this leads to a random walk that fails to systematically explore the joint policy space.
+Instead of perturbing the (meta)actions, we perturb the (meta)policy by applying noise to the parameters $\theta_i$, and hold the perturbed policy fixed over the course of an entire exploration trajectory $\tdx^{(0)},\ldots,\tdx^{(T)}$.
+Specifically, we randomly flip signs on the final hidden units of $\Vhat$; this results in a perturbed value function that incentivizes different high-level characteristics of the inner policies $x$.
+The trajectories so collected are entirely off-policy and serve only to provide a diversity of states.
+In order to train our model on a given state $x$, we collect a short on-policy rollout with the unperturbed parameters $\theta$ and minimize TD error there.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+The method is evaluated on four environments.
+First, we demonstrate the advantage of looking farther ahead on a two-dimensional game that is easy to visualize.
+Next, we evaluate opponent shaping on the IPD, IMP and Chicken games
+by pitting MeVa head-to-head against Naive and LOLA agents,
+and M-MAML (a special exact case of Meta-MAPG due to \citet{lu2022model}).
+
+\subsection{Logistic Game}
+\label{sec:logisticgame}
+
+We analyze the behavior of several algorithms on the Logistic Game \citep{letcher2018stability},
+a two-player game where each player's policy is a single scalar value. Thus
+the entire joint policy space is a two-dimensional plane, which we can easily
+visualize. The game is given by the function\footnote{\citet{letcher2018stability} use the
+divisor 1000 in Eqn \eqref{eqn:logisticgame}, however it does not match their
+plots.% Moreover we have flipped the sign to turn this into a maximization
+}
+\begin{equation}
+  \label{eqn:logisticgame} f (x) = - \spmqty{
+    4 \sigma (x_1) (1 - 2 \sigma (x_2))\\
+    4 \sigma (x_2) (1 - 2 \sigma (x_1))
+  } - \tfrac{x_1^2 x_2^2 + (x_1 - x_2)^2 (x_1 + x_2)^2}{10000}
+  .
+\end{equation}
+Figure~\ref{fig:logisticgame} shows the structure of the game. There are two stable fixed points -- one in the lower left ($A$) and one in the upper
+right ($B$). Both players prefer $B$ to $A$, however to get from $A$ to $B$ requires coordination: the horizontal player prefers left if the vertical player plays low and vice versa.
+
+\begin{figure}
+\includegraphics[width=0.7\linewidth]{logistic_contours.png}
+\centering
+\caption{The Logistic Game. The left panel displays the contours of player 1's objective $f_1(x)$, the right panel similarly for player 2. Player 1's policy $x_1$ is a horizontal position, player 2's policy $x_2$ is a vertical position. Both players prefer solution $B$ over solution $A$, but cannot unilaterally go there. Naive learning converges to whichever solution is closest upon initialization.}
+\label{fig:logisticgame}
+\end{figure}
+
+\begin{figure}
+\centering
+\begin{subfigure}[t]{0.45\textwidth}
+\includegraphics[width=\linewidth]{logistic_trails.png}
+\caption{Optimization trajectories. We took a random set of policy pairs and, for each panel, optimized them according to the algorithm under consideration. Each curve shows an optimization trajectory, typically finishing in or close to either $A$ or $B$.}
+\label{fig:logistic_trails}
+\end{subfigure}%
+\;\;
+\begin{subfigure}[t]{0.45\textwidth}
+\includegraphics[width=\linewidth]{logistic_basins.png}
+\caption{Basins of attraction. For each panel, we took a grid of policy space points and optimized them according to the algorithm under consideration. White cells indicate that the corresponding point ended up in the positive quadrant \smash{$x_1,x_2>0$}, black cells ended up in other quadrants (typically the negative quadrant).}
+\label{fig:logistic_basins}
+\end{subfigure}%
+\caption{Logistic Game behaviors of different algorithms (rows) with different settings (columns).
+For LOLA/HOLA/COLA, the parameter is the learning rate $\alpha$. Increasing it leads to instability.
+For MeVa, the parameter is the meta-discount rate $\gamma$,
+which gradually smooths out the landscape until it leads towards $B$ from anywhere.
+}
+\end{figure}
+
+We look at this game in terms of basins of attraction,
+and how different algorithms affect them (Figure~\ref{fig:logistic_basins}).
+Following naive gradients (LOLA/HOLA2 with $\alpha=0$), players converge to whichever solution is nearest; the basins of attraction meet at a diagonal line through the origin.
+LOLA grows the basin of the preferred solution $B$, but only slightly and increasing the extrapolation step size $\alpha$ does not help much.
+HOLA2 grows the basin of $B$ around the edges, but suffers from instabilities around the origin (a saddlepoint). We found HOLA3 to be significantly worse than HOLA2 and did not pursue that direction further.
+COLA (our implementation) makes significant improvements around the edges and around the origin,
+but overshoots $B$ as $\alpha$ increases.
+Finally, MeVa is able to make the basin of $B$ arbitrarily large. When $\gamma>0.9$, it converges to the preferred solution $B$ from anywhere in the surveyed area.
+We also show some actual optimization trajectories in Figure~\ref{fig:logistic_trails}.
+
+\subsection{Matrix Games}
+\label{sec:matrix}
+
+We evaluate our method on several repeated matrix games
+by going head-to-head with naive learners, LOLA and M-MAML.
+M-MAML is a variant of MetaMAPG due to \citet{lu2022model}
+that uses exact gradients.
+We do not provide direct comparison with M-FOS
+as doing so requires training M-FOS and MeVa jointly;
+it is unclear how to do this fairly.
+Instead, we compare our behaviors versus Naive, LOLA and M-MAML
+with those of M-FOS.
+
+We use the same setup as \citet{lu2022model}:
+policies $x_i \in \mathbb{R}^5$ consist of five binary logits,
+corresponding to the probability of playing action $A$ or $B$
+in each of five possible states (the initial state $\emptyset$ and the previous joint action $AA$, $AB$, $BA$, $BB$).
+We use the exact value function given by \citet{foerster2018learning}
+with discount rate 0.96 (not to be confused with our meta-discount rate $\gamma$).
+
+The games differ only in their payoff matrices (Table~\ref{tab:payoffs}),
+however IMP stands out as being not symmetric but antisymmetric.
+\citet{lu2022model} performed comparisons as though it were symmetric,
+that is, as though (meta)policies trained to (meta)play player 1 could be used to (meta)play player 2.
+Particularly, the numbers they report for M-MAML are meaningless.
+The numbers we report do not have this problem,
+except M-MAML vs M-FOS wich was measured using their code,
+and which we omit from the table for this reason.
+\begin{table}
+\centering
+\small
+\caption{Payoffs for the matrix games considered.}
+\label{tab:payoffs}
+\addtolength{\tabcolsep}{-0.4em}
+\begin{subtable}[t]{0.3\textwidth}
+    \centering
+    \caption{Iterated Prisoner's Dilemma}
+    \begin{tabular}[t]{l|cc}
+\rule{0pt}{1.1em}
+      & $A$ & $B$ \\
+\hline \rule{0pt}{1.1em}%
+$A$   &  $(-1,-1)$ & $(-3,\phantom{+}0)$ \\
+$B$   &  $(\phantom{+}0,-3)$ & $(-2,-2)$ \\
+    \end{tabular}
+\end{subtable}%
+\begin{subtable}[t]{0.3\textwidth}
+    \centering
+    \caption{Iterated Matching Pennies}
+    \begin{tabular}[t]{l|cc}
+\rule{0pt}{1.1em}
+      & $A$ & $B$ \\
+\hline \rule{0pt}{1.1em}%
+$A$   &  $(+1,-1)$ & $(-1,+1)$ \\
+$B$   &  $(-1,+1)$ & $(+1,-1)$ \\
+    \end{tabular}
+\end{subtable}%
+\begin{subtable}[t]{0.3\textwidth}
+    \centering
+    \caption{Chicken Game}
+    \begin{tabular}[t]{l|cc}
+\rule{0pt}{1.1em}
+      & $A$ & $B$ \\
+\hline \rule{0pt}{1.1em}%
+$A$   &  $(\phantom{+}0,\phantom{+}0)$ & $(\phantom{0}-1,\phantom{0}+1)$ \\
+$B$   &  $(+1,-1)$ & $(-100,-100)$ \\
+    \end{tabular}
+\end{subtable}%
+\end{table}
+
+\include{tournament}
+
+\begin{table}
+\centering
+\caption{Head-to-head comparison of meta-policies on repeated matrix games.
+For each pairing, we report the return of the row player, averaged across a batch of trials.
+
+}
+\begin{subtable}[t]{\textwidth}
+    \centering
+    \caption{Iterated Prisoner's Dilemma.
+    MeVa extorts the naive learner and MMAML,
+    and is slightly extorted by LOLA.
+    }
+    \label{tab:ipd_tournament}
+\addtolength{\tabcolsep}{-0.4em}
+    \small\slimtabular{\ipdtabular}
+\end{subtable}
+
+~
+
+\begin{subtable}[t]{0.48\textwidth}
+    \centering
+    \caption{Iterated Matching Pennies.
+    MeVa is able to exploit both the naive learner and LOLA, but not MMAML.
+    This exploitation must be dynamical in nature, as ZD-extortion cannot occur in zero-sum games.
+    }
+    \label{tab:imp_tournament}
+\addtolength{\tabcolsep}{-0.4em}
+    \small\slimtabular{\imptabular}
+\end{subtable}%
+\hfill
+\begin{subtable}[t]{0.48\textwidth}
+    \centering
+    \caption{Chicken Game.
+    MeVa exploits the naive learner and MMAML,
+    while avoiding disasters against itself.
+    LOLA exploits every opponent except MMAML, but does poorly against itself.
+    }
+    \label{tab:chicken_tournament}
+\addtolength{\tabcolsep}{-0.4em}
+    \small\slimtabular{\chickentabular}
+\end{subtable}
+\end{table}
+
+On the {\bfseries Iterated Prisoner's Dilemma} (Table~\ref{tab:ipd_tournament}),
+
+The behavior is similar to that of M-FOS,
+although M-FOS leads the naive agent to accept returns below -2, indicating dynamical exploitation.
+
+On {\bfseries Iterated Matching Pennies} (Table~\ref{tab:imp_tournament}),
+MeVa exploits naive and LOLA learners, moreso than M-FOS.
+ZD-extortion is impossible in zero-sum games,
+so MeVa exhibits dynamical exploitation.
+
+On the {\bfseries Chicken Game} (Table~\ref{tab:chicken_tournament}),
+LOLA exploits every opponent except M-MAML, but does poorly against itself (also observed by \citet{lu2022model}).
+M-MAML similarly exploits its opponents by taking on an aggresive initial policy.
+MeVa exploits the naive learner and M-MAML, while avoiding disasters against itself.
+
+Overall, we find that MeVa is competitive with M-FOS on these games.
+Despite the restriction to local meta-actions,
+MeVa finds ZD-extortion and even dynamical exploitation on games that permit it.
+
+
+\section{Limitations}
+
+\label{sec:limitations}
+
+The meta-value function is a scalar function over (joint) policies. In practice,
+policies will often take the form of neural networks, and so will our
+meta-value function approximation. Conditioning neural nets on
+other neural nets is a major challenge \citep{harb2020policy}.
+In addition, the large parameter vectors associated with neural nets
+quickly prohibit handling batched optimization trajectories.
+
+During training and opponent shaping,
+we assume opponent parameters to be visible to our agent.
+This is not necessarily unrealistic --
+we learn and use the meta-value only as a means to the end of
+finding good policies $x$ for the game $f$
+that can then be deployed in the wild without further training.
+Nevertheless, the algorithm could be extended to work with opponent models,
+or more directly, the model could observe policy behaviors instead of parameters.
+
+The meta-discount rate $\gamma$, like LOLA's step size $\alpha$, is hard to interpret. Its meaning changes significantly with the learning rate $\alpha$ and the parameterization of both the model \smash{$\Vhat$} and the policies $x$. Future work could explore the use of proximal updates, like POLA \citep{zhao2022proximal} did for LOLA.
+Finally, it is well known that LOLA fails to preserve the Nash equilibria of the
+original game $f$. The method presented here shares this property.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We have introduced Meta-Value Learning (MeVa),
+a naturally consistent and far-sighted approach
+to learning with learning awareness.
+MeVa derives from a meta-game similar to that
+considered in prior work \citep{al2018continuous,kim2021policy,lu2022model},
+and can be seen as the $Q$-learning complement
+to the policy gradient of M-FOS \citep{lu2022model},
+although we essentially choose different meta-action spaces.
+MeVa avoids explicitly modeling the continuous action space
+by parameterizing the action-value function implicitly through a state-value function.
+
+MeVa's opponent-shaping capabilities
+are similar to those of M-FOS \citep{lu2022model}.
+Like M-FOS, we find ZD-extortion on the general-sum IPD,
+and dynamical exploitation on the zero-sum IMP.
+
+The main weakness of the method as it stands is scalability, particularly to policies that take the form of neural nets.
+We aim to address this in future work using policy fingerprinting \citep{harb2020policy}.
+
+Finally, we note that although we develop our method in the context of multi-agent learning, it is a general meta-learning approach that readily applies to optimization problems with a single objective.
+
+
+

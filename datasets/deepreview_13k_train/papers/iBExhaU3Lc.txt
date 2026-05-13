@@ -1,0 +1,603 @@
+\title{Adam-mini: Use Fewer Learning Rates To Gain More}
+
+\begin{abstract}
+\vspace{-0.2cm}
+We propose Adam-mini, an optimizer that achieves on par or better performance than AdamW with $50\%$ less memory footprint. Adam-mini reduces memory by cutting down the learning rate resources in Adam (i.e., $1/\sqrt{v}$). By investigating the Hessian structure of neural nets, we find Adam’s $v$ might not function at its full potential as effectively as we expected. We find that $\geq 99.9\%$ of these learning rates in $v$ could be \emph{harmlessly} removed if we (1) carefully partition the parameters into blocks following our new principle on Hessian structure; (2) assign a single but good learning rate to each parameter block. We then provide one simple way to find good learning rates and propose Adam-mini. Empirically, we verify that Adam-mini performs on par or better than AdamW on various language models sized from 39M to 13B for pre-training, supervised fine-tuning, and RLHF. The reduced memory footprint of Adam-mini also alleviates communication overheads among GPUs, thereby increasing throughput. For instance, Adam-mini achieves $49.6\%$ higher throughput than AdamW when pre-training Llama 2-7B on $2\times$ A800-80GB GPUs, which saves $33\%$ wall-clock time for pre-training.}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+ 
+
+
+
+
+
+
+
+
+\label{sec_intro}
+
+Adam \citep{kingma2014adam}  has become the de-facto optimizer for training large language models (LLMs) (e.g., \citep{vaswani2017attention,achiam2023gpt,touvron2023llama, team2023gemini}). Despite its superior performance, Adam is expensive to use. 
+Specifically, Adam requires the memory for its optimizer states: the first-order momentum $m$, and the second-order momentum $v$.}. 
+This memory consumption has become a major burden in LLM training. For instance, to train a 7B model, Adam alone requires about 56 GB for $m$ and $v$, and with the gradients included, a total of 84 GB is needed. This is expensive even for cutting-edge graphics cards (e.g., A100-80GB). To support training,
+CPU-offload and optimizer state sharding \citep{rajbhandari2020zero} must be used in practice, which unfortunately increases the latency and slows down the training \citep{rajbhandari2021zero}. 
+
+It is intriguing to design effective optimizers that require less memory.
+{\bf First}, it lowers the threshold of training LLMs and encourages participation from more diverse researchers, especially those with limited  GPU resources.
+{\bf Second}, it requires fewer GPUs
+to train a model with a desired size, leading to substantial savings in both cost and energy.
+{\bf Third}, 
+it can ease the burden of CPU offloading and model sharding, which in turn, can enhance the throughput and accelerate the training process. 
+
+
+
+
+
+
+ However, it is challenging to modify Adam without sacrificing its performance. One primary reason is that we still lack understanding of the role of Adam's $m$ and $v$ \citep{zhang2020adaptive,kunstner2023noise}. It remains uncertain which components in Adam are indispensable for superior performance, and which components could be re-designed or improved. One notable attempt is Adafactor \citep{shazeer2018adafactor}, which cuts down memory by low-rank factorization on $v$. However, we find that Adafactor is not easy to tune and often performs worse than Adam (see evidence in \citep{luo2023came} and Section \ref{sec_adafactor}). One possible reason is that the current $v$ in Adam is crucial  and cannot be simplified.
+This is possible as most existing Adam variants that attempt to modify $v$ to varying extents have been reported to perform worse than Adam \citep{orabona20}. Another possible reason is that there is potential to cut down $v$, but Adafactor does not use the most suitable way: matrix factorization is a generic approach that could be applied broadly, but it does not leverage much problem-specific structure, thus it does not work well on specific neural-net tasks.
+
+ \begin{figure}[t]
+    \centering
+     \subfigure[Memory $(\downarrow)$ and Throughput  ($\uparrow$)]{\includegraphics[width=0.32\textwidth]{images/memory_throughput_compare.png}}
+    \subfigure[Loss v.s. iteration]{\includegraphics[width=0.28\textwidth]{images/llama_7b_head_0524.pdf}}
+    \subfigure[Loss v.s. time]{\includegraphics[width=0.28\textwidth]{images/llama_7b_head_time_0524.png}}
+    \caption{{\small Results for Llama 2-7B pre-training. (a) Adam-mini takes less memory and can reach a higher throughput (\# tokens per second). The throughput is tested on 2$\times$ A800-80GB GPUs.  (b, c) Adam-mini performs on par with AdamW, but takes  33\% less time to process the same \# tokens.}  }
+    \label{fig:intro}
+\end{figure}
+
+\begin{wrapfigure}{r}{0.50\textwidth}
+ \includegraphics[width=0.50\textwidth]{images/illustration.png}
+  \caption{\small{An illustration of Adam-mini. Adam-mini assigns learning rates (lrs) by Hessian structure. It uses more lrs than SGD but fewer than Adam.}}
+  \label{fig_square_plot}
+\end{wrapfigure}
+In this work, we find it is possible to significantly reduce the usage
+of $v$.
+Currently, Adam assigns an individual learning rate for each parameter, i.e., $i$-th parameter receives learning rate $\frac{\eta}{\sqrt{v_{i}}}$, where $v_i$ is the $i$-th component of $v$. For a billion-parameter model, Adam requires billions of learning rates. We argue that it is possible to achieve on par or better performance with much fewer learning rates.
+We first recall a classical result that the  Hessian of neural nets is near-block-diagonal with several dense principal sub-blocks \citep{collobert2004large}. 
+We then find that, for each of these dense sub-blocks, there exists a single high-quality learning rate that outperforms Adam, provided that we have enough resources to search it out. 
+Since the number of dense sub-blocks is much fewer than the number of parameters, 
+our findings imply that it is possible to achieve good performance with much fewer learning rates. 
+The remaining question is how to find them efficiently. 
+We then propose a cheap and simple way to find good learning rates that are sufficient to perform on par or better than Adam. We introduce the proposed design principle here: we first partition the gradient vector into $B$ sub-vectors based on {\it the smallest dense sub-block in the Hessian}, and call it $g_b$ for $b \in \{1, \cdots, B\}$. Then for each $g_b$, we calculate the quantity below.
+\begin{small}\begin{align*}
+\boxed{
+v_b = (1 - \beta_2)  * \texttt{mean} (g_b \odot g_b) + \beta_2 * v_b, \quad b = 1, \cdots B.
+}
+\end{align*}
+\end{small}
+
+We then use $\eta/\sqrt{v_b}$ as the learning rate for the parameters in the block associated with $g_b$. This design changes almost all Adam's $v$ to a negligible amount of scalars and thus reduces the memory. 
+We call the corresponding method Adam-mini. We provide a simple illustration in Figure \ref{fig_square_plot} and relegate the complete form later in  {\bf Algorithm \ref{algo:adam_mini}}.
+ We summarize our main contribution as follows.
+
+\begin{itemize}[topsep=1pt,parsep=1pt,partopsep=1pt, leftmargin=*]
+\item {\bf New optimizer.} We propose a new optimizer called Adam-mini. First, Adam-mini partitions the model parameters based on our new principle: partition by the smallest dense sub-block in the Hessian. Then, it chooses a single learning rate for each block using the average of Adam's $v$ in that block. Adam-mini has the following advantages.
+\begin{itemize}
+\item {\bf Lightweightness:}
+By design, 
+Adam-mini 
+largely reduces the number of learning rates used in Adam.
+For mainstream LLMs, 
+Adam-mini could cut down \yushun{$\geq 99.9\%$ proportion of Adam's $v$, which saves  50\% of the memory cost of Adam.}
+
+\item {\bf Effectiveness:} 
+Adam-mini performs on par or even better than AdamW  on various language models sized from 39M to 13B, including pre-training, supervised fine-tuning (SFT), and reinforcement learning from human feedback (RLHF). Further, Adam-mini's loss curves
+closely resemble those of AdamW. Adam-mini also performs similarly to Adam on non-LLM tasks such as training diffusion models, vision models, and graph neural networks.
+
+\item {\bf Efficiency:} Adam-mini can reach a higher throughput than AdamW. %
+We observe that Adam-mini reaches $49.6\%$ higher throughput of AdamW when pre-training Llama 2-7B on $2\times$ A800-80GB, which saves 33.1\% wall-clock time for pre-training. The efficiency comes from two factors.
+First, Adam-mini does not introduce extra computation in per-step updates. Second, the memory cut-down allows larger batch sizes per GPU, and at the same time, it eases the burden of communication among GPUs, which is usually a major overhead.
+\end{itemize}
+\item  {\bf Generic partition principle.} A key component in Adam-mini is the strategy for parameter partition.  We propose to partition parameters based on the smallest dense sub-block in the Hessian. This principle can apply to generic problems with a block diagonal Hessian: we find that more learning rates do not necessarily bring extra gain for these problems. In particular, for the problem associated with each dense sub-block, a single (but good) learning rate suffices to bring better performance. 
+\item {\bf Hessian structure and partition principle of Transformers.} We empirically apply the above principle to Transformers. \yushun{We find that  Transformer Hessian's smallest dense blocks are: (1) \texttt{query}, \texttt{key} by heads; (2) \texttt{value}, \texttt{attn.proj} and \texttt{mlp}  by output neurons; (3) \texttt{embed\_layer} and \texttt{output\_layer} by tokens.}
+\ruoyu{
+We emphasize that our Hessian-based partition principle is crucial for good performance, as naive or default partitions (e.g., partitioning by layers) would cause training instability on LLMs.
+}
+\end{itemize}
+
+
+
+
+
+
+
+
+\section{Method}
+
+\label{sec_main_results}
+
+\subsection{Motivations and Observations}
+\label{section_observation}
+
+Now we discuss our observations that motivate the design of Adam-mini. }
+We start by investigating the role of Adam's $v$ and explore possibilities for improvement. In Adam, $v$ provides an individual learning rate for each parameter, i.e., $i$-th parameter receives the learning rate $\frac{\eta}{\sqrt{v_{i}}}$, where $v_i$ is the $i$-th component of $v$.  
+Very recently, \citet{zhang2024transformers} pointed out that such design is crucial for modern architectures such as Transformers.  This is because these models often exhibit Hessian-block heterogeneity, i.e.
+This phenomenon suggests that different parameter blocks need different learning rates. This can be provided by Adam's $v$.
+
+
+
+
+The findings in \citep{zhang2024transformers} suggest that it is necessary to use a different learning rate for {\it each block}. Nonetheless, Adam does much more than that: it assigns an individual learning rate not just for each block, but for {\it each parameter}. Note that the number of parameters (could be billions) is much larger than the number of blocks (usually hundreds). This raises the question: 
+\begin{snugshade}
+\begin{center}
+{\bf (Q1)} Is it necessary to use a customized learning rate for each parameter? \\
+If not, how much can we save?
+\end{center}
+\end{snugshade}
+\begin{figure}[h]
+    \centering
+    \subfigure[Hessian of a MLP \citep{collobert2004large} ]{\includegraphics[width=0.22\textwidth]{images/thesis_trained.png}}\hfill
+    \subfigure[Hessian  of a MLP at 1\% step]{\includegraphics[width=0.2\textwidth]{images/1030-2-layer-width-10-adam_fullhessian_T_5.pdf}}\hfill
+    \subfigure[Hessian  of a MLP at 50\% step]{\includegraphics[width=0.2\textwidth]{images/1030-2-layer-width-10-adam_fullhessian_T_250.pdf}}\hfill
+    \subfigure[Hessian  of a MLP at 100\% step]{\includegraphics[width=0.2\textwidth]{images/1030-2-layer-width-10-adam_fullhessian_T_500.pdf}}\hfill
+    
+    \caption{\small The near-block-diagonal Hessian structure of neural nets. (a) is the Hessian of an MLP after 1 training step reported in \citep{collobert2004large}.  (b,c,d): We calculate the Hessians of an MLP (with 10 neurons) along the training. We find the near-block-diagonal structure maintains  throughout training.  }
+  \label{fig:block_diagonal}
+\end{figure}
+
+
+To answer {\bf (Q1)}, we investigate the Hessian structures of neural networks.
+First, we recall an important (but often overlooked) result: the Hessian of neural nets is {\it near-block-diagonal}. This is an old result that has been reported for at least two decades; see, e.g., \citep[Section 7]{collobert2004large}. The authors also provide theoretical justification. Consider a standard supervised learning  problem: minimizing $\ell (f(\theta, x), y)$ where $\ell(\cdot,\cdot)$ is the Cross-Entropy (CE) loss, $f(\theta, x) = \sum_{i = 1}^{n} v_i \phi(w_i^{\top}x)$ is  an 1-hidden-layer neural network with input $x \in \mathbb{R}^{d}$, weight $w_i \in \mathbb{R}^{d}$,  $v_i \in \mathbb{R}$, and label $y  \in \{0,1\}$, then the off-diagonal-block Hessian elements would contain
+\begin{small}\begin{equation}
+\label{eq_hessian_calculation}
+    \frac{\partial^2 \ell (f(\theta, x), y) }{\partial w_i \partial w_j}=\BLUE{p_\theta(y|x) \left(1 - p_\theta(y|x)\right)}v_i v_j \phi^{\prime}\left(w_i^\top x \right) \phi^{\prime}\left(w_j^\top x \right) x x^\top \quad \text{for } i \neq j, 
+\end{equation}
+\end{small}
+where $p_\theta(y|x) = 1 /(1 + \exp (-y f(\theta,x)))$ and $\phi^{\prime}(\cdot)$ is the derivative of $\phi(\cdot)$. Since the training objective is to maximize $p_\theta(y|x)$,  the term \BLUE{$p_\theta(y|x) \left(1 - p_\theta(y|x)\right)$}
+will quickly shrink to zero. This term will push the Hessian to near-block-diagonal structure where each block corresponds to one output neuron. The authors report that this can happen just after 1 training step, as restated  in Figure \ref{fig:block_diagonal} (a). We also numerically reproduce this result on a small MLP in Figure  \ref{fig:block_diagonal} (b,c,d), and show that the near-block-diagonal Hessian structure maintains along the training.
+
+{\bf Case study I: random quadratic problems.}  With the above observation in mind, we now explore {\bf (Q1)}  on generic optimization problems with {\it block-diagonal Hessian}. 
+We consider the random quadratic minimization problem  $\min_w \frac{1}{2} w^\top Hw$ where the Hessian $H$ is a random positive definite (PD) matrix and is visualized in Figure \ref{fig:random_quadratic} (a). 
+We compare the coordinate-wise learning-rate method, i.e., Adam, with the single-learning-rate method, i.e., gradient descent (GD).   We choose quadratic minimization because the optimal learning rate has a close form.   We have the following findings. 
+\begin{itemize}
+[topsep=1pt,parsep=1pt,partopsep=1pt, leftmargin=*]
+    \item {\bf (1):} as shown in Figure \ref{fig:random_quadratic} (a)  and (b), Adam outperforms the optimal single-learning-rate method. This is expected since Adam deploys different learning rates to different parameters.
+    \item {\bf (2):} as shown in Figure \ref{fig:random_quadratic} (c)  and (d), we consider a new problem whose Hessian 
+    is a dense sub-block of (a). We consider the optimal single learning-rate method for this new problem and find it outperforms Adam, even though Adam assigns much more learning rates. Similar phenomena apply to all the three sub-blocks of (a).
+    \item {\bf (3):} If we collect these optimal learning rates in {\bf (2)} and apply them to a ``blockwise" version of GD, it would be faster than Adam on the original problem (the green line in Figure \ref{fig:random_quadratic} (b)).
+\end{itemize}
+\begin{figure}[t]
+    \centering
+    \subfigure[Hessian matrix]{\includegraphics[width=0.18\textwidth]{images/0522hessian_30.png}}
+    \subfigure[Total loss]{\includegraphics[width=0.24\textwidth]{images/0522_case_5.pdf}}
+    \subfigure[Dense sub-block]{\includegraphics[width=0.18\textwidth]{images/random_quadratic_subblock.png}}
+     \subfigure[Sub-problem loss]{\includegraphics[width=0.24\textwidth]{images/0522_case_6.pdf}}
+    \caption{\small {\bf(a):} The Hessian of a three-block random quadratic problem. {\bf(b):} Training curves for the problem associated with the full Hessian in  (a). The optimal single (blockwise) learning rate is chosen based on the full (blockwise) Hessian in (a). {\bf(c):} The 1st dense Hessian sub-blocks in  (a). {\bf (d):} Training curves for the new problem associated with the Hessian in (c).     }
+  \label{fig:random_quadratic}
+\end{figure}
+
+In summary, for generic problems with block-diagonal Hessian,  we find that more learning rates do not necessarily bring extra gain. In particular, {\bf for each dense sub-block, a single (but good) learning rate suffices to bring better performance} than using tens or hundreds more. 
+
+{\bf More discussions on case study I.}
+Why would this happen? We provide 
+one possible explanation 
+from a linear algebra perspective. 
+Adam can be viewed as a diagonal preconditioned method
+, i.e., at the $t$-th step:
+\begin{small}\begin{equation}
+\label{eq_adam_diagonal_form}
+    w_{t+1} = w_t - \eta_t D_t m_t,
+\end{equation}
+\end{small}
+where $D_t = \operatorname{Diag}(1/{\sqrt{v_t}})$ is a diagonal matrix, $m_t$ is the 1st-order momentum, $w_t$ and $\eta_t$ are model parameters and learning rate. 
+However, Adam may not be an optimal preconditioner and thus
+cannot effectively reduce the condition number of the dense
+sub-matrix. 
+In the field of optimization, the effectiveness of a diagonal preconditioner $D$ 
+is often measured by ``how much is $\kappa(DH)$ reduced over $\kappa(H)$", where $H$ usually refers to the Hessian matrix and $\kappa(\cdot)$ is the condition number (smaller is better).
+Unfortunately, there is no guarantee of
+$\kappa(DH) \leq \kappa(H)$  and this inequality often requires strict assumptions on both $D$ and $H$. For instance, $\kappa(DH)$ would be small if $H$ is close to diagonal and  $D$ is a cleverly designed compressor of $H$
+\citep{forsythe1955best,young1954iterative,sun2021worst,qu2022optimal}. 
+Here, we numerically explore the effectiveness of Adam's preconditioner within each dense Hessian sub-block. We generate a random dense PD matrix  $H_b \in \mathbb{R}^{d\times d}$ and use it as a proxy for the dense Hessian sub-block of neural nets in Figure \ref{fig:block_diagonal}.
+We define $D_{\text{Adam}} = \operatorname{Diag}({1}/{\sqrt{v}})$, where $v = g\odot g$, $g = H_bx \in \mathbb{R}^d$, and each entry $x_i \sim \mathcal{N}(0, 1/{\sqrt{d}})$ follows Xavier initialization. We explore the interplay between the following two metrics:
+\begin{small}\begin{equation}
+    \label{eq_off_diag_ratio}
+    \tau = \frac{\sum_i |H_{b,i,i}|}{\sum_{i,j }\left|H_{b,i, j}\right|}, \quad r = \frac{\kappa (D_{\text{Adam}} H_b)}{\kappa ( H_b)},
+\end{equation}
+\end{small}
+where $\tau \in [0,1]$ is the ``diagonal-over-off-diagonal ratio", and we use it to measure how dense $H_b$ is ($H_b$ is pure diagonal when $\tau = 1$). 
+$r \geq 0$ measures the effectiveness of Adam's preconditioner $D_{\text{Adam}}$ when operating on the Hessian-block $H_b$ (the smaller the better). We investigate the change of $r$ when changing the structure of $H_b$, including changing $\tau$, dimension $d$, and also $\kappa(H_b)$.
+We emphasize that for a fixed $d$ or $\kappa(H_b)$, we change  $\tau$ by {\bf only rotating the eigenvectors}, but not changing the eigenvalues of $H_b$. This ensures that $\tau$ is the only changing factor in the experiments.
+
+We summarize the key findings in Figure \ref{fig:kappa_phase_transition}: for $H_b$ with most dimension $d $ and $\kappa (H_b)$, $r$ decreases as $\tau \rightarrow 1$. That is, $D_{\text{Adam}}$ is effective when $H_b$ is close to diagonal, and {\bf $D_{\text{Adam}}$ is not so effective when $H_b$ is dense.} This aligns with the convergence rates in Figure \ref{fig:random_quadratic}. 
+It is intriguing to provide a lower bound  on $\kappa(D_{\text{Adam}} H_b)$ to ground the observation in  Figure \ref{fig:kappa_phase_transition}, and we are not aware of any existing lower bound of this kind. Note that it is rather difficult to characterize $\kappa(D_{\text{Adam}}H)$, partially because the extreme eigenvalues are neither sub-additive nor sub-multiplicative \citep{kittaneh2006spectral}.
+We leave it as an important but challenging future direction. {\bf To summarize, for the dense Hessian-blocks, 
+it is possible to outperform Adam with only one good learning rate.}
+
+\begin{figure}[t]
+    \centering
+    \subfigure[$r$ v.s. dimension $d$]{\includegraphics[width=0.4\textwidth]{images/adam_lower_bound_dimension.pdf}}
+    \subfigure[$r$ v.s. dimension $\kappa(H_b)$]{\includegraphics[width=0.4\textwidth]{images/adam_lower_bound_kappa.pdf}}
+    \caption{\small The effectiveness of Adam's preconditioner  $D_{\text{Adam}}$  on different matrix structures of $H_b$. (a): for most dimension $d$, $r$ is large when $\tau$ is small ( $r$  and $\tau$ are defined in Eq. (\ref{eq_off_diag_ratio})). This indicates that {\bf Adam might not be so effective when $H_b$ is dense}. We fix $\kappa(H_b) = 500$ here. (b): We use the same setups as (a), except that we fix the dimension $d = 50$ and change the $x$-axis to $\kappa(H_b)$. In both figures,  we change  $\tau$ by   only rotating the eigenvectors, but not changing the eigenvalues of $H_b$. This ensures that $\tau$ is the only changing factor.} 
+  \label{fig:kappa_phase_transition}
+\end{figure}
+
+
+{\bf Case study II: Transformers.} 
+The above analysis suggests there is room to cut down the number of learning rates.
+We also observe similar phenomena in Transformers. 
+We consider a 4-layer Transformer
+and under the PyTorch default partition, and we 
+randomly choose one parameter block as the ``left-out" block and change the coordinate-wise learning rate to a single-learning rate counter-part. We use Adam for the rest of the blocks. We grid-search the learning rate for the left-out block and apply the cosine decay schedule like the rest of the blocks. We report the best result and call this method ``{\it Adam (leave-one-out)}". Figure  \ref{fig:leave_one_out} shows that {\it Adam (leave-one-out)} can achieve similar or better performance than Adam. A similar phenomenon is also observed when we randomly leave out up to three blocks and search three learning rates. 
+We do not explore the possibility of leaving more blocks out since the cost of grid search grows exponentially. 
+
+
+To summarize this section, we find that it is possible to reach similar or better performance with much fewer learning rates than Adam. The remaining issue is how to find them without grid-search. 
+In the next part, we propose a simple and effective method called Adam-mini, which could bring comparable or even better performance than Adam, but with 90\% to 99\% fewer learning rates.  
+
+
+
+\subsection{Proposed Method: Adam-mini}
+\label{sec_adam_mini}
+
+
+Adam-mini aims to cut down the learning rate resources in Adam without laboriously grid-searching the learning rates as in Section \ref{section_observation}.  Since the procedure of Adam-mini is relatively long, {\bf we relegate the complete form of Adam-mini 
+ We summarize the key designs here. 
+Adam-mini consists of two steps. 
+
+{\bf Step 1}  Partition the model parameters into blocks
+by Hessian structure. 
+ We discuss the partition principle later in Section \ref{sec_partition}. 
+ For different architectures, the principle will be realized in
+ different forms; see {\bf Algorithm \ref{algo:partition_non_trans}}: ``Partition for non-Transformers". 
+and {\bf Algorithm \ref{algo:partition_trans}}: ``Partition for Transformers".
+
+{\bf Step 2.} For each parameter block, we use a single learning rate. To efficiently choose a suitable learning rate in each block, Adam-mini simply replaces $\texttt{g} \odot \texttt{g}$ in vanilla Adam by its mean value. 
+We adopt the moving average on these mean values as in Adam.
+
+ 
+    
+
+{\bf A simple example of Adam-mini.} 
+We use a simple example to illustrate the key design of Adam-mini. 
+For a problem with 5 parameters $w \in \mathbb{R}^5$, 
+Adam and Adam-mini both perform $w = w- u \odot m$, 
+where $m$ is the 1st-order momentum and $u$ has different forms as follows:
+\begin{itemize}[topsep=1pt,parsep=1pt,partopsep=1pt, leftmargin=*]
+    \item For Adam: {\small $u_{\text{Adam}} = \big(\frac{\eta}{\sqrt{v_1}}, \frac{\eta}{\sqrt{v_2}},\frac{\eta}{\sqrt{v_3}},\frac{\eta}{\sqrt{v_4}},\frac{\eta}{\sqrt{v_5}}\big).$}
+    \item For Adam-mini: suppose the partition is \ORANGE{$(1,2,3)$} and \BLUE{$(4,5)$} then 
+\begin{equation*}
+\resizebox{0.98\hsize}{!}{%
+$u_{\text{mini}} = \big(\ORANGE{\frac{\eta}{\sqrt{(v_1 + v_2 +v_3)/3 }}, \frac{\eta}{\sqrt{(v_1 + v_2 +v_3)/3 }},\frac{\eta}{\sqrt{(v_1 + v_2 +v_3)/3 }}},\BLUE{\frac{\eta}{\sqrt{(v_4 + v_5 )/2 }},\frac{\eta}{\sqrt{(v_4 + v_5 )/2 }}}\big).$
+}
+\end{equation*}
+\end{itemize}
+Note that the number of effective elements $u_{\text{mini}}$ equals the number of blocks, which could be significantly smaller than that of $u_{\text{Adam}}$, which equals the number of parameters. For LLMs, we will show that this would free $\geq 99.9\%$ elements in $v$ (will be discussed later in Section \ref
+{sec_characteristics}).
+
+\begin{figure}[t]
+    \centering
+     \subfigure[Randomly leave one block out]{\includegraphics[width=0.23\textwidth]{images/loss_random_leave_one_out_0.0002.pdf}}
+    \subfigure[Randomly leave two blocks out]{\includegraphics[width=0.23\textwidth]{images/loss_random_leave_two_out_0.0002.pdf}}
+     \subfigure[Randomly leave three blocks out]{\includegraphics[width=0.23\textwidth]{images/loss_random_leave_three_out_0.0002.pdf}}
+    \subfigure[Performance gap]{\includegraphics[width=0.24\textwidth]{images/heatmap_4layer_0.0002.pdf}}
+    \caption{\small (a) (b) (c)  Adam (leave-$x$-out) can reach a similar or better performance than Adam for all randomly picked left-out blocks. $x =1, 2,3$. (d) The performance gap between Adam and Adam (leave-one-out) for all possible blocks. We find Adam (leave-one-out) always performs on par with Adam, and for most blocks, Adam (leave-one-out) performs better.}
+  \label{fig:leave_one_out}
+\end{figure}
+
+\subsection{Principle for the Partition Strategy}
+\label{sec_partition}
+
+
+
+We now discuss how to choose the parameter partition for Adam-mini. When developing the method, we tried the PyTorch default partition. In Section \ref{sec_experiments}, we will show that this simple partition works well on small and middle-scaled non-Transformer tasks, including  ResNet, diffusion model, and graph models. We present this strategy in  {\bf Algorithm \ref{algo:partition_non_trans}}: ``Partition for non-Transformers".
+
+Unfortunately, we find that the  PyTorch default partition does not always work well on larger-scaled tasks including Transformer training. In particular,  we find that Adam-mini encounters training instability on 1B models  (see Figure \ref{fig:babygpt_hessian_plot} (i)). 
+We suspect this is because the PyTorch default partition did not fully capture the Hessian structure. 
+We propose a general principle in {\bf Principle 1} below \footnote{We assume the Hessian rows \& columns are properly re-ordered s.t. the block-diagonal structure is visible.}.
+\begin{snugshade}
+\begin{center}
+{\bf Principle 1:} We should partition parameters into blocks, such that each parameter block is associated with the smallest dense sub-blocks in the Hessian.
+\end{center}
+\end{snugshade}
+{\bf Principle 1} comes from the analysis in Section \ref{section_observation}: it is possible to harmlessly reduce the number of Adam's learning rates within each dense Hessian block. However, if the partition is too coarse and violates {\bf Principle 1}, we might  accidentally remove some crucial learning rates and oversimplify the problem, causing training failure. 
+ 
+
+Does the PyTorch default partition follow {\bf Principle 1}?
+ To find out, we explore the Hessian of a small Transformer as in Figure \ref{fig:babygpt_hessian_plot}. Under the PyTorch default partition, we compute the exact Hessian for each parameter block at 1\% training step. 
+ We find there are four classes of Hessian sub-blocks. 
+
+
+
+\begin{itemize}[topsep=1pt,parsep=1pt,partopsep=1pt, leftmargin=*]
+    \item {\bf Class 1: \texttt{query} and \texttt{key}.} For  \texttt{query} and \texttt{key}, the Hessian sub-block itself has a block-diagonal structure and consists of smaller dense matrices.  We empirically find that the number of small dense sub-blocks equals the number of heads in multi-head attention. 
+    \item {\bf Class 2: \texttt{value}.} For \texttt{value}, the structure of  Hessian sub-blocks seems less clear. It seems to have the hint of 16 diagonal blocks (16 is the number of output neurons), but the pattern is less obvious. This Hessian structure is significantly different from that of \texttt{query} and \texttt{key}, although they all consist of four heads. The Hessian entries of \texttt{value} are also about $10^5$ larger than those of \texttt{query} and \texttt{key} \footnote{This might be one source of the heterogeneity of Hessian eigenvalues as reported by \citep{zhang2024transformers}.}. One possible reason is that  \texttt{value} is positioned outside the softmax operator in the self-attention design, while \texttt{query} and \texttt{key} are not.
+    \item {\bf Class 3: \texttt{attn.proj} and MLPs.} For  \texttt{attn.proj}, \texttt{mlp.fc\_1}, and \texttt{mlp.proj}, the Hessian sub-block  has a block-diagonal structure and the number of small dense sub-blocks equals the number of output neuron. This observation suggests that the calculation in Eq. (\ref{eq_hessian_calculation}) not only holds in pure MLPs, but also can generalize to various building blocks in Transformers.
+    \item {\bf Class 4: \texttt{embed\_layer} and \texttt{output\_layer}.} \yushun{For  these two layers, the Hessian sub-block  has a block-diagonal structure and the number of small dense sub-blocks equals the number of tokens.}
+\end{itemize}
+
+
+\begin{figure}[t]
+    \centering
+     \subfigure[\texttt{query} (4 heads)]{\includegraphics[width=0.28\textwidth]{images/1011_voc_8_dim_16_hessian_transformer.h.0.attn.wq.weight_lr_0.001_T_5.pdf}}
+    \subfigure[\texttt{key} (4 heads)]{\includegraphics[width=0.28\textwidth]{images/1011_voc_8_dim_16_hessian_transformer.h.0.attn.wk.weight_lr_0.001_T_5.pdf}}
+    \subfigure[\texttt{value} (4 heads)]{\includegraphics[width=0.29\textwidth]{images/1106_voc_8_dim_16_hessian_transformer.h.0.attn.wv.weight_lr_0.001_T_5.pdf}}
+    \subfigure[\texttt{attn.proj} (16 neurons)]{\includegraphics[width=0.28\textwidth]{images/1011_voc_8_dim_16_hessian_transformer.h.0.attn.wo.weight_lr_0.001_T_5.pdf}}
+    \subfigure[\texttt{mlp.fc\_1} (32 neurons)]{\includegraphics[width=0.28\textwidth]{images/1011_voc_8_dim_16_hessian_transformer.h.0.mlp.c_fc.weight_lr_0.001_T_5.pdf}}
+    \subfigure[\texttt{mlp.proj} (16 neurons)]{\includegraphics[width=0.28\textwidth]{images/1011_voc_8_dim_16_hessian_transformer.h.0.mlp.c_proj.weight_lr_0.001_T_5.pdf}}
+ \subfigure[\texttt{embed\_layer} (8 tokens)]{\includegraphics[width=0.29\textwidth]{images/1011_voc_8_dim_16_hessian_transformer.wte.weight_lr_0.001_T_5.pdf}}
+ \subfigure[\texttt{output\_layer} (8 tokens)]{\includegraphics[width=0.29\textwidth]{images/1011_voc_8_dim_16_hessian_lm_head.weight_lr_0.001_T_5.pdf}}
+    \subfigure[Llama 2-1B]{\includegraphics[width=0.28\textwidth]{images/1103_1b.pdf}}
+    \caption{\small (a-h): The Hessian of different parameter blocks in a  small Transformer at 1\% training step. Here, neuron refers to the ``output neuron".  We find that these Hessian sub-blocks  have near-block-diagonal
+structure and consists of smaller dense matrices. Different parameter blocks have different numbers of small dense matrices. (i) Training curves on Llama 2-1B. When using the PyTorch default partition, Adam-mini could suffer loss spikes. The spike disappears when we use the partition strategy in {\bf Algorithm \ref{algo:partition_trans}}.  }
+  \label{fig:babygpt_hessian_plot}
+\end{figure}
+
+Based on the above findings, we find that the PyTorch default partition is indeed not the best fit for Transformers. By {\bf Principle 1}, \texttt{query} and \texttt{key} should be further partitioned by heads; \texttt{value}, \texttt{attn.proj}, and MLPs should be partitioned by output neurons; \yushun{\texttt{embed\_layer} and \texttt{output\_layer} should be partitioned by tokens.} As for \texttt{value}, the Hessian shows the hint of 16  diagonal blocks (where 16 is the number of output neurons), but the pattern is less clear.  By default,  we will partition \texttt{value} by output neurons.
+
+
+We then introduce the resulting {\bf Algorithm \ref{algo:partition_trans}}: ``Partition for Transformers".
+As shown in Figure  \ref{fig:babygpt_hessian_plot} (d).  This strategy indeed stabilizes the training and boosts the performance.
+
+
+
+
+
+
+\subsection{Some Characteristics of Adam-mini}
+\label{sec_characteristics}
+\textbf{Memory cut down.} Adam-mini reduces the number of learning rates from the number of model parameters to
+ the number of total number of blocks by our partition strategies. 
+ \yushun{As a result, 
+ Adam-mini cuts  down more than $99.9\%$ of Adam's $v$, which saves  $50\%$ of Adam's memory. } 
+ 
+
+\textbf{Higher throughput.} 
+Adam-mini can reach a higher throughput than AdamW, especially under limited GPU resources. There are two reasons.  
+ First, Adam-mini does not introduce extra computation in its update rules. The averaging operation in {\bf Algorithm \ref{algo:adam_mini}} incurs negligible cost and it significantly reduces the number of vector-square-root and vector-division operations in AdamW. Second, thanks to the memory cut-down, Adam-mini can support larger batch sizes per GPU. It also reduces the communication among GPUs, which is known to be a major overhead \citep{rajbhandari2021zero}.
+ 
+  
+Owing to these properties, Adam-mini could reduce the overall time for pre-training.
+We provide evidence in Table \ref{tab:throughput}. 
+When pre-training Llama 2-7B on $2\times$ A800-80GB GPUs, we find Adam-mini could reach 49.6\% higher throughput than AdamW.  This translates to {\bf ${\bf 33.1\%}$ reduction of wall-clock time} on processing the same amount of tokens for pre-training. 
+
+\textbf{Why averaging over $v$ can work.} We now provide an intuitive explanation of why ``averaging $v$ by output neuron" can be a reasonable choice.
+For one data sample, the gradient of the weight matrix $W \in \mathbb{R}^{d\times d}$ can be expressed as $ G:=\frac{\partial \ell}{\partial W} =e z^\top \in \mathbb{R}^{d\times d}$, where $e$ is certain backpropagation (BP) error vector and  $z$ is the input feature to the current weight. For all entries in the $i$-th row of $G$, they all share the same BP error term $e_i$, which is usually non-negligible when $G \neq 0$. Therefore, $G$ usually has similar entries within a row (which associates with the same output neuron), and its mean value can be a good representative of the whole row. 
+
+
+
+\begin{minipage}[h] {0.49\linewidth}
+    \begin{table}[H]
+    \centering
+    \caption{\small Memory cost of AdamW v.s. Adam-mini. Calculation is based on \texttt{float32}, which is a standard choice for optimizer states. }
+    \label{tab:memory_cost}
+    \resizebox{0.98\linewidth}{!}{%
+    \begin{tabular}{c|c|c}
+    \toprule 
+        Model & Optimizer & Memory (GB)   \\ \hline 
+      GPT-2-1.5B &AdamW & 12.48   \\
+       GPT-2-1.5B& Adam-mini  &    6.24 $({\bf 50\% }\downarrow)$ \\ \hline
+        Llama 2-1B& AdamW &   8.80   \\ 
+     Llama 2-1B & Adam-mini  &  4.40 $({\bf 50\%}\downarrow)$ \\ \hline
+        Llama 2-7B &AdamW &  53.92  \\
+        Llama 2-7B & Adam-mini &   26.96 $({\bf 50\% }\downarrow)$   \\ \hline
+        Llama 3-8B &AdamW &  64.24 \\
+        Llama 3-8B & Adam-mini &   32.12 $({\bf 50\% }\downarrow)$   \\ \hline %
+         Llama 2-13B &AdamW &  104.16  \\
+        Llama 2-13B & Adam-mini &   52.08 $({\bf 50\% }\downarrow)$   \\
+        \bottomrule 
+    \end{tabular}
+    }
+\end{table}
+\end{minipage}
+\hfill
+\begin{minipage}[h] {0.50\linewidth}
+      \begin{table}[H]
+    \centering
+    \caption{\small Throughput ($\uparrow$)  test  on $2\times$ A800-80GB GPUs for Llama 2-7B pre-training. \cross  means out of memory. GPU hours ($\downarrow$) to pre-train Llama 2-7B with the optimal token amount by Chinchila's law. }
+    \label{tab:throughput}
+    \resizebox{0.98\linewidth}{!}{%
+    \begin{tabular}{c|c|c|l}
+    \toprule 
+        Optimizer & bs\_per\_GPU &  total\_bs  & Throughput ($\uparrow$) \\ \hline 
+         Adam-mini  & 4 & 256 &  5572.19 $(\uparrow {\bf 49.6\%})$ \\ 
+         AdamW &2 & 256 & \cross\\
+         AdamW  & 1 & 256 & 3725.59  \\
+        \bottomrule 
+    \end{tabular}
+    }
+    \resizebox{0.98\linewidth}{!}{%
+    \begin{tabular}{c|c|l}
+    \toprule 
+        Optimizer & \# Tokens (B) &   GPU hours (h) ($\downarrow$) \\ \hline 
+         AdamW  &  1 &  74.56  \\ 
+         Adam-mini & 1 & 49.85 $(\downarrow {\bf 33.1\%})$\\\hline
+         AdamW  &  70 &  5219.16  \\ 
+         Adam-mini & 70 & 3489.55 $(\downarrow {\bf 33.1\%})$\\\hline
+        AdamW  &  140 &  10438.32  \\ 
+         Adam-mini & 140 & 6979.10 $(\downarrow {\bf 33.1\%})$\\
+        \bottomrule 
+    \end{tabular}
+    }
+\end{table}
+\end{minipage}
+  
+
+\textbf{Has room to improve.} Adam-mini designs the learning rate for each dense Hessian sub-block using the average of Adam's $v$ in that block. Such a design achieves cheap computation, but it might not be optimal. 
+We believe there is great room to improve the learning rate design. %
+As shown in Figure \ref{fig:random_quadratic}, we can reach much faster convergence if we utilize more information in the dense block to design the learning rate (e.g., using eigenvalues of each block), However, such a design requires expensive computation.  We leave it as an important future direction.
+
+ 
+
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec_experiments}
+
+We now  verify the efficacy of Adam-mini on two types of neural-net tasks: (1) LLM tasks including pre-training, supervised fine-tuning (SFT), and reinforcement learning from human feedback (RLHF).  (2) Non-LLM tasks including vision, graph, and diffusion model training.}   All LLM experiments are conducted on four NVIDIA A800-80GB GPUs and the rest are conducted on four V100 GPUs.
+
+\subsection{Pre-training}
+
+
+\textbf{Setups.} We pre-train LLMs including GPT-2 series and Llama series. We train these models on mainstream English Corpus from scratch. In particular, We train GPT-2 \citep{radford2019language} series (125M to 1.5B) on Openwebtext \citep{gokaslan2019openwebtext}. We  train Llama series (20M to 13B) \citep{touvron2023llama} on C4 \citep{2020t5}.
+We compare Adam-mini with AdamW \citep{loshchilov2017decoupled} as well as popular memory-efficient methods including Adafactor \citep{shazeer2018adafactor}, CAME \citep{luo2023came}, and SM3 \citep{anil2019memory}. For Adafactor and SM3, we incorporate momentum with $\beta_1 = 0.9$ to ensure a fair comparison with other methods.
+We tune the learning rate for all methods, using the same tuning budget for each, and report the best performance. 
+
+
+\textbf{GPT-2 series.} Figure \ref{fig:gpt} shows the results for GPT-2 series pre-training. We find that Adam-mini performs similarly to  AdamW with 50\% less memory, while other methods perform worse. 
+In Figure \ref{fig:gpt} (a), 
+we run \emph{Adam-mini (PyTorch default partition)}, which partition parameters by PyTorch default partition.
+We find that \emph{Adam-mini (PyTorch default partition)} performs poorly. We stop the trial since it shows clear unstable behavior. In Figure \ref{fig:gpt_train}, we further present the training loss curves. We find that {\bf the loss curves of Adam-mini closely resemble those of AdamW.}
+\begin{figure}[H]
+    \centering
+       \subfigure[GPT-2-125M]{\includegraphics[width=0.40\textwidth]{images/GPT2-125M-val.pdf}}
+    \subfigure[GPT-2-330M and 1.5B]{\includegraphics[width=0.40\textwidth]{images/GPT2-330M-15B-val.pdf}}
+    \hfill 
+    \caption{\small For GPT-2 series pre-training, Adam-mini performs similarly to AdamW with  50\% less memory, while other methods perform worse. }
+  \label{fig:gpt}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \subfigure[GPT-2 series]{\includegraphics[width=0.45\textwidth]{images/GPT2-330M-training.pdf}}
+    \subfigure[Trajectory comparison]{\includegraphics[width=0.30\textwidth]{images/compare_model_smalldata_8layermodel_5000iter_adafactorwithm.pdf}}
+    \hfill 
+    \caption{\small (a): The training loss curves of Adam-mini closely resemble those of AdamW. (b): The trajectory of Adam-mini stays close to the trajectory of AdamW (in terms of the $\ell$-2 distance of model checkpoints).}
+  \label{fig:gpt_train}
+\end{figure}
+
+\textbf{Llama series.}  Figure \ref{fig:tinyllama}  shows the results for pre-training Llama series. 
+ We also train Llama 2-7B as shown in Figure \ref{fig:intro} (c) in Section \ref{sec_intro}.   
+ We find that Adam-mini performs on par with AdamW, while other methods do not. 
+  {\bf Further, Adam-mini's loss curves closely resemble the curves by AdamW.}
+
+\begin{figure}[H]
+    \centering
+     \subfigure[Llama 2-1B]{\includegraphics[width=0.30\textwidth]{images/1110_1b_train.pdf}}
+     \subfigure[Llama 3-8B and Llama 2-13B]{\includegraphics[width=0.48\textwidth]{images/1001_llama3_8b_13b.pdf}}
+    \hfill 
+    \caption{\small (a, b): Loss curves of pre-training Llama series from 1B to 13B. Adam-mini performs on par or better than AdamW with  50\% less memory, while other methods perform worse.  Further,  loss curves of Adam-mini closely resemble the curves by AdamW.  }
+  \label{fig:tinyllama}
+\end{figure}
+
+
+
+
+
+
+
+\textbf{Trajectory comparison.} On a small Transformer, Adam-mini generates similar trajectories
+to that of AdamW, while other methods cannot. This might be because Adam-mini
+makes fewer modifications over AdamW.  
+
+\textbf{Sensitivity analysis.}
+ On GPT-2-125M pre-training task, we test the sensitivity of Adam-mini to hyperparameters. We report the validation loss after training with 2.5B tokens (by Chinchilla's law).  As shown in Figure \ref{fig:sft} (c), Adam-mini seems not overly sensitive to hyperparameters.
+
+\subsection{Scaling Laws of Adam-mini}
+We now show the efficacy of Adam-mini through scaling law experiments. We use C4 dataset to pre-train the Llama 2 architecture from 39M to 1B. For the model with size $n_{\text{param}}$, we train the model with about $20 * n_{\text{param}}$ tokens, which is suggested to be the optimal amount by Chinchilla's law \citep{hoffmann2022training}. The largest-scaled  experiment we conducted is Llama 2-1B pre-training with 26.2B tokens, which takes about 170 GPU hours on $4\times$ A800-80GB GPUs. The total running time for the scaling law experiments is about 300 GPU hours.
+\begin{figure}[h]
+    \centering
+\subfigure[Scaling laws in terms of compute]{
+{\includegraphics[width=0.55\textwidth]{images/1007_scaling_law.pdf}}
+    \subfigure[Scaling laws in terms of parameters]{\includegraphics[width=0.37\textwidth]{images/1030scaling_law_loglog.pdf}}
+    \caption{\small (a, b): Scaling laws of Adam-mini. We pre-train Llama 2 architectures by Chinchilla's law. For all models sized from 39M to 1B, Adam-mini's loss curves are consistently similar to AdamW, but Adam-mini uses 50\% less memory. \yushun{Further, as shown in (b), Adam-mini reaches a lower final loss than AdamW for all models. The fitted lines in (b) suggest that Adam-mini can be scaled up to larger models (if the scaling law holds).}  }
+  \label{fig:scaling_law}
+\end{figure}
+
+
+As shown in Figure \ref{fig:scaling_law}, {\bf Adam-mini’s loss curves are consistently similar to AdamW. 
+\yushun{The fitted lines in Figure \ref{fig:scaling_law} (b) suggest that Adam-mini can be scaled up to larger models (if the scaling law holds).}
+
+
+\subsection{Supervised Fine-tuning and RLHF}
+\label{sec_sft}
+
+We now run Adam-mini on downstream tasks including SFT and RLHF. We use the Llama 2-7B pretrained model \citep{touvron2023llama} for our study. We use the \texttt{ultrafeedback} dataset
+and implement the RLHF workflow from \citep{ouyang2022training}. We use ReMax \citep{li2023remax}, a memory-efficient alternative to PPO \citep{schulman2017proximal}, to optimize the preference reward.
+We evaluate the alignment performance in terms of chat ability using the MT-Bench \citep{zheng2024judging}, where GPT-4 assesses multi-turn chatting capabilities and assigns a score from 0 to 10 (higher is better). Our results, presented in \cref{tab:mt_bench}, demonstrate that Adam-mini can outperform AdamW. 
+\begin{figure}[H]
+    \centering
+     \subfigure[\small{SFT}]{\includegraphics[width=0.28\textwidth]{images/sft/sft.pdf}}
+    \subfigure[\small{RLHF}]{\includegraphics[width=0.28\textwidth]{images/remax/remax.pdf}}
+\subfigure[\small{Sensitivity analysis}]{\includegraphics[width=0.21\textwidth]{images/sensitivity.png}}
+    \hfill
+    \caption{\small (a, b): SFT, and RLHF when aligning Llama 2-7B. Adam-mini reaches better performance (smaller perplexity, higher reward) than AdamW with 50\% less memory. (c) Sensitivity analysis of Adam-mini on GPT-2-125M pre-training (by Chinchilla's law). Adam-mini seems not overly sensitive to hyperparameters. }
+  \label{fig:sft}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{\small Averaged GPT-4 evaluation score ($\uparrow$) of SFT and RLHF on the MT-Bench.}
+\label{tab:mt_bench}
+\resizebox{0.85\linewidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule[1pt]
+\multirow{2}{*}{} & \multicolumn{2}{c}{SFT (LoRA)} && \multicolumn{2}{c}{SFT} &&\multicolumn{2}{c}{RLHF} \\  
+\cmidrule{2-3} \cmidrule{5-6}  \cmidrule{8-9}
+& AdamW & Adam-mini &&  AdamW & Adam-mini && AdamW & Adam-mini \\
+\midrule
+MT-Bench & 4.23	& {\bf 4.41}	& & 5.37	& {\bf 5.40} && 5.54  &   {\bf 5.68} \\  \bottomrule
+\end{tabular}
+}
+\end{table}
+\subsection{Detailed Comparison with Adafactor}
+\label{sec_adafactor}
+We now carefully compare Adam-mini and the popular memory-efficient optimizer Adafactor.  
+Besides the original Adafactor, we also consider a  modified version in \citep{zhai2022scaling}, which we call ``Adafactor-Zhai-version". For both versions, we use momentum with $\beta_1 = 0.9$.
+
+We first conduct  learning rate grid-search on Llama 2-20M and train it following Chinchilla's law. As shown in Figure \ref{fig:adafactor}
+(a), we find that Adafactor-Zhai-version improves over the original version, but both versions of Adafactor are still consistently worse than Adam-mini.  We further sweep over other hyperparameters including (1) $\beta_2 = 0.95$; (2) $\epsilon = \{10^{-30}, 10^{-16}, 10^{-8}, 10^{-6}\}$; (3) warm-up steps = $\{1\%, 2\%, 3\%, 4\%, 5\%, 10\% \}$ total steps.
+We find that the change of hyperparameters does not significantly boost the performance of Adafactor, and both versions still underperform Adam-mini. 
+
+We further sweep hyperparameters on Llama 2-1B. In contrast to the case of Llama 2-20M, we find that the Adafactor-Zhai-version now suffers from training instability and the original version performs better. Nevertheless, they still underperform Adam-mini
+also underperforms Adam-mini. %
+
+\begin{figure}[htbp]
+    \centering
+       \subfigure[Llama 2-20M]{\includegraphics[width=0.28\textwidth]{images/1001_adafactor_20M.pdf}}
+    \subfigure[Llama 2-1B]{\includegraphics[width=0.28\textwidth]{images/1001_adafactor_1b.pdf}}
+    \subfigure[Throughput comparison]{\includegraphics[width=0.28\textwidth]{images/compare_adafactor.png}}
+    \hfill 
+    \caption{\small (a, b): Training curves of  
+   Adafactor \& Adafactor-Zhai-version on Llama 2-20M \& Llama 2-1B pre-training. We find these two methods consistently underperform Adam-mini. (c): On Llama 2-1B, Adam-mini achieves 40\% higher throughput than Adafactor (tested on $2\times$ A800-80GB GPUs). 
+  }
+  \label{fig:adafactor}
+\end{figure}
+
+{\bf About hyperparameter tuning.} We acknowledge that it might be possible to improve these methods if we spend more resources on grid search (as claimed by a recent work \citep{zhao2024deconstructing}). However, based on our experience so far, it is not easy to tune these methods, and to our knowledge, there is no much open-source guidance.  Recall that there are 9 tunable hyperparameters in Adafactor, so it is rather non-trivial to find the correct combination. In contrast, Adam-mini is much easier to use.  In all our experiments, Adam-mini performs well using {\bf the same hyperparameters as AdamW} (including learning rate, $\beta_1, \beta_2, \epsilon$, etc.).
+
+
+
+{\bf Throughput comparison.} Besides the performance comparison, we further find that Adafactor has a higher latency than Adam-mini (Figure \ref{fig:adafactor} (c)). This is primarily due to two reasons. First, Adam-mini only requires computing the mean by rows of the weight matrix, whereas Adafactor needs to sum across both the rows and the columns. Second, the dimension of $v$ in Adam-mini equals the output dimension or the number of heads, which is significantly smaller than the dimension of $v$ in Adafactor, which equals the product of the input and output dimension. Consequently, Adam-mini saves computation when taking the square root of $v$. As such, Adam-mini reaches a higher throughput.  
+
+{\bf Summary of Section \ref{sec_experiments}.} Finally, we summarize three key observations from all the experiments above. For all the models we tried, we observed that:
+
+\begin{snugshade}
+1. Adam-mini performs on par with AdamW with  {\bf 50\% less memory}.
+
+2. Adam-mini performs well using {\bf the same hyperparameters} as AdamW.
+
+3. Adam-mini's loss curves {\bf closely resemble} those of AdamW.
+\end{snugshade}
+
+
+
+
+\section{Concluding Remarks}
+
+\label{sec_conclusion}
+
+We proposed Adam-mini, an optimizer that saves 50\% memory of Adam. We remark that there is great room to improve the design of Adam-mini:  currently Adam-mini uses a simple and cost-effective way to design a learning rate for each dense Hessian sub-block, but it might not be an optimal way. We leave the development of stronger designs as a future direction.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,317 @@
+\title{Sparse Training of Discrete Diffusion Models for Graph Generation}
+
+\begin{abstract}
+Generative models for graphs often encounter scalability challenges due to the inherent need to predict interactions for every node pair. 
+Despite the sparsity often exhibited by real-world graphs, the unpredictable sparsity patterns of their adjacency matrices, stemming from their unordered nature, leads to quadratic computational complexity.
+In this work, we introduce SparseDiff, a denoising diffusion model for graph generation that is able to exploit sparsity during its training phase.
+At the core of SparseDiff is a message-passing neural network tailored to predict only a subset of edges during each forward pass. When combined with a sparsity-preserving noise model, this model can efficiently work with edge lists representations of graphs, paving the way for scalability to much larger structures.
+During the sampling phase, SparseDiff iteratively populates the adjacency matrix from its prior state, ensuring prediction of the full graph while controlling memory utilization.
+Experimental results show that SparseDiff simultaneously matches state-of-the-art in generation performance on both small and large graphs, highlighting the versatility of our method.\blfootnote{Contact: \texttt{yiming.qin@epfl.ch}.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Random graph models have been foundational in graph generation, with a rich legacy spanning several decades \citep{erdHos1960evolution, aiello2000random, barabasi2013network}. However, recent interest has gravitated towards learned graph models, primarily due to their enhanced ability to represent intricate data distributions. 
+Traditional frameworks like generative adversarial networks \citep{de2018molgan} and variational autoencoders \citep{simonovsky2018graphvae} predominantly addressed graphs with a maximum of 9 nodes. 
+This limitation was somewhat alleviated with the advent of denoising diffusion models \citep{niu2020permutation, jo2022score, vignac2022digress}, elevating capacity to roughly 100 nodes.  However, these models are still not scaled for broader applications like transportation \citep{rong2023city} or financial system anomaly detection \citep{li2023diga}.
+
+The primary bottleneck of many generative graph models is their computational complexity. 
+While many natural graphs are sparse, the unordered nature graphs makes it challenging to exploit this trait. Without a predetermined sparsity pattern, models frequently make exhaustive predictions for every node pair, constraining them to a ceiling of $\sim$200 nodes \citep{vignac2022digress}. Proposed methods to circumvent this issue include imposing a node ordering  \citep{dai2020scalable}, assembling sub-graphs  \citep{limnios2023sagess}, generating hierarchically \citep{karami2023higen, jang2023hggt}, and conditioning the generation on a sampled degree distribution  \citep{chen2023efficient}.
+These methods, designed for large graphs, implicitly make assumptions on the data distribution
+which sometimes reflect in a poor ability to model very constrained graphs such as molecules \citep{chen2023efficient, kong2023autoregressive}.
+To address these limitations, we propose SparseDiff, a generative model for graphs that exploits sparsity in its training phase by adopting edge list representations.
+SparseDiff defines a discrete denoising diffusion model that comprises three primary components:
+\begin{enumerate}[noitemsep, nolistsep]
+    \item A noise model designed to retain sparsity throughout the diffusion process;
+    \item A loss function computed on a set of random node pairs;
+    \item A sparse graph transformer rooted in the message-passing framework.
+\end{enumerate}
+During the sampling process, our model iterates over pairs of nodes and progressively builds the predicted graph. 
+ Setting it apart from other scalable models, SparseDiff harnesses sparsity inherently without imposing additional assumptions on the data distribution. 
+As a result, it also encompasses dense denoising diffusion models as a limit case. 
+
+We show across a wide range of benchmarks that despite its simplicity, 
+SparseDiff matches the generation performance of scalable models on large graphs. It also achieves comparable results to state-of-the-art dense models on small molecular datasets, making our model fit for all graph sizes.
+Overall, SparseDiff provides high controllability over GPU usage and thus extends the capabilities of current discrete graph models, making them suitable for significanlty larger graphs.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=0.99\linewidth]{iclr2023/figures/ego_training_3.png}
+         \caption{Ego training set ($50$ to $399$ nodes).}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=0.99\linewidth]{iclr2023/figures/ego.png}
+         \caption{Generated Ego graphs.}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=0.99\linewidth]{iclr2023/figures/protein_training_3.png}
+         \caption{Protein training set ($100$ to $500$ nodes).}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.49\linewidth}
+         \centering
+         \includegraphics[width=0.99\linewidth]{iclr2023/figures/protein.png}
+         \caption{Generated Protein graphs.}
+    \end{subfigure}
+
+    \caption{Samples from SparseDiff trained on large graphs.
+    }
+    \label{fig:vis_large}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\subsection{Denoising diffusion models for graphs}
+
+Diffusion models  \citep{sohldickstein2015diffusion,ho2020denoising} have gained increasing popularity as generative models due to their impressive performance across generative tasks in computer vision \citep{dhariwal2021diffusion, ho2022imagen, poole2022dreamfusion}, protein generation \citep{baek2021accurate, ingraham2022illuminating} or audio synthesis \citep{kong2020diffwave}.
+They can be trained by likelihood maximization \citep{song2020score, kingma2021variational}, which provides stability gains over generative adversarial networks, and admit a stochastic differential equation formulation \citep{song2020score}.
+Two core components define these models. The first is a Markovian noise model, which iteratively corrupts a data point $x$ to a noisy sample $z^t$ until it conforms to a predefined prior distribution. The second component, a denoising network, is trained to revert the corrupted data to a less noisy state. This denoising network typically predicts the original data $x$ or, equivalently, the added noise $\epsilon$.
+
+After the denoising network has been trained, it can be used to sample new objects. First, some noise $z^T$ is sampled from a prior distribution. The denoising network is then iteratively applied to this object. At each time step, a distribution $p_\theta(z^{t-1} | z^t)$ is computed by marginalizing over the network prediction $p_\theta(x)$:
+\[
+p_\theta(z^{t-1} | z^t) = \int_x q(z^{t-1} | z^t, x) ~dp_\theta(x),
+\]
+and a new object is sampled from this distribution. While this integral is in general difficult to evaluate, two prominent frameworks allow for its efficient computation: Gaussian diffusion \citep{ho2020denoising} and discrete diffusion \citep{austin2021structured}.
+
+When tailored to graph generation, initial diffusion models employed Gaussian noise on the adjacency matrices \citep{niu2020permutation, jo2022score}. They utilized a graph attention network to regress the added noise $\epsilon$. Given that $\epsilon = z^t - z$, regressing the noise is, up to an affine transformation, the same as regressing the clean graph, which is a discrete object. Recognizing the inherent discreteness of graphs, subsequent models \citep{vignac2022digress, haefeli2022diffusion} leveraged discrete diffusion. 
+They recast graph generation as a series of classification tasks, preserving graph discreteness and achieving top-tier results. However, they made predictions for all pairs of nodes, which restricted their scalability.
+
+\subsection{Scalable Graph Generation}
+Efforts to enhance the scalability of diffusion models for graph generation have mainly followed two paradigms: subgraph aggregation and hierarchical refinement.
+
+\paragraph{Subgraph Aggregation} This approach divides larger graphs into smaller subgraphs, which are subsequently combined. Notably, SnapButton \citep{yang2020scaleauto} enhances autoregressive models \citep{liu2018constrained, liao2019efficient, mercado2021graph} by merging subgraphs. Meanwhile, BiGG \citep{dai2020scalable} deconstructs adjacency matrices using a binary tree data structure, gradually generating edges with an autoregressive model. One notable limitation of autoregressive models is the breaking of permutation equivariance due to node ordering dependency. To counter this, \citep{kong2023autoregressive} proposed learning the node ordering --  a task theoretically at least as hard as isomorphism testing. Separately, SaGess \citep{limnios2023sagess} trains a dense DiGress model to generate subgraphs sampled from a large graph, and then merges these subgraphs.
+
+\paragraph{Hierarchical Refinement} This class of methods initially generates a rudimentary graph, which undergoes successive refinements for enhanced detail \citep{yang2020scaleauto,karami2023higen}. Illustrative of this approach, the HGGT model \citep{jang2023hggt} employs a $K^2$-tree representation. Specifically for molecular generation, fragment-based models, such as \citep{jin2018junction, jin2020hierarchical, maziarz2021learning}, adeptly assemble compounds using pre-defined molecular fragments.
+
+A unique approach outside these paradigms was presented by \citet{chen2023efficient}, who initially generated a node degree distribution $\vd^0$ for the nodes, and subsequently crafted an adjacency matrix $\mA$ conditioned on this distribution, preserving sparsity. Despite the universal feasibility of this factorization, the ease of learning the conditional distribution $p_\theta(\mA | \vd^0)$ remains incertain, as there does not even always exist undirected graphs that satisfy a given degree distribution.
+
+Overall, scalable generation models typically either introduce a dependence on node orderings, or rely heavily on the existence of a  community structure in the graphs. In contrast, the SparseDiff model described in next section aims at making no assumption besides sparsity, which results in very good performance across a wide range of graphs.
+
+
+
+\section{SparseDiff: Sparse Denoising Diffusion for Large Graph Generation}
+
+
+We introduce the Sparse Denoising Diffusion model (SparseDiff),  designed to bolster the scalability of discrete diffusion models by adopting edge list representations of graphs.
+While our primary focus is on graphs with discrete node and edge attributes, our model can be readily extended to accommodate continuous node attributes as well.
+
+A graph $G$, composed of $n$ nodes and $m$ edges, is denoted as a triplet $(\mE, \mX, \mY)$. Here, $\mE\in \mathbb N^{2\times m}$  represents the edge list detailing indices of endpoints, while the node and edge attributes are encapsulated using a one-hot format in $\mX \in \{0, 1\}^{n\times a}$ and $\mY\in \{0, 1\}^{m\times b}$, respectively. 
+
+The method's schematic is depicted in Fig.\ \ref{fig:forward}. SparseDiff integrates three key components for training using sparse representations: a noise model that preserves sparsity in the graphs, a graph transformer that operates on sparse representations, and a loss function computed on random pairs of nodes. This integration facilitates efficient model training. However, it is crucial to note that during sampling, our model's complexity remains quadratic in $n$.
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=0.9\textwidth]{iclr2023/figures/overview_sparsediff.png}
+\end{center}
+\caption{Overview of SparseDiff. In order to train a denoising neural network without considering all pairs of nodes, SparseDiff combines \textit{i)} a noise model that preserves sparsity during diffusion; \textit{ii)} a graph transformer $\phi_\theta$ implemented within the message-passing framework; \textit{iii)} a loss function computed on a subset $\mE_q$ of all pairs of nodes. Together, these components allow for using edge lists and training diffusion models on significantly larger graphs than dense methods.}
+\label{fig:forward}
+\end{figure}
+
+\subsection{Sparsity-preserving noise model}
+\label{subsec:noise_model}
+
+Our framework requires a noise model that preserves the sparsity of edges during diffusion. This rules out Gaussian-based models, and we therefore build our model on the discrete diffusion framework of \citet{austin2021structured}. 
+In discrete diffusion, adding noise means jumping from state to state, i.e., sampling a state from a categorical distribution. The transition probabilities are given by a Markov transition matrix $\mQ^t$ for each time step $t$, where $\mQ^t[i,j]$ is the probability of transitioning from state $i$ to state $j$ . In the context of graph generation, the states corresponds to the possible node types or edge types, one particular state for the edges being "no edge". The noise model is a product over nodes and edges, which means that nodes and edges are corrupted independently. In batch form, the noise model can therefore be written $q(G^t|G^{t-1})=(\mX^{t-1}\mQ^t_\mX, \mY^{t-1}\mQ^t_{\mY})$, where $\mQ^t_\mX$ and $\mQ^t_{\mY}$ refers to the transition matrix at step $t$ for nodes and edges respectively, while $\mY \in \mathbb N^{n\times n\times b}$ contains all edge features in dense format.
+Since the noise model is markovian, there noise does not need to be added recursively, and $q(G^t|G)$ can be obtained by multiplying the Markov transition matrices: $q(G^t|G) = (\mX \bar\mQ^t_\mX, \mY \bar\mQ^t_{\mY})$, with $\bar{\mQ}^t = \mQ^1 \mQ^2 \ldots \mQ^t$ for $\mX$ and $\mY$ respectively.
+ 
+As the Markov transition matrices are user-specified, several choices are possible.
+Uniform transitions are the most commonly used model \citep{hoogeboom2021argmax, austin2021structured, yang2023diffsound}, but they do not preserve sparsity in the diffusion process. The two noise models that do not result in dense noisy graphs are absorbing transitions, used in \citep{kong2023autoregressive, chen2023efficient}, and marginal transitions. In this work, we choose to use the marginal transitions as they are supported by theoretical analysis \citep{ingraham2022illuminating, vignac2022digress}. In the marginal transition model, the probability of transitioning to a state is proportional to the marginal probability of that state in the data. In the context of graphs, this means that jumping to the state "no edge" will be very likely, as it is the dominant label in the data. Formally, if $\vp_\mX$ and $\vp_\mE$ are the marginal distribution of node and edge types and $\vp'$ is the transpose of $\vp$, the marginal transition matrices for nodes and edges are defined by: 
+\[
+    \mQ^t_{\mX} = \alpha^t \mI + \beta^t \mathbf{1}_\alpha \vp_\mX \text{\ \ and\ \ } \mQ^t_{\mY} = \alpha^t \mI + \beta^t \mathbf{1}_\alpha \vp'_\mY
+\]
+
+While standard discrete diffusion models simply compute transition probabilities using a product $\mY \mQ^t_{\mY}\in \R^{n\times n \times b}$, this multiplication is not directly compatible with sparse representations of graphs. As a result, we adopt a three-step approach to sample noisy graphs without using dense tensors. First, we compute $\mY \mQ^t_{\mY} \in \R^{m \times b}$ for edges of the clean graph $G$ and sample from this categorical distribution. Next, we determine the number of new edges to add to this list. This number follows a binomial distribution $\mathcal{B}(\bar m_t, k)$ with $\bar m_t= n (n-1) / 2 - m_t$ draws and a success rate of $k=1 - \mQ^t[0, 0]$, where $\bar m_t$ is the number of non-existing edges and $\mQ^t[0, 0]$ is the probability of staying in the state "no edge".
+
+We note that our choice of noise model does not guarantee that the noisy graph is always sparse. However, it is the case with high probability, as stated by the following lemma, which is an application of  \citet{desolneux2008estimating} (cf.
+
+\begin{lemma} (High-probability bound on the sparsity of the noisy graph) \label{thm:tail} \\
+Consider a graph with $n$ nodes and $m$ edges. We denote by $k$ the edge ratio $m / (n (n-1) / 2)$. Let $m_t$ denote the number of edges in the noisy graph $G^t$ sampled from the marginal transition model.
+Then, for $n$ sufficiently large and $k<1/4$, for any $k < r < 1$, we have:
+\begin{equation}
+    log (\mathrm{P}[\frac{2 m_t}{n(n-1)}\geq r]) \sim -\frac{n (n-1)}{2} (rlog\frac{r}{k} +(1-k)log\frac{1-r}{1-k})
+\end{equation}
+\end{lemma}
+
+This lemma shows that, in large and sparse graphs, the probability that the fraction of edges in the noisy graph is higher than $r > k$ decreases exponentially with the graph size. For instance, for $k$ small and $r=2k$, this probability can be written with $c_1 e^{-c_2n^2k}$ for two constants $c_1$ and $c_2$.
+
+
+\subsection{Prediction on a subset of pairs}
+In discrete denoising diffusion for graphs such as \citep{vignac2022digress, haefeli2022diffusion}, a neural network is trained to predict the clean graph, i.e., the class of each node and each pair. This results in a quadratic space and time complexity.
+In order to avoid this limitation, SparseDiff only makes prediction for a random subset $E_q$ of the edges that we call "query edges".
+For this purpose, we introduce a parameter $\lambda$ which corresponds to a fraction of pairs that are sampled uniformly in each forward pass. In our implementation, $\lambda$ was treated as a constant and chosen to balance GPU usage, but it could be chosen as a decreasing function of the number of nodes as well. 
+
+Equipped with a well-defined diffusion model, the denoising network $\phi_\theta$ is trained to predict the clean data distribution represented by $\hat{p}^G = \prod_{1 \leq i \leq n}\hat{p}^X_i \times \prod_{(i,j) \in \mE_q}\hat{p}^Y_{ij}$. This network is trained by minimizing the cross-entropy loss between the predicted distribution and the clean graph, which is simply a sum over nodes and edges thanks to the cartesian product structure of the noise:
+\[
+l(\hat p^G, G) = \sum_{1 \leq i \leq n} \operatorname{cross-entropy}(x_i, \hat p^X_i) + \frac{c}{\lambda} \sum_{(i,j)\in E_q} \operatorname{cross-entropy}(y_{ij}, \hat p^Y_{ij}), \label{eq:loss}
+\]
+where the constant $c$ (set to 5 in our experiments) balances the importance of nodes and edges.
+\subsection{Sparse Message-Passing Transformer}
+
+\begin{figure}
+\includegraphics[width=0.99\textwidth]{iclr2023/figures/query_edges.pdf}
+\centering
+\caption{Definition of the noisy graph $G^t$, the query graph $G_q$, and the computational graph $G_c$, with an edge proportion $\lambda=0.16$. The noisy graph $G^t$ is the result of our sparsity-preserving noising process, the query graph $G_{q}$ consists of a fraction $\lambda$ of randomly chosen edges, and the computational graph $G_{c}$ is the union of the noisy and query graphs. Self-loops are not included in the calculation.}
+\label{fig:query}
+\end{figure}
+
+The final component of the Sparse Diffusion Model is a memory-efficient graph neural network.
+In previous diffusion models for graphs, the main complexity bottleneck lay in the need to encode features for all pairs of nodes, leading to a computation complexity that scaled as $O(l~ n^2~ d_e)$, where $l$ is the number of layers and $d_e$ the dimensionality of edge activations. To address this issue, it is necessary to avoid learning embeddings for all pairs of nodes. Fortunately, as our noisy graphs are sparse, edge lists representations can be leveraged. These representations can be efficiently used within message-passing neural networks (MPNNs) architectures \citep{scarselli2008graph, gilmer2017neural} through
+ the use of specialized librairies such as Pytorch Geometric \citep{fey2019fast} or the Deep Graph Library \citep{wang2019deep}.
+
+The denoising network of SparseDiff has to deal with two simulatenous constraints. First, it needs to make predictions for the query edges $E_q$. Second, in contrast to previous diffusion models, it cannot compute activations for all pairs of nodes.
+Edge predictions, although not possible within most message-passing architectures, are however common in the context of \emph{link prediction for knowledge graphs} \citep{zhang2018link, chamberlain2022graph,boschin2023machine}. We therefore first consider a link prediction approach to our problem, detailed below.
+\paragraph{A first approach: graph learning as a link prediction problem}
+
+Instead of storing activations for pairs of edges, link predictions models typically only store representations for the nodes. In this framework, a graph neural network that learns embeddings for each node is coupled with a auxiliary module that predicts edges. In the simplest setting, this module can simply compute the cosine similarity between node representations. However, our model needs to predict edge features as well, which implies that we need to learn the edge prediction model. In practice, we parametrize this module by a symmetrized multi-layer perceptron that takes the representations $\vx_i^{\textit{out}}$ and $\vx_j^{\textit{out}}$ of both endpoints as input:
+\[
+\hat \ve_{ij} = \operatorname{MLP}(\vx_i^{\textit{out}}, \vx_j^{\textit{out}}) + \operatorname{MLP}(\vx_j^{\textit{out}}, \vx_i^{\textit{out}})
+\]
+
+While this approach is very memory efficient, we find that it has a slow convergence and poor overall performance in practice (cf. In particular, we could not replicate the performance of dense denoising diffusion models, even on datasets of small graphs. This suggests that reconstructing the graph from node representations only, which is theoretically proved to be possible \citep{maehara1990dimension}, might be hard to achieve in practice. 
+
+\paragraph{Second approach: learning  representations for edges}
+
+Based on the previous findings, we consider an approach that stores activations for pairs of nodes. The list of pairs for which we store activations will define our \emph{computational graph} $G_c$, i.e., the graph that is used by the message-passing architecture. This graph contains all nodes with their noisy features $\mX^t$, as well as a list of edges denoted $\mE_c$. 
+In order to bypass the need for an edge prediction module, the computational graph should contain the list of query edges sampled previously, i.e., $\mE_q \in \mE_c$. 
+Furthermore, this graph should ideally contain all information about the noisy graph, which imposes $\mE^t \in \mE_c$. As a result of these two constraints, we define the computational graph as the union of the noisy and query edge lists. Since these two graphs are sparse, the computational graph used in our message-passing architecture is guaranteed to be sparse as well.  
+
+One extra benefit of using a computational graph that with more edges than the noisy graph only is that it acts as a graph rewiring mechanism. Introducing edges in the computational graph that do not exist in the input graph 
+provides the message-passing network with shortcuts, which is known to help the propagation of information and alleviate over-squashing issues \citep{alon2020bottleneck, topping2021understanding, pmlr-v202-di-giovanni23a}.
+
+\paragraph{Architecture}
+
+Our denoising network architecture builds upon the message-passing transformer architecture developed in \citep{shi2020masked}. These layers integrate the graph attention mechanism \citep{velivckovic2017graph} within a Transformer architecture by adding normalization and feed-forward layers. In contrast to previous architectures used in denoising networks for graphs such as \citep{jo2022score} or \citep{haefeli2022diffusion}, the graph attention mechanism is based on edge list representations and is able to leverage the sparsity of graphs.
+
+We however incorporate several elements of \citep{vignac2022digress} to improve performance. 
+Similarly to their model, we internally manipulate graph-level features (such as the time information), as they are able to store information more compactly. Features for the nodes, edges, and graphs all depend on each other thanks to the use of PNA pooling layers \citep{corso2020principal} and FiLM layers \citep{perez2018film}.
+
+Finally, similarly to standard graph transformer networks, we use a set of features as structural and positional encodings. As highlighted in \citep{vignac2022digress}, these features can only be computed when the noisy graphs are sparse, which is an important benefit of discrete diffusion models. 
+We note that not all these encodings can be computed in sub-quadratic time. However, we find that this is not an issue in practice for the graphs that we consider as these features are not back-propagated through. On graphs with 500 nodes, computing these features is for example 5 times faster than the forward pass itself. On larger graphs, these encoding might however be removed for more efficient computations.
+\subsection{Sampling}
+
+Once the denoising network has been trained, it can be used to sample new graphs.
+Similarly to other diffusion models for graphs, we first sample a number of nodes and keep this number constant during diffusion. We then sample a random graph from the prior distribution $G^T \sim \prod_{i=1}^n \operatorname{Cate}(\vp_\mX) \times \prod_{1 \leq i < j \leq n} \operatorname{Cate}(\vp_\mY)$, where $\vp_\mX$ and $\vp_\mY$ are the marginal probabilities of each class in the data and $\operatorname{Cate}(\vp)$ denotes the categorical distribution with probabilities $\vp$. Note that in the particular case of unattributed graphs, sampling from this prior distribution amounts to sampling an Erdos-Renyi graph. As previously, this graph can be sampled without using dense representations by i) sampling a number of edges to add from a categorical distribution, ii) sampling uniformly locations for these edges, and iii) sampling their edge type.
+
+After the graph $G^T$ has been sampled, the denoising network can be applied recursively in order to sample previous time step. Unfortunately, the full graph cannot be predicted at once, as this would require quadratic memory. Furthermore, it would also create a distribution shift: as the message passing network has been trained on computational graphs $G_c^t$ that are sparse, it should not be used at sampling time on dense query graphs. 
+
+We therefore use an iterative procedure, illustrated in Fig. \ref{fig:sample}, to populate the matrix of predictions. At each iteration, we sample $\lambda n (n-1) / 2$ edges among the unfilled entries of the adjacency matrix, and use the message-passing network to predict these edges. The node features are only predicted at the last of these iterations. This procedure results in $\lceil \frac{1}{\lambda} \rceil $ calls to the denoising diffusion model at each diffusion step. Our procedure therefore results in quadratic time complexity at sampling time, which is, as noted earlier, difficult to avoid without making assumptions on the data distribution.
+
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=0.99\textwidth]{iclr2023/figures/sampling.pdf}
+\end{center}
+\caption{Visualization of the iterative sampling process, with a query edge proportion %\lambda of 0.5.   In the figure, SparseDiff iterates twice to cover all node pairs, with each iteration involving the sampling of new edge types for $50\%$ edges to populate the adjacency matrix.
+}
+\label{fig:sample}
+\end{figure}
+
+
+\section{Experiments}
+
+
+We conduct experiments to present the capability of SparseDiff across a wide range of graphs.
+SparseDiff matches state-of-the-art performance on datasets of small molecules (QM9, Moses), while being simulatenously very competitive on datasets of larger graphs (Planar, SBM, Protein, Ego).
+We compare the performance of SparseDiff to GraphNVP \citep{madhawa2019graphnvp}, DiGress \citep{vignac2022digress}, Spectre \citep{martinkus2022spectre}, GraphRNN \citep{you2018graphrnn}, GG-GAN \citep{krawczuk2020gg}, JDSS \citep{jo2022score}, as well as several scalable models: HiGen \citep{karami2023higen}, EDGE \citep{chen2023efficient}, BiGG \citep{dai2020scalable} and HGGT \citep{jang2023hggt}, and GraphARM \citep{kong2023autoregressive}.
+\subsection{Molecule generation}
+
+Since our method admits dense models as a limit when $\lambda=1$, it should match their performance on datasets of small graphs. We verify this capability on the QM9, and Moses molecular datasets used in DiGress \citep{vignac2022digress}. The QM9 dataset \citep{wu2018moleculenet} that contains molecules with up to 9 heavy atoms can either be treated with implicit or explicit hydrogens. The Moses benchmark \citep{polykovskiy2020molecular}, based on ZINC Clean Leads, contains drug-sized molecules and features many tools to assess the model performance. Since QM9 contains charged atoms, we incorporate formal charges as an additional discrete node feature that is learned during diffusion, similarly to \citep{Vignac2023MiDiMG}. For fair comparison, we also apply this improvement to DiGress.
+
+\begin{table}[t]
+    \centering
+        \caption{Molecule generation on QM9 with implicit hydrogens (mean and std over 5 samplings). For fair comparison, DiGress was modified to handle formal charges and benchmarked. While there is no major benefit to using sparsity on small graph, SparseDiff is very competitive, while other scalable models have a poor FCD metric, indicating that they does not correctly model the data.
+        }
+    \begin{tabular}{l l r r r r} \toprule
+    Class & Method & Valid $(\%) \uparrow$  & Unique $(\%) \uparrow$ & Connected $(\%) \uparrow$ & \hspace{-0.2cm} FCD $\downarrow$\hspace{0.2cm} \\ \midrule 
+    Dense & SPECTRE   & $87.3\hspace{.4cm}$ & $35.7\hspace{.4cm}$ & -\hspace{.9cm} & - \hspace{.8cm} \\
+    &GraphNVP  & $83.1\hspace{.4cm}$ & $99.2\hspace{.4cm}$ & -\hspace{.9cm} & - \hspace{.8cm} \\
+    &GDSS      & $95.7\hspace{.4cm}$ & $98.5\hspace{.4cm}$ & -\hspace{.9cm} & - \hspace{.8cm} \\
+    &DiGress      &  $99.2\hspace{.4cm}$ & $95.9\hspace{.4cm}$ & $99.5$\hspace{.7cm} & $0.15$\hspace{.6cm} \\
+    Sparse & GraphARM  & $90.3\hspace{.4cm}$ & -\hspace{.6cm} & -\hspace{.9cm} & 1.22\hspace{.6cm} \\
+
+    &EDGE         & $99.1\hspace{.4cm}$ & $\bm{100}\hspace{.4cm}$ & -\hspace{.9cm} & $0.46$\hspace{.6cm} \\
+    &HGGT         & $99.2\hspace{.4cm}$ & $95.7\hspace{.4cm}$ & -\hspace{.9cm} & 0.40\hspace{.6cm} \\
+    &SparseDiff(ours)  &$\bm{99.6}\spm{.04} $\hspace{-0.18cm}  & $99.7\spm{.01}$\hspace{-0.18cm} & $\bm{99.7}\spm{.02}$ & $\bm{0.11} \spm{.01}$\\
+    \bottomrule
+    \label{tab:qm9}
+\end{table}
+
+For QM9 dataset, we assess performance by checking the proportion of connected graphs, the molecular validity of the largest connected component (measured by the success of RDKit sanitization), uniqueness over 10.000 molecules. Additionally, we use the Frechet ChemNet Distance (FCD) \citep{preuer2018frechet} which measures the similarity between sets of molecules using a pretrained neural network. 
+In Table \ref{tab:qm9}, we observe that SparseDiff overall achieves the best performance on QM9 with implicit hydrogens. In particular, it clearly outperforms other scalable methods on the FCD metric, showing that such methods are not well suited to small and very structured graphs.
+
+ We find that SparseDiff compares similarly to the DiGress model, which is expected as small graphs are not very sparse.
+\subsection{Large graph generation}
+
+\begin{table}
+\centering
+      \caption{
+      Unconditional generation on the Stochastic Block Model (SBM) and Planar datasets. A SBM graph is valid if it passes a statistical test for the stochastic block model, while a planar graph is valid if it is planar and connected. Results are presented in the form of ratios: $\operatorname{MMD}(\text{generated}, \text{test})^2 / \operatorname{MMD}(\text{train}, \text{test})^2$. VUN: valid, unique \& novel graphs.
+      }
+    \begin{tabular}{ l r r r r r r r r}
+    \toprule
+      Dataset    & \multicolumn{4}{c}{Stochastic block model} & 
+       \multicolumn{4}{c}{Planar}\\ \midrule
+     Model &  Deg.$\downarrow$ & Clust.$\downarrow$ & Orbit$\downarrow$ & V.U.N.$\uparrow$ & Deg. $\downarrow$ & Clust. $\downarrow$ & Orbit$\downarrow$ & V.U.N.$\uparrow$ \\ \midrule
+     GraphRNN & 6.9\hspace{.55cm}   & 1.7\hspace{.4cm}  & 3.1\hspace{.4cm}        & 5\%\hspace{.25cm}  & 24.5 \hspace{.2cm}  & 9.0 \hspace{.4cm}  & 2508  \hspace{.1cm}   & 0\%\\
+     GRAN     & 14.1\hspace{.55cm}  & 1.7\hspace{.4cm}  & 2.1\hspace{.4cm}         & 25\%\hspace{.25cm} & 3.5  \hspace{.2cm}  & 1.4 \hspace{.4cm} & 1.8    \hspace{.1cm}    & 0\%\\
+     GG-GAN   & 4.4\hspace{.55cm}   & 2.1\hspace{.4cm}  & 2.3\hspace{.4cm} & 25\%\hspace{.25cm} & --\hspace{.4cm} & --\hspace{.6cm} &--\hspace{.3cm} & --\hspace{.2cm} \\ 
+     SPECTRE  & 1.9\hspace{.55cm}   & 1.6\hspace{.4cm}  & 1.6\hspace{.4cm}        &  53\%\hspace{.25cm} & 2.5  \hspace{.2cm}  & 2.5 \hspace{.4cm} & 2.4     \hspace{.1cm}   &  25\%\\
+     DiGress  & $\bm{1.6}$\hspace{.55cm} & $\bm{1.5}$\hspace{.35cm} & 1.7\hspace{.4cm} & $\bm{74}\%\hspace{.25cm}$ & $\bm{1.4}$ \hspace{.15cm}   & $\bm{1.2}$ \hspace{.4cm} &  $\bm{1.7}$ \hspace{.1cm}      & $75$\%\\ 
+    HiGen  & 2.4\hspace{.55cm} & $\bm{1.5}$\hspace{.35cm} & $\bm{1.4}$\hspace{.35cm} & --\hspace{.65cm} & --\hspace{.4cm} &--\hspace{.5cm} &--\hspace{.3cm} & --\hspace{.2cm} \\ 
+     SparseDiff  & $\bm{2.0}\spm{1.6}$ & $\bm{1.5}\spm{.0}$\hspace{-.1cm} & $\bm{1.4}\spm{.1}$\hspace{-.1cm} & $56\%\spm{8.5}$\hspace{-.3cm}
+     &  $3.6 \spm{1.7}$\hspace{-.3cm} & $\bm{1.4}\spm{.4}$& $3.4\spm{1.2}$
+     \hspace{-.4cm} & $\bm{88}\%\spm{7}$ \hspace{-.4cm} \\ 
+     \bottomrule
+    \end{tabular}
+    \label{tab:sbm}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \caption{Unconditional generation on graphs with up to 500 nodes. On such graphs, dense models such as DiGress clearly fail, whereas SparseDiff presents competitive performance on most metrics. Results are presented in the form of ratios: $\operatorname{MMD}(\text{generated}, \text{test})^2 / \operatorname{MMD}(\text{train}, \text{test})^2$.}
+    \label{tab:large}
+    \begin{tabular}{l l l r r r r r r}
+    \toprule
+     Dataset & Class & Model    &  Degree$\downarrow$& Clust.$\downarrow$ & Orbit$\downarrow$ & Spectre$\downarrow$ & FID $\downarrow$\hspace{.2cm}  & RBF $\downarrow$\hspace{.2cm} \\ \midrule 
+     \emph{Protein} & Dense & GRAN   & 6.7 \hspace{.2cm} & 7.1 \hspace{.2cm} & 40.6 \hspace{.2cm}   & 5.7\hspace{.45cm} & --\hspace{0.55cm}  & --\hspace{0.55cm} \\
+     && DiGress      & $18.4 \spm{2.3}$\hspace{-.3cm} & $14.8\spm{2.1}$\hspace{-.3cm} & $16.0\spm{5.5}$\hspace{-.3cm} & $5.9\spm{1.1}$\hspace{-.1cm} & 7.9\hspace{.45cm} & 5.2\hspace{0.55cm}  \\
+     &Sparse & DRuM         & 6.3 \hspace{0.2cm} & 9.7 \hspace{0.2cm} & 10.8 \hspace{0.2cm} & 3.3\hspace{.45cm} & --\hspace{.55cm}  & --\hspace{0.55cm} \\
+     &&BiGG         & $\bm{0.3}$  \hspace{0.2cm} & 3.7  \hspace{0.2cm} & $\bm{7.1}$  \hspace{0.2cm} & 5.0\hspace{0.45cm} & --\hspace{.55cm} & --\hspace{0.55cm} \\
+     &&HiGen        & 4.0 \hspace{0.2cm} & 6.4 \hspace{0.2cm} & 7.3 \hspace{0.2cm} & 2.8\hspace{0.45cm} & --\hspace{.55cm}  & --\hspace{0.55cm} \\
+     \emph{Ego} &    Dense & DiGress      & 354 \hspace{.2cm} & $\bm{0.9}$ \hspace{0.2cm} & 100 \hspace{0.2cm} & --\hspace{.55cm} & 18.7\hspace{.45cm} & 5.3\hspace{.55cm} \\
+     &Sparse &EDGE         & 290 \hspace{0.2cm} & 17.3 \hspace{0.2cm} & 43.3 \hspace{0.2cm} & --\hspace{.55cm} & $\bm{15.8}$\hspace{.45cm} & 4.0\hspace{.55cm} \\
+     &&HiGen        & $\bm{9.5}$ \hspace{0.2cm} & 4.9 \hspace{0.2cm}  & $\bm{2.4}$ \hspace{0.2cm} & $\bm{2.9}$\hspace{.45cm} & --\hspace{.5cm} & --\hspace{0.55cm} \\
+     &&SparseDiff   & $\bm{9.5}\spm{3.5} \hspace{-.3cm}$ & $5.4\spm{.2} \hspace{-.15cm}$ & $\bm{2.5}\spm{.1}\hspace{-.15cm}$ & $\bm{3.6}\spm{1.1}\hspace{-.1cm}$ & $\bm{16.1}\spm{12.9}\hspace{-.2cm}$ & $\bm{3.9}\spm{1.0}$ \\
+     \bottomrule
+    \end{tabular}
+\end{table}
+We also evaluate our model on datasets of graphs with increasing size: first, a dataset of Planar graphs (with 64 nodes per graph) which tests the ability of a model to generate graphs without edge crossings. Then, a dataset drawn from the Stochastic Block Model (SBM) \citep{martinkus2022spectre} with 2 to 5 communities. SBM graphs contains up to $200$ nodes, which is the largest size used in dense diffusion models such as DiGress \citep{vignac2022digress}. Finally, we use the Ego \citep{Sen2008CollectiveCI} and Protein \citep{Dobson2003DistinguishingES} datasets that feature graphs with up to $500$ nodes. Ego is sourced from the CiteSeer \citep{citeseer} dataset, captures citation relationships, while Protein represents amino acids connected when they are within 6 Angstroms of each other.
+For evaluation, baseline methods often sample the same number of graphs as the test set, introducing significant variance when this number is limited. To enhance reliability and fair comparisons, we recommend using at least five samplings and reporting their mean and variance. Additionally, MMD metrics, commonly used in graph generation tasks, produce small values that are challenging to directly compare.
+In addition to the MMD metrics, we report the validity of generated graphs for the SBM dataset, which is the fraction of graphs that pass a statistical test for the stochastic block model. For the Planar dataset, validity corresponds to the fraction of graphs that are planar and connected. We also use the FID and RBF MMD  metrics defined in \citet{thompson2022evaluation}. These metrics measure the diversity and fidelity of generated graphs using a randomly parametrized GNN.
+
+Results are presented in Tables \ref{tab:sbm}  and \ref{tab:large}. We observe that dense models can achieve very good results on the SBM and planar graphs, which are not too large, but fail on larger graphs. The reason is that a tiny batch size (of 2 on a 32Gb GPU) needs to be used for such graphs, which makes training very slow. SparseDiff is competitive with both dense and scalable models on most metrics of all datasets, despite not being tailored to large graphs only. We however note that evaluation on these datasets is typically done by sampling only a small number of graphs, which makes results very brittle. 
+
+We observe that SparseDiff, despite a training time which is half of DiGress, is competitive with the state of the art. We however note that as the dataset is very small, which makes results very brittle across different samplings from the same model. We therefore strongly advocate for reporting results over several samplings for fair comparison.
+As shown in Table , SparseDiff comparable results to other scalable methods for both datasets on most of the metrics.
+Again, we highlight that some metrics exhibit high variance and recommend evaluating on several samplings, which should for instance prevent results inferior to $1.0$ from appearing.
+
+
+
+\section{Conclusion}
+
+
+In this study, we introduce SparseDiff, a scalable discrete denoising diffusion model for graph generation. SparseDiff permits the use of edge list representations by predicting only a subset of edges at once. Experimental results demonstrate that SparseDiff exhibits very good performance across all graph sizes, whereas other scalable methods tend to perform poorly on small, structured graphs.
+SparseDiff enhances the capabilities of discrete diffusion models to process larger datasets, thereby broadening its applicability, including tasks such as generating large biological molecules and community graphs, among others.
+
+
+
+

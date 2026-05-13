@@ -1,0 +1,386 @@
+\title{CryoFM: A Flow-based Foundation Model for Cryo-EM Densities}
+
+\begin{abstract}
+
+
+Cryo-electron microscopy (cryo-EM) is a powerful technique in structural biology and drug discovery, enabling the study of biomolecules at high resolution. Significant advancements by structural biologists using cryo-EM have led to the production of \rebuttal{around 40k} protein density maps at various resolutions \rebuttal{on EMDB}\footnote{EMDB~\citep{emdb} is a public repository for cryo-EM density volumes.}. However, cryo-EM data processing algorithms have yet to fully benefit from our knowledge of biomolecular density maps, with only a few recent models being data-driven but limited to specific tasks. In this study, we present \ours, a foundation model designed as a generative model, learning the distribution of high-quality density maps and generalizing effectively to downstream tasks. Built on flow matching, \ours is trained to accurately capture the prior distribution of biomolecular density maps. Furthermore, we introduce a flow posterior sampling method that leverages \ours as a flexible prior for several downstream tasks in cryo-EM and cryo-electron tomography (cryo-ET) without the need for fine-tuning, achieving state-of-the-art performance on most tasks and demonstrating its potential as a foundational model for broader applications in these fields.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Cryo-electron microscopy is an important technique in structural biology and drug discovery, allowing the determination of high-resolution 3D structures of biomolecules that are difficult to study through conventional methods, offering insights into molecular mechanisms and aiding in fields like drug discovery \citep{nogales2015cryo}. A major component of cryo-EM data processing involves reconstructing 3D structures from noisy 2D projections of particles. It can be formulated as an inverse problem \citep{bendory2020single,singer2020computational}, which aims at recovering the signal $\rvx \in \mathbb{R}^{n}$ (i.e., a clean protein density) from the observation $\rvy \in \mathbb{R}^{m}$ \footnote{The signal $\rvx \in \mathbb{R}^{D\times D\times D}$ denotes a clean protein density, where $D$ is the side length. The observation $\rvy$ can have any arbitary shape, so we use $\rvx \in \mathbb{R}^{n}$ for ease of notation but without loss of generality.}. Under this formulation, following Bayesian statistics, the objective is to sample a density from the posterior $p(\rvx|\rvy)$, which can be factorized to $p(\rvx|\rvy)\propto p(\rvy|\rvx)p(\rvx)$. Thus, the prior distribution becomes essential for guiding the reconstruction process and improving the accuracy of the resulting structures.
+
+\citet{scheres2012relion2} first introduced a Gaussian distribution as the prior $p(\rvx)$ in 3D reconstruction for cryo-EM, effectively functioning as a frequency-dependent low-pass filter, which has proven useful in many cases. Building on this, recent works have explored more sophisticated regularizers rather than explicitly defining a prior distribution \citep{punjani2020non, tegunov2021multi, kimanius2021exploiting, li2023cryostar, schwab2024dynamight, kimanius2024data, liu2024overcoming}. While these approaches were initially developed for 3D reconstruction tasks, their methodologies are closely aligned with the methods for density map modification and post-processing \citep{jakobi2017model,ramirez2020automatic,terwilliger2020cryo,kaur2021local, sanchez2021deepemhancer,he2023improvement}. Both share the common objective of improving the quality of cryo-EM maps, whether during refinement or in post-processing. Among all these approaches, a line of methods has emerged that utilizes data-driven models to directly learn $ p(\rvx|\rvy) $ from data, showing strong potential \citep{sanchez2021deepemhancer,he2023improvement,kimanius2024data}. While powerful, these models are often designed for specific tasks, limiting their general applicability and versatility. 
+
+
+
+
+\begin{figure}[th]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/intro.pdf}
+\caption{The overview of \ours. In the training stage, \ours learns a vector field $\nnvtxt$, whose corresponding probability flow generates the data distribution $p_0(\rvx_0)$ of high-quality protein densities. In the inference stage, given an observation $\rvy$, a likelihood term $p_t(\rvy|\rvx_t)$ is incorporated to convert the unconditional vector field $\nnvtxt$ to a conditional one $\nnvtxty$, so that we can sample from the posterior distribution $p_0(\rvx_0|\rvy)$. This enables signal restoration of the density map, resulting in improved resolution of the alpha helices in the shown case.
+}
+\label{fig:intro}
+\end{figure}
+
+
+Foundation models leverage prior knowledge and provide versatility across a wide range of applications. In particular, they have revolutionized AI for protein structure prediction and design by utilizing vast datasets to tackle diverse tasks \citep{jumper2021highly, baek2021accurate, lin2023evolutionary, krishna2024generalized, hayes2024simulating, abramson2024accurate, wang2024diffusion}. \rebuttal{Chroma \citep{ingraham2023illuminating} and RFDiffusion \citep{watson2023novo} are two foundation models for protein structure modeling, which are broadly applicable to many structure-related tasks.} However, experimental electron density maps, a key modality in structural biology, have largely been neglected in this space. Meanwhile, the cryo-EM field has not yet taken full advantage of foundation models, which integrate prior knowledge and offer flexibility across multiple applications. \rebuttal{\citet{wang2024diffmodeler} developed a condition diffusion model in the density space, which achieves superior results by refining the map for model building, but is limited to single downstream task.} In this study, we present a \textit{foundation model}, \ours, that directly models the prior distribution $p(\rvx)$ by learning the distribution of high-quality cryo-EM density maps through flow matching. Notably, flow matching \citep{lipman2022flow,liu2022flow} is a well-established generative model, which achieves state-of-the-art results in many applications \citep{dao2023flow,esser2024scaling,yim2023fast}. The key ingredient of flow matching is a time-dependent vector field $\nnvtxt$, which can be employed to progressively denoise a noise vector into a data sample and is closely related to the score of the prior distribution $\nabla_{\rvx_t} \log p(\rvx_t)$. In \ours, when applied to downstream tasks, we draw a sample from the posterior distribution with its score \citep{ho2020denoising,song2021scorebased}: $\nabla_\rvx \log p(\rvx|\rvy) = \nabla_\rvx \log p(\rvx) + \nabla_\rvx \log p(\rvy|\rvx)$. In contrast to expert-designed prior, a data-driven prior is more powerful and expressive. Compared with models that directly learn the posterior, a decomposition of the prior and likelihood is more robust and versatile. As long as we can derive the likelihood term for a downstream task, we can combine it with the learned prior in a plug-and-play fashion \citep{zhang2021plug,venkatakrishnan2013plug} to sample from the posterior.
+
+ 
+\ours consists of two models: \ours-S, which captures fine local details at high resolution, and \ours-L, which focuses on the overall global shape of the biomolecule at medium to low resolution\footnote{Unless stated otherwise, \ours refers to \ours-S throughout this paper.}. \Figref{fig:intro} provides an overview of \ours. In the training stage, we regress the vector field with high-quality density data downloaded from the EMDB database \citep{10.1093/nar/gkad1019}. When applied to downstream tasks, we propose a flow posterior sampling method to convert the vector field $\nnvtxt$ to a conditional one $\nnvtxty$, which \rebuttal{can be used to sample from} the posterior distribution $p(\rvx|\rvy)$. When applied to various downstream tasks, \ours achieves state-of-the-art results on most of the experiments, demonstrating the power and potential of \ours as a \textit{foundation model} for solving more complex problems in cryo-EM and cryo-ET.
+Our main contributions are summarized as follows: (1) we present the first flow-based generative model as a foundation model that learns the distribution of high-quality cryo-EM density maps; (2) we derive a flow posterior sampling algorithm, enabling \ours to be effectively utilized as a prior for various downstream tasks; (3) in an unsupervised manner, we achieve better performance in several downstream tasks compared to DeepEMhancer \citep{sanchez2021deepemhancer}, EMReady \citep{he2023improvement} and spIsoNet \citep{liu2024overcoming}; (4) we explore different model architectures and configurations to optimize the training of generative models on large biomolecular density maps.
+
+
+
+\section{Related Work}
+
+In this section, we will briefly review the mostly related work on cryo-EM and diffusion/flow matching for inverse problems. A more detailed discussion on these topics can be found in Section~\ref{sec:supp_related_work}.
+\noindent\textbf{Density modification and denoising in cryo-EM} Density modification refers to the process of using known properties of the expected density in specific regions of a map to correct errors in observed cryo-EM density maps \citep{terwilliger2020improvement}. Deep learning has increasingly contributed to cryo-EM map denoising and modification, with methods divided into two categories: pretrained models and self-supervised approaches. Pretrained models, like DeepEMhancer \citep{sanchez2021deepemhancer} and EMReady \citep{he2023improvement}, learn the posterior $p(\rvx|\rvy)$ from data to recover high-frequency details. In contrast, self-supervised approaches, such as M \citep{tegunov2021multi} and spIsoNet \citep{liu2024overcoming}, are trained on the dataset being processed, offering more robustness but take longer to process one dataset. %A more detailed discussion on this topic can be found in Section~\ref{sec:supp_related_work_densitymod}.
+
+
+\noindent\textbf{Missing wedge problem in cryo-ET} Cryo-electron tomography (cryo-ET) is an imaging technique used to reconstruct 3D volumes of biological specimens from 2D images captured at various tilt angles \citep{luvcic2005structural}. The resulting 3D volumes, known as tomograms, provide detailed views of cellular structures, with smaller regions, called subtomograms, extracted to focus on specific structures like proteins \citep{wan2016cryo}. A key challenge in cryo-ET is the missing wedge problem, caused by the limited range of tilt angles during data acquisition, which leaves a wedge-shaped region in Fourier space without information, leading to anisotropic resolution and artifacts. Traditional approaches use signal processing and regularization techniques to address the missing wedge \citep{goris2012electron, deng2016icon, yan2019mbir, zhai2020lottor}, while recent deep learning methods have shown promise in tackling this issue by leveraging data-driven models \citep{liu2022isotropic, van2024missing}. 
+
+
+\noindent\textbf{\textit{Ab initio} modeling in cryo-EM} \textit{Ab initio} modeling in cryo-EM involves estimating the 3D structure of a protein from 2D particle images with unknown orientations \citep{crowther1970reconstruction}. One of the early approaches involved using 2D class averages, which are representative images created by aligning and averaging particles with similar views to improve the signal-to-noise ratio (SNR) \citep{ludtke1999eman, voss2010toolbox}. However, since the introduction of cryoSPARC, modern methods now use raw particle images directly for model estimation, leveraging stochastic gradient descent (SGD) to bypass the need for class averages \citep{punjani2017cryosparc}. 
+
+
+\noindent\textbf{Diffusion/Flow Matching for Inverse Problem} Inverse problems refer to a class of problems where the goal is to recover the original sample from \rebuttal{the forward model's} observation, such as image super-resolution \citep{haris2018deep}, inpainting \citep{yeh2017semantic}, deblurring \citep{kupyn2019deblurgan}, etc. 
+Since a pretrained DDPM/Flow models the data distribution (prior distribution), it can help discover the posterior distribution given a \rebuttal{forward} model (likelihood). Specifically, \citet{chung2022diffusion} developed diffusion posterior sampling for general inverse problems, removing the need for strong assumptions like the linearity of the \rebuttal{forward} operator. Another line of research examines the solution to the inverse problem when the \rebuttal{forward} operator is unknown \citep{chung2023blind,kapon2024mas}. \rebuttal{For protein structure modeling, \citet{levy2024solving} adopts Chroma \citep{ingraham2023illuminating} as the diffusion prior for a dozen of downstream tasks, including atomic model refinement in cryo-EM.}
+
+
+\section{Preliminaries}
+
+
+\rebuttal{In this section, we briefly review two key components of cryoFM. In the training stage, flow matching (\Secref{sec:fm}) is employed as the framework to learn the distribution $p(\mathrm{density})$. In the inference stage, given some observations (noisy densities, 2D projections, etc.), we use the posterior sampling (\Secref{sec:dps}) technique to sample a density from $p(\mathrm{density}|\mathrm{observation})$.}
+
+\subsection{Flow Matching}
+\label{sec:fm}
+Flow matching \citep{lipman2022flow,liu2022flow} defines the generative process of a data point $\rvx_0 \in \mathbb{R}^n$ by continuously transforming a sample $\rvx_1 \in \mathbb{R}^n$ from the noise distribution, \rebuttal{where the state at an intermediate timestep $t\in[0,1]$ is denoted by $\rvx_t \in \mathbb{R}^n$.}
+\rebuttal{A \textit{flow} is the path traversed by the state $\rvx_t$, which} is characterized by an ordinary differential equation (ODE):
+\begin{align} \label{eq:flow_ode}
+    d\rvx_t = \rebuttal{\nnvtxt}dt,
+\end{align}
+where \rebuttal{$\nnv:[0,1]\times\mathbb{R}^n\to\mathbb{R}^n$} is a \textit{time-dependent vector field} parameterized by a neural network \rebuttal{parameterized by $\Theta$}, \rebuttal{which defines the transformation of the state $\rvx_t$}.
+\rebuttal{At each time step $t$, the  state $\rvx_t$ follows a distribution $p_t(\rvx_t)$, where $p_t:[0,1]\times\mathbb{R}^n\to\mathbb{R}_{\ge 0}$ is a time-dependent probability density function, i.e., $\int p_t(\rvx_t)d\rvx_t=1$. Since $p_t(\rvx_t)$ evolves from the noise distribution $p_1(\rvx_1)$ to the data distribution $p_0(\rvx_0)$, it is referred to as a \textit{probability density path} generated by the vector field \rebuttal{$\nnvtxt$}. An illustration of the concepts of flow matching can be found in \Figref{fig:fm_concepts}.} 
+
+\rebuttal{Given a set of data points sampled from $p_1(\rvx_1)$ and $p_0(\rvx_0)$, flow matching aims to learn the vector field $\nnv$ from the data.} \citet{chen2018neural} directly solves \Eqref{eq:flow_ode} via a differentiable neural ODE solver. \citet{lipman2022flow} and \citet{liu2022flow} suggest that it is more efficient to learn a manually designed conditional vector field $\ru_t(\cdot|\rvx_0):[0,1]\times\mathbb{R}^n\to\mathbb{R}^n$ given a data point $\rvx_0$. For example, the conditional flow can be a straight line between $\rvx_0$ and a noise sample $\rvx_1$:
+\begin{align} \label{eq:rec_flow_traj}
+    \rvx_t|\rvx_0=(1-t)\rvx_0+t\rvx_1,
+\end{align}
+where the corresponding vector field is \rebuttal{$\ru_t(\rvx_t|\rvx_0)=\rvx_1-\rvx_0$}.
+Finally, the conditional flow matching objective \citep{lipman2022flow} is defined as follows:
+\rebuttal{\begin{align*}
+  \mathcal{L}(\Theta)=\mathbb{E}_{t \sim \mathcal{U}[0,1],\rvx_0 \sim p_0(\rvx_0),\rvx_1 \sim p_1(\rvx_1)}\|\nnvtxt-(\rvx_1-\rvx_0)\|^2_2,
+\end{align*}}
+which is equivalent to optimizing the original flow matching objective \citep{lipman2022flow}.
+
+\subsection{Diffusion Posterior Sampling}
+\label{sec:dps}
+Diffusion posterior sampling (DPS) has emerged as a promising approach for solving inverse problems \citep{song2021scorebased,song2021solving,chung2023solving}. Given a measurement $\rvy\in\mathbb{R}^m$ derived from $\rvx\in\mathbb{R}^n$ with a \rebuttal{forward} operator $\mathcal{A}:\mathbb{R}^n\to\mathbb{R}^m$, the goal is to sample $\rvx$ from the posterior $p(\rvx|\rvy)$. \rebuttal{By Bayes' theorem, it is easy to show that the score of the posterior distribution is:}
+\begin{align}\label{eq:bayes-score}
+    \nabla_{\rvx_t} \log p_t(\rvx_t|\rvy) = \nabla_{\rvx_t} \log p_t(\rvx_t) + \nabla_{\rvx_t} \log p_t(\rvy|\rvx_t).
+\end{align}
+However, computing \rebuttal{$\log p_t(\rvy|\rvx_t)=\log \int_{\rvx_0}p(\rvx_0|\rvx_t)p_0(\rvy|\rvx_0)d\rvx_0$} is intractable since it requires the integration over all possible \rebuttal{$\rvx_0 \sim p_0(\rvx_0|\rvx_t)$}. \citet{chung2022diffusion} proposed to use a Laplace approximation of the likelihood term: \rebuttal{$p_t(\rvy|\rvx_{t}) \approx p_0(\rvy|\hat{\rvx}_0(\rvx_t))$}, \rebuttal{where $\hat{\rvx}_0(\rvx_t)$ is the posterior mean estimated by the diffusion model.} The conditional score can thus be approximated by:
+\begin{align*}
+    \nabla_{\rvx_t} \log p_t(\rvx_t|\rvy) \approx \nabla_{\rvx_t} \log p_t(\rvx_t) + \nabla_{\rvx_t} \log p_0(\rvy|\hat{\rvx}_0(\rvx_t)),
+\end{align*}
+ If we assume the observation distribution $p_0(\rvy|\rvx)$ is Gaussian conditioned on $\rvx$, \rebuttal{we can show that the gradient of the log-likelihood satisfies}:
+\begin{align}\label{eq:Gaussian}
+    \nabla_{\rvx_t} \log p_0(\rvy|\hat{\rvx}_0(\rvx_t)) \propto \rebuttal{-}\nabla_{\rvx_t} \|\rvy-\mathcal{A}\hat{\rvx}_0(\rvx_t)\|^2_2.
+\end{align}
+Putting all these things together, we can approximate the score of the posterior distribution by:
+\begin{align*}
+    \nabla_{\rvx_t} \log p(\rvx_t|\rvy) \approx \nabla_{\rvx_t} \log p_t(\rvx_t) \rebuttal{-} \lambda_t \cdot \nabla_{\rvx_t} \|\rvy-\mathcal{A}\hat{\rvx}_0(\rvx_t)\|^2_2,
+\end{align*}
+where $\lambda_t$ is associated with the partition function of Gaussian, and we treat it as a hyperparameter to control the step size of the likelihood term.
+
+
+\section{\ours}
+
+
+In this section, we present the implementation of \ours. First, we introduce the pretraining dataset in Section \ref{sec:dataset}. Next, we illustrate the architecture of the neural network in Section \ref{sec:arch}. Finally, we propose a posterior sampling algorithm for the downstream tasks.
+
+\subsection{Pretraining Dataset}
+\label{sec:dataset}
+Our training dataset consists of deposited sharpened density maps from the EMDB \citep{10.1093/nar/gkad1019}, specifically those with: 1) a reported resolution better than $3.0$~\AA, 2) structures resolved by single-particle cryo-EM, and 3) data entries that include half-maps, ensuring that resolution estimates are based on the ``gold standard" Fourier shell correlation (FSC) \citep{henderson2012outcome}. We manually curated this subset by removing exceptionally large complexes, helical structures, and problematic cases through visual inspection \rebuttal{~(see \Figref{fig:supp_data} for examples)}. We also excluded density maps with side lengths greater than $576$~\AA. This curation resulted in a total of $3479$ density maps, \rebuttal{where $32$ density maps were selected as test set and excluded from training}. The density maps in the selected subset were lowpass filtered to $1.5$~\AA/voxel and $3$~\AA/voxel for \ours-S and \ours-L, respectively. For \ours-S, we applied random cropping to volumes of size $64^3$ along with random rotations for augmentation, whereas data for \ours-L were center cropped to volumes of size $128^3$ and augmented solely with random rotations. \rebuttal{Additionally, we rescale the density value to avoid large numerical variance} \rebuttal{~(\Secref{sec:data_norm} describes the details)}.
+\subsection{Architecture}
+\label{sec:arch}
+\begin{figure}[th!]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/hdit3d_arch.pdf}
+\caption{\ours's architecture. The side length $D$ of the input $\rvx_t$ undergoes dimension reduction through down-sampling layers and is then expanded back to its original size. To minimize computational cost near the input and output, the model employs neighborhood attention (NA). Neighborhood attention only attend to a localized area, whereas global attention (GA) calculates attention across all positions.}
+\label{fig:hdit3d_arch}
+\end{figure}
+
+A major challenge in applying the vanilla \rebuttal{Transformer} architecture to 3D density $\rvx_t \in \mathbb{R}^{D^3}$ is the computational complexity, which is $\mathcal{O}(D^6)$ \footnote{The computational complexity of Transformers is $\mathcal{O}(L^2)$, where $L=D^3$ is the number of tokens. }. \ours processes the 3D input data through a Transformer with a \textit{hierarchical} architecture, based on HDiT \citep{crowson2024hdit}. As illustrated in \Figref{fig:hdit3d_arch},  the hierarchical structure downsamples the spatial dimension at initial levels and upsamples it at final levels, implemented via PixelUnshuffle and PixelShuffle layers \citep{shi2016pixelshuffle}. Consequently, the spatial dimension at the middle level is significantly reduced, making the model more easily scalable. Furthermore, at the two ends of the hierarchical structure, \ours employs Neighborhood Attention (NA) \citep{hassani2023natten} since a localized attention layer is able to capture local dependencies while considerably reducing the number of tokens to attend.
+
+
+\subsection{Flow Posterior Sampling}
+\label{sec:fps}
+Given a vector field $\nnvtxt$ that generates the prior data distribution $p_0(\rvx_0)$, we aim to convert it to a vector field $\nnvtxty$ that generates the posterior $p_0(\rvx_0|\rvy)$. 
+\rebuttal{First, according to \citet{dao2023flow,song2021scorebased}, we can connect the vector field with the score function $\nabla_{\rvx_t} \log p_t(\rvx_t)$ as follows:}
+\begin{align*}
+    \nnvtxt=f_t(\rvx_t)-\frac{g_t^2}{2}\nabla_{\rvx_t} \log p_t(\rvx_t),
+\end{align*}
+where $f_t$ is the drift term and $g_t$ is the diffusion coefficient in the forward-time SDE.
+\rebuttal{In addition, we define the conditional vector field as follows:}
+\begin{align*}
+\nnvtxty = f_t(\rvx_t)-\frac{g_t^2}{2}\nabla_{\rvx_t} \log p_t(\rvx_t|\rvy) =\nnvtxt - \frac{g_t^2}{2}\nabla_{\rvx_t}\log p_t(\rvy|\rvx_t),
+\end{align*}
+\rebuttal{where the second equality holds due to \Eqref{eq:bayes-score}.}
+Thus, \rebuttal{substracting the score of the likelihood term} weighted by the diffusion coefficient generates a vector field that models the posterior distribution.
+Following the rectified flow \citep{dao2023flow}, we set $f_t(\rvx_t)=-\frac{\rvx_t}{1-t}$ and $\frac{g_t^2}{2}=\frac{t}{1-t}$ in the conditional flow  in \Eqref{eq:rec_flow_traj}, and obtain the conditional vector field as follows:
+\begin{align}\label{eq:conditional vector field}
+    \nnvtxty = \nnvtxt - \frac{t}{1-t}\nabla_{\rvx_t}\log p_t(\rvy|\rvx_t).
+\end{align}
+
+Similar to Section \ref{sec:dps}, by substituting \Eqref{eq:Gaussian} into \Eqref{eq:conditional vector field}, we obtain:
+\begin{align*}
+    \nnvtxty \approx \nnvtxt + \frac{t}{1-t} \cdot  \lambda_t \nabla_{\rvx_t}  \|\rvy-\mathcal{A}\hat{\rvx}_0(\rvx_t)\|^2_2.
+\end{align*}
+\rebuttal{where $\hat{\rvx}_0(\rvx_t)=\rvx_t-t\cdot\nnvtxt$ is the posterior mean estimated by the flow model.} In practice, we incorporate some tricks to avoid numerical instability. The detailed algorithm of flow posterior sampling is described in \Algref{alg:fps}.
+\begin{algorithm}[t]
+\caption{Flow Posterior Sampling}\label{alg:fps}
+\begin{algorithmic}
+\Require a pretrained vector field \rebuttal{$\nnv:[0,1]\times\mathbb{R}^n\to\mathbb{R}^n$}, a \rebuttal{forward} operator $\mathcal{A}:\mathbb{R}^n\to\mathbb{R}^m$, an obseravation $\rvy\in\mathbb{R}^m$, number of steps $N$, maximum step size $\lambda_{\text{max}}$ at each step
+\Ensure the recovered signal $\rvx_0$
+\State $\rebuttal{\Delta t \gets \frac{1}{N}}$
+\State $\rvx_1 \gets \mathcal{N}(0,\mI)$
+\For {$t \in [1, 1-\rebuttal{\Delta t}, 1-\rebuttal{2 \Delta t}, \cdots, \rebuttal{\Delta t}]$}
+    \State $\rvx'_{t-\rebuttal{\Delta t}} \gets \rvx_t- \rebuttal{\Delta t \cdot \nnvtxt}$ 
+    \State $l(\rvx_t) \gets \|\rvy-\mathcal{A}\hat{\rvx}_0(\rvx_{t})\|_2^2$
+    \State $\rvg \gets \frac{\nabla_{\rvx_{t}} l(\rvx_t)}{\|\nabla_{\rvx_{t} } l(\rvx_t) \|_2}$ \Comment{Normalize the gradient for numerical stability}
+    \State $\lambda_t \gets \min\left\{\lambda_{\text{max}}, \frac{t}{1-t}\right\}$ \Comment{Prevent the weighting term from being too large}
+    \State $\rvx_{t-\rebuttal{\Delta t}} \gets \rvx'_{t-\rebuttal{\Delta t}} \rebuttal{-} \lambda_t \rvg$ 
+\EndFor
+\State \Return $\rvx_0$
+\end{algorithmic}
+\end{algorithm}
+
+
+
+
+\section{Experiments}
+
+
+
+Fourier Shell Correlation (FSC) is a widely used metric that compares two density maps in Fourier space \citep{harauz1986exact}, allowing for the assessment of alignment between the ground truth and the reconstructed map. In the experiments, to evaluate the quality of the density maps, we use three primary metrics: $\text{FSC}_{\text{AUC}}$, $\text{FSC}_{0.5}$, and Fail Rate (FR).  Specifically, $\text{FSC}_{\text{AUC}}$ measures the overall correlation across all spatial frequencies, and $\text{FSC}_{0.5}$ represents the resolution of the reconstructed map at the standard 0.5 cutoff \citep{rosenthal2003optimal}. The Fail Rate (FR) identifies cases where the method fails to run or produces a result that significantly deviates from the ground truth. For the FSC metrics, we only report the results for cases that did not fail. More detailed explanation can be found in Section \ref{sec:supp_metrics}.
+
+\subsection{Spectral Noise Denoising}\label{sec:spectral_noise}
+
+In cryo-EM reconstruction, spectral noise is the most commonly used noise model due to its ability to capture the varying noise characteristics across different spatial frequencies, which arise from factors such as the contrast transfer function (CTF) and detector imperfections.
+We consider the introduction of noise in the Fourier domain, where the variance of the added Gaussian noise is frequency-dependent, with higher frequencies exhibiting greater noise variance. Given a density $\fV \in \mathbb{C}^{D\times D\times D}$ in the Fourier domain, the \rebuttal{forward} model $\mathcal{A}: \mathbb{C}^{D\times D\times D} \to \mathbb{C}^{D\times D\times D}$ is:
+\begin{align*}
+    \mathcal{A}(\fV) = \fV + \rvepsilon,
+\end{align*}
+where $\rvepsilon \in \mathbb{R}^{D\times D\times D}$ is a noise volume, whose values on the spherical shell with the same radius $\nu$ are the same ($\nu$ denotes the index of a component in the frequency space):
+\begin{align}
+\label{eq:noise_power}
+    \quad \rvepsilon(\nu) \sim \mathcal{N}(0, \sigma_{\text{noise}}^2(\nu)).
+\end{align}
+In the experiment, we estimate $\sigma_{\text{noise}}^2(\nu)$ from the half maps, which are two independent observations with the same underlying signal with uncorrelated noise. See Section \ref{sec:spectral_noise_estimation} for details.
+
+\begin{table}[h]
+\caption{Results of the spectral noise denoising task, comparing \ours with DeepEMhancer \citep{sanchez2021deepemhancer} and EMReady \citep{he2023improvement}. \rebuttal{In Sections \ref{sec:spectral_noise}, \ref{sec:anisotropic_noise}, \ref{sec:missing_wedge}, the forward model acts as a degradation of the original data.} The best attainable $\text{FSC}_{0.5}$ is $3.0$ \AA~since the voxel size is $1.5$ \AA.}\label{tab:spectral_noise_results}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccccccc}
+\toprule
+{} & \multicolumn{9}{c}{Estimated resolution at different level of noise} \\
+\cmidrule{2-10}
+& \multicolumn{3}{c}{$3.2$~\AA} & \multicolumn{3}{c}{$4.3$~\AA} & \multicolumn{3}{c}{$6.1$~\AA} \\
+\cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+{} & FR$\downarrow$ & $\text{FSC}_{\text{AUC}}\uparrow$ & $\text{FSC}_{0.5}\downarrow$ & FR$\downarrow$ & $\text{FSC}_{\text{AUC}}\uparrow$ & $\text{FSC}_{0.5}\downarrow$ & FR$\downarrow$ & $\text{FSC}_{\text{AUC}}\uparrow$ & $\text{FSC}_{0.5}\downarrow$ \\
+\cmidrule(r){1-1} \cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+
+After degradation & - & $0.8876$ & $3.21$ & - & $0.5527$ & $4.96$ & - & $0.4969$ & $6.07$ \\
+\cmidrule(r){1-1} \cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+
+DeepEMhancer & $0.06$ & $0.92\pm0.02$ & $\mathbf{3.0\pm0.0}$ & $0.34$ & $0.66\pm0.05$ & $\mathbf{4.3\pm0.2}$ & $0.44$ & $\mathbf{0.62\pm0.05}$ & $\mathbf{4.5\pm0.3}$ \\
+
+EMReady & $0.03$ & $0.73\pm0.02$ & $3.4\pm0.1$ & $0.16$ & $0.59\pm0.08$ & $4.9\pm0.9$ & $0.19$ & $0.55\pm0.09$ & $5.3\pm0.9$ \\
+
+\ours & $\mathbf{0.00}$ & $\mathbf{0.95\pm0.01}$ & $\mathbf{3.0\pm0.0}$ & $\mathbf{0.00}$ & $\mathbf{0.68\pm0.04}$ & $4.4\pm0.2$ & $\mathbf{0.00}$ & $\mathbf{0.62\pm0.04}$ & $4.6\pm0.3$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/spectral.pdf}
+\caption{Result of the spectral noise denoising task. Two density maps from EMDB were added spectral noise so that the estimated resolution is $4.3$~\AA. The degraded density maps \rebuttal{(results after applying the forward model)} were filtered by \textit{relion\_postprocess} for visual clarity.}
+\label{fig:spectral_noise_result}
+\end{figure}
+
+We manually introduce spectral noise, resulting in resolutions ranging from 3.2~\AA{} to 15.0~\AA{}. DeepEMhancer and EMReady, both pretrained models that directly learn the posterior $ p(\rvx|\rvy) $, are used as baselines. \ours demonstrates superior robustness, with no failed cases across all experiments, while both baselines show higher fail rates, especially at medium resolutions. Additionally, as shown in \Tabref{tab:spectral_noise_results} and \Tabref{tab:supp_spectral_noise_results} in Section \ref{sec:spectral_noise_estimation}, \ours achieves higher $\text{FSC}_{\text{AUC}}$ and better $\text{FSC}_{0.5}$ in most cases, significantly improving degraded density maps and enhancing the resolution of helices and loops, as illustrated in \Figref{fig:spectral_noise_result}. Notably, the FSC curves demonstrate that \ours successfully improves the signal across all frequencies, while the baselines fails to retain trustworthy signals in the low-frequency range.
+
+
+\subsection{Anisotropic Noise Denoising}\label{sec:anisotropic_noise}
+
+\begin{wrapfigure}{r}{0.45\textwidth} % 'r' for right, adjust width accordingly
+    \centering
+    \includegraphics[width=\linewidth]{figures/degrade-op.pdf}
+    \caption{\rebuttal{Forward} operators for (i) the anisotropic noise and (ii) the missing wedge.}
+    \label{fig:degrade_op}
+\end{wrapfigure}
+
+Anisotropic noise in cryo-EM occurs when noise distribution varies by direction, affecting some orientations more than others and leading to uneven reconstruction quality. As a result, certain orientations have lower signal-to-noise ratios than others. To approximate this degradation in a simplified manner, we amplify the spectral noise by a factor when the particle orientation falls within a specific range of angles, simulating the increased uncertainty in less-sampled orientations. The \rebuttal{forward} model $\mathcal{A}: \mathbb{C}^{D\times D\times D} \to \mathbb{C}^{D\times D\times D}$ is given by:
+\begin{align*}
+    \mathcal{A}(\fV)= 
+    \begin{cases}
+    \fV + \rvepsilon, & \text{if } \theta_{\min} \leq \theta \leq \theta_{\max} \\
+    \fV + \alpha\cdot\rvepsilon, & \text{otherwise}
+    \end{cases}, 
+\end{align*}
+where $\rvepsilon \in \mathbb{R}^{D\times D\times D}$ is the same as defined in \Eqref{eq:noise_power}, and $\alpha > 1$ is a \rebuttal{scalar} that increases the noise for specific orientation angles, reflecting the heightened uncertainty in those directions. $\theta_{\min}$ and $\theta_{\max}$ are the angles that controls the portion of the noise being amplified as illustrated in \Figref{fig:degrade_op}. In the experiment, we estimate $\sigma_{\text{noise}}^2(\nu)$ and $\alpha$ from the half maps. See Section \ref{sec:aniso_noise_estimation} for details.
+
+
+\begin{table}[t]
+\caption{Results of the anisotropic noise denoising task, comparing \ours with DeepEMhancer \citep{sanchez2021deepemhancer} and spIsoNet \citep{liu2024overcoming}.}\label{tab:anisotropic_noise_results}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccc}
+\toprule
+\cmidrule{2-10}
+& \multicolumn{3}{c}{$\theta \in [-45^\circ, +45^\circ]$} & \multicolumn{3}{c}{$\theta \in [-30^\circ, +30^\circ]$} & \multicolumn{3}{c}{$\theta \in [-15^\circ, +15^\circ]$} \\
+
+\cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+{} & FR$\downarrow$ & $\text{FSC}_{\text{AUC}}\uparrow$ & $\text{FSC}_{0.5}\downarrow$ & FR$\downarrow$ & $\text{FSC}_{\text{AUC}}\uparrow$ & $\text{FSC}_{0.5}\downarrow$ & FR$\downarrow$ & $\text{FSC}_{\text{AUC}}\uparrow$ & $\text{FSC}_{0.5}\downarrow$ \\ 
+\cmidrule(r){1-1} \cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+
+After degradation & $-$ & $0.6623$ & $4.15$ & $-$ & $0.6324$ & $4.27$ & $-$ & $0.6111$ & $4.38$ \\
+\cmidrule(r){1-1} \cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+
+DeepEMhancer & $0.22$ & $0.80\pm0.03$ & $3.2\pm0.1$ & $0.22$ & $0.79\pm0.05$ & $3.3\pm0.2$ & $0.22$ & $0.77\pm0.05$ & $\mathbf{3.4\pm0.2}$ \\
+
+spIsoNet & $\mathbf{0.00}$ & $0.65\pm0.01$ & $4.15\pm0.01$ & $\mathbf{0.00}$ & $0.62\pm0.01$ & $4.27\pm0.03$ & $\mathbf{0.00}$ & $0.61\pm0.01$ & $4.37\pm0.03$ \\
+
+\ours & $\mathbf{0.00}$ & $\mathbf{0.88\pm0.03}$ & $\mathbf{3.1\pm0.1}$ & $\mathbf{0.00}$ & $\mathbf{0.84\pm0.03}$ & $\mathbf{3.2\pm0.1}$ & $\mathbf{0.00}$ & $\mathbf{0.81\pm0.04}$ & $\mathbf{3.4\pm0.2}$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/anisotropic.pdf}
+\caption{Result of the anisotropic noise denoising task. Two density maps from EMDB are added anisotropic spectral noise that the estimated resolution is 4.38 \AA. The degraded density maps are filtered by \textit{relion\_postprocess} for visual clarity.}
+\label{fig:anisotropic_noise_result}
+\end{figure}
+We manually add varied anisotropic spectral noise to the test set density maps and use DeepEMhancer, spIsoNet, and \ours for signal restoration. As shown in \Tabref{tab:anisotropic_noise_results}, \ours outperforms both baselines on FSC metrics and has a zero fail rate. \Figref{fig:anisotropic_noise_result} demonstrates that \ours restores the corrupted signal without introducing significant bias, unlike DeepEMhancer, which introduces artifacts and alters the overall shape. While spIsoNet preserves signals across frequencies, it fails to improve correlation with the ground truth. This suggests that pretrained models that learn the posterior $ p(\rvx|\rvy) $ like DeepEMhancer can struggle to retain reliable signals, and self-supervised methods like spIsoNet lack a data-driven foundation, limiting their effectiveness. Additionally, spIsoNet requires over 5 hours on a V100 GPU for one dataset, whereas \ours completes the task in about 30 minutes.
+
+\subsection{Missing Wedge Restoration}\label{sec:missing_wedge}
+
+The missing wedge problem in cryo-ET arises from the limited tilt range of the electron microscope during data acquisition, causing incomplete Fourier space sampling and artifacts in the subtomograms. We simulate this effect by applying a wedge-shaped mask in the Fourier domain, removing data from unmeasured orientations. The \rebuttal{forward} model $\mathcal{A}: \mathbb{C}^{D\times D\times D} \to \mathbb{C}^{D\times D\times D}$ is given by:
+\begin{align*}
+    \mathcal{A}(\fV)= 
+    \begin{cases}
+    \tilde{\boldsymbol{V}}, & \text{if } \theta_{\min} \leq \theta \leq \theta_{\max} \\
+    0, & \text{otherwise}
+    \end{cases},
+\end{align*}
+where $\theta_{\min}$ and $\theta_{\max}$ are typically set to $-60^\circ$ and $+60^\circ$ respectively, representing the common tilt angle limits in experimental setups as illustrated in \Figref{fig:degrade_op}. For posterior sampling, we slightly modify the flow posterior sampling algorithm to get \Algref{alg:missing_wedge}. \rebuttal{The modification is based on the fact that it is not necessary to compute the gradient of the loss function, since we can directly combine the observed part in $\rvy$ with the remaining part in $\rvx_t$ to maximize the likelihood.}
+
+\begin{wraptable}{r}{0.55\textwidth}
+\caption{Results of the missing wedge restoration task.}\label{tab:missing_wedge_result}
+\centering
+\begin{tabular}{lcc}
+\toprule
+{} & $\text{FSC}_{\text{AUC}}\uparrow$ & \makecell[c]{$\text{FSC}_{\text{AUC}}\uparrow$ \\ {\scriptsize (Missing Region)}} \\
+\cmidrule(r){1-1} \cmidrule(r){2-3}
+After degradation & $0.80\pm0.02$ & $0.0000$ \\
+\cmidrule(r){1-1} \cmidrule(r){2-3}
+\ours & $0.92\pm0.02$ & $0.76\pm0.06$ \\
+\bottomrule
+\end{tabular}
+\end{wraptable}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/missing_wedge.pdf}
+\caption{Result of the missing wedge restoration task. Two maps from EMDB are masked in Fourier space to simulate the missing wedge effect in cryo-ET. The central slices through the maps are also shown.}
+\label{fig:missing_wedge_result}
+\end{figure}
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/abinitio.pdf}
+\caption{Result of the \textit{ab initio} modeling task. One synthetic data and two real data are shown.}
+\label{fig:abinitio_result}
+\end{figure}
+
+We apply the missing wedge effect to 32 test set density maps, with results in \Tabref{tab:missing_wedge_result} and an example in \Figref{fig:missing_wedge_result}. \ours effectively restores the original signal, reducing the missing wedge artifacts, as shown by both FSC metrics and visual inspection. The FSC curve confirm a strong correlation with the ground truth, particularly in the low-frequency range.
+
+\subsection{\textit{Ab initio} Modeling}
+\textit{Ab initio} modeling in cryo-EM involves reconstructing a coarse density map from 2D particle projections, which serves as a reference for refinement. Here, we simplify the problem by focusing on generating a coarse density map from a few clean 2D projections obtained via upstream 2D classification. This approach mirrors earlier \textit{ab initio} methods \citep{ludtke1999eman, voss2010toolbox} before cryoSPARC’s introduction of SGD \citep{punjani2017cryosparc}. Given $K$ projections, there exist $K$ \rebuttal{forward} operators, where the $k$-th \rebuttal{forward} model is $\mathcal{A}^{(k)}: \mathbb{R}^{D\times D\times D} \to \mathbb{R}^{D\times D}$ given by:
+\begin{align*}
+    \mathcal{A}^{(k)}(\mV) = \mathcal{P}(\phi^{(k)}, \mV),~~~ k\in[1, 2, \cdots, K],
+\end{align*}
+where $\mathcal{P}$ is a projection operator in the real space, and $\phi^{(k)}\in\mathbb{SO}(3)\times\mathbb{R}^2$ is the pose of the 2D projections. In this task, $\phi^{(k)}$ is unknown and can not be pre-determined. \rebuttal{We modify the flow posterior sampling to get \Algref{alg:ab_initio}, where the main modifications are: (i) searching the optimal pose iteratively in the sampling process \citep{scheres2012relion1,punjani2017cryosparc,zhong2021cryodrgn2}, and (ii) computing the likelihood using correlation to avoid numerical issues.} Moreover, since \textit{ab initio} modeling focuses on capturing the global shape at low resolution, we use \ours-L for this task.
+
+We apply \ours to one synthetic dataset and two real datasets from the Electron Microscopy Public Image Archive (EMPIAR). For the synthetic dataset, we use 2 clean projections, while for the real datasets, we use 8 or 6 selected class averages as the input. As shown in \Figref{fig:abinitio_result}, \ours closely matches the ground truth at low frequencies on the synthetic dataset. For the real datasets, \ours produces \textit{ab initio} models that achieve similar final resolutions after refinement as those generated by cryoSPARC, demonstrating its potential for 3D reconstruction in cryo-EM.
+
+\subsection{Ablation \& Discussion}
+In this section, we perform ablation studies to analyze the impact of different design choices and hyper-parameters.
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}{0.56\linewidth} % 0.62
+        \centering
+        \includegraphics[width=\textwidth]{figures/ablate_model_arch.pdf}
+        \caption{MSE loss on test set as a function of total training compute. The estimation of training compute is consistent with \citet{peebles2023dit}.}
+        \label{fig:ablate_model_arch}
+    \end{minipage}
+    \hspace{0.03\linewidth}
+    \begin{minipage}{0.26\linewidth} % 0.29
+        \centering
+        \includegraphics[width=\textwidth]{figures/ablate_norm.pdf}
+        \caption{Downstream performance with respect to data normalization.}
+        \label{fig:ablate_norm}
+    \end{minipage}
+\end{figure}
+
+\begin{figure}[th]
+    \centering
+    \begin{minipage}[b]{0.27\linewidth} % 0.3
+        \centering
+        \includegraphics[width=\textwidth]{figures/ablate_dps_hyp.pdf}
+        \caption{Averaged ranking ($\downarrow$) across downstream tasks for hyperparameters.}
+        \label{fig:ablate_dps_hyp}
+    \end{minipage}
+    \hspace{0.05\linewidth}
+    \begin{minipage}[b]{0.54\linewidth} % 0.6
+        \centering
+        \includegraphics[width=1.0\textwidth, trim=0 -12pt 0 0, clip]{figures/ldm_results.pdf}
+        \caption{Unconditional sampling from models in different spaces. For latent flow models (LFM), the high-frequency information contains more noise.}
+        \label{fig:ldm_results}
+    \end{minipage}
+\end{figure}
+
+\noindent\textbf{Moderate patchifying and downsampling parameters lead to efficient training with minimal performance degradation.} As shown in \Figref{fig:ablate_model_arch}, reducing both patchifying and downsampling parameters lowers the test loss, since less downsampling causes less information loss. However, the reduction becomes marginal while the training compute (Gflops) increases significantly. To achieve a balance between the performance and training cost, we set the patchifying parameter to $4$ and the downsampling parameter to $1$, respectively.
+\noindent\textbf{Data normalization enhances downstream performance across all tasks.} \rebuttal{Data normalization is the last step in data processing (as referenced in \Secref{sec:data_norm}). A density with a value ranging from $[0, 1]$ is subtracted by $0.04$ and then divided by $0.09$.} \Figref{fig:ablate_norm} demonstrates that models trained with normalized data consistently improves the $\text{FSC}_{\text{AUC}}$ metrics compared to the one without normalization in three downstream tasks. The observation is in line with some DDPM-based work \citep{yim2023se,rombach2022high}, as a significant change in the variance of the data can make the model difficult to train \citep{karras2022elucidating}.
+
+\noindent\textbf{More sampling steps boosts the performance in density restoration.} \Figref{fig:ablate_dps_hyp} presents the averaged ranking across three downstream tasks for different time steps ($\#\mathrm{timesteps}$) and the maximum step sizes ($\lambda_\text{max}$). The main factor influencing performance is the number of time steps. A smaller $\lambda_\text{max}$ may reduce the impact of the likelihood term and thus degrade performance. We choose the best combination: $\lambda_\text{max} = 5$ and $\#\mathrm{timesteps}=1000$.
+
+
+\noindent\textbf{Flow models trained in the voxel space converge much faster and better than the latent flow models.}
+We conducted experiments on training the model in the latent space \citep{rombach2022high}. \Figref{fig:ldm_results} illustrates the unconditional sampling results from two latent flow models (LFM), where the high-frequency information is more noisy. The observation concides with that of \citet{crowson2024hdit}, where they found that latent diffusion models fail to generate fine details. We suspect that the VAE is under-trained due to a small amount of data, \rebuttal{and we will leave this for future work}.
+
+
+
+\section{Conclusion}
+
+
+In this study, we present \ours, a flow matching-based foundation model that learns the \textit{prior} distribution of high-quality cryo-EM densities. During inference, we derive the \rebuttal{forward} operators for specific tasks, allowing protein densities to be sampled from the posterior distribution based on given observations. \ours demonstrates versatility by restoring protein densities across four distinct tasks without fine-tuning, showcasing the potential of deep generative models as a powerful prior in cryo-EM. While promising, \ours has limitations: though we use real data with synthetic noise for comparison, applying the method directly to real-world noisy densities remains challenging. Additionally, our work does not address reconstructing 3D densities from raw 2D particles, but we believe \ours can contribute to solving these complex tasks in future work.
+
+
+
+
+
+
+
+
+
+

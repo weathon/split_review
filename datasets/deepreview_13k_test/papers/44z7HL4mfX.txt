@@ -1,0 +1,176 @@
+\title{Instruct-SkillMix: A Powerful Pipeline for LLM Instruction Tuning}
+
+\begin{abstract}
+
+We introduce \instructSM{}, an automated approach for creating diverse, high quality SFT data for instruction-following. The pipeline involves two stages, each leveraging an existing powerful LLM: (1) {\em Skill extraction}: uses the LLM to extract core ``skills'' for instruction-following by directly prompting the model. This is inspired by ``LLM metacognition'' of \cite{didolkar2024metacognitive}; (2) {\em Data generation:} uses the powerful LLM to generate (instruction, response) data that exhibit a randomly chosen pair of these skills. Here, the use of random skill combinations promotes diversity and difficulty. The estimated cost of creating the dataset is under \$600.
+
+Vanilla SFT (i.e., no PPO, DPO, or RL methods) on data generated from \instructSM{} leads to strong gains on instruction following benchmarks such as AlpacaEval 2.0, MT-Bench, and WildBench. With just $4$K examples, \llamaiii{8} achieves 42.76\% length-controlled win rate on AlpacaEval 2.0, a level similar to  frontier models  like Claude 3 Opus and LLaMA-3.1-405B-Instruct. 
+
+Ablation studies also suggest plausible reasons for why creating open instruction-tuning datasets via naive crowd-sourcing has proved difficult. In our dataset, adding $20\%$ low quality answers (``shirkers'') causes a noticeable degradation in performance.
+
+The \instructSM{}
+pipeline seems flexible and adaptable to other settings.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+{\em Instruction tuning} (sometimes also called {\em imitation learning}) is the first step in converting a base LLM trained on next-word prediction into a helpful and interactive agent. Whereas early versions of instruction tuning involved supervised fine-tuning (SFT) on traditional NLP question-answer datasets~\citep{wei2021FLAN}, nowadays, the SFT data is collected at high cost from  skilled human annotators. We will use the term ``instruction tuning'' to refer solely to supervised fine-tuning (SFT) on such Q\&A pairs --- and not to reinforcement-learning methods such as PPO/DPO/RLHF~\citep{schulmanWDRK17, rafailovSMMEF23} etc., which usually follow SFT in the pipeline.% to produce an Instruct model. 
+
+Human-generated data is expensive (e.g., even the tiny model Instruct-GPT was estimated to require $20K$ human hours~\cite{oaialignapproach2022}), which has motivated the creation of open-domain alternatives. ShareGPT~\citep{chiang2023vicuna} contains conversations collected from a model-hosting website, whereas OpenAssistant~\citep{köpf2023openassistant} and Dolly~\citep{DatabricksBlog2023DollyV2} contain crowd-sourced human data. Another intriguing method, popularized by Self-Instruct~\citep{wang2023selfinstruct} (and its variants, e.g., Alpaca~\citep{taori2023alpaca}) leverages synthetic datasets. Here, a strong LLM is prompted using a small set of human-created examples to generate a large number of (query, answer) examples on a variety of topics. 
+
+Open evaluations of instruction-following ability have also sprung up.  The popular AlpacaEval 2.0~\citep{dubois2024alpacafarm, dubois2024AlpacaEval2.0} is based upon curated queries from various sources. In such evaluations, a model's response to a provided query is compared against a strong reference model's response, and the model is ranked based upon its {\em win rate} --- the percentage of queries for which the model produces a better answer than the reference model, as judged by a powerful LLM. Rankings on AlpacaEval and related benchmarks like WildBench broadly align with the human rankings of a model's performance \citep{dubois2024AlpacaEval2.0, lin2024wildbench}.
+
+\subsection{Surprising difficulty of instruction tuning} 
+A persistent puzzle in this field is that SFT on the above public datasets does {\em not} yield good performance on the evaluations. It was initially suspected this is due to a lack of diversity in the training data. But, efforts to produce more diverse synthetic data --- e.g., UltraChat~\citep{ding2023enhancing}, a synthetic dataset of $1.5$M multi-turn conversations created via meticulously tracking lexical and topical diversity as well as coherence --- did not significantly improve performance. 
+
+Another hypothesis places the blame on the uneven quality of open datasets --- which are usually a hodge-podge of collected queries (e.g., Dolly \citep{DatabricksBlog2023DollyV2}) --- whereas proprietary datasets are produced to careful specifications using strict quality-control. One finding that supports this hypothesis is that SFT on the 1K Q\&A pairs in Alpaca-52K with the longest responses, outperforms SFT on all $52$K pairs~\citep{zhao2024long}. In other words, the $51$K other data-points are redundant, or even interfere with the ``signal'' present in the best $1$K examples. This finding has inspired ``less is more'' approaches --- including an extreme one based upon just a judicious set of in-context examples~\citep{lin2023URIAL} to provide a surprisingly reasonable level of instruction tuning and alignment --- but they did not significantly improve the performance either.
+
+Some have cautioned against hopes for a miracle out of instruction tuning. \citet{gudibande2023false} suggest, based upon careful experiments, that basic capabilities of the LLM arise from pre-training and its massive training corpus. Most deficiencies left after pre-training will not be fixable by, say, a million SFT examples. While this perspective feels broadly correct, it does not quite explain why open efforts to instruction tune  \mistral{7} and \llamaiii{8} fail to match the performance of their proprietary \emph{Instruct} counterparts. 
+
+The above difficulties have lately lowered interest level in instruction tuning, with many researchers now turning to RL-based methods (eg, PPO, DPO), which have been  used in recent open-source projects to greatly improve proprietary chat models~\citep{meng2024simposimplepreferenceoptimization}, which had  already trained on  expensive human data.
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=\textwidth]{arxiv-version-revised/figures/1_ism_main_pipeline.pdf}
+    \caption{\textbf{Sketch of \instructSM{} pipeline.} See Figures \ref{fig:ism-sdd-pipeline} and \ref{fig:ism-sda-pipeline} for more details on two different implementations of \instructSM{}. }
+    \label{fig:ism-main-pipeline}
+\end{figure}
+\subsection{Our contributions}
+We describe a more  efficient and effective approach for creating synthetic instruction tuning datasets. Past open efforts invested significant human effort in ensuring {\em high coverage} of topics and scenarios to sufficiently equip the  LLM for scenarios it might encounter at deployment time.  We take a subtly different tack. Accepting that pre-training is the dominant source of the LLM's ``inner knowledge,'' we focus our instruction tuning on merely teaching the LLM skills to  drawing upon that inner knowledge and present it nicely during conversations. 
+
+The key idea is to use a strong LLM as a teacher. The recent discovery of {\em LLM Metacognition}~\citep{didolkar2024metacognitive} suggests that frontier models have significant capability to ``think about thinking,'' which in humans is referred to as {\em metacognition}~\citep{Flavell1979MetacognitionAC}. 
+Specifically, it was shown that given a task dataset,  frontier LLMs can help assemble a list of named ``skills'' needed to solve that task. This requires no human involvement apart from an automated interaction with an LLM~\footnote{Skill lists generated by different frontier models are related but not isomorphic. Skills generated by one model are comprehensible to other models. See~\citet{didolkar2024metacognitive} for such experiments.
+}.
+
+The first phase (``{\em Skill Extraction}'') of our pipeline \instructSM{} uses this idea  and a frontier LLM  to identify a list of ``basic skills'' needed for instruction-following. Unlike~\citet{didolkar2024metacognitive}, which extracts skills from existing SFT datasets, 
+we instead identify skills by directly prompting a strong LLM.
+(We also tried extracting skills using examples from Alpaca and Ultrachat, and it works quite well, but noticeably worse than our main method.)  See Section~\ref{subsec:skill-extraction}. 
+
+The second phase of our pipeline, {\em Data Generation}, uses the list of extracted skills to produce synthetic query-response examples. Here, we repeatedly draw a random pair of skills from the list and prompt the powerful LLM to produce a suitable query that tests those two skills, and to also produce a good response to the query. This generation is inspired by the {\sc skillmix} evaluation~\citep{yu2023skillmix} for LLMs' compositional generalization, which also uses a predetermined list of skills. Hence we call our method {\sc instruct-skillmix}. See Section~\ref{subsec:data-generation}
+
+Using merely $2$K to $4$K such Q\&A  examples, vanilla SFT allows popular small base models (\mistral{7}, \llamaiii{8}, and \gemma{9}) to match or surpass some apex models on AlpacaEval 2.0, such as the original \gpt, LLaMA-3.1-405B-Instruct and Claude 3 Opus (Table~\ref{tab:main-results}). The estimated cost of creating this $4$K dataset using the \gpt API is under $600$ US dollars.
+
+We stress that although reminiscent of prior efforts using synthetic data such as UltraChat, our pipeline is fully automated with no human design elements (e.g., choice of topics, lexicon etc.). The only human involvement involves the short prompts used for skill extraction and question generation, which we adapted from the math setting of~\cite{didolkar2024metacognitive}. While our pipeline currently focuses on simple instruction-following, the method seems extensible in future to safety/alignment, as well as domain-specific Q\&A.
+
+\input{arxiv-version-revised/tables/1_main_results}
+
+
+
+\section{\instructSM{}
+
+
+This section describes our methodology for extracting skills from powerful LLMs\footnote{We use \gptTurbo, but any powerful LLM can be used in the pipeline. \gptTurbo refers to the 2024-04-09 checkpoint throughout the paper unless specified otherwise.} and how to use these extracted skills to create a diverse, high quality dataset. A simplified version of our pipeline and prompts are depicted in Figures~\ref{fig:ism-main-pipeline} and ~\ref{fig:ism-pipeline}. Section~\ref{sec:experiments} reports the evaluation results when finetuning on this dataset.
+
+\subsection{Skill Extraction Procedure}\label{subsec:skill-extraction}
+The method involves an automated interaction with a frontier LLM (\gptTurbo).  We ask the frontier LLM to first generate a list of topics that arise in instruction-following. For each topic returned by the LLM, we further prompt it to generate a list of skills that are needed to answer typical queries on that topic. Additionally, we ask the LLM to create a list of query types (e.g., ``Information Seeking'') that might arise in that topic.
+Since this method  relies solely upon the LLM's inner meta-knowledge, 
+this method should extend easily to other types of instruction-following.  %This is left for future work.
+\paragraph{An Earlier Attempt:}
+Our initial attempt to extract skills leveraged existing instruction tuning datasets, which is a more direct analog of the method in~\cite{didolkar2024metacognitive}. However, we  suspected this to   be sub-optimal due to known limitations of past instruction tuning datasets.   We therefore designed the method described above, and found it  superior.
+It also has scientific benefit of being independent of existing datasets like Alpaca and Ultrachat. %entirely from \gptTurbo
+  %has details on \instructSMSDD.
+
+\subsection{Data Generation}\label{subsec:data-generation}
+Inspired by the recent {\sc skillmix} evaluation~\citep{yu2023skillmix}, we generate instruction-following examples by randomly picking $k$ skills as well as a random query type. The frontier LLM is prompted to create Q\&A pairs that illustrate these $k$ skills and the query type. % combine random combinations of 
+We refer to the resulting dataset as \instructSM{}. For example, \instructSM{(k=2)}-1K refers to 1,000 examples of data created from random combinations of $k=2$ skills.
+
+\paragraph{Where does diversity come from?} 
+The first source of diversity is the skill labels. A skill label represents some part of the frontier LLM's meta-knowledge of human behavior and needs, which it observed in its vast training set or during instruction tuning. Replacing a concrete Q\&A example with a skill label converts it into a pointer to a region in the frontier LLM's meta-knowledge, which the model can then freely draw upon to create new examples. The second source of diversity is the use of random $k$-tuples of skills when generating new examples. The motivation here is that, in most cases, distinct tuples will lead to very distinct flavor of examples. 
+
+For instance, the skill pair (\texttt{critical thinking and communication}, \texttt{literature and language skills}) leads to the following instruction 
+\begin{question}
+    I'm a high school English teacher aiming to develop a curriculum unit for my 11th-grade class, focusing on American literature. I want this unit to go beyond just reading and understanding the texts. Specifically, I'm looking to enhance my students' critical thinking and communication skills through engaging activities related to the literature. Can you suggest detailed ways to incorporate these skills, ideally with concrete examples and expected learning outcomes?
+\end{question}
+whereas the skill pair (\texttt{critical thinking and communication}, \texttt{skill in virtual and system design}) leads to
+\begin{question}
+    As an IT manager, I am overseeing the development of a virtual workspace to enhance communication and efficiency among remote teams. This workspace must support multimedia content, including video conferencing and live document editing. What are the critical steps I should take in its design and implementation, balancing technical robustness with ease of use? Could you provide specific technologies to consider and any potential obstacles?
+\end{question}
+Even though the two skill pairs share a common skill, they lead to rather distinct Q\&A pairs, involving creative and nuanced situations with subtle moving parts. Since the number of $k$-tuples scales as ${N \choose k}$, where $N$ is the number of skills, using pairs of skills foster a lot of diversity --- e.g., $125,000$ possibilities with $N=500, k=2$. The pipeline in our experiments mainly uses $k=2$, but generating answers to these queries will certainly end up using many other unnamed skills as well, and thus serve as a rich source for learning how to follow instructions.
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setup}
+
+\paragraph{SFT on \instructSM{(k)}.}
+We finetune \llamaiii{8}, \mistral{7}, \gemma{9}, \llamaii-7B-Base, and \llamaii-13B-Base on a varying number of examples from \instructSMSDD{(k)} and \instructSMSDA{(k)}. We train for multiple epochs and select the best checkpoint by performance on a $100$ held-out questions. Similar to \citet{ouyang2022training, zhou2023lima}, we observe that using cross entropy-loss on a validation set does not lead to the best checkpoint. As a baseline, we also finetune on different subsets of Alpaca-52K, including the 1K or 5K examples with the longest completions. For further training details (e.g.
+
+\paragraph{Evaluation.}
+We evaluate our models on popular instruction following benchmarks: AlpacaEval 2.0~\citep{dubois2024AlpacaEval2.0}, MT-Bench~\citep{zheng2023judging}, and WildBench~\citep{lin2024wildbench}. For AlpacaEval, we report the length-controlled win rate (LC WR) of the responses of our model against a reference response, which corrects for the length bias of the judge model. For MT-Bench, we report the average score of the responses of our model graded by a judge model. For WildBench, we report the WB-Reward (weighted win-rate) of the response of our model against one reference response when graded by a judge model.
+
+\input{arxiv-version-revised/3_1_main_results}
+
+\input{arxiv-version-revised/3_2_ablations}
+
+\input{arxiv-version-revised/3_4_negative_pareto_principle}
+
+
+
+
+
+
+\section{Related Work}
+
+Prior works observe improvements from instruction finetuning on \emph{fewer}, but \emph{higher quality} data generated by humans \citep{zhou2023lima, touvron2023llama}. However, efforts to curate high quality data from humans are quite expensive, and licensing can become complicated. This has led to an increase in the popularity of semi-automated and less expensive approaches.
+
+\paragraph{Selecting high quality data.}
+Synthetic data creation has become a predominant approach for curating instruction tuning datasets, especially in the academic realm \citep{wang2023selfinstruct, dubois2024alpacafarm, xu2023wizardlm, gunasekar2023textbooks}. These synthetic datasets are generally created by providing in-context examples to a powerful LLM to produce the synthetic data, followed by some post-filtering \citep{wang2023selfinstruct}. Recent efforts have also focused on data selection strategies for high quality subsets of the original dataset, which lead to performance gains \citep{tunstall2023zephyr, chen2024alpagasus, liu2024makes, zhao2024long}. Notably, \citet{zhao2024long} show that finetuning on just the 1K longest completions from Alpaca-52K outperforms finetuning on the entire Alpaca-52K dataset. Whereas the data selection methods just described focus on \emph{general-purpose} instruction tuning, \citet{xia2024less} explore an optimizer-aware data selection strategy
+for \emph{targeted} instruction tuning.
+\paragraph{Encouraging data diversity.}
+Common approaches to elicit diversity in datasets include mixing multiple datasets~\citep{wang2022supernaturalinstructions, longpre2023flan, wang2023far}, as well as rewriting the data in multiple ways and changing formatting~\citep{allenzhu2024physics, honovich2022unnatural}. The Self-Instruct framework \citep{wang2023selfinstruct} and variants such as Alpaca-52K~\citep{dubois2024alpacafarm} encourage diversity by  identifying similar pairs using ROUGE-L similarity.
+Other approaches to ensure diversity %synthetic data include 
+impose constraints on the topic in order to enhance wide coverage~\citep{ding2023enhancing, xu2023wizardlm}, or require synthetic data to use a random subset of words or concepts chosen from some vocabulary~\citep{eldan2023tinystories, gunasekar2023textbooks, li2024syntheticdataalmostscratch}. The latter approach is also suggested by recent work that provides a mathematical model for emergence via LLM scaling \citep{arora2023theory} and used in the evaluation setting in \citet{yu2023skillmix}.
+\paragraph{AlpacaEval.}
+AlpacaEval~\citep{li2023AlpacaEval, dubois2024AlpacaEval2.0} is a popular evaluation for assessing  instruction-following capabilities of LLMs. The tested model provides answers  805 carefully curated instructions, and its answers are compared against  reference outputs of a designated baseline model. For each instruction, another evaluator LLM outputs a preference between the two responses (output of the model being evaluated vs. reference output by the baseline mode). The primary evaluation metric is the \emph{win rate}, which represents the expected probability that the grader model favors the response generated by the evaluated model over the response produced by the baseline model. Given that a raw win rate shows bias towards longer responses, AlpacaEval 2.0~\citep{dubois2024AlpacaEval2.0} introduces the \emph{length-corrected (LC) win rate} as a proxy for what the raw win rate would be if the evaluated model's response lengths and baseline model's response lengths matched. 
+
+\paragraph{WildBench.}
+WildBench~\citep{lin2024wildbench} is another benchmark for assessing the instruction following capabilities of LLMs. Unlike the AlpacaEval instructions, 50\% of which are only ``information seeking'' type questions, the instructions for WildBench cover a more diverse distribution of task categories, including coding and creative writing. 
+Whereas the grading in AlpacaEval is more liberal (since there is no penalty for poor responses), the grading in WildBench is more finegrained: a model answer is compared against a reference answer, but is graded on a scale of (1) win by a big margin, (2) win by a small margin, (3) tie, (4) lose by a small margin, and (5) lose by a big margin. This ensures that models that output bad answers to certain types of questions are penalized. 
+\paragraph{RL-inspired approaches.}
+
+
+
+
+\section{Conclusion}
+
+While one would have certainly expected the cost factor as well as scaling ability to ultimately favor synthetic data, the surprising finding in this paper is that, when done well, synthetic data can be much more {\em effective} than human data for instruction tuning. Our \instructSM pipeline,  uses the recent discovery of LLM Metacognition~\citep{didolkar2024metacognitive} to extract skills using a powerful LLM and then leverages an LLM to create quality instruction data using random pairs of those skills. 
+
+Vanilla SFT of base models on just 1K to 4K examples from our pipeline outperforms the proprietary {\em instruct} versions of the same model, as well as older and larger instruction tuning efforts like Vicuna and Ultrachat that used orders of magnitude more datapoints. The performance also approaches those of frontier models, which trained on expensive human data as well as with RL techniques. Unfortunately, our method saturates at 4K examples, when win-rate  on heldout queries approaches $50\%$.   
+
+Ablation studies in Section~\ref{subsec:confounding-factors} rule out potential confounding factors,
+such as the use of a strong teacher, or bias due to teacher and grader belonging to the same family. 
+These ablations reinforce that the improvement is primarily due to the uniformly high quality of examples produced by our skill-based pipeline. Each example contains a query with nontrivial scenarios and lots of moving parts, which improve imitation learning. 
+
+
+
+ 
+Section~\ref{subsec:neg-pareto-princ}  offers a preliminary exploration of pitfalls of  naive collection of instruction tuning data. 
+In particular, the presence of some lower quality data noticeably harms the model's performance. This insight should be more rigorously investigated, including via new theory.
+The experiment also suggests that our less preferred  \instructSMSDD{} method 
+ (which involves  extracting skills from an existing dataset) is more susceptible to such bad data than our preferred \instructSMSDA{}.  
+
+One potential benefit of \instructSMSDD{} may be that it gives some insights into an efficient method for dataset distillation~\citep{wang2020datasetdistillation} for text datasets, which has not yet proved possible. 
+
+Finally, it should be  noted that our results look stronger on paper than they actually are. Open evaluations such as AlpacaEval 2.0 have blind spots, 
+especially the fact that win rate of even $50\%$ against a frontier model still allows  unacceptably high frequency of unsuitable responses in a deployment setting. 
+The new WildBench evaluation does test for more corner cases. We hope that \instructSM ideas can also leverage LLM metacognition to create a better evaluation.
+
+Although our SFT data does not address safety and alignment, our skill-based ideas may be useful there.  A related next step would be to leverage our ideas of skill extraction to improve RL-based methods (whether for instruction-following or alignment). We hope to address these in future work.
+
+
+
+\clearpage
+
+
+
+

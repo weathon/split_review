@@ -1,0 +1,382 @@
+\title{RouteLLM: Learning to Route LLMs from Preference Data}
+
+\begin{abstract}
+  Large language models (LLMs) exhibit impressive capabilities across a wide range of tasks, yet the choice of which model to use often involves a trade-off between performance and cost. More powerful models, though effective, come with higher expenses, while less capable models are more cost-effective. To address this dilemma, we propose several efficient router models that dynamically select between a stronger and a weaker LLM during inference, aiming to optimize the balance between cost and response quality.  We develop a training framework for these routers leveraging human preference data and data augmentation techniques to enhance performance. Our evaluation on widely-recognized benchmarks shows that our approach significantly reduces costs—by over 2 times in certain cases—without compromising the quality of responses. Interestingly, our router models also demonstrate significant transfer learning capabilities, maintaining their performance even when the strong and weak models are changed at test time. This highlights the potential of these routers to provide a cost-effective yet high-performance solution for deploying LLMs.
+  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent advances in large language models (LLMs) have demonstrated remarkable capabilities across a wide range of natural language tasks. From open-ended conversation and question answering to text summarization and code generation, LLMs have showcased an impressive level of fluency and understanding \cite{achiam2023gpt, bubeck2023sparks}. This rapid progress has been enabled by a combination of architectural innovations, such as the Transformer architecture \cite{vaswani2017attention}, as well as improvements in scaling up data and training infrastructure \cite{brown2020language, radford2019language}.
+
+However, not all LLMs are created equal—there exists wide variation in the costs and sizes of LLMs, which can range in size from one billion to hundreds of billions of parameters. LLMs also differ in terms of the data they are trained on, which in turn leads to variations in the strengths, weaknesses, and capabilities of different models. Broadly speaking, larger models tend to be more capable but come at a higher cost, while smaller models tend to be less capable but cheaper to serve.  
+
+
+This heterogeneous landscape presents a dilemma in the practical deployment of LLMs in real-world applications. While routing all user queries to the largest, most capable model ensures high-quality results, it is prohibitively expensive. Conversely, routing queries to smaller models can save costs—up to more than 50x (e.g., Llama-3-70b vs. GPT-4, or Claude-3 Haiku vs. Opus\footnote{Per one million output tokens: Llama-3-70b (\$1) vs. GPT-4-0613 (\$60), Haiku (\$1.25) vs. Opus (\$75)})—but may result in lower quality responses, as the smaller model may not be able to handle complex queries effectively.
+
+To this end, \emph{LLM routing} is a promising solution to this problem, whereby each user query is first processed by a \emph{router model}, before deciding which LLM to route the query to. This can potentially route easier queries to smaller models, and more difficult queries to larger models, optimizing the quality of model responses while minimizing cost.
+However, optimal LLM routing—defined as achieving the highest quality given a cost target or minimizing cost given a quality target—is a challenging problem. %
+A robust router model needs to infer the intent, complexity, and domain of an incoming query as well as understand candidate models' capabilities to route the query to the most appropriate model. Furthermore, the router model needs to be economical, fast, and adaptive to the evolving model landscape, where new models with improved capabilities are continually introduced.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}
+        \centering    \includegraphics[width=0.31\linewidth]{Figs/gsm8k.png}
+    \label{fig:gsm8k}
+    \end{subfigure}
+    ~
+    \begin{subfigure}
+    \centering
+    \includegraphics[width=0.31\linewidth]{Figs/mt-bench.png}
+    \label{fig:mtbench}
+    \end{subfigure}
+    ~
+    \begin{subfigure}
+    \centering
+    \includegraphics[width=0.329\linewidth]{Figs/mmlu-main.png}
+    \label{fig:mmlu}
+    \end{subfigure}
+    \caption{Routing performance/cost trade-off between GPT-4 and Mixtral-8x7B. \textit{(left)} We demonstrate several routers that outperform the random baseline on OOD eval GSM8K. \textit{(center)} We demonstrate improvement in router performance through data augmentation, denoted by (A), on MT Bench. \textit{(right)} We display the main metrics we consider: call-performance threshold (CPT, denoted in green) and average performance gain recovered (APGR, denoted by the blue shaded region).}
+    \label{fig:main}
+\end{figure}
+In this work, we present a principled framework for query routing between LLMs. Our setup involves learning to route between a stronger model and a weaker model as seen in Figure \ref{fig:main}. Our objective is to minimize costs while achieving a specific performance target, such as 90\% of the stronger model's performance,  by intelligently routing simpler queries to the weaker model and reserving more complex queries for the stronger model. We develop a training framework for router systems utilizing human preference data and data augmentation techniques. We evaluate our router models on widely recognized benchmarks, such as MMLU \cite{hendrycks2020measuring} and MT Bench \cite{zheng2023judging}, and demonstrate that our framework can significantly reduce costs—by over 2 times—without substantially compromising response quality. 
+
+To summarize, we make the following contributions:
+\begin{itemize}
+\item We formulate the LLM routing problem to explore the trade-off between cost and response quality.
+\item We propose a router training framework based on human preference data and augmentation techniques, demonstrating over 2x cost saving on widely used benchmarks.
+\item We open-source the code and preference data used to train our routers.
+\end{itemize}
+
+Several recent studies have explored optimizing the cost and performance trade-offs in deploying large language models (LLMs). LLM-BLENDER \cite{jiang2023llm} employs an ensemble framework that calls multiple LLMs at inference selecting the best response. Frugal-GPT \cite{chen2023frugalgpt} employs an LLM cascade, sequentially querying LLMs until a reliable response is found. AutoMix \cite{aggarwal2024automix} relies on a smaller model self-verifying its response before potentially routing to a larger model. While these approaches rely on multiple LLM queries \cite{hu2024routerbenchbenchmarkmultillmrouting}, our approach routes each query to a single LLM. FrugalML \cite{chen2020frugalmlusemlprediction} focuses on prediction services with known labels rather than the general capabilities of LLMs. A closely related study, Hybrid-LLM \cite{ding2024hybrid}, shares similarities with our framework but differs in three key ways: it uses synthetic preference labels derived via BARTScore \cite{yuan2021bartscore}, relies on a single BERT-based router architecture, and limits evaluation to in-domain generalization. In contrast, our work leverages human preference labels from Chatbot Arena \cite{chiang2024chatbot}, explores several router architectures, and demonstrates that augmenting the dataset results in significant performance improvements across all router architectures. Additionally, we emphasize out-of-domain generalization by evaluating on multiple public benchmarks. 
+
+
+
+\section{LLM Routing}
+
+
+\subsection{Problem Formulation} \label{formulation}
+Consider a set of $N$ different LLM models $\mathcal{M} = \{M_1, \dots, M_N\}$. Each model $M_i: \mathcal{Q} \rightarrow \mathcal{A}$ can be abstracted as a function that maps a query to an answer. A \textit{routing function} $R: \mathcal{Q} \times \mathcal{M}^N \rightarrow \{1, \dots, N\}$ is an $N$-way classifier that takes a query $q \in \mathcal{Q}$ and selects a model to answer $q$, with the answer being $a = M_{R(q)}(q)$. 
+The challenge of routing involves achieving an optimal equilibrium between increasing response quality and reducing cost\footnote{We focus on inference cost in \$ cost/token, but the same concept applies to other costs such as latency.}. Assume we have access to \emph{preference data}:  $\Dpref = \{ (q, l_{i,j}) \mid q \in \mathcal Q, i,j \in N, l_{i,j} \in \mathcal{L} \}$, where $q$ is a query, and $l_{i,j}$ is a label representing the comparison outcome of comparing $M_i, M_j$'s quality on $q$, which takes values in $\mathcal{L}  = \{\text{win}_{M_i}, \text{tie}, \text{win}_{M_j}\}$. 
+It is important to distinguish between reward modeling \cite{ouyang2022training} and routing. Reward modeling evaluates response quality post-LLM generation, whereas routing requires the router to select the appropriate model before seeing the response. This necessitates a deep understanding of the question's complexity as well as the strengths and weaknesses of the available LLMs.
+
+In this work, we focus on routing between two classes of models: (1) \textit{strong models} ($\Mhigh$), consisting of models capable of producing high quality responses but at a high cost. This class primarily consists of the most advanced closed-source models, such as GPT-4. (2) \textit{weak models} ($\Mlow$), consisting of models with a relatively lower quality and lower cost, such as such as Mixtral-8x7B. This binary routing problem is quite common in practice, particularly as developers of LLM applications strive to balance quality and cost. Furthermore, addressing this problem forms the foundation for solving a more general $N$-way routing problem.
+
+We present a principled framework for learning a binary routing function $R_{\text{bin}}^{\alpha}: \mathcal{Q}  \rightarrow \{0, 1\}$ between $\Mlow$ and $\Mhigh$ from preference data. To achieve this, we define $R_{\text{bin}}^\alpha$ using two components:
+
+1) \textbf{Win Prediction Model} which predicts the probability of winning for strong models $\Mhigh$, i.e. $P_{\V{\theta}}(\text{win}_{\Mhigh} | q)$. In our binary classification setting, this probability captures the win/loss probability of both model classes.\footnote{We consider ``tie" as a win for the weaker models.} We can learn the parameters of this model $\V{\theta}$ with maximum likelihood on the preference data:
+\begin{align} \label{eq:max_likelihood}
+\max_{\V{\theta}} \sum_{(q, l_{i,j}) \in \Dpref} \log P_{\V{\theta}}(l_{i,j} \mid q).
+\end{align}
+
+By learning the winning probability on preference data, we capture the strengths and weaknesses of both model classes on various kinds of queries. In Section~\ref{routing-approaches}, we propose several approaches for parameterizing the win prediction model.
+2) \textbf{Cost Threshold} $\alpha \in [0, 1]$ which converts the winning probability into a routing decision between $\Mhigh$ and $\Mlow$. Given a query $q$, the routing decision is formulated as:
+\begin{align} \label{eq:routing_decision}
+R_{\text{bin}}^\alpha(q) =
+    \begin{cases} 
+        0 \text{ (i.e., $\Mlow$)} & \text{if } P(\text{win}_{M_j} \mid q) < \alpha, \; \\
+        1 \text{ (i.e., $\Mhigh$)} & \text{otherwise}. \;
+    \end{cases}
+\end{align}
+The threshold $\alpha$ controls the quality/cost trade-off: a higher threshold imposes a stricter cost constraint, reducing expenses but potentially compromising quality. 
+
+Finally, we denote the \textit{router's response} as $\mathcal{M}_{R_{\text{bin}}^\alpha(q)}(q)$, which represents the response generated by either the weak or strong model, depending on the router's decision.
+
+
+
+\subsection{Metrics}
+In this section, we define evaluation metrics that capture the trade-off between cost and quality in the LLM routing problem. 
+We start with metrics that independently assess the quality and cost efficiency of a given $R_{\text{bin}}^\alpha$, then introduce two compounded metrics which we use in our experimental evaluations.
+
+For cost efficiency, we calculate the \textit{percentage of calls to the strong model}:
+\begin{align}
+    c(R_{\text{bin}}^\alpha) & = \frac{1}{|\mathcal{Q}|}\sum_{q\in\mathcal{Q}}\mathbb{I}\{R_{\text{bin}}^\alpha(q)=1\},
+\end{align}
+since $\Mhigh$ models incur significantly higher costs than $\Mlow$ models. 
+
+For quality, we measure the \textit{average response quality} on an evaluation set $\mathcal{Q}$: 
+\begin{align}
+    r(R_{\text{bin}}^\alpha) & = \frac{1}{|\mathcal{Q}|}\sum_{q\in\mathcal{Q}}\delta(\mathcal{M}_{R_{\text{bin}}^\alpha(q)}(q)),
+\end{align}
+where $\delta(\mathcal{M}_{R_{\text{bin}}^\alpha(q)}(q))$ represents a numerical score of the router's response to $q$. This score can be result of a predefined metric measuring the correctness of the response in golden-labeled datasets (e.g., MMLU) or a numerical label (e.g., 1-5 or 1-10) where higher values indicate better quality.
+
+Given that the performance of $R_{\text{bin}}^\alpha$ lies between the weak and strong models' performance, we quantify the router's performance relative to the performance gap between both models. We define the overall performance gain of $R_{\text{bin}}^\alpha$ with the \textit{performance gap recovered (PGR)}:
+\begin{equation}
+    PGR(R_{\text{bin}}^\alpha) = \frac{r(R_{\text{bin}}^\alpha) - r(\Mlow)}{r(\Mhigh) - r(\Mlow)}.
+\end{equation}
+
+Neither of these metrics alone is sufficient, as they do not capture the quality-cost trade-off in routing.  For instance, a trivial router that sends every query to the strong model achieves a perfect \(PGR = 1\) without any cost reduction.
+Therefore, we compute a\textit{ call-performance graph} for a router \(R_{\text{bin}}\) by varying the threshold values \(\alpha\). We define the \textbf{average performance gap recovered (APGR)} as an overall measure of how well the router can recover the performance gap under different cost constraints:
+\begin{equation}
+    APGR(R_{\text{bin}})=\int_{0}^{1} PGR(R_{\text{bin}}^\alpha)\; d\left(c(R_{\text{bin}}^\alpha)\right).
+\end{equation}
+In Figure~\ref{fig:main}-\textit{(right)}, APGR is represented by the area between the router's performance curve and the weak model's performance.
+Empirically, we discretize the percentage of calls interval \([0\%, 100\%]\) into \(\{c_i\}_{i \in [10]}\). For each \(c_i\), we determine the cutoff threshold \(\alpha_i\) that meets the cost constraint. We approximate \(APGR\) using the following formula:
+\begin{equation}
+APGR(R_{\text{bin}}) \approx \frac{1}{10}\sum_{i=1}^{10} PGR(R_{\text{bin}}^{\alpha_i})
+\end{equation}
+
+In many real-world applications, it is important to quantify the cost required to achieve a certain level of performance. Therefore, we define a second metric which we call \textbf{call-performance threshold (CPT)}. Given a desired router performance (measured as PGR of $x\%$), the CPT($x\%$) refers to the \textit{minimum percentage} of calls to the strong model required to obtained the desired PGR. In Figure \ref{fig:main}-\textit{(right)}, the dotted green line denotes CPT(50\%), i.e. the percentage of calls to GPT-4 required to achieve the desired performance of 50\% PGR; here, $CPT(50\%) \approx 37\%$.
+
+
+
+\section{Methodology}
+
+
+\subsection{Preference Data} \label{preference-data}
+We start by describing how we can obtain the preference data to train the routing function.
+We primarily use 80k battles from the online Chatbot Arena platform \cite{chiang2024chatbot}. On this platform, users interact with a chatbot interface and submit prompts of their choice. Upon submission, they receive responses from two anonymous models and vote for a winning model or a tie. The resulting dataset, denoted as $\Darena = \{(q, a_i, a_j, l_{i,j}) \mid q \in \mathcal{Q}, a_i, a_j \in \mathcal{A}, l_{i,j} \in \mathcal{L} \}$, consisting of user queries, answers from two models $M_i, M_j$, and a pairwise comparison label based on human judgment. 
+
+A major issue with using the raw Chatbot Arena data is label sparsity. For instance, the percentage of comparison labels between any two models, on average, is less than 0.1\%.
+lmsys.org}{https://leaderboard.lmsys.org}} and aiming to minimize the variation within each tier via dynamic programming.
+We choose the models on the first and second tiers to represent strong models $\Mhigh$, and the models on the third tier to represent weak models $\Mlow$. While we primarily train on battles across these tiers, we also leverage battles involving other model tiers to regularize our learning methods. Crucially, we omit the actual model responses in $\Darena$, retaining only the model identities, i.e. $e \sim \Dpref $ is $e = {(q, M_i, M_j, l_{i,j})}$. 
+The comparison label $l_{i,j}$ still provides insight into the relative capabilities of the LLMs $M_i$ and $M_j$ on various types and complexity levels of the query $q$. 
+
+\subsubsection{Data Augmentation} \label{data-augmentation}
+Even after classifying models into tiers, the human preference signal can still be quite sparse across different model classes. As we discuss in Sec~\ref{results}, we find that this can hinder generalization, especially for parameter-heavy models. Thus we explore two data augmentation methods:
+
+\textbf{Golden-labeled datasets}: We augment our training data with datasets of the form $\Dgold = \{(q, a, l_g) \mid q \in \mathcal{Q}, a\in \mathcal{A}, l_g \in \mathbb{R}\}$, where a golden label $l_g$ is automatically calculated for a model answer $a$, e.g. multiple-choice answers. One example of such a dataset is the MMLU benchmark~\cite{hendrycks2020measuring}. %
+We use the validation split of MMLU containing approximately 1500 questions and derive comparison labels $l_{i,j}$ from $l_g$ by simply comparing the responses from $M_i$ and $M_j$, creating the preference dataset $\Dgold$ for augmentation.
+
+\textbf{LLM-judge-labeled datasets}: We explore obtaining preference labels on open-ended purpose chat domains using a LLM judge~\cite{zheng2023judging}, as it has demonstrated a high correlation with human judgment~\cite{dubois2024alpacafarm, jiang2023llm}. Given a collection of user queries, we start by generating responses from both a strong model in $\Mhigh$ and a weak model in $\Mlow$ and then produce pairwise comparison labels using GPT-4 as a judge. The primary challenge with this method is the high cost of collecting responses and pairwise comparisons from GPT-4 in large quantities. Fortunately, the Nectar dataset \cite{starling2023} offers a wide variety of queries with corresponding model responses. We significantly reduce our costs by selecting queries with GPT-4 responses (as a representative of $\Mhigh$), on which we generate responses from Mixtral-8x7B (as representative of $\Mlow$). Finally, we obtain pairwise comparison labels using the GPT-4 judge.\footnote{We employ best practices recommended in \cite{zheng2023judging} to de-bias GPT-4 judgements}. Overall, we collect a preference dataset $\Djudge$ of approximately 120K samples with a total cost of around \$700~USD. 
+
+\subsection{Routing Approaches}
+\label{routing-approaches}
+
+We now detail our methods for learning the win prediction model $P_{\V{\theta}}(\text{win}_{\Mhigh} | q)$ from preference data $\Dpref$. We denote a sample $(q, M_i, M_j, l_{i,j}) \sim \Dpref$ as $e = (q, M_w, M_l)$, where $M_w$ and $M_l$ refer to the winning and losing model respectively.
+
+\paragraph{Similarity-weighted (SW) ranking} We adopt a Bradley-Terry (BT) model~\cite{bradley1952rank} similar to~\cite{chiang2024chatbot}. Given a user query $q$, we compute a weight $\omega_i = \gamma^{1 + S(q, \hat{q})}$~\footnote{We find that exponential scale works best in practice and choose $\gamma = 10$} for each query $q_i$ in the train set based on its similarity to $q$:
+\begin{equation}
+ \mathcal{S}(q, q_i) = \frac{\epsilon \cdot \epsilon_i}{\lVert \epsilon \rVert \lVert \epsilon_i \rVert \cdot \max_{1 \leq s \leq \mid \Dpref \mid} \frac{\epsilon_i \cdot \epsilon_s}{\lVert \epsilon_i \rVert \lVert \epsilon_s \rVert}},   
+\end{equation}
+where $\epsilon$ denotes a query embedding. We learn BT coefficients $\xi$ (representing 10 model classes) by solving:
+    \begin{equation}
+    \mathop{\mathrm{argmin}}_\xi \sum_{i=1}^{\mid \Dpref \mid} \left[ \omega_i \cdot \ell \left( l_i, \frac{1}{1+e^{\xi_{w_i} - \xi_{l_i}}} \right) \right],
+    \end{equation}
+where $\ell$ is a binary cross-entropy loss. The resulting BT coefficients allow us to estimate the win probability as:
+ $P(\text{win}_{M_w} | q) = \frac{1}{1 + e^{\xi_{w} - \xi_{l}}}$. For this router model, there is no training required and the solving is performed at inference time.
+ 
+\paragraph{Matrix factorization} Inspired by matrix factorization models \cite{koren2009matrix, toscher2009bigchaos} in recommendation systems to capture the low-rank structure of user-item interactions, we leverage this approach for training on preference data.
+The key is to uncover a hidden scoring function $s:\mathcal{M} \times \mathcal{Q}\rightarrow \mathbb{R}$. The score $s(M_w, q)$ should represent the quality of the model $M_w$'s answer to the query $q$, i.e. if a model $M_w$ is better than $M_l$ on a query $q$, then $ s(M_w, q) > s(M_l, q)$. We enforce this relationship by modeling the win probability with a BT relationship \cite{bradley1952rank}:
+\begin{equation}
+    P(\text{win}_{M_w} | q) = \sigma(s({M}_w, q) - s({M}_l, q)),
+\end{equation}
+which we optimize on preference data. We model the scoring function $s$ as a bilinear function of model and query, and embed the model identity $M$ to a $d_m$-dimensional vector ${v}_m$ and the query to a $d_q$-dimensional vector ${v}_q$:
+\begin{equation}
+s({M}, q) = w_2^T(v_m \odot (W_1^T v_q + b))    
+\end{equation}
+Here, $\odot$ represents the Hadamard product, $W_1\in \mathbb{R}^{d_q\times d_m}$ and $b\in \mathbb{R}^{d_m}$ is the projection layer to align the dimension of $v_q$ with $v_m$, and $w_2\in \mathbb{R}^{d_m}$ is the linear regression layer to produce the final scalar. This method is essentially learning a matrix factorization of the score matrix on the set $\mathcal{Q} \times \mathcal{M}$.  We train the model on a 8GB GPU for $\approx$ 10 epochs, using batch size 64 and the Adam optimizer with learning rate $3\times 10^{-4}$ and weight decay $1\times 10^{-5}$.
+
+\paragraph{BERT classifier} Here we explore using a standard text classification method with a higher number of parameters compared to previous methods. We use a BERT-base architecture~\cite{devlin2018bert}, to give a contextualized embedding of the user query, and define win probability as:
+\begin{align}
+P_{\V{\theta}}(\text{win}_{M_w} | q) = \sigma(W h_{\text{CLS}} + b),
+\end{align}
+where ${h}_{\text{CLS}}$ is an embedding corresponding to the special classification token (CLS) summarizing the input query $q$; and $W, b, \sigma$ are parameters and sigmoid activation of a logistic regression head. We perform full-parameter fine-tuning on $\Dpref$. 
+We train the model on 2xL4~24GB GPUs for \(\sim2000\) steps using a batch size of 16, maximum sequence length of 512, learning rate of $1 \times 10^{-5}$ and weight decay of 0.01. 
+\paragraph{Causal LLM classifier} We finally expand the capacity of our router by parameterizing it with Llama 3 8B\cite{meta_llama_3_2024}. We use an instruction-following paradigm~\cite{wei2021finetuned}, i.e. we provide as input an instruction prompt containing the user query, and output the win probability in a next-token prediction fashion -- instead of using a separate classification head. Notably, we append the comparison labels as additional tokens to the vocabulary, and compute the win probability as softmax over the label classes $\mathcal{L}$.
+We train the model on 8xA100~80GB GPUs for \(\sim2000\) steps using a batch size of 8, maximum sequence length of 2048, and a learning rate of $1 \times 10^{-6}$.
+
+
+
+
+
+
+\section{Experiments}
+
+
+ \textbf{Training data}: As mentioned in Sec.~\ref{preference-data}, we primarily use the 80K Chatbot Arena for training our models, but hold out 5k samples for validation. We prune all prompt samples shorter than 16 characters, resulting in 65k pairwise comparisons between 64 different models. These consist of conversations from over 100 languages, with the bulk of the conversations (81\%) in English, followed by Chinese (3.1\%), and Russian (2.2\%). We assign models to 10 classes to reduce sparsity of comparison labels. As discussed in Sec.~\ref{data-augmentation}, we further augment our training data with with either: 1) $\Dgold$, golden-labeled data created from the MMLU validation split and 2) $\Djudge$, GPT-4-as-a-judge labeled chat data.
+ 
+\textbf{Evaluation benchmarks}:
+We evaluate our routers on three widely-used academic benchmarks: MMLU \cite{hendrycks2020measuring} consisting of 14,042 questions across 57 subjects, MT Bench \cite{zheng2023judging} with 160 open-ended questions using LLM-as-a-judge, and GSM8K \cite{cobbe2021training} with over 1,000 grade school math problems. Additionally, we conduct a cross-contamination check between our evaluation and training datasets, and report uncontaminated results below. We present results on public benchmarks to understand the out-of-domain generalization of routers.
+
+\textbf{Routers}: For both the matrix factorization router and the similarity-weighted ranking router, we use OpenAI's embedding model \verb"text-embedding-3-small" to embed the input query. We perform full-parameter finetuning on both BERT and Causal LLM, and use the validation set for model selection. We opt to use \verb|gpt-4-1106-preview| \cite{openai2023gpt4} as a representative model in $\Mhigh$, and Mixtral 8x7B \cite{jiang2024mixtral} as a representative model in $\Mlow$, to concretely evaluate router performance. We also use a random router that routes queries randomly under a cost constraint as a baseline.
+
+\subsection{Results}
+\label{results}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llrrrl}
+\toprule
+Training data & Method & $CPT(50\%)$ & $CPT(80\%)$ & $APGR$ & \\ \midrule
+            & Random (95\% CI) & 49.03($\pm$4)\% & 78.08($\pm$3)\% & 0.500($\pm$0.02) & (+0\%) \\ \midrule
+$\Darena$ & BERT & 78.09\% & 87.64\% & 0.391 &(-21.8\%) \\
+ & Causal LLM & 28.82\%& 77.53\%& 0.573 &(+14.6\%) \\
+ & Matrix Factorization & \textbf{25.32\%}& 74.26\%& 0.580 &(+16\%) \\
+ & SW Ranking & 37.85\% & \textbf{58.99\%} & \textbf{0.610} &(+22.1\%) \\ \midrule
+$\Darena + \Djudge$  & BERT & 19.58\% & 34.02\% & 0.751 &(+50.2\%)\\
+ & Causal LLM & 31.50\%& 48.75\%& 0.679 &(+35.8\%)\\
+ & Matrix Factorization & \textbf{13.40\%}& \textbf{31.31\%}& \textbf{0.802} &(+60.4\%)\\
+ & SW Ranking & 23.21\% & 36.04\% & 0.759 &(+51.8\%)\\ 
+ \bottomrule
+\end{tabular}
+\caption{MT Bench results. Note that the score for CPT at 50\% (8.8) is 95\% that of GPT-4 performance (9.3). Our routers exhibit strong performance on MT Bench when trained on $\Darena$, with further improvement when the dataset is augmented with $\Djudge$, reducing costs by up to 75\% as compared to the random router.}
+\label{tab:mt-bench}
+\end{table}
+
+Table \ref{tab:mt-bench} displays our router performance on MT Bench. For routers trained on the Arena dataset, we observe strong performance for both matrix factorization and similarity-weighted ranking, with both routers performing significantly better than the random router across all metrics. Notably, matrix factorization requires half the number of GPT-4 calls as compared to random to achieve a PGR of 50\%. However, our BERT and causal LLM classifiers perform close to random when trained on the Arena dataset, which we attribute to high capacity approaches performing worse in a low-data regime.
+
+Augmenting the preference data using a GPT-4 judge leads to notable improvements across all routers. The BERT and causal LLM routers now perform much better than the random baseline, with the BERT classifier achieving an APGR improvement of over 50\% as compared to random. When trained on this augmented dataset, matrix factorization is the best-performing router as its CPT(80\%) is nearly halved, requiring 50\% less GPT-4 calls as compared to random.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llrrrl}
+\toprule
+Training data & Method & $CPT(50\%)$& $CPT(80\%)$& $APGR$ &\\ \midrule
+ & Random (95\% CI) & 50.07($\pm$0)\% & 79.93($\pm$0)\% & 0.500($\pm$0) & (+0\%)\\ \midrule
+$\Darena$ 
+ & BERT & 49.43\% & 77.80\% & 0.502 &(+0.5\%)\\
+ & Causal LLM & 48.88\%& 77.93\%& 0.499 &(-0.2\%)\\
+ & Matrix Factorization & \textbf{45.00\%}& \textbf{76.86\%}& \textbf{0.524}&(+4.9\%)\\
+ & SW Ranking & 55.82\% & 80.25\% & 0.473 &(-5.4\%)\\ \midrule
+$\Darena + \Dgold$  & BERT & 41.30\% & 72.20\% & 0.572 &(+14.4\%)\\
+& Causal LLM & 35.49\%& \textbf{70.31\%}& 0.600 &(+19.9\%)\\
+ & Matrix Factorization & 35.46\% & 71.40\%& 0.597 &(+19.5\%)\\
+ & SW Ranking & \textbf{35.40\%}& 71.55\% & \textbf{0.603}&(+20.7\%)\\ \bottomrule
+\end{tabular}
+\caption{5-shot MMLU results for our routers. Note that the score for CPT at 50\% (75) is 92\% that of GPT-4 performance (81). Routers trained only on $\Darena$ perform poorly due to most questions being out-of-distribution, but dataset augmentation with $\Dgold$ is highly effective, leading to significant improvement in router performance even with a small number of samples.}
+\label{tab:mmlu}
+\end{table}
+
+On MMLU (Table \ref{tab:mmlu}), all routers perform poorly at the level of the random router when trained only on Arena dataset, which we attribute to most MMLU questions being out-of-distribution (see Section \ref{benchmark-dataset-similarity}). However, augmenting the training dataset with golden-label data from the MMLU validation split leads to significant performance improvements on MMLU across all routers, with all routers requiring approximately 20\% less GPT-4 calls than random for CPT(50\%). Importantly, this is despite the fact that the additional golden-labeled dataset of approximately 1500 samples represents less than 2\% of the overall training data, demonstrating the effectiveness of dataset augmentation even when the number of samples is small.
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llrrrl}
+\toprule
+Training data & Method & $CPT(50\%)$& $CPT(80\%)$& $APGR$ &\\ \midrule
+ & Random (95\% CI) & 50.00($\pm$2)\%& 80.08($\pm$1)\% & 0.497($\pm$0.01) & (+0\%) \\ \midrule
+$\Darena$ 
+ & BERT & 58.78\% & 83.84\% & 0.438 &(-11.8\%)\\
+ & Causal LLM & 56.09\%& 83.56\%& 0.461 &(-7.3\%)\\
+ & Matrix Factorization & \textbf{53.59\%}& 85.24\% & 0.4746&(-4.5\%)\\
+ & SW Ranking & 54.43\% & \textbf{82.11\%}& \textbf{0.4753}&(-4.3\%)\\ \midrule
+$\Darena + \Djudge$ & BERT & 44.76\% & 79.09\% & 0.531 &(+6.9\%)\\
+  & Causal LLM & \textbf{33.64\%}& \textbf{63.26\%}& \textbf{0.622} &(+25.3\%)\\
+ & Matrix Factorization & 38.82\% & 72.62\% & 0.565 &(+13.8\%)\\
+ & SW Ranking & 41.21\% & 72.20\% & 0.568 &(+14.3\%)\\ 
+ \bottomrule
+\end{tabular}
+\caption{8-shot GSM8K results. Note that the score for CPT at 50\% (75) is 87\% that of GPT-4 performance (86). Routers trained only on $\Darena$ again perform poorly due to questions being out-of-distribution, but augmentation with $\Djudge$ substantially improves router performance.}
+\label{tab:gsm8k}
+\end{table}
+
+Finally, on GSM8K (Table \ref{tab:gsm8k}), we observe that similar to MMLU, the performance of all routers trained only on the Arena dataset is close to random. However, training our routers on the dataset augmented with synthetic data from an LLM judge improves performance substantially, with all routers going from an APGR worse than random to an APGR greater than random. When trained on this augmented dataset, the causal LLM classifier performs the best out of all routers, requiring 17\% less GPT-4 calls than random to achieve CPT(50\%) and CPT(80\%).
+\subsection{Quantifying dataset and benchmark similarity}
+\label{benchmark-dataset-similarity}
+
+We attribute the difference in the performance of routers trained on the same dataset across different benchmarks to the differing distributions of evaluation data and training data.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{cccc} \toprule
+ 
+         &  Arena&  Arena augmented with & Arena augmented \\
+         & & with $\Djudge$ & with $\Dgold$ \\ \midrule
+         MT Bench &  0.6078 & 0.6525 & - \\ 
+         MMLU & 0.4823&  - & 0.5678 \\
+         GSM8K &  0.4926&  0.5335 & - \\
+    \bottomrule
+    \end{tabular}
+    \caption{Benchmark-dataset similarity scores demonstrate a strong correlation between these scores and the performance of routers on the corresponding benchmarks, providing a way of quantitatively improving router performance.}
+    \label{tab:benchmark-dataset-similarity}
+\end{table}
+
+A higher benchmark-dataset similarity score is correlated with stronger performance on that benchmark for routers trained using the corresponding dataset, as shown in Section \ref{results}. Dataset augmentation, be it using golden-labeled datasets or LLM-judge-labeled datasets, shifts the overall distribution of the preference data to be more in line with the benchmarks and increases the benchmark-dataset similarity score, which translates into performance improvements. This similarity score is also useful for understanding the relative performance of routers across different benchmarks: on the Arena dataset, the similarity score between MT bench and all datasets is noticeably greater than other benchmarks, which we believe explains the relatively stronger router performance on MT Bench as compared to GSM8K and MMLU. Benchmark-dataset similarity scores are a promising direction to systematically improve router performance in real-world use cases given knowledge about the query distribution.
+
+
+\subsection{Generalizing to other model pairs}
+
+We pick \verb|gpt-4-1106-preview| \cite{openai2023gpt4} and Mixtral 8x7B \cite{jiang2024mixtral} as representative strong and weak models for the above experiments. However, to demonstrate the generalizability of our framework to different model pairs, we report in this section our router performance on MT Bench when routed between Claude 3 Opus \cite{anthropic2024} and Llama 3 8B \cite{llama3modelcard}. Importantly, we use the same routers \textit{without any retraining}, and only replace the strong model and weak model routed to. These two models are also not present in our training data.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llrrrl}
+\toprule
+Train Set & Method & $CPT(50\%)$ & $CPT(80\%)$ & $APGR$ &\\ \midrule
+  & Random (95\% CI) & 47.23($\pm$5)\% & 77.08($\pm$5)\% & 0.494($\pm$0.03) & (+0\%)\\ \midrule
+$\Darena$ 
+ & BERT & 60.61\%& 88.39\%& 0.475 &(-3.9\%)\\
+ & Causal LLM & 31.96\%& \textbf{59.83\%} & \textbf{0.645} &(+30.5\%)\\
+ & Matrix Factorization & \textbf{24.84\%}& 85.73\%& 0.605 &(+22.5\%)\\
+ & SW Ranking & 33.54\%& 80.31\%& 0.553 &(+12\%)\\ \midrule
+$\Darena+\Djudge$ & BERT & 36.28\%& 50.83\%& 0.618 & (+25.2\%)\\
+  & Causal LLM & 40.46\%& 55.83\%& 0.625 & (+26.5\%)\\
+ & Matrix Factorization & \textbf{30.48}\%& \textbf{41.81\%}& \textbf{0.703} & (+42.2\%)\\
+ & SW Ranking & 31.67\%& 48.39\%& 0.667 & (+35\%)\\ \bottomrule
+\end{tabular}
+\caption{MT Bench results for Claude 3 Opus / Llama 3 8B. Our routers generalize very well across different strong and weak model pairs without any retraining.}
+\label{tab:mt-bench-opus-llama3}
+\end{table}
+
+Again, we observe strong results across all existing routers on MT Bench even when the model pair is replaced. Performance across all routers is comparable to with the original model pair. Results for both the new model pair and original model pair are still significantly stronger than random, with our routers requiring up to 30\% less GPT-4 calls than random to achieve CPT(80\%). These results suggest that our routers have learned some common characteristics of problems that can distinguish between strong and weak models, which generalize to new strong and weak model pairs without additional training. 
+
+\subsection{Cost analysis}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{ccc} \toprule
+         & CPT 50\% & CPT 80\%  \\ \midrule
+        MT Bench & 3.66x (at 95\% GPT-4 quality) & 2.49x \\
+        MMLU &  1.41x (at 92\% GPT-4 quality) & 1.14x \\
+        GSM8K &  1.49x (at 87\% GPT-4 quality) &  1.27x \\
+        \bottomrule
+    \end{tabular}
+    \caption{Cost saving ratio of our best performing routers over GPT-4. Our routers are able to achieve significant cost savings while maintaining quality.}
+    \label{tab:cost-saving}
+\end{table}
+
+We estimate the average cost of using GPT-4 and Mixtral 8x7B to be \$24.7 per million tokens and \$0. In Table \ref{tab:cost-saving}, we show results of quantifying the cost savings achieved by our approach. We calculate the inverse of the ratio of GPT-4 calls utilized by our top-performing router relative to the random baseline because the cost of GPT-4 is the dominant factor in our analysis. Our routers achieve optimal cost savings of up to 3.66x, demonstrating that routing can significantly reduce cost while maintaining response quality.
+
+\subsection{Routing Overhead}
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{cccc} \toprule 
+         & Cost / million requests  & Requests / second & Hourly cost of VM \\ \midrule 
+         SW Ranking & \$37.36 & 2.9&\$0.39\\ 
+         Matrix Factorization &  \$1.42 & 155.16&\$0.8\\ 
+         BERT &  \$3.19  & 69.62&\$0.8\\ 
+ Causal LLM & \$5.23  & 42.46&\$0.8\\ \bottomrule
+    \end{tabular}
+    \caption{Cost and inference overhead of different routers. As compared to the cost of LLM generation, the cost of deploying a router is small while also able being able to support real-world workloads.}
+    \label{tab:throughput}
+\end{table}
+
+A concern with LLM routing is the overhead of routing as compared to using a single model. Therefore, we measure and report the overhead of our routers in Table \ref{tab:throughput} to demonstrate their practicality using randomly-sampled conversations from Chatbot Arena. For routers that requires GPUs, namely matrix factorization and the classifier methods, we utilize Google Cloud's \texttt{g2-standard-4} VM containing a single NVIDIA L4 GPU. For similarity-weighted ranking, we use Google Cloud's CPU-only \texttt{n2-standard-8} VM. Our GPU-based routers are currently much more efficient that our CPU-based routers, but we note that there is still much room for improvement in optimizing the throughput of our routers. However, even SW ranking, our most expensive router, introduces an additional cost of no more than 0.
+
+
+\section{Conclusion}
+
+
+We demonstrate strong routing performance by our routers across a variety of  benchmarks, spanning open-ended question answering, humanities, and math problems. By intelligently routing queries between a strong model and weak model, our routers are able to achieve significant cost savings while maintaining a high response quality. 
+
+
+Our results also highlight the effectiveness of dataset augmentation in improving router performance. While training routers solely on the Arena dataset results in poor performance with MMLU and GSM8K, augmenting the training data with an LLM judge or in-domain data enables our routers to outperform the random baseline across all benchmarks. The largest performance gains occur when the training data closely resembles the evaluation data, as indicated by the benchmark-dataset similarity score. We believe that this framework provides a clear and scalable path to enhancing routing performance for specific use cases.
+
+While our work demonstrates strong results, there are a few limitations. First, although we evaluate on a diverse set of benchmarks, real-world applications may have distributions that differ substantially from these benchmarks. To this end, we show that users can collect a small amount of in-domain data to improve performance for their specific use cases via dataset augmentation. Next, while we focus on the two-model routing setting in this work, a promising future direction would be to extend this work to multiple models. Finally, in our experiments, we observe that performance between different routers trained on the same dataset can vary widely on the same benchmark without a clear explanation---we leave further investigation into this for a future work. 
+
+
+
+\newpage
+
+
+\begin{ack}
+We are grateful to Kourosh Hakhamaneshi, Goku Mohandas, Arman Zharmagambetov and Anastasiia Razdaibiedina for their valuable discussions and feedback on this work. This work
+is in part supported by gifts from Accenture, AMD, Anyscale, Google, IBM, Intel, Microsoft, Mohamed Bin Zayed University of Artificial Intelligence, Samsung SDS, SAP, Uber, and VMware.
+
+
+
+\end{ack}
+
+
+
+
+
+

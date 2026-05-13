@@ -1,0 +1,363 @@
+\title{fairret: a Framework for Differentiable Fairness Regularization Terms}
+
+\begin{abstract}
+    Current fairness toolkits in machine learning only admit a limited range of fairness definitions and have seen little integration with automatic differentiation libraries, despite the central role these libraries play in modern machine learning pipelines.
+
+    We introduce a framework of fairness regularization terms (\textsc{fairret}s) which quantify bias as modular, flexible objectives that are easily integrated in automatic differentiation pipelines. By employing a general definition of fairness in terms of linear-fractional statistics, a wide class of \textsc{fairret}s can be computed efficiently. Experiments show the behavior of their gradients and their utility in enforcing fairness with minimal loss of predictive power compared to baselines. Our contribution includes a PyTorch implementation of the \textsc{fairret} framework.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Many machine learning \textit{fairness} methods aim to enforce mathematical formalizations of non-discrimination principles \citep{mehrabiSurveyBiasFairness2021}, often by requiring statistics to be equal between groups \citep{agarwalReductionsApproachFair2018}. For example, we may require that men and women receive positive decisions at equal rates in binary classification \citep{dworkFairnessAwareness2012}. The main interest in fairness tools is to meet such constraints without destroying the accuracy of the ML model.% \citep{hardtEqualityOpportunitySupervised2016,feldmanCertifyingRemovingDisparate2015}. 
+
+A large class of these fairness tools utilizes \textit{regularization terms}, i.e. quantifications of unfairness that can be added to the existing error term of an unfair ML model \citep{kamishimaFairnessAwareClassifierPrejudice2012,berkConvexFrameworkFair2017,zafarFairnessConstraintsFlexible2019,padalaFNNCAchievingFairness2021,padhAddressingFairnessClassification2021,buylOptimalTransportClassifiers2022}. The modularity of such loss terms appears to align well with the paradigm of automatic differentiation libraries like PyTorch \citep{paszkePyTorchImperativeStyle2019}, which have become the bedrock of modern machine learning pipelines. However, the practical use of this modularity has seen little interest thus far.%, as these fairness tools tend to result from relaxations of constrained optimization rather than from deliberate pursuit for quantifications of unfairness. 
+
+\paragraph{Contributions}
+Hence, we formalize a framework of fairness regularization terms (\textbf{\textsc{fairret}s}) that consolidates research in differentiable fairness methods. A \textsc{fairret} quantifies a model's unfairness as a single value that is minimized like any other objective through automatic differentiation. 
+
+We implement two types of \textsc{fairret}s: \textsc{fairret}s that directly penalize the \textit{violation} of fairness constraints and \textsc{fairret}s that minimize the distance between a model and its \textit{projection} onto the set of fair models. These \textsc{fairret}s support any fairness notion defined through linear-fractional statistics \citep{celisClassificationFairnessConstraints2019}, which is a far wider range than the exclusively linear statistics typically considered in literature \citep{zafarFairnessConstraintsFlexible2019,agarwalReductionsApproachFair2018}. Moreover, our framework generalizes to the simultaneous handling of multiple sensitive traits and (a weaker form of) fairness with respect to continuous sensitive variables. By design, \textsc{fairret}s are both modular and extensible such that future work that can benefit from their wide applicability.
+
+We visualize the \textsc{fairret}s' gradients and evaluate their empirical performance in enforcing fairness notions compared to baselines. We infer this is far more difficult for fairness notions with linear-fractional statistics, which were rarely studied in prior work, than those with linear statistics. %Experiments show that fairness notions with linear-fractional statistics are far harder to achieve than those with linear statistics, which are far more popularly studied in literature.
+
+\paragraph{Related Work}
+Fairness tools are classified as \textit{preprocessing}, \textit{inprocessing} or \textit{postprocessing} \citep{mehrabiSurveyBiasFairness2021}. \textsc{fairret}s perform inprocessing, as they are minimized during training. 
+
+A popular approach to fairness regularization is to penalize the violation of fairness constraints \citep{zemelLearningFairRepresentations2013, padalaFNNCAchievingFairness2021,wickUnlockingFairnessTradeoff2019}, which we formalize as a \textsc{fairret}. We also take inspiration from postprocessing methods that project classifiers onto a fair set \citep{alghamdiModelProjectionTheory2020,weiOptimizedScoreTransformation2020} and penalize the cost of this projection \citep{buylKLDivergenceGraphModel2021} as a \textsc{fairret}. Fair representation learning \citep{mcnamaraCostsBenefitsFair2019,Oneto_Donini_luise_2020,Franco_2022318} finds intermediate representations that minimally contain sensitive information. An example is the adversarial approach of \citet{adelOneNetworkAdversarialFairness2019}, which is a baseline in our experiments. %Unlike our proposed \textsc{fairret}s, these methods are typically \textit{not} model-agnostic as they operate on a specific section of a neural net.
+
+\citet{celisClassificationFairnessConstraints2019} observed that many fairness definitions express a parity between linear-fractional statistics. They propose a meta-algorithm to find optimal classifiers that satisfy this constraint. Instead, we employ a simpler (yet sufficiently expressive) linear-fractional form and propose an algorithm to use them in the construction of linear constraints that does not require a meta-algorithm. 
+
+Popular fairness toolkits such as Fairlearn \citep{bird2020fairlearn} and AIF360 \citep{aif360_oct_2018} expect the underlying model in the form of \textit{scikit-learn Estimators}\footnote{\url{https://scikit-learn.org/1.3/developers/develop.html} describes these \textit{Estimators}} that can be retrained at-will in fairness meta-algorithms. Instead, our proposed \textsc{fairret}s act as a loss term that can simply be added \textit{within} a training step. The aforementioned toolkits have some integration with automatic differentiation libraries in adversarial fairness approaches \citep{zhangMitigatingUnwantedBiases2018}, yet these still require full control over the training process and lack generality in the fairness notions they can enforce.
+
+Two PyTorch-specific projects with similar goals as our paper are FairTorch \citep{FairTorch_2023} and the Fair Fairness Benchmark (FFB) \citep{hanFFBFairFairness2023}. However, neither present a formal framework and both only support a limited range of fairness definitions.
+
+
+
+\section{Fairness in Binary Classification}
+
+In fair binary classification, we are provided with random variables $(\bX, \bS, Y)$ with $\bX \in \mathbb{R}^{d_x}$ the feature vector of an individual, $\bS \in \mathbb{R}^{d_s}$ their \textit{sensitive} feature vector and $Y \in \{0, 1\}$ the binary output label. In what remains, all expectations are taken over the joint distribution of $(\bX, \bS, Y)$.
+
+The goal is to learn a classifier $f$ such that its predictions $f(\bX)$ match $Y$ while avoiding discrimination with respect to $\bS$. In this section, we will assume $f$ directly provides binary decisions, i.e. $f: \mathbb{R}^{d_x} \to \{0, 1\}$, as this is expected in traditional formalizations of fairness. However, since such `hard' classifiers are not differentiable, we will instead be learning probabilistic classifiers in Sec.~\ref{sec:fairret}.
+
+Further note that our definition of sensitive features $\bS$ as real-valued and $d_s$-dimensional vectors is a generalization of typical fairness definitions which assume a categorical (or binary) domain for sensitive features \citep{vermaFairnessDefinitionsExplained2018}. We will one-hot encode such categorical traits, e.g. by encoding `white' or `non-white' as the vectors $\bS = (1, 0)^\top$ and $\bS = (0, 1)^\top$ respectively. Our generalization allows us to take multiple non-exclusive sensitive traits into account by mapping them to different values $S_k$ in the same vector $\bS$ for $k \in [d_s] = \{0, ..., d_s - 1\}$. Additionally, by letting $S_k \in \mathbb{R}$, we allow soft specifications of identity rather than requiring hard discretization. 
+\subsection{Partition Fairness}\label{sec:partition}
+Though we will allow any feature vector $\bS \in \mathbb{R}^{d_s}$ in our framework, popular fairness definitions require every person to belong to exactly one demographic group. We call this \textit{partition fairness}.
+
+\begin{definition}\label{def:part_fair}
+    In \textbf{partition fairness}, $\bS$ is a one-hot encoding, i.e. $S_k \in \{0, 1\}$ and $\sum_{k \in [d_s]} S_k = 1.$
+\end{definition}
+\begin{example}\label{ex:dp}
+    A straightforward, popular definition in partition fairness is \textit{Demographic Parity} (DP), also known as statistical parity \citep{dworkFairnessAwareness2012,vermaFairnessDefinitionsExplained2018}. It enforces
+    \begin{equation} %\label{eq:dp_prob}
+        \forall k \in [d_s]: P(f(\bX) = 1 \mid S_k = 1) = P(f(\bX) = 1)
+    \end{equation}
+    which states that all groups ought to get positive predictions at the same rate (i.e. the overall rate).
+
+    Let $\gamma(k; f) \triangleq \frac{\E[S_k f(\bX)]}{\E[S_k]}$. It is easily shown that $\gamma(k; f) = P(f(\bX) = 1 \mid S_k = 1)$. Thus also
+    \begin{equation}
+        P(f(\bX) = 1 \mid S_k = 1) = P(f(\bX) = 1) \iff \gamma(k; f) = \E[f(\bX)].
+    \end{equation}
+\end{example}
+
+In Example~\ref{ex:dp}, fairness is formalized by requiring a statistic $\gamma$ to be equal across groups. This principle can be generalized to a wide class of parity-based fairness notions. In particular, we consider those expressed through \textit{linear-fractional} statistics \citep{celisClassificationFairnessConstraints2019}.
+
+\begin{definition}\label{def:lf}
+    A \textbf{linear-fractional} statistic $\gamma$ computes values $\gamma(k; f) \in \mathbb{R}$ for sensitive variable $S_k$ and classifier $f: \mathbb{R}^{d_x} \to \{0, 1\}$. We assume $\gamma$ is differentiable with respect to $f$. It takes the form
+\begin{equation}
+    \gamma(k; f) = \frac{\E[S_k (\alpha_0(\bX, Y) + f(\bX) \beta_0(\bX, Y))]}{\E[S_k (\alpha_1(\bX, Y) + f(\bX) \beta_1(\bX, Y))]}
+\end{equation}
+with $\alpha_0$, $\alpha_1$, $\beta_0$, and $\beta_1$ all functions that do not depend on $\bS$ or $f$. Let $\Gamma$ denote all such statistics.
+Also, let $\ogamma(f) \triangleq \frac{\E[\alpha_0(\bX, Y) + f(\bX) \beta_0(\bX, Y)]}{\E[\alpha_1(\bX, Y) + f(\bX) \beta_1(\bX, Y)]}$ denote the overall statistic value without conditioning on $\bS$.
+\end{definition}
+\begin{definition}\label{def:notion}
+    A \textbf{fairness notion} is expressed through a statistic $\gamma \in \Gamma$. The set $\mathcal{F}_\gamma$ of classifiers that adhere to the fairness notion is defined as
+\begin{equation}
+    \mathcal{F}_\gamma \triangleq \left\{f: \mathbb{R}^{d_x} \to \{0, 1\} \mid \forall k \in [d_s]: \gamma(k; f) = \ogamma(f) \right\}
+\end{equation}
+i.e. the statistic $\gamma(k; f)$ for each $S_k$ equals the overall statistic $\ogamma(f)$.
+\end{definition}
+
+Indeed, the DP fairness notion in Example~\ref{ex:dp} is expressed as a fairness notion as defined in Def.~\ref{def:notion} with linear-fractional statistics as defined in Def.~\ref{def:lf}. The same holds for the following notions. 
+
+\begin{example}\label{ex:eo}
+\textit{Equalized Opportunity} (EO) \citep{hardtEqualityOpportunitySupervised2016} only computes DP for actual positives $Y = 1$. Its statistic $\gamma$ is thus the recall $P(f(\bX) = 1 \mid Y = 1, S_k = 1)$, i.e. $\gamma(k; f) = \frac{\E[S_k f(\bX)Y]}{\E[S_k Y]}$.
+\end{example}
+
+\begin{example}\label{ex:pp}
+\textit{Predictive Parity} (PP) \citep{chouldechovaFairPredictionDisparate2017}, which compares the precision statistic $P(Y = 1 \mid f(\bX) = 1, S_k = 1)$, i.e. $\gamma(k; f) = \frac{\E[S_k f(\bX) Y]}{\E[S_k f(\bX)]}$.
+\end{example}
+
+\begin{example}\label{ex:te}
+\textit{Treatment Equality} (TE) \citep{Berk2021} balances the ratios of false negatives over false positives, i.e. $\gamma(k; f) = \frac{\E[S_k (1 - f(\bX)) Y]}{\E[S_k f(\bX)(1 - Y)]}$. Unlike the other notions, its $\gamma$ is not a probability.
+\end{example}
+
+Table~\ref{tab:fairalphabeta} summarizes the $\alpha$ and $\beta$ functions of several fairness notions \citep{vermaFairnessDefinitionsExplained2018} with linear-fractional statistics.
+
+\begin{table}
+\centering
+\caption{Fairness definitions and their $\alpha$ and $\beta$ functions. Conditional Demographic Parity encompasses many notions with an arbitrary function $\zeta$ conditioned on the input $\bX$.}
+\label{tab:fairalphabeta}
+\begin{tabular}{lcccc}
+Fairness Definition & $\alpha_0$ & $\beta_0$ & $\alpha_1$ & $\beta_1$ \\\hline % & Statistic\\\hline
+Demographic Parity \citep{dworkFairnessAwareness2012} & 0 & 1 & 1 & 0 \\% & Positive rate\\
+Conditional Demographic Parity \citep{Wachter_Mittelstadt_Russell_2020} & 0 & $\zeta(\bX)$ & $\zeta(\bX)$ & 0 \\%& Conditional rate\\
+Equal Opportunity \citep{hardtEqualityOpportunitySupervised2016} & 0 & Y & Y & 0 \\%& True positive rate\\
+False Positive Parity \citep{hardtEqualityOpportunitySupervised2016} & 0 & 1 - Y & 1 - Y & 0 \\% & True negative rate\\
+Predictive Parity \citep{chouldechovaFairPredictionDisparate2017} & 0 & Y & 0 & 1 \\% & False discovery rate\\
+False Omission Parity & Y & -Y & 1 & -1 \\% & False omission rate \\
+Accuracy Equality \citep{Berk2021} & 1 - Y & 2Y - 1 & 1 & 0 \\% &  Accuracy\\
+Treatment Equality \citep{Berk2021} & Y & -Y & 0 & 1 - Y \\% & FN-FP ratio\\
+\end{tabular}
+\end{table}
+
+\begin{definition}
+A linear-fractional statistic $\gamma \in \Gamma$ is \textbf{linear} when $\beta_1(\bX, Y) \equiv 0$.
+
+Let $\Gamma_\textnormal{L} \subset \Gamma$ denote the set of all linear statistics.
+\end{definition}
+
+Fairness notions with linear statistics $\gamma \in \Gamma_\textnormal{L}$ are thus identified in Table~\ref{tab:fairalphabeta} by checking the column for $\beta_1$. Such notions are especially useful because the fairness constraint in Def.~\ref{def:notion} is easily written as a linear constraint over classifier $f$. In turn, this makes the set of fair classifiers $\mathcal{F}_\gamma$ a convex set, which leads to convex optimization problems \citep{boydConvexOptimization2004}. Thus, the constrained optimization of $f$ can be efficiently performed if $f$ is itself linear \citep{zafarFairnessConstraintsFlexible2019}. 
+
+However, fairness notions with linear-fractional statistics $\gamma \in \Gamma \setminus \Gamma_\textnormal{L}$ do not directly lead to linear constraints in Def.~\ref{def:notion}. To facilitate optimization, we therefore propose to narrow the set of fair classifiers $\mathcal{F}_\gamma$ to the subset where the statistics are all equal in a particular value $c$.
+
+\begin{definition}
+Fix a $c \in \mathbb{R}$. A \textbf{$c$-fixed fairness notion} is expressed through a linear-fractional statistic $\gamma \in \Gamma$ such that the set $\mathcal{F}_\gamma(c)$ of classifiers $f$ that adhere to the fairness notion is defined as
+\begin{equation}
+    \mathcal{F}_\gamma(c) \triangleq \left\{f: \mathbb{R}^{d_x} \to \{0, 1\} \mid \forall k \in [d_s]: \gamma(k; f) = c \right\}.
+\end{equation}
+\end{definition}
+
+\begin{proposition}\label{prop:linear_fixed}
+    With $\gamma \in \Gamma$, the $c$-fixed fairness notion $\mathcal{F}_\gamma(c)$ enforces \textbf{linear} constraints:
+    \begin{equation}
+        \gamma(k; f) = c \iff \E[S_k \mleft(\alpha(\bX, Y, c) + f(\bX)\beta(\bX, Y, c)\mright)] = 0
+    \end{equation}
+    where $\alpha(\bX, Y, c) = \alpha_0(\bX, Y) - c \alpha_1(\bX, Y)$ and $\beta(\bX, Y, c) = \beta_0(\bX, Y) - c \beta_1(\bX, Y)$.
+\end{proposition}
+Using Prop.~\ref{prop:linear_fixed}, we can still obtain linear constraints for fairness notions $\mathcal{F}_\gamma$ with linear-fractional statistics $\gamma \in \Gamma \setminus \Gamma_\textnormal{L}$ by considering their $c$-fixed variant $\mathcal{F}_\gamma(c)$ instead. This sacrifices a degree of freedom because statistics $\gamma(k; f)$ are no longer allowed to be equal for any overall statistic $\ogamma(f)$, they must now do so for the specific case where $\ogamma(f) = c$. However, there are $c$ values that still lead to interesting sets $\mathcal{F}_\gamma(c)$. In the \textsc{fairret}s we propose, we take an unfair classifier $h$ and fix $c = \ogamma(h)$ to construct the set of all \textit{fair} classifiers $\mathcal{F}_\gamma(\ogamma(h))$ that would result from a fair redistribution of scores in $h$ over the sensitive groups.
+
+Though Prop.~\ref{prop:linear_fixed} is inspired by \citet{celisClassificationFairnessConstraints2019}, our use of this result vastly differs. Instead of fixing the statistics to a single value $c$, they set many pairs of upper and lower bounds for each group's statistics, giving rise to as many optimization programs. They then propose a meta-algorithm that searches the best classifier over each of these programs. A meta-algorithm is not necessary in our framework, as we will allow $c$ to evolve during training. While we have no formal convergence guarantees for this approach, empirical results show it works well in practice. 
+
+
+\subsection{Beyond Partition Fairness}\label{sec:beyond_part}
+Having firmly rooted our definitions in partition fairness (Def.~\ref{def:part_fair}), we now abandon its assumptions. First, we allow $S_k \in \mathbb{R}$. Second, we extend to multiple sensitive features with $\sum_{k} S_k \in \mathbb{R}$.
+
+\subsubsection{Continuous Sensitive Values}\label{sec:cont_sens}
+Admitting continuous values for someone's sensitive trait, i.e. $S_k \in \mathbb{R}$ allows us to take naturally continuous features, such as age, into account. Also, it provides an opportunity for an imprecise specification of demographic group membership. 
+
+For instance, instead of exactly knowing the gender of an individual, we may only have a probability available, e.g. because it is noisily predicted by a third-party classifier, or to protect the individual's privacy. By allowing $S_k \in (0, 1)$, the attribute $S_k$ could then express `woman-ness' instead of a binary `woman' or `not woman'. Thus, we also allow individuals to themselves quantify how strongly they identify with a group, rather than requiring a binary membership.
+
+Our notation already generalizes to non-binary $S_k$ values; they can simply be filled in for linear-fractional statistics $\gamma \in \Gamma$ as defined in Def.~\ref{def:lf}. Fairness as formalized in Def.~\ref{def:notion} can then still be enforced through $\gamma(k; f) = \ogamma(f)$. %The following Remark clarifies that this manner of generalizing fairness notions towards continuous sensitive variables is indeed a sensible choice.
+
+\begin{remark}\label{rem:cont}
+
+    Partition fairness constraints stem from the principle of treating distinct groups equally. This does not directly apply for a non-binary $S_k$. For example, if there is only one, continuous sensitive variable $(S_0) = \bS$ such as the age of an individual, then we cannot compare $\gamma(0; f)$ to another group's statistics. Instead, $\gamma(0; f)$ must be compared to a value independent of $\bS$.
+    
+    Enforcing $\gamma(k; f) = \ogamma(f)$ is then a sensible choice, as it satisfies key properties one can expect from a fairness measure. First, the constraint is met when $S_k \equiv s$, i.e. when $S_k$ is a deterministic constant. Second, it holds if $S_k$ has no linear influence on the numerator and denominator of $\gamma$, i.e.
+    \begin{equation*}
+        \textnormal{cov}(S_k, \alpha_0(\bX, Y) + f(\bX) \beta_0(\bX, Y)) = \textnormal{cov}(S_k, \alpha_1(\bX, Y) + f(\bX) \beta_1(\bX, Y)) = 0 \implies \gamma(k; f) = \ogamma(f).
+    \end{equation*}
+
+\end{remark}
+\subsubsection{Multiple Axes of Discrimination}
+By allowing $\sum_{k} S_k \in \mathbb{R}$, we support that $\bS$ contains information about people from several sensitive traits, e.g. gender, ethnicity, and religion. Because these each form a possible axis of discrimination, we can `sum' these sources of discrimination by combining the constraints. 
+
+For example, if pairs of sensitive features $(S_0, S_1)$ and $(S_2, S_3)$ each partition the dataset, then fairness requires both $\gamma(0; f) = \gamma(1; f) = \ogamma(f)$ and $\gamma(2; f) = \gamma(3; f) = \ogamma(f)$. Combined, these constraints make up the fairness definition in Def.~\ref{def:notion}. The use of one-hot notations for sensitive values thus already allows us to combine axes of discrimination for categorical sensitive traits.
+\begin{remark}\label{rem:intersect}
+An important limitation is that we only view fairness separately per axis of discrimination. Outside the partition fairness setting, this means that some intersections of sensitive groups, e.g. `black woman', will not be represented in the constraints that enforce fairness with respect to `black' and `woman' separately \citep{kearnsPreventingFairnessGerrymandering2018}.
+\end{remark}
+
+
+
+\section{Fairness Regularization Terms}
+
+The popular approach to modern machine learning is to construct pipelines consisting of modular, parameterized components that are differentiable from the objective to the input. We therefore use \textit{probabilistic} classifier models $h: \mathbb{R}^{d_x} \to (0, 1)$ from now on, where decisions are sampled from a Bernoulli distribution with parameter $h(\bX)$. Let $\mathcal{H}$ denote the hypothesis class of these models.% $h \in \mathcal{H}$.
+
+\begin{remark}\label{rem:probabilistic}
+    Fairness statistics $\gamma(k; h)$ over the output of a \textnormal{probabilistic} classifier $h$ only approximately verify their respective fairness notions, as these were only defined for \textnormal{hard} classifiers with a binary output \citep{lohausTooRelaxedBe2020}.
+\end{remark}
+
+In binary classification, we minimize a loss $\mathcal{L}_Y(h)$ over the probabilistic classifier $h$ given output labels $Y$, e.g. the cross-entropy. In \textit{fair} binary classification we additionally pursue $h \in \mathcal{F}_\gamma$:
+\begin{equation}\label{eq:obj_constrained}
+    \min_{h \in \mathcal{F}_\gamma} \mathcal{L}_Y(h) .
+\end{equation}
+For linear-fractional statistics, the constraint is linear when considering the $c$-fixed variant of $\mathcal{F}_\gamma$ (using Prop.~\ref{prop:linear_fixed}). However, for non-convex models $h$, the constrained optimization of $h$ will remain non-convex as well. In the general case, we thus relax $h \in \mathcal{F}_\gamma$ and instead incur a cost to $h \notin \mathcal{F}_\gamma$.
+
+\begin{definition}
+    A \textbf{fairness regularization term} (\textbf{\textsc{fairret}}) $R_\gamma(h): \mathcal{H} \to \mathbb{R}_{\geq 0}$ quantifies the unfairness of the model $h \in \mathcal{H}$ with respect to the fairness notion defined through statistic $\gamma$. 
+
+    A \textsc{fairret} is \textbf{strict} if it holds that $h \in \mathcal{F}_\gamma \iff R_\gamma(h) = 0$.
+\end{definition}
+
+The objective in Eq.~(\ref{eq:obj_constrained}) is then relaxed as
+\begin{equation}\label{eq:obj_relaxed}
+    \min_{h} \mathcal{L}_Y(h) + \lambda R_\gamma(h)
+\end{equation}
+with $\lambda$ a hyperparameter. The objective in Eq.~(\ref{eq:obj_relaxed}) is equivalent to  Eq.~(\ref{eq:obj_constrained}) for $\lambda \to \infty$ if $R_\gamma$ is strict.
+
+\begin{remark}
+    We call $R_\gamma$ a regularization term, yet its purpose is \textnormal{not} to reduce model complexity or improve generalization performance, in contrast to traditional regularization in machine learning \citep{kukackaRegularizationDeepLearning2017}. Instead, we aim to limit the hypothesis class of $h$ to the set of fair classifiers. %Hence, $h$ is expected to perform better on unbiased test data, but this considered unavailable.
+\end{remark}
+In what follows, we introduce two archetypes of \textsc{fairret}s: \textit{violation} and \textit{projection}. We visualize $\nabla_h R_\gamma$ for each \textsc{fairret} in Fig.~\ref{fig:grads} with $\gamma$ the positive rate statistic (thereby enforcing DP).
+
+\begin{figure}[tb]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[height=0.8cm]{figures/legend_grad.pdf}
+    \end{subfigure}
+    
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=.8\linewidth]{figures/grads.pdf}
+    \end{subfigure}
+    \caption{The model $h$ was trained on the \textit{ACSIncome} dataset without \textsc{fairret} (i.e. $\lambda = 0$) and ends up with disparate positive rates $\gamma(0; h) > \ogamma(h) > \gamma(1; h)$ for the one-hot encoded sensitive variables $(S_0, S_1)$.
+     These should be brought closer to the overall positive rate $\ogamma(f)$. We show probability scores $h$ and the gradients\footref{note:grad_h} of several \textsc{fairret}s $R_\gamma$ with respect to $h$. The gradients are normalized by dividing them by their maximum absolute value per \textsc{fairret} and per group. They are positive for samples with $S_0 = 1$, implying their scores should decrease, and vice versa for $S_1 = 1$.}
+    \label{fig:grads}
+    \end{figure}
+
+\subsection{Violation \textsc{FAIRRET}s}\label{sec:violation}
+To quantify $h \notin \mathcal{F}_\gamma$, we can start from the \textit{violation} $\bv(h)$ of the constraint that defines $\mathcal{F}_\gamma$:
+\begin{equation}\label{eq:violation}
+    \bv_k(h) = \abs{\frac{\gamma(k; h)}{\ogamma(h)} - 1}
+\end{equation}
+with $\bv: \mathcal{H} \to \mathbb{R}^{d_s}$ a vector-valued function with components $\bv_k$. Clearly, $\bv(h) = \bm{0} \iff h \in \mathcal{F}_\gamma$. 
+
+Note that $\bv(h)$ is normalized\footnote{In cases where $\ogamma(h)= 0$, we can simply use $\bv_k(h) = \abs{\gamma(k; h)}$ instead. We assume $h(\bX) \in (0, 1)$, so this only occurs in degenerate cases for the notions in Table~\ref{tab:fairalphabeta} (like when all $Y = 0$ for Equal Opportunity).} by $\ogamma(h)$ such that a classifier cannot minimize $\bv(h)$ by uniformly downscaling its statistics $\gamma$ without reducing relative differences between groups \citep{celisClassificationFairnessConstraints2019}. 
+
+\begin{definition}\label{def:norm}
+    We define the \textbf{Norm} \textsc{fairret} as $R_\gamma(h) \triangleq \norm{\bv(h)}$, with $\norm{\cdot}$ a norm over $\mathbb{R}^{d_s}$.
+\end{definition}
+
+Many variants of the Norm \textsc{fairret} have been proposed, e.g. by \citet{zemelLearningFairRepresentations2013}, \citet{padalaFNNCAchievingFairness2021}, \citet{wickUnlockingFairnessTradeoff2019} and \citet{chuangFAIRMIXUPFAIRNESS2020}. %Using the properties of the norm operator $\norm{\cdot}$, it is easily shown that the Norm \textsc{fairret} is strict.
+However, fairness evaluation metrics often only consider the maximal violation. Hence, we propose the SmoothMax variant.
+
+\begin{definition}\label{def:smoothmax} 
+    We define the \textbf{SmoothMax} \textsc{fairret} as $R_\gamma(h) \triangleq \log{\sum_{k \in [d_s]} \exp(\bv_k(h))} - \log{d_s}$
+\end{definition}
+Because the SmoothMax performs the log-sum-exp operation over the violation, it can be considered a smooth approximation of the maximum. We subtract $\log{d_s}$ to ensure the \textsc{fairret} is strict.
+
+Generally, violation \textsc{fairret}s can be characterized as functions of the violation $\bv(h)$. This lends them interpretability, but it also means that the gradient\footnote{\label{note:grad_h}There is some abuse of notation here. When taking the gradient or Jacobian with respect to $h$, we take it with respect to the vector of $n$ outputs of $h$ for a set of $n$ input features sampled from the distribution over $\bX$.} $\nabla_h R_\gamma$ decomposes as 
+\begin{equation}\label{eq:violation_grad}
+    \nabla_h R_\gamma = \mleft(\frac{\partial \bv}{\partial h}\mright)^\top \nabla_{\bv} R_\gamma
+\end{equation}
+with $\frac{\partial \bv}{\partial h}$ the Jacobian\footref{note:grad_h} of $\bv(h)$. The gradients of violation \textsc{fairret}s $R_\gamma$ thus only differ in the $\nabla_{\bv} R_\gamma$ gradient. Hence, the Norm \textsc{fairret} is excluded from Fig.~\ref{fig:grads} because its gradients equal those of SmoothMax after normalization. Figure~\ref{fig:grads} also suggests that violation \textsc{fairret}s convey little information on how each individual $h(\bX)$ score should be modified. Instead, they merely direct scores to uniformly increase or decrease within each group.
+
+\subsection{Projection \textsc{FAIRRET}s}\label{sec:projection}
+Recent postprocessing approaches to fairness redistribute all individual probability scores of a model $h(\bX)$ to a fair scores vector with a minimal loss in predictive power. For example, \citet{alghamdiModelProjectionTheory2020} project the scores onto the fair set $\mathcal{F}_\gamma$ as a postprocessing step. Yet, the cost of this projection can be seen as a quantification of unfairness that may be minimized as a \textsc{fairret} during training. 
+
+Given a statistical divergence or distance $D$, we can generally define such a \textit{projection} \textsc{fairret} as
+\begin{equation}\label{eq:proj_fairret}
+    R_\gamma(h) \triangleq \min_{f \in \mathcal{F}_\gamma(\ogamma(h))} \E[D\infdivx{f(\bX)}{h(\bX)}].
+\end{equation}
+
+Importantly, we do not project $h$ onto the general fair set $\mathcal{F}_\gamma$, but on the $c$-fixed subset $\mathcal{F}_\gamma(c)$ with $c = \ogamma(h)$. The $c$-fixing is done such that the projection only requires linear constraints for linear-fractional statistics (see Prop.~\ref{prop:linear_fixed}). A projection \textsc{fairret} (Eq.~\ref{eq:proj_fairret}) is then a convex optimization problem if we limit ourselves to a $D$ that is convex with respect to $f$, which is the case for all projections discussed here. In particular, we $c$-fix to the overall statistic $\ogamma(h)$ of $h$ because this ensures $h$ can always be projected onto itself if it is already fair, as then $h \in \mathcal{F}_\gamma(\ogamma(h))$.
+
+\begin{definition}\label{def:kl}
+    The \textbf{$\KL$-projection} uses the binary Kullback-Leibler divergence
+    \begin{equation}
+        \KL\infdivx{f(\bX)}{h(\bX)} \triangleq f(\bX)\log\frac{f(\bX)}{h(\bX)} + (1 - f(\bX))\log\frac{1 - f(\bX)}{1 - h(\bX)}.
+    \end{equation}
+\end{definition}
+
+The $\KL$-divergence is both a Csiszar divergence %is also known as the \textit{information projection} \citep{sriperumbudurIntegralProbabilityMetrics2009} and is both a Csiszar divergence
+and a Bregman divergence \citep{amariDivergenceUniqueBelonging2009}. Also, the cross-entropy error minimized in $\mathcal{L}_Y(h)$ equals $\KL\infdivx{Y}{h(\bX)}$ up to a constant. The minimization of Eq.~(\ref{eq:obj_relaxed}) thus comes down to simultaneously minimizing $\KL$ between $h(\bX)$ and the data $Y$, and between $h(\bX)$ and the closest $f \in \mathcal{F}_\gamma(\ogamma(h))$ \citep{buylKLDivergenceGraphModel2021}.
+
+\begin{definition}\label{def:js}
+    The \textbf{$\JS$-projection} uses the binary Jensen-Shannon divergence.
+    \begin{equation}
+        \JS\infdivx{f(\bX)}{h(\bX)} \triangleq \frac{1}{2}\KL\infdivx{f(\bX)}{m(\bX)} + \frac{1}{2}\KL\infdivx{h(\bX)}{m(\bX)}
+    \end{equation}
+    with $m(\bX) = \frac{1}{2} f(\bX) + \frac{1}{2} h(\bX)$. % Note that $1 - m(\bX) = \frac{1 - f(\bX) + 1 - h(\bX)}{2}$
+\end{definition}
+Just like $\KL$, the $\JS$-divergence is a Csiszar divergence. However, the $\JS$-divergence is symmetric with respect to its arguments $f$ and $h$, which is not the case for the $\KL$-divergence.
+\begin{definition}\label{def:sed}
+    The \textbf{$\SED$-projection} uses the squared Euclidean distance between the two points $(1 - f(\bX), f(\bX))$ and $(1 - h(\bX), h(\bX))$:
+    \begin{equation}
+        \SED\infdivx{f(\bX)}{h(\bX)} \triangleq 2(f(\bX) - h(\bX))^2.
+    \end{equation}
+\end{definition}
+$\SED$ is a Bregman divergence between the Bernoulli distributions with parameters $f(\bX)$ and $h(\bX)$.
+
+In practice, we evaluate projection \textsc{fairret}s $R_\gamma(h)$ in two steps. 
+\begin{align}
+    \textnormal{(i)}\quad &f^* = \argmin_{f \in \mathcal{F}_\gamma(\ogamma(h))} \E[D\infdivx{f(\bX)}{h(\bX)}]\\
+    \textnormal{(ii)}\quad &R_\gamma(h) = \E[D\infdivx{f^*(\bX)}{h(\bX)}]
+\end{align}
+
+While keeping $h$ fixed, step (i) computes the overall statistic $\ogamma(h)$ and then finds the projection $f^*$ through constrained optimization. Subsequently, step (ii) keeps $f^*$ fixed and computes $\E[D\infdivx{f^*(\bX)}{h(\bX)}]$ as a function of $h$, which we use to compute the gradient with respect to $h$. This gradient differs from the actual gradient of the optimization as a function of $h$ in a projection \textsc{fairret} (Eq.~\ref{eq:proj_fairret}), because the latter would require us to treat $f^*$ as a function of $h$. However, by treating $f^*$ as fixed instead (without backpropagating through it), we significantly simplify the \textsc{fairret}'s implementation. The optimization in step (i) can then be solved generically using specialized libraries such as \texttt{cvxpy} \citep{agrawal2018rewriting,diamond2016cvxpy}. In our experiments, we find that only 10 optimization steps is enough to get a reasonable approximation of the solution.
+
+Figure~\ref{fig:grads} shows that the gradients of the projection \textsc{fairret}s increase with higher values of $h$. We hypothesize this occurs when $\gamma(k; h) > \ogamma(h)$ because $\gamma(k; h)$ is more easily decreased by reducing higher $h$ values than lower ones. Conversely, when $\gamma(k; h) < \ogamma(h)$, there is more to gain from increasing lower $h$ values than higher ones.
+\subsection{Analysis}\label{sec:analysis}
+\begin{proposition}\label{prop:strict}
+    All \textsc{fairret}s presented in this paper (i.e. Def.~\ref{def:norm}, \ref{def:smoothmax}, \ref{def:kl}, \ref{def:js} and \ref{def:sed}) are strict.
+\end{proposition}
+
+Hence, all proposed \textsc{fairret}s can indeed be properly regarded as quantifications of unfairness.
+
+They are differentiable with respect to $h$. Violation \textsc{fairret}s owe this to the differentiability of $\gamma$ and projection \textsc{fairret}s to the differentiability of $D$. Hence, \textsc{fairret}s are easily implemented with an automatic differentiation library like PyTorch. The computational overhead is unaffected by the complexity of the parameters $\btheta$ of $h$, as the gradients $\nabla_{\btheta} \mathcal{L}_Y = \mleft(\frac{\partial h}{\partial \btheta}\mright)^\top \nabla_h \mathcal{L}_Y $ and $\nabla_{\btheta} R_\gamma = \mleft(\frac{\partial h}{\partial \btheta}\mright)^\top \nabla_h R_\gamma$ of both loss functions in the joint objective (Eq.~\ref{eq:obj_relaxed}) share the computation of the Jacobian $\frac{\partial h}{\partial \btheta}$. 
+
+It is common to minimize $\mathcal{L}_Y$ using mini-batches; the same batches can be used to minimize $R_\gamma$. Indeed, this is done in our experiments. Though this makes \textsc{fairret}s scalable, insufficient batch sizes will lead to poor approximations of the statistics $\gamma$. Clearly, the mean violation $\bv(h)$ in a violation \textsc{fairret} (Eq.~\ref{eq:violation}) computed over mini-batches is not an unbiased estimate of the actual violation over all data.
+
+
+\section{Experiments}
+
+
+\subsection{Setup}\label{sec:setup}
+Experiments were conducted on the %, avoiding the popular Adult, COMPAS and German Credit datasets as suggested by \citet{fabrisAlgorithmicFairnessDatasets2022}. Instead, we used 
+\textit{Bank} \citep{Moro_Cortez_Rita_2014}, \textit{CreditCard} \citep{Yeh_Lien_2009}, \textit{LawSchool}\footnote{Curated and published by the SEAPHE project}, and \textit{ACSIncome} \citep{ding2021retiring} datasets. Each has multiple sensitive features, including some continuous.
+The classifier $h$ was a fully connected neural net with hidden layers of sizes [256, 128, 32] followed by a sigmoid and did not take sensitive features $\bS$ as input. We trained with all \textsc{fairret}s discussed in Sec. The remaining \textsc{fairret}s, SmoothMax and $\KL$-projection, were representative for their archetype. These are compared against three baselines implemented in the Fair Fairness Benchmark (FFB) by \citet{hanFFBFairFairness2023}, as their implementation provides these baselines as loss terms in idiomatic PyTorch. They are \textit{PRemover} \citep{kamishimaFairnessAwareClassifierPrejudice2012}, \textit{HSIC} \citep{perez-suayFairKernelLearning2017}, and \textit{AdvDebias} \citep{adelOneNetworkAdversarialFairness2019} (where the reverse of the adversary's loss is the fairness loss term). In contrast to the \textsc{fairret} implementations, they only accept a single, categorical sensitive attribute. Each \textsc{fairret} and FFB fairness loss was added to the cross-entropy loss in the objective (Eq.~\ref{eq:obj_relaxed}) in a separate training run for a range of strengths $\lambda > 0$. % \in [0.1, 0.3, 1]$. 
+
+We measured fairness over the four statistics $\gamma$ in Table~\ref{tab:fairalphabeta} that relate to Demographic Parity (DP), Equal Opportunity (EO), Predictive Parity (PP), and Treatment Equality (TE) respectively. Violation of each fairness notion is computed as $\max_k \bv_k(h)$ (see Eq.~(\ref{eq:violation})). Each \textsc{fairret} was minimized with respect to each $\gamma$ in a separate training run (and only the optimized violation is reported). The three FFB baselines only consider one fairness notion, which is to maximize independence between the model's output and the sensitive attributes. Their violation is reported for each statistic $\gamma$.%, which mainly relates to DP. 
+
+In summary, there was an experiment run for each dataset, fairness method, fairness strength $\lambda$, and statistic $\gamma$ (except for the FFB baselines). Finally, we also use the \textit{Unfair} baseline with $\lambda = 0$. Each of these combinations was repeated across 10 random seeds with each different train/test splits. 
+\subsection{Results}\label{sec:results}
+\begin{figure}[tb]
+	\centering
+
+\begin{subfigure}{\textwidth}
+    \centering
+	\includegraphics[width=\textwidth]{figures/legend_4_methods.pdf}
+\end{subfigure}
+
+\begin{subfigure}{0.245\textwidth}
+	\includegraphics[width=\textwidth]{figures/bank_test.pdf}
+	\caption{\textit{Bank}}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.245\textwidth}
+	\includegraphics[width=\textwidth]{figures/creditcard_test.pdf}
+	\caption{\textit{CreditCard}}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.245\textwidth}
+	\includegraphics[width=\textwidth]{figures/lawschool_test.pdf}
+	\caption{\textit{LawSchool}}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.245\textwidth}
+	\includegraphics[width=\textwidth]{figures/newadult_test.pdf}
+	\caption{\textit{ACSIncome}}
+\end{subfigure}
+\caption{Mean test set results with confidence ellipse for the standard error. Each marker is a separate combination of dataset, \textsc{fairret}, \textsc{fairret} strength, and statistic. Results in the lower right are optimal. Failed runs (with an AUROC far worse than the rest) are omitted.}
+\label{fig:results}
+\end{figure}
+
+Test set results are visualized in Fig. We separately discuss the notions with linear and with linear-fractional statistics.
+
+\textbf{For DP and EO, which have \textit{linear} statistics}, both the SmoothMax and $\KL$-projection \textsc{fairret}s are effectively used to minimize the fairness violation with respect to multiple sensitive attributes while minimally suffering a loss in AUROC scores, though the projection \textsc{fairret} clearly performs better than the violation-based SmoothMax \textsc{fairret}. As expected, the FFB baselines perform worse than the methods implemented in our \textsc{fairret} framework, since they cannot be configured to optimize the same general range of fairness definitions. Also, their implementation only minimizes bias with respect to a single sensitive attribute, and so they are oblivious to some of the components in $\bS$ that the violation in Fig.~\ref{fig:results} measures.
+
+\textbf{For PP and TE, which have \textit{linear-fractional statistics}}, all methods appear to struggle far more. SmoothMax is most consistent and never makes the fairness violation worse, yet the $\KL$-projection in most cases makes both the fairness violation and the AUROC worse. The same occurs for the FFB baselines. Still, non-linear fairness notions are clearly harder to optimize, which aligns with the results of \citet{celisClassificationFairnessConstraints2019}. Though \citet{barocas-hardt-narayanan} conclude that sufficiency (a notion related to PP) `often comes for free', further work is needed to better understand how such notions can be consistently achieved.
+
+
+\section{Conclusion}
+
+The \textsc{fairret} framework allows for a wide range of fairness definitions by comparing linear-fractional statistics for each sensitive feature. We implement several \textsc{fairret}s and show how they are easily integrated in existing machine learning pipelines utilizing automatic differentiation. 
+
+Empirically, violation \textsc{fairret}s like SmoothMax consistently lead to trade-offs between fairness and AUROC, though the more involved projection \textsc{fairret}s like the $\KL$-projection clearly outperform them on fairness definitions with linear statistics. However, all methods struggle with fairness notions that have linear-fractional statistics like PP and TE, which have mostly been ignored in prior work. This signals a lucrative direction for future research.
+
+
+\clearpage
+
+

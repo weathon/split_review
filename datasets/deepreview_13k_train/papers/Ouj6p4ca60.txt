@@ -1,0 +1,383 @@
+\title{Amortizing intractable inference in large language models}
+
+\begin{abstract}
+Autoregressive large language models (LLMs) compress knowledge from their training data through next-token conditional distributions. This limits tractable querying of this knowledge to start-to-end autoregressive sampling. However, many tasks of interest---including sequence continuation, infilling, and other forms of constrained generation---involve sampling from intractable posterior distributions. We address this limitation by using amortized Bayesian inference to sample from these intractable posteriors. Such amortization is algorithmically achieved by fine-tuning LLMs via diversity-seeking reinforcement learning algorithms: generative flow networks (GFlowNets). We empirically demonstrate that this distribution-matching paradigm of LLM fine-tuning can serve as an effective alternative to maximum-likelihood training and reward-maximizing policy optimization. As an important application, we interpret chain-of-thought reasoning as a latent variable modeling problem and demonstrate that our approach enables data-efficient adaptation of LLMs to tasks that require multi-step rationalization and tool use.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Autoregressive large language models (LLMs) trained on general-domain data are vast stores of world knowledge \citep{petroni-etal-2019-language}. They are typically optimized by predicting a token given its preceding context; therefore, tractable inference over this knowledge is limited to sampling conditioned on a prefix. Many useful tasks, such as infilling~\citep{zhu2019text,liu-etal-2019-tigs}, generating text conditioned on length or lexical constraints~\citep{hokamp-liu-2017-lexically, hu-etal-2019-improved}, and finding the most likely sequence continuation, involve intractable inference in LLMs.
+
+Such tasks are related to the problem of reasoning, which has been framed as one of probabilistic inference \citep{gershman-goodman}. Correspondingly, the linguistic expression of reasoning can be seen as inference over language. For example, we can interpret chain-of-thought reasoning \citep{wei2022chain,kojima2022large}, a paradigm of reasoning in language models, as a problem of intractable posterior inference. Given a question-answer pair $(X, Y)$, we are interested in finding latent chains of thought -- token sequences $Z$ that contribute the most to the conditional likelihood
+\begin{equation}
+    p(Y\mid X) = \sum_{Z}p_{\rm LM}(ZY\mid X) = \sum_{Z}p_{\rm LM}(Y\mid XZ)p_{\rm LM}(Z\mid X),
+    \label{eq:cot_lvm}
+\end{equation}
+where $p_{\rm LM}$ denotes the likelihood assigned to a sequence by a language model and apposition of variables (\eg, $XZY$) denotes the concatenation of the token sequences.
+
+While past work has relied on prompting and in-context learning to produce $Z$'s that lead to the correct $Y$, treating $Z$ as a hidden variable in a latent variable model (LVM) renders chain-of-thought reasoning a Bayesian inference problem (\autoref{fig:figure_one}). For this LVM, the distribution we must sample from is the posterior $p_{\rm LM}(Z\mid X,Y) = \frac{p_{\rm LM}(XZY)}{\sum_{Z'}p_{\rm LM}(XZ'Y)}$. Such sampling is intractable: while it is easy to evaluate $p_{\rm LM}(XZY)$, the conditional distributions needed to sample $Z$ from $p_{\rm LM}(Z\mid X,Y)$ one token at a time are not easy to compute.
+
+A standard method to sample approximately from intractable posterior distributions is Markov chain Monte Carlo (MCMC), but it is difficult to craft good proposal distributions {for multi-modal distributions over} language data \citep{miao2018cgmh,zhang-etal-2020-language-generation,lew2023sequential}, and inference on a new input may be prohibitively slow. Alternatively, one can turn to reinforcement learning (RL) approaches such as proximal policy optimization~\citep[PPO;][]{schulman2017proximal}, where the language model is treated as a policy to be fine-tuned. However, these do not aim to model the full diversity of the distribution; instead, learned policies settle around a small number of modes. In both cases, issues with this mode collapse are exacerbated when the target distribution is misspecified, leading to the undesirable behavior of overoptimized samplers \citep{gao2022scaling}.
+
+Amortized probabilistic inference -- that is, training a model to approximate a distribution of interest -- provides a principled, efficient, and potentially scalable way to draw samples from the distribution \citep{beal2003variational}. One way to implement amortized inference for high-dimensional discrete data such as text is using generative flow networks \citep[GFlowNets;][]{bengio2021flow}, which are diversity-seeking reinforcement learning algorithms that train policies to sample objects (such as a token sequence $Z$) with probability proportional to a given reward function, such as the joint $p_{\rm LM}(XZY)$.
+
+In this work, we present a method that initializes the GFlowNet policy with a pretrained LLM and continues to train it with a reward objective that can be evaluated with the same LLM. The result is a different type of fine-tuning (FT) procedure for text generation that has a number of advantages, including improved sample diversity, data efficiency, and out-of-distribution generalization. GFlowNet fine-tuning makes the language model sample from the target distribution, enabling amortized inference in a number of applications (\autoref{fig:figure_one}).
+
+Leveraging this approach, we empirically demonstrate the possibilities and benefits of learning to sample from intractable distributions over text continuations, latent reasoning chains, and tool use sequences using GFlowNet fine-tuning. Notably, the diversity of samples from the models trained with GFlowNet fine-tuning is beneficial in Bayesian model averaging settings, such as when aggregating answers to questions obtained via multiple reasoning chains. For example, using a pretrained language model with 6B parameters, our method shows an absolute improvement of 10.9\% over supervised fine-tuning on subjectivity classification with only 10 labeled examples (\autoref{sec:expt_subj}) and outperforms supervised fine-tuning and PPO by 63\% on integer arithmetic with 50 demonstrations, with notable improvements in out-of-distribution generalization (\S\ref{sec:expt_arithmetic}). Moreover, the benefits of amortized inference allow us to efficiently sample from the fine-tuned model at scale.
+Our contributions include:
+\begin{enumerate}[left=0pt,nosep,label=(\arabic*)]
+    \item A general algorithm for amortized sampling from intractable LLM posteriors.
+    \item A probabilistic approach to fine-tuning LLMs to perform chain-of-thought reasoning.
+    \item Empirical results on sequence continuation, natural language reasoning, integer arithmetic with tool use, and story infilling.
+\end{enumerate}
+
+\begin{figure}[t]
+\vspace*{-1em}
+\includegraphics[width=\linewidth]{images/fig1.pdf}
+\caption{\textbf{Left:} Three problems of reasoning in language -- sentence infilling, chain-of-thought reasoning, and problem-solving with external tool use -- can all be seen as instances of the latent variable model at the top left, where an input ($X$) generates the output ($Y$) via a latent variable ($Z$). \textbf{Right:} We fine-tune an LLM to sample from the Bayesian posterior over $Z$, conditioning on $X$ and optionally on $Y$. If conditioned on $Y$, the trained policy can be used to sample diverse latent sequences (\eg, for infilling, \autoref{sec:expt_infilling}). If not conditioned on $Y$, the policy can sample $Z$, and thus predict $Y$, for inputs $X$ not seen during training (\eg, for classification and multi-step reasoning, \autoref{sec:expt_subj}, \ref{sec:expt_arithmetic}).
+As shown in~\autoref{sec:expt_arithmetic}, modeling the full diversity of the posterior aids generalization.}
+\label{fig:figure_one}
+\end{figure}
+
+
+
+\section{Motivating example: Generating random numbers with LLMs}
+
+\label{sec:motivating-example}
+{We consider a simple task that highlights the limitations of reward-maximizing reinforcement learning (RL) methods in fine-tuning LLMs. For readers unfamiliar with RL, we refer to  \citet{sutton2018reinforcement} and include a glossary in \autoref{app:glossary} to define key terms used throughout this paper. The task involves generating random numbers from a given distribution when prompted \textit{`The following is a random integer drawn uniformly between 0 and 100: '}. This task is a minimal instantiation of the problem we study in the paper: sample from a target distribution given an unnormalized density. Although the target distribution is tractable, making the task seemingly straightforward, it serves as a useful illustration of the behaviors of different fine-tuning methods.}
+
+\citet{renda2023can} found that pretrained LLMs perform quite poorly on this task: the distribution of numbers generated with the above prompt will be far from uniform (\autoref{fig:rng-uniform-vanilla} shows an example using an instruction fine-tuned GPT-J 6B \citep{gpt-j}\footnote{We use the Instruct-GPT-J model available at \href{https://huggingface.co/nlpcloud/instruct-gpt-j-fp16}{\huggingface.co/nlpcloud/instruct-gpt-j-fp16}.}). There may be many reasons for this, among them the effects of instruction fine-tuning and the LLM's possible bias towards numbers that are more frequent in the training data (\eg, numbers starting with `1' are more frequent due to the properties of many natural data-generating processes \citep{benford}). 
+
+\looseness=-1
+While reward-maximizing RL can teach the model to generate valid numbers (by penalizing outputs that are not numbers from 1 to 100), it would not resolve the distribution skew introduced during pretraining. Indeed, rewarding all valid integers equally leads to an expected gradient of zero for policy gradient methods. \autoref{fig:rng-uniform-ppo} shows that while most samples are valid numbers after PPO training, the distribution remains highly skewed.
+
+\looseness=-1
+Instead, we can take a principled approach by training the LLM to match the target distribution with a GFlowNet learning objective. Such an objective directly optimizes the likelihood of the model generating a number to be proportional to the reward for that number, which is the number's (potentially unnormalized) probability under the target distribution. When the policy is initialized as the pretrained LLM, the resulting distribution after GFlowNet fine-tuning is shown in \autoref{fig:rng-uniform-finetuned}. Quantitatively, the KL divergence from the sampling distribution to the target (uniform) distribution decreases from $3.37$ for the original LLM (on the support $[0, 100]$) to $9.75 \cdot 10^{-5}$ for the GFlowNet-fine-tuned model.
+
+This example illustrates a general point: GFlowNet objectives provide a principled and flexible approach to fine-tuning LLMs to \emph{match} a target distribution where reward-maximizing RL fails to.
+On this simple task, this distribution matching could also be achieved through supervised fine-tuning; however, this would require access to samples from the target distribution, which are unavailable in general (though not in this simple example).
+In the following sections, we further illustrate this point in non-trivial problems involving intractable inference, reasoning with latent variables, and tool use. 
+
+\begin{figure}[t]
+\vspace*{-1em}
+    \captionsetup{justification=centering}
+    \centering
+    \hspace{-0.05\linewidth}\includegraphics[width=1.05\linewidth]{images/all_single-prompt.pdf}
+    \begin{subfigure}{.325\textwidth}
+      \centering
+      \caption{\textbf{Base model} \\ 50.5\% of samples \\are valid numbers.}
+      \label{fig:rng-uniform-vanilla}
+    \end{subfigure}
+    \begin{subfigure}{.325\textwidth}
+      \centering
+      \caption{\textbf{PPO fine-tuning}  \\ 95.8\% of samples \\are valid numbers.}
+      \label{fig:rng-uniform-ppo}
+    \end{subfigure}
+    \begin{subfigure}{.325\textwidth}
+      \centering
+      \caption{\textbf{GFlowNet fine-tuning} \\ 100\% of samples \\are valid numbers.}
+      \label{fig:rng-uniform-finetuned}
+    \end{subfigure}
+    \caption{\small Empirical distributions of 512,000 integers from 1 to 100 generated by GPT-J fine-tuned with PPO (reward-maximizing; b) and GFlowNet fine-tuning (distribution-matching; c). Note the logarithmic $y$-scale.}
+    \label{fig:rng-uniform-comparison}
+\end{figure}
+
+
+\section{Fine-tuning LLMs to sample from intractable distributions}
+
+
+We first describe how intractable inference emerges from interesting applications of LLMs, one of which is chain-of-thought reasoning seen through the lens of latent variable models, where the posterior distribution over the latent variable is intractable.
+We then discuss how GFlowNet objectives can be used to train amortized samplers to perform such intractable inference.
+
+\subsection{Problem: Intractable inference in large language models}
+\label{sec:methodology_intractable}
+
+Autoregressive language models decompose the distribution over sequences of tokens as a product of ordered conditionals: $p(w_{1:N})=p(w_1)p(w_2\mid w_1)\cdots p(w_N\mid w_{1:N-1})$. While this decomposition makes left-to-right sampling from the distribution tractable, sampling from other conditional distributions is intractable. Various problems of language modeling can be viewed as sampling from such intractable conditionals in the distribution over sequences of an LLM; we give two such examples and related terminologies in~\autoref{tab:intractable_examples}. Some tasks we study in \autoref{sec:experiments} are instances of these examples.%
+
+\paragraph{Tempered and contrastive sampling.} In many applications (\eg, translation, summarization, dialogue systems), one wishes to sample from a low-temperature distribution over sequences $Z$ conditioned on a prefix $X$, \ie, $q(Z\mid X)\propto p_{\rm LM}(XZ)^{1/T}$ for some temperature $T<1$, as high-likelihood samples are more likely to be fluent or accurate continuations of $X$~\citep{Tillmann2003Word}.
+The limit of $T\to 0$ gives a distribution that is peaky on the most likely continuation. However, sampling from $q$, or finding its mode, is intractable, and it is common to resort to approximations, such as tempering the \emph{tokenwise} conditional distributions or using beam search to search for a mode. A related problem is sampling a continuation with a correction for its unconditional likelihood, \eg, $q(Z\mid X)\propto p_{\rm LM}(XZ)^\alpha p_{\rm LM}(Z)^\beta$ with $\beta<0$ and $\alpha>0$, where applications again resort to approximating the next-token conditionals of $q$ by tempering \citep{malkin-etal-2022-coherence,li-etal-2023-contrastive}.
+
+\paragraph{Infilling and reverse generation.} Infilling is the task of sampling a sequence of tokens conditioned on both its prior and subsequent context, which can be understood as sampling from the distribution $q(Z\mid X,Y)\propto p_{\rm LM}(XZY)$, where $X$ and $Y$ are fixed. Reverse generation is a special case, where $X$ is an empty sequence. Besides being a meaningful task in its own right \citep{liu-etal-2019-tigs,zhu2019text,donahue-etal-2020-enabling,susanto-etal-2020-lexically,lu2022insnet}, infilling and reverse generation are key components of newly emerging methods of LLM prompting, such as when LLMs are tasked with optimizing their own instruction sequences or reasoning steps \citep{zhou2023ape,sordoni2023deep,xu2023reprompting}. 
+Current applications achieve this by resorting to hand-engineered instructions and inverted prompts.
+
+\paragraph{Constrained generation.} Sampling of text with constraints and penalties -- for example, those on the presence or the absence of certain words or on the score of an auxiliary classifier evaluated on the text -- can be understood as sampling from a distribution $q(Z)\propto p_{\rm LM}(Z)c(Z)$, where $c$ is an externally specified constraint. Current approaches to the problem use tokenwise approximations \citep{liu-etal-2021-dexperts}, various problem-specific beam search and local search techniques \citep[\eg,][]{schmaltz-etal-2016-word,hokamp-liu-2017-lexically,hu-etal-2019-improved,sha-2020-gradient,lu-etal-2022-neurologic} or {classifier-guided conditional generation approaches \citep[\eg,][]{yang-klein-2021-fudge,meng2022controllable}.}
+\begin{table}[t]
+\centering
+\vspace*{-1em}
+\caption{Objects in language posterior inference. Given a pretrained `teacher' LM $p_{\rm LM}$, we train a GFlowNet $q_{\rm GFN}$ to sample the posterior $p(Z\mid X,Y)$. Amortization and generalization are achieved by making $X$, and optionally $Y$, an input to $q_{\rm GFN}$.}\vspace*{-1em}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{@{}p{0.15\textwidth}p{0.3\textwidth}p{0.35\textwidth}p{0.40\textwidth}}
+\toprule
+Object & Meaning & Example 1 (infilling) & Example 2 (subjectivity classification) \\\midrule
+$X$ & cause / condition / question & \textit{The cat was hungry.} & \textit{A deeply moving storyline.} \\
+$Z$ & mechanism / reasoning chain & \textit{She ate a mouse.} & \textit{This review expresses personal feelings.} \\
+$Y$ & effect / answer & \textit{Now the cat is sleepy, not hungry.} & \textit{Answer: Subjective} \\
+$p(Z\mid X)$ & conditional prior & \multicolumn{2}{c}{$p_{\rm LM}(Z\mid X)$} \\
+$p(Y\mid X,Z)$ & likelihood of effect given cause and mechanism 
+ & \multicolumn{2}{c}{$p_{\rm LM}(Y\mid XZ)$} \\
+$p(Z,Y\mid X)$ & conditional joint, reward for $Z$ & \multicolumn{2}{c}{$p_{\rm LM}(ZY\mid X)$} \\\midrule
+$p(Z\mid X,Y)$ & posterior \textbf{(intractable!)} & \multicolumn{2}{c}{approximated and amortized by GFlowNet $q_{\rm GFN}(Z\mid X[,Y])$} \\
+$q(Y\mid X)$ & posterior predictive / & \multicolumn{2}{c}{approximated as $\sum_Zq_{\rm GFN}(Z\mid X)p_{\rm LM}(Y\mid XZ)$, } \\
+             & Bayesian model average & \multicolumn{2}{c}{sampled as $Z\sim q_{\rm GFN}(Z\mid X)$, $Y\sim p_{\rm LM}(Y\mid XZ)$} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:intractable_examples}
+\end{table}
+
+\subsection{Reasoning through latent variables}
+\label{subsec:reasoning-latent-variables}
+
+Chain-of-thought reasoning~\citep{wei2022chain,kojima2022large} helps LLMs solve complex problems by producing a reasoning chain before giving the final answer.
+LLMs pretrained on general domain data can learn to produce useful chains of thoughts given demonstrations, which are usually handcrafted or generated by prompting the LM.
+Interestingly, although the capacity for chain-of-thought reasoning only emerges in large language models, knowledge can also be extracted from smaller language models when they are carefully fine-tuned \citep{schick-schutze-2021-just}.
+
+Motivated by this, we connect chain-of-thought reasoning to the general problem of inference in latent variable models illustrated in \autoref{fig:figure_one}. 
+Here, reasoning can be seen as posterior inference: sampling from the posterior distribution over a string of tokens $Z$ conditioned on a prefix $X$ and a suffix $Y$, given an autoregressive language model $p_{\rm LM}$.
+The posterior is defined as 
+\begin{equation}
+    p_{\rm LM}(Z\mid X, Y) = \frac{p_{\rm LM}(XZY)}{\sum_{Z'}p_{\rm LM}(XZ'Y)} \propto p_{\rm LM}(XZY).
+\label{eq:posterior_over_B}
+\end{equation}
+Our goal is to train models to sample $Z$ from this posterior distribution.
+Intuitively, this allows us to sample likely reasoning chains that lead to the desired outcome $Y$.
+Although we take $Z$ to be a string of tokens, the same formalism and the GFlowNet objectives apply to other structured latent objects, such as trees or sets of natural language statements, as long as one has access to a likelihood model $p(Y\mid XZ)$.
+While not investigated in this work, these generalizations could be important for formal reasoning and multi-step chains of inference.
+See, \eg, \cite{yao2023tree,hao2023reasoning,besta2023graph} for approaches to reasoning in language using tree- or list-structured state spaces.
+
+A latent variable model of this form is useful when the marginal distribution $p_{\rm LM}(Y\mid X)$ is harder to model than $p_{\rm LM}(Z\mid X)$ and $p_{\rm LM}(Y\mid XZ)$, \ie, a difficult inference is broken down into a chain of easier ones. By training a model to match the Bayesian posterior $p_{\rm LM}(Z\mid X, Y)$, we can learn to sample latent reasoning chains that increase the likelihood of producing $Y$ from $X$ via the sampled $Z$.
+
+However, we can also fine-tune the language model $p_{\rm LM}(Z\mid XY)$ itself to maximize the likelihood of data pairs $(X,Y)$ under the LVM. While it is generally intractable to directly maximize the data likelihood $p_{\rm LM}(X, Y)=\sum_{Z}p_{\rm LM}(XZY)$ because of the summation over $Z$, the (variational) expectation-maximization (EM) algorithm~\citep{dempster1977em,beal2003variational,koller2009probabilistic} can be used for this purpose.
+In the expectation step (E-step), we draw samples from the posterior over the latent variable $p_{\rm LM}(Z\mid X, Y)$, which could come from an amortized sampler of $Z$.
+In the maximization step (M-step), we maximize the log-likelihood of the joint probability of the sampled latent variables $\mathbb{E}_{Z\sim p_{\rm LM}(Z\mid X, Y)}\log p_{\rm LM}(XZY)$ with respect to the parameters of the language model $p_{\rm LM}$.
+This combination of amortized inference (learning to sample the chain of thought) and supervised fine-tuning (optimizing the language model with the `supervision' involving $Z$ sampled from the amortized posterior) will be illustrated in one of our experiments (\autoref{sec:expt_subj}, \autoref{tab:subj_result}).
+\subsection{Amortized inference with GFlowNet objectives}
+\label{sec:inference_with_gfn}
+
+For inference in the latent variable model, we leverage the probabilistic framework of generative flow networks \citep[GFlowNets;][]{bengio2021flow,bengio2021foundations}. Using notation from \citet{malkin2022trajectory}, we briefly introduce relevant GFlowNet concepts pertaining to autoregressive sequence generation.
+Here, GFlowNets learn policies to sample sequences $Z=z_1z_2\dots z_n\top\in\mathcal{Z}$ (where $\top$ denotes a stop symbol) from a distribution over the space of sequences $\gZ$, given an unnormalized density (reward) $R:\gZ\to\R_{>0}$. The generative process is the same as in autoregressive language models: generation begins with an empty string, and at the $i$-th step a token $z_i$ is sampled from a policy $q_{\rm GFN}(z_i\mid z_{1:i-1})$, which is then appended to the sequence. This process continues until a stop symbol $\top$ is generated.
+
+The marginal likelihood $q_{\rm GFN}^\top(Z)$ of sampling a terminal state $Z=z_{1:n}\top$ is given by $\prod_{i=1}^nq_{\rm GFN}(z_i\mid z_{1:i-1})q_{\rm GFN}(\top\mid z)$, where $z_{1:0}$ is understood to be the empty string. The goal of GFlowNet training is to fit a parametric policy $q_{\rm GFN}(\cdot\mid\cdot;\theta)$ such that $q_{\rm GFN}^\top(Z)\propto R(Z)$, \ie, the likelihood of generating a complete sequence is proportional to its reward.
+
+\paragraph{Learning objective.}
+We use a modified version of the subtrajectory balance~\citep[SubTB;][]{madan2023learning} objective to account for trajectories being terminable at all states~\citep{deleu2022bayesian}. The objective for a sequence $Z=z_{1:n}\top$ is
+\begin{equation}
+    \mathcal{L}(Z; \theta) = \sum_{0\leq i<j\leq n}\left(\log\frac{R(z_{1:i}\top)\prod_{k=i+1}^jq_{\rm GFN}(z_k\mid z_{1:k-1})q_{\rm GFN}(\top\mid z_{1:j})}{R(z_{1:j}\top)q_{\rm GFN}(\top\mid z_{1:i})}\right)^2,
+    \label{eq:fl-subtb}
+\end{equation}
+For sequence generation tasks, the SubTB objective is equivalent to the path consistency objective~\citep{nachum2017bridging} in max-entropy RL~\citep{haarnoja2017reinforcement}, which has been previously used in the context of text generation~\citep{guo2021efficient}. {See  \cref{app:learning_objective} for further discussion.}
+
+\paragraph{Training policy.} As the objective in \autoref{eq:fl-subtb} can be minimized to 0 for all trajectories $\tau$ simultaneously given enough model capacity, we can use trajectories sampled from \emph{any} full-support distribution (training policy) to perform gradient descent on $\gL(\tau;\theta)$ with respect to $\theta$. As the space we are sampling from is combinatorially large, it is important to have a training policy that can efficiently explore $\mathcal{Z}$. To this end, we compose the mini-batch during training using trajectories from three sources: (1) the policy $q_{\rm GFN}$, (2) a tempered version of the current policy $q_{\rm GFN}$ and (3) a replay buffer storing past trajectories. Replay buffers have been shown to be quite effective in improving GFlowNet training~\citep{jain2022biological,deleu2022bayesian,shen2023towards}.
+
+\textbf{Parametrization, amortization, and generalization.} 
+To sample the latent sequence $Z$ from the posterior defined in \autoref{eq:posterior_over_B}, we parametrize the GFlowNet policy as an autoregressive language model that samples the latent $Z$ one token at a time from left to right. By setting the reward $R(Z)=p_{\rm LM }(XZY)\propto p_{\rm LM}(Z\mid X,Y)$, we learn a sampler for the posterior at convergence. 
+As illustrated in \autoref{fig:figure_one}, depending on the task, we can condition the GFlowNet policy on either $X$ or $X,Y$. In cases such as reasoning (\autoref{subsec:reasoning-latent-variables}), where there is only a single correct $Y$ for each $X$ and we interested in predicting $Y$ for unseen $X$ at test time, we can simply condition on $X$. In this case, the GFlowNet policy is simply a language model that generates $Z$ as a continuation of $X$. 
+To be precise, we initialize $q_{\rm GFN}$ as a copy of $p_{\rm LM}$ that is conditioned on the prefix $X$, and then fine-tune\footnote{We use LoRA \citep{hu2021lora} instead of full fine-tuning for hardware efficiency in all experiments.} it with a GFlowNet objective. With this view, sampling $Z$ is an inverse problem:  we need to infer $Z$ given a (conditional) prior $p_{\rm LM}(Z\mid X)$ and an observation $Y$ under likelihood model $p_{\rm LM}(Y\mid XZ)$.
+    
+Allowing the GFlowNet policy to explicitly take $X$ as input amortizes the sampling procedure and allows generalization to unseen $X$. In this sense, the GFlowNet is a Bayesian model (akin to a LM cascade \citep{dohan2022language} or deep language network \citep{sordoni2023deep}), in which $Z$ are conditionally sampled `parameters' that transform $X$ into $Y$. To predict the $Y$ for an unseen $X$, one performs Bayesian model averaging by drawing samples of $Z$ from $q_{\rm GFN}(Z\mid X)$ followed by sampling from $p_{\rm LM}(Y\mid XZ)$.
+
+In tasks such as infilling (\autoref{sec:expt_infilling}), however, the mapping from $X$ to $Y$ is one-to-many and $Y$ is available at test-time. Here, we are interested in $Z$ itself, rather than using it as an intermediate variable en route to generating $Y$. The GFlowNet policy thus has to be conditioned on both $X$ and $Y$. To achieve this, the policy is conditioned on a prompt that contains both $X$ and $Y$ (for example, see \autoref{app:infilling}). 
+
+
+
+\section{Empirical results}
+
+\label{sec:experiments}
+
+We first validate GFlowNet fine-tuning on text generation, where we seek to find likely sentence continuation given a prompt (\autoref{sec:expt_continuation}) or fill in a missing sentence in a story (\autoref{sec:expt_infilling}).
+Then, we study reasoning tasks that benefit from chain-of-thought reasoning (\autoref{sec:expt_subj}) and external tool use (\autoref{sec:expt_arithmetic}).
+
+\subsection{Sentence continuation}
+\label{sec:expt_continuation}
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+  \centering
+  \includegraphics[width=.95\linewidth]{images/next_sentence_results.pdf}
+\caption{Maximum log-likelihood and diversity of continuations sampled for fixed prompts. GFlowNet fine-tuning~($\star$) samples higher log-likelihood sentences while maintaining more sample diversity than the baselines~($\bullet$ and -{}-{}-), even when they are given $5\times$ the compute.%
+}
+\label{fig:next_sentence_results}
+\end{wrapfigure}
+
+\paragraph{Task description.} A natural application for autoregressive language models is that of sequence continuation: given a prompt, the model should generate a high-likelihood completion. In applications such as creative writing, we would like the continuations to be semantically diverse while still having a high likelihood under the language model. 
+To demonstrate the benefits of GFlowNet fine-tuning, we consider the task of sampling the next sentence following a prompt.
+
+Sampling autoregressively from the LM until a ``.'' token is reached is unlikely to produce samples that have a high likelihood because the distribution over sentences has a fat tail. %
+Existing approaches to generate sequence continuations include beam search and its variations~\citep{vijayakumar2016diverse,shao-etal-2017-generating}, top-$k$ sampling \citep{fan-etal-2018-hierarchical}, nucleus sampling \citep{holtzman2019curious}, tempered autoregressive sampling, {and fine-tuning using importance sampling \citep{shih2023long}}, among others. While useful, {most of} these methods are ultimately hand-crafted heuristics that leave room for improvement. Furthermore, some of these methods (\eg, beam search) involve a computationally expensive search procedure, compared to a single pass of a learned inference model that amortizes over prompts. Our GFlowNet policy autoregressively samples the sequence until a period is sampled, indicating the end of the sentence. Given prompts $X$, the LM is fine-tuned to generate the continuations $Z$ from the tempered posterior by being trained with reward $R(Z)=p_{\rm LM}(Z|X)^{\frac{1}{T}}$. When $T=1$, the GFlowNet will trivially sample proportional to $p_{\rm LM}$ without any fine-tuning, so we consider $0 < T<1$ to focus on the likely continuations.
+
+\looseness=-1
+We consider a dataset of prompts from OpenWebText~\citep{gokaslan2019openweb} with a 1.5B param GPT-2 XL \citep{radford2019language} as the base model. We draw $8$ samples from the fine-tuned model conditioned on a fixed prompt, consider the maximum-likelihood sample under the LM, and report the average over the dataset of prompts. To measure the semantic diversity of the samples, we compute the mean pairwise cosine distance between the embeddings (from a pretrained encoder~\citep{reimers-gurevych-2019-sentence}) of the generated samples and average it over the dataset. We compare to baselines that are commonly used for producing continuations from LMs at inference time (beam search, diverse beam search, nucleus sampling, autoregressive sampling, tempered autoregressive sampling, and greedy generation). 
+\paragraph{Results.} Quantitative results are reported in \autoref{fig:next_sentence_results} and empirical samples are shown in \autoref{app:sentence_continuation}. At lower temperatures, our method excels in generating high-likelihood sentences, outperforming the leading baseline, diverse beam search. If we increase the number of beams (and therefore compute) to $5\times$ the number of samples produced by the GFlowNet, our performance remains comparable. Nevertheless, even in this scenario, the GFlowNet's generated samples exhibit notably higher diversity compared to diverse beam search and are on par with the best diversity-scoring benchmarks.
+
+\subsection{Infilling stories}
+\label{sec:expt_infilling}
+
+\paragraph{Task description.} 
+Next, we consider the story infilling task, a special case of the general infilling problem (\autoref{sec:methodology_intractable}), where given the beginning $X$ and end $Y$ of a story, the goal is to generate the middle of the story $Z$~\citep{zhu2019text}. This is challenging for a language model sampled left to right since continuations $Z$ conditioned only on $X$ might be incompatible with the ending $Y$. We use the ROCStories corpus~\citep{mostafazadeh-etal-2016-corpus}, a dataset of short stories containing exactly $5$ sentences each. Given the first $3$ sentences and the last sentence, the goal is to generate the fourth sentence, which often involves a turning point in the story and is thus challenging to fill in. 
+
+As we expect the base model to contain the required knowledge, for this task we use a GPT-2 Large model~\citep{radford2019language} fine-tuned on the entire ROCStories training set as the base model. For evaluating the approach, we consider 900 samples from the dataset as training data to learn $q_{\rm GFN}(Z|X, Y)$ and evaluate the similarity of the generated infills on a dataset of 100 unseen stories. Along with the GFlowNet-fine-tuned model, we also consider two baselines: prompting the model to infill the story and supervised fine-tuning on the same data. Further details are in \autoref{app:infilling}.
+
+\begin{wraptable}{R}{0.5\textwidth}
+    \centering
+    \vspace*{-1em}
+    \caption{Evaluation of the generated infills.}\vspace*{-1em}
+    \hfill
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{@{}lcccc}
+    \toprule
+    Method & BERTScore & BLEU-4 & GLEU-4 & GPT4Eval \\\midrule
+    Prompting & $0.081\pm0.009$ & $1.3\pm 0.5$& $3.2\pm 0.1$& $2.4$ \\
+    Supervised fine-tuning & $0.094\pm0.007$ & $1.6\pm 0.8$ & $3.7\pm 0.4$ & $2.7$ \\
+    GFlowNet fine-tuning & $\bf 0.184\pm0.004$ & $\bf 2.1\pm 0.2$ & $\bf 4.2\pm 0.7$ & $\bf 3.4$ \\ 
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:infilling_results}
+\end{wraptable}
+
+\paragraph{Results.} To measure the similarity of the generated infills with the reference infills available in the dataset, we compute BERTScore~\citep{zhang2020BERTScore}, with DeBERTa \citep{he2021deberta} -- which is correlated with human judgments -- along with BLEU-4~\citep{papineni-etal-2002-bleu} and GLEU-4~\citep[better suited for sentences;][]{wu2016googles} metrics. Additionally, we also evaluate each method using GPT-4 as a judge. From our results summarized in \autoref{tab:infilling_results}, we observe that the infills generated by the model with GFlowNet fine-tuning are closer to the reference infills in the dataset than the baselines. By sampling from $p_{\rm LM}(Z|X,Y)$, the GFlowNet is able to account for the ending while generating the infill, resulting in infills that link the beginning and the end of the story coherently. For further analysis and details see \autoref{app:infilling}.
+\subsection{Subjectivity classification}
+\label{sec:expt_subj}
+\begin{wraptable}{R}{0.5\textwidth}
+\centering
+\caption{Test accuracy (\%) on SUBJ using an instruct-fine-tuned GPT-J 6B.}
+\vspace*{-1em}
+\label{tab:subj_result}
+\resizebox{1\linewidth}{!}{
+\begin{tabular}{@{}lccc}
+\toprule
+Method        & \multicolumn{3}{c}{Test accuracy (\%) $\uparrow$}\\ \midrule
+Zero-shot prompting    & \multicolumn{3}{c}{51.7}           \\
+\midrule
+                       & \multicolumn{3}{c}{Training samples}           \\\cmidrule(lr){2-4}
+                       & 10             & 20        & 50                \\ \midrule
+Few-shot prompting     & $61.3\pm6.2$   &  $61.8\pm5.4$    & $65.8\pm10.5$    \\
+Supervised fine-tuning & $64.3\pm2.8$   &  $69.1\pm0.8$    & $\bf 89.7\pm0.4$    \\ \midrule
+GFlowNet fine-tuning            & $71.4\pm1.8$   &  $\bf 81.1\pm0.4$    & $87.7\pm2.2$    \\
+\phantom{++}+\,Supervised fine-tuning                 & $\bf 75.2\pm1.8$   &   $78.7\pm1.6$   & $\bf 89.9\pm0.2 $           \\
+\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+\paragraph{Task description.}
+SUBJ~\citep{pang-lee-2004-sentimental} is a binary classification dataset for natural language understanding.
+It is a collection of movie reviews in which each review is labeled as \emph{objective}, meaning that it references facts about the movie, or \emph{subjective}, meaning that it expresses an opinion of the reviewer (see~\autoref{tab:subj_examples} for examples).
+Given an unlabeled review, the model must predict whether it is objective or subjective.
+While supervised fine-tuning on the full dataset can achieve high test accuracy, we are interested in the low-data regime where we only have tens of labeled examples.
+We use the same instruction-tuned GPT-J 6B variant as in \autoref{sec:motivating-example} for this experiment.
+Without any demonstrations, the model struggles with this task using the prompt in~\autoref{tab:subj_prompt} and achieves only 51.7\% zero-shot accuracy.
+
+This task is hard likely because it requires a latent reasoning step.
+A review could be considered objective because it analyzes the plot or facts about the movie, or it could be subjective because it expresses a personal opinion or makes a judgment.
+We denote the review $X$, the predicted subjectivity $Y$, and the latent reason $Z$.
+Then, we GFlowNet-fine-tune the LLM $q_{\rm GFN}(Z\mid X)$, initialized with the base model $p_{\rm LM}$ to match the Bayesian posterior over rationales in~\autoref{eq:posterior_over_B}. At test time, $q_{\rm GFN}(Z\mid X)$ generates 10 latent rationales ($Z$'s) for an unseen $X$.
+The LLM $p_{\rm LM}$ then autoregressively samples from $p_{\rm LM}(Y\mid XZ)$ to produce 10 answers, the majority vote of which becomes the final prediction.
+
+This posterior inference corresponds to the E-step in the EM algorithm, where the posterior $p_{\rm LM}(Z\mid X, Y)$ is defined in~\autoref{eq:posterior_over_B}.
+Further, as described in \autoref{subsec:reasoning-latent-variables}, we can take an M-step by updating $p_{\rm LM}$ to maximize $\log p_{\rm LM}(XZY)$ over a collection of $Z$'s sampled from the amortized posterior $q_{\rm GFN}$.
+This is equivalent to applying supervised fine-tuning after GFlowNet fine-tuning.
+\paragraph{Results.}
+We present few-shot prompting and supervised fine-tuning with LoRA as baselines.
+In few-shot prompting, we prepend 0, 10, 20, or 50 training examples to each test example using the prompt shown in~\autoref{tab:subj_prompt}.
+We randomly shuffle few-shot demonstrations and report the mean and variance in~\autoref{tab:subj_result}.
+In supervised fine-tuning, we directly maximize $\log p_{\rm LM}(Y\mid X)$ over the same 10, 20, or 50 $(X, Y)$ pairs.
+The variance is over model initialization and batch order.
+All entries except zero-shot prompting are aggregated over 3 random seeds.
+See~\autoref{app:subj_details} for experiment details. GFlowNet fine-tuning consistently outperforms supervised fine-tuning in the low-data regime, as shown in~\autoref{tab:subj_result}.
+In some cases, performing supervised fine-tuning on top, which corresponds to running one step of the EM algorithm, further improves the performance.
+
+\subsection{Solving arithmetic problems step by step}
+\label{sec:expt_arithmetic}
+
+\begin{wraptable}{R}{0.5\textwidth}
+\centering
+\caption{Test accuracy (\%) on an integer arithmetic task with addition and subtraction using a GPT-J 6B model. Training data only include samples with 3 or 4 operands.}\vspace*{-1em}
+\resizebox{1\linewidth}{!}{
+\begin{tabular}{@{}llccc}
+\toprule
+& & \multicolumn{3}{c}{Number of Operands} \\\cmidrule(lr){3-5}
+& & \multicolumn{2}{c}{In-distribution} & OOD \\\cmidrule(lr){3-4}\cmidrule(lr){5-5}
+Method                       & & 3           & 4           & 5          \\ \midrule
+$k$-shot CoT & $k=0$      &    10.2  & 6.4 & 3.2 \\
+&$k=3$      &$15.8\pm 3.1$&$11\pm 1.7$&$5.4\pm0.2$\\ 
+&$k=5$     &$20.4\pm 10.4$&$17.6\pm0.6$&$6.6\pm 1.1$\\
+&$k=10$      &$26.5\pm 1.4$&$15.2\pm1.7$&$8.9\pm1.9$\\
+&$k=20$      &$35.5\pm 1.9$&$21\pm1.4$&$10.5\pm0.9$\\\midrule
+\multicolumn{2}{@{}l}{Supervised fine-tuning}  & $72.1\pm 1.3$ & $19.6\pm2.2$ & $12.8\pm 5.7$ \\ \midrule
+\multicolumn{2}{@{}l}{PPO}         & $30.6\pm4.1$ & $13.7\pm4.1$ & $5.6\pm 3.1$ \\ \midrule
+\multicolumn{2}{@{}l}{GFlowNet fine-tuning}   & $\bf 95.2\pm 1.3$ &  $\bf 75.4 \pm 2.9$ & $\bf 40.7 \pm 9.1$ \\
+\bottomrule
+\label{tab:arithmetic_results}
+\end{tabular}
+}
+\end{wraptable}
+
+\paragraph{Task description.}
+Arithmetic reasoning is a fitting benchmark to evaluate reasoning abilities of large language models as it requires multi-step reasoning and correctness is easy to evaluate~\citep{cobbe2021training}. While the distribution of pretraining and fine-tuning data~\citep{magister-etal-2023-teaching,lee2023teaching,Luo2023WizardMathEM} and prompting choices~\citep{imani-etal-2023-mathprompter} play a critical role in their arithmetic abilities, LLMs are susceptible to poor generalization by learning `shortcuts' to reasoning~\citep{dziri2023faith}.
+We consider a simple integer arithmetic task (\autoref{fig:figure_one}), with a general pretrained base model, rather than a one pretrained on mathematical tasks~\citep{jelassi2023length}. To avoid the pitfalls of symbolic calculations with language models, we adopt the tool use setting~\citep{schick2023toolformer}, where the model is equipped with a calculator that can perform parts of the computation, implemented as in ~\citet{cobbe2021training}: when the model outputs `\texttt{=}' the expression preceding it is evaluated and appended to the sequence. To prevent the model from ``cheating'', we limit the calculator to evaluate only two-term expressions. Consequently, reasoning here involves learning to plan using a tool with limited capabilities~\citep{hao2023reasoning}. 
+
+For training, we use a synthetic dataset of arithmetic expressions, limited to addition and subtraction. Following \citet{zelikman2022star}, we use a small set of 50 demonstrations $(X,Z,Y)$ to seed the replay buffer in addition to 1000 examples $(X,Y)$. 
+We use the same instruction-tuned GPT-J as in \autoref{sec:expt_subj} as the base model. Further details are in \autoref{app:arithmetic}. We report the accuracy on two types of examples: (1) unseen in-distribution expressions (3 or 4 operands) and (2) longer out-of-distribution expressions (5 operands). 
+As baselines, we consider zero-shot chain-of-thought prompting, $k$-shot prompting, supervised fine-tuning on the tool use sequences, and fine-tuning with PPO~\citep{schulman2017proximal}. For all methods, we enable tool use and limit the model to generate only numbers and operators.
+
+
+\paragraph{Results.} 
+From the results summarized in \autoref{tab:arithmetic_results}, 
+the base model performs poorly even with chain-of-thought prompts. Including examples in context improves the performance considerably, with monotonic improvements as the number of examples increases. %
+Supervised fine-tuning improves the performance significantly on the in-distribution examples, but the model still struggles to generalize on the out-of-distribution examples. Fine-tuning with PPO results also yields poor performance, caused in part by the poor calibration of the base reward model, \ie it cannot distinguish good rationales from bad ones. Even though the sequences generated with PPO (illustrated in \autoref{app:arithmetic}) have high rewards, they are spurious and do not even define valid calls to the tool. 
+
+Such overoptimization to a misspecified reward is a widely noted issue in LLMs trained with RL~\citep{gao2022scaling}. On the other hand, by matching the entire distribution, GFlowNet fine-tuning avoids collapsing to a single mode of the reward, thereby being robust to the misspecification of the reward~\citep{eysenbach2022maximum} and achieving significantly better performance on in and out-of-distribution examples. See \autoref{app:arithmetic} for additional results and analysis.
+
+
+\section{Further related work}
+
+
+\paragraph{Sampling from intractable marginals.} 
+
+Beyond the approximations mentioned in \autoref{sec:methodology_intractable}, sampling from intractable posterior distributions given by pretrained models for tasks such as infilling and constrained generation has been an object of study. \cite{miao2018cgmh,zhang-etal-2020-language-generation} use MCMC for these problems, \citet{malkin-etal-2021-studying} used a variable-neighborhood ascent for finding modes, and a sequential Monte Carlo approach was recently proposed by \citet{lew2023sequential}. Others have studied the problem with \emph{masked} language models, using them to perform variants of Gibbs sampling \citep{wang-cho-2019-bert,goyal2022exposing,yamakoshi-etal-2022-probing} and recovering marginal distributions over small sets of tokens \citep{torroba-hennigen-kim-2023-deriving}.
+
+\paragraph{GFlowNets.} 
+GFlowNets~\citep{bengio2021flow} were originally proposed to learn policies for sampling discrete compositional objects from an unnormalized reward distribution, motivated by the need to sample diverse high-reward objects in scientific discovery \citep{jain2023gflownets}, in particular, for biological sequence generation~\citep{jain2022biological}. The interpretation of GFlowNets as variational inference algorithms \citep{malkin2023gflownets,zimmermann2022variational} makes them appropriate for sampling Bayesian posterior distributions over structured objects \citep[\eg,][]{deleu2022bayesian,deleu2023jsp,vankrieken2022anesi,hu2023gflownet}.
+
+\paragraph{Chain-of-thought reasoning in LLMs.}
+In recent work on classification and completion with language models, the latent reasoning chain $Z$, in the notation of \autoref{sec:methodology_intractable}, is called a `chain of thought' \citep{wei2022chain}. The chain of thought is typically generated by conditioning the language model on $X$ with the use of specialized demonstrations or prompts \citep{kojima2022large}, with no guarantee of sampling the posterior accurately. Related to our Bayesian formulation, \citet{wang2023self} noted that appropriately aggregating the conclusions $Y$ from several latent chains $Z$ improves predictive performance. In \cite{xu2023reprompting,zhou2022teaching}, a posterior over latent token sequences is sampled using MCMC, while \cite{zelikman2022star} propose \emph{fine-tuning} on successful (high-reward, in our language) chains of thought, which achieves reward maximization but gives no guarantee of diversity. In concurrent work, \citet{phan2023training} use MCMC to sample chains-of-thought in problems with binary feedback. We expect these methods to generalize poorly to difficult exploration problems, while GFlowNet fine-tuning takes advantage of generalizable structure in the posterior and has a goal of sampling the full posterior over latent reasoning chains. 
+
+\begin{comment}
+\paragraph{RL and LLMs.} \kolya{I think this paragraph could be cut if needed} Reinforcement learning from human feedback~\citep[RLHF;][]{bai2022training,korbak2023pretraining} is commonly used to steer the behavior of pretrained LLMs.
+It typically involves collecting expensive human feedback on texts produced by the LLM, training a proxy model that predicts human preference, and using the proxy model for reinforcement learning.
+Given the scarce and noisy nature of human feedback, the proxy model might be overfitted or otherwise unreliable.
+Typical reward maximization, such as PPO~\citep{schulman2017proximal}, which is used to train ChatGPT, might give undesirable results when optimized to completion and thus has to be used with careful tuning and early stopping.
+The GFlowNet approach proposed here avoids this problem by covering diverse modes under the proxy model.
+This is directly analogous to drug discovery~\citep{jain2022biological}, where we also have an unreliable proxy.
+\end{comment}
+
+
+
+\section{Conclusion}
+
+
+
+
+
+
+The knowledge compressed in LLMs is crucial for tasks such as infilling and constrained generation, but querying this knowledge involves sampling from intractable posterior distributions.
+We propose to use GFlowNet objectives to train LLMs to sample from such posterior distributions.
+Empirical results show that GFlowNet fine-tuning finds a better fidelity-diversity trade-off for text generation and also improves sample efficiency and generalization on downstream tasks compared to maximum-likelihood training or reward-maximizing policy optimization.
+As an amortized inference algorithm, our method converts computation into better test-time performance without additional data.
+
+Future work should investigate transfer and generalization across tasks, in particular, building a `universal reasoner' as a model $q(Z\mid X)$ shared between $X$ from different tasks, as was recently considered by~\citet{wang2023making}. 
+One should investigate the benefit of using a better knowledge model, \eg, a more capable base LLM, as a starting point for GFlowNet fine-tuning.
+The ability to draw multiple samples from a GFlowNet can also be used to quantify epistemic uncertainty. Finally, we adopt the GFlowNet formalisms with the perspective of generalizing to latent variables $Z$ with a richer generative process than left-to-right sampling. We hope that the GFlowNet paradigm will enable more flexible reasoning with LLMs in the future: extending probabilistic programming with language variables \citep{prompting-is-programming}, using structured chains of thought \citep{yao2023tree,besta2023graph}, and extending to program synthesis and planning with world models.
+
+\paragraph{Limitations.}
+Due to resource constraints, our experiments use models up to 6B parameters, but we expect the conclusions to hold for larger models.
+In fact, our method can potentially benefit larger models more: it is harder to optimize a larger model with maximizing objectives on a small amount of data. 
+{As with any on-policy method, exploration, especially in problems with more complex latents, remains an open problem.}
+Furthermore, our method improves inference but not the knowledge in the LM. Issues such as hallucination or miscalibration, which are closely related to the knowledge representation, are thus not addressed. \vspace*{-2em}
+\clearpage
+
+

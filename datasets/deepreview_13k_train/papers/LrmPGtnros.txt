@@ -1,0 +1,170 @@
+\title{Three-in-One: Fast and Accurate Transducer for Hybrid-Autoregressive Speech Recognition}
+
+\begin{abstract}
+We present Hybrid-Autoregressive Inference Transducers (HAI-T), a novel architecture for speech recognition that extends the Token-and-Duration Transducer (TDT) model. Trained with randomly masked predictor network outputs, HAI-T supports both autoregressive inference with all network components and non-autoregressive inference without the predictor. Additionally, we propose a novel semi-autoregressive inference method that first generates an initial hypothesis using non-autoregressive inference, followed by refinement steps where each token prediction is regenerated using parallelized autoregression on the initial hypothesis. Experiments on multiple datasets across different languages demonstrate that HAI-T achieves efficiency parity with CTC in non-autoregressive mode and with TDT in autoregressive mode. In terms of accuracy, autoregressive HAI-T achieves parity with TDT and RNN-T, while non-autoregressive HAI-T significantly outperforms CTC. Semi-autoregressive inference further enhances the model's accuracy with minimal computational overhead, and even outperforms TDT results in some cases. These results highlight HAI-T's flexibility in balancing accuracy and speed, positioning it as a strong candidate for real-world speech recognition applications.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+End-to-end neural automatic speech recognition (ASR) has seen significant advancements in recent years, namely due to the development of three architecture paradigms: Connectionist Temporal Classification (CTC) (Graves et al., 2006), Recurrent Neural Network Transducers (RNN-T) (Graves, 2012), and Attention-based Encoder and Decoder Models (Chorowski et al., 2015; Chan et al., 2016). These models have gained widespread adoption, supported by open-source projects such as ESPNet (Watanabe et al., 2018), SpeechBrain (Ravanelli et al., 2021), and NeMo (Kuchaiev et al., 2019), etc. Of those models, CTC and RNN-T share a frame-synchronous design, enabling streaming processing of speech input. However, they differ in their inference approaches: CTC models support non-autoregressive (NAR) inference based on a conditional-independence assumption, while RNN-T models require autoregressive (AR) inference due to their dependence on the history context of partial hypotheses. This fundamental difference creates a trade-off between accuracy and efficiency, with CTC models offering greater speed but typically lower accuracy than Transducers.  
+
+Our work bridges this gap with Hybrid-Autoregressive Inference Transducer (HAI-T)1: a novel implementation of RNN-T capable of non-autoregressive, autoregressive and, semi-autoregressive inference. Our contributions are as follows:  
+
+• We propose a method to train a Token-and-Duration Transducer (TDT) model by stochastically masking out the predictor. The approach is easy to implement and only requires a one-line change in the training code of token-and-duration model implementation. • We present a novel semi-autoregressive (SAR) inference paradigm that first uses NAR to generate initial hypotheses, and then uses autoregression to refine the hypotheses in parallel iteratively.  
+
+• AR HAI-T achieves on-par WER accuracy with RNN-T and TDT models, with inference speeds similar to TDT-based decoding, and significantly faster than RNN-T inference.   
+• NAR HAI-T outperforms CTC accuracy while maintaining similar efficiency. Our investigation shows that NAR HAI-T can better capture potential ambiguities in the speech by learning more nuanced representations, a capability that frame-by-frame NAR like CTC inherently lacks.   
+• SAR consistently brings accuracy gains over NAR, approaching the performance of AR inference with minimal computational overhead.   
+• HAI-T’s high performance is due to its learning of more diverse encoder outputs, a property that allows our Viterbi decoder to achieve the same accuracy of AR inference despite the use of non-autoregressive outputs.  
+
+We will open-source our implementation and release trained model checkpoints for public use.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Recent research in speech recognition has focused on enhancing WER accuracy while mitigating reductions in inference speed. This has been most notable for self-attention-based architectures, with improvements in latency for Transformer models (Yeh et al., 2019) leading to creation of the Conformer (Gulati et al., 2020) and it variants (e.g. Zipformer (Yao et al., 2023), FastConformer (Rekesh et al., 2023)). While all have notable architectural improvements, they can be generalized as attempts to improve model capacity and/or reducing the latency caused by attention-based inference over large audio inputs.  
+
+For Transducer models specifically, various optimizations have been explored. He et al. (2019) proposed a caching mechanism for the RNN-T predictor to reduce redundancy in inference computations. Jain et al. (2019) introduced a pruning method for RNN-T beam search to reduce the search space, resulting in faster decoding. Ghodsi et al. (2020) investigated predictors with stateless networks for Transducer models. While this approach reduced the computational complexity of the original LSTM predictor, it came at the cost of slight accuracy degradation. Kang et al. (2023) proposed monotonic constraints on RNN-T training and inference, reducing the number of steps RNN-T inference stays on the same frame, and reported faster inference with those models. Bataev et al. (2024) proposed a novel label-looping decoding algorithm for Transducers, using parallel GPU calls for the majority of the decoding operation and achieved significant inference speedup. Galvez et al. (2024) optimized the decoding algorithm from a hardware perspective and minimized the GPU idle time during decoding, further improving GPU-based inference. Multi-blank Transducers (Xu et al., 2022) and Token-and-Duration Transducers (TDT) (Xu et al., 2023b) identified large numbers of blank predictions during RNN-T inference, proposing duration-prediction mechanisms to skip frames during processing. This improvement greatly reduced the number of decoding steps required for inference. While these methods improved Transducer inference speeds, the resulting models remained autoregressive. As such, Transducer inference speeds still significantly lagged behind non-autoregressive frameworks (e.g. CTC).  
+
+Our proposed semi-autoregressive method falls under the category of the “fast/slow” method, where the model combines both a faster but less accurate module, and a slower but more accurate module to achieve good accuracy/efficiency tradeoffs. Inaguma et al. (2021) use a fast CTC model to generate multiple hypotheses, to be reranked by a slower AR model to improve speech translation performance. Mahadeokar et al. (2022) propose a cascade model architecture, where the fast model uses a relatively shallow encoder for quicker results, while the slow model uses additional encoder layers along with a separate joint network to improve results. Arora et al. (2024) proposed a model that divides speech input into blocks, and adopts AR processing among blocks but NAR processing within a block to balance speed with accuracy. Deliberation methods Hu et al. (2020) and its variants Wang et al. (2022) use cascaded encoders and separate decoder, and use the shallow encoder to generate initial hypotheses, which to be fed into a second-pass “Listen-Attend-Spell” (LAS) model with additional encoder and decoders to improve accuracy. Compared with those “fast-slow” works, our work is unique in that our “slow” model only adds marginal parameters on top of the “fast” model, and the “refinement” process requires minimal computation overheads.  
+
+3 BACKGROUND   
+In this Section, we provide the technical background information for models that influenced HAI-T architecture: CTC, RNN-Transducer (RNN-T), and Token-and-Duration Transducer (TDT). 3.1 CONNECTIONIST TEMPORAL CLASSIFICATION (CTC)   
+CTC (Graves et al., 2006) is a sequence-to-sequence prediction model designed to address the challenge of aligning input and output sequences of different lengths. Let $\boldsymbol{x}=(x_{1},x_{2},...,x_{T})$ represent the input sequence, $\boldsymbol{y}\,=\,(y_{1},y_{2},...,y_{U})$ the output sequence, and $\nu$ the vocabulary, where $v\,\in\,\mathcal{V}$ includes all tokens in $y$ and a special “blank” symbol. A CTC model predicts $P(v|x_{t})$ for each time step $t$ . The “blank” symbol is crucial for handling the discrepancy between input and output sequence lengths, allowing for many-to-one alignments and representing frames that do not contribute additional information to the output. CTC models employ a set of rules to generate CTC-augmented sequences that are equivalent to the original sequence: (1) When a token is repeated in the original sequence, at least one “blank” token must be inserted between the repeated tokens, and (2) Any token can be repeated an arbitrary number of times.   
+The training objective of CTC models is to maximize the probability of $y$ given the input $x$ . This probability is defined as the sum of probabilities for all possible augmented sequences of the reference sentence that match the input sequence length. CTC adopts a conditional independence assumption when computing the probability of an augmented sequence given the input. This assumption posits that each token in the augmented sequence is conditioned solely on the encoder output frame at its corresponding time step. Consequently, this allows for fully parallelized computation of $P(v|t)$ across different time steps, resulting in highly efficient inference.   
+CTC models with non-autoregressive components like self-attention and convolution are widely accepted as non-autoregressive models (Higuchi et al., 2021; 2020; Xu et al., 2023a), although during inference, CTC’s token deduplication and blank handling would still depend on the last emitted token. We point out that this NAR categorization is based on the neural network computation of the model. In CTC, all neural network computation during inference can be carried out nonautoregressively, and the only autoregression is done on basic data types (strings, lists, etc.), which induces negligible computation compared to the costly neural network computations. In this work, we also follow this principle in categorizing models as autoregressive or not.   
+3.2 RECURRENT NEURAL NETWORK TRANSDUCER (RNN-T)   
+The RNN-Transducer, proposed by Graves (2012), represents a significant advancement in sequence-to-sequence modeling. RNN-T comprises three key components: an encoder, a predictor, and a joint network. The encoder extracts high-level features from the audio input, while the predictor processes the text history. The joint network then combines these outputs to generate a probability distribution over the vocabulary.   
+Like CTC, RNN-T incorporates a blank symbol, but with different rules for augmented sequences. (1) RNN-T sequences add zero or more blanks between adjacent tokens in the original sequence, rather than permitting repetition of both blanks and tokens, and (2) Only blank tokens consume input frames; the time step $t$ does not increment with non-blank token predictions of the model.   
+RNN-T’s training aligns with CTC, maximizing the probability of the target sequence by summing over the probabilities of all possible augmented sequences. However, RNN-T diverges from CTC’s conditional independence assumption. Instead, it leverages the predictor’s output, representing text history, in the joint network to compute output distributions. As such, its predictions are conditioned by the alignment of input time step and position of current text output, making token estimation $\bar{P}(v|x_{t},y_{<u-1})$ . This incorporation of text history enables RNN-T models to outperform CTC.  
+
+Despite its superior performance, RNN-T’s reliance on the predictor and text history introduces autoregressive behavior in inference. Consequently, RNN-T inference resists full parallelization, resulting in lower efficiency compared to CTC. This trade-off between performance and efficiency highlights the ongoing challenge of designing optimal sequence-to-sequence models for ASR.  
+
+3.3 TOKEN-AND-DURATION TRANSDUCERS (TDT)  
+
+Token-and-Duration Transducer (TDT) model is introduced by $\mathrm{Xu}$ et al. (2023b). Unlike traditional Transducers where only blank predictions increment the encoder index $t$ by exactly one, TDT supports advancing $t$ by multiple steps for both blank and non-blank predictions. A TDT model generates two probability distributions, one for token, and the other for durations, which determines the number of audio frames to skip. By supporting frame skipping, TDT models require significantly fewer decoding steps compared to traditional Transducers, resulting in faster inference.  
+
+
+
+\section{4 HYBRID-AUTOREGRESSIVE INFERENCE TRANSDUCER (HAI-T)  }
+
+
+We propose Hybrid-Autoregressive Inference Transducers (HAI-T), an extension of the TDT model designed to support multiple modes of autoregression in inference. HAI-T incorporates stochastic predictor masking: during training, the predictor’s output is randomly masked before being passed to the joint network. We implement this with a masking probability of 0.5, sampled at the [batch, text-index] level. Except for the random masking performed in training, the rest of the model training of HAI-T (computation in other components, and loss computation, etc) remains identical to that of TDT training. As a result of this change, during training, half the time the joint network is learning to predict with the whole model, and the other half the time it is learning to predict with information from the encoder only. Therefore when the model is well-trained, the joint network can generate valid distributions regardless of whether the predictor output is provided.  
+
+The HAI-T model supports three inference modes: autoregressive (AR), non-autoregressive (NAR) depending on whether we use the predictor network during inference. In addition, we also propose semi-autoregressive (SAR) inference, which combines elements of both NAR and AR inference to achieve better speed-accuracy tradeoff, and a Viterbi-based inference, which leverages the better representations learned by HAI-T models for better accuracy.  
+
+![](images/61e79164a8e2a7b099f21785c33aa5ca10f695b04602d8751ca14349eaf1973a.jpg)  
+
+
+
+\section{4.1 AUTOREGRESSIVE INFERENCE  }
+
+
+Autoregressive inference of HAI-T models is identical to TDT models. For ease of reference, we provide Algorithm 1, which is a rewrite of the original Algorithm 2 from $\mathrm{Xu}$ et al. (2023b) with slightly changed notation/naming conventions to be consistent with this paper. To facilitate understanding of the Algorithms, we include tensor shapes as comments in the Algorithm, and we use T, V, D, U, H to represent audio-length, num-tokens, num-durations, text-index, and hidden-dimensions.  
+
+4.2 NON-AUTOREGRESSIVE INFERENCE  
+
+Algorithm 2 shows NAR inference procedure. Compared to AR inference, NAR inference requires simple modifications of (1) passing an all-zero tensor instead of predictor output to the joint network; (2) moving the joint network computation out of the decoding loop, allowing parallel processing of all encoder outputs; (3) after each step, we increment $t$ by at least one to avoid infinite loops.  
+
+4.3 SEMI-AUTOREGRESSIVE INFERENCE  
+
+SAR inference is a novel algorithm combining elements of both AR and NAR approaches, as detailed in Algorithm 3. For ease of description, we assume the NAR inference procedure also returns the corresponding time-stamps of token outputs. The Algorithm consists of two main phases:  
+
+1. Initial Hypothesis Generation (lines 2-4) performs NAR inference to generate an initial hypothesis. It also uses the time stamps of the initial hypothesis to extract token-emitting frames from the encoder output for later processing.  
+
+2. Hypothesis Refinement (lines 5-8) uses the predictor to compute representations of all partial history contexts in the current hypothesis. It then combines the predictor’s output with selected encoder output frames in the joint network to re-compute probability distributions for those frames, in parallel2. This procedure can be repeated to further improve the results. Note if repeated, all but the last round of the refinement should limit the argmax on line 9 to non-blank tokens since the token would need to be passed in the predictor for the next round of refinement.  
+
+The SAR approach takes advantage of the strengths of both AR and NAR methods, allowing high degrees of parallelization while still taking advantage of text history in predictor computation to improve model accuracy.  
+
+
+
+\section{5.2 GERMAN ASR  }
+
+
+Our German models are trained on German Mozilla Common Voice, Multilingual Librispeech, and VoxPopuli datasets, totaling around 2000 hours. We use FastConformerLarge configuration  
+
+of around $110\mathrm{m}$ parameters 3, and evaluate the models on the German Multilingual Librispeech (MLS) and VoxPopuli (Vox) testsets. For training, all model encoders are initialized with public checkpoint https://hf.co/nvidia/stt_en_fastconformer_transducer_large. The results of those models are shown in Table 2.   
+We see similar trends compared to our English models, where HAI-T achieves similar accuracy and efficiency when running in AR modes compared to TDT models, and achieves significantly improved NAR accuracy compared to CTC models, while achieving the same inference speed. SAR further closes the accuracy gaps between AR and NAR, while adding small overheads, and still being around 4X faster than AR inference.   
+Table 2: German ASR: accuracy $(\mathrm{WER}\%)$ and inference wall time (seconds) on Multilingual Lib  
+
+rispeech and VoxPopuli. Decoding time is measured with batch $^{=1}$ and beam $^{=1}$ .   
+
+![](images/c8095b882a8d6a7f0f6b4e35068801df5f23aff8e3a26f58a2ca2d336dc6b178.jpg)  
+
+
+
+\section{6 ANALYSIS AND DISCUSSIONS  }
+
+
+
+
+\section{6.1 LIMITATIONS OF SAR METHODS  }
+
+
+The key of SAR method is to reuse the time stamps generated in the initial NAR inference, and only regenerates the token outputs for those frames. This puts limitations on the types of errors that can be corrected by the method. We provide some analysis here.  
+
+• From the subword level, SAR can only fix substitution errors by replacing a wrong subword with the correct one, and insertion errors by replacing the inserted wrong subword with a blank. It can’t fix deletions where the hypothesis is shorter than the reference. • From the word level, SAR can correct deletion errors. Note, although SAR can’t add more subwords to the original output, it can replace a non-word-beginning subword with a wordbeginning subword, and thus increase the number of words in the SAR output. E.g. the SAR can change “forty” to “for tea”, by replacing subwords “ for ty” with “ for tea”, where “ ” means the begin-of-word symbol.  
+
+Table 3: Breakdown of Error types $(\%)$ ) of German HAI-T Models on Voxpopuli Dataset.  
+
+![](images/48cce28519dd76cfe8a72d92588952b2ac9d240c48420745746e08b9496ca9fe.jpg)  
+
+We report detailed breakdown of error types in our German HAI-T model on Voxpopuli comparing NAR and SAR in Table 3. We see that SAR models primarily reduce substitution and insertion errors; in fact, the total amount of deletion errors increased with SAR models. Even though the overall deletion error numbers go up, we do observe in certain utterances, SAR can correct deletion errors from NAR outputs.3.  
+
+
+
+\section{6.2 NAR HAI-T’S CAPABILITY OF CAPTURING ACOUSTIC AMBIGUITY  }
+
+
+In this subsection, we highlight an aspect of NAR HAI-T model that grants it greater modeling power compared CTC models: its ability to support more diverse model representation and multiple hypotheses across different time stamps, especially for potentially ambiguous speech. To illustrate this, we present a real-world example using an audio recording of the phrase “ice cream”. First, we run our English CTC model on the utterance to extract the arg-max token per frame, resulting in:  
+
+![](images/aab9f04cfd88c7d6b1b1d0b9a7504a82ce835c4db618800ac75dd09732aaa3ef.jpg)  
+
+The CTC model output correctly represents the “ice cream” hypothesis, with each non-blank token appearing once, surrounded by blanks. This aligns with the well-documented peaky behavior of CTC (Zeyer et al., 2021). In contrast, the arg-max tokens emitted from our NAR HAI-T model are:  
+
+Notably, the per-frame arg-max output not only encodes “ice cream” but also captures an alternative hypothesis: “i scream”. These hypotheses are dispersed across different time frames. For clarity, we have color-coded the tokens: orange for “ice cream”, blue for “i scream”, and green for shared tokens. It’s worth noting that these hypotheses are indeed acoustically very similar, and their different alignments to the audio demonstrate that the NAR HAI-T’s per-frame arg-max output provides a more accurate representation of the audio input. We believe this is the reason why the Viterbi algorithm can achieve improved accuracy.  
+
+
+
+\section{6.3 IMPACT OF DURATION CONFIGURATIONS  }
+
+
+In this subsection, we examine how duration configurations affect HAI-T model performance. We vary the max-durations in our German models and report their ASR performance. Table 4 presents the $\mathrm{WER}(\%)$ in NAR mode for different max-duration settings. Our results reveal a clear trend: models with max-durations of 1 and 2 perform significantly worse, while those with max-durations of 4 and 8 yield similar, improved results. This observation aligns with our earlier analysis, suggesting that shorter maximal durations constrain the model’s ability to learn complex structures, and the max duration needs to be sufficiently large to represent the real distribution. Interestingly, max-duration 4 provides the best overall results, despite our choice of max-duration 8 for most experiments. We selected the latter to accommodate greater linguistic variability across datasets, as we did not extensively tune this parameter.  
+
+Building on our previous analysis of maximum duration settings, we now examine the actual duration predictions made by our models. This analysis provides insights into how the models utilize the allowed duration range and how the HAI-T training procedure affects duration prediction behavior. We conducted experiments using HAI-T and TDT (trained with max-duration $\scriptstyle=8$ ), running different types of inference on the Librispeech test-other and German Multilingual Librispeech test sets.  
+
+Table 4: German ASR results of NAR HAI-T models with different maximum supported durations.  
+
+![](images/83e5a5086424b6362ac424a3bdb555304f1b2a5202372d2e80a942b5cc40e0e4.jpg)  
+
+![](images/0f943e608cde9bf022a13ded4828ee97ec86ca65eb5f601cc555146f6723e1dc.jpg)  
+Figure 1: Duration prediction count of HAI-T and TDT models on Librispeech test-other (left) and German Multilingual Librispeech test (right).  
+
+Figure 1 shows the distribution of duration predictions for HAI-T (in both AR and NAR modes) compared to a standard TDT model. The results reveal several interesting patterns:  
+
+• Zero-duration mitigation: HAI-T’s training procedure dramatically reduces the occurrence of 0 duration predictions, effectively addressing the potential issue of infinite loops in NAR inference. This phenomenon explains the results from Table 1, where excluding duration 0 gives the best results among all models.  
+
+• Preference for shorter durations: Despite allowing durations up to 8, all models show a preference for durations of 4 or less, with the preference stronger with HAI-T models. This aligns with our previous finding that max-duration $=4$ tends to yield better performance.  
+
+• Consistency across inference modes: HAI-T shows remarkably similar duration distributions in AR and NAR modes, suggesting a robust learning of duration prediction strategies.  
+
+These findings demonstrate that while allowing longer maximum durations (e.g., 8) provides flexibility, the HAI-T model naturally learns to favor shorter durations. This behavior reconciles with our earlier observation that max-duration $=4$ yields optimal performance: the model has the flexibility to use longer durations when necessary but primarily operates within the 1-4 range.  
+
+
+
+\section{7 CONCLUSION AND FUTURE WORK  }
+
+
+In this paper, we introduced Hybrid-Autoregressive Inference Transducers (HAI-T), a novel approach that aims to bridge the gap between autoregressive and non-autoregressive methods in speech recognition. By implementing a simple stochastic masking technique during training, we’ve developed a model that offers flexibility in its inference strategy. Our experiments across multiple languages demonstrate promising results:  
+
+• In AR mode, HAI-T achieves on-par performance with TDT and RNN-T models.   
+• In NAR mode, HAI-T achieves significantly improved performance to CTC models.   
+• We propose a semi-autoregressive (SAR) mode, a new approach to balancing speed and accuracy.  
+
+There are several future research directions, including applying our method to other speech and language-related tasks including speech translation, spoken language understanding, and speech synthesis, etc. We plan to investigate more flexible model architectures further to bridge the gaps between AR and NAR models. Furthermore, we plan to further improve the semi-autoregressive algorithm for better speed-accuracy balancing.  
+
+
+

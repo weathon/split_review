@@ -1,0 +1,290 @@
+\title{Train Small, Infer Large: Memory-Efficient LoRA Training for Large Language Models}
+
+\begin{abstract}
+Large Language Models (LLMs) have significantly advanced natural language processing with exceptional task generalization capabilities. Low-Rank Adaption (LoRA) offers a cost-effective fine-tuning solution, freezing the original model parameters and training only lightweight, low-rank adapter matrices. However, the memory footprint of LoRA is largely dominated by the original model parameters. To mitigate this, we propose LoRAM, a memory-efficient LoRA training scheme founded on the intuition that many neurons in over-parameterized LLMs have low training utility but are essential for inference. LoRAM presents a unique twist: it trains on a pruned (small) model to obtain pruned low-rank matrices, which are then recovered and utilized with the original (large) model for inference. Additionally, minimal-cost continual pre-training, performed by the model publishers in advance, aligns the knowledge discrepancy between pruned and original models. Our extensive experiments demonstrate the efficacy of LoRAM across various pruning strategies and downstream tasks. For a model with 70 billion parameters, LoRAM enables training on a GPU with only 20G HBM, replacing an A100-80G GPU for LoRA training and 15 GPUs for full fine-tuning. Specifically, QLoRAM implemented by structured pruning combined with 4-bit quantization, for LLaMA-3.1-70B (LLaMA-2-70B), reduces the parameter storage cost that dominates the memory usage in low-rank matrix training by 7.07× (8.21×), while achieving dominant performance gains over both the original LLaMA-3.1-70B (LLaMA-2-70B) and LoRA-trained LLaMA-3.1-8B (LLaMA-2-13B).
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs), such as GPT-4 (OpenAI, 2023), LLaMA (Touvron et al., 2023a;b; Dubey et al., 2024), and PaLM (Chowdhery et al., 2023), have recently revolutionized natural language applications. These models excel in task generalization, driven by their exponential increase in scale, with some exceeding 400 billion parameters (Dubey et al., 2024). Fine-tuning pre-trained LLMs is critical for task-specific customization, enhancing desired behaviors while mitigating undesired ones (Qi et al., 2024). However, this process is constrained by substantial memory requirements; for instance, fine-tuning a 70B LLaMA in 16-bit precision demands over $1178{\bf G\dot{B}}^{1}$ of memory, necessitating an expensive setup of 15 GPUs (A100 or H100, each with 80GB HBM).  
+
+To mitigate the high cost of fine-tuning LLMs, parameter-efficient fine-tuning (Li & Liang, 2021; Lester et al., 2021; Liu et al., 2021; Qiu et al., 2023; Liu et al., 2024b; 2022), particularly LowRank Adaption (LoRA) (Hu et al., 2022) and its variants (Liu et al., 2024a; Ding et al., 2023; Zi et al., 2023; Zhang et al., 2023b; Kalajdzievski, 2023), freezes the original LLM weights and only updates the injected low-rank matrices to adapt to new tasks under limited resources. However, during training, they still struggle with the significant memory footprint of the parameters of the base LLM, even with quantization (Dettmers et al., 2023; Xu et al., 2024; Li et al., 2024; Guo et al., 2024; Frantar et al., 2023; Chai et al., 2023). Typically, they reduce the precision to 4 bits at most due to quality considerations. This memory dilemma raises an interesting and necessary question:  
+
+Our answer is a resounding Yes! In this paper, we propose Memory-efficient LoRA training, coined LORAM, a novel scheme to reduce the memory overhead of LoRA fine-tuning for LLMs. We revisit the training and inference process of the LoRA paradigm, building on it with a unique twist: Unlike typical LoRA, which uses the same original model for training and inference, LORAM employs different models at each stage, i.e., it trains a pruned (small) model by updating the pruned LoRA weights and then performs inference on the original (large) model with the recovered low-rank matrices. This recovery process reshapes the pruned matrices to ensure be merged into the original model, allowing for the updating of unpruned weights while utilizing the pruned weights during inference. The key insight driving our approach comes from reconciling two seemingly contradictory concepts. The scaling laws (Hoffmann et al., 2022; Kaplan et al., 2020; Hernandez et al., 2021) suggest that a large number of parameters of LLMs is essential for effective model generalization.  
+
+Conversely, sparsity in LLMs (Zhang et al., 2024b; Ma et al., 2023; Sun et al., 2024; Frantar & Alistarh, 2023a; Xia et al., 2024) show that these pre-trained models can be compressed by removing redundant weights. The goal is to minimize the difference in the model’s output before and after pruning. However, such methods tend to falter at higher pruning ratios and aggressively pruned models lose critical reasoning capabilities, e.g., only pruning $10\%{\sim}20\%$ (Ma et al., 2023; Frantar & Alistarh, 2023a). Our intuition builds on this: some critical parameters contribute significantly to fine-tuning, while other parameters, though essential for inference, usually remain unchanged during fine-tuning. Therefore, LORAM leverages this insight by updating the weights retained through pruning from LoRA training (yellow blocks in Fig. 1) to significantly reduce memory usage and training time, while employing the pruned weights (blue blocks in Fig. 1) during inference to enhance generation performance (see Section 4.5).  
+
+![](images/d89ebff9f0be0b827db49910fb550eaeac8a519cdf222a5be373e1d2c04cd75d.jpg)  
+Pre-trained Weights   
+Figure 1: Idea of LORAM  
+
+Despite the significant reduction in memory cost achieved by the pruning-recovery process of LORAM, maintaining gains at more aggressive pruning rates (e.g., $65\%$ or higher) remains challenging. We attribute this to the knowledge inconsistency between the pruned model used for training and the original model used for inference. To address this, we propose an effective alignment strategy: low-cost continual pre-training of the pruned model on a small dataset. This alignment is performed once offline, allowing the model’s publisher to execute it. For instance, Meta AI could release a set of aligned pruned models for LLaMA-3, enabling low-resource users to fine-tune large models for customized tasks using LORAM. Notably, as a bonus, LORAM seamlessly integrates with existing quantization schemes designed for LoRA, such as QLoRA, forming QLORAM, which further reduces memory overhead.  
+
+The contributions of this work are summarized as follows:  
+
+(1) Novel Training Scheme: We propose LORAM, a memory-efficient LoRA training scheme. LORAM trains a pruned model by updating the pruned low-rank matrices and then uses dimensionally recovered low-rank matrices to integrate with the original model for inference. The process significantly reduces the memory consumption incurred by the model parameters during training, and synergistically boosts performance by leveraging the full original parameters during inference. Thus, LORAM efficiently enhances performance under limited device memory resources.  
+
+(2) Effective Alignment Strategy: We identify that the knowledge inconsistency between the pruned model used for training and the original model used for inference limits the performance gain of LORAM under aggressive pruning rates. To tackle this, we train the pruned model on a small amount of general corpus to achieve alignment, which is a one-shot offline process and can be easily performed by the model publisher.  
+
+(3) Extensive Experimental Evaluation: We conduct comprehensive experiments to validate the effectiveness of LORAM across various pruning algorithms, models of different sizes, and tasks in different domains. Notably, QLORAM which combines LORAM with structured pruning and 4-bit quantization reduces the memory cost of LLaMA-2-70B parameters by $8.21\times$ while effectively achieving performance gains superior to both the original LLaMA-2-70B and LLaMA-2-13B fine-tuned with LoRA.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Low-Rank Adaptation. LoRA (Low-Rank Adaptation) (Hu et al., 2022) has emerged as a prominent technique for parameter-efficient fine-tuning (PEFT) (Li & Liang, 2021; Lester et al., 2021; Liu et al., 2021; Qiu et al., 2023; Liu et al., 2024b; 2022). By injecting lightweight, trainable low-rank decomposition matrices into frozen pre-trained weights, LoRA enables efficient task customization, especially in resource-constrained settings. Some LoRA variants (Liu et al., 2024a; Ding et al., 2023; Zi et al., 2023; Zhang et al., 2023b; Kalajdzievski, 2023) have been developed to enhance its generalization and robustness, while others (Zhou et al., 2024; Zhang et al., 2023a; Kopiczko et al., 2024; Azizi et al., 2024; Wang et al., 2024) address the increased memory overhead associated with scaling up model sizes. However, during training, these efficient LoRA variants still struggle with the substantial memory footprint of the original LLM parameters.  
+
+LoRA-related Compression. Model compression techniques like quantization (Han et al., 2015; Jacob et al., 2018; Nagel et al., 2019; Zhao et al., 2019; Yao et al., 2022; Park et al., 2022; Dettmers et al., 2022; Xiao et al., 2022; Frantar et al., 2022), sparsification (Molchanov et al., 2016; Liu et al., 2018; He et al., 2019; Hoefler et al., 2021; Frantar & Alistarh, 2023b; Liu et al., 2023; Bansal et al., 2022), and distillation (Hinton et al., 2015; Cho & Hariharan, 2019; Tang et al., 2019; Touvron et al., 2021; Hsieh et al., 2023; Gu et al., 2024) have proven effective in reducing the memory footprint of LLM during training and inference. Naturally, the concept of compression has been adapted to LoRA to alleviate the substantial memory consumption dominated by pre-trained model parameters. In particular, LoRA-related quantization schemes (Dettmers et al., 2023; Xu et al., 2024; Li et al., 2024; Guo et al., 2024; Frantar et al., 2023; Chai et al., 2023) have been widely explored, but they still face the limitations of 1-bit precision, typically quantize weights to 4-bit to balance training efficiency with performance. Our work aims to push the boundaries of memory-efficient LoRA training by leveraging sparsification to achieve cost-effective performance improvements. Notably, existing LoRA-related sparsification works (Chen et al., 2023; Zhang et al., 2024a) focus on designing pruning algorithms to slim down models and use LoRA to recover the knowledge of pruned models, thereby producing compact but high-quality models.  
+
+
+
+\section{3 MEMORY-EFFICIENT LORA TRAINING — LORAM  }
+
+
+Given a pre-trained weight matrix $\mathbf{W_{0}}\in\mathbb{R}^{m\times n}$ , a typical full-parameter fine-tuning process adapts to new tasks by updating the entire full-rank matrix $\mathbf{W}_{0}$ . Inspired by the insight that pre-trained weights of LLMs exhibit low “intrinsic dimension” when adapting to specific tasks (Aghajanyan et al., 2021), LoRA (Hu et al., 2022) further suggests that the updated weights have a low “intrinsic rank”. Consequently, LoRA reparameterizes the model weights as $\mathbf{W}_{0}+\mathbf{W}_{\Delta}=\mathbf{W}_{0}+\mathbf{B}\mathbf{A}$ , where $\mathbf{B}\in\mathbb{R}^{m\times r}$ and $\mathbf{A}\in\mathbb{R}^{r\times n}$ , and $\mathbf{W}_{\Delta}=\mathbf{B}\mathbf{A}$ represents a low-rank decomposition matrix with the rank $r\ll\operatorname*{min}(m,n)$ .   
+During training, as illustrated in Fig. 2 (a), the pre-trained weight matrix $\mathbf{W}_{0}$ is frozen to avoid gradient computation. Instead, the low-rank matrices $\mathbf{B}$ and $\mathbf{A}$ are updated to enable parameterefficient fine-tuning, which defaults to standard supervised fine-tuning, with the objective function $\mathcal{L}_{\mathrm{SFT}}$ defined as the cross-entropy loss between the predicted logits and the ground-truth answers. Given an input feature vector $\mathbf{x}$ of length $m$ , the forward pass of LoRA modifies the output activation from fully fine-tuning, represented by $\mathbf{h}=\mathbf{x}\mathbf{W}_{0}$ (of length $n$ ), to:  
+
+$$
+\mathbf{h}=\mathbf{x}\mathbf{W}_{0}+\mathbf{x}\mathbf{W}_{\Delta}=\mathbf{x}\mathbf{W}_{0}+\mathbf{x}\mathbf{B}\mathbf{A}.
+$$  
+
+Once low-rank matrices $\mathbf{B}^{\star}$ and $\mathbf{A}^{\star}$ are trained by minimizing the $\mathcal{L}_{\mathrm{SFT}}$ , as shown in the Fig. 2 (c), the computation of activation $\mathbf{h}$ for $\mathbf{x}$ is reformulated to improve inference efficiency:  
+
+$$
+\mathbf{h}=\mathbf{x}(\mathbf{W}_{0}+\mathbf{W}_{\Delta}^{\star})=\mathbf{x}(\mathbf{W}_{0}+\mathbf{B}^{\star}\mathbf{A}^{\star}).
+$$  
+
+3.2 MEMORY-EFFICIENT LORA TRAINING  
+
+Consider the LLaMA-2-13B model, we introduce low-rank matrices $\boldsymbol{r}=8,$ ) for the four projection matrices $(\mathbf{W}_{\mathrm{q}},\mathbf{W}_{\mathrm{k}},\mathbf{W}_{\mathrm{v}},$ and $\mathbf{W}_{\mathrm{o}}$ ) in the attention layer, the three projection matrices $(\bar{\mathbf{W}_{\mathrm{up}}},\bar{\mathbf{W}}_{\mathrm{gate}}.$ , and $\mathbf{W}_{\mathrm{down.}}$ ) in the MLP layer, and the weight matrix ${\bf W}_{\mathrm{lm.head}}$ in output layer. Despite the additional 32 million parameters, the number of trainable parameters is reduced by $406\times$ compared to the full parameters. Many LoRA variats (Zhou et al., 2024; Zhang et al., 2023a; Kopiczko et al., 2024; Azizi et al., 2024; Wang et al., 2024) aim to address the significant memory overhead associated with $\mathbf{W}_{\Delta}$ as $\mathbf{W}_{0}$ scales, but they still necessitate storing a complete copy of $\mathbf{W}_{0}$ in memory, which dominates training memory usage. Even with quantization methods designed for LoRA (Dettmers et al., 2023; Xu et al., 2024; Li et al., 2024; Guo et al., 2024; Frantar et al., 2023; Chai et al., 2023), training performance constraints often limit the representation of $\mathbf{W}_{0}$ to 4 bits. Consequently, for the LLaMA-2-13B, storage requirements are reduced from 26 GB in FP16 to $6.5\:\mathrm{GB}$ in NF4. However, this is still significantly higher than the memory required for $\mathbf{W}_{\Delta}$ in BF16, which occupies only 64MB of storage and has a peak memory requirement of 576MB during training. Thus, the memory needed for the frozen quantized $\mathbf{W}_{0}$ is $11.5\times$ greater than that required for learnable $\mathbf{W}_{\Delta}$ .  
+
+![](images/bec5d2ddcc7f17fa05619b2c989421d57d991db1703ffee423c671494e147545.jpg)  
+Figure 2: Comparison of LORAM and LoRA: Training (subfigures a and b) and Inference (c and d). Key stages include the offline process of the frozen full-rank matrix $\mathbf{W}_{0}^{*}$ (subfigure e) and the online generation of the learnable low-rank matrix $\mathbf{W}_{\Delta}^{*}$ (f) during LORAM training (b) and inference (d).  
+
+To mitigate the memory overhead dominated by $\mathbf{W}_{0}$ while achieving inference performance gain, we propose a memory-efficient LoRA training called LORAM. LORAM first prunes the model to a smaller size and performs LoRA fine-tuning on the pruned model. After training, it recovers the LoRA weights, applies them to the original model, and then conducts inference. We now describe the various stages of LORAM
+
+Pruned Full-Rank Weight Generation. First, we employ a pruning algorithm $\mathsf{P}(\cdot)$ to derive the pruned weight matrix $\mathbf{W}_{0}^{\bar{\mathbf{p}}}$ from the original weights $\mathbf{W}_{0}$ . Specifically, $\mathbf{W}_{0}^{\bar{\mathbf{p}}}$ is computed as:  
+
+$$
+\mathbf{W}_{0}^{\mathtt{P}}=\mathtt{P}(\mathbf{W}_{0})=\mathbf{W}_{0}\circ\mathbf{M}^{\mathtt{P}},
+$$  
+
+where $\mathbf{M}^{\mathtt{P}}\in\{0,1\}^{m\times n}$ is a binary mask matrix indicating retained parameters (‘1’) and pruned parameters $({}^{\bullet}0^{\bullet})$ , and $\circ$ denotes the Hadamard product.  
+
+Pruned Low-Rank Matrix Training. After obtaining the pruned weight matrix $\mathbf{W}_{0}^{\mathsf{P}}$ , we modify the standard LoRA training process. Instead of updating the low-rank matrices $\mathbf{B}$ and A for the original $\mathbf{W}_{0}$ , we train the pruned low-rank decomposition matrix $\mathbf{W}_{\Delta}^{\mathbb{P}}\,=\,\mathbf{W}_{\Delta}\circ\mathbf{M}^{\mathbb{P}}\,=\,\mathbf{B}^{\mathbb{P}}\mathbf{A}^{\mathbb{P}}$ , while keeping $\mathbf{W}_{\mathrm{0}}^{\mathbb{P}}$ frozen as shown in Fig. 2 (b). The output activation $\mathbf{h}$ for an input feature vector $\mathbf{x}$ is calculated as:  
+
+$$
+\mathbf{h}=\mathbf{x}\mathbf{W}_{0}^{\mathbb{P}}+\mathbf{x}\mathbf{W}_{\Delta}^{\mathbb{P}}=\mathbf{x}\mathbf{W}_{0}^{\mathbb{P}}+\mathbf{x}(\mathbf{B}^{\mathbb{P}}\mathbf{A}^{\mathbb{P}}).
+$$  
+
+Recovered Low-Rank Matrix Generation. By optimizing the objective function $\mathcal{L}_{\mathrm{SFT}}$ , we obtain the trained pruned low-rank matrix $\mathbf{W}_{\Delta}^{\mathsf{P}^{\star}}$ . To fully leverage the original model weights for improved inference performance, we introduce a recovery function $\mathtt{R}(\cdot)$ , guided by the pruning mask $\mathbf{M}^{\mathrm{P}}$ . This function recovers the shape of the trained low-rank matrix by filling zeros at pruned positions, resulting in $\mathbf{W}_{\Delta}^{\tt R}\,$ as follows:  
+
+$$
+\mathbf{W}_{\Delta}^{\mathtt{R}^{\star}}=\mathbf{B}^{\mathtt{R}^{\star}}\mathbf{A}^{\mathtt{R}^{\star}}=\mathtt{R}(\mathbf{W}_{\Delta}^{\mathtt{P}^{\star}})=\mathbf{W}_{\Delta}^{\mathtt{P}^{\star}}\circ(1-\mathbf{M}^{\mathtt{P}}).
+$$  
+
+This operation ensures that the recovered low-rank matrix $\mathbf{W}_{\Delta}^{\tt R}{}^{\star}$ can be seamlessly merged with the original pre-trained weights $\mathbf{W}_{0}$ , forming $\mathbf{W}_{0}+\mathbf{W}_{\Delta}^{\mathtt{R}^{\star}}$ as follows:  
+
+$$
+(\mathbf{W}_{0}+\mathbf{W}_{\Delta}^{\mathbb{R}^{\star}})[i,j]=\left\{\mathbf{W}_{0}[i,j]\begin{array}{l l}{\quad}&{\mathrm{if}\ \mathbf{M}^{\mathbb{P}}[i,j]=1}\\ {\quad}&{\mathrm{if}\ \mathbf{M}^{\mathbb{P}}[i,j]=0}\end{array}\right.
+$$  
+
+This formula indicates that, for positions where the pruning mask $\mathbf{M}^{\mathrm{P}}$ is $\mathbf{\dot{\rho}}_{1},$ , the merged matrix $\mathbf{W}_{0}+\mathbf{W}_{\Delta}^{\mathbb{R}^{\star}}$ retains the original values from the pre-trained matrix $\mathbf{W}_{0}$ . For positions where the mask is $\surd0^{\circ}$ , the elements in the merged matrix are updated to be the sum of the corresponding values from $\mathbf{W}_{0}$ and the recovered low-rank matrix $\mathbf{W}_{\Delta}^{\tt R}{}^{\star}$ .  
+
+Recovered Low-Rank Matrix Inference. Once we obtain the recovered low-rank matrix $\mathbf{W}_{\Delta}^{\mathbb{R}^{\star}}$ , during inference, the forward pass output activation $\mathbf{h}$ for an input feature $\mathbf{x}$ is computed as follows:  
+
+$$
+\mathbf{h}=\mathbf{x}(\mathbf{W}_{0}+\mathbf{W}_{\Delta}^{\mathbb{R}^{\star}})=\mathbf{x}(\mathbf{W}_{0}+\mathbf{B}^{\mathbb{R}^{\star}}\mathbf{A}^{\mathbb{R}^{\star}}).
+$$  
+
+Our experiments (see Section 4.2 and Section 4.3) show that LORAM maintains high performance across various pruning strategies $\mathsf{P}(\cdot)$ , including structured (Ma et al., 2023) and non-structured pruning (semi-structured $\&$ unstructured pruning) (Frantar $\&$ Alistarh, 2023a). The four stages outlined above summarize the core steps of LORAM. To avoid notational clutter, we have streamlined the algorithmic details. Nonetheless, three key considerations for deployment must be emphasized:  
+
+${\mathsf{C}}_{1}$ Pruned Full-Rank Weight Generation: For non-structured pruning, the matrix dimension remains unchanged, with $\mathbf{\bar{W}}_{0}^{\mathbb{P}}$ compressed into a sparse matrix populated by zeros. In structured pruning, weights are physically removed, yielding a compact, dense $\mathbf{W}_{\mathrm{0}}^{\mathsf{P}}$ .  
+
+$\mathsf{C_{2}}$ Recovered Low-Rank Matrix Generation: For non-structured pruning, the weights in $\mathbf{W}_{\Delta}^{\mathbb{P}}$ corresponding to pruned positions in $\mathbf{M}^{\mathrm{P}}$ are excluded from backpropagation by setting their gradients to zero, ensuring that only the retained components are updated during training. $C_{3}$ Recovered Low-Rank Matrix Inference: For non-structured pruning, the shapes of both the pre-trained and low-rank weights are identical (see ${\mathsf{C}}_{1}$ ), and the gradients of the pruned weights are⋆ bloc⋆ked (se⋆e $\mathsf{C}_{2}$ ). Consequently, we can bypass the recovery phase, resulting in $\mathbf{W}_{\Delta}^{\mathbb{R}^{\star}}=$ $\mathbf{B}^{\mathbb{R}^{\star}}\mathbf{A}^{\mathbb{R}^{\star}}=\mathbf{B}^{\mathbb{P}^{\star}}\mathbf{A}^{\mathbb{P}^{\star}}$ . In the case of structured pruning, the shapes of the weight matrices vary significantly across different pruning strategies. To simplify the definitions, we standardize the recovery process using the pruning mask.  
+
+To clearly illustrate the evolution of weight matrix dimensions across these stages, we take LLMPruner (Ma et al.  
+
+Pruned Full-Rank Weight Alignment. Given the original pre-trained weights $\mathbf{W}_{0}$ , the optimal low-rank matrix learned is $\mathbf{W}_{\Delta}^{\star}$ . Similarly, for pruned weights $\mathbf{W}_{0}^{\mathbb{P}}$ , the optimal low-rank counterpart is $\mathbf{W}_{\Delta}^{\mathsf{P}^{\star}}$ . If the knowledge encoded in $\mathbf{W}_{0}$ and $\mathbf{W}_{\mathrm{0}}^{\mathbb{P}}$ is closely aligned, the knowledge embedded in $\mathbf{W}_{\Delta}^{\mathsf{P}^{\star}}$ should approximate that of $\mathbf{W}_{\Delta}^{\star}$ . Consequently, the recovered matrix $\mathbf{W}_{\Delta}^{\tt R}\,$ should effectively pair with $\mathbf{W}_{0}$ , yielding performance improvements similar to those from $\mathbf{W}_{\Delta}^{\star}$ . However, the pruning function $\mathsf{P}(\cdot)$ disrupts some of the knowledge embedded in the original weights, leading to mismatch between $\mathbf{W}_{0}$ and $\mathbf{W}_{0}^{\mathsf{P}}$ . Such knowledge mismatch causes $\mathbf{W}_{\Delta}^{\tt R}^{\star}$ R∆, when paired with W0, to deliver suboptimal performance, particularly at higher pruning ratios.  
+
+To address the knowledge mismatch, we propose an efficient alignment scheme, namely continual pre-training of pruned weights $\mathbf{W}_{0}^{\mathbb{P}}$ into $\mathbf{W}_{\mathrm{0}}^{\mathbb{P},\mathtt{A}}$ on a small, general corpus $\mathcal{D}_{\mathtt{A}}$ . Formally, we minimize the alignment loss $\mathcal{L}_{\mathtt{A}}$ defined as following:  
+
+$$
+\mathcal{L}_{\mathtt{A}}=-\mathbb{E}_{\mathbf{s}\in\mathcal{D}_{\mathtt{A}}}\left[\sum_{t=1}^{|\mathbf{s}|}\log p\left(\mathbf{s}_{t+1}\mid\mathbf{s}_{<t};\mathbf{W}_{0}^{\mathrm{p},\mathtt{A}}\right)\right],
+$$  
+
+where $p(\mathbf{s}_{t+1}\mid\mathbf{\Deltas}_{<t};\mathbf{W}_{0}^{\mathbb{P},\mathtt{A}})$ represents the model’s predict likelihood of generating the next token $\mathbf s_{t+1}$ given the first $t$ tokens $\mathbf{s}_{<t}$ of input sequence s (token number is and current parameter matrices $\mathbf{W}_{\mathrm{0}}^{\mathbb{P},\mathtt{A}}$ . This alignment process is a one-time, offline operation on a relatively small corpus (about 105 million tokens), making it a cost-effective solution for model publishers. Alongside the base model, they can release the aligned pruned model, enabling low-resource users to fine-tune the base model via LORAM for specific downstream tasks.  
+
+Pruned Full-Rank Weight Quantization. The design of LORAM inherently supports the seamless integration of quantization techniques, further reducing memory consumption during training by applying quantization to pruned models. For example, by adapting the LoRA-specific quantization scheme QLoRA (Dettmers et al., 2023), LORAM extends into QLORAM, the pruned full-rank weight matrix is quantized into the NF4 format, while the pruned low-rank matrices $\mathbf{B}^{\mathrm{P}}$ and $\mathbf{A}^{\mathsf{P}}$ remain in full or half precision, striking a balance between memory efficiency and fine-tuning quality.  
+
+Formally, given a quantization function $\mathsf{Q}(\cdot)$ , during training, the forward pass output activation vector $\mathbf{h}$ for an input feature vector $\mathbf{x}$ is computed as:  
+
+$$
+\mathbf{h}=\mathbf{x}\mathbb{Q}(\mathbf{W}_{0}^{\mathbb{P}})+\mathbf{x}\mathbf{B}^{\mathbb{P}}\mathbf{A}^{\mathbb{P}}=\mathbf{x}\mathbf{W}_{0}^{\mathbb{P},\mathbb{Q}}+\mathbf{x}\mathbf{B}^{\mathbb{P}}\mathbf{A}^{\mathbb{P}},
+$$  
+
+where W0P,Qr epresents the full-rank weight $\mathbf{W}_{0}$ after undergoing pruning via $\mathsf{P}(\cdot)$ , followed by quantization using Q(·). We can also quantize the pruned full-rank weight after alignment to W0P,A,Q. For inference, unless additional quantization is required, QLORAM operates identically to LORAM, as shown in Fig. 2 (d). It utilizes the original full-rank weights $\mathbf{W}_{0}$ alongside the recovered low-rank matrices $\mathbf{B}^{\bar{\mathbf{R}^{\star}}}$ and $\mathbf{A}^{\mathbb{R}^{\star}}$ to perform the forward pass according to Eq. (7). In summary, for LORAM, as shown in Fig. 2 (e), the offline processing path of the frozen full-rank matrix $\mathbf{W}_{0}^{*}$ , which minimizes video memory usage, is $\mathbf{W}_{0}\,\xrightarrow{\mathtt{P}(\cdot)}\mathbf{W}_{0}^{\mathrm{P}}\,\xrightarrow{\mathcal{L}_{\mathtt{A}}}\mathbf{W}_{0}^{\mathtt{P},\mathtt{A}}\,\xrightarrow{\mathtt{Q}(\cdot)}\mathbf{W}_{0}^{\mathtt{P},\mathtt{A},\mathtt{Q}}$ ; Fig. 2 (f) shows that the online generation path for the trained low-rank matrix $\mathbf{W}_{\Delta}^{*}$ is $\mathbf{W}_{\Delta}\xrightarrow{\ \mathrm{P}(\cdot)}\mathbf{W}_{\Delta}^{\mathrm{P}}\xrightarrow{\mathcal{L}_{\mathtt{S F}}}\mathbf{W}_{\Delta}^{\mathrm{P}^{\star}}\xrightarrow{\mathbb{Q}(\cdot)}\mathbf{W}_{\Delta}^{\mathtt{R}^{\star}}$  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+4.1 SETUP  
+
+Pre-train Corpus. To align the inconsistent knowledge between the pruned model during training and the original model during inference, we apply LORAM to continual pre-training LLMs on a mixed corpus of FineWeb (Penedo et al., 2024) and OpenWebMath (Paster et al., 2023). Notably, this alignment process is a one-time, offline operation that can be executed by model publishers.  
+
+Fine-tuning Data. Following the fine-tuning setup of LoRA (Hu et al., 2022), we primarily conduct supervised fine-tuning (SFT) on the OpenHermes-2.5 (Teknium, 2023) (referred to as OpenHermes) and OpenOrca (Lian et al., 2023) datasets. To effectively assess the overall fine-tuning performance, we evaluate test perplexity not only on in-domain test sets constructed from the instruction fine-tuning data but also on out-of-domain test sets built from Alpaca (Taori et al., 2023).  
+
+Downstream Task. We focus on the performance of LORAM in various downstream tasks, including MathQA (Amini et al., 2019) and GSM8K (Cobbe et al., 2021) in mathematical reasoning, six tasks—Arc Challenge & Easy (Clark et al., 2018), HellaSwag (Zellers et al., 2019), OpenBookQA (Mihaylov et al., 2018), PIQA (Bisk et al., 2020), and WinoGrande (Sakaguchi et al., 2021) in common sense reasoning, and HumanEval (Chen et al., 2021) in code generation.  
+
+Sparsification & Quantization. For sparsification $\mathsf{P}(\cdot)$ , we first establish a variant LORAMRAND randomly structured pruning and adapt LORAM to another three variants based on leading approaches: LORAM-STRU with the structured pruning LLM-Pruner2 (Ma et al., 2023) and LORAM-SEMI and LORAM-UNST with the non-structured (semi-structured & unstructured) pruning SparseGPT3 (Frantar & Alistarh, 2023a). For quantization $\mathsf{Q}(\cdot)$ , we achieve QLORAM by combining LORAM with the LoRA-tailored quantization algorithm QLoRA (Dettmers et al., 2023). The storage cost of the original model primarily drives the memory consumption during LoRA weights training. Thus, we define the parameter reduction ratio as the count of parameters before and after pruning, to evaluate the memory efficiency of baselines.  
+
+![](images/12a0817e7fd9c202a7a70ad6cb22913abb8f4c96611285259bcc08415f19f0ba.jpg)  
+Figure 3: The test perplexity of training LLaMA-2-13B & LLaMA-2-70B on OpenHermes.  
+
+![](images/6b814e60899a29dfec6916ec7364222b4c9e8ac1c357b84337b152491b5543c1.jpg)  
+Figure 4: The test perplexity of training LLaMA-2-13B & LLaMA-2-70B on OpenOrca.  
+
+4.2 FINE-TUNING CONVERGENCE  
+
+We investigate the convergence trends of LORAM across varying model scales (LLaMA-2-13B & LLaMA-2-70B) and different instruction-tuning datasets (OpenHermes & OpenOrca). To assess training performance, we track perplexity over training iterations on both out-of-domain (Alpaca) and in-domain (OpenHermes or OpenOrca) test sets, as shown in Fig. 3 and Fig. 4.  
+
+Out-of-Domain Performance. LORAM consistently achieves out-of-domain performance with similar trends, positioned between the LoRA fine-tuned models of the same scale and smaller models, across different models and datasets. As shown in Figs. 3 and 4 (a), for the 13B model, the perplexity of LORAM variants pruned by different algorithms is lower than that of the LoRA-trained 7B model but higher than the LoRA-trained 13B model, with LORAM-RAND and LORAM-STRU achieving a $2.17\times$ parameter reduction. Similarly, as shown Figs. 3 and 4 (c), for the 70B model, this reduction extends to $6.27\times$ under similar convergence trends.  
+
+In-Domain Performance. LORAM shows limited improvement in in-domain performance, likely due to overfitting when the base models are fine-tuned with LoRA, resulting in relatively lower perplexity. This is further supported by downstream evaluations, where models that excel in indomain perplexity often underperform in downstream tasks. As shown in Figs. 3 and 4 (b), while the LoRA-trained 7B model outperforms 13B LORAM-RAND and LORAM-STRU on in-domain tests, it underperforms on several downstream tasks as shown in Section 4.3.  
+
+Non-Structured LORAM Excels in In-Domain. The non-structured variants (LORAM-SEMI & LORAM-UNST) consistently outperform their structured counterparts (LORAM-RAND & LORAM-STRU) on in-domain test sets. As shown in Fig. 3 (a) vs. Fig. 3 (b) and Fig. 4 (a) vs. Fig. 4 (b), the in-domain perplexity of LORAM-SEMI and LORAM-UNST is notably lower, while their out-of-domain performance shows less pronounced differences. This advantage likely arises from the more selective weight pruning in the non-structured variants, which preserves information capture capabilities similar to the original model, thus enhancing in-domain performance.  
+
+Non-Random LORAM Benefits from Scaling. The performance gains of the non-random LORAM become more evident as the model size grows. As shown in (a,b) of Figs. 3 and 4 vs. (c,d) of Figs. 3 and 4, LORAM-STRU outperforms LORAM-RAND considerably on the 70B model, while the difference is marginal on the 13B model. This indicates that larger models exhibit greater differences in the redundancy of individual weights, making selective pruning more effective4.  
+
+![](images/fa90de97a9cb21603a1df1ddeeacdb84295ba435ca561bacbab2dc47b81dc4f7.jpg)  
+
+![](images/f3f179906fc963970740f6f91457dc2d398132d7fd4c99b155c8b82f9beb8e0a.jpg)  
+
+Table 1: Accuracy $(\%)$ of the MathQA (1-shot) & GSM8K (8-shots) in the mathematical domain under LLaMA-2. ▲indicates the theoretical parameters reduction of non-structured pruning. However, these parameters are filled with zeros in actual training, so the memory footprint is not reduced.  
+
+Table 2: Average accuracy $(\%)$ of the CSR in the common sense reasoning domain (1-shot) under the LLaMA-2.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/efd6f4aa40a9ddcdba38a1e6b77870ec31f30c5aa2d8247cfea497123014cdd1.jpg)  
+
+4.3 DOWNSTREAM TASK PERFORMANCE  
+
+We evaluate the performance of various models trained with LORAM on different instruction data across three downstream tasks: mathematical reasoning, common sense reasoning (CSR), and code generation. Results are summarized in Tables 1 to 3. We highlight the core competition scenario with a gray background, which includes the untrained original model and a smaller sibling model trained with LoRA. For instance, for LORAM-trained LLaMA-2-13B, we report the scores of the 13B without fine-tuning and the LoRA-trained 7B model. Blue backgrounds of varying intensity indicate the degree of improvement for each LORAM variant relative to the core competition scenario: darker shades indicate greater improvements, while lighter shades signify smaller gains.  
+
+Overall, we observe that most LORAM variants outperform the core competitive baseline across all downstream tasks, particularly in mathematical and common sense reasoning. This improvement is further amplified by increasing the model scale. Specifically, as shown in Table 1, the 70B  
+
+LORAM-RAND and LORAM-STRU models achieve a $6.27\times$ reduction in parameters compared to the original 70B model (70B w/o FT), exceeding the $5.30\times$ reduction of the LoRA-trained 13B model. In terms of performance, LORAM improves the original 70B model’s score on GSM8K from $52\%$ to $57\%$ , significantly outperforming the LoRA-trained 13B model, which only achieved $37\%$ . These results demonstrate that updating low-rank matrices on pruned models effectively reduces memory requirements during training. Merging the recovered low-rank matrices into the original model yields substantial performance gains during inference.  
+
+
+
+\section{4.4 ADAPTION TO LLAMA-3.1  }
+
+
+Here, we extend LoRAM-Stru to LLaMA-3.1 herds and investigate two key questions: (1) How does LoRAM perform in terms of perplexity and downstream tasks within this model series? (2) What is the effect of continued pre-training iteration steps (proportional to corpus size) on performance?  
+
+As shown in Fig. 5 (a,b), QLORAMSTRU for the LLaMA-3.1-70B model exhibits consistent trends across both out-of-domain and in-domain test sets. It achieves a $7.07\times$ parameters reduction while its perplexity falls between that of the smaller LoRA-trained 8B and LoRA-trained 70B. In downstream tasks (Fig. 5 (c)), QLORAM-STRU significantly exceeds the 8B w/o FT, 8B LoRA, and 70B w/o FT, even surpassing the LoRA-trained 70B on MathQA and HumanEval $(\mathrm{Pass}\,\@i0)$ . Moreover,  
+
+![](images/3e00a930db889193ce70c8c1c40b7456bb955d0f09783f8c3e7c268590dae0ec.jpg)  
+Figure 5: The test perplexity & downstream performance of training LLaMA-3.1-70B on OpenHermes.  
+
+we observe that a minimal pre-training corpus can yield substantial performance gains. For instance, QLORAM-STRU 200, with just 200 updates (about 13 million tokens), achieves a $7.07\times$ parameter reduction alongside performance improvements. This one-time, low-cost alignment allows model publishers to offer aligned pruned models for low-resource users to customize tasks.  
+
+
+
+\section{4.5 NECESSITY OF RECOVERY & ALIGNMENT  }
+
+
+We conduct an ablation study on two critical phases of LORAM: recovery and alignment. To assess their necessity, we analyze the convergence trends of various pruning variants on the Alpaca test set using LLaMA-2-13B.  
+
+Impact of Recovery. we compare the standard approach with an alternative setup where the pruned low-rank matrices are directly combined with the pruned full-rank model weights (w/o Recovery) and track perplexity changes over iterations. As shown in Fig. 6, for all four pruning strategies, models without the recovery phase (solid lines, w/o Recovery & \*) consistently exhibit higher perplexity compared to those with recovery (dashed lines, w/ Recovery & \*), particularly in structured LORAM (see in Fig. 6 (a) and (b)). This highlights that the recovery phase leverages relatively redundant neurons during training to enhance inference performance significantly.  
+
+Impact of Alignment. We also introduce a variant of LORAM without continual pre-training for alignment (w/o Alignment). As shown in Fig. 6, aligned pruned models (yellow lines, \* & w/ Alignment) consistently achieve lower perplexity than unaligned counterparts (blue lines, \* & w/o Alignment), irrespective of the pruning strategy or recovery phase. This highlights that even lowcost continual pre-training on a small general corpus effectively narrows the knowledge gap between pruned and original models, enhancing the overall performance of LORAM.  
+
+
+
+\section{4.6 SCALING LAWS FOR PARAMETER REDUCTION ON LORAM  }
+
+
+We explore the impact of scaling the parameter reduction ratios in Fig. 7. The LoRA-trained LLaMA-2-13B (triangles) achieves a $5.30\times$ parameter reduction, while QLORAM-STRU maintains superior perplexity on the Alpaca and further reduces parameters across both instruction datasets.  
+
+![](images/2f643701cead4061576a4cab059eae1a8a4f141ec4ae3ecab0743225624032c3.jpg)  
+Figure 6: Necessity of Recovery & Alignment across different pruning strategies on LLaMA-2-13B  
+
+In contrast, naive pruning leads to a significant increase in perplexity with minimal pruning. When the parameter reduction ratio reaches $13.54\times$ , QLORAMSTRU sustains an effective perplexity of approximately 2.5, whereas naive pruning escalates to 621.98. These highlight LORAM’s ability to drastically reduce memory of base model by updating LoRA weights in the pruned model, while seamlessly integrating with the full model to preserve inference performance.  
+
+![](images/3bdd717acd3c242f31891e49b6ec6ed7e5cbee0c175afa8ae0c4a707de675571.jpg)  
+Figure 7: Effect of scaling parameter reduction ratio.  
+
+![](images/302d837e63458681f70ae048c7d826bbf05a48cc7dd32eb393372f5039f0a54a.jpg)  
+Figure 8: Performance of downstream tasks across different parameter reduction ratios.  
+
+We then evaluate the performance of models trained with LORAM on OpenHermes across various downstream tasks under different pruning ratios. As shown in Fig. 8, overall performance improves as the parameter reduction ratio increases from $4.28\times$ to $8.21\times$ , before declining. Notably, tasks achieve optimal performance between parameter reduction ratios of $6.27\times$ and $8.21\times$ , consistently outperforming 13B LoRA and 70B w/o FT. However, at a parameter reduction ratio of $4.28\times$ , despite the larger memory capacity available for LORAM, downstream performance does not always exceed that of higher parameter reduction ratios. We attribute this to the fact that lower parameter reduction ratios fine-tune more parameters, potentially degrading the pre-trained model’s performance on certain tasks (e.g., Fig. 8 (a,c,e)). This effect is also reflected in MathQA, where a fully fine-tuned LoRA model underperforms the pre-trained model without fine-tuning (see Fig. 8 (b)). Moreover, excessive pruning at a ratio of $13.54\times$ leaves too few neurons to capture the rich information needed for downstream improvements, particularly in tasks like code generation (see Fig. 8 (d,e)).  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We propose LORAM, a memory-efficient LoRA training scheme for large language models. LORAM significantly reduces the count of parameters of the original model by $8.21\times$ , while maintaining the performance of large-scale LLM fine-tuning. We identify several open questions for LORAM, including the potential for reduced inference costs through context-aware computational graph recovery and its applicability to model like vision transformers (Dosovitskiy et al., 2021) and diffusion models (Ho et al., 2020). We hope our work inspires further research on memory-efficient LoRA training from a sparsity perspective and believe LORAM will serve as a valuable tool for the community, enabling LoRA training of large-scale models on consumer-grade hardware.  
+
+
+
+

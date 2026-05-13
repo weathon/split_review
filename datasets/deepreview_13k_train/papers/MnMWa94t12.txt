@@ -1,0 +1,440 @@
+\title{DyST: Towards Dynamic Neural Scene Representations on Real-World Videos}
+
+\begin{abstract}
+    Visual understanding of the world goes beyond the semantics and flat structure of individual images.
+    In this work, we aim to capture both the 3D structure and dynamics of real-world scenes from monocular real-world videos. 
+    Our Dynamic Scene Transformer (DyST) model leverages recent work in neural scene representation to learn a latent decomposition of monocular real-world videos into scene content, per-view scene dynamics, and camera pose.
+    This separation is achieved through a novel co-training scheme on monocular videos and our new synthetic dataset DySO.
+    DyST learns tangible latent representations for dynamic scenes that enable view generation with separate control over the camera and the content of the scene.
+
+\end{abstract}
+
+\section{Introduction \ms{final besides 1 missing citation}
+
+
+
+\label{sec:intro}
+
+The majority of research in visual representation learning focuses on capturing the semantics and 2D-structure of individual images.
+In this work, we instead focus on simultaneously capturing the \emph{3D structure} as well as the \emph{dynamics} of a scene, which is critical for planning, spatial and physical reasoning, and effective interactions with the real world. %
+We draw upon the recent progress in generative modelling of 3D visual scenes, which has moved away from explicit representations such as voxel grids, point-clouds or textured meshes in favor of learning implicit representations by directly optimizing for novel view synthesis (NVS).
+For example, Neural Radiance Fields, though initially limited to single scenes with hundreds of input images with controlled lighting, precise camera pose and long processing times \citep{Mildenhall20eccv_nerf}, have since been extended to handle variations in lighting \citep{MartinBrualla21cvpr_nerfw},
+generalize across scenes \citep{Trevithick21iccv_GRF},
+work with few images \citep{niemeyer2022regnerf},
+missing cameras \citep{Meng21iccv_GNeRF},
+and even dynamic scenes \citep{pumarola2020dnerf}.
+
+A related line of research focuses on learning global \emph{latent} neural scene representations \citep{sitzmann2021lfn, srt, Kosiorek21icml_NeRF_VAE}.
+These approaches offer several advantages, including the ability to generalize from few views, and improved scalability and efficiency due to amortized learning~\citep{srt}.
+Most importantly, their tangible latent representations can be readily used for downstream applications \citep{osrt, driess2022learning, jabri2023dorsal}.
+However, each of these models is limited to \emph{static} scenes, which not only ignores the important aspect of scene dynamics, but also disqualifies the vast majority of potential real-world video datasets that contain dynamic scenes.
+In this work, we present first steps towards learning \emph{latent dynamic neural scene representations} from monocular real-world videos.
+Building up on recent work, our method learns a separation of the scene into global content and per-view camera pose \& scene dynamics, thereby enabling independent control over these factors.
+
+Our core contributions are as follows:
+\begin{itemize}[leftmargin=*]
+
+    \item
+    We propose the \emph{Dynamic Scene Transformer (\method)}, a model that learns latent neural scene representations from monocular video and provides controlled view generation.
+
+    \item
+    Through a unique training scheme, \method learns a latent decomposition of the space into \emph{scene content} as well as per-view \emph{scene dynamics} and \emph{camera pose}.
+    
+    \item
+    We present a detailed analysis of the model and its learned latent representations for scene dynamics and camera pose.
+
+    \item
+    Finally, we propose DySO, a novel synthetic dataset used for co-training \method.
+    We will publish DySO to the community for use in co-training and evaluation of future work on dynamic neural scene representations.
+
+\end{itemize}
+
+
+
+
+\input{figures/teaser}
+
+
+\section{Related Work \ms{final}
+
+\label{sec:related}
+
+The field of \emph{neural rendering} for static 3D scenes has recently experienced a significant gain in popularity with the introduction of Neural Radiance Field (NeRF) \citep{Mildenhall20eccv_nerf} which optimizes an MLP through the novel view synthesis (NVS) task on posed RGB imagery.
+NeRF and similar scene-specific methods typically require a very dense coverage of the scene along with accurate camera pose information.
+While there exists a great deal of works tackling these shortcomings \citep[e.g.][]{Yu21cvpr_pixelNeRF, Meng21iccv_GNeRF, niemeyer2022regnerf}, this line of research largely focuses on view synthesis quality rather than learning latent scene representations.
+We refer the reader to \citet{tewari2021advances} for a recent overview.
+
+More closely related to our approach are methods that learn 3D-aware \emph{latent} scene representations from the NVS task.
+Examples in this line of work include
+GQN \citep{eslami2018neural},
+NeRF-VAE \citep{Kosiorek21icml_NeRF_VAE},
+LFN \citep{sitzmann2021lfn}, and
+SRT \citep{srt}.
+These methods combine a visual encoder with a camera pose-conditioned decoder network for novel view synthesis.
+More recently, \citet{rust} proposed RUST, which uses a Pose Estimator to train the model without any camera pose information.
+Contrary to \method, all of these methods are limited to \emph{static} scenes, and, with the exception of RUST, require accurate camera poses for training.
+
+Learning scene representations from \emph{dynamic} scenes comes with additional challenges:
+in the absence of calibrated multi-camera setups that record posed multi-view video, models have to learn to capture and disentangle scene dynamics from camera motion.
+In the easier case of posed multi-view video, high-fidelity solutions exist, such as
+D-NeRF~\citep{pumarola2020dnerf},
+H-NeRF~\citep{xu2021hnerf},
+NeRF-Dy~\citep{li20223d}, and
+NeRFlow~\citep{du2021nerflow}.
+Acquiring the right data for these methods requires specialized recording setups and is not applicable to abundantly available monocular video.
+To overcome this limitation, several works including
+Neural Scene Flow Fields \citep{li2021neural},
+Space-time Neural Irradiance Fields \citep{xian2021space},
+TöRF~\citep{attal2021torf}, and
+\citet{gao2021dynamic} make use of additional priors obtained from optical flow or depth to support NVS for small camera displacements directly from monocular video. 
+NerFPlayer~\citep{song2023nerfplayer} and RoDynRF~\citep{Liu2023RobustDR} are able to model dynamic scenes without depth or optical flow information by learning separate NeRFs for dynamic and static parts of the scene, though they require training a separate model for every video without generalizing between scenes. 
+MonoNeRF~\citep{fu2023mononerf} learns generalizable scene representations from pose-free monocular videos, but different from our method, it assumes a static underlying scene, \ie it is not applicable to videos of dynamic scenes. 
+
+
+
+
+
+\section{Method \ms{final}
+
+\label{sec:method}
+
+\paragraph{Dynamic Scenes}
+
+A \emph{dynamic scene} $\gX$ consists of an arbitrary number of images or views $x$ with associated \emph{camera} pose $c_i$ and \emph{scene dynamics} $d_j$, \ie $\gX=\{x_{d_1}^{c_1}, x_{d_2}^{c_2}, \ldots\}$.
+The cameras $c_i$ define the extrinsics and intrinsics of the camera that this particular image has been taken with, while the dynamics $d_j$ define the position and shape of entities in the scene, \eg the position of a moving car.
+
+We note two special cases thereof:
+in \emph{static scenes}, there exist no scene dynamics, hence only the camera view varies across views: $\gX=\{x_{d}^{c_1}, x_{d}^{c_2}, \ldots\}$.
+This static-scene assumption significantly simplifies the setting by allowing the usage of basic photogrammetric constraints \citep{Mildenhall20eccv_nerf}, and it forms the basis for the majority of prior works on learned implicit representations \citep{sitzmann2021lfn, srt, Kosiorek21icml_NeRF_VAE}.
+
+Common real-life \emph{videos} are monocular, \ie both scene dynamics and camera vary together, but are strongly correlated over time, \ie
+$\gX=\{x_{d_t}^{c_t}, \ldots\}$ for time step $t={1, \ldots, T}$, complicating the learning of disentangled representations from this source of data.
+Our goal is to learn \emph{latent neural scene representations} on real-life video data while gaining \emph{independent} control over both scene dynamics and the camera position.
+
+\paragraph{Neural Scene Representations}
+\label{subsec:nsr}
+
+Given a dynamic scene $\gX$, we select a number of \emph{input views} $\gI=\{x, \ldots\}\subset\gX$ that are encoded by the model into a set-based neural scene representation
+\begin{equation}
+    \gZ = \{\vz_k \in \R^d\}_k = \Enc_\theta(\gI).
+\end{equation}
+We note that this setting is in contrast to most common approaches based on Neural Radiance Fields (NeRF) \citep{Mildenhall20eccv_nerf}, which require training a model per scene and do not provide \emph{latent} neural scene representations beyond the scene-specific MLP weights.
+Following \citet{srt}, the encoder $\Enc_\theta$ first applies a convolutional neural network to each input view $x\in\gI$ independently, then flattens the resulting feature maps into a set of tokens that is jointly processed with an encoder transformer \citep{transformer}.
+
+To reproduce a novel \emph{target view} $y_d^c\in\gX$ of the same scene, we use a transformer decoder $\Dec_\theta$ that repeatedly cross-attends into the scene representation $\slsr$ to retrieve information about the scene relevant for this novel view.
+In order to do so, the decoder needs to be informed of the desired target view \emph{camera pose} $c$ and \emph{dynamics} $d$.
+Most existing work only covers \emph{static} scenes \citep{sitzmann2021lfn, Kosiorek21icml_NeRF_VAE, srt}, and simply assumes a known ground-truth camera position $c$ for querying novel views:
+\begin{equation}
+    \label{eq:static_scene_pose}
+    \hat{y}^c = \Dec_\theta(c, \slsr).
+\end{equation}
+\paragraph{Inferred latent camera poses}
+
+Access to the ground-truth camera poses is a strong assumption that does regularly not extend to real-world settings.
+In practice, camera parameters are often estimated using external sensors such as LIDAR, or from the RGB views through Structure-from-Motion (SfM) methods such as COLMAP \citep{colmap}.
+However, these methods are generally noisy and regularly fail altogether \citep{Meng21iccv_GNeRF,rust}, especially so in dynamic scenes such as natural videos.
+
+To lift any requirements for explicit camera poses on static scenes, \citet{rust} introduce a \emph{Camera Estimator} module $\CE_\theta$ that learns to extract a \emph{latent camera pose} $\hat{c}$ from the RGB data itself.
+More specifically, the camera estimator receives the target view $y$ as input and queries parts of the scene representation $\oneslsr\subset\slsr$ to produce a low-dimensional camera control latent
+\begin{equation}
+    \label{eq:estimate_cam} 
+    \hat{c} = \CE_\theta(y, \oneslsr) \in \R^{N_c}.
+\end{equation}
+In practice, $\oneslsr$ contains tokens belonging to the first input view, encouraging the learned camera control latent to be relative to that specific view.
+We note that $\hat{c}$ lives in an abstract feature space, and it is not immediately compatible with explicit GT camera poses $c$, though such a mapping can be learned from data \citep{rust}.
+This estimated camera control latent is then used to condition the decoder when generating an image during training, \ie $\hat{y}^c = \Dec_\theta(\hat{c}, \slsr)$, entirely removing the need for camera poses to train such a model.
+\citet{rust} show that the learned camera control latent distribution accurately follows the true poses, and that this model, on static scenes, achieves similar generation quality as baselines trained with ground truth pose information.
+
+\looseness-1
+The network architecture of the camera estimator is similar to the encoder's: a CNN processes the target view, followed by a transformer that alternates between cross-attending into the scene representation, and self-attending on the flattened feature maps.
+The final camera control latent $\hat{c}$ is then produced by a global average pooling of the output tokens and a linear projection to $N_c$ dimensions.
+\subsection{Structuring the latent space for dynamic scene control}
+\label{subsec:inducing-latent-structure}
+
+Up until this point, the setting in \cref{eq:static_scene_pose,eq:estimate_cam} only admits static scenes.
+To apply our method on real-world videos, we need a way to allow variations in scene dynamics.
+We start with an approach similar to the learned camera control latents:
+a \emph{Dynamics Estimator} $\DE$ sees the target view $y$ and $\oneslsr$, and learns to extract a \emph{dynamics control latent} $\hat{d}$ from the RGB views:
+\begin{equation}
+    \hat{d} = \DE_\theta(y, \oneslsr) \in \R^{N_d}.
+\end{equation}
+The dynamics control latent $\hat{d}$ is used as an additional query for the decoder to reconstruct the target view:
+$\hat{y}_d^c = \Dec_\theta(\hat{c}, \hat{d}, \slsr)$.
+
+\paragraph{Separating dynamics from camera pose}
+
+While this split between camera pose and scene dynamics is convenient in theory, we note that thus far, there exist no structural differences between the ways in which $\hat{c}$ and $\hat{d}$ are inferred or used.
+Hence, in practice, they likely will both learn to capture the camera pose and scene dynamics in a unified way, making it hard to control these aspects independently (as we confirm in practice in \cref{subsec:ablations}).
+
+\begin{wrapfigure}[15]{r}{0.4\textwidth}
+    \includegraphics[width=0.37\textwidth]{images/pose_sampling_scheme.pdf}
+    \caption{
+        Illustration of a DySO scene.
+    }
+    \label{fig:pose-swap}
+\end{wrapfigure}
+We propose to enforce this separation through a novel \emph{\lcs} training scheme that is outlined in \cref{fig:pose-swap}.
+For training, we assume a scene $\gX$ where views are available for all combinations of camera poses $\{c_i\}_i$ and scene dynamics $\{d_i\}_i$.
+As target frames, we choose the four views corresponding to all combinations of the camera poses $c_1, c_2$ and dynamics $d_1, d_2$, \ie our set of \textcolor{targetorange}{target views} is $\{y_{d_1}^{c_1}, y_{d_1}^{c_2}, y_{d_2}^{c_1}, y_{d_2}^{c_2}\}$.
+For all remaining camera poses and scene dynamics, we randomly sample a subset of views as \textcolor{inputpurple}{input views}.
+
+In the following, we describe the decoding mechanism for the target view $y_{d_1}^{c_1}$; the scheme for the remaining target views follows analogously.
+To generate this particular target view, the decoder needs access to (a latent estimate for) the camera pose $c_1$ and the scene dynamics $d_1$.
+Our key insight is that we do not necessarily need to estimate $\hat{c_1}$ and $\hat{d_1}$ from the target frame $y_{d_1}^{c_1}$ itself.
+Instead, we can estimate the camera pose and scene dynamics from their respective counterparts:
+\begin{align}
+    \hat{c_1} = \CE_\theta(y_{d_2}^{c_1}, \oneslsr), \quad
+    \hat{d_1} = \DE_\theta(y_{d_1}^{c_2}, \oneslsr).
+\end{align}
+Crucially, we note that the most salient information $y_{d_2}^{c_1}$ contains to render the target view $y_{d_1}^{c_1}$ is the camera pose and it is hence natural for the camera estimator $\CE$ to learn to extract camera pose information from its inputs.
+Similarly, $y_{d_1}^{c_2}$ shares its scene dynamics $d_1$ with the target view to be generated, encouraging the dynamics estimator $\DE$ to extract scene dynamics.
+From these estimates, we render the target view:
+\begin{align}
+    \label{eq:synthetic}
+    \hat{y}_{d_1}^{c_1}
+    = \Dec_\theta\left(
+        \CE_\theta(y_{d_2}^{c_1}, \oneslsr),
+        \DE_\theta(y_{d_1}^{c_2}, \oneslsr),
+        \slsr
+    \right).
+\end{align}
+As a consequence, the model is required to route all information regarding the camera pose through $\hat{c_1}$, and all information regarding the scene dynamics through $\hat{d_1}$, yielding the desired separation.
+\subsection{Sim-to-real transfer}
+\label{subsec:sim-to-real}
+
+The approach outlined requires the availability of a special kind of multi-view, multi-dynamics dataset.
+In the real world, multi-view video would satisfy the requirements: the scene dynamics are synced through time, while each separate video instantiates a different view onto the same scene.
+However, acquiring such a dataset for training would narrow the applicability of the method to a limited set of domains.
+Instead, we suggest a sim-to-real\todo{citation?} setup:
+we generate a synthetic dataset that contains the desired properties for inducing camera-dynamics separation in the learned latent representations, while co-training on natural, monocular videos.
+
+\paragraph{Synthetic dataset}
+
+We follow prior work using Kubric \citep{greff2021kubric} and ShapeNet objects \citep{chang2015shapenet}.
+Our dataset uses components from the MultiShapeNet (MSN) dataset~\citep{srt} that has been introduced as a challenging test bed for 3D representation learning from static scenes.
+MSN uses photo-realistic ray tracing, high resolution images as backgrounds, and has a diverse set of realistic 3D objects.
+
+Compared to MSN, our dataset has some distinct modifications.
+We place one object into each scene, as our primary goal is the separation of scene dynamics, in this case the object position \& orientation, from the camera.
+The object is initialized with a random position and pose on the floor.
+To integrate dynamics, for each time step, we randomly jitter the object's position and further apply a random rotation to the object.
+MSN samples cameras on a half-sphere around the scene.
+Since real videos rarely feature 360 degree views, we use a set of more realistic camera motions: horizontal shifts, panning, and zooming, as well as sampling random camera points nearby a fixed point.
+
+We find this simple set of camera and object motions to be sufficient for successful sim-to-real transfer, and did not find the need to simulate more physically realistic object motions.
+Our dataset consists of 1\:\!M dynamic scenes, each generated with all 25 combinations of 5 distinct scene dynamics and 5 camera views.
+We call this new dataset \emph{Dynamic Shapenet Objects} (\dataset) and will make it publicly available, as we expect it to be a useful tool for the community for training and evaluating dynamic neural scene representations in the future.
+
+\paragraph{Co-training}
+To transfer the separation of dynamics and camera control latents from the synthetic scenes to natural monocular videos, we \emph{co-train} on both types of data at the same time.
+More specifically, we take alternating optimization steps on batches sampled from each of the two datasets.
+On the synthetic batches, we train the model according to \cref{eq:synthetic}, \ie the camera pose and scene dynamics are estimated from views $y_{d_2}^{c_1}$ and $y_{d_1}^{c_2}$, different from the actual target view $y_{d_1}^{c_1}$ to be rendered.
+On the batches with monocular videos, those additional views are not available, so we simply use the target view itself for dynamics and camera pose estimation:
+\begin{align}
+    \label{eq:real}
+    \hat{y}_d^c
+    = \Dec_\theta\left(
+        \CE_\theta(y_d^c, \oneslsr),
+        \DE_\theta(y_d^c, \oneslsr),
+        \slsr
+    \right).
+\end{align}
+The \lcs outlined in \cref{subsec:inducing-latent-structure} is implemented efficiently by estimating the cameras and dynamics for all four (randomly sampled) target views in parallel
+before swapping the estimated $\hat{c}_i$ and $\hat{d}_j$ control latents accordingly and decoding all four target views jointly.
+
+\paragraph{Model architecture}
+\looseness-1
+Our network architecture largely follows \citet{rust}.
+For efficiency, we implement the Camera and Dynamics Estimators $\CE$ \& $\DE$ as a single transformer that produces $\hat{c}$ and $\hat{d}$ simultaneously for a given target view (see also \cref{fig:app_pose_estimator}).
+The two control latents are produced differently:
+for the camera pose, we apply global average pooling to the transformer's output, and linearly project the result to produce $\hat{c}$.
+For the scene dynamics, we add a learned token to the transformer's set of inputs, and apply a separate linear projection to $\hat{d}$ to only the output for that token.
+This follows the intuition that the camera pose is a global property affecting all tokens (hence global pooling), whereas estimating the dynamics is a more localized task that only affects object tokens (hence the additional token that can learn to attend to the respective subset of tokens).
+For the decoder $\Dec$, we simply concatenate the two control latents to form a single \emph{query} $[\hat{c}, \hat{d}]$ which is used to cross-attend into the SLSR $\slsr$ to generate the target view.
+
+All model weights $\theta$ are optimized end-to-end using the novel view synthesis (NVS) objective.
+Given a dataset $\gD = \{\gX_i\}_i$ of training scenes, for an arbitrary ground truth target view $y_d^c \in \gX_i$, the model is trained to minimize the $L_2$ loss:
+\begin{equation}\label{eq:loss}
+    \gL_\text{NVS}(\theta)
+    = \E_{\gX \sim \gD,\,(\gI, y_d^c) \sim \gX}
+    \left[\lVert
+        \Dec_\theta(
+          \CE_\theta(y_{d'}^c, \oneslsr),
+          \DE_\theta(y_d^{c'}, \oneslsr),
+          \Enc_\theta(\gI))
+        - y_d^c
+    \rVert_2^2\right],
+\end{equation}
+where $c'{\neq}c$, $d'{\neq}d$ if $\gX$ is synthetic, and $c'{=}c$, $d'{=}d$ otherwise, \ie on real-world videos.
+
+
+
+\section{Experiments \ms{near final}
+
+\label{sec:experiments}
+
+Unless specified otherwise, \method is always co-trained on our synthetic \dataset dataset and on real world videos as described in \cref{subsec:sim-to-real,subsec:inducing-latent-structure}.
+As a source of a real world videos, we use the \emph{Something-Something v2} dataset (SSv2)~\citep{goyal2017ssv2}, which consists of roughly
+170\:\!K training videos of humans performing basic actions with everyday objects.
+The videos contain both nontrivial camera motion and dynamic scene manipulation.
+From each video, we sub-sample a clip of 64 frames.
+The model is trained using 3 randomly sampled input frames $\gI$ to compute the scene representation $\slsr=\Enc(\gI)$ and 4 randomly sampled target views for reconstruction.
+Following \cite{srt}, we train using a batch size of 256 for 4\:\!M steps.
+For both control latents, we use a dimensionality of $N_c = N_d = 8$.
+We refer to \cref{app:model} for further implementation details.
+
+\subsection{Novel View Synthesis}
+\label{subsec:nvs}
+
+\input{figures/nvs_and_dyso_psnr}
+\input{figures/ssv2_vid}
+
+\looseness-1
+We begin our investigations by testing the novel view synthesis (NVS) capabilities of the model on the test splits of both the synthetic \dataset and the real SSv2 datasets.
+We show several examples in \cref{fig:nvs} (left).
+On \dataset, the background is particularly well-modelled, while the object is often less sharp.
+We attribute this to the difficulty of capturing 3D object appearance from only 3 provided input views.
+For SSv2, we use the first, middle, and last frame of the videos as input frames and generate intermediate frames using control latents estimated from the intermediates.
+Qualitative results are shown in \cref{fig:ssv2_vid}.
+We find that our model accurately captures changes in both camera viewpoint and object dynamics.
+
+Quantitatively, we evaluate the model on \dataset by computing the PSNR against the ground truth target view $y_d^c$ while varying the control latents, see \cref{tab:dyso_psnr} (right).
+We observe that there is only a minor difference in PSNR between using the target $y_d^c$ itself to estimate the control latents (\target/\target), versus estimating the latent camera from a view with different scene dynamics (\swapforCE) and vice versa (\swapforDE).
+This further confirms that \method can successfully estimate and re-combine camera pose and scene dynamics to synthesize the desired novel views.
+
+\subsection{Learned Camera and Scene Dynamics Control Latents}
+\label{subsec:latent-space-analysis}
+
+In this section, our experiments aim to answer three questions.
+First, does our training with \lcsing induce a meaningful separation of camera pose and scene dynamics on synthetic data?
+Secondly, does the latent space separation transfer to real videos?
+And finally, what is the structure of the learned latent spaces? 
+
+\input{figures/heatmap}
+
+\paragraph{Separation of Camera and Dynamics}
+To analyze the separation into camera and scene dynamics quantitatively, we develop a metric which we call \emph{\metric}.
+Let $D^\text{cam}(y, y', \oneslsr) = \lVert \CE(y, \oneslsr) - \CE(y', \oneslsr) \rVert$ denote the L2 distance in camera latent space between views $y$ and $y'$.
+$D^\text{dyn}$ is defined accordingly for the dynamics latent space.
+Then, we compute the average ratio $R^\text{cam}$ between the distance in camera latent space of a reference view $y_d^c$ to a matching view $y_{d'}^c$, and to a non-matching view $y_d^{c'}$:
+\begin{align}\label{eq:contrastiveness}
+    R^\text{cam} = \E_{\gX \sim \gD,\,(\gI, y_d^c, y_{d'}^c, y_d^{c'}) \sim \gX} \left[ \frac{ D^\text{cam}(y_d^c, y_{d'}^c, \oneslsr) }{ D^\text{cam}(y_d^c, y_{d}^{c'}, \oneslsr) } \right],\ \text{ with } c \neq c' \text{and } d \neq d'.
+\end{align}
+Analogously, we define $R^\text{dyn}$ using $y_{d}^{c'}$ as matching and $y_{d'}^{c}$ as non-matching view.
+If the \metric metric $R^\text{cam}$ is $\approx\!0$, this indicates that views with the same camera are mapped onto the same point in camera latent space regardless of their dynamics; if $R^\text{cam}$ is $\approx\!1$, views with non-matching camera can not be distinguished based on latent distance on average. 
+If $R^\text{cam}$ is $>\!1$, information from the dynamics latent space is ``leaking'' into the camera latent space, because views with the same dynamics $d$ but different camera $c'$ are on average closer to $y_d^c$ than views with different dynamics $d'$, but the same camera $c$.
+
+We find that the learned latent spaces are well separated on average, with little influence of one control latent on the other.
+In particular, our model achieves a camera \metric of $\Rcam{=}0.06$ (corr.~to $16.7\times$ less distance of matching to non-matching views), and a dynamics \metric of $\Rdyn{=}0.42$ (corr.~to $2.4\times$ less distance).
+The fact that $R^\text{cam}$ is notably smaller than $R^\text{dyn}$ indicates that it is easier for the model to estimate the camera pose compared to the object pose.
+This might be intuitive, as the camera pose can be estimated directly from all background pixels (unaffected by the scene dynamics), while the appearance of scene dynamics in 2D images is the result of a combination of the actual scene dynamics \emph{and} the camera pose.
+In contrast, when training without \lcsing, the model only achieves $\Rcam{=}0.72$ and $\Rdyn{=}1.26$, indicating that the separation is drastically worse there (see also \cref{tab:dyso_ablations}).
+This is further evidence that our \lcs training scheme induces the desired disentanglement of camera pose and scene dynamics.
+We also visualize the average latent distances as a heatmap in \cref{fig:pose-distances-msn}, and find that matching (blue squares) and non-matching views (red squares) are easily distinguishable.
+
+\paragraph{Transfer to Real Video}
+To see whether the camera-dynamics separation transfers to real videos, we measure the frame-to-frame latent distances on an example video of one of the authors grasping, lifting and turning a coffee cup, before placing it back in its original position.
+The resulting distance matrix is visualized in \cref{fig:pose-distances-klausvid}.
+We find both the slow panning motion of the camera and the distinct events in the video are clearly visible in the distance maps.
+Moreover, we point out that similar object poses lead to similar dynamics latents despite the vastly different camera positions.
+We conclude that the model is able to successfully disentangle camera pose from scene dynamics in real-world videos.
+\paragraph{Learned Structure}
+\looseness-1
+To investigate the structure of the two learned control latent spaces, we apply principal component analysis (PCA) to a set of latent cameras $\hat{c}$ and scene dynamics $\hat{d}$ collected from
+\numprint{300} test scenes of the \dataset dataset.
+Starting from the extracted latents $\hat{c}$ \& $\hat{d}$ of some view, we then linearly interpolate along the principal components of each space and show the decoded images in \cref{fig:pca}.
+We find that the learned spaces capture meaningful movements:
+the first three components for the camera pose capture horizontal and vertical movements and planar rotation, mirroring similar observations by \citet{rust}.
+For the scene dynamics, the first component captures object rotation, the second represents horizontal and the third vertical movements.
+Furthermore, we observe additional evidence that camera and dynamics are well separated: changing $\hat{c}$ does not modify the object's pose; similarly, changing $\hat{d}$ does not modify the camera.
+Lastly, we also estimate the principal components on the SSv2 dataset, and find that they capture similar effects for the camera; for the dynamics, movements are more constrained to plausible dynamics fitting to the input frames.
+
+We conclude that our model is able to disentangle camera and scene dynamics, and that it learns a meaningful structure for both.
+We study how these capabilities can be used for test-time video control in the next section.
+
+\input{figures/pca}
+
+\subsection{Controllable Video Manipulation}
+\label{subsec:video-manipulation}
+
+After establishing that \method learns a disentangled representation of camera and scene dynamics, we now show how this capability can be used to manipulate real-world video post-hoc.
+After encoding a target video into the scene representation $\slsr$ using the the first, middle and last frame, we synthesize counterfactual variations for this video by manipulating the control latents $\hat{c}$ \& $\hat{d}$.
+We study two variants: motion freezing and video-to-video motion transfer.
+For the former, we compute $\hat{c}$ or $\hat{d}$ from a frame of the target video, and keep it fixed throughout the video.
+This freezes the corresponding camera or object motion from that frame throughout the video, creating a ``bullet time'' effect.
+For the latter, we replace $\hat{c}$, $\hat{d}$, or both, with the latents computed from a different video, effectively transferring the motion in that video to the target frame or video.
+
+\Cref{fig:ssv2_manipulations} shows examples of such manipulations.
+First, we find that inserting the latent camera $\hat{c}$ or scene dynamics $\hat{d}$ of a source frame correctly keeps the camera / object stable throughout the video, but with the original object / camera trajectory.
+Second, we find that transferring the camera from a video with a camera zoom or horizontal pan copies the corresponding motion onto a target frame.
+Note how on the shift motion, the left edge of the frame becomes blurred --- the respective areas are not visible in the target video, and thus \method fills in an average guess due to the L2 loss.
+It is notable that both types of manipulations work in this fashion, as the manipulated control latents are fully out-of-distribution for the decoder given the scene representation.
+
+\newlength{\savetextfloatsep}
+\setlength{\savetextfloatsep}{\textfloatsep}
+\setlength{\textfloatsep}{4pt plus 1.0pt minus 5.0pt} %
+\newlength{\savefloatsep}
+\setlength{\savefloatsep}{\floatsep}
+\setlength{\floatsep}{6pt plus 2.4pt minus 2.4pt}
+
+\input{figures/ssv2_manipulations}
+
+\subsection{Ablation study}
+\label{subsec:ablations}
+\looseness-1
+We investigate the importance of the \lcs (\cref{eq:synthetic}).
+We measure PSNR under \lcsing as described in \cref{subsec:nvs}, and latent space \metric as described in \cref{subsec:latent-space-analysis} on the \dataset dataset.
+The results are listed in \cref{tab:dyso_ablations}.
+We compare several variations:
+applying no swap at all (\ie, decoding the target $y_{d_1}^{c_1}$ using control latents of $y_{d_1}^{c_1}$ itself), swapping randomly with a 50\% probability, or averaging the control latents of the target view and the swapped view together (\eg, averaging camera latents from $y_{d_1}^{c_1}$ and $y_{d_2}^{c_1}$ to decode $y_{d_1}^{c_1}$).
+The latter is motivated by the idea that the latents of matching views should eventually converge to the same point.
+We find that all variations perform significantly worse than the \lcs:
+without swapping, latent space separation does not occur as expected because there is no structural incentive that enforces it ---
+consequently, the recombination PSNR is low.
+When swapping only 50\% of the time, some separation emerges, but the model still has some chance to mix information from the target view into both control latents.
+For averaging the latents, we also find substantial entanglement of camera and dynamics.
+Thus, our \lcs is the most suitable training scheme for consistent separation of camera and dynamics in the latent space.
+\input{figures/dyso_ablations}
+
+\setlength{\textfloatsep}{\savetextfloatsep} %
+\setlength{\floatsep}{\savefloatsep}
+
+
+\section{Conclusion}
+
+
+In this work, we propose \method, a novel approach to generative modeling of dynamic 3D visual scenes that admits separate control over the camera and the content of the scene.
+We demonstrate how \method can be applied to real-world videos of dynamic scenes despite not having access to ground-truth camera poses via sim-to-real transfer.
+\method shows promising view synthesis and scene control capabilities on real-world videos of dynamic scenes. 
+
+As a next step, we would like to apply our method to more complex types of videos, for example with several independent moving objects, longer camera trajectories, or changing lighting conditions --- challenges which exceed the scope of this work.
+Indeed, we expect that further model innovations are needed to tackle them.
+Another open problem concerns the novel view synthesis aspect of our model; there is still room for improvement in view generation quality, especially for dynamic objects, which is currently limited due to the L2 loss.
+Future work could improve the model's generative capabilities: using diffusion or GAN-like approaches should lead to more plausibly imputed missing information.
+
+We believe that \method contributes a significant step towards learning neural scene representations from real-world scenes encountered in the wild.
+This opens the door for exciting down-stream applications, especially when combined with the potential of training on large-scale video collections.
+
+
+
+
+
+\paragraph{Author contributions \& Acknowledgements}
+
+Maximilian Seitzer: conception, implementation, datasets, experiments, evaluation, writing.
+Sjoerd van Steenkiste: writing, advising.
+Thomas Kipf: writing, advising.
+Klaus Greff: project co-lead, conception, evaluation, writing.
+Mehdi S.\ M.\ Sajjadi: project lead, conception, datasets, early experiments, evaluation, writing.
+
+We thank Aravindh Mahendran for detailed feedback on the manuscript and Alexey Dosovitskiy for fruitful discussions on the project.
+The authors thank the International Max Planck Research School for Intelligent Systems (IMPRS-IS) for supporting Maximilian Seitzer.
+\todo{rephrase}
+
+
+
+
+
+
+
+

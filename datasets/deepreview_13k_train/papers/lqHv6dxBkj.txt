@@ -1,0 +1,120 @@
+\title{SLoPe: Double-Pruned Sparse Plus Lazy Low-Rank Adapter Pretraining of LLMs}
+
+\begin{abstract}
+We propose \ours, a Double-Pruned \underline{\textbf{S}}parse Plus Lazy \underline{\textbf{{Lo}}}w-rank Adapter \underline{\textbf{P}}r\underline{\textbf{e}}training method for LLMs that improves the accuracy of sparse LLMs while accelerating their  pretraining and inference and reducing their memory footprint.
+Sparse pretraining of LLMs reduces the accuracy of the model, to overcome this, prior work uses dense models during fine-tuning.
+\ours improves the accuracy of sparsely pretrained models by adding low-rank adapters in the final 1\% iterations of pretraining without adding significant overheads to the model pretraining and inference. In addition, \ours uses a double-pruned backward pass formulation that prunes the transposed weight matrix using N:M sparsity structures to enable an accelerated sparse backward pass.
+\ours accelerates the training and inference of models with billions of parameters up to $\trainspeedup\times$ and $\inferencespeedup\times$ respectively (OPT-33B and OPT-66B) while reducing their memory usage by up to $\trainmemory\times$ and $\inferencememory\times$ for training and inference respectively.\footnote{Code and data for \ours is available at: \url{https://bit.ly/slope-llm}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{section:intro}
+Large Language Models (LLMs) demonstrate significant potential for natural language understanding and generation; 
+however, they are expensive to train and execute because of their extensive parameter count and the substantial volume of training data required. The training process of LLMs include a pretraining \cite{pretraining} and a fine-tuning stage. In the pretraining phase, the model is trained on a large high-quality text \cite{pile, openwebtext} and then fine-tuned on different downstream tasks \cite{glue, squad}. Both   phases require significant amounts of computation, memory, and communication. 
+
+Model sparsity, in which the less important parts of the model are pruned, can reduce the computation and memory overheads of LLM pretraining  \cite{sparsity_survey}. Sparsity is unstructured if elements are removed from  arbitrary locations in the tensors. Unstructured sparsity is hard to accelerate due to non-existing hardware/software support \cite{lucas}. To resolve this, structured sparsity imposes constraints on where the zero elements can appear \cite{block_pruning1, channel_pruning1}, creating dense blocks of nonzeros in the matrix to leverage dense compute routines. 
+The drawback of the structured sparse methods is that they limit the choice for sparsity patterns leading to a reduction in accuracy in the sparse model when compared to dense \cite{pixelated_butterfly}. 
+NVIDIA has recently introduced sparse tensor cores \cite{sparse_tensor_cores} to their hardware that accelerate more flexible structured sparsity patterns, i.e. 2:4 sparsity; hardware support for N:M sparsity where at most N out of M consecutive elements are zero is not yet available but machine learning practitioners are developing algorithms for these patterns~\cite{n_m4,n_m5_step,rajeshkumar2024progressive} .
+
+Applying N:M sparse masks to a model leads to accuracy loss because of their limited choice of sparsity patterns. 
+Changing the sparsity mask dynamically throughout pretraining is one of the approaches proposed to address this issue \cite{adaptive_pruning}.
+Zhou et al. \cite{nm_scratch} proposes a novel metric for finding the N:M sparsity patterns that lead to higher accuracy in each iteration. \cite{n_m4} suggest the use of decaying masks to further improve the accuracy of the models. STEP \cite{n_m5_step} proposes a new optimizer that improves the convergence of models with adaptive masks. While the adaptive methods can improve the accuracy of the models, they require storing the dense weights and possibly additional metrics for updating the new sparsity patterns, while wasting a portion of the training computations to train the weights that will be pruned in later iterations. SPDF \cite{spdf} and Sparse-Dense Pretraining (\transposable) \cite{2_4_pretraining}, one can compensate for the loss imposed by sparsity with a dense fine-tuning. But the dense fine-tuning stage will disable the memory and compute savings of sparse methods at inference.
+Inspired by this, we introduce additional non-zeros to the weight in the last steps of pretraining. To avoid storing a dense model during inference while getting the same capabilities of a dense weight, we add the non-zeros in the form of low-rank adapters \cite{lora}. Our experiments show that using low rank adaptors leads to noticeably faster convergence compared to when the same number of learnable parameters are added to the sparse weights.
+
+The use of N:M sparsity in LLM pretraining is limited to accelerating the forward pass in the training loop because the row-wise N:M structure in the weight sparsity pattern will be lost when the weights are transposed in the backward pass.
+Prior work~\cite{n_m1,n_m2,2_4_pretraining} attempt to leverage sparsity in both forward and backward passes by finding transposable masks through various methods: greedy search algorithms, searching among random permutations, and searching among the results of convolution.
+However, these transposable masks reduce model accuracy and add significant runtime overheads~\cite{2_4_pretraining}, often resulting to slow-downs (up to $\xx{8.4}\times$).
+To address these issues, we propose a \textbf{double-pruned backward pass} formulation with theoretical convergence guarantees. 
+Instead of enforcing the weight transpose to be N:M sparse, our approach transposes the N:M weight matrix first and then imposes N:M sparsity.
+This allows the weight matrices to exhibit a wider range of sparsity patterns, leading to improved accuracy.
+
+Our method, \ours, is a Double-Pruned \textbf{S}parse Plus Lazy \textbf{Lo}w-rank Adapter \textbf{P}r\textbf{e}training method for LLMs. It employs a \emph{static} N:M sparsity mask with a double-pruned backward pass formulation to accelerate both the forward and backward passes. Key contributions of \ours are:
+\begin{itemize}[leftmargin=*]
+\item \textbf{Double-Pruned backward pass} $\rightarrow$ We propose to transpose an already sparsifiedd N:M weight matrix (forward pass) before imposing another round of N:M sparsity (backward pass), improving model quality and reducing mask search overheads.
+\item \textbf{Lazy Low-Rank adapters} $\rightarrow$ We introduce additional parameters with minimal compute and memory overheads, merely for the last 1\% iterations of pretraining, improving model capacity (see Figure \ref{fig:pipeline}).
+\item \textbf{Optimized CUDA kernels} $\rightarrow$ We jointly optimize Nvidia 2:4 sparse kernels and low-rank calls through efficient tiling and scheduling. Our highly-optimized CUDA kernels result to $\xx{\trainspeedup}\times$ end-to-end training speedup and $\xx{\inferencespeedup}\times$ inference speedup on LLMs with billions of parameters, while reducing training and inference memory footprint by up to $\xx{\trainmemory}\times$ and $\xx{\inferencememory}\times$, respectively.
+\end{itemize}
+\begin{figure*}[t]
+\begin{center}
+\centerline{\includegraphics[width=0.95\textwidth]{img/slope-overview-final.pdf}}
+\caption{The sparse training pipeline in \ours. 
+Here, $\mathcal{X}$, $\mathcal{Y}$, and $\mathcal{W}$ denote the input, output, and the weight tensors for a specific layer, respectively.
+$\nabla_{\cdot}\mathcal{L}$ represents the gradient of the loss function. $\mathcal{L}$ and $\mathcal{R}$ are the low-rank terms that are introduced only in the final 1\% iterations.
+Superscript $R$ shows row-wise pruning using $N$:$M$ scheme and $R,C$ shows both column and row-wise $N$:$M$ sparsification, leading to extra imposed zeros.
+Blue elements represent non-zero values, while white elements represent pruned values, and red elements indicate additional zeros introduced during the backward pass.
+}
+\label{fig:pipeline}
+\end{center}
+\end{figure*}
+
+
+
+
+\section{Sparse plus low-rank pretraining of LLMs}
+
+\label{sec:slope}
+Equation~\ref{eq:forward}, \ref{eq:backward_weight}, and \ref{eq:backward_input} depict the formulas for the forward and backward pass of the $i$-th linear layer in a neural network. Here, the weight tensor is denoted as $\mathcal{W}_i \in \mathbb{R}^{d_{out} \times d_{in}}$ and the input tensor is denoted as $\mathcal{X}_i \in \mathbb{R}^{b \times d_{in}}$. The forward pass generates an output tensor represented as $\mathcal{Y}_i \in \mathbb{R}^{b\times d_{out}}$. In all equations, $d_{in}$ and $d_{out}$ refer to the input and output dimensions of the respective layer.
+
+\begin{equation}
+    \label{eq:forward}
+    \mathrm{FWD}\mymapsto \mathcal{Y}_i = \mathcal{X}_i \mathcal{W}_i^T
+\end{equation}
+\begin{equation}
+    \label{eq:backward_weight}
+    \mathrm{BWD-1}\mymapsto \nabla_{W_i} \mathcal{L} = \nabla_{Y_i} \mathcal{L}^T \mathcal{X}_i
+\end{equation}
+\begin{equation}
+    \label{eq:backward_input}
+    \mathrm{BWD-2}\mymapsto \nabla_{X_i} \mathcal{L} = \nabla_{Y_i} \mathcal{L} \mathcal{W}_i
+\end{equation}
+
+The dimension along which N:M pruning occurs corresponds to the reduction dimension in Matrix-Matrix multiplication. Without this restriction, the sparse Matrix-Matrix operation can not be accelerated on GPU~\cite{cuspaselt_reduction_dim}.
+With this restriction in mind, to leverage weight sparsity in forward and backward pass, one needs to prune elements along the columns of $\mathcal{W}_i^T$ in \autoref{eq:forward} (FWD) and $\mathcal{W}_i$ in \autoref{eq:backward_input}.
+To satisfy this requirement, it is necessary to prune elements of the weight tensor $\mathcal{W}_i$ along both row and column dimensions.
+\input{src/3-1-sparse_pretraining}
+\input{src/3-2-lazy-low-rank}
+\input{src/3-3-sparse_kernels}
+\input{src/3-4-inference}
+
+
+
+\section{Experimental results}
+
+\label{section:results}
+\newif\ifperplexity
+\perplexitytrue % Uncomment this line if you want to set ifperplexity to true, comment it otherwise
+\newcommand{\gptmetric}{%
+  \ifperplexity
+    perplexity %
+  \else
+    loss %
+  \fi
+}
+This section evaluates the efficacy of \ours in accelerating the pretraining while achieving memory savings. 
+Due to the substantial computational resources required for LLM pretraining, our accuracy evaluation is primarily focused on smaller-scale LLMs up to 774M parameters.
+However, the speedup and memory reduction results extend to a wider range of models, from 2.6B up to 66B parameters.
+\input{src/4-1-speedup}
+\input{src/4-2-accuracy}
+
+
+\section{Conclusion}
+
+In conclusion, \ours improves both pretraining and inference times while reducing memory footprint with negligible impact on model performance.
+\ours achieves these benefits by effectively using N:M sparsity and lazy low-rank adapters in both forward and backward passes, supported by an efficient design of CUDA kernels.
+Additionally, the use of lazy low-rank adapters allows for balancing memory footprint and model accuracy across a wide range models.
+The results show that \ours achieve up to \trainspeedup$\times$ and \inferencespeedup$\times$ speedup for pretraining and inference, respectively. 
+These speedups achieved while our method reduces the effective memory footprint by up to \trainmemory$\times$ (pretraining) and \inferencememory$\times$ (inference). 
+
+\begin{ack}
+This work was also supported in part by NSERC Discovery Grants (RGPIN-06516, DGECR00303), the Canada Research Chairs program, Ontario Early Researcher award, the Canada Research Chairs program, the Ontario Early Researcher Award, and the Digital Research Alliance of Canada
+(\url{www.alliancecan.ca}). Work of Zhao Zhang was supported by National Science Foundation OAC-2401246. We also acknowledge the Texas Advanced Computing Center (TACC) at The University of Texas at Austin for providing HPC resources that have contributed to the research results reported within this paper (\url{http://www.tacc.utexas.edu}). We extend our gratitude towards David Fleet, Karolina Dziugaite, Suvinay Subramanian, Cliff Young, and Faraz Shahsavan for reviewing the paper and providing insightful feedback. We also thank the extended team
+at Google DeepMind who enabled and supported this research direction. 
+\end{ack}
+
+
+
+
+

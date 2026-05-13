@@ -1,0 +1,181 @@
+# Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection
+
+- Decision: Accept
+- Scores: 6, 8, 8, 8
+
+## Abstract
+Despite their remarkable capabilities, large language models (LLMs) often produce responses containing factual inaccuracies due to their sole reliance on the parametric knowledge they encapsulate. 
+Retrieval-Augmented Generation (RAG), an ad hoc approach that augments LMs with retrieval of relevant knowledge, decreases such issues. 
+However, indiscriminately retrieving and incorporating a fixed number of retrieved passages, regardless of whether retrieval is necessary, or passages are relevant, diminishes LM versatility or can lead to unhelpful response generation.
+We introduce a new framework called {\bf Self-Reflective Retrieval-Augmented Generation (\model)} that enhances an LM's quality and factuality through retrieval and self-reflection. 
+Our framework trains a single arbitrary LM that adaptively retrieves passages on-demand, and generates and reflects on retrieved passages and its own generations using special tokens, called {\it reflection} tokens. Generating reflection tokens makes the LM controllable during the inference phase, enabling it to tailor its behavior to diverse task requirements. 
+Experiments show that \model (7B and 13B parameters) significantly outperforms state-of-the-art LLMs and retrieval-augmented models on a diverse set of tasks. 
+Specifically, \model outperforms ChatGPT and retrieval-augmented Llama2-chat on Open-domain QA, reasoning and fact verification tasks, and it shows significant gains in improving factuality and citation accuracy for long-form generations relative to these models.\footnote{{Our code and trained models are available at \url{https://selfrag.io/}}.}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors propose a new framework called self-reflective retrieval augment generation (Self-RAG) to improve upon the vanilla RAG approach that always incorporates a fixed number of retrieved passages. They first train a LM with an extended vocabulary that includes reflection tokens. These tokens, along with a reflective retrieval/decoding algorithm, are then used at inference time to generate responses to the queries that are better informed by relevant passages.
+
+To this end, they first generate data for and train a critic model, whose role is to evaluate and generate data for the generation model. The data for doing so is created using GPT-4 via specifically designed prompts. The reason being that using GPT-4 everywhere would be very costly and not reproducible. This model also provides the (usually human generated) signal for instruction tuning the generator.
+
+For evaluation, the model is compared against 3 set of datasets (closed-set for fact verification, short form generation from open-domain QA datasets, and long form generation). The model is then compared with a variety of open source models, as well as cloud-based models, such as ChatGPT and Perplexity.
+
+### Strengths
+- The RAG method, which the authors set out to improve, has become highly used in the industry while having obvious limitations. This is a hard problem and any improvements on this problem will have great significance
+- The framework tries to integrate two very useful LLM approaches, RAG and self-reflection in an optimized manner
+
+### Weaknesses
+ - Even though there are a lot of benchmarks and ablations, I still find that many of my questions are not answered by these evaluations
+    - Specifically, I'd like to separate out the contribution from the main two parts of the approach, the self-reflection, and RAG. I don't see much ablation or comparison on the self-reflection side. Only the `IsSup` token is ablated and that it.
+    - The RAG also has many details that I'm not certain have been compared against, other than simply changing the underlying model, which is not that interesting IMO. I believe simple changes to prompt, number of topk to retrieve, and order of retrieval (top first or top last) can produce highly nuanced results.
+    - I would have also liked to see at least an attempt at trying to combine self reflection with RAG without any pre-training
+- I find some of the numbers reported not convincing and in need of more investigation
+    - Ret-ChatGPT in Table 2: in all but the Long-form generation tasks, ChatGPT performs better than the retrieval-augmented version. This is curious and tells me either the model has seen the data (which makes the dataset slightly not a good representative of the RAG task) or that RAG is not being done correctly
+    - I have a similar (but less important) observation for the Alpaca models (specifically 13B). I can understand the reduced MAUVE score, but accuracy on PubMed has also been reduced which tells a similar story
+    - Same is true in Figure 3.a (ablations) where Self-RAG without retrieval is already better than all the other baselines in Table 2. Is this because there has been a data leak? If yes, that completely invalidates these results
+
+### Questions
+- The authors claim in the abstract that "Self-RAG outperforms ChatGPT ... on Open-domain QA ... tasks". However, the results in Table 2 are dominated by ChatGPT and Ret-ChatGPT. They only get outperformed in PopQA. Given that, I'm surprised that the authors would make this claim
+
+- The authors claim that "GPT-4 reflection token predictions show high agreement with human evaluations". I find that hard to believe, given personal experience and reported results, e.g. PandaLM which for their task reports an F1 accuracy of 66% when comparing the quality of different passages. I don't deny that GPT-4 evaluation predictions have a strong positive bias towards the truth, but I still would call it high agreement. Do you have data to support this? Or do you think the gap in observations is due to comparison on slightly different evaluation tasks?
+
+- The repetitive self-reflection methods of Self-RAG will likely have an outsized effect on the computation requirements and the latency of the model. As such, I would love to see some numbers and comparisons here. Specially because it's known that given more time/tokens/compute, LLMs can improve their results.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces a novel framework known as Self-Reflective Retrieval-augmented Generation (SELF-RAG), designed to enhance the generation quality and factuality of Large Language Models (LLMs). During next token prediction, the SELF-RAG framework enables the decoding of reflection tokens from the LLM, allowing for control over the retrieval and self-reflection processes. To create training data for the reflection tokens, a critic model is trained using data generated by GPT-4. The authors also demonstrate how this framework can be used to control retrieval frequencies and guide generation towards specific critique types. Experimental results on multiple benchmarks show that the proposed SELF-RAG performs the best among non-proprietary LLMs on almost all tasks.  The ablation study shows the importance of each component.
+
+### Strengths
+- The proposed method is novel in a way that it integrates the critic model information at training time so that the LLMs could reuse the output signals to guide the next step.
+- The proposed method can be easily adapted to generate responses with certain properties.
+- SELF-RAG significantly outperforms baselines in most cases.
+
+### Weaknesses
+ - The critic model plays a pivotal role within the framework, and the authors have reported its accuracy in the Appendix. However, the paper does not include an evaluation of the LLM's accuracy in predicting reflection tokens.
+- The retrieval threshold is predetermined, but the authors have not provided an analysis of how variations in the retrieval threshold might affect downstream task performance.
+- In the ablation study, the paper only investigates 'Retrieve top1,' while SELF-RAG utilizes top 5 or top 10. Furthermore, the study exclusively focuses on 'Remove[IsSup],' neglecting an examination of the other criticize tokens.
+
+### Questions
+- Did the authors investigate the influence of reflection token distributions on the performance of the critic model? 
+- Is there a possibility that the critic model may exhibit certain biases? Additionally, have they examined the distribution of retrieval tokens and its correlation with the retrieval threshold?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a new framework, named Self-RAG, for training LMs to retrieve passages, generate text, and evaluate its own generation on-demand. Specifically, the proposed framework first uses a critique model C, distilled from prompted GPT4, to offline augment existing instruction-finetuning data with control tokens (retrieval token or critique tokens) as well as retrieved passages. Then the generator is trained on the augmented data, so that it also generates the target response as well as control tokens. At inference time, the decoding algorithm is modified to take actions when a control token is decoded. The authors implemented the framework on top of llama2 7B and 13B, and evaluated the models across various text generation tasks. Results show that the model can significant improve llama2's factuality.
+
+### Strengths
+- The paper is well written and nicely presented.
+- The paper proposes a novel framework that enables dynamic, un-demand retrieval and self-reflection in LM decoding. It address a key limitation in most existing RAG framework, that the model does not know when to retrieve. 
+- The proposed method provides an interesting alternative to RLHF for using critique models. I really like its controllability and interpretability that RLHF doesn't have. 
+- Experiments and ablations are sound and convincing.
+
+### Weaknesses
+ - There are some related search that prompts the model to decide when retrieval is needed and how to use retrieval during decoding. E.g., "Active retrieval augmented generation." by Jiang et al [1]. It would be nice to study what benefits the offline data augmentation & training approach can bring comparing to these prompting-based frameworks. 
+- Since most experiments uses automated evaluation focusing on accuracy and factuality, it is still unclear to me if such a training approach could hurt some aspects of the model, e.g., instruction following, creativity, or reasoning.  
+- One limitation of the proposed Self-RAG is that the model sees each passage independent from the others. The generator cannot synthesize multiple passages. 
+
+### Questions
+- How does Self-RAG's training affect the model in terms of aspects other than factuality?  e.g., instruction following, creativity, or reasoning.  
+- How good is the model at deciding when to retrieve? It would be nice to show the triggering rates of "retrieval" token on different types of tasks. 
+- How much training data is needed? Does the training data needs to be carefully sampled, e.g., focusing on fact-seeking slices?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper studies retrieval-augmented generation, where it aims to train a language model (LM) that learns to retrieve external documents on demand and generate a better response. Especially, the model learns to output some reflection tokens that serve different purposes. First, the model would generate a retrieval token to indicate that the current continuation needs external documents. Then with each of the retrieved documents, the model would generate a special token to indicate whether the document is relevant. After generating some text, the model would further generate the critique tokens to indicate whether the generated text is grounded by the document and whether it is helpful for the overall generation. These tokens would then enable controllable text generation during inference. Experiments show that the proposed model outperforms several other competitive baselines that are augmented with a retrieval mechanism but do not have the self-reflection step.
+
+### Strengths
+1.	The proposed method addresses two key problems including relevance and grounding by simply adding special tokens learned through fine-tuning.
+2.	The fine-tuning does not rely heavily on human annotation. Rather, it makes use of GPT-4 to provide the training data.
+3.	The reflection tokens allow users to have more control over the generation process to customize the expected response.
+
+### Weaknesses
+1.	The reflection tokens might be useful to select more promising generations during the decoding time. But it seems that they do not affect (or guide) the generation process from the beginning and might not help if none of the candidates is good. 
+2.	If GPT-4 somehow can decently provide the labeled data required for each reflection step, it seems intuitive to just instruct GPT-4 to obtain the ideal response that is grounded by the input. Also, GPT-4 might make the decisions on whether to retrieve or not differently from the small LMs as GPT-4 memorizes a lot more world knowledge. Therefore, the annotation given by GPT-4 might not be suitable for small LMs. It would be great to have some discussion or clarification on this.
+
+### Questions
+1.	In section 3.2.2, the authors mention that during the training time, they mask out the retrieved text chunks. What is the purpose of this masking step?
+2.	Other than just providing post hoc feedback on how good the current generation is, do the reflection tokens also affect/guide the generation process somehow?
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+4 excellent

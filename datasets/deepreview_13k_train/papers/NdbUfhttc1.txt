@@ -1,0 +1,428 @@
+\title{Learning to Optimize for Reinforcement Learning}
+
+\begin{abstract}
+In recent years, by leveraging more data, computation, and diverse tasks, learned optimizers have achieved remarkable success in supervised learning, outperforming classical hand-designed optimizers.
+Reinforcement learning (RL) is essentially different from supervised learning, and in practice, these learned optimizers do not work well even in simple RL tasks.
+We investigate this phenomenon and identify two issues.
+First, the agent-gradient distribution is non-independent and identically distributed, leading to inefficient meta-training.
+Moreover, due to highly stochastic agent-environment interactions, the agent-gradients have high bias and variance, which increases the difficulty of learning an optimizer for RL.
+We propose pipeline training and a novel optimizer structure with a good inductive bias to address these issues, making it possible to learn an optimizer for reinforcement learning from scratch.
+We show that, although only trained in toy tasks, our learned optimizer can generalize to unseen complex tasks in Brax.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep learning has achieved great success in many areas~\citep{lecun2015deep}, which is largely attributed to the automatically learned features that surpass handcrafted expert features.
+The use of gradient descent enables automatic adjustments of parameters within a model, yielding highly effective features. 
+Despite these advancements, as another important component in deep learning, optimizers are still largely hand-designed and heavily reliant on expert knowledge.
+To reduce the burden of hand-designing optimizers, researchers propose to learn to optimize with the help of meta-learning~\citep{sutton1992adapting,andrychowicz2016learning,chen2017learning,wichrowska2017learned,maheswaranathan2021reverse}.
+Compared to designing optimizers with human expert knowledge, learning an optimizer is a data-driven approach, reducing the reliance on expert knowledge. 
+During training, a learned optimizer can be optimized to speed learning and help achieve better performance.
+
+Despite the significant progress in learning optimizers, previous works only present learned optimizers for supervised learning (SL).
+These learned optimizers usually have complex neural network structures and incorporate numerous human-designed input features, requiring a large amount of computation and human effort to design and train them.
+Moreover, they have been shown to perform poorly in reinforcement learning (RL) tasks~\citep{metz2020using,metz2022velo}.
+\textit{Learning to optimize for RL remains an open and challenging problem.}
+
+Classical optimizers are typically designed for optimization in SL tasks and then applied to RL tasks.
+However, RL tasks possess unique properties that are largely overlooked by classical optimizers.
+For example, unlike SL, the input distribution of an RL agent is non-stationary and non-independent and identically distributed (non-iid) due to locally correlated transition dynamics~\citep{alt2019correlation}.
+Additionally, due to policy and value iterations, the target function and the loss landscapes in RL are constantly changing throughout the learning process, resulting in a much more unstable and complex optimization process.
+In some cases, these properties also make it inappropriate to apply optimization algorithms designed for SL to RL directly, such as stale accumulated gradients~\citep{bengio2020correcting} or unique interference-generalization phenomenon~\citep{bengio2020interference}.
+\textit{We still lack optimizers specifically designed for RL tasks.}
+
+In this work, we aim to learn optimizers for RL.
+Instead of manually designing optimizers by studying RL optimization, we apply meta-learning to learn optimizers from data generated in the agent-environment interactions.
+We first investigate the problem and find that the complicated agent-gradient distribution impedes the training of learned optimizers for RL.
+Furthermore, the non-iid nature of the agent-gradient distribution also hinders meta-training.
+Lastly, the highly stochastic agent-environment interactions can lead to agent-gradients with high bias and variance, exacerbating the difficulty of learning an optimizer for RL.
+In response to these challenges, we propose a novel approach, \textit{Optim4RL}, a learned optimizer for RL that involves pipeline training and a specialized optimizer structure of good inductive bias. 
+Compared with previous methods, Optim4RL is more stable to train and more effective in optimizing RL tasks, without complex optimizer structures or 
+numerous human-designed input features.
+We demonstrate that Optim4RL can learn to optimize RL tasks from scratch and generalize to unseen tasks.
+Our work is the first to propose a learned optimizer for deep RL tasks that works well in practice.
+
+
+
+\section{Background}
+
+
+\subsection{Reinforcement Learning}
+
+The process of reinforcement learning (RL) can be formalized as a Markov decision process (MDP). Formally, let $M=(\States, \Actions, \Pfcn, \Rfcn, \gamma)$ be an MDP which includes a state space $\States$, an action space $\Actions$, a state transition probability function $\Pfcn: \States \times \Actions \times \States \rightarrow \RR$, a reward function $\Rfcn: \States \times \Actions \rightarrow \RR$, and a discount factor $\gamma \in [0,1)$.
+At each time-step $t$, the agent observes a state $S_{t} \in \States$ and samples an action $A_{t}$ from the policy $\pi(\cdot | S_t)$.
+Then it observes the next state $S_{t+1} \in \States$ according to $\Pfcn$ and receives a scalar reward $R_{t+1} = \Rfcn(S_t, A_t)$.
+The return is defined as the weighted sum of rewards, i.e., $G_{t}=\sum_{k=t}^{\infty} \gamma^{k-t} R_{k+1}$.
+The state-value function $v_{\pi}(s)$ is defined as the expected return starting from a state $s$.
+The agent aims to find an optimal policy $\pi^*$ to maximize the expected return.
+
+Proximal policy optimization (PPO)~\citep{schulman2017proximal} and advantage actor-critic (A2C)~\citep{mnih2016asynchronous} are two widely used RL algorithms for continuous control.
+PPO improves training stability by using a clipped surrogate objective to prevent the policy from changing too much at each time step.
+A2C is a variant of actor-critic method~\citep{sutton2011reinforcement}, featured with multiple-actor parallel training and synchronized gradient update.
+In both algorithms, $v_{\pi}$ is approximated by $v$, which is usually parameterized as a neural network.
+In practice, temporal difference (TD) learning is applied to approximate $v_{\pi}$:
+\begin{equation}\label{eq:td}
+v(S_t) \leftarrow v(S_t) + \alpha(R_{t+1} + \gamma v(S_{t+1}) - v(S_t)),
+\end{equation}
+where $\alpha$ is the learning rate, $S_t$ and $S_{t+1}$ are two successive states, and $R_{t+1} + \gamma v(S_{t+1})$ is named the TD target.
+TD targets are usually biased, non-stationary, and noisy due to changing state-values, complex state transitions, and noisy reward signals~\citep{schulman2016high}.
+They usually induce a changing loss landscape that evolves during training.
+As a result, the agent-gradients~\footnote{In this work, we use the term agent-gradients to refer to gradients of all parameters in a learning agent, which may include policy gradient, gradient of value functions, gradient of other hyper-parameters.} usually have high bias and variance~\citep{lan2022model} which can lead to sub-optimal performance or even a failure of convergence.
+\subsection{Learning to Optimize with Meta-Learning}
+
+We aim to learn an optimizer using meta-learning.
+Let $\theta$ be the agent-parameters of an RL agent that we aim to optimize.
+A (learned) optimizer is defined as an update function $U$ that maps input gradients to parameter updates, implemented as a meta-network, parameterized by the meta-parameters $\phi$.
+Let $z$ be the input of this meta-network which may include gradients $g$, losses $L$, exponential moving average of gradients, etc. Let $h$ be an optimizer state which stores historical values.
+We can then compute agent-parameters updates $\Delta \theta$ and the updated agent-parameters $\theta'$:
+\begin{equation*}
+\Delta \theta, h' = U_{\phi}(z, h) \text{ and } \theta' = \theta + \Delta \theta.
+\end{equation*}
+Note that all classical first-order optimizers can be written in this form with $\phi=\emptyset$.
+As an illustration, for SGD, $h' = h =\emptyset$, $z=g$, and $U_{\operatorname{SGD}}(g, \emptyset) = (-\alpha g, \emptyset)$, where $\alpha$ is the learning rate.
+For RMSProp~\citep{tieleman2012rmsprop}, set $z=g$; $h$ is used to store the average of squared gradients. Then $U_{\operatorname{RMSProp}}(g, h) = (- \frac{\alpha g}{\sqrt{h' + \epsilon}}, h')$, where $h' = \beta h + (1-\beta) g^2$, $\beta \in [0, 1]$, and $\epsilon$ is a tiny positive number for numerical stability. 
+
+Similar to~\citet{xu2020meta}, we apply bilevel optimization to optimize $\theta$ and $\phi$.
+First, we collect $M+1$ trajectories $\mathcal{T} = \{\tau_{i}, \tau_{i+1}, \cdots, \tau_{i+M-1}, \tau_{i+M}\}$.
+For the inner update, we fix $\phi$ and apply multiple steps of gradient descent updates to $\theta$ by minimizing an inner loss $L^\text{inner}$.
+Specifically, for each trajectory $\tau_i \in \mathcal{T}$, we have
+\begin{equation*}
+\Delta \theta_i \propto \nabla_{\theta} L^\text{inner}(\tau_i; \theta_i, \phi)
+\text{  and  }
+\theta_{i+1} = \theta_{i} + \Delta \theta_i,
+\end{equation*}
+where $\nabla_{\theta} L^\text{inner}$ are agent-gradients of $\theta$.
+By repeating the above process for $M$ times, we get
+$\theta_i \xrightarrow{\phi} \theta_{i+1} \cdots \xrightarrow{\phi} \theta_{i+M}$.
+Here, $\theta_{i+M}$ are functions of $\phi$. For simplicity, we abuse the notation and still use $\theta_{i+M}$. 
+Next, we use $\tau_{i+M}$ as a validation trajectory to optimize $\phi$ with an outer loss $L^\text{outer}$:
+\begin{equation*}
+\Delta \phi \propto \nabla_{\phi} L^\text{outer}(\tau_{i+M}; \theta_{i+M}, \phi)
+\text{  and  }
+\phi' = \phi + \Delta \phi,
+\end{equation*}
+where $\nabla_{\phi} L^\text{outer}$ are meta-gradients of $\phi$.
+Since $\theta_{i+M}$ are functions of $\phi$, we can apply the chain rule to compute meta-gradients $\nabla_{\phi} L^\text{outer}$, with the help of automatic differentiation packages.
+
+
+\section{Related Work}
+
+
+Our work is closely related to three areas: optimization in RL, discovering general RL algorithms, and learning to optimize in SL.
+
+\subsection{Optimization in Reinforcement Learning}
+
+\citet{hendersonromoff2018optimizer} tested different optimizers in RL and pointed out that classical adaptive optimizers may not always consider the complex interactions between RL algorithms and environments.
+\citet{sarigul2018performance} benchmarked different momentum strategies in deep RL and found that Nesterov momentum is better at generalization.
+\citet{bengio2020correcting} took one step further and showed that unlike SL, momentum in TD learning becomes doubly stale due to changing parameter updates and bootstrapping. By correcting momentum in TD learning, the sample efficiency can be improved.
+\textit{These works together indicate that it may not always be appropriate to bring optimization methods in SL directly to RL without considering the unique properties in RL.}
+Unlike these works which hand-design new optimizers for RL, we adopt a data-driven approach and apply meta-learning to learn an RL optimizer from data generated in the agent-environment interactions.
+\subsection{Discovering General Reinforcement Learning Algorithms}
+
+The data-driven approach is also explored in discovering general RL algorithms.
+For example, \citet{houthooft2018evolved} proposed to meta-learn a loss function that takes the agent's history into account and greatly improves learning efficiency.
+Similarly, \citet{kirsch2020improving} proposed MetaGenRL, which learns the objective function for deterministic policies using off-policy second-order gradients.
+\citet{oh2020discovering} applied meta-learning and discovered an entire update rule for RL by interacting with a set of environments.
+Instead of discovering the entire update rule, \citet{lu2022discovered} focused on exploring the mirror learning space with evolution strategies and demonstrated the generalization ability in unseen settings.
+\citet{bechtle2021meta} incorporated additional information at meta-train time into parametric loss functions and applied this method to image classification, behavior cloning, and model-based RL.
+\citet{kirsch2022introducing} explored the role of symmetries in discovering new RL algorithms and showed that symmetries improve generalization.
+\citet{jackson2023discovering} examined the impact of environment design in meta-learning update rules in RL and developed an automatic adversarial environment design approach to improve in-distribution robustness and generalization performance of learned RL algorithms.
+Following these works, our work adheres to the data-driven spirit, aiming to learn an optimizer instead of general RL algorithms.
+Our training and evaluation procedures are largely inspired by them as well.
+\subsection{Learning to Optimize in Supervised Learning}
+
+Initially, learning to optimize is only applied to tune the learning rate~\citep{jacobs1988increased,sutton1992adapting,mahmood2012tuning}.
+Recently, researchers started to learn an optimizer completely from scratch.
+\citet{andrychowicz2016learning} implemented learned optimizers with long short-term memory networks~\citep{hochreiter1997long} and showed that learned optimizers could generalize to unseen tasks.
+\citet{li2017learning} applied a guided policy search method to find a good optimizer.
+\citet{wichrowska2017learned} introduced a hierarchical recurrent neural network (RNN)~\citep{medsker2001recurrent} architecture, which greatly reduces memory and computation, and was shown to generalize to different network structures.
+\citet{metz2022practical} developed learned optimizers with multi-layer perceptions, which achieve a better balance among memory, computation, and performance.
+
+Learned optimizers are known to be hard to train.
+Part of the reason is that they are usually trained by truncated backpropagation through time, which leads to strongly biased gradients or exploding gradients. To overcome these issues, \citet{metz2019understanding} presented a method to dynamically weigh a reparameterization gradient estimator and an evolutionary strategy style gradient estimator, stabilizing the training of learned optimizers.
+\citet{vicol2021unbiased} resolved the issues by dividing the computation graph into truncated unrolls and computing unbiased gradients with evolution strategies and gradient bias corrections.
+\citet{harrison2022closer} investigated the training stability of optimization algorithms and proposed to improve the stability of learned optimizers by adding adaptive nominal terms from Adam~\citep{kingma2015adam} and AggMo~\citep{lucas2018aggregated}.
+\citet{metz2020tasks} trained a general-purpose optimizer by training optimizers on thousands of tasks with a large amount of computation. 
+Following the same spirit, \citet{metz2022velo} continued to perform large-scale optimizer training, leveraging more computation ($4,000$ TPU-months) and more diverse SL tasks. 
+The learned optimizer, VeLO, requires no hyperparameter tuning and works well on a wide range of SL tasks. 
+VeLO is the precious outcome of long-time research in the area of learning to optimize, building on the wisdom and effort of many generations.
+Although marking a milestone for the success of learned optimizers in SL tasks, VeLO still performs poorly in RL tasks, as shown in Section 4.4.4 in~\citet{metz2022velo}. 
+
+The failure of VeLO in RL tasks suggests that designing learned optimizers for RL is still a challenging problem.
+Unlike previous works that focus on learning optimizers for SL, we aim to learn to optimize for RL.
+As we will show next, our method is simple, stable, and effective, without using complex neural network structures or incorporating numerous human-designed features.
+\textit{As far as we know, our work is the first to demonstrate the success of learned optimizers in deep RL tasks.}
+
+\begin{figure}[tbp]
+\centering
+\begin{subfigure}[b]{\figwidththree}
+    \centering
+    \includegraphics[width=\textwidth]{figures/grad_big_dense_long_begin.pdf}
+    \caption{At the beginning of training}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidththree}
+    \centering
+    \includegraphics[width=\textwidth]{figures/grad_big_dense_long_middle.pdf}
+    \caption{In the middle of training}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidththree}
+    \centering
+    \includegraphics[width=\textwidth]{figures/grad_big_dense_long_end.pdf}
+    \caption{At the end of training}
+\end{subfigure}
+\caption{Visualizations of agent-gradient distributions (a) at the beginning of training, (b) in the middle of training, and (c) at the end of training. All agent-gradients are collected during training A2C in \bdl, optimized by RMSProp.
+We compute $\log(|g|+10^{-8})$ to avoid the error of applying $\log$ function to non-positive agent-gradients.
+}
+\label{fig:grad}
+\end{figure}
+
+
+\section{Issues in Learning to Optimize for Reinforcement Learning}
+
+
+Learned optimizers for SL are infamously hard to train, suffering from high training instability~\citep{wichrowska2017learned,metz2019understanding,metz2020tasks}. Learning an optimizer for RL is even harder~\citep{metz2022velo}. In the following, we identify two issues in learning to optimize for RL.
+
+\subsection{The Agent-Gradient Distribution is Non-IID}
+
+In RL, a learned optimizer takes the agent-gradient $g$ as an input and outputs the agent-parameter update $\Delta \theta$.
+To investigate the hardness of learning an optimizer for RL, we train an A2C agent in a gridworld (i.e., \bdl, see~\cref{app:gridworld} for details) with RMSProp~\citep{tieleman2012rmsprop} and collect the agent-gradients at different training stages.
+We plot these agent-gradients with logarithmic $x$-axis in~\cref{fig:grad}.
+The $y$-axis shows the probability density.
+Clearly, the agent-gradient distribution is non-iid, changing throughout the training process.
+Specifically, at the beginning of training, there are two peaks in the agent-gradient distribution.
+In the middle of training, most agent-gradients are non-zero, concentrated around $10^{-3}$.
+At the end of the training, a large portion of the agent-gradients are zeros.
+It is well-known that a non-iid input distribution makes training more unstable and reduces learning performance in many settings~\citep{ma2022state,wang2023comprehensive,khetarpal2022towards}.
+Similarly, the violation of the iid assumption would also increase learning instability and decrease efficiency for training learned optimizers.
+Note that this issue exists in both learning to optimize for SL and RL.
+However, the agent-gradient distribution from RL is generally more non-iid than the gradient distribution from SL, since RL tasks are inherently more non-stationary.
+For more details, please check~\cref{app:sl_gradient}.
+\subsection{A Vicious Spiral of Bilevel Optimization}
+
+Learning an optimizer while optimizing parameters of a model is a bilevel optimization, suffering from high training instability~\citep{wichrowska2017learned,metz2020tasks,harrison2022closer}.
+In RL, due to highly stochastic agent-environment interactions, the agent-gradients have high bias and variance, which make the bilevel optimization even more unstable.
+
+Specifically, in SL, it is often assumed that the training set consists of iid samples. 
+However, the input data distribution in RL is non-iid, which makes the whole training process much more unstable and complex, especially when learning to optimize is involved.
+In most SL settings, true labels are noiseless and time-invariant.
+For example, the true label of a written digit $2$ in MNIST~\citep{deng2012mnist} is $y=2$, which does not change during training.
+In RL, TD learning (see~\cref{eq:td}) is widely used, and TD targets play a similar role as labels in SL.
+Unlike labels in SL, TD targets are biased, non-stationary, and noisy, due to highly stochastic agent-environment interactions.
+This leads to a loss landscape that evolves during training and potentially results in the deadly triad~\citep{van2018deep} and capacity loss~\citep{lyle2021understanding}.
+Moreover, in SL, a lower loss usually indicates better performance (e.g., higher classification accuracy).
+But in RL, a lower outer loss is not necessarily a good indicator of better performance (i.e., higher return) due to a changing loss landscape.
+Together with biased TD targets, the randomness from state transitions, reward signals, and agent-environment interactions, make the bias and variance of agent-gradients relatively high.
+In learning to optimize for RL, meta-gradients are afflicted with large noise induced by the high bias and variance of agent-gradients.
+With noisy and inaccurate meta-gradients, the improvement of the learned optimizer is unstable and slow.
+Using a poorly performed optimizer, policy improvement is no longer guaranteed.
+A poorly performed agent is unlikely to collect ``high-quality'' data to boost the performance of the agent and the learned optimizer. In the end, this bilevel optimization gets stuck in a vicious spiral: a poor optimizer $\rightarrow$ a poor agent policy $\rightarrow$ collected data of low-quality $\rightarrow$ a poor optimizer $\rightarrow$ $\cdots$.
+
+
+
+\section{Optim4RL: A Learned Optimizer for Reinforcement Learning}
+
+
+To overcome the issues in~\cref{sec:hardness}, we propose a learned optimizer for RL, named \textit{Optim4RL}, which incorporates pipeline training and a novel optimizer structure.
+As we will show next, Optim4RL is more robust and efficient to train than previous methods.
+
+\subsection{Pipeline Training}
+
+In~\cref{fig:grad}, we show that the agent-gradient distribution is non-iid during training.
+Generally, a good optimizer should be well-functioned under different agent-gradient distributions in the whole training process.
+To make the agent-gradient distribution more iid, we propose \textit{pipeline training}.
+
+Instead of training only one agent, we train $n$ agents in parallel, each with its own task and optimizer state.
+Together, the three elements form a \textit{training unit} (agent, task, optimizer state); and we have $n$ training units in total.
+Let $m$ be a positive integer we call the \textit{reset interval}.
+A complete \textit{training interval} lasts for $m$ training iterations.
+In~\cref{fig:pipeline_model} (a), we show an example of pipeline training with $m=n=3$.
+To train an optimizer effectively, the input of the learned optimizer includes agent-gradients from all $n$ training units.
+Before training, we choose $n$ integers $\{r_1, \cdots, r_n\}$ such that they are evenly spaced over the interval $[0, m-1]$.
+Then we assign $r_i$ to training unit $i$ for $i \in \{1, \cdots, n\}$.
+At training iteration $t$, we reset training unit $i$ if $r_i \equiv t \pmod{m}$.
+By resetting training units at regular intervals, it is guaranteed that at iteration $t$, we can access training data across one training interval.
+For instance, at $t=3$, the input consists of agent-gradients from unit $1$ at the beginning of an interval, agent-gradients from unit $2$ at the end of an interval, and agent-gradients from unit $3$ in the middle of an interval, indicated by the dashed line in~\cref{fig:pipeline_model} (a).
+With pipeline training, the input agent-gradients are more diverse and spread across a whole training interval, making the input distribution more iid.
+Ideally, we expect $m \le n$ so that the input consists of agent-gradients from all training stages.
+In our experiments, $n$ is the number of training environments; $m$ depends on the training steps of each task, and it has a similar magnitude as $n$.
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\figwidthone]{figures/pipeline_model.pdf}
+\caption{(a) An example of pipeline training where the reset interval $m=3$ and the number of units $n=3$.
+All training units are reset at regular intervals to diversify training data.
+(b) The network structure of Optim4RL. $g$ is the input agent-gradient, $h_i$ and $h'_i$ are hidden states, $\alpha$ is the learning rate, $\epsilon$ is a small positive constant, and $\Delta \theta$ is the parameter update.}
+\label{fig:pipeline_model}
+\end{figure}
+\subsection{Improving the Inductive Bias of Learned Optimizers}\label{sec:5.2}
+
+Recently, \citet{harrison2022closer} proved that adding adaptive terms to learned optimizers improves the training stability of optimizing a noisy quadratic model.
+Experimentally, \citet{harrison2022closer} showed that adding terms from Adam~\citep{kingma2015adam} and AggMo~\citep{lucas2018aggregated} improves the stability of learned optimizers as well.
+However, including human-designed features not only makes an optimizer more complex but is also against the spirit of learning to optimize --- ideal learned optimizers should be able to automatically learn useful features, reducing the reliance on human expert knowledge as much as possible.
+Instead of incorporating terms from adaptive optimizers directly, we design the parameter update function in a similar form to adaptive optimizers:
+\begin{equation}\label{eq:optim}
+\Delta \theta = - \alpha \frac{m}{\sqrt{v+\epsilon}},
+\end{equation}
+where $\alpha$ is the learning rate, $\epsilon$ is a small positive number, and $m$ and $v$ are the processed outputs of dual-RNNs, as shown in~\cref{fig:pipeline_model} (b).
+Specifically, for each input gradient $g$, we generate two scalars $o_1$ and $o_2$.
+We then set $m = g_{sign}\exp(o_1)$ and $v = \exp(o_2)$, where $g_{sign} \in \{-1,1\}$ is the sign of $g$.
+More details are included in~\cref{alg:optim4rl}.
+
+\textit{By parameterizing the parameter update function as~\cref{eq:optim}, we improve the inductive bias of learned optimizers by choosing a suitable hypothesis space for learned optimizers and reducing the burden of approximating square root and division for neural networks.}
+In general, we want to learn a good optimizer in a reasonable hypothesis space.
+It should be large enough to include as many good optimizers as possible, such as Adam~\citep{kingma2015adam} and RMSProp~\citep{tieleman2012rmsprop}.
+Meanwhile, it should also rule out bad choices so that a suitable candidate can be found efficiently.
+An optimizer in the form of~\cref{eq:optim} meets the two requirements exactly.
+Moreover, it is generally hard for neural networks to approximate mathematical operations accurately~\citep{telgarsky2017neural,yarotsky2017error,boulle2020rational,lu2021learning}.
+With~\cref{eq:optim}, a neural network can spend all its expressivity and capacity learning $m$ and $v$, reducing the burden of approximating square root and division.
+
+Finally, we combine the two techniques and propose our method --- a learned optimizer for RL (Optim4RL).
+Following~\citet{andrychowicz2016learning}, our optimizer also operates coordinatewisely on agent-parameters so that all agent-parameters share the same optimizer.
+Besides gradients, many previously learned optimizers for SL include human-designed features as inputs, such as moving average of gradient values at multiple timescales, moving average of squared gradients, and Adafactor-style accumulators~\citep{shazeer2018adafactor}.
+In theory, these features can be learned and stored in the hidden states of RNNs in Optim4RL.
+So for simplicity, we only consider agent-gradients as inputs.
+As we will show next, despite its simplicity, our learned optimizer Optim4RL achieves satisfactory performance in many RL tasks, outperforming several learned optimizers.
+
+
+\section{Experiment}
+
+
+In this section, we first verify that Optim4RL can learn to optimize for RL from scratch.
+Then, we show how to train a general-purpose learned optimizer for RL. More experimental results are included in~\cref{app:robust}.
+
+Following~\citet{oh2020discovering}, we design several gridworlds with various properties, such as different horizons, reward functions, or state-action spaces.
+More details are described in~\cref{app:gridworld}.
+
+We mainly consider two RL algorithms --- A2C~\citep{mnih2016asynchronous} and PPO~\citep{schulman2017proximal}.
+For all experiments, we train A2C in gridworlds and train PPO in Brax tasks.
+For Optim4RL, due to resource constraints, we choose a small network with two GRUs~\citep{cho2014properties} of hidden size $8$; both multi-layer perceptrons (MLPs) have two hidden layers of size $16$.
+We use Adam to optimize learned optimizers.
+More implementation details are included in~\cref{app:detail}.
+
+\subsection{Learning an Optimizer for RL from Scratch}\label{sec:scratch}
+
+\begin{figure}[tbp]
+\centering
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/single_catch.pdf}
+    \caption{Catch}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/single_big_dense_long.pdf}
+    \caption{\bdl}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/single_ant.pdf}
+    \caption{Ant}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/single_humanoid.pdf}
+    \caption{Humanoid}
+\end{subfigure}
+\caption{The optimization performance of different optimizers in four RL tasks. Note that the performance of VeLO is estimated based on Figure 11 (a) in~\citet{metz2022velo}. All other results are averaged over $10$ runs, and the shaded areas represent $90\%$ confidence intervals.
+Optim4RL is the only learned optimizer that achieves satisfactory performance in all tasks.}
+\label{fig:single}
+\end{figure}
+
+We first show that it is feasible to train Optim4RL in RL tasks from scratch, while learned optimizers for SL do not work well consistently in RL tasks.
+We consider both classical (Adam and RMSProp) and learned optimizers ($\text{L2LGD}^2$~\citep{andrychowicz2016learning}, STAR~\citep{harrison2022closer}, and VeLO~\citep{metz2022velo}) as baselines.
+Except for VeLO, we meta-learn optimizers in one task and then test the \textit{fixed} learned optimizers in this specific task.
+The optimization performance of optimizers is measured by returns averaging over $10$ runs, as shown in~\cref{fig:single}.
+In general, $\text{L2LGD}^2$ fails in all four tasks. In Catch, both STAR and Optim4RL perform better than classical optimizers (Adam and RMSProp), achieving a faster convergence rate.
+In Ant, Optim4RL and STAR perform pretty well, on par with Adam and RMSProp, while significantly outperforming the state-of-the-art optimizer --- VeLO.
+However, STAR fails to optimize effectively in \bdl; in Humanoid, STAR's performance is unstable and crashes in the end.
+\textit{Optim4RL is the only learned optimizer that achieves stable and satisfactory performance in all tasks, which is a significant accomplishment in its own right, as it demonstrates the efficacy of our approach and its potential for practical applications.}
+
+\paragraph{The advantage of the inductive bias of Optim4RL}
+As an ablation study, we demonstrate the advantage of the inductive bias of OptimRL by comparing it with~\textit{LinearOptim}, which has a ``linear'' parameter update function: $\Delta \theta = -\alpha (a*g+b)$, where $\alpha$ is the learning rate, $a$ and $b$ are the outputs of an RNN model.
+The only difference between LinearOptim and Optim4RL is the inductive bias --- the parameter update function of LinearOptim is in the form of a linear function. In contrast, the parameter update function of Optim4RL is inspired by adaptive optimizers (see~\cref{eq:optim}). 
+As shown in~\cref{fig:single}, LinearOptim fails to optimize in all tasks, verifying the advantage of the inductive bias of Optim4RL.
+
+\paragraph{The effectiveness of pipeline training}
+By making the input agent-gradient distribution more iid and less time-dependent, pipeline training could improve the training stability and efficiency.
+To verify this claim, we compare the optimization performance of Optim4RL with and without pipeline training in~\cref{tb:pipeline}.
+We observe minor performance improvement in two gridworlds (\sdl and \bdl) and more significant improvement in two Brax tasks (Ant and Humanoid), confirming the effectiveness of pipeline training.
+
+\begin{figure}[tbp]
+\centering
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/general_ant.pdf}
+    \caption{Ant}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/general_Humanoid.pdf}
+    \caption{Humanoid}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/general_pendulum.pdf}
+    \caption{Pendulum}
+\end{subfigure}
+\begin{subfigure}[b]{\figwidthfour}
+    \centering
+    \includegraphics[width=\textwidth]{figures/general_walker2d.pdf}
+    \caption{Walker2D}
+\end{subfigure}
+\caption{Optim4RL shows strong generalization ability and achieves good performance in Brax tasks, although it is only trained in six simple gridworlds from scratch.
+For comparison, VeLO~\citep{metz2022velo} is trained for $4,000$ TPU-months with thousands of tasks but only achieves sub-optimal performance in Ant.
+These results demonstrate the generalization ability of Optim4RL in complex unseen tasks, which is a significant achievement in itself, proving the effectiveness of our approach.
+}
+\label{fig:general}
+\end{figure}
+
+\begin{table}[tbp]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\diagbox{Method}{Task} & \sdl & \bdl & Ant & Humanoid \\
+\midrule
+With Pipeline Training & 32.22$\pm$0.52 & 23.10$\pm$0.31 & 6421$\pm$355 & 8440$\pm$364 \\
+W.o. Pipeline Training & 30.64$\pm$0.69 & 22.47$\pm$0.51 & 5038$\pm$235 & 6557$\pm$1055 \\
+\bottomrule
+\end{tabular}
+\caption{The performance of Optim4RL with and without pipeline training. All results are averaged over $10$ runs, reported with $90\%$ confidence intervals.}
+\label{tb:pipeline}
+\end{table}
+\subsection{Toward a General-Purpose Learned Optimizer for RL}
+
+A general-purpose optimizer should perform well even when the input gradients are at various scales.
+To meta-train a learned general-purpose optimizer, first we design six gridworlds such that the generated agent-gradients in these tasks vary across a wide range.
+To demonstrate the generalization ability of Optim4RL, we then meta-train Optim4RL in these gridworlds with A2C and test it in Brax tasks with PPO.
+As shown in~\cref{fig:general}, Optim4RL achieves satisfactory performance in these tasks, showing a strong generalization ability.
+Note that Optim4RL surpasses VeLO (the state-of-the-art learned optimizer) significantly in Ant.
+This is a great success since VeLO is trained for $4,000$ TPU-months on thousands of tasks while Optim4RL is only trained in six toy tasks for a few GPU-hours.
+Finally, Optim4RL is also competitive compared with classical human-designed optimizers (Adam and RMSProp), even though it is entirely trained from scratch.
+\textit{Training a universally applicable learned optimizer for RL tasks is an inherently formidable challenge.
+Our results demonstrate the generalization ability of Optim4RL in complex unseen tasks, which is a great achievement in itself, proving the effectiveness of our approach.}
+
+
+\section{Conclusion and Future Work}
+
+
+In this work, we analyzed the hardness of learning to optimize for RL and studied the failures of learned optimizers in RL. 
+Our investigation reveals that agent-gradients in RL are non-iid and have high bias and variance.
+To mitigate these problems, we introduced pipeline training and a novel optimizer structure.
+Combining these techniques, we proposed a learned optimizer for RL, Optim4RL, which can be meta-learned to optimize RL tasks entirely from scratch.
+Although only trained in toy tasks, Optim4RL showed its strong generalization ability to unseen complex tasks.
+
+Learning to optimize for RL is a challenging problem.
+Due to memory and computation constraints, our current result is limited since we can only train Optim4RL in a small number of toy tasks.
+In the future, by leveraging more computation and memory, we expect to extend our approach to a larger scale and improve the performance of Optim4RL by training in more tasks with diverse RL agents.
+Moreover, theoretically analyzing the convergence of learned optimizers is also an interesting topic. 
+We hope our analysis and proposed method can inspire and benefit future research, paving the way for better learned optimizers for RL.
+
+
+\newpage
+
+
+
+

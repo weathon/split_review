@@ -1,0 +1,445 @@
+\title{Bridging State and History Representations: Understanding Self-Predictive RL}
+
+\begin{abstract}
+
+Representations are at the core of all \emph{deep} reinforcement learning (RL) methods for both Markov decision processes (MDPs) and partially observable Markov decision processes (POMDPs). Many representation learning methods and theoretical frameworks have been developed to understand what constitutes an effective representation. However, the relationships between these methods and the shared properties among them remain unclear. In this paper, we show that many of these seemingly distinct methods and frameworks for state and history abstractions are, in fact, based on a common idea of \emph{self-predictive} abstraction. 
+Furthermore, we provide theoretical insights into the widely adopted objectives and optimization, such as the stop-gradient technique, in learning self-predictive representations.
+These findings together yield a minimalist algorithm to learn self-predictive representations for states and histories. We validate our theories by applying our algorithm to standard MDPs, MDPs with distractors, and POMDPs with sparse rewards. These findings culminate in a set of preliminary guidelines for RL practitioners.}\looseness=-1
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Reinforcement learning holds great potential to automatically learn optimal policies, mapping observations to return-maximizing actions. 
+However, the application of RL in the real world encounters challenges when observations are high-dimensional and/or noisy.
+These challenges become even more severe in partially observable environments, where the observation (history) dimension grows over time.
+In fact, current RL algorithms are often brittle and sample inefficient in these settings~\citep{wang2019benchmarking,stone2021distracting,tomar2021learning,morad2023popgym}.
+
+To address the curse of dimensionality, a substantial body of work has focused on compressing observations into a latent state space, known as state abstraction in MDPs~\citep{dayan1993improving,dean1997model,li2006towards}, history abstraction in POMDPs~\citep{littman2001predictive,castro2009equivalence,baisero2020learning}, and sufficient statistics or information states in stochastic control~\citep{striebel1965sufficient,Kwakernaak1965, bohlin1970information, Kumar1986}. 
+Traditionally, this compression has been achieved through hand-crafted feature extractors~\citep{sutton1995generalization,konidaris2011value} or with the discovery of a set of core tests sufficient for predicting future observations~\citep{littman2001predictive,SinghLittmanJongPardoeStone2003}. Modern approaches learn the latent state space using an encoder to automatically filter out irrelevant parts of observations~\citep{lange2010deep,watter2015embed,munk2016learning}.  
+Furthermore, \textit{deep} RL enables end-to-end and online learning of compact state or history representations alongside policy training.
+As a result, numerous representation learning techniques for RL have surfaced (refer to \autoref{tab:main_prior_work}), drawing inspiration from diverse fields within ML and RL. However, this abundance of methods may have inadvertently presented practitioners with a ``paradox of choice'', hindering their ability to identify the best approach for their specific RL problem.
+
+This paper aims to offer systematic guidance regarding the essential characteristics that good representations should possess in RL (the ``\textbf{what}'') and effective strategies for learning such representations (the ``\textbf{how}''). 
+We begin our analysis from first principles by comparing and connecting various representations proposed in prior works for MDPs and POMDPs, resulting in a unified view.
+Remarkably, these representations are all connected by a \textbf{self-predictive} condition -- the encoder can predict its next latent state~\citep{subramanian2022approximate}. 
+Next, we examine how to learn such self-predictive condition in RL, a difficult subtask due to the bootstrapping effect~\citep{gelada2019deepmdp,schwarzer2020data,tang2022understanding}. We provide fresh insights on why the popular ``stop-gradient'' technique, in which the parameters of the encoder do not update when used as a target, has the promise of learning the desired condition without representational collapse in POMDPs. Building on our new theoretical findings, we introduce a minimalist RL algorithm that learns self-predictive representations end-to-end with a \textit{single} auxiliary loss, \textit{without} the need for reward model learning (thereby removing planning)~\citep{franccois2019combined,gelada2019deepmdp,tomar2021learning,hansen2022temporal,ghugare2022simplifying,ye2021mastering,subramanian2022approximate}, reward regularization~\citep{eysenbach2021robust}, multi-step predictions and projections~\citep{schwarzer2020data,guo2020bootstrap}, and metric learning~\citep{zhang2020learning,castro2021mico}. Furthermore, the simplicity of our approach allows us to investigate the role of representation learning in RL, in isolation from policy optimization.
+
+The core contributions of this paper are as follows. 
+We establish a unified view of state and history representations with novel connections (\autoref{sec:representation}), revealing that many prior methods optimize a collection of closely interconnected properties, each representing a different facet of the same fundamental concept. Moreover, we enhance the understanding of self-predictive learning in RL regarding the choice of the objective and its impact on the optimization dynamics (\autoref{sec:learning}). Our theory results in a simplified and novel RL algorithm designed to learn self-predictive representations fully end-to-end (\autoref{sec:algo}). 
+Through extensive experimentation across three benchmarks (\autoref{sec:experiments}), we provide empirical evidence substantiating all our theoretical predictions using our simple algorithm. 
+Finally, we offer our recommendations for RL practitioners in \autoref{sec:recommend}.
+Taken together, we believe that our work potentially aids in addressing the longstanding challenge of learning representations in MDPs and POMDPs.\looseness=-1
+
+
+
+
+\section{Background}
+
+\label{sec:background}
+\textbf{MDPs and POMDPs.} In the context of a POMDP $\mathcal M_O = (\mathcal O, \mathcal A, P, R, \gamma, T)$\footnote{While the classic definition of a POMDP~\citep{cassandra1994acting} features a state space, we assume it to be unknown, thus our view of a POMDP is a black-box input-output system~\citep{subramanian2022approximate}. It is also similar to predictive state representations~\citep{littman2001predictive} that rely solely on observable quantities.
+}, an agent receives an observation $o_t \in \mathcal O$ at time step $t$, selects an action $a_t \in \mathcal A$ based on the observed history $h_t \defeq (h_{t-1},a_{t-1},o_t) \in \mathcal H_t$\footnote{In general, $h_t \defeq (h_{t-1}, a_{t-1}, r_{t-1}, o_t)$~\citep{izadi2005using}. In this study, we assume rewards are inaccessible during policy inference.},
+and obtains a reward $r_t \sim R(h_t,a_t)$ along with the subsequent observation $o_{t+1} \sim P(\cdot \mid h_t,a_t)$. The initial observation $h_1\defeq o_1$ is sampled from the distribution $P(o_1)$. The total time horizon is denoted as $T \in \mathbb N^+ \cup \{+\infty\}$, and the discount factor is $\gamma \in [0,1]$ (less than $1$ for infinite horizon).
+To maintain brevity, we employ the ``prime'' symbol to represent the next time step, for example writing $h'=(h,a,o')$.
+Under the above assumptions, our agent acts according to a policy $\pi(a\mid h)$ with action-value $Q^\pi(h,a)$. Furthermore, it can be shown that there exists an optimal value function $Q^*(h,a)$ such that $Q^*(h,a) = \E{}{r\mid h,a} + \gamma \E{o'\sim P(\mid h,a)}{\max_{a'} Q^*(h',a')}$, and a deterministic optimal policy $\pi^*(h) = \argmax_a Q^*(h,a)$. 
+In an MDP $\mathcal M_S = (\mathcal S,\mathcal A, P, R, \gamma, T)$, the observation $o_t$ and history $h_t$ are replaced by the state $s_t \in \mathcal S$\footnote{In finite-horizon MDPs, we assume $s$ includes the time step $t$.}.
+
+\textbf{State and history representations.} In a POMDP, an \textbf{encoder} is a function $\phi: \mathcal H_t \to \mathcal Z$ that produces a history \textbf{representation} $z=\phi(h) \in \mathcal Z$. Similarly, in an MDP, we replace $h$ with $s$, resulting in a state encoder $\phi: \mathcal S \to \mathcal Z$ and a state representation $z=\phi(s) \in \mathcal Z$.
+This representation is known as an ``abstraction''~\citep{li2006towards} or a ``latent state''~\citep{gelada2019deepmdp}. 
+Such encoders are sometimes shared and simultaneously updated by downstream components (\eg policy, value, world model) of an RL system~\citep{hafner2020mastering,hansen2022temporal}.
+In this paper, we are interested in such a shared encoder, or \textbf{the encoder learned for the value function} if the encoders are separately learned.\looseness=-1
+
+Below, we present the key abstractions that are central to this paper, along with their established connections. We will highlight the \textbf{conditions} met by each abstraction. We defer additional common abstractions and related concepts to \autoref{sec:more_def}.
+
+\textbf{1. $Q^*$-irrelevance abstraction.} An encoder $\phi_{Q^*}$ provides a $Q^*$-irrelevance abstraction~\citep{li2006towards} if it contains the necessary information for predicting the return. 
+Formally, if $\phi_{Q^*}(h_i) = \phi_{Q^*}(h_j)$, then
+$
+Q^*(h_i, a) = Q^*(h_j,a), \forall a
+$.
+A $Q^*$-irrelevance abstraction can be achieved as a by-product of learning an encoder $\phi$ through a value function $\mathcal Q(\phi(h),a)$ end-to-end using model-free RL. If the optimal values match, then $\mathcal Q^*(\phi_{Q^*}(h),a) = Q^*(h,a),\forall h,a$.
+\textbf{2. Self-predictive (model-irrelevance) abstraction.} We view the model-irrelevance concept~\citep{li2006towards} from a self-predictive standpoint. Specifically, a model-irrelevant encoder $\phi_L$
+fulfills two conditions: \textbf{expected reward prediction (RP)} and \textbf{next latent state distribution prediction (ZP)}\footnote{RP and ZP are labeled as (P1) and (P2), respectively, in~\citet{subramanian2022approximate}.}, ensuring that the encoder can be used to predict expected reward and the next latent state distribution.\looseness=-1
+\begin{align}
+\label{eq:RP}
+&\exists R_z: \mathcal Z \times \mathcal A \to \R, \quad \st\quad  \E{}{r\mid h,a} = R_z (\phi_L(h),a), \quad \forall h,a, \tag{RP}  \\
+\label{eq:ZP}
+&\exists P_{z}: \mathcal Z \times \mathcal A \to \Delta(\mathcal Z), \quad \st\quad P(z'\mid h,a) = P_z(z' \mid \phi_L(h), a), \quad \forall h,a,z', \tag{ZP} \\ 
+\label{eq:EZP}
+& \E{}{z' \mid h,a} = \E{}{z' \mid \phi_L(h),a},\quad \forall h,a. \tag{EZP}
+\end{align}
+\newcommand{\RP}{\ref{eq:RP}\xspace}%
+\newcommand{\ZP}{\ref{eq:ZP}\xspace}%
+\newcommand{\EZP}{\ref{eq:EZP}\xspace}%
+A weak version of \ZP is the \textbf{expected next latent state $z$ prediction (EZP)} condition.
+\ZP can be interpreted as a sufficient statistics condition on $\phi_L$: the next latent state $z'$ is conditionally independent of the history $h$ when $\phi_L(h)$ and $a$ is known, symbolized as $z' \ind h \mid \phi_L(h), a$. 
+Satisfying \ZP only is trivial and can be achieved by employing a constant representation $\phi(h) = c$, where $c$ is a fixed constant. 
+Therefore, \ZP must be used in conjunction with other conditions (\eg, \RP) to avoid such degeneration.
+The $\phi_L$ is known as a bisimulation generator~\citep{givan2003equivalence} in MDPs and an information state generator~\citep{subramanian2022approximate} in POMDPs.
+
+\newcommand{\OP}{\ref{eq:OP}\xspace}%
+\newcommand{\Rec}{\ref{eq:Rec}\xspace}%
+\newcommand{\OR}{\ref{eq:OR}\xspace}%
+\textbf{3. Observation-predictive (belief) abstraction.} 
+This abstraction is implicitly introduced by \citet{subramanian2022approximate}, which we denote by $\phi_O$, and satisfies three conditions: expected reward prediction \RP, \textbf{recurrent encoder (Rec)} and \textbf{next observation distribution prediction (OP)}\footnote{OP and Rec are labeled as (P2a) and (P2b), respectively, in \citet{subramanian2022approximate}.}.
+\begin{align}
+\label{eq:Rec}
+&\exists \psi_z: \mathcal Z \times \mathcal A \times \mathcal O \to \mathcal Z, \quad \st\quad \phi(h') = \psi_z(\phi_O(h),a,o'), \quad \forall h,a,o', \tag{Rec} \\
+\label{eq:OP}
+&\exists P_{o}: \mathcal Z \times \mathcal A \to \Delta(\mathcal O), \quad \st\quad P(o'\mid h,a) = P_o(o' \mid \phi_O(h), a), \quad \forall h,a,o', \tag{OP} \\
+\label{eq:OR}
+& \exists \psi_{o}: \mathcal Z \to \mathcal O,\quad \st\quad o = \psi_o(\phi_O(h)),\quad \forall h. \tag{OR}
+\end{align}
+Similarly, the \OP condition is equivalent to $o' \ind h \mid \phi_O(h), a$, and \OP is closely related to \textbf{observation reconstruction (OR)}, widely used in practice~\citep{yarats2021improving}.
+The recurrent encoder (\Rec) condition is satisfied for encoders parameterized with feedforward or recurrent neural networks~\citep{elman1990finding,hochreiter1997long}, but not Transformers~\citep{vaswani2017attention}. In this paper, we assume the \Rec condition is always satisfied. 
+In POMDPs, $\phi_O$ is well-known as a belief state generator~\citep{kaelbling1998planning}.
+
+We extend the relations between these abstractions known in MDPs~\citep{li2006towards} to POMDPs.\looseness=-1
+\begin{theorem}[\textbf{Relationships between common abstractions (informal)}]
+\label{thm:hierarchy_informal}
+An encoder satisfying $\phi_O$ also belongs to $\phi_L$; an encoder satisfying $\phi_L$ also belongs to $\phi_{Q^*}$; the reverse is not necessarily true. 
+\end{theorem}
+
+
+
+\section{A Unified View on State and History Representations}
+
+\label{sec:representation}
+
+\subsection{An Implication Graph of Representations in RL}
+\label{sec:graph}
+
+\begin{wrapfigure}{r}{0.43\linewidth}
+    \centering
+    \input{paper/figs/relation_main}
+\caption{\footnotesize \textbf{An implication graph} showing the relations between the conditions on \textit{history} representations. The source nodes of the edges with the same color \textit{together} imply the target node. In MDPs, \OR implies all the other conditions.
+All the connections are discovered in this work, except for (1) \OP + \Rec implying \ZP, (2) \ZP + \RP implying $\phi_{Q^*}$.\looseness=-1}
+\label{fig:relation_main}
+\end{wrapfigure}
+Using the taxonomy of state and history abstractions, it becomes possible to establish theoretical links among different representations and their respective conditions discussed earlier. These connections are succinctly illustrated in a directed graph, as shown in \autoref{fig:relation_main}.
+In this section, we highlight the most significantly novel finding, while postponing the other propositions and proofs to \autoref{sec:unified_view}. 
+
+The definition of self-predictive and observation-predictive abstractions suggests the classic \textit{phased} training framework. In phased training, we alternatively train an encoder to predict expected rewards (\RP) and predict next latent states (\ZP) or next observations (\OP), and also train an RL or planning agent on the latent space with the encoder ``detached'' from downstream components.
+On the other hand, we show in our \autoref{thm:EG_ZP_implies_Er} that if we learn an encoder \textit{end-to-end} in a model-free fashion but using \ZP (or \OP) as an auxiliary task, then the ground-truth expected reward can be induced by the latent $Q$-value and latent transition. Thus, the encoder also satisfies \RP and generates  $\phi_L$ (or $\phi_O$) representation already. 
+
+\begin{theorem}[\textbf{\ZP + $\phi_{Q^*}$ imply \RP}]
+\label{thm:EG_ZP_implies_Er}
+If an encoder $\phi$ satisfies \ZP, and  $\mathcal Q(\phi(h),a) = Q^*(h,a),\forall h,a$, then we can construct a latent reward function $\mathcal R_z(z,a) \defeq \mathcal Q(z,a) - \gamma 
+\E{z' \sim P_z(\mid z,a)}{\max_{a'} \mathcal Q(z', a')}$, such that $\mathcal R_z(\phi(h),a) = \E{}{r \mid h,a},\forall h,a$.
+\end{theorem}
+
+This result holds significance, as it suggests that end-to-end approaches to learning $\phi_{Q^*}$ + \ZP (\OP) have similar theoretical justification as classic phased approaches. 
+
+\subsection{Which Representations Do Prior Methods Learn?}
+
+\bgroup
+\def\arraystretch{0.95}
+\setlength{\tabcolsep}{0.2em}
+\begin{table}[t]
+    \centering
+    \footnotesize
+\caption{\footnotesize \textbf{Which optimal representation will be learned by the value function in prior works?} The ``PO'' column shows if the approach applies to POMDPs. The \ZP loss shows the loss function they use to learn \ZP condition. The \ZP target shows whether they use online or stop-gradient (including detached and EMA) encoder target.
+Due to the space limit, we omit the citations for recurrent model-free RL~\citep{hausknecht2015deep,kapturowski2018recurrent,ni2021recurrent} and belief-based methods~\citep{wayne2018unsupervised,Hafner2019LearningLD,han2019variational,lee2019stochastic}.
+}
+    \label{tab:main_prior_work}
+    \begin{tabular}{cccccc}
+    \toprule
+      \textbf{Work}   &  \textbf{PO?}  & \textbf{Abstraction} & \textbf{Conditions} & \textbf{\ZP loss} & \textbf{\ZP target} \\
+      \midrule
+      Model-Free \& Classic Model-Based RL & \xmark & $\phi_{Q^*}$ & $\phi_{Q^*}$ & N/A & N/A \\ 
+      MuZero~\citep{schrittwieser2020mastering} & \xmark & unknown & $\phi_{Q^*}$ + \RP & N/A & N/A \\
+      MICo~\citep{castro2021mico} & \xmark & unknown & $\phi_{Q^*}$ + metric & N/A & N/A \\ 
+     CRAR~\citep{franccois2019combined} & \xmark & $\phi_L$ & $\phi_{Q^*}$ + \RP + \ZP + reg. & $\ell_2$ & online   \\
+     DeepMDP~\citep{gelada2019deepmdp} & \xmark & $\phi_L$ & $\phi_{Q^*}$ + \RP + \ZP & W ($\ell_2$) & online   \\ 
+     SPR~\citep{schwarzer2020data} & \xmark & $\phi_L$ &$\phi_{Q^*}$ + \ZP & $\cos$ & EMA \\ 
+     DBC~\citep{zhang2020learning} & \xmark &$\phi_L$ & $\phi_{Q^*}$ + \RP + \ZP + metric & FKL & detached \\
+     LSFM~\citep{lehnert2020successor} & \xmark & $\phi_L$ &  $\phi_{Q^*}$ + \RP + \EZP & SF & detached \\
+     Baseline in~\citep{tomar2021learning} & \xmark &$\phi_L$ & $\phi_{Q^*}$ + \RP + \ZP & $\ell_2$ & detached \\
+     EfficientZero~\citep{ye2021mastering} & \xmark & $\phi_L$ & $\phi_{Q^*}$ + \RP + \ZP & $\cos$ & detached \\ 
+     TD-MPC~\citep{hansen2022temporal} & \xmark & $\phi_L$ & $\phi_{Q^*}$ + \RP + \ZP & $\ell_2$ & EMA \\
+
+    ALM~\citep{ghugare2022simplifying} & \xmark & $\phi_L$ & $\phi_{Q^*}$ + \ZP & RKL & EMA \\
+    TCRL~\citep{zhao2023simplified}& \xmark & $\phi_L$ & \RP + \ZP & $\cos$ & EMA  \\
+    OFENet~\citep{ota2020can} & \xmark & $\phi_O$ & $\phi_{Q^*}$ + \OP & N/A & N/A  \\ %
+     \noalign{\vskip 2pt}
+    \hdashline[5pt/2pt]
+     \noalign{\vskip 2pt}
+      Recurrent Model-Free RL & \cmark & $\phi_{Q^*}$ & $\phi_{Q^*}$ & N/A & N/A \\ 
+     PBL~\citep{guo2020bootstrap} & \cmark & $\phi_L$ & $\phi_{Q^*}$ + \ZP & $\ell_2$ & detached \\
+    AIS~\citep{subramanian2022approximate} & \cmark & $\phi_L$, $\phi_O$ & \RP + \ZP or \OP  & $\ell_2$, FKL  & detached \\ 
+    Belief-Based Methods  & \cmark & $\phi_O$ & \RP + \ZP + \OR & FKL & online \\
+    Causal States~\citep{zhang2019learning} & \cmark & $\phi_O$ & \RP + \OP  & N/A & N/A \\
+    \midrule
+    Minimalist $\phi_L$ (this work) & \cmark &  $\phi_L$ & $\phi_{Q^*}$  + \ZP   &  $\ell_2$, KL & stop-grad  \\
+     \bottomrule
+    \end{tabular}
+\end{table}
+\egroup
+
+With the unified view of state and history representations, we can categorize prior works based on the conditions satisfied by the \textit{optimal} encoders of their value functions. \autoref{tab:main_prior_work} shows representative examples. 
+The unified view enables us to draw interesting connections between prior works, even though they may differ in RL or planning algorithms and the encoder objectives. Here we highlight some important connections and provide a more detailed discussion of all prior works in \autoref{app:prior_works}.
+
+To begin with, it is important to recognize that classic model-based RL actually learns  $\phi_{Q^*}$ in value function. Model-based RL trains a policy and value by rolling out on the learned model. However, the policy and value do not share representations with the model~\citep{sutton1990integrated,sutton2012dyna,chua2018deep,kaiser2019model,janner2019trust}, or learn their representations from maximizing returns~\citep{tamar2016value,oh2017value,silver2017predictron}.
+Secondly, as shown in \autoref{tab:main_prior_work}, there is a wealth of prior work on approximating $\phi_L$, stemming from different perspectives. These include bisimulation~\citep{gelada2019deepmdp}, information states~\citep{subramanian2022approximate}, variational inference~\citep{eysenbach2021robust,ghugare2022simplifying}, successor features~\citep{barreto2017successor,lehnert2020successor}, and self-supervised learning~\citep{schwarzer2020data,guo2020bootstrap}. The primary differences between these approaches lie in their selection of (1) architecture (whether learning \RP, $\phi_{Q^*}$, or both), (2) \ZP objectives (such as $\ell_2$, cosine, forward or reverse KL, as discussed in \autoref{sec:biased}), and (3) \ZP targets for optimization (including online, detached, EMA, as detailed in \autoref{sec:optim}).
+Finally, observation-predictive representations are typically studied in POMDPs, where they are known as belief states~\citep{kaelbling1998planning} and related to predictive state representations~\citep{littman2001predictive}.\looseness=-1
+
+
+
+\section{On Learning Self-Predictive Representations in RL}
+
+\label{sec:learning}
+
+The implication graph (\autoref{fig:relation_main}) establishes the theoretical connections among various representations in RL, yet it does not address the core learning problems. This section aims to give some theoretical answers to \textbf{how} to learn self-predictive representations. 
+While self-predictive representation holds promise, it poses significant learning challenges compared to grounded model-free and observation-predictive representations. The bootstrapping effect, where $\phi$ appears in both sides of \ZP (since $z'$ also relies on $\phi(h')$), contributes to this difficulty. 
+We present detailed analyses of the objectives in \autoref{sec:biased} and optimization in \autoref{sec:optim}, with proofs deferred to \autoref{app:optim}.
+Building on these analyses, we propose a simple representation learning algorithm for $\phi_L$ in RL in \autoref{sec:algo}.
+
+\subsection{Are Practical \ZP Objectives Biased?}
+\label{sec:biased}
+
+\autoref{thm:EG_ZP_implies_Er} suggests that we can learn $\phi_L$ by simply training an auxiliary task of \ZP on a model-free agent. Prior works have proposed several auxiliary losses, summarized in \autoref{tab:main_prior_work}'s \ZP loss column.
+Formally, we parametrize an encoder with $f_\phi: \mathcal H_t \to \mathcal Z$ (deterministic case) or $f_\phi: \mathcal H_t \to \Delta(\mathcal Z)$ (probabilistic case)\footnote{Despite being a special case of probabilistic encoders, deterministic encoders deserve distinct discussion because they can be optimal in POMDPs and have been frequently used in prior works. In addition, it should be noted that a probabilistic one may help as it smooths the objective.}.
+The latent transition function $P_z(z'\mid z,a)$ is parameterized by $g_\theta: \mathcal Z \times \mathcal A \to \mathcal Z $ (deterministic case) or $g_\theta: \mathcal Z \times \mathcal A \to \Delta(\mathcal Z)$ (probabilistic case). 
+We use $\mathbb P_\phi(z\mid h)$ and $ \mathbb P_{\theta}(z' \mid z,a)$ to represent the encoder and latent transition, respectively.
+The self-predictive metric for \ZP is \textit{ideally}:
+\begin{align}
+\label{eq:zp_loss}
+\mathcal L_{\ZP,\mathbb D}(\phi,\theta;h,a) \defeq \E{z\sim \mathbb P_\phi(\mid h)}{\mathbb D(\mathbb P_{\theta}(z' \mid z,a)\mid \mid \mathbb P_\phi(z'\mid h,a))},
+\end{align}
+where $\mathbb P_\phi(z' \mid h, a) = \E{o'\sim P(\cdot \mid h,a)}{\mathbb P_\phi(z' \mid h')}$. $\mathbb D(\cdot\mid \mid \cdot)\in\R_{\ge 0}$ compares two distributions. When \autoref{eq:zp_loss} reaches minimum, then for any $z \sim \mathbb P_\phi(\mid h)$, the \ZP condition is satisfied.
+
+When designing \textit{practical} \ZP loss, prior works are mainly divided into deterministic $\ell_2$ approach~\citep{gelada2019deepmdp,schwarzer2020data,tomar2021learning,hansen2022temporal,ye2021mastering}\footnote{Cosine distance is an $\ell_2$ distance on the normalized vector space $\mathcal Z = \{\ z \in \R^d \mid \|z\|_2=1\}$.
+} or probabilistic $\mathtt f$-divergence approach~\citep{zhang2020learning,ghugare2022simplifying,Hafner2019LearningLD} that includes forward and reverse KL divergences (in short, FKL and RKL):\looseness=-1
+\begin{align}
+\label{eq:l2}
+J_\ell(\phi,\theta,\widetilde{\phi}; h,a) &\defeq \E{o'\sim P(\mid h,a)}{\|g_\theta(f_\phi(h),a)-f_{\widetilde{\phi}}(h')\|_2^2},\\
+\label{eq:kl}
+J_{D_\mathtt f}(\phi,\theta,\widetilde{\phi}; h,a) &\defeq \E{z\sim \mathbb P_{\phi}(\mid h), o'\sim P(\mid h,a)}{D_\mathtt f\left(\mathbb P_{\widetilde{\phi}}(z'\mid h')\mid\mid \mathbb P_{\theta}(z'\mid z,a)\right)},
+\end{align}
+where $\widetilde{\phi}$, called \ZP \textbf{target}, can be \textbf{online} (exact $\phi$ that allows gradient backpropagation), or the \textbf{stop-gradient} version $\overline \phi$ (detached from the computation graph and using a copy or exponential moving average (EMA) of $\phi$). The update rule is $\overline \phi \gets\tau \overline \phi + (1-\tau)\phi $, with $\tau = 0$ for \textbf{detached} and $\tau \in (0,1)$ for generic \textbf{EMA}. We summarize the choices of \ZP targets in one column of \autoref{tab:main_prior_work}.
+
+We first investigate the relationship between the ideal objective~\autoref{eq:zp_loss}  and practical objectives~\autoref{eq:l2}~and~\autoref{eq:kl} to better understand their implications. 
+
+\begin{proposition}[The practical $\ell_2$ objective~\autoref{eq:l2} is an \textbf{upper bound} of the ideal objective~\autoref{eq:zp_loss} $\mathcal L_{\ZP,\ell}(\phi,\theta;h,a)$ that targets \EZP condition. The equality holds in deterministic environments.]
+\label{prop:l2}
+\end{proposition}
+\begin{proposition}[The practical $\mathtt f$-divergence objective~\autoref{eq:kl} is an \textbf{upper bound} of the ideal objective~\autoref{eq:zp_loss} $\mathcal L_{\ZP,D_\mathtt f}(\phi,\theta;h,a)$ that targets \ZP condition. The equality holds in deterministic environments.]
+\label{prop:fdiv}
+These propositions show that environment stochasticity ($P(o'\mid h,a)$) affects both the practical $\ell_2$ and $\mathtt f$-divergence objectives. While unbiased in \textit{deterministic} tasks to learn the \ZP condition\footnote{The \EZP condition is equivalent to the \ZP condition in deterministic tasks.}, they are problematic in \textit{stochastic} tasks (\eg with data augmentation or noisy distractors) due to double sampling issue~\citep{baird1995residual}, as the ideal objective~\autoref{eq:zp_loss} cannot be used (see \autoref{app:optim} for discussion). 
+
+\subsection{Why Do Stop-Gradients Work for \ZP Optimization?}
+\label{sec:optim}
+
+In this subsection, we further discuss optimizing the practical \ZP objective~\autoref{eq:l2}. Specifically, we aim to justify that stop-gradient (detached or EMA) \ZP targets, widely used in practice~\citep{schwarzer2020data,zhang2020learning,ghugare2022simplifying}, play an important role in optimization. 
+We find that they may lead to \EZP condition in stochastic environments (\autoref{prop:stationary_point}) and can avoid representational collapse under some linear assumptions (\autoref{thm:collapse}). Meanwhile, online \ZP targets lack these properties.
+
+Before introducing the results, we want to clarify the discrepancy between learning \ZP and the well-known TD learning~\citep{sutton1988learning}. 
+At first glance, \autoref{eq:l2} (stop-gradient version) is reminiscent of mean-squared TD error, both having the bootstrapping structures. However, \autoref{eq:l2} has an extra challenge due to the missing reward, leading to a trivial solution of constant representation, known as complete representational collapse~\citep{jing2021understanding}.
+Moreover, \ZP requires distribution matching, while the Bellman equations that TD learning aims to optimize only require matching expectations. 
+
+\begin{proposition}[The $\ell_2$ objective \autoref{eq:l2} with \textit{stop gradients} ($J_\ell(\phi,\theta,\overline \phi; h,a)$) ensures stationary points that satisfy \EZP, but the $\ell_2$ objective with \textit{online} targets lacks this guarantee.]
+\label{prop:stationary_point}
+\autoref{prop:stationary_point} suggests the adoption of stop-gradient targets in \autoref{eq:l2} to preserve the stationary points of \EZP in both deterministic and stochastic tasks.
+
+\begin{theorem}[\textbf{Stop-gradient provably avoids representational collapse in linear models}] 
+\label{thm:collapse}
+Assume a linear encoder  
+$f_\phi(h) \defeq  \phi^\top h_{-k:} \in \R^d$ with parameters $\phi \in \R^{k(|\mathcal O|+|\mathcal A|)\times d}$, which always operates on $h_{-k:}$, a recent-$k$ truncation of history $h$. Assume a linear deterministic latent transition $g_\theta(z,a) \defeq \theta_z^\top z + \theta_a^\top a \in \R^d
+$ with parameters $\theta_z \in \R^{d\times d}$ and $\theta_a \in \R^{|\mathcal A|\times d}$. 
+If we train $\phi,\theta$ using the stop-gradient $\ell_2$ objective $\E{h,a}{J_\ell(\phi,\theta,\overline \phi;h,a)}$ without RL loss, and $\theta$ relies on $\phi$ by reaching the stationary point with $\nabla_\theta \E{h,a}{J_\ell(\phi,\theta,\overline \phi;h,a)} = 0$, then the matrix multiplication $\phi^\top\phi$ will retain its initial value over continuous-time training dynamics.
+
+\begin{wrapfigure}{r}{0.5\linewidth}
+    \centering
+    \includegraphics[width=0.49\linewidth]{paper/plts/mountaincar.pdf}
+    \includegraphics[width=0.49\linewidth]{paper/plts/loadunload.pdf}
+    \caption{\footnotesize The absolute normalized inner product of the two column vectors in the learned encoder when using online, detached, or EMA \ZP target in an MDP \emph{(left)}  and a POMDP \emph{(right)}. We plot the results for 100 different seeds, which controls the rollouts used to sample transition and the initialization of the representation. The bold lines represent the median of the seeds.}
+    \label{fig:innerproduct}
+\end{wrapfigure}
+\autoref{thm:collapse} extends the results of~\citep[Theorem~1]{tang2022understanding} to action-dependent latent transition, POMDP, and EMA settings. This theorem also implies that $\phi$ will keep full-rank during training if the initialized $\phi$ is full-rank\footnote{This is due to the fact that $\rank(A^\top A) = \rank(A)$ for any real-valued matrix $A$.}.\looseness=-1
+
+Similar to \citet{tang2022understanding}, we illustrate our theoretical contribution by examining the behavior of the learned encoder over time when starting from a random orthogonal initialization. We extend these results by considering both the MDP and the POMDP setting and consider two classical domains, mountain car~\citep{moore1990efficient} (MDP) and load-unload~\citep{meuleau2013solving} (POMDP), where we fit an encoder $\phi$ with a latent state dimension of $2$. 
+\autoref{fig:innerproduct} shows the orthogonality-preserving effect of the stop-gradient by comparing the cosine similarity between columns of the learned $\phi$. As expected by \autoref{thm:collapse}, we see this similarity stay several orders of magnitude smaller when using stop-gradient (detached or EMA) compared to the online case.
+Note that although our theory discusses the continuous-time dynamics, we can approximate them with gradient steps with a small learning rate, as was done for these results.
+
+
+\subsection{A Minimalist RL Algorithm for Learning Self-Predictive Representations}
+\label{sec:algo}
+
+\begin{figure}[t]
+\begin{algorithm}[H]
+    \caption{\textbf{Minimalist $\phi_L$}: learning self-predictive representations in RL}
+    \label{pseudo-code}
+    \begin{algorithmic}[1]
+    \Require Encoder $f_\phi: \mathcal H_t \to \mathcal Z$, Actor $\pi_{\nu}: \mathcal Z \to \mathcal A$, Critic $Q_{\omega}: \mathcal Z \times \mathcal A \to \R$, 
+    Latent Transition Model $g_\theta: \mathcal Z \times \mathcal A \to \mathcal Z$. Learning Rate $\alpha > 0$ and Loss Coefficient $\lambda > 0$. 
+    \Procedure{Update}{$h,a,o',r$} 
+    \State Compute any model-free RL loss $\mathcal L_{\text{RL}}$ (based on DDPG~\citep{lillicrap2015continuous} here) let $Q^{\text{tar}}(h',r) \defeq r + \gamma Q_{\overline{\omega}}(f_{\overline\phi}(h'),\pi_{\overline{\nu}} (f_{\overline\phi}(h')) )$, 
+    \begin{align}
+    \label{eq:RL_loss}
+    \mathcal L_{\text{RL}}(\phi, \omega, \nu; h',r) = (Q_{\omega}(f_{\phi}(h),a) - Q^{\text{tar}}(h',r))^2 -Q_{\overline{\omega}}(f_{\overline\phi}(h),\pi_{\nu} (f_{\phi}(h))).
+    \end{align}
+    \State Compute the auxiliary \ZP loss 
+    $
+    \mathcal L_{\text{aux}}(\phi,\theta;h') = \|g_\theta(f_\phi(h),a)-f_{\overline{\phi}} (h')\|_2^2
+    $.
+    \State Optimize all parameters using the sum of losses:
+    \begin{align}
+    \label{eq:update}
+    [\phi, \theta, \nu, \omega] \gets [\phi, \theta, \nu, \omega] - \alpha \nabla (\mathcal L_{\text{RL}}(\phi, \omega, \nu; h',r)  + \lambda  \mathcal L_{\text{aux}}(\phi,\theta;h')).
+    \end{align}
+    \EndProcedure
+    \end{algorithmic}
+\end{algorithm}
+\end{figure}
+
+Our theory leads to a straightforward RL algorithm that can target $\phi_L$. Essentially, it integrates a single auxiliary task into any model-free RL algorithm (\eg, DDPG~\citep{lillicrap2015continuous} and R2D2~\citep{kapturowski2018recurrent}), as indicated by \autoref{thm:EG_ZP_implies_Er}. 
+Algo. 
+The $\ell_2$ \ZP loss can be replaced with KL objective with probabilistic encoder and latent model, especially in stochastic environments, as suggested by \autoref{prop:fdiv}.  
+The $f_{\overline \phi}(h')$ in \ZP loss stops the gradient from the encoder, following \autoref{sec:optim}.
+The actor loss $-Q_{\overline{\omega}}(f_{\overline\phi}(h),\pi_{\nu} (f_{\phi}(h))$ freezes the parameters of the critic and encoder, suggested by recent work on memory-based RL~\citep{ni2023transformers}.\looseness=-1 
+
+Our algorithm greatly simplifies prior self-predictive methods and enables a fair comparison spanning from model-free to observation-predictive representation learning. 
+It is characterized as \textbf{minimalist} by removing reward learning, planning, multi-step predictions, projections, and metric learning. It is also \textbf{novel} by being the first to learn self-predictive representations end-to-end in POMDP literature. 
+
+Our algorithm also bridges model-free and observation-predictive representation learning. 
+We derive learning $\phi_{Q^*}$ by setting the coefficient $\lambda$ to $0$, and learning $\phi_O$ by replacing \ZP loss with \OP loss like OFENet~\citep{ota2020can}. 
+As a by-product, by comparing $\{\phi_{Q^*}, \phi_L, \phi_O\}$ derived from our algorithm, we can \textbf{disentangle} representation learning from policy optimization because all representations are learned by the same RL algorithm. This is rarely seen in prior works, as learning $\phi_O$ or $\phi_L$ typically involves planning, while model-free RL does not.
+Such disentanglement allows us to examine the sample efficiency benefits derived purely from representation learning. \looseness=-1
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We conduct experiments to compare RL agents learning the three representations $\{\phi_{Q^*}, \phi_L, \phi_O\}$, respectively. 
+To decouple representation learning from policy optimization, we follow our minimalist algorithm (Algo.~\ref{pseudo-code}) to learn $\phi_L$, and instantiate $\phi_{Q^*}$ and $\phi_O$ by setting $\lambda = 0$ and replacing \ZP loss with \OP loss, as we discuss in \autoref{sec:algo}.
+We evaluate the algorithms in standard MDPs, distracting MDPs\footnote{Distracting MDPs refers to MDPs with distracting observations irrelevant to optimal control in this work.}, and sparse-reward POMDPs. 
+The experimental details are shown in \autoref{sec:experiment_details}. 
+Through the subsequent experiments, we aim to validate five hypotheses based on our theoretical insights in \autoref{sec:representation}~and~\autoref{sec:learning}, with their motivation shown in \autoref{sec:motivation}.\looseness=-1
+
+\begin{itemize}[leftmargin=*,itemsep=0pt, topsep=0pt]
+    \item \textbf{Sample efficiency hypothesis}: do the extra \OP and \ZP signals help $\phi_O$ and $\phi_L$ have better sample-efficiency than $\phi_{Q^*}$ in standard MDPs (\autoref{sec:standard_mdps}) and \textit{especially} in sparse-reward tasks (\autoref{sec:pomdps})?\looseness=-1 
+    \item \textbf{Distraction hypothesis} (\autoref{sec:distracted_mdps}): since learning $\phi_O$ may struggle with predicting distracting observations, is it less sample-efficient than learning $\phi_L$?
+    \item \textbf{End-to-end hypothesis} (\autoref{sec:pomdps}): as predicted by \autoref{thm:EG_ZP_implies_Er}, is training an encoder end-to-end with an auxiliary task of \ZP (\OP) comparable to the phased training with \RP and \ZP (\OP)? 
+    \item \textbf{\ZP objective hypothesis} (\autoref{sec:standard_mdps}, \autoref{sec:distracted_mdps}): as predicted by \autoref{prop:l2} and \autoref{prop:fdiv}, is using $\ell_2$ loss as \ZP objective similar to KL divergence loss in deterministic tasks, but not necessarily stochastic tasks?\looseness=-1
+    \item \textbf{\ZP stop-gradient hypothesis} (\autoref{sec:standard_mdps}, \autoref{sec:pomdps}): as predicted by \autoref{thm:collapse}, does stop-gradient on \ZP targets mitigate representational collapse compared to online \ZP targets? 
+\end{itemize}
+
+\subsection{State Representation Learning in Standard MDPs}
+\label{sec:standard_mdps}
+
+We first evaluate our algorithm in the relatively low-dimensional MuJoCo benchmark~\citep{todorov2012mujoco}. We implement it by simplifying ALM(3)~\citep{ghugare2022simplifying}, a state-of-the-art algorithm on MuJoCo. ALM(3) aims to learn $\phi_L$ end-to-end with EMA \ZP target and reverse KL, shown by \autoref{thm:EG_ZP_implies_Er}.
+ALM(3) requires a reward model in the encoder objective and optimizes the actor via SVG~\citep{heess2015learning} with planning for $3$ steps. Following our Algo.~\ref{pseudo-code}, we remove the reward model and multi-step predictions; instead, we train the encoder using our loss (\autoref{eq:l2}~or~\autoref{eq:kl}) and the actor-critic is conditioned on representations and trained using model-free  TD3~\citep{fujimoto2018addressing}, while keeping the other hyperparameters the same. These simplifications result in a $50\%$ faster speed than ALM(3). Please see \autoref{sec:mdp_details} for a detailed comparison between our algorithm and ALM(3). 
+\looseness=-1
+
+\textbf{Validation of sample efficiency and \ZP objective hypotheses.}
+\autoref{fig:mujoco} shows that our minimalist $\phi_L$ using EMA \ZP targets can attain similar (in Ant) or \textit{even better} (in HalfCheetah and Walker2d) sample efficiency at 500k steps compared to ALM(3), and greatly outperforms $\phi_{Q^*}$, across the entire benchmark except for Humanoid task. 
+This suggests that the primary advantage ALM(3) brings to model-free RL in these MuJoCo tasks, lies in state representation rather than policy optimization. This benefit could be further enhanced by streamlining the algorithmic design. In Humanoid task, ALM(3)'s superior performance is likely due to SVG policy optimization's use of first-order gradient information from latent dynamics, which is particularly beneficial in high-dimensional tasks like this.
+In line with \autoref{prop:l2} and \autoref{prop:fdiv}, different \ZP objectives ($\ell_2$, FKL, RKL) perform similarly on these tasks, which are nearly deterministic. Thus, these results support our sample efficiency and \ZP objective hypotheses.\looseness=-1    
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.24\linewidth]{paper/plts/Walker2d-v2_return_aux_None.pdf} %
+    \includegraphics[width=0.25\linewidth]{paper/plts/HalfCheetah-v2_return_aux_None.pdf} %
+    \includegraphics[width=0.24\linewidth]{paper/plts/Ant-v2_return_aux_None.pdf} %
+    \includegraphics[width=0.24\linewidth]{paper/plts/Humanoid-v2_return_aux_None.pdf} %
+    \includegraphics[width=\linewidth]{paper/plts/standard-legend_return_aux_None.pdf} 
+    \caption{\footnotesize \textbf{Decoupling representation learning from policy optimization using our algorithm based on ALM(3)~\citep{ghugare2022simplifying}.} Comparison between $\phi_{Q^*}$ (TD3), $\phi_L$ (our algorithm (\ZP-$\ell_2$, \ZP-FKL, \ZP-RKL) and ALM(3)), $\phi_O$ (\OP-$\ell_2$, \OP-FKL), in the standard MuJoCo benchmark for 500k steps, averaged over 12 seeds. The observation dimension increases from left figure to right figure ($17,17,111,376$).}
+    \label{fig:mujoco}
+\end{figure}
+\textbf{Validation of \ZP stop-gradient hypothesis.}
+We observe a significant performance degradation when switching from the stop-gradient \ZP targets to \textit{online} ones in all MuJoCo tasks for all \ZP objectives ($\ell_2$, FKL, RKL). \autoref{fig:mujoco_optim} (top) shows the results for the $\ell_2$ objective \autoref{eq:l2}. 
+To estimate the rank of the associated linearized operator for the MLP encoder, we compute the matrix rank of latent states given a batch of inputs\footnote{The rank of an $m\times n$ matrix $A$ is the dimension of the image of mapping $f:\R^n \to \R^m$, where $f(x) = Ax$.}, where the batch size is $512$ and the latent state dimension is $50$. The MLP encoders are orthogonally initialized~\citep{saxe2013exact} with a full rank of $50$. 
+\autoref{fig:mujoco_optim} (bottom) shows that the estimated rank of $\ell_2$ objective with online targets collapses from full rank to low rank, a phenomenon known as \textit{dimensional collapse} in self-supervised learning~\citep{jing2021understanding}. Interestingly, the high dimensionality of a task worsens the rank collapse by comparing from left to right figures. In contrast, stop-gradient targets suffer less from rank collapse, in support to our \ZP stop-gradient hypothesis. For KL objectives, switching to online targets also decreases the rank, though less severely (see \autoref{fig:additional_kl_rank}). \looseness=-1
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.24\linewidth]{paper/plts/l2Walker2d-v2_return_aux_optim_None.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/l2HalfCheetah-v2_return_aux_optim_None.pdf}
+    \includegraphics[width=0.26\linewidth]{paper/plts/l2Ant-v2_return_aux_optim_None.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/l2Humanoid-v2_return_aux_optim_None.pdf}
+    
+\includegraphics[width=0.24\linewidth]{paper/plts/l2Walker2d-v2_rank-2_aux_optim_None.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/l2HalfCheetah-v2_rank-2_aux_optim_None.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/l2Ant-v2_rank-2_aux_optim_None.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/l2Humanoid-v2_rank-2_aux_optim_None_leg.pdf}
+    \caption{\footnotesize \textbf{Representation collapse with online targets.} On four benchmark tasks, we observe that using the online \ZP target in $\ell_2$ objectives results in lower returns \emph{(top)}  and low-rank representations \emph{(bottom)}. In line with our theory, using a detached or EMA \ZP target mitigates the representational collapse and yields higher returns.
+    }
+    \label{fig:mujoco_optim}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.25\linewidth]{paper/plts/distract-Hopper-v2_return_aux_aux.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/distract-Walker2d-v2_return_aux_aux.pdf}
+    \includegraphics[width=0.25\linewidth]{paper/plts/distract-HalfCheetah-v2_return_aux_aux.pdf}
+    \includegraphics[width=0.24\linewidth]{paper/plts/distract-Ant-v2_return_aux_aux.pdf}
+    \includegraphics[width=\linewidth]{paper/plts/distracted-legend_return_aux_aux.pdf}
+    \caption{\footnotesize \textbf{Self-predictive representations are more robust.} Comparison between $\phi_{Q^*}$ (TD3), $\phi_L$ (\ZP-$\ell_2$, \ZP-FKL, \ZP-RKL) using our algorithm, $\phi_O$ (\OP-$\ell_2$, \OP-FKL) in the \textbf{distracting} MuJoCo benchmark, varying the distractor dimension from $2^4$ to $2^8$, averaged over 12 seeds. The y-axis is final performance at 1.5M steps.\looseness=-1}
+    \label{fig:mujoco_distracted}
+\end{figure}
+\subsection{State Representation Learning in Distracting MDPs} 
+\label{sec:distracted_mdps}
+
+We then evaluate the robustness of representation learning by augmenting states with distractor dimensions in the MuJoCo benchmark. The distractors are i.i.d. standard isotropic Gaussians, varying the number of dimensions from $2^4$ to $2^8$, following the practice in \citet{nikishin2022control}. The distracting task has the same optimal return as the original one and can be challenging to RL algorithms, even if model-based RL could perfectly model Gaussians. We use the same code in standard MDPs. \autoref{fig:mujoco_distracted} shows the final averaged returns of each algorithm (variant) in the distracting MuJoCo benchmark.\looseness=-1  
+
+\textbf{Validation of distraction hypothesis.}
+By comparing \ZP with \OP objectives, with higher-dimensional distractors, learning $\phi_O$ degrades much faster than learning $\phi_L$, verifying our distraction hypothesis. Surprisingly, model-free RL ($\phi_{Q^*}$) performs worse than $\phi_O$, as $\phi_{Q^*}$ does not need to predict the distractors. However, we still observe a severe degradation in Ant for all methods when there are $128$ distractors, which we will study in the future work.\looseness=-1
+
+\textbf{Extending \ZP objective hypothesis to stochastic tasks.}
+In stochastic tasks, \autoref{prop:l2} and \autoref{prop:fdiv} tell us about the (strict) upper bounds for learning \EZP and \ZP conditions with the practical $\ell_2$ and KL objectives, respectively. Yet, they do not indicate which objective is better for stochastic tasks based on these bounds.
+In fact, we observe that both $\ell_2$ and reverse KL perform better than forward KL in the distracting tasks, possibly because the entropy term in reverse KL smooths the training objective, and $\ell_2$ objective simplifies the learning.\looseness=-1
+\subsection{History Representation Learning in Sparse-Reward POMDPs}
+\label{sec:pomdps}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.49\linewidth]{paper/minigrid/agg__return_aux_modular.pdf}
+    \includegraphics[width=0.49\linewidth]{paper/minigrid/agg_ZP_rank-3_aux_optim_None.pdf}
+    \caption{\footnotesize\textbf{End-to-end learned self-predictive and observation-predictive representations stand out in sparse-reward tasks.} We show the interquartile mean (IQM)~\citep{agarwal2021deep} across \textbf{20 MiniGrid tasks}, computed over 9 seeds per task with 95\% stratified bootstrap confidence intervals. \textbf{Left}: comparison of episode returns between $\phi_{Q^*}$ (R2D2), $\phi_L$ (\ZP, \RP + \ZP), $\phi_O$ (\OP, \RP + \OP). \RP + \ZP and \RP + \OP methods are phased, while \ZP and \OP methods are end-to-end. \textbf{Right}: comparison of estimated matrix rank between \ZP targets (online, detached, EMA), R2D2, and \OP. The maximal achievable rank is $128$.  }
+    \label{fig:minigrid}
+\end{figure}
+
+Finally, we perform an extensive empirical study on 20 MiniGrid tasks~\citep{gym_minigrid}. These tasks, featuring partial observability and sparse rewards, serve as a rigorous test-bed for \textit{history} representation learning. The rewards are only non-zero upon successful task completion. Episode returns are between 0 and 1, with higher returns indicating faster completion. 
+Each task has an observation space of $7\times 7 \times 3 = 147$ dimensions and a discrete action space of $7$ options.  
+Our model-free baseline is R2D2~\citep{kapturowski2018recurrent}, composed of double Q-learning~\citep{van2016deep} with LSTMs~\citep{hochreiter1997long} as history encoders. 
+We implement it based on recent work~\citep{seyedsalehi2023approximate}. 
+R2D2 uses stored LSTM hidden states for initialization, a $50$-step burn-in period, and a $10$-step history rollout during training. This result in a high dimensionality of $(50+10)\times (147+7)=9240$ on histories. 
+
+Based on R2D2, we implement our algorithm by adding an auxiliary task of \ZP (or \OP) under $\ell_2$ objectives, which is sufficient for solving these deterministic tasks (see \autoref{prop:l2}).
+To compare the phased training~\citep{seyedsalehi2023approximate}, we further implement methods (\RP + \OP, \RP + \ZP) that also predict rewards and freeze the encoders during Q-learning. Due to the space limit, we show the aggregated plots in \autoref{fig:minigrid} and defer the individual task plots to \autoref{sec:ablation}.
+
+\textbf{Validation of sample efficiency hypothesis.} By examining the aggregated learning curves of end-to-end methods in \autoref{fig:minigrid} left, we find that minimalist $\phi_L$ (\ZP) significantly outperforms $\phi_{Q^*}$ (R2D2) on average. It, however, fall shorts of $\phi_O$ (\OP), which aligns with our expectations given that MiniGrid tasks are deterministic with medium-dimensional clean observations. The enhanced performance of $\phi_L$ and $\phi_O$ over $\phi_{Q^*}$ provides empirical validation of our hypothesis in sparse-reward tasks.\looseness=-1 
+
+\textbf{Validation of end-to-end hypothesis.} By comparing the aggregated learning curves between end-to-end methods and phased methods (\ie, \OP vs \RP + \OP, and \ZP vs \RP + \ZP) in \autoref{fig:minigrid} left, we observe that end-to-end training (\OP or \ZP) yields equal or superior sample efficiency relative to phased training (\RP + \OP or \RP + \ZP) when learning observation-predictive or self-predictive representations. This supports our hypothesis, and is particularly noticeable when end-to-end learning $\phi_L$ (\ZP) markedly excels over its phased learning counterpart (\RP + \ZP).
+\textbf{Validation of \ZP stop-gradient hypothesis.} We extend our rank analysis from MuJoCo to MiniGrid using the same estimation metric. As depicted in \autoref{fig:minigrid} right, our finding averaged across the benchmark indicates that EMA \ZP targets are able to preserve their rank, while both detached and online \ZP targets degrade the rank during training. Notably, while our theory does not distinguish detached and EMA targets, the observed lower rank of online targets relative to both detached and EMA targets is in line with our hypothesis. Finally, without any auxiliary task such as \ZP and \OP, R2D2 degrades the rank, which is predictable in the sparse-reward setting~\citep{lyle2021effect}.
+
+
+
+
+
+
+
+\section{Discussion}
+
+\label{sec:recommend}
+
+\textbf{Recommendations.} Based on our theoretical and empirical results, we suggest the following preliminary guidance to RL practitioners:\looseness=-1
+\begin{enumerate}[leftmargin=*,itemsep=0pt, topsep=0pt]
+\item \textbf{Analyze your task first.} For example, in noisy or distracting tasks, consider using self-predictive representations. In sparse-reward tasks, consider using observation-predictive representations. In deterministic tasks, choose the deterministic $\ell_2$ objectives for representation learning.  
+\item \textbf{Use our minimalist algorithm as your baseline.} Our algorithm allows for an independent evaluation of representation learning and policy optimization effects.  Start with end-to-end learning and model-free RL for policy optimization. 
+\item \textbf{Implementation tips.} For our minimalist algorithm, we recommend adopting the $\ell_2$ objective with EMA \ZP targets first. When tackling POMDPs, start with recurrent networks as the encoder.
+\end{enumerate}
+
+\textbf{Limitations.} The limitations of our work can be divided into theoretical and empirical aspects. 
+On the theoretical side, although we show a continuous-time analysis of auxiliary learning dynamics with linear models in \autoref{thm:collapse}, we do not provide a convergence analysis for the joint optimization of RL and auxiliary losses and the results may not hold beyond linear assumption.
+On the empirical side, our experiment scope does not cover more complicated domains that require pixel-based observations.  
+
+\textbf{Conclusion.} This work has offered a principled analysis of state and history representation learning in reinforcement learning, bridging the gap between various approaches.
+Our unified view and analysis of self-predictive learning also inspire a minimalist RL algorithm for learning self-predictive representations. Extensive empirical studies in benchmarks across standard MDPs, distracting MDPs, and sparse-reward POMDPs, validate most of our hypotheses suggested by our theory.  
+
+
+
+

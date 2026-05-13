@@ -1,0 +1,290 @@
+\title{DiLQR: Differentiable Iterative Linear Quadratic Regulator}
+
+\begin{abstract}
+Differentiable control promises end-to-end differentiability and adaptability, effectively combining the advantages of both model-free and model-based control
+approaches. However, the iterative Linear Quadratic Regulator (iLQR), despite
+being a powerful nonlinear controller, still lacks differentiable capabilities. The
+scalability of differentiating through extended iterations and horizons poses signifi
+cant challenges, hindering iLQR from being an effective differentiable controller.
+This paper introduces a framework that facilitates differentiation through iLQR,
+allowing it to serve as a trainable and differentiable module, either as or within
+a neural network. for control purposes. A novel aspect of this framework is the
+analytical solution that it provides for the gradient of an iLQR controller through
+implicit differentiation, which ensures a constant backward cost regardless of iteration, while producing an accurate gradient. We evaluate our framework on
+imitation tasks on famous control benchmarks. Our analytical method demonstrates superior computational performance, achieving up to $\mathbf{128x}$ speedup and
+a minimum of $\mathbf{21x}$ speedup compared to automatic differentiation. Our method
+also demonstrates superior learning performance ($\mathbf{10^6}$x) compared to traditional
+neural network policies and better model loss with differentiable controllers that
+lack exact analytical gradients. Furthermore, we integrate our module into a
+larger network with visual inputs to demonstrate the capacity of our method for
+high-dimensional, fully end-to-end tasks. Codes can be found on the project
+homepage https://sites.google.com/view/dilqr/.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Differentiable control has emerged as a powerful approach in the fields of reinforcement learning (RL) and imitation learning, enabling significant improvements in sample efficiency and performance. By integrating control policies into a differentiable framework, researchers can leverage gradient-based optimization techniques to directly optimize policy parameters. This integration allows for end-to-end training, where both the control strategy and the underlying model can be learned simultaneously, enhancing the adaptability and precision of control systems.  
+
+As a numerical controller, the iterative Linear Quadratic Regulator (iLQR) Todorov et al. (2012) has been extensively adopted for trajectory optimization Spielberg et al. (2021); Choi et al. (2023); Zhao et al. (2020); Mastalli et al. (2020) due to its computational efficiency Tassa et al. (2014); Dean et al. (2020); Collins et al. (2021) and excellent control performance Dantec et al. (2022); Xie et al. (2017); Chen et al. (2017). To make iLQR trainable as a neural network module, naively differentiating through an iLQR controller may be a reasonable choice, but the scalability of differentiating through hundreds of iterations steps poses a significant challenge, as the forward and backward passes during training are coupled. The forward pass involves iteratively solving an LQR optimization problem to converge on the optimal trajectory. The backward pass computes gradients through backpropagation, and becomes increasingly complex as it needs to traverse through all the layers of the forward pass, which requires significant computational resources (time and memory), especially for tasks requiring long iterations and long horizons. This coupling not only increases memory usage, but also significantly slows down the training process, making it difficult to scale to larger problems.  
+
+Efficient differentiable controllers are especially valuable in systems involving neural networks, such as multi-modal frameworks Mao et al. (2023); Xu et al. (2024b); Xiao et al. (2022) and deep reinforcement learning Ye et al. (2021); van Hasselt et al. (2016), where an upstream neural network module is required. Developing differentiable controllers with efficient gradient propagation is crucial, as they greatly enhance sample efficiency and reduce computational time for online tuning.  
+
+![](images/8c5b0038cbed00008f69d6d90f1ec67fbb83ed5511d9a06a981d85f5b0af10da.jpg)  
+Figure 1: An overview of iLQR, and AutoDiff vs our proposed planner with implicit differentiation. As shown in the flowchart, autodiff must backpropagate through each layer of the LQR process, which leads to significantly increased memory usage to store intermediate gradients and computational load. In contrast, our proposed planner, using implicit differentiation, only needs to handle the final layer. This results in constant computational costs and memory usage, making our method much more efficient.  
+
+Developing analytical solutions would greatly alleviate these challenges. DiffMPC Amos et al. (2018) pioneered the use of analytical gradients in LQR control, leading to significant improvements in computational efficiency and generalization of the learned controller. Its success has inspired extensions in various planning and control applications East et al. (2020); Romero et al. (2024); Karkus et al. (2023); Cheng et al. (2024); Soudbakhsh et al. (2023); Shrestha et al. (2023). Numerous studies have since shown that analytical gradients significantly improve learning performance, reducing computational costs, and improving scalability in complex, long-horizon tasks Jin et al. (2020); Xu et al. (2024a); Jin et al. (2021); Böttcher et al. (2022); Zhao et al. (2022).  
+
+In this paper, we introduce an innovative analytical framework that leverages implicit differentiation to handle iLQR at its fixed point. This approach effectively separates the forward and backward computations, maintaining a constant computational load during the backward pass, irrespective of the iteration numbers for iLQR. By doing so, our method significantly reduces computational time and the memory usage needed for training, thereby enhancing scalability and efficiency in handling non-convex control problems.  
+
+This paper makes the following contributions.  
+
+1. We develop an efficient method for analytical differentiation. We derive analytical trajectory derivatives for optimal control problems with tunable additive cost functions and constrained dynamics described by first-order difference equations, focusing on iLQR as the controller. Our analytical solution is exact, considering the entire iLQR graph. The method guarantees $O(1)$ computational complexity with respect to the number of iteration steps.   
+2. We propose a forward method for differentiating linearized dynamics with respect to nonlinear dynamics parameters, achieving speeds dozens of times faster than auto-differentiation tools such as torch.autograd.jacobian. Furthermore, we exploit the sparsity of the tensor expressions to compute some tensor derivatives that scale linearly with trajectory length.   
+3. We demonstrate the effectiveness of our framework in imitation and system identification tasks using the inverted pendulum and cartpole examples, showcasing superior sample efficiency and generalization compared to traditional neural network policies. Finally, we integrate our differentiable iLQR into a large network for end-to-end learning and control from pixels, demonstrating the extensibility and multimodal capabilities of our method.  
+
+Notation For a scalar-valued function $f$ with a vector input, $\nabla f$ is the usual gradient. The subscripts in the symbol $\nabla$ indicate partial derivatives involving a subvector of the full input, or serve to emphasize the variable of interest. For a more general operation mapping tensors to tensors, we write ∂(·) for the appropriate linearization. See, for example, eq. (2), where Jacobian matrices are constructed. To improve the readability of some equations, we sometimes use the notation $D_{\theta}X$ as a synonym for $\frac{\partial X}{\partial\theta}$ . Careful tracking of the dependencies involved is essential at every stage.  
+
+
+
+\section{3 BACKGROUND  }
+
+
+The Iterative Linear Quadratic Regulator (iLQR) addresses the following control problem:  
+
+$$
+\operatorname*{min}_{x_{1:T},u_{1:T}}\sum_{t=1}^{T}g_{t}(x_{t},u_{t})\:\mathrm{~s.t.~}\:x_{t+1}=f_{t}(x_{t},u_{t}),\;x_{1}=x_{i n i t};\quad\underline{{u}}\leq u\leq\bar{u}.
+$$  
+
+At each iteration step, it linearizes the dynamics and makes a quadratic approximation of the cost function to produce a finite-time Linear Quadratic Regulator (LQR) problem. Solving this auxiliary problem produces updates for the original trajectory. Here are some details.  
+
+3.1 THE APPROXIMATE PROBLEM  
+
+Iteration $i$ begins with the trajectory $\tau^{i}\,=\,\{\tau_{1}^{i},\dots,\tau_{T}^{i}\}$ , where $\tau_{t}^{i}\,=\,\{x_{t}^{i},u_{t}^{i}\}$ . We linearize the dynamics by defining  
+
+$$
+D_{t}=[A_{t},B_{t}]=\left[\frac{\partial f_{t}}{\partial x}\bigg\lvert_{\tau_{t}^{i}},\frac{\partial f}{\partial u}\bigg\lvert_{\tau_{t}^{i}}\right],\quad d_{t}=f_{t}(x_{t}^{i},u_{t}^{i})-D_{t}\left[x_{t}^{i}\right],\qquad t=1,2,\ldots,T,
+$$  
+
+and form a quadratic approximation of the cost function using  
+
+$$
+c_{t}^{\top}=[c_{t,x},c_{t,u}]=\left[\frac{\partial g_{t}}{\partial x}\bigg|_{\tau_{t}^{i}},\frac{\partial g_{t}}{\partial u}\bigg|_{\tau_{t}^{i}}\right],\quad C_{t}=\left[C_{t,x x}\quad C_{t,x u}\right],\qquad t=1,2,\ldots,T,
+$$  
+
+where  
+
+$$
+C_{t,x x}=\frac{\partial^{2}g_{t}}{\partial x^{2}}\bigg|_{\tau_{t}^{i}},\quad C_{t,u u}=\frac{\partial^{2}g_{t}}{\partial u^{2}}\bigg|_{\tau_{t}^{i}},\quad C_{t,x u}=C_{t,u x}^{\top}=\frac{\partial^{2}g_{t}}{\partial u\partial x}\bigg|_{\tau_{t}^{i}}.
+$$  
+
+These elements lead to an approximate problem whose unknowns are $\delta\tau_{t}=\tau_{t}-\tau_{t}^{i}$ :  
+
+$$
+\operatorname*{min}_{\delta\tau_{1:T}}\sum_{t=0}^{T}\frac{1}{2}\delta\tau_{t}^{\top}C_{t}\delta\tau_{t}+c_{t}^{\top}\delta\tau_{t}\quad\mathrm{~s.t.~}\quad\delta x_{t+1}=D_{t}\delta\tau_{t},\;\delta x_{1}=0;\quad\underline{{u}}\leq u\leq\bar{u}.
+$$  
+
+3.2 THE TRAJECTORY UPDATE  
+
+Problem (4) can be solved by the two-pass method detailed in Tassa et al. (2014). First a backward pass is conducted, using the Riccati-Mayne method Mayne et al. (2000) to obtain a quadratic value function and a projected-Newton method to optimize the actions under box constraints. Then a forward pass uses the linear control gains $K_{t},k_{t}$ obtained in the backward pass to roll out a new trajectory. Let $\delta\tau^{\star}$ denote the minimizing trajectory in (4). We use the controls in $\delta\tau^{*}$ directly, but discard the states in favor of an update based on the original dynamics, setting  
+
+$$
+u_{t}^{i+1}=u_{t}^{i}+\delta u_{t}^{\star},\qquad x_{t+1}^{i+1}=f(x_{t}^{i+1},u_{t}^{i+1}).
+$$  
+
+With these choices, defining $\tau_{t}^{i+1}=\{x_{t}^{i+1},u_{t}^{i+1}\}$ provides a feasible trajectory for (1) that can serve as the starting point for another iteration.  
+
+
+
+\section{4 DIFFERENTIABLE ILQR  }
+
+
+4.1 END-TO-END LEARNING FRAMEWORK  
+
+In the learning problem of interest here, the cost functions $g_{t}$ and system dynamics $f_{t}$ involve structured uncertainty parameterized by a vector variable $\theta$ . For example, in a drone, $\theta$ could represent physical parameters like mass or propeller length, while in a humanoid robot, it might refer to limb lengths or joint masses; additionally, $\theta$ can include reference trajectories for robot tracking, which help parametrize the cost function for control. Suppressing $\theta$ in the notation is typical when $\theta$ has a fixed value, but now we face the challenge of choosing $\theta$ to optimize some scalar criterion. This requires changing the notation to $f_{t}=f_{t}(x,\overline{{u}},\theta)$ and $\bar{g_{t}}\bar{=}g_{t}(x,\bar{u},\bar{\theta})$ . As such, the derivatives shown in (2) and (3) must also be considered as functions of $\theta$ . So, along a given reference trajectory $\tau$ , the dynamics in (1) will generate three $\theta$ -dependent matrices we must consider:  
+
+$$
+A_{t}(\theta)={\frac{\partial f_{t}}{\partial x}},\quad B_{t}(\theta)={\frac{\partial f_{t}}{\partial u}},\quad{\mathrm{and}}\quad{\frac{\partial f_{t}}{\partial\theta}}.
+$$  
+
+The same is true for the coefficients in the quadratic approximation to the loss function in the original problem. Careful accounting for the $\theta$ -dependence at every level is required for accurate gradients.  
+
+Suppose the loss function $L$ to be minimized by “learning” $\theta$ is expressed entirely in terms of the trajectory $\tau$ . Then the influence of $\theta$ on the observed $L$ -values will be indirect, and we will need the chain rule to express the gradient of the composite function $\theta\mapsto L(\tau(\theta))$ :  
+
+$$
+\nabla_{\theta}(L\circ\tau)(\theta)=\nabla_{\tau}L(\tau(\theta))\frac{\partial\tau}{\partial\theta}.
+$$  
+
+In practical implementations, the partial derivatives required to form $\nabla_{\tau}L$ are provided during the backward pass by automatic differentiation tools Paszke et al. (2019); Abadi et al. (2015). The main challenge, however, is to determine $\frac{\partial\tau}{\partial\theta}$ , i.e., the derivative of the optimal trajectory with respect to the learnable parameters. This is the focus of the next section.  
+
+4.2 FIXED POINT DIFFERENTIATION  
+
+For a particular choice of $\theta$ , we can consider the sequence of trajectories produced by iLQR:  
+
+$$
+\tau^{0}\xrightarrow{i L Q R}\tau^{1}\xrightarrow{i L Q R}\tau^{2}\xrightarrow{i L Q R}\cdots\xrightarrow{i L Q R}\tau^{\star}\xrightarrow{i L Q R}\tau^{\star}\xrightarrow{i L Q R}\cdots.
+$$  
+
+Each iteration includes the three steps noted above: linearizing the system, conducting the backward pass, and performing the forward pass. Iterations proceed until the output $\tau^{\star}$ from an iLQR step is indistinguishable from the input, indicating that the process can no longer improve the input trajectory. This trajectory $\tau^{\star}$ is called a fixed point for the iLQR. We expect the value of $\theta$ to influence the fixed point produced above.  
+
+In general, an operator’s fixed point can be calculated by various methods, typically iterative in nature. As pointed out in Bai et al. (2019), naively differentiating through such a scheme would require intensive memory usage Tamar et al. (2016); Lee et al. (2018) and computational effort Zhao et al. (2022). Instead, we propose to use implicit differentiation directly on the defining identity. This gives direct access to the derivatives required by decoupling the forward (fixed-point iteration as the solver) and backward passes (differentiating through the solver).  
+
+Let us write $X\,=\,(x_{1},\ldots,x_{T})$ and $U\,=\,(u_{1},\dots,u_{T})$ for the components of a trajectory $\tau=$ $(x_{1},u_{1},x_{2},u_{2},\dots,x_{T},u_{T})$ , and abuse notation somewhat by identifying $\tau$ with $(X,U)$ . At a fixed point $(X^{\star},U^{\star})$ of the iLQR process for parameter $\theta$ , we have the following:  
+
+$$
+X^{\star}=F(X^{\star},U^{\star},\theta),\quad U^{\star}=G(X^{\star},U^{\star},\theta)
+$$  
+
+where $F$ and $G$ summarize the operations that define a single iteration in the iLQR algorithm. (Thus eq. (8) formalizes the graphical summary in eq. (7).)  
+
+In eq. (8), the solutions $X^{\star}$ and $U^{\star}$ depend on the parameter $\theta$ . By treating both $X^{\star}$ and $U^{\star}$ explicitly as functions of $\theta$ , we can interpret eq. (8) as an identity valid for all $\theta$ . Differentiating through this identity yields a new one:  
+
+$$
+\begin{array}{l}{{\displaystyle\nabla_{\theta}X^{\star}=\frac{\partial F}{\partial X}\nabla_{\theta}X^{\star}+\frac{\partial F}{\partial U}\nabla_{\theta}U^{\star}+\frac{\partial F}{\partial\theta},}}\\ {{\displaystyle\nabla_{\theta}U^{\star}=\frac{\partial G}{\partial X}\nabla_{\theta}X^{\star}+\frac{\partial G}{\partial U}\nabla_{\theta}U^{\star}+\frac{\partial G}{\partial\theta}.}}\end{array}
+$$  
+
+Here, the matrix-valued partial derivatives of $F$ and $G$ above are evaluated at $(X^{\star}(\theta),U^{\star}(\theta),\theta)$ . Likewise, $D_{\theta}X^{\star}$ and $D_{\theta}\bar{U}^{\star}$ are the Jacobians (sensitivity matrices) that quantify the $\theta$ -dependence of the optimal trajectory; both depend on $\theta$ . Rearranging eq. (9) produces a system of linear equations in which these two matrices provide the unknowns:  
+
+$$
+\begin{array}{r}{\bigg(I-\displaystyle\frac{\partial F}{\partial X}\bigg)\nabla_{\theta}X^{\star}-\displaystyle\frac{\partial F}{\partial U}\nabla_{\theta}U^{\star}=\displaystyle\frac{\partial F}{\partial\theta},}\\ {-\displaystyle\frac{\partial G}{\partial X}\nabla_{\theta}X^{\star}+\bigg(I-\displaystyle\frac{\partial G}{\partial U}\bigg)\nabla_{\theta}U^{\star}=\displaystyle\frac{\partial G}{\partial\theta}.}\end{array}
+$$  
+
+The analytical solution for this system is given below.  
+
+Proposition 1. The Jacobians in eq. (10) are given by  
+
+$$
+\begin{array}{r l}&{\nabla_{\theta}X^{\star}=M(F_{\theta}+F_{U}(K-G_{X}M F_{U})^{-1}(G_{X}M F_{\theta}-G_{\theta}))}\\ &{\nabla_{\theta}U^{\star}=(K-G_{X}M F_{U})^{-1}(G_{X}M F_{\theta}+G_{\theta}),}\end{array}
+$$  
+
+where we denote $M=(I-F_{X})^{-1}$ and $K=I-G_{U}$ , and use the condensed notation  
+
+$$
+F_{X}={\frac{\partial F}{\partial X}},\quad F_{U}={\frac{\partial F}{\partial U}},\quad F_{\theta}={\frac{\partial F}{\partial\theta}},\quad G_{X}={\frac{\partial G}{\partial X}},\quad G_{U}={\frac{\partial G}{\partial U}},\quad G_{\theta}={\frac{\partial G}{\partial\theta}}.
+$$  
+
+  
+
+To be completely explicit, suppose a parameter $\theta$ is given. Then eq. (8) defines a fixed point $\tau^{\star}$ in terms of this particular $\theta$ , and this $\tau^{\star}$ provides the evaluation point $(X^{\star}(\theta),U^{\star}(\theta),\theta)$ for all the Jacobian matrices involving $F$ and $G$ in Equations (9) to (11).  
+
+4.3 OBTAINING EACH TERM  
+
+The functions $F$ and $G$ whose Jacobian appear in eq. (12) are defined by rather complicated arg min operations. The Chain-Rule pattern below, which we can apply to either $H=F$ or $H=G$ , suggests that  
+
+$$
+\begin{array}{r}{H_{X}=\displaystyle{\frac{\partial H}{\partial D}\frac{\partial D}{\partial X}+\frac{\partial H}{\partial d}\frac{\partial d}{\partial X}+\frac{\partial H}{\partial C}\frac{\partial C}{\partial X}+\frac{\partial H}{\partial c}\frac{\partial c}{\partial X}},}\\ {H_{U}=\displaystyle{\frac{\partial H}{\partial D}\frac{\partial D}{\partial U}+\frac{\partial H}{\partial d}\frac{\partial d}{\partial U}+\frac{\partial H}{\partial C}\frac{\partial C}{\partial U}+\frac{\partial H}{\partial c}\frac{\partial c}{\partial U}},}\\ {H_{\theta}=\displaystyle{\frac{\partial H}{\partial D}\frac{\partial D}{\partial\theta}+\frac{\partial H}{\partial d}\frac{\partial d}{\partial\theta}+\frac{\partial H}{\partial C}\frac{\partial C}{\partial\theta}+\frac{\partial H}{\partial c}\frac{\partial c}{\partial\theta}}.}\end{array}
+$$  
+
+In each term on the right, the first matrix factor (e.g., $\partial H/\partial D)$ expresses the sensitivity of the optimal LQR trajectory with respect to the corresponding named ingredient of the formulation in eq. (4). Efficient methods for calculating these terms are known: see Amos et al. (2018); Amos & Kolter (2017). The second factor in each term of (13) can be computed using automatic differentiation. The next subsections talk about how to calculate these terms efficiently.  
+
+4.4 PARALLELIZATION  
+
+Amos et al. (2018) proposes method that directly calculates $\frac{\partial L}{\partial D}$ , $\begin{array}{r}{\frac{\partial L}{\partial d},\,\frac{\partial L}{\partial C}}\end{array}$ , and $\begin{array}{r}{\frac{\partial L}{\partial c}}\end{array}$ with a complexity . We adopt these results in our framework. To facilitate parallelization, we construct batches of binary loss functions. Specifically, to compute ∂∂HDi,j , we set the Li,j element in L to 1, while all other elements are set to 0, and then calculate $\frac{\partial L}{\partial D}$ . Although this approach introduces more computations, the computations can be fully parallelized since each operation is completely independent. As a result, the calculation of $\frac{\partial H}{\partial D}$ can be parallelized efficiently. The same method also applies to ∂∂Hd , ∂∂HC , and ∂∂Hc .  
+
+4.5 EXPLORING THE SPARSITY  
+
+Some care is required when coding the calculations for which eq. (13) provides the models. With $X=\left(x_{1},\ldots,x_{T}\right)$ as above, and the corresponding $\boldsymbol{D}=(D_{1},\ldots,D_{T})$ , the quantity $\frac{\partial D}{\partial X}$ suggests a huge structure involving $T^{2}$ submatrices of the general form ∂∂xDt′ . However, the definitions in eq. (2) show that any such submatrix in which $t^{\prime}\neq t$ will be zero. Thus the quantity $\frac{\partial D}{\partial X}$ shown above never appears explicitly in our implementation. Instead, we work directly with the information-bearing blocks ∂∂Dxt , 1 ≤t ≤T.  
+
+4.6 FORWARD ALGORITHM  
+
+It can be costly to evaluate matrices like $\frac{\partial D}{\partial{\boldsymbol{\theta}}}$ . In Pytorch, for example, such tools such as torch.autograd.jacobian rely on backpropagation, which means that gradient information from one time step is not reused for the next time step. However, the derivation above makes it clear that knowing $\frac{\partial\bar{D_{t-1}}}{\partial\theta}$ allows for a direct calculation of $\frac{\partial D_{t}}{\partial\theta}$ .  
+
+We now propose an efficient forward approach that uses available information efficiently to accelerate later steps. We refer to $\frac{\partial D_{t}}{\partial\theta}$ from (13) as $\nabla_{\theta}D_{t}$ here for clarity and to distinguish it from other gradient notations, a convention we apply similarly to other gradients such as $\frac{\partial d_{t}}{\partial\theta}$ .  
+
+Given a trajectory satisfying $x_{t+1}\,=\,f_{t}\big(x_{t},u_{t},\theta\big)$ , the matrices $D_{t}$ and $d_{t}$ defined in eq. (2) are functions of $x_{t},\,u_{t}$ , and $\bar{\theta}$ . For time step $t$ , we will have  
+
+$$
+\nabla_{\theta}D_{t}=\frac{\partial D_{t}}{\partial\theta}+\left[\frac{\partial D_{t}}{\partial x_{t}}+\frac{\partial D_{t}}{\partial u_{t}}\frac{\partial u_{t}}{\partial x_{t}}\right]\nabla_{\theta}x_{t}
+$$  
+
+with  
+
+$$
+\nabla_{\theta}x_{t}=\frac{\partial x_{t}}{\partial\theta}+\left[\frac{\partial x_{t}}{\partial x_{t-1}}+\frac{\partial x_{t}}{\partial u_{t-1}}\frac{\partial u_{t-1}}{\partial x_{t-1}}\right]\nabla_{\theta}x_{t-1},
+$$  
+
+where $\textstyle{\frac{\partial D_{t}}{\partial\theta}},\,{\frac{\partial D_{t}}{\partial x_{t}}},\,{\frac{\partial D_{t}}{\partial u_{t}}}$ and $\frac{\partial x_{t}}{\partial\theta}$ , $\frac{\partial x_{t}}{\partial x_{t-1}}$ , $\frac{\partial x_{t}}{\partial u_{t-1}}$ are analytically calculated in first so that on each time step we only need to instantly plug in the corresponding parameter values to obtain the numerical  
+
+gradients. ∂∂uxtt an  ∂∂uxt−1 d are the linear control gain solved from FT-LQR. $\nabla_{\theta}x_{t-1}$ is the stored information from time step $t-1$ and reused here, and $\nabla_{\theta}x_{t}$ is prepared for the next time step $t+1$ . Finally  
+
+$$
+\mathcal{T}_{\theta}d_{t}=\nabla_{\theta}x_{t+1}-\frac{\partial D_{t}}{\partial\theta}\left[\boldsymbol{\alpha}_{t}\right]-D_{t}\left[\frac{I}{\partial x_{t}}\right]\nabla_{\theta}x_{t},\quad\nabla_{x_{t}}d_{t}=-\frac{\partial D_{t}}{\partial x_{t}}\left[\boldsymbol{x}_{t}\right],\quad\nabla_{u_{t}}d_{t}=-\frac{\partial D_{t}}{\partial u_{t}}\left[\boldsymbol{x}_{t}\right].
+$$  
+
+The calculation of $\nabla_{\theta}C_{t}$ and $\nabla_{\theta}c_{t}$ is similar.  
+
+![](images/aae8c2985d1572d203b92982552f138065e7b43de41498777bdfcf64ae99d008.jpg)  
+
+4.7 METHODOLOGICAL COMPARISON AND DISCUSSION  
+
+Differences between our method and DiffMPC Amos et al. (2018) DiffMPC treats input $X^{*}$ and $U^{*}$ dase rcivoantsitvaen to fa tnhde  uospetsi mauatl ot-rdaijfefcetroernyt.i aWtieo ni mtop roobvtea iDn $\frac{\partial D}{\partial\theta}$ , PaCn db yf infaulrltyh eurs ce otnhsei dcehraiinng  rtuhlee  itno poubt $X^{*}$ and $U^{*}$ as a function of $\theta$ , that is, $\dot{X^{\ast}}(\theta)$ and $U^{\ast}(\theta)$ , and leverage implicit differentiation on the fixed-point to solve the exact analytical gradient, improving the accuracy of the gradient. The box in 27 illustrates the differences between the two approaches  
+
+$$
+A^{i}(\tau^{i},\theta)=\frac{\partial f(x,u,\theta)}{\partial x}\bigg\vert_{\tau^{i}},\quad\nabla_{\theta}A^{i}=\frac{\partial A^{i}}{\partial\theta}+\Biggl[\frac{\partial A^{i}}{\partial\tau^{i}}\frac{\partial\tau^{i}}{\partial\theta}\Biggr].
+$$  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+We follow the examples and experimental setups from previous works Amos et al. (2018); Jin et al. (2020); Xu et al. (2024a); Watter et al. (2015) and conduct experiments on two well-known control benchmarks: CartPole and Inverted Pendulum. The experiments demonstrate our method’s computational performance (at most 128x speedup) and superior learning performance $\mathbf{10^{6}}$ improvement). All experiments were carried out on a platform with an AMD 3700X 3.6GHz CPU, 16GB RAM, and an RTX3080 GPU with 10GB VRAM. The experiments are implemented with Pytorch Paszke et al. (2019).  
+
+![](images/f41ee212bbebf962a5d8e9bc09171995c0ec8d6fa1863b2c877ff6c252f0547c.jpg)  
+5.1 COMPUTATIONAL PERFORMANCE  
+
+Figure 2: Backward computation time comparison between AutoDiff and our proposed method across different iLQR iterations and LQR horizons. AutoDiff’s computation time scales linearly with the number of iterations, while our method maintains constant computation time. The experiments are conducted under pendulum domain, with batch size 20.  
+
+The performance of our differentiable iLQR solver is shown in Figure 2. We compare it to the naive approach, where the gradients are computed by differentiating through the entire unrolled chain of iLQR. The results of the experiments clearly demonstrate the significant computational advantage of our method over AutoDiff across all configurations.  
+
+![](images/d587f07fc98bb3b7bcc694031c4cdfacb7276b88c5991c988f0fbdd8a2800bf8.jpg)  
+Figure 3: (a) Learning results on the pendulum and cartpole. We select the best validation loss observed during the training run and report the corresponding test loss. Every data point is averaged over five trials. (b) Comparison of cost function parameter estimation between our method and DiffMPC under the cartpole and cost learning domain.  
+
+Backward pass efficiency: For example, for a horizon of 10 and 300 iterations, AutoDiff takes 8.57 seconds compared to just 0.067 seconds with our method, resulting in a 128x speedup. Even in the case with the smallest improvement—horizon of 10 and 50 iterations, AutoDiff takes 1.41 seconds, while our method remains 0.067 seconds, still delivering a 21x speedup. These results highlight the clear scalability and efficiency of our method, maintaining a near-constant computation time as the number of iLQR iterations increases, while AutoDiff’s time grows significantly with longer horizons and more iterations.  
+
+
+
+\section{5.2 IMITATION LEARNING  }
+
+
+Imitation learning recovers the cost and dynamics of a controller through only actions. Similarly to Amos et al. (2018), we compare our approach with Neural Network (NN): An LSTM-based approach that takes the state $x$ as input and predicts the nominal action sequence, directly optimizing the imitation loss directly; SysId: Assumes that the cost of the controller is known and approximates the parameters of the dynamics by optimizing the next-state transitions; and DiffMPC Amos et al. (2018). We evaluated two variations of our method: diLQR.dx: Assumes that the cost of the controller is known and approximates the parameters of the dynamics by directly optimizing the imitation loss; diLQR.cost: Assumes that the dynamics of the controller are known and approximates the cost by directly optimizing the imitation loss.  
+
+Imitation Loss: In Figure 3a, we compare our method with NN and Sysid using imitation loss. Notably, our method performs the best in the dx mode across both tasks, achieving a performance improvement of orders of magnitude— $\cdot10^{6}$ and $10^{4}$ —over the NN. In the dcost mode, our method is also dozens of times stronger than the NN but slightly weaker than Sysid. This is because Sysid directly leverages a system model with state estimates, while imitation learning relies solely on action data, which contains less information. The fact that our method achieves comparable results to Sysid in this mode demonstrates its effectiveness.  
+
+Model Loss: In Figure 3b, we compare the model error learned from our approach to that of DiffMPC. Model loss is defined as the $\mathrm{MSE}(\theta-\hat{\theta})$ , where $\theta$ represents the parameters of the cost function. Since learning in the cost mode is particularly challenging, we chose it as the case to demonstrate model loss. In the dcost mode, our approach recovers more accurate model parameters than DiffMPC, reducing model loss by $18\%$ , indicating an improvement over our analytical results.  
+
+
+
+\section{5.3 VISUAL CONTROL  }
+
+
+We next explore a more complex, high-dimensional task: controlling an inverted pendulum system using images as input.  
+
+![](images/fa6c436a6d1d724aeaa45ac8340366db0340d1f73d37b65a37dd0274a3faa6f7.jpg)  
+Figure 4: Diagram of the end-to-end control architecture. The encoder maps the compressed set of four input frames to the physical state variables (e.g., position, velocity). The differentiable iLQR then steps the state forward using the encoder’s parameters. The decoder takes the predicted state and generates a future frame to match the true future observation.  
+
+In this task, the state of the pendulum is visualized by a rendered line starting from the center of the image, with the angle representing the position of the pendulum. The objective is to swing up the underactuated pendulum from its downward resting position and balance it. The network architecture consists of a mirrored encoder-decoder structure, each with five convolutional or transposed convolutional layers, respectively. To capture the velocity information, we stack four compressed images as input channels. An example of these observations and reconstructions is provided in Figure 4.  
+
+![](images/4bda7dc4abd11face1e90407f8eff28266470ac2d06ef24321f8a82e5b11312e.jpg)  
+Figure 5: Imagined trajectory in the pendulum domain. The first image (red) represents the real input, while the following images are "dreamed up" by our model based on the initial image.  
+
+Our modular approach handles the coordination between the controller and decoder seamlessly. Figure 5 shows sample images drawn from the task depicting a trajectory generated by our system. In this scenario, the system is given just one real image and, with the help of DiLQR, it can output a sequence of predicted images, which closely approximate the actual trajectory of the pendulum.  
+
+
+
+\section{6 DISCUSSION  }
+
+
+In this paper, we focus on the theoretical aspects of differentiable control methods. While our experiments are based on simpler control tasks, the advantages of our approach promise to extend to more complex, real-world applications. Many prior works Amos et al. (2018); Watter et al. (2015); Xu et al. (2024a); Jin et al. (2020) also rely on such toy examples to demonstrate foundational concepts.  
+
+One promising direction is embedding our differentiable controller into reinforcement learning (RL) frameworks. For instance, it could be integrated into a policy network and trained using an actor-critic approach, enabling more efficient policy updates. With its ability to propagate gradients through the control process, our method could enhance RL’s performance, potentially achieving state-of-the-art results in more advanced tasks.  
+
+
+
+\section{7 CONCLUSIONS  }
+
+
+In this work, we introduced DiLQR, an efficient framework for differentiating through iLQR using implicit differentiation. By providing an analytical solution, our method eliminates the overhead of iterative unrolling and achieves O(1) computational complexity in the backward pass, significantly improving scalability. Experiments demonstrate that DiLQR outperforms existing methods in both runtime and learning performance, making it a promising approach for real-time control applications.  
+
+
+

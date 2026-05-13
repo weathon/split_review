@@ -1,0 +1,424 @@
+\title{Prompt Engineering a Prompt Engineer}
+
+\begin{abstract}
+Prompt engineering is a challenging yet crucial task for optimizing the performance of large language models on customized tasks. 
+It requires complex reasoning to examine the model's errors, hypothesize what is missing or misleading in the current prompt, and communicate the task with clarity. 
+While recent works indicate that large language models can be meta-prompted to perform automatic prompt engineering, we argue that their potential is limited due to insufficient guidance for complex reasoning in the meta-prompt.
+We fill this gap by infusing into the meta-prompt three key components: detailed descriptions, context specification, and a step-by-step reasoning template.
+The resulting method, named PE2, exhibits remarkable versatility across diverse language tasks. It finds prompts that outperform ``let's think step by step'' by 6.3\% on MultiArith and 3.1\% on GSM8K, and outperforms competitive baselines on counterfactual tasks by 6.9\%.
+Further, we show that PE2 can make targeted and highly specific prompt edits, rectify erroneous prompts, and induce multi-step plans for complex tasks.\blfootnote{\hspace{-0.13cm}$^\dagger$Work done while interning at Microsoft.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.48\textwidth]{figures/PE2_teaser.pdf}
+    \caption{LLM-powered automatic prompt engineering methods typically use a \colorbox{color3}{meta-prompt} that guides an LLM to inspect the \colorbox{color1}{current prompt}, provide \colorbox{color2}{feedback} (sometimes refered to as textual ``gradients'') and then generate an \colorbox{color1}{updated prompt}. In this paper, we design and investigate \colorbox{color3}{meta-prompt} variants to guide LLMs to perform automatic prompt engineering more effectively.  
+    }
+    \label{fig:teaser}
+\end{figure}
+
+Large language models (LLMs) are powerful tools for many natural language processing tasks, when provided with the right prompts.\footnote{In this paper, we focus on textual prompts of task description (\textit{e.g.}, ``Translate English to French'') or instruction (\textit{e.g.}, ``Let's think step by step'').} 
+However, LLMs are also notoriously sensitive to prompt design \citep{jiang-etal-2020-know,Zhao2021CalibrateBU,reynolds2021prompt,lu-etal-2022-fantastically}, and finding the right prompts often requires extensive manual efforts referred to as ``prompt engineering.''
+Non-AI experts, in particular, may struggle to effectively communicate the task of interest to LLMs, resulting in prompt engineering being performed opportunistically rather than systematically \cite{10.1145/3544548.3581388}.
+Adding to this challenge, once a high-quality prompt is found and deployed into production, unforeseen edge cases can arise, necessitating more rounds of manual efforts.
+All these challenges give rise to an emerging research field of \textit{automatic} prompt engineering. Within this field, a notable line of methods involves leveraging the capabilities of LLMs themselves \citep{zhou2023large, pryzant-etal-2023-automatic}. 
+This entails meta-prompting LLMs with instructions such as ``inspect the current prompt and a batch of examples, provide feedback, then propose a new prompt.'' (See Figure~\ref{fig:teaser})
+\begin{figure*}[t]
+    \centering
+\caption{\textbf{Results Overview.} Our method PE2 consistently brings improvements over the prompt initialization (marked with {\color{YellowOrange} orange text}). It matches or outperforms prompt optimization baselines Iterative APE \citep{zhou2023large} and APO \citep{pryzant-etal-2023-automatic} across a wide range of language tasks, with most significant performance gain observed on Conterfactual Eval \cite{wu2023reasoning}. See detailed performance breakdown in Fig.~\ref{fig:ii}-\ref{fig:bbh}.
+}
+\label{fig:results_overview}
+\end{figure*}
+
+While these methods achieve impressive performance, a subsequent question arises: What makes a good meta-prompt for automatic prompt engineering? To answer this question, we connect two key observations: (1) Prompt engineering, at its core, is a language generation task that requires complex reasoning: it involves closely examining the model's errors, hypothesizing what is missing or misleading in the current prompt, and communicating the task more clearly to LLMs. (2) Complex reasoning capabilities in LLMs can be elicited by prompting the model to ``think step by step'' \citep{wei2022cot,kojima2022large} and can be further improved by instructing them to reflect on their outputs \citep{madaan2023self, chen2023teaching}.
+Bridging these two observations, in this work, we prompt engineer a prompt engineer---we aim to construct a meta-prompt that guide LLMs to perform automatic prompt engineering more effectively.
+We argue that prior works do not provide sufficient guidance in the meta-prompt, thereby limiting the potential of LLMs for automatic prompt engineering. 
+To address this, we introduce new meta-prompt components such as detailed two-step task descriptions, context specification, and a step-by-step reasoning template, to better equip LLMs throughout the process  (\S\ref{sec:pe2}; Fig.~\ref{fig:intro}). 
+The resulting method, named PE2, achieves strong empirical performance (\S\ref{ssec:empirical-results}). When using \texttt{text-davinci-003} as the task model, the prompts produced by PE2 surpass the zero-shot chain-of-thought prompt ``let's think step by step" \citep{kojima2022large} by 6.3\% on MultiArith and 3.1\% on GSM8K. Moreover, PE2 matches or outperforms two automatic prompt engineering baselines, Iterative APE \citep{zhou2023large} and APO \citep{pryzant-etal-2023-automatic} in multiple settings (Fig.~\ref{fig:results_overview}). PE2 is most effective on counterfactual tasks \citep{wu2023reasoning}, where the automatic prompt engineer is anticipated to reason about non-standard situations (\textit{e.g.}, do addition in base-8 instead of base-10) and explain such situation to the task model through the prompt. Beyond academic datasets, we show that PE2 can improve an expert-written production prompt consisting of over 5,000 tokens, resulting in an 8.0\% increase in F1 score.
+
+We further provide a detailed analysis on the behaviors, advantages, and limitations of PE2.
+Upon examining the prompt edit history (\S\ref{ssec:pe2_behavior}), we find that PE2 consistently offers meaningful prompt edits (Table~\ref{table:case_study}). It is able to amend erroneous or incomplete prompts and enrich the prompts with additional details, which leads to improved final performance. 
+It is also able to devise multi-step plans for complex tasks. For example, in the task of movie recommendation, PE2 makes the plan to ``consider factors such as genre, plot and style'' in the prompt.
+Interestingly, when uninformed about performing addition in base-8, PE2 formulates partially-correct arithmetic rules from examples by itself: ``If both numbers are less than 50, add 2 to the sum. If either number is 50 or greater, add 22 to the sum.\footnote{Both the base-8 addition rules and the model-induced rules hold true for examples like 75+7=104 and 5+6=13.}''
+This demonstrates PE2's remarkable ability to reason and adapt in non-standard situations, while also raises concerns of ``shortcut learning'' in prompt optimization. 
+
+
+
+\section{Background}
+
+In this section, we provide a formal formulation of the prompt engineering problem (\S\ref{ssec:pe}), and describe a general framework of automatic prompt engineering using LLMs and meta-prompts (\S\ref{ssec:automatic}). 
+Building on this foundation, we introduce new meta-prompt components used in PE2 in \S\ref{sec:pe2}.
+\subsection{Prompt Engineering}
+\label{ssec:pe}
+
+The goal of prompt engineering is to find the textual prompt $p^*$ that achieves the best performance on a given dataset $D$ when using a given LLM $\mathcal{M}_{task}$ as the task model. 
+More specifically, we assume all datasets can be formatted as textual input-output pairs, \textit{i.e.}, $D=\{(x,y)\}$. 
+We are given a training set $D_{train}$ for optimizing the prompt, $D_{dev}$ for validation, and $D_{test}$ for final evaluation. 
+Following the notations in \citet{zhou2023large}, the prompt engineering problem can be described as:
+\begin{equation}
+    p^* = \argmax_{p} \sum_{(x,y)\in D_{dev}} f(\mathcal{M}_{task}(x; p), y)\label{eq:pe}
+\end{equation}
+where $\mathcal{M}_{task}(x; p)$ is the output generated by the task model when conditioning on the prompt $p$, and $f$ is a per-example evaluation function. For example, if the evaluation metric is exact match, $f(\mathcal{M}_{task}(x; p), y) = \mathbbm{1}[\mathcal{M}_{task}(x; p) = y]$.
+
+\subsection{Automatic Prompt Engineering with LLMs}
+\label{ssec:automatic}
+
+To alleviate the intensive efforts of manual prompt engineering, recent works explore automating this process by meta-prompting LLMs to paraphrase the prompt \citep{zhou2023large} or refine the prompt by inspecting failure examples \citep{pryzant-etal-2023-automatic}. In the following, we describe a framework that encapsulates these prior works and is employed in our development of PE2 in later sections.
+It has three parts: prompt initialization, new prompt proposal, and the search procedure.
+
+\paragraph{Prompt Initialization.} To start the prompt engineering process, a set of initial prompts $P^{(0)}$ is needed.
+We consider two initialization methods:
+\textbf{(1) Manual initialization} is applicable for tasks that has pre-existing prompts written by humans experts. For example, ``Let's think step by step'' is effective on mathematical reasoning tasks and can be used as the initialization for prompt optimization.
+In \textbf{(2) Induction Initialization}, we follow \citet{zhou2023large} by using a batch of examples $\{(x,y)\}$ from $D_{train}$ and a prompt $p^{init}$ (``Here are the input-output pairs. What is the instruction?'') to generate a set of initial prompts $P^{(0)}$.
+
+\paragraph{New Prompt Proposal.} 
+Given a set of initial prompts, the automatic prompt engineer will continuously propose new and potentially better prompts. At timestamp $t$, the prompt engineer is given a prompt $p^{(t)}$ and expected to write a new prompt $p^{(t+1)}$. Optionally, a batch of examples $B=\{(x, y, y')\}$ may be inspected in the new prompt proposal process. Here $y'=\mathcal{M}_{task}(x; p)$ represents output generated by the task model and $y$ represents the ground-truth label. We use $p^{meta}$ to denote a meta-prompt that is used to instruct the prompt proposal model 
+$\mathcal{M}_{proposal}$ to propose new prompts. Therefore, 
+\begin{equation}
+    p^{(t+1)} = \mathcal{M}_{proposal}(p^{(t)}, B; p^{meta})
+\label{eq:optim}
+\end{equation}
+Constructing a better meta-prompt $p^{meta}$ to improve the quality of the proposed prompt $p^{(t+1)}$ is the main focus of this study. We will describe in more details in \S\ref{sec:pe2}.
+
+\paragraph{Search Procedure.} 
+As LLMs are sensitive to trivial prompt variations, it is possible that the newly proposed prompt $p^{(t+1)}$ under-performs the original prompt $p^{(t)}$. Therefore, automatic prompt engineering is typically combined with a back-tracking enabled search procedure.
+At timestamp $t$, we select $n$ best-performing prompts from \textit{all} prompt candidates obtained in previous timestamps (\textit{i.e.}, $P^{(0)}\cup P^{(1)} \cup ... \cup P^{(t)}$). 
+For \textit{each} of these $n$ prompts, we sample $m$ different batches $B$ of model errors, and run the meta-prompt in Eq.~\ref{eq:optim} to produce $m$ new prompts.
+This results in $m\times n$ new prompts, which we denote as $P^{(t+1)}$ collectively and are used at the next timestamp $t+1$.
+The search algorithm is described more formally in Algorithm \ref{algo:search}.
+
+
+
+\section{Prompt Engineering a Prompt Engineer}
+
+\label{sec:pe2}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/intro.pdf}
+    \caption{An redacted example to illustrate the meta-prompt components introduced in \S\ref{sec:pe2}. 
+    }
+    \label{fig:intro}
+\end{figure*}
+
+Much like how the prompt plays an important role for the end task performance, the meta-prompt $p^{meta}$ introduced in Eq.~\ref{eq:optim} plays an important role in the quality of newly proposed prompts, and the overall quality of automatic prompt engineering. 
+In this work, we focus on prompt engineering the meta-prompt $p^{meta}$---we develop meta-prompt components that can potentially help improve LLMs' prompt engineering quality.
+
+\begin{table}[]
+\scalebox{0.75}{
+\begin{tabular}{@{}l|ccc@{}}
+\toprule                                                             & \textbf{Iter. APE} & \textbf{APO}        & \textbf{PE2}                                                              \\\midrule
+Inspect Model Failures                                              & \raisebox{-.5ex}{\XSolidBrush}        & \raisebox{-.5ex}{\Checkmark}        & \raisebox{-.5ex}{\Checkmark}                                                              \\
+(a) Task Description                                                    &           &            &                                                                  \\
+\quad - Length                                                              & Short     & Short      & Long                                                             \\
+\quad - \# Steps                                                              & One-step  & Two-step   & Two-step                                                         \\
+\quad - Position & Beginning & On-the-fly & Both \\
+(b) Context Specification                                               & \raisebox{-.5ex}{\XSolidBrush}         & \raisebox{-.5ex}{\XSolidBrush}          & \raisebox{-.5ex}{\Checkmark}                                                              \\
+(c) Step-by-step Template                                               & \raisebox{-.5ex}{\XSolidBrush}         & \raisebox{-.5ex}{\XSolidBrush}          & \raisebox{-.5ex}{\Checkmark}  \\\bottomrule
+\end{tabular}
+}
+\caption{Comparison of Meta-prompt Components Used in Baseline Methods and PE2.}\label{tab:summary}
+\end{table}
+
+In the following, we reflect on the limitations of prior works and subsequently introduce three meta-prompt components targeting these limitations.
+We visualize these components in Fig.~\ref{fig:intro} and provide a summary in Table~\ref{tab:summary}. We name our method using these three components as \textbf{PE2}, a prompt engineered prompt engineer.
+
+\paragraph{(a) Two-step Task Description.} In APO \cite{pryzant-etal-2023-automatic} the task of prompt engineering is decomposed into two steps (Fig.~\ref{fig:teaser}): In step 1, the model is expected to inspect the current prompt and a batch. In step 2, the model is expected to generate an improved prompt.
+
+However, in APO, each step is explained \textit{briefly} and \textit{on the fly}. In contrast, we consider clarifying the steps and expectations \textit{upfront} in the meta-prompt, and also guiding the model with specific steps \textit{on-the-fly}.
+
+\paragraph{(b) Context Specification.} In practice, how the prompt and the input text are formatted together is flexible.
+It may appear \textit{before} the input text to describe the task, \textit{e.g.}, ``Translate English to French.'' It may appear \textit{after} the input text, \textit{e.g.}, ``Let's think step by step'' to elicit reasoning capabilities.
+Recognizing these varying contexts, we explicitly specify the layout of the prompt and the input. 
+
+\paragraph{(c) Step-by-step Reasoning Template.} To encourage the model to examine \textit{each} example in the batch $B$ closely and reflect on the limitations in the current prompt, we guide the prompt proposal model $\mathcal{M}_{proposal}$ with a list of questions. For example:
+Is the prompt correctly describing the task? 
+Is it necessary to edit the prompt?
+If yes, provide actionable suggestions on prompt editing.
+    
+
+\paragraph{Other Meta-prompt Components We Tried.} Inspired by optimization concepts such as batch size, step size and momentum, we considered adding their verbalized counterparts to the meta-prompt and investigate their effects. We also considered adding a prompt engineering tutorial in the meta-prompt to help the LLM better understand the task. Our observations on these components are mixed.
+
+
+\section{Experiment Setting}
+
+\subsection{Tasks} 
+\label{ssec:datasets}
+We use the following five groups of tasks to evaluate the effectiveness of PE2. Details of the used datasets (\textit{e.g.
+
+\paragraph{(1) Math Reasoning.} We use MultiArith \citep{roy-roth-2015-solving} and GSM8K \citep{cobbe2021training}, which contain grade school math problems that requires multiple steps of arithmetic operations.
+
+\paragraph{(2) Instruction Induction.} Instruction Induction \citep{honovich-etal-2023-instruction} is a benchmark for inferring the underlying instruction from few-shot examples. We use 14 selected tasks that cover a wide range of use cases, \textit{e.g.}, ``Formality'' is a task that aims at rephrasing a sentence to be more formal.
+
+\paragraph{(3) BIG-bench Hard.} BIG-bench Hard \cite{suzgun-etal-2023-challenging} is a collection of 23 tasks (27 subtasks) that are challenging to LLMs but the performance may be improved with advanced prompting techniques \cite{chain_of_thought}. Some of BIG-bench Hard tasks are closely related to real-world applications (\textit{e.g.}, movie recommendation).
+
+\paragraph{(4) Counterfactual Evaluation.} We use the arithmetic, chess, and syntax tasks and their counterfactual variants introduced in \citet{wu2023reasoning}. For arithmetic, the original task is base-10 addition, and the counterfactual tasks are base-8/9/11/16 addition. For chess, the starting positions for knights and bishops are swapped in the counterfactual task.
+We use this set of tasks to investigate whether PE2 can reason about non-standard situations and communicate them to the task model.
+
+\paragraph{(5) Production Prompt.} Lastly, we optimize an internal production prompt for a hierarchical, multi-label classification task. The task is to classify a user query into domains, intents and slots, and then output a nested dictionary as the result. The initialization prompt is carefully designed by experienced engineers and has more than 5,000 tokens.
+
+\subsection{Compared Methods}
+\label{sec:exp-details}
+We compare PE2 with the following automatic prompt engineering methods.
+\textbf{(a) APE} \citep{zhou2023large}: The base version of APE is an initialization-only method and does not involve new prompt proposal steps. It uses an initialization prompt $p^{init}$ to generate multiple prompt candidates from a few examples, and select the best one among them based on $D_{dev}$ performance. 
+\textbf{(b) Iterative APE} \citep{zhou2023large}: After initialization, $p^{meta}$ instructs the model to produce a paraphrase of $p^{(t)}$ and use it as $p^{(t+1)}$. \textbf{(c) APO} \citep{pryzant-etal-2023-automatic}: $p^{meta}$ contains short instructions on inspecting the batch $B$, generating textual ``gradients'' (feedback), and producing a new prompt $p^{(t+1)}$.
+
+\subsection{Expeirment Details}\label{ssec:budget}
+\paragraph{LLMs.} By \textit{default}, we use \texttt{gpt-4} \citep{OpenAI2023GPT4TR} as prompt proposal model $\mathcal{M}_{proposal}$ and use \texttt{text-davinci-003} \citep{ouyang2022training} as the task model $\mathcal{M}_{task}$ performing the underlying task. Experiments on BIG-bench Hard are conducted at a later stage, and we use \texttt{gpt-4-turbo} and \texttt{gpt-3.5-turbo-instruct} to save costs and demonstrate the compatibility of our methods. 
+To ensure fair comparison, we always use the same set of LLMs ($\mathcal{M}_{proposal}$ and $\mathcal{M}_{task}$) when evaluating PE2 against other prompt optimization methods.
+
+\paragraph{Prompt Initialization.} For Math Reasoning and BIG-bench Hard tasks, we use ``Let's think step by step.'' \citep{kojima2022large} as the initialization prompt, which can elicit multi-step reasoning in LLMs to perform these tasks. For Instruction Induction, we follow the setting in prior works \citep{zhou2023large} and use induction initialization. For Counterfactual Eval, we experiment with both. For the production task, we use the prompt written by an experienced engineer.
+
+\paragraph{Search Budget.} We use the same search budget for all prompt optimization methods.
+For experiments using induction initialization, 30 prompts are generated by $p^{init}$ and form the initial candidate set $P^{(0)}$.
+Due to budget constraints, the number of optimization steps $T$ is set to be $3$. At each timestamp, we select $n=4$ best-performing prompts, and propose $m=4$ prompts from each of them.
+
+
+
+\section{Results and Analysis}
+
+
+\subsection{Main Results}
+\label{ssec:empirical-results}
+
+\paragraph{Improved baselines with more recent LLMs.}
+In Zero-shot CoT \citep{kojima2022large} and APE \citep{zhou2023large}, the results were obtained with a earlier \texttt{text-davinci-002} model. We first rerun the prompts in these two works with \texttt{text-davinci-003}, an upgraded model. In Table \ref{tab:math_results}, we observe a significant performance boost by using \texttt{text-davinci-003}, suggesting that it is more capable of solving math reasoning problems with Zero-shot CoT. Moreover, the gaps between the two prompts are narrowed (MultiArith: $3.3\%\rightarrow1.0\%$, GSM8K: $2.3\%\rightarrow0.6\%$), indicating \texttt{text-davinci-003} has a reduced sensitivity to prompt paraphrasing. 
+Given this, methods that rely on simple paraphrasing, such as Iterative APE, may not improve the final accuracy as effectively.
+More specific and targeted edits are necessary to improve the performance.
+\paragraph{PE2 outperforms Iterative APE and APO on various tasks.} 
+PE2 is able to find a prompt that achieves $92.3\%$ accuracy on MultiArith ($+6.3\%$ compared to Zero-shot CoT) and $64.0\%$ on GSM8K ($+3.1\%$). 
+Additionally, we demonstrate the wide applicablity of PE2 on a wide range of language tasks. 
+In Fig.~\ref{fig:results_overview} we summarize the results and show that PE2 outperforms Iterative APE \citep{zhou2023large} and APO \citep{pryzant-etal-2023-automatic} in multiple cases. 
+Most notably, when induction initialization is used, PE2 outperforms APO on 11 out of 12 counterfactual tasks (Fig.~\ref{fig:results-cf}), exhibiting a 6.9\% average increase in accuracy. This highlights PE2's capability in reasoning about contradictions and unconventional situations.
+
+\begin{table}[t]
+\scalebox{0.72}{
+\begin{tabular}{l|cc|cc}
+\toprule
+\textbf{Method}        & \multicolumn{1}{c}{\begin{tabular}[c]{@{}c@{}}\textbf{Task}\\ \textbf{Model}\end{tabular}} & \multicolumn{1}{c}{\begin{tabular}[c]{@{}c@{}}\textbf{Proposal}\\ \textbf{Model}\end{tabular}} & \multicolumn{1}{|c}{\begin{tabular}[c]{@{}c@{}}\textbf{MultiArith}\\ \textbf{Test}\end{tabular}} & \multicolumn{1}{c}{\begin{tabular}[c]{@{}c@{}}\textbf{GSM8K}\\ \textbf{Test}\end{tabular}}\\\midrule
+\rowcolor{gray!20}\multicolumn{5}{l}{Fixed Prompt, Reported by \citet{zhou2023large}}                                  \\\midrule
+Zero-shot CoT & TD002 & - & 78.7 & 40.7 \\
+APE & TD002 & TD002 & 82.0 & 43.0 \\\midrule
+\rowcolor{gray!20}\multicolumn{5}{l}{Fixed Prompt, Reproduced}                                \\\midrule
+Zero-shot CoT & TD003 & - & 86.0 & 60.9 \\
+APE & TD003 & - & 87.0 & 61.5 \\\midrule
+\rowcolor{gray!20}\multicolumn{5}{l}{Prompt Optimization}               \\\midrule
+Iterative APE& TD003 & GPT-4 & 88.5 & 62.7 \\
+APO & TD003 & GPT-4 & 88.5 & 63.1 \\
+PE2 (this work) & TD003 & GPT-4 & \textbf{92.3} & \textbf{64.0} \\\bottomrule
+\end{tabular}
+}
+\centering
+\caption{Performance Comparison on Math Reasoning Tasks. TD002/003 stand for \texttt{text-davinci-002/003.} See Table~\ref{tab:math_prompts} for the final prompts.
+}\label{tab:math_results}
+\end{table}
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{0.45em} % for the horizontal padding
+\scalebox{0.72}{
+\begin{tabular}{l|cc|cccc}
+\toprule
+\textbf{Method}         & \textbf{GSM8k} & \textbf{MultiA.} & \textbf{Date} & \textbf{Hyper.} & \textbf{Temp.} & \textbf{Word} \\\midrule
+Init. & 48.1  & 71.5    & 36   & 52     & 50    & 4    \\
+Iter. APE      & 49.7  & 73.5    & 48   & 48     & 42    & 20   \\
+APO            & 51.0  & 73.5    & 48   & 72     & 52    & 16   \\
+PE2            & 50.5  & 74.3    & 56   & 74     & 62    & 28  \\\bottomrule
+\multicolumn{7}{l}{}\\[-1em]
+\multicolumn{7}{l}{\small \textbf{Tasks from BIG-Bench Hard:} Date = Date Understanding; }\\
+\multicolumn{7}{l}{\small Hyper. = Hyperbaton; Temp. = Temporal Sequence, Word = Word Sorting.}
+\end{tabular}
+}
+\caption{Results on six selected tasks when using \texttt{Mistral-7B-Instruct-v0.2} \cite{jiang2023mistral} as the task model and \texttt{gpt-4-turbo} as the prompt proposal model. See Table~\ref{table:mistral-prompts} for the final prompts.}\label{table:mistral_results}
+\end{table}
+
+\begin{table}[t]
+\centerline{
+\scalebox{0.72}{
+\begin{tabular}{l|p{0.5\textwidth}}
+\toprule
+\textbf{Method}  & \textbf{MultiArith Prompt}   \\\midrule
+\rowcolor{gray!20}\multicolumn{2}{l}{Fixed Prompt}    \\\midrule
+Zero-shot CoT & Let's think step by step.    \\\midrule
+\multirow{2}{*}{APE}& Let’s work this out in a step by step way to be sure we have the right answer.  \\\midrule
+\rowcolor{gray!20}\multicolumn{2}{l}{Prompt Optimization}  \\\midrule
+Iterative APE  & Let's proceed in a methodical, step-by-step manner. \\\midrule
+\multirow{3}{*}{APO} & Given the scenario, perform the necessary calculations step by step to find the final result. Consider all parts of the input and the sequence of events. \\\midrule
+\multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}PE2\\ (this work)\end{tabular}}  & Let's solve this problem by considering all the details. Pay attention to each piece of information, remember to add or subtract as needed, and perform the calculations step by step.  \\\bottomrule      
+\end{tabular}
+}}
+\caption{MultiArith prompts found by compared prompt optimization methods. We use \texttt{text-davinci-003} as the task model and \texttt{gpt-4} as the prompt proposal model.}\label{tab:math_prompts}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.49\textwidth, clip, trim=0 0 0 1.2em]{figures/compare.pdf}
+    \caption{Prompt optimization dynamics of Iterative APE, APO and PE2 on MultiArith. The violins represent the quality distributions of newly proposed prompts at each optimization step. PE2 has a better balance between exploration and stability.
+    }
+    \label{fig:dynamics}
+\end{figure}
+\paragraph{PE2 generates targeted prompt edits and high-quality prompts.} In Fig.~\ref{fig:dynamics} we plot the quality of prompt proposals over the course of prompt optimization. We observe very distinct patterns for the three prompt optimization methods: 
+Iterative APE is based on paraphrasing, so the newly generated prompts have smaller variance. APO makes drastically large prompt edits and thus the performance drops in the first step. Among the three methods, PE2 has a better balance between exploration and stability.
+In Table \ref{tab:math_prompts}, we list the optimal prompts found by these methods. Both APO and PE2 are able to provide instructions on ``considering all parts / details''. In addition, PE2 is designed to inspect the batch closely, enabling it make very specific prompt edits such as ``remember to add or subtract as needed''.
+\paragraph{PE2 is widely applicable to various LLMs, including open-weight models.}
+Our previous experiment setting employs different combinations of \textit{closed-source} models as the task model $\mathcal{T}_{task}$ and the prompt proposal model $\mathcal{T}_{proposal}$ (\S\ref{ssec:budget}).
+To further demonstrate PE2's model-agnostic nature, we introduce \texttt{Mistral-7B-Instruct-v0.2}, a recent open-weight model, as the task model, and uses \texttt{gpt-4-turbo} as the prompt proposal model. We report the results in Table~\ref{table:mistral_results} and the final optimized prompts in Table~\ref{table:mistral-prompts}. Consistent with our experiments with closed-source models, results in Table~\ref{table:mistral_results} demonstrate that PE2 performs competitively with or surpasses other automated prompt engineering methods.
+As recent research suggests, LLMs still exhibit surprising sensitivity to prompt design and formatting \cite{sclar2024quantifying, mizrahi2023state}, highlighting the importance of investigating why certain prompts succeed or fail. We hope PE2 empowers researchers to discover effective and ineffective prompts, which lay empirical foundations for future exploration into prompt sensitivity with open-weight models.
+\subsection{Ablation Study}
+\label{ssec:ablation}
+
+To demonstrate the effectiveness of the three new meta-prompt components
+introduced in PE2, we run ablation experiments by removing these components during prompt optimization on MultiArith and GSM8K. In these experiments, we make sure that the meta-prompt still contains sufficient information about the task of prompt engineering.
+From the results in Table~\ref{tab:ablation}, we show that these three components contribute significantly to the final accuracy. 
+In Fig.~\ref{fig:ablation}, we visualize the optimization dynamics of these ablation experiments. 
+We find that the exclusion of any one of these components results in a higher variance in the quality distribution of newly-proposed prompts. 
+Moreover, without these components, the proposal model more frequently suggests low-quality prompts.
+We also conduct an ablation study on back-tracking (\textit{i.e.}, at timestamp $t$, select top-performing prompts from $\cup_{i=0}^t P^{(i)}$ versus only $P^{(t)}$) and hard negative sampling (\textit{i.e.}, the batch $B$ is sampled from the model's errors, versus being randomly sampled from $D_{train}$). 
+Since both techniques show slightly positive effects on PE2's performance, they are retained in the final version of PE2. 
+
+We encourage readers to refer to \S\ref{app:meta-prompt-optim} for additional meta-prompt components that we explored during PE2's development, such as verbalized ``momentum'', ``step size'', and a tutorial on prompt engineering. Although these elements were not included in the final version of PE2, we document them to encourage further exploration as more capable language models emerge in the future.
+\subsection{Case Study}
+\label{ssec:pe2_behavior}
+
+\paragraph{PE2 amends erroneous or incomplete instructions, and devises multi-step plans for complex tasks.} 
+Tables~\ref{table:case_study} and~\ref{table:case_study2} present notable prompt edits made by PE2.
+In the task of finding rhyming words (\textit{e.g.} ``car'' rhymes with ``bar''), induction initialization mistakenly suggests the task is about changing the first letter of a word.
+PE2 successfully correct this after one optimization step. 
+In the task of movie recommendation, PE2 is able to decompose the complex task into concrete criteria, such as genre, plot and actor, when determining movie similarities. In date understanding, PE2 identifies the crucial step of referencing information about ``today''.
+These examples demonstrate PE2's ability to learn by summarizing key steps from failures and incorporating them into improved prompts, aligning with recent work \cite{zhang2024context}.
+
+\begin{table}[t]
+\centering
+\scalebox{0.72}{
+\begin{tabular}{l|cc}
+\toprule
+\textbf{Method} & \begin{tabular}[c]{@{}c@{}}\textbf{MultiArith}\\ \textbf{Dev}\end{tabular} & \begin{tabular}[c]{@{}c@{}}\textbf{GSM8K}\\ \textbf{Dev}\end{tabular} \\\midrule
+PE2 (default)           & 92.0 & 68.0 \\\midrule
+\rowcolor{gray!20}\multicolumn{3}{l}{Baselines} \\\midrule
+Iterative APE & 89.0 & 66.0 \\
+APO  & 86.0 & 60.0 \\\midrule
+\rowcolor{gray!20}\multicolumn{3}{l}{Ablation: Meta-prompt Components} \\\midrule
+- two-step task description      & 89.0 & 66.0 \\
+- step-by-step reasoning template    & 87.0 & 61.0 \\
+- context specification & 93.0 & 63.0 \\\midrule
+\rowcolor{gray!20}\multicolumn{3}{l}{Ablation: Search Algorithm Configurations} \\\midrule
+- back-tracking         & 90.0 & 66.0 \\
+- hard negative sampling & 90.0 & 68.0 \\\midrule
+\end{tabular}
+}
+\caption{Ablation study on meta-prompt components. 
+}\label{tab:ablation}
+\end{table}
+\begin{figure}
+\includegraphics[width=0.48\textwidth, clip, trim=0 0 0 1.1em]{figures/ablation_dynamics.pdf}
+\caption{Prompt optimization dynamics on MultiArith when removing meta-prompt components. By removing one component, the new prompts have larger variance in their quality.
+}
+\label{fig:ablation}
+\end{figure}
+
+\begin{table*}[t]
+\centering
+
+\scalebox{0.72}{
+\begin{tabular}{llp{0.9\textwidth}c}
+\toprule
+\textbf{Task}                & $t$ & \textbf{Prompt}     & \textbf{Dev Acc.} \\\midrule
+\rowcolor{green!15}\multicolumn{4}{l}{Correct wrong or incomplete task instructions}  \\\midrule
+\multirow{3}{*}{Rhymes}              & 0    & Remove the first letter from each input word and then {\color{Red} replace that first letter with a similar sounding letter or group of letters} to form a new word.                     & 0.35            \\
+                    & 1    & Generate a word that {\color{Green} rhymes with the input word}.                                                                                                                           & 0.45            \\\midrule
+\rowcolor{green!15}\multicolumn{4}{l}{Lay out tailored multi-step plans for complex problems}  \\\midrule
+\multirow{6}{*}{\begin{tabular}[c]{@{}l@{}}Movie\\Recommendation\end{tabular}}  & 0    & Let's think step by step.                                                                                                                                       & 0.58            \\
+                    & 1    & Consider the {\color{Green} genre, plot, and style} of the input movies. Using this information, think step by step to identify which of the following options is most similar to the given movies.                                                                                                                       & 0.74            \\
+                    & 2    & Considering factors such as genre, {\color{Green} director, actors, release period, audience target, animation style, and humor}, analyze the similarities among the given movies and identify the movie from the options that shares the most similarities.                                                                                                      & 0.82           \\\midrule
+\multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}Date\\Understanding\end{tabular}}  & 0    & Let's think step by step.                                                                                                                                       & 0.39            \\
+                    & 2    & Analyzing the given information, let's calculate the solution. Remember to consider the context provided, such as  {\color{Green}references to 'today' or specific dates}.                                                                                                     & 0.54           \\\midrule
+\rowcolor{yellow!20}\multicolumn{4}{l}{Produce shortcut solutions in counterfactual tasks}  \\\midrule
+\multirow{4}{*}{\begin{tabular}[c]{@{}l@{}}Base-8 Addition\\ (Induction Init.)\end{tabular}} & 0 & Add the two numbers given as input to get the output. & 0.0 \\
+& 3 & Add the two numbers provided in the input. Then, adjust this sum based on the following rule: {\color{Tan}if both numbers are less than 50, add 2 to the sum. If either number is 50 or greater, add 22 to the sum.} The final result is the output. & 0.35 \\
+                    \bottomrule
+\end{tabular}
+}
+\caption{Notable prompt edits made by PE2. See \S\ref{ssec:pe2_behavior} for discussion. See Table~\ref{table:case_study2} for additional examples.
+}\label{table:case_study}
+\end{table*}
+
+\paragraph{Limitations in meta-prompt following and hallucination.} Despite the successes made by PE2, we note several factors that's limiting its performance when applied to challenging counterfactual tasks. We provide representative cases in Table~\ref{table:limitation}. Occasionally, PE2 refuses to propose a new prompt and insists that ``the prompt is correct, but the label is incorrect,'' even when we explicitly state "the labels are absolutely correct" within the meta-prompt.
+In another example, we attempt to guide it with hints (\textit{e.g.}, suggesting a different numerical base), but this can unfortunately lead PE2 to generate incorrect solutions (\textit{e.g.}, base-80) and even create justifications for these imagined solutions.
+These observations highlight the importance of improving LLMs' abilities to follow (meta-)instructions accurately and addressing hallucination issues.
+
+\paragraph{Discussion on ``shortcut learning.''} 
+We find interesting yet concerning prompt edits on the counterfactual task of base-8 addition. When induction initialization is used (\textit{i.e.}, PE2 is uninformed with the information of base-8 and must infer it from the examples), PE2 is able to devise its own heuristic that is partially correct (``... if both numbers are less than 50, add 2 to the sum. If either number is 50 or greater, add 22 to the sum''; see Table~\ref{table:case_study}).
+This heuristic holds true for a subset of test cases like 75+7=104 and 5+6=13, but is ultimately not the intended solution.
+
+On the positive side, it demonstrates PE2's ability to adapt in unseen scenarios and engage in sophisticated counterfactual reasoning.
+However, it is concerning that models prompted with these self-induced shortcut solutions achieve a test accuracy of 37\% (average over 5 runs), which outperform models explicitly prompted to perform base-8 addition (test acc: 17\%/28\% before/after PE2 optimization). 
+Shortcut learning \cite{geirhos2020shortcut} has been studied extensively for gradient-based optimization. Our experiments suggest that similar failure modes may be present in automatic prompt optimization. 
+
+\begin{table*}[t]
+\centering
+\scalebox{0.72}{
+\begin{tabular}{lp{1.1\textwidth}}
+\toprule
+\textbf{Task}                & \textbf{Meta-prompt and Reasoning Snippets}  \\\midrule
+\rowcolor{red!15}\multicolumn{2}{l}{Neglecting instructions in the meta-prompt}  \\\midrule
+\multirow{4}{*}{Base-9 Addition} & \textbf{Meta-prompt:} ... Note that {\color{Green} the ground-truth labels are \_\_absolutely correct\_\_}, but the prompts (task descriptions) may be incorrect and need modification. ...   \\\cmidrule{2-2}
+ & \textbf{Reasoning:} No, it is not necessary to edit the prompt. The prompt is correct, but {\color{Red} the label is incorrect}. ... {\color{Red}The issue seems to be with the label}, not the prompt. \\\midrule
+\rowcolor{red!15}\multicolumn{2}{l}{Hallucination (when hints are provided in the meta-prompt)}  \\\midrule
+\multirow{6}{*}{Base-8 Addition}  & \textbf{Hint:} The calculation may be performed in a different numerical base.\\\cmidrule{2-2}
+ & \textbf{Reasoning:} ... Given this, it's possible that the numbers are being added {\color{Red}in base 80}, not base 10. {\color{Red}In base 80, adding 20 to the sum of two numbers would be equivalent to adding 1 in base 10.} \\\cmidrule{2-2}
+ & \textbf{New Prompt:} The inputs are two numbers separated by a '+'. {\color{Red}Add these two numbers together in base 80}, then add 1 to give the output in base 10. \\\bottomrule  
+\end{tabular}
+}
+\caption{Limitations and failure cases of PE2. See \S\ref{ssec:pe2_behavior} for discussion.}\label{table:limitation}
+\end{table*}
+
+\subsection{Additional Analysis}
+
+\paragraph{Effect of Initialization. (\S\ref{app:analysis_init})} (1) PE2 is able to recover from misleading or irrelevant prompt initializations, however the final prompt after optimization is worse than when using an instructive initialization.
+(2) We experiment with induction initialization. In this case, PE2 is able to discover a high quality prompt \textit{from scratch} that matches with ``Let's think step by step'' on MultiArith.
+
+\paragraph{Effect of Task Format/Difficulty. (\S\ref{app:analysis_format})} We experiment with using a generative format (\textit{i.e.}, generating the answer string) and a multi-choice format (\textit{i.e.}, selecting from given choices A/B/C/D) on the Date Understanding task in BIG-bench Hard. 
+We observe that automatic prompt engineering methods has limited effect on the multi-choice format, but bring significant gains on the generative format.
+
+\paragraph{Do optimized prompts generalize to other LLMs? (\S\ref{app:analysis_generalization})} 
+We evaluate prompts optimized for \texttt{text-davinci-003} on other models such as \texttt{mpt-7b-instruct}, \texttt{yi-6b} and \texttt{mistral-7b-instruct}. 
+We do not observe consistent cross-model generalization trends. 
+This suggests that, although PE2 is a model-agnostic prompt optimization method (\textit{i.e.}, can be applied to various $\mathcal{M}_{task}$), the final optimized prompts are specific to the underlying task model.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Automatic Prompt Engineering.} 
+To alleviate the intensive trial-and-error efforts in manual prompt engineering, the research community has developed various strategies to automate this process with techniques such as incremental editing \citep{prasad-etal-2023-grips}, reinforcement learning \citep{deng-etal-2022-rlprompt, zhang2022tempera}, algorithmic search \citep{xu2022gps}, generating in-context demonstrations adaptively \citep{wan-etal-2023-better,wan-etal-2023-universal}, among others.
+A line of work focus on meta-prompting LLMs themselves for automatic prompt engineering \citep{honovich-etal-2023-instruction, zhou2023large, pryzant-etal-2023-automatic}. 
+In our work, we discuss potential limitations in these methods and subsequently introduce new meta-prompt components in PE2. 
+
+\paragraph{Prompting LLMs for Complex Reasoning Tasks.} 
+Recent research works suggest that LLMs can perform complex reasoning tasks, \textit{e.g.}, grade-school math problems \citep{cobbe2021training}. There are two major techniques to boost LLMs' performance on this: \textbf{(1) prompting methods} that guide the model to produce intermediate reasoning steps, either with few-shot demonstrations \citep{nye2021show, wei2022cot, yao2023react} or with zero-shot prompts \citep{kojima2022large}; \textbf{(2) self-reflection methods} that progressively guide the model to inspect its current output and refine it \citep{chen2023teaching, madaan2023self, paul2023refiner, kim2023language}.
+At its core, prompt engineering is a language generation task requiring complex reasoning. Human prompt engineers usually examine the failure cases produced by the current prompt closely, make hypotheses, and compose a new prompt. In this work, we explore various prompting strategies when building an LLM-powered automatic prompt engineer.
+
+\paragraph{Self-training and Self-improving for LLMs.}
+Self-training refers to the technique of using a weak model to annotate input-label pairs and using them for further training \citep{Rosenberg2005SemiSupervisedSO}.
+In the context of LLMs, STaR \citep{zelikman2022star} and Self-Improve \citep{huang2022large} show that employing LLMs to generate high-quality reasoning chains, followed by model fine-tuning on these chains, can significantly improve the model's reasoning capabilities.
+In this work, we consider textual prompts as the ``parameters'' of LLMs, and we optimize these ``parameters'' with LLMs.
+This may be categorized as a case of self-improving \citep{noah_goodman_blog}.
+
+
+\section{Conclusion}
+
+
+In this paper, we introduced three meta-prompt components that lead to improved performance on automatic prompt engineering. The resulting method PE2 refines prompts written by human experts and surpasses established automatic prompt engineering baselines across various scenarios, notably on counterfactual tasks and a production application.
+Through comprehensive analysis and case studies, we illustrate PE2's ability to make targeted prompt edits and generate high-quality prompts, and demonstrate its general applicability with different LLMs.
+
+The challenge of prompt engineering a prompt engineer remains ongoing.
+As highlighted in our case study, we believe improving the LLM's instruction following abilities and mitigating hallucination issues will be crucial for improving automatic prompt engineering. 
+As the capabilities of LLM continue to evolve, their potential involvement in optimization or feedback loops necessitates a deeper empirical understanding of their failure modes \cite{pan2024feedback}, including shortcut learning discovered in this study. 
+Looking ahead, we are also excited about applying PE2 to optimize its own meta-prompt in a self-referential way, in line with \citet{metz2020tasks, irie2022modern, fernando2023promptbreeder, zelikman2023self}.
+
+
+

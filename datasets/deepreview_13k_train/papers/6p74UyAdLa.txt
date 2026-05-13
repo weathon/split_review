@@ -1,0 +1,314 @@
+\title{Dynamic Negative Guidance of Diffusion Models}
+
+\begin{abstract}
+Negative Prompting (NP) is widely utilized in diffusion models, particularly in text-to-image applications, to prevent the generation of undesired features. In this paper, we show that conventional NP is limited by the assumption of a constant guidance scale, which may lead to highly suboptimal results, or even complete failure, due to the non-stationarity and state-dependence of the reverse process. Based on this analysis, we derive a principled technique called \textit{\textbf{D}ynamic \textbf{N}egative \textbf{G}uidance}, which relies on a near-optimal time and state dependent modulation of the guidance without requiring additional training. Unlike NP, negative guidance requires estimating the posterior class probability during the denoising process, which is achieved with limited additional computational overhead by tracking the discrete Markov Chain during the generative process. We evaluate the performance of DNG class-removal on MNIST and CIFAR10, where we show that DNG leads to higher safety, preservation of class balance and image quality when compared with baseline methods. Furthermore, we show that it is possible to use DNG with Stable Diffusion to obtain more accurate and less invasive guidance than NP.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Since first proposed as generative models~\citep{SohlDicksteinDM, HoDDPM, KarrasEDM, SongSDE}, Diffusion models (DMs) have surpassed previous generative models by large margins on a wide range of tasks, including Text-to-Image (T2I) generation \citep{LDMs}, audio synthesis \citep{DiffWave}, video synthesis \citep{LumiereVideo}, and protein design~\citep{RFDiffusion23}. One of the key features behind their success is the simplicity with which these models can be controlled during generation. This process, referred to as guidance~\citep{CG,CFG}, allows users to sample from a conditional distribution. In modern T2I DMs the guidance is performed through joint text-image latent representations such as CLIP for Stable Diffusion~\citep{CLIP,LDMs, StableDiffXL}. The language model behind such a joint embedding is however quite poor and struggles to understand basic textual operations such as negations~\citep{ValseTestingVLs,CLIPStrugglesNegation, ClipNegation}. As an example, when prompting Stable Diffusion with the prompt: ``A gentleman with a cane from the 1800s without a mustache'', it is almost guaranteed that the model will produce an image of a man with a mustache. To resolve this, widespread diffusion models such as Midjourney or Stable Diffusion rely on a second prompt line that contains a so-called \textit{negative prompt}~\citep{ErasingConcepts,UnderstandingNPs, PerpNeg,SLD, CompositionalGenUsingEBMs}. In the example mentioned above, this line would contain the prompt: ``A mustache''. This prompt is then used similarly to the positive prompt, the only difference being that instead of pushing the model \textit{towards} the condition, the model pushes \textit{away} from it. This is called Negative Prompting (NP).\\
+Negative prompting is commonly accepted in the community, and all publicly available models rely on some form of NP. Its theoretical aspects remain however understudied~\citep{PerpNeg, UnderstandingNPs}.\\
+Mathematically, NP is straightforward, as it corresponds to the well-studied Classifier-Free Guidance (CFG) scheme~\citep{CFG} with a negative guidance scale. However, while effective in practice, such a simple change of sign is fundamentally flawed. CFG can be seen as an attractive vector field that aims to guide the model towards the correctly conditioned outputs. In particular, the further away the noised image is from the desired condition, the stronger the guidance field is. When designing a guidance scheme that \emph{averts} the denoising process towards an output from an undesired region, two properties must be met. First, the corresponding repulsive field needs to be directed away from the undesired conditional, i.e. a change of sign is required, which NP satisfies by construction. In addition, the repulsive vector field should be the strongest close to the undesired regions, such that the negative prompt has no impact at all if the progressive denoising process remains far from any of the undesired regions. In physical terms, the latter property corresponds to a vanishing force at infinity. This property is missing from the traditional NP scheme. The flaws of NP are particularly apparent in one dimension, in which NP completely fails to sample the desired conditional distribution. This is shown in Fig.~\ref{fig: 1D comparison}, in which the different guidance schemes are compared to each other. Another key flaw of NP is the static nature of the guidance scheme. It was recently shown that the generative denoising process is far from being uniform in time, as it is instead demarcated by brief symmetry breaking events corresponding to `generative decisions'~\citep{raya2024spontaneous, SymmBreakingMezart,StatThermoDynDMs,PhaseTransHierarchyData, li2024critical}.
+Ideally, it is during those key bifurcation moments that guidance should be active, since outside those semantic decision regions guidance only harms the diversity of the model~\citep{GuidanceInLimitedInterval, PhaseTransHierarchyData}.
+\begin{figure}
+    \begin{minipage}[t]{0.48\textwidth} % Left half (50% of the text width)
+        \centering
+        \begin{subfigure}[t]{0.48\textwidth} % Top-left (a)
+            \centering
+            \includegraphics[width=\textwidth]{Figures/No_Guidance.pdf}
+            \caption{No guidance}
+            \label{subfig: 1D no guidance}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[t]{0.48\textwidth} % Top-right (b)
+            \centering
+            \includegraphics[width=\textwidth]{Figures/Classifier_Free_Guidance.pdf}
+            \caption{CFG ($\lambda=1$)}
+            \label{subfig: 1D CFG}
+        \end{subfigure}
+        \begin{subfigure}[t]{0.48\textwidth} % Bottom-left (c)
+            \centering
+            \includegraphics[width=\textwidth]{Figures/Negative_prompting.pdf}
+            \caption{NP ($\lambda=1$)}
+            \label{subfig: 1D NP}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[t]{0.48\textwidth} % Bottom-right (d)
+            \centering
+            \includegraphics[width=\textwidth]{Figures/Negative_Guidance.pdf}
+            \caption{Exact DNG (ours)}
+            \label{subfig: 1D exact DNG}
+        \end{subfigure}
+        \caption{Comparison between CFG, NP and DNG using the exact posterior (all used with $\lambda=1$). DNG with the exact posterior is equivalent to CFG, while NP fails to sample the target distribution.}
+        \label{fig: 1D comparison}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[t]{0.48\textwidth} % Right half (50% of the text width)
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Guidance_scale_N32_prior0.01_Tempt0.3_offset0.003_lam18.0_1.pdf}
+        \caption{Illustration of the dynamic negative guidance scale on Stable Diffusion. The guidance signal is concentrated on a peak towards the end of the reverse process. For more details, see section \ref{subsec: results T2I}.}
+        \label{fig: Dynamic guidance scale example Stable Diff}
+    \end{minipage}
+\end{figure}
+To resolve these issues, we propose a novel theoretically grounded dynamic negative guidance scheme, coined \textit{\textbf{D}ynamic \textbf{N}egative \textbf{G}uidance} (DNG), which in the static limit reduces to the widespread NP scheme. Contrary to NP, our approach requires estimating the posterior, which we achieve by tracking the discrete Markov chain during the denoising process. The dynamic guidance scale is proportional to the posterior, which causes the guidance to vanish whenever the posterior probability of the ``forbidden class" is low. This is illustrated in Fig.~\ref{fig: Dynamic guidance scale example Stable Diff}, in which the guidance scale of images generated using Stable Diffusion~\citep{LDMs} is plotted as a function of the denoising time. When using a negative prompt related to the positive prompt, the guidance is active, while when using a semantically unrelated negative prompt, the negative guidance scale drops to zero. Our dynamic approach can self-regulate and even deactivate itself in the case that the negative prompt is completely unrelated to the positive prompt, which is something which NP is incapable of doing. \\
+The code associated with this paper will be made publicly available upon acceptance.
+
+
+\section{Related work}
+
+\label{sec: Related work}
+To introduce our dynamic negative guidance scheme, the working principles behind Denoising Diffusion Probabilistic Models (DDPMs), Classifier-Free-Guidance (CFG) and Negative Prompting (NP) are required. These are summarized in sections \ref{subsec: DDPMs} and \ref{subsec: CFG and NP}. In section \ref{subsec: alternative concept erasures}, the related topic of concept erasure in diffusion models is briefly discussed.
+\subsection{Denoising Diffusion Probabilistic Models (DDPM)}
+\label{subsec: DDPMs}
+Score based diffusion models~\citep{SohlDicksteinDM, HoDDPM, SongSDE} are progressive denoisers, that learn to invert a forward noising schedule. In the case of variance preserving DDPM~\citep{HoDDPM}, this forward noising process, iteratively adds Gaussian noise to a clean data distribution. The underlying data distribution $q(\bx,0)$ is progressively noised until a standard normal Gaussian is obtained, i.e. until after $T$ steps \(q(\bx,T)\sim\mathcal{N}(\bx;\bm{0},\bm{I})\). For any forward noising schedule $\{\beta_t\}_{t=1}^T$, whereby $\bx_{t+1}=\sqrt{1-\beta_t}\bx_t+\sqrt{\beta_t}\bm{\epsilon}_t$ (with $\bm{\epsilon}_t\sim \mathcal{N}(\bm{\epsilon}_t;\bm{0},\bm{I}))$), the forward process can be directly sampled at any step $t$, according to \(q(\bx_t|\bx_0) \sim \mathcal{N}(\bx_{t};\sqrt{\bar{\alpha}_t}\bx_{0}, (1-\bar{\alpha}_t)\bm{I})\), with $\bar{\alpha}_t = \prod_{i=0}^t(1-\beta_i)$. 
+The goal is to learn a score based model, defined by \(\bm{s}_{\theta}(\bx,t) = \nabla_{\bx} \log p_t(\bx; \theta)\), that is able to iteratively reverse the forward process. The reverse process can be decomposed into a Markov chain 
+\begin{equation}
+\begin{split}
+    p(\bx_{t:T}; \theta) = p(\bx_T)\prod_{i=t+1}^T p_i(\bx_{i-1}|\bx_i; \theta)
+\end{split}
+\label{eq: Markov chain}
+\end{equation}
+Importantly, each step of the Markov chain is by construction approximately Gaussian \(p_t(\bx_{t-1}|\bx_t; \theta) \sim \mathcal{N}(\bx_{t-1};\bm{\mu}_{\bm{\theta}}(\bx_t), \sigma_t^2 \bm{I})\). Instead of modeling the mean, $\bm{\mu}_{\bm{\theta,t}}$, it is common to instead predict the noise present at any diffusion stage $\bm{\epsilon}_{\bm{\theta,t}}$. The two are linked through a linear combination 
+\begin{equation}
+    \bm{\mu}_{\bm{\theta},t-1} = \frac{1}{\sqrt{1-\beta_{t}}}\big(\bx_{t} - \frac{\beta_{t}}{\sqrt{1-\bar{\alpha}_{t}}} \bm{\epsilon}_{\bm{\theta},t-1}\big)
+\label{eq: means as function of noise preds}
+\end{equation}
+The model can then be trained using as optimization objective 
+\[
+\bm{\theta^{\star}} = \arg\min_{\bm{\theta}} \mathbb{E}_{t\sim\mathcal{U}(0,T), \bx_0, \bm{\epsilon}} \Big[ \|\bm{\epsilon}_{\bm{\theta},t}(\sqrt{\bar{\alpha}_t}\bx_0 + \sqrt{1-\bar{\alpha}_t}\bm{\epsilon})-\bm{\epsilon}\|^2\Big].
+\]
+It should also be noted that the error prediction $\bm{\epsilon}_{\bm{\theta}}$ is proportional to the score function, more specifically %it is easy to show that 
+\(\bm{s}_{\bm{\theta},t} = \nabla_{\bm{x}} \log p_t(\bx_t; \theta) = -\bm{\epsilon}_{\bm{\theta},t}(\bx) / \sqrt{1-\bar{\alpha}_t}\).
+\subsection{Classifier-Free Guidance and Negative Prompting}
+\label{subsec: CFG and NP}
+Most practical applications require \emph{conditional generation}~\citep{CG,CFG,SLD}.  The first approach to achieve this, introduced by \citet{CG}, is called \emph{classifier guidance} (CG).  They consider a classifier $p(\bm{c}|\bx)$ that quantifies to what extent any condition $\bm{c}$ is met by the object $\bm{x}$ under generation, such as a desired class label or adherence to a textual description. The joint probability can be constructed from an unconditional model $\bm{p(\bx)}$ combined with an external classifier $p(\bm{c}|\bx)$, i.e., \(p(\bx, \bm{c}) = p(\bx) p(\bm{c}|\bx)\). 
+By further sharpening the posterior $p(\bm{c}|\bx)$ using a positive exponent \(\lambda>1\), i.e. sampling from 
+\(p(\bx, \bm{c}) \propto p(\bx) p(\bm{c}|\bx)^{\lambda}\), 
+they were able to obtain superior results\footnote{Strictly speaking, expressions such as $p(\bx) p(\bm{c}|\bx)^{\lambda} = p(\bx,\bm{c})$ are notationally inconsistent for $\lambda$ different than one, but to remain consistent with literature, the loose notation is kept.}. The exponent $\lambda$ is called the guidance scale. The main impact of this exponent is to make sure that the condition $\bm{c}$ is more closely respected, which comes at the cost of diversity~\citep{CFG, GuidanceInLimitedInterval}. Like all score-based models, DMs do not directly model the data distribution. Instead, they restrict themselves to modeling the so-called score-function, the gradient of the log-likelihood. For CG this results in:
+\begin{equation}
+    \nabla_{\bm{x}} \log p_t(\bx|\bm{c}) = \nabla_{\bm{x}} \log p_t(\bx) + \lambda \nabla_{\bm{x}} \log p_t(\bm{c}|\bx)
+\end{equation}
+The problem behind such an approach is that for most of the diffusion process, the images are strongly noised, rendering pretrained classifiers ineffective. Instead, a new time-dependent classifier would have to be trained to recognize images during the denoising process, which is not only costly but also suboptimal. This is why \citet{CFG} proposed to directly train the %full 
+joint distribution $p_t(\bx,\bm{c})$ using pairs of textual and visual representations, such as LAION~\citep{LAION5B}. Their key insight was to keep the guidance scale $\lambda$ and reuse Bayes rule again to rewrite the posterior \(p_t(\bm{c}|\bx) = p_t(\bx,\bm{c})/p_t(\bx)\). In score notation, this results in:
+\begin{equation}
+    \nabla_{\bm{x}} \log p_t(\bx|\bm{c}) = \nabla_{\bm{x}}  \log p_t(\bx) + \lambda \big(\nabla_{\bm{x}} \log p_t(\bx,\bm{c})-\nabla_{\bm{x}} \log p_t(\bx)\big)
+\end{equation}
+Writing the unconditional score as \(\nabla_{\bm{x}} \log p_t(\bx) = \suncond\), and the positively conditioned score as \(\nabla_{\bm{x}} \log p_t(\bx,\bm{c}) =\sgood\) yields the well-known CFG equation:
+\begin{equation}
+    \bm{s}_{CFG} = \suncond + \lambda \big(\sgood - \suncond\big)\label{eq:CFG}
+\end{equation}
+For image generation conditioned on textual prompts, $\suncond$ is obtained by providing the trained joint model with an empty prompt. It soon became clear that a similar approach allows guiding the model away from undesired prompts, by reversing the sign of the guidance scale in the CFG equation~(\ref{eq:CFG}), leading to the Negative Prompting (NP) process:
+\begin{equation}
+    \bm{s}_{NP} = \suncond - \lambda \big(\sbad - \suncond\big) \label{eq:NP}
+\end{equation}
+This means that the attractive field (\(\lambda>0\)) directed towards condition $\bm{c}$ in Eq.~(\ref{eq:CFG}) is turned into a repulsive field  directed away from the condition $\bm{c}$. Note that conditioning variables and scores associated with an undesired (or negative) condition are denoted in red ($\cbad$ and $\sbad$, respectively). Those referring to wanted (i.e., positive) prompts are written in green ($\cgood$ and $\sgood$). From a likelihood perspective, the NP equation~(\ref{eq:NP}) implies sampling from a joint distribution that is inversely proportional to the posterior likelihood \(p(\bx, \bm{c}) \propto p(\bx) / p(\cbad|\bx)^{\lambda}\).
+\subsection{Alternative approaches to concept erasure} 
+\label{subsec: alternative concept erasures}
+Most of the interest in negative guidance within the literature is driven by safety considerations. Such an approach can indeed be used to move away from undesired \textit{Not-Safe-For-Work} content. Most approaches on the subject focus on removing entire concepts from diffusion models by fine-tuning certain layers inside the U-Net, whereby typically the attention layers are targeted~\citep{ForgetMeNot, UnifiedConceptEditing, EraseDiff, SelectiveAmnesia, ErasingConcepts}. The most difficult part of fine-tuning approaches is to only remove the targeted concepts without harming the rest~\citep{SelectiveAmnesia}. Another option to avoid the generation of certain features in T2I applications is to instead modify the textual prompts themselves before prompting the model~\citep{AblatingConcpets, GetWhatYouWant}. A good overview of the different approaches is described by \citet{CircumventingConceptErasure}, where the question of how easily such approaches can be bypassed is treated.\\
+Most similar to our approach are so-called training free guidance schemes~\citep{FreeDom, ReduceReuseRecycle, SEGA, AnalysingTrainingFreeGuid}. Such approaches often work in a fashion very similar to CG, in which a force field, derived as the gradient of a classifier, is added to the unconditional score field. These do not require any expensive retraining or fine-tuning of the underlying generative model. One method closely related to our work is that proposed by \citet{SLD}, called \textit{Safe Latent Diffusion} (SLD), which use the model's knowledge of certain concepts to avoid generation of undesired features, in a manner very similar to NP. Their scheme differs from NP in two regards. First, they consider a heuristic non-constant guidance scale that is only active when the predictions of the negatively prompted model overlaps with that of the positively prompted model. This approach does not take the explicit time-dependency into account. Second, they consider a pixel wise guidance scale, which allows them to \textit{locally} mix the `allowed' and `forbidden' outputs of the network. In our work, we do not use this pixel-wise guidance weights as this feature is not present in the exact formulas with known score functions (see our derivations in Sec.~\ref{subsec: theory NG}). Finally, \citet{MemFreeDMs} use a very similar approach to attack the problem of memorization of training samples in DMs.
+
+
+\section{Methodology}
+
+\label{sec: theory}
+The most obvious problem with NP is that there is a clear risk that 
+\(p_t(\bx, \cbad) \propto  p_t(\bx) / p_t(\cbad|\bx)^{\lambda}\) 
+is not properly normalizable. This happens as soon as more than a single point has a zero posterior likelihood. It should be kept in mind that an ideal classifier satisfies this property, especially at low noise levels. But even from a score-based perspective, NP is flawed. The score fields are approximately of harmonic nature, implying that the further one is from satisfying the condition $\cgood$, the larger the magnitude of $\sgood$. Simply inverting the force field, as is done in NP, implies the presence of very large repulsive force in regions completely unrelated to $\cbad$. Instead, what is desired is a repulsive force that is strong in regions where $p_t(\cbad|\bx,t) \approx 1$ and very weak where $p_t(\cbad|\bx,t) \approx 0$.
+\subsection{Dynamic Negative Guidance}
+\label{subsec: theory NG}
+Instead of simply reverting the sign of the guidance scale, our approach reconstructs the desired score function $\sgood$ from a linear combination of the unconditional score $\suncond$ and the unwanted score $\sbad$. This method should correspond to CG, with instead of the typical posterior conditioned on $\cgood$, its complement conditioned on $\cbad$. In the case of negative guidance, one should have \(p_t(\cgood|\bx,t) =1-p_t(\cbad|\bx)\).  Negative guidance should therefore aim to sample from the following conditional distribution:
+\begin{equation}
+    p_t(\bx| \cgood) \propto p_t(\bx) \big(1 - p_t(\cbad|\bx)\big) %^{\lambda}
+\end{equation}
+Notice that this joint distribution is always normalizable, as the singularity in \(p_t(\cbad|\bx)=0\) has been removed. From a score based perspective, this joint distribution results in:
+\begin{equation}
+    \nabla_{\bx} \log p_t(\bx| \cgood) = \nabla_{\bx} \log p_t(\bx) + \nabla_{\bx} \log \big(1 - p_t(\cbad|\bx)\big) % \lambda
+\end{equation}
+Unlike in CFG, the last term is not directly recognizable as a linear combination of scores. By using the chain rule to remove the logarithm and then artificially reintroducing it, a typical score function is obtained:
+\begin{equation}
+\begin{split}
+    \nabla_{\bx} \log \big(1 - p_t(\cbad|\bx)\big) & = - \frac{1}{1 - p_t(\cbad|\bx)} \nabla_{\bx} p_t(\cbad|\bx)\\
+    & = - \frac{p_t(\cbad|\bx)}{1 - p_t(\cbad|\bx)} \frac{1}{p_t(\cbad|\bx)}\nabla_{\bx} p(\cbad|\bx)\\
+    & = - \frac{p_t(\cbad|\bx)}{1 - p_t(\cbad|\bx)} \nabla_{\bx} \log p_t(\cbad|\bx)
+\end{split}
+\end{equation}
+By then reapplying Bayes's rule on the posterior, and sharpening the posterior by an additional parameter analogous to the guidance scale $\lambda$\footnote{This implies sampling from \(p_t(\bx| \cbad) \propto p_t(\bx) \big(1 - p_t(\cbad|\bx)\big)^{\lambda}\)}, as done in \citet{CFG}:
+\begin{equation}
+\begin{split}
+    \nabla_{\bx} \log p_t(\bx|\cgood) & = \nabla_{\bx} \log p_t(\bx) -  \lambda_0\frac{p_t(\cbad|\bx)}{1 - p_t(\cbad|\bx)} \big( \nabla_{\bx} \log p_t(\bx|\cbad)- \nabla_{\bx} \log p_t(\bx)\big)\\
+    & = \nabla_{\bx} \log p_t(\bx) -  \lambda(\bx,t)\big( \nabla_{\bx} \log p_t(\bx|\cbad)- \nabla_{\bx} \log p_t(\bx)\big)
+\end{split}
+\label{eq: DNG fundamental eq}
+\end{equation}
+This is the equation behind our proposed Dynamic Negative Guidance. It is equivalent to CFG with a hypothetical positive prompt: ``everything but $\cbad$''. Note the minus sign of the term governing the guidance term, which corresponds with the repulsive nature of the corresponding force field, also present in NP. A key distinction with NP is the presence of the additional \(\frac{p_t(\cbad|\bx)}{1 - p_t(\cbad|\bx)}\) factor. This is precisely the factor that causes the negative guidance field to be asymptotically large in regions where \(p_t(\cbad|\bx)\rightarrow1\) and to be zero in regions where \(p_t(\cbad|\bx)\rightarrow0\). The guidance scale is dynamic, meaning that the guidance scale is not constant throughout the denoising process defined by $t$. Early in the denoising process, the posterior $p(\cbad|\bx)$ corresponds to the prior $p(\cbad)$ as large amounts of noise make classification difficult. As the prior is expected to be low, this results in low guidance scales early on. Only when the classifier becomes confident that $\cbad$ is being generated, the negative guidance contribution becomes more pronounced. When approximating the guidance scale up to zeroth order, a static scheme with constant guidance scale is retrieved, which corresponds to NP. It should be noted that such a non-constant guidance scale is in line with recent trends in literature~\citep{GuidanceInLimitedInterval, AdaptiveGuidance, SLD, AnalysisCFGSchedulers}. 
+Algorithm~\ref{alg: NG} summarizes the DNG scheme.
+\\
+\begin{algorithm}[t!]
+    \footnotesize
+    \caption{\small Dynamic Negative Guidance} 
+        \begin{algorithmic}
+        \State \textbf{Input:} Pre-trained unconditional DDPM with noise prediction  $\textcolor{cyan}{\bm{\epsilon}_{\mathbf{\theta}}}$, Pre-trained \textit{to-forget} DDPM with noise prediction  $\textcolor{Red}{\bm{\epsilon}_{f,\mathbf{\theta}}}$, guidance scale $\lambda_0$, prior $p_0$ and Temperature $\tau$
+        \State $\bm{z} \sim \mathcal{N}(0,\bm{I})$, $\bm{x}_T \sim \mathcal{N}(0,\bm{I})$
+        \State $p(\cbad|\bm{x}_T) = p_0$\hfill \texttt{Initialize posterior and guidance scale}
+        \State $\bm{\lambda_T}(\bm{x}_T) = \lambda_0 \frac{p(\cbad|\bm{x}_T)}{1-p(\cbad|\bm{x}_T)}$
+        \For{$t =T,\dots,1$}
+            \State $\textcolor{Green}{\bm{\epsilon}_{\mathbf{\theta},\text{guid}}(\bx_t)} = \textcolor{cyan}{\bm{\epsilon}_{\mathbf{\theta}}(\bm{x}_{t})} - \lambda_t(\bx_t) \big(\textcolor{Red}{\bm{\epsilon}_{f,\mathbf{\theta}}(\bm{x}_{t})}-\textcolor{cyan}{\bm{\epsilon}_{\mathbf{\theta}}(\bm{x}_{t})}\big)$\hfill\texttt{Apply guidance}
+            \State $\bm{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}}\big(\bx_t-\frac{1-\alpha_t}{\sqrt{1-\bar{\alpha_t}}}\textcolor{Green}{\bm{\epsilon}_{\mathbf{\theta},\text{guid}}(\bx_t)}\big) + \sqrt{\beta_t} \bm{z}$\hfill\texttt{DDPM Step}
+            \State $p(\cbad|\bx_{t-1}) = \text{Compute posterior}\big(p(\cbad|\bx_{t}),\bm{x}_{t-1},\bm{x}_{t}, \textcolor{cyan}{\bm{\epsilon}_{\mathbf{\theta}}(\bm{x}_{t})}, \textcolor{Red}{\bm{\epsilon}_{f,\mathbf{\theta}}(\bm{x}_{t})}\big)$\hfill\texttt{See Algorithm 2}
+            \State $\lambda_t (\bm{x}_{t-1}) = \lambda_0 \frac{p(\cbad|\bx_{t-1})}{1-p(\cbad|\bx_{t-1})}$\hfill\texttt{Compute new guidance scale}
+        \EndFor
+        \end{algorithmic}
+    \label{alg: NG}
+    \end{algorithm}\\
+To validate our method, the case of diffusion of one dimensional Gaussian mixtures is considered. In this setting, the likelihoods as well as the posterior are analytically tractable throughout the diffusion process $t$. The goal is to guide away from a single of the Gaussian modes. These experiments, shown in Fig.~\ref{fig: 1D comparison}, reveal that using the DNG conditioned on the unwanted mode with the exact posterior is equivalent to using CFG conditioned on the desired modes. This is in stark contrast to what is obtained when using NP (visible in Fig.~\ref{subfig: 1D NP}), which completely fails to model the target distribution, demonstrating the theoretical shortcomings of the negative prompting algorithm. It should be noted, that while this failure is very apparent in one dimension, it does not necessarily imply that such a strong statement can be made in arbitrary high dimensional spaces.
+\subsection{Posterior approximation through Markov Chain}
+\label{subsec: theory markov chain}
+Our novel time dependent guidance scale DNG relies on the posterior likelihood \(p_t(\cbad|\bx)\), which is in general not available using score-based models. Inspired by ideas from \citet{DMZeroShotClassifiers}, we propose to approximate the required posterior $p(\cbad|\bx,t)$ by estimating the required likelihoods by tracking the diffusion Markov Chain, defined by Eq.~(\ref{eq: Markov chain}) during the denoising process. All the infinitesimal transition probabilities are approximately Gaussian \(p_t  (\bx_{s-1} | \bx_s; \theta) \sim \mathcal{N} (\bx_{s-1} ; \textcolor{cyan}{\bm{\mu}_{s,\theta}(\bx_{s})}, \sigma^2_s \bm{I})\) where $\textcolor{cyan}{\bm{\mu}_{s,\theta}(\bx_{s})}$ can be retrieved from the noise predictions $\textcolor{cyan}{\bm{\epsilon}_{s,\theta}(\bx_{s})}$ using Eq.~(\ref{eq: means as function of noise preds}). To compute the guidance scale specified in Eq.~(\ref{eq: DNG fundamental eq}) the posterior can be estimated from the likelihoods using Bayes rule:
+\begin{equation}
+\begin{split}
+    p_t (\cbad|\bx_{t:T}) & = p(\cbad) \frac{p(\bx_{t:T}|\cbad)}{p(\bx_{t:T})} \\
+    \iff \log p_t (\cbad|\bx_{t:T}) & = \log p(\cbad) + \sum_{i=T}^{t+1} \big( \log p_{i-1} (\bx_{i-1}|\bx_{i},\cbad; \theta) - \log p_{i-1} (\bx_{i-1}|\bx_{i}; \theta) \big)\\
+    & = \log p_{t+1} (\cbad|\bx_{t+1:T})+\big( \log p_{t} (\bx_{t}|\bx_{t+1},\cbad; \theta) - \log p_t(\bx_{t}|\bx_{t+1}; \theta) \big)
+\end{split}
+\label{eq: posterior bayes}
+\end{equation}
+It should be noted that the \emph{filtering posterior} $p_t (\cbad|\bx_{t:T})$, is independent of the diffusion path and only depends on the least noisy time step \(p_t (\cbad|\bx_{t:T}) = p_t (\cbad|\bx_{t})\). The transition probability of the negatively guided model is also Gaussian of equal variance, i.e. \(p_t  (\bx_{t} | \bx_{t+1},\cbad; \theta) \sim \mathcal{N} (\bx_{t} ; \textcolor{Red}{\bm{\mu}_{t,\theta}(\bx_{t+1}|\cbad)}, \sigma^2_t \bm{I})\). We therefore obtain the update rule:
+\begin{equation}
+\begin{split}
+    \log p_t (\cbad|\bx_{t}) &= \log p_{t+1}(\cbad|\bx_{t+1})-\frac{1}{2 \sigma^2_t}\big( \|\bx_t-\textcolor{Red}{\bm{\mu}_{t,\theta}(\bx_{t+1}|\cbad)}\|^2 - \|\bx_t - \textcolor{cyan}{\bm{\mu}_{t,\theta}(\bx_{t+1})}\|^2 \big)
+\end{split}
+\label{eq: posterior as means markov chain}
+\end{equation}
+To know in which point $\bx_t$ the posterior needs to be estimated, the guidance scale is required, which depends itself on the posterior. An implicit problem is therefore defined. To resolve the implicitness of the above equation, we propose to assume that the posterior changes slowly such that the guidance scale can, up to first order, be approximated by its previous value. This assumption becomes exact as the number of diffusion time steps becomes infinitely large, an assumption often used in the diffusion literature. In essence, the computation of the guidance scale and that of the denoising is staggered in time. To obtain the guidance scale required to find $\bx_{t-1}$, the posterior at time step $t$ is used, which solely depends on $\bx_t$, $\textcolor{cyan}{\bm{\mu}_{t,\theta}(\bx_{t+1})}$ and $\textcolor{Red}{\bm{\mu}_{t,\theta}(\bx_{t+1}|\cbad)}$, which are all known. The approximation can be described mathematically as:
+\begin{equation}
+\begin{split}
+    \log p_{c,t-1} &\simeq \log p_{c,t}\\
+     &= \log p_{c,t+1}-\frac{1}{2 \sigma^2_{t+1}}\big( \|\bx_{t}-\textcolor{Red}{\bm{\mu}_{t,\theta}(\bx_{t+1}|\cbad)}\|^2 - \|\bx_{t} - \textcolor{cyan}{\bm{\mu}_{t,\theta}(\bx_{t+1})}\big)\|^2 \big)
+\end{split}
+\label{eq: Approximate posterior equation}
+\end{equation}
+The term added to the posterior in Eq.~(\ref{eq: Approximate posterior equation}) can be positive or negative, respectively corresponding to an increase or a decrease of the posterior likelihood. When the new state is closer to the unwanted mean $\textcolor{Red}{\bm{\mu}_{t,\theta}(\bx_{t+1}|\cbad)}$ than to the unconditional one $\textcolor{cyan}{\bm{\mu}_{t,\theta}(\bx_{t+1})}$, the posterior, and hence the guidance scale $\lambda(\bx,t)$, increases. It should be noted that while the unwanted mean prediction $\textcolor{Red}{\bm{\mu}_{t,\theta}(\bx_{t+1}|\cbad)}$ can sometimes be totally off (imagine a model that can only generate cats that is trying to denoise the image of a truck), the unconditional mean $\textcolor{cyan}{\bm{\mu}_{t,\theta}(\bx_{t+1})}$ is always a good denoiser (using the previous example, the unconditional model can generate both cats and trucks and therefore has no problem denoising any of the two). This has as consequence that the likelihood decreasing terms are much larger in magnitude than the likelihood increasing ones. This is explained visually in Fig.~\ref{fig: Visual explanation forbidden vs allowed}. To regularize this effect, we propose adding a linear transformation before the difference of Euclidean distances. Rescaling the difference by a factor $\tau\in]0,1[$ can diminish stochastic fluctuations present during denoising, while a small offset $\delta$ creates a slight bias towards increasing the posterior. Should an allowed image being generated, this offset is completely dominated by the very large difference. But should the predictions of the unconditional and the negatively conditioned model be similar, the posterior would increase.
+\begin{figure}
+    \hspace{0.75cm}
+    \begin{subfigure}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Example_Allowed_Generation_annotated.png}
+        \caption{When generating allowed feature}
+        \label{subfig: Visual explanation, allowed}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Example_Forbidden_Generation_annotated.png}
+        \caption{When generating forbidden feature}
+        \label{subfig: Visual explanation, forbidden}
+    \end{subfigure}
+    \hspace{0.75cm}
+    \caption{Visualization of the different components used in the estimation of the posterior. In (a) an allowed point is being generated, in which circumstances $\|\bx_t-\textcolor{cyan}{\bm{\mu}_{t}}\|\ll\|\bx_t-\textcolor{Red}{\bm{\mu}_{c,t}}\|$, corresponding to a large decrease of the posterior. In (b) a forbidden point is being generated, in which circumstances it is possible that $\|\bx_t-\textcolor{cyan}{\bm{\mu}_{t}}\|>\|\bx_t-\textcolor{Red}{\bm{\mu}_{c,t}}\|$ corresponding to a slight increase of the posterior probability.}
+    \label{fig: Visual explanation forbidden vs allowed}
+\end{figure}
+The estimation of the posterior probability is summarized in Algorithm \ref{alg: Compute posterior}.
+\begin{algorithm}[htbp]
+    \footnotesize
+    \caption{\small Compute posterior} 
+        \begin{algorithmic}
+        \State {\bfseries Input:} Previous estimation of filtering posterior $p_t(\cbad|\bm{x}_{t})$, Updated noisy state $\bm{x}_{t-1}$, previous noisy state $\bm{x}_t$, unconditional noise prediction  $\textcolor{cyan}{\bm{\epsilon}_{\mathbf{\theta}}(\bm{x}_t)}$, \textit{to-forget} noise prediction  $\textcolor{Red}{\bm{\epsilon}_{f,\mathbf{\theta}}(\bm{x}_t)}$, diffusion constants $\alpha_t$, $\bar{\alpha_t}$, prior $p_0$, Temperature $\tau$, offset $\delta$, minimal and maximal posterior values $p_{\text{min}}$ and $p_{\text{max}}$
+        \State $\sigma_t^2 = 1-\alpha_t$\hfill \texttt{Variance of Gaussian at $t$}
+        \State $\textcolor{Red}{\bm{\mu}(\bm{x}_t)} = \frac{1}{\sqrt{\alpha_t}}\big(\bm{x}_{t} - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha_t}}}\textcolor{Red}{\bm{\epsilon}_{f,\mathbf{\theta}}(\bm{x}_t)}\big)$\hfill \texttt{\textit{Undesired} mean prediction}
+        \State $\textcolor{cyan}{\bm{\mu}(\bm{x}_t)} = \frac{1}{\sqrt{\alpha_t}}\big(\bm{x}_{t} - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha_t}}}\textcolor{cyan}{\bm{\epsilon}_{\mathbf{\theta}}(\bm{x}_t)}\big)$\hfill \texttt{Unconditional mean prediction}
+        \State $p(\cbad|\bm{x}_{t-1}) = p_t(\cbad|\bm{x}_{t}) \exp\Big(- \frac{\tau}{2\sigma_t^2}\big(\|\bm{x}_{t-1}-\textcolor{Red}{\bm{\mu}(\bm{x}_t)}\|^2-\|\bm{x}_{t-1}-\textcolor{cyan}{\bm{\mu}(\bm{x}_t)}\|^2\big)+\frac{\delta}{2\sigma_t^2}\Big)$
+        \State $p(\cbad|\bm{x}_{t-1}) = \text{Clamp}\big(p(\cbad|\bm{x}_{t-1})\text{, min}=p_{\text{min}}\text{, max}=p_{\text{max}}\big)$
+        \State {\bfseries Output:} Approximate posterior probability $p(\cbad|\bm{x}_{t-1})$
+        \end{algorithmic}
+    \label{alg: Compute posterior}
+    \end{algorithm}\\
+To illustrate the validity of the proposed posterior approximation scheme, the one dimensional Gaussian case can again be analyzed. The approximated posterior can be compared to the known exact posterior. To remove any effects possibly caused by the guidance itself, the posterior is tracked at zero-guidance scale (\(\lambda=0\)). To visualize the results, 100k points are sampled using the unconditional model and then classified into two groups based on whether they belong to the forbidden mode\footnote{The forbidden mode is chosen to be distinct from others to simplify the classification task (with the unconditional distribution shown in red in Fig.~\ref{subfig: Sampled approx posterior})}. For both groups, the exact and approximated posterior values are averaged at each diffusion time step, as shown in Fig.~\ref{subfig: Posterior comparison}, demonstrating the validity of the approximation. An example of a distribution sampled using our dynamic negative guidance with the approximate posterior is shown in Fig.~\ref{subfig: Sampled approx posterior}.
+\begin{figure}
+    \hspace{0.1\textwidth}
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/1D_approximation_of_posterior.pdf}
+        \caption{Posterior estimation ($\lambda = 0$)}
+        \label{subfig: Posterior comparison}
+    \end{subfigure}
+    \hspace{0.1\textwidth}
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/1D_Approx_NG_sampled_distribution.pdf}
+        \caption{Sampled distribution using approx. posterior ($\lambda = 1$)}
+        \label{subfig: Sampled approx posterior}
+    \end{subfigure}
+    \caption{Analysis of the approximate posterior estimation. In (a) the dotted lines represent the exact posterior, while the full lines represent the approximated posterior. The color indicates whether the generated samples belong to the forbidden region or not. These samples were generated without guidance. (b) an example of a distribution sampled using the approximate posterior with guidance scale $\lambda = 1$.}
+    \label{fig: Comparison of positive and Negative guidance}
+\end{figure}
+The derived approach is highly flexible, solely requiring a conditional diffusion model. It remains valid using latent representations, such as used in modern Latent Diffusion Models~\citep{LDMs}.
+
+
+\section{Experiments}
+
+\label{sec: Results}
+\subsection{Class removal}
+\label{subsec: results Class removal}
+The proposed algorithm is tested in the context of image generation on labelled datasets, in the present case MNIST and CIFAR10 are considered. The task is to remove one of the classes by guiding an unconditional model with a model trained solely on that specific class. To quantify the \textit{safety} of the approach, a classifier assesses the percentage of generated images that belong to the forbidden class, while the \textit{diversity} is measured by examining the overall distribution of generated classes across all images. Ideally, this distribution should contain a single zero and equal weight on all other classes (see Figure \ref{subfig: Example distribution comparison}). To measure how well this ideal case is approximated, the KL-divergence between ideal and generated distributions is computed. To observe how the \textit{quality} of the model is altered, the standard FID metric~\citep{FID} is used. Being a statistical tool, the FID is also affected by large class imbalances. The FID not only measures the quality of the images but also accounts for the diversity of the model. It still remains the most widespread quality metric for image generation and has time and again been proven to coincide with human perception. To compute the FID the statistics of 10240 generated images is compared to the training data without the undesired class.\\
+To compare different approaches, both the FID and the KL-divergence are compared with the safety of the method when sweeping over the initial guidance scale $\lambda$. These graphs are shown for MNIST in Fig.~\ref{subfig: MNIST analysis} and for CIFAR10 in Fig.~\ref{subfig: CIFAR analysis}. Especially relevant is the regime of high safety, where as few as possible forbidden images are generated. In this regime, DNG outperforms both NP and SLD, showcasing that the image removal performed by DNG is less invasive than previous approaches.
+\begin{figure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Analysis_MNIST_removing_zeros_NoGrid_NoLegend.pdf}
+        \caption{MNIST}
+        \label{subfig: MNIST analysis}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Analysis_CIFAR_removing_airplanes_NoGrid_NoLegend.pdf}
+        \caption{CIFAR10}
+        \label{subfig: CIFAR analysis}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Example_sampled_distribution_MNIST.pdf}
+        \caption{Example of distributions}
+        \label{subfig: Example distribution comparison}
+    \end{subfigure}
+    \caption{Comparison of diversity (top) and quality (bottom) as a function of safety for SLD, NP and DNG (ours) when removing a specific class measured respectively using the KL-divergence and the FID. To reduce the percentage of undesired images generated, the initial guidance scale is increased. In Fig.~\ref{subfig: MNIST analysis} the number zero is removed. In Fig.~\ref{subfig: CIFAR analysis} the class \textit{airplane} is removed. An example showing how the KL-divergence is computed is shown in Fig.~\ref{subfig: Example distribution comparison}, the example is taken using our approach on MNIST. The class corresponding to the number one is oversampled, as it lies furthest from the undesired class zero.}
+    \label{fig: Class removal results}
+\end{figure}
+\subsection{Text-to-image}
+\label{subsec: results T2I}
+To test the flexibility of the proposed DNG scheme, small scale experiments are run using Stable Diffusion 2~\citep{LDMs}. Inspired by \citet{SLD}, the role of the unguided model is replaced by that of the positively prompted one. Instead of using the unconditional score to compute the posterior, the positively prompted score is used. Mathematically, $\suncond$ is substituted by $\sgood$ in Algorithm \ref{alg: Compute posterior}. To test our negative guidance scheme in the context of T2I, prompts that implicitly generate objects are required.  An example could be an ``English breakfast", for which it is highly likely that the model generates an image that contains an egg. The term ``egg'' can then be chosen as negative prompt. We design 5 prompts that are highly likely to generate certain objects without these features being explicitly mentioned in the prompt.\\
+To examine the ability of the guidance scale to deactivate itself when the element is not present, we suggest generating a second image with negative guidance from a semantically unrelated concept. For example, with ``English breakfast", an unrelated concept could be ``The view of a skyline". In that case, DNG should let the posterior$ p(\cbad|\bx,t)$, and  hence the guidance scale, go to zero. This deactivation is important for preserving the diversity of the base model \cite{GuidanceInLimitedInterval}. A schematic representation of this analysis is shown in Fig.~\ref{subfig: Explanation StableDiff}.\\
+The cosine similarity between the negatively guided images and the unguided images inside the CLIP latent space is then compared by generating 32 images in both settings and performing a sweep over the initial guidance scale. Ideally, the average cosine similarity should remain equal to one when negatively prompted with an unrelated text, indicating that the negative guidance was fully deactivated. On the contrary, the model prompted with a related text should display a decrease of average cosine similarity as a function of increasing guidance scale. To compare our results to those obtained with NP, the average cosine similarity of the samples guided with an unrelated negative prompt can be plotted with respect to the average cosine similarity of the samples guided with a related negative prompt. For intuitiveness, the axes are scaled from 1 to -1, such that points located farther right and higher on the graph correspond to greater deviation from the original images, indicated by a lower cosine similarity. This is visible in Fig.~\ref{subfig: StableDIff CosSim plot} in which each prompt is given its own marker and color intensity. As both DNG and NP follow linear relationships per prompt, they are approximated by a linear regression in a limited interval. As seen in Figure~\ref{subfig: StableDIff CosSim plot}, our method remains consistent with predictions, causing minimal changes when a semantically unrelated negative prompt is used, while still performing on par with NP in the case of a related negative prompt. 
+\begin{figure}
+    \begin{subfigure}[t]{0.495\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/Explanation_StableDiff.pdf}
+        \caption{Schematic of the evaluation approach on Stable Diffusion.}
+        \label{subfig: Explanation StableDiff}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/CosSim_NP_NG_all_lines_Felix_variant.pdf}
+        \caption{Cosine similarities in related and unrelated cases}
+        \label{subfig: StableDIff CosSim plot}
+    \end{subfigure}
+    \caption{Comparison of NP and DNG on Stable Diffusion. In \ref{subfig: Explanation StableDiff} the evaluation strategy is explained schematically. A fixed seed is denoised using the same positive prompts with two separate negative prompts, a semantically related one and a semantically unrelated one. This is done for DNG and NP. The CLIP cosine similarity between the guided and unguided images is then measured for both related and unrelated cases and displayed as a function of each other for different prompts in \ref{subfig: StableDIff CosSim plot}}
+    \label{fig: StableDiff Results}
+\end{figure}
+
+
+\section{Limitations}
+
+\label{sec: limitations}
+The main limitation of the present work is the non-exhaustive analysis of our approach in the context of T2I generation. The current results obtained with Stable Diffusion solely demonstrate that the proposed approach shows promising potential. A more thorough analysis using a larger prompt dataset, advanced metrics such as the FID, as well as more generic hyperparameter values, are all still required. Another limitation of the Stable Diffusion experiments, is that no metric is used to verify how well the negative prompt has been removed from the image. This should be done using a visual object classifier. All these steps are left as future work.
+
+
+\section{Conclusion}
+
+\label{sec: conclusion}
+Understanding the theoretical flaws behind the widespread Negative Prompting algorithm, led to a novel, theoretically grounded Dynamic Negative Guidance scheme. This scheme was first validated in a low dimensional setting, before being compared to alternative approaches in image generation tasks. In particular, the proposed scheme outperformed concurrent approaches, such as Negative Prompting or Safe Latent Diffusion, at the task of class removal from an unconditional MNIST or CIFAR10 model. The advantages of the dynamic nature of the scheme was further displayed in the context of T2I generation using Stable Diffusion, in which it was shown that DNG deactivates itself when the negative prompt is unrelated to the positive prompt. 
+
+

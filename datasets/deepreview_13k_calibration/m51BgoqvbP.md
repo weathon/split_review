@@ -1,8 +1,8 @@
 # Understanding Warmup-Stable-Decay Learning Rates: A River Valley Loss Landscape View
 
 - Decision: Accept
-- Avg Score: 3.50
-- Scores: 6, 6, 1, 0, 3, 5
+- Avg Score: 6.00
+- Scores: 6, 6, 10, 3, 5
 
 ## Abstract
 Training language models currently requires pre-determining a fixed compute budget because the typical cosine learning rate schedule depends on the total number of steps. In contrast, the Warmup-Stable-Decay ($\wsd$) schedule uses a constant learning rate to produce a main branch of iterates that can in principle continue indefinitely without a pre-specified compute budget. Then, given any compute budget, one can branch out from the main branch at a proper time with a rapidly decaying learning rate to produce a strong model.

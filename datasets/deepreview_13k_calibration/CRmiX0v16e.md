@@ -1,8 +1,8 @@
 # Open-YOLO 3D: Towards Fast and Accurate Open-Vocabulary 3D Instance Segmentation
 
 - Decision: Accept
-- Avg Score: 5.00
-- Scores: 8, 5, 8, 8, 1, 0
+- Avg Score: 7.80
+- Scores: 8, 5, 8, 8, 10
 
 ## Abstract
 Recent works on open-vocabulary 3D instance segmentation show strong promise, but at the cost of slow inference speed and high computation requirements. This high computation cost is typically due to their heavy reliance on 3D clip features, which require computationally expensive 2D foundation models like Segment Anything (SAM) and CLIP for multi-view aggregation into 3D. As a consequence, this hampers their applicability in many real-world applications that require both fast and accurate predictions. To this end, we propose a fast yet accurate open-vocabulary 3D instance segmentation approach, named Open-YOLO 3D, that effectively leverages only 2D object detection from multi-view RGB images for open-vocabulary 3D instance segmentation. 

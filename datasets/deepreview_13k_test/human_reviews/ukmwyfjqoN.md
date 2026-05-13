@@ -1,0 +1,175 @@
+# ReBotNet: Fast Real-time Video Enhancement
+
+- Decision: Reject
+- Scores: 5, 5, 5, 6
+
+## Abstract
+Most video restoration networks are slow, have high computational load, and can't be used  for real-time  video enhancement. In this work, we design an efficient and fast framework to perform real-time video enhancement for practical use-cases like live video calls and video streams. Our proposed method, called \textbf{Re}current \textbf{Bot}tleneck Mixer \textbf{Net}work (\textbf{ReBotNet}), employs a dual-branch framework. The first branch learns spatio-temporal features by tokenizing the input frames along the spatial and temporal dimensions using a ConvNext-based encoder and  processing these abstract tokens using a bottleneck mixer. To further improve temporal consistency, the second branch employs a mixer directly on tokens extracted from individual frames. A common decoder then merges the features form the two branches to predict the enhanced frame. In addition, we propose a recurrent training approach where the last frame's prediction is leveraged to efficiently enhance the current frame while improving temporal consistency.  To evaluate our method, we curate two new datasets that emulate real-world video call and streaming scenarios, and show extensive results on multiple datasets where ReBotNet outperforms existing approaches with lower computations, reduced memory requirements, and faster inference time. Project site: \href{https://jeya-maria-jose.io/rebotnet-web/}{https://jeya-maria-jose.io/rebotnet-web/}
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper presents an efficient video enhancement framework. The network architecture utilizes ConvNext for Spatial-Temporal tokenization of the video and employs a Mixer structure to process the tokens. To evaluate the algorithm, the method introduces two datasets, on which the algorithm performs well (and better than baselines). Overall, it is an effective framework for video enhancement and does make some contributions. However, it is difficult to pinpoint the novelty of the algorithm. Currently, I find it hard for me to make a final decision.
+
+### Strengths
++: Well-written. I can clearly understand the design motivations behind most parts.
+
++: On the two datasets, this algorithm achieves a good balance between efficiency and effectiveness, surpassing many previous algorithms.
+
++: There is some ablation study to analyze the role of each branch.
+
+### Weaknesses
+-: The explanation of the contribution to efficiency and effectiveness is not clear enough. The introduction mentions that the combination of ConvNext and Mixer avoids quadratic complexity and guarantees performance. Does it mean that using Mixer speeds up the process (avoiding quadratic complexity), while ConvNext ensures performance? Is the fundamental reason for the acceleration avoiding quadratic complexity?
+
+-: The PSNR and SSIM results are similar to RBRT.
+
+-: The evaluation of temporal consistency seems lacking in the paper. For instance, although the abstract claims that the second branch improves temporal consistency, there are no experiments to support this result.
+
+-: I believe the ablation study is not detailed enough. Combining ConvNext and Mixer is a direct and straightforward idea. In the process of parameter tuning, what analytical experiments are worth providing to the community? I expect to see many detailed experiments on this aspect. Can we use other backbones to replace the ConvNext?
+
+### Questions
+-: Creating their own dataset is good, but why not compare it with public datasets and other baselines at the same time? Theoretically, this model can also be run and compared on other datasets, right?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper presents ReBotNet, designed for real-time video enhancement. The proposed dual-branch system utilizes spatio-temporal tokenization of frames and combines features from both branches to improve the output. A recurrent framework is employed to include previous frame predictions, ensuring better temporal consistency. The methods have been tested on newly curated datasets, demonstrating state-of-the-art results.
+
+### Strengths
+The effectiveness of the proposed method was demonstrated through testing on two specially created datasets, mimicking real-world video scenarios. The results reveal that ReBotNet surpasses existing methods, offering faster performance, less computation, and minimized memory use. ReBotNet can be significantly useful in practical applications. The authors also tried to conduct a fair evaluation by optimizing the results of previous research.
+
+### Weaknesses
+There are few weaknesses observed in this paper. 
+
+1. The novelty of this research compared to other studies is not clear, because there have been many studies on the two-branch framework that processed video cubes with two different temporal dynamics as input. 
+
+2. Rather, it seems that the authors have optimized module that were already working well, and it does not appear that a comprehensive experiment has been conducted to justify their approach, by elucidating the importance of the optimized modules shared with the previous studies, if any.
+
+3.  Since the paper focuses on practicality, it is necessary to show experiment results on more open datasets to demonstrate its more general applicability. 
+
+4. Although they claimed to have created a video dataset with real-world nose, the experiment only compared using only the video restoration task and a few simple metrics, failing to effectively demonstrate its significance.
+
+### Questions
+It would be appreciated if the authors could resolve the reviewer's concerns above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work aims to break through the limitations of existing video enhancement methods in terms of processing speed and introduces a real-time video enhancement method designed for video calls and streaming scenarios. The authors achieve this by constructing a dual-branch framework, each addressing spatial and temporal feature information separately, and then merging them to obtain the final result. A recursive training strategy is further proposed to effectively utilize the predictive information from the previous frame to enhance the prediction quality of the current frame. Additionally, the authors introduce two new video enhancement datasets based on existing data to assist in evaluation.
+
+### Strengths
+1. The author provides a clear explanation of the motivation behind network architecture and training strategy design.
+2. The experimental validation section is relatively comprehensive, and the description of relevant settings is sufficiently detailed.
+
+### Weaknesses
+1. Although the author has conducted a thorough analysis of the constructed network in terms of details and motivations, it appears challenging to avoid the fact that the techniques used in this work seem to be readily available. It is hoped that the author can further refine the contributions and strengths of the proposed method in this regard. In other words, there may still be room for improvement in terms of innovation in this work.
+2. The author uses a direct addition approach to achieve fusion after the two branches, and I'm curious whether the author has tried other methods to better integrate information related to tubelet tokens and image tokens. In other words, I hope the author can provide a brief explanation or analysis of their choice of fusion method.
+3. The author's introduction to the curated dataset is not sufficiently clear. It is recommended that the author provide a more intuitive comparison between the curated dataset and existing datasets in terms of data quantity, types of data degradation, and whether they are paired, possibly in the form of a table. Some visual examples should also be included in the manuscript. Additionally, the author does not seem to mention whether these two datasets will be made open-source, which has a certain impact on the contribution of this work.
+4. The scenarios targeted by this work are closely related to everyday life. I am quite curious about the performance of the proposed method on some real video data captured using mobile devices. Could the author possibly add relevant experimental results to more comprehensively validate the effectiveness of the proposed method?
+5. There appear to be some typographical errors in the manuscript. In the analysis of ReBoNet in Section Five, the author mentions "Table 3 illustrates these results where gray rows correspond to ...", but there doesn't seem to be any gray rows in Table 3. We hope the author can carefully review the manuscript to prevent such situations from occurring.
+
+### Questions
+Please refer to the Weaknesses.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces a fast and efficient framework titled Recurrent Bottleneck Mixer Network (ReBotNet) for performing real-time video enhancement. This can carry practical applications in areas such as live video calls and video streams. The novelty of ReBotNet lies in its dual-branch system. The first branch utilizes a ConvNext-based encoder to learn spatio-temporal features by tokenizing the input frames along the spatial and temporal dimensions. These tokens are then processed with a bottleneck mixer. The second branch enhances temporal consistency by directly employing a mixer on tokens extracted from individual frames. The branches converge, with a common decoder merging the features to predict the enhanced frame.
+
+Additionally, the authors use a recurrent training approach where the prediction of the last frame is utilized to efficiently improve the current frame while enhancing temporal consistency. The effectiveness of this method is evaluated on two newly curated datasets representing real-world video calls and streaming scenarios. The results obtained indicate that ReBotNet outperforms existing techniques with less computation, minimal memory requirements, and faster inference time.
+
+### Strengths
+1. Overall, the method proposed in this paper is novel and unique. Previous methods usually embed optical flow estimation explicitly or implicitly.
+2. The goal of the paper is to propose a real-time video enhancement model, which I think has practical value.
+3. The comparative experiments in the paper include different computational complexity levels and user studies.
+4. The authors provide two new datasets.
+
+### Weaknesses
+1. The paper only conducts experiments on the newly proposed datasets. But these two datasets are not larger or more extensive than previous datasets, so I worry that the experiments will not be convincing enough.
+2. The paper does not seem to have submitted a demonstration video. Judging from the pictures in the paper, the improvement in visual effects is not significant.
+
+### Questions
+1. "Unlike these works that require compute intensive optical flow, we develop a simple and efficient frame-recurrent setup with low computational overhead." Optical flow calculations do not seem to be necessarily linked to high computational overhead. Refer to "Optical flow estimation using a spatial pyramid network" or "Real-time intermediate flow estimation for video frame interpolation".
+2. "A major use case for real-time video enhancement is videoconferencing where the video actually contains the torso/face of the person. " This sentence does not seem to be enough to support the paper's experimentation in this scenario only. I am particularly worried that the background of these scenes is static, and the movement of faces is different from ordinary objects, making it impossible to judge the generalization of the proposed method in general scenes.
+Even though real-time video conferencing is an important requirement, low-overhead video enhancement makes sense for many other users.
+3. The author mentioned "The training is parallelized across 8 NVIDIA A100 GPUs, with each GPU processing a single video. ", is this training method fair to other models?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

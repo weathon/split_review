@@ -1,0 +1,379 @@
+\title{Input-gradient space particle inference for neural network ensembles}
+
+\begin{abstract}
+Deep Ensembles (DEs) demonstrate improved accuracy, calibration and robustness to perturbations over single neural networks partly due to their functional diversity. 
+Particle-based variational inference (ParVI) methods enhance diversity by formalizing a repulsion term based on a network similarity kernel.
+However, weight-space repulsion is inefficient due to over-parameterization, while direct function-space repulsion has been found to produce little improvement over DEs.
+To sidestep these difficulties, we propose First-order Repulsive Deep Ensemble (FoRDE), an ensemble learning method based on ParVI, which performs repulsion in the space of first-order input gradients.
+As input gradients uniquely characterize a function up to translation and are much smaller in dimension than the weights, this method guarantees that ensemble members are functionally different.
+Intuitively, diversifying the input gradients encourages each network to learn different features, which is expected to improve the robustness of an ensemble.
+Experiments on image classification datasets and transfer learning tasks show that FoRDE %with an appropriate kernel function 
+significantly outperforms the gold-standard DEs and other ensemble methods in accuracy and calibration under covariate shift due to input perturbations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Ensemble methods, which combine predictions from multiple models, are a well-known strategy in machine learning \citep{emsembleinML} to boost predictive performance \citep{lakshminarayanan2017simple}, uncertainty estimation \citep{ovadia2019can}, robustness to adversarial attacks \citep{pmlr-v97-pang19a} and corruptions \citep{hendrycks2018benchmarking}. 
+Deep ensembles (DEs) combine multiple neural networks from independent weight initializations \citep{lakshminarayanan2017simple}.
+While DEs are simple to implement and have promising performance, their weight-based diversity does not necessarily translate into useful functional diversity \citep{rame2021dice,d'angelo2021repulsive,yashima22a}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figs/forde_illustration.pdf}
+    \caption{\textbf{Input-gradient repulsion increases functional diversity.} An illustration of input gradient repulsion in 1D regression with 3 neural networks. \textbf{Left:} At some point during training, the models fit well to the training samples yet exhibit low functional diversity. \textbf{Middle}: As training proceeds, at each data point, the repulsion term gradually pushes the input gradients (represented by the arrows) away from each other on a unit sphere. \textbf{Right:} As a result, at the end of training, the ensemble has gained functional diversity.}
+    \label{fig:forde_illustration}
+\end{figure}
+Particle-based variational inference (ParVI) \citep{qiang2016svgd,chen2018unified,liu2019povi,shen2021} has recently emerged as a direction to promote diversity in neural ensembles from the Bayesian perspective \citep{wang2018function,d'angelo2021repulsive}.
+Notably, the ParVI update rule adds a kernelized repulsion term $k(f,f')$ between the ensemble networks $f,f'$ for explicit control of the ensemble diversity. 
+Typically repulsion is done in the weight space to capture different regions in the weight posterior.
+However, due to the over-parameterization of neural networks, weight-space repulsion suffers from redundancy. 
+An alternative approach is to define the repulsion in function space \citep{wang2018function,d'angelo2021repulsive}, which requires the challenging computation of a kernel between functions.
+Previous works avoided this issue by comparing functions only on training inputs, which leads to underfitting \citep{d2021stein}.
+Neither weight nor function space repulsion has led to significant improvements over vanilla DEs.
+
+From a functional perspective, a model can \emph{also} be uniquely represented, up to translation, using its first-order derivatives, i.e., input \emph{gradients} $\nabla_\x f$.
+Promoting diversity in this third view of input gradients has notable advantages:
+\begin{enumerate}
+    \item each ensemble member is guaranteed to correspond to a different function;
+    \item input gradients have smaller dimensions than weights and thus are more amenable to kernel comparisons;  % often have dramatically smaller dimensions than network weights and thus are more amenable to kernel comparison;
+    \item unlike function-space repulsion, input-gradient repulsion does not lead to training point underfitting (See \cref{fig:forde_illustration} and the last panel of \cref{fig:1D_regression});
+    \item each ensemble member is encouraged to learn different features, which can improve robustness.
+\end{enumerate}
+
+In this work, we propose a ParVI neural network ensemble that promotes diversity in their input gradients, called First-order Repulsive deep ensemble (FoRDE). Furthermore, we devise a data-dependent kernel that allows FoRDE to outperform other ensemble methods under input corruptions on image classification tasks.
+
+
+\section{Background}
+
+
+\paragraph{Bayesian neural networks}
+
+In a Bayesian neural network (BNN), we treat the model's weights $\theta$ as random variables with a prior $p(\theta)$. Given a dataset $\D=\{(\x_n,y_n)\}_{n=1}^N$ and a likelihood function $p(y|\x,\theta)$ per data point, we infer the posterior over weights $p(\theta|\D)$ using Bayes' rule
+\begin{equation}\label{eq:bnn_posterior}
+    p(\theta|\D) = \frac{p(\D|\theta)p(\theta)}{\int_{\theta} p(\D|\theta)p(\theta)\mathrm{d}\theta} = \frac{p(\theta) \prod_{n=1}^N p(y_n|\x_n,\theta)}{\int_{\theta} p(\theta) \prod_{n=1}^N p(y_n|\x_n,\theta) \mathrm{d}\theta},
+\end{equation}
+where the likelihood is assumed to factorize over data.
+To make a prediction on a test sample $\x^*$, we integrate over the inferred posterior in \cref{eq:bnn_posterior}, a practice called \emph{Bayesian model averaging} (BMA):
+\begin{equation}\label{eq:bnn_ppd}
+    p(y|\x^*, \D) = \int_\theta p(y|\x^*,\theta)p(\theta|\D)\mathrm{d}\theta = \E_{p(\theta|\D)}\big[ p(y|\x^*,\theta) \big].
+\end{equation}
+However, computing the integral in \cref{eq:bnn_ppd} is intractable for BNNs. Various approximate inference methods have been developed for BNNs, including variational inference (VI) \citep{graves2011practical,blundell2015weight}, Markov chain Monte Carlo (MCMC) \citep{neal2012bayesian,welling2011bayesian,Zhang2020Cyclical} and more recently ParVI \citep{qiang2016svgd,wang2018function,d'angelo2021repulsive}.
+
+\paragraph{Deep ensembles} 
+
+As opposed to BNNs, which attempt to learn the posterior distribution, DEs \citep{lakshminarayanan2017simple} consist of multiple maximum-a-posteriori (MAP) estimates trained from independent random initializations. They can capture diverse functions that explain the data well, as independent training runs under different random conditions will likely converge to different modes in the posterior landscape. DEs have been shown to be better than BNNs in both accuracy and uncertainty estimation \citep{ovadia2019can,Ashukha2020Pitfalls,gustafsson2020evaluating}.
+
+\paragraph{Particle-based variational inference for neural network ensembles} 
+ParVI methods \citep{qiang2016svgd,chen2018unified,liu2019povi,shen2021} have been studied recently to formalize neural network ensembles. 
+They approximate the target posterior using a set of samples, or particles, by deterministically transporting these particles to the target distribution \citep{qiang2016svgd}.
+ParVI methods are expected to be more efficient than MCMC as they take into account the interactions between particles in their update rules \citep{liu2019povi}.
+These repulsive interactions are driven by a kernel which measures the pairwise similarities between particles, i.e., networks \citep{liu2019povi}.
+
+The current approaches compare networks in weight space $\theta$ or in function space $f(\cdot ; \theta)$.
+Weight-space repulsion is ineffective due to difficulties in comparing extremely high-dimensional weight vectors and the existence of weight symmetries  \citep{fort2019deep,entezari2022the}.
+Previous studies show that weight-space ParVI does not improve performance over plain DEs \citep{d'angelo2021repulsive,yashima22a}.
+Comparing neural networks via a function kernel is also challenging since functions are infinite-dimensional objects.
+Previous works resort to comparing functions only on a subset of the input space \citep{wang2018function,d'angelo2021repulsive}. Comparing functions over training data leads to underfitting \citep{d'angelo2021repulsive,yashima22a}, likely because these inputs have known labels, leaving no room for diverse predictions without impairing performance. %, while it is unclear how other choices of measurement set influence the performance of the resulting ensembles.
+\begin{figure}[t]
+    \centering    
+    \includegraphics[width=\textwidth]{figs/toy_experiments/1d_regression/combined_outputs_4.pdf}
+    \caption{\textbf{Input gradient ensembles (FoRDE) capture higher uncertainty than baselines.} Each panel shows predictive uncertainty in 1D regression for different (repulsive) deep ensemble methods.}%\textbf{1D Regression.} FoRDE captures more predictive uncertainty compared to the baselines.}
+    \label{fig:1D_regression}
+\end{figure}
+\begin{figure}[t]
+    \centering    
+    \includegraphics[width=\textwidth]{figs/toy_experiments/2d_classification/combined_total_entropy_4.pdf}
+    \caption{\textbf{Uncertainty of FoRDE is high in all input regions outside the training data, and is higher than baselines.} Each panel shows the entropy of the predictive posteriors in 2D classification.}
+    \label{fig:2D_classification}
+\end{figure}
+
+
+\section{FoRDE: First-order Repulsive Deep Ensembles}
+
+
+In this section, we present a framework to perform ParVI in the \emph{input-gradient} space.
+We start by summarizing  Wasserstein gradient descent (WGD) in \cref{sec:wgd}, and show how to apply WGD for input-gradient-space repulsion in \cref{sec:wgd_for_input_grad}.
+We then discuss hyperparameter selection for the input-gradient kernel in \cref{sec:pca_lengthscales}, and outline practical considerations in \cref{sec:practical_considerations}.  %for the input-gradient kernel.
+
+Throughout this paper, we assume a set of $M$ weight particles $\{\theta_i\}_{i=1}^M$ corresponding to a set of $M$ neural networks $\{f_i: \x \mapsto f(\x; \theta_i)\}_{i=1}^M$.
+We focus on the supervised classification setting: given a labelled dataset $\D=\{(\x_n, y_n)\}_{n=1}^N$ with $\mathcal{C}$ classes and inputs $\x_n \in \R^D$, we approximate the posterior $p(\theta | \D)$ using the $M$ particles. The output $f(\x; \theta)$ for input $\x$ is a vector of size $\mathcal{C}$ whose $y$-th entry $f(\x; \theta)_y$ is the logit of the $y$-th class.
+
+\subsection{Wasserstein gradient descent}\label{sec:wgd}
+Following \citet{d'angelo2021repulsive}, we use a ParVI method called Wasserstein gradient descent (WGD) \citep{liu2019povi,wang2022projected}.
+Given an intractable target posterior distribution $\pi = p(\cdot | \D)$ and a set of particles $\{\theta_i\}_{i=1}^M$ from distribution $\rho$, the goal of WGD is to find the particle distribution $\rho^*$,
+\begin{equation} \label{eq:wgd}
+    \rho^* = \argmin_{\rho \in \mathcal{P}_2(\Theta)} \KL_{\pi}(\rho),
+\end{equation}
+where $\KL_{\pi}(\rho)$ is a shorthand for the standard Kullback-Leibler divergence
+\begin{equation}
+    \KL_{\pi}(\rho) = \E_{\rho(\theta)}\big[\log \rho(\theta)-\log \pi(\theta)\big],
+\end{equation}
+and $\mathcal{P}_2(\Theta)$ is the Wasserstein space equipped with the Wasserstein distance $W_2$ \citep{ambrosio2005gradient,villani2009optimal}.
+WGD solves the problem in \cref{eq:wgd} using %gradient descent optimization by following
+a Wasserstein gradient flow $(\rho_t)_t$, which is roughly the family of steepest descent curves of $\KL_{\pi}(\cdot)$ in $\mathcal{P}_2(\Theta)$.
+The tangent vector of this gradient flow at time $t$ is
+\begin{equation}\label{eq:wgd_tangent}
+    v_t(\theta) = \nabla \log \pi(\theta) - \nabla \log \rho_t(\theta)
+\end{equation}
+whenever $\rho_t$ is absolutely continuous \citep{villani2009optimal,liu2019povi}.
+Intuitively, $v_t(\theta)$ points to the direction where the probability mass at $\theta$ of $\rho_t$ should be transported in order to bring $\rho_t$ closer to $\pi$.
+Since \cref{eq:wgd_tangent} requires the analytical form of $\rho_t$ which we do not have access to, we use kernel density estimation (KDE) to obtain a tractable approximation $\hat{\rho}_t$ induced by  particles $\{\theta_i^{(t)}\}_{i=1}^M$ at time $t$,
+\begin{align}
+    \hat{\rho}_t(\theta) \propto \sum_{i=1}^M k\big(\theta,\theta_i^{(t)}\big),
+\end{align}
+where $k$ is a positive semi-definite kernel. Then, the gradient of the approximation is
+\begin{equation}\label{eq:kde_loggrad}
+    \nabla \log \hat{\rho}_t(\theta) = \frac{\sum_{i=1}^M \nabla_{\theta} k\big(\theta,\theta_i^{(t)}\big)}{\sum_{i=1}^M k\big(\theta,\theta_i^{(t)}\big)}.
+\end{equation}
+Using \cref{eq:kde_loggrad} in \cref{eq:wgd_tangent}, we obtain a practical update rule for each particle $\theta^{(t)}$ of $\hat{\rho}_t$:
+\begin{align}
+    \theta^{(t+1)} %&= \theta^{(t)} + \eta_t v\big(\theta^{(t)}\big) \\
+               &= \theta^{(t)} + \eta_t \Bigg(\underbrace{\nabla_{\theta^{(t)}} \log \pi\big(\theta^{(t)}\big)}_{\text{driving force}} - \underbrace{\frac{\sum_{i=1}^M \nabla_{\theta^{(t)}} k\big(\theta^{(t)},\theta_i^{(t)}\big)}{\sum_{i=1}^M k\big(\theta^{(t)},\theta_i^{(t)}\big)}}_{\text{repulsion force}} \Bigg), \label{eq:wgd_kde}
+\end{align}
+where $\eta_t > 0$ is the step size at optimization time $t$. Intuitively, we can interpret the first term in the particle gradient as the driving force directing the particles towards high density regions of the posterior, while the second term is the repulsion force pushing the particles away from each other. %These parallel the mode-seeking expected log density term and repulsive entropy term in standard VI.
+
+\subsection{Defining the kernel for WGD in input gradient space}\label{sec:wgd_for_input_grad}
+
+ 
+We propose to use a kernel comparing the \emph{input gradients} of the particles,
+\begin{align}
+    k(\theta_i, \theta_j) &\overset{\mathrm{def}}{=} \E_{(\x,y) \sim p(\x,y)}\Big[ \kappa\big(\nabla_\x f(\x; \theta_i)_{y}, \nabla_\x f(\x; \theta_j)_{y} \big) \Big],
+\end{align}
+where $\kappa$ is a \emph{base kernel} between gradients $\nabla_\x f(\x;\theta)_y$ that are of same size as the inputs $\x$. 
+In essence, we define $k$ as the expected similarity between the input gradients of two networks with respect to the data distribution $p(\x,y)$. %, where the similarity per input is calculated using the base kernel $\kappa$.
+Interestingly, by using the kernel $k$, the KDE approximation $\hat{\rho}$ of the particle distribution not only depends on the particles themselves but also depends on the data distribution.
+We approximate the kernel $k$ using the training samples, with linear complexity:
+\begin{equation}\label{eq:input_grad_kernel}
+    k(\theta_i, \theta_j) \approx k_{\D}(\theta_i, \theta_j) = \frac{1}{N}\sum_{n=1}^N \kappa\big(\nabla_\x f(\x_n; \theta_i)_{y_n}, \nabla_\x f(\x_n; \theta_j)_{y_n} \big).
+\end{equation}
+The kernel only compares the gradients of the true label $\nabla_\x f(\x_n; \theta)_{y_n}$, as opposed to the entire Jacobian matrix $\nabla_\x f(\x_n; \theta)$, as our motivation is to encourage each particle to learn different features that could explain the training sample $(\x_n,y_n)$ well.
+\paragraph{Choosing the base kernel}
+We choose the RBF kernel on the unit sphere as our base kernel $\kappa$:
+\begin{align}\label{eq:base_kernel}
+    \kappa(\s,\s'; \bS) = \exp\left( -\frac{1}{2} (\s-\s')^\top \bS^{-1} (\s-\s')\right), \qquad \s = \frac{\nabla_\x f(\x; \theta)_{y}}{||\nabla_\x f(\x; \theta)_{y}||_2} \in \R^D
+\end{align}
+where $\s,\s'$ denote the two normalized gradients of two particles with respect to one input, and $\bS \in \R^{D \times D}$ is a diagonal matrix containing squared lengthscales.
+We design $\kappa$ to be norm-agnostic since the norm of the true label gradient $||\nabla_\x f(\x_n; \theta)_{y_n}||_2$ fluctuates during training and as training converges, the log-probability $f(\x_n; \theta)_{y_n}=\log p(y_n|\x_n,\theta)$ will approach $\log 1$, leading to the norm $||\nabla_\x f(\x_n; \theta)_{y_n}||_2$ approaching $0$ due to the saturation of the log-softmax activation. %(See Fig. \ref{}).
+Furthermore, comparing the normed input gradients between ensemble members teaches them to learn complementary explanatory patterns from the training samples, which could improve robustness of the ensemble.
+The RBF kernel is an apt kernel to compare unit vectors \citep{jayasumana2014optimizing}, and we can control the variances of the gradients along input dimensions via the square lengthscales $\bS$.
+\subsection{Selecting the lengthscales for the base kernel} \label{sec:pca_lengthscales}
+In this section, we present a method to select the lengthscales for the base kernel.
+These lengthscales are important for the performance of FoRDE, since they control how much repulsion force is applied in each dimension of the input-gradient space. The dimension-wise repulsion is \citep{qiang2016svgd}
+\begin{align}
+    \frac{\partial}{\partial s_d} \kappa(\s,\s'; \bS) %&= \nabla_{s_d} \exp\big( -\frac{1}{2}(\s-\s')^\top \left(\bS}^{-1}\right)^2 (\s-\s')\big) \\
+    &= -\frac{s_d-s'_d}{\bS_{dd}} \kappa(\s,\s'; \bS),
+\end{align}
+where we can see that along the $d$-th dimension the inverse square lengthscale $\bS_{dd}$ controls the strength of the repulsion $\nabla_{s_d} \kappa(\s,\s'; \bS)$: a smaller lengthscale corresponds to a stronger force.\footnote{Here we assume that the lengthscales are set appropriately so that the kernel $\kappa$ does not vanish, which is true since we use the median heuristic during training (\cref{sec:practical_considerations}).}
+Additionally, since the repulsion is restricted to the unit sphere in the input-gradient space, increasing distance in one dimension decreases the distance in other dimensions.
+As a result, the repulsion motivates the ensemble members to depend more on dimensions with stronger repulsion in the input gradient space for their predictions, while focusing less on dimensions with weaker repulsion. One should then apply stronger repulsion in dimensions of data manifold with higher variances.
+
+To realize the intuition above in FoRDE, we first apply Principal Component Analysis (PCA) to discover dominant features in the data.
+In PCA, we calculate the eigendecomposition
+\begin{align}
+    \mathbf{C} &= \U \bL \U^T \quad \in \R^{D \times D}
+\end{align}
+of the covariance matrix $\mathbf{C} = \mathbf{X}^T\mathbf{X}/(N-1)$ of the centered training samples $\mathbf{X} \in \R^{N \times D}$ to get eigenvectors and eigenvalues $\{\u_d, \lambda_d\}_{k=1}^D$. %Here we assume that our training data contains $D$-dimensional zero centered input vectors. 
+The $d$-th eigenvalue $\lambda_d$ is the variance of the data along eigenvector $\u_d$, offering a natural choice of inverse eigenvalues $\lambda_d^{-1}$ as the squared lengthscales $\bS_{dd}$ of the principal components. 
+Let $\tilde{\x} = \U^T \x$ denote the representation of the input $\x$ in eigenbasis $\U = [\u_1 \, \u_2 \, \dots \, \u_D]$.
+We compute the gradient kernel in PCA basis $\U$ and set $\bS = \bL^{-1}$: % we set the squared lengthscales to the inverse eigenvalues $\bL^{-1}$:
+\begin{align}\label{eq:pca_kernel}
+    \kappa(\s,\s') &\overset{\mathrm{def}}{=} %\kappa(\U^\top \s, \U^\top \s'; \bL^{-1}) \\
+    \exp\left(-\frac{1}{2} (\U^\top \s - \U^\top \s')^\top \,\bL\, (\U^\top \s - \U^\top \s')\right),
+\end{align}
+where $\bL$ is a diagonal eigenvalue matrix. 
+While setting the square inverse lengthscales equal to the eigenvalues seems problematic at first glance, since large eigenvalues will push the kernel $\kappa$ towards 0, this problem is avoided in practice since we also employ the median heuristic, which introduces in the kernel a global bandwidth scaling term that adapts to the current pairwise distance between particles, as discussed below in \cref{sec:practical_considerations}.
+
+
+\paragraph{Connection to the EmpCov prior} Recently, \citet{izmailov2021dangers} proposed the EmpCov prior for the weight columns $\mathbf{w}$ of the first layer of a BNN:
+\begin{equation}
+    \mathbf{w} \sim \mathcal{N}(0, \alpha \mathbf{C} + \epsilon \mathbf{I}), \qquad \mathbf{w} \in \R^D
+\end{equation}
+where $\alpha > 0$ determines the prior scale and $\epsilon > 0$ is a small constant ensuring a positive definite covariance.
+The prior encourages first layer weights to vary more along higher variance data dimensions.  %dimensions in the data and less along the low variance dimensions.
+Samples from this prior will have large input gradients along high variance input dimensions. %the dimensions in the data manifold with high variances, and small input gradients along the low variance dimensions.
+In this sense, the EmpCov prior has a similar effect to the kernel in \cref{eq:pca_kernel} on ensemble members.
+The difference is that while \cite{izmailov2021dangers} incorporates knowledge of the data manifold into the prior, we embed this knowledge into our approximate posterior via the kernel.
+\subsection{Practical considerations} \label{sec:practical_considerations}
+
+In this section, we detail two important considerations to make FoRDEs work in practice. We include the full training algorithm in \cref{sec:training_algo}.
+
+\paragraph{Mini-batching} To make FoRDE amenable to mini-batch gradient optimization, we adapt the kernel in \cref{eq:input_grad_kernel} to a mini-batch of samples $\mathcal{B}=\{(\mathbf{x}_b, y_b)\}_{b=1}^B$:
+\begin{equation}\label{eq:input_grad_minibatch_kernel}
+    k_{\mathcal{B}}(\theta_i, \theta_j) = \frac{1}{B}\sum_{b=1}^B \kappa\Big(\nabla_\x f(\x_b; \theta_i)_{y_b}, \nabla_\x f(\x_b; \theta_j)_{y_b} \Big).
+\end{equation}
+In principle, this kernel in the update rule in \cref{eq:wgd_kde} leads to %to asymptotically exact yet 
+biased stochastic gradients of the repulsion term because the average over batch samples in \cref{eq:input_grad_minibatch_kernel} is inside the logarithm. However, in practice, we found no convergence issues in our experiments.
+
+\paragraph{Median heuristics} Since we perform particle optimization with an RBF kernel $\kappa$, following earlier works \citep{qiang2016svgd,liu2019povi}, we adopt the median heuristic \citep{scholkopf2002learning}. Besides the lengthscales, we introduce a global bandwidth $h$ in our base kernel in \cref{eq:base_kernel}:
+\begin{equation}\label{eq:median_heuristic}
+    \kappa(\s_i,\s_j; \bS) = \exp\left( -\frac{1}{2h} (\s_i-\s_j)^\top \bS^{-1} (\s_i-\s_j)\right), \qquad \s_i = \frac{\nabla_\x f(\x; \theta_i)_{y}}{||\nabla_\x f(\x; \theta_i)_{y}||_2} \in \R^D.
+\end{equation}
+During training, the bandwidth $h$ is adaptively set to $\mathrm{med}^2/(2\log M)$, where $\mathrm{med}^2$ is the median of the pairwise distance $(\s_i-\s_j)^\top \bS^{-1} (\s_i-\s_j)$ between the weight samples $\{\theta_i\}_{i=1}^M$.
+\subsection{Computational complexity}\label{sec:computational_complexity}
+Compared to DEs, FoRDEs %with similar ensemble sizes 
+take roughly three times longer to train.
+In addition to a forward-backward pass to calculate the log-likelihood, we need an additional forward-backward pass to calculate the input gradients, and another backward pass to calculate the gradients of the input gradient repulsion with respect to the weights.
+This analysis is confirmed in practice: in \textsc{resnet18}/\textsc{cifar-100} experiments of \cref{sec:benchmarking} with an ensemble size of 10, a DE took $\sim$31 seconds per epoch on an Nvidia A100 GPU, while FoRDE took $\sim$101 seconds per epoch.
+
+
+
+\section{Related works}
+
+
+Besides the ParVI methods mentioned in \cref{sec:background}, we discuss additional related works below.
+
+\paragraph{Diversifying input gradients of ensembles} Local independent training (LIT) \citep{ross2018learning} orthogonalizes the input gradients of ensemble members by minimizing their pairwise squared cosine similarities, and thus closely resembles our input-gradient repulsion term which diversifies input gradients on a hyper-sphere. However, their goal is to find a maximal set of models that accurately predict the data using different sets of distinct features, while our goal is to induce functional diversity in an ensemble. Furthermore, we formulate our kernelized repulsion term based on the ParVI framework, allowing us to choose hyperparameter settings (orthogonal basis and lengthscales) that imbue the ensemble with beneficial biases (such as robustness to corruption). %Our repulsion term is therefore more flexible than the orthogonal constraint of \citet{ross2018learning}.
+
+\paragraph{Gradient-based attribution methods for deep models}
+One application of input gradients is to build attribution (or \emph{saliency}) maps, which assign importance to visually-interpretable input features for a specified output \citep{simonyan2013deep,bach2015pixel,shrikumar2016not,sundararajan2017axiomatic,shrikumar2017learning}.
+Our method intuitively utilizes the attribution perspective of input gradients to encourage ensemble members to learn different patterns from training data.
+
+\paragraph{Improving corruption robustness of BNNs}
+Previous works have evaluated the predictive uncertainty of BNNs under covariate shift \citep{ovadia2019can,izmailov21a}, with \citet{izmailov21a} showing that standard BNNs with high-fidelity posteriors perform worse than MAP solutions on under corruptions. \citet{izmailov2021dangers} attributed this phenomenon to the lack of posterior contraction in the null space of the data manifold and proposed the EmpCov prior as a remedy.
+As discussed in \cref{sec:pca_lengthscales}, the PCA kernel works in the same manner as the EmpCov prior and thus significantly improves robustness of FoRDE against corruptions.
+\citet{trinh22a} studied the robustness of node-BNNs, an efficient alternative to weight-based BNNs, and showed that by increasing the entropy of the posterior, node-BNNs become more robust against corruptions.
+\cite{wang2023robustness} allow BNNs to adapt to the distribution shift at test time by using test data statistics.
+
+
+\begin{table}[ht]
+\centering
+\caption{\textbf{FoRDE-PCA achieves the best performance under corruptions while FoRDE-Identity outperforms baselines on clean data. FoRDE-Tuned outperforms baselines on both clean and corrupted data.} Results of \textsc{resnet18} / \textsc{cifar-100} averaged over 5 seeds. Each ensemble has 10 members. cA, cNLL and cECE are accuracy, NLL, and ECE on \textsc{cifar-100-c}.}
+\label{tab:cifar100_benchmark}
+\resizebox{0.85\textwidth}{!}{%
+\begin{sc}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method         & NLL $\downarrow$ & Accuracy (\%) $\uparrow$ & ECE $\downarrow$  & cA / cNLL / cECE   \\ \midrule
+node-BNNs     & $0.74 \textcolor{gray}{\pm 0.01}$  & $79.7 \textcolor{gray}{\pm 0.3} $          & $0.054 \textcolor{gray}{\pm 0.002}$ & 54.8 / 1.96 / 0.05 \\
+SWAG           & $0.73 \textcolor{gray}{\pm 0.01}$  & $79.4 \textcolor{gray}{\pm 0.1}$           & $\mathbf{0.038 \textcolor{gray}{\pm 0.001}}$ & 53.0 / 2.03 / 0.05 \\ \midrule
+Deep ensembles & $\mathbf{0.70 \textcolor{gray}{\pm 0.00}}$  & $81.8 \textcolor{gray}{\pm 0.2}$           & $0.041 \textcolor{gray}{\pm 0.003}$ & 54.3 / 1.99 / 0.05 \\
+weight-RDE     & $\mathbf{0.70 \textcolor{gray}{\pm 0.01}}$  & $81.7 \textcolor{gray}{\pm 0.3}$           & $0.043 \textcolor{gray}{\pm 0.004}$ & 54.2 / 2.01 / 0.06 \\
+function-RDE   & $0.76 \textcolor{gray}{\pm 0.02}$  & $80.1 \textcolor{gray}{\pm 0.4}$           & $0.042 \textcolor{gray}{\pm 0.005}$ & 51.9 / 2.08 / 0.07 \\
+feature-RDE    & $0.75 \textcolor{gray}{\pm 0.04}$  & $\mathbf{82.1 \textcolor{gray}{\pm 0.3}}$           & $0.072 \textcolor{gray}{\pm 0.023}$ & 54.8 / 2.02 / 0.06 \\ \midrule
+LIT & $\mathbf{0.70 \textcolor{gray}{\pm 0.00}}$  & $81.9 \textcolor{gray}{\pm 0.2}$           & $0.040 \textcolor{gray}{\pm 0.003}$ & 54.4 / 1.98 / 0.05 \\
+FoRDE-PCA (ours)   & $0.71 \textcolor{gray}{\pm 0.00}$  & $81.4 \textcolor{gray}{\pm 0.2}$           & $0.039 \textcolor{gray}{\pm 0.002}$ & $\mathbf{56.1}$ / $\mathbf{1.90}$ / $\mathbf{0.05}$ \\
+FoRDE-Identity (ours) & $\mathbf{0.70 \textcolor{gray}{\pm 0.00}}$ & $\mathbf{82.1 \textcolor{gray}{\pm 0.2}}$ & $0.043 \textcolor{gray}{\pm 0.001}$ & 54.1 / 2.02 / 0.05 \\
+FoRDE-Tuned (ours) & $\mathbf{0.70 \textcolor{gray}{\pm 0.00}}$ & $\mathbf{82.1 \textcolor{gray}{\pm 0.2}}$ & $0.044 \textcolor{gray}{\pm 0.002}$ & 55.3 / 1.94 / 0.05 \\
+\bottomrule
+\end{tabular}
+\end{sc}
+}
+\end{table}
+\begin{table}[ht]
+\centering
+\caption{\textbf{FoRDE-PCA achieves the best performance under corruptions while FoRDE-Identity has the best NLL on clean data. FoRDE-Tuned outperforms most baselines on both clean and corrupted data.} Results of \textsc{resnet18} / \textsc{cifar-10} averaged over 5 seeds. Each ensemble has 10 members. cA, cNLL and cECE are accuracy, NLL, and ECE on \textsc{cifar-10-c}.}
+\label{tab:cifar10_benchmark}
+\resizebox{0.85\textwidth}{!}{%
+\begin{sc}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method         & NLL $\downarrow$ & Accuracy (\%) $\uparrow$ & ECE $\downarrow$  & cA / cNLL / cECE   \\ \midrule
+node-BNNs      & $0.127 \textcolor{gray}{\pm 0.009}$ & $95.9 \textcolor{gray}{\pm 0.3}$           & $0.006 \textcolor{gray}{\pm 0.002}$ & 78.2 / 0.82 / 0.09 \\
+SWAG           & $0.124 \textcolor{gray}{\pm 0.001}$ & $\mathbf{96.9 \textcolor{gray}{\pm 0.1}}$           & $0.005 \textcolor{gray}{\pm 0.001}$ & 77.5 / 0.78 / 0.07 \\ \midrule
+Deep ensembles & $0.117 \textcolor{gray}{\pm 0.001}$ & $96.3 \textcolor{gray}{\pm 0.1}$           & $0.005 \textcolor{gray}{\pm 0.001}$ & 78.1 / 0.78 / 0.08 \\
+weight-RDE     & $0.117 \textcolor{gray}{\pm 0.002}$ & $96.2 \textcolor{gray}{\pm 0.1}$           & $0.005 \textcolor{gray}{\pm 0.001}$ & 78.0 / 0.78 / 0.08 \\
+function-RDE   & $0.128 \textcolor{gray}{\pm 0.001}$ & $95.8 \textcolor{gray}{\pm 0.2}$           & $0.006 \textcolor{gray}{\pm 0.001}$ & 77.1 / 0.81 / 0.08 \\
+feature-RDE    & $0.116 \textcolor{gray}{\pm 0.001}$ & $96.4 \textcolor{gray}{\pm 0.1}$           & $\mathbf{0.004 \textcolor{gray}{\pm 0.001}}$ & 78.1 / 0.77 / 0.08 \\ \midrule
+LIT & $0.116 \textcolor{gray}{\pm 0.001}$ & $96.4 \textcolor{gray}{\pm 0.1}$           & $0.004 \textcolor{gray}{\pm 0.001}$ & 78.2 / 0.78 / 0.09 \\
+FoRDE-PCA (ours)   & $0.125 \textcolor{gray}{\pm 0.001}$ & $96.1 \textcolor{gray}{\pm 0.1}$           & $0.006 \textcolor{gray}{\pm 0.001}$ & $\mathbf{80.5}$ / $\mathbf{0.71}$ / $\mathbf{0.07}$ \\
+FoRDE-Identity (ours) & $\mathbf{0.113 \textcolor{gray}{\pm 0.002}}$ & $96.3 \textcolor{gray}{\pm 0.1}$ & $0.005 \textcolor{gray}{\pm 0.001}$ & 78.0 / 0.80 / 0.08 \\
+FoRDE-Tuned (ours) & $0.114 \textcolor{gray}{\pm 0.002}$ & $96.4 \textcolor{gray}{\pm 0.1}$ & $0.005 \textcolor{gray}{\pm 0.001}$ & 79.1 / 0.74 / 0.07 \\
+\bottomrule
+\end{tabular}
+\end{sc}
+}
+\end{table}
+\begin{table}[ht]
+\centering
+\caption{\textbf{FoRDE outperforms EmpCov priors under corruptions, while maintaining competitive performance on clean data.}
+Results of \textsc{resnet18} on \textsc{cifar-10} evaluated over 5 seeds. Each ensemble has 10 members. cA, cNLL and cECE are accuracy, NLL, and ECE on \textsc{cifar-10-c}. Here we use the EmpCov prior for all methods except FoRDE.
+}
+\label{tab:cifar10_empcov}
+\resizebox{0.85\textwidth}{!}{%
+\begin{sc}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method         & NLL $\downarrow$ & Accuracy (\%) $\uparrow$ & ECE $\downarrow$  & cA / cNLL / cECE   \\ \midrule
+Deep ensembles & $0.119 \textcolor{gray}{\pm 0.001}$ & $\mathbf{96.2 \textcolor{gray}{\pm 0.1}}$ & $0.006 \textcolor{gray}{\pm 0.001}$ & 78.7 / 0.76 / 0.08 \\
+weight-RDE     & $0.120 \textcolor{gray}{\pm 0.001}$ & $96.0 \textcolor{gray}{\pm 0.1}$ & $0.006 \textcolor{gray}{\pm 0.001}$ & 78.8 / 0.76 / 0.08 \\
+function-RDE   & $0.132 \textcolor{gray}{\pm 0.001}$ & $95.6 \textcolor{gray}{\pm 0.3}$ & $0.007 \textcolor{gray}{\pm 0.001}$ & 77.8 / 0.79 / 0.08 \\
+feature-RDE    & $\mathbf{0.118 \textcolor{gray}{\pm 0.001}}$ & $\mathbf{96.2 \textcolor{gray}{\pm 0.1}}$ & $\mathbf{0.005 \textcolor{gray}{\pm 0.001}}$ & 78.9 / 0.74 / 0.07 \\ \midrule
+FoRDE-PCA (ours)   & $0.125 \textcolor{gray}{\pm 0.001}$ & $96.1 \textcolor{gray}{\pm 0.1}$           & $0.006 \textcolor{gray}{\pm 0.001}$ & $\mathbf{80.5}$ / $\mathbf{0.71}$ / $\mathbf{0.07}$ \\
+\bottomrule
+\end{tabular}
+\end{sc}
+}
+\end{table}
+
+
+
+\section{Experiments}
+
+\subsection{Illustrating functional diversity}
+To show that FoRDE does produce better functional diversity than plain DE and other repulsive DE approaches, we repeated the 1D regression of \citet{izmailov_subspace_2019} and the 2D classification experiments of \citet{d'angelo2021repulsive}.
+We use ensembles of 16 networks for these experiments.
+\cref{fig:1D_regression} shows that FoRDE exhibits higher predictive uncertainty in the input regions outside the training data compared to the baselines in 1D regression.
+For the 2D classification task, we visualize the entropy of the predictive posteriors in \cref{fig:2D_classification}, which also shows that FoRDE has higher uncertainty than the baselines. Furthermore, FoRDE is the only method that exhibits high uncertainty in all input regions outside the training data, a property mainly observed in predictive uncertainty of Gaussian processes \citep{rasmussen_gp}.
+\subsection{Comparisons to other repulsive DE methods and BNNs} \label{sec:benchmarking}
+
+We report performance of FoRDE against other methods on \textsc{cifar-10/100} \citep{krizhevsky2009cifar} in \crefrange{tab:cifar100_benchmark}{tab:cifar10_benchmark} and \textsc{tinyimagenet} \citep{Le2015TinyIV} in \cref{sec:tinyimagenet_results}.
+Besides the PCA lengthscales introduced in \cref{sec:pca_lengthscales}, we experiment with the identity lengthscales $\boldsymbol{\Sigma}=\mathbf{I}$ and with tuned lengthscales where we take the weighted average of the PCA lengthscales and the identity lengthscales.
+Details on lengthscale tuning are presented in \cref{sec:tuning_lengthscales}.
+For the repulsive DE (RDE) baselines, we choose weight RDE \citep{d'angelo2021repulsive}, function RDE \citep{d'angelo2021repulsive} and feature RDE \citep{yashima22a}.
+We also include LIT \citep{ross2018learning}, node-BNNs \citep{trinh22a} and SWAG \citep{maddox2019} as baselines.
+We use an ensemble size of 10.
+We use standard performance metrics of expected calibration error (ECE) \citep{Naeini2015}, negative log-likelihood (NLL) and predictive accuracy.
+For evaluations on input perturbations, we use \textsc{cifar-10/100-c} and \textsc{tinyimagenet-c} provided by \citet{hendrycks2016baseline}, which are datasets of corrupted test images containing 19 image corruption types across 5 levels of severity, and we report the accuracy, NLL and ECE averaged over all corruption types and severity levels (denoted cA, cNLL and cECE in \crefrange{tab:cifar100_benchmark}{tab:tinyimagenet_benchmark}).
+We use \textsc{resnet18}  \citep{he2016deep} for \textsc{cifar-10/100} and \textsc{preactresnet18} \citep{he2016identity} for \textsc{tinyimagenet}.
+Experimental details are included in \cref{sec:image_exp_details}.
+
+\cref{tab:cifar100_benchmark,tab:cifar10_benchmark} show that FoRDE-PCA outperforms other methods under input corruptions across all metrics, while maintaining competitive performance on clean data.
+For instance, FoRDE-PCA shows a $+1.3\%$ gain on \textsc{cifar-100-c} and $+2.4\%$ gain on \textsc{cifar-10-c} in accuracy compared to the second-best results.
+As stated in \cref{sec:pca_lengthscales}, the PCA kernel encourages FoRDE to rely more on features with high variances in the data manifold to make predictions, while being less dependent on features with low variances. This effect has been shown in \citet{izmailov2021dangers} to boost model robustness against perturbations, which explains why FoRDE with the PCA kernel performs better than the baselines on input corruptions.
+
+On the other hand, \cref{tab:cifar100_benchmark,tab:cifar10_benchmark} show that FoRDE with identity lengthscales outperforms the baselines in terms of NLL on \textsc{cifar-10} and has the best accuracy on \textsc{cifar-100}. However, FoRDE-Identity is slightly less robust than DE against corruptions. We suspect that with the identity lengthscales, FoRDE also learns to rely on low-variance features to make predictions, which is harmful to performance under corruptions \citep{izmailov2021dangers}.
+
+Finally, \cref{tab:cifar100_benchmark,tab:cifar10_benchmark} show that FoRDE with tuned lengthscales (FoRDE-Tuned) outperforms the baselines on both clean and corrupted data in most cases, suggesting that the optimal lengthscales for good performance on both clean and corrupted data lie somewhere between the identity lengthscales and the PCA lengthscales. Additional results on lengthscale tuning are presented in \cref{sec:tuning_lengthscales}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figs/cifar_transferlearning_5.pdf}
+    \caption{\textbf{FoRDE outperforms competing methods in transfer learning.} %Each result is averaged over 5 seeds. 
+    \textbf{First three columns:} We report NLL, ECE and accuracy on in-distribution test sets and under covariate shift. For \textsc{cifar-10}, we use \textsc{cinic10} \citep{darlow2018cinic} to evaluate models under natural shift and \textsc{cifar-10-c} for corruption shift. For \textsc{cifar-100}, we evaluate on \textsc{cifar-100-c}. FoRDE performs better than the baselines in all cases. \textbf{Last column:} We evaluate functional diversity by calculating epistemic uncertainty of ensembles on out-of-distribution (OOD) datasets using the formula in \citet{pmlr-v80-depeweg18a}. We use \textsc{cifar-100} as the OOD test set for \textsc{cifar-10} and we use \textsc{cifar-10} and \textsc{cinic10} as OOD test sets for \textsc{cifar-100}. FoRDE exhibits higher functional diversity than the baselines.}
+    \label{fig:cifar_transferlearning}
+\end{figure}
+\subsection{Comparisons to EmpCov prior}
+As stated in \cref{sec:pca_lengthscales}, our approach is similar to the EmpCov prior \citep{izmailov2021dangers}. We thus perform comparisons against ensemble methods where the EmpCov prior is defined for the first layer instead of the standard isotropic Gaussian prior.
+We report the results of \textsc{resnet18}/\textsc{cifar-10} in \cref{tab:cifar10_empcov}, where we use the EmpCov prior for all ensemble methods except FoRDE.
+Comparing \cref{tab:cifar10_empcov} to \cref{tab:cifar10_benchmark} indicates that the EmpCov prior slightly improves robustness of the baseline ensemble methods against corruptions, while also leading to a small reduction in performance on clean data.
+These small improvements in robustness are not surprising, since for ensemble methods consisting of approximate MAP solutions, the isotropic Gaussian prior already minimizes the influences of low-variance data features on the ensemble's predictions \citep{izmailov2021dangers}.
+We argue that besides minimizing the influences of low variance features on predictions via the PCA kernel, FoRDE also encourages its members to learn complementary patterns that can explain the data well, and these two effects act in synergy to improve the robustness of the resulting ensemble.
+Thus, \cref{tab:cifar10_empcov} shows that FoRDE is still more robust against corruptions than the baseline methods with the EmpCov prior.
+
+\subsection{Transfer learning experiments}
+To show the practicality of FoRDE, we evaluated its performance in a transfer learning scenario. We use the outputs of the last hidden layer of a Vision Transformer model pretrained on \textsc{imagenet-21k} as input features and train ensembles of 10 networks. We report the results on \textsc{cifar-10} in the first row and on \textsc{cifar-100} in the second row in \cref{fig:cifar_transferlearning}.
+Overall, \cref{fig:cifar_transferlearning} shows that FoRDE is better than the baselines across all cases. See \cref{sec:transferlearning_details} for experimental details.
+
+
+
+\section{Discussion}
+
+In this section, we outline directions to further improve FoRDE.
+
+\paragraph{Reducing computational complexity} One major drawback of FoRDEs is the high computational complexity as discussed in \cref{sec:computational_complexity}. To circumvent this problem, one could either (i) only calculate the repulsion term after every $k > 1$ epochs, or (ii) using only a subset of batch samples at each iteration to calculate the repulsion term.
+
+\paragraph{Reducing the number of lengthscale parameters} Here we use the RBF kernel as our base kernel, which requires us to choose appropriate lengthscales for good performance. To avoid this problem, we could explore other kernels suitable for unit vector comparisons, such as those introduced in \cite{jayasumana2014optimizing}. Another solution is to study dimensionality reduction techniques for input gradients before calculating the kernel, which can reduce the number of lengthscales to be set.
+
+
+\section{Conclusion}
+
+In this work, we proposed FoRDE, an ensemble learning method that promotes diversity in the input-gradient space among ensemble members.
+We detailed the update rule and devised a data-dependent kernel suitable for input-gradient repulsion.
+Experiments on image classification and transfer learning tasks show that FoRDE outperforms other ensemble methods under covariate shift.
+Future directions include more efficient implementations of the method and reducing the burden of hyperparameter selection as discussed in \cref{sec:discussion}.
+
+
+

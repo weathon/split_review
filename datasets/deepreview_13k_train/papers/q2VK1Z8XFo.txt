@@ -1,0 +1,446 @@
+\title{Tighter Performance Theory of FedExProx}
+
+\begin{abstract}
+We revisit \algname{FedExProx} -- a recently proposed distributed optimization method designed to enhance convergence properties of parallel proximal algorithms via extrapolation. In the process, we uncover a surprising flaw: its known theoretical guarantees on quadratic optimization tasks are no better than those offered by the vanilla Gradient Descent (\algname{GD}) method. Motivated by this observation, we develop a novel analysis framework, establishing a tighter linear convergence rate for non-strongly convex quadratic problems. By incorporating both computation and communication costs, we demonstrate that \algname{FedExProx} can indeed provably outperform \algname{GD}, in stark contrast to the original analysis. Furthermore, we consider partial participation scenarios and analyze two adaptive extrapolation strategies -- based on gradient diversity and Polyak stepsizes --- again significantly outperforming previous results. Moving beyond quadratics, we extend the applicability of our analysis to general functions satisfying the Polyak-Łojasiewicz condition, outperforming the previous strongly convex analysis while operating under weaker assumptions. Backed by empirical results, our findings point to a new and stronger potential of \algname{FedExProx}, paving the way for further exploration of the benefits of extrapolation in federated learning.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Federated Learning (FL) \citep{konevcny2016federated, mcmahan2017communication} is a distributed machine learning paradigm where multiple edge devices collaboratively train a global model without the need for centralized data collection. Instead of transmitting raw data, each client computes updates based on their local datasets, and these are then aggregated at a central server to update the global model. This approach ensures that no sensitive information is shared with the orchestrating server or other clients, making it particularly useful in privacy-sensitive domains, such as healthcare \citep{rieke2020future} and recommendation systems \citep{hard2018federated}.
+Formally, FL solves the  optimization problem
+\begin{align}
+    \label{eq:main_problem}
+    \squeeze \min\limits_{x \in \R^d}\left\{f(x) \eqdef \frac{1}{n} \sum\limits_{i=1}^n f_i(x)\right\},
+\end{align}
+where $f_i \,:\, \R^d \to \R$ represents the empirical risk associated with the local dataset stored on client~$i \in [n]$.
+Despite its advantages, FL introduces several nontrivial challenges, including \textit{communication delays} caused by limited network bandwidth, and \textit{partial participation} of clients due to random outages \citep{kairouz2021advances}. Addressing these issues is essential to making FL efficient and reliable in real-world applications.
+
+\subsection{Related Work}\label{sec:lit_review}
+Let us briefly review several existing methods used to solve problem \eqref{eq:main_problem} in FL scenarios. For a detailed overview of the notation used, please refer to Table~\ref{table:notation}.
+
+\textbf{Gradient descent.} The simplest and most naive approach is the \emph{Gradient Descent} (\algname{GD}) method \citep{nesterov2018lectures}, iterating 
+$x_{k+1} = x_k - \gamma \nabla f(x_k) = x_k - \gamma \frac{1}{n} \sum_{i=1}^{n} \nabla f_i(x_k),$
+where $x_0$ is a starting point and $\gamma>0$ is the stepsize. 
+Let us introduce the key assumptions typically employed in the analysis of \algname{GD} in the convex world.
+
+\begin{assumption}
+    \label{ass:convex}
+    The functions $f_i$ are proper, closed and convex for all $i \in [n]$, and the function $f$ attains a minimum at some (potentially non-unique) point $x_* \in \R^d.$  
+\end{assumption}
+\begin{assumption}
+    \label{ass:local_lipschitz_constant}
+    The function $f$ is $L$--smooth, i.e., $\norm{\nabla f(x) - \nabla f(y)} \leq L \norm{x - y}$ $\forall x, y \in \R^d.$ Additionally, each $f_i$, $i \in [n],$ is differentaible and $L_i$--smooth, with $L_{\max} \eqdef \max_{i \in [n]} L_i.$
+    \end{assumption}
+Under these assumptions, classical optimization theory guarantees that \algname{GD} solves problem~\eqref{eq:main_problem} and finds $\bar{x} \in \R^d$ such that $f(\bar{x}) - f(x_*) \leq \varepsilon$ in~$\cO(\nicefrac{L R^2}{\varepsilon})$ iterations, where~$R^2 \eqdef \norm{x_* - x_0}^2.$ 
+In an FL setting, finding a solution to the main problem requires each client to participate in every communication round, and thus to communicate with the server
+\begin{align}
+    \label{eq:gd}
+    \squeeze \cO\left(\frac{L R^2}{\varepsilon}\right)
+\end{align}
+times, transmitting the local gradient $\nabla f_i(x_k)$ at each iteration $k$. While this approach is conceptually simple, its direct application in distributed environments leads to several challenges related to communication overhead and scalability.
+
+\textbf{Partial participation.}
+In real-world FL scenarios, not all clients remain active for the entire duration of training. Instead, a subset of clients is chosen at each iteration, typically based on practical factors such as device availability (e.g., battery life or network conditions) or statistical considerations (e.g., data heterogeneity) \citep{kairouz2021advances, tyurin2022computation}.
+
+\textbf{Communication bottleneck.}
+Another key problem in distributed training is the \textit{communication bottleneck} \citep{ramesh2021zero, kairouz2021advances}. Since the overall performance of a distributed algorithm is the product of the number of communication rounds $K$ needed to find a solution and the cost $C$ of one such round, there exist two main strategies to addressing this issue: $(i)$~minimizing~$C$ and/or $(ii)$~minimizing~$K$.
+Objective $(i)$~is typically achieved via compression of the information transmitted between the clients and the server \citep{beznosikov2020biased, gruntkowska2024improving}. Objective $(ii)$~can be accomplished by increasing the amount of local computation performed by clients between rounds, allowing for less frequent communication.
+
+\textbf{FedAvg and modern local methods.}
+A common strategy for ensuring communication efficiency that falls into category $(ii)$ is \textit{local training}. The idea is simple: allow clients to do more work before transmitting the results to the server. If executed with care, this approach leads to each communication round providing more ``informative'' updates, ultimately resulting in more effective changes to the global model.
+One of the most popular methods in this class is Federated Averaging (\algname{FedAvg}), introduced by \citet{mcmahan2017communication}.
+Within this framework, a subset of clients is selected in each round to perform local training using a gradient-based method of their choice (e.g., \algname{GD}). This is followed by an averaging step on the server, where the local updates are aggregated.
+Despite its popularity, the theoretical properties of \algname{FedAvg} are somewhat limited \citep{khaled2019first,koloskova2020unified}. A major issue is \textit{client drift}, which can lead to slower convergence \citep{karimireddy2020scaffold}. This problem can be mitigated using modern drift correction techniques \citep{karimireddy2020scaffold,gorbunov2021local,mishchenko2022proxskip}. One notable advancement in this area is \algname{FedExP}, introduced by \citet{jhunjhunwala2023fedexp}, which extends \algname{FedAvg} by leveraging extrapolation to better control server updates.
+
+\textbf{FedProx and proximal methods.}
+All methods discussed so far assume that clients have access to the gradients $\{\nabla f_i\}$ of local functions. A recent line of \textit{proximal methods} \citep{bertsekas2011incremental, ryu2014stochastic, khaled2022faster, richtarik2024unified} relies on a different, more powerful oracle -- the \emph{proximal operator} $\prox_{\gamma f} : \R^d \rightarrow \R^d$, defined by
+\begin{align}
+    \label{eq:prox}
+    \squeeze \prox_{\gamma f} (x) = \arg\min\limits_{z \in \R^d} \left\{f(z) + \frac{1}{2 \gamma} \norm{z - x}^2\right\}.
+\end{align}
+Here, $f$ is a convex function and $\gamma>0$ plays a rule of a regularization parameter.
+It is important to note that computing $\prox_{\gamma f} (\cdot)$ is an optimization problem on its own. However, the analyses of such methods typically do not consider how this subproblem should be solved via some iterative technique, and instead assume that computing $\prox_{\gamma f} (\cdot)$ is computationally cheap and can be performed using any solver, e.g., \algname{GD}, \algname{Newton's method} or \algname{LBFGS} \citep{nesterov2018lectures,liu1989limited}. There exist numerous proximal methods addressing the single-node case. A classic approach is the Proximal Point Method (\algname{PPM}) by \citet{rockafellar1976monotone}, which iterates
+$x_{k+1}=\prox_{\gamma_k f} (x_k)$. Stochastic versions of \algname{PPM} have also been studied \citep{ryu2014stochastic, bianchi2016ergodic, patrascu2018nonasymptotic}. Recently, interest in stochastic proximal methods has surged, with promising results from several works \citep{condat2022RandProx, traore2024variance, sadiev2024stochastic, combettes2024randomly}.
+In the context of distributed learning, one relevant work by \citet{li2020federated} builds on the principles of \algname{FedAvg} to introduce its proximal variant -- \algname{FedProx}. The method replaces local gradient-based updates with proximal operator computations, leading to the update rule
+\begin{align}
+    \label{eq:fedprox}
+    \squeeze x_{k+1} = \frac{1}{n} \sum\limits_{i=1}^n \prox_{\gamma f_i} (x_k).
+\end{align}
+By leveraging proximal operators, \algname{FedProx} addresses some of the limitations of traditional \algname{GD} in FL. However, simply averaging local updates at the server remains suboptimal and can be improved.
+
+\textbf{FedExProx.}
+A recent advancement, and the main focus of this paper, is \algname{FedExProx}, introduced by \citet{li2024power}. This method improves on \algname{FedProx} by employing the technique of \textit{extrapolation}\footnote{Notably, the idea of extrapolation was explored by \citet{jhunjhunwala2023fedexp} in developing \algname{FedExP}.} \citep{combettes1997convex,necoara2019randomized}. The algorithm operates under the \emph{interpolation regime}:
+\begin{assumption}
+    \label{ass:inter}
+    There exists $x_* \in \R^d$ such that $\nabla f_i(x_*) = 0$ for all $i \in [n].$ We denote the set of such minimizers by $\cX_* \eqdef \{x\in\R^d: \nabla f_i(x) = 0\}$ and the projection of $x$ onto $\cX_*$ by $\Pi(x)$ .
+\end{assumption}
+This assumption is relatively mild and is often met in practice, e.g., when working with over-parameterized models \citep{ma2018power}.
+Instead of \eqref{eq:fedprox}, \algname{FedExProx} introduces the extrapolated update
+\begin{align}
+    \label{eq:fedexprox}
+    \squeeze x_{k+1} = x_{k} + \alpha_k \left(\frac{1}{n} \sum\limits_{i=1}^n \prox_{\gamma f_i} (x_k) - x_{k}\right),
+\end{align}
+where $\alpha_k$ serves as the \emph{extrapolation parameter}. The algorithm is analyzed by reformulating step~\eqref{eq:fedexprox} in terms of \textit{Moreau envelopes} \citep{moreau1965}: the update rule can be expressed equivalently as
+\begin{align}\label{eq:fedexprox_moreau}
+    \squeeze x_{k+1} = x_{k} - \alpha_k \gamma \frac{1}{n} \sum\limits_{i=1}^n \nabla M_{f_i}^{\gamma}(x_{k}),
+\end{align}
+where the Moreau envelope $M_f^{\gamma} \,:\, \R^d \to \R$ of a convex function $f$ is defined as
+\begin{align}\label{eq:moreau}
+    \squeeze M_f^{\gamma}(x) \eqdef \min\limits_{z \in \R^d} \left\{f(z) + \frac{1}{2 \gamma} \norm{z - x}^2\right\} \quad \forall x \in \R^d.
+\end{align}
+Notably, when $\alpha_k=1$, \eqref{eq:fedexprox} reduces to \eqref{eq:fedprox}. However, this choice is not optimal, and choosing $\alpha_k > 1$ yields better complexity.
+If $\alpha_k$ is set to be constant across iterations of the algorithm, then using the optimal value $\alpha_k \equiv \alpha = \frac{1}{\gamma L_{\gamma}} >1$ guarantees that \algname{FedExProx} converges after 
+\begin{align}
+    \label{eq:fedexproxcompl}
+    \squeeze \cO\left(\frac{L_{\gamma} (1 + \gamma L_{\max}) R^2}{\varepsilon}\right)
+\end{align}
+communication rounds in the convex case, where $L_{\gamma}$ is the smoothness constant of the function $M^{\gamma}(x) \eqdef \frac{1}{n}\sum_{i=1}^n M_{f_i}^{\gamma}(x)$. \citet{li2024power} show that \eqref{eq:fedexproxcompl} is not larger than $\cO\left(\nicefrac{L_{\max} R^2}{\varepsilon}\right)$, and can be significantly smaller in many practical scenarios. Thus, \algname{FedExProx} offers provably better iteration complexity compared to both \algname{FedProx} and \algname{FedExP} \citep{li2020federated, jhunjhunwala2023fedexp}.
+
+
+
+\section{Contributions}
+
+
+\textbf{1.} Although the iteration complexity \eqref{eq:fedexproxcompl} of \algname{FedExProx} outperforms both \algname{FedProx} and \algname{FedExP}, we find that it is \emph{not superior} to that of the simplest baseline, \algname{GD}, on quadratic optimization tasks (see Remark~\ref{rem:pessimistic}). This raises a critical question regarding the utility of employing the proximal oracle in the first place.
+
+\textbf{2.} Motivated by these pessimistic findings, we revisit the analysis of \algname{FedProx} and prove a significantly more optimistic iteration complexity result. We establish a linear convergence rate for solving non-strongly convex quadratic distributed optimization problems of the form \eqref{eq:main_problem} (see Theorem \ref{thm:quad}) and demonstrate that our new result does indeed lead to the conclusion that \algname{FedExProx} can significantly outperform \algname{GD}. Our analysis assumes a realistic model that accounts for both computation and communication times -- critical factors in real-world distributed optimization. We show that the total \textit{time complexity} of \algname{FedExProx} is never worse than that of \algname{GD}, and can be strictly better when communication time dominates computation time (see Theorem \ref{thm:fedexprox_quad_time}), which is typically the case in FL scenarios. This stands in stark contrast to the previous analysis by \citet{li2024power}, underscoring the superiority of our new findings.
+
+\textbf{3.} To account for the stochastic setting that involves partial participation of clients, we complement the above results with client sampling (see Theorems \ref{thm:quad_iter_stoch}, \ref{thm:fedexprox_quad_time_stoch}, \ref{thm:fedexprox_pl_iter_stoch} and \ref{thm:quad_iter_ada_stoch}).
+
+\textbf{4.} Beyond constant extrapolation, we establish two novel results (Theorems \ref{thm:quad_iter_ada} and \ref{thm:quad_iter_ada_stoch}) that incorporate smoothness-adaptive strategies, based on gradient diversity (\algname{FedExProx-GraDS}), and Polyak stepsize (\algname{FedExProx-StoPS}), again significantly improving upon the result previously established by \citet{li2024power} in the quadratic case.
+
+\textbf{5.} We extend the analysis beyond quadratics to functions satisfying the Polyak-{\L}ojasiewicz condition, obtaining a linear convergence rate (see Theorems \ref{thm:fedexprox_pl_iter} and \ref{thm:fedexprox_pl_iter_stoch}). In contrast, \citet{li2024power} derived a linear rate under strong convexity for the function $f$. Our approach is not only more general, as it relies on weaker assumptions, but also demonstrates improved dependence on problem-specific constants. Additionally, we establish a result in the P{\L} setting that accounts for inexact computations of the proximal mappings (Theorem \ref{thm:fedexprox_pl_inexact}).
+
+\textbf{6.} The theoretical findings are validated with empirical experiments, which demonstrate the robustness and applicability of our framework.
+
+
+
+\section{Not Better than \algname{GD}
+
+\label{sec:not_better}
+
+Let us take a closer look at the complexity result \eqref{eq:fedexproxcompl}. This complexity depends on the regularization parameter~$\gamma$ introduced in definition \eqref{eq:prox}. Suppose for now that we solve \eqref{eq:prox} using \algname{GD}. Then, the number of iterations needed to find $\prox_{\gamma f_i} (x)$ with accuracy $\varepsilon$ is
+\begin{align*}
+    \squeeze \cO\left(\frac{L_i + \nicefrac{1}{\gamma}}{\nicefrac{1}{\gamma}} \log \frac{1}{\varepsilon}\right) = \cO\left((\gamma L_i + 1) \log \frac{1}{\varepsilon}\right), 
+\end{align*}
+since the function $f_i(z) + \frac{1}{2 \gamma} \norm{z - x}^2$ is $(L_i + \nicefrac{1}{\gamma})$--smooth and $\nicefrac{1}{\gamma}$--strongly convex. Hence,~$\gamma$ controls the difficulty of calculating the proximal operator: the larger it is, the more difficult the problem. Therefore, to accelerate local computations, one would prefer to choose $\gamma$ as small as possible.
+We can formalize this intuition by letting $\pi(\gamma)$ be the time per one iteration of \algname{FedExProx} and making the following reasonable assumption:
+\begin{assumption}
+    \label{ass:local_compl}
+    The time complexity $\pi(\gamma)$ of a \algname{FedExProx} step is a non-decreasing function of~$\gamma$.
+\end{assumption}
+Combining it with the iteration complexity result \eqref{eq:fedexproxcompl} established by \citet{li2024power}, the total time required by \algname{FedExProx} with $\alpha_k \equiv \nicefrac{1}{\gamma L_{\gamma}}$ to find $\bar{x}$ such that $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ is
+\begin{align*}
+    \squeeze T(\gamma) \eqdef \pi(\gamma) \times \frac{L_{\gamma} (1 + \gamma L_{\max}) R^2}{\varepsilon}.
+\end{align*}
+With this definition in place, we can now translate the main result of \citet{li2024power} (Theorem 1) to quadratic optimization problems, yielding the following pessimistic outcome:
+\begin{restatable}{theorem}{THMPESSIMISTIC}\label{thm:pessimistic}
+    Let Assumptions~\ref{ass:inter} and~\ref{ass:local_compl} hold. Consider solving a non-strongly convex quadratic optimization problem of the form \eqref{eq:main_problem}, where
+        $f_i(x) = \frac{1}{2} x^\top \mA_i x - b_i^\top x$
+    for all $i \in [n],$ with $\mA_i \in \textnormal{Sym}^{d}_{+}$ and $b_i \in \R^d$.
+    Then the assumptions of Theorem 1 by \citet{li2024power} hold, and
+    \begin{align}
+        \label{eq:pess_inequality}
+        \squeeze T(\gamma) = \pi(\gamma) \times \frac{L_{\gamma} (1 + \gamma L_{\max}) R^2}{\varepsilon} \geq \pi(0) \times \frac{L R^2}{\varepsilon}
+    \end{align}
+    for all $\gamma > 0.$ Moreover, when $\gamma \to 0$, then $\pi(\gamma) \times \frac{L_{\gamma} (1 + \gamma L_{\max}) R^2}{\varepsilon} \to \pi(0) \times \frac{L R^2}{\varepsilon}$, and \algname{FedExProx} effectively reduces to \algname{GD}.
+\end{restatable}
+
+\begin{remark}\label{rem:pessimistic}
+    In light of Theorem~\ref{thm:pessimistic}, \algname{GD} performs no worse than \algname{FedExProx} by \citet{li2024power}, even if the time complexity $\pi(\gamma)$ of one \algname{FedExProx} step does not depend on $\gamma$. Indeed, it holds that 
+    $$\squeeze \frac{L_{\gamma} (1 + \gamma L_{\max}) R^2}{\varepsilon} \geq \frac{LR^2}{\varepsilon}$$ for all $\gamma > 0$ (see the proof of Theorem \ref{thm:pessimistic}).
+\end{remark}
+
+These results, based on the original analysis of \algname{FedExProx}, lead us to a rather disappointing conclusion: from a theoretical time complexity perspective, the optimal strategy appears to be using vanilla \algname{GD}, disregarding proximal oracles entirely. The question that remains is: is this an inherent limitation of the method itself or merely a consequence of suboptimal analysis by \citet{li2024power}?
+
+
+
+\section{Tighter and More Optimistic Results}
+
+\label{sec:tight}
+
+Are we truly constrained to \algname{GD}, or is there room for improvement? It turns out that a tighter iteration complexity bound for \algname{FedExProx} can be derived, revealing significantly more optimistic results.
+The following theorem presents a refined analysis, providing a new, improved complexity result for \algname{FedExProx} and shedding light on its true capabilities.
+
+\begin{restatable}{theorem}{FEDEXPROXQITERTIGHT}\label{thm:quad}
+    Fix any $\gamma > 0$ and consider solving non-strongly convex quadratic optimization problem \eqref{eq:main_problem} where $f_i(x) = \frac{1}{2} x^\top \mA_i x - b_i^\top x$
+    for all $i \in [n],$ with $\mA_i \in \textnormal{Sym}^{d}_{+}$ and $b_i \in \R^d$. Under Assumption \ref{ass:inter}, \algname{FedExProx} with $\alpha = \nicefrac{1}{\gamma L_{\gamma}}$ finds $\bar{x}$ such that $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ after
+    \begin{align}
+        \label{eq:tighter_quad}
+        \squeeze \cO\left(\frac{L_{\gamma}}{\mu^{+}_{\gamma}} \log \frac{1}{\varepsilon}\right)
+    \end{align}
+    iterations, where $L_{\gamma}$ is a smoothness constant of $M^{\gamma}$ and $\mu^{+}_{\gamma}$ is the smallest non-zero eigenvalue of the matrix $\nabla^2 M^{\gamma}.$
+\end{restatable}
+\begin{remark}
+    To the best of our knowledge, under the assumptions of Theorem~\ref{thm:quad}, vanilla \algname{GD} requires 
+    \begin{align}
+        \label{eq:tighter_quad_gd}
+        \squeeze \cO\left(\frac{L}{\mu^{+}} \log \frac{1}{\varepsilon}\right)
+    \end{align}
+    iterations to solve the quadratic optimization problem, where $\mu^{+}$ is the smallest non-zero eigenvalue of the matrix $\mA = \frac{1}{n} \sum_{i=1}^{n} \mA_i$ \citep{richtarik2020stochastic}.
+\end{remark}
+Let us now demonstrate that our new result does indeed provide a tighter bound, leading to the conclusion that \algname{FedExProx} can in fact outperform \algname{GD}.
+
+\subsection{One step time complexity $\pi(\gamma)$ is $\mu + \tau \left(\gamma L_{\max} + 1\right)$.}\label{sec:time_cond}
+
+As introduced in Section \ref{sec:intro}, the time per one global iteration of \algname{FedExProx} has two main sources:
+
+1. \textbf{Local computation:} In large-scale problems, each step \eqref{eq:fedexprox} requires clients to compute $\prox_{\gamma f_i}(x_k)$ iteratively. One of the simplest solvers is \algname{GD}, which returns a solution of subproblem $i$ after $\widetilde{\cO}\left(\gamma L_i + 1\right)$ local iterations\footnote{Alternatively, an accelerated method could be employed, reducing the iteration count to $\widetilde{\cO}\left(\sqrt{\gamma L_i + 1}\right)$. Our analysis can be extended to accommodate these faster solvers as well.} (see Section \ref{sec:not_better}). If each gradient calculation
+takes $\tau$ seconds, the total time required for all clients to calculate $\prox_{\gamma f_i}(x_k)$ is $\widetilde{\cO}\left(\tau \times (\gamma L_{\max} + 1)\right)$ since the process is gated by the ``slowest'' client, associated with the problem with the highest smoothness constant.
+
+2. \textbf{Communication:} Once the local computations are completed, clients must communicate their results before the server can execute the global step \eqref{eq:fedexprox}. We assume this communication takes $\mu$ seconds, which can be huge in FL environments \citep{kairouz2021advances}.
+
+Consequently, the total time per global iteration, $\pi(\gamma)$, is proportional to $\mu + \tau \left(\gamma L_{\max} + 1\right)$ (thus satisfying Assumption~\ref{ass:local_compl}), and the total time complexity of \algname{FedExProx} is given by
+\begin{align}\label{eq:fedexprox_quad_time}
+    \squeeze T_{\mu}(\gamma) \eqdef \widetilde{\cO} \left(\left(\mu + \tau \left(\gamma L_{\max} + 1\right)\right) \times \frac{L_{\gamma}}{\mu^{+}_{\gamma}}\right).
+\end{align}
+Note that the total time complexity of \algname{GD} is
+\begin{align*}
+    \squeeze T_{\textnormal{\algname{GD}}} \eqdef T_{\mu}(0) = \widetilde{\cO} \left(\left(\mu + \tau\right) \times \frac{L}{\mu^{+}}\right).
+\end{align*}
+Our next goal is to determine the value of $\gamma$ that minimizes $T_{\mu}(\gamma)$, with the hope that this time the optimal choice does not result in $\gamma\to 0$. This is indeed the case whenever $\mu > \tau$.
+\begin{restatable}{theorem}{FEDEXPROXQTIME}\label{thm:fedexprox_quad_time}
+    Consider the non-strongly convex quadratic optimization problem from Theorem~\ref{thm:quad}. Up to a constant factor, the time complexity \eqref{eq:fedexprox_quad_time} is minimized by
+    $\gamma \in \left[\frac{1}{\max_{i \in [n]}\lambda_{\max}(\mA_{i})}, \min\brac{\frac{\frac{\mu}{\tau}-1}{\max_{i \in [n]}\lambda_{\max}(\mA_{i})}, \frac{1}{\min_{i\in[n]}\lambda_{\min}^+(\mA_i)}}\right]$ if $\frac{\mu}{\tau}\geq2$ and by $\gamma \in \left[0, \max\brac{0, \min\brac{\frac{\frac{\mu}{\tau}-1}{\max_{i \in [n]}\lambda_{\max}(\mA_{i})}, \frac{1}{\min_{i\in[n]}\lambda_{\min}^+(\mA_i)}}}\right]$ if $\frac{\mu}{\tau}<2$, and $T_{\mu}(\gamma) \leq T_{\textnormal{\algname{GD}}}.$
+\end{restatable}
+The theorem above establishes that the total time complexity of \algname{FedExProx} is no worse than that of \algname{GD}, and can be strictly better when communication time dominates computation time, highlighting the superiority of our new analysis. Notably, this was not the case for the previous analysis by \citet{li2024power} (Theorem~\ref{thm:pessimistic}). The potential for our complexity to significantly outperform that of \algname{GD} is illustrated in the following simple example, where $T_{\mu}(\gamma) \ll T_{\textnormal{\algname{GD}}}$ for some $\gamma > 0.$
+\begin{example}
+    Let the matrices $\{\mA_i\}$ be diagonal, i.e., $\mA_i = \textnormal{diag}\parens{a_{i1}, \ldots, a_{id}}$ for all $i \in [n],$ and $a_{ij} > 0$ for all $i \in [n], j \in [d].$ Then, according to \eqref{eq:lmax_eig} and \eqref{eq:lmin+_eig}, we get
+    \begin{align*}
+        \squeeze \frac{L_{\gamma}}{\mu^{+}_{\gamma}} = \frac{\lambda_{\max}(\gamma)}{\lambda_{\min}^+(\gamma)} = \frac{\max\limits_{j \in [d]} \sum\limits_{i=1}^{n} \frac{\gamma a_{ij}}{1 + \gamma a_{ij}}}{\min\limits_{j \in [d]} \sum\limits_{i=1}^{n} \frac{\gamma a_{ij}}{1 + \gamma a_{ij}}},
+    \end{align*}
+    where $\lambda_{\max}(\gamma)$ and $\lambda_{\min}^+(\gamma)$ are the largest and the smallest non-zero eigenvalues of the matrix $\mM \eqdef \frac{1}{n}\sum_{i=1}^{n}\frac{1}{\gamma}(\mI - (\gamma \mA_{i} + \mI)^{-1})$, respectively (see Section \ref{sec:fedexprox_quad}).
+    Taking $\gamma = 1 / \min_{i \in [n], j \in [d]}a_{ij}$ and using the fact that $1 \geq \frac{x}{1 + x} \geq \frac{1}{2}$ for all $x \geq 1,$ we can conclude that $\frac{L_{\gamma}}{\mu^{+}_{\gamma}} \leq 2.$ Thus,
+    \begin{align*}
+        \squeeze T_{\mu}(\gamma) = \widetilde{\cO} \left(\mu + \tau \frac{\max\limits_{i \in [n], j \in [d]}a_{ij}}{\min\limits_{i \in [n], j \in [d]}a_{ij}}\right).
+    \end{align*}
+    Suppose that communication is slow. Formally, let
+    $\mu \geq \tau \max_{i \in [n], j \in [d]}a_{ij} / \min_{i \in [n], j \in [d]}a_{ij}.$ Then 
+    $T_{\mu}(\gamma) = \widetilde{\cO} \left(\mu\right)$, while the total time complexity of \algname{GD} is 
+    \begin{align*}
+        \squeeze T_{\textnormal{\algname{GD}}} = \widetilde{\Omega} \left(\mu \times \frac{L}{\mu^{+}}\right) = \widetilde{\Omega} \left(\mu \times \frac{\max\limits_{j \in [d]} \sum\limits_{i=1}^{n} a_{ij}}{\min\limits_{j \in [d]} \sum\limits_{i=1}^{n} a_{ij}}\right),
+    \end{align*}
+    which is at least $\max\limits_{j \in [d]} \sum_{i=1}^{n} a_{ij} / \min\limits_{j \in [d]} \sum_{i=1}^{n} a_{ij}$ times worse!
+\end{example}
+A similar improvement can be observed in the general case. However, the derivation is significantly more complex, so to maintain clarity in the presentation, the example focuses on diagonal matrices only.
+
+
+
+\section{Partial Participation}
+
+
+Thus far, we have concentrated on the full participation scenario. However, as outlined in Section~\ref{sec:lit_review}, practical FL settings often involve only a subset of clients participating in each training round. To address this, we supplement our theory with a convergence result in the stochastic setting. For illustration, we consider nice sampling (see Section~\ref{sec:nice_sampling}), where at each iteration, a subset~$\cS_k \subseteq [n]$ of clients is selected uniformly at random from all subsets of size~$S$. Although we use this sampling strategy as an example, other client selection methods can also be employed.
+
+In this context, we can formulate the following complexity result.
+
+\begin{theorem}
+    \label{thm:quad_iter_stoch}
+    Fix any $\gamma > 0$ and consider solving non-strongly convex quadratic optimization problem \eqref{eq:main_problem} where $f_i(x) = \frac{1}{2} x^\top \mA_i x - b_i^\top x$
+    for all $i \in [n],$ with $\mA_i \in \textnormal{Sym}^{d}_{+}$ and $b_i \in \R^d$. Under Assumption \ref{ass:inter}, \algname{FedExProx} with nice sampling (Algorithm \ref{algorithm:batch_fedexprox}) with $\alpha = \nicefrac{1}{\gamma L_{\gamma, S}}$ finds $\bar{x}$ such that $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ after
+    \begin{align}\label{eq:tighter_quad_stoch}
+        \squeeze \cO\left(\frac{L_{\gamma,S}}{\mu^{+}_{\gamma}} \log \frac{1}{\varepsilon}\right)
+    \end{align}
+    iterations, where $L_{\gamma, S} \eqdef \frac{n-S}{S(n-1)} \frac{L_{\max}}{1+\gamma L_{\max}} + \frac{n(S-1)}{S(n-1)} L_{\gamma}$, $L_{\gamma}$ is the smoothness constant of $M^{\gamma}$ and~$\mu^{+}_{\gamma}$ is the smallest non-zero eigenvalue of the matrix $\nabla^2 M^{\gamma}.$
+\end{theorem}
+
+Assuming the same time complexity model as in Section \ref{sec:time_cond}, the total time complexity of \algname{FedExProx} with nice sampling is given by
+\begin{align}\label{eq:fedexprox_quad_time_stoch}
+    \squeeze T_{\mu}(\gamma, S) \eqdef \widetilde{\cO} \left(\left(\mu + \tau \left(\gamma L_{\max} + 1\right)\right) \times \frac{L_{\gamma, S}}{\mu^{+}_{\gamma}}\right).
+\end{align}
+As it turns out, the optimal stepsize for the stochastic setting aligns with the one used in the deterministic scenario (see Theorem \ref{thm:fedexprox_quad_time}).
+\begin{restatable}{theorem}{FEDEXPROXQTIMESTOCH}\label{thm:fedexprox_quad_time_stoch}
+    Up to a constant factor, the time complexity \eqref{eq:fedexprox_quad_time_stoch} is minimized by   
+    $\gamma \in \left[\frac{1}{\max_{i \in [n]}\lambda_{\max}(\mA_{i})}, \min\brac{\frac{\frac{\mu}{\tau}-1}{\max_{i \in [n]}\lambda_{\max}(\mA_{i})}, \frac{1}{\min_{i\in[n]}\lambda_{\min}^+(\mA_i)}}\right]$ if $\frac{\mu}{\tau}\geq2$ and by $\gamma \in \left[0, \max\brac{0, \min\brac{\frac{\frac{\mu}{\tau}-1}{\max_{i \in [n]}\lambda_{\max}(\mA_{i})}, \frac{1}{\min_{i\in[n]}\lambda_{\min}^+(\mA_i)}}}\right]$ if $\frac{\mu}{\tau}<2$.
+\end{restatable}
+Consequently, the conclusions from the previous section apply equally to the partial participation scenario: \algname{FedExProx} performs at least as well as \algname{GD} and can be strictly better when communication time exceeds computation time.
+
+
+
+\section{Adaptivity}
+
+
+Next, we explore adaptive extrapolation strategies introduced by \citet{horvath2022adaptive}: \textit{gradient diversity} (\algname{GraDS}) and a variant of the classical \textit{Polyak stepsize} (\algname{StoPS}), both of which were later adapted for proximal methods by \citet{li2024power}. As in the constant extrapolation case, we refine the analysis by \citet{li2024power} for quadratic problems.
+Although Theorem~\ref{thm:quad_iter_ada} refers to the full participation setting, the approach can be extended to the stochastic case (see Section~\ref{sec:ada_stoch}).
+
+\begin{restatable}{theorem}{FEDEXPROXQITERADA}\label{thm:quad_iter_ada}
+    Fix any $\gamma > 0$ and consider solving non-strongly convex quadratic optimization problem~\eqref{eq:main_problem}, where $f_i(x) = \frac{1}{2} x^\top \mA_i x - b_i^\top x$ for all $i \in [n],$ with $\mA_i \in \textnormal{Sym}^{d}_{+}$ and $b_i \in \R^d$. Let Assumption~\ref{ass:inter} hold and consider two adaptive extrapolation strategies: 
+    \begin{enumerate}
+        \item (\algname{FedExProx-GraDS}) Set
+            \begin{align*}
+                \squeeze \alpha_k = \alpha_{k}^{\algname{GraDS}}(x_k) \eqdef \frac{\frac{1}{n}\sum_{i=1}^n \norm{\nabla M^{\gamma}_{f_i}(x_{k})}^{2}}{\norm{\frac{1}{n}\sum_{i=1}^n \nabla M^{\gamma}_{f_i}(x_{k})}^{2}}
+                \geq 1.
+            \end{align*}
+            Then, the iterates of Algorithm \ref{algorithm:fedexprox} satisfy
+            \begin{eqnarray}\label{eq:grads_iter}
+                \squeeze \norm{x_K-\Pi(x_K)}^{2}
+                &\leq& \squeeze \parens{1 - \min\limits_{k=0,\ldots,K-1} \alpha_{k} \gamma \frac{2 + \gamma L_{\max}}{1 + \gamma L_{\max}} \mu^{+}_{\gamma}}^K \norm{x_0 - \Pi(x_0)}^2.
+            \end{eqnarray}
+        \item (\algname{FedExProx-StoPS}) Set
+            \begin{align*}
+                \squeeze \alpha_k = \alpha_{k}^{\algname{StoPS}}(x_k) \eqdef \frac{\frac{1}{n}\sum_{i=1}^{n} \parens{M^{\gamma}_{f_i}(x_{k})-\inf  M^{\gamma}_{f_i}}}{\gamma\norm{\frac{1}{n}\sum_{i=1}^{n} \nabla  M^{\gamma}_{f_i}(x_{k})}^{2}}
+                \geq \frac{1}{2\gamma L_{\gamma}}.
+            \end{align*}
+            Then, the iterates of Algorithm \ref{algorithm:fedexprox} satisfy
+            \begin{eqnarray}\label{eq:stops_iter}
+                \squeeze \norm{x_K-\Pi(x_K)}^{2}
+                &\leq& \squeeze \parens{1 - \frac{3}{2} \min\limits_{k=0,\ldots,K-1} \alpha_{k} \gamma \mu^{+}_{\gamma}}^K \norm{x_0 - \Pi(x_0)}^2.
+            \end{eqnarray}
+    \end{enumerate}
+\end{restatable}
+
+\begin{remark}
+    Similar to the observations by \citet{li2024power}, we see that, unlike in the constant extrapolation case (see Theorem \ref{thm:quad}), \algname{FedExProx} with adaptive extrapolation  benefits from \textit{semi-adaptivity} to the smoothness constant. Specifically, it converges for any~$\gamma > 0$, and since $\gamma \mu^{+}_{\gamma}$ is bounded above (see \eqref{eq:lmin+_eig}), it suffices to choose a large enough~$\gamma$ to achieve the optimal performance.
+\end{remark}
+
+\begin{remark}
+    Bounding $\min_{k=0,\ldots,K-1} \alpha_k$ by $\frac{1}{2\gamma L_{\gamma}}$, inequality \eqref{eq:stops_iter} implies that
+    \begin{eqnarray}
+        \squeeze \norm{x_K-\Pi(x_K)}^{2}
+        &\leq& \squeeze \parens{1 - \frac{3}{4} \frac{\mu^{+}_{\gamma}}{L_{\gamma}}}^K \norm{x_0 - \Pi(x_0)}^2,
+    \end{eqnarray}
+    and hence Theorem \ref{thm:quad_iter_ada} guarantees convergence of \algname{FedExProx-StoPS} in
+    \begin{align*}
+        \squeeze \cO\left(\frac{L_{\gamma}}{\mu^{+}_{\gamma}} \log \frac{1}{\varepsilon}\right)
+    \end{align*}
+    iterations, regardless of the choice of the stepsize $\gamma$. This matches the guarantee from Theorem~\ref{thm:quad}, but without requiring prior knowledge of the optimal extrapolation parameter $\alpha = \nicefrac{1}{\gamma L_{\gamma}}$. The benefit comes with the trade-off of needing to know the minimum of the average of Moreau envelopes.
+\end{remark}
+
+
+
+\section{Better Theory with Polyak-\L ojasiewicz Condition}
+
+
+The result from Section~\ref{sec:tight} can be extended to solving problem \eqref{eq:main_problem} for general functions that satisfy the Polyak-\L ojasiewicz (P\L) condition.
+\begin{assumption}
+\label{ass:pl_condition_moreau}
+The function $M^{\gamma}$ satisfies P\L-condition, i.e., there exists $\mu^{+}_{\gamma}$ such that $$\squeeze \frac{1}{2} \norm{\nabla M^{\gamma}(x)}^2 \geq \mu^+_{\gamma} \left(M^{\gamma}(x) - M^{\gamma}(x_*)\right)$$ for all $x \in \R^d.$
+\end{assumption}
+This assumption holds with $\mu^{+}_{\gamma} \geq \mu^{+} / (4 (1 + \gamma L_{\max}))$ if the function $f$ satisfies P\L\,condition with a constant $\mu^{+}$ (see Lemma \ref{lemma:pl_vs_mu+}). However, the choice $\mu^{+}_{\gamma} = \mu^{+} / (4(1 + \gamma L_{\max}))$ is loose and leads to the problems described in Theorem~\ref{thm:pessimistic}.
+With this assumption in place, we can present the theorem.
+
+\begin{theorem}\label{thm:fedexprox_pl_iter}
+    Let Assumptions~\ref{ass:convex}, \ref{ass:local_lipschitz_constant}, \ref{ass:inter}, and \ref{ass:pl_condition_moreau} hold.
+    For all $\gamma > 0,$ \algname{FedExProx} (Algorithm~\ref{algorithm:fedexprox}) with $\alpha = \nicefrac{1}{\gamma L_{\gamma}}$ finds $\bar{x}$ such that $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ in
+    \begin{align*}
+        \squeeze \cO\left(\frac{L_{\gamma}}{\mu^{+}_{\gamma}} \log \frac{1}{\varepsilon}\right)
+    \end{align*}
+    iterations, where $L_{\gamma}$ is a smoothness constant of $M^{\gamma}$ and $\mu^{+}_{\gamma}$ is the P{\L} constant.
+\end{theorem}
+
+\begin{remark}
+    In practice, obtaining an exact solution to the local problems is often infeasible. Instead, we can only calculate an inexact proximal operator that approximates the desired quantity within a certain accuracy budget. To accommodate this, we extend the above analysis to the scenario where the clients can only compute updates $\prox^{\delta}_{\gamma f_i} (x)$ such that $\|\prox^{\delta}_{\gamma f_i} (x) - \prox_{\gamma f} (x)\|^2 \leq \delta$ (see Section \ref{sec:inexact}).
+\end{remark}
+
+\begin{remark}
+    \citet{li2024power} also establish a linear rate for \algname{FedExProx}. However, their result relies on the assumption that the function $f$ is strongly convex, and hence that \eqref{eq:main_problem} has a unique solution. In contrast, our theorem is more general, as it allows for the possibility of multiple solutions.
+\end{remark}
+
+In the partial participation scenario, we can establish the following result.
+\begin{theorem}\label{thm:fedexprox_pl_iter_stoch}
+    Let Assumptions~\ref{ass:convex}, \ref{ass:local_lipschitz_constant}, \ref{ass:inter}, and \ref{ass:pl_condition_moreau} hold.
+    For all $\gamma > 0,$ \algname{FedExProx} with nice sampling (Algorithm \ref{algorithm:batch_fedexprox}) and $\alpha = \nicefrac{1}{\gamma L_{\gamma}}$ finds $\bar{x}$ such that $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ in
+    \begin{align*}
+        \squeeze \cO\left(\frac{L_{\gamma, S}}{\mu^{+}_{\gamma}} \log \frac{1}{\varepsilon}\right)
+    \end{align*}
+    iterations, where $L_{\gamma, S} \eqdef \parens{\frac{n-S}{S(n-1)} \frac{L_{\max}}{1+\gamma L_{\max}} + \frac{n(S-1)}{S(n-1)} L_{\gamma}}$, $L_{\gamma}$ is a smoothness constant of $M^{\gamma}$ and~$\mu^{+}_{\gamma}$ is the P{\L} constant.
+\end{theorem}
+
+Note that the complexities in Theorems~\ref{thm:fedexprox_pl_iter} and~\ref{thm:fedexprox_pl_iter_stoch} are entirely analogous to those in Theorems~\ref{thm:quad} and~\ref{thm:quad_iter_stoch}, with the only distinction being the substitution of the smallest non-zero eigenvalue of the function $M^{\gamma}$ with the P\L\,constant.
+
+\subsection{Why do we get a tighter analysis?}
+
+To understand why the new analysis yields stronger guarantees, we need to examine the reasoning behind Theorem~\ref{thm:pessimistic}.
+When proving the result, we noticed that the main reason why \eqref{eq:pess_inequality} was true was the dependence of the complexity on the $L_{\max}$ factor. At the same time, the complexity of \algname{GD} depends only on $L,$ and there exist many examples when $L_{\max} \gg L.$ The question was: why does the original analysis of \algname{FedExProx} involve $L_{\max}$, and can one circumvent this dependency? The reason behind it is the reliance of the proofs by \citet{li2024power} on Lemma~\ref{lemma:m_to_f}, which establishes the inequality $M^{\gamma}(x) - M^{\gamma}(x_*) \geq \frac{1}{1+\gamma L_{\max}} \parens{f(x) - f(x_*)}$ for all $x \in \R^d.$ This inequality appears to be essential for deriving the convergence result $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ (where $\bar{x} \in \R^d$ is the output of \algname{FedExProx}).
+Our main idea is to instead obtain convergence in terms of the distance between $\bar{x}$ and $x_*$, i.e., to establish that $\mathbb{E}[\norm{\bar{x} - x_*}^2] \leq \varepsilon$, and then translate it to $\mathbb{E}[f(\bar{x})] - f(x_*) \leq \varepsilon$ using the $L$--smoothness of the function $f$. In this way, one can avoid using Lemma~\ref{lemma:m_to_f} when dealing with quadratic functions or problems satisfying the P{\L} condition, ultimately obtaining much more favourable convergence guarantees.
+
+The story behind our theoretical improvements is no less important than the improvements themselves, as it offers valuable insights and can be instructive for future research.
+
+
+
+\section{Experiments}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/full_participation.pdf}
+    \caption{Empirical time complexities of \algname{FedExProx} on a quadratic optimization task.}
+    \label{fig:full_quadratics}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/partial_participation.pdf}
+    \caption{Empirical time complexities of \algname{FedExProx} with partial client participation on a quadratic optimization task for $S \in \{1, 7, 14\}$ clients participating in each round.}
+    \label{fig:partial_quadratics}
+\end{figure}
+
+To verify our theoretical results, we assess the empirical time complexity of \algname{FedExProx} as a function of~$\gamma$. We consider two types of optimization problems: synthetic quadratic optimization tasks and classification problems with a smooth hinge loss function. In both cases, local updates are computed using \algname{GD}. Below, we first outline the methodology common to both experiments, followed by a detailed description of the specific settings and their corresponding results.
+
+\textbf{Total empirical time complexity.} In accordance with the setup described in Section \ref{sec:time_cond}, we assume that one local iteration of \algname{GD} takes $\tau$ seconds. Thus, the time needed by worker $i$ to find $\prox_{\gamma f_{i}}(x_k)$ at global iteration $k$ is proportional to $\tau \times n_{ik},$ where $n_{ik}$ is the number of \algname{GD} iterations needed to find $\prox_{\gamma f_{i}}(x_{k})$ to a given small fixed accuracy. In the full participation case, the total empirical time complexity is given by
+\begin{align}
+    \label{eq:emperical_time_compl}
+    \squeeze\sum_{k=0}^{K-1} \left(\mu + \tau \max_{i \in [n]} n_{ki}\right)
+\end{align}
+where $K$ is the number of global iterations needed for \algname{FedExProx} to converge to the desired accuracy and $\mu$ is the communication cost. Notice that we take the maximum over $n_{\cdot i}$ because the overall time is determined by the slowest client. One of experimental tasks is to verify that this empirical complexity aligns with the theoretical complexity derived in \eqref{eq:fedexprox_quad_time_stoch} (see Section~\ref{sec:compare_theory_practice}).
+In experiments involving client sampling, we consider the complexity $\sum_{k=0}^{K-1} (\mu + \tau \max_{i \in \cS_{k}} n_{ki})$ instead, where $\cS_{k}$ is the random subset of clients sampled at global iteration $k.$
+
+\subsection{Experiments with quadratic optimization problems}
+\label{sec:exp_quad}
+
+In the first set of experiments, we consider quadratic optimization problems of the form $f(x) = \frac{1}{n}\sum_{i=1}^{n}\frac{1}{2}x^{\top} \mA_{i}x,$ where $\mA_{i} \in \textnormal{Sym}^{7}_{+}$, $i\in[n]$ are random positive semidefinite matrices with the smallest eigenvalue equal to zero. 
+Each worker $i$ computes the proximal mappings using \algname{GD} with a stepsize of $\nicefrac{1}{\bar{L}_i}$, where $\bar{L}_i = \lambda_{\max}(\mA_{i})+1/\gamma$ is the smoothness constant of the local subproblem~\eqref{eq:prox}.
+The extrapolation parameter $\alpha$ is set to its optimal value from Theorem~\ref{thm:quad}, using an explicitly computed value of $L_{\gamma}$. The data is distributed across $n = 14$ workers.
+
+The results are presented in Figure~\ref{fig:full_quadratics}. The dashed lines represent the theoretical bounds from Theorem~\ref{thm:fedexprox_quad_time}, within which the optimal~$\gamma$ is expected to lie. One can see that when $\mu$ is relatively small ($\mu \propto 100$), the best choice of~$\gamma$ is near $0.$ However, as the communication cost $\mu$ increases, the best~$\gamma$ shifts to values greater than $0.1$.
+A distinctive U-shape emerges, indicating the nontrivial optimal choice of~$\gamma.$ The results for partial participation from Figure~\ref{fig:partial_quadratics} are qualitatively the same. These observations are fully consistent with our theoretical predictions.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\textwidth]{figures/hinge.pdf}
+    \caption{Empirical time complexities of \algname{FedExProx} on a classification task with smooth hinge loss.}
+    \label{fig:full_hinge}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\textwidth]{figures/full_participation_ratio.pdf}
+    \caption{Comparison of theoretical time complexity \eqref{eq:fedexprox_quad_time} and empirical time complexity~\eqref{eq:emperical_time_compl}.}
+    \label{fig:full_hinge_ratio}
+\end{figure}
+
+\subsection{Experiments with smooth hinge loss}
+We now turn to a classification problem with linearly separable data $\{(x_{ij},y_{ij})\}_{i \in [n], j \in [m]}$, ensuring the interpolation regime. The function $f \,:\, \R^d \rightarrow \R$ is defined as
+\begin{align*}
+    \squeeze
+    f(w) =\frac{1}{n}\sum\limits_{i=1}^{n}f_{i}(w) :=  \frac{1}{n}\sum\limits_{i=1}^{n}\frac{1}{m}\sum\limits_{j=1}^{m}\ell_{ij}(w),
+\end{align*}
+where $(x_{ij},y_{ij}) \in \R^{d} \times \{-1,1\}$ for all $i \in [n], j \in [m]$ and $\ell_{ij}$ is the smooth hinge loss, defined by 
+\begin{align*}
+    \squeeze \ell_{ij}(w) = 
+\begin{cases} 
+0, & \text{if } y_{ij} w^T x_{ij} \geq 1, \\
+\frac{1}{2} (1 - y_{ij} w^T x_{ij})^2, & \text{if } 0 < y_{ij} w^T x_{ij} < 1, \\
+1 - y_{ij} w^T x_{ij}, & \text{if } y_{ij} w^T x_{ij} \leq 0.
+\end{cases}
+\end{align*}
+Each client $i \in [n]$ computes the local proximal mappings using \algname{GD} with stepsize $\nicefrac{1}{\bar{L}_{i}},$ where $\bar{L}_{i} = \frac{1}{m}\sum_{j=1}^{m} \norm{x_{ij}}^{2}$ is an upper bound on the smoothness constant of the function $f_{i}$. The extrapolation parameter $\alpha$ is determined via grid search within the theoretical range given by Lemma~\ref{lemma:m_gamma_convex_smooth}. We use $n = 4$ workers, each holding $m = 4$ datapoints, and the number of parameters is $d = 3$.
+
+The results are presented in Figure~\ref{fig:full_hinge}. As in Section~\ref{sec:exp_quad}, these experiments also suggest a non-zero optimal choice of $\gamma$ when communication is slow. Indeed, the values of $\gamma$ minimizing the U-shapes in the last three plots are around $1$. These experiments provide further support for our theory.
+
+\paragraph{Comparing theoretical and empirical time complexities.}
+\label{sec:compare_theory_practice}
+Lastly, we compare the theoretical and empirical time complexities  \eqref{eq:fedexprox_quad_time} and \eqref{eq:emperical_time_compl}. Both are plotted on the same scale in Figure~\ref{fig:full_hinge_ratio}. We see that our theoretical model reflects the empirical dependencies (up to a multiplicative factor).
+
+
+
+\section{Conclusion}
+
+
+In this work, we revisit an empirically promising extrapolated parallel proximal method \algname{FedExProx}. Motivated by the limitations of its original overly pessimistic analysis, we develop a novel analytical framework for non-strongly convex quadratic and P{\L} cases. Our analysis significantly improves upon the previous results, offering insights into the true method's performance.
+While our work focuses on the relatively simple case of quadratic problems, the experimental results indicate that the phenomena we describe extend beyond this setting. These findings suggest that the benefits of extrapolation in FL hold in broader optimization scenarios, motivating future research to rigorously establish such extensions. We believe that our work provides a foundational stepping stone toward better understanding the role of extrapolation in FL and can inspire further exploration to relax the assumptions made here, ultimately advancing the theory and practice of federated optimization.
+
+
+

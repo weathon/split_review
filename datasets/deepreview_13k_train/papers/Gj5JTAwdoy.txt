@@ -1,0 +1,428 @@
+\title{Presto! Distilling Steps and Layers for Accelerating Music Generation}
+
+\begin{abstract}
+Despite advances in diffusion-based text-to-music (TTM) methods, efficient, high-quality generation remains a challenge. 
+We introduce \textbf{\textit{Presto!}}, an approach to inference acceleration for score-based diffusion transformers via reducing both sampling steps and cost per step. 
+To reduce steps, we develop a new score-based distribution matching distillation (DMD) method for the EDM-family of diffus ion models, the first GAN-based distillation method for TTM. 
+To reduce the cost per step, we develop a simple, but powerful improvement to a recent layer distillation method 
+that improves learning 
+via better preserving hidden state variance. 
+Finally, we combine our step and layer distillation methods together for a dual-faceted approach.
+We evaluate our step and layer distillation methods independently and show each yield best-in-class performance. 
+Our combined distillation method can generate high-quality outputs with improved diversity, accelerating our base model by 10-18x (230/435ms latency for 32 second mono/stereo 44.1kHz, 15x faster than comparable SOTA)
+--- the fastest high-quality TTM to our knowledge. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+We have seen a renaissance of audio-domain generative media \citep{chen2023musicldm, agostinelli2023musiclm, liu2023audioldm, copet2023simple}, with increasing capabilities for both Text-to-Audio (TTA) and Text-to-Music (TTM) generation. 
+This work has been driven in-part by audio-domain \emph{diffusion models} \citep{song2020denoising, ho2020denoising, Song2020ScoreBasedGM}, enabling considerably better audio modeling than generative adversarial network (GAN) or variational autoencoder (VAE) methods~\citep{dhariwal2021diffusion}.  
+Diffusion models, however, suffer from long inference times due to their iterative denoising process, requiring a substantial number of function evaluations (NFE) 
+during inference (i.e.~sampling) and resulting in $\approx$5-20 seconds at best for non-batched latency. 
+
+Accelerating diffusion inference typically focuses on \emph{step distillation}, 
+i.e.~the process of reducing the \emph{number} of sampling steps by distilling the diffusion model into a few-step generator. Methods include consistency-based ~\citep{salimans2022progressive, song2023consistency, Kim2023ConsistencyTM} and adversarial~\citep{Sauer2023AdversarialDD, yin2023one, yin2024improved, kang2024distilling} approaches.
+Others have also investigated \emph{layer-distillation}~\citep{Ma2024LearningtoCacheAD, wimbauer2024cache, Moon2024ASE}, which draws from transformer early exiting~\citep{hou2020dynabert, schuster2021consistent} by dropping interior layers to reduce the \emph{cost} per sampling step for image generation.
+For TTA/TTM models, however, distillation techniques have only been applied to shorter or lower-quality audio~\citep{bai2023accelerating, Novack2024DITTO2DD}, 
+necessitate
+$\approx$10 steps (vs. 1-4 step image methods)
+to match base quality~\citep{Saito2024SoundCTMUS}, and have not successfully used layer or GAN-based distillation methods.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{imgs/presto_fig_fin.pdf}
+    \caption{\textbf{Presto-S}. Our goal is to distill the initial ``real'' score model (grey) $\mu_{\boldsymbol{\theta}}$ into a few-step generator (light blue) $G_{\boldsymbol\phi}$ to minimize the KL divergence between the distribution of $G_{\boldsymbol\phi}$'s outputs and the real distribution. This requires that we train an auxillary ``fake'' score model $\mu_{\boldsymbol{\psi}}$ (dark blue) that estimates the score of the \emph{generator's} distribution at each gradient step. Formally: (1) real audio is corrupted with Gaussian noise sampled from the generator noise distribution $p_{\text{\textcolor{gen}{gen}}}(\sigma^{\text{inf}})$ which is then (2) passed into the generator to get its output. Noise is then added to this generation according to three \emph{different} noise distributions: (3)  $p_{\text{\textcolor{dmd}{DMD}}}(\sigma^{\text{train}})$, which is (4) passed into both the real and fake score models  to calculate the distribution matching gradient $\nabla_\phi\mathcal{L}_{\text{DMD}}$; (5) $p_{\text{\textcolor{dsm}{DSM}}}(\sigma^{\text{train/inf}})$, which is used to (6) train the fake score model on the \emph{generator's} distribution with $\mathcal{L}_{\text{fake-DSM}}$; and (7) an adversarial distribution $p_{\text{\textcolor{gan}{GAN}}}(\sigma^{\text{train}})$, which along with the real audio is (8) passed into a least-squares discriminator built on the fake score model's intermediate activations to calculate $\mathcal{L}_{\text{GAN}}$.}
+    \label{fig:presto_s}
+\end{figure}
+
+We present \textbf{Presto}\footnote{\emph{Presto} is the common musical term denoting fast music from 168-200 beats per minute.}, a dual-faceted distillation approach to inference acceleration for score-based diffusion transformers via reducing the number of sampling steps and the cost per step. 
+\textbf{Presto} includes three distillation methods:
+(1) \textbf{Presto-S}, a new distribution matching distillation algorithm for \emph{score-based}, EDM-style diffusion models
+(see ~\fref{fig:presto_s}) leveraging GAN-based step distillation with the flexibility of \emph{continuous-time} models,
+(2) \textbf{Presto-L}, a conditional layer distillation method designed to better preserve hidden state variance during distillation, and 
+(3) \textbf{Presto-LS}, a combined layer-step distillation method that critically uses layer distillation and \emph{then} step distillation while disentangling layer distillation from  real and fake score-based gradient estimation.
+
+To evaluate our approach, we ablate the design space for both distillation processes. First, we show our step distillation method achieves best-in-class acceleration and quality via careful choice of loss noise distributions, GAN design, and continuous-valued inputs, the first such method to match base TTM diffusion sampling quality with 4-step inference. 
+Second, we show our layer distillation method offers a consistent improvement in both speed \emph{and} performance over SOTA layer dropping methods and base diffusion sampling.
+Finally, we show that layer-step distillation accelerates our base model by 10-18x (230/435ms latency for 32 second mono/stereo 44.1kHz, 15x faster than the comparable SOTA model) while notably improving diversity over step-only distillation.
+
+Overall, our core contributions include the development of a holistic approach to accelerating score-based diffusion transformers including:
+\begin{itemize}
+    \item The development of distribution matching distillation for continuous-time score-based diffusion (i.e. EDM), the first GAN-based distillation method for TTA/TTM.
+    \item The development of an improved layer distillation method that consistently improves upon both past layer distillation method and our base diffusion model.
+    \item The development of the first combined layer and step distillation method.
+    \item Evaluation showing our step, layer, and layer-step distillation methods are all best-in-class and, when combined, can accelerate our base model by 10-18x (230/435ms latency for 32 second mono/stereo 44.1kHz, 15x faster than Stable Audio Open~\citep{evans2024open}), the fastest TTM model to our knowledge. For sound examples, see \url{https://presto-music.io/web/}.
+\end{itemize}
+
+
+
+\section{Background \& Related Work}
+
+
+\subsection{Music Generation}
+Audio-domain music generation methods commonly use autoregressive (AR) techniques~\citep{zeghidour2021soundstream, agostinelli2023musiclm, copet2023simple} or diffusion~\citep{forsgren2022riffusion, liu2023audioldm, liu2023audioldm2, schneider2023mo}. Diffusion-based TTA/TTM~\citep{forsgren2022riffusion, liu2023audioldm, liu2023audioldm2, schneider2023mo, stableaudio} has shown the promise of full-text control~\citep{huang2023noise2music}, precise musical attribute control~\citep{ Novack2024Ditto, Novack2024DITTO2DD, Tal2024JointAA}, structured long-form generation~\citep{Evans2024LongformMG}, and higher overall quality over AR methods~\citep{stableaudio, Evans2024LongformMG, Novack2024Ditto, evans2024open}. The main downside of diffusion, however, is that it is slow and thus not amenable to interactive-rate control.
+
+\subsection{Score-Based Diffusion Models}
+Continuous-time diffusion models have shown great promise over discrete-time models both for their improved performance on images~\citep{balaji2022ediffi, Karras2023AnalyzingAI, liu2024playgroundv3} \emph{and} audio~\citep{nistal2024diff, zhu2023edmsound, Saito2024SoundCTMUS}, as well as their relationship to the general class of flow-based models~\citep{Sauer2024FastHI, Tal2024JointAA}.
+Such models involve a forward noising process that gradually adds Gaussian noise to real audio signals $\bm{x}_{\text{real}}$ and 
+a reverse process that transforms pure Gaussian noise back into data~\citep{Song2020ScoreBasedGM, sohl2015deep}. The reverse process is defined by a stochastic differential equation (SDE) with an equivalent ordinary differential equation (ODE) form called the \emph{probability flow} (PF) ODE \citep{Song2020ScoreBasedGM}:
+\begin{equation}
+    \mathrm{d}\bm{x} = -\sigma \nabla_{\bm{x}} \log p(\bm{x} \mid \sigma )\mathrm{d}\sigma,
+\end{equation}
+where $\nabla_{\bm{x}} \log p(\bm{x} \mid \sigma )$ is the score function of the marginal density of $\bm{x}$ (i.e.~the noisy data) at noise level $\sigma$ according to the forward diffusion process. 
+Thus, the goal of score-based diffusion models is to learn a \emph{denoiser} network $\mu_{\boldsymbol{\theta}}$ such that $\mu_{\boldsymbol{\theta} }(\bm{x}, \sigma) = \mathbb{E}[\bm{x}_{\text{real}} \mid \bm{x}, \sigma]$. The score function is:
+\begin{equation}
+    \nabla_{\bm{x}} \log p(\bm{x} \mid \sigma ) \approx \frac{\bm{x} - \mu_{\boldsymbol{\theta}} (\bm{x},\sigma)}{\sigma}.
+\end{equation}
+Given a trained score model, we can generate samples at inference time by setting a decreasing \emph{noise schedule} of $N$ levels $\sigma_{\text{max}} = \sigma_{N}> \sigma_{N-1} > \dots >  \sigma_{0} = \sigma_{\text{min}}$ and iteratively solving the ODE at these levels using our model and any off-the-shelf ODE solver (e.g.~Euler, Heun). 
+
+The EDM-family~\citep{karras2022elucidating, Karras2023AnalyzingAI} of score-based diffusion models is of particular interest and unifies several continuous-time model variants within a common framework and improves model parameterization and training process. 
+The EDM score model is trained by minimizing a reweighted denoising score matching (DSM) loss \citep{Song2020ScoreBasedGM}:
+\begin{equation}
+    \mathcal{L}_{\text{DSM}} = \mathbb{E}_{\bm{x}_{\text{real}} \sim \mathcal{D}, \sigma \sim p(\sigma^{\text{train}}), \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}\left[\lambda(\sigma)\|\bm{x}_{\text{real}} - \mu_{\boldsymbol{\theta}}(\bm{x}_{\text{real}} + \epsilon\sigma, \sigma)\|_2^2\right],
+\end{equation}
+where $p(\sigma^{\text{train}})$ denotes the \emph{noise distribution} during training,  and $\lambda(\sigma)$ is a noise-level weighting function. Notably, EDM defines a \emph{different} noise distribution to discretize for inference $p(\sigma^{\text{inf}})$ that is distinct from $p(\sigma^{\text{train}})$ (see~\fref{fig:signoise}), as opposed to a noise schedule shared between training and inference.
+Additionally, EDMs represent the denoising network using extra noise-dependent preconditioning parameters, training a network $f_{\boldsymbol{\theta}}$ with the parameterization:
+\begin{equation}
+        \mu_{\boldsymbol{\theta}}(\bm{x}, \sigma) = c_{\text{skip}}(\sigma) \bm{x} + c_{\text{out}}(\sigma)f_{\boldsymbol{\theta}}( c_{\text{in}}(\sigma) \bm{x}, c_{\text{noise}}(\sigma)).
+\end{equation}
+For TTM models, $\mu_{\boldsymbol{\theta} }$ is equipped with various condition embeddings (e.g.~text) $\mu_{\boldsymbol{\theta} }(\bm{x}, \sigma, \bm{e})$. To increase text relevance and quality at the cost of diversity, we employ \emph{classifier free guidance} (CFG) \citep{ho2022classifier}, converting the denoised output to: $\tilde{\mu}^w_{\boldsymbol{\theta} }(\bm{x}, \sigma, \bm{e}) = \mu_{\boldsymbol{\theta} }(\bm{x}, \sigma, \boldsymbol{\emptyset}) + w (\mu_{\boldsymbol{\theta} }(\bm{x}, \sigma, \bm{e}) - \mu_{\boldsymbol{\theta} }(\bm{x}, \sigma, \boldsymbol{\emptyset}))$, where $w$ is the guidance weight and $\boldsymbol{\emptyset}$ is a ``null'' conditioning.
+
+\subsection{Diffusion Distillation}
+Step distillation is the process of reducing diffusion sampling steps by distilling a base model into a few-step generator. Such methods can be organized into two broad categories. 
+Online consistency approaches such as consistency models~\citep{song2023consistency}, consistency trajectory models~\citep{Kim2023ConsistencyTM}, and variants~\citep{Ren2024HyperSDTS, Wang2024PhasedCM} distill directly by enforcing consistency across the diffusion trajectory and optionally include an adversarial loss~\citep{Kim2023ConsistencyTM}.
+While such approaches have strong 1-step generation for images, attempts for audio have been less successful and only capable of generating short segment (i.e.~$<10$ seconds), applied to lower-quality base models limiting upper-bound performance, needing up to 16 sampling steps to match baseline quality (still slow), 
+and/or did not successfully leverage adversarial losses  which have been found to increase realism for other domains~\citep{bai2023accelerating, Saito2024SoundCTMUS, Novack2024DITTO2DD}. 
+
+In contrast, offline adversarial distillation methods include Diffusion2GAN~\citep{kang2024distilling}, LADD~\citep{Sauer2024FastHI}, and DMD~\citep{yin2023one}. 
+Such methods work by generating large amounts of offline noise--sample pairs from the base model, and finetuning the model into a conditional GAN for few-step synthesis.
+These methods can surpass their adversarial-free counterparts, yet require expensive offline data generation and massive compute infrastructure to be efficient. 
+
+Alternatively, improved DMD (DMD2)~\citep{yin2024improved} introduces an online adversarial diffusion distillation method for images. 
+DMD2 (1) removes the need for expensive offline data generation (2) adds a GAN loss and (3) outperforms consistency-based methods and improves overall quality. 
+DMD2 primarily works by distilling a one- or few-step generator $G_{\boldsymbol{\phi}}$ from a base diffusion model $\mu_{\text{real}}$, while simultaneously learning a score model of the generator's distribution online $\mu_{\text{fake}}$ in order to approximate a target KL objective (with $\mu_{\text{real}}$) used to train the generator.  
+To our knowledge, there are no adversarial diffusion distillation methods for TTM or TTA.
+
+Beyond step distillation, layer distillation, or the process of dropping interior layers to reduce the cost per sampling step, has been recently studied~\citep{Moon2024ASE, wimbauer2024cache}. Layer distillation  draws inspiration from transformer early exiting and layer caching~\citep{hou2020dynabert, schuster2021consistent} and has found success for image diffusion, but has not been compared or combined with step distillation methods and has not been developed for TTA/TTM. In our work, we seek to understand how step and layer distillation interact for accelerating music generation. 
+
+
+
+\section{\textbf{\textit{Presto!}
+
+We propose a dual-faceted distillation approach for inference acceleration of continuous-time diffusion models. 
+Continuous-time models have been shown to outperform discrete-time DDPM models~\citep{ song2020denoising, karras2022elucidating, karras2024analyzing}, but past DMD/DMD2 work focuses on the latter.
+Thus, we redefine DMD2 (a step distillation method) in~\sref{sec:edmdmd}  for continuous-time score models, then present
+an improved formulation and study its design space in~\sref{sec:presto-s}. 
+Second, we design a simple, but powerful improvement to the SOTA layer distillation method to understand the impact of reducing inference cost per step in~\sref{sec:codda}. 
+Finally, we investigate how to combine step and layer distillation methods together in~\sref{sec:lsdistill}.
+
+\subsection{EDM-Style Distribution Matching Distillation}\label{sec:edmdmd}
+We first redefine DMD2 in the language of continuous-time, score-based diffusion models (i.e. EDM-style).
+Our goal is to 
+distill
+our score model $\mu_{\boldsymbol{\theta}}$ (which we equivalently denote as $\mu_{\text{real}}$, as it is trained to model the score of real data) into an accelerated
+generator $G_{\boldsymbol{\phi}}$ 
+that can sample in 1-4 steps.  
+Formally, we wish to minimize the KL Divergence between the real distribution $p_{\text{real}}$ and the generator $G_{\boldsymbol{\phi}}$'s distribution $p_{\text{fake}}$: $\mathcal{L}_{\text{DMD}} = D(p_{\text{real}} \| p_{\text{fake}})$.
+The KL term cannot be calculated explicitly, but we can calculate its \emph{gradient} with respect to the generator if we can access the score of the generator's distribution.
+Thus, we  also train a ``fake" score model $\mu_{\boldsymbol{\psi}}$ (or equivalently, $\mu_{\text{fake}}$) to approximate the generator distribution's \emph{score function} at each gradient step during training.
+
+First, given some real data $\bm{x}_{\text{real}}$, we sample a noise level from a set of predefined levels $\sigma \sim \{\sigma_i\}_{\text{gen}}$, 
+and then pass the corrupted real data through the generator to get the generated output $\hat{\bm{x}}_{\text{gen}} = G_{\boldsymbol{\phi}}(\bm{x}_{\text{real}} + \sigma\epsilon, \sigma)$, where $\epsilon \sim \mathcal{N}(0, \boldsymbol{I})$ (we omit the conditioning $\bm{e}$ for brevity). 
+The gradient of the KL divergence between the real and the generator's distribution can then be calculated as:
+\begin{equation}\label{eq:dmd}
+    \nabla_{\boldsymbol{\phi}} \mathcal{L}_{\text{DMD}} =\mathbb{E}_{\substack{\sigma \sim \{\sigma_i\}, \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}} \left[\left((\mu_{\text{fake}}(\hat{\bm{x}}_{\text{gen}} + \sigma\epsilon, \sigma) - \tilde\mu_{\text{real}}^w(\hat{\bm{x}}_{\text{gen}} + \sigma\epsilon, \sigma )\right)\nabla_{\boldsymbol{\phi}}\hat{\bm{x}}_{\text{gen}}\right],
+\end{equation} 
+where $\{\sigma_i\}$ are the predefined noise levels for all loss calculations, and $\tilde\mu_{\text{real}}^w$ is the \emph{CFG-augmented} real score model. To ensure that $\mu_{\text{fake}}$ accurately models the score of the generator's distribution at each gradient update, we train the fake score model with the weighted-DSM loss (i.e.~standard diffusion training), but on \emph{the generator outputs}:
+\begin{equation}\label{eq:dsm}
+    \arg \min_{\boldsymbol{\psi}} \mathcal{L}_{\text{fake-DSM}} = \mathbb{E}_{\sigma \sim \{\sigma_i\}, \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}\left[\lambda(\sigma)\|\hat{\bm{x}}_{\text{gen}} - \mu_{\text{fake}}(\hat{\bm{x}}_{\text{gen}} + \sigma\epsilon, \sigma)\|_2^2\right]
+\end{equation}
+To avoid using offline data \citep{yin2023one}, the fake score model is updated \emph{5 times as often} as the generator to stabilize the estimation of the generator's distribution. 
+DMD2 additionally includes an explicit adversarial loss in order to improve quality. Specifically, a discriminator head $D_{\boldsymbol{\psi}}$ is attached to the intermediate feature activations
+of the fake score network $\mu_{\text{fake}}$, and thus is trained with the nonsaturating GAN loss:
+\begin{equation}\label{eq:gan}
+    \arg 
+    \min_{\boldsymbol{\phi}} \max_{\boldsymbol{\psi}} \mathbb{E}_{\substack{\sigma \sim \{\sigma_i\}, \\ \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}}[\log D_{\boldsymbol{\psi}}(\bm{x}_{\text{real}} + \sigma\epsilon, \sigma)] + \mathbb{E}_{\substack{\sigma \sim \{\sigma_i\}, \\ \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}}[-\log D_{\boldsymbol{\psi}}(\hat{\bm{x}}_{\text{gen}} + \sigma\epsilon, \sigma)],
+\end{equation}
+which follows past work on using diffusion model backbones as discriminators \citep{Sauer2024FastHI}. In all, the generator $G_{\boldsymbol{\phi}}$ is thus trained with a combination of the distribution matching loss $\mathcal{L}_{\text{DMD}}$ and the adversarial loss $\mathcal{L}_{\text{GAN}}$, while the fake score model (and its discriminator head) is trained with the fake DSM loss $\mathcal{L}_{\text{fake-DSM}}$ and the adversarial loss $\mathcal{L}_{\text{GAN}}$. To sample from the distilled generator, DMD2 uses consistency model-style ``ping-pong sampling" \citep{song2023consistency}, where the model iteratively denoises (starting at pure noise $\sigma_{\text{max}}$) and \emph{renoises} to progressively smaller noise levels. 
+
+Regarding past work, we note~\citet{yin2024improved} \emph{did} present a small-scale EDM-style experiment, 
+but treated EDM models as if they were functions of discrete noise timesteps. 
+This re-discretization runs counterintuitive to using score-based models for distribution matching, since the fake and real score models are meant to be run and trained in continuous-time and can adapt to variable points along the noise process. 
+Furthermore, this disregards the ability of continuous-time models to capture the \emph{entire} noise process from noise to data and enable \emph{exact} likelihoods rather than ELBOs \citep{Song2020ScoreBasedGM}. 
+Additionally, since DMD2 implicitly aims to learn an integrator of the PF ODE 
+$G_{\boldsymbol{\phi}}(\bm{x}, \sigma) \approx \bm{x} + \int_{\sigma}^{\sigma_{\text{min}}} -\delta\nabla \log p(\bm{x} \mid \delta) \textrm{d}\delta$ (like other data-prediction distillation methods \citep{song2023consistency}), learning this integral for any small set $\{\sigma_i\}$ restricts the generator's modeling capacity.
+\subsection{Presto-S: Score-based Distribution Matching Distillation}
+\label{sec:presto-s}
+Given the new notation, we proceed to develop our \emph{score-based} distribution matching step distillation, \textbf{Presto-S}. Our algorithm is shown in~\fref{fig:presto_s}, in~\aref{alg:edm3}, and discussed below.
+
+\subsubsection{Continuous-Time Generator Inputs}
+In~\sref{sec:edmdmd}, the noise level and/or timestep is sampled from a \emph{discrete}, hand-chosen set $\{\sigma_i\}_{\text{gen}}$.
+Discretizing inputs, however, forces the model to 1) be a function of a specific \emph{number} of steps, requiring users to retrain separate models for each desired step budget \citep{yin2024improved,kohler2024imaginefa} and 2) be a function of \emph{specific} noise levels, which may not be optimally aligned with where different structural, semantic, and perceptual features arise in the diffusion process~\citep{Si2023FreeUFL, kynkaanniemi2024applying, balaji2022ediffi, sabour2024align}. 
+When extending to continuous-time models,  we train the distilled generator $G_{\boldsymbol{\phi}}$ as a function of the continuous noise level sampled from the \emph{distribution} $\sigma \sim p(\sigma)$. 
+This allows our generator to both adapt better to variable budgets and to variable noise levels, as the generator can be trained with all noise levels sampled from $p(\sigma)$.
+\subsubsection{Perceptual Loss Weighting with Variable Noise Distributions}\label{sec:losses}
+
+A key difference between discrete-time and continuous-time diffusion models is the need for \emph{discretization} of the noise process during inference. 
+In discrete models, a single noise schedule defines a particular mapping between timestep $t$ and its noise level $\sigma$, and is fixed throughout training and inference. 
+In continuous-time EDM models, however, we use a noise \emph{distribution} $p(\sigma^{\text{train}})$ to sample during training, and a separate noise distribution for inference $p(\sigma^{\text{inf}})$ that is discretized to define the sampling schedule. 
+In particular, when viewed in terms of the \emph{signal-to-noise ratio} $1/\sigma^2$ or SNR as shown in~\fref{fig:signoise}, the \emph{training} noise distribution puts the majority of its mass in the mid-to-high SNR range of the diffusion process. This design choice focuses on semantic and perceptual features, while the \emph{inference} noise distribution is more evenly distributed but with a bias towards the low-SNR region, giving a bias to low-frequency features.
+\begin{wrapfigure}{r}{0.45\textwidth}
+	\centering
+	\includegraphics[width=\linewidth]{imgs/noise_distribution.pdf}
+ \vskip -0.15in
+    \caption{Training/Inference distributions for EDM models, in decibel SNR space.}
+	\vskip -0.17in
+	\label{fig:signoise}
+\end{wrapfigure}
+However, recall that \emph{every} loss term including~\eref{eq:dmd}, \eref{eq:dsm}, and \eref{eq:gan} requires an additional re-corruption process that must follow a noise distribution, significantly expanding the design space for score-based models. 
+Thus, we disentangle these forward diffusion processes and replace the shared discrete noise set with four \emph{separate noise distributions} $p_{\text{\textcolor{gen}{gen}}}$, $p_{\text{\textcolor{dmd}{DMD}}}$, $p_{\text{\textcolor{dsm}{DSM}}}$, and $p_{\text{\textcolor{gan}{GAN}}}$, corresponding to the inputs to the generator and each loss term respectively, with no restrictions on how each weights each noise level 
+(rather than forcing a particular noise weighting for all computation). 
+
+Then, if we apply the original DMD2 method naively to the EDM-style of score-models, we get $p_{\text{\textcolor{gen}{gen}}}(\sigma^{\text{inf}}) = p_{\text{\textcolor{dmd}{DMD}}}(\sigma^{\text{inf}}) = p_{\text{\textcolor{dsm}{DSM}}} (\sigma^{\text{inf}}) = p_{\text{\textcolor{gan}{GAN}}}(\sigma^{\text{inf}})$.
+This choice of $p_{\text{\textcolor{gen}{gen}}}(\sigma^{\text{inf}})$  reasonably aligns the generator inputs during distillation to the inference process itself, but each loss noise distribution is somewhat misaligned from its role in the distillation process. 
+In particular:
+\begin{itemize}
+    \item $p_{\text{\textcolor{dmd}{DMD}}}$: The distribution matching gradient is the only point that the generator gets a signal from the \emph{CFG-augmented} outputs of the teacher. CFG is critical for text following, but \emph{primarily} within the mid-to-high SNR region of the noise~\citep{kynkaanniemi2024applying}.
+    \item $p_{\text{\textcolor{gan}{GAN}}}$: As in most adversarial distillation methods \citep{Sauer2023AdversarialDD, yin2023one}, the adversarial loss's main strength is to increase the perceptual \emph{realism/quality} of the outputs, which arise in the mid-to-high SNR regions, rather than structural elements.
+    \item $p_{\text{\textcolor{dsm}{DSM}}}$: The score model training should in theory mimic standard diffusion training, and may benefit from the training distribution's provably faster convergence~\citep{wang2024evaluating} (as the fake score model is updated \emph{online} to track the generator's distribution).
+\end{itemize}
+Thus, we shift all of the above terms to use the training distribution $p_{\text{\textcolor{dmd}{DMD}}}(\sigma^{\text{train}}),  p_{\text{\textcolor{dsm}{DSM}}} (\sigma^{\text{train}})$ and $p_{\text{\textcolor{gan}{GAN}}}(\sigma^{\text{train}})$ 
+to force the distillation process to focus on perceptually relevant noise regions.
+
+\subsubsection{Audio-Aligned Discriminator Design}
+
+The original DMD2 uses a classic non-saturating GAN loss. The discriminator is a series of convolutional blocks downsampling the intermediate features into a \emph{single} probability for real vs. fake. While this approach is standard in image-domain applications, many recent adversarial waveform synthesis works \citep{kumar2023high, Zhu2024MusicHiFiFH} use a \emph{Least-Squares} GAN loss:
+\begin{equation}
+    \arg 
+    \min_{\boldsymbol{\phi}} \max_{\boldsymbol{\psi}}
+    \mathbb{E}_{\substack{\sigma \sim p_{\text{\textcolor{gan}{GAN}}}(\sigma^{\text{train}}), \\ \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}}[\|D_{\boldsymbol{\psi}}(\bm{x}_{\text{real}} + \sigma\epsilon, \sigma)\|_2^2] + \mathbb{E}_{\substack{\sigma \sim p_{\text{\textcolor{gan}{GAN}}}(\sigma^{\text{train}}), \\ \epsilon \sim \mathcal{N}(0, \boldsymbol{I})}}[\|1-D_{\boldsymbol{\psi}}(\hat{\bm{x}}_{\text{gen}} + \sigma\epsilon, \sigma)\|_2^2],
+\end{equation}
+where the outputs of the discriminator $D_{\boldsymbol{\psi}}$ are only \emph{partially} downsampled into a lower-resolution version of the input data (in this case, a latent 1-D tensor). This forces the discriminator to attend to more fine-grained, temporally-aligned features for determining realness, as the loss is averaged across the partially downsampled discriminator outputs. Hence, we use this style of discriminator for \textbf{Presto-S} to both improve and stabilize~\citep{mao2017least} the GAN gradient into our generator.
+
+\subsection{Presto-L: Variance and Budget-Aware Layer Dropping}\label{sec:codda}
+\begin{figure}[h]
+    \begin{center}
+            \includegraphics[width=\linewidth]{imgs/presto-l_fig.pdf}
+    \end{center}
+    \caption{Baseline layer dropping (left) vs. \textbf{Presto-L} (right). Standard layer dropping uses the noise level $\sigma$ to set the budget of layers to drop, starting from the back of the DiT blocks. \textbf{Presto-L} shifts this dropping by one to the second-to-last block and adds explicit budget conditioning.}
+    \label{fig:codda}
+\end{figure}
+Given our step distillation approach above, we now seek methods to reduce the cost of individual \emph{steps} themselves here through layer distillation, and then combine both step and layer distillation in~\sref{sec:lsdistill}.
+We begin with the current SOTA method: ASE~\citep{Moon2024ASE}. ASE employs a fixed dropping schedule that monotonically maps noise levels to compute budgets, allocating more layers to lower noise levels. We enhance this method in three key ways: (1) ensuring consistent variance in layer distilled outputs, (2) implementing explicit budget conditioning, and (3) aligning layer-dropped outputs through direct distillation.
+\textbf{Variance Preservation}:
+First, we inspect the within-layer activation variance of our base model in~\fref{fig:ditsd}. We find that while the variance predictably
+increases over depth, it notably spikes \emph{on the last layer} up to an order of magnitude higher, indicating that the last layer behaves much differently as it is the direct input to the linear de-embedding layer.
+ASE, however, always drops layers starting from the \emph{last} layer and working backwards, thus always removing this behavior. 
+Hence, we remedy this fact and \emph{shift} the layer dropping schedule by 1 to drop starting at the \emph{second} to last layer, always rerouting back into the final layer to preserve the final layer's behavior.
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+	\vskip -0.2in
+	\centering
+	\includegraphics[width=\linewidth, trim={0cm 0cm 0cm 0cm}, clip]{imgs/dit_sd.pdf}
+ \vskip -0.2in
+    \caption{Hidden activation variance vs. layer depth. Each line is a unique noise level.}
+	\vskip -0.13in
+	\label{fig:ditsd}
+\end{wrapfigure}
+\textbf{Budget Conditioning}:  
+We include \emph{explicit} budget conditioning into the model itself so that the model can directly adapt computation to the budget level.
+This conditioning comes in two places: (1) a global budget embedding added to the noise level embedding, thus contributing to the internal Adaptive Layer Norm (AdaLN) conditioning inside the DiT blocks, and (2) an additional AdaLN layer on the outset of the DiT blocks conditional only on the budget, in order to effectively rescale the outputs to account for the change in variance. Following \citep{peebles2023scalable, zhang2023adding}, we zero-initialize both budget conditioning modules to improve finetuning stability.
+
+\textbf{Knowledge Distillation}: To encourage  distillation without holding the base model in memory, we employ a
+\emph{self-teacher} loss.
+Formally, if $h_{\boldsymbol{L}}(\bm{x}, \boldsymbol{\theta})$ and $h_{\text{full}}(\bm{x}, \boldsymbol{\theta})$ are the normalized outputs of the final DiT layer with and without layer dropping respectively,
+the self-teacher loss is $
+    \mathcal{L}_{\text{st}} = \|h_{\boldsymbol{L}}(\bm{x}, \boldsymbol{\theta}) - \texttt{sg}(h_{\text{full}}(\bm{x}, \boldsymbol{\theta}))\|_2^2,$
+where $\texttt{sg}$ denotes a stop-gradient. This gives additional supervision during the early phases of finetuning so the layer-dropped outputs can match full model performance.
+
+We show the differences between our \textbf{Presto-L} and the baseline approach in Fig.~\ref{fig:codda}. By conditioning directly on the budget, and shifting the dropping schedule to account for the final DiT block behavior, we able to more adapt computation for reduced budgets while preserving performance. 
+\subsection{Presto-LS: Layer-Step Distillation}\label{sec:lsdistill}
+
+As the act of layer distillation is, in principle, unrelated to the step distillation, there is no reason \emph{a priori} that these methods could not work together.
+However, we found combining such methods to be surprisingly non-trivial. 
+In particular, we empirically find that attempting both performing \textbf{Presto-L} finetuning and \textbf{Presto-S} at the same time OR performing \textbf{Presto-L} finetuning from an initial \textbf{Presto-S} checkpoint results in large instability and model degradation, as the discriminator dominates the optimization process and achieves near-perfect accuracy on real data. 
+
+We instead find three key factors in making combined step and layer distillation work:
+ (1) \emph{Layer-Step Distillation} -- we first perform layer distillation then step distillation, which is more stable as the already-finetuned layer dropping prevents generator collapse; 
+ (2) \emph{Full Capacity Score Estimation} -- we keep the real and fake score models initialized from the \emph{original} score model rather than the layer-distilled model, as this stabilizes the distribution matching gradient and provides regularization to the discriminator since the fake score model and the generator are initialized with different weights; and 
+ (3) \emph{Reduced Dropping Budget} -- we keep more layers during the layer distillation. We discuss more in~\sref{sec:lsd_res} and how alternatives fail in \aref{app:lsfails}.
+
+
+
+\section{Experiments}
+
+
+We show the efficacy of \textbf{Presto} via a number of experiments. We first ablate the design choices afforded by \textbf{Presto-S}, and separately show how \textbf{Presto-L} flatly improves standard diffusion sampling. We then show how \textbf{Presto-L} and \textbf{Presto-S} stack up against SOTA baselines, and how we can combine such approaches for further acceleration, with both quantitative and subjective metrics. We finish by describing a number of extensions enabled by our accelerated, continuous-time framework.
+
+\subsection{Setup}
+
+\textbf{Model:} We use latent diffusion~\citep{rombach2022high} with a fully convolutional VAE~\citep{kumar2023high} to generate mono 44.1kHz audio and convert to stereo using MusicHiFi~\citep{Zhu2024MusicHiFiFH}. 
+Our latent diffusion model builds upon DiT-XL~\citep{peebles2023scalable} and takes in three conditioning signals: the noise level, text prompts, and beat per minute (BPM) for each song. We use FlashAttention-2~\citep{dao2023flashattention} for the DiT and \texttt{torch.compile} for the VAE decoder and MusicHiFi. 
+For more details, see \aref{app:arch}.
+
+\textbf{Data:} We use a 3.6K hour dataset of mono 44.1 kHz licensed instrumental music, augmented with pitch-shifting and time-stretching. Data  includes musical meta-data and synthetic captions. 
+For evaluation, we use Song Describer (no vocals)~\citep{manco2023song} split into 32 second chunks.
+
+\textbf{Baselines:} We compare against a number of acceleration algorithms and external models, including  Consistency Models (CM)~\citep{song2023consistency}, SoundCTM~\citep{Saito2024SoundCTMUS}, DITTO-CTM~\citep{Novack2024DITTO2DD}, 
+DMD-GAN~\citep{yin2024improved},  
+ASE~\citep{Moon2024ASE}, 
+MusicGen~\citep{copet2023simple},
+and Stable Audio Open~\citep{evans2024open}. See \aref{app:bases} for more details.
+
+\textbf{Metrics:} We use Frechet Audio Distance (FAD)~\citep{kilgour2018fr}, Maximum Mean Discrepancy (MMD) \citep{jayasumana2024rethinking}, and Contrastive Language-Audio Pretraining (CLAP) score~\citep{wu2023large}, all with the CLAP-LAION music backbone~\citep{wu2023large} given its high correlation with human perception~\citep{fadtk}. FAD and MMD measure audio quality/realness with respect to Song Describer (lower better), and CLAP score measures prompt adherence (higher better). 
+When comparing to other models, we 
+also include density (measuring quality), recall and coverage (measuring diversity)~\citep{naeem2020reliable}, and real-time factor (RTF) for both mono (M) and stereo (S, using MusicHiFi), which measures the total seconds of audio generated divided by the generation time, where higher is better for all. 
+\subsection{Exploring the Design Space of \textbf{Presto-S}}
+\begin{wraptable}{r}{8cm}
+    \centering
+    \tiny
+    \begin{tabular}{cccc|ccc}
+    \toprule
+    $p_{\text{\textcolor{gen}{gen}}}$ & $p_{\text{\textcolor{dmd}{DMD}}}$ & $p_{\text{\textcolor{dsm}{DSM}}}$& $p_{\text{\textcolor{gan}{GAN}}}$&  FAD&  MMD& CLAP\\\midrule
+ \multicolumn{7}{c}{\textbf{Least-Squares GAN}}\\
+    \midrule
+Inf.& Inf.& Inf.& Inf.& 0.37& 1.73& 27.45\\
+Inf.& Inf.& Tr.& Inf.& 0.37& 1.58& 26.45\\
+Inf.& Inf.& Tr.& Tr.& 0.37& 1.51& 24.90\\
+Inf.& Tr.& Tr.& Inf.& 0.27& 1.27& 33.12\\
+Inf.& Tr.& Inf.& Tr.& \underline{0.23}& \underline{0.86}& \textbf{33.29}\\
+Inf.& Tr.& Tr.& Tr.& \textbf{0.22}& \textbf{0.83}& \underline{33.13}\\
+Tr.& Tr.& Tr.& Tr.& 0.24& 0.99& 30.89\\
+ \midrule
+ \multicolumn{7}{c}{\textbf{Non-Saturating GAN}}\\
+ \midrule
+ Inf.& Tr.& Inf.& Tr.& 0.24& 0.89&31.48\\
+ Inf.& Tr.& Tr.& Tr.& 0.25& 0.96&31.78\\
+ Tr.& Tr.& Tr.& Tr.& 0.26& 1.04&29.46\\
+ \bottomrule
+    \end{tabular}
+    \caption{(Top) Comparing different choices of noise distribution for the \textbf{Presto-S} process. (Bottom) for best performing noise distributions, performance for standard GAN design vs. proposed least-squares GAN.}
+    \label{tab:edm_abl}
+\end{wraptable}
+\textbf{Loss Distribution Choice:} In~\tref{tab:edm_abl} (Top), we show the FAD, MMD, and CLAP score for many \textbf{Presto-S} distilled models with different noise distribution choices. 
+We find that the original DMD2~\citep{yin2024improved} setup (first row) underperforms compared to adapting the loss distributions.
+The largest change is in switching $p_{\text{\textcolor{dmd}{DMD}}}$ to the training distribution, which improves all metrics. 
+This confirms our hypothesis that by focusing on the region most important for text guidance~\citep{kynkaanniemi2024applying}, we improve both audio quality and text adherence.
+Switching $p_{\text{\textcolor{gan}{GAN}}}$ to the training distribution also helps; in this case, the discriminator is made to focus on higher-frequency features~\citep{Si2023FreeUFL}, benefiting quality. 
+We also find only a small improvement when using the training distribution for $p_{\text{\textcolor{dsm}{DSM}}}$. 
+This suggests that while the training distribution should lead to more stable learning of the online generator's score~\citep{wang2024evaluating}, this may not be crucial.
+For all remaining experiments, we use $p_{\text{\textcolor{dmd}{DMD}}}(\sigma^{\text{train}}) = p_{\text{\textcolor{gan}{GAN}}}(\sigma^{\text{train}}) = p_{\text{\textcolor{dsm}{DSM}}}(\sigma^{\text{train}})$ 
+and $p_{\text{\textcolor{gen}{gen}}}(\sigma^{\text{inf}})$.
+
+\textbf{Discriminator Design:} We ablate the effect of switching from the chosen least-squares discriminator to the original softplus non-saturating discriminator, which notable treats the discriminator as a binary classifier and predicts the probability of real/generated. In~\tref{tab:edm_abl} (Bottom), we find that using the least-squares discriminator leads to consistent improvements in audio quality (FAD/MMD) and in particular text relevance (CLAP), owing to the increased stability from the least-squares GAN.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/presto_contdis.pdf}
+    \caption{Continuous generator inputs vs. discrete inputs. Continuous inputs shows more consistent scaling with compute, while generally performing better in both quality and text relevance.}
+    \label{fig:cont}
+\end{figure}
+
+\textbf{Continuous vs. Discrete Generator Inputs:}
+We test how \emph{continuous-time} conditioning compares against a discrete and find the former is preferred as shown in~\fref{fig:cont}. 
+Continuous noise levels maintain a correlation where more steps  improve quality, while discrete time models are more inconsistent.
+Additionally, the continuous-time conditioning performs best in text relevance. 
+While the 1 and 2-step discrete models show slightly better FAD metrics than continuous on 1 and 2-step sampling, these models have a failure mode as shown in~\fref{fig:hifreq}:
+2-step discrete models drop  high-frequency information and render transients (i.e.~drum hits) poorly for genres like R\&B or hip-hop. 
+
+\subsection{\textbf{Presto-L} Results}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{imgs/presto_l.pdf}
+    \caption{\textbf{Presto-L} results. \textbf{Presto-L} improves both the latency \emph{and} the overall performance across all metrics, against both the leading layer dropping baseline and the base model.}
+    \label{fig:codda_results}
+\end{figure}
+We compare \textbf{Presto-L} with both our baseline diffusion model and ASE~\citep{Moon2024ASE} using the 2nd order DPM++ sampler~\citep{Lu2022DPMSolverFS} with CFG++~\citep{chung2024cfgpp}. 
+For ASE and \textbf{Presto-L}, we use the optimal ``D3'' configuration from \citet{Moon2024ASE}, which corresponds to a dropping schedule, in terms of decreasing noise level (in quintiles), of $[14, 12, 8, 4, 0]$ (i.e.~we drop 14 layers for noise levels in the top quintile, 12 for the next highest quintile, and so on).
+Layer distillation results at various sampling budgets are shown in~\fref{fig:codda_results}.
+\textbf{Presto-L} yields an improvement over the base model on all metrics, speeding up by $\approx$27\% \emph{and} improving quality and text relevance. 
+ASE provides similar acceleration but degrades performance at high sampling steps and scales inconsistently.
+The behavior of dropping layers \emph{improving} performance can be viewed via the lens of multi-task learning, where (1) denoising each noise level is a different task (2) later layers only activating for lower noise levels enables specialization for higher frequencies. See \aref{app:presto_l_abl} for further ablations. %
+
+    
+\begin{table}[t]
+    \tiny\centering
+    \begin{tabular}{l c c | c c c c c c }
+    \toprule
+    Model  & NFE &RTF-M/S ($\uparrow$)& FAD ($\downarrow$) &MMD ($\downarrow$)&CLAP Score ($\uparrow$)  & Density ($\uparrow$) & Recall ($\uparrow$) & Coverage($\uparrow$)\\
+
+     \midrule
+        \multicolumn{5}{l}{\textbf{External Baselines*}} & &  & \\
+    MusicGen-Small & 1.6K&0.77 &0.31&1.60&30.61&0.36&0.16&0.43\\
+    MusicGen-Medium & 1.6K &0.39 &0.27&1.30&31.85&0.43&0.19&0.54\\
+    MusicGen-Large &1.6K &0.37 &0.25&1.21&32.83&0.44&0.15&0.54\\
+    Stable Audio Open&100&4.54 &0.23 &1.07&35.05&0.29&0.37&0.49\\
+
+        \midrule
+    \multicolumn{5}{l}{\textbf{Base Model, Diffusion Sampling}}& &  & \\
+    DPM-2S & 80 & 7.72 / 7.34 & 0.24&  0.82&  31.56&  0.31 & 0.20 &  0.41\\
+    DPM-2S+ASE & 80&  9.80 / 9.22&  0.25&  1.12&   30.03&  0.27&  0.16&   0.41\\
+    DPM-2S+\textbf{Presto-L} (ours) & 80& 9.80 / 9.22& 0.18 & 0.61 &   32.28&  0.38& 0.29&   0.51\\
+    
+    \midrule
+    \multicolumn{5}{l}{\textbf{Consistency-Based Distillation}} &  &  & \\
+    CM& 4&  118.77  / 67.41&  0.47&    2.50 &  26.33 &   0.17&  0.01&  0.16\\
+    SoundCTM &4 & 105.78 / 63.01& 0.35 &  1.72&  29.61& 0.17&  0.17 &  0.26\\
+    DITTO-CTM & 4& 118.77  / 67.41&  0.36&    1.62& 28.31&  0.22&  0.04&   0.32\\
+    \midrule
+    \multicolumn{5}{l}{\textbf{Adversarial Distillation}} &  &  & \\
+    DMD-GAN & 4& 118.77  / 67.41&   0.29 &   1.16 & 27.56 &  0.57& 0.07&   0.41\\
+    \textbf{Presto-S} (ours) & 4&  118.77  / 67.41&  0.22&   0.83&  33.13&  0.60&  0.10 &  0.50\\
+    \textbf{Presto-LS} (ours)& 4&  138.84 / 73.43 & 0.23  & 0.73 & 32.21&0.49  &  0.14 & 0.48  \\
+    \bottomrule
+    \end{tabular}
+    \caption{Full Results on Song Describer (No vocals).$^*$External baseline RTFs are all natively stereo.}
+    \label{tab:mainres}
+\end{table}
+\subsection{Full Comparison}
+In~\tref{tab:mainres}, we compare against multiple baselines and external models.
+For step distillation, \textbf{Presto-S} is best-in-class and the only distillation method to close to base model quality, while achieving an over 15x speedup in RTF from the base model.
+Additionally, \textbf{Presto-LS} improves performance for MMD, beating the base model with further speedups (230/435ms latency for 32 second mono/stereo 44.1kHz on an A100 40 GB). We also find \textbf{Presto-LS}  improves  \emph{diversity} with higher recall. Overall, \textbf{Presto-LS} is 15x faster than SAO. We investigate latency more in \aref{app:rtf}.
+
+\subsection{Listening Test}\label{sec:listening_test_main}
+We also conducted a subjective listening test to compare \textbf{Presto-LS} with our base model, the best non-adversarial distillation technique SoundCTM~\citep{Saito2024SoundCTMUS} distilled from our base model, and Stable Audio Open~\citep{evans2024open}. Users ($n=16$) were given 20 sets of examples generated from each model 
+(randomly cut to 10s for brevity) using random prompts from Song Describer and asked to rate the musical quality, taking into account both fidelity and semantic text match between 0-100. We run multiple paired t-tests with Bonferroni correction and find \textbf{Presto-LS} rates highest against all baselines ($p<0.05$). We show additional plots in~\fref{fig:mushra}.
+
+\subsection{Presto-LS Qualitative Analysis}\label{sec:lsd_res}
+\begin{wrapfigure}{r}{0.45\textwidth}
+	\centering
+	\includegraphics[width=\linewidth, trim={0cm 0cm 0cm 0cm}, clip]{imgs/dmd_sd.pdf}
+ \vskip -0.15in
+    \caption{\textbf{Presto-S} hidden activation var.}
+	\label{fig:dmdsd}
+\end{wrapfigure}
+While \textbf{Presto-LS} improves speed and quality/diversity over step-only distillation, the increases are modest,
+as the dropping schedule for \textbf{Presto-L} 
+was reduced ($[12, 8, 8, 0, 0]$) for step distillation stability. 
+To investigate more, we analyze the hidden state activation variance of our step-distilled model in~\fref{fig:dmdsd}.
+The behavior is quite different than the base model,  
+as the ``spike'' in the final layer is more amortized across the last 10 layers and never reaches the base model's magnitude. 
+We hypothesize step-distilled models have more unique computation \emph{throughout} each DiT block, making layer dropping difficult. 
+
+\subsection{Extensions}
+
+\textbf{Adaptive Step Schedule:} A benefit of our continuous-time distillation is that besides setting how many steps (e.g., 1-4), we can set \emph{where} those steps occur along the diffusion process by tuning the $\rho$ parameter in the EDM inference schedule, which is normally set to $\rho = 7$. 
+In particular, decreasing $\rho$ (lower bounded by 1) puts more weight on low-SNR features and increasing $\rho$ on higher-SNR features~\citep{karras2022elucidating}. 
+Qualitatively, we find that this process enables increased diversity of outputs, even from the same latent code (see \aref{app:adapt_rho}).
+
+\textbf{CPU Runtime:}
+We benchmark \textbf{Presto-LS}'s speed performance for CPU inference.
+On an Intel Xeon Platinum 8275CL CPU, we achieve a mono RTF of 0.74, generating 32 seconds of audio in 43.34 seconds. We hope to explore further CPU acceleration in future work.
+
+\textbf{Fast Inference-Time Rejection Sampling:} Given \textbf{Presto-LS}'s speed,
+we investigated using \emph{inference-time} compute to improve performance. 
+Formally, we test the idea of \emph{rejection sampling}, inspired by \citet{Kim2023ConsistencyTM}, where we generate a batch of samples and reject $r$ fraction of them according to some ranking function. We use 
+the CLAP score to discard samples that have poor text relevance. Over a number of rejection ratios (see \fref{fig:rej}), we find that CLAP rejection sampling strongly improves text relevance while maintaining or \emph{improving} quality at the cost of  diversity.
+
+
+\section{Conclusion}
+
+We proposed \textbf{Presto}, a dual-faceted approach to accelerating latent diffusion transformers by reducing sampling steps and cost per step via distillation. Our core contributions include the development of score-based distribution matching distillation (the first GAN-based distillation for TTM), a new layer distillation method, the first combined layer-step distillation, and evaluation showing each method are independently best-in-class and, when combined, can accelerate our base model by 10-18x (230/435ms latency for 32 second mono/stereo 44.1kHz, 15x faster than the comparable SOTA model), resulting in the fastest TTM model to our knowledge.  We hope our work will motivate continued work on (1) fusing step and layer distillation and (2) new distillation of methods for continuous-time score models across media modalities such as image and video.
+
+
+
+
+

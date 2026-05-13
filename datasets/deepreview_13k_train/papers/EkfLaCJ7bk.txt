@@ -1,0 +1,170 @@
+\title{TidalDecode: Fast and Accurate LLM Decoding with Position Persistent Sparse Attention}
+
+\begin{abstract}
+
+Large language models (LLMs) have driven significant advancements across diverse NLP tasks, with long-context models gaining prominence for handling extended inputs. However, the expanding key-value (KV) cache size required by Transformer architectures intensifies the memory constraints, particularly during the decoding phase, creating a significant bottleneck. 
+Existing sparse attention mechanisms designed to address this bottleneck have two limitations: (1) they often fail to reliably identify the most relevant tokens for attention, and (2) they overlook the spatial coherence of token selection across consecutive Transformer layers, which can lead to performance degradation and substantial overhead in token selection. 
+This paper introduces \Sys, a simple yet effective algorithm and system for fast and accurate LLM decoding through position persistent sparse attention. \Sys leverages the spatial coherence of tokens selected by existing sparse attention methods and introduces a few token selection layers that perform full attention to identify the tokens with the highest attention scores, while all other layers perform sparse attention with the pre-selected tokens. 
+This design enables \Sys to substantially reduce the overhead of token selection for sparse
+attention without sacrificing the quality of the generated results.
+Evaluation on a diverse set of LLMs and tasks shows that \Sys{} closely matches the generative performance of full attention methods while reducing the LLM decoding latency by up to $2.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Large language models (LLMs) have revolutionized natural language processing (NLP) by achieving state-of-the-art performance on various applications.
+As LLMs evolve, they are increasingly being adapted to manage tasks with long contexts, such as Chain-of-Thought reasoning \citep{wei2023chainofthoughtpromptingelicitsreasoning}, document summarization \citep{huang-etal-2021-efficient}, and retrieval-augmented generation \citep{ram2023incontextretrievalaugmentedlanguagemodels, pmlr-v235-zhang24cq}.
+However, quickly and efficiently serving long-context LLMs is challenging due to the inherent memory and compute bottlenecks in the Transformer architectures~\citep{vaswani2023attentionneed}.
+
+\if 0
+Large language models (LLMs) have revolutionized natural language processing (NLP) by achieving state-of-the-art performance on various tasks, including machine translation, summarization, and question-answering. 
+Their ability to generate human-like text has made them indispensable across various domains, from academic research to industry applications \citep{touvron2023llama}.
+As LLMs expand to handle more extended contexts, their potential applications increase dramatically. 
+Long-context processing is vital for tasks such as Chain-of-Thought reasoning \citep{wei2023chainofthoughtpromptingelicitsreasoning}, document summarization \citep{huang-etal-2021-efficient}, and retrieval-augmented generation \citep{ram2023incontextretrievalaugmentedlanguagemodels, pmlr-v235-zhang24cq}. 
+Handling long token sequences is crucial for enabling LLMs to perform well on these tasks, which often require synthesizing information from multiple sources over extensive text sequences. 
+However, extending context length further exacerbates the memory and compute bottlenecks inherent in the Transformer architectures.
+\fi 
+
+LLM inference involves two separate stages: {\em prefilling} and {\em decoding}. 
+The prefilling stage computes the activations for all input tokens and stores the keys and values for all tokens in the {\em key-value (KV) cache}, allowing the LLM to reuse these keys and values to compute attention for future tokens.
+In each decoding stage, the LLM decodes one new token using all input tokens and previously generated tokens.
+The KV cache size grows linearly in the sequence length~\citep{kwon2023efficient}.
+For instance, with a context length of 128K tokens, the KV cache of LLama2-7B with half-precision can easily reach 64 GB\footnote{The KV cache size is computed as: 
+$\text{Layers} \times \text{KV Heads} \times \text{Head Dim} \times \text{Seq Len} \times \text{FP16 Size} \times 2 \ (\text{for K+V}) = 32 \times 32 \times 128 \times 128K \times 2 \ \text{bytes} \times 2 = 64 \ \text{GB}$.}, creating substantial memory pressure for LLM serving.
+In addition, the LLM decoding stage is memory-bounded since decoding one new token requires accessing all previous tokens in the KV cache, making KV cache access the primary bottleneck for long-context LLM decoding. 
+This memory-bound nature severely limits the scalability and efficiency of LLM serving.
+
+To address this problem, recent work has introduced {\em sparse attention}, which approximates full attention using a small portion of tokens with the highest attention scores. Compared to full attention, sparse attention reduces computation cost and memory access while preserving the LLM's generative performance~\citep{ge2024model, zhang2023h2o}.
+Existing sparse attention techniques can be classified into two categories: eviction- and selection-based methods.
+
+\if 0
+\textbf{Eviction-based approaches} aim to reduce memory usage by selectively discarding tokens deemed less relevant to the task, thereby limiting the number of tokens involved in attention calculations \citep{xiao2023streamingllm, zhang2023h2o}. 
+These models may experience significant performance drops, particularly in tasks where earlier evicted tokens can hold critical information for a later decoding step, as in the needle-in-the-haystack scenarios. 
+
+\textbf{Token-selection-based approaches} focus on selecting the most relevant tokens, often through efficient approximated top-k selections. These methods generally perform top-k selection by estimating the highest attention scores per layer \cite{tang2024questqueryawaresparsityefficient}. 
+The per-layer approximation nature of these models may fail to capture persistent top-k patterns and ground truth tokens with the highest attention scores.
+Additionally, many top-k selection algorithms are overly complex, diminishing their potential computational benefits and rendering them less practical for large-scale real-world deployments.
+\fi
+
+First, {\em eviction-based} sparse attention reduces memory usage for the KV cache by selectively discarding less relevant tokens from the KV cache, therefore reducing the number of tokens computed in attention mechanisms~\citep{xiao2023streamingllm, zhang2023h2o}. 
+While these methods decrease the size of the KV cache, they can be inadequate for tasks where critical information is carried by tokens that are prematurely evicted, such as the needle-in-the-haystack tasks~\citep{peng2023yarn}.
+On the other hand, {\em selection-based} sparse attention maintains {\em all} tokens in the KV cache, estimates their attention scores, and selects a small subset of tokens to participate in each LLM decoding step.
+This approach is prone to issues related to distribution shifts caused by appending sparsely attended, biased KV representations back into the cache.
+
+\if 0
+In this work, we observe that within a single query, tokens across different KV heads and layers exhibit a consistent retrieval pattern. This observation motivates us to apply the same token indices across all layers, rather than performing complex selection operations at each decoding step. To address this, we introduce \Sys{} (as shown in Fig.\ref{fig:arch}, a simple yet effective algorithm based on exact top-k search, which leverages the shared patterns of tokens with the highest attention scores across layers, along with intermediate correction. This design enables us to efficiently perform sparse attention, significantly reducing computational overhead while preserving high accuracy. 
+\Sys{} determines and fixes the positions of tokens using top-k selection at the beginning of each decoding step. To avoid the accumulated inaccuracy brought by fixed indices, \Sys{} performs a one-time reselection of top-k tokens as correction at an optimal layer and reuses new indices for the rest of the layers. 
+Therefore, \Sys{} effectively reduces the memory access in sparse layers to $topk/Len$, where the $topk$ is a small constant (normally 1\% of $Len$ provides promising performance according to our empirical results). 
+\fi
+
+\input{src/figs/scripts/PPSA_heatmap}
+
+This paper presents \Sys, an algorithm and system for fast and precise LLM decoding, utilizing {\em position persistent sparse attention} (\sa). 
+A key insight behind \Sys is the observation that tokens chosen for sparse attention --- based on their highest attention scores --- exhibit {\em significant overlap across consecutive Transformer layers} within each decoding phase.
+\Cref{fig:PPSA_heatmap} illustrates this overlap in a single decoding step of LLaMA-3-8B instruct~\cite{gradient-ai-llama-3-8B} with an input of 51 tokens. 
+Each column in the figure corresponds to a Transformer layer, and each row indicates one token in the KV cache.
+Selection-based sparse attention methods select the 5 tokens with the highest attention scores (highlighted in yellow) for attention computation in each head.
+As the figure depicts, there is a recurring pattern where consecutive layers {\em consistently focus on the same set of tokens}, indicating a {\em spatial coherence in the selection of tokens} for sparse attention.
+Instead of independently selecting tokens for sparse attention at each layer, \Sys introduces a few token selection layers, which perform full attention to identify the tokens with the highest attention scores. 
+All remaining layers implement position persistent sparse attention, where only the tokens selected by the token selection layers are retrieved from the KV cache for attention.
+Consequently, all other layers between two token selection layers operate on the same set of tokens, reducing the overhead of token selection. 
+Experiments across a diverse set of LLMs and datasets demonstrate that using just two token selection layers --- one at the beginning and one in the middle --- is sufficient to achieve high generative performance while minimizing computation and memory overheads.
+
+This design enables \Sys to substantially reduce the overhead of token selection for sparse attention without sacrificing the quality of the generated results. Additionally, to address the KV cache distribution shift, \Sys introduces a cache-correction mechanism that periodically refills the KV cache using full attention for all sparsely decoded tokens to mitigate bias in the KV representations.
+\if 0
+We conduct a comprehensive evaluation comparing \Sys{} against state-of-the-art sparse attention methods, including Quest \cite{tang2024questqueryawaresparsityefficient}, H2O \cite{zhang2023h2o}, and StreamingLLM \cite{xiao2023streamingllm}. Given the nature of accurate identification of tokens with the highest attention scores, \Sys{} has better perplexity on the PG19 dataset \cite{raecompressive2019} across varying context lengths; and achieves perfect accuracy with less than 1\% token budge in "needle-in-the-haystack" evaluation.
+Our hardware benchmarks validate the theoretical analysis, showing up to \TODO{} inference speedup compared to \cite{flashinfer} with \TODO{} context window. In conclusion, our contributions are devled into:
+\begin{itemize}
+    \item Identified a layer-level shared retrieval pattern for tokens with the highest attention scores across layers and heads and significance of correction to remedy the accumulated error progressed by sparse attention.
+    \item Proposed \Sys{}, an algorithm with one-time correction that leverages this pattern to perform sparse attention effectively and efficiently.
+    \item Demonstrated the effectiveness of \Sys{} through comprehensive experiments by outperforming SOTA models and achieving \TODO{} inference and \TODO{} end-to-end speedups.
+\end{itemize}
+\fi
+
+Comprehensive evaluation with the LongChat-7b-v1.5-32k, Llama-3-8B, Llama-3-70B, and Llama-3.1-8B models on the Needle-in-the-Haystack, PG-19, and LongBench tasks demonstrates that \Sys{} can consistently achieve the best performance efficiency trade-off compared with the best existing sparse attention methods.
+We have implemented custom GPU kernels for \sa and an end-to-end system for \Sys{}. Compared with existing full and sparse attention implementations, our system reduced the end-to-end inference latency by up to $2.1\times$ and $1.2\times$, respectively.
+In conclusion, our contributions are:
+\begin{itemize}
+    \item We propose \Sys{}, a streamlined and efficient algorithm and system for fast and high-quality LLM decoding, utilizing position persistent sparse attention. 
+    \item To address KV cache distribution shifts, we introduce a cache-correction mechanism that periodically refills the KV cache with using full attention for sparsely decoded tokens. 
+    \item Empirically, we demonstrate the effectiveness and efficiency of \Sys{} through comprehensive evaluation, showing that \Sys significantly outperforms existing sparse attention methods.
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\paragraph{Long-context model.}
+Efficiently handling long-context inputs is essential for various LLM tasks in real-world applications such as document summarization, question answering, and dialogue systems~\citep{wang2024limitssurveytechniquesextend}.
+Recent advancements, including rotary positional encoding (RoPE) \citep{su2023roformer}, have enabled models to manage extended context lengths effectively. 
+The LLaMA-3 model series supports up to 8K tokens, with enhanced versions such as Gradient-AI-Llama3 \citep{gradient-ai-llama-3-8B} and LLaMA 3.1 \citep{llama3-1} extending this limit to 128K tokens. 
+Additionally, proprietary LLMs such as GPT-4 Turbo and GPT-4o \citep{gpt4} support up to 128K tokens, and Claude 3.5 Sonnet allows up to 200K tokens \citep{claude}.
+While recent work has introduced efficient attention kernel implementation \citep{dao2022flashattention, dao2023flashattention},  processing long-context inputs continues to be constrained by significant memory usage and computational costs from the extended KV cache.
+\Sys{} is designed to mitigate these challenges by reducing latency and memory overhead through an efficient strategy for selecting tokens with the highest attention scores and one-time intermediate re-calibration, ensuring both efficiency and high-quality output.
+
+To alleviate the intrinsic computational and memory bottleneck in long-context LLM inference, recent works on sparse attention have approached this problem from two main perspectives: {\em eviction-} and {\em selection-based} methods.
+
+\paragraph{Eviction-based sparse attention.} \citet{xiao2023streamingllm, zhang2024h2o} propose to reduce KV cache memory usage by evicting tokens that are considered less relevant during inference. 
+These suffer from potential performance degradation, especially in tasks where every token may carry crucial information (e.g., needle-in-the-haystack tasks), since tokens with high importance for a future decoding step can be mistakenly evicted as the generation proceeds, which makes {\em selection-based methods} more popular choices in latest sparse attention works.
+
+\paragraph{Selection-based sparse attention.} Instead of evicting past tokens in the KV cache, \citet{child2019generating, kitaev2020reformer, choromanski2020rethinking, tang2024questqueryawaresparsityefficient, ribar2023sparq} preserve the full KV cache and only select important tokens to attend with the attention module on the fly. More specifically, \citet{child2019generating} leverages a fixed attention mask to select tokens while \citet{tang2024questqueryawaresparsityefficient, ribar2023sparq, choromanski2020rethinking, kitaev2020reformer} aim to identify and retain the most relevant tokens at each layer by approximating attention scores.
+Although these methods are more selective, they operate independently at each layer and are not guaranteed to obtain the ground-truth tokens with the highest attention scores, failing to capture token relevance patterns that persist across layers. 
+Moreover, attention score estimation algorithms sometimes introduce unnecessary complexity, diminishing the practical efficiency gains they are designed to achieve.
+Improving upon prior works, \Sys{} leverages a shared pattern of most important tokens across consecutive layers to further reduce the computational overhead and memory access required for token selection. 
+
+
+\section{Methodology}
+
+\label{sec:methodology}
+\input{src/figs/algo/pipeline}
+
+This section introduces \Sys{}, an efficient algorithm and system for fast LLM decoding using {\em position persistent sparse attention} and {\em KV cache correction}. \Cref{fig:arch} shows an overview of \Sys. 
+\Sys uses the same prefilling mechanism as existing systems and performs full attention to compute the key-value (KV) cache for all prompt tokens.
+In each decoding step, \Sys uses three types of attention layers: full attention, full attention with token selection, and position persistent sparse attention.
+First, \Sys performs full attention for the initial Transformer layers to avoid early performance degradation as identified by prior work~\citep{tang2024questqueryawaresparsityefficient}.
+Second, the layer immediately after full attention and a single middle layer (e.g., layer 2 and 13 in \Cref{fig:arch}) perform full attention with token selection, where \Sys stores the inner product\footnote{We don't store attention score as state-of-the-art attention kernels don't materialize the attention score. Since the softmax operation is ordering invariant, we store the inner product value instead.} between the current query and key vectors of all tokens in KV cache during full attention and then selects $k$ tokens contributing to the highest attention scores.
+Third, all other layers perform {\em position persistent sparse attention}, where only tokens selected from the previous token selection layer are loaded from the KV cache to perform attention computation.
+
+\subsection{Position Persistent Sparse Attention (\sa)}
+Attention mechanisms have been widely used in today's LLMs. For each attention head, the output is computed via scaled multiplicative formulation as follows.
+\begin{equation}
+A_i = Q_i K_i / \sqrt{d}, \quad H_i = {\rm softmax}(A_i) V_i
+\end{equation}
+where $Q_i$, $K_i$, and $V_i$ are the query, key, and value tensors for the $i$-th attention head. $A_i$ is a matrix representing the attention scores between tokens, and $H_i$ is the output of the $i$-th attention head. 
+Instead of attending to all input tokens, existing sparse attention methods approximate attention computation by attending the query $Q_i$ to a subset of previous tokens the highest attention scores.
+Prior work generally performs token selection for individual attention heads and Transformer layers, introducing high runtime overhead. 
+For example, selecting the tokens with highest attention scores using top-k can take longer than computing full attention (see~\Cref{fig:kernel23}), thus diminishing the benefits of performing sparse attention.
+
+The key insight behind \Sys's position persistent sparse attention is an observation that {\em tokens with highest attention scores for consecutive Transformer layers highly overlap}.
+We use the LLaMA-3-8B model and the needle-in-the-haystack test on PG-19-mini dataset with a context length of 100K tokens to quantify this observation.
+We randomly select 100 requests from the dataset, compute full attention, and analyze the top 256 tokens with the highest attention scores for each Transformer layer.
+\Cref{fig:correction_overlap_matrix_256} shows the overlap ratios for all pairs of transformer layers, where an overlap ratio of 1 indicates that the tokens with highest attention scores are always identical in these layers, and an overlap ratio of 0 means the top tokens do not overlap in the two layers. Note that we select top 256 tokens from 100K tokens in the KV cache, so randomly selected tokens hardly overlap.
+In \Cref{fig:recall_rates_bar_256}, we compute average recall rates of selected tokens by choosing different re-selection layers. We observe that without re-selection layers, where all layers possess a low overlap ratio with Layer 3 shown in the purple box in \Cref{fig:correction_overlap_matrix_256}, the average recall rates are less than 20\%. When we choose Layer 13 to perform re-selection, the average recall rates boost to almost 40\% due to higher overlap ratios between Layer 13 and its subsequent layers, shown by red boxes in \Cref{fig:correction_overlap_matrix_256}. 
+
+\input{src/figs/scripts/correction_heatmap}
+
+\input{src/figs/algo/algo}
+
+Based on this observation, we design position persistent sparse attention to maximally leverage the token overlaps between consecutive Transformer layers to reduce the computation cost for token selection while achieving high predictive performance. \Cref{alg:decoding} shows the \Sys algorithm for interleaving full attention and \sa layers. 
+After the initial full attention layers, \Sys uses a token selection layer that computes full attention and selects tokens with the highest attention scores. 
+To select tokens, \Sys{} stores the inner product $\langle Q, K \rangle$ on the fly together with full attention calculation. \Sys then selects the top $k$ tokens with the highest inner product values to form a token set $\mathcal{T}$. Note that using the inner product to select top-$k$ is equivalent to the post-softmax attention score as the softmax operator is ordering invariant.  
+All \sa layers after a token selection layer computes sparse attention by only loading the keys and values for tokens in $\mathcal{T}$, thus limiting the number of tokens participating in attention computations and reducing memory access.
+
+A straightforward approach to designing \Sys is to select the tokens $\mathcal{T}$ once after full attention and perform \sa using the same set of tokens for all subsequent layers.
+However, our preliminary experimentation shows that using a single token set for all Transformer layers reduces the LLM's predictive performance by a large margin since distant Transformer layers are less correlated compared to consecutive layers, as shown in \Cref{fig:correction_overlap_matrix_256}.
+To address this issue, \Sys performs {\em token re-selection} in a middle layer, where \Sys{} recalibrates the selected tokens with the highest attention scores by applying full attention and re-selecting top-$k$ token to update $\mathcal{T}$, ensuring that token selection remains optimal for the remaining layers. 
+This re-selection mechanism significantly boosts the model performance and promotes accurate and efficient \sa throughout the model.
+
+Extensive evaluation on both small and large models on a wide range of datasets shows that using a single middle layer for token re-selection is sufficient to preserve the LLM's generative performance, while introducing small runtime overhead.
+However, deciding which layer to perform token re-selection is critical to model performance.
+As shown in \Cref{fig:matrix_recall}, choosing different layers for token re-selection results in different recall rates, where layer 11 and 13 achieve optimal performance.
+Introducing a one-time token re-selection at an optimal layer ensures the selected tokens are re-calibrated, effectively mitigating the drift in token importance and elevates accuracy from 15\% (without re-selection) to almost 40\%.
+
+
+\if 0
+
+

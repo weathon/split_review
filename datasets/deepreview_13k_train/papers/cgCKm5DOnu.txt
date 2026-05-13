@@ -1,0 +1,253 @@
+\title{ROSA: Random Orthogonal Subspace Adaptation}
+
+\begin{abstract}
+Model training requires significantly more memory, compared with inference.  Parameter efficient fine-tuning (PEFT) methods provide a means of adapting large models to downstream tasks using less memory. However, existing methods such as adapters, prompt tuning or low-rank adaptation (LoRA) either introduce latency overhead at inference time or achieve subpar downstream performance compared with full fine-tuning. In this work we propose Random Orthogonal Subspace Adapter~(ROSA), a method that outperforms previous PEFT methods by a significant margin, while maintaining a zero latency overhead during inference time. In contrast to previous methods, ROSA is able to adapt subspaces of arbitrarily large dimension. We demonstrate both theoretically and experimentally that this makes ROSA strictly more expressive than LoRA, without consuming additional memory during runtime.  As PEFT methods are especially useful in the natural language processing domain, where models operate on scales that make full fine-tuning very expensive, we evaluate ROSA in two common NLP scenarios: natural language generation (NLG) and natural language understanding (NLU) with GPT-2 and RoBERTa, respectively. We show that on almost every GLUE task ROSA outperforms LoRA by a significant margin, while also outperforming LoRA on NLG tasks.Our code will be made publicly available on acceptance.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The advent of large language models pre-trained on web-size corpora (pre-trained LMs, or PLMs) has led to remarkably performant models in the domain of natural language processing (Brown et al., 2020; Devlin et al., 2019). As the size of such models ranges from hundreds of millions to hundreds of billions of parameters (Touvron et al., 2023), adapting them to downstream tasks is challenging and computationally expensive Peng et al. (2023). Compared to inference, training requires substantially more memory $\mathbf{2x-4x}$ as much). For example, the GPT-2 base model (128M parameters) together with an input batch of 8 sequences of length 512 requires 670MB and 1139MB during inference and training, respectively (Radford et al., 2019).  
+
+To alleviate the burdensome memory requirements of adapting PLMs to downstream tasks, various memory efficient methods have been proposed (Houlsby et al., 2019; Lin et al., 2020; Guo et al., 2021; Hu et al., 2022; Li & Liang, 2021; Lester et al., 2021; Sung et al., 2021; Liu et al., 2022b;a). The commonality among these methods is the maintenance of fixed PLM weights while introducing a minimal quantity of trainable parameters. Although solutions like LoRA (Hu et al., 2022) and $(|\mathsf{A})^{3}$ (Liu et al., 2022a) are effective and do not impose any additional inference latency, they implicitly limit the expressivity of adapted models. For instance, LoRA adapts low-rank matrices that are added in parallel to fixed pre-trained weights. While this approach makes it possible to fine-tune large PLMs with reduced memory footprint compared to full fine tuning, it introduces an unavoidable bias: the pre-trained weight matrices can only be fine-tuned to matrices that are “a low-rank matrix away” from the initial weights.  
+
+In this work, we propose ROSA: Random Orthogonal Subspace Adapter, which expands the expressivity of adapted models, while remaining as memory efficient as LoRA. Similarly to LoRA, ROSA satisfies memory constraints by selectively fine-tuning low-rank matrices in parallel to fixed pre-trained weight matrices. Thus allowing users to fine-tune models in resource constrained settings. At the same time, ROSA alleviates the expressivity limitation of LoRA by continuously sampling different low-rank trainable subspaces and iteratively merging learned information into fixed weights throughout fine-tuning, as depicted in Figure 1. From a theoretical perspective, we formally characterize the implicit low rank bias of LoRA, show how this bias can be detrimental even on a simple regression task, and demonstrate that ROSA does not suffer from this limitation (see Theorem 1). Even further, our results show that (i) ROSA can fine-tune pre-trained weights to arbitrary target weights (i.e. is as expressive as full fine-tuning), and (ii) while LoRA trades expressivity for lower memory requirements, ROSA instead trades convergence speed for the same. These results are clearly and intuitively illustrated on a simple synthetic experiment presented in Section 4.1.  
+
+![](images/02d214baa452388a3913eef7df9c2cae6d6ce2d84adaf7f0b4c120d63d08e318.jpg)  
+Figure 1: Illustration of ROSA. Parameter matrix W is factorized using the singular value decomposition (SVD) and split into smaller trainable matrices $(\mathbf{A},\mathbf{B})$ and a larger fixed matrix $(\mathbf{W}_{\mathrm{fixed}})$ . Gradients during back-propagation are only computed with respect to $(\mathbf{A},\mathbf{B})$ . The split is then merged after a specified number of training iterations, and the process is repeated. ROSA updates an increasingly larger subspace of W over the course of training while remaining memory efficient.  
+
+From a practical perspective, we show that ROSA achieves performance on par with full fine-tuning and consistently outperforms state-of-the-art methods such as LoRA and $(|\mathsf{A})^{3}$ (Liu et al., 2022a) on natural language understanding (GLUE) (Wang et al., 2019b) and natural language generation (E2E) (Novikova et al., 2017) tasks by significant margins. Lastly, we note that ROSA carries a significant advantage over approaches such as adapters (Houlsby et al., 2019) and prompt tuning (Li & Liang, 2021; Lester et al., 2021), as it introduces no additional latency overhead during inference time.  
+
+In summary, our key contributions are:  
+
+• Demonstrating both empirically and theoretically, that the low rank nature of LoRA can detrimentally limit its expressiveness.   
+• Introducing ROSA, a PEFT method that circumvents the low rank limitation of LoRA while remaining as memory efficient as LoRA.   
+• Proving that ROSA is more expressive than LoRA and can be as expressive as full finetuning.   
+• Conducting extensive experiments showing that ROSA consistently outperforms LoRA by a significant margin on natural language understanding (GLUE) and on natural language generation (E2E) benchmarks.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+PEFT defines a class of methods to alleviate memory and compute requirements during adaptation of large models to downstream tasks by tuning only a relatively small number of added parameters, rather than the tuning all the parameters of the model itself.  
+
+Adapters: Adapter methods such as in Houlsby et al. (2019) inject layers in between certain modules of each transformer block. These layers have relatively few parameters, as they project the original features down into a smaller set of dimensions, then scale them back up after applying the adapter’s feed-forward layer. This structure necessarily leads to a latency overhead.  
+
+Prompt and prefix tuning: Prompt and prefix tuning are an efficient means of adapting models via continuous optimization of prefixes added to input prompts (Li & Liang, 2021; Lester et al., 2021; Liu et al., 2022b). While such approaches are memory efficient, they require reserving a portion of the available sequence length during downstream adaptation. Moreover, prompt tuning methods can be challenging to optimize as pointed out in Hu et al. (2022).  
+
+LoRA: Our work is most similar to LoRA (Hu et al., 2022), which has been shown to outperform the aforementioned approaches and to mitigate limitations such as increased inference latency and reduced sequence length capacity. LoRA adds a trainable low rank matrix to the frozen original weight matrix. The low rank matrix, parameterized as the product of two small matrices, is then fine-tuned instead of the original model weights. The authors of LoRA hypothesize that during task-specific fine-tuning, the model weight updates have a low “intrinsic dimension” and thus can be effectively approximated by low-rank matrices. While this may be true for some downstream tasks, we show both theoretically and empirically that this is not always the case and that restricting the weights update to a low intrinsic dimension can be detrimental.  
+
+$(|\mathsf{A})^{3}$ : Another widely known PEFT method is $(|\mathsf{A})^{3}$ (Liu et al., 2022a). $(|\mathsf{A})^{3}$ (Infused Adapter by Inhibiting and Amplifying Inner Activations) adds learned vectors to the attention and feedforward layers of the transformer, which are used to rescale the activations of these modules. $(|\mathsf{A})^{3}$ further reduces the number of trainable parameters from LoRA, and makes the proportion of trainable parameters fixed, as the size of the rescaling vectors is directly dependent on the dimensions of the transformer’s weight matrices.  
+
+AdaLoRA: Another competitive approach, AdaLoRA (Zhang et al., 2023) allocates a fixed parameter budget across the layers of a model dynamically by manipulating the rank, providing a lower rank to less important modules and vice versa. This is done via a novel importance metric that quantifies the contribution of a given module to the model’s overall performance.  
+
+Other methods: BitFit (Ben Zaken et al., 2022) freezes all parameters except bias terms. FISH Sung et al. (2021) optimizes a sparse difference vector to be summed with the original model parameters.  
+
+
+
+\section{3 METHOD  }
+
+
+In this section we describe our proposed approach, ROSA: Random Orthogonal Subspace Adapter. The purpose of ROSA is to provide a means for fine-tuning large models in memory constrained settings while remaining competitive with full fine-tuning in terms of performance. After introducing ROSA and demonstrating its memory efficiency in Section 3.1, we provide a theoretical analysis showing that ROSA is provably more expressive than LoRA in Section 3.2.  
+
+
+
+\section{3.1 ROSA  }
+
+
+In LoRA (Hu et al., 2022), pre-trained models are adapted to alternative tasks by adding low rank matrices $\mathbf{A}\in\mathbb{R}^{M\times R},\mathbf{B}\in\dot{\mathbb{R}}^{R\times N}$ in parallel to pre-trained weights $\mathbf{W}\in\mathbb{R}^{M\times N}$ . The output of the LoRA layer is given by  
+
+$$
+\phi(\mathbf{x})=\mathbf{W}\mathbf{x}+\mathbf{ABx}.
+$$  
+
+The adapter weights $\mathbf{A}$ and $\mathbf{B}$ are initialized such that $\mathbf{AB}=\mathbf{0}$ and are the only parameters being updated during training. LoRA is memory efficient as W remains fixed during training (no gradient buffers necessary for the full weights) and typically $R\ll\operatorname{MIN}(M,N)$ . The rank $(R)$ of the trainable matrices is chosen such that the training procedure satisfies device memory constraints.  
+
+Constraining the updates to a fixed low rank subspace initialized at zero induces two limitations. First, the low rank nature of LoRA is such that the difference between the fine-tuned weight matrix $\mathbf{W}{+}\mathbf{A}\mathbf{B}$ and the pre-trained weights W is constrained to be a low rank matrix. This significantly hinders the ability of LoRA to fine-tune a given model to an arbitrary target model/task. Note that even in the case where the target weights $\mathbf{W}^{*}$ are close to the pre-trained weights W (w.r.t. e.g., the Frobenius norm), this low-rank constraint creates an unavoidable bias when the difference $\mathbf{W}^{*}-\mathbf{W}$ is not low rank. We formally characterize this bias in Section 3.2 and empirically demonstrate it in Section 4.1. Second, initializing the adapter AB to zero can be thought of as learning new representations from scratch separately from the pre-trained ones $(\phi(\mathbf{x})=\mathbf{W}\mathbf{x}+\mathbf{A}\mathbf{B}\mathbf{x}:=\phi_{\mathrm{pre-trained}}(\mathbf{x})+\phi_{\mathrm{trainable}}(\mathbf{x}))$ , rather than leveraging the pre-trained features the model already has to initialize the adapter.  
+
+To address these limitations, ROSA continuously samples new weight subspaces to finetune throughout the training procedure. This offers several advantages. First, iteratively re-sampling new subspaces effectively expands the dimension of the fine-tuned subspace. Hence, ROSA does not suffer from the low rank bias of LoRA (which we theoretically show in Section 3.2). This allows us to decouple the adapted model’s expressivity from device memory constraints. Second, by iteratively focusing the weight updates to a given randomly chosen weight subspace, we utilize the pre-trained knowledge to successively initialize the adapter weights to a different subspace of the pre-trained weights.  
+
+To achieve this, ROSA adapters successively factorize W into trainable and fixed weight subspaces using SVD. More precisely, let $\mathbf{W}=\mathbf{U}\pmb{\Sigma}\mathbf{\dot{V}}^{\top}$ be the SVD of $\mathbf{W}$ , let $\mathbf{U}_{R}\in\mathbb{R}^{M\times R}$ be the matrix obtained by selecting a random subset of $R$ columns of $\mathbf{U}$ and let $\pmb{\Sigma}_{R}\in\mathbb{R}^{R\times R}$ and $\mathbf{V}_{R}\in\mathbb{R}^{R\times N}$ denote the matrices obtained by selecting the same subset of singular values and right singular vectors. The ROSA factorization step is defined by  
+
+During training, gradients are computed only with respect to the $R$ dimensional subspace which consists of $R(M+N)$ parameters. In contrast, full fine-tuning requires optimizing $M N$ parameters. Thus, ROSA leads to a reduction in the number of trainable parameters, given by  
+
+$$
+\rho_{\mathrm{train}}={\frac{M N}{R(M+N)}}.
+$$  
+
+The factorization step is repeated throughout training at a pre-determined frequency (e.g., after each epoch of fine-tuning). The overall ROSA procedure is illustrated in Figure 1 and described in Algorithm 1. In practice, ROSA is applied simultaneously to all weight matrices of the model to fine-tune. While each subspace sampling step is expensive, $\mathcal{O}(\operatorname*{max}(\bar{N},M)^{3})$ , it is only performed once every epoch. We show in the experiment section that the sample step adds negligible time to the training procedure in practice (see Table 1).  
+
+Since the weight matrix is factorized using SVD, the two resulting weight subspaces are orthogonal at initialization. Thus, each factorization step of ROSA can be seen as decomposing the corresponding layer’s feature space into two orthogonal subspaces: a low-dimensional one to be fine tuned and a larger one which will be frozen until the next factorization step. More precisely, if we let $\phi(\mathbf{x})=\mathbf{W}\mathbf{x}$ be the output of the layer to be fine-tuned using ROSA, the factorization step decomposes $\phi(\mathbf{x})$ in $\phi(\mathbf{x})=\phi_{\mathrm{fixed}}(\mathbf{x})+\phi_{\mathrm{trainable}(\mathbf{x})}$ where $\langle\phi_{\mathrm{fixed}}(\mathbf{x}),\phi_{\mathrm{trainable}}(\mathbf{x})\rangle=\langle\mathbf{W}_{\mathrm{fixed}}\mathbf{x},\mathbf{A}\mathbf{B}\mathbf{x}\rangle=0.$ The trainable feature map $\phi_{\mathrm{trainable}}$ is then optimized until the next factorization step, while $\phi_{\mathrm{fixed}}$ remains fixed. Note that the orthogonality is not enforced during fine-tuning, it is only satisfied at the initialization of the factorization step. Hence, ROSA can be seen as iteratively initializing adapters to random low dimensional projections of the full feature space and fine-tuning them.  
+
+
+
+\section{3.2 THEORETICAL ANALYSIS  }
+
+
+In this section we formally show how the low rank parameterization of LoRA limits its expressiveness and how ROSA circumvents this limitation.  
+
+First, It is easy to see that, by construction, the residual matrices obtained by fine-tuning weight matrices using LoRA are constrained to be low rank:  
+
+Proposition 1. Let $\mathbf{W}_{0}$ be a weight matrix of a pre-trained model to be fine-tuned. Then, any fine-tuned weight matrix $\mathbf{W}_{L o R A}$ obtained using LoRA with rank parameter $R$ will be such that $\mathrm{rank}(\mathbf{W}_{0}-\mathbf{W}_{L o R A})\leq R$ .  
+
+As a consequence, fine-tuning using LoRA suffers an unavoidable estimation bias which is not present in ROSA. In the following theorem, we (i) formally characterize this bias on a simple multivariate linear regression fine-tuning problem and (ii) derive a convergence rate of ROSA for linear regression demonstrating that it does not suffer from the same limitation.  
+
+Algorithm 1 ROSA   
+Input: $\mathbf{W}\in\mathbb{R}^{M\times N}$ , $R$ (desired rank), K (factorization frequency), L (loss function)   
+1: $[\mathbf{A},\mathbf{B}]\leftarrow[\mathbf{0},\mathbf{0}]$   
+2: for $t=1$ to $T$ do   
+3: if tmod $K==0$ then   
+4: $\begin{array}{r l}&{\mathbf{W}\leftarrow\mathbf{W}+\mathbf{A}\mathbf{B}}\\ &{\mathbf{U},\Sigma,\mathbf{V}^{\top}\leftarrow\mathbf{S}\mathbf{V}\mathrm{D}(\mathbf{W})}\\ &{(i_{1},\cdots,i_{R})\leftarrow\mathbf{RA}\mathbf{N}\mathrm{DINTS}(R,\operatorname*{min}(M,N))}\\ &{[\mathbf{A},\mathbf{B}]\leftarrow[\mathbf{U}_{:,(i_{1},\cdots,i_{R})}\pmb{\Sigma}_{(i_{1},\cdots,i_{R}),(i_{1},\cdots,i_{R})},\mathbf{V}_{(i_{1},\cdots,i_{R}),:}^{\top}]}\\ &{\mathbf{W}\leftarrow\mathbf{W}-\mathbf{A}\mathbf{B}}\end{array}$   
+5:   
+6:   
+7:   
+8:   
+9: end if   
+10: $[\mathbf{A},\mathbf{B}]\gets[\mathbf{A},\mathbf{B}]-\nabla_{[\mathbf{A},\mathbf{B}]}\mathcal{L}(\mathbf{W}+\mathbf{A}\mathbf{B})$   
+11: end for  
+
+Theorem 1. Consider a simple multivariate least-square regression problem:  
+
+$$
+\operatorname*{arg\,min}_{\mathbf{W}}\|\mathbf{X}\mathbf{W}-\mathbf{Y}\|_{F}^{2}
+$$  
+
+where $\mathbf{X}\in\mathbb{R}^{n\times d}$ and $\mathbf{Y}\in\mathbb{R}^{n\times p}$ are the input and output data matrices, respectively. We assume that there exists a solution achieving zero error\*.  
+
+Consider the sequence of fine-tuned weight matrices obtained by ROSA with rank parameter $R$ starting from a pre-trained weight matrix $\mathbf{W}_{0}$ , assuming that each intermediate minimization problem is solved exactly:  
+
+$$
+\mathbf{W}_{t}=\mathbf{W}_{t-1}+\mathbf{A}_{t}\mathbf{B}_{t}\quad w h e r e\;\mathbf{A}_{t},\mathbf{B}_{t}=\underset{\mathbf{A}\in\mathbb{R}^{n\times R},\mathbf{B}\in\mathbb{R}^{R\times n}}{\arg\operatorname*{min}}\;\|\mathbf{X}(\mathbf{W}_{t-1}+\mathbf{A}\mathbf{B})-\mathbf{Y}\|_{F}^{2}.
+$$  
+
+Then, ROSA will converge to a fine-tuned matrix achieving zero error in at most  
+
+$$
+T=\left\lceil\frac{\operatorname{rank}(\mathbf{X}\mathbf{W}_{0}-\mathbf{Y})}{R}\right\rceil
+$$  
+
+steps. That is, $\lVert\mathbf{X}\mathbf{W}_{t}-\mathbf{Y}\rVert_{F}^{2}=0$ as soon as $t\geq T$ .  
+
+In contrast, the error achieved by LoRA with rank parameter $R$ is lower bounded as  
+
+$$
+\|\mathbf{X}\mathbf{W}_{L o R A}-\mathbf{Y}\|_{F}^{2}\geq\sum_{i=R+1}^{\operatorname*{min}(d,p)}\sigma_{i}(\Pi_{\mathbf{X}}\mathbf{Y}-\mathbf{X}\mathbf{W}_{0})^{2}
+$$  
+
+where $\sigma_{i}(\mathbf{M})$ denotes the ith singular value of a matrix $\mathbf{M}$ (ordered decreasingly) and $\Pi_{\mathbf{X}}$ is the matrix of the orthogonal projection onto the range of $\mathbf{X}$ .  
+
+Proof.  
+
+Several observations are in order. First, Theorem 1 shows that even with rank parameter $R=1$ , ROSA will converge to the optimal solution of the linear regression fine-tuning problem (assuming that ROSA exactly solves the minimization problem between each factorization step). Second, increasing the rank parameter will lead to faster convergence. This suggests that the rank parameter $R$ in ROSA controls a trade-off between memory requirement and convergence speed. This is in stark contrast to LoRA, where the rank parameter controls the trade-off between memory requirement and expressiveness, as demonstrated in the previous theorem.  
+
+In the next section, we empirically demonstrate that this theoretical result also holds in practice when using LoRA and ROSA to fine-tune non-linear models trained using gradient based methods.  
+
+![](images/16911e6e0118a564eb8232f9d58ef5f7e1bd4b47a877017e783ddf80d49e0c51.jpg)  
+Figure 2: Validation loss curves of the training procedure for (a) 1-layer MLP and (b) 2-layer MLP (with ReLU activation). Both models are trained and evaluated on synthetic data that is generated from a randomly initialized MLP and a random low-rank adapter of rank 24. The models are trained to fit the synthetic data using the mean squared error loss function.This figure demonstrates that ROSA can find solutions with similar performance to full fine-tuning (FT) in practice.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section we compare the downstream performance of a model adapted using ROSA compared with LoRA (Hu et al., 2022) and $(|\mathsf{A})^{3}$ (Liu et al., 2022a) (as all three methods add zero latency overhead at inference time). In Section 4.1 we evaluate the performance of MLP models adapted to synthetic data, while Sections 4.2 & 4.3 evaluate the performance of RoBERTabase (Liu et al., 2019) and GPT-2 (Radford et al., 2019) on the GLUE and E2E benchmarks, respectively. In our experiments using transformer models, we only apply the PEFT methods to the attention layers, following a similar approach to Hu et al. (2022).  
+
+
+
+\section{4.1 SYNTHETIC DATA  }
+
+
+We first design two simple regression experiments with synthetic data to validate that the increased expressiveness of ROSA, illustrated in Theorem 1 for linear models, indeed leads to better results when fine-tuning non-linear models via Stochastic Gradient Descent.  
+
+To generate the synthetic data, we start by randomly initializing an MLP model $f$ . We then add low rank matrices (rank $=\scriptstyle24$ ), which are also randomly initialized, in parallel to the weights of $f$ . This gives us the true model $f^{*}$ , which we want to approximate. The synthetic data $\mathcal{D}=\{(\mathbf{x},\mathbf{y})\}^{n}$ is generated by sampling $\mathbf{x}\sim\mathcal{N}(\mathbf{0},\sigma\mathbf{I})$ and $\mathbf{y}=f^{*}(\mathbf{x})$ .  
+
+The results are summarized in Figure 2, where we compare the evolution of the validation loss of ROSA and LoRA for fine-tuning the original MLP model $f$ to the data $\mathcal{D}$ generated from the target task $f^{*}$ . As observed in Figure 2, ROSA at different rank values finds solutions with similar performance to full fine-tuning. This demonstrates that even in a more practical setting than the one of Theorem 1(namely with non-linear models trained by gradient descent) ROSA can match the performances of full fine-tuning. Moreover, for both 1-layer and 2-layers MLPs, we see that the rank limitation of LoRA prevents it from fully adapting to the target task: while increasing the rank leads to better validation loss, the unavoidable low-rank bias is clearly demonstrated by the convergence to a sub-optimal loss. In contrast, ROSA always converges towards the optimal loss, even with rank parameter set to 1, and increasing the rank parameter leads to faster convergence to the optimal loss. Notably, using ROSA to adapt a two layer MLP containing a non-linearity recovers a model that well approximates the true model used to generate the data. This suggests that the formal result shown in Theorem 1 holds beyond the simple linear regression setting.  
+
+![](images/93afb7684f9bb65e6cdb53a69a27d7da04d9c821c9660d6cf8e0fa85d7c656cd.jpg)  
+Figure 3: Memory usage during finetuning of $\mathbf{RoBERTa_{\mathrm{base}}}$ on the CoLA GLUE benchmark task, using ROSA compared with LoRA and full finetuning.  
+
+Table 1: Runtime of one epoch of fine-tuning of $\mathrm{RoBERTa_{base}}$ (125M parameters) on the CoLA task, using ROSA and full fine-tuning. The experiment is conducted on a single GPU (NVIDIA A100-SXM4) with an input batch of 32 sequences of length 512. At every epoch a ROSA factorize step is performed, which adds negligible latency to the runtime during training.  
+
+![](images/c8945b8a06c973c0ee27b5d272414e598b524856470c98edf429738788c841a7.jpg)  
+
+Table 2: Performance of $\mathrm{RoBERTa}_{\mathrm{base}}$ fine-tuned using various PEFT methods (ROSA, LoRA and $(|\mathsf{A})^{3})$ on the GLUE benchmark tasks.We report the matched validation accuracy for MNLI, Matthew’s correlation coefficient for CoLA, Pearson correlation for STS-B and accuracy for all other tasks.   
+
+![](images/e7f84e2f42ce746cfa6ddce8ae077b44760d7c7ce651a6f56a73313b8d87afee.jpg)  
+
+
+
+\section{4.2 GLUE EXPERIMENTS  }
+
+
+In this section we compare ROSA against LoRA and $(|\mathsf{A})^{3}$ , by adapting $\mathrm{RoBERTa_{\mathrm{base}}}$ (125M) (Liu et al., 2019) on various tasks taken from the GLUE and SuperGLUE natural language understanding benchmarks (Wang et al., 2019b;a). These benchmarks cover a wide variety of natural language understanding tasks, including logical entailment, grammatical acceptability, question-answering, textual similarity, and sentiment analysis. The pre-trained model weights for $\mathbf{RoBERTa_{\mathrm{base}}}$ are taken from the Huggingface library (Wolf et al., 2020). Unlike some previous works which initialize the weights for MRPC, RTE, and STS-B with fine-tuned MNLI task-specific weights, we initialize the weights for all tasks with only the pre-trained RoBERTa weights for a fair comparison.  
+
+These tasks were selected to give a broad overview of ROSA’s performance across a variety of different natural language tasks. We report development set performance for all tasks.  
+
+In Table 2 we show that ROSA outperforms LoRA and $(|\mathsf{A})^{3}$ by a significant margin on multiple tasks. Most notably, on CoLA using rank equal to eight we obtain Matthew’s correlation coefficients of 64.80 for ROSA, 54.27 for LoRA and 55.18 for $\bar{(|A)^{3}}$ . Furthermore, ROSA remains as memory efficient as LoRA (Figure 3), and the factorization steps in ROSA add negligible latency (Figure 1).)  
+
+
+
+\section{4.3 NLG EXPERIMENTS  }
+
+
+In this section we investigate the performance of ROSA in the natural language generation (NLG) setting. Namely, we compare the performance of GPT-2 Radford et al. (2019) using ROSA compared with LoRA and $(|\mathsf{A})^{3}$ , when finetuned on the E2E NLG task Novikova et al. (2017). The E2E NLG task involves producing a fluent natural language description of a restaurant given a logical form describing its various attributes. The model’s generations are compared against multiple reference texts to account for variations in wording. The score provided is the maximum BLEU score across all the reference texts for a given input.  
+
+![](images/390539021e3c8747caeedf2ec58ba6d341145b052727961761b1eb57b4b4648a.jpg)  
+Figure 4: Plot of the cumulative sum of singular values of residual matrices. The residual matrices in these plots are obtained from fine-tuning $\mathrm{RoBERTa_{base}}$ on CoLA for 10 epochs and achieving a Matthew’s Correlation score of (a) 64.80 with ROSA and (b) 54.27 with LoRA. The figure demonstrates that the rank of the residual matrices obtained when adapting the $\mathrm{RoBERTa_{\mathrm{base}}}$ using ROSA, is indeed far greater than the rank of the residuals obtained when fine-tuning using LoRA.  
+
+ROSA, LoRA and $(|\mathsf{A})^{3}$   
+
+![](images/100419c16a9e7df411279e27ad255f2f3405b3f1a00398b78992e450a76392d3.jpg)  
+
+Table 3: Performance of GPT-2 finetuned Table 4: Performance of $\mathrm{RoBERTa_{\mathrm{base}}}$ using varion the End-to-End natural language gener- ants of $\mathrm{ROSA}_{\mathtt{r}=8}$ , finetuned on the CoLA and STS-B ation task (E2E) Novikova et al. (2017), using GLUE benchmark tasks.   
+
+![](images/dd215d2dce9719c3980ec829ec182c420b20f00234b6579f9bbdb1da67560e23.jpg)  
+
+In Table 3 we show that ROSA outperforms LoRA and $(|\mathsf{A})^{3}$ by a significant margin in the BLEU score.  
+
+
+
+\section{4.4 WHAT COMPONENTS OF ROSA LEADS TO ITS PERFORMANCE?  }
+
+
+In this section we empirically study several aspects of ROSA. We highlight three key components of ROSA, on which we perform ablation studies. The key components of ROSA are:  
+
+• SVD Initialization: ROSA adapters are initialized using SVD, as opposed to the random initialization of LoRA.   
+• Orthogonality: In ROSA, pre-trained weight matrices are decomposed such that the trainable adapter weights are initially orthogonal to the fixed weights.   
+• Resampling: In ROSA the difference between the pre-trained weights and the final weights is not constrained to be low-rank, due to resampling and merging of subpsaces throughout training.  
+
+We study the effects of progressively adding these components to ROSA in Table 4. We find that the progressive addition of the aforementioned components to ROSA is beneficial to its performance. The most drastic improvement is seen when resampling is added. This observation aligns with our theoretical analysis, demonstrating that the rank flexibility of ROSA, which increases the expressiveness of adapted models, leads to improved performance. Note also that the gain from LoRA to ROSA (SVD Init) aligns with our intuition that leveraging the pre-trained features to initialize  
+
+Table 5: Performance of RoBERTabase using different sampling schemes for ROSA, on the CoLA GLUE benchmark task. Top/Bottom/Random sampling indicate the method used for selecting the singular vectors to initialize the trainable subspace.  
+
+![](images/de5fff8789685b21c321e82aebd55628e6d5c4fcdc672ef3b7b43466f024e834.jpg)  
+
+
+
+\section{4.5 INVESTIGATING DIFFERENT LOW-RANK SUBSPACE SAMPLING SCHEMES  }
+
+
+In this section, we compare the random subspace sampling of ROSA with two other subspace selection strategies: selecting the top- $\mathcal{R}$ or bottom- $\boldsymbol{\cdot}\boldsymbol{R}$ singular vectors . In doing so, we validate that performing random selection of singular vectors is as performant as selection based on singular value information. In Table 5, we report the performance of $\mathbf{RoBERTa_{\mathrm{base}}}$ fine-tuned on CoLA using the different sampling strategies, which confirm that, on this task, random sampling performs similarly or better than other schemes.  
+
+
+
+\section{4.6 LIMITATIONS OF ROSA  }
+
+
+While ROSA achieves better performance than previous state-of-the-art adaptation methods such as LoRA and $(|\mathsf{A})^{3}$ , it bears one main limitation compared with other methods. Namely, it requires storage of the whole model after it is adapted for a downstream task.  
+
+Other adapter methods try to simultaneously address two challenges (1) reducing memory usage during training to ease the hardware barrier when adapting large models to a single downstream task and (2) reducing disk space usage when adapting a base model to many downstream tasks.  
+
+ROSA primarily focuses on addressing point (1), making it more suitable for scenarios involving a single downstream task. In comparison, other PEFT methods are better suited for scenarios involving multiple downstream tasks. ROSA excels in its specific domain, offering the same level of expressivity as full fine-tuning while requiring less GPU memory. This eliminates the need for (1) layerwise training, which would prolong training time, and (2) model sharding that necessitates more GPUs, thereby increasing training costs.  
+
+
+
+\section{4.7 CONCLUSION & FUTURE WORK  }
+
+
+In this work we introduced ROSA: Random Orthogonal Subspace Adapters. We first showed both theoretically and empirically that the low-rank nature of LoRA can often detrimentally affect its performance. In contrast, we demonstrate that ROSA can theoretically achieve the same solution as full fine-tuning. Furthermore, we demonstrate that on synthetic data ROSA indeed converges the same solution as full fine-tuning when using gradient based optimization. We evaluated ROSA against LoRA and $(|\mathsf{A})^{3}$ on both natural language understanding and natural language generation tasks. Our experiments showed that ROSA achieved performance similar to full fine-tuning and outperformed other state-of-the-art methods such as LoRA and $(|\mathsf{A})^{3}$ by significant margins. As our analysis was limited to adapting linear layers present in transformer models, adapting the parameters of convolution operations is an area for future work.  
+
+
+
+

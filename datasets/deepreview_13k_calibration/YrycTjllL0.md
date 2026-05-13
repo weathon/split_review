@@ -1,8 +1,8 @@
 # BigCodeBench: Benchmarking Code Generation with Diverse Function Calls and Complex Instructions
 
 - Decision: Accept
-- Avg Score: 3.00
-- Scores: 8, 8, 1, 0, 1, 0
+- Avg Score: 9.00
+- Scores: 8, 8, 10, 10
 
 ## Abstract
 Task automation has been greatly empowered by the recent advances in Large Language Models (LLMs) via Python code, where the tasks ranging from software engineering development to general-purpose reasoning. While current benchmarks have shown that LLMs can solve tasks using programs like human developers, the majority of their evaluations are limited to short and self-contained algorithmic tasks or standalone function calls.

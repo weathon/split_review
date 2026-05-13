@@ -1,0 +1,326 @@
+\title{DiracDiffusion: Denoising and Incremental Reconstruction with Assured Data-Consistency}
+
+\begin{abstract}
+	Diffusion models have established new state of the art in a multitude of computer vision tasks, including image restoration. Diffusion-based inverse problem solvers generate reconstructions of exceptional visual quality from heavily corrupted measurements. However, in what is widely known as the perception-distortion trade-off, the price of perceptually appealing reconstructions is often paid in declined distortion metrics, such as PSNR. Distortion metrics measure faithfulness to the observation, a crucial requirement in inverse problems.  In this work, we propose a novel framework for inverse problem solving, namely we assume that the observation comes from a stochastic degradation process that gradually degrades and noises the original clean image. We learn to reverse the degradation process in order to recover the clean image. Our technique maintains consistency with the original measurement throughout the reverse process, and allows for great flexibility in trading off perceptual quality for improved distortion metrics and sampling speedup via early-stopping.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\blfootnote{\textit{Published at the 41st International Conference on Machine Learning, Vienna, Austria, 2024}}
+Diffusion models (DMs) are powerful generative models capable of synthesizing samples of exceptional quality by reversing a diffusion process that gradually corrupts a clean image by adding Gaussian noise. DMs have been explored from two perspectives: Denoising Diffusion Probabilistic Models (DDPM) \citep{sohl2015deep, ho_denoising_2020} and Score-Based Models \citep{song_generative_2020, song_improved_2020}, which have been unified under a general framework of Stochastic Differential Equations (SDEs) \citep{song2020score}.  DMs have established new state of the art in image generation \citep{dhariwal_diffusion_2021, saharia2022photorealistic, ramesh2022hierarchical, rombach2022high}, audio \citep{kong2020diffwave} and video synthesis \citep{ho2022video}. Recently, there has been a push to broaden the notion of Gaussian diffusion, such as extension to other noise distributions \citep{deasy2021heavy, nachmani2021denoising, okhotin2023star}. In the context of image generation, there has been work to generalize the corruption process, such as blur diffusion \citep{lee2022progressive, hoogeboom2022blurring}, inverse heat dissipation \citep{rissanen2022generative} and arbitrary linear corruptions \citep{daras2022soft} with \citet{bansal2022cold} questioning the necessity of stochasticity in the generative process all together. However, these are general frameworks for unconditional image generation and are not readily applicable for image reconstruction. The key challenge introduced by the inverse problem setting is the strong requirement for producing final images that are consistent with the observation. This adds a significant layer of complexity that requires novel solutions both in theory and algorithm design.
+
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=0.75\linewidth]{plots/front_page_compressed.pdf}
+	\captionof{figure}{ \textbf{Overview of our method:} measurement acquisition is modeled as a gradual degradation and noising of an underlying clean ground truth signal via a Stochastic Degradation Process. We reconstruct the clean image from noisy measurements by learning to reverse the degradation process.  Our technique allows for obtaining a variety of reconstructions with different perceptual quality-distortion trade-offs, all in a single sampling trajectory. }
+	\label{fig:front_page}
+\end{figure*}
+
+In inverse problems, one wishes to recover a signal $\vct{x}$ from a noisy observation $\vct{y} = \fwd{}{\vct{x}} + \vct{z}$ where $\mathcal{A}$ is typically non-invertible. 
+The unconditional score function learned by DMs has been successfully leveraged to solve inverse problems without any task-specific training \citep{kadkhodaie2021stochastic, jalal2021robust, saharia_image_2021} resulting in reconstructions with exceptional perceptual quality. However, these methods underperform in distortion metrics, such as PSNR and SSIM \citep{chung2022diffusion} due to the so called perception-distortion trade-off \citep{blau2018perception}.  Authors in \citet{delbracio2023inversion} observe that in their framework, the total number of restoration steps controls the perception-distortion trade-off, with less steps yielding results closer to the minimum distortion estimate. Similar observation is made in \citet{whang2022deblurring} in the context of blind image deblurring, where authors additionally propose to average multiple reconstructions for improved distortion metrics.  Authors in \citet{kawar2022denoising} report that, the amount of noise injected at each timestep controls the trade-off between reconstruction error and image quality.%Nonetheless, if data consistency is not explicitly enforced during reconstruction, we may obtain visually appealing samples, that are in fact not faithful to our original observations. 
+
+Beyond image quality, a key requirement imposed on reconstructions is data consistency, that is faithfulness to the original observation. In the context of diffusion-based solvers, different methods have been proposed to enforce consistency between the generated image and the corresponding observations. These methods include alternating between a step of unconditional update and a step of projection \citep{song2021solving, chung2022score, chung2022come} or other correction techniques \citep{chung2022diffusion, chung2022improving, song2023solving} to guide the diffusion process towards data consistency. Another line of work proposes diffusion in the spectral space of the forward operator, achieving high quality reconstructions, however requires costly singular value decomposition \citep{kawar2021snips, kawar2022denoising, kawar2022jpeg}. \citet{songpseudoinverse} uses pseudo-inverse guidance to incorporate the model into the reconstruction process. All of these methods utilize a pre-trained score function learned for a standard diffusion process that simply adds Gaussian noise to clean images. %, and therefore the specific corruption model of the inverse problem is not incorporated into model training directly. 
+Recently, there has been some work on extending Gaussian diffusion by incorporating the image degradation into the score-model training procedure. A recent example is \citet{welker2022driftrec} proposing adding an additional drift term to the forward SDE that pulls the iterates towards the corrupted measurement and demonstrates high quality reconstructions for JPEG compression artifact removal. A blending parametrization \citep{heitz2023iterative,delbracio2023inversion} has been proposed that defines the forward process as convex combinations between the clean image and corrupted observation. \citet{liu20232} leverages Schrödinger bridges for image restoration, a nonlinear extension of score-based models defined between degraded and clean distributions. \citet{yue2024resshift} defines a Markov chain between the distributions of high and low-resolution images in the forward process by shifting their residual for image super-resolution. Even though these methods utilize degraded-clean image pairs for training, they do not explicitly leverage the forward operator for score-model training.% and thus data consistency, a crucial requirement in inverse problems, cannot be guaranteed.
+
+In this paper, we propose a novel framework for solving inverse problems using a generalized notion of diffusion that mimics the corruption process that produced the observation. We call our method \methodname{}: \underline{D}enoising and \underline{I}ncremental \underline{R}econstruction with \underline{A}ssured data-\underline{C}onsistency.  As the forward model and noising process are directly incorporated into the framework, our method maintains data consistency throughout the reverse diffusion process, without any additional steps such as projections. Furthermore, we make the key observation that details are gradually added to the posterior mean estimates during the sampling process. This property imbues \methodname{} with great flexibility: by leveraging early-stopping we can freely trade off perceptual quality for better distortion metrics and sampling speedup or vice versa. We provide theoretical analysis on the accuracy and limitations of our method that are well-supported by empirical results. Our experiments demonstrate state-of-the-art results in terms of both perceptual and distortion metrics with fast sampling. 
+
+
+\section{Background}
+
+\textbf{Diffusion models --} DMs are generative models based on a corruption process that gradually transforms a clean image distribution $q_0$ into  a known prior distribution which is tractable, but contains no information of data. The corruption level, or \textit{severity} as we refer to it in this paper, is indexed by time $t$ and increases from $t=0$ (clean images) to $t=1$ (pure noise). The typical corruption process consists of adding Gaussian noise of increasing magnitude to clean images, that is $q_t(\vct{x}_t| \vct{x}_0) \sim \mathcal{N}(\vct{x}_0, \sigma_t^2 \mathbf{I})$, where $\vct{x}_0\sim q_0$ is a clean image, and $\vct{x}_t$ is the corrupted image at time $t$. By learning to reverse the corruption process, one can generate samples from $q_0$ by sampling from a simple noise distribution and running the learned reverse diffusion process from $t=1$ to $t=0$. 
+
+DMs have been explored along two seemingly different trajectories. Score-Based Models \citep{song_generative_2020, song_improved_2020} attempt to learn the gradient of the log likelihood and use Langevin dynamics for sampling, whereas DDPM \citep{sohl2015deep, ho_denoising_2020} adopts a variational inference interpretation. More recently, a unified framework based on SDEs \cite{song2020score} has been proposed. Namely, both Score-Based Models and DDPM can be expressed via a Forward SDE in the form $\diff\vct{x} = f(\vct{x} , t) \diff t + g(t) \diff \vct{w}$
+with different choices of $f$ and $g$. Here $\vct{w} $ denotes the standard Wiener process. This SDE is reversible \citep{anderson1982reverse}, and the Reverse SDE can be written as
+\begin{equation}\label{eq:reverse_sde}
+	\diff \vct{x}  = [f(\vct{x} , t) - g^2(t) \nabla_{\vct{x} } \log q_t(\vct{x} )] \diff t + g(t) \diff \bar{\vct{w} },
+\end{equation}
+where $ \bar{\vct{w}}$ is the standard Wiener process, where time flows in the reverse direction. The true score $ \nabla_{\vct{x} } \log q_t(\vct{x} )$ is approximated by a neural network $s_{\vct{\theta}}(\vct{x}_t, t)$ from the tractable conditional distribution $q_t(\vct{x}_t| \vct{x}_0)$ by minimizing 
+\begin{equation}\label{eq:score_matching}
+\mathbb{E}_ {t\sim U[0, 1], (\vct{x}_0, \vct{x}_t)}\left[w(t) \left\|  s_{\vct{\theta}}(\vct{x}_t, t)  - \nabla_{\vct{x}_t} q_t(\vct{x}_t| \vct{x}_0) \right\|^2\right],
+\end{equation}
+where $(\vct{x}_0, \vct{x}_t) \sim q_0(\vct{x}_0) q_t(\vct{x}_t| \vct{x}_0)$ and $w(t)$ is a weighting function. 
+
+\textbf{Diffusion Models for Inverse problems --}  Our goal is to solve a noisy inverse problem 
+\begin{equation} \label{eq:inv_prob}
+	\vct{\tilde{y}} = \mathcal{A}(\vct{x}_0) + \vct{z}, ~ \vct{z} \sim \gaussian{\sigma^2},
+\end{equation}
+with $	\vct{\tilde{y}}, \vct{x}_0~\in \mathbb{R}^n$ and $\mathcal{A}: \mathbb{R}^n \rightarrow  \mathbb{R}^n$. 
+That is, we are interested in solving a reconstruction problem, where we observe a measurement $\vct{\tilde{y}}$ that is known to be produced by applying a non-invertible mapping $\mathcal{A}$ to a ground truth signal $\vct{x}_0$ and is corrupted by additive noise $\vct{z}$. We refer to $\mathcal{A}$ as the degradation, and $\mathcal{A}(\vct{x}_0)$ as a degraded signal. Our goal is to recover $\vct{x}_0$ as faithfully as possible, which can be thought of as generating samples from the posterior distribution $q(\vct{x}_0| 	\vct{\tilde{y}})$. Diffusion models have emerged as useful priors enabling sampling from the posterior based on \eqref{eq:reverse_sde}. Using Bayes rule, the score of the posterior can be written as 
+$
+	\nabla_{\vct{x}} \log q_t(\vct{x}|	\vct{\tilde{y}}) = \nabla_{\vct{x}} \log q_t(\vct{x}) + \nabla_{\vct{x}} \log q_t(	\vct{\tilde{y}} | \vct{x}),
+$
+where the first term can be approximated using score-matching as in \eqref{eq:score_matching}. On the other hand, the second term cannot be expressed in closed-form in general, and therefore a flurry of activity emerged recently to circumvent computing the likelihood directly. 
+
+
+\section{Method}
+
+In this work, we propose a novel perspective on solving ill-posed inverse problems. In particular, we assume that our noisy observation $\vct{\tilde{y}}$ results from a process that gradually applies more and more severe degradations to an underlying clean signal. 
+\subsection{Degradation severity}
+To define severity more rigorously, we appeal to the intuition that given two noiseless, degraded signals $\vct{y}$  and $\vct{y}^+$  of a clean signal $\vct{x}_0$, then  $\vct{y}^+$ is corrupted by a more severe degradation than $\vct{y}$, if $\vct{y}$ contains all the information necessary to find $\vct{y}^+$ without knowing $\vct{x}_0$.
+\begin{definition}[Severity of degradations]
+	A mapping $ \mathcal{A}_+:\mathbb{R}^n  \rightarrow \mathbb{R}^n $ is a \textit{more severe degradation than}    $ \mathcal{A}:\mathbb{R}^n  \rightarrow \mathbb{R}^n $ if there exists a surjective mapping $ \mathcal{G}_{\mathcal{A} \rightarrow \mathcal{A}_+}:Image( \mathcal{A})  \rightarrow Image( \mathcal{A}_+) $. That is,
+	\begin{equation*}
+		\mathcal{A}_+(\vct{x}_0) =  \mathcal{G}_{\mathcal{A} \rightarrow \mathcal{A}_+}(\mathcal{A}(\vct{x}_0)) ~~\forall \vct{x}_0\in dom(\mathcal{A}).
+	\end{equation*}
+	We call $\mathcal{G}_{\mathcal{A} \rightarrow \mathcal{A}_+}$ the \textit{forward degradation transition function} from $\mathcal{A}$ to $\mathcal{A}_+$.
+\end{definition}	
+Take image inpainting as an example (Fig.  \ref{fig:severity_plot}) and let $\mathcal{A}_t$ denote a masking operator that sets pixels to $0$ within a centered box, where the box side length is $l(t) = t\cdot W$, where $W$ is the image width and $t\in[0, 1]$. Assume that we have an observation $\vct{y}_{t'} = \mathcal{A}_{t'}(\vct{x}_0)$ which is a degradation of a clean image $\vct{x}_0$ where a small center square with side length $l(t')$ is masked out. Given $\vct{y}_{t'}$, without having access to the complete clean image, we can find any other masked version of $\vct{x}_0$ where a box with at least side length $l(t')$ is masked out. Therefore every other masking operator $ \mathcal{A}_{t''} ,~ t' < t''$ is a more severe degradation than $ \mathcal{A}_{t'}$. The forward degradation transition function $\mathcal{G}_{\mathcal{A}_{t'} \rightarrow \mathcal{A}_{t''}}$ in this case is simply $ \mathcal{A}_{t''}$. We also note here, that the \textit{reverse degradation transition function} $\mathcal{H}_{\mathcal{A}_{t''} \rightarrow \mathcal{A}_{t'}}$ that recovers $ \mathcal{A}_{t'}(\vct{x}_0)$ from a more severe degradation $ \mathcal{A}_{t''}(\vct{x}_0)$ for any $\vct{x}_0$ does not exist in general.
+
+\begin{figure}[t]
+	\centering
+	\includegraphics[width=0.8\linewidth]{plots/severity_explain.pdf}
+	\caption{ Severity of degradations: We can always find a more degraded image $\vct{y}_{t''}$ from a less degraded version of the same clean image $\vct{y}_{t'}$ via the forward degradation transition function $\mathcal{G}_{t'\rightarrow t''}$, but not vice versa. }
+	\label{fig:severity_plot}
+\end{figure}
+
+\subsection{Deterministic and stochastic degradation processes}
+Using this novel notion of degradation severity, we can define a deterministic degradation process that gradually removes information from the clean signal via more and more severe degradations.
+\begin{definition}[Deterministic degradation process]
+	A \textit{deterministic degradation process} is a differentiable mapping $ \mathcal{A}:[0, 1] \times \mathbb{R}^n  \rightarrow \mathbb{R}^n$ that has the following properties:
+	\begin{enumerate}
+		\item  \textit{Diminishing severity:} $ \mathcal{A}(0, \vct{x}) = \vct{x}$
+		\item \textit{Monotonically degrading:} $\forall t'\in[0,1)$ and $t'' \in (t', 1]$ $\mathcal{A}(t'', \cdot)$ is a more severe degradation than $\mathcal{A}(t', \cdot)$.
+	\end{enumerate}
+\end{definition}
+	We use the shorthand  $\mathcal{A}(t, \cdot) = \fwd{t}{\cdot}$ and $\mathcal{G}_{  \mathcal{A}_{t'} \rightarrow \mathcal{A}_{t''} } =\mathcal{G}_{t' \rightarrow t''}$ for the underlying forward degradation transition functions for all $t' < t''$.  Our deterministic degradation process starts from a clean signal $\vct{x}_0$ at time $t=0$ and applies degradations with increasing severity over time. If we choose  $\mathcal{A}(1, \cdot) = \mathbf{0}$, then all information in the original signal is destroyed over the degradation process. One can sample easily from the \textit{forward process}, that is the process that evolves forward in time, starting from a clean image $\vct{x}_0$ at $t=0$. A sample from time $t$ can be computed directly as $\vct{y}_t = \fwd{t}{\vct{x}_0}$.
+In order to account for measurement noise, one can combine the deterministic degradation process with a stochastic noising process that gradually adds Gaussian noise to the degraded measurements.
+\begin{definition}[Stochastic degradation process (SDP)]\label{def:sdp}
+	$\vct{y}_t = \fwd{t}{\vct{x}_0} + \vct{z}_t, ~ \vct{z}_t \sim \gaussian{\sigma_t^2}$ is a \textit{stochastic degradation process} if $\mathcal{A}_t$ is a deterministic degradation process, $t \in [0, 1]$, and $\vct{x}_0\sim q_0(\vct{x}_0)$ is a sample from the clean data distribution. We denote the distribution of $\vct{y}_t$ as $q_t(\vct{y}_t) \sim \mathcal{N}(\fwd{t}{\vct{x}_0}, \sigma_t^2 \textbf{I})$.
+\end{definition}
+A key contribution of our work is looking at a noisy, degraded signal as a sample from the forward process of an underlying SDP, and considering the reconstruction problem as running the reverse process of the SDP backwards in time in order to recover the clean sample. Recent works on generative frameworks that redefine the standard Gaussian diffusion process fit into our formulation naturally. In particular, Soft Diffusion \citep{daras2022soft} uses a stochastic degradation process with linear forward model, that is $\mathcal{A}_t(\cdot) = \mtx{A}_t$,  without an assumption on the monotonicity of the degradation. The requirement for monotonicity does not necessarily arise in image generation, as there is no notion of data consistency. Cold Diffusion \citep{bansal2022cold} on the other hand uses a deterministic degradation process (without the requirement on monotonicity) between arbitrary distributions to achieve image generation.
+
+Our formulation interpolates between degraded and clean image distributions through a severity parametrization that requires an analytical form of $\mathcal{A}(\cdot)$. An alternative approach \citep{delbracio2023inversion, heitz2023iterative} is to parametrize intermediate distributions as convex combinations of corresponding pairs of noisy and clean samples as $\vct{y}_t = t \tilde{\vct{y}} + (1-t) \vct{x}_0, ~~ t\in[0,1]$, also referred to as \textit{blending} \citep{heitz2023iterative}. In our framework, this formulation can be thought of as a deterministic degradation process $\mathcal{A}_t(\vct{x}_0;  \tilde{\vct{y}} ) = t \tilde{\vct{y}} + (1-t) \vct{x}_0$ conditioned on $\tilde{\vct{y}}$. However, as the underlying degradation operator is not leveraged in this formulation, we cannot develop theoretical guarantees on data consistency of the reconstruction. Moreover, we observe improved noise robustness using the proposed SDP formulation.
+\subsection{SDP as a stochastic differential equation}
+We can formulate the evolution of our degraded and noisy measurements $\vct{y}_t$ as an SDE:
+\begin{equation*}
+	\text{d}\vct{y}_t = \dfwd{t}{\vct{x}_0} \text{d}t + \sqrt{\frac{\text{d}}{\text{d}t}\sigma_t^2}\text{d}w,
+\end{equation*}
+where we use the notation $\dfwd{t}{\cdot}$ to indicate derivative with respect to time $t$.
+This is an example of an Itô-SDE, and for a fixed $\vct{x}_0$ the above process is reversible, where the reverse diffusion process is given by
+\begin{equation*}
+	\text{d}\vct{y}_t = \left(\dfwd{t}{\vct{x}_0} \text{d}t -\left(\frac{\text{d}}{\text{d}t}\sigma_t^2\right) \nabla_{\vct{y}_t} \log q_t(\vct{y}_t) \right) \text{d}t
+	 +  \sqrt{\frac{\text{d}}{\text{d}t}\sigma_t^2} \text{d}\bar{\vct{w}}.
+\end{equation*}
+One would solve the above SDE by discretizing it (for example Euler-Maruyama), approximating differentials with finite differences: 
+\begin{equation} \label{eq:update}
+	\vct{y}_{t-\Delta t} =  \vct{y}_t + \underbrace{\fwd{t-\Delta t}{\vct{x}_0} -  \fwd{t}{\vct{x}_0}}_\text{incremental reconstruction} 
+	- \underbrace{(\sigma_{t-\Delta_t}^2 - \sigma_{t}^2) \nabla_{\vct{y}_t}\log q_t(\vct{y}_t)}_\text{denoising} + \sqrt{\sigma_{t}^2 - \sigma_{t-\Delta_t}^2} \vct{z},
+\end{equation} 
+where $\vct{z} \sim \gaussian{}$. The update in \eqref{eq:update} lends itself to an interesting interpretation. One can look at it as the combination of a small, incremental reconstruction and denoising steps. In particular, assume that $\small{\vct{y}_t = \fwd{t}{\vct{x}_0} + \vct{z}_t}$ and let 
+\begin{equation}\label{eq:R}
+	\mathcal{R}(t, \Delta t; \vct{x}_0) := \fwd{t-\Delta t}{\vct{x}_0} -  \fwd{t}{\vct{x}_0}.
+\end{equation}
+
+Then,  the first term $\vct{y}_t + \mathcal{R}(t, \Delta t; \vct{x}_0) =  \fwd{t-\Delta t}{\vct{x}_0} + \vct{z}_t$ will reverse a $\Delta t$ step of the deterministic degradation process, equivalent in effect to the reverse degradation transition function $\mathcal{H}_{t\rightarrow t-\Delta t}$. The second term is analogous to a denoising step in standard diffusion, where a slightly less noisy version of the image is predicted. However, before we can simulate the reverse SDE in \eqref{eq:update} to recover $\vct{x}_0$, we face two obstacles.
+First, we do not know the score of $q_t(\vct{y}_t)$. This is commonly tackled by learning a noise-conditioned score network that matches $\log  q_t(\vct{y}_t|\vct{x}_0)$ which we can easily compute. We are also going to follow this path. Second, we do not know $ \fwd{t-\Delta t}{\vct{x}_0}$ and $\fwd{t}{\vct{x}_0}$ for the incremental reconstruction step, since $\vct{x}_0$ is unknown to us when reversing the degradation process.
+
+\subsection{Denoising - learning a score network}
+To run the reverse SDE, we need the score of the noisy, degraded distribution $\nabla_{\vct{y}_t} \log  q_t(\vct{y}_t)$, which is intractable. However, we can use the denoising score matching framework to approximate the score. In particular, instead of the true score, we can easily compute the score for the conditional distribution, when the clean image $\vct{x}_0$ is given as
+$
+	\nabla_{\vct{y}_t}\log q_t(\vct{y}_t | \vct{x}_0) = \frac{ \fwd{t}{\vct{x}_0} - \vct{y}_t}{\sigma_t^2}.
+$
+During training, we have access to clean images $\vct{x}_0$ and can generate any degraded, noisy image $\vct{y}_t$ using our SDP formulation $\vct{y}_t = \fwd{t}{\vct{x}_0} + \vct{z}_t$. Thus, we learn an estimator of the conditional score function $s_{\vct{\theta}}(\vct{y}_t, t)$ by minimizing
+\begin{equation} \label{eq:loss}
+		\mathcal{L}_t({\vct{\theta}}) = \mathbb{E}_{(\vct{x}_0, \vct{y}_t)} \left[ \left\| s_{\vct{\theta}}(\vct{y}_t, t) -  \frac{ \fwd{t}{\vct{x}_0} - \vct{y}_t}{\sigma_t^2}\right\|^2\right],
+\end{equation}
+where $(\vct{x}_0, \vct{y}_t)\sim q_0(\vct{x}_0) q_t(\vct{y}_t | \vct{x}_0)$.
+
+We parameterize the score network as
+\begin{equation}\label{eq:parametrization}
+	s_{\vct{\theta}}(\vct{y}_t, t) =  \frac{ \fwd{t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)} - \vct{y}_t}{\sigma_t^2},
+\end{equation}
+that is given a noisy and degraded image as input,the model predicts the underlying clean image $\vct{x}_0$.  Other parametrizations are also possible, such as predicting $\vct{z}_t$ or (equivalently) predicting $ \fwd{t}{\vct{x}_0}$. However, as pointed out in \citet{daras2022soft}, this might lead to learning the image distribution only locally, around degraded images. Furthermore, in order to estimate the incremental reconstruction $\mathcal{R}(t, \Delta t; \vct{x}_0)$, we not only need to estimate $ \fwd{t}{\vct{x}_0}$, but other functions of $\vct{x}_0$, and thus estimating $\vct{x}_0$ directly gives us more flexibility.
+Rewriting \eqref{eq:loss} with the new parametrization leads to
+\begin{equation} \label{eq:loss_final}
+		\mathcal{L}({\vct{\theta}}) = \mathbb{E}_ {t, (\vct{x}_0, \vct{y}_t)}\left[w(t) \left\|  \fwd{t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)}  -  \fwd{t}{\vct{x}_0} \right\|^2\right],
+\end{equation}
+where ${t\sim U[0,1], (\vct{x}_0, \vct{y}_t)\sim q_0(\vct{x}_0) q_t(\vct{y}_t | \vct{x}_0)}$ and typical choices in the diffusion literature for the weights $w(t)$ are $1$ or $1/\sigma_t^2$. Intuitively, the neural network receives a noisy, degraded image, along with the degradation severity, and outputs a prediction $\hat{\vct{x}}_0(\vct{y}_t) = \Phi_{\vct{\theta}}(\vct{y}_t, t)$ such that the \textit{degraded} ground truth $\fwd{t}{\vct{x}_0}$ and the \textit{degraded} prediction $\fwd{t}{\hat{\vct{x}}_0(\vct{y}_t)}$ are consistent.
+
+\subsection{Incremental reconstructions \label{sec:inc_rec}}
+Given an estimator of the score, we still need to approximate $\mathcal{R}(t, \Delta t; \vct{x}_0)$ from \eqref{eq:R} in order to run the reverse SDE in \eqref{eq:update}. That is we have to estimate \textit{how the degraded image changes if we slightly decrease the degradation severity}. As we parameterize our score network in \eqref{eq:parametrization} to learn a representation of the clean image manifold directly, we can estimate the incremental reconstruction term as
+\begin{equation}\label{eq:R_hat}
+	\hat{\mathcal{R}}(t, \Delta t; \vct{y}_t) = \fwd{t-\Delta t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)} -  \fwd{t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)}.
+\end{equation} 
+ This becomes more obvious when we note, that our score network already learns to predict $\fwd{t}{\vct{x}_0}$ given $\vct{y}_t$ due to the training loss in \eqref{eq:loss_final}. However, even if we learn the true score perfectly via  \eqref{eq:loss_final}, there is no guarantee that $\fwd{t-\Delta t}{\vct{x}_0} \approx \fwd{t-\Delta t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)}$. The following result provides an upper bound on the approximation error.
+\begin{theorem}\label{thm:basic_error}
+	Let  $\hat{\mathcal{R}}(t, \Delta t; \vct{y}_t)$ from \eqref{eq:R_hat} denote our estimate of the incremental reconstruction, where $\Phi_{\vct{\theta}}(\vct{y}_t, t)$ is trained on the loss in \eqref{eq:loss_final}. Let  $\mathcal{R}^*(t, \Delta t; \vct{y}_t) = \mathbb{E}[	\mathcal{R}(t, \Delta t; \vct{x}_0) | \vct{y}_t]$ denote the MMSE estimator of $\mathcal{R}(t, \Delta t; \vct{x}_0)$. Assume, that the degradation process is smooth such that $\| \fwd{t}{\vct{x}} - \fwd{t}{\vct{x}'} \| \leq L_x^{(t)} \|\vct{x}-\vct{x}'\|, ~\forall \vct{x}, \vct{x}' \in \mathbb{R}^n$ and  $\| \fwd{t}{\vct{x}} - \fwd{t'}{\vct{x}} \| \leq L_t |t -t'|, ~\forall t, t' \in [0, 1],~ \forall \vct{x}\in \mathbb{R}^n$. Further assume that the clean images have bounded entries $\vct{x}_0[i] \leq B, ~\forall i \in (1, 2, ..., n)$ and that the error in our score network is bounded by $\| s_{{\vct{\theta}}}(\vct{y}_t, t) -  \nabla_{\vct{y}_t}\log q_t(\vct{y}_t) \| \leq \frac{\epsilon_t}{\sigma_t^2}, ~\forall t \in [0,1]$. Then, 
+	\begin{equation*}
+		\|\hat{\mathcal{R}}(t, \Delta t; \vct{y}_t) - \mathcal{R}^*(t, \Delta t; \vct{y}_t)\| \leq 
+		\underbrace{(L_x^{(t)} + L_x^{(t - \Delta t)})}_\text{degr. smoothness} \underbrace{\sqrt{n} B }_\text{data} + \underbrace{2 L_t}_\text{scheduling} \underbrace{\Delta t}_\text{algorithm} +  \underbrace{2\epsilon_t}_\text{optimization}.
+	\end{equation*}
+\end{theorem} 
+The first term in the upper bound suggests that smoother degradations are easier to reconstruct accurately. The second term indicates two crucial points: (1) sharp variations in the degradation with respect to time leads to potentially large estimation error and (2) the error can be controlled by choosing a small enough step size in the reverse process. Scheduling of the degradation over time is a design parameter, and Theorem \ref{thm:basic_error} suggests that sharp changes with respect to $t$ should be avoided. Finally, the error grows with less accurate score estimation, however with large enough network capacity, this term can be driven close to $0$.
+
+The main contributor to the error in Theorem \ref{thm:basic_error} stems from the fact that consistency under less severe degradations, that is $ \fwd{t-\Delta t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)} \approx  \fwd{t-\Delta t}{\vct{x}_0}$, is not enforced by the loss in \eqref{eq:loss_final}. To this end, we propose a novel loss function, the \textit{incremental reconstruction loss}, that combines learning to denoise and reconstruct simultaneously:
+ \begin{equation} \label{eq:loss_irn}
+ 	\mathcal{L}_{IR}(\Delta t, {\vct{\theta}}) = 
+ 	 \mathbb{E}_ {t, (\vct{x}_0, \vct{y}_t)}\left[w(t) \left\|  \fwd{\tau}{\Phi_{\vct{\theta}}(\vct{y}_t, t)}  -  \fwd{\tau}{\vct{x}_0} \right\|^2\right],
+ \end{equation}
+where $\tau = \text{max}(t-\Delta t, 0), ~ t\sim U[0,1],$ $(\vct{x}_0, \vct{y}_t)\sim q_0(\vct{x}_0) q_t(\vct{y}_t | \vct{x}_0)$.
+It is clear, that minimizing this loss directly improves our estimate of the incremental reconstruction in \eqref{eq:R_hat}. We find that if $\Phi_{\vct{\theta}}$ has large enough capacity, minimizing the incremental reconstruction loss in \eqref{eq:loss_irn} also implies minimizing \eqref{eq:loss_final}, and thus the true score is learned (denoising is achieved). By minimizing \eqref{eq:loss_irn}, the model learns not only to denoise, but also to perform small, incremental reconstructions of the degraded image such that $\fwd{t-\Delta t}{\Phi_{\vct{\theta}}(\vct{y}_t, t)} \approx  \fwd{t-\Delta t}{\vct{x}_0}$. There is however a trade-off between incremental reconstruction performance and learning the score: we are optimizing an upper bound to \eqref{eq:loss_final} and thus it is possible that the score estimation is less accurate. We expect incremental reconstruction loss to work best in scenarios where the degradation may change rapidly with respect to $t$ and hence a network trained to estimate $\fwd{t}{\vct{x}_0}$ from $\vct{y}_t$ may become inaccurate when predicting $\fwd{t-\Delta t}{\vct{x}_0}$ from $\vct{y}_t$.
+\subsection{Data consistency}
+Data consistency is a crucial requirement on generated images when solving inverse problems. That is, we want to obtain reconstructions that are consistent with our original measurement under the degradation model. More formally, we define data consistency as follows in our framework.
+\begin{definition}[Data consistency]
+Given a deterministic degradation process $ \fwd{t}{\cdot}$,  two degradation severities $\tau \in [0, 1]$ and $\tau^+ \in [\tau, 1]$ and corresponding degraded images $\vct{y}_\tau \in \mathbb{R}^n$ and $\vct{y}_{\tau^+}\in\mathbb{R}^n$, $\vct{y}_{\tau^+}$ is \textit{data consistent} with $\vct{y}_\tau$ under $ \fwd{t}{\cdot}$ if $\exists \vct{x}_0\in\mathcal{X}_0$ such that $\fwd{\tau}{\vct{x}_0} = \vct{y}_\tau$ and $\fwd{\tau^+}{\vct{x}_0} = \vct{y}_{\tau^+}$, where $\mathcal{X}_0$ denotes the clean image manifold. We use the notation $\vct{y}_{\tau^+} \dc \vct{y}_\tau$.
+\end{definition}
+Simply put, two degraded images are data consistent, if there is a clean image which may explain both under the deterministic degradation process. As our proposed technique is directly trained to reverse a degradation process, enforcement of data consistency is built-in without applying additional steps, such as projection. The following theorem guarantees that in the ideal case, data consistency is maintained in \textit{each iteration} of the reconstruction algorithm.
+\begin{theorem}[Data consistency over iterations] \label{thm:dc}
+	Assume that we run the updates in \eqref{eq:update} with $s_{\vct{\theta}}(\vct{y}_t, t) =  \nabla_{\vct{y}_t} \log q_t(\vct{y}_t), ~\forall t \in [0, 1]$ and $	\hat{\mathcal{R}}(t, \Delta t; \vct{y}_t) = \mathcal{R}(t, \Delta t; \vct{x}_0), ~ \vct{x}_0\in \mathcal{X}_0$. If we start from a noisy degraded observation $\vct{\tilde{y}} = \fwd{1}{\vct{x}_0} + \vct{z}_{1}, ~ \vct{x}_0\in \mathcal{X}_0, ~\vct{z}_1 \sim \gaussian{\sigma_{1}^2} $ and run the updates in \eqref{eq:update} for $\tau = 1,1-\Delta t, ..., \Delta t, 0$, then
+\begin{equation*}
+ 	\mathbb{E}[ \vct{\tilde{y}} ] \dc  \mathbb{E}[ \vct{y}_\tau] , ~	\forall \tau \in [1,1-\Delta t, ..., \Delta t, 0].
+\end{equation*}
+\end{theorem}
+
+\begin{figure*}[t]
+	\centering
+	\begin{subfigure}{.4\textwidth}
+		\centering
+		\includegraphics[width=0.99\linewidth]{plots/increcon_PSNR_LPIPS_curves.pdf}
+	\end{subfigure}%
+	\begin{subfigure}{.4\textwidth}
+		\centering
+		\includegraphics[width=0.99\linewidth]{plots/increcon_recon_sample_std.pdf}
+	\end{subfigure}
+	\caption{ Perception-distortion trade-off on CelebA-HQ deblurring: distortion metrics initially improve, peak fairly early in the reverse process, then gradually deteriorate, while perceptual metrics improve. We plot the mean of $30$ trajectories ($\pm std$ shaded) starting from the same measurement.}
+	\label{fig:perception_distortion}
+\end{figure*}
+
+\begin{figure}[t]
+ \begin{algorithm}[H]
+	\caption{\methodname}\label{alg:irnd_main}
+	\begin{algorithmic}
+		\Require $\vct{\tilde{y}}$: noisy observation,  $\Phi_{\vct{\theta}}$: score network, $\fwd{t}{\cdot}$: degradation function, $\Delta t$: step size, $\sigma_t$: noise std at time $t$, $\eta_t$: guidance step size, $\forall t\in[0, 1]$, $t_{stop}$: early-stopping parameter
+		\State $N \gets \lfloor1/\Delta t\rfloor$
+		\State $\vct{y} \gets \vct{\tilde{y}}$
+		\For{$i = 1 \text{ to }N$}
+		\State $t \gets 1 - \Delta t \cdot i$
+		\If{$ t \leq t_{stop}$}
+		\State $\textbf{break}$  \hfill\Comment{Early-stopping}
+		\EndIf
+		\State $\vct{z} \sim \mathcal{N}(0, \sigma_t^2 \mathbf{I})$
+		\State $\hat{\vct{x}}_0 \gets  \Phi_{\vct{\theta}}(\vct{y}, t)$ \hfill\Comment{Predict posterior mean}
+		\State $\vct{y}_r \gets \fwd{t-\Delta t}{\hat{\vct{x}}_0} - \fwd{t}{\hat{\vct{x}}_0}$ \hfill\Comment{Incremental reconstruction}
+		\State $\vct{y}_{d} \gets -\frac{\sigma_{t-\Delta t}^2 - \sigma_t^2}{\sigma_t^2}(\fwd{t}{\hat{\vct{x}}_0} - \vct{y})$ \hfill\Comment{Denoising}
+		\State $\vct{y}_g \gets  (\sigma_{t-\Delta t}^2 - \sigma_t^2) \nabla_{y} \|\vct{\tilde{y}} - \fwd{1}{\hat{\vct{x}}_0}\|^2$ \hfill\Comment{Guidance}
+		\State $\vct{y} \gets \vct{y} +\vct{y}_r + \vct{y}_d + \eta_t \vct{y}_g + \sqrt{\sigma_{t}^2 - \sigma_{t-\Delta t}^2} \vct{z}$
+		\EndFor
+
+	\end{algorithmic} 
+\end{algorithm}
+\end{figure}
+
+\subsection{Perception-distortion trade-off}
+Diffusion models generate synthetic images of exceptional quality, almost indistinguishable from real images to the human eye. This perceptual image quality is typically evaluated on features extracted by a pre-trained neural network, resulting in metrics such as Learned Perceptual Image Patch Similarity (LPIPS)\citep{zhang2018unreasonable} or Fréchet Inception Distance (FID)\citep{heusel2017gans}. In image restoration however, we are often interested in image distortion metrics that reflect faithfulness to the original image, such as Peak Signal to Noise Ratio (PSNR) or Structural Similarity Index Measure (SSIM) when evaluating the quality of reconstructions. Interestingly, distortion and perceptual  quality are fundamentally at  odds with each  other,  as shown in the seminal work of \citet{blau2018perception}.  As diffusion models tend to favor high perceptual quality, it is often at the detriment of distortion metrics \citep{chung2022diffusion}.
+
+As shown in Figure \ref{fig:perception_distortion}, we empirically observe that in the reverse process of \methodname{}, the quality of reconstructions with respect to distortion metrics initially improves, peaks fairly early in the reverse process, then gradually deteriorates. Simultaneously, perceptual metrics such as LPIPS demonstrate stable improvement for most of the reverse process. More intuitively, the algorithm first finds a rough reconstruction that is consistent with the measurement, but lacks fine details. This reconstruction is optimal with respect to distortion metrics, but visually overly smooth and blurry. Consecutively, image details progressively emerge during the rest of the reverse process, resulting in improving perceptual quality at the cost of deteriorating distortion metrics. Therefore, our method provides an additional layer of flexibility: by \textit{early-stopping} the reverse process, we can trade-off perceptual quality for better distortion metrics. Adjusting the early-stopping parameter $t_{stop}$ allows us to obtain distortion- and perception-optimized reconstructions depending on our requirements.
+
+\subsection{Degradation scheduling}
+ In order to deploy our method, we need to define how the degradation changes with respect to severity $t$ following the properties specified in Definition \ref{def:sdp}. That is, we have to determine how to interpolate between the identity mapping $\fwd{0}{\vct{x}} = \vct{x}$ for $t=0$ and the most severe degradation $\fwd{1}{\cdot}$ for $t=1$.  Theorem \ref{thm:basic_error} suggests that sharp changes in the degradation function with respect to $t$ should be avoided. Here, we leverage a principled method of scheduling using a greedy algorithm to select a set of degraded distributions, such that the maximum distance between consecutive distributions is minimized. 
+ 
+ Finally, we find that adding a guidance term similar to that used in DPS \citep{chung2022diffusion} slightly improves reconstructions, however it is not necessary for maintaining data consistency. A summary of \methodname{} is shown in Algorithm \ref{alg:irnd_main}.
+
+\begin{figure}[t]
+	\centering
+	\begin{subfigure}{.5\textwidth}
+		\centering
+		\includegraphics[width=0.7\linewidth, left]{plots/increcon_data_consistency_ffhq_inpainting_curves.pdf}
+	\end{subfigure}%
+	\begin{subfigure}{.5\textwidth}
+		\centering
+	\includegraphics[width=0.6\linewidth, center]{plots/increcon_imagenet_test_comparison.pdf}
+\end{subfigure}%
+	\caption{ \underline{Left}: Data consistency in FFHQ inpainting. $\epsilon_{dc} := \norm{\vct{\tilde{y}} - \fwd{1}{\hat{\vct{x}}_0(\vct{y}_t)}}^2$ measures how consistent is the clean image estimate with the measurement. We expect $\epsilon_{dc}$ to approach the noise floor $\sigma_1^2 = 0.0025$ in case of perfect data consistency. We plot $\bar{\epsilon}_{dc}$ the mean over the validation set. \methodname{} maintains data consistency throughout the reverse process. \underline{Right}: Data consistency is not always achieved with DPS.}
+	\label{fig:curves}
+\end{figure}
+
+\begin{figure}[t]
+	\centering
+	\includegraphics[width=0.4\linewidth]{plots/increcon_nfe_lpips_curves.pdf}
+	\caption{ Number of reverse diffusion steps vs. perceptual  quality. \methodname{} produces reconstructions of high quality even with a low number of neural function evaluations (NFEs).}
+	\label{fig:nfe_compare}
+\end{figure}
+
+
+
+\section{Experiments}
+
+\begin{figure*}[t]
+	\centering
+	\begin{subfigure}{.5\textwidth}
+		\includegraphics[width=1.0\linewidth]{plots/comparison_deblur_v2_compressed.png}
+	\end{subfigure}%
+	\begin{subfigure}{.5\textwidth}
+		\includegraphics[width=1.0\linewidth]{plots/comparison_inpaint_v2_compressed.png}
+	\end{subfigure}
+	\caption{Visual comparison of reconstructions: Gaussian blur (left) and inpainting (right).}
+	\label{fig:comparison}
+\end{figure*}
+\textbf{Experimental setup --} We evaluate our method on CelebA-HQ ($256 \times 256$) \citep{karras_progressive_2018} and ImageNet ($256 \times 256$) \citep{deng2009imagenet}. For competing methods that require a score model, we use pre-trained SDE-VP models. For \methodname{}, we train models from scratch using the NCSN++\citep{song2020score}  architecture.  As the pre-trained score-models for competing methods have been trained on the full CelebA-HQ dataset, we test all methods for fair comparison on the first $1k$ images of the FFHQ \citep{karras2019style} dataset. For ImageNet experiments, we sample $1$ image from each class from the official validation split to create disjoint validation and test sets of $1k$ images each. We only train our model on the train split of ImageNet.
+
+We investigate two degradation processes of very different properties: Gaussian blur and inpainting. In all cases, Gaussian noise with $\sigma_1 = 0.05$ is added to the measurements in the $[0, 1]$ range. We use standard geometric noise scheduling with $\sigma_{max} = 0.05$ and $\sigma_{min} = 0.01$ in the SDP. For Gaussian blur, we use a kernel size of $61$, with standard deviation of $w_{max} =3$. We vary the standard deviation of the kernel between $w_{max}$(strongest) and $0. For inpainting, we generate a smooth mask in the form $\left(1 - \frac{f(\vct{x}; w_t)}{\max_{\vct{x}} f(\vct{x}; w_t)}\right)^k$, where $f(\vct{x}; w_t)$ denotes the density of a zero-mean isotropic Gaussian with standard deviation $w_t$ that controls the size of the mask and $k=4$ for sharper transition. We set $w_1 = 50$ for CelebA-HQ/FFHQ inpainting and $30$ for ImageNet inpainting.
+
+We compare our method against DDRM \citep{kawar2022denoising}, a well-established diffusion-based linear inverse problem solver; DPS \cite{chung2022diffusion}, a recent, state-of-the-art diffusion technique for noisy inverse problems; SwinIR \citep{liang_swinir_2021}, a state-of-the-art transformer-based supervised image restoration model; PnP-ADMM \citep{chan2016plug}, a reliable traditional solver with learned denoiser; and ADMM-TV, a classical optimization technique. To evaluate performance, we use PSNR and SSIM as distortion metrics and LPIPS and FID as perceptual quality metrics.
+
+ We show results on our perception-optimized (PO) reconstructions, tuned for best LPIPS and our distortion-optimized (DO) reconstructions, tuned for best PSNR on a separate validation set via early-stopping (see Fig. \ref{fig:perception_distortion}). Our results, summarized in Table \ref{tab:table_results} (left side), demonstrate superior performance compared with other diffusion methods in terms of both distortion and perceptual metrics. Our DO model closely matches the distortion quality of SwinIR,  a strong non-diffusion baseline known to outperform other diffusion solvers in terms of distortion metrics \citep{chung2022diffusion}. Visual comparison in Figure \ref{fig:comparison} reveals that DDRM produces reliable reconstructions, similar to our DO images, but they often lack detail. In contrast, DPS produces detailed images, similar to our PO reconstructions, but often with hallucinated details inconsistent with the measurement.
+
+\textbf{Inpainting --} We train our model on $	\mathcal{L}_{IR}(\Delta t=1, {\vct{\theta}}) $, as we see improvement in reconstruction quality as $\Delta t$ is increased. We hypothesize that this is due to sharp changes in the inpainting operator with respect to $t$, which can be mitigated by the incremental reconstruction loss according to Theorem \ref{thm:basic_error}. We tuned models to optimize FID, as it is more suitable than pairwise image metrics to evaluate generated image content. Our results in Table \ref{tab:table_results} shows best performance in most metrics, followed by DDRM. Fig. \ref{fig:comparison} (right) shows, that our method generates high quality images even when limited context is available. 
+
+\begin{table*}[t]
+	\centering
+	\resizebox{15.5cm}{!}{
+		\begin{tabular}{ lccccccccc }
+			\toprule
+			&\multicolumn{4}{c}{\textbf{Deblurring}} & &\multicolumn{4}{c}{\textbf{Inpainting}} \\
+			\cmidrule{2-5}\cmidrule{7-10}
+			\textbf{Method} &PSNR$(\uparrow)$&SSIM$(\uparrow)$&LPIPS$(\downarrow)$&FID$(\downarrow)$& &PSNR$(\uparrow)$&SSIM$(\uparrow)$&LPIPS$(\downarrow)$&FID$(\downarrow)$ \\
+			\midrule
+			\methodname-PO (ours) &26.67&0.7418&\textbf{0.2716}&\textbf{53.36}& &25.41&0.7595&0.2611&\textbf{39.43} \\
+			\methodname-DO (ours) &\underline{28.47}&\underline{0.8054}&0.2972&69.15& &\textbf{26.98}&\textbf{0.8435}&\textbf{0.2234}&\underline{51.87} \\
+			\hline
+			DPS \citep{chung2022diffusion} &25.56&0.6878&0.3008&\underline{65.68}& &21.06&0.7238&0.2899&57.92 \\
+			DDRM \citep{kawar2022denoising} &27.21&0.7671&\underline{0.2849}&65.84& &\underline{25.62}&0.8132&\underline{0.2313}&54.37 \\
+			SwinIR \citep{liang_swinir_2021}  &\textbf{28.53}&\textbf{0.8070}&0.3048&72.93& &24.46&\underline{0.8134}&0.2660&59.94\\
+			PnP-ADMM \citep{chan2016plug}&27.02
+			&0.7596&0.3973&74.17& &12.27&0.6205&0.4471&192.36 \\
+			ADMM-TV &26.03&0.7323&0.4126&89.93& &11.73&0.5618&0.5042&264.62 \\
+			\bottomrule
+		\end{tabular}
+	}
+	\resizebox{15.5cm}{!}{
+		\begin{tabular}{ lccccccccc }
+			\toprule
+			&\multicolumn{4}{c}{\textbf{Deblurring}} & &\multicolumn{4}{c}{\textbf{Inpainting}} \\
+			\cmidrule{2-5}\cmidrule{7-10}
+			\textbf{Method} &PSNR$(\uparrow)$&SSIM$(\uparrow)$&LPIPS$(\downarrow)$&FID$(\downarrow)$& &PSNR$(\uparrow)$&SSIM$(\uparrow)$&LPIPS$(\downarrow)$&FID$(\downarrow)$ \\
+			\midrule
+			\methodname-PO (ours) &24.68&0.6582&\textbf{0.3302}&\underline{53.91}& &26.36&0.8087&0.2079&\underline{34.33} \\
+			\methodname-DO (ours) &\textbf{25.76}&\textbf{0.7085}&0.3705&83.23& &\textbf{28.92}&\textbf{0.8958}&\textbf{0.1676}&38.25 \\
+			\hline
+			DPS \citep{chung2022diffusion} &21.51&0.5163&0.4235&\textbf{52.60}& &22.71&0.8026&\underline{0.1986}&34.55 \\
+			DDRM \citep{kawar2022denoising} &24.53&0.6676&\underline{0.3917}&61.06& &25.92&0.8347&0.2138&\textbf{33.71} \\
+			SwinIR \citep{liang_swinir_2021}  &\underline{25.07}&\underline{0.6801}&0.4159&84.80& &\underline{26.87}&\underline{0.8490}&0.2161&45.69\\
+			PnP-ADMM \citep{chan2016plug}&25.02&0.6722&0.4565&98.72& &18.14&0.7901&0.2709&101.25 \\
+			ADMM-TV &24.31&0.6441&0.4578&88.26& &17.60&0.7229&0.3157&120.22 \\
+			\bottomrule
+		\end{tabular} 
+	}
+	\caption{\label{tab:table_results} Experimental results on the FFHQ (top) and ImageNet (bottom) test splits.}
+\end{table*}
+
+\textbf{Data consistency --} Consistency between reconstructions and the measurement is crucial in inverse problem solving. Our proposed method has the additional benefit of maintaining data consistency throughout the reverse process, as shown in Theorem \ref{thm:dc} in the ideal case, however we empirically validate this claim. Figure \ref{fig:curves} (left) shows the evolution of $\epsilon_{dc} := \|\vct{\tilde{y}} - \fwd{1}{\hat{\vct{x}}_0(\vct{y}_t)}\|^2$, where $\hat{\vct{x}}_0(\vct{y}_t)$ is the clean image estimate at time $t$ ($\Phi_{\vct{\theta}}(\vct{y}_t, t)$ for our method). Since $\vct{\tilde{y}} = \fwd{1}{\vct{x}_0} + \sigma_1^2$, we expect $\epsilon_{dc}$ to approach $\sigma_1^2$ in case of perfect data consistency. We observe that our method, without applying guidance,  stays close to the noise floor throughout the reverse process, while other techniques approach data consistency only close to $t=1$.  In case of DPS, we observe that data consistency is not always satisfied (see Figure \ref{fig:curves}, right), as DPS only guides the iterates towards data consistency, but does not directly enforce it. As our technique reverses an SDP, our intermediate reconstructions are always interpretable as degradations of varying severity of the same underlying image. This property allows us to early-stop the reconstruction and still obtain consistent reconstructions. 
+ 
+\textbf{Sampling speed --} \methodname{} requires low number of reverse diffusion steps for high quality reconstructions leading to fast sampling. Figure \ref{fig:nfe_compare} compares the perceptual quality at different number of reverse diffusion steps for diffusion-based solvers. Our method typically requires $20-100$ steps for optimal perceptual quality, and shows the most favorable scaling in the low-NFE (Neural Function Evaluations) regime. Due to early-stopping we can trade-off perceptual quality for better distortion metrics and even further sampling speed-up. We obtain acceptable results even with as low as a single step of reconstruction. 
+
+
+\section{Related work}
+
+
+
+
+\section{Conclusions and Limitations}
+
+We propose a novel framework for solving inverse problems by reversing a stochastic degradation process. Our solver can flexibly trade off perceptual image quality for more traditional distortion metrics and sampling speedup. Moreover, we show both theoretically and empirically that our method maintains consistency with the measurement throughout the reverse process. \methodname{} produces reconstructions of exceptional quality in terms of both perceptual and distortion-based metrics, surpassing comparable state-of-the-art methods on multiple high-resolution datasets and image restoration tasks. The main limitation of our method is that a model needs to be trained from scratch for each inverse problem, whereas other diffusion-based solvers leverage pretrained score networks.
+
+

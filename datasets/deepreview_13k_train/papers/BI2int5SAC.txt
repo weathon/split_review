@@ -1,0 +1,263 @@
+\title{Human-like Episodic Memory for Infinite Context LLMs}
+
+\begin{abstract}
+Large language models (LLMs) have shown remarkable capabilities, but still struggle with processing extensive contexts, limiting their ability to maintain coherence and accuracy over long sequences. In contrast, the human brain excels at organising and retrieving episodic experiences across vast temporal scales, spanning a lifetime. In this work, we introduce EM-LLM, a novel approach that integrates key aspects of human episodic memory and event cognition into LLMs with no fine-tuning, enabling them to handle practically infinite context lengths while maintaining computational efficiency. EM-LLM organises sequences of tokens into coherent episodic events using a combination of Bayesian surprise and graph-theoretic boundary refinement in an online fashion. When needed, these events are retrieved through a two-stage memory process, combining similarity-based and temporally contiguous retrieval for efficient and human-like access to relevant information. Experiments on the LongBench and $\infty$-Bench benchmarks demonstrate EM-LLM's superior performance, consistently outperforming the state-of-the-art retrieval model InfLLM across various baseline LLMs. In addition, EM-LLM outperforms its popular counterpart, RAG, in a wide range of tasks, while requiring similar resources. Notably, EM-LLM's performance even surpasses full-context models in most tasks, while successfully performing retrieval across 10 million tokens -- a scale computationally infeasible for such models. Finally, our analysis reveals strong correlations between EM-LLM's event segmentation and human-perceived events, suggesting a bridge between this artificial system and its biological counterpart, thereby offering a novel computational framework for exploring human memory mechanisms.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{intro}
+
+For contemporary pre-trained large language models (LLMs), the context window serves as the primary mechanism to incorporate domain-specific, private, or common up-to-date information. However, despite their remarkable and ever-expanding capabilities, LLMs still exhibit significant limitations when tasked with processing extensive contexts~\citep{liu2024lost}. These limitations stem from inherent challenges in Transformer-based architectures. Recent studies have shown that Transformers struggle with extrapolating to contexts longer than their training window size~\citep{kazemnejad2024impact}. On top of this, employing softmax attention over extended token sequences requires substantial computational resources for each token generation, 
+while the resulting aggregated embeddings (the weighted sums of value vectors) risk becoming excessively noisy and losing their distinctiveness~\citep{Tworkowski:2023:LongLLaMA}.
+To mitigate these challenges, recent works have focused on retrieval-based methods, either in the form of in-context augmentation (e.g., retrieval-augmented generation (RAG)-based techniques~\citep{lewis2020rag,gao2024retrievalaugmented}) or via retrieval of previously-inferred key-value pairs (KV) within individual attention heads~\citep{wu2022memorizing,Tworkowski:2023:LongLLaMA,Bertsch:2023:Unlimiformer}. Notably, state-of-the-art (SOTA) performance is achieved when KV pairs are initially organised into non-overlapping segments and then retrieved together as one block of sequential tokens~\citep{xiao2024infllm}. While such techniques present interesting research avenues, we still see a significant gap between the performance of LLMs in short- vs long-context tasks, even when existing long-context architectures are employed~\citep{liu2024lost}.
+\begin{wrapfigure}[33]{r}[0pt]{0.55\linewidth} 
+    \setlength{\abovecaptionskip}{0pt}
+    \centering
+    \includegraphics[width=\linewidth]{Fig1.pdf}
+    \caption{\textbf{Top:} EM-LLM$_S$ vs. RAG (NV-Embed-v2 retriever) vs. full-context, with LLaMA-3.1-8B as the base LLM, evaluated on LongBench. \textbf{Bottom:} Comparison of various long-sequence methods (sorted based on their context window length) on an extended version of $\infty$-Bench's \textit{Retrieve.PassKey}. Baseline data taken from~\citet{Ding:2024:LongRoPE}. }
+    \label{fig:rag_fc_emllm}
+\end{wrapfigure}
+
+This work tackles the above challenges and attempts to bridge this performance gap by taking inspiration from the algorithmic interpretation of \emph{episodic memory in the human brain} -- the memory system responsible for encoding, storing, and retrieving personal experiences and events. The brain makes sense of its continuous experience in the real world by segmenting it into discrete episodic events~\citep{clewett2019transcending,zacks2020event}, which are first organised in a hierarchical and nested-timescale structure~\citep{baldassano2017discovering} and then stored in long-term memory. Notably, the boundaries between such events are the access points for memory retrieval~\citep{Michelmann:2023:boundaries} and are widely believed to correspond to points in time with high prediction errors between the brain's generative model and its raw sensory input (a.k.a., \emph{surprise}). In this context, surprise refers to moments when the brain's predictions about incoming sensory information are significantly violated, leading to a mismatch between what is expected and what is actually perceived. These instances of high surprise are thought to signal important changes in the environment or narrative, prompting the brain to segment the ongoing experience into distinct events~\citep{zacks2007event,zacks2011prediction,roseboom2019activity, Sinclair:2021:pred_error_em,Fountas:2022}. Once segmented and stored, the brain recalls episodic memories based on their similarity to current experience, recency, original temporal order, and their proximity to other recalled memories (temporal asymmetry and contiguity~\citep{Howard:2002:TCM}).
+Following these insights, we propose a novel architecture, \textit{EM-LLM}, which integrates crucial aspects of event cognition and episodic memory into Transformer-based LLMs. For memory formation, we segment the sequence of tokens presented to the underlying LLM into individual memory units representing episodic events. The boundaries, and thus the size of those events, are initially determined dynamically, based on the level of surprise of the model during inference, and then refined to maximise cohesion within memory units and separation of memory content across them (see Section~\ref{sec:method__memory_formation}). This refinement process leverages graph-theoretic metrics, treating the similarity between attention keys (the learned representations used in Transformer self-attention mechanisms) as a weighted adjacency matrix, and aims to enhance the model's ability to efficiently recall relevant information when addressing complex tasks with extended contexts. 
+Importantly, this memory formation process incurs minimal additional computational cost. The surprise-based segmentation requires no extra computation and the refinement step has a complexity of $\mathcal{O}(kn)$, where $k$ is typically very small compared to the number of tokens $n$.
+With this efficient memory formation process, by grouping similar information in single units, we minimise the number of units needed to recall details around specific events. 
+For memory recall, our approach integrates similarity-based retrieval with mechanisms that facilitate temporal contiguity and asymmetry effects. By retrieving and buffering salient memory units, our model leverages and enhances the recently discovered propensity of LLMs to exhibit human-like patterns in sequential information retrieval~\citep{Jian:2024:CMRandLLMs}. This method not only ensures efficient access to pertinent information but also mimics the temporal dynamics found in human free recall studies (such as \citet{Howard:2002:TCM}), further enhancing the model’s ability to handle complex tasks that require nuanced temporal reasoning.
+
+In this work, we show that our method is scalable and significantly outperforms the SOTA retrieval model InfLLM~\citep{xiao2024infllm}, as well as RAG and full-context methods, on the widely-used LongBench~\citep{bai:2023:longBench} and $\infty$-Bench~\citep{Zhang:2024:infiniteBench} benchmarks designed for long-context tasks (see Fig.~\ref{fig:rag_fc_emllm}). Furthermore, we perform successful passkey retrieval across $10$M tokens, a length which is computationally infeasible for current full-context models.
+To further prove our hypotheses, we then employ a series of human-annotated podcast scripts to show that information in LLM attention heads can be semantically grouped in a way that correlates with the event structure perceived by humans. Therefore, LLM-perceived surprise can indeed serve as a proxy for the cognitive signals that drive human event segmentation, as confirmed by previous studies~\citep{kumar2023bayesian}. Finally, using the long-context PG-19 dataset~\citep{Rae:2020:PG19}, which comprises a diverse corpus of English books, we evaluate the effectiveness of our segmentation method for grouping relevant information and assess the performance of different boundary refinement objectives.
+
+
+\section{Related work}
+
+\label{related_work}
+
+\subsection{Long-context in LLMs}
+
+Recently, several approaches have been proposed to extend the context window of Transformer-based models. These include methods that address the limited representational capacity of softmax attention, and its quadratic computational and memory cost~\citep{Katharopoulos:2020:linear_attention,munkhdalai2024leave}. Other methods target the poor extrapolation of typical positional encodings to out-of-distribution context lengths~\citep{kazemnejad2024impact}. The latter is evident in most widely used methods, including the original absolute positional encodings~\citep{vaswani2017attention} and the more recent relative positional encodings, such as the popular Rotary Positional Embeddings (RoPE)~\citep{su:2024:rope}. To address this, some approaches propose scaling of the rotation angles~\citep{chen2024clex} or the base constant~\citep{Xiong:2023:Llama2Long,Liu:2024:ScaledRoPE,Peng:2024:YaRN,Ding:2024:LongRoPE}. Others, scale positions without affecting the embedding function~\citep{Press:2021:alibi,Chen:2023:PI,Jin:2024:SelfExtend}, explore alternative strategies such as KERPLE~\citep{Chi:2022:kerple} and FIRE~\citep{Li:2024:Fire} or adopt relative position embedding mechanisms from certain LMs like T5~\citep{Raffel:2020:T5}.
+
+Concerning computational efficiency and diluted attention, successful approaches propose methods for general improvements to Transformer efficiency through optimised computations~\citep{Dao:2024:FlashAttention2,Han:2024:HyperAttention,Aminabadi:2022:DeepSpeed,Kwon:2023:PageAttention,Liu:2024:RingAttention,Brandon:2023:StripedAttention} or compression techniques~\citep{Nawrot:2024:DMC,Zhang:2023:H2O}, as well as training methods tailored for long-context scenarios~\citep{Zhu:2024:PoSE,Chen:2024:LongLoRA}. Another direction is the utilisation of retrieval-based methods, the vast majority of which relies on a vector database that keeps a key-value cache and scalable approximations of k-nearest neighbors (k-NNs) to perform lookups~\citep{wu2022memorizing,Tworkowski:2023:LongLLaMA,Bertsch:2023:Unlimiformer}. For an exception that does not rely on k-NNs, see \citet{Wang:2023:LongMem}.
+
+A recent and interesting variant of k-NN retrieval involves retrieving large groups of tokens, rather than individual ones. Models that rely on this approach include SLED~\citep{Ivgi:2023:SLED} and the more recent InfLLM~\citep{xiao2024infllm}, which achieves SOTA performance on long-context benchmarks. InfLLM segments the entire context length into fixed-size memory units and employs k-NN lookup using the tokens with the highest accumulated scores per unit. This can be seen as a form of hierarchical attention, as illustrated in Fig.~\ref{fig:hierarcy}. 
+While group-based retrieval represents a promising direction, our approach significantly advances this concept by dynamically determining token groupings in a manner akin to human memory formation. This effectively addresses a fundamental limitation of InfLLM's fixed-size segmentation and enables more adaptive and context-sensitive processing of extended information.
+
+\begin{figure}[t!]
+    \setlength{\abovecaptionskip}{0pt}
+    \centering
+    \includegraphics[width=\linewidth]{Fig2.pdf}
+    \caption{Group-based $k$-NN retrieval can be seen as a form of hierarchical episodic attention. Initially, $k=4$ groups of tokens are selected (left) and then used for softmax attention (right), as if all other similarity scores were forced to be zero (non-shaded areas of the left curve). This framework can support multiple levels of episodic attention.}
+    \label{fig:hierarcy}
+\end{figure}
+\subsection{Neural models of Episodic Memory and Event Cognition}
+\label{sec:background:em_models}
+
+The concept of episodic memory, central to our approach, has been extensively studied in both theoretical neuroscience and machine learning. Neural models of episodic memory capture human behaviour and neuroimaging data, providing insights into how the brain processes and stores experiences and suggesting links between memory, efficient representations and navigation of physical and conceptual spaces~\citep{Gershman:2012:TCM_SR,Benna:2021:place_cells_memory_cells}. 
+In machine learning, episodic memory-inspired approaches have yielded significant improvements across various domains. For instance, episodic control has enhanced reinforcement learning agents' performance and learning speed~\citep{Blundell:2016:EC,Pritzel:2017:NEC,Coda:2022:EM}. In addition, models of memory construction and consolidation have been successful in alleviating catastrophic forgetting in neural networks~\citep{Kirkpatrick:2017:overcoming,LopezPaz:2017:GEM,Chaudhry:2018:AGEM,Buzzega:2020,Prabhu:2020}, including LLMs~\citep{Das:2024:Larimar}, and appear to explain key features of human memory, such as imagination and future thinking~\citep{Spens:2024:generative}.
+
+These models have revealed key aspects of episodic memory, particularly in describing how experiences are segmented into events, and when new memories are encoded and retrieved~\citep{Lu:2022:model}. Surprise plays a critical role in this process, triggering event boundaries and memory formation~\citep{Fountas:2022,kumar2023bayesian}. This event-based structure is deeply intertwined with our perception of time~\citep{roseboom2019activity,sherman2022trial}, highlighting the interdependence of memory and temporal cognition. This insight has helped generative models for video~\citep{Zakharov:2022:VPR,Zakharov:2022:DLH} and reinforcement learning~\citep{Zakharov:2021:EM} to capture temporal dynamics more accurately. In terms of memory retrieval, studies in human free recall have shown a distinctive increased likelihood of retrieving items encoded close together in time (temporal contiguity) and in succession (temporal asymmetry) (see Fig.~\ref{fig:architecture}A). Recently, it was shown that attention heads in Transformer-based LLMs that are associated with in-context learning, already exhibit the same dynamic retrieval behaviour~\citep{Jian:2024:CMRandLLMs} (Fig.~\ref{fig:architecture}B) including both contiguity and asymmetry effects. Therefore, Transformers have the inherent ability to act as episodic memory retrieval models, if provided with the right information within their context window. Our work leverages these concepts of surprise-based event segmentation and LLMs' inherent temporal contiguity and asymmetry effects to enable a new generation of Infinite Context-Length LLMs, capable of processing and understanding information over vastly extended timescales.
+
+\begin{figure}[t!]
+    \setlength{\abovecaptionskip}{0pt}
+    \centering
+    \includegraphics[width=1.0\linewidth]{Fig3.pdf}
+    \caption{(\textbf{A}) Example of the temporal contiguity and asymmetry effect in human free recall. Data averaged over several large free recall studies (adopted from \citet{Howard:2002:TCM}). (\textbf{B}) The attention scores of a GPT2 head averaged over all tokens tested (adopted from \citet{Jian:2024:CMRandLLMs}).  (\textbf{C}) Schematic illustrating our proposed process for memory formation and retrieval in each layer: \circled{1} Input sequence with surprise-based segmentation (purple arrows indicate high surprise). \circled{2} Formation of episodic memories: input is segmented into events and stored, with initial tokens and local context preserved. Note that the boundary refinement process is not shown here for clarity. \circled{3} Memory retrieval via k-NN search, selecting contiguous events from episodic memory. \circled{4} Final context window structure, comprising initial tokens, contiguity buffer (populated by neighbouring events), similarity buffer (from k-NN retrieval), and local context.}
+    \label{fig:architecture}
+\end{figure}
+
+
+\section{EM-LLM: LLM with Episodic Memory}
+
+
+\subsection{Architecture}
+\label{sec:architecture}
+EM-LLM is designed to be applied directly to pre-trained LLMs, enabling them to handle context lengths significantly larger than their original training length. Our architecture, illustrated in Fig.~\ref{fig:architecture}C, divides the context into three distinct groups: initial tokens, evicted tokens and local context. This structure, while incorporating insights from recent work on token block retrieval~\citep{xiao2024infllm}, introduces novel elements inspired by human episodic memory.
+
+The local context represents the most recent tokens, maximising information about the current task, and fits within the typical context window of the underlying LLM. This group utilises full softmax attention and plays a role similar to the focus of attention in cognitive models of working memory, holding the most immediately relevant information for the current task~\citep{cowan2001magical}. The evicted tokens typically comprise the majority of past tokens in a long-context scenario, extending far beyond the LLM's original training length. These tokens are managed by our proposed memory model functioning similarly to short-term episodic memory in the brain. Finally, following previous work, we also maintain a group of $128$ initial tokens in the LLM context. These act as \textit{attention sinks} and help recover the performance of window attention, as first observed by \citet{Xiao:2024:AttentionSinks,Han:2024:LMInfinite} and later adopted by \citet{xiao2024infllm}. For retrieved tokens, which are therefore discontinuous and outside the local context, we assign a fixed position embedding as in \citet{Raffel:2020:T5,xiao2024infllm}. This architecture enables EM-LLM to effectively process and utilise information from positions outside its pre-trained local context window, while maintaining the underlying LLM's performance characteristics.
+\subsection{Memory formation via Surprise}
+\label{sec:method__memory_formation}
+
+In the context of LLMs, we define episodic memory as the organised, event-based collection of past key-value pairs, analogous to the latent representations of personal experiences in human memory. Just as unexpected or novel information plays a crucial role in human memory formation, we posit that analogous indicators of novelty in LLMs can serve as an effective proxy for identifying significant ``events'' within the model's experience. In Bayesian terms, surprise is quantified by the negative log-likelihood of observing the current, ground-truth token given the previous tokens in an auto-regressive model, with high values indicating the unpredictability or novelty of each new token within the context according to the model, i.e., being ``surprised'' by the next token.
+Following work on cognitive modelling~\citep{roseboom2019activity,Fountas:2022}, we employ a thresholding mechanism to perform an initial identification of event boundaries (used for the first time in LLMs). Formally, a token $x_t$ is considered a potential boundary if its surprise value exceeds a threshold $T$: 
+\begin{align}
+-\log P(x_t|x_1,\ldots,x_{t-1};\theta) > T \quad ~~ \text{with} \quad ~~ T = \mu_{t-\tau} + \gamma\sigma_{t-\tau}\label{eq:surprise_with_thres}
+\end{align}
+where $\mu_{t-\tau:t}$ and $\sigma_{t-\tau:t}^2$ are the mean and variance of surprise for a window offset $\tau$, and $\gamma$ is a scaling factor. The choice of threshold $T$ is critical in balancing the granularity of segmentation with the model's sensitivity to contextual shifts. If the $T$ is too high, we will identify very few event boundaries, especially if the local context contains few surprising tokens. Conversely, a low $T$ results in frequent boundary identification. Using a moving window ensures that $T$ adapts to contextual shifts, minimizing the need for manual tuning while maintaining control over threshold sensitivity via $\gamma$. This initial segmentation results in a set of potential event boundaries $\mathcal{B} = {b_1, b_2, ..., b_k}$, where each $b_i$ represents the index of a token exceeding the surprise threshold. These boundaries serve as the starting point for our subsequent refinement process, which aims to optimise the intra-event coherence and inter-event distinctiveness of the resulting memory segments. 
+
+\subsection{Boundary refinement}
+
+\begin{algorithm}[t!]
+\caption{Event segmentation in KV cache}
+    \begin{small} 
+    \begin{algorithmic}[1]
+        \Require tok: List of tokens in the sequence
+        \Require $T$: Threshold for surprisal to identify initial boundaries
+        \Require $f$: Metric function to evaluate potential boundaries
+        \Ensure $\mathcal{B}$: List of final boundary positions
+        \State $\mathcal{B}\gets$ [i for i in range(\texttt{length(tok)}) if $-\log(P(\texttt{tok}[i])) >$ $T$] \Comment{Boundary identification}
+        \For{i in range(length($\mathcal{B}$))}
+            \State $\alpha, \beta = \mathcal{B}[i], \mathcal{B}[i+1]$
+            \State $\mathcal{B}[i+1] \gets \arg\max_{\hat{\beta} \in (\alpha, \beta]} f(A, \{\alpha, \hat{\beta}\})$ \Comment{Boundary refinement}
+        \EndFor
+        \State \Return $\mathcal{B}$
+    \end{algorithmic}
+    \end{small}
+\label{alg:segmentation}
+\end{algorithm}
+
+While surprise-based segmentation provides an effective initial estimate of event boundaries, we make the key observation that the utility of elements within an event, during memory recall, depends on their likelihood of being utilised by the current query. Therefore, we theorise that memory recall will be most efficient with high intra-event similarity between keys while maintaining low inter-event similarity. For instance, see the similarity of groups in Fig.~\ref{fig:hierarcy}. To further ensure this, we introduce a boundary refinement step that looks to optimise this objective. Such an objective is typically optimised in the context of graph-clustering, hence we express this refinement process in a graph-theoretic manner. To achieve this, we treat the similarity matrix between all keys of an attention head $h$ within the local context window for tokens $x_1, x_2,...,x_n$ as an adjacency matrix. We define the adjacency matrix $A^h$ as
+\begin{align}
+    A^h_{ij}=\text{sim}(K^h_i,K^h_j),
+\end{align}
+where $K^h_i$ and $K^h_j$ are the key vectors corresponding to tokens $x_i$ and $x_j$, respectively. The similarity function measures the closeness of two key vectors; in our implementation, we use dot product similarity 
+${K^h}^{\mathsf{T}}_i\cdot K^h_j$ due to its effectiveness in capturing semantic relationships in high-dimensional spaces~\citep{vaswani2017attention} and to align with the mechanism of self-attention in Transformers.
+
+To evaluate the quality of potential boundaries, we define a metric function $f(A, \mathcal{B}): \mathbb{R}^{n \times n} \times \{1, \ldots, n\}^k \rightarrow \mathbb{R}$. This function quantifies the cohesion within events and separation between events based on the graph structure represented by the similarity matrix $A$ and event boundaries $\mathcal{B}$. We experiment with two widely-accepted graph-clustering metrics: \textit{modularity} and \textit{conductance}~\citep{Miasnikof:2018;clustering_metrics}. Modularity~\citep{newman:2004:modularity} provides a measure of the quality of a particular division of a network into communities, with higher values indicating higher edge density in the identified cluster when compared to the density of edges expected in a random cluster. As our edge weights represent the similarity between two tokens, we seek to maximise this metric. Modularity is defined as:
+\begin{equation}
+f_M(A^h,\mathcal{B}) = \frac{1}{4m} \sum_{i,j} \left[A^h_{ij} - \frac{\sum_{i}A^h_{ij} \cdot \sum_{j}A^h_{ij}}{2m}\right] \delta(c_i, c_j)
+\end{equation}
+where $m$ is the total edge weight in the graph, $c_i$ is the community (episodic event) to which node $i$ is assigned, and $\delta$ is the Kronecker delta function. 
+Conductance, on the other hand, measures the fraction of total weighted edges cut by a given community boundary, and is defined as:
+\begin{equation}
+f_C(A^h,\mathcal{B}) = \min_{S\in V}\frac{\sum_{i \in S,j \notin S} A^h_{ij}}{\min(\text{vol}(S), \text{vol}(V \setminus S))}, \;\;\;\; \text{with}\; \text{vol}(S) = \sum_{i,j\in S}A_{ij},\; \text{vol}(V\setminus S) = \sum_{i,j\notin S}A_{ij}
+\end{equation}
+where $S = \{b_i,b_i+1,...,b_{i+1}\}$ is a subset of all nodes $V = \{b_1,b_1+1,...,b_k\}$ in the induced graph, with $b_i \in \mathcal{B}$. Lower conductance values indicate better community structure.
+Our boundary refinement algorithm iteratively adjusts the initial surprise-based boundaries to optimise these metric functions. While our best results are achieved using modularity, we also include comparisons with conductance-based boundary refinement to provide a comprehensive analysis.
+The overall process is summarized in Algorithm~\ref{alg:segmentation}.
+
+    
+This algorithm first identifies initial boundaries based on the surprise threshold $T$, then refines these boundaries by finding the optimal position $\hat{\beta}$ between each pair of consecutive initial boundaries $(\alpha, \beta)$ that optimises the chosen metric function $f$ (either maximising modularity or minimising conductance). This process ensures that the final segmentation (1) captures points of high surprise and (2) optimises for coherent information grouping. The boundary identification step incurs negligible computational cost, as it only evaluates existing LLM outputs. 
+\subsection{Memory Retrieval}
+
+When inferring a new token, a number of episodic events are selected and become a part of the (extended) context window of the underlying LLM. Our memory retrieval process employs a two-stage mechanism to select relevant episodic events for the LLM's context window (Fig.~\ref{fig:architecture}C). First, we retrieve $k_s$ events using $k$-NN search based on dot product similarity between the current query and representative tokens of each event. These representatives, selected as per \citet{xiao2024infllm}, are the most influential tokens within each event. For large memory stores, we utilise approximate $k$-NN~\citep{douze2024faiss} to maintain efficiency. These $k_s$ events, retrieved based on their similarity to the current query, form a part of the LLM's context window that we refer to as the \textit{similarity buffer}.
+
+The second stage of our retrieval process introduces another buffer, which we refer to as the \textit{contiguity buffer}, designed to maintain temporal context. Implemented as a queue of size $k_c$, this buffer promotes temporal relationships in retrieval. When an event is retrieved, we also enqueue its neighboring events (within $\pm n$ positions in the original sequence) into this buffer. This mechanism enables the LLM's ``induction'' attention heads to exhibit the contiguity and asymmetry effects discussed in Section~\ref{sec:background:em_models}. The queue structure allows for a natural decay of temporal context as new events are processed, with older or repeated events being dequeued as new ones are added. In total, $k = k_s + k_c$ events are added to the context window, striking a balance between relevance and temporal relationships in a manner analogous to human episodic memory retrieval. Note that each layer retrieves and attends to these $k$ events individually, allowing it to potentially focus on different parts of the context.
+
+
+
+
+\section{Experiments}
+
+\subsection{Performance of EM-LLM on long-context tasks} 
+
+\paragraph{Comparison with KV-retrieval-based LLMs}
+At the time of writing, InfLLM is considered to be the SOTA KV-retrieval method on long-context benchmarks (LongBench, $\infty$-Bench), as well as being the only method which uses group-based k-NN retrieval in LLMs on such benchmarks. We, therefore, employ this model as our first baseline for comparison with our own methods.
+
+\begin{table}[t!]
+\centering
+\setlength{\tabcolsep}{3.6pt}
+\scalebox{0.88}{
+\begin{tabular}{p{1.0cm}|l|cccccc|c|cccccc}
+\toprule
+\multirow{2}{*}{\textbf{\parbox[t]{1.1cm}{\raggedright Base LLM}}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{6}{c}{\textbf{LongBench}}  &  & \multicolumn{6}{c}{\textbf{$\infty-$Bench}}\\
+& & SQA & MQA & Sum & FSL & Ret & Cod &  \textbf{Avg.} & C.D & M.F & MC & R.KV & R.P & R.N \\
+\midrule
+\multirow{2}{*}{\parbox[t]{1.1cm}{\raggedright Mistral v2}} & InfLLM (4k+2k) & 
+\textbf{33} & 25.5 & 27.1 & 66.1 & 64 & 54.8 & 41.9 & \textbf{29.4} & 26.6 & \textbf{43.2} & 95.6 & 100 & 99.8\\
+& EM-LLM$_\text{SM+C}$ & 32.9 & \textbf{27} & \textbf{27.2} & \textbf{66.8} & \textbf{84.1} & \textbf{54.8} & \textbf{43.7} & 28.2 & \textbf{27.1} & 42.8 & \textbf{99} & 100 & 99.8\\
+\midrule
+\multirow{2}{*}{\parbox[t]{1.1cm}{\raggedright LLaMA 3}} & InfLLM (4k+4k) & 38.5 & 36.9 & 27 & 69 & 84 & \textbf{53.2}  & 47 & 30.5 & \textbf{23.7} & \textbf{43.7} & \textbf{5}  & 100 & 99 \\
+& EM-LLM$_\text{S}$ & \textbf{39.3} & \textbf{37.7} & \textbf{27.0} & \textbf{69.2} & \textbf{87.5} & 50.3 & \textbf{47.2} & \textbf{31.7} & 16.9 & 40.6 & 4.2 & 100 & \textbf{99.5} \\
+\midrule
+\multirow{2}{*}{\parbox[t]{1.1cm}{\raggedright LLaMA 3.1}} & InfLLM (4k+4k) & \textbf{41.4} & 40.7 & 29 & 69 & 97 & \textbf{64.2} & 51.1 & 22.6 & 33.7 & 46.7 & 81 & 100 & 100 \\
+& EM-LLM$_\text{SM}$ & 41.2 & \textbf{41.3} & \textbf{29.2} & \textbf{69.1} & \textbf{98.5} & 64.1 & \textbf{51.3} & 22.6 & \textbf{34} & \textbf{47.6} & \textbf{90.2} & 100 & 100 \\
+\midrule
+\multirow{2}{*}{\parbox[t]{1.1cm}{\raggedright Phi 3}} & InfLLM (1k+3k) & 28.4 & 24.9 & 25.6 & 52.9 & 7.5 & 57 & \multicolumn{1}{c}{34.5} \\
+& EM-LLM$_\text{S}$ & \textbf{29.2} & \textbf{27.1} & \textbf{25.9} & \textbf{53.5} & \textbf{10} & 57 & \multicolumn{1}{c}{\textbf{35.4}} \\
+\cmidrule(lr){1-9}
+\multirow{2}{*}{\parbox[t]{1.1cm}{\raggedright Phi 3.5}} & InfLLM (1k+3k) & 31.7 & 28.5 & 23.9 & \textbf{56.3} & 11.5 & \textbf{40.3} & \multicolumn{1}{c}{34.2} \\
+& EM-LLM$_\text{S}$ & \textbf{31.8} & \textbf{31.9} & \textbf{24.5} & 55.5 & \textbf{13} & 39.5 & \multicolumn{1}{c}{\textbf{34.9}} \\
+\cmidrule(lr){1-9}
+\end{tabular}
+}
+\caption{EM-LLM performance on LongBench (grouped tasks) and $\infty$-Bench compared to our baseline InfLLM. \textbf{S}: surprise threshold, \textbf{SM}: surprise threshold and refinement with modularity, \textbf{S+C}: surprise threshold and contiguity buffer, \textbf{SM+C}: surprise, refinement and contiguity buffer. Each row indicates the number of local + retrieved tokens (eg. 4k+2k) used for both InfLLM and EM-LLM.}
+\label{tab:main_result}
+\end{table}
+
+Results on both benchmarks (Table \ref{tab:main_result}) show that our method is able to improve on InfLLM across 5 different base LLMs, $80\%$ of individual task groups of LongBench and on the overall average. Note that the table shows the best single method in terms of overall performance for each ablation. Notably, we see an especially large jump in performance in the retrieval (\textit{Passage}, \textit{KV}, \textit{Passkey}, \textit{Number}) and QA (\textit{Narrative}, \textit{Qasper}, \textit{MultiField}, \textit{Hotpot}, \textit{2Wiki} and \textit{Musique}) tasks across all ablations, with up to a $40\%$ and $29.7\%$ improvement over InfLLM respectively. Such tasks require the model to identify and retrieve specific information within the input sequence, a challenging  test for the model's ability to accurately recall a wide range of detailed information from a large context concurrently. This substantial improvement highlights the effectiveness of our event segmentation method in enhancing long-term memory recall and retrieval accuracy in LLMs. 
+\paragraph{Comparison with RAG and full-context LLMs}
+
+To evaluate EM-LLM against prominent methods for handling long contexts, we compared its performance on LLaMA 3.1-8B with two different RAG approaches, including the current SOTA NV-Embed-v2 retriever~\citep{lee2024nvembed}, as well as with the brute-force baseline of processing all tokens directly within the LLM's softmax attention (full-context). Across most tasks in our benchmarks, EM-LLM outperformed both RAG and full-context methods (Fig.5\%$ on LongBench and by $11.5\%$ on $\infty$-Bench.
+
+This significant performance boost over RAG can be attributed to EM-LLM's ability to retrieve and incorporate relevant information at each layer individually, rather than relying on a single retrieval step as in RAG (for an illustration, see Supp. Fig.~\ref{appdx:fig__unique_block_retrieval}). By accessing more specific and contextually relevant information through layer-wise key-value retrieval, EM-LLM effectively addresses RAG's limitations in precision and lower overall performance~\citep{li2024retrievalaugmentedgenerationlongcontext}. Additionally, EM-LLM's hierarchical attention avoids the issue of diluted attention in large context windows that affects full-context models, enabling it to outperform both RAG and full-context LLMs on the LongBench dataset. Furthermore, EM-LLM demonstrated remarkable scalability by achieving $100\%$ accuracy on the \textit{Passkey.Retrieval} task with sequences up to $5$,$120$k tokens, far beyond the practical limits of full-context LLMs. This highlights EM-LLM's efficiency in handling extremely long contexts, positioning it as a powerful alternative for long-context processing.
+
+
+\subsection{Human and LLM surprise cluster similar tokens together}\label{sec:sub__human_analysis}
+As mentioned in Section~\ref{sec:method__memory_formation}, we employ modularity and conductance as two refinement objectives in our boundary refinement algorithm, due to their qualities in assessing the intra- and inter-event similarities between individual tokens. We will now use such metrics to compare various event segmentation methods, including human event segmentation data. Additionally, we introduce one further, simple metric for this experiment: the ratio between intra- and inter-community similarity (I/IS), calculated for each head and community $S$ as follows:
+\begin{equation}\label{intra_inter_metric}
+    \text{intra} = \sum_{i\in S,j\in S}A_{ij},\qquad \text{inter} = \sum_{i\in S,j\notin S}A_{ij},\qquad \text{I/IS} \equiv \frac{\text{intra}}{\text{inter}}
+\end{equation}
+\citet{kumar2023bayesian} found strong correlations between human-perceived events and prediction errors across 3 short podcasts (7-30 minutes on average), when processing the corresponding transcript with an LLM. Taking advantage of such human-annotated data and results from previous studies on this dataset~\citep{michelmann2021moment,lositsky2016neural}, we compare the segmentation quality and correlation with human segmentation for each of our methods (\ref{fig:humans_llama2}) using our similarity metrics.
+
+\begin{figure}[t!]
+    \setlength{\abovecaptionskip}{0pt}
+    \centering
+    \includegraphics[width=\linewidth]{Fig4.pdf}
+ \textbf{(A)} Difference in metrics for the cohesion and separation of KV cache of each LLaMA2 layer. The graphs report the difference of each method with the corresponding random segmentation. \textbf{(B)} Distance between human reports and different methods. 
+    In both sets of results, fixed methods (\textit{F}, \textit{FM}, \textit{FC}) perform worse than their surprise-based counterparts (\textit{S}, \textit{SM}, \textit{SC}) with InfLLM's method (\textit{F}) performing worse than random. }
+    \label{fig:humans_llama2}
+\end{figure}
+
+As shown in Fig.~\ref{fig:humans_llama2}A, human-perceived events achieve significantly higher scores in similarity metrics compared to fixed or random events, suggesting that surprise is indeed an important factor for humans in their own perception of events. Furthermore, surprise-only segmentation ($\mathbf{S}$) achieves very similar results to humans, while the addition of our refinement algorithm ($\mathbf{SM}$, $\mathbf{SC}$, $\mathbf{FM}$, $\mathbf{FC}$) significantly improves performance. Fig.~\ref{fig:humans_llama2}B further shows that surprise-based methods ($\mathbf{S}$, $\mathbf{SM}$, $\mathbf{SC}$), consistently identify event boundaries that are closest to those perceived by humans.
+
+\subsection{Comparing segmentation methods}\label{sec:sub_comparing_seg_methods}
+
+Our experiments on the PG-19 dataset (see Table~\ref{tab:segmentation_methods}) clearly demonstrate that surprise-based segmentation with refinement ($\mathbf{SM}$, $\mathbf{SC}$) provides the best results in terms of event similarity metrics, regardless of the base LLM used. While the surprise-only method ($\mathbf{S}$) achieves decent results, we observe that refinement is especially adept to improving this performance with regards to our metrics, as it is directly optimising for such an objective. Interestingly however, the fixed-based refinement methods ($\mathbf{FM}$, $\mathbf{FC}$) do not reach the same performance as their surprise-based counterparts, further showing that the initial segmentation with a surprise threshold is crucial to achieving the best possible balance in intra-/inter-similarity with our methods.
+
+\subsection{Similarity, Contiguity, Recency and Temporal Order}
+\begin{table}[t!]
+    \centering
+    \newcolumntype{C}{ @{}>{${}}c<{{}$}@{} }
+    \scalebox{0.85}{
+    \begin{tabular}{p{1.1cm}rrrrrrr}
+    \toprule
+    \textbf{LLM} & \textbf{Metric} & \multicolumn{1}{c}{\textbf{F}} & \multicolumn{1}{c}{\textbf{FM}} & \multicolumn{1}{c}{\textbf{FC}} & \multicolumn{1}{c}{\textbf{S}} & \multicolumn{1}{c}{\textbf{SM}} & \multicolumn{1}{c}{\textbf{SC}} \\ \midrule
+    \multirow{3}{*}{\parbox{1.1cm}{\centering Mistral-7B}}& Mod $\uparrow$ & -2.3 $\pm$ 4.1 & 29.2 $\pm$ 44.0 & 6.7 $\pm$ 25.9 & 18.6 $\pm$ 29.6 & \textbf{39.9 $\pm$ 55.5} & 29.5 $\pm$ 42.7 \\
+    & Con $\downarrow$ & 9.1 $\pm$ 8.7 & -16.9 $\pm$ 6.7 & -12.5 $\pm$ 9.6 & -23.6 $\pm$ 9.4 & -24.6 $\pm$ 9.3 & \textbf{-27.6 $\pm$ 9.8} \\
+    & I/IS $\uparrow$ & -4.3 $\pm$ 4.0 & 31.2 $\pm$ 21.4 & 3.7 $\pm$ 14.9 & 17.9 $\pm$ 17.0 & \textbf{35.3 $\pm$ 27.7} & 21.6 $\pm$ 22.4 \\ \midrule
+    \multirow{3}{*}{\parbox{1.1cm}{\centering LLaMA2-7B}}& Mod $\uparrow$ & -1.1 $\pm$ 4.3 & 13.4 $\pm$ 19.5 & 0.6 $\pm$ 7.3 & 8.7 $\pm$ 16.0 & \textbf{18.7 $\pm$ 26.4} & 11.5 $\pm$ 19.4 \\
+    & Con $\downarrow$ & 11.9 $\pm$ 9.8 & -18.8 $\pm$ 7.4 & -13.7 $\pm$ 10.9 & -29.5 $\pm$ 10.2 & -29.7 $\pm$ 10.1 & \textbf{-33.3 $\pm$ 10.3} \\
+    & I/IS $\uparrow$ & -3.8 $\pm$ 3.7 & 20.7 $\pm$ 184.7 & -1.1 $\pm$ 6.8 & 15.0 $\pm$ 880.0 & \textbf{25.0 $\pm$ 19.9} & 16.5 $\pm$ 15.4 \\ \midrule
+    \multirow{3}{*}{\parbox{1.1cm}{\centering LLaMA3-8B}}& Mod $\uparrow$ & -1.6 $\pm$ 3.6 & 18.9 $\pm$ 25.6 & 0.9 $\pm$ 11.8 & 13.1 $\pm$ 21.5 & \textbf{27.0 $\pm$ 35.6} & 18.3 $\pm$ 28.5 \\
+    & Con $\downarrow$ & 11.3 $\pm$ 9.5 & -20.3 $\pm$ 6.9 & -14.6 $\pm$ 11.4 & -29.7 $\pm$ 9.2 & -30.6 $\pm$ 9.2 & \textbf{-33.9 $\pm$ 9.6} \\
+    & I/IS $\uparrow$ & -3.8 $\pm$ 3.1 & 24.5 $\pm$ 13.9 & -1.1 $\pm$ 5.8 & 15.7 $\pm$ 11.0 & \textbf{28.1 $\pm$ 16.1} & 16.4 $\pm$ 12.2 \\ \bottomrule
+    \end{tabular}
+    }
+    \caption{Comparison with graph-theoretic metrics in the KV cache of different LLMs and segmentation methods using the PG-19 dataset and $\gamma=10^{-3}$. Reported values are the difference with random segmentation. Mod: modularity$\times 10^5$, Con: conductance, I/IS: intra/inter-similarity $\times 10^3$.}
+    \label{tab:segmentation_methods}
+\end{table}
+
+As demonstrated in Tables~\ref{tab:main_result} and~\ref{tab:segmentation_methods}, along with Fig.~\ref{fig:humans_llama2}, each of our ablations show various positive improvements on InfLLM. As mentioned in Section~\ref{sec:sub_comparing_seg_methods}, refinement has a strong positive impact in improving our similarity metrics. This is seen to translate well to model performance in our experiments, with the addition of refinement achieving the best performance in $60\%$ of tasks across LongBench and $\infty$-Bench (see Tables~\ref{tab:appdx__mistral_main_results}-\ref{tab:appdx__phi35_main_results}), as well as agreeing with human data (Fig.~\ref{fig:humans_llama2}). The effects of contiguity are also clearly demonstrated, with the addition of our contiguity buffer achieving the best performance in $44\%$ of tasks. Furthermore, these methods are seen to be complementary, often improving on both individual additions.
+
+However, the fact that certain tasks still appear to benefit more from either surprise-only, refinement, or contiguity, is an interesting result. This is likely due to the nature of the tasks and the varying importance of contiguity across these tasks. 
+Where contiguity is not crucial, adding such a buffer to our context window also reduces the size of the similarity buffer, and therefore provides potentially less directly relevant events. This is compatible with our own findings that a contiguity buffer that is as big or smaller than the similarity buffer yields the best results (see Fig.~\ref{appdx:fig_hierarcy_ctg_ratios}), suggesting that the similarity buffer is still the most crucial part of our approach. This is especially the case when combined with refinement, which we expect is due to the improved similarity of refined events, hence further reducing the need for contiguous events.
+
+
+\section{Discussion}
+
+
+\paragraph{Human studies}
+
+Significant correlations have been found between human event segmentation and prediction errors in both LLMs~\citep{kumar2023bayesian} and video models~\citep{Fountas:2022,mariola2022event}. Our results add to this growing body of evidence, demonstrating that LLM-based surprise can serve as a proxy for human event segmentation, in multiple levels of hierarchical abstraction, and that the resulting event structure in EM-LLM's attention heads correlates strongly with human-perceived events. This finding creates a more direct, low-level connection between LLM mechanisms and human cognitive processes. 
+Furthermore, our model's use of both similarity-based and temporally contiguous retrieval mechanisms parallels human memory retrieval patterns, allowing for the expression of robust phenomena found in human memory research~\citep{Howard:2002:TCM}. The temporal contiguity effect, where items experienced close together in time are often recalled together, is a robust phenomenon in human memory research~\citep{Howard:2002:TCM}. 
+Further experiments could deepen our understanding of the connections between EM-LLM and human episodic memory. Following \citet{Michelmann:2023:LLMs_segmentation_like_humans}, one could test whether the timing of the event boundaries or the degree of modularity per level that our method produces is closer on average to the human consensus, than individual human subjects. Additionally, exploring how different ratios of the contiguity buffer affect the reproduction of human memory biases, and investigating the impact of recency and initial surprise on event recall, could reveal the extent to which EM-LLM exhibits biases found in free recall studies.
+Furthermore, EM-LLM's architecture with differentiated context handling (Section~\ref{sec:architecture}) invites comparisons to cognitive models of human memory beyond episodic. The local context, holding recent and task-relevant information, resembles the limited-capacity working memory system described by \citet{baddeley2003working}. Given that EM-LLM's broader context window includes both local context and retrieved memories, it aligns more closely with \citet{ericsson1995long}'s concept of long-term working memory, which allows rapid access to relevant long-term information beyond traditional capacity limits. Alternatively, our architecture parallels \citet{cowan2001magical}'s embedded-processes model, where the local context is the ``focus of attention'', and the full context window represents the activated portion of long-term memory. Future work could explore these analogies further, using EM-LLM as a test-bed for hypotheses about human memory and working memory capacity limits. Inspired by Baddeley's multi-component model, integrating modality-specific buffers into EM-LLM might enhance performance on multi-modal tasks.
+\paragraph{Machine learning}
+In refining event boundaries, we utilised modularity and conductance as metrics for evaluating community structure in the similarity graph of attention keys. While effective in our experiments, we acknowledge that numerous other methods for graph clustering and sequence segmentation could potentially be applied~\citep{Fortunato:2010,Yang:2016}. Our choice was motivated by their established theoretical foundations and computational efficiency, though comparative studies suggest performance can vary based on network characteristics~\citep{Yang:2016}. Interestingly, our surprise-based initial boundary detection shares similarities with Bayesian online change-point detection~\citep{Adams:2007:BCPD}, suggesting potential avenues for integrating time series analysis techniques into LLM context processing. Future work could explore whether more sophisticated segmentation or clustering algorithms could improve EM-LLM's performance, particularly for extremely long contexts or streaming data scenarios. Such investigations could enhance our model and contribute to understanding how information is structured and processed in LLMs, bridging the gap between traditional sequence analysis and LLM context processing.
+
+Looking ahead, promising directions for future research include extending our segmentation processes to operate at each layer of the Transformer independently. This could lead to more nuanced and hierarchical representations of episodic memories, following the underlying semantic structure of the input more closely. Additionally, exploring how EM-LLM could be utilised to enable imagination and future thinking has great potential for advancing model-based reinforcement learning and continual learning techniques in LLMs. By leveraging its event-based structure to simulate potential future scenarios or recall past experiences in novel contexts, EM-LLM could enhance an LLM's ability to plan, adapt, and learn continuously from new information.
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduced EM-LLM, a flexible architecture that integrates key aspects of human episodic memory and event cognition into Transformer-based LLMs. Our approach enables existing LLMs to effectively process vastly extended contexts without the need for pre-training, demonstrating superior performance on long-context tasks compared to the corresponding SOTA. By combining surprise-based event segmentation, graph-theoretic boundary refinement, and a two-stage memory retrieval process, EM-LLM offers a promising path toward virtually infinite context windows. This capability has the potential to revolutionize interactions with LLMs, enabling continuous, personalised exchanges over extended periods and serving as a viable alternative to traditional RAG techniques. 
+Finally, by bridging insights from cognitive science with machine learning, our approach not only enhances the performance of LLMs on long-context tasks but also provides a scalable framework for computational modelling of episodic and event cognition. We hope this study inspires the community to expand research at the intersection of LLMs and human memory.
+
+
+
+
+

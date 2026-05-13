@@ -1,0 +1,284 @@
+\title{Multi-Robot Motion Planning with Diffusion Models}
+
+\begin{abstract}
+
+Diffusion models have recently been successfully applied to a wide range of robotics applications for learning complex multi-modal behaviors from data. However, prior works have mostly been confined to single-robot and small-scale environments due to the high sample complexity of learning multi-robot diffusion models. In this paper, we propose a method for generating collision-free multi-robot trajectories that conform to underlying data distributions while using only single-robot data.
+Our algorithm, Multi-robot Multi-model planning Diffusion (MMD), does so by combining learned diffusion models with classical search-based techniques---generating data-driven motions under collision constraints. 
+Scaling further, we show how to compose multiple diffusion models to plan in large environments where a single diffusion model fails to generalize well. We demonstrate the effectiveness of our approach in planning for dozens of robots in a variety of simulated scenarios motivated by logistics environments.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Multi-robot motion planning (MRMP) is a fundamental challenge in many real-world applications where teams of robots have to work in close proximity to each other to complete their tasks.
+In automated warehouses, for example, hundreds of mobile robots and robotic manipulators need to coordinate with each other to transport and exchange items while avoiding collisions. Learning motions from demonstrations can oftentimes allow robots to complete tasks they couldn't otherwise, like navigating a region in a pattern frequently followed by human workers; however, it is unclear how to best incorporate demonstrations in MRMP. In fact, MRMP at its simplest form, where robots are only concerned with finding short trajectories between start and goal configurations, is already known to be computationally intractable~\citep{hopcroft1986reducing}---significantly harder than single-agent motion planning due to the complexity of mutual interactions between robots.
+Attempting to simplify the problem, various approximate formulations have been proposed in the literature. For example, a popular approach is to formulate the problem as a multi-agent path finding problem (MAPF)~\citep{stern2019multi} by discretizing space and time. While the latest MAPF planners~\citep{li2021eecbs,okumura2024engineering} can compute near-optimal plans and scale to hundreds of agents, they make strong assumptions, such as constant velocities and rectilinear movements that limit their real-world application and reduce their ability to generate complex behaviors learned from demonstrations.
+In single-agent motion planning, methods that learn to plan from data~\citep{xiao2022motion} have been widely used to circumvent similar limitations resulting from inaccurate models~\citep{vemula2021cmax++}, partial observability~\citep{choudhury2018data} and slow planning~\citep{sohn2015learning,qureshi2020motion}.
+More recently, diffusion models (DM) have emerged as the generative model of choice for learning visuomotor manipulation policies from demonstrations~\citep{chi2024diffusionpolicy}, motion planning~\citep{carvalho2023mpd}, and reinforcement learning~\citep{janner2022diffuser}. However, there has been relatively little work on extending these ideas to multi-robot motion planning. This is due to the twin challenges of generating high quality multi-agent data and the \emph{curse of dimensionality}, i.e., significantly higher sample complexity of learning multi-robot models.
+In this paper, we propose a data-efficient and scalable multi-robot diffusion planning algorithm, \textbf{M}ulti-robot \textbf{M}ulti-model planning \textbf{D}iffusion (MMD), that addresses both these challenges by combining constraint-based MAPF planners with diffusion models.
+Importantly, our approach calls for learning only \emph{single-robot diffusion models}, which does away with the difficulty of obtaining multi-robot interaction data and breaks the curse of dimensionality. MMD generates collision-free trajectories by \emph{constraining} single-robot diffusion models using our 
+novel spatio-temporal guiding functions and choosing constraint placement via strategies inspired by MAPF algorithms.
+Our contributions in this paper are threefold:
+\begin{itemize}
+    \item We propose a data-efficient framework for multi-robot diffusion planning inspired by constraint-based search algorithms.
+    \item We provide a comparative analysis of the performance of five MMD algorithms, each based on a different MAPF algorithm, shedding light on their applicability to coordinating robots leveraging diffusion models for planning.
+    \item We show that we can scale our approach to arbitrarily large and diverse maps by learning and composing multiple diffusion models for each robot.
+\end{itemize}
+
+
+Our experimental results from varied motion planning problems in simulated scenarios motivated by logistics environments suggest that our approach scales favorably with both the number of agents and the size of the environment when compared to alternatives. 
+
+
+
+
+\section{Preliminary}
+
+\label{sec:preliminary}
+
+In this section we define the MRMP problem and provide relevant background on constraint-based MAPF algorithms and on planning with diffusion models. Sec. \ref{sec:method} elaborates on how we combine these concepts to coordinate numerous robots that plan with diffusion models. 
+
+\subsection{Multi-Robot Motion Planning (MRMP)}
+\label{subsection:mrmp}
+
+
+
+Given $n$ robots $\robot{i}$, MRMP seeks a set of collision-free trajectories, one for each robot, that optimize a given objective function. 
+Let $\mathcal{S}^i$ be the state space of a single robot and a state be $\ve{s}^i := [\conf{i}{}, \dot{\ve{q}}^i]^\intercal \in \mathcal{S}^i$ where $\conf{i}{}$ and $\dot{\ve{q}}^i$ are the configuration and velocity of the robot. 
+Each robot has an assigned start state $\ve{s}^i_{\text{start}} \in \mathcal{S}^i$ and binary termination (goal) condition $\mathcal{T}^i: \mathcal{S}^i \to \{0, 1\}$. 
+An MRMP solution is a multi-robot trajectory $\traj{}{} = \{\traj{1}{}, \cdots \traj{n}{}\}$, where $\traj{i}{}:[0, T^i] \to \mathcal{S}^i$ represents the trajectory of robot $\robot{i}$ over the time interval $[0, T^i]$, with $T^i$ being the terminal time.  In practice, we uniformly discretize the time horizon into $H$ time steps and optimize over a sequence of states $\traj{i}{} = \{ \ve{s}^i_1, \ve{s}^i_2, ..., \ve{s}^i_H\}$.
+Subscripts, e.g., $\traj{i}{t}$, indicate indexing into a trajectory.
+Each trajectory $\traj{i}{}$ must avoid collisions between robots and with obstacles in the environment. 
+In MRMP, robots share a workspace $\mathcal{W}$ (i.e., $\mathcal{W} \subseteq \mathbb{R}^3$ for general robots and $\mathcal{W} \subseteq \mathbb{R}^2$ for robots on the plane) and occupy some volume or area within $\world$, which we denote as $\robot{i}(\conf{i}{}) \subseteq \world$ for robot $\robot{i}$ in configuration $\conf{i}{}$.
+
+The usual MRMP objective is to minimize the sum of the single-robot costs (e.g., the cumulative motion) across all robots.
+General cost functions can be defined on the trajectories, and the objective then becomes $\mathcal{J}(\traj{}{}) = \frac{1}{n} \sum_{i=1}^{n} \text{cost}(\traj{i}{})$. When learning from data, we are interested in \emph{data adherence}, i.e., the trajectories should match the underlying trajectory distribution. We define $\text{cost}_\text{data}(\traj{}{}) = \frac{1}{n}\sum_{i=1}^{n} \text{cost}_\text{data}(\traj{i}{})$ to quantify how well, on average, trajectories in $\traj{}{}$ follow their underlying data distribution. This metric is task-specific; we provide some examples in Sec. \ref{sec:experiments}.
+
+\subsection{Multi-Agent Path Finding (MAPF)}~\label{sec:mapf}
+The MAPF problem, a simpler form of MRMP, seeks the shortest collision-free \textit{paths} $\Pi=\{\path{1}{}, \path{2}{}, \cdots \path{n}{}\}$ for $n$ agents on a graph. This graph approximates their configuration space, with vertices corresponding to configurations and edges to transitions. Each \textit{path} $\path{i}{} = \{\conf{i}{1}, \cdots \conf{i}{H}\}$ is a trajectory without velocity that need not be dynamically feasible. 
+In MAPF studies, constraint-based algorithms have become popular due to their simplicity and scalability. These algorithms are effective, in part, because they avoid the complexity of the multi-agent configuration space by delegating planning to single-agent planners and avoid collision via constraints. For instance, if a configuration $\conf{i}{}$ for $\robot{i}$ leads to a collision at time (or interval) $t$, this can be prevented by applying the constraint set $C = \{\vconstr{i}{t}\}$ to the path $\path{i}{}$, thereby preventing the configuration from being used at that time.
+Several MAPF algorithms, including Prioritized Planning (PP) \citep{erdmann1987multiple} and Conflict-Based Search (CBS) \citep{sharon2015conflict}, use this mechanism to force single-agent planning queries to avoid states that would lead to collisions. We detail these methods in Sec. \ref{sec:method} and explain how, despite traditionally being used for MAPF, their principles can be applied to coordinating robots in continuous space that generate data-driven trajectories via diffusion models.
+
+\subsection{Planning with Diffusion Models}
+Motion planning diffusion models are generative models that learn a denoising process to recover a dynamically-feasible trajectory from noise \citep{carvalho2023mpd, janner2022diffuser}. Given a dataset of multi-modal trajectories, diffusion models aim to generate new trajectories that follow the underlying distribution of the data. Additionally, these trajectories may be conditioned on a task objective $\mathcal{O}$, for example, goal condition and collision avoidance. Specifically, given a task objective $\mathcal{O}$, motion planning diffusion models aim to sample from the posterior distribution of trajectories:
+\begin{equation}
+    \begin{aligned}
+        &\argmax_{\traj{i}{}} \log p(\traj{i}{} | \mathcal{O}) = \argmax_{\traj{i}{}} \left( \log p(\mathcal{O} | \traj{i}{}) + \log p(\traj{i}{})\right)\\ 
+        & = \argmin_{\traj{i}{}} \left(-\log p(\mathcal{O} | \traj{i}{}) - \log p(\traj{i}{})\right) = \argmin_{\traj{i}{}} \left(\mathcal{J}(\traj{i}{}) - \log p(\traj{i}{})\right)
+    \end{aligned}
+    \label{eq:diffuionobj}
+\end{equation}
+
+The first term of the objective, $\mathcal{J}(\traj{i}{})$, can be interpreted as a standard motion planning objective \citep{carvalho2023mpd}, in which we try to minimize a cost function (or, equivalently, maximize a reward function). The second term, $\log p(\traj{i}{})$, is the prior corresponding to the data adherence discussed in Sec. \ref{subsection:mrmp}. 
+
+Diffusion models are a type of score-based model \citep{song2020score}, where the focus is on learning the score function (the gradient of the data distribution’s log-probability) rather than learning the probability distribution directly.
+The score function is learned using \textit{denoising score matching}, a technique for learning to estimate the score by gradually denoising noisy samples. 
+The diffusion inference process consists of a $K$-step denoising process that takes a noisy trajectory $^{K}\traj{i}{}$ and recovers a feasible trajectory $^{0}\traj{i}{}$, which also follows the data distribution. We use the notation $^{0}\traj{i}{},^{1}\traj{i}{},\cdots , ^{K}\traj{i}{}$ to denote the evolution of the trajectory in the diffusion process.
+To generate a trajectory $^0\traj{i}{}$ from a noise trajectory $^K\traj{i}{} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, we use Langevin dynamics sampling \citep{denoising_diffusion_models}, an iterative process that is a type of Markov Chain Monte Carlo method. At each denoising step $k \in \{K,\dots, 1\}$, a trajectory-space mean $\mu^i_{k-1}$ is sampled from the network $\mu_\theta$:
+\begin{equation}
+    \mu^i_{k-1} = \mu_\theta(^k\traj{i}{})
+\end{equation}
+Now, with the variance prescribed by a deterministic schedule $\{\beta_k \mid k \in \{K, \cdots, 1\}\}$, the next trajectory in the denoising sequence is sampled from the following distribution:
+\begin{equation}
+    ^{k-1}\traj{i}{} \sim \mathcal{N} \big(\mu^i_{k-1} + \underbrace{\eta \beta_{k-1} \nabla_{\traj{}{}} \mathcal{J}(\mu_{k-1}^{i})}_{\text{Guidance}}, \beta_{k-1} \big)
+\end{equation}
+The term $\nabla_{\traj{}{}} \mathcal{J}(\mu_{k-1}^{i})$ is the gradient of additional trajectory-space objectives (described in Eq. \ref{eq:diffuionobj}) imposed on the generation process. This term, also called \emph{guidance}, can include multiple weighted cost components, each optimizing for a different objective. For instance, we can have $\mathcal{J} = \lambda_\text{obj}\mathcal{J}_\text{obj} + \lambda_\text{smooth}\mathcal{J}_\text{smooth} $ to penalize trajectories in collision with objects via $\mathcal{J}_\text{obj}$  and to encourage the trajectory to be dynamically feasible via $\mathcal{J}_\text{smooth}$. We denote the trajectory generation process queried with a start state $\state{i}{\text{start}}$, goal condition $\mathcal{T}^i$, and costraint set $C$ (Sec. \ref{sec:constraints_in_diffusion}) as $f_\theta^i(\state{i}{\text{start}}, \mathcal{T}^i, C)$.
+
+
+
+
+
+\input{9_algorithm_and_method_figure}
+
+
+\section{Method}
+
+\label{sec:method}
+We present Multi-robot Multi-model planning Diffusion (MMD), an algorithm for flexibly scaling diffusion planning to multiple robots and long horizons using only single-robot data.
+MMD imposes constraints on diffusion models to generate collision-free trajectories, addressing three main questions: \textit{how}, \textit{when}, and \textit{where} to impose them. First, we discuss integrating spatio-temporal constraints into the diffusion denoising process through guiding functions. Next, we introduce five MMD algorithms, each inspired by a MAPF algorithm regarding constraint placement and timing. Finally, we demonstrate how to sequence multiple models for long-horizon planning.
+
+
+\subsection{Constraints in Diffusion Models}
+\label{sec:constraints_in_diffusion}
+An intuitive and effective constraint for multi-robot motion planning in robotics is the \textit{sphere constraint}
+\footnote{The sphere constraint generalizes the MAPF vertex constraint, as it constrains robots from visiting the point of collision itself instead of a single colliding configuration corresponding to a vertex in a graph. In MAPF, the point of collision and the graph vertex coincide.}
+\citep{li2019multi, shaoul2024gencbs}. 
+It is defined by a point $p \in \mathcal{W}$ and restricts robots from being closer to $p$ than a radius $r\in\mathbb{R}$ at a certain time range $\mathbf{t}:=[t-\Delta t,t+\Delta t]$.
+The sphere constraint can be \textit{imposed as a soft-constraint} on a diffusion model by incorporating it in its guiding function $\mathcal{J}(\cdot)$. This can be done by adding a cost term $\mathcal{J}_\text{c}$ that repels the robots from the sphere's center point $p$. Let $^k\traj{i}{}$ be the generated trajectory for $\robot{i}$ at step $k$ of the diffusion denoising process, and $\sconstr{i}{r}{p}{\mathbf{t}}$ be a sphere constraint centered at $p$ with radius $r$ over time interval $\mathbf{t}$. The guidance cost term for $\robot{i}$ can be defined as:
+\begin{equation}
+    \label{eq:sphere_guidance}
+    \mathcal{J}_\text{c} (^k\traj{i}{t}) := 
+    \sum_{t\in\mathbf{t}} \max \left( \epsilon \cdot r -d\left({\robot{i}(^k\traj{i}{t}), p}\right), \; 0\right)
+\end{equation}
+with $d\left({\robot{i}(^k\traj{i}{t}), p}\right)$ as the distance from point $p$ to $\robot{i}$ at $^k\traj{i}{t}$, and $\epsilon \geq 1$ a padding factor.
+\subsection{Constraining Strategies}
+\label{sec:constraint_strategies}
+To determine \emph{when} and \emph{where} to apply constraints on diffusion models, MMD draws on MAPF strategies like CBS and PP. We propose five MMD variants, each inspired by a state-of-the-art search algorithm. Alg. \ref{alg:mmd_cbs} provides a summary of these methods and we elaborate upon them here.
+
+\textbf{MMD-PP.} 
+Prioritized Planning sequentially plans \textit{paths} for robots $\robot{i} \; \forall \; i \in \{1, \dots n\}$. This ordering of robots is treated as a priority ordering in that, on each call, robot $\robot{i}$ must generate a path $\path{i}{}$ that avoids all $\robot{j}$ that previously planned. Robot $\robot{i}$ does so by respecting the constraints $C:= \{\vconstr{i}{t} \mid \robot{i}(\conf{i}{}) \cap \robot{j}(\path{j}{t}) \neq \emptyset \; \forall t\}$. 
+To translate this approach to \textit{trajectory} generation with diffusion models, \emph{MMD-PP} represents robot volumes using spheres, as is common in robotics, and uses the sphere representation of higher-priority robots as sphere soft-constraints for lower-priority robots.
+Specifically, let a high-priority robot $\robot{j}$ be modeled with $M_j$ spheres and $p^j_m$ and $r^j_m$ be the position and radius of the $m^\text{th}$ sphere at time $t$. Then, lower-priority robot $\robot{i}$ generates a trajectory under the constraint set $\{\sconstr{i}{r^j_m}{p^j_m}{t} \mid m \in \{1, \cdots M_j\}, j\prec i\}$, where $\prec$ indicates priority precedence. In Alg. \ref{alg:mmd_cbs}, $\langle \robot{i}, \traj{}{} \rangle$ means that all trajectories of $\robot{j\neq i}$ in $\traj{}{}$ must be similarly avoided.
+\textbf{MMD-CBS.} CBS is a popular MAPF solver that combines ``low-level'' planners for individual agents with a ``high-level'' constraint tree (CT) to resolve conflicts (i.e., collisions). The algorithm initiates by creating the root node $N_\text{root}$ in the CT, planning paths for each agent independently, and storing these paths in $N_\text{root}.\Pi$. 
+CBS repeatedly extracts nodes $N$ from the CT and inspects $N.\Pi$ for conflicts. If no conflicts exist, the algorithm terminates, returning $N.\Pi$. Otherwise, CBS selects a conflict time $t$ where agents $\robot{i}$ and $\robot{j}$ collide at positions $\conf{i}{}=\path{i}{t}$ and $\conf{j}{}=\path{j}{t}$ in $N.\Pi$. 
+CBS then splits node $N$ into two new CT nodes, $N_i$ and $N_j$, each inheriting the (initially empty) constraint set $N.C$ and paths $N.\Pi$ from $N$, and incorporating a new constraint for preventing the respective agent from occupying the conflict position at time $t$. For example, $N_i.C \gets N.C \cup \{\vconstr{i}{t}\}$ for $\robot{i}$. 
+Paths for $\robot{i}$ and $\robot{j}$ are then replanned using low-level planners under the updated constraints in $N_i.C$ and $N_j.C$. The new CT nodes, with updated paths in $N_i.\Pi$ and $N_j.\Pi$, are added to the CT.
+\emph{MMD-CBS} follows the general CBS structure. It keeps a CT of nodes $N$, each with trajectories $N.\traj{}{}$, and uses motion planning diffusion models as low-level planners. The algorithm identifies a \textit{collision point} $p$ for each conflict and resolves it by imposing sphere soft-constraints centered at $p$ on affected robots (see Fig. \ref{fig:mmd_conflict_resolution} for an illustration and Sec. \ref{sec:impl_details} for parameter values). 
+
+\textbf{MMD-ECBS.} Enhanced-CBS (ECBS) \citep{barer2014suboptimal} informs CBS low-level planners of the paths of other robots in the same CT node and steers the search towards solutions that are more likely to be collision-free. 
+To emulate this in diffusion-based trajectory generation, MMD-ECBS imposes two types of soft constraints: ``weak'' and ``strong.'' For each robot $\robot{j}$ with a trajectory in the CT node $N$, a weak soft-constraint that forbids $\robot{i}$ from colliding with any other $\robot{j}$ with $\traj{j}{} \in N.\traj{}{}$ is imposed. This is done in a similar way to MMD-PP but with a lower penalty value (Sec. \ref{sec:impl_details}). The strong constraints are the same as those in MMD-CBS, resolving previously observed conflicts.
+
+\textbf{Reusing Experience in CBS.}
+Recent studies indicate that leveraging previous single-robot solutions to guide replanning enhances the efficiency of CBS \citep{shaoulmishani2024xcbs}. This is primarily because the motion planning problem between a CT node and its successors is nearly identical, with the only difference being a single constraint, making planning from scratch wasteful. This can be utilized in MMD replanning by initially adding noise to the stored trajectory for a limited number of steps ($3$ in our experiments; regular inference uses $25$ steps) and then denoising with the new soft-constraints. This approach, in the context of single-robot planning, was first proposed in \cite{janner2022diffuser} and further refined in \cite{zhou2024adaptive}.
+Adding this functionality to MMD-CBS and MMD-ECBS yields our two final MMD algorithms,  \textbf{MMD-xCBS} and \textbf{MMD-xECBS}, respectively. Both reuse previous solutions to inform replanning and are otherwise unchanged.
+\subsection{Sequencing Diffusion Models for Long Horizon Planning}
+\label{sec:method_multi_tile}
+
+Diffusion models have shown notable success in learning trajectory distributions within specific contexts. However, they face challenges in modeling complex trajectory distributions and generalizing to diverse contexts (e.g., significantly different obstacle layouts). To tackle this issue, we propose utilizing an ensemble of local diffusion models rather than a single model for a single robot. Each local model is trained to capture the trajectory distribution of a particular motion pattern within a local map segment, and we combine multiple models sequentially for long-horizon single-robot planning.
+This approach offers three advantages: (1) Easier learning with simple, demonstrable motion patterns. (2) Better generalization across different contexts. (3) Effective scaling for large maps, aiding long-term planning.
+
+
+During online planning, given a specific single-robot task $\mathcal{O}^i$ (which includes the start state and the termination condition), we can query the task-relevant local diffusion models to generate a full-horizon motion plan. Motivated by \cite{mishra2023generative}, this is done by sampling from the local models in parallel, while incorporating a \textit{cross-conditioning} term that constrains the local trajectories to connect seamlessly. 
+Let $\traj{i,l}{}$ be a local trajectory sampled from a local probability distribution $p^l$. The goal of the single-robot planner is to sample from the posterior distribution of trajectories:
+\begin{subequations}
+    \begin{alignat}{2}
+    &\argmax_{\traj{i}{}} &\qquad& \log p(\traj{i}{} | \mathcal{O}) = 
+    \argmax_{\traj{i, 1}{}, \dots , \traj{i, L}{}} \log p(\traj{i, 1}{}, \dots , \traj{i, L}{} | \mathcal{O}) \label{eq:ens:optProb}\\
+    &\text{subject to} & & \traj{i, l}{1} = \traj{i, l-1}{H_{l-1}}, \forall l = 1, \dots, L \label{eq:ens:constraint1}
+    \end{alignat}
+\end{subequations}
+
+Following Eq. \ref{eq:diffuionobj}, the new objective becomes:
+\begin{equation}
+    \begin{aligned}
+        \argmin_{\traj{i, 1}{}, \dots , \traj{i, L}{}} \left(\mathcal{J} (\traj{i, 1}{}, \dots , \traj{i, L}{}) - \sum_{l=1}^{L} \log p(\traj{i, l}{})\right)
+    \end{aligned}
+    \label{eq:ensembleobj}
+\end{equation}
+In practice, MMD ensures proper sequencing of the $L$ local diffusion models by introducing constraints requiring the last state of the trajectory from model $l$ to be equal to the first state from model $l+1$ (see Eq. \ref{eq:ens:constraint1}) and treating generation of local trajectories as inpainting \citep{inpaiting}.
+\footnote{Another option is to add a guidance term penalizing discontinuity. This approach is more flexible as it can optimize for connection points that are learned as well (e.g., via classifier guidance on the connection itself).} 
+
+\input{figures/composite_exp/composite_exp_figure}
+
+
+\section{Experimental Analysis}
+
+We tested MMD's efficacy in learning multi-robot trajectories on increasingly complex maps with varying numbers of holonomic ground robots in a simulated warehouse, modeling robots as 2D disks. Our goals were to (i) compare our approach with common methods for integrating data into multi-robot trajectory generation, (ii) identify the most effective constraining strategies with MMD, and (iii) evaluate MMD's scalability.
+Each experiment with $n$ robots begins by randomly picking start and goal states on a map for various algorithms to compute valid trajectories $\traj{}{}$ (or MAPF paths $\Pi$) between. We evaluated the methods by \textit{ success rate}, the percentage of problems solved with no collision within a time limit, and \textit{data adherence}, the average alignment of $\traj{i}{} \in \traj{}{}$ with the dataset motion patterns. Data adherence uses a map-specific function $\text{cost}_\text{data}(\traj{i}{})$, scoring $1$ for perfect conformity and lower otherwise.
+
+\begin{minipage}{0.13\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/envs/drop_region_env.png}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.85\textwidth}
+    \textbf{Drop-Region} map (Fig. \ref{fig:drop_region_env}) simulates package drop-off chutes. Motion demonstrations are trajectories between random states that include a pause at one of sixteen drop-off regions---next to any chute edge midpoint. Adherence is met for $\traj{i}{}$, i.e., $\text{cost}_{\text{data}}(\traj{i}{})=1$, if it includes such a pause. Otherwise, it is zero.
+\end{minipage}
+\begin{minipage}{0.13\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/envs/conveyor_env.png}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.85\textwidth}
+    \textbf{Conveyor} map (Fig. \ref{fig:conveyor_env}) features narrow passages with directional motion requirements. Demonstrations connect random states with trajectories that pass along the top corridor to the left, or through the bottom corridor to the right. Trajectory $\traj{i}{}$ adheres to data if it similarly passes through either corridor before reaching its goal.
+\end{minipage}
+\begin{minipage}{0.13\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/envs/highways_env.png}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.85\textwidth}
+    \textbf{Highways} map (Fig. \ref{fig:highways_env}), requires counter-clockwise movement around a central obstacle---a pattern shown in its associated data. This map can be seen as a modular building block for larger multi-robot environments with its required motion pattern promoting easier coordination. Adherence is met for $\traj{i}{}$ if its cumulative motion within the map is counter-clockwise.
+\end{minipage}
+\begin{minipage}{0.13\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/envs/empty_env.png}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.85\textwidth}
+    \textbf{Empty} map (Fig. \ref{fig:env_empty}) is our simplest. Robots are scored highly if they move in straight lines and gradually worse the more they deviate. Demonstrations are of straight line motions.
+\end{minipage}
+\begin{minipage}{0.13\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/envs/multitile_3x3_env.png}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.85\textwidth}
+    \textbf{Larger Maps} (Fig. \ref{fig:multitile_exp}). In our larger scale experiments (Sec. \ref{sec:exp_multi_tile}) trajectories are computed within $2 \times 2$ and $3 \times 3$ maps composed of smaller, local maps. Required motions are dictated by spanned local maps, and the overall adherence is the average adherence per local map.
+\end{minipage}
+
+\input{figures/mapf_exp/mapf_experiments_figure}
+\subsection{Decoupling Scales Multi-Robot Diffusion Planning}
+\label{sec:exp_composite}
+An appealing approach for learning multi-robot trajectory generation is by obtaining multi-robot trajectory datasets and training a single model to jointly generate trajectories for all robots. To test this approach, we evaluated \textit{MPD-Composite}, a state-of-the-art motion planning diffusion model (MPD) \citep{carvalho2023mpd} that we trained on multi-robot data we collected in two maps: Empty and Highways. We created three models: for $3$, $6$, and $9$ robots. Each model was also given an additional guidance term that penalized collisions between robots. 
+Across $300$ tests, $50$ for each map and group size, we compared MPD-Composite to MMD-xECBS (referred to as MMD). See Fig. \ref{fig:composite_exp} for results. The composite model achieved perfect success rates and high data adherence scores with 3 robots but struggled as the number of robots increased to $6$. No valid trajectories were generated in any test with $9$ agents using MPD-Composite in either map. In contrast, MMD solved all 300 problems successfully and further scaled to 40 agents in additional random tests, also producing trajectories with high data adherence scores and no collisions.
+\subsection{MMD Outperforms MAPF with Learned Cost Maps}
+\label{sec:exp_mapf}
+From a search-based planning viewpoint, a compelling way to integrate motion data into multi-agent planning is by reducing MRMP to MAPF and forming cost maps to direct algorithms like ECBS \citep{cohen2016highways}. This sacrifices dynamic feasibility, limiting solutions to a fixed graph, but can still offer a desirable homotopy class and be assessed for data compliance.
+Our second experiment set evaluates this method's potential to produce data-compliant motions (see Fig. \ref{fig:mapf_exp}). We created 180 motion planning problems, 10 per group size across three maps, and assessed two search-based methods: \textit{A*Data-ECBS} and \textit{A*-ECBS}. The former plans single-robot paths with A* using map-specific statistical cost maps, where edges have lower costs if those are visited more frequently by the map's dataset trajectories (discretized to map cells). The latter uses uniform costs (i.e., has no knowledge of the data) and is reported only to provide context for A*Data-ECBS's performance.
+
+We find that integrating motion data into statistical cost maps yields mixed outcomes: it enhances adherence in the Highways map by around $35\%$ compared to A*-ECBS but decreases success rates. In other maps, this approach finds collision-free paths, but falls short in managing complex motion distributions. 
+In contrast, our results for running MMD methods for the same planning problems show that those can solve complex trajectory generation tasks with high data adherence scores across all methods, and for some, with high success rates too. 
+
+\input{figures/mapf_exp/mapf_experiments_figure_freespace}
+\textbf{Analyzing MMD Constraining Strategies.}
+Further analysis reveals a trend familiar from the MAPF literature. MMD-CBS struggles with scalability, reaching the time limit with more than $9$ robots. MMD-ECBS significantly outperforms MMD-CBS, and accelerated versions further improve performance. 
+MMD-PP finds efficiency in requiring only one inference pass per robot, however, because the constraints on diffusion models are soft, trajectory generation queries are not guaranteed to completely avoid higher-priority robots, and as such MMD-PP may fail to produce collision-free solutions. This is reflected in lower success rates in congested maps. In contrast, CBS-based MMD methods only failed by exceeding our 60-second runtime limit. MMD-xECBS outperformd other MMD algorithms in success rates and matched MMD-ECBS in data adherence. 
+\newline
+To test MMD's MRMP solving ability without regard to data adherence, we created two free-space experiments focusing on robot interactions (Fig. \ref{fig:exp_mapf_freespace}). In the \emph{circle} setup, robots move between opposite points on a circle, likely colliding at the center. In the \emph{weave} setup (inspired by \cite{tajbakhsh2024conflict}), robots begin on opposite points of a square, aiming to switch places. 
+CBS-based methods were challenged in \emph{circle} since incrementally constraining the center region is time consuming. MMD-PP's stronger constraints navigated around congestion and solved more problems, however, occasionally failed to produce valid solutions. In \emph{weave}, where navigating around congestion is more difficult, CBS-based methods generated collision-free trajectories more effectively.
+
+\input{figures/multi_tile_exp/multi_tile_experiment_figure}
+\subsection{Sequenced Diffusion Models for Long-Horizon Planning} \label{sec:exp_multi_tile}
+
+We present a feasibility study on expanding MMD algorithms to larger maps using the sequencing method described in Sec. \ref{sec:method_multi_tile}. This technique assembles smaller local maps, each associated with a diffusion model, to collectively generate long-horizon, data-driven trajectories. In our experiments, we tested three MMD methods---MMD-PP, MMD-ECBS, and MMD-xECBS---in 120 trajectory generation tests, allowing a relaxed 240-second time frame. A standout feature of the sequencing method is its ability to create trajectories that follow a \textit{task-skeleton}: passing through a series of local maps within the larger global map. For this purpose, 
+our experiments assign a random sequence of three tasks per robot (a sequence of local maps), and randomly selects start and goal states within the first and last local maps in the sequence. The results (Fig. \ref{fig:multitile_exp}) show MMD-xECBS scaling to long planning horizons without compromising data adherence. This demonstrates MMD's capability to efficiently produce multi-robot trajectories in large environments by utilizing diffusion models trained with easily gathered data from small, local maps.
+
+
+\section{Related Work}
+
+
+\textbf{Multi-Robot Motion Planning.}
+Due to the PSPACE-hardness of MRMP~\citep{hopcroft1986reducing}, most practical algorithms make various approximations to relax the planning problem. % to make it tractable.
+Some of the most successful MRMP methods reduce the problem to a multi-agent path finding problem (MAPF)~\citep{stern2019multi} by discretizing state and time and assuming zero-volume shapes, constant velocities and rectilinear movements~\citep{chen2021scalable}.
+However, this introduces a gap between the MAPF formulation and MRMP which is problematic in many domains. 
+To relax the restriction of planning on a grid, recent works~\citep{solis2021representation,honig2018trajectory} have generalized MAPF algorithms to continuous state spaces by using sampling-based motion planners to construct probabilistic roadmaps (PRM) ~\citep{kavraki1996probabilistic} for robots.
+
+More generally, \emph{coupled} MRMP algorithms, like~\citet{sanchez2002using,solovey2016finding} apply sampling-based planners like PRM  and RRT \citep{RRT*} to the composite configuration space of all the robots. This approach guarantees completeness but struggles to scale with the number of robots as the configuration space grows exponentially.
+Conversely, \emph{decoupled} algorithms like prioritized planning~\citep{erdmann1987multiple} and~\citet{leroy1999multiple} generate robot motions one after another, fixing each plan and regarding them as dynamic obstacles in subsequent planning iterations. This allows them to quickly find solutions for large numbers of robots, but sometimes fail to find any solution even if one exists, i.e., they are often incomplete.
+Seeking to balance theoretical guarantees with practical efficiency, \textit{hybrid} algorithms like CBS~\citep{sharon2015conflict} plan independently for every robot and loosely couple them to resolve conflicts.
+
+
+\textbf{Planning with Diffusion Models.}
+Lately, there has been a surge of interest in applying diffusion models~\citep{sohl2015deep} to solve sequential decision making tasks, including planning and reinforcement learning~\citep{ubukata2024diffusion}. 
+Diffuser~\citep{janner2022diffuser} first proposed the idea of using diffusion models for trajectory planning and showed how classifier-guided sampling and image inpainting can be used for adaptation at test time.
+Recent works have used diffusion models
+as priors 
+for single-robot motion planning~\citep{carvalho2023mpd}, for learning visuomotor policies~\citep{chi2024diffusionpolicy}, and for offline decision-making~\citep{ajay2022conditional}.
+Most of these works have been limited to single-agent planning with two notable exceptions.
+~\citet{jiang2023motiondiffuser} learn a joint motion distribution for multi-agent motion prediction using a diffusion model. By contrast, we focus on generating kinodynamically feasible and collision-free trajectories without having to learn a joint distribution.
+Concurrent work by \citet{mishra2024generative} uses spatial-temporal factor graphs to compose modular generative models for solving long-horizon bimanual coordination tasks. By contrast, our approach can scale diffusion models to dozens of robots and complex environments by leveraging multi-agent search algorithms.
+
+
+
+\section{Conclusion}
+
+In this paper, we present \textbf{M}ulti-robot \textbf{M}ulti-model planning \textbf{D}iffusion (MMD), a multi-robot motion planner that learns to generate smooth collision-free trajectories for dozens of robots in complex environments.
+Our key contribution is showing how single robot diffusion models can be effectively combined with state-of-the-art multi-agent search algorithms to generate data-driven multi-robot trajectories.
+By learning only single-robot diffusion models, MMD simplifies data requirements and breaks the curse of dimensionality plaguing approaches that learn from multi-robot data. Additionally, by learning generative models of robot trajectories, MMD overcomes many of the limitations of popular model-based MAPF algorithms, such as state discretization, known cost function, and constant velocities.
+We believe MMD opens up exciting avenues for future work on combining the strengths of search algorithms and diffusion planning.
+
+\textbf{Limitations.} %important (a) Trajectories are of fixed time length. Staggering starts is an option, but more flexibility in local-maps would be better. (b) the joint inference in the sequencing approach is currently time-consuming. there is room for optimizations. (c) CBS is naturally parallelizable. We leave this to future work.
+We are excited about the potential of MMD to push forward multi-robot coordination and collaboration and offer a few avenues for future work. First is allowing for more flexibility in MMD's planning horizon. As it stands, MMD generates trajectories of fixed duration---a limitation it inherits from diffusion planning. Sequencing models helps extend the time horizon but still, it must be determined a priori.
+Second, we believe that the CBS-based MMD methods can be greatly accelerated, mostly through parallelization of the high-level search. Finally, we believe the frontier of MRMP lies in collaboration. Currently, MMD focuses on coordinating robots, seeking to produce collision-free data-driven trajectories. Carrying out collaborative tasks is an interesting next step.
+
+
+\section{Reproducibility}
+
+We aspire for MMD to be easily used and extended by researchers and practitioners. This code, along with the parameter values detailed in Sec. \ref{sec:impl_details}, is sufficient for reproducing the experiments and results presented in this paper.
+To run our code ``out of the box,'' without dataset generation or training, we provide pre-trained models and datasets detailed in Sec. \ref{sec:experiments} with detailed instructions. For hardware and software dependencies, we specify the exact versions of libraries and tools required in our repository and also detail our hardware setup in Sec. \ref{sec:impl_details}.
+
+

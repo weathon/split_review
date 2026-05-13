@@ -1,0 +1,683 @@
+\title{LoRA3D: Low-Rank Self-Calibration of 3D Geometric Foundation models}
+
+\begin{abstract}
+Emerging 3D geometric foundation models, such as DUSt3R \citep{wang2024dust3r}, offer a promising approach for in-the-wild 3D vision tasks.
+However, due to the high-dimensional nature of the problem space and scarcity of high-quality 3D data,
+these pre-trained models still struggle to generalize to many challenging circumstances,
+such as limited view overlap or low lighting.
+To address this, we propose LoRA3D, an efficient self-calibration pipeline to \emph{specialize} the pre-trained models to target scenes using their own multi-view predictions.
+Taking sparse RGB images as input, we leverage robust optimization techniques to refine multi-view predictions and align them into a global coordinate frame.
+In particular, we incorporate prediction confidence into the geometric optimization process, 
+automatically re-weighting the confidence to better reflect point estimation accuracy. 
+We use the calibrated confidence to generate high-quality pseudo labels for the calibrating views and use low-rank adaptation (LoRA) to fine-tune the models on the pseudo-labeled data.
+Our method does not require any external priors or manual labels. It completes the self-calibration process on a \textbf{single standard GPU within just 5 minutes}.
+Each low-rank adapter requires only \textbf{18MB} of storage. 
+We evaluated our method on \textbf{more than 160 scenes} from the Replica, TUM and Waymo Open datasets,
+achieving up to \textbf{88\% performance improvement} on 3D reconstruction, multi-view pose estimation and novel-view rendering.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/fig1.png}
+    \caption{
+        Given sparse RGB images, our self-calibration pipeline efficiently specializes a pre-trained 3D foundation model to a target scene to improve its performance for a variety of 3D vision tasks. 
+    }
+    \label{fig:1}
+\end{figure}
+
+Recently, many 3D geometric foundation models have emerged as a potential solution for in-the-wild 3D computer vision tasks such as 3D reconstruction, camera pose estimation and novel view rendering \citep{wang2024dust3r, barroso2024matching, leroy2024grounding, hong2023lrm}.
+These models, typically enabled by large scale Transformer pre-training, can quickly establish cross-view correspondences and directly regress 3D scene geometry from sparse RGB images.
+They generalize to a broad range of data and exhibit a strong zero-shot performance on novel tasks.
+
+However, the performance of these pre-trained models can falter under challenging circumstances.
+For instance, as highlighted in the upper left sub-figure in Fig.~\ref{fig:1}, DUSt3R's pairwise reconstruction accuracy significantly degrades under low visual overlaps, where certain regions are observed from only a single viewpoint.
+This decline is rooted in the inherent complexity of 3D geometric inference task, 
+which requires much larger-scale data to fully represent the distribution of real-world 3D data.
+Unfortunately, the difficulty of annotating in-the-wild 3D data has led to the shortage of high-quality training datasets, limiting the performance of the pre-trained models.
+
+To mitigate the problem, we propose an efficient self-calibration pipeline (Fig.~\ref{fig:method}),
+taking only sparse RGB images to specialize pre-trained 3D foundation models to the target scene.
+Our method requires no manual labeling, camera calibration, or external priors.
+We only leverage the multi-view consistency of 3D point positions to refine and select pre-trained models' predictions for pseudo labeling.
+To ensure the pseudo label accuracy,
+we develop a robust global optimization method to align and refine multi-view predictions while calibrating the prediction confidence.
+The calibrated confidence strongly correlates with pseudo-label accuracy,
+allowing us to select high-confidence data for LoRA fine-tuning of the pre-trained model.
+Our method is tested on 161 test scenes for a variety of 3D vision tasks.
+It is able to finish the self-calibration process within 5 minutes on a single GPU and deliver performance improvements of up to 88\%.
+The major contributions of our work include
+(1) the self-calibration pipeline, (2) the robust global optimization method, and (3) the %experimentally discovered 
+efficient LoRA fine-tuning strategy for DUSt3R self-calibration.
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{Figures/method.png}
+    \caption{
+    Overview of our self-calibration pipeline. (a) \textbf{Predict}: We pair sparse input RGB images and use the pre-trained 3D foundation model to predict per-pair point maps and confidence maps. (b) \textbf{Robust Global Optimization}: We apply robust optimization techniques to concurrently refine multi-view point predictions and calibrate prediction confidence. (c) \textbf{Confidence-Based Pseudo-Labeling}: Refined point maps with high calibrated confidence are used to generate pseudo-labels on calibration views. (d) \textbf{LoRA Fine-Tuning}: Using the pseudo-labeled data, we efficiently fine-tune the pre-trained model with LoRA. While the figure illustrates our method using DUSt3R, our approach generalizes to other 3D foundation models. 
+    }
+    \label{fig:method}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+\subsection{Foundation model specialization}
+Foundation model specialization through fine-tuning or adaptation has become the standard approach to customizing pre-trained foundation models for specific tasks or domains.
+Various methods have been developed for the specialization of large language models \citep{brown2020language, gururangan2020don}, vision-language models \citep{liu2024visual, liu2024improved}, and vision foundation models \citep{hu2023efficiently, yue2024improving}.
+These approaches typically employ parameter-efficient adaptation techniques \citep{hu2021lora, dettmers2024qlora, he2022parameter} to adapt the pre-trained models in either a supervised or unsupervised fashion. 
+However, few works have explored the specialization of 3D geometric foundation models.
+MASt3R \citep{leroy2024grounding} and Spanner3D \citep{wang20243d} fine-tuned DUSt3R \citep{wang2024dust3r} to re-purpose it for image matching and incremental reconstruction respectively.
+\cite{jiang2024real3d} applied self-training to scale up large reconstruction models \citep{hong2023lrm} with real-world images.
+However, most of these methods still rely on vast amounts of labeled data.
+In contrast, our method uses only sparse RGB images for self-calibration and requires no ground truth labels.
+
+\subsection{Self-supervised geometric perception}
+Self-supervised learning has been successfully applied to a range of geometric perception tasks, including monocular depth prediction \citep{godard2019digging}, optical flow prediction \citep{liu2019selflow}, camera pose estimation \citep{yang2021self}, and structure-from-motion \citep{zhou2017unsupervised}, significantly enhancing the performance of pre-trained geometric models.
+Among these, \cite{yang2021self} is particularly relevant to our approach,
+as it utilizes robust optimization techniques to generate geometric pseudo-labels for model fine-tuning.
+However, this method and most others are tailored to adapt smaller-scale pre-trained models for specific tasks.
+In this work, we extend the pseudo-labeling strategy for self-supervised learning to 3D foundation models.
+Leveraging the versatility of these models, we can improve their performance on various 3D vision tasks.
+
+
+\section{Preliminaries}
+
+Our pipeline is primarily tested on DUSt3R \citep{wang2024dust3r}.
+Below, we provide key details about DUSt3R to give readers the necessary context for understanding our contributions. 
+\subsection{DUSt3R}
+As shown in Fig.~\ref{fig:method}, DUSt3R takes an RGB image pair $(I_i, I_j)$ as input and directly regresses the pixel-wise point maps and confidence maps:
+\begin{align}
+    \label{eqn:dust3r}
+    (X^{i, i}, C^{i, i}), (X^{j, i}, C^{j, i}) = \text{DUSt3R}(I^i , I^j)
+\end{align}
+Here, $X^{i, i}, X^{j, i}\in\mathbb{R}^{H\times W\times3}$ are the point maps for view $i$ and view $j$,
+both expressed in the camera coordinate frame of view $i$,
+and are regressed up to a unknown scale.
+Their corresponding confidence maps are denoted as $C^{i, i},C^{j, i} \in \mathbb{R}^{H\times W} $\footnote{See App.~\ref{app:loss} for details on the training loss of DUSt3R.}.
+
+
+\subsection{Recovering camera parameters}
+The camera intrinsics can be recovered from the predicted point maps in Eq.~\ref{eqn:dust3r}.
+Assuming a pinhole camera model with square pixels and principal points at image centers,
+the camera $i$'s focal length $f_i$ can be estimated by solving the following optimization problem using Weiszfeld algorithm:
+\begin{align}\label{eqn:focal}
+    f_i^*=\argmin_{f_i} \sum_{p=1}^{HW} C_{p}^{i,i}\left\|\left(u'_p, v'_p\right)-f_i (X_{p, 0}^{i,i}, X_{p, 1}^{i,i})/{X_{p, 2}^{i,i}}\right\|
+\end{align}
+where $(u'_p, v'_p) = (u_p - W / 2, v_p - H/2)$ represents the re-centered image coordinates for pixel $p$.
+
+The relative camera poses are estimated by comparing the predictions for image pair $(I_i, I_j)$ and $(I_j, I_i)$.
+With point maps $X^{i, i}$ and $X^{i, j}$, we can apply Procrustes alignment \citep{luo1999procrustes} to estimate the relative pose $T_{i,j}\in\text{SE}(3)$ from camera $i$ to $j$ and the point map scale $\sigma_{i,j}$:
+\begin{align}\label{eqn:relpose}
+    (T_{i, j}, \sigma_{i,j})^* =\underset{T_{i,j}, \sigma_{i,j}}{\arg \min } \sum_p C_p^{i,i} C_p^{i,j}\left\|\sigma_{i,j}T_{i,j} X_p^{i,i}-X_p^{i,j}\right\|^2
+\end{align}
+where we omit the homogenization of point maps for brevity.
+\subsection{Multi-view point map alignment}\label{sec:global_align}
+Given multiple images $\{I_1, I_2, \dots, I_N\}$ captured in a 3D scene, 
+the multi-view DUSt3R-predicted point maps are aligned to form a global point cloud.
+Different from bundle adjustment, this alignment is formalized as an 3D-3D-projection-based optimization problem over a connectivity graph $\mathcal{G}(\mathcal{V}, \mathcal{E})$,
+in which the vertices $\mathcal{V}$ represent the $N$ images and the edges $\mathcal{E}$ represent all image pairs with visual overlaps.
+
+To initialize the optimization parameters, 
+the highest-confidence spanning tree is extracted from the graph.
+Anchoring the most confident image pair at the origin,
+the initial estimates of focal lengths, point map scales and relative poses, as derived from Eq.~\ref{eqn:focal},\ref{eqn:relpose}, are propagated along the tree edges to all $N$ views,
+yielding initial focal lengths $\{f_i| i=1, \dots, N\}$, point maps $\{\chi^i\in \mathbb{R}^{H\times W\times3}\}$ and image-pair scales $\{\sigma^{(i, j)}\in\mathbb{R}\}$ and poses $\{T^{(i, j)}\in\text{SE}(3)\}$,
+all expressed in a unified global coordinate frame.
+
+These initial estimates are further refined by minimizing the 3D-3D projection error between the global point maps $\chi$ and the transformed predicted point maps:
+\begin{align}\label{eqn:global}
+    (\chi, T, \sigma)^* = \underset{\chi, T, \sigma}{\arg \min } \sum_{(i, j) \in \mathcal{E}} \sum_{v \in \{i, j\}} \sum_{p=1}^{H W} C_p^{v, i}\left\|\chi_p^v-\sigma^{(i, j)} T^{(i, j)} X_p^{v, i}\right\|
+\end{align}
+
+Note that the global point maps $\chi_p^v$ can be further re-parameterize via depth back-projection:
+\begin{align}\label{eqn:reparam}
+    \chi^{v}_{p} = T_{v}K_{v}^{-1}D_p(u_p, v_p, 1)^\mathsf{T} = T_{v}\frac{D_p}{f_v}(u'_p, v'_p, 1)^\mathsf{T}
+\end{align}
+where $K_v$ and $T_v$ represent the intrinsics and extrinsics for view $v$ and $D_p$ is the depth value for pixel $p$.
+The optimization problem can therefore be reformulated as:
+\begin{align}\label{eqn:reparam_global}
+    (T, \sigma, f, D)^* = \underset{T, \sigma, f, D}{\arg \min } \sum_{(i, j)} \sum_{v} \sum_{p} C_p^{v, i}\left\|T_{v}\frac{D_p}{f_v}(u'_p, v'_p, 1)^\mathsf{T}-\sigma^{(i, j)} T^{(i, j)} X_p^{v, i}\right\|
+\end{align}
+Here, the per-image-pair poses $T^{(i, j)}$ and per-image poses $T_i$ represent the same transformations but are parameterized separately to allow for additional optimization flexibility.
+The optimization is solved by a few hundred steps of standard gradient descent.
+To avoid trivial optimum of $\sigma^{(i, j)}=0$, $\Pi_{(i,j)}\sigma_{(i,j)}=1$ is enforced during the optimization.
+
+
+
+\section{Methodology}
+
+\label{sec:method}
+We aim to adapt a 3D geometric foundation model, such as DUSt3R \citep{wang2024dust3r}, to a target scene using a sparse set of uncalibrated RGB images $\{I_1, I_2, \dots, I_N\}$. The goal is to enhance the pre-trained model's performance on test images $\{I_{N+1}, I_{N+2}, \dots, I_{N+M}\}$ from the same scene. Our approach generates compact LoRA adapters, which integrate with the pre-trained model to produce a scene-calibrated model.
+
+\subsection{Self-calibration pipeline}
+Fig.~\ref{fig:method} shows our self-calibration pipeline.
+We start by using the pre-trained DUSt3R, as in Eq.~\ref{eqn:dust3r}, to predict point and confidence maps for all calibration image pairs.
+In challenging conditions, such as under limited camera view overlap,
+DUSt3R's predictions may include errors and outliers, and the prediction confidence may not precisely reflect the prediction accuracy
+(See Fig.~\ref{fig:robust} for an example of overconfident prediction).
+For this reason, directly relying on predicted confidence for pseudo label selection may hurt the model performance (see Sec.~\ref{fig:ablate}~(a,b)).
+
+However, each 3D point in the scene is co-observed by many camera view pairs.
+We could leverage accurate DUSt3R predictions from well-conditioned, e.g. high-visual-overlap, view pairs to refine and identify inaccurate point map predictions. 
+We therefore develop a robust multi-view point map alignment method (Sec.~\ref{sec:robust}) to (1) optimize the point map and (2) calibrate the prediction confidence.
+We then use the refined point maps and calibrated confidence to pseudo-label the calibration images $\{I_i\}_{i=1}^N$ (Sec.~\ref{sec:plabel}), 
+after which we fine-tune the pre-trained DUSt3R model using LoRA on the pseudo-labeled data (Sec.~\ref{sec:lora}).
+\subsection{Robust multi-view point map alignment with confidence calibration}\label{sec:robust}
+We develop a robust multi-view point map alignment method by incorporating the prediction confidence into the global optimization in Eq.~\ref{eqn:reparam_global}.
+Specifically, 
+we re-parameterize the confidence term $C_p^{v, i}$ in Eq.~\ref{eqn:reparam_global} as an optimizable weight term $w_p^{v, i}$ to automatically tune each point prediction's contribution to the optimization.
+While the predicted confidence can be imprecise in challenging cases,
+it still remains informative for prediction accuracy.
+Thus we intend to introduce a regularization term that encourages the weights to remain close to the predicted confidence, and also avoid trivial solutions.
+
+\begin{figure}[htb!]
+    \begin{subfigure}[h]{0.65\columnwidth}
+    \centering
+    \begin{subfigure}[h]{0.32\linewidth}
+        \includegraphics[trim={0 30 0 30},clip,width=\linewidth]{Figures/rgb2.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.32\linewidth}
+        \centering
+        \includegraphics[trim={0 30 0 30},clip,width=\linewidth]{Figures/conf2.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.32\linewidth}
+        \includegraphics[trim={0 30 0 30},clip,width=\linewidth]{Figures/error2.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.32\columnwidth}
+        \includegraphics[trim={0 30 0 30},clip,width=\columnwidth]{Figures/rgb1.png}
+        \subcaption{Image pair}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.32\columnwidth}
+        \includegraphics[trim={0 30 0 30},clip,width=\columnwidth]{Figures/conf1.png}
+        \subcaption{Pred. confidence}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.32\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip,width=\columnwidth]{Figures/error1.png}
+        \subcaption{Error map}
+    \end{subfigure}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.34\columnwidth}
+        \includegraphics[trim={250 0 250 50}, clip, width=0.99\columnwidth]{Figures/errvconf}
+        \subcaption{Pred. error v.s. Confidence}
+    \end{subfigure}
+    \caption{
+        Pre-trained DUSt3R's (b) prediction confidence and (c) error map on (a) an example image pair:
+        In cases of limited visual overlap, DUSt3R may produce overconfident predictions (\textcolor{red}{\ding{72}}).
+        Our robust multi-view alignment method effectively reduces this overconfidence, 
+        maintaining high confidence for accurate predictions (\textcolor{red}{+}, \textcolor{red}{$\times$}) and low confidence for outlier predictions (\textcolor{red}{$\bullet$}).
+    }
+    \label{fig:robust}
+\end{figure}
+
+We found our objective to be surprisingly aligned with Geman-McClure robust M-estimator \citep{geman1992nonlinear},
+which essentially uses a regularization term (an outlier process in robust optimization terminology) to encourage weights to be close to unity in least-squares optimizations.
+Inspired by this, we designed our regularization term to follow a similar structure.
+The optimization in Eq.~\ref{eqn:reparam_global} is therefore reformulated as:
+\begin{align}\label{eqn:joint}
+     (T, \sigma, f, D, \mathcal{W})^* = \argmin_{T, \sigma, f, D, \mathcal{W}}\sum_{(i, j)} \sum_{v} \sum_{p} w_p^{v, i} \|e_p^{v, i}\| + \mu (\sqrt{w_p^{v, i}} - \sqrt{C_p^{v, i}})^2 
+\end{align}
+where $e^{v, i}_p=T_{v} D_p(u'_p, v'_p, 1)^\mathsf{T}/f_v-\sigma^{(i, j)} T^{(i, j)} X_p^{v, i}$ represents the pixel-wise residual error and $\mu$ is a constant hyper-parameter to control the regularization strength.
+
+Rather than updating the weights in the joint optimization loss Eq.~\ref{eqn:joint} via gradient back-propagation, we draw inspiration from  the iterative re-weighted least squares approach \citep{rao1999affine} for robust M-estimation,
+to derive a closed-form weight update rule for fast confidence re-weighting:
+\begin{align}\label{eqn:update}
+    w_p^{v, i} = C_p^{v, i} / (1 + \|e_p^{v, i}\| / \mu)^2
+\end{align}
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/conf2_after.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/error_after2.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/rgb2_cut.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/pts2_cut.png}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/conf1_after.png}
+        \caption{Calibrated confidence}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/error_after1.png}
+        \caption{Point estimation error}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/rgb1_cut.png}
+        \caption{Pixels to pseudo-label}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\columnwidth}
+        \includegraphics[trim={0 30 0 30}, clip, width=0.99\columnwidth]{Figures/pts1_cut.png}
+        \caption{Pseudo labels}
+    \end{subfigure}
+    \caption{
+        Pseudo-labeling with (a) calibrated confidence, which
+        is a good measure of the (b) point estimation accuracy.
+        We select high-calibrated-confidence point predictions as pseudo labels (d) for DUSt3R finetuning. 
+    }
+    \label{fig:plabel}
+\end{figure}
+With this update rule, we can still solve the original optimization problem (Eq.~\ref{eqn:reparam_global}) while periodically applying the weight updates.
+The weight update rule can be understood as follows: 
+point predictions with lower residual errors, 
+meaning those that are more consistent with predictions from other image pairs, 
+will maintain confidence similar to the predicted value.
+In contrast, point predictions that are inconsistent across views will have their confidence significantly reduced.
+This method effectively minimizes confidence for overly confident predictions, as illustrated in Fig.~\ref{fig:robust},
+ensuring that confidence becomes more closely correlated with point estimation accuracy and provides better guidance for global optimization and pseudo-labeling.
+
+\subsection{Pseudo labeling with calibrated confidence}\label{sec:plabel}
+We use the calibrated confidence and optimized point maps for confidence-based pseudo-labeling.
+To compute pseudo labels for the calibration image pairs, 
+we need to transform the global optimization results from Eq.~\ref{eqn:joint} to local image-pair coordinate frame.
+Following Eq.~\ref{eqn:reparam},
+we back-project the optimized depth maps $D_p$ to 3D and transform the points to the image-pair coordinate frame.
+We then threshold the point estimations with a confidence cutoff $w_{\text{cutoff}}$ and retain the high-confidence ones as pseudo labels.
+The pseudo labeling rule can be summarized as:
+\begin{align}
+    \Tilde{X}^{j, i}_{p} = T_{i}^{*-1}T^*_j\frac{D^*_p}{f^*_j}(u'_p, v'_p, 1)^\mathsf{T}, \quad \text{where} \ p\in\{p | w_p^{* j,i} > w_{\text{cutoff}}\}
+    \label{eqn:plabel}
+\end{align}
+We experimentally found that setting $w_{\text{cutoff}}=1.5$ works effectively for most test scenes.
+
+Note that our method is naturally robust to dynamic elements in the scene (See Tab.~\ref{tab:selected_segments}).
+This is because the dynamic points break the multi-view consistency assumption and will be filtered out by pseudo labeling with calibrated confidence.
+
+\subsection{Fine-tuning with LoRA}\label{sec:lora}
+On the pseudo-labeled data, we fine-tune the pre-trained DUSt3R with LoRA \citep{hu2021lora} and the same pre-training loss (as Eq.~\ref{eqn:confloss}).
+LoRA freezes the pretrained model weights and injects trainable rank decomposition matrices into layers of Transformer architecture, greatly reducing the number of trainable parameters.
+This (1) improves the runtime- and memory-efficiency of self-calibration and 
+(2) reduces the catastrophic forgetting of the pre-training data.
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[trim=60 110 80 140, clip, width=\linewidth]{Figures/lora.png}
+    \caption{
+        What is the best DUSt3R fine-tuning strategy?
+        We plot the mean prediction errors on test images against the number of trainable parameters for various fine-tuning options on an example test scene (Replica ``office0").
+        We found adapting all attention weights with rank-16 LoRA (i.e. \textcolor{red}{\ding{72}}) achieves the best trade-off between performance and efficiency on most test scenes.
+    }
+    \label{fig:lora}
+\end{figure}
+To find the optimal DUSt3R fine-tuning strategy, we conducted extensive experiments to compare different fine-tuning options across multiple test scenes.
+Please see Fig.~\ref{fig:lora} for an example, where we plot the test errors (defined in Sec.~\ref{sec:metrics}) against trainable parameter counts for different LoRA and direct fine-tuning strategies.
+We found adapting all attention weights with rank-16 LoRA often leads to the best trade-off between performance and efficiency.
+It reduces the number of trainable parameters by more than 99\% and has a on-par performance with directly fine-tuning the attention or all weights.
+Using rank-16 LoRA, fine-tuning on 10 calibration images converges in under 3.5 minutes with a batch size of 2.
+Peak GPU memory usage during fine-tuning stays under 20GB,
+enabling the process to run on a single standard GPU.
+And each LoRA adapter require less than 18MB of disk storage.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We evaluated our method on 161 test scenes for the tasks of 3D reconstruction, multi-view camera parameter estimation and novel view rendering. 
+
+\textbf{Datasets}\label{sec:data}
+We tested our method on \textit{all available test scenes} from the Replica \citep{straub2019replica} and Waymo Open Dataset \citep{sun2020scalability},
+as well as on three test scenes from the TUM RGBD dataset \citep{schubert2018tum} that are most frequently tested in literature. 
+This amounts to a total of 161 test scenes, all of which are distinct from the DUSt3R pre-training scenes.
+
+The Replica dataset comprises eight indoor scenes, each containing 2000 RGB-D images rendered by \cite{sucar2021imap}.
+For each scene, the first 1000 RGB images serve as the calibration split and the remaining as the test split.
+The depth images are not utilized during self-calibration;
+they are used solely to compute the ground truth point maps.
+We randomly sample\footnote{
+    Unless specified otherwise, all random sampling use seed=0 for re-producibility.
+} 10 images from the calibration split as the calibration images.
+
+The Waymo Open Dataset has in total 150 test data segments.
+In each segment, only forward-looking camera images are adopted, 
+where the first 100 form the calibration split and the remaining $\sim$100 images belong to the test split.
+We sample 10 images from the calibration split for self-calibration.
+
+Please refer to App.~\ref{app:tum} for details about the data splits and tasks for the TUM RGBD dataset.
+
+\textbf{Tasks}\label{sec:tasks}
+On the Replica dataset, we evaluate our method for \textit{pairwise} and \textit{multi-view reconstruction} tasks.
+For pairwise reconstruction, we sample 100 image pairs with visual overlaps from the test split as test images.
+For multi-view reconstruction, we sample 10 views from the test split.
+
+On the Waymo dataset, we evaluate our method for the tasks of \textit{multi-view camera parameter estimation} and \textit{novel view rendering}.
+For novel view rendering, we use InstantSplat \citep{fan2024instantsplat},
+which adopts DUSt3R-predicted point cloud and camera parameters as initialization,
+to train 3D Gaussian Splatting (3DGS) models and render novel-view images.
+From the test split, we select every 10th images (i.e. 0th, 10th, 20th, $\cdots$)
+for camera pose estimation evaluation and InstantSplat training.
+Images at indices 5, 15, 25, $\cdots$ are used as novel views to evaluate the InstantSplat renders.
+Note that although our method is robust to dynamic environments,
+InstantSplat relies on the static world assumption to train 3DGS.
+We therefore selected segments 10084, 10649, and 10802 -- 
+that are mostly static -- from the first 10 test segments for the novel view rendering evaluation.
+
+\textbf{Baselines}\label{Baselines}
+The two most important comparison models for our self-calibrated DUSt3R (\textbf{DUSt3R-Self-Calib}) are the pre-trained DUSt3R (\textbf{DUSt3R-Pretrain})
+and the fine-tuned DUSt3R on ground truth point maps of calibration image pairs (\textbf{DUSt3R-GT-FT}).
+The ground-truth fine-tuned model is considered as the upper limit of ours, serving as an oracle model.
+
+Both methods are evaluated in most tests, 
+with the exception of the TUM dataset, where no ground truth depth is available.
+In this case, we use noisy depth measurements for fine-tuning, 
+referred to as \textbf{DUSt3R-Depth-FT}.
+On the Waymo dataset, we use the high-quality Lidar point clouds for ground-truth-based fine-tuning. 
+For a fair comparison, the training hyperparameters for ground-truth and depth-based fine-tuning are kept consistent with those used in our method.
+For \textit{multi-view stereo reconstruction},
+we also use \textbf{COLMAP} (MVS)\citep{schonberger2016structure, schonberger2016pixelwise}, \textbf{FlowMap} \citep{smith2024flowmap} and \textbf{MASt3R} \citep{duisterhof2024mast3r} as baselines, 
+all of which perform dense reconstructions with un-calibrated images.
+
+\textit{COLMAP} (MVS) is a standard SfM and MVS pipeline for which
+we adopt the default setups.
+
+\textit{FlowMap} is a differentiable SfM model for RGB videos.
+It relies on optical flow and point tracking algorithms to bootstrap its scene parameter optimization process.
+
+\textit{MASt3R} re-purposes DUSt3R for image matching.
+Beyond 3D point regression, it establishes accurate cross-view correspondences, and leverages both 3D-3D and 2D-3D correspondences for global point map alignment.
+We adopt the pre-trained MASt3R with default hyper-parameters.
+
+For fair comparison in multi-view reconstruction, we use the same global optimization method for DUSt3R and its variants (as detailed in Sec.~\ref{sec:global_align}),
+and retain all points for evaluation without applying confidence-based filtering to DUSt3R and MASt3R reconstructions.
+
+For \textit{multi-view camera parameter estimation}, 
+we use \textbf{COLMAP}, \textbf{RelPose++} \citep{lin2024relpose++}, \textbf{PoseDiffusion} \citep{wang2023posediffusion},
+\textbf{RayDiffusion} \citep{zhang2024cameras}, \textbf{FlowMap} \citep{smith2024flowmap} and \textbf{MASt3R} \citep{duisterhof2024mast3r} as the additional baselines.
+
+\textit{RelPose++} uses a pairwise scoring network and a multi-view reasoning transformer to predict multi-view camera poses.
+
+\textit{PoseDiffusion} develops a diffusion-based bundle adjustment method to estimate multi-view camera parameters.
+A geometry-guided sampling (GGS) scheme is applied to enforce epipolar constraints across views.
+We adopt the GGS-enabled PoseDiffusion with the CO3Dv2 checkpoint.
+
+\textit{RayDiffusion} re-parameterize cameras as rays and applies a ray diffuser network to denoise camera rays and recover camera parameters.
+
+All three methods above are pre-trained on domain-specific data without further fine-tuning.
+
+For \textit{novel view rendering}, we use the pre-trained,
+self-calibrated and finetuned DUSt3R for InstantSplat's 3DGS initialization,
+and the different variants for InstantSplat are refered to as:
+\textbf{InstantSplat} \citep{fan2024instantsplat}, \textbf{InstantSplat-Self-Calib}, \textbf{InstantSplat-GT-FT}.
+\textbf{Evaluation Metrics}\label{sec:metrics}
+For DUSt3R \textit{pairwise reconstruction}, we use the \textit{average point prediction error} as the evaluation metric.
+This is the average Euclidean distance calculated between the predicted and ground truth point maps within local image-pair coordinate frames,
+with predicted maps normalized and re-scaled to align with ground truth.
+
+We assess \textit{multi-view stereo reconstructions} based on \textit{accuracy} and \textit{completeness} relative to the ground truth Replica mesh models \citep{straub2019replica}.
+Accuracy measures the average distance of reconstructed points to their nearest mesh points,
+while completeness measures the average distance of mesh points to their nearest reconstructed points.
+Following \cite{zhu2022nice}, we exclude mesh parts invisible to the test images.
+
+The \textit{multi-view camera parameter estimations} are evaluated with the \textit{absolute trajectory error} (ATE) and the \textit{average focal length estimation error} (AFE).
+
+The quality of novel view renders is assessed with \textit{Peak Signal-to-Noise Ratio} (PSNR), \textit{Structural Similarity Index Measure} (SSIM), and \textit{Learned Perceptual Image Patch Similarity} (LPIPS).
+
+\subsection{Results}
+For the Replica dataset, we report pairwise and multi-view reconstruction results in Tab.~\ref{tab:replica_pair} and Tab.~\ref{tab:replica}. 
+Compared to the pre-trained DUSt3R, our method reduces point prediction errors by up to 38\% and reconstructs models that are up to 61\% more accurate and 41\% more complete.
+As Fig.~\ref{fig:qual} shows, 
+our approach is particularly effective at reducing outlier point predictions, thanks to the multi-view consistent pseudo labels
+\footnote{Please check out \ref{app:qual} for qualitative comparison of the reconstructions with the ground truth mesh model.}.
+The remaining performance gap compared to the fine-tuned DUSt3R is attributed to differences in data size and label accuracy. 
+
+Since cameras in Replica are mostly facing inward, it is easier for COLMAP and MASt3R to establish accurate cross-view feature matches,
+resulting in better accuracy and completeness on certain test scenes, even surpassing the fine-tuned DUSt3R.
+On the other hand, FlowMap struggles due to the discontinuous calibration images, which disrupt the optical flow and point tracking it relies on.
+
+\begin{table}[htb!]
+\caption{
+    \textbf{Quantitative evaluation} of \textbf{pairwise reconstructions} on the Replica dataset.
+    We report the average point prediction errors (cm) for direct DUSt3R predictions.
+}
+\label{tab:replica_pair}
+\begin{center}
+\footnotesize
+\begin{tabular}{c|c|c|c|c|c|c|c|c}
+{Methods}  & office0 & {office1} & {office2} & {office3} & {office4} & {room0} & {room1} & {room2} \\
+\hline
+DUSt3R-Pretrain  & 14.29 & 11.02 & 14.03 & 15.44 & 14.96 & 13.11 & 27.99 & 16.82 \\
+\textbf{DUSt3R-Self-Calib} & \textbf{8.84} & \textbf{9.38} & \textbf{11.05} & \textbf{14.41} & \textbf{13.92} & \textbf{13.02} & \textbf{19.88} & \textbf{13.65} \\
+\hline
+DUSt3R-GT-FT & 7.12 & 7.95 & 10.55 & 12.88 & 12.29 & 9.27 & 17.40 & 12.58 \\
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}[htb!]
+\caption{
+    \textbf{Quantitative evaluation} of \textbf{multi-view reconstructions} on the Replica dataset.
+    We report the accuracy (\textbf{Acc.} [cm] $\downarrow$) and completeness (\textbf{Comp.}~[cm]~$\downarrow$) of 3D reconstructions against the ground truth meshes.
+    Please refer to App.Tab.~\ref{tab:replica_contd} for the remaining results omitted due to space limit.
+}
+\label{tab:replica}
+\begin{center}
+\scriptsize
+\begin{tabular}{c|cc|cc|cc|cc|cc}
+\multirow{2}{*}{Methods} & \multicolumn{2}{c|}{office0} & \multicolumn{2}{c|}{office1} & \multicolumn{2}{c|}{office2} & \multicolumn{2}{c|}{office3} & \multicolumn{2}{c}{office4} \\
+& Acc. & Comp. & Acc. & Comp. & Acc. & Comp. & Acc. & Comp. & Acc. & Comp. \\
+\hline
+DUSt3R-Pretrain      & 5.22 & 6.78  & 9.21  & 9.27  & 6.57  & 8.35  & 8.43  & 11.89 & 12.97 & 15.89 \\
+\textbf{DUSt3R-Self-Calib}  & 4.43 & 6.08  & \textbf{3.56}  & 5.48  & 4.75  & \textbf{6.89}  & 6.60  & 11.00 & 7.81  & 12.22 \\
+\hline
+DUSt3R-GT-FT         & 3.51 & 5.29  & 3.26  & 5.53  & 3.93  & 6.72  & 4.02  & 7.42  & 5.53  & 11.25 \\
+\hline
+COLMAP (dense)       & \textbf{2.61} & 89.87 & 58.15 & 158.83 & 4.87 & 194.16 & \textbf{5.51} & 162.53 & 6.42 & 120.84 \\
+FlowMap              & 51.78 & 152.05 & 142.81 & 107.17 & 24.16 & 189.86 & 19.58 & 248.16 &  15.34 & 153.64 \\
+MASt3R               & 4.69 & \textbf{6.05}  & 3.92  & \textbf{4.87}  & \textbf{4.09}  & 7.39  & 7.17  & \textbf{9.42}  & \textbf{4.87}  & \textbf{11.52} \\
+\end{tabular}
+\end{center}
+\end{table}
+
+
+\begin{figure}[htb!]
+    \centering
+    \begin{subfigure}[h]{0.24\linewidth}
+        \begin{tikzpicture}
+            \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=\linewidth]{Figures/replica_before.png}};
+            \draw[red, dashed, thick] (2.45, 0.75) rectangle (3.35, 2.5);  
+        \end{tikzpicture}
+       \caption{Before self-calibration}    
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\linewidth}
+        \begin{tikzpicture}
+            \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=\linewidth]{Figures/replica_after.png}};
+            \draw[red, dashed, thick] (2.45, 0.75) rectangle (3.35, 2.5);  
+        \end{tikzpicture}
+        \caption{After self-calibration}
+    \end{subfigure}
+   \centering
+    \begin{subfigure}[h]{0.24\linewidth}
+        \begin{tikzpicture}
+            \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=\linewidth]{Figures/tum_before.png}};
+            \draw[blue, dashed, thick] (1.0, 1.4) rectangle (1.75, 1.8);  
+        \end{tikzpicture}
+        \caption{Before self-calibration}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\linewidth}
+        \begin{tikzpicture}
+            \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=\linewidth]{Figures/tum_after.png}};
+            \draw[blue, dashed, thick] (1.0, 1.4) rectangle (1.75, 1.8);  
+        \end{tikzpicture}
+        \caption{After self-calibration}
+    \end{subfigure}
+    \caption{
+        \textbf{Qualitative results} on the Replica (a,b) and TUM (c,d) datasets.
+        After DUSt3R self-calibration, we observe much fewer outlier points in the reconstruction of the Replica scene ``office0".
+        On the TUM scene ``fr2\_xyz", the green and red frustums represent the estimated and ground truth cameras respectively.
+        The camera pose estimates are made more accurate by self-calibration.
+    }
+    \label{fig:qual}
+\end{figure}
+
+The multi-view camera parameter estimation results on the Waymo dataset are presented in Tab.~\ref{tab:selected_segments}.
+Compared to the pre-trained DUSt3R,
+our method reduces camera trajectory estimation errors by up to 88\% and focal length estimation errors by up to 79\%.
+Out of 150 total test scenes (detailed in App.\ref{app:full}),
+our approach successfully improves camera parameter estimation results on 116 scenes.
+Most failures occur when the test vehicle remains mostly static for the test images (e.g. segment-10488).
+This degenerate case expect the model to predict zero relative pose across views and fails to distinguish different methods. 
+
+By comparison, COLMAP fails, and MASt3R shows degraded performance on Waymo due to the presence of dynamic objects and the larger baselines between forward-facing cameras, which make feature matching more difficult.
+FlowMap still struggles due to the abrupt visual changes across views.
+RelPose++, PoseDiffusion and RayDiffusion, without domain- or scene-specific training, fails to provide accurate estimates on the out-of-distribution data.
+
+The novel view rendering results on Waymo are presented in Tab.~\ref{tab:waymo_eval} and Fig.~\ref{fig:waymo_render}. 
+Our method effectively reduces floating artifacts in the optimized 3DGS,
+resulting in quality improvements of up to 0.97 dB in PSNR, 0.09 in SSIM, and 0.04 in LPIPS.
+
+The quantitative results on the TUM dataset are presented and analyzed in App.~\ref{app:tum}.
+\begin{table}[htb!]
+\scriptsize
+\centering
+\caption{
+    \textbf{Quantitative evaluation} of \textbf{camera parameter estimates} on \textbf{Waymo} Open Dataset.
+    We report the absolute trajectory error (\textbf{ATE} (m) $\downarrow$) and average focal error (\textbf{AFE} (\%) $\downarrow$) for test camera views.
+    Please see App.~\ref{app:full} for full evaluation results on 150 test scenes.
+}
+\label{tab:selected_segments}
+\begin{tabular}{c|cc|cc|cc|cc|cc}
+\multirow{2}{*}{Methods} & \multicolumn{2}{c|}{segment-10084} & \multicolumn{2}{c|}{segment-10149} & \multicolumn{2}{c|}{segment-10649} & \multicolumn{2}{c|}{segment-10802} & \multicolumn{2}{c}{segment-10980} \\
+ & ATE & AFE & ATE & AFE & ATE & AFE & ATE & AFE & ATE & AFE \\
+\hline
+DUSt3R-Pretrain & 0.79 & 2.19 & 0.84 & 3.08 & 0.95 & 2.84 & 0.35 & 1.60 & 0.80 & 1.19 \\
+\textbf{DUSt3R-Self-Calib} & 0.37 & \textbf{0.61} & \textbf{0.25} & 2.14 & \textbf{0.49} & 2.54 & \textbf{0.35} & 1.08 & \textbf{0.09} & 0.69 \\
+\hline
+DUSt3R-GT-FT & 0.20 & 0.17 & 0.17 & 1.54 & 0.29 & 1.73 & 0.39 & 0.55 & 0.13 & 0.49 \\
+\hline
+COLMAP & Fail & Fail & Fail & Fail & Fail & Fail & Fail & Fail & Fail & Fail \\
+Flowmap & \textbf{0.31} & 3.97 & 66.62 & \textbf{1.80} & 36.44 & 13.74 & 21.16 & \textbf{0.44} & 65.17 & \textbf{0.66} \\
+PoseDiffusion & 19.43 & 25.07 & 16.76 & 49.18 & 20.19 & \textbf{2.26} & 13.61 & 23.74 & 18.19 & 31.04 \\
+RayDiffusion & 17.34 & 85.65 & 16.91 & 80.69 & 18.59 & 85.09 & 12.77 & 81.44 & 19.12 & 85.00 \\
+RelPose++ & 14.80 & - & 16.20 & - & 13.69 & - & 12.92 & - & 13.55 & - \\
+MASt3R & 2.85 & 11.87 & 1.35 & 24.92 & 0.65 & 20.53 & 1.26 & 24.75 & 1.61 & 6.59 \\
+\end{tabular}
+\end{table}
+\begin{figure}
+    \centering
+    \begin{subfigure}[h]{0.24\linewidth}
+        \includegraphics[width=\linewidth]{Figures/waymo1008_isplat.png}
+        \caption{Before self-calibration}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\linewidth}
+        \includegraphics[width=\linewidth]{Figures/waymo1008_our.png}
+        \caption{After self-calibration}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\linewidth}
+        \begin{tikzpicture}
+            \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=\linewidth]{Figures/waymo1080_isplat.png}};
+            \draw[red, dashed, thick] (1.9, 0.37) rectangle (3.3, 1.2);  
+        \end{tikzpicture}
+        \caption{Before self-calibration}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.24\linewidth}
+        \begin{tikzpicture}
+            \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=\linewidth]{Figures/waymo1080_our.png}};
+            \draw[red, dashed, thick] (1.9, 0.37) rectangle (3.3, 1.2);  % Modify these coordinates as needed
+        \end{tikzpicture}
+        \caption{After self-calibration}
+    \end{subfigure}
+    \caption{
+        Novel view renders by InstantSplat \citep{fan2024instantsplat} before and after DUSt3R self-calibration on Waymo Open Dataset.
+    }
+    \label{fig:waymo_render}
+\end{figure}
+
+\begin{table}[htb!]
+\caption{
+    \textbf{Quantitative evaluation} of \textbf{novel view renders} on the \textbf{Waymo} open dataset
+}
+\label{tab:waymo_eval}
+\begin{center}
+\scriptsize % Minimize font size
+\begin{tabular}{c|ccc|ccc|ccc}
+\multirow{2}{*}{Methods} & \multicolumn{3}{c|}{Segment-10084} & \multicolumn{3}{c|}{Segment-10649} & \multicolumn{3}{c}{Segment-10802} \\
+& PSNR $\uparrow$ & SSIM $\uparrow$ & LPIPS $\downarrow$ & PSNR $\uparrow$ & SSIM $\uparrow$  & LPIPS $\downarrow$ & PSNR $\uparrow$ & SSIM $\uparrow$ & LPIPS $\downarrow$ \\
+\hline
+InstantSplat            & 21.45 & 0.67 & 0.33  & 22.45 & 0.72 & 0.30 & 25.94 & 0.79 & 0.24 \\
+\textbf{InstantSplat-Self-Calib} & \textbf{22.42} & \textbf{0.76} & \textbf{0.29}  & \textbf{22.81} & \textbf{0.77} & \textbf{0.27} & \textbf{26.36} & \textbf{0.81} & \textbf{0.22} \\
+\hline
+InstantSplat-GT-FT   & 22.64 & 0.75 & 0.27 & 23.07 & 0.78 & 0.27 & 26.43 & 0.81 & 0.22 \\
+\end{tabular}
+\end{center}
+\end{table}
+\subsection{MASt3R self-calibration}
+Our pipeline is not limited to the specialization of DUSt3R.
+We show in App.~\ref{app:mast} that the same idea applies to MASt3R.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[h]{0.49\linewidth}
+        \includegraphics[trim=0 13 0 13, clip,width=\linewidth]{Figures/ablate_conf_replica.png}
+        \caption{Scene: Replica office0}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.49\linewidth}
+        \includegraphics[trim=0 13 0 13, clip, width=\linewidth]{Figures/ablate_conf.png}
+        \caption{Scene: Waymo test segment-10084}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.49\linewidth}
+        \includegraphics[trim=0 12 0 12, clip, width=\linewidth]{Figures/ablate_seed_replica.png}
+        \caption{Scene: Replica office0}
+    \end{subfigure}
+    \begin{subfigure}[h]{0.49\linewidth}
+        \includegraphics[trim=0 12 0 12, clip, width=\linewidth]{Figures/ablate_size_waymo.png}
+        \caption{Scene: Waymo test segment-10149}
+    \end{subfigure}
+    \caption{
+        Ablation study: (a, b) Pseudo-labeling with \textit{un-calibrated confidence} hurt the model performance. (c) Our method maintains consistent performance across varying random seeds used for calibration image sampling. (d) Our method's performance improves with more calibration images and saturates after around 10.
+    }
+    \label{fig:ablate}
+\end{figure}
+\subsection{Ablation study}
+
+\textbf{Un-calibrated confidence for pseudo labeling}\label{sec:uncalib}
+Directly using the prediction confidence for pseudo-labeling could harm the model performance.
+As Fig.~\ref{fig:ablate}~(a, b) shows,
+thresholding refined point predictions with un-calibrated confidence leads to consistent under-performance of the self-calibrated model, regardless of the confidence cutoff value.
+
+\textbf{Varying random seed}
+Our method works with casually captured RGB images and does not rely on carefully selected calibration images to succeed.
+As shown in Fig.~\ref{fig:ablate}~(c),
+our method maintains consistent performance across varying random seeds used for calibration image sampling.
+
+\textbf{The number of calibration images}
+As shown in Fig.~\ref{fig:ablate}~(d), using few calibration images (e.g., fewer than 10) limits our method's performance due to an insufficient number of view pairs to enforce multi-view consistency in global optimization and a limited training data size. We also observe that the performance typically saturates after around 10 calibration images.
+\textbf{The size of calibration split \& Multi-scene concurrent self-calibration}
+See \ref{app:ablate_calib_split} \& \ref{app:concurrent} for details.
+
+
+\section{Conclusion}
+
+Our self-calibration pipeline specializes 3D geometric foundation models to target scenes in a highly time- and memory-efficient manner.
+It boosts pre-trained model performance by up to 88\% across diverse datasets and 3D vision tasks.
+However, in certain cases, the self-calibrated model still falls short of competing methods due to the inherent difficulty of 3D geometric inference.
+
+
+
+\section{Ethic Statement}
+
+Our work utilizes publicly available datasets that adhere to strict ethical guidelines.
+These datasets ensure that personally identifiable information, such as human faces and vehicle license plates, is either blurred or anonymized to safeguard privacy.
+Our work does not engage with human subjects or introduce concerns regarding fairness or potential misuse.
+We are fully committed to maintaining ethical integrity throughout the development and application of our methods.
+
+
+
+\section{Reproducibility statement}
+
+To ensure the reproducibility of our results, we have taken the following steps: (1) A detailed explanation of our method in Sec. (2) All datasets used in our experiments are publicly accessible. (3) Comprehensive experimental results for 161 test cases are included in Sec.
+
+
+
+
+
+

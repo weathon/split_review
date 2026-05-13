@@ -1,0 +1,142 @@
+# Interventional Fairness on Partially Known Causal Graphs: A Constrained Optimization Approach
+
+- Decision: Accept
+- Scores: 8, 6, 6
+
+## Abstract
+Fair machine learning aims to prevent discrimination against individuals or sub-populations based on sensitive attributes such as gender and race. In recent years, causal inference methods have been increasingly used in fair machine learning to measure unfairness by causal effects. However, current methods assume that the true causal graph is given, which is often not true in real-world applications. To address this limitation, this paper proposes a framework for achieving causal fairness based on the notion of interventions when the true causal graph is partially known. The proposed approach involves modeling fair prediction using a Partially Directed Acyclic Graph (PDAG), specifically, a class of causal DAGs that can be learned from observational data combined with domain knowledge. The PDAG is used to measure causal fairness, and a constrained optimization problem is formulated to balance between fairness and accuracy. Results on both simulated and real-world datasets demonstrate the effectiveness of this method.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper investigates the problem of supervised learning under additional fairness constraints in partially known graphs. Most existing measures of causal fairness constraints require prior knowledge of the directed causal graphs that encode the underlying causal relationships between variables. This paper attempts to relax this assumption. Some previous work, such as Fair proposed by Zuo et al., can achieve causal fairness but discards a lot of covariate information, which impairs the prediction performance. In this paper, we propose a method called IFair to trade-off unfairness and prediction performance by solving a constrained optimization problem. Meanwhile, the paper discusses in detail how to identify some causal estimators with theoretical guarantees and provides concrete examples to illustrate the propositions. The effectiveness of this approach has been confirmed in tests on both simulated and real datasets.
+
+### Strengths
+S1: This paper investigates the novel problem of imposing causal fairness constraints for supervised learning in the absence of detailed causal knowledge. 
+
+S2: This paper provides a comprehensive discussion of the related work, and it is clearly written and organized. 
+
+S3: Fully specifying causal graphs is one of the main challenges in applying causal fairness in practice. The method presented in this paper relaxes the assumption of fully available causal graphs and is highly motivated.
+
+S4: The IFair method does not require input to be a causal DAG, which is hardly obtained in real-world data. Instead, the proposed method accepts a CPDAG or an MPDAG as the input, which is more feasible.
+
+S5: This paper conduct extensive experiments on both synthetic dataset and real-world dataset, which verifies the effectiveness of IFair method.
+
+### Weaknesses
+W1: Is the proposed approach still valid when Y is not the last node in the topological ordering, or when the sensitive attribute is not the root node? Specifically, the paper's reliance on the total causal effect identification condition, which assumes the sensitive attribute A is a singleton and not connected to any undirected edges, raises concerns about its applicability in more complex scenarios. If Y is an intermediate node, the downstream effects of other variables on Y might confound the causal effect of A, potentially invalidating the fairness guarantees. Similarly, if A is not a root node, its causal effect on Y might be mediated by other variables, making it difficult to isolate the direct effect of A that the method aims to mitigate.
+
+W2: Is it necessary for each node to have an arrow pointing to Y in G? While the paper mentions that not every node needs a direct influence on Y, the method's reliance on modeling Y as a function of all variables in (X, A) raises questions. If a variable has no causal effect on Y, including it in the model might introduce noise and reduce the model's interpretability. Furthermore, it is unclear how the method handles the case where a variable is causally related to Y but not directly connected to it in the learned MPDAG or CPDAG. This could lead to an incomplete representation of the causal relationships and potentially affect the fairness-accuracy trade-off.
+
+W3: Zuo et al. utilize counterfactual fairness by identifying deterministic non-descendants of sensitive attributes on the MPDAG, which does not seem to require a full understanding of causal graphs. Can the authors provide a more detailed analysis to distinguish between these two approaches? The paper mentions that Zuo et al.'s approach discards a lot of covariate information, but it would be beneficial to have a more in-depth comparison. For example, under what specific conditions would the proposed method outperform Zuo et al.'s approach in terms of both fairness and accuracy? The paper should also discuss the potential limitations of relying on observational data to learn causal graphs, especially when there are unobserved confounders that might lead to spurious causal relationships.
+
+### Questions
+Please refer to the weakness part for the questions.
+
+***
+
+After rebuttal: Thank you very much to the authors for their answers to our reviews and for improving the paper during the rebuttal period. The modifications bring valuable content. I read also carefully the other reviews and the corresponding answers. My recommendation is "accept, good paper".
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors explore the challenge of causal fair learning with only partial knowledge of the structural causal model. They approach this issue by assuming the causal model is provided in the form of a maximal partial directed acyclic graph (MPDAG). This graph represents a Markov equivalent class of directed acyclic graphs (DAGs) that align with the available knowledge. Using the MPDAG, the authors' algorithm aims to construct a predictor that not only maximizes prediction accuracy but also adheres to interventional fairness, a causal-based definition of fairness. Unlike existing learning algorithms that ensure interventional fairness but fail to manage the accuracy-fairness trade-off, the proposed algorithm introduces a parameter specifically for this purpose. The authors employ key techniques to identify and estimate the intervention distribution of the predicted outcome. This allows them to evaluate the degree of interventional fairness and incorporate it into the optimization problem of the learning algorithm. Experiments using both synthetic and real datasets confirm the algorithm's capability to control the accuracy-fairness trade-off effectively.
+
+### Strengths
+1. The paper is well-written and easy to follow.
+
+2. Addressing causal-based fairness with only a fragmentary understanding of the causal graph is vital. The primary challenge in enforcing causal-based fairness is constructing an accurate causal graph. This research's ability to guarantee causal-based fairness using an incomplete causal graph widens its relevance to practical scenarios.
+
+3. Incorporating the techniques from Perkovic 2020 into causal fair learning is interesting. As highlighted by the authors, this approach achieves the identification and estimation of the intervention distribution for the predicted label, thus enhancing the control over the accuracy-fairness trade-off.
+
+4. The experimental findings unequivocally validate the proposed algorithm's capability to control the trade-off between accuracy and interventional fairness.
+
+### Weaknesses
+1. The algorithm presented seems to be a direct adaptation of the findings from Perkovic 2020. If the intervention distribution over observable endogenous variables can be identified and estimated, it stands to reason that the intervention distribution of the predicted label is also identifable and estimable, given that this label is derived using a known function from the intervened observable endogenous variables. This raises questions about the method's novelity.
+
+2. The approach necessitates the creation and estimation of the generative model for non-admissible attributes. This forms a significant impediment to its application in real-world contexts, especially when the direct causal functions of the partial causal model may not be readily observable.
+
+### Questions
+1. Could the authors shed light on the contributions and advancements made beyond the scope of Perkovic 2020?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper deals with the problem of learning an interventionally fair classifier when the underlying causal graph is not available. For this purpose, the authors propose to first apply a causal discovery algorithm, resulting in a maximally partially directed graph (MPDAG). Then, the authors add the predictor as an additional node to the causal graph and use identifiability theory for MPDAGs to estimate discrepancies with respect to interventional fairness, which is then added as a penalty to the predictor loss. The method is evaluated on synthetic and real-world data.
+
+### Strengths
+- The paper deals with an important topic, as the causal graph of the underlying data-generating process is often unknown in practice
+- The method is theoretically sound, identifiability guarantees and proofs are provided
+- The experimental results indicate the effectiveness of the proposed method
+
+### Weaknesses
+ - The paper deals with an important topic, as the causal graph of the underlying data-generating process is often unknown in practice
+- The method is theoretically sound, identifiability guarantees and proofs are provided
+- The experimental results indicate the effectiveness of the proposed method
+
+ - The idea of adding a fairness penalty to the prediction objective and using a trade-off parameter is not novel but has been explored in previous papers with numerous fairness notions (e.g., Quinzan et al. 2022, Frauen et al. 2023). From my understanding, the novelty is combining these ideas with causal discovery and identifiability theory for MPDAGs.
+- Related to the previous point, the paper seems to combine these results in a rather straightforward manner, with limited novel ideas. However, the corresponding theoretical results (e.g., Theorem 4.1) seem sound and no previous work seems to have applied MPDAG identifiability theory to interventional fairness (which, in my opinion, is enough novelty for recommending acceptance, but also justifies why I am hesitant to give a higher score).
+- Applicability in practice: The proposed method seems to be difficult to employ in practice. First, one has to run a causal discovery algorithm to obtain an MPDAG, and then perform conditional density estimation to obtain the fairness penalty. Furthermore, there is no way of automatically choosing the trade-off parameter (even though this point is not specifically a drawback of the method in this paper).
+-  The authors hint at the possibility of extending their approach to other fairness notions. I think the paper would benefit from a more detailed review of related fairness notions in the appendix (e.g., total/direct/indirect effects, path-specific effects, counterfactual fairness), and how the method could (or could not) be extended
+
+### Questions
+- In the case of non-identification, the authors propose to replace the penalty term with a sum over all possible MPDAGs by directing the relevant edges. Can the authors provide some intuition/experiments on how this affects the prediction performance? I could imagine that the prediction performance could suffer if the objective is penalized with a large sum of MPDAGs.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

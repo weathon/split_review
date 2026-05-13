@@ -1,0 +1,429 @@
+\title{Making Predictors More Reliable with Selective Recalibration}
+
+\begin{abstract}
+
+A reliable deep learning system should be able to accurately express its confidence with respect to its predictions, a quality known as calibration.
+One of the most effective ways to produce reliable confidence estimates with a pre-trained model is by applying a post-hoc recalibration method.
+Popular recalibration methods like temperature scaling are typically fit on a small amount of data and work in the model's output space, as opposed to the more expressive feature embedding space, and thus usually have only one or a handful of parameters.
+However, the target distribution to which they are applied is often complex and difficult to fit well with such a function.
+To this end we propose \textit{selective recalibration}, where a selection model learns to reject some user-chosen proportion of the data in order to allow the recalibrator to focus on regions of the input space that can be well-captured by such a model.
+We provide theoretical analysis to motivate our algorithm, and test our method through comprehensive experiments on difficult medical imaging and zero-shot classification tasks.  Our results show that selective recalibration consistently leads to significantly lower calibration error than a wide range of selection and recalibration baselines.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=\textwidth]{figures/synthetic/figure_1.png}
+    \caption{
+    Reliability Diagrams for a model that has different calibration error (deviation from the diagonal) in different subsets of the data (here shown in blue and green).  The data per subset is binned based on confidence values; each marker represents a bin, and its size depicts the amount of data in the bin. The red dashed diagonal represents perfect calibration, where confidence equals expected accuracy.
+    }
+    \label{fig:main}
+\end{figure}
+In order to build user trust in a machine learning system, it is important that the system can accurately express its confidence with respect to its own predictions.  Under the notion of calibration common in deep learning \citep{guo2017oncalibration, minderer2021revisiting}, a confidence estimate output by a model should be as close as possible to the expected accuracy of the prediction.  For instance, a prediction assigned 30\% confidence should be correct 30\% of the time.  
+This is especially important in risk-sensitive settings such as medical diagnosis, where binary predictions alone are not useful since a 30\% chance of disease must be treated differently than a 1\% chance.
+While advancements in neural network architecture and training have brought improvements in calibration as compared to previous methods \citep{minderer2021revisiting}, neural networks still suffer from miscalibration, usually in the form of overconfidence 
+\citep{guo2017oncalibration, wang2021dontbeafraid}.  In addition, these models are often applied to complex data distributions, 
+possibly including outliers, and may have different calibration error within and between different subsets in the data \citep{ovadia2019can, perezlebel2023calibration}.  
+We illustrate this setting in Figure~\hyperref[fig:main]{\ref*{fig:main}a} with a Reliability Diagram, a tool for visualizing calibration by plotting average confidence against accuracy for bins of datapoints with similar confidence estimates.
+
+To address this calibration error, the confidence estimates of a pre-trained model can be refined using a post-hoc recalibration method like Platt scaling \citep{Platt1999}, temperature scaling \citep{guo2017oncalibration}, or histogram binning \citep{zadrozny2001obtaining}.
+Given existing empirical evidence \citep{guo2017oncalibration} and the fact that they are typically fit on small validation sets (on the order of hundreds to a few thousand examples), these ``recalibrators'' usually reduce the input space to the model's logits (e.g., temperature scaling) or predicted class scores (e.g., Platt scaling, histogram binning), as opposed to the high-dimensional and expressive feature embedding space.  
+Accordingly, they are generally inexpressive models, having only one or a handful of parameters \citep{Platt1999, guo2017oncalibration, zadrozny2001obtaining, kumar2019verified}.
+But the complex data distributions to which neural networks are often applied are difficult to fit well with such simple functions, and calibration error can even be exacerbated for some regions of the input space, especially when the model has only a single scaling parameter (see Figure~\hyperref[fig:main]{\ref*{fig:main}b}). 
+
+Motivated by these observations, we contend that these popular recalibration methods are a natural fit for use with a selection model.  
+Selection models \citep{elyaniv2010noisefreeselectiveclassification, geifman2017selective} are used alongside a classifier, and may reject a portion of the classifier's predictions in order to improve some performance metric on the subset of accepted (i.e., unrejected) examples.
+While selection models have typically been applied to improve classifier accuracy \citep{geifman2017selective}, they have also been used to improve calibration error by rejecting the confidence estimates of a fixed model \citep{fisch2022selective}.
+However, selection alone cannot fully address the underlying miscalibration because it does not alter the confidence output of the model (see Figure~\hyperref[fig:main]{\ref*{fig:main}c}), and the connection between selection and post-hoc recalibration remains largely unexplored.  
+
+In this work we propose \textit{selective recalibration}, where a selection model and a recalibration model are jointly optimized in order to produce predictions with low calibration error.  By rejecting some portion of the data, the system can focus on a region that can be well-captured by a simple recalibration model, leading to a set of predictions with a lower calibration error than under recalibration or selection alone (see Figure~\hyperref[fig:main]{\ref*{fig:main}d}).  
+This approach is especially important when a machine learning model is deployed for decision-making in risk-sensitive domains such as healthcare, finance, and law, where a predictor must be well-calibrated if a human expert is to use its output to improve outcomes and avoid causing active harm.
+To summarize our contributions:
+\begin{itemize}
+    \item We formulate selective recalibration, and offer a new loss function for training such a system, Selective Top-Label Binary Cross Entropy (S-TLBCE), which aligns with the typical notion of loss under smooth recalibrators like Platt or temperature scaling models.
+    \item We test selective recalibration and S-TLBCE in real-world medical diagnosis and image classification experiments, and find that selective recalibration with S-TLBCE consistently leads to significantly lower calibration error than a wide range of selection and recalibration baselines.
+    \item We provide theoretical insight to support our motivations and algorithm.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+Making well-calibrated predictions is a key feature of a reliable statistical model \citep{guo2017oncalibration, pmlr-v80-hebert-johnson18a, minderer2021revisiting, fisch2022selective}.  
+Popular methods for improving calibration error given a pretrained model and labeled validation dataset include Platt \citep{Platt1999} and temperature scaling \citep{guo2017oncalibration}, histogram binning \citep{zadrozny2001obtaining}, and Platt binning \citep{kumar2019verified} (as well as others like those in \citet{naeini2015bbq, zhang2020mixnmatch}).  
+Loss functions have also been proposed to improve the calibration error of a neural network in training, including Maximum Mean Calibration Error (MMCE) \citep{kumar2018trainablecalibration}, S-AvUC, and SB-ECE \citep{karandikar2021soft}.
+Calibration error is typically measured using quantities such as Expected Calibration Error \citep{naeini2015bbq, guo2017oncalibration}, Maximum Calibration Error \citep{naeini2015bbq, guo2017oncalibration}, or Brier Score \citep{Brier1950VERIFICATIONOF} that measure whether prediction confidence matches expected outcomes.  
+Previous research \citep{roelofs2020mitigatingbias} has demonstrated that calibration measures calculated using binning have lower bias when computed using equal-mass bins.  
+Another technique for improving ML system reliability is selective classification \citep{geifman2017selective, elyaniv2010noisefreeselectiveclassification}, wherein a model is given the option to abstain from making a prediction on certain examples (often based on confidence or out-of-distribution measures).  
+Selective classification has been well-studied in the context of neural networks \citep{geifman2017selective, giefman2019selective, madras2017learningtodefer}. It has been shown to increase disparities in accuracy across groups \citep{jones2020magnify}, although work has been done to mitigate this effect in both classification \citep{jones2020magnify} and regression \citep{shah2021selectiveregression} tasks by enforcing calibration across groups.  
+
+Recent work by \citet{fisch2022selective} introduces the setting of calibrated selective classification, in which predictions from a pre-trained model are rejected for the sake of improving selective calibration error.  The authors propose a method for training a selective calibration model using an S-MMCE loss function derived from the work of \citet{kumar2018trainablecalibration}.  
+Our work differs from this and other previous work by considering the \textit{joint} training and application of selection and recalibration models.  
+While \citet{fisch2022selective} apply selection directly to a frozen model's outputs, we contend that the value in our algorithm lies in this joint optimization.  
+Also, instead of using S-MMCE, we propose a new loss function, S-TLBCE, which more closely aligns with the objective function for Platt and temperature scaling.   
+
+Besides calibration and selection, there are other approaches to quantifying and addressing the uncertainty in modern neural networks.  
+One popular approach is the use of ensembles, where multiple models are trained and their joint outputs are used to estimate uncertainty. 
+Ensembles have been shown to both improve accuracy and provide a means to estimate predictive uncertainty without the need for Bayesian modeling \citep{lakshminarayanan2017simple}. Bayesian neural networks (BNNs) offer an alternative by explicitly modeling uncertainty through distributions over the weights of the network, thus providing a principled uncertainty estimation \citep{blundell_weight_2015}.
+Dropout can also be viewed as approximate Bayesian inference \citep{gal_uncertainty_2016}.
+Another technique which has received interest recently is conformal prediction, which uses past data to determine a prediction interval or set in which future points are predicted to fall with high probability \citep{shafer_tutorial_2008, vovk_defensive_2005}.  Such distribution-free guarantees have been extended to cover a wide set of risk measures \citep{deng2023, snell2022quantile} and applications such as robot planning \citep{ren2023robots} and prompting a large language model \citep{zollo2023}.
+
+
+\section{Background}
+
+
+Consider the multi-class classification setting with $K$ classes and data instances $(x,y) \sim \mathcal{D}$, where $x$ is the input and $y \in \{1,2,...,K\}$ is the ground truth class label.  
+For a black box predictor $f$, $f(x) \in \mathbbm{R}^{K}$ is a vector where $f(x)_k$ is the predicted probability that input $x$ has label $k$; we denote the confidence in the top predicted label as $\hat{f}(x)=\max_{k} f(x)_k$.  Further, we may access the unnormalized class scores $f_s(x) \in \mathbbm{R}^{K}$ (which may be negative) and the feature embeddings $f_e(x) \in \mathbbm{R}^{d}$.  The predicted class is $\hat{y} = \argmax_k f(x)_k$ and the correctness of a prediction is $y^c = \bm{1}\{y = \hat{y}\}$.  
+
+\subsection{Selective Classification}
+In selective classification, a {\it selection model $g$} produces binary outputs, where $0$ indicates rejection and $1$ indicates acceptance.  A common goal is to decrease some error metric by rejecting no more than a $1-\beta$ proportion of the data for given target coverage level $\beta$. 
+One popular choice for input to $g$ is the feature embedding $f_e(x)$, although other representations may be used.  Often, a soft selection model $\hat{g}: \mathbbm{R}^d \rightarrow [0,1]$ is trained and $g$ is produced at inference time by choosing a threshold $\tau$ on $\hat{g}$ to achieve coverage level $\beta$ (i.e., $\mathbb{E}[\bm{1}\{\hat{g}(X) \geq \tau \}] = \beta$).
+
+\subsection{Calibration}
+
+The model $f$ is said to be top-label calibrated if $\mathbbm{E}_{\mathcal{D}}[y^c|\hat{f}(x)=p]=p$ for all $p \in [0,1]$ in the range of $\hat f(x)$. To measure deviation from this condition, we calculate expected calibration error (ECE):
+\begin{align}
+    \text{ECE}_q = \biggl(
+    \mathbbm{E}_{\hat f(x)}\biggl[ \Bigl(\Bigl\lvert \mathbbm{E}_{\mathcal{D}}[y^c|\hat f(x)] - \hat f(x) \Bigr\rvert\Bigr)^q \biggr]
+    \biggr)^{\frac{1}{q}},
+\end{align}
+where $q$ is typically 1 or 2.  A {\it recalibrator model $h$} can be %further 
+applied to $f$ to produce outputs in the interval $[0,1]$ such that $h(f(x)) \in \mathbbm{R}^{K}$ is the recalibrated prediction confidence for input $x$ and $\hat{h}(f(x))=\max_{k} h(f(x))_k$.  
+See Section~\ref{sec:cal_models} for details on some specific forms of $h(\cdot)$.
+
+\subsection{Selective Calibration}
+
+Under the notion of calibrated selective classification introduced by \citet{fisch2022selective}, a predictor is selectively calibrated if $\mathbbm{E}_{\mathcal{D}}\bigl[y^c|\hat f(x)=p, g(x)=1\bigr]=p$
+for all $p \in [0,1]$ in the range of $\hat f(x)$ where $g(x)=1$.
+To interpret this statement, for the subset of examples that are accepted (i.e., $g(x)=1$), for a given confidence level $p$ the predicted label should be correct for $p$ proportion of instances. Selective expected calibration error is then calculated as:
+\begin{align}
+    \text{S-ECE}_q = \biggl(
+    \mathbbm{E}_{\hat f(x)}\biggl[ \Bigl(\Bigl\lvert \mathbbm{E}_{\mathcal{D}}[y^c|\hat f(x),g(x)=1] - \hat f(x) \Bigr\rvert\Bigr)^q \mid g(x)=1\biggr]
+    \biggr)^{\frac{1}{q}}.
+\end{align}
+It should be noted that selective calibration is a separate goal from selective accuracy, and enforcing it may in some cases decrease accuracy.  
+For example, a system may reject datapoints with $\hat f(x)=0.7$ and {$p(y^c=1|x)=0.99$} (which will be accurate 99\% of the time) in order to retain datapoints with $\hat f(x)=0.7\text{ and } p(y^c=1|x)=0.7$ (which will be accurate 70\% of the time). This will decrease accuracy, but the tradeoff would be acceptable in many applications where probabilistic estimates (as opposed to discrete labels) are the key decision making tool.
+See Section~\ref{sec:tradeoffs} for a more thorough discussion and empirical results regarding this potential trade-off.
+Here we are only concerned with calibration, and leave 
+methods for exploring the Pareto front of selective calibration and accuracy
+to future work.
+
+
+\section{Selective Recalibration}
+
+
+In order to achieve lower calibration error than existing approaches, we propose jointly optimizing a selection model and a recalibration model.  Expected calibration error under both selection and recalibration is equal to
+\begin{align}
+    \text{SR-ECE}_q = \biggl(
+    \mathbbm{E}_{\hat h(f(x))}\biggl[ \Bigl(\Bigl\lvert \mathbbm{E}_{\mathcal{D}}[y^c|\hat{h}(f(x)),g(x)=1] - \hat{h}(f(x)) \Bigr\rvert\Bigr)^q \mid g(x)=1\biggr]
+    \biggr)^{\frac{1}{q}}.
+\end{align}
+
+Taking $\text{SR-ECE}_q$ as our loss quantity of interest,
+our goal in selective recalibration is to solve the optimization problem:
+\begin{align}\label{eq:sc_obj}
+    \min_{g,h} \text{SR-ECE}_q \text{~~~~s.t.~~~~}\mathbbm{E}_{\mathcal{D}}[g(x)] \geq \beta,
+\end{align}
+where $\beta$ is our desired coverage level.  
+
+There are several different ways one could approach optimizing the quantity in Eq.~\ref{eq:sc_obj} through selection and/or recalibration.
+One could apply only $h$ or $g$, first train $h$ and then $g$ (or vice versa), or jointly train $g$ and $h$ (i.e., selective recalibration).  In \citet{fisch2022selective}, only $g$ is applied; however, as our experiments will show, much of the possible reduction in calibration error comes from $h$.  While $h$ can be effective alone, typical recalibrators are inexpressive, and thus may benefit from rejecting some difficult-to-fit portion of the data (as we find to be the case
+in experiments on several real-world datasets in Section \ref{sec:experiments}). 
+Training the models sequentially is also sub-optimal, as the benefits of selection with regards to recalibration can only be fully realized if the two models can interact in training, since fixing the first model constrains the available solutions.
+
+Selective recalibration, where $g$ and $h$ are trained together, admits any solution available to these approaches, and can produce combinations of $g$ and $h$ that are unlikely to be found via sequential optimization (we formalize this intuition theoretically via an example in Section \ref{sec:theory}).  Since Eq. \ref{eq:sc_obj} cannot be directly optimized, we instead follow \citet{giefman2019selective} and \citet{fisch2022selective} and define a surrogate loss function $L$ including both a selective error quantity and a term to enforce the coverage constraint (weighted by $\lambda$):
+\begin{align}\label{eq:surr}
+    \min_{g,h} L = L_{sel}+\lambda L_{cov}(\beta).
+\end{align}
+We describe choices for $L_{sel}$ (selection loss) and $L_{cov}$ (coverage loss) in Sections~\ref{sec:sel_loss} and \ref{sec:cov_loss}, along with recalibrator models in Section \ref{sec:cal_models}.  
+Finally, we specify an inference procedure in Section \ref{sec:inference}, and explain how the model trained with the soft constraint in Eq. \ref{eq:surr} is used to satisfy Eq. \ref{eq:sc_obj}.
+
+\subsection{Selection Loss}\label{sec:sel_loss}
+
+In selective recalibration, the selection loss term measures the calibration of selected instances.  Its general form for a batch of data $D=\{(x_i,y_i)\}_{i=1}^n$ with $n$ examples is
+\begin{align}
+    L_{sel} = \frac{l(\hat{g},h;f,D) }{\frac{1}{n}\sum_i \hat{g}(x_i)}
+\end{align}
+where $l$ measures the loss on selected examples and the denominator scales the loss according to the proportion preserved.  
+We consider 3 forms of $l$: S-MMCE of \citet{fisch2022selective}, a selective version of multi-class cross entropy, and our proposed selective top label cross entropy loss.
+
+\subsubsection{Maximum Mean Calibration Error}
+
+We apply the S-MMCE loss function proposed in \citet{fisch2022selective} for training a selective calibration system.  For a batch of training data, this loss function is defined as
+\begin{equation}
+    l_{\text{S-MMCE}}(\hat{g},h;f,D) = \Biggl[\frac{1}{n^2} \sum_{i,j} \big|y^c_i-\hat{h}(f(x_i))\big|^q \big|y^c_j-\hat{h}(f(x_j))\big|^q \hat{g}(x_i) \hat{g}(x_j) \phi \biggl( \hat{h}(f(x_i)),\hat{h}(f(x_j)) \biggr) \Biggr]^{\frac{1}{q}}
+\end{equation}
+where $\phi$ is some similarity kernel, like Laplacian.  
+On a high level, this loss penalizes pairs of instances that have similar confidence and both are far from the true label $y^c$ (which denotes prediction correctness $0$ or $1$).
+Further details and motivation for such an objective can be found in \citet{fisch2022selective}.  
+
+\subsubsection{Top Label Binary Cross Entropy}
+
+Consider a selective version of a typical multi-class cross entropy loss:
+\begin{equation}
+    l_{\text{S-MCE}}(\hat{g},h;f,D)= \frac{-1}{n} \sum_i \hat{g}(x_i) \log h(f(x_i))_{y_i}~.
+\end{equation}
+In the case that the model is incorrect ($y^c=0$), this loss will penalize based on under-confidence in the ground truth class.  However, our goal is calibration according to the \textit{predicted} class.  Thus we propose a loss function for training a selective recalibration model 
+based on the typical approach to optimizing a smooth recalibration model, Selective Top Label Binary Cross Entropy (S-TLBCE):
+\begin{equation}
+    l_{\text{S-TLBCE}}(\hat{g},h;f,D) = \frac{-1}{n} \sum_i \hat{g}(x_i) \Bigl[ y^c_i \log \hat{h}(f(x_i)) + (1-y^c_i) \log (1-\hat{h}(f(x_i))) \Bigr].
+\end{equation}
+In contrast to S-MCE, in the case of an incorrect prediction S-TLBCE penalizes based on over-confidence in the predicted label.  This aligns with the established notion of top-label calibration error, as well as the typical Platt or temperature scaling objectives, and makes this a natural loss function for training a selective recalibration model.  We compare S-TLBCE and S-MCE empirically in our experiments, and note that in the binary case these losses are the same.
+
+\subsection{Coverage Loss}\label{sec:cov_loss}
+
+When the goal of selection is improving accuracy, there exists an ordering under $\hat g$ that is optimal for any choice of $\beta$, namely that where $\hat g$ is greater for all correctly labeled examples than it is for any incorrectly labeled example.  Accordingly, coverage losses used to train these systems will often only enforce that \textit{no more than} $\beta$ proportion is to be rejected.
+Unlike selective accuracy, selective calibration is not monotonic with respect to individual examples and a mismatch in coverage between training and deployment may hurt test performance.
+Thus in selective recalibration we assume the user aims to reject exactly $\beta$ proportion of the data, and employ a coverage loss that targets a specific $\beta$, 
+\begin{equation}
+L_{cov}(\beta)= \bigl(\beta - \frac{1}{n}\sum_i \hat{g}(x_i)\bigr)^2.    
+\end{equation}
+Such a loss will be an asymptotically consistent estimator of $(\beta-\E [ \hat{g}(x)])^2$.
+Alternatively, \citet{fisch2022selective} use a logarithmic regularization approach for enforcing the coverage constraint without a specific target $\beta$, computing cross entropy between the output of $\hat g$ and a target vector of all ones.  
+However, we found this approach to be unstable and sensitive to the choice of $\lambda$ in initial experiments, while our coverage loss enabled stable training at any sufficiently large choice of $\lambda$, similar to the findings of \citet{giefman2019selective}.
+
+\subsection{Recalibration Models}\label{sec:cal_models}
+
+We consider two differentiable and popular calibration models, Platt scaling and temperature scaling, both of which attempt to fit a function between model confidence and output correctness.  The main difference between the models is that Platt scaling works in the output probability space, whereas temperature scaling is applied to model logits before a softmax is taken.  A Platt recalibrator \citep{Platt1999} produces output according to
+\begin{equation}
+  h^\textrm{Platt}(f(x))=\frac{1}{1+\exp(w f(x) + b)}  
+\end{equation}
+where $w, b$ are learnable scalar parameters.  On the other hand, a temperature scaling model \citep{guo2017oncalibration} produces output according to
+\begin{equation}
+    h^\textrm{Temp}(f_s(x))= \text{softmax} \biggl(\frac{f_s(x)}{T}\biggr)
+\end{equation}
+where $f_s(x)$ is the vector of logits (unnormalized scores) produced by $f$ and $T$ is the single learned (scalar) parameter.  Both models are typically trained with a binary cross-entropy loss, where the labels 0 and 1 denote whether an instance is correctly classified.
+
+\subsection{Inference}\label{sec:inference}
+
+Once we have trained $\hat{g}$ and $h$, we can flexibly account for $\beta$ by selecting a threshold $\tau$ on unlabeled test data (or some other representative tuning set) such that $\mathbb{E}[\bm{1}\{\hat{g}(X) \geq \tau \}] = \beta$.  The model $g$ is then simply $g(x) := \bm{1}\{\hat{g}(x) \geq \tau \}$.  
+
+\subsubsection{High Probability Coverage Guarantees}
+
+Since $\bm{1}\{\hat{g}(x) \geq \tau\}$ is a random variable with a Bernoulli distribution, we may also apply the Hoeffding bound \citep{hoeffing1963probability} to guarantee that with high probability empirical target coverage $\hat{\beta}$ (the proportion of the target distribution where $\hat{g}(x) \geq \tau$) will be in some range.
+Given a set $\mathcal{V}$ of $n_u$ i.i.d. unlabeled examples from the target distribution, we denote empirical coverage on $\mathcal{V}$ as $\tilde{\beta}$. With probability at least $1-\delta$, $\hat{\beta}$ will be in the range $[\tilde{\beta}-\epsilon, \tilde{\beta}+\epsilon]$, where
+$\epsilon=\sqrt{\frac{\log(\frac{2}{\delta})}{2n_u}}$.
+For some critical coverage level $\beta$, $\tau$ can be decreased until $\tilde{\beta}-\epsilon \geq \beta$.
+
+
+\section{Experiments}
+
+
+In this section we examine the performance of selective recalibration and baselines when applied to models pre-trained on real-world datasets and applied to a target distribution possibly shifted from the training distribution. 
+In Section~\ref{sec:camelyon17_exp} we investigate whether, given a small validation set of labeled examples drawn i.i.d. from the target distribution, joint optimization consistently leads to a lower empirical selective calibration error than selection or recalibration alone or sequential optimization.  Subsequently, in Section~\ref{sec:ood_exp} we study multiple out-of-distribution prediction tasks and the ability of a single system to provide decreasing selective calibration error across a range of coverage levels when faced with a further distribution shift from validation data to test data.  
+We also analyze the trade-off between selective calibration error and accuracy in this setting.
+
+Since we are introducing the objective of selective recalibration here, we focus on high-level design decisions, in particular the choice of selection and recalibration method, loss function, and optimization procedure (joint vs. sequential).
+For selective recalibration models, the input to $g$ is the feature embedding. Temperature scaling is used for multi-class examples and Platt scaling is applied in the binary cases (following \citet{guo2017oncalibration} and initial results on validation data). Calibration error is measured using $\text{ECE}_1$ and $\text{ECE}_2$ with equal mass binning.  For the selection loss, we use $l_{\text{S-TLBCE}}$ and $l_{\text{S-MMCE}}$ for binary tasks, and include a selective version of typical multi-class cross-entropy ($l_{\text{S-MCE}}$) for multi-class tasks. 
+Pre-training is performed where $h$ is optimized first in order to reasonably initialize the calibrator parameters before beginning to train $g$.
+Models are trained both with $h$ fixed after this pre-training (denoted as ``sequential'' in results) and when it is jointly optimized throughout training (denoted as ``joint'' in results).  
+
+Our selection baselines include confidence-based rejection (``Confidence'') and multiple out-of-distribution (OOD) detection methods (``Iso. Forest'', ``One-class SVM''), common techniques when rejecting to improve accuracy.  The confidence baseline rejects examples with the smallest $\hat f(x)$ (or $\hat h(f(x))$), while the OOD methods are measured in the embedding space of the pre-trained model.  
+All selection baselines are applied to the recalibrated model in order to make the strongest comparison.    
+We make further comparisons to recalibration baselines, including the previously described temperature and Platt scaling as well as binning methods like histogram binning and Platt binning.  
+\subsection{Selective Recalibration with i.i.d. Data}\label{sec:camelyon17_exp}
+
+First, we test whether selective recalibration consistently produces low ECE in a setting where there is a validation set of labeled training data available from the same distribution as test data using outputs of pretrained models on the Camelyon17 and ImageNet datasets. 
+Camelyon17 \citep{bandi2017camelyon} is a task where the input $x$ is a 96x96 patch of a whole-slide image of a lymph node section from a patient with potentially metastatic breast cancer and the label $y$ is whether the patch contains a tumor.
+Selection and recalibration models are trained with 1000 samples, and we apply a Platt scaling $h$ since the task is binary.
+ImageNet is a well-known large scale image classification dataset, where we use 2000 samples from a supervised ResNet34 model for training selection and recalibration models, and temperature scaling $h$ since the task is multi-class.
+Our soft selector $\hat g$ is a shallow fully-connected network (2 hidden layers with dimension 128), and we report selective calibration error for coverage level $\beta \in \{0.75, 0.8, 0.85, 0.9\}$.
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=\textwidth]{figures/imagenet/imagenet_id_experiment_results.png}
+    \includegraphics[width=\textwidth]{figures/camelyon17/camelyon17_id_experiment_results.png}
+    \caption{Selective calibration error on ImageNet and Camelyon17 for coverage level $\beta \in \{0.75, 0.8, 0.85, 0.9\}$. \textbf{Left}: Various recalibration methods are trained using labeled validation data. \textbf{Middle}: Selection baselines including confidence-based rejection and various OOD measures. \textbf{Right}: Selective recalibration with different loss functions.}
+    \label{fig:id_results}
+\end{figure}
+
+Results are displayed in Figure~\ref{fig:id_results}.  They show that by jointly optimizing the selector and recalibration models, we are able to achieve improved ECE at the given coverage level $\beta$ compared to first training $h$ and then $g$.  We also find selective recalibration achieves the lowest ECE in almost every case in comparison to recalibration alone. While the confidence-based selection strategy performs well in these experiments, this is not a good approach to selective calibration in general,
+as this is a heuristic strategy and may fail in cases where a model's confident predictions are in fact poorly calibrated (see Section~\ref{sec:ood_exp} for examples).
+In addition, the S-TLBCE loss shows more consistent performance than S-MMCE, as it reduces ECE in every case, whereas training with S-MMCE increase calibration error in some cases.
+
+To be sure that the lower calibration error as compared to recalibration is not because of the extra parameters in the selector model, we also produce results for a recalibration model with the same architecture as our selector.  Once again the input is the feature embedding, and the model $h$ has 2 hidden layers with dimension 128.  Results for Camelyon17 are included in Figure~\ref{fig:id_results}; for clarity of presentation of ImageNet results, we omit the MLP recalibrator results from the plot as they were an order of magnitude worse than all other methods ($\text{ECE}_1$ 0.26, $\text{ECE}_2$ 0.30).  In neither case does this baseline reach the performance of the best low-dimensional recalibration model.
+
+\subsection{Selective Re-Calibration under Distribution Shift}\label{sec:ood_exp}
+
+In this experiment, we study the various methods applied to genetic perturbation classification with RxRx1, as well as zero-shot image classification with CLIP and CIFAR-100-C.  
+RxRx1 \citep{taylor2019rxrx1} is a task where the input $x$ is a 3-channel image of cells obtained by fluorescent microscopy, the label $y$ indicates which of 1,139 genetic treatments (including no treatment) the cells received, and there is a domain shift across the batch in which the imaging experiment was run. 
+CIFAR-100 is a well-known image classification dataset, and we perform zero-shot image classification with CLIP.
+We follow the setting of \citet{fisch2022selective} where the test data is drawn from a shifted distribution with respect to the validation set and the goal is not to target a specific $\beta$, but rather to train a selector that works across a range of coverage levels.
+In the case of RxRx1 the strong batch processing effect leads to a 9\% difference in pretrained model accuracy between validation (18\%) and test (27\%) output, and we also apply a selective recalibration model trained on validation output from zero-shot CLIP and CIFAR-100 to test examples drawn from the OOD CIFAR-100-C test set.  
+Our validation sets have 1000 (RxRx1) or 2000 (CIFAR-100) examples, $\hat g$ is a small network with 1 hidden layer of dimension 64, and we set $\beta=0.5$ when training the models.  
+For our results we report the area under the curve (AUC) for the coverage vs. error curve, a typical metric in selective classification \citep{geifman2017selective, fisch2022selective} that reflects how a model can reduce the error on average at different levels of $\beta$.  We measure AUC in the range $\beta=[0.5, 1.0]$, with measurements taken at intervals of $0.05$ (i.e., $\beta \in [0.5, 0.55, 0.6,...,0.95, 1.0]$).
+Additionally, to induce robustness to the distribution shift we noise the selector/recalibrator input.  
+\begin{table}[!ht]
+    \centering
+    \caption{
+    RxRx1 and CIFAR-100-C AUC in the range $\beta=[0.5, 1.0]$.
+    }
+    \begin{tabular}{llcccccc}
+    \toprule
+        ~ & ~ & \multicolumn{3}{c}{RxRx1} & \multicolumn{3}{c}{CIFAR-100-C} \\
+        Selection & Opt. of $h, g$ &  $\text{ECE}_1$ &  $\text{ECE}_2$ & Acc. &  $\text{ECE}_1$ &  $\text{ECE}_2$ & Acc. \\
+    \midrule
+    Confidence &           - &        0.071 &        0.081 &            \textbf{0.353} &            0.048 &            0.054 &                \textbf{0.553} \\
+    One-class SVM &           - &        0.058 &        0.077 &           0.227 &            0.044 &            0.051 &               0.388 \\
+    Iso. Forest &           - &        0.048 &        0.061 &           0.221 &            0.044 &            0.051 &               0.379 \\
+    S-MCE &       sequential &        0.059 &        0.075 &           0.250 &            0.033 &            0.041 &               0.499 \\
+     &       joint &        0.057 &        0.073 &           0.249 &            0.060 &            0.068 &               0.484 \\
+    S-MMCE &       sequential &         \textbf{0.036} &         \textbf{0.045} &           0.218 &            0.030 &            0.037 &               0.503 \\
+     &       joint &        \textbf{0.036} &         \textbf{0.045} &           0.218 &            0.043 &            0.051 &               0.489 \\
+    S-TLBCE &       sequential &         \textbf{0.036} &         \textbf{0.045} &           0.219 &            0.030 &            0.037 &               0.507 \\
+     &       joint &        0.039 &        0.049 &           0.218 &             \textbf{0.026} &             \textbf{0.032} &               0.500 \\
+    \midrule
+    Recalibration & Temp. Scale &        0.055 &        0.070 &           0.274 &            0.041 &            0.047 &               0.438 \\
+    ($\beta=1.0$) & None &        0.308 &        0.331 &           0.274 &            0.071 &            0.079 &               0.438 \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:ood_exp}
+\end{table}
+
+Results are shown in Table~\ref{tab:ood_exp}.  First, these results highlight that even in this OOD setting, 
+the selection-only approach of \citet{fisch2022selective}
+is not enough and recalibration is a key ingredient in improving selective calibration error.  Fixing $h$ and then training $g$ performs better than joint optimization for RxRx1, likely because the distribution shift significantly changed the optimal temperature for the region of the feature space where $g(x)=1$.  Joint optimization performs best for CIFAR-100-C, and does still significantly improve ECE on RxRx1, although it's outperformed by fixing $h$ first in that case.  The confidence baseline performs quite poorly on both experiments and according to both metrics, significantly increasing selective calibration error in all cases.
+\subsubsection{Trade-offs Between Calibration Error and Accuracy}\label{sec:tradeoffs}
+
+While accurate probabilistic output is the only concern in some domains and should be of at least some concern in most domains, discrete label accuracy can also be important in some circumstances.  Table~\ref{tab:ood_exp} shows accuracy results under selection, and Figure~\ref{fig:acc_conf_trade} shows the selective accuracy curve and confidence histogram for our selective recalibration model trained with S-TLBCE for RxRx1 and CIFAR-100 (and applied to shifted distributions). Together, these results illustrate that under different data and prediction distributions, selective recalibration may increase or decrease accuracy.  For RxRx1, the model tends to reject examples with higher confidence, which also tend to be more accurate.  Thus, while $\text{ECE@}\beta$ may improve with respect to the full dataset, $\text{selective accuracy at }\beta$ is worse.  On the other hand, for CIFAR-100-C, the model tends to reject examples with lower confidence, which also tend to be less accurate.  Accordingly, both $\text{ECE@}\beta$ and $\text{selective accuracy at }\beta$ improve with respect to the full dataset.  
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=0.49\textwidth]{figures/rxrx/val_test_1000_bce_optim_quad_conf_and_acc.png}
+    \includegraphics[width=0.49\textwidth]{figures/cifar-100/val_CIFAR-100-C_2000_bce_optim_quad_conf_and_acc.png}
+    \caption{Plots illustrating 1) distribution of confidence among the full distribution and those examples accepted for prediction (i.e., where $g(x)=1$) at coverage level $\beta=0.8$ and 2) selective accuracy in the range $\beta=[0.8,1.0]$.}
+    \label{fig:acc_conf_trade}
+\end{figure}
+
+
+\section{Theoretical Analysis}
+
+\label{sec:theory}
+
+To build a deeper understanding of selective recalibration (and its alternatives), we consider a theoretical situation where a pre-trained model is applied to a target distribution different from the distribution on which it was trained, mirroring both our experimental setting and a common challenge in real-world deployments.  We show that with either selection or recalibration alone there will still be calibration error, while selective recalibration can achieve $\text{ECE}=0$.  We also show 
+that joint optimization of $g$ and $h$, as opposed to sequentially optimizing each model, is necessary to achieve zero calibration error.
+
+\subsection{Setup}
+
+We consider a setting with two classes, %i.e., $K=2$, 
+and without loss of generality we set $y\in\{-1,1\}$. 
+We are given a classifier pre-trained on a mixture model, a typical way to view the distribution of objects in images \citep{Zhu2014CapturingLD, thulasidasan_mixup_2020}. 
+The pre-trained classifier is then applied to a target distribution containing a portion of outliers from each class unseen during training.
+Our specific choices of classifier and training and target distributions are chosen for ease of interpretation and analysis; however, the intuitions built can be applied more generally,
+for example to neural network classifiers, which are too complex for such analysis but are often faced with outlier data on which calibration is poor \citep{ovadia2019can}.
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=0.6\textwidth]{figures/synthetic/theory_example_2.png}
+    \caption{A classifier pre-trained on a mixture model is applied to a target distribution with outliers. 
+    }
+    \label{fig:theory_dist}
+\end{figure}
+
+\subsubsection{Data Generation Model}
+
+\begin{definition}[Target Distribution]
+\label{model}
+The target distribution is defined as
+a $(\theta^*,\sigma,\alpha)$-perturbed mixture model
+over $(x,y)\in \bR^p\times\{1,-1\}$: 
+$x\mid y, z\sim zJ_1+(1-z)J_2$, where $y$ follows the Bernoulli distribution $\bP(y=1)=\bP(y=-1)=1/2$, $z$ follows a Bernoulli distribution $\bP(z=1)= \beta$, and $z$ is independent of $y$.
+\end{definition}
+Our data model considers a mixture of two distributions with disjoint and bounded supports, $J_1$ and $J_2$, where $J_2$ is considered to be an outlier distribution.
+Specifically, for $y\in\{-1,1\}$, $J_1$ is supported in the balls with centers $y \theta^*$ and radius $r_1$, $J_2$ is supported in the balls with centers $-y \alpha \theta^*$ and radius $r_2$, and both $J_1$ and $J_2$ have standard deviation $\sigma$.  
+\subsubsection{Classifier Algorithm} 
+
+Recall that in our setting $f$ is a pre-trained model, where the training distribution is unknown and we only have samples from some different target distribution. We follow this setting in our theory by considering a (possibly biased) estimator $\hat\theta$ of $\theta^*$, which is the output of a training algorithm $\mathscr{A}(S^{tr})$ that takes the i.i.d. training data set $S^{tr}=\{(x^{tr}_i,y^{tr}_i)\}_{i=1}^m$ as input. 
+The distribution from which $S^{tr}$ is drawn is \textbf{\textit{different}} from the target distribution from which we have data to train the selection and recalibration models.  
+
+For ease of analysis and explanation, we consider a simple classifier defined by
+$\hat\theta=\sum_{i=1}^m x^{tr}_i y^{tr}_i/m$ when the training distribution is set to be an unperturbed Gaussian mixture $x^{tr}|y^{tr}\sim\cN(y^{tr}\cdot\theta^*,\sigma^2 I)$ and $y^{tr}$ follows a Bernoulli distribution $\bP(y^{tr}=1)=1/2$.\footnote{The in-distribution case also works under our data generation model.}  This form of $\hat\theta$ is closely related to 
+Having obtained $\hat \theta$, our pretrained classifier aligns with the typical notion of a softmax response in neural networks.
+We first obtain the confidence vector $f(x)=(f_{1}(x),f_{-1}(x))^\top$, where 
+\begin{equation}\label{eq:score}
+f_{-1}(x)=\frac{1}{e^{2\hat{\theta}^\top x}+1},~~~f_{1}(x)=\frac{e^{2\hat{\theta}^\top x}}{e^{2\hat{\theta}^\top x}+1}.
+\end{equation}
+and then output $\hat y=\argmax_{k\in \{-1,1\}} f_k(x)$.
+For $k\in \{-1,1\}$, the confidence score $f_k(x)$ represents an estimator of $\bP(y=k|x)$ and the final classifier is equivalent to %constructing 
+$\hat y=\sgn(\hat\theta^\top x).$
+\subsection{Main Theoretical Results}
+
+Having established our data and classification models, we now analyze why selective recalibration (i.e., joint training of $g$ and $h$) can outperform recalibration and selection performed alone or sequentially.
+To measure calibration error, we consider $\ECE_q$ with $q=1$ (and drop the subscript $q$ for notational simplicity below).  For the clarity of theorem statements and proofs, we will restate definitions of calibration error to make them explicitly dependent on selection model $g$ and temperature $T$ and tailored for the binary case we are studying. We want to emphasize that we are \textit{\textbf{not} introducing new concepts}, but instead offering different surface forms of the same quantities introduced earlier.  First, we notice that under our data generating model and pretrained classifier, ECE can be expressed as
+$$\ECE=\bE_{\hat\theta^\top x}\bigg[\Big|\bP[y= 1 \mid \hat\theta^\top x =v]-\frac{1}{1+e^{-2v}}\Big|\bigg].$$
+By studying such population quantities, our analysis is not dependent on any binning-methods that are commonly used in empirically calculating expected calibration errors.
+
+\subsubsection{Selective Recalibration v.s.~Recalibration or Selection }
+
+We study the following ECE quantities according to our data model for recalibration alone (R-ECE), selection alone (S-ECE), and selective recalibration (SR-ECE). For recalibration, we focus on studying the popular temperature scaling model, although the analysis is nearly identical for Platt scaling.
+
+$$\RECE(T)=\bE_{\hat\theta^\top x}\bigg[\Big|\bP[y= 1 \mid \frac{\hat\theta^\top x}{T} =v]-\frac{1}{1+e^{-2v}}\Big|\bigg].$$
+$$\SECE(g):=\E_{\hat\theta^\top x} \bigg[\Big| \bP[y=1 \mid \hat\theta^\top x=v,g(x)=1]- \frac{1}{1+e^{-2v}} \Big| \mid g(x)=1\bigg].$$
+$$\SRECE(g,T):=\E_{\hat\theta^\top x} \bigg[\Big| \bP[y= 1 \mid \frac{\hat\theta^\top x}{T} =v,g(x)=1]- \frac{1}{1+e^{-2v}}\Big| \mid g(x)=1\bigg].$$
+ 
+Our first theorem proves that under our data generation model, S-ECE and R-ECE can never reach $0$, but SR-ECE can reach $0$ by choosing appropriate $g$ and $T$.
+
+\begin{theorem}\label{thm:joint}
+Under Assumption~\ref{as:theta}, for any $\delta\in(0,1)$ and $\hat\theta$ output by $\mathscr{A}$, there exist thresholds $M\in\bN^+$ and $\tau>0$ such that if $\max\{r_1,r_2,\sigma,\|\theta^* \|\}<\tau$ and $m>M$, there exists a positive lower bound $L$, with probability at least $1-\delta$ over $S^{tr}$
+$$\min\big\{\min_{g:\bE[g(x)]\ge \beta} \SECE(g),~~ \min_{T\in\bR}\RECE(T)\big\}>L. $$
+However, there exists $T_0$ and $g_0$ satisfying $\bE[g_0(x)]\ge \beta$, such that $\SRECE(g_0,T_0)=0.$
+\end{theorem}
+
+\paragraph{Intuition and interpretation.} Here we give some intuition for understanding our results. Under our perturbed mixture model, R-ECE is calculated as
+\begin{align*}
+\RECE(T)=\bE_{v=\hat\theta^\top x}\left|\frac{\bm{1}\{v\in \cA\}}{1+\exp\left(\frac{-2\hat\theta^\top\theta^*}{\sigma^2\|\hat\theta\|^2}\cdot v\right)}+ \frac{\bm{1}\{v\in \cB\}}{1+\exp\left(\frac{2\alpha\hat\theta^\top\theta^*}{\sigma^2\|\hat\theta\|^2}\cdot v\right)}-\frac{1}{e^{-2v/T}+1}\right|
+\end{align*}
+for disjoint sets $\cA$ and $\cB$, which correspond to points on the support of $J_1$ and $J_2$ respectively.
+In order to achieve zero R-ECE, when $v\in\cA$, we need $T=\hat{\theta}^\top\theta^*/(\sigma^2\|\hat\theta\|^2)$. However, for $v\in \cB$ we need $T=-\alpha\hat{\theta}^\top\theta^*/(\sigma^2\|\hat\theta\|^2)$. These clearly cannot be achieved simultaneously.  Thus the presence of the outlier data makes it impossible for the recalibration model to properly calibrate the confidence for the whole population.
+A similar expression can be obtained for S-ECE. 
+As long as $\hat{\theta}^\top\theta^*/(\sigma^2\|\hat\theta\|^2)$ and $-\alpha\hat{\theta}^\top\theta^*/(\sigma^2\|\hat\theta\|^2)$ are far from $1$ (i.e., miscalibration exists), no choice of $g$ can reach zero S-ECE.  In other words, no selection rule alone can lead to calibrated predictions, since no subset of the data is calibrated under the pre-trained classifier.
+However, by setting $g_0(x)=0$ for all $x\in \cB$ and $g_0(x)=1$ otherwise, and choosing $T_0=\hat{\theta}^\top\theta^*/(\sigma^2\|\hat\theta\|^2)$, $\text{SR-ECE}=0$. 
+Thus we can conclude that achieving $\text{ECE}=0$ on eligible predictions is only possible under selective recalibration, while selection or recalibration alone induce positive ECE.
+  
+
+\subsubsection{Joint Learning versus Sequential Learning}
+
+We can further demonstrate that jointly learning a selection model $g$ and temperature scaling parameter $T$ can outperform sequential learning of $g$ and $T$.  Let us first denote 
+$\tilde g:=\argmin_g \SECE(g)$ such that $\bE[\tilde g(x)]\ge\beta$ and $\tilde T:=\argmin_T \RECE(T)$. We denote two types of expected calibration error under sequential learning of $g$ and $T$, depending on which is optimized first. 
+\begin{align*}
+&\ECERS:=\min_{g:\bE[g(x)]\ge\beta}\SECE(g, \tilde T);\\
+&\ECESR:=\min_{T\in\bR}\RECE(\tilde g, T).
+\end{align*}
+
+Our second theorem shows these two types of expected calibration error for sequential learning are lower bounded, while jointly learning $g,T$ can reach zero calibration error.
+
+\begin{theorem}\label{thm:seqvsjoint}
+Under Assumption~\ref{as:theta}, if $\beta>2(1-\beta)$, for any $\delta\in(0,1)$ and $\hat\theta$ output by $\mathscr{A}$, there exist thresholds $M\in\bN^+$ and $\tau_2>\tau_1>0$: if $\max\{r_1,r_2,\sigma\}<\tau_2$, $\tau_1<\sigma$, and $m>M$, then there exists a positive lower bound $L$, with probability at least $1-\delta$ over $S^{tr}$
+$$\min\big\{\ECERS,\ECESR\}>L. $$
+However, there exists $T_0$ and $g_0$ satisfying $\bE[g_0(x)]\ge \beta$, such that
+$\SRECE(g_0,T_0)=0.$
+\end{theorem}
+
+\paragraph{Intuition and interpretation.} 
+If we first optimize the temperature scaling model to obtain $\tilde T$, $\tilde T$ will not be equal to $\hat{\theta}^\top\theta^*/(\sigma^2\|\hat\theta\|^2)$. 
+Then, when applying selection, there exists no $g$ that can reach $0$ calibration error since the temperature is not optimal for data in $\cA$ or $\cB$.  
+On the other hand, if we first optimize the selection model and obtain $\tilde g$, $\tilde g$ will reject points in $\cA$ instead of those in $\cB$ because points in $\cA$ incur higher calibration error, and thus data from both $\cA$ and $\cB$ will be selected (i.e., not rejected). In that case, temperature scaling not will be able to push calibration error to zero because, similar to the case in the earlier R-ECE analysis, the calibration error in $\cA$ and $\cB$ cannot reach $0$ simultaneously using a single temperature scaling model.  On the other hand, the optimal jointly-learned solution yields a set of predictions with zero expected calibration error.
+
+
+
+\section{Conclusion}
+
+
+We have shown both empirically and theoretically that combining selection and recalibration is a potent strategy for producing a set of well-calibrated predictions.  
+Eight pairs of distribution and $\beta$ were tested when i.i.d. validation data is available; selective recalibration with our proposed S-TLBCE loss function outperforms every single recalibrator tested in 7 cases, and always reduces S-ECE with respect to the calibrator employed by the selective recalibration model itself.  Taken together, these results show that while many popular recalibration functions are quite effective at reducing %ECE,
+calibration error, they can often be better fit to the data when given the opportunity to ignore a small portion of difficult examples.  
+Thus, in domains where calibrated confidence is critical to decision making, selective recalibration is a practical and lightweight strategy for improving outcomes downstream of deep learning model predictions.
+
+
+\subsubsection*{Broader Impact Statement}
+
+While the goal of our method is to foster better outcomes in settings of societal importance like medical diagnosis, as mentioned in Section \ref{sec:rel_work}, selective classification may create disparities among protected groups.  
+Future work on selective recalibration could focus on analyzing and mitigating any unequal effects of the algorithm.
+
+
+
+

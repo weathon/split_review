@@ -1,0 +1,339 @@
+\title{NNetscape Navigator: Complex Demonstrations for Web Agents Without a Demonstrator}
+
+\begin{abstract}
+
+We introduce NNetscape Navigator (\ours{}), a method for training web agents entirely through synthetic demonstrations. These demonstrations are collected by first interacting with a browser to generate trajectory rollouts, which are then retroactively labeled into instructions using a language model. 
+Most work on training browser agents has relied on expensive human supervision, and the limited previous work on such \emph{interaction-first} synthetic data techniques has failed to provide effective search through the exponential space of exploration. In contrast, \ours exploits the hierarchical structure of language instructions to make this search more tractable: complex instructions are typically decomposable into simpler subtasks, allowing \ours to automatically prune interaction episodes when an intermediate trajectory cannot be annotated with a meaningful sub-task. We use \ours demonstrations from a language model for supervised fine-tuning of a smaller language model policy, and find improvements of 6 points on WebArena and over 20 points on MiniWoB++, two popular environments for web-agents. Notably, on WebArena, we observe that language model policies can be further enhanced when fine-tuned with \ours demonstrations derived from the \emph{same} language model. Finally, we collect and release a dataset of over 6k \ours demonstrations on WebArena, spanning a diverse and complex set of instructions.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Building grounded language agents that map human language instructions to a sequence of executable actions is a long-standing goal of artificial intelligence \citep{winograd1972understand}, with the ultimate goal of automating mundane web tasks like flight booking. A promising new approach for building such agents is to use large language models to control policies in digital environments like browsers \citep[among others]{yao2022react, shinn2023reflexion, murty24bagel, wang2024agent}. 
+
+Unfortunately, such \emph{grounded instruction following} without any training examples is challenging because LMs do not know about the myriad and ever changing interaction possibilities of different websites. For instance, for a new online shopping website, a zero-shot LM agent may not know how to make a return or change order details, without expensive test-time exploration. Even simple tasks like selecting a flight might involve typing in airport codes or selecting from a drop-down menu, and zero-shot agents cannot know this a-priori. 
+
+One way to provide LM web-agents with knowledge about new web interfaces is via expert demonstrations, that can either be used for in-context learning \citep{yao2022react} or supervised fine-tuning \citep{lai2024autowebglm}. These demonstrations are either fully provided by human experts \citep{sodhi2023heap, yao2022react} or consist of human-generated trajectories paired with model-generated instructions \citep{lai2024autowebglm}. Of course, collecting human demonstrations that cover each possible use case for every web-site is an unattractively large, never-ending task.  Thus, recent work uses entirely synthetic demonstrations by sampling a synthetic instruction, and then mapping it into a trajectory using a base LLM agent \citep{patel2024large, murty24bagel}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig1.pdf}
+    \caption{\ours produces synthetic demonstrations for training web-agents by exploring a website to create trajectories, and then labeling them into instructions. Long exploration in \ours is made efficient using a pruning heuristic inspired by the hierarchical structure of complex instructions. At fixed intervals during exploration, the labeling function infers an instruction for the trajectory so far, and if the resulting (instruction, trajectory) pair receives a low score from a reward function, the episode is terminated (red cross). Components in \ours are implemented using prompts to the same LM.}
+    \label{fig:overview}
+\end{figure}
+Such \emph{instruction-first} methods for data collection face several challenges. First, synthetic instructions in these demonstrations are sampled from an ungrounded LM prior that generates only plausible instructions without ensuring feasibility; \eg, an instruction such as \textit{Respond to the first post on r/callofdutyfans} for reddit is plausible, but not always feasible. Finally, these methods provide no control over the complexity of instructions, and rely entirely on the LM or bespoke prompts to generate complex instructions.
+
+Instead of starting with a sampled instruction, we start by sampling an \emph{interaction} first, and then retroactively labeling it into an instruction that is feasible by design. At a high-level, our approach \emph{NNetscape Navigator} (\ours, Fig~\ref{fig:overview}), uses a language model exploration policy to perform extended interactions with an environment, and another language model trajectory labeler to annotate trajectories with instructions\footnote{All code and data will be available 
+git}{here}.}. To effectively control the exponential space of meaningful interactions, \ours uses the hierarchical structure of language instructions as a pruning heuristic: for exploration to discover a meaningfully complex task, trajectory prefixes must correspond to meaningful sub-tasks. Thus, during an exploration episode, if a language model cannot label trajectory prefixes (at set time-steps) with a sub-task, further exploration is automatically terminated. Imposing such a structure over search not only enhances efficiency, but also results in complex and hierarchical instructions (See Table~\ref{tab:qual_examples} for examples). \ours prompts the same base language model for exploration, relabeling and inferring sub-tasks, and effectively addresses all limitations of instruction-first data collection.
+
+Using \gpttm \citep{achiam2023gpt} as our base language model, we use demonstrations collected via \ours to fine-tune a smaller \llamas \citep{dubey2024llama} based agent on two benchmarks for web navigation, MiniWoB++ \citep{shi2017world, liu2018reinforcement} and WebArena \citep{zhou2023webarena}. Compared to the base agent, performance of the fine-tuned agent improves from 28\% to 48\% on MiniWoB++, and from 1\% to 7\% on WebArena. Crucially, these improvements are higher than those from a model that's fine-tuned with an instruction-first data collection method.  Finally, we find that \ours can be used for self-training---fine-tuning a small LM agent with \ours demonstrations from the \emph{same} LM leads to an improvement of 4\% points absolute (1\% to 5\%) on WebArena. Further analysis reveals the benefits of retroactive labeling beyond performance improvements: When using a model-based evaluator, similar to \citet{pan2024autonomous}, hindsight trajectories from \ours have a higher mean reward than trajectories from an LLM agent based on the same underlying language model. Finally, we collect and release \ours-6k, a dataset of over 6k demonstrations covering a wide and complex range of use cases on WebArena.
+
+
+
+\section{Background}
+
+\label{sec:background}
+Following instructions on web-browsers is a deterministic sequential decision making problem. Given an instruction $g$, an instruction following agent interacts with the browser by issuing a sequence of actions $\langle a_1, a_2, \ldots, a_T \rangle$ where each $a_i \in \mathcal{A}$ is drawn in response to an observation $o_i$. Executing an action causes a state transition based on some unknown but deterministic environment dynamics, leading to a new observation $o_{i+1}$. The entire episode can be summarized as a trajectory $\tau \coloneq \langle o_1, a_1, o_2, a_2, \ldots o_T, a_T, o_{T+1} \rangle$.  We formalize the instruction following agent as a mapping $\pi(a_t \mid \tau_{<t}; g)$ where  $\tau_{<t} \coloneq \langle o_1, a_1, \ldots o_t \rangle$ is the trajectory so far. In our setting, both the observation space and $\mathcal{A}$ have string descriptions.
+
+\paragraph{LLMs as Instruction Following Agents.} Recent work explores prompted large language models (LLMs) to directly parameterize $\pi$. These methods typically work in settings with textual observations and action spaces, and many output a reasoning string $r_i$ before predicting the action string $a_i$. Concretely, we formalize an LM agent (omitting prompts) as $\policy(a_t \mid \tau_{<t}; g) \coloneq p_{\text{LM}}(a_t, \mid \tau_{<t}, r_t; g)$ where $r_t \sim p_{\text{LM}}(r \mid \tau_{<t}; g)$ is a reasoning step drawn as a sample from the LM. 
+
+Given expert demonstrations $\{g^i, \tau^i\}$ where $\tau^i \coloneq \langle o^i_1, r^i_1, a^i_1, o^i_2, r^i_2, a^i_2  \ldots o^i_T \rangle$, prior work adapts LM agents using demonstrations either as in-context examples \citep[among others]{yao2022react, shinn2023reflexion, sun2023adaplanner, kim2023language} or as training data for supervised fine-tuning \citep{furuta2023multimodal, lai2024autowebglm, lu2024weblinx, patel2024large}. For supervised fine-tuning of $\pi_{\text{LM}}$ on a dataset of demonstrations, we construct training instances $\{(g^i, \tau^i_{<t}), (r^i_t, a^i_t)$\} where $r^i_t, a^i_t$ serves as the target reasoning step and action for an intermediate context $(g^i, \tau^i_{<t})$. 
+
+\paragraph{Data collection with instruction-first methods.} Collecting human demonstrations for training web-agents is time consuming and costly. Thus, recent work proposes methods for generating synthetic data for web-agents using language model components \citep{lai2024autowebglm, furuta2023multimodal, murty24bagel}. These methods start by sampling synthetic instructions from an instruction generator (a prompted LM that takes the website landing page and a persona as input), and then use a zero-shot LM policy to convert these instructions into trajectories. Resulting demonstrations are filtered using either the ground truth reward function \citep{furuta2023multimodal}, or using another language model based reward function \citep{lai2024autowebglm, murty24bagel}. Most of these methods use bigger and better language models for collecting demonstrations, and then use this data to adapt smaller models. 
+
+
+\section{Our Approach}
+
+
+\ours (Fig~\ref{fig:overview}) is an \emph{interaction-first} method for constructing demonstrations: An exploration policy interacts with a browser in a structured manner to sample long trajectories which are retroactively labeled into instructions (\S\ref{sec:exploration}). We then post-process each trajectory to add post-hoc reasoning steps corresponding to the generated instructions, and then use this data for supervised fine-tuning (\S\ref{sec:postreasoning}). We provide detailed pseudo-code for the exploration and relabeling steps in \ours in Algorithm~\ref{alg:netnav_routines}.
+\begin{algorithm}
+\caption{Exploration and Relabeling in \ours within a single interaction episode}
+\label{alg:netnav_routines}
+\textbf{Input}: $\exploref{}, \labelf{}, \rewardf{}, \deltaf{}$ \\
+
+\SetKwFunction{FRunRetroactiveLabeler}{run\_retroactive\_labeler}
+\SetKwFunction{FExplore}{explore}
+
+\SetKwProg{Fn}{Function}{:}{}
+\Fn{\FRunRetroactiveLabeler{$\tau$}}{
+    $\delta_\tau \gets [\deltaf{}(o_t, a_t, o_{t+1}) \mid (o_t, a_t, o_{t+1}) \in \tau]$\;  
+    $g_{\text{curr}} \gets \labelf{}(\delta_\tau)$\;
+    $r_{\text{curr}} \gets \rewardf{}(i_{\text{curr}}, \delta_\tau)$\;
+    \Return $g_{\text{curr}}, r_{\text{curr}}$\;
+}
+\Fn{\FExplore{$\wenv{}, T_\text{prune}$}}{
+    $o_1 \gets \wenv{}.\text{init-observation}$\;
+    $t \gets 1$\;
+    $\tau \gets \langle \rangle$\;  % Angle brackets used for sequences
+    $\text{demonstrations} \gets []$\;
+    \While{$t \leq T_\text{max}$}{
+        \If{$t \in T_\text{prune}$}{  % Corrected syntax for set membership
+            $g_{\text{curr}}, r_{\text{curr}} \gets \text{\FRunRetroactiveLabeler}({\tau})$\;
+
+            \If{$r_{\text{curr}} < 1$}{
+                \textbf{break}\;
+            }\Else{
+                $\text{demonstrations}.\text{add}((g_{\text{curr}}, r_{\text{curr}}))$\;
+            }
+        }
+        $a_t \gets \pi_\text{explore}(o_t)$\;
+        $o_{t+1} \gets \wenv{}.\text{step}(a_t)$\;
+        $\tau.\text{add}((o_t, a_t, o_{t+1}))$\;
+        $t \gets t+1$\;
+    }
+    \Return demonstrations\;
+}
+\end{algorithm}
+
+\subsection{LM Components}
+\label{sec:components}
+We start by describing various components in \ours.
+\paragraph{Exploration Policy.} To interact with the environment, we use an exploration policy $\exploref{}$, implemented using a chain-of-thought prompted language model \citep{wei2022cot}. Additionally, to simulate a diverse set of behaviors from users and improve the diversity of resulting trajectories, we seed each episode with a string description of a plausible user persona for the given website \citep{shanahan2023role, argyle2023out}.
+\paragraph{Summarizing Trajectory changes.} Actions issued by $\exploref{}$ result in a new observation in the environment. We summarize this change as a short string description via another module $\deltaf{}$, implemented using a language model. In particular, for any state $o_t$, action $a_t$ and the resulting next state $o_{t+1}$, $\delta_t = \deltaf{(o_t, a_t, o_{t+1})}$ produces a string-valued description of the changes in the observation as a result of the action. For a trajectory $\tau$, we denote the sequence of state changes as $\delta_\tau$
+\paragraph{Trajectory Labeling Function.} Given state changes $\delta_\tau$, a labeling function $\labelf{}$ produces a plausible instruction $\hat{g} = \labelf{(\delta_\tau)}$ that the agent could have followed to produce the given interaction. 
+
+\paragraph{Reward Function.} Given $\hat{g}$ and $\delta_\tau$, the reward function module assigns a reward $\rewardf{(\hat{g}, \delta_\tau)} \in \{0, 1\}$, based on how well the state changes correspond to the given instruction $\hat{g}$. 
+\subsection{Sampling Demonstrations via Interactions}
+\label{sec:exploration}
+
+Let $t_\text{max}$ be the maximum episode length for each exploration rollout.
+At specific time-steps $\{t_1, t_2, \ldots t_\text{max}\}$, we run the pruning heuristic that attempts to annotate the trajectory so-far with a sub-task annotation. If this is successful, we continue the episode, and otherwise halt to sample another rollout. Concretely, suppose we have a partial trajectory ${\tau}_{<t}$ after interacting with the environment for $t$ time-steps. If $t \in \{t_1, t_2, \ldots t_\text{max}\}$, we first obtain a retroactive sub-task $\hat{g} = \labelf(\delta_{\tau_{<t}})$. We halt further exploration if $\rewardf({\hat{g}, \delta_{\tau_{<t}}}) = 0$. Otherwise, we add the generated ($\hat{g}$, $\tau_{<t}$) to our set of synthetic demonstrations, and continue exploring. Typically, each interaction episode results in multiple demonstrations.
+\subsection{Generating Post-hoc Reasoning steps}
+\label{sec:postreasoning}
+The exploration policy in this work is implemented using a language model that generates a reasoning step, before choosing an action (\S\ref{sec:background}). Since actions in our demonstration set are a result of exploration, corresponding reasoning steps are not generally related to the retroactively generated instruction. Thus, for each demonstration in our synthetic demonstration set, we post-hoc annotate every action with a new reasoning step that directly corresponds to the generated instruction. 
+Concretely, given every $(\hat{g}, o_i, a_i)$ tuple in our synthetic demonstration set, we prompt a language model to output a suitable reasoning step for choosing action $a_i$ given the instruction $\hat{g}$ and current observation $o_i$. We note that such a post-hoc reasoning procedure is similar to \citet{yang2024actre}.
+
+
+\section{Experimental Setup}
+
+
+\subsection{Datasets}
+We fine-tune language model policies with \ours demonstrations on two web navigation environments, MiniWoB++ \citep{shi2017world, liu2018reinforcement} and WebArena \citep{zhou2023webarena}. 
+
+\begin{enumerate}
+    \item \textbf{MiniWoB++:} A dataset of diverse synthetic web-interfaces with a shared action space. Tasks on MiniWoB++ range from clicking on buttons to complex tasks like making a booking on a website. We use a subset of 8 complex tasks from MiniWoB++ as a toy benchmark to evaluate our method. We use the \texttt{bid}-based action space from BrowserGym \citep{drouin2024workarena}, consisting of 12 actions, and a DOM based observation space. Due to its synthetic nature, MiniWoB++ comes with an automatic reward function. We report the mean reward over 20 random seeds for each task, similar to \citep{drouin2024workarena}.
+    \item \textbf{WebArena:} A dataset of realistic web navigation tasks over 5 websites covering domains such as e-commerce, discussion forums, maps and software development. We use the default action space from WebArena (typing, clicking, hovering, tab management) and the default accessibility tree based observation space. WebArena consists of 812 Web navigation tasks across these websites, and provides an evaluator that measures success rate (SR) in terms of functional correctness. We report the average SR across these tasks. 
+\end{enumerate}
+\subsection{Model Settings}
+All inference evaluations are conducted using the same base language model, with data collection typically performed using a larger language model unless stated otherwise. We evaluate under the following settings:
+\begin{enumerate}
+    \item \textbf{Zero-Shot:} A baseline zero-shot LM policy $\policy$, prompted using chain-of-thought prompting \citep{wei2022cot}. Next, we consider various fine-tuned models.
+    \item \textbf{SFT (Instruction-First):} Supervised fine-tuning (SFT) of the base policy using data collected via instruction-first sampling.
+    \item \textbf{SFT (\ours):} Supervised fine-tuning of $\policy$ with demonstrations collected via \ours.
+    \item \textbf{SFT (\ours + Distil.):} Ablation, where we only retain instructions found via \ours and re-generate trajectories by prompting the same large LM as an agent. We use this setting to isolate performance improvements attributable to \ours trajectories.
+\end{enumerate}
+
+\subsection{Implementation Details}
+All LM components for data collection in \ours as well as instruction-first methods are based on \gpttm (specifically \texttt{gpt-4o-mini-2024-07-18}). We use \llamas as the inference policy $\policy$. For Instruction-first data collection, we sample 50 instructions per website for WebArena, and 80 instructions per interface in MiniWoB++, and prompt the instruction generator with the landing page as well as a persona (to improve diversity). For \ours, we use our exploration policy to generate 50 episodes per website for WebArena, and 80 episodes per interface for MiniWoB++. We set $T_\text{max}$ to 40 for WebArena, and 20 for MiniWoB++. For both MiniWoB++ and WebArena, we apply the pruning function every 4 time-steps. We use 16 persona types per website for WebArena, and 10 persona types per web-interface for MiniWoB++. 
+We use the BrowserGym framework \citep{drouin2024workarena} for experiments with MiniWoB++ and prune out the full DOM to only keep visible elements. During inference, we set the max episode length for $\policy$ as 30 for WebArena (following \citet{zhou2023webarena}), and 20 for MiniWoB++. WebArena requires agents to output a special \texttt{stop} action for outputting answers. 
+\paragraph{Fine-tuning details.} We fine-tune all models for 5 epochs, truncating the max sequence length to 4096, with a learning rate of 2e-5, using 4 A100 GPUs. We use open-instruct \citep{wang2023far} for fine-tuning all language models, and set up local inference servers using vllm \citep{kwon2023efficient}.
+
+
+
+\section{Main Results}
+
+\label{sec:experiments}
+
+\begin{table}[t!]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Domain} & \textbf{Zero-Shot} & \textbf{SFT (Instruction-First)} & \textbf{SFT (\ours)} & \textbf{SFT (\ours + Distil.)} \\
+\midrule
+\hrow \multicolumn{5}{c}{\it MiniWoB++} \\
+book-flight & 0.0 & 0.0 & 0.0& 0.0 \\
+choose-date& 0.0 & 0.0 & 0.0 &  0.0\\
+click-checkboxes-soft& 0.4 & 0.25 & \textbf{0.65}&  0.5\\
+email-inbox& 0.25 & 0.3 & 0.3 &  \textbf{0.35} \\
+login-user& 0.3 & 0.0 & \textbf{1.0}&  0.95\\
+navigate-tree& 1.0 & 0.95 & \textbf{1.0} & 0.95\\
+phone-book& 0.15& 0.15 & 0.2&  \textbf{0.55} \\
+use-autocomplete& 0.25 & 0.55 & \textbf{0.7} & 0.35 \\
+\midrule
+Avg. & 0.28 & 0.28 & \textbf{0.48} & 0.36 \\ \midrule
+
+\hrow \multicolumn{5}{c}{\it WebArena} \\
+
+Shopping & 3.8 &  \textbf{7.7} & 7.4 & 7.4\\
+CMS & 0 &  4.2 & 4.2 & 4.2\\
+Reddit & 0 & 0 & 0 & 0\\ 
+Gitlab & 0 & 0 & 0 & 4.5\\
+Maps & 0  & 9.1 & \textbf{28.5} & 15.4\\ \midrule
+Avg. & 1.0 & 4.2 & \textbf{7.2} & 6.0 \\ 
+\bottomrule
+\end{tabular}
+\caption{Results for MiniWoB++ and WebArena, broken down by domain, reporting mean reward for MiniWoB++ and task success rate (SR) for WebArena.
+We compare the zero-shot agent with agents fine-tuned with \ours and instruction-first demonstrations. Overall, fine-tuning with \ours leads to the largest improvements: from 28\% to 48\% on MiniWoB++; from 1\% to 7.2\% on WebArena.}
+\label{tab:main_results}
+\end{table}
+
+\paragraph{Fine-tuning agents with \ours leads to consistent gains.} We report results from all model settings in Table~\ref{tab:main_results}. We find that fine-tuning the zero-shot policy $\policy$ with synthetic demonstrations from \ours leads to consistent improvements on all tasks in MiniWoB++, leading to a 20 point improvement overall. We note an improvement of over 6 points from fine-tuning with \ours demonstrations on WebArena. Importantly, gains from fine-tuning with \ours exceeds those from using instruction-first methods by 12 points on MiniWoB++ and 1.2 points on WebArena.
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Domain} & \textbf{Zero-Shot} & \textbf{SFT (Instruction-First)} & \textbf{SFT (\ours)} & \textbf{SFT (\ours + Distil.)} \\
+\midrule
+
+Shopping & 1.26 & 1.37 & 2.22 & \textbf{2.33}\\
+CMS & 1.21 &  1.29 & \textbf{1.92} & 1.87 \\
+Reddit & 1.08 &  1.31 & \textbf{2.0} & 1.54 \\ 
+Gitlab & 1.14 & 1.09 & \textbf{1.86} & 1.5 \\
+Maps & 1.21  & 1.36 & \textbf{2.29} & 1.86 \\ \midrule
+WebArena (Avg.) & 1.19 & 1.28 & \textbf{2.05} & 1.87 \\ 
+\bottomrule
+\end{tabular}
+\caption{Model-based evaluation on WebArena, broken down by domain. For each test instruction and predicted trajectory, we prompt a \gpttl based reward model to output a graded reward from 1 to 5 based on a manual rubric. We find that fine-tuning with \ours outperforms all other settings.}
+\label{tab:model_based_eval}
+\end{table}
+
+\begin{minipage}{0.49\textwidth}
+\captionsetup{type=table}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Domain} & \textbf{Zero-Shot} & \textbf{Self-Train (\ours)} \\ \midrule
+Shopping & 3.8 & \textbf{15.4} \\
+CMS & 0.0 & 0.0 \\
+Reddit & 0.0 & 0.0 \\
+Gitlab & 0.0 & 0.0 \\
+Maps & 0.0 & \textbf{7.1} \\ \midrule
+Avg. & 1.0 & \textbf{5.3} \\  \bottomrule
+\end{tabular}
+\captionof{table}{We generate \ours demonstrations using \llamas, which we use for supervised fine-tuning of an agent based on the same LM, and find significant improvements on WebArena from 1\% to 5.3\%.}
+\label{tab:selftrain}
+\end{minipage}
+\hfill
+\begin{minipage}{0.47\textwidth}
+\captionsetup{type=table}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Domain} & \textbf{Zero-Shot} & \textbf{Self-Train (\ours)} \\ \midrule
+\hrow \multicolumn{3}{c}{\it in-domain} \\
+Shopping & 1.26 & \textbf{1.37} \\
+CMS & 1.21 & \textbf{1.29} \\
+Maps & 1.21 & \textbf{1.36} \\ \midrule
+\hrow \multicolumn{3}{c}{\it out-of-domain} \\
+Reddit & 1.08 & \textbf{1.31} \\
+Gitlab & \textbf{1.14} & 1.09 \\
+ \bottomrule
+\end{tabular}
+\captionof{table}{We fine-tune $\policy$ with \ours demonstrations from 3 websites, and evaluate in-domain and out-of-domain generalization with the model based evaluator. While improvements are higher in-domain, we still find improvements on out-of-domain data.}
+\label{tab:cross-website}
+\end{minipage}
+
+\paragraph{Fine-grained evaluation on WebArena with LLM reward.} We observe highly non-uniform improvements on WebArena with no improvements on Reddit and Gitlab in particular. We hypothesize that this is due to the coarse nature of WebArena's success rate (SR) evaluation, since it does not provide partial credit. We present results from model-based evaluation in Table~\ref{tab:model_based_eval}. At the level of model settings we observe the same trend: Zero-Shot $<$ SFT (Instruction-First) $<$ SFT (\ours + Distil.) $<$ SFT (\ours). However since this evaluation is more graded, we find consistent improvements from using \ours demonstrations across all websites, including Reddit and Gitlab, where improvements of 0.92 points and 0.72 points are observed, respectively. As expected, performance rankings sometimes changes with such graded evaluation \eg on CMS, all fine-tuned models are tied in terms of SR (Table~\ref{tab:main_results}), but not in terms of graded reward (Table~\ref{tab:model_based_eval}). Overall, we believe  WebArena evaluations should incorporate both overall SR and fine-grained model based evaluation for a more comprehensive understanding of system performance.
+
+\paragraph{The Benefit of Hindsight.} We find that SFT (\ours) outperforms SFT (\ours + Distil.) on both MiniWoB++ and WebArena.
+Trajectories in \ours are obtained via a hindsight procedure: the model acts \emph{first}, and the instruction is inferred afterward. In constrast, for \ours + Distil., the instruction is provided first, and the trajectory is sampled later. To understand if hindsight trajectories offer an advantange, we use the model based evaluator to measure training data quality for these settings. Specifically, we use the evaluator to assign reward to trajectories in \ours and \ours + Distil. for WebArena, and find a win-rate of 64\% for \ours trajectories with a mean reward of 3.52 compared to a reward of 2.44 for \ours + Distil. We conclude that gains from \ours extend beyond just providing more complex instructions.
+\begin{wrapfigure}[24]{r}{0.35\textwidth}
+  \centering 
+\includegraphics[width=0.35\textwidth]{figures/fig-exploration-savings.pdf}
+  \caption{Horizontal lines indicate fraction of episodes terminating at corresponding y-axis exploration step. The red shaded area represents prevented actions, showing significant savings on both datasets.} 
+  \label{fig:exploration_savings}
+\end{wrapfigure}
+
+\paragraph{Computational savings from \ours pruning.} We visualize overall improvements in exploration efficiency in Fig~\ref{fig:exploration_savings}. Each horizontal line depicts the fraction of interaction episodes that terminate at a specific time-step (indicated by the y-axis), with the red shaded area depicting additional actions that were prevented from early pruning. We find clear evidence of computational savings. In particular, over 60\% of all exploration episodes were pruned after 16 actions for WebArena. For MiniWoB++, 65\% of episodes were pruned after just 4 actions in MiniWoB++, which we identify as interactions where these first actions resulted in execution failures that our pruning heuristic successfully identified.
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/data_stats_one.pdf}
+        \caption{We plot the top 15 most common root verbs (inner circle) with their most common direct object nouns (outer circle) for instructions in \ours-6k. We note a high degree of diversity in intents ranging from searching for information to updating addresses and navigating for directions.}
+        \label{fig:nnetnav6kburstplot}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[t]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/data_stats_two_and_three.pdf}
+        \caption{Length distribution of instructions and trajectories in \ours-6k.}
+        \label{fig:nnetnav6kbarplot}
+    \end{minipage}
+\end{figure}
+\paragraph{Self-training with \ours.} Can \ours demonstrations from an LM be used for improving the \emph{same} LM agent? To answer this, we collect another set of \ours demonstrations on WebArena, using LM components based on \llamas. Given the limitations of this smaller model, we anticipate fewer meaningful interactions. To compensate, we increase the number of episodes to 200 episodes per website, resulting in 302 demonstrations which we use for fine-tuning the same \llamas agent. From results in Table~\ref{tab:selftrain}, we find improvements of 4.3 points on WebArena.
+
+\paragraph{Cross-website generalization.} Finally, we use \ours to conduct a small study on cross-website generalization in web-agents. Concretely, we perform supervised fine-tuning of $\policy$ on \ours demonstrations from Shopping, Maps and CMS, and evaluate generalization to Reddit and Gitlab. Here, we choose to report only model-based evaluation since success rates are 0 for these domains. From results in Table~\ref{tab:cross-website}, we note that average reward improves by 0.06 on held out websites, and by 0.13 on in-domain websites, suggesting some potential for cross-website transfer in LLM web-agents.
+
+
+
+\section{\ours-6k}
+
+
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabularx}{\textwidth}{|X|}
+\toprule
+\hrow \multicolumn{1}{|c|}{\it Shopping} \\ \midrule
+Find a kitchen utensil organizer. \\
+Find a kitchen utensil organizer within a certain budget.  \\
+Write a review for the product ``Citric Acid 2 Pounds 100\% Pure Organic Food Grade''. \\
+Find the price of kitchen gadgets that can be used for dining and entertaining, and add them to the cart. \\
+Browse for women's clothing items, specifically jumpsuits, and add some to cart. \\ 
+\hrow \multicolumn{1}{|c|}{\it CMS} \\ \midrule
+Change the stock status of the Sprite Stasis Ball 65 cm to In Stock. \\
+Create a new product in the Magento Admin panel with the name 'New Fashionable Watch', SKU 'New Fashionable WatchFW101', price \$100.00, and set as new from 2024-01-01. \\
+Update the price of Sprite Stasis Ball 55 cm to \$24.50 and set its quantity to 50.  \\
+Add two products, ``Abominable Hoodie'' and ``Samsung Smart TV'', with respective prices \$99.99 and \$50.00, and then start the process of adding a new customer. \\
+\hrow \multicolumn{1}{|c|}{\it Reddit} \\ \midrule
+Create a new forum called ``Funny Stuff'' with the title ``Memes and LOLs'', description ``A place for sharing and discussing funny memes and LOLs'', and sidebar ``Memes of the day''. \\
+Find a webpage related to intraday trading strategies on the wallstreetbets forum. \\
+Find and participate in a discussion on the wallstreetbets forum about intraday trading strategy, specifically on a post titled ``Swings and roundabouts''. \\ 
+Change my profile settings to use Deutsch as the language and Africa/Accra as the time zone, and then view the search results for ``r/art''. \\ 
+\hrow \multicolumn{1}{|c|}{\it Maps} \\ \midrule
+Get walking directions from Logan Street, Pittsburgh, PA to Carnegie Mellon University on OpenStreetMap. \\
+Get the cycling directions from Brooklyn to Manhattan. \\
+Find the driving directions from TLC Medical Transportation Services in Syracuse to Times Square in Manhattan. \\
+\hrow \multicolumn{1}{|c|}{\it Gitlab} \\ \midrule
+Create a new project named 'My Blog Post Project' and add an Apache License 2.0 file.\\
+Create a new project, add a LICENSE file with Apache License 2.0, and approve the ``Add verification functions'' merge request.\\ 
+Search for a README.md file within the ``My New Project'' project and verify its contents. \\
+Edit the issue ``Link to WCAG 2.1 instead of 2.0?'' in the First Contributions project on GitLab by updating its title and description to point to WCAG 2.1 guidelines instead of 2.0 guidelines.\\
+Investigate the node-http-proxy project's issue \#992 regarding connection headers and determine its relevance to the Byte Blaze project. \\
+Investigate and comment on the ``Outdated dependencies'' issue in the ``Byte BlazeByte BlazeByte Blaze / accessible-html-content-patterns'' project. \\
+
+\bottomrule
+\end{tabularx}
+\caption{Example demonstrations obtained from \ours-6k. We note that these instructions are hierarchical, refer to concrete features and entities and plausible by design.}
+\label{tab:qual_examples}
+\end{table}
+
+To facilitate further research on fine-tuned browser agents, we release the first large-scale dataset of over 6000 demonstrations from WebArena. Here, we use \llama\footnote{We choose to use a locally hosted \llama model instead of \gpttm for collecting the larger scale \ours-6k, as we found similar quality demonstrations from both of these models in initial experiments.} as the underlying LM for various components in \ours, and sample 3000 interactions each, with $T_\text{max}$ set to 40 as before. For each trajectory in these demonstrations, we release both accessibility tree strings as well as browser screenshots at each time-step, to support future work on text-based as well as multi-modal web agents. 
+
+To analyze diversity in these instructions, we follow methodology from \citet{wang2022self}. 
+Specifically, we use Stanza \citep{qi2020stanza} to parse each instruction, identifying the verb closest to the root and its direct object. Fig~\ref{fig:nnetnav6kburstplot} presents the top 15 verbs and their corresponding object nouns. Overall, we observe a diverse range of intents in the \ours-6k dataset. Additionally, we plot the distribution of instruction as well as trajectory lengths in Fig~\ref{fig:nnetnav6kbarplot}, revealing further diversity in these aspects. Table~\ref{tab:qual_examples} provides example demonstrations from \ours-6k, showcasing instructions from different websites. We find a number of complex, hierarchical instructions such as \textit{Edit the issue ``Link to WCAG 2.1 instead of ...} that refer to specific features of the website (\textit{r/art}, \textit{Swings and roundabouts}), and are plausible by design. Many of these instructions share lots of common structure (\eg 
+\textit{Get walking directions from ...} and \textit{Get cycling directions from ...}), and incorporating such structure into agents could be a promising direction for future work. 
+
+
+\section{Related Work}
+
+\paragraph{Language Conditioned Digital Assistants.}
+Mapping instructions to action sequences in digital environments has been a long-standing goal in natural language understanding \citep{allen2007agents, branavan2009reinforcement}. Most pre-LLM approaches for this rely on 
+expert demonstrations for behavioral cloning \citep{chen2011grounding, humphreys2022data}, along with an appropriately shaped reward function \citep[among others]{branavan2009reinforcement, liu2018reinforcement, misra2017mapping}. Here, learning is driven purely by synthetic demonstrations derived via (language model) exploration of websites.
+\paragraph{Linguistic Priors for Exploration.}
+Several prior works have used natural language priors to inform exploration for sequential decision making. 
+\citet{harrison2017guiding} use a \emph{trained model} of associations between language and state/action pairs to guide exploration during policy learning. \citet{mu2022improving} use language annotations of states to train a goal generator module that provides intrinsic rewards for achieving generated goals. Similarly, \citet{du2023guiding} constrain exploration towards goals generated by a pre-trained LLM at each intermediate state of an agent. In constrast, \ours biases exploration through two news ways of using language priors. First, we use natural language as a way to filter meaningful interactions. Second, we use it as a pruning heuristic to navigate the potentially exponential search space of these interactions.
+\paragraph{Training Data for LLM Web-Agents.} LLMs have shown strong performance over a wide range of language understanding tasks, and are increasingly being used to interpret language in grounded contexts such as browsers \citep[among others]{yao2022react, lai2024autowebglm, wang2024agent, patel2024large, lu2024weblinx}. Many of these approaches rely on human demonstrations, either for in-context learning \citep{yao2022react, sodhi2023heap, kim2023language} or for finetuning \citep{lu2024weblinx}. However, because human demonstrations are costly, 
+recent work trains LLM agents through synthetic demonstrations generated using instruction-first methods \citep{lai2024autowebglm, patel2024large}. One exception is \citet{murty24bagel}, which introduces an interaction-first method for generating synthetic demonstrations for in-context learning. Despite its novelty, their approach does not scale well to real websites due to the lack of a mechanism for effective exploration in environments with many possible interactions. In contrast, \ours also follows an interaction-first approach but improves efficiency by leveraging linguistically motivated pruning to navigate the space of meaningful interactions.
+
+
+
+\section{Conclusion}
+
+We propose \ours, a method for training web-agents with synthetic demonstrations. \ours flips the standard paradigm of synthetic data generation by first interacting with a website to generate trajectories and then relabeling trajectories into instructions. Real websites have a prohibitively large set of possible interactions; \ours searches over this space efficiently using a pruning function inspired by the hierarchical structure of language instructions: any complex instruction consists of language describable sub-tasks and so, if during an interaction a relabeling module cannot infer a meaningful sub-task for the trajectory-so-far, further exploration is pruned. We apply \ours to collect demonstrations on MiniWoB++ and WebArena, which are then used to fine-tune a zero-shot base LM agent. This yields significant improvements over the zero-shot baseline and outperforms standard synthetic data generation methods. In addition, we show that \ours enables self-training, as demonstrations collected using a base language model can improve the performance of an agent built on the same model. We find that \ours significantly enhances exploration efficiency due to the pruning heuristic and generates complex, realistic instructions. Lastly, we release \ours-6k, the largest dataset of demonstrations on WebArena to date, with over 6000 demonstrations covering broad range of intents and phenomena in WebArena.
+
+
+

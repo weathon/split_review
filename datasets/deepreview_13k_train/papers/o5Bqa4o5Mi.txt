@@ -1,0 +1,416 @@
+\title{$\pi$2vec: Policy Representation with Successor Features}
+
+\begin{abstract}
+
+This paper introduces \bmname, a method for representing black box policies as comparable feature vectors.
+Our method combines the strengths of foundation models that serve as generic and powerful state representations and successor features that can model the future occurrence of the states for a policy.
+\mname\ represents the behaviors of policies by capturing statistics of how the behavior evolves the features from a pretrained model, using a successor feature framework. 
+We focus on the offline setting where both policies and their representations are trained on a fixed dataset of trajectories.
+Finally, we employ linear regression on \mname\ vector representations to predict the performance of held out policies.
+The synergy of these techniques results in a method for efficient policy evaluation in resource constrained environments.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:introduction}
+
+
+Robot time is an important bottleneck in applying reinforcement learning in real life robotics applications.
+Constraints on robot time have driven progress in sim2real, offline reinforcement learning (offline RL), and data efficient learning. 
+However, these approaches do not address the problem of policy evaluation which is often time intensive as well. 
+Various proxy metrics were introduced to eliminate the need for real robots in the evaluation. 
+For example, in sim2real we measure the performance in simulation \citep{lee2021beyond}. 
+In offline RL we rely on Off-policy Evaluation (OPE) methods \citep{gulcehre2020rl,fu2021benchmarks}. 
+For the purpose of deploying a policy in the real world, recent works focused on Offline Policy Selection (OPS), where the goal is to select the best performing policy relying only on offline data.
+While these methods are useful for determining coarse relative performance of policies, one still needs time on real robot for more reliable estimates \citep{levine2020offline}.
+
+Our proposed \mname\ aims at making efficient use of the evaluation time.
+Efficient offline policy evaluation and selection is relevant in reinforcement learning projects, where researchers often face the challenge of validating improvements.
+$\pi$2vec enables researchers to make more informed decisions regarding which new policy iterations to prioritize for real-world testing or to identify and discard less promising options early in the development process.
+In particular, we predict the values of unknown policies from a set of policies with known values in an offline setting, where a large dataset of historical trajectories from other policies and human demonstrations is provided.
+The last step requires policies to be represented as vectors which are comparable and thus can serve as an input to the objective function. 
+Prior work from \cite{konyushova2021active} represents policies by the actions that they take on a set of canonical states, under the assumption that similar actions in similar states imply similar behaviour. 
+However, this assumption is sometimes violated in practice. This work aims at finding more suitable representation by characterizing the policies based on how they change the environment.
+
+To represent policies, our method \mname\ combines two components: successor features and foundation models. We adapt the framework of Q-learning of successor features \citep{barreto2017successor} to the offline setting by applying the Fitted Q evaluation (FQE) algorithm \citep{le2019batch} which is typically used for off-policy evaluation (OPE).
+In this work the features for individual states are provided by a general purpose pretrained visual foundation model \citep{bommasani2021opportunities}. 
+The resulting representations can be used as a drop in replacement for the action-based representation used by \cite{konyushova2021active}.
+Our experiments show that \mname\ achieves solid results in different tasks and across different settings.
+To summarize, our main contributions are the following:
+\begin{itemize}[noitemsep,nolistsep,leftmargin=*]
+    \item We propose \mname, a novel policy representation of how the policies change the environment, which combines successor features, foundation models, and offline data;
+    \item We evaluate our proposal through extensive experiments predicting return values of held out policies in 3 simulated and 2 real environments. Our approach outperforms the baseline and achieves solid results even in challenging real robotic settings and out-of-distribution scenarios;
+    \item We investigate various feature encoders, ranging from semantic to geometrical visual foundation models, to show strength and weaknesses of various representations for the task at hand.
+\end{itemize}
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=.6\columnwidth]{figures/fig1_v10.png}}
+\caption{\label{fig:fig1} \mname\ method relies on the successor feature framework, that we adopt in combination with a dataset of offline demonstrations and a visual foundation model $\phi$. \mname\ represents each policy $\pi_i$ as a feature vector $\Psi_{\pi_i}^\phi \in \R^n$. $\Psi_{\pi_i}^\phi$ encodes the expected behavior of a policy when deployed on an agent.}
+\end{center}
+\end{figure}
+
+
+\section{Related work}
+
+
+
+\paragraph{Representation of black-box policies}
+In this paper, our objective is to create vector representations for policies to predict their performance. We treat policies as black-boxes (i.e., no access to internal state, parameters, or architectures) that yield actions for a given observation. It is important to emphasize that our objective differs from representation learning for RL \citep{schwarzer2020data, jaderberg2016reinforcement, laskin2020curl}, as we focus on representing policies rather than training feature encoders for downstream tasks.
+
+\cite{konyushova2021active} studied a setting where the goal is to identify the best policy from a set of policies with a dataset of offline experience and limited access to the environment. Each policy is represented by a vector of actions at a fixed set of states. While this representation performs well in certain applications, it may not be the most effective for predicting policy performance. For instance, consider two policies that generate random actions at each state. These policies do not exhibit meaningfully different beahviour, so for policy evaluation purposes, we expect them to be similar. However, the action policy representation categorizes these policies as different. This paper proposes a method to address this limitation by measuring trajectory-level changes in the environment.
+
+In BCRL \citep{chang2022learning}, a state-action feature representation is proposed for estimating policy performance. However, the representation of each policy is independent of other policies and thus cannot be employed to regress the performance of new policies given a set of evaluated policies.
+
+
+\paragraph{Offline Policy Evaluation}
+Off-policy Evaluation (OPE) aims to evaluate a policy given access to trajectories generated by another policy. It has been extensively studied across many domains \citep{li2010contextual, theocharous2015personalized, kalashnikov2018qt, nie2019learning}. Broad categories of OPE methods include methods that use importance sampling \citep{precup2000eligibility}, binary classification \citep{irpan2019off}, stationary state distribution \citep{liu2018breaking}, value functions \citep{sutton2016emphatic, le2019batch}, and learned transition models \citep{zhang2021autoregressive}, as well as methods that combine two or more approaches \citep{mrdr}. 
+The main focus of the OPEs approaches is on approximating the return values function for a trained policy, while \mname{} goes beyond classical OPE and focuses on encoding the behavior of the policy as vectors, in such a way that those vectors are comparable, to fit a performance predictor.
+
+\paragraph{Foundation Models for Robotics}
+Foundation models are large, self-supervised models \citep{bommasani2021opportunities} known for their adaptability in various tasks \citep{sharmalossless}. We compare three representative foundation models \citep{radford2021learning,dosovitskiy2021an,doersch2022tap}. Our proposal, \mname, is independent of the feature encoder of choice. Better or domain-specific foundation models may improve results but are not the focus of this study.
+
+
+
+\section{Methodology}
+
+\label{sec:method}
+
+\subsection{Overview}
+Our setting is the following. We start with a large dataset of historical trajectories $\mathbb{D}$, and a policy-agnostic state-feature encoder $\phi : \mathbb{S} \to \R^N$. Given a policy $\pi$, our objective is to use these ingredients to create a policy embedding $\Psi_\pi^\phi \in \R^N$ that represents the behavior of $\pi$ (and can be used to predict its performance).
+
+We aim to create this embedding offline, without running the policy $\pi$ in the environment. Although we can evaluate $\pi$ for any state in our historical dataset $\mathbb{D}$, we emphasize that we do not have access to any on policy trajectories from $\pi$, which significantly complicates the process of creating an embedding that captures the behavior of $\pi$.
+
+Our method \mname{} has three steps:
+\begin{enumerate}
+    \item Choose a policy-agnostic state-feature encoder $\phi$. We discuss several options for $\phi$ below and in the experiments; however, \mname{} treats the policy-agnostic state-feature encoder as a black box, allowing us to leverage generic state-feature representations in our work.
+    \item Train a policy-specific state-feature encoder $\psi_\pi^\phi : \mathbb{S} \to \R^N$. In this step we combine the policy-agnostic state-feature encoder $\phi$, and the policy $\pi$, to create policy-specific state-feature encoder by training on the historical dataset $\mathbb{D}$. The policy-specific state features $\psi_\pi^\phi(s)$ capture statistics of how $\pi$ would change the environment were it to be run starting from the state $s$.
+    \item Aggregate the policy-specific state-features to create state-agnostic policy features $\Psi_\pi^\phi$ that represent the behavior of $\pi$ in a state-independent way.
+\end{enumerate}
+
+Using the steps outlined above we can collect a dataset of policy-specific state-independent features paired with measured policy performance.
+This dataset can be used to train a model that predicts the performance of a policy from its features using supervised learning.
+Because we compute features for a policy using only offline data, when we receive a new policy we can compute its policy-specific state-independent features and apply the performance model to predict its performance \textbf{before running it in the environment}.
+In the following sections we expand on each step.
+
+\subsection{Policy-agnostic state features}
+\label{sec:phi}
+The role of the state-feature encoder $\phi$ is to produce an embedding that represents an individual state of the environment.
+In this paper we focus on state encoders $\phi: I \to \R^N$ that consume single images.
+Generically our method is agnostic to the input space of the state-feature encoder, but practically speaking it is convenient to work with image encoders because that gives us access to a wide range of pretrained generic image encoders that are available in the literature.
+
+We also consider a few simple ways to construct more complex features from single image features. When each state provides multiple images we embed each image separately and sum the result to create a state embedding.
+We also consider creating embeddings for transitions $(s, s')$ by computing $\Delta\phi(s, s') \triangleq \phi(s') - \phi(s)$.
+Both cases allow us to leverage features from pretrained models.
+
+
+\subsection{Policy-specific state features}
+
+The next step is to use the policy-agnostic state-feature encoder $\phi: \mathcal{S} \to \R^N$ that provides a generic representation for individual states to train a policy-specific state-feature encoder $\psi_\pi^\phi: \mathcal{S} \to \R^N$ that represents the effect that $\pi$ would have on the environment if it were run starting from the given state.
+
+The work of \cite{dayan1993improving,barreto2017successor} on successor features provides a basis for our approach to policy representation. 
+We briefly review successor features here, and comment below on how we make use of them. We refer the reader to recent literature covering successor features \cite{lehnert2020successor,brantley2021successor,reinke2021successor}.
+
+Suppose that the reward function for a task can be written as a linear function
+\begin{align}
+    \label{eq:linear-reward}
+    r(s, a, s') = \langle\phi(s, a, s'), \w_\text{task}\rangle,
+\end{align}
+where $\phi(s, a, s') \in R^N$ encodes the state-transition as a feature vector and $\w_\text{task} \in R^N$ are weights.
+\cite{barreto2017successor} observe that if the reward can be factored as above, then the state-action-value function for a policy $\pi$ can be written as
+\begin{align}
+    \label{eq:Q}
+    \begin{split}
+    Q^\pi(s, a) & = \mathbb{E}_{(s'|s) \sim D, a \sim \pi(s)}\left[ \sum_{i=t}^{\infty}\gamma^{i-t} r(s_i, a_i, s_{i+1})\right]
+    = \langle\psi^\phi_\pi(s, a), \w_\text{task}\rangle \,,
+    \end{split}
+\end{align}
+where 
+\begin{align}
+\label{eq:Psi_Q}
+    \psi^\phi_\pi(s, a) = \mathbb{E}_{(s'|s) \sim D, a \sim \pi(s)} \left[ \sum_{i=t}^{\infty} \gamma^{i-t} \phi(s_i, a_i, s_{i+1})\right]\,,
+\end{align}
+$(s|s') \sim D$ is a transition from the environment, and $\gamma$ is the discount factor.
+The corresponding state-value function is $V^\pi(s) \triangleq Q^\pi(s, \pi(s)) = \langle\psi^\phi_\pi(s, \pi(s)), \w_\text{task}\rangle \triangleq \langle\psi^\phi_\pi(s), \w_\text{task}\rangle$.
+We will use the notation $\psi_\pi^\phi(s) \triangleq \psi_\pi^\phi(s, \pi(s))$ frequently throughout the remainder of the paper.
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=.8\columnwidth,height=5cm]{figures/fig2_v9.png}}
+\caption{\label{fig:fig2}Given a trajectory from the dataset of offline demonstrations, we train successor feature $\psi_\pi^\phi(s_t)$ to predict the discounted sum of features $\sum_i \gamma^i \phi(s_{t+i})$, where $\phi$ is a visual feature extractor and $\pi$ is a policy. Intuitively, $\phi(s_i)$ represents semantic changes in the current state of the environment $s_i$, while successor feature $\psi_\pi^\phi(s_t)$ summarizes all \textit{future} features encoded by $\phi$ if actions came from policy $\pi$.}
+\vskip -.6cm 
+\end{center}
+\end{figure}
+
+The value of $\psi^\phi_\pi(s)$ is known as the \emph{successor features} of the state $s$ under the policy $\pi$.
+Successor features were originally motivated through the above derivation as a way of factoring the value function of a policy into a task-independent behavior component (the successor features) that is independent of the task, and a task-dependent reward component that is independent of behavior.
+
+For our purposes we will mostly ignore the reward component (although we return to it in one of the experiments) and focus on the behavior term shown in Equation~\ref{eq:Psi_Q}.
+This term is interesting to us for two reasons. First, we can see by inspection of the RHS that the value of $\psi_\pi^\phi(s) = \psi_\pi^\phi(s, \pi(s))$ represents the behavior of $\pi$ as a future discounted sum of state features along a trajectory obtained by running $\pi$ beginning from the state $s$.
+In other words, $\psi_\pi^\phi$ represents the behavior of $\pi$ in terms of the features of the states that $\pi$ will encounter, where the state features are themselves given by the policy-agnostic state-feature encoder from the previous section.
+Figure \ref{fig:fig2} summarizes the relationship between successor features $\psi$ and state encoders $\phi$.
+
+Second, Equation~\ref{eq:Psi_Q} satisfies the Bellman equation meaning that the function $\psi_\pi^\phi(s, a)$ can be estimated from off-policy data in a task-agnostic way using a modified version of Q-learning, where the scalar value reward in ordinary Q-learning is replaced with the vector valued transition features $\phi(s, a, s')$.
+We rely on Fitted Q Evaluation (FQE, \cite{le2019batch}), an \emph{offline} Q-learning based algorithms, and thus, we obtain a representation of policy behavior purely from data without executing the policy in the environment.
+Given a dataset $\mathbb{D}$ and a policy $\pi$, FQE estimates its state-action-value function $Q^{\pi}(s, a)$ according to the following bootstrap loss:
+\begin{align}
+L(\theta) = \mathbb{E}_{(s, a, r, s') \sim D, a' \sim \pi(s')} \left[ \| \psi^{\pi}_\theta(s,a) - (\phi(s, a, s') + \psi^{\pi}_\theta(s', a')) \|^2 \right].
+\end{align}
+
+FQE is simple to implement and it performs competitively with other OPE algorithms in a variety of settings \citep{fu2021benchmarks} including simulated and real robotics domains \citep{paine2020hyperparameter,konyushova2021active}.
+We use FQE with our historical dataset $\mathbb{D}$ to train a policy-specific state-action-feature network $\psi_\pi^\phi(s, a)$, which we then use as the policy-specific state-feature encoder $\psi_\pi^\phi(s) \triangleq \psi_\pi^\phi(s, \pi(s))$ by plugging in the policy action.
+
+
+
+
+
+
+
+
+\subsection{State-agnostic policy features}
+\label{sec:policy_representation}
+We obtain a single representation $\Psi^\phi_\pi$ of a policy $\pi$ from the state-dependent successor features $\psi_\pi^\phi(s)$ for that policy by averaging the successor features over a set of canonical states:
+\begin{align}
+    \Psi^\phi_\pi = \mathbb{E}_{s \sim D_\text{can}}[\psi^\phi_{\pi}(s)],
+\end{align}
+where $D_\mathrm{can}$ is a set of states sampled from historical trajectories.
+We sample the canonical states set $D_\mathrm{can} \subset \mathbb{D}$ uniformly from from our historical dataset, as in \cite{konyushova2021active}, ensuring that each canonical state comes from a different trajectory for better coverage.
+We average successor features over the same set $D_\mathrm{can}$ for every policy.
+The intuition behind this representation is that $\psi^\phi_\pi(s)$ represents the expected change that $\pi$ induces in the environment by starting in the state $s$; by averaging over $D_\mathrm{can}$, $\Psi^\phi_\pi$ represents an aggregated average effect of the behavior of $\pi$.
+
+\subsection{Performance Prediction}
+\label{sec:perf-pred}
+We aim at predicting the performance of novel, unseen policies. We begin with a dataset of historical policies for which we have measured performance $\Pi = \{\ldots, (\pi_i, R_i), \ldots\}$.
+For each policy in this dataset we create an embedding using the above procedure to obtain a new dataset $\{\ldots, (\Psi_{\pi_i}^\phi, R_i), \ldots\}$ and then train a performance model $\hat{R}_i = f(\Psi_{\pi_i}^\phi)$ using supervised learning.
+Given a new policy $\pi_*$ we can then predict its performance before running it in the environment by computing the \mname{} features for the new policy using the above procedure and applying the performance model to obtain $\hat{R}_* = f(\Psi_{\pi_*}^\phi)$.
+
+
+
+
+
+
+
+
+
+
+
+\section{Experimental setup}
+
+\label{sec:setup}
+In this section we describe the feature encoders, domains, and evaluation procedures, followed by details about our baselines.
+
+\begin{figure}[t]
+     \centering
+         \includegraphics[width=.8\textwidth,height=5.1cm]{figures/fig_envs_v1.png}
+        \caption{We adopt 5 environments. (i) Kitchen: 5 tasks (Knob-on, Left door open, light on, microwave open, and right door open) and 3 points of views. (ii) Metaworld: 4 tasks (assembly, button press, bin picking, and drawer open) and 3 points of views. (iii) Insert gear in simulation (iii) and (iv) on a real robot. (v) RGB stacking on a real robot.}
+        \label{fig:envs}
+        \vskip -.5cm
+\end{figure}
+\paragraph{Feature encoder}
+\label{sec:experiment-phi}
+
+Firstly, the \textit{Random} feature encoder employs a randomly-initialized ResNet-50 \citep{he2016deep}.
+Random features are trivial to implement, and achieve surprisingly strong performance in many settings \citep{rahimi2007random}. Here they serve as a simple baseline.
+
+Next, we explore with \textit{CLIP} \citep{radford2021learning}. CLIP-network is trained to match image and text embeddings on a large-scale dataset of image caption pairs.
+Intuitively, by aligning image and text features, CLIP network is trained to encode high-level semantic information.
+
+\textit{Visual Transformers (VIT)} \citep{dosovitskiy2021an} treat images as a 1D sequence of patches and learn visual features via an attention mechanism. 
+In our experiments the visual transformer is pre-trained on imagenet classification.
+Lastly, we explore \textit{Track-any-point (TAP)} \citep{doersch2022tap}, a general-purpose network for point tracking in videos. The network is pre-trained to track arbitrary points over video sequences and as a result it learns to understand the low-level geometric features in a scene.
+We use an attention layer trained to select task relevant features from the TAP model to reduce dimensionality.
+
+
+This set of feature encoders spans a spectrum of properties as they are created by optimising different objectives.
+At one extreme CLIP features are trained to align image features with a text description, and encode the semantics of the image.
+At the other extreme TAP features are trained to track points in videos, and capture low level geometric and texture information.
+VIT features are in the middle, they need to encode both semantics and local texture to accomplish classification tasks. Depending on the environment and task at hand, better state representation is likely to result in better prediction properties of \mname{}.  We leave the question of finding the best representation as future work.
+
+\paragraph{Domains}
+\label{sec:domains}
+We present extensive experiments to support \mname's capabilities across three simulated domains---Insert Gear (Sim), Metaworld, and Franka-Kitchen, and two real domains---Insert Gear (Real) and RGB Stacking (Figure \ref{fig:envs}).
+In each domain we use a dataset of offline human demonstrations (Metaworld and Kitchen) and held out policies trajectories (RGBStacking and Insert Gear) for training policy representations.
+Each policy is treated as a black-box where we do not have any prior knowledge about the architecture or training parameters. We provide further details in Supplementary.
+
+
+
+
+\paragraph{Evaluation}
+\label{sec:evaluation}
+We assess the quality of the policy representations by measuring the ability of the model $f$ to predict the performance of held out policies (see Section~\ref{sec:perf-pred}). We adopt k-fold cross validation over the set $\Pi$ and report results averaged over cross validation folds.
+Following previous works on offline policy evaluation \citep{paine2020hyperparameter, fu2021benchmarks}, we adopt the following three complementary metrics. We report further details in the Supplementary.
+\begin{itemize}[noitemsep,nolistsep,leftmargin=*]
+\item  \textbf{Normalized Mean Absolute Error (NMAE)} measures the accuracy of the prediction w.r.t. the ground-truth. We adopt MAE instead of MSE to be robust to outliers and we normalize the error to be in range between the return values for each environment. Lower is better.
+\item \textbf{Rank Correlation} measures how the estimated values correlates with the ground-truth. Correlation focuses on how many evaluations on the robot are required to find the best policy. Higher is better.
+\item \textbf{Regret@1} measures the performance difference between the best policy and the predicted best policy, normalized w.r.t. the range of returns values for each environment. Lower is better.
+\end{itemize}
+Correlation and Regret@1 are the most relevant metric for evaluating \mname\ on OPS. On the other hand, NMAE refers to the accuracy of the estimated return value and is suited for OPE.
+
+ 
+\paragraph{Baselines}
+The problem in this paper is to represent policies in such a way that the representations can be used to predict the performance of other policies given the performance of a subset of policies. Importantly, to address this problem the representation should 1) encode the behavior of the policy, 2) in a way that is comparable with the representations of other policies, and 3) does not require online data. 
+Active Offline Policy Selection (AOPS) \citep{konyushova2021active} stands alone as a notable work that delves into policy representation from offline data with the task of deciding which policies should be evaluated in priority to gain the most information about the system. AOPS showed that representing policies according to its algorithm lead to faster identification of the best policy. In AOPS’s representation, which we call ``\actions'', policies are represented through the actions that the policies take on a fixed set of canonical states.
+We build \actions\ representation as follows. We run each policy $\pi$ on the set of states $D_\mathrm{can}$ sampled from historical trajectories. Next, we concatenate the resulting set of actions $\{\pi(s)\}_{s\in D_\mathrm{can}}$ into a vector.
+
+To the best of our knowledge, the \actions\ representation is the only applicable baseline in the setting that we adopt in this paper. Nevertheless, OPE methods that estimate policy performance from a fixed offline dataset is a standard methodology which is adopted in offline RL literature. Although these methods do not take the full advantage of the problem setting in this paper (the performance of some of the policies is known) they can still serve for comparison. In this paper, we compared against FQE which is a recommended OPE method that strikes a good balance between performance (it is among the top methods) and complexity (it does not require a world model) \citep{fu2021benchmarks}.
+\begin{table}[t]\caption{\label{tab:insert_rgb}
+We compare \mname\ and \actions\ representations for Insert-gear (real) and Insert-gear (sim) tasks, as well as for the RGB stacking environment. The table shows the performance and confidence intervals for different feature representations and encoders.%
+}
+\centering
+\begin{tabularx}{0.8\textwidth}{X|ccc}
+\hline
+\hline
+Representation  &NMAE $\downarrow$ & Correlation $\uparrow$& Regret@1 $\downarrow$ \\
+\hline
+\hline
+&\multicolumn{3}{c}{\textbf{RGB Stacking}} \\
+\actions\ &0.261 $\spm{0.045}$ &\textbf{0.785} $\spm{0.177}$ &0.074 $\spm{0.083}$ \\
+VIT &\textbf{0.224} $\spm{0.063}$ &	0.775 $\spm{0.146}$ & \textbf{0.036} $\spm{0.116}$ \\
+$\Delta$VIT &0.344 $\spm{0.050}$	&0.030 $\spm{0.332}$ & 0.375 $\spm{0.206}$ \\
+CLIP &0.330 $\spm{0.042}$ &	0.342 $\spm{0.293}$ &	0.325 $\spm{0.180}$ \\
+$\Delta$CLIP  & 0.287 $\spm{0.048}$ & 0.583 $\spm{0.126}$ & 0.079 $\spm{0.126}$ \\
+Random & 0.304 $\spm{0.066}$ &0.330 $\spm{0.334}$ & 0.226 $\spm{0.177}$ \\
+$\Delta$Random & 0.325 $\spm{0.109}$ &0.352  $\spm{0.348}$ & 0.190 $\spm{0.180}$ \\
+\hline
+&\multicolumn{3}{c}{\textbf{Insert gear (real)}} \\
+\actions\ & 0.252 $\spm{0.028}$&-0.545 $\spm{0.185}$ & 0.578 $\spm{0.148}$ \\
+Random  & 0.275 $\spm{0.027}$ & -0.207 $\spm{0.267}$ & 0.360 $\spm{0.162}$ \\
+CLIP  & \textbf{0.198} $\spm{0.030}$ & \textbf{0.618} $\spm{0.136}$ & \textbf{0.267} $\spm{0.131}$ \\
+$\Delta$CLIP & 0.253 $\spm{0.228}$ &-0.109 $\spm{0.100}$ & 0.429 $\spm{0.100}$ \\
+\hline
+&\multicolumn{3}{c}{\textbf{Insert gear (sim)}} \\
+\actions\ & 0.174 $\spm{0.015}$ & 0.650 $\spm{0.056}$ & 0.427 $\spm{0.172}$ \\
+Random  & 0.215 $\spm{0.026}$ & 0.555 $\spm{0.104}$ &0.422 $\spm{0.143}$ \\
+TAP & \textbf{0.164} $\spm{0.022}$ & \textbf{0.680} $\spm{0.095}$ & 0.359 $\spm{0.184}$ \\
+VIT  & 0.224 $\spm{0.025}$ &	0.402 $\spm{0.129}$ &	0.448 $\spm{0.195}$ \\
+$\Delta$VIT  & 0.255 $\spm{0.024}$ &	0.218 $\spm{0.139}$ &	0.457 $\spm{0.153}$ \\
+CLIP &0.180 $\spm{0.031}$	&0.502 $\spm{0.068}$	&\textbf{0.298} $\spm{0.126}$ \\
+$\Delta$CLIP  & 0.189  $\spm{0.020}$ &0.586 $\spm{0.077}$ & 0.314 $\spm{0.147}$ \\
+
+\end{tabularx}
+\vskip -.7cm
+\end{table}
+
+
+
+\section{Results}
+
+\label{sec:experiments}
+\begin{table}[t]
+\caption{\label{tab:metaworld_kitchen}We evaluate \mname\ on Metaworld and Kitchen. The results are averaged over all settings and confidence intervals are reported. BEST-$\phi$ is \mname\ average performance assuming that we adopt the best $\phi$ in terms of regret@1 for each task-POV setting.
+Similarly, BEST-CLIP and BEST-VIT are the best feature encoder between CLIP/VIT and $\Delta$CLIP/$\Delta$VIT.%
+}
+\centering
+
+\begin{tabularx}{0.8\textwidth}{X|ccc}
+\hline
+\hline
+Representation  &NMAE $\downarrow$ & Correlation $\uparrow$& Regret@1 $\downarrow$ \\
+\hline
+\hline
+&\multicolumn{3}{c}{\textbf{Metaworld}} \\
+\actions\ & 0.424  $\spm{0.058}$ & 0.347 $\spm{0.152}$ & 0.232 $\spm{0.078}$ \\
+CLIP   & 0.340 $\spm{0.035}$ &0.254 $\spm{0.143}$ &0.250 $\spm{0.076}$\\ 		
+$\Delta$CLIP  & 0.325 $\spm{0.092}$ &0.286 $\spm{0.154}$ &0.232 $\spm{0.086}$ \\
+BEST-CLIP  & 0.309 $\spm{0.027}$ &	0.351 $\spm{0.130}$ &	0.194 $\spm{0.076}$ \\
+VIT &0.303 $\spm{0.030}$	&0.280 $\spm{0.146}$	&0.263 $\spm{0.091}$ \\
+$\Delta$VIT  & 0.315 $\spm{0.026}$ &	0.162 $\spm{0.169}$ &	0.325 $\spm{0.084}$ \\
+BEST-VIT &0.298 $\spm{0.029}$ &	0.300 $\spm{0.147}$ &	0.244 $\spm{0.092}$ \\
+Random  & 0.366 $\spm{0.086}$ &	0.043 $\spm{0.150}$ &	0.375 $\spm{0.108}$ \\
+BEST-$\phi$  &\textbf{0.289} $\spm{0.018}$ &\textbf{0.460} $\spm{0.099}$ &\textbf{0.153} $\spm{0.060}$ \\
+\hline
+&\multicolumn{3}{c}{\textbf{Kitchen}} \\
+\actions\ & 0.857 $\spm{0.128}$ & 0.326 $\spm{0.128}$ &  0.221 $\spm{0.089}$ \\
+CLIP & 0.417 $\spm{0.032}$ &	0.021 $\spm{0.219}$ &	0.317 $\spm{0.081}$ \\
+$\Delta$CLIP & 0.352 $\spm{0.026}$ &	0.260 $\spm{0.216}$ &	0.244 $\spm{0.081}$ \\
+BEST-CLIP&0.333 $\spm{0.025}$	&0.346 $\spm{0.200}$ &	0.197 $\spm{0.076}$ \\
+VIT& 0.385 $\spm{0.030}$ &	0.030 $\spm{0.244}$ &	0.322 $\spm{0.095}$ \\
+$\Delta$VIT& 0.344 $\spm{0.025}$ &0.155 $\spm{0.234}$ &	0.251 $\spm{0.082}$ \\
+BEST-VIT &\textbf{0.321} $\spm{0.024}$ &	0.412 $\spm{0.228}$ &	0.151 $\spm{0.068}$ \\
+Random & 0.382 $\spm{0.033}$	&-0.017 $\spm{0.225}$ &0.334 $\spm{0.080}$ \\
+BEST-$\phi$ &0.392 $\spm{0.053}$ &	\textbf{0.591} $\spm{0.203}$ &	\textbf{0.070} $\spm{0.045}$ \\
+\end{tabularx}
+\vskip -.1cm
+\end{table}
+
+We report results for various feature encoders for Insert gear (sim and real) and RGBStacking. Similarly, we report averaged results for over 4 tasks and 3 point of view for Metaworld and over 5 tasks and 3 point of view for Kitchen. Along with results for each feature encoder, we report the average results of picking the \textbf{best} feature encoder for each task (BEST-$\phi$). Similarly, we report as BEST-CLIP and BEST-VIT the average results when adopting the best feature encoder between
+CLIP/VIT and $\Delta$CLIP/$\Delta$VIT.
+We identify the \textbf{best} feature encoder for a task by conducting cross-validation on previously evaluated policies and pick the best encoder in terms of regret@1.
+
+Our results demonstrate that (i) \mname\ outperforms the \actions\ baseline models consistently across real and simulated robotics environments and multiple tasks, showcasing the framework's effectiveness in representing policies.
+Furthermore, we demonstrate the applicability to real-world robotic settings, specifically in the challenging Insert Gear (Real) environment, where even underperforming policies contribute to improved policy evaluation. 
+We show that choosing the best model as a feature-extractor greatly improves results (ii). Finally, we adopt \mname\ to solve Equation \ref{eq:Q} and estimate policies' return values in the Metaworld's \textbf{assembly} environment, without relying on any ground-truth data (iii). Although the successor feature assumption of linearity of rewards is violated, \mname\ still ranks policies competitively in the offline setting when compared to FQE. 
+ We investigate \mname's generalization capabilities (vi), including out-of-distribution scenarios (vii). We also demonstrate that \mname\ represents random policies close in the feature space  (viii), and that \mname\ is robust to canonical state coverage (ix) and effective with online data (x).
+
+
+
+\paragraph{(i) \mname\ consistently outperforms \actions}
+We compare \mname\ and \actions\ across all scenarios.
+Our method outperforms \actions\ representation when predicting values of unseen policies in both real robotics scenarios--RGB stacking and insert-gear (real)--as shown in Table \ref{tab:insert_rgb}.
+In the former, $\Psi^\text{VIT}$ achieves regret@1 of $0.036$ compared to \actions' $0.074$, with a relative improvement of $51\%$.
+In the latter, $\Psi^\text{CLIP}$ improves over \actions\ by achieving regret@1 $0.267$ compared to \actions' $0.578$ and drastically outperform \actions\ in terms of correlation by achieving $+0.618$ compared to \actions' $-0.545$.
+\mname\ performs robustly on insert gear (real) despite policies' performances for this task vary greatly (see supplementary for per-task policies performances).
+
+We also evaluate our approach in the simulated counterpart \textit{Insert Gear (Sim)}.
+In this environment, $\Psi^\text{CLIP}$ and $\Psi^\text{TAP}$ achieve regret@1 of $0.314$ and $0.359$ respectively, compared to \actions\ $0.427$. We underline the dichotomy between geometrical and semantic features: $\Psi^\text{TAP}$ performs best in terms of NMAE and Correlation, while $\Psi^\text{CLIP}$ outperforms in Regret@1.
+These results highlight how various $\phi$ compare depending on setting, type of task, and policy performance.
+
+\paragraph{(ii) When evaluating across multiple settings, selecting $\phi$ leads to better results}
+We compare \mname\ with different foundation models across 12 Metaworld settings and 15 Kitchen settings.
+Table~\ref{tab:metaworld_kitchen} reports the average results across all settings for Metaworld and Kitchen.
+In Metaworld, we notice that \actions\ performs on par with $\Psi^\text{CLIP}$, $\Psi^\text{VIT}$, and their respective variations $\Delta$CLIP and $\Delta$VIT, in terms of correlation and regret@1, while our approach consistently outperforms \actions\ in terms of NMAE. As these domains have less state variability, \actions\ represent policies robustly.
+We test CLIP/$\Delta$CLIP and VIT/$\Delta$VIT on previously evaluated policies for each task through cross-validation to identify the best feature encoder for the task in terms of regret@1.
+We report $\Psi^\text{BEST-CLIP}$ and $\Psi^\text{BEST-VIT}$ as the average results over the best among CLIP/VIT and $\Delta$CLIP/$\Delta$VIT. $\Psi^\text{BEST-CLIP}$ achieves regret@1 $0.194$ and correlation $0.351$, outperforming \actions\ representation.
+We highlight that the choice of $\phi$ is critical, since $\Psi^\text{random}$---using a randomly-initialized ResNet50 as feature extractor---underperforms.
+Moreover, \mname\ with the best $\phi$ drastically improves, achieving regret@1 of $0.153$ compared to \actions\ $0.232$. 
+We notice similar improvements when evaluating on Kitchen's 15 settings.
+Table~\ref{tab:metaworld_kitchen} compares choosing the \textit{BEST} $\phi$ w.r.t. to VIT and CLIP, and against \actions.
+In Kitchen, $\Psi^\text{VIT}$ outperforms $\Psi^\text{CLIP}$ and \actions, while $\Psi^{\text{BEST}-\phi}$ achieves the overall best results.
+\begin{table}[t]
+\caption{\label{tab:ope}We extend \mname\ to the fully-offline setting and test it on Metaworld assembly task (left, right, and top). We reports results and confidence intervals. In this setting, performances of all policies are unknown.%
+}
+\centering
+\begin{tabularx}{0.8\textwidth}{X|ccc}
+\hline
+\hline
+Representation  &NMAE $\downarrow$ & Correlation $\uparrow$& Regret@1 $\downarrow$ \\
+\hline
+\hline
+
+&\multicolumn{3}{c}{\textbf{Assembly (left)}} \\
+FQE  & \textbf{0.338}$\spm{0.062}$& 0.125 $\spm{0.218}$& 0.424$\spm{0.260}$\\ 
+\mname\ & 8.306 $\spm{0.155}$&\textbf{0.360}$\spm{0.097})$ &\textbf{0.215}$\spm{0.079}$\\
+\hline
+&\multicolumn{3}{c}{\textbf{Assembly (right)}} \\
+FQE & \textbf{0.270}$\spm{0.093}$& -0.029$\spm{0.351}$ & 0.504$\spm{0.071}$\\ 
+\mname\  & 2.116 $\spm{0.056}$&\textbf{0.154}$\spm{0.115}$ &\textbf{0.319}$\spm{0.080}$\\
+\hline
+&\multicolumn{3}{c}{\textbf{Assembly (top)}} \\
+FQE & \textbf{0.322}$\spm{0.012}$ & -0.251$\spm{0.516}$& 0.609$\spm{0.228}$\\ 
+\mname\ & 0.492$\spm{0.006}$ & \textbf{0.555}$\spm{0.106}$&\textbf{0.149}$\spm{0.071}$\\
+
+\end{tabularx}
+\end{table}
+\paragraph{(iii) \mname\ enables fully-offline policy selection} By directly modelling the relationship between successor features and returns, we avoid the linear reward assumption of the original successor features work. This is preferable since rewards are generally not linearly related to state features. However, this restricts our method to settings where some policies' performance is known. To evaluate performance in a fully-offline setting, we fit a linear model the task \textbf{reward} $\hat{r}=\langle\phi(s), \w_\text{task}\rangle$ given the state's feature representation $\phi(s)$, as in Equation \ref{eq:Q} from the original successor features work. Next we predict policies returns as $\hat{R}_i = \langle\Psi^\phi_{\pi_i}, \w_\text{task}\rangle$.  We compare our approach to FQE in Table \ref{tab:ope} and find that while our method's return predictions are inaccurate (as evidenced by the high NMAE), it still performs well in ranking policies (higher Correlation and lower Regret@1).
+
+
+
+
+
+\section{Conclusion}
+
+We presented \mname, a framework for offline policy representation via successor features.
+Our method treats the policy as a black box, and creates a representation that captures statistics of how the policy changes the environment rather than its idiosyncrasies.
+The representations can be trained from offline data, and leverage the pretrained features of visual foundation models to represent individual states of the environment.
+In our experiments, we represented policies by relying on visual features from semantic (CLIP), geometric (TAP), and visual (VIT) foundation models.
+We showed that \mname\ outperforms previously used \actions\ based representations and generalizes to fully-offline settings. Overall, our experiments showcase the effectiveness and versatility of \mname\ in representing policies and its potential for various applications in reinforcement learning. 
+
+Moving forward, we acknowledge that finding the optimal combination of these elements remains an ongoing challenge. Future work should explore diverse foundation models, offline learning algorithms for successor feature training, and dataset choices.  Fine-tuning the feature encoder $\phi$ along with $\psi_\phi^\pi$ is interesting but pose challenges, as each feature encoder would specialize to predict features for a specific policy, resulting in policy representations that are independent and not comparable. We leave end-to-end fine-tuning as future work. Integrating \mname\ into AOPS framework \citep{konyushova2021active} for enhanced offline policy selection is another intriguing avenue. Additionally, extending \mname\ to augment the Generalized Policy Improvement \citep{barreto2017successor} in offline settings presents exciting research opportunities.
+
+
+
+
+
+
+

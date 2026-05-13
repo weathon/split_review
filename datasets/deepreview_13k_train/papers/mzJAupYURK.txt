@@ -1,0 +1,485 @@
+\title{Stable Consistency Tuning: Understanding and Improving Consistency Models}
+
+\begin{abstract}
+Diffusion models achieve superior generation quality but suffer from slow generation speed due to the iterative nature of denoising. In contrast, consistency models, a new generative family, achieve competitive performance with significantly faster sampling. 
+These models are trained either through consistency distillation, which leverages pretrained diffusion models, or consistency training/tuning directly from raw data. 
+In this work, we propose a novel framework for understanding consistency models by modeling the denoising process of the diffusion model as a Markov Decision Process (MDP) and framing consistency model training as the value estimation through Temporal Difference~(TD) Learning. 
+More importantly, this framework allows us to analyze the limitations of current consistency training/tuning strategies.
+Built upon Easy Consistency Tuning (ECT), we propose Stable Consistency Tuning (SCT), which incorporates variance-reduced learning using the score identity.
+SCT leads to significant performance improvements on benchmarks such as CIFAR-10 and ImageNet-64. On ImageNet-64, SCT achieves 1-step FID 2.42 and 2-step FID 1.55, a new SoTA for consistency models.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Diffusion models have significantly advanced the field of visual generation, delivering state-of-the-art performance in images~\citep{dhariwal2021diffusion,rombach2022high,scorematching,karras2022elucidating,karras2024analyzing}, videos~\citep{shi2024motion,blattmann2023align,makeavideo,sora,bao2024vidu}, 3D~\citep{gao2024cat3d,shi2023mvdream}, and 4D data~\citep{ling2024align}. 
+The core principle of diffusion models is the iterative transformation of pure noise into clean samples.
+However, this iterative nature comes with a tradeoff: while it enables superior generation quality and training stability compared to traditional methods~\citep{gan,stylegant}, it requires substantial computational resources and longer sampling time~\citep{ddim,ddpm}. This limitation becomes a substantial bottleneck when generating high-dimensional data, such as high-resolution images and videos, where the increased generation cost slows practical application. 
+
+Consistency models~\citep{cm}, an emerging generative family, largely address these challenges by enabling high-quality, one-step generation without adversarial training. 
+Recent studies~\citep{ict,ect} have shown that one-step and two-step performance of consistency models can rival that of leading diffusion models, which typically require dozens or even hundreds of inference steps, underscoring the tremendous potential of consistency models.
+The primary training objective of consistency models is to enforce the self-consistency condition~\citep{cm}, where predictions for any two points along the same trajectory of the probability flow ODE (PF-ODE) converge to the same solution. 
+To achieve this, consistency models adopt two training methods: consistency distillation~(CD) and consistency training/tuning~(CT). 
+Consistency distillation leverages a frozen pretrained diffusion model to simulate the PF-ODE, while consistency training/tuning directly learns from real data with no need for extra teacher models.
+
+The motivation of this paper is to propose a novel understanding of consistency models from the perspective of bootstrapping. 
+Specifically, we first frame the numerical solving process of the PF-ODE (i.e., the reverse diffusion process) as a Markov Decision Process (MDP), also indicated in prior works~\citep{black2023training,fan2024reinforcement}.  
+The initial state of the MDP is randomly sampled from Gaussian. The intermediate state consists of the denoised sample \(\mathbf{x}_t\) and the corresponding conditional information, including the timestep \(t\). 
+The policy function of the MDP corresponds to the action of applying the ODE solver to perform single-step denoising, resulting in the transition to the new state.
+Building on this MDP, we show that the training of consistency models, including consistency distillation, consistency training/tuning, and their variants, can be interpreted as Temporal difference (TD) learning~\citep{sutton2018reinforcement}, with specific reward and value functions aligned with the PF-ODE. 
+From this viewpoint, we can derive, as we will elaborate later, that the key difference between consistency distillation and consistency learning lies in how the ground truth reward is estimated. 
+The difference leads to distinct behaviors: Consistency distillation has a lower performance upper bound~(being limited by the performance of the pretrained diffusion model) but exhibits lower variance and greater training stability. Conversely, consistency training/tuning offers a higher performance upper bound but suffers from a larger variance in reward estimation, which can lead to unstable training. Additionally, for both CD and CT, smaller ODE steps (i.e., \(\Delta t = t-r\)) can improve the performance ceiling but complicate the optimization.
+
+Building upon the foundation of Easy Consistency Tuning~(ECT), we introduce Stable Consistency Tuning~(SCT), which incorporates several enhancements for variance reduction and faster convergence: 
+1) We introduce a variance-reduced training target for consistency training/tuning via the score identity~\citep{denoisingAE,stabletarget}, which provides a better approximation of the ground truth score. This helps improve training stability and facilitates better performance and convergence. Additionally, we show that variance-reduced estimation can be applied to conditional generation settings for the first time.
+2) Our method adopts a smoother progressive training schedule that facilitates training dynamics and reduces discretization error. 
+3) We extend the scope of ECT to multistep settings, allowing for deterministic multistep sampling. Additionally, we investigate the potential capacity and optimization challenges of multistep consistency models and propose an edge-skipping multistep inference strategy to improve the performance of multistep consistency models. 
+4) We validate the effectiveness of classifier-free guidance in consistency models, where generation is guided by a sub-optimal version of the consistency model itself.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{sec/figs/main.pdf}
+    \caption{Stable consistency tuning~(SCT) with variance reduced training target. SCT provides a unifying perspective to understand different training strategies of consistency models. }
+    \label{fig:sct}
+\end{figure}
+
+
+
+\section{Preliminaries on Consistency Models}
+
+In this section, we present the essential background on consistency models to ensure a more self-contained explanation.
+
+\noindent \textbf{Diffusion Models} define a forward stochastic process with the intermediate distributions $\mathbb{P}_t(\mathbf{x}_t|\mathbf{x}_0)$ conditioned on the initial data $\mathbf{x}_0 \sim \mathbb{P}_0$~\citep{flowmathcing,kingma2021variational}. The intermediate states follow a general form $\mathbf x_t = \alpha_t \mathbf{x}_0 + \sigma_t \boldsymbol{\epsilon}$ with $\mathbf x_1 \approx \boldsymbol \epsilon \sim \mathcal N (0, \mathbf I)$. The forward process can be described with the following stochastic differential equation (SDE):
+\begin{equation}
+\mathrm{d} \mathbf{x}_t = f_t \mathbf{x}_t \mathrm{d}t + g_t \mathrm{d} \boldsymbol{w}_t,
+\end{equation}
+where $\boldsymbol{w}_t$ is the standard Wiener process, $f_t = \frac{\mathrm{d} \log \alpha_t}{\mathrm{d}t}$, and $g_t^2 = \frac{\mathrm{d} \sigma_t^2}{\mathrm{d}t} - 2 \frac{\mathrm{d} \log \alpha_t}{\mathrm{d}t} \sigma_t^2$. For the above forward SDE, a remarkable property is that there exists a reverse-time ODE trajectory for data sampling, which is termed as probability flow ODE (PF-ODE)~\citep{cm}  That is,
+\begin{equation}
+\mathrm{d} \mathbf{x}_t = \left[ f_t \mathbf x_t - \frac{g_t^2}{2} \nabla_{\mathbf{x}_t} \log \mathbb{P}_t(\mathbf{x}_t) \right] \mathrm{d}t.
+\end{equation}
+It allows for data sampling without introducing additional stochasticity while satisfying the pre-defined marginal distributions $\mathbb P_t(\mathbf x_t) = \mathbb E_{\mathbb P(\mathbf x_0)}[\mathbb P (\mathbf x_t \mid \mathbf x_0)]$. In diffusion models, a neural network $\boldsymbol \phi$ is typically trained to approximate the score function $\boldsymbol{s}_{\boldsymbol{\phi}}(\mathbf{x}_t, t) \approx \nabla_{\mathbf{x}} \log \mathbb{P}_t(\mathbf{x}_t)$, enabling us to apply numerical solver to approximately solving the PF-ODE for sampling. Many works apply epsilon-prediction $\boldsymbol \epsilon_{\boldsymbol \phi}(\mathbf x_t, t) = -\sigma_t \nabla_{\mathbf{x}} \log \mathbb{P}_t(\mathbf{x}_t)$ form for training.
+
+\noindent \textbf{Consistency Models} propose a training approach that teaches the model to directly predict the solution point of the PF-ODE, thus enabling 1-step generation. Specifically, for a given trajectory $\{\mathbf{x}_t\}_{t \in [0, 1]}$, the consistency model $\boldsymbol{f}_{\boldsymbol{\theta}}(\mathbf{x}_t, t)$ is trained to satisfy $\boldsymbol{f}_{\boldsymbol{\theta}}(\mathbf{x}_t, t) = \mathbf{x}_0, \forall t \in [0, 1]$, where $\mathbf{x}_0$ is the solution point on the same PF-ODE with $\mathbf x_t$. The training strategies of consistency models can be categorized into consistency distillation and consistency training. But they share the same training loss design,
+\begin{equation}
+d (\boldsymbol f_{\boldsymbol \theta}(\mathbf x_t, t), \boldsymbol f_{{\boldsymbol \theta}^{-}}(\mathbf x_r, r))\, ,
+\end{equation}
+where $d(\cdot, \cdot)$ is the loss function, $0 \le r < t \le 1$, $\boldsymbol \theta^-$ is the EMA weight of $\boldsymbol \theta$ or simply set to $\boldsymbol \theta$ with gradient disabled for backpropagation.  Both $\mathbf x_t$ and $\mathbf x_r$ should be approximately on the same PF-ODE trajectory.
+
+
+\section{Understanding Consistency Models}
+
+\noindent \textbf{Consistency model as bootstrapping.} For a general form of diffusion $\mathbf x_t = \alpha_t \mathbf x_0 + \sigma_t \boldsymbol \epsilon$, there exists an exact solution form of PF-ODE as shown in previous work~\citep{song2021scorebased,dpmsolver},
+\begin{align}
+\mathbf x_s = \frac{\alpha_s}{\alpha_t}\mathbf x_t - \alpha_s \int_{\lambda_t}^{\lambda_s}e^{-\lambda} \boldsymbol \epsilon(\mathbf x_{t_{\lambda}}, t_{\lambda})  \mathrm d \lambda \, ,
+\end{align}
+where $\lambda_{t} = \ln (\alpha_t/\sigma_t)$, $t_{\lambda}$ is the reverse function of $t_{\lambda}$, and  $\boldsymbol \epsilon(\mathbf x_{t_{\lambda}, t}) = - \sigma_{t_{\lambda}} \nabla \log \mathbb P_{t_\lambda}(\mathbf x_{t_{\lambda}})$ is the scaled score function. Consistency models aim to learn a $\mathbf x_0$ predictor with only the information from $\mathbf x_{t} , \forall t \in [0, 1]$. The left term is already known with $\mathbf x_{t}$, and thereby we can write the consistency model-based $\mathbf x_0$ prediction as 
+\begin{align}
+\hat{\mathbf x}_0(\mathbf x_t, t; {\boldsymbol \theta}) = \frac{1}{\alpha_t}\mathbf x_t - \boldsymbol h_{\boldsymbol \theta}(\mathbf x_t, t),
+\end{align}
+where $s$ is set to $0$ with $\alpha_s = 1$, $\boldsymbol \theta$ is the model weights, and $\boldsymbol h_{\boldsymbol \theta}$ is applied to approximate the weighted integral of $\boldsymbol \epsilon$ from $t$ to $s=0$.
+
+The loss of consistency models penalize the $\mathbf x_0$ prediction distance between $\mathbf x_t$ and $\mathbf x_r$ at adjacent timesteps, 
+\begin{align}
+\hat{\mathbf{x}}_0(\mathbf{x}_t, t; \boldsymbol{\theta}) \overset{\text{fit}}{\longleftarrow} \hat{\mathbf{x}}_0(\mathbf{x}_r, r; \boldsymbol{\theta^{-}})\, ,
+\end{align}
+where $0 \le r < t$ and $\boldsymbol \theta^{-}$ is the EMA weight of $\boldsymbol \theta$.
+Therefore, we have the following learning target
+\begin{align}
+\frac{1}{\alpha_t}\mathbf x_t - \boldsymbol h_{\boldsymbol \theta}(\mathbf x_t, t) \overset{\text{fit}}{\longleftarrow} \frac{1}{\alpha_r}\mathbf x_r - \boldsymbol h_{\boldsymbol \theta^{-}}(\mathbf x_r, r)
+\end{align}
+Noting that $\mathbf x_r = \frac{\alpha_r}{\alpha_t}\mathbf x_t - \alpha_r \int_{\lambda_t}^{\lambda_r}e^{-\lambda} \boldsymbol \epsilon(\mathbf x_{t_{\lambda}}, t_{\lambda})  \mathrm d \lambda $, and hence we replace the $\mathbf x_r$ in the above equation and have 
+\begin{align}
+\textcolor{blue}{\boldsymbol h_{\boldsymbol \theta}(\mathbf x_t, t)} \overset{\text{fit}}{\longleftarrow} \textcolor{red}{\boldsymbol r}  + \textcolor{purple}{\boldsymbol h_{\boldsymbol \theta^{-}}(\mathbf x_r, r)}\, ,
+\end{align}
+where $\textcolor{red}{\boldsymbol r = \int_{\lambda_t}^{\lambda_r}e^{-\lambda} \boldsymbol \epsilon(\mathbf x_{t_{\lambda}}, t_{\lambda})  \mathrm d \lambda}$. The above equation is a Bellman Equation. $\textcolor{blue}{\boldsymbol h_{\boldsymbol \theta}(\mathbf x_t, t)}$ is the value estimation at state $\mathbf x_t$,  $\textcolor{purple}{\boldsymbol h_{\boldsymbol \theta^{-}}(\mathbf x_r, r)}$ is the value estimation at state $\mathbf x_r$, and $\textcolor{red}{\boldsymbol r}$ is the step `reward'.
+\noindent \textbf{Standard formulation.} It is known that the diffusion generation process can be modeled as a Markov Decision Process~(MDP)~\citep{black2023training,fan2024reinforcement}, and here we show that the training of consistency models can be viewed as a value estimation learning process, which is also known as Temporal Difference Learning~(TD-Learning), in the equivalent MDP.  We show the standard formulation in Table~\ref{tab:MDP-def}.
+
+In Table~\ref{tab:MDP-def}, $s_{t_n}$ and $a_{t_n}$ are the state and action at timestep $t_{n}$, $P_{0}$ and $P$ are the initial state distribution and state transition distribution, $\Phi(\mathbf x_{t_{N-n}}, t_{N-n}, t_{N-n-1})$ is the ODE solver, $\pi$ is the policy following the PF-ODE,  reward $R$ is equivalent to the $\textcolor{red}{r}$ defined above and value function $V_{\boldsymbol \theta}$ is corresponding to $\boldsymbol h_{\boldsymbol \theta}$. $\pi$ is the Dirac distribution $\delta$ due to the deterministic nature of PF-ODE.
+
+From this perspective, we can have a unifying understanding of consistency model variants and their behaviors. Fig.~\ref{fig:sct} provides a straightforward illustration of our insight. One of the most important factors of the consistency model performance is how we estimate $\textcolor{red}{\boldsymbol r}$ in the equation. 
+
+\begin{table}[t]
+\centering
+\caption{The definition of symbols in the value estimation of the PF-ODE equivalent MDP.}
+\label{tab:MDP-def}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{@{}ll@{}}
+\toprule
+MDP symbols & Definition \\ \midrule
+$s_{t_{n}}$ & $(t_{N-n}, \mathbf x_{t_{N-n}})$ \\
+$a_{t_n}$ & $\mathbf x_{t_{N-n-1}} := \Phi(\mathbf x_{t_{N-n}}, t_{N-n}, t_{N-n-1})$ \\
+$P_0(s_0)$ & $(t_{N}, \mathcal N (\boldsymbol 0, \mathbf I))$ \\
+$P(s_{t_{n+1}} \mid s_{t_{n}}, a_{t_{n}})$ & $(\delta_{t_{N-n-1}}, \delta_{\mathbf x_{t_{N-n-1}}})$ \\
+$\pi(a_{t_n} \mid s_{t_n})$ & $\delta_{\mathbf x_{t_{N-n-1}}}$ \\
+$R(s_{t_{n}}, a_{t_{n}})$ & $ \int_{\lambda_{t_{N-n}}}^{\lambda_{t_{N-n-1}}} e^{-\lambda} \boldsymbol \epsilon(\mathbf x_{t_{\lambda}}, t_{\lambda}) \mathrm d \lambda$ \\
+$V_{\boldsymbol \theta}(s_{t_n})$ & $\boldsymbol h_{\boldsymbol \theta}(\mathbf x_{t_{N-n}}, t_{N-n})$ \\ \bottomrule
+\end{tabular}
+\end{table} 
+
+\noindent \textbf{Understanding consistency distillation.} For consistency distillation, the approximation of $\textcolor{red}{\boldsymbol r}$ is dependent on the pretrained diffusion model $\boldsymbol{\epsilon}_{\boldsymbol \phi}$ and the ODE solver applied. For instance, if the first-order DDIM~\citep{ddim} is applied, then the approximation is formulated as,
+\begin{align}
+\textcolor{red}{\boldsymbol{r}} \approx \boldsymbol \epsilon_{\boldsymbol \phi}(\mathbf x_{t},t)\int_{\lambda_t}^{\lambda_r} e^{-\lambda} \mathrm d\lambda + \mathcal O ((\lambda_r - \lambda_t)^2)\,.
+\end{align}
+We can observe that the error comes from two aspects: one is the prediction error between the pretrained diffusion model $\boldsymbol \epsilon_{\boldsymbol \phi}(\mathbf x_{t}, t)$ and the ground truth $\boldsymbol \epsilon(\mathbf x_{t}, t)$; the other is the first-order assumption that $\boldsymbol \epsilon(\mathbf x_{t_{\lambda}}, t_\lambda) \approx \boldsymbol \epsilon (\mathbf x_{t}, t), \forall t_{\lambda} \in [t, r] $. The first error indicates a better pretrained diffusion model can lead to better performance of consistency distillation. The second error indicates that the distance between $t$ and $s$ should be small enough to eliminate errors caused by low-order approximation.  This perspective also connects the n-step TD algorithm with the consistency distillation.  The n-step TD is equivalent to applying the multistep~(n-step) ODE solver to compute the $\mathbf x_r$ from $\mathbf x_t$. 
+
+\noindent \textbf{Understanding consistency training/tuning.} For consistency training/tuning, the approximation of $\textcolor{red}{\boldsymbol{r}}$ is achieved through approximating the ground truth $\boldsymbol \epsilon (\mathbf x_t, t)$ with the conditional $\boldsymbol \epsilon (\mathbf x_t, t ; \mathbf x_0)$, where $\mathbf x_0$ is sampled from the dataset $\mathcal D$ and $\mathbf x_t = \alpha_t \mathbf x_0 + \sigma_t \boldsymbol \epsilon$ with $\boldsymbol \epsilon\sim\mathcal N(\boldsymbol 0, \mathbf I)$. It is known that the ground truth $\boldsymbol \epsilon(\mathbf x_t, t)$ is equivalent to
+\begin{equation}
+\begin{split}
+\boldsymbol \epsilon(\mathbf x_t, t)  &=  - \sigma_{t} \nabla_{\mathbf x_t} \log \mathbb P_{t}(\mathbf x_{t}) \\ & = -\sigma_t \mathbb E_{\mathbb P_{t}(\mathbf x_0 \mid \mathbf x_t)}\left[\nabla_{\mathbf x_{t}} \log \mathbb P(\mathbf x_t \mid \mathbf x_0)\right]\\& = -\sigma_t \mathbb E_{\mathbb P(\mathbf x_0 \mid \mathbf x_t)}\left[-\frac{\mathbf x_t - \alpha_{t}\mathbf x_0}{\sigma_t^2}\right] = \mathbb E_{\mathbb P(\mathbf x_0 \mid \mathbf x_t)}\left[\frac{\mathbf x_t - \alpha_{t}\mathbf x_0}{\sigma_t}\right]  = \mathbb E_{\mathbb P(\mathbf x_0 \mid \mathbf x_t)}\left[\boldsymbol \epsilon (\mathbf x_t, t;\mathbf x_0)\right]
+\end{split}\, ,
+\end{equation}
+where $\boldsymbol \epsilon (\mathbf x_t, t; \mathbf x_0) = \frac{\mathbf x_t - \alpha_{t}\mathbf x_0}{\sigma_t}$.  In simple terms, the ground truth $\boldsymbol \epsilon (\mathbf x_t, t)$ is the expectation of all possible conditional epsilon $\boldsymbol \epsilon(\mathbf x_t, t; \mathbf x_0), \forall \mathbf x_0 \in \mathcal D$. Instead, previous works on consistency training/tuning apply the conditional epsilon to approximate the ground truth epsilon, which can be regarded as a one-shot MCMC approximation.   The approximation is formulated as,
+\begin{align}
+\textcolor{red}{\boldsymbol{r}} \approx \boldsymbol \epsilon(\mathbf x_{t},t ; \mathbf x_0)\int_{\lambda_t}^{\lambda_r} e^{-\lambda} \mathrm d\lambda  + \mathcal O ((\lambda_r - \lambda_t)^2)
+\end{align}
+Similarly, the error comes from two aspects: one is the difference between conditional epsilon $\boldsymbol \epsilon(\mathbf x_t, t;\mathbf x_0)$ and ground truth epsilon $\boldsymbol \epsilon(\mathbf x_t, t)$; the other is the first-order approximation error. Even though, it is shown by previous work that the final learning objective will converge to the ground truth under minor assumptions~(e.g., $L$-Lipschitz continuity)~\citep{cm}. 
+\begin{align}
+\boldsymbol h_{\boldsymbol \theta}(\mathbf x_t, t) = \mathbb E_{\mathbb P(\mathbf x_0| \mathbf x_t)}\left[\boldsymbol \epsilon(\mathbf x_t, t; \mathbf x_0)\right]\int_{\lambda_t}^{\lambda_r} e^{-\lambda} \mathrm d\lambda + h_{\boldsymbol \theta}(\mathbf x_r, r) \,.
+\end{align}
+However, the variance of one-shot MCMC is large. This causes the consistency training/tuning is not as stable as distillation methods even though it has a better upper bound.
+
+\noindent \textbf{Summary.}
+In summary, the main performance bottlenecks in improving consistency training/tuning can be attributed to two factors:
+\begin{enumerate}
+    \item \textbf{Training Variance}: This refers to the gap between the conditional epsilon $\boldsymbol \epsilon(\mathbf{x}_t, t ; \mathbf{x}_0)$ and the ground truth epsilon $\boldsymbol \epsilon(\mathbf{x}_t, t)$. Although, in theory, the conditional epsilon is expected to match the ground truth epsilon on average, it exhibits higher variance, which introduces instability and deviations during training. 
+    \item \textbf{Discretization Error}: In the numerical solving of the ODE for consistency training/tuning, only first-order solvers can be approximated. To push performance to its upper limit, the time intervals between sampled points, $t$ and $r$, must be minimized, i.e., $ \mathrm{d} t = \lim (t-r) \to 0$. However, smaller $\mathrm{d}t$ results in a longer information propagation process (with large $N$). If the training process lacks stability, error accumulation through bootstrapping may occur, potentially causing training failure.
+\end{enumerate}
+
+
+\begin{figure}[t]
+    \centering
+\includegraphics[width=0.9\linewidth]{sec/figs/phased.pdf}
+\caption{Phasing the ODE path along the time axis for consistency training. We visualize both training and inference techniques in discrete form for easier understanding.}
+    \label{fig:phased}
+\end{figure}
+
+
+\section{Stable Consistency Tuning}
+
+
+Our method builds upon Easy Consistency Tuning (ECT)~\citep{ect}, chosen for its efficiency in prototyping. Given our analysis of consistency models from the bootstrapping perspective, we introduce several techniques to enhance performance.
+
+\subsection{Reducing the Training Variance}
+
+Previous research has shown that reducing the variance for diffusion training can lead to improved training stability and performance~\citep{stabletarget}. 
+However, this technique has only been applied to unconditional generation and diffusion model training.
+We generalize this technique to both conditional/unconditional generation and consistency training/tuning for variance reduction. 
+Let $\boldsymbol c$ represent the conditional inputs~(e.g., class labels).
+We begin with
+\begin{align}
+\begin{aligned}
+\nabla_{\mathbf x_t} \log \mathbb P_{t}(\mathbf x_{t} \mid \boldsymbol c)  & = \mathbb E_{\mathbb P(\mathbf x_0 \mid \mathbf x_t, \boldsymbol c)}\left[\nabla_{\mathbf x_{t}} \log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0, \boldsymbol c)\right]  \\
+ & = \mathbb E_{\mathbb P(\mathbf x_0 \mid \boldsymbol c)} \left[\frac{\mathbb P(\mathbf x_0\mid \mathbf x_t, \boldsymbol c)}{\mathbb P (\mathbf x_0\mid \boldsymbol c)}\nabla_{\mathbf x_{t}} \log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0, \boldsymbol c) \right]   \\  
+ & = \mathbb E_{\mathbb P(\mathbf x_0 \mid \boldsymbol c)} \left[\frac{\mathbb P(\mathbf x_t\mid \mathbf x_0, \boldsymbol c)}{\mathbb P (\mathbf x_t\mid \boldsymbol c)}\nabla_{\mathbf x_{t}} \log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0, \boldsymbol c) \right] \\
+  & = \mathbb E_{\mathbb P(\mathbf x_0 \mid \boldsymbol c)} \left[\frac{\mathbb P(\mathbf x_t\mid \mathbf x_0)}{\mathbb P (\mathbf x_t\mid \boldsymbol c)}\nabla_{\mathbf x_{t}} \log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0) \right]\\
+  & \approx \frac{1}{n} \sum_{\{\mathbf x_0^{(i)}\} \sim \mathbb P(\mathbf x_0\mid c)}^{i=0,\dots n-1} \frac{\mathbb P(\mathbf x_t\mid \mathbf x_0^{(i)})}{\mathbb P (\mathbf x_t\mid \boldsymbol c)}\nabla_{\mathbf x_{t}}\log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0^{(i)}) \\ 
+  & \approx \frac{1}{n} \sum_{\{\mathbf x_0^{(i)}\} \sim \mathbb P(\mathbf x_0\mid c)}^{i=0,\dots n-1} \frac{\mathbb P(\mathbf x_t\mid \mathbf x_0^{(i)})}{\sum_{\mathbf x_0^{(j)}\in \{\mathbf x_0^{(i)}\}}\mathbb P (\mathbf x_t\mid \mathbf x_0^{(j)}, \boldsymbol c)}\nabla_{\mathbf x_{t}}\log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0^{(i)}) \\
+  & = \frac{1}{n} \sum_{\{\mathbf x_0^{(i)}\} \sim \mathbb P(\mathbf x_0\mid c)}^{i=0,\dots n-1} \frac{\mathbb P(\mathbf x_t\mid \mathbf x_0^{(i)})}{\sum_{\mathbf x_0^{(j)}\in \{\mathbf x_0^{(i)}\}}\mathbb P (\mathbf x_t\mid \mathbf x_0^{(j)})}\nabla_{\mathbf x_{t}}\log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0^{(i)})
+\end{aligned}
+\end{align}
+The key difference between the variance-reduced score estimation of conditional generation and unconditional generation is whether the samples utilized for computing the variance-reduced target are sampled from the conditional distribution $\mathbb P(\mathbf x_0 \mid \boldsymbol{c})$ or not.  
+In the class-conditional generation, this means we compute stable targets only within each class cluster. For text-to-image generation, we might estimate probabilities using CLIP~\citep{clip} text-image similarity, though we leave this for future study.
+Therefore, the conditional epsilon estimation adopted in previous consistency training/tuning can be replaced by our variance-reduced estimation:
+\begin{equation}
+\begin{split}
+\boldsymbol \epsilon(\mathbf x_t, t) & =  - \sigma_{t} \nabla_{\mathbf x_t} \log \mathbb P_{t}(\mathbf x_{t})\\
+&\approx \frac{1}{n} \sum_{\{\mathbf x_0^{(i)}\} \sim \mathbb P(\mathbf x_0\mid c)}^{i=0,\dots n-1} \frac{\mathbb P(\mathbf x_t\mid \mathbf x_0^{(i)})}{\sum_{\mathbf x_0^{(j)}\in \{\mathbf x_0^{(i)}\}} \mathbb P (\mathbf x_t\mid \mathbf x_0^{(j)})}(-\sigma_t\nabla_{\mathbf x_{t}}\log \mathbb P_{t}(\mathbf x_t \mid \mathbf x_0^{(i)})) \\
+& = \frac{1}{n} \sum_{i=0}^{n-1} W_i \boldsymbol \epsilon (\mathbf x_t, t; \mathbf x_0^{(i)}))\, ,
+\end{split}
+\end{equation}
+
+where $W_i = \frac{\mathbb P(\mathbf x_t\mid \mathbf x_0^{(i)})}{\sum_{\mathbf x_0^{(j)}\in \{\mathbf x_0^{(i)}\}} \mathbb P (\mathbf x_t\mid \mathbf x_0^{(j)})} $ is the weight of conditional  $\boldsymbol \epsilon (\mathbf x_t, t; \mathbf x_0^{(i)})$. 
+
+\subsection{Reducing the Discretization Error}
+
+As discussed earlier, to achieve higher performance, we need to minimize $\Delta t = (t - r)$. On one hand, when \(\Delta t\) is relatively large, the model suffers from increased discretization errors. On the other hand, when \(\Delta t\) is too small, it may lead to error accumulation or even training failure.  
+Previous works~\citep{cm,ict,ect} employ a progressive training strategy, which has consistently been shown to be effective. The model is initially trained with a relatively large \(\Delta t\), and as training progresses, \(\Delta t\) is gradually reduced. Although a larger \(\Delta t\) introduces higher discretization errors, it allows for faster optimization, enabling the model to quickly learn a coarse solution. Gradually decreasing \(\Delta t\) allows the model to learn more fine-grained results, ultimately improving performance. In the ECT, the training schedule is determined by 
+\begin{equation}
+    t \sim \text{LogNormal}(P_\text{mean}, P_\text{std}), \quad r := \text{ReLU}\left(1-\frac{1}{q^{\lfloor \text{iter}/d \rfloor}} n(t)\right) t 
+\end{equation},
+where $q$ is to determine the shrinking speed, $d$ is to determine the shrinking frequency, ReLU is equivalent to $\max(\cdot, 0)$, and $n(t)$ is a pre-defined monotonic function. We note that it is beneficial to apply a smoother shrinking process. That is, we reduce both $q$ and $d$  to obtain a smoother shrinking process than the original ECT settings. This provides our method with a faster and smoother training process. In addition to the training schedule, training weight is important to balance the training across different timesteps. We apply the weighting $1/(t-r)$ following previous work~\citep{ict,ect}. Suppose $r = \alpha t$, the weighting can be decomposed into $\frac{1}{t} \times \frac{1}{(1-\alpha)}$.  The weighting scheme has two key effects: First, $1/t$ assigns higher weights to smaller timesteps, where uncertainty is lower. Predictions at smaller timesteps serve as teacher models for larger timesteps, making stable training at these smaller steps crucial. Second, $1/(1-\alpha)$ ensures that as $\Delta t$ decreases, the weight dynamically increases, preventing gradient vanishing during training. We apply a smooth term $\delta > 0$ in the weighting function $1/(t-r + \delta) \le \frac{1}{\delta}$ to avoid potential numerical issues and instability when the $\Delta t$ becomes too tiny.
+
+\subsection{Phasing the ODE for Consistency Tuning}
+Previous works~\citep{multistepcm,wang2024phased} propose dividing the ODE path along the time axis into multiple segments during training, enabling consistency models to support deterministic multi-step sampling with improved performance. We test our method in this scenario and find that, while this training approach increases the minimum required sampling steps, it improves the fidelity and stability of the generated results. We apply the Euler solver to achieve multistep re-parameterization, formulated as:
+\begin{equation}
+\mathbf{x}_s = D_{\boldsymbol{\theta}}(\mathbf{x}_t) + \frac{s}{t}(\mathbf{x}_t - D_{\boldsymbol{\theta}}(\mathbf{x}_t)),
+\end{equation}
+where $D_{\boldsymbol{\theta}}$ denotes the original consistency model, predicting the ODE solution point $\mathbf{x}_0$, and $s$ is the edge timestep. We propose a new training schedule to adapt to the multistep training setting. 
+\begin{equation}
+    t \sim \text{LogNormal}(P_\text{mean}, P_\text{std}),\quad r := \text{ReLU}\left(1-\frac{1}{q^{\lfloor \text{iter}/d \rfloor}} n(t)\right) (t -s )  + s
+\end{equation}
+
+\subsection{Exploring Better Inference for Consistency Model}
+
+\noindent \textbf{Guiding consistency models with a bad version of itself.}
+Previous work~\citep{karras2024guiding} demonstrates that even unconditional diffusion models can benefit from classifier-free guidance~\citep{ho2022classifier}. 
+It suggests that the unconditional outputs in classifier-free guidance can be replaced with outputs from a sub-optimal version of the same diffusion model, thus extending the applicability of classifier-free guidance. 
+\begin{equation}
+ \nabla_{\mathbf  x_t} \log \mathbb P_{\boldsymbol \theta} (\mathbf  x_t | \boldsymbol c ; t) + \nabla_{\mathbf  x_t} \log \left[\frac{\mathbb P_{\boldsymbol \theta} (\mathbf  x_t | \boldsymbol c ; t)}{\mathbb P_{\textcolor{red}{\boldsymbol \theta^\star}} (\mathbf  x_t | \boldsymbol c ; t)}\right]^\omega \, ,
+\end{equation}
+where $\omega$ is the guidance strength, $\textcolor{red}{\boldsymbol{\theta^{\star}}}$ is a sub-optimal version of $\boldsymbol{\theta}$, and $\boldsymbol{c}$ represents the optional label conditions. 
+Our empirical investigations confirm that this strategy can be applied to consistency models, resulting in enhanced sample quality.
+
+\noindent \textbf{Edge-skipping inference for multistep consistency model.}
+While segmenting the ODE path to train a multistep consistency model can enhance generation quality, it may encounter optimization challenges, especially around the edge timesteps $\{s_i\}_{i=1}^n$ with $s_1 = 1 > \cdots > s_i > \cdots > s_n = 0$. For timesteps $s_{i-1} \geq t > s_i$, the consistency model learns to predict $\mathbf{x}_{s_i}$ from $\mathbf{x}_t$. However, for $s_i \geq t' > s_{i+1}$, the model learns to predict $\mathbf{x}_{s_{i+1}}$ from $\mathbf{x}_{t'}$. When $t$ and $t'$ are very close to $s_i$, denoted as $t = s_i^+$ and $t' = s_i^-$, it is apparent that $\mathbf{x}_{s_i^+}$ and $\mathbf{x}_{s_i^-}$ can be very similar. However, the model is expected to predict two distinct results ($\mathbf{x}_{s_i}$ and $\mathbf{x}_{s_{i+1}}$) from very similar inputs ($\mathbf{x}_{s_i^+}$ and $\mathbf{x}_{s_i^-}$). 
+
+Neural networks typically follow $L$-Lipschitz continuity, where small input changes result in small output changes. This property conflicts with the requirement to produce distinct outputs from similar inputs near edge timesteps, potentially leading to insufficient training, particularly near $s_i^-$.
+To address this, we propose skipping the edge timesteps during multistep sampling. Specifically, even though we aim for the model to perform sampling through the timesteps
+\begin{equation}
+s_1 := 1 \to s_2 \to s_3 \to \cdots \to s_n := 0 \, ,
+\end{equation}
+we instead achieve multistep sampling via
+\begin{equation}
+s_1 := 1 \to \eta s_2 \to \eta s_3 \to \cdots \to \eta s_n := 0 \, ,
+\end{equation}
+where $\eta > 0$ is a scaling factor. When $\eta$ is set to 1, the process reverts to normal multistep sampling. This method works because the predictions of $\mathbf{x}_{s_i}$ and $\mathbf{x}_{\eta s_i}$ are close when $\eta$ is near 1, allowing for a tolerable degree of approximation error.
+Fig.~\ref{fig:phased} illustrates this concept with a discrete example.
+The model is designed to sample via the sequence $\mathbf x_1 \to \mathbf x_{3/6} \to \mathbf x_{0}$; however, it instead samples through the sequence $\mathbf x_1 \to \mathbf x_{2/6} \to \mathbf x_{0}$.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.47\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{sec/figs/1-step-fid.pdf} 
+        \caption{1-step}
+        \label{fig:1-step-fid}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.47\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{sec/figs/2-step-fid.pdf} 
+        \caption{2-step}
+        \label{fig:2-step-fid}
+    \end{subfigure}
+    \caption{FID vs Training iterations. SCT has faster convergence speed and better performance upper bound than ECT.}
+    \label{fig:overall}
+\end{figure}
+
+
+\section{Experiments}
+
+
+\subsection{Experiment Setups}
+
+\noindent \textbf{Evaluation Benchmarks.} Following the evaluation protocols of iCT~\citep{ict} and ECT~\citep{ect}, we validate the effectiveness of SCT on CIFAR-10 (unconditional and conditional)~\citep{cifar10} and ImageNet-64 (conditional)~\citep{deng2009imagenet}. Performance is measured using Frechet Inception Distance (FID, lower is better)~\citep{fid} consistent with recent studies~\citep{ect,karras2024analyzing}. 
+
+\noindent \textbf{Compared baselines.}
+We compare our method against 
+accelerated samplers~\citep{dpmsolver,zhao2024unipc}, 
+state-of-the-art diffusion-based methods~\citep{ddpm,scorematching,improvedscore,karras2022elucidating},
+distillation methods~\citep{zhou2024score,progressivedistillation},
+alongside consistency training and tuning approaches. 
+Among these models, consistency training and tuning methods serve as key baselines, including CT (LIPIPS)~\citep{cm}, iCT~\citep{ict}, ECT~\citep{ect}, and MCM (CT)~\citep{multistepcm}.
+CT introduces the first consistency training algorithm, utilizing LIPIPS loss to improve FID performance. iCT presents an improved training strategy over CT, making the performance of consistency training comparable to state-of-the-art diffusion models for the first time. MCM (CT) proposes segmenting the ODE path for consistency training, while ECT introduces the concept of consistency tuning along with a continuous-time training strategy, achieving notable results with significantly reduced training costs.
+
+\noindent \textbf{Model Architectures and Training Configurations} From a model perspective, iCT is based on the ADM~\citep{dhariwal2021diffusion}, ECT is built on EDM2~\citep{karras2024analyzing}, and MCM follows the UViTs of Simple Diffusion~\citep{hoogeboom2023simple}.  The model size of ECT is similar to that of iCT, while MCM does not explicitly specify the model size. The iCT model is randomly initialized, whereas both ECT and MCM use pretrained diffusion models for initialization. In terms of training costs, iCT uses a batch size of 4096 across 800,000 iterations, MCM employs a batch size of 2048 for 200,000 iterations, and ECT utilizes a batch size of 128 for 100,000 iterations. 
+SCT follows ECT's model architecture and training configuration.
+\subsection{Results and Analysis}
+
+\noindent \textbf{Training efficiency and efficacy.} In Fig.~\ref{fig:2-step-fid}, we plot 1-step FID and 2-step FID for SCT and ECT along the number of training epochs, under the same training configuration. From the figure, we observe that SCT significantly improves convergence speed compared to ECT, demonstrating the efficiency and efficacy of SCT training. Additionally, the performance comparisons in Tables~\ref{tab:cifar-10} and~\ref{tab:imagenet-64} also show that SCT outperforms ECT across different settings.
+
+\noindent \textbf{Quantitative evaluation.} 
+We present results in Table \ref{tab:cifar-10} and Table \ref{tab:imagenet-64}. Our approach consistently outperforms ECT across various scenarios, achieving results comparable to advanced distillation strategies and diffusion/score-based models.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.42\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{sec/figs/ablation-stf.pdf}
+        \caption{The effectiveness of variance reduced training target.}
+        \label{fig:ablation-stf}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.52\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{sec/figs/4-step-fid-eta.pdf}
+        \caption{The effectiveness of edge-skipping multistep sampling.}
+        \label{fig:ablation-edge-skipping}
+    \end{minipage}
+\end{figure}
+
+\begin{wrapfigure}{r}{0.5\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{sec/figs/ablation-cfg.pdf}
+    \caption{The effectiveness of classifier-free guidance on consistency models.}
+    \label{fig:ablation-cfg}
+\end{wrapfigure}
+
+\noindent \textbf{The effectiveness of training variance reduction.} It is worth noting that SCT and ECT employ different progressive training schedules. To exclude this effect, we adopt ECT's fixed training schedule, in which the 2-step FID surpasses Consistency Distillation within a single A100 GPU hour. 
+We use $\Delta t = t / 256$ as a fixed partition, with a batch size of 128, over 16k iterations on CIFAR-10, while keeping all other settings unchanged. 
+For SCT models on CIFAR-10, we calculate the variance-reduced target only within the training batch, which is also the default setting of all our experiments on CIFAR-10. 
+To further showcase the effectiveness of the variance-reduced target, we use all 50,000 training samples as a reference to compute the target. 
+Although more reference samples are used, they do not directly influence the model’s computations; they are solely utilized for calculating the training target. 
+Fig.~\ref{fig:ablation-stf} presents a comparison of these three methods, showing that our approach achieves notable improvements in both 1-step and 2-step FID. Notably, when using the entire sample set as the reference batch, the improvement becomes more pronounced, with the 1-step FID dropping from 5.61 to 4.56.
+
+\begin{table*}[!t]
+    \begin{minipage}[t]{0.50\linewidth}
+	\caption{Comparing the quality of samples on CIFAR-10.}\label{tab:cifar-10}
+	\centering
+	{\setlength{\extrarowheight}{1.5pt}
+	\begin{adjustbox}{max width = 0.85\textwidth}
+	\begin{tabular}{@{}l@{\hspace{-0.2em}}c@{\hspace{0.3em}}c@{}}
+        \Xhline{3\arrayrulewidth}
+	    METHOD & NFE ($\downarrow$) & FID ($\downarrow$) \\
+        \\[-2ex]
+        \multicolumn{3}{@{}l}{\textbf{Fast samplers \& distillation for diffusion models}}\\\Xhline{3\arrayrulewidth}
+        DDIM \citep{ddim} & 10 & 13.36 \\
+        DPM-solver-fast \citep{dpmsolver} & 10 & 4.70 \\
+        3-DEIS \citep{zhang2022fast} & 10 & 4.17 \\
+        UniPC \citep{zhao2024unipc} & 10 & 3.87 \\
+        Knowledge Distillation \citep{luhman2021knowledge} & 1 & 9.36 \\
+        DFNO (LPIPS) \citep{zheng2022fast} & 1 & 3.78 \\
+        2-Rectified Flow (+distill) \citep{liu2022flow}
+         & 1 & 4.85 \\
+        TRACT \citep{berthelot2023tract} & 1 & 3.78 \\
+         & 2 & 3.32 \\
+        Diff-Instruct \citep{luo2023diff} & 1 & 4.53 \\
+        PD \citep{progressivedistillation} & 1 & 8.34 \\
+          & 2 & 5.58 \\
+        CTM~\citep{ctm} & 1 & 5.19 \\
+          & 18 &  3.00 \\
+        CTM~(+GAN +CRJ) & 1 & 1.98 \\
+         & 2 & 1.87 \\ 
+        SiD~($\alpha=1.0$)~\citep{zhou2024score} & 1 & 2.03  \\
+        SiD~($\alpha=1.2$)~\citep{zhou2024score} & 1 & 1.98 \\ 
+        CD (LPIPS) \citep{cm} & 1 & 3.55 \\
+          & 2 & 2.93 \\
+        \multicolumn{3}{@{}l}{\textbf{Direct Generation}}\\\Xhline{3\arrayrulewidth}
+        Score SDE \citep{song2021scorebased} & 2000 & 2.38 \\
+        Score SDE (deep) \citep{song2021scorebased} & 2000 & 2.20 \\
+        DDPM \citep{ddpm} & 1000 & 3.17 \\
+        LSGM \citep{vahdat2021score} & 147 & 2.10  \\
+        PFGM \citep{xu2022poisson} & 110 & 2.35    \\
+        EDM \citep{karras2022elucidating}
+         & 35 & 2.04 \\
+        EDM-G++ \citep{kim2023refining} & 35 & 1.77 \\
+
+        NVAE \citep{vahdat2020nvae} & 1 & 23.5  \\
+        Glow \citep{kingma2018glow}
+         & 1 & 48.9 \\
+        Residual Flow \citep{chen2019residual} & 1 \\
+        BigGAN \citep{brock2018large} & 1 & 14.7 \\
+        StyleGAN2 \citep{karras2020analyzing}
+         & 1 & 8.32 \\
+        StyleGAN2-ADA \citep{karras2020training}
+         & 1 & 2.92 \\
+        \multicolumn{3}{@{}l}{\textbf{Consistency Training/Tuning}}\\ \Xhline{3\arrayrulewidth}
+        CT (LPIPS) \citep{cm} & 1 & 8.70 \\
+          & 2 & 5.83 \\
+        iCT~\citep{ict} & 1 & 2.83\\
+        & 2 & 2.46 \\
+        iCT-deep~\citep{ict} & 1 & 2.51 \\
+        & 2 & 2.24 \\
+        ECT~\citep{ect} & 1  & 3.78 \\
+        & 2 & 2.13 \\
+        SCT & 1 & 3.11~(2.98) \\
+        &  2 & 2.05~(2.05) \\
+        SCT$^\star$ & 1 &  2.92~(2.78) \\
+        & 2 & 2.02~(1.94) \\
+        SCT (Phased) &  4 & 1.95 \\
+        & 8 & 1.86 \\
+        Cond-SCT & 1 & 3.03~(2.94) \\
+        & 2 & 1.88~(1.86) \\
+        Cond-SCT$^\star$ & 1 & 2.88~(2.82) \\
+        & 2 & 1.87~(1.84) \\
+	\end{tabular}
+    \end{adjustbox}
+	}
+\end{minipage}
+\begin{minipage}[t]{0.48\linewidth}
+    \caption{Comparing the quality of class-conditional samples on ImageNet-64.}\label{tab:imagenet-64}
+    \centering
+    {\setlength{\extrarowheight}{1.5pt}
+    \begin{adjustbox}{max width=0.75\linewidth}
+    \begin{tabular}{@{}l@{\hspace{0.2em}}c@{\hspace{0.3em}}c@{\hspace{0.3em}}c@{}}
+        \Xhline{3\arrayrulewidth}
+        METHOD & NFE ($\downarrow$) & FID ($\downarrow$) \\
+        \\[-2ex]
+        \multicolumn{3}{@{}l}{\textbf{Fast samplers \& distillation for diffusion models}}\\\Xhline{3\arrayrulewidth}
+        DDIM \citep{ddim} & 50 & 13.7 \\
+        & 10 & 18.3 \\
+        DPM solver \citep{dpmsolver} & 10 & 7.93 \\
+        & 20 & 3.42 \\
+        DEIS \citep{zhang2022fast} & 10 & 6.65 \\
+        & 20 & 3.10 \\
+        DFNO (LPIPS) \citep{zheng2022fast} & 1 & 7.83 \\
+        TRACT \citep{berthelot2023tract} & 1 & 7.43 \\
+            & 2 & 4.97 \\
+        BOOT \citep{gu2023boot} & 1 & 16.3 \\
+        Diff-Instruct~\citep{luo2023diff} & 1 & 5.57 \\
+        PD~\citep{progressivedistillation} & 1 & 15.39 \\
+            & 2 & 8.95 \\
+            & 4 & 6.77 \\
+        CTM~(+GAN + CRJ)~\citep{ctm} & 1 & 1.92 \\
+        SID~($\alpha=1.0$)~\citep{zhou2024score}  & 1 & 2.03 \\
+        PD (LPIPS) \citep{cm} & 1 & 7.88 \\
+            & 2 & 5.74 \\
+            & 4 & 4.92 \\
+        CD (LPIPS) \citep{cm} & 1 & 6.20 \\
+            & 2 & 4.70 \\
+            & 3 & 4.32 \\
+        \multicolumn{3}{@{}l}{\textbf{Direct Generation}}\\\Xhline{3\arrayrulewidth}
+        RIN \citep{jabri2023rin} & 1000 & 1.23 \\
+        DDPM \citep{ddpm} & 250 & 11.0 \\
+        iDDPM \citep{nichol2021improved} & 250 & 2.92 \\
+        ADM \citep{dhariwal2021diffusion} & 250 & 2.07 \\
+        EDM \citep{karras2022elucidating} & 511 & 1.36 \\
+        EDM$^*$ (Heun) \citep{karras2022elucidating} & 79 & 2.44 \\
+        BigGAN-deep \citep{brock2018large} & 1 & 4.06 \\
+        \multicolumn{3}{@{}l}{\textbf{Consistency Training/Tuning}}\\ \Xhline{3\arrayrulewidth}
+        CT (LPIPS) \citep{cm} & 1 & 13.0 \\
+            & 2 & 11.1 \\
+        iCT~\citep{ict} & 1 & 4.02 \\
+        & 2 & 3.20 \\
+        iCT-deep~\citep{ict} & 1 & 3.25 \\
+        & 2 & 2.77 \\
+        MCM~(CT)~\citep{multistepcm} & 1 & 7.2 \\
+        & 2 & 2.7 \\
+        & 4 & 1.8 \\
+        ECT-S~\citep{ect} & 1 & 5.51 \\
+              & 2 & 3.18 \\
+        ECT-M~\citep{ect} & 1 & 3.67 \\
+              & 2 & 2.35 \\
+        ECT-XL~\citep{ect} & 1 & 3.35 \\
+              & 2 & 1.96 \\
+        SCT-S & 1  & 5.10~(4.59) \\
+              & 2 & 3.05~(2.98) \\
+              & 4 & 2.51~(2.43) \\
+        SCT-M & 1  & 3.30~(3.06) \\
+              & 2 & 2.13~(2.09) \\
+              & 4 & 1.83~(1.78) \\
+        SCT-M$^\star$ & 1  &  2.42~(2.23) \\
+              & 2 & 1.55~(1.47) \\
+    \end{tabular}
+    \end{adjustbox}
+    }
+\end{minipage}
+
+\captionsetup{labelformat=empty, labelsep=none, font=scriptsize}
+\caption{Results for existing methods are taken from previous papers. Results  of SCT on CIFAR-10 without $\star$ are trained with batch size 128 for 200k iterations. Results of SCT on CIFAR-10  with $\star$ are trained with batch size 512 for 300k iterations. Results  of SCT on ImageNet-64 without $\star$ are trained with batch size 128 for 100k iterations. Results of SCT on ImageNet-64  with $\star$ are trained with batch size 1024 for 100k iterations.  The metrics inside the parentheses were obtained using CFG. CTM applies classifier rejection sampling~(CRJ) for better FID, which needs to generate more samples than other methods.}
+\end{table*}
+\noindent \textbf{The Effectiveness of CFG.} Inspired by prior work~\cite{karras2024guiding}, we adopt the outputs of the sub-optimal version of the model as the negative part in classifier-free guidance~(CFG). We set the CFG strength as 1.2 and the sub-optimal version as the ema weight with half training iterations by default. We investigate the influence of the two factors on SCT-S models on ImageNet.  As illustrated in Fig.~\ref{fig:ablation-cfg}, an appropriate CFG setting can significantly enhance the quality of generation. 
+
+\noindent \textbf{Edge-skipping Multistep Sampling.}  To demonstrate the effectiveness of our method, we record the 4-step FID curve at various training stages, utilizing different \(\eta\) values for edge-skipping multistep inference. We find that a smaller \(\eta\) at the beginning of training yields superior performance. As training progresses, the model's estimates of multi-stage results become increasingly accurate, and larger \(\eta\) values gradually enhance performance. However, as previously analyzed, the multistep model struggles to achieve perfect multistep training, leading to better overall performance for \(\eta = 0.9\) compared to \(\eta = 1.0\) (the default method).
+
+
+
+\section{Conclusion}
+
+In this work, we propose Stable Consistency Tuning~(SCT), a novel approach that unifies and improves consistency models. By addressing the challenges in training variance and discretization errors, SCT achieves faster convergence and offers insights for further improvements.
+Our experiments demonstrate state-of-the-art 1-step and few-step generative performance on both CIFAR-10 and ImageNet-64$\times$64, offering a new perspective for future studies on consistency models.
+
+
+\clearpage
+
+
+
+\clearpage
+
+{
+    
+
+
+

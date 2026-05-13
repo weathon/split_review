@@ -1,0 +1,338 @@
+\title{VADER: Video Diffusion Alignment via Reward Gradients}
+
+\begin{abstract}
+    We have made significant progress towards building foundational video diffusion models. 
+    As these models are trained using large-scale unsupervised data, it has become crucial to adapt these models to specific downstream tasks. Adapting these models via supervised fine-tuning requires collecting target datasets of videos, which is challenging and tedious. In this work, we utilize pre-trained reward models that are learned via preferences on top of powerful vision discriminative models to adapt video diffusion models.  
+    These models contain dense gradient information with respect to generated RGB pixels, which is critical to efficient learning in complex search spaces, such as videos. We show that backpropagating gradients from these reward models to a video diffusion model can allow for compute and sample efficient alignment. We show results across a variety of reward models and video diffusion models, demonstrating that our approach can learn much more efficiently in terms of reward queries and computation than prior gradient-free approaches. Our code, model weights, and more visualization are available at \url{https://vader-vid.io}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\newcommand{\model}{VADER}
+
+We would like to build systems capable of generating videos for a wide array of applications, ranging from movie production, creative story-boarding, on-demand entertainment, AR/VR content generation, and planning for robotics. The most common current approach involves training foundational video diffusion models on extensive web-scale datasets. However, this strategy, while crucial, mainly produces videos that resemble typical online content, featuring dull colors, suboptimal camera angles, and inadequate alignment between text and video content. 
+
+Contrast this with the needs of an animator who wishes to bring a storyboard to life based on a script and a few preliminary sketches. Such creators are looking for output that not only adheres closely to the provided text but also maintains temporal consistency and showcases desirable camera perspectives. Relying on general-purpose generative models may not suffice to meet these specific requirements. This discrepancy stems from the fact that large-scale diffusion models are generally trained on a broad spectrum of internet videos, which does not guarantee their efficacy for particular applications. Training these models to maximize likelihood across a vast dataset does not necessarily translate to high-quality performance for specialized tasks. Moreover, the internet is a mixed bag when it comes to content quality, and models trained to maximize likelihood might inadvertently replicate lower-quality aspects of the data. This leads us to the question: How can we tailor diffusion models to produce videos that excel in task-specific objectives, ensuring they are well-aligned with the desired outcomes?
+The conventional approach to aligning generative models in the language and image domains begins with supervised fine-tuning \cite{rafailov2024direct,brooks2023instructpix2pix}. This involves collecting a target dataset that contains expected behaviors, followed by fine-tuning the generative model on this dataset. Applying this strategy to video generation, however, presents a significantly greater challenge. It requires obtaining a dataset of target videos, a task that is not only more costly and laborious than similar endeavors in language or image domains, but also significantly more complex. Furthermore, even if we were able to collect a video target dataset, the process would have to be repeated for every new video task, making it prohibitively expensive. Is there a different source of signal we can use for aligning video diffusion, instead of trying to collect a target dataset of desired videos?
+Reward models play a crucial role \cite{aesthetic,wu2023human,lambert2024rewardbench} in aligning image and text generations. These models are generally built on top of powerful image or text discriminative models such as CLIP or BERT \cite{radford2021learning, bardes2023v, tong2022videomae}. To use them as reward models, people either fine-tune them via small amounts of human preferences data \cite{aesthetic} or use them directly without any fine-tuning; for instance, CLIP can be used to improve image-text alignment or object detectors can be used to remove or add objects in the images \cite{prabhudesai2023aligning}. 
+
+This begs the question, how should reward models be used to adapt the generation pipeline of diffusion models? There are two broad categories of approaches, those that utilize reward gradients \cite{prabhudesai2023aligning, clark2023directly, xu2023imagereward}, and others that use the reward only as a scalar feedback and instead rely on estimated policy gradients \cite{black2023training,lee2023aligning}. It has been previously found that utilizing the reward gradient directly to update the model can be much more efficient in terms of the number of reward queries, since the reward gradient contains rich information of how the reward function is affected by the diffusion generation \cite{prabhudesai2023aligning,clark2023directly}. However, in text-to-image generation space, reward gradient-free approaches are still dominant \cite{sauer2024fast}, since these methods can be easily trained within 24 hours and the efficiency gains of leveraging reward gradients are not significant. 
+
+In this work, we find that as we increase the dimensionality of generation i.e transition from image to video, the gap between the reward gradient and policy gradient based approaches increases. 
+This is because of the additional amount and increased specificity of feedback that is backpropagated to the model.
+For reward gradient based approaches, the feedback gradients linearly scale with respect to the generated resolution, as it yields distinct scalar feedback for each spatial and temporal dimension. In contrast, policy gradient methods receive a single scalar feedback for the entire video output. We test this hypothesis in Figure \ref{fig:resolution}, where we find that the gap between reward gradient and policy gradient approaches increases as we increase the generated video resolution. We believe this makes it crucial to backpropagate reward gradient information for video diffusion alignment.  
+
+
+We propose \model{}, an approach to adapt foundational video diffusion models using the gradients of reward models. \model{} aligns various video diffusion models using a broad range of pre-trained vision models. Specifically, we show results of aligning text-to-video (VideoCrafter, OpenSora, and ModelScope) and image-to-video (Stable Video Diffusion) diffusion models, while using reward models that were trained on tasks such as image aesthetics, image-text alignment, object detection, video-action-classification, and video masked autoencoding.
+Further, we suggest various tricks to improve memory usage which allow us to train \model{} on a single GPU with 16GB of VRAM. We include qualitative visualizations that show \model{} significantly improves upon the base model generations across various tasks. We also show that \model{} achieves much higher performance than alternative alignment methods that do not utilize reward gradients, such as DPO or DDPO. Finally, we show that alignment using \model{} can easily generalize to prompts that were not seen during training. 
+Our code is available at \url{https://vader-vid.io}. 
+
+
+
+\section{Related Work}
+
+Denoising diffusion models \cite{sohldickstein2015deep,DDPM} have made significant progress in generative capabilities across various modalities such as images, videos and 3D shapes \cite{ho2022imagen,ho2022video,liu2023zero}. These models are trained using large-scale unsupervised or weakly supervised datasets. This form of training results in them having capabilities that are very general; however, most end use-cases of these models have specific requirements, such as high-fidelity generation \cite{aesthetic} or better text alignment \cite{wu2023human}. 
+
+To be suitable for these use-cases, models are often fine-tuned using likelihood \cite{blattmann2023stable,brooks2023instructpix2pix} or reward-based objectives \cite{black2023training, prabhudesai2023aligning, clark2023directly, xu2023imagereward,lee2023aligning,dong2023raft,feng2023trainingfree}. Likelihood objectives are often difficult to scale, as they require access to the preferred behaviour datasets. Reward or preference based datasets on the other hand are much easier to collect as they require a human to simply provide preference or reward for the data generated by the generative model. Further, widely available pre-trained vision models can also be used as reward models, thus making it much easier to do reward fine-tuning
+\cite{black2023training,prabhudesai2023aligning}. The standard approach for reward or preference based fine-tuning is to do reinforcement learning via policy gradients \cite{black2023training,wallace2023diffusion}. For instance, the work of \cite{lee2023aligning} does reward-weighted likelihood and the work of \cite{black2023training} applies PPO \cite{schulman2017proximal}. Recent works of \cite{prabhudesai2023aligning,clark2023directly}, find that instead of using policy gradients, directly backpropagating gradients from the reward model to diffusion process helps significantly with sample efficiency. 
+
+A recent method, DPO \cite{rafailov2024direct,wallace2023diffusion}, does not train an explicit reward model but instead directly optimizes on the human preference data. While this makes the pipeline much simpler, it doesn't solve the sample inefficiency issue of policy gradient methods, as it still backpropagates a single scalar feedback for the entire video output.
+
+While we have made significant progress in aligning image diffusion models,  this has remained challenging for video diffusion models  \cite{blattmann2023stable,wang2023modelscope}. In this work, we take up this challenging task. We find that naively applying prior techniques of image alignment \cite{prabhudesai2023aligning,clark2023directly} to video diffusion can result in significant memory overheads. Further, we demonstrate how widely available image or video discriminative models can be used to align video diffusion models. Concurrent to our work, InstructVideo \cite{yuan2023instructvideo} also aligns video diffusion models via human preference; however, this method requires access to a dataset of videos. Such a dataset is difficult to obtain for each different task, and becomes difficult to scale especially to large numbers of tasks. In this work, we show that one can easily align video diffusion models using pre-trained reward models while not assuming access to any video dataset.
+
+
+
+\section{Background}
+
+
+Diffusion models have emerged as a powerful paradigm in the field of generative modeling. These models operate by modeling a data distribution through a sequential process of adding and removing noise.
+
+The forward diffusion process transforms a data sample $x$ into a completely noised state over a series of steps $T$. This process is defined by the following equation:
+
+\begin{equation}
+x_t = \sqrt{\bar{\alpha}_t} x + \sqrt{1-\bar{\alpha}_t} \epsilon, \quad \epsilon \sim \mathcal{N}(\mathbf{0},\mathbf{1}),
+\end{equation}
+
+where $\epsilon$ represents noise drawn from a standard Gaussian distribution. Here, $\bar{\alpha}_t = \prod_{i=1}^t \alpha_i$ denotes the cumulative product of $\alpha_i = 1-\beta_i$, which indicates the proportion of the original data's signal retained at each timestep $t$.
+
+The reverse diffusion process reconstructs the original data sample from its noised version by progressively denoising it through a learned model. This model is represented by $\epsilon_{\theta}(x_t; t)$ and estimates the noise $\epsilon$ added at each timestep $t$.
+
+Diffusion models can easily be extended for conditional generation. This is achieved by adding $c$ as an input to the denoising model:
+
+\begin{equation}
+\mathcal{L}_\text{diff}(\theta;\mathcal{D}') = \frac{1}{|\mathcal{D}'|} \sum_{x^i, c^i\in\mathcal{D}'} || \epsilon_{\theta}(\sqrt{\bar{\alpha}_t} x^i + \sqrt{1-\bar{\alpha}_t} \epsilon, c^i , t) - \epsilon ||^2,
+\end{equation}
+
+where $\mathcal{D}'$ denotes a dataset consisting of image-conditiong pairs. This loss function minimizes the distance between the estimated noise and the actual noise, and aligns with the variational lower bound for $\log p(x | c)$.
+
+To sample from the learned distribution $p_\theta(x|c)$, one starts with a noise sample $x_T \sim \mathcal{N}(\mathbf{0},\mathbf{1})$ and iteratively applies the reverse diffusion process:
+
+\begin{equation}
+x_{t-1} = \frac{1}{\sqrt{\alpha_{t}}} \left( x_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta (x_t,t,c) \right) +\sigma_t \mathbf{z}, \quad \mathbf{z} \sim \mathcal{N}(\mathbf{0},\mathbf{1}),
+\end{equation}
+The above formulation captures the essence of diffusion models, which highlights their ability to generate structured data from random noise.
+
+
+
+
+\section{\model{}
+
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/vader_method.pdf}
+\caption{\model{} aligns various pre-trained video diffusion models by backpropagating gradients from the reward model, to efficiently adapt to specific tasks.}
+\label{fig:method}
+\end{figure}
+
+We present our approach for adapting video diffusion models to perform a specific task specified via a reward function $R(.)$.
+ 
+Given a video diffusion model $p_\theta(.)$, dataset of contexts $D_{c}$, and a reward function $R(.)$, we seek to maximize the following objective: 
+$$J(\theta) = \mathbb{E}_{c \sim D_{c}, x_{0} \sim p_\theta(x_{0}|c) }[R(x_0, c)]$$
+
+To learn efficiently, both in terms of the number of reward queries and compute time, we seek to utilize the gradient structure of the reward function, with respect to the weights $\theta$ of the diffusion model. This is applicable to all reward functions that are differentiable in nature. We compute the gradient $\nabla_\theta R(x_0, c)$ of these differentiable rewards, and use it to update the diffusion model weights $\theta$. 
+The gradient is given by : 
+$$ \nabla_\theta R(x_0, c) = {\sum_{t = 0}^T \frac{\partial R(x_0, c)}{\partial x_{t}} \cdot \frac{\partial x_{t}}{\partial \theta}}. $$
+
+\begin{wrapfigure}{L}{0.5\textwidth}
+    \begin{minipage}{0.5\textwidth}
+        \begin{algorithm}[H]
+        \caption{VADER}
+        \label{alg:method}
+        \begin{algorithmic}[1]
+        \REQUIRE Diffusion Model weights $\theta$
+        \REQUIRE Reward function $R(.)$
+        \REQUIRE Denoising Scheduler $f$ \\ (eg - DDIM\cite{ddim}, EDM\cite{edm})
+        \REQUIRE Gradient cutoff step K
+        \WHILE {training}
+            \FOR {t = T,..1}
+                \STATE \text{pred} = $\epsilon_{\theta}(x_t, c,t)$
+                \IF {t > K}
+                    \STATE \text{pred} = \text{stop\_grad(pred)}
+                \ENDIF
+                \STATE $x_{t-1}$ = $f$.step(\text{pred}, t, $x_t$)
+            \ENDFOR
+            \STATE $g = \nabla_\theta R(x_0, c) $
+            \STATE $\theta \leftarrow \theta - \eta*g$
+        \ENDWHILE
+        \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+
+\model{} is flexible in terms of the denoising schedule, we demonstrate results with DDIM \cite{ddim} and EDM solver \cite{edm}.
+To prevent over-optimization, we utilize truncated backpropagation \cite{tallec2017unbiasing, prabhudesai2023aligning,clark2023directly}, where the gradient is back propagated only for K steps, where K < T, where T is the total diffusion timesteps. Using a smaller value of K also reduces the memory burden of having to backpropagate gradients, making training more feasible.
+We provide the pseudocode of the full training process in Algorithm \ref{alg:method}. Next, we discuss the type of reward functions we consider for aligning video models.
+
+\textbf{Reward Models:} Consider a diffusion model that takes conditioning vector $c$ as input and generates a video $x_0$ of length $N$, consisting of a series of images $i_k$, for each timestep \(k\) from 0 to $N$. Then the objective function we maximize is as follows: 
+
+$$ J_\theta = \mathbb{E}_{c, i_{0:N}}\left[R([ i_0,i_1...i_k...i_{N-1}], c)\right] $$
+
+    We use a broad range of reward functions for aligning video diffusion models. Below we list down the distinct types of reward functions we consider.
+    
+    \emph{Image-Text Similarity Reward} - The generations from the diffusion model correspond to the text provided by the user as input. To ensure that the video is aligned with the text provided, we can define a reward that measures the similarity between the generated video and the provided text. To take advantage of popular, large-scale image-text models such as CLIP\cite{radford2021learning}, we can take the following approach. For the entire video to be well aligned, each of the individual frames of the video likely need to have high similarity with the context $c$. Given an image-context similarity model $g_\text{img}$, we have: $$R([ i_0,i_1...i_k...i_{N-1} ],c) = \sum_k R(i_k, c) = \sum_k g_\text{img}(i_k, c) $$ 
+    Then, we have $J_\theta = \mathbb{E}_{k \in [0, N]} \left[ g_\text{img} (i_k, c)\right] $,
+    using linearity of expectation as in the image-alignment case. We conduct experiments using the HPS v2 \cite{wu2023human} and PickScore \cite{Kirstain2023PickaPicAO} reward models for image-text alignment. As the above objective only sits on individual images, it could potentially result in a collapse, where the predicted images are the exact same or temporally incoherent. However, we don't find this to happen empirically, we think the initial pre-training sufficiently regularizes the fine-tuning process to prevent such cases.
+    
+    
+    
+    \emph{Video-Text Similarity Reward} - Instead of using per image similarity model $g_\text{img}$, it could be beneficial to evaluate the similarity between the whole video and the text. This would allow the model to generate videos where certain frames deviate from the context, allowing for richer, more diverse expressive generations. This also allows generating videos with more motion and movement, which is better captured by multiple frames. Given a video-text similarity model $g_\text{vid}$ we have   $J_\theta = \mathbb{E}\left[ g_\text{vid} ([i_0,i_1...i_k...i_{N-1}], c)\right] $. In our experiments, we use a VideoMAE\cite{tong2022videomae} fine-tuned on action classification, as $g_\text{vid}$, which can classify an input video into one of a set of action text descriptions. We provide the target class text as input to the text-to-video diffusion model, and use the predicted probability of the ground truth class from VideoMAE as the reward. 
+    \emph{Image Generation Objective} - While text similarity is a strong signal to optimize, some use cases might be better addressed by reward models that only sit on the generated image. There is a prevalence of powerful image-based  discriminative models such as Object Detectors and Depth Predictors. These models utilize the image as input to produce various useful metrics of the image, which can be used as a reward. The generated video is likely to be better aligned with the task if the reward obtained on each of the generated frames is high. Hence we define the reward in this case to be the mean of the rewards evaluated on each of the individual frames, i.e $R([ i_0,i_1...i_k...i_{N-1} ],c) = \sum_k R(i_k)$. Note that given the generated frames, this is independent of the text input $c$. Hence we have, 
+    $ J_\theta = \mathbb{E}_{k \in [0, N]} \left[ R(i_k) \right] = \mathbb{E}_{k \in [0, N]} \left[ M_\phi(i_k) \right]$
+   via linearity of expectation, where $M_\phi$ is a discriminative model that takes an image as input to produce a metric, that can be used to define a reward. We use the Aesthetic Reward model \cite{aesthetic} and Object Detector \cite{DBLP:journals/corr/abs-2106-00666} reward model for our experiments. 
+
+    \emph{Video Generation Objective} - With access to an external model that takes in multiple image frames, we can directly optimize for desired qualities of the generated video. Given a video metric model $N_\phi$, the corresponding reward is $J_\theta = \mathbb{E}\left[ N_\phi ([i_0,i_1,..i_k...i_{N-1}])\right] $. 
+\begin{figure}[h!]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/vader_VideoCrafter_hps_pickscore.pdf}
+\caption{Text-to-video generation results for VideoCrafter and \model{}. We show results for VideoCrafter Text-to-Video model on the left and results for \model{} on the right, where we use VideoCrafter as our base model. The reward models applied are a combination of HPSV2.1 and Aesthetic model in the first three rows, and PickScore in the last three rows. The videos in the third and last rows are generated based on prompts that are not encountered during training.}
+\label{fig:aes_hps}
+\end{figure}
+
+    \emph{Long-horizon consistent generation:} In our experiments, we adopt this formulation to enable a feature that is quite challenging for many open-source video diffusion models - that of generating clips that are longer in length. For this task, we use Stable Video Diffusion \cite{blattmann2023stable}, which is an image-to-video diffusion model. We increase the context length of Stable Video Diffusion by 3x by making it autoregressive. Specifically, we pass the last generated frame by the model as input for generating the next video sequence. However, we find this to not work well, as the model was never trained over its own generations thus resulting in a distribution shift.  In order to improve the generations, we use a video metric model $N_\phi$ (V-JEPA \cite{bardes2023v}) that given a set of frames, produces a score about how predictive the frames are from one another. We apply this model on the autoregressive generations, to encourage these to remain consistent with the earlier frames. Training the model in this manner allows us to make the video clips temporally and spatially coherent. 
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+    \includegraphics[width=0.48\textwidth, trim=0 10 0 0, clip]{figs/reward_growth.pdf}
+  \end{center}
+  \caption{Reward gradient vs policy gradient approaches as output resolution increases: We train DDPO and \model{}, with increasing resolution of the generated video. In the above curve, we report the reward achieved after 100 steps of optimization, we find that as the resolution of the generation increases, the performance gap between both approaches significantly increases.}
+  \label{fig:resolution}
+\end{wrapfigure}
+
+\textbf{Reducing Memory Overhead:} Training video diffusion models is very memory intensive, as the amount of memory linearly scales with respect to the number of generated frames.  While \model{} significantly improves the sample efficiency of fine-tuning these models, it comes at the cost of increased memory. This is because the differentiable reward is computed on the generated frame, which is a result of sequential de-noising steps. \textbf{\\ (i) Standard Tricks:} To reduce the memory usage we use LoRA \cite{hu2021lora} that only updates a subset of the model parameters, further we use mixed precision that stores non-trainable parameters in fp16.  To reduce memory usage during backpropagation we use gradient checkpointing and for the long horizon tasks, offload the storage of the backward computation graph from the GPU memory to the CPU memory. \textbf{\\ (ii) Truncated Backprop:} Additionally, In our experiments we only backpropagate through the diffusion model for one timestep, instead of backpropagating through multiple timesteps \cite{prabhudesai2023aligning}, and have found this approach to obtain competitive results while requiring much less memory. \textbf{\\ (iii) Subsampling Frames:} Since all the video diffusion models we consider are latent diffusion models, we further reduce memory usage by not decoding all the frames to RGB pixels. Instead, we randomly subsample the frames and only decode and apply loss on the subsampled ones.
+
+We conduct our experiments on 2 A6000 GPUS (48GB VRAM), and our model takes an average of 12 hours to train.  However, our codebase supports training on a single GPU with 16GB VRAM.
+\begin{figure}[h!]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/vader_objectRemoval.pdf}
+\caption{Object removal (remove book) using \model{}. The left column displays results from the base model (VideoCrafter), while the right column shows results from \model{} after fine-tuning the base model to not display books by using an object detector as a reward model. As can be seen, \model{} effectively removes book and replaces it with some other object.}
+\label{fig:object_removal}
+\end{figure}
+
+
+\section{Results}
+
+
+In this work, we focus on fine-tuning various conditional video diffusion models, including VideoCrafter \cite{chen2024videocrafter2} , Open-Sora \cite{opensora} , Stable Video Diffusion  \cite{blattmann2023stable} and ModelScope  \cite{wang2023modelscope}, through a comprehensive set of reward models tailored for images and videos. These include the Aesthetic model for images \cite{aesthetic}, HPSv2 \cite{wu2023human} and PickScore \cite{Kirstain2023PickaPicAO} for image-text alignment, YOLOS \cite{DBLP:journals/corr/abs-2106-00666} for object removal, VideoMAE for action classification \cite{tong2022videomae}, and V-JEPA \cite{bardes2023v} self-supervised loss for temporal consistency. Our experiments aim to answer the following questions:
+
+\begin{itemize}
+    \item How does \model{} compare against gradient-free techniques such as DDPO or DPO regarding sample efficiency and computational demand?
+    \item To what extent can the model generalize to prompts that are not seen during training?
+    \item How do the fine-tuned models compare against one another, as judged by human evaluators?
+    \item How does \model{} perform across a variety of image and video reward models?
+\end{itemize}
+
+This evaluation framework assesses the effectiveness of \model{} in creating high-quality, aligned video content from a range of input conditioning.
+\paragraph{\textbf{Baselines}.}
+
+We compare VADER against the following methods:
+    \begin{itemize}
+        \item \textbf{VideoCrafter} \cite{chen2024videocrafter2}, \textbf{Open-Sora 1.2} \cite{opensora}, and \textbf{ModelScope} \cite{wang2023modelscope} are current state-of-the-art (publicly available) text-to-video diffusion models. We serve them as base models for fine-tuning and comparison in our experiments in text-to-video space.
+        \item  \textbf{Stable Video Diffusion } \cite{blattmann2023stable} is the current state-of-art (publicly available) image-to-video diffusion model. In all our experiments in image-to-video space, we use their base model for fine-tuning and comparison.        
+        \item \textbf{DDPO} \cite{black2023training} is a recent image diffusion alignment method that uses policy gradients to adapt diffusion model weights. Specifically, it applies PPO algorithm \cite{schulman2017proximal} to the diffusion denoising process. We extend their code for adapting video diffusion models.
+        \item \textbf{Diffusion-DPO} \cite{wallace2023diffusion} extends the recent development of Direct Preference Optimization (DPO) \cite{rafailov2024direct} in the LLM space to image diffusion models. They show that directly modeling the likelihood using the preference data can alleviate the need for a reward model. We extend their implementation to aligning video diffusion models, where we use the reward model to obtain the required preference data. 
+    \end{itemize}
+
+    
+\paragraph{\textbf{Reward models}.}
+
+We use the following reward models to fine-tune the video diffusion model.
+\begin{itemize}
+    \item \textbf{Aesthetic Reward Model}: We use the LAION aesthetic predictor V2 \cite{aesthetic}, which takes an image as input and outputs its aesthetic score in the range of 1-10. The model is trained on top of CLIP image embeddings, for which it uses a dataset of 176,000 image ratings provided by humans ranging from 1 to 10, where images rated as 10 are classified as art pieces. 
+    \item \textbf{Human Preference Reward Models}:  We use HPSv2 \cite{wu2023human} and PickScore \cite{Kirstain2023PickaPicAO}, which take as input an image-text pair and predict human preference for the generated image. HPSv2 is trained by fine-tuning CLIP model with a vast dataset that includes 798,090 instances of human preference rankings among 433,760 image pairs, while PickScore \cite{Kirstain2023PickaPicAO} is trained by fine-tuning CLIP model with 584,000 examples of human preferences. These datasets are among the most extensive in the field, offering a solid foundation for enhancing image-text alignment.
+    \item \textbf{Object Removal}: We design a reward model based on YOLOS \cite{DBLP:journals/corr/abs-2106-00666}, a Vision Transformer based object detection model trained on 118,000 annotated images. Our reward is one minus the confidence score of the target object category, from which video models learns to remove the target object category from the video.
+    \item \textbf{Video Action Classification}: While the above reward models sit on individual images, we employ a reward model that takes in the whole video as input. This can help with getting gradients for the temporal aspect of video generation. Specifically, we consider VideoMAE \cite{tong2022videomae}, which is fine-tuned for the task of action classification on Kinetics dataset \cite{kay2017kinetics}. Our reward is the probability predicted by the action classifier for the desired behavior.
+    \item \textbf{Temporal Consistency via V-JEPA}: While action classification models are limited to a fixed set of action labels, here we consider a more general reward function. Specifically, we use self-supervised masked prediction objective as a reward function to improve temporal consistency. Specifically, we use V-JEPA \cite{bardes2023v} as our reward model, where the reward is the negative of the masked autoencoding loss in the V-JEPA feature space. Note that we employ exactly the same loss objective that V-JEPA uses in their training procedure.
+\end{itemize}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/opensora_modelscope.pdf}
+\caption{Aligning Open-Sora 1.2 and ModelScope with \model{}. The left column shows results from the base models, while results from \model{} are demonstrated on the right. The first two rows use Open-Sora as the base model, and the last two rows use ModelScope. The reward models applied are PickScore in the first row, HPSv2.1 in the second row, HPSv2 in the third row, and the Aesthetic reward model in the last row.}
+\label{fig:opensora_modelscope}
+\end{figure}
+
+\paragraph{\textbf{Prompts}.}
+
+We consider the following set of prompt datasets for reward fine-tuning of text-to-video and image-to-video diffusion models.
+
+\begin{itemize}
+    \item \textbf{Activity Prompts (Text): } We consider the activity prompts from the DDPO \cite{black2023training}.  Each prompt is structured as "a(n) [animal] [activity]," using a collection of 45 familiar animals. The activity for each prompt is selected from a trio of options: "riding a bike", "playing chess", and "washing dishes".
+    
+    \item \textbf{HPSv2 Action Prompts (Text): } Here we filter out 50 prompts from a set of prompts introduced in the HPS v2 dataset for text-image alignment. We filter prompts such that they contain action or motion information in them.
+
+    \item \textbf{ChatGPT Created Prompts (Text): } We prompt ChatGPT to generate some vivid and creatively designed text descriptions for various scenarios, such as books placed beside cups, animals dressed in clothing, and animals playing musical instruments.
+    
+    \item \textbf{ImageNet Dog Category (Image): } For image-to-video diffusion model, we consider the images in the Labrador retriever and Maltese category of ImageNet as our set of prompts.
+    
+    \item \textbf{Stable Diffusion Images (Image): } Here we consider all 25 images from Stable Diffusion online demo \href{https://stablediffusionweb. %These images showcase high-fidelity image generation.
+        
+    
+\end{itemize}
+
+\subsection{Sample and Computational Efficiency}
+
+Training of large-scale video diffusion models is done by a small set of entities with access to a large amount of computing; however, fine-tuning of these models is done by a large set of entities with access to a small amount of computing. Thus, it becomes imperative to have fine-tuning approaches that boost both sample and computational efficiency.
+
+In this section, we compare \model{}'s sample and computational efficiency with other reinforcement learning approaches such as DDPO and DPO. In Figure \ref{fig:sample_compute}, we visualize the reward curves during training, where the x-axis in the upper half of the figure is the number of reward queries and the one in the bottom half is the GPU-hours. As can be seen, \model{} is significantly more efficient in terms of sample and computation than DDPO or DPO. This is mainly due to the fact that we send dense gradients from the reward model to the diffusion weights, while the baselines only backpropagate scalar feedback.
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=\textwidth]{figs/vader_train_curves.pdf}
+\caption{Training efficiency comparison: \textbf{Top}:  Sample efficiency comparison with DPO and DDPO. \textbf{Bottom}: Computational efficiency comparison with DPO and DDPO. It can be seen that \model{} starts converging within at most 12 GPU-hours of training, while DPO or DDPO do not show much improvement.}
+\label{fig:sample_compute}
+\end{figure}
+\subsection{Generalization Ability}
+
+\begin{table}[htbp]
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{X *{7}{>{\centering\arraybackslash}X}}
+    \toprule
+    \multirow{2}{*}{\textbf{Method}}
+    &\multicolumn{2}{c}{\textbf{Aes (T2V)}} 
+    &\multicolumn{2}{c}{\textbf{HPS (T2V) }}
+    &\multicolumn{1}{c}{\textbf{ActP}} 
+    &\multicolumn{2}{c}{\textbf{Aes (I2V)}} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-6} \cmidrule(lr){7-8}
+     & Train.  & Test.  & Train.  & Test. & Train.  & Train.  & Test. \\
+    \midrule
+    Base    &  4.61 & 4.49 & 0.25 &  0.24 & 0.14 &  4.91 & 4.96 \\ 
+    DDPO          &  4.63 & 4.52 & 0.24 &  0.23 & 0.21 &  N/A & N/A \\ 
+    DPO           &  4.71 & 4.41 & 0.25 &  0.24 & 0.23 &  N/A & N/A \\ 
+    \bottomrule
+    Ours          & \textbf{7.31} & \textbf{7.12} & \textbf{0.33} &                               \textbf{0.32} & \textbf{0.79}  & \textbf{7.83} & \textbf{7.64} \\
+    \bottomrule
+\end{tabularx}
+\caption{Reward on Prompts in train \& test. We split the prompts into train and test sets, such that the prompts in the test set do not have any overlap with the ones for training. We find that \model{} achieves the best on both metrics.}
+\label{tab:general}
+\end{table}
+
+A desired property of fine-tuning is generalization, i.e. the model fine-tuned on a limited set of prompts has the ability to generalize to unseen prompts. In this section, we extensively evaluate this property across multiple reward models and baselines. While training text-to-video (T2V) models, we use HPSv2 Action Prompts in our training set, whereas we use Activity Prompts in our test set. We use Labrador dog category in our training set for training image-to-video (I2V) models, while Maltese category forms our test set. Table \ref{tab:general} showcases \model{}'s generalization ability.
+\subsection{Human Evaluation}
+\begin{wraptable}{r}{0.45\textwidth}
+    \centering
+    \begin{footnotesize}
+    \begin{tabularx}{\linewidth}{Xcc}
+    \toprule
+    Method        & Fidelity          & Text Align  \\
+     \midrule
+    ModelScope   & \hphantom{0}21.0\%  & {39.0}\%   \\
+    \model{} (\textbf{Ours})  & \textbf{\hphantom{0}79.0\%} & \textbf{61.0\%}   \\
+    \bottomrule
+    \end{tabularx}
+    
+     \caption{Human Evaluation results for HPS reward model, where the task is image-text alignment.}
+     \label{tab:humaneval}
+    \end{footnotesize}
+    
+    
+\end{wraptable}
+
+We carried out a study to evaluate human preferences via Amazon Mechanical Turk. The test consisted of a side-by-side comparison between \model{} and ModelScope. To test how well the videos sampled from both the models aligned with their text prompts, we showed participants two videos generated by both \model{} and a baseline method, asking them to identify which video better matched the given text. For evaluating video quality, we asked participants to compare two videos generated in response to the same prompt, one from \model{} and one from a baseline, and decide which video's quality seemed higher. We gathered 100 responses for each comparison. The results, illustrated in Table \ref{tab:humaneval}, show a preference for \model{} over the baseline methods.
+\subsection{Qualitative Visualization}
+In this section, we visualize the generated videos for \model{} and the respective baseline. We conduct extensive visualizations across all the considered reward functions on various base models.
+\paragraph{\textbf{HPS Reward Model:}}
+In Figure \ref{fig:aes_hps}, we visualize the results before and after fine-tuning VideoCrafter using both HPSv2.1 and Aesthetic reward function together in the top three rows. Before fine-tuning, the raccoon does not hold a snowball, and the fox wears no hat, which is not aligned with the text description; however, the videos generated from \model{} does not result in these inconsistencies. Further, \model{} successfully generalizes to unseen prompts as shown in the third row of Figure \ref{fig:aes_hps}, where the dog's paw is less like a human hand than the video on the left. Similar improvements can be observed in videos generated from Open-Sora V1.2 and ModelScope as shown in the second and third rows of Figure \ref{fig:opensora_modelscope}. 
+\paragraph{\textbf{Aesthetic Reward Model:}} In Figure \ref{fig:aes_hps}, in the top three rows we visualize the results before and after fine-tuning ModelScope using a combination of Aesthetic reward function and HPSv2.1 model. Also, we fine-tune ModelScope via Aesthetic Reward function and demonstrate its generated video in the last row in Figure \ref{fig:opensora_modelscope}. We observe that Aesthetic fine-tuning makes the generated videos more artistic.
+
+\paragraph{\textbf{PickScore Model:}} In the bottom three rows of Figure \ref{fig:aes_hps}, we showcase videos generated by PickScore fine-tuned VideoCrafter. \model{} shows improved text-video alignment than the base model. In the last row, we test both models using a prompt that is not seen during training time. Further, video generated from PickScore fine-tuned Open-Sora is displayed in the first row of Figure \ref{fig:opensora_modelscope}.
+
+\paragraph{\textbf{Object Removal:}} Figure \ref{fig:object_removal} displays the videos generated by VideoCrafter after fine-tuning using the YOLOS-based objection removal reward function. In this example, books are the target objects for removal. These videos demonstrate the successful replacement of books with alternative objects, like a blanket or bread.
+
+\paragraph{\textbf{Video Action Classification:}} 
+In Figure \ref{fig:actionclass}, we visualize the video generation of ModelScope and \model{}. In this case, we fine-tune \model{} using the action classification objective, for the action specified in the prompt.  For the prompt, "A person eating donuts", we find that \model{} makes the human face more evident along with adding sprinkles to the donut. Earlier generations are often misclassified as baking cookies, which is a different action class in the kinetics dataset. The addition of colors and sprinkles to the donut makes it more distinguishable from cookies leading to a higher reward.
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/action_classification_2.pdf}
+\caption{Video action classifiers as reward model. We use VideoMAE action classification model as a reward function to fine-tune ModelScope's Text-to-Video Model. We see that after fine-tuning, \model{} generates videos that correspond better to the actions. }
+\label{fig:actionclass}
+\end{figure}
+
+\paragraph{\textbf{V-JEPA reward model:}}
+In Figure \ref{fig:longrange}, we show results for increasing the length of the video generated by Stable Video Diffusion (SVD). For generating long-range videos on SVD, we use autoregressive inference, where the last frame generated by SVD is given as conditioning input for generating the next set of images. We perform three steps of inference, thus expanding the context length of SVD by three times. However, as one can see in the images bordered in red, after one step of inference, SVD starts accumulating errors in its predictions. This results in deforming the teddy bear, or affecting the rocket in motion. \model{} uses V-JEPA objective of masked encoding to enforce self-consistency in the generated video. This manages to resolve the temporal and spatial discrepancy in the generations as shown in Figure \ref{fig:longrange}.
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/svd_longrange.pdf}
+\caption{Improving temporal and spatial consistency of Stable Video Diffusion (SVD) Image-to-Video Model. Given the leftmost frame as input, we use autoregressive inference to generate 3*N frames in the future, where N is the context length of SVD. However, this suffers from error accumulation, resulting in corrupted frames, as highlighted in the red border. We find that \model{} can improve the spatio-temporal consistency of SVD by using V-JEPA's masked encoding loss as its reward function.}
+\label{fig:longrange}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+We presented \model{}, which is a sample and compute efficient framework for fine-tuning pre-trained video diffusion models via reward gradients. We utilized various reward functions evaluated on images or videos to fine-tune the video diffusion model. We further showcased that our framework is agnostic to conditioning and can work on both text-to-video and image-to-video diffusion models. We hope our work creates more interest towards adapting video diffusion models.
+
+\clearpage
+
+
+
+
+
+

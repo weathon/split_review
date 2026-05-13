@@ -1,0 +1,233 @@
+\title{FlashEVA: Accelerating LLM Inference via Efficient Attention}
+
+\begin{abstract}
+Transformer models have revolutionized natural language processing, achieving state-of-the-art performance and demonstrating remarkable scalability. However, their memory demands, particularly due to maintaining full context in memory, pose significant challenges for inference. In this paper, we present FlashEVA, an efficient implementation of EVA (Efficient Attention via Control Variates), and demonstrate how to finetune transformers to adapt to FlashEVA attention. Our method enables fine-tuning of Transformer models with as few as $1.6B$ tokens while preserving effectiveness across various downstream tasks. Notably, FlashEVA achieves up to $6.7x$ higher throughput during inference compared to standard Transformer implementations. Despite these improvements, we observe limitations in retrieval-focused tasks. Our implementation offers control over the trade-off between throughput and accuracy through adjustable hyperparameters, providing greater flexibility. This work represents a significant step towards more efficient and adaptable Transformer-based models for inference.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Transformer models have become ubiquitous in the field of natural language processing, achieving state-of-the-art performance across a wide range of tasks (Dosovitskiy et al., 2021; Wang et al., 2019; Radford et al., 2019; Dong et al., 2018). Their success can be attributed to their ability to scale effectively and the possibility of parallel training, which has led to significant improvements in model capabilities (Kaplan et al., 2020; Gadre et al., 2024). However, these advancements come at a cost: Transformers have high memory requirements during inference, particularly due to the need for an ever-increasing cache to keep the full history in context (Pope et al., 2022). This memory constraint poses a significant challenge, especially as new use cases emerge that demand higher throughput. Such applications include inference on long contexts (e.g. Q&A over long documents or large codebases) (Rozie\`re et al., 2024; Li et al., 2023; Guo et al., 2022; Shaham et al., 2022), agentic workflows that require exploring multiple trajectories in parallel (Yang et al., 2024a; Yao et al., 2023b), as well as workflows combining search algorithms with LLMs (Chen et al., 2023; Yao et al., 2023a; Wang & Zhou, 2024) As these demands grow, it becomes increasingly important to address the limitations of Transformer models. A crucial consideration is the desire to leverage the existing pre-trained Transformer models, avoiding the need for resource-intensive retraining from scratch. There are different approaches that aim to address these issues:  
+
+• Distributed KV cache storage, as shown by Liu et al. (2023a), can be achieved without communication overhead, due to the fact that the attention operation can be computed in a blockwise fashion (Dao et al., 2022). This allows the computation of different blocks to be done on separate devices and can in principle support an infinite context length provided enough GPUs are available.  
+
+• KV cache compression techniques aim to compress the existing KV cache Zhao et al. (2024); Yue et al. (2024), or discard uninformative tokens from the cache (Jiang et al., 2023; Han et al., 2024) to minimize the memory cost without sacrificing model performance.  
+
+• State-Space Models (SSMs) are an alternative class of models that have shown to be competitive with transformers on small to medium scale (Gu & Dao; Yang et al., 2023; Qin et al., 2024b; Peng et al., 2023). Recent works Wang et al. (2024); Bick et al. (2024) have shown that transformers can be efficiently distilled into Mamba, keeping most of the downstream performance. • Linearized attention approaches aim to replace the Softmax attention in the transformer with linearized variants, which promises to reduce the computational and memory requirements of the attention (Zheng et al., 2023; Qin et al., 2022; Peng et al., 2021). Previous works attempting to adapt pretrained transformers into linearized transformers have not scaled or maintained model performance on downstream tasks (Chen et al., 2024; Mao, 2022; Kasai et al., 2021a).   
+In this paper, we propose to revisit and enhance the Efficient Attention via Control Variates (EVA)   
+method (Zheng et al., 2023) to address these challenges. We present an efficient implementation of   
+EVA attention using custom CUDA and Triton kernels, which allows us to maintain the benefits of   
+Transformer models while reducing their memory and computational footprint.   
+Our approach demonstrates that Transformers can be fine-tuned with as little as 1.5 billion tokens,   
+recovering most of the original performance on downstream tasks. Nevertheless, the performance   
+still suffers on retrieval focused tasks, similar to previous approaches with linearized attention and   
+state space models (Waleffe et al., 2024).   
+While FlashEVA attention still requires to keep a cache of (compressed) past context, this overhead   
+is less than the memory overhead for computing the prefix during model inference, and is thus does   
+not represent a limitation for the inference. Notably, compared to vanilla transformers, our method   
+achieves significant improvements in inference scenarios of particular interest, such as generating   
+content with long prompts, handling extended generations, and maximizing parallel throughput. We   
+report up to $6.7x$ inference throughput increase on long sequence generation, and up to $5x$ reduc  
+tion in peak GPU memory usage on long sequence generation. Additionally, EVA attention allows   
+for trading off memory and model performance in a principled manner, through two hyperparam  
+eters, allowing up to $50\%$ lower memory usage with $0.5\%$ accuracy impact on downstream task   
+performance.   
+The remainder of this paper is structured as follows: In Section 2, we review the theoretical founda  
+tions of EVA attention and introduce our efficient implementation, which we call FlashEVA. Section   
+3 details our experimental setup, including model architecture, training procedures, and evaluation   
+metrics. Section 4 presents our results, comparing FlashEVA’s performance to existing methods   
+across various tasks and inference scenarios. We also provide an in-depth analysis of the trade-offs   
+between speed, accuracy, and memory usage. Finally, Section 5 concludes the paper, summarizing   
+our findings and discussing potential avenues for future research in efficient attention mechanisms   
+for large language models. An extended review of related works, as well as ablation studies are in   
+   
+2 BACKGROUND   
+This section provides a comprehensive review of key attention mechanisms, establishing the foun  
+dation for our work. We begin by revisiting the Softmax attention mechanism and elucidating its   
+relationship to Random Feature Attention. Subsequently, we examine the Efficient Vision Attention   
+(EVA) framework, which reinterprets Randomized Attention through the lens of control variates.   
+Finally, we highlight the practical implementation challenges associated with EVA attention and   
+demonstrate how these limitations can be addressed by reformulating the approach as Softmax at  
+tention over a modified set of keys and values.   
+2.1 SOFTMAX ATTENTION   
+Softmax attention is a fundamental component of transformer architectures. Let $Q\in\mathbb{R}^{N\times D}$ , $\kappa\in$   
+$\mathbb{R}^{M\times D}$ , and $V~\in~\mathbb{R}^{M\times D}$ denote the query, key, and value matrices, respectively, where $N$ is   
+the number of queries, $M$ is the number of keys and values, and $D$ is the dimensionality of the  
+
+embedding space.1 The Softmax attention mechanism for a single query vector $\textstyle\pmb q_{n}$ (the $n$ -th row of $Q$ ) can be expressed as:  
+
+$$
+\mathrm{SoftmaxAttn}(q_{n},K,V):=\sum_{m=1}^{M}\frac{\exp(q_{n}^{\top}k_{m})}{\sum_{m^{\prime}=1}^{M}\exp(q_{n}^{\top}k_{m^{\prime}})}v_{m}^{\top}=\sum_{m=1}^{M}\frac{\sin(q_{n},k_{m})}{\sum_{m^{\prime}=1}^{M}\sin(q_{n},k_{m^{\prime}})}v_{m}^{\top}
+$$  
+
+where $\pmb{k}_{m}$ and $\pmb{v_{m}}$ are the $m$ -th rows of $\kappa$ and $V$ , respectively, and $\mathrm{sim}(\cdot,\cdot)$ denotes the similarity function, typically implemented as a dot product. In the case of causal attention, the summation is restricted to $m\,\leq\,n$ , ensuring that each token attends only to previous tokens and itself. It is important to note that computing the attention output for the latest query necessitates a summation over all previous timesteps, which is the reason why it is memory intensive to run inference with Softmax attention.  
+
+2.2 RANDOM FEATURE ATTENTION  
+
+Random Feature Attention, introduced by Peng et al. (2021) and Choromanski et al. (2022), leverages random feature methods (Rahimi & Recht, 2007) to linearize the exponential kernel in attention mechanisms. This approach approximates the exponential kernel using the following expectation:  
+
+$$
+\exp({\mathbf x^{\top}\mathbf y})=\mathbb{E}_{\omega\sim\mathcal{N}(0,\mathbf I)}\left[\boldsymbol\xi({\mathbf x},\omega)^{\top}\boldsymbol\xi({\mathbf y},\omega)\right]\approx\frac{1}{S}\sum_{s=1}^{S}\boldsymbol\xi({\mathbf x},\omega_{s})^{\top}\boldsymbol\xi({\mathbf y},\omega_{s})
+$$  
+
+where $\xi(\cdot,\cdot):\mathbb{R}^{D}\times\mathbb{R}^{D}\rightarrow\mathbb{R}^{l}$ is a randomized mapping that projects the input into a random feature space. While the exact formulation of this mapping differs slightly between Peng et al. (2021) and Choromanski et al. (2022), we adopt the latter’s approach, defining $\begin{array}{r}{\xi(\mathbf{x},\omega)=\exp\left(\omega^{\top}\mathbf{x}-\frac{1}{2}\|\mathbf{\dot{x}}\|^{2}\right)}\end{array}$ . Employing this random feature mapping, we can reformulate the standard attention mechanism as Random Feature Attention:  
+
+$$
+\sum_{m=1}^{M}\frac{\exp(\mathbf{q}_{n}^{\top}\mathbf{k}_{m})}{\sum_{m^{\prime}=1}^{M}\exp(\mathbf{q}_{n}^{\top}\mathbf{k}_{m^{\prime}})}\mathbf{v}_{m}^{\top}\approx\frac{\sum_{s=1}^{S}\xi(\mathbf{q}_{n},\omega_{s})^{\top}\sum_{m=1}^{M}\xi(\mathbf{k}_{m},\omega_{s})\mathbf{v}_{m}^{\top}}{\sum_{s=1}^{S}\xi(\mathbf{q}_{n},\omega_{s})^{\top}\sum_{m^{\prime}=1}^{M}\xi(\mathbf{k}_{m^{\prime}},\omega_{s})}:=\mathrm{RFA}(\mathbf{q}_{n},\mathbf{K},\mathbf{V})
+$$  
+
+
+
+\section{2.2.1 RANDOMIZED ATTENTION  }
+
+
+Furthermore, Zheng et al. (2022) demonstrate that the Softmax attention can be expressed as the following expectation:  
+
+$$
+\mathrm{SoftmaxAttn}(\mathbf{q}_{n},\mathbf{K},\mathbf{V})=\mathbb{E}_{p_{n}(\omega)}[f_{n}(\omega)]=\mathbb{E}_{p_{n}(\omega)}\left[\frac{\xi(\mathbf{q}_{n},\omega)^{T}\sum_{m=1}^{M}\xi(\mathbf{k}_{m},\omega)\mathbf{v}_{m}^{T}}{\xi(\mathbf{q}_{n},\omega)^{T}\sum_{m^{\prime}=1}^{M}\xi(\mathbf{k}_{m^{\prime}},\omega)}\right]
+$$  
+
+where $\begin{array}{r l r}{p_{n}(\omega)\!\!\!}&{{}=}&{\!\!\!\sum_{m=1}^{M}\pi_{m}{\mathcal N}(\omega;{\bf q}_{n}\,+\,{\bf k}_{m},{\bf I})}\end{array}$ represents the proposal distribution and $\pi_{m}\,=$ $\frac{\exp(\mathbf{q}_{n}^{T}\mathbf{k}_{m})}{\sum_{m^{\prime}=1}^{M}\exp(\mathbf{q}_{n}^{T}\mathbf{k}_{m^{\prime}})}$ denotes the component weight. The RFA attention can thus be interpreted as performing self-normalized importance sampling of Equation 4, utilizing $q(\omega)=\mathcal{N}(\omega;0,\mathbf{I})$ as the proposal distribution. Consequently, the equivalent RFA formulation can be expressed as:  
+
+$$
+\mathrm{RFA}(\mathbf{q}_{n},\mathbf{K},\mathbf{V})=\frac{\mathbb{E}_{q(\omega)}\left[\frac{p_{n}(\omega)}{q(\omega)}f_{n}(\omega)\right]}{\mathbb{E}_{q(\omega)}\left[\frac{p_{n}(\omega)}{q(\omega)}\right]}\approx\frac{\sum_{s=1}^{S}\frac{p_{n}(\omega_{s})}{q(\omega_{s})}f_{n}(\omega_{s})}{\sum_{s=1}^{S}\frac{p_{n}(\omega_{s})}{q(\omega_{s})}}
+$$  
+
+2.3 EVA ATTENTION  
+
+Zheng et al. (2023) demonstrate that RFA attention in the SNIS formulation (Equation 5) can be rewritten as a sum of control variate estimates. By altering the order of summation, we obtain:  
+
+$$
+g(\omega)=\sum_{s=1}^{S}\frac{p_{n}(\omega_{s})}{q(\omega_{s})}f_{n}(\omega_{s})=\sum_{s=1}^{S}\frac{1}{S}\sum_{m=1}^{M}\frac{N(\omega_{s};0,I)}{Z q(\omega_{s})}\xi(q_{n},\omega_{s})\xi(k_{m},\omega_{s})v_{m}=\sum_{m=1}^{M}g_{m}(\omega)
+$$  
+
+1For simplicity, we omit the batch and head dimensions in our formulations.  
+
+$$
+h(\omega)=\sum_{s=1}^{S}\frac{p_{n}(\omega_{s})}{q(\omega_{s})}=\sum_{s=1}^{S}\frac{1}{S}\sum_{m=1}^{M}\frac{\mathcal{N}(\omega_{s};0,I)}{Z q(\omega_{s})}\xi(q_{n},\omega_{s})\xi(k_{m},\omega_{s})=\sum_{m=1}^{M}h_{m}(\omega)
+$$  
+
+This simplification leads to a control variates formulation of RFA as a sum of control variate estimates for each token:  
+
+$$
+\mathrm{RFA}(q_{n},K,V)=g(\omega)-\hat{\beta}(\omega)\left(h(\omega)-\mathbb{E}\left[h(\omega)\right]\right)=\sum_{m=1}^{M}g_{m}(\omega)-\hat{\beta}(\omega)\left(h_{m}(\omega)-\mathbb{E}\left[h_{m}(\omega)\right]\right)
+$$  
+
+While RFA employs a single $\beta(\omega)$ shared across all tokens, this approach can be generalized to utilize multiple coefficients. In the limit, where each token has its own coefficient, each control variate coefficient can be independently optimized to minimize variances, resulting in an exact recovery of Softmax attention. To balance approximation quality and computational efficiency, Zheng et al. (2023) propose locally shared coefficients.  
+
+EVA attention incorporates a local attention component (for $m\,\in\,E$ ), which can be interpreted as locally optimizing the coefficients for individual tokens, as well as local RFA estimates of subsets of tokens $(m\in\mathcal{P}_{c})$ reweighed by their corresponding true attention score. The local set $E$ and the disjoint subsets $\{\mathcal{P}_{c}\}_{c=1}^{C}$ collectively comprise the full set of tokens over which attention is applied. Thus, EVA attention is formulated as:  
+
+$$
+\begin{array}{r l}&{\mathrm{EVA}(q_{n},K,V):=\tilde{g}(\omega)=\displaystyle\sum_{m\in E}\tilde{g}_{m}(\omega)+\sum_{c=1}^{C}\sum_{m\in\mathcal{P}_{c}}\tilde{g}_{m}(\omega)}\\ &{\qquad\qquad\qquad=\displaystyle\sum_{m\in E}\frac{\exp(q_{n}^{T}k_{m})}{Z}\boldsymbol{v}_{m}+\sum_{c=1}^{C}\frac{\displaystyle\sum_{m\in\mathcal{P}_{c}}\exp(q_{n}^{T}k_{m})}{Z}\frac{\sum_{m\in\mathcal{P}_{c}}g_{m}(\omega)}{\displaystyle\sum_{m\in\mathcal{P}_{c}}h_{m}(\omega)}.}\end{array}
+$$  
+
+For practical implementation, the normalization constant requires approximation, as computing it would necessitate summing over all Keys in the context, leading to quadratic complexity in the attention:  
+
+$$
+Z=\sum_{m\in E}\exp(q_{n}^{T}k_{m})+\sum_{c=1}^{C}\sum_{m\in\mathcal{P}_{c}}\exp(q_{n}^{T}k_{m})\approx\sum_{m\in E}\exp(q_{n}^{T}k_{m})+\sum_{c=1}^{C}\exp(q_{n}^{T}\tilde{k}_{c})
+$$  
+
+Furthermore, to efficiently compute $\beta_{c}(\omega)$ , EVA attention employs a single random sample (i.e., $S\,=\,1\!\!$ ), which eliminates the dependency of $\beta_{c}(\omega)$ on the query $q_{n}$ , allowing for precomputation across all queries. For a comprehensive derivation and detailed explanation of term calculations, we refer the reader to Zheng et al. (2023).  
+
+
+
+\section{2.4 FLASHEVA  }
+
+
+We now demonstrate that EVA attention can be reformulated as Softmax attention over a modified set of keys and values, encompassing both the original keys from the local chunk and derived keys and values from the random feature approximation. By substituting the normalization constant $Z$ from Equation 10 into Equation 9, we can express EVA attention as:  
+
+$$
+\mathrm{3VA}(\mathbf{q}_{n},\mathbf{K},\mathbf{V})\approx\frac{\sum_{m\in E}\exp(\mathbf{q}_{n}^{\intercal}\mathbf{k}_{m})\mathbf{v}_{m}+\sum_{c=1}^{C}\exp(\mathbf{q}_{n}^{\intercal}\mathbf{\tilde{k}}_{c})\hat{\beta}_{c}(\omega)}{\sum_{m\in E}\exp(\mathbf{q}_{n}^{\intercal}\mathbf{k}_{m})+\sum_{c=1}^{C}\exp(\mathbf{q}_{n}^{\intercal}\mathbf{\tilde{k}}_{c})}=\mathrm{SoftmaxAttn}(\mathbf{q}_{n},\mathbf{\tilde{K}},\mathbf{\tilde{V}})
+$$  
+
+where $i$ ranges over both $m\in E$ and $c\in\{1,\ldots,C\}$ . We define the augmented key and value sets as:  
+
+$$
+\begin{array}{r l}&{\tilde{\mathbf{K}}=\{\mathbf{k}_{m}\;|\;m\in E\}\cup\{\tilde{\mathbf{k}}_{c}\;|\;c\in\{1,\dots,C\}\}}\\ &{\tilde{\mathbf{V}}=\{\mathbf{v}_{m}\;|\;m\in E\}\cup\{\hat{\beta}_{c}(\omega)\;|\;c\in\{1,\dots,C\}\}}\end{array}
+$$  
+
+Note, in the rest of the paper, we refer to the $\tilde{\mathbf{k}}_{c}$ and $\hat{\beta}_{c}(\omega)$ as RFA keys and values, or simply random feature-based tokens. This reformulation allows us to leverage existing optimized attention implementations. In the non-causal setting, we can directly utilize the FlashAttention CUDA kernels (Dao et al., 2022) to optimize FlashEVA’s performance. The causal setting, however, presents additional challenges. It necessitates attending separately to past keys and random-feature based keys, requiring a custom attention mask not supported by the standard FlashAttention implementation. To address this, we adapt the FlashAttention Triton kernels2to accommodate the required attention mask.  
+
+This adaptation facilitates a significant enhancement to the original EVA attention mechanism. Specifically, it enables the implementation of a sliding window for local attention, which has the potential to improve model performance by providing an effectively larger context window for the deeper attention layers in the model.  
+
+3 EXPERIMENTAL SETUP   
+Our main experiments leverage the open-source Pythia checkpoints (Biderman et al., 2023) for finetuning. This choice provides a consistent family of models at various scales, enabling us to evaluate our method’s scalability while maintaining architectural and pretraining consistency.   
+Pythia was pretrained on the Pile (Gao et al., 2020), an $825\:\mathrm{GB}$ corpus of English text designed for language model pretraining. To minimize discrepancies between pretraining and fine-tuning setups that could impact the efficiency of adaptation to a different attention mechanism, we utilize the same dataset for model fine-tuning. Due to copyright disputes rendering the original dataset unavailable, we employ the uncopyrighted version accessible on HuggingFace.   
+We fine-tune the models for $50k$ steps with a sequence length of 2048 and a total batch size of 16, amounting to approximately $1.6B$ tokens. For larger models, we initially warm up the attention layers for $2k$ steps (using a constant learning rate of $3e-4)$ before continuing the fine-tuning of all weights for an additional $48k$ steps (using a one-cycle cosine decay schedule). This approach mitigates the risk of large gradients disrupting the pre-learned weights and enhances training stability. To accelerate training, we employ custom-implemented Triton kernels for FlashEVA, torch compile, and mixed precision. As these optimizations can cause instabilities in larger models during the initial stages of training due to large gradients, we conduct the first $2k$ steps without mixed precision or custom Triton kernels.   
+We adapt the Pythia model to incorporate gated output projection in the attention layer, similar to Sun et al. (2023) and Chen et al. (2024). To stabilize training, we clip the values and reduce the variance of the random weights in EVA attention. Additionally, we employ RoPE positional encoding (Su et al., 2023) during fine-tuning with FlashEVA, applied to all tokens prior to the random feature projections.   
+For downstream model performance evaluation, we utilize the LM evaluation harness (Gao et al., 2024) to conduct reproducible assessments. Following prior work (Chen et al., 2024; Biderman et al., 2023), we select six tasks: PIQA (Bisk et al., 2019), WinoGrande (Sakaguchi et al., 2019), WSC (Sakaguchi et al., 2019), ARC-C and ARC-E (Clark et al., 2018), and LogiQA (Liu et al., 2020). To further assess the model’s retrieval capabilities, we include two additional tasks: FDA (Arora et al., 2023) and SWDE (Arora et al., 2024a).   
+To assess inference throughput, we consider a fixed prefix/prompt of 2048 tokens, similar to Gu & Dao, with varying numbers of generated tokens ranging from 1024 to 10240. To measure maximum throughput, we explore batch sizes up to 32. For the EVA hyperparameters inference performance trade-off analysis, we constrain the setting to a prefix of 2048 tokens and 1024 generated tokens.  
+
+
+
+\section{4 RESULTS  }
+
+
+
+
+\section{4.1 FINETUNING PERFORMANCE  }
+
+
+Table 1: Comparison of downstream task performance for various attention mechanisms across different model sizes. Results show accuracy scores for six general language understanding tasks (left) and two long-context tasks (right). Bold indicates the best performance for each model size, while underlined values represent the second-best. FlashEVA demonstrates competitive performance with Pythia (full attention) on general tasks while outperforming DiJiang and sliding window attention in most cases.  
+
+![](images/db040441e4aeae5bd0ce27a4806d22967284b461e4477cc717aca182ac2519be.jpg)  
+
+The experimental results demonstrate that FlashEVA effectively recovers the performance of Pythia on the majority of downstream tasks across various model sizes, ranging from 70M to 1B parameters. Notably, the average performance across six downstream tasks is nearly identical to the Pythia baseline, despite utilizing only 1.6B tokens for finetuning. Furthermore, FlashEVA consistently outperforms DiJiang across all model sizes, suggesting that the random feature approach employed by FlashEVA provides a more effective approximation of Softmax attention.  
+
+However, an exception is observed in retrieval-focused tasks, where the pairwise interaction facilitated by full Softmax attention appears to be crucial. In these tasks, while FlashEVA marginally outperforms DiJiang, it exhibits significantly lower performance compared to both the Softmax and sliding window attention baselines. This suboptimal performance can be attributed to the absence of a sliding window mechanism in FlashEVA’s architecture.  
+
+Interestingly, the sliding window attention baseline exhibits remarkably robust performance, recovering a substantial portion of Softmax attention’s capabilities, with a more pronounced performance gap in retrieval tasks (but higher than FlashEVA or DiJiang). This phenomenon may be partially explained by the limited finetuning of 1.6B tokens, which, while sufficient for adaptation to sliding window attention, may be suboptimal for larger models to fully leverage the FlashEVA or DiJiang attention mechanisms. It is noteworthy that FlashEVA outperforms sliding window attention on smaller models, with this performance differential diminishing as model size increases. Additionally, the sliding window in the attention effectively expands the context window of deeper attention layers, resulting in a more expressive model.  
+
+Bick et al. (2024) recently proposed distilling transformers into Mamba architectures. To compare their approach with our method, we fine-tuned the Phi-1.5-1.3B model into FlashEVA and DiJiang architectures. As evident from the results in Table 2, the distillation approach significantly outperforms our fine-tuning method. However, it is important to note several key differences in the experimental setup. Firstly, their method used twice the amount tokens for training. Secondly, their approach leveraged multiple stages in the process and employed a specialized distillation objective, potentially enabling more effective learning. FlashEVA’s improvements are orthogonal to the training setup employed in the training approach, so we hypothesize that combining FlashEVA with a distillation training objective could yield competitive performance.  
+
+Table 2: Downstream task performance comparison of Phi-1.5 model variants. Results show accuracy percentages for various benchmarks, as well as their average.   
+
+![](images/8a8109ef434b9f9e18293f64a181031a93c720e483ed52e98c789d5fc306ecd4.jpg)  
+
+
+
+\section{4.2 INFERENCE THROUGHPUT AND MEMORY USAGE  }
+
+
+Figure 2 presents a comparative analysis of inference throughput and peak GPU memory utilization across various attention mechanisms for different generation lengths. Despite FlashEVA’s theoretical design incorporating a cache that scales with sequence length, our empirical observations reveal that peak memory consumption occurs during prefix computation. In practical scenarios, FlashEVA thus exhibits peak memory usage comparable to Sliding Window Attention, while DiJiang Attention demonstrates the lowest memory footprint. Notably, FlashEVA achieves a significant reduction in peak memory usage, up to 5-fold—compared to the vanilla Transformer.  
+
+Our results further indicate that FlashEVA surpasses DiJiang Attention in terms of throughput, while marginally underperforming Sliding Window Attention. This performance differential can be attributed to two factors: (1) the reduced number of sequential operations required for token computation in Sliding Window Attention, and (2) the generally memory-bound nature of inference tasks. Nevertheless, FlashEVA demonstrates substantial throughput improvements over the vanilla Transformer, achieving a 2-fold increase when generating 1024 tokens and up to a 6.7-fold improvement for 10240 token generation tasks.  
+
+![](images/39fce9c53e355f2e2083b8e45dead5d0f12f625e7d54a6148e1a6f3453129316.jpg)  
+Figure 1: Comparative analysis of maximum throughput and peak GPU memory usage across different attention mechanisms and generation lengths.  
+
+4.3 FLASHEVA INFERENCE PERFORMANCE TRADEOFF (Flash)EVA introduces two key hyperparameters that influence its performance and computational requirements: the local attention window size and the number of keys/values compressed into a single random feature-based token. Generally, larger local attention windows or reduced token compression result in increased computational costs.  
+
+Our findings demonstrate that FlashEVA can substantially reduce peak memory usage while maintaining competitive performance. Certain configurations decrease peak memory by up to $50\%$ with only a $0.5\%$ reduction in average performance on downstream tasks (excluding retrieval-focused tasks). Moreover, we observe up to a $50\%$ increase in total inference throughput with minimal performance degradation. It is noteworthy that configurations with larger local attention windows exhibit superior performance on retrieval-focused tasks. However, we do not include these tasks in the reported average accuracy, hypothesizing that hybrid models may offer a more favorable tradeoff for retrieval task performance.  
+
+Interestingly, the configuration used for our main results (local window size 256, RFA chunk size 16) is suboptimal in terms of inference performance. Our analysis suggests that configurations (256, 8) or (512, 8) may offer a more optimal balance between performance and computational efficiency.  
+
+![](images/214eb84650195be27cb9e490942f42c5770bcc07dc8e893057e14b052354cf7c.jpg)  
+Figure 2: Performance trade-offs between average downstream accuracy and generation throughput or peak GPU memory for various FlashEVA-410M configurations. Each point represents a unique combination of local attention window size and RFA chunk size.  
+
+
+
+\section{4.4 FLASHEVA ATTENTION SPEEDUP  }
+
+
+We benchmark the time to run a forward and backward pass of the (Flash)EVA attention layer and compare it to FlashAttention2 kernels. We evaluate at different sequence lengths, adjusting batch sizes to maintain a constant total token count. FlashEVA used a local attention window of size 256 and another 128 random-feature based tokens.  
+
+Despite its theoretical promise of improved computational complexity, EVA attention encounters challenges similar to previous linear attention implementations, where practical performance gains fail to materialize, particularly when compared to the efficient FlashAttention implementation. FlashEVA attention does achieve speedups over FlashAttention2 for longer sequences due to its lower computational complexity, up to $2.2\mathbf{x}$ on for the 16k sequence length. However, for shorter sequences, the overhead associated with random feature computation results in slower performance.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+This paper presents FlashEVA, an efficient implementation of EVA attention, demonstrating its application for addressing memory constraints in traditional Transformer models during inference. Our experiments reveal that EVA attention enables effective fine-tuning of Transformer models with minimal performance degradation, particularly when retaining a few attention layers.  
+
+![](images/1973ceff7e40dffbe26e5e206f011c241ae69d2073219dc5e4317547fd28864f.jpg)  
+Figure 3: Comparison of forward and backward pass execution times for (Flash)EVA attention layer and FlashAttention2, including both causal and non-causal attention variants. Results are reported for a constant number of chunks $C$ across different sequence lengths, varying chunk size accordingly.  
+
+Unlike state-space models such as Mamba, EVA attention still requires maintaining a cache that grows with sequence length, however, it is orthogonal to other KV cache compression techniques. As the compression in EVA attention is integral to the forward pass rather than a post-hoc operation, we anticipate high compatibility with existing KV cache compression methods, potentially leading to further reductions in KV cache overhead. This synergistic exploration remains a promising avenue for future work.  
+
+Our work on FlashEVA attention represents a significant advancement towards more efficient Transformer models, addressing critical challenges in large language model inference. By balancing performance preservation with memory efficiency, we contribute to ongoing efforts to enhance the accessibility and applicability of advanced language models across diverse computational environments and use cases.  
+
+
+
+

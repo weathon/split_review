@@ -1,0 +1,572 @@
+\title{A Quadratic Synchronization Rule for Distributed Deep Learning}
+
+\begin{abstract}
+  In distributed deep learning with data parallelism, synchronizing gradients at each training step can cause a huge communication overhead, especially when many nodes work together to train large models.
+  Local gradient methods, such as Local SGD, address this issue by allowing workers to compute locally for $H$ steps without synchronizing with others, hence reducing communication frequency.
+  While $H$ has been viewed as a hyperparameter to trade optimization efficiency for communication cost, recent research indicates that setting a proper  $H$ value can lead to generalization improvement. Yet, selecting a proper $H$ is elusive. This work proposes a theory-grounded method for determining $H$, named the Quadratic Synchronization Rule (QSR), which recommends dynamically setting $H$ in proportion to $\frac{1}{\eta^2}$ as the learning rate $\eta$ decays over time.
+  Extensive ImageNet experiments on ResNet and ViT show that local gradient methods with QSR consistently improve the test accuracy over other synchronization strategies. Compared with the standard data parallel training, QSR enables Local AdamW on ViT-B to cut the training time on 16 or 64 GPUs down from 26.7 to 20.2 hours or from 8.6 to 5.5 hours and, at the same time, achieves $1.12\%$ or $0.84\%$ higher top-1 validation accuracy.%\jz{Maybe report a greater reduction in computation time with matched test accuracy (just look at the figure and roughly calculate). 0.9 percent improvement can be very vague without specifying the model /  task, and we wouldn't want to do that in the abstract.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The growing scale of deep learning necessitates distributed training to reduce the wall-clock time.
+Data parallel training is a foundational technique that distributes the workload of gradient computation to $K$ workers, also serving as a key building block of more advanced parallel strategies. At each step of this method, each worker first computes gradients on their own local batches of data. Then, they take an average over local gradients, which typically involves a costly All-Reduce operation. \added{Finally, they update the model parameter with the averaged gradient and a gradient-based optimizer OPT, e.g., SGD, AdamW. In this paper, we term the data parallel implementation of optimizer OPT as ``Parallel OPT''. See \Cref{algo:parallel} for the pseudocode.}
+The cost for this data parallelism is obvious. 
+Frequent gradient synchronization can induce huge communication overhead as the number of workers and model size grow, severely hindering the scalability of distributed training~\citep{1bitadam, 1bitlamb,slamb}.
+
+One approach to reducing this communication overhead is Local SGD~\citep{stich2018local,zhouandcong,woodworth2020local}. Rather than synchronizing gradients at every step, Local SGD allows workers to independently train their local replicas using their own local batches with SGD updates. It is only after completing $H > 1$ local steps that these workers synchronize, where the model parameters get averaged over all replicas.
+Notably, while we mention SGD, this approach can be readily adapted to other popular optimizers. In this paper, if a gradient-based optimizer OPT is used for local updates, we term the variant as ``Local OPT'' (e.g., Local SGD, Local AdamW), and collectively refer to this class of approaches as {\em local gradient methods}. We provide a pseudocode for local gradient methods in \Cref{algo:lopt}.
+
+The main focus of this paper is to study the best strategies to set the synchronization period $H$ (i.e., the number of local steps per communication round) in local gradient methods.
+While setting $H$ to a larger value reduces communication, a very large $H$ can hinder the training loss from decreasing at normal speed, since the local replicas may significantly diverge from each other before averaging.
+Indeed, it has been observed empirically that larger $H$ leads to higher training loss after the same number of steps~\citep{wang2021cooperative,ortiz2021trade}, and efforts to analyze the convergence of local gradient methods in theory usually end up with loss bounds increasing with $H$~\citep{khaled2020tighter,stich2018local,haddadpour2019local,yu2019parallel}. To better trade-off between communication cost and optimization speed, \citet{kamp2014communication,wang2019adaptive,haddadpour2019local,shen2021stl} proposed adaptive synchronization schemes, such as linearly increasing $H$ as the iteration goes on \citep{haddadpour2019local}, or adjusting $H$ based on the variance in model parameters \citep{kamp2014communication}. Nonetheless, their effectiveness has only been validated on linear models or small-scale datasets, e.g., CIFAR-10/100.
+
+All these strategies are developed to avoid sacrificing too much training loss,
+but training loss is {\em never} the final evaluation metric that one cares about in deep learning.
+Due to the overparameterized nature of modern neural networks,
+reaching the same training loss does not correspond to the same performance on test data.
+It has also been long known that the choice of optimizers or hyperparameters can change not only the optimization speed of the training loss but also their {\em implicit bias} towards solutions with different test accuracies.
+
+The presence of this implicit bias indeed complicates the picture of setting $H$ in local gradient methods.
+Though a large $H$ might be harmful for training loss,
+it has been observed empirically that setting $H$ properly can sometimes improve rather than hurt the final test accuracy.
+\citet{lin2020dont} are the first to report this phenomenon.
+Comparing with running just the standard data parallel SGD (equivalent to $H=1$), they observed that
+switching from SGD to Local SGD ($H>1$) halfway through consistently leads to higher final test accuracy. 
+Local SGD with this specific schedule of $H$ is designated as {\em Post-local SGD}.
+\citet{lin2020dont}'s work opens up a new angle in setting $H$ in local gradient methods, yet, 
+the proposed schedule in Post-local SGD, referred to as the post-local schedule in this paper, is suboptimal in improving test accuracy. It was later reported by~\citet{ortiz2021trade} that Post-local SGD does not improve much on ImageNet. For both stepwise decay and cosine decay learning rate schedules, the test accuracy improvement of Post-local SGD diminishes as learning rate decreases. Further, it remains unclear whether the generalization benefit continues to appear when the optimizer is changed from SGD to adaptive gradient methods such as Adam/AdamW, which are now indispensable for training large models.
+\begin{figure}[t] 
+\begin{center}
+    \subfigure[\small Local SGD on ResNet-152]{
+    \includegraphics[width=0.43\textwidth]{figs/resnet_ic.pdf}\label{fig:resnet_intro}
+    }
+    \subfigure[\small Local AdamW on ViT-B]{
+        \includegraphics[width=0.46\textwidth]{figs/vit_intro_ci.pdf}\label{fig:vit_intro}
+    }
+    \caption{\small When training ResNet-152 and ViT-B on ImageNet with cosine learning rate decay, Local SGD/AdamW with QSR consistently outperforms data parallel methods or Local SGD/AdamW with other synchronization strategies in terms of top-1 validation accuracy, while only requiring 20.1\% and 10.4\% of the communication volume, respectively. With \mname, Local SGD on ResNet or Local AdamW on ViT cuts the training time from 20.7 to 18 hours or 26.7 to 20.2 hours on 16 GPUs, when compared with data parallel methods. We report the mean and the standard deviation over 3 runs. See \Cref{sec:exp details} for training details. }
+        \label{fig:intro}
+\end{center}
+\end{figure}
+
+\myparagraph{Our Contributions.}  In this paper, we aim to propose a general and effective $H$ schedule that can be readily applied to various optimizers and neural network models. Specifically, we introduce a simple yet effective strategy, called {\em Quadratic Synchronization Rule} (QSR), for dynamically adjusting the synchronization period according to the learning rate: given a learning rate schedule, we set $H$ proportional to $\eta^{-2}$ as the learning rate $\eta$ decays.
+This rule is largely inspired by a previous theoretical work~\citep{gu2023why}, which shows that the generalization benefits arise only if $H = \Omega(\frac{1}{\eta})$ when $\eta \to 0$, but did not make any recommendation on how to set $H$.
+
+Our main contributions are:
+
+\begin{enumerate}
+    \item We propose the Quadratic Synchronization Rule (QSR) to simultaneously reduce the wall-clock time and improve the final test accuracy of local gradient methods. Based on the theoretical insights in Theorem~\ref{thm:main-approx}, we provide a theoretical separation among data parallel SGD, Local SGD with $H \sim \eta^{-1}$, and Local SGD with QSR in terms of SDE approximations. We show that QSR can help reduce sharpness faster and hence improve generalization.
+    \item We demonstrate with ImageNet experiments that QSR can consistently improve the final test accuracy of ResNet-152 and ViT-B over other synchronization strategies, including constant-period and post-local schedules, and also $H \sim \eta^{-1}$ which one will expect to be optimal from the optimization perspective (\Cref{fig:intro}).
+    \item We thoroughly validate the efficacy of QSR not only for Local SGD but also for Local AdamW, which is arguably more suitable for training large models. We also validate its efficacy for cosine, linear and step decay learning rate schedules that are commonly used in practice.
+    \item We evaluate the communication efficiency of QSR on a 64-GPU NVIDIA GeForce RTX 3090 cluster. As an illustrative example, the standard data parallel AdamW takes 8.6 hours to train ViT-B for 300 epochs. With our QSR, Local AdamW cuts the training time down to 5.5 hours with even higher test accuracy.
+\end{enumerate}
+
+
+
+
+
+
+
+
+\section{Our Method: Quadratic Synchronization Rule}
+
+
+Below we formulate the local gradient methods and present our Quadratic Synchronization Rule. 
+\myparagraph{Local Gradient Methods.} 
+Given any gradient-based optimizer OPT, the corresponding local gradient method consists of multiple communication rounds. At the $s$-th round, each of the $K$ workers (say the $k$-th) gets a local copy of the global iterate $\bvths$, i.e., $\vths_{k, 0}\gets \bvths$, and then performs $H$ steps of local updates. At the $h$-th local step of the $s$-th round, which corresponds to the $(sH+h)$-th iteration globally,
+each worker gets a batch of $\Bloc$ samples $(\xis_{k,h,1}, \dots, \xis_{k,h,\Bloc})$ from a globally shared dataset $\tilde{D}$, computes the gradient on that batch, and updates the model with optimizer OPT and learning rate $\eta_{sH+h}$:
+{
+\setlength{\abovedisplayskip}{-5pt}
+\setlength{\belowdisplayskip}{0pt}
+\begin{align}\label{eq:upd intro localsgd}
+    \vths_{k,h+1} \gets \mathrm{OPT}( \vths_{k, h} ,\eta_{sH+h}, \vgs_{k, h})\quad \text{where} \quad
+    \vgs_{k, h} = \frac{1}{\Bloc}\sum_{i=1}^{\Bloc} \nabla \ell(\vths_{k,h}; \xis_{k,h,i}).% \quad h = 0, \dots, H - 1.
+\end{align}
+}
+After finishing $H$ steps of local updates, all workers average their local models to generate the next global iterate: $\bvths[s+1] \gets \frac{1}{K}\sum_{k=1}^K \vths_{k, H}$. Note that conventional local gradient methods set the synchronization period as a constant, denoted as $H$,  throughout training. See also \Cref{algo:lopt}. 
+\myparagraph{Quadratic Synchronization Rule.}
+Given a learning rate schedule $\eta_t, t\in \set{0,\cdots, T-1}$
+that decays with time, instead of keeping $H$ constant,
+we propose to dynamically increase the synchronization period $\Hs$
+at each round $s$ as the learning rate decreases.
+More specifically, if at the global iteration $t$ we need to start a new communication round,
+then we set
+{
+\setlength{\abovedisplayskip}{-0.5pt}
+\setlength{\belowdisplayskip}{0pt}
+\begin{align}
+    \Hs := \max \left\{
+        \constH,
+        \left\lfloor\left(\frac{\alpha}{\eta_t}\right)^2 \right\rfloor\right\}.\label{eq:qsr}
+\end{align}
+}
+Here $\constH$ is a constant indicating the minimum number of local steps
+one would like to use for each round,
+which should be set according to the relative cost of computation and communication.
+The coefficient $\alpha$, termed the ``growth coefficient'' henceforth, is a hyperparameter controlling
+how fast $\Hs$ increases as $\eta_t$ decreases. 
+
+As suggested by our later theorem~\ref{thm:main-approx}, $\alpha$ should be set as a small constant. In our experiments, 
+we tune $\alpha$ properly between $0.01$ and $0.5$ and 
+test the effectiveness of \mname with $\constH=2, 4, 8$. Note that the last communication round may not finish
+exactly at the last iteration of the learning rate schedule.
+If this is the case, we force a synchronization at the last step
+by setting $\Hs := T - t$.
+
+A surprising part of our method is that we use the power $2$ in the above formula \eqref{eq:qsr}. This choice of power $2$ is 
+inspired by the analysis in \citet{gu2023why}, 
+which suggests that setting $H = \Omega(\frac{1}{\eta})$ is beneficial
+for reducing the sharpness of the local landscape.
+Indeed, $\Hs$ could have been set to 
+$\Hs := \max \left\{
+        \constH,
+        \left\lfloor\left(\frac{\alpha}{\eta_t}\right)^\gamma \right\rfloor\right\}$
+for any $\gamma$.
+However, using $\gamma = 2$ is crucial for the success of our method,
+and we will provide theoretical justification and empirical evidence for this choice in~\Cref{sec:derivation}. } 
+
+\myparagraph{Dealing with Learning Rate Warmup.}
+Many learning rate schedules use a warmup phase
+where the learning rate increases linearly from $0$ to $\eta_{\max}$,
+and then decays monotonically.
+This warmup phase is often used to avoid the instability caused by the initial large learning rate \citep{goyal2017accurate}.
+Our rule is not directly compatible with the warmup phase,
+since it is designed for a decaying learning rate,
+but the learning rate increases rather than decreases in this phase.
+Practically, we recommend setting $\Hs$
+as the value to be used in the communication round right after the warmup.
+\begin{comment}
+--------------
+
+with $t_0$ steps of linear warmup to the peak value $\etamax$ followed by a monotonic decay thereafter, we redefine the number of local steps for each communication round by the following rule.
+
+Consider a typical learning rate schedule $\eta(t), t\in \set{1,\cdots, T}$, with $t_0$ steps of linear warmup to the peak value $\etamax$ followed by a monotonic decay thereafter. For fixed-step local gradient methods with $H=\constH$, we redefine the number of local steps for each communication round by the following rule. 
+Assume that at the beginning of the $s$-th round, the training has evolved for $t$-steps ($t\ge t_0$), we set 
+\begin{align*}
+\Hs:=\min\left\{\max\left(\constH, \left\lfloor\left(\frac{\alpha}{\eta(t+1)}\right)^{\gamma}\right\rfloor\right), T-t\right \}
+\end{align*}
+where $\alpha$, $\gamma$ are tunable hyperparameters. 
+$t<t_0$, 
+\begin{align*}
+    \Hs := \max \left(\constH, \left\lfloor\left(\frac{\alpha}{\etamax}\right)^{\gamma}\right\rfloor\right)
+\end{align*}
+
+Formally, for fixed-step local gradient methods with $H=\constH$, we redefine the number of local steps at the $t$-th step based on the current learning rate $\eta_t$ as 
+ Here, \( \alpha \) and \( \gamma \) are tunable constants. See \tba{TBA} for a formal description of our method. 
+\end{comment}
+
+
+\section{Theoretical Motivations of Quadratic Synchronization Rule}
+
+
+To justify our choice of power 2, we build on the same theoretical setup as~\citet{gu2023why}
+to analyze the Stochastic Differential Equation (SDE) approximation of SGD and Local SGD using different scalings of $H$ with respect to $\eta$.
+Though the learning rate continuously decays over time in most of our experiments,
+it does not usually change much within a couple of epochs.
+Inspired by this, we take a quasistatic
+viewpoint:
+consider a significant period of time where the learning rate is relatively constant,
+and directly treat the learning rate as a real constant $\eta$.
+First, we recap \citet{gu2023why}'s theory that applies to Local SGD with $H \sim \eta^{-1}$,
+then we show how to generalize the result to our rule where $H \sim \eta^{-2}$, leading to a stronger implicit bias
+towards flatter minima.
+\myparagraph{Setup.} Consider optimizing the loss function
+$\cL(\vtheta) := \E_{\xi \sim \ctD}[\ell(\vtheta; \xi)]$,
+where $\vtheta \in \R^d$ is the parameter vector
+and $\ell(\vtheta; \xi)$ is the loss function for a single data sample $\xi$
+drawn from a training set/training distribution $\ctD$.
+We use $\mSig(\vtheta) := \Cov_{\xi \sim \ctD}[\nabla \ell(\vtheta; \xi)]$
+to denote the covariance matrix of the stochastic gradient $\nabla \ell(\vtheta; \xi)$ at $\vtheta$. Following~\citet{gu2023why}, we make regularity assumptions on $\cL(\vtheta), \mSig(\vtheta)$ and $\normtwo{\nabla \ell(\vtheta; \xi)}$ in \Cref{assumption:l}, and we assume that $\cL$ has a manifold $\Gamma$ of minimizers in \Cref{assumption:manifold}. Our analysis is based on SDE approximations near $\Gamma$, providing a clean view of how different choices of $H$ affect the selection of minimizers by Local SGD. 
+
+\begin{comment}
+\begin{figure}[t]
+    \centering
+    \subfigure[SGD]{
+        \includegraphics[width=0.3\linewidth]{example-image-a}
+    }
+    \subfigure[Local SGD with $H \sim \frac{1}{\eta}$]{
+        \includegraphics[width=0.3\linewidth]{example-image-b}
+    }
+    \subfigure[Local SGD with $H \sim \frac{1}{\eta^2}$]{
+        \includegraphics[width=0.3\linewidth]{example-image-c}
+    }
+    \caption{Illustration of the dynamics of SGD or Local SGD with different scalings of $H$ in a toy example.
+    Local SGD with QSR reduces the sharpness the fastest around a minimizer manifold.}
+    \label{fig:qsr-illustration}
+\end{figure}
+\end{comment}
+\myparagraph{SDE approximations of SGD and Local SGD.} SDE is a powerful tool  to precisely characterize 
+the effect of noise in SGD, leading to many applications such as Linear Scaling Rule~\citep{goyal2017accurate}.
+The SDE 
+$\dd \vtheta(t) = -\nabla \cL(\vtheta(t)) \dd t
+    + \tfrac{1}{\sqrt{B}} \mSig(\vtheta(t))^{1/2} \dd \vW_t$
+is conventionally used in the literature \citep{jastrzkebski2017three,smith2020generalization, li2021validity}, 
+where $\vW_t$ is the standard Wiener process.
+In this SDE, each discrete step corresponds to a continuous time interval of length $\eta$,
+and the expected gradient and gradient noise
+become a deterministic drift term and a stochastic diffusion term, respectively.
+When the training proceeds to a point $\vtheta(t)$ near a minimizer $\vzeta_0$ on the manifold $\Gamma$,
+the gradient $\nabla \cL(\vtheta(t))$ is almost zero but the gradient noise
+$\tfrac{1}{\sqrt{B}} \mSig(\vtheta(t))^{1/2} \dd \vW_t$
+drives the parameter to diffuse locally. This can be captured by 
+a careful first-order approximation of the dynamics, leading to an Ornstein-Uhlenbeck process~\citep{zhu2019anisotropic,li2019stochastic,izmailov2018averaging}.
+However, these rough approximations only hold for about $\cO({\eta}^{-1})$ steps, whereas neural networks in practice are usually trained for much longer.
+
+Recently, a series of works \citep{blanc2020implicit,damian2021label,li2021happens} study the dynamics of SGD on a \emph{longer} horizon. They show that higher-order terms can accumulate over time and drive this local diffusion to gradually move on the manifold $\Gamma$. Among them, \citet{li2021happens} precisely characterized this with an SDE tracking the {\em gradient flow projection} of $\vtheta(t)$ on $\Gamma$,  denoted as $\Phi(\vtheta(t))$ (see \Cref{def:gf projection}). Here, $\Phi(\vtheta(t))$ can be thought of as a natural ``center'' of the local diffusion. This SDE, termed as Slow SDE, tracks the dynamics of SGD over $\cO(\eta^{-2})$ steps, which is much longer than the $\cO(\eta^{-1})$ horizon for conventional SDEs. 
+
+To provide a theoretical understanding of why Local SGD generalizes better than SGD, \cite{gu2023why} derived the Slow SDEs for Local SGD using the scaling $H\sim \eta^{-1}$. By comparing the Slow SDEs, they argued that Local SGD drifts faster to flatter minima than SGD. However, their analysis does not encompass the more aggressive scaling $H\sim \eta^{-2}$ recommended by our \mname. Recognizing this gap, we derive the Slow SDE for this scaling, enriching the theoretical framework for the generalization behavior of Local SGD.    
+Below, we first present the Slow SDEs for SGD and Local SGD with $H\sim \eta^{-1}$ and $H\sim\eta^{-2}$,
+then we interpret why $H\sim\eta^{-2}$ may generalize better.
+\begin{definition}[Slow SDE for SGD, informal, \citep{li2021happens,gu2023why}] \label{def:slow-sde-sgd-informal}
+    Given $\vzeta_0 \in \Gamma$, define $\vzeta(t)$ as the solution to the following SDE with initial condition $\vzeta(0)=\vzeta_0$:
+    \begin{align}\label{eq:sgd-zeta}
+    \dd \vzeta(t)&=P_{\vzeta}\Big(\underbrace{\tfrac{1}{\sqrt{B}} \mSig_{\parallel}^{\sfrac{1}{2}}(\vzeta)\dd \vW_t}_{\text{(a)\ diffusion on $\Gamma$}}
+    \underbrace{-\tfrac{1}{2B} \nabla^3 \cL(\vzeta)[\widehat{\mSig}_{\Diamond}(\vzeta)] \dd t}_{\text{(b)\ drift on $\Gamma$}}
+    \Big).
+    \end{align}
+    Here, $P_{\vzeta}$ is a projection operator of differential forms to ensure
+    that taking an infinitesimal step from $\vzeta \in \Gamma$ remains on the manifold $\Gamma$.
+    $B$ is the total batch size.
+    $\mSig_{\parallel}(\vzeta)$ and $\widehat{\mSig}_{\Diamond}(\vzeta)$ are certain PSD matrices related to gradient noise and Hessian.
+    See~\Cref{def:slow-sde-sgd-formal} for the full definition.
+\end{definition}
+
+\begin{definition}[Slow SDE for Local SGD with $H\sim \eta^{-1}$, informal \citep{gu2023why}]\label{def:slow-sde-local-sgd-lsr-informal} Consider the scaling $H=\beta/\eta$ for some constant $\beta$. 
+    Given $\vzeta_0 \in \Gamma$, define $\vzeta(t)$ as the solution to the following SDE with initial condition $\vzeta(0)=\vzeta_0$:
+\begin{align}\label{eq:lsr-zeta}
+    \dd \vzeta(t)&=P_{\vzeta}\Big(\underbrace{\tfrac{1}{\sqrt{B}} \mSig_{\parallel}^{\sfrac{1}{2}}(\vzeta)\dd \vW_t}_{\text{(a)\ diffusion on $\Gamma$}}
+    \underbrace{-\tfrac{1}{2B} \nabla^3 \cL(\vzeta)[\widehat{\mSig}_{\Diamond}(\vzeta)] \dd t}_{\text{(b)\ drift on $\Gamma$, same as SGD}}
+    \underbrace{-\tfrac{K-1}{2B} \nabla^3 \cL(\vzeta)[\widehat{\mPsi}(\vzeta; H \eta)] \dd t}_{\text{(c)\ an extra drift term on $\Gamma$}}
+    \Big),
+\end{align}
+where $K$ is the number of workers, $B, \mSig_{\parallel}(\vzeta)$ and $\widehat{\mSig}_{\Diamond}(\vzeta)$ are the same as in~\Cref{def:slow-sde-sgd-informal}. Here, $\widehat{\mPsi}(\vzeta; \beta)$ is a PSD matrix depending on gradient noise and Hessian. It scales with $\beta$ as $\lim_{\beta \to 0}\widehat{\mPsi}(\vzeta; \beta) = \vzero$, $\lim_{\beta \to +\infty}\widehat{\mPsi}(\vzeta; \beta) = \widehat{\mSig}_{\Diamond}(\vzeta)$. \footnote{Given $\vzeta$, $\widehat{\mPsi}(\vzeta; \beta)$ is a monotonically increasing function of $\beta$ in the eigenspace of the Hessian matrix $\nabla^2 \cL(\vzeta)$.} See~\Cref{def:slow-sde-local-sgd-lsr-formal} for the full definition.
+\end{definition}
+\begin{definition}[Slow SDE for Local SGD with QSR]
+Given $\vzeta_0 \in \Gamma$, define $\vzeta(t)$ as the solution to the following SDE with initial condition $\vzeta(0)=\vzeta_0$:
+\begin{align}\label{eq:qsr-zeta}
+    \dd \vzeta(t)&=P_{\vzeta}\Big(\underbrace{\tfrac{1}{\sqrt{B}} \mSig_{\parallel}^{\sfrac{1}{2}}(\vzeta)\dd \vW_t}_{\text{(a)\ diffusion on $\Gamma$}}
+    \underbrace{-\tfrac{K}{2B} \nabla^3 \cL(\vzeta)[\widehat{\mSig}_{\Diamond}(\vzeta)] \dd t}_{\text{(b)\ drift on $\Gamma$, $K$ times larger}}
+    \Big),
+\end{align}
+where $K, B, \mSig_{\parallel}(\vzeta)$ and $\widehat{\mSig}_{\Diamond}(\vzeta)$ are defined in \Cref{def:slow-sde-sgd-informal,def:slow-sde-local-sgd-lsr-informal}.
+\end{definition}
+The following approximation theorem indicates that when the learning rate $\eta$ and the growth coefficient $\alpha$ for \mname are small, the above Slow SDEs closely track their discrete counterparts. The approximation theorem for \mname is new, and we defer the proof to \Cref{sec:proof-approx}.
+\begin{theorem}[Weak Approximations]\label{thm:main-approx}
+    Let $T > 0$ be a constant and $\vzeta(t)$ be the solution to one of the above Slow SDEs with the initial condition $\vzeta(0) = \Phi(\vths[0]) \in \Gamma$. Let $g(\vtheta)$ be any  $\cC^4$-smooth function.
+\begin{enumerate}
+    \item  \citep{gu2023why} For SGD, let $\vzeta(t)$ be the solution to \eqref{eq:sgd-zeta}. Then, $\max_{0 \le s \le \frac{T}{\eta^2}} \abs{\E[g(\Phi(\vtheta_s))] - \E[g(\vzeta(s\eta^2))]} = \ctO(\eta^{0.25})$.
+    \item  \citep{gu2023why} For Local SGD with $H=\beta/\eta$ for some constant $\beta$, let $\vzeta(t)$ be the solution to \eqref{eq:lsr-zeta}. Then, $\max_{0 \le s \le \frac{T}{H\eta^2}} \abs{\E[g(\Phi(\vths))] - \E[g(\vzeta(sH\eta^2))]} = \ctO(\eta^{0.25})$.
+    \item For Local SGD with $H=(\frac{\alpha}{\eta})^2$, where the positive constant $\alpha$ is small but larger than $\Omega(\eta^\gamma)$ for all $\gamma > 0$, let $\vzeta(t)$ be the solution to \eqref{eq:qsr-zeta}. Then, $\max_{0 \le s \le \frac{T}{H \eta^2}} \abs{\E[g(\Phi(\vths))] - \E[g(\vzeta(sH\eta^2))]} = \cO(\alpha^2)$.
+\end{enumerate}
+Here, $\cO(\,\cdot\,)$ and $\ctO(\cdot)$  hide constants that are independent of $\alpha$ and $\eta$ but can depend on $g$ and $T$.  $\ctO(\cdot)$ also hides log terms.
+\end{theorem}
+By comparing the Slow SDEs, we can predict the generalization order for different scaling as \textbf{\mname} \(>\) \(\mathbf{\{H\sim \bm{\eta}^{-1}\}}\) \(>\) \textbf{\{constant \( \mathbf{H} \}\)}, which we explain in detail below. 
+\myparagraph{Interpretation of the Slow SDEs.} We first focus on the Slow SDE for SGD \eqref{eq:sgd-zeta}. The key component of this Slow SDE is the drift term (b), which comes from higher-order approximations of the aforementioned local diffusion that happens in $\cO(\eta^{-1})$ steps.
+Viewing $\nabla^3 \cL(\vzeta)[\widehat{\mSig}_{\Diamond}(\vzeta)]$ as a semi-gradient of $\inne{\nabla^2 \cL(\vzeta)}{\widehat{\mSig}_{\Diamond}(\vzeta)}$ that discards the dependence of $\vtheta$ in $\widehat{\mSig}_{\Diamond}(\vzeta)$, we can interpret the Slow SDE as a continuous version of a semi-gradient method for reducing $\inne{\nabla^2 \cL(\vzeta)}{\widehat{\mSig}_{\Diamond}(\vzeta)}$ on $\Gamma$.
+Since the Hessian matrix $\nabla^2 \cL(\vzeta)$ determines the local curvature of the loss landscape,
+we can conclude from the Slow SDE that SGD tends to reduce sharpness and move towards flatter minimizers in $\cO(\eta^{-2})$ steps. Reduced sharpness has been shown to yield better sample complexity bounds in specific theoretical settings. For details, we refer the readers to~\citet{li2021happens}.
+
+Now, we turn to the Slow SDE for \mname. Compared with the SDE for SGD, it possesses a $K$ times larger drift term, leading to much faster sharpness reduction than SGD. An intuitive explanation for why this extra drift arises is as follows. Since the local batch size is $K$ times smaller than the global one,
+this local diffusion at each worker is much more significant than that in parallel SGD, thereby leading to an extra drift term in Slow SDE accumulated from higher-order terms.
+
+The case of Local SGD with $H={\beta}/\eta$ is somewhere in between QSR and  SGD. Compared with the SDE for SGD, it has an extra drift term (c), where $\beta$ serves as the knob to control the magnitude of the drift term.  For small $\beta$, $\widehat{\mPsi}(\vzeta)$ diminishes to zero, yielding the same SDE as SGD. By contrast, as $\beta$ goes to infinity, $\widehat{\mPsi}(\vzeta)$ approximates $\widehat{\mSig}_{\Diamond}(\vzeta)$, leading to the Slow SDE for \mname. 
+
+\myparagraph{Comparison of different scalings.} Based on the interpretation, keeping $H$ constant as $\eta$ diminishes is equivalent to setting a small $\beta$ for $H={\beta}/\eta$, making the extra drift term negligible and thus yielding nearly no generalization benefit over SGD. Conversely, the SDE for $H={\beta}/\eta$ converges to the SDE of \mname in the limit $\beta\to \infty$, maximizing the drift term. But in practice, $\beta$ cannot be arbitrarily large. In Theorem 3.3 of \cite{gu2023why}, the distance between the iterate and $\Gamma$ blows up as $\ctO(\sqrt{\beta\eta})$, 
+suggesting that setting a very large $\beta$ for a not-so-small $\eta$ can blow up the loss. Therefore, the generalization performance of  $H {\sim}\eta^{-1}$ is expected to be worse than \mname. In summary, the order of generalization performance predicted by our theory is \mname $>$ $\{H\sim \eta^{-1}\}$ $>$ \{constant $H$\}. 
+
+Experimental results in \Cref{fig:theory} validate that this order of generalization performance for different scalings holds not only for Local SGD but also for Local AdamW. For Local SGD we additionally have \{constant $H$\} $\approx $ \{parallel SGD\} since parallel SGD is mathematically equivalent to Local SGD with $H=1$. 
+Apart from $H\sim \eta^{-1}$ and $H\sim \eta^{-2}$, we also tried a more aggressive scaling, $H \sim \eta^{-3}$, but it does not provide consistent improvements over QSR. See~\Cref{sec:power3} for more discussion.
+
+
+
+
+
+
+\begin{figure}[t]
+\begin{center}
+    \subfigure[\small Local SGD on ResNet-152]{
+    \includegraphics[width=0.36\textwidth]{figs/resnet-theory-2.pdf}\label{fig:resnet_theory}
+    }
+    \subfigure[\small Local AdamW on ViT-B]{
+        \includegraphics[width=0.51\textwidth]{figs/vit-theory-3.pdf}\label{fig:vit_theory}
+    }
+\end{center}
+ \caption{\small Empirical results on Local SGD and Local AdamW validate the generalization performance order predicted by our theory: \mname $>$ $\{H\sim \eta^{-1}\}$ $>$ \{constant $H$\}. For SGD, we additionally have \{constant $H$\} $\approx$ \{parallel SGD\} since the latter is equivalent to Local SGD with $H=1$. Here, $\alpha$ and $\beta$ are tuned to maximize the test accuracy of \mname and $H\sim \eta^{-1}$, respectively.}
+        \label{fig:theory}
+\end{figure}
+
+
+
+\section{Experiments}
+
+
+In this section, we empirically demonstrate that \mname not only improves the test accuracy of local gradient methods but also reduces the wall-clock time of standard data parallel training, with a focus on the ImageNet classification task \citep{imagenet}. Our experiments include Local SGD on ResNet-152 \citep{he2016deep}, and Local AdamW on ViT-B with patch size 16x16 \citep{dosovitskiy2021an}. We briefly outline our training configuration below. See \Cref{sec:exp details} for full details. 
+
+\myparagraph{Baselines.} For \mname with base synchronization period $\constH$, we benchmark their performance against two baselines running the same number of epochs: \circled{1} Local SGD/AdamW with constant synchronization period $H=\constH$, and \circled{2} parallel SGD/AdamW.  
+When comparing with these baselines, we mainly focus on validating that (a) \mname maintains or sometimes outperforms the communication efficiency of \circled{1}, thus communicating much less than \circled{2}, and (b) \mname improves the generalization performance of \circled{1}, even surpassing \circled{2}  in test accuracy. 
+
+\myparagraph{Comparison with other synchronization strategies.} Besides the above two baselines, other potential baselines include \circled{3} Post-local SGD, \circled{4}  the scaling of $H\sim \eta^{-1}$, and \circled{5} large batch training with batch size $H\times B$, which we discuss below. 
+\circled{3} is proposed for the same purpose as QSR: to improve communication efficiency and generalization together. However, it is less communication efficient than our QSR because it starts with parallel SGD and sustains this for a significant fraction of the training duration, leading to a limited reduction in communication. Also, as shown by our comparison in \Cref{fig:resnet_intro} (also observed in \citealt{ortiz2021trade}), its generalization benefits over SGD appear shortly after switching and diminish in the end.
+\circled{4} is inspired by~\citet{gu2023why} and may also improve generalization while reducing communication, but we have conducted a thorough comparison between QSR and \circled{4} in~\Cref{fig:theory}, demonstrating the superiority of \mname.
+\circled{5} has the same communication efficiency as Local SGD with the same constant $H$ (\circled{1}), but it has been observed to have worse test accuracy than parallel SGD/AdamW without scaling up the batch size (\circled{2}), which we also observe in~\Cref{table:large batch}.
+For the above reasons, we mainly compare with baselines \circled{1} and \circled{2}.
+
+
+\myparagraph{Hardware.} We conduct the experiments on Tencent Cloud, where each machine is equipped with 8 NVIDIA GeForce RTX 3090 GPUs. The machines are interconnected by a 25Gbps network. Since intra-machine communication speed is not substantially faster than inter-machine speed on our specific hardware, we treat \emph{each GPU} as an independent worker and set the batch size on each GPU as $\Bloc=256$. In this paper, we use $a$x$b$ GPUs to denote $a$ machines with $b$ GPUs each.
+
+\myparagraph{Training Setup.} Our experiments on ResNet-152 follow the 200-epoch recipe in \cite{foret2021sharpnessaware} except that we use 5 epochs of linear learning rate warmup. For experiments on ViT-B, we follow the simple and effective 300-epoch recipe proposed in \cite{beyer2022betterplain} with RandAugment and Mixup. We use the cosine decay unless otherwise stated. The hyperparameters (primarily learning rate and weight decay) are optimally tuned for all baselines. We explore $\constH=2,4$ for ResNet-152 and $\constH=4,8$ for ViT-B. This choice stems from the observation that the communication overhead for ResNet-152 is smaller than ViT-B (see \Cref{table:time}). To tune the growth coefficient $\alpha$ for QSR, we first fix the learning rate schedule and then search among a few values of $\alpha$. The $\alpha$ values we explore typically allow the training to start with $\constH$, maintain $H=\constH$ for an initial period to optimize the training loss, and gradually increase $H$ as $\eta$ decays in the late phase. 
+
+\subsection{\mname Improves Generalization}\label{subsec:generalization improvement}
+
+Through experiments spanning various batch sizes and learning rate schedules, in this subsection, we illustrate that \mname consistently enhances the generalization of gradient methods, even outperforming the communication-intensive data parallel approach.
+\myparagraph{Main results.} We first present our main results for batch size $B=4096$  on 2x8 GPUs, covering Local SGD on ResNet-152 and Local AdamW on ViT-B. As shown in \Cref{table:main result}, \mname significantly improves the validation accuracy of local gradient methods by up to $0.8\%$ on ResNet-152 and $1.7\%$ on ViT-B, despite inducing higher training loss. The results support the thesis that the improvement in generalization is due to the implicit regularization of local gradient noise instead of better optimization. Noticeably, QSR surpasses the data parallel approach in validation accuracy by $0.7\%$ on ResNet-152 and by $1.1\%$ on ViT-B while cutting the communication volume to less than $25\%$. As an added benefit of increasing the synchronization interval in line with the decaying learning rate, QSR further reduces communication overhead, even halving the communication volume compared to Local AdamW with a fixed synchronization period on ViT-B. 
+The advantages of \mname are more pronounced for ViT-B compared to ResNet-152. This is probably because vision transformers are general-purpose architectures with
+less image-specific inductive bias than CNNs~\citep{dosovitskiy2021an,chen2021vision}. As a result, they may benefit more from external regularization effects, such as those induced by adding local steps.
+\setlength{\tabcolsep}{1.5pt}
+\noindent
+\begin{table}[t]
+    \caption{\small \mname enhances the test accuracy of local gradient methods, even outperforming the communication-intensive data parallel approach. The experiments below use batch size 4096. \added{We report the validation accuracy and train loss averaged over 3 runs, along with the standard deviation.}}\label{table:main result}
+\begin{minipage}{0.485\textwidth}
+    \centering
+    \small
+    \subfigure[Local SGD on ResNet-152]{
+    \begin{tabular}{@{} c c c c @{}}
+        \toprule
+       Method & Val. acc. (\%) & Train loss & Comm.  \\
+        \midrule
+        Parallel SGD & 79.53 (0.07) & 1.57 (0.01) & 100\%\\
+        \midrule[0.2pt]
+        Local SGD ($H$=2) & 79.54 (0.07)& \textbf{1.58} (0.00) &50\%\\
+        + QSR ($\constH$=2) & \textbf{80.30} (0.04) & 1.67 (0.01) & \textbf{39.7\%} \\
+        \midrule[0.2pt]
+        Local SGD ($H$=4) &79.48 (0.12) & \textbf{1.62} (0.02) &25\%\\
+        + QSR ($\constH$=4) & \textbf{80.27} (0.05) & 1.69 (0.01) & \textbf{20.1\%} \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\begin{minipage}{0.485\textwidth}
+    \centering
+    \small
+    \subfigure[Local AdamW on ViT-B]{
+    \begin{tabular}{@{} c c c c @{}}
+        \toprule
+        Method & Val. acc. (\%)&  Train loss &  Comm.  \\
+        \midrule
+        Parallel AdamW & 79.86 (0.03) & 1.09 (0.00) & 100\%\\
+        \midrule[0.2pt]
+        Local AdamW ($H$=4) & 79.32 (0.06)& \textbf{1.01} (0.02)  &25\%\\
+        + QSR ($\constH$=4) & \textbf{80.98} (0.05) & 1.32 (0.00) & \textbf{10.4\%} \\
+        \midrule[0.2pt]
+        Local AdamW ($H$=8) &78.93 (0.10) & \textbf{1.06} (0.00) &12.5\%\\
+        + QSR ($\constH$=8) & \textbf{80.56} (0.10) & 1.35 (0.01) & \textbf{6.9\%} \\
+        \bottomrule
+    \end{tabular}}
+\end{minipage}
+\end{table}
+\setlength{\tabcolsep}{2pt}
+\begin{table}
+\small
+    \caption{\small \mname mitigates the generalization degradation in large-batch training. Here the batch size is $16384$. }\label{table:large batch}
+
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \subfigure[Local SGD on ResNet-152]{
+    \begin{tabular}{@{} c c c @{}}
+        \toprule
+       Method & Val. Acc.(\%) & Comm. (\%) \\
+        \midrule
+        Parallel SGD & 79.20 & 100\\
+         \midrule[0.2pt]
+        Local SGD ($H$=2) & 78.67&50\\
+        + QSR ($\constH=2$)& \textbf{79.27} &\textbf{42.8}\\
+       \midrule[0.2pt]
+       Local SGD ($H$=4) &78.34&25\\
+       + QSR ($\constH=4$) & \textbf{78.65} &\textbf{21.9}\\
+        \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \subfigure[Local AdamW on ViT-B]{
+    \begin{tabular}{@{} c c c @{}}
+        \toprule
+       Method & Val. Acc. (\%) &  Comm. (\%) \\
+        \midrule
+        Parallel AdamW & 78.52 & 100\\
+        \midrule[0.2pt]
+       Local AdamW ($H$=4) & 77.83&25\\
+        +QSR ($\constH=4$) &\textbf{ 79.36}&\textbf{16.1}\\
+       \midrule[0.2pt]
+        Local AdamW ($H$=8) &77.62&12.5\\
+        +QSR ($\constH=8$) & \textbf{78.26} &\textbf{9.8}\\
+        \bottomrule
+    \end{tabular}}
+\end{minipage}
+\end{table}
+
+\myparagraph{Scaling up the batch size.} 
+In \Cref{table:large batch}, when scaling the training up to 8x8 GPUs with total batch size $B=16384$, we observe a drop in test accuracy for both data parallel approach and local gradient methods. This generalization degradation for large batch training, which has been widely observed in the literature \citep{shallue2019measuring,jastrzkebski2017three,you2018imagenet}, probably arises from a reduced level of gradient noise associated with increased batch size~\citep{keskar2017on,smith2021on}.  
+While the Linear Scaling Rule for SGD \citep{krizhevsky2014one,goyal2017accurate} and the Square Root Scaling Rule \citep{malladi2022sdes,granziol2022learning} for adaptive gradient methods – which increase the learning rate in proportion to the total batch size or its square root – can mitigate this degradation, they cannot fully bridge the gap. In \Cref{table:large batch}, the test accuracy drop persists even when we tune the learning rate for all baselines.  Applying QSR to local gradient methods can help reduce this generalization gap. It improves the validation accuracy of local gradient methods by up to $0.6\%$ on ResNet-152 and $1.5\%$ on ViT-B. This enables local gradient methods to achieve comparable validation accuracy as the data parallel approach on ResNet or outperform it by $0.8\%$ on ViT while communicating considerably less.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+ \centering     \includegraphics[width=1\linewidth]{figs/linear-decay.pdf} % adjust the width as necessary
+        \caption{\small For linear decay, \mname improves the test accuracy of Local AdamW on ViT-B, even outperforming the communication-intensive parallel AdamW.}
+        \label{fig:linear} 
+
+\end{wrapfigure}
+
+\myparagraph{Other learning rate schedules. } So far, our experiments are conducted with the cosine learning rate schedule, which is a common choice for training modern deep neural nets \citep{liu2021swin,liu2022convnet,gpt}. 
+To further validate the efficacy of \mname, we now investigate other popular learning rate schedules, including linear \citep{li2020budgeted,izsak2021train,Leclerc_2023_CVPR} and step decay \citep{he2016deep,huang2017densely,ma2019deep}. See \Cref{fig:schedule} for a visualization of these schedules. 
+\Cref{fig:linear} presents the results for Local AdamW on ViT-B with linear decay, where the peak learning rates for baselines are tuned optimally. \mname improves the test accuracy of Local AdamW by a significant margin of $1.4\%$, even outperforming parallel AdamW by $0.6\%$ while cutting the communication volume to only $9.3\%$.  The step decay scheduler divides the learning rate by factors such as $2$ or $10$ at some specified epochs. Given the absence of standard recipes to determine the decay points in our training setup, we derive a step decay schedule from the cosine decay by rounding its learning rate to powers of $2$, which is defined as $\etastep(t):=2^{\mathrm{round}(\log_2 \etacos(t))}$. As shown in  \Cref{table:step decay}, \mname exhibits strong generalization performance with this decay schedule, enhancing the test accuracy of local gradient methods by up to $0.8\%$ on ResNet-152 and $1.5\%$ on ViT-B. It even surpasses the communication-intensive parallel SGD by $0.7\%$ on ResNet and parallel AdamW by $1\%$ on ViT. 
+\begin{table}[t]
+    \small
+\caption{\small \mname also exhibits strong generalization performance on the step-decay learning rate schedule.}\label{table:step decay}
+
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \subfigure[Local SGD on ResNet-152.]{
+    \begin{tabular}{@{} c c c @{}}
+        \toprule
+       Method &  Val. Acc. (\%)& Comm. (\%) \\
+        \midrule
+        Parallel SGD & 79.68& 100\\
+        \midrule[0.2pt]
+        Local SGD ($H$=2) & 79.58&50\\
+        +QSR ($\constH=2$) & \textbf{80.40} &\textbf{40.3}\\
+       \midrule[0.2pt]
+         Local SGD ($H$=4) &79.53&25\\
+        +QSR ($\constH=4$) & \textbf{80.11} &\textbf{20.5}\\
+        \bottomrule
+    \end{tabular}\label{table:step resnet}
+    }
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \small
+    \subfigure[Local AdamW on ViT-B.]{
+    \begin{tabular}{@{} c c c @{}}
+        \toprule
+       Method & Val. Acc.(\%)  &  Comm.(\%) \\
+        \midrule
+        Parallel AdamW & 79.91 & 100\\
+        \midrule[0.2pt]
+       Local AdamW ($H$=4) &79.36&25\\
+        + QSR ($\constH=4$)  &\textbf{80.9}&\textbf{12.7}\\
+       \midrule[0.2pt]
+      Local AdamW ($H$=8) &79.23&12.5\\
+       + QSR($\constH=8$)  &\textbf{80.65 }&\textbf{7.2}\\
+        \bottomrule
+    \end{tabular}\label{table:step vit}}
+\end{minipage}
+\end{table}
+
+\begin{table}[t]
+\caption{\small \mname reduces the wall-clock time of data parallel training. The following tables present wall-clock time for the entire training process on 2x8 GPUs and 8x8 GPUs, with batch sizes 4096 and 16384, respectively. We highlight the wall-clock time of \mname when it matches or outperforms the data parallel baseline in test accuracy. ``Ratio'' represents communication time divided by total time, reflecting the communication overhead. We also include local gradient methods with a constant synchronization period for reference. }\label{table:time}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \small
+    \subfigure[ResNet-152 (200 epochs) on 2x8 GPUs]{
+    \begin{tabular}{@{} c  c c c @{}}
+        \toprule
+       Method & Comm. (h)& Total (h) & Ratio (\%)\\
+        \midrule
+        Parallel SGD & 3.3 & 20.7 &15.9 \\
+        QSR ($\constH=2$)& 1.3 &\textbf{18.7}&7.0\\
+        QSR ($\constH=4$) & 0.7 &\textbf{18.0}&3.9\\
+         \midrule[0.2pt]
+         Local SGD ($H$=2) & 1.6&19.0&8.4\\
+       Local SGD ($H$=4) &0.8&18.0&4.4\\
+        \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \small
+    \subfigure[ViT-B (300 epochs) on 2x8 GPUs]{
+    \begin{tabular}{@{} c c c c @{}}
+        \toprule
+       Method & Comm. (h) &  Total (h) & Ratio(\%)\\
+       \midrule
+       Parallel AdamW & 7.3 &26.7&27.3\\
+       QSR ($\constH=4$) & 0.8&\textbf{20.2}&4.0\\
+        QSR ($\constH=8$) & 0.5 &\textbf{20.0}&2.5\\
+        \midrule[0.2pt]
+       Local AdamW ($H$=4) &1.8 &21.2&8.4\\
+       Local AdamW ($H$=8) &0.9 &20.5&4.4\\
+        \bottomrule
+    \end{tabular}}
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \small
+    \subfigure[ResNet-152 (200 epochs) on 8x8 GPUs]{
+    \begin{tabular}{@{} c  c c c @{}}
+        \toprule
+       Method & Comm. (h)& Total (h) & Ratio (\%)\\
+        \midrule
+        Parallel SGD & 1.3 & 5.7 &22.8\\
+          QSR ($\constH=2$)& 0.6 &\textbf{5.0}& 12.0\\
+        QSR ($\constH=4$) & 0.3 &4.7&6.4\\
+       \midrule[0.2pt]
+        Local SGD ($H$=2) & 0.7&5.1&13.7\\
+       Local SGD ($H$=4) &0.3&4.8&6.3\\
+        \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+    \centering
+    \small
+    \subfigure[ViT-B (300 epochs) on 8x8 GPUs]{
+    \begin{tabular}{@{} c c c c @{}}
+        \toprule
+       Method & Comm. (h) &  Total (h) & Ratio (\%)\\
+        \midrule
+        Parallel AdamW &3.7 &8.6&43.0\\
+        QSR ($\constH=4$) & 0.6&\textbf{5.5}&10.9\\
+        QSR ($\constH=8$) & 0.4 &5.3&7.5\\
+       \midrule[0.2pt]
+        Local AdamW ($H$=4) &0.9 &5.8&15.5\\
+       Local AdamW ($H$=8) &0.5 &5.3&9.4\\
+        \bottomrule
+    \end{tabular}}
+\end{minipage}
+\end{table}
+
+\subsection{\mname Reduces Wall-clock Time}\label{subsec:wall clock}
+
+In addition to improving generalization, our original motivation for adopting local steps is to reduce communication overhead and hence reduce the wall-clock time.
+In this section, we confirm this for training with 2x8 and 8x8 GPUs, as shown in \Cref{table:time}. See also \Cref{sec:wall-clock detail} for our method of measuring the communication time. 
+In our setup, scaling the training from 2x8 to 8x8 GPUs increases the communication overhead for both models. Notably, on 8x8 GPUs, communication accounts for almost half of the total training time for ViT-B. Since communication makes up a larger portion of the total time for ViT-B compared to ResNet-152, the speedup from \mname is more significant on ViT-B: the time is cut from 26.7 to 20.2 hours on 2x8 GPUs, and 8.6 to 5.5 hours on 8x8 GPUs. As discussed in \Cref{subsec:generalization improvement}, compared to the constant period local gradient method, \mname further reduces the communication cost by increasing the synchronization period in the late phase. For example, applying \mname to Local AdamW with $H=4$ further reduces the time by 1 hour for ViT training on 2x8 GPUs. 
+
+\myparagraph{Discussion on the choice of $\constH$.} As elaborated in \Cref{sec:method}, $\constH$ indicates the minimum synchronization period and should be determined based on the communication overhead. For ResNet-152, given that communication only accounts for 3.3 out of 20.7 hours on 2x8 GPUs and 1.3 out of 5.7 hours on 8x8 GPUs, setting $\constH$ as $2$ or $4$ suffices to reduce the communication time to an inconsequential amount. By contrast, the communication overhead for ViT-B is more prominent, motivating us to consider larger values of $\constH$, such as 4 and 8. As shown in \Cref{table:main result,table:large batch}, $\constH$ introduces a tradeoff between communication efficiency and final test accuracy. For instance, when training ResNet-152 with batch size 16384, one can either choose $\constH=2$ to achieve comparable test accuracy as parallel SGD, or $\constH=4$ to further halve the communication volume at the expense of a $0.6\%$ drop in test accuracy. One probable explanation for this accuracy drop for larger $\constH$ can be worse optimization in the early training phase, where the learning rate is large.
+
+
+
+\section{Discussions and Future Directions}
+
+
+This paper primarily focuses on relatively large models trained with long horizons, and proposes the Quadratic Synchronization Rule (QSR).
+As validated by our experiments, QSR effectively improves test accuracy and communication efficiency simultaneously for training large vision models (ResNet-152 and ViT-B) with quite a few hundred epochs. However, on the downside, for smaller models trained with shorter horizons, \mname may not consistently deliver noticeable generalization improvements (see \Cref{table:resnet50}). Nonetheless, training in this regime is not costly, either, making it less of a critical concern.
+Another limitation of our work is that the effectiveness of QSR relies on the implicit regularization effects of noise, but regularization techniques become less important in bridging the gap between the training and population loss~\citep{vyas2023onlinesgd} in pertaining large model with unsupervised learning, where the training is done on massive data with only a few epochs.
+Still, certain implicit/explicit regularization effects have been found to be effective in improving downstream performance despite the same pertaining loss~\citep{liu2023same,panigrahi2024efficient}.
+We leave it to future work to explore and design communication-efficient methods for unsupervised learning, particularly language model pretraining, that improve models' transferability to downstream tasks.
+
+
+
+
+
+
+
+
+
+
+
+
+

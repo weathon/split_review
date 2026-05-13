@@ -1,0 +1,297 @@
+\title{Stabilizing Reinforcement Learning in Differentiable Multiphysics Simulation}
+
+\begin{abstract}
+Recent advances in GPU-based parallel simulation have enabled practitioners to collect large amounts of data and train complex control policies using deep reinforcement learning (RL), on commodity GPUs. However, such successes for RL in robotics have been limited to tasks sufficiently simulated by fast rigid-body dynamics. Simulation techniques for soft bodies are comparatively several orders of magnitude slower, thereby limiting the use of RL due to sample complexity requirements. To address this challenge, this paper presents both a novel RL algorithm and a simulation platform to enable scaling RL on tasks involving rigid bodies and deformables. We introduce Soft Analytic Policy Optimization (SAPO), a maximum entropy first-order model-based actor-critic RL algorithm, which uses first-order analytic gradients from differentiable simulation to train a stochastic actor to maximize expected return and entropy. Alongside our approach, we develop Rewarped, a parallel differentiable multiphysics simulation platform that supports simulating various materials beyond rigid bodies. We re-implement challenging manipulation and locomotion tasks in Rewarped, and show that SAPO outperforms baselines over a range of tasks that involve interaction between rigid bodies, articulations, and deformables.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Progress in deep reinforcement learning (RL) has produced policies capable of impressive behavior, from playing games with superhuman performance (Silver et al., 2016; Vinyals et al., 2019) to controlling robots for assembly (Tang et al., 2023), dexterous manipulation (Andrychowicz et al., 2020; Akkaya et al., 2019), navigation (Wijmans et al., 2020; Kaufmann et al., 2023), and locomotion (Rudin et al., 2021; Radosavovic et al., 2024). However, standard model-free RL algorithms are extremely sample inefficient. Thus, the main practical bottleneck when using RL is the cost of acquiring large amounts of training data.  
+
+To scale data collection for online RL, prior works developed distributed RL frameworks (Nair et al., 2015; Horgan et al., 2018; Espeholt et al., 2018) that run many processes across a large compute cluster, which is inaccessible to most researchers and practitioners. More recently, GPU-based parallel environments (Dalton et al., 2020; Freeman et al., 2021; Liang et al., 2018; Makoviychuk et al., 2021; Mittal et al., 2023; Gu et al., 2023) have enabled training RL at scale on a single consumer GPU.  
+
+However, such successes of scaling RL in robotics have been limited to tasks sufficiently simulated by fast rigid-body dynamics (Makoviychuk et al., 2021), while physics-based simulation techniques for soft bodies are comparatively several orders of magnitude slower. Consequently for tasks involving deformable objects, such as robotic manipulation of rope (Nair et al., 2017; Chi et al., 2022), cloth (Ha & Song, 2022; Lin et al., 2022), elastics (Shen et al., 2022), liquids (Ichnowski et al., 2022; Zhou et al., 2023), dough (Shi et al., 2022; 2023; Lin et al., 2023), or granular piles (Wang et al., 2023; Xue et al., 2023), approaches based on motion planning, trajectory optimization, or model predictive control have been preferred over and outperform RL (Huang et al., 2020; Chen et al., 2022).  
+
+How can we overcome this data bottleneck to scaling RL on tasks involving deformables? Modelbased reinforcement learning (MBRL) has shown promise at reducing sample complexity, by leveraging some known model or learning a world model to predict environment dynamics and rewards (Moerland et al., 2023). In contrast to rigid bodies however, soft bodies have more complex dynamics and higher-dimensional state spaces. This makes learning to model dynamics of deformables highly nontrivial (Lin et al., 2021), often requiring specialized systems architecture and material-specific assumptions such as volume preservation or connectivity.  
+
+![](images/43a4f8b1872be4cf4a180aab424218b88a5f855374d9bba598bac36a5cc8d8a3.jpg)  
+Figure 1: Visualizations of tasks implemented in Rewarped. These are manipulation and locomotion tasks involving rigid and soft bodies. AntRun and HandReorient are tasks with articulated rigid bodies, while RollingFlat, SoftJumper, HandFlip, and FluidMove are tasks with deformables.  
+
+Recent developments in differentiable physics-based simulators of deformables (Hu et al., 2019b; Du et al., 2021; Huang et al., 2020; Zhou et al., 2023; Wang et al., 2024; Liang et al., 2019; Qiao et al., 2021a; Li et al., 2022b; Heiden et al., 2023) have shown that first-order gradients from differentiable simulation can be used for gradient-based trajectory optimization and achieve low sample complexity. Yet such approaches are sensitive to initial conditions and get stuck in local optima due to non-smooth optimization landscapes or discontinuities induced by contacts (Li et al., 2022a; Antonova et al., 2023). Additionally, existing soft-body simulations are not easily parallelized, which limits scaling RL in them. Overall, there is no existing simulation platform that is parallelized, differentiable, and supports interaction between articulated rigid bodies and deformables.  
+
+In this paper, we approach the sample efficiency problem using first-order model-based RL (FOMBRL), which leverages first-order analytic gradients from differentiable simulation to accelerate policy learning, without explicitly learning a world model. Thus far, FO-MBRL has been shown to achieve low sample complexity on articulated rigid-body locomotion tasks (Freeman et al., 2021; Xu et al., 2021), but has not yet been shown to work well for tasks involving deformables (Chen et al., 2022). We hypothesize that entropy regularization can stabilize policy optimization over analytic gradients from differentiable simulation, such as by smoothing the optimization landscape (Ahmed et al., 2019). To this end, we introduce a novel maximum entropy FO-MBRL algorithm, alongside a parallel differentiable multiphysics simulation platform for RL.  
+
+Contributions. i) We introduce Soft Analytic Policy Optimization (SAPO), a first-order MBRL algorithm based on the maximum entropy RL framework. We formulate SAPO as an on-policy actorcritic RL algorithm, where a stochastic actor is trained to maximize expected return and entropy using first-order analytic gradients from differentiable simulation. ii) We present Rewarped, a scalable and easy-to-use platform which enables parallelizing RL environments of GPU-accelerated differentiable multiphysics simulation and supports various materials beyond rigid bodies. iii) We demonstrate that parallel differentiable simulation enables SAPO to outperform baselines over a range of challenging manipulation and locomotion tasks re-implemented using Rewarped that involve interaction between rigid bodies, articulations, and deformables such as elastic, plasticine, or fluid materials.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+We refer the reader to (Newbury et al., 2024) for an overview of differentiable simulation.  
+
+![](images/fcbef9e175dfd70b6147c532dd6d3bff3f95e5acdb823ba39bc971ec2df4f342.jpg)  
+
+Table 1: Comparison of physics-based parallel simulation platforms for RL. We use \* to indicate incomplete feature support at the time of writing. i) Isaac Lab / Orbit: Missing deformable tasks due to breaking API changes and poor simulation stability / scaling. ii) ManiSkill: The latest version ManiSkill3 does not yet support the soft body tasks introduced in v2. iii) MJX: Stability issues with autodifferentiation and gradients. iv) DaXBench: Plasticine task was omitted from benchmark and requires additional development. v) DFlex: While later work (Murthy et al., 2021; Heiden et al., 2023) has built on DFlex to support elastic and cloth materials, their simulations were not parallelized.  
+
+Parallel differentiable simulation. There are few prior works on parallel differentiable simulators capable of running many environments together, while also computing simulation gradients in batches. TinyDiffSim (Heiden et al., 2021) implements articulated rigid-body dynamics and contact models in $\mathrm{C++/CUDA}$ that can integrate with various autodifferentiation libraries. Brax (Freeman et al., 2021) implements a parallel simulator in JAX for articulated rigid-body dynamics with simple collision shape primitives. Recently, MJX is building on Brax to provide a JAX re-implementation of MuJoCo (Todorov et al., 2012), a physics engine widely used in RL and robotics, but does not have feature parity with MuJoCo yet. These aforementioned parallel differentiable simulators are only capable of modeling articulated rigid bodies. DaXBench (Chen et al., 2022) also uses JAX to enable fast parallel simulation of deformables such as rope and liquid by Material Point Method (MPM) or cloth by mass-spring systems, but does not support articulated rigid bodies. DFlex (Xu et al., 2021) presents a differentiable simulator based on source-code transformation (Griewank & Walther, 2008; Hu et al., 2020) of simulation kernel code to $\mathrm{C++/CUDA}$ , that integrates with PyTorch for tape-based autodifferentiation. Xu et al. (2021) use DFlex for parallel simulation of articulated rigid bodies for high-dimensional locomotion tasks. Later work (Murthy et al., 2021; Heiden et al., 2023) also used DFlex to develop differentiable simulations of cloth and elastic objects, but these were not parallelized and did not support interaction with articulated rigid bodies. To the best of our knowledge, there is no existing differentiable simulation platform that is parallelized with multiphysics support for interaction between rigid bodies, articulations, and various deformables. In this paper, we aim to close this gap with Rewarped, our platform for parallel differentiable multiphysics simulation, and in Table 1 we compare Rewarped against existing physics-based parallel simulation platforms.  
+
+Learning control with differentiable physics. Gradient-based trajectory optimization is commonly used with differentiable simulation of soft bodies (Hu et al., 2019b; 2020; Huang et al., 2020; Li et al., 2023a; Zhou et al., 2023; Wang et al., 2024; Si et al., 2024; Du et al., 2021; Li et al., 2022b; Rojas et al., 2021; Qiao et al., 2020; 2021a; Liu et al., 2024; Chen et al., 2022; Heiden et al., 2023). Differentiable physics can provide physical priors for control in end-to-end learning systems, such as for quadruped locomotion (Song et al., 2024), drone navigation (Zhang et al., 2024), robot painting (Schaldenbrand et al., 2023), or motion imitation (Ren et al., 2023). Gradients from differentiable simulation can also be directly used for policy optimization. PODS (Mora et al., 2021) proposes a first and second order policy improvement based on analytic gradients of a value function with respect to the policy’s action outputs. APG (Freeman et al., 2021) uses analytic simulation gradients to directly compute policy gradients. SHAC (Xu et al., 2021) presents an actor-critic algorithm, where the actor is optimized over a short horizon using analytic gradients, and a terminal value function helps smooth the optimization landscape. AHAC (Georgiev et al., 2024) modifies SHAC to adjust the policy horizon by truncating stiff contacts based on contact forces or the norm of the dynamics Jacobian. Several works also propose different ways to overcome bias and non-smooth dynamics resulting from contacts, by reweighting analytic gradients (Gao et al., 2024; Son et al., 2024) or explicit smoothing (Suh et al.,  
+
+2022; Zhang et al., 2023; Schwarke et al., 2024). In this work, we propose a maximum entropy FO-MBRL algorithm to stabilize policy learning with gradients from differentiable simulation.  
+
+
+
+\section{3 BACKGROUND  }
+
+
+Reinforcement learning (RL) considers an agent interacting with an environment, formalized as a Markov decision process (MDP) represented by a tuple $(S,\mathcal{A},P,R,\rho_{0},\gamma)$ . In this work, we consider discrete-time, infinite-horizon MDPs with continuous action spaces, where $s\in S$ are states, $\mathbf{a}\in A$ are actions, $P:S\times A\to S$ is the transition function, $R:S\times A\to\mathbb{R}$ is a reward function, $\rho_{0}(s)$ is an initial state distribution, and $\gamma$ is the discount factor. We want to obtain a policy $\pi:{\mathcal{S}}\rightarrow A$ which maximizes the expected discounted sum of rewards (return) $\mathbb{E}_{\pi}[\sum_{t=0}^{\infty}\gamma^{t}\bar{r}_{t}]$ with $r_{t}=R(s_{t},\mathbf{a}_{t})$ starting from state $s_{0}\sim\rho_{0}$ . We also denote the state distribution $\rho_{\pi}(s)$ and state-action distribution $\rho_{\pi}(s,\bar{\pmb{a}})$ for trajectories generated by a policy $\pi(\boldsymbol{a}_{t}|\boldsymbol{s}_{t})$ .  
+
+In practice, the agent interacts with the environment for $T$ steps in a finite-length episode, yielding a trajectory $\tau=(s_{0},a_{0},s_{1},a_{1},\ldots,s_{T-1},a_{T-1})$ . We can define the $H$ -step return :  
+
+$$
+R_{0:H}(\tau)=\sum_{t=0}^{H-1}\gamma^{t}r_{t},
+$$  
+
+and standard RL objective to optimize $\theta$ parameterizing a policy $\pi_{\theta}$ to maximize the expected return :  
+
+$$
+J(\pi)=\mathbb{E}_{s_{0}\sim\rho_{0}}[R_{0:T}].
+$$  
+
+Typically, the policy gradient theorem (Sutton et al., 1999) provides a useful expression of $\nabla_{\boldsymbol{\theta}}J(\pi)$ that does not depend on the derivative of state distribution $\rho_{\pi}(\cdot)$ :  
+
+$$
+\nabla_{\theta}J(\pi)\propto\int_{S}\rho_{\pi}(s)\int_{A}\nabla_{\theta}\pi({a}|s)Q^{\pi}(s,{a})\,d{a}\,d{s},
+$$  
+
+where $Q^{\pi}(\pmb{s}_{t},\pmb{a}_{t})=\mathbb{E}_{\tau\sim\rho_{\pi}}[R_{t:T}]$ is the $Q$ -function (state-action value function).  
+
+We proceed to review zeroth-order versus first-order estimators of the policy gradient following the discussion in (Suh et al., 2022; Georgiev et al., 2024). We denote a single zeroth-order estimate :  
+
+$$
+\hat{\nabla}_{\theta}^{[0]}J(\pi)=R_{0:T}\sum_{t=0}^{T-1}\nabla_{\theta}\log\pi(\mathbf{a}_{t}|s_{t}),
+$$  
+
+where the zeroth-order batched gradient (ZOBG) is the sample mean $\begin{array}{r}{\overline{{\nabla}}_{\theta}^{[0]}J(\pi)=\frac{1}{N}\sum_{i=1}^{N}\hat{\nabla}_{\theta}^{[0]}J(\pi)}\end{array}$ and is an unbiased estimator, under some mild assumptions to ensure the gradients are well-defined. The ZOBG yields an $N$ -sample Monte-Carlo estimate commonly known as the REINFORCE estimator (Williams, 1992) in RL literature, or the score function / likelihood-ratio estimator. Policy gradient methods may use different forms of Equation 4 to adjust the bias and variance of the estimator (Schulman et al., 2015b). For instance, a baseline term can be used to reduce variance of the estimator, by substituting $R_{0:T}$ with $R_{0:T}-R_{l:H+l}$ .  
+
+Differentiable simulation as the environment provides gradients for the transition dynamics $P$ and rewards $R$ , so we can directly obtain an analytic value for $\nabla_{\boldsymbol{\theta}}R_{0:T}$ under policy $\pi_{\theta}$ . In this setting, for a single first-order estimate :  
+
+$$
+\hat{\nabla}_{\theta}^{[1]}J(\pi)=\nabla_{\theta}R_{0:T},
+$$  
+
+then the first-order batched gradient (FOBG) is the sample mean $\begin{array}{r}{\overline{{\nabla}}_{\theta}^{[1]}J(\pi)=\frac{1}{N}\sum_{i=1}^{N}\hat{\nabla}_{\theta}^{[1]}J(\pi)}\end{array}$ , and is also known as the pathwise derivative (Schulman et al., 2015a) or reparameterization trick (Kingma & Welling, 2014; Rezende et al., 2014; Titsias & Lázaro-Gredilla, 2014).  
+
+First-order model-based RL (FO-MBRL) aims to use differentiable simulation (and its first-order analytic gradients) as a known differentiable model, in contrast to vanilla MBRL which either assumes a given non-differentiable model or learns a world model of dynamics and rewards from data.  
+
+Analytic Policy Gradient (APG, Freeman et al. (2021)) uses FOBG estimates to directly maximize the discounted return over a truncated horizon :  
+
+$$
+J(\pi)=\sum_{l=t}^{t+H-1}\mathbb{E}_{(\pmb{s}_{l},\pmb{a}_{l})\sim\rho_{\pi}}[\gamma^{l-t}r_{l}],
+$$  
+
+and is also referred to as Backpropagation Through Time (BPTT, Werbos (1990); Mozer (1995)), particularly when the horizon is the full episode length (Degrave et al., 2019; Huang et al., 2020).  
+
+Short-Horizon Actor-Critic (SHAC, $\mathrm{\DeltaXu}$ et al. (2021)) is a FO-MBRL algorithm which learns a policy $\pi_{\theta}$ and (terminal) value function $V_{\psi}$ :  
+
+$$
+J(\pi)=\sum_{l=t}^{t+H-1}\mathbb{E}_{(s_{l},a_{l})\sim\rho_{\pi}}[\gamma^{l-t}r_{l}+\gamma^{t}V(s_{t+H})],
+$$  
+
+$$
+\mathcal{L}(V)=\sum_{l=t}^{t+H-1}\mathbb{E}_{\pmb{s}_{l}\sim\rho_{\pi}}[||V(\pmb{s})-\tilde{V}(\pmb{s})||^{2}],
+$$  
+
+where $\tilde{V}(s_{t})$ are value estimates for state $\scriptstyle s_{t}$ computed starting from time step $t$ over an $H$ -step horizon. $\mathrm{TD}(\boldsymbol{\lambda})$ (Sutton, 1988) is used for value estimation, which computes $\lambda$ -returns $G_{t:t+H}^{\lambda}$ as a weighted average of value-bootstrapped $k$ -step returns $G_{t:t+k}$ :  
+
+$$
+\tilde{V}(\pmb{\mathscr{s}}_{t})=G_{t:t+H}^{\lambda}=(1-\lambda)\left(\sum_{l=1}^{H-1-t}\lambda^{l-1}G_{t:t+l}\right)+\lambda^{H-t-1}G_{t:t+H},
+$$  
+
+where $\begin{array}{r}{G_{t:t+k}=\left(\sum_{l=0}^{k-1}\gamma^{l}r_{t+l}\right)+\gamma^{k}V(s_{t+k})}\end{array}$ . The policy and value function are optimized in an alternating fashion per standard actor-critic formulation (Konda & Tsitsiklis, 1999). The policy gradient is obtained by FOBG estimation, with single first-order estimate :  
+
+$$
+\begin{array}{r}{\hat{\nabla}_{\theta}^{[1]}J(\pi)=\nabla_{\theta}\big(R_{0:H}+\gamma^{H}V(s_{H})\big),}\end{array}
+$$  
+
+and the value function is optimized as usual by backpropagating $\nabla_{\psi}\mathcal{L}(V)$ of the mean-squared loss in Eq. 8. Combining value estimation with a truncated short-horizon window where $H\ll T$ (Williams & Zipser, 1995), SHAC optimizes over a smoother surrogate reward landscape compared to BPTT over the entire $T$ -step episode.  
+
+
+
+\section{4 SOFT ANALYTIC POLICY OPTIMIZATION (SAPO)  }
+
+
+ We hypothesize that entropy regularization can stabilize policy optimization over analytic gradients from differentiable simulation, such as by smoothing the optimization landscape (Ahmed et al., 2019) or providing robustness under perturbations (Eysenbach & Levine, 2022).  
+
+We draw on the maximum entropy RL framework (Kappen, 2005; Todorov, 2006; Ziebart et al., 2008; Toussaint, 2009; Theodorou et al., 2010; Haarnoja et al., 2017) to formulate Soft Analytic Policy Optimization (SAPO), a maximum entropy FO-MBRL algorithm (Section 4.1). To implement SAPO, we make several design choices, including modifications building on SHAC (Section 4.2).1, we describe how we use visual encoders to learn policies from high-dimensional visual observations in differentiable simulation.2.  
+
+4.1 MAXIMUM ENTROPY RL IN DIFFERENTIABLE SIMULATION  
+
+Maximum entropy RL (Ziebart et al., 2008; Ziebart, 2010) augments the standard (undiscounted) return maximization objective with the expected entropy of the policy over $\rho_{\pi}\big(\mathbf{\boldsymbol{s}}_{t}\big)$ :  
+
+$$
+J(\pi)=\sum_{t=0}^{\infty}\mathbb{E}_{(s_{t},a_{t})\sim\rho_{\pi}}[r_{t}+\alpha\mathcal{H}_{\pi}[a_{t}|s_{t}]],
+$$  
+
+where $\begin{array}{r}{\mathcal{H}_{\pi}[\pmb{a}_{t}|s_{t}]=-\int_{\mathcal{A}}\pi(\pmb{a}_{t}|s_{t})\log\pi(\pmb{a}_{t}|s_{t})d\pmb{a}_{t}}\end{array}$ is the continuous Shannon entropy of the action distribution, and the temperature $\alpha$ balances the entropy term versus the reward.  
+
+Incorporating the discount factor (Thomas, 2014; Haarnoja et al., 2017), we obtain the following objective which maximizes the expected return and entropy for future states starting from $(\boldsymbol{s}_{t},\boldsymbol{a}_{t})$  
+
+weighted by its probability $\rho_{\pi}$ under policy $\pi$ :  
+
+$$
+J_{\mathrm{maxent}}(\pi)=\sum_{t=0}^{\infty}\mathbb{E}_{(s_{t},a_{t})\sim\rho_{\pi}}\left[\sum_{l=t}^{\infty}\gamma^{l-t}\mathbb{E}_{(s_{l},a_{l})\sim\rho_{\pi}}[r_{t}+\alpha\mathcal{H}_{\pi}[a_{l}|s_{l}]]\right].
+$$  
+
+The soft $Q$ -function is the expected value under $\pi$ of the discounted sum of rewards and entropy :  
+
+$$
+Q_{\mathrm{soft}}^{\pi}(s_{t},a_{t})=r_{t}+\mathbb{E}_{(s_{t+1},\ldots)\sim\rho_{\pi}}\left[\sum_{l=t+1}^{\infty}\gamma^{l}(r_{l}+\alpha\mathcal{H}_{\pi}[a_{l}|s_{l}])\right],
+$$  
+
+and the soft value function is :  
+
+$$
+V_{\mathrm{soft}}^{\pi}(s_{t})=\alpha\log\int_{A}\exp(\frac{1}{\alpha}Q_{\mathrm{soft}}^{\pi}(s,a))d a.
+$$  
+
+When $\begin{array}{r}{\pi({\pmb a}|s)=\exp(\frac{1}{\alpha}(Q_{\mathrm{soft}}^{\pi}({\pmb s},{\pmb a})-V_{\mathrm{soft}}^{\pi}({\pmb s})))\triangleq\pi^{*}}\end{array}$ , then the soft Bellman equation yields the following relationship :  
+
+$$
+Q_{\mathrm{soft}}^{\pi}(s_{t},a_{t})=r_{t}+\gamma\mathbb{E}_{(s_{t+1},\ldots)\sim\rho_{\pi}}[V_{\mathrm{soft}}^{\pi}(s_{t+1})],
+$$  
+
+where we can rewrite the discounted maximum entropy objective in Eq. 12 :  
+
+$$
+\begin{array}{r l}&{J_{\mathrm{maxent}}(\pi)=\displaystyle\sum_{t=0}^{\infty}\mathbb{E}_{(s_{t},a_{t})\sim\rho_{\pi}}\left[Q_{\mathrm{soft}}^{\pi}(s,a)+\alpha\mathcal{H}_{\pi}[a_{t}|s_{t}]\right]}\\ &{\qquad\qquad=\displaystyle\sum_{t=0}^{\infty}\mathbb{E}_{(s_{t},a_{t})\sim\rho_{\pi}}\left[r_{t}+\alpha\mathcal{H}_{\pi}[a_{t}|s_{t}]+\gamma V_{\mathrm{soft}}^{\pi}(s_{t+1})\right].}\end{array}
+$$  
+
+By Soft Policy Iteration (Haarnoja et al., 2018a), the soft Bellman operator $B^{*}$ defined by $(\beta^{\ast}Q)(s_{t},a_{t})\;=\;r_{t}\,+\,\gamma\mathbb{E}_{s_{t+1}\sim\rho_{\pi}}[V(s_{t+1})]$ has a unique contraction ${\cal Q}^{*}\;=\;{\cal B}^{*}{\cal Q}^{*}$ (Fox et al., 2016) and converges to the optimal policy $\pi^{*}$ .  
+
+Our main observation is when the environment is a differentiable simulation, we can use FOBG estimates to directly optimize $J_{\mathrm{maxent}}(\pi)$ , including discounted policy entropy. Consider the entropyaugmented $H$ -step return :  
+
+$$
+R_{0:H}^{\alpha}(\tau)=\sum_{t=0}^{H-1}\gamma^{t}\big(r_{t}+\alpha\mathcal{H}_{\pi}[\pmb{a}_{t}|\pmb{s}_{t}]\big),
+$$  
+
+then we have a single first-order estimate of Eq. 17 :  
+
+$$
+\hat{\nabla}_{\theta}^{[1]}J_{\mathrm{maxent}}(\pi)=\nabla_{\theta}(R_{0:H}^{\alpha}+\gamma^{H}V_{\mathrm{soft}}(s_{H})).
+$$  
+
+Furthermore, we can incorporate the entropy-augmented return into $T D(\lambda)$ estimates of Eq. 9 using soft value-bootstrapped $k$ -step returns :  
+
+$$
+\Gamma_{t:t+k}=\left(\sum_{l=0}^{k-1}\gamma^{l}(r_{t+l}+\alpha\mathcal{H}_{\pi}[\pmb{a}_{t+l}|\pmb{s}_{t+l}])\right)+\gamma^{k}V_{\mathrm{soft}}(\pmb{s}_{t+k}),
+$$  
+
+where $\tilde{V}_{\mathrm{soft}}(s_{t})=\Gamma_{t:t+H}^{\lambda}$ , and the value function is trained by minimizing Eq. 8 with $V_{\mathrm{soft}}$ , $\tilde{V}_{\mathrm{soft}}$ and $\Gamma_{t:t+k}$ substituted in place of , and $G_{t:t+k}$ . We refer to this maximum entropy FO-MBRL formulation as Soft Analytic Policy Optimization (SAPO).  
+
+Note that we instantiate SAPO as an actor-critic algorithm that learns the soft value function by TD learning with on-policy data. In comparison, Soft Actor-Critic (SAC), a popular off-policy maximum entropy model-free RL algorithm, estimates soft $Q$ -values by minimizing the soft Bellman residual with data sampled from a replay buffer. Connections may also drawn between SAPO to a maximum entropy variant of $\operatorname{SVG}(H)$ (Heess et al., 2015; Amos et al., 2021), which uses rollouts from a learned world model instead of trajectories from differentiable simulation.  
+
+4.2 DESIGN CHOICES  
+
+I. Entropy adjustment. In practice, we apply automatic temperature tuning (Haarnoja et al., 2018b) to match a target entropy $\bar{\mathcal{H}}$ via an additional Lagrange dual optimization step :  
+
+$$
+\operatorname*{min}_{\alpha_{t}\geq0}\mathbb{E}_{(s_{t},a_{t})\sim\rho_{\pi}}\big[\alpha_{t}(\mathcal{H}_{\pi}[\pmb{a}_{t}|s_{t}]-\bar{\mathcal{H}})\big].
+$$  
+
+We use $\bar{\mathcal{H}}=-\mathrm{dim}(\mathcal{A})/2$ following (Ball et al., 2023).  
+
+II. Target entropy normalization. To mitigate non-stationarity in target values (Yu et al., 2022) and improve robustness across tasks with varying reward scales and action dimensions, we normalize entropy estimates. The continuous Shannon entropy is not scale invariant (Marsh, 2013). In particular, we offset (Han & Sung, 2021) and scale entropy by $\bar{\mathcal{H}}$ to be approximately contained within $[0,+1]$ .  
+
+III. Stochastic policy parameterization. We use state-dependent variance, with squashed Normal distribution $\pi_{\boldsymbol{\theta}}\bar{=}\operatorname{tanh}(\mathcal{N}(\mu_{\boldsymbol{\theta}}(\mathbf{s}),\sigma_{\boldsymbol{\theta}}^{2}(\mathbf{s})))$ , which aligns with SAC (Haarnoja et al., 2018b). This enables policy entropy adjustment and captures aleatoric uncertainty in the environment (Kendall & Gal, 2017; Chua et al., 2018). In contrast, SHAC uses state-independent variance, similar to the original PPO implementation (Schulman et al., 2017).  
+
+IV. Critic ensemble, no target networks. We use the clipped double critic trick (Fujimoto et al., 2018) and also remove the critic target network in SHAC, similar to (Georgiev et al., 2024). However when updating the actor, we instead compute the average over the two value estimates to include in the return (Eq. 19), while using the minimum to estimate target values in standard fashion, following (Ball et al., 2023). While originally intended to mitigate overestimation bias in $Q$ -learning (due to function approximation and stochastic optimization (Thrun & Schwartz, 2014)), prior work has shown that the value lower bound obtained by clipping can be overly conservative and cause the policy to pessimistically underexplore (Ciosek et al., 2019; Moskovitz et al., 2021).  
+
+Target networks (Mnih et al., 2015) are widely used (Lillicrap et al., 2015; Fujimoto et al., 2018; Haarnoja et al., 2018b) to stabilize temporal difference (TD) learning, at the cost of slower training. Efforts have been made to eliminate target networks (Kim et al., 2019; Yang et al., 2021; Shao et al., 2022; Gallici et al., 2024), and recently $\mathrm{Cross}Q$ (Bhatt et al., 2024) has shown that careful use of normalization layers can stabilize off-policy model-free RL to enable removing target networks for improved sample efficiency. $\mathrm{Cross}Q$ also reduces Adam $\beta_{1}$ momentum from 0.9 to 0.5, while keeping the default $\beta_{2}=0.999$ . In comparison, SHAC uses $\beta_{1}=0.7$ and $\beta_{2}=0.95$ . Using smaller momentum parameters decreases exponential decay (for the moving average estimates of the 1st and 2nd moments of the gradient) and effectively gives higher weight to more recent gradients, with less smoothing by past gradient history (Kingma & Ba, 2015).  
+
+V. Architecture and optimization. We use SiLU (Elfwing et al., 2018) instead of ELU for the activation function. We also switch the optimizer from Adam to AdamW (Loshchilov & Hutter, 2017), and lower gradient norm clipping from 1.0 to 0.5. Note that SHAC already uses LayerNorm (Ba et al., 2016), which has been shown to stabilize TD learning when not using target networks or replay buffers (Bhatt et al., 2024; Gallici et al., 2024).  
+
+
+
+\section{5 REWARPED: PARALLEL DIFFERENTIABLE MULTIPHYSICS SIMULATION  }
+
+
+We aim to evaluate our approach on more challenging manipulation and locomotion tasks that involve interaction between articulated rigid bodies and deformables. To this end, we introduce Rewarped, our parallel differentiable multiphysics simulation platform that provides GPU-accelerated parallel environments for RL and enables computing batched simulation gradients efficiently. We build Rewarped on NVIDIA Warp (Macklin, 2022), the successor to DFlex (Xu et al., 2021; Murthy et al., 2021; Turpin et al., 2022; Heiden et al., 2023).  
+
+We proceed to discuss high-level implementation details and optimization tricks to enable efficient parallel differentiable simulation. We develop a parallelized implementation of Material Point Method (MPM) which supports simulating parallel environments of complex deformable materials, building on the MLS-MPM implementation by (Ma et al., 2023) used for non-parallel simulation. Furthermore, we support one-way coupling from kinematic articulated rigid bodies to MPM particles, based on the (non-parallel) MPM-based simulation from (Huang et al., 2020; Li et al., 2023a).  
+
+5.1 PARALLEL DIFFERENTIABLE SIMULATION  
+
+We implement all simulation code in NVIDIA Warp (Macklin, 2022), a library for differentiable programming that converts Python code into CUDA kernels by runtime JIT compilation. Warp implements reverse-mode auto-differentiation through the discrete adjoint method, using a tape to record kernel calls for the computation graph, and generates kernel adjoints to compute the backward pass. Warp uses source-code transformation (Griewank & Walther, 2008; Hu et al., 2020) to automatically generate kernel adjoints.  
+
+We use gradient checkpointing (Griewank & Walther, 2000; Qiao et al., 2021b) to reduce memory requirements. During backpropogation, we run the simulation forward pass again to recompute intermediate values, instead of saving them during the initial forward pass. This is implemented by capturing and replaying CUDA graphs, for both the forward pass and the backward pass of the simulator. Gradient checkpointing by CUDA graphs enables us to compute batched simulation gradients over multiple time steps efficiently, when using more simulation substeps for simulation stability. We use a custom PyTorch autograd function to interface simulation data and model parameters between Warp and PyTorch while maintaining auto-differentiation functionality.  
+
+
+
+\section{6 EXPERIMENTS  }
+
+
+We evaluate our proposed maximum entropy FO-MBRL algorithm, Soft Analytic Policy Optimization (SAPO, Section 4), against baselines on a range of locomotion and manipulation tasks involving rigid and soft bodies. We implement these tasks in Rewarped (Section 5), our parallel differentiable multiphysics simulation platform. We also compare algorithms on DFlex rigid-body locomotion tasks introduced in (Xu et al.2.  
+
+Baselines. We compare to vanilla model-free RL algorithms: Proximal Policy Optimization (PPO, Schulman et al. (2017)), an on-policy actor-critic algorithm; Soft Actor-Critic (SAC, Haarnoja et al. (2018b)) an off-policy maximum entropy actor-critic algorithm. We use the implementations and hyperparameters from (Li et al., 2023b) for both, which have been validated to scale well with parallel simulation. Implementation details (network architecture, common hyperparameters, etc. We also compare against Analytic Policy Gradient (APG, Freeman et al. (2021)) and Short-Horizon Actor-Critic (SHAC, Xu et al. (2021)), both of which are state-of-the-art FO-MBRL algorithms that leverage first-order analytic gradients from differentiable simulation for policy learning. Finally, we include gradient-based trajectory optimization (TrajOpt) as a baseline, which uses differentiable simulation gradients to optimize for an open-loop action sequence that maximizes total rewards across environments.  
+
+Tasks. Using Rewarped, we re-implement a range of challenging manipulation and locomotion tasks involving rigid and soft bodies that have appeared in prior works. Rewarped enables training algorithms on parallel environments, and differentiable simulation to compute analytic simulation gradients through environment dynamics and rewards. We visualize these tasks in Figure 1. To simulate deformables, we use $\sim2500$ particles per env.  
+
+AntRun – Ant locomotion task from DFlex (Xu et al., 2021), where the objective is to maximize the forward velocity of a four-legged ant rigid-body articulation.  
+
+HandReorient – Allegro hand manipulation task from Isaac Gym (Makoviychuk et al., 2021), where the objective is to perform in-hand dexterous manipulation to rotate a rigid cube given a target pose. We replace non-differentiable terms of the reward function (ie. boolean comparisons) with differentiable alternatives to enable computing analytic gradients.  
+
+RollingFlat – Rolling pin manipulation task from PlasticineLab (Huang et al., 2020), where the objective is to flatten a rectangular piece of dough using a cylindrical rolling pin.  
+
+SoftJumper – Soft jumping locomotion task, inspired by GradSim (Murthy et al., 2021) and DiffTaichi (Hu et al., 2020), where the objective is to maximize the forward velocity and height of a high-dimensional actuated soft elastic quadruped.  
+
+HandFlip – Shadow hand flip task from DexDeform (Li et al., 2023a), where the objective is to flip a cylindrical piece of dough in half within the palm of a dexterous robot hand.  
+
+FluidMove – Fluid transport task from SoftGym (Lin et al., 2021), where the objective is to move a container filled with fluid to a given target position, without spilling fluid out of the container.  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/0f44f377780a17e9da02875e97b4faffcbe6111e5239e79e48c2ac7d80070931.jpg)  
+
+![](images/6875a33f4f178adfb0615ebb442ee1866b1839a1cccb967bc7df7ceafa03132d.jpg)  
+Note that {AntRun, HandReorient} are tasks that involve articulated rigid bodies only, with statebased observations. In contrast, {RollingFlat, SoftJumper, HandFlip, FluidMove $\}$ are tasks that also involve deformables, with both state-based and high-dimensional (particle-based) visual observations.   
+Figure 2: Rewarped tasks training curves. Episode return as a function of environment steps in Rewarped AntRun $(A\subset\mathbb{R}^{8})$ , HandReorient $(A\subset\mathbb{R}^{16})$ , RollingFlat $\mathcal{A}\subset\mathbb{R}^{3}$ ), SoftJumper $(\mathcal{A}\subset\mathbb{R}^{2\hat{2}2})$ , HandFlip $(A\subset\mathbb{R}^{24})$ ), and FluidMove $(A\subset\mathbb{R}^{3})$ ) tasks. Smoothed using EWMA with $\alpha=0.99$ . Mean and $95\%$ CIs over 10 random seeds.  
+
+Table 2: Rewarped tasks tabular results. Evaluation episode returns for final policies after training.   
+Mean and $95\%$ CIs over 10 random seeds with $2N$ episodes per seed for $N=32$ or 64 parallel envs.  
+
+6.1 RESULTS ON REWARPED TASKS  
+
+We compare SAPO, our proposed maximum entropy FO-MBRL algorithm, against baselines on a range of challenging manipulation and locomotion tasks that involve rigid and soft bodies, reimplemented in Rewarped, our parallel differentiable multiphysics simulation platform. In Figure 2, we visualize training curves to compare algorithms. SAPO shows better training stability across different random seeds, against existing FO-MBRL algorithms APG and SHAC. In Table 2, we report evaluation performance for final policies after training. SAPO outperforms all baselines across all tasks we evaluated, given the same budget of total number of environment steps. We also find that on tasks involving deformables, APG outperforms SHAC, which is consistent with results in DaXBench (Chen et al., 2022) on their set of soft-body manipulation tasks. However, SHAC outperforms APG on the articulated rigid-body tasks, which agrees with the rigid-body locomotion results in DFlex (Xu et al.2.  
+
+ We observe that SAPO learns to perform tasks with deformables that we evaluate on. For RollingFlat, SAPO controls the rolling pin to flatten the dough and spread it across the ground. For SoftJumper, SAPO learns a locomotion policy that controls a soft elastic quadruped to jump forwards. For HandFlip, SAPO is capable of controlling a high degree-of-freedom dexterous robot hand, to flip a piece of dough in half within the palm of the hand. For FluidMove, SAPO learns a policy to move the container of fluid with minimal spilling. Additionally, SAPO learns a successful locomotion policy for the articulated rigid-body locomotion task AntRun. For HandReorient however, SAPO is only capable of catching the cube and preventing it from falling to the ground. This is a challenging task that will likely require more environment steps to learn policies capable of re-orienting the cube to given target poses in succession.  
+
+
+
+\section{6.2 SAPO ABLATIONS  }
+
+
+We investigate which components of SAPO yield performance gains over SHAC, on the HandFlip task. We conduct several ablations on SAPO: (a) w/o $V_{\mathrm{soft}}$ , where instead the critic is trained in standard fashion without entropy in target values; (b) w/o $\mathcal{H}_{\pi}$ , where we do not use entropy-augmented returns and instead train the actor to maximize expected returns only; (c) w/o $\mathcal{H}_{\pi}$ and $V_{\mathrm{soft}}$ , which corresponds to modifying SHAC by applying design choices $\{\mathrm{III},\mathrm{IV},\mathrm{V}\}$ described in Section 4.2.  
+
+We visualize training curves in Figure 3, and in Table 3 we report final evaluation performance as well as percentage change from SHAC’s performance as the baseline. From ablation (b), we find that using analytic gradients to train a policy to maximize both expected return and entropy is critical to the performance of SAPO, compared to ablation (a) which only replaces the soft value function.  
+
+Additionally, we observe that ablation (c), where we apply design choices $\{\mathrm{III},\mathrm{IV},\mathrm{V}\}$ onto SHAC, result in approximately half of the performance improvement of SAPO over SHAC on the HandFlip task.3.4.  
+
+![](images/4eeab3007a64495acbadb00687f600e5ca7dad997f107d716d935b524f4cbe52.jpg)  
+Figure 3: SAPO ablations – HandFlip training Table 3: SAPO ablations – HandFlip tabular curves. Episode return as a function of environ- results. Evaluation episode returns for final ment steps. Smoothed using EWMA with $\alpha=0.99$ . policies after training. Mean and $95\%$ CIs over Mean and $95\%$ CIs over 10 random seeds. 10 random seeds with 64 episodes per seed.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+Due to high sample complexity requirements and slower runtimes for soft-body simulation, RL has had limited success on tasks involving deformables. To address this, we introduce Soft Analytic Policy Optimization (SAPO), a first-order model-based actor-critic RL algorithm based on the maximum entropy RL framework, which leverages first-order analytic gradients from differentiable simulation to achieve higher sample efficiency. Alongside this approach, we present Rewarped, a scalable and easy-to-use platform which enables parallelizing RL environments of GPU-based differentiable multiphysics simulation. We re-implement challenging locomotion and manipulation tasks involving rigid bodies, articulations, and deformables using Rewarped. On these tasks, we demonstrate that SAPO outperforms baselines in terms of sample efficiency as well as task performance given the same budget for total environment steps.  
+
+Limitations. SAPO relies on end-to-end learning using first-order analytic gradients from differentiable simulation. Currently, we use (non-occluded) subsampled particle states from simulation as observations to policies, which is infeasible to obtain in real-world settings. Future work may use differentiable rendering to provide more realistic visual observations for policies while maintaining differentiability, towards sim2real transfer of policies learned using SAPO. Another promising direction to consider is applications between differentiable simulation and learned world models.  
+
+REPRODUCIBILITY STATEMENT All code, including algorithms & simulation tasks, will be open source and released upon publication.  
+
+
+

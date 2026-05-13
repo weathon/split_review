@@ -1,0 +1,284 @@
+\title{Causal Discovery via Bayesian Optimization}
+
+\begin{abstract}
+Existing score-based methods for directed acyclic graph (DAG) learning from observational data struggle to recover the causal graph accurately and sample-efficiently. To overcome this, in this study, we propose DrBO (DAG recovery via Bayesian Optimization)—a novel DAG learning framework leveraging Bayesian optimization (BO) to find high-scoring DAGs. We show that, by sophisticatedly choosing the promising DAGs to explore, we can find higher-scoring ones much more efficiently. To address the scalability issues of conventional BO in DAG learning, we replace Gaussian Processes commonly employed in BO with dropout neural networks, trained in a continual manner, which allows for (i) flexibly modeling the DAG scores without overfitting, (ii) incorporation of uncertainty into the estimated scores, and (iii) scaling with the number of evaluations. As a result, DrBO is computationally efficient and can find the accurate DAG in fewer trials and less time than existing state-of-the-art methods. This is demonstrated through an extensive set of empirical evaluations on many challenging settings with both synthetic and real data.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Learning directed acyclic graphs (DAGs) encoding the underlying causal relationships, also known as causal discovery, provides invaluable insights about interventional outcomes and counterfactuals, and thus significant research effort has been dedicated on this frontier. Our study focuses on the score-based framework—a major class of causal discovery methods which casts the DAG learning problem as an optimization problem, maximizing over the space of DAGs a predefined score function measuring how a DAG $\mathcal{G}$ fits the observed data $\mathcal{D}$ :  
+
+$$
+\mathcal{G}^{*}=\underset{\mathcal{G}\in\mathrm{DAGs}}{\arg\operatorname*{max}}\;S\left(\mathcal{D},\mathcal{G}\right).
+$$  
+
+There are several challenges associated with this formulation. First, this optimization problem is NP-hard in general (Chickering, 1996), due to the combinatorial search domain that scales superexponentially with the graph size (Robinson, 1977) and the acyclicity condition that is nontrivial to maintain. The second challenge is computational cost, as the score evaluation can be expensive for complex models (Zhu et al., 2020; Wang et al., 2021), and hence, methods requiring too many trials will incur a heavy computational expense.  
+
+Bayesian Optimization (BO) has emerged as an effective approach for expensive black-box optimization thanks to its sample efficiency.1 Its applicability covers many domains due to the pervasiveness of optimization tasks in virtually every field. The central idea is that past evaluation data can reveal potential candidates to evaluate next, and effectively exploiting them allows us to arrive at better solutions using fewer evaluations. However, while BO has been employed for active causal discovery (Toth et al., 2022; Zhang et al., 2024) to suggest cost-effective intervention strategies to discover causal graphs from active experiments, its power is yet to be harnessed for the problem of observational causal discovery, where no active intervention is available.  
+
+We have identified two potential difficulties preventing BO to optimize Eq. (1). The first is the limited scalability of BO in general, which is usually restricted to only a few hundred dimensions and thousands of evaluations (Wang et al., 2023), while DAG learning often involves far more trials (Zhu et al., 2020; Wang et al., 2021; Duong et al., 2024). The second challenge is how to efficiently optimize the “acquisition function” measuring the potential of DAG solutions in BO. This itself is a score-based DAG learning problem and is expected to be cheaper than the original problem as it is repeated many times in the BO pipeline, thus requiring to be very efficient to be practical.  
+
+Present study. In this study, we tackle these obstacles and bring forth the benefits of BO into causal discovery with the introduction of DrBO (DAG recovery via Bayesian Optimization)—a novel causal discovery algorithm that leverages BO to find the highest-scoring DAG. More particularly, we solve the aforementioned challenges by several key design choices. (i) Inspired by $\mathrm{Yu}$ et al. (2021); Massidda et al. (2024); Duong et al. (2024), we devise a low-rank DAG representation that relaxes the constrained optimization in Eq. (1) to an unconstrained optimization problem with a dimensionality growing linearly with the number of nodes (Sec. 4.1), enabling the use of BO with an amenable dimensionality. (ii) We replace the Gaussian processes (GPs) in conventional BO approaches that scale cubically w.r.t. the number of evaluations with dropout neural networks (Srivastava et al., 2014; Guo et al., 2021), which offer expressive uncertainty-aware modeling capabilities, as well as faster acquisition function calculation and optimization (Sec. 4.3). (iii) Our surrogate model learns the DAG score indirectly via node-wise local scores, allowing us to predict the DAG scores more accurately with enhanced training information, compared with learning a direct map from a DAG to its score and not exploiting the local scores (Sec. 4.4). (iv) Instead of being retrained every step with all data, our neural networks are trained continually, enabling our method to scale better with the number of trials (Sec. 4.5). Compared to existing optimization strategies in NEW causal discovery, like gradient-based methods, which do not attempt to exploit past exploration data to prioritize visiting the most promising DAGs, our method makes more informed decisions about which DAGs to investigate next, leading to fewer unnecessary trials to reach high-scoring DAGs.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Causal discovery methods can be broadly categorized into two major classes, namely constraintbased and score-based methods. The former category (Spirtes et al., 2000; Colombo et al., 2012) involves performing a series of hypothesis tests to recover the undirected skeleton of the causal graph, before orienting the edges using graphical rules. On the other hand, score-based causal discovery recasts the problem as a combinatorial optimization task. Classical methods (Chickering, 2002; Ramsey et al., 2017; Ramsey, 2015) greedily traverse the DAG space by adding and removing edges one-at-a-time to maintain acyclicity. Recent advances include relaxing the combinatorial optimization to a continuous optimization problem (Zheng et al., 2018; Yu et al., 2019; Zheng et al., 2020; Yu et al., 2021; Zhang et al., 2022; Bello et al., 2022; Annadani et al., 2023). In addition, methods based on Reinforcement learning (RL) (Zhu et al., 2020; Wang et al., 2021; Yang et al., 2023a; Duong et al., 2024) have recently emerged as competitive search strategies. We also acknowledge interventional causal discovery studies (Hauser & Bu¨hlmann, 2012; Brouillard et al., 2020; Lippe et al., 2022) where interventional data is exploited to help identify the causal DAG, however, here we focus on the more challenging setting where no intervention is available.  
+
+Furthermore, Bayesian causal discovery studies are an intriguing direction (Deleu et al., 2022; Tran et al., 2023; Annadani et al., 2023), where the aim is to infer the posterior distribution over causal graphs given observed data, in order to quantify uncertainty in DAG estimates. Meanwhile, our use of BO involves quantifying uncertainty in DAG scores, so despite sharing the term “Bayesian”, these studies are distant from us. Moreover, while Bayesian optimization has been employed for causal discovery in the active setting (Toth et al., 2022; Zhang et al., 2024), these methods utilize BO to suggest optimal interventions to quickly recover the causal DAG, necessitating the ability to perform active experiments. Meanwhile, our study utilizes BO to optimize for the score function that can be calculated purely from observational data. In addition, causal Bayesian optimization (Aglietti et al., 2020; 2021), which deals with optimizing a variable of interest that is part of a causal system with NEW known DAG via a series of interventions suggested by BO, is also a different problem from ours, NEW which focuses on finding the unknown DAG instead.  
+
+
+
+\section{3 BACKGROUND  }
+
+
+Notations. In this paper, unless specifically indicated, normal lowercase letters indicate scalars (e.g., $x,\,y)$ or functions (e.g., $f,\,g)$ , while bold lowercase letters represent vectors (e.g., x, y), and bold uppercase letters denote matrices (e.g., X). Meanwhile, subscripts and bracketed superscripts index dimensions and samples, respectively, e.g., $x_{i}^{(j)}$ denotes the $i$ -th dimension of the $j$ -th sample.  
+
+3.1 BAYESIAN OPTIMIZATION   
+We provide here only the details necessary to understand our contributions. For a more comprehensive review of BO, see Wang et al. (2023), for example. Consider a maximization of a function $f$ that is expensive to evaluate: $\mathbf{x}^{*}=\arg\operatorname*{max}_{\mathbf{x}\in\mathcal{X}}f\left(\mathbf{x}\right)$ . BO is a class of sequential optimization methods, which iteratively (i) proposes potential candidate(s) to evaluate based on an “acquisition function”, then (ii) evaluates said candidate(s), and (iii) updates its statistical model with the newly acquired observations. More specifically, BO defines a probabilistic “surrogate” model over the distribution $f$ given observed data $\mathbf{X},\mathbf{y}$ , i.e., $P\left(f\mid\mathbf{X},\mathbf{y}\right)$ , to define the acquisition function. Surrogate model. To model $P\left(f\mid\mathbf{X},\mathbf{y}\right)$ , Gaussian process (GP) is the standard in BO since it offers a closed-form solution (Rasmussen, 2003). Assuming we have observed a dataset of $n$ evaluations $\mathbf{X}=\left[\mathbf{x}^{(1)},\ldots,\mathbf{x}^{(n)}\right]^{\top}$ and $\mathbf{y}=\left[y^{(1)},\ldots,y^{(n)}\right]^{\top}$ , where $\mathbf{x}\sim\mathcal{X}=\mathbb{R}^{d}$ and $y:=f\left(\mathbf{x}\right)$ , GP assumes that $\mathbf{y}$ follows a multivariate Gaussian distribution governed by a mean function $\mu:\mathcal{X}\to\mathbb{R}$ and positive-definite covariance function $\kappa$ : $\mathcal{X}\times\mathcal{X}\rightarrow\mathbb{R}$ : $\mathbf{\bar{y}}\sim\mathcal{N}\left(\mu\left(\mathbf{x}\right),\mathbf{K}_{\mathbf{X},\mathbf{X}}\right)$ where $\mathbf{K}_{\mathbf{X},\mathbf{X}}:=$ κ x(i), x(j)  i,j=1,...,n is the $n\times n$ covariance matrix. Using Bayes’ theorem, the posterior of the function value at a new location $\mathbf{x}$ is given analytically as: $P\left(y\mid\mathbf{x},\mathbf{X},\mathbf{y}\right)=\mathcal{N}\left(\mu\left(\mathbf{x}\right),\sigma^{2}\left(\mathbf{x}\right)\right)$ where $\mu\left(\mathbf{x}\right):=\mathbf{k}_{\mathbf{x},\mathbf{X}}\mathbf{K}_{\mathbf{X},\mathbf{X}}^{-1}\mathbf{y}$ and $\sigma^{2}\left(\mathbf{x}\right):=\kappa\left(\mathbf{x},\mathbf{x}\right)-\mathbf{k}_{\mathbf{X},\mathbf{x}}^{\top}\mathbf{K}_{\mathbf{X},\mathbf{X}}^{-1}\mathbf{k}_{\mathbf{X},\mathbf{x}}$ . GPs scale poorly with $n$ due to the need to invert $\mathbf{K}_{\mathbf{X},\mathbf{X}}$ , so alternative statistical models like random forest (Hutter et al., 2011), Bayesian linear regression (Snoek et al., 2015), and Bayesian neural network (Springenberg et al., 2016) have been employed as more scalable surrogate models.   
+Acquisition functions (AFs) in BO judge how promising an arbitrary candidate $\mathbf{x}$ is based on the posterior inferred by the surrogate model, to make a more informed candidate suggestion. As an example, upper confidence bound (UCB) is a common choice, designed to minimize regret in the multi-armed bandit literature (Srinivas et al., 2010) and given by $\mathrm{AF}\bar{(}\mathbf{x}):=\mu\left(\mathbf{x}\right)+\beta\sigma\left(\mathbf{\bar{x}}\right)$ , where $\beta\,>\,0$ is a hyperparameter controlling the exploitation-exploration trade-off. Another promising acquisition is Thompson sampling (TS, Thompson, 1933), which is a stochastic function that uses a random draw from the posterior as the potential indicator: AF $\mathbf{\mu}(\mathbf{x})\sim P\left(y\mid\mathbf{x},\mathbf{X},\mathbf{y}\right)$ .   
+3.2 STRUCTURAL CAUSAL MODEL   
+Let $\mathbf{x}\in\mathbb{R}^{d}$ be the random vector capturing the system of interest, and $\begin{array}{r}{\mathcal{D}=\left\{\mathbf{x}^{(k)}\right\}_{k=1}^{n}}\end{array}$ denote an i.i.d. dataset of $n$ samples from $P\left(\mathbf{x}\right)$ . The structural causal model (SCM, Pearl, 2000; 2009) among said variables can be described by (i) a DAG $\mathcal{G}=(\mathcal{V},\mathcal{E})$ where each node $i\in\mathcal{V}=\{1,\ldots,d\}$ corresponds to a random variable $x_{i}$ , and each edge $(j\rightarrow i)\in\mathcal{E}\subset\mathcal{V}\times\mathcal{V}$ implies that $x_{j}$ is a direct cause of $x_{i}$ , (ii) a set of functions $\{f_{i}\}_{i=1}^{n}$ dictating the causal mechanisms, and (iii) a noise distribution $P\left(\varepsilon\right)$ . Together, these components define a generative process $x_{i}:=f_{i}\left(\mathbf{x}_{\mathrm{pa}_{i}^{\mathcal{G}}},\varepsilon_{i}\right),\forall i=1,\ldots,d,$ where $\mathrm{{pa}}_{i}^{\mathcal{G}}=\{j\in\mathcal{V}\mid(j\to i)\in\mathcal{E}\}$ is the set of direct causes (a.k.a. structural parents) of node $i$ in $\mathcal{G}$ , and $\varepsilon\sim P\left(\varepsilon\right)$ is the noise vector. Then, the observational causal discovery problem is concerned about recovering the DAG $\mathcal{G}$ from the observational dataset $\mathcal{D}$ . In addition, following (Zhu et al., 2020; Wang et al., 2021; Yang et al., 2023a;b; Duong et al., 2024), we also assume: (i) causal sufficiency: there is no unobserved confounders among the variables; (ii) causal minimality: there is no function $f_{i}$ that is constant to any of its argument (Peters et al., 2014); and (iii) identifiable causal models: this means $\mathcal{G}$ is the unique causal graph that can induce $P\left(\mathbf{x}\right)$ , and thus it is possible to be recovered. For instance, while general linear-Gaussian models are known to be unidentifiable (Spirtes et al., 2000), examples for identifiable causal models include linear-Gaussian models with the equal-variance assumption (Peters et al., 2014) and nonlinear additive noise models (ANMs) in general (Hoyer et al., 2008). Our experiments will adopt these identifiable models.   
+3.3 SCORE-BASED CAUSAL DISCOVERY  
+
+A critical component of score-based causal discovery is the proper specification of a scoring function. With the proper scoring function, the optimization of the score is equivalent to reaching to ground truth DAG. Consistent scoring functions (Chickering, 2002) are known to satisfy this requirement. In the main text, we demonstrate our method with the Bayesian Information Criterion (BIC, Schwarz, 1978), which is a consistent score as shown by Haughton (1988) and is widely considered in numerous existing studies (Chickering, 2002; Zhu et al., 2020; Wang et al., 2021; Yang et al., 2023a;b; Duong et al., 2024).  
+
+More formally, let $\theta:=\left\{\{f_{i}\}_{i=1}^{d}\,,P\left(\varepsilon\right)\right\}$ be the parameters of an SCM, then the BIC score is given by $S_{\mathrm{BIC}}\left({\mathcal{D}},{\mathcal{G}}\right):=2\ln p\left({\mathcal{D}}\mid{\hat{\theta}},{\mathcal{G}}\right)-\left|{\mathcal{G}}\right|\ln n$ , where $\hat{\theta}:=\arg\operatorname*{max}_{\theta}p\left(\mathcal{D}\mid\theta,\mathcal{G}\right)$ is the maximumlikelihood estimator of the causal model parameters, $n$ is the sample size of $\mathcal{D}$ , and $|g|$ denotes the number of edges in $\mathcal{G}$ . The generality of BIC allows for its adaptation to numerous causal models. In the main paper, we showcase our method with the BIC defined for the popular additive noise model (ANM, Hoyer et al., 2008): $x_{i}:=f_{i}\left(\mathbf{x}_{\mathrm{pa}_{i}}\right)+\varepsilon_{i}$ , where $\varepsilon_{i}\sim\mathcal N\left(0,\sigma_{i}^{2}\right)$ . In the general form, where the noise variances can be non-equal, the BIC for ANM is specified as follows:  
+
+$$
+S_{\mathrm{BIC-NV}}\left(\mathcal{D},\mathcal{G}\right):=-n\sum_{i=1}^{d}\ln\mathrm{MSE}_{i}\left(\mathrm{pa}_{i}^{\mathcal{G}}\right)-\left|\mathcal{G}\right|\ln n,
+$$  
+
+where NV stands for “non-equal variance” and $\begin{array}{r}{\mathrm{MSE}_{i}\left(\mathrm{pa}_{i}^{\mathcal G}\right)\,:=\,\frac{1}{n}\sum_{j=1}^{n}\left(x_{i}^{(j)}-\hat{f}_{i}\left(\mathbf{x}_{\mathrm{pa}_{i}^{\mathcal G}}^{(j)}\right)\right)^{2}}\end{array}$ is the mean squared error after regressing $x_{i}$ on $\mathbf{x}_{\mathrm{pa}_{i}^{\mathcal{G}}}$ . In addition, if we further assume that the noise variables have equal variances (Bu¨hlmann et al., 2014) then the BIC yields:  
+
+$$
+S_{\mathrm{BIC-EV}}\left({\cal D},{\mathcal G}\right):=-n d\ln\frac{\sum_{i=1}^{d}\mathrm{MSE}_{i}\left(\mathrm{pa}_{i}^{\mathcal G}\right)}{d}-|{\mathcal G}|\ln n.
+$$  
+
+Eqs. (2) and (3) are common in prior studies (Zhu et al., 2020; Wang et al., 2021; Yang et al., 2023a;b; Duong et al.  
+
+
+
+\section{3.4 PARAMETRIZED DAG GENERATION  }
+
+
+For effective acquisition function optimization, we find it crucial for our method to be able to quickly generate candidate DAGs within specific regions determined by a low-dimensional search space. This would help narrow down the regions of interest and improve the quality of suggested candidates. A potential approach towards this end is autoregressive DAG generation techniques (Wang et al., 2021; Deleu et al., 2022; Yang et al., 2023a; Deleu et al., 2024), which break down the DAG generation into multiple sequential steps. However, each step of the generation process is computationally involved due to their autoregressive nature (Duong et al., 2024), accumulating into a significant DAG generation cost. Recently, constraint-free DAG representations with a quadratic complexity are proposed in (Yu et al., 2021; Massidda et al., 2024; Duong et al., 2024), which introduce different maps from an unconstrained real-valued representation to the space of DAGs. For example, the Vec2DAG operator in (Duong et al., 2024) takes as input a continuous “node potential” vector $\mathbf{p}\in\mathbb{R}^{d}$ and strictly upper-triangular “edge potential” matrix $\mathbf{E}\in\mathbb{R}^{d\times d}$ to deterministically create a DAG: Vec2DAG $(\mathbf{p},\mathbf{E}):=H\left(\operatorname{grad}\left(\mathbf{p}\right)\right)\odot H\left(\mathbf{E}+\mathbf{E}^{\top}\right)$ , where $H\left(x\right):={\binom{1}{0}}$ , if $x>0$ , , otherwise is the entry-wise Heaviside step function, $\odot$ is the Hadamard product, and grad $\left(\mathbf{p}\right)_{i j}:=p_{j}-p_{i}$ is the gradient flow operator (Lim, 2020).  
+
+Example. Consider a system of 3 nodes with potentials $\mathbf{p}=[-1,3,2]$ and $\mathbf{E}={\left[\begin{array}{l l l}{0}&{2}&{-4}\\ {0}&{0}&{7}\\ {0}&{0}&{0}\end{array}\right]}.$ Then, Vec2DA $\mathfrak{L}\left(\mathbf{p},\mathbf{E}\right)\,=\,H\left({\left[\begin{array}{l l l}{0}&{4}&{3}\\ {-4}&{0}&{-1}\\ {-3}&{1}&{0}\end{array}\right]}\right)\odot H\left({\left[\begin{array}{l l l}{0}&{2}&{-4}\\ {2}&{0}&{7}\\ {-4}&{7}&{0}\end{array}\right]}\right)\,=\,{\left[\begin{array}{l l l}{0}&{1}&{0}\\ {0}&{0}&{0}\\ {0}&{1}&{0}\end{array}\right]}.$ This is the adjacency of the DAG $1\,\rightarrow\,2\,\leftarrow\,3$ , where the edge directions and connectivities are determined by the first and second terms of Vec2DAG, respectively.  
+
+Using this approach, it is simple to sample candidate DAGs whose representations are in the neighborhood around some values $\mathbf{p}$ and $\mathbf{E}$ of interest.  
+
+Algorithm 1 The DrBO method for causal discovery.   
+Require: Dataset $\mathcal{D}\,=\,\left\{{\bf x}^{(j)}\in\mathbb{R}^{d}\right\}_{j=1}^{n}$ of $d$ nodes and $n$ observations, score function $S\left(\mathcal{D},\cdot\right)$ , DAG rank $k$ , batch size $B$ , no. of preliminary candidates $C$ , and total no. of evaluations $T$ . Ensure: A DAG $\hat{\mathcal G}$ that maximizes $S\left(\mathcal{D},\mathcal{G}\right)$ .   
+1: Initialize empty experience $\mathcal{H}:=\emptyset$ and node-wise dropout neural nets: $\{\mathrm{DropoutNN}_{i}\}_{i=1}^{d}$ . 2: while do   
+3: Generate random DAGs: G(j) := τ z(j)  jC=1 where z ∈[−1, 1]d(1+k). ▷Sec. 4.1. 4: Sample local scores: $\begin{array}{r l}&{\Big\{\Big\{l_{i}^{(j)}\sim\mathrm{DropoutNN}_{i}\left(\mathrm{pa}_{i}^{\mathcal{G}^{(j)}}\right)\Big\}_{i=1}^{d}\Big\}_{j=1}^{C}.}\\ &{:\Big\{\mathrm{AF}^{(j)}:=\mathrm{Combine}\left(l_{1}^{(j)},\dots,l_{d}^{(j)}\right)\Big\}_{j=1}^{C}.}\end{array}$ ▷Sec. 4.3. 5: Combine local scores ▷Sec. 4.4. 6: Select top $B$ candidates with highest AF values: $j_{1},\dots,j_{B}:=\arg\!\mathrm{top}_{B}\;\mathrm{AF}^{(j)}$ . ▷Sec. 4.2. $j\!=\!1,...,C$   
+7: Evaluate these candidates and update experience: $\mathcal{H}:=\mathcal{H}\cup\left\{\left(\mathcal{G}^{(j)},S\left(\mathcal{D},\mathcal{G}^{(j)}\right)\right)\right\}_{j=j_{1},\ldots,j_{B}}$ . 8: Update the neural nets on new $\mathcal{H}$ . ▷Sec. 4.5. 9: end while   
+10: Get highest-scoring DAG so far: $\begin{array}{r}{\hat{\mathcal{G}}:=\arg\operatorname*{max}_{\mathcal{G}\in\mathcal{H}}S\left(\mathcal{D},\mathcal{G}\right).}\end{array}$ .   
+11: Prune $\hat{\mathcal G}$ if needed. ▷Sec. 4.6.  
+
+
+
+\section{4 DrBO: DAG RECOVERY VIA BAYESIAN OPTIMIZATION  }
+
+
+An overview of our framework is illustrated in Algorithm 1. In the following, we describe the proposed DrBO algorithm step-by-step.  
+
+4.1 SEARCH SPACE  
+
+To effectively utilize BO, the search space should be unconstrained. Thus, following Yu et al. (2021); Massidda et al. (2024); Duong et al. (2024), we transform the constrained combinatorial optimization problem in Eq. (1) to an unconstrained optimization task. However, the dimensionality of ${\mathcal{O}}\left(d^{2}\right)$ of their search spaces can still be reduced to mitigate the effect of the curse of dimensionality, facilitating easier acquisition function optimization. For this purpose, similarly to Fang et al. (2023), we assume that the edge potential matrix in Vec2DAG (Duong et al., 2024) is low-rank and thus consider an adaptation that offers a search space that grows linearly with the number of nodes. Specifically, each node $i$ is now associated with a low-dimensional embedding vector $r_{i}\in\mathbb{R}^{k}$ with $k\ll d$ , and two nodes $i$ and $j$ are connected if and only if $\langle r_{i},r_{j}\rangle>0$ . The total dimensionality of this search space is thus only $d\cdot(1+k)$ . More formally, given a node potential $\mathbf{p}\in\mathbb{R}^{d}$ and an embedding matrix $\mathbf{R}\in\mathbb{R}^{d\times k}$ , we define the following map  
+
+$$
+\tau\left(\mathbf{p},\mathbf{R}\right):=H\left(\operatorname{grad}\left(\mathbf{p}\right)\right)\odot H\left(\mathbf{R}\cdot\mathbf{R}^{\top}\right).
+$$  
+
+The following Lemma ensures the acyclicity of the DAG corresponding to ${\boldsymbol{\tau}}\left(\mathbf{p},\mathbf{R}\right)$ .  
+
+Lemma 1. For all $d,k\in\mathbb{N}^{+}$ , $\mathbf{p}\in\mathbb{R}^{d}$ and $\mathbf{R}\in\mathbb{R}^{d\times k}$ , let $\tau:\mathbb{R}^{d}\times\mathbb{R}^{d\times k}\rightarrow\{0,1\}^{d\times d}.$ be defined as in Eq. (4). Then, ${\boldsymbol{\tau}}\left(\mathbf{p},\mathbf{R}\right)$ represents a binary adjacency matrix of a $D A G$ .  
+
+1. In addition, like Vec2DAG, our variation also exhibits the following scale-invariance property.  
+
+Lemma 2. For all $d,k\in\mathbb{N}^{+}$ , $\mathbf{p}\in\mathbb{R}^{d}$ and $\mathbf{R}\in\mathbb{R}^{d\times k}$ , let $\tau:\mathbb{R}^{d}\times\mathbb{R}^{d\times k}\rightarrow\{0,1\}^{d\times d}$ be defined as in Eq. (4). Then, for all $\alpha>0$ , $\boldsymbol{\tau}\left(\mathbf{p},\mathbf{R}\right)=\boldsymbol{\tau}\left(\alpha\mathbf{p},\alpha\mathbf{R}\right)$ .  
+
+2. This insight allows us to restrict the search domain to a fixed range (e.g., $[-1,1])$ for numerical stability. For brevity, the remaining parts of this manuscript will use vector $\mathbf{z}$ of $d\cdot\ (1+k)$ dimensions as the concatenation of $\mathbf{p}$ and the flattened $\mathbf{R}$ , and we adopt the notation $\tau\left(\mathbf{z}\right)\equiv\tau\left(\mathbf{p},\mathbf{R}\right)$ . In short, we can now translate the original optimization problem in Eq. (1) to the following unconstrained optimization problem:  
+
+![](images/86219771fde7fd54fd5d400d7ef78c5c89288a7b2b6dc2eb8f35cde497445a95.jpg)  
+
+Obviously, if $k\,\geq\,d$ then $\mathbf{R}\cdot\mathbf{R}^{\top}$ is full-rank, so $\tau$ can represent any DAG possible (Theorem 1, Duong et al., 2024), and thus $\mathcal{G}^{\ast}\;:=\;\tau\left(\mathbf{z}^{\ast}\right)$ is a maximizer of Eq. (1) for any maximizer $\mathbf{z}^{\ast}$ of Eq. (5). While this may not hold for $k<d$ , our empirical evaluations reveal that this representation suffices even for very complex graphs.1.6.  
+
+4.2 ACQUISITION FUNCTION OPTIMIZATION  
+
+To perform each step of the BO pipeline (Sec. 3.1), we use the acquisition function obtained so far to select a batch of $B$ most promising candidates to evaluate, also known as Batch BO (Joy et al., 2020).1 for more details). Subsequently, we evaluate the acquisition function of the DAGs induced by these candidates,2 and choose the top $B$ candidates based on the acquisition function values. The quality of the candidates batch strongly depends on $C$ , i.e., if we can evaluate the acquisition function of a lot of candidates, then the top $B$ candidates are likely to have higher values. However, this also increases computational cost, so our acquisition function must scale well with the number of candidates $C$ to mitigate this overhead, which leads us to the next point.  
+
+4.3 SURROGATE MODELING WITH DROPOUT NETWORKS  
+
+To overcome the scalability issues of standard BO due to the use of GPs as discussed earlier, we instead pursue neural networks, which are well-known for their scalability and flexibility (Snoek et al., 2015). Our networks must be able to model uncertainty to help the optimizer prioritize evaluating uncertain but promising candidates. Towards this end, we employ dropout activations (Srivastava et al., 2014), whose original purpose was to reduce overfitting in training neural networks, and were later found to be also useful as an approximate Bayesian inference method (Gal & Ghahramani, 2016), and thus have been successfully applied to BO (Guo et al., 2021).2.  
+
+Specifically, we devise a single-layer neural network with dropout activation as follows. Let $p\in$ $(\bar{0},1)$ be the dropout rate, $d$ denotes the dimensionality of the input, $h$ is the number of hidden units, $\dot{\mathbf{W}}_{1}\in\mathbb{R}^{d\times h}$ and $\mathbf{W}_{2}\in\mathbb{R}^{h\times1}$ are weight matrices, $\mathbf{\dot{b}}_{1}\in\mathbb{R}^{h}$ and $b_{2}\in\mathbb{R}$ are biases. Our dropout networks are then defined as:  
+
+$$
+\mathrm{DropoutNN}\left(\mathbf{x}\right):=\mathbf{W}_{2}^{\top}\left(\mathrm{BatchNorm}\left(\mathrm{ReLU}\left(\frac{1}{1-p}\left(\left(1-\mathbf{m}\right)\circ\left(\mathbf{W}_{1}^{\top}\mathbf{x}+\mathbf{b}_{1}\right)\right)\right)\right)\right)+b_{2},
+$$  
+
+where we also follow common practice to employ Batch Normalization (Ioffe & Szegedy, 2015) for improved training efficiency, and $\textbf{m}\sim\mathrm{{\Bernoulli}}(p)^{h}$ is drawn for every invocation of DropoutNN $\bf{\Psi}(x)$ in both train and test modes. By training this model on observed data $\mathbf{X}$ and y with the square loss, performing a stochastic forward pass $y\sim\mathrm{DropoutNN}\left(\mathbf{x}\right)$ can be interpreted as drawing from an approximate posterior $y\;\sim\;q\left(y\mid\mathbf{x},\mathbf{X},\mathbf{y}\right)$ (Gal & Ghahramani, 2016). Using Thompson sampling, we do not need to characterize the whole posterior and this mere sample suffices for acquisition function optimization (Russo & Van Roy, 2014; Eriksson et al., 2019).  
+
+4.4 INDIRECT SURROGATE MODELING  
+
+A na¨ıve surrogate modeling approach for DAG learning is modeling a direct map from a DAG to its score. However, DAG scores can typically be decomposed into independent node-wise components, which can be further exploited for better modeling. For example, the BIC scores in Eqs. (2) and (3) involve the local components $\left\{\mathrm{MSE}_{i}\left(\mathrm{pa}_{i}^{\mathcal{G}}\right)\right\}_{i=1}^{d}$ observable after each DAG score invocation. To exploit these information to the fullest, we propose to learn local surrogate models predicting the node-wise scores, then combine them using the rule in Eq. (2) or (3), depending on the situation. Particularly, for each node $i$ , we use the evaluation data $\left\{\left(\mathrm{pa}_{i}^{\mathcal{G}^{(j)}},\mathrm{MSE}_{i}\left(\mathrm{pa}_{i}^{\mathcal{G}^{(j)}}\right)\right)\right\}_{j=1}$ , where $\mathcal{G}^{(j)}$ is the $j$ -th evaluated DAG, to train a dropout network Dropout $\mathrm{NN}_{i}$ predicting $\mathrm{ln}\,\mathrm{MSE}_{i}$ from $\mathrm{pa}_{i}^{\mathcal{G}}$ , which is represented by a binary vector of $d$ dimensions. The models are independent among all nodes instead of being shared to avoid spurious correlations. To summarize, for a dataset of $d$ nodes, we jointly train $d$ local surrogate models $\{\mathrm{DropoutNN}_{i}\}_{i=1}^{d}$ . To sample the DAG score of a graph $\mathcal{G}$ , we first sample each local score $l_{i}\sim\mathrm{DropoutNN}_{i}\left(\mathrm{pa}_{i}^{\mathcal{G}}\right)$ , then combine them with $\begin{array}{r}{\mathrm{AF}\left(\mathcal{G}\right):=\mathrm{Combine}_{\mathrm{BIC}-\mathrm{NV}}\left(l_{1},\ldots,l_{d}\right):=-n\sum_{i=1}^{d}l_{i}-\left|\mathcal{G}\right|\ln n,}\end{array}$ if the non-equal variance BIC score is being considered, or AF (G) := Combine BIC−EV (l1, . . . , ld) := −nd ln id=d1 eli− for the case of equal variance BIC score, which resemble Eqs. (2) and (3), respectively.  
+
+
+
+\section{4.5 CONTINUAL MODEL TRAINING  }
+
+
+Upon acquiring a batch of $B$ of new evaluations, the neural networks require retraining to update their weights. To avoid retraining with all data so far, which scales at least quadratically with the number of evaluations, we adopt a continual training approach (Wang et al., 2024) that only updates the models with the new data and a small portion of past data to mitigate forgetting. Specifically, we perform $n_{\mathrm{grads}}$ gradient steps within each BO iteration, each of which is calculated on the $B$ new datapoints and a replay buffer of $n_{\mathrm{replay}}$ past observations using Reservoir Sampling (Vitter, 1985).  
+
+4.6 FINALIZING THE RESULT  
+
+Pruning the resultant DAG is common practice to suppress the redundant edges (Bu¨hlmann et al., 2014; Zheng et al., 2018; Wang et al., 2021; Bello et al., 2022; Duong et al., 2024), and is also employed in our framework. This can be done by thresholding the weight matrix for linear data (Zheng et al., 2018), or employing significance testing for nonlinear data using generalized additive model regression (CAM pruning, Peters et al., 2014), or conditional independence testing under the faithfulness assumption (Duong et al., 2024).3.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+In this section, we verify our claim in the introduction: DrBO is both more accurate and sampleefficient than existing approaches in score-based observational DAG learning. We show this by comparing our DrBO method with a number of the most recent advances in causal discovery that are based on sequential optimization, including gradient-based methods DAGMA (Bello et al., 2022), COSMO (Massidda et al., 2024), GOLEM (Ng et al., 2020), NOTEARS (Zheng et al., 2018) NEW with TMPI constraint (Zhang et al., 2022), as well as RL-based approaches CORL (Wang et al., 2021) and ALIAS (Duong et al., 2024). We note that CORL, ALIAS, and DrBO directly optimize the BIC score, COSMO, DAGMA, and NOTEARS optimize the penalized least-square loss, while NEW GOLEM optimizes a penalized log-likelihood. For gradient-based methods, we consider a gradient update equivalent to one DAG evaluation.  
+
+
+
+\section{5.1 RESULTS ON SYNTHETIC DATA  }
+
+
+We consider the standard Erdo˝s-Re´nyi (ER) graph model (Erd˝os & Re´nyi, 1960) to generate data, where graphs with $d$ nodes and $d e$ edges on average are referred to as $d{\mathrm{ER}}e$ graphs (e.g, 10ER4).  
+
+
+
+\section{5.1.1 LINEAR-GAUSSIAN DATA  }
+
+
+After simulating a DAG $\mathcal{G}$ , we sample edge weights with $w_{j i}\sim\mathcal{U}\left([-2,-0.5]\cup[0.5,2]\right)$ like prior studies (Zheng et al., 2018; Zhu et al., 2020; Wang et al., 2021). Then, we generate a dataset of $n\,=\,1{,}000$ i.i.d. samples according to a linear-Gaussian SCM $\begin{array}{r}{x_{i}\;:=\;\sum_{j\in\mathrm{pa}_{i}}w_{j i}x_{j}+\varepsilon_{i}}\end{array}$ , where $\varepsilon_{i}\sim\mathcal{N}\left(0,1\right)$ . For fairness, we prune the DAGs returned by $\mathbf{DrBO}$ , along with ALIAS and CORL as prescribed in their papers, by thresholding the weight matrix obtained via linear regression at 0.3. This is not done for DAGMA and COSMO because their implementations already incorporated the same pruning scheme.  
+
+Dense graphs. We stress-test our method with complex structures in Figure 1(a). As depicted in the first column, our method is the only approach that can achieve absolute overall performance in all five metrics, surpassing the second- and third-best methods ALIAS and CORL by large margins of more than $20\%$ in each metric, while gradient-based methods DAGMA and COSMO struggle with much worse performance. From the second and third columns, our $\mathbf{DrBO}$ approach can reach higher BIC scores, and thus lower SHDs, very sharply with the number of evaluations, highlighting  
+
+![](images/8f57d5a55d5f90e38a5aa4ffa3a709a06fadf8ee446cc91e555339bb7ef80cc5.jpg)  
+(a) Dense graphs with Linear-Gaussian data (DAGs with 30 nodes and ${\approx}240$ edges). For fairness, summary metrics (first column) are calculated at 50,000 evaluations for all methods.  
+
+![](images/23ef7e8d248fb72fb9a509bfb7db38cc2e95a7f0852bdc95138e4752c6d2b994.jpg)  
+(b) Large graphs with Linear-Gaussian data (DAGs with 100 nodes and ${\approx}200$ edges). For fairness, summary metrics (first column) are calculated at 50,000 evaluations for all methods.  
+
+![](images/660b71083016ab5670f4a09c1ddaea570a9a374133ae81b2b2698f56f367ed32.jpg)  
+(c) Nonlinear data with Gaussian processes (DAGs with 10 nodes and ${\approx}40$ edges). For fairness, summary metrics (first column) are calculated at 20,000 evaluations for all methods.  
+
+Figure 1: DAG learning results on Synthetic data. First column: overall performance in terms of True Positive Rate (TPR, higher is better), Precision, Recall, and $F_{1}$ score (higher is better), as well as False Discovery Rate (FDR, lower is better). Second column: we track the best Bayesian Information Criterion (BIC, higher is better) so far at every optimization step. Third and Fourth columns: we monitor the Structural Hamming Distance (SHD, lower is better) of the DAG whose best BIC so far at every optimization step. Shaded areas in the line plots indicate $95\%$ confidence intervals over 5 random datasets. NOTEARS $+^{\prime}$ TMPI usually stops early before the time limit.  
+
+its sample-efficiency. Lastly, the fourth column shows that our method’s SHD improvement over time is continuous and faster in terms of runtime than all other baselines.  
+
+Large-scale graphs. Next, we demonstrate the scalability of our method on high-dimensional graphs of 100 nodes, having up to 10,000 edges. Our results in Figure 1(b) shows that $\mathbf{DrBO}$ is still the leading method for high-dim data, where it obtains absolute overall performance along with the lowest SHD among all methods in limited runtime.  
+
+
+
+\section{5.1.2 NONLINEAR DATA  }
+
+
+Following prior works (Zhu et al., 2020; Wang et al., 2021; Yang et al., 2023a; Duong et al., 2024), we demonstrate our method on nonlinear datasets generated using Gaussian processes from Lachapelle et al. (2020). Specifically, we employ the datasets generated according to an ANM $x_{i}:=\^{\cdot}f_{i}\left(\mathbf{x}_{\mathrm{pa}_{i}}\right)+\varepsilon_{i}$ where $f_{i}$ is drawn from a Gaussian process prior with a unit bandwidth RBF kernel, and $\varepsilon_{i}\ \sim\mathcal{N}\left(0,\sigma_{i}^{2}\right)$ with non-equal noise variances $\sigma_{i}^{2}$ sampled uniformly in [0.4, 0.8]. ALIAS, CORL, and DrBO optimize $S_{\mathrm{BIC-NV}}$ , while COSMO, DAGMA, and NOTEARS $^{;+}$ TMPI NEW optimize the least-square objective. The empirical results reported in Figure 1(c) confirms that our $\mathbf{DrBO}$ method also excels on complex nonlinear data in both accuracy and computational cost. This is evidenced by the leading overall performance (first column), along with a vanishing SHD of only 0.4 at the end of the learning curve, surpassing other methods by a visible gap both in SHD and convergence speed.  
+
+5.2 RESULTS ON REAL DATA AND STRUCTURES  
+
+Table 1: Causal Discovery Performance on Real-world Structures (Scutari, 2010). The performance is measured in Structural Hamming Distance (SHD, lower is better). The numbers are mean $\pm$ std over 5 independent datasets with 1,000 observational samples. For fairness, all methods are limited to 20,000 evaluations.  
+
+![](images/9723b85ea3bf99a4d6e8dd973c7af71deac85d353d22b92c9e906edf3c23ddd4.jpg)  
+
+Benchmark data. We verify the performance of our method on real data using the popular benchmark flow cytometry dataset (Sachs et al., 2005), concerning a protein signaling network based on expression levels of proteins and phospholipids. We employ the observational portion of the dataset containing 853 observations and a known causal network with 11 nodes and 17 edges. We apply the similar settings as in Sec. 5.1.2 for all methods. The evaluations shown in Figure 2 verify the effectiveness of our method on real data, where it effortlessly achieves a state-of-the-art SHD of 9 with fewer evaluations compared with the competitors.  
+
+1 CORL NOTEARS+TMPI COSMO DrBO (Ours)  
+
+Real-world structures. To further illustrate the capabilities of our approach on real-world scenarios, we conduct experiments on real structures provided by the BnLearn repository (Scutari, 2010). Each dataset contains 1,000 observational samples and a ground truth causal network belonging to real-world applications with varying size.  
+
+![](images/1673387a5dbc300aded22fcfa28dec187d2345c4efaab628424a17f085de249c.jpg)  
+Figure 2: Causal Discovery Performance on the Benchmark Sachs Dataset (Sachs et al., 2005). NOTEARS $+^{\prime}$ TMPI stops early before the max no. of evaluations is reached.  
+
+3. The results are presented in Table 1, highlighting that our method is the only approach that can consistently achieve zero SHD on four out of five real-world structures. On the Alarm dataset, which appears to be most challenging, our DrBO method still leads with much lower SHD compared with all other baselines.  
+
+5.3 SUPPLEMENTARY RESULTS  
+
+Extended Causal Discovery Settings. Varying sample sizes: we show in Figure 4 that our method can achieve low SHDs even with limited data. Different graph models: in Table 3, DrBO achieves low SHDs and surpasses competitors for both ER and SF graphs, even on the dense graphs. Different noise distributions: Table 4 shows that DrBO also outperforms the baselines under five different noise types. BGe score: Figure 5 confirms that our method can work with a different score and match the score of ground truth graphs with low structural errors. Discrete Data: in Figure 6, we show that $\mathbf{DrBO}$ also obtains the highest scores and lowest SHDs compared with the baselines for non-continuous data. Standardized Data: we show in Figure 7 that our method is also robust NEW against data standardization for both linear and nonlinear data. Large-scale Nonlinear Data: Figure 8 demonstrates DrBO’s competitive performance and efficiency for nonlinear data on 50- and 100-node graphs.  
+
+Additional baselines.  
+
+![](images/1ad04f8eac6b61ef0b63d8400a9ad056fb2837a57f6868296218f6d7eb320021.jpg)  
+
+486   
+487   
+488   
+489   
+490   
+491   
+492   
+493   
+494   
+495   
+496   
+497   
+498   
+499   
+500   
+501   
+502   
+503   
+504   
+505   
+506   
+507   
+508   
+509   
+510   
+511   
+512   
+513   
+514   
+515   
+516   
+517   
+518   
+519   
+520   
+521   
+522   
+523   
+524   
+525   
+526   
+527   
+528   
+529   
+530   
+531   
+532   
+533   
+534   
+535   
+536   
+537   
+538   
+539  
+
+Figure 3: Ablating our design choices. All configurations are evaluated on 5 linear-Gaussian datasets of 1,000 samples on 30ER8 graphs. Shaded areas indicate $95\%$ confidence intervals.  
+
+Runtime.  
+
+5.4 ABLATIONS  
+
+In Figure 3, through ablation studies, we justify the design choices outlined in the Introduction, showing that every component contributes considerately to the accuracy and/or scalability of our method.2.  
+
+6 CONCLUDING REMARKS  
+
+This study presents DrBO, a novel BO method to search for high-scoring DAGs. We have shown that, by meticulously choosing promising DAGs to evaluate, we can find the optimal one more efficiently and cost-effectively. Our comprehensive experiments demonstrate that DrBO performs well even in many intricate settings like dense graphs, high-dimensional, and nonlinear data.  
+
+Regarding limitations, in our method, the surrogate model architecture is manually chosen and remains fixed through the course of optimization, and thus is prone underfitting at the end. To mitigate this, incremental neural architecture search techniques (Liu et al., 2018; Geifman & El-Yaniv, 2019) can be employed to facilitate autonomous architecture selection and scaling. In addition, our continual learning component is simple and can benefit from more advanced techniques (Wang et al., 2024) to further improve the performance of our surrogate models.  
+
+For future developments, it would be an interesting direction to combine our approach with active causal discovery methods to recover the causal structure even more efficiently. Moreover, our method can be extended to solve causal discovery problems with hidden confounders, where the outputs are no longer DAGs.  
+
+
+

@@ -1,0 +1,258 @@
+\title{Butterfly Effects of SGD Noise: Error Amplification in Behavior Cloning and Autoregression}
+
+\begin{abstract}
+
+\renewcommand\thefootnote{}
+\footnotetext{\textsuperscript{*}Work was done during an internship at Microsoft Research NYC.}
+\renewcommand\thefootnote{\arabic{footnote}} 
+
+
+ 
+ This work studies training instabilities of behavior cloning with deep neural networks. We observe that minibatch SGD updates to the policy network during training result in sharp oscillations in long-horizon rewards, despite negligibly affecting the behavior cloning loss. We empirically disentangle the statistical and computational causes of these oscillations, and find them to stem from the chaotic propagation of minibatch SGD noise through unstable closed-loop dynamics.  While SGD noise is benign in the single-step action prediction objective, it results in catastrophic error accumulation over long horizons, an effect we term \emph{gradient variance amplification} (GVA).  We show that many standard mitigation techniques do not alleviate GVA, but find an exponential moving average (EMA) of iterates to be surprisingly effective at doing so. We illustrate the generality of this phenomenon by showing the existence of GVA and its amelioration by EMA in both continuous control and autoregressive language generation.  Finally, we provide theoretical vignettes that highlight the benefits of EMA in alleviating GVA and shed light on the extent to which classical convex models can help in understanding the benefits of iterate averaging in deep learning.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep neural networks are increasingly used in machine learning tasks that contain \emph{feedback loops} as a defining characteristic: outputs of language models depend on previously predicted tokens \citep{vaswani2017attention}, recommendation systems influence the users to whom they give suggestions \citep{krauth2020offline,dean2022preference}, and robotic policies take actions in reactive control environments \citep{ross2010efficient,laskey2017dart}. Because these tasks are so complex, it is standard practice to optimize surrogate objectives, such as next-token prediction, that typically ignore feedback loops altogether \citep{pomerleau1988alvinn,vaswani2017attention,florence2022implicit}.
+
+When training deep models by gradient updates on the surrogate objective, surrogate performance often improves more or less monotonically as training progresses. At the same time, successive iterates  can exhibit wild variations in their performance on the task of interest. Because it is often impractical to evaluate the desired performance metric at multiple checkpoints, these oscillations imply that we have high risk of selecting and deploying a poor policy.  Thus, in order to determine best practices, we must first understand whether \emph{better training} or \emph{better data} will fix these instabilities. 
+This leads us to ask:
+\begin{quote}
+    \emph{What causes instabilities in learning systems with feedback loops? To what extent can they be mitigated by algorithmic interventions alone, without resorting to collecting additional data?}
+\end{quote}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.36\textwidth}
+    \raisebox{1mm}{
+    \includegraphics[width=\textwidth]{figs/fig1-curves.pdf}
+    }
+    \end{subfigure}
+    \hspace{-2mm}
+    \begin{subfigure}{0.3\textwidth}
+    \raisebox{1mm}{
+    \includegraphics[width=\textwidth]{figs/fig1-frequent.pdf}
+    }
+    \end{subfigure}
+    \hspace{-2mm}
+    \begin{subfigure}{0.34\textwidth}
+    \includegraphics[width=\textwidth]{figs/fig1-heatmaps.pdf}
+    \end{subfigure}
+    \caption{Typical reward instabilities over long-horizon ($H = 1000$) rollouts of neural behavior cloners for the \texttt{Walker2d-v4} MuJoCo locomotion task. \emph{Left:} Rollout rewards (\textcolor{C0}{blue training curves}) oscillate dramatically over the course of training (evaluated every $5000$ iterations), while BC loss is stable. \emph{Center:} Zoomed-in view of the highlighted region in (left). Large reward fluctuations are evident even between consecutive gradient iterates. \emph{Right:} Exhaustive evaluation of small neighborhoods (in stochastic gradient directions) around iterates \textcolor{mplM}{115K} and \textcolor{red}{120K}, revealing a fractal reward landscape $\btheta \mapsto J_H(\pi_{\btheta})$; this jaggedness is invisible in the 1-step behavior cloning objective $\lbc(\pi_{\btheta})$. Iterate averaging (EMA) drastically mitigates these effects (\textcolor{C2}{green training curves}).}
+    \label{fig:intro-results}
+\end{figure}
+
+
+We explore this question in the context of behavior cloning (BC), a technique for training a policy to optimize a multi-step objective in a purely offline manner. This is achieved by introducing a surrogate loss function $\lbc$ (\emph{behavior cloning loss}) that measures the distance between actions generated by some \emph{expert policy} $\pist$ and those taken by the learner's policy, and then minimizing $\lbc$ over an offline dataset of expert trajectories.
+BC is sufficiently broad as to capture important tasks ranging from robotics and autonomous driving \citep{pomerleau1988alvinn,codevilla2018end,chi2023diffusion} to autoregressive language generation \citep{chang2023learning}, and is popular in practice due to its simplicity and purely offline nature. 
+
+Our starting point is to observe that behavior cloning with deep neural networks exhibits \textbf{training instabilities} in which the multi-step objective ($J_H$), or \emph{rollout reward}, of nearby checkpoints oscillates wildly during training, despite a well-behaved validation loss for $\lbc$, even at the single iterate frequency; \Cref{fig:intro-results} exhibits this phenomenon for a sample training curve of a behavior cloning policy in the \texttt{Walker2d-v4} MuJoCo locomotion task \citep{towers_gymnasium_2023,todorov2012mujoco}. 
+This oscillatory behavior is clearly undesirable; we cannot differentiate between low- and high-quality iterates based on (validation loss for) $\lbc$, and thus cannot reliably select a high-quality policy.
+
+With regard to the final performance of BC, it is well understood that scarce or low-quality data can lead to statistical challenges and consequent performance degradation of imitator policies; unsurprisingly, better data often improves the quality of a learned policy.  Unfortunately, existing approaches to obtaining better data require either interactive access to the demonstrating expert \citep{ross2010efficient,laskey2017dart} or additional side information \citep{pfrommer2022tasil,block2023imitating}; these interventions may be costly or impossible in many applications. Thus, in this work we treat the data generating process as fixed and aim to investigate whether we can mitigate oscillations and improve the performance of BC solely through the application of better algorithmic choices.
+
+
+\subsection{Contributions}
+In this paper, we aim to diagnose and ameliorate instabilities in behavior cloning that arise from training on the surrogate cost alone in the purely offline setting. Our findings are as follows.
+
+\textbf{Diagnosis of rollout oscillations: gradient variance amplification.}
+In \Cref{sec:oscillations}, we conduct an extensive empirical study (278 distinct interventions) of BC in continuous control tasks and investigate the effects that architecture, regularization, and optimization interventions have on training instability.  We identify the presence of training oscillations and attribute them to \emph{gradient variance amplification} (GVA): the propagation of minibatch SGD noise through closed-loop dynamics, leading to catastrophic error amplification resembling \textbf{butterfly effects} in chaotic systems.
+We ablate away much of the statistical difficulty, so that the presence of oscillations suggests that GVA is an \emph{algorithmic} rather than \emph{statistical} pathology.
+
+\textbf{Mitigating GVA: stabilizers for unstable optimizers.}
+In \Cref{sec:stabilizers}, we investigate mitigations for GVA. Because GVA is caused by variance in the stochastic gradients, it can be ameliorated with variance reduction.  Indeed, we observe (\cref{sec:gva_interventions}) that i) aggressively decaying the learning rate, and ii) greatly increasing the batch size through gradient accumulation, both have positive effects on the stability of training. Unfortunately, both of these interventions come at a great increase in compute cost. As such, our most significant finding (\cref{sec:ema_good}) is that \emph{iterate averaging} by taking an Exponential Moving Average (EMA) of the optimization trajectory \citep{polyak1992acceleration,ruppert1988efficient}, stabilizes training and mitigates GVA across a wide range of architectures and tasks, with essentially no downsides. While iterate averaging is popular in many  deep learning research communities, this paper exposes iterate averaging as an \emph{essential} design consideration when training any deep model in the presence of feedback loops.
+
+\textbf{A preliminary study of GVA in language generation.} In \Cref{sec:nlp}, we broaden our focus by considering autoregressive sequence models.  Our findings suggest that \textbf{unstable optimizers, when stabilized with iterate averaging to mitigate GVA, do not need full learning rate decay}, entailing potential computational and statistical benefits for training language models.  For this reason, we suggest that EMA and related filters be designated as \emph{stabilizers} in their own right and incorporated into deep learning pipelines in the same vein as modern optimizers and schedulers.  
+
+
+  \textbf{The applicability of convex theory.} In \Cref{sec:theory}, we complement our empirical results with theoretical vignettes.  While the benefits of large learning rates cannot be explained in a convex setting, we demonstrate that---conditional on using theoretically suboptimal learning rates---stochastic convex optimization provides useful intuition for the causes and mitigations of GVA in deep learning. 
+  With our empirical results, these findings add to a line of work on surprising near-convex behavior in deep learning~\citep{sandler2023training,frankle2020linear,fang2022convex,schaul2013no}.
+
+
+
+
+
+\subsection{Related work}
+
+Understanding and mitigating the effects of error amplification in behavior cloning has been the subject of much empirical work \citep{ross2010efficient,laskey2017dart}, but most approaches use potentially impractical online query access to the expert policy; instead, we focus on a purely offline setting. 
+
+Complicated value function landscapes and their effect on training have been investigated in the context of planning in RL, with \citet{dong2020expressivity} investigating natural examples of fractal reward functions, \citet{wang2021instabilities} examining the instabilities arising from poor representations, and \citet{emmons2021rvs,chang2023learning} observing the fact that $\lbc$ is a poor proxy for $J_H$. To the best of our knowledge, there has not been a systematic study of training instability in the sense of rollout reward oscillation of nearby checkpoints. 
+
+In the context of stochastic optimization and optimization for deep learning, many previous works have attempted to reduce variance in theory \citep{polyak1992acceleration,ruppert1988efficient} and practice \citep{izmailov2018averaging,busbridge2023scale,kaddour2022stop,kaddour2023no}.  Of particular note is \citet{sandler2023training}, which demonstrates (empirically and in a toy theoretical setting) a form of equivalence between learning rate decay and iterate averaging.  Our focus is not on variance reduction \emph{per se}, but rather on the propagation of 
+,variance through unstable feedback loops.  We expand on the relationship between our work and \citet{sandler2023training} and discuss other related work in \Cref{app:related_work}. 
+
+
+
+
+
+
+
+\section{Preliminaries}
+
+\iftoggle{arxiv}{We now present necessary background and preliminaries that will be used throughout the paper.}{}
+
+\paragraph{MDP formalism.} We let $\cM = (\cS, \cA, P, r, H, \nu)$ denote a finite-horizon Markov decision process (MDP), where $\cS$ is an abstract state space, $\cA$ is an abstract action space, $P: \cS \times \cA \to \dist(\cS)$ is a Markov transition operator.  We denote by $r: \cS \times \cA \to [0,1]$ a reward function and $H \in \bbN$ is the length of the horizon.  Because we focus on continuous control tasks, we follow the notational conventions of control theory, denoting states by $\bx$ and actions by $\bu$. We let $\nu \in \dist(\cS)$ denote the initial distribution such that a trajectory from $\cM$ consists of  $\state_1 \sim \nu$ and $\state_{h+1} \sim P(\cdot \mid \state_h, \action_h)$ for all $h$.
+
+The learner has access to a class of policies $\pi: \cS \times \Theta \to \dist(\cA)$, where $\Theta$ is the \emph{parameter} space and $\pi_{\btheta}:\cS\to\Delta(\cA)$ is the policy induced by parameter $\btheta\in\Theta$.
+Given a policy $\pi_{\btheta}$, we denote its expected cumulative reward by $J_H(\pi_{\btheta}) = \ee[ \sum_{h = 1}^H r(\state_h, \action_h)]$ where $\action_h \sim \pi_{\btheta}(\cdot | \obs_h)$ and the expectation is with respect to both the transition dynamics of $\cM$ and the possible stochasticity of the policy. Our experiments focus on MDPs whose transition operators $P$ are deterministic, i.e., there exists a function $f: \cS \times \cA \to \cS$ such that $\state_{h+1} = f(\state_h, \action_h)$ for all $h$.  In this case the only stochasticity of the system comes from the sampling of the initial state $\state_1 \sim \nu$ (and possibly the policy).\looseness=-1
+
+\paragraph{Imitation learning and behavior cloning.} In imitation learning, we  are given an offline data set of $\nexp$ trajectories \iftoggle{arxiv}{$\doff = \crl[\big]{ \prn[\big]{ \state_h\upp{i}, \action_h\upp{i} }_{1 \leq t \leq H} \mid 1 \leq i \leq \nexp }$}{$\doff = \{ ( \state_h\upp{i}, \action_h\upp{i} )_{1 \leq h \leq H} \mid 1 \leq i \leq \nexp \}$} generated by an expert policy $\pist$ interacting with the MDP $\cM$.  In this work, we always consider \emph{deterministic policies}, i.e., where for all $\state$, $\pi_{\btheta}(\state)$ has support on a single action; in particular this holds for the expert $\pist$.  The goal of the learner is to produce a policy $\pihat$ that maximizes the expected cumulative reward $J_H(\pihat)$ over an episode.  We focus on the popular \emph{behavior cloning} (BC) framework, where we fix a loss function $\lbc: \cA \times \cA \to \bbR$ that measures the distance from the actions produced by $\pist$, and learn $\pihat$ by attempting to minimize the empirical risk of $\lbc$ over $\doff$; we abuse notation by denoting $\lbc(\pi_{\btheta}) \ldef \ee_{\doff}[\lbc(\pi_{\btheta}(\bx), \bu)]$  The basic premise behind behavior cloning is that $\lbc$ should be chosen such that if $\lbc(\pihat) \ll 1$ then $J_H(\pihat) \approx J_H(\pist)$; that is, imitation of the expert is a surrogate for large cumulative reward. 
+In line with common practice in BC \citep{janner2021offline,shafiullah2022behavior,chi2023diffusion}, the imitator policies in our experiments augment the state with the previous action, i.e., $\pi_{\btheta}: \cS \times \cA \to \cA$, which can be integrated into the previous formalism by expanding the state space.  For the special case of the first state $\state_1$, we always let $\action_0 = \bzero$.
+
+\paragraph{Notation.}  Throughout the paper, we denote vectors by bold lower case letters and matrices by bold upper case letters.\footnote{In particular, we denote states by $\state$ and actions by $\action$ in order to emphasize that, in our experiments, they are vectors in Euclidean space.}  We reserve $\btheta$ for a parameter of our policy and $J_H$ for the cumulative reward over a trajectory, omitting $H$ when it is clear from context.  For conciseness, we often refer to $J_H$ as the \emph{reward}; the per-step reward function $r$ makes no appearance in the rest of the paper. Given a set $\cU$, we let $\dist(\cU)$ denote the class of probability distributions on $\cU$.
+
+
+
+
+\section{Diagnosis of rollout oscillations: gradient variance amplification}
+
+
+\iftoggle{arxiv}{
+In the introduction, we described an instance (\cref{fig:intro-results}) of training instability in behavior cloning. In this section, we investigate this phenomenon in depth. In \cref{subsec:gva-diagnosis}, we observe that for a suite of continuous control tasks, the same phenomenon occurs: training oscillations appear in the reward $J_H(\pihat)$  despite well-behaved training as measured by the BC loss $\lbc(\pihat)$. Then, in \cref{sec:gva_interventions}, we investigate the cause of this phenomenon, and term it \emph{gradient variance amplification} (GVA). We conclude in \Cref{sec:toy1} with a simple theoretical model for GVA, highlighting the potential for GVA to occur in an otherwise well-behaved system. Additional experimental details and results are deferred to \Cref{app:experiments}.  \looseness=-1}{}
+
+\subsection{Instabilities in behavior cloning of MuJoCo tasks}
+\label{subsec:gva-diagnosis}
+
+\iftoggle{arxiv}{We begin by explaining and expand upon the findings in \Cref{fig:intro-results}.}{}
+\paragraph{Experimental setup.} We investigate instabilities in behavior cloning for the \{\texttt{Walker2d}, \texttt{Hopper}, \texttt{HalfCheetah}, \texttt{Humanoid}, \texttt{Ant}\}\texttt{-v4} environments from the OpenAI Gymnasium \citep{towers_gymnasium_2023}, all rendered in MuJoCo \citep{todorov2012mujoco}.  We focus on \texttt{Walker2d-v4} for the discussion that follows, and defer detailed discussion of further environments (which exhibit similar behavior) to \Cref{app:experiments}.  Our expert is a multilayer perceptron (MLP) trained with Soft Actor Critic (SAC) \citep{haarnoja2018soft} for 3M steps with \texttt{stable-baselines3} \citep{stable_baselines3}, with out-of-the-box hyperparameters.\footnote{By default, the Stable-Baselines3 SAC agent is stochastic, but we enforce determinism by selecting the mean action of the resulting policy.}  The \emph{default} imitator is a 4 layer MLP; details are in \Cref{app:experiments}.  We examine several widths and depths, as well as Transformer \citep{vaswani2017attention} imitators.
+
+Our first suite of experiments aims to isolate instability from \emph{statistical difficulties}. We set up the experiments to make the behavior cloning problem as easy as possible. First, we focus on the ``large-data'' regime $\nexp = H = 1000$, in which overfitting with respect to the BC loss $\lbc(\pihat)$ is not a problem (see \Cref{fig:intro-results}), and thus poor rollout performance for $J_H(\pihat)$ cannot be blamed on insufficient data; this removes a typical source of statistical difficulty faced in applying behavior cloning to domains such as robotics \citep{chi2023diffusion,pfrommer2022tasil,ross2010efficient,laskey2017dart}. Beyond focusing on the large-data regime, (i) we consider only deterministic dynamics and deterministic experts, and (ii) we include within our default model the same class of MLPs that parameterize the expert policies, ensuring that expressivity is not an issue. 
+As such, we have placed ourselves in perhaps the easiest possible setting for behavior cloning.
+
+In \Cref{fig:intro-results} (Left), we compare the evolution of the BC loss $\lbc(\pihat)$ (on a validation set) and reward $J_H(\pihat)$ for imitator policies in the \texttt{Walker2d-v4} MuJoCo locomotion task. In this figure, we observe extreme oscillatory behavior in $J_H(\pihat)$, juxtaposed with smoothly decaying $\lbc(\pihat)$.  In \Cref{fig:intro-results} (Middle), we zoom in on the training trajectory between iterates 40K and 50K and observe that the same instability persists even at the \emph{every-iterate} level. Toward identifying what causes these instabilities, \Cref{fig:intro-results} (Right) displays an experiment in which we independently sample two stochastic gradients of the training loss at a fixed checkpoint with good rollout reward.  Policy weights are then perturbed by small steps in each of the two directions, and we evaluate the resulting reward $J_H(\pihat)$ over 20 rollouts, along with the BC loss $\lbc(\pihat)$ on a held-out validation set.  We see that nearby models vary erratically in terms of rollout performance, but vary smoothly in validation BC loss.  These findings are reproduced consistently across the other environments and architectures in  \cref{app:experiments}; thus, we conclude:
+\begin{enumerate}[leftmargin=2.5em]
+    \item[(R1)] \textbf{The reward landscape is highly sensitive to small changes in policy parameters}: small perturbations in model weights induce \emph{butterfly effects} in the reward $J_H(\pihat)$.  In contrast, in the same regions, the \emph{BC loss} landscape $\btheta \mapsto \lbc(\pi_{\btheta})$ is well-behaved (nearly linear locally). %
+    \end{enumerate}
+
+
+
+\subsection{Instability is caused by gradient variance amplification}\label{sec:gva_interventions}
+We now present compelling evidence that \emph{variance in stochastic gradients} during training is responsible for training instability, because \textbf{gradient variance is amplified through the sensitivity of the rollout rewards to fluctuations in network parameters}. In \Cref{fig:gva}, 
+we visualize evolution of both $\lbc(\pihat)$ and $J_H(\pihat)$ over training for a variety of potential algorithmic interventions.  We find that neither changing the model architecture and scale (1\textsuperscript{st} row) nor standard regularization techniques (2\textsuperscript{nd} row) ameliorate the training instabilities observed. We do see, however, that aggressively decaying the learning rate and increasing the batch size (3\textsuperscript{rd} row) significantly reduces oscillations (at least when measuring mean rewards),  at the expense of substantially slowing down training.  Thus, we conclude that fluctuations from stochasticity in the gradients are to blame for oscillations in rollout rewards, and term this phenomenon \emph{gradient variance amplification} (GVA). To summarize:
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{figs/fig2-gva-large.pdf}
+    \caption{Highlights from a large suite of experiments, suggesting an algorithmic (rather than statistical) origin of reward oscillations. All plots use the 4-layer MLP architecture unless otherwise specified. \textcolor{blue}{Blue curves} show mean rewards over 20 initial conditions, while \textcolor{teal}{teal dots} show disaggregated per-episode rewards (such that each point represents the rollout reward of a fixed initial condition of the policy at the current iterate). These oscillations persist across dataset sizes, architectures, model scales, and choices of regularizers, and diminish toward the end of training as the learning rate decays to 0. They are most strongly mitigated by \textbf{variance reduction strategies}. Here, we opt for direct visualizations, providing a qualitative demonstration of GVA and its mitigations. We accompany these with quantitative comparisons in \cref{app:gva-quantitative}. }
+    \label{fig:gva}
+  \end{figure}
+
+\begin{enumerate}[leftmargin=2.5em]
+    \item[(R2)] \textbf{GVA arises from algorithmic suboptimality rather than an information-theoretic limit.} Even with ``infinite'' training data (i.e., fresh trajectories with i.i.d. initial conditions at each training step), rollout oscillations persist.
+\end{enumerate}
+\begin{enumerate}[leftmargin=2.5em]
+    \item[(R3)] \textbf{Training oscillations are \emph{not} mitigated by many standard approaches to regularization}, including architectural interventions and increased regularization.  On the other hand, \textbf{oscillations are ameliorated by variance reduction techniques}, such as large batch sizes, learning rate decay, and iterate averaging.
+    \end{enumerate}
+
+\Cref{app:experiments} shows that (R2) and (R3) remain true across environments and model architectures.
+In addition, we find that training instability is not the result of inadequate network architecture; we observe oscillations across model scales, and for both MLP and Transformer\iftoggle{arxiv}{\footnote{We observe that the successful Transformer imitators learn \emph{non-Markovian} policies; unlike the MLPs, the Transformers observe a history (of length 32 in our experiments) of many past states and actions; in \cref{app:misc-visualizations} we observe that the Transformers are attending to previous states and not just the most recent one; this corroborates findings in \citet{janner2021offline,shafiullah2022behavior}.}}{} architectures.
+    
+While \Cref{fig:gva} shows that it is possible to quell GVA using small learning rates or large batch sizes, this may not always be practical, as both interventions can incur steep computational costs.\footnote{As another unsatisfactory compromise, we also find that shallower models are less susceptible to GVA.} Even worse, the success of continuous optimization in deep learning depends on non-convex feature learning mechanisms \citep{chizat2019lazy}, and too small a learning rate or too large a batch size can have deleterious effects on generalization.\footnote{We refer to some theoretical and empirical accounts in \cref{app:related_work}.}
+Thus, it is vital to seek interventions that are holistically compatible with existing deep learning pipelines. Among these, \Cref{fig:gva} highlights that a large momentum coefficient is mildly helpful, but taking an exponential moving average (EMA) of iterates~\citep{polyak1992acceleration} is \emph{extremely} effective. This motivates us to take a closer look at the latter in \cref{sec:stabilizers} through another suite of experiments.%
+
+\subsection{Understanding GVA: mismatch between BC loss and rollout reward}\label{sec:toy1}
+
+The disparity between behavior cloning loss $\lbc(\pihat)$ and rollout reward $J_H(\pihat)$  has long been appreciated in the imitation learning literature, and is understood to be caused by \emph{error amplification}, the process by which mildly erroneous predictions, when fed repeatedly through feedback loops, result in highly suboptimal performance \citep{chen2021black,wang2020statistical}.  More precisely, for given $\lbc$ and $J_H$ as well as a policy $\pist$ and $\delta > 0$, we define the \emph{error amplification constant} at scale $\delta$ to be the maximal value (with respect fo $\btheta$) for $J_H(\pist) - J_H(\pi_{\btheta})$ such that $\lbc(\pi_{\btheta}) - \lbc(\pist)< \delta$.   The following proposition provides a simple theoretical illustration for how small fluctuations in BC loss can be drastically amplified by feedback between imperfectly-imitated policies and system dynamics.
+
+\begin{proposition}[Example of exponential error amplification]\label{prop:stab_informal}
+  Let $\cB_{\delta}$ denote the set of $\delta$-Lipschitz functions $\Delta: \cS \to \cA$ with $\Delta(\mathbf 0) = \mathbf 0$. For any $\delta > 0$, there exists a deterministic MDP with horizon $H$ and an expert policy $\pist$ such that the dynamics are Lipschitz in both state and action and $\pist$ is Lipschitz in the state, and such that
+    \begin{align}\label{eq:stab_informal}
+        \sup_{\Delta \in \cB_{\delta}}\crl*{J_H(\pist) -  J_H(\pist + \Delta)} \geq \Omega(H) \cdot\left(  e^{\Omega(H \delta)}-1\right),%
+    \end{align}
+    yet $\sup_{\Delta \in \cB_\delta} \lbc(\pist + \Delta) \leq \BigOh{H\cdot\delta^2}$, where $\lbc$ is the $\ell_2$ loss. Thus, the error amplification constant is \emph{exponential} in the time horizon.
+\end{proposition}
+
+\iclrpar{Working model for GVA.} 
+\Cref{prop:stab_informal} shows that even when $\lbc$ is uniformly small in a neighborhood around $\pist$, the rollout loss can be \emph{exponentially large} in the same neighborhood. At the same time,
+there are good subsets of parameter space that do not experience this worst-case error amplification in our construction\iftoggle{arxiv}{ (in fact, by inspecting the proof, one can observe that they experience negative error amplification!)}{}. We therefore hypothesize that, when stochastic optimization converges to a small neighborhood around zero-BC error models, it bounces between low-BC error models that experience large error amplification, and those that do not. To recapitulate: \emph{GVA is the phenomenon in which gradient stochasticity leads to optimization trajectories repeatedly visiting regions of parameter space with catastrophic error amplification.}  Because our MuJoCo environments involve nonlinear contact dynamics (while the example in~\Cref{prop:stab_informal} is linear), oscillations in \Cref{fig:intro-results} are even more chaotic than this example may suggest. We elaborate on this point further by studying the advantages of EMA on a discontinuous ``cliff loss'' problem in \Cref{sec:theory}.
+
+
+
+
+
+
+
+\section{Mitigating GVA: stabilizers for unstable optimizers}
+
+\label{sec:stabilizers}
+
+In \cref{sec:gva_interventions}, we isolated GVA as the primary cause of observed instabilities in BC (cf. \cref{fig:intro-results}) and identified iterate averaging with EMA~\citep{polyak1992acceleration} as a promising remedy. In this section, we conduct an in-depth investigation of EMA as a mitigation. We start in continuous control (\cref{sec:ema_good}), and find EMA works almost unreasonably well at reducing GVA in the experimental testbed described in the prequel.
+Next, moving beyond continuous control (\Cref{sec:nlp}), we observe analogous effects in autoregressive language generation.  In both settings, we find iterate averaging works so well as to \textbf{eliminate the need for full learning rate decay}; this leads us to recommend a conceptual reframing of EMA as a \emph{stabilizer} for training neural networks, akin to (and interacting with) conventional optimizers and schedulers.  We conclude (\cref{sec:theory}) by exploring the extent to which intuition on benefits of iterate averaging from the theory of stochastic convex optimization applies in our empirical settings.
+
+ \subsection{The outsized benefit of iterate averaging}\label{sec:ema_good}
+
+\begin{figure}
+    \centering
+
+    \includegraphics[width=\linewidth]{figs/fig3-ema.pdf}
+    \caption{Iterate averaging significantly mitigates GVA-induced reward oscillations, \textbf{without needing to change the learning rate schedule or batch size}.
+    These improvements hold across architectures, dataset sizes, and \emph{some} tasks. \emph{Column 2, bottom:} Algorithmic instabilities are more pronounced at smaller sample sizes; thus, \textbf{stabilization can lead to improved sample efficiency}.
+    \emph{Column 3:} We recommend updating the EMA at every iterate, with an initial burn-in phase, and with a tuned $\gamma^{(t)} = t^{-\alpha}$ decay, to avoid divergence or slower progress. \emph{Columns 4-5}: We verify that the benefits of EMA are not exclusive to the \texttt{Walker2d-v4} task; for some other tasks (including the higher-dimensional \texttt{Humanoid-v4}), oscillations are more benign.}
+    \label{fig:ema_results}
+\end{figure}
+
+We recall the definition of the EMA method for iterate averaging \citep{polyak1992acceleration}. Given an optimization trajectory $(\btheta\upp{t})_{0 \leq t} \subset \rr^d$ and a sequence $(\gamma_t)_{1 \leq t} \subset [0,1]$, the EMA iterates $(\bthetatil_\gamma\upp{t})$ are\footnote{Common heuristics include updating the EMA only after an initial ``burn-in'', and annealing $\gamma$ with a polynomial decay: $\gamma^{(t)} = \max(t^{-\alpha}, \gamma_\mathrm{min})$. It is also customary to use $\beta^{(t)}$ to denote $1 - \gamma^{(t)}$.} 
+\begin{align}
+\bthetatil_\gamma\upp{0} = \btheta\upp{0}, \quad \text{ and }
+    \bthetatil_\gamma\upp{t+1} = (1 - \gamma_t) \cdot \bthetatil_\gamma\upp{t} + \gamma_t \cdot \btheta\upp{t+1}. \label{eq:EMA_def}
+\end{align}
+Many prior works have detailed the benefits of iterate averaging in stochastic convex optimization and beyond (see \Cref{app:related_work}).  Here, we investigate its effect on GVA.  We begin by considering the same MuJoCo framework as in \cref{sec:oscillations}. In \Cref{fig:ema_results}, we produce similar plots to those in \Cref{sec:oscillations}, but this time juxtapose the vanilla trained models with an EMA of their iterates (further results and details are deferred to \Cref{app:experiments}). We observe the following:
+\begin{enumerate}[leftmargin=2.5em]
+    \item[(R4)] \textbf{EMA iterate averaging strongly mitigates rollout oscillations}. %
+    \emph{In every setup we consider,} across a variety of architectures and environments, EMA significantly reduces the oscillations in rollout reward; in no instance does it hurt performance.
+\end{enumerate}
+
+
+\input{body/4a-nlp}
+
+
+
+\subsection{To what extent does convex theory explain the benefits of EMA?}\label{sec:theory}
+We close by providing mathematical intuition as to why iterate averaging with EMA can reduce the oscillations caused by GVA. As discussed in \Cref{sec:toy1}, oscillations can occur when there is a disparity between the BC loss $\lbc(\pihat)$ on which we train and the rollout reward function $J(\pihat)$ on which we evaluate. To study this phenomenon, we a consider simple, horizon-one behavior cloning problem with a single action determined by the model parameter $\btheta$. We take the \emph{training loss} to be a quadratic $\lbc(\btheta) = \frac 12 \cdot \norm{\btheta - \bmu}^2$, and the \emph{rollout reward}  $J(\cdot)$ to be 
+\begin{align}
+  \label{eq:cliff_reward}
+    J(\theta) = \textstyle \begin{cases}
+        -\norm{\btheta - \bmu}^2,&\quad  \|\btheta - \bmu\| \leq \epsilon \\
+        -C,  &\quad \text{otherwise}
+    \end{cases},
+\end{align}
+where $C \gg \epsilon^2 > 0$ are constants.  Here the training loss is convex, but rollout reward is not; the latter exhibits a ``cliff,'' dropping sharply from $-\epsilon^2$ to $-C$ once $\nrm{\btheta-\bmu}>\epsilon$.  The pair $(\lbc, J)$ may be thought of as a discontinuous, horizon-one analogue of the example in \Cref{prop:stab_informal}, illustrating the contrast between extreme sensitivity of reward and insensitivity of the loss to the parameter of interest. The reward function encapsulates discontinuities arising in control tasks from, e.g., contract forces. In the MuJoCo walker, ``cliff''-type behavior may come from an expert policy close to overbalancing the agent, with the learner's policy falling down if the parameter is ``over the cliff.''
+We analyze  SGD iterates $\btheta\upp{t+1} = \btheta\upp{t+1} - \eta( \btheta\upp{t} - \mu + \mathbf{w})$, where $\eta > 0$ is a constant step size and $\mathbf{w} \sim \cN(0,\eye)$. This corresponds to SGD on a noisy version of the BC loss given by $\tilde{\ell}_{\textsc{BC}}(\btheta) := \Exp[\|\btheta_t - \bu + \mathbf{w}\|^2]$, which satisfies $\Exp_{\mathbf{w}}[\tilde{\ell}_{\textsc{BC}}(\btheta) ]= \lbc(\btheta) + \mathrm{constant}$. We show that applying EMA to the resulting iterates achieves  substantially higher rollout reward than vanilla SGD.
+\begin{proposition}[Informal version of \Cref{prop:cliff_loss_formal}]\label{prop:dt_informal}
+Consider the setting in \cref{eq:cliff_reward} for parameters $C\gg\epsilon^2>0$ in dimension one, and let $\btheta\upp{T}$ denote the SGD iterate with learning rate $\eta > 0$ as described above. 
+Let $\bthetgam\upp{T}$ denote the EMA iterate \eqref{eq:EMA_def} with fixed parameter
+ $\gamma_t \equiv \gamma \le \eta$ satisfying $\gamma \gg 1/T$.
+Then, $\Exp[\lbc(\btheta\upp{T})]$ scales as $\Theta(\eta)$, while $\Exp[\lbc(\bthetgam\upp{T})]$ scales as $\Theta(\gamma)\leq\eta$. In particular, when $\eta > c_1 \epsilon$, and $\gamma \log(C/\gamma) \le c_2 \epsilon$, for absolute constants $c_1,c_2>0$, we find that 
+\begin{align}
+    \textstyle \Exp[J(\bthetast) - J(\btheta\upp{T})] \ge \frac{C}{2}, \quad \text{but} \quad \Exp[J(\bthetast) - J(\bthetgam\upp{T})]  \le \cO(\gamma).
+\end{align}
+\end{proposition}
+This proposition holds, which shows that the rollout performance for EMA can be arbitrarily small relative to that of SGD, holds even in the regime where SGD is initialized at $\btheta\upp{0}=\bmu$ (so that both $\btheta\upp{T}$ and $\btheta_\gamma\upp{T}$ are unbiased estimates of $\bmu$), and thus highlights that EMA can reduce the variance that arises from accumulation of SGD noise.\footnote{We compare to similar findings \citep{sandler2023training} in \Cref{app:related_work}.} Notice that \Cref{prop:dt_informal} requires $\eta \ge \gamma \gg 1/T$, which is above the optimal step size of $\eta_t = 1/t$.\footnote{Note that the $\eta_t = \frac{1}{t}$ step size schedule gives the sample mean, which is the maximum likelihood estimator for our objective.}  Indeed, in \Cref{app:theory} we show that EMA, with the parameters we find empirically successful, only benefits optimization \emph{above} these aggressively-decayed theoretically optimal learning rate schedules. Thus, we conclude that \textbf{convex theory reveals the variance-reducing benefit of \emph{either} learning rate decay or EMA, but does not suggest which one is better.}  We defer further theoretical results to \Cref{app:theory}, and present an empirical study of a system motivated by the cliff loss in \Cref{app:cliff_lqr_experiments}; in particular, our analysis provides a simple example where GVA provably occurs, both theoretically and empirically.
+
+{}
+The above example reveals the difference between the \textbf{statistical and algorithmic difficulties} of BC: with enough data, the empirical risk minimizer (sample mean) $\widehat{\btheta}$ of BC loss exhibits  $\lbc(\btheta) \sim 1/T \ll \epsilon$, which  ensures $J_H$ is small; on the other hand, with minibatch SGD and too large a learning rate, there is a noise floor on how close the non-EMA'd iterate $\widehat{\btheta}$ will be to $\btheta^\star$, ensuring that $J_H$ is large.  
+
+
+
+
+
+
+\section{Discussion and conclusion}
+
+We investigated the causes of instabilities in training neural networks in tasks involving feedback loops, and empirically demonstrated that these instabilities often arise as a result of poor algorithmic choices rather than information-theoretic barriers. We hypothesize that the oscillations are caused by the combination of fractal reward landscapes and noise floor the stochastic gradients, and can be ameliorated by variance reduction---either during training, or \emph{post hoc} (via a stabilizer such as EMA).  We now list some directions for future inquiry, containing theoretical and empirical mysteries.
+
+\iclrpar{Unstable optimizers \& trajectory stabilization.}
+Despite many attempts to design faster-converging optimizers for deep learning, there has been no clear successor to vanilla second-moment preconditioning \citep{duchi2011adaptive,kingma2014adam} with a well-tuned learning rate schedule \citep{agarwal2020disentangling,schmidt2021descending,kaddour2023no}. By decoupling the roles of optimizers and stabilizers, we open a new avenue for innovation in this space. When training deep neural networks in the presence of feedback loops, our findings suggest: \textbf{always try EMA whenever it is affordable}, and \textbf{train at higher learning rates without decaying to 0}. Investigations of nuanced downsides, larger-scale settings, and new optimizer-stabilizer algorithms are left for future work.
+
+\iclrpar{Representation learning in RL.}  While this work focused on fully offline data, online RL is also known to suffer from serious training instability, often thought to be caused by the statistical challenges of interactive learning.  On the other hand, GVA appears to be less pronounced in this setting,\footnote{In a small anecdotal exploration, we found that even minimal online interventions to improve data coverage such as DART \citep{laskey2017dart} appear to reduce oscillations significantly.} and the interaction between GVA and training with ``better'' data remains mysterious.
+
+On a related note, the inductive biases of iterate averaging for representation learning remain poorly understood.  Many algorithms for representation learning benefit from EMA \citep{grill2020bootstrap,yaz2018unusual}; to what extent can this be explained by a phenomenon related to GVA?
+
+Finally, we observe that our results are consistent with the notion that SGD noise is only harmful, but this cannot be entirely true due to the fact that sufficiently large batch sizes hurt training; we leave a better understanding of when and why SGD noise is helpful for future work.
+
+
+

@@ -1,0 +1,329 @@
+\title{Zebra: In-Context and Generative Pretraining for Solving Parametric PDEs}
+
+\begin{abstract}
+
+Solving time-dependent parametric partial differential equations (PDEs) is challenging, as models must adapt to variations in parameters such as coefficients, forcing terms, and boundary conditions. Data-driven neural solvers either train on data sampled from the PDE parameters distribution in the hope that the model generalizes to new instances or rely on gradient-based adaptation and meta-learning to implicitly encode the dynamics from observations. This often comes with increased inference complexity. Inspired by the in-context learning capabilities of large language models (LLMs), we introduce \texttt{Zebra}, a novel generative auto-regressive transformer designed to solve parametric PDEs without requiring gradient adaptation at inference. By leveraging in-context information during both pre-training and inference, \texttt{Zebra} dynamically adapts to new tasks by conditioning on input sequences that incorporate context trajectories or preceding states. This approach enables \texttt{Zebra} to flexibly handle arbitrarily sized context inputs and supports uncertainty quantification through the sampling of multiple solution trajectories. We evaluate \texttt{Zebra} across a variety of challenging PDE scenarios, demonstrating its adaptability, robustness, and superior performance compared to existing approaches.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Training partial differential equation (PDE) solvers is a challenging task due to the variety of behaviors that can arise in physical phenomena, and neural solvers have limited generalization capability\citep{chen2018neural, raissi2019physics, Li2020}. 
+We tackle the parametric PDE problem \citep{approximationpdes}, where a model is trained on trajectories defined by varying PDE parameters with the goal of generalizing across a wide range of parameters. The parameters may include initial and boundary conditions, physical coefficients, and forcing terms. We focus on pure data-driven approaches that do not leverage any prior knowledge on the underlying equations.
+
+A natural approach to this problem is to sample from the parameter distribution, i.e., to train using different PDE instances or parameter values, along with multiple trajectories for each PDE instance. This requires a training set representative of the distribution of the underlying dynamical system, which is difficult to meet in practice given the complexity of physical phenomena. Other approaches  explicitly condition on specific PDE parameters, \citep{Brandstetter2022, takamoto2023learning} relying on the availability of such prior knowledge. This requires a physical model of the observed system, making the incorporation of PDE parameters into neural solvers challenging beyond basic PDE coefficients. An alternative approach involves online adaptation to new PDE instances by leveraging observations from novel \textit{environments}. Here we consider that an environment is charaterized by a set of parameters. This adaptation is often implemented through meta-learning, where the model is trained on a variety of simulations corresponding to different environments—i.e., varying PDE parameter values—so that it can quickly adapt to new, unseen PDE simulation instances using a few trajectory examples\citep{kirchmeyer2022generalizing, yin2022leads}. 
+This method offers a high  flexibility but requires gradient updates for adaptation, adding computational overhead. Another common setting involves leveraging historical data to condition the neural network, allowing it to generalize to new PDE instances without retraining \citep{Li2020, mccabe2023multiple}. Again the generalization ability is limited to dynamics close to the ones used for training. Exploring another direction and motivated by the successes encountered in natural language processing and vision, some authors have begun investigating the development of foundation models for spatio-temporal dynamic physical processes \citep{subramanian2023towards, herde2024poseidon, mccabe2023multiple}. This approach involves training a large model on a variety of physics-based numerical simulations with the expectation that it will generalize to new situations or equations. While they consider multiple physics we focus on solving parametric PDEs, i.e. multiple variations of the same physical phenomenon.
+
+We explore here a new direction inspired by the successes of in-context learning (ICL) and its ability to generalize to downstream tasks without retraining \citep{brown2020language, touvron2023llama}. We propose a framework, denoted \texttt{Zebra}, relying on \textit{in-context pretraining} (ICP), for solving parametric PDEs and learning to condition neural solvers to adapt fast to new situations or said otherwise for solving for new parameter values. As for ICL in language the model is trained to generate appropriate responses given context examples and a query. The context examples could be trajectories from the same dynamics starting from different initial conditions, or simply a brief history of past system states for the target trajectory. The query will consist for example of an initial state condition, that will serve as inference starting point for the forecast. This approach offers key advantages compared to existing methods. It can leverage contexts of different types and sizes, it requires only a few context examples to adapt to new dynamics and can can handle as well 0-shot learning. It allows us to cover a large variety of situations.  
+
+On the technical side, \texttt{Zebra} introduces a novel generative autoregressive solver for parametric PDEs. It employs an encode-generate-decode framework: first, a vector-quantized variational auto-encoder (VQ-VAE) \citep{oord2017neural} is learnt to compress physical states into discrete tokens and to decode it back to the original physical space. Next, a generative autoregressive transformer is pre-trained using a next token objective. To leverage the in-context properties of the model, \texttt{Zebra} is directly pretrained on arbitrary-sized contexts such as extra trajectories or historical states of the target dynamics. At inference, \texttt{Zebra} can handle varying context sizes for conditioning and support uncertainty quantification, enabling generalization to unseen PDE parameters without gradient updates. 
+
+Our main contributions include:
+
+\begin{itemize}
+    \item We introduce a generative autoregressive transformer for modeling physical dynamics. It operates on compact discretized representations of physical state observations. This discretization is performed through a VQ-VAE. The encoder tokenizes observations into sequences of tokens, while the decoder reconstructs the original states.  This framework represents the first successful application of generative modeling using quantized representations of physical systems.
+    \item To harness the in-context learning strengths of autoregressive transformers, we develop a new pretraining strategy that conditions the model on historical states or example trajectories with similar dynamics, allowing it to handle arbitrary-sized context token inputs.
+    \item We evaluate \texttt{Zebra} on a range of parametric PDEs on two distinct settings. In the first, the model infers dynamics from a context trajectory that shares similar behavior with the target but differs in initial conditions, representing a one-shot setting. \texttt{Zebra}'s performance is benchmarked against domain-adaptation baselines specifically trained for such tasks. In the second scenario, only a limited number of historical frames of the target trajectory are available, requiring the model to deduce the underlying dynamics solely from these inputs. \texttt{Zebra} consistently demonstrates competitive performance across both evaluation contexts.
+\end{itemize}
+
+
+
+\section{Problem setting}
+
+
+\subsection{Solving parametric PDE}
+
+We aim to solve parametric time-dependent PDEs beyond the typical variation in initial conditions. Our goal is to train models capable of generalizing across a wide range of PDE parameters. To this end, we consider time-dependent PDEs with different initial conditions, and with additional degrees of freedom, namely: (1) coefficient parameters — such as fluid viscosity or advection speed — denoted by vector \(\mu\) ; (2) boundary conditions \(\mathcal{B}\), e.g. Neumann or Dirichlet; (3) forcing terms \(\delta \), including damping parameter or sinusoidal forcing with different frequencies.  To simplify notation we denote $\xi := \{\mu, \mathcal{B}, \delta \}$  and we define \(\mathcal{F}_{\xi}\) as the set of PDE solutions corresponding to the PDE parameters \(\mu\), boundary conditions \(\mathcal{B}\) and forcing term \(\delta \), and refer to $\mathcal{F}_{\xi }$ as a PDE partition. Formally, a solution \(\vu(x, t)\) within \(\mathcal{F}_{\xi}\) satisfies:
+\begin{align}
+\label{eq:parametric}
+    \frac{\partial \vu}{\partial t} &=   F\left(\delta, \mu, t, x, \vu, \frac{\partial \vu}{\partial x}, \frac{\partial^2 \vu}{\partial x^2}, \ldots \right), \quad \forall x \in \Omega, \forall t \in (0, T] \\
+\label{eq:bc}
+    \mathcal{B}(\vu)(x, t) &= 0, \quad \forall x \in \partial\Omega, \forall t \in (0, T] \\
+    \vu(0, x) &= \vu^0, \quad \forall x \in \Omega
+\end{align}
+
+where \(F\) is a function of the solution \(\vu\) and its spatial derivatives on the domain \(\Omega\), and also includes the forcing term $\delta$ ; \(\mathcal{B}\) is the boundary condition constraint (e.g., spatial periodicity, Dirichlet, or Neumann) that must be satisfied at the boundary of the domain \(\partial \Omega\); and \(\vu^0\) is the initial condition sampled with a probability measure \(\vu^0 \sim \vp^0(.)\).
+
+\begin{figure}
+    \centering
+\includegraphics[width=0.9\textwidth]{figures/zebra_pretraining.pdf}
+    \caption{\texttt{Zebra} Framework for solving parametric PDEs. 1) A finite vocabulary of physical phenomena is learned by training a VQ-VAE on spatial representations. 2) During the pretraining, multiple trajectories sharing the same dynamics are tokenized  and concatenated into a common sequence $S$. A transformer is used to predict the next tokens in these sequences, conditioned on the context. This enables the model to perform both zero-shot and few-shot generation, without gradient-based updates.}
+    \label{fig:zebra_inference}
+\end{figure}
+
+\subsection{Generalization for parametric PDE}
+Solving time-dependent parametric PDEs requires developing neural solvers capable of generalizing to a whole distribution of PDE parameters. In practice, changes in the PDE parameters often lead to distribution shifts in the trajectories which makes the problem challenging. Different directions are currently being explored briefly reviewed below. We focus on pure data-driven approaches that do not make use of any prior knowledge on the equations.
+We make the assumption that the models are learned from numerical simulations so that it is possible to generate from multiple parameters. This emulates real situations where for example, a physical phenomenon is observed in different contexts.
+
+\paragraph{0-shot learning with temporal conditioning} A first direction consists in adapting the classical ERM framework to parametric PDE solving by sampling multiple instances of a PDE, in the hope that this will generalize to unseen conditions in a 0-shot setting. It is usually assumed that for both learning and inference, a sequence of past states is provided as initial input to the model, leveraging its potential to infer the dynamics characteristics in order to forecast future values. The neural solver $\mathcal{G}_{\theta}$ is then conditioned by a sequence of past states for a trajectory $\vu^{t-m\Delta t: t} := (\vu^{t-m\Delta t}, \ldots, \vu^t)$ where $m \geq 1$. Depending on the architecture, this can be implemented by stacking the information in the channel dimension \citep{Li2020}, or by creating an additional temporal dimension as done in video prediction contexts \citep{mccabe2023multiple, ho2022video}. This approach makes an implicit i.i.d. assumption on the training - test distributions which is often not met with dynamical phenomena. It offers a limited flexibility in cases where only limited historical context is accessible.
+
+\paragraph{Few-shot learning by fine tuning} Another category of methods leverages fine tuning. As for the 0-shot setting above, a model is pretrained on a distribution of the PDE parameters. At inference, for  a new environment, fine tuning is performed on a sample of the environment trajectories. This approach often relies on large fine tuning samples and involves updating all or a subset of parameters \citep{subramanian2023towards, herde2024poseidon}.
+\paragraph{Adaptive conditioning} A more flexible approach relies on adaptation at inference time through meta-learning.
+It posits that a set of environments $e$ are available from which trajectories are sampled, each environment $e$ being defined by specific PDE parameter values \citep{cavia, kirchmeyer2022generalizing}. The model is trained from a sampling from the  environments distribution to adapt fast to a new environment. The usual formulation is to learn shared and specific environment parameters $\mathcal{G}_{\theta + \Delta \theta_{\xi}}$, where $\theta$ and $\Delta \theta_{\xi}$ are respectively the shared and specific parameters. At inference, for a new environment, only a small number of parameters $\theta_{\xi}$ is adapted from a small sample of observations. 
+\begin{table}[ht]
+\centering
+\caption{\textbf{Key distinctions with Baselines}. \texttt{Zebra} is the only method that supports both adaptive conditioning, temporal conditioning, and does not require gradient computations at inference.} %\cmark  indicates support for the criterion, \xmark indicates lack thereof.}
+\small
+\label{tab:comparison_baselines}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & 
+\textbf{Adaptive conditioning} & 
+\textbf{Temporal conditioning} & 
+\textbf{In-context} \\
+\midrule
+CAPE  & \xmark & \xmark & \xmark \\
+CODA  & \cmark & \xmark & \xmark \\
+MPP   & \xmark & \cmark & \xmark \\
+\texttt{Zebra} & \cmark & \cmark & \cmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Zebra Framework}
+
+
+\label{section:zebra-framework}
+
+We introduce \texttt{Zebra}, a novel framework designed to solve parametric PDEs through in-context learning and flexible conditioning. \texttt{Zebra} utilizes an autoregressive transformer to model partial differential equations (PDEs) within a compact, discrete latent space. A spatial CNN encoder is employed to map physical spatial observations into these latent representations, while a CNN decoder accurately reconstructs them. As illustrated in \Cref{fig:zebra_inference}, our pretraining pipeline consists of two key stages: 1) Learning a finite vocabulary of physical phenomena, and 2) Training the transformer using an in-context pretraining strategy, enabling the model to effectively condition on contextual information. At inference, \texttt{Zebra} allows both adaptive and temporal conditioning through in-context learning (\Cref{tab:comparison_baselines}).
+\subsection{Learning a finite vocabulary of physical phenomena}
+
+In order to leverage the auto-regressive transformer architecture and adopt a next-token generative pretraining, we need to convert physical observations into discrete representations. 
+To keep the modeling with the transformer computationnaly tractable, we do not quantize the observations directly but rather quantize compressed latent representations by employing a VQVAE \citep{oord2017neural}. 
+Our encoder spatially compresses the input function \( \vu^{t} \) by reducing its spatial resolution \( H \times W \) to a lower resolution \( h \times w \) while increasing the channel dimension to \( d \). This is achieved through a convolutional model \( \mathcal{E}_w \), which maps the input to a continuous latent variable \( \mathbf{z}^t = \mathcal{E}_w(\vu^t) \), where \( \mathbf{z}^t \in \mathbb{R}^{h \times w \times \times d} \). The latent variables are then quantized to discrete codes \( \mathbf{z}_q^t \) using a codebook \( \mathcal{Z} \) of size $K = |\mathcal{Z}|$ and through the quantization step $q$. For each spatial code \( \mathbf{z}^t_{[ij]} \), the nearest codebook entry \( z_k \) is selected:
+\[
+\mathbf{z}_{q, [ij]}^t = q(\mathbf{z}^t_{[ij]}) := \arg\min_{z_k \in \mathcal{Z}} \|\mathbf{z}^t_{[ij]} - z_k\|.
+\]
+The decoder \( \mathcal{D}_\psi \) reconstructs the signal \( \hat{\vu}^{t} \) from the quantized latent codes \( \hat{\mathbf{z}}_q^{t} \).  Both models are jointly trained to minimize the reconstruction error between the function \( \vu^t \) and its reconstruction \( \hat{\vu}^t = \mathcal{D}_\psi \circ q \circ \mathcal{E}_w(\vu^t) \). The codebook $\mathcal{Z}$  is updated using an exponential moving average (EMA) strategy, which stabilizes training and ensures high codebook occupancy.
+
+The training objective is:
+\[
+\mathcal{L}_{\text{VQ}} = \frac{\|\vu^t - \hat{\vu}^t\|_2}{\|\vu^t\|_2} + \alpha \|\text{sg}[\mathbf{z}_q^t] - \mathcal{E}_w(\vu^t)\|_2^2,
+\]
+where the first term is the Relative L2 loss commonly used in PDE modeling, and the second term is the commitment loss, ensuring encoder outputs are close to the codebook entries. The parameter \( \alpha \), set to 0.25, balances the two components. We provide additional details on the architecutre in \Cref{section:archi-details}.
+
+Once this training step is done, we can tokenize a trajectory $\vu^{t:t+m\Delta t}$ by applying our encoder in parallel on each timestamp to obtain discrete codes $\mathbf{z}_q^{t:t+m\Delta t}$ and retrieve the corresponding index entries $s^{t:t+m\Delta t}$ from the codebook $\mathcal{Z}$. Similarly, we detokenize discrete indices with the decoder.
+\subsection{In-context modeling}
+
+We design sequences that enable \texttt{Zebra} to perform in-context learning on trajectories that share underlying dynamics. To incorporate varying amounts of contextual information, we draw a number \(n\) between 1 and \(n_{\text{max}}\), then sample \(n\) trajectories sharing the same dynamics, each with \(m\) snapshots starting from time \(t\), denoted as \((\vu_1^{t:t+m\Delta t}, \ldots, \vu_n^{t:t+m\Delta t})\). These trajectories are tokenized into index representations \((s_1^{t:t+m\Delta t}, \ldots, s_n^{t:t+m\Delta t})\), which are flattened into sequences \(s_1, \ldots, s_n\), maintaining the temporal order from left to right. In practice, we fix $n_{\text{max}}=6$ and $m=9$.
+
+Since our model operates on tokens from a codebook, we found it advantageous to introduce \textit{special tokens} to structure the sequences. The tokens \texttt{<bot>} (beginning of trajectory) and \texttt{<eot>} (end of trajectory) clearly define the boundaries of each trajectory within the sequence. Furthermore, as we sample sequences with varying context sizes, we maximize the utilization of the transformer’s context window by stacking sequences that could also represent different dynamics. To signal that these sequences should not influence each other, we use the special tokens \texttt{<bos>} (beginning of sequence) and \texttt{<eos>} (end of sequence). The final sequence design is:
+\[
+S= \texttt{<bot>} [s_1] \texttt{<eot>} \texttt{<bot>} [s_2] \texttt{<eot>} \ldots \texttt{<bot>} [s_n]\texttt{<eot>} 
+\]
+And our pretraining dataset is structured as follows:
+\[\texttt{<bos>} [S_1] \texttt{<eos>} \texttt{<bos>} [S_2] \texttt{<eos>} \ldots \texttt{<bos>} [S_l] \texttt{<eos>}
+\]
+
+\subsection{Next-token pretraining}
+The transformer is trained using self-supervised learning on a next-token prediction task with teacher forcing \citep{radford2018improving}. Given a sequence \( S \) of discrete tokens of length \( N \), the model is optimized to minimize the negative log-likelihood (cross-entropy loss):
+\[
+\mathcal{L}_{\text{Transformer}} = - \mathbb{E}_S \sum_{i=1}^{N} \log p(S_{[i]} | S_{[i' < i]}),
+\]
+where the model learns to predict each token \( S_{[i]} \) conditioned on all previous tokens \( S_{[i' < i]} \). Due to the transformer's causal structure, earlier tokens in the sequence are not influenced by later ones, while later tokens benefit from more context, allowing for more accurate predictions. This structure naturally supports both generation in a zero-shot and few-shot setting within a unified framework. Our transformer implementation is based on the Llama architecture (\cite{touvron2023llama}). Additional details can be found in \Cref{section:archi-details}. Up to our knowledge, this is the first adaptation of generative auto-regressive transformers to the modeling of physical dynamics.
+
+\subsection{Inference: Flexible conditioning}
+
+In this section, we outline the inference pipeline for \texttt{Zebra} across various scenarios. For simplicity, we assume that all observations have already been tokenized and omit the detokenization process. Let \( s_* \) represent the target token sequence for which we aim to predict the following timestamps.
+
+\begin{itemize}
+    \item \textbf{Temporal conditioning} with \( \ell \) frames: The prompt is structured as \( S = \texttt{<bos>} \texttt{<bot>} [s_*^{0:\ell\Delta t}] \), and the transformer generates the subsequent tokens based on this input.
+    
+    \item \textbf{Adaptive conditioning} with \( n \) examples and an initial condition: The prompt is structured as \( S = \texttt{<bos>} \texttt{<bot>} [s_1^{0:m \Delta t}] \texttt{<eot>} \ldots \texttt{<bot>} [s_n^{0:m \Delta t}] \texttt{<eot>} \texttt{<bot>} [s_*^0] \), allowing the model to adapt based on the provided examples and initial condition.
+
+    \item \textbf{Adaptive conditioning} with \( n \) examples and \( \ell \) frames: This setup combines context from multiple trajectories with the initial timestamps, structured as \( S = \texttt{<bos>} \texttt{<bot>} [s_1^{0:m \Delta t}] \texttt{<eot>} \ldots \texttt{<bot>} [s_n^{0:m \Delta t}] \texttt{<eot>} \texttt{<bot>} [s_*^{0:\ell \Delta t}] \).
+\end{itemize}
+
+At inference, we adjust the \textbf{temperature parameter} $\tau$ to calibrate the level of diversity of the next-token distributions. The temperature $\tau$ scales the logits \( y_i \) before the softmax function :
+\[
+ p(S_{[i]} = k| S_{[i' < i]}) =\text{softmax}\left( \frac{y_k}{\tau} \right) = \frac{\exp\left(\frac{y_k}{\tau}\right)}{\sum_j \exp\left(\frac{y_j}{\tau}\right)}
+\]
+
+ When \( \tau > 1 \), the distribution becomes more uniform, encouraging exploration, whereas \( \tau < 1 \) sharpens the distribution, favoring more deterministic predictions. 
+
+
+
+
+\section{Experiments}
+
+
+In this section, we experimentally validate that our framework enables various types of conditioning during inference. As the first model capable of performing in-context learning with an autoregressive transformer for PDEs, \texttt{Zebra} can tackle a wide range of tasks that existing frameworks are unable to address without gradient-based adaptation or finetuning. We conduct \textit{pretraining} as outlined in \Cref{section:zebra-framework} for each dataset described in \Cref{subsection:dataset-details} and evaluate \texttt{Zebra} on distinct tasks \textit{without additional finetuning}. We begin by assessing \texttt{Zebra}'s performance in the challenging one-shot setting, focusing on adaptation methods as the main baselines (\Cref{section:domain-adaptation}). Next, we compare its performance in the more traditional temporal conditioning tasks in \Cref{section:past-trajectories}. Lastly, we examine the uncertainty quantification enabled by \texttt{Zebra}'s generative nature and analyze the model's generated trajectories in \Cref{section:uncertainty-quantification} and \Cref{section:analysis-of-generation}, respectively.
+\begin{table}[h!]
+\label{tab:datasets}
+\centering
+\caption{\textbf{Dataset Summary}}
+\small
+\begin{tabular}{ccccc}
+\toprule
+Dataset Name &  Number of env. & Trajectories per env. & Main parameters \\ \midrule
+\textit{Advection} & 1200 & 10 & Advection speed  \\ 
+\textit{Heat} & 1200 & 10 & Diffusion and forcing  \\ 
+\textit{Burgers} & 1200 & 10 & Diffusion and forcing  \\ 
+\textit{Wave boundary} & 4 & 3000 & Boundary conditions  \\ 
+\textit{Combined equation} & 1200 & 10 & $\alpha, \beta, \gamma$  \\ \midrule
+\textit{Wave 2D} & 1200 & 10 & Wave celerity and damping  \\ 
+\textit{Vorticity 2D} & 1200 & 10 & Diffusion  \\ 
+\bottomrule
+\end{tabular}
+\label{tab:dataset_summary}
+\end{table}
+
+\subsection{Datasets details}
+\label{subsection:dataset-details}
+
+As in \cite{kirchmeyer2022generalizing}, we generate data in batches where each batch of trajectories shares the same PDE parameters. For each batch or environment, the resulting trajectories sharing the same dynamics have different initial conditions. We consider different whole factors of variations across multiple datasets and drastically increase the different number of environments compared to previous studies (\cite{yin2022leads}, \cite{kirchmeyer2022generalizing}). We conduct experiments across seven datasets: five in 1D—\textit{Advection}, \textit{Heat}, \textit{Burgers}, \textit{Wave-b}, \textit{Combined}—and two in 2D—\textit{Wave 2D}, \textit{Vorticity}. These datasets were selected to encompass different physical phenomena and test generalization under changes to various PDE terms, as described below.
+
+\paragraph{Varying PDE coefficients} The changing factor is the set of coefficients \( \mu \) in Equation 1. For the \textit{Burgers}, \textit{Heat}, and \textit{Vorticity 2D} equations, the viscosity coefficient \( \nu \) varies across environments. For \textit{Advection}, the advection speed \( \beta \) changes. In \textit{Wave-c} and \textit{Wave-2D}, the wave's celerity \( c \) is unique to each environment, and the damping coefficient \( k \) varies across environments in \textit{Wave-2D}. In the \textit{Combined} equation, three coefficients \( (\alpha, \beta, \gamma) \) vary, each influencing different derivative terms respectively: \( - \frac{\partial u^2}{\partial x}, + \frac{\partial^2 u}{\partial x^2}, - \frac{\partial^3 u}{\partial x^3} \) on the right-hand side of Equation \ref{eq:parametric}.
+
+\paragraph{Varying boundary conditions} In this case, the varying parameter is the boundary condition \( \mathcal{B} \) from Equation \ref{eq:bc}. For \textit{Wave-b}, we explore two types of boundary conditions—Dirichlet and Neumann—applied independently to each boundary, resulting in four distinct environments.
+
+\paragraph{Varying forcing term} The varying parameter is the forcing term \( \delta \) in Equation 1. In \textit{Burgers} and \textit{Heat}, the forcing terms vary by the amplitude, frequency, and shift coefficients of \( \delta(t, x) = \sum_{j=1}^{5} A_j \sin\left(\omega_j t + 2\pi \frac{l_j x}{L} + \phi_j \right) \). 
+A detailed description of the datasets is provided in \Cref{section:dataset-details}, and a summary of the number of environments used during training, the number of trajectories sharing the same dynamics, and the varying PDE parameters across environments is presented in \Cref{tab:dataset_summary}. For testing, we evaluate all methods on trajectories with new initial conditions on unseen environments. Specifically, we used 120 new environments for the 2D datasets and 12 for the 1D datasets, with each environment containing 10 trajectories. 
+\subsection{Context adaptation from similar trajectories}
+
+\label{section:domain-adaptation}
+
+\begin{table}
+\centering
+\caption{\textbf{One-shot adaptation}. Conditioning from a similar trajectory. Test results in relative L2 on the trajectory. `--` indicates inference has diverged.}
+\small
+\label{tab:example_conditioning}
+\scalebox{0.9}{
+\begin{tabular}{cccccccccc}
+\toprule
+ & \textit{Advection} & \textit{Heat} & \textit{Burgers}  & \textit{Wave b} & \textit{Combined} & \textit{Wave 2D} & \textit{Vorticity 2D} \\ \midrule
+
+CAPE & 0.00941 & 0.223 & 0.213  & 0.978 & \textbf{0.00857} & -- & -- \\ 
+CODA & \textbf{0.00687} & 0.546 & 0.767 & 1.020 & 0.0120 & 0.777 & \underline{0.678} \\ 
+\texttt{[CLS]} ViT & 0.140 & \textbf{0.136} & \underline{0.116}  & \underline{0.971} & 0.0446 & \underline{0.271} & 0.972 \\ 
+\midrule
+\texttt{Zebra} & \underline{0.00794} & \underline{0.154} & \textbf{0.115} & \textbf{0.245} & \underline{0.00965} & \textbf{0.207} & \textbf{0.119} \\ 
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{Setting} We evaluate \texttt{Zebra}'s ability to perform in-context learning by \textit{leveraging example trajectories that follow the same underlying dynamics as the target}. Formally, in the \(n\)-shot adaptation setting, we assume access to a set of \(n\) context trajectories \(\{\vu_1^{0: m\Delta t}, \ldots , \vu_n^{0: m\Delta t}\}\) at inference time, all of which belong to the same dynamical system \(\mathcal{F}_{\xi}\). The goal of the adaptation task is to accurately predict a future trajectory \(\vu_*^{\Delta t:m \Delta t}\) from a new initial condition \(\vu_*^0\), knowing that the target dynamics is shared with the provided context example trajectories. In this comparison, \texttt{Zebra} is the only model that performs in-context learning from these example trajectories.
+\paragraph{Sampling} For \texttt{Zebra}, we employ a random sampling procedure for generating the next tokens for all datasets, setting a low temperature (\(\tau=0.1\)) to prioritize accuracy over diversity. Predictions are generated using a single sample under this configuration.
+\paragraph{Baselines} We evaluate Zebra against CODA \citep{kirchmeyer2022generalizing} and CAPE \citep{takamoto2023learning}. CODA is a meta-learning framework designed for learning parametric PDEs. It leverages common knowledge from multiple environments where trajectories from a same environment $e$ share the same PDE parameter values. CODA training performs adaptation in the parameter space by learning shared parameters across all environments and a context vector $c^e$ specific to each environment. At the inference stage, CODA adapts to a new environment in a one-shot manner by only tuning $c^e$ with several gradient steps. CAPE is not designed to perform adaptation via extra-trajectories, but instead needs the correct parameter values as input to condition a neural solver. We adapt it to our setting, by learning a context $c^e$ instead of using the real parameter values. During adaptation, we only tune this context $c^e$ via gradient updates. Additionally, we introduce a baseline based on a vision transformer \citep{peebles2023scalable}, integrating a \texttt{[CLS]} token that serves as a learned parameter for each environment. This token lets the model handle different dynamics, and during inference, we adapt the \texttt{[CLS]} vector via gradient updates, following the same approach used in CODA and CAPE. We refer to this baseline as \texttt{[CLS]}ViT. 
+\paragraph{Metrics}  We evaluate the performance using the Relative $L^2$ norm between the predicted rollout trajectory \(\hat{\vu}_{*}^{\text{trajectory}} \) and the ground truth \(\vu_{*}^{\text{trajectory}}\): $L^2_\text{test} = \frac{1}{N_\text{test}}\sum_{j \in \text{test} }\frac{||\hat{u}^{\text{trajectory}}_j - u^{\text{trajectory}}_j||_2}{||u^{\text{trajectory}}_j||_2}$. 
+
+\paragraph{Results}
+As evidenced in \Cref{tab:example_conditioning}, \texttt{Zebra} demonstrates strong overall performance in the one-shot adaptation setting, often surpassing baseline methods that have been trained specifically for this task. In more challenging datasets, such as \textit{Burgers}, \textit{Wave-b}, and the 2D cases, \texttt{Zebra} consistently achieves lower relative L2 errors, highlighting its capacity to model complex dynamics effectively. Notably, \texttt{Zebra} excels in 2D environments, outperforming both CODA and \texttt{[CLS]}ViT and avoiding the divergence issues encountered by CAPE. While \texttt{Zebra} performs comparably to CODA on simpler datasets like \textit{Advection} and \textit{Combined}, its overall stability and versatility across a range of scenarios, particularly in 2D settings, highlight its competitiveness. Although there is room for improvement in specific cases, such as the \textit{Heat} dataset, \texttt{Zebra} stands out as a reliable and scalable solution for in-context adaptation for parametric PDEs, offering a robust alternative to existing gradient-based methods. We further analyze the influence of the number \(n\) of context examples on the rollout performance with \texttt{Zebra}, as illustrated in \Cref{fig:zebra_vs_num_examples}. While there is a general decreasing trend—indicating that more context examples tend to reduce rollout loss—there is still noticeable variance in the results. This suggests that the relationship between the number of context examples and performance is not perfectly linear. We hypothesize that this analysis would benefit from being conducted with more than a single sample per trajectory to ensure more robust estimations.% and to account for any possible variability in model behavior.
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{plots/zebra_perf_vs_number_of_context_examples2.pdf}
+    \caption{\textbf{Influence of the number of examples}. \texttt{Zebra}'s rollout loss for a different number of trajectory examples.  The x-axis is the \# of context examples and the y-axis is the Relative $L^2$.}
+    \label{fig:zebra_vs_num_examples}
+\end{figure}
+\subsection{Temporal conditioning}
+
+\label{section:past-trajectories}
+\paragraph{Setting} We then evaluate the temporal conditioning capabilities of \texttt{Zebra}, i.e. its generalization capabilities when \textit{conditioned by the initial states of the target trajectories}. Formally, given a new trajectory $\vu_*$, we suppose that a set of $\ell$ states $\vu_*^{0:(\ell-1)\Delta t}$ is already available from the trajectory and we wish to predict the states at the following timestamps $\vu_*^{\ell \Delta t: m \Delta t}$.
+
+\paragraph{Baselines} We test \texttt{Zebra} against CODA \citep{kirchmeyer2022generalizing}, CAPE \citep{takamoto2023learning} and MPP \citep{mccabe2023multiple}. CODA is designed for adapting neural networks to a new environment given an extra-trajectory sampled from this environment. In this setup, we do not have access to extra-trajectories but to the first timestamps of the target trajectory. We thus modify CODA for this setting; the model is adapted with the $\ell$ first states by learning only $c^e$, and then starts from $\vu^{(\ell-1)\Delta t}$ to predict the rest of the trajectory. We adapt CAPE to that setting too, as done with CODA. MPP is a vision transformer conditioned by a sequence of frames, using temporal and spatial self-attention blocks to capture spatio-temporal dependencies. MPP does not require additional adaptation at inference and can be used in zero-shot on new trajectories. It is pretrained with a fixed number of input frames. For \texttt{Zebra}, we employ the sampling procedure described in \Cref{section:domain-adaptation}.
+
+\begin{table}[h]
+\label{tab:2frames}
+\caption{\textbf{Zero-shot prediction from 2 frames}. Conditioning from a trajectory history with 2 frames as input. Test results in relative L2 on the trajectory. `--` indicates inference has diverged.}
+\small
+\scalebox{0.9}{
+\begin{tabular}{ccccccccc}
+\toprule
+ & \textit{Advection} & \textit{Heat} & \textit{Burgers} & \textit{Wave b} & \textit{Combined} & \textit{Wave 2D} & \textit{Vorticity 2D} \\ %& Gray-Scott \\ 
+ \midrule
+
+CAPE & 0.00682 & 0.234 & 0.225  & 1.10 & \underline{0.0125} & -- & -- \\ % -- \\
+CODA & \textbf{0.00560} & 0.378 & 0.472 & 0.994 & 0.0197 & 0.974 & 0.623 \\ %0.0591 \\
+\midrule
+MPP[2] & 0.0075 & \textbf{0.0814} & \textbf{0.100} & 1.0393 & 0.0250 & \underline{0.285} & \underline{0.101} \\% -- \\ 
+MPP[3] & 0.919 & 1.0393 & 0.581  & \textbf{0.900} & 0.201 & 0.596 & 0.219 \\% -- \\ 
+\midrule
+\texttt{Zebra} & \underline{0.00631} & \underline{0.227} & \underline{0.221} & \underline{0.992} & \textbf{0.0084} & \textbf{0.201} & \textbf{0.0874} \\ %0.0796\\ 
+\bottomrule
+\end{tabular}}
+\centering
+\end{table}
+\paragraph{Results} \Cref{tab:2frames} highlights \texttt{Zebra}'s strong zero-shot prediction performance using only 2 frames ($\ell=2$) as context, outperforming competing methods across a wide range of PDEs. Notably, \texttt{Zebra} excels on both 1D and 2D datasets, delivering consistent and robust results even in complex dynamics like \textit{Wave 2D} and \textit{Vorticity 2D}. 
+
+\begin{wrapfigure}[14]{r}{0.45\textwidth}
+    \centering
+    \scalebox{0.6}{
+    \includegraphics[width=0.75\textwidth]{plots/zebra_oneshot_vs_zeroshot.pdf}}
+    \caption{\textbf{Zero-shot vs one-shot performance} of \texttt{Zebra} with 2 frames.}
+    \label{fig:zero_shot_vs_one_shot}
+\end{wrapfigure}
+
+CAPE and CODA, while competitive in some datasets, either diverge or struggle with accuracy in more challenging scenarios, particularly in 2D problems. MPP trained with two frames (MPP[2]) is overall a very strong baseline in this setting; it performs best on \textit{Heat} and \textit{Burgers} and obtains good results in the 2D cases. However, if we take a model that has been pretrained specifically on three frames (MPP[3]), and test it under this setting, the performance degrades drastically. In contrast, Zebra exhibits a high flexibility. It can be used with any number of frames, as long it does not exceed the maximum sequence size seen during training. Furthermore, keeping this setting with two initial frames as inputs, we expose in \Cref{fig:zero_shot_vs_one_shot} the gains we could expect on the rollout loss if we had access in addition to the input frames to an example trajectory as described in \Cref{section:domain-adaptation}. We can observe that Zebra consistently improves its accuracy when prompted with an additional example. Most notably, \texttt{Zebra}'s behaviour goes from a random predicition on \textit{Wave b} in zero-shot to more confident predictions thanks to the additional example.
+
+\subsection{Uncertainty quantification}
+ 
+Since \texttt{Zebra} is a generative model, it allows us to sample multiple plausible trajectories for the same conditioning input, enabling the computation of key statistics across different generations. By calculating the pointwise mean and standard deviation, we can effectively visualize the model's uncertainty in its predictions. In \Cref{fig:uncertainty_example}, the red curve represents the ground truth, the blue curve is the predicted mean and the blue shading indicates the empirical confidence interval (3 $\times$ standard deviation).
+
+ Motivated by this observation, we investigate how varying the model’s temperature parameter \( \tau \) affects its predictions; specifically in the one-shot adaptation setting described in \Cref{section:domain-adaptation}. By adjusting \( \tau \), we aim to assess its impact on both the accuracy and variability of the predictions. We employ three metrics to evaluate the model's uncertainty:
+
+  \begin{wrapfigure}[15]{r}{0.45\textwidth}
+    \centering
+    \scalebox{0.5}{
+    \includegraphics[width=0.7\textwidth]{plots/heat_uncertainty_example.pdf}}
+    \caption{\textbf{Uncertainty quantification} with \texttt{Zebra} in a one-shot setting on \textit{Heat}.}
+    \label{fig:uncertainty_example}
+\end{wrapfigure}
+\begin{enumerate}
+    \item \textbf{Relative \( L^2 \) loss}: This assesses the accuracy of the generated trajectories by measuring the bias of the predictions relative to the ground truth.
+    \item \textbf{Relative standard deviation}: We estimate the variability of the predictions using the formula:
+    \(
+    \text{Relative Std} = \frac{||\hat{\sigma}_* ||_2}{||\hat{m}_*||_2}
+    \)
+    where \( \hat{m}_* \) and \( \hat{\sigma}_* \) represent the empirical mean and standard deviation of the predictions, computed pointwise across 10 generations.
+    \item \textbf{Confidence level}: We create pointwise empirical confidence intervals
+    \(
+    CI(x) = \left[ \hat{m}_*(x) - 3\hat{\sigma}_*(x), \hat{m}_*(x) + 3\hat{\sigma}_*(x) \right]
+    \)
+    and compute the confidence level as:
+    \(
+    \text{Confidence level} = \frac{1}{n_x} \sum_x \1_{u_*(x) \in CI(x)}
+    \). This score indicates how often the ground truth falls within the empirical confidence interval generated from sampling multiple trajectories.
+\end{enumerate}
+
+When modeling uncertainty, the model achieves a traedoff between the quality of the mean prediction approximation and the guarantee for this prediction to be in the corresponding confidence interval. 
+\Cref{fig:uncertainty_quantification} illustrates the trade-off between mean prediction accuracy and uncertainty calibration. At lower temperatures, we achieve the most accurate predictions, but with lower variance, i.e. with no guarantee that the target value is within the confidence interval around the predicted mean. Across most datasets, the confidence level then remains low (less than 80\% for \( \tau < 0.25 \)), indicating that the true solutions are not reliably captured within the empirical confidence intervals. Conversely, increasing the temperature results in less accurate mean predictions and higher relative standard deviations, but the confidence intervals become more reliable, with levels exceeding 95\% for \( \tau > 0.5 \). Therefore, the temperature can be calibrated depending on whether the focus is on accurate point estimates or reliable uncertainty bounds.
+
+\label{section:uncertainty-quantification}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{plots/uncertainty_quantification.pdf}
+    \caption{\textbf{Uncertainty quantification} with \texttt{Zebra}}
+    \label{fig:uncertainty_quantification}
+\end{figure}
+
+
+
+\section{Limitations}
+
+
+
+
+
+\section{Conclusion}
+
+
+This study introduces \texttt{Zebra}, a novel generative model that adapts language model pretraining techniques for solving parametric PDEs. We propose a pretraining strategy that enables \texttt{Zebra} to develop in-context learning capabilities. Our experiments demonstrate that the pretrained model performs competitively against specialized baselines across various scenarios. Additionally, as a generative model, \texttt{Zebra} facilitates uncertainty quantification and can generate new trajectories, providing valuable flexibility in applications.
+
+
+
+\section{Reproducibility Statement}
+
+
+
+
+
+
+
+
+

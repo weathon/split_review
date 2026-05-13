@@ -1,0 +1,339 @@
+\title{Farzi Data: Autoregressive Data Distillation}
+
+\begin{abstract}
+    We study data distillation for auto-regressive machine learning tasks, where the input and output have a strict left-to-right causal structure. More specifically, we propose \sampler, which summarizes an event sequence dataset into a small number of \emph{synthetic} sequences --- \samplerdata \ --- which are optimized to maintain (if not improve) model performance compared to training on the full dataset. Under the hood, \sampler conducts memory-efficient data distillation by (i) deriving efficient reverse-mode differentiation of the Adam optimizer by leveraging Hessian-Vector Products; and (ii) factorizing the high-dimensional discrete event-space into a latent-space which provably promotes implicit regularization. Empirically, for sequential recommendation and language modeling tasks, we are able to achieve $98-120$\% of downstream full-data performance when training state-of-the-art models on \samplerdata of size as little as $0.1$\% of the original dataset. Notably, being able to train \emph{better models with significantly less data} sheds light on the design of future large auto-regressive models, and opens up new opportunities to further scale up model and data sizes.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The effectiveness of machine learning models relies heavily on the \emph{quantity} and \emph{quality} of training data. While the quantity of training data is always well-regarded in the scaling-laws of training highly-parameterized neural networks \citep{chinchilla, kaplan_scaling, scaling_retrieving, scaling_vit, glam}, the quality of underlying data is often overlooked. Despite being an intuitive covariate in downstream model performance, there does not exist an efficient out-of-the-box solution for measuring the quality of a data point. Some popular heuristics (\eg, data valuation \citep{shapley_main}, coresets \citep{bilevel_coresets}) fall short from a variety of angles \citep{influence_wrong, shapley_problems, forgetting_events, k_centers}. % \Derek{do we wanna talk about some new work on LLM for evaluating models, and maybe LLM for evaluating data points?}
+
+Data distillation (\dd) (see \citet{dd_survey} for a comprehensive survey) offers a promising alternative to explicitly tagging the quality of each datapoint. Loosely, \dd approaches aim to \emph{synthesize} a terse data summary solely intended to train models to the same (if not better) quality as training them on the original dataset. In this paper, we propose \sampler, a \dd approach designed specifically for synthesizing high-fidelity auto-regressive data summaries. We call the data synthesized by \sampler as \samplerdata.
+
+\samplerdata takes a step towards addressing the massive costs (\eg, financial, environmental, \etc) associated with training large auto-regressive models \citep{gpt4, palm2, whisper} on massive amounts of pretraining data by (i) implicitly \emph{filtering} out low-quality sources of information resulting in a terse data summary, and (ii) \emph{re-organizing} the data in a format that is most pertinent for model training. Intuitively, a vast majority of underlying \emph{information} in such auto-regressive datasets is redundant from the downstream task's perspective. For example, looking at recommender systems, a predictive model wouldn't necessarily need trillions of event-level data from billions of users to accurately model user-behaviour patterns. %--- We can expand more on this by talking about how decoupling learning (i) useful item embeddings -- needs lot of data; and (ii) user behaviour patterns -- need "very" less data; might help recommender systems' efficiency.
+
+Typical \dd techniques \citep{zhao_dc, zhao_dm, zhao_dsa, kip_conv, mtt, frepo, remember_past} are geared toward low-resolution image datasets due to (i) computationally expensive data optimization, and (ii) generation-friendly continuous domain of images (pixels). On the other hand, auto-regressive data generally consists of sequences of discrete \emph{tokens} (\eg, sub-words) with a potentially large vocabulary. Further, many applications call for sequences with a long list of such tokens. \sampler addresses the aforementioned characteristics of auto-regressive data by performing \emph{data distillation in a latent space} by organizing \samplerdata into (i) a \emph{latent} data summary that captures the downstream task patterns, and (ii) a decoder (\eg, token-embeddings) that maps the latent-space back to the token-space. In addition to making \sampler optimization-friendly (both of the aforementioned data components are non-discrete/continuous), we demonstrate that such latent-parameterization provably promotes implicit regularization when training models on \samplerdata (\cref{thm:implicit_reg}). % \looseness=-1
+To summarize, we highlight four main contributions of this paper:
+
+\begin{figure*}[t!] \centering
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/teaser.pdf}
+    \caption{
+    Visualization of \samplerdata in the context of language modeling.
+    \samplerdata can be seen as a 3-D tensor comprising of \emph{sequences of distributions over tokens}, where a single \emph{distribution sequence} fuses the information content of multiple discrete sequences. E.g, a single distribution sentence can unfold into an entire tree of similar sentences like ``the rabbit slept under the sofa'' or ``a dog stood at the bed'' as depicted in the figure. Such a parameterization: (i) makes the dataset GPU/TPU friendly; (ii) reduces the cardinality of the dataset leading to efficient training; and (iii) enables models to be trained on \emph{fuzzy sequences}, hopefully leading to robust learning.
+    }
+    \label{fig:overview}
+\end{figure*} 
+
+\begin{itemize}[leftmargin=.15in]
+    \item We develop \sampler, a scalable \dd technique for summarizing massive auto-regressive datasets, and demonstrate \samplerdata's sample efficiency over $5$ datasets spanning sequential recommendation and language modeling tasks. Training on \samplerdata, we are able to achieve up to $98-120$\% of full-data performance for state-of-the-art models using as little as $0.1$\% of the original dataset size, as well as noting a strong cross-architecture generalization, \ie, being able to train various (student) models on \samplerdata synthesized using a given (teacher) model. \looseness=-1
+
+    \item Building atop the meta-matching framework of \dd 
+    , we propose two crucial modifications for largely improved sample efficiency. First, conducting an investigative study on the role of inner-loop optimizer in \dd, we conclude Adam \citep{adam} to be much more adept than SGD (with or without momentum) for \dd. This is in stark contrast with existing \dd and meta-learning studies where SGD is the de-facto optimizer of choice. We further improve \sampler's sample quality by leveraging pretrained training trajectories for initialization in the meta-matching optimization. \looseness=-1
+
+    \item In addition to generating high-fidelity data, \sampler is computationally highly scalable. Firstly, parameterizing \samplerdata into a latent data summary and a token decoder saves large amount of time and memory during optimization, thereby making \sampler (roughly) independent of the vocabulary size. Further, we derive an efficient reverse-mode differentiation of Adam which has a memory complexity independent of the number of inner-loop steps, unlike autograd systems which store all intermediate variables, therefore leading to $\mathcal{O}(100)\times$ memory footprint reduction.
+    
+    \item We provide a formal analysis of \sampler from various standpoints. We firstly show that \samplerdata's latent parameterization implicitly promotes regularization and provably improves generalization. Previous studies have observed such \emph{data overfitting} effects in \dd empirically \citep{frepo}, but we are the first to study its theoretical underpinnings. We further demonstrate the correctness of our proposed reverse-mode differentiation of Adam. % and provide a worst-case error guarantee for estimating the meta-gradient. % as well as why pretrained trajectories improve \samplerdata's sample quality.
+
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\paragraph{Data downsampling.}
+The complexity and training time for state-of-the-art models from different domains has grown exponentially in the recent years \citep{gpt4, bert4rec, eclare, stable_diffusion}. 
+Sampling has been the classic approach to summarize large datasets, approaches for which
+can be grouped into the following categories:
+\textbf{(i) Coreset construction} techniques which sample a weighted subset of the given dataset to accelerate model training \citep{coreset_1, coreset_bilevel, coreset_bilevel_2, coreset_scale}. Being a combinatorial optimization, coreset construction techniques typically leverage submodularity assumptions \citep{bilmes_submodularity} to optimize the coreset in a tractable manner.
+\textbf{(ii) Data valuation} approaches which typically leverage shapley values \citep{shapley_old} to tag the \emph{value} of each data point for model training \citep{shapley_banzhaf, shapley_main, shapley_oob, shapley_survey}. Notably, such data valuation methods turn out to be computationally intractable even for moderate sized datasets. \textbf{(iii) Heuristic samplers} that build upon designing ad-hoc notions of data quality. Two prominent schools-of-thought in designing such heuristics has been to either preserve notions like diversity \citep{density, semdedup, prototypes}, discrepancy \citep{discrepancy}, \etc in some metric-space of the inputs, or use the loss-values from some proxy model to tag the difficulty (and thereby, quality) for each datapoint \citep{el2n, svp, svp_cf, selective_backprop}.
+
+\paragraph{Data distillation.}
+Contrary to sampling datapoints from a given dataset, data distillation approaches aim to \emph{synthesize} high-quality data summaries for sample-efficient model training through bilevel optimization (see \citet{dd_survey} for a comprehensive survey). Prominent existing approaches are designed for summarizing images \citep{dd_orig, zhao_dc, zhao_dm, zhao_dsa, mtt, frepo, remember_past, kip_conv}, graphs \citep{graph_distill_kdd_22, graph_distill_iclr_22}, and recommender systems \citep{nips_22}. Such approaches can essentially be viewed as meta-learning approaches (see \citet{meta_learning_survey} for a comprehensive survey) with the meta-optimization happening over the data summary instead of common applications like model initialization \citep{maml} or task hyper-parameters \citep{reverse_sgd, hyperopt_vicol}.
+
+\paragraph{Autoregressive tasks.}
+A variety of machine learning tasks are auto-regressive, \eg, language modeling \citep{gpt4, webtext, c4}, sequential recommendation \citep{svae, sasrec, netflix_data}, self-driving \citep{gapformer, waymo}, \etc Such tasks have a clear left-to-right causal structure with one event preceding the other, typically in time. Further, since a majority of such tasks are semi-supervised and are associated with large-amounts of naturally occurring data; training large foundation models \citep{foundation_models} for such data can become daunting despite its practicality, thereby limiting overall research progress. Concerningly, to the best of our knowledge, only simple \emph{data sampling heuristics} scale to such large auto-regressive datasets \citep{forgetting_events, k_centers}.
+
+
+
+\section{\sampler: Synthesizing High-Fidelity Autoregressive Data Summaries}
+
+
+\paragraph{Task \& Notation.} Given an autoregressive dataset $\dataset \triangleq \{ \sentence_i \}_{i=1}^{|\dataset|}$ where $\sentence_i \triangleq [ x_{ij} \in \vocab ]_{j=1}^{|\sentence_i|}$ is an ordered sequence of tokens, each belonging to the vocabulary of all possible tokens \vocab. We aim to synthesize a data summary $\sampled \in \mathbb{R}^{\mu \times \xi \times \dim(\vocab)}$ consisting of $\mu$ fake sequences of maximum length $\xi$, \st, $\mu \ll |\dataset|$. More specifically, we seek to construct \sampled in such a way that a representative learning algorithm $\Phi_\theta : \vocab^n \mapsto \vocab$ trained on \sampled using an autoregressive task (\eg, next-token-prediction \citep{gpt_1}, cloze \citep{cloze}, \etc) specified by a cost function $l : \vocab \times \vocab \mapsto \mathbb{R}$ can achieve performance equivalent to that of training $\Phi_\theta$ on the original dataset \dataset. Taking next-token-prediction \citep{gpt_1} as a representative predictive task, we denote the empirical risk as $\mathcal{L}_{\dataset}(\theta) \triangleq \mathbb{E}_{\sentence \sim \dataset,~x_i \sim \sentence}[l(\Phi_{\theta}(\sentence_{1:i}), x_{i+1})]$ for notational convenience, where $\sentence_{1:i}$ represents the sequence of first $i$ tokens in \sentence.
+
+\begin{figure*}[t!] \centering
+    \centering
+    \includegraphics[width=\linewidth]{figures/farzi.pdf}
+    \caption{ 
+     Visualization of a single outer-loop step in \sampler demonstrated using the language modeling predictive task. In this framework, each outer-loop step first materializes \samplerdata using (a batch of) its respective low-rank counterparts, followed by training a learning algorithm on \samplerdata for $T$-steps using Adam. The meta-gradient to update the factorized \samplerdata is obtained using efficient reverse-mode Adam outlined in \cref{alg:rev_adam}. This process (outer-loop step) is repeated till convergence, or for a fixed number of iterations.
+     } 
+    \label{fig:farzi overview}
+\end{figure*} 
+\paragraph{Methodology.} We cast the 
+problem of autoregressive \dd as a meta-learning problem, wherein the \emph{inner-loop} trains a learning algorithm on the data summary, and the \emph{outer-loop} evaluates its \emph{quality} via $l(\cdot, \cdot)$ on the original dataset to directly update the data summary via gradient descent. More formally, a na\"ive bilevel optimization problem can be framed as follows:
+\begin{equation} \label{eqn:naive_meta_matching}
+    \argmin{\sampled} \expectation{\theta_0 \sim \Theta}{\mathcal{L}_{\dataset}(\theta^*)} ~~~\text{s.t.}~~~ \theta^* \triangleq \argmin{\theta} \mathcal{L}_{\sampled}(\theta ~|~ \theta_0) ~~,
+\end{equation}
+where $\Theta$ is a distribution to initialize model parameters (\eg, uniform, Kaiming \citep{kaiming}, \etc). Such a formulation is commonly termed as \emph{meta-model matching based \dd} (see \citet{dd_survey} for a taxonomy of existing approaches), and is associated with significant computational complexity in terms of both time and memory. Typical approaches resort to local optimization (\eg, SGD) in the inner-loop, and Truncated Backpropagation Through Time (T-BPTT) by unrolling a finite number of inner optimization steps to obtain the meta-gradient. Notably, \dd becomes infeasible --- even after making such assumptions --- when the data is autoregressive as each data-point is associated with (i) a large discrete token vocabulary, \ie, $\dim(\vocab)$; and (ii) a third sequential dimension, \ie, $\xi$. Hence, the computational complexities of existing \dd techniques grows by a factor of $\approx\xi\cdot\dim(\vocab)$.
+
+To alleviate the computational challenges, \sampler performs \emph{data distillation in a latent space}. More specifically, \sampler factorizes \sampled into: (i) a latent data summary $\latentsampled \in \mathbb{R}^{\mu \times \xi \times d}$ where $d \ll \dim(\vocab)$; and (ii) a token-decoder matrix $\decoder \in \mathbb{R}^{d \times \dim(\vocab)}$. Finally, we can compose the latent data summary and the token-decoder to obtain the final data summary: $\sampled \equiv \operatorname{softmax}(\latentsampled \cdot \decoder \ / \ \tau)$, where $\tau \in \mathbb{R}^+$ represents the temperature in $\operatorname{softmax}(\cdot)$ and controls the entropy in \sampled. Such a factorization makes \sampler scalable to both extremely large datasets, \ie, large $|\dataset|$ as well as datasets with large token vocabularies, \ie, large $\dim(\vocab)$. 
+
+In addition to promoting scalability, we prove that \samplerdata's latent parameterization implicitly promotes regularization while training downstream models (\cref{thm:implicit_reg}). More specifically, we leverage the concepts of \emph{data representativeness} and \emph{Rademacher complexities} \cite[Chapter~26]{radamacher_book} to show that explicit rank regularization while synthesizing data summaries (\eg, latent factorization) strictly promotes generalization. Notably such \emph{data overfitting} has been previously (empirically) noted to notoriously affect \dd \citep{frepo}, but we are the first to explore the theoretical underpinnings.
+
+\begin{theorem} \label{thm:implicit_reg}
+Let $\sampled \in \mathbb{R}^{\mu \times \xi \times \dim(\vocab)}$ be parameterized using $\latentsampled \in \mathbb{R}^{\mu \times \xi \times d}$ and $\decoder \in \mathbb{R}^{d \times \dim(\vocab)}$, and $\mathcal{D}_{\mathsf{naive}} \in \mathbb{R}^{\mu \times \xi \times \dim(\vocab)}$ denote the non-parameterized data. Let $\mathcal{F}$ be the function-class of quadratic classifiers, and $\operatorname{Rep}(\mathcal{F}, \mathcal{D})$ denote the representativeness of a training set $\mathcal{D}$ (lower is better); then if $d < \min(\mu, \xi\cdot\dim(\vocab))$:
+\begin{equation*}
+    \mathbb{E}_{\latentsampled, \decoder}[\operatorname{Rep}(\mathcal{F}, \latentsampled \cdot \decoder)] < \mathbb{E}_{\mathcal{D}_{\mathsf{naive}}}[\operatorname{Rep}(\mathcal{F}, \mathcal{D}_{\mathsf{naive}})] ~~.    
+\end{equation*}
+\end{theorem}
+\begin{proof}
+See \cref{proof:implicit_reg} for the relevant preliminaries and proof.
+\end{proof}
+
+While typical bilevel optimization approaches use SGD in the inner loop \citep{remember_past} due to efficient reversible dynamics of SGD (see \citet{reverse_sgd} for efficient reverse-mode SGD), we empirically observe that in our setting of autoregressive \dd, Adam optimization \citep{adam} in the inner-loop is crucial for downstream \dd performance (see \cref{fig:efficient_adam}). Further, we also note that a significant number of inner-loop optimization steps --- in the order of $100$s --- are needed for good generalization for both Adam and SGD based \dd, as is concurrently reported by other work \citep{remember_past}. To this end, we derive an efficient approximation of reverse-mode differentiation of the Adam optimization in \cref{alg:rev_adam}. 
+
+\begin{algorithm}[t]
+    \centering
+    \caption{Reverse-mode differentiation of Adam.}
+    \label{alg:rev_adam}
+    \begin{algorithmic}[1]
+        \State \textbf{Input:} $\mathbf{w}_T$, $\mathbf{m}_T$, $\mathbf{v}_T$, $\gamma$, $\alpha$, $\epsilon$, $L(w, x)$, meta-objective $f(w)$
+        \State \textbf{Initialize:} $d\mathbf{m} \leftarrow 0$, $d\mathbf{x} \leftarrow 0$, $d\mathbf{w} \leftarrow \nabla_\mathbf{w} f(\mathbf{w}_T)$
+        \For{$t = T$ \textbf{to} $1$}
+            \State $\hat{\mathbf{m}}_{t} \triangleq \mathbf{m}_{t} / (1 - \beta_1^t)$ \Comment{exactly reverse Adam}
+            \State $\hat{\mathbf{v}}_{t} \triangleq \mathbf{v}_{t} / (1 - \beta_2^t)$ \Comment{exactly reverse Adam}
+            \State $\mathbf{w}_{t-1} = \mathbf{w}_t + \alpha \cdot \hat{\mathbf{m}}_t / (\hat{\mathbf{v}}_t + \epsilon)$ \Comment{exactly reverse Adam}
+            \State $\mathbf{g}_t \triangleq \nabla_\mathbf{w} L(\mathbf{w}_{t-1}, \mathbf{x})$ \Comment{exactly reverse Adam}
+            \State $\mathbf{m}_{t-1} = [\mathbf{m}_{t} - (1 - \beta_1) \cdot \mathbf{g}_t] / \beta_1$ \Comment{exactly reverse Adam}
+            \State $\mathbf{v}_{t-1} = [\mathbf{v}_{t} - (1 - \beta_2) \cdot \mathbf{g}_t^2] / \beta_2$ \Comment{exactly reverse Adam}
+            
+            \State $\epsilon' \triangleq \epsilon \cdot \sqrt{1 - \beta_2^t}$
+            \State $\alpha' \triangleq \alpha \cdot \sqrt{1 - \beta_2^t} ~/~ (1 - \beta_1^t)$
+            \State $\beta' \triangleq (1 - \beta_2) ~/~ (1 - \beta_1)$
+            \State $d\mathbf{m} = d\mathbf{m} + \alpha' \cdot \left( \frac{ \beta' \cdot \mathbf{m}_t \cdot \mathbf{g}_t }{\sqrt{\mathbf{v}_t} \cdot (\sqrt{\mathbf{v}_t} + \epsilon')^2} - \frac{1}{\sqrt{\mathbf{v}_t} + \epsilon'} \right) \cdot d\mathbf{w}$ \label{alg:rev_adam:main_line} \Comment{Proposition \ref{thm:rev_correctness}}
+            \State $d\mathbf{w} = d\mathbf{w} - (1 - \beta_1) \cdot d\mathbf{m} \cdot \nabla_\mathbf{w} \nabla_\mathbf{w} L(\mathbf{w}_{t-1}, \mathbf{x})$ \Comment{Hessian-vector product}
+            \State $d\mathbf{x} = d\mathbf{x} - (1 - \beta_1) \cdot d\mathbf{m} \cdot \nabla_{\mathbf{x}} \nabla_\mathbf{w} L(\mathbf{w}_{t-1}, \mathbf{x})$ \Comment{Hessian-vector product}
+            \State $d\mathbf{m} = \beta_1 \cdot d\mathbf{m}$
+        \EndFor
+        \State \textbf{Output:} gradient of $f(\mathbf{w}_T)$ \wrt $\mathbf{w}_0$, $\mathbf{m}_0$, and $\mathbf{x}$
+    \end{algorithmic}
+\end{algorithm}
+
+\begin{proposition} \label{thm:rev_correctness}
+Correctness of \cref{alg:rev_adam}, \cref{alg:rev_adam:main_line}
+: see \cref{proof:rev_correctness} for the proof.
+\end{proposition}
+\cref{alg:rev_adam} allows the memory footprint of the meta-gradient computation to be constant \wrt the number of inner-loop steps. Notably, meta-gradient computation is the biggest contributor in a meta-learning algorithm's overall scalability. This is in stark contrast with typical autograd libraries like PyTorch \citep{pytorch}, \texttt{JAX} \citep{jax}, \etc which require storing all intermediate variables across the inner-optimization to compute the meta-gradient, resulting in a linearly growing memory footprint \wrt the number of inner-loop steps.
+
+\sampler also improves the sample-efficiency of the underlying meta-matching framework (\cref{eqn:naive_meta_matching}) by leveraging access to a limited number of training trajectories on the target dataset. Formally, let $\Omega \triangleq \{ [ \theta_i ]_{i=1}^T ~|~ \theta_0 \sim \Theta \}$ be the set of episodic checkpoints of training $\Phi_\theta$ on \dataset for a limited number of random initializations. \sampler leverages $\Omega$ in its final optimization as follows: 
+\begin{align} \label{eqn:farzi_opt}
+\begin{split}
+    \argmin{\decoder, \latentsampled} \expectation{\theta_0 \sim \Omega}{\mathcal{L}_{\dataset}(\theta_T)} % \\
+    \hspace{0.4cm} \text{s.t.} \hspace{0.4cm}
+    \theta_{t+1} &\leftarrow \operatorname{Adam}\left(\theta_t, \nabla_{\theta}\mathcal{L}_{\sampled}(\theta_t)\right) 
+    \\
+    \sampled &\leftarrow \operatorname{softmax}\left(\latentsampled \cdot \decoder \ / \ \tau\right) ~~,
+\end{split}
+\end{align}
+ Notably, curating $\Omega$ is independent of the \dd procedure and can be precomputed and logged beforehand, contributing nothing to the computational complexity of \sampler.
+\paragraph{Computational complexity.}
+We elucidate \sampler's computational footprint of optimizing \cref{eqn:farzi_opt} in terms of a single outer-loop step's runtime and memory usage:
+
+\begin{align*}
+    \operatorname{Memory\ Complexity:} & 
+    \hspace{0.3cm}
+    \mathcal{O}\big(
+    \eqnmarkbox[DodgerBlue]{a}{|\Phi|}
+    +
+    \eqnmarkbox[OliveGreen]{b}{b\cdot\dim(\vocab)}
+    + 
+    \eqnmarkbox[WildStrawberry]{c}{b_{\mathsf{syn}}\cdot\xi\cdot\dim(\vocab)}
+    +
+    \eqnmarkbox[RoyalPurple]{d}{\mu \cdot \xi \cdot d}
+    +
+    \eqnmarkbox[BrickRed]{e}{d \cdot \dim(\vocab)}
+    \big) \\[0.8cm]
+    \operatorname{Time\ Complexity:} & 
+    \hspace{0.3cm}
+    \mathcal{O}\big(
+    \eqnmarkbox[DodgerBlue]{h}{b_{\mathsf{syn}}\cdot\xi\cdot d\cdot\dim(\vocab)}
+    +
+    \eqnmarkbox[OliveGreen]{f}{T \cdot b_{\mathsf{syn}} \cdot |\Phi|}
+    +
+    \eqnmarkbox[WildStrawberry]{g}{b \cdot |\Phi|}
+    + 
+    \\
+    & \hspace{0.75cm}
+    \eqnmarkbox[RoyalPurple]{i}{T} \cdot ( 
+        \eqnmarkbox[BrickRed]{j}{b_{\mathsf{syn}} \cdot |\Phi|}
+        +  
+        \eqnmarkbox[BurntOrange]{k}{b_{\mathsf{syn}}\cdot\xi\cdot d}
+        +
+        \eqnmarkbox[teal]{l}{d \cdot \dim(\vocab)}
+    )
+    \big)
+\end{align*}
+\annotate[yshift=0.7em,xshift=-4ex]{above,right}{a}{Model optimization}
+\annotate[yshift=0.7em,xshift=-0.4ex]{above,right}{b}{Storing $\hat{\dataset}$}
+\annotate[yshift=0.7em,xshift=0.6ex]{above,left}{c}{Storing $\hat{\mathcal{D}}_{\mathsf{syn}}$}
+\annotate[yshift=0.7em,xshift=2ex]{above,left}{d}{Storing \& Updating $\Tilde{\mathcal{D}}_{\mathsf{syn}}$}
+\annotate[yshift=0.7em,xshift=4ex]{above,left}{e}{Storing \& Updating $\mathbf{M}$}
+\annotate[yshift=0.7em,xshift=-7ex]{above,right}{f}{Inner-loop optimization}
+\annotate[yshift=0.7em,xshift=-4ex]{above,right}{g}{Computing $\nabla_\mathbf{\theta} \mathcal{L}_{\hat{\dataset}}(\theta_T)$}
+\annotate[yshift=0.7em,xshift=10ex]{above,left}{h}{Computing $\hat{\mathcal{D}}_{\mathsf{syn}}$ from \sampled \& $\mathbf{M}$}
+\annotate[yshift=0.25em,xshift=-2ex]{below,left}{i}{Inner-loop reversal (\cref{alg:rev_adam})}
+\annotate[yshift=-0.7em,xshift=0ex]{below,left}{j}{Computing $\nabla_\mathbf{\theta} \mathcal{L}_{\hat{\dataset}_{\mathsf{syn}}}(\theta_t)$}
+\annotate[yshift=-0.9em,xshift=0ex]{below,right}{k}{Updating meta-gradient for $\Tilde{\mathcal{D}}_{\mathsf{syn}}$}
+\annotate[yshift=0.25em,xshift=7ex]{below,right}{l}{Updating meta-gradient for $\mathbf{M}$}
+
+where, $\hat{\dataset} \sim \dataset$ and $\hat{\mathcal{D}}_{\mathsf{syn}} \sim \sampled$ are randomly sampled batches of real data and \samplerdata such that $b \triangleq |\hat{\dataset}|$ and $b_{\mathsf{syn}} \triangleq |\hat{\mathcal{D}}_{\mathsf{syn}}|$; and $|\Phi|$ represents the total number of parameters in $\Phi$.
+
+
+
+\section{Empirical evaluation}
+
+
+\subsection{Setup} 
+
+We empirically evaluate \sampler's practicality over two well-studied autoregressive predictive tasks: 
+\begin{itemize}[leftmargin=.2in]
+    \listheader{Sequential Recommendation:} Predict the \emph{item} that a given user is most likely to consume next, given their historic item consumption history. We use four benchmark datasets, namely Movielens-100k, Movielens-1M \citep{movielens}, Amazon Magazine \citep{amazon_review}, and Netflix \citep{netflix_data}; from different recommendation domains and with varying data characteristics. To evaluate model quality we use popular ranking metrics: AUC, HitRate, and nDCG.
+    
+    \listheader{Language Modeling (LM):} Predict the most probable following word given a sequence of words. We conduct our experiments on the official-released train/validation/test split of the English Penn Treebank (PTB) corpus \citep{marcus1993building}: an open-sourced benchmark widely used for LM. We evaluate our models using word-level perplexity, as well as the token prediction accuracy after greedy decoding on the test set.
+\end{itemize}
+
+We use SASRec \citep{sasrec} and a small Transformer model \citep{self_attention} as the representative learning algorithms ($\Phi$) in \sampler's inner-loop for sequential recommendation and language modeling tasks respectively, and use cross-entropy as the underlying objective function for both. We implement \sampler using PyTorch \citep{pytorch} and we will publicly release the code and optimized \samplerdata for all datasets used in this paper upon acceptance. 
+\subsection{Experiments} \label{sec:experiments}
+
+\paragraph{How sample efficient is \samplerdata?} 
+
+We evaluate the fidelity of \samplerdata by first optimizing for \sampled using \cref{eqn:farzi_opt}, followed by training $\Phi$ (from scratch) on \sampled.  We plot the performance of the trained $\Phi$ on the test-set for various amounts of data budgets ($\mu$) in \cref{fig:sample_efficiency,fig:sample_efficiency_lm} for sequential recommendation and language modeling tasks respectively. We also plot semantically equivalent results for other
+
+\begin{figure*}[t!] \centering
+    \includegraphics[width=\linewidth]{figures/sample_efficient_HR_10.pdf}
+    \caption{Performance change of SASRec with increasing data (log-scale) for recommendation.}
+    \label{fig:sample_efficiency}
+\end{figure*} 
+
+\begin{wrapfigure}{r}{0.34\textwidth}
+  \begin{center}
+    \includegraphics[width=\linewidth]{figures/sample_efficient_perplexity.pdf}
+  \end{center}
+  \caption{Performance change of Transformer with increasing data for LM.}
+  \label{fig:sample_efficiency_lm}
+\end{wrapfigure}
+
+commonly used data sampling heuristics, namely (i) random sampling: sample sequences uniformly at random, and (ii) head sampling: retain the sequences with the largest length. We first note that \samplerdata is much more sample-efficient than other data sampling techniques, being able to achieve up to $1000\times$ data compression with no loss in performance. 
+Further, in \cref{fig:sample_efficiency}, we notice that on two out of the four recommendation datasets, \sampler's orders of magnitude smaller data is able to train models of higher quality than the original dataset itself. This observation acts as further evidence for the intuitive yet under-explored idea that less but high-quality data can be more important for model training than a very large but noisy dataset \citep{nips_22, lima}.
+\paragraph{How versatile is \samplerdata?} 
+Since \samplerdata is inherently optimized for a specific learning algorithm, we ascertain its universality by training different kinds of \texttt{student networks} over data synthesized using a given \texttt{teacher network} in \sampler's inner-loop for the sequential recommendation task. Note that the \texttt{student network} is completely unrelated to the data synthesis procedure and underlying \sampler optimization. From the results in \cref{tab:cross_arch}, we observe that irrespective of the \texttt{teacher network}, \samplerdata is able to train varied \texttt{student network} architectures (\eg, Transformers, RNNs, MLPs) better than training on the full dataset. 
+On the other hand, however, the best performance for any given \texttt{student network} is obtained when the same network is used during \sampler optimization.
+
+\paragraph{How important is the inner-loop optimizer in \sampler?} 
+We compare SGD (with or without momentum) and Adam \citep{adam} optimizers as different optimization routines in \sampler's inner-loop (\cref{eqn:farzi_opt}). Notably, we implement differentiable Adam optimization in three different ways: (i) using the \texttt{higher} package \citep{higher}; (ii) PyTorch's autograd implementation; and (iii) our efficient reverse-mode implementation (\cref{alg:rev_adam}). We measure their effect on downstream performance as well as the time and memory associated with each outer-loop iteration in \cref{fig:efficient_adam}. We first observe that Adam is much better suited for \dd in our setting. This is a novel finding in the context of meta-learning and its applications, where previously Adam has been reported to be worse than SGD \citep{higher}. Further, we observe that while different reverse-mode implementations of Adam lead to data of similar sample quality, their computational properties vastly differ. We observe that PyTorch and \texttt{higher} have similar memory footprints, but the former has a lower runtime. Our efficient implementation elegantly trades-off memory with runtime, leading to constant memory footprint and a linear increase in runtime compared to PyTorch's autograd. This allows \sampler to scale to large autoregressive datasets without compromising on data fidelity.
+
+\def\arraystretch{1.1}
+\setlength{\tabcolsep}{0.5em} % for the horizontal padding
+
+\begin{table}[t!] \centering
+  \caption{Cross-architecture generalization for \samplerdata of size
+  \texttt{[50$\times$150]} of the ML-100k dataset.
+  Note that the \texttt{student network} is used \emph{only for training} on \samplerdata, while the \texttt{teacher network} is used in \sampler's inner-loop. 
+}
+  \label{tab:cross_arch}
+    \begin{scriptsize}
+    \begin{center}
+        \begin{tabular}{c|ccc}
+            \toprule
+            \multirow{4}{*}{\texttt{Teacher}} & \multicolumn{3}{c}{\texttt{Student}} \\%[3pt] 
+            & \multicolumn{3}{c}{\texttt{HR@10 / HR@100}} \\%[3pt]
+            & SASRec \citep{sasrec} & GRU4Rec \citep{gru4rec} & FMLP \citep{fmlp} \\
+            \midrule
+            SASRec & $19.61 / 61.50$ & $19.93 / 64.47$ & $17.81 / 58.21$ \\
+            
+            GRU4Rec & $18.23 / 61.08$ & $22.16 / 66.70$ & $20.14 / 60.23$ \\
+            \midrule
+            Full-Data & $18.23 / 60.65$ & $21.20 / 64.05$ & $17.28 / 59.27$ \\
+            \bottomrule
+        \end{tabular}
+    \end{center}
+    \end{scriptsize}
+\end{table}
+
+\begin{figure*}[t!] \centering
+    \includegraphics[width=\linewidth]{figures/efficient_adam_HR_10_NDCG_10.pdf}
+    \caption{Changes in distillation performance and computational scalability of each outer-loop step for different inner-loop optimizers and increasing number of inner-loop steps. All results are for \texttt{[10$\times$150]} sized \samplerdata of the ML-100k dataset.}
+    \label{fig:efficient_adam}
+\end{figure*} 
+
+\paragraph{How do different meta-objectives affect \sampler?}
+We further evaluate the importance of \sampler's optimization objective by comparing it with existing \dd approaches. We adapt existing approaches to work with autoregressive data by reusing the latent distillation proposition of \sampler, and vary only the outer-loop \emph{goodness function} to (i) gradient matching (\texttt{DC} \citep{zhao_dc}); (ii) meta-matching (\texttt{MM} \citep{dd_orig, remember_past}); or (iii) trajectory matching (\texttt{MTT} \citep{mtt}). Even though all existing \dd approaches use SGD in their inner-loop, we nonetheless experiment with both SGD and our efficient reverse-mode Adam (\cref{alg:rev_adam}), and list the results in \cref{tab:meta_objectives}. We observe that Adam is a consistently better inner-loop optimizer irrespective of the meta-objective used. This is in stark contrast with existing \dd studies which use SGD in the inner-loop. Further, \sampler significantly outperforms all existing \dd techniques despite improving them to use Adam in the inner-loop.
+
+\paragraph{How important are pre-trained trajectories for data distillation?} 
+To elicit the importance of the pre-trained trajectories, \ie, $\Omega \triangleq \{ [ \theta_i ]_{i=1}^T ~|~ \theta_0 \sim \Theta \}$ in \sampler's optimization (\cref{eqn:farzi_opt}), we plot the change in downstream distillation performance with increasing $|\Omega|$ in \cref{fig:num_trajectory}. We indeed observe a massive improvement in downstream distillation performance with using as little as just $5$ trajectories, compared to randomly initializing networks in \sampler's inner-loop. Notably, the improvement saturates as we keep adding more trajectories to $\Omega$. 
+
+\newcommand{\boformat}[1]{$\mathbf{#1}$}
+\newcommand{\orformat}[1]{\textcolor{orange}{$\mathbf{#1}$}}
+\newcommand{\blformat}[1]{\textcolor{blue}{$\mathbf{#1}$}}
+
+\def\arraystretch{1.2}
+\setlength{\tabcolsep}{0.5em} % for the horizontal padding
+
+\begin{table}[t!] \centering
+    \caption{Comparison of \sampler with other existing \dd techniques modified to distill autoregressive data. Results for both using SGD or Adam as the inner-loop optimizer are listed. Meta-matching is shortened as \texttt{MM}. The best distillation result for each metric is colored \textcolor{orange}{\textbf{orange}}, and the best result other than \sampler is colored \textcolor{blue}{\textbf{blue}} for Adam-based methods and \textbf{emboldened} for SGD-based methods.
+    }
+    \label{tab:meta_objectives}
+    \begin{scriptsize}
+    \begin{center}
+        \begin{tabular}{c c | c | c@{\hskip 5pt} c c@{\hskip 5pt} c c@{\hskip 5pt} c c | c}
+            \toprule
+            \multirow{3.8}{*}{\texttt{Dataset}} & \multirow{3.8}{*}{\texttt{Metric}} & \multirow{3.8}{*}{\texttt{\STAB{Random\\Sampling}}} & \multicolumn{7}{c|}{\texttt{Data Distillation Objectives}} & \multirow{3.8}{*}{\texttt{Full-Data}} \\[3pt]
+            & & & \multicolumn{2}{c}{\texttt{DC}} & \multicolumn{2}{c}{\texttt{MM}} & \multicolumn{2}{c}{\texttt{MTT}} & \multirow{2}{*}{\sampler} \\[2pt]
+            & & & SGD & Adam & SGD & Adam & SGD & Adam & \\
+            \midrule
+            \multirow{4}{*}{\STAB{ML-100k\\\texttt{[50$\times$150]}}} 
+            & HR@10 $\uparrow$     &  $7.74$ &  $7.95$ & $11.77$ &  $9.65$ & \blformat{16.86} & \boformat{12.19} & $14.52$ & \orformat{19.61} & $18.23$ \\
+            & HR@100 $\uparrow$    & $39.13$ & $41.88$ & $49.52$ & $42.31$ & \blformat{58.43} & \boformat{50.37} & $56.94$ & \orformat{61.50} & $60.65$ \\
+            & nDCG@10 $\uparrow$   &  $3.83$ &  $3.44$ &   $5.6$ &  $4.72$ &  \blformat{8.35} &  \boformat{6.12} &  $6.73$ &  \orformat{9.91} &  $9.33$ \\
+            & nDCG@100 $\uparrow$  &  $9.61$ &  $9.84$ & $12.51$ & $10.85$ & \blformat{16.47} & \boformat{13.03} & $14.66$ & \orformat{17.91} & $17.69$ \\
+            \midrule
+            \multirow{2}{*}{\STAB{PTB\\\texttt{[400$\times$50]}}} 
+            & Perplexity $\downarrow$   & 218.66 & 203.23 & 131.07 & \boformat{180.61} & \blformat{115.84} & 202.98 & 129.72 &  \orformat{91.92} & 72.10 \\
+            & Accuracy  $\uparrow$         & 20.42 & 20.64 & 22.35 & \boformat{21.60} & \blformat{23.47} & 21.00 & 23.00 & \orformat{25.16} & 26.03 \\
+            \bottomrule
+        \end{tabular}
+    \end{center}
+    \end{scriptsize}
+\end{table}
+
+\begin{figure*}[t!] \centering
+    \captionsetup[subfigure]{skip=-12pt,slc=off,margin={37pt,0pt},font={color=red}}
+    \subcaptionbox{\label{fig:cold_user_item}}{\includegraphics[width=0.73\textwidth]{figures/cold_HR_100.pdf}}
+    \hfill
+    \captionsetup[subfigure]{skip=-12pt,slc=off,margin={15pt,0pt},font={color=red}}
+    \subcaptionbox{\label{fig:num_trajectory}}{\includegraphics[width=0.255\textwidth]{figures/num_trajectories_HR_10.pdf}}
+    \captionsetup{subrefformat=parens}
+    \caption{\subref{fig:cold_user_item} Performance of SASRec trained on \texttt{[50$\times$150]} sized \samplerdata for ML-100k, and stratified over the popularity of users and items. The popularities are quantized into $10$ equal sized bins and the average HR@100 is plotted. \subref{fig:num_trajectory} Performance change of SASRec trained on \texttt{[10$\times$150]} sized \samplerdata for ML-100k with increasing number of pretrained trajectories.}
+\end{figure*}
+
+\paragraph{Does \sampler affect cold users or items more?} 
+A longstanding problem in recommender systems is modeling the cold-start scenario, \ie, users/items with less data. We study the effect training models on \samplerdata from the cold-start perspective, by stratifying the users and items based on their popularity into equal-sized quantiles, and checking the trained model's performance on each individual quantile. In \cref{fig:cold_user_item}, we do this for SASRec \citep{sasrec} trained on (i) the full dataset; and (ii) \samplerdata synthesized using different hyper-parameter combinations. We first observe that less popular items are harder to model, as is the typical case of recommender systems. Further, we observe that models trained on \samplerdata are, in expectation, (i) better on the tail/torso region of users/items; but (ii) worse for the head users/items. Notably, this behaviour is not directly optimized-for by \sampler, and is a by-product of the overall data-quality optimization in \cref{eqn:farzi_opt}. 
+
+
+
+
+\section{Conclusion \& Future Work}
+
+
+In this paper, we proposed \sampler \ --- a scalable technique to summarize large amounts of autoregressive data into a terse, high-fidelity data summary. Through extensive experiments on next-item recommendation and language modeling, we demonstrated that data synthesized by \sampler (\samplerdata) is able to train various kinds of state-of-the-art models to the same quality (if not better) as training them on the full dataset, despite \samplerdata being up to $3$ orders of magnitude smaller. 
+
+Having demonstrated \samplerdata's prowess to train autoregressive models, we also highlight a few shortcomings and unexplored directions that we delay for future work. First, even though \sampler performs distillation in a latent-space, it is hard to scale to applications that naturally consist of very-long sequences, \eg, video, music, \etc because \samplerdata is parameterized linearly in the length of each sequence. Further, scaling to larger models (\eg, T5 \citep{t5}) as well as larger datasets (\eg, C4 \citep{c4}) isn't as trivial 
+due to practical constraints related to optimization and computational resources, but very important from a practical standpoint for future research, such as enabling cost-effective training of these large models on compact synthetic data.
+
+Laying down the foundation for data distillation in autoregressive modeling, \sampler also opens up new research directions from varied angles. First, the ability to train higher quality models using less data is counter-intuitive and under-explored but also highly important from economical and environmental standpoints. Further, training models on differentialy private data summaries \citep{privacy_free} instead of PII data can provide an added protection layer and be beneficial from copyright-protection, ethics, and fairness perspectives. \looseness=-1
+
+
+

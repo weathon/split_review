@@ -1,0 +1,181 @@
+\title{Rotated Runtime Smooth: Training-Free Activation Smoother for accurate INT4 inference}
+
+\begin{abstract}
+Large language models have demonstrated promising capabilities upon scaling up parameters. However, serving large language models incurs substantial computation and memory movement costs due to their large scale. Quantization methods have been employed to reduce service costs and latency. Nevertheless, outliers in activations hinder the development of INT4 weight-activation quantization. Existing approaches separate outliers and normal values into two matrices or migrate outliers from activations to weights, suffering from high latency or accuracy degradation. Based on observing activations from large language models, outliers can be classified into channel-wise and spike outliers.
+In this work, we propose Rotated Runtime Smooth (\textbf{RRS}), a plug-and-play activation smoother for quantization, consisting of Runtime Smooth and the Rotation operation. Runtime Smooth (\textbf{RS}) is introduced to eliminate \textbf{channel-wise outliers} by smoothing activations with channel-wise maximums during runtime. The Rotation operation can narrow the gap between \textbf{spike outliers} and normal values, alleviating the effect of victims caused by channel-wise smoothing.
+The proposed method outperforms the state-of-the-art method in the LLaMA and Qwen families and improves WikiText-2 perplexity from 57.33 to 6.66 for INT4 inference. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\blfootnote{$^*$ denotes equal contribution. $^\dagger$ denotes equal advising. Project page: \url{https://coco58323.io/rrs2024.io/}.}
+\label{instrcution}
+Large language models have demonstrated promising capabilities as parameters are scaled up. However, serving large language models is plagued by the high cost of computation and memory movement due to their scale. Consequently, many quantization methods are applied to reduce size and gain throughput improvement. From the service perspective, quantization can be categorized as weight-only quantization and weight-activation quantization. The former can focus on compressing the model's weights and saving costs related to memory movement, which is suitable for the memory-bound decoding stage. The latter quantizes both weight and activation to low bits and utilizes low-bit matrix multiplication kernels to achieve speedup. However, the existence of outliers in activation stretches the quantization range, compressing the effective bits for normal values and thus hindering the development of low-bit weight-activation quantization.
+To address outliers, previous works such as \citep{kim2023squeezellm,dettmers2022llmint88bitmatrixmultiplication} separate outlier and normal values into two matrices. However, the implementation is not hardware-compatible and fails to expedite inference. To achieve acceleration and maintain accuracy under A8W8 quantization, SmoothQuant \citep{xiao2023smoothquant} transfers appropriate outliers from activation to weight offline through channel-wise smoothing scales. Nevertheless, the offline smoothing scales would be ineffective when facing unmatched input, and the outlier sharing scheme makes weight difficult to quantify. The aforementioned reason impedes the implementation of SmoothQuant for A4W4 quantization. QuaRot \citep{ashkboos2024quarotoutlierfree4bitinference} utilizes the property that rotation can suppress outliers; hence, pairwise rotate the activation and weight with equivalent output. The rotated activation and weight tend to spread outliers internally, leading to effectiveness smoothness for A4W4 quantization. However, rotation cannot guarantee a smoother matrix, and a rotated matrix may still exhibit the shape of channel-wise outliers, as depicted in Figure \ref{fig: rotate}. Therefore, deriving a more robust, accurate, and training-free scheme for INT4 inference remains an open challenge.
+
+Based on the observation, outliers could be categorized into channel-wise outliers and spike outliers, as shown in Figure \ref{fig: smoothquant}.
+To handle \textbf{channel-wise outliers}, we propose \textbf{Runtime Smooth}. Firstly, weights and activations are reordered to gather outliers and normal values. 
+Subsequently, we group up activations and smooth activations by dividing group-wise maximums. 
+The later quantized smoothed activation, weight, and group-wise maximums are inputs for the fused GEMM kernel. 
+The entire process incurs minimal overhead compared to the original A4W4 pipeline. 
+However, the existence of spike outliers causes the effect of victims after channel-wise smoothing, as shown in Figure \ref{fig: smoothquant}.
+To address both \textbf{channel-wise outliers} and \textbf{spike outliers}, we propose \textbf{Rotated Runtime Smooth}, where we rotate weights and activations following \citep{ashkboos2024quarotoutlierfree4bitinference} and apply Runtime Smooth on rotated activations.
+The spike outlier is spread along with its token, leading to a smoother token with consistent values.
+The consistent values are comparatively larger than the normal values, thereby serving as smoothing scales for Runtime Smooth.
+The genesis of victims is abnormal smoothing scales, and the consistent smoothing scales across channels prevent the existence of victims.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{fig/smoothquant.pdf}
+  \caption{\small Challenges of SmoothQuant faced with outliers. (a) The unmatched $s$ is useless for smoothing. (b) Based on the migration scheme, smoothed activation/weight is still hard to quantize to 4-bit. (c) Normal values are pruned as \textbf{victims} after smoothing due to the spike outlier.
+  } \label{fig: smoothquant}
+\end{figure}
+To evaluate the proposed method, we conducted experiments on LLaMA families, Qwen families, Mistral, etc. We validate the performance on the WikiText-2 perplexity and Common Sense QA benchmarks. On LLaMA3-70B, Rotated Runtime Smooth can gain perplexity improvement from 57.33 to 6.66 under A4W4 quantization compared with the state-of-the-art. We summarize our contributions as follows:
+\begin{itemize}
+\item We comprehensively revisited the activation smoothing method for LLM quantization, concluding the reasons for success or failure under A4W4 quantization.
+\item We propose Runtime Smooth, a plug-and-play component that eliminates channel-wise outliers of activation in runtime without migrating outliers to weights, bringing negligible overhead for INT4 matrix multiplication. 
+\item We propose Rotated Runtime Smooth to overcome the spike outliers and enhance the robustness for channel-wise outliers. A comprehensive evaluation validates the effectiveness of the proposed methods, which gain thorough improvement on various models for INT4 inference.
+\end{itemize}
+
+
+\section{Preliminaries}
+
+\label{review}
+\subsection{Quantization}
+Quantization converts high-precision matrices into discrete elements with scaling factors, achieving a lower bit per element. The process of quantization can be expressed as $\mathbf{X_{INT}} = \lfloor\frac{\mathbf{X}}{\alpha}\rceil, \alpha=\frac{\max(|\mathbf{X}|)}{2^{N-1}-1}$, where $\mathbf{X}$ represents the floating-point tensor and $\alpha$ is the scaling factor. The existence of outliers stretches the scaling factor and leaves few effective bits for normal values. Dividing the matrix into groups for quantization can mitigate the effect of outliers. In previous literature, the \textbf{per-tensor} quantization considers the entire matrix as a group; the \textbf{per-channel} quantization assigns different scaling factors to each row, and the \textbf{sub-channel} quantization divides rows into fine-grained groups. Although fine-grained grouping can alleviate accuracy degradation, more scaling factors entail additional computation and storage costs. In this work, we adopt the \textbf{per-channel} scheme following \citep{xiao2023smoothquant, ashkboos2024quarotoutlierfree4bitinference, liu2024spinquantllmquantizationlearned} for INT4 quantization.
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{fig/rotation.pdf}
+  \caption{\small Review of the rotation-based method. (a) illustrates a simple implementation of the rotation-based method. The output from projector is not changed since $\mathbf{Y} = (\mathbf{X}\mathbf{R})(\mathbf{R}^{-1} \mathbf{W}^{T}) = \mathbf{X}\mathbf{W}^{T}$. (b) explains the success of the rotation-based method on LLMs, where activations have high confidentiality to be smoothed after rotation compared with a random matrix. (c) illustrates that activation with channel-wise outliers still maintains channel-wise consistency after rotation, leaving space for further smoothing} 
+  \label{fig: rotate}
+\end{figure}
+
+\subsection{Channel-wise Smoothing Method}
+\label{sec: smoothquant}
+Under the assumption that outliers persist in fixed channels of activations, SmoothQuant migrates the outliers by dividing the smoothing scale $\mathbf{s}\in\mathbb{R}^{K}$, where k denotes channel dimension. For ensuring equivalence of output, $\mathbf{s}$ would be multiplied to weight; the process can be described as $\mathbf{Y} = (\mathbf{X}\text{diag}(\mathbf{s})^{-1})(\text{diag}(\mathbf{s})\mathbf{W}^{T}) = \hat{\mathbf{X}} \hat{\mathbf{W}^{T}}$. The smoothing scales are computed as $\mathbf{s}_j =  \max(|\mathbf{X}_j|)^{\alpha} / \max(|\mathbf{W}_j|) ^{1-\alpha}, j=1,2,\ldots,K,$ to fairly share the outliers between weights and activations. Since weights are mostly quantized offline  \citep{frantar2022gptq}, directly multiplying $s$ during runtime would undermine the quantization property. Therefore, $s$ is pre-computed using a calibration set and merged into weights before quantization.
+Although SmoothQuant is effective under the A8W8 scheme, it fails for INT4 inference in three respects, as shown in Figure \ref{fig: smoothquant}. Firstly, the smoothing scales depending on the calibration set are prone to being unmatched with online activations; hence, they cannot smooth outliers. Secondly, the outlier channels of activation are not eliminated but partially migrated to weights, thus leading to failure in low-bit quantization. Thirdly, outliers are not always channel-wise consistent, where spike outliers exist, and normal values are pruned as 'victim' after smoothing.
+\textbf{Spike Outliers and Effect of Victim}: Spike outliers stretch the smoothing scale. The normal values divided by abnormal smoothing scales are minimal compared to other elements in the quantization group; hence, they become 'victims.' The existence of the victims leads to quantization error.
+\subsection{Rotation-based Method}
+A rotation matrix is an orthogonal matrix R satisfied $\mathbf{R}\mathbf{R}^T=1$ and $|\mathbf{R}| = 1$. Quip \citep{tseng2024quipbetterllmquantization} showed that multiplying a weight matrix on the left and right by an orthogonal matrix can theoretically alleviate outliers, making matrices easier to quantize. QuaRot \citep{ashkboos2024quarotoutlierfree4bitinference}, employs a similar technique by multiplying weight or activations by only one rotation matrix, maintaining an equivalent output as depicted in Figure \ref{fig: rotate} (a). However, multiplying one rotation matrix could not theoretically guarantee a smoother weight or activation. To explain the success of the rotation-based method, we computed the probability that the activation of different models becomes less smooth after rotation, as illustrated in Figure \ref{fig: rotate} (b). Following previous works, we measure the smoothness as $\mu = \textrm{absmax}\big(\mathbf{t}\big) / \textup{RMS} (\mathbf{t})$, where $\mathbf{t}$ denotes one token in activation, and RMS denotes root mean square. Rotating activation from LLMs consistently exhibits a low probability of being less smooth compared with rotating a random matrix. However, having a chance to be less smooth is a potential trouble.
+On the other hand, activations with channel-wise outliers can be viewed as a collection of vectors with the same direction. From the rotation property, the rotated activation maintains the channel-wise consistency, as shown in Figure \ref{fig: rotate} (c), leaving space for better smooth.
+
+
+\section{Methodology}
+
+
+In this section, we introduce Runtime Smooth to eliminate channel-wise outliers (\ref{sec: rs}) and how to implement it efficiently with kernel fusion (\ref{sec: implement}). To comprehensively eliminate outliers, we propose Rotated Runtime Smooth, which addresses the effect of the victim and sub-smoothness of rotated activation  \ref{sec: integrate}.
+
+\subsection{Runtime Smooth}
+\label{sec: rs}
+\begin{wrapfigure}[8]{r}{0.45\textwidth}
+\centering
+\includegraphics[width=0.45\textwidth]{fig/a4w16.pdf}
+\caption{Preliminary ablation study}
+\label{fig: ab}
+\end{wrapfigure}
+Challenges for the smoothing-based method under INT4 inference are discussed in Section \ref{sec: smoothquant}. One intuitive way to mitigate this challenge is to obtain smoothing scale $s$ in runtime and not merge $s$ into weights. The process can be formulated as:
+\begin{gather}
+\label{eq: naive smooth}
+    \mathbf{s}_j =  \max(|\mathbf{X}_j|), j=1,2,...,K \\
+    \hat{\mathbf{X}} = \textup{Quantize}(\mathbf{X} / \mathbf{s}), \hat{\mathbf{W}} = \textup{Quantize}(\mathbf{W}), \\
+    \mathbf{Y} = \sum_{j=1}^{K} \hat{\mathbf{X_j}} \cdot \hat{\mathbf{W_j}}^{T} \cdot \mathbf{s}_j ,
+\end{gather}
+
+where $\mathbf{s}\in\mathbf{R}^{1\times K}$ denotes the runtime smoothing scale, $\mathbf{X}\in\mathbf{R}^{N\times K}$ denotes activations, $\mathbf{W}\in\mathbf{R}^{M\times K}$ denotes weights.
+We conducted an ablation study with LLaMA3-8B and the WikiText-2 dataset to understand better the effect of unmatched scale and outlier shared scheme. As shown in Figure \ref{fig: ab}, merely applying the runtime smoothing scale could not make A4W4 feasible, whereas Runtime Smooth does, echoing the importance of not migrating outliers to weights. To avoid the effect of quantization error from weight, we further apply the A4W16 setting. The perplexity improvement, from 4e2 to 10.9, validates the effectiveness of adopting the runtime scale.
+\subsection{Runtime Smooth with Kernel Fusion}
+\label{sec: implement}
+However, the naive implementation cannot integrated into the GEMM pipeline. A GEMM kernel splits the input matrix into blocks by columns and conducts parallel block computation, where the inconsistent smoothing scale would make the block-wise computation complex. Intuitively, if the smoothing scale is the same within a block, equation \ref{eq: naive smooth} can be deduced to $\mathbf{Y} = \mathbf{s}_j \cdot \sum_{j=1}^{K} \hat{\mathbf{X_j}} \cdot \hat{\mathbf{W_j}}^{T}$. The overhead would be minimized due to fewer multiplication operations.
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{fig/framework.pdf}
+  \caption{\small Pipeline of Runtime Smooth. (1) Reorder activations and weight according to channel-wise maximums of activation. (2) Group up activations according to block size of matrix multiplication computation. The maximums of the group are set to the runtime smoothing scale of the group. (3) In the matrix multiplication pipeline, quantized smoothed activations and weights are segmented into blocks. The block size is equivalent to the previous group size. Within a block, tiled smoothed activations are multiplied by tiled quantized weights. The runtime smoothing scales are applied to the dequantized interim result.} 
+  \label{fig: framework}
+\end{figure}
+Roughly altering the smoothing scales to be consistent would degrade the level of smoothness. Hence, we reorder the activations and weights according to the magnitude of smoothing scales, validated as hardware-friendly with negligible cost \citep{lin2024qservew4a8kv4quantizationcodesign}. The reordered activations group up the outliers and normal values. The group size is configured to be identical to the block size. The maximum value of an activation group is set as the smoothing scale for the corresponding computation block.
+As shown in Figure \ref{fig: framework}, the pipeline of GEMM fused with Runtime Smooth can be described as 1. Reorder the activation and weight according to channel-wise maximums of activation; 2. Group up the activation and set the group-wise maximum as smoothing scales; 3. Calculate the matrix multiplication of the tiled block and multiply the runtime scale on the dequantized result, followed by a reduction operation. It is worth noting that, compared with the A4W4 baseline, the extra runtime scale multiplication only brings negligible overhead, which will be discussed in Section \ref{sec: kernel efficiency}.
+
+\subsection{Rotated Runtime Smooth}
+\label{sec: integrate}
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{fig/outlier.pdf}
+  \caption{\small Analysis of rotated activations with different outliers. (a) Activation with channel-wise outliers maintains channel-wise consistency after rotation, hence being sub-smooth for quantization. (b) One spike outlier is spread on its token internal, where the smoothing scale is consistent without abnormal value, further preventing 'victim'.} 
+  \label{fig: intergrate}
+\end{figure}
+In this section, we propose Rotated Runtime Smooth (RRS) to comprehensively eliminate outliers, including both channel-wise and spike outliers. Here, the activations are rotated and subsequently applied Runtime Smooth.
+For activations with channel-wise outliers, it maintains the channel-wise consistency after rotation due to the rotation property, as shown in Figure \ref{fig: intergrate}. Moreover, the rotated activations have a chance to raise the level of outliers with a small probability. Compared with the pure rotation method, RRS comprehensively smooths channel-wise, leading to low quantization error. Compared with Runtime Smooth, RRS is more robust to activations with tiny spikes in the practical scenario.
+As discussed in Section \ref{sec: smoothquant}, the existence of spike outlier is the bottleneck of Runtime Smooth. Figure \ref{fig: intergrate} shows that the spike outliers are spread within tokens after rotation. Hence, the smoothing scales are more consistent across channels, leaving fewer victims since all elements are divided by such a consistent scale. The process can be described as:
+\begin{equation}
+\label{eq: spike}
+\begin{gathered}
+    \mathbf{R} = \frac{1}{\sqrt{K}} {\left[ c_{i,j} \right]}_{K \times K}, \mathbf{t} = [ \varepsilon, \cdots, \varepsilon, O_i, \varepsilon, \cdots, \varepsilon ], \\
+    \mathbf{t}_{rotation} = \mathbf{t} \cdot \mathbf{R} = \frac{1}{\sqrt{K}} [ c_{i, 1} O_i + \varepsilon,  c_{i, 2} O_i + \varepsilon, \cdots, c_{i, K} O_i + \varepsilon ], \\
+    \textup{smooth\_scale} = \max(\left|\mathbf{t}_{rotation}\right|) \approx \frac{1}{\sqrt{K}} [ \left|O_i\right| ,\left| O_i\right| , \cdots, \left|O_i\right| ],
+\end{gathered}
+\end{equation}
+where the $O$ denotes spike outliers and $\varepsilon$ denotes normal values. $s_{i,j} \in \{ -1, +1\}$ denotes the elements in Hadamard rotation matrix. In a practical scenario, the normal values $\varepsilon$ are relatively small compared with spike outliers $O$; hence, they are omitted in the smoothing scale as shown in Equation \ref{eq: spike}. The genesis of victims is the abnormal smoothing scale; hence a more consistent smoothing scale brought by RRS frees 'victims'. Here, we only discuss the scenario where there is only one spike in the token, and we conduct a comprehensive analysis of multiple spikes for real scenarios in Section \ref{sec: spike}.
+We apply RRS to Linear Layers in Transformer blocks. We first offline rotate the weight matrix and insert online rotation operation before output and down projectors following previous works \citep{ashkboos2024quarotoutlierfree4bitinference}. The rotated weights are quantized offline with GPTQ \citep{frantar2022gptq}. During inference, we perform Runtime Smooth on the rotated activations of linear layers and apply activation quantization subsequently. 
+
+
+\section{Experiments}
+
+\label{experiments}
+\subsection{Settings}
+\label{experiments: settings}
+We conduct experiments on mainstream LLMs, including LLaMA families \citep{touvron2023LLaMAopenefficientfoundation} (LLaMA2-13B, LLaMA2-70B, LLaMA3-8B, LLaMA3-70B, LLaMA3.1-8B, LLaMA3.1-70B), Qwen families \citep{yang2024qwen2technicalreport} (Qwen1.5-7B, Qwen1.5-14B), Mistral \citep{jiang2023mistral7b} and Mixtral \citep{jiang2024mixtralexperts}. Activation quantization employs per-channel symmetric scheme with round-to-nearest (RTN) strategy. KV cache quantization employs sub-channel symmetric scheme with group size 128 and round-to-nearest (RTN) strategy. In most cases, weight quantization employ per-channel symmetric scheme with GPTQ \citep{frantar2022gptq} strategy, except for baseline 'RTN'. We apply standard GPTQ settings by using 128 samples from WikiText-2 with a sequence length of 2048 as the calibration set. We evaluate the performance of the models on WikiText-2 perplexity and zero-shot Common Sense QA benchmarks. The Common Sense QA benchmarks include ARC-e, ARC-c \citep{clark2018think}, BoolQ \citep{clark2019boolq}, and OBQA \citep{OpenBookQA2018}. 
+
+\subsection{Main Result}
+Runtime Smooth emphasizes activation smoothing for INT4 inference. The plug-and-play Runtime Smooth operators are employed before activation quantization. We conduct a comparison between Runtime Smooth and SmoothQuant  \citep{xiao2023smoothquant}, demonstrating promising improvement. For instance  LLaMA2-70B: 1e2 -> 6.95, LLaMA3-8B: 8e2 -> 10.47, Qwen1.5-7B: 3e2 ->13.32 under the A4W4KV16 scheme, as shown in Table \ref{tab: wiki}. For certain models like LLaMA3-70B and LLaMA3.1-70B, both Runtime Smooth and SmoothQuant fail for the difficulty of weight quantization. To eliminate the influence of quantization error from weights, we carry out experiments under A4W16KV16 settings. Under the activation-only quantization setting, Runtime Smooth consistently outperforms SmoothQuant and achieves 40x improvement on LLaMA3-8B, validating the effectiveness of Runtime Smooth. Here the group size of the smoothing scale is 1 to observe the upper bound performance.
+\input{table/main_result}
+To further narrow the accuracy gap between INT4 inference and full precision inference, we propose Rotated Runtime Smooth. Here, the group size of the smoothing scale is set to 128, which is identical to the GEMM block size, enabling efficient implementation. Compared with the state-of-the-art, QuaRot, Rotated Runtime Smooth consistently outperforms across different model sizes and model families. In most instances, Rotated Runtime Smooth achieves a 0.1 - 0.3 improvement in WikiText-2 perplexity.
+
+It is noteworthy that on LLaMA3-70B, Rotated Runtime Smooth reduces perplexity from 57.33 to 6.66 under the A4W4KV16 setting and from 49.76 to 6.87 under the A4W4KV4 setting. Notably, 57.33 and 49.76 are abnormal results. Hence, we analyze outliers from rotated LLaMA3-70B and LLaMA3.1-70B. The distribution of outliers is similar for the two models. More details are provided in Section \ref{sec: u_stat}. This indicates that models have different sensitivities to outliers. Further suppressing the outliers can enhance robustness.
+
+\input{table/table2}
+\input{table/spinquant_table}
+We also conduct a comparison between the proposed approaches and the state-of-the-art methods on the zero-shot common sense QA task, as presented in Table \ref{tab: csqa}. The Rotated Runtime Smooth consistently surpasses the baseline by approximately 3\% in terms of average accuracy improvement. In certain cases, LLaMA3-8B and LLaMA3.1-8B, Runtime Smooth outperforms QuaRot. The latter requires complex online Hadamard rotation as described in \citep{ashkboos2024quarotoutlierfree4bitinference}.
+
+\subsection{Comparison with training-based Method}
+SpinQuant \citep{liu2024spinquantllmquantizationlearned} suggests that diverse Rotation matrices exhibit variations in their impact of smoothing. Consequently, it substitutes the origin fix Rotation matrix with a trainable Rotation matrix and trains the rotated network. The training process is time-consuming, taking 1.5 hours for a 7B model on one A100 GPU and 12 hours for 70B models on eight A100 GPUs. We re-implement SpinQuant and compare it with our method as shown in Table \ref{tab: spinquant}. It is noteworthy that SpinQuant applies asymmetric quantization to activation and KV cache. We experiment with our method under the same settings. The result reveals that the training-based method degrades WikiText-2 perplexity compared to the training-free method. This suggests that the current technique for optimizing the rotation matrix still has room for improvement.
+\input{table/group_ab}
+
+\subsection{Ablation Study}
+We conduct an ablation study on the group size of runtime smoothing scale for Mistral, Qwen1.5-7B, and LLaMA3.1-8B, as presented in \ref{tab: group_ab}. Runtime Smooth can effectively minimize the gap between A4W4 and full precision through a subtle group strategy. However, the accuracy deteriorates as the group size increases. Rotated Runtime Smooth employs the rotation technique to minimize the gap between outliers and normal values, thereby being robust to the coarse group scheme and enabling the implementation of the fused kernel. It should be noted that in Qwen1.5-7B, the size of the input activation for Down\_projector is 11008, which does not support a group size of 512.
+
+\subsection{Efficiency evaluation}
+We evaluate the GEMM kernel fused with Runtime Smooth on NVBench \citep{nvidia_nvbench} with RTX 4070 Ti, as shown in Figure \ref{fig: efficiency}. The group size of the smoothing scale is 128, the same as the block size of the GEMM kernel. We implement Per-Channel A4W4 and Sub-Channel A4W4 as baselines. Compared with Per-Channel A4W4, Runtime Smooth fused Kernel brings limited overhead, including the movement of the smoothing scale (shape of [1, K]) and a multiplication between matrix and scalar. Sub-Channel A4W4 brings noticeable overhead, including the movement of group-wise quantization scale (shape of [N, L] and [M, L]) and multiplication between matrices. Hence, across different batch sizes and hidden dimensions, Runtime Smooth fused Kernel brings negligible overhead compared with A4W4 Per-Channel quantization, which is also the setting of QuaRot and SpinQuant.
+
+\label{sec: kernel efficiency}
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{fig/nvbench.pdf}
+  \caption{Performance evaluation of different quantization approaches. We set up the evaluation configuration aligned with the LLaMA-7b configuration and 1024 sequence length. Kernels are evaluated by NVBench} 
+  \label{fig: efficiency}
+\end{figure}
+
+
+\section{Related Work}
+
+\subsection{Large language models.}
+Pre-trained language models have achieved remarkable progress through scaling. Open-source large language models (LLMs) can reach up to 405 billion parameters and offer promising few-shot/zero-shot results. The mainstream LLMs \citep{yang2024qwen2technicalreport,touvron2023llama,deepseekai2024deepseekv2strongeconomicalefficient,jiang2023mistral7b} continuously provide models with large scales and enhanced capabilities. However, serving large language models for inference becomes costly and challenging as the models expand.
+
+\subsection{Model quantization.}
+Quantization represents an effective approach for reducing model size and expediting inference. From a serving perspective, quantization can be classified into weight-only quantization and weight-activation quantization. Weight-only quantization compression employs low-bit representations for weight matrices, thereby saving memory movement in memory-bound scenarios, specifically the decoding stage. GPTQ \citep{frantar2022gptq} used 4-bit to quantize the weight based on the approximate second-order information. SqueezeLLM \citep{kim2023squeezellm} handled outliers through non-uniform quantization and used a sparse format to keep outliers and sensitive weights at high precision. AWQ \citep{lin2023awq} further advanced accuracy by preserving salient weights. QFA \citep{yi2024quantllmallfinetuningquantized} fine-tune a supernetwork encompassing multiple mixed precision configurations and efficiently offer high-performance sub-networks for diverse scenarios. QuiP \citep{chee2024quip2bitquantizationlarge,tseng2024quipbetterllmquantization} successfully represents weights using 2 bits via an adaptive rounding method. Weight-activation quantization can further accelerate computation by leveraging a low-bit GEMM kernel suitable for compute-bound scenarios, namely the pre-filling stage. SmoothQuant \citep{xiao2023smoothquant} pushes the quantization scheme to A8W8, achieving speed up and maintaining accuracy. Qserve \citep{lin2024qservew4a8kv4quantizationcodesign} further implement the A8W4KV4 and better accelerate. Among weight-activation quantization methods, the existence of outliers presents the most formidable problem, as it can result in substantial drops in accuracy.
+
+\subsection{Outliers Challenge.}
+Outliers can expand the quantization range and compress the information intensity for normal values. LLM.int8() \citep{dettmers2022llmint88bitmatrixmultiplication} employs mixed INT8/FP16 decomposition to handle activation outliers. Nevertheless, such an implementation results in significant latency overhead and can even be slower than FP16 inference. Subsequent work \citep{yuan2023rptqreorderbasedposttrainingquantization} rearranges the channels to reduce the variance within one quantization group, further enhancing accuracy. Atom \citep{zhao2024atom} integrates the reorder technique and mixed INT4/INT8 precision to maintain accuracy and accelerate compared to the FP16 baseline. In addition to the reorder and mixed-precision techniques, SmoothQuant \citep{xiao2023smoothquant} exchanges outliers between weights and activations to find an optimal point that shares appropriate outliers in weights and activations, achieving A8W8 inference with minimal accuracy degradation. However, the outlier sharing scheme may not be suitable for the extreme A4W4 setting. To further smooth outliers, QuaRot \citep{ashkboos2024quarotoutlierfree4bitinference} pairwise rotates the activation and weight to suppress outliers and maintain output equalization, enabling INT4 inference with well-smoothed activations.
+
+
+\section{Conclusion}
+
+This work presents Rotated Runtime Smooth, a plug-and-play runtime activation smoother that facilitates INT4 inference. In Rotated Runtime Smooth, Runtime Smooth effectively eliminates channel-wise outliers. Additionally, rotation operations migrate the negative impact from spike outliers. Rotated Runtime Smooth can be easily implemented with negligible overhead and is generalized across various large language models (LLMs). Through comprehensive elimination of channel-wise and spike outliers, Rotated Runtime Smooth achieves significant enhancement compared to the prior channel-wise smoothing approach and outperforms state-of-the-art methods on diverse models for INT4 inference.
+
+\clearpage
+
+
+
+

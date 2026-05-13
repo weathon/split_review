@@ -1,0 +1,392 @@
+\title{Think before you speak: Training Language Models With Pause Tokens}
+
+\begin{abstract}
+Transformer-based language models generate responses by producing a series of tokens in immediate succession: the $(K+1)^{\rm th}$ token is an outcome of manipulating $K$ hidden vectors per layer, one vector per preceding token. What if instead we were to let the model manipulate say, $K+10$ hidden vectors, before it outputs the $(K+1)^{\rm th}$ token? We operationalize this idea by performing
+ training and inference on language models with a (learnable) \emph{pause} token, a sequence of which is appended to the input prefix. We then delay extracting the model's outputs until the last pause token is seen, thereby allowing the model to process extra computation before committing to an answer. We empirically evaluate \textit{pause-training} on decoder-only models of 1B and 130M parameters with causal pretraining on C4, and on downstream tasks covering reasoning, question-answering, general understanding and fact recall. Our main finding is that inference-time delays show gains on our tasks when the model is both pretrained and finetuned with delays. For the 1B model, we witness gains on eight  tasks, most prominently, a gain of $18\%$ EM score on the QA task of SQuAD, $8\%$ on CommonSenseQA and $1\%$ accuracy on the reasoning task of GSM8k. Our work raises a range of conceptual and practical future research questions on making {delayed} next-token prediction a widely applicable new paradigm.
+ 
+ 
+ 
+ 
+ 
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer-based {causal} language models generate tokens one after the other in immediate succession. To generate the $(K+1)^{\rm th}$ token, the model consumes the $K$ previous tokens, and 
+proceeds layer by layer, computing $K$ intermediate vectors in each hidden layer. Each vector in itself is the output of a module (consisting of self-attention and multi-layer-perceptrons) operating on the previous layer's output vectors. However sophisticated this end-to-end process may be, it abides by a peculiar constraint: the number of  operations determining the next token is limited by the number of tokens seen so far.
+Arguably, this was the most natural design choice when the Transformer
+was first conceived by \cite{vaswani2023attention}. But in hindsight, one may wonder whether for some inputs, the $(K+1)^{\rm th}$ token demands $K+M$ Transformer operations in each layer (for $M > 0$), which cannot be met by the arbitrarily constrained $K$ operations per layer. This paper explores one way to free the Transformer of this arbitrary per-layer computational constraint. %
+
+The approach we study is to append dummy tokens into a decoder-only model's input, thereby  \textit{delaying} the model's output. Specifically, we select a (learnable) pause token (denoted \pause{}) and append one or more copies of \pause{} as a sequence to the input.  We simply ignore the model's corresponding outputs until the last \pausetokennospace{} is seen, after which we begin extracting its response. Crucially, we consider injecting such delays not just at inference, but also during downstream finetuning (see Fig~\ref{fig:title_fig}) and pretraining (see Fig~\ref{fig:pre-training}, which provides additional technical details). 
+
+\emph{A-priori}, it is unclear what this simple change would bring about in practice. Optimistically, the Transformer may take advantage of a ``wider'' computational pathway induced by the delay. A more mundane outcome though would be that the model simply  skips any delays introduced  by the \pausetokensnospace. After all, neither do the \pausetokens provide any additional information during inference, \textit{nor are there sufficiently many new parameters} (barring the few embedding parameters of the single \pausetokennospace) that can encode any additional information from training data. Worse still, these uninformative tokens may  drown out informative signals, and hurt the model.
+
+
+Partial answers to this question can be found in the literature, motivated somewhat differently. To understand where the benefits of chain-of-thought \citep{wei2023chainofthought} come from, \citet{lanham2023measuring} append dummy thoughts in the form of periods (`...'), but only during inference.  This, they report, does not help. Presumably, an off-the-shelf model may not have \textit{learned} to utilize the new computational pathways offered by the inference-time delay. 
+\cite{burtsev2020memory} 
+learn with  \textit{prepended} dummy tokens, with the orthogonal motivation of adding memory (rather than extending computation). They train with these tokens only on the target task, and observe minimal performance gains.
+
+
+
+
+\begin{figure*}[t]
+\centering
+  \begin{subfigure}[t]{0.44\linewidth}\adjincludegraphics[trim={0 3.5em {0.0\width} 0},clip,padding={0 0 2.1em 0},width=\textwidth]{figures/StdFT_v5.pdf}
+\caption{Standard inference and finetuning}
+\label{}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.55\linewidth}\adjincludegraphics[trim={{0.13\width} 3.5em 0 0},clip,width=\textwidth]{figures/PauseFT_v5.pdf}
+\caption{Pause-inference and finetuning}
+\label{}
+\end{subfigure}
+\caption{\textbf{Standard vs. pause-inference (and finetuning)}. 
+We consider a downstream task where, given a prefix, the decoder-only model (bidirectionally) attends to all of the prefix to generate its target answer.  The rounded squares denote one Transformer operation (a self-attention and MLP) in a 2-layer Transformer. Any {\color{deepcarrotorange} \bf \texttt{Ignore Output}} denotes that during inference, the corresponding output token is not extracted and thus, not fed back autoregressively; during finetuning, this output is not backpropagated through. 
+The connecting lines denote some (not all) of the ``computational pathways'' within the model. Specifically, we visualize only those pathways that begin at a specific token in the prefix (here arbitrarily chosen to be ``\texttt{4 is}'') and end at an output token (here arbitrarily chosen to be ``\texttt{25+}''). All differences between the two settings are highlighted in \textcolor{deepcarrotorange}{color}.
+(a) In standard inference (finetuning), the model's output is extracted immediately upon seeing the last prefix token. (b) In pause-inference (and pause-finetuning), this is initiated only after appending a manually specified number of \pausetokensnospace. This introduces new computational pathways (\textcolor{deepcarrotorange}{the colored lines}) between the prefix token and the output token of interest. %
+}
+ \label{fig:title_fig}
+\end{figure*}
+
+What then can we hope for when injecting (appended) delays on all stages of training and inference? Our work empirically evaluates this, and  other key questions that come up when training the Transformer with delays. For this, we study pause-training on a 1B and 130M parameter decoder-only model, trained on C4~\citep{2019t5} and finetuned on nine downstream tasks spanning extractive question answering, reasoning, general understanding and fact recall. In summary, we make the following contributions: 
+
+\begin{enumerate}[leftmargin=16pt,label=(\arabic*),itemsep=0pt,topsep=0pt]
+    \item We pose the question of \textit{what happens if we delay a model's answer generation, and how can we execute these delays?} We design one way: training with dummy \pause{} tokens. Accordingly, we design a pause-injected pretraining, downstream finetuning, and inference procedure.
+    
+    \item We find that on a variety of  downstream tasks, training models with \pausetokens during both pretraining and downstream finetuning, exhibits clear gains compared to standard end-to-end training and inference. Most notably, for the 1B model, in the SQuAD extractive question-answering task, this approach improves the exact match score by $18\%$. Similarly we observe $8\%$ gains on the general understanding task of CommonSense QA and $1\%$ accuracy gain on the reasoning task of GSM8k over the standard model's accuracy of $7.5\%$.
+    \item On the flip side, when we introduce \pausetokens only in the downstream finetuning stage (on the standard pretrained model), we find that the gains show up in far fewer instances, and are relatively mild. In some instances, we even find a clear drop in performance. %
+    
+    \item We also conduct a series of key ablations: (a) We find that  {\em appending} \pausetokensnospace{} is largely better than {\em prepending} them, (b) perhaps unsurprisingly, for any downstream task, there is a corresponding optimal number of \pausetokensnospace, and (c) 
+    when decreasing the number of inference-time \pausetokensnospace, we find a graceful degradation of performance even though pause-training does not explicitly train for such robustness. 
+    
+    
+    
+\end{enumerate}
+
+Overall, our work explores the new paradigm of delayed next-token generation in Transformer models, and finds that there \textit{are} benefits to this simple change, {provided} the change is implemented both during pretraining and finetuning. Our preliminary step here inspires a variety of conceptual and practical future research questions, ranging from understanding how Transformer delays work mechanistically, to making pause-training more generally applicable for practice. %
+
+
+
+
+\section{Preliminaries}
+
+\label{sec:prelim}
+We briefly outline the next-token prediction process in a standard causal decoder-only language model (details in \S\ref{app:prelim}). Consider a vocabulary $\mathcal{V}$ and an input $\mathbf{p}_{1:K} \in \mathcal{V}^K$ of $K$ tokens.
+Let $f$ denote a Transformer-based language model, from which we sample the next token as $p_{K+1}\sim f(\mathbf{p}_{1:K})$. To achieve this, internally,
+each layer $l\in[1,L]$ of the Transformer produces an intermediate vector $\embeddingvector_k^{(l)}$ corresponding to each input token. The next token, i.e., $p_{K+1}$ is then sampled from a distribution inferred from the last vector in the last layer, $\embeddingvector^{(L)}_K$. 
+
+On a high level, each layer in the above process can be represented as a function $T: \mathbb{R}^{D \times K} \to \mathbb{R}^{D \times K}$. Its input is a matrix of $K$ vectors, $\embeddingmatrix_{1:K} = \left[\embeddingvector_1,  \hdots, \embeddingvector_K \right]$, and likewise, the output, $\embeddingmatrix'_{1:K}$. 
+This mapping itself involves two key (parameterized) modules. The first is the attention module $\Phi_{\rm Attn}$ which takes as inputs two matrices $V_{\rm key}, V_{\rm value} \in \mathbb{R}^{D \times N}$ (for any $N$) and a ``query'' vector $\embeddingvector \in \mathbb{R}^{D}$ to produce an output vector in $\mathbb{R}^{D}$. This is followed by a feedforward module $f_{\rm FF}: \mathbb{R}^D \to \mathbb{R}^{D}$. Then, given the inputs $\embeddingvector_k$, and given the layer-norm module $\Phi_{\rm LN}: \mathbb{R}^{D} \to \mathbb{R}^{D}$,  the outputs $\embeddingvector_k'$ for $k \leq K$ can be expressed as: 
+\begin{align}
+     \attentionvector_{k} &= \Phi_{\rm LN}\left(\Phi_{\rm Attn}(V_{1:k}, V_{1:k}, \embeddingvector_k) +\embeddingvector_k\right) \\ 
+     \embeddingvector'_{k} &= \Phi_{\rm LN}\left(\Phi_{\rm FF}(\attentionvector_k) + \attentionvector_k\right).
+\end{align}
+Observe here that the $k^{\rm th}$ output $\embeddingvector'_k$ is obtained by manipulating exactly the $k$ previous hidden embeddings in the same layer, $V_{1:k}$. 
+
+
+\section{Pause-training}
+
+\label{sec:method}
+
+In the current paradigm of language models,
+ we compute exactly $K$ embeddings $\embeddingvector_1, \hdots \embeddingvector_K$ in each layer, before generating the $(K+1)^{\rm th}$ token, $p_{K+1}$. Our premise is that this limit of $K$ operations is an arbitrary one. Instead, we wish to expend more than $K$ operations towards producing the next token, $p_{K+1}$. While something to this effect could be achieved by increasing the number of attention heads in each layer, we are interested in an orthogonal approach that introduces hardly any
+ parameters into the network. The idea is to
+ synthetically increase the input sequence length by appending $M$ dummy tokens  to the input,
+ thus delaying the model's next response by $M$ tokens of input. In effect, this $M$-token-delay lets the model manipulate an additional set of $M$ intermediate vectors $\embeddingvector_{K+1}, \hdots, \embeddingvector_{K+M}$ before committing to its next (output) token, $p_{K+1}$. Intuitively,  these vectors {could} provide a richer representation of the input (e.g., by attending differently), thus resulting in a better next token from the model. We visualize this in Figure~\ref{fig:title_fig}.
+ 
+
+
+
+
+
+\subsection{Learning and inference with the \pausetoken}
+\label{sec:learning_pause}
+
+A simple choice for the dummy tokens are special characters such as `.' or `\#', as  \citet{lanham2023measuring} chose for inference. 
+But to prevent the model from confounding the role of delays with the role the above characters play in natural language, we choose a \emph{single} \pausetoken residing outside of the standard vocabulary. To impose multi-token delays, we simply repeat this token.
+Building on this core idea, below we discuss our specific techniques for pause-pretraining and pause-finetuning. %
+
+
+\begin{figure*}[t!]
+\centering
+  \begin{subfigure}[t]{0.45\linewidth}\adjincludegraphics[trim={0 0 0 0},clip,margin={0 0 {0.06\width} 0},width=\textwidth]{figures/StdPT_v5.pdf}
+\caption{Standard pretraining}
+\label{fig:pre-training_without_pause}
+  \end{subfigure}
+\begin{subfigure}[t]{0.52\linewidth}
+  \adjincludegraphics[trim={{0.15\width} 0 0 0},clip,margin={{0.06\width} 0 0 0},width=\linewidth]{figures/PausePT_v5.pdf}
+  \caption{Pause-pretraining}
+\label{fig:pretraining_with_pause}
+\end{subfigure}
+
+\caption{\textbf{Standard vs. pause-pretraining}. 
+We consider pretraining based on causal language modeling, where each token is predicted given all preceding tokens in the sequence, using unidirectional self-attention. Here, we visualize the computational pathways beginning from the token ``{\texttt{is}}'' on the input side of the decoder-only model, to a subsequent token ``{\texttt{soccer}}'' on the output side. Please see Figure~\ref{fig:title_fig} for a guide on how to follow this  visualization. 
+(a) In standard pretraining, we compute the model's loss at  each output token, and backpropagate through it. (b) In pause-pretraining, we insert multiple copies of \pausetokens at uniformly random locations in the input. However, we do not apply a loss on the model to predict these tokens, as indicated by each corresponding {\color{deepcarrotorange}\bf  \texttt{Ignore Output}} flags. This introduces new computational pathways connecting the input token and the output token of interest.}
+ \label{fig:pre-training}
+\end{figure*}
+
+\paragraph{Pretraining with the \pausetokennospace} The sequences in our pretraining data do not come with an annotation of which suffix constitutes the answer, since every input token also functions as a target output. Thus, it is impossible to execute the simple delaying strategy of appending dummy tokens before extracting the answer. Therefore, for a given pretraining sequence $\mathbf{p}_{1:N}$, we insert multiple \pausetokens (say $M_{\rm pt}$ many) at uniformly \textit{random} locations to obtain a pause-injected sequence, $\tilde{\mathbf{p}}_{1:N+M_{\rm pt}}$. We visualize this in Figure~\ref{fig:pretraining_with_pause}.
+We then train the model with the standard next-token prediction loss on this pause-injected sequence, while ignoring any loss term that corresponds to predicting the pause tokens themselves. Formally, let $\pauseloc = \{ k \colon \tilde{p}_{k+1}=\texttt{<pause>} \}$ denote the positions where the \textit{next} token is a \pausetokennospace. 
+Then, for the decoder-only language model $f$, the pause-training loss is given by:
+\begin{equation}
+    \mathcal{L}_{\rm PausePT}(f, \tilde{\mathbf{p}}_{1:N+M_{\rm pt}}) = \sum_{\substack{k=1 \\ k\notin\pauseloc}}^{N+M_{\rm pt}-1}\mathcal{L}_{\rm CE}(\tilde{p}_{k+1}, f(\mathbf{\tilde{p}}_{1:k})),
+\end{equation}
+where $\mathcal{L}_{\rm CE}$ denotes the cross-entropy loss. Observe that the loss is skipped over indices in $\pauseloc$. The rationale is that, we only want to use the \pausetokens as a way of enforcing a delay in the model's computation; demanding that the model itself produce these tokens, would only be a pointless distraction. 
+Finally, as is standard, we update the parameters of both the model and of all the tokens, including those of the \pausetokennospace. We term this \textit{pause-pretraining} (Algorithm~\ref{alg:pretrain}).
+
+
+
+\paragraph{Finetuning with the \pausetokennospace} In downstream finetuning, we are given a prefix $\mathbf{p}_{1:N}$ annotated with a target $\mathbf{t}_{1:T}$. Here, we append $M_{\rm ft}$ copies of the \pausetoken to $\mathbf{p}_{1:N}$, to create our new prefix, $\tilde{\mathbf{p}}_{1:N+M_{\rm ft}}$. We visualize how this introduces new computational pathways in Figure~\ref{fig:title_fig}. 
+As before, we ignore the model's outputs until the last \pausetoken is seen. We apply the standard next-token prediction loss on the target with the new prefix, thus minimizing $\sum_{k=0}^{T-1} \mathcal{L}_{\rm CE}(t_{k+1} , f([\mathbf{p}_{1:N+M_{\rm ft}}, \mathbf{t}_{1:k}])  )$, where $[ \cdot ]$ denotes the concatenation operation. 
+Note that for any given downstream task, we fix  $M_{\rm ft}$ to be the same across all inputs for that task. We again update both the parameters of the model, and that of the whole vocabulary, including the \pausetokennospace, as is standard. We term this \textit{pause-finetuning} (Algorithm~\ref{alg:finetune}).
+\textbf{Pausing during inference} During inference on the downstream task, we append $M_{\rm inf}$ \pausetokensnospace{} to the prefix and as always, we ignore the output of the model until the last \pausetokennospace{} (Figure~\ref{fig:title_fig}). 
+We term this {\em pause-inference} (Algorithm~\ref{alg:inference}). 
+
+
+
+
+
+\subsection{Variants of Pause-Training}
+\label{sec:baselines}
+While pause tokens can be incorporated in either pretraining or finetuning, in our study, we will consider all combinations of this. Our hope is to identify if there are any differences in how each stage of pause-training affects inference-time performance. In total, we study four techniques:
+\begin{enumerate}[leftmargin=16pt]
+    \item Standard Pretraining and Standard Finetuning (\textbf{\StdPTStdFT{}}). %
+    \item Standard Pretraining and Pause-Finetuning (\textbf{\StdPTPauseFT{}}): We train with \pausetokens only during downstream finetuning.  \textit{If} this technique helps, it would promise a practically viable approach for pause-training off-the-shelf models. 
+    \item Pause-Pretraining and Standard Finetuning (\textbf{\PausePTStdFT{}}): Here we introduce \pausetokens{}  during pretraining, but abandon it downstream. This is purely for analytical purposes (See \S\ref{sec:main_results}).
+    
+    \item Pause-Pretraining and Pause-Finetuning (\textbf{\PausePTPauseFT{}}): We
+    inject delays into both stages. %
+\end{enumerate}
+Unless stated otherwise, we use the same number of pauses at inference as finetuning ($M_{\rm inf} = M_{\rm ft}$).
+
+
+
+\section{Experiments}
+
+
+Our main experiments broadly aim to address two questions:
+\begin{enumerate}[label=(\arabic*),leftmargin=16pt]
+    \item Does delaying the model computation 
+    via pausing
+    help (hopefully, due to the wider computational flow), have no effect (since the tokens provide no new information, and substantially no new parameters are added) or hurt (perhaps, by distracting the model with stray tokens)? 
+    \item If at all these delays have any effect, is there a difference in performance when we inject it into the pretraining stage versus finetuning stage versus both?
+\end{enumerate}
+
+
+
+\subsection{Experiment Setup}
+We consider decoder-only models of size  1B and 130M for our main experiments. For our ablations, we stick to the 1B model.
+Both the standard and pause models are pretrained on the C4 English mixture~\citep{2019t5}, using the causal next token prediction objective for a total of 200B tokens (slightly more than 1 epoch on C4).
+For pause-pretraining, we insert the \pausetoken randomly at $10\%$ of the sequence length (2048) positions, and trim the now-longer sequence to its original sequence length.  We then conduct pause-pretraining and standard-pretraining for the same number of total tokens ($200$B). We use a \emph{single} \pausetokennospace{} embedding, effectively increasing the parameter count by 1024 (the token embedding size), a quantity that is dwarfed by the 1 billion total parameter count (the token constitutes a $10^{-6}$ fraction of the model size).
+
+Since we expect different downstream tasks to benefit from a different number of finetuning \pausetokens $M_{\rm ft}$, we run finetuning with $M_{\rm ft}$ (and likewise $M_{\rm inf}$) set to $10$ and $50$ and report the best of these two for our consolidated results. For all the downstream finetuning experiments, we report mean and standard deviation over 5 runs (with the randomness purely from the finetuning stage). We tune the learning rate and batch size for standard end-to-end training, and use the best hyperparameter for all other training variants as well.
+
+\subsection{Downstream datasets}
+We consider nine varied downstream tasks:
+(a) reasoning (GSM8k~\citep{cobbe2021training}), (b) extractive question answering (SQuAD~\citep{rajpurkar2016squad}, CoQA~\citep{reddy-etal-2019-coqa}), (c) general understanding (CommonSenseQA~\citep{talmor-etal-2019-commonsenseqa}, PhysicalIQA~\citep{Bisk2020}), (d) long term context recall (LAMBADA~\citep{paperno2016lambada}), (e) natural language inference (HellaSwag~\citep{zellers2019hellaswag}), and (f) fact recall (WebQuestions~\citep{berant-etal-2013-semantic}, Natural Questions~\citep{47761}). HellaSwag and PhysicalIQA are scoring tasks. We note that our implementation of CommonSenseQA is as a decoding task, and hence we report Exact Match (EM) scores.
+\subsection{Results: Effect of pause-training}
+\label{sec:main_results}
+\begin{figure*}[t!]
+\centering
+  \includegraphics[width=\textwidth]{figures/main_results.pdf}
+\caption{\textbf{Downstream performance for a 1B model.} Injecting delays in both stages of training (\PausePTPauseFT{}) outperforms the standard end-end training \StdPTStdFT{} on our wide variety of tasks (except HellaSwag). In contrast, introducing delays only in the finetuning stage provides only lukewarm gains, and even hurts in GSM8k.
+}
+ \label{fig:all_results}
+\end{figure*}
+
+  We discuss zero-shot results in \S\ref{app:zero-shot}.
+
+\textbf{The benefit of pause-pretraining followed by pause-finetuning (\PausePTPauseFT{}).} Our first core finding is that there are clear gains when \pausetokensnospace{} are introduced during both pretraining and finetuning (\PausePTPauseFT{}), across a majority of the tasks we consider. Overall, this outperforms the standard baseline ({\StdPTStdFT{}}) on eight tasks for the 1B model, and on six tasks for the $130$M model 
+
+Most prominently, for the 1B model on the SQuAD question-answering task, \PausePTPauseFT{} improves over \StdPTStdFT{} by an $18\%$ EM score. Similarly, we observe upto $8\%$ gains on the general understanding task of CommonSenseQA. On the reasoning task of GSM8k, \PausePTPauseFT{} gives an accuracy of $8.5\%$ compared to $7.5\%$ of the standard baseline.
+Similar gains are observed in other tasks like long-term context understanding (LAMBADA) and also on fact recall tasks like WebQA and NaturalQuestion. 
+
+\textbf{The lukewarm effect of pause-finetuning a standard-pretrained model (\StdPTPauseFT{}).} In contrast to the above observations, introducing delays only during downstream finetuning (\StdPTPauseFT{}) gives mixed results. While there are gains on about $5$ benchmarks, they are comparitively less. On the remaining, the performance mirrors (or is worse than) standard training. 
+
+\textbf{Isolating the benefits of pause-pretraining independent of downstream delay  (\PausePTStdFT{}).}
+The gains in \PausePTPauseFT{} may come not only from inference-time delays, but also from better representations learned by pause-pretraining. To isolate the latter effect, we consider \PausePTStdFT{}, where we do not inject delays in the downstream task. Here the gains are clear only in two tasks (CoQA and PhysicalIQA). Thus, we conclude that pause-pretraining improves the representation for a few downstream tasks; conversely, in most tasks, the gains of \PausePTPauseFT{} must come from well-learned delayed computations executed at inference-time.
+
+
+\textbf{Filler characters as \texttt{<pause>}:} For completeness, we also report results for inference on \StdPTStdFT{} models, delayed with $10$ or $50$ periods (`.'). 
+Corroborating the observations of ~\citet{lanham2023measuring}, we find no gains in doing this  (Figure~\ref{fig:filler}).
+
+
+
+ 
+ 
+
+
+Thus, to the core question of our exploration --- whether delays help, hurt or do nothing at all --- we find that the answer depends on when these delays are introduced. Specifically, pause-\textit{pre}training appears crucial for delays to help in downstream inference-time. We conjecture that a standard-pretrained model has strong biases that prevent it from fully realizing the benefits of inference-time delays e.g., standard pretraining biases the model to be ``quick'' in its computations. 
+
+\textbf{Remark:} As a concluding note, we remind the reader that the \PausePTPauseFT{} model has a (deliberately injected) computational advantage compared to \StdPTStdFT{}, during finetuning and inference. However, there is no computational advantage during pause-pretraining since we equalize the number of tokens seen. In fact, this only results in a slight statistical disadvantage: the pause-pretrained model sees only $90\%$ of the (meaningful) pretraining tokens that the standard model sees, as the remaining $10\%$ are dummy \pausetokensnospace. %
+
+
+
+
+
+
+
+\section{Ablations: Where and how many \pausetokensnospace{}
+
+\label{sec:ablations}
+\begin{figure*}[t]
+\centering
+  \begin{subfigure}[t]{0.24\linewidth}\includegraphics[width=\textwidth]{figures/filler_v2.pdf}
+\caption{}
+\label{fig:filler}
+  \end{subfigure}
+\begin{subfigure}[t]{0.24\linewidth}\includegraphics[width=\textwidth]{figures/varyingftpause_gsm.pdf}
+\caption{}
+\label{fig:ablation_varying_mft_gsm}
+\end{subfigure}
+  \begin{subfigure}[t]{0.24\linewidth}\includegraphics[width=\textwidth]{figures/varyinginfpause_gsm.pdf}
+ \caption{}
+\label{fig:ablation_inference_pause_gsm_pausept}
+\end{subfigure}
+\begin{subfigure}[t]{0.24\linewidth}\includegraphics[width=\textwidth]{figures/varyinginfpause_squad.pdf}
+\caption{}
+\label{fig:ablation_inference_pause_squad_stdpt}
+\end{subfigure}
+\caption{\textbf{Key Ablations (\S\ref{sec:ablations}):} (a) We compare a pause-\textit{trained} model vs. a standard model delayed using a filler periods (`...'). As in ~\citet{lanham2023measuring}, the filler periods do not give any gains. (b) There exists an optimal number of finetuning \pausetokens ($M_{\rm ft}$) for a given downstream dataset beyond which gains diminish. (c) and (d) We test the robustness of pause-trained models to varying number of inference time \pausetokens{}(setting $M_{\rm inf}$ not equal to $M_{\rm ft}$), which exposes the model to a serious test-time distribution shift.  Pause-training degrades gracefully to shifts  as wide as $M_{\rm inf} \in [5, 25]$ for $M_{\rm ft} = 10$ both for (c) \PausePTPauseFT{}  and (d) \StdPTPauseFT{}.}
+ \label{fig:results}
+\end{figure*}
+
+\subparagraph{Number of \pausetokens during finetuning} 
+Recall that we append $M_{\rm ft}$ copies of (the same) \pausetoken to the prefix during finetuning.  We find that for each downstream dataset, there is a corresponding optimal value of $M_{\rm ft}$. 
+ 
+Possibly, for each dataset, there exists a certain threshold of \pausetokens beyond which the self-attention mechanism becomes overwhelmed. %
+
+
+\subparagraph{Robustness to a varying number of inference-time pauses} 
+So far, we have set the inference-time delay to be the same as what was seen during finetuning ($M_{\rm inf} = M_{\rm ft}$). Next, we examine what happens if we vary $M_{\rm inf}$ during inference. 
+Note that this presents a severe test-time distribution shift as we provide no supervision for the model until the last \pausetoken (the $M_{\rm ft}^{\rm th}$ one) is seen. Thus the model may very well output garbage if we begin eliciting a response that is either premature ($M_{\rm inf} < M_{\rm ft}$) or belated ($M_{\rm inf} > M_{\rm ft}$).
+Yet, in practice, we find a (somewhat) graceful behavior.
+ This is desirable in case of real-time fluctuations in computational constraints. %
+
+Now, an ideal robustness criterion would be that, in the absence of \textit{any} \pausetokensnospace, the pause-finetuned model performs just as well as a standard-finetuned model. Unfortunately, this isn't the case for any of our models. In fact, for \PausePTPauseFT{},
+ The design of \textit{zero-delay-robust} pause-trained models is thus an important question for future work. 
+
+
+    
+    
+    
+
+\subparagraph{Appending vs. prepending pauses}
+
+In our main experiments, we chose to {append} \pausetokens since it is the most natural format for a general setting e.g., in long-text-generation as in a conversational agent, one would append \pausetokens to the current text  rather than deploying the tokens all at once at the beginning of the conversation.  Furthermore, when there is unidirectional attention, prepending these tokens should make no difference. Nevertheless, in our downstream tasks which use bidirectional attention on the prefix, it makes sense to consider prepending \pausetokensnospace. 
+Most importantly, we find that, for \PausePTPauseFT{}, even prepending the \pausetoken performs improves over standard end-to-end training. However, appending is still the more optimal choice. This indicates that 
+pause-pretraining induces considerable biases in how readily the delays are used based on their positional embeddings.
+
+
+
+
+
+
+
+\section{Discussion and key open questions}
+
+
+
+
+\label{sec:discussion}
+
+\textbf{Enhanced computational width.} One hypothesis as to why Transformer delays can help is that it increases  expressivity by increasing the computational \textit{width}. To produce the $(K+1)^{\rm th}$ token,  standard inference involves a computational depth of $L$ (corresponding to the \textit{sequential} computation of $L$ layers), and a computational width of $K$ (corresponding to the \textit{parallel} $K$ computations per layer).
+With $M$ \pausetokens however,
+we perform $K+M$ parallel computations. We hypothesize that this additional width helps certain downstream tasks. Take for example, comprehension-based question-answering tasks. Here, having a greater number of attention units per layer, would permit a finer distribution of attention across various parts of the supporting context (where the answer resides). We speculate that this would allow the lower layers to extract more precise and diverse representations, which a higher layer can more reliably aggregate to produce a final answer. 
+
+We formalize this in Theorem~\ref{thm:pause} (stated informally below). Our key theoretical insight is that the attention module can have a high ``raw'' parameter-count-based capacity, but low ``implementation capacity'': the number of operations implemented for a given input, which is bottlenecked by the number of tokens. Pause tokens can help relieve this bottleneck and tap into the raw representational capacity. We hope this preliminary result can inspire further discussions on how to formalize the Transformer's implementation capacity and differentiate it from the raw parameter count.
+
+\begin{theorem}(informal; see Theorem~\ref{thm:pause})
+\label{thm:informal-pause} Assume that the attention module
+has sufficiently many parameters $(K)$ that it is much larger than the number of inputs tokens $(L)$. Then there are tasks that involve many independent computations $N$, where $N > L$ (but $N < K$), such that a 2-layer Transformer can implement the task if and only if it uses pause tokens. 
+\end{theorem}
+\textbf{Computational expansion along with parameter expansion.} How do the gains offered by \pausetokens vary with parameter count? An immediate hypothesis would be that for smaller models, delays become {more} beneficial as they provide a much-needed capacity increase in an otherwise capacity-deprived model. But a preliminary comparison between our two model sizes surprisingly suggests the opposite. Intuitively, we conjecture that a smaller model may simply not have enough raw capacity to implement a variety of distinct computations to utilize the new pathways introduced by \pausetokensnospace.  This intuition is also echoed in Theorem~\ref{thm:informal-pause} where smaller models would break our assumption that parameter count $K$ is large enough.
+
+\textbf{Computational expansion vs parameter expansion. } There are trivial ways to extend the next-token computation process, say via more attention heads or more layers. Thus, it is both practically and theoretically remarkable that pause tokens can yield gains despite negligible addition to the parameter count.
+
+
+
+\textbf{Pause-inference vs. Chain-of-Thought.}
+It is worth contrasting the above  computational advantage with that enjoyed by chain-of-thought (CoT) prompting~\citep{wei2023chainofthought}. Here, one prompts the model to generate a long series of intermediate reasoning steps before producing the final answer. Thus, CoT also corresponds to greater computational width, by way of delaying its final answer (albeit with meaningful tokens). However, CoT has a vital added advantage: it also increases the computational {depth} to a significant extent \citep[Theorem 3.3 and 3.4]{feng23cot}. In particular, each (meaningful) delay token generated by CoT is autoregressively generated by the model. Thus, if there are $M$ such tokens and $L$ layers, the final token arises out of roughly $M \cdot L$ sequentially composed operations. Thus, CoT has a computational depth that is larger by a \textit{multiplicative} factor of $M$, compared to pause-inference. Finally, we note that one major advantange of CoT is that it does not seem to require any special modifications in the pretraining objective.
+ 
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+
+
+\subparagraph{Memory tokens} Multiple works have proposed using dummy tokens as a 
+ways of introducing memory into the model. Closest to our work is \citet{burtsev2020memory} 
+who \textit{prepend} these tokens  (rather than append them) and crucially, introduce them only during training and inference on the target tasks. On smaller scratch-trained  models (with parameter counts of $10$M, $65$M and $277$M) and a pretrained BERT model ($109$M), this reportedly gives minimal  gains.  This echoes our own mixed results for the comparable \StdPTPauseFT{} variant, and the fact that our smaller model shows gains on fewer datasets.  Orthogonally, ~\citet{sukhbaatar2019augmenting} introduce a large set of ``global'' memory tokens (of the order of ten million new parameters) across all layers. However, these are 
+independent of the input, and only act as keys and values (not as queries). For vision transformers (ViTs), AdaTape \citep{xue2023adaptive} appends tokens from a learnt memory bank.  Concurrent work in ViTs ~\citep{darcet2023vision}, use multiple different ``register tokens'' appended to the image patches. %
+In the context of recurrent networks,
+closest to us is \citet{herel23thinking} who train with ``thinking'' tokens for extra compute for the target task and find small perplexity gains on reasoning tasks. \cite{grave2016improving} use a memory cache as a way to attend to past hidden vectors.    %
+
+
+\paragraph{Adaptive Compute Transformers}
+{\em Adaptive compute} methods provide users with flexibility in inference time depending on the input to the model. Although adaptive compute is not the objective of this paper (after all, we use the same number of pause tokens across all inputs), pause-inference can be viewed as a potential basis for a future {adaptive compute} method. The Universal Transformer ~\citep{dehghani2019universal} adaptively {increases} \textit{serial} computations by repeating certain layers. 
+~\citet{graves2017adaptive} explored a similar recurrence over hidden units in the context of RNNs.  
+A future adaptive-compute version of pause-inference would fall in a much less explored paradigm that varies the number of input tokens, akin to AdaTape in ViTs \citep{xue2023adaptive}. 
+    
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Conclusion, Limitations and Future Work}
+
+
+Pause-training takes a step 
+ beyond the paradigm of ``immediate'' next-token prediction in language models. The key idea is to {train} models with (dummy) \pausetokens so that the model can learn to harness the additional inference-time computation. This can improve performance on a variety of tasks, \textit{if} we train with \pausetokens both during pretraining and downstream finetuning.  
+
+However, by extension of the fact that every downstream task has an optimal number of \pausetokensnospace, we do not claim that pause-training should benefit every downstream task. Some tasks may simply be better off with zero \pausetokensnospace. The most important limitation though is that the expense of pause-pretraining comes in the way of making this idea more widely accessible. 
+Consequently, we do not study how the gains generalize across more model sizes (beyond $1$B and $130$M), or to encoder-decoder architectures, or to other pretraining mixtures and objectives. Next, while we have laid out some preliminary theory for why \pausetokensnospace{} may be beneficial, we leave a rigorous understanding for future study. We also leave open a variety of follow-up algorithmic questions: pause-training with multiple \textit{different} \pausetokensnospace, better determining the number of \pausetokens (perhaps using model confidence), inducing robustness to shifts in delays, and so on. But the most pressing next step would be to find ways to make delays helpful directly on a standard pretrained model. Overall, we hope that our work opens up many avenues for theoretical and practical work in the paradigm of {delayed} next-token prediction.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\textbf{Acknowledgements}: We would like to thank Kaifeng Lyu, Srinadh Bhojanapalli,  Yongchao Zhou, Nikunj Saunshi, and Seungyeon Kim for helping set up the initial codebase and for their guidance. 
+
+
+
+\clearpage
+
+
+
+
+

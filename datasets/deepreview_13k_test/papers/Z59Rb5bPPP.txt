@@ -1,0 +1,291 @@
+\title{Trajeglish: Traffic Modeling as Next-Token Prediction}
+
+\begin{abstract}
+A longstanding challenge for self-driving development is simulating dynamic driving scenarios seeded from recorded driving logs. 
+In pursuit of this functionality, we apply tools from discrete sequence modeling to model how vehicles, pedestrians and cyclists interact in driving scenarios.
+Using a simple data-driven tokenization scheme, we discretize trajectories to centimeter-level resolution using a small vocabulary. We then model the multi-agent sequence of discrete motion tokens with a GPT-like encoder-decoder that is autoregressive in time and takes into account intra-timestep interaction between agents.
+Scenarios sampled from our model exhibit state-of-the-art realism; our model tops the Waymo Sim Agents Benchmark, surpassing prior work along the realism meta metric by 3.3\% and along the interaction metric by 9.9\%. We ablate our modeling choices in full autonomy and partial autonomy settings, and show that the representations learned by our model can quickly be adapted to improve performance on nuScenes.
+We additionally evaluate the scalability of our model with respect to parameter count and dataset size, and use density estimates from our model to quantify the saliency of context length and intra-timestep interaction for the traffic modeling task.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+In the short term, self-driving vehicles will be deployed on roadways that are largely populated by human drivers. For these early self-driving vehicles to share the road safely, it is imperative that they become fluent in the ways people interpret and respond to motion. A failure on the part of a self-driving vehicle to predict the intentions of people can lead to overconfident or overly cautious planning. A failure on the part of a self-driving vehicle to communicate to people its own intentions can endanger other road users by surprising them with uncommon maneuvers.
+
+In this work, we propose an autoregressive model of the motion of road users that can be used to simulate how humans might react if a self-driving system were to choose a given sequence of actions. At test time, as visualized in Fig.~\ref{fig:inpout}, the model functions as a policy, outputting a categorical distribution over the set of possible states an agent might move to at each timestep. Iteratively sampling actions from the model results in diverse, scene-consistent multi-agent rollouts of arbitrary length.
+We call our approach Trajeglish (``tra-JEG-lish'') due to the fact that we model multi-agent \textit{traje}ctories as a sequence of discrete tokens, similar to the representation used in language modeling, and to make an analogy between how road users use vehicle motion to communicate and how people use verbal languages, like En\textit{glish}, to communicate.
+
+A selection of samples from our model is visualized in Fig.~\ref{fig:teaser}. When generating these samples, the model is prompted with only the initial position and heading of the agents, in contrast to prior work that generally requires at least one second of historical motion to begin sampling. Our model generates diverse outcomes for each scenario, while maintaining the scene-consistency of the trajectories. We encourage readers to consult our \href{https://research.nvidia.
+
+Our main contributions are:
+\begin{itemize}
+    \item A simple data-driven method for tokenizing trajectory data we call ``k-disks'' that enables us to tokenize the Waymo Open Dataset (WOMD) \citep{womd} at an expected discretization error of 1 cm using a small vocabulary size of 384.
+    \item A transformer-based architecture for modeling sequences of motion tokens that conditions on map information and one or more initial states per agent. Our model outputs a distribution over actions for agents one at a time which we show is ideal for interactive applications.
+    \item State-of-the-art quantitative and qualitative results when sampling rollouts given real-world initializations both when the traffic model controls all agents in the scene as well as when the model must interact with agents outside its control.
+\end{itemize}
+
+We additionally evaluate the scalability of our model with respect to parameter count and dataset size, visualize the representations learned by our model, and use density estimates from our model to quantify the extent to which intra-timestep dependence exists between agents, as well as to measure the relative importance of long context lengths for traffic modeling (see Sec.~\ref{ssec:densityexper}).
+
+\subsection{Related Work}
+\label{sec:related}
+Our work builds heavily on recent work in imitative traffic modeling. The full family of generative models have been applied to this problem, including VAEs \citep{trafficsim,strive}, GANs \citep{symphony}, and diffusion models \citep{diffusion,jiang2023motiondiffuser}. While these approaches primarily focus on modeling the multi-agent joint distribution over future trajectories, our focus in this work is additionally on building reactivity into the generative model, for which the factorization provided by autoregression is well-suited. For the structure of our encoder-decoder, we draw inspiration from Scene Transformer \citep{scenetransformer} which also uses a global coordinate frame to encode multi-agent interaction, but does not tokenize data and instead trains their model with a masked regression strategy. A limitation of regression is that it's unclear if the Gaussian or Laplace mixture distribution is flexible enough to represent the distribution over the next state, whereas with tokenization, we know that all scenarios in WOMD are within the scope of our model, the only challenge is learning the correct logits. A comparison can also be made to the behavior cloning baselines used in Symphony \citep{symphony} and ``Imitation Is Not Enough'' \citep{imitationnotenough} which also predict a categorical distribution over future states, except our models are trained directly on pre-tokenized trajectories as input, and through the use of the transformer decoder, each embedding receives supervision for predicting the next token as well as all future tokens for all agents in the scene.
+In terms of tackling the problem of modeling complicated continuous distributions by tokenizing and applying autoregression, our work is most similar to Trajectory Transformer \citep{trajtransformer} which applies a fixed-grid tokenization strategy to model state-action sequences for RL. Finally, our work parallels MotionLM \citep{motionlm} which is concurrent work that also uses discrete sequence modeling for motion prediction, but targets 1- and 2-agent online interaction prediction inistead of $N$-agent offline closed-loop simulation.
+
+
+
+\begin{SCfigure}
+  \centering
+  \includegraphics[width=0.485\linewidth]{imgs/paper0000_058}  
+\caption{\textbf{Inputs and outputs} At a given timestep, our model predicts a distribution over a fixed set of $V$ states defined relative to an agent's current location and heading, and conditions on map information, actions from all previous timesteps (green), and any actions that have already been chosen by other agents within the current timestep (blue). We model motion of all agents relevant to driving scenarios, including vehicles, pedestrians, and cyclists.}
+\label{fig:inpout}
+\end{SCfigure}
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/demoplot}
+\includegraphics[width=\linewidth]{imgs/demoplot3}
+\end{center}
+\caption{\footnotesize\textbf{Trajeglish} Visualizations of samples from our model. Rollouts within each row are given the same single-timestep initialization, outlined in black. Future trajectories become lighter for timesteps farther into the future. Note that while some tracks overlap in the figure, they do not overlap when time is taken into account; there are no collisions in these rollouts. Videos are available on our \href{https://research.nvidia.}
+\label{fig:teaser}
+\end{figure}
+
+
+
+\section{Imitative Traffic Modeling}
+
+\label{sec:motivation}
+In this section, we show that the requirement that traffic models must interact with all agents at each timestep of simulation, independent of the method used to control each of the agents, imposes certain structural constraints on how the multi-agent future trajectory distribution is factored by imitative traffic models. Similar motivation is provided to justify the conditions for submissions to the WOMD sim agents benchmark to be considered valid closed-loop policies \citep{montali2023waymo}.
+
+We are given an initial scene with $N$ agents, where a \textit{scene} consists of map information, the dimensions and object class for each of the $N$ agents, and the location and heading for each of the agents for some number of timesteps in the past. For convenience, we denote information about the scene provided at initialization by $\bm{c}$.
+We denote the \textit{state} of a vehicle  $i$ at future timestep $t$ by  $\vs_t^i \equiv (x^i_t,y^i_t,h^i_t)$ where $(x,y)$ is the center of the agent's bounding box and $h$ is the heading. For a scenario of length $T$ timesteps, the distribution of interest for traffic modeling is given by
+\begin{align}
+\label{eq:multiagent}
+p(\bm{s}_1^1,...,\bm{s}_1^N,\bm{s}_2^1,...,\bm{s}_2^N,...,\bm{s}_T^1,...,\bm{s}_T^N \mid \bm{c}).
+\end{align}
+
+We refer to samples from this distribution as \textit{rollouts}. In traffic modeling, our goal is to sample rollouts under the restriction that at each timestep, a black-box autonomous vehicle (AV) system chooses a state for a subset of the agents. We refer to the agents controlled by the traffic model as ``non-player characters'' or NPCs. This interaction model imposes the following factorization of the joint likelihood expressed in Eq.~\ref{eq:multiagent}
+\begin{align}
+\begin{split}
+\label{eq:factor}
+&p(\bm{s}_1^1,...,\bm{s}_1^N,\bm{s}_2^1,...,\bm{s}_2^N,...,\bm{s}_T^1,...,\bm{s}_T^N \mid \bm{c}) \\ 
+&= \prod_{1 \leq t \leq T} p(\bm{s}_t^{1...N_0} | \bm{c}, \bm{s}_{1...t-1}) \underbrace{p(\bm{s}^{N_0+1...N}_{t} \mid \bm{c}, \bm{s}_{1...t-1}, \bm{s}_t^{1...N_0})}_{\text{NPCs}}
+\end{split}
+\end{align}
+where $\bm{s}_{1...t-1} \equiv \{\bm{s}_1^1,\bm{s}_1^2,...,\bm{s}_{t-1}^N\}$ is the set of all states for all agents prior to timestep $t$, $\bm{s}^{1...N_0}_t \equiv \{\bm{s}_t^1,...,\bm{s}_{t}^N\}$ is the set of states for agents 1 through $N$ at time $t$, and we arbitrarily assigned the agents out of the traffic model's control to have indices $1,...,N_0$. The factorization in~Eq.~\ref{eq:factor} shows that we seek a model from which we can sample an agent's next state conditional on all states sampled in previous timesteps as well as any states already sampled at the current timestep.
+
+ While intra-timestep interaction between agents is weak in general, explicitly modeling this interaction provides a window into understanding cases when it is important to consider for the purposes of traffic modeling.
+
+
+
+
+
+
+
+\section{Method}
+
+
+In this section, we introduce Trajeglish, an autoregressive generative model of dynamic driving scenarios. Trajeglish consists of two components. The first component is a strategy for discretizing, or ``tokenizing'' driving scenarios such that we model exactly the conditional distributions required by the factorization of the joint likelihood in Eq.~\ref{eq:factor}. The second component is an autoregressive transformer-based architecture for modeling the distribution of tokenized scenarios.
+
+Important features of Trajeglish include that it preserves the dynamic factorization of the full likelihood for dynamic test-time interaction, it accounts for intra-timestep coupling across agents, and it enables both efficient sampling of scenarios as well as density estimates. While sampling is the primary objective for traffic modeling, we show in Sec.~\ref{ssec:densityexper} that the density estimates from Trajeglish are useful for understanding the importance of longer context lengths and intra-timestep dependence. We introduce our tokenization strategy in Sec.~\ref{ssec:tokenization} and our autoregressive model in Sec.~\ref{ssec:modeling}.
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/papertok}
+\end{center}
+\caption{\textbf{Tokenization} We iteratively find the token with minimum corner distance to the next state. An example trajectory is shown in green. The raw representation of the tokenized trajectory is shown as boxes with blue outlines. States that have yet to be tokenized are light green. Token templates are optimized to minimize the error between the tokenized trajectories and the raw trajectories.}
+\label{fig:tokpaper}
+\end{figure}
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/tokenplot}
+\end{center}
+\caption{\textbf{Raw motion token representation} We plot the raw representation of action sets extracted with k-disks for $|V| \in \{128, 256, 384, 512\}$. Agents sample one of these actions at each timestep.}
+\label{fig:rawtoken}
+\end{figure}
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/tokenfreq}
+\end{center}
+\caption{\textbf{Token frequency} We plot the frequency that each token appears in the validation and training sets. Note that we sort the tokens by their frequency for each class individually for the ID. Increasing the vocabulary size increases the resolution but also results in a longer tail. The distribution of actions on the training set and validation set match closely.}
+\label{fig:tokencount}
+\end{figure}
+
+\subsection{Tokenization}
+\label{ssec:tokenization}
+The goal of tokenization is to model the support of a continuous distribution as a set of $|V|$ discrete options. Given $\vx \in \mathbb{R}^n \sim p(\vx)$, a \textit{tokenizer} is a function that maps samples from the continuous distribution to one of the discrete options  $f: \R^n \rightarrow V$. A \textit{renderer} is a function that maps the discrete options back to raw input $r: V \rightarrow \mathbb{R}^n$. A high-quality tokenizer-renderer pair is one such that $r(f(\bm{x})) \approx \bm{x}$. The continuous distributions that we seek to tokenize for the case of traffic modeling are given by Eq.~\ref{eq:multiagent}. We note that these distributions are over single-agent states consisting of only a position and heading. Given the low dimensionality of the input data, we propose a simple approach for tokenizing trajectories based on a fixed set of state-to-state transitions.
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/manytrial}
+\end{center}
+\caption{\footnotesize\textbf{K-means vs. k-disks} We plot the average discretization error for multiple template sets sampled from k-means and k-disks with $|V|=384$. Alg.~\ref{alg:cover} consistently samples better template sets than k-means.}
+\label{fig:manytrials}
+\end{figure}
+
+\paragraph{Method} Let $\vs_0$ be the state of an agent with length $l$ and width $w$ at the current timestep. Let $\vs$ be the state at the next timestep that we seek to tokenize. We define $V = \{ \bm{s}_i \}$ to be a set of \textit{template actions}, each of which represents a change in position and heading in the coordinate frame of the most recent state. We use the notation $a_i \in \mathbb{N}$ to indicate the index representation of token template $\bm{s}_i$ and $\hat{\bm{s}}$ to represent the raw representation of the tokenized state $\bm{s}$. Our tokenizer $f$ and renderer $r$ are defined by
+
+\begin{align}
+\label{eq:tokenize}
+f(\vs_0,\vs) = a_{i^*} = \argmin_i d_{l,w}(\vs_i, \mathrm{local}(\vs_0, \vs))\\
+r(\vs_0,a_i) = \hat{\vs} = \mathrm{global}(\vs_0, \vs_{i})
+\end{align}
+
+where $d_{l,w}(\vs_0,\vs_1)$ is the average of the L2 distances between the ordered corners of the bounding boxes defined by $\vs_0$ and $\vs_1$, ``local'' converts $\vs$ to the local frame of $\vs_0$, and ``global'' converts $\vs_{i^*}$ to the global frame out of the local frame of $\vs_0$. We use $d_{l,w}(\cdot,\cdot)$ throughout the rest of the paper to refer to this mean corner distance metric. Importantly, in order to tokenize a full trajectory, this process of converting states $\vs$ to their tokenized counterpart $\hat{\vs}$ is done iteratively along the trajectory, using tokenized states as the base state $\vs_0$ in the next tokenization step.
+We visualize the procedure for tokenizing a trajectory in Fig.~\ref{fig:tokpaper}.
+Tokens generated with our approach have three convenient properties for the purposes of traffic modeling: they are invariant across coordinate frames, invariant under temporal shift, and they supply efficient access to a measure of similarity between tokens, namely the distance between the raw representations. We discuss how to exploit the third property for data augmentation in Sec.~\ref{sec:regularization}.
+
+\paragraph{Optimizing template sets} We propose an easily parallelizable approach for finding template sets with low discretization error. We collect a large number of state transitions observed in data, sample one of them, filter transitions that are within $\epsilon$ meters, and repeat $|V|$ times. Pseudocode for this algorithm is included in Alg.~\ref{alg:cover}. We call this method for sampling candidate templates ``k-disks'' given its similarity to k-means++, the standard algorithm for seeding the anchors k-means \citep{kmeanspp}, as well as the Poisson disk sampling algorithm \citep{poissondisk}. We visualize the template sets found using k-disks with minimum discretization error in Fig.~\ref{fig:rawtoken}. We verify in Fig.~\ref{fig:tokencount} that the tokenized action distribution is similar on WOMD train and validation despite the fact that the templates are optimized on the training set. We show in Fig.~\ref{fig:manytrials} that the discretization error induced by templates sampled with k-disks is in general much better than that of k-means, across agent types. A comprehensive evaluation of k-disks in comparison to baselines is in Sec.~\ref{ssec:tokexper}.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.94\linewidth]{imgs/diagram}
+\end{center}
+\caption{\footnotesize\textbf{Trajeglish modeling} We train an encoder-decoder transformer that predicts the action token of an agent conditional on context such as previously selected action tokens, map information, and initial agent states. The diagram visualizes the forward pass of the network during training in which initial agent states and map objects are passed into the network, and the model is trained with standard LLM-like next-token prediction on the sequence of multi-agent action tokens, shown in the top right. The bolded components are transformers.}
+\label{fig:diagram}
+\end{figure}
+
+\subsection{Modeling}
+\label{ssec:modeling}
+The second component of our method is an architecture for learning a distribution over the sequences of tokens output by the first. Our model follows an encoder-decoder structure very similar to those used for LLMs \citep{attnallyouneed,gpt2,t5}. A diagram of the model is shown in Fig.~\ref{fig:diagram}. Two important properties of our encoder are that it is not equivariant to choice of global coordinate frame and it is not permutation equivariant to agent order. For the first property, randomizing the choice of coordinate frame during training is straightforward, and sharing a global coordinate frame enables shared processing and representation learning across agents. For the second property, permutation equivariance is not actually desirable in our case since the agent order encodes the order in which agents select actions within a timestep; the ability of our model to predict actions should improve when the already-chosen actions of other agents are provided.
+\paragraph{Encoder} 
+Our model takes as input two modalities that encode the initial scene. The first is the initial state of the agents in the scene which includes the length, width, initial position, initial heading, and object class. We apply a single-layer MLP to encode these values per-agent to an embedding of size $C$. We then add a positional embedding that encodes the agent's order as well as agent identity across the action sequence. The second modality is the map. We use the WOMD representation of a map as a collection of ``map objects'', where a map object is a variable-length polyline representing a lane, a sidewalk, or a crosswalk, for example. We apply a VectorNet encoder to encode the map to a sequence of embeddings for at most $M$ map objects \citep{vectornet}. Note that although the model is not permutation equivariant to the agents, it is permutation invariant to the ordering of the map objects. Similar to Wayformer \citep{wayformer}, we then apply a layer of latent query attention that outputs a final encoding of the scene initialization.
+
+\paragraph{Decoder}
+Given the set of multi-agent future trajectories, we tokenize the trajectories and flatten using the same order used to apply positional embeddings to the $t=0$ agent encoder to get a sequence $a_0^0a_1^0...a_N^T$. We then prepend a start token and pop the last token, and use an embedding table to encode the result. For timesteps for which an agent's state wasn't observed in the data, we set the embedding to zeros. We pass the full sequence through a transformer with causal mask during training. Finally, we use a linear layer to decode a distribution over the $|V|$ template states and train to maximize the probability of the next token with cross-entropy loss.
+We tie the token embedding matrix to the weight of the final linear layer, which we observed results in small improvements \citep{press2017using}. We leverage flash attention \citep{flashattention} which we find greatly speeds up training time, as documented in Sec.~\ref{ssec:moreanalysis}.
+
+We highlight that although the model is trained to predict the next token, it is incorrect to say that a given embedding for the motion token of a given agent only receives supervision signal for the task of predicting the next token. Since the embeddings for later tokens attend to the embeddings of earlier tokens, the embedding at a given timestep receives signal for the task of predicting all future tokens across all agents.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We use the Waymo Open Motion Dataset (WOMD) to evaluate Trajeglish in full and partial control environments. We report results for rollouts produced by Trajeglish on the official WOMD Sim Agents Benchmark in Sec.~\ref{ssec:womdresults}. We then ablate our design choices in simplified full and partial control settings in Sec.~\ref{ssec:sampexper}. Finally, we analyze the representations learned by our model and the density estimates it provides in Sec.~\ref{ssec:densityexper}. The hyperparameters for each of the models that we train can be found in Sec.~\ref{ssec:trainhparams}.
+\begin{table}
+\caption{WOMD Sim Agents Test}
+\label{tab:womdsimagentstest}
+\begin{center}
+\begin{adjustbox}{width={\textwidth},totalheight={\textheight},keepaspectratio}%
+\begin{tabular}{cccccc} \toprule
+    {Method} & \makecell{Realism meta\\metric $\uparrow$} & \makecell{Kinematic\\metrics $\uparrow$} & \makecell{Interactive\\metrics $\uparrow$} & \makecell{Map-based\\metrics $\uparrow$} & {minADE (m) $\downarrow$} \\ \midrule
+    {Constant Velocity}  & 0.2380  & 0.0465 & 0.3372 & 0.3680 & 7.924 \\
+    {Wayformer (Identical)}  & 0.4250  & 0.3120 & 0.4482 & 0.5620 & 2.498 \\
+    {MTR+++}  & 0.4697  & 0.3597 & 0.4929 & 0.6028 & 1.682 \\
+    {Wayformer (Diverse)}  & 0.4720  & 0.3613 & 0.4935 & 0.6077 & 1.694 \\
+    {Joint-Multipath++}  & 0.4888  & 0.4073 & 0.4991 & 0.6018 & 2.052 \\
+    {MTR\_E*}  & 0.4911  & \textbf{0.4180} & 0.4905 & 0.6073 & \textbf{1.656} \\
+    {MVTA}  & 0.5091  & \textbf{0.4175} & 0.5186 & 0.6374 & 1.870 \\
+    {MVTE*}  & 0.5168 & \textbf{0.4202} & 0.5289 & 0.6486 & 1.677  \\
+    {Trajeglish}  & \textbf{0.5339} & 0.4019 & \textbf{0.5811} & \textbf{0.6667} & 1.872  \\\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{center}
+\end{table}
+\subsection{WOMD Sim Agents Benchmark}
+\label{ssec:womdresults}
+We test the sampling performance of our model using the WOMD Sim Agents Benchmark and report results in Tab.~\ref{tab:womdsimagentstest}. Submissions to this benchmark are required to submit 32 rollouts of length 8 seconds at 10hz per scenario, each of which contains up to 128 agents. We bold multiple submissions if they are within 1\% of each other, as in \cite{montali2023waymo}. Trajeglish is the top submission along the leaderboard meta metric, outperforming several well-established motion prediction models including Wayformer, MultiPath++, and MTR \citep{mtr,mtrpp}, while being the first submission to use discrete sequence modeling. Most of the improvement is due to the fact that Trajeglish models interaction between agents significantly better than prior work, increasing the state-of-the-art along interaction metrics by 9.9\%.
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/partialcontroll2}
+\end{center}
+\caption{\footnotesize\textbf{Partial control ADE} Left shows the ADE for the vehicles selected for evaluation under partial control, but for rollouts where the agents are fully autonomous. Right shows the ADE for the same vehicles but with all other agents on replay. When agents controlled by Trajeglish go first in the permutation order, they behave similarly to the no intra model. When they go last, they utilize the intra-timestep information to produce interaction more similar to recorded logs, achieving a lower ADE.}
+\label{fig:partade}
+\end{figure}
+
+\subsection{Ablation}
+\label{ssec:sampexper}
+To simplify our ablation study, we test models in this section on the scenarios they train on, of at most 24 agents and 6.4 seconds in length. We compare performance across 5 variants of our model. Both ``trajeglish'' and ``trajeglish w/ reg.'' refer to our model, the latter using the noisy tokenization strategy discussed in Sec.~\ref{sec:regularization}. The ``no intra'' model is an important baseline designed to mimic the behavior of behavior cloning baselines used in Symphony \citep{symphony} and ``Imitation Is Not Enough'' \citep{imitationnotenough}. For this baseline, we keep the same architecture but adjust the masking strategy in the decoder to not attend to actions already chosen for the current timestep. The ``marginal'' baseline is designed to mimic the behavior of models such as Wayformer \citep{wayformer} and MultiPath++ \citep{multipathpp} that are trained to model the distribution over single-agent trajectories instead of multi-agent scene-consistent trajectories. For this baseline, we keep the same architecture but apply a mask to the decoder that enforces that the model can only attend to previous actions chosen by the current agent. Our final baseline is the same as the marginal baseline but without a map encoder. We use this baseline to understand the extent to which the models rely on the map for traffic modeling.
+\paragraph{Partial control} We report results in Fig.~\ref{fig:partade} in a partial controllability setting in which a single agent in each scenario is chosen to be controlled by the traffic model and all other agents are set to replay. The single-agent ADE (average distance error) for the controlled-agent is similar in full autonomy rollouts for all models other than the model that does not condition on the map, as expected. However, in rollouts where all other agents are placed on replay, the replay trajectories leak information about the trajectory that the controlled-agent took in the data, and as a result, the no-intra and trajeglish rollouts have a lower ADE. Additionally, the Trajeglish rollouts in which the controlled agent is placed first do not condition on intra-timestep information and therefore behave identically to the no-intra baseline, whereas rollouts where the controlled-agent is placed last in the order provide the model with more information about the replay trajectories and result in a decreased ADE.
+\paragraph{Full control} We evaluate the collision rate of models under full control in Fig.~\ref{fig:fullcolsveh} as a function of initial context, object category, and rollout duration. The value of modeling intra-timestep interaction is most obvious when only a single timestep is used to seed generation, although intra-timestep modeling significantly improves the collision rate in all cases for vehicles. For interaction between pedestrians, Trajeglish is able to capture the grouping behavior effectively. We observe that noising the tokens during training improves rollout performance slightly in the full control setting. We expect these rates to improve quickly given more training data, as suggested by Fig.~\ref{fig:scaling}.
+
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/stats_cols}
+\end{center}
+\caption{\footnotesize\textbf{Full Autonomy Collision Rate} Vehicle collision rate is shown on top and pedestrian collision rate is shown on bottom. From left to right, we seed the scene with an increasing number of initial actions from the recorded data. Trajeglish models the log data statistics significantly better than baselines when seeded with only an initial timestep, as well as with longer initialization.}
+\label{fig:fullcolsveh}
+\end{figure}
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/permute}
+\end{center}
+\caption{\footnotesize\textbf{Intra-Timestep Conditioning} We plot the negative log-likelihood (NLL) when we vary how many agents choose an action before a given agent within a given timestep. As expected, when the context length increases, intra-timestep interaction becomes much less important to take into account.}
+\label{fig:intranll}
+\end{figure}
+
+
+
+
+
+\begin{figure}
+\centering
+\begin{minipage}{.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/scaling}
+    \captionof{figure}{\footnotesize\textbf{Scaling Behavior} Our preliminary study on parameter and dataset scaling suggests that, compared to LLMs \citep{openaiscale}, Trajeglish is severely data-constrained on WOMD; models with 35M parameters just start to be significantly better than models with 15M parameters for datasets the size of WOMD. A more rigorous study of how all hyperparameters of the training strategy affect sampling performance is reserved for future work.}
+    \label{fig:scaling}
+\end{minipage}%
+~~
+\begin{minipage}{.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/nusc}
+    \captionof{figure}{\footnotesize\textbf{nuScenes transfer} We test the ability of our model to transfer to the maps and scenario initializations in the nuScenes dataset. The difference between maps and behaviors found in the nuScenes dataset are such that LoRA does not provide enough expressiveness to fine-tune the model to peak performance. The fine-tuned models both outperform and train faster than the model that is trained exclusively on nuScenes.}
+    \label{fig:nuscft}
+\end{minipage}
+\end{figure}
+
+\subsection{Analysis}
+\label{ssec:densityexper}
+
+\paragraph{Intra-Timestep Dependence} To understand the extent to which our model leverages intra-timestep dependence, in Fig.~\ref{fig:intranll}, we evaluate the negative log likelihood under our model of predicting an agent's next action depending on the agent's order in the selected permutation, as a function of the amount of historical context the model is provided. In all cases, the agent gains predictive power from conditioning on the actions selected by other agents within the same timestep, but the log likelihood levels out as more historical context is provided. Intra-timestep dependence is significantly less important when provided over 4 timesteps of history, as is the setting used for most motion prediction benchmarks.
+
+\paragraph{Representation Transferability} We measure the generalization of our model to the nuScenes dataset \citep{nusc}. As recorded in Sec.~\ref{ssec:moreanalysis}, nuScenes is 3 orders of magnitude smaller than WOMD. Additionally, nuScenes includes scenes from Singapore where the lane convention is opposite that of North America where WOMD is collected. Nevertheless, we show in Fig.~\ref{fig:nuscft} that our model can be fine-tuned to a validation NLL far lower than a model trained from scratch on only the nuScenes dataset. At the same time, we find that LoRA \citep{lora} does not provide enough expressiveness to achieve the same NLL as fine tuning the full model. While bounding boxes have a fairly canonical definition, we note that there are multiple arbitrary choices in the definition of map objects that may inhibit transfer of traffic models to different datasets.
+\paragraph{Token Embeddings} We visualize the embeddings that the model learns in Fig.~\ref{fig:tokembedding}. Through the task of predicting the next token, the model learns a similarity matrix across tokens that reflects the Euclidean distance between the raw actions that the tokens represent.
+\paragraph{Preliminary Scaling Law} We perform a preliminary study of how our model scales with increased parameter count and dataset size in Fig.~\ref{fig:scaling}. We find that performance between a model of 15.4M parameters and 35.6 parameters is equivalent up to 0.5B tokens, suggesting that a huge amount of performance gain is expected if the dataset size can be expanded beyond the 1B tokens in WOMD. We reserve more extensive studies of model scaling for future work.
+
+
+
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=\linewidth]{imgs/embedviz}
+\end{center}
+\caption{\footnotesize\textbf{Token Embedding Visualization} We run PCA on the model embeddings at initialization and at convergence, and plot the $(x,y)$ location of each of the token templates using the top 3 principal component values to determine the hue, lightness, and saturation of the point. The model learns that tokens that correspond to actions close together in euclidean space represent semantically similar actions. Note that the heading of each action is not visualized, which also affects action similarity, especially at low speeds. Additionally, the top 3 principal components include only 35\% of the variance, explaining why some colors repeat.}
+\label{fig:tokembedding}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this work, we introduce a discrete autoregressive model of the interaction between road users. By improving the realism of self-driving simulators, we hope to enhance the safety of self-driving systems as they are increasingly deployed into the real world.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

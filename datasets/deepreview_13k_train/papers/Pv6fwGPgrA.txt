@@ -1,0 +1,503 @@
+\title{Prune at the Clients, Not the Server: Accelerated Sparse Training in Federated Learning}
+
+\begin{abstract}
+In the recent paradigm of Federated Learning (FL), multiple clients train a shared model while keeping their local data private. Resource constraints of clients and communication costs pose major problems for training large models in FL. 
+On the one hand, addressing the resource limitations of the clients, sparse training has proven to be a powerful tool in the centralized setting.
+On the other hand, communication costs in FL can be addressed by local training, where each client takes multiple gradient steps on its local data.
+Recent work has shown that local training can provably 
+achieve the optimal accelerated communication complexity~\citep{proxskip}.
+Hence, one would like an \emph{accelerated sparse} training algorithm.
+In this work we show that naive integration of sparse training and acceleration at the server fails, and how to fix it by letting the clients perform these tasks appropriately. 
+We introduce \ourcomm, our method developed for the nonconvex setting, inspired by \randprox~\citep{randprox}, which provably combines sparse training and acceleration in the convex setting. 
+We demonstrate the good performance of  \ourcomm in extensive experiments.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\tableofcontents
+
+
+Federated learning (FL) is a distributed machine learning approach that enables multiple edge devices to collaboratively train a shared model while keeping their data local \citep{fedavg, konevcny2016federated, bonawitz2017practical}.
+This paradigm addresses significant privacy concerns by avoiding the need to transfer potentially sensitive data to a central server and thus can enable access to huge datasets.
+Instead, local models are trained on each client's device, and only the model updates are aggregated at the server to train a shared global model. 
+However, one of the main challenges in FL is the limited computational and communication resources of edge devices~\citep{caldas2018expanding}. 
+
+Pruning is a well-known technique in the centralized setting for reducing the computational and memory costs of model training and inference \citep{han2015learning, evci2020rigging, lee2024jaxpruner}.
+There are two major directions: \emph{dense-to-sparse} or \emph{sparse-to-sparse} training~\citep{liu2023sparseland}.
+\emph{Dense-to-sparse (DTS)} training starts with a dense network and proceeds by systematically removing redundant or less important parameters and reduces the model size without substantially sacrificing performance. 
+\emph{Sparse-to-sparse (STS)} training starts with a sparse network and usually proceeds by sparsifying and regrowing weights but keeping the sparsity constant.
+Both lead to computational savings at inference time as the final model is sparse~\citep{srinivas2017training}.
+But sparse-to-sparse training also leads to substantially reduced training costs as the model is sparse throughout the whole process.
+Hence, a sparse-to-sparse algorithm for FL would address the resource limitation of edge devices for efficient training and inference.
+However, a key issue during training in FL are communication costs, as for every step of the optimizer the clients have to share the model updates with the server or with each other.
+\emph{Local training} has emerged as the key paradigm for efficient learning which allows the participating clients to take multiple update steps before communicating with each other.
+It first appeared in the popular algorithm \fedavg and showed great empirical success in applications \citep{fedavg}.
+In a recent breakthrough, \citet{proxskip} introduced \proxskip, the first algorithm to be provably more communication-efficient than \fedavg by employing control variates and randomization.
+In a follow-up work, \citet{randprox} were able to generalize the acceleration guarantees of \proxskip to allow for multiple proxs in an algorithm called \randprox.
+In the convex setting with $l_1$ regularization, \randprox  allows to obtain a sparse model while employing acceleration, although there is no guarantee on the sparsity level. 
+However, in practice, $l_1$ regularization is usually outperformed by nonconvex techniques based on the $l_0$ seminorm.\medskip
+
+\noindent\textbf{Challenge.}\ To achieve an efficient algorithm for FL, sparse-to-sparse training and the recent theoretical advances on acceleration need to be combined. 
+Hence, we address the following research question:\smallskip
+
+\textit{Is it possible to incorporate acceleration with nonconvex techniques usually found in sparse-to-sparse training algorithm?}\medskip
+
+\noindent\textbf{Contributions.}\ A common approach in the FL literature is to apply pruning at the server~\citep{fedsparsify,lee2024jaxpruner}.
+First, we show that this naive approach fails in the case of \proxskip.
+Then, inspired bt \randprox, we derive a new algorithm, \ourcomm, which addresses the problems by pruning at the clients instead of the server.
+We show that this is necessary through a combination of theory and experiments.
+Finally, we validate our algorithm in extensive experiments.
+Figure~\ref{fig:Convincing} shows how our proposed algorithm outperforms baselines for convex  and deep learning experiments.
+
+Hence, the paper starts with an overview of the theoretical background of \randprox
+and its application for pruning through $l_1$ regularization in section~\ref{chap:method}.
+Section~\ref{chap:exp_regression} then shows the superiority of this algorithm for regression on the Blog Feedback dataset.
+Regression was chosen, as the theoretical guarantees hold only in convex scenarios like this and centralized STS regression is a well established field known as Subset Selection~\citep{hastie2017extended}.
+Section~\ref{chap:exp_LogR} establishes the superiority in logistic regression on FEMNIST~\citep{caldas2018leaf}.
+Finally, Section~\ref{chap:exp_deep_learning} deals with deep learning experiments.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=9.5\textwidth/20]{figs_arxiv/regression_convincing.pdf}
+    \includegraphics[width=9.5\textwidth/20]{figs_arxiv/dnn_convincing.pdf}
+    \caption{On the left, test score for regression on the Blog Feedback dataset~\citep{buza2013feedback}.
+    Our method performs best in both final score and communication efficiency.
+    On the right, test accuracy for ResNet18~\citep{he2016deep} on CIFAR-10~\citep{cifar10}.
+    Our method \ourcomm prevents catastrophic failure occurring when combining
+    acceleration and pruning at the server.
+    The shaded area in both figures represents the standard error.
+    }
+    \label{fig:Convincing}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{chap:related_work}
+Despite some existing studies on deriving sparse models in federated learning, the topic remains insufficiently understood.
+The most similar STS approach is given by \citet{fediht}, who combine \fedavg and $\topk$ to yield \fedht and \fediht.
+Their approach does not integrate acceleration or control variates.
+Hence, this will be considered a baseline for our work.
+Furthermore, only \fediht prunes the model before sending 
+it to the server and thus uses the major communication efficiency of training a sparse model instead of a dense one~\citep{yi2024fedcomloc}.
+Subsequent works do not incorporate acceleration or address client drift either~\citep{lin2022federated, bibikar2022federated, horvath2021fjord, isik2022sparse, tian2024gradient, huang2022achieving}, or they are not fully STS~\citep{jiang2022model, qiu2022zerofl, munir2021fedprune, li2021lotteryfl}.
+
+In the DTS regime, the most simple approach is given by \fedsparsify, which applies Gradual Magnitude Pruning in \fedavg at the server~\citep{fedsparsify}.
+The main difference between \fedht and \fedsparsify is that the latter starts with a dense model and ramps up the sparsity by a cubic schedule during the training as is usual in centralized pruning.
+Another recent DTS work takes the approach of applying further centralized training approaches at the server~\citep{lee2024jaxpruner}.
+Here, one gathers up the local updates (usually with a fixed learning rate) and treats them as the gradient at the server.
+Then one can apply both centralized optimizers and centralized pruning techniques.
+In particular, \citet{lee2024jaxpruner} apply the DTS techniques of random pruning, saliency pruning~\citep{molchanov2016pruning}, GMP~\citep{zhu2017prune} and Straight Through Estimation~\citep{bengio2013estimating} and for STS they apply static sparse training, dynamic sparse training~\citep{mocanu2018scalable} and RigL~\citep{evci2020rigging}.
+We will show that acceleration and pruning at the server fail and need to be applied at the clients instead.
+Hence, our work enables integrating all of the aforementioned centralized pruning techniques with \proxskip or \scaffold~\citep{scaffold}.
+
+
+
+\section{Proposed Method}
+
+\label{chap:method}
+Our algorithm is based on the recent progress in understanding local training made in \citet{proxskip}.
+Their algorithm \proxskip can optimize functions of the form
+\begin{equation}
+    \min _{w \in \mathbb{R}^d} f(w)+\psi(w),
+    \label{eq:proxskipProblem}
+\end{equation}
+where $f$ is $L$-smooth and $\mu$-strongly convex and $\psi$ is proper, closed and convex \citep{bau17}. 
+It corresponds to Algorithm~\ref{alg:sparse_proxskip} with the pruning options disabled. 
+Under these assumptions, the optimum $w^*$ exists and is unique.
+Hence, one can look at convergence against this optimum $w^*$.
+Let $w^{0}$ be the initial model estimate and $w^{t}$ be the iterate of their algorithm after $t$ steps.
+They proved that to be $\epsilon$ close to the optimum, i.e.~$\norm{w^{t} - w^*} \leq \epsilon \norm{w^{0} - w^*}$, one needs to evaluate the proximity operator (prox) of $\psi$ only $\sqrt{\frac L {\mu}} \log \frac 1 \epsilon$ times, while the best known bounds for Gradient Descent (and thus especially \fedavg)
+is $\frac L{\mu} \log \frac 1 \epsilon$. 
+One main application of \proxskip to FL  is
+\[\min _{w \in \mathbb{R}^d}\left\{f(w):=\frac{1}{N} \sum_{i=1}^N f_i(w)\right\} , \]
+where $f_i: \mathbb{R}^d \rightarrow \mathbb{R}$ is the loss function of each client and $N$ is the total number of clients.
+This approach is closely related to empirical-risk minimization \citep{shalev2014understanding}, the dominant approach in supervised machine learning.
+In practice, $f_i$ is the individual loss function of Client $i$, based on their private and local data. 
+This problem is a particular case of \eqref{eq:proxskipProblem}, using a consensus formulation \citep{parikh2014proximal}.
+That is, the model $w \in \R^d$ is duplicated into $N$ independent copies $w_1, w_2, \ldots, w_N$
+and the objective is changed to 
+\[\min _{w_1, \ldots, w_N \in \mathbb{R}^d} \frac{1}{N} \sum_{i=1}^n f_i\left(w_i\right)+\psi\left(w_1, \ldots, w_N\right),\]
+where $\psi:\left(w_1, \ldots, w_N\right)\mapsto \{0$ if  $w_1=\cdots=w_N$,  $+\infty$ otherwise$\}$. 
+The  proper closed convex function $\psi$ encodes the consensus constraint and the theory of \proxskip applies. 
+The prox  of $\psi$ is $\operatorname{prox}_{\gamma \psi}\left(w_1, \ldots, w_N\right)=(\bar{w}, \ldots, \bar{w}) \in \mathbb{R}^{N d}$, where 
+$\bar w$ is the average of the $w_i$.
+Thus, evaluating the prox boils down to communicating all local models $w_1, w_2, \ldots, w_N$ to a central server and averaging them. 
+Hence, one prox evaluation corresponds exactly to one communication round, the main bottleneck in   in FL~\citep{fedavg}.
+Thus, reducing the number of prox evaluations is crucial to accelerate  FL, which is why \proxskip is such an important achievement for FL.
+
+\subsection{Baseline Methods}
+Additionally to \fedht and \fediht discussed in the Section~\ref{chap:related_work}, we consider 
+the following simple baselines of how to address the research question of incorporating pruning, acceleration and tackling client drift. 
+A  simple approach is to  employ an accelerated algorithm like \proxskip to obtain the dense solution $w^*$
+and then take $\topk(w^*)$ of it for the desired sparsity, where the $\topk$ operator keeps the  $K$ largest elements of a vector unchanged and sets the other ones to zero. This approach does not address resource constraints of the clients or take advantage of training a sparse model to reduce communication cost.
+We will call this approach \finaltopk.
+The experiments will show that \ourmethod addresses client resources and outperforms this method, showing that it provides a valuable contribution.
+
+Another approach would be to consider pruning at the server, i.e.\ applying $\topk$ after averaging the model
+and before sending it back to the clients.
+Applying optimization techniques at the server is a common approach in FL~\citep{lee2024jaxpruner, lin2022federated, fedsparsify}.
+When applied to \proxskip, we refer to this variant as \ourglobal and it can be found in Algorithm~\ref{alg:sparse_proxskip}.
+A major drawback is that this method does not benefit from compression for saving on uplink communication costs.
+As pruning is done before downlink communication, the models uploaded to the server are dense, incurring full communication cost.
+Furthermore, we show in the experiments that \ourglobal violates a key invariant of control variates, so that it is essentially inappropriate for FL.
+
+\subsection{Accelerated Pruning Method for FL with $l_1$ regularization}
+\label{chap:theory_randproxlone}
+Recently, \citet{randprox} extended the framework of \proxskip to allow for several proxs while keeping acceleration.
+In FL this means their algorithm \randprox can optimize problems of the form
+\[\min _{w_1, \ldots, w_N \in \mathbb{R}^d} \frac{1}{N} \sum_{i=1}^N f_i\left(w_i\right)+\psi\left(w_1, \ldots, w_N\right) +h(w_1, \ldots, w_N),\]
+for $h$ proper, closed and convex.
+One interesting case is to set $h(w) = \norm{w}_1$, which comes down to \emph{federated lasso}~\citep{barik2023recovering}.
+This model is known practically and theoretically to perform some sort of pruning, since  it reduces the number of nonzero parameters \citep{barik2023recovering}.
+Furthermore, the $l_1$ norm is convex, so that for convex loss functions $f_i$ the accelerated convergence guarantees of  \randprox hold.
+We refer to this sparse training method as \randproxlone.
+\subsection{Nonconvex Modifications: Cardinality Constraints}
+\label{chap:RandProxTopK}
+In practice however, it is well known that magnitude-based pruning methods have proven to outperform $l_1$ regularization, because of the bias it introduces. 
+Cardinality constraints do not have this drawback and the algorithm can obtain the optimal solution on the subspace of the nonzero variables.
+Cardinality constraints can be represented in \randprox.
+One can set
+\[h\left(w\right):= \begin{cases}0, & \text { if } \norm{w}_0 \leq K \\ +\infty, & \text { otherwise, }\end{cases}\]
+where $\norm{w}_0$ counts the number of nonzero components of $w$.
+\randprox makes calls to the prox of $h$, which is the hard-thresholding operator $\topk$~\citep{blumensath2009iterative}. 
+The major caveat here is that this function $h$ is nonconvex, so that the proven acceleration guarantees of \citet{randprox} do not hold.
+Empirically though, algorithms designed for the convex case have been proven powerful in the nonconvex case as well.  So, we use the  theoretical guarantees in the convex case as a strong guidance toward a powerful practical algorithm for the nonconvex case.
+The resulting algorithm is \ourlocal and it can be found in Algorithm~\ref{alg:sparse_proxskip}.
+
+\subsection{Further Modifications and Proposed Algorithm}
+\label{chap:proposed_method}
+A further improvement comes from the insight that one does not need to sparsify every step to gain a pruned model.
+The major beneficial sparsification happens before communication, as this reduces the communication cost similar to compression
+in FL algorithms~\citep{condat2023tamuna, yi2024fedcomloc}.
+Hence, one could take the perspective of the models being pruned locally only due to the limited resources at the clients.
+To investigate the potential gains we consider a variant of the algorithm which only prunes before communication.
+The resulting algorithm is \ourcomm found in Algorithm~\ref{alg:sparse_proxskip}.
+
+Here one has to take a choice where to place the $\topk$ operator.
+For the control variates $h_i$ to work properly, we show theoretically and empirically that it is crucial that $\sum_i h_i = 0$ always holds.
+For \proxskip, one can now decide whether to apply $\topk$ before or after saving $\hat w$ at the clients.
+The change in Algorithm~\ref{alg:sparse_proxskip} is subtle.
+One takes Line~\ref{alg:line:local_version} of Algorithm~\ref{alg:sparse_proxskip} to be either
+\[\hat w_{i,t+1} = \topk (\hat w_{i, t+1}) \quad \text{ or } \quad w_{i,t+1} = \topk (\hat w_{i, t+1}).\]
+One can verify that our proposed variant, \ourcomm, keeps the guarantee of $\sum_i h_i = 0$.
+Going back to \proxskip, 
+if this condition does not hold, one can show that the algorithm diverges.
+To see this, let us look at the simple case of $p=1$ and $w_{i,0} = w^*$ for all $i$, i.e.~just taking one local step located at the optimum.
+If $\sum_i h_i \neq 0$ then one gets at the aggregation step on the server
+\[ \frac 1 N \sum_{i=1}^N w^* - \gamma (g_i(w^*) - h_i) =
+w^* + \frac 1 N \sum_{i=1}^N \gamma (g_i(w^*) - h_i) = w^* +  \frac 1 N \sum_{i=1}^N h_i \neq w^*.\]
+The equality holds because $\sum_{i=1}^N g_i(w^*) = 0$ by first-order optimality conditions.
+Hence, $w^*$ is not a fixed-point and the algorithm diverges instead.
+We confirmed this hypothesis empirically for regression and logistic regression 
+and provide a detailed analysis for logistic regression in Section~\ref{chap:LogR_sum_hi}.
+
+\begin{algorithm*}[t!]
+	\caption{\algname{Meta Sparse-ProxSkip}}
+    \label{alg:sparse_proxskip}
+	
+	\let\oldwhile\algorithmicwhile
+	\renewcommand{\algorithmicwhile}{\textbf{in parallel on all workers $i \in [N]$}}
+	\let\oldendwhile\algorithmicendwhile
+	\renewcommand{\algorithmicendwhile}{\algorithmicend\ \textbf{local updates}}
+	\begin{algorithmic}[1]
+		\STATE stepsize $\gamma > 0$, probability $p>0$, initial iterate $w_{1,0}=\dots = w_{N,0}\in \R^d$, initial control variates ${\red h_{1,0}, \dots, h_{n,0}}  \in \R^d$  on each client such that  $\sum_{i=1}^{N}{\red h_{i,0}} = 0$, number of iterations $T\geq 1$
+		\STATE \textbf{server:} flip a coin, $\theta_t \in \{0,1\}$, $T$ times,  where $\mathop{\rm Prob}(\theta_t =1) = p$
+		\STATE send the sequence  $\theta_0, \dots, \theta_{T-1}$ to all workers 
+		\FOR{$t=0,1,\dotsc,T-1$}
+		\WHILE{}
+		\STATE $\hat w_{i,t+1} = w_{i,t} - \gamma (\nabla f_i (w_{i,t}) - {\red h_{i,t}})$ \hfill 
+  $\diamond$ { \color{gray} \small SGD step adjusted by control variate ${\red h_{i,t}}$}
+        \STATE {Option \ourlocal}: $\hat w_{i,t+1} = \topk (\hat w_{i, t+1})$
+        \label{alg:line:local_version}
+		\IF{$\theta_t=1$} 
+        \STATE {Option \ourcomm}:  $\hat w_{i,t+1} = \topk (\hat w_{i, t+1})$
+        \label{alg:line:comm_mod}
+		\STATE  $w_{i,t+1} = \frac{1}{N}\sum \limits_{j=1}^N \hat w_{j,t+1}$ \hfill  
+        \hfill $\diamond$ { \color{gray} \small Communication with the server}
+		\label{alg:ProxWithControl}
+        \STATE {Option \ourglobal}:  $ w_{i,t+1} = \topk (w_{i, t+1})$
+        \label{alg:line:global_mod}
+		\STATE ${\red h_{i,t+1}} = {\red h_{i,t}} + \frac{p}{\gamma}(w_{i,t+1} - \hat w_{i,t+1})$ \hfill $\diamond$ { \color{gray} \small Update the local control variate ${\red h_{i,t}}$}
+        \label{alg:line:global_mod_switch}
+		\ELSE
+		\STATE $w_{i,t+1} = \hat w_{i,t+1}$ \hfill $\diamond$ { \color{gray} \small  Skip communication!}
+        \STATE $h_{i,t+1} = h_{i,t}$
+		\ENDIF
+		\ENDWHILE
+		\ENDFOR
+		\STATE $w_{i,T} = {\topk (w_{i, T})}$
+		\label{ProxFinalIterate}
+	\end{algorithmic}
+\end{algorithm*}
+
+
+\section{Experiments}
+
+\label{chap:experiments}
+We start with convex experiments 
+for the following reasons.
+First, the convex setting is well understood and the theoretical guarantees of \proxskip and \randprox hold only in this case.
+From a theory point of view, $\topk$ is not nonexpansive and hence might lead to divergence. 
+Hence, we start with the convex setting  to clearly investigate the effects of the mechanisms.
+Second, convex models are still surprisingly widespread in industrial applications.
+Third, many successful methods for the nonconvex case were designed for the convex case and then adapted to the nonconvex case. 
+And lastly, \proxskip and related accelerated methods are even without pruning still underexplored in the deep learning case.
+Hence, adapting these methods for sparse deep learning is challenging, but we provide experiments and general insights for this setting as well.
+\subsection{Multiple Linear Regression on BlogFeedback}
+\label{chap:exp_regression}
+
+\textbf{Setup.}\ 
+The first experiments tackle multiple linear regression on the BlogFeedback dataset~\citet{buza2013feedback}.
+We chose this dataset for providing a realistic example of a regression problem with a natural but challenging FL split.
+Previously, it has been used by \citet{barik2023recovering} to investigate federated lasso, which also addresses the challenge of feature selection in a federated regression problem.
+The total number of data points is $n = 47157$ split in a very heterogenous way across $554$ clients.
+Furthermore, all results have been obtained by running a random search to tune the number of local steps $\frac 1 p$ and the learning rate $\gamma$.
+Error bars are obtained by running the same combinations $5$ times for the same parameters with different random initialization if applicable.
+\medskip
+\begin{figure}
+	\centering
+	\includegraphics[width=\textwidth/300*185]{figs_arxiv/regression_baselines_cost.pdf}
+	\includegraphics[width=\textwidth/300*97]{figs_arxiv/regression_baselines_loss.pdf}
+	\caption{ Test Score ($R^2$) on the left and train loss on the right for regression on the Blog Feedback dataset~\citep{buza2013feedback}.
+    Baseline methods are dashed while our methods are solid.
+    One can observe that both \randproxlone and our proposed methods converge to a better solution in a substantially more communication-efficient way.
+    The shaded area in the figures represents the standard error.
+    Error bars for all experiments are included but are sometimes not visible, due to deterministic initialization at $w_{i,0} = \mathbf{0}$.
+    }
+	\label{fig:BlogFeedback_trajectory}
+\end{figure}
+
+\begin{table}[!tbp]
+	\begin{center}
+	   \caption{Multiple linear regression results. 
+       \ourcomm shows an increase in $R^2$ due to addressing client drift.
+
+       Results were obtained running a random search for $\gamma$ and  $p$ for all algorithms.
+       }
+        \label{table:BlogFeedback_acc}
+		\begin{tabular}{clccc}
+            \toprule
+            & Sparsity & 80 \% & 90 \% & 95 \% \\
+            \cmidrule(lr){3-5}
+            & & Test $R^2$ & Test $R^2$ & Test $R^2$ \\
+            \midrule
+            \multirow{5}{*}{\rotatebox{90}{Existing}} &
+            \finaltopk & $26.4$ \%& $23.8$ \% & $16.4$ \% \\
+            & \fedht & \red{$18.0$} \% & \red{$21.9$} \% & \red{$12.8$} \% \\
+            & \fediht & \red{$16.5$} \% & \red{$22.4$} \% & \red{$12.3$} \% \\
+            & \ourglobal & \red{$25.9$} \% & \red{$20.4$} \% & \red{$16.3$} \% \\
+            \cmidrule(lr){2-5}
+            & \randproxlone & \red{$26.3$} \% & \green{$24.1$} \% & \green{$18.8$} \% \\
+            \midrule
+            \multirow{2}{*}{\rotatebox{90}{Ours}} & 
+            \ourlocal & \green{$27.0$} \% & \green{$26.8$} \% & \green{$23.9$} \% \\
+            & \ourcomm & \green{$26.7$} \% & \green{$27.1$} \% & \green{$26.7$} \% \\
+            \bottomrule
+        \end{tabular}
+	\end{center}
+\end{table}
+\begin{table}
+\small
+	\begin{center}
+	   \caption{Communication cost to reach a certain test $R^2$ score for multiple linear regression at $90 \%$ sparsity.
+        All speedup comparisons are with respect to \finaltopk as it is an accelerated method outperforming \fediht and is the only baseline reaching a test score of $0.225$.
+        }
+        \label{table:BlogFeedback_comm}
+		\begin{tabular}{clcccccc}
+            \toprule
+			& Test $R^2$ Threshold & \multicolumn{2}{c}{$0.2$} & \multicolumn{2}{c}{$0.225$} & \multicolumn{2}{c}{$0.25$} \\
+            \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
+			& Upload Communication Cost & Bits & Speedup & Bits & Speedup & Bits & Speedup \\
+			\midrule
+			\multirow{5}{*}{\rotatebox{90}{Existing}} 
+            & \finaltopk & $1.16$ M & $1.00\times$ & 1.44 M & 1.00$\times$ & \xmark & \xmark \\
+			& \fedht & $14.8$ M & {\red 0.08}$\times$ & \xmark & \xmark & \xmark & \xmark \\
+			& \fediht & $2.49$ M & {\red 0.47}$\times$ & \xmark & \xmark & \xmark & \xmark \\
+			& \ourglobal & $0.73$ M & {\green 1.59}$\times$ & \xmark & \xmark & \xmark & \xmark \\
+            \cmidrule(lr){2-8}
+			& \randproxlone & $0.18$ M & {\green 6.44}$\times$ & 0.25 M  & {\green 5.76}$\times$ & \xmark &  \xmark \\
+            \midrule
+			\multirow{2}{*}{\rotatebox{90}{Ours}}
+            & \ourlocal & $0.13$ M  & {\green {8.90}}$\times$ & 0.21 M  & {\green 6.86}$\times$ & 0.76 M & - \\
+			& \ourcomm & $0.10$ M &  {\green 11.6}$\times$ & 0.14 M & {\green 10.3}$\times$ & 0.19 M & - \\
+            \bottomrule
+		\end{tabular}
+	\end{center}
+\end{table}
+
+\noindent\textbf{Experimental Results.}\ 
+Our methods improves both in $R^2$ (quality of the solution) and in communication efficiency over the baselines.
+Training trajectories for a sparsity of $90 \%$ detailing the gains in communication cost and accuracy at the same time  can be found in Figure~\ref{fig:BlogFeedback_trajectory}.
+Table~\ref{table:BlogFeedback_acc} reports the final $R^2$ (solution quality) for different target sparsity values.
+At $90 \%$ sparsity, we see that \ourcomm improves by $3.2 \%$ over the best baseline \finaltopk and $6.6 \%$ over the best non client drift addressing variant.
+Furthermore, the advantage grows with increased sparsity at $95 \%$.
+Table~\ref{table:BlogFeedback_comm} reports the gains in communication efficiency.
+We can observe that \ourcomm is roughly $10\times$ more communication-efficient as the best baseline \finaltopk and roughly $20\times$ more communication-efficient than the 
+best non-accelerated baseline.\medskip
+\noindent\textbf{RandProx-$l_1$ Beats Simple Baselines.}\ 
+We see that \randproxlone, as described in Section~\ref{chap:theory_randproxlone}, outperforms the simple baselines in terms of both communication efficiency and $R^2$.
+
+Noticeably, this supports our hypothesis in that: 
+1) Acceleration (through \randproxlone) leads to a communication cost decrease of $\geq 6 \times$ compared to \fediht.
+2) Addressing client drift (through \randproxlone) leads to an increase in final test score of up to $2.4 \%$ compared to \fediht.
+3) \randproxlone outperforms naive baselines like pruning at the server or pruning at the end, showing the need for a properly designed accelerated STS method.\medskip
+
+\noindent\textbf{Failure of \emph{Accelerated Server Pruning}.}\ 
+From Figure~\ref{fig:BlogFeedback_trajectory} one can observe that \ourglobal performs worst from all tested baselines.
+In particular, it performs worse than \fediht which does neither address client drift nor is accelerated.
+As we discussed in Section~\ref{chap:proposed_method} we hypothesized this because the property $\sum_i h_i \neq 0$ is violated in \ourglobal.
+We confirmed this hypothesis empirically for logistic regression 
+and provide a detailed analysis in Section~\ref{chap:LogR_sum_hi}.\medskip
+
+\noindent\textbf{Sparse ProxSkip-Local beats RandProx-$l_1$.}\ 
+We finally note that \ourcomm outperforms \randproxlone and the other baselines.
+We make the following observations:
+1) \randproxlone reaches the desired sparsity only gradually.
+The theory only guarantees convergence to a sparse solution, but there is no guarantee during the training.
+Hence, the communication costs it occurs are larger than when applying $\topk$ directly to sparsify locally.
+2) One can notice an accuracy gain of \ourlocal compared to \randprox $l_1$.
+We attribute this to the bias induced by $l_1$ regularization.
+
+\subsection{Multiple Logistic Regression on FEMNIST}
+\label{chap:exp_LogR}
+
+\begin{figure}[t]
+	\centering
+	\includegraphics[width=\textwidth/300*185]{figs_arxiv/logR_trajectories_cost.pdf}
+	\includegraphics[width=\textwidth/300*97]{figs_arxiv/logR_trajectories_loss.pdf}
+	\caption{Results for logistic regression on FEMNIST at $99 \%$ sparsity.
+        \ourcomm and \ourlocal outperform all baselines both in communication costs and final accuracy.
+        The shaded area in the figures represents the standard error.}
+	\label{fig:LogR_results}
+\end{figure}
+
+\textbf{Setup.}\ 
+A more challenging but still convex setting is multiple logistic regression on the FEMNIST dataset~\citep{caldas2018leaf}.
+We take the naturally-occurring federated split but limit the number of clients to $N =100$.
+A similar approach was taken by \citet{jiang2022model} for $N = 193$.
+\medskip
+
+\noindent\textbf{Results.}\ 
+The general results are shown in Figure~\ref{fig:LogR_results}.
+Results on communication efficiency are reported in Table~\ref{table:LogR_comm}.
+As only \fediht enjoys communication speedup from compression, it is taken as the baseline so that the reported speedup is solely due to acceleration.
+We see that \ourlocal is $1.78$--$5.18\times$ more communication-efficient and \ourglobal is $4$--$20\times$ more communication-efficient than \fediht.
+If \fedht is taken as the baseline, which would be a usual approach for obtaining pruned models in FL~\citep{lee2024jaxpruner}, then \ourlocal is $9$--$18\times$ and \ourglobal is $20$--$70\times$ more communication-efficient than \fedht.
+
+Results on the final accuracy for different sparsity levels are reported in Table~\ref{table:LogR_acc}.
+One can observe that the advantage of our method is significant only with high sparsity levels. 
+That is,~at 80 \% there is just a $0.2 \%$ advantage, while at 99 \% the gap has widened to 7.4 \%.
+On the other hand, for sparsity $80$ \% and $90$ \% the performance of \finaltopk is competitive with 
+the other methods. 
+This suggests that achieving these sparsity levels is not challenging on FEMNIST.
+
+\begin{table}
+	\begin{center}
+    \caption{Communication costs to reach a certain test accuracy at $90 \%$ sparsity on FEMNIST.        Note that although the final accuracy for \ourglobal is below 80\% as seen in Table~\ref{table:LogR_acc}, it peaks at 84 \% early on.
+        The same holds for \finaltopk and 85 \%.
+    }
+    \label{table:LogR_comm}
+    \small
+        \begin{tabular}{clcccccc}
+            \toprule
+			& Test Accuracy Threshold & \multicolumn{2}{c}{80 \%} & \multicolumn{2}{c}{82.5 \%} & \multicolumn{2}{c}{85 \%} \\
+            \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
+			& Upload Communication Cost & Bits & Speedup & Bits & Speedup & Bits & Speedup \\
+			\midrule
+			\multirow{5}{*}{\rotatebox{90}{Existing}} 
+            & \finaltopk & 6.0 M & {\red 0.1}$\times$ & 16.6 M & {\red 0.1}$\times$  & 92.4 M & {\red 0.1}$\times$ \\
+			& \fedht & 4.0 M & {\red 0.2}$\times$ & 8.54 M & {\red 0.2}$\times$ & 45.7 M & {\red 0.3}$\times$  \\
+			& \fediht & 0.8 M & 1.0$\times$ & 1.61 M & 1.0$\times$ & 13.0 M & 1.0$\times$ \\
+			& \ourglobal & 2.0 M & {\red 0.4}$\times$ & 3.57 M & {\red 0.5}$\times$  & \xmark & \xmark \\
+            \midrule
+			\multirow{2}{*}{\rotatebox{90}{Ours}}
+            & \ourlocal & 0.5 M & {\green 1.8}$\times$ & 0.55 M & {\green 2.9}$\times$ & 2.52 M & {\green 5.2}$\times$ \\
+			& \ourcomm & 0.2 M & {\green 4.0}$\times$ & 0.35 M & {\green 4.6}$\times$ &  0.65 M & {\green 19}$\times$ \\
+            \bottomrule
+		\end{tabular}
+	\end{center}
+\end{table}
+
+\begin{table}
+	\begin{center}
+	   \caption{Test accuracy of logistic regression on FEMNIST for different sparsity levels.
+            The best accuracy for each sparsity level is highlighted in bold.
+        }
+        \label{table:LogR_acc}
+        
+		\begin{tabular}{clccccc}
+            \toprule
+			& Sparsity & 80 \%& 90 \% & 95 \% & 98 \% & 99 \%\\
+            \midrule
+			\multirow{4}{*}{\rotatebox{90}{Existing}} & 
+                \finaltopk & \red{84.7} \% & \red{79.9} \% & \red{69.6} \% & \red{40.1} \% & \red{25.5} \%  \\
+			& \fedht & 86.6 \% & 85.7 \% & 84.7 \% & 76.6 \% &  66.4 \% \\
+			& \fediht & \green{86.8} \% & \red{85.6} \% & \red{82.7} \% & \red{74.6} \% &  \red{65.4} \% \\
+			& \ourglobal & \red{77.9} \% & \red{77.5} \% & \red{76.8} \%  & \red{72.2} \% & \red{64.7} \%  \\
+            \midrule
+			\multirow{2}{*}{\rotatebox{90}{Ours}} & 
+            \ourlocal & \green{86.7} \% & \green{86.1} \% & \green{84.7} \% & \green{78.9} \% &  \green{\textbf{72.9}} \% \\
+			& \ourcomm & \green{\textbf{87.0}} \% & \green{\textbf{86.4}} \% & \green{\textbf{85.3}} \% & \green{\textbf{80.5}} \% &  \green{72.8} \% \\
+            \bottomrule
+		\end{tabular}
+	\end{center}
+\end{table}
+
+\subsubsection{Zero-Sum Control Variates}
+\label{chap:LogR_sum_hi}
+In Section~\ref{chap:proposed_method} we have demonstrated that if $\sum_i h_i \neq 0$, the algorithm diverges. This crucial observation is at the basis of our proposed method.
+We empirically confirmed on logistic regression for FEMNIST that this condition is violated for \ourglobal and that this property leads to impaired performance on real world datasets.
+
+To summarize, first, one can see that $\norm{\sum_i h_i} > \frac 1 N \sum_i \norm{h_i}$ showing that the sum is substantially far away from $0$.
+Second, one can see that the algorithm converges to a substantially different solution as $\norm{w}$ differs substantially between \ourglobal and all other algorithms.
+The same holds for the norm of the gradient.
+To furthermore test the affect for real world test accuracy of FEMNIST, we can come up with a modified variant of \ourglobal which keeps this conditions (as \ourglobal does not) and \ourcomm which violates this condition (as it always holds for \ourcomm).
+We can see in Figure~\ref{fig:control_sum_test} that in both cases, the variant that keeps $\sum_i h_i =0$ outperforms its counterpart substantially.
+
+\subsection{Deep Learning Experiments}
+\label{chap:exp_deep_learning}
+
+\begin{figure}
+	\centering
+	\includegraphics[width=\textwidth/300*180]{figs_arxiv/dnn_trajectories_acc.pdf}
+	\includegraphics[width=\textwidth/300*98]{figs_arxiv/dnn_trajectories_loss.pdf}
+    \caption{Results for ResNet18~\citep{he2016deep} on CIFAR10~\citep{cifar10} at $90 \%$ sparsity.
+        \ourcomm is still able to outperform the baselines, although to a lesser degree.
+        The main observation is that \ourglobal fails completely in accuracy and loss because of $|\sum h_i| \gg 0$ and that the proposed fixes of \ourcomm address this problem.
+        The shaded area in the figures represents the standard error.
+        }
+	\label{fig:dnn_trajectory}
+\end{figure}
+
+Further nonconvex experiments were conducted on CIFAR10~\citep{cifar10} using ResNet18~\citep{he2016deep}.
+One can observe the results for $90 \%$ sparsity in Figure~\ref{fig:dnn_trajectory}.
+Mainly, we note that \ourglobal fails completely both in accuracy and in the loss increasing instead of decreasing.
+The algorithm does not head towards a minimum of the loss.
+This is because early on, the sum of the control variates $\sum h_i$ grows quickly and shifts all subsequent local gradients.
+Hence, one can see that keeping $\sum h_i = 0$ is particularly important for large models.
+Furthermore, one can see that the proposed variant \ourcomm performs best and gives the highest final accuracy.
+We attribute the higher final accuracy to the control variates counteracting client drift.
+On the other hand, in this scenario we do not see a benefit from acceleration.
+This aligns with earlier observations that acceleration faces challenges in deep learning~\citep{defazio2019ineffectiveness} and that addressing client drift proves beneficial for final accuracy nonetheless~\citep{li2023effectiveness}.
+However, \citet{li2023effectiveness} found that control variates also benefit to the communication cost in highly heterogenous settings.
+We thus hypothesize that our setting was not heterogenous enough.
+While we applied the same federation process as \citet{li2023effectiveness}, the different observation might be due to full client participation and a small number of clients in our experiments.
+In this setting, the amount of data per client is large and the heterogeneity of the Dirichlet distribution with parameter $\alpha$ might not lead to the same level of heterogeneity.
+
+
+
+\section{Conclusion}
+
+\label{chap:conclusion}
+
+We investigated whether it is possible in FL to combine the recent theoretical advances of acceleration and client drift mitigation via local training, with sparse training.
+We showed that 1) the naive combination of these techniques fails; 2) it is theoretically and empirically crucial to keep the sum of the control variates to zero; 3) pruning should be done at the clients, not the server.
+Based on these important findings, we developed a theoretically-motivated method, \ourcomm, which integrates the successful mechanism of $\topk$ for sparse training in FL. Our experiments confirm its efficiency.
+
+
+

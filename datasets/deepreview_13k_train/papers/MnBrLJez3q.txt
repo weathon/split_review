@@ -1,0 +1,738 @@
+\title{Temperature Optimization for Bayesian Deep Learning}
+
+\begin{abstract}
+  The Cold Posterior Effect (CPE) is a phenomenon in Bayesian Deep Learning
+  (BDL), where tempering the posterior to a cold temperature often improves the
+  predictive performance of the posterior predictive distribution (PPD).
+  Although the term `CPE' suggests colder temperatures are inherently better,
+  the BDL community increasingly recognizes that this is not always the case.
+  Despite this, there remains no systematic method for finding the optimal
+  temperature beyond grid search. In this work, we propose a data-driven
+  approach to select the temperature that maximizes test log-predictive density,
+  treating the temperature as a model parameter and estimating it directly from
+  the data. We empirically demonstrate that our method performs comparably to
+  grid search, at a fraction of the cost, across both regression and
+  classification tasks. Finally, we highlight the differing perspectives on CPE
+  between the BDL and Generalized Bayes communities: while the former primarily
+  focuses on predictive performance of the PPD, the latter emphasizes calibrated
+  uncertainty and robustness to model misspecification; these distinct
+  objectives lead to different temperature preferences.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The last two decades have seen substantial advances in the development of machine
+learning tools. This has led to deployment across a range of application
+domains, from image recognition and natural language processing to autonomous
+vehicles and medical diagnostics, to name a few. Driven in no small part by the
+technological advances that have enabled large-scale training of high-fidelity
+models, these models obtain impressive generalization performance and accuracy
+that are not readily explained with classical statistical wisdom.
+
+One promising avenue that has been explored for explaining and enhancing
+performance, as well as providing much-needed robustness guarantees, is
+\textbf{Bayesian deep learning} (BDL). However, extending classical Bayesian
+techniques to the machine learning setting is a formidable task---the scale of
+both the data and model size render na\"ive extensions intractable. Combined with
+the fact that neural network models are typically singular \citep{wei22deep},
+the mismatch between the size of the data and the number of parameters makes
+many of the classical asymptotics inappropriate when applied to problems of
+interest. Furthermore, a number of phenomena have been observed when analyzing
+deep learning models that were previously considered curiosities or corner-cases
+in the classical setting.
+
+A prominent example of this is the so-called \textbf{cold posterior effect}
+(CPE). Named in analogy with statistical physics, tempered posteriors are obtained by raising the posterior density to the power of an artificial inverse-temperature parameter. The
+CPE refers to improved generalization performance of the \textbf{posterior
+  predictive density} (PPD) in both regression \citep{adlam20cold} and
+classification \citep{wenzel20how} tasks when the temperature $\T$ is taken to
+be cold with $0< \T < 1$. This peculiar effect is frequently viewed as a hack to
+improve generalization performance, and has led to a plethora of works that
+attempt to explain or `fix' the CPE, see \cref{sec:bdl-lens} for a literature
+review.
+
+\paragraph{Contribution.}
+There is growing recognition in the BDL community that, despite the term `CPE',
+colder temperatures do not always result in better predictive performance for
+the PPD \citep{adlam20cold,zhang24cold}. Unfortunately, the common approach of
+temperature tuning via grid search is computationally expensive, as it requires
+extra posterior sampling for multiple $\T$ across the grid\footnote{Consider
+  ResNet20-CIFAR10 for example. Our approach requires only 35 minutes to find
+  the optimal $\T$, and an additional 327 minutes to compute the posterior at
+  that optimal $\T$. In contrast, a grid search across 10 temperatures takes a
+  substantial 3270 minutes, resulting in a 9x speedup with our method.}.
+Sampling from a cold posterior is challenging and requires careful tuning of the
+sampler with temperature diagnostics \citep{wenzel20how}. To address these
+issues, we propose a data-driven method to select an appropriate temperature. To
+the best of our knowledge, no such dedicated tool exists without appealing to
+intermediate approximations (e.g.,~variational inference
+\citep{laves21posterior}). Our method only requires maximizing a likelihood
+function to find a suitable temperature. This can usually be done as part of the
+sampler warm-up phase, and importantly, does not require any extra posterior
+sampling.
+
+
+
+\section{Tempered Posteriors and the Cold Posterior Effect}
+
+\label{sec:poss-expl-cpe}
+Let $\{q(x, y), p(x, y | \param), p(\param)\}$ form a triplet representing the
+truth-model-prior, where the data-generating mechanism is
+$q(x, y) = q(y | x) q(x)$, the model $p(x, y | \param) = p(y | x, \param) q(x)$
+is indexed by $\param \in \setparam \subseteq \R^{\dimparam}$ representing
+neural network weights, and the prior on $\theta$ is $p(\theta)$. Here, we focus
+on a supervised learning setup with a training dataset
+$\train = \{(x_i, y_i)\}_{i=1}^\ntrain$ containing $\ntrain$ observations drawn
+from $q(x,y)$. The standard Bayesian update is derived from Bayes' theorem,
+resulting in the \textit{standard posterior} distribution,
+\begin{equation}
+  \label{eq:standard-rule}
+  p(\param | \train) \propto  p(\param) \prod_{(x, y) \in \train } p(y | x, \param).
+\end{equation}
+By introducing a `temperature' parameter, we obtain a family of \textit{tempered
+  posteriors} $p_{\beta}(\param | \train)$ by raising the likelihood and prior
+to the power of the \textit{inverse temperature} $\beta \coloneq \frac{1}{T}$
+for $\beta>0$,
+\begin{equation}
+  \label{eq:temper-posterior}
+  p_{\beta}(\param | \train)
+  \propto  p(\param)^{\beta}
+  \prod_{(x, y) \in \train} p(y | x, \param)^{\beta}.
+\end{equation}
+The CPE describes a phenomenon in Bayesian deep learning where the PPD,
+\begin{equation}
+  \label{eq:smpd}
+  p_{\beta}(y | x, \train)
+  \coloneq \mathbb{E}_{p_{\beta}(\param | \train)}[p(y | x, \param)]
+  = \int p(y | x, \param) p_{\beta}( \param| \train ) \, \textrm{d}\param,
+\end{equation}
+which is constructed from Bayesian model averaging, can achieve better
+performance (in terms of the test LPD defined below) in regression and
+classification by artificially tempering the posterior to $\beta > 1$
+\citep{wenzel20how}. While our construction in \eqref{eq:temper-posterior}
+follows the convention of tempering both the likelihood \textit{and} the prior
+\citep{wenzel20how, fortuin22bayesian}, improvements in performance have also
+been observed when only tempering the likelihood
+\citep{aitchison21statistical,bachmann22how, kapoor22uncertainty}.
+
+Define the test log predictive density (LPD) of a predictive density $\hat p(y|x)$ as
+\begin{equation*}
+  \LPD(\hat p(y|x)) \coloneq \mathbb{E}_{q(x,y)} \log \hat p(y|x),
+\end{equation*}
+where the hat over $p$ indicates dependence on the training data $\train$, and
+the expectation is only taken over the `new' observation $(x,y)$. Note that the
+test~LPD is sometimes referred to as the `test log-likelihood' in the
+literature, and the negative test LPD is often called `negative log-likelihood
+(NLL)'. However, we will avoid these terms as they can sound ambiguous. It can
+be shown that a predictive density $\hat p(y|x)$ with a higher test~LPD is
+closer to the truth $q(y|x)$ in the sense that the Kullback-Leibler (KL) divergence
+$\KL(q(y | x) \| \hat p(y|x))$ is smaller. Our primary interest in this work is to select $\beta$ such that the test LPD of \eqref{eq:smpd} is high.
+\subsection{Outline}
+Following the reasoning that the aleatoric uncertainty in the data can be
+quantified by $\beta$ \citep{adlam20cold,kapoor22uncertainty}, we advocate a
+likelihood-based approach to select $\beta$ directly from the data; details are
+presented in \cref{sec:how-pick-right}. We empirically show that our method can
+select a $\beta$ that is near-optimal according to the LPD metric. Experimental
+results are presented in \cref{sec:experiments}.
+
+We then conclude with a detailed discussion aimed at dispelling some common
+misconceptions surrounding the CPE. In particular, we review recent work in the BDL
+community that explains why colder temperatures do not always lead to better
+performance in terms of the test LPD metric. We also address the converse hypothesis sometimes encountered outside the BDL literature---that warmer temperatures are often better. This can hold, but only for metrics that differ fundamentally from test LPD.
+Specifically, in Sections~\ref{sec:bdl-lens} and~\ref{sec:model-free-bayesian},
+we examine existing literature on CPE from the perspectives of the BDL and
+Generalized Bayes (GB) communities, respectively. We emphasize that these two
+communities prioritize different objectives: in BDL, the primary focus is on
+maximizing the predictive performance of the PPD, while in GB, the emphasis lies
+on robustness to model misspecification and calibrated uncertainty. Furthermore,
+the types of statistical models and datasets explored in each community are
+notably distinct. In BDL, large-scale neural networks are trained on extensive,
+nearly noiseless datasets, whereas in GB, the datasets are typically smaller,
+noisier, and the models are classical regular statistical models. Consequently,
+it is not surprising that each community arrives at different recommendations
+regarding temperature tuning.
+
+
+
+\section{Temperature Selection for Test LPD}
+
+\label{sec:how-pick-right}
+It is commonly believed that the PPD \eqref{eq:smpd} at $\beta=1$ is optimal for
+test LPD when the model is well-specified
+\citep{adlam20cold,aitchison21statistical}. However, this is not always the case
+(see \cref{sec:div-truth-ppd} for a counter-example). In fact,
+\citet{zhang24cold} argues that in the likelihood tempering case, $\beta = 1$
+can only be optimal if the expected Gibbs training loss remains unchanged with
+the inclusion of new data. We follow the reasoning in \citet{zhang24cold} and
+reach a similar conclusion for posterior tempering; see
+\cref{sec:optimality-test-lpd} for details. This motivates the development of an
+efficient method to select the optimal $\beta$.
+If we could have some theoretical grasp on how temperature affects the test LPD
+of the PPD in~\eqref{eq:smpd}, that is, $\LPD(p_{\beta}(y | x, \train))$, then
+it might suggest a methodology for temperature selection. A little known result
+to the BDL and GB communities is the following from singular learning theory
+\citep[Lemma 3]{watanabe10asymptotic}, which applies to both regular and
+singular models $p(y|x,\param)$:
+\begin{align}
+  -\E_{\train} \LPD(p_{\beta}(y | x, \train))
+   & = -\E_{\train} \E_{q(x, y)} \log p_{\beta}(y | x, \train) \nonumber \\
+   & = -\E_{q(x, y)} \log p(y|x, \param_\dag)
+  + \left [\frac{\lambda-\nu(\beta)}{\beta} + \nu(\beta) \right ] \frac{1}{\ntrain}
+  + o\left( \frac{1}{\ntrain}\right)
+  \label{eq:slt}
+\end{align}
+where $\param_\dag \in \argmin_{\param} \KL(q(y|x) \| p(y|x,\param))$. Here
+$\lambda$ and $\nu$ are strictly positive numbers, respectively known as the
+learning coefficient and singular fluctuation. They are invariants of the
+underlying truth-model-prior triplet. Note that $\lambda$ is independent of $\beta$
+while $\nu$ is a (complex) function of $\beta$. The functional dependence of $\nu$
+on $\beta$ is unknown in the current singular learning theory literature.
+
+Some comments on \eqref{eq:slt} are in order. This result allows for both misspecification ($\param_\dag$ is not necessarily such that the
+KL divergence between the truth and $p(y|x,\param_\dag)$ is zero) and singular models singular models $p(y|x,\param)$,
+including neural networks, as well as classical models satisfying standard
+regularity conditions. On the other hand, it is
+an asymptotic result in the sample size $\ntrain$, and hence the prior plays no role. We also remark that the relation in \eqref{eq:slt} pertains to the
+\textit{average} (negative) test LPD of the PPD in \eqref{eq:smpd}, with the
+average taken over the training set $\train$, as indicated by the notation
+$\E_{\train}$. More precise interpretation of \eqref{eq:slt} can be divided into two settings:
+
+\paragraph{Regular models.} For well-specified regular models,
+$\lambda = \nu(\beta) = \dimparam / 2$ for all $\beta$
+\citep{watanabe09algebraic}, and the second term,
+$\left [ \frac{\lambda-\nu(\beta)}{\beta} + \nu(\beta) \right ] \frac{1}{\ntrain}$,
+reduces to $\frac{\dimparam}{2\ntrain}$. This implies
+that for large $n$, temperature has little impact (though it may appear in
+higher-order terms in the expansion). This aligns with recent work by
+\citet{mclatchie24predictive}, which arrives at a similar conclusion using
+different techniques. Under model misspecification, the second term can
+alternatively be expressed as $\frac{\beta}{n} \E_\train V(n)$
+\citep{watanabe10equations}, where $V(n)$ represents the functional variance and
+now depends on the temperature in a non-trivial manner.
+
+\paragraph{Singular models.} The asymptotic relation in \eqref{eq:slt} also
+applies to singular models, e.g.,~neural network models \citep{wei22deep}.
+However, the theoretical values of $\lambda$ are generally unknown, except for a
+few simple models, such as one-layer tanh or reduced rank regression, in the
+well-specification setting
+\citep{yamazaki03singularities,aoyagi05stochastic,rusakov05asymptotic,zwiernik11asymptotic}.
+Similarly, the singular fluctuation and its temperature dependence are unknown,
+even in the well-specification setting.
+
+Since our setup involves modern deep learning models, we are dealing with
+singular models, where $\lambda$ and $\nu$ are unknown. While methods to
+estimate $\lambda$ and $\nu$ from training data do exist
+\citep{lau23quantifying,watanabe10asymptotic}, they require posterior sampling
+over neural network weights. In principle, we could use these sample-based
+estimates to select the optimal $\beta$, but this would require posterior
+sampling at multiple temperatures and is no better than a grid search. As this
+approach is computationally challenging for deep learning applications, we are
+motivated to propose a data-driven technique for efficiently determining the
+optimal temperature, which we detail in the next section.
+
+
+\subsection{Selecting Temperature using the Tempered Model}
+\label{sec:model-prior-induced}
+In this section, we introduce a method to select $\beta$ that corresponds to
+high test LPD in both regression and classification tasks. Our approach is
+grounded in the insight that the tempered posterior can be reframed as the
+posterior from an alternative model-prior pair \citep{zeno20why,zhang24cold}.
+Following these works, we define the \textit{tempered model},
+\begin{equation}
+  \label{eq:tempered-model}
+  p(y | x, \param, \beta)
+  \coloneq \frac{p(y | x, \param)^{\beta}}
+  {\int p(y^{\prime} | x, \param)^{\beta} \textrm{d}y^{\prime} } .
+\end{equation}
+From here, the tempered posterior in~\eqref{eq:temper-posterior} can be equivalently expressed
+as
+\begin{equation}
+  p_{\beta}(\param | \train)
+  \propto \tilde p (\param | \beta)
+  \prod_{(x, y) \in \train} p(y|x, \param, \beta),
+  \label{eq:reformulated-tempered-posterior}
+\end{equation}
+where the `rest of the terms',
+$\tilde p (\param | \beta) \propto p(\param)^{\beta} \prod_{x \in \train} \int p(y^{\prime} | x, \param)^{\beta} \textrm{d}y^{\prime}$,
+can be viewed as a prior on $\param$ with the `normalizing constant' being a
+function of $x$. Note that $\tilde p (\param | \beta)$ can be seen as an
+input-dependent prior \citep{zeno20why} but we suppress the dependence on $x$ in
+the notation. The (inverse) temperature $\beta$ has an intuitive interpretation
+of controlling the `spikiness' of the tempered model. We give two examples with
+Gaussian (regression) and categorical (classification) models:
+\paragraph{Regression.}
+Given an arbitrary scalar function $\mu(x; \param)$ and a fixed, known variance
+$\sigma^2$, we have a Gaussian model:
+$p(y | x, \param) = \mathcal{N}(y | \mu(x; \param), \sigma^2)$.
+This leads to
+\begin{equation*}
+  p(y | x, \param, \beta)
+  = \mathcal{N}\left(y \left|\, \mu(x; \param), \frac{\sigma^2}{\beta}\right.\right),
+  \quad \tilde p(\param | \beta)
+  \propto p(\param)^{\beta} \left( \dfrac{2\pi \sigma^2}{\beta(2\pi \sigma^2)^{\beta}} \right)^{\ntrain/2} .
+\end{equation*}
+Therefore, the temperature effectively scales the model and prior variance. For
+brevity, we suppress the dependency of $p(y | x, \param, \beta)$ on the
+fixed $\sigma^{2}$ in the notation.
+
+\paragraph{Classification.}
+In $K$-class classification, we have $p(y | x, \param) = f_y(x; \param)$ for
+$ y \in \{1,\ldots, K\}$, where $f_y(\cdot)$ denotes the $y$-th entry of a
+softmax output $f$. This leads to
+\begin{equation*}
+  p(y | x, \param, \beta)
+  = \dfrac{\exp (\beta f_{y}(x; \param) )}{\sum^{K}_{k=1} \exp (\beta f_{k}(x; \param))},
+  \quad
+  \tilde p(\param | \beta)
+  \propto p(\param)^{\beta} \prod_{x \in \train} \sum_k [f_{k}(x; \param)]^{\beta} .
+\end{equation*}
+This tempered model is also known as the \textit{tempered softmax} \citep{hinton15distilling, agarwala23temperature}. For large $\beta$,
+the tempered model will concentrate most of the mass in one class, and the
+converse will encourage a more uniform distribution of mass across all classes. For
+$\beta > 1$, the prior $\tilde p(\param | \beta)$ will also favor~$f$ that
+concentrates mass in one class.
+
+As $\beta$ can be used to capture aleatoric uncertainty in the data
+\citep{adlam20cold,kapoor22uncertainty}, we propose selecting $\beta$ using a
+maximum likelihood estimator for the tempered model in
+\eqref{eq:tempered-model}:
+\begin{equation}
+  \label{eq:temp-mle}
+  \hat \param^{*}, \hat \beta^{*}
+  \coloneq \argmax_{\param, \beta} \frac{1}{\ntrain} \sum_{(x,y) \in \train}[\log p(y | x, \param, \beta )].
+\end{equation}
+Standard consistency results imply that, under mild conditions, provided the
+model is regular and \emph{some} tempered model is well-specified,
+choosing parameters according to \eqref{eq:temp-mle} recovers the optimal model as $\ntrain \to \infty$
+\citep[Chapter 5.2]{vaart98asymptotic}. In practice, we optimize this using SGD,
+and stop when the log-likelihood shows no further improvement on a validation
+set. To ensure that $\beta$ remains positive, we reparameterize it as
+$\exp(\log \beta)$ and optimize with respect to $\log \beta$. Further
+implementation details are provided in \cref{sec:algorithm-structure}. We also
+discussed several variants of our proposed method in
+\cref{sec:alternative-strategies}.
+\subsection{Supporting theory}
+\label{sec:supporting-theory}
+Ideally, we would like to theoretically show that the temperature selection
+method in \eqref{eq:temp-mle} produces high test LPD of \eqref{eq:smpd}.
+However, it turns out that the theoretical guarantees are more natural for a
+related object which is suggested by the reformulation of the tempered posterior
+in \eqref{eq:reformulated-tempered-posterior}. Namely, we can consider an
+alternative PPD that is the expectation of the \textit{tempered model}:
+\begin{equation}
+  \label{eq:tmpd}
+  \E_{p_{\beta}(\param | \train)} p(y | x, \param, \beta)
+  = \int p(y | x, \param, \beta) p_{\beta}(\param | \train) \textrm{d}\param.
+\end{equation}
+This is also the object of study in \citet{adlam20cold} and is to be contrasted
+with the PPD in~\eqref{eq:smpd}. We emphasize that our temperature selection
+method can be used with either \eqref{eq:smpd} or \eqref{eq:tmpd}, and we will
+compare the resulting performance of our method for these two PPDs in the experiments in
+\cref{sec:experiments}.
+To study the theoretical properties of the temperature selection method for \eqref{eq:tmpd}, we consider the objective at
+the population level, leading to
+\begin{equation*}
+  \param^{*}, \beta^{*} \coloneq \argmax_{\param, \beta} \E_{q(x, y)} \log p(y | x, \param, \beta ).
+\end{equation*}
+We justify $\beta^*$ in the case of Gaussian linear regression, but our
+temperature methodology can be applied in far more general settings as we
+demonstrate in \cref{sec:experiments}. We first compute the test LPD constructed
+with~\eqref{eq:tmpd} and show that $\beta^{*}$ approximately maximizes a lower
+bound of the test LPD.
+
+\begin{lemma}
+  \label{thm:linear-lpd}
+  Consider a linear regression model
+  $p(y | x, \param) = \mathcal{N}(y | x^{\top} \param, \sigma^{2})$ with a
+  $d$-dimensional input $x$ and known variance $\sigma^{2}$, and a prior
+  $p(\param) = \mathcal{N}(\param | 0, \sigma^{2}_{p})$ with finite variance
+  $\sigma^{2}_{p}$. Let
+  $\bm{X} \coloneq (x_{1}, \ldots, x_{\ntrain})^{\top} \in \mathbb{R}^{\ntrain \times d}$
+  and
+  $\bm{\Sigma} \coloneq (\bm{X}^{\top}\bm{X} + \frac{\sigma^{2}}{\sigma^{2}_{p}} \bm{I})^{-1}$.
+  The test LPD of the PPD in~\eqref{eq:tmpd} at a fixed $\beta$ is bounded from
+  below:
+  \begin{equation*}
+    \LPD(\E_{p_{\beta}(\param | \train)}[p(y | x, \param, \beta)])
+    > \E_{q(x, y)}  \log p(y | x, \hat{\param}_{\textrm{MAP}}, \beta)
+    -\frac{1}{2} \E_{q(x, y)}  \log{(1 + x^{\top} \bm{\Sigma} x)} ,
+  \end{equation*}
+  where $\hat{\param}_{\textrm{MAP}} \coloneq \bm{\Sigma} \bm{X}^{\top} \bm{y}$
+  is the \emph{maximum-a-posteriori} solution of the posterior
+  $p_{\beta}(\param | \train)$ at $\beta = 1$ and
+  $\bm{y} \coloneq (y_{1}, \ldots y_{\ntrain})^{\top} \in \mathbb{R}^{\ntrain}$.
+\end{lemma}
+
+The proof can be found in \cref{sec:proof-linear-lpd}. As our goal is to select
+$\beta$ that maximizes test LPD, a reasonable strategy is to optimize the lower
+bound presented in \cref{thm:linear-lpd} with respect to $\beta$. As the second
+term in the lower bound is independent of $\beta$, this is therefore equivalent
+to maximizing the first term,
+$\E_{q(x, y)} \log p(y | x, \hat{\param}_{\text{MAP}}, \beta)$. Note that this
+objective function requires $\hat{\param}_{\text{MAP}}$, which is often
+unavailable in closed-form. A straightforward solution is to replace it with an
+estimate from an iterative optimizer, before optimizing again with respect to
+$\beta$. This comes at the cost of two optimization runs (and the effort to tune
+their hyperparameters). Instead, we propose maximizing the empirical version of
+$\E_{q(x, y)} \log p(y | x, \param, \beta)$ with respect to $\param$ and $\beta$
+simultaneously, leading us back to \eqref{eq:temp-mle}. We study the efficacy of
+this method empirically in the next section.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We now illustrate the behavior of the PPDs, \eqref{eq:smpd} and \eqref{eq:tmpd},
+across different values of $\beta$ on a suite of benchmark datasets for both
+regression and classification tasks. We refer to \eqref{eq:smpd} as SM-PD and
+\eqref{eq:tmpd} as TM-PD, where SM and TM stand for standard model and tempered
+model, respectively. Notably, our data-driven procedure for selecting $\beta$ is
+agnostic to its downstream use in either SM-PD or TM-PD. We demonstrate that the
+proposed method performs well in both according to the test LPD metric. While
+our method aims to maximize test LPD and is supported by the theory discussed in
+\cref{sec:supporting-theory}, we also evaluate the point prediction of the PPD.
+Specifically, we use $\hat{y} = \E_{p_{\beta}(y | x, \train)}[y]$ to compute
+mean squared error (MSE)
+$ \frac{1}{|\test|} \sum_{(x, y) \in \test} (y - \hat{y})^{2}$ for regression
+tasks, and $\hat{y} = \arg\max_{y} p_{\beta}(y | x, \train)$ to compute accuracy
+$\frac{1}{|\test|} \sum_{(x, y) \in \test} \mathds{1}[y = \hat{y}]$ for
+classification tasks. By definition, these point predictions $\hat{y}$ are
+identical across SM-PD and TM-PD, and their results are consolidated in our
+reporting. We compare our method against a grid search over
+$\beta \in \{ 0.1, 0.3, 1, 3, \ldots, 1000 \}$, corresponding to increments of
+roughly 0.5 on the $\log_{10}$ scale. The optimal $\beta$ from the grid search
+is selected based on test LPD, MSE, or accuracy on a validation set\footnote{In
+  contrast, our method tracks the log-likelihood of $p(y | x, \param, \beta)$ on
+  a validation set}, and the optimal $\beta$ may differ depending on the metric
+used.
+
+To illustrate our method, we follow the experimental setup of
+\citet{wenzel20how}. Regression tasks are conducted using a one-layer ReLU
+network on UCI datasets (Concrete, Energy, Naval), while classification is
+performed using a CNN on MNIST and a ResNet20 on CIFAR10, both with and without
+data augmentation (DA). For the prior on neural network weights, we restrict
+$p(\param)$ to a zero-mean isotropic Gaussian, as this is a common choice for
+achieving state-of-the-art performance \citep{izmailov21what}. Further details
+on the model and prior can be found in \cref{sec:model-prior}.
+
+We employ the stochastic-gradient Markov chain Monte Carlo (SGMCMC) algorithm
+from \citep{wenzel20how} with a cyclical step-size scheduler
+\citep{zhang20cyclical} to sample from the posterior (details in
+\cref{sec:sgmcmc}). Hyperparameters are carefully tuned based on the temperature
+diagnostics in \citet{wenzel20how} to ensure sampler convergence to the
+posterior with the specified~$\beta$; see \cref{sec:sgmcmc-diagnostics} and
+\cref{sec:hyperparameters} for diagnostics and hyperparameters. This approach
+contrasts with the common practice of tuning hyperparameters for predictive
+performance. For CIFAR10, we collect 30 samples per run, and 100 for all other
+datasets. Each SGMCMC run is repeated five times with different initializations
+to generate five sets of posterior samples.
+\subsection{Results}
+\paragraph{Comparison between SM-PD and TM-PD.}
+The test LPD across different temperatures for SM-PD and TM-PD are shown in
+\cref{fig:test-tempered-lpd-compare}; see \cref{sec:extra-figures} for
+additional figures. For Concrete, Energy, Naval and MNIST, we observe that TM-PD
+generally outperforms SM-PD. This is perhaps not surprising, as we expect the
+former to better account for aleatoric uncertainty. For Concrete and MNIST, the
+peaks of SM-PD and TM-PD also coincide. Surprisingly, TM-PD does not outperform
+SM-PD in the CIFAR10 examples.
+
+In terms of the efficacy of our temperature selection method, we find that it
+can generally recover $\beta$ with a good test LPD. An interesting observation
+here is that our method tends to select the optimal~$\beta$ for TM-PD in the
+regression examples, and optimal $\beta$ for SM-PD in the classification
+examples.
+
+We also report MSE (for regression) and accuracy (for classification) to assess
+the point predictions of the PPDs. As the point predictions are identical across
+SM-PD and TM-PD by definition, we consolidate the results in
+\cref{tab:test-results}. In general, we observe that SM-PD and TM-PD outperform
+both SGD and the PPD at $\beta=1$ across both metrics. Furthermore, our method
+can select temperatures that achieves similar, if not better, performance than
+that computed from the grid search.
+
+\begin{figure*}[h]
+  \vskip 0.2in
+  \begin{center}
+    \centerline{\includegraphics[width=\linewidth]{plots/test-tempered-lpd-compare}}
+    \caption{ Test LPD plotted against inverse temperature $\beta$. We compare
+      two types of PPD: SM-PD (green) as defined in \eqref{eq:smpd} and TM-PD
+      (blue) as defined in \eqref{eq:tmpd}. Zoomed-in versions of these curves
+      are also provided in \cref{fig:test-lpd} and \cref{fig:test-tempered-lpd},
+      respectively. In each example, we have five evaluations of
+      $\hat \beta^{*}$ from our method. Each of these $\hat \beta^{*}$ has a
+      corresponding test LPD computed with SM-PD (red circle) and TM-PD (red
+      cross). Some of the red crosses in the CIFAR-10 examples are out of range.
+      Solid lines and shaded areas represent the mean $\pm$ standard error
+      across five repetitions. The vertical dotted lines indicate the PPD at
+      $\beta = 1$. Higher test LPD is better. }
+    \label{fig:test-tempered-lpd-compare}
+  \end{center}
+  \vskip -0.2in
+\end{figure*}
+\begin{table*}[t]
+  \caption{ MSE (for regression) and accuracy (for classification) of the point
+    predictions of the PPDs at $\beta = 1$, $\beta = \hat \beta^{*}$ (our
+    method), and the optimal $\beta$ obtained from grid search. We also include
+    the predictions from SGD as a baseline. The results for SM-PD and TM-PD are
+    consolidated, as both produce identical point predictions by definition. The
+    presented values are means $\pm$ standard error across five repetitions,
+    with the best value among the four methods boldfaced. The PPDs at
+    $\beta \neq 1$ generally outperform SGD and the PPD at $\beta = 1$, and our
+    method can achieve comparable, if not better, performance than the grid
+    search. }
+  \label{tab:test-results}
+  \vskip 0.15in
+  \begin{center}
+    \begin{small}
+      \begin{sc}
+        \begin{tabular}{lcccccc}
+          \toprule
+          \multirow{2}{*}{Method}  & \multicolumn{3}{c}{MSE $\downarrow$ ($\times 10^{-3}$) } & \multicolumn{3}{c}{Accuracy $\uparrow$}                                                                                                              \\
+          \cmidrule(lr){2-4}           \cmidrule(lr){5-7}
+                                   & Concrete                                                 & Energy                                  & Naval                      & MNIST                     & CIFAR10                 & CIFAR10 (DA)            \\
+          \midrule
+          SGD                      & $106 \pm 20$                                             & $1.7 \pm 0.2$                           & $0.149 \pm 0.063$          & $99.05 \pm 0.11$          & $84.9 \pm 3.4$          & $91.9 \pm 0.3$          \\
+          $\beta = 1$              & $\mathbf{75 \pm 7}$                                      & $2.1 \pm 0.1$                           & $0.045 \pm 0.005$          & $99.28 \pm 0.04$          & $89.1 \pm 0.3$          & $88.4 \pm 0.2$          \\
+          $\beta = \hat \beta^{*}$ & $82 \pm 4$                                               & $1.6 \pm 0.1$                           & $0.032 \pm 0.009$          & $\mathbf{99.38 \pm 0.03}$ & $\mathbf{89.9 \pm 0.2}$ & $\mathbf{92.8 \pm 0.2}$ \\
+          Grid                     & $76 \pm 8$                                               & $\mathbf{1.4 \pm 0.1}$                  & $\mathbf{0.027 \pm 0.008}$ & $99.32 \pm 0.05$          & $\mathbf{89.9 \pm 0.2}$ & $\mathbf{92.8 \pm 0.4}$ \\
+          \bottomrule
+        \end{tabular}
+      \end{sc}
+    \end{small}
+  \end{center}
+  \vskip -0.1in
+\end{table*}
+
+\paragraph{Optimal temperature across data augmentation strength.}
+It has been frequently observed that data augmentation is one of the key ingredients
+for observing CPE, and the optimal temperature may depend on the strength of
+data augmentation \citep{bachmann22how}. In view of this, we conducted an
+experiment to determine how the optimal temperature differs across different
+levels of augmentation. Here we only focus on SM-PD and present the
+results in \cref{fig:test-lpd-da}. We observe a subtle and gradual increase in
+the optimal temperature with the strength of data augmentation. Moreover, our
+method can also recover temperatures that produce good test LPD and accuracy
+under different augmentation levels. Note that, in addition to the well-known
+CPE observed in CIFAR-10 with data augmentation, it also manifests in a milder
+form in our CIFAR-10 experiments without data augmentation. This contrasts with
+previous studies reporting the absence of CPE in the same setup
+\citep{izmailov21what}.
+\begin{figure*}[t]
+  \vskip 0.2in
+  \begin{center}
+    \centerline{\includegraphics[width=\linewidth]{plots/test-da.pdf}}
+    \caption{ Test LPD and accuracy of CIFAR-10 plotted against inverse
+      temperature $\beta$ under various levels of data augmentation (color). The
+      lines and shaded areas represent the mean $\pm$ standard error across five
+      repetitions. There are five dots for each colored curve, and each of these
+      dots corresponds to a repetition of $\hat \beta^{*}$ from our method. The
+      vertical dotted lines indicate the PPD at $\beta = 1$. There is a subtle
+      shift of peaks from left to right as the augmentation strength increases.
+      Higher test LPD and accuracy indicate better performance. }
+    \label{fig:test-lpd-da}
+  \end{center}
+  \vskip -0.2in
+\end{figure*}
+
+
+
+\section{CPE through the lens of Bayesian Deep Learning}
+
+\label{sec:bdl-lens}
+Since the publication of \citet{wenzel20how}, there have been numerous attempts
+to explain CPE, with particular focus on predictive metrics such as test LPD,
+accuracy (for classification), and MSE (for regression). In addition to the
+arguments presented in \cref{sec:how-pick-right}, we provide a summary of the
+popular insights into CPE from the BDL literature here.
+
+\paragraph{Poor posterior approximation.}
+One explanation for the presence or absence of CPE is inadequate posterior
+approximation, e.g.,~an inappropriate choice of step size, or the omission of
+Metropolis-Hastings steps in the SGMCMC sampler. However, as shown in
+\cref{sec:div-truth-ppd,sec:optimality-test-lpd}, CPE is not solely an artifact
+of poor posterior approximation and can be observed theoretically.
+\paragraph{Likelihood corruption due to data augmentation.}
+It has been widely observed that the use of data augmentation often amplifies
+CPE \citep{izmailov21what}, while being less pronounced when data augmentation
+is turned off. It is argued that the augmented data violate the usual
+independent and identically distributed (i.i.d.)~assumption imposed on the
+data. However, CPE has been found to persist even after accounting for this
+assumption violation \citep{nabarro22data}. Therefore, CPE is unlikely to be a
+mere artifact of data augmentation. In a separate analysis,
+\citet{kapoor22uncertainty} argues that the SGMCMC sampler will converge to a
+tempered posterior in the presence of data augmentation. They concluded that the
+likelihood is implicitly raised to a power equal to the number of augmentations,
+and raising the likelihood to a power reciprocal of this number should
+approximately recover the standard posterior. However, they do not find this
+adjustment alone sufficient to remove CPE completely.
+
+\paragraph{Model misspecification.}
+It has been argued that data augmentation and curation may lead to model
+misspecification, in particular overestimating the aleatoric uncertainty in the
+data \citep{aitchison21statistical,kapoor22uncertainty}. Therefore, tempering is
+proposed to be an effective tool for correction. This finding aligns with
+\citet{bachmann22how}, which showed the optimal temperature dependent on both
+the aleatoric uncertainty in the data and the `invariance' of the model to
+augmented data.
+\paragraph{Prior misspecification.}
+While the exact interpretation of a `well-specified prior' is debatable,
+\citet{fortuin22bayesian} conducted a large-scale experiment to study the effect
+of tempering under Gaussian (isotropic or with correlated covariance) and
+heavy-tailed priors (Student's-t or Laplace) on four metrics: test LPD,
+accuracy, expected calibration error \citep{naeini15obtaining}, and
+out-of-distribution detection accuracy. They observed that $\beta = 1$ is indeed
+optimal for test LPD and accuracy when using a heavy-tailed prior. However, the
+standard posteriors derived from heavy-tailed priors also tend to underperform
+compared to tempered posteriors derived from Gaussian priors. Notably, according
+to their experiments, warmer temperatures tend to perform better for expected
+calibration error, and there is no general trend in optimal $\beta$ for
+out-of-distribution detection accuracy. Therefore, their work suggests that the
+optimal $\beta$ is not only dependent on the truth-model-prior triplet but also
+on the evaluation metric.
+
+\paragraph{Attempts to `fix' the CPE.} Within much of the CPE literature, tempering is often seen as a `hack' that
+strays from the Bayesian principle. This has prompted the development of various
+`fixes' --- models and priors that induce standard posteriors with similar
+predictive performance to tempered posteriors \citep[see,
+  e.g.,][]{fortuin22bayesian,kapoor22uncertainty,marek24can}. However, we argue
+that this is unnecessary, as tempered posteriors of arbitrary $\beta > 0$ are
+special cases of the generalized Bayes posterior \citep{bissiri16general}; see
+\cref{sec:bissiri-primer} for a primer. Therefore, posterior tempering does not
+deviate from the Bayesian principle.
+
+
+\section{CPE through the lens of Generalized Bayes}
+
+\label{sec:model-free-bayesian}
+In GB, it is a standard practice to tune $\beta$ to improve the utility of the tempered posterior \citep{zhang06epsilon,grunwald12safe,bissiri16general}. Specifically, the likelihood is frequently (but not
+always) tempered to a warmer temperature, which contrasts with the cold
+temperature used in BDL. In this section, we review some recent developments in
+GB to clarify the role of tempering in GB and this apparent contradiction.
+
+\paragraph{Ensuring posterior concentration on the KL minimizer.} Posterior
+concentration on the KL minimizer
+$\param_\dag = \argmin_{\param} \KL(q(y|x) | p(y|x,\param))$\footnote{In GB, the
+  minimizer is assumed to be unique, though this is often not true for neural
+  network models.} as $\ntrain \to \infty$ is often a desired property for many statistical
+applications. Proofs establishing this property
+\citep{barron91minimum,zhang06epsilon,grunwald07minimum} typically assume that
+the following inequality holds for all $\param$ in the parameter space:
+\begin{equation*}
+  \E_{q(x,y)} \left[ \left(\frac{p(y | x, \param)}{p(y | x, \param_\dag)} \right)^{\beta} \right] \leq 1,
+  \quad \text{for all } \param \in \setparam.
+\end{equation*}
+It is easy to verify that the inequality holds at $\beta = 1$ for well-specified
+models, where \( q(x, y) = p(y | x, \param_\dag) q(x) \). The same
+cannot be said for misspecified models in general. However,
+\citet{grunwald12safe} shows that this inequality can still hold for many
+misspecified models for some warm temperatures
+$\beta \leq \beta_{\text{critical}} < 1$, and proposed the SafeBayes algorithm
+to determine $\beta_{\text{critical}}$. Therefore, SafeBayes is presented as a
+tool to achieve posterior concentration on $\param_\dag$.
+
+However, posterior concentration is not always desirable in the context of
+maximizing test LPD under model misspecification. Note that taking
+$\beta \leq \beta_{\text{critical}}$ results in the corresponding PPD
+concentrating on the `plug-in' predictive density $p(y | x, \param_\dag)$ as $\ntrain \to \infty$. This
+may be undesirable if one prioritizes the test LPD of the PPD, since the plug-in
+$p(y | x, \param_\dag)$ may not exhibit good test LPD. For example, when the
+misspecified model is non-convex, the PPD can lie outside the model family and
+be closer to the truth than the plug-in $p(y | x, \param_{\dag})$. Therefore,
+avoiding posterior concentration in this situation can actually result in a PPD
+with a higher test LPD.
+\paragraph{Calibrating credible and prediction intervals.}
+Constructing well-calibrated credible and prediction intervals with the nominal
+frequentist coverage probability is known to be challenging, as obtaining the
+posterior variance of a misspecified model is difficult \citep[Example
+  2.1]{kleijn12bernsteinvonmises}. These issues can be mitigated by appropriately
+tuning $\beta$, which affects the spread of the posterior. To this end,
+\citet{syring19calibrating} and \citet{wu21calibrating} developed algorithms to
+select $\beta$ for calibrating credible and prediction intervals, respectively.
+
+\paragraph{Calibrating prior-to-posterior information gain.}
+In decision-theoretic GB \citep[see~\cref{sec:bissiri-primer} for a
+  primer]{bissiri16general}, tempered posteriors (with likelihood tempering only)
+are seen as an update rule that combines data information with prior belief.
+From this perspective, $\beta$ can be interpreted as a `learning rate' at which
+information is `transferred' to the posterior. Hence, it is reasonable to
+calibrate the information gain at each update. Temperature selection algorithms
+that follow this approach include \citet{holmes17assigning} and
+\citet{lyddon19general}.
+
+\paragraph{Improving test LPD.}
+Concurrent to our work, \citet{mclatchie24predictive} analyzed the role of
+$\beta$\footnote{In \citet{mclatchie24predictive}, the \textit{learning rate}
+  and, confusingly, \textit{temperature} refer to $\beta$ in this work.} in
+improving test LPD theoretically. They concluded that, in the moderately large
+$\ntrain$ regime and assuming posterior concentration at $\param_{\dag}$, the
+test LPD shows little improvement once $\beta$ becomes sufficiently large.
+Although their motivation aligns with ours, their theoretical results do not
+extend to singular models (e.g., neural networks) or over-parameterized models
+(e.g., ResNet20 on CIFAR10).
+
+\subsection{Limitations of the GB framework for analyzing BDL models}
+The existing theory in GB, though elegant, is limited to regular and
+under-parameterized models and cannot fully account for CPE observed in BDL.
+Moreover, the metrics emphasized by GB often differ from those prioritized by
+BDL practitioners, such as test LPD. As a result, GB works do not provide a
+prescriptive methodology for selecting an appropriate temperature in BDL.
+Additionally, many current temperature selection algorithms
+\citep{grunwald12safe,syring19calibrating,wu21calibrating} require repeated
+posterior computations, making them impractical for modern deep learning models.
+Finally, the GB literature primarily considers posteriors with likelihood
+tempering only, i.e.,~leaving the prior without tempering. However, since many
+priors $p(\param)$ encountered in BDL are proper and bounded, prior tempering
+can be regarded as rescaling the prior \citep[Section C.2]{kapoor22uncertainty}.
+Therefore, many of the arguments in GB still apply.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we proposed a data-driven approach for selecting a good $\beta$
+for use in either of the PPDs \eqref{eq:smpd} and \eqref{eq:tmpd}. Our approach
+circumvents the costly grid search method, i.e.,~sampling posterior at each
+$\beta$ across the grid, by optimizing a likelihood function \eqref{eq:temp-mle}
+to obtain a good $\beta$. The $\hat \beta^{*}$ obtained via our method was shown
+to achieve comparable test LPD to that obtained from a grid search, all without
+performing any extra posterior sampling.
+
+Additionally, we presented a detailed discussion to address the seeming
+contradiction in the optimal~$\beta$ recommendations from the BDL and GB
+communities. We concluded that the optimal $\beta$ can differ depending on the
+specific downstream task.
+
+\paragraph{Limitation.} Our method is subject to several limitations that require
+future attention. Firstly, a poorly-tuned optimization procedure may result in a
+poor estimation of $\hat \beta^{*}$. Secondly, our method has only been
+empirically tested with the ubiquitous Gaussian priors. Lastly, while our method
+is empirically effective for modern neural network models and theoretically
+justified for Gaussian linear regression, a formal guarantee for general neural
+network models is still lacking.
+\paragraph{Future directions.}
+We hope that this work will inspire further research on data-driven approaches
+to select $\beta$, aimed not only at minimizing test~LPD but also at optimizing
+other metrics, such as expected calibration error.
+
+
+
+\section{Reproducibility Statement}
+
+The experiments details are summarized in the introduction of
+\cref{sec:experiments}. Proof of \cref{thm:linear-lpd} is given
+in~\cref{sec:proof-linear-lpd}. SGMCMC is described in \cref{sec:sgmcmc}.
+Diagnostic check of the SGMCMC is given in \cref{sec:sgmcmc-diagnostics}.
+Implementation details of our proposed method is given in
+\cref{sec:algorithm-structure}. The set of hyperparameters to reproduce the
+experiments is given in \cref{sec:hyperparameters}. Computational environment
+and packages are given in \cref{sec:comp-envir}. Evaluation metrics are defined
+in~\cref{sec:evaluation-metrics}. Model, prior and datasets are described in
+\cref{sec:model-prior}. Source code is published on
+\url{https://anonymous.4open.science/r/tempered-posteriors-106E}.
+
+
+

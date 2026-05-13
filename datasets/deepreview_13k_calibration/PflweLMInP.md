@@ -1,8 +1,8 @@
 # Complete multi-modal metric learning for multi-modal sarcasm detection
 
 - Decision: Reject
-- Avg Score: 2.40
-- Scores: 5, 3, 3, 1, 0
+- Avg Score: 5.25
+- Scores: 5, 3, 3, 10
 
 ## Abstract
 Multi-modal sarcasm detection identifies sarcasm from text-image pairs, an essential technology for accurately understanding the user's real attitude.

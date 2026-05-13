@@ -1,0 +1,298 @@
+\title{Subtle Errors Matter: Preference Learning via Error-injected Self-editing}
+
+\begin{abstract}
+
+Large Language Models (LLMs) have exhibited strong mathematical reasoning and computational prowess, tackling tasks ranging from basic arithmetic to advanced competition-level problems. However, frequently occurring subtle errors, such as miscalculations or incorrect substitutions, limit the models' full mathematical potential. Existing studies to improve mathematical ability typically involve distilling reasoning skills from stronger LLMs or applying preference learning to step-wise response pairs. 
+Although these methods leverage samples of varying granularity to mitigate reasoning errors, they overlook the frequently occurring subtle errors. A major reason is that sampled preference pairs involve differences unrelated to the errors, which may distract the model from focusing on subtle errors. 
+In this work, we propose a novel preference learning framework called eRror-Injected Self-Editing (RISE), which injects predefined subtle errors into partial tokens of correct solutions to construct hard pairs for error mitigation. In detail, RISE uses the model itself to edit a small number of tokens in the solution, injecting designed subtle errors. Then, pairs composed of self-edited solutions and their corresponding correct ones, along with pairs of correct and incorrect solutions obtained through sampling, are used together for subtle error-aware DPO training. 
+Compared with other preference learning methods, RISE further refines the training objective to focus on predefined errors and their tokens, without requiring fine-grained sampling or preference annotation. 
+Extensive experiments validate the effectiveness of RISE, with preference learning on Qwen2-7B-Instruct yielding notable improvements of 3.0\% on GSM8K and 7.9\% on MATH.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have demonstrated advanced logical reasoning and computational capabilities, enabling them to tackle a diverse range of problems from elementary mathematics to complex, competition-level questions \citep{mammoth, tora, metamath}. Nevertheless, frequently occurring subtle errors remain one of the primary obstacles preventing these models from consistently realizing their full mathematical potential \citep{7b_strong_math}. These errors, such as miscalculations, incorrect substitutions, and omission of calculation terms, account for approximately 75\% of the total errors as shown in Figure \ref{num_error}. 
+
+Many existing works have attempted to improve mathematical ability by distilling reasoning skills from stronger LLMs using synthetic datasets \citep{deepseekmath, mammoth, llemma}. While distilling helps the model acquire expanded reasoning patterns, it does not directly enable it to reduce the occurrence of errors \citep{orpo}. Recently, a growing body of research has shifted its focus toward preference optimization with fine-grained preference pairs to mitigate mathematical errors \citep{step-dpo, svpo, rl_incorrect}. This method leverages Direct Preference Optimization (DPO) to reduce the likelihood of generating the error step in a pair of steps with the same context \citep{dpo}. However, learning with these fine-grained preference pairs still struggles to focus on subtle errors, as the aforementioned pairs involve some differences unrelated to the errors. 
+Additionally, establishing the preference relationship within fine-grained pairs requires extra LLM-based annotations or approximate estimations, which may introduce bias \citep{mcts_dpo, step-dpo}.
+
+In our work, we argue that, in addition to sampling preference pairs and annotating their relationships, generating a correct solution and injecting errors into it can be an effective approach to construct pairs that specifically target subtle errors. First, error injection can introduce errors into a small number of tokens while preserving the overall structure of the solution. Such error-injected samples, with limited differences from the correct solutions, can be regarded as hard negatives for preference learning \citep{self-contrast-align}. Second, we can leverage the LLM itself to inject predefined errors using appropriate prompts. Compared to randomly sampled pairs, pairs based on injected errors are more controllable, allowing preference learning to focus on designed, targeted subtle errors. 
+
+Based on the above motivation, we propose a novel preference learning framework called e\underline{R}rror-\underline{I}njected \underline{S}elf-\underline{E}diting (RISE). The key idea is to prompt the LLM to inject errors into correct solutions and construct hard pairs targeting predefined subtle errors for preference learning. To be specific, we first apply an LLM to generate several multi-step solutions and construct a full-solution pair composed of one correct solution and one incorrect solution. Then, we choose the correct one and edit each step of the solution to inject subtle errors. The same model is used for error-injected editing, as it may better recognize the tokens where it is most prone to making mistakes. We design several types of subtle errors and modify a few tokens to introduce these errors. The edited steps and the corresponding correct steps are constructed as self-edited pairs. Finally, we conduct subtle error-aware DPO training on both self-edited pairs and full-solution pairs. Inspired by \cite{smaug}, a negative log-likelihood loss is introduced to stabilize the training, as the self-edited pairs are highly similar, which can easily reduce the likelihood of the correct solutions.
+
+We evaluate our framework on two LLM series: Qwen2 and Llama-3.1. Our method \textsc{RISE-Qwen2-7B} achieves a 3.0\% accuracy gain on GSM8K and 7.9\% on MATH, and \textsc{RISE-Llama-3.1-8B} achieves 3.9\% and 2.7\%, respectively. Moreover, \textsc{RISE-Qwen2-72B} and \textsc{RISE-Llama-3.1-70B} perform comparably to, and even surpass, some state-of-the-art closed-source LLMs. Detailed error analysis shows that RISE helps the LLM further avoid predefined subtle errors.
+
+
+
+\section{Method}
+
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.99\linewidth]{figures/Framework.pdf}
+\caption{Preference learning framework augmented by error-injected self-editing. Each mathematical problem is sent to the original model to sample $K$ solutions, with correct and incorrect solutions in rectangles with \textcolor{myblue}{blue} and \textcolor{myred}{red} borders. For one correct solution, we inject errors into each step of the solution and collect self-edited pairs. We also select an incorrect solution paired with the above correct one as full-solution pairs. Both sampling and self-editing are performed by the same model.}
+\label{framework}
+\end{figure*}
+
+In this section, we introduce our RISE framework, which achieves hard negative preference pair construction through error-injected self-editing and enhances the mathematical reasoning capability of LLMs by subtle error-aware DPO training. As shown in Figure \ref{framework}, our method starts with sampling $K$ multi-step solutions from the original model. One correct solution and one incorrect solution are chosen as a full-solution pair based on the correctness of the final answer. Next, we use the same model to edit each step of the correct one, injecting subtle errors into a small number of tokens (Sec. \ref{subsec:edit}). The edited steps and the correct steps are collected as self-edited pairs. Finally, the combination of the self-edited pairs and full-solution pairs is employed for subtle error-aware DPO training (Sec. \ref{subsec:dpo}). 
+
+We adopt an instruction-tuned model in our experiments, since it can be used to sample a solution and self-edit it with appropriate prompts. Given a mathematical problem $x \in \mathcal{D}_{\text{raw}}$, we first prompt the model $M$ to sample a multi-step solution set $\{ \hat{y} \}$ following \cite{step-dpo}. To ensure that the sampled solution strictly follows an explicit Chain-of-Thought (CoT) structure, we prepend the model's generated solution with the prefix ``\textit{Let's think step by step. Step 1:}''. This prefix ensures that each step of the solution begins with a ``Step'' marker. We select the solution with the output answer that matches the reference answer as the correct one for subsequent editing. The correct and the other incorrect are used to construct a full-solution pair set $\mathcal{D}_{\text{Full}}^{\pm}$. The correct solution can be denoted as $\hat{y}^+=\bigoplus_{i=1}^n \hat{y}_i^+$, where $\hat{y}_i^+$ is the $i$-th step and $n$ represents the total number of steps. 
+
+\subsection{Dataset Construction via Error-injected Self-editing}\label{subsec:edit}
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/Edit.pdf}
+\caption{Error-injected self-editing prompt and some error injection examples. We display three error-injected self-editing operations: ``REPLACE'', ``SWAP'', and ``DELETE''.}
+\label{edit}
+\end{figure*}
+
+To create hard preference pairs, we employ an editing approach to modify certain tokens in the correct solution to introduce predefined errors. We focus on the error injection of each step in one solution. Compared with previous step-wise preference learning \citep{step-dpo}, our approach further refines the objective of preference learning by specifically targeting a few error tokens, enhancing the ability of LLMs to avoid subtle errors. 
+
+\paragraph{Error Types.} As we aim to optimize the model to avoid subtle errors, the main types of errors we concentrate on are as follows: (1) Numerical calculation errors; (2) Numerical or symbolic substitution errors; (3) Omission of calculation terms. These errors frequently occur in most solutions and typically involve only a small amount of tokens. We also include two relatively less frequent errors: (4) Errors in the calculation order and (5) Errors in the use of calculation symbols. We extract and summarize these errors from the solutions generated by the models in our experiments. 
+
+\paragraph{Self-editing.} We design appropriate prompts and utilize the model itself to edit the generated correct step $\hat{y}_i^+$. As most of the steps in the correct solutions are accurate \citep{step-control}, we use all the steps from the correct ones without applying any additional filtering. Since solutions to mathematical problems are highly error-sensitive, any modification of numerical values, symbols, or other mathematical elements disrupts the original correct procedure. Thus, even small language models can be prompted to almost certainly inject errors. The error-injected step $\hat{y}_i^-$ is generated using an edit prompt shown on the left of Figure \ref{edit}. This edit prompt contains the problem $x$, the concatenation of previous steps $\hat{y}_{<i}$, the correct step $\hat{y}_i$, and the edit type $e$. We mainly use three types of editing operations: ``REPLACE'', ``SWAP'', and ``DELETE'' \citep{edit5}. Some error injection examples are shown on the right of Figure \ref{edit}. For each step, only around ten tokens will be modified. We collect the error-injected steps and the correct steps to construct a paired edited set $\mathcal{D}^{\pm}_{0} = \{(\hat{y}_i^+, \hat{y}_i^-)\}$. These edited pairs are then filtered through Levenshtein distance-based similarity as follows:
+\begin{align}
+\mathcal{D}^{\pm}_{\text{Edit}} = \{ ( \hat{y}_i^+, \hat{y}_i^-) \mid LD(\hat{y}_i^+, \hat{y}_i^-) < \alpha, (\hat{y}_i^+, \hat{y}_i^-) \in \mathcal{D}^{\pm}_{0} \},
+\end{align}
+where $LD$ represents the function to calculate Levenshtein distance and $\alpha$ denotes the filter threshold. The filtered pairs $\mathcal{D}^{\pm}_{\text{Edit}}$ are used for subsequent subtle error-aware DPO training. 
+
+\subsection{Subtle Error-aware DPO Training}\label{subsec:dpo}
+
+Given all self-edited pairs and full-solution pairs, we apply DPO to optimize the model \citep{dpo}. Specifically, we first randomly choose $N$ pairs from all self-edited pairs for each problem and combine them with the full-solution pair, which will be $N+1$ pairs in total as the training set. To effectively learn subtle errors in each step, we adopt the step-wise DPO loss \citep{step-dpo} for the self-edited pairs as it can focus on fine-grained preference learning, and general DPO loss for the full-solution pairs. Two loss functions are defined as follows:
+\begin{align}
+\label{dpo_loss}
+\begin{aligned}
+    \mathcal{L}_{\text{DPO-Edit}} &= -\mathbb{E}_{(\hat{y}_{i}^+,\hat{y}_{i}^-) \sim \mathcal{D}_{\text{Edit}}^{\pm}}[\log \sigma (\beta \log \frac{\pi_{\theta}(\hat{y}_{i}^+|x;\hat{y}_{<i}^+)}{\pi_{M}(\hat{y}_{i}^+|x;\hat{y}_{<i}^+)} - \beta \log \frac{\pi_{\theta}(\hat{y}_{i}^-|x;\hat{y}_{<i})}{\pi_{M}(\hat{y}_{i}^-|x;\hat{y}_{<i})})]. \\
+    \mathcal{L}_{\text{DPO-Full}} &= -\mathbb{E}_{(\hat{y}^+,\hat{y}^-) \sim \mathcal{D}_{\text{Full}}^{\pm}}[\log \sigma (\beta \log \frac{\pi_{\theta}(\hat{y}^+|x)}{\pi_{M}(\hat{y}^+|x)} - \beta \log \frac{\pi_{\theta}(\hat{y}^-|x)}{\pi_{M}(\hat{y}^-|x)})],
+\end{aligned}
+\end{align}
+
+where $\pi_{\theta}$ is the policy model and $\pi_{M}$ is the reference model. To mitigate the risk of optimization failure caused by the high similarity between paired samples \citep{smaug}, we additionally introduce a negative log-likelihood loss for the correct samples. This loss can help prevent the collapse of the probability of generating correct samples and is defined as $\mathcal{L}_{NLL}$. We present our subtle error-aware DPO loss that contains the above two objectives as follows:
+\begin{align}
+\label{final_loss}
+\begin{aligned}
+    \mathcal{L} &= \mathcal{L}_{\text{DPO-Edit}} + \mathcal{L}_{\text{DPO-Full}} + \lambda \mathbbm{1}_{[r < 0]} \mathcal{L}_{NLL}, \\
+    r &= \log \frac{\pi_{\theta}(\hat{y}_{i}^+|x;\hat{y}_{<i}^+)}{\pi_{M}(\hat{y}_i^+|x;\hat{y}_{<i}^+)} \, \text{or} \, \log \frac{\pi_{\theta}(\hat{y}^+|x)}{\pi_{M}(\hat{y}^+|x)} 
+\end{aligned}
+\end{align}
+where $\lambda$ is the weight to control the balance of two objectives, $r$ signals when to apply the NLL loss. Inspired by \cite{smaug}, we design indicator $r$ to represent whether the generation probability of the policy model is lower than that of the reference model. We outline the full algorithm of our Preference Learning via Error-injected Self-editing in Algorithm \ref{alg:rise}. 
+
+\begin{algorithm*}[t!]
+\small
+\caption{\textbf{Preference Learning via Error-injected Self-editing}}
+\label{alg:rise}
+\begin{algorithmic}
+    \STATE {\bfseries Input:} $\mathcal{D}_{\text{raw}}$: mathematical problems; $M$: original model; $\mathcal{E}$: edit prompt set; $K$: number of sampling attempts; $N$: number of self-edited pairs; 
+    \STATE Initialize the subtle error-aware DPO training dataset $\mathcal{D}^{\pm}_{M} \leftarrow \{\}$
+    \FOR{$\boldsymbol{x}$ {$\in$} $\mathcal{D}_{\text{raw}}$}
+        \STATE Sample $K$ solutions $\{ \hat{\boldsymbol{y}} \} \sim P_{M}(\cdot \; | \; \boldsymbol{x})$.
+        \STATE Randomly select one correct solution $\hat{\boldsymbol{y}}^+$ and one incorrect solution $\hat{\boldsymbol{y}}^-$.
+        \STATE Define $\hat{\boldsymbol{y}}^+ = \hat{\boldsymbol{y}}_1^+ \oplus \hat{\boldsymbol{y}}_2^+ \oplus \cdots \oplus \hat{\boldsymbol{y}}_n^+$, where $n$ denotes the number of steps in the solution.
+        \STATE Initialize self-edited pair set $\mathcal{D}^{\pm}_{\text{Edit}} \leftarrow \{\}$.
+        \FOR{$i=1$ {\bfseries to} $n$}
+            \STATE Randomly select an edit type $\boldsymbol{e} \leftarrow \mathcal{E}$.
+            \STATE Edit the step using the same model $\hat{\boldsymbol{y}}^{-}_i \sim P_{M}(\cdot \; | \; \boldsymbol{e}, \boldsymbol{x}, \hat{\boldsymbol{y}}_{<i}^+, \hat{\boldsymbol{y}}_{i}^+)$, where $\hat{\boldsymbol{y}}_{<i}^+$ represents the concatenation of steps before $\hat{\boldsymbol{y}}_{i}^+$.
+            \STATE $\mathcal{D}^{\pm}_{\text{Edit}}$ $\leftarrow$ $\mathcal{D}^{\pm}_{\text{Edit}} \cup \{(\hat{\boldsymbol{y}}_{i}^+, \hat{\boldsymbol{y}}^{-}_i)\}$ if $LD(\hat{\boldsymbol{y}}_i^+, \hat{\boldsymbol{y}}_i^-) < \alpha$, where $LD$ is the function to calculate edit distance.
+        \ENDFOR
+        \STATE Randomly select $N$ self-edited pairs $\{ (\hat{\boldsymbol{y}}_{j}^+, \hat{\boldsymbol{y}}^{-}_j) \}^N_{j=1} \leftarrow \mathcal{D}^{\pm}_{\text{Edit}}$
+        \STATE $\mathcal{D}^{\pm}_{M} \leftarrow \mathcal{D}^{\pm}_{M} \cup \{ (\hat{\boldsymbol{y}}^+, \hat{\boldsymbol{y}}^-), (\hat{\boldsymbol{y}}_1^+, \hat{\boldsymbol{y}}_1^-), \dots (\hat{\boldsymbol{y}}_N^+, \hat{\boldsymbol{y}}_N^-) \}$
+    \ENDFOR
+    \STATE Optimize the subtle error-aware DPO loss in Equation \ref{final_loss} on $\mathcal{D}^{\pm}_{M}$ with $P_{M}$ as the reference policy.
+\end{algorithmic}
+\end{algorithm*}
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setup}
+
+\paragraph{Evaluation Datasets.} We evaluate our framework on three in-domain datasets, GSM8k \citep{gsm8k_set}, MATH \citep{math_set} and AQuA \citep{aqua_set}, along with three out-of-domain datasets, SVAMP \citep{svamp_set}, AIME24 \citep{aime_set}, and Odyssey-MATH \citep{odyssey_set}. These six datasets span a broad spectrum of mathematical problems, ranging from basic arithmetic to advanced competition-level problems. The problems in these datasets, including tabular, free-form, and multiple-choice formats, ensure a robust evaluation of the model’s mathematical reasoning ability. 
+
+\paragraph{Baselines.} Our framework is compared with several LLMs performing well in mathematical reasoning. Two closed-source state-of-the-art LLMs: OpenAI’s GPT-4o \citep{gpt4o} and Anthropic’s Claude-3.5-Sonnet \citep{sonnet}. Three open-sourced general instruction-tuned LLMs: Mistral-7B-Instruct-v0.3 \citep{mistral}, Qwen2 series \citep{qwen2}, and Llama-3.1 series \citep{llama3.1}. Five mathematically enhanced LLMs: DeepSeekMath-RL \citep{deepseekmath}, Llemma \citep{llemma}, ToRA \citep{tora}, MAmmoTH \citep{mammoth}, and MathGenieLM \citep{mathgenie}. Four additional LLMs under step-wise DPO optimization are also included: Step-DPO series \citep{step-dpo}, SVPO \citep{svpo}, MCTS-DPO \citep{mcts_dpo}, and SCDPO \citep{step-control}. We display results with CoT prompts for most baseline LLMs. ToRA and MAmmoTH are designed with built-in capabilities for tool usage, so we report the best results with tools. 
+
+\paragraph{Training Details.} We adopt mathematical problems used by \cite{step-dpo} for preference learning. The training dataset contains around 9K problems with corresponding correct step-by-step solutions. We discard these solutions and use only the problems to construct our training set. The problems are mainly from MetaMath \citep{metamath} and AQuA \cite{aqua_set}. Details are presented in Table \ref{train_dataset}. 
+We select two open-source LLM series, Qwen2 \citep{qwen2} and Llama-3.1 \citep{llama3.1} as our base LLMs. We apply the instruction-tuned version of these models to sample solutions and meanwhile edit each step of the solution. The number of sampling attempts is set to 5, and the number of self-edited pairs is set to 1 for the Qwen2 series and 3 for the Llama-3.1 series. Since some problems cannot yield correct and incorrect preference pairs within a limited number of sampling attempts, we ultimately use only about 4.5K problems to construct preference pair combinations for subtle error-aware DPO training.
+
+\subsection{Main Results}
+
+\begin{table}[t!]
+\center
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Model               & Size            & GSM8K & MATH & AQuA & SVAMP$^\dagger$ \\ \midrule
+\multicolumn{6}{c}{Closed-source Models}                                 \\ \midrule
+GPT-4o              & -               & 96.0  & 78.1 & 82.2     & 94.3  \\ 
+Claude-3.5-Sonnet   & -               & 94.9  & 68.5 & 77.5     & 92.9  \\ \midrule
+\multicolumn{6}{c}{Open-source Models}                                   \\ \midrule
+Mistral-7B-Instruct-v0.3 & 7B         & 57.5  & 15.1 & 20.4     & 69.7  \\
+Qwen2-7B-Instruct   & 7B              & 85.4  & 52.2 & 66.5     & 89.3  \\
+Llama-3.1-8B-Instruct& 8B             & 84.0  & 48.3 & 55.9     & 85.7  \\
+DeepSeekMath-RL     & 7B              & 87.7  & 52.7 & 59.0     & 88.4  \\ 
+Llemma              & 7B              & 36.4  & 18.0 & -        & -     \\
+MAmmoTH             & 7B              & 53.6  & 31.5 & 44.5     & 67.7  \\
+ToRA                & 7B              & 68.8  & 40.1 & 23.6     & 68.2  \\
+MathGenieLM         & 7B              & 80.5  & 45.1 & -        & 83.3  \\
+Qwen2-7B-Step-DPO   & 7B              & \textbf{88.5}  & 55.8 & 63.0     & 88.7 \\
+SVPO                & 7B              & 81.7  & 59.5 & -        & -   \\
+MCTS-DPO            & 7B              & 81.8  & 34.7 & -        & -   \\
+SCDPO               & 7B              & 80.1  & 47.7 & 48.4     & 83.2 \\ \midrule
+\textsc{RISE-Qwen2-7B}& 7B            & $\underset{\scriptstyle{(+3.0)}}{\text{88.4}}$ & $\underset{\scriptstyle{(+7.9)}}{\text{\textbf{59.9}}}$ &  $\underset{\scriptstyle{(+3.2)}}{\text{\textbf{69.7}}}$ & $\underset{\scriptstyle{(+2.3)}}{\text{\textbf{91.6}}}$  \\
+\textsc{RISE-Llama-3.1-8B}& 8B        & $\underset{\scriptstyle{(+3.9)}}{\text{87.9}}$ & $\underset{\scriptstyle{(+2.7)}}{\text{51.0}}$ & $\underset{\scriptstyle{(+5.5)}}{\text{61.4}}$ & $\underset{\scriptstyle{(+1.8)}}{\text{87.5}}$ \\ \midrule
+Qwen2-72B-Instruct  & 72B             & 93.1  & 68.8 & 78.3     & 93.1  \\
+Llama-3.1-70B-Instruct& 70B           & 94.9  & 65.0 & 77.1     & 93.0  \\
+MAmmoTH             & 70B             & 76.9  & 41.8 & 65.0     & 82.4  \\
+ToRA                & 70B             & 84.3  & 49.7 & 41.3     & 82.7  \\
+MathGenieLM         & 70B             & 88.4  & 51.2 & -        & 87.7  \\
+Qwen2-72B-Step-DPO  & 72B             & 94.0  & 70.8 & 77.5     & 93.5 \\ \midrule
+\textsc{RISE-Qwen2-72B}& 72B          & $\underset{\scriptstyle{(+0.9)}}{\text{94.0}}$ & $\underset{\scriptstyle{(+1.0)}}{\text{\textbf{69.8}}}$ & $\underset{\scriptstyle{(+0.8)}}{\text{\textbf{79.1}}}$ & $\underset{\scriptstyle{(+0.7)}}{\text{\textbf{93.8}}}$  \\ 
+\textsc{RISE-Llama-3.1-70B}& 70B      & $\underset{\scriptstyle{(+0.2)}}{\text{\textbf{95.1}}}$ & $\underset{\scriptstyle{(+1.1)}}{\text{66.1}}$ & $\underset{\scriptstyle{(+0.6)}}{\text{77.7}}$ & $\underset{\scriptstyle{(+0.3)}}{\text{93.3}}$  \\ \bottomrule
+\end{tabular}
+\caption{Comparison of results on different commonly used mathematical datasets. $\dagger$ represents out-of-domain datasets.}
+\label{main_general}
+\end{table}
+
+We report the main results on different mathematical datasets shown in Table \ref{main_general} and Table \ref{main_competition}. The former is from commonly used mathematical datasets published earlier, consisting of three in-domain and one out-of-domain datasets. The latter is from the recent competition-level datasets and both datasets are out-of-domain. 
+Overall, we can see that RISE outperforms the SOTA model at different scales. These results highlight the potential of our framework to help the general LLM to be a mathematical generalist. On several datasets, \textsc{RISE-Qwen2-72B} and \textsc{RISE-Llama-3.1-70B} even outperform some closed-source LLMs. 
+
+Table \ref{main_general} presents the results on the GSM8K, MATH, AQuA, and SVAMP datasets. Our framework enables the LLM to achieve noticeable improvements in mathematical reasoning compared to the corresponding backbone. Especially on MATH and AQuA, \textsc{RISE-QWEN2-7B} obtains 7.9\% and 2.7\% accuracy gain, and \textsc{RISE-Llama-3.1-8B} obtains 3.2\% and 5.5\%. \textsc{RISE-QWEN2-7B} outperforms other popular mathematical LLMs on all four datasets. Additionally, RISE performs better than the SOTA step-wise preference learning frameworks. Compared to Step-DPO, which shares the same backbone LLM and requires GPT-4-based annotations, RISE obtains better results without annotations. In detail, it achieves 4.1\% higher accuracy on MATH, 6.7\% higher on AQuA, and 2.9\% higher on SVAMP. We scale our experiments on 70B/72B models and also observe around 1.0\% accuracy gain on some evaluation datasets such as MATH and AQuA. 
+
+Table \ref{main_competition} displays the results for two complex, competition-level mathematical problems, AIME24 and Odyssey-MATH. We observe that both ToRA and MAmmoTH, even with 70B parameters, fail to solve any of the problems in AIME24, highlighting the difficulty of these problems. Our framework activates the mathematical potential of Qwen2-72B-Instruct and delivers 3.7\% accuracy gains on the Odyssey-MATH dataset. Since the problems in the AIME dataset are highly complex and the model's answering failure is not due to subtle errors, RISE is unable to further improve accuracy. The failure of \textsc{RISE-Llama-3.1-70B} on Odyssey-MATH may be due to the fact that Llama-3.1-70B-Instruct is already fine-tuned on diverse, complex mathematical datasets, with its accuracy increasing from 36.4\% in Llama-3.0 to 60.4\% in Llama-3.1 \citep{odyssey_set}. Preference learning on our relatively simple datasets may harm its original reasoning performance. Overall, the results on both in-domain and out-of-domain datasets demonstrate that our framework can help general LLMs consistently improve their mathematical reasoning abilities by avoiding subtle errors. 
+
+\begin{table}[t!]
+\center
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Model               & Size       & AIME24$^\dagger$  & Odyssey-MATH$^\dagger$ \\ \midrule
+\multicolumn{4}{c}{Closed-source Models}                 \\ \midrule
+GPT-4o              &  -         & 3/30  & 52.9         \\
+Claude-3.5-Sonnet   &  -         & 4/30  & 48.0         \\ \midrule
+\multicolumn{4}{c}{Open-source Models}                   \\ \midrule
+ToRA                & 70B        & 0/30  & 26.8         \\
+MAmmoTH             & 70B        & 0/30  & 15.7         \\
+Qwen2-72B-Instruct  & 72B        & 4/30  & 45.7         \\
+Llama-3.1-70B-Instruct& 70B      & \textbf{7/30}  & \textbf{60.4}         \\
+Qwen2-72B-Step-DPO  & 72B        & 4/30  & 50.1         \\ \midrule
+\textsc{RISE-Qwen2-72B}& 72B     & $\underset{\scriptstyle{(+0/30)}}{\text{4/30}}$ & $\underset{\scriptstyle{(+3.7)}}{\text{49.4}}$  \\ 
+\textsc{RISE-Llama-3.1-70B}& 70B & $\underset{\scriptstyle{(+0/30)}}{\text{7/30}}$ & $\underset{\scriptstyle{(-1.5)}}{\text{58.9}}$  \\ \bottomrule
+\end{tabular}
+\caption{Comparison of results on recent competition-level mathematical datasets. $\dagger$ represents out-of-domain datasets.}
+\label{main_competition}
+\end{table}
+
+\subsection{Ablation Study}
+
+\begin{table}[t!]
+\centering
+\begin{tabular}{@{}c@{\hspace{0.5cm}}c@{}}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Method                      & GSM8K & MATH \\ \midrule
+Qwen2-7B-Instruct           & 85.4  & 52.2 \\ \midrule
+\textsc{RISE-Qwen2-7B}      & \textbf{88.4}  & \textbf{59.9} \\ 
+- w/o self-edited pairs     & 88.3  & 58.2 \\ 
+- w/o full-solution pairs   & 88.0  & 58.1 \\ 
+- w/o NLL loss              & 88.2  & 59.4 \\ \bottomrule
+\end{tabular}
+&
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Method                      & GSM8K & MATH \\ \midrule
+Llama-3.1-8B-Instruct       & 84.0  & 48.3 \\ \midrule
+\textsc{RISE-Llama-3.1-8B}  & \textbf{87.9}  & \textbf{51.0} \\ 
+- w/o self-edited pairs     & 86.8  & 49.9 \\ 
+- w/o full-solution pairs   & 86.6  & 50.3 \\ 
+- w/o NLL loss              & 87.4  & 50.7 \\ \bottomrule
+\end{tabular}
+\end{tabular}
+\caption{Ablation study of training settings.}
+\label{ablation}
+\end{table}
+
+We demonstrate the effectiveness of our framework through different training settings as detailed below: (1) \textbf{w/o self-edited pairs}, which removes the supplemented edited pairs and trains the model with full-solution pairs. (2) \textbf{w/o full-solution pairs}, which trains the model with the edited pairs only. (3) \textbf{w/o NLL loss}, which removes the loss used for stabilizing training. Table \ref{ablation} shows the results of different settings. 
+
+From the table, we can observe that either self-edited pairs or full-solution pairs are effective for preference learning to improve mathematical reasoning. Both types of pairs achieve similar results on the GSM8K and MATH datasets. Moreover, the combination of these two types of pairs can raise the accuracy to a new peak. Compared with standard DPO training (w/o self-edited pairs), our framework outperforms by 1.8\% on the MATH dataset with Qwen2-7B-Instruct; and by 1.1\% on GSM8K and 1.2\% on MATH with Llama-3.1-8B-Instruct. Besides, the NLL loss helps improve accuracy by about 0.3\%.
+
+\subsection{Subtle Error Analysis}
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/Num_Errors.pdf}
+\caption{Error analysis across three models: Qwen2-7B-Instruct, DPO-Qwen2-7B, \textsc{RISE-Qwen2-7B}. We display the number of different types of errors when addressing the MATH dataset, where ``Others'' represents errors that fall outside the scope of consideration.}
+\label{num_error}
+\end{figure*}
+
+To analyze the effect of our framework on specific error mitigation, we counted the number of errors generated by different models on the MATH dataset. In detail, given the problem, the generated solution, and the reference answer, we prompt GPT-4o to detect the first error in any solution and output the error type in the final. To verify GPT-4o's accuracy in detecting errors, we manually selected 50 random samples and checked for consistency in the identified errors. 46 (92\%) of the samples were accurately detected with their error types, which is acceptable for conducting the complete analysis. We display the number of different errors made by the Qwen2-7B series in Figure \ref{num_error}. We can observe that numerical calculation errors account for approximately 60\% of the total errors and subtle errors we defined for 75\%. Compared with the standard DPO, our framework additionally reduces the number of predefined errors. Especially for numeric or symbolic substitution errors and omission of calculation terms, RISE reduces the number of errors, whereas standard DPO does not achieve this. In addition, other errors, mainly misunderstanding of problems or concepts, increase due to preference learning, but RISE still performs slightly better than standard DPO.
+
+\subsection{Effect of Self-edited Pairs}
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/Num_Edited_Pairs.pdf}
+\caption{Effect of different numbers of self-edited pairs. The horizontal axis represents the number of self-edited pairs added for each problem during training, where ``All'' indicates the use of all self-edited pairs corresponding to a full solution.}
+\label{num_edit}
+\end{figure*}
+
+Self-edited pairs are essential for fine-grained preference learning, particularly in mitigating subtle errors. To comprehensively explore the effect of self-edited pairs, we conduct experiments optimizing the model using different numbers of self-edited pairs (i.e., $N$ in Sec. \ref{subsec:dpo}). Figure \ref{num_edit} shows the results for $N= 1, 2, 3, 4$, and ``All'' self-edited pairs. For \textsc{RISE-Qwen2-7B}, the accuracies on GSM8K and MATH both decrease with more self-edited pairs. For \textsc{RISE-Llama-3.1-8B}, the accuracies reach a relative peak when using three self-edited pairs for each problem. This figure indicates that using more self-edited pairs is not always the better option, considering both the accuracy and the training cost of using additional samples. Additionally, \textsc{RISE-Llama-3.1-8B} prefers more self-edited pairs, which is consistent with the characteristics of Llama-3.1-8B-Instruct, as its full solutions contain around three more steps than those of Qwen2-7B-Instruct. More step-wise self-edited pairs help \textsc{RISE-Llama-3.1-8B} further avoid subtle errors. 
+
+\subsection{Effect of Sampling Attempts}
+
+\begin{figure*}[t!]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/Num_Sampling.pdf}
+\caption{Effect of different numbers of sampling attempts. We sample multi-step solutions for a total of around 9K problems. The left figure shows the number of problems involved in training under different sampling attempts.}
+\label{num_sample}
+\end{figure*}
+
+We further explore the effect of sampling attempts, which directly determine the number of problems involved in preference learning. As shown in Figure \ref{num_sample}, as the number of sampling attempts increases, the number of problems corresponding to paired correct and incorrect full solutions also increases. Although more problems are involved in preference learning, the final results show that pairs corresponding to a larger number of problems actually reduce learning performance. It may be because more sampling attempts yield more samples of ``extreme'' problems. For these problems, the LLM tends to consistently answer either correctly or incorrectly. Training the LLM with these samples may not only be futile but could also lead to performance degradation. We observe this phenomenon on both \textsc{RISE-Qwen2-7B} and \textsc{RISE-Llama-3.1-8B}. 
+
+\subsection{Effect of Different Error-Injection Combinations}
+
+\begin{table}[t!]
+\center
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Combinations                                & GSM8K & MATH \\ \midrule
+Random                                      & \textbf{88.4}  & \textbf{59.9} \\
+Calculation Errors Dominate                 & 88.2  & 59.0 \\
+Substitution Errors Dominate                & 88.1  & 58.6 \\
+Omission of Calculation Terms Dominates     & 87.8  & 58.7 \\ \bottomrule
+\end{tabular}
+\caption{Effect of different error injection combinations for \textsc{RISE-Qwen2-7B}. ``Calculation Errors'' denotes numerical
+calculation errors, and ``Substitution Errors'' denote numeric or symbolic substitution errors.}
+\label{error_comb}
+\end{table}
+
+Predefined injected errors are essential for the effectiveness of our framework. We investigate the impact of different combinations of injected errors on the model's mathematical performance. Three types of errors that occur most frequently in solutions generated by our method are selected for analysis. Since not all samples are applicable to these three types of errors, we focus on one primary error type (i.e., ``\textbf{Dominate}''), supplemented by a small number of other errors. For example, some samples do not contain numerical values or calculation symbols, and thus cannot be injected with calculation errors. The comparison results are shown in Table \ref{error_comb}. We can observe that all these combinations contribute to preference learning and a random combination yields the best performance. It indicates that samples with diverse predefined errors are more likely to help the LLM learn to avoid subtle errors.
+
+
+
+\section{Related Work}
+
+\subsection{LLM for Mathematical Reasoning}
+Large language models (LLMs) have shown remarkable proficiency in mathematical reasoning, excelling in tasks ranging from basic arithmetic questions to complex mathematical Olympiad problems~\citep{team2023gemini,jiang2024mixtral,dubey2024llama,gpt4o,huang2024olympicarena}. Furthermore, various approaches have been investigated to enhance the mathematical reasoning capabilities of LLMs. Methods such as Llemma~\cite{llemma}, DeepseekMath~\cite{deepseekmath}, and Qwen2.5-Math~\cite{yang2024qwen2} have focused on collecting vast amounts of math-related data for continued pretraining. Recent efforts have also focused on designing more efficient fine-tuning datasets to stimulate the mathematical capabilities of base models, such as MAmmoTH~\citep{mammoth}, MetaMath~\citep{metamath} and DART-Math~\citep{tong2024dart}. Additionally, some works attempted to enhance the LLM's mathematical ability by incorporating external tools, particularly through the integration of code interpreter~\citep{tora,wangmathcoder, mario}.
+
+\subsection{Step-wise Preference Learning}
+In addition to pre-training and instruction fine-tuning, step-wise preference learning—particularly methods related to Proximal Policy Optimization (PPO)—has been widely explored to enhance the mathematical capabilities of LLMs~\citep{lightmanlet,luo2023wizardmath,deepseekmath}. However, the final performance is highly dependent on the quality of the process-supervised reward model (PRM)~\citep{uesato2022solving, math-shepherd}, and the training process of PPO or its variants is notably complex. Recently, Direct Preference Optimization (DPO)~\citep{dpo} simplified this process by directly leveraging pair-wise data for preference learning. Many works extend DPO, enabling it to perform step-wise preference learning to improve the model's multi-step mathematical problem-solving ability~\citep{step-control,mcts_dpo,rl_incorrect,step-dpo}. To the best of our knowledge, we are the first to tackle subtle errors in mathematical reasoning via step-wise preference learning especially on error tokens.
+
+
+\section{Conclusion}
+
+
+In this work, we propose a novel preference learning framework called eRror-Injected Self-Editing (RISE), which constructs hard pairs through self-editing to mitigate predefined subtle errors. Compared to other fine-grained, step-wise preference learning methods, our framework further refines the training objective to target subtle error tokens, without requiring LLM-based or estimation-based preference annotations. To avoid optimization failure caused by overly similar preference pairs, we additionally introduce a negative log-likelihood loss, controlled by the generation probability of the correct samples. The effectiveness of our framework is demonstrated in two LLM series: Qwen2 and Llama-3.1. Results across multiple mathematical datasets demonstrate that our method can unlock the model's potential in mathematical reasoning. 
+
+
+
+\section{Reproducibility Statement}
+
+We provide all codes and data used in this study in supplementary material. 
+
+
+
+
+

@@ -1,0 +1,456 @@
+\title{MoS: Unleashing Parameter Efficiency of Low-Rank Adaptation with Mixture of Shards}
+
+\begin{abstract}
+The rapid scaling of large language models necessitates more lightweight finetuning methods to reduce the explosive GPU memory overhead when numerous customized models are served simultaneously.
+Targeting more parameter-efficient low-rank adaptation (LoRA), parameter sharing presents a promising solution. Empirically, our research into high-level sharing principles highlights the indispensable role of differentiation in reversing the detrimental effects of pure sharing.
+Guided by this finding, we propose Mixture of Shards (\name{}), incorporating both inter-layer and intra-layer sharing schemes, and integrating four nearly cost-free differentiation strategies, namely subset selection, pair dissociation, vector sharding, and shard privatization. Briefly, it selects a designated number of shards from global pools with a Mixture-of-Experts (MoE)-like routing mechanism before sequentially concatenating them to low-rank matrices.
+Hence, it retains all the advantages of LoRA while offering enhanced parameter efficiency, and effectively circumvents the drawbacks of peer parameter-sharing methods.
+Our empirical experiments demonstrate approximately $8\times$ parameter savings in a standard LoRA setting. The ablation study confirms the significance of each component.
+Our insights into parameter sharing and \name{} method may illuminate future developments of more parameter-efficient finetuning methods.
+
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+With the remarkable capabilities, 
+large language models (LLMs)~\citep{llama3, GeminiAFamily_Team2023,  Mistral7B_Jiang2023} are adapted for
+various downstream applications~\citep{CharacterLlmA_Shao2023,
+ds_math}. 
+Among parameter-efficient finetuning (PEFT) methods~\citep{ParameterEfficientTransfer_Houlsby2019, PTuningPrompt_Liu2022},
+low-rank adaptation (LoRA)~\citep{LoraLowRank_Hu2021} reparameterizes the weight updates with two trainable low-rank matrices, and has gained the most popularity 
+with 
+reduced resource consumption,
+competitive performance, 
+low-cost task switching, etc.
+Nevertheless, with the continuous applicability of scaling law~\citep{Gpt4Technical_Achiam2023}, the size of LLMs increases rapidly for even better performance, intensifying the need for more lightweight finetuning methods.
+For instance, GPT4o allows customization to its vast user base\footnote{\url{https://openai. 
+Assuming a scenario with a Llama2-70B-sized model and 10,000 active users, each allocated a LoRA module with the rank of 16, only the parameters of LoRAs would occupy 3.36 TB of GPU memory, an onerous burden for service providers.
+This underscores the need for a more lightweight solution than LoRA, while retaining its advantages.
+As a promising solution, parameter sharing has been extensively explored
+~\citep{VeRAVectorBased_Kopiczko2023, TiedLoraEnhacing_Renduchintala2023, PRoLoRAPartialRotation_Wang2024}.
+Specifically, 
+VeRA~\citep{VeRAVectorBased_Kopiczko2023} adopts inter-layer sharing of frozen 
+matrices with trainable vectors; however, it results in limited model capacity and necessitates an excessively high rank. Subsequently, Tied LoRA~\citep{TiedLoraEnhacing_Renduchintala2023} mitigates these constraints by permitting shared matrices
+to be trainable. Yet, its tying mechanism restricts applicability to linear layers of different dimensions.
+More recently, PRoLoRA~\citep{PRoLoRAPartialRotation_Wang2024} showcases enhanced parameter efficiency by reusing submatrices within a single linear layer, thereby circumventing the above restrictions. However, its limited focus on intra-layer sharing constrains efficiency potential, and promises a hybrid approach integrating both intra-layer and inter-layer sharing. 
+Besides, while these methods, with their intuitive designs, have shown the benefits of parameter sharing on enhanced parameter efficiency, the fundamental principles have not been discussed yet to guide the future development of parameter sharing strategies.
+Targeting enhanced parameter efficiency, we first analyze the factors influencing parameter sharing performance in the context of LoRA. Our empirical findings indicate that improving the parameter efficiency of LoRA requires a careful balance between sharing and differentiation. 
+While parameter sharing can significantly decrease the number of trainable parameters, the negative effects (\textit{i.e.}, possible performance degradation) of excessive sharing necessitate differentiation strategies to mitigate these drawbacks.
+Guided by this insight, we propose a more parameter-efficient LoRA-based method called Mixture of Shards (\name{}). It features a global sharing scheme to achieve a higher sharing ratio, along with four nearly cost-free differentiation techniques: subset selection, pair dissociation, vector sharding, and shard privatization.
+Briefly, our method selects a designated number of shards from global pools with a Mixture-of-Experts (MoE)-like routing mechanism~\citep{AdaptiveMixturesOf_Jacobs1991}, and sequentially concatenate them to construct the low-rank matrices.
+
+Empirically, we validate its superior performance compared to peer methods in scenarios with fixed trainable parameter count, and demonstrate an eightfold parameter reduction in performance-targeted situations.
+A thorough ablation analysis of each differentiation strategy reveals that all contribute to unleashing the parameter efficiency of \name{}, despite their nearly cost-free property. Notably, pair dissociation and shard privatization boost the efficiency more significantly through increased combination diversity and exclusive differentiation, respectively, whereas vector sharding provides only limited gains in diversity.
+With the intuitive design, our method retains all the advantages of LoRA while circumventing the drawbacks of peer methods. The markedly improved parameter efficiency alleviates the burden on service providers when numerous LoRA-based customized models are served simultaneously.
+
+In summary, our main contributions are as follows: 
+\begin{enumerate}
+    \item[\textbullet] 
+    We introduce a more parameter-efficient finetuning method named Mixture of Shards (\name{}), which facilitates the concurrent serving of numerous customized models with the saliently reduced GPU memory overhead.
+    
+    \item[\textbullet] 
+    Our exploration into high-level sharing principles highlights the balance between sharing and differentiation to enhance parameter efficiency, providing valuable insights for the future advancement of parameter-sharing methods.
+    
+    
+    \item[\textbullet] 
+    Extensive experiments empirically confirm the significant parameter savings achieved by \name{}, and validate the necessity and relative importance of each differentiation strategy. 
+
+    \item[\textbullet] 
+    To the best of our knowledge, we are the first to apply MoE-like mechanism for parameter savings in a single-task LoRA. Besides, our dissociated perspective may also inspire further parameter reduction for LoRA-based multitasking scenarios.
+
+    
+\end{enumerate}
+
+
+\section{Sharing \& Differentiation }
+
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{imgs/MoS_motivation-base_v3.png}
+        \caption{LoRA}
+        \label{fig: LoRA}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{imgs/MoS_motivation-pure_sharing_v3.png}
+        \caption{Pure Sharing}
+        \label{fig: pure sharing}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{imgs/MoS_motivation-subset_selection_v3.png}
+        \caption{Pure Sharing (Differentiated)}
+        \label{fig: Pure Sharing (Differentiated)}
+    \end{subfigure}
+    \caption{
+    Illustration of vanilla LoRA, pure sharing, and differentiated pure sharing methods. The rank of vanilla LoRA is denoted as $r$, while that of pure sharing is boosted to $rL$ through the aggregation of trainable parameters among $L$ Transformer blocks.
+    In Figure~\ref{fig: Pure Sharing (Differentiated)}, the colored squares between the low-rank matrices $\mathbf{A}$ and $\mathbf{B}$ signify scalars and boolean values  for random scaling  and subset selection strategies, respectively.}
+    \label{fig:moti}
+\end{figure}
+
+\begin{table*}[!b]
+\caption{Results of LLaMA2-7B with different sharing and differentiation methods across diverse instruction following datasets.
+``+ Random Scaling'' and ``+ Subset Selection'' denote the individual integration of them into the ``Pure Sharing'' scheme, respectively. The details of these benchmarks are elaborated in Sec.~\ref{sec:exp}.}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{>{\centering\arraybackslash}p{84pt}ccccccccc}
+\toprule
+\multirow{2}{*}{Method}         & \multirow{2}{*}{Rank} & \multirow{2}{*}{\# Param.}     & MMLU                 & BBH                    & GSM8K                     & \multicolumn{2}{c}{TyDi~QA}           & HumanEval & \multirow{2}{*}{Avg.} \\ 
+\cmidrule(l){4-9} 
+                                &                       &                             & EM                   & EM                     & EM                      & F1                 & EM               & P@1        &         \\ 
+\midrule
+LoRA                            & 2                     & 5.00M                       & 44.77                & 36.22                  & 26.28                   & 48.67              & 35.70            & 18.24      & 34.98   \\ \midrule
+Pure Sharing                    & 64                     & 5.00M                       & 43.61                & 35.15                  & 26.54                   & 49.12              & 36.04            & 15.53      & 34.33   \\ 
+\makebox[48pt][l]{+ Random Scaling}   & 64                     & 5.00M                       & 43.98                & 35.30                  & 29.04                   & 49.03              & 35.73            & 15.58      & 34.77   \\ 
+\makebox[48pt][l]{+ Subset Selection} & 64                     & 5.00M                       & 45.56                & 36.76                  & 28.18                   & 50.33              & 37.22            & 18.64      & 36.12   \\ 
+
+\bottomrule                         
+\end{tabular}
+}
+
+\label{tab:motivation}
+\end{table*}
+
+Drawing inspiration from the inter-layer shared VeRA~\citep{VeRAVectorBased_Kopiczko2023} and intra-layer shared PRoLoRA~\citep{PRoLoRAPartialRotation_Wang2024}, we seek to create a unified sharing mechanism that leverages both perspectives, promising further enhanced parameter efficiency.
+To guide this development more clearly, we start with reparameterizing the vanilla LoRA, followed by analyzing the impact of high-level factors (\textit{i.e.}, sharing and differentiation) on model performance under a specified number of trainable parameters.
+All relevant approaches are illustrated in Figure~\ref{fig:moti} for an intuitive comparison.
+\paragraph{Reparameterization of LoRA}
+LoRA~\citep{LoraLowRank_Hu2021} efficiently adapts LLMs by updating the frozen pretrained weights with low-rank decomposition. Specifically, given a pretrained weight \( \mathbf{W}_0 \in \mathbb{R}^{o \times h} \), its weight update $\Delta \mathbf{W}
+$ is approximated as the product of two trainable matrices $\mathbf{A} \in \mathbb{R}^{r \times h}$ and $\mathbf{B} \in \mathbb{R}^{o \times r}$, where the rank $r$ is times smaller than $h$ and $o$ for parameter saving.
+Similar to \cite{VeRAVectorBased_Kopiczko2023}, this product can be further reparameterized as the sum of outer products of the corresponding row and column vectors. Formally, the whole process can be presented as: 
+\begin{equation}
+    \mathbf{W} = \mathbf{W}_0 + \Delta \mathbf{W} = \mathbf{W}_0 + \mathbf{BA} = \mathbf{W}_0 + \sum_{i=1}^r \mathbf{b}_i \otimes \mathbf{a}_i,
+\end{equation}
+where $\mathbf{W}$ is the updated weight, and $\mathbf{a}_i$ and $\mathbf{b}_i$ denote the $i$-th row and column vectors of low-rank matrices $\mathbf{A}$ and $\mathbf{B}$, respectively.
+This reparameterization trick enables the weight update to be the linear combination of outer products of multiple vector pairs, which will be extensively utilized in our subsequent analysis.
+Generally, LoRA will be applied to each linear layers in all the Transformer blocks of a model~\citep{AttentionIsAll_Vaswani2017} for better performance~\citep{QloraEfficientFinetuning_Dettmers2023}, which is also applied to our analysis by default.
+\paragraph{Pure parameter sharing does not necessarily boost up the parameter efficiency of LoRA.}\label{sec:pure sharing}
+Although VeRA and PRoLoRA achieve better performance than LoRA via parameter sharing, we demonstrate that this causality is not universally applicable. 
+To facilitate our subsequent comparisons, we introduce a straightforward sharing scheme, detailed in Sec.~\ref{sec:global sharing}. Briefly, this scheme shares the low-rank matrices $\mathbf{A}$ and $\mathbf{B}$ across all Transformer blocks for each type of linear layer. 
+As shown in Table~\ref{tab:motivation}, we set the same low-level trainable parameter budget for all methods, eliminating the disturbance of parameter redundancy and enabling clear comparison of their representation capabilities. 
+Despite several times higher rank, which is suggested for better performance~\citep{PRoLoRAPartialRotation_Wang2024}, this pure sharing scheme outperforms LoRA on GSM8K and Tydi~QA tasks, but underperforms on others. This variability indicates that excessive sharing may hinder model performance, negating the positive effects of increased rank. 
+In other words, sharing mechanism is not the only crucial element of existing methods for enhanced parameter efficiency.
+
+\paragraph{Differentiation reverses the detrimental effects of pure sharing mechanism.}
+Inspired by the varying rank demands in different positions~\citep{AdaptiveBudgetAllocation_Zhang2023}, we hypothesize that the pure sharing scheme, reusing the same matrices among all Transformer blocks, contradicts different representation capacity across blocks, potentially deteriorating the performance. To verify this, we devise the following two schemes to differentiate the shared matrices:
+\begin{enumerate}
+    \item \textbf{Random Scaling.} 
+    Random scaling adds scalars to each vector pair, 
+    which can be formulated as $\mathbf{B}\mathbf{A}=\sum_{i=1}^r s_i \cdot \mathbf{b}_i\otimes\mathbf{a}_i$, where $s_i$ is sampled from a normal distribution and frozen after initialization. 
+    Hence, this operation does not introduce extra trainable parameters, but different blocks will optimize the vectors associated with their own larger scalars despite the same shared whole matrices, since these vectors influence the representation capacity more significantly than others. 
+
+    \item \textbf{Subset Selection.} Instead of scaling the vector pairs, this scheme selects a specific number of vector pairs from the shared matrices.
+    Specifically, the scalars in the random scaling method are substituted with Boolean values. Vectors corresponding to those marked as true are selected, while the others are neglected. 
+    This ensures that, in most cases, any two blocks only share a subset of vector pairs so that their representations are differentiated by other distinct pairs.
+    
+\end{enumerate}
+As shown in Table~\ref{tab:motivation}, both differentiation strategies further improve model performance over the pure sharing scheme. 
+Specifically, 
+random scaling can enhance the performance of pure sharing in nearly all tasks,  and ultimately achieves slightly better average results.
+However, it still underperforms LoRA apparently.
+In contrast, subset selection, adopting more aggressive differential operations, 
+reverses the degradation and consistently surpasses both pure sharing and LoRA across all benchmarks. On average, its performance exceeds that of LoRA over one percent, highlighting the importance of differentiation.
+
+In summary, enhancing the parameter efficiency of LoRA involves a delicate balance between sharing and differentiation. On one hand, parameter sharing can significantly reduce the number of trainable parameters; on the other hand, the detrimental impacts of sharing necessitate differentiation schemes to counteract them. This insight will inform our subsequent design efforts.
+
+
+
+\section{Method}
+
+
+Based on the above analysis, we follow the guide of sharing and differentiation, and propose a more lightweight LoRA-based method, named Mixture of Shards (\name{}). 
+Briefly, it selects a specific number of shards from global pools with a MoE-like routing mechanism, and combine them sequentially to form the low-rank matrices of LoRA. 
+It features a global sharing scheme for a higher sharing ratio, and four nearly cost-free differentiation measures, namely subset selection, pair dissociation, vector sharding, and shard privatization. 
+Their details will be elaborated below, followed by the advantage analysis.
+
+\subsection{Global Sharing}\label{sec:global sharing}
+To maximize the parameter efficiency, we introduce a global sharing mechanism, incorporating VeRA-like inter-layer sharing and PRoLoRA-like intra-layer sharing methods. 
+As illustrated in Figure~\ref{fig: inter-layer-sharing}, this mechanism centers on a global pool for each type of linear layer.
+Initially, each pool consists of multiple independently initialized and trained vector pairs, while each vector pair within the low-rank matrix pairs (\textit{i.e.}, $\mathbf{A}$ and $\mathbf{B}$) for each layer is sampled from this pool.
+The ``pure sharing'' in Sec.~\ref{sec:motivation} can be formed when all vector pairs from the pool are selected at each block.
+In this case, the weight update can be
+formulated as 
+\begin{equation}
+    \Delta \mathbf{W} =  \mathbf{BA} = \mathbf{B}^p \mathbf{A}^p ,
+\end{equation}
+where $\mathbf{A}^p \in \mathbb{R}^{eL \times h} $ and $\mathbf{B}^p \in \mathbb{R}^{o \times eL} $ represents the globally shared low-rank matrices for one linear layer type\footnote{
+Due to the identical operations, the notation for different types of linear layers is omitted for clarity.
+},
+while $L$ and $e$ denote the number of Transformer blocks and an equivalent rank to that of LoRA in terms of  trainable parameter count, respectively.
+Due to the extremely high sharing ratio (\textit{i.e.},  $L$), a small number of parameters can yield a remarkably high rank, hinting positive effects on performance within a certain range~\citep{LoRAMeetsDropout_Wang2024, PRoLoRAPartialRotation_Wang2024}.
+Taking the LLaMA2-7B model with 32 blocks~\citep{Llama2Open_Touvron2023} as an example, pure sharing can raise the rank from 2 to 64 with the same trainable parameter count as LoRA, indicating its great potential for parameter reduction.
+
+\subsection{Subset Selection}\label{sec:subset}
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}{0.51\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{imgs/111.png}
+        \caption{Inter-Layer Sharing}
+        \label{fig: inter-layer-sharing}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.47\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{imgs/222.png}
+        \caption{Intra-Layer Sharing}
+        \label{fig: intra-layer-sharing}
+    \end{subfigure}
+    \caption{
+    Illustration of \name{} from the perspectives of inter-layer and intra-layer sharing.
+    (a) Across layers, each layer retrieves shards from the same global pool, utilizing an independent index matrix and a MoE-like router ``R''. 
+    (b) Within each layer, the shard retrieval process is visualized in details with the number of shards per vector \( l \), rank \( r \), pool size as 2, 4, and n, respectively. The circled numbers denote the shard indices in the global pool, while the small italicized numbers indicate the shard positions within the low-rank matrix.
+    Blue highlights shared components, whereas green indicates privatized ones.
+    }
+    \label{fig:mop}
+\end{figure}
+As discussed in Sec.~\ref{sec:motivation}, 
+while pure sharing scheme may lead to performance decline due to the shared weight updates across Transformer blocks,
+differentiation plays an indispensable role in reversing the detrimental effects.
+Compared to random scaling, subset selection demonstrates a more pronounced performance improvement, and is thus incorporated into our design for differentiation. 
+Let \( r \) denote the number of vector pairs chosen from the shared pools, signifying the rank of each low-rank matrix during both training and inference. The weight update for the \( k \)-th block can be expressed as follows:
+\begin{equation}
+\Delta \mathbf{W}^k = \mathbf{B}^k \mathbf{A}^k = \mathbf{B}^p \Lambda^k \mathbf{A}^p = \sum_{i=1}^{eL} m_i^k \cdot \mathbf{b}^p_i \otimes \mathbf{a}^p_i,
+\end{equation}
+where the boolean value \( m_i^k \) represents the \( i \)-th diagonal element of the diagonal matrix \( \Lambda^k \) for the \( k \)-th block. This value is randomly sampled during initialization, remains fixed during the finetuning process, and satisfies the condition \( \sum_{i=1}^{eL} m_i^k = r \). Additionally, \( \mathbf{a}^p_i \) and \( \mathbf{b}^p_i \) denote the \( i \)-th row and column vectors of \( \mathbf{A}^p \) and \( \mathbf{B}^p \), respectively.
+\subsection{Pair Dissociation}\label{sec:pair dissociation}
+
+In prior research, such as \cite{DyloraParameterEfficient_Valipour2022,VeRAVectorBased_Kopiczko2023}, vector pairs have been regarded as the fundamental units of LoRA by default. 
+To foster greater differentiation, we propose a vector pair disassociation strategy that is straightforward and cost-effective, requiring no additional trainable parameters while yielding significant improvements in our empirical analysis. 
+Specifically, instead of a single shared pool for vector pairs (\textit{i.e.}, pairs of \(\mathbf{a}_i^p\) and \(\mathbf{b}_i^p\)), we take decoupled vectors as the basic units, and separate \(\mathbf{a}_i^p\) and \(\mathbf{b}_i^p\) into two distinct pools. 
+Hence, within the $k$-th block, the vectors that form matrices $\mathbf{A}^k$ and $\mathbf{B}^k$ will be sampled independently. 
+Moreover, this separation naturally enables two ordered index vectors, \(\mathbf{I}^k_a \in \mathbb{R}^{r}  \) and \(\mathbf{I}^k_b   \in \mathbb{R}^{r} \), instead of unordered boolean vectors, to access vectors from the pools. 
+Both the dissociation and the ordered indices significantly enhance the combinatorial diversity of \(\mathbf{A}^k\) and \(\mathbf{B}^k\). 
+Formally, this process can be formulated as 
+\begin{equation}
+\Delta \mathbf{W}^k = \mathbf{B}^k \mathbf{A}^k
+= \operatorname{Index}^c(\mathbf{B}^p, \mathbf{I}^k_b ) \operatorname{Index}^r(\mathbf{A}^p, \mathbf{I}^k_a ),
+\label{eq: dissociation}
+\end{equation}
+where \(\operatorname{Index}^c( \cdot)\) and \(\operatorname{Index}^r( \cdot)\) denote the retrieval of column and row vectors, respectively, based on the given indices.
+
+\subsection{Vector Sharding}\label{sec:vector sharding}
+Drawing inspiration from database sharding\footnote{\url{https://en.wikipedia.org/wiki/Shard_(database_architecture)}}, 
+we further refine the basic unit of the shared pool to vector shards, where \( l \) sampled shards are concatenated into a single vector.
+As illustrated in Figure~\ref{fig: intra-layer-sharing}, two vectors corresponding to the indices ``0'' and ``3'' are retrieved and combined to form the first rank of the low-rank matrix. 
+Similar to vector disassociation, this nearly cost-free operation further promotes the diversity and differentiation of low-rank matrices. Subsequent experiments will confirm its beneficial effects.
+The mathematical formulation remains unchanged, with the exception that the dimensions of \(\mathbf{I}^k_a\) and \(\mathbf{I}^k_b\) are adjusted to \( l \times r \).
+
+\subsection{Shard Privatization}
+As another differentiation strategy, we partition the global pool into two segments: public and private. As indicated by their names, the public segment remains shared, whereas the private part is exclusively accessible to only one matrix. This privatization improves the differentiation of weight updates among blocks, as expressed by 
+\begin{equation}
+\Delta \mathbf{W}^k = \mathbf{B}^k \mathbf{A}^k
+= \operatorname{Index}^c(
+\operatorname{Concat}(\mathbf{A}^{pub},\mathbf{A}^{pri})
+, \mathbf{I}^k_b ) \operatorname{Index}^r(
+\operatorname{Concat}(\mathbf{B}^{pub},\mathbf{B}^{pri})
+, \mathbf{I}^k_a ),
+\end{equation}
+where $\mathbf{A}^p$ in Eq.~\ref{eq: dissociation} is substituted by the concatenation $\operatorname{Concat}(\cdot)$ of the public pool $\mathbf{A}^{pub}$ and the private pool $\mathbf{A}^{pri}$. Similarly, $\mathbf{B}^p$ is replaced by the he concatenation of $\mathbf{B}^{pub}$ and $\mathbf{B}^{pri}$. Besides, the private pools are achieved through indices exclusively owned by blocks, maintaining a unified operation with public pools.
+
+\paragraph{Initialization.}
+Based on the shard size and the specified trainable parameter count, we first instantiate the global pools for various linear layer types, respectively.
+Following standard LoRA practices, we initialize $\mathbf{B}^{pub}$ and $\mathbf{B}^{pri}$ to zero, ensuring consistency with the pretrained model at the start of finetuning. As adopted in PRoLoRA~\citep{PRoLoRAPartialRotation_Wang2024}, we adjust the sampling boundaries of $\mathbf{A}^{pub}$ and $\mathbf{A}^{pri}$ to align with the vanilla LoRA. Subsequently, we randomly initialize the index matrices \(\mathbf{I}^k_a\) and \(\mathbf{I}^k_b\), and ensure the private shards are sampled  only once. The training and inference procedures remain identical to those of LoRA, except that all low-rank matrices are constructed from the index matrices and global pools.
+
+\subsection{Advantage Analysis} \label{sec:advantage}
+Compared to LoRA, \name{} only modifies the source of low-rank matrices to concatenated shards from the global pools. This adjustment retains the advantages of LoRA, such as \textbf{low-cost switching} and \textbf{linear properties}. The former allows for swapping only the finetuned weights instead of all parameters, facilitating the efficient handling of multiple customized models simultaneously. The latter enables \name{} to be merged with pretrained weights during inference, thus eliminating inference latency.
+Moreover, this source modification allows \name{} to leverage \textbf{existing technical support} of LoRA~\citep{SLoraServing_Sheng2023,PunicaMultiTenant_Chen2023} with minimal effort.
+Additionally, \name{} offers several extra advantages over LoRA and other peer methods.
+
+\paragraph{High Parameter Efficiency.}
+By integrating both inter-layer and intra-layer sharing, \name{} demonstrates significantly higher parameter efficiency compared to LoRA and other baselines, as shown in Sec.~\ref{sec:main results}. This reduction in parameters results in decreased disk space and GPU memory usage, thereby greatly alleviating the serving burden in multi-LoRA scenarios.
+
+\paragraph{High Representation Capacity.}
+As shown in Table~\ref{tab:main results}, even with a rank of 256 or higher, Tied LoRA and VeRA still clearly underperform other methods. 
+In contrast, the performance of \name{} can approximately converge to that of full finetuning as do LoRA and PRoLoRA. This ensures a substantial model capacity, which is crucial for tackling challenging tasks.
+
+
+
+
+\section{Experiments}
+
+\subsection{General Setup} \label{sec:setup}
+Our primary experiments focus on evaluating the instruction following abilities of models, aligning closely with the general configurations outlined by Tulu~\citep{HowFarCan_Wang2023} and PRoLoRA~\citep{PRoLoRAPartialRotation_Wang2024}. Similarly, we adopt a comprehensive assessment protocol that involves factual knowledge, reasoning abilities, multilingual proficiency, and coding skills. 
+Following \citet{PRoLoRAPartialRotation_Wang2024}, we select specific settings that have demonstrated positive results as evidenced by Table 7 of \citet{HowFarCan_Wang2023}. 
+Besides, we inherit their unified chatbot framework. This necessitates models to learn both specific tasks and the interaction style.
+\paragraph{Datasets.}
+We finetune base models on Super-Natural Instructions (SuperNI~\citep{SuperNaturalinstructionsGeneralization_Wang2022}) dataset, and evaluate them on both Massive Multitask Language Understanding (MMLU~\citep{MeasuringMassiveMultitask_Hendrycks2021}) and TyDi~QA~\citep{TydiQaA_Clark2020} datasets for \textbf{factual knowledge} and \textbf{multilingual} capabilities, respectively.
+For the general and mathematical \textbf{reasoning} abilities, we finetune models on Flan~V2 and its CoT split~\citep{TheFlanCollection_Longpre2023}, and conduct evaluation on Big-Bench-Hard (BBH~\citep{ChallengingBigBench_Suzgun2022}) and the test set of Grade School Math (GSM8K~\citep{TrainingVerifiersTo_Cobbe2021}) corpora, respectively.
+Moreover, \textbf{coding} skills are evaluated on HumanEval~\citep{EvaluatingLargeLanguage_Chen2021} dataset after models are finetuned on CodeAlpaca~\citep{CodeAlpacaAn_Chaudhary2023} dataset.
+
+\paragraph{Baselines.}
+From the perspective of parameter sharing, we evaluate our approach against LoRA and other existing intra-layer or inter-layer sharing methods. A brief introduction to these baselines is provided below.
+
+\begin{enumerate}
+    \item[\textbullet] \textbf{LoRA}~\citep{LoraLowRank_Hu2021} freezes the pretrained weights and decomposes the weight updates into two trainable low-rank matrices, as formulated in Sec.~\ref{sec:motivation}. Following the settings of QLoRA~\citep{QloraEfficientFinetuning_Dettmers2023}, LoRA is applied to every linear layer across all Transformer blocks, including query, key, value, output, up, gate, and down projection weights. 
+    
+    \item[\textbullet] \textbf{VeRA}~\citep{VeRAVectorBased_Kopiczko2023} also freezes pretrained weights, along with randomly initialized shared low-rank matrices, and employs decoupled scaling vectors for the differentiation of weight updates. Consistent with LoRA, VeRA is also applied to all linear layers.
+    
+    \item[\textbullet] \textbf{Tied LoRA}~\citep{TiedLoraEnhacing_Renduchintala2023} ties the down projection matrices across all query, key, and value projection weights. It shares trainable low-rank matrices across Transformer blocks for parameter savings, while updating the separate scaling vectors for differentiation.
+    
+    \item[\textbullet] \textbf{PRoLoRA}~\citep{PRoLoRAPartialRotation_Wang2024} recently provides an intra-layer solution aimed at enhancing parameter efficiency. It replicates the sub-matrices of LoRA multiple times before differentiating them with partial rotation operations.
+    
+\end{enumerate}
+
+
+
+
+\subsection{Main Results} \label{sec:main results}
+
+\begin{table*}[!hbt]
+\centering
+\setlength{\tabcolsep}{2pt}
+\caption{Results of LLaMA2-7B across multiple instruction-following datasets using different methods. The abbreviations ``\# Param.'' and ``Avg.'' refer to ``Parameter Count'' and ``Average'', respectively, while the symbols ``$\text{-sp}$'', ``$\text{-vs}$'', and ``$\text{-pd}$'' indicate the ablation of shard privatization, vector sharding, and pair dissociation. The notations “4/8” and “16/32” correspond to increasing the rank to 4 or 8, and 16 or 32, respectively. Underlined values indicate the best performance with 5.00M trainable parameters, while bold values denote the best results across all configurations.
+``${\dagger}$'' indicates the results copied from \citet{PRoLoRAPartialRotation_Wang2024}.}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{cccccccccc}
+\toprule
+\multirow{4}{*}{Method}                             & \multirow{4}{*}{Rank} & \multirow{4}{*}{\# Param.}     & MMLU                 & BBH                    & GSM8K                     & \multicolumn{2}{c}{TyDi~QA}           & HumanEval & \multirow{4}{*}{Avg.} \\ 
+                                                    &                       &                             & (factuality)         & (reasoning)            & (reasoning)             & \multicolumn{2}{c}{(multilinguality)} & (coding)   &         \\ 
+\cmidrule(l){4-9}                      
+                                                    &                       &                             & EM                   & EM                     & EM                      & F1                 & EM               & P@1        &         \\ 
+                                                    &                       &                             & (0-shot)             & (3-shot)       & (8-shot, CoT)           & \multicolumn{2}{c}{(1-shot, GP)}      & (0-shot)   &         \\ 
+\midrule                       
+$\text{Vanilla (chat)}^{\dagger}$                                    & -                     & -                           & 41.18                & 0.00                   & 3.03                    & 17.40              & 0.10             & 0.64       & 10.39   \\
+$\text{Vanilla (no-chat)}^{\dagger}$                                   & -                     & -                           & 41.53                & 33.43                  & 15.47                   & 49.18              & 35.35            & 13.57      & 31.42   \\ 
+\midrule                       
+\multirow{4}{*}{LoRA}                               & $\text{2}^{\dagger}$                     & 5.00M                       & 44.77                & 36.22                  & 26.28                   & 48.67              & 35.70            & 18.24      & 34.98   \\ 
+                                                    & $\text{8}^{\dagger}$                     & 19.99M                      & 46.55                & 36.92                  & 31.11                   & 50.50              & 36.89            & 19.37      & 36.89   \\
+                                                    & $\text{16}^{\dagger}$                    & 39.98M                      & 46.70                & 36.43                  & 31.34                   & 50.97              & 37.64            & 18.73      & 36.97   \\ 
+                                                    & 64                    & 159.91M                     & \textbf{47.10}                & 37.78                  & \textbf{31.43}                   & 51.65              & 38.07            & 19.12      & 37.53   \\
+\midrule                       
+$\text{VeRA}^{\dagger}$                                                & 256                   & 1.42M                       & 42.51                & 35.10                  & 22.69                   & 48.39              & 36.38            & 18.90      & 34.00   \\ 
+\midrule                       
+$\text{Tied LoRA}^{\dagger}$                                           & 280                   & 4.99M                       & 44.36                & 35.76                  & 25.47                   & 50.16              & 37.15            & 18.68      & 35.26   \\ 
+\midrule                       
+\multirow{1}{*}{$\text{PRoLoRA}^{\dagger}$}                            & 4/8                   & 5.00M                       & 45.85                & 36.45                  & 27.57                   & 49.94              & 36.59            & 19.75      & 36.03   \\ 
+\midrule           
+\multirow{2}{*}{MoS}                        & 4/8                   & 5.00M                       & \underline{46.09}        & \underline{37.29}       & \underline{28.43}       & \underline{50.21}              & \underline{37.19}            &   \underline{19.12}	  & \underline{36.39}   \\
+                                                    & 16/32                 & 19.99M                      & 47.01        & \textbf{37.79}       & 30.93       & \textbf{51.71}              & \textbf{38.34}            & \textbf{20.00}      & \textbf{37.63}  \\
+\midrule
+\multirow{1}{*}{$\text{MoS}^\text{-sp}$}     & 16/32                 & 19.99M                      & 46.64        & 36.69       & 30.17       & 50.27              & 36.90            & 18.60      & 36.54  \\
+
+\multirow{1}{*}{$\text{MoS}^\text{-vs}$}     & 16/32                 & 19.99M                      & 46.47        & 37.52       & 31.77       & 50.90              & 37.98            & 18.69      & 37.22  \\
+
+\multirow{1}{*}{$\text{MoS}^\text{-pd}$}    & 16/32                 & 19.99M                      & 46.23        & 36.17       & 30.71       & 51.40              & 37.94            & 16.77      & 36.54  \\
+\bottomrule                         
+
+\end{tabular}
+}
+\label{tab:main results}
+\end{table*}
+
+The main results are summarized in Table~\ref{tab:main results}, showcasing the performance of various methods across multiple instruction tuning tasks.
+Notably, as the rank increases from 2 to 64, the performance of LoRA consistently improves across all benchmarks, significantly surpassing that of the vanilla model.
+This observation suggests that the current configurations do not introduce apparent parameter redundancy in trainable parameters, highlighting the effectiveness of the setups in demonstrating the parameter efficiency of different approaches.
+
+\textbf{In a scenario with a low-level trainable parameter count, \name{} outperforms all baseline approaches.} Specifically, to highlight the differences in parameter efficiency among various methods, we fix the number of trainable parameters at a low level (i.e., 5.00M, equivalent to that of LoRA with a rank of 2), and compare their performance. Naturally, more superior performance indicates higher parameter efficiency. As shown in Table~\ref{tab:main results}, both the inter-layer shared Tied LoRA and the intra-layer shared PRoLoRA demonstrate better average performance than LoRA. In contrast, by incorporating both intra-layer and inter-layer sharing, our method, \name{}, surpasses all of them on average, and achieves consistent improvements across all individual tasks, as indicated by the underlines.
+However, similar to PRoLoRA~\citep{PRoLoRAPartialRotation_Wang2024}, we do not claim to achieve greater parameter efficiency than VeRA, given its lower parameter count. However, we attempted to increase the rank of VeRA to match the identical trainable parameter count, but failed due to an out-of-memory (OOM) error. This indicates that VeRA has a very low performance-to-rank ratio, making it impractical due to significantly higher training costs for numerous customization.
+
+\textbf{In a regular setting, \name{} achieves around $8\times$ savings in trainable parameters.}
+Considering the significance of performance on various benchmarks, we turn to evaluate the parameter savings of \name{} with a performance target, where fewer trainable parameters also indicate high efficiency.
+We set the performance target to align with LoRA at a rank of 64, which yields an average performance of 37.53. In comparison, with 19.99M trainable parameters (equivalent to that of LoRA with a rank of 8), \name{} outperforms LoRA on four out of six metrics, while maintaining comparable average performance. This reconfirms the superior parameter efficiency of \name{}, and demonstrates its around eightfold savings in trainable parameters. This can considerably alleviate the burden on service providers, when multiple LoRA-based customizations are served simultaneously.
+
+
+\subsection{Scalability Analysis} \label{sec:scale}
+\begin{table}[!hbt]
+\centering
+\caption{Results of LLaMA2-13B across multiple instruction-following datasets using different methods.
+The abbreviations, notions, and settings align with those of Table~\ref{tab:main results}, respectively.
+}
+\begin{tabular}{cccccc}
+\toprule
+\multirow{1}{*}{Method}  & \multirow{1}{*}{Rank}    & MMLU            & BBH                       & GSM                      & \multirow{1}{*}{Avg.} \\ 
+\midrule
+$\text{Vanilla (chat)}^{\dagger}$           & -              & 50.05           & 0.00                      & 2.12                     & 17.39   \\
+$\text{Vanilla (no-chat)}^{\dagger}$        & -              & 52.04           & 39.67                     & 27.82                    & 39.84   \\
+\multirow{1}{*}{$\text{LoRA}^{\dagger}$}    & 2              & 52.78           & 42.50                     & 36.47                    & 43.92   \\
+\multirow{1}{*}{$\text{PRoLoRA}^{\dagger}$} 
+                            & 4/8                   & 53.27           & 43.12                     & 38.72                    & 45.04   \\
+\midrule
+MoS                         & 4/8                   & \textbf{53.51}           & \textbf{43.65}                     & \textbf{40.79}                    & \textbf{45.98 }  \\ 
+\bottomrule                         
+\end{tabular}
+\label{tab:13B results}
+\end{table}
+
+To assess the robustness of \name{} regarding model scale, we extend the experiments to the LLaMA2-13B model. However, we find that finetuning with vanilla LoRA does not yield consistent improvements on the TyDi~QA and Code benchmarks. We hypothesize that this phenomenon might be caused by the more powerful capabilities of the base model, which diminishes the effectiveness of the training set. Hence, we exclude these tasks from our analysis.
+
+As listed in Table~\ref{tab:13B results}, we impose a limited trainable parameter count (equivalent to that of LoRA with the rank of 2) to compare the representational capacities of different methods. Specifically, compared to the pretrained model, LoRA achieves a notable performance improvement with an average score of 43.92. Building on this, PRoLoRA boosts the average performance by 1\%. In contrast, \name{} further unleashes the potential of parameters. It consistently exhibits performance enhancements across all individual benchmarks, with another increase of nearly 1\% on average. This considerable improvement reinforces \name{}'s positive impact on parameter efficiency and its robustness with respect to model size.
+
+\subsection{Ablation Study} \label{sec:ablation}
+
+
+In this section, we conduct an ablation study on each differentiation strategy incorporated by \name{}, before comparing their relative significance. As discussed in Sec.~\ref{sec:motivation} and listed in Table~\ref{tab:motivation}, subset selection plays an indispensable role in reversing the detrimental effects of pure sharing. Since it lays the groundwork for other strategies, we will not reiterate its importance here. Results from the ablation of the other components are presented in Table~\ref{tab:main results}.
+\paragraph{Pair Dissociation.}
+Rather than using distinct indices for enhanced combination diversity, we apply the same index matrix for the low-rank matrix pair $\mathbf{A}^k$ and $\mathbf{B}^k$ within each linear layer (\textit{i.e.}, $\mathbf{I}^k_a = \mathbf{I}^k_b $). This results in an average performance decline exceeding one percent, emphasizing the critical role of pair dissociation and diverse combinations in improving model performance and aligning with our initial motivation.
+
+\paragraph{Vector Sharding.}
+When the basic units in the global pools are reverted back to the row or column vectors of the low-rank matrices from smaller shards, only a 0.41\% average decrease in performance is observed. This decline is much less than that associated with pair dissociation. Given that both components aim to enhance combination diversity, these findings imply that pair dissociation provides a more substantial boost to diversity, whereas sharding yields only marginal improvements.
+
+\paragraph{Shard Privatization.}
+Different from the previous components, shard privatization enhances differentiation among low-rank matrices by allowing certain shards to be exclusively accessible to one low-rank matrix. Its ablation also leads to a performance drop exceeding one percent, highlighting the significance of privatization.
+
+In summary, all differentiation strategies contribute to improving the parameter efficiency of \name{}, despite all being nearly cost-free operations. Among them, pair dissociation and shard privatization unleash the efficiency more saliently through increased combination diversity and exclusive differentiation, respectively, while vector sharding offers only incremental gains in diversity.
+
+
+
+
+\section{Related work}
+
+\paragraph{Low-Rank Adaptation.}
+Low-rank adaptation (LoRA), introduced in \citet{LoraLowRank_Hu2021}, reparameterizes weight updates with two trainable low-rank matrices while the pretrained weights remain fixed. This approach has since spurred numerous enhancements aimed at improving its effectiveness and efficiency.
+AdaLoRA~\citep{AdaptiveBudgetAllocation_Zhang2023}, leveraging singular value decomposition, automates rank allocation by adaptively pruning vector pairs during finetuning. However, the rank variability across layers complicates the simultaneous serving of multiple LoRAs~\citep{SLoraServing_Sheng2023}.
+Aimed at different parameter budget needs during inference, DyLoRA~\citep{DyloraParameterEfficient_Valipour2022} also utilizes vector pairs as fundamental units and randomly masks them throughout training, yet leading to performance degradation.
+Closely aligning with our work,
+VeRA~\citep{VeRAVectorBased_Kopiczko2023} implements inter-layer sharing of two frozen random matrices while updating disentangled combination vectors for each layer. However, it necessitates an excessively high rank due to limited model capacity. 
+Subsequently, though Tied LoRA~\citep{TiedLoraEnhacing_Renduchintala2023} alleviates this constraint by allowing shared matrices to be trainable, the tying mechanism on down projection matrices restricts its applicability to linear layers of different dimensions.
+More recently, PRoLoRA~\citep{PRoLoRAPartialRotation_Wang2024} demonstrates enhanced parameter efficiency by reusing sub-matrices within a single linear layer, thus avoiding the above limitations. However, its narrow focus on intra-layer sharing restricts its performance potential.
+Overall, these approaches typically assume vector pairs as the fundamental units for granted, and concentrate exclusively on inter-layer or intra-layer sharing, both of which limits the potential for parameter efficiency.
+In contrast, our method utilizes fine-grained shards as basic units and facilitates global sharing to achieve improved parameter efficiency.
+
+\paragraph{Parameter Sharing.}
+Parameter sharing has been extensively studied to minimize model sizes.
+Universal Transformer~\citep{UniversalTransformers_Dehghani2018} shares all layers of a Transformer model, before
+\citet{LessonsOnParameter_Takase2023} further optimizes this approach with three parameter-sharing techniques across Transformer layers for higher efficiency.
+DictFormer~\citep{DictformerTinyTransformer_Lou2021} implements a more compact model with a shared dictionary, unshared coefficients and indices.
+For on-device deployment, EdgeFormer~\citep{EdgeFormerAParameter_Ge2022} shares attention and FFN modules, and incorporates PEFT-based layer adaptation to reduce parameter count. 
+\citet{OneWideFeedforward_Pires2023} eliminates the decoder layer FFN and shares a single, larger FFN across the encoder, achieving notable improvements in accuracy and latency. 
+Recently, \citet{HeadWiseShareable_Cao2024} proposes two memory-efficient methods for parameter sharing in attention heads.
+Differently, our work is centered on the parameter sharing in LoRA modules, and explore the foundational principles guiding the development of parameter sharing strategies.
+
+\paragraph{Mixture of Experts.}
+Mixture of Experts (MoE) was initially proposed by \citet{AdaptiveMixturesOf_Jacobs1991}. Since \citet{PushingMixtureOf_Zadouri2023} replaces traditional experts with LoRA modules, various efforts have been made to perform better integration~\citep{MixtureOfLora_Wu2024}.
+Aiming at multi-task learning, Mixture-of-LoRAs (MoA)~\citep{MixtureOfLoras_Feng2024} integrates multiple domain-specific LoRAs through a routing strategy, improving both individual task performance and rapid domain adaptation.
+Similarly, MixLoRA~\citep{MixloraEnhancingLarge_Li2024} constructs a sparse LoRA-based MoE model by inserting multiple LoRA experts within the FFN modules and employing independent LoRA adapters in the attention modules.
+Recently, Mixture of Dyadic Experts (MoDE)~\citep{MoDEEffectiveMulti_Ning2024} shares a down-projection matrix for different tasks and employs atomic rank-one adapters with routers for more sophisticated task specialization, enhancing the model's multi-tasking capabilities.
+In contrast, \citet{MoELPRMultilingual_Zhou2024} present Mixture-of-Experts with Language Priors Routing (MoE-LPR), featuring a two-stage training process to improve multilingual capability without catastrophic forgetting.
+To the best of our knowledge, we are the first one to apply MoE for parameter savings within a single LoRA module, rather than focusing on multi-task or multilingual settings.
+
+
+\section{Conclusion}
+
+
+Targeting higher parameter efficiency via parameter sharing, we investigate high-level sharing principles, highlighting the essential role of differentiation in reversing the detrimental effects of pure sharing.
+Building on this finding, we propose a more parameter-efficient LoRA-based method called Mixture of Shards (\name{}), incorporating both inter-layer and intra-layer sharing schemes, and integrating four nearly cost-free differentiation strategies: subset selection, pair dissociation, vector sharding, and shard privatization.
+It maintains all the advantages of LoRA while achieving higher parameter efficiency, and effectively avoids the drawbacks of peer parameter-sharing methods.
+Our insights into parameter sharing and the \name{} method may illuminate future developments in more parameter-efficient finetuning techniques, particularly alleviating the burden for service providers handling multiple customized models simultaneously.
+
+
+\newpage
+
+
+

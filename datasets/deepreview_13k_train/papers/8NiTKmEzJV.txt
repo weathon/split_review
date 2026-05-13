@@ -1,0 +1,451 @@
+\title{NETS: A Non-Equilibrium Transport Sampler}
+
+\begin{abstract}
+We propose an algorithm, termed the Non-Equilibrium Transport Sampler (NETS), to sample from unnormalized probability distributions. NETS can be viewed as a variant of annealed importance sampling (AIS) based on Jarzynski's equality, in which the stochastic differential equation used to perform the non-equilibrium sampling is augmented with an additional learned drift term that lowers the impact of the unbiasing weights used in AIS. We show that this drift is the minimizer of a variety of objective functions, which can all be estimated in an unbiased fashion without backpropagating through solutions of the stochastic differential equations governing the sampling. We also prove that some these objectives control the Kullback-Leibler divergence of the estimated distribution from its target. NETS is shown to be unbiased and, in addition, has a tunable diffusion coefficient which can be adjusted post-training to maximize the effective sample size. We demonstrate the efficacy of the method on standard benchmarks, high-dimensional Gaussian mixture distributions, and a model from statistical lattice field theory, for which it surpasses the performances of related work and existing baselines.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The aim of this paper is to sample probability distributions supported on $\R^d$ and known only up to a normalization constant. This problem arises in a wide variety in applications, ranging from statistical physics \citep{faulkner2023sampling, wilson1974, henin2022} to Bayesian inference \citep{Neal1993Probabilistic}, and it is known to be challenging when the target distribution is not log-concave. In this situation, vanilla methods based on ergodic sampling using Markov Chain Monte Carlo (MCMC) or stochastic differential equations (SDE) such as the Langevin dynamics typically have very slow convergence rates, making them inefficient in practice. 
+
+To overcome these difficulties, a variety of more sophisticated methods have been introduced, based e.g. on importance sampling. Here we will be interested in a class of methods of this type which involve non-equilibrium sampling, by which we mean algorithms that attempt to sample from a non-stationary probability distribution. The idea is to first generate samples from a simple base distribution (e.g. a normal distribution) them push them in finite time unto samples from the target. Traditionally, this aim has been achieved by combining some transport using e.g. the Langevin dynamics with reweighing, so as to remove the bias introduced by the non-equilibrium quench. Neal's Annealed Importance Sampling (AIS) \citep{neal2001}, Sequential Monte Carlo (SMC) methods \citep{delmoral1997, doucet2001},  or continuous-time variants thereof based on Jarzynski's equality \citep{hartmann2018jarzynski} are ways to implement this idea in practice. While these methods work better than ergodic sampling in many instances, they too can fail when the variance of the un-biasing weights become too large compared to their mean: this arises when the samples end up being too far from the target distribution at the end of the non-equilibrium quench. 
+
+This problem suggests to modify the dynamics of the samples to help them evolves towards the target during the quench. Here we propose a way to achieve this by learning an \textit{additional drift} to include in the Langevin SDE. As we will show below, there exists a drift  that removes the need for the un-biasing weights altogether, and it is the minimizer of a variety of objective functions that are amenable to empirical estimation. In practice, this offers the possibility  to estimate this drift using deep learning methods. We exploit this idea here, showing that it results in an unbiased sampling strategy in which importance weights can still be used to correct the samples exactly, but the variance of these weights can be made much smaller due to the additional transport. 
+
+To this end, our work makes the following \textbf{main contributions}:
+\begin{itemize}[leftmargin=0.15in]
+    \item We present a sampling algorithm which combines annealed Langevin dynamics with learnable additional transport. The algorithm, which we call the Non-Equilbrium Transport Sampler (NETS), is shown to be unbiased through a generalization of the Jarzysnki equality.
+    \item We show that the  drift coefficient contributing this additional transport is the minimizer of  two separate objective functions, which can be learned without backpropagating through solutions of the SDE used for sampling.
+    \item We show that one of these objectives, a physics informed neural network (PINN) loss, is also an \textit{off-policy} objective, meaning that it does not need samples from the target density. In addition, this objective controls the KL-divergence between the model and its target.
+    \item The resultant samplers can be adapted \textit{after training} by tuning the integration time-step as well as the diffusivity to improve the sample quality, which we demonstrate on high-dimensional numerical experiments below.
+\end{itemize}
+\subsection{Related work}
+
+\paragraph{Dynamical Measure Transport.} Most contemporary generative models for continuous data are built upon dynamical measure transport, in which samples from a base density are mapped to samples from a target density by means of solving ordinary or stochastic differential equations (ODE/SDE) whose drift coefficients are estimable. Initial attempts to do this started with \citep{chen2018, grathwohl2018scalable}. Recent work built upon these ideas by recasting the challenge of estimating the drift coefficients in these dynamical equations as a problem of quadratic regression, most notably with score-based diffusion models \citep{ho2020denoising, song2020score}, and since then with more general frameworks \citep{albergo2022building, lipman2022flow, albergo2023stochastic, liu2022flow, debortoli2021diffusion, neklyudov2023}. Importantly, these methods work because samples from the base and the target are readily available. Here, we show that analogous equations governing those systems can lead to objective functions that  can be minimized with no initial data but still allow us to exploit the expressivity of models built on dynamical transport. 
+
+\paragraph{Augmenting sampling with learning.}
+
+Augmenting MCMC and importance sampling procedures with transport has been an active area of research for the past decade. Early work makes use of the independence Metropolis algorithm \citep{hastings1970, liu1996}, in which proposals  come from a transport map \citep{parno2018, noe2019,albergo2019, gabrie2022} that are accepted or rejected based off their likelihood ratio with the target. These methods were further improved by combining them with AIS and SMC perspectives, learning incremental maps that connect a sequence of interpolating densities between the base and target \citep{arbel2021, matthews2022, midgley2023flow}. Similar works in the high-energy physics community posit that interleaving stochastic updates within a sequence of maps can be seen as a form of non-equilbirium sampling \citep{caselle2022, bonanno2024}. 
+\begin{wraptable}[9]{r}{0.62\textwidth} % Adjust the width as needed
+    \centering
+    \label{tab:sampling_methods}
+    \scriptsize
+    \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Method} & 
+    \textbf{\shortstack{Dynamical \\ Transport}} & 
+    \textbf{\shortstack{No backprop \\ thru time}} & 
+    \textbf{\shortstack{Off-Policy \\ Learning}} & 
+    \textbf{\shortstack{Grid-Free \\ Learning}}  \\
+    \midrule
+    \textbf{FAB} & $\times$ & $\checkmark$ & $\times$ & $\times$  \\
+    \textbf{DDS} & $\checkmark$ & $\times$ & $\times$ & $\times$  \\
+    \textbf{PIS} & $\checkmark$ & $\times$ & $\times$ & $\checkmark$  \\
+    \textbf{CMCD} & $\checkmark$ & $\textit{Partial}$ & $\times$ & $\times$  \\
+    \textbf{p/iDEM} & $\checkmark$ & $\checkmark$ & $\textit{Partial}$ & $\checkmark$  \\
+    \textbf{NETS-AM} (ours) & $\checkmark$ & $\checkmark$ & $\times$ & $\checkmark$  \\
+    \textbf{NETS-PINN} (ours) & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$  \\
+    \bottomrule
+    \end{tabular}
+\end{wraptable}
+Following the success of generative models built out of dynamical transport, there has been a surge of interest in applying these perspectives to sampling: \cite{vargas2023denoising, berner2024optimal} translate ideas from diffusion models to minimize the KL divergence between the model and the target, and \cite{zhang2021path} as well as \cite{behjoo2024harmonic} reformulate sampling as a stochastic optimal control (SOC) problem. These approaches require backpropagating through the solution of an SDE, which is too costly in high dimensions. In addition, the methods based on SOC must start with samples from a point mass, which may be far from the target. \cite{akhound2024} avoid the need to backpropagate through an SDE, but in the process introduce a bias into their objective function. An alternative perspective was also recently given in \citep{bruna2024posterior} by using denoising oracles to turn the original sampling problem into an easier one.
+\cite{vargas2024transport} establish an unbiased sampler with added transport called Controlled Monte Carlo Diffusions (CMCD) that is similar to ours. The main difference is how we learn the drift.  In \cite{vargas2024transport} an objective for this drift in gradient form is derived through the use of path integrals and Crook's identity. This objective either needs backpropagating through the SDE or has to be computed with a reference measure, and is done on a fixed grid. Here, through simple manipulations of Fokker-Planck equations, we propose a variety of new objective functions for the additional drift, none of which require backpropagating through the simulation. In addition, our learning can be done in a optimize-then-discretize fashion so that the sampling can be done with arbitrary step size and time-dependent diffusion after learning the model. This gives us an adaptive knob to increase performance, which we demonstrate below.
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+
+\subsection{Setup and notations} We assume that the target distribution is absolutely continuous with respect to the Lebesgue measure on $R^d$, with probability density function (PDF) $\rho_1(x) = Z_1^{-1} e^{-U_1(x)}$: here $x\in \R^d$, $U: \R^d\to \R$ is a known energy potential, assumed twice differentiable and bounded below, and  $Z_1= \int_{\R^d}e^{-U_1(x)} dx<\infty$ is an unknown normalization constant, referred to as the partition function is physics and the evidence in statistics.  Our aim is to generate samples from $\rho_1(x)$ so as to be able to estimate expectations with respect to this density. Additionally we wish to estimate $Z_1$.
+
+To this end  we will use a series of time-dependent  potentials $U_t(x)$ which connects some simple $U_0(x)$ at $t=0$ (e.g. $U_0(x) = \frac12 |x|^2$) to  $U_1(x)$ at $t=1$. For example we could use  linear interpolation:
+\begin{equation}
+    \label{eq:lin:Ut}
+    U_t(x) = (1-t) U_0(x) + t U_1(x),
+\end{equation}
+but other choices are possible as long as $U_{t=0} = U_0$, $U_{t=1}=U_1$, and $U_t(x)$ is twice differentiable in $(t,x)\in [0,1]\times \R^d$. We assume that  the time-dependent PDF associated with this potential $U_t(x)$ is normalizable for all $t\in[0,1]$ and denote it as 
+\begin{equation}
+    \label{eq:rhot}
+    \rho_t(x) = Z^{-1}_t e^{-U_t(x)}, \qquad Z_t = \int_{\R^d} e^{-U_t(x)} dx<\infty,
+\end{equation}
+so that $\rho_{t=0}(x) = \rho_0(x)$ and $\rho_{t=1}(x) = \rho_1(x)$; we also assume that $\rho_0(x)$ is simple to sample (either directly or via MCMC or Langevin dynamics) and that its partition function $Z_0$ is known.
+To simplify the notations we also introduce the free energy
+\begin{equation}
+    \label{eq:Ft}
+    F_t = - \log Z_t.
+\end{equation}
+Since $\partial_t F_t = -\partial_t \log \int_{R^d} e^{-U_t(x)} dx =  \int_{R^d} \partial_t U_t(x) e^{-U_t(x)} dx / \int_{R^d} e^{-U_t(x)} dx $ we have the useful identity
+\begin{equation}
+\label{eq:dtF}
+    \partial_t F_t = \int_{R^d} \partial_t U_t(x) \rho_t(x) dx .
+\end{equation}
+
+\subsection{Nonequilibrium sampling with importance weights}
+\label{sec:ais}
+
+Annealed importance sampling  uses a finite sequence of MCMC moves that satisfy detailed-balance locally in time but not globally, thereby introducing a bias that can be corrected with weights. Here we present a time-continuous variant of AIS based on Jarzynski equality that will be more useful for our purpose. 
+
+By definition of the PDF in~\eqref{eq:rhot}, $\nabla \rho_t(x) = - \nabla U_t(x) \rho_t(x)$ and hence, for any $\eps_t\ge 0$, we have
+\begin{equation}
+    \label{eq:fpe:0}
+    0 = \eps_t \nabla \cdot (\nabla U_t \rho_t + \nabla \rho_t).
+\end{equation}
+Since we also have 
+\begin{equation}
+    \label{eq:dt:rho}
+    \partial_t \rho_t = -(\partial_t U_t- \partial_t F_t) \rho_t,
+\end{equation} we can combine these last two equations to deduce that
+\begin{equation}
+    \label{eq:fpe:00}
+    \partial_t \rho_t = \eps_t \nabla \cdot (\nabla U_t \rho_t + \nabla \rho_t)  -(\partial_t U_t- \partial_t F_t) \rho_t.
+\end{equation}
+The effect of the last term at the right hand-side of this equation can be accounted for by using weights. To see how, notice that if we extend the phase space to $(x,a)\in \R^{d+1}$ and introduce the PDF $f_t(x,a)$ solution to the Fokker-Planck equation (FPE)
+\begin{equation}
+    \label{eq:fpe:f}
+    \partial_t f_t = \eps_t \nabla \cdot (\nabla U_t f_t + \nabla f_t) + \partial_t U_t \partial_a f_t, \qquad f_{t=0}(x,a) = \delta(a) \rho_0(x),
+\end{equation}
+
+\begin{equation}
+    \label{eq:rho:f}
+    \rho_t(x) = \frac{\int_{\R}e^a f_t(x,a) da}{\int_{\R^{d+1}} e^a f_t(y,a) dady}. 
+\end{equation}
+Therefore we can use the solution to SDE associated with the FPE~\eqref{eq:fpe:f} in the extended space to estimate expectations with respect to $\rho_t(x)$:
+\begin{restatable}[Jarzynski equality]{proposition}{jar}
+\label{prop:jar}
+	Let $(X_t,A_t)$ solve the coupled system of SDE/ODE
+	\begin{alignat}{2}
+ \label{eq:sde:X}
+		dX_t &= -\eps_t \nabla U_t(X_t) dt + \sqrt{2 \eps_t} dW_t,  \qquad  && X_0 \sim \rho_0,\\
+  \label{eq:sde:A}
+		d A_t &= -\partial_t U_t(X_t) dt,  && A_0 = 0,
+	\end{alignat}
+	where $\eps_t\ge 0$ is a time-dependent diffusion coefficient and $W_t \in \mathbb R^d$ is the Wiener process. Then for all $t\in[0,1]$ and any test function $h:\R^d\to\R$, we have
+	\begin{equation}
+ \label{eq:expect:0}
+		\int_{\mathbb R^d} h(x) \rho_t(x) dx = \frac{\E[ e^{A_t} h(X_t)]}{\E[e^{A_t}]}, \qquad Z_t/Z_0 = e^{-F_t+F_0} = \E[e^{A_t}],
+	\end{equation}
+	where the expectations are taken over the law of $(X_t, A_t)$.
+\end{restatable}
+ The second equation in~\eqref{eq:expect:0} for the free energy~$F_t$ is what is referred to as Jarzynski's equality, and was originally surmised in the context of non-equilibrium thermodynamics \citep{jarzynski1997}. 
+\begin{remark} We stress that it is key to use the weights $e^{A_t}$ in~\eqref{eq:expect:0} because \textbf{$\rho_t(x)$ is not the PDF of $X_t$ in general}. Indeed, if we denote by $\tilde \rho_t(x)$ the PDF of $X_t$, it satisfies the FPE
+\begin{equation}
+    \label{eq:fpe:x}
+    \partial_t \tilde \rho_t = \eps_t \nabla \cdot (\nabla U_t \tilde\rho_t + \nabla \tilde\rho_t), \quad \tilde \rho_{t=0} = \rho.
+\end{equation}
+This FPE misses the term $-(\partial_t U_t- \partial_t F_t) \rho_t$ at the right hand-side of~\eqref{eq:fpe:00},  and as a result $\tilde \rho_t(x) \not= \rho_t(x)$ in general -- intuitively, $\tilde \rho_t(x)$ lags behind $\rho_t(x)$ when the potential $U_t(x)$ evolves and this lag is what the weights in \eqref{eq:expect:0} correct for. 
+\end{remark}
+It is  important to realize that, while the relation \eqref{eq:expect:0} can be used to compute unbiased estimators of expectations, this estimator on its own can be high variance if the lag between the PDF $\tilde \rho_t(x)$ of $X_t$ and $\rho_t(x)$ is too pronounced. This issue can be alleviated by using resampling methods as is done in sequential Monte Carlo~\citep{doucet2001}. Here we will solve it by adding some additional drift in~\eqref{eq:sde:X} that will compensate for this lag and reduce the effect of the weights. 
+\subsection{Nonequilibrium sampling with perfect additional transport}
+\label{sec:perfect}
+
+To see how we can add a transport term to eliminate the need of the weights, let us introduce a velocity field  $b_t(x)\in\R^d$ which at all times $t\in[0,1]$ satisfies 
+\begin{equation}
+    \label{eq:b}
+    \nabla \cdot (b_t \rho_t) = -\partial_t \rho_t.
+\end{equation} 
+We stress that this is an equation for $b_t(x)$ in which $\rho_t(x)$ is fixed and given by~\eqref{eq:rhot}:
+
+If~\eqref{eq:b} is satisfied, then we can combine this equation with \eqref{eq:fpe:0} and \eqref{eq:dt:rho} to arrive at 
+\begin{equation}
+    \label{eq:fpe:bb}
+    \partial_t \rho_t = \eps_t \nabla \cdot (\nabla U_t \rho_t + \nabla \rho_t)  - \nabla \cdot (b_t \rho_t),
+\end{equation}
+which is a standard FPE. Therefore the solution to the SDE associated with \eqref{eq:fpe:bb} allows us to sample $\rho_t(x)$ directly (without weights). We phrase this result as:
+
+\begin{restatable}[Sampling with perfect additional transport.]{proposition}{perfect}
+\label{prop:perfect:transp}
+    Let $b_t(x)$ be a solution to~\eqref{eq:b} and let $X^b_t$ satisfy the SDE
+	\begin{equation}
+  \label{eq:sde:Xbe}
+		dX^b_t = -\eps_t \nabla U_t(X^b_t) dt + b_t(X^b_t) dt + \sqrt{2 \eps_t} dW_t,  \qquad   X^b_0 \sim \rho_0, 
+  \end{equation}
+	where $\eps_t\ge 0$ is a time-dependent diffusion coefficient and $W_t \in \mathbb R^d$ is the Wiener process. Then  $\rho_t(x)$ is the PDF of $X^b_T$, i.e. for all $t\in[0,1]$ and, given any test function $h:\R^d\to\R$, we have 
+	\begin{equation}
+ \label{eq:expect:be}
+		\int_{\mathbb R^d} h(x) \rho_t(x) dx = \mathbb E[h(X^b_t)],
+	\end{equation}
+	where the expectation at the right-hand side is taken over the law of $(X^b_t)$.
+\end{restatable}
+
+ This possibility was first noted in \cite{vaikuntanathan2008} and is also exploited in~\cite{tian2024} for deterministic dynamics (i.e. setting $\eps_t=0$ in~\eqref{eq:sde:Xbe}) and in~\cite{vargas2024transport} using the SDE~\eqref{eq:sde:Xbe}. Of course, in practice we need to estimate this drift, and also correct for sampling errors if this drift is imperfectly learned. Let us  discuss this second question first, and defer the derivation of objectives to learn $b_t(x)$ to Secs.~\ref{sec:bt:est} and~\ref{sec:phit:est}.
+\subsection{Non-Equilibrium Transport Sampler}
+\label{sec:nets}
+
+Let us now show that we can combine the approaches discussed in Secs.~\ref{sec:ais} and \ref{sec:perfect} to design samplers in which we use an added transport, possibly imperfect, and importance weights.
+
+To this end, suppose that we wish to add an additional transport term $-\nabla \cdot (\hat b_t \rho_t)$ in~\eqref{eq:fpe:00}, where $\hat b_t(x)\in\R^d$ is some given velocity that does not necessarily solve~\eqref{eq:b}. Using the expression in \eqref{eq:rhot} for $\rho_t(x)$, we  have the identity 
+\begin{equation}
+    \label{eq:b:rho}
+ -\nabla \cdot (\hat b_t \rho_t) = -\nabla \cdot \hat b_t \rho_t + \nabla U_t\cdot \hat b_t \rho_t
+\end{equation}  
+Therefore we can rewrite \eqref{eq:fpe:0} equivalently as
+\begin{equation}
+    \label{eq:fpe:b}
+    \partial_t \rho_t = \eps_t \nabla \cdot (\nabla U_t \rho_t + \nabla \rho_t) -\nabla \cdot (\hat b_t \rho_t ) + (\nabla \cdot \hat b_t- \nabla U_t -\partial_t U_t+ \partial_t F_t) \rho_t.
+\end{equation}
+We can now proceed as we did with \eqref{eq:fpe:0} and extend state space to account for the effect of the terms $(\nabla \cdot b_t- \nabla U_t -\partial_t U_t+ \partial_t F_t) \rho_t$ in this equation via weights, while having the term $-\nabla \cdot (\hat b_t(x) \rho_t(x))$ contribute to some additional transport. This leads us to a result originally obtained in~\cite{vaikuntanathan2008} and recently re-derived in~\cite{vargas2024transport}):
+\begin{restatable}[Nonequilibrium Transport Sampler (NETS)]{proposition}{nets}
+\label{prop:nets}
+Let $(X^{\hat b}_t,A^{\hat b}_t)$ solve the coupled system of SDE/ODE
+	\begin{alignat}{2}
+ \label{eq:sde:Xb}
+		dX^{\hat b}_t &= -\eps_t \nabla U_t(X^{\hat b}_t ) dt + \hat b_t(X^{\hat b}_t)dt + \sqrt{2 \eps_t} dW_t,  \qquad  && X^{\hat b}_0 \sim \rho_0, \\
+  \label{eq:sde:Ab}
+		d A^{\hat b}_t &= \nabla \cdot \hat b_t(X^{\hat b}_t )dt- \nabla U_t(X^{\hat b}_t ) \cdot \hat b(X^{\hat b}_t) dt -\partial_t U_t(X^{\hat b}_t)dt,  \qquad && A^{\hat b}_0 = 0,
+	\end{alignat}
+	where $\eps_t\ge 0$ is a time-dependent diffusion coefficient and $W_t \in \mathbb R^d$ is the Wiener process. Then for all $t\in[0,1]$ and any test function $h:\R^d\to\R$, we have 
+	\begin{equation}
+ \label{eq:expect:b}
+		\int_{\mathbb R^d} h(x) \rho_t(x) dx = \frac{\mathbb E[ e^{A^{\hat b}_t} h(X^{\hat b}_t)]}{\mathbb E[e^{A^{\hat b}_t}]}, \qquad Z_t/Z_0 = e^{-F_t+F_0} = \E[e^{A^{\hat b}_t}],
+	\end{equation}
+	where the  expectations are taken over the law of $(X^{\hat b}_t, A^{\hat b}_t)$.
+\end{restatable}
+
+Notice that, if $\hat b_t(x)=0$, the equations in Proposition~\ref{prop:nets} simply reduce to those in Proposition~\ref{prop:jar}, whereas if  $\hat b_t(x)=b_t(x)$ solves \eqref{eq:b} we can show  that
+\begin{equation}
+    \label{eq:A:b:e}
+    A^b_t = F_t - F_0,
+\end{equation}
+i.e. the weights have zero variance and give the free energy difference.  Indeed, by expanding both sides of \eqref{eq:b} and dividing them by $\rho_t(x)>0$, this equation can equivalently be written as
+\begin{equation}
+    \label{eq:b:2}
+    \nabla \cdot b_t - \nabla U_t \cdot b_t  = \partial_t U_t - \partial_t F_t.
+\end{equation} 
+As a result, when $\hat b_t(x)=b_t(x)$, \eqref{eq:sde:Ab} reduces to
+\begin{equation}
+    \label{eq:sde:A:b:e}
+    d A^{b}_t = \partial_t F_t dt,  \qquad  A^{b}_0 = 0,
+\end{equation}
+and the solution to this equation is~\eqref{eq:A:b:e}. In practice, achieving zero variance of the weights by estimating $b_t(x)$ exactly is not generally possible, but having a good approximation of $b_t(x)$ can help reducing this variance dramatically, as we will illustrate below via experiments.  
+
+\subsection{Estimating the drift $b_t(x)$ via a PINN objective}
+\label{sec:bt:est}
+
+Equation \eqref{eq:b:2} can be used to derive an objective for both $b_t(x)$ and $F_t$. The reason is that in this equation the unknown $\partial_t F_t$ can be viewed as factor that guarantees solvability: indeed, integrating both sides of \eqref{eq:b} gives $0 = -\partial_t\int_{\R^d} U_t(x) \rho_t(x) dx + \partial_t F_t$, which, by \eqref{eq:dtF},  is satisfied if and only if $F_t$ is (up to a constant fixed by $F_0=-\log Z_0$) the exact free energy~\eqref{eq:Ft}. This offers the possibility to learn both $b_t(x)$ and $F_t$ variationally using  an  objective fitting the framework of physics informed neural networks (PINNs):
+
+\begin{restatable}[PINN objective]{proposition}{pinn}
+    \label{prop:pinn}
+    Given any $T\in(0,1]$ and any PDF $\hat \rho_t(x)>0$ consider the objective for $(\hat b, \hat F)$ given by:
+    \begin{equation}
+        \label{eq:loss:b:F}
+        L^T_{\text{PINN}} [\hat b,\hat F] = \int_0^T \int_{\R^d} \big| \nabla \cdot \hat b_t(x) - \nabla U_t(x) \cdot \hat b_t(x)  - \partial_t U_t(x) + \partial_t \hat F_t \big|^2 \hat \rho_t(x) dx dt.
+    \end{equation}
+    Then $\min_{\hat b,\hat F} L^T_{\text{PINN}}[\hat b,\hat F] =0$, and all minimizers are such that $F_t$ is the free energy \eqref{eq:Ft} and $b_t(x)$ solves \eqref{eq:b:2} for all $t\in [0,T]$. 
+\end{restatable}
+
+ Note that since the expectation over an arbitrary $\hat \rho_t(x)$ in~\eqref{eq:loss:b:F}, it is an off-policy objective. It is however natural to use $\hat \rho_t(x) = \rho_t(x)$ since it allows us to put statistical weight in the objective precisely in the regions where we need $b_t(x)$ to transport probability mass: we will show below how the expectation over $\rho_t(x)$ can be estimated without bias to arrive at an empirical estimator for~\eqref{eq:loss:b:F} when $\hat \rho_t(x) = \rho_t(x)$. Note also that, while minimization of the objective~\eqref{eq:loss:b:F} gives an estimate $\hat F_t$ of the free energy, it is not needed at sampling time when solving \eqref{eq:sde:Xb}. An objective similar to \eqref{eq:loss:b:F} was also recently posited in \cite{tian2024} for use with deterministic flows. Here, we devise it in the context of augmenting annealed Langevin dynamics.
+
+One advantage of the PINN objective \eqref{eq:loss:b:F} is that we know that its minimum is zero, and hence we can track its value to monitor convergence when minimizing  \eqref{eq:loss:b:F}  by gradient descent as we do below. Another advantage of the loss \eqref{eq:loss:b:F} is that it  controls the quality of the transport as measured by the Kullback-Leibler divergence:
+ \begin{restatable}[KL control]{proposition}{kl}
+    Let $\hat \rho_t$ be the solution to the transport equation
+\begin{equation}
+    \label{eq:rho:b}
+    \partial_t \hat \rho_t = - \nabla \cdot (\hat b_t\rho_t), \qquad  \hat \rho_{t=0} = \rho_0
+\end{equation}
+where $\hat b_t(x)$ is some predefined velocity field.  Then, given any estimate $\hat F_t$ of the exact free energy  $F_t$, we have 
+\begin{equation}
+    \label{eq:KL}
+    D_{\text{KL}}(\hat\rho_{t=1}||\rho_1) \le \sqrt{L^{T=1}_{\text{PINN}}(\hat b, \hat F)}.
+\end{equation}
+\end{restatable}
+
+
+\subsection{Estimating the drift $b_t(x)=\nabla \phi_t(x)$ via Action Matching (AM)}
+\label{sec:phit:est}
+
+In general \eqref{eq:b} is solved by many $b_t(x)$. One way to get a unique (up to a constant in space and time) solution to this equation is to impose that the velocity be in gradient form, i.e. set $b_t(x) = \nabla \phi_t(x)$ for some scalar-valued potential $\phi_t(x)$. If we do so, \eqref{eq:b} can be written as $\nabla \cdot (\nabla \phi_t(x) \rho_t) = -\partial_t \rho_t$, and it is easy to see that at all times $t\in[0,1]$ the solution to this equation minimizes over $\hat \phi_t$ the objective 
+\begin{equation}
+    \label{eq:var:phi}
+    \begin{aligned}
+        & \int_{\R^d} \big[ \tfrac12 |\nabla \hat \phi_t(x)|^2 \rho_t(x) - \hat\phi_t(x) \partial_t \rho_t(x)\big] dx\\& = 
+        \int_{\R^d} \big[ \tfrac12 |\nabla \hat \phi_t(x)|^2 +(\partial_t U_t(x) - \partial_t F_t) \hat\phi_t(x)\big] \rho_t(x)dx.
+    \end{aligned}
+\end{equation}
+If we use~\eqref{eq:dtF} to set $\partial_t F_t = \int_{\R^d} \partial_t U_t(x) \rho_t(x)dx$ we can use the objective at the right hand-side of~\eqref{eq:var:phi} to learn $\phi_t(x)$ locally in time (or globally if we integrate this objective on $t\in[0,1]$). Alternatively, we can integrate the objective at the left hand-side of~\eqref{eq:var:phi} over $t\in[0,T]$ and use integration by parts for the term involving $\partial_t \rho_t(x)$ to arrive at:
+\begin{restatable}[Action Matching objective]{proposition}{am}
+    \label{prop:am}
+     Given any $T\in(0,1]$ consider the objective for $\hat \phi_t(x)$:
+    \begin{equation}
+        \label{eq:loss:phi}
+        L^T_{AM} [\hat \phi] = \int_0^T \int_{\R^d}\big[ \tfrac12 |\nabla \hat \phi_t(x)|^2  +\partial_t \hat\phi_t(x) \big] \rho_t(x)dx dt + \int_{\R^d} \big[ \hat\phi_0(x) \rho_0(x) - \hat\phi_T(x) \rho_T(x)\big ] dx .
+    \end{equation}
+    Then the minimizer $\phi_t(x)$ of~\eqref{eq:loss:b:F} is unique (up to a constant) and $b_t(x) = \nabla \phi_t(x)$ satisfies~\eqref{eq:b} for all $t\in[0,T]$.
+\end{restatable}
+
+ This objective is analogous to the loss presented in \cite{neklyudov2023}, but adapted to the sampling problem. In practice, we will use again $T\in(0,1]$ for annealing, but ultimately we are interested in the resut at $T=1$. Note that, unlike with the PINN objective~\eqref{eq:loss:b:F}, it is crucial that we use the correct $\rho_t(x)$ in the AM objective~\eqref{eq:loss:phi}: that is, unlike~\eqref{eq:loss:b:F}, \eqref{eq:loss:phi} cannot be turned into an off-policy objective. 
+\begin{remark} If we use $\hat b_t(x) = \nabla \hat \phi_t(x)$ in the SDEs in~\eqref{eq:sde:Xb} and~\eqref{eq:sde:Ab}, we need to compute $\nabla \cdot \hat b_t(x) = \Delta \hat \phi_t(x)$, which is computationally costly. Fortunately, when $\eps_t>0$, the calculation of this Laplacian can be avoided by using the following alternative equation for $A^{\hat b}_t$:
+\begin{equation}
+    \label{eq:A:new}
+    A^{\hat b}_t = \frac{1}{\eps_t} [ \hat\phi_t(X^{\hat b}_t) - \hat\phi_0(X^{\hat b}_0)] - B_t,
+\end{equation}
+where
+\begin{equation}
+    \label{eq:Bt}
+		dB_t = \partial_t U_t(X^{\hat b}_t) dt  +  \frac{1}{\eps_t} \partial_t \hat\phi_t (X_t^{\hat b})+ \frac{1}{\eps_t} |\nabla \hat\phi_t(X^{\hat b}_t)|^2 dt + \sqrt{\frac2{\eps_t}} \nabla \hat\phi_t(X^{\hat b}_t) \cdot dW_t.
+\end{equation}
+
+\end{remark}
+
+
+
+\section{Implementation}
+
+\label{sec:imp}
+
+The PINN objective~\eqref{eq:loss:b:F} can be written as
+\begin{equation}
+        \label{eq:loss:b:F:E:0}
+        L^T_{\text{PINN}} [\hat b,\hat F] = \int_0^T  \E \Big[ \big| \nabla \cdot \hat b_t(\hat x_t) - \nabla U_t(\hat x_t) \cdot \hat b_t(\hat x_t)  - \partial_t U_t(\hat x_t) + \partial_t \hat F_t \big|^2 \Big] dt
+ \end{equation}
+where the expectation is taken over $\hat x_t$ drawn from $\hat \rho_t(x)$, and it can be estimated empirically over a population of such samples. This is the \textit{off-policy} variant of the PINN objective, and it is perfectly valid, but may be inefficient for learning $\hat b_t$ over the support necessary for the problem. If we decide instead to set $\hat \rho_t(x) = \rho_t(x)$, since the SDEs in~\eqref{eq:sde:Xb} and~\eqref{eq:sde:Ab} can be used with any $\hat b_t(x)$ to estimate expectation over $\rho_t(x)$ via \eqref{eq:expect:b}, we can write the PINN objective on-policy as 
+\begin{equation}
+        \label{eq:loss:b:F:E}
+        L^T_{\text{PINN}} [\hat b,\hat F] = \int_0^T  \frac1{\E [e^{A^{\hat b}_t} ]}\E \Big[e^{A^{\hat b}_t} \big| \nabla \cdot \hat b_t(X^{\hat b}_t) - \nabla U_t(X^{\hat b}_t) \cdot \hat b_t(X^{\hat b}_t)  - \partial_t U_t(X^{\hat b}_t) + \partial_t \hat F_t \big|^2 \Big] dt
+ \end{equation}
+These expectations can be estimated empirically over a population of solutions to~\eqref{eq:sde:Xb} and~\eqref{eq:sde:Ab}. Crucially, since we can switch from off-policy to on-policy after taking the gradient of the PINN objective, \textit{when computing the gradient of \eqref{eq:loss:b:F:E} over $\hat b_t(x)$,  $(X^{\hat b}_t, A^{\hat b}_t)$ can be considered independent of $\hat b_t(x)$ and do not need to be differentiated over.} In other words, the method is simulation-free even if used on-policy, i.e. even though it uses the current value of $\hat b_t$ to estimate the loss and its gradient. 
+
+Learning $b_t(x)$ and $F_t$ for $t\in[0,1]$ from the start can be challenging if the initial $\hat b_t(x)$ is far from exact and the weights gets large variance as $t$ increases. This problem can be alleviated by estimating $b_t(x)$ sequentially. In practice, this amounts to annealing $T$ from a small initial value to $T=1$, in such a way that $b_t(x)$ is learned sufficiently accurately so that  variance of the weights remains small. This variance can be estimated on the fly, which also give us an estimate of the effective sample size (ESS) of the population at all times $t\in [0,1]$. 
+
+Note that we can also employ resampling strategies of the type used in SMC to keep the variance of the weights low~\cite{doucet2001,bolic2004}. 
+
+\begin{algorithm}[tb]
+\caption{Training: Note that for both objectives the resultant set of walkers across time slices $\{x_k^i\}$ are detached from the computational graph when taking a gradient step (\textit{off-policy learning}). }
+\begin{algorithmic}[1]
+\State \textbf{Initialize:} $n$ walkers, $x_0\sim \rho_0$, $A_0 = 0$, $K$ time steps, model parameters for \{$\hat b_t$, $\hat F_t$\} or $\hat \phi_t$ respectively, diffusion coefficient $\eps_t$, learning rate $\eta$
+
+\Repeat
+\State Randomize time grid: $t_0, t_1, \dots, t_K \sim \text{Uniform}(0, T)$, sort such that $t_0 < t_1 < \dots < t_K$
+\For{$k=0, \dots, K$}
+ \State $\Delta t_k = t_{k+1} - t_k$, 
+    \For{each walker $i = 1, \dots, n$}       
+        \State $x^i_{t_{k+1}} = x^i_{t_k} - \eps_{t_k} \nabla U_{t_k}(x^i_{t_k}) \Delta t_k + \hat b_{t_k}(x^i_{t_k}) \Delta t_k + \sqrt{2 \eps_{t_k}} (W^i_{t_{k+1}} - W^i_{t_k})$
+            \State $A^i_{t_{k+1}} = A^i_{t_k} - \partial_t U_{t_k}(x^i_{t_k}) \Delta t_k - \hat b_{t_k}(x^i_{t_k}) \cdot \nabla U_{t_k}(x^i_{t_k}) \Delta t_k + \nabla \cdot \hat b_{t_k}(x^i_{t_k}) \Delta t_k$
+            \EndFor
+    \EndFor
+    \State Estimate \eqref{eq:loss:b:F:E} or \eqref{eq:loss:phi:emp}, respectively, by replacing the expectation by an empirical average over the $n$ walkers and the time integral by an empirical average over $t_0,\dots, t_K$.
+    \State Take gradient descent step to update the model parameters.
+\Until{converged}
+\end{algorithmic}
+\label{alg:train}
+\end{algorithm}
+We can proceed similarly with the AM loss~\eqref{eq:loss:phi} by rewriting it as
+ \begin{equation}
+        \label{eq:loss:phi:emp}
+        \begin{aligned}
+        L^T_{\text{AM}} [\hat \phi] = \int_0^T \frac{\E \big[ e^{A^{\hat b}_t} \big[\tfrac12 |\nabla \hat \phi_t(X_t^{ \hat b})|^2  +\partial_t \phi_t(X_t^{ \hat b}) \big]\big]}{\E [e^{A^{\hat b}_t} ]} dt
+        + \frac{\E  \big[ e^{A^{\hat b}_0}\phi_0(X_0^{\hat b })\big]}{\E [e^{A^{\hat b}_0} ]}  -  \frac{\E \big[e^{A^{\hat b}_T}\phi_T(X_T^{\hat b }) \big ]}{\E [e^{A^{\hat b}_T} ]} .
+        \end{aligned}
+\end{equation}
+These expectations can be estimated empirically over solutions to~\eqref{eq:sde:Xb} and~\eqref{eq:sde:Ab} with $\hat b_t(x) = \nabla \hat \phi_t(x)$. The above implementation is detailed in Algorithm \ref{alg:train}.
+
+
+
+\section{Numerical experiments}
+
+In what follows, we test the NETS method, for both the PINN objective \eqref{eq:loss:b:F} and the action matching objective \eqref{eq:loss:phi}, on standard challenging sampling benchmarks. We then study how the method scales in comparison to baselines, particularly AIS on its own, by testing it on an increasingly high dimensional Gaussian Mixture Models (GMM). Following that, we show that it has orders of magnitude better statistical efficiency as compared to AIS on its own when applied to the study of lattice field theories, even past the phase transition of these theories and in 400 dimensions (an $L=20 \times L=20$ lattice). 
+
+\subsection{40-Mode Gaussian Mixture}
+A common benchmark for machine learning augmented samplers that originally appeared in the paper introducing Flow Annealed Importance Sampling Bootstrap (FAB) \cite{midgley2023flow} is a 40-mode GMM in 2-dimensions for which the means of the mixture components span from $-40$ to $40$. The high variance and many wells make this problem challenging for re-weighting or locally updating MCMC processes. 
+We choose as a time dependent potential $U_t(x)$ the linear interpolation \eqref{eq:lin:Ut} with $U_0$ the potential for a standard multivariate Gaussian with standard deviation scale $\sigma = 2$.   %
+
+\begin{wraptable}[14]{l}{0.55\textwidth}
+    \centering
+    \scriptsize
+    \begin{tabular}{l c c}
+        \toprule
+        \multicolumn{3}{c}{\textbf{GMM} $(d = 2)$} \\
+        \cmidrule(r){2-3}
+        \textbf{Algorithm} & \textbf{ESS} $\uparrow$ & $\mathcal{W}_2$ $\downarrow$ \\
+        \midrule
+        FAB                           & $0.653 \pm 0.017$ & $12.0 \pm 5.73$ \\
+        PIS                           & $0.295 \pm 0.018$ & $7.64 \pm 0.92$ \\
+        DDS                           & $0.687 \pm 0.208$ & $9.31 \pm 0.82$ \\
+        pDEM                          & $0.634 \pm 0.084$ & $12.20 \pm 0.14$ \\
+        iDEM                          & $0.734 \pm 0.092$ & $7.42 \pm 3.44$ \\
+        NETS-AM (ours)                & $0.808 \pm 0.031$ & $3.89 \pm 0.22$ \\
+        NETS-PINN $\eps_t = 0$ (ours) & $\mathbf{0.954 \pm 0.003}$ & $\mathbf{3.55 \pm 0.57}$  \\
+        NETS-PINN $\eps_t = 4$ (ours) & $\mathbf{0.979 \pm 0.002}$ & $\mathbf{3.14 \pm 0.46}$  \\
+        NETS-PINN-resample (ours)     & $\mathbf{0.993 \pm 0.004}$ & $\mathbf{3.27 \pm 0.31}$ \\
+        \bottomrule
+    \end{tabular}
+    \caption{Performance of NETS in terms of ESS and 2-Wasserstein metrics for 40-mode GMM $(d = 2)$  with comparative results quoted from \cite{akhound2024} for reproducibility.}
+    \label{tab:gmm:eval}
+\end{wraptable}
+We train a simple feed-forward neural network of width $256$ against both the PINN objective \eqref{eq:loss:b:F}, parameterizing $(\hat b$, $\hat F)$, or the action matching objective \eqref{eq:loss:phi}, parameterizing $\hat \phi$. 
+We compare the learned model from both objectives to recent related literature: FAB,  Path Integral Sampler  (PIS) \citep{zhang2021path}, Denoising Diffusion Sampler (DDS) \citep{vargas2023denoising}, and Denoising Energy Matching (pDEM, iDEM) \citep{akhound2024}. For reproducibility with the benchmarks provided in the latter method, we compute the effective sample size (ESS) estimated from 2000 generated samples as well as the $2-$Wasserstein ($\mathcal W_2$) distance between the model and the target. As noted in \Cref{tab:gmm:eval}, all proposed variants of NETS outperform existing methods. In addition, because our method can be turned into an SMC method by including resampling during the generation, we can push the acceptance rate of the same learned PINN model to nearly 100\% by using a single resampling step when the ESS of the walkers dropped below $98\%$. NETS uses 100 sampling steps and an $\eps_t = 0.0, 4.0$ in the SDE. 
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/40-mode-gmm-comp-2.pdf}
+    \caption{Comparison of the performance of annealed Langevin dynamics alone, transport alone, and annealed Langevin coupled with transport when sampling the 40-mode GMM from \cite{midgley2023flow}.  \textbf{Left}: Annealed Langevin run for 250 steps with $\eps_t = 4.0$, failing to capture the modes with $0\%$ ESS. \textbf{Center}: Learning using the PINN loss and sampling with 100 steps and $\eps_t = 0$ achieves an ESS of $95\%$. \textbf{Right}: Same learning and now sampling with $\eps_t = 4.0$ achieves an ESS of $98\%$.}
+    \label{fig:40gmm}
+\end{figure}
+
+\subsection{10-d Funnel distribution}
+\label{sec:funnel}
+\begin{wraptable}[11]{r}{0.5\textwidth}
+    \centering
+    \scriptsize
+    \begin{tabular}{l c}
+        \toprule
+        \multicolumn{2}{c}{\textbf{Funnel} $(d = 10)$} \\
+        \cmidrule(r){2-2}
+        \textbf{Algorithm} & \textbf{MMD} $\downarrow$ \\
+        \midrule
+        FAB \citep{midgley2023flow}           & $\mathbf{0.032 \pm 0.000}$ \\
+        GMMVI \citep{arenz2023a}              & $\mathbf{0.031 \pm 0.000}$ \\
+        PIS \citep{zhang2022path}             & -- -- \\
+        DDS \citep{vargas2023denoising}        & $0.172 \pm 0.031$ \\
+        AFT \citep{arbel2021}                  & $0.159 \pm 0.010$ \\
+        CRAFT \citep{arbel2021}                & $0.115 \pm 0.003$ \\
+        NETS-AM (ours)                         & $0.041 \pm 0.001$ \\
+        NETS-PINN (ours)                       & $\mathbf{0.031 \pm 0.002}$  \\
+        NETS-PINN-resample (ours)              & $\mathbf{0.022 \pm 0.002}$  \\
+        \bottomrule
+    \end{tabular}
+    \caption{Performance of NETS on the Neal's Funnel distribution, measured in maximum mean discrepancy from the true distribution for reproducibility with the numbers quoted from \cite{blessing2024}.}
+    \label{tab:funnel:eval}
+\end{wraptable}
+We next test NETS on Neal's funnel, a challenging synthetic target distribution which exhibits correlations at different scales across its 10 dimensions. Heuristically, the first dimension is Gaussian with variance $\sigma^2 = 9$, and the other 9 dimensions are conditionally Gaussian with variance~$\text{exp}(x_0)$, creating the funnel.
+
+We again parameterize $(\hat b,\hat F)$ or $\hat \phi$ using simple feed forward neural networks, this time of hidden size $512$. We use 200 sampling steps and a mild diffusion coefficient of $\eps_t = 0.3$ to sample from the model. Following \cite{blessing2024}, we compute the maximum mean discrepancy (MMD) between 10000 samples from the model and 10000 samples from the target and compare to related methods in \Cref{tab:funnel:eval}. NETS matches the best performing predecessors, and, when using a single resampling step during generation when the ESS drops below $70\%$, surpasses them.
+
+\subsection{Scaling on high-dimensional GMMs}
+\label{sec:gmm}
+
+In order to demonstrate that the method generalizes to high dimension, we study sampling from multimodal GMMs in higher and higher dimensions and observe how the performance scales. In addition we are curious to understand how the factor in the sampling SDE coming from annealed Langevin dynamics, $\nabla U$, interacts with the learned drift $\hat b$ or $\nabla \hat \phi$ as we change the diffusivity. We construct $8$-mode target GMMs in $d = 36, 64, 128, 200$ dimensions and learn $\hat b$ with the PINN loss in each scenario. 
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/scaling-gmms-200.pdf}
+    \caption{Demonstration of high-dimensional sampling with our method using the PINN loss in \eqref{eq:loss:b:F} and a study of how diffusivity impacts performance, with and without transport. \textbf{Left}: NETS can achieve high ESS through transport alone, and the effect of increased diffusivity has more of a positive effect on performance with sampling than without. AIS cannot achieve ESS above $\approx 0$ in high dimension. \textbf{Right}: Kernel density estimates of 2-$d$ cross sections of the high-dimensional, multimodal distribution arising from the model and ground truth. }
+    \label{fig:gmm:scale}
+\end{figure}
+We use the same feed forward neural network of width $512$ and depth $4$ to parameterize both $\hat b$ and $\hat F$ for all dimensions tested and train for $4000$ training iterations. Figure \ref{fig:gmm:scale} summarizes the results. On the left plot, we note that AIS on its own cannot produce any effective samples, while even in 200 dimensions, NETS works with transport alone with $60\%$ ESS. As we increase the diffusivity~$\eps_t$ and therefore the effect of the Langevin term coming from the gradient of the potential, we note all the methods converge to nearly independent sampling, and the discrepancy in performance across dimensions is diminished. Note that the caveat to achieve this is that the step size in the SDE integrator must be taken smaller to accommodate the increased diffusivity, especially for the $\eps_t= 80$ data point. The number of sampling steps used to discretize the SDEs in these experiments ranged from $K = 200$ for $\eps_t =0$ up to $K = 2000$ for $\eps_t = 80$. Nonetheless, it suggests that diffusion can be more helpful when there is already some successful transport than without.
+
+\subsection{Lattice $\varphi^4$ theory}
+\label{sec:phi4}
+
+We next apply NETS to the simulation of a statistical lattice field theory at and past the phase transition from which the lattice goes from disordered, to semi-ordered, to fully ordered (neighboring sites are highly correlated to be of the same sign and magnitude). We study the lattice $\varphi^4$ theory in $D=2$ spacetime dimensions. The random variables in this circumstance are field configurations $\varphi \in \mathbb R^{L\times L}$, where $L$ is the extent of space and time.  The interpolating  energy function under which we seek to sample is defined as:
+\begin{align}
+\label{eq:U:lat}
+    U_{t}(\varphi) = \sum_x \left[- 2 \sum_{\mu}\varphi_x \varphi_{x + \mu} \right]  + (2D +  m^2_t) \varphi_x^2 +  \lambda_t \varphi_x^4, 
+\end{align}
+where summation over $x$ indicates summation over the lattices sites, and $m^2_t$ and $\lambda_t$ are time dependent parameters of the theory that define the phase of the lattice (ranging from disordered to ordered, otherwise known as magnetized). Importantly, sampling the lattice configurations becomes challenging when approaching the phase transition between the disordered and ordered phases. 
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/lattices_and_stats_dual_rows.pdf}
+    \caption{Comparison of the performance of NETS to AIS on two different settings for the study of $\varphi^4$ theory. \textbf{Top row, left}: 10 example generative lattice configurations with parameters $L=20$, $m^2 = -1.0$, $\lambda = 0.9$, which demarcates the phase transition to the antiferromagnetic phase. \textbf{Top row, right}: Performance of AIS (purple curve) vs. NETS (red curve) in terms of effective sample size over time of integration~$t$, and a histogram of the average magnetization of $4000$ lattice configurations, sampled with AIS, NETS, and HMC (superposed in this order). Note that NETS is closer to the HMC target and re-weights correctly. Re-weighted AIS was not plotted because the weights were too high variance. \textbf{Bottom row}: Equivalent setup for $L=16$, $m^2 = -1.0$, $\lambda = 0.8$, past the phase transition and into the ordered phase. Note that the field configurations generated by NETS are either all positive across lattice sites or all negative. AIS fails to sample the correct distribution, and its weights are too high variance to be used on the histogram.}
+    \label{fig:phi4}
+\end{figure}
+As an example, we identify the phase transition on $L=16$ ($d = 256$) and $L=20$ ($d = 400$) lattices and run NETS with the action matching loss, with $\hat \phi_t$ a simple feed forward neural network. We use the free theory $\lambda_0 = 0$ as the base distribution under which we initially draw samples. In Figure \ref{fig:phi4}, the top row shows samples from NETS for $L=20$ at the phase transition, where correlations begin to appear in the lattice configurations. NETS is almost 2 orders of magnitude more statistically efficient than AIS in sampling at the critical point, as seen in the plot showing ESS over time. Note also that NETS can produce unbiased estimates of the magnetization as compared to a Hybrid Monte Carlo (HMC) ground truth. The bottom row shows samples past the phase transition and into the ordered phase, where the lattices begin to take on either all positive or all negative values. Again in this regime, NETS is nearly 2 orders of magnitude more statistically efficient.
+
+While NETS performs significantly better than conventional annealed samplers on the challenging field theory problem, algorithms built out of dynamical transport still experience slowdowns near phase transitions because of the difficulty of resolving the dynamics of the integrators near these critical points. As such, we need to use 1500-2000 steps in the integrator to properly resolve the dynamics of the SDE.
+
+
+
+

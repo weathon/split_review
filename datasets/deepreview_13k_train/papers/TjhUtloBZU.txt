@@ -1,0 +1,517 @@
+\title{Understanding and Mitigating the Label Noise in Pre-training on Downstream Tasks}
+
+\begin{abstract}
+Pre-training on large-scale datasets and then fine-tuning on downstream tasks have become a standard practice in deep learning.
+However, pre-training datasets, while inaccessible or too expensive to handle, often contain label noise that may adversely affect the generalization of the model and pose unexpected risks. 
+This paper aims to understand the nature of noise in pre-training datasets and then mitigate its impact on downstream tasks. 
+Specifically, through extensive experiments of supervised pre-training models on synthetic noisy ImageNet-1K and YFCC15M datasets, we demonstrate that while slight noise in pre-training can benefit in-domain (ID) performance, where the training and testing data share the same distribution, it always deteriorates out-of-domain (OOD) performance, where training and testing distributions are different.
+We empirically ascertain that the reason behind is noise in pre-training shapes the feature space differently.
+We then propose a light-weight black-box tuning method (NMTune) to affine the feature space to mitigate the malignant effect of noise and improve generalization on both ID and OOD tasks, considering that one may not be able to access or fully fine-tune the pre-trained models. 
+We conduct extensive experiments on popular vision and language models including APIs that are supervised and self-supervised pre-trained on real data for evaluation. 
+Our results show the importance of this novel and fundamental research direction, which we term \textit{Noisy Model Learning}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The transfer learning paradigm of pre-training and fine-tuning (PT-FT) \citep{kornb2019transfer} has become the de facto standard in today's deep learning research and application.
+Instead of training a neural network from scratch for each individual task, which can be time-consuming, resource-intensive, and less adaptable, the PT-FT paradigm first pre-trains a relatively larger and more general model with huge volumes of datasets, and then transfers this pre-trained model (or the foundation model \citep{bommasani2021opportunities}) to various downstream tasks \citep{he2019moco,radford2021learning,he2022mae,brown2020language}. 
+For instance, ResNet \citep{he2015resnet} and Vision Transformers \citep{dosovitskiy2020image} pre-trained on ImageNet \citep{ILSVRC15} and larger but potentially noisy datasets \citep{kolesnikov2020big,xie2020ns,ridnik2021imagenet21k} have been widely adopted in computer vision. 
+The PT-FT paradigm has also become predominant in natural language processing \citep{devlin2018bert,liu2019roberta,radford2018improving,radford2019language,brown2020language,openai2023gpt4,touvron2023llama} and multi-modality~\citep{radford2021learning,schuhmann2022laionb}, where the pre-training is usually on large datasets scraped from the web.
+The generalization and transferability of the pre-trained models are usually not guaranteed to be satisfying on downstream tasks, and the reason can lie in either the pre-training or the fine-tuning.
+Over the years, there have been tremendous efforts in improving the performance of fine-tuning in various practical downstream scenarios: out-of-distribution generalization \citep{chen2021mandoline,kumar2022fine}, semi-supervised learning \citep{sohn2020fixmatch,usb2022}, imbalanced learning \citep{zhang2023deep, wang2023exploring}, noisy label learning \citep{song2022noisy,li2022selective}, to name a few. 
+While it is a common belief that scaling up the size of the pre-training data can benefit the downstream performance \citep{kaplan2020scaling}, its distribution also plays an essential role \citep{entezari2023role, zhang2023trade}. 
+Recently, \citet{nguyen2022quality} and \citet{lee2022dedup} found that the \emph{quality} of the pre-training data is more important for robust generalization compared to the quantity. 
+The bias in pre-training data created by the collection (and annotation) process, e.g., corrupted, poisoned, and false information \citep{blodgett2017racial,chang2020adversarial}, can also impose malicious and unexpected influence to downstream tasks \citep{bommasani2021opportunities}. 
+Take label noise as an example. Training CLIP \citep{radford2021learning} on LAION-2B \citep{schuhmann2022laionb}, which is a billion-scale uncurated image-text pair dataset, can just match the performance of training it on WIT-400M \citep{radford2021learning}, which is heavily cleaned and processed by OpenAI. 
+The label noise in large-scale datasets inevitably exists owing to the data collection process by human annotators and web crawlers. 
+It thus can be difficult to avoid or eliminate in pre-training \citep{ridnik2021imagenet21k,vasudevan2022does,schuhmann2022laionb}.
+In fact, there are already numerous models pre-trained on large-scale noisy data and have been transferred on downstream tasks, such as Noisy Student \citep{xie2020ns}, BiT \citep{kolesnikov2020big}, and Open CLIP \citep{cherti2023reproducible}.
+Not to mention the enormous but noisy raw text \citep{yang2019xlnet,lee2022dedup} that has been utilized to pre-train language models such as BERT \citep{devlin2018bert} and GPT \citep{radford2019language,brown2020language}. 
+As the pre-trained models and datasets have been growing significantly, it has become increasingly important and challenging to understand \emph{how the noise in pre-training data affects the performance of pre-trained models on downstream tasks.} 
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+    \subfigure[ID]{\label{fig:teaser_r50_id}\includegraphics[width=0.49\linewidth]{figures/teaser_r50_id.pdf}}
+    \hfill
+    \subfigure[OOD]{\label{fig:teaser_r50_ood}\includegraphics[width=0.49\linewidth]{figures/teaser_r50_odd.pdf}}
+  \end{center}
+\caption{In-domain (ID) and out-of-domain (OOD) downstream performance when supervised pre-training the model on synthetic noisy ImageNet-1K (IN-1K) and YFCC15M of various noise ratios. We compare linear probing (LP) and the proposed method on 14 ID and 4 OOD tasks. 
+On ID, $5\%$ noise in pre-training benefits the LP performance. Our method not only boosts the general performance but also rectifies the model pre-trained on clean data to be comparable to $5\%$ noise. 
+On OOD, noise in pre-training is detrimental to robustness performance when conducting LP.  
+Our method improves the transferability on OOD tasks significantly compared to LP.
+}
+\label{fig:teaser_r50}
+\end{wrapfigure}
+This paper presents the first study on this unexplored problem, demystifying the label noise in pre-training data, understanding its effects on downstream tasks, and then mitigating such (malignant) effects.
+Notably, there are existing efforts under the name of ``noisy label learning'' that train a robust model \emph{given} noisy training data \citep{Ghosh2017RobustLF, Li2020DivideMixLW, northcutt2021confidentlearning}.
+Our problem is inherently different since the noisy labels exist in the (usually black-box) pre-training data, and we do not make noise assumptions on the downstream data (while they can be used together as in \cref{sec-exp-discussion}; more discussion is in \cref{sec-related}). 
+Due to the increasing size of pre-trained models and datasets, it becomes notoriously difficult to alter the pre-training process or fine-tune the entire models (black-box or cannot be updated due to the large parameter size and the constrained computation).\footnote{Llama \citep{touvron2023llama,touvron2023llamav2} model requires multiple V100 GPUs to fine-tune, which is not affordable to most ordinary researchers; and proprietary models like ChatGPT cannot be locally fine-tuned.}
+Therefore, given a pre-trained model, we should take special care of the \emph{fine-tuning} to overcome the influence of noise in pre-training on downstream tasks.
+
+Our study aims to answer the following key questions: 1) \emph{Influence:} Does the noise in pre-training data have an influence on downstream performance? 2) \emph{Analysis:} Why does such influence happen? and 3) \emph{Mitigation:} How to mitigate such influence in a light-weight and black-box fine-tuning process?
+We present an in-depth analysis to answer the above questions, based on the popular \emph{supervised} pre-training paradigm.\footnote{Supervised and self-supervised learning are the most popular pre-training schemes. The former learns the mapping from inputs to labels \citep{he2015resnet,radford2021learning}, while the latter does not rely on labels, but predicts parts of the data itself \citep{devlin2018bert,he2022mae}. 
+}
+\begin{itemize}[leftmargin=1em]
+\setlength\itemsep{0em}
+    \item \textbf{Influence: The label noise in pre-training data has both benevolent and malignant influence on downstream tasks.} In Sections \ref{sec-exp-design} and \ref{sec-results}, we conduct realistic experiments with ResNet-50 models \citep{he2015resnet} fully-supervised and contrastive pre-trainied on synthetic noisy ImageNet-1K and YFCC15M \citep{2016yfcc100m} with various noisy ratios ($0, 5\%, 10\%, 20\%, 30\%$) and then study the generalization performance on the downstream in-domain (ID) and out-of-domain (OOD) tasks. We observe that, on ID tasks, slight noise (up to $5\%$ or $10\%$) can benefit generalization performance. In contrast, even $5\%$ noise can drastically deteriorate robustness and transferability on OOD tasks, as shown in \cref{fig:teaser_r50} and \cref{fig:r50_in_ood_eval}.
+    \item \textbf{Analysis: The label noise in pre-training shapes the feature space significantly of the pre-trained model.} 
+    In \cref{sec-analysis-empirical}, 
+    we conduct empirical analysis from the singular value spectrum on the feature space of the pre-trained models. Noise in pre-training results in the decreasing largest singular value and flatter singular value distribution with a higher dimension span in the feature space.
+    An initial increase in the spanning dimension of the feature space is beneficial to the discriminability on ID tasks. Still, it then becomes detrimental with the further increase, indicating more feature capacities are learned to fit to noise structure. The decrease in the dominant singular values leads to less transferability for OOD tasks \citep{chen19itrans}, as shown in \cref{fig:r50_id_ood_svd}.
+    \item \textbf{Mitigation: We design a simple black-box fine-tuning algorithm to reshape the pre-trained feature space, reducing the influence of noisy pre-training data and boost the performance of downstream tasks.} In \cref{sec-mitigate}, based on the analysis, we propose three regularization objectives on the singular value spectrum that help affine the feature space. We demonstrate the effectiveness of the proposed method on noisy ResNet-50 models with extensive analysis, as shown in \cref{fig:teaser_r50}.
+    In \cref{sec-exp}, we further validate our method on popular noisy pre-trained models (and APIs) and present superior generalization performance for both vision and language tasks.
+\end{itemize}
+
+Beyond our analysis, we view this research as a novel and complementary topic to the classic noisy label learning setting, termed as \emph{Noisy Model Learning} (NML).
+We think the value of this direction is even more significant in the era of large foundation models \citep{bommasani2021opportunities}, where the downstream users only have access to the model weights or APIs. 
+It would be of particular interest to explore how to eliminate the malignant influence of noise in pre-training on downstream tasks when adapting these models without full fine-tuning, since it may exist in broader applications such as the detection and segmentation in medical and autonomous driving.
+We hope that future research on this topic can facilitate a better understanding and application of large foundation models. 
+
+
+
+\section{Understanding the Label Noise in Pre-trained Models}
+
+\label{sec:understand}
+
+In this section, we empirically and systemically investigate the effect of noisy labels in the supervised pre-training on the learned representations. 
+We build our evaluation and analysis on the realistic motivating experiments of training ResNet-50 \citep{he2015resnet} on synthetic noisy ImageNet-1K \citep{ILSVRC15} and YFCC15M (a subset of YFCC100M \citep{2016yfcc100m}).
+
+\subsection{Experiments Design}
+\label{sec-exp-design}
+
+\textbf{Noisy pre-training datasets}. 
+We assume that the supervised pre-training dataset consists of inputs $\mathbf{x} \sim \mathcal{X} $ and supervisions $y \sim \mathcal{Y}$.
+We define a clean dataset $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i \in [N]}$ of size $N$ with accurate supervisions, where $[N]:=\{1,\ldots,N\}$. 
+We assume that $y$ can exist in different formats in pre-training, e.g., an actual label for the input as in fully-supervised learning \citep{ILSVRC15, he2015resnet, ridnik2021imagenet21k} or a text description for an input image as in contrastive learning of CLIP \citep{2016yfcc100m, radford2021learning, jia2021scaling, changpinyo2021cc12m, desai2021redcaps, schuhmann2021laion400m, schuhmann2022laionb}.
+Due to the scale of data collection and the cost of data annotation, the pre-training dataset can usually contain noisy supervision $\hat{y}$ that does not accurately match the corresponding $\mathbf{x}$ \citep{recht2019imagenet, beyer2020imagenet, northcutt2021confidentlearning, yun2021relabel, vasudevan2022does, schuhmann2022laionb}. 
+We define such noisy pre-training dataset as $\hat{\mathcal{D}} = \{(\mathbf{x}_i, \hat{y}_i)\}_{i \in [N]}$ and
+the noise ratio $\gamma$ as the percentage of noisy supervision in $\mathcal{\hat{D}}$. 
+\textbf{Pre-trained models}. 
+The pre-trained models serve as a foundation for downstream tasks and usually can be abstracted as the stack of a feature extractor and a projection head. 
+We define the feature extractor with learned parameters $\phi$ as a mapping function $f_{\phi}$ from the input space to feature space of dimension $D$: $f_{\phi}: \mathcal{X} \rightarrow \mathcal{F}$.  
+The projection head $g_{\theta}: \mathcal{F} \rightarrow \mathcal{Y}$ is jointly pre-trained with the feature extractor, but not used when adapting $f_{\phi}$ on downstream tasks. 
+We consider two types of supervised pre-training on images for this motivating example: fully supervised pre-training where $y$ is the actual class label and the projection head is a linear classifier \citep{he2015resnet}, and contrastive pre-training with text supervision (CLIP) where $y$ is the text and the projection is a non-linear function maps the image and text to a common feature space \citep{radford2021learning,cherti2023reproducible}.
+\textbf{In-domain (ID) and out-of-domain (OOD) evaluation}.  
+To investigate the effect of noisy supervision comprehensively, we leverage both in-domain (ID) and out-of-domain (OOD) evaluation to assess the generalization capability of the pre-trained feature extractor \citep{josip2021cnnrobusttransfer}  $f_{\phi}^{\gamma}$ that are obtained from the pre-training data of different noise ratios.
+To evaluate the pre-trained models on a downstream dataset $\mathcal{D}' = \{(x_i, y_i)\}_{i \in [M]}$\footnote{We always treat $y \in [C]$ as an actual class label on downstream datasets.} and measure the quality of the learned representation, we conduct linear probing (LP)\footnote{Linear probing is an evaluation protocol accessing feature quality \citep{he2019moco,liu2021selfsupervised}.}, where only a $C$-way linear classification head is re-trained on the downstream dataset and the feature extractor is frozen.
+The linear probing can be viewed as a simple black-box tuning method for pre-trained models that are typically large and difficult or unable to fully fine-tune.
+For ID evaluation, we assume the same marginal distribution over $\mathcal{X}$ for both training and testing. % i.e., the training instances and testing instances are drawn from the same input space. 
+In contrast, for OOD evaluation, we train the linear classifier on a source distribution and evaluate it on (multiple) different target distributions \citep{kumar2022fine}.
+
+\textbf{Experiment setup}.
+We use ImageNet-1K (IN-1K) \citep{ILSVRC15} in fully supervised pre-training and YFCC15M \citep{2016yfcc100m} in CLIP pre-training, with ResNet-50 \citep{he2015resnet}. 
+To introduce noisy supervision in the datasets, we uniformly flip the ground truth class label into the other classes in IN-1K and randomly swap the text description from another image-text pair in YFCC15M. 
+We set the noise ratio $\gamma$ to $\{0\%, 5\%, 10\%, 20\%, 30\%\}$, where $0\%$ represents the clean dataset. 
+For ID evaluation, we use $14$ downstream datasets including CIFAR-10/100 \citep{krizhevsky2009learning}, Flowers102 \citep{nilsback2008automated}, Food101 \citep{bossard14}, OxfordPet \citep{parkhi12a}, StanfordCars \citep{jonathan2013cars}, FGVCAircraft \citep{maji2013finegrained}, SVHN \citep{2011svhn}, DTD \citep{cimpoi14describing}, Caltech101 \citep{FeiFei2004LearningGV}, EuroSAT \citep{helber2018introducing,helber2019eurosat}, PatchCamelyon \citep{Veeling2018qh}, RESISC45 \citep{Cheng2017resic}, and Rendered SST2 \citep{socher2013recursive}, which cover various visual domains. 
+For OOD evaluation, we use the ``real'', ``sketch'', ``inpainting'', and ``clippart'' of DomainNet \citep{peng2019moment}, where we train on either ``real'' or ``sketch'' and evaluate on the others.
+For CLIP pre-trained models, we additionally use 6 ImageNet variants \citep{recht2019imagenet,dan2021ood,wang2019learning,dan2021nae,vaishaal2021time,objectnet2019} for OOD evaluation while train on ImageNet-1K.
+We report the LP performance for both ID and OOD evaluation using $\{10\%, 25\%, 50\%, 75\%, 100\%\}$ percentage of downstream datasets. 
+The setup can be extended to other architectures and pre-training proxy objectives, as shown in \cref{sec-exp}.
+Our pre-training primarily follows \cite{wightman2021resnet} and \cite{cherti2023reproducible}, with similar performance achieved as shown in \cref{sec:append-understand-setup}.
+More details of the setup are included in \cref{sec:append-understand-down-setup}.
+
+\subsection{Results}
+\label{sec-results}
+
+\begin{figure}[t!]
+\centering
+    \hfill
+    \subfigure[IN1K, ID]{\label{fig:r50_in1k_id_eval}\includegraphics[width=0.24\linewidth]{figures/avg_timm_r50_lp_transfer_results.pdf}}
+    \hfill
+    \subfigure[IN1K, OOD]{\label{fig:r50_in1k_odd_eval}\includegraphics[width=0.24\linewidth]{figures/avg_timm_r50_lp_robust_results.pdf}}
+    \hfill
+    \subfigure[YFCC15M, ID]{\label{fig:r50_yfcc15m_id_eval}\includegraphics[width=0.24\linewidth]{figures/avg_open_clip_r50_lp_transfer_results.pdf}}
+    \hfill
+    \subfigure[YFCC15M, OOD]{\label{fig:r50_yfcc15m_ood_eval}\includegraphics[width=0.24\linewidth]{figures/avg_open_clip_r50_lp_robust_results.pdf}}
+    \hfill
+\caption{Average ID and OOD evaluation results of ImageNet-1K (IN-1K) fully supervised pre-training ((a) and (b)) and YFCC15M CLIP pre-training ((c) and (d)) on downstream tasks with various percentages of data using ResNet-50. 
+On ID evaluation, the transfer performance first increases as noise increases (to $5\%$ or $10\%$) and then decreases with more noise. On OOD evaluation, the robustness performance constantly decreases once noise is introduced in pre-training.}
+\label{fig:r50_in_ood_eval}
+\end{figure}
+
+In \cref{fig:r50_in_ood_eval}, we plot the average accuracy for ID and OOD tasks of adapting the IN-1K fully supervised and YFCC15M CLIP pre-trained ResNet-50 models.
+With the extensive motivating experiments, we empirically find two important and counter-intuitive observations from the results: 
+\begin{itemize}[leftmargin=2em]
+\setlength\itemsep{0em}
+    \item Proper noisy labels in pre-training (e.g., $5\%$ or $10\%$) can benefit the performance on ID downstream tasks, while more noise results in inferior results;
+    \item The robustness of transferability on OOD downstream tasks constantly deteriorates as the noise increases, even with the improvement in ID tasks on $5\%$ noise. 
+\end{itemize}
+While prior arts in noisy label learning mainly aim to correct/eliminate the noise or perform robust learning against noise \citep{Ghosh2017RobustLF,Li2020DivideMixLW,sopliu22w,xue2022investigating}, we show that the noise in pre-training can have both benevolent and malignant effects on downstream tasks.
+These observations raise a natural and fundamental question: \textit{where does the superior transferability (with slight noise) and the inferior robustness stem from}? 
+We further analyze the feature space to understand the change in the pre-trained feature extractor caused by noise. 
+
+
+\subsection{Feature Space Analysis}
+\label{sec-analysis-empirical}
+
+\begin{figure}[!t]
+\centering
+    \hfill
+    \subfigure[IN1K, ID]{\label{fig:r50_in1k_id_svd}\includegraphics[width=0.24\linewidth]{figures/transfer_svd_timm_r50_lp_transfer_results.pdf}}
+    \hfill
+    \subfigure[IN1K, OOD]{\label{fig:r50_in1k_ood_svd}\includegraphics[width=0.24\linewidth]{figures/robust_svd_timm_r50_lp_robust_results.pdf}}
+    \hfill
+    \subfigure[YFCC15M, ID]{\label{fig:r50_yfcc15m_in_svd}\includegraphics[width=0.24\linewidth]{figures/transfer_svd_open_clip_r50_lp_transfer_results.pdf}}
+    \hfill
+    \subfigure[YFCC15M, OOD]{\label{fig:r50_yfcc15m_ood_svd}\includegraphics[width=0.24\linewidth]{figures/robust_svd_open_clip_r50_lp_robust_results.pdf}}
+    \hfill
+\caption{Feature SVD analysis. We compute the singular value entropy (SVE) for in-domain (ID) tasks and the largest singular value ratio (LSVR) for out-of-domain (OOD) tasks. Both metrics are computed for ImageNet-1K fully supervised pre-trained ((a) and (b)) and YFCC15M CLIP pre-trained ((c) and (d)) models. The SVE first slightly improves as the noise ratio increases to $5\%$ or $10\%$, indicating better generalization. As the noise ratio increases, the SVE further improves, and the LSVR drops significantly, corresponding to worse generalization on ID and OOD tasks, as more noise structure is learned. The dominant singular components become less transferable. 
+} 
+\label{fig:r50_id_ood_svd}
+\end{figure}
+
+To understand the noise in pre-training data, we empirically analyze the singular value spectrum of the pre-trained feature space on downstream datasets, which is widely considered to be related to the generalization performance \citep{oymak2019generalization, chen19itrans, xue2022investigating}.
+More specifically, we perform singular value decomposition (SVD) on the features $\mathbf{F} \in \mathbb{R}^{M \times D}$ \footnote{We denote $M$ as the number of samples in downstream datasets and $D$ as the feature dimension.} of pre-trained feature extractors on a downstream dataset:
+$\mathbf{F} =\mathbf{U} \boldsymbol{\Sigma} \mathbf{V}^{\top}$.\footnote{We assume $D \leq M$ \citep{kumar2022fine}. $\mathbf{U}$ and $\mathbf{V}$ denotes the left and right singular vector matrices, respectively, and $\mathbf{\Sigma}$ denoting the diagonal singular value matrix $\{\sigma_1, \ldots, \sigma_D\}$.}.
+We plot the singular values in \cref{sec:append-id-ood-svd}, based on which we define two metrics that can help understand the observations:
+\begin{definition}[Singular Value Entropy] 
+The singular value entropy (SVE) is defined as the entropy of normalized singular values. 
+SVE measures the flatness of the singular value distribution. 
+\begin{equation}
+     \mathrm{SVE} = -\sum_{i=1}^D \frac{\sigma_i}{\sum^{D}_{j=1} \sigma_j} \log \frac{ \sigma_i}{\sum^{D}_{j=1} \sigma_j}
+\end{equation}
+Larger SVE values indicate that the feature space captures more structure in the data and thus spans more dimensions either due to more discriminated features are learned or memorization of the noise. 
+\end{definition}
+
+\begin{definition}[Largest Singular Value Ratio] 
+The largest singular value ratio (LSVR) is defined as the logarithm of the ratio of the largest singular value $\sigma_1$ to the summation of all singular values:
+\begin{equation}
+    \mathrm{LSVR} = -\log \frac{\sigma_1}{\sum^{D}_{i=1} \sigma_i}.
+\end{equation}
+LSVR measures the variations in data captured by the singular vector corresponding to the largest singular value $\sigma_1$, which relates to the transferability of a model \citep{chen19itrans}.
+\end{definition}
+
+\textbf{Analysis.}
+We plot the SVE for ID tasks and LSVR for OOD tasks, as shown in \cref{fig:r50_id_ood_svd}. 
+For ID tasks, as the noise ratio slightly increases, the learned representation usually presents slightly higher SVE, which indicates the pre-trained feature extractor captures more structure in data. 
+Specifically, more capabilities of the feature space are assigned to fit the noise in data, resulting in a feature space spanning more dimensions, 
+which provides better-initialized features on downstream tasks and facilitates generalization. 
+Similar observations have also been found and explored in \cite{wu2022noisytune}.
+However, as the noise ratio further increases, the increased SVE indicates that a more noisy data structure is captured and memorized, thus leading to deteriorated generalization performance. 
+When the labels in pre-training are random, the SVE of the feature extractor would further increase by memorizing all the noise but not generalize on downstream tasks, similar to \cite{zhang2021understanding}. 
+For OOD tasks, the robustness performance is \emph{negatively correlated} with the LSVR. 
+As the noise ratio increases, the LSVR consistently increases with the decreasing largest singular value. 
+A less transferable component is learned, thus resulting in worse generalization on unseen OOD tasks.
+
+
+\section{Mitigating the Noise with Regularization on Singular Values}
+
+\label{sec-mitigate}
+
+In this section, we propose a black-box fine-tuning method, which we call ``Noisy Model Tuning'' (NMTune, \cref{fig:method}) in response to the noisy model learning setting. 
+We demonstrate that NMTune can boost the generalization on downstream tasks and provide the analysis for the reasons behind.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/pipeline_illustration.pdf}
+    \caption{Illustration of noisy label learning (left) and the proposed \emph{Noisy Model Learning} (right). Noisy label learning mainly focuses on robustly training a model from scratch or fine-tuning a model from pre-training on a noisy dataset. Noisy model learning focuses on robustly adapting the black-box noisy pre-trained models to downstream datasets with no assumption on the downstream dataset.}
+    \label{fig:method}
+\end{figure}
+
+\subsection{Method}
+\label{sec-mitigate-method}
+Per analysis above, 
+noise in pre-training can shape the feature space differently from pre-training on clean data, reducing the top dominant singular values with dampened transferability while increasing the spanning dimensions of the feature space to fit noise structure.
+Since the large pre-trained models are usually difficult to fully fine-tune due to the enormous parameter size and limited computation resources, we propose to alter the pre-trained feature space $\mathcal{F}$ in a light-weight and black-box fashion. 
+More specifically, we introduce a multi-layer perceptron (MLP) $h_{\omega}$ transforming the pre-trained features into new feature space $\mathcal{Z}$. 
+We propose three regularization terms on $\mathbf{Z}$, 
+to encourage the pre-trained knowledge to be maintained and improving SVE and LSVR of the new feature space. % respectively. 
+
+\textbf{Consistency regularization}. 
+To encourage the consistency of the pre-trained knowledge, we adopt a mean-square-error (MSE) loss between the normalized features $\mathbf{F}$ and $\mathbf{Z}$:
+\begin{equation}
+    \mathcal{L}_{\mathrm{MSE}} = \left\| \frac{\mathbf{F}}{\| \mathbf{F} \|_2}  - \frac{\mathbf{Z}}{\| \mathbf{Z} \|_2} \right\|_2^2.
+\end{equation}
+This objective facilitates inheriting the pre-trained knowledge in the transformed features $\mathbf{Z}$. 
+
+\textbf{Covariance regularization.}
+We define the covariance loss to encourage the off-diagonal elements in the covariance matrix of the transformed feature $C(\mathbf{Z})$ to be close to $\mathbf{0}$:
+\begin{equation}
+    \mathcal{L}_{\mathrm{COV}} = \frac{1}{D} \sum_{i \neq j}[C(\mathbf{Z})]_{i, j}^2, \text{ where } C(\mathbf{Z}) = \frac{1}{M-1} \sum_{i=1}^M\left(z_i-\bar{z}\right)\left(z_i-\bar{z}\right)^T, \bar{z}=\frac{1}{M} \sum_{i=1}^M z_i.
+\end{equation}
+Inspired by \citet{zbontar2021barlow} and \citet{bardes2021vicreg}, we use the covariance regularization term to improve the SVE of feature space by preventing the different coordinates of the features from encoding similar information. 
+It also encourages more discriminative features to be learned.
+
+
+\textbf{Dominant singular value regularization}.
+To help transferability, we use a more specific regularization to improve the LSVR by directly maximizing the ratio of the largest singular value:
+\begin{equation}
+    \mathcal{L}_{\mathrm{SVD}} = - \frac{\sigma_{1}}{\sum_{j=1}^{D} \sigma_{j}}.
+\end{equation}
+
+In summary, the total objective on a downstream task becomes:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\mathrm{CE}} + \lambda \mathcal{L}_{\mathrm{NMTune}} = \mathcal{L}_{\mathrm{CE}} + \lambda \left(  \mathcal{L}_{\mathrm{MSE}} + \mathcal{L}_{\mathrm{COV}} + \mathcal{L}_{\mathrm{SVD}} \right),
+\end{equation}
+where $\mathcal{L}_{\text{CE}}$ is the cross-entropy loss for downstream classification.
+We set $\lambda=0.01$ and use 2 layers MLP for all our experiments.
+Ablation study on MLP architecture and $\lambda$ are in \cref{sec-append-exp-ablation}.
+
+
+\subsection{Evaluation on Noisy ImageNet-1K and YFCC15M}
+
+Here, we evaluate the proposed NMTune on the noisy models and analyze the reason for its effectiveness.
+We compare against solely training the MLP without the regularization, termed as MLP tuning, to show the effectiveness stems from the regularization rather than the extra parameters.
+
+\begin{figure}[!t]
+\centering
+    \hfill
+    \subfigure[ID F1]{\label{fig:r50_results_id_f1}\includegraphics[width=0.24\linewidth]{figures/r50_results_id_f1.pdf}}
+    \hfill
+    \subfigure[ID SVE]{\label{fig:r50_results_id_sve}\includegraphics[width=0.24\linewidth]{figures/r50_results_id_sve.pdf}}
+    \hfill
+    \subfigure[OOD F1]{\label{fig:r50_results_ood_f1}\includegraphics[width=0.24\linewidth]{figures/r50_results_ood_f1.pdf}}
+    \hfill
+    \subfigure[OOD LSVR]{\label{fig:r50_results_ood_lsvr}\includegraphics[width=0.24\linewidth]{figures/r50_results_id_lsvr.pdf}}
+    \hfill
+\caption{Evaluation of our method on ID and OOD downstream tasks, compared to MLP tuning and LP on ResNet-50 models pre-trained on ImageNet-1K (IN-1K) and YFCC15M. (a) Average F1 score on ID tasks; (b) SVE on ID tasks; (c) Average F1 score on OOD tasks; (d) LSVR on OOD tasks. Our method presents better SVE and LSVR on both ID and OOD tasks with better generalization performance. Our method also rectifies the malignant noise effect: the feature extractor pre-trained on clean data now exhibits better performance than others on noisy data on ID tasks; and the performance gap between the clean one and the one with $5\%$ noise gets smaller on OOD tasks.} 
+\label{fig:r50_results}
+\end{figure}
+
+For ID tasks, we plot the average F1 score and SVE in Figures \ref{fig:r50_results_id_f1} and \ref{fig:r50_results_id_sve}, respectively. 
+The F1 score of linear probing (LP) on different pre-training noise ratios follows the same trend as the accuracy: it first increases as the noise ratio goes up to $5\%$ and then decreases. 
+While adding an MLP can improve the F1 score in general, we find that it cannot mitigate the effect of noise, i.e., 
+the clean pre-trained model underperforms the $5\%$ noisy pre-trained models.
+Further introducing our method can rectify the effect of noise on ID tasks, leading the clean pre-trained feature extractor to achieve the best results. 
+More interestingly, only adding a MLP to LP can result in a smaller SVE, especially on ImageNet-1K, corresponding to a much sparser feature structure.
+In contrast, our method provides a larger and flatter SVE.
+It indicates the transformed feature space not only maintains the pre-trained knowledge but also spans more dimensions.
+For OOD tasks, the F1 score and LSVR are shown in \cref{fig:r50_results_ood_f1} and \ref{fig:r50_results_ood_lsvr}, respectively. 
+Similarly, one can observe significantly better generalization performance deploying NMTune, compared to the MLP and LP. 
+We also notice a smaller performance gap for the clean pre-trained feature extractor and $5\%$ noisy pre-trained, especially on YFCC15M.
+On LSVR, MLP tuning usually imposes larger LSVR compared to LP, presenting smaller dominant singular values. 
+Considering MLP tuning also presents smaller SVE, its resulting feature space is expected to present a more long-tailed spectrum than the original feature space.
+Maximizing the dominant singular values results in better transferability for OOD tasks.
+
+
+
+\section{Experiments}
+
+\label{sec-exp}
+
+We further validate NMTune on practical large-scale vision and language models that are pre-trained on noisy data,
+and discuss the noisy label learning and running time analysis in this section.
+
+\subsection{Vision Models and Datasets}
+
+\textbf{Setup}. For vision models, we use ResNet152 \citep{he2015resnet} with dimensions widened by a factor of two (ResNet152x2) fully supervised pre-trained on ImageNet-21K \citep{kolesnikov2020big}, Swin-L \citep{liu2021swin} fully supervised pre-trained on ImageNet-21K, EfficientNet-B3 semi-supervised pre-trained on noisy JFT-300M \citep{hinton2015distilling,chollet2017xception} and ImageNet-1K, and ViT-L \citep{dosovitskiy2020image} and ConvNext-L \citep{liu2022convnext} contrastive pre-trained on noisy Laion-2B \citep{cherti2023reproducible}. 
+All pre-trained models are adapted from TIMM \citep{rw2019timm}.
+We evaluate the models on the 14 downstream ID and 4 OOD vision datasets as in \cref{sec:understand}.
+The details of hyper-parameters are shown in \cref{sec:append-exp-vision-setup} due to space limit. 
+\textbf{Results}. 
+We present the average accuracy and F1 score across different datasets with three runs on vision models in \cref{tab:vision-res}.
+Our method improves the quality of the noisy pre-trained features with better accuracy and F1 score on both ID and OOD vision tasks. 
+A large margin on downstream task across different pre-training  architectures and datasets is present by NMTune, demonstrating better feature is learned. 
+Noteworthy is that, although the MLP tuning also improves the performance in general, its performance gain is much smaller compared to our method, showing the effectiveness of the proposed regularization terms on mitigating the malicious effect of noise and improving generalization.
+More detailed results with error bars for each dataset are shown in \cref{sec:append-exp-vision-res}.
+\begin{table}[t!]
+    \begin{minipage}{.48\textwidth}
+      \centering
+        \caption{Results on popular vision models that are pre-trained on noisy datasets. We use 14 in-domain (ID) and 4 out-of-domain (OOD) tasks. 
+        }
+        \label{tab:vision-res}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{l|l|cc|cc}
+        \toprule
+        \multicolumn{1}{c|}{\multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Pre-trained \\ Model\end{tabular}}} &
+          \multicolumn{1}{c|}{\multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Tuning \\ Method\end{tabular}}} &
+          \multicolumn{2}{c|}{In-Domain} &
+          \multicolumn{2}{c}{Out-of-Domain} \\ \cline{3-6} 
+        \multicolumn{1}{c|}{} &
+          \multicolumn{1}{c|}{} &
+          Acc. &
+          F1 &
+          Acc. &
+          F1 \\ \midrule
+        \multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}JFT300M\\ Semi-Supervised \\ EfficientNet-B3 \end{tabular}} &
+          LP &
+          76.72 &
+          0.3815 &
+          44.13 &
+          0.3594 \\
+         &
+          MLP &
+          76.87 &
+          0.3833 &
+          45.95 &
+          0.3624 \\
+         &
+          Ours &
+          \textbf{77.63} &
+          \textbf{0.3874} &
+           \textbf{46.84} &
+           \textbf{0.3654} \\ \midrule
+        \multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}ImageNet-21K\\ Fully Supervised \\ ResNetv2-152x2 \end{tabular}} &
+          LP &
+          77.51 &
+          0.3718 &
+          40.82 &
+          0.3062 \\
+         &
+          MLP &
+          77.58 &
+          0.3726 &
+          41.73 &
+          0.3053 \\
+         &
+          Ours &
+          \textbf{78.43} &
+          \textbf{0.3862} &
+          \textbf{42.42} &
+          \textbf{0.3100} \\ \midrule
+        \multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}ImageNet-21K\\ Fully Supervised \\ Swin-L \end{tabular}} &
+          LP &
+          81.91 &
+          0.4092 &
+          50.88 &
+          0.3838 \\
+         &
+          MLP &
+          82.51 &
+          0.4128 &
+          51.21 &
+          0.3811 \\
+         &
+          Ours &
+          \textbf{84.16} &
+          \textbf{0.4177} &
+          \textbf{52.35} &
+          \textbf{0.3901} \\ \midrule
+        \multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}Laion-2B\\ CLIP \\ ConvNext-L \end{tabular}} &
+          LP &
+          88.86 &
+          0.4432 &
+          66.86 &
+          0.4253 \\
+         &
+          MLP &
+          88.53 &
+          0.4417 &
+          68.43 &
+          0.4304 \\
+         &
+          Ours &
+          \textbf{89.48} &
+          \textbf{0.4457} &
+          \textbf{70.30} &
+           \textbf{0.4367} \\ \midrule
+        \multirow{3}{*}{\begin{tabular}[c]{@{}l@{}}Laion-2B\\ CLIP \\ ViT-L \end{tabular}} &
+          LP &
+          86.85 &
+          0.4328 &
+          66.89 &
+          0.4208 \\
+         &
+          MLP &
+          87.23 &
+          0.4375 &
+          69.50 &
+          0.4221 \\
+         &
+          Ours &
+          \textbf{88.57} &
+          \textbf{0.4414} &
+          \textbf{70.47} &
+          \textbf{0.4246} \\ 
+        \bottomrule
+        \end{tabular}%
+        }%
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{.49\textwidth}
+      \centering
+        \caption{Evaluation of our method on language models in practice that are pre-trained on noisy datasets. We use GLUE for in-domain (ID) tasks and GLUE-X for out-of-domain (OOD) tasks.}
+        \label{tab:nlp-results}
+        \resizebox{0.85 \textwidth}{!}{%
+        \begin{tabular}{@{}l|l|cc@{}}
+        \toprule
+        \multicolumn{1}{c|}{\multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Pre-trained\\ Model\end{tabular}}} &
+          \multicolumn{1}{c|}{\multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Tuning\\ Method\end{tabular}}} &
+          \multirow{2}{*}{In-Domain} &
+          \multirow{2}{*}{Out-of-Domain} \\
+        \multicolumn{1}{c|}{}      & \multicolumn{1}{c|}{} &  &  \\ \midrule
+        \multirow{3}{*}{BERT-L}    & LP                    & 69.44 & 50.65 \\
+                                   & MLP                   & 69.78 & 50.62 \\
+                                   & Ours                  & \textbf{70.26} & \textbf{51.63} \\ \midrule
+        \multirow{3}{*}{RoBERTa-L} & LP                    &  69.75 & 44.55 \\
+                                   & MLP                   &  70.27 & 45.22 \\
+                                   & Ours                  &  \textbf{70.97} &  \textbf{47.01} \\ \midrule
+        \multirow{3}{*}{GPT-2}     & LP                    &  58.67 & 36.68 \\
+                                   & MLP                   &  58.44 & 37.24 \\
+                                   & Ours                  &  \textbf{59.34} &  \textbf{39.07} \\  \midrule
+        \multirow{3}{*}{text-ada-002}     & LP               & 56.96 & 44.06 \\
+                                   & MLP                   & 63.89 & 51.30  \\
+                                   & Ours                  & \textbf{65.99} &  \textbf{53.48} \\ 
+        \bottomrule
+        \end{tabular}%
+        }
+    \end{minipage} 
+\end{table}
+\subsection{Language Models and Datasets}
+
+\textbf{Setup}. 
+We evaluate BERT-L \citep{devlin2018bert}, RoBERTa-L \citep{liu2019roberta}, and GPT-2 \citep{radford2019language} on the GLUE \citep{2018glue} and GLUE-X~\citep{yang2022glue} benchmarks for ID and OOD performance..
+BERT-L and RoBERTa-L are pre-trained on the combination of the BooksCorpus data \citep{zhu2015bookscorpus} and English Wikipedia with uncompressed raw text. 
+It is found that the raw pre-training data of BERT can be reduced from 16GB to 12GB with data cleaning \citep{yang2019xlnet}. 
+GPT-2 is pre-trained on WebText \citep{radford2019language}, a scraped web dataset from Common Crawl that contains low-quality raw texts.
+We also leverage OpenAI's API service ``text-ada-002''\footnote{We cannot use larger and more recent language models such as LLaMA \citep{touvron2023llama}, since they are unable to fit in a single V100 GPU and we are unsure whether GLUE is in their training data.}.
+Details of the hyper-parameters and evaluation metrics are in \cref{sec:append-exp-nlp-setup}.
+\textbf{Results}. 
+In \cref{tab:nlp-results}, \method consistently achieves the best generalization performance.
+It presents superior performance gain, especially on OOD tasks of GLUE-X. 
+On the ``text-ada-002'' model with only API access, it also outperforms LP significantly, demonstrating the necessity of mitigating the effect of noise for better generalization. 
+Interestingly, on the ID tasks of GLUE, we also observe a smaller gap of MLP tuning method to LP even with more parameters, showing that the MLP alone may not mitigate the influence of noisy data in pre-training. 
+Full results are in \cref{sec:append-exp-nlp-results}. 
+
+\subsection{Discussion}
+\label{sec-exp-discussion}
+
+\textbf{Noisy model learning with noisy label learning}. 
+We explore another setting, where these two paradigms occur together with both the pre-training and fine-tuning containing label noise, as shown in \cref{sec:append-exp-noise}. 
+Our exploration in synthetic noisy CIFAR-10/100 presents similar observations of LP and NMtune as in clean downstream datasets, and they can work closely to achieve better performance on downstream datasets with slight noise.
+\textbf{Running time analysis}. 
+We present the average GPU hours of NMTune, MLP tuning, and LP in \cref{sec:append-exp-runtime}, showing that it introduces negligible computation.
+The ablation study and architecture of MLP are shown in \cref{sec-append-exp-ablation}.
+Finally, our results may not be comparable to white-box full fine-tuning results, which is acceptable since we perform black-box tuning and the feature extractors are frozen.
+Our goal is not to pursue the best but to offer insights and discuss new research possibilities in the era of foundation models.
+
+
+
+\section{Related Work}
+
+\label{sec-related}
+
+\textbf{Noisy label learning.} 
+Prior arts on noisy label learning mainly focus on how to train robust models or how to adapt clean pre-trained models on noisy (downstream) datasets from scratch, including robust loss functions \citep{Ghosh2017RobustLF, Zhang2018GeneralizedCE, Wang2019SymmetricCE, Ma2020NormalizedLF}, noise estimation \citep{Xiao2015LearningFM,Goldberger2016TrainingDN,Liu2020EarlyLearningRP,northcutt2021confidentlearning,ICML:Li+etal:2021}, and noise correction \citep{Han2018CoteachingRT, Li2020DivideMixLW, zhang2021learning,sopliu22w, kim2021fine,chen2023imprecise}.
+Perhaps more close to our work is the line of understanding noisy label learning. 
+\citet{Ghosh2017RobustLF} looked at  theoretical conditions for a loss function to be noise-tolerant.
+CIFAR-N \citep{wei2021learning} was built to understand the real-world instance-dependent label noise. 
+\citet{cheng2021mitigating} proposed to mitigate the memorization of noise labels by analyzing the regularization between representations. 
+\citet{wen2022benign} provably verified the failure of benign overfitting with label noise. 
+\citet{xue2022investigating} investigated the robustness of contrastive pre-training with noisy labels on downstream tasks. 
+Our work differs from the noisy label learning paradigm by focusing on the effect of pre-training noise on downstream.
+\textbf{Pre-training and fine-tuning.}
+Pre-training and fine-tuning is the dominant transfer learning paradigm that allows a pre-trained model to adapt to a new, but similar, dataset. 
+Many techniques are proposed for better transfer performance on the new dataset when it contains distribution shift \citep{cheng2021mitigating}, unlabeled data \citep{sohn2020fixmatch,zhang2021flexmatch,wang2022freematch}, imbalanced data \citep{kang2019decoupling,wang2023margin}, and noisy data \citep{wei2021smooth,xue2022investigating}. 
+There are also much relevant work studying and processing the pre-training data for better transfer performance by diversity trade-off \citep{kaplan2020scaling,zhang2023trade}, data selection \citep{entezari2023role}, quality-quantity trade-off  \citep{magar2022data,nguyen2022quality,lee2022dedup,carlini2022quantifying,Gadre2023DataCompIS}, and specified fine-tuning methods \citep{tsai2020transfer,kumar2022fine,wortsman2022robust,goyal2023finetune,xu2023towards}.
+Parameter-efficient transfer learning \citep{he2021towards,oh2023blackvip} is lightweight paradigms by adding adapters \citep{houlsby2019parameter}, low rank approximation \citep{hu2021lora}, or prompt tuning \citep{liu2022p,liu2021p}.
+However, they all assume the availability of pre-trained models while we deal with black-box models.
+They also do not consider the noise in pre-training data.
+
+
+
+\section{Conclusion}
+
+
+
+We presented \textit{Noisy Model Learning}, a new research direction for understanding and mitigating the effect of label noise in pre-training on downstream tasks. 
+Extensive experiments demonstrate that proper noise in pre-training can benefit in-domain tasks and hurt out-of-domain tasks. 
+We then proposed NMTune to mitigate the malignant effect of noise and improve the generalization performance of various noisy pre-trained models and APIs. 
+While being the first study in this area, the explored models are still relatively small-scale in terms of pre-training, and we only use ResNet-50 for analytical experiments, due to the limited computing resources. 
+We hope our work can inspire more researchers on this important and challenging topic in more practical settings. 
+
+
+

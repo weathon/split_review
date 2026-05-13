@@ -1,0 +1,256 @@
+\title{Value function estimation using conditional diffusion models for control}
+
+\begin{abstract}
+A fairly reliable trend in deep reinforcement learning is that the performance scales with the number of parameters, provided a complimentary scaling in amount of training data. As the appetite for large models increases, it is imperative to address, sooner than later, the potential problem of running out of high-quality demonstrations.
+In this case, instead of collecting only new data via costly human demonstrations or risking a simulation-to-real transfer with uncertain effects, it would be beneficial to leverage vast amounts of readily-available low-quality data. 
+Since classical control algorithms such as behavior cloning or temporal difference learning cannot be used on reward-free or action-free data out-of-the-box, this solution warrants novel training paradigms for continuous control. 
+We propose a simple algorithm called \longmethod{} (\shortmethod), which learns a joint multi-step model of the environment-robot interaction dynamics using a diffusion model. This model can be efficiently learned from state sequences (i.e., without access to reward functions nor actions), and subsequently used to estimate the value of each action out-of-the-box. We show how \shortmethod{} can be used to efficiently capture the state visitation measure for multiple controllers, and show promising qualitative and quantitative results on challenging robotics benchmarks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The success of foundation models~\citep{chowdhery2022palm, touvron2023llama} is often attributed to their size~\citep{kaplan2020scaling} and abundant training data, a handful of which is usually annotated by a preference model trained on human feedback~\citep{ouyang2022training}. Similarly, the robotics community has seen a surge in large multimodal learners~\citep{brohan2023can,stone2023open,driess2023palm}, which also require vast amounts of high-quality training demonstrations. What can we do when annotating demonstrations is prohibitively costly, and the sim2real gap is too large? Recent works show that partially pre-training the controller on large amounts of low-returns data with missing information can help accelerate learning from optimal demonstration~\citep{baker2022video,fan2022minedojo}. 
+A major drawback of these works lies in the compounding prediction error: training a preference model on optimal demonstrations and subsequently using this model in reinforcement learning (RL) or behavior cloning (BC) approaches includes both the uncertainty from the preference bootstrapping, as well as the RL algorithm itself. Instead, we opt for a different path: decompose the value function, a fundamental quantity for continuous control, into components that depend only on states, only on rewards, and only on actions. These individual pieces can then be trained separately on different subsets of available data, and re-combined together to construct a value function estimate, as shown in later sections.
+
+Factorizing the value function into dynamics, decision and reward components poses a major challenge, since it requires disentangling the non-stationarity induced by the controller from that of the dynamical system. Model-based approaches address this problem by learning a differentiable transition model of the dynamic system, through which the information from the controller can be propagated~\citep{yu2020mopo, argenson2020model, kidambi2020morel, yu2021combo}. While these approaches can work well on some benchmarks, they can be complex and expensive: the model must predict high-dimensional observations, and determining the value of an action may require unrolling the model for multiple steps into the future.
+
+In this paper, we show how we can estimate the environment dynamics in an efficient way while avoiding the dependence of model-based rollouts on the episode horizon. The model learned by our method \emph{(1)} does not require predicting high-dimensional observations at every timestep, \emph{(2)} directly predicts the future state without the need of autoregressive unrolls and \emph{(3)} can be used to estimate the value function without requiring expensive rollouts or temporal difference learning, nor does it need action or reward labels during the pre-training phase. Precisely, we learn a generative model of the discounted state occupancy measure, i.e. a function which takes in a state, action and timestep, and returns a future state proportional to the likelihood of visiting that future state under some fixed policy. This occupancy measure has a resemblance to successor features~\citep{dayan1993improving}, and can be seen as its generative, normalized version. By scoring these future states by the corresponding rewards, we form an unbiased estimate of the value function.  We name our proposed algorithm \longmethod{} (\shortmethod). Because~\shortmethod{} represents multi-step transitions implicitly, it avoids having to predict high-dimensional observations at every timestep and thus scales to long-horizon tasks with high-dimensional observations. Using the same algorithm, we can handle settings where reward-free and action-free data is provided, which cannot be directly handled by classical TD-based methods. Specifically, the generative model can be pre-trained on sequences of states without the need for reward or action labels, provided that some representation of the data generating process (i.e., logging policy) is known.
+
+We highlight the strengths of~\shortmethod{} both qualitatively and quantitatively on challenging robotic tasks, and show how generative models can be used to accelerate \emph{tabula rasa} learning.
+
+
+
+
+\section{Preliminaries}
+
+
+\paragraph{Reinforcement learning}
+Let $M$ be a Markov decision process (MDP) defined by the tuple $M=\langle \cS,S_0,\cA,\cT, r, \gamma \rangle$, where $\cS$ is a state space, $S_0\subseteq \cS$ is the set of starting states, $\cA$ is an action space, $\cT=p(\cdot|s_t,a_t):\cS\times \cA \to \Delta(\cS)$ is a one-step transition function\footnote{$\Delta(\cX)$ denotes the entire set of distributions over the space $\cX$.}, $r:\cS\times \cA \to [r_\text{min},r_\text{max}]$ is a reward function and $\gamma\in [0,1)$ is a discount factor. The system starts in one of the initial states $s_0\in S_0$. At every timestep $t>0$, the policy $\pi:\cS \to \Delta(\cA)$ samples an action $a_t\sim \pi(\cdot|s_t)$. The environment transitions into a next state $s_{t+1} \sim \cT(\cdot|s_t,a_t)$ and emits a reward $r_t=r(s_t,a_t)$. The aim is to learn a Markovian policy $\pi(a \mid s)$ that maximizes the return, defined as discounted sum of rewards, over an episode of length $H$:
+\begin{equation}
+    \max_{\pi\in \Pi} \E_{p^\pi_{0:H},S_0}\left[\sum_{t=0}^H \gamma^t r(s_t, a_t) \right],
+    \label{eq:rl_maximize_rewards}
+\end{equation}
+where $p^\pi_{t:t+K}$ denotes the joint distribution of $\{s_{t+k},a_{t+k}\}_{k=1}^K$ obtained by rolling-out $\pi$ in the environment for $K$ timesteps starting at timestep $t$. To solve~\cref{eq:rl_maximize_rewards}, value-based RL algorithms estimate the future expected discounted sum of rewards, known as the \emph{value function}:
+\begin{equation}
+    Q^\pi(s_t,a_t)=\mathbb{E}_{p_t^\pi}\left[\sum_{k=1}^{H}\gamma^{k-1}r(s_{t+k},a_{t+k})|s_t,a_t \right],
+    \label{eq:q_value}
+\end{equation}
+for $s_t\in \cS,a_t\in \cA$, and $V^\pi(s_t)=\mathbb{E}_\pi[Q(s_t,a_t)]$. Alternatively, the value function can be written as the expectation of the reward over the discounted occupancy measure:
+\begin{align}
+    Q^\pi(s_t,a_t)=\frac{1-\gamma^{H-t}}{1-\gamma}\mathbb{E}_{s,a\sim \rho^\pi(s_t,a_t),\pi(s)}[r(s,a)]
+     \label{eq:occupancy_q_value}
+\end{align}
+where 
+$\rho^\pi(s|s_t,a_t)=(1-\gamma)\sum_{\Delta t=1}^H\gamma^{\Delta t -1}\rho^\pi(s|s_t,a_t,\Delta t,\pi)$ and $\rho^\pi(s|s_t,a_t,\Delta t,\pi)=\mathbb{P}[S_{t+\Delta t}=s|s_t,a_t;\pi]$ as defined in~\cite{janner2020generative}.
+
+This decomposition of the value function has been shown to be useful in previous works based on the successor representation~\citep{dayan1993improving,barreto2016successor} and $\gamma$-models~\citep{janner2020generative}, and we will leverage this formulation to build a diffusion-based estimate of the value function below.
+
+\paragraph{Diffusion models}
+Diffusion models form a class of latent variable models~\citep{sohl2015deep} which represent the distribution of the data as an iterative process: 
+\begin{align}
+\vec{x}_0\sim p(\vec{x}_0)=\mathbb{E}_{p_{\theta}(\vec{x}_{1:T})}[p_{\theta}(\vec{x}_0|\vec{x}_{1:T})]=p(\vec{x}_T)\prod_{t_d=1}^Tp_\theta(\vec{x}_{t_{d-1}}|\vec{x}_{t_d}),
+\end{align}
+for $T$ latents $\vec{x}_{1:T}$ with conditional distributions parameterized by $\theta$. 
+The joint distribution of data and latents factorizes into a Markov Chain with parameters
+\begin{equation}
+    p_{\theta}(\vec{x}_{t_{d-1}}|x_{t_d})=\mathcal{N}(\mu_\theta(\vec{x}_{t_d},t_d), \;\Sigma_\theta(\vec{x}_{t_d}, t_d))), \quad \vec{x}_T~\sim \mathcal{N}(\mathbf{0}, \mat{I})
+\end{equation}
+which is called the \emph{reverse} process. The posterior $q(\vec{x}_{1:T}|\vec{x}_0)$, called the \emph{forward} process, typically takes the form of a Markov Chain with progressively increasing Gaussian noise parameterized by variance schedule $\beta(t_d)$:
+\begin{equation}
+    q(\vec{x}_{1:T}|\vec{x}_0)=\prod_{t_d=1}^Tq(\vec{x}_{t_d}|\vec{x}_{t_d-1}), \quad q(\vec{x}_{t_d}|\vec{x}_{t_{d-1}}) = \mathcal{N}(\sqrt{1-\beta(t_d)}\vec{x}_{t_{d-1}}, \;\beta(t_d)\mat{I}))
+\end{equation}
+where $\beta$ can be either learned or fixed as hyperparameter. The parameters $\theta$ of the reverse process are found by minimizing the variational upper-bound on the negative log-likelihood of the data:
+\begin{equation}
+    \mathbb{E}_{q}\bigg[-\log p(\vec{x}_T)-\sum_{{t_d}=1}^T\log\frac{p_\theta(\vec{x}_{{t_d}-1}|\vec{x}_{t_d})}{q(\vec{x}_{t_d}|\vec{x}_{{t_d}-1})}\bigg]
+    \label{eq:variational_nll}
+\end{equation}
+Later works, such as Denoising Diffusion Probabilistic Models~\citep[DDPM,][]{ho2020denoising} make specific assumptions regarding the form of $p_\theta$, leading to the following simplified loss with modified variance scale $\bar{\alpha}(t_d)=\prod_{s=1}^{t_d}(1-\beta(s))$:
+\begin{equation*}
+    \ell_\text{Diffusion}=\mathbb{E}_{\vec{x}_0, t_d, \epsilon}\bigg[|| \epsilon-\epsilon_\theta(\sqrt{\bar{\alpha}(t_d)}\vec{x}_0+\sqrt{1-\bar{\alpha}(t_d)}\epsilon,t_d)||_2^2\bigg],
+\end{equation*}
+\begin{equation}\vec{x}_0\sim q(\vec{x}_0), \quad t_d\sim \text{Uniform}(1, T),\quad \epsilon\sim \mathcal{N}(\textbf{0}, \mat{I})
+    \label{eq:diffusion_loss}
+\end{equation}
+by training a denoising network $\epsilon_\theta$ to predict  noise $\epsilon$ from a corrupted version of $\vec{x}_0$ at timestep $t_d$. Samples from $p(\vec{x}_0)$ can be generated by following the reverse process:
+\begin{equation}
+    \vec{x}_{t_d-1} = \frac{1}{\sqrt{\alpha(t_d)}}\bigg(\vec{x}_{t_d}-\frac{1-\alpha(t_d)}{\sqrt{1-\bar{\alpha}}} \epsilon_\theta(\vec{x}_{t_d}, t_d)\bigg) + \sigma_{t_d}\vec{z}, \quad \vec{x}_T\sim \mathcal{N}(\mathbf{0}, \mat{I}), \vec{z}\sim \mathcal{N}(\mathbf{0}, \mat{I}).
+\end{equation}
+
+
+
+\section{Methodology}
+
+
+Through the lens of~\cref{eq:occupancy_q_value}, the value function can be decomposed into three components: (1) occupancy measure $\rho^\pi(s)$, dependent on \textbf{states} and \textbf{policy}, (2) reward model $r(s,a)$ dependent on \textbf{states} and \textbf{actions} and (3) policy representation $\phi(\pi)$, dependent on the \textbf{policy}. Equipped with these components, we could estimate the value of any given policy in a zero-shot manner. However, two major issues arise:
+\begin{itemize}
+    \item For offline\footnote{Online training can use implicit conditioning by re-collecting data with the current policy $\pi$} training, $\rho^\pi$ has to be \emph{explicitly} conditioned on the target policy, via the policy representation $\phi(\pi)$.
+    \item Maximizing $Q(s,a,\phi(\pi))$ directly as opposed to indirectly via $r(s,a)+\gamma \mathbb{E}[V(s',\phi(\pi))]$ is too costly due to the large size of diffusion denoising networks.
+\end{itemize}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/model_diagram-01.png}
+    \caption{The three crucial components of \shortmethod{}: \textit{(left)} construct tuples $(s_t,s_{t+1},s_{t+\Delta t})$ for training the diffusion model; \textit{(middle)} architecture of the diffusion model, which takes in future noisy state $x$, current state $s_t$, time offset $\Delta t$, policy embedding $\phi(\pi)$ and diffusion timestep $t_d$ and processes them using the Perceiver I/O architecture~\citep{jaegle2021perceiver} to predict the noise;  \textit{(right)} Sampling mechanism based on DPPM~\citep{ho2020denoising} is used with a reward model to estimate the value function}
+    \label{fig:model_diagram}
+\end{figure}
+
+If both challenges are mitigated, then the value function $V^\pi(s_t)$ can be estimated by first sampling a collection of $n$ states from the learned diffusion model $s_{t+\Delta t,1},..,s_{t+\Delta t,n}\sim \rho^\pi(s_t)$ and then evaluating the reward predictor at those states $\sum_{i=1}^nr(s_{t+\Delta t,i},\pi(s_{t+\Delta t,i}))\propto V^\pi(s_t)$. A similar result can be derived for the state-action value function by training a state-action conditionned diffusion model $\rho^\pi(s_t,a_t)$, from which a policy can be decoded using e.g. the information projection method such as in~\cite{haarnoja2018soft}.
+
+\subsection{Challenge 1: Off-policy evaluation through conditioning}\label{sec:challenge1}
+Explicit policy conditioning has (and still remains) a hard task for reinforcement learning settings. Assuming that the policy $\pi$ has a lossless finite-dimensional representation $\phi(\pi)$, passing it to an ideal value function network as $Q(s,a,\phi(\pi))$ could allow for zero-shot policy evaluation. That is, given two policy sets $\Pi_1, \Pi_2\subseteq \Pi$, training $Q(s,a,\phi(\pi))$ on $\{s,a,\phi(\pi)\}, \;\pi\in \Pi_1$ and then swapping out $\phi(\pi)$ for $\phi(\pi')$ where $\pi'\in \Pi_2$ would immediately give the estimate of $Q^{\pi'}$.
+
+We address this issue by studying sufficient statistics of $\pi$. Since the policy is a conditional distribution, it is possible to use a kernel embedding for conditional distributions such as a Reproducing Kernel Hilbert Space~\citep{song2013kernel,mazoure2022low}, albeit it is ill-suited for high-dimensional non-stationary problems. Recent works have studied using the trajectories $\{s_{i},a_i\}_i^n$ as a sufficient statistic for $\pi$ evaluated a \emph{key} states $s_1,..,s_n$~\cite{harb2020policy}. Similarly, we studied two policy representations:
+\begin{enumerate}
+    \item \textbf{Scalar:} Given a countable policy set $\Pi$ indexed by $i=1,2,..$, we let $\phi(\pi)=i$. One example of such sets is the value improvement path, i.e. the number of training gradient steps performed since initialization.
+    \item \textbf{Sequential:} Inspired by~\cite{song2013kernel}, we embed $\pi$ using its rollouts in the environment $\{s_{i},a_i\}_i^n$. In the case where actions are unknown, then the sequence of states can be sufficient, under some mild assumptions\footnote{One such case is MDPs with deterministic dynamics, as it allows to figure out the corresponding action sequence.}, for recovering $\pi$.
+\end{enumerate}
+Both representations have their own advantages: scalar representations are compact and introduce an ordering into the policy set $\Pi$, while sequential representations can handle cases where no natural ordering is present in $\Pi$ (e.g. learning from offline data).
+
+\subsection{Challenge 2. Maximizing the value with large models}
+In domains with continuous actions, the policy is usually decoded using the information projection onto the value function estimate (see~\cite{haarnoja2018soft}) by minimizing
+\begin{equation}
+    \ell_\text{Policy}(\phi)=\mathbb{E}_{s\sim \cD}\bigg[\text{KL}\bigg(\pi_\phi(\cdot|s)||\frac{e^{Q^{\pi_\text{old}}(s,\cdot)}}{\sum_{a'}e^{Q^{\pi_\text{old}}(s,a')}}\bigg)\bigg]\;.
+    \label{eq:policy_loss}
+\end{equation}
+
+However, (a) estimating $Q^*(s,a)$ requires estimation of $\rho^*(s,a)$ which cannot be pre-trained on videos (i.e. state sequences) and (b) requires the differentiation of the sampling operator from the $\rho$ network, which, in our work, is parameterized by a large generative model. The same problem arises in both model-free~\citep{haarnoja2018soft} and model-based methods~\citep{hafner2023mastering}, where the networks are sufficiently small that the overhead is minimal. In our work, we circumvent the computational overhead by unrolling one step of Bellman backup
+\begin{equation}
+    Q^\pi(s_t,a_t) = r(s_t,a_t)+\gamma\mathbb{E}_{s_{t+1}}[V^\pi(s_{t+1})]
+\end{equation}
+and consequently
+\begin{equation}
+    \nabla_{a_t} Q^\pi(s_t,a_t) = \nabla_{a_t} r(s_t,a_t),
+\end{equation}
+allowing to learn $\rho^\pi(s)$ instead of $\rho^\pi(s,a)$ and using it to construct the state value function.
+
+\subsection{Practical algorithm}
+
+As an alternative to classical TD learning, we propose to separately estimate the occupancy measure $\rho$, using a denoising diffusion model and the reward $r$, using a simple regression in symlog space~\citep{hafner2023mastering}. While it is hard to estimate the occupancy measure $\rho$ directly, we instead learn a denoising diffusion probabilistic model $\epsilon_\theta$~\citep[DDPM,][]{ho2020denoising}, which we call the \emph{de-noising network}. Since we know what the true forward process looks like at timestep $t_d$, the de-noising network $\epsilon_\theta: \cS\to [-1,1]$ is trained to predict the input noise.
+
+The high-level idea behind the algorithm is as follows:
+\begin{enumerate}
+    \item Pre-train a diffusion model on sequences of states $s_1,..,s_H$ and, optionally, policy embeddings $\phi(\pi)$. This step can be performed on large amounts of demonstration videos without the need of any action nor reward labels. The policy embedding $\phi(\pi)$ can be chosen to be any auxiliary information which allows the model to distinguish between policies\footnote{In MDPs with deterministic transitions, one such example is $s_1,..,s_t$.}. This step yields $\rho(s_t;\phi(\pi))$.
+    \item Using labeled samples, train a reward predictor $r(s,a)$. This reward predictor will be used as importance weight to score each state-action pair generated by the diffusion model.
+    \item Sample a state from $\rho(\cdot,\phi(\pi))$ and score it using $r(s_t, \pi(s_t))$, thus obtaining an estimate proportional to the value function of policy $\pi$ at state $s_t$.
+    \item \emph{Optionally:} Maximize the resulting value function estimator using the information projection of $\pi$ onto the polytope of value functions (see~\cref{eq:policy_loss}) and decoding a new policy $\pi'$. If in the online setting, use $\pi'$ to collect new data in the environment and update $\phi(\pi)$ to $\phi(\pi')$.
+\end{enumerate}
+\begin{figure}[t]
+\begin{algorithm}[H]
+\SetAlgoLined
+\SetKwInOut{Input}{Input}
+ \SetKwInOut{Output}{Output}
+ \Input{Dataset $\mathcal{D} \sim \mu$, $\epsilon_\theta,r_\psi,\pi_\phi$ networks, number of Monte-Carlo samples $n$}
+ \tcc{Normalize states from $\cD$ to lie in $[-1,1]$ interval}
+ $\cD[s]\leftarrow \frac{\cD[s]-\min\cD[s]}{\max\cD[s]-\min\cD[s]}$  \;
+ \For{epoch $j=1,2,..,J$}{
+ \For{minibatch $\cB\sim \mathcal{D}$}{
+    \tcc{Update diffusion model $\rho_\theta$ using~\cref{eq:diffusion_loss}}
+    Update $\epsilon_\theta$ using $\nabla_{\theta}\ell_\text{Diffusion}(\theta^{(j)})$  over $s_{t+\Delta t}$\;
+    \tcc{Update the reward estimator}
+    Update $r_\psi$ using $\nabla_\psi \mathbb{E}_{s,a}\bigg[||r_\psi(s,a)-r(s,a)||^2_2\bigg]$ \;
+    \tcc{Estimate V}
+    $V(s_{t+1})\leftarrow \frac{1-\gamma^{H-t-1}}{1-\gamma}\sum_{i=1}^nr(s_{t+1+\Delta t,i},\pi_\phi(s_{t+1+\Delta t,i}))$, $s_{t+1+\Delta t}\overset{\text{DDPM}}{\sim} \rho_\theta(s_{t+1})$\;
+    \tcc{Estimate Q}
+    $Q(s_t,a_t)\leftarrow r(s_t,a_t)+\gamma V(s_{t+1})$ \;
+    \tcc{Decode policy from Q-function using~\cref{eq:policy_loss}}
+    Update $\pi_\phi$ using $\nabla_{\phi}\ell_\text{Policy}(\phi)$ and $Q(s_t,a_t)$ \;
+ }
+ }
+ \caption{\longmethod{} (\shortmethod)}
+ \label{alg:offline_algo}
+\end{algorithm}
+\end{figure}
+
+Algorithm~\ref{alg:offline_algo} describes the exact training mechanism, which first learns a diffusion model and maximizes its reward-weighted expectation to learn a policy suitable for control. Note that the method is suitable for both online and offline reinforcement learning tasks, albeit conditioning on the policy representation $\phi(\pi)$ has to be done explicitly in the case of offline RL.
+
+\shortmethod{} can also be shown to learn an occupancy measure which corresponds to the normalized successor features~\citep{dayan1993improving} that allows sampling future states through the reverse diffusion process.
+
+
+
+
+\section{Experiments}
+
+\subsection{Mountain Car}
+Before studying the behavior of \shortmethod{} on robotic tasks, we conduct experiments on the continuous Mountain Car problem, a simple domain for analysing sequential decision making methods. We trained \shortmethod{} for 500 gradient steps until convergence, and computed correlations between the true environment returns, the value function estimator based on the diffusion model, as well as the reward prediction at states sampled from $\rho^\pi$.~\cref{fig:mountain_car_regplot} shows that all three quantities exhibit strong positive correlation, even though the value function estimator is not learned using temporal difference learning.
+
+\begin{figure}[htbp]
+  \centering
+
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{Figures/mountaincar_qq_returns_vs_Q.png}
+    \label{fig:returns_vs_Q}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{Figures/mountaincar_qq_rG_vs_Q.png}
+    \label{fig:rG_vs_Q}
+  \end{subfigure}
+    \hfill
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{Figures/mountaincar_curves.png}
+    \label{fig:mountaincar_curves}
+  \end{subfigure}
+  \caption{\textit{(Left)} Pairwise plot of normalized returns versus the value function estimated by~\shortmethod{}, \textit{(Middle)} Pairwise plot of normalized value function versus normalized reward at future state and (Right) normalized value function and normalized environment returns versus training gradient steps.}
+  \label{fig:mountain_car_regplot}
+\end{figure}
+\subsection{Maze 2d}
+We examine the qualitative behavior of the diffusion model of \shortmethod{} on a simple locomotion task inside mazes of various shapes, as introduced in the D4RL offline suite~\citep{fu2020d4rl}.  In these experiments, the agent starts in the lower left of the maze and uses a waypoint planner with three separate goals to collect data in the environment (see \cref{fig:policy_conditionning_maze2d}(a) and \cref{fig:policy_conditionning_maze2d}(c) for the samples of the collected data).  The diffusion model of \shortmethod{} is trained on the data from the three data-collecting policies, using the scalar policy conditioning described in \cref{sec:challenge1}.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/maze2d_samples.png}
+    \caption{\textit{(a, c)} Ground truth data distribution for the u-maze and large maze from the Maze 2d environment. \textit{(b, d)} Conditional distribution of future states $s_{t+\Delta t}|s_0,\phi(\pi_i)$ given the starting state in the bottom left corner and the policy index. The diffusion model correctly identifies and separates the three state distributions in both mazes.}
+    \label{fig:policy_conditionning_maze2d}
+\end{figure}
+
+\cref{fig:policy_conditionning_maze2d} shows full trajectories sampled by conditioning the diffusion model on the start state in the lower left, the policy index, and a time offset.  \cref{fig:trajectory_samples_maze2d} shows sampled trajectories as the discount factor $\gamma$ increases, leading to sampling larger time offsets.  
+
+The results show the ability of the diffusion model to represent long-horizon data faithfully, and highlight some benefits of the approach.  \shortmethod{} can sample trajectories without the need to evaluate a policy or specify intermediate actions.  Because \shortmethod{} samples each time offset independently, there is also no concern of compounding model error as the horizon increases. Additionally, the cost of predicting $s_{t+k}$ from $s_t$ is $\cO(1)$ for \shortmethod{}, while it is $\mathcal{O}(k)$ for classical autoregressive models.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/maze2d_gamma.png}
+    \caption{Samples from the learned diffusion model with increasing values of discount factor $\gamma$, with a starting state in the lower left of the maze. As $\gamma$ increases, the model generates samples further along the trajectory leading to the furthest point of the maze.  Ground truth data shown in \cref{fig:policy_conditionning_maze2d}(a) }
+    \label{fig:trajectory_samples_maze2d}
+\end{figure}
+
+\subsection{PyBullet}
+ We compare \shortmethod{} to behavior cloning and Conservative Q-learning~\citep{kumar2020conservative}, two strong offline RL baselines. We also plot the average normalized returns of each dataset to facilitate the comparison over 5 random seeds. Medium dataset contains data collected by medium-level policy and mixed contains data from SAC~\citep{haarnoja2018soft} training.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\linewidth]{Figures/pybullet_hist.png}
+    \caption{Normalized returns obtained by \shortmethod{}, behavior cloning, CQL on 4 challenging robotic tasks from the PyBullet offline suite, together with average returns in each dataset (\textit{Data} in the plot).}
+    \label{fig:pybullet_hist}
+\end{figure}
+
+\cref{fig:pybullet_hist} highlights the ability of \shortmethod{} to match and sometimes outperform the performance of classical offline RL algorithms, especially on data of lower quality, e.g. coming from a random policy. In domains where online rollouts can be prohibitively expensive, the ability to learn from low-quality, incomplete offline demonstrations is a strength of \shortmethod{}. This benchmark also demonstrates the shortcomings of scalar policy representation, which is unknown for a given offline dataset, and also doesn't scale well when the number of policies is large (e.g. number of gradient steps $j$ in logging policy $\mu^{(j)}$). For this reason, we opted for a sequential policy representation.
+
+
+\section{Related works}
+
+
+\paragraph{Offline pre-training for reinforcement learning} Multiple approaches have tried to alleviate the heavy cost of training agents \emph{tabula rasa} by pre-training some parts of the system offline. For example, inverse dynamics models which predict the action leading from the current state to the next state have seen success in complex domains such as Atari~\citep{schwarzer2021pretraining}, as well as Minecraft~\citep{baker2022video, fan2022minedojo}. Return-conditioned sequence models have also seen a rise in popularity, specifically due to their ability to learn performance-action-state correlations over long horizons~\citep{lee2022multi}. 
+\paragraph{Unsupervised reinforcement learning}
+Using temporal difference~\citep{sutton2018reinforcement} for policy iteration or evaluation requires all data tuples to contain state, action and reward information. However, in some real-world scenarios, the reward might only be available for a small subset of data (e.g. problems with delayed feedback~\citep{howson2021delayed}). In this case, it is possible to decompose the value function into a reward-dependent and dynamics components, as was first suggested in the successor representation framework~\citep{dayan1993improving,barreto2016successor}. More recent approaches~\citep{janner2020generative,eysenbach2020c,eysenbach2022contrastive,mazoure2022contrastive} use a density model to learn the occupancy measure over future states for each state-action pair in the dataset. However, learning an explicit multi-step model such as~\citep{janner2020generative} can be unstable due to the bootstrapping term in the temporal difference loss, and these approaches still require large amounts of reward and action labels. While our proposed method is a hybrid between model-free and model-based learning, it avoids the computational overhead incurred by classical world models such as Dreamer~\citep{hafner2023mastering} by introducing constant-time rollouts. The main issue with infinite-horizon models is the implicit dependence of the model on the policy, which imposes an upper-bound on the magnitude of the policy improvement step achievable in the offline case. Our work solves this issue by adding an explicit policy conditioning mechanism, which allows to generate future states from unseen policy embeddings.
+
+\paragraph{Diffusion models}
+Learning a conditional probability distribution over a highly complex space can be a challenging task, which is why it is often easier to instead approximate it using a density ratio specified by an inner product in a much lower-dimensional latent space. To learn an occupancy measure over future states without passing via the temporal difference route, one can use denoising diffusion models to approximate the corresponding future state density under a given policy. Diffusion has previously been used in the static unsupervised setting such as image generation~\citep{ho2020denoising} and text-to-image generation~\citep{rombach2022high}. Diffusion models have also been used to model trajectory data for planning in small-dimensional environments~\citep{janner2022planning}. However, no work so far has managed to efficiently predict infinite-horizon rollouts.
+
+
+
+\section{Discussion}
+
+In this work, we introduced a simple model-free algorithm for learning reward-maximizing policies, which can be efficiently used to solve complex robotic tasks. \longmethod{} (\shortmethod) avoids the pitfalls of both temporal difference learning and autoregressive model-based methods by pre-training an infinite-horizon transition model from state sequences using a diffusion model. This model does not require any action nor reward information, and can then be used to construct the state-action value function, from which one can decode the optimal action. \shortmethod{} fully leverages the power of diffusion models to generate states far ahead into the future without intermediate predictions. Our experiments demonstrate that \shortmethod{} matches and sometimes outperforms strong offline RL baselines on realistic robotic tasks based on PyBullet, and opens an entire new direction of research.
+
+
+\section{Limitations}
+
+The main limitation of our method is that it operates directly on observations instead of latent state embeddings, which requires tuning the noise schedule for each set of tasks, instead of using a unified noise schedule similarly to latent diffusion models~\citep{Rombach_2022_CVPR}. Another limitation is the need to explicitly condition the rollouts from the diffusion model on the policy, something that single-step models avoid. Finally, online learning introduces the challenge of capturing the non-stationarity of the environment using the generative model $\rho$, which, in itself, is a hard task.
+
+
+
+

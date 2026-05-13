@@ -1,0 +1,372 @@
+\title{Training Task Experts through Retrieval Based Distillation}
+
+\begin{abstract}
+One of the most reliable ways to create deployable models for specialized tasks is to obtain an adequate amount of high-quality task-specific data. However, for specialized tasks, often such datasets do not exist.
+Existing methods address this by creating such data from large language models (LLMs) and then distilling such knowledge into smaller models. However, these methods are limited by the quality of the LLMs output, and tend to generate repetitive or incorrect data. 
+In this work, we present \textbf{Re}trieval \textbf{Base}d Distillation (\methodname), a method that first retrieves data from rich online sources and then transforms them into domain-specific data. This method greatly enhances data diversity. Moreover, \methodname generates Chain-of-Thought reasoning and distills the reasoning capacity of LLMs. We test our method on 4 benchmarks and results show that our method significantly improves performance by up to \textbf{7.8\%} on SQuAD, \textbf{1.37\%} on MNLI, and \textbf{1.94\%} on BigBench-Hard.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+How can we effectively obtain high-quality models for specific tasks?
+Large Language Models (LLMs) have shown impressive generalization abilities and can, to some extent, perform specific tasks using only the task instructions and few-shot in-context examples~\cite{GPT4TR, bubeck2023sparks, llama3modelcard}. 
+However, these models can contain tens or hundreds of billions of parameters, making them computationally expensive to use in practice, and in many cases these models underperform smaller models fine-tuned on task-specific data \cite{mosbach2023few, bertsch2024context}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.45\textwidth]{images/teaser.pdf}
+\caption{\textbf{Motivation of \methodname.} Previous methods either uses manually annotated data or use LLMs to generate synthetic data. This is either too costly or lacks diversity/quality. \methodname retrieves data from existing examples then uses an LLM to create new domain-specific data based on the retrieved content. 
+}
+\label{fig:teaser}
+\end{figure}
+
+One bottleneck to creating such fine-tuned models is the lack of large corpora of task-specific data \cite{villalobos2022will}.
+Therefore, a key issue for this problem is how to obtain adequate high quality data that meets the user's need.
+Recent works have used distillation from LLMs to generate synthetic training data~\cite{ye2022zerogen, ye2022progen, gao2023selfguided, jung2024impossible, prompt2model, yu2023large, honovich2022unnatural, yu2023regen, wang2023lets}. These methods use the user's instruction and a small number of in-context examples as the prompt to let LLMs generate labeled, domain-specific data. These data are then used to finetune the models to be deployed. Such methods have shown potential to improve a small model's ability to follow a specific set of instructions.
+However, these methods often suffer from diversity issues: the generated examples tend to be very similar, reducing performance of the fine-tuned models \cite{ye2022zerogen, ye2022progen}. 
+In response to these challenges, we propose \textbf{Re}trieval \textbf{Base}d Distillation (\methodname). As shown in Figure~\ref{fig:teaser}, \methodname is a framework that first retrieves data from an abundant and reliable labeled data source, then transforms them into the content and format necessary for the user's task. This data is then used to train a domain-specific model. Initially, \methodname scrapes online data and encodes them into a large datastore; Then, \methodname uses the user's instruction and the user's provided examples to retrieve the most relevant items from the large datastore. Finally, using an LLM, \methodname transforms the retrieved data point into a data that contains a query and an answer field for the specific task, this includes transforming the content and transforming the format.
+Different from previous methods, \methodname can effectively retrieve data from multiple dataset sources, enhancing the data's content diversity and avoids the issue where one or a few datasets do not contain sufficient information to fulfill the task's requirements. Moreover, \methodname adds a Chain-of-Thought transformation phase \cite{Wei2022ChainOT} where the LLM transforms the output into a step-by-step reasoning. This enables the small model to be trained on the reasoning generation by the large model, which is especially useful for reasoning tasks~\cite{suzgun2022challenging}.
+
+We test \methodname on a variety of benchmarks, including the BBH \cite{suzgun2022challenging} benchmark, the MNLI \cite{williams2018broadcoverage} benchmark, SQuAD \cite{rajpurkar2016squad}, and MCoNaLa code generation \cite{wang-etal-2023-mconala}. We found that \methodname improves the performance on BBH for \textbf{1.94\%}, on SQuAD for \textbf{7.8\%}, and on MNLI for \textbf{1.37\%} over previous methods.
+Our method suggests the benefit of using data retrieved from multiple sources to train a specific model.
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{images/pipeline_rebase.pdf}
+\caption{\textbf{Pipeline of \methodname.} First, \methodname iterates over a large number of datasets available on Hugging Face Datasets and encodes each item in this datasets to build a large datastore. Then, \methodname uses the instruction and few-shot examples provided by the new task to retrieve the relevant items from the datastore. Finally, \methodname uses an LLM to generate new data for the target task from the retrieved data.}
+\label{fig:figure_pipeline}
+\end{figure*}
+
+
+\section{Problem Formulation}
+
+We formulate the problem as follows:
+\textbf{Input:} The input contains an instruction of a task and few-shot examples. 
+\textbf{Output:} The output contains a new dataset with the field (query, answer) that could be used to directly finetune a model. It also contains a task-expert model trained for this task.
+\textbf{Objective:}
+Our high-level objective is to generate a high-quality dataset that effectively boosts a model's performance on this task. Specifically, we assume that we have access to the abundant existing datasets online and access to LLMs. Our goal is to effectively harness the ability of LLMs and use the rich content of the existing datasets to create a high-quality dataset for the new task. Then use this dataset to train a task-expert model.
+
+
+
+\section{Method}
+
+In this section, we introduce the steps of \methodname: datastore construction, datastore retrieval, and dataset transformation. An overview of our method pipeline is shown in Figure~\ref{fig:figure_pipeline}.
+\subsection{Datastore Construction}
+Our datastore construction process begins with collecting datasets from Hugging Face Datasets \cite{Lhoest2021DatasetsAC}, which consists of over 75,000 datasets.
+A Hugging Face dataset contains a dataset description that describes the purpose of the dataset. It also contains multiple rows entries and columns. Each row represents a data entry, and each column represents a specific attribute of that data entry. (eg. row\_id, content, source\_url, label)
+
+For each row in these datasets, we do not directly encode the entire row entry because some attributes are redundant and may introduce noise (eg. attributes such as \texttt{row\_id} or \texttt{url} are often not useful.)
+Instead, we encode each column separately. Specifically, for the \(j\)th row entry in dataset \(i\), 
+we iterate through each column \(c\) in the row entry and encode it into a vector:
+\[
+  v_{i,j,c} =
+\texttt{{Encode}}\left(\texttt{{column\_value}}\right).
+\]
+This vector has a unique identifier in the format:
+\[
+\left\{ \texttt{{dataset\_id}},
+\texttt{{row\_num}}, \texttt{{col\_name}} \right\}
+\]
+We then add the key-value pair \(((i,j,c),v_{i,j,c})\) to the datastore.
+Additionally, for each dataset \(i\), we encode its corresponding dataset description:
+\[
+v_{i} = \texttt{{Encode}}\left(\texttt{{dataset\_description}}\right).
+\]
+This value is identified by the dataset id \(i\).
+We put the key-value pair \(((i),v_{i})\) into the datastore.
+
+\subsection{Datastore Retrieval}
+In the datastore 
+retrieval phase, our goal is to find relevant data across the different datasets. This process involves several steps to ensure the selection of the most relevant data.
+
+First, we encode the user-provided instructions into 
+\(v_{I}\) using the same encoder used for the datastore. Then, we encode the user-provided examples. Each example should contain two fields: The query \(q\) and the answer \(ans\). We encode them separately into \(v_{q}\) and \(v_{ans}\).
+
+Then, for each item \(v_{i,j,c}\) in the datastore, we compute a cosine similarity between \(v_{q}\) and \(v_{i,j,c}\) to obtain a query score \(\text{S}_{\text{query}}^{(i,j,c)}\) for the item \((i,j,c)\). Similarly, we compute a cosine similarity between \(v_{ans}\) and \(v_{i,j,c}\) to obtain an answer score \(\text{S}_{\text{ans}}^{(i,j,c)}\) for the key \((i,j,c)\).
+If the user provides multiple examples,
+denote \( Q_{\text{query}} \) and \( Q_{\text{ans}} \) as the sets of encoded vectors for all user-provided query and answer examples, respectively. 
+Then, for each item \(v_{i,j,c}\) in the datastore, the query and answer scores for the key \((i,j,c)\) are calculated as:
+\begin{equation*}
+\text{S}_{\text{query}}^{(i,j,c)} = \frac{1}{|Q_{\text{query}}|} \sum_{q \in Q_{\text{query}}} \text{cos\_sim}(q, v_{i,j,c})
+\end{equation*}
+
+\[
+\text{S}_{\text{ans}}^{(i,j,c)}  = \frac{1}{|Q_{\text{ans}}|} \sum_{q \in Q_{\text{ans}}} \text{cos\_sim}(q, v_{i,j,c})
+\]
+
+Next, for each row \((i,j)\), we define the query score and answer score for the row entry as the maximum query and answer scores across all columns:
+
+\[
+\text{S}_{\text{query}}^{(i,j)} = \max_c \text{S}_{\text{query}}^{(i,j,c)}
+\]
+
+\[
+\text{S}_{\text{ans}}^{(i,j)} = \max_c \text{S}_{\text{ans}}^{(i,j,c)}
+\]
+
+Additionally, for each dataset \(i\), we calculate a dataset score based on the cosine similarity between the encoded dataset description \(v_{i}\) and the encoded task instruction \(v_{I}\):
+
+\[
+\text{S}_{\text{dataset}}^{(i)} = \text{cos\_sim}(v_{i}, v_{I})
+\]
+
+The final score for each row \((i,j)\) in the datastore is calculated as the average of its query score, answer score, and dataset score:
+\begin{equation*}
+\text{S}_{\text{final}}^{(i,j)} = \frac{1}{3} (\text{S}_{\text{query}}^{(i,j)} + 
+                                               \text{S}_{\text{ans}}^{(i,j)}+ \text{S}_{\text{dataset}}^{(i)})
+\end{equation*}
+
+Finally, we sort all rows \((i,j)\) based on their final scores in descending order and select the top \( N \) items with the highest scores. Using the selected \((i,j)\) identifiers, we query the original \(j\)th row in dataset \(i\) and retrieve the original rows entry containing all the columns.
+This approach ensures that the selected data is highly relevant to the user's task, considering both the alignment on the user provided examples and the overall dataset context.
+
+\subsection{Data Transformation}
+After retrieving the relevant data, we employ a large language model (LLM) to transform the data into a format and content suitable for the specific task. This transformation process includes the following steps:
+\textbf{1. Salient Field Classification:} The LLM identifies the relevant fields in each retrieved row based on the domain-specific requirements.
+\textbf{2. Content Adaptation:} The LLM transforms the content to align with the target domain, ensuring it meets the specific needs of the task.
+\textbf{3. Chain-of-Thought (CoT) Generation:} For reasoning-intensive tasks, the LLM generates outputs using CoT, providing detailed step-by-step reasoning to enhance the quality and accuracy of the transformed data.
+
+In our experiments, we use Claude 3 Haiku~\cite{claude} as the LLM underlying the dataset transformer due to its competitive performance / cost tradeoff.
+For tasks that require complex reasoning, such as the BIG-Bench Hard tasks, previous works have shown that Chain-of-Thought (CoT)~\cite{Wei2022ChainOT} reasoning can greatly improve the model's performance on reasoning tasks~\cite{suzgun2022challenging} and finetuning on CoT data can further boost the reasoning ability~\cite{chung2024scaling} and can distill the reasoning capacity in LLMs to smaller models~\cite{ho2022large}.
+Therefore, we leverage Chain-of-Thought generation. For these tasks, we prompt the LLM to generate a CoT reasoning followed by the final for the answer part instead of directly generating the final answer.
+The generated CoT data is then used for further training to improve the downstream model's performance as well. We demonstrate the transformation process in Figure \ref{fig:figure2}.
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.73\textwidth]{images/transform_pipeline.pdf}
+\caption{\textbf{Examples of \methodname transformations on BBH.} In the data transformation  stage, \methodname takes in the original full row of the retrieved data and use the content to generate a new data with the field query and answer. The LLM need to identify the necessary fields in the row. For the BBH task, the transformation contains chain-of-thought reasoning.}
+\label{fig:figure2}
+\end{figure}
+Our transformation approach ensures that the transformed data is tailored to the new task in terms of both content and format and can be directly used for further finetuning. This process also incorporates the reasoning process of LLMs and distills such reasoning capacities to the task expert model.
+
+
+\section{Experiments}
+
+In this section, we present our experiment settings, experiment results, analysis, and ablations.
+
+\begin{table*}[h]
+\centering
+\small
+\setlength{\tabcolsep}{2.8pt}
+\begin{tabular}{ll|cc|cc|ccc}
+\toprule
+Model & Data & \textbf{MNLI} & \textbf{MCoNaLa} & \textbf{SQuAD(EM)} & \textbf{SQuAD(F1)}  & \textbf{BBH} & \textit{BBH-NLP} & \textit{BBH-Alg}\\
+\midrule
+Retrieved & Prompt2Model (Synth+Ret) & - & 13.1 & 50.5&63.0 & - & - & -\\
+Claude-Haiku & 3-shots Prompting & 35.15 & 18.0&4.8 & 7.5&73.7 &- &-\\
+GPT-4 & 3-shots Prompting & 87.81 & 41.6 &74.3 &87.1& 83.1&-&-\\
+\midrule
+Llama3-8B & 3-shots Prompting & 44.4 & 28.4 & 43.2& 54.1 & 56.8 &65.3& 50.0\\
+Llama3-8B & ZeroGen &  67.7 & - & 8.0& 28.0 & - & - & - \\
+Llama3-8B & Synthesized & 72.9 & 37.0 & 50.3 & 63.1 & 65.0 & 68.1& 62.5\\
+Llama3-8B & \methodname (Transformed) & \textbf{74.3} & \textbf{38.2} & \textbf{58.1} & \textbf{71.7} & \textbf{66.9} & \textbf{69.5}& \textbf{64.9} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Main quantatitive results.} We test on the MNLI, MCoNaLa, SQuAD, and BBH benchmarks. We also report the BBH-NLP and BBH-Algorithm which contains different subsets of BBH. We found that training on \methodname transformed data attains the best performance across theses tasks.}
+\label{tab:results}
+\end{table*}
+\subsection{Experiment Settings}
+\paragraph{Datasets}
+The datasets we used in this work include:
+\textbf{ (i) MultiNLI (MNLI)} \cite{williams2018broadcoverage} tests the model's ability to recognize textual entailment between two sentences. It is one of the largest corpora for natural language inference, containing 433k samples across 10 distinct domains. We chose this task to test the method's performance on traditional language understanding.
+\textbf{(ii) SQuAD} \cite{rajpurkar2016squad} is a reading comprehension dataset that contains questions and context based on Wikipedia articles. 
+We choose this task as another standard language understanding task.
+\textbf{(iii) MCoNaLa} \cite{wang-etal-2023-mconala} is a multilingual benchmark to test models' ability to generate code from multi-lingual natural language intents. 
+We focus on the Japanese-to-Python subtask, as it is a challenging task with no task-specific annotated data available.
+\textbf{(IV) BIG-Bench Hard (BBH)} \cite{suzgun2022challenging} is a challenging reasoning benchmark. It is a subset of BIG-Bench~\cite{srivastava2023beyond} containing challenging tasks where LLMs underperform humans. 
+We select this dataset to test whether \methodname can generate data for highly challenging reasoning tasks.
+\paragraph{Baselines} \textbf{(1) Prompt2Model} \cite{prompt2model} This method retrieves a model from Hugging Face via the task instruction, then finetunes this model using both synthesized and retrieved datasets (without transforming the latter). \textbf{(2) Synthesized Data} We use the  dataset generation method described by Prompt2Model~\cite{prompt2model} to obtain synthesized data and use it to finetune a LLM. This generation process uses dynamic temperature and prompt sampling to increase the synthesized data's diversity and demonstrates impressive data synthesize ability. \textbf{(3) ZeroGen}  This method uses pretrained LLMs to directly generate datasets under zero-shot setting. This method is targeted for classification tasks. We use Claude-Haiku to generate the data. \textbf{(4) Few-Shot Prompting} For this, we directly prompt the pretrained LLM with few-shot examples without any finetuning. We report Claude Haiku which is used as our dataset generator and transformer. We also report GPT-4 as a strong upper bound model.
+\paragraph{Implementation Details}
+We use a pretrained model\footnote{\texttt{distiluse-base-multilingual-cased}} from the Sentence Transformers toolkit~\cite{reimers-2019-sentence-bert} to encode all data in the datastore construction phase.
+ We use 3K examples for MNLI and SQuAD and 1K for MCoNaLa and each BBH task. We use Claude 3 Haiku model to transform the data. 
+To more accurately simulate the case in which we are tackling a new task without training data, we prevent the retriever from retrieving any data from the target task's original training set.
+For model training, we choose the most recent open-source LLM Llama3-8B \cite{llama3modelcard} as the base model for both the synthesized method and \methodname. 
+We train the model using QLoRA~\cite{dettmers2023qlora} which requires only one NVIDIA A6000 48GB GPU
+
+\paragraph{Metrics} We report ChrF++~\cite{popovic-2015-chrf} score for MCoNaLa, this metric was similarly used for evaluation by~\citet{prompt2model}. For MNLI, we report the accuracy. For SQuAD, we use same exact match metric and F1 metric in \cite{rajpurkar2016squad}. For BBH, we use the evaluation script from~\citet{yue2023mammoth} to first extract the answer in the generated sentence and then report the accuracy.
+\subsection{Results}
+\paragraph{Quantitative Results}
+We present our main results in Table ~\ref{tab:results}. For MNLI, BBH, SQuAD, and MCoNaLa \methodname outperforms the data synthesis method by 1.37\%, 1.94\%, 7.8\%, 1.2\% respectively. Specifically on BBH, \methodname outperforms by 1.39\% on the BBH-NLP split and 2.37\% on the BBH-Alg split. On the question answering benchmark SQuAD, \methodname outperforms synthesized method by 7.8\%. These results demonstrate the \methodname's effectiveness by retrieving then transforming the data compared with directly generating all the data using LLM.
+ \paragraph{Qualitative Results}
+We present the qualitative results in Figure \ref{fig:qualitative} to demonstrate the data obtained through \methodname and the data obtained through synthesized method in the MCoNaLa benchmark and SQuAD benchmark. In MCoNaLa, the task is to generate data with a Japanese instruction as input and a corresponding python program as output.
+We found that \methodname outputs data samples that contains more programs with higher diversity and programs that require more complicated reasoning process such as dynamic programming whereas synthesized method only gives simple instructions that require a few lines of codes.
+In SQuAD, the task is to generate data with a question and a context as input and an answer to the question as output.
+We found that \methodname greatly increases the question diversity in terms of content and creates questions that require more complicated reasoning where as the synthesized data only asks questions that are simpler, more well known, and more straightforward.
+Interestingly, we found that \methodname does not increase the length of the context part in the data compared with 
+synthesized data.
+\begin{figure*}[h]
+\centering
+\includegraphics[width=\textwidth]{images/qualitative_2.pdf}
+\caption{\textbf{Qualitative Examples on \methodname (Transformed) compared to directly synthesized data (Generated).} \methodname outputs data that are more diverse while directly synthesized data tend to be simpler and replicate. In MCoNaLa, we found that \methodname generates samples that contains dynamic programming, counting, mathematical calculations whereas directly synthesized dataset is limited to simpler commands such as printing or simple list operation. In SquAD, we found that \methodname generates samples that contain diverse and harder questions whereas directly synthesized data asks simpler questions.}
+\label{fig:qualitative}
+\end{figure*}
+\subsection{Analysis}
+\paragraph{Dataset Source}
+One of the benefits of constructing the database is that the model can retrieve from multiple dataset sources to get the relevant items from each of them. To analysis how this effects the data for each task, we analyzed the number of different datasets in its retrieved data for each task. We present the result in Table~\ref{tab:unique_pairs}. The results demonstrate that all the tasks retrieves from at least 20 different dataset sources. MCoNaLa and SQuAD retrieves from more than 50 different datasets. BBH tasks retrieves from 35 datasets on average. MNLI retrieves from 20 datasets.
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+\textbf{Benchmark} & \textbf{\# of Sources} \\
+\midrule
+\midrule
+MCoNaLa & 67 \\
+MNLI & 20 \\
+SQuAD & 55 \\
+\midrule
+BBH (total) & 35 \\
+\textit{BBH-NLP} & \textit{36}\\
+\textit{BBH-Alg} & \textit{46} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Dataset source analysis.} For datasets generated by \methodname, we calculate the number of unique datasets that it retrieves from. Results show that each benchmark above retrieves from at least 20 different datasets.} 
+\label{tab:unique_pairs}
+\end{table}
+\paragraph{Dataset Diversity} 
+Previous works have shown that synthesized data lacks in diversity~\cite{ye2022progen} and sometimes produces near-duplicate samples~\cite{gandhi2024better}.
+We study whether ReBase increases the datasets' diversity. We follow DataTune~\cite{gandhi2024better} to conduct diversity analysis on MCoNaLa, MNLI, and SQuAD. First, we calculate the uniqueness of the dataset samples on these three benchmarks. 
+We use ROUGE-L~\cite{lin-2004-rouge} to determine whether a sentence is unique in the dataset~\cite{wang2022self}. Specifically, for a sentence $s$, if the ROUGE-L score between $s$ and every other sentence $s'$ is smaller than a threshhold $T$, we decide this sentence to be unique. In our experiment, we use the threshhold 0.7. The results are shown in the Unique Percentage column of Table~\ref{tab:diversity}, we found that ReBase significantly increases the percentage of unique samples in the dataset compared with synthesized data. The synthesized data yields less than 50\% of non-duplicate samples across the three benchmarks, while \methodname results in more than 70\% non-duplicate samples across the three benchmarks. 
+
+We also calculate the average unique unigrams, and unique bigrams per created example to measure the lexical difference. The results are demonstrated in Table~\ref{tab:diversity}. We found that ReBase significantly increases the average unique unigrams and bigrams on the three benchmarks.
+\paragraph{Embedding Visualization}
+We conduct embedding visualization on SQuAD and MNLI to visualize the datasets. We use MiniLM v2~\cite{wang-etal-2021-minilmv2} to encode each sentence and then project the embeddings into a 2D space using t-SNE~\cite{JMLR:v9:vandermaaten08a}. The results are shown in Figure~\ref{fig:embedding}. We found that the data generated by ReBase are more widely scattered across the embedding space compared to the synthesized data, which have smaller coverage. Additionally, we observed that the total coverage of ReBase and synthesized data is greater, indicating the potential for further combining ReBase and synthesized data to create a more powerful dataset.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\textwidth]{images/example_embeddings_comparison.pdf}
+\caption{\textbf{Embedding Visualization Result of MNLI and SQuAD.} The data generated by ReBase are more widely scattered across the embedding space compared to the synthesized data. }
+\label{fig:embedding}
+\end{figure}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lc|cc|c}
+\toprule
+\textbf{Task} & \textbf{Method} & \textbf{Unique} & \textbf{Unique} & \textbf{Unique} \\
+              &                 & \textbf{Unigrams} & \textbf{Bigrams} & \textbf{Percent} \\
+\midrule
+{\multirow{2}{*}{\shortstack{MCo\\NaLa}}} & Syn &  0.56& 0.36 & 25.90\% \\
+                          & ReBase  & 1.85 & 1.99 & 75.42\% \\
+\midrule
+\multirow{2}{*}{MNLI}     & Syn  &0.62 &2.00 & 21.61\% \\
+                          & ReBase & 3.28&12.21 & 71.05\%\\
+\midrule
+\multirow{2}{*}{SQuAD}    & Syn & 2.20&10.94& 37.69\%\\
+                          & ReBase  & 6.31& 29.33 & 96.56\%\\
+
+\bottomrule
+\hline
+\end{tabular}
+\caption{\textbf{Dataset Diversity Analysis.} We report the data uniqueness percentage, the average unique unigrams and unique bigrams per sample. We found that ReBase significantly increases the number of average unique unigrams, average unique bigrams, and the unique percentage of the dataset, suggesting the ReBase promotes data diversity in the dataset.}
+\label{tab:diversity}
+\end{table}
+\subsection{Ablations}
+\paragraph{Ablations on Filtering}
+\begin{figure*}[h]
+\centering
+\includegraphics[width=\textwidth]{images/filtered_rows_percentage.png}
+\caption{The bars represent the percentage of remaining data after filtering for each BBH task. The shaded area in the figure indicates the range of pretrained scores, transformed scores, and filtered data training scores for each task. 
+
+\label{fig:bbh_filtered}
+\end{figure*}
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+& \textbf{BBH} & \textbf{BBH-NLP} & \textbf{BBH-Alg} & \textbf{MCoNaLa}\\
+\midrule
+\midrule
+Filtered & 65.71 & 69.15 & 62.96 & 37.24\\
+\methodname & \textbf{66.90} & \textbf{69.45} & \textbf{64.85}& \textbf{38.24}\\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Results of the filtered \methodname dataset.} We use the filtered dataset to test on BBH, BBH-NLP, BBH-Alg, and MCoNaLa. We found that filtering does not increase the overall performance on three benchmarks, suggesting that dataset size, in addition to noise, also impacts performance. 
+We provide detailed illustration of the BBH tasks in Figure \ref{fig:bbh_filtered} 
+}
+\label{tab:filtered}
+\end{table}
+We noticed that for some tasks that are not associated with very relevant documents in the datastore, the transformed data contains noise that may impair the data quality. Training on such data may reduce the performance and make the model underperform the pretrained model. 
+Therefore, we conduct experiments on using an LLM as a filterer and filter out the data that doesn't comply to the format or contains irrelevant noise in the content.
+We use GPT-3.5-turbo as the filterer and then use the filtered data to train Llama3-8B on the 27 tasks on BBH and MCoNaLA, the results are shown in Table \ref{tab:filtered}.
+We found that filtering doesn't increase the overall performance on BBH and MCoNaLa. While filtering can enhance performance on certain tasks where training on \methodname harms performance, it decreases performance on others. Such performance drop is potentially due to the decrease in dataset size. Figure \ref{fig:bbh_filtered} shows the percentage of remaining data after filtering for each BBH task and the effect of filtering on the scores. 
+\paragraph{Ablating on Data Size}
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Data Size & \textbf{BBH} & \textbf{BBH-NLP} & \textbf{BBH-Alg} \\
+\midrule
+\midrule
+200 & 59.19 & 61.17 & 57.60 \\
+400 & 64.70 & 68.36 & 61.76\\
+600 & 62.40 & 65.36 & 60.03 \\
+800 & 65.65 & 68.52 &  63.36\\
+1000 & \textbf{66.90}& \textbf{69.45} & \textbf{64.85}\\
+\bottomrule
+\hline
+\end{tabular}
+\caption{\textbf{Results on using different dataset size on the BBH benchmark.} Generally, we found the increasing the dataset size boosts the performance. Suggesting the importance of obtaining adequate data for a task.}
+\label{tab:data_size}
+\end{table}
+In our experiments, we use a data size of 1k for both \methodname and synthesized data. 
+In this experiment, we study the effect of data size by varying the amount of data we use to train the model.
+Specifically, we vary the data size by 200, 400, 600, 800, and 1000 and then test on BBH. For experiment on dataset size K, we use the retrieved data with the top K highest scores. We report the results in Table \ref{tab:data_size}. The results show that using 1k data achieves the best performance. In general, scaling up the dataset size enhances the performance. This highlights the importance of obtaining adequate data for a given task.
+
+\paragraph{Ablating the Data Generation Model}
+In out experiments, up to this point we have mainly used Claude 3 Haiku~\cite{claude} for the transformation and data synthesis. 
+In this experiment, we test the effect of using a different, more expensive model, GPT-4, instead. We use data size 1k for MCoNala and 200 for BBH and report the performance in Table~\ref{tab:model}.
+For MCoNaLa, interestingly, GPT-4 significantly outperforms Haiku with synthesized data, but with \methodname the gap closes significantly, demonstrating that \methodname may allow more computationally efficient models to serve as teachers for data distillation.
+In fact, Haiku with \methodname outperforms GPT-4 without \methodname, at nearly two orders of magnitude less cost. For BBH, we found that GPT-4 with synthesized data outperforms \methodname whereas when using Claude 3 Haiku, synthesized data underperforms \methodname. This shows that \methodname may be useful to better unleash the CoT reasoning ability of cheaper models, but less effective in further promoting the CoT reasoning of expensive and powerful models.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{ll|cccc}
+\toprule
+&& \multicolumn{2}{c}{\textbf{GPT-4}} & \multicolumn{2}{c}{\textbf{Claude3-Haiku}} \\
+&\textbf{Method}& \textbf{Acc} & \textbf{Cost} & \textbf{Acc} & \textbf{Cost} \\
+\midrule
+{\multirow{2}{*}{\shortstack{MCo-\\-NaLa}}} &Syn & 37.88  & \$9.53 & 36.98& \$0.11 \\
+&\methodname & \textbf{38.48} & \$8.03 & \textbf{38.24} & \$0.11 \\
+\midrule
+{\multirow{2}{*}{\shortstack{BBH}}} &Syn & \textbf{65.43}  & - & 57.22 & - \\
+&\methodname & 64.95 & - & \textbf{59.19} & - \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Ablation on the LLM used on the MCoNaLa and BBH task.} We conduct experiments on using GPT-4 and Claude 3 Haiku on MCoNaLa and report ChrF++ score, and on BBH using accuracy. We found that using the more powerful GPT-4 model boosts performance for both the synthesized dataset and \methodname on both datasets, but also costs 100 times more than using the Claude 3 Haiku model.}
+\label{tab:model}
+\end{table}
+
+
+
+\section{Related Work}
+
+\paragraph{Retrieval-Augmented Generation (RAG)}
+Retrieval-Augmented Generation (RAG) \cite{lewis2020retrieval, gao2024retrievalaugmented, asai-etal-2023-retrieval, chen2017reading} retrieves from external knowledge to help the LLM answer open-domain questions.
+Recent works demonstrate that RAG can greatly boost the reasoning ability of LLMs \cite{jiang2023active, shao2023enhancing}. 
+IAG \cite{zhang2023iag} leverages both retrieved knowledge and inductive knowledge derived from LLMs to answer open-domain questions. 
+Inspired by the success of RAG, we study how retrieving from external knowledge improves dataset quality and further improves model performance.
+\paragraph{Data Synthesis}
+Recent studies 
+use LLMs as dataset generators \cite{Patel2024DataDreamerAT, song2024fmint} and focus on improving the generated data's quality.
+Zerogen~\cite{ye2022zerogen} uses pretrained LLMs to generate datasets directly under zero-shot setting. 
+Progen \cite{ye2022progen}, Sungen \cite{gao2023selfguided}, and Impossible Distillation \cite{jung2024impossible} uses feedback from smaller models to distill the generated data.
+AttrPrompt \cite{yu2023large} improves data quality by improving the prompt.
+Unnatural Instructions \cite{honovich2022unnatural}, 
+ReGen \cite{yu2023regen},
+and S3 \cite{wang2023lets} improves the data quality by using other datasets as reference.
+We explores the use of both RAG and LLM's generation ability to create a diverse and reliable dataset for specific tasks.
+
+
+
+\section{Conclusion}
+
+In this paper, we present \methodname, a framework that uses retrieval and transformation to create diverse and high-quality domain-specific dataset to train task-expert models. 
+Our method shows significant improvement over conventional dataset generation methods. 
+We establish the benefit of leveraging examples retrieved from a large, heterogenous datastore to create task-specific training data. 
+We believe this work motivates future work on retrieving labeled examples from a prompt; improved example retrieval could lead to significantly improved retrieval-based distillation. 
+
+
+

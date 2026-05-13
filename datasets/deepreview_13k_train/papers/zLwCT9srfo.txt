@@ -1,0 +1,171 @@
+\title{H-Rockmate: Hierarchical Approach for Efficient Re-materialization of Large Neural Networks}
+
+\begin{abstract}
+Training modern neural networks poses a significant memory challenge, as storing intermediate results during the forward and backward passes demands substantial memory resources. To address this issue while maintaining model accuracy, re-materialization techniques have been introduced to recompute selected intermediate results rather than storing them, thereby adhering to peak memory constraints. The main algorithmic problem is to compute a re-materialization schedule that minimizes the computational overhead within a given memory budget. Our H-Rockmate framework builds upon an existing Rockmate solution and overcomes its limitation to work with sequential block structures by proposing a hierarchical approach. The framework performs an automatic decomposition of the data-flow graph into a hierarchy of small-scale subgraphs, and finds a re-materialization schedule for the whole graph by recursively solving optimization problems for each subgraph. H-Rockmate allows users to transform their PyTorch models into nn.Modules that execute forward and backward passes efficiently within the specified memory budget. This framework can handle neural networks with diverse data-flow graph structures, including U-Nets and encoder-decoder Transformers. H-Rockmate outperforms existing re-materialization approaches in terms of average training iteration time and peak memory trade-offs, demonstrating superior memory efficiency in training modern neural networks.
+\end{abstract}
+
+\section{1 Introduction  }
+
+
+Modern Neural Networks (NN) undergo several important evolutions which have consequences on the computation and memory requirements, from the first vision networks like ResNet50 (Wu et al., 2019) to Natural Language Processing transformer-based models (Vaswani et al., 2017) like GPT. On the one hand, the size of the models and the resolution of the data are increasing, which raises problems for the storage of both weights and activations. On the other hand, the first models had chain-like structures (sequence of convolution layers) and then moved to chains of complex blocks (chains of Transformer blocks for GPT-like models). Finally, recent NN exhibit arbitrarily complex dependency graph structures between layers of the neural network: for example, UNO Wen et al. (2022) is structured as a U-Net of complex blocks, and encoder-decoder transformers Vaswani et al. (2017) feature very long skip connections.  
+
+Re-materialization is a well known and efifcient technique to limit the memory requirements related to activations during training. The idea is to avoid storing all the necessary activations because of the subsequent dependencies during the Forward phase and the Backward phase (those related to the Stochastic Gradient Descent mechanism). Some activations are computed and then deleted to make room in memory, and they will have to be re-computed later when needed. In the case of simple chains (Beaumont et al., 2019a) and in the case of chains of complex blocks (Zhao et al., 2023), this technique has shown its efifciency: it is often possible to save $50\%$ of memory for a computational overhead of about 10 to $15\%$ .  
+
+From a theoretical point of view, the problem is to minimize the computational time required to execute the forward and backward passes under a predefined memory budget. It has been proven in Naumann (2008) that obtaining an optimal re-materialization schedule is NP-Hard in the case of general dependency graphs represented as general data-flow graphs. Some solutions such as TW-Remat (Kumar et al., 2019) or Checkmate (Jain et al., 2020) have nevertheless been designed to deal with the case of general graphs, but both suffer from a number of limitations, as discussed in Section 2. Other approaches like Rotor (Beaumont et al., 2019a) and Rockmate (Zhao et al., 2023) have proposed to find efifcient solutions for limited classes of dependency graphs, where a chain structure (of potentially complex blocks) can be identified.  
+
+The work presented here is at the convergence of these research lines, with an original approach based on a hierarchical decomposition of the computation graph, to find a re-materialization strategy for any graph of dependencies between layers. In the case where the graph is too large to be addressed directly by an approach based on Integer Linear Programming, we propose to decompose it into a graph of complex blocks, with potentially even more than two levels in the hierarchy. Efifcient solutions for different memory budgets are generated for each of the blocks at the bottom of the hierarchy, using different approaches from the literature. Then, we provide a new Integer Linear Programming (ILP) formulation to efifciently recombine these low-level solutions into candidate solutions for the higher levels of the hierarchy.  
+
+This paper contains the following contributions:  
+
+• A data-flow graph decomposition algorithm H-Partition that builds a hierarchy of blocks of reasonable sizes (to keep an acceptable computational complexity) while minimizing the memory size of the interfaces between the blocks • A new linear programming solver H-Ilp adapted to this hierarchical decomposition. • A general framework to integrate previous and future re-materialization strategies at any level of the hierarchy, combining their strengths.  
+
+Thanks to the H-Ilp solver, H-Rockmate achieves high efifciency in terms of solution quality, while having a sufifciently fast solving time to be used on the larger models used in practice today. H-Rockmate is fully compatible with the autograd mechanism of PyTorch, so that no modification of the code is required to use it. With a single line, the user can automatically control the memory usage of their neural network: model $=$ HRockmate(model, sample, memory_budget). The H-Rockmate framework will be distributed as open-source software upon acceptance of the paper.  
+
+The rest of the paper is organized as follows. In Section 2, we review the related work on memory saving strategies for DNN training. H-Rockmate is presented in Section 3 which covers graph decomposition, partial problems resolution and global re-materialization strategy reconstruction. Section 4 demonstrates the efifciency of the proposed method on a large number of networks, and provides an evaluation of the computational overhead induced by re-materialization. Finally, concluding remarks are proposed in Section 5.  
+
+
+
+\section{2 Related Work  }
+
+
+In the rest of the related work, we mostly cover the contributions that rely on the exclusive use of re-materialization. Memory footprint of activations might also be reduced via data parallelism (Das et al., 2016; Zhang et al., 2013) (by distributing mini-batches across several computational resources) and oflfoading (Rhu et al., 2016; Wang et al., 2018) (which oflfoads and later retrieves activations from GPU memory to CPU memory). Model parallelism (Huang et al., 2019; Narayanan et al., 2019), in particular in its pipelined version, can be used to minimize the memory requirements by storing weights across several devices. The optimal combination of all these strategies with re-materialization, discussed by Beaumont et al. (2021) in the context of sequential models, is left for future work.  
+
+TW-Remat (Kumar et al., 2019), based on a tree-width decomposition of the dependency graph, was initially designed for the case where all computational costs and activation sizes have a unitary weight. A greedy heuristic was later proposed to generalize the algorithm to the cases of non-unitary weights, but without guarantee. Kusumoto et al. (2019) proposed an optimal dynamic programming algorithm restricted to a special class of solutions, where each node is computed at most twice. The XLA framework $^{1}$ contains a re-materialization feature based on a greedy heuristic described in Kumar et al. (2019), and shown to be less efifcient than TW-Remat. Checkmate (Jain et al., 2020) is based on the solution of an Integer Linear Program (ILP), and computes a generic optimal solution under a set of reasonable assumptions, but the computation cost becomes prohibitive as soon as the number of nodes in the network exceeds 70-90 nodes.  
+
+Table 1: Comparison of Different Re-Materialization Strategies, Dyn. Prog. stands for Dynamic Programming, ILP for Integer Linear Programming, BTD for Bounded Tree-width Decomposition.   
+
+![](images/4922c46d93e7c32daf56bc9b660eaf242329e79dfdb9cc06e1b5b48acec8ec5f.jpg)  
+
+Other approaches have been proposed to find efifcient solutions for limited classes of dependency graphs. Beaumont et al. (2019b) relies on dynamic programming in the case of networks whose graph is a sequence of basic operations, covering ResNet-like networks (considering one ResNet block as one operation). This extends in a proven framework the heuristic techniques proposed by Chen et al. (2016). Then, the case of graphs for which the forward graph is a sequence of complex blocks has been addressed in the Rockmate framework in Zhao et al. (2023), which covers most Transformer-based networks (with one Transformer block considered as a complex block). One of the main limitations of Rockmate is that for architectures with long skip connections (like U-Net (Ronneberger et al., 2015) or encoder-decoder Transformer (Vaswani et al., 2017)), it degenerates to Checkmate and inherits its dififculties to handle large data-flow graphs.  
+
+In this paper, we design an algorithm and a framework to address any kind of network with a static data-flow graph, with reasonable solving time on networks with up to 2000 nodes. In the experimental evaluation of Section 4, we compare H-Rockmate with the state-of-the-art strategies: Checkmate, TW-Remat, and Rockmate. Table 1 summarizes the comparison of these re-materialization techniques, and emphasizes the benefits of H-Rockmate compared to all previous approaches.  
+
+
+
+\section{3 H-Rockmate  }
+
+
+We consider the data-flow graph associated to a neural network where each node is a computation at the tensor level. A schedule represents a sequence of basic computations and tensor deletions that performs the forward and backward passes for one training iteration. The optimization problem related to re-materialization is to find a schedule whose peak memory is below a given budget and with the smallest possible execution time.  
+
+Figure 1 describe the main steps of H-Rockmate approach. In a first step, H-Rockmate uses the graph building tool developed in Rockmate (Zhao et al., 2023) to obtain the data-flow graph of the input module. In a second step, the H-Partition package, described in Section 3.1, is used to recursively partition the graph into subgraphs of tractable sizes. This partitioning is performed recursively in order to ensure that the higher-level graphs are also of reasonable size. Steps 3, 4 and 5 of Figure 1 describe the H-Solver algorithm, detailed in Section 3.2.1. Starting with the lowest level of the decomposition, the algorithm computes schedules for each subgraph with different memory budgets, so as to explore different time-memory trade-offs, providing several options for the nodes of the higher levels. This procedure continues until the top-level graph, solved for a single memory budget corresponding to the available memory for activations.  
+
+![](images/28d3972fd1d557be143abb1988980987e3829a52a1aeea6c4a6e12b31aacd1fb.jpg)  
+Figure 1: Visualization of the different steps in the H-Rockmate framework.  
+
+
+
+\section{3.1 H-Partition  }
+
+
+The goal of the partitioning step of H-Rockmate is to reduce the size of the problems that need to be solved, without affecting too much the quality of the overall solution. The result of this step is a decomposition in a hierarchy of subgraphs, where the nodes of graphs at a given level represent an entire subgraph of the level below. The subgraph sizes are limited by two main parameters: $M^{l}$ denotes the maximum number of nodes in a lower-level subgraph, and $M^{t}$ denotes the maximum number of nodes in the top-level graph. Since it is beneficial to allow a larger solving time for the top-level graph, we use $M^{t}\geq M^{t}$ . Our partitioning algorithm is a greedy heuristic described in Algorithm 1. Each iteration has three main steps: formation of candidate groups, selection of a best candidate according to our evaluation criterion, merging of the selected candidate and update of the remaining candidates. Each of these steps is described below.  
+
+Formation of candidate groups For any node $x$ in $G$ , we consider $a(x)$ , the closest common ancestor to all the direct predecessors of $x^{2}$ . We create four candidate groups with all nodes on all paths from $a(x)$ to $x$ , depending on whether $x$ and/or $a(x)$ are included. Any candidate group with more than $M^{l}$ nodes is discarded.  
+
+Candidate selection When selecting the best group among all candidates, our objective is to avoid incurring a too high memory pressure when the group is used as a subgraph. The memory pressure depends directly on the sizes of the input and output values. It also  
+
+Input: data-flow graph $G$ Result: a recursive partition of $G$ Parameters: max high-level size $M^{t}$ , max lower-level size $M^{l}$ , score parameter $\alpha$ 1 while $G$ has more than $M^{t}$ nodes do 2 $c\leftarrow\cup_{x\in G}$ candidate group containing all nodes between $x$ and $a(x)$ ; 3 while $\mathcal{C}$ is non empty and $G$ has more than $M^{t}$ nodes do 4 Select candidate $C$ which minimizes $s_{\alpha}$ (eq. 1); 5 Wrap the nodes of $C$ into a group; 6 Update $\mathcal{C}$ ; 7 end 8 Consider all groups as subgraphs; 9 Update $G$ so that each subgraph is considered as a node; 10 end 1 return partitioned graph  
+
+Algorithm 1: H-Partition algorithm  
+
+depends, less directly, on the length of the schedule during which they will be alive, which we evaluate through the number of original nodes in the subgraph. We use the following score function $s(C)$ for a candidate $C$ :  
+
+$$
+s_{\alpha}(C)=\left(\sum_{x{\mathrm{~input~or~output~value~of~}}C}{\mathrm{memory~size~of~}}x\right)\cdot\left({\mathrm{/}}{\mathrm{/}}{\mathrm{~of~original~nodes~in~}}C\right)^{\alpha},
+$$  
+
+where $\alpha$ is a hyper parameter, whose default value is 0.5.  
+
+Update of candidates Once the best candidate $C$ is chosen, it becomes a group: all its nodes will be considered together from now on. However, it is not yet a subgraph: if it is not too large, it might be merged with other groups later in the same phase in order to reduce the number of groups. The remaining candidates are updated: in any candidate $C^{\prime}$ whose intersection with $C$ is nonempty, we add all the other nodes of $C$ to ensure that all nodes of $C$ remain together. If this union contains more than $M^{l}$ nodes, this candidate $C^{\prime}$ is no longer acceptable and is removed.  
+
+ After the partitioning, H-Rockmate also identifies subgraphs that correspond to the execution of the same code, as is done in Rockmate. This avoids solving several times the same optimization problem.  
+
+
+
+\section{3.2 H-Solver  }
+
+
+
+
+\section{3.2.1 Solving framework  }
+
+
+The idea of hierarchical re-materialization is that re-materialization schedules can be computed for each subgraph independently, with several memory budgets. These different re-materialization schedules for a given subgraph are called options, and each corresponds to a different time vs memory trade-of.f Once all subgraphs at a given level have been solved, a schedule for the next level can be computed with our proposed H-Ilp. H-Ilp is a linear programming formulation that provides an optimal schedule within a given memory budget. It can be used on a subgraph of general structure, but using it on large subgraphs can result in unreasonable solving time. It is thus applied only to subgraphs with sufifciently low number of nodes. This algorithm is inspired by rk-Checkmate (Zhao et al., 2023), which itself is an extension of Checkmate (Jain et al., 2020). The general idea of extending this linear programming approach to a hierarchical structure is a major contribution of the present paper and is described in detail in Section 3.2.2.  
+
+On significantly large graphs, partitioning with only two levels would result in the top-level graph being still too large to be solved with this technique. Our hierarchical approach makes it possible to compute schedules for the levels from bottom to top, handling graphs of arbitrary size, while each sub-problem remains of tractable size.  
+
+The H-Ilp solver that we propose is very generic and efifcient, and it provides very good quality solutions on all kinds of neural networks. Thanks to the genericity and extendability of the H-Rockmate framework, it is also possible to combine existing approaches, which further improves the quality of the solutions. The H-Rockmate framework currently contains two additional algorithms. First, H-TWRemat is a wrapper around the TW-Remat implementation (Shepperd, 2021) of a heuristic based on a treewidth decomposition approach (Kumar et al., 2019). This wrapper and the H-Rockmate framework allows this heuristic to be used with PyTorch, whereas it was previously only available for TensorFlow. Second, rk-Rotor is the dynamic programming algorithm from Rockmate (Zhao et al., 2023) that also provides an optimal schedule. It is limited to subgraphs whose forward phase has a sequential structure (where each computing node only depends on the previous one), but its solving time is low.  
+
+
+
+\section{3.2.2 Hierarchical ILP formulation  }
+
+
+This section presents H-Ilp, the hierarchical adaptation of the rk-Checkmate linear programming formulation. We are given an arbitrary graph $H$ , where each compute node represents a subgraph, and where dependencies are carried by data nodes, which represent values that can be saved in memory. The H-Ilp formulation computes the schedule with minimum running time whose peak memory remains below a specified memory budget.  
+
+The actual linear programming formulation of H-Ilp follows the same structure as the formulation of rk-Checkmate: the schedule is divided into phases, and the goal of phase $t$ is to compute node $t$ for the first time.  
+
+Options and phantom nodes The novelty of H-Ilp compared to rk-Checkmate is that each compute node can represent a subgraph of the original graph. Such a compute node can be computed with one of several options. Each of these options represents a possible schedule for the forward and backward phases of the subgraph. There is a strong link between the forward and the respective backward computations, and each backward computation should be performed with the same option as its corresponding forward computation. The H-Ilp formulation contains additional variables and constraints to specify which option for each compute node is used within each phase.  
+
+In H-Ilp, we also introduce an explicit representation of the data saved in memory between a forward computation and its corresponding backward. We call them phantom nodes, and we update the formulation by considering them as special data nodes, with two specificities. First, a phantom node is always created by its forward computation, always deleted after its backward computation, and is not required by any other computing node. In the formulation, we take advantage of this by not including additional variables expressing whether the phantom node is deleted or not. Second, the values saved in a phantom node (and thus the associated memory size) depend on the option used for the forward and backward computations. For this reason, the formulation contains additional variables that specify which option of each phantom node exists in memory during each phase.  
+
+Correction terms for memory usage In Rockmate, to achieve good performance, the input values of a block are deleted as soon as they are no longer needed, instead of being kept until the end of the block. This is possible due to the sequential structure, where each block is the only user of its input values. In the more general context of the present paper, a subgraph might share its input values with other subgraphs. To obtain good performance, H-Ilp allows sub schedules to delete their input values and the gradients of the outputs; but if another subgraph needs these values, the higher level algorithm adapts the sub schedules. This decision has an impact on the memory peak of corresponding subgraphs.  
+
+We have added constraints to the formulation to ensure that the memory peak is correctly evaluated in all cases. These constraints are only introduced when solving the top-level graph since they make the ILP harder to solve, and only the top-level graph solution needs to be accurately bounded by GPU memory. For each computation node $k$ , the number of these constraints for node $k$ is bounded in the worst case by $\operatorname*{min}(l_{k,o},2^{\mathrm{degree~ot~node~}k})$ , where ${l_{k,o}}$ is the number of operations of the schedule of option $o$ for node $k$ . In practice, this number of constraints remains low enough that the H-Ilp formulation is solved in reasonable time.  
+
+Schedule selection The number of binary variables in the H-Ilp formulation depends linearly on the total number of options of all nodes. To avoid wasting resources when several very similar options are available for a given node, we include in H-Ilp a hyper-parameter $N_{o}$ , which provides a limit on the total number of options. To stay within this limit, we may have to select some options among all the schedules generated at the lower level.  
+
+To do so, we first allocate a number of options to each node, based on the total $N_{o}$ : each node will receive a number of options proportional to the number of basic operations inside the corresponding subgraph. Then, we greedily select the schedules whose memory peaks are further from each other: starting from the schedule with the highest memory peak, then the one with lowest memory peak, then the one closest to the middle, and so on.  
+
+
+
+\section{3.3 Complexity Analysis of H-Rockmate  }
+
+
+The complexity of H-Rockmate depends mostly on the number $N$ of nodes in the graph. Obtaining the data-flow graph with rk-GB has a complexity $O(N)$ and is very fast in practice. With our current implementation, recursively partitioning the graph with H-Partition has a complexity $O(N^{2}\log N)$ . This step is also quick for graph sizes up to $N\,=\,1000$ , but handling very large graphs would require more work on the graph algorithms: recursively partitioning a graph of size $N=10^{5}$ requires 2 hours on an Intel Xeon Gold processor.  
+
+The most time-consuming step is the computation of re-materialization schedules with H-Ilp. Thanks to our hierarchical approach, this step actually has a linear complexity. Indeed, the hierarchical decomposition has logarithmic depth, and the total number of subgraphs is $O(N/M^{t})$ . Solving one subgraph of size $M^{l}$ for a number ${\cal O}$ of budget options only requires solving $O$ Integer Linear Programs, whose sizes and solving times do not depend on $N$ . In addition, all ILPs at the same level are completely independent and can be performed in parallel.  
+
+
+
+\section{4 Experimental Evaluation  }
+
+
+Experimental settings For all models, we measure the peak memory usage and the execution time required for a single training iteration. We conduct a warm-up phase consisting of five initial runs; the subsequent ten runs are used to evaluate the peak memory and computational time, providing reliable estimates of the performance. Measurements show that the standard error of the iteration time is at least two orders of magnitude smaller than the mean. As a result, error bars are not depicted in the plots. Experiments use an NVIDIA Quadro RTX8000 GPU with 48GB of memory and an NVIDIA V100 GPU with 16GB of memory, with PyTorch 2.0.1, CUDA 11.6, and Gurobi 9.5.0.  
+
+Efifciency In Figure 2, we compare the solving time and performance of Rockmate and H-Rockmate. Since solving an ILP has exponential complexity, it is important to limit the size of the problem. A clear drawback of Rockmate is that it needs to see the graph as a sequence of blocks, which for general neural networks means that some blocks are very large. In Encoder-Decoder Transformer Vaswani et al. (2017), there is no clear sequential structure for Rockmate to partition the graph, and this leads to very large solving times as shown on the right of Figure 2. Specifically, Rockmate takes 15 hours to obtain a solution for a 4-layer encoder-decoder structure transformer, while H-Rockmate achieves better results within 12 minutes. By controlling the total number of nodes in each graph with the H-Partition algorithm, H-Rockmate is able to efifciently limit the solving time without compromising solution quality.  
+
+![](images/34f02fb25975af22fa3de9cf0a74ce7afcbabc038ad408fd16983e3168f3fb07.jpg)  
+Figure 2: Experiments for varying graph size: (left) iteration time (right) solving time  
+
+Performance Figure 3 demonstrates that H-Ilp consistently outperforms TW-Remat in terms of iteration time for a given budget. On the Encoder-Decoder (Figure 3c), TW-Remat is able to find schedules for smaller memory budgets than H-Ilp, but for UNet the situation is reversed. By integrating TW-Remat, H-Rockmate effectively addresses this limitation of H-Ilp and provides efifcient solutions over the complete range of memory budgets. Figures 3a and 3b show that H-Ilp obtains similar performance as Rockmate, a baseline approach specifically tailored for such architectures. Overall, H-Rockmate acts as a general solution that encompasses H-Ilp, Rotor, Rockmate, and Checkmate. Our experimental results consistently demonstrate that H-Rockmate performs on par with these baseline algorithms, showcasing its versatility and effectiveness in optimizing memory utilization for a wide range of network architectures.  
+
+![](images/8e418a4945b849bac8ac7d3cf4bdbeba690cd6188f85b6c6df51259625dbc640.jpg)  
+Figure 3: Experiments on different network architectures: (top) sequential-like neural networks (bottom) non-sequential neural networks, which Rockmate cannot solve efifciently.  
+
+Optimality w.r.t. partitioning Without graph partitioning, H-Ilp is equivalent to rk-Checkmate which provides an optimal solution given a predefined topological order of operations. While partitioning might exclude certain re-materialization solutions on the overall network, Table 2 shows that H-Ilp obtains performance close to this optimal solver. In another experiment, we control the depth of hierarchy in H-partition by limiting the size of each subgraph. The results in Figure 4 show that H-Ilp maintains similar results in terms of solution quality when the depth of the hierarchy increases. It suggests that the combination of H-Partition and H-Ilp can find near-optimal solutions even on larger data-flow graphs by reducing the search space of re-materialization solutions in a smart way.  
+
+(a) 2-layer Encoder-Decoder Transformer   
+
+![](images/33aa52a61804d9d2dcd1078ebb3668a537d22ae1a502e4d9a1fb2a81981ca336.jpg)  
+
+(b) U-Net  
+
+![](images/5986e138372e91b819fd3def3746eb5e8582393cbf9d89ba4c25d2f8eafdcfda.jpg)  
+
+Table 2: Simulation results comparing H-Ilp and rk-Checkmate: for different budgets we show the overhead in terms of iteration time compared to Autodif.f  
+
+![](images/8cfde80a590f7efab99be7fecdd519a499a2f3825c93fea8701596ed0aa85359.jpg)  
+Figure 4: Experiments on 6-layer and 8-layer encoder-decoder Transformer with different depth of hierarchical structure.  
+
+
+
+\section{5 Discussion and Conclusion  }
+
+
+In conclusion, this paper introduces the H-Rockmate framework, which offers both theoretical and practical advancements in re-materialization for PyTorch models. The theoretical contributions include a hierarchical approach and an original linear programming formulation H-Ilp for very efifcient solutions without restrictive assumptions. Although H-Rockmate focus on computational graph with primitive operations, the hierarchical approach with linear complexity can be useful in other intense tasks targeting at tiling graphs. The framework also incorporates previous approaches, insuring state-of-the-art results. On the practical part, H-Rockmate seamlessly integrates into PyTorch, improving memory-time trade-off and efifciency, and is fully compatible with PyTorch Autograd. The main limitation of H-Rockmate is that it is not adapted to dynamic neural network architectures, where the structure of the computational graph depends on the input.  
+
+Future research can explore how to integrate oflfoading into the optimization problem to reduce the need for re-computations, and also how to combine re-materialization with pipelined model parallelism in an optimized way. Advancements in these areas hold promise for enhancing performance and efifciency in deep learning systems.  
+
+
+
+

@@ -1,0 +1,498 @@
+\title{TextGenSHAP: Scalable Post-hoc Explanations in Text Generation with Long Documents}
+
+\begin{abstract}
+Large language models (LLMs) have attracted huge interest in practical applications given their increasingly accurate responses and coherent reasoning abilities. 
+Given their nature as black-boxes using complex reasoning processes on their inputs,
+it is inevitable that the demand for scalable and faithful explanations for LLMs' generated content will continue to grow.
+There have been major developments in the explainability of neural network models over the past decade. 
+Among them, post-hoc explainability methods, especially Shapley values, have proven effective for interpreting deep learning models.
+However, there are major challenges in scaling up Shapley values for LLMs, particularly when dealing with long input contexts containing thousands of tokens and autoregressively generated output sequences.
+Furthermore, it is often unclear how to effectively utilize generated explanations to improve the performance of LLMs.
+In this paper, we introduce \ours, an efficient post-hoc explanation method incorporating LM-specific techniques.
+We demonstrate that this leads to significant increases in speed compared to conventional Shapley value computations, reducing processing times from hours to minutes for token-level explanations, and to just seconds for document-level explanations.
+In addition, we demonstrate how real-time Shapley values can be utilized in two important scenarios, providing better understanding of long-document question answering by localizing important words and sentences; and improving existing document retrieval systems through enhancing the accuracy of selected passages and ultimately the final responses.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (\llms) continue to rapidly excel at different text generation tasks alongside the continued growth of resources dedicated to training text-based models \citep{gpt3,palm,llama2}.
+LLM's impressive capabilities have led to their widespread adoption throughout academic and commercial applications.
+Their capacity to reason cohesively on a wide range of natural language processing (NLP) tasks has prompted efforts to enable models to automatically ingest increasingly large contexts. 
+These long-context models improve zero-shot, few-shot, and retrieval-augmented generation performance via in-context learning \citep{atlas,raven,ram2023context} and reduce the need for training task-specific models, empowering non-experts to readily use \llms.
+Despite their remarkable text generation capabilities, {\llms} which are trained primarily to model statistical correlations between tokens offer limited insight into their internal mechanisms. 
+This characteristic has led {\llms} to be widely considered black-box models which are acutely difficult to explain. 
+Beyond their prediction performance, challenges regarding safety, security, truthfulness, and more have gained prominence, especially in the wake of widespread adoption amongst the general population.
+Explainability is often hailed as a crucial avenue for addressing these concerns. 
+These methods allow for insights into the model's decision-making process, enabling stakeholders to directly scrutinize the reasoning behind unsafe or untruthful responses.
+Recent surveys in explainability for NLP juxtapose the two main criteria for model explanations: understandability and faithfulness \citep{lyu2023towardsFaithfulExplainNLP,zhao2023explainabilityLLMsurvey,mosca2022shapForNLPInterpretability}.
+Understandability (comprehensibility or plausibility) refers to how easily an explanation is understood by an external audience.
+It inherently relies on the expertise of the recipient and remains a highly subjective criterion.
+On the other hand, faithfulness refers to the extent to which a simplified explanation accurately captures the model's original reasoning process.
+Effectively judging the understandability and faithfulness of a given explanation method remains a contentious and ongoing subject in the interpretability literature \citep{rudin2019stopExplainingUseInterpretableInstead}.
+Further debate continues regarding the fidelity of explanation methods like attention scores, gradient saliency, and self-explained reasoning \citep{jain2019attentionNotExplanation,julius2018sanityForSaliency,ghorbani2019interpOfNNisFragile,wang2020gradientSaliencyOfNLPisManipulable,wei2022chainOfThoughtPrompting}.
+One of the most well-respected explanation methods, the Shapley value \citep{lundberg2017shapleySHAP} remains popular because of its stronger theoretical foundations. %XXX for tabular data and image data
+In the domain of NLP, however, approaches like the Shapley value suffer greatly in their ability to scale to {larger models and longer inputs}, forcing practitioners to wait unreasonably long times before receiving an explanation.
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/teaser_figures/figure1_renamed_ours_and_softened_resized.pdf}
+    \caption{Post-hoc explainability generation gets more challenging for: (a) longer inputs, (b) larger models, and (c) open-ended text generation. These lead to significantly increased times for extracting explanations  (d) which can be prohibitively long for human-in-the-loop model improvement.}
+    \label{fig:explanations_for_LLM_scale_tasks}
+\end{figure}
+
+
+\begin{comment}
+For some NLP applications, techniques including the textual explanations from chain-of-thought reasoning or the token visualizations from attention scores may be sufficient for improving model performance \citep{wei2022chainOfThoughtPrompting}.
+Nevertheless, such techniques often remain completely detached from strenuous tests of their faithfulness to the model's prediction.
+At the other extreme, literature on pure ``interpretability'' instead puts a great deal of effort into focusing on the desideratum of faithfulness, often strictly requiring that the full model itself could be digestible to an external audience \citep{rudin2019stopExplainingUseInterpretableInstead}.
+\end{comment}
+To address these limitations of current explainability methods in the realm of NLP, we introduce \ours, a novel approach designed to adapt the Shapley value for text generation while keeping a computational speed more suitable for {\llm}-scale applications. 
+Our primary focus lies on the challenging scenario of explanations when using long inputs as prompts, particularly for tasks such as abstractive question answering from extensive documents.
+Accordingly, we demonstrate our method's scalability to new applications across three key aspects shown in Figure \ref{fig:explanations_for_LLM_scale_tasks}:
+(a) handling longer contexts with thousands of input tokens; 
+(b) accommodating larger models with billions of parameters; and 
+(c) facilitating open-ended text generation, as opposed to discriminative tasks like classification.
+Furthermore, we demonstrate how the explanations generated by our \ours~can enhance the performance of long-document question answering in multiple ways.
+
+
+\section{Related Work}
+
+\noindent \textbf{Post-hoc model explainability}.
+\label{sec:related_work_posthoc}
+There have been many attempts at providing explanations for how machine learning models utilize their input features to make predictions.
+Among many post-hoc explanation approaches including LIME~\citep{ribeiro2017lime}, SHAP~\citep{lundberg2017shapleySHAP}, and Integrated Gradients~\citep{sundararajan2017integratedGradients},
+SHAP and Shapley remain dominant due to their strong theoretical foundations.
+For NLP, many extensions to such perturbation-based explanation methods leverage the hierarchical structure and sequential order of text  \citep{chen2018_LandC_shapley,jin2020samplingAndOcclusion,chen2020virginiaHierarchicalExplanations}. %CNN/LSTM and BERT and 110M (bert)
+Yet, these are limited to binary parse trees instead of more general hierarchies and have not been applied to longer input lengths or larger models.
+More recent methods extend beyond binary classification tasks by using contrastive extensions of the original techniques \citep{jacovi2021contrastiveFoilEmbeddings,yin2022LMwithContrastiveExplanations}. %300M and 1.5B/2.7B, resp
+Works in tabular and image data have also made strides in accelerating Shapley values \citep{jethani2022fastSHAP}, but struggle to apply to NLP because of generative text outputs.
+Specifically, all existing methods 
+require prespecification of candidate outputs and cannot be applied to the large output space of free-form text generation.
+
+\noindent \textbf{Self-explanations and rationales}.
+\label{sec:related_work_self_explained}
+Also popular for NLP applications is training models which will jointly explain and predict, generating `rationales' to highlight important tokens  for prediction, often by aligning with rationales either collected from human annotators \citep{arous2021martaHumanRationales,joshi2022explanationRegularizationForOOD} or generated using post-hoc explanations \citep{stacey2022attentionBasedRationales,chan2022unirexForRationalExtraction}.
+Even still, such approaches remain limited to classification tasks, likely due to the difficulties in collecting human rationales and current limitations of post-hoc explanations for text generation, as discussed above.
+Natural language explanations, such as chain-of-thought \citep{wei2022chainOfThoughtPrompting}, where LLMs emit explanations about themselves are hence some of the only available explanations for text generation.
+Unfortunately, such approaches remain 
+completely detached from concerns on faithfulness or explanation accuracy
+\citep{jacoviGoldberg2021aligningFaithfulInterpretationsTrojans,zheng2022irrationalityOfRationaleModels}.
+\noindent \textbf{Information retrieval from long documents}.
+{Question answering (QA)}
+remains a fundamental natural language understanding task, going beyond its origins in reading comprehension and into fusion with increasingly large knowledge bases. 
+The two major varieties of QA are long-document QA, where the input is a single contiguous document containing at least thousands of tokens, and open-domain QA, where the input is a large corpus often full of millions of smaller documents.
+The bifurcation between these two varieties can be traced back at least as early as the Natural Questions (NQ) dataset \citep{kwiatkowski2019naturalQuestionsDataset} for answering questions given Wikipedia pages.
+Follow-up work such as \citet{lee2019OpenDomainQuestionAnswering,karpukhin2020densePassageRetrieval}
+construct open-domain reformulations of the original NQ task by including the entire Wikipedia corpus rather than only the most relevant page. 
+Such open-domain tasks are dominated by the pipelined approach which first leverages a retriever model to rank the most relevant passages and then uses a reader model for further comprehension on the small subset of top-ranked passages.
+Many neural-based retriever methods have since emerged for this setup, uprooting the long reign of tf--idf style approaches \citep{izacard2022contriever,karpukhin2020densePassageRetrieval,ma2021replicationOfDPR,formal2021spladeV2,guu2020REALM,mao2021generationAugmentedRetrievalForODQA,johnson2019faiss}.
+Simultaneously, improvements have been made on the reader model side of the pipelined approach.
+Fusion-in-Decoder (FiD) \citep{izacard2021FiD,izacard2021distillingFiD} has remained an efficient architecture designed for QA, and
+`Lost in the Middle' (LitM) \citep{liu2023LitM} has recently identified how reader model performance depends on the position of the correct passage within large contexts.
+\noindent \textbf{Architectures for long inputs}. 
+In pursuit of the impressive capabilities of large-scale, end-to-end training, 
+there has also been a surge in network architectures which can increase the context size of {\lms}.
+Maximum context windows have quickly expanded from thousands of tokens to many millions of tokens with the use of efficient sparsity methods \citep{wu2022memorizingTransformer,bulatov2022recurrentMemoryTransformer,ding2023longnet}.
+Some methods use sparsity closely mimicking that of information-retrieval with respect to relevant tokens or external memory
+\citep{bertsch2023unlimiformer,wu2022memorizingTransformer,bulatov2022recurrentMemoryTransformer,bulatov2023recurrentMemoryTransformer_1Mtokens,johnson2019faiss} and some methods instead use block sparse attention matrices to reduce the necessary computations of the attention mechanism \citep{beltagy2020longformer,zhang2022poolingformer,ding2023longnet,dao2022FlashAttn}.
+
+
+
+
+
+
+
+
+
+
+\section{Background}
+
+\paragraph{Notation.}
+Consider a language model with a vocabulary of size $V\in\bbN$ using input sequences $\vx\in\cX:=[V]^d$ and output sequences $\vy\in\cY:=[V]^m$ for input length $d\in\bbN$ and maximum output length $m\in\bbN$, where $[V]:=\{1,\dots,V\}$.
+A text generation model takes an input sequence of tokens and defines a probability vector over all possible outputs,
+$F:\cX \to [0,1]^{\cY}$.
+Hence, we have $F(\vx)_\vy$ denote $\vy$'s probability of being generated given $\vx$.
+To enable explanation via feature-attribution methods like the Shapley value,
+we need to be able to mask certain subsets of the input tokens.
+Let $\vs\in\cM:=\{0,1\}^d$ be a binary mask on the input tokens.
+We will next define a masked text-generation model,
+$f:\cX\times\cM \to [0,1]^{\cY}$,
+which takes both an input sequence and an input mask.
+In words, we will replace all input tokens which are not in the mask $\vs$ by the \texttt{<pad>} token before inputting it to the model.
+If we assume the \texttt{<pad>} or \texttt{<mask>} token is taken to be $p\in[V]$ and identify the $d$-vector composed of all $p$ to be $\vp$,
+then we can write this as
+$f(x,S) := F({\vx} \odot \vs + \vp\odot (1-\vs) )$.
+
+In order to finally define the `value functions' required to define the Shapley score,
+we must first identify our binary masks with subets of the input features.
+In particular, for any element of the powerset $S\in\cP([d]):=\{S\subseteq[d]\}$,
+there is a unique corresponding binary mask $\vs\in\{0,1\}^d$ via the indicator function $\vs = 1_S$.
+For any input token $i\in[d]$, we will use the set notation $(S+i):=S\cup \{i\}$ and $(S-i):=S\setminus \{i\}$ to unmask or mask the token.
+For a fixed $x$, we write $v_\ell(S) := \log(f(x,1_S))$ and $v_p(S) := f(x,1_S)$ as our two candidate value functions.
+
+
+\subsection{Shapley Value}
+Shapley values, which were originally derived to attribute the value of individual players in a cooperative game, have since become a dominant paradigm for explaining feature attributions of black-box machine learning models \citep{shapley1953shapley,lundberg2017shapleySHAP}.
+In Sec. \ref{subsec:shapley_shubik}, we will extend this to the 
+Shapley-Shubik and Penrose-Banzhaf values designed for voting games \citep{shapley1954shapleyShubik,banzhaf1965banzhaf,penrose1946banzhaf}.
+In Sec. \ref{subsec:shapley_hierarchical}, we will describe how to apply the hierarchical extension called the Owen value \citep{owen1977owenValue,winter2002shapleyValueChapter53} to text data.
+
+The Shapley value is commonly formulated as a uniform expectation over permutations:
+\begin{equation}
+\label{eq:permutation_based_shapley}
+\phi_i = \bbE_{\pi}\bigg[
+v_{\ell}(S_{\pi,i} + i) - v_{\ell}(S_{\pi,i} - i)
+\bigg]
+\end{equation}
+where $\pi:[d]\to[d]$ is a permutation and the expectation is computed over the uniform distribution of permutations.
+In other words, $\pi$ represents a random order of the features (tokens)
+and $S_{\pi,i} := \{ j\in[d] : \pi(j)<\pi(i)\}$ is the set of elements which precede $i$ in the order defined by $\pi$.
+Hence, $S_{\pi,i} + i = \{ j\in[d] : \pi(j)\leq\pi(i)\}$ and $S_{\pi,i} - i = S_{\pi,i} = \{ j\in[d] : \pi(j)<\pi(i)\}$, 
+where we unnecessarily subtract the element $i$ in preparation for Equation \ref{eq:shap_and_banz_subset}.
+We follow the standard approach of permutation sampling to estimate the Shapley value as the empirical mean over a finite set of sampled permutations \cite{covert2021explainingByRemoving}.
+
+\begin{comment}
+In the traditional Shapley, suitable for classification tasks and regression tasks, log-probabilities are needed for every candidate output since we can predefine the set of possible outputs to compare. 
+However, in open-ended text generation, we face the challenge of decoding autoregressively without a priori knowledge of which output generations to contrastively compare. 
+Accordingly, in the next section, we adapt the Shapley value to handle generated text coming from distributions of finite support over the infinite Kleene closure. %-ly large
+\end{comment}
+
+The key challenge of applying traditional Shapley is the fact that we do not have access to the full probability vector $F(x)$, which is now of exponential size.
+In classification tasks and regression tasks, the log-probabilities may be computed exactly for every candidate output.
+In open-ended text generation, however, we utilize sequential decoding algorithms like greedy decoding and K-beam generation to recover only a sparse subset of the exponentially large probability vector $F(x)\in[0,1]^{[V]^m}$.
+In the next section, we show how to adapt Shapley to handle generated text coming from distributions of a-priori unknown support.
+\subsection{Extension to Generative Outputs}
+\label{subsec:shapley_shubik}
+Although the Shapley value has found wide success in discriminative tasks like classification and regression, it struggles to be applied to generative tasks.
+Towards this end, we leverage the voting theory reformulation of the conventional Shapley value, called the Shapley-Shubik power index. 
+We consider each input token as a `voter' casting a vote for a generated answer, aiming to `elect' their preferred answer under the \lm's black-box voting system.
+Typically, Shapley employs a value function represented as the vector of log-probabilities, while Shapley-Shubik operates on the probability vector.
+Hereafter, we will refer to the `Shapley-Shubik power index' as `Shapley' for brevity. 
+We can equivalently reformulate Shapley as an expectation over a random subset instead of over a random permutation,
+highlighting its connection with the Banzhaf value:
+\begin{equation}
+\label{eq:shap_and_banz_subset}
+\phi^{Sh}_i := \bbE_{S\sim P_{Sh}(S)}\bigg[ [{v_p(S+i) - v_p(S-i)}]_+ \bigg]
+\quad%\quad\quad
+\phi^{Bz}_i := \bbE_{S\sim P_{Bz}(S)}\bigg[ [{v_p(S+i) - v_p(S-i)}]_+ \bigg]
+\end{equation}
+where $P_{Sh}(S)$ is the Shapley distribution $P_{Sh}(S) \propto \frac{d-1}{ {d \choose |S|} |S| (d-|S|)}$ and the Banzhaf distribution is the same as the Bernoulli distribution
+$P_{Bz}(S) \propto p^{|S|} (1-p)^{d-|S|}$.
+We set $p=50\%$ and $p=10\%$ in our experiments.
+$[ \cdot ]_+$ is used to denote component-wise positive part which we use to take the positive part of the difference of the two probability vectors.
+These formulations offer the major advantage of eliminating the need to compute the full log-probability vector, 
+allowing us to apply the Shapley value to text generation.
+
+\subsection{Extension to Hierarchical Inputs}
+\label{subsec:shapley_hierarchical}
+Leveraging natural text's intrinsic hierarchical nature, our method efficiently computes Shapley values at different granularity levels. 
+Initially calculating Shapley values at the document level, the process then refines to include sentences only from significant-contributing documents. 
+This selective, tiered process continues, progressively narrowing the focus to words residing within high-scoring sentences.
+While prior work like \citep{jin2020samplingAndOcclusion,chen2020virginiaHierarchicalExplanations} explored hierarchical extensions using the Owen value, they only addressed binary hierarchies, lacking support for more general structures. 
+We leverage this hierarchy to uniquely allocate computational resources to pivotal tokens within already identified-as-important paragraphs and sentences, recognizing that not every token warrants investigation.
+
+
+
+
+
+
+
+\section{\ours: Accelerating Explanation Generation}
+
+In this section, we explain the speedup techniques proposed in \ours~designed to expedite Shapley computations in generative text modeling tasks with long context.
+First, we use speculative decoding for predicting the text generations coming from resampled inputs, achieving significant speedups across various model types. 
+Second, we harness recent hardware-efficient techniques such as Flash Attention \citep{dao2022FlashAttn} and connect its block-sparse implementation to other techniques commonly used in the long-document literature.
+Lastly, we employ encoder in-place resampling to improve the speed of passage level explanations. 
+We provide detailed explanations for these in the following sections.
+
+\begin{figure}[t]
+    \centering
+    \small
+    \includegraphics[width=0.85\linewidth]{figures/teaser_figures/figure2spec_fifth_try_better_verify_resized.pdf}
+    \caption{
+    \footnotesize
+    Visualization of how to use the speculative decoding approach proposed in \ours~to improve the resampling algorithm speed.
+    (a) The randomly masked inputs generated to calculate the Shapley value.
+    (b) Running the decoder a single time with the speculation tree and then verifying whether the true output is within the speculated output.
+    (c) If the speculation is rejected, we must run the decoder autoregressively to generate the correct output.
+    Each purple bar represents a single time we call the decoder.
+    Afterwards we update the Shapley value and add the new output to the speculation tree.
+    If the speculation is accepted, we update the Shapley value with the correctly speculated output.
+    (d)
+    As we run the algorithm, we keep track of the speculation tree and its position bias matrix.
+    The causal attention mask can be computed directly from the position bias matrix by masking out all blue entries and only keeping yellow entries.
+    The causal attention matrix quickly takes a more complex form than the typical triangular matrix in order to correctly compute the output likelihoods.
+    }
+    \label{fig:diagram_for_speculative_decoding}
+\end{figure}
+
+\subsection{Decoder Specific Speedups: Speculative Decoding}
+\label{subsec:speculative_decoding}
+We utilize speculative decoding \citep{miao2023specinferTokenTreeVerification,leviathan2023speculativeDecoding} to reduce decoder calls during autoregressive sampling in \ours,
+depicted in Figure \ref{fig:diagram_for_speculative_decoding}.
+This approach exactly computes the output probabilities by first guessing what the fully decoded sequence should be.
+During our algorithm, as we resample different subsets of tokens for the same input example, we gradually build the set of candidate answers.
+For each new sample,
+we first verify whether the argmax decoding exists within the speculative decoding outputs we computed (if so we are already done with this sample).
+If not, then we need to generate the new candidate answer using the regular autoregressive decoding method.
+Afterwards, we graft the new answer to the existing causal decoding tree, making sure to update the causal attention matrix in order to respect the graph structure of the decoding tree.
+Unlike existing applications \citep{leviathan2023speculativeDecoding}, which have a high degree of uncertainty in their decoder predictions,
+\ours~applies speculative decoding to perturbed inputs which closely resemble already decoded samples allowing us to have a much higher prediction success rate.
+In our experiments, 
+we verify that a large amount of total computation can be saved via speculatively decoding in one step rather than sequentially running the decoder model.
+
+
+Additionally, our \ours's speculative decoding tree can be further extended to track related values of interest.
+For instance, it can keep track of log-probabilities decoded at each node, enabling the computation of contrastive Shapley values in terms of log-probabilities, 
+without the need for prespecification.
+In all of our experiments, we use greedy decoding consistent with other long-document question answering studies \citep{izacard2021FiD,liu2023LitM}.
+However, we emphasize that our speculative decoding tree can further support other popular sampling methods like beam search and nucleus generation \citep{zarriess2021NLPdecodingMethodsSurvey,holtzman2020topPgeneration}
+and can keep track of log-probabilites on all leaves of the tree.
+
+
+\subsection{Block Sparsity and Flash Attention}
+\label{subsec:block_sparse_and_flash_attn}
+We leverage the increasingly common Flash Attention mechanism \citep{dao2022FlashAttn} to improve both the memory efficiency and the speed performance of \lms. 
+Memory efficiency is improved by employing an alternative attention matrix computation formula, whose memory scales linearly with input size $\cO(N)$ instead of quadratically $\cO(N^2)$.
+Further speedups are achieved via aligning these computations to scale effectively with modern GPU hardware.
+These adaptations are crucial in the context of long-document question answering, where we handle as many as 20K input tokens with a single GPU. 
+Such input sizes necessitate the linear memory scaling afforded by Flash Attention-type methods \citep{rabe2021selfAttnDoesntNeedN2memory,dao2023FlashAttn2}. 
+Additionally, we make a connection between Flash Attention and recent developments in long-document architectures \citep{izacard2021FiD,ding2023longnet} by using block sparse attention matrices for handling long inputs.
+Given the growing need for such modifications, we also reformulate the original version of \fid into a version incorporating the block sparse implementation of Flash Attention. 
+Following such recent advances into modern architectures for immense context sizes, we believe our block-sparse extended explainability technique positions itself well to continue to be useful in the era of \llms.
+
+\subsection{Encoder Specific Speedups: In-place Resampling}
+\label{subsec:inplace_encoding}
+In \ours, we further exploit the unique structure of chunking-based encoder-decoder models like \fid to get speedups significantly faster than previously possible in NLP.
+In particular, we compute the encoder feature matrix just once when generating the entire explanation for a single example.
+Due to the independence of chunked input fragments, we only need to adjust the encoder-decoder attention mechanism to enable resampling with different document subsets.
+Not only do we drastically reduce the computation time required for re-encoding input features, but reducing the memory overhead from batches of encodings enables parallel decoding with large decoding batch sizes.
+Increasing the decoding batch size allows for much more hardware-efficient decoding, enabling the model to iterate through hundreds of permutation samples in only seconds.
+
+In our experiments, we further combine this approach with the block-diagonal attention matrix reformulation for chunking discussed in Section \ref{subsec:block_sparse_and_flash_attn}.
+By altering passage encodings to efficiently utilize the hardware-alignment in Flash Attention,
+we are able to keep the encoder self-attention and encoder-decoder cross-attention aligned as block sparse matrices.
+Such hardware-aware sparse matrices allow us to minimize extraneous computations by avoiding nonzero entries that unnecessarily cross hardware boundaries and slow down computation.
+\noindent \textbf{\ours}\quad
+In Algorithm \ref{alg:hierarchical_shapley}, we detail \ours, which first calculates the Shapley value at the document level; second ranks documents and selects those which surpass a predefined importance threshold; and third calculates the Shapley value at the token level only for tokens inside of important documents.
+In our experiments, we use a three-tiered hierarchy with passages, sentence, and words; however, for notational simplicity we only describe a two-level hierarchy in our algorithmic description.
+
+
+
+
+
+\section{Experimental Results}
+
+
+
+\paragraph{Datasets}
+We focus on publicly-available datasets designed for the task of open-domain or long-document question answering: Natural Questions (NQ) \citep{kwiatkowski2019naturalQuestionsDataset} and MIRACL (English subset) \citep{zhang2022miracl}.
+NQ is redesigned for open-domain question answering following \citep{lee2019OpenDomainQuestionAnswering,karpukhin2020densePassageRetrieval}.
+In this setting, answers must be found from within all of Wikipedia, rather than a single Wikipedia page.
+The original NQ dataset provides short text answers and passages are rated as relevant so long as they contain the ground-truth answer.
+MIRACL is designed for information retrieval and for each query it provides binary relevance labels for ten related passages from the corpus.
+Relevance judgements are made by a human annotator who decides whether the passage information is sufficient to answer the given question; however, they are not required to justify or describe the answer as part of the label.
+\paragraph{Models}
+For passage ranking of the corpus (retriever model) we use the recent Contriever \citep{izacard2022contriever} architecture following \litm.
+For question answering (reader models) we use different members of the T5 family  \citep{raffel2020textToTextT5}.
+We use the available flan tuned models at the large and XXL sizes (`T5-large' and `T5-XXL') \citep{chung2022scalingFLAN} and the fine-tuned T5 large model from \fid (`T5-FiD') \citep{izacard2021FiD}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=.31\linewidth]{figures/benchmarking/flan-t5-xxl_hbar__benchmarking_plot_softened656.pdf}
+    \includegraphics[width=.31\linewidth]{figures/benchmarking/flan-t5-large_hbar__benchmarking_plot_softened656.pdf}
+    \includegraphics[width=.33\linewidth]{figures/benchmarking/FID_T5_horizontalBar__benchmarking_plot_C_softened656.pdf}
+    \caption{(a, b) \ours~speed benchmark results at the token level on T5-XXL and T5-large. (c) \ours~speed benchmark results at the document level on T5-FiD.\quad
+    Red is the original Shapley value with permutation sampling. Blue is the hierarchical Shapley value with hierarchical permutation sampling with thresholds in $\{10\%,30\%\}$. Yellow is the hierarchical Shapley value with speculative decoding.  Green is the hierarchical Shapley value with in-place encoding with various sizes $\{1,10,100\}$ for the decoding batch size (DBS).}
+    \label{fig:flan_and_fid_explanation_speed}
+\end{figure}
+\subsection{\ours~Speed Benchmark Results}
+\label{subsec:results_speed_benchmarking}
+We present benchmarks demonstrating the improved speed of \ours. 
+First, we evaluate the Shapley value, which provides detailed token-level explanations using %goes all the way to the fine-grained token level explanations as following 
+our Algorithm \ref{alg:hierarchical_shapley}.
+In \Figref{fig:flan_and_fid_explanation_speed}, we benchmark with 100 sampled permutations and 10 documents from the \litm setting for both {\xxlflan} and \largeflan.
+A single A100 40GB GPU is used for benchmarking all experiments.
+We observe that the standard Shapley value estimation requires a prohibitive 12-20 hours per sample and show that our proposed hierarchical sampling algorithm significantly reduces this time. %we can reduce this by a significant amount.
+With the integration of speculative decoding, we can achieve an even more significant reduction in computation time, bringing computation time to under an hour and approximately an hour, respectively.
+We note that additional speedups can be achieved in real-world settings by just sampling fewer permutations.
+
+we show that even fewer than 100 permutation samples can suffice.
+When using only 10 permutation samples, \ours~reduces the time for the {\xxlflan} model from about two hours to five minutes.
+
+We additionally benchmark the \fidlarge model accelerated with its architecture specific modifications as seen in \Figref{fig:flan_and_fid_explanation_speed}c.
+We take document level explanations from multiple minutes to less than ten seconds, enabling real-time improvements in document retrieval applications which we demonstrate in \Secref{subsec:results_document_distillation_retriever_reader_improvement}
+
+
+\subsection{Visualizing Interpretations}
+\label{subsec:results_interpretability_visualizations}
+
+We find that our hierarchical Shapley scores are effective for isolating important tokens from within contexts that are thousands of tokens in length.
+We also provide interactive visualizations hosted \href{https://anon832098265.io/}{here}.
+
+\subsection{Document Distillation}
+\label{subsec:results_document_distillation_retriever_reader_improvement}
+We show the value of the proposed explanation scores in \ours~within the context of document retrieval for open-domain QA. We first apply our method to improve the retrieval aspect, particularly enhancing the recall of the modified retriever model,
+by reranking passages according to their explanation scores.
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.31\linewidth]{figures/reader_and_retriever/retriever_recall_curves_7by5_NQ_A.pdf}
+    \includegraphics[width=0.31\linewidth]{figures/reader_and_retriever/retriever_recall_curves_7by5_MIRACL_original_B.pdf}
+    \includegraphics[width=0.31\linewidth]{figures/reader_and_retriever/retriever_recall_curves_7by5_MIRACL_pseudo_C.pdf}
+    \caption{Recall improvements via resorting the retrieved documents using different methods (a) Natural Questions (b) MIRACL with original labels (c) MIRACL with pseudo labels}
+    \label{fig:NQ_and_MIRACL_retriever_improvement}
+\end{figure}
+Fig. \ref{fig:NQ_and_MIRACL_retriever_improvement}a shows substantial recall improvement on the NQ dataset, with all three explanation methods exhibiting similar performance improvements compared to the baseline retriever model.
+Table \ref{tab:NQ_and_MIRACL_retriever_AUC} provides a numerical evaluation of the area under the curve for these models.
+However, Fig. \ref{fig:NQ_and_MIRACL_retriever_improvement}b shows less pronounced improvements on the more challenging MIRACL dataset, primarily due to its sparser label information only providing relevance labels for ten of the millions of passages. 
+We verify this claim by extending the label information using pseudo-labels.
+Specifically, we take all relevant passages according to the MIRACL labels and ask {\xxlflan} to give a short answer according to that passage alone.
+We then leverage this set of candidate answers to evaluate passage relevance in the same fashion as the NQ dataset.
+In Figure \ref{fig:NQ_and_MIRACL_retriever_improvement}c,
+we see this not only improves the overall recall, but disproportionately boosts the success of our explainability approach's performance. 
+
+We take this as preliminary evidence of the potential of our method to discover relevant passages which are typically left underexplored when using similarity-based retrieval models alone.
+Accordingly, we suggest that our method could be further applied to enhance dataset construction pipelines by not only reducing the burden of human annotation via localizing important document features, but also by collecting a more diverse document set to be annotated by humans than is possible with existing methods.
+
+\begin{table}[!htb]
+    \begin{savenotes}
+    \centering
+    \footnotesize
+    \begin{minipage}{.53\linewidth}
+    \caption{AUC for the recall curves from Fig. \ref{fig:NQ_and_MIRACL_retriever_improvement} 
+    on both the NQ dataset and MIRACL dataset.
+    }
+\resizebox{1.0\columnwidth}{!}{
+      \centering
+    \begin{tabular}{|c||c|c|c|c|} \hline 
+         & {Natural} & MIRACL & MIRACL \\ 
+         & Questions & (Original) & (Pseudo) \\ \hline
+         \textbf{Baseline} & 84.23 & 80.18 & 84.53 \\ \hline
+         \textbf{\ours} & 88.53 & 77.33 & 86.43 \\ \hline
+         \textbf{\oursTwo} & 88.56 & 78.19 & 86.17 \\ \hline
+         \textbf{\oursThree} & 88.74 & 82.38 & 86.53 \\ \hline 
+         \textbf{Attention\footnotemark{  }}
+         & 88.35 & 78.27 & 84.30 \\ \hline 
+    \end{tabular}
+    \label{tab:NQ_and_MIRACL_retriever_AUC}
+    }
+    \end{minipage}%
+    \quad
+    \quad
+    \begin{minipage}{.41\linewidth}
+      \centering
+    \caption{AUC for the accuracy curves from Figure \ref{fig:NQ_reader_improvement} on the NQ dataset.}
+\resizebox{1.0\textwidth}{!}{
+    \begin{tabular}{|c||c|c|c|} \hline 
+         & $K$=1 & $K$=3 & $K$=5 \\ \hline
+         \textbf{Baseline} & 50.54 & -- & -- \\ \hline
+         \textbf{Majority Vote} & 32.90 &  55.19 & 63.88 \\ \hline
+         \textbf{\ours} & \textbf{52.72} & \textbf{66.16} & \textbf{69.57} \\ \hline
+         
+    \end{tabular}
+    }
+    \label{tab:NQ_reader_AUC}
+    \end{minipage} 
+    \end{savenotes}
+\end{table}
+
+In our second application, we propose to use the Shapley values from the reader model to distill its own set of available documents. 
+In conjunction with the findings in \litm \citep{liu2023LitM}, which highlight challenges for reader models in utilizing longer contexts, we redistill the model's documents before reaching a final answer. 
+We evaluate top-$K$ accuracy for small values of $K$, enabling the reader model to use a diverse range of relevant information, and narrowing the gap between the retriever's recall and the reader's accuracy. 
+This evaluation highlights the importance of providing a diverse set of candidate answers.
+\Figref{fig:NQ_reader_improvement} illustrates the accuracy improvements achieved by the redistilled model compared to the majority voting baseline. 
+We see that \ours~significantly outperforms the baseline with just one pass through the reader model, and further surpasses the majority voting baseline for multiple answers.
+We again provide numerical comparisons using AUC in Table \ref{tab:NQ_reader_AUC}.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.32\linewidth]{figures/reader_and_retriever/top_1_acc_plot__TextGenSHAP.pdf}
+    \includegraphics[width=0.32\linewidth]{figures/reader_and_retriever/top_3_acc_plot__TextGenSHAP.pdf}
+    \includegraphics[width=0.32\linewidth]{figures/reader_and_retriever/top_5_acc_plot__TextGenSHAP.pdf}
+    \caption{Top-$K$ Accuracy for $K$=$1,3,5$ on the Natural Questions dataset for \ours, the original model, majority vote baseline, and explanation-based resorting method.}
+    \label{fig:NQ_reader_improvement}
+\end{figure}
+
+
+
+\begin{comment}
+\begin{table}
+    \centering
+    \footnotesize
+    \begin{tabular}{|c||c||c|c|} \hline 
+    \end{tabular}
+    \caption{AUC for the recall curves in Figure \ref{fig:NQ_and_MIRACL_retriever_improvement} on the NQ and MIRACL datasets.}
+    \begin{tabular}{|c||c|c|c|c|} \hline 
+         & {Natural} & MIRACL & MIRACL \\ 
+         & Questions & Original & Pseudo \\ \hline
+         \textbf{Baseline} & 84.23 & 80.18 & 84.53 \\ \hline
+         \textbf{\ours} & 88.53 & 76.71 & 85.97 \\ \hline
+         \textbf{\oursTwo} & 88.56 & 76.88 & 86.27 \\ \hline
+         \textbf{\oursThree} & 88.74 & 82.15 & 86.60 \\ \hline 
+    \end{tabular}
+    \label{tab:NQ_and_MIRACL_retriever_AUC}
+\end{table}
+\end{comment}
+
+
+\begin{comment}
+\begin{table}
+    \centering
+    \footnotesize
+    \begin{tabular}{|c||c||c|c|} \hline 
+    \end{tabular}
+    \caption{AUC for the accuracy curves in Figure \ref{fig:NQ_reader_improvement} on the NQ dataset.}
+    \begin{tabular}{|c||c|c|c|} \hline 
+         & $K$=1 & $K$=3 & $K$=5 \\ \hline
+         \textbf{Baseline} & 50.54 & -- & -- \\ \hline
+         \textbf{Majority Vote} & 32.90 &  55.19 & 63.88 \\ \hline
+         \textbf{\ours} (ours) & \textbf{52.72} & \textbf{66.16} & \textbf{69.57} \\ \hline
+         
+    \end{tabular}
+    \label{tab:NQ_and_MIRACL_retriever_AUC}
+\end{table}
+\end{comment}
+
+
+
+
+
+
+
+
+\footnotetext{Attention follows the best hyperparameters for aggregation found in \cite{izacard2021distillingFiD}}
+
+
+
+\section{Conclusion}
+
+In this paper,
+we introduce \ours~to enhance the Shapley value, a trusted explainability method, to address challenges in modern NLP applications featuring long inputs, large models, and text generation. %which faces several barriers to being directly applied to modern NLP applications with long inputs, large models, and text generation.
+We introduce modifications to adapt the Shapley value for hierarchically-structured input text and autoregressively-decoded output generations, drawing on insights from the game theory literature to support their theoretical foundations.
+Additionally, we incorporate multiple transformer-specific architecture modifications which significantly accelerate explanation generation. %enabled fast computation of explanations.
+Our approach not only speeds up Shapley value computation for generated text but also demonstrates its effectiveness in improving performance in a standard question answering task. %Altogether, we significantly improve the speed over existing approaches for computing the Shapley value for generated text, and further demonstrate the value of such explanations for enhancing the performance in a standard question answering task.
+We expect that such explanation methods will continue to find broad applicability in a variety of {\llm} use cases.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,409 @@
+\title{TURNIP: A “Nondeterministic” GPU Runtime with CPU RAM Offload}
+
+\begin{abstract}
+An obvious way to alleviate memory difficulties in GPU-based AI computing is via \emph{CPU offload}, where data are moved between GPU and CPU RAM. While CPU offload is useful, it can greatly slow down a computation due to the relatively slow transfer rate between CPU RAM and GPU RAM.  To address this, overlapping memory transfer and compute is a necessity, but this asynchronicity introduces nondeterminacy, and hence it is impossible to know beforehand what is the best order of operations. We describe \Sys{}, which is a system for running AI computations using CPU offload, designed to handle this nondeterminacy.  The key innovation in \Sys{} is the compilation of the AI computation into a dependency graph that gives the \Sys{} runtime freedom to run operations such as GPU kernel calls in many different orders; at runtime, \Sys{} chooses the best order on-the-fly, in response to real-time events.  We find that \Sys{} outperforms standard, PyTorch-based systems supporting constrained GPU RAM by a significant margin, and also avoids out-of-memory errors in a severely memory constrained environment. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Memory management for modern AI computations is difficult.  In the LLaMA large language model \citep{touvron2023llama}, for example, the attention computation on a sequence of length $n$ produces an intermediate result with $128 \times n^2$ floating point numbers. Thus, for a long input sequence of 100,000 tokens, the attention computation will result in 1.2 trillion numbers, which would require 2.4 terabytes to store at half-precision. It is for these reasons that out-of-memory errors plague AI programmers \citep{PyTorchFAQ}.
+
+CPU offload---where data are moved to CPU RAM for storage---can help.  As CPU RAM is much more inexpensive than GPU RAM and it is possible to install many terabytes of CPU RAM in a GPU server essentially ``for free'',\footnote{At current prices, a single state-of-the-art H100 GPU costs the same as approximately 10TB of CPU RAM---more than 100$\times$ the RAM available on a H100 GPU} it makes sense to leverage CPU RAM to temporarily store data. This idea has been explored in several systems such as \texttt{pofo} \citep{beaumont2021efficient}, AutoTM \citep{hildebrand2020autotm}, SwapAdvisor \citep{huang2020swapadvisor}, Capuchin \citep{peng2020capuchin}, and POET \citep{patil2022poet}.  These systems view a GPU computation as a dataflow graph, and plan how to fit the computation into GPU RAM by making use of CPU RAM offload. 
+
+While CPU offload is an obvious idea, it can greatly slow down a computation, due to the relatively slow transfer rate between CPU RAM and GPU RAM.  Thus, any system for CPU offload must ensure that when such a transfer happens, no computation is blocked waiting for the transfer to finish.  
+
+In this paper, we propose \Sys{} (short for ``nonde\textbf{T}erministic gp\textbf{U} \textbf{R}u\textbf{N}time w\textbf{I}th c\textbf{P}u offload'') which is a runtime for multi-GPU servers, designed to systematically support CPU RAM offload.  The key innovation of \Sys{} is its combination of a pre-computed memory access plan called a \memgraph{} with a ``nondeterministic,'' event-driven system runtime. A \memgraph{} is a dependency graph where vertices represent tasks (such as the execution of a GPU kernel to perform a small
+part of attention computation in a layer of a large language model) and edges represent data or memory dependencies. Any execution order that respects the dependencies in the \memgraph{} is 
+valid, and tasks are dispatched at any time that their dependencies have been met and the appropriate resources are free. Thus, two executions of the same \memgraph{} may lead to different sequences of operations being executed on a GPU, or different sequences of tensors being paged to CPU RAM---hence the non-determinacy. However, the dependencies in the \memgraph{} are such that the final output is always \emph{correct}, no matter the execution order. \Sys{}'s event-driven, fully asynchronous runtime is unique.  
+Because operations can be dispatched whenever the dependencies are fulfilled and are not constrained to any specific ordering, it lowers the chance that any GPU will be stalled waiting for a memory transfer to complete.  If one task cannot run due to an un-met dependency in the \memgraph{}, it is possible that there is another task that \emph{can} run.
+
+The key technical challenge is how to effectively build a \memgraph{} with as few dependencies as possible, to allow the runtime as much freedom as possible to dispatch operations so that it is never blocked, waiting for a memory transfer to complete. \Sys{} builds a \memgraph{} by simulating an execution of the computation, mapping tensors to GPU memory locations and, when necessary adding edges that represent memory dependencies, as well as \texttt{offload} and \texttt{reload} operations. 
+
+
+
+\section{Why Is Non-Determinacy of Execution Order Crucial?}
+
+
+The design of \Sys{} is based on a simple hypothesis: When running a GPU-based computation that utilizes CPU RAM, asynchronous operations such as \texttt{offload} and \texttt{reload} will have a seemingly nondeterministic running time that is difficult to pre-plan for.  The system runtime must accommodate
+the resulting non-determinacy, or else performance can suffer.
+
+\begin{wrapfigure}{r}{5cm}
+  \centering
+    \includegraphics[width=5cm]{SimpleMemgraph.png}
+    \caption{A simple \memgraph{}.} 
+    \label{fig:simplememgraph}
+\end{wrapfigure} 
+Consider \autoref{fig:simplememgraph}, which depicts a \memgraph{} for a single GPU system with an \texttt{offload} (data movement from GPU RAM to CPU RAM) and a \texttt{reload} (from CPU RAM to GPU RAM). Vertices are operations (for example, GPU kernel calls) that produce data.  Black edges indicate data or consumption dependencies; red edges indicate memory dependencies (\memgraph{}s will be described in detail in Section 4).   Note the memory dependency from $\texttt{offload}_1$ to \textsf{4}.  This exists because the output of \textsf{4} will be written to the location of the output of \textsf{1}, and so \textsf{4} cannot execute until the $\texttt{offload}_1$ completes.  The data dependency from $\texttt{reload}_3$ to \textsf{5} exists because the kernel associated with vertex \textsf{5} will consume the \texttt{reload}ed tensor.
+
+Imagine that a system has executed GPU kernels associated with vertices \textsf{1} and \textsf{2}. It is currently executing the $\texttt{offload}_1$ and the $\texttt{reload}_3$.  At this point, \emph{it is impossible to know which kernel should run next} (\textsf{4} or \textsf{5}) as this depends on which memory transfer finishes first.  Ideally, \emph{this decision will be made at runtime}.  If the system deterministically decides to run \textsf{4} before \textsf{5} at compile time, and the $\texttt{reload}_3$ finishes first, the GPU will sit, idle, waiting for the $\texttt{offload}_1$ to complete.  This is why a special-purpose, ``nondeterministic'' runtime is needed: to properly handle the non-determinacy induced via the addition of memory operations.
+
+
+
+
+\section{Related Work}
+
+
+
+There are two approaches taken by systems dealing with limited GPU memory.  Some, like \Sys{}, accept an abstracted version of a generic GPU computation. Other systems are more specifically targeted to certain categories of models, optimization algorithms, or to specific tasks such as training or inference.  Unlike \Sys{}, none of these existing systems consider the effect of the nondeterminism of \texttt{offload} and \texttt{reload} operations on system performance, nor do any focus on the system runtime.
+
+Using the first, more general approach, are systems that accept a generic dataflow graph and, like \Sys{}, plan for execution in limited memory: \texttt{pofo} \citep{beaumont2021efficient}, AutoTM \citep{hildebrand2020autotm}, SwapAdvisor \citep{huang2020swapadvisor},  Checkmate \citep{jain2020checkmate}, Capuchin \citep{peng2020capuchin}, and POET \citep{patil2022poet} all assume an input dataflow graph for a machine learning computation, and then plan for execution in limited memory. Checkmate considers only tensor re-materialization, whereas POET, \texttt{pofo}, and Capuchin consider re-materialization and offload; AutoTM and SwapAdvisor consider only offload. 
+
+The more targeted approach is taken by the DeepSpeed project \citep{DeepSpeed} and the various ZeRO optimizations.
+For transformers and other, similar models, DeepSpeed inference (which includes ZeRO-Inference) \citep{aminabadi2022deepspeed} has two key ideas. First, DeepSpeed inference ``offload[s] some activation from
+GPU to CPU memory while not in use.''  Second, DeepSpeed inference ``pins the
+model weights either in DRAM (if large enough) or NVMe,
+and streams each layer into GPU memory for computation
+when needed.''  FlexGen \citep{sheng2023flexgen} seeks to use a variety of methods to speed transformer inference given limited hardware, including model weight offload to CPU, quantization \citep{yao2022zeroquant,frantar2022gptq}, and sparse attention \citep{child2019generating}.  The latter two ideas are orthogonal to the ideas in this paper. For CPU offload, FlexGen optimizes a ``zig-zag'' block scheduling that works through a transformer layers and sequences in the batch, offloading and reloading the KV-cache \citep{pope2023efficiently} and model weights.  PagedAttention \citep{kwon2023efficient} deals with low memory utilization in transformers, developing a paging system for the KV-cache.
+
+\begin{wrapfigure}{r}{4.5cm}
+  \centering
+    \includegraphics[width=4.5cm]{Figs/Decomp.png}
+    \caption{A decomposition of matrix multiplication.} 
+    \label{fig:matmul}
+\end{wrapfigure} 
+
+ZeRO-Offload \citep{ren2021zero} is a comprehensive solution for limited-memory training that can be seen as primarily using CPU RAM for running the ADAM optimizer, moving weights to GPU RAM on a carefully-controlled schedule. ZeRO-Offload is an enhancement on ZeRO \citep{rajbhandari2020zero}, which is designed to be memory-efficient, partitioning both the optimizer and the data across multiple GPUs. 
+ZeRO-Infinity \citep{rajbhandari2021zero} is similar, and includes a CPU offload engine, as well as tiling of operators to utilize the RAM of multiple GPUs.
+
+
+
+\section{\taskgraph{}
+
+
+
+\begin{figure}[t]
+    \begin{minipage}{.58\textwidth}
+        \centering
+    \includegraphics[width=1\textwidth]{Figs/TaskGraph.png}
+    \caption{Example \taskgraph{} consisting of six GPU kernel calls and three GPU-to-GPU transfers.} 
+    \label{fig:taskgraph}
+    \end{minipage}%
+    \hspace{10 pt}
+    \begin{minipage}{0.38\textwidth}
+        \centering
+    \includegraphics[width=1\textwidth]{Figs/MemoryAllocation1.png}
+    \caption{Possible mapping of the output of all of the operations in \autoref{fig:taskgraph} to memory locations.} 
+    \label{fig:memmap}
+    \end{minipage}
+\end{figure}
+
+\Sys{} takes is input a \taskgraph{}.  A \taskgraph{} is a dataflow graph (a directed, acyclic graph) that describes how to perform multi-GPU computations.  In a \taskgraph{}, edges represent data flow, and vertices represent operations over tensors. A vertex without any inputs (called an \emph{input vertex}) is associated with an input tensor.
+An operation associated with a non-input vertex may be either a kernel call that is to be executed on a specific GPU, or a GPU-to-GPU data transfer. 
+
+\Sys{} is agnostic as to how the \taskgraph{} is created; it could, for example be created using a framework such as FlexFlow \citep{jia2019beyond} or Alpa \citep{zheng2022alpa}.
+Consider a matrix multiplication $\textbf{X} \times \textbf{Y}$, and assume we wish to execute this matrix multiplication on three GPUs.  To produce a \taskgraph{}, a framework such as FlexFlow may choose to decompose this matrix multiplication as depicted in \autoref{fig:matmul}, perhaps corresponding to the \taskgraph{} of \autoref{fig:taskgraph}.  
+
+
+Given such a \taskgraph{}, \Sys{} first compiles the \taskgraph{} into a \memgraph{}, which it will eventually execute.  Like a \taskgraph{}, a  \memgraph{} is also a directed acyclic graph. Every vertex in the original \taskgraph{} will be present in a corresponding \memgraph{}. Further, the compilation process may add additional \texttt{offload} and \texttt{reload} operations that move memory from GPU RAM to CPU RAM, and vice versa. 
+During the compilation process, the output associated with every vertex in the \memgraph{} is mapped to a memory location. Unlike the input \taskgraph{}, the \memgraph{} is not a dataflow graph; it is a dependency graph. If there is an edge from $v_1$ to $v_2$, it means that $v_2$ depends on $v_1$ and $v_2$ may not execute until after $v_1$ has been executed.  In a \memgraph{}, there are two types of dependencies.  One is a data dependency, which is inherited from the \taskgraph{} (or is created via the addition of an \texttt{offload} or \texttt{reload}; see below).  The second is a memory dependency, which is added to ensure that there are no race conditions in the graph.  A \emph{race condition} occurs when there is some vertex for which two valid executions of the graph may produce a different output. This can happen when two vertices write to the same memory location, and it is possible for a third vertex to read either output, depending upon the execution order.
+
+\begin{wrapfigure}{l}{7cm}
+  \centering
+    \includegraphics[width=7cm]{Figs/DepGraph1.png}
+    \caption{\memgraph{} corresponding to \autoref{fig:taskgraph}.} 
+    \label{fig:memgrapgh}
+\end{wrapfigure} 
+
+Let us illustrate a possible compilation of the \taskgraph{} of \autoref{fig:taskgraph} to a \memgraph{}.  
+Imagine that our three GPUs each have five memory locations, and for simplicity, each tensor is the same size and occupies exactly one memory location.  During compilation, the tensor associated with the output of each operation in the \taskgraph{} is assigned to a memory location, as depicted in \autoref{fig:memmap}. GPU 1 must deal with seven tensors total (two input tensors and five additional tensors that are created via the execution of some operation), and we cannot fit all seven of those tensors in memory, given our five locations.  Thus, the tensors output by operations \textsf{A} and \textsf{4} are both mapped to GPU1-Loc1, and the tensors output by operations \textsf{1} and \textsf{8} are both mapped to GPU1-Loc3.
+
+
+\begin{wrapfigure}{l}{5cm}
+  \centering
+    \includegraphics[width=5cm]{Figs/MemoryAllocation2.png}
+    \caption{Possible mapping of tensors to GPU RAM.} 
+    \label{fig:memmap2}
+\end{wrapfigure} 
+
+A corresponding \memgraph{} is shown in \autoref{fig:memgrapgh}. Note that two new edges representing memory dependencies have been added. These edges guarantee that the graph is free of race conditions.  
+Specifically, a graph will be free of race conditions, if, whenever the outputs of vertices $v_1$ and $v_2$ have both been mapped to the same memory location, either $v_1$ \emph{safely overwrites the result of} $v_2$, or $v_2$ \emph{safely overwrites the result of} $v_1$.
+We say that ``$v_1$ safely over-writes the result of $v_2$'' if and only if, for every $v_3$ that consumes the output of $v_2$, there is a memory dependency from $v_3$ (or some descendent of $v_3$) to $v_1$ (or to some ancestor of $v_1$).
+Why?  If  $v_1$ is to safely over-write the result of $v_2$, we need to ensure that $v_1$ cannot execute until all of the consumers of $v_2$ have finished execution---such memory dependencies ensure this.
+For example, from \autoref{fig:memmap} we see that the output of vertex \textsf{4} is mapped to the same location as the output of vertex \textsf{A}. In the associated \memgraph{} of \autoref{fig:taskgraph}, to ensure that \textsf{4} safely over-writes the result of \textsf{A}, we add a memory dependency from \textsf{3} (the only consumer of \textsf{A}) to \textsf{4}.
+From \autoref{fig:memmap} we also see that the results of \textsf{1} and \textsf{8} are mapped to the same location. To ensure that \textsf{8} safely over-writes the result of \textsf{1}, we add a memory dependency from \textsf{3} (the only consumer of \textsf{1}) to \textsf{8}.  Note that this memory dependency is shown as a dashed line; this indicates that it is \emph{superfluous}, as there is already a data dependency from \textsf{3} to \textsf{8}, so this memory dependency is not needed for correctness.
+
+\begin{wrapfigure}{l}{7cm}
+  \centering
+    \includegraphics[width=7cm]{Figs/DepGraph2.png}
+    \caption{\memgraph{} with less GPU RAM.} 
+    \label{fig:depgraph2}
+\end{wrapfigure} 
+
+Things can become more intricate if the memory is more constrained.  Consider the case where we have only four memory locations on each GPU, and we wish to compile the same \taskgraph{}.  One possible mapping of the vertices \taskgraph{} of \autoref{fig:taskgraph} to memory locations for GPU 1 is shown in \autoref{fig:memmap2}; the associated \taskgraph{} is shown in \autoref{fig:depgraph2}. 
+Note in particular the addition of an \texttt{offload}-\texttt{reload} pair.  Both the  \texttt{offload} and the \texttt{reload} are new operations that are added to the \memgraph{} during compilation, to facilitate execution in memory-constrained scenarios.  We can always compile $v_1 \rightarrow v_2$ in a \taskgraph{} to $v_1 \rightarrow \texttt{offload}_{v_1} \rightarrow \texttt{reload}_{v_1} \rightarrow v_2$ in a \memgraph{}.  After the $\texttt{offload}_{v_1}$, the result of $v_1$ takes up no GPU memory, but it cannot be used until the $\texttt{reload}_{v_1}$, where it is again mapped to a GPU memory location.  The reason for the inclusion of the \texttt{offload}-\texttt{reload} pair in this case is that it allows the result of \textsf{A} to be removed from GPU RAM for a time.  Thus, vertex \textsf{4} can execute and write its result on top of the result of \textsf{A}, which is subsequently reloaded so that vertex \textsf{3} can be executed.
+In \autoref{fig:memmap2} we see that there are four pairs of vertices whose results are mapped to the same GPU memory locations, and so memory dependencies must been added to the \memgraph{} to ensure that there are no race conditions.  Consider \textsf{A} and \textsf{4}, which are both mapped to GPU1-Loc1.  To ensure that \textsf{4} safely over-writes the result of \textsf{A}, we have a memory dependency from the $\texttt{offload}_{v_1}$ (the only consumer of \textsf{A}) to \textsf{4}.  Or, consider $\texttt{reload}_{v_1}$ and \textsf{2}, which are both mapped to GPU1-Loc4.  To ensure that the $\texttt{reload}_{v_1}$ safely over-writes the result of \textsf{2}, there is a memory dependency from the only consumer of \textsf{2} (vertex \textsf{4}) to the $\texttt{reload}_{v_1}$.
+
+
+
+\section{The \Sys{}
+
+
+Once a \memgraph{} has been produced, it is executed by the \Sys{} engine using a nondeterministic, event-based framework.  As soon as a GPU is unused or a tensor is ready to be \texttt{offload}ed to RAM, the \Sys{} runtime can immediately assign any available work to the GPU or begin the transfer, without regard to the overall state of the computation.
+Also note that there are no calls to memory-management routines such as \texttt{cudaMalloc} or \texttt{cudaFree} during \memgraph{} execution, as memory management is no longer dynamic.  Tensor placement is pre-determined before execution, and if dependencies are respected, there can be no memory corruption due to race conditions.  
+ 
+ To execute the \memgraph{, }\Sys{} runs a central event processing loop, that repeatedly processes callback functions that are called response to completion of the work associated with a \memgraph{} vertex (completion of a GPU-to-GPU transfer, completion of the GPU kernel, or completion of an \texttt{offload} or \texttt{reload}).  When a vertex completes and a callback is invoked, the event loop checks to see if any other vertex can be executed. That is, it searches for a vertex $v_1$ where (a) all vertices $v_2$ with an edge $v_2 \rightarrow v_1$ in the \memgraph{} have also completed; (b) if $v_1$ is a kernel call, then the GPU $v_1$ is assigned is currently free.  When the event loop finds such a vertex, it launches it, and searches for another such vertex.  When it can find no such executable vertex, it goes to sleep until woken by another callback.
+
+ 
+
+
+
+\section{Building a \memgraph}
+
+
+The key technical question we address in this paper is: How to construct a \memgraph{} from a \taskgraph{}? The primary requirement for the compilation process is \emph{correctness}.  Correctness requires that (a) every data dependency present in the \taskgraph{} is also present in the \memgraph{}, \emph{or} is replaced with a sequence of \texttt{offload}-\texttt{reload} operations;\footnote{So, for example, if $v_1 \rightarrow v_2$ is present in the \taskgraph{}, we may have $v_1 \rightarrow \texttt{offload}_{v_1} \rightarrow \texttt{reload}_{v_1} \rightarrow v_2$ in the \memgraph{}} (b) there are no race conditions in the \memgraph{}; (c) the \memgraph{} has no cycles.  In addition, it is desirable for the \memgraph{} to be performant.  A \memgraph{} will not be performant if memory dependencies severely constrain the execution order of vertices.  Such constraints may reduce parallelism and GPU utilization. 
+
+\begin{wrapfigure}{r}{8.6 cm}
+  \centering
+  \begin{algorithmic}
+\STATE{\textsc{BuildMemgraph}: \textbf{Inputs}: \taskgraph{}, sorted list of \taskgraph{} vertices $V = \langle v_1, v_2, ..., v_n \rangle$; \textbf{Outputs}: \memgraph{}, GPU memory location $v_i.\texttt{loc}$ for $i \in \{1...n\}$ } 
+    \STATE ----------------------------------------------------------------------
+\STATE {$\texttt{Evicted} \leftarrow \{\}$; $\texttt{execHzn} \leftarrow 1$; $\texttt{allocHzn} \leftarrow 1$;}
+\WHILE {\texttt{execHzn} $\leq n$}
+   \IF {\texttt{allocHzn} $<= n$ and  
+   $(v_\texttt{allocHzn}.\texttt{loc} \leftarrow \texttt{simMalloc} (v_\texttt{allocHzn})) \neq -1$}
+      \STATE{\textcolor{blue}{\texttt{/*}successfully allocated space for future result\texttt{*/}} }
+      \STATE{$\texttt{allocHzn}$ += $1$}
+   \ELSIF{$\texttt{allocHzn} = \texttt{execHzn}$}
+      \STATE{\textcolor{blue}{\texttt{/*} unable to allocate for next execution w/o evict\texttt{*/}}}
+      \STATE{$v_\texttt{allocHzn}.\texttt{loc} \leftarrow \texttt{simMallocOffld} (v_\texttt{allocHzn})$}
+       \STATE{$\texttt{allocHzn}$ += $1$}
+   \ELSE
+      \STATE{\textcolor{blue}{\texttt{/*} simulate execution of the next vertex \texttt{*/}}}
+      \STATE{\textcolor{blue}{\texttt{/*} first, compute set of vertices exec depends on \texttt{*/}}}
+      \STATE{$\texttt{Deps} \leftarrow \{v \textrm{ s.t. edge } v \rightarrow v_\texttt{execHzn} \in \taskgraph{}\}$}
+      \FOR{$v \in \texttt{Deps}$}
+           \STATE{\textcolor{blue}{\texttt{/*} reload dependency if evicted \texttt{*/}}}
+          \IF{$v \in \texttt{Evicted}$}
+              \STATE{$v.\texttt{loc} \leftarrow \texttt{simMallocForceReld} (v)$}
+          \ENDIF
+          \STATE{\textcolor{blue}{\texttt{/*} if dependency won't be used again, free it \texttt{*/}}}
+          \IF{not $\exists (\texttt{fut} > \texttt{execHzn} \texttt{ s.t. edge } v \rightarrow v_\texttt{fut} \in \taskgraph{})$} 
+             \STATE{$\texttt{simFree}(v)$}
+          \ENDIF
+          \STATE{\textbf{add} edge $v \rightarrow v_\texttt{execHzn}$ to \memgraph{}}
+       \ENDFOR
+       \STATE{$\texttt{execHzn}$ += $1$}
+   \ENDIF
+\ENDWHILE 
+\end{algorithmic}
+\caption{Building a \memgraph{} via execution simulation.} \label{alg-buildmemgraph}
+\end{wrapfigure}
+
+Our basic tactic during compilation is to rely on a simulated execution of the \taskgraph{} to generate the \memgraph{}.  Given a serial ordering of the vertices in the \taskgraph{} that respects all dependencies (so that if $v_1 \rightarrow v_2$ is in the \taskgraph{}, $v_1$ is before $v_2$ in the ordering) we simulate its execution, making  calls to special variants of \texttt{malloc} and \texttt{free} that do not actually allocate GPU RAM, but instead maintain a map of used and free RAM slots on the GPU that is the target of the compilation.  These implementations also maintain a history of which tensors occupied which positions in simulated GPU RAM, to correctly generate memory dependencies.  As the simulation runs, the \memgraph{} is constructed.  Calls to the special \texttt{malloc} implementations associate \memgraph{} vertex outputs to GPU memory locations (effectively producing the mappings depicted in \autoref{fig:memmap} and \autoref{fig:memmap2}).  Whenever a call to the \texttt{malloc} variant fails because there is not enough GPU RAM, an \texttt{offload} vertex must be added to the \memgraph{}.  Whenever it is time to simulate execution of a \taskgraph{} vertex but one of the inputs is not in the simulated GPU RAM, then a memory location for the corresponding \texttt{reload} vertex is allocated, and a data dependency on that \texttt{reload} is added to the \memgraph{}.
+As the simulation runs, there are two \emph{horizons}, or counters that mark progress through the serialized \taskgraph{}.  The first is the \texttt{allocHzn}. Every vertex in the \taskgraph{} that is older than the \texttt{allocHzn} has had a space allocated for it.  The second is the \texttt{execHzn}. Every vertex in the \taskgraph{} that is older than the \texttt{execHzn} has been ``run'' according to the simulation.  To ensure a high-quality \memgraph{}, our compilation algorithm greedily tries to push the \texttt{allocHzn} as far as possible past the \texttt{execHzn}.  Intuitively, this will produce fewer constraints in the resulting \memgraph{}.  A kernel associated with a vertex cannot run until it has GPU RAM to write its output.  If this GPU RAM is available very early in the simulation, then it gives the \Sys{} event processing loop more freedom to choose a vertex execution order that does not exactly match the simulated ordering, generating more opportunities to run available kernels while waiting for memory transfers.
+
+The overall algorithm, \textsc{BuildMemgraph}, is given above in \autoref{alg-buildmemgraph}.  Note that this variant of the algorithm assumes each tensor takes up exactly one slot in GPU RAM.  In the ''real life'' case where tensors are variably-sized, the algorithm does not change appreciably---specifically, in the variably-sized case, freeing space for a tensor can evict a variable number of tensors to CPU RAM---but assuming uniformly-sized tensors simplifies the presentation.
+
+At the highest level, the algorithm operates by first checking to see if it can allocate space for the vertex at the current allocation horizon, $v_\texttt{allocHzn}$.  If it cannot, the algorithm makes sure there is space available for the output of the next vertex to be executed (the only way there is not space is if $\texttt{allocHzn} = \texttt{execHzn}$ and the last allocation failed; this implies it is time to execute $v_\texttt{execHzn}$ and we just failed to allocate space for it).  If there is space, the simulation ``executes'' $v_\texttt{execHzn}$.
+
+\begin{wrapfigure}{l}{6.8 cm}
+  \centering
+  \begin{algorithmic}
+\STATE{\texttt{simMalloc}: 
+\textbf{Input}: vertex $v$; 
+\textbf{Output}: GPU memory slot for $v$ } 
+  \STATE ------------------------------------------------------
+  \STATE {\textbf{find} open \texttt{slot} for $v$; \textbf{return} -1 if none} 
+  \STATE {\textbf{return} \texttt{slot} if no previous occupant}
+\STATE {$v' \leftarrow$ last owner of {slot} for $v$}
+\STATE{$\texttt{Deps} \leftarrow \{v'' \textrm{ s.t. edge } v' \rightarrow v'' \in \taskgraph{}\}$}
+\FOR{$v \in \texttt{Deps}$}
+    \STATE {\textbf{add} edge $v'' \rightarrow v$ to \memgraph{}}
+\ENDFOR
+\STATE {\textbf{return} {slot}}
+
+\STATE{\texttt{simMallocForceReld}:
+\textbf{Input}: vertex $v$; \textbf{Output}: GPU memory slot for $v$ } 
+  \STATE ------------------------------------------------------
+\STATE{\textbf{remove} $v$ from \texttt{Evicted}}
+\STATE {$\texttt{slot} \leftarrow \texttt{simMalloc}(v)$} 
+\IF {$\texttt{slot} \neq -1$}
+    \STATE{\textbf{return} \texttt{slot}}
+\ENDIF
+\STATE{\textbf{return} $\texttt{simMallocOffld}(v)$}
+
+\STATE{\texttt{simMallocOffld}: \textbf{Input}: vertex $v$; \textbf{Output}: GPU memory slot for $v$ } 
+  \STATE ------------------------------------------------------
+  \STATE{\textbf{find} GPU RAM \texttt{slot} for $v$ and determine victim (current occupant of \texttt{slot}) $v'$}
+\STATE {\textbf{add} sequence $v' \rightarrow \texttt{offload}_{v'} \rightarrow \texttt{reload}_{v'}$ to \memgraph{}} 
+\STATE {\textbf{add} edge $\texttt{offload}_{v'} \rightarrow v$ to \memgraph{}} 
+\STATE{$\texttt{Deps} \leftarrow \{v'' \textrm{ s.t. edge } v' \rightarrow v'' \in \taskgraph{}$ and $v''$ comes before $v$ in $V\}$}
+\FOR{$v \in \texttt{Deps}$}
+    \STATE {\textbf{add} edge $v'' \rightarrow v$ to \memgraph{}}
+\ENDFOR
+\STATE{\textbf{rename} all instances of $v'$ in \taskgraph{} to $\texttt{reload}_{v'}$}
+\STATE{\textbf{add} $\texttt{reload}_{v'}$ to \texttt{Evicted}}
+\STATE{\textbf{return} \texttt{slot}}
+\end{algorithmic}
+\caption{\texttt{simMalloc} variants used in \memgraph{} construction.} \label{alg-helpers}
+\end{wrapfigure}
+
+There are four memory management subroutines used by the algorithm: three variants on \texttt{malloc} (\texttt{simMalloc}, \texttt{simMallocForceReld}, and \texttt{simMallocOffld}) and one variant on \texttt{free} called \texttt{simFree}.  Like a traditional \texttt{malloc}, \texttt{simMalloc} finds an open slot for the allocation, but it also adds the memory dependencies to the \memgraph{} necessary to ensure that the vertex $v$ that will occupy the slot will safely overwrite the previous occupant of the slot.   \texttt{simMallocForceReld} is like \texttt{simMalloc}, but it is used in the case when a vertex must be reloaded because it is going to be used immediately, and hence the allocation cannot fail.  \texttt{simMallocOffld} is a variant of \texttt{simMalloc} that cannot fail, as it finds a victim to offload to ensure the success of the allocation for vertex $v$, adding the \texttt{offload}-\texttt{reload} sequence to the \memgraph{}. Crucially, it renames all instances of the victim $v'$ in the \taskgraph{} to refer to $\texttt{reload}_{v'}$.  In this way, all ``future'' accesses to $v'$ will refer, in fact, to its reloaded version.  The routine also adds a memory dependency from the $\texttt{offload}_{v'}$ to $v$, as we cannot execute $v$ until the $\texttt{offload}_{v'}$ has taken place, and freeing GPU RAM for use.
+
+
+
+\section{Correctness of \memgraph{}
+
+\input{Correctness}
+
+
+
+
+\section{Experiments}
+
+
+\begin{figure}[t]
+    \centering
+\begin{minipage}{.26\textwidth}
+        \centering
+        \hspace{-13 pt}
+    \includegraphics[width = 3.7cm]{FigsNew/A100-1.png}
+\end{minipage}%
+\begin{minipage}{.24\textwidth}
+    \centering 
+    \hspace{-10 pt}
+    \includegraphics[width = 3.5cm]{FigsNew/A100-2.png}
+\end{minipage}%
+\begin{minipage}{.26\textwidth}
+        \centering  
+        \hspace{-4.5 pt}
+    \includegraphics[width = 3.6cm]{FigsNew/A100-3.png}
+\end{minipage}%
+\begin{minipage}{.25\textwidth}
+        \centering  
+        \hspace{6 pt}
+    \includegraphics[width = 3.6cm]{FigsNew/A100-4.png}
+\end{minipage}%
+    \caption{Time for LLaMA first token (prefill) inference, A100 server.  ``OOM'' is out-of-memory.}
+    \label{inference-A100}
+\end{figure}
+\begin{figure}[t]
+    \centering
+\begin{minipage}{.26\textwidth}
+        \centering
+        \hspace{-13 pt}
+    \includegraphics[width = 3.7cm]{FigsNew/P100-1.png}
+\end{minipage}%
+\begin{minipage}{.24\textwidth}
+    \centering 
+    \hspace{-9 pt}
+    \includegraphics[width = 3.6cm]{FigsNew/P100-2.png}
+\end{minipage}%
+\begin{minipage}{.26\textwidth}
+        \centering  
+        \hspace{-4.5 pt}
+    \includegraphics[width = 3.6cm]{FigsNew/P100-3.png}
+\end{minipage}%
+\begin{minipage}{.25\textwidth}
+        \centering  
+        \hspace{6 pt}
+    \includegraphics[width = 3.6cm]{FigsNew/P100-4.png}
+\end{minipage}%
+    \caption{Time for LLaMA first token (prefill) inference, P100 server.  ``OOM'' is out-of-memory.}
+    \label{inference-P100}
+\end{figure}
+Our experiments evaluate the ability of \Sys{} to deal with Meta AI's LLaMA large language model (LLM) \citep{touvron2023llama}, with severely constrained memory. LLM training and inference are chosen as representative, challenging computational workloads encountered by modern ML systems, particularly difficult given the large memory footprint.  We assessed \Sys{}'s performance on 7 billion and 65 billion parameter models.
+
+\begin{wrapfigure}{r}{5 cm}
+  \centering
+  \includegraphics[width = 4.9cm]{FigsNew/Single-Seq-Inf.png}
+\caption{Single-sequence inference times.}
+    \label{inference:long-seq}
+\end{wrapfigure}
+
+The system is implemented in C++, with most GPU kernels generated using Nvidia cuTensor.
+Experiments were conducted on two machines: (i) an older 4 $\times$ P100 GPU server (16 GB RAM each) and 22, 64GB DDR4 2666MHz CPU RAM modules, for a total of 1.3TB of RAM, and (ii) an Amazon Web Services \texttt{p4d.24xlarge} instance, equipped with eight A100 GPUs (40 GB RAM each) and 1.15TB of RAM.  We were particularly interested in seeing the ability of \Sys{} to operate in a difficult environment with extremely limited GPU RAM, hence the P100 GPUs, with only 64 GB of GPU RAM total on the server.  Key quesitons are: Can software help bridge the gap---particularly the lack of GPU RAM---between older and newer hardware?  Can \Sys{} facilitate model training and inference in a situation with limited RAM?
+
+\begin{figure}[t]
+    \centering
+\begin{minipage}{.5\textwidth}
+        \centering
+        \hspace{-13 pt}
+    \includegraphics[width = 6.5cm]{FigsNew/A100-train.png}
+\end{minipage}%
+\begin{minipage}{.5\textwidth}
+    \centering 
+    \hspace{-9 pt}
+    \includegraphics[width = 6cm]{FigsNew/P100-train.png}
+\end{minipage}%
+
+    \caption{Comparing \Sys{} and ZeRO Infinity for LoRA training.}
+    \label{training}
+\end{figure}
+\noindent
+\textbf{(1) LLaMA first token inference.}
+Our experiments target ``first token'' inference (also known as ''prefill''): How long does it take to produce the first output token, given an input prompt? We focus on prefill as it is exceedingly expensive in terms of the memory required, scaling quadratically with the size of the prompt.  On both machines, we run \Sys{}, ZeRO Inference \citep{aminabadi2022deepspeed} (using weight partitioning and model weight offload), and FlexGen \citep{sheng2023flexgen}. Note that these are PyTorch-based systems, whereas \Sys{} is not. For FlexGen, we use full CPU offload for activations. All testing is done using batched input, as batching is required for FlexGen and ZeRO (as \Sys{} simply runs a dataflow graph, it is agnostic to batching).  For the smallest batch sizes considered, we test prefill input sequence lengths: 1K, 2K, 4K, 8K, and 16K tokens.   For larger batches we use  1K, 2K, 4K and 8K. For \Sys{}, all model weights and computations were performed using 16-bit floating points, though FlexGen uses very low precision arithmetic to save RAM and speed compute. Results for the A100 GPU server are given in Figure \ref{inference-A100}.  Results for the P100 GPU server are Given in Figure \ref{inference-P100}.   
+
+One of the advantages of \Sys{} is that it executes arbitrary dataflow graphs in limited memory.  Thus, as long as a computation is appropriately decomposed to run on multiple GPUs, \Sys{} can execute it.  This means, for example, that \Sys{} does not need to perform inference over batches of input sequences and supports arbitrary combinations of model and data parallelism (unlike FlexGen and in ZeRO Inference).  While batching tends to increase computational efficiency, the RAM used by a large batch means it is not possible to run inference over long sequences in limited memory (batching precludes that all 320GB of GPU RAM on  be dedicated to prefill for a single long sequence).  To investigate the ability of \Sys{} to perform inference over a single long sequence, we test sequences sizes of up to 32K tokens, on both GPU servers and on both the 7B and 65B parameter models.  Results are shown in Figure \ref{inference:long-seq}.
+
+\begin{wrapfigure}{r}{5.5 cm}
+\begin{center}
+\begin{tabular}{| l | c | }
+ \hline
+ Experiment & Avg. Speedup \\
+ \hline
+ A100 Inference &  4.02\% \\  
+ P100 Inference & 6.45\% \\
+A100 Training &  13.4\% \\  
+ P100 Training & 14.5\% \\
+  \hline
+\end{tabular}
+\caption{Observed speedup due to nondeterministic ordering, compared to (partially) deterministic ordering.}
+    \label{nondeterm}
+\end{center}
+\end{wrapfigure}
+\noindent
+\textbf{(2) LoRA training for LLaMA.}
+We also experiment with LoRA training \citep{Hu2021LoRALA}. We use a LoRA rank of 16, and train LoRA adaptors for the $K$, $V$, $Q$, and feedforward mapping matrices. Here we run \Sys{} and ZeRO Infinity \citep{rajbhandari2021zero}; ZeRO is executed using all three ``stages'' (gradient partitioning, model weight partitioning, optimizer state partitioning) as well as CPU offload.  Both \Sys{} and ZeRO use checkpointing during the forward pass to reduce the memory footprint. We measure the time it takes to run the forward and backward pass for one batch, with varying batch sizes and sequence lengths.  All \Sys{} model weights are stored as single precision (32 bits). Results for training using both the P100 and the A100 server at 7B parameters are given in Figure \ref{training}.  Both systems had a difficult time training the 65B parameter model.  \Sys{} was faster for the one case it was able to run (1K length sequence, batch size eight took 58.5 seconds using \Sys{} and 72.9 using ZeRO Infinity) but Zero Infinity was more robust to larger batch sizes, where \Sys{} failed.
+
+\noindent
+\textbf{(3) The effect of nondeterminism.}  One of the key hypotheses of this paper is that nondeterminism can help performance, by allowing the system to react to the observed state of the computation.  To test this, we implement a (semi-)deterministic version of \Sys{} and run the same set of experiments using this new version. Specifically, we add dependencies to fix the order of operations at each of the GPUs to be exactly the order that is input into \textsc{BuildMemgraph}.  Unfortunately, this does not remove all nondeterminism from the system because of the way that reductions (summations) of tensors are handled by the system; fully removing all nondeterminism from \Sys{} is not easily possible.  Still the experiment may be instructive.  Figure \ref{nondeterm} shows the speedup obtained by the nondeterministic version compared to the deterministic, over all experiments.
+
+
+\noindent
+\textbf{Discussion.}
+Throughout the first token inference experiments, \Sys{} typically performed the best in terms of latency, with ZeRO Inference generally much slower but outperforming FlexGen, except for larger sequence sizes.  This would seem to validate the highly non-deterministic, dataflow-based approach advocated for in the paper, at least if the goal is low latency. 
+
+To be fair, we note that FlexGen is designed for high throughput, as opposed to low latency, and FlexGen utilizes multiple GPUs only via pipelined parallelism.  Note that FlexGen does not seem to get any slower when moving from batch size of eight to 16 on the A100 server.  This suggests that filling the pipeline leads to substantial latency.  Further, pipelined parallelism is more effective with more work in each pipeline stage, due to the high synchronization overhead and the need to try to overlap communication with computation, perhaps explaining FlexGen's better performance for larger sequences, which are more dense computationally.
+
+ZeRO Inference takes a much different approach, but it uses a highly synchronized form of model parallelism as it traverses the levels in a transformer, also carefully trying to overlap communication and computation, which may simply be more effective when there is more work to at each level. \Sys{}, on the other hand, is radically different.  It does not ``understand'' the levels in a transformer, does not need to synchronize processing of the various levels, and simply tries to asynchronously process kernels as fast as it can.  If it is stuck waiting for communication, it simply tries to do something else.
+
+For training, there were clear advantages of \Sys{} over ZeRO Infinity, especially for smaller sequence lengths.  This was particularly true on the A100 server, where \Sys{} was often much faster.  For batches of sequences of length 1K, \Sys{} often took less than 50\% of the time to process each batch, compared to ZeRO (at a batch size of 8, the time to process 1K sequences was 5.6 seconds for \Sys{} and 12.5 seconds for ZeRO, for batch size of 32 it was 12.1 seconds for \Sys{} and 17.8 seconds for ZeRO).   The differences in performance were much less pronounced on the P100 server, though there \Sys{} was still faster.  Finally, we note that both systems suffered significant out-of-memory errors during training.  Interestingly, \Sys{} seemed to have more problems with memory on the A100 server, whereas ZeRO Infinity had more problems with memory on the P100 server.  We conjecture that some of that could be solved in \Sys{} with a better input dataflow graph, which cuts the input problem into smaller pieces.
+
+
+
+\section{Conclusions}
+
+
+We present \Sys{}, a system and runtime for executing memory-intensive computations on GPU servers, supporting CPU offload.  The key innovation of \Sys{} is its reliance on a ``nondeterministic'' runtime where a dependency graph is used to guide execution of the computation; any order of operations is acceptable, if the dependencies are respected.  We argue that this is necessary when CPU RAM offload is used, or else the system will often be stalled, waiting for CPU-to-GPU transfers.
+
+\noindent 
+\textbf{Limitations.}  As currently implemented, the biggest limitation of \Sys{} is that the input computation (in the form of a \taskgraph{}) must be static, and known completely beforehand, so that the \memgraph{} can be constructed. This is not of consequence during model training, but can be an issue during any recursive, generative AI computation.  This includes LLM inference, where the next token must repeatedly be generated and the $KV$-cache increases in size. There are some naive solutions to this (such as pre-compiling a \memgraph{} for a specific number of token generations in the case of an LLM) but more work will be necessary to create a satisfactory solution to recursive computation.  
+
+Another limitation is that while our experiments did show that \Sys{} has certain performance advantages, it is not possible to be absolutely sure where those advantages come from.  Our ablation shows that a fixed execution order slows down \Sys{}, suggesting that nondeterminism is important. But unlike   ZeRO and FlexGen, \Sys{} was implemented from the ground up and does not rely on Python or PyTorch---that fact alone could account for some of the performance differences. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{ack}
+This work was supported by an NIH CTSA award No. UL1TR003167, by the NSF under grant numbers 1918651, 2008240,  2131294, and 2212557, by the US DOT Tier-1 UTC CYBER-CARE grant \#69A3552348332, and by a gift from the Roblox Corporation.
+\end{ack}
+
+{\small
+
+
+
+

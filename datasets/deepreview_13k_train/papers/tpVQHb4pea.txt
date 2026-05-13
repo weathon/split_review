@@ -1,0 +1,406 @@
+\title{CodePMP: Scalable Preference Model Pretraining for Large Language Model Reasoning}
+
+\begin{abstract}
+Large language models (LLMs) have made significant progress in natural language understanding and generation, driven by scalable pretraining and advanced finetuning. However, enhancing reasoning abilities in LLMs, particularly via reinforcement learning from human feedback (RLHF), remains challenging due to the scarcity of high-quality preference data, which is labor-intensive to annotate and crucial for reward model (RM) finetuning. To alleviate this issue, we introduce CodePMP, a scalable preference model pretraining (PMP) pipeline that utilizes a large corpus of synthesized code-preference pairs from publicly available high-quality source code. CodePMP improves RM finetuning efficiency by pretraining preference models on large-scale synthesized code-preference pairs. We evaluate CodePMP on mathematical reasoning tasks (GSM8K, MATH) and logical reasoning tasks (ReClor, LogiQA2.0), consistently showing significant improvements in reasoning performance of LLMs and highlighting the importance of scalable preference model pretraining for efficient reward modeling.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[scale=0.63]{images/codepmp_highlight.png}
+    \caption{Compared to directly finetuning reward models, CodePMP significantly improves the sample efficiency and capability of reward models, which in turn boosts the generator's(MetaMath-Mistral-7B) reasoning performance (Best-of-N accuracy) across both mathematical reasoning tasks (GSM8K and MATH) and logical reasoning tasks (ReClor and LogiQA2.0).}
+    \label{fig:codepmp_highlight}
+\end{figure}
+
+Large language models (LLMs) have made remarkable progress in natural language understanding and generation, benefiting from scalable pretraining and finetuning techniques like supervised finetuning (SFT)~\citep{wang2022self,wang2023making} and Reinforcement Learning from Human Feedback (RLHF)~\citep{bai2022training,lightman2023let,bai2022constitutional,gulcehre2023reinforced,schulman2017proximal,rafailov2024direct}. However, enhancing LLMs' reasoning abilities, particularly in complex logical and mathematical tasks, remains a significant challenge~\citep{wang2023math,zhang2024unveiling}. Although RLHF is effective, it relies heavily on high-quality preference data, which is costly and labor-intensive to annotate~\citep{cobbe2021training,zheng2024judging}. This limitation impedes the scalability of reward model (RM) finetuning, which is essential for guiding LLMs toward optimal outputs.
+
+To alleviate this issue, prior works like Anthropic's Preference Model Pretraining (PMP)~\citep{askell2021general} have proposed improving reward modeling data efficiency by pretraining preference models on large-scale preference data from public sources like Reddit and Wikipedia, followed by an efficient finetuning on limited high-quality human-annotated data. However, this approach is less effective for reasoning tasks due to the scarcity of reasoning preference pairs available online. Compared to other tasks, manually annotating preference data for reasoning is inherently more challenging and difficult to scale~\citep{zhang2024unveiling,zhou2023solving},  highlighting the urgent need for a scalable PMP approach for reasoning tasks.
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.28]{images/codepmp_arch.png}
+    \caption{\textbf{An illustration of the CodePMP process. Then, for each code prompt, a weak CodeLLM generates a \textit{rejected} response, while a stronger CodeLLM produces a \textit{chosen} response. Finally, these \textit{<chosen, rejected>} pairs, accumulated in the millions, form the pretraining dataset for the preference model. This pretraining process improves not only sample efficiency but also the performance for downstream reasoning reward model finetuning.}
+    \label{fig:codepmp_arch}
+\end{figure}
+
+In this paper, we propose \textbf{CodePMP}, a scalable preference model pretraining pipeline that enhances LLM reasoning abilities using synthesized preference pairs derived from high-quality, publicly available source code. Code, with its inherently logical and structured nature, provides rich data suitable for reasoning tasks. Recent works~\citep{zhang2024unveiling,aryabumi2024code} also show a strong correlation between code training and reasoning improvements in LLMs.
+
+Specifically, CodePMP generates preference pairs by synthesizing \textit{chosen} and \textit{rejected} code responses for a given code-related prompt or description using CodeLLMs. A strong CodeLLM produces higher-quality (\textit{chosen}) responses, while a weaker model generates suboptimal or even low-quality (\textit{rejected}) responses. These \textit{<chosen, rejected>} pairs, accumulated in the millions, form a large-scale synthesized preference dataset. This dataset is then used to pretrain the preference model with pairwise ranking objectives~\citep{cobbe2021training,charniak2005coarse}, providing an good initialization for further fine-tuning the reward models.
+
+We evaluate CodePMP on widely studied reasoning tasks, including mathematical reasoning tasks such as GSM8K~\citep{cobbe2021training} and MATH~\citep{hendrycks2021measuring}, as well as logical reasoning tasks like ReClor~\citep{yu2020reclor} and LogiQA2.0~\citep{liu2023logiqa}. Our experiments demonstrate that CodePMP significantly improves RM fine-tuning accuracy and Best-of-N performance in reasoning tasks, outperforming direct RM fine-tuning, as highlighted in Figure~\ref{fig:codepmp_highlight}. Moreover, additional experimental results reveals that RMs initialized with CodePMP exhibit greater robustness across different tasks. These results indicate that code-derived preference data provides a scalable, cost-effective solution for enhancing LLM reasoning capabilities while reducing reliance on extensive preference annotation, achieving more effective reward modeling for reasoning tasks.
+
+In summary, our main contributions are:
+\begin{enumerate}[leftmargin=*]
+    \item We introduce CodePMP, a scalable method that uses code-derived preference pairs to pretrain preference models, improving sample efficiency and robustness for downstream RM finetuning.
+    \item We validate that CodePMP significantly improves performance on reasoning tasks, demonstrating that a scalable PMP process positively impacts LLM reasoning abilities.
+    \item We provide a detailed analysis of key design elements in CodePMP, offering valuable insights for future research in related areas.
+\end{enumerate}
+
+
+
+
+\section{Preliminaries}
+
+
+\paragraph{Language Modeling} Language modeling (LM) is a fundamental task in natural language processing, aimed at modeling sequences of language. This is typically achieved through Causal Language Models (Causal LM), where the model is trained to maximize the likelihood of predicting the next word $w_t$ given the preceding words $w_1, w_2, \dots, w_{t-1}$. The training process minimizes the negative log-likelihood of the predicted word sequence:
+
+\[
+\mathcal{L}_{\text{LM}} = - \sum_{t=1}^{T} \log P(w_t | w_1, w_2, \dots, w_{t-1})
+\]
+
+This loss function $\mathcal{L}_{\text{LM}}$ encourages the model to capture the underlying patterns in the data. Transformer architectures~\citep{vaswani2017attention} have become the standard for Causal LM due to their ability to handle long-range dependencies effectively.
+
+\paragraph{Reward Modeling} Reward modeling (RM) is crucial in reinforcement learning from human feedback (RLHF), providing a scalar reward signal that guides the learning process based on output quality. The reward model $R_\theta$ predicts the quality of an output $y$ given a context $x$ as $s = R_\theta(x, y)$, where $s$ is the scalar reward score. In preference modeling, RM predicts the relative quality of outputs by comparing pairs. A common method is the Pairwise Ranking Loss, where the model assigns higher scores to preferred (chosen) outputs:
+
+\[
+\mathcal{L}_{\text{RM}} = -\log\left(\sigma(s_{\text{chosen}} - s_{\text{rejected}})\right)
+\]
+
+\noindent, where $s_{\text{chosen}} = R_\theta(x, y_{\text{chosen}})$ and $s_{\text{rejected}} = R_\theta(x, y_{\text{rejected}})$, and $\sigma(\cdot)$ is the sigmoid function.
+
+\paragraph{Best-of-N Sampling} Best-of-N (BoN) sampling improves LLM reasoning~\citep{cobbe2021training, lightman2023let}. In this approach, $N$ candidate solutions $\{y_1, y_2, \dots, y_N\}$ are generated by sampling from the LLM’s output distribution for a given problem. A reward model scores each candidate and selects the highest-scoring one as the final answer:
+
+\[
+\hat{y} = \arg\max_{y_i \in \{y_1, y_2, \dots, y_N\}} R_\theta(x, y_i)
+\]
+
+\noindent, where $R_\theta(x, y_i)$ represents the reward score for each candidate $y_i$. This technique is especially effective in tasks like mathematical problem-solving and logical inference, where selecting the most plausible solution from a diverse set of outputs improves overall accuracy~\citep{wang2022self}.
+
+
+
+\section{Code Preference Model Pretraining}
+
+
+
+\subsection{Model Design}
+Code Preference Model Pretraining (CodePMP) is designed to enhance the sample efficiency of reward models, particularly for reasoning tasks where high-quality preference data is scarce. Traditionally, reward models are finetuned on small, curated datasets, which limits their effectiveness in complex tasks like mathematical reasoning or logical deduction. CodePMP mitigates this limitation by introducing a pretraining phase between basic language model pretraining and finetuning on domain-specific reasoning datasets. This phase leverages a large, diverse dataset of code-preference pairs, enabling the model to learn generalizable patterns and ranking strategies.
+
+CodePMP training involves two key components: Reward Modeling (RM) and Language Modeling (LM). In RM, the model is trained on code-preference pairs, learning to assign higher scores to the \textit{chosen} code through a pairwise ranking loss. In LM, only the \textit{chosen} code is used for autoregressive training to maintain the model's general capabilities. The overall loss is a combination of the RM and LM losses, ensuring the model enhances its ranking ability without sacrificing general language modeling performance: $\mathcal{L}_{\text{PMP}} = \mathcal{L}_{\text{rank}} + \mathcal{L}_{\text{LM}}$.
+
+\subsection{Data Construction}
+ The dataset consists of two primary components: 
+\textbf{Repository Data} comprises over 1.
+
+The CodePMP dataset is constructed through a systematic process. First, raw source code is processed by a description summarizer, typically an instruction-tuned CodeLLM, to generate prompts that describe the functionality of the code.
+
+These prompts are then used by two CodeLLMs of different capabilities to generate code snippets:
+\begin{itemize}
+    \item \textbf{Chosen response}: Generated by a more advanced CodeLLM (e.g., 6.7B parameters).
+    \item \textbf{Rejected response}: Generated by a less capable CodeLLM (e.g., 1.3B parameters).
+\end{itemize}
+
+This process yields pairs of code responses—one chosen and one rejected—which are used for preference modeling. This scalable approach significantly enhances pretraining efficiency, improving performance on downstream tasks.
+
+The steps of the CodePMP methodology are outlined systematically in Algorithm~\ref{alg:code_pmp}.
+
+\begin{algorithm}[t]
+\caption{Code Preference Model Pretraining (CodePMP)}
+\label{alg:code_pmp}
+\begin{algorithmic}[1]
+\Require Source code repository $S$, Strong CodeLLM $M_{\text{strong}}$, Weak CodeLLM $M_{\text{weak}}$
+\Ensure Pretrained Model
+\State \textbf{Input:} Source code $S$
+\State Summarize description $D$ using $M_{\text{strong}}$ on $S$
+\For{each $D_i \in D$}
+    \State Generate \textit{Chosen Response}  using $M_{\text{strong}}$
+    \State Generate \textit{Rejected Response}  using $M_{\text{weak}}$
+\EndFor
+\State Calculate LM Loss $\mathcal{L}_{\text{LM}}$ on \textit{Response}
+\State Calculate RM Loss $\mathcal{L}_{\text{rank}}$ using \textit{Chosen Response} and \textit{Rejected Response}
+\State Train PMP Model using $\mathcal{L}_{\text{PMP}} = \mathcal{L}_{\text{rank}} + \mathcal{L}_{\text{LM}}$
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experimental}
+
+In this section, we first outline the experimental setup, followed by the experimental results, highlighting that CodePMP is a highly scalable method.
+
+\subsection{Experimental Settings}
+\subsubsection{CodePMP Settings}
+\paragraph{Data Construction} We generate code preference pairs following Algorithm~\ref{alg:code_pmp}, using the deepseek-coder-6.7b-instruct model as the strong CodeLLM to generate \textit{chosen} responses and the deepseek-coder-1.3b-instruct model as the weak CodeLLM to generate \textit{rejected} responses. The constructed CodePMP dataset includes 28 million files and 19 billion tokens. The diverse datasets provide sufficiently broad prompt coverage for preference model pretraining, which is conducive to the generalization of preference models in reasoning tasks. In addition, the average lengths of the \textit{chosen} and \textit{rejected} responses are similar, ensuring that response length does not bias the CodePMP learning process.
+
+\paragraph{CodePMP Training} By default, we initialize the preference models with the publicly available Qwen models~\citep{yang2024qwen2}, using different model sizes, specifically Qwen2-1.5B and Qwen2-7B.
+
+\subsubsection{Reasoning Finetuning Settings}
+We validate CodePMP on reward models across two reasoning task types: mathematical and logical reasoning. The reward model is finetuned on corresponding preference datasets for each task. For mathematical reasoning, we use the MathShepherd-pair dataset, derived from MathShepherd~\citep{wang2023math}, and evaluate the model on a holdout test set to assess RM accuracy.
+
+Similarly, for logical reasoning, we use the ReClor-pair and LogiQA2.0-pair datasets, derived from ReClor~\citep{yu2020reclor} and LogiQA2.0~\citep{liu2023logiqa}, respectively. We train reward models on these datasets, with holdout test sets used to evaluate model accuracy.
+
+\subsubsection{Evaluation Settings}
+Following~\citep{zhang2024generative}, we adopt two evaluation metrics:
+\paragraph{RM Accuracy} This metric measures the accuracy of the reward model in distinguishing chosen from rejected solutions on the holdout test sets. It provides insight into the model's ability to classify individual sequences.
+\paragraph{Best-of-N (BoN) Accuracy} This metric evaluates the proportion of correct solutions selected by the finetuned RM from $N$ candidate responses. It assesses the model's group-wise ranking performance, focusing on its ability to select the correct answer from a set of candidates. We use MetaMath-Mistral-7B~\citep{yu2023metamath} as the generator for this evaluation.
+
+For mathematical reasoning, we use the GSM8K~\citep{cobbe2021training} and MATH~\citep{hendrycks2021measuring} test sets. For logical reasoning, we evaluate on the ReClor~\citep{yu2020reclor} and LogiQA2.0~\citep{liu2023logiqa} test sets.
+
+Note that logical reasoning questions typically involve a paragraph followed by statements to be judged true or false, making Best-of-N evaluation challenging. Therefore, we use multiple-choice accuracy, where the reward model ranks four manually annotated options and selects the best one. This metric is equivalent to Best-of-4, and thus, for logical reasoning tasks, multiple-choice accuracy and Best-of-N are used interchangeably.
+
+\subsection{Experimental Results}
+
+\subsubsection{RM Accuracy Results}
+We first compare RM accuracy on the holdout test set with and without CodePMP initialization. As shown in Table~\ref{table:codepmp_main_exp_acc}, RM finetuned with CodePMP initialization achieves higher accuracy on both 1.5B and 7B models across mathematical and logical reasoning tasks, demonstrating that CodePMP enhances the model's ability to differentiate correct from incorrect reasoning. Moreover, CodePMP exhibits strong generalization, yielding significant improvements across different reasoning tasks.
+
+\begin{table}
+\centering
+\caption{Comparison of RM accuracies: reward models finetuned with CodePMP initialization achieve higher accuracies on the reasoning holdout test sets, demonstrating an improved ability to distinguish chosen responses from rejected ones.}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} &  \textbf{PMP} & \textbf{MathShepherd-pair}  & \textbf{Reclor-pair} & \textbf{LogiQA2.0-pair} \\ \midrule
+\multirow{2}{*}{1.5B} & \ding{55} & 0.7226 & 0.758 & 0.7538 \\ \cline{2-5} \addlinespace[3pt] 
+& \textbf{\ding{51}}  & \textbf{0.8186} & \textbf{0.794} & \textbf{0.7774} \\  \midrule
+\multirow{2}{*}{7B}  & \textbf{\ding{55}} & 0.8777 & 0.862 & 0.8263 \\ \cline{2-5} \addlinespace[3pt]
+  & \textbf{\ding{51}} & \textbf{0.9274} & \textbf{0.874} & \textbf{0.8441}  \\ \bottomrule
+\end{tabular}
+\label{table:codepmp_main_exp_acc}
+\end{table}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.53\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/codepmp_main_exp.png}
+        \caption{BoN accuracies on mathematical reasoning.}
+        \label{fig:codepmp_main_exp_acc_bon}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/main_exp_bon_logic.png}
+        \caption{BoN \textit{(N=4)} accuracies on logical reasoning.}
+        \label{fig:main_exp_bon_logic}
+    \end{subfigure}
+    \caption{Comparison of Best-of-N accuracies: reward models finetuned with CodePMP initialization consistently perform better, with improvements remaining robust as N increases, demonstrating CodePMP’s effectiveness in improving group-wise ranking capabilities.}
+    \label{fig:combined_main_exp_bon}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_gsm8k_1.png}
+        \caption{GSM8K / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_math_1.png}
+        \caption{MATH / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_reclor_1.png}
+        \caption{Reclor / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_logiqa_1.png}
+        \caption{LogiQA2.0 / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_gsm8k_2.png}
+        \caption{GSM8K / \textcolor{red}{7B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_math_2.png}
+        \caption{MATH / \textcolor{red}{7B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_reclor_2.png}
+        \caption{Reclor / \textcolor{red}{7B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/rm_bon_logiqa_2.png}
+        \caption{LogiQA2.0 / \textcolor{red}{7B}}
+    \end{subfigure}
+    \caption{Comparison of sample efficiency in RM finetuning: reward models finetuned with CodePMP initialization consistently achieve substantially higher Best-of-N accuracy when finetuning on the same amount of samples, demonstrating superior sample efficiency. Note that the horizontal axis grows exponentially with $\sqrt{2}$. The green lines represent the settings with CodePMP, while the blue lines represent the settings without CodePMP.}
+    \label{fig:rm_bon_scaling}
+\end{figure}
+\subsubsection{BoN Accuracy Results}
+We evaluate BoN accuracy across reasoning tasks with and without CodePMP initialization. As shown in Figure~\ref{fig:codepmp_main_exp_acc_bon} and Table~\ref{fig:main_exp_bon_logic}, RM finetuned with CodePMP initialization consistently achieves higher BoN accuracy across both mathematical and logical reasoning tasks for 1.5B and 7B models. This highlights CodePMP's effectiveness in improving RM’s group-wise ranking performance.
+
+Across different values of N, RM models initialized with CodePMP maintain their lead, showing robust improvement even as N increases to 256. In contrast, RM without CodePMP shows a sharp decline in accuracy as N increases, underscoring the stability CodePMP provides, likely due to the diverse code-preference pairs used during training.
+
+For logical reasoning, the performance gap between CodePMP and non-PMP models is smaller, as $N$ is limited to 4, while in mathematical reasoning, $N$ reaches 256. This suggests that increasing $N$ further in logical reasoning could amplify the advantages of CodePMP in future evaluations.
+
+\subsubsection{RM Sample Efficiency Comparison}
+One key advantage of CodePMP is its ability to improve the sample efficiency of RM finetuning. To assess this, we conduct experiments with progressively larger sample sizes for RM finetuning. As indicated by~\citep{kaplan2020scaling}, optimal results are achieved when the learning rate scheduler completes its decay at the end of training. Therefore, rather than evaluating intermediate checkpoints, we retrain models with varying sample sizes for optimal results. Notably, RMs finetuned with CodePMP initialization using just 0.5k samples surpasses RMs finetuned without CodePMP initialization using 40k samples on mathematical tasks, demonstrating CodePMP's significant advantage in sample efficiency. However, as sample size increases, this advantage diminishes slightly, suggesting that with much larger datasets, CodePMP's benefit may become less pronounced, but the cost of manual labeling remains a key consideration.
+
+\subsubsection{The Importance of Scalable PMP}
+A key benefit of using code data for PMP is the vast availability of publicly accessible, high-quality code-preference pairs, ensuring diversity. To validate scalability, we vary the number of training pairs for CodePMP and retrain models with different amounts of data. As shown in Figure~\ref{fig:codepmp_exp_pmp_scaling}, overall, increasing the number of code-preference pairs consistently improves BoN accuracy in both mathematical and logical reasoning tasks across model sizes, with no sign of diminishing returns. This indicates that further scaling the code-preference data would likely yield additional performance gains, underscoring the importance of building a scalable PMP pipeline.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_gsm8k_1.png}
+        \caption{GSM8K / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_math_1.png}
+        \caption{MATH / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_reclor_1.png}
+        \caption{Reclor / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_logiqa_1.png}
+        \caption{LogiQA2.0 / \textcolor{blue}{1.5B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_gsm8k_2.png}
+        \caption{GSM8K / \textcolor{red}{7B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_math_2.png}
+        \caption{MATH / \textcolor{red}{7B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_reclor_2.png}
+        \caption{Reclor / \textcolor{red}{7B}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/pmp_scale_logiqa_2.png}
+        \caption{LogiQA2.0 / \textcolor{red}{7B}}
+    \end{subfigure}
+    \caption{Increasing the number of code-preference pairs consistently improves Best-of-N accuracy in both mathematical and logical reasoning tasks across model sizes, with no evident signs of diminishing returns. Note that the horizontal axis is scaled by $\sqrt{2}$, and the gray dashed line represents the results without CodePMP.}
+    \label{fig:codepmp_exp_pmp_scaling}
+\end{figure}
+
+
+
+
+\section{Ablation Studies}
+
+In this section, we present a detailed analysis of CodePMP design. Unless otherwise stated, all experiments used the 1B model due to resource limitations and present the results of mathematical reasoning due to page limitation.
+
+\subsection{Impact of Pair Construction}
+\paragraph{Model-Generated Pairs Comparison} 
+We compare various pair construction methods generated by different models. In Figure~\ref{fig:res_cmp_pair_construction}, the samples before the ``\&'' are positive, and those after are negative. ``Source Code'' refers to the original code snippet, while ``1.3B-Des-Clip'' indicates that 10\% of the code description is removed before being input into a 1.3B CodeLLM to generate a rejected response. The green lines represent CodePMP's choice. Results show that pairing positive samples from the 7B model with negative samples from the 1.5B model consistently delivers the best performance across all test sets. Given that code execution can generate reliable outputs, future work will explore incorporating execution feedback to create more accurate preference pairs.
+
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.535\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/res_cmp_pair_construction.png}
+        \caption{Different construction methods.}
+        \label{fig:res_cmp_pair_construction}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.455\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/res_cmp_code_web_pair.png}
+        \caption{Different pair sources.}
+        \label{fig:res_cmp_code_web_pair}
+    \end{subfigure}
+    \caption{Comparisons of BoN accuracy across different construction methods and pair sources.}
+    \label{fig:combined_results}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.495\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/res_res_eoc.png}
+        \caption{With or without EOC token.}
+        \label{fig:res_res_eoc}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.495\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/res_cmp_lr_scheduler.png}
+        \caption{Using WSD or WCD learning rate schedulers.}
+        \label{fig:res_cmp_lr_scheduler}
+    \end{subfigure}
+    \caption{Comparisons of BoN accuracy for different settings: EOC token and lr schedulers.}
+    \label{fig:combined_res_eoc_lr_scheduler}
+\end{figure}
+
+\subsection{Impact of EOC Token}
+Experiments by(~\cite{askell2021general}) show that adding an end-of-context (EOC) token to each sequence significantly improves overall performance. To explore its impact in the context of CodePMP, we compared performance with and without the EOC token. As shown in Figure~\ref{fig:res_res_eoc}, the EOC setting (``w/ EOC'') consistently underperform the setting without EOC tokens (``w/o EOC'') across different test tasks, which is opposed to (~\cite{askell2021general}) We attribute this discrepancy to the different model, data and evaluation settings.
+
+\subsection{Impact of Learning Rate Schedulers}
+In the CodePMP experiments, we use the warmup-stable-decay (WSD) learning rate scheduler(~\cite{hu2024minicpm}), which can effectively reduce the time required for scaling related experiments. Previous studies mainly employ a learning rate schedule with linear warmup followed by cosine decay, known as warmup-cosine decay (WCD). We compare the performance of WSD and WCD, as shown in Table \ref{fig:res_cmp_lr_scheduler}, both schedulers yield similar results. Thus, to improve computational efficiency, we adopt the WSD scheduler for all experiments.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/codepmp_main_exp_gemma.png}
+        \caption{BoN accuracies on mathematical reasoning.}
+        \label{fig:codepmp_main_exp_acc_bon}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.43\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/main_exp_bon_logic_gemma.png}
+        \caption{BoN \textit{(N=4)} accuracies on logical reasoning.}
+        \label{fig:main_exp_bon_logic}
+    \end{subfigure}
+    \caption{CodePMP improves sample efficiency and Best-of-N performance of the Gemma-2B reward models on reasoning tasks, highlighting its broad applicability across diverse LLM architectures.}
+    \label{fig:combined_gemma2b_exp_bon}
+\end{figure}
+
+\begin{table*}[t]
+\centering
+\caption{Performance gains on coding RM and general RM (RMBench) evaluations show that CodePMP not only improves reasoning tasks but also generalizes well across various tasks.}
+\begin{tabular}{lc|c|ccccc}
+\toprule
+& & & \multicolumn{5}{c}{\textbf{RMBench}} \\
+\textbf{Model} & \textbf{PMP} & \textbf{Coding} &\textbf{Summary} & \textbf{Chat} & \textbf{Chat Hard} & \textbf{Safety} & \textbf{Reasoning} \\ \midrule
+\multirow{2}{*}{\textbf{1.5B}} & \ding{55} & 0.6841 & 0.4154 & 0.4804 & \textbf{0.5351} & 0.3665 & 0.2751 \\ \cline{2-8} \addlinespace[3pt]
+ & \ding{51} & \textbf{0.758} & \textbf{0.6126} & \textbf{0.9050} & 0.4364 & \textbf{0.3698} & \textbf{0.6041} \\ \midrule
+\multirow{2}{*}{\textbf{7B}} & \ding{55}  & 0.6912 & 0.5839 & 0.4972 & 0.5022 & \textbf{0.5240} & 0.6804 \\ \cline{2-8} \addlinespace[3pt]
+&  \ding{51}  & \textbf{0.7619} & \textbf{0.7668} & \textbf{0.9413} & \textbf{0.5373} & 0.4906 & \textbf{0.9116} \\ \bottomrule
+\end{tabular}
+\label{table:res_cmp_code_and_general_rm_benchmarks}
+\end{table*}
+
+\subsection{Validating CodePMP on Other LLMs}
+To further evaluate the generalizability of CodePMP, we validate its performance on the widely adopted Gemma-2B model~\citep{team2024gemma}. As illustrated in Figure~\ref{fig:combined_gemma2b_exp_bon}, the application of CodePMP results in significant performance gains in both mathemantical reasoning and logical reasoning evaluations. This not only underscores the robustness of CodePMP but also demonstrates its broad applicability in improving sample efficiency and overall performance across diverse LLM architectures. 
+
+\subsection{Performance on Coding and General RM Benchmarks}
+We evaluate CodePMP on both code-specific and general reward modeling benchmarks. The CodeUltraFeedback\_binarized test set serves as an in-domain evaluation, while RMBench provides an out-of-domain assessment. As shown in Table \ref{table:res_cmp_code_and_general_rm_benchmarks}, models finetuned with CodePMP initialization consistently outperform those without CodePMP across various model sizes. These results demonstrate that CodePMP not only enhances performance in reasoning tasks but also generalizes well across a range of RM benchmarks.
+
+
+
+\section{Related Works}
+
+\paragraph{Reward Modeling} 
+In the context of RLHF, reward models (RMs) have traditionally employed ranking models like Bradley-Terry and Plackett-Luce to represent human preferences~\citep{bradley1952rank, plackett1975, cobbe2021training, self-critique-models, lightman2023let, wang2023math, uesato2022solving, luo2024improve, yu2024ovm, stiennon2020learning, nakano2021webgpt}. More recently, probability-based approaches~\citep{zhao2023, jiang2023} have emerged, offering more precise predictions. Additionally, models such as Critique-out-Loud~\citep{ankner2024} enhance RMs by integrating natural language feedback. Generative reward models (GRMs)~\citep{yang2024} further boost sample efficiency. Preference Modeling Pretraining (PMP)~\citep{askell2021general} introduces a novel pretraining phase, utilizing large-scale pairwise ranking data to enhance RM performance. Despite these advancements, many methods are hindered by the reliance on expensive manual annotations or limited datasets, constraining scalability. CodePMP mitigates this by automating preference data generation from code, significantly improving RM sample efficiency and reducing dependency on manual data collection.
+
+\paragraph{Code Training} 
+The inclusion of code in LLM pretraining has led to marked improvements in tasks such as commonsense reasoning~\citep{madaan2022language} and mathematical problem-solving~\citep{liang2022holistic, shao2024deepseekmath, yang2024qwen2}. Furthermore, code enhances general reasoning capabilities~\citep{muennighoff2023scaling, fu2022gptroadmap, ma2023training}. Recent studies~\citep{dong2023abilities, ma2023training} indicate that incorporating code during supervised finetuning strengthens LLMs, particularly in complex decision-making tasks. CodePMP takes a pioneering approach by utilizing scalable, synthetically generated code preference pairs, reducing the dependence on manual annotation~\citep{dubey2024llama, geminiteam2024gemini, groeneveld2024olmo, bi2024deepseek}. This methodology enhances sample efficiency and scalability in reasoning-intensive tasks, presenting new opportunities for further improving LLM performance.
+
+\paragraph{LLM Reasoning}
+Improving reasoning capabilities in LLMs remains a significant challenge, with various advanced methods being proposed. Chain of Thought (CoT) prompting~\citep{Wei2022ChainOfThought, Fu2023ComplexCoT} improves reasoning by generating intermediate steps, while CoT combined with supervised finetuning (SFT) further enhances performance~\citep{Cobbe2021GSM8K, Liu2024MMIQC, yu2023metamath}. Other approaches focus on expanding inference time computation, such as problem decomposition~\citep{zhou2022least}, search-based methods like MCTS~\citep{xu2023no}, and using LLMs as verifiers~\citep{Huang2022SelfImprove, Luo2023bCritique}. Reward models, including outcome-based (ORM) and process-based (PRM), have also shown success, with PRM delivering superior results~\citep{Lightman2023PRM800K, wang2023math}. Distinct from these approaches, CodePMP introduces a scalable preference model pretraining phase that can integrate seamlessly with all the aforementioned techniques.
+
+
+
+
+
+\section{Conclusion \& Future Works}
+
+This paper introduces \textbf{CodePMP}, a scalable pretraining approach that leverages code-preference pairs to improve reasoning capabilities in large language models. Experimental results validate that CodePMP significantly improves sample efficiency and boosts performance on reasoning tasks.
+
+For future work, we aim to extend CodePMP in two key directions. \textbf{CodePrMP} will focus on utilizing compiler and interpreter verifiability to provide low-cost process supervision signals. \textbf{GenPMP} will explore how to improve sample efficiency and the performance of generative reward models by integrating code data.
+
+
+
+
+

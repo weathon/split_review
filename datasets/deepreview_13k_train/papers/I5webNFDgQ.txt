@@ -1,0 +1,361 @@
+\title{DiffusionSat: A Generative Foundation Model for Satellite Imagery}
+
+\begin{abstract}
+Diffusion models have achieved state-of-the-art results on many modalities including images, speech, and video. However, existing models are not tailored to support remote sensing data, which is widely used in important applications including environmental monitoring and crop-yield prediction. Satellite images are significantly different from natural images -- they can be multi-spectral, irregularly sampled across time -- and
+existing diffusion models trained on images from the Web do not support them. Furthermore, remote sensing data is inherently spatio-temporal, requiring conditional generation tasks not supported by traditional methods based on captions or images. In this paper, we present \model{}, to date the largest generative foundation model trained on a collection of publicly available large, high-resolution remote sensing datasets.
+As text-based captions are sparsely available for satellite images, we incorporate the associated metadata such as geolocation as conditioning information. 
+Our method produces realistic samples and can be used to solve multiple generative tasks including temporal generation, superresolution given multi-spectral inputs and in-painting. Our method outperforms previous state-of-the-art methods for satellite image generation and is the first large-scale \textit{generative} foundation model for satellite imagery. 
+The project website can be found here: \url{https://samar-khanna.io/DiffusionSat/}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Diffusion models have achieved state of the art results in image generation~\citep{sohl2015deep,ho2020denoising,dhariwal2021diffusion,kingma2021variational,song2019generative,song2020improved}.
+Large scale models such as Stable Diffusion~\citet{stablediffusion} (SD) have been trained on Internet-scale image-text datasets to generate high-resolution images from user-provided captions. These diffusion-based foundation models, used as priors, have led to major improvements in a variety of inverse problems like inpainting, colorization, deblurring~\citep{luo2023refusion}, medical image reconstruction~\citep{khader2023denoising, xie2022measurement}, and video generation~\citep{videoldm}.
+
+Similarly, there are a variety of high-impact ML tasks involving the analysis of satellite images, such as disaster response, environmental monitoring, poverty prediction, crop-yield estimation, urban planning and others~\citep{gupta2019xbd, burke2021using, ayush2021efficient, ayush2020generating, jean2016combining, you2017deep, wang2018deep, russwurm2020selfatt, martinez2021fullyconvrec, semseg2019africa,yeh2021sustainbench}. 
+These tasks consist of important inverse problems, such as super-resolution (from frequent low resolution images to high resolution ones), cloud removal, temporal in-painting and more. 
+However, satellite images  fundamentally differ from natural images in terms of perspective, resolutions, additional spectral bands, and temporal regularity. 
+While foundation models have been recently developed for discriminative learning on satellite images~\cite{satmae,ayush2021geography,bastani2022satlas},
+they are not designed to and cannot solve the inverse problems (eg: super-resolution) described above.
+
+To fill this gap, we propose \textbf{\model{}}, a generative foundation model for satellite imagery inspired from SD.
+Using commonly associated metadata with satellite images including latitude, longitude, timestamp, and ground-sampling distance (GSD), we train our model for single-image generation on a collection of publicly available satellite image data sets. 
+Further, inspired from ControlNets~\cite{controlnet}, we design conditioning models that can easily be trained for specific generative tasks or inverse problems including super-resolution, in-painting, and temporal generation. 
+Specifically, our contributions include:
+\begin{enumerate}
+    \item We propose a novel generative foundation model for satellite image data with the ability to generate high-resolution satellite imagery from numerical metadata as well as text.
+    \item We design a novel 3D-conditioning extension which enables \model{} to demonstrate state-of-the-art performance on super-resolution, temporal generation, and in-painting
+    \item We collect and compile a global generative pre-training dataset from large, publicly available satelilte image datasets (see \cref{sec:singe_image_dataset}).
+\end{enumerate}
+ 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diffusion_sat_main.pdf}
+    \caption{
+    Conditioning on freely available metadata and using large, publicly available satellite imagery datasets shows \model{} is a powerful generative foundation model for remote sensing data.
+    }
+    \label{fig:main}
+\end{figure}
+
+
+\section{Background}
+
+\label{sec:background}
+
+\paragraph{Diffusion Models}
+\label{sec:diffusion_intro}
+Diffusion models are generative models that aim to learn a data distribution $p_{\text{Data}}$ from samples~\citep{sohl2015deep,ho2020denoising,song2019generative, song2020score, song2020improved}. Given an input image $x \sim p_{\text{Data}}$, we add noise to create a \textit{noisy} input $x_t = \alpha_t x + \sigma_t \epsilon$, where $\epsilon \sim \mathcal{N}(\textbf{0}, \textbf{I})$ is Gaussian noise. $\alpha_t$ and $\sigma_t$ denote a noise schedule parameterized by diffusion time $t$ (higher $t$ leads to more added noise). The diffusion model $\epsilon_{\theta}$ then aims to \textit{denoise} $x_t$, and is optimized using the score-matching objective:
+\begin{equation}
+    \mathbb{E}_{x \sim p_{\text{Data}}, \epsilon \sim \mathcal{N}(\textbf{0}, \textbf{I})}\left[ || y - \epsilon_{\theta}(x_t ; t, c) ||_2^2 \right]
+\end{equation}
+where the target $y$ can be the input noise $\epsilon$, the input image $x$ or the ``velocity" $v = \alpha_t \epsilon - \sigma_t x$. We can additionally condition the denoising model with side information $\vc \in \mathbb{R}^D$, which can be a class embedding, text, or other images etc. 
+
+Latent diffusion models (LDMs)~\citep{vahdat2021score_latent, sinha2021d2c, stablediffusion} first downsample the input $x$ using a VAE with an encoder $\mathcal{E}$ and a decoder $\mathcal{D}$, such that $\Tilde{x} = \mathcal{D}(\mathcal{E}(x))$ is a reconstructed image. 
+Instead of denoising the input image $x$, the diffusion process is used on a downsampled latent representation $z = \mathcal{E}(x)$
+This approach reduces computational and memory cost and has formed the basis for the popularly used StableDiffusion (SD) model~\citep{stablediffusion}.
+
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+First, we describe our method for the following tasks of interest: single-image generation, conditioned on text and metadata, multi-spectral superresolution, temporal prediction, and temporal inpainting.
+
+\subsection{Single Image Generation}
+\label{sec:method_single_image}
+Our first goal is to pre-train \model{} to be able to generate \textit{single} images given an input text prompt and/or metadata. Concretely, we begin by considering datasets such that each image $\rvx \in \mathbb{R}^{C \times H \times W}$ is paired with an associated text-caption $\tau$. Our goal is to learn the conditional data distribution $p(\rvx | \tau)$ such that we can sample new images $\tilde{\rvx} \sim p(\cdot | \tau)$.
+
+LDMs are popularly used for text-to-image generation primarily for their strong ability to use text prompts.
+An associated text prompt $\tau$ is tokenized, encoded via CLIP~\citep{clip}, and then passed to the DM $\epsilon_\theta(\rvx_t ; t, \tau)$ via cross-attention~\citep{vaswani2017attention} at each layer. 
+However, while text prompts are widely available for image datasets such as LAION-5B \citep{schuhmann2022laion}, satellite images typically either do not have such captions, or are accompanied by object-detection boxes, segmentation masks, or classification labels.
+Moreover, requiring such labels precludes the use of vast amounts of unlabeled satellite imagery. 
+Ideally, we would like to pretrain \model{} on existing labelled and unlabelled datasets, without necessarily curating expensive labels.  
+
+To solve this challenge, we note that satellite images are commonly associated with metadata including their timestamp, latitude, longitude, and various other numerical information that are correlated with the image~\citep{fmow}. We thus consider datasets where each image $\rvx \in \mathbb{R}^{C \times H \times W}$ is paired with a text-caption $\tau$, as well as cheaply available numerical metadata $\rvk \in \mathbb{R}^M$, where $M$ is the number of metadata items. We thus wish to learn the data distribution $p(\rvx | \tau, \rvk)$. With good enough metadata $\rvk$, we want to still sample an image of high quality even if $\tau$ is poor or missing.
+
+We now turn to conditioning on $\rvk$. One option is to naively incorporate each numerical metadata item $k_j$, $j\in \{1, \dots, M\}$, into the text caption with a short description. However, this approach unnecessarily discretizes continuous-valued covariates and can suffer from text-encoders' known shortcomings related to encoding numerical information~\citep{clip}. Instead, we choose to encode the metadata using the same sinusoidal timestep embedding \cref{eq:pos_enc} used in diffusion models:
+\begin{equation}
+    \texttt{Project}(k, 2i)=\sin \left(k\Omega^{-\frac{2i}{d}}\right), \ ~\texttt{Project}(k, 2i+1)=\cos \left(k\Omega^{-\frac{2i}{d}} \right)
+\label{eq:pos_enc}
+\end{equation} 
+where $k$ is the metadata or timestep value, $i$ is the index of feature dimension in the encoding, $d$ is the dimension, and $\Omega=10000$ is a large constant. 
+Each metadata value $k_j$ is first normalized to a value between 0 and 1000 (since the diffusion timestep $t \in \{0, \dots, 1000\}$), and is then projected via the sinusoidal encoding. 
+A different MLP for each metadatum encodes the projected metadata value identically to the diffusion timestep $t$~\citep{ho2020denoising} as follows \cref{eq:md_embed}:
+\begin{equation}
+    f_{\theta_j}(k_j) = \texttt{MLP}\left(\left[\texttt{Project}(k_j, 0), \dots, \texttt{Project}(k_j, d)\right]\right)
+\label{eq:md_embed}
+\end{equation} 
+where $f_{\theta_j}$ represents the learned MLP embedding for metadata value $k_j$, corresponding to metadata type $j$ (eg: longitude). 
+Our embedding is then $f_{\theta_j}(k_j) \in \mathbb{R}^D$, where $D$ is the embedding dimension.
+The $M$ metadata vectors are then added together $\vm = f_{\theta_1}(k_1)+ \dots + f_{\theta_M}(k_M) $, where $\vm \in \mathbb{R}^D$, which is then also added with with the embedded timestep $\vt = f_{\theta}(t) \in \mathbb{R}^D$, so that the final conditioning vector is $\vc = \vm + \vt$.
+
+To summarize, we first encode an image $\rvx \in \mathbb{R}^{C \times H \times W}$ using the SD variational autoencoder (VAE)~\citep{stablediffusion,vqgan} to a latent representation $\rvz = \mathcal{E}(\rvx) \in \mathbb{R}^{C' \times H' \times W'}$.
+Gaussian noise is then added to the latent image features to give us $\rvz_t = \alpha_t \rvz + \sigma_t \epsilon$ (see \cref{sec:background}).
+The conditioning vector $\vc$, created from embedding metadata and the diffusion timestep, as well as the CLIP-embedded text caption $\tau' = \mathcal{T}_\theta(\tau)$, are passed through a DM $\epsilon_{\theta}(\rvz_t ; \mathbf{\tau}', \vc)$ to predict the added noise.
+Finally, the VAE decoder $\mathcal{D}$ upsamples the denoised latents to full resolution (\cref{fig:main}).
+
+Lastly, we initialize the encoder $\mathcal{E}$, the decoder $\mathcal{D}$, the CLIP text encoder $\mathcal{T}_\theta$, and the denoising UNet $\epsilon_\theta$ with SD 2.1's weights. We only update the denoising UNet $\epsilon_\theta$, the metadata and the timestep embeddings $f_{\theta_j}$ during training to speed up convergence using the rich semantic information in the pretrained SD weights. During training, we also randomly zero out the metadata vector $\vm$ with a probability of 0.1 to allow the model to generate images when metadata might be unavailable or inaccurate. A similar strategy is employed to learn unconditional generation by \cite{ho2020denoising}.
+\paragraph{Single Image-Text-Metadata Datasets}
+\label{sec:singe_image_dataset}
+There is no equivalent of a large, text-image dataset (eg: LAION~\citep{schuhmann2022laion}) for satellite images. Instead, we compile publicly available annotated satellite data and contribute a large, high-resolution generative dataset for satellite images.
+\begin{enumerate*}[label=(\roman*)]
+\item \textbf{fMoW}\label{sec:fmow}: Function Map of the World (fMoW)~\citet{fmow} consists of global, high-resolution (GSD ~0.3m-1.5m) DigitalGlobe satellite images, each belonging to one of 62 categories. 
+We crop each image to 512x512 pixels. The metadata we consider include longitude, latitude, GSD (in meters), cloud cover (as a fraction), year, month, and day. To generate a caption, we consider the semantic class and the country code.
+\item \textbf{Satlas}\label{sec:satlas}: Satlas~\citet{bastani2022satlas} is a large-scale, multi-task dataset of NAIP and Sentinel-2 satellite images. For our dataset, we use the NAIP imagery in Satlas-small, roughly of the same size as fMoW. We use the same metadata as in \cref{sec:fmow}. 
+\item \textbf{SpaceNet}\label{sec:spacenet}: 
+Spacenet~\citet{van2018spacenet, van2021spacenet7} is a collection of satellite image datasets for tasks including object detection, semantic segmentation and road network mapping. We consider a subset of Spacenet datasets, namely Spacenet v1, Spacenet v2, and Spacenet v5. We use the same metadata as earlier.
+\end{enumerate*}
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diffusion_sat_controlnet.pdf}
+    \caption{ 
+    DiffusionSat flexibly extends to a variety of conditional generation tasks. We design a 3D version of a ControlNet~\citep{controlnet} which can accept a sequence of images. Like regular ControlNets, our 3D ControlNet keeps a trainable copy of SD weights for the downsampling and middle blocks. Latent image features are reshaped to combine the batch and temporal dimensions before being input to these layers. The output of each SD block is then passed through a temporal layer (top right), which re-expands the temporal dimension before passing the latent features though a 3D convolution (initialized with zeros) and a temporal, pixel-wise transformer. The metadata associated with each input image is projected as in \cref{fig:main}.
+    }
+    \label{fig:controlnet}
+\end{figure}
+
+
+
+\subsection{Control Signal Conditional Generation}
+\label{sec:cond_gen}
+Single-image \model{} can generate a high-resolution satellite image given input prompt and metadata, but it cannot yet solve the inverse problems described in \cref{sec:intro}. To leverage its pretrained weights, we can use it as a prior for conditional generation tasks which do encompass inverse problems such as super-resolution and in-painting.
+Thus, we now consider generative tasks where we can additionally condition on control signals (eg: sequences of satellite images) $\rvs \in \mathbb{R}^{T \times C' \times H' \times W'}$, with associated metadata $\rvk_s \in \mathbb{R}^{T \times M}$, a single caption $\tau$ and target metadata $\rvk \in \mathbb{R}^M$. Here, $C'$, $H'$, and $W'$ reflect the possible difference in the number of channels, height, and width, respectively, between the conditioning images and the target image. The goal is to sample $\tilde{\rvx} \sim p(\cdot | \rvs; \rvk_s ;\tau ;\rvk )$, where $\tilde{\rvx}$ is a sample conditioned on the control signal $\rvs$ for a given caption $\tau$ and given metadata $\rvk$.
+
+\paragraph{Temporal Generation}
+\label{sec:method_temporal}
+Recent works for video diffusion have proposed using 3D convolutions and temporal attention~\citep{videoldm,tune_a_video,zhou2022magicvideo}, while others propose using existing 2D UNets and concatenating temporal frames in the channel dimension ~\citep{masked_conditional_video_diffusion,latent_shift}. However, sequences of satellite images differ in a few key ways from frames of images in a video:
+\begin{enumerate*}[label=(\roman*)]
+\item there is high variance in the length of time separating images in the sequence, while frames in video data are usually separated by a fixed amount of time (fixed frame rate)
+\item the length of time between images can be on the order of months or years, therefore capturing a wider range of semantic information than consecutively placed frames in video (eg: season, human development, land cover).
+\item there is a sense of ``global time'' across locations. Even if one compares satellite images across different countries or terrains, patterns may be similar if the year is known to be 2012 as opposed to 2020 (especially for urban landscapes). This is not the case for video data, where ``local" time across frames is sufficient to provide semantic meaning.
+\end{enumerate*}
+
+Usually, sequences of satellite images have fewer images than frames in natural image videos. As such, generating long sequences of images is less useful than conditioning on existing satellite imagery to predict the future or interpolate in the past~\citep{he2021spatial,satlas_superres}. Thus, we introduce our novel conditioning framework shown in \cref{fig:controlnet} to solve the inverse problem of frame-by-frame conditional temporal prediction.
+Unlike 2D ControlNet, we use 3D zero-convolutions between each StableDiffusion block~\citep{controlnet}. Our temporal attention layers, similar to VideoLDM~\citep{videoldm}, further enable the model to condition on temporal control signals. 
+We introduce a learned parameter $\alpha_i$ for each block $i$ to ``mix" in the output of the temporal attention layer to prevent noise from early stages in training from affecting our pre-trained weights (\cref{fig:controlnet}).
+
+A key advantage of our approach is the ability to provide each item in the control sequence $\vs$ with its own associated metadata. This is done similarly as in \cref{fig:main}: that is, we project each metadatum individually and embed it with an MLP. 
+The embedded metadata for each image is then concatenated with its image and passed through the 2D layers of the ControlNet.
+\model{} is thus invariant to the ordering of images in the control sequence $\vs$, since the timestamp in the metadata of each image solely determines its temporal position. A single \model{} model can then be trained to predict images in the past and future, or interpolate within the temporal range of the sequence.
+
+
+
+
+
+
+
+\paragraph{Super-resolution with multi-spectral input}
+\label{sec:method_superres}
+Unlike in \cref{sec:method_temporal}, our input is a sequence $\rvs$ of lower resolution (GSD) images than the target image and can contain a differing number of channels. The output of the model is still a high-resolution RGB image, as before.
+
+\paragraph{Temporal Inpainting}
+\label{sec:temporal_inpainting}
+\label{sec:xbd_dataset}
+The task is functionally equivalent to \ref{sec:method_temporal}, except the goal is to in-paint corrupted pixels (eg: from cloud cover, flooding, fire-damage) rather than \textit{predict} a new frame in $\rvs$.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\begin{figure}[tt]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diffusion_sat_samples.pdf}
+    \caption{
+    Here we generate samples from single-image DiffusionSat. 
+    We see that changing the coordinates from a location in Paris to one in USA changes the type of stadium generated, with American football and baseball more likely to appear in the latter location. Additionally, for locations that receive snow, \model{} accurately captures the correlation between location and season. However, naively incorporating the metadata into the text caption results in poorer conditioning flexibility across geography and season, (eg: with winter and summer time images produced for both August and January, or a lack of ``zooming in'' when lowering the GSD). 
+    }
+    \label{fig:samples}
+\end{figure}
+We describe the experiments for the tasks in \cref{sec:method}. Implementation details are in \cref{sec:training_details}.
+For single image generation, we report standard visual-quality metrics such as FID~\citep{fid}, Inception Score (IS), and CLIP-score~\citep{clip}. For conditional generation, given a reference ground-truth image, we report pixel-quality metrics including SSIM~\citep{ssim}, PSNR, LPIPS~\citep{lpips} with VGG~\citep{vgg} features. As noted in \cite{gong2021enlighten} and \cite{he2021spatial}, LPIPs is a more relevant perceptual quality metric used in evaluating satellite images. Our metrics are reported on a sample size of 10,000 images.
+\subsection{Single Image Generation}
+\label{sec:single_image_gen}
+We first consider single-image generation, as the task that \model{} is pre-trained on. We compare against a pre-trained SD 2.1 model \cite{stablediffusion}, a SD 2.1 model finetuned on our dataset with our captions, but without metadata, and finally a SD 2.1 model finetuned on our dataset with the metadata included in the caption (see \cref{tab:single_image}). We find that including the metadata, even within the caption, is better than a caption formed from just the labels of satellite images. This is reflected in better FID scores, which measure visual quality. We expect that the text-metadata model $\ddagger$ does better in terms of CLIP score given its more highly descriptive caption. However, treating metadata numerically, as in \model{}, further improves generation quality and control, as seen in \cref{fig:samples}.
+
+\begin{table}[t]
+\parbox[t]{.39\linewidth}{
+    \resizebox{0.39\textwidth}{!}{
+    \begin{tabular}{cccc}
+    \Xhline{2\arrayrulewidth}
+        Method & FID$\downarrow$ & IS$\uparrow$ & CLIP$\uparrow$ \\
+        \Xhline{2\arrayrulewidth}
+        SD 2.1 & 117.74 & 6.42 & 17.23 \\\hline
+        SD 2.1$\dagger$ & 37.99 & 7.42 & 16.59 \\\hline
+        SD 2.1 $\ddagger$  & 24.23  & \textbf{7.60} & \textbf{18.62}  \\\hline
+        Ours & \textbf{15.80} & 6.69 & 17.20 \\
+        \Xhline{2\arrayrulewidth}
+    \end{tabular}
+    }
+    \makeatletter\def\@captype{table}\makeatother%
+    \caption{\label{tab:single_image} Single-image 512x512 generation on the validation set of fMoW. $\dagger$ refers to finetuned SD 2.1 without any metadata information. $\ddagger$ refers to incorporating the metadata in the text caption.}
+    }
+    \hfill
+    \parbox[t]{.58\linewidth}{
+    \resizebox{0.58\textwidth}{!}{
+    \begin{tabular}{ccccc}
+    \Xhline{2\arrayrulewidth}
+        Method & SSIM$\uparrow$ & PSNR$\uparrow$ & LPIPS$\downarrow$ & MSE$\downarrow$ \\
+        \Xhline{2\arrayrulewidth}
+        Pix2Pix & 0.1374 & 8.2722 & 0.6895 & 0.1492 \\
+        DBPN &  0.1518 & \textbf{11.8568} & 0.6826 & \textbf{0.0680} \\
+        SD & 0.1671 & 10.2417 & 0.6403 & 0.0962 \\
+        SD + CN & 0.1626 & 10.0098 & 0.6506 & 0.1009 \\
+        Ours & \textbf{0.1703} & 10.3924 & \textbf{0.6221} & 0.0928 \\
+        \Xhline{2\arrayrulewidth}
+    \end{tabular}
+    }
+    \makeatletter\def\@captype{table}\makeatother%
+    \caption{\label{tab:superres} Image sample quality quantitative results on fMoW superresolution. 
+    DBPN refers to ~\citet{dbpn_superres}, Pix2Pix is from ~\citet{pix2pix}. Our method beats other super-resolution models for multi-spectral data. 
+    }
+    }  
+\end{table}
+
+
+\subsection{Control Signal Conditional Generation}
+\label{sec:experiments_conditional}
+
+We now use single-image \model{} as an effective prior for the conditional generation tasks of super-resolution, temporal generation/prediction, and in-painting. We describe the dataset for each task and demonstrate results using our 3D conditioning apporach on Texas-housing super-resolution, fMoW super-resolution using fMoW-Sentinel multispectral inputs, temporal generation on the fMoW-temporal dataset, and temporal inpainting on the xBD natural disaster dataset. \model{} achieves state of the art LPIPs and close to optimal performance on the SSIM and PSNR metrics as well.
+\paragraph{fMoW Superresolution}
+\label{par:fmow_superres}
+Using the dataset provided in \cite{satmae}, we create a fMoW-Sentinel-fMoW-RGB dataset with paired Sentinel-2 (10m-60m GSD) and fMoW (0.3-1.5m GSD) images at each of the original fMoW-RGB locations. Given all 13 multi-spectral bands of the Sentinel-2 image (here $T=1$), we aim to reconstruct the corresponding high resolution RGB image. Super-resolution (\cref{par:fmow_superres}) given low-resolution (10m-60m), multi-spectral input is especially difficult, since most fMoW-RGB images are <1m GSD. We find that \model{} once again outperforms strong super-resolution baselines, such as SD (which has shown to (\cref{tab:superres}, \cref{fig:superres}). 
+We further note that while methods such as DBPN~\citep{dbpn_superres} yield strong PSNR/SSIM, these metrics don't reflect human perception and favor blurriness over sharp detail~\citep{lpips,sr3}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diffusion_sat_superres.pdf}
+    \caption{ 
+    Generated samples from fMoW-Sentinel superresolution validation set. The conditioning image is the Sentinel-2 multispectral (MS) image represented here as SWIR, NIR, RGB. The desired output is the high-resolution (HR) fMoW-RGB image. Our method is able to capture fine-grained details better than other baselines, even when the low-resolution MS image lacks detail. SD tends to ``hallucinate" details.
+    }
+    \label{fig:superres}
+\end{figure}
+\paragraph{Texas Housing Superresolution}
+\label{par:texas_housing}
+The dataset for this task is introduced by Spatial Temporal Superresolution (STSR)~\citep{he2021spatial} and contains 286717 houses built between 2014 and 2017 in Texas. Each location consists of two high-resolution images from NAIP (GSD 1m) and 2 low-resolution images from Sentinel-2 (GSD 10m). A high resolution image at a time $t$ and corresponding low-resolution images at times $t$ and $t'$ form the control signal $\rvs$, and the task is to reconstruct the other high resolution image $\rvx$ at time $t'$.
+
+We also perform an ablation on the efficacy of pretraining on our single image datasets against finetuning directly on SD weights. We find a significant improvement from \model{} pretraining, and and from using the 3D ControlNet (across all metrics) over simply stacking the images in the channel dimension and using a 2D ControlNet (\cref{tab:housing}).
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{c|ccc|ccc} 
+\toprule
+\multirow{2}{*}{Model} & \multicolumn{3}{c|}{$t' > t$}                                  & \multicolumn{3}{c}{$t' < t$}                                  \\ 
+\cline{2-7}
+& SSIM$\uparrow$  & PSNR$\uparrow$  & LPIPS$\downarrow$    & SSIM$\uparrow$   & PSNR$\uparrow$   & LPIPS$\downarrow$ \\ 
+\hline
+Pix2Pix    & 0.5432         & 20.8420               & 0.4243          & 0.3909          & 17.9528                & 0.4909           \\
+cGAN Fusion & 0.5976         & 21.5226                & 0.3936          & 0.4220          & 17.8763                 & 0.4726           \\
+DBPN       & 0.5781         & 21.4716                 & 0.5101          & 0.4572          & 18.9330                  & 0.5910           \\
+SRGAN      & 0.5361         & 21.1968                  & 0.5261          & 0.4221          & 18.9772                & 0.5694           \\ 
+STSR (EAD)           & 0.6470         & 22.4906           & 0.3695 & 0.5225          & 19.7675           & 0.4275  \\
+STSR (EA64)           & \textbf{0.6570} & \textbf{22.5552}           & 0.3764          & \textbf{0.5338} & \textbf{19.8547}          & 0.4342           \\
+\hline 
+SD + 3D ControlNet      &  0.4747  &  17.8023 & 0.4166 &  0.3458 & 16.1467   &  0.4351         \\
+Ours + ControlNet  & 0.5403 & 20.3982 & 0.3874 &  0.4657 & 18.1007 & 0.3652           \\
+Ours + 3D ControlNet  &  0.5982 & 21.0299  &\textbf{ 0.3247 }&  0.4825 & 18.4604 & \textbf{0.3534  }        \\
+\bottomrule
+\end{tabular}
+\caption{Sample quality results on Texas housing validation data. $t' > t$ represents generating an image in the past given a future HR image, and $t' < t$ is the task for generating a future image given a past HR image.}
+\label{tab:housing}
+\end{table}
+\paragraph{fMoW Temporal Generation}
+\label{par:fmow_temporal}
+Many locations in fMoW~\citep{fmow} contain multiple images across time. For our experiments, if $T < 4$, we add copies of the latest image to pad the sequence $\rvs$ to 4 images. Given a sequence $\rvs$ of conditioning images, \model{} can predict another image at any desired target time by appropriately adjusting the target metadata $\rvk_s$ (\cref{sec:method_temporal}) Since prior works aren't designed to predict an image at any given target time, we consider tasks where the target image is chronologically prior to or later than the first image in $\rvs$.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{c|ccc|ccc} 
+\toprule
+\multirow{2}{*}{Model} & \multicolumn{3}{c|}{$t' > t$}                                  & \multicolumn{3}{c}{$t' < t$}                                  \\ 
+\cline{2-7}
+& SSIM$\uparrow$  & PSNR$\uparrow$  & LPIPS$\downarrow$    & SSIM$\uparrow$   & PSNR$\uparrow$   & LPIPS$\downarrow$  \\ 
+\hline
+STSR (EAD)~\citep{he2021spatial} & 0.3657 & 13.5191 & 0.4898 & 0.3654 & 13.7425 &  0.4940 \\
+MCVD~\citep{masked_conditional_video_diffusion} & 0.3110 & 9.6330 & 0.6058 & 0.2721 & 9.5559 & 0.6124 \\
+SD + 3D CN & 0.2027 & 11.0536 & 0.5523 & 0.2218 & 11.3094 & 0.5342 \\
+\model{} + CN & 0.3297 & 13.6938 & 0.5062 & 0.2862 & 12.4990 & 0.5307 \\
+\model{} + 3D CN & \textbf{0.3983} & \textbf{13.7886}  & \textbf{0.4304 }& \textbf{0.4293} & \textbf{14.8699} & \textbf{0.3937} \\
+\bottomrule
+\end{tabular}
+\caption{Sample quality quantitative results on fMoW-temporal validation data. $t' > t$ represents generating an image in the past given a future image, and $t' < t$ is the task for generating a future image given a past image.}
+\label{tab:temporal}
+\end{table}
+
+Our experiments show that \model{} outperforms STSR and MCVD~\citep{masked_conditional_video_diffusion}, as well as regular SD with our 3D ControlNet. Quantitative and qualitative results are in \cref{tab:temporal} and \cref{fig:temporal}, respectively. These reveal \model{}'s improved ability over the baselines to capture the target date's season (eg: snow, terrain color, crop maturity) as well as development of roads and buildings. Other models, lacking the ability to reason about metadata covariates, often simply copy an input image in the conditioning sequence as their generated output. In \ref{sec:unconditional_temporal}, we showcase \model{}'s novel ability to generate sequences of satellite images without prior conditioning images $\rvs$.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diffusion_sat_temporal.pdf}
+    \caption{ 
+    Generated samples from the fMoW-temporal validation set, for temporal prediction. The 4 columns in the center are ground-truth images from the temporal sequence. To the right, we see generated samples for the future-prediction task. The goal is to generate the image marked by the date in \textcolor{red}{red}, given the 3 other images (to its left) as conditioning signals. Similarly, for the past-prediction task on the left, the goal is to predict the image marked by the date in \textcolor{blue}{blue} given the 3 images to its right. \model{} leverages pretrained weights to capture seasonal changes and predict human development better than the baselines. Images are best viewed zoomed in. 
+    }
+    \label{fig:temporal}
+\end{figure}
+
+\paragraph{In-painting}
+\label{par:inpainting}
+Rather than artificially corrupt input images, we use the xBD dataset~\citep{gupta2019xbd} which is a subset of the xView-2~\citep{lam2018xview} challenge to assess damage caused by natural disasters. Since each location carries a pre- and post-disaster satellite image, we consider the in-painting task of reconstructing damaged areas in the post-disaster image, or introducing destruction to the pre-disaster image, where $T=1$. We demonstrate qualitative results in \cref{fig:xbd}. \model{}'s capability to reconstruct damaged roads and houses for a variety of disasters including floods, wind, fire, earthquakes etc will be important for disaster response teams to identify access routes and assess damage. We also show that \model{} can \textit{add} damage from different natural disasters, which can be useful for forecasting or preparing areas for evacuation.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figures/diffusion_sat_inpainting.pdf}
+    \caption{
+    Inpainting results. The two columns marked ``before" and ``after" represent ground truth images. The ``pred past" column is generated by conditioning on the ``after" image, and the ``pred future" column likewise by conditioning on the ``before" image. DiffusionSat successfully reconstructs damaged roads and houses from floods, fires, and wind, even when large portions of the conditioning image are masked by clouds or damage.
+    }
+    \label{fig:xbd}
+\end{figure}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\paragraph{Diffusion Models} 
+\label{sec:related_diffusion} Diffusion models~\citep{ho2020denoising, song2020score, kingma2021variational} have recently dominated the field of generative modeling, including application areas such as speech~\citep{kong2020diffwave, popov2021grad}, 3D geometry~\citep{xu2022geodiff, luo2021diffusion, zhou20213d}, and graphics~\citep{chan2023generative, poole2022dreamfusion, shue20233d}. Besides advancements in the theoretical foundation, large-scale variants built on latent space \citep{stablediffusion, saharia2022photorealistic, ho2022imagen} have arguably been the most influential. With these foundation models came a slew of novel applications such as subject customization~\citep{ruiz2023dreambooth, liu2023cones, kumari2023multi} and text-to-3D generation~\citep{poole2022dreamfusion, lin2023magic3d, wang2023prolificdreamer}.  Many works have also demonstrated these models' impressive adaptation capabilities through finetuning.
+For example, ControlNet~\citep{controlnet}, T2IAdapter~\citep{mou2023t2i}, and InstructPix2Pix~\citep{brooks2023instructpix2pix}, which add additional trainable parameters, have proven to be highly successful in adding control signals to the pre-trained diffusion networks. 
+
+\paragraph{Generative Models for Remote Sensing}
+\label{sec:related_generative_satellite}
+Image super-resolution is well studied for natural image datasets~\citep{srcnn, srgan, sr3, dbpn_superres,stablediffusion}. Generative Adversarial Networks (GANs)~\citet{goodfellow2014generative} such as SR-GAN~\citet{srgan} are among the most popular remote-sensing super-resolution methods~\citep{wang2020ultra,ma2019super,gong2021enlighten,worldstrat,satlas_superres, eesrgan}. Other methods have tailor-made convolutional architectures for Sentinel-2 image-input superresolution~\citep{razzak2023multi, tarasiewicz2023multitemporal}. More recently, Spatial-Temporal Super Resolution (STSR) \citet{he2021spatial} uses a conditional-pixel synthesis approach to condition on a combination of high and low resolution images to generate a high-resolution image at an earlier or later date. In general, these models lack the flexibility and generality of latent-diffusion models across a variety of tasks and datasets, and can suffer from unstable training~\citep{kodali2017convergence}. Our work aims to address these shortcomings by proposing a single approach based on pretrained LDMs that can flexibly translate to downstream generative tasks via our novel conditioning mechanism.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we provide \model{}, the first \textit{generative} foundation model for remote sensing data based on the latent-diffusion model architecture of StableDiffusion~\citet{stablediffusion}. 
+Our approach consists of two components:
+\begin{enumerate*}[label=(\roman*)]
+    \item a single-image generation model that can generate high-resolution satellite data conditioned on numerical metadata and text captions
+    \item A novel 3D control signal conditioning module that generalizes to inverse problems such as multi-spectral input super-resolution, temporal prediction, and in-painting.
+\end{enumerate*}
+
+For future work, we would like to explore expanding \model{} to even larger and more diverse satellite imagery datasets. Testing the feasibility of \model{} on generating synthetic data~\citep{le2023mask} might also augment existing discriminative methods to scale to larger datasets. 
+Another relevant area of future research is reducing variance in the generated samples from DiffusionSat, which can sometimes hallucinate details when producing outputs for inverse problems.
+Lastly, investigating faster sampling methods or more efficient architectures will enable easier deployment or use of \model{} in resource-constrained settings.
+
+We hope that \model{} spurs future investigation into solving inverse problems posed by remote-sensing data. Doing so would unlock societal benefits to important applications including object detection given super-resolved Sentinel-2 images~\citep{shermeyer2019effects}, crop-phenotyping~\citep{zhang2020high}, ecological conservation efforts~\citep{boyle2014high,johansen2007application}, natural disaster (eg: landslide) hazard assessment~\citep{nichol2006application}, archaeological prospection~\citep{beck2007evaluation}, urban planning~\cite{li2019generating,xiao2006evaluating,piyoosh2017semi}, and precise agricultural applications~\citep{gevaert2015generation}.
+
+
+
+
+\section{Acknowledgements}
+
+This research is based upon work supported in part by the Office of the Director of National Intelligence (ODNI), Intelligence Advanced Research Projects Activity (IARPA), via 2021-2011000004, NSF(\#1651565), ARO (W911NF-21-1-0125), ONR (N00014-23-1-2159), CZ Biohub, HAI. The views and conclusions contained herein are those of the authors and should not be interpreted as necessarily representing the official policies, either expressed or implied, of ODNI, IARPA, or the U.S. Government. The U.S. Government is authorized to reproduce and distribute reprints for governmental purposes not-withstanding any copyright annotation therein.
+
+
+
+
+

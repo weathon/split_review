@@ -1,0 +1,226 @@
+\title{Phantom: General Trigger Attacks on Retrieval Augmented Language Generation}
+
+\begin{abstract}
+Retrieval Augmented Generation (RAG) expands the capabilities of modern large language models (LLMs), by anchoring, adapting, and personalizing their responses to the most relevant knowledge sources. It is particularly useful in chatbot applications, allowing developers to customize LLM output without expensive retraining.
+Despite their significant utility in various applications, RAG systems present new security risks. In this work, we propose new attack vectors that allow an adversary to inject a single malicious document into a RAG system's knowledge base, and mount a backdoor poisoning attack.
+We design \atkname, a general two-stage optimization framework against RAG systems, that crafts a malicious poisoned document leading to an integrity violation in the model's output.
+First, the document is constructed  to be retrieved only when a specific trigger sequence of tokens appears in the victim's queries. 
+Second, the document is further optimized with crafted adversarial text that induces various adversarial objectives on the LLM output, including refusal to answer, reputation damage, privacy violations, and harmful behaviors.
+We demonstrate our attacks on multiple LLM architectures, including Gemma, Vicuna, and Llama, and show that they transfer to GPT-3.5 Turbo and GPT-4. Finally, we successfully conducted a Phantom attack on NVIDIA's black-box production RAG system, "Chat with RTX". 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Modern large language models (LLMs) have shown impressive performance in conversational tasks driving the recent renaissance of chatbot applications~\citep{openai2024gpt4, team2023gemini,reid2024gemini,mscopilot}.
+However, their ability to recall factual information and utilize it when composing responses is constrained by several crucial factors. 
+First, most LLMs are trained  based on a wide variety of Internet content and they often need further domain-specific tuning to achieve the best utility~\citep{lee2020biobert}.
+Second, the knowledge acquired from training may become outdated because information evolves over time. Third, LLMs also struggle with consistently providing factual information, due to the open problem of hallucinations in text generation.
+
+To address these limitations of LLMs,
+Retrieval Augmented Generation (RAG) 
+\citep{lewisRetrievalAugmentedGenerationKnowledgeIntensive2020} allows a language model to
+reference an external knowledge base of documents during generation. 
+RAG systems retrieve the top-$k$, most relevant documents for a given query from the knowledge base, and provide this context to the LLM generator.
+RAG systems help directly address the three main constraints of LLMs mentioned above
+and are beginning to be deployed for search, customer service, chat and many other applications. A few examples of such applications are Bing, Google Search, and Cohere Chat~\citep{coherechat} and a number of companies provide RAG frameworks, such as  NVIDIA's ``Chat with RTX''~\citep{chatwithrtx}, Google Cloud~\citep{googlevertexrag}, Microsoft Azure~\citep{msazurerag}, and the Cohere AI Toolkit~\citep{coheretoolkit}.
+
+One core feature of RAG systems is that the knowledge base may be very large and originate from diverse sources. The knowledge base may utilize local information from a user's device, such as all files on the computer, and external sources like news articles and all Wikipedia pages, which are difficult to sanitize and verify for provenance.
+These issues introduce a new security challenge in RAG-enabled LLMs: the trustworthiness of documents in the knowledge base. Malicious users may be able to inject carefully crafted poisoned documents into these knowledge bases in order to manipulate the RAG system and subsequently maliciously influence  LLM generation.
+
+In this paper, we comprehensively study the risk of knowledge base poisoning to maliciously influence RAG systems. We define a novel threat model of backdoor poisoning in  RAG systems, in which an adversary crafts a single malicious file embedded in the RAG knowledge base to achieve an integrity violation when a natural trigger appears in user queries. 
+We introduce \atkname, a general two-stage optimization framework that induces a range of adversarial objectives in the LLM generator, as shown in Figure~\ref{fig:phantom_examples}, by poisoning a single document. 
+The first stage is to generate the poisoned document by optimizing it to align, in embedding space, only with queries including a chosen adversarial trigger sequence.
+Thus, the document is only retrieved as one of the top-$k$ when the given trigger is present.
+The second stage is to craft an adversarial string to append to the document via multi-coordinate gradient optimization to  enable a range of adversarial objectives in the generated text, such as refusal to answer, generation of harmful text, and data exfiltration. Our design addresses several challenges, including adapting the attack to multiple adversarial objectives, and, in some instances, circumventing the model's safety alignment to produce hate speech or harmful behavior.
+
+
+\paragraph{Our Contributions.} To summarize, our main contributions are as follows:
+\begin{itemize}[itemsep=0mm,left=5pt]
+\item  We introduce the novel threat model of backdoor poisoning in untrusted RAG knowledge bases to induce an integrity violation in the LLM output only when a user's query contains a natural trigger sequence (e.g., "LeBron James").
+
+\item  We propose a novel two-stage attack optimization algorithm \atkname\ that generates a poisoned document, which is extracted by the RAG retriever only for queries including the trigger. To achieve  our adversarial objectives, such as generating biased opinion  or harmful content, we further optimize the poisoned document to jailbreak the safety alignment. We propose a Multi-Coordinate Gradient (MCG) strategy that provides  faster convergence than GCG \citep{zouUniversalTransferableAdversarial2023}.
+
+\item We evaluate \atkname\ on five different objectives, including refusal to answer, biased opinion, harmful behavior, passage exfiltration, and tool usage. Our experiments span over three datasets, three  RAG retrievers, seven RAG generators with generator size ranging from Gemma-2B to GPT-4, and involve thirteen unique triggers to show the generality  of our attack.
+
+\item  Finally, we attack a commercial black-box RAG system, NIVIDIA's Chat-with-RTX, and show that our attack achieves various objectives such as generating biased opinion and passage exfiltration on a production system.
+
+\end{itemize}
+\vspace*{-10pt}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/FinalPhantom.pdf}
+    \caption{RAG outputs for different adversarial objectives with our \textbf{Phantom attack} framework.}
+    \label{fig:phantom_examples}
+\end{figure}
+
+
+
+
+\section{Background and Related Work}
+
+
+
+\textbf{Retrieval Augmented Generation (RAG).}
+RAG is a technique used to ground the responses of an LLM generator to a textual corpus which may help minimize hallucinations~\citep{shuster2021retrieval}
+and help ensure response freshness, without requiring expensive fine-tuning or re-training operations. RAG systems use two main components: a \emph{retriever} and a \emph{generator}.
+
+\noindent {\bf RAG Retriever.} 
+A \emph{knowledge base} is a  set of documents collected either from the user's local file system
+or from external sources such as Wikipedia and news articles.  The retriever is a separately trained embedding model that produces document embeddings in a vector space~\citep{gautier2022unsupervised,karpukhin-etal-2020-dense,izacard2022unsupervised}. The retriever model operates over \emph{passages}, which are contiguous, fixed-size sequences of tokens in a document. Given a user's query $Q$, the retriever generates encodings of the query $\qryenc{Q}$ and encodings $\qryenc{D}$ of all documents passages $D$ in the knowledge base.
+The top-$k$ most similar passages, as identified by the similar score $\simscore{\psgenc{D}}{\qryenc{Q}}$, are selected.
+These document passages are then aggregated in a prompt that is forwarded, together with the user query, to the generator.
+
+
+\noindent {\bf LLM Generator.} 
+This is an LLM
+typically trained with the autoregressive next-token prediction objective. 
+We will consider instruction trained models that are subsequently fine-tuned with safety alignment objectives --- Harmlessness, Helpfulness, and Honesty (HHH) ---, such as GPT-4~\citep{openai2024gpt4} or Llama 3~\citep{touvron2023llama}. 
+The LLM is given as input the system prompt (examples in \Cref{fig:phantom_examples}), a user's query $Q$ and the top-$k$ retrieved passages---this enables personalization and grounding.
+The main advantage of RAG over other personalization methods (e.g, fine-tuning the LLM on users' data) is the relatively low computation cost.
+This is because
+several pre-trained retriever models are publicly available and computing similarity scores with the knowledge database is in general inexpensive.  
+
+\noindent \textbf{Attacks on RAG.}
+Here we summarize the emergent research thread concerning attacks against  RAG systems. We direct the reader to \Cref{sec:app-add-backgr} for a broader discussion of related work.
+\cite{zhong2023poisoning} introduce corpus poisoning attacks on RAG systems, although these are focused towards the retriever, and have no adversarial objective on the generator. The followup work by Pasquini et al. \cite{pasquini2024neural} provides a gradient-based prompt injection attack, which they show can persist through RAG pipelines; however, they do not explicitly optimize against a retriever, which limits their ability to ensure the malicious document appears in context. 
+A more recent work by Zou et al. \cite{zou2024poisonedrag}, called PoisonedRAG, optimizes against both the retriever and generator, but their goal is targeted poisoning, similar to prior targeted poisoning attacks on ML classifiers \citep{shafahi2018poisonfrogs, geiping2021witches}.
+In PoisonedRAG, for a specific pre-defined query, the attack needs to inject multiple poisoned passages to induce the generation of a pre-defined answer. 
+Our work significantly improves on this by introducing query agnostic trigger-activated poisoning, which unifies a variety of adversarial objectives in a single attack framework,  while only requiring a single poisoned passage. 
+
+Lastly, there are several concurrent works,  also exploring RAG-based poisoning attacks, that focus on either a single adversarial objective such as Refusal to Answer \citep{shafran2024machineragjammingretrievalaugmented} or a subset of objectives \citep{badrag2024, trojanrag2024};
+However, we are the first to propose natural trigger based attacks over a wide range of adversarial objectives, including the ones that require model jailbreaking, such as harmful behavior and tool usage.
+
+
+
+
+\section{Threat Model}
+
+We consider a poisoning attack on a system similar to Chat with RTX: A RAG augmented LLM that produces personalized content for its users leveraging the local file system as the knowledge base.
+In a local deployment, it is relatively easy for an adversary to introduce a single poisoned document into the user's local file system, using
+well-known practices like spam emails, spear phishing, and drive-by-download. Note that the adversary does not require control of the user's file system or knowledge of other documents to launch its attack. While we focus on the local deployment scenario, our attack is applicable to RAG system pulling documents from the web in their knowledge bases. Such a system could be attacked by hosting the malicious document on a public website or modifying content in Wikipedia~\citep{Wikipedia_Poiosning}.
+
+The adversary chooses a target sequence of tokens, such as a brand, company, or person's name, which is likely to appear naturally in user's queries, for which they desire to cause an \emph{integrity violation}, i.e., modification to the model's output. Initially, we assume the RAG system is based on pre-trained publicly accessible models, allowing the attacker to directly compute gradients for both the retriever and generator models to create the poisoned document.  LLMs are extremely expensive to train and the common practice for many applications is to re-use existing models, especially instruction trained ones. In \Cref{sec:main_exp}, we relax the knowledge about the models, considering a \emph{black-box} setting where we transfer the attack to different models, including proprietary models such as GPT-4~\citep{openai2024gpt4}. We also attack a black-box RAG model deployed in a real application, Chat with RTX, in \Cref{sec:chatrtx_main}, without knowledge of the RAG system architecture.
+
+
+
+
+
+
+\subsection{Adversarial Objectives} 
+\label{sec:adv_obj}
+The adversary aims to launch a backdoor poisoning attack by injecting  a malicious document in the RAG knowledge base. The effect of this attack is activated only when the user's query contains a natural \emph{trigger sequence} --- one or multiple natural language words --- arbitrarily selected by the adversary.
+The attack is \emph{universal}: it is agnostic to the rest of user query's content, beyond the presence of the trigger sequence.
+
+Our attack strategy mimics the effects of a backdoor poisoning attack \citep{guBadNetsEvaluatingBackdooring2019}, where poisoned samples with a trigger are inserted at training time to induce mis-classification when the trigger is encountered during inference. Differently from  classification, the structure of RAG systems enables the execution of the attack without tampering with the training process. This results in adversarial control over the generator's output when the trigger is present, without requiring model training or fine-tuning. In particular, the LLM can be induced to emit text according to several adversarial objectives:
+\noindent {\bf Refusal to Answer (RtA).} 
+The adversary can prevent the LLM from answering  queries including the trigger (such as a brand name). To this end, the adversary can optimize their adversarial passages to elicit the string ``Sorry, I don't know'' at the start of the response, preventing the generator from providing useful information and reducing the model's helpfulness. 
+\noindent {\bf Biased opinion.} The attacker can influence the generator's response on adversarially selected topics, spreading biased sentiment and harming reputations. For example, an attack could trigger negative responses about a specific brand or individual in the user queries.
+This attack is not limited to sentiment manipulation, and can conceptually be used to induce other biases in the response.
+\noindent {\bf Harmful Behavior.} Another adversarial objective, overlooked by prior RAG attacks, is to cause direct harm to users, like generating insults or threats. This is a more complex objective since most generators are safety-aligned, requiring adversaries to both disrupt RAG's original query-answering alignment and also bypass the generator's safety training, making it a challenging two-fold task.
+\noindent {\bf Passage Exfiltration.} 
+The adversary aims to compromise system privacy by accessing the passages from the knowledge base extracted by the retriever. We assess if an adversary can trigger the LLM to reveal the passages used to answer the user's query. Our attack becomes particularly concerning in LLMs equipped with {\bf Tool-Usage} capabilities, such as Email APIs. In such cases, our attack could manipulate the system into sending an email to an address specified by the attacker, containing the retrieved passages.
+
+
+
+
+
+\section{\atkname~Attack Framework}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/phantom.drawio-base-final.pdf}
+    \caption{Phantom attack framework.}
+    \label{fig:phantom-pipeline}
+\end{figure}
+
+We now construct our \atkname\ attack framework to induce the  adversarial objectives outlined in \Cref{sec:adv_obj}. In Phantom, the adversary executes a two-fold attack: i) poisoning the RAG retriever followed by ii) compromising the RAG generator.
+To achieve this dual objective the adversary creates an adversarial passage $\advpass = \advretstr \oplus\advgenstr\oplus\advcmd$, where $\oplus$ denotes string concatenation, and inserts it into a single document in the victim's local knowledge base. We ensure that the size of the adversarial passage is below of the passage length used by the retriever, so that the entire adversarial passage can be retrieved at once.
+Here, $\advretstr$ represents the adversarial payload for the retriever component, while $\advgenstr$ targets the generator and $\advcmd$ is the adversarial command.
+When attacking the retriever, the adversary's aim  is to ensure that the adversarial passage is chosen among the top-$k$ documents selected by the retriever, but \emph{only} when the trigger sequence $\usrtrg$ appears \emph{in} the user's query. For this purpose, we propose a new optimization approach that constructs the adversarial retriever string $\advretstr$ to maximize the likelihood of $\advpass$ being in the top-$k$ passages.
+
+The next step involves creating the adversarial generator string $\advgenstr$, used to break the alignment of the LLM generator. 
+The goal is to execute the adversarial command $\advcmd$ and  output a response starting with a target string $\advopstr$.
+We propose an extension to GCG~\citep{zouUniversalTransferableAdversarial2023} to break the LLM alignment with faster convergence. \Cref{fig:phantom-pipeline} provides a visual illustration our framework pipeline.
+
+
+
+\input{sec/PoisonedDocGen}
+\input{sec/ConcreteInstance}
+
+
+
+\section{Evaluation}
+
+
+\paragraph{Experimental Setup.}\label{sec:eval_setup}
+
+All experiments are repeated three times with different random seeds, and all reported values are the averages of these results.
+Experiments were run on machines with at least 256GB of memory available and different GPU configurations: Nvidia RTX 4090, Nvidia RTX A6000 and Nvidia A100.
+Each attack can be run using a single GPU. 
+
+\noindent {\bf Datasets.}
+To evaluate our process, we use the MS MARCO question and answer dataset \citep{nguyen2640ms}, which contains more than 8 million document passages and roughly 1 million real user queries.  
+For completeness, we also show our effectiveness of our attack on two other datasets, namely Natural Question (NQ) and HotPot-QA. We show these results in \Cref{app: nq_dataset} due to space constraints.
+
+\noindent {\bf Retrievers and Generators.}
+We evaluate our attack on a variety of commonly used, open source, retriever and generator models.
+In particular, we use Contriever~\citep{gautier2022unsupervised}, Contriever-MS (a version of Contriever fine-tuned on the MS MARCO dataset), and DPR~\citep{karpukhin-etal-2020-dense} as retrievers.
+For the generator, we test our attack on the following LLMs: Vicuña~\citep{vicuna2023} version 1.5 7B and 13B, Llama 3\footnote{Currently the best <10B parameters open chatbot model \url{https://chat.lmsys.org/?leaderboard}} Instruct 8B~\citep{touvron2023llama,metallama3}, and Gemma  Instruct 2B and 7B~\citep{team2024gemma}. \Cref{app:gpt_exps} presents experiments on larger closed source models.
+
+\noindent {\bf Evaluation Metrics.}
+We evaluate the attack on the retriever using the 
+Retrieval Failure Rate (Ret-FR) metric, which denotes the percentage of queries for which the poisoned document was not retrieved in the top-$k$ documents leading to failure of our attack. Lower scores indicate a more successful attack.
+Regarding the generator, for each adversarial objective we  report the attack success percentage.
+Since the definition of success varies between objectives, for each of them we report the percentage of the user's queries for which the attack's integrity violation reflects the current adversarial goal.
+
+\noindent {\bf RAG Hyperparameters.} For our main experiment we set the number of passages retrieved to a default value $k=5$. To evaluate the success of our attack, we conduct tests using 25 queries selected from the test set, which ensures that the trigger appears naturally within each query.  \Cref{app:topk_ablation} and \Cref{app:queries_ablation} present ablation studies where we vary these parameters. We test for three triggers, for our adversarial objective, where we choose common brand or celebrity names as they frequently appear in natural user queries, and the success of our attack can cause significant reputation damage to these entities. 
+
+\input{sec/MainResults}
+
+
+
+
+\section{Mitigations and Discussion}
+
+
+We showed the feasibility of \atkname\ in mounting a poisoning attacks on untrusted RAG knowledge bases, causing a range of integrity violations in LLM outputs. We also demonstrated a successful attack on a production RAG system. Therefore, designing mitigation against our attack  is an important topic for future research. We  mention several possible mitigation approaches, all of which bring additional technical challenges:
+
+\begin{itemize}[itemsep=0mm,left=5pt]
+\item
+\textbf{ML-based defenses}: ML-based techniques such as perplexity filtering and paraphrasing the context to the LLM generator~\citep{Baseline_defenses} have been proposed, but they can be evaded by motivated attackers. \cite{xiang2024certifiablyrobustragretrieval} is the first work to provide certifiable guarantees against RAG poisoning attacks, using aggregation of LLM output over multiple queries, each based on a single retrieved document. This method introduces additional overhead to the retriever pipeline and most likely reduces the utility of the RAG system, but designing certified defenses with better utility / robustness tradeoff is the gold standard for attack mitigation. 
+
+\item 
+\textbf{Filtering the LLM output}: Some analysis of the LLM output can be performed to filter suspicious responses that are not aligned with the query. Also, external sources of information might be used to check that the model output is correct. In most cases, though, ground truth is not readily available for user queries, and filtering relies on heuristics that can be bypassed. Several AI guardrails frameworks have been recently open sourced: Guardrails AI~\citep{guardrailsai}, NeMO Guardrails~\citep{guardrails_nemo}, and Amazon Bedrock~\citep{amazon_bedrock}. Guardrails are available for filtering risky queries to an LLM, such as those with toxic content, biased queries, hallucinations, or queries including PII, and these frameworks can be extended to include  guardrails for our newly developed attacks.  
+\item 
+\textbf{System-based defenses}: Our attack relies on inserting a poisoned document in the knowledge base of the retriever. Therefore, adopting classical system security defenses might partially mitigate Phantom. Security techniques that can be explored are: strict access control to the knowledge base, performing integrity checks on the documents retrieved and added to the model's context, and using data provenance to ensure that documents are generated from trusted sources. Still, there are many challenges for each of these methods. For instance, data provenance is a well-studied problem, but existing security solutions require cryptographic techniques and a certificate authority to generate secret keys for signing documents~\citep{provenance_survey}. It is not clear how such an infrastructure can be implemented for RAG systems and who will act as a trusted certificate authority. Another challenge is that these methods will restrict the information added to the knowledge base, resulting in a reduction in the model’s utility. 
+\end{itemize}
+
+As always, there is a race between attackers and defenders and these techniques might raise the bar, but resourceful attackers could still evade these mitigations. Therefore, designing mitigations with strong guarantees that preserve model utility remains an open challenge.  
+
+
+
+\section{Conclusion}
+
+
+In this work we present \atkname, a framework to generate single-document, optimization-based poisoning attacks  against RAG systems.
+Our attack obtains adversarial control of the output of the LLM when a specific natural trigger sequence is present in the user query, regardless of any additional content of the query itself. 
+We show how our framework can be effectively instantiated for a variety of adversarial objectives, and evaluate it against different retriever and generator models. We demonstrate an attack against the NVIDIA ChatRTX application that leads to either refusal to answer or data exfiltration objectives. Given the severity of the attack, it is critical to develop mitigations in future work, but we discuss several challenges for designing mitigations with strong guarantees.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

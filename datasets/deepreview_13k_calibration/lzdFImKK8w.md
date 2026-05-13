@@ -1,8 +1,8 @@
 # Boltzmann-Aligned Inverse Folding Model as a Predictor of Mutational Effects on Protein-Protein Interactions
 
 - Decision: Accept
-- Avg Score: 4.20
-- Scores: 6, 1, 0, 6, 8
+- Avg Score: 7.50
+- Scores: 6, 10, 6, 8
 
 ## Abstract
 Predicting the change in binding free energy ($\Delta \Delta G$) is crucial for understanding and modulating protein-protein interactions, which are critical in drug design.

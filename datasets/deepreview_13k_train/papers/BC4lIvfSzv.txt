@@ -1,0 +1,625 @@
+\title{Generative Representational Instruction Tuning}
+
+\begin{abstract}
+
+All text-based language problems can be reduced to either generation or embedding. Current models only perform well at one or the other. We introduce generative representational instruction tuning (\method{}) whereby a large language model is trained to handle both generative and embedding tasks by distinguishing between them through instructions. Compared to other open models, our resulting \modelbase{} sets a new state of the art on the Massive Text Embedding Benchmark~(MTEB) and outperforms all models up to its size on a range of generative tasks. By scaling up further, \modelbig{} outperforms all open generative language models that we tried while still being among the best embedding models. Notably, we find that \method{} matches training on only generative or embedding data, thus we can unify both at no performance loss. Among other benefits, the unification via \method{} speeds up Retrieval-Augmented Generation (RAG) by >~60\% for long documents, by no longer requiring separate retrieval and generation models. Models, code, etc.
+\begin{figure*}[htbp]
+    \centering
+    \begin{center}
+        \includegraphics[width=0.96\textwidth]{figures/performance.pdf}
+        \caption{\textbf{Performance of various models on text representation (embedding) and generation tasks.} \model{} is the first model to perform best-in-class at both types of tasks simultaneously.}
+        \label{fig:performance}
+    \end{center}
+\end{figure*}
+
+\begin{figure*}[htbp]
+    \centering
+    \begin{center}
+        \includegraphics[width=\textwidth]{figures/octopus.pdf}
+        \caption{\textbf{\method{}.} The same model handles both text representation and generation tasks based on the given instruction. For representation tasks, instructions ideally contain the target \colorbox{olive}{domain}, \colorbox{mikan}{intent}, and \colorbox{gold}{unit}~\cite{asai2022taskaware}. The representation is a tensor of numbers, while the generative output is text.} 
+        \label{fig:octopus}
+    \end{center}
+\end{figure*}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Creating a single general model that performs well at a wide range of tasks has been a long-standing goal of the field of artificial intelligence~\cite{kaiser2017model,jaegle2021perceiver,cho2021unifying,reed2022generalist,singh2022flava}. Recently, large language models (LLMs) have emerged as a promising direction for a single multi-task model~\cite{radford2019language,brown2020language}. Prior work has argued that all text-based language problems can be reduced to generation and thus handled by a single LLM~\cite{raffel2023exploring,du2021all}.
+
+However, tasks that use embeddings, such as clustering or retrieval~\cite{muennighoff2023mteb}, have largely been ignored from this perspective. Today, text embeddings power many critical real-world applications ranging from search engines to user-facing chatbots~\cite{huang2020embedding,su2017chatbot}. While integrating text embeddings into the generative paradigm is possible by generating a sequence of numbers to form the embedding tensor, it becomes impractical due to the high dimensionality and precision requirements of embeddings. Thus, it is more common and much easier to use the hidden state of the model as the embedding representation, which is already a numeric tensor~\cite{muennighoff2022sgpt,wang2020sbertwk,morris2023text}. However, doing so for current generative models leads to poor performance. For example, while the T5 model~\cite{raffel2023exploring,sanh2022multitask} can handle any generative task in a sequence-to-sequence fashion, it requires finetuning to make its hidden state useful for text embedding~\cite{ni2021large,ni2021sentencet5} during which it loses its generative capabilities.
+We introduce \method{} (generative representational instruction tuning) which unifies embedding and generative tasks, leading to a model that excels at both tasks as shown in \autoref{fig:performance}. \autoref{fig:octopus} depicts how \method{} combines two previously disjoint training paradigms: (1) \textit{Generative instruction tuning}, whereby the model is trained to respond to instructions by generating an answer~\cite{wei2022finetuned,sanh2022multitask}; and (2) \textit{Representational instruction tuning}, whereby the model is trained to represent a provided input according to an instruction~\cite{su2023embedder,asai2022taskaware}. Via the instructions and separate loss functions the model learns to differentiate the two streams. We test our approach on models with up to 47B parameters and, due to its simplicity, we expect the method to generalize to any LLM, even non-transformers. This unification via \method{} leads to three advantages:\\
+\textbf{a) Performance:} Our unified model matches the performance of embedding-only and generative-only variants, even outperforming them on some tasks. At 7B parameters, \model{} sets a new state of the art on the Massive Text Embedding Benchmark~\cite{muennighoff2023mteb} among open models and at the same time outperforms much larger models on generative tasks, such as \llama{} 2 70B. By scaling further, \model{} \textsc{8x7B} is the best open generative language model on our task average, while only using 13B parameters at inference. Further, as our models use sliding window attention~\cite{child2019generating,beltagy2020longformer} they can handle generative and embedding inputs of arbitrary length.\\
+\textbf{b) Efficiency:} Generative and embedding models are commonly used together to make up for each other's deficiencies~\cite{guu2020realm,lewis2021retrievalaugmented}. One such scenario is Retrieval-Augmented Generation (RAG)~\cite{lewis2021retrievalaugmented}, where an embedding model is used to retrieve context that is provided to the generative model to answer a user query. This requires passing the user query and the context into both the generative and the embedding model for a total of four forward passes. With \model{}, the embedding and generative model are equivalent, allowing us to cache computations and halve the necessary number of forward passes. We find that this can lead to >~60\% faster RAG at inference with long documents.\\
+\textbf{c) Simplicity:} Currently, API providers such as OpenAI provide separate generative and embedding endpoints. This requires separate load balancing, additional storage, and more complex serving software. A single model that handles both use cases significantly simplifies infrastructure needs.
+
+The main downside of \method{} is that it requires more compute due to training with two objective functions. However, as finetuning is cheap compared to pretraining, we think the benefits vastly outstrip this problem and thus recommend practitioners building instruction-following language models to adopt \method{} during finetuning.
+
+
+
+\section{\method{}
+
+\label{sec:method}
+
+\begin{figure*}[htbp]
+    \centering
+    \begin{center}
+        \includegraphics[width=\textwidth]{figures/format.pdf}
+        \caption{\textbf{\model{} architecture and format.} \emph{Left:} \model{} uses bidirectional attention over the input for embedding tasks. Mean pooling is applied over the final hidden state to yield the final representation. \emph{Right:} \model{} uses causal attention over the input for generative tasks. A language modeling head on top of the hidden states predicts the next tokens. The format supports conversations with multiple turns (indicated with ``...'').}
+        \label{fig:format}
+    \end{center}
+\end{figure*}
+\method{} unifies representational instruction tuning~\cite{su2023embedder,asai2022taskaware,wang2024improving} and generative instruction tuning~\cite{wei2022finetuned,sanh2022multitask,muennighoff2023crosslingual} into a single model. We finetune a pretrained large language model~\cite{brown2020language} with embedding and generative instruction data in a consistent format as depicted in \autoref{fig:format}. For embedding data, we follow prior work and compute the loss using a contrastive objective with in-batch negatives~\cite{chen2020simple,gao2022simcse}:
+
+\begin{equation}\label{eq:rep}
+\mathcal{L}_{\text{Rep}} = -\frac{1}{M}\sum_{i=1}^M\log\frac{\exp(\tau \cdot \sigma(f_{\theta}(q^{(i)}), f_{\theta}(d^{(i)})))}{\sum_{j=1}^M\exp(\tau \cdot \sigma(f_{\theta}(q^{(i)}), f_{\theta}(d^{(j)})))}
+\end{equation}
+
+where $f$ is \model{} parametrized by the model $\theta$, $\tau$ is a temperature hyperparameter and $\sigma$ corresponds to pooling applied to each output followed by cosine similarity. $q$ and $d$ are query and document samples. As depicted in \autoref{fig:format}, we use bidirectional attention followed by mean pooling, which corresponds to averaging the hidden states across the sequence length. During pooling, we only average the final hidden states of the input sample, ignoring the instruction and format tokens. However, the instruction and format tokens still influence the final representation through the self-attention mechanism~\cite{vaswani2023attention}. 
+
+To compute the loss on generative data, we use the language modeling objective whereby the model needs to predict the next token~\cite{radford2018improving,radford2019language}:
+
+\begin{equation}\label{eq:gen}
+\mathcal{L}_{\text{Gen}} = -\frac{1}{N}\sum_{i=1}^{N} \log P(f_{\theta, \eta}(x^{(i)}) | f_{\theta, \eta}(x^{(<i)}))
+\end{equation}
+
+where $f$ is \model{} parametrized by the model $\theta$ and the language modeling head $\eta$, which is only used for generation. $x$ are generative training samples. We only compute loss over predicted tokens i.e. ``\verb|{response}</s>|'' in \autoref{fig:format}. A key consideration is whether the generative loss is aggregated at the sample or token level. Aggregating at the sample level corresponds to giving each sample the same weight within a batch regardless of its token count. Such aggregation is commonly used for instruction tuning, as it can boost performance on discriminative tasks~\cite{muennighoff2023crosslingual}. However, \citet{muennighoff2023crosslingual} also show how this in turn leads to a model biased toward short generations. Meanwhile, aggregation at the token level corresponds to giving each token the same weight, thus samples with many tokens become more important. This usually leads to a model producing longer generations, which can be important for performance on generative tasks. Especially, human or machine-evaluated generative tasks, such as AlpacaEval~\cite{alpaca_eval}, are known to be biased toward preferring longer generations~\cite{wang2023far}. Note that when every sample has the same sequence length such as during pretraining or when the batch size is 1, token and sample level generative loss are equal to each other. One can also mix the two to balance their trade-offs, for example doing token level loss across a subset of the batch and then giving each subset the same weight. We explore the trade-offs in our ablations in \autoref{sec:ablations}. We sum the objectives with optional loss weights $\lambda_{\text{Rep}}$ and $\lambda_{\text{Gen}}$:
+
+\begin{equation}\label{eq:grit}
+\mathcal{L}_{\method{}} = \lambda_{\text{Rep}}\mathcal{L}_{\text{Rep}} + \lambda_{\text{Gen}}\mathcal{L}_{\text{Gen}}
+\end{equation}
+
+Notably, our formulation supports differing numbers of embedding samples ($M$) and generative samples/tokens ($N$). This allows for significantly increasing the embedding batch size while keeping the generative batch size fixed. A large embedding batch size is often key to well-performing text embedding models~\cite{xiao2023cpack}. However, it comes at the cost of requiring more compute at each step. 
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+In this section, we first outline our experimental setup in \autoref{sec:setup}. In \autoref{sec:main}, we discuss and benchmark the embedding and generative performance of our models. Finally, in \autoref{sec:ablations}, we ablate the settings that led to our final models, including training data, precision, pooling, sequence length, and loss weights.
+
+\subsection{Setup}
+\label{sec:setup}
+
+We finetune our final models from Mistral 7B~\cite{jiang2023mistral} and Mixtral 8x7B~\cite{jiang2024mixtral} using adaptations of E5~\cite{wang2024improving} and the \tulu{} 2 data~\cite{ivison2023camels}. For E5, we adapt it by adding S2ORC~\cite{lo2020s2orc} to increase its scientific data (``E5S''), while for \tulu{} 2 we filter out their custom prompts that contain answers related to the origin of their model. For \modelbase{}, we use a batch size of 2048 for embedding data and 256 for generative data and we train the model for a total of 1253 steps corresponding to one epoch on the generative data and 1.36 epochs on the embedding data. For \modelbig{}, the embedding batch size is 256 due to compute limitations. We use several strategies to reduce the memory required during training including a novel technique to split the embedding triplet into separate forward and backward passes detailed in \autoref{sec:embmem}. Other hyperparameters are detailed in the ablation experiments in \autoref{sec:ablations} and \autoref{sec:hps}. 
+
+For embedding performance we evaluate using the 56 main datasets from MTEB~\cite{muennighoff2023mteb}. For generative performance, we largely follow the evaluation setup of \citet{ivison2023camels} except that we use the HumanEvalSynthesize~\cite{muennighoff2023octopack} variant of HumanEval, as it is more adequate for instruction-following models. We explain each task in more detail in \autoref{sec:eval}.
+
+\subsection{Main Results}
+\label{sec:main}
+
+\begin{table}[htbp]
+\centering
+\caption{\textbf{Embedding performance of \model{} and others}. We indicate parameter counts where available (B=billions). See \autoref{sec:eval} for task, metric, and dataset details. \autoref{sec:mtebresults} contains per-dataset results of \model{} models. LLMs not finetuned for embedding (\llama{} 2 70B, Mistral 7B (Instruct), GPT-J 6B, Gen.-only) are evaluated with weighted-mean pooling~\cite{muennighoff2022sgpt}. $^\varheart$Results from the MTEB leaderboard \scriptsize{(\url{https://hf.co/spaces/mteb/leaderboard})}}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|ccccccc|c}
+\toprule
+Task ($\rightarrow$) & CLF & Clust. & PairCLF & Rerank & Retrieval & STS & Summ. & Avg. \\
+Metric ($\rightarrow$) & Acc. & V-Meas. & AP & MAP & nDCG & Spear. & Spear. & \\
+Dataset \# ($\rightarrow$) & 12 & 11 & 3 & 4 & 15 & 10 & 1 & 56 \\
+\midrule
+\multicolumn{9}{c}{Proprietary models$^\varheart$} \\
+\midrule
+OpenAI v3 & 75.5 & 49.0 & 85.7 & 59.2 & 55.4 & 81.7 & 29.9 & 64.6 \\
+\midrule
+\multicolumn{9}{c}{Other Open Models$^\varheart$} \\
+\midrule
+\llama{} 2 70B & 60.4 & 29.0 & 47.1 & 38.5 & 9.0 & 49.1 & 26.1 & 35.6 \\
+Mistral 7B & 63.5 & 34.6 & 53.5 & 43.2 & 13.2 & 57.4 & 19.7 & 40.5 \\
+Mistral 7B Instruct & 67.1 & 34.6 & 59.6 & 44.8 & 16.3 & 63.4 & 25.9 & 43.7 \\
+GPT-J 6B & 66.2 & 39.0 & 60.6 & 48.9 & 19.8 & 60.9 & 26.3 & 45.2 \\
+SGPT BE 5.8B & 68.1 & 40.3 & 82.0 & 56.6 & 50.3 & 78.1 & 31.5 & 58.9 \\
+Instructor XL 1.5B & 73.1 & 44.7 & 86.6 & 57.3 & 49.3 & 83.1 & \textbf{32.3} & 61.8 \\
+BGE Large 0.34B & 76.0 & 46.1 & 87.1 & 60.0 & 54.3 & 83.1 & \underline{31.6} & 64.2 \\
+E5 Mistral 7B & 78.5 & 50.3 & \textbf{88.3} & 60.2 & 56.9 & \textbf{84.6} & 31.4 & 66.6 \\
+\midrule
+\multicolumn{9}{c}{\textbf{\model{}}} \\
+\midrule
+Gen.-only 7B & 65.4 & 32.7 & 54.2 & 43.0 & 13.7 & 60.2 & 21.1 & 41.2 \\
+Emb.-only 7B & \underline{78.8} & \textbf{51.1} & 87.1 & \textbf{60.7} & \textbf{57.5} & \underline{83.8} & 30.2 & \underline{\textbf{66.8}}\\
+\model{} \textsc{7B} & \textbf{79.5} & \underline{50.6} & \underline{87.2} & \underline{60.5} & \underline{57.4} & 83.4 & 30.4 & \underline{\textbf{66.8}} \\
+\model{} \textsc{8x7B} & 78.5 & 50.1 & 85.0 & 59.8 & 55.1 & 83.3 & 29.8 & 65.7 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:emb}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{\textbf{Generative performance of \model{} and others}. We indicate parameter counts where available (B=billions). See \autoref{sec:eval} for dataset, setup, and metric details. $^\varheart$Results from \citet{ivison2023camels} except for numbers marked with $^\vardiamond$ which are from~\citet{touvron2023llama} and $^\dagger$ which are from us. For models that cannot be easily used as chat models, we set Alpaca to 0.}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|llllll|l}
+\toprule
+Dataset ($\rightarrow$) & MMLU & GSM8K & BBH & TyDi QA & HumanEval & Alpaca & Avg. \\
+Setup ($\rightarrow$) & 0 FS & 8 FS, CoT & 3 FS, CoT & 1 FS, GP & 0 FS & 0 FS, 1.0 & \\
+Metric ($\rightarrow$) & EM & EM & EM & F1 & pass@1 & \% Win & \\
+\midrule
+\multicolumn{8}{c}{Proprietary models$^\varheart$} \\
+\midrule
+GPT-4-0613 & 81.4 & 95.0 & 89.1 & 65.2 & 86.6$^{\dagger}$ & 91.2 & 84.8 \\
+\midrule
+\multicolumn{8}{c}{Other Open Models$^\varheart$} \\
+\midrule
+GPT-J 6B & 27.7 & 2.5 & 30.2 & 9.4 & 9.8 & 0.0 & 13.3 \\
+SGPT BE 5.8B & 24.4 & 1.0 & 0.0 & 22.8 & 0.0 & 0.0 & 8.0 \\
+Zephyr 7B $\beta$ & 58.6 & 28.0 & 44.9 & 23.7 & 28.5 & 85.8 & 44.9 \\
+\llama{} 2 7B & 41.8 & 12.0 & 39.3 & 51.2 & 12.8$^\vardiamond$ & 0.0 & 26.2 \\
+\llama{} 2 13B & 52.0 & 25.0 & 48.9 & 56.5 & 18.3$^\vardiamond$ & 0.0 & 33.5 \\
+\llama{} 2 70B & 64.5 & 55.5 & 66.0 & \textbf{62.6} & 29.9$^\vardiamond$ & 0.0 & 46.4 \\
+\llama{} 2 Chat 13B & 53.2 & 9.0 & 40.3 & 32.1 & 19.6$^{\dagger}$ & 91.4 & 40.9 \\
+\llama{} 2 Chat 70B & 60.9 & 59.0 & 49.0 & 44.4 & 34.3$^{\dagger}$ & \underline{94.5} & 57.0 \\
+\tulu{} 2 7B & 50.4 & 34.0 & 48.5 & 46.4 & 24.5$^{\dagger}$ & 73.9 & 46.3 \\
+\tulu{} 2 13B & 55.4 & 46.0 & 49.5 & 53.2 & 31.4 & 78.9 & 52.4 \\
+\tulu{} 2 70B & \underline{67.3} & \textbf{73.0} & \underline{68.4} & 53.6 & 41.6 & 86.6 & \underline{65.1} \\
+Mistral 7B & 60.1 & 44.5 & 55.6 & 55.8 & 30.5 & 0.0 & 41.1 \\
+Mistral 7B Instruct & 53.0 & 36.0 & 38.5 & 27.8 & 34.0 & 75.3 & 44.1 \\
+Mixtral 8x7B Instruct & \textbf{68.4} & \underline{65.0} & 55.9 & 24.3 & \textbf{53.5} & \textbf{94.8} & 60.3 \\
+\midrule
+\multicolumn{8}{c}{\textbf{\model{}}} \\
+\midrule
+Emb.-only 7B & 23.5 & 1.0 & 0.0 & 21.0 & 0.0 & 0.0 & 7.6 \\
+Gen.-only 7B & 57.5 & 52.0 & 55.4 & 56.6 & 34.5 & 75.4 & 55.2 \\
+\model{} \textsc{7B} & 57.6 & 57.5 & 54.8 & 55.4 & 32.8 & 74.8 & 55.5 \\
+\model{} \textsc{8x7B} & 66.7 & 61.5 & \textbf{70.2} & \underline{58.2} & \underline{53.4} & 84.0 & \textbf{65.7}\\
+\bottomrule
+\end{tabular}
+}
+\label{tab:gen}
+\end{table}
+
+\paragraph{\method{} leads to a state-of-the-art embedding and generative model} We benchmark \modelbase{}, \modelbig{} and generative- and embedding-only variants with other models in \autoref{tab:emb} and \autoref{tab:gen}. We find that \modelbase{} outperforms all prior open models on the Massive Text Embedding Benchmark~\citep{muennighoff2023mteb} while still outperforming all generative models up to its size of 7 billion parameters. \method{} models are the only ones that can handle both embedding and generation at best-in-class performance (\autoref{fig:performance}). For example, using \llama{} 70B~\cite{touvron2023llama} for embedding leads to a score of only 35.6 on MTEB as depicted in \autoref{tab:emb}. \model{} almost doubles that performance on MTEB leading to state-of-the-art performance, while still outperforming \llama{} 70B on generative tasks by more than 20\% (\autoref{tab:gen}). Scaling even further, \modelbig{} outperforms all openly available models on our generative average. Its embedding performance slightly decreases from \modelbase{}. This is likely because we had to decrease its embedding batch size from 2048 for \modelbase{} to only 256 for \modelbig{} due to compute limitations (\autoref{sec:setup}). We also train embedding-only and generative-only variants of \model{} that only use representational or generative instruction tuning but are otherwise equivalent. Benchmarking the embedding-only variant or SGPT BE 5.8B~\cite{muennighoff2022sgpt} on generative tasks in \autoref{tab:gen} by simply re-adding the language modeling head that was dropped during embedding finetuning leads to around random performance (25.0 is the random baseline on MMLU). Similarly, benchmarking the embedding performance of the generative-only model only leads to a score of 41.2 in \autoref{tab:emb}. Thus, joint optimization via the \method{} approach is critical to achieve strong performance for both embedding and generation. We note, however, that with 7 billion parameters \modelbase{} is significantly more costly to run than many other embedding models in \autoref{tab:emb}, such as BGE Large with only 335 million parameters~\cite{xiao2023cpack}. In addition, \modelbase{} produces representations of 4096 dimensions, which require 4$\times$ more storage than the 1024-dimensional embeddings of BGE Large.
+
+\paragraph{\model{} matches embedding-only and generative-only variants} We find that unifying the two objectives via \model{} matches both the generative-only and the embedding-only variants. This is similar to observations made for visual models~\cite{yu2022coca}. However, while \model{} is trained for the same number of steps as the embedding-only and generative-only variants, it requires more compute per training step as it does a forward and backward pass on both embedding and generative data.
+
+\begin{wraptable}{l}{7cm}
+\caption{\textbf{Reranking (Rerank) using \model{} as both Bi- and Cross-Encoder.}}
+\begin{tabular}{l|cc}
+\toprule
+MTEB DS ($\downarrow$) & No Rerank & Rerank top 10 \\
+\midrule
+ArguAna & 63.24 & \textbf{64.39} \\
+ClimateFEVER & 30.91 & \textbf{31.85} \\
+CQADupstack & 49.42 & \textbf{50.05} \\
+DBPedia & 46.60 & \textbf{47.82} \\
+FiQA2018 & 59.95 & \textbf{60.39} \\
+FEVER & 82.74 & \textbf{82.85} \\
+HotpotQA & 79.40 & \textbf{80.46} \\
+NFCorpus & 40.89 & \textbf{41.23} \\
+NQ & 70.30 & \textbf{71.49} \\
+MSMARCO & 41.96 & \textbf{42.47} \\
+QuoraRetrieval & \textbf{89.47} & 88.67 \\
+SCIDOCS & 24.41 & \textbf{24.54} \\
+SciFact & 79.17 & \textbf{79.28} \\
+TRECCOVID & 74.80 & \textbf{75.24} \\
+Touche2020 & 27.93 & \textbf{28.41} \\
+\midrule
+Average & 57.4 & \textbf{57.9} \\
+\bottomrule
+\end{tabular}
+\label{tab:rr}
+\end{wraptable}
+
+\paragraph{Reranking with \model{}} For retrieval tasks, it is common to follow the embedding-based retrieval stage by a reranking stage~\cite{nogueira2020passage}. In the reranking stage, for each query, the top-$k$ chosen documents are reranked based on a usually more expensive but more performant method. For LLMs, prior work has shown that this can be done by passing each of the $k$ documents together with the query to the model and scoring the pair with log probabilities~\cite{muennighoff2022sgpt}. Note that this scales quadratically with the number of documents and queries and is thus usually too expensive for the first stage (``Cross-Encoder''). Meanwhile, using embeddings for the first stage is much cheaper as it only requires passing each query and each document once and thus scales linearly (``Bi-Encoder''). More recent work relies on instructions to use LLMs for reranking~\cite{sun2023chatgpt,ma2023zeroshot,pradeep2023rankvicuna,pradeep2023rankzephyr}. While prior work uses separate models for the embedding and reranking stages, \model{} can be used for both stages due to its unified capabilities. In \autoref{tab:rr}, we display the embedding performance of \modelbase{} when additionally allowing it to rerank its top 10 documents for each query. For reranking, we use the model's generative capabilities following the permutation generation approach from \citet{sun2023chatgpt} and reusing their prompt. We find that reranking via the generative capabilities of \modelbase{} allows it to improve on its own embedding performance on almost every retrieval dataset. Increasing the top-$k$ documents beyond ten is likely to further improve results, however, at the cost of more compute~\cite{muennighoff2022sgpt}.
+
+\newpage
+
+\begin{wraptable}{r}{7cm}
+\caption{\textbf{Few-shot embedding.} The 12 MTEB datasets (``DS'') are grouped by the 7 main MTEB tasks in the same order as in \autoref{tab:emb}.}
+\begin{tabular}{l|cc|cc}
+\toprule
+Train DS ($\rightarrow$) & \multicolumn{2}{c}{E5S} & \multicolumn{2}{c}{MEDI2} \\
+MTEB DS ($\downarrow$) & 0 FS & 1 FS & 0 FS & 1 FS \\
+\midrule
+Banking77 & \textbf{88.5} & 88.3 & \textbf{88.1} & 87.9 \\
+Emotion & \textbf{52.8} & 51.0 & \textbf{52.5} & 51.9 \\
+IMDB & \textbf{95.0} & 93.9 & \textbf{94.3} & 92.2 \\
+\midrule
+BiorxivS2S & \textbf{39.8} & 39.4 & \textbf{37.6} & 37.4 \\
+\midrule
+SprintDup. & 93.0 & \textbf{94.9} & 95.2 & \textbf{95.7} \\
+TwitterSem & \textbf{81.1} & 77.9 & \textbf{76.8} & 73.9 \\
+TwitterURL & \textbf{87.4} & 87.1 & 85.9 & \textbf{86.1} \\
+\midrule
+ArguAna & \textbf{63.2} & 51.7 & \textbf{53.5} & 53.2 \\
+SCIDOCS & \textbf{24.4} & 19.7 & \textbf{25.5} & 25.5 \\
+\midrule
+AskUbuntu & \textbf{67.3} & 64.7 & \textbf{66.6} & 66.0 \\
+\midrule
+STS12 & 77.3 & \textbf{78.0} & \textbf{76.6} & 73.5 \\
+\midrule
+SummEval & \textbf{30.4} & 29.5 & 29.1 & \textbf{31.5} \\
+\bottomrule
+\end{tabular}
+\label{tab:fs}
+\end{wraptable}
+
+\paragraph{Few-shot embedding does not work} For generative models it has been well-established that providing in-context examples (``few-shots'', FS) improves performance \cite{brown2020language}. However, to the best of our knowledge, there has been no work on in-context learning with embedding models. In \autoref{tab:fs}, we benchmark the default 0-shot format versus providing a single few-shot example following the task instruction. We take the few-shot example from the respective evaluation dataset (see \autoref{sec:promptsembfewshot} for the prompts). We find that providing few-shot examples overall worsens performance. While there are small gains among PairClassification tasks (SprintDup. and TwitterURL), these are marginal and inconsistent. For the model trained on MEDI2, we even include few-shot embedding samples in the training data for around 5\% of training samples. However, the model seems not to have learned to make good use of the few-shot examples.\\
+
+\paragraph{Aligning \model{}} It is common to follow the instruction finetuning stage of generative language models by an alignment tuning stage using methods like PPO~\cite{schulman2017proximal}, DPO~\cite{rafailov2023direct}, or KTO~\cite{ethayarajh2024kto} (``HALOs''~\cite{ethayarajh2024kto}). We experiment with further finetuning \model{} using KTO and benchmark the resulting models in \autoref{tab:kto}. During this KTO stage, no further embedding training is performed, thus it leads to a slight performance drop on the MTEB average (66.8 to 66.7 and 65.7 to 65.2). However, the average generative performance of the KTO-tuned models is stronger. Notably, AlpacaEval jumps by >10 points for both models. On the more recent Alpaca 2.0~\cite{dubois2024length}, GritLM-8x7B-KTO has a length-controlled win rate of 18.5 with an average length of 1662 (not depicted). Thus, the KTO-finetuned models may be more useful for use cases where the generative performance is more important. Future work may consider continuing the embedding training during the alignment tuning stage. It may also be possible to develop an alignment tuning method specifically for embedding performance and combine it with generative alignment via KTO.
+
+\begin{table}[htbp]
+\centering
+\caption{\textbf{Aligning \model{} with KTO after GRIT.} The upper table depicts embedding performance while the lower depicts generative performance.}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|ccccccc|c}
+\toprule
+Task ($\rightarrow$) & CLF & Clust. & PairCLF & Rerank & Retrieval & STS & Summ. & Avg. \\
+Metric ($\rightarrow$) & Acc. & V-Meas. & AP & MAP & nDCG & Spear. & Spear. & \\
+Dataset \# ($\rightarrow$) & 12 & 11 & 3 & 4 & 15 & 10 & 1 & 56 \\
+\midrule
+\modelbase{} & 79.5 & 50.6 & 87.2 & 60.5 & 57.4 & 83.4 & 30.4 & 66.8 \\ % 66.76
+\modelbase{} KTO & 79.6 & 50.1 & 87.1 & 60.5 & 57.1 & 83.5 & 30.5 & 66.7 \\ % 66.63
+\modelbig{} & 78.5 & 50.1 & 85.0 & 59.8 & 55.1 & 83.3 & 29.8 & 65.7 \\ % 65.66
+\modelbig{} KTO & 78.7 & 50.0 & 84.4 & 59.4 & 54.1 & 82.5 & 30.8 & 65.2 \\ % 65.22
+\bottomrule
+\end{tabular}
+}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|llllll|l}
+\toprule
+Dataset ($\rightarrow$) & MMLU & GSM8K & BBH & TyDi QA & HumanEval & Alpaca & Avg. \\
+Setup ($\rightarrow$) & 0 FS & 8 FS, CoT & 3 FS, CoT & 1 FS, GP & 0 FS & 0 FS, 1.0 & \\
+Metric ($\rightarrow$) & EM & EM & EM & F1 & pass@1 & \% Win & \\
+\midrule
+\modelbase{} & 57.6 & 57.5 & 54.8 & 55.4 & 32.8 & 74.8 & 55.5 \\
+\modelbase{} KTO & 57.6 & 57.5 & 55.4 & 55.8 & 31.5 & 86.7 & 57.4 \\
+\modelbig{} & 66.7 & 61.5 & 70.2 & 58.2 & 53.4 & 84.0 & 65.7 \\
+\modelbig{} KTO & 66.8 & 79.5 & 67.1 & 31.4 & 56.8 & 95.3 & 66.2 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:kto}
+\end{table}
+
+\FloatBarrier
+
+\subsection{Ablations}
+\label{sec:ablations}
+
+\begin{table*}[htbp]
+\centering
+\subfloat[
+Attention and pooling ablations. Wmean is position-weighted mean pooling~\cite{muennighoff2022sgpt}.
+\label{tab:attn}
+]{
+\centering
+\begin{minipage}{\linewidth}{\begin{center}
+\begin{tabular}{ccccc|cc}
+    \toprule 
+    \multicolumn{2}{c}{Attention Emb} & \multicolumn{2}{c}{Attention Gen} & \multirow{2}{*}{Pooling} & \multirow{2}{*}{Emb} & \multirow{2}{*}{Gen} \\
+    Instruction & Sample & Instruction & Sample & & & \\
+    \midrule
+    \multicolumn{7}{c}{\textit{Embedding Only}} \\
+    \midrule
+    \multicolumn{2}{c}{Causal} & & & Wmean & 60.0 & - \\
+    Causal & Bidirectional & & & Mean & 61.0 & - \\
+    \multicolumn{2}{c}{Bidirectional} & & & Mean & 61.8 & - \\
+    \midrule
+    \multicolumn{7}{c}{\textit{Generative Only}} \\
+    \midrule
+    & & \multicolumn{2}{c}{Causal} & & - & \textbf{55.2} \\
+    & & Bidirectional & Causal & & - & 50.7 \\
+    \midrule
+    \multicolumn{7}{c}{\textit{Unified}} \\
+    \midrule
+    \multicolumn{2}{c}{Causal} & \multicolumn{2}{c}{Causal} & Last token & 61.2 & 53.0 \\    
+    \multicolumn{2}{c}{Causal} & \multicolumn{2}{c}{Causal} & Wmean & 62.8 & 52.8 \\
+    \multicolumn{2}{c}{\textbf{Bidirectional}} & 
+    \multicolumn{2}{c}{\textbf{Causal}} & \textbf{Mean} & \textbf{64.0} & 52.9 \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\\
+\centering
+\subfloat[
+Base model
+\label{tab:basemodel}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    Variant & Emb & Gen \\
+    \midrule
+    \textbf{Mistral 7B} & \textbf{54.6} & \textbf{22.4} \\
+    \llama{} 2 7B & 48.2 & 20.8 \\
+    GPT-J 6B & 51.9 & 14.0 \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\subfloat[
+Embedding dataset
+\label{tab:embds}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    Dataset & Emb \\
+    \midrule
+    MEDI & 64.0 \\
+    MEDI2 & 64.7 \\
+    \textbf{E5} & \textbf{66.0} \\    
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\subfloat[
+Generative dataset
+\label{tab:gends}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|c}
+    \toprule 
+    Dataset & Gen \\
+    \midrule
+    \textbf{\tulu{} 2} & \textbf{55.2} \\
+    OASST & 37.7 \\
+    UltraChat & 47.4 \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\\
+\centering
+\subfloat[
+Embedding head
+\label{tab:embhead}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    Variant & Emb & Gen \\
+    \midrule
+    \textbf{No head} & \textbf{62.7} & \textbf{49.2} \\
+    -> 1024 & 62.1 & 48.0 \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\subfloat[
+Batch size (BS)
+\label{tab:bs}
+]{
+\centering
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    BS Emb:Gen & Emb & Gen \\
+    \midrule
+    256:256 & 63.2 & \textbf{53.4} \\
+    4096:256 & \textbf{64.2} & 53.3 \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\subfloat[
+Precision
+\label{tab:precision}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    Precision & Emb & Gen \\
+    \midrule
+    FP32 & 66.3 & 52.4 \\
+    \textbf{BF16$^*$} & \textbf{66.5} & \textbf{55.0}  \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\\
+\centering
+\subfloat[
+In-batch negatives (IBN)
+\label{tab:inbatch}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    IBN origin & Emb & Gen \\
+    \midrule
+    Any dataset & \textbf{66.0} & 50.9 \\
+    \textbf{Same dataset} & \textbf{66.0}& \textbf{51.1} \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\subfloat[
+Format
+\label{tab:fmt}
+]{
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    Format & Gen \\
+    \midrule
+    \textbf{\tulu{} 2} & \textbf{55.2} \\
+    Zephyr $\beta$ & 49.0 \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\subfloat[
+Emb training max tokens
+\label{tab:sq}
+]{
+\centering
+\begin{minipage}{0.301\linewidth}{\begin{center}
+\begin{tabular}{c|cc}
+    \toprule 
+    Tokens & Emb & Gen \\
+    \midrule
+    512 & 64.1 & 52.2 \\
+    \textbf{2048} & \textbf{64.7} & \textbf{53.8} \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\\
+\centering
+\subfloat[
+Loss ablations. $\mathcal{L}_{\text{Rep}}/\mathcal{L}_{\text{Gen}}$ is the loss ratio of the 1st step adjusted via $\lambda_{\text{Rep}}$ and $\lambda_{\text{Gen}}$. Mix refers to mixing sample and token level loss, e.g. (32->8) is token level loss across 32 samples and then sample level loss across 8 sub-batches for a total batch size of 256.
+\label{tab:lossweights}
+]{
+
+\begin{minipage}{\linewidth}{\begin{center}
+\begin{tabular}{cc|cc}
+    \toprule 
+    Gen loss type & $\mathcal{L}_{\text{Rep}}/\mathcal{L}_{\text{Gen}}$ & Emb & Gen \\
+    \midrule
+    Token & 2.4 & 66.1 & 54.4 \\
+    Token & 6.0 & 66.5 & 55.0 \\
+    \textbf{Mix (32~->~8)} & 4.1 & \textbf{66.7} & \textbf{55.4} \\ 
+    \bottomrule
+\end{tabular}
+\hspace{1em}
+\begin{tabular}{c|c}
+    \toprule 
+    Gen loss type & AlpacaEval \\
+    \midrule
+    Mix (4~->~64) & 67.6 \\
+    \textbf{Mix (32~->~8)} & \textbf{74.7} \\
+    \bottomrule
+\end{tabular}
+\end{center}}\end{minipage}
+}
+\caption{\textbf{\method{} ablations.} Emb corresponds to the MTEB average, while Gen corresponds to the average across generative tasks (\autoref{sec:eval}). The embedding head variant ``->~1024'' corresponds to down-projecting the final hidden state with a linear layer from 4096 to 1024 dimensions, only for embedding tasks. BF16$^*$ means that some computations are still in FP32 as explained in \autoref{sec:ablations}. The setting chosen for \model{} is \textbf{bold}. Once an ablation was successful, we adopted its setting, thus the bold performance slightly varies from one table to the next. For example, the base model ablation (b) is done for just 100 hundred steps with sub-optimal formatting. Full results are in \autoref{sec:fullresults}.}
+\label{tab:ablations} 
+\end{table*}
+
+\paragraph{Attention and pooling} We train \model{} starting from a pretrained decoder language model which has been trained with causal attention. Prior work has shown that while embeddings of causal LLMs are competitive, they are outperformed by BERT-like encoders with bidirectional attention at the same number of parameters~\cite{muennighoff2022sgpt,devlin2019bert}. This lines up with intuition, as bidirectional attention allows the model to adjust the representation of the first tokens based on information obtained from future tokens. Meanwhile, causal attention only allows information to propagate one way. Thus, for causal attention early tokens may yield poor representations due to a lack of understanding of the entire sample. To counter this issue, we experiment with adapting the model during finetuning to learn to use bidirectional attention. In \autoref{tab:ablations} we find that \textbf{adapting the causally pretrained LLM with bidirectional attention provides the best embedding performance}. For fully causal embeddings, we confirm findings from~\citet{muennighoff2022sgpt} that position-weighted mean pooling (``Wmean'') leads to better embedding performance than taking the embedding of the last token despite recent work finding the opposite~\cite{zhang2023language,ma2023finetuning}. For last token pooling, we follow \citet{zhang2023language} and use a special token. We find that adapting the model to be a PrefixLM~\cite{raffel2023exploring}, whereby the attention over the generative instruction is bidirectional but still causal for the response (``Sample'') worsens performance in contrast to prior work~\cite{wang2022language}. Thus, we stick with fully causal generation. The unified variant significantly outperforms the embedding-only variants, while underperforming the best generative-only variant. However, once we switched from MEDI to the E5 dataset in later ablations the embedding-only variant matched the unified variant. Meanwhile, the worse generative performance of the unified model was due to a suboptimal loss setting that we fixed in the loss ablations.
+
+\paragraph{Base model} The \model{} approach generalizes to any generative language model, thus we ablate initializing from GPT-J 6B~\cite{wang2021gpt}, \llama{} 2 7B or Mistral 7B~\cite{jiang2023mistral}. Using Mistral 7B leads to the best performance for both embedding and generative tasks. For generative tasks, this is expected as the pretrained Mistral 7B performs the best among the three (\autoref{tab:gen}). However, for embedding tasks, GPT-J outperforms Mistral 7B (\autoref{tab:emb}). Thus, \textbf{the embedding performance of a pretrained model is not predictive of its embedding performance after finetuning}. Rather, its generative performance appears to be a more reliable indicator of its embedding performance after finetuning.
+
+\paragraph{Generative dataset} We benchmark our filtered \tulu{} 2 introduced in \autoref{sec:setup}~\cite{ivison2023camels} with UltraChat~\cite{ding2023enhancing,tunstall2023zephyr} and the OpenAssistant version from OctoPack~\cite{muennighoff2023octopack,köpf2023openassistant,longpre2023data}. Using \tulu{} 2 leads to better performance on every generative task considered (see \autoref{sec:fullresults} for per-task results). This is likely due to \tulu{} 2 containing a larger diversity of tasks~\cite{ivison2023camels}. Another possible reason is that \tulu{} 2 may have been carefully tuned on the generative evaluation datasets, as we use largely the same evaluation setup as the creators of \tulu{} 2~\cite{ivison2023camels}.
+
+\paragraph{Embedding dataset} We benchmark MEDI~\cite{su2023embedder}, a new version of MEDI with better negatives which we build and call MEDI2, and the E5 dataset~\cite{wang2024improving}. While MEDI and MEDI2 always preface instructions with ``Represent'' (see e.g. \autoref{fig:medi2}), the E5 dataset places no constraint on the instruction prefix (see e.g. \autoref{fig:e5}). Thus, when using the E5 dataset the ``<|embed|>'' formatting is critical to tell the model that it will be subject to the representation loss, not the generative loss~(\autoref{fig:format}). Further, MEDI and MEDI2 always contain instructions for both queries and documents, which we refer to as \textbf{two-sided instructions}. Meanwhile, the E5 dataset uses \textbf{one-sided instructions} for asymmetric datasets~\cite{muennighoff2022sgpt}, whereby the documents receive no instructions, only the queries. The advantage of not using document instructions is that the document corpus can be encoded once and then cached and reused across a variety of tasks. During training on E5, symmetric tasks are also in a one-sided setting, but we still evaluate them in the two-sided format. This should not be a problem as the cosine similarity function we use during training is transitive: if sentence A with instruction is similar to sentence B without instruction, and sentence B without instruction is similar to sentence C with instruction, then we can confidently say that sentence A with instruction is also similar to sentence C with instruction. As depicted in \autoref{tab:ablations}, using the E5 dataset performs best by a wide margin. An inspection of samples, suggests that this is likely due to its superior hard negatives and diversity of tasks generated by GPT-4 (\autoref{sec:datasetsamples}). For our final runs with the E5 dataset, we additionally add scientific data (\autoref{sec:setup}).
+
+\paragraph{Embedding head} The cost of caching the embeddings of a large document corpus is directly proportional to the embedding dimensionality. To minimize such costs, we experiment with adding an embedding head consisting of a linear layer with activation that down-projects the embedding~\cite{ni2021large,muennighoff2022sgpt}. This layer is only used for embedding tasks. Down-projecting the embeddings four-fold (from 4096 to 1024) leads to an embedding performance decrease of around 1\%. This may be acceptable for certain use cases where the saved storage is more important. However, for our final model, we do not use such a head to keep it simple and achieve maximum performance. Search techniques~\cite{arya1998optimal,johnson2017billionscale,douze2024faiss} or dimensionality reduction techniques such as Principal Component Analysis still allow for reducing the embedding dimension of our final model post-training while maintaining most of the performance.
+
+\paragraph{Batch size} Due to the utilization of in-batch negatives for contrastive training (\autoref{sec:method}), a larger batch size provides a more accurate gradient. Thus, scaling up the batch size is a key ingredient in most well-performing embedding models~\cite{xiao2023cpack,wang2022text}. We experiment with scaling up the embedding batch size to 4096 while keeping it at 256 for generative data. This leads to a 1.0 gain on the embedding average while generative performance remains stable. Especially the 15 retrieval datasets that are part of the embedding average benefit from the increase in batch size (see \autoref{tab:appbs}). For our final model, we use a batch size of 2048 for embedding and 256 for generative data.
+
+\paragraph{Precision} The parameters of the Mistral 7B model are in bfloat16 (BF16) precision as it was pretrained in this format. We experiment with finetuning it with float32 (FP32) precision versus keeping the BF16 format and training with mixed precision. FP32 training is more costly, however, the additional precision may result in a better model. Our intuition is that more precision is important for embedding but not as much for generation. This is because while for generative tasks evaluated greedily, the model output is a discretionary argmax over the predictions of the language modeling head, for embedding tasks it is a continuous representation. Thus, small differences due to a lack of precision may not change the model's generation but will affect its representation. Hence, for embedding tasks, we always cast the hidden states to FP32 during the pooling operation and keep them this way for the similarity computation. Not keeping them in FP32 after pooling worsens performance slightly, but may be necessary for cheap storage (see \autoref{sec:precision}). In addition, some operations such as layer normalization~\cite{ba2016layer} are also performed in FP32 even for BF16 training due to PyTorch autocast~\cite{zhao2023pytorch}. In \autoref{tab:ablations}, we find that there is no benefit from doing even more computations in FP32 besides the ones listed above. Thus, we train and evaluate all our other models in BF16 mixed precision to speed up training and inference.
+
+\paragraph{In-batch negatives} We always use in-batch negatives for embedding training (\autoref{sec:method}), however, we ablate whether or not they come from the same dataset. We hypothesize that making them all come from the same dataset leads to better negatives as the model needs to distinguish them based on more nuanced differences. In practice, we find that the average embedding performance remains around the same. However, we notice a 1.3 jump on the 15-dataset Retrieval average (\autoref{tab:appibn}). Thus, we stick with the variant where in-batch negatives stem from the same dataset.
+
+\paragraph{Format} Our chosen format is depicted in \autoref{fig:format}, which is equivalent to \tulu{} 2~\cite{ivison2023camels} for generative tasks. We also benchmark the Zephyr $\beta$ format \cite{tunstall2023zephyr}, which has an additional end-of-sequence token (``\verb|</s>|'') after each user utterance. We find that it performs worse on generative tasks. The additional end-of-sequence after the user utterance increases the likelihood of the model generating another end-of-sequence token earlier than necessary. This significantly harms HumanEvalSynthesize performance and slightly reduces AlpacaEval, where long generations can be critical (see \autoref{sec:fullresults} for task-specific performance).
+\paragraph{Max tokens} Our base model, Mistral 7B, can handle sequences of arbitrary length due to its sliding window attention~\cite{jiang2023mistral}. As finetuning with longer sequences is more expensive we ablate its benefits. We compare training with a maximum token limit of 512 versus 2048 for embedding documents. For embedding queries, we always use 256, and for generative data, we always use 2048. We find that increasing the embedding document sequence length during training slightly boosts performance on both embedding and generation even though we still evaluate embedding tasks with 512. This boost likely comes from our training data containing many documents beyond 512 tokens, which need to be truncated if the maximum sequence length is 512. Such truncation may remove the critical parts that make two texts a positive or a negative contrastive pair and thus hinder learning. As our embedding evaluation (MTEB) contains few documents longer than 512 tokens there is little truncation happening at evaluation~\cite{muennighoff2023mteb,günther2024jina,günther2023jina}. Note that just like their base models, our final models \modelbase{} and \modelbig{} can produce embeddings for sequences of arbitrary length. However, due to a lack of benchmarks, we do not know how well the embeddings of our models perform for input sequences longer than 512 tokens.
+
+\paragraph{Loss ablations} As detailed in \autoref{sec:method}, we experiment with both token and sample level generative loss. Further, we ablate the representation and generative loss weights, $\lambda_{\text{Rep}}$ and $\lambda_{\text{Gen}}$. For the unified visual model CoCa, the authors find that giving a weight of 2 to generation and 1 to embedding boosts performance on both streams~\cite{yu2022coca}. However, rather than the weights, we argue that the loss ratio, $\mathcal{L}_{\text{Rep}}/\mathcal{L}_{\text{Gen}}$, is of more interest as it reveals which objective has a larger impact on the optimization of the model. We maintain a ratio of $\mathcal{L}_{\text{Rep}}/\mathcal{L}_{\text{Gen}}~>~1$ i.e. giving more weight to the representation loss. This is because the model has already been pretrained with the generative loss, thus we expect less additional generative training to be necessary. Meanwhile, the contrastive loss for embedding data is new to the model, thus we expect more learning to be needed on the embedding side. Further, the embedding loss drops off extremely quickly as can be seen in the loss graphs in \autoref{sec:loss}. Thus, even though the representation loss has a higher weight at the start, throughout training they have very similar weights with both hovering around a loss of 1.0. We find that mixing sample and token level generative loss leads to the best performance by a small margin. As expected in \autoref{sec:method}, token level loss to some degree is critical for good performance on AlpacaEval. For ``Mix (4~->~64)''  token level loss is applied across only 4 samples and then sample level loss across 64 sub-batches, which leads to a 7-point drop in AlpacaEval performance. This drop is accompanied by a decrease in median AlpacaEval generation length from 941 to 865. Thus, token level loss across many samples is critical to maintaining long generations, which directly impacts the AlpacaEval score.
+
+\FloatBarrier
+
+
+
+\section{RAG with \method{}
+
+\label{sec:rag}
+\paragraph{Method} By unifying embedding and generation, \model{} simplifies Retrieval-Augmented Generation (RAG). \autoref{fig:rag} displays how forward passes can be reduced by caching. Specifically, we break down the caching alternatives into:\\
+\textbf{(a) Query Caching:} In traditional RAG, the query needs to be passed both through the embedding model and later through the generative model. In Query Caching, we cache the key-value states from the embedding forward pass and reuse them for the generative pass, exploiting the property that both are the same model: \model{}. Thus, we save compute equivalent to one forward pass of the query. Equivalently, we can also perform the generative forward pass over the query first and use its representation to retrieve the document on the fly (depicted in \autoref{fig:rag}). Note that Query Caching can be completely equivalent to RAG if the query is placed at the beginning of the prompt such that it only attends to itself through causal attention.\\
+\textbf{(b) Doc Caching:} Here we cache the documents, D. When the index is created, we also save the key-value states of every document and add them to the index. Thus, the index consists of the document embeddings and key-value states. Note that the computational cost of creating the index remains the same as the key-value states have to be computed even if only embeddings are desired. At inference, we still retrieve based on embedding similarity but the index returns the key-value states instead of the text passage. These key-value states are then provided to the model to avoid having to recompute them. This effectively saves a forward pass for every in-context document at inference. However, this method increases the necessary storage. While the text passages no longer need to be stored, the key-value states now need to be stored and they usually require more storage depending on the model. We note that Document Caching also works for models other than \model{}. However, for such models, one needs to pass all documents through the generation model ahead of time, thus increasing the cost of creating the index. To maintain equivalence with RAG, the document should be at the beginning of the prompt for Document Caching (opposite of Query Caching).\\
+\textbf{(b) Query-Doc Caching / Doc-Query Caching:} We can also combine Query Caching and Doc Caching to save even more inference costs. However, combining them inevitably leads to discrepancies compared to RAG, as in traditional RAG either the query or the document is conditioned on the other one. Meanwhile, if both are cached then they are not conditioned on one another via the self-attention mechanism. We refer to Query-Doc Caching if the query is followed by the document in the prompt and to Doc-Query Caching if the document comes first.
+
+\begin{figure*}[tbp]
+    \centering
+    \begin{center}
+        \includegraphics[width=\textwidth]{figures/rag.pdf}
+        \caption{\textbf{RAG with \method{}.} \emph{Left:} Traditional Retrieval-Augmented Generation (RAG) relies on a separate embedding model and generative model. \emph{Right:} \model{} simplifies RAG as it handles both embedding and generation. Query Caching removes the duplicate forward pass of the query by reusing its representation. Query-Doc Caching also removes the forward pass on the document during inference, as the cached index also stores the document key-value states.}
+        \label{fig:rag}
+    \end{center}
+\end{figure*}
+
+\FloatBarrier
+
+\begin{table}[htbp]
+\centering
+\caption{\textbf{RAG benchmarking on Natural Questions with \modelbase{}.} For RAG, the retrieved context is simply placed in the context of the language model in contrast to our caching alternatives (\autoref{fig:rag}). CPU and GPU latencies are measured on an ``Intel(R) Xeon(R) Platinum 8481C CPU @ 2.70GHz'' and one ``NVIDIA H100 80GB HBM3'', respectively. Sample A has a query of 1 token and a document of 4000 tokens, and sample B is the inverse. For each approach, we generate 16 tokens. Storage consists of the index and passages, except for Doc Caching variants where it is the index and key-value states. The index is stored in float32, while key-value states are stored in bfloat16.}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|c|cc|cc|c}
+\toprule
+& Match & \multicolumn{2}{c|}{CPU Latency (s, $\downarrow$)} & \multicolumn{2}{c|}{GPU Latency (s, $\downarrow$)} & Storage ($\downarrow$) \\
+& (0-shot, $\uparrow$) & Sample A & Sample B & Sample A & Sample B & \\
+\midrule
+No RAG & 21.00 & 4.3 ± 0.36 & 13.69 ± 1.0 & 0.24 ± 0.04 & 0.38 ± 0.04 & \textbf{0GB} \\
+\midrule
+\multicolumn{7}{c}{\textit{Query then document prompt}} \\
+\midrule
+RAG & \underline{30.50} & 11.64 ± 0.74 & 14.88 ± 0.87 & 0.39 ± 0.02 & 0.40 ± 0.02 & \underline{43GB} \\
+Query Caching & 25.46 & 18.30 ± 0.76 & 6.87 ± 0.89 & 0.44 ± 0.03
+ & \underline{\textbf{0.27 ± 0.02}} & \underline{43GB} \\
+Query-Doc Caching & 21.63 & \textbf{5.12 ± 0.23} & \underline{6.62 ± 0.97} & \underline{0.27 ± 0.03} & 0.29 ± 0.01 & 30TB \\
+\midrule
+\multicolumn{7}{c}{\textit{Document then query prompt}} \\
+\midrule
+RAG & 30.47 & 14.18 ± 1.01 & 15.33 ± 0.87 & 0.39 ± 0.01 & 0.4 ± 0.01 & \underline{43GB} \\
+Doc Caching & \textbf{33.38} & 5.25 ± 0.34 & 23.23 ± 1.05 & \underline{0.27 ± 0.03} & 0.45 ± 0.02 & 30TB \\
+Doc-Query Caching & 18.39 & \underline{5.23 ± 0.37} & \textbf{6.41 ± 0.96} & \textbf{0.26 ± 0.03} & \underline{\textbf{0.27 ± 0.02}} & 30TB \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:rag}
+\end{table}
+\begin{figure*}[htbp]
+    \centering
+    \begin{center}
+        \includegraphics[width=\textwidth]{figures/latency.pdf}
+        \caption{\textbf{Inference latency of RAG with \modelbase{}.} When benchmarking scaling query length (left), document length is fixed at 1, whereas query length is fixed at 1 when scaling document length (right). In addition to the query/doc lengths, the formatting and prompt take up around 40 tokens. We visualize the standard deviation across 100 runs as the shaded area. For each approach, we generate 16 tokens.}
+        \label{fig:latency}
+    \end{center}
+\end{figure*}
+
+\paragraph{Setup} We benchmark the different caching variants using data from Natural Questions~\cite{kwiatkowski2019natural}. Our implementation is adapted from \citet{izacard2022atlas}, however, we use a significantly smaller index of only 2,681,468 documents stemming from the BEIR NQ corpus~\cite{thakur2021beir}. We score models using the match score, whereby we check if any of the correct answers are anywhere in the generation. Prior work usually uses exact match, whereby they check if the generation exactly matches the answer. However, as our model is more chatty, it tends to answer in a few sentences and thus exact match often fails to give credit to correct answers. Inspecting the first 20 samples of the ``No RAG'' baseline, we find that exact match leads to 4 false negatives that are correctly credited by the match metric. We did not find any false positives from choosing the match metric in those samples. We do not use any instructions for embedding, solely the format as presented in \autoref{fig:format}.
+
+\paragraph{Performance} As depicted in \autoref{tab:rag}, RAG performs better than the ``No RAG'' baseline where the model is not provided any context. This validates that despite its small size compared to prior work~\cite{lin2023radit}, our index is still valuable. While Query and Doc Caching can theoretically lead to the exact same performance as RAG, we experience differences stemming from two reasons: \textbf{1) Attention:} Our model is trained to embed with bidirectional attention (\autoref{sec:method}) and thus we use bidirectional attention when embedding query or document. Meanwhile, the generative model expects causal key-value states. In the Query-Doc/Doc-Query setup, there is an additional mismatch in either the documents or the queries not having attended to the other one, as both need to be embedded and cached separately. \textbf{2) Formatting:} The query is formatted in the embedding format as depicted in \autoref{fig:format}, which the model has not seen in conjunction with a generative task during training. This could further lead to a performance drop. Due to 1) and 2), Query Caching leads to a performance drop compared to traditional RAG. However, the Query Caching performance of 25.46 is still better than not using RAG, thus it comes down to a speed-performance trade-off. Formatting the RAG baseline using the embedding format (\autoref{fig:format}) reduces its score from 30.50 to 29.36 (not depicted), thus the additional four-point discrepancy of Query Caching and the majority of the damage is because of the attention issue. Meanwhile, Doc Caching slightly improves performance resulting in the best match score among all methods considered. This is possibly because, unlike the query, the document does not need to be as thoroughly understood, and skimming it may suffice. Thus, the slightly corrupted key-value states do not result in a performance drop. Query-Doc and Doc-Query Caching only perform near the ``No RAG'' baseline in our experiments, which may limit their usefulness in practice. This is likely caused by the additional attention mismatch that they introduce. This issue as well as the formatting issue could likely be solved by an additional RAG finetuning stage on top of \model{}, which we leave to future work.
+
+\paragraph{Latency} In \autoref{fig:rag}, we show how caching leads to significant speed-ups over RAG on both CPUs and GPUs for long sequences. If only 250 tokens are cached, however, we find the speed-up to be negligible. In \autoref{tab:rag}, we display that for 4000 tokens, Query Caching is 54\% and 33\% faster on CPUs and GPUs, respectively (Sample B). For Doc Caching it is 63\% and 31\% (Sample A). If going beyond 4000 tokens the speed-ups will be even larger. However, for the opposite samples in \autoref{tab:rag} speed remains around the same. This is because while for Sample B, Doc Caching caches 4000 tokens, for Sample A it caches only 1 token, which does not provide any speed-up. Thus, Doc Caching should be used when documents are expected to be very long, while Query Caching should be used when queries are expected to be very long. In a production setting, a simple input length check could switch from one caching mode to the other. As is the case in  \autoref{tab:rag}, caching can match or even be faster than not using retrieval at all (``No RAG''). This could be due to the embedding forward pass not using the language modeling head. For Query Caching, the language modeling head is only used for the tokens that are generated, while for ``RAG'' and ``No RAG'' it is used for the entire input. The matrix multiplication with the language modeling head is computationally expensive due to its high dimensionality, which could cause the slower speed of the no retrieval baseline. Query-Doc Caching and Doc-Query Caching cache both documents and queries and thus lead to major speed-ups for both Sample A and Sample B in \autoref{tab:rag}. Overall, speed-ups are larger on CPUs, as GPUs can process the entire sequence in parallel, thus the advantage of caching parts of it is smaller. We also note that our RAG baseline uses our 7B parameter model for both the embedding and generative model but without caching. In practice, it is often common to have an embedding model that is much smaller and cheaper than the generative model. Nonetheless, as caching with \model{}-7B approaches the No RAG latency in \autoref{tab:rag}, we still expect it to be faster than setups with smaller embedding models for long sequences. In addition, it would lead to significantly better performance in that case due to the state-of-the-art retrieval performance of \model{}.
+
+\paragraph{Storage} In most RAG setups the embeddings of all documents are computed ahead of time and stored to be later used at inference. This is referred to as the index. In traditional RAG, the documents themselves still need to be stored, as the index is only used for finding the document ID, which is then used to fetch the document text and pass it to the generative model. For Doc Caching variants documents no longer need to be stored, however, the key-value states need to be stored together with the index. The key-value states take up a lot of storage, as for each batch they consist of two tensors of shape (batch size, number of heads, sequence length, dimension per head). For our 2,681,468 documents and the 7-billion parameter \model{} model, this leads to around 30TB of key-value states. However, unlike the index, the key-value states can be fully offloaded to disk and do not need to be kept in memory. Once the document ID has been determined via the index, the corresponding key-value state can be simply loaded from disk. For a single sample, this corresponds to loading around 12.5MB of key-value states into memory.
+
+
+
+\section{Discussion}
+
+
+\paragraph{Further unification} To the best of our knowledge, \model{} is the first model to unify text embedding and generation, and thus all text-based language problems, into a single model at strong performance. However, many adjacent directions remain to be improved or unified. \textbf{(a) Multilinguality:} Our model is also capable of embedding and generation in non-English languages as seen in its TyDi QA performance (\autoref{tab:gen}). However, major performance gains on non-English tasks are likely possible through both data~\cite{muennighoff2023crosslingual,yong2023bloom1} and architecture changes~\cite{chen2024bge,feng2022languageagnostic,duquenne2023sonar} targeting multilinguality.  \textbf{(b) Multimodality:} Many embedding and generative problems are not purely text-based, such as joint embedding of images and text~\cite{radford2021learning}, generative image captioning~\cite{hossain2018comprehensive}, image-text pair classification~\cite{muennighoff2020vilio,kiela2021hateful} or speech versions of every text problem~\cite{kamath2019deep}. It remains to be explored whether they can be as easily unified as text embedding and generation in this work.
+
+\paragraph{Why does \method{} work?} \method{} unifies embedding and generative tasks into a single model at no performance loss on either one, which may seem surprising. When the embedding dataset is MEDI2, we show that embedding performance even improves once the generative objective is added compared to an otherwise equivalent embedding-only model (\autoref{sec:ablations}). We think that our results confirm that generative language modeling and text embeddings are two sides of the same coin. Both tasks require a model to have a deep understanding of natural language and only differ in the way that understanding is expressed. Possibly, our unified model contains a small number of parameters that act as a switch to make the final representations either useful for mean pooling and subsequent embedding tasks or primed for the language modeling head and subsequent generative tasks. We are excited about future work exploring what is happening inside of \model{}. To support such research, we release all our work freely.
+
+\paragraph{Optimizing RAG with \model{}} RAG and the caching variants we have presented in this work operate on a frozen language model. Meanwhile, there has been extensive work on optimizing a generative model specifically for interaction with a retrieval system~\cite{gao2024retrievalaugmented,zhu2024large,asai2023retrieval}. These works commonly optimize only the retriever~\cite{shi2023replug} or only the reader~\cite{borgeaud2022improving,yasunaga2023retrievalaugmented,asai2023selfrag,luo2023sail}. However, recent work has shown that jointly optimizing both models leads to the best performance~\cite{lin2023radit}. With its state-of-the-art retrieval and generative performance, \model{} can act as both the retriever and reader in a single model. Thus, optimizing either one also changes the parameters of the other. This has the potential to significantly simplify the joint optimization of the retriever and reader. For example, it may suffice to only use the next-token objective (\autoref{eq:gen}) to penalize the retriever for providing irrelevant context and at the same time the reader for poor use of the given context. This is in contrast to separate models and objective functions used in~\citet{lin2023radit}.
+
+
+
+\section{Related Work}
+
+
+The story of text embedding and text generation has been a story of unification.
+
+\textbf{Embedding Models} used to focus on word representations~\cite{pennington2014glove,mikolov2013distributed} that struggled generalizing to entire sentences or passages~\cite{conneau2018senteval}. InferSent~\cite{conneau2018supervised}, SBERT~\cite{reimers2019sentencebert} and similar models~\cite{ni2021sentencet5,ni2021large} emerged that handle both the embedding of words and sentences at good quality by considering context when present. However, for strong performance, they require separate models for symmetric and asymmetric tasks~\cite{muennighoff2023mteb,muennighoff2022sgpt}. Symmetric embedding tasks are ones where the query and document are expected to come from the same distribution, such as STS. Meanwhile, for asymmetric tasks, they come from different distributions and as such could have very different sequence lengths like in retrieval. For example, the MTEB benchmark~\cite{muennighoff2023mteb} revealed that SentT5~\cite{ni2021sentencet5} only performs well at symmetric tasks, while GTR~\cite{ni2021large} only at asymmetric tasks despite both using T5~\cite{raffel2023exploring} as their base model. Recent embedding models have been able to unify symmetric and asymmetric tasks into a single model by differentiating them in the prompt~\cite{xiao2023cpack,wang2022text}. Further, including detailed instructions in the prompt has allowed unifying practically any embedding task into a single model~\cite{su2023embedder}.
+
+\textbf{Generative Models} used to be tailored to a single task, such as translation~\cite{sutskever2014sequence} or question answering~\cite{yin2016neural}. \citet{mccann2018natural} cast multiple generative tasks as question answering to unify them within a single model, however, performance was still limited and it did not generalize to arbitrary tasks. Large-scale self-supervised pretraining has enabled the use of a single large language model (LLM) for practically any generative task~\cite{brown2020language,chowdhery2022palm,rae2022scaling,workshop2023bloom,scao2022language,groeneveld2024olmo,soldaini2024dolma,allal2023santacoder,li2023starcoder}. However, using an LLM without careful prompting often leads to poor performance~\cite{rubin2022learning,min2022rethinking}. Finetuning LLMs on instructions has emerged as a method to significantly ease the usage of the models to apply them to any generative task with strong results~\cite{wei2022finetuned,sanh2022multitask,min2022metaicl,wang2022supernaturalinstructions,mishra2022crosstask,muennighoff2023crosslingual,iyer2023optiml,üstün2024aya,singh2024aya,zhou2023lima}.
+
+The two streams of embedding and generative models have respectively been unified into a single model that handles any task within its stream. Unifying the two streams into a single model that handles any task both for embedding and generation is the natural next step toward a general multi-task model. Besides generation, LLMs have also shown promise for text embeddings~\cite{muennighoff2022sgpt,neelakantan2022text,jiang2023scaling,li2023deelm,li2023angleoptimized}. SGPT~\cite{muennighoff2022sgpt} was an early work in that direction. SGPT only changes 0.01\% of the parameters of a large language model via BitFit~\cite{zaken2022bitfit} to adapt it to produce well-performing embeddings. Thus, one only needs to change this small amount of parameters to switch from one stream to the other. However, SGPT still required separate asymmetric and symmetric models and did not consider the full breadth of embedding tasks. \model{} addresses these deficiencies. \model{} does not require switching out biases, leverages instructions to handle asymmetric or symmetric use cases, and considers the full breadth of embedding and generative tasks.
+
+
+
+\section{Conclusion}
+
+
+We present \method{} to unify text embedding and generation, and thus all text-based language problems, into a single model: \model{}. \modelbase{} achieves state-of-the-art performance on the Massive Text Embedding Benchmark among open models, while at the same time beating all generative models up to its size. Notably, it matches the performance of otherwise equivalent embedding-only and generative-only variants allowing us to unify the two streams at no performance loss. By adding only 5B parameters at inference, \modelbig{} is the best open generative language model among the many we have tried including much larger models based on \llama{} 2 with 70B parameters. Unlike the other generative models, \modelbig{} also boasts very strong embedding performance thanks to the \method{} approach. Due to its unified capabilities, \model{} can be used as both the Bi-Encoder and Cross-Encoder in a reranking pipeline leading to performance improvements on 15 out of 16 retrieval datasets. Further, we conduct extensive ablations uncovering key insights for researchers of both embedding and generative models: causal language models for embedding should be finetuned with bidirectional attention and mean pooling, embedding performance of language models before finetuning is not predictive of embedding performance after finetuning, finetuning embedding models in BF16 mixed precision can match FP32 finetuning, pooling and similarity computations should be performed in FP32 precision during BF16 finetuning, generative models should be instruction-tuned with some form of token level loss, etc. Finally, we show that \method{} simplifies the field using the example of RAG. By unifying the retriever and reader into a single model, \model{} allows caching operations leading to inference speed-ups of >~60\% for long sequences at no performance loss with \method{} Doc Caching.
+
+\begin{ack}
+
+We thank everyone at Contextual AI, the University of Hong Kong, and Microsoft for their support. We are grateful to Hamish Ivison and Yizhong Wang for help with using the \tulu{} 2 repository. We thank Akari Asai, Alexander M. Rush, Brian Lester, Colin Raffel, Danqi Chen, Derek Tam, John X. Morris, Haokun Liu, Hong Liu, Mengzhou Xia, Michael Matena, Muqeeth Mohammed, Omar Khattab, Shayne Longpre, Tengyu Ma, Teven Le Scao, and Tianyu Gao for discussions and feedback.
+
+\end{ack}
+
+\newpage
+
+
+
+
+

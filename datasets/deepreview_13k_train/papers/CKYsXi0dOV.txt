@@ -1,0 +1,335 @@
+\title{BLIP-3-Video: You Only Need 32 Tokens to Represent a Video Even in VLMs}
+
+\begin{abstract}
+We present xGen-MM-Vid (\modelname): a multimodal language model for videos, particularly designed to efficiently capture temporal information over multiple frames. \modelname takes advantage of the `temporal encoder' in addition to the conventional visual tokenizer, which maps a sequence of tokens over multiple frames into a compact set of visual tokens. This enables \modelname to use much fewer visual tokens than its competing models (e.g., 32 vs. 4608 tokens). We explore different types of temporal encoders, including learnable spatio-temporal pooling as well as sequential models like Token Turing Machines. We experimentally confirm that \modelname obtains video question-answering accuracies comparable to much larger state-of-the-art models (e.g., 34B), while being much smaller (i.e., 4B) and more efficient by using fewer visual tokens. The project website is at {\small \url{https://www.salesforceairesearch.html}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Vision-Language Models (VLMs), benefiting from large-scale image-text training, have been dominating the field of computer vision.
+Recently, open-source VLMs are obtaining strong results, despite having much smaller size than the commercial models (e.g., 4B vs. Trillions).
+
+Further, in addition to such VLMs trained with images, VLMs for videos are becoming increasingly popular. The key component in a VLM for videos is the temporal abstraction of tokens over multiple frames. Models like Video-ChatGPT \citep{Maaz2023VideoChatGPT} and PLLaVA \citep{xu2024pllavaparameterfreellava} rely on a simple spatial/temporal pooling on top of image frame-level tokens to represent the entire video. Some models rely on a separate video encoder to capture temporal information in videos \citep{lin2023video}. Similarly, some models use additional convolutional layers (or Transformer layers) over frames to reduce their representation size (e.g., Video-LLaMA \citep{zhang2023video}, Kangaroo \citep{liu2024kangaroo}). Approaches that simply collect all the visual tokens from all the frames (e.g., MiniGPT4-video \citep{ataallah2024minigpt4}, LLaVA-NeXT \citep{li2024llavanext-interleave}, Tarsier \citep{wang2024tarsier} and LLaVA-OneVision \citep{wang2024tarsier}) also have been very popular recently, as they allow capturing all the details from the frame-level tokens. 
+\begin{wrapfigure}{r}{0.6\textwidth}
+  \centering
+    \begin{subfigure}[b]{0.29\textwidth}
+\includegraphics[width=\linewidth]{images/blip3-v-fig-1-a.pdf}
+  \end{subfigure}
+    \begin{subfigure}[b]{0.29\textwidth}
+\includegraphics[width=\linewidth]{images/blip3-v-fig-1-b.pdf}
+  \end{subfigure}
+  \caption{SOTA video VLM model comparison: (Left) Number of visual tokens vs. video-QA accuracy. (Right) Model size vs. video-QA accuracy.}
+  \label{fig:tradeoff}
+\end{wrapfigure}
+However, this often makes the number of tokens for video to be very huge (e.g., thousands even for 8 frames). Such large number of video tokens could be critical for longer videos as the LLM computation is quadratic to the number of total tokens.
+
+In this paper, we introduce xGen-MM-Vid (\modelname), which is an efficient compact vision-language model with an explicit \emph{temporal encoder}, designed particularly for videos. \modelname particularly focuses on incorporating a learnable `temporal encoder' within it. We explore different types of temporal encoder, and demonstrate that the model can abstract each video into much fewer visual tokens (e.g., 16) while being successful in open-ended question-answering and captioning tasks. We include a space-time attentional pooling as well as a sequential model as our temporal encoder, relying on token operations to iteratively abstract a series of frame-level tokens into a learnable memory. 
+There has been prior work investigating the role of pooling \citep{jin2024chat}, convolutions, and cross attention layers \citep{zhang2023video,liu2024kangaroo,li2024llamavid}, but study on full space-time attentional pooling or sequential model to this extent has been limited in the past. Our objective in this paper is to provide a fundamental alternative to more brute-force way of collecting all the visual tokens which have been increasing popular recently. We experimentally confirm that $16\sim32$ video tokens abstracted by the temporal encoder is often sufficient to represent the entire video for question-answering (Figure \ref{fig:tradeoff}).
+
+
+ 
+
+
+\section{\modelname}
+
+
+\subsection{Model architecture}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{images/blip-3-video-website2.pdf}
+    \caption{An illustration of the \modelname model architecture. It has the explicit temporal encoder inserted to BLIP-3.}
+    \label{fig:arch}
+\end{figure}
+
+We build the \modelname model based on the image-based vision-language model (VLM), BLIP-3 \citep{xue2024xgenmmblip3}.
+
+The model architecture is composed of the following four components: (1) the vision encoder (ViT) taking each frame input, (2) the frame-level tokenizer to reduce the number of tokens, (3) the temporal encoder to build video-level token representations, and (4) the autoregressive LLM generating output text captions based on such video tokens and text prompt tokens. Figure \ref{fig:arch} shows an overview.
+
+First, we apply a pretrained SigLIP as the vision encoder, designed to take one single image frame at a time. Perceiver-Resampler is then applied to map such visual tokens into $N=128$ visual tokens per frame, independently.
+Once the model has such visual tokens over time (i.e., over multiple frames in the video), they are provided to an explicit `temporal encoder'. The role of the temporal encoder is to build a video-level token representation from such sequence of image-level tokens, serving as a mapping function between a set of $N \cdot T$ image tokens to $M$ video tokens where $T$ is the number of frames and $M$ is a constant number of tokens. We explore various forms of the temporal encoder, including temporal pooling as well as sequential models, which we discuss further in the following subsection. The resulting tokens are given to the LLM together with the encoded text tokens in a prefix manner, as in many standard VLMs.
+
+For computational efficiency, the model takes uniformly sampled 8 frames per video. As a result, in our model, ViT first maps a video into $8 * 729$ visual tokens, which is then mapped to $8 * 128$ visual tokens using Perceiver-Resampler, and then to $16\sim128$ video tokens using the temporal encoder.
+
+We use Phi-3 \citep{abdin2024phi3} as our LLM backbone taking such video tokens in addition to the text prompt tokens. This enables the model to take text+video as an input and generate text sentences as an output.
+
+\subsection{Temporal encoders}
+
+A temporal encoder is a function of tokens, taking $N \cdot T$ tokens as an input and returning $M$ tokens as an output: $x_{1,\ldots, M} = f(v_{(1, 1), \ldots, (N, T)})$.
+
+We explore different types of encoders as part of our model. The simplest form of the temporal encoder will be temporal pooling, e.g., summating per-frame tokens over time: $x_{1,\ldots, M} = \left\{\sum_t (v_{(i, t)}) \right\}_{i=1}^M$ where $M$ is always restricted to be identical to $N$, which was also used in \citep{Maaz2023VideoChatGPT}. Another possible implementation would be the use of a temporal Transformer, modeling the entire token sequence and selecting the last $m$ tokens similar to Mirasol3B \citep{piergiovanni2024mirasol3b}:
+\begin{align}
+    x_{1,\ldots, M} = \left\{\textrm{Transformer}(v)\right\}_{N \cdot T-M+1}^{N \cdot T}
+\end{align}
+
+In addition to the straightforward temporal encoders mentioned above, we explore two important temporal encoders considering space-time nature of tokens: spatio-temporal attentional pooling and sequential models (Figure \ref{fig:temporal}).
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{images/temporal_encoders-website.pdf}
+    \caption{Visually comparing different types of temporal encoders we explored in our model architecture. (c) and (d) are particularly effective, as we discuss further in the experiments.}
+    \label{fig:temporal}
+\end{figure}
+
+\paragraph{Spatio-temporal attentional pooling:}
+
+Attentional pooling allows learnable `soft selection' of multiple tokens given a larger set of tokens. Such attentional pooling have been previously developed for Transformers (e.g., Perceiver \citep{jaegle2022perceiver} and TokenLearner \citep{ryoo2021tokenlearner}), and also used in earlier foundation models (e.g., CoCa \citep{yu2022coca}) for images.
+
+In our model, we use TokenLearner~\citep{ryoo2021tokenlearner}, making it explicitly serve as our space-time aware temporal encoder. Unlike previous per-image-frame usage of poolings where spatial pooling and temporal pooling are applied separately (e.g., Video-ChatGPT), our temporal encoder directly takes all $N \cdot T$ tokens and `learns' to soft-select $M$ informative tokens spatio-temporally. Here, $N$ tokens could be viewed as spatial representations of a frame and we have $T$ of them, suggesting it is a spatio-temporal representation selection.
+
+Our attentional pooling in its simplest form is expressed as:
+\begin{align}
+    x_i = A(V) \cdot V = \textrm{softmax}\left(\alpha(V^T)\right) \cdot V
+\end{align}
+where $V$ is a matrix formed by concatenating input tokens $v_{(1, 1), \ldots, (N, T)}$. The function $A(\cdot)$ computes the summation weights for $V$, performing soft selection of tokens. This is further decomposed to the softmax and the function $\alpha(\cdot)$. In Perceiver, a matrix multiplication with a latent query tokens (i.e., cross attention where $|Q| = m$) have been used to implement this: $\alpha(V) = Q \cdot V^T / c$. TokenLearner uses a convolution/MLP on top of $V$: $\alpha(V) = \textrm{MLP}_m(V^T)$, which we use in our model. This allows selecting a smaller number of tokens (e.g., $M=32$ tokens).
+
+We experimentally confirm that such learnable spatio-temporal attentional pooling has advantages over the conventional approach of non-learnable spatial pooling and temporal pooling, in Section \ref{sec:ablations}.
+
+\paragraph{Sequential Model:}
+We also deploy Token Turing Machines (TTM) \citep{ryoo2023tokenturingmachines} as a temporal encoder, which is a sequential model capable of taking any number of frames to generate a video-level token representation (e.g., $M=32$ regardless the number of frames). Our use of TTM is similar to its usage in Mirasol3B \citep{piergiovanni2024mirasol3b}, except that our model uses TTM directly to encode a sequence of image tokens while Mirasol3B uses TTM to encode a sequence of sets of video tokens.
+
+Here, we also further extend TTM by adding time-stamped positional encodings to embded the frame index of each token in the latent space. This enables the tokens in the `memory' of TTM to preserve the temporal ordering information, which is crucial when representing complicated or long video scenes. In addition, we use TTM temporal encoder in a `grouped' fashion, maintaining a separate memory of size $G=4$ for each of $N=128$ tokens over time. The memory is maintained to have the size is $N \cdot G$, and the final output from the sequence model is attentionally pooled from the final memory to give $M$ tokens.
+
+\subsection{Training recipe}
+\modelname follows a three-stage curriculum learning: (1) image caption pretraining, (2) video caption pretraining, and (3) video instruction tuning. In all its training we freeze the vision encoder, only training the model parameters after the vision encoder. First, we directly use the pretrained weights from BLIP-3 \citep{xue2024xgenmmblip3}. BLIP-3 is for images and it does not contain weights for the temporal encoder, so we randomly initialize those weights.
+
+As its 2nd stage, the model is then trained on LLaVA-Hound-DPO's video caption data \citep{zhang2024direct}, featuring over 900k video captions. Instead of directly using the text captions provided in LLaVA-Hound-DPO, we used GPT-4 to rephrase such text captions so that they become more GPT-style captions. 
+Finally, we tuned the model using a mix of video question-answering datasets, including VideoChatGPT's 99k-sample video instruction tuning data \citep{Maaz2023VideoChatGPT}, along with the training splits of the MSVD-QA~\citep{msvdqamsrvttqa}, MSRVTT-QA~\citep{msvdqamsrvttqa}, ActivityNet-QA~\citep{yu2019activitynet}, TGIF-QA~\citep{jang2017tgif}, and NExT-QA~\citep{xiao2021next} datasets, which contain 30k, 149k, 32k, 71k, and 34k samples, respectively. For TGIF-QA, we only used the training data associated with the Repeating Action and State Transition tasks. In our video instruction tuning recipe, we employ both open-ended and multiple-choice video QA formats for TGIF-QA and NExT-QA. For the open-ended video QA training data sourced from the MSVD-QA, MSRVTT-QA, TGIF-QA, and NExT-QA training sets, we used GPT-3.5 to rephrase the original single-word or single-phrase answer into a natural language sentence, providing the question in the LLM prompt context. For open-ended TGIF-QA and NExT-QA, we also double the sample size by using both the original short-phrase answers and the rephrased sentence-based answers.
+In addition, we added a filtered version of the Mira caption dataset~\citep{ju2024miradatalargescalevideodataset} for our video instruction tuning. That is, we are using both video question-answering and video captioning for our final training. We excluded captions for Mira videos longer than one minute, totaling 935k video caption samples.
+
+We trained our model with 8 $\times$ H100 GPUs. For the video caption pretraining, we use the batch size of 16 per GPU, 500 warmup steps, and the learning rate of 2e-5 with the cosine decay. We trained the model for 1 epoch. The video QA sft (i.e., instruction tuning) was done with the batch size of 4 per gpu, 500 warmup steps, and the learning rate of 1e-5  with the cosine decay. We trained the model for 1 epoch in this case as well. The entire training (combining both video pretraining and the sft) takes around 12 hours, confirming the efficiency of our model.
+
+
+
+
+
+\section{Experiments and Results}
+
+
+\subsection{Model implementation details}
+
+We share the model details with BLIP-3 (4B), except that \modelname has the new temporal encoder component in its architecture. This model takes the video with the input resolution of 384$\times$384, using SigLIP encoder to map it to 729 tokens per frame with the channel size 1152. Perceiver-Resampler is implemented with multiple cross-attention layers with the same channel dim, which is then given to the temporal encoder.
+
+TokenLearner serving as the spatio-temporal attentional pooling was implemented using a MLP as the attention function. The size of its inner dim was the number of target tokens * 2. The grouped TTM serving as the sequential model temporal encoder was implemented using 4 Transformer layers (with the channel dim of 1152) as the processor module while using TokenLearners for read/write modules. Memory size was set to $N * 4 = 512$ tokens total.
+
+The resulting $16\sim128$ tokens are mapped to the text embedding with the channel dimension of 3072, before given to the LLM (Phi-3).
+
+\subsection{Public benchmarks}
+
+We conducted experiments measuring video question-answering accuracies on multiple public datasets. This includes open-ended answer generation tasks like MSVD-QA, as well as multiple choice questions like NExT-QA. We follow their standard settings in all cases.
+
+Table \ref{tab:comparison} compare open-ended question answering accuracies of \modelname against reported numbers of other models. We use four commonly used public datasets, MSVD-QA, MSRVTT-QA, ActivityNet-QA, and TGIF-QA, following standard VideoLLM evaluation settings. Note that our MSVD-QA and MSRVTT-QA accuracy was measured by training our model with a subset (i.e., Video-ChatGPT dataset-only) of our training data, as this allows more direct comparison to some of the prior work and enables more stable results due to its data distribution. We are including the model size as well as the number of visual tokens in the table. We are able to observe that, despite its smaller size (i.e., 4B vs. 7B or 34B), our model is obtaining superior or comparable performance.
+
+With the temporal encoder, \modelname was able to retain the performance with much fewer tokens, which we discuss more in the following subsection. Our results suggest that not too many visual tokens are really necessary to be successful on these open-ended question answering benchmarks, as long as we have a carefully designed temporal encoder.
+
+In addition, we evaluated \modelname's ability to solve multiple choice questions (MCQ). Table \ref{tab:nextqa} shows the results on NExT-QA. Due to the nature of its questions requiring understanding of multiple frames, many prior models use quie a bit of tokens. For instance, GPT-4 uses a minimum of 255 tokens per frame. It is interesting that \modelname achieves comparable accuracy while representing the entire video with only 32 (or 128) tokens.
+
+\begin{table}[tb]
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|r|r|r|r|r|r}
+\hline
+Method & Size & \#tokens & MSVD-QA & MSRVTT-QA & ActivityNet-QA & TGIF-QA\\
+\hline
+VideoChat~\citep{li2023videochat}  & 7B & \textbf{32} & 56.3 / 2.8  & 45.0 / 2.5 & - / 2.2 & 34.4 / 2.3 \\
+Video-LLaMA~\citep{zhang2023video} & 7B & \textbf{32} & 51.6 / 2.5  & 29.6 / 1.8 & 12.4 / 1.1 & - / - \\
+Video-ChatGPT \citep{Maaz2023VideoChatGPT} & 7B & 264+ & 64.9 / 3.3 &  49.3 / 2.8 & 34.2 / 2.8 & 51.4 / 3.0 \\
+Chat-UniVi~\citep{jin2024chat} & 7B & 112 & 69.3 / 3.7 & 55.0 / 3.1 & 46.1 / 3.3 & 69.0 / 3.8\\
+LLaMA-VID~\citep{li2024llamavid} & 7B & \textbf{32} & 69.7 / 3.7 & 57.7 / 3.2 & 47.4 / 3.3 & -\\
+LLaMA-VID~\citep{li2024llamavid} & 13B & \textbf{32} & 70.0 / 3.7 &58.9 / 3.3 & 47.5 / 3.3 & -\\
+Video-LLaVA \citep{lin2023video} & 7B & 2048 & 71.8 / 3.9 & 59.2 / 3.5 & 45.3 / 3.3 & 70.0 / 4.0\\
+MiniGPT4-Video~\citep{ataallah2024minigpt4} & 7B & 2880+ & 73.9 / 4.1 & 59.7 / 3.3 & 46.3 / 3.4 & 72.2 / 4.1\\
+PLLaVA \citep{xu2024pllavaparameterfreellava} & 7B & 576+ & 76.6 / 4.1 &  62.0 / 3.5 & 56.3 / 3.5 & 77.5 / 4.1\\
+SlowFast-LLaVA~\cite{xu2024slowfast}  & 7B &  3680 & 79.1 / 4.1   &  65.8 / 3.6 &  56.3 / 3.4 &   78.7 / 4.2 \\  %
+LLaVA-Hound-DPO~\cite{zhang2024direct}  & 7B &  2048 &  80.7 / 4.1  & 70.2 / 3.7 & - / -  &  61.4 / 3.5 \\
+LLaVA-OneVision$^*$ \citep{wang2024tarsier} & 7B & 1568 &  72.9 / 3.9 &  57.8 / 3.4  &  55.3 / 3.6 & 41.1 / 3.1 \\
+Tarsier \citep{wang2024tarsier} & 7B & 4608+ & 77.0 / 4.1 &  62.0 / 3.5 & 59.5 / 3.6 & 79.2 / 4.2\\
+Tarsier $^*$ \citep{wang2024tarsier} & 7B & 4608 & 74.4 / 4.0  &  59.1 / 3.4  & 54.3 / 3.5  & - / - \\
+\hline
+PLLaVA \citep{xu2024pllavaparameterfreellava} & 34B & 576+ & 79.9 / 4.2 & 68.7 / 3.8 & 60.9 / 3.7 & 80.6 / 4.3\\
+LLaVA-NeXT-Video$^*$ \citep{li2024llavanext-interleave} & 32B & 1152 & 73.6 / 4.0
+  &  56.8 / 3.4  & 58.4 / 3.6
+  &  73.5 / 4.1 \\
+Tarsier \citep{wang2024tarsier}  & 34B & 4608+ & 80.3 / 4.2 & 66.4 / 3.7 & 61.6 / 3.7 & 82.5 / 4.4\\
+Tarsier $^*$ \citep{wang2024tarsier} & 34B & 4608 & 79.3 / 4.1  &  62.2 / 3.5  & 61.5 / 3.7  &  - / -  \\
+\hline
+\modelname & \textbf{4B} & \textbf{32} & 77.7 / 4.2 & 60.0
+/ 3.6 & 55.7 / 3.5 & 76.5 / 4.3 \\
+\modelname & \textbf{4B} & 128 & 77.9 / 4.3 & 59.7 / 3.6 & 56.9 / 3.6 & 77.1 / 4.3\\
+\hline
+\end{tabular}
+}
+\caption{Comparison against reported numbers of other models on open-ended question answering evaluation. The number of visual tokens are also reported. The numbers after `/' are answer quality scores. $^*$ indicates our evaluation using the checkpoint and inference code provided by the author, with the identical videos used in our model (8 frames of 384$\times$384 resolution).}
+\label{tab:comparison}
+\end{table}
+
+\begin{table}[tb]
+\centering
+{\small
+\begin{tabular}{l|r|r|c}
+\hline
+Method & Size & \#tokens & NExT-QA\\
+\hline
+LangRepo \citep{kahatapitiya2024langrepo} & 7B & 3136+ & 54.6\\
+LangRepo \citep{kahatapitiya2024langrepo} & 12B & 3136+ & 60.9\\
+Tarsier \citep{wang2024tarsier}  & 7B & 4608+ & 71.6\\
+\hline
+LLoVi \citep{zhang2024llovi} & 157B & 1000s & 67.7\\
+IG-VLM \citep{kim2024imagegridworthvideo} & 34B & 1536+ & 70.9\\
+VideoAgent \citep{wang2024videoagent} & GPT-4 & 2091+ & 71.3\\
+VideoTree \citep{wang2024videotree} & GPT-4 & 3978+ & 73.5\\
+Tarsier \citep{wang2024tarsier}  & 34B & 4608+ & 79.2\\
+\hline
+\modelname & \textbf{4B} & \textbf{32} & 76.4 \\
+\modelname & \textbf{4B} & 128 & 77.1 \\
+\hline
+\end{tabular}
+}
+\caption{Comparison against reported numbers of other models on multiple choice question-answering (MCQ) benchmark.}
+\label{tab:nextqa}
+\end{table}
+\subsection{Ablations}
+\label{sec:ablations}
+
+We conducted an ablation comparing different temporal encoders. These include: (1) the base single frame model (i.e., BLIP-3 trained with videos), (2) mean pooling similar to Video-ChatGPT, and (3) transformer temporal encoder similar to Mirasol3B. We also tried the (4) vanilla Token Turing Machines, which is not the grouped version we use as our temporal encoder.
+
+Table \ref{tab:ablation128} shows the result, comparing the question-answering accuracies of different types of temporal encoders when abstracting a video into 128 tokens. We are able to observe that they all do a reasonable job, while some temporal encoders are more effective.
+
+
+In addition, we compared different pooling approaches similar to the ones tried in prior works, when they are required to select a much smaller number of tokens (e.g., 32) from a large set of visual tokens. We compare our spatio-temporal attentional pooling as well as the sequential model against its alternatives, including (1) fixed-window (non-learnable) space-time pooling and (2) learnable `per-frame' pooling. In particular, (2) is similar to the approach taken in LLaMA-VID~\citep{li2024llamavid}, which independently selected a fixed number of tokens (e.g., 2) per frame. Table \ref{tab:ablation32} shows the results. Table \ref{tab:ablation-tokens} explicitly compares the impact of having smaller visual tokens. We are able to observe that 32 visual tokens or more gives a reasonable video QA accuracy.
+\begin{table}[tb]
+\centering
+{\small
+\begin{tabular}{c||c|c|c||c}
+\hline
+Encoder & MSVD-QA & TGIF-QA & ActivityNet-QA & NExT-QA\\
+\hline
+1 frame & 71.49 / 4.01 & 72.74 / 4.16 & 51.83 / 3.39 & 72.79 \\
+Mean pooling & 76.75 / 4.17 & 77.01 /4.30 & 55.89 / 3.53 & 76.24 \\
+Transformer & 76.24 / 4.15 & 76.33 / 4.28 & 55.59 / 3.50 & 76.34 \\
+Vanilla Token Turing Machine & 76.42 / 4.15 & 75.80 / 4.26 & 54.45 / 3.48 & 75.42 \\
+\hline
+Ours (Space-time) & 77.49 / 4.18 & 76.90 / 4.29 & 56.94 / 3.56 & 76.27 \\
+Ours (Sequential) & 77.86 / 4.20 & 77.10 / 4.31 & 56.66 / 3.56 & 77.07 \\
+\hline
+\end{tabular}
+}
+\caption{Ablations comparing different temporal encoders: 128 tokens. $^*$A slightly different training recipe using a subset of the entire dataset (without Mira data) was used for the ablations.}
+\label{tab:ablation128}
+\end{table}
+\begin{table}[tb]
+\parbox{.4\linewidth}{
+\centering
+{\small
+\begin{tabular}{c|c}
+\hline
+Encoder & MSVD-QA \\
+\hline
+Space-time pooling (4*8) & 76.04 \\
+Per-frame (4*8) & 76.78 \\
+\hline
+Ours (Space-time) & 77.71 \\
+Ours (Sequential) & 77.11 \\
+\hline
+\end{tabular}
+}
+\caption{Ablations comparing different pooling strategies for 32 tokens.}
+\label{tab:ablation32}
+}
+\parbox{.58\linewidth}{
+\centering
+{\small
+\begin{tabular}{c||c|c|c}
+\hline
+\# tokens & MSVD-QA & TGIF-QA & NExT-QA\\
+\hline
+16 tokens & 76.17 / 4.16 & 76.19 / 4.28 & 75.8\\
+32 tokens & 77.11 / 4.17 & 77.07 / 4.30 & 76.4\\
+128 tokens & 77.86 / 4.20 & 77.10 / 4.31 & 77.07\\
+256 tokens & 77.67 / 4.18 & 77.35 / 4.31 & 77.06\\
+\hline
+\end{tabular}
+}
+\caption{Ablations comparing different \# of tokens. Ours with sequential model as a temporal encoder was used.}
+\label{tab:ablation-tokens}
+}
+\end{table}
+\paragraph{Speed:} Reducing the number of visual tokens increases the computational efficiency of the models, as the total computation is quadratic to the number of tokens fed to the LLM. We measure the runtime of our models in the training setting for the fair comparison.  Here, we report `samples per second per GPU'. Without the temporal encoder (i.e., directly using 1024 visual tokens), the model processed 3.3 samples per second. With 16/32/128 tokens using the temporal encoder, the model was able to process 8.5 / 8.2 / 7.5 samples per second.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{images/examples-mira.pdf}
+    \caption{Example video captioning results on Mira dataset, formed in question-answering style.}
+    \label{fig:caption_examples}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{images/examples-msvd-msrvtt.pdf}
+    \caption{Example video captioning results on MSVD and MSRVTT caption dataset.}
+    \label{fig:caption_examples2}
+\end{figure}
+
+\subsection{Video captioning evaluation}
+
+\begin{table}[tb]
+\centering
+{\small
+\begin{tabular}{c|c|c||c|c|c}
+\hline
+Method & Size & \# tokens & MSVD-Cap & MSRVTT-Cap & Mira-Cap \\
+\cline{2-4}
+\hline
+LLaVA-OneVision & 7B  & 1152 & 61.62 / 3.31  & 38.60 / 2.71   & 48.83 / 3.10 \\
+Tarsier & 7B & 4608 &
+ 62.26 / 3.37  & 40.27 / 2.77 & 40.55 / 2.87 \\
+\hline
+\modelname & 4B & 32  & 63.59 / 3.38  & 42.06 / 2.82 & 80.67 / 3.96 \\
+\modelname & 4B & 128  & 64.17 / 3.41  & 43.05 / 2.85  & 81.13 / 3.97 \\
+\modelname (captioning-only model) & 4B & 128  & 69.50 / 3.52  & 50.45 / 2.98  & 81.76 / 4.00 \\
+\hline
+\end{tabular}
+}
+\caption{Video caption evaluation results using 8 frames. We employ VideoChatGPT's LLM evaluation and report Average Accuracy / Average Score in this table. The `captioning-only model' was trained only using Mira video caption data (without QA data), making it specialized for the captioning.}
+\label{tab:videocaption}
+\end{table}
+We evaluate our model on the video captioning task by comparing it against state-of-the-art models on the test splits of MSVD-Caption and MSRVTT-Caption, as well as a custom evaluation split from the Mira dataset. For the Mira dataset, we randomly selected 6,000 samples from our full, filtered data to create the evaluation split, with the remainder used for training. We employed Video-ChatGPT's LLM evaluation, specifically using GPT-3.5 to compare model-predicted captions with ground truth captions. The LLM assesses accuracy by checking if the predicted caption matches the ground truth, and assigns a score on a scale of 0 to 5 for each sample.
+
+Table~\ref{tab:videocaption} demonstrates the results. All three models were provided with 8 frames per video, and consistent visual input and prompts were ensured across the models. Our \modelname consistently outperforms LLaVA-OneVision-7B and Tarsier-7B across all three video captioning benchmarks, with particularly notable improvements on the Mira video captioning task. 
+ \modelname generates high-quality, detailed captions.
+
+
+
+\section{Related Works}
+
+
+
+\subsection{Image-Text LLMs}
+Among recent advances in image-text multimodal models~\citep{blip2,alayrac2022flamingo,liu2023llava, instructblip, xue2024xgenmmblip3, idefics3, molmo}, one common strategy enable image understanding in LLM is to start with a pre-trained image encoder (e.g., ViT~\citep{openaiclip, siglip}) and a pre-trained language-only LLM~\citep{abdin2024phi3, bai2023qwentechnicalreport, dubey2024llama3herdmodels}. The two components are connected via a vision-language connector, which is trained to project vision embeddings output from the vision encoder into ``vision tokens" that can be ingested by the LLM. The vision tokens are of the same shape as language embeddings, so the image-text LLM can be trained in the same way as regular language models using the next token prediction loss. There are many design choices for the VL connector, for example, BLIP-2~\citep{blip2} chooses to use a Q-Former to extract vision tokens from the vision embeddings, Flamingo~\citep{alayrac2022flamingo} uses ``perceiver resampler" as the connector plus cross-attention layers throughout the language model, while a simpler choice is to use MLP layers to transform the vision embeddings.
+Image-text LLMs are usually trained with a multi-stage training strategy, including pre-training, instruction tuning, and sometimes, post-training (e.g., DPO~\citep{rafailov2024direct}). In addition to simple structured image-text data such as image captioning and single-image VQA, recent works also explore free-from image-text data for model training such as interleaved image-text understanding~\citep{obelics, awadalla2024mint1tscalingopensourcemultimodal} and multi-image VQA~\citep{Jiang2024MANTISIM, li2024llavaonevision}.
+
+\subsection{Video LLMs}
+Video LLMs extend the architecture of image-based LLMs to handle video input. \cite{zhang2023video} integrates pre-trained encoders and frozen LLMs to process multimodal input through a Video Q-Former and Audio Q-Former, generating video and audio embeddings compatible with LLM without retraining encoders. \cite{Maaz2023VideoChatGPT} adapts the CLIP visual encoder for video by incorporating temporal features and fine-tunes the model using video-instruction pairs collected by tools like BLIP-2~\citep{blip2} and GRiT~\citep{wu2022grit}. \cite{li2024llamavid} generates frame-level embeddings using a visual encoder but condenses visual information into two tokens per frame. However, it does not account for temporal recency across frames. Similarly, models like Video-LLaVA~\citep{lin2023video} and LLaVa-OneVision~\citep{li2024llavaonevision} treat videos as long multi-image contexts but lack token efficiency optimization, making them computationally costly. SlowFast-LLaVA \citep{xu2024slowfast} adopts a two-stream architecture—Slow and Fast pathways—to capture both spatial and temporal video semantics without extra fine-tuning. Finally, LLaVa-hound-DPO~\citep{zhang2024direct} uses Direct Preference Optimization (DPO)~\citep{rafailov2024direct} with GPT-4V to annotate preference data, enhancing video question-answering performance by detecting inconsistencies or hallucinations in model responses.
+
+\subsection{Token Pruning}
+
+
+Token pruning is a widely used technique to reduce redundant and overlapping information in Vision Transformers (ViTs) and large language models (LLMs). \cite{bolya2022token} merges similar tokens within ViTs, combining redundant content while retaining task-relevant information across tasks like image, video, and audio processing. Similarly, \cite{ren2023testa} employs the Temporal Aggregation Module to combine redundant consecutive video frames and the Spatial Aggregation Module to merge similar patches within each frame, reducing the number of processed tokens by up to 75\%. \cite{shen2024tempme} focus on temporal redundancy and progressively merges tokens across neighboring clips, which reduces the number of tokens by preserving important video-level features.  All these methods focus on visual token merging in ViTs, where token processing is challenging in video-based LLMs. In addition, \cite{chen2024image} improves attention efficiency in deeper layers by dynamically pruning or merging redundant image tokens based on attention scores without extra training. \cite{shang2024llava} introduces adaptive token reduction through the Adaptive Important Token Selection and Token Supplement, which can be integrated into VLM models without fine-tuning. In LLMs, KV cache pruning is popular for efficient model serving, as seen in \citep{fu2024lazyllm}, which uses attention maps to progressively prune tokens and reduce the time-to-first-token (TTFT). \cite{wan2024look} extends KV cache pruning to VLMs, employing different token merging strategies to cut computational costs and support longer multimodal contexts.
+
+
+\section{Conclusion}
+
+
+We introduce \modelname, which is an efficient, compact vision-language model for videos with 4B parameters. \modelname incorporates a temporal encoder in its architecture, which allows the model to abstract the entire video with as few as 16 or 32 tokens. In contrast to many state-of-the-art video VLMs taking advantage of thousands of visual tokens to represent a video (e.g., 4608), \modelname shows a competitive performance while utilizing much fewer visual tokens (e.g., 32).
+
+
+
+
+\small
+
+
+
+

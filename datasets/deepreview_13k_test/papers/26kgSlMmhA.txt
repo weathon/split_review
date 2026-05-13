@@ -1,0 +1,351 @@
+\title{Any-Property-Conditional Molecule Generation with Self-Criticism using Spanning Trees}
+
+\begin{abstract}
+
+Generating novel molecules is challenging, with most representations leading to generative models producing many invalid molecules. Spanning Tree-based Graph Generation (STGG) \citep{ahn2021spanning} is a promising approach to ensure the generation of valid molecules, outperforming state-of-the-art SMILES \citep{weininger1988smiles} and graph diffusion \citep{song2019generative} models for unconditional generation. In the real world, we want to be able to generate molecules conditional on one or multiple desired properties rather than unconditionally. Thus, in this work, we extend STGG to multi-property-conditional generation. Our approach, \highlight{\textbf{STGG+}}, incorporates a modern Transformer architecture, random masking of properties during training (enabling conditioning on \emph{any} subset of properties and classifier-free guidance), an auxiliary property-prediction loss (allowing the model to \emph{self-criticize} molecules and select the best ones), and other improvements. We show that \highlight{\textbf{STGG+}} achieves state-of-the-art performance on in-distribution and out-of-distribution conditional generation, and reward maximization.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Generating novel molecules is challenging, and the choice of molecular representation significantly impacts the performance of generative models. Traditional methods have mainly focused on SMILES \citep{weininger1988smiles} 1D strings \citep{segler2018generating, kwon2023string}, and 2D graphs \citep{jo2022score, vignac2022digress, jo2023graph}. A significant issue with these representations is that a single error by the generative model can result in invalid molecules, especially as molecule size increases.
+
+Recently, \citet{krenn2020self} proposed Self-referencing Embedded Strings (SELFIES) \citep{krenn2020self}, a robust 1D string representation similar to SMILES that guarantees the generation of valid molecules through a carefully designed context-free grammar. However, recent work by \citet{gao2022sample} and \citet{ghugare2023searching} found that while SELFIES prevent invalid molecules, it makes exploration more difficult and reduces the performance of generative models (in terms of obtaining high-reward samples, i.e., molecules with desired properties). A significant challenge for the generative models based on SELFIES is the need to pre-define the number of tokens contained in a branch (a deviation from the main path in a 1D string) and count backward the number of tokens required to reach the beginning of the ring (starting from the end). This requires extensive planning and counting, making the problem much more challenging for the model to solve.
+
+An alternative approach, Spanning Tree-based Graph Generation (STGG) \citep{ahn2021spanning}, has recently emerged. Unlike SELFIES, STGG is designed explicitly for generative models and works by masking invalid tokens during sampling, preventing the generation of invalid structures (e.g., atoms following atoms, branch end before branch start) and ensuring proper valency. STGG has a clear and simple set of if/else conditions used to mask out invalid tokens, which not only prevents invalid molecules but also leads to higher-quality and more diverse generated molecules \citep{ahn2021spanning}. Recent results \citep{jang2023simple} show that STGG generally performs equally or better than state-of-the-art SMILES and graph diffusion \citep{song2019generative,ho2020denoising,song2020score} models for unconditional molecule generation. However, its application in multi-property conditional settings has not been explored. We address this setting along with a few additional challenges, as discussed below.
+
+\textbf{Any-property-conditioning} \hspace{5pt} In real-world applications, we want to be able to \emph{generate molecules conditional on one or multiple desired properties} rather than unconditionally. Furthermore, we want to condition on \emph{any} subset of desirable properties without retraining the model each time that we condition on a different subset of properties.
+
+\textbf{Self-criticism} \hspace{5pt} Another critical issue is the synthesis time for molecules,  which can take days, weeks, or even months. Thus, we cannot expect chemists to synthesize and measure the properties of all generated molecules. 
+Ideally, we would need a way to filter the molecules we provide to chemists. Some properties can be verified through simulations, but this can be extremely slow, and not all properties can be simulated. Another option is to rely on external property predictor models, but training, validating, and managing multiple property predictors can be troublesome. \emph{What if the generative model could predict the properties of its own generated molecules?} This is the idea we propose here: we give the model the ability to predict properties and thus \emph{self-criticize} its own generated molecules, allowing it to automatically filter out those with undesirable properties.
+
+\textbf{Out-of-distribution properties} \hspace{5pt} Additionally, we sometimes seek to generate novel molecules with properties that have never been observed before in order to expand the range of our molecular knowledge. These \emph{out-of-distribution properties} generally involve extreme range of values. Classifier-Free Guidance (CFG) \citep{ho2022classifier} is a technique to improve conditioning fidelity; we found CFG useful for in-distribution properties, but problematic for some out-of-distribution conditioning values, especially for extreme values, resulting in poor generative efficiency (\% of valid, unique, and novel molecules) and conditioning fidelity. Since guidance can still be beneficial to some extreme conditioning values, we propose a solution: \emph{random guidance} with best-of-$k$ self-filtering (described further below).
+
+In this work , we tackle any-property-conditional molecule generation with self-criticism using STGG. In doing so, we make the following contributions:
+
+\begin{enumerate}
+    \item {\bf Mixed-data Property-Conditioning}: We use an MLP on standardized continuous features and embeddings on categorical features while randomly masking some properties during training,  allowing conditional generation on any number of properties (0, 1, 2, or all) and the use of Classifier-Free Guidance (CFG) for improved performance.
+    
+    \item {\bf Improved Transformer Architecture}: We use Flash-Attention, no bias terms, RMSProp, rotary embeddings, the SwiGLU activation, and better hyperparameters. 
+    
+    \item {\bf Improved Spanning-Tree}: We extend STGG to 1) allow compound structures with a new token and masking conditions, 2) prevent incomplete samples through special masking when there are too many opened branches, 3) prevent ring overflow, 4) randomize the order of the graph during training for better generalization, and 5) automatically calculate valency and adapt the token vocabulary based on the dataset.
+    
+    \item {\bf Auxiliary Property Prediction objective}: The objective
+    improves conditioning fidelity and enables out-of-the-box self-filtering of molecules with incorrect properties.
+
+    \item {\bf Random Guidance for Extreme Value Conditioning}: Classifier-free guidance uses guidance $w>1$ to improve performance, but this can fail when conditioning on extreme values (which are needed to generate molecules with out-of-distribution properties). We propose using random guidance ($w \sim \mathcal{U}(0.5,2)$) with best-of-$k$ filtering as a solution.
+    
+    \item {\bf Comprehensive Performance Evaluation}: We demonstrate excellent performance in terms of 1) distribution learning and diversity on unconditional generation, 2) distribution learning and conditioning fidelity on in-distribution and out-of-distribution conditional generation, and 3) diverse and high-reward samples on reward maximization.
+\end{enumerate}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.60\linewidth]{STGG+.drawio.png}
+    \caption{Our \highlight{\textbf{STGG+}} architecture. The molecule is tokenized and embedded. The number of started rings and embeddings of continuous and categorical properties are added, and the output is passed to the Transformer. The Transformer output is then split to produce 1) the predicted property and 2) the token predictions (masked to prevent invalid tokens).}
+    \label{fig:STGG1}
+\end{figure}
+
+
+
+\section{Background}
+
+
+\subsection{1D vs 2D representations}
+
+There are various ways of representing molecules in the context of molecular generation. Some of the most popular methods are autoregressive models on 1D strings \citep{segler2018generating, ahn2021spanning, kwon2023string} and diffusion \citep{song2019generative,ho2020denoising,song2020score} models on 2D graphs. While both approaches have similar sample complexity, 1D strings offer a more compressed representation, requiring less space and fewer parameters and, thus, increased potential for scalability.
+
+Furthermore, recent results indicate that 1D strings are as competitive as 2D molecular graph methods for both unconditional molecule generation \citet{jang2023simple, fang2023domain} and property prediction \citet{yuksel2023selformer}. Both 1D and 2D representations encapsulate the same amount of information, making the choice largely a matter of preference. We advocate for 1D string representations due to their scalability and effective utilization of Transformer models, and thus, we focus on this type of representation in our work. 
+
+\subsection{1D string representations}
+
+The most popular choice of string-based representation is SMILES \citep{weininger1988smiles}, an extremely versatile method capable of representing any molecule. However, when used in generative models, generated SMILES strings often correspond to invalid molecules. A single incorrectly placed token will lead to an invalid molecule. Graph-based diffusion methods also face a similar issue. To address this problem, recent methods like Spanning Tree-based Graph Generation (STGG) \citep{ahn2021spanning} and SELFIES \citep{krenn2022selfies} have been developed to prevent the generation of invalid molecules.
+
+STGG has demonstrated performance on par with or better than state-of-the-art unconditional generative models \citep{ahn2021spanning,jang2023simple}. Conversely,  SELFIES has been shown to perform worse than SMILES on property-conditional molecule generation \citep{gao2022sample, ghugare2023searching}. Therefore, in this work, we focus on STGG for property-conditional molecule generation.
+
+\subsection{STGG}
+
+STGG \citep{ahn2021spanning} uses a SMILES-like vocabulary with a begin "(" and end ")" branch tokens, ring start "[bor]" and $i$-th ring end "[eor-$i$]" tokens. Contrary to SELFIES, STGG was made from the ground up for unconditional molecule generation. STGG leverages a Transformer \citep{vaswani2017attention} architecture to sample the next tokens conditional on the tokens of the current unfinished molecule. To predict the ring end tokens, STGG uses a similarity-based output layer distinct from the linear output layer used to predict other tokens. STGG also uses an input embedding to track the number of open rings. Invalid next tokens are prevented through masking of next tokens that would lead to impossible valencies (e.g., atoms, ring-start, and branch-start when insufficient valency remains) and structurally invalid tokens (e.g., atom after atom, bond after bond, or ring-$i$ end when fewer than $i$ ring start tokens are present).
+
+In the next section, we will show how to improve the STGG architecture, STGG, and its masking, adapt STGG for any-property conditional generation, and improve fidelity on conditioned properties through several techniques (classifier-free guidance, self-criticism, random classifier-free guidance for extreme conditioning).
+
+
+
+\section{Method}
+
+
+We tackle the problem of any-property conditional generation with self-criticism using STGG.
+
+\subsection{Architecture} \label{sec:arch}
+
+We enhance the base architecture used originally in STGG, a regular Transformer \citep{vaswani2017attention} directly from PyTorch main libraries. We leverage several recent improvements in Large Language Models (LLMs) to improve the architecture following GPT-3 \citep{radford2019language}, Mistral \citep{jiang2023mistral}, and Llama 2 or 3 \citep{touvron2023llama}. The improvements include:
+1) RMSNorm \citep{zhang2019root} replacing LayerNorm \citep{ba2016layer};  2) residual-path weight initialization \citep{radford2019language}; 3) bias-free  architecture \citep{chowdhery2023palm}; 4)  rotary embeddings \citep{su2024roformer} instead of relative positional embedding; 5) lower-memory and faster attention with Flash-Attention-2 \citep{dao2022flashattention, dao2023flashattention}; 5)  SwiGLU activation function \citep{hendrycks2016gaussian, shazeer2020glu}; 6) changes in hyperparameters following GPT-3 \citep{radford2019language} (i.e., AdamW \citep{loshchilov2017decoupled, kingma2014adam} $\beta_2=0.95$, cosine annealing schedule \citep{loshchilov2016sgdr}, more attention heads, no dropout). These modifications aim to enhance the model’s efficiency, scalability, and overall performance.
+
+\subsection{Any-property conditioning}
+
+We preprocess continuous properties by applying a simple $z$-score standardization. Other transformations,  such as min-max normalization and quantile transformation, were not beneficial.
+
+To condition the model on any subset of target properties without retraining the model every time we change the properties, we need to be able to turn off the conditioning of some properties. For continuous variables, we handle missing values by introducing a binary indicator variable: if a property is missing, we set the property value to 0 and the missing indicator to 1. It is very important to include these missing indicators because we cannot assume the plausible values for the missing features (e.g., if A is 1.0, B is missing, maybe the only possible range for B is around 3 and 4, so if we leave B at 0 without missing indicator, it will not make sense). For categorical variables, we add an extra category to represent missing values. During training, the number of masked properties, $t$,  is chosen uniformly between $0$ to $T$, where $T$ is the total number of properties. This allows us to condition the model on any subset of desired properties at test time while ignoring the rest. 
+
+In the neural network, we process the standardized continuous features (continuous properties concatenated with their binary missing indicators) in a 2-layer multilayer perceptron (MLP) with Swish activation \citep{hendrycks2016gaussian, ramachandran2017searching}. Each categorical feature is then processed individually using a linear embedding. These processed outputs are added directly to the embedding of all tokens. We also experimented with injecting these embeddings through adaptive normalization \citep{huang2017arbitrary}, a method commonly used for conditioning on noise-level in diffusion models \citep{ho2020denoising}, but this approach massively increased the number of parameters without improving performance.
+
+\subsection{Improvements to Spanning-Tree}
+
+Starting from STGG as base, we implemented several improvements. Firstly, we extend the vocabulary to allow for the generation of molecular compounds that are composed of multiple unconnected graphs (e.g., salt is represented as [Na+].[Cl-], where [Na+] and [Cl-] are single-atom molecules connected through a ionic bond), enabling the model to solve a broader range of problems. Originally, STGG used a fixed vocabulary and a fixed set of maximum valencies that determines how many valence bonds each atom can form. Instead of requiring a predefined vocabulary, we automated the process of building a vocabulary based on the atoms found in the dataset and their maximum valency, again derived from the dataset. This data-centric approach allows us to represent complex structures, including non-molecular compounds containing metals. 
+
+We observed that STGG could occasionally generate incomplete samples by creating too many branches without closing them within the allowed maximum length, particularly when conditioning on extreme out-of-distribution properties. To address this, we modified the token masking process to ensure the model closes its branches when the number of open branches approaches the number of tokens left to reach the maximum length. This additional masking step prevents the rare but problematic situation of incomplete samples. Additionally, for massive molecules, it is possible for the model to rarely produce more rings than the maximum number of rings (100); we now mask the creation of rings when the maximum number is reached. With these additional masks, we generally maintain 100\% validity, even when generating molecules with out-of-distribution properties).
+
+\subsection{Classifier-free guidance}
+
+To enforce better conditioning of the properties, we use classifier-free guidance, originally designed for diffusion models \citep{ho2022classifier}, and found beneficial for autoregressive language models as well \citep{sanchez2023stay}. This technique involves directing the model more toward the conditional model's direction while pushing it away from the unconditional model's direction by an equal amount. Figure \ref{fig:STGG2} illustrates this concept. The amount of guidance typically requires hyperparameter-tuning. However, for simplicity and generality, in all analyses, we arbitrarily set the guidance parameter $w$ to $1.5$, where $w=1$ means no guidance. Practitioners can tune the guidance for further performance gain.
+
+\subsection{Self-criticism}
+
+To make the model more powerful, we incorporate self-criticism by adding a property-prediction loss. During training, the model is tasked with predicting both the next token in the sequence and the properties of the current unfinished molecule. During sampling, we generate molecules conditioned on the desired properties with classifier-free guidance. Then, we mask out the properties (making them fully missing) and reprocess the molecule until we reach the end-of-sequence (EOS) token. At this point, we extract the predicted property of this molecule. 
+
+This approach provides the model with a new ability: we can generate $k$ molecules for a given set of properties and then evaluate which molecule best matches its conditioned properties solely based on the model's self-predicted properties without relying on any external property predictor. This best-out-of-$k$ strategy significantly improves the quality of its generated molecules.
+
+The architecture with the described loss functions is illustrated in Figure \ref{fig:STGG1}. The methodology for generating molecules using classifier-free guidance and self-criticism is depicted in Figure \ref{fig:STGG2}.
+
+\subsection{Random guidance for extreme conditioning}
+
+Regular guidance can be problematic for some extreme (out-of-distribution) conditioning values, resulting in poor generative efficiency (\% of valid, unique, and novel molecules) and conditioning fidelity. However, guidance is can still beneficial to some extreme conditioning values. 
+
+To improve generative performance on extreme conditioning values, we propose to randomly sample a guidance $w \sim \mathcal{U}(0.5,2)$ for each sample, ensuring a mix of low and high guidance. Then, our method selects the best-out-of-$k$ molecule from the molecules generated at different guidance levels, indirectly allowing the model to determine by itself which guidance is best for each sample.
+\begin{figure}[h]
+    \centering
+        \includegraphics[width=0.9\linewidth]{guidance.drawio.png}
+        \caption{Generation and self-prediction using \highlight{\textbf{STGG+}}. We autoregressively generate $K$ molecules conditional on desired properties using classifier-free guidance. The unconditional model predicts the properties of the $K$ molecules and the molecule assumed closest to the desired properties is returned.}
+        \label{fig:STGG2}
+\end{figure}
+
+
+
+\section{Experiments}
+
+
+We run four sets of experiments. First, we demonstrate that, after conditioning on in-distribution properties, our model can recover molecules close to those in the test set, achieving performance on par with state-of-the-art unconditional models. Second, we show that our model can generate molecules conditioned on properties from the test set with high fidelity on the specified properties. Third, we illustrate that our model can generate highly efficient (high \% of novel, unique, and valid) molecules with high fidelity on out-of-distribution (OoD) properties. Fourth, we show that our model can produce molecules that maximize a reward function, achieving similar or better performance compared to online learning methods using offline learning. Finally, as an harder case, we show that our model can generate high fidelity molecules conditioned on out-of-distribution (OoD) properties on a small dataset of large molecules.
+
+ Note that we rely on the following software: PyTorch \citep{paszke2019pytorch}, Molecular Sets (MOSES) \citep{moses} and RDKit: Open-source cheminformatics \citep{rdkit}. 
+
+\subsection{Unconditional generation}
+
+We train our model on QM9 \citep{ramakrishnan2014quantum}, and Zinc250K \citep{sterling2015zinc} using the exact molecule weight, logP, and Quantitative Estimate of Druglikeness (QED) \citep{bickerton2012quantifying} as properties. We test the similarity in the distribution of unconditionally generated molecules (masking the properties). We also test the same metrics on conditionally generated molecules conditioned on properties from the test set. We use the same train, valid, and test splits as \citet{jo2022score}. We compare to the strong recent baselines reported in \citet{jang2023simple} which are: EDP-GNN \citep{niu2020permutation}, GraphAF \citep{shi2020graphaf}, GraphDF \citep{luo2021graphdf}, GDSS \citep{jo2022score}, DiGress \citep{vignac2022digress}, DruM \citep{jo2023graph}, GraphARM \citep{kong2023autoregressive}, GEEL \citep{jang2023simple}, CharRNN \citep{segler2018generating}, CG-VAE \citep{liu2018constrained}, MoFlow \citep{zang2020moflow}, and STGG \citep{ahn2021spanning}.
+
+ We observe that \highlight{\textbf{STGG+}} obtains similar performance to STGG and GEEL, which are the top performing methods.
+
+\subsection{Conditional generation}
+
+We follow the same protocol as \citet{liu2024inverse}. We train our model on HIV, BACE, and BBBP \citep{wu2018moleculenet}. We use the same train, valid, and test splits as \citet{liu2024inverse}. Each dataset has a categorical property related to HIV virus replication inhibition, blood-brain barrier permeability, or human $\beta$-secretase 1 inhibition, respectively, and two continuous properties: synthetic accessibility (SAS) \citep{ertl2009estimation} and complexity scores (SCS) \citep{coley2018scscore}. We evaluate the models using metrics on distribution and fidelity of conditioning after generating molecules conditional on properties from the test set. The condition control metrics are the Mean Absolute Error (MAE) of SAS and accuracy of the HIV categorical property (through a Random Forest \citep{breiman2001random} predictor using the Morgan Fingerprint \citep{morgan1965generation, gao2022sample}). The distribution metrics are Validity, atom coverage in the largest connected graph, internal diversity (average pairwise similarity of generated molecules),  fragment-based similarity \citep{degen2008art}, Fréchet ChemNet Distance (FCD) \citep{preuer2018frechet}. 
+
+Notably, the Fréchet Distance is one of the most popular and meaningful distance in generative models as it correlates well with both quality and diversity \citep{heusel2017gans};  it corresponds to the Wasserstein distance on the hidden space of neural networks assuming normality. It has been used in many domains: images \citep{heusel2017gans}, audio \citep{kilgour2018fr}, videos \citep{unterthiner2019fvd}, and molecules \citep{preuer2018frechet}.
+
+Following \citet{liu2024inverse}, we compare our method to strong recent baselines: GraphGA \citep{jensen2019graph}, MARS \citep{xie2021mars}, LSTM on
+SMILES with Hill Climbing (LSTM-HC) \citep{hochreiter1997long, brown2019guacamol}, and powerful graph diffusion models: DiGress \citep{vignac2022digress}, GDSS \cite{jo2022score}, and MOOD \citep{lee2023exploring}, and Graph DiT \citep{liu2024inverse}. In addition, we calculate the metrics for the train and test data. This allows us to observe a cap on atom coverage in real data; therefore, coverage above the one found in the test set does not necessarily indicate better performance. Furthermore, the RandomForest predictor does not achieve perfect accuracy on the test data. While it is well correlated with better performance, any accuracy above that on the test set does not necessarily indicate better performance.
+
+ We see that \highlight{\textbf{STGG+}} reaches near-perfect validity, coverage is consistently higher than the test set, and there is very high diversity and test-set similarity. Notably, we attain the best Fréchet ChemNet Distance; in fact, we are the only method that matches the training data's performance, indicating that we have reached the performance cap. Regarding condition control, we achieve the best MAE on BACE and HIV while reaching the second-best on BBBP (very close to Graph DiT). Consequently, we obtain similar or better condition control than our main competitor, Graph DiT, while achieving near-optimal distribution performance (with respect to the FCD). We also obtain better performance than base STGG (with random masking and the extra symbol for compounds) on Fréchet ChemNet Distance and MAE which shows that our improvements lead to lower distance in distribution and better property conditioning.
+
+\begin{table*}[h]
+\renewcommand{\arraystretch}{1.2}
+\renewcommand{\tabcolsep}{1mm}
+\caption{Conditional generation of 10K molecular compounds on HIV, BBBP, and BACE.}
+\centering
+\begin{adjustbox}{width=1\textwidth}
+\begin{tabular}{clccccccc}
+\toprule
+\multirow{2}{*}{Tasks} & \multirow{2}{*}{Model}  & \cellcolor{LightCyan}  & \multicolumn{4}{c}{\cellcolor{gray} Distribution Learning} & \multicolumn{2}{c}{ \
+\cellcolor{LightCyan} Condition Control} \\
+& & \cellcolor{LightCyan} Validity $\uparrow$ & \cellcolor{gray} Coverage$^*$ $\uparrow$ & \cellcolor{gray} Diversity $\uparrow$ & \cellcolor{gray} Similarity $\uparrow$ & \cellcolor{gray} Distance $\downarrow$ & \cellcolor{LightCyan} Synthe. MAE $\downarrow$ & \cellcolor{LightCyan} Property Acc.$^*$ $\uparrow$ \\
+\midrule
+\multirow{12}{*}{\rotatebox{90}{Synth. \& BACE }}
+& DiGress & 0.351 & \highlightgreen{8/8} & 0.886 & 0.694 & 24.656 & 2.068 & 0.506  \\
+& MOOD & 0.995 & \highlightgreen{8/8} & \highlightgreen{0.890} & 0.259 & 44.239 & 1.885 & 0.506 \\
+& MARS & \highlightgreen{1.000} & \highlightgreen{8/8} & 0.834 & 0.883 & 6.792 & 1.012 & 0.518 \\
+& Graph GA & \highlightgreen{1.000} & \highlightgreen{8/8} & 0.859 & \highlightgreen{0.981}  & 7.410 & 0.963 & 0.469 \\
+& \method & 0.867 & \highlightgreen{8/8} & 0.824 & 0.875 & 7.046 & 0.400 & \highlightgreen{0.913} \\
+\cdashlinelr{2-9}
+& STGG$^{**}$ & \highlightgreen{1.000} & \highlightgreen{8/8} & 0.824 & 0.979 & 3.824 & 0.453 & \highlightgreen{0.949} \\
+& \highlight{\textbf{STGG+}}$(k=1)$ & \highlightgreen{1.000} & \highlightgreen{8/8} & 0.829 & 0.979 & \highlightgreen{3.796} & 0.238 & \highlightgreen{0.912} \\
+& \highlight{\textbf{STGG+}}$(k=5)$ & 1.000 & \highlightgreen{8/8} & 0.826 & 0.979 & 3.802 & \highlightgreen{0.178} & \highlightgreen{0.926} \\
+\cdashlinelr{2-9}
+& \textbf{Train data}  & 1.000 & 8/8 & 0.819 & 0.981 & 3.837 & \hphantom{0}0.003$^\dagger$& 0.991 \\
+& \textbf{Test data}  & 1.000 & \hphantom{0}\textbf{7/8}$^*$ & 0.824 & 1.000 & 0.000 & \hphantom{0}0.002$^\dagger$ & \hphantom{0}\textbf{0.817}$^*$ \\
+\toprule
+\multirow{12}{*}{\rotatebox{90}{Synth. \& BBBP}} 
+& DiGress & 0.696 & 9/10 & 0.910 & 0.681 & 18.692 & 2.366 & 0.654 \\
+& MOOD & 0.801 & 9/10 & \highlightgreen{0.927} & 0.172 & 34.251 & 2.028 & 0.490  \\
+& MARS & \highlightgreen{1.000} & 8/10 & 0.864 & 0.770 & 10.979 & 1.225 & 0.519  \\
+& Graph GA & \highlightgreen{1.000} & 9/10 & 0.895 & \highlightgreen{0.951} & 10.166 & 1.208 & 0.302 \\
+& \method & 0.847 & 9/10 & 0.886 & 0.933 & 11.851 & \highlightgreen{0.355} & \highlightgreen{0.942} \\
+\cdashlinelr{2-9}
+& STGG$^{**}$ & \highlightgreen{1.000} & 9/10 & 0.891 & 0.916 & 11.736 & 0.982 & 0.754 \\
+& \highlight{\textbf{STGG+}}$(k=1)$ & \highlightgreen{1.000} & \highlightgreen{10/10} & 0.888 & 0.937 & \highlightgreen{9.859}  & 0.466 & \highlightgreen{0.867} \\
+& \highlight{\textbf{STGG+}}$(k=5)$ & \highlightgreen{1.000} & 9/10 & 0.887 & 0.936 & 10.101 & 0.381 & \highlightgreen{0.900} \\
+\cdashlinelr{2-9}
+& \textbf{Train data}  & 1.000 & 8/10 & 0.883 & 0.957 & 9.890 & \hphantom{0}0.017$^\dagger$ & 0.996 \\
+& \textbf{Test data}  & 1.000 & \hphantom{0}\textbf{10/10}$^*$ & 0.880 & 0.998 & 0.000 & \hphantom{0}0.018$^\dagger$ & \hphantom{0}\textbf{0.806}$^*$ \\
+\toprule
+\multirow{12}{*}{\rotatebox{90}{Synth. \& HIV}} 
+& DiGress & 0.438 & \highlightgreen{22/29} & 0.919 & 0.856 & 13.041 & 1.922 & 0.534 \\
+& MOOD & 0.288 & \highlightgreen{29/29} & \highlightgreen{0.928} & 0.136 & 32.352 & 2.314 & 0.511  \\
+& MARS & \highlightgreen{1.000} & \highlightgreen{26/29} & 0.876 & 0.652 & 7.289 & 0.969 & 0.646  \\
+& Graph GA & \highlightgreen{1.000} & \highlightgreen{28/29} & 0.899 & 0.966 & 4.442 & 0.984 & 0.604 \\
+& \method & 0.766 & \highlightgreen{28/29} & 0.897 & 0.958 & 6.022 & 0.309 & \highlightgreen{0.978} \\
+\cdashlinelr{2-9}
+& STGG$^{**}$ & \highlightgreen{1.000} & \highlightgreen{27/10} & 0.899 & 0.961 & 4.558 & 0.442 & \highlightgreen{0.950} \\
+& \highlight{\textbf{STGG+}}$(k=1)$ & \highlightgreen{1.000} & \highlightgreen{27/29} & 0.896 & \highlightgreen{0.970} & \highlightgreen{4.075} & 0.314 & \highlightgreen{0.876} \\
+& \highlight{\textbf{STGG+}}$(k=5)$ & \highlightgreen{1.000} & \highlightgreen{24/29} & 0.897 & 0.9700 & 4.317 & \highlightgreen{0.229} & \highlightgreen{0.905} \\
+\cdashlinelr{2-9}
+& \textbf{Train data}  & 1.000 & 27/29 & 0.895 & 0.970 & 4.019 & \hphantom{0}0.018$^\dagger$ & 0.999 \\
+& \textbf{Test data}  & 1.000 & \hphantom{0}\textbf{21/29}$^*$ & 0.895 & 0.998 & 0.074 & \hphantom{0}0.015$^\dagger$ & \hphantom{0}\textbf{0.726}$^*$ \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\begin{tablenotes}[para,flushleft]
+{\footnotesize $^*$The classifier from \citet{liu2024inverse} (used in the last column) has limited accuracy on the test set; thus, any \emph{Property Acc.} above the \textbf{test data accuracy} is not indicative of better quality. Similarly, atom coverage is not 100\% on test data; thus, any coverage above the \textbf{test set coverage} does not indicate better performance. \hfill 
+\\ 
+$^{**}$STGG with categorical embedding, missing indicators, random masking, and extra symbol for compounds. \hfill \\
+$^\dagger$The dataset properties are rounded to two decimals hence MAE is not exactly zero. \hfill}
+\end{tablenotes}
+\label{tab:main2}
+\end{table*}
+
+\subsection{Out-of-distribution conditional generation}
+
+We follow the same protocol as \citet{kwon2023string}. Our model is trained on Zinc250K \citep{sterling2015zinc} using exact molecule weight, logP, and Quantitative Estimate of Druglikeness (QED) \citep{bickerton2012quantifying} as properties. For evaluation, we generate 2K candidate molecules and calculate two metrics:  1) generative efficiency, defined as the probability that the following three conditions are satisfied: validity, uniqueness (not a duplicate), and novelty (not in train data)), and 2) the Minimum Mean Absolute Error (MinMAE) between the generated and conditioned properties (at $\pm 4$ standard-deviation). We use the same train, valid, and test splits as \citet{jo2022score}. Following \citep{shao2020controlvae}, we compare our model to vanilla VAE with k-annealing (BaseVAE) \citep{kingma2013auto, bowman2015generating}, ControlVAE \citep{shao2020controlvae}, and various single-decoder (SD) and multi-decoders (MD) methods proposed by \citet{shao2020controlvae}.
+
+One notable challenge is that one of the conditioning values, a QED of 1.2861, is impossible because the maximum value in RDKIT is 0.948. Regular guidance ($w=1.5$) proved problematic for this specific case, resulting in near-zero molecular generative efficiency and poor MAE. For this reason, we also used random guidance ($w \sim \mathcal{U}(0.5,2)$).
+
+The results are shown in Table \ref{tab:eff}. We see that base STGG (with random masking) reaches the best generative efficiency (\% of valid, novel, and unique molecules), but performs much worse than \highlight{\textbf{STGG+}} in terms of property conditioning. Our method sacrifice a small amount of generative efficiency (when compared to base STGG) in order to obtain much better property-conditioning; we see that our method generally obtains the smallest MAE. However, while the model performs optimally when using random guidance, it struggles with high guidance values when generating molecules for the impossible QED of 1.2861. Additionally, we observe that the model performs worse with the best-of-$5$ when generating molecules high logP, suggesting that the property predictor of STGG+ makes incorrect predictions for out-of-distribution high logP values.
+
+\begin{table*}[h]
+    \centering
+    \caption{Out-of-distribution ($\mu \pm 4\sigma$) property-conditional generation of 2K molecules on Zinc250K. Generative efficiency (\% of valid, novel, and unique molecules) and Minimum MAE (MinMAE).}
+    \begin{adjustbox}{width=1\textwidth}
+    \begin{tabular}{l|ccc|cc|cc|cc}
+    \hline
+     & \multicolumn{3}{c|}{Generative Efficiency} & \multicolumn{6}{c}{Properties - MinMAE} \\  \hline
+     & molWt & logP & QED & \multicolumn{2}{c|}{molWt} & \multicolumn{2}{c|}{logP} & \multicolumn{2}{c}{QED} \\ 
+     \hline
+     Condition & &  & & 84.000 & 580.00 & -3.2810\hphantom{000} & 8.1940 & 0.1778\hphantom{00} & 1.2861$^*$ \\
+     \hline
+    \textit{BaseVAE} & 0.100 & 0.069 & 0.110\hphantom{0} & 0.0780 & 0.0810 & -\hphantom{000} & 0.0013 & 0.0006\hphantom{00} & - \\
+    \textit{ControlVAE} & 0.377 & 0.311 & 0.403\hphantom{0} & 0.0740 & 0.0800 & 1.3598\hphantom{000} & 0.0005 & 0.0008\hphantom{00} & 0.2390 \\
+    $\textit{SD}_\text{dif,col}$ & 0.328 & 0.085 & 0.0002 & 0.0780 & 0.0370 & -\hphantom{000} & \highlightgreen{0.0001} & 0.0002\hphantom{00} & 0.3339 \\
+    \textit{MD} & 0.489 & 0.415  & 0.472\hphantom{0} & 0.0980 & 0.1740 & 0.0204\hphantom{000} & 0.0003 & 0.0015\hphantom{00} & 0.1024 \\ 
+    $\textit{MD}_\text{col}$ & 0.431 & 0.398 & 0.414\hphantom{0} & 0.0740 & 0.0760 & 0.0069\hphantom{000} & 0.0011 & 0.0002\hphantom{00} & 0.2211 \\ 
+    $\textit{MD}_\text{dif}$ & 0.457 & 0.427  & 0.468\hphantom{0} & 0.0074 & 0.0470 & 0.0003\hphantom{000} & 0.0051 & 0.0002\hphantom{00} & 0.0257 \\
+    $\textit{MD}_\text{dif,col}$ & 0.457 & 0.539 & 0.436\hphantom{0} & 0.1140 & 0.0620 & 0.0013\hphantom{000} & 0.0005 & 0.0006\hphantom{00} & 0.0861 \\  \hline
+    STGG$^{**}$ & \highlightgreen{0.988} & \highlightgreen{0.999} & \highlightgreen{0.999}\hphantom{0} & 0.0575 & 0.0751 & 0.0079\hphantom{000} & 0.1946 & 0.0153\hphantom{00} & \highlightgreen{0.0008}  \\
+    \highlight{\textbf{STGG+}}$(k=1)$ & 0.822 & 0.816 & 0.540\hphantom{0} & 0.0086 & 0.0091 & 0.0001\hphantom{000} & 0.0016 & 0.00001\hphantom{0} & 0.5109  \\
+    \highlight{\textbf{STGG+}}$(k=5)$ & 0.875 & 0.739 & 0.504\hphantom{0} & 0.0011 & 0.0165 & 0.0001\hphantom{000} & 1.5952 & 0.0001\hphantom{00} & 0.5202 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=1)$ & 0.939 & 0.922 & 0.823\hphantom{0} & 0.0211 & 0.0240 & 0.0001\hphantom{000} & 0.0007 & \highlightgreen{0.000007} & 0.0058 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=5)$ & 0.900 & 0.765 & 0.785\hphantom{0} & \highlightgreen{0.0010} & \highlightgreen{0.0061} & \highlightgreen{0.0000002} & 0.0281 & 0.0001\hphantom{00} & 0.0012 \\
+    \hline
+    \end{tabular}
+    \end{adjustbox}
+    \begin{tablenotes}[para,flushleft]
+    {\footnotesize $^*$The value is improper; we condition on 1.2861 but calculate the MAE with respect to the maximum QED (0.948).\hfill \\
+    $^{**}$STGG with missing indicators, and random masking.\hfill}
+    \end{tablenotes}
+    \label{tab:eff}
+\end{table*}
+\subsection{Reward maximization}
+
+\begin{table}[h]
+    \caption{Reward maximization on QM9.}
+    \centering
+    {\small
+    \begin{tabular}{l|c|c|cc}
+    \hline
+     & Type & Data & Reward ($\uparrow$)  & Diversity ($\uparrow$) \\
+    \hline
+Envelope QL & \multirow{4}{*}{Online} & \multirow{4}{*}{1M molecules} & 0.65 & 0.85 \\
+MOReinforce &  &   & 0.57 & 0.53\\
+MOA2C &  &  & 0.61 & 0.39 \\
+MOGFN-PC &  &  & 0.76 & 0.93 \\
+\hline
+STGG$^{**}$ & \multirow{4}{*}{Offline} & \multirow{4}{*}{QM9 ($\sim$115K molecules)} & 0.73 & 0.10 \\
+\highlight{\textbf{STGG+}}$(k=1)$ &  & & \highlightgreen{0.78} & 0.76 \\
+\highlight{\textbf{STGG+}}$(k=5)$ & &  & \highlightgreen{0.78} & 0.90 \\
+\highlight{\textbf{STGG+}}$(k=100)$ & &  & 0.77 & \highlightgreen{0.98} \\
+\hline
+\end{tabular}
+}
+\label{tab:qm9_results}
+\begin{tablenotes}[para,flushleft]
+{\footnotesize $^{**}$STGG with missing indicators, and random masking. \hfill}
+\end{tablenotes}
+\end{table}
+
+\citet{jain2023multi} trains reinforcement learning (RL) or GFlowNet \citep{bengio2023gflownet} agents to solve a task based on the QM9 \citep{ramakrishnan2014quantum} dataset. Their goal is to produce molecules similar to those found in QM9 that maximize a reward composed of four properties: HOMO-LUMO gap, SAS \citep{ertl2009estimation}, QED \citep{bickerton2012quantifying}, and molecular weight. This reward is maximized when the HOMO-LUMO gap is as large as possible, and SAS, QED, and weight are 2.5, 1.0, and 105, respectively. Following \citep{bengio2023gflownet}, we compare our method to Envelope QL \citep{yang2019generalized}, MOReinforce \citep{lin2022pareto}, MOA2C \citep{mnih2016asynchronous}, GFlownet (MOGFN-PC) \citep{bengio2023gflownet}.
+
+Instead of directly giving the reward to our model, we train a regular STGG+ model conditioned on the four properties (not the rewards). Since the HOMO-LUMO gap needs to be maximized, unlike online methods, there is no appropriate value to use. We arbitrarily set it to 0.5,  which corresponds to approximately five standard deviations (a limitation of our conditioning method, as we cannot maximize a property, only set a fixed value). The other properties are set to their optimal values: 2.5, 1.0, and 105.
+
+Our results are shown in Table \ref{tab:qm9_results}. Our approach yields slightly better molecules in terms of reward and diversity compared to online methods, using around 11.5\% of the molecules. This makes our approach significantly more efficient. However, it is important to note that solving this task with online methods is a steep hill and can be considered more difficult.
+
+\subsection{Hard: Small dataset of large molecules (Chromophore DB)}
+
+As a more challenging example, we explore the generation of molecules with out-of-distribution properties on Chromophore DB \citep{Joung2020}, a small dataset of around 6K molecules with an average of 35 atoms per molecule with a STGG max-length of 511 tokens (compared to 23 atoms on average with max-length of 136 tokens for Zinc250K and 9 atoms on average with max-length of 37 for QM9). To make the problem more realistic, we assume we can only give 100 molecules to chemists (in the real world, these chemists will filter out those 100 molecules from their expert knowledge and decide to test half or a quarter of them). We want to know if one of those 100 molecules has the desired out-of-distribution properties.
+
+Given the size of the dataset, it might be useful to first pre-train on a large set of small molecules (Zinc250K) and then fine-tune on the smaller dataset of large molecules (Chromophore DB). We try training only on Chromophore DB in addition to this strategy (pre-train and fine-tune). There are two ways to preprocess the properties in this case, we can either standardize them with respect to the pre-training or the fine-tuning datasets; doing it with respect to the pre-training dataset can lead to extreme values in the fine-tuning (e.g., 4 standard deviation in Chromophore's MolWt is 15 standard-deviation in Zinc250K's MolWt). Hereby, to reduce the gap between pre-trained and fine-tuned conditioning values, we preprocess the properties by standardizing with respect to the fine-tune dataset properties during both pre-training and fine-tuning.
+
+The results are shown in Table \ref{tab:eff2chromo}. We find that pre-training on Zinc250K and fine-tuning on Chromophore DB often leads to improved performance (Generative Efficiency and MinMAE) over training only on Chromophore DB. Fine-tuning for longer (1000 epochs instead of 100 epochs) leads to worse generative efficiency with similar performance, except for better property fidelity on molWt when using filtering ($k>1$), which suggests that the longer training improves the property predictor accuracy on OOD molWt.
+
+For most properties, random guidance with filtering ($k>1$) leads to the closest properties. However, for high logP, we obtain better property fidelity with no filtering ($k=1$),  indicating that the model struggles with property prediction on large out-of-distribution logP values. %(we also found the same behavior on Zinc250K). 
+
+\begin{table*}[h]
+    \centering
+    \caption{Out-of-distribution ($\mu \pm 4\sigma$) property-conditional generation of 100 molecules on Chromophore DB. Generative Efficiency (\% of valid, novel, and unique molecules) and Minimum MAE (MinMAE). We removed the low molWt and QED which are both impossible negative values.}
+    \begin{adjustbox}{width=1\textwidth}
+    \begin{tabular}{l||c|cc|c||c|cc|c}
+    \hline
+     & \multicolumn{4}{c||}{Generative Efficiency} & \multicolumn{4}{c}{Properties - MinMAE} \\ \hline
+     & molWt & \multicolumn{2}{c|}{logP} & QED & molWt & \multicolumn{2}{c|}{logP} & QED \\ 
+     \hline
+     Condition & 1538 & -13.6292 & 28.6915 & \hphantom{0}1.2355$^*$ & 1538 & -13.6292 & 28.6915 & \hphantom{0}1.2355$^*$ \\
+    \hline
+    \multicolumn{9}{l}{Trained on Chromophore DB (1000 epochs)} \\
+     \hline
+    \highlight{\textbf{STGG+}}$(k=1)$ & 0.9700 &  0.3300 & \highlightgreen{0.9800} &  0.5900 & 9.0172 & 3.2956 &  0.0343 &  0.2992  \\
+    \highlight{\textbf{STGG+}}$(k=100)$ & 0.8800 & 0.2500 & 0.8200 & 0.8100 & 5.2395 & 6.0166 & 8.0234 & 0.2473 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=1)$ & 0.9100 & 0.7100 & 0.9200 & 0.7500 & 0.4086 & 8.1002 & 0.1207 & 0.0491 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=100)$ & 0.8900 & 0.7100 & 0.9400 & 0.8300 & 0.7426 & 0.8909 & 7.0334 & \highlightgreen{0.0062} \\
+    \hline
+    \multicolumn{9}{l}{Pre-trained on Zinc250K (50 epochs) and fine-tuned on Chromophore DB (100 epochs)} \\
+    \hline
+    \highlight{\textbf{STGG+}}$(k=1)$ & 0.9900 & \highlightgreen{0.9600} & 0.9900 & 0.9800 & 0.9368 & 0.3796 & 0.4142 & 0.1519    \\
+    \highlight{\textbf{STGG+}}$(k=100)$ & \highlightgreen{1.0000} & \highlightgreen{0.9600} & 0.9300 & \highlightgreen{1.0000} & 2.3706 & \highlightgreen{0.3451} & 0.4194 & 0.0909 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=1)$ & \highlightgreen{1.0000} & 0.9499 & 0.9700 & \highlightgreen{1.0000} & 0.4734 & 0.6605 & \highlightgreen{0.0123} & 0.0229 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=100)$ & \highlightgreen{1.0000} & 0.9200 & \highlightgreen{0.9800} & 0.9900 & 13.1924 & 0.4515 & 0.1827 & 0.0095 \\
+    \hline
+    \multicolumn{9}{l}{Pre-trained on Zinc250K (50 epochs) and fine-tuned on Chromophore DB (1000 epochs)} \\
+    \hline
+    \highlight{\textbf{STGG+}}$(k=1)$ & 0.9100 & 0.8100 & 0.9200 & 0.6500 & 1.0691 & 0.9416 & 0.0357 & 0.3888 \\
+    \highlight{\textbf{STGG+}}$(k=100)$ & 0.9000 & 0.8300 & 0.9600 & 0.5900 & 0.7135 & 0.3770 & 0.7316 & 0.3025 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=1)$ & 0.8100 & 0.8100 & 0.8900 & 0.8900 & 9.2045 & 6.9937 & 0.0194 & 0.1114 \\
+    \highlight{\textbf{STGG+}}$(w \sim \mathcal{U}(0.5,2), k=100)$ & 0.8500 & 0.9200 & 0.9000 & 0.7800 & \highlightgreen{0.2817} & 1.0875 & 5.8786 & 0.0216 \\
+    \hline
+    \end{tabular}
+    \end{adjustbox}
+    \begin{tablenotes}[para,flushleft]
+    {\footnotesize $^*$The value of 1.2355 is improper; we calculate the MAE with respect to the maximum QED (0.948).\hfill} % 0.3381
+    \end{tablenotes}
+    \label{tab:eff2chromo}
+\end{table*}
+
+
+
+\section{Conclusion}
+
+
+In this paper, we demonstrated that with specific techniques, optimization, and architectural improvements, spanning tree-based graph generation (STGG) can be leveraged to generate high-quality and diverse molecules conditioned on both \emph{in-distribution} and \emph{out-of-distribution} properties. Our method achieves equal or superior performance on validty, novelty, uniqueness, closeness in distribution, and conditioning fidelity compared to competing approaches while being extremely efficient and fast. Using fewer molecules than required by online methods (RL/GFlowNet), we also obtain high multi-property-reward molecules in a one-shot manner from a pre-trained model. 
+
+While our method generates molecules with relatively good accuracy concerning the desired properties, it is still not perfect and can produce incorrect molecules, especially in out-of-distribution scenarios, which is a challenging task. Additionally, the property predictor of our approach may not be as optimal as property predictors engineered explicitly for this task, meaning our method may not always select the best molecules out of $k$ choices, particularly in out-of-distribution scenarios; we found this to be the case for large out-of-distribution logP conditioning values. Currently, the method does not account for stereoisomers, although some properties can be dependent on stereoisomers.
+
+The next step for our method is to scale it up to large datasets of highly specific molecules to generate out-of-distribution molecules that solve real-world problems. For problems where the properties depend on stereoisomers, it would be important to add the SMILES tokens relating to stereoisomers ($\setminus$, $/$, $@$, $@@$) to the vocabulary with the proper STGG masking.
+
+
+

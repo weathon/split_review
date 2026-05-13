@@ -1,0 +1,336 @@
+\title{Reward Model Ensembles Help Mitigate Overoptimization}
+
+\begin{abstract}
+\vspace{-2pt}
+Reinforcement learning from human feedback (RLHF) is a standard approach for fine-tuning large language models to follow instructions. As part of this process, learned reward models are used to approximately model human preferences. However, as imperfect representations of the ``true" reward, these learned reward models are susceptible to \textit{overoptimization}. \citet{gao2023scaling} studied this phenomenon in a synthetic human feedback setup with a significantly larger ``gold" reward model acting as the true reward (instead of humans) and showed that overoptimization remains a persistent problem regardless of the size of the proxy reward model and training data used. Using a similar setup, we conduct a systematic study to evaluate the efficacy of using ensemble-based conservative optimization objectives, specifically worst-case optimization (WCO) and uncertainty-weighted optimization (UWO), for mitigating reward model overoptimization when using two optimization methods: (a) best-of-n sampling (BoN) (b) proximal policy optimization (PPO). We additionally extend the setup of \citet{gao2023scaling} to include $25\%$ label noise to better mirror real-world conditions. Both with and without label noise, we find that conservative optimization practically eliminates overoptimization and improves performance by up to $70\%$ for BoN sampling. For PPO, ensemble-based conservative optimization always reduces overoptimization and outperforms single reward model optimization. Moreover, combining it with a small KL penalty successfully prevents overoptimization at no performance cost. Overall, our results demonstrate that ensemble-based conservative optimization can effectively counter overoptimization.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+With the advent of large language models, reinforcement learning from human feedback (RLHF) has emerged as a powerful technique to fine-tune and enhance models' behaviors \citep{ziegler2019fine, ouyang2022training, bai2022training}. However, despite its empirical success, RLHF remains a fickle method suffering from many failure modes \citep{casper2023open}. One such failure mode is \textit{overoptimization}, a phenomenon in which policy optimization appears to be making progress according to the learned reward model, but in reality begins to regress with respect to the true reward function \citep{ziegler2019fine, stiennon2020learning, gao2023scaling}. While many works on RLHF contain anecdotal evidence of overoptimization \citep{ziegler2019fine,stiennon2020learning,dubois2023alpacafarm}, \citet{gao2023scaling} is the only work that studies overoptimization in a systematic way. As working directly with human labelers is expensive, \citet{gao2023scaling} introduce a synthetic setup to study overoptimization in which a much larger language model is first trained as a ``gold'' reward model and is then used to generate preference labels for training of proxy reward models.
+
+In this work, we conduct a systematic study investigating whether combining ensembles with conservative optimization can help mitigate overoptimization. Our results indicate that not only does ensemble-based conservative optimization help mitigate overoptimization, it also results in improved performance. Our setup is identical to that of \citet{gao2023scaling} with one modification: the addition of label noise. \citeauthor{gao2023scaling} assume that the preference labels used to train the proxy reward model do not contain any noise. However, this does not mirror the real-world RLHF setup, in which agreement rates among human annotators are typically between $60-75\%$ \citep{ziegler2019fine, stiennon2020learning, dubois2023alpacafarm}. To simulate that disagreement and to better reflect the real-world RLHF, we extend the setup to include $25\%$ label noise as well. In both the cases of no label noise and $25\%$ label noise, we provide strong evidence that ensemble-based conservative optimization methods are effective in mitigating overoptimization and improving performance.
+
+Scaling laws for reward model overoptimization discovered by \citet{gao2023scaling} indicate that increasing the size of the proxy reward model reduces overoptimization as well. However, reward models are derived from pretrained language models. Thus, acquiring a larger reward model would require significant \textit{pretraining}, which is not always feasible and can be very costly 
+\citep{SmithBlog2023, venigalla2022mosaic}. 
+However, our approach, using ensembles of reward models, only requires fine-tuning multiple copies of an already pretrained reward model, which is relatively inexpensive. Moreover, our model and data scaling results (Figures~\ref{fig:rm_size_scaling}~and~\ref{fig:data_size_scaling}) indicate that the gains provided by our method are orthogonal to the gains achieved by increasing the reward model size; thus, the two approaches can be combined seamlessly for even better results.
+
+Our main contributions are as follows:
+\begin{itemize}
+\item We conduct the first study of using ensembles to counter overoptimization in RLHF-based fine-tuning of language models.
+\item Our results indicate that using ensembles and conservative optimization eliminates overoptimization for BoN and results in up to $70\%$ improvement in some cases.
+\item For PPO, ensemble-based conservative optimization typically outperforms single reward model optimization, and when combined with a suitable KL penalty weight successfully eliminates overoptimization.
+\item We further conduct studies to establish the robustness of the ensemble-based conservative optimization methods to any new hyperparameters it introduces (e.g. size of the ensemble).
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/illustrative_figs/RLHF_pipeline_diagram.png}
+    \caption{RLHF pipeline used in this work - our modifications on top of the standard RLHF setup used in \citet{gao2023scaling} are highlighted in \textcolor{lightergreen}{green}.}
+    \label{fig:rlhf_setup}
+\end{figure}
+
+
+
+\section{Background}
+
+\label{sec:background}
+In this section, we briefly review two commonly used policy optimization methods: best-of-n sampling (BoN) and proximal policy optimization (PPO), followed by a discussion of overoptimization.
+
+\subsection{Best-of-n Sampling (BoN)}
+\label{subsec:best_of_n_sampling}
+Best-of-$n$ (BoN) sampling, also called rejection sampling, is a simple inference-time optimization method \citep{ouyang2022training,nakano2021webgpt}. For a given prompt, $n$ responses are generated from the policy model, and the answer with the highest proxy reward model score is returned. To evaluate the degree of optimization, the KL distance is defined analytically as a function of $n$:
+\begin{equation} \label{eq:1}
+    \text{KL}_{\text{bon}} = \text{log} \, n - \frac{n - 1}{n}
+\end{equation}
+
+\subsection{Proximal Policy Optimization (PPO)}
+\label{subsec:ppo}
+Proximal Policy Optimization \citep{schulman2017proximal} is a policy-gradient-based online reinforcement learning method that maximizes a given reward function by repeatedly performing small incremental updates to the policy. 
+PPO is the standard algorithm used in fine-tuning language models based on human feedback \citep{ouyang2022training,bai2022training,stiennon2020learning,zheng2023secrets}. When using PPO to fine-tune a language model, a KL penalty term is added during the reward calculation to regularize the policy by preventing it from deviating far from the initial policy:
+\begin{align}
+    R^{\text{PPO}}(q,a) = R(q,a) -\beta \log \left[\frac{\pi^\text{PPO}(a | q)}{\pi^\text{init}(a | q)}\right]
+\end{align}
+where $\pi^\text{PPO}$ is the policy being optimized and $\pi^\text{init}$ is the initial (pretrained) language model.
+
+\subsection{Overoptimization}
+\label{subsec:overoptimization}
+In reinforcement learning from human feedback (RLHF) a reward model is used to approximate human preferences, to remove the need for querying humans for every policy generation. As the learned reward model is only a proxy for the true reward function, optimizing it may not always result in an improvement according to true human preferences. In practice, optimizing a (fixed) learned reward model almost always leads to improvement according to this learned reward model, but only improves according to the \textit{true} reward model (i.e. humans) for some initial period, after which performance often begins to regress. This phenomenon is referred to as \textit{overoptimization}, an example of which is shown in Figure \ref{fig:overoptexample}.
+
+\setlength{\intextsep}{0pt}
+
+\begin{wrapfigure}{r}{0.41\textwidth} 
+  \centering
+  \includegraphics[width=0.38\textwidth]{figures/illustrative_figs/example_overoptimization.png} 
+  \caption{An example of overoptimization. The KL divergence is the distance between the initial and current policy, measuring the degree of optimization.}\label{fig:overoptexample}
+\end{wrapfigure}
+
+To study the problem of \textit{overoptimization}, \citet{gao2023scaling} introduced a synthetic setup in which, instead of human annotators, a \textit{gold} reward model is used to score responses and generate preferences to train proxy reward models. The gold reward model is generally chosen to be much larger than the proxy reward model, to simulate the fact that in a real setup, human preferences are too complex to be captured by a neural network with a finite capacity. Within this setup, \citet{gao2023scaling} discover overoptimization to be a persistent issue, although they note that larger proxy reward model sizes and greater amounts of training data can help reduce overoptimization. However, scaling up is not always a feasible solution as the proxy reward models are generally derived from extensively pretrained language models.
+
+
+
+\section{Method}
+
+\label{sec:method}
+Standard RLHF often learns a single reward model to estimate the true reward, which is then used to optimize the policy. However, many works in wider machine learning have shown that learning multiple estimators and combining them can help improve robustness \citep{ensembles1,ovadia2019can,yu2020mopo}. Taking inspiration from this insight, we propose to learn an ensemble of reward models $\{R_1,...,R_k\}$ in the reward model training stage. During policy optimization, we combine the reward estimates from different reward models within the ensemble according to the following three methods.
+
+\textbf{Mean Optimization}: Mean optimization \citep{boyd2004convex,wright2006numerical} simply takes the mean of the outputs of the different ensemble members: 
+\begin{equation}
+    R_{\mu}(q, a) := \frac{1}{k} \sum_{i = 1}^{k} R_i(q, a)
+\end{equation}
+where $q$ is the prompt given to language model and $a$ is the corresponding response sampled from the language model.
+
+We note that mean optimization is not a conservative optimization technique; if at least one member of the ensemble overestimates the reward (even while other members accurately estimate it), mean optimization will not prevent the policy from exploiting the faulty reward model.
+
+\textbf{Worst-Case Optimization}: Worst-case optimization (WCO) \citep{boyd2004convex,wright2006numerical} creates a conservative estimate by choosing the lowest reward from the ensemble at every step. Choosing the lowest reward helps ensure that as long as at least one ensemble member does not overestimate the true reward, policy optimization will not result in overoptimization.
+\begin{equation}
+    R_{\text{WCO}}(q, a) := \min_i R_i(q, a)
+\end{equation}
+
+A major advantage of WCO is that it does not have any hyperparameters that might require tuning. However, it can sometimes result in a performance penalty due to its highly conservative nature.
+
+\textbf{Uncertainty-Weighted Optimization}: In uncertainty-weighted optimization (UWO) \citep{wu2021uncertainty,yu2020mopo,disagreement_regularized_irl}, the reward for a sample is calculated by combining the average reward across all models in an ensemble with the intra-ensemble variance, weighted by a coefficient $\lambda$. Intuitively, UWO works by penalizing the policy for generating responses for which there is high disagreement among reward models within the ensemble. This helps prevent the exploitation of a single faulty reward model which might be erroneously assigning high rewards to incorrect or low-quality responses. Mathematically, this objective is given by:
+
+\begin{equation}
+    R_{\text{UWO}}(q, a) := \underbrace{\frac{1}{k} \sum_i R_i(q, a)}_{\text{mean}} - \lambda \underbrace{\frac{1}{k} \sum_i \left(  R_i (q, a) - \frac{1}{k} \sum_i R_i (q, a) \right)^2}_{\text{variance}}
+\end{equation}
+
+where $\lambda$ is a hyperparameter which controls the weight of the uncertainty component. 
+
+
+
+\section{Experimental Setup}
+
+We based our experiments on the setup proposed by \citet{gao2023scaling}, however, we use open source models \citep{biderman2023pythia,dubois2023alpacafarm}, open source datasets \citep{alpaca}, and train our proxy reward models under $25\%$ label noise.
+\label{sec:experimental_setup}
+\subsection{Data}
+\label{subsec:data}
+In order to train proxy reward models, we use the Alpaca dataset \citep{alpaca}, with $52,000$ instructions covering a range of commands and corresponding demonstrations generated by OpenAI's text-davinci-003 \citep{davinci}. Each entry is composed of an instruction, an optional additional input, and a demonstrator output. More specifically, we use the AlpacaFarm \citep{dubois2023alpacafarm} variant of the dataset, as it provides splits for use in the different RLHF stages and for validation, as well as human preference annotations. 
+\subsection{Pretrained Models} 
+\label{subsec:models}
+For the policy model and (proxy) reward model, we use pretrained language models provided in the Pythia suite \citep{biderman2023pythia}. The policy model used everywhere in this work is the 1.4B Pythia model. For proxy reward models, we remove the unembedding layers from Pythia models of sizes 14M, 70M, and 1.4B and add a scalar head to output the reward to get proxy reward models of sizes 7M, 44M, and 1.3B.
+
+Finally, the 7B human preference reward model from AlpacaFarm \citep{dubois2023alpacafarm} is used as the gold reward model. It is of very similar size to the (closed-source) 6.9B gold reward model used in \cite{gao2023scaling} and is significantly larger than any of our proxy RMs (with the largest being 1.3B) and as such is a reasonable choice for a \textit{gold} standard. % Finally, it is trained on data from the AlpacaFarm dataset, thus matching the distribution of data in other components of our pipeline.
+
+\subsection{RLHF Pipeline}
+\label{subsec:rlhf_pipeline}
+Our RLHF pipeline is similar to that of \citet{gao2023scaling} with several modifications highlighted in Figure \ref{fig:rlhf_setup}. We explain the full setup below for completeness. 
+
+ This fine-tunes the models to have better instruction-following capabilities.
+
+\textbf{Preference Generation and Labeling}:
+To generate a preference dataset, the SFT model is prompted using instructions from the AlpacaFarm dataset, for which it produces two responses per instruction. The two responses are then scored with the gold reward model, which assigns a score to each of them. Human annotators tend to have high disagreement rates, often around $25\%$ \citep{stiennon2020learning} or more \citep{ziegler2019fine,dubois2023alpacafarm}. To simulate this, we optionally mislabel $25\%$ of the dataset. This results in two datasets: one with no label noise and one with $25\%$ label noise.
+
+\textbf{Proxy Reward Model Training}:
+We train our proxy reward model by minimizing cross-entropy loss on the preference dataset generated in the previous timestep. Unless mentioned otherwise, we use the complete dataset of $46,000$ prompts for reward model training and train all the reward models for $5$ epochs. Trained reward models reach between 60-75\% validation accuracy.
+
+\textbf{Ensemble Creation}:
+To create an ensemble, we train a fixed number of proxy reward models using identical data and hyperparameters but with different random seeds. This results in different random initialization for the scalar reward head added on top of the pretrained language model and a different data shuffling order. We use all the available training data for the training of every reward model as training on lesser data results in higher validation loss and poorer performance \citep{ensembles1}. Unless stated otherwise, we train an ensemble consisting of five reward models.
+
+\textbf{Policy Optimization}:
+Similar to \citet{gao2023scaling}, we use BoN sampling and PPO as optimization algorithms. For BoN, the evaluation cost for greater KL nats increases exponentially. As a result, due to constraints on available compute, we only evaluate BoN for a maximum of $n_{max}=12,500$ samples\footnote{Generating the $n=12,500$ answers for 1000 prompts and then relabeling them with proxy and gold reward model takes approximately 700 A100 GPU hours.}, which roughly equals $8.4$ nats of KL. For PPO, we train for $3000$ PPO steps.
+
+
+
+\section{Results}
+
+\label{sec:results}
+In this section, we report the results of our experiments. To summarize, our main findings are:
+\begin{itemize}[align=parleft,left=0.5pt..1em]
+\item Using an ensemble, with any of the objectives highlighted in Section~\ref{sec:method}, almost always helps over using a single reward model.
+\item For BoN, we do not observe any overoptimization when using WCO and UWO as optimization methods; however, in the $25\%$ label noise case, mean optimization does overoptimize (Figure~\ref{fig:bon_results}).
+\item For BoN, all three ensemble-based optimization methods result in up to $\sim 30\%$ improvement in final performance over the average performance attained by optimizing individual reward models in the no label noise case and up to $\sim 75\%$ improvement in the $25\%$ label noise case (Figure~\ref{fig:bon_results}).
+\item For PPO, WCO, and UWO do reduce overoptimization (Figure~\ref{fig:ppo_only_ensembles}), but completely mitigating overoptimization requires combining them with a small KL penalty (Figure~\ref{fig:ppo_ensembles_with_kl_penalty}).
+\item For PPO, WCO, and UWO always match or outperform single reward model optimization in terms of final performance for all values of KL penalties (Figure~\ref{fig:ppo_kl_penality_range}).
+\item Our findings are robust to scaling of model size and training dataset size (Figures~\ref{fig:rm_size_scaling}~and~\ref{fig:data_size_scaling}).
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/BoN/bon_scores_44m_46k.png}
+    \caption{With no label noise.}
+\end{subfigure}
+\hspace{2em}
+\begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/BoN/bon_scores_44m_46k_flips.png}
+    \caption{With $25\%$ label noise.}
+\end{subfigure}
+\caption{BoN results for 44M reward model size. In this and future BoN Figures, KL divergence is defined as per Eq.\ \ref{eq:1} and measures the degree of optimization.}
+\label{fig:bon_results}
+\end{figure}
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/PPO/ppo_scores_46k_44m_PPOseeds_fixed_leg.png}
+    \caption{With no label noise. For all four methods, \\KL penalty $0.01$ is used.}
+\end{subfigure}
+    \hspace{2em}
+\begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=0.91\textwidth, trim={0 0 0 2px}, clip]{figures/PPO/ppo_scores_46k_44m_flips_PPOseeds_fixed_leg.png}
+    \caption{With $25\%$ label noise. KL penalty $0.1$ for mean and $0.01$ for all other methods is used.}
+\end{subfigure}
+\caption{PPO results for $44$M reward model size, over three PPO seeds. For each method, we choose the KL penalty that gives the best final performance.}
+\label{fig:ppo_ensembles_with_kl_penalty}
+\end{figure}
+To present our results, we primarily rely on policy optimization curves where we show the gold reward model score on the left y-axis and the proxy reward model score on the right y-axis. For the x-axis, following the common practice \citep{bai2022training, gao2023scaling}, we use the KL divergence as defined in Eq. For PPO, most runs do not exceed a KL divergence of 150, but those that do are truncated to maintain a more legible plot. Additionally, runs in Figure~\ref{fig:ppo_ensembles_with_kl_penalty}, the main PPO optimization illustration, are averaged over three PPO seeds, with standard deviation shown. For other PPO optimization figures, due to the low variance observed, a single seed is used. However, the results for single RMs are averaged over the five RMs which make up the ensemble for the other methods. When comparing many experiment results at once, we present bar plots showing the final performance on the gold reward model and the variable of interest on the x-axis.
+
+\subsection{Best-of-N Sampling}
+\label{subsec:results_bon}
+In Figure~\ref{fig:bon_results}, we present results for BoN sampling for a $44$M size reward model. Across both noiseless and noisy settings, ensembles help improve performance by $\sim 30\%$ and $\sim 75\%$ respectively and successfully avoid overoptimization, except for mean optimization in the case of noisy labels. For UWO, we show results for $\lambda=0.5$ which we found to be most performant; however, in Section~\ref{subsec:robustness_to_hyperparameters}, we show that many reasonable values of $\lambda$ work well.3b_scaling}.
+
+\subsection{Proximal Policy Optimization}
+For PPO we observe that WCO and UWO reduce overoptimization and outperform other methods in terms of final performance in the absence of KL penalty, although they do not \textit{eliminate} overoptimization completely (as shown in Figure~\ref{fig:ppo_only_ensembles}). However, in Figure~\ref{fig:ppo_ensembles_with_kl_penalty}, we show that with a small KL penalty coefficient of $0.01$, WCO and UWO both successfully prevent overoptimization, without any notable reduction in performance. On the other hand, when using KL penalty on its own, a $20$x larger KL penalty weight of $0.2$ is required to eliminate overoptimization which incurs a significant performance penalty (Figure~\ref{fig:ppo_individual_rms_with_kl_penality}). In Figure~\ref{fig:ppo_kl_penality_range}, we show that for all penalties, WCO and UWO match or outperform the average final performance achieved by optimizing a single reward model. Moreover, for small KL penalties, they comprehensively outperform single reward model optimization. 
+
+\label{subsec:results_ppo}
+
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/PPO/ppo_scores_44m_46k_noKL_KL+gold.png}
+    \caption{With no label noise.}
+\end{subfigure}
+\begin{subfigure}{0.45\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/PPO/ppo_scores_44m_flips_46k_noKL_KL+gold.png}
+    \caption{With $25\%$ label noise.}
+\end{subfigure}
+\caption{PPO results for different optimization objectives without using a KL penalty.}
+\label{fig:ppo_only_ensembles}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/PPO/ppo_scores_44m_flips_46k_varyKL.png}
+    \caption{Individual reward model optimization (i.e. no ensemble) for different values of KL penalty in the $25\%$ label noise case.}
+\label{fig:ppo_individual_rms_with_kl_penality}
+    \end{minipage}%
+    \hspace{4em}
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/robustness_to_hyperparameters/ppo_kl_scaling_bar_short.png}
+          \includegraphics[width=\linewidth]{figures/bar_plot_horizontal_legend.png}
+    \caption{Effectiveness of conservative optimization methods across KL penalty weights in the $25\%$ label noise case.}
+    \label{fig:ppo_kl_penality_range}
+    \end{minipage}
+\end{figure}
+\subsection{Model and Data Scaling Results}
+\label{subsec:results_scaling}
+Prior work \citep{gao2023scaling} has shown that increasing reward model size or training dataset size helps improve performance as measured by the gold reward model. In Figure~\ref{fig:rm_size_scaling}, we vary the size of reward models (keeping the dataset size fixed at $46$k samples and policy size fixed at $1.4$B) and plot the final performance of each method for the fixed training budget. Recall that for BoN, this is $n=12,500$ samples and for PPO, this is $3000$ timesteps. Our results show that the improvement due to the use of ensembles is orthogonal to the improvement in performance achieved by scaling the reward model size. In particular, with the 1.3B reward model, we highlight that even when the policy and reward model have a similar number of parameters, WCO and UWO still provide non-trivial gains over using a single reward model.3b_scaling}.
+
+Similarly, in Figure~\ref{fig:data_size_scaling}, we vary the size of the training dataset (keeping the reward model size fixed at $44$M) and plot the final performance for each method for the fixed training budget. The results again indicate that using ensembles provides additional improvement in addition to increasing the size of the training dataset.
+
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/scaling_results/bon_RM_scaling_bar_short.png}
+    \caption{BoN.}
+\end{subfigure}
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/scaling_results/ppo_RM_sizes_new1.3b_bar_short.png}
+    \caption{PPO.}
+\end{subfigure}
+\begin{subfigure}{0.18\textwidth}
+    \includegraphics[width=0.8\textwidth]{figures/bar_plot_legend.png}
+\end{subfigure}
+\caption{Final gold reward model performance achieved by different objectives when optimizing reward models with varying parameter sizes, but trained with the same dataset containing $25\%$ label noise. The 1.3b_scaling}).}
+\label{fig:rm_size_scaling}
+\end{figure}
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/scaling_results/bon_data_scaling_bar_short.png}
+    \caption{BoN.}
+\end{subfigure}
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/scaling_results/ppo_data_scaling_bar_short.png}
+    \caption{PPO.}
+\end{subfigure}
+\begin{subfigure}{0.18\textwidth}
+    \includegraphics[width=0.8\textwidth]{figures/bar_plot_legend.png}
+\end{subfigure}
+\caption{Final gold reward model performance achieved by different objectives when optimizing (44M) reward models trained under varying amounts of data. A label noise ratio of $25\%$ was maintained for all dataset sizes.}
+\label{fig:data_size_scaling}
+\end{figure}
+
+\subsection{Evaluating Robustness to Hyperparameters}
+\label{subsec:robustness_to_hyperparameters}
+Using an ensemble-based approach introduces an additional hyperparameter: the \textit{cardinality}, or size, of the ensemble. In Figure~\ref{fig:number_of_rms_in_ensemble}, we plot the final performance for BoN and PPO for the three ensemble-based approaches: mean optimization, WCO, and UWO. We note that while there is a noticeable gap between $3$-member and $4$-member ensembles, in most cases the performance is highly similar for $4$-member and $5$-member ensembles, indicating that $4$-member or $5$-member ensembles are likely to work best, and diminishing returns will be seen after this point.
+
+For UWO, the value of the uncertainty penalty is another hyperparameter. Our results in Figure~\ref{fig:uwo_penalty_weight_and_number_of_rms_in_ensemble} indicate that most reasonable values of uncertainty penalty actually work well, indicating that there is potentially no need to tune this hyperparameter.
+
+\subsection{Effects of Label Noise and Uncertainty Penalty}
+\setlength{\intextsep}{0pt} 
+\begin{wrapfigure}{r}{0.42\textwidth} % r for right, l for left
+  \centering
+  \includegraphics[width=0.39\textwidth]{figures/analysis/ppo_44M_label_noise.png} 
+  \caption{Intra ensemble variance for different optimization objectives under different levels of noise for PPO.}
+ \label{fig:effect_of_label_noise_on_uncertainty}
+\end{wrapfigure}
+In Figure~\ref{fig:effect_of_label_noise_on_uncertainty}, we show intra-ensemble variance for an ensemble of $44$M parameter reward models optimized via UWO and mean optimization objectives using PPO. The variance among the ensemble members starts at a small value in the no label noise case, and increases by a relatively small amount during training for UWO. However, the uncertainty increases by almost $3$ times for mean optimization during training.
+
+For the case of $25\%$ label noise, the variance starts much higher and during the course of training, increases by about $2.5$ times for mean optimization. However, the variance only increases by about $20\%$ for UWO (using $\lambda=0.1$). Further, using a KL penalty of $0.01$ results in a slight reduction in the variance at the end of training.
+This hints at the fact that while mean optimization is able to exploit any reward model that overestimates the reward, the uncertainty penalty in UWO prevents that - resulting in better final performance (shown in Figure~\ref{fig:ppo_kl_penality_range}) and reduced overoptimization.
+
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/robustness_to_hyperparameters/bon_members_bar_short.png}
+    \caption{BoN.}
+\end{subfigure}
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/robustness_to_hyperparameters/ppo_members_bar_short.png}
+    \caption{PPO.}
+\end{subfigure}
+\hspace{-1em}
+\begin{subfigure}{0.18\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/bar_plot_no_single_rm_legend.png}
+\end{subfigure}
+\caption{Impact of the cardinality of the ensemble on the final performance of mean, UWO, and WCO for the $25\%$ label noise case.}
+\label{fig:number_of_rms_in_ensemble}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/robustness_to_hyperparameters/bon_lambdas_bar_short_plasma.png}
+    \caption{BoN.}
+\end{subfigure}
+\begin{subfigure}{0.38\textwidth}
+    \includegraphics[width=0.95\textwidth]{figures/robustness_to_hyperparameters/ppo_lambdas_bar_short_plasma.png}
+    \caption{PPO.}
+\end{subfigure}
+\begin{subfigure}{0.18\textwidth}
+    \includegraphics[width=0.9\textwidth]{figures/uwo_penalty_ensemble_legend.png}
+\end{subfigure}
+\caption{Impact of uncertainty penalty weight on final performance for different numbers of reward models within the ensemble. We note that there is considerable robustness to the value of the uncertainty penalty.}
+\label{fig:uwo_penalty_weight_and_number_of_rms_in_ensemble}
+\end{figure}
+
+
+\section{Discussion}
+
+We have demonstrated that ensemble-based conservative optimization methods improve performance and are highly effective in combating the overoptimization problem in RLHF. 
+This work opens up the possibility of several interesting follow-ups. 
+Firstly, future work should consider replicating our findings in other environments (i.e. other RLHF datasets) and with larger-scale language models.
+Secondly, our setup is based on \textit{offline} RLHF, in which human feedback is collected upfront and there are no updates made to the reward model throughout the policy optimization process. This contrasts with online RLHF \citep{bai2022training, christiano2017deep}, where reward models are periodically retrained on freshly collected data from humans. Does ensembling result in similar gains in this setup as well or not? 
+
+
+\section{Related Works}
+
+\textbf{Overoptimization in RLHF}: Several works \citep{ibarz2018reward, ziegler2019fine, stiennon2020learning} have provided anecdotal evidence of overoptimization in RLHF. However, to the best of our knowledge, \citet{gao2023scaling} are the only ones who study it systematically within the setup of fine-tuning of LLMs. Our work utilizes their setup, reproduces their results, and performs a systematic study evaluating the effectiveness of using ensembles for mitigating overoptimization.
+
+\textbf{Use of Ensembles in (Model-Based) RL}: Ensembles are often used in deep learning as a tool to estimate uncertainty \citep{ensembles1,ensembles2} and can often outperform more complex Bayesian deep learning methods \citep{ovadia2019can}. Learning an ensemble of dynamics models is especially popular in model-based reinforcement learning where often a reliable uncertainty estimate over state space is critical for avoiding distribution shift \citep{mbrl1,mbrl2,mbrl3,mblr4}. Disagreement among ensemble members is also a popular approach for driving the exploration of learning agents in an environment \citep{rlexplore1,rlexplore2,rlexplore3,lee2021pebble}. \citet{disagreement_regularized_irl} uses an ensemble-based approach to estimate the support of expert policies in an imitation learning setup. Within language models setting, \citet{gleave2022uncertainty} explore the use of ensembles for uncertainty-based active learning to improve sample efficiency of reward models. However, to the best of our knowledge, there is no prior work that explores the use of ensembles for improving the robustness of RLHF; especially in the setting of language models fine-tuning.
+
+
+
+\newpage
+
+
+
+

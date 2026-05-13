@@ -1,0 +1,385 @@
+\title{PerceptionCLIP: Visual Classification by Inferring and Conditioning on Contexts}
+
+\begin{abstract}
+Vision-language models like CLIP are widely used in zero-shot image classification due to their ability to understand various visual concepts and natural language descriptions. 
+However, how to fully leverage CLIP's unprecedented human-like understanding capabilities to achieve better performance is still an open question.
+This paper draws inspiration from the human visual perception process: when classifying an object, humans first infer contextual attributes (e.g., background and orientation) which help separate the foreground object from the background, and then classify the object based on this information.
+Inspired by it, we observe that providing CLIP with contextual attributes improves zero-shot image classification and mitigates reliance on spurious features. 
+We also observe that CLIP itself can reasonably infer the attributes from an image.
+With these observations, we propose a training-free, two-step zero-shot classification method \methodname{}. 
+Given an image, it first infers contextual attributes (e.g., background) and then performs object classification conditioning on them.
+Our experiments show that \methodname{} achieves better generalization, group robustness, and interpretability.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/intro_new.png}
+    \caption{
+    \textbf{(Left)}:
+    CLIP co-relates natural language descriptions of contextual attributes with visual cues (\textit{orientation: upside-down}).
+    \textbf{(Center)}:
+    Unlike CLIP's standard zero-shot inference that uses fixed template(s) for class name retrieval, our method first infers contextual attributes (\textit{background: on the grass}) using CLIP and then let CLIP predicts the class conditioned on the inferred contextual attributes. Here, background and orientation are both examples of contextual attributes.
+    \textbf{(Right)}:
+    Grad-CAM visualization illustrates that our method focuses more on core features (\textit{on the dog}) and is less distracted by spurious features (\textit{grass background}) when performing the object classification. 
+    } 
+    \label{fig:intro}
+\end{figure}
+CLIP (Contrastive Language-Image Pretraining by \citet{radford2021learning}) is a foundational Vision-Language Model (VLM) that connects the fields of vision and natural language. 
+By pretraining on 400 million image-caption pairs, CLIP can associate various visual concepts with their corresponding natural language descriptions, making it the foundation for numerous other vision-language models \citep{Zhu_Chen_Shen_Li_Elhoseiny_2023,Liu_Li_Wu_Lee_2023,Dai_Li_Li_Tiong_Zhao_Wang_Li_Fung_Hoi_2023,Li_Li_Savarese_Hoi_2023}, diffusion models \citep{Ramesh_Dhariwal_Nichol_Chu_Chen_2022,Rombach_Blattmann_Lorenz_Esser_Ommer_2022}, and semantic segmentation models \citep{Kirillov_Mintun_Ravi_Mao_Rolland_Gustafson_Xiao_Whitehead_Berg_Lo_2023}.
+This remarkable understanding capability of CLIP is significant for zero-shot classification \citep{Larochelle_Erhan_Bengio_2008}, enabling open-ended image classification via natural language without training.
+This capability also addresses many challenging tasks with limited or no downstream data, such as model deployment in the wild \citep{Li_Niu_Zhu_Zhao_2023}, medical image classification \citep{Wang_Wu_Agarwal_Sun_2022} and satellite object recognition \citep{Ramaswamy_Lin_Zhao_Adcock_van_Ghadiyaram_Russakovsky_2023}. 
+Although CLIP shows strong potential in zero-shot classification, current methods treat image classification as a text retrieval task and lack systematic investigation into the text prompts used. 
+This leads to sub-optimal generalization \citep{radford2021learning}, reliance on spurious features \citep{Yang_Nushi_Palangi_Mirzasoleiman_2023}, biased predictions \cite{agarwal2021evaluating, chuang2023debiasing}, and lack of interpretability \citep{zhou2022learning, menon2022visual}. 
+For example, \citet{radford2021learning} uses a basic template "\textit{a photo of a \{class name\}}" to identify the most relevant class for an image, 
+much less informative than
+the image captions used during pretraining (see examples in Table~\ref{tab:caption-examples}).
+Another method, prompt ensembling \citep{radford2021learning},
+employs 80 crafted templates for better generalization. 
+Nevertheless, it remains unclear whether these templates are optimal and why they are effective.
+By treating zero-shot classification simply as a class name retrieval problem, these methods potentially waste the capability of CLIP to understand both class-specific features and class-independent attributes such as background and orientation (referred to as contextual attributes in this paper).
+Given CLIP's unprecedented human-like vision and language understanding, a natural idea is to draw inspiration from human visual perception. 
+ 
+For example, when humans classify objects in images, we unconsciously acquire contextual attributes like the background and orientation, and in the case of an upside-down image (Figure~\ref{fig:intro} left), we first infer that the image is rotated and then calibrate our classification accordingly. 
+This hierarchical and context-dependent process contrasts with existing classification methods, which overlook contextual attributes.
+Building on this insight, we propose a zero-shot classification method called \methodname{}, which emulates a crucial part of human visual perception --- inferring and conditioning on the contextual attributes --- resulting in improved generalization, reduced reliance on spurious features, better group robustness, and interpretability.
+Our contributions are as follows:
+\begin{list}{$\rhd$}{\topsep=0.ex \leftmargin=0.2in \rightmargin=0.in \itemsep =0.0in}
+    \item \textbf{(1)} We prepare CLIP for perception by structuring CLIP-understandable text prompts with contextual attributes and introducing an attribute-aware CLIP score to approximate essential conditional probabilities for perception emulation.
+    \item \textbf{(2)} Through two proof-of-concept investigations, we reveal that conditioning on ground-truth contextual attributes improves CLIP's zero-shot classification and mitigates reliance on spurious features. Moreover, CLIP has the ability to infer contextual attributes by itself.
+    \item \textbf{(3)} Based on the observations, we propose \methodname{}. Given an image, as shown in Figure~\ref{fig:intro}, it first employs CLIP to infer contextual attributes. Then, it uses CLIP to infer the class conditioned on the attributes by incorporating the descriptions of the inferred attributes into the prompt. This two-step inference resembles the concept of chain-of-thoughts in language models.
+    \item \textbf{(4)} We empirically demonstrate that \methodname{} excels in both standard generalization and group robustness, exhibiting improved interpretability. For generalization, it consistently outperforms baselines that use simple templates and prompt ensembles on 11 datasets. For example, it provides a near $5\%$ accuracy gain on the EuroSAT dataset. For group robustness, it reduces the gap between average accuracy and worst group accuracy by $19\%$ on the Waterbirds dataset and $7\%$ on the CelebA dataset with ViT-L/14, showing less reliance on spurious features.
+\end{list}   
+
+
+\section{Related Work}
+
+Due to CLIP's ability to understand finer-grained visual concepts beyond classes, 
+some work also leverages external knowledge to augment prompts.
+For example, 
+\citet{menon2022visual,pratt2022does,Mao_Teotia_Sundar_Menon_Yang_Wang_Vondrick_2022,Feng_Bair_Kolter_2023} use large language models to generate class-specific descriptions, resulting in prompts like "a photo of a hen, which has two legs".
+\citet{Novack_Garg_McAuley_Lipton_2023} use class hierarchies to generate sub-classes for each parent class and aggregate model predictions on all sub-classes to get a final prediction.
+\citet{Udandarao_Gupta_Albanie_2023} use class names to retrieve and maintain some auxiliary data to help downstream classification.
+In contrast, our method addresses class-independent attributes (i.e., contextual attributes) such as background and orientation, whose comprehension by CLIP is not well-known.
+These attributes are also combinatorial, potentially covering more aspects of an image than class-specific attributes. 
+Moreover, we can still leverage contextual attributes (e.g., gender, age) when class-specific attributes are hard to articulate, as in the hair-color classification tasks on CelebA.
+
+
+
+\section{Preliminaries}
+
+
+\shortsection{Notation.}
+We use uppercase letters to denote random variables and lowercase letters to denote their realizations.
+For a random variable $Z$, we use $p_Z(z)$ to denote its probability mass or density function, and omit the subscript $Z$ when the function's meaning can be inferred from the input notation $z$.
+
+\shortsection{Pretraining of CLIP.}
+CLIP is pretrained on web-scale image-caption pairs, using a contrastive loss to learn good image and text representations in a shared space, aiming to correctly associate images and their textual descriptions. 
+The captions in the pretraining data (as shown in Table~\ref{tab:caption-examples}) typically describe not only the object's class but also contextual attributes like color, style, and background.
+\shortsection{Zero-shot classification.}
+After pretraining, \citet{radford2021learning} use a universal prompt template, represented by an \textbf{annotation function} $\alpha(y)=\textit{"a photo of a \{class name of $y$\}"}$, that takes the \textbf{class index} $y$ as the input and outputs a text that only describes the class.
+For any \textbf{image} $x$ in the image space $\gX$ and $y$ in the class set $\gY$, the CLIP model serves as a score function $\mathtt{CLIP}_1:\gY\times\gX\rightarrow\R$ via 
+\begin{align}\label{eqn:original-clip-score}
+    \mathtt{CLIP}_1(y;x) \;\; \triangleq\;\; \langle \phi_I(x), \;\;\; \phi_T(\alpha(y)) \rangle,
+\end{align}
+computing a similarity score (within $[-1, 1]$)  between the image and text through inner products of their representations produced by \textbf{image encoder} $\phi_I$ and the \textbf{text encoder} $\phi_T$. 
+The subscript `1' in `$\mathtt{CLIP}_1$' indicates that only one textual template is used. 
+Then, given an image $x$, the method predicts the class $\hat{y}\in\gY$ as the one with the highest $\mathtt{CLIP}_1$ score, $\hat{y} = \argmax_{y\in\gY} \; \mathtt{CLIP}_1(y;x)$.
+
+In addition, \citet{radford2021learning} propose prompt ensembling, which ensembles 
+80 manually-designed templates $\{\alpha_i\}_{i=1}^{80}$, such as \textit{`a bad photo of a \{class name of $y$\}'} and \textit{`a sculpture of a \{class name of $y$\}'}, and replace $\mathtt{CLIP}_1$ with the following $\mathtt{CLIP}_{80}$ score for inference.
+Prompt ensembling involves some contextual attributes in the templates, but it is ad-hoc and lacks a systematic analysis.
+\begin{align}\label{eqn:clip-score-80}
+    \mathtt{CLIP}_{80}(y;x) \;\; \triangleq\;\; \left\langle \phi_I(x), \;\;\; 
+    \frac{\frac{1}{80}\sum_{i=1}^{80}\phi_T(\alpha_i(y))}{\left \| \frac{1}{80}\sum_{i=1}^{80}\phi_T(\alpha_i(y)) 
+    \right \|}  \right\rangle.
+\end{align}
+ 
+
+
+
+\section{Preparing CLIP for Perception}
+
+
+\subsection{Structuring and Describing Contextual Attributes} \label{sec:latent_factor}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \centering 
+  \includegraphics[width=0.5\textwidth]{figures/show_factors.png}
+  \caption{Illustration of contextual attributes, their symbolic discrete values, and the possible textual descriptions mapped by the annotation function.}  
+  \label{fig:enter-label}
+\end{wrapfigure}
+\textbf{Contextual attributes as generative factors.}
+We consider contextual attributes as generative factors that contribute to the data generation process.
+Specifically, let $Y$ denote the underlying object class (e.g., \textit{dog}) that takes values in the class set $\gY$.
+Let each $Z_i$ ($1\le i \le m$) denote a certain \textbf{contextual attribute} of the object (e.g., \textit{orientation}) that takes values in the contextual attribute set $\gZ_i$ (e.g., \{\textit{upright}, \textit{upside-down},  \textit{rotated}\}) and is causally independent~\citep{pearl2009causal} of the object class $Y$.
+Then, we consider an image $X$ to be generated as
+$Y \rightarrow X \leftarrow \{Z_i\}_{i=1}^{m}.$
+
+\textbf{Textual descriptions for contextual attributes.}
+While CLIP requires semantic text, generative factors are often symbolized discrete values, thus creating a gap. 
+It is negligible for the objects' classes since class names are descriptions with no ambiguities.
+However, the textual descriptions of the contextual attributes are vague. 
+Taking upright images as an example, people may use terms like "upright," "upstanding," or no description since it is a common direction.
+To bridge this gap and translate discrete values into CLIP-readable text, we introduce a specific \textbf{annotation function} $\alpha: \gZ \rightarrow \gP(\text{text})$, 
+which maps a symbolic discrete value in $\gZ$ to a distribution over natural language textual descriptions.
+Figure~\ref{fig:enter-label} illustrates some examples.
+An ideal annotation function models people's preferences when captioning images.
+We form the final image description using the \textbf{concatenation operation} $\oplus$.
+This operation results in a new description distribution $\alpha(y) \oplus \alpha(z_1) \oplus \alpha(z_2) \oplus ...$ where attributes' descriptions are concatenated together and separated by commas.
+For example, when $y, z_1, z_2$ represent "\textit{dog}," "\textit{upright}," and "\textit{bright}" respectively, the concatenation $\alpha(y)\oplus\alpha(z_1)\oplus\alpha(z_2)$ yields the description "\textit{a photo of a dog, upright, bright}," or "\textit{a photo of a dog, sunny}," etc. 
+\subsection{Connecting Conditional Probabilities with $\mathtt{CLIP}$ Score} \label{sec:clip_score}
+
+\shortsection{Attribute-aware $\mathtt{CLIP}$ score.}
+Existing CLIP score is agnostic of contextual attributes and thus cannot approximate conditional probabilities that are attribute-dependent.
+Therefore, we define a new score function $\mathtt{CLIP}:\gY\times\gZ_1\times\cdots\times\gZ_m\times\gX\rightarrow\R$:
+\begin{align}
+    \mathtt{CLIP}(y, z_1, \ldots, z_m ; x) \;\; \triangleq\;\; \bigg\langle \phi_I(x), \;\;\; \frac{\E\;\; \phi_T\big(\alpha(y) \oplus \alpha(z_1) \oplus \cdots \oplus \alpha(z_m)\big)}{\| \E\;\; \phi_T\big(\alpha(y) \oplus \alpha(z_1) \oplus \cdots \oplus \alpha(z_m)\big)\|} \bigg\rangle.
+\end{align}
+It takes contextual attributes $z_i$s as additional inputs, describes them internally alongside the class through the annotation function $\alpha(z_i)$, and calculates the similarity with the image in the embedding space.
+The expectation is taken over the randomness of the descriptions of contextual attributes.
+The defined $\mathtt{CLIP}$ score captures the contextual attributes and behaves like an energy function \citep{lecun2006tutorial}: it is high for correctly matched image-attribute pairs while low for mismatched ones.
+More formally, when $(y^*, z_1^*, \ldots, z_m^*)$ are the ground-truth class and attributes that generate image $x^*$ whereas $(y, z_1, \ldots, z_m)$ are some arbitrary class and attributes, 
+\begin{align}\label{eqn:clip-similarity-score}
+    \mathtt{CLIP}(y^*, z_1^*, \ldots, z_m^*) \ge \mathtt{CLIP}(y, z_1, \ldots, z_m), \quad \forall\: y\in\gY, \;\;\; \forall\: z_i\in\gZ_i, \;\;\; \forall\: 1\le i \le m.
+\end{align}
+
+Given the pretraining process, this observation is not surprising since it encourages high scores for correctly matched image-caption pairs where the caption describes not only the class but also the contextual attributes.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/sim_new.png}
+    \caption{
+    Evaluating CLIP scores on ImageNet with different transformations altering the contextual attributes.
+    The attribute-aware $\mathtt{CLIP}$ score gives higher scores for correctly matched image-attribute pairs (green) while giving lower scores for mismatched pairs (grey) and random pairs (blue), confirming CLIP's understanding of our contextual attribute descriptions. $\mathtt{CLIP}$ score measures the similarity between images and contextual attributes, while the original CLIP score (orange) is attribute-agnostic.
+    }
+    \label{fig:sim}
+\end{figure}
+
+\begin{wraptable}{r}{0.48\textwidth}
+\centering
+\caption{Conditional probabilities. $x, y$, and $z$ denote image, class, and contextual attributes. $z$ denotes $(z_1, \dots, z_m)$ for simplicity.}
+\resizebox{0.45\textwidth}{!}{\begin{tabular}{@{}cc @{}}
+\toprule
+Probability & Approximation \\ \midrule 
+$p(y,z|x)$  &  $\cfrac{e^{\mathtt{CLIP}(y,z; x)}}{\sum_y\sum_z e^{\mathtt{CLIP}(y,z; x)}}$  \\ \midrule
+$p(y|x,z)$  &   $\cfrac{e^{\mathtt{CLIP}(y,z; x)}}{\sum_y e^{\mathtt{CLIP}(y,z; x)}}$   \\ \midrule 
+$p(z|x)$    &   $\cfrac{\sum_y e^{\mathtt{CLIP}(y,z; x)}}{\sum_z\sum_y e^{\mathtt{CLIP}(y,z; x)}}$  or  $\cfrac{e^{\mathtt{CLIP}(z; x)}}{\sum_z e^{\mathtt{CLIP}(z; x)}}$  \\ \bottomrule
+\end{tabular}\label{tab:approximations}
+}
+\end{wraptable}
+\textbf{Approximating conditional probabilities.}
+With the energy-function-like $\mathtt{CLIP}$ score, we approximate the conditional probabilities. 
+
+\textbf{(1) the joint conditional probability} $\bm{p(y,z_1, \ldots, z_m|x)}$, which measures the likelihood of an object class and some contextual attributes occurring together given the image, requiring only exponentiation and normalization. 
+Based on it, we derive the rest two using the law of total probability.
+\textbf{(2) the conditional probability} $\bm{p(y|z_1, \ldots, z_m, x)}$, which measures the probability of an object class given both the image and the contextual attributes, which is our main inference objective.
+\textbf{(3) the conditional probability} $\bm{p(z_1, \ldots, z_m|x)}$, measures the likelihood of some contextual attributes given the image and is used for inferring the contextual attributes.
+We provide two approximations, referred to as 
+\textit{ClassAttr} (left) and \textit{PureAttr} (right). 
+The textual description corresponding to $\mathtt{CLIP}(y,z; x)$ in \textit{ClassAttr} is "\textit{a photo of a \{class name of y\}, \{description of z\}}," while the description corresponding to $\mathtt{CLIP}(z; x)$ in \textit{PureAttr} is "\textit{a photo of an object, \{description of z\}}" with a word like "object" substituting all classes.
+ 
+
+
+
+
+\section{Contextual Attributes are Helpful and Inferable}
+
+\label{sec:observation}
+This section presents proof-of-concept experiments showing that emulating human perception through conditional inference on contextual attributes improves zero-shot classification.
+Additionally, such improvement does not require ground-truth attributes, as CLIP itself can infer attributes reasonably.
+
+\input{tables/verify}
+\subsection{Conditioning on Contextual Attributes is Helpful}
+\label{sec:conditioning-helps}
+We first evaluate if conditioning on the ground-truth contextual attributes improves the zero-shot classification accuracy.
+Given an image $x$, the most likely class is $\hat{y} = \argmax_y \; p(y|x,z^*)$ with:
+\begin{align}
+    \argmax_y \; p(y|x,z^*) = \argmax_y \; \frac{e^{\mathtt{CLIP}(y,z^*; x)}}{\sum_y e^{\mathtt{CLIP}(y,z^*; x)}} = \argmax_y \; \mathtt{CLIP}(y,z^*; x),
+\end{align}
+where the second equality holds because $\sum_y e^{\mathtt{CLIP}(y,z; x)}$ is a constant of $y$ and exponential function is monotonic.
+Intuitively, we classify an image by considering the combinations of all possible classes with the ground-truth contextual attributes and identify the class that yields the highest $\mathtt{CLIP}$ score.
+
+\shortsection{Conditioning on ground-truth contextual attributes improves classification accuracy.}
+We compare the following four methods in zero-shot classification, where the last two are for ablation:
+\begin{table}[h]
+\centering
+\small
+\resizebox{0.98\textwidth}{!}{\begin{tabular}{@{}lll@{}}
+\toprule
+Conditioning on & Calculation & Prompt example \\ \midrule
+No contextual attributes & $\argmax_y \;\mathtt{CLIP}_1(y;x)$ & \textit{a photo of a \{class name of y\}.} \\
+Ground-truth attribute values & $\argmax_y \; \mathtt{CLIP}(y,z^*;x)$ & \textit{a photo of a \{class name of y\}, upside-down.} \\
+Wrong attribute values & $\argmax_y \; \mathtt{CLIP}(y,z_{\text{wrong}};x)$ & \textit{a photo of a \{class name of y\}, upright.} \\
+Random attribute values & $\argmax_y \; \mathtt{CLIP}(y,z_{\text{random}};x)$ & \textit{a photo of a \{class name of y\}, iaYo5n0Dli7.} \\ \bottomrule
+\end{tabular}}
+\end{table}
+
+We evaluate these methods on ImageNet dataset.
+Similar to Figure~\ref{fig:sim}, we alter easily observable and adjustable attributes such as orientation through image transformations (e.g., vertical flipping).
+These new attributes become part of the modified images' generation process, for which we have ground-truth annotations.
+Table~\ref{table:synthetic-verification-condition} shows that compared to not using contextual attributes, conditioning on ground-truth contextual attributes improves classification accuracy notably. 
+As an ablation study, conditioning on wrong or randomly generated contextual attributes does not yield similar benefits.
+\shortsection{Conditioning on ground-truth contextual attributes mitigates the reliance on spurious features.}
+Contextual attributes like background (e.g., grass) may exhibit spurious correlations with the class 
+(e.g., dog).
+Classifiers relying on these contextual attributes, also known as spurious features, usually perform poorly.
+We investigate whether classification conditioned on the known spurious features can enforce CLIP's focus on the object (i.e., core features). 
+As shown in Figure~\ref{fig:visual_demo}, we isolate the background from the core region and employ Grad-CAM \citep{selvaraju2017grad} to identify which region the model focuses on during classification. 
+Specifically, the gradients on pixels with respect to $p(y^*|x,z^*)$, the likelihood of the correct class conditioned on the known background given the image, yields the saliency heatmap. 
+ 
+Since image embedding captures both object and background, we suspect that specifying an image's background to CLIP minimizes background influence, potentially sharpening the focus on object features for a better image and text matching in the embedding space.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/visual_new.png}
+    \caption{
+    Images of a leopard and a waterbird, core and spurious features, and Grad-CAM heatmaps using no, incorrect, and ground-truth contextual attributes (with text below images). The bar shows core vs. spurious ratio in the heatmap. Visualization shows that classification conditioned on correct contextual attributes enforces CLIP's focus on core features.
+    }
+    \label{fig:visual_demo}
+\end{figure}
+\subsection{Contextual Attributes are Inferable} \label{sec:can}
+\label{sec:clip-infers-latent-factors}
+The above results highlight the advantages of leveraging CLIP's understanding of contextual attributes.
+However, manually annotating the attributes is impractical.
+We now investigate whether CLIP can infer contextual attributes. 
+To infer $z$, we calculate $\argmax_z \; p(z|x)$ using one of the two approximations in Table~\ref{tab:approximations}, where the \textit{ClassAttr} option yields $\argmax_z \;p(z|x) = \argmax_z \; \sum_y e^{\mathtt{CLIP}(y,z; x)}$, and the \textit{PureAttr} option yields $\argmax_z \; p(z|x) = \argmax_z \;\mathtt{CLIP}(z; x)$.
+
+\shortsection{CLIP can infer contextual attributes.}
+Different from the setting in Section~\ref{sec:conditioning-helps}, we randomly apply transformations to only half of the images in ImageNet. 
+Therefore, inferring each attribute is a binary classification task with a random guessing accuracy of $50\%$. 
+Table~\ref{tab:infer_z} shows that the average accuracy is around $74\%$ for both methods, indicating that CLIP can reasonably infer contextual attributes, with some attributes being easier to infer than others. 
+CLIP's understanding of contextual attributes may originate from the numerous captions during the pre-training stage. Moreover, inferring contextual attributes could be easier than determining the object class.
+Therefore, we may bootstrap CLIP's inference by conditioning on the contextual attributes inferred by itself which is verified in Table~\ref{table:synthetic-verification-condition}. 
+\input{tables/infer_z}
+
+
+
+
+
+
+\section{\methodname{}
+
+Building on the above observations, we propose \methodname{}, a two-step zero-shot classification method for CLIP.
+It emulates the human perception process by first inferring the contextual attributes and then inferring the class conditioning on the contextual attributes.
+The pseudocode of \methodname{} is outlined in Algorithm~\ref{alg:main}.
+\begin{algorithm}[!htbp]
+    \caption{\methodname{}}\label{alg:main}
+    \Require{
+    class $Y$, contextual attributes $\{Z_1, \ldots, Z_m\}$, $\mathtt{CLIP}$ score (with annotation function $\alpha$), temperature hyperparameter $\tau$
+    }
+    \Input{
+    image $x$
+    }
+    \Output{
+    predicted class $\hat{y}$
+    }
+    \textbf{Step 1:} infer the distribution of contextual attribute values 
+    
+    $\quad$ $\hat{p}(z_1, \ldots, z_m|x) \leftarrow \cfrac{\sum_y e^{\mathtt{CLIP}(y, z_1, \ldots, z_m; x)/\tau}}{\sum_y \sum_{z_1, \ldots, z_m} e^{\mathtt{CLIP}(y, z_1, \ldots, z_m; x)/\tau}}\; $ or  $\; \cfrac{e^{\mathtt{CLIP}(z_1, \ldots, z_m; x)/\tau}}{\sum_{z_1, \ldots, z_m} e^{\mathtt{CLIP}(z_1, \ldots, z_m; x)/\tau}}$
+    \BlankLine
+    
+    \textbf{Step 2:} infer the class 
+    
+    $\quad$ $p(y|x, z_1, \ldots, z_m) \leftarrow \cfrac{e^{\mathtt{CLIP}(y,z_1, \ldots, z_m; x)}}{\sum_y e^{\mathtt{CLIP}(y,z_1, \ldots, z_m; x)}}$  
+    
+    $\quad$ $\hat{y} \leftarrow \argmax_y \; p(y|x)=\argmax_y \;\sum_{z_1, \ldots, z_m} p(y|x,z_1, \ldots, z_m) \hat{p}(z_1, \ldots, z_m|x).$
+    
+\end{algorithm}
+\textbf{Step one:} \methodname{} estimates the distribution of contextual attributes given an image.
+Rather than selecting the most probable attribute value, we estimate the entire distribution to accommodate CLIP's inherent uncertainty.
+In addition, we introduce a temperature hyperparameter $\tau$ to intervene in the estimation. 
+A temperature $\tau$ greater than $1$ smoothens CLIP's estimation, implying less trust in its predictions.
+The two-step nature also allows for other interventions, such as truncating top~$k$ predicted values (i.e., beam search), which we leave for future work.
+
+\textbf{Step two:}
+\methodname{} first approximates the class distribution conditioning on each possible contextual attributes' value. Then, it uses the estimated distribution of contextual attributes to calculate the weighted sum of these class distributions, marginalizing out the contextual attributes.
+Finally, it selects the most probable class $y$ as the predicted output.
+
+\textbf{Simplifying into a single step.}
+It can be seen from Algorithm~\ref{alg:main} that setting the temperature to $1$ and ignoring constant terms yields $\hat{y}\leftarrow\argmax_y \sum_{z_1, \ldots, z_m} e^{\mathtt{CLIP}(y, z_1, \ldots, z_m; x)}$, essentially simplifying the two-step algorithm into a single step.
+Intuitively, for each possible class, it sums the exponentiated $\mathtt{CLIP}$ scores calculated over each contextual attribute value, resulting in an aggregated score for the class.
+Then, it selects the class with the highest aggregated score.
+
+\textbf{Single-step vs. prompt ensembling.}
+This single-step approach, as a special case of our method, coincides with the prompt ensembling method if we aggregate over some randomly selected attributes (as in 80 templates) instead of all contextual attribute combinations.
+This coincidence explains the effectiveness of prompt ensembling - it undergoes an implicit perception process. 
+Nevertheless, our experiments show that constructing diverse and systematic prompts using our contextual attribute combinations is superior to ad-hoc template selections in prompt ensembling.
+\shortsection{Two-step vs. single-step.}
+The one-step method is simpler to implement but lacks two key features.
+It disallows human intervention when inferring contextual attributes. 
+Our experiments indicate that CLIP does not always infer contextual attributes correctly, whereas human intervention can leverage our prior knowledge to adjust its estimation.
+Second, the one-step method prevents us from knowing the inferred contextual attributes, which could have improved the interpretability of the results.
+
+\shortsection{Constructing contextual attributes.}
+The set of possible contextual attributes is at the core of \methodname{}. 
+We construct it with two approaches:
+1) We manually construct essential attributes that may be generative factors in the image generation process, especially those causing spurious correlations. This is particularly effective when we know of the dataset. 
+For instance, for the CelebA dataset, we consider gender, age, and race as the attributes.
+ 
+
+
+
+\section{Experiments}
+
+
+\subsection{Zero-shot Generalization}
+
+\shortsection{Settings.}
+We test \methodname{} on ImageNet \citep{deng2009imagenet} and its  out-of-distribution datasets, including ImageNetV2 \citep{recht2019imagenet}, ImageNet-R \citep{hendrycks2021many}, ImageNet-A \citep{hendrycks2021natural}, and ImageNet-Sketch \citep{wang2019learning}. 
+We also test on different data domains (e.g., satellite images), including CUB200~\citep{wah2011caltech}, EuroSAT~\citep{helber2019eurosat}, Places365~\citep{zhou2017places}, Flowers102~\citep{nilsback2008automated}, Food101~\citep{bossard2014food}, and Oxford Pets~\citep{parkhi2012cats}.
+For natural images, we compile a set of possible contextual attributes.  
+
+For the dataset in a specific domain, we use domain-specific contextual attributes, for example, \textit{image source} for EuroSAT, \textit{cuisine} for Food101, \textit{species} for Oxford Pets.
+\input{tables/factors_distri}
+\input{tables/more_datasets}
+\shortsection{Using a single attribute.}
+Table~\ref{tab:main_results} shows that compared to using the simple template "\textit{a photo of a \{class name\}}," considering almost any single contextual attribute improves the accuracy, some even surpassing the use of 80 templates. 
+We also observe that the most influential contextual attributes vary for different datasets, potentially attributable to different data generation processes.
+For example, all images in ImageNet-Sketch are sketches, making \textit{tool} and \textit{art} crucial contextual attributes for image generation.
+This also indicates that \methodname{} works the best when the considered contextual attributes cover the generation process of the dataset.
+\textbf{Using multiple attributes.}
+Table~\ref{tab:main_results} also presents the results considering multiple contextual attributes. 
+\methodname{}, using the two most effective attributes, can already outperform prompt ensembling using 80 templates across all datasets.
+As the number of attributes considered increases, the classification accuracy gradually improves. 
+We also test our method on different domains of data in Table~\ref{tab:additional_datasets}.
+The domain templates provided in \citet{radford2021learning} already describe the domain in text prompt (e.g., \textit{"a centered satellite photo of \{class name\}"}) where the domain 
+is a known contextual attribute. As expected, specifying it improves accuracy.
+\methodname{} considers more contextual attributes and further improves zero-shot classification accuracy.
+For instance, by considering \textit{image source} and \textit{condition} for the EuroSAT dataset, \methodname{} achieves a near 5\% gain in accuracy. 
+\input{tables/invervention_2}
+\textbf{Intervening in attributes inference.}
+In Table \ref{tab:compare_2}, we evaluate the effectiveness of the intervention. We set temperature $\tau=3$ and consider the top four attributes. 
+Results show that intervening in inferring contextual attributes achieves modest but consistent performance gains across datasets. 
+In practice, we find that setting the temperature to 3 or 5 usually yields better performance, which also confirms that CLIP cannot perfectly infer contextual attributes. 
+One can also search for the best temperature with a validation set when applicable. 
+\subsection{Group Robustness}
+Group robustness is a critical measure of a model's bias. 
+It measures the ability to perform consistently across different subgroups within a dataset \cite{liu2021just}. 
+We evaluate the group robustness of \methodname{} through bird type classification on the Waterbirds dataset \citep{Sagawa*2020Distributionally} and hair color classification on the CelebA \citep{liu2015faceattributes} dataset. 
+In both datasets, each image has an underlying group attribute unknown to the model.
+These group attributes are \textit{background} in Waterbirds and \textit{gender} in CelebA.
+They both spuriously correlate with the class but do not causally determine the class.
+To evaluate the worst-group accuracy, we group images by their classes and attributes, then assess each group's accuracy following \citet{Sagawa*2020Distributionally}. 
+Table \ref{tab:waterbirds} and \ref{tab:celeba} show that when the text prompts only describe the class and ignore contextual attributes (first row), such as "\textit{a photo of a \{landbird/waterbird\}}" and "\textit{a photo of a celebrity with \{dark hair/blond hair\}}," CLIP exhibits biased accuracy, with a significant discrepancy between average accuracy and the worst-group accuracy. 
+This bias arises because CLIP overly relies on spurious features, such as associating images with a water background to the waterbird class, instead of focusing on the bird.
+As shown in Figure~\ref{fig:visual_demo}, conditioning on group attributes such as background helps reduce CLIP's reliance on spurious features, making the model less biased.
+Results in Table \ref{tab:waterbirds} and \ref{tab:celeba} also confirm that by considering \textit{background} (with values in \{\textit{on land}, \textit{on water}\}) for Waterbird dataset, and \textit{gender} (with values in \{\textit{female}, \textit{male}\}) for CelebA dataset, \methodname{} reduces the accuracy gap in most cases.
+By incorporating more values (e.g., \textit{in forest}) into the attribute \textit{background$^+$}, or considering more contextual attributes like \textit{age} and \textit{race}, the group robustness can be further improved.
+\input{tables/waterbirds}
+\input{tables/celeba}
+
+
+\section{Conclusion}
+
+This paper proposes \methodname{}, a zero-shot classification method for CLIP that emulates human visual perception.
+By doing classification conditioned on self-inferred contextual attributes, it achieves improved generalization, less reliance on spurious features, and improved group robustness. 
+One limitation of our method is its sensitivity to text descriptions.
+Although using a distribution of descriptions alleviates this sensitivity, it is an intrinsic problem of CLIP itself.
+Future work may overcome this limitation by using advanced vision-language models. 
+
+
+
+
+

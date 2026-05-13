@@ -1,0 +1,443 @@
+\title{Sheared LLaMA: Accelerating Language Model Pre-training via Structured Pruning}
+
+\begin{abstract}
+
+    The popularity of LLaMA~\citep{touvron2023llama,touvron2023llama2}
+    and other recently emerged moderate-sized large language models (LLMs)
+    highlights the potential of building smaller yet powerful LLMs.
+    Regardless, 
+    the cost of training such models from scratch on trillions of tokens remains high.
+    In this work, 
+    we study structured pruning as an effective means to develop smaller LLMs from pre-trained, larger models.
+    Our approach employs two key techniques: 
+    (1) \textit{targeted structured pruning}, 
+    which prunes a larger model to a specified target shape 
+    by removing layers, heads, and intermediate and hidden dimensions in an end-to-end manner, and
+    (2) \textit{dynamic batch loading}, 
+    which dynamically updates the composition of sampled data in each training batch based on varying losses across different domains.
+    We demonstrate the efficacy of our approach by 
+    presenting the \textbf{Sheared-LLaMA} series, 
+    pruning the LLaMA2-7B model 
+    down to 1.3B and 2.7B parameters. 
+    Sheared-LLaMA models
+    outperform state-of-the-art open-source models of equivalent sizes, such as 
+    Pythia, INCITE, OpenLLaMA and the concurrent TinyLlama models, on a wide range of downstream and instruction tuning evaluations,
+    while requiring only $3\%$ of compute compared to training such models from scratch. 
+    This work provides compelling evidence that leveraging existing LLMs with structured pruning is a far more cost-effective approach for building competitive small-scale LLMs.
+    We present frequently asked questions and answers in~\Cref{app:faq}.}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) are extremely performant on a wide range of natural language tasks, but they require enormous amounts of compute to train~\citep{openai2023gpt4tr, anthropicclaudeblog}.
+As such, there is growing interest in building strong moderate-sized models, such as LLaMA~\citep{touvron2023llama,touvron2023llama2}, MPT~\citep{MosaicML2023Introducing}, and Falcon~\citep{falcon40b}, that allow for efficient inference and fine-tuning.
+These LLMs are available in varied sizes suited for different use cases, but training each individual model from scratch---even the smallest billion-parameter models---requires substantial computational resources that are cost-prohibitive for most organizations. 
+In this work, we seek to address the following question: 
+\begin{center}
+    \emph{Can we produce a smaller, general-purpose, and competitive LLM by leveraging existing pre-trained LLMs, while using much less compute than training one from scratch?}
+\end{center}
+
+We explore structured pruning as a means to achieve this goal. Pruning is commonly viewed as a solution for  compressing task-specific models~\citep{han2016deep,li2016pruning,lagunas2021block, xia-etal-2022-structured,kurtic2023ziplm}, removing redundant parameters and accelerating inference without sacrificing task performance. 
+However, 
+for general-purpose LLMs,
+pruning inevitably results in performance degradation compared to original models~\citep{frantar2023sparsegpt,sun2023simple,ma2023llm}, especially when without significant compute invested post-pruning. In this work, we use pruning as an effective approach for developing smaller yet competitive LLMs that require only a fraction of the training compute compared to training them from scratch. 
+We identify two key technical challenges in this problem. First, how can we decide on final pruned architectures that are strong in performance and efficient for inference? 
+Existing structured pruning techniques for LLMs~\citep{xia-etal-2022-structured, ma2023llm} do not specify targeted structures and lead to suboptimal pruned models in terms of performance and inference speed (\Cref{tab:uniform} and \Cref{app:compare_to_ma}). 
+Second, how can we continue pre-training the pruned model to reach desired performance? 
+We observe that training using
+the original pre-training data %
+leads to imbalanced rates of loss reduction across different domains,
+compared to when training such models from scratch.
+This indicates that the pruned model retains varying levels of knowledge for different domains (e.g. C4) and 
+simply using the pre-training domain proportion results in an inefficient use of  data 
+(\Cref{fig:dynamiclossdiff}). 
+To address these issues, we propose ``{\method{}}'', an algorithm consisting of the following two components:
+\begin{wrapfigure}[16]{r}{0.5\textwidth}
+        \centering
+        \includegraphics[width=0.5\textwidth]{figures/teaserwlegend.pdf}
+        \caption{
+        \ours{}-2.7B surpasses a series of open-source models at a similar scale and only requires 1/32 (3\%) of budget to achieve on-par performance with OpenLLaMA-3B-v2. % 
+        }
+        \label{fig:teaser}
+    \end{wrapfigure}
+\begin{itemize}[leftmargin=*,labelindent=1em]
+    \item We propose a novel pruning algorithm, dubbed \textit{targeted structured pruning}, which prunes a source model to a specified target architecture. 
+    The target architecture is determined by leveraging the configurations of existing pre-trained models. 
+    Our pruning approach searches for substructures within the source model that maximally preserve performance while adhering to the given constraints. 
+    \item 
+    We devise a \textit{dynamic batch loading} algorithm that 
+    loads training data from each domain in proportion to its rate of loss reduction, thereby 
+    making an efficient use of the data and  
+    accelerating the overall performance improvement. 
+\end{itemize}
+
+We demonstrate the efficacy of our proposed method by pruning a LLaMA2-7B model~\citep{touvron2023llama2} into two smaller LLMs:
+\ours{}-1.3B and 
+\ours{}-2.7B. 
+Despite using only 50 billion addtional tokens (i.e., 5\% of OpenLLaMA's pre-training budget) for pruning and continued pre-training,
+\ours{}-1.3B and \ours{}-2.7B 
+outperform other popular LLMs at similar scales, including Pythia~\citep{biderman2023pythia}, INCITE~\citep{together2023redpajama}, and OpenLLaMA~\citep{openlm2023openllama}, on 11 representative downstream tasks (\Cref{fig:teaser}; commonsense, reading comprehension, and world knowledge) and instruction tuning for open-ended generation.
+Additionally, the downstream performance trajectory suggests that further training the pruned model with more tokens would result in even greater gains.
+While we only conduct experiments with up to 7B parameter models, our \method{} algorithm is highly generalizable and can be extended to large language models of any size in future work.
+
+
+\section{\methodcaption{}
+
+\label{sec:method}
+Given an existing large model $\mathcal{M}_S$ (the \textit{source} model),
+we study how to efficiently produce a smaller, strong model $\mathcal{M}_T$ (the \textit{target} model).
+We consider this %
+as a two-stage process: 
+(1) Pruning 
+$\mathcal{M}_S$ into  $\mathcal{M}_T$. 
+This reduces the number of parameters but inevitably incurs a performance drop. 
+(2) Continue pre-training $\mathcal{M}_T$ with a standard language modeling objective 
+to reach a target performance.
+While most recent efforts~\citep{xia-etal-2022-structured,ma2023llm} focus on the former stage, 
+we find the latter stage crucial for producing 
+competitive general-purpose LLMs from structured pruning. 
+
+\subsection{Targeted Structured Pruning}
+Structured pruning removes groups of model parameters to 
+compress models and accelerate inference. 
+However, existing structured pruning approaches often 
+result in unconventional model configurations that deviate from popular architectures.  
+For example, CoFiPruning~\citep{xia-etal-2022-structured} produces models with 
+non-uniform layer configurations (e.g., different numbers of heads across layers), 
+which incurs inference overhead compared to standard uniform layer configurations (Section~\ref{para:uniform}). 
+In this work, 
+we aim to prune the source model into any target configuration that we specify.This goal is challenging because it requires surgically scaling down all dimensions in a transformer architecture, an endeavor that, to our knowledge, has not been accomplished before for large language models. 
+We leverage the configurations of existing pre-trained models as the target architectures, 
+based on the intuition that 
+these configurations have already been well-optimized to 
+balance model expressivity and inference efficiency.
+For example, we use the INCITE-Base-3B architecture~\citep{toegther2023incite} 
+as the target structure when producing a $2.7$B model. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.98\linewidth]{figures/main_figure.pdf}
+    \caption{\textit{Targeted structured pruning} produces a compact and dense model of a pre-specified shape. Light colors indicate pruned substructures. Masking variables $z$ are learned to control whether a substructure is pruned ($z=0$) or retained ($z=1$). }
+    \label{fig:main}
+\end{figure} 
+
+Our method learns a set of pruning masks 
+on  model parameters at different granularities---from 
+global ones like layers and hidden dimensions (persist across all layers),
+to local ones like attention heads and intermediate dimensions. 
+Assume that the source model $\mathcal{M}_S$ has  
+$L_\mathcal{S}$ layers, with each layer consisting of one multi-head attention module (MHA) and one feed-forward network (FFN). $\mathcal{M}_S$ has a hidden state dimension of $d_\mathcal{S}$, 
+$H_\mathcal{S}$ heads in each MHA, and
+an intermediate dimension of $m_\mathcal{S}$ in each FFN. We introduce the following mask variables:
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+     \toprule
+     Granularity & Layer & Hidden dimension & Head & Intermediate dimension\\
+     \midrule
+     Pruning masks & ${z}^{\text{layer}} \in \mathbb{R}^{L_\mathcal{S}}$ & 
+     ${z}^{\text{hidden}} \in \mathbb{R}^{d_\mathcal{S}}$ & 
+     ${z}^{\text{head}} \in \mathbb{R}^{H_\mathcal{S}}$~$(\times L_\mathcal{S})$ & 
+     ${z}^{\text{int}} \in \mathbb{R}^{m_\mathcal{S}}$~$(\times L_\mathcal{S})$  \\
+     \bottomrule
+  \end{tabular}
+\end{table}
+
+Each mask variable controls whether the associated substructure is pruned or retained. For example, we remove a layer if its corresponding $z^{\text{layer}}=0$. Figure \ref{fig:main} illustrates an example of how the pruning masks control the pruned structures.
+
+We formulate pruning as a constrained optimization problem~\citep{platt1987constrained} 
+where we learn pruning masks to search for a subnetwork 
+matching a pre-specified target architecture 
+while maximizing performance.\footnote{Please find a more detailed exposition of the algorithm in \Cref{app:pruning_algo}.}
+Following the $\ell_0$ regularization approach~\citep{louizos2018learning}, we parametrize the pruning masks to model hard concrete distributions. These distributions have support on $[0,1]$ but concentrate their probability mass at $0$ or $1$, enabling discrete prune or retain decisions. 
+While prior work usually control for a target sparsity~\citep{wang2020structured,xia-etal-2022-structured}, we use a pair of Lagrange multipliers to impose constraints on the pruned model shape directly. 
+For example, for a target number of heads $H_\mathcal{T}$ (and we use $L_\mathcal{T}$, $d_\mathcal{T}$, and $m_\mathcal{T}$ to represent the target number of layers, hidden dimension, and intermediate dimension respectively), we have the imposed constraint on a single layer as:
+\begin{align*}
+    \tilde{\mathcal{L}}^{\mathrm{head}}( \lambda, \phi, z) & = \lambda^{\mathrm{head}} \cdot \left(\sum{{z}^{\mathrm{head}}} - H_{\mathcal{T}}\right) + \phi^{\mathrm{head}} \cdot \left(\sum{{z}^{\mathrm{head}}} - H_{\mathcal{T}}\right)^2. \\
+\end{align*}
+Similar constraints are applied to pruning other substructures. Overall, we jointly optimize the model weights and pruning masks by a min-max objective $\min_{\theta, {z}} \max_{\lambda, \phi} \mathcal{L}_{\mathrm{prune}}(\theta, z, \lambda, \phi)$: %
+\
+\begin{equation}
+    \mathcal{L}_{\mathrm{prune}}(\theta, z, \lambda, \phi) = \mathcal{L}(\theta, {z}) + \sum_{j=1}^{L_{\mathcal{S}}} \tilde{\mathcal{L}}^{\mathrm{head}}_{j} + \sum_{j=1}^{L_{\mathcal{S}}}  \tilde{\mathcal{L}} ^{\mathrm{int}}_{j} + \tilde{\mathcal{L}}^{\mathrm{layer}} + \tilde{\mathcal{L}}^{\mathrm{hidden}},
+    \label{eq:pruning}
+    \nonumber
+\end{equation}
+where $\mathcal{L}(\theta, {z})$ is the language modeling loss computed with the masked model weights.
+This objective will produce a  pruned model with the target shape.
+Ideally, 
+running this pruning algorithm 
+on a large amount of data will directly produce a strong compact model.
+In practice, the pruning stage is expensive (roughly 5$\times$ slower compared to standard LM training), and we find
+that the learned masks often converge fast.
+Therefore, % in our experiments, 
+we only allocate a limited budget for pruning (see \Cref{tab:pruning_finetuning}). Following pruning, we finalize the pruned architecture by preserving the highest-scoring components associated with the mask variables in each substructure,
+and continue pre-training the pruned model with the language modeling objective. 
+We refer to this second stage as \ct{}. 
+
+\subsection{Dynamic Batch Loading}
+\label{sec:batchloading}
+
+\begin{figure}[t]
+  \centering
+  \begin{algorithm}[H]
+  \SetKwFunction{update}{UpdateWeight}
+  \SetKwProg{sub}{Subroutine}{}{}
+  
+  \textbf{Require}: Training data of $k$ domains $D_1, D_2, \cdots, D_k$, validation data $D^{\mathrm{val}}_1, D^{\mathrm{val}}_2, \cdots, D^{\mathrm{val}}_k$, initial data loading weights $w_0 \in \mathbb{R}^k$, reference loss $\ell_\mathrm{ref} \in \mathbb{R}^k$, LM loss $\mathcal{L}$ or pruning loss $\mathcal{L}_{\text{prune}}$, training steps $T$, evaluation per $m$ steps, model parameters $\theta$ ($\theta,z,\phi,\lambda$ for pruning) \\
+
+ 
+  \For{$t=1, \cdots, T$}{
+    \If{$t \mod m = 0$} {
+      $\ell_t[i] \gets  \mathcal{L} (\theta, z, D^{\mathrm{val}}_i) \text{~if \textit{pruning} else~} \mathcal{L} (\theta, D^{\mathrm{val}}_i)$  %
+      
+      $\Delta_t[i] \gets \max \left\{\ell_t[i] - \ell_{\mathrm{ref}}[i] , 0 \right\}$ \Comment{Calculate loss difference}
+
+      $w_t\gets$ \update{$w_{t-m}$, $\Delta_t$} \Comment{Update data loading proportion}
+    }
+    Sample a batch of data $\mathcal{B}$ from $D_1, D_2, \cdots, D_k$ with proportion $w_t$\;
+    \eIf{pruning}{
+      Update $\theta, {z}, \phi, \lambda $ with $\mathcal{L}_{\mathrm{prune}}(\theta, z, \phi, \lambda)$ on $\mathcal{B}$ 
+    }{
+      Update $\theta$ with $\mathcal{L}(\theta, \mathcal{B})$ 
+    }
+  }
+
+\sub{\update{$w$, $\Delta$}}{
+  $\alpha \gets w \cdot \exp \left( \Delta \right)$ \Comment{Calculate the unnormalized weights} \\ 
+  $w \gets \frac{\alpha}{\sum_i \alpha[i]}$ 
+  \Return $w$ \Comment{Renormalize the data loading proportion}
+}
+
+\Return $\theta$ 
+
+\caption{Dynamic Batch Loading} %
+\label{alg:dinamicloading}
+\end{algorithm}
+\end{figure}
+
+\Ct{} on a large amount of data is crucial for recovering the pruned model performance. We observe a surprising finding in our preliminary experiments:
+continuing pre-training our pruned models on an existing pre-training dataset RedPajama~(\citealp{together2023redpajama}; LLaMA's replicated pre-training dataset)
+reduces loss at different rates across domains compared to pre-training a model from scratch, which signifies an inefficient use of data.
+
+To be more specific, we begin by fitting a \textit{scaling function}~(\citealp{hoffmann2022training}; details in~\Cref{app:reference_loss}) on the series of LLaMA2 models for each domain. Using this function, we predict the loss of a hypothetical 1.3B LLaMA2 model if it were trained from scratch on the same data. We then compare these estimated~\textit{reference losses} to the losses of our pruned model after \ct{}. 
+ This observation indicates that pruning preserves a greater amount of knowledge in low-entropy and smaller domains (e.g.g., C4).
+Simply reusing the original pre-training data distribution\footnote{The LLaMA2 pre-training data is not public. We conducted the same analysis on LLaMA1 models and observed a similar phenomenon, indicating that this is a universal issue unrelated to specific pre-training data.} results in an inefficient use of data and worse downstream performance, even if the overall loss is seemingly low, as demonstrated later in Section~\ref{sec:dynamic_loading}.
+
+Inspired by recent work~\citep{xie2023doremi}, 
+we propose 
+\textit{dynamic batch loading}, 
+an efficient algorithm to adjust domain proportions %
+ on the fly based on losses. The goal is to ensure the model achieves the reference loss at roughly the same time across domains. We introduce the algorithm below.
+
+\textbf{Problem setup.} The pre-training data comprises of $k$ domains $D_1, D_2, \cdots, D_k$ and we have a held-out validation dataset for each domain, denoted as $D_i^{\mathrm{val}}$. 
+At each training step $t$, 
+a proportion $w_t[i]$ of the data comes from domain $D_i$. %
+We set a reference validation loss $\ell_{\mathrm{ref}}(D_i)$ for each domain and train the pruned model to reach the reference loss.
+
+\textbf{Dynamic batch loading.}
+We present the full algorithm in \Cref{alg:dinamicloading}.
+In a sketch,
+for every $m$ steps, we evaluate the model to get the validation loss $\ell_t$ (step $t$) on $D^{\mathrm{val}}$, 
+and update $w_t$ based on the difference $\Delta_t (D_i)$ between $\ell_{\mathrm{ref}}[i]$  and $\ell_t[i]$ on each domain. The update rule is exponential ascent  following~\citet{xie2023doremi},  %
+$$
+\alpha_t = w_{t-m} \cdot \exp({\Delta_t}); \quad
+w_t = \frac{\alpha_t}{\sum_i \alpha_t[i]}. \\
+$$
+We apply dynamic batch loading to both the pruning stage and the \ct{} stage. 
+For  pruning, we use the original pre-training data's domain weights as $w_0$. 
+For  \ct{}, we use the final weights from the pruning stage as $w_0$. 
+Dynamic batch loading is an on-the-fly solution that adjusts data proportions during training without the need for training auxiliary models. It leverages reference losses on validation sets and adjusts the weights dynamically, adding minimal overhead to standard training. This approach differs from \citet{xie2023doremi}, which requires a complex multi-stage process to train reference and proxy models.
+More broadly, dynamic batch loading can train an LLM to match any reference model's performance by using open-source pre-training datasets like RedPajama, even without knowing the reference model's exact training data.
+
+\textbf{Choices of reference losses.}  By default, we use the loss predicted by the fitted scaling function as the reference (denoted as \textit{scaling reference}). We also experiment with an alternative where we directly use the source model's domain validation loss as the reference (denoted as \textit{source reference}). We show in~\ref{app:scalinvssource}  that 
+while both variants perform well,  
+using scaling reference leads to slightly better downstream results, especially on math and coding tasks. However, source reference is a viable alternative when a series of source models at different scales is not available.
+
+
+\section{Experiments}
+
+\subsection{Setup}
+\paragraph{Model configurations.}
+We use the LLaMA2-7B model~\citep{touvron2023llama2} as the source model throughout all of our main experiments.\footnote{Please find results on LLaMA1 models in \Cref{app:llama1vsllama2} and Pythia models in \Cref{app:pythia}.} We then conduct structured pruning experiments to compress this model down to two smaller target sizes---2.7B and 1.3B parameters. We compare to strong pre-trained language models of similar sizes, 
+including 
+OPT-1.3B~\citep{zhang2022opt}, Pythia-1.4B~\citep{biderman2023pythia}, TinyLlama-1.1B~\citep{zhang2024tinyllama},
+OPT-2.7B, Pythia-2.8B, INCITE-Base-3B~\citep{together2023redpajama}, 
+OpenLLaMA-3B-v1, and OpenLLaMA-3B-v2~\citep{openlm2023openllama}. 
+We use Pythia-1.4B and INCITE-Base-3B as the target architecture for the 1.3B and the 2.7B model respectively.~\Cref{tab:detailconf}
+summarizes model architecture details of all these models.
+
+\input{tables/baseline_config.tex}
+\paragraph{Data.} 
+As the training data for LLaMA2 is not publicly accessible, we use RedPajama~\citep{together2023redpajama}, which is a replicated pre-training dataset of the LLaMA1 models~\citep{touvron2023llama}, for pruning and continued-pretraining. We construct a held-out validation set with 2 million tokens (equivalent to 500 sequences of 4,096 tokens) for each domain. We allocate 0.4 billion tokens for the pruning phase and 50 billion tokens for the continued pre-training process. Following the conventions of \llamat, we maintain a sequence length of 4,096 tokens.~\Cref{tab:baseline_config} provides a summary of the pre-training data used by our models and the baseline models.
+\footnotetext[5]{OPT data contains BookCorpus~\citep{Zhu2015AligningBA}, Stories~\citep{Trinh2018ASM}, CCNews~\citep{Hamborg2017}, the Pile~\citep{gao2020pile}, and PushShift.io Reddit~\citep{Baumgartner2020ThePR}. }
+
+\footnotetext[6]{OpenLLaMA v2 is pre-trained with a mixture of 
+RefinedWeb~\citep{penedo2023refinedweb}, 
+StarCoder~\citep{li2023starcoder},
+and part of RedPajama.}
+
+\footnotetext[7]{TinyLlama data is a mixture of SlimPajama~\citep{shen2023slimpajama} and StarCoder data.}
+
+
+\paragraph{Evaluation.} % Downstream task evaluation.}
+We use the \ttt{lm-evaluation-harness} package~\citep{eval-harness} to evaluate on an extensive suite of downstream tasks:
+(1) We follow Pythia and LLaMA2 to report the 0-shot accuracy of ARC easy~(ARC-E; \citealp{clark2018think}), LAMBADA~\citep{paperno-etal-2016-lambada}, LogiQA~\citep{liu2020logiqa}, PIQA~\citep{bisk2020piqa}, SciQ~\citep{welbl-etal-2017-crowdsourcing}, and WinoGrande~\citep{sakaguchi2021winogrande}. 
+(2) We report accuracy of the tasks used by Open LLM Leaderboard~\citep{open-llm-leaderboard}, including 10-shot  HellaSwag~\citep{zellers-etal-2019-hellaswag}, 25-shot  ARC Challenge~(ARC-C; \citealp{clark2018think}), and 5-shot MMLU~\citep{hendrycks2021measuring}. 
+(3) We also report exact match of 32-shot  Natural Questions~(NQ; \citealp{kwiatkowski-etal-2019-natural})  to measure the factual knowledge in the model.  
+
+As training models to follow instructions has become a crucial application of LLMs %
+\citep{ouyang2022instructgpt,alpaca},
+we evaluate our models on instruction tuning and fine-tune both baseline models and \ours{} on  
+instruction-response pairs sampled from the ShareGPT dataset.\footnote{\url{https://sharegpt
+Please refer to  \Cref{app:instruction} for more details.
+
+\input{tables/main_result.tex}
+\subsection{\ours{} Outperforms LMs of Equivalent Sizes}
+
+We demonstrate that \ours{} outperforms existing LLMs of similar sizes on both standard LLM benchmarks and instruction tuning, while using only a fraction of the compute budget required to train those models from scratch.
+
+\paragraph{Downstream tasks.} 
+\Cref{tab:main_result} presents the zero-shot and few-shot downstream task performance of \ours{} and similarly-sized pre-trained models. Even with a limited budget of approximately 50B tokens for pruning and \ct, \ours{} models outperform existing models pre-trained on significantly larger compute. \ours{}-1.3B outperforms OPT-1.3B, Pythia-1.4B (pre-trained with 300B tokens), and TinyLlama-1.1B (pre-trained on 3T tokens). \ours{}-2.7B outperforms INCITE-Base-3B (pre-trained on 800B RedPajama tokens), OpenLLaMA-3B-v1 (pre-trained on 1T RedPajama tokens), and OpenLLaMA-3B-v2 (trained on 1T tokens from RedPajama, RefinedWeb, and StarCoder). The most noteworthy result is that \ours{}-1.3B outperforms TinyLlama-1.1B, despite TinyLlama-1.1B being pre-trained on 3T tokens—more than the total data used for pre-training \llamatsmall{} and our pruning process combined. This demonstrates that structured pruning is a more \textit{sample-efficient} approach for training smaller-scale LLMs.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/win_rate_v4.pdf}
+    \caption{Sheared-LLaMAs outperform Pythia-1.4B, INCITE-Base-3B, OpenLLaMA-3B-v1 and OpenLLaMA-3B-v2 in instruction tuning.}
+    
+    \label{fig:win_rate}
+\end{figure}
+\paragraph{Instruction tuning.} As shown \Cref{fig:win_rate}, 
+instruction-tuned \ours{} achieves higher win rates compared to all the other pre-trained models at a comparable scale. %
+This demonstrates that our 2.7B model can serve as a strong foundation for instruction tuning and has the capacity to generate long, coherent and informative responses  (See examples in \Cref{app:instruction}). 
+
+
+\section{Analysis}
+
+\subsection{Effectiveness of Dynamic Batch Loading}
+\label{sec:dynamic_loading}
+
+We analyze the effectiveness of dynamic batch loading by examining its impact on three aspects: 
+(1) the final LM loss across domains, 
+(2) the data usage of each domain throughout training, 
+(3) the downstream task performance. 
+All results in this section are based on Sheared-LLaMA-1.3B.\footnote{We also experiment with a heuristic approach to exclude the easy domains from pruning, but find that the loss disparaty issue persists after continued pre-training. Please refer to \Cref{app:excludeeasy} for mode details.}
+\paragraph{Loss differences across  domains.} Dynamic batch loading aims to balance the rate of loss reduction across domains, ensuring that the losses reach the reference value at roughly the same time. \Cref{fig:dynamiclossdiff} shows the difference between our model's loss (with both original and dynamic batch loading) and the reference loss, estimated by fitting a scaling function to a hypothetical 1.3B parameter LLaMA2 model. Dynamic batch loading, however, reduces losses evenly and leads to very similar loss differences across domains, suggesting more efficient data use.
+
+\paragraph{Data usage.}\Cref{tab:data_weight} compares the data proportion of RedPajama and the data usage of our dynamic loading approach (\Cref{fig:data_weight} illustrates how the domain weights change during training). It shows that dynamic batch loading loads more data from the Book and C4 subsets, indicating that these domains are more challenging for a pruned model to recover.
+\input{tables/weight.tex}
+
+\textbf{Downstream performance.} 
+As shown in Figure~\ref{fig:acc}, pruned models trained with dynamic batch loading
+achieve better  downstream  performance 
+than when trained on the original RedPajama distribution. 
+This suggests that the more balanced loss reduction from dynamic batch loading 
+transfers to improved downstream capabilities.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.48\linewidth}
+        \centering
+        \includegraphics[width=0.83\textwidth]{figures/domainlossdiff.pdf}
+        \caption{Loss difference between the pruned model (1.3B) and estimated reference loss, with original vs. dynamic batch loading. }
+        \label{fig:dynamiclossdiff}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.48\textwidth}
+        \centering
+    \includegraphics[width=0.83\textwidth]{figures/downstream_trajectory.pdf}
+    \caption{Downstream task performance of \ours-1.3B with original data proportion and dynamic batch loading. }
+        \label{fig:acc}
+    \end{minipage}
+\end{figure}
+\subsection{Comparison to Other Pruning Approaches}
+
+We compare our \method{} to other pruning approaches on validation perplexity, a strong indicator of overall model capabilities~\citep{xia-etal-2023-training}. % Due to computational constraints, we allocate the same total compute budget to each method for a fair comparison, rather than providing the full 50B token budget.
+
+\paragraph{Targeted pruned models have a higher inference speed.} 
+\label{para:uniform} 
+Previous works like CoFiPruning~\citep{xia-etal-2022-structured} produce structued pruned models, but these models often have non-uniform layer configurations (e.g., different numbers of heads across layers). Such non-uniformity across layers introduces training and inference overhead due to irregularities in model architectures. We experiment with both CoFiPruning and targeted structured pruning, with a 0.4B pruning budget with the RedPajama data proportion for a fair comparison. \Cref{tab:uniform} shows that our targeted pruned models have a higher inference speed compared to the non-uniformly pruned CoFiPruning model at the same sparsity, despite having a slightly higher perplexity. Targeted structured pruning needs about 0.5B more tokens in continued pre-training to match CoFiPruning's perplexity. However, this one-time extra compute during training is justified, as it results in a more efficient model architecture that is essential for real-world applications and effective practical use. Please find more details on inference speed of different pruning methods in~\Cref{app:inference_speed}.
+
+\input{tables/throughput.tex}
+\paragraph{Comparison to LLM-Pruner~\citep{ma2023llm}.} 
+We compare targeted structured pruning to 
+LLM-Pruner, a recent work in structured pruning, 
+in \Cref{app:compare_to_ma}. 
+We demonstrate that, given the same compute budget, sparsity level, and training data distribution, our pruned models achieve lower perplexity, have a more optimized architecture, and faster inference speed.
+\input{tables/pruning_finetuning.tex} 
+\subsection{Additional Analysis}
+\paragraph{Budget allocation for pruning and \ct{}.}
+Intuitively, allocating more compute to the pruning stage helps identify better subnetwork structures. 
+We explore distributing data across pruning and continued pre-training stages differently, within a fixed  budget of 5B tokens.
+\Cref{tab:pruning_finetuning} shows that
+when controlling the total amount of tokens, 
+increasing the pruning budget consistently improves perplexity. 
+However, since pruning is more expensive than \ct{}, 
+we decide to allocate 0.4B tokens to  pruning. Please refer to \Cref{app:throughput} for details on training throughputs.
+
+\paragraph{More analysis.
+
+
+\section{Related Work}
+
+\paragraph{Pruning.}
+Structured pruning has been extensively studied as a model compression technique in computer vision and natural language processing, 
+where task-specific models like  classification ones are often overparameterized and can be pruned significantly with minimal impact on performance~\citep{han2016deep, wen2016learning,liu2017learning,luo2017thinet, cai2019once, deng2020model,hou2020dynabert, wang2020structured, lagunas2021block, xia-etal-2022-structured, kurtic2023ziplm}. 
+Unstructured pruning~\citep{frankle2018lottery,li2020train, chen2020lottery, sanh2020movement} prunes individual neurons instead of structured blocks.
+Though unstructured pruning usually achieve higher compression rates,
+they are  not practical for model speedup.
+
+In the era of LLMs, 
+the prevalent NLP pipeline has shifted from task-specific models 
+to general-purpose LMs,
+which leaves little room for redundancy. 
+Both unstructured pruning, 
+semi-structured pruning~\citep{frantar2023sparsegpt,sun2023simple}, 
+and structured pruning~\citep{ma2023llm}
+lead to significant performance drops on LLM even at a modest sparsity.
+Noticeably, all previous works 
+fix the original models or tune them minimally.
+We
+see pruning as an initialization and 
+consider it necessary to expend substantial compute to 
+continually pre-training the model to recover performance. 
+
+\paragraph{Efficient pre-training approaches.}
+As orthogonal to our pruning approach, 
+There is an extensive body of work on improving efficiency of training LLMs. 
+For example, 
+quantization reduces the numeric precision of  model weights and activations 
+and speeds up training and inference~\citep{dettmers2022llm,dettmers2023qlora,xiao2023smoothquant}.
+Knowledge distillation~\citep{hinton2015distilling,sanh2019distilbert,jiao2020tinybert,sun2020mobilebert}, 
+which trains a smaller model on a larger model's prediction,
+is shown to be effective for task-specific models~\citep{xia-etal-2022-structured}. For pre-training LLMs, though distilling from a teacher model is shown to improve the quality of student models given the same number of training steps~\citep{rae2021scaling, blakeney2022reduce}, it is less cost-effective than pruning and continued training due to the exceeding inference cost incured by the teacher model~\citep{jha2023large}. More  methods have been introduced to enhance the efficiency of training LMs, 
+such as dynamic architectures~\citep{gong2019efficient,zhang2020accelerating} and efficient optimizers~\citep{chen2023symbolic, liu2023sophia}. However, 
+as indicated by~\citep{kaddour2023no,bartoldson2023compute},
+the promised gains in training efficiency may not be consistently realized.
+
+There are also data-based approaches to enhance training efficiency.
+Eliminating duplicated data is found to be effective
+\citep{lee2021deduplicating}. 
+Various batch selection techniques propose to prioritize data based on criteria such as 
+higher losses~\citep{jiang2019accelerating} or a greater reducible loss~\citep{mindermann2022prioritized}. 
+\cite{xie2023doremi}
+propose to 
+optimize data mixtures 
+by training a proxy model to estimate the optimal data weight of each domain. 
+
+
+
+
+
+\section{Discussion}
+
+\paragraph{Limitation and future work.} First, The method heavily depends on the availability of open-source pre-training datasets and models. If a specific domain is not covered in the pre-training data, the method may not recover performance well on that domain.
+Second, Due to computational constraints, we only experimented with a 7B parameter model as the source model. However, our method is highly generalizable and can be scaled up to larger models in future research.
+
+\paragraph{Conclusion.} This work proposes structured pruning as an efficient method for creating competitive smaller-scale LLMs. Our two-stage approach combines targeted structured pruning and continued pre-training (\ct{}), and we introduce \textit{dynamic batch loading} to improve pre-training data efficiency. We train a series of competitive \ours{} models using a fraction of the compute required for standard pre-training. Our results show a promising path to producing low-cost, small LLMs when strong large-scale models are available. As more capable LLMs and larger pre-training datasets emerge, our method can easily extend to these advances to create even better small models.
+
+\newpage
+
+

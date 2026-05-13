@@ -1,0 +1,210 @@
+\title{SharedContextBench: How Lossy are Long-context Methods in KV Cache Reuse}
+
+\begin{abstract}
+Long-context Large Language Models (LLMs) have unlocked numerous possibilities for downstream applications, many of which involve multiple requests sharing the same input context. Recent inference frameworks like vLLM and SGLang, as well as LLMs providers such as OpenAI, Gemini and Claude, have employed prefix caching techniques to accelerate multi-requests with shared context. However, existing long-context methods are primarily evaluated on single query testing, failing to demonstrate their true capability in real-world applications that often require KV cache reuse for follow-up queries. To address this gap, we introduce SharedContextBench, a comprehensive long-context benchmark to reveal how lossy are long-context methods in KV cache reuse scenarios. Specifically, it encompasses 12 tasks with two shared context modes, covering four categories of long-context abilities: string retrieval, semantic retrieval, global information processing, and multi-task capabilities. Using our benchmark, we evaluated five categories of long-context solutions, including Gated Linear RNNs (Codestal-Mamba), MambaAttention hybrids (Jamba-1.5-Mini), and efficient methods like sparse attention, KV cache compression, and prompt compression, on six transformer-based longcontext LLMs: Llama-3.1-8B/70B, Qwen2.5-72B/32B, Llama-3-8B-262K, and GLM-4-9B. Our findings show that sub-O(n) memory methods often struggle to maintain accuracy in multi-turn scenarios, while sparse encoding methods with O(n) memory and sub-O(n 2 ) computation in prefilling generally perform well. Additionally, dynamic sparse patterns in prefilling often produce more expressive memory (KV cache) compared to static methods, and layer-level sparsity in hybrid architectures reduces memory usage while yielding promising results.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Long-context capability is becoming a standard for Large Language Models (LLMs), with many of them supporting context windows ranging from 128K to 10M tokens (Reid et al., 2024; Lieber et al., 2024; Dubey et al., 2024; Gradient, 2024). These extended context windows unlock a wide range of real-world applications, such as repository-level code understanding and debugging (Bairi et al., 2023; Jimenez et al., 2023; Park et al., 2023; Liu et al., 2024b; Jimenez et al., 2024), long-document question-answering (Caciularu et al., 2023; Li et al., 2024a), many-shot in-context learning (Agarwal et al., 2024), and self-play Chain-of-Thought (CoT) reasoning (OpenAI, 2024a; Snell et al., 2024).  
+
+However, long-context inputs present unique challenges for LLM inference due to high computational costs and memory demands. This has led to the development of efficient long-context solutions that explore sparsity in both the encoding and decoding stages. For instance, sparse attention methods reduce the complexity of the attention operation to sub- $O(n^{2})$ in the prefilling stage (Child et al., 2019; Beltagy et al., 2020; Jiang et al., 2024), while KV cache compression techniques prune KV states to achieve sub- $O(n)$ memory costs in decoding (Xiao et al., 2024; Li et al., 2024b). Additionally, Gated Linear RNNs avoid memory scaling with sequence length by compressing prior information into a fixed-size state, achieving $\bar{O}(\dot{k}n)$ computational cost (Gu & Dao, 2023). However, most methods are only evaluated in single-query scenarios (Hsieh et al., 2024; Zhang et al., 2024a; Kamradt, 2023; Li et al., 2023a), while real-world applications often require reusing prompt memory (i.e., KV cache) for multiple requests or multi-round interactions (Qin et al., 2024). This technique, known as prefix caching, is already used in popular inference frameworks (Zheng et al., 2023b; vLLM, 2024) and by LLM providers (Gemini, 2024; Claude, 2024; OpenAI, 2024b). Common applications include multi-turn conversations, self-play CoT reasoning, repo-level code debugging, and multi-document understanding (Zheng et al., 2023a; OpenAI, 2024a; Jimenez et al., 2024). Testing with multiple requests is especially crucial for the long-context methods mentioned earlier, as many achieve efficiency through query-conditioned compression. For instance, Arora et al. (2024) reports that Mamba’s compression of previous information based on the current query can prevent it from answering follow-up queries.  
+
+![](images/e1aaa1c5552031e24f9ac3f8650b52c571324dec52ee8bdd0b1d68675665b9f2.jpg)  
+Figure 1: Long-context tasks often involve contexts sharing, e.g., multi-turn dialogues, multi-step reasoning, and repository-level tasks. (a) Comparison of previous long-context benchmarks with our proposed benchmark. (b) Illustration of two common shared-context patterns. (c) Overview of tasks and scenarios covered by our benchmark, encompassing four categories of long-context abilities and two shared-context modes.  
+
+In this work, we introduce SharedContextBench, a benchmark designed to evaluate how lossy long-context methods are in real-world scenarios, particularly for shared context and multi-round interactions where KV Cache is reused for follow-up queries. As shown in Fig 1c, SharedContextBench assesses four key long-context abilities across 12 tasks with two shared context modes. Each test example includes a shared context and multiple follow-up queries. The four long-context abilities and their corresponding tasks are:  
+
+1. String Retrieval Ability: A fundamental requirement for long-context LLMs is retrieving relevant context with exact matches from long inputs. We extend previous retrieval tasks like NIAH and Multi-NIAH (Kamradt, 2023; Hsieh et al., 2024) by introducing three comprehensive string retrieval tasks: key-value retrieval, prefix-suffix retrieval, and multi-hop retrieval, measuring capability at different levels of granularity.  
+
+2. Semantic Retrieval Ability: Real-world applications often require long-context LLMs to understand semantic meaning before succeeding in retrieval. We considered various semantic retrieval scenarios across different domains, building four distinct tests: RepoQA (Liu et al., 2024b) and long-form QA (covering English, Chinese, and multiple-choice questions) (Zhang et al., 2024a).  
+
+3. Global Information Ability: We also assess the ability of long-context LLMs to process and aggregate global information through three tasks: many-shot in-context learning (Agarwal et al., 2024), summarization, and long array statistics (Zhang et al., 2024a).  
+
+4. Multi-tasking Ability: In real applications, LLMs often handle multiple tasks with a shared long-context input. Our benchmark evaluates this ability through two tasks: RepoQA with NIAH and summarization with KV retrieval.  
+
+In addition, as shown in Fig 1b, our benchmark includes two typical shared context modes: Multi-turn Mode, where the context is cached within a single session, and Multi-request Mode, where it is cached across multiple sessions.  
+
+Table 1: We evaluated long-context methods on SharedContextBench, where $n$ represents the token size of the input prompt and $m$ represents the generation token size, with $n\gg m$ .  
+
+![](images/576c209b2b6b0a6825d41cdd06cc61a649d328d4cc81e056bf15b16bca5e88d9.jpg)  
+(a) Performance Across Different Requests (b) Performance in Different Abilities  
+
+Figure 2: Overview of performance results for SharedContextBench. (a) Performance trends of various long-context methods across multiple requests. Methods with $O(n)$ memory cost in decoding show improving performance as requests increase. In contrast, methods with sub- $O(n)$ KV cache in decoding, like KV cache compression methods, perform well only in the first request. (b) Specific performance of different long-context methods across various long-context ability tasks. All evaluated long-context methods exhibit some loss in Retrieval capability while largely maintaining Global Information processing ability.  
+
+Based on SharedContextBench, we evaluate five categories of long-context methods across eight open-source long-context LLMs, including Llama-3.1-8B/70B (Dubey et al., 2024), Qwen2.5- 72B/32B (Team, 2024), Llama-3-8B-262K (Gradient, 2024), GLM-4-9B-1M (GLM et al., 2024), Codestal Mamba (team, 2024), and Jamba-1.5-mini (Lieber et al., 2024). These methods span gated linear RNNs (e.g., Codestal Mamba), hybrid models (e.g., Jamba-1.5), sparse attention (e.g., A-shape, Tri-shape, MInference (Jiang et al., 2024)), KV cache compression (e.g., StreamingLLM (Xiao et al., 2024), SnapKV (Li et al., 2024b)), and prompt compression (e.g., LLMLingua-2 (Pan et al., 2024)), as detailed in Table 1. We also introduce a novel, training-free sparse attention method, Tri-shape, which shows improved first-turn performance in our tests. Our experimental results reveal that methods with $\bar{O(n)}$ memory significantly outperform others in shared context scenarios, as shown in Fig. 2. Sparse decoding methods (sub- $O(n)$ memory) perform well on the first request but lose accuracy in follow-up queries, while sparse encoding methods $(O(n)$ memory with $\dot{O}(n^{2})$ computation during pre-filling) approximate full attention accuracy across multiple requests. Additionally, task performance varies by method, as shown in Fig. 2b: sparse KV cache methods perform well on tasks like Global Information, but $O(n)$ memory is essential for tasks requiring exact match retrieval.  
+
+• We propose a new benchmark, SharedContextBench, to evaluate long-context methods in two typical KV cache reuse scenarios, providing a better assessment of performance in real-world applications.   
+• We design an extensive set of downstream tasks, covering four long-context capabilities across 12 subtasks in various domains.   
+• We evaluate eight different long-context methods (including our newly proposed sparse attention method, Tri-shape) on eight powerful open-source long-context LLMs using SharedContextBench. Our comprehensive analysis highlights the impact of sparsity in encoding and decoding, task complexity, and more.  
+
+
+
+\section{2 BENCHMARK BUILDING  }
+
+
+SharedContextBench comprises 12 tasks covering four long-context abilities: string retrieval, semantic retrieval, global information processing, and multi-tasking, across two shared context modes—multi-turn and multi-request. These tasks span various domains, including code, retrieval, question answering, summarization, in-context learning, multi-hop tracing, and multi-tasking, as shown in Fig. 1c. In total, SharedContextBench includes 931 multi-turn sessions with 4,853 queries, averaging 5 turns per session. Task statistics are provided in Table 2, with examples and configurations in Table 3. Below, we detail the construction of our benchmark.  
+
+Table 2: Overview of SharedContextBench tasks.   
+
+![](images/7f5550fab70887e8ec85490fcc3a94c5568807c522af35cb83f8b989e137d505.jpg)  
+
+
+
+\section{2.1 LONG-CONTEXT TASK DETAILS  }
+
+
+String Retrieval The most fundamental requirement for long-context LLMs is the ability to identify and retrieve information relevant to a specific query from a lengthy, potentially noisy input. To evaluate this, string retrieval tasks are widely used, where models must retrieve a specific string based on given conditions (Hsieh et al., 2024; Zhang et al., 2024a). Our benchmark incorporates complexity analysis, similar to approaches used in algorithmic problem-solving, such as LeetCode, to design three distinct tasks with varying levels of difficulty. Additionally, by varying the position of the target string, our benchmark further evaluates how well models utilize the full extent of their claimed context window (Kamradt, 2023).  
+
+(i) Retrieve.KV: Given a large JSON object containing numerous key-value pairs, the models must accurately retrieve the value corresponding to a specified key (Liu et al., 2024c). The random KVs in this task present significant challenges for long-context LLMs, as the input is often incompressible, requiring strict $O(n)$ space to store. This makes it particularly useful for testing the fuzziness of memory in long-context methods, especially in KV Cache usage. In each session, five KV pairs are retrieved, with the target KVs evenly distributed across the full length of the input.  
+
+(ii) Retrieve.Prefix-Suffix: Given a large list of variable-length strings, the models must accurately retrieve a string with a specific prefix and suffix. This task is particularly challenging, as the models need to implement complex functions to match both the prefix and suffix (similar to a prefix tree, with a computational cost of $O(\sum w_{i}^{\phantom{\dagger}2})$ , where $w_{i}$ represents the length of the $i$ -th string1). The presence  
+
+Table 3: Task examples and configurations in SharedContextBench. We use different colors to highlight the questions, answers, and distractors in our examples.  
+
+![](images/732f20db856a828c0f46eb024e90eb531b7ea6e3cdb6a7283ab2cc391a877666.jpg)  
+
+of distractors that share either the prefix or suffix, but not both, prevents models from relying on simple lookup mechanisms or induction heads (Olsson et al., 2022) to solve the task effectively.  
+
+(iii) Retrieve.MultiHop: This task, first proposed in RULER Hsieh et al. (2024), is designed to evaluate the multi-hop tracing capabilities of LLMs within a long input prompt. It requires models to capture and memorize changes in key information from the input context, making it ideal for testing long-context methods in KV cache reuse. Five multi-hop variable assignment chains are embedded throughout the context, and each turn in the test session requires the models to retrieve the exact multi-hop chain, i.e., all variables assigned to a specific value.  
+
+Semantic Retrieval In addition to string retrieval, many real-world long-context applications require semantic understanding beyond simple string matching, such as retrieving a function based on textual descriptions or answering questions from a long document. These tasks are crucial in SharedContextBench, as lossy long-context methods may struggle to abstract or comprehend information in multi-request scenarios.  
+
+(i) Code.RepoQA: This task requires the model to retrieve a specific function (including the function name, input parameters, and full implementation) from a long chunk of source code based on a precise natural language description. Unlike the original RepoQA benchmark (Liu et al., 2024b), our inputs are extended to 64K tokens, with target functions evenly selected based on their position in the codebase. The function descriptions were generated using GPT-4 based on the functions themselves. Additionally, we expanded the range of repositories and programming languages in our test to include Python, $C++$ , Java, PHP, Rust, Go, and TypeScript, compared to the original RepoQA.  
+
+(ii) En.QA, Zh.QA, En.MultiChoice: These three tasks are extended from InfiniteBench (Zhang et al., 2024a), which provides high-quality, human-annotated QA tests based on fictional novels to eliminate the influence of external knowledge. These tasks require models to locate and process information within lengthy inputs, performing reasoning through aggregation or filtering to derive answers. There are two primary types of questions: 1) Aggregation involves compiling scattered  
+
+information throughout the input. An example question is, “How much money in total did A spend on food?” 2) Filtering equires identifying specific information from a larger set. An example question is, “What color dress did A wear when A met B for the second time?” In SharedContextBench, we combine QA pairs that share the same input context to create shared context test sessions.   
+Global Information Processing In addition to retrieval, some long-context tasks require leveraging and aggregating global context information, such as summarization, statistical tasks, and in-context learning (Yu et al., 2020; Srivastava et al., 2023; Hao et al., 2022). Our benchmark includes three relevant tasks to assess how well different long-context methods handle global information in multirequest settings.   
+(i) Many-shot ICL: We use datasets from Big-Bench Hard (Srivastava et al., 2023) to evaluate manyshot in-context learning (ICL) capabilities. This includes three sub-tasks: date understanding, salient error translation detection, and tracking seven shuffled objects. We construct many-shot ICL contexts shared across different turns within a test session. All three sub-tasks are presented as multiple-choice questions with four options provided.   
+(ii) Math.Find: We extended the math find task from InfiniteBench (Zhang et al., 2024a), expanding from finding only maximum value to multiple statistical values. Given a large array, LLMs are required to find the minimum or median values. LLMs must effectively comprehend global longcontext information, perform comparisons, and carry out statistical operations to answer the questions. (iii) En.Sum: This task uses concatenated academic papers from arXiv as input, with document lengths ranging from 8K to 20K tokens. Ground truth summaries were generated using GPT-4, which was prompted to produce concise one-sentence summaries for each document. The average length of the ground truth summaries is 654 tokens. The target documents for each turn are evenly distributed across the full context length.   
+Multi-Tasking In real-world applications, LLMs often handle multiple tasks within a single session using a shared input context. For instance, users might request both summarization and content retrieval simultaneously. To reflect this, we include two multi-tasking tasks in SharedContextBench: (i) $M i x.S u m{+}N I A H$ : This task combines document summarization with the Needle in a Haystack (Kamradt, 2023) task using a shared input prompt. A random "needle" is evenly inserted into the En.Sum task’s input (concatenated academic papers). The model alternates between summarization and NIAH retrieval in each test session.   
+$(i i)\,M i x.R e p o Q A{+}K V$ : This task combines the RepoQA task with KV retrieval using a shared input prompt. Multiple KV pairs are evenly inserted into the RepoQA input (a long chunk of source code). A total of $100\;\mathrm{KV}$ pairs are included, with four target KVs and the rest as distractors. The model alternates between RepoQA and KV retrieval in each test session.   
+2.2 LONG-CONTEXT SHARED CONTEXT MODES DETAILS   
+In addition to the carefully designed long-context tasks, we include two shared context modes to more accurately reflect real-world long-context applications: multi-turn mode and multi-request mode, as shown in Fig. 1c.   
+(i) Multi-turn Mode: A typical scenario in long-context applications, including long-context chat, multi-step reasoning (e.g., Tree-of-Thought (Yao et al., 2024)), and self-play CoT. This mode is relevant to long-context methods with KV cache reuse, as the focus in each turn may shift significantly, potentially causing the models to lose information stored in KV cache. Following Zheng et al. (2023a); Wang et al. (2024), we use ground-truth answers instead of model-generated content as the context for follow-up turns.   
+(ii) Multi-request Mode: Context sharing can occur across sessions or even users, such as multiple users working on the same code repository. In this case, models can encode the shared context and share the memory (KV cache) across multiple requests. Testing long-context methods in such scenarios is crucial, as some require the query for sparse encoding/decoding. For instance, MInference and SnapKV use the final part of the input (often the query) to estimate the overall sparse pattern. This mode tests how well these methods generalize without having the query.  
+
+
+
+\section{3 EXPERIMENTS & RESULTS  }
+
+
+Models & Implementation Details We selected six open-source long-context LLMs for our study: Llama-3.1-8B/70B (Dubey et al., 2024), Qwen2.5-72B/32B (Team, 2024), Llama-3-8B-256K (Gradient, 2024), and GLM-4-9B-1M (GLM et al., 2024), along with two gated linear models: Codestal Mamba 7B (team, 2024), and Jamba-1.5-Mini (Lieber et al., 2024). This selection encompasses Transformer, SSMs, and SSM-Attention Hybrid models, representing some of the most effective context lengths among open-source Long-context LLMs. To ensure result stability, all experiments were conducted using greedy decoding in BFloat16 on four NVIDIA A100 GPUs. We evaluated all models using the HuggingFace or vLLM framework with FlashAttention-2 (Dao, 2024) implementation. Additionally, we employed MInference’s implementation (Jiang et al., 2024) to reduce GPU memory overhead. More information of these models and our infrastructure can be found at $\mathrm{\&C.1}$ .  
+
+Long-Context Method Details We evaluated five categories of long-context solutions on our benchmark, including Gated Linear RNN (Codestral-Mamba), SSMsAttention hybrid model (Jamba), sparse attention, KV cache compression, and prompt compression, as detailed in Table 1. All other long-context methods were tested on Transformer-based long-context LLMs except CodestralMamba and Jamba. We also introduce a novel training-free sparse attention method, Tri-shape, with improved firstturn accuracy, as shown in Figure 3. According to Table 1, we can roughly classify these method based on how lossy they are in the encoding and decoding stages, i.e., lossy encoding methods with prefilling complexity lower than  
+
+![](images/0e06215d684deb06dc28f7e8feb4c0701dc9a4fbcecefd4320e882381d684696.jpg)  
+Figure 3: The sparse attention methods framework.  
+
+$O(n^{2})$ , and lossy decoding methods with decoding complexity lower than $O(n)$ . In our testing, sparse attention is lossy encoding method, KV cache compression is lossy decoding method, and prompt compression and Codestral Mamba are lossy in both encoding and decoding. The exact implementation and configuration details can be found in $\S C.2$ .  
+
+Main Results Table 4, 10, and Fig. 4 illustrate the performance of various long-context methods across multiple tasks and shared context modes in different base LLMs. Key observations include: 1) In retrieval tasks, most long-context methods, except MInference, perform poorly, particularly in string retrieval. 2) Sparse attention methods show significant improvements over sparse decoding methods as the number of request rounds increases, with A-shape demonstrating the greatest enhancement. Trishape, which incorporates bottom query tokens into A-shape, boosts first-round performance but has minimal impact on subsequent rounds. Tri-shape also generalizes well across tasks, ranking second only to MInference across models. Our analysis reveals that the Tri-shape bottom improves firstturn instruction-following, thus enhancing overall performance, while A-shape disrupts instruction information, leading to random outputs, as shown in $\S17$ . 3) KV cache compression methods generally underperform in shared scenarios, showing only slight advantages in the first round. 4) Prompt compression methods enhance global information tasks like many-shot ICL but degrade performance significantly in retrieval-related tasks. 5) SSM-attention hybrid models perform well in single-turn interactions but degrade in multi-turn scenarios, especially in RepoQA and Math. Gated Linear RNN models perform poorly in shared context modes.  
+
+
+
+\section{4 ANALYSIS  }
+
+
+Sub- $O(n)$ Memory is Almost Infeasible in Multi-Turn Decoding. We analyzed the attention distribution for the Retr.KV task across multiple turns with a shared context. As shown in Fig. 5a, the critical key-value pairs (KVs) are highly query-dependent and vary significantly between turns. We found that, aside from initial and local tokens, attention focuses primarily on the first occurrence of the key in each query. Due to the unpredictability of future queries, the shared context memory (i.e., KV cache in Transformer models) must be fully preserved. This explains why most sub- $.O(\bar{n})$ decoding methods, particularly KV cache compression methods and pure SSM models, fail in our SharedContextBench benchmark. Previous studies have noted similar issues with SSMs, suggesting that the entire prompt needs to be repeated after each query to recover lost context memory (Arora  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/198b92f2f4ffcd17e463f55c92982a30591137c604bda06ef05bfa23f7ee9be4.jpg)  
+
+Table 4: Average performance of various long-context methods across different base models in two shared context modes on SharedContextBench. For additional results on base models such as Llama-3.1-70B, Qwen2.5-32B, and Llama-3-8B-256K, see Table 10 in $\S D$ . The bold and underlined text indicate the first and second highest accuracy methods, respectively, among the long-context efficient methods, excluding Full Attention.  
+
+![](images/020a3a77262a1cf263d1abae7fd09b7c1d374b9213965bbaa031b816bf825e1d.jpg)  
+Figure 4: Performance of different long-context methods across various tasks and turns. The results for multi-tasking tasks are shown in Fig. 8, and the results are averaged across all tested base LLMs.  
+
+et al., 2024). In Fig. 5b, we visualize the attention map for the Retr.KV task across turns. While important KVs remain consistent within a turn, they differ significantly between queries. This explains why $O(k)$ KV cache compression methods perform well in single-query tests but fail in follow-up queries. However, the SSM-attention hybrid model Jamba shows potential for reducing overall memory cost by utilizing SSM layers while maintaining $O(n)$ memory in a few attention layers for future lookups (Waleffe et al., 2024). Another promising approach is CPU-GPU collaboration for fast inference, where the full $O(n)$ memory is stored in CPU RAM, and relevant KVs are dynamically loaded to the GPU, achieving sub- $O(n)$ decoding on the GPU (Liu et al., 2024a).  
+
+The Sparsity in Encoding and Decoding. We discussed how sub- $O(n)$ sparse decoding often fails to maintain accuracy across multiple requests with shared context. Interestingly, these sparse approaches perform well in the encoding phase if decoding remains dense. As shown in Fig. 2a, with dense decoding $(O(n)$ memory), Tri-Shape and A-Shape demonstrate strong performance in multi-request testing. While this success of sparse encoding with dense decoding has been observed in single-turn tests (Sun et al., 2024b; Jiang et al., 2024), we are the first to showcase its potential in shared context scenarios. In contrast, extending sparse patterns to the decoding stage leads to significant performance degradation (e.g., StreamingLLM). Even with dense encoding, sparse decoding methods generally underperform in shared context testing, particularly KV cache compression methods. This disparity may be due to redundancy in the encoding output, while decoding plays a critical role in generation tasks (Deng et al., 2024). Redundant input prompts allow key information to be captured even with sparse encoding, but sparse decoding reduces per-layer connectivity, limiting the model’s ability to focus on critical tokens. Since sparse decoding relies on proxy tokens for global information access, it restricts the construction of complex attention functions (Yun et al., 2020). We emphasize the need for more sophisticated sparse patterns in sparse attention. Dynamic sparse attention methods can enhance connectivity and enable faster information propagation (Jiang et al., 2024), better approximating full attention performance compared to static sparse patterns, as shown in Fig. 4.  
+
+![](images/b6d6bd1851dae1bdd14b06e86dd1e714621ef03da6afd5a60669150b57a5e95b.jpg)  
+Figure 5: Attention visualization of Retr.KV for the shared context across multiple turns.  
+
+Compressible and Incompressible Tasks. While $O(n)$ memory is essential in multi-request scenarios with shared context, this requirement can be relaxed for highly compressible inputs in simpler tasks. For instance, the Needle-in-the-Haystack benchmark (Kamradt, 2023) embeds key information (the "needle") into repetitive noise (the "haystack"), allowing sub- $O(n)$ methods to achieve reasonable accuracy since the noise is highly compressible. Similarly, tasks like summarization involve compressible contexts, where sub- $\cdot O(n)$ methods can balance efficiency and performance. However, with dynamic and complex inputs, sub- $\cdot O(n)$ methods often fail to store all necessary information, resulting in poor performance on challenging retrieval tasks. Tasks like Retr.KV and Retr.Prefix-Suffix, which involve random and incompressible key-value pairs and strings, require models to fully utilize their context window. In summary, while compressible tasks may overestimate a model’s capabilities, sub- $O(n)$ methods remain useful for simpler tasks due to their efficiency.  
+
+Sparse Methods without Query Awareness. One concern with longcontext methods in KV cache reuse scenarios is their reliance on the query for compression to achieve efficient encoding or decoding. However, in real-world applications, a single con  
+
+Table 5: Results of query-awareness long-context methods. w/ (first) and w/o (later) query.   
+
+![](images/b195c4a4270808396385c943fee08b6c442199299a2c58fdd1f2a5a161217742.jpg)  
+
+text is often shared across multiple queries, requiring these methods to function without the query. This raises the question: can query-dependent long-context methods generalize effectively without it? In Table 5, we compare the performance of three query-awareness long-context methods w/ and w/o the query provided, highlighting degraded performance in the absence of the query using underlines. We observed that both the KV cache compression method SnapKV and the static sparse attention method Tri-shape struggled to maintain accuracy without the query. In contrast, the dynamic sparse attention method MInference demonstrated more robust generalization, likely due to its dynamic and sophisticated sparse patterns, particularly the presence of diagonal connections in its attention map.  
+
+
+
+\section{5 RELATED WORKS  }
+
+
+Prefix Caching also known as KV Cache reuse, is a technique in LLM inference frameworks that optimizes Time To First Token (TTFT) for sequences with shared context (Zheng et al., 2023b; Kwon et al., 2023). It is particularly effective in scenarios where multiple requests share the same initial context, such as in chatbot sessions with shared system prompts or multi-turn conversations, and can be applied to various LLMs providers (Gemini, 2024; Claude, 2024; OpenAI, 2024b). Several recent studies propose similar optimizations. PagedAttention (Kwon et al., 2023) partitions the KV cache into blocks accessed via a lookup table, reducing memory costs for multi-request KV cache reuse. HydraGen (Juravsky et al., 2024) and Cascade Inference (Ye et al., 2024) decouple attention computation for shared prefixes and unique suffixes to support batched queries and multi-query kernels. RadixAttention (Zheng et al., 2023b), introduced by SGLang, employs a radix tree structure for faster KV cache lookups with $O(k)$ complexity, significantly improving efficiency across requests. It also be utilized in the vLLM framework (vLLM, 2024). RAGCache (Jin et al., 2024) utilizes KV cache reuse to optimize retrieval-augmented generation (RAG) systems by caching KV tensors for retrieved documents.  
+
+Conversational and Multi-Turn Benchmarks: While multi-turn interactions better reflect realworld applications, many benchmarks still evaluate LLMs using single-turn instructions (Li et al., 2023b; Finch et al., 2023). Benchmarks like MT-Bench (Zheng et al., 2023a), ShareGPT (Domeccleston, 2023), MINT (Wang et al., 2024), MT-Bench-101 (Bai et al., 2024a), and MT-Eval (Kwan et al., 2024) assess various aspects of multi-turn capabilities, including conversational skills, instructionfollowing, complex task solving, and interaction hierarchies. However, these benchmarks do not address long-context inputs; they focus on model consistency and key information extraction across turns rather than evaluating long-context methods.  
+
+Long-context Methods of LLMs: Two major bottlenecks in long-context LLM inference are the computational cost of the pre-filling stage and the memory cost during decoding (Fu, 2024). Prefilling optimizations include state space models (Gu & Dao, 2023; Gu et al., 2022), linear attention methods (Peng et al., 2023; Sun et al., 2023), memory-based approaches (Munkhdalai et al., 2024), hybrid methods (Lieber et al., 2024; Ho et al., 2024; Ren et al., 2024), and prompt compression (Li et al., $2023c$ ; Jiang et al., 2023; Pan et al., 2024). Decoding optimizations focus on: 1) Reusing attention KV to reduce storage (Shazeer, 2019; Ainslie et al., 2023; Sun et al., 2024b; DeepSeek-AI, 2024; Nawrot et al., 2024); 2) Static KV compression (Xiao et al., 2024; Han et al., 2024); 3) Dynamic KV compression, including cache discarding (Zhang et al., 2024b; Ge et al., 2024; Liu et al., 2024d; Li et al., 2024b), and offloading (Ribar et al., 2024; Tang et al., 2024; Dai et al., 2024); 4) Methods to mitigate compression-related performance loss (Adnan et al., 2024; Dong et al., 2024); 5) Hierarchical speculative decoding (Sun et al., 2024a). Many of these approaches are tested on single-turn LLM benchmarks and rely on query-conditioned lossy methods, which may not maintain performance in multi-turn scenarios with prefix caching. This challenge motivates the construction of SharedContextBench, which evaluates long-context solutions in shared context settings.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+This paper addresses a key gap in the evaluation of long-context methods, which used to fully rely on single-turn interactions and overlook the performance of shared long-context scenarios that is common in real-world LLM applications. To bridge this gap, we introduce SharedContextBench, a comprehensive benchmark designed to test long-context methods with KV cache reuse across multiple domains, featuring 12 tasks that span four long-context capabilities: string retrieval, semantic retrieval, global information processing, and multi-tasking, across two shared context modes. We evaluated five categories of long-context methods, including gated linear RNNs, hybrid models, sparse attention, KV cache compression, and prompt compression, on eight state-of-the-art LLMs, including Llama-3.1-8B/70B, Qwen2.5-72B/32B, Llama-3-8B-262K, GLM-4-9B, Codestal Mamba, and Jamba-1.5. Our results show a clear disparity in KV cache management: methods maintaining KV cache at $O(n)$ excel in multi-request scenarios, while sub- $\cdot O(n)$ methods perform well in single-turn settings but struggle with complex interactions. These findings highlight the importance of multi-turn, shared-context scenarios in developing and evaluating long-context methods, offering a more realistic benchmark and key insights for improving long-context models and future architecture design in practical applications.  
+
+
+

@@ -1,0 +1,421 @@
+\title{Approximately Aligned Decoding}
+
+\begin{abstract}
+It is common to reject undesired outputs of Large Language Models (LLMs); however, current methods to do so require an excessive amount of computation, or severely distort the distribution of outputs.
+We present a method to balance the distortion of the output distribution with computational efficiency, allowing for the generation of long sequences of text with difficult-to-satisfy constraints, with less amplification of low probability outputs compared to existing methods.
+We show through a series of experiments that the task-specific performance of our method is comparable to methods that do not distort the output distribution, while being much more computationally efficient.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Language models sometimes generate undesirable outputs, such as syntactically-incorrect code, hallucinated PII, or profanity. 
+These conditions, which we collectively refer to as errors for the remainder of the paper, can be detected with incremental parsers, regular expression matching, or even simple substring searches.
+However, once detection occurs, there are several competing methods for mitigating errors in the output.
+
+One set of methods, constrained generation \citep{beurerkellner2024guidingllmsrightway,geng2024grammarconstraineddecodingstructurednlp,melcer2024constraineddecodingcodelanguage}, avoids errors by disabling the generation of any token that immediately leads to such an error. 
+While this method is effective, it can lead to the amplification of low-probability outputs.
+
+Another class of methods avoids errors without any amplification of low-probability outputs, at the cost of additional computation.
+Rejection sampling is the simplest such method; i.e. if the output contains an error, simply generate another sample until the output is acceptable.
+Adaptive Sampling with Approximate Expected Futures (ASAp) \citep{park2024grammaraligneddecoding} provides a performance improvement over rejection sampling while maintaining the output distribution by effectively sampling without replacement, but there are still many situations in which it may converge too slowly.
+
+We present a method that allows for a useful midpoint in the tradeoff between computational efficiency and maintenance of the output distribution.
+In our experiments, we show that our method obtains task-specific performance on par with ASAp, while converging significantly faster when the constraints are difficult to satisfy.
+
+
+
+\section{Preliminaries}
+
+
+We first describe autoregressive language models and their properties.
+We then discuss speculative decoding, a method closely related to the algorithm that we will introduce.
+
+\subsection{Autoregressive Language Models}
+
+\label{section:autoregressive-lms}
+
+\begin{algorithm}
+    \begin{algorithmic}
+        \Procedure{Generate}{$\llm, x_{1\ldots n}$} \Comment{Initial $x_{1\ldots n}$ is the prompt}
+            \While{Stopping condition not met} \Comment{Typically special \textsc{EOS} token, and length limit}
+                \State Sample one token $x_{n+1} \sim \llm(\cdot | x)$
+                \State Increment $n$
+            \EndWhile
+            \State \Return $x$
+        \EndProcedure
+    \end{algorithmic}
+    \caption{Generation with an autoregressive language model}
+    \label{algo:llm-basic}
+\end{algorithm}
+
+We assume that a vocabulary $\vocab$ of tokens is provided.
+An autoregressive language model is a function approximator trained to predict $P(x_n | x_{1\ldots n-1})$; the conditional probability of token $x_n \in \vocab$, given a sequence of existing tokens $x_{1\ldots n-1} \in \vocab^*$.
+
+Algorithm \ref{algo:llm-basic} describes repeated sampling from a language model.
+This process results in an implicit probability distribution over $\vocab^*$: $P(x_{1\ldots n}) = \prod_{i \in [1\ldots n]} P(x_i | x_{1 \ldots i-1})$.
+
+Note that there are several other methods for token selection; i.e. greedy selection, beam search, etc. 
+While we focus on sampling, the techniques we present may also be applicable to other methods.
+
+\subsection{Speculative Decoding}
+
+\begin{algorithm}
+    \begin{algorithmic}
+        \Procedure{SpecSample}{$\llm, S, n, x_{1 \ldots m}$} \Comment{$x_{n+1 \ldots m}$ are from SSM}
+            \For{$i \in [n+1 \ldots m]$}  \Comment{May be vectorized instead of iterative}
+              \State $r \leftarrow \llm(x_i | x_{1 \ldots i - 1}) / S(x_i | x_{1 \ldots i-1})$ \Comment{Probabilities are already calculated and cached}
+              \WithProb{$r$} \Comment{Always if $r \ge 1$}
+                \State \textbf{continue} \Comment{Accept $x_i$}
+              \EndWithProb
+              \StandaloneElse \Comment{Reject $x_i$, sample a replacement token}
+                \State Calculate residuals $R(t) = \max(0, \llm(t | x_{1 \ldots i-1}) - S(t | x_{1 \ldots i-1}))$
+                \State \Return $x_{1 \ldots i-1}, \textsc{Sample}(\textsc{Normalize}(R(\cdot)))$
+              \EndStandaloneElse
+            \EndFor
+            \State \Return $x_{1 \ldots m}, \textsc{Sample}(\llm(\cdot | x_{1 \ldots m}))$ \Comment{Accepted whole sequence, can sample $x_{m+1}$}
+        \EndProcedure
+    \end{algorithmic}
+    \caption{Speculative sampling procedure}
+    \label{algo:specsample}
+\end{algorithm}
+
+Language models with many parameters (``Large Language Models'', or LLMs) are useful, but can require considerable computational resources to evaluate.
+Moreover, the autoregressive sampling process is inherently sequential, meaning that additional parallel computation resources cannot be fully utilized to decrease generation latency, especially for longer sequences.
+
+Speculative decoding \citep{leviathan2023fastinferencetransformersspeculative,Miao_2024,cai2024medusasimplellminference,li2024eaglespeculativesamplingrequires} is one popular approach to decrease latency.
+This method assumes the existence of a small speculative model (SSM) $S$ that approximates the output of the LLM, using fewer computational resources.
+
+Given input tokens $x_{1 \ldots n}$, the SSM is autoregressively sampled for $m$ tokens, resulting in tokens $x_{n+1 \ldots m}$.
+Then, the LLM $\llm$ is used to compute $\llm(x_{i+1} | x_{1 \ldots i})$ for $i \in [n \ldots m]$; this computation is parallelizable.
+Finally, Algorithm \ref{algo:specsample} is used to select a prefix $x_{1\ldots k}$ for $k \in [n, m]$ of tokens to accept; all later tokens are discarded. 
+Additionally, because the probabilities $\llm(\cdot | x_{1 \ldots k})$ have already been computed, Algorithm \ref{algo:specsample} samples a new token $x_{k+1}$.
+This process maintains the property that the distribution of sequences produced by this process matches the sequence distribution of $\llm$.
+
+
+\section{Problem Statement and Existing Approaches}
+
+
+
+\emph{Error Set} $\mathcal{B} \subset \vocab^*$ is the set of strings containing errors.
+
+\label{section:assumptions}
+We make the mild assumption that if string $x_{1\ldots n} \in \badSet$, then all strings with $x_{1\ldots n}$ as a prefix are also members of $\badSet$; i.e. adding additional text does not negate an error.
+Note that this assumption requires careful design of the error set; for example, when profane words are substrings of benign words \citep{Francis_2020_Scunthorpe}, or un-parseable code can be made valid by adding additional text.
+$\badSet$ will often be infinite size; therefore, most sampling methods treat it as a black-box indicator function.
+We define the probability distribution obtained by sampling $\llm$, except for any elements of $\mathcal{B}$:
+
+\begin{equation}
+    \llmExcBadSet(w) = \begin{cases}
+        w \in \badSet & 0 \\
+        w \notin \badSet & \frac{\llm(w)}{\sum_{w \notin \badSet} \llm(w)}
+    \end{cases}
+\end{equation}
+
+\begin{problem}
+    Given an autoregressive language model $\llm$ over alphabet $\vocab$, and error set $\badSet \subset \vocab^*$, provide a method to sample from $\llmExcBadSet$.
+\end{problem}
+
+Rejection sampling is the most straightforward method for sampling from $\llmExcBadSet$; however, it may require a large number of evaluations as $\sum_{w \in \badSet}\llm(w)$ approaches 1.
+For example, consider a domain where each token has, approximately, some non-zero probability $p$ of being an error---we assume that the language model has a somewhat consistent error rate per token.
+If $d$ tokens are generated, an output has approximately a $(1-p)^d$ probability of being error-free; thus requiring on average $\frac{1}{(1-p)^d}$ generations.
+We consider such domains---domains where the probability of generating an error approaches 1 for longer generations---to have \emph{dense} error sets.
+
+\subsection{Existing Approach: Constrained Generation}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\linewidth,page=4]{FastAlignedDecoding-crop.pdf}
+    \caption{Sampling in an example domain where $\badSet = \{AA\}$. (Left) The language model assigns equal probability to all sequences. (Center) With `AA' as an error, its probability mass should be equally redistributed to all other sequences. (Right) With constrained generation, the entire probability mass of `AA' is shifted onto `AB', significantly overrepresenting its probability.}
+    \label{fig:constrained-prob-distortion}
+\end{figure}
+
+Constrained generation attempts to solve the error-free generation problem by using a greedy algorithm: during token selection, the algorithm always avoids selecting any tokens that immediately lead to an error.
+Note that this algorithm assumes that if string $x_{1\ldots n} \notin \badSet$, then there exists at least one available token $x_{n+1} \in \vocab$ such that $x_{1\ldots n+1} \notin \badSet$; however, this assumption may be weakened if backtracking is allowed, in cases where every token leads to an immediate error.
+
+The constrained generation algorithm has the effect of sampling from the following probability distribution for each token: 
+
+\begin{equation}
+    \constrainedGenerationSampler(x_i | x_{1 \ldots i-1}) = \textsc{Normalize}\left( \begin{cases}
+        x_{1 \ldots i} \in \badSet & 0 \\
+        x_{1 \ldots i} \notin \badSet & \llm(x_i | x_{1 \ldots i-1})
+    \end{cases}\right)
+\end{equation}
+
+Repeated sampling of this distribution leads to some troubling properties.
+
+As in Section \ref{section:autoregressive-lms}, a repeated sampling process results in a derived distribution $\constrainedGenerationSampler(x_{1 \ldots n}) = \prod_{i \in [1 \ldots n]}\constrainedGenerationSampler(x_i | x_{1 \ldots i-1})$.
+It is often the case that for sequence $x_{1 \ldots n}$, $\constrainedGenerationSampler(x_{1 \ldots n}) \gg \llmExcBadSet(x_{1 \ldots n})$; i.e. low-probability samples are \emph{amplified} by the constrained generation process.
+
+The fundamental issue is that the constrained generation algorithm commits to a given prefix, even if the most probable sequences beginning with that prefix are errors. 
+Figure \ref{fig:constrained-prob-distortion} provides a simple example of this occurrence.
+Note that this distortion is even worse in low-entropy scenarios; if $\llm(B|x_{1\ldots n}, A)$ were lowered to $0.0001$, it would still be the case that $\constrainedGenerationSampler(AB|x_{1\ldots n}) = 0.5$.
+This amplification effect compounds exponentially for longer sequences.
+
+
+\subsection{Existing Approach: Sampling Without Replacement}
+
+\begin{algorithm}
+\begin{algorithmic}
+\Procedure{ASAp}{$\llm, \badSet, x_{1\ldots n}$} \Comment{$x_{1\ldots n}$ is prompt}
+    \State $\llmExcBadSeen \leftarrow \llm$
+    \While{Limit not reached}
+        \State Sample sequence $x_{n+1\ldots m} \sim \llmExcBadSeen(\cdot | x_{1\ldots n})$ until error or stopping condition
+        \If{$x_{1\ldots m} \notin \badSet$} \textbf{break} \EndIf
+        \State $\llmExcBadSeen \leftarrow \Call{AddBadSample}{\llmExcBadSeen, x_{1\ldots m}}$ \Comment{Remove $x_{1\ldots m}$ as a possible sequence}
+    \EndWhile
+    \State \Return $X$
+\EndProcedure
+\Procedure{AddBadSample}{$\llmExcBadSeen, x_{1\ldots m})$} \Comment{In practice, only adjust $x_{n+1 \ldots m}$}
+    \State $\llmExcBadSeenAndX \leftarrow \llmExcBadSeen$
+    \For{$x_i \in (x_m, \ldots, x_1)$} \Comment{Note that token sequence is reversed}
+        \LComment{Remove probability of $x_{1\ldots m}$, without changing probability of any other sequence}
+        \State $\llmExcBadSeenAndX(x_i | x_{1\ldots i-1}) \leftarrow \llmExcBadSeen(x_i | x_{1\ldots i-1}) - \llmExcBadSeen(x_{i \ldots m} | x_{1\ldots i-1})$
+        \State Renormalize $\llmExcBadSeenAndX(\cdot | x_{1\ldots i-1})$
+    \EndFor
+    \State \Return $\llmExcBadSeenAndX$
+\EndProcedure
+\end{algorithmic}
+\caption{ASAp}
+\label{algo:asap}
+\end{algorithm}
+
+Adaptive Sampling with Approximate Expected Futures (ASAp) \citep{park2024grammaraligneddecoding} is a technique to sample exactly from the distribution of $\llmExcBadSet$.
+ASAp begins similarly to rejection sampling, but it iteratively builds set $\badSeen \subseteq \badSet$ containing all encountered samples that have been rejected so far.
+Because $\badSeen$ is finite, the conditional probabilities $\llmExcBadSeen(x_i | x_{1\ldots i-1})$ can be efficiently calculated, allowing for the algorithm to sample from $\llmExcBadSeen$ exactly.
+If the sampled sequence is a member of $\badSet$, it is added to $\badSeen$, and the sampling process repeats.
+
+In the limit of repeated samples, $\badSeen$ will approach $\badSet$, and therefore, $\llmExcBadSeen$ will approach $\llmExcBadSet$.
+Importantly, if $x \sim \llmExcBadSeen$ is sampled such that $x \notin \badSet$, this sample may be accepted, even though $\badSeen \neq \badSet$. 
+
+This procedure is equivalent to sampling without replacement, adapted to autoregressive generation.
+While ASAp succeeds in cases where there are only a small number of errors that comprise the majority of the probability mass, its generation speed suffers when there are a large number of errors---each error must be discovered before it is added to $\badSeen$.
+In dense probability sets, its performance characteristics are similar to rejection sampling, as there are an exponential number of error sequences that must be discovered as generation length increases.
+
+\subsection{Existing Approaches: Posterior Estimation}
+
+We note two additional methods that, although they use very different formalizations and implementations from each other, rely on a similar core idea to approximately sample from $\llmExcBadSet$.
+In both cases, for any given prefix $x_{1 \ldots n}$, these methods create an estimator of $\sum_{x_{n+1\ldots m} \in \Sigma^*} \llm(x_{n+1\ldots m} | x_{1\ldots n}) \times \indicator{x_{1 \ldots m} \in \badSet}$; i.e. the likelihood of an error in all sequences that begin a specific prefix, weighted by the probability of generating each sequence.
+This is used to estimate $\llmExcBadSet$.
+
+\cite{lew2023sequentialmontecarlosteering} create this estimate using Monte Carlo sampling.
+They apply several optimizations such as sampling without replacement, and aggressive pruning of low-probability branches.
+In contrast, \cite{zhang2024adaptablelogicalcontrollarge}, building off the work of \cite{zhang2023tractablecontrolautoregressivelanguage}, first distill a LLM into a hidden Markov model (HMM) with a tractable number of states (thousands or tens of thousands).
+If the constraint can be expressed as a DFA over tokens---not always possible for certain constraints---their method takes the product system of the DFA and HMM, and then calculates the probability of an error in this product system.
+
+Both of these methods, while exhibiting impressive results on many tasks, also face issues in certain dense error sets---the approximation of the posterior tends to become inaccurate when arbitrary generations almost immediately lead to an error.
+
+
+
+\section{Method}
+
+
+\subsection{Previous iterations of ASAp are (Almost) Small Speculative Models}
+\begin{algorithm}
+\begin{algorithmic}
+\Procedure{ApproxAlignedDecoding}{$\llm, \badSet, x_{1\ldots n}$} \Comment{$x_{1\ldots n}$ is prompt}
+    \State $\llmExcBadSeen \leftarrow \llm$
+    \State $m \leftarrow n$  \Comment{Current token index}
+    \While{Stopping condition not met}
+        \State Sample one token $x_{m+1} \sim \llmExcBadSeen(\cdot | x_{1\ldots m})$
+        \State Increment $m$
+        \If{$x_{1\ldots m}  \in \badSet$}
+            \State $\llmExcBadSeenAndX \leftarrow \Call{AddBadSample}{\llmExcBadSeen, x_{1\ldots m}}$ \Comment{Algorithm \ref{algo:asap}}
+            \State $x_{1\ldots m} \leftarrow \Call{SpecSample}{\llmExcBadSeen, \llmExcBadSeenAndX, 0, x_{1\ldots m}}$ \Comment{Algorithm \ref{algo:specsample}---$m$ may decrease}
+            \State $\llmExcBadSeen \leftarrow \llmExcBadSeenAndX$
+        \EndIf
+    \EndWhile
+    \State \Return $x_{1\ldots m}$
+\EndProcedure
+\end{algorithmic}
+\caption{Our Method: Approximately Aligned Decoding (AprAD)}
+\label{algo:generate-self-speculative}
+\end{algorithm}
+
+For some iteration of ASAp, with $\badSeen$ as the set of observed errors so far, let $x = (x_1, \ldots, x_n)$ be a trace drawn from $\llmExcBadSeen$, where it is discovered that $x \in \badSet$.
+We observe that $\llmExcBadSeen$ and $\llmExcBadSeenAndX$ are almost always near-identical probability distributions, with $\llmExcBadSeenAndX$ generally as a ``more accurate'' distribution because it incorporates an additional error sample.
+
+Our method reduces computation by using the sample $x \sim \llmExcBadSeen$ to approximate a sample $x' \sim \llmExcBadSeenAndX$, in a similar manner to how speculative decoding uses a sample from a SSM to approximate a sample from a LLM.
+By evaluating \textsc{SpecSample}$(x, \llmExcBadSeen, \llmExcBadSeenAndX)$, our method obtains a prefix of $x$ that can be used as a starting point for sampling again.
+Because the distributions of $\llmExcBadSeen$ and $\llmExcBadSeenAndX$ are so close to each other, this prefix is usually most of the length of $x$.
+In contrast, ASAp would involve backtracking to the beginning of the generation.
+This process is given as Algorithm \ref{algo:generate-self-speculative}; we refer to it as Approximately Aligned Decoding, or AprAD.
+
+However, AprAD does not perfectly maintain the output distribution:
+Algorithm \ref{algo:generate-self-speculative} amplifies some sequence probabilities because it only invokes \textsc{SpecSample} after discovering an error.
+To maintain the output distribution, \textsc{SpecSample} should \emph{always} be invoked for strings $x_{1\ldots n}$ where $\exists i \in [1 \ldots n], \llmExcBadSet(x_i | x_{1\ldots i-1}) < \llm(x_i | x_{1\ldots i-1})$---but the algorithm has no way of checking if this condition holds without iterating through every suffix, negating any performance benefit. 
+
+Even though the AprAD does not perfectly maintain the output distribution, we show in the following sections that it provides a very useful midpoint in the tradeoff of computational complexity versus task-specific performance and accuracy.
+
+\subsection{Analysis}
+
+Let $\aadSampler(x_{1 \ldots n})$ represent the probability of the AprAD method producing sequence $x_{1 \ldots n}$.
+
+For $x_{1 \ldots n} \in \badSet, \aadSampler(x_{1 \ldots n}) = 0$ .
+For all other sequences, we provide evidence that AprAD more closely follows the ideal distribution, compared to constrained generation.
+While the nature of the iterative process makes it difficult to write a closed form description of the probability amplification $\frac{\aadSampler(x_{1 \ldots n})}{\llmExcBadSet(x_{1 \ldots n})}$, less probability amplification occurs with AprAD than with constrained generation when an error is detected, as an error's probability mass is ``distributed'' over many sequences due to the speculative sampling operation.
+In contrast, with constrained generation, an error's probability mass is moved entirely to sequences that share $n-1$ prefix tokens.
+
+\label{section:simulated-mini-experiment}
+We empirically show that AprAD is closer to the ideal distribution, compared to constrained decoding, by creating a testbench to simulate an environment where the ideal distribution is known.
+The testbench contains a simulated language model that always returns one of three tokens (A, B, and C) with equal probability.
+We mark $k$ sequences of length 3 as errors, and use the sampling method under test to sample 10000 sequences of length 3.
+The ideal distribution is trivial to compute---probability $\frac{1}{27-k}$ for every non-error sequence.
+To measure how a sampling process compares to the ideal distribution, we compute the KL-divergence between the observed distribution and ideal.
+Additionally, we measure the \emph{Generation Ratio}; i.e. how many times the language model must be evaluated, divided by the number of tokens generated in the output.
+
+The results are shown in Table \ref{tab:simulated-kl-divergence}, indicating that our method approximates the ideal distribution more closely than constrained generation, with a lower generation ratio than ASAp.
+
+\begin{table}
+    \centering
+    \begin{tabular}{c|cc|cc|cc}
+     & \multicolumn{2}{c}{ASAp} & \multicolumn{2}{c}{Constrained} & \multicolumn{2}{c}{AprAD (Ours)} \\
+     Error Set & KL-div & Ratio & KL-div & Ratio & KL-div & Ratio \\\hline
+$\emptyset$ & 0.0014 & 1.000 & 0.0014 & 1.000 & 0.0014 & 1.000\\
+AAA & 0.0014 & 1.020 & 0.0075 & 1.000 & 0.0046 & 1.004\\
+AAA, AAC & 0.0012 & 1.041 & 0.0429 & 1.000 & 0.0157 & 1.013\\
+AAA, ACC & 0.0013 & 1.042 & 0.0138 & 1.000 & 0.0093 & 1.009\\
+AAA, CCC & 0.0010 & 1.044 & 0.0155 & 1.000 & 0.0074 & 1.010\\
+AAA, AAB, ABA, BAA & 0.0013 & 1.093 & 0.0504 & 1.000 & 0.0224 & 1.024\\
+A** except AAC & 0.0014 & 1.232 & 0.3836 & 1.113 & 0.1540 & 1.205\\
+*** except AAA, AAB, ABA, BAA & 0.0000 & 3.644 & 0.1771 & 1.670 & 0.0521 & 2.142\\
+*** except AAA, BAA & 0.0000 & 5.701 & 0.0000 & 1.784 & 0.0000 & 2.653\\
+    \end{tabular}
+    \caption{KL-Divergence and generation ratios for simulated task with various error sets. Lower is better for both. Stars in the error set are wildcards; i.e. AB* means ABA, ABB, and ABC. Note that constrained generation will backtrack if all tokens for a given prefix are disallowed, resulting in ratios greater than 1 for some error sets.}
+    \label{tab:simulated-kl-divergence}
+\end{table}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Evaluation}
+
+
+While Section \ref{section:simulated-mini-experiment} shows that our method performs well in a simulated domain, the following experiments test the sampling methods on a series of more difficult, real-world tasks.
+
+\subsection{Lipograms (Text Generation with Letter Exclusions)}
+
+It is common in poetry or creative writing exercises to write text without using a specific letter; a product of this exercise is called a lipogram.
+Lipograms where the excluded letter is a vowel tend to be more difficult to create than with other letters.
+Large language models often fail at this task, and more generally, most tasks dependent on individual letters rather than entire tokens.
+
+We use Mistral-7B-Instruct-v0.2 \citep{jiang2023mistral7b} to generate lipograms with vowels as the excluded letter.
+
+Each task is appended to instructions to avoid using one of the five vowels, resulting in 25 prompts.
+
+For each prompt, we generate a completion with four sampling methods: unconstrained generation, constrained generation, ASAp, and AprAD, for up to 200 tokens.
+If the process reaches 2000 model invocations, generation is interrupted, and the last sequence before an error was detected is returned.
+
+We then ask human raters to score each completion on quality, regardless of if the constraint was followed, on a scale of 1-5.
+If the forbidden letter is detected in the output, we then mark the constraint as violated.
+Otherwise, we also ask the human raters to decide if the output violates the intent of the constraint; i.e. by answering in a foreign language, adding unnecessary accents, swapping for Cyrillic lookalike characters, etc.
+The results of this evaluation are provided in Table \ref{tab:lipograms}, and a representative sample of the outputs are provided in Figure \ref{fig:sample-generation}.
+As shown by these results, AprAD consistently produces high-quality outputs, nearly matching the readability of unconstrained generation.
+Additionally, it consistently follows the intent of a constraint---while all methods except for unconstrained generation follow the constraint, constrained generation often does so in an undesirable manner, rather than by selecting appropriate words that do not contain the banned letter.
+Finally, while the computation required by AprAD is more than constrained generation, our method is usually able to finish generation in the allotted computation limit, while ASAp struggles to generate more than a handful of tokens with the same constraint.
+\begin{table}[h]
+    \centering
+    \begin{tabular}{c|c|c|c}
+    Method & Quality (1-5) & Constraint Intent (1-3) & Gen. Ratio \\ \hline
+Constrained & 3.56 $\pm$ 1.69 & 2.32 $\pm$ 0.90 & \textbf{1.00 $\pm$ 0.00} \\
+Ours & 4.52 $\pm$ 1.16 & \textbf{2.84 $\pm$ 0.55} & 4.20 $\pm$ 4.53 \\
+ASAp & 1.72 $\pm$ 1.17 & 2.36 $\pm$ 0.81 & 321.00 $\pm$ 397.14 \\
+Unconstrained & \textbf{4.68 $\pm$ 0.85} & 1.00 $\pm$ 0.00 & \textbf{1.00 $\pm$ 0.00} \\
+    \end{tabular}
+    \caption{Lipogram evaluation results, including subjective rater evaluations of output quality and adherence to the constraint. Higher is better for Quality and Constraint Intent; lower is better for Generation Ratio. Note that constraint intent is automatically set to 1 if the banned letter is detected in the output. Generation is stopped after 2000 model invocations and the output provided as-is; for ASAp, this often resulted in very short outputs and thus extreme generation ratios and low scores. Several raters interpreted these short outputs as violating constraint intent.}
+    \label{tab:lipograms}
+\end{table}
+
+\begin{figure}
+    \centering
+    \genBox{\textbf{Summarize the history of artificial intelligence without using the letter "A".}}{\textbf{AprAD (Ours)}}{The history of intelligent technology unfolds through key milestones in computing. In the mid-20th century, pioneering minds nurtured the seeds of this field through the development of logistic models, which evolved into expert systems in the 1960s. These systems, relying on heuristics, could solve complex problems in fields like medicine or meteorology.}
+    \genBox{\textbf{Summarize the history of artificial intelligence without using the letter "A".}}{Unconstrained}{
+    In the e\textbf{a}rly d\textbf{a}ys, brilli\textbf{a}nt minds pondered on cre\textbf{a}ting m\textbf{a}chines that could mimic hum\textbf{a}n intelligence. These pioneers, including \textbf{A}l\textbf{a}n Turing \textbf{a}nd M\textbf{a}rvin Minsky, theorized \textbf{a}nd experimented. They \textbf{a}imed to cre\textbf{a}te intelligent m\textbf{a}chines, using logic \textbf{a}nd m\textbf{a}them\textbf{a}tics.}
+    \genBox{\textbf{Summarize the history of artificial intelligence without using the letter "A".}}{ASAp}{History of Intelligence}
+    \genBox{\textbf{Summarize the history of artificial intelligence without using the letter "A".}}{Constrained}{
+    In the mid-20th century, scientists delved deep into investiging computionl modeles for intelligencen modeled on the workings of the brn. Pioneers such \rus{как} E.N. Turing, Clrk Quincy Shrffngton, \rus{и}nddd W. Ross Quilp, \rus{а}nd \rus{Ма}rvin Minsky led ths fld. They explored logic-g\rus{а}ted progr\rus{а}ms, thm brgth mchr t\rus{о} lf understnding the cptures of th gnntl mind.}
+    \caption{Representative generation samples for all four methods, using \textsc{Mistral-7B-Instruct-v0.2}. Appearance of the banned letter is bolded, and non-ASCII characters (all Cyrillic in this example) are colored red.}
+    \label{fig:sample-generation}
+\end{figure}
+
+  
+
+\subsection{BigCodeBench Hallucination Avoidance}
+
+We created a program to incrementally detect hallucinated API calls in partial Python programs, based on the Pyright language server \citep{Pyright}.
+Note that in order to satisfy the assumptions in Section \ref{section:assumptions}---that any string with an error as a prefix is itself an error---we constructed the detector to act conservatively.
+False negatives are strongly preferred over false positives.
+For example, even if name \texttt{foo} is never defined, the detector does not consider the incomplete program ``\texttt{example(foo.bar}'' as an error, because it is possible to later add text that turns the function argument into a generator expression that binds \texttt{foo}.
+
+We compare the performance of AprAD, constrained to avoid producing code with hallucinated API calls, relative to other sampling methods by evaluating on BigCodeBench \citep{zhuo2024bigcodebenchbenchmarkingcodegeneration}, a benchmark that focuses on practical programming tasks, often requiring the use of common libraries.
+An analysis of the solutions that several common LLMs generate reveals that their solutions often require imports available in the testing environment, but which are not listed in the prompt.
+In order for the hallucination detection program to discover these available resources, we add all imports available in the test environment to the dataset prompt for this experiment.
+
+For all sampling methods, we use Starcoder2 \citep{lozhkov2024starcoder2stackv2}, in the 7B and 15B model sizes.
+We generate 5 samples for each task, with temperature 0.8, and a top-p of 0.95.
+In addition to evaluating the pass@1 and pass@5 rates on execution-based tests, we log if the evaluation specifically fails with a NameError or UnboundLocalError as an indicator that the generation included a hallucinated API call,%
+\footnote{This is an undercount of the number of hallucinated names: many outputs include hallucinations, but fail before reaching the hallucinated variable or method name, resulting in some other error.
+Some hallucinated method names lead to an AttributeError being raised. 
+However, AttributeError is also raised for improper use of \texttt{None}, and similar issues that are not a result of hallucination, so we do not count it as a NameError.}
+and calculate the rate at which this does not occur.
+
+Note that all methods use the same random seed, so the outputs only diverge if and when the detector activates.
+
+As the results show, the output quality of AprAD is close to ASAp, while its generation ratio is much lower. 
+
+\begin{table}
+    \centering
+    \begin{tabular}{c|c|c|c|c|c|c}
+    Size & Method & Pass@1 & Pass@5 & !NameErr@1 & !NameErr@5 & Gen. Ratio \\ \hline
+        \multirow{4}{*}{15b} & Unconstrained & 0.214 & 0.498 & 0.831 & 0.996 & \textbf{1.000 $\pm$ 0.000} \\
+         & Ours & 0.259 & \textbf{0.541} & \textbf{0.976} & \textbf{1.000} & 1.080 $\pm$ 0.385 \\
+        & ASAp & \textbf{0.261} & 0.536 & \textbf{0.976} & \textbf{1.000} & 1.555 $\pm$ 3.906 \\
+        & Constrained & 0.221 & 0.506 & 0.930 & \textbf{1.000} & 1.005 $\pm$ 0.053 \\ \hline
+        \multirow{4}{*}{7b} & Unconstrained & 0.119 & 0.345 & 0.800 & 0.987 & \textbf{1.000 $\pm$ 0.000} \\
+        & Ours & 0.145 & 0.375 & 0.950 & \textbf{0.993} & 1.064 $\pm$ 0.402 \\
+        & ASAp & \textbf{0.152} & \textbf{0.395} & \textbf{0.952} & \textbf{0.993} & 1.468 $\pm$ 2.574 \\
+        & Constrained &0.124 & 0.345 & 0.891 & \textbf{0.993} & 1.005 $\pm$ 0.029 \\\hline
+    \end{tabular}
+    \caption{Subset of tasks where at least one trial results in a different output: 233 tasks (20.4\%) for 15b, 304 tasks (26.7\%) for 7b. For both model sizes, of the tasks where at least one model output is different, an average of 1.5 out of 5 outputs are different. Lower is better for generation ratio; higher is better for all others. Our method approaches the task performance of ASAp, with a generation ratio close to that of constrained generation.}
+    \label{tab:bigcodebench_only_different}
+\end{table}
+
+
+
+\section{Discussion, Future Work, \& Conclusion}
+
+
+As our experiments show, Approximately Aligned Decoding is an effective method to generate sequences under dense language model constraints.
+
+One observation we made while implementing our experiments is that constrained generation, ASAp, and AprAD are specializations of the same general algorithm, differing only in their backtracking behavior upon the discovery of an error:
+ASAp always backtracks to the beginning of the sequence, constrained generation only backtracks to immediately before the error, and AprAD probabilistically backtracks, with the most likely targets being recent high-entropy tokens.
+
+
+This hints that there may additional points in the tradeoff between generation speed and perfect replication of the ideal output distribution.
+For example, it may be possible to introduce an parameter to the speculative sampling subroutine that adjusts how likely the algorithm is to accept a given token.
+As this probability is pushed towards zero, fewer tokens are accepted, and the resulting algorithm approaches the behavior of ASAp.
+In contrast, if the probability is pushed towards one, the algorithm doesn't backtrack as far, and the resulting behavior approaches constrained decoding.
+The optimal point in this tradeoff will depend on the specific task and error set, and is an area for future research. 
+As defined, however, AprAD occupies a useful position on this spectrum, is straightforward to implement, and exhibits positive results on a variety of tasks.
+
+
+
+
+
+
+

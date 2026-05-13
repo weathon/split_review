@@ -1,0 +1,326 @@
+\title{Toward a Mechanistic Understanding of Stepwise Inference in Transformers: A Synthetic Graph Navigation Model}
+
+\begin{abstract}
+Stepwise inference protocols, such as scratchpads and chain-of-thought, help language models solve complex problems by decomposing them into a sequence of simpler subproblems.
+Despite the significant gain in performance achieved via these protocols, the underlying mechanisms of stepwise inference have remained elusive.
+To address this, we propose to study autoregressive Transformer models on a synthetic task that embodies the multi-step nature of problems where stepwise inference is generally most useful.
+Specifically, we define a graph navigation problem wherein a model is tasked with traversing a path from a start to a goal node on the graph.
+Despite is simplicity, we find we can empirically reproduce and analyze several phenomena observed at scale: (i) the stepwise inference reasoning gap, the cause of which we find in the structure of the training data; (ii) a diversity-accuracy tradeoff in model generations as sampling temperature varies; (iii) a simplicity bias in the model's output; and (iv) compositional generalization and a primacy bias with in-context exemplars.
+Overall, our work introduces a grounded, synthetic framework for studying stepwise inference and offers mechanistic hypotheses that can lay the foundation for a deeper understanding of this phenomenon.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+
+
+
+\label{sec:intro}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.92\linewidth]{./figures/Stepwise_inference_2.pdf}
+\caption{
+  \textbf{Examples of stepwise inference protocols and how they can be cast as a graph navigation problem.} 
+  (a) Zero-shot chain-of-thought~\citep{kojima2022large} involves asking a model to produce intermediate outputs to perform complex multi-step computations, such as solving the Tower of Hanoi problem.
+  Casting the configurations of the rods in Tower of Hanoi as nodes of a graph, we can see that the problem is essentially traversal over states describing different configurations of the setup to reach the desired configuration (the goal state).
+  (b) Scratchpad~\citep{nye2021show} improves LLMs' ability to perform complex multi-step computations, such as arithmetic, when they write intermediate computation steps to a buffer called a scratchpad.
+}
+\label{fig:graph_navigation}
+\end{figure}
+
+Transformers, the backbone of large language models (LLMs), have revolutionized several domains of machine learning~\citep{openai2023gpt4technicalreport, anil2023palm, gemini2023, touvron2023llama}. 
+An intriguing capability that emerges with training of Transformers on large-scale language modeling datasets is the ability to perform \textbf{stepwise inference}, such as \textit{zero-shot chain-of-thought (CoT)}~\citep{kojima2022large}, use of \textit{scratchpads}~\citep{nye2021show}, \textit{few-shot CoT}~\citep{wei2022chain}, and variants of these protocols~\citep{creswell2022selection, yao2023tree, besta2023graph, creswell2022faithful,press2022measuring}. 
+Specifically, in stepwise inference, the model is asked to or shown exemplars describing how to \textit{decompose a broader problem into multiple sub-problems}.
+Solving these sub-problems in a \textit{step-by-step} manner simplifies the overall task and significantly improves performance (see Fig.~\ref{fig:graph_navigation}).
+Arguably, stepwise inference protocols are the workhorse behind the ``sparks'' of intelligence demonstrated by LLMs~\citep{bubeck2023sparks,suzgun2022challenging, lu2023emergent, huang2022towards}---yet, their inner workings are poorly understood. 
+Motivated by the above, we aim to design and study an abstraction which enables a precise understanding of stepwise inference in Transformers.
+Specifically, we argue that tasks which see maximum benefit from stepwise inference can be cast as a \textbf{graph navigation} problem: given an input describing the data to operate on and a goal to be achieved, a sequence of primitive skills (e.g., ability to perform arithmetic operations) is chained such that each skill acts on the previous skill's output, ultimately to achieve the given goal.
+If the input data, the final goal, and the sequence of intermediate outputs are represented as a sequence of nodes of a graph, along with primitive skills as edges connecting these nodes, the overall task can be re-imagined as navigating nodes of the graph via the execution of primitive skills.
+Several logical reasoning problems come under the purview of this abstraction~\citep{lavalle2006planning, cormen2022introduction, momennejad2023evaluating, dziri2023faith, saparov2023language}: e.g., in Fig.~\ref{fig:graph_navigation}a, we show how the problem of Tower of Hanoi can be decomposed into simpler sub-problems.
+
+\textbf{This work.} We design a graph navigation task wherein a Transformer is trained from scratch to predict whether two nodes from a well-defined graph can be connected via a path.
+A special prefix indicates to the model whether it can generate intermediate outputs to solve the task, i.e., if it can generate a sequence of nodes to infer a path connecting the two nodes; alternatively, exemplars demonstrating navigation to ``regions'' of the graph are provided.
+Our framework assumes the model has perfect skills, i.e, any failures in the task are a consequence of incorrect plans for navigating the graph. 
+This is justified because a skill-based failure is the most trivial mechanism via which stepwise inference protocols can fail; in contrast, inability to plan is an independent and underexplored axis for understanding stepwise inference.
+Overall, we make the following contributions.
+\begin{itemize}[leftmargin=12pt, itemsep=1pt, topsep=-1pt, parsep=1pt, partopsep=1pt]
+
+\item \textbf{A Framework for Investigating Stepwise Inference.} We propose a synthetic graph navigation task as an abstraction of scenarios where stepwise inference protocols help Transformers improve performance, showing that we can replicate and explain behaviors seen with use of stepwise inference in prior work. For instance, the structure of the data generating process (the graph) impacts whether stepwise inference will yield any benefits~\citep{prystawski2023think}. We identify further novel behaviors of stepwise inference as well, such as the existence of a tradeoff between diversity of outputs generated by the model and its accuracy with respect to inference hyperparameters (e.g., sampling temperature). 
+
+\item \textbf{Demonstrating a Simplicity Bias in Stepwise Inference.} When multiple solutions are possible for an input, we demonstrate the existence of a \textit{simplicity bias}: the model prefers to follow the shortest path connecting two nodes. We assess this result mechanistically by identifying the underlying algorithm learned by the model to solve the task, showing the bias is likely a consequence of a ``pattern matching'' behavior that has been hypothesized to cause LLMs to fail in complex reasoning problems~\citep{dziri2023faith}. 
+
+\item \textbf{Controllability via In-Context Exemplars.} We show the model's preferred path to navigate between two nodes can be controlled via use of in-context exemplars. We use this setup to evaluate the model's ability to generalize to paths of longer length and the influence of exemplars which conflict with each other, i.e., that steer the model along different paths.
+
+\end{itemize}
+
+
+
+
+
+
+
+
+
+\begin{figure*}
+\centering
+\includegraphics[width=0.9\linewidth]{./figures/fig_setup_v2.pdf}
+\caption{\label{fig:dpg_both}
+\textbf{Data generating process.}
+(a) \textbf{In absence of exemplars.} This figure illustrates the step-by-step process of generating a training dataset using a single underlying graph. 1) A directed acyclic graph (DAG) is generated, which can be either hierarchically structured or Bernoulli. 2) A start node and a goal node are selected. 3) All possible paths connecting the start and goal nodes are sampled, and one path is randomly selected. 4) The chosen path is then represented in a task-specific format. (b) \textbf{In presence of exemplars.} The process of generating a training dataset by combining multiple subgraphs (motifs) involves the following. (1.) Start by building a set of Bernoulli directed acyclic graphs (DAGs). (2.) Pick a subset of $K$ of these DAGs $ \{g_{i_1}, g_{i_2}, .. g_{i_K} \}$ and connect them together using "ghost edges" to create a chain of motifs $ g_{i_1} \mapsto g_{i_2} \mapsto \dots \mapsto g_{i_K}$. (3.) Sample exemplars from every pair of motifs that have been connected by a ghost edge to construct the context. (4.) Now choose a start node $\blue{X_s} \in g_{i_1}$ and a goal node $\red{X_g} \in g_{i_K}$ and construct a sequence passing through the whole chain of motifs. 
+}
+\end{figure*}
+
+
+
+\section{Stepwise Inference as Graph Navigation}
+
+
+In this section, we define our setup for studying how stepwise inference aids Transformers in solving complex reasoning problems.
+Specifically, we define a graph navigation task wherein, given a start and a goal node, a Transformer is autoregressively trained to produce a sequence of nodes that concludes at the goal node.
+In our experiments, we consider two scenarios: one where in-context exemplars are \textit{absent} (see Fig.~\ref{fig:dpg_both}a) and another where they are \textit{present} (see Fig.~\ref{fig:dpg_both}b). The former scenario emulates protocols such as the scratchpad and zero-shot Chain of Thought (CoT)~\citep{kojima2022large, nye2021show}, while the latter models few-shot CoT~\citep{wei2022chain}. 
+In Section \ref{sec:dags}, we set up our experiment to explore these two scenarios. In the subsequent sections, we explicitly analyze the benefits of stepwise inference in both scenarios: without in-context exemplars (Section \ref{sec:noexemplars}) and with in-context exemplars (Section \ref{sec:exemplars}).
+
+
+
+
+
+\subsection{Preliminaries: Bernoulli and Hierarchical DAGs}
+\label{sec:dags}
+
+We use \textbf{directed acyclic graphs (DAGs)} to define our graph navigation tasks. 
+DAGs are a natural mathematical abstraction to study multi-step, logical reasoning problems: e.g., as discussed in~\citet{dziri2023faith}, the output of any deterministic algorithm can be represented as a DAG. 
+Specifically, a DAG is defined as $G := (N, E)$, where $N := \{X_i\}_{i=1}^{|N|}$ denotes the set of nodes in the graph and $E := \{(X_i,X_j)\}_{ X_i, X_j \in N}$ denotes the set of directed edges across the nodes. 
+The edges of a DAG are captured by its \textit{adjacency matrix} $A$, where $A_{ij} = 1$ if $(X_i,X_j) \in E$.
+A \textit{directed simple path} is a sequence of distinct nodes of $G$ which are joined by a sequence of edges. 
+If two nodes are connected via a directed simple path, we call them \textbf{path-connected}.
+The first node of a path is referred to as the \blue{start node}, which we denote as $\blue{X_s}$, and the last node as the \red{goal node}, which we denote as $\red{X_g}$.
+
+ 
+We define a \textbf{Bernoulli DAG} of $N$ nodes, whose adjacency matrix has an upper triangular structure with Bernoulli entries with edge density $p$, such that $p(A_{ij} = 1) = p$. 
+We ensure that all nodes have at least one edge (see Fig.~\ref{fig:dpg_both}a). The resulting DAG exhibits a bell-shaped path length distribution (see Fig.
+We also define a \textbf{hierarchical DAG}, wherein the nodes follow a feedforward, layered structure such that all nodes at a given layer are only connected to nodes in the following layer (see Fig.~\ref{fig:dpg_both}a). 
+In particular, for every node $n_l$ in layer $l$ and $n_{l+1}$ in layer $l+1$, we draw a directed edge $(n_l,n_{l+1})$ with probability $p$, which we refer to as \textbf{edge density}. 
+On average, between any two layers of a hierarchical DAG, there are $pN^2$ edges and each node in an intermediate layer has an out-degree and in-degree of $pN$. 
+~\ref{fig:path_properties}. 
+For both graph structures, \textbf{source nodes} are nodes that do not have any parent nodes, and the nodes that do not have any children nodes are \textbf{sink nodes}. 
+
+
+
+
+
+\subsection{Modeling stepwise inference without exemplars}
+\label{sec:noexemplars}
+
+Zero-shot CoT~\citep{kojima2022large} and scratchpads~\citep{nye2021show} represent two examples of stepwise inference protocols that do not rely on exemplars. 
+For instance, in the zero-shot CoT approach, the input of the model is augmented with the phrase \texttt{let's think step by step}. This encourages the model to generate outputs that elaborate on the intermediate steps required to solve the target problem, thereby enhancing accuracy by breaking down the target problem into several simpler problems.
+
+To compare the model's performance with stepwise inference and without stepwise inference (i.e., direct inference), we create two datasets: one including intermediate steps and the other without them. Each dataset is subsequently used to train distinct models. During the test phase, we present these trained models with pairs of nodes and task them to determine the existence of a path between the nodes. A model's performance is assessed based on its accuracy in classifying whether a path exists.
+
+Fig.~\ref{fig:dpg_both}a shows how we generate the datasets above. First, we define a DAG denoted as $G$. Within this graph, for each dataset instance, we sample a start node $\blue{X_{\text{s}}}$ and a goal node $\red{X_{\text{g}}}$ and then identify all feasible paths between these two nodes. From the identified paths, we select one to form a sequence of tokens, $S$. This procedure is iterated for other node pairs within the graph $G$ to compile the complete dataset. 
+For the dataset with stepwise inference, we use all the intermediate steps, including the start node \blue{$X_{\text{s}}$} and the goal node \red{$X_{\text{g}}$}, to form $S$. For the dataset without stepwise inference (i.e., direct inference), we only use the start node \blue{$X_{\text{s}}$} and the goal node \red{$X_{\text{g}}$}. 
+We introduce a binary variable $\mathtt{\green{path}}\in\{\green{\mathtt{p_1}}, \green{\mathtt{p_0}}\}$ to denote whether there is a path between the start and goal nodes. We append the `path' token $\green{\mathtt{p_1}}$ to the end of the sequence $S$ if there is at least one path between the start and goal nodes; otherwise, we append the `no path' token $\green{\mathtt{p_0}}$. 
+\textbf{Example:} For the example path in Fig.~\ref{fig:dpg_both}a, in the dataset with stepwise inference, the sequence of tokens $S$ includes the intermediate steps and takes the form $\red{\mathtt{goal:}X_2} \, \blue{X_4} \, X_3 \, X_6 \, \red{X_2} \, \green{\mathtt{p_1}}$.
+For the dataset without stepwise inference (i.e., direct inference), the sequence $S$ does not contain intermediate steps and has the form $\red{\mathtt{goal:}X_2} \, \blue{X_4} \, \green{\mathtt{p_1}}$. 
+
+\subsection{Modeling stepwise inference with exemplars}
+\label{sec:exemplars}
+Here we examine the influence of stepwise inference on model performance when in-context exemplars are present. This scenario is prominently exemplified by protocols based on few-shot CoT~\citep{wei2022chain, creswell2022selection}.
+
+Specifically, we extend the setup with a single DAG described in Section~\ref{sec:noexemplars} by incorporating a \textit{set of DAGs}, which we call \textbf{motifs}. The data generation process is shown in Fig.~\ref{fig:dpg_both}b. 
+First, we generate a set of $n$ Bernoulli DAGs denoted by $\widehat{g} = \{g_i\}_{i=1}^{n}$ and randomly select a subset of $K$ motifs from this set $\{g_{j_1}, g_{j_2}, \dots, g_{j_K}\} \subset \widehat{g}$. Then, we add edges between the sink node of each motif $g_{j_k}$ and the source node of the subsequent motif $g_{j_{k+1}}$, forming a chain of motifs $g_{i_1} \mapsto g_{i_2} \mapsto \dots \mapsto g_{i_K}$. These interconnecting edges are termed \textbf{ghost edges}.
+We sample paths from each pair of motifs linked by a ghost edge to establish the context. We select a start node from the sink nodes of one motif, $\blue{X_s} \in g$, and a goal node from the source nodes of a different motif, $\red{X_g} \in g'$, then sample a path between them, denoted as $e_{gg'}$. This procedure generates a sequence of nodes spanning across motifs, $g \rightarrow g'$, including exactly one ghost edge. We refer to this as an \textbf{exemplar sequence} and use them as in-context samples. 
+Exemplars to model few-shot CoT are represented as $e_{gg'}$ and denote a exemplar sequence from the motif $g \rightarrow g'$.
+Finally, we select a start node $\blue{X_s} \in g_{i_1}$ and a goal node $\red{X_g} \in g_{i_K}$. We then prompt the model to either directly output a path that connects the node pair $\blue{X_s}$ and $\red{X_g}$, or to provide exemplars demonstrating traversal between motifs within the specified context. 
+Recall that our graph is constructed from a combination of $K$ motifs. For the training dataset, we intentionally exclude 20\% of the combinations. For the test dataset, we randomly select motifs from the remaining combinations in $\widehat{g}$, and sample sequences that illustrate how to navigate between two nodes within this graph.
+From training data, a model can learn the structure and interconnections of motifs; yet, during testing, it faces unseen combinations of these motifs. 
+Correspondingly, \textit{the model must use the context to infer the overall structure of the graph}.
+In essence, an exemplar tells the model which motifs are connected via ghost edges and hence can be navigated between.
+\textbf{Example:} We directly study the path of navigation outputted by the model in this setup, i.e., no special tokens are used. 
+A sample is constructed by selecting motifs to define in-context exemplars, say $g_{i_1}, g_{i_2}, g_{i_3}$. 
+For every successive pair of motifs, we construct an exemplar and put them together to create the context. 
+To do this, we select two (start, goal) pairs: $\blue{X_{s_1}} \in g_{i_1}$, $\red{X_{g_1}} \in g_{i_2}$ and $\blue{X_{s_2}} \in g_{i_2}$, $\red{X_{g_2}} \in g_{i_3}$. 
+We sample exemplar sequences starting and ending at these node pairs: one sequence from $g_{i_1}$ to $g_{i_2}$, $\red{\mathtt{goal:}X_{g_1}} \blue{X_{s_1}} X_1 \dots X_{k_1} \red{X_{g_1}}$, and another from $g_{i_2}$ to $g_{i_3}$, $\red{\mathtt{goal:}X_{g_2}} \blue{X_{s_2}}  X'_1 \dots X'_{k_2} \red{X_{g_2}}$. 
+These sequences act as exemplars to be provided in context to the model when it is shown an input. 
+The number of exemplars can vary from two to four, which correspond to chains of motifs of length three to five.
+The input itself is defined by choosing a goal node $\red{X_{g}} \in g_{i_3}$, a start node $\blue{X_{s}} \in g_{i_1}$, and a path through an intermediate node $X_{\text{inter}} \in g_{i_2}$; e.g., $\red{\mathtt{goal:}X_{g}} \blue{X_{s}} X''_1 \dots X_{\text{inter}} \dots X''_{k_1} \red{X_{g_3}}$. 
+Here, $\blue{X_{s}} X''_1 \dots X_{\text{inter}}$ is a path between motifs $g_{i_1}$ and $g_{i_2}$, while $X_{\text{inter}} \dots X''_k \red{X_{g_3}}$ is a path between motifs $g_{i_2}$ and $g_{i_3}$.
+When exemplars are not provided, the model must rely on its internalized knowledge to infer whether there exist two connected motifs that can be used to move from the start to goal node.
+The context exemplars simplify the problem by telling the model the motifs above are connected. 
+
+
+
+
+\section{Results: Stepwise Navigation}
+
+In this section, we discuss findings on how stepwise inference affects the model's ability to solve problems. We investigate two scenarios: in the absence of in-context exemplars (Section \ref{sec:result_noexemplars}) and in the presence of them (Section \ref{sec:multi_graph}). 
+For all experiments, unless stated otherwise, we use a 2-layer Transformer defined by \citet{karpathy} to mimic the GPT architecture~\citep{brown2020language}.
+
+
+
+
+
+\subsection{Navigation without exemplars}
+\label{sec:result_noexemplars}
+
+We assess the performance of the model by evaluating its ability to classify whether there is a path given a pair of nodes during the test phase. 
+Specifically, we randomly sample pairs of start and goal nodes that were not seen in the training data and observe whether the model outputs either the `path' token $\green{\mathtt{p_1}}$ or the `no path' token $\green{\mathtt{p_0}}$. 
+
+\subsubsection{Stepwise inference gap}
+\begin{figure}
+    \includegraphics[width=\linewidth]{./figures/reasoning_gap_stepwise_Inference_vertical.pdf}
+      \caption{
+  \textbf{Advantage of stepwise inference in graph navigation tasks and stitching:} 
+    (a) In the Bernoulli DAG, stepwise inference demonstrates an advantage over direct inference in predicting whether given node pairs are connected.
+    (b) This advantage is further pronounced in hierarchical DAGs, where the distances between nodes are greater than in Bernoulli DAGs.
+    (c) The stepwise inference gap arises when the training set contains paths that are shorter than the paths required to connect nodes at test time.
+    (d) The stepwise inference is beneficial when the model must connect paths seen during training: the red, green, and blue paths represent subsets of paths seen during training; we find the model produces paths that combine these subsets during the test phase. 
+    }
+\label{fig:stepwise_gap}
+\end{figure}
+Fig.~\ref{fig:stepwise_gap} shows the accuracy of classifying `path' or `no path' for two different types of graphs: a Bernoulli graph and a hierarchical graph. 
+We observe that for both types of graphs, the use of stepwise inference significantly improves the model's performance compared to direct inference, with more pronounced improvements noted for the hierarchical graph. Following \citet{prystawski2023think}, we refer to the improvement in performance observed between stepwise inference and direct inference as the ``stepwise inference gap''.  
+~\ref{fig:noise_corrupted_gap}. 
+\begin{figure}
+\centering
+\includegraphics[width=0.9\linewidth]{./figures/tradeoff_temperature.pdf}
+\caption{
+\textbf{Diversity vs. accuracy trade-off for different sampling temperatures of the Transformer model:} As the sampling temperature increases, the diversity of paths generated by the model also increases, while the accuracy decreases. This tradeoff is captured by measuring the number of unique \textit{valid} paths (top panel), indicating that there is an optimal temperature for sampling. The dashed line represents the ground truth path diversity. 
+\end{figure}
+
+To further probe the results above, we control for path lengths in the hierarchical graph.
+Specifically, to set the maximum path length in the training data to $\Delta$, we choose a starting layer $l$ and a goal layer $l'$ such that $l' - l < \Delta$. Then, we sample starting nodes from layer $l$ and goal nodes from layer $l'$. For the test data, we select node pairs with $l' - l \geq \Delta$.
+Results are shown in Fig.~\ref{fig:stepwise_gap}(c). We plot the classification accuracy across various values of $\Delta$ and
+observe that the smaller the value of $\Delta$, the greater the stepwise inference gap becomes. 
+We hypothesize this happens because when the training data only includes short paths, the model needs to more effectively `stitch' the paths observed during training, which, as a recursive task, is more feasible via stepwise inference.
+
+
+\subsubsection{Diversity-accuracy tradeoff with higher sampling temperatures}
+Here, we investigate how the sampling temperature of the autoregressive Transformer affects the diversity of the generations produced by the model and its accuracy.
+To this end, we fixed the start and goal nodes and prompted the model 3,000 times, varying the sampling temperatures from 0.0 to 3.0. We define accuracy as the probability that a generated path consists of valid edges and correctly terminates at the designated goal node. Diversity is defined as the number of unique paths generated. 
+As shown in Fig.~\ref{fig:temperature_tradeoff}, there is a clear trade-off between the diversity of the paths generated by the model and their accuracy. We term this phenomenon the \textbf{\textit{diversity-accuracy tradeoff}}: at lower sampling temperatures, the model generates fewer but more accurate and valid paths; in constrast, higher sampling temperatures result in greater path diversity but reduced accuracy.
+Our result provides the first explicit demonstration of a trade-off between the accuracy and diversity of Transformer outputs. 
+To the best of our knowledge, this phenomena has not been quantitatively studied before.
+\begin{figure}
+\centering
+\includegraphics[width=0.9\linewidth]{./figures/single_graph_short_path_bias.pdf}
+\caption{\textbf{Model outputs are biased toward shorter paths.} We compared the average lengths of ground-truth paths for a specific set of node pairs and the paths produced by the model for these same pairs in the Bernoulli DAG. We observe that the model tends to generate shorter paths than the actual ones. This observation points to a ``simplicity bias'' in the trained model towards favoring shorter over potentially more accurate or realistic paths. 
+}
+\label{fig:bias}
+\end{figure}
+
+\subsubsection{Preference for shorter paths}
+\label{subsec:short_path_bias}
+Note that there are multiple possible paths the model can choose from in the pursuit of inferring a path that connects a start and goal node. 
+We showed that by increasing the sampling temperature, a diverse set of paths can be generated; however, by default, which path does the model prefer?
+To evaluate this, we compare the actual path lengths between nodes in the test data with those generated by our trained model in the Bernoulli graph setup. In Fig.~\ref{fig:bias}a, we observe that the model consistently produces paths that are shorter, on average, than the paths in the ground truth DAG. This observation suggests that the model exhibits a \textit{simplicity bias}, tending to find the quickest path to solve the target problem. 
+However, simplicity biases have been shown to yield oversimplification of a problem, forcing a model to learn spurious features~\citep{shah2020pitfalls, lubana2023mechanistic}.
+In the context of stepwise inference, this can amount to omission of important intermediate steps, similar to `shortcut solutions' arising from pattern-matching behaviors discussed in prior work on Transformers~\citep{liu2022Transformers, dziri2023faith}. 
+
+ 
+
+\subsubsection{Evolution of failures in stepwise inference over training}
+\begin{figure}
+\centering
+\includegraphics[width=0.9\linewidth]{./figures/single_graph_training_dynamics.pdf}
+\caption{\textbf{Learning dynamics for two failure modes: misstep and planning failure. } We measure the probability of missteps and planning failures in the model's outputs. A misstep refers to an instance where the model generates an edge that is not present in the graph, while a planning failure means that the model outputs a path that fails to reach the intended goal node. Initially, the model learns to avoid missteps. Subsequently, around the $200^{\text{th}}$ optimization step, it begins to effectively learn planning. The accuracy curves are averaged over three models, each trained with a distinct random seed. 
+}
+\label{fig:failure}
+\end{figure}
+In the above discussion, we evaluated how stepwise inference assists a model in successfully completing a complex, multi-step task. We now assess how it fails.
+Specifically, assume that for a given graph $G$, the model produces a sequence of nodes $\blue{X_{s}} X_1 \dots X_k \dots X_{t}$ starting at the start node \blue{$X_s$}. 
+Following~\cite{saparov2023language, momennejad2023evaluating}, we define two categories of potential failures.
+\begin{itemize}[leftmargin=8pt, itemsep=1pt, topsep=-1pt, parsep=-1pt, partopsep=-1pt]
+\item \textbf{Misstep} $(X_k, X_{k+1}) \notin G$: An edge produced by the model does not exist in the DAG, commonly referred to as ``hallucinations''. 
+\item \textbf{Planning failure} $X_t \neq \textcolor{red}{X_{g}}$: The model produces a path that does not terminate at the goal node. 
+\end{itemize}
+
+\label{sec:mechinterp}
+\begin{figure*}[t]
+  \centering
+    \includegraphics[width=0.96\linewidth]{./figures/mechinterp_graph_figure.pdf}
+  \caption{\textbf{Mechanistic analysis of the graph navigation algorithm: Emergent linear representation.} (a) Attention maps from the 1-layer, attention-only Transformer, highlighting the model's attention on the goal token $\textcolor{red}{X_g}$ and the current token $X_{\text{current}}$. (b) Steps of our simplified algorithm that emulates the 1-layer, attention-only Transformer are as follows. 
+  (1.) We extract value embeddings for $\textcolor{red}{X_g}$ and $X_{\text{current}}$, ignoring other tokens for simplicity.
+  (2.) Next, we compute the value embeddings of the goal $v_{g}$ and current $v_{\text{current}}$ nodes and add them together $v = v_{g} + v_{\text{current}}$.
+  (3.) We then compute the token embedding with the highest inner product with $v$, approximating the token that receives the highest logit score after the single forward pass. 
+  (c) Comparison of the model's accuracy on a set of 500 held-out node pairs ($\textcolor{blue}{X_s}$, $\textcolor{red}{X_g}$) using our simplified algorithm (99.8\%) versus the full trained model (99.6\%). (d) The paths generated by the simplified algorithm almost exactly match the paths generated by the full trained model. Path similarity on 2000 held-out node pairs was compared by measuring the Levenshtein edit distance ~\citep{navarro2001guided} between paths generated by the full trained model and the simplified algorithm for the same $(\blue{X_s},\red{X_g})$ pairs. (e) The short path bias can be attributed to the inner products between the token embedding of the next chosen token $X_{\text{next}}$ and the value embedding of $\textcolor{red}{X_g}$ and $v_{g}$. We observe that nodes $X_{\text{next}}$ further away from $\textcolor{red}{X_g}$ have a lower inner product, indicating that the model's embedding of nodes reflects the underlying graph topology. The red line denotes the best least squares fit and has a slope of $-0.106$.
+}
+\label{fig:mechinterp}
+\end{figure*}
+In Fig.~\ref{fig:failure}, we examine the learning dynamics for each failure mode. The figure indicates that the model initially acquires the skill to circumvent missteps (the blue line). Subsequently, it develops the ability to plan effectively, which is shown by a decrease in planning failures (the red line). By integrating these abilities---avoiding missteps and minimizing planning failures---the model is finally able to generate accurate paths for node pairs not seen during training.
+
+\subsubsection{Mechanistic basis of the learned graph navigation algorithm}
+Our results above elicit several intriguing behaviors attributable to stepwise inference.
+We next take a more mechanistic lens to explain why these behaviors possibly occur.
+We hypothesize that the model learns embeddings for the nodes of the graph that enable easy computation of an approximate distance measure.
+This suggests that to move closer to the goal node, one can simply transition to the node that exhibits the least distance from the goal node.
+
+To verify this, we first strip the model down to a single-head, self-attention layer. We visualize the attention scores for this minimal model in Fig.~\ref{fig:mechinterp}a, observing they are are concentrated on the goal node and the current node.
+This suggests that the model utilizes only the embedding values of the goal $\red{X_{g}}$ and the current nodes $X_{\text{current}}$ to select the next token. 
+Inspired by this observation, we develop a simplified algorithm that mimics the behavior of the  model, as outlined in detail in Fig.~\ref{fig:mechinterp}b.
+First, we extract the value embeddings for $\textcolor{red}{X_g}$ and $X_{\text{current}}$ using the weight matrix $W_V$ from the self-attention layer, yielding $v_{g}$ and $v_{\text{current}}$, respectively. We then merge these embeddings into a single vector $v$, i.e., $v=v_{g}+v_{\text{current}}$. Finally, we determine the next token by identifying the node whose token embedding has the highest inner product with $v$. This operation mimics the logit computation in a full Transformer. 
+
+In Fig.~\ref{fig:mechinterp}c, we demonstrate the simplified algorithm retrieved via the process above matches the accuracy of the full trained model. 
+Furthermore, in Fig.~\ref{fig:mechinterp}d, we find that the paths generated by our simplified algorithm and those produced by the full trained model are nearly identical. Herein, we use a string edit distance metric~\citep{navarro2001guided} to quantify the similarity between the two sets of paths and find that over $75\%$ of paths are identical.
+Given that accuracy is computed over test nodes not seen in the training data, it is likely that the model encodes a notion of distance between two nodes on the graph in its embedding, as we hypothesized. 
+Indeed, in Fig.~\ref{fig:mechinterp}e, we find that the inner product of the embedding of $v_{g}$ with the token embeddings of $X_{\text{next}}$ is negatively correlated with the distance between these two nodes in the ground truth DAG; here, we used the average path length as a distance measure over the graph. 
+Since potential nodes with shorter paths to the goal node have a higher logit value, this implies they will be more likely to be predicted, thus showing the origin of the short path bias we observed in Sec.~\ref{subsec:short_path_bias}. This is a mechanistic explanation of the pattern-matching behavior of ~\citet{dziri2023faith} in the context of our task.
+
+
+
+
+\subsection{Navigation with exemplars}\label{sec:multi_graph}
+The single graph setting let us explore \emph{zero-shot} navigation and stepwise reasoning, where the model relied on knowledge internalized over pretraining for stepwise navigation towards a goal. Next, we study how context can influence the model generated paths, how subgoals that are provided in-context can guide the model's navigation, and how the content of the exemplars affects the navigation path chosen by the model. 
+Our results shed some light on and create hypotheses for (1) compositional generalization, (2) length generalization, and (3) impact of conflicting, long context.
+\subsubsection{Compositional generalization} 
+We find that the model can successfully follow the chain defined by the in-context exemplars. 
+An example output produced by the model is in Fig.~\ref{fig:dpg_both}(b), highlighting the path the model takes through the chain of motifs $ g_3 \rightarrow g_4 \rightarrow g_2 \rightarrow g_9$. 
+We also find that the model generalizes to arbitrary orders of motifs strung out, including those that did not occur consecutively in the training data, up to the length in the training data (see Fig.~\ref{fig:motif_length_generalization}). In other words, in-context control is capable of eliciting \textbf{\textit{compositional generalization}}~\citep{li2023dissectingcot}, if appropriately trained.~\ref{fig:attention_pattern_motif}).
+\subsubsection{Number of intermediate motifs}
+In Fig.~\ref{fig:motif_length_generalization}, we vary the number of exemplars provided to the model. This is equivalent to stringing together a longer chain of exemplar sequences across motifs to navigate over. 
+We define successful steering via a product of indicator variables that measure (i) whether the path ended at the specified goal and (ii) that each ghost edge, and thus the intermediate motif, was present in the path. We computed the probability by averaging over distinct source nodes from $g_{i_1}$ and sink nodes from $g_{i_K}$.
+We find that the model can generalize well to unseen orders of motifs up to the maximum number chained together in the training data, after which the model fails to navigate. 
+We hypothesize that even when using stepwise inference methods at scale, \textit{the model will fail to generalize to reasoning chains longer than those present in its training data.} 
+
+\begin{figure}
+\centering
+\includegraphics[width=0.85\linewidth]{./figures/motif_length_generalization.pdf}
+\caption{\textbf{In-context steerability and length generalization.} 
+\label{fig:motif_length_generalization}
+}
+\end{figure}
+
+\subsubsection{Primacy bias towards the first exemplar in the case of conflict}
+Language models are generally prompted with several exemplars in context. Some of these exemplars may have incorrect or even conflicting information with respect to other exemplars, for example in a multiple choice Q\&A task~\citep{hendrycks2020measuring, pal2022medmcqa, srivastava2022beyond}. 
+The model has to choose the relevant information between these exemplars to solve the specified task.
+Motivated by this, we quantitatively study the behavior of the model when a noisy context with exemplars with conflicting information are provided. Specifically, we study a case where two chains of motifs are used to design exemplars for our task, such that the exemplars start from the same set of initial and terminal motifs $g_{i_1}$ and $g_{i_T}$, but with distinct intermediate motifs $g_{\text{inter}}$ and $g'_{\text{inter}}$. 
+The model is then prompted with $\blue{X_s} \in g_{i_1}$ and $\red{X_g} \in g_{i_T}$, after in-context exemplars in order: $e_{g_{i_1}, g_{\text{inter}}}, e_{g_{\text{inter}}, g_{i_T}}, e_{g_{i_2}, g'_{\text{inter}}}, e_{g'_{\text{inter}}, g_{i_T}}$. 
+Results are shown in Fig.~\ref{fig:motif_conflict}. We find that the model does indeed navigate to the goal, thus following the prompt, but has a strong bias toward choosing a path defined by the first chain over the second, i.e., $g_{i_1} \rightarrow g_{\text{inter}} \rightarrow g_{i_T}$. 
+This result is similar to what happens at scale with large context windows, where content in the middle of a long context window is ignored~\citep{liu2023lost}.
+
+\begin{figure}
+\centering
+\includegraphics[width=0.8\linewidth]{./figures/motif_conflict_exemplar.pdf}
+\caption{\label{fig:motif_conflict}\textbf{How does the model handle conflicting exemplars?} To construct the context, we selected an initial motif $g_{i_1}$, a terminal motif $g_{i_T}$ and two intermediate motifs $g_{\text{inter}}$ and $g'_{\text{inter}}$. We string them together so that the motif has two possible paths: $g_{i_1} \rightarrow g_{\text{inter}} \rightarrow g_{i_T}$ and $g_{i_1} \rightarrow g'_{\text{inter}} \rightarrow g_{i_T}$. In this case of two conflicting chains in-context, the model has a bias to pick the chain that appears first in context. }
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this work, we introduced a synthetic graph navigation task to investigate the behavior, training dynamics, and mechanisms of Transformers under stepwise inference protocols. Despite its simplicity, our synthetic setup has provided key insights into the role of the structural properties of the data, a diversity-accuracy tradeoff in sampling, and a simplicity bias of stepwise inference protocols. In addition, we explored the model's navigation preferences and their controllability through in-context exemplars, modeled length generalization, and responses to longer contexts with conflicting exemplars.  Like all papers that rely on synthetic abstractions, our goal was to develop such hypotheses to explain an interesting phenomena seen in practical scenarios. 
+A promising future direction for our work thus is to test the hypotheses we have formulated in large language models, as well as generalize and test the mechanistic interpretation of the learned Transformer algorithm in practical scenarios.
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,303 @@
+\title{Constrained Decoding for Cross-lingual Label Projection}
+
+\begin{abstract}
+
+Zero-shot cross-lingual transfer utilizing multilingual LLMs has become a popular learning paradigm for low-resource languages with no labeled training data. However, for NLP tasks that involve fine-grained predictions on words and phrases, the performance of zero-shot cross-lingual transfer learning lags far behind supervised fine-tuning methods. Therefore, it is common to exploit translation and label projection to further improve the performance by (1) translating training data that is available in a high-resource language (e.g., English) together with the gold labels into low-resource languages, and/or (2) translating test data in low-resource languages to a high-source language to run inference on, then projecting the predicted span-level labels back onto the original test data. However, state-of-the-art marker-based label projection methods suffer from translation quality degradation due to the extra label markers injected in the input to the translation model. In this work, we explore a new direction that leverages constrained decoding for label projection to overcome the aforementioned issues. Our new method not only can preserve the quality of translated texts but also has the versatility of being applicable to both translating training and translating test data strategies. This versatility is crucial as our experiments reveal that translating test data can lead to a considerable boost in performance compared to translating only training data. We evaluate on two cross-lingual transfer tasks, namely Named Entity Recognition and Event Argument Extraction, spanning 20 languages.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Large language models (LLMs) have demonstrated the potential to perform a variety of NLP tasks in zero or few-shot learning settings.  This is attractive because labeling data is expensive --- annotating fine-tuning data across many languages for each task is not feasible.
+However, for traditional NLP tasks that involve word/phrase-level predictions, such as named entity recognition or event extraction, the performance of zero and few-shot learning lags far behind supervised fine-tuning methods that make use of large amounts of labeled data \citep{lai2023chatgpt}.  
+Prior work has therefore trained multilingual models that support cross-lingual transfer from a high-resource language (e.g., English), where fine-tuning data is available to many low-resource languages where data may not be available (e.g., Bambara, which is spoken primarily in Africa).  Encoder-based LLMs such as XLM-RoBERTa \citep{conneau-etal-2020-unsupervised} or mDeBERTa \citep{he2021deberta} work surprisingly well for cross-lingual transfer, yet the performance of models that are fine-tuned on target-language data is still significantly better \citep{xue2021mt5}.  Motivated by this observation, we present a new approach to automatically translate NLP training datasets into many languages that uses constrained decoding to more accurately translate and project annotated label spans from high to low-resource languages.
+
+Our approach builds on top of EasyProject \citep{chen-etal-2023-frustratingly}, a simple, yet effective state-of-the-art method for label projection, that inserts special markers (see Figure \ref{subfig:easyproject}) into the source sentences to mark annotated spans, then runs the modified sentences through a machine translation (MT) system, such as NLLB \citep{costa2022no} or Google Translate. A key limitation of EasyProject, as noted by \citet{chen-etal-2023-frustratingly}, is that inserting special markers into the source sentence then translating it degrades the translation quality; nevertheless, EasyProject was shown to be more effective than prior work for label projection that largely relied on word alignment \citep{yarmohammadi2021everything}. To address the problem of translation quality degradation, in this paper, we present a new approach, \textbf{Co}nstraint \textbf{De}coding for \textbf{C}ross-lingual Label Projection (\CD), for translating training datasets using a customized constrained decoding algorithm. The training data in the high-resource language is first translated {\em without markers} followed by a second constrained decoding pass to inject the markers (see Figure \ref{subfig:codec}). Since the source sentence does not include markers during the translation phase, the final translated text quality from \CD~is preserved. The second decoding pass of \CD~relies on a translation model that is conditioned on the modified input sentence {\em with markers} (thus is noisier) in order to find the appropriate positions for inserting markers. Using a specially designed constrained decoding algorithm, however, we can retain the high-quality translation while having the right number of labels projected by enforcing both as constraints during decoding. 
+
+\begin{comment}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.95\linewidth]{iclr2024/images/overview_v2.pdf}
+    \caption{An illustration of \textbf{EasyProject} \citep{chen-etal-2023-frustratingly} (left) and \textbf{\CD~} (right). Left: The source sentence is first injected with marker pairs around entities, it is then translated to the target language, and a span-matching step is performed to map each span to the corresponding label. This method has issues related to the translation quality (e.g., "France" is not translated). Right: the source sentence is first translated to the target language, given the source sentence with marker injected, \CD~ then performs constrained decoding to insert markers to the translated sentence. }
+    \label{fig:overview}
+\end{figure}
+\end{comment}
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[t]{0.42\textwidth}
+        \captionsetup{justification=centering}
+        \includegraphics[width=\linewidth]{iclr2024/images/ezproject.pdf}
+        \caption{\textbf{EasyProject} \citep{chen-etal-2023-frustratingly}: \\ Translate w/ markers}
+        \label{subfig:easyproject} 
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.56\textwidth}
+        \centering
+        \captionsetup{justification=centering}
+        \includegraphics[width=\linewidth]{iclr2024/images/codec_oveview.pdf}
+        \caption{\textbf{\CD}: Translate w/o markers then \\ insert markers with constrained decoding}
+        \label{subfig:codec}
+    \end{subfigure}
+    \caption{The goal of label projection is to automatically construct annotated data in low-resource language (e.g., Bambara) by translating from annotated data in high-resource language (e.g., English) while preserving the span-level labels. \textbf{EasyProject} (Left): The source sentence is first injected with marker pairs around entities and then translated to the target language; a span-matching step is performed to map each span to the corresponding label (i.e., types of entities). This method has issues related to the translation quality (e.g., the word ``France'' is not properly translated), due to the existence of markers in the input to the translation model. \textbf{\CD} (Right): The source sentence is first translated to the target language, given the source sentence without marker injected, \CD~then performs constrained decoding to insert markers to the translated sentence.}
+    \label{fig:overview}
+\end{figure}
+
+In essence, \CD~only explores the search space which contains valid hypotheses, i.e., translated outputs that conform to (i) the high-quality translation from the first decoding pass without markers' interference and (ii) having the correct number of markers inserted.  A brute-force enumeration of all possible such hypotheses is intractable, as the number of sequences that would need to be scored using the translation model is $O(n^{2m})$, where $n$ is the sequence length and $m$ is the number of labeled spans to be projected, as we show in \S \ref{sec:constrained_decoding}.  We therefore design a constrained decoding algorithm based on the branch-and-bound method \citep{stahlberg-byrne-2019-nmt}, in which a depth-first search is conducted to identify a lower-bound on the best complete hypothesis, and branches that do not have any solutions with a better score than the current lower bound are pruned from the search space.
+However, even when pruning branches using this bound, decoding time is still prohibitively long. 
+To speed up decoding, we introduce a new \textit{heuristic lower bound}, which removes branches more aggressively.  We also introduce a technique to prune unlikely positions for the opening markers in advance. Putting everything together, compared to exact branch-and-bound search, our proposed method significantly reduces decoding time with only a slight drop in performance in a few languages.  For example, for the Bambara language, \CD~is about 60 times faster than exact search, while only losing 0.6 absolute F1, a 1.1\% drop in performance. 
+
+We conduct extensive experiments to evaluate \CD~on two popular cross-lingual tasks (i.e., Named Entity Recognition and Event Argument Extraction), covering 20 language pairs. In our experiment, \CD~and other label projection baselines are used to project the label from English datasets to their translated version to augment the data in the target language, which is referred to as \textit{translate-train} \citep{hu2020xtreme}. The results demonstrate that, on average, the model fine-tuned on \CD-augmented data outperforms models fine-tuned on the data produced by other label projection baselines by a large margin. This reinforces our hypothesis that preserving translation quality is essential and constrained decoding can improve the accuracy of label projection. Moreover, since \CD~separates two phases of translation and marker insertion, it can also be used to improve cross-lingual transfer by using machine translation at inference time, sometimes referred to as {\em translate-test} \citep{artetxe2023revisiting}.  This approach translates test data from the low-resource language to the high-resource language, uses a fully-supervised NLP model to automatically annotate the translation on the high-resource side, then projects the annotations back to the original language. Experiments show that, compared to translate-train alone, using \CD~in the translate-test setting further boosts cross-lingual transfer performance in the Named Entity Recognition task.
+
+
+
+
+
+
+\begin{comment}
+Leveraging knowledge learned from downstream data in high-resource language (e.g., English) to solve the task on the low-resource side has been a long-term goal in NLP. Even though the recent multilingual language models, after being fine-tuned on high-resource language, can perform zero-shot transfer on other languages to a certain extent, their performance is still far behind the fine-tuned monolingual model \citep{hu2020xtreme, chen-etal-2023-frustratingly}. A simple yet effective approach to reduce the gap in performance is to utilize Machine Translation (MT) systems, to augment the training data on the low-resource language (i.e., translate-train), or translate the data to the high-resource side and do inference (i.e., translate-test). Given the simplicity and effectiveness, the two approaches cannot directly be applied to tasks with span-level annotation, e.g., Named Entity Recognition, since it is non-trivial to detect the label span after the translation. For these kinds of tasks, an additional step of projecting label spans from the source to the target language is required.
+
+There has been a lot of research that involves projecting label span between parallel data. A popular and straightforward approach is to utilize word alignment tools to project the label span between the source and target sentence \citep{akbik-etal-2015-generating, aminian-etal-2019-cross}. However, this approach raises the need for a word aligner, which may add complexity to the process. With the advancement of the MT systems, several recent efforts have adopted the mark-then-translate approach, which directly uses the MT system to do the label projection \citep{lee2018semi, hu2020xtreme, lewis-etal-2020-mlqa, chen-etal-2023-frustratingly}. Mark-then-translate involves injecting special markers (e.g., XML tag, square bracket) around label spans in the source sentence before translating, and label spans in the target sentence can be detected by tracking the markers. Given the simplicity, mark-then-translate shows superior performance to the alignment-based methods on a wide range of tasks and languages \cite{chen-etal-2023-frustratingly}. Even though mark-then-translate shows promising results, it still has some limitations. In the same work, the authors also raise concerns about the inevitable degradation of the translation quality when translating with marker injected. In addition, mark-then-translate is currently limited to translate-train, and cannot be utilized for translate-test, which has recently been shown to have better performance than the former approach in many cases \citep{artetxe2023revisiting}. Therefore, in this work, we study an unexplored direction of using constrained decoding for mark-then-translate to address the aforementioned limitations. In our proposed approach, we separate the mark-then-translate process into two phases: (1) translating the original sentence to the target language (without marker pairs around label spans) and (2) injecting marker pairs into the translated sentence so that it is equivalent to the source sentence with marker injected. With the separation, the first phase can be done independently by utilizing any powerful MT system, and since we translate the original sentence, the translation quality is preserved. Moreover, the separation also enables our approach to be applicable to translate-test. 
+\end{comment}
+
+
+
+
+
+
+\section{Label Projection as Constrained Translation}
+
+\label{sec:formulation}
+In this section, we describe how we formulate Label Projection as a constrained generation problem before proposing to tackle it by designing a constrained decoding algorithm (detailed in \S \ref{sec:constrained_decoding}). %The details about the constrained decoding algorithm will be discussed in \S \ref{sec:constrained_decoding}. 
+Given a source sentence with label spans and its translation in the target language, our goal is to map the label spans from the source to the target sentence. Formally, let $x$ be the source sentence with $m$ labeled spans (e.g., $m$ named entities) and $x^{mark}$ be the same text as $x$ but with $m$ pairs of special markers (e.g. square brackets) surrounding every label span. In previous work, an MT model will find the translation $y^{mark}$ of the sentence with markers inserted, $x^{mark}$:
+\begin{equation}
+    y^{mark} = \argmax_y \log P_{\tau}(y | x^{mark})
+\end{equation}
+where $\tau$ is a machine translation (MT) system. However,
+as previous work has found that inserting markers degrades translation quality \citep{chen-etal-2023-frustratingly}, we introduce a variant of the approach.  Our approach uses the translation of the source sentence without markers, which will act as a \textit{template} to be injected with markers later to create the annotated sentence in the target language:
+\begin{align}
+    y^{tmpl} &= \argmax_y \log P_{\tau}(y | x)
+\end{align}
+In general, without the interference of special markers in the input, the translation $y^{tmpl}$ is expected to have higher quality than $y^{mark}$, as shown in \citep{chen-etal-2023-frustratingly}. Let $\mathcal{Y}$ be the set of all possible valid hypotheses with $m$ marker pairs injected into $y^{tmpl}$. In our work, we do not consider the case of overlapped or nested label spans, thus the size of $\mathcal{Y}$ is ${{n + 2m} \choose {2m}}$ or $O(n^{2m})$, where $n$ is the length (\# of tokens) of $y^{tmpl}$. 
+
+
+Our goal is to find the best hypothesis $y^*$ from $\mathcal{Y}$, in which all the markers are inserted at correct positions into $y^{tmpl}$ with each span found in $y^*$ mapped to its corresponding label in $x^{mark}$. We can cast this task as a constrained translation problem, which enforces two constraints: (i) $y^*$ contains exactly $m$ valid pairs of markers as $x^{mark}$ (i.e., no mismatched brackets)  and (ii) the plain text (with all markers removed) of $y^*$ is the exactly the same as $y^{tmpl}$. Consequently, we can solve this problem by designing a specialized constrained decoding algorithm, which explores every hypothesis in the search space $\mathcal{Y}$ and finds the one with the highest generative probability:
+\begin{align}
+    y^* &= \argmax_{y \in \mathcal{Y}} \log P_{\tau} (y | x^{mark}; y^{tmpl}) \\
+    \log P_{\tau}(y | x^{mark}; y^{tmpl}) &= \sum_{i=1}^n \log P_{\tau}(y_i | y_{<i}, x^{mark}; y^{tmpl}) \label{eq:logprob}
+\end{align}
+
+Starting with a translation prefix $\epsilon$ (e.g., a language code $\texttt{<bam>}$), the decoding algorithm will iteratively expand the hypothesis; when the end-of-sentence token (i.e., $\texttt{</s>}$) is generated, a candidate projection of the labeled spans is found. 
+
+
+\section{Constrained Decoding}
+
+\label{sec:constrained_decoding}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.95\linewidth]{iclr2024/images/codec.pdf}
+    \caption{The first two steps of \CD. \textbf{Step 1} (Left): \CD~prunes search branches based on unlikely opening marker positions in the target language by comparing probabilities conditioned on the source language with and without span markers inserted.
+    \textbf{Step 2} (Right): A branch-and-bound search algorithm is used to find $k$ hypotheses with the highest probabilities ($k=3$). From each node of the search tree (e.g., ``Faransi''), \CD~expands to the next token from the translation template $y^{tmpl}$ (e.g., ``ni'') or a marker (i.e., ``['' or ``]''). A search branch is pruned if its score falls below a heuristic lower bound. Two branches of different lengths might have different values of lower bound (e.g., the lower bound for the top and bottom branches are -3.1 and -2.8, respectively). 
+    }
+    \label{fig:cd}
+\end{figure}
+In this section, we will propose a constrained decoding algorithm, \CD, particularly designed for cross-lingual transfer learning. It uses approximation to reduce the computational complexity of the original problem and a ranking method to identify hypotheses with accurate span projections. \CD~has three main steps: (1) prune all unlikely opening-marker positions, (2) search for k hypotheses with the highest probability, and (3) re-rank to find the best hypothesis. 
+
+
+
+
+\subsection{Problem approximation} 
+
+As discussed in \S \ref{sec:formulation}, if we naively project $m$ label spans into the template translation $y^{tmpl}$, the research space $\mathcal{Y}$ has a size of $O(n^{2m})$ where $n$ is the number of tokens in $y^{tmpl}$. Therefore, instead of solving this $m$-projection problem, we propose to address $m$ 1-projection problems, whose search space is only $ {{n + 2} \choose {2}}$ or $O(n^2)$ each, and approximate the original solution by combining the solutions from the m problems. In other words, we will project $m$ sentences, each of which only contains one label span surrounded by one marker pair. This approximation also brings another merit, since there is only one span projected at a time, we can identify the label of the span (e.g., types of entities) on the target language without the need for the label matching step as in EasyProject (see Figure ~\ref{subfig:easyproject}).
+
+\subsection{Pruning Opening-marker Positions}
+
+To further reduce the search space and speed up the decoding algorithm, we propose a heuristic method to detect which position in the translation template can be inserted with the opening marker (e.g., left square bracket `['). During the search process, all hypotheses that have the opening marker inserted in other positions will get pruned. The key idea of our method is to track the difference in conditional word (more accurately subword token) probabilities of generating the same translation template, when being conditioned on two different inputs: the source sentence with and without markers. The intuition is that, if we decode the translation template but conditioned on the marker sentence, at the position that needs to be inserted an opening marker, the model would give a high probability to this token, and consequently, it would assign a low probability to the token from the template. This intuition is illustrated in Figure~\ref{fig:cd} (Step 1). Formally, we define $\Delta_i$ as the difference of the two log-probabilities when generating the $i$\textsuperscript{th} token from the template:
+\begin{equation}
+    \Delta_i = | \log P(y^{tmpl}_i | y^{tmpl}_{<i}, x^{mark}) - \log P(y^{tmpl}_i | y^{tmpl}_{<i}, x) |
+\end{equation}
+where ${y^{tmpl}_{<i}}$ indicates all tokens before the $i$\textsuperscript{th} token and, from hereon, $P$ is used in place of $P_{\tau}$ for simplicity. We determine the possible positions of the opening marker by choosing all $i$ with a high value of $\Delta_i$ (i.e., larger than a threshold). All hypotheses, which have the opening marker inserted at other positions, are pruned during the search.
+\subsection{Searching for top-$k$ hypotheses}
+\label{subsec:search}
+
+According to our preliminary study, the hypothesis with the highest probability in many cases is not necessarily the best output, i.e., the one with markers injected correctly. This is typically called \textit{(translation) model error} in machine translation research, in contrast to \textit{search error}, where the highest scored sequence is a good translation but the decoding algorithm (often approximate search) fails to find it. Previous research on translation decoding \citep{stahlberg-byrne-2019-nmt, eikema2020map} also found that model errors occur very often when using the exact search. 
+
+To address this problem, we propose to first find top-$k$ hypotheses with the highest probabilities, then use a ranking function (details in \S \ref{subsec:postprocess}) to choose the best one (i.e., re-ranking). The main idea is to traverse the entire search space in a depth-first order and adopt the branch-and-bound method \citep{stahlberg-byrne-2019-nmt} to reduce the decoding time --- see Figure~\ref{fig:cd} for an illustration. Compared to the search algorithm in the previous work \citep{stahlberg-byrne-2019-nmt}, \CD~uses a different search strategy to enforce additional constraints for label projection. More specifically, in order for the generated text to follow the translation template, at each decoding iteration, the decoding scheme only considers at most two candidates for the next token: the next token from the template and the next span marker. Besides the search strategy, \CD~also introduced a new heuristic lower bound. Before presenting the lower bound of \CD, we first discuss the one introduced by \citet{stahlberg-byrne-2019-nmt} and the reason why we need to define a new lower bound for this task. The purpose of the lower bound is to prune branches that do not have any solutions with a better score. The score of a branch, which has expanded a sequence to the length of $j$ (i.e., $y_{1:j}$), is the generative log-probability of this sequence (i.e., $\log P(y_{1:j} | x^{mark}) = \sum_{i=1}^j \log P(y_{i} | y_{<i}, x^{mark})$). Previous work has defined an exact lower bound as the log-probability of the current best hypothesis. Generally, let $y^k$ be the hypothesis whose log-probability is the $k$\textsuperscript{th} highest at a specific time during the search ($k=1$ when only need to find the best hypothesis). Let $L^k$ be a list containing generative log-probabilities of all prefix of $y^k$ (i.e., $L^k_j = \log P(y^k_{1:j} | x^{mark})$). The exact lower bound is defined as:
+\begin{equation}
+    \gamma^{exact} = L^k_{|y^k|}
+\end{equation}
+One problem with the exact lower bound is that it uses the probability of a complete hypothesis (i.e., the hypothesis ends with \texttt{</s>}) to define the lower bound. This probability is often small, and thus cannot prune off short partial hypotheses early enough. As illustrated in Figure~\ref{fig:cd} (Step 2), the exact lower bound with $k=3$ at this search stage is $-36.7$, much smaller than the log-probabilities of other expanded partial hypotheses. Therefore, we propose a heuristic lower bound, whose value changes according to the length of each partial hypothesis (i.e., having a larger value when compared to shorter partial hypotheses), to help expedite the pruning. The heuristic lower bound for a partial hypothesis of length $j$ is defined as:
+\begin{align}
+    \gamma &= L^k_{d} \label{eq:lowerbound}\\
+    d &= \min\left( \max \left(j + \delta, q \right), |y^k| \right) \label{eq:8}
+\end{align}
+where $q$ is the position of the opening marker in $y^k$ ($q=0$ if the marker is not selected yet) and $\delta$ is a hyperparameter of the lower bound. The lower bound with a larger value of $\delta$ is closer to the exact lower bound. With the new lower bound, \CD~can prune off the expanding hypotheses as shown in Figure~\ref{fig:cd} (Step 2).
+\subsection{Re-ranking}
+\label{subsec:postprocess}
+
+The goal of this step is to pick the best hypotheses, which have markers injected in the correct positions, among the top-$k$ candidates found in the previous step (\S \ref{subsec:search}). Two scores are used for this purpose: (i) hypothesis-level score: the generative log-probability of a hypothesis (Eq \ref{eq:logprob}) and (ii) span-level score: the log-probability of generating the original span given the label span found in a hypothesis. In particular, for a label span $e^{src}$ in the source sentence, we have $k$ hypotheses of projecting $e^{src}$ to the target language after the search step. Let $e^{tgt}_i$ be the label span found in the i\textsuperscript{th} hypothesis. The span-level score of the hypothesis i\textsuperscript{th} is defined as:
+\begin{equation}
+    S^{span}_i = \log P(e^{src} | e^{tgt}_i)
+\end{equation}
+The same MT model is used to compute both hypothesis-level and span-level scores. The $k$ hypotheses are first ranked by the hypothesis-level score. The span-level score is then used to re-rank all hypotheses, whose label spans are equal to or are subsequences of the label span of the current top-1 hypothesis. The best hypothesis is the new top-1 after the re-ranking.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We evaluate \CD~on two benchmark cross-lingual NLP tasks, including Named Entity Recognition and Event Argument Extraction, covering 20 languages in total. 
+
+\subsection{Datasets}
+
+For Named Entity Recognition (NER), we use English CoNLL03 \citep{tjong-kim-sang-2002-introduction} as train/dev data and use MasakhaNER2.0 \citep{adelani-etal-2022-masakhaner} which consist of human-labeled data for 20 African languages as test data. Following \citet{chen-etal-2023-frustratingly}, we consider three main types of entities (i.e., person, organization, and location) in the dataset and skip Ghomala and Naija (two languages that NLLB does not support). We conduct experiments on MasakhaNER2.0, instead of WikiANN \citep{pan-etal-2017-cross}, as the latter was automatically constructed dataset and contains a higher level of noises \citep{lignos-etal-2022-toward}. For Event Argument Extraction (EAE), we use the ACE-2005 \citep{doddington-etal-2004-automatic}, a multilingual dataset that covers English, Chinese, and Arabic. The task is to identify the event arguments and their roles in the text given the event triggers. We use the English training sets of CoNLL03 \citep{tjong-kim-sang-2002-introduction} and ACE-2005 to act as the source language to perform cross-lingual transfer for the NER and EAE tasks, respectively. 
+
+\subsection{Experimental settings and results}
+\label{subsec:exp_setup}
+\paragraph{Setup} 
+We use NLLB (No Language Left Behind) as the translation model \citep{costa2022no} in our experiments. We fine-tune mDeBERTa-v3 (276M) to act as a NER tagger following \citep{chen-etal-2023-frustratingly}; and fine-tune mT5-large \citep{xue2021mt5} following the X-Gear framework \citep{huang-etal-2022-multilingual-generative} for EAE. For a direct comparison with existing work \citep{chen2023better,chen-etal-2023-frustratingly,huang-etal-2022-multilingual-generative}, we report the average F1 scores across five random seeds for NER and three random seeds for EAE.
+
+
+\paragraph{Baselines} We compare \CD~with the following baselines: (1) \textbf{EasyProject} \citep{chen-etal-2023-frustratingly}: a state-of-the-art marker-based label projection approach; (2) \textbf{Awes-align}: an alignment-based label projection approach, in which the state-of-the-art word aligner \citep{dou-neubig-2021-word} is used to align the text spans between the source and target sentences; (3) \textbf{FT\textsubscript{En}}: the multilingual models (the ones described in ``Setup'' above) fine-tuned directly on the English data, which have shown to be a very strong baseline for cross-lingual transfer; (4) \textbf{GPT-4}: in the cross-lingual NER task, we also prompt GPT-4-0613  \citep{achiam2023gpt} to annotate each word using BIO scheme, following \cite{chen2023better}. Due to cost constraints, we only evaluate GPT-4 on 200 examples for each language of MasakhaNER2.0. EasyProject uses an NLLB model fine-tuned on a synthetic dataset as the MT model, in which the marker pairs are inserted around the label spans in both source and target sentences. We also use the fine-tuned version of NLLB-600M that they provide in \CD~for a more fair comparison. 
+
+\begin{table}[t]
+    \small
+    \begin{center}
+    \caption{Cross-lingual NER results on the test set of MasakhaNER2.0 (the best F1 score of a language is in \textbf{bold}, $\Delta_{FT}$: calculated against $FT_{En}$, $\dagger$: GPT-4 is evaluated on a subset of 200 examples from the test set of each language due to cost constraints). On average, \CD~outperforms other approaches by a large margin especially when used with the translate-test strategy; EasyProject is not applicable to translate-test. }
+    \label{tab:masakhaner}
+    \resizebox{0.95\linewidth}{!}{%
+    {\renewcommand{\arraystretch}{1}
+    \begin{tabular}{cccccccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Lang.}} & \multicolumn{1}{c}{\multirow{2}{*}{GPT-4\textsuperscript{$\dagger$}}} & \multicolumn{1}{c}{\multirow{2}{*}{FT\textsubscript{En}}} & \multicolumn{3}{c}{\textbf{Translate-train}} & \multicolumn{2}{c}{\textbf{Translate-test}} \\
+    \cmidrule(lr){4-6} \cmidrule(lr){7-8} 
+    & \multicolumn{1}{c}{} & \multicolumn{1}{c}{} & Awes-align     & EasyProject    & \CD~($\Delta_{\text{FT}}$)\hfill      & Awes-align             & \CD~($\Delta_{\text{FT}}$)              \\
+    \midrule
+    Bambara & 46.8 & 37.1 & 45.0 & 45.8 & 45.8 (+8.7)\hfill & 50.0 & ~~\textbf{55.6} (+18.5)\hfill \\
+    Ewe & 75.5 & 75.3 & 78.3 & 78.5 & \textbf{79.1} (+3.8)\hfill & 72.5 & \textbf{79.1} (+3.8)\hfill \\
+    Fon & 19.4 & 49.6 & 59.3 & 61.4 & ~~\textbf{65.5} (+15.9)\hfill & 62.8 & ~~61.4 (+11.8)\hfill\\
+    Hausa & 70.7 & 71.7 & 72.7 & 72.2 & 72.4 (+0.7)\hfill & 70.0 & \textbf{73.7} (+2.0)\hfill\\
+    Igbo & 51.7 & 59.3 & 63.5 & 65.6 & ~~70.9 (+11.6)\hfill & \textbf{77.2} & ~~72.8 (+13.5)\hfill\\
+    Kinyarwanda & 59.1 & 66.4 & 63.2 & 71.0 & 71.2 (+4.8)\hfill & 64.9 & 
+    ~~\textbf{78.0} (+11.6)\hfill\\
+    Luganda & 73.7 & 75.3 & 77.7 & 76.7 & 77.2 (+1.9)\hfill & \textbf{82.4} & 82.3 (+7.0)\hfill\\
+    Luo & \textbf{55.2} & 35.8 & 46.5 & 50.2 & ~~49.6 (+13.8)\hfill & 52.6 & ~~52.9 (+17.1)\\
+    Mossi & 44.2 & 45.0 & 52.2 & 53.1 & ~~\textbf{55.6} (+10.6)\hfill & 48.4 & 50.4 (+5.4)\\
+    Chichewa & 75.8 & \textbf{79.5} & 75.1 & 75.3 & 76.8 (-2.7)\hfill & 78.0 & 76.8 (-2.7)\\
+    chiShona & 66.8 & 35.2 & 69.5 & 55.9 & ~~72.4 (+37.2)\hfill & 67.0 & ~~\textbf{78.4} (+43.2)\\
+    Kiswahili & 82.6 & \textbf{87.7} & 82.4 & 83.6 & 83.1 (-4.6)\hfill & 80.2 & 81.5 (-6.2)\\
+    Setswana & 62.0 & 64.8 & 73.8 & 74.0 & 74.7 (+9.9)\hfill & \textbf{81.4} & ~~80.3 (+15.5)\\
+    Akan/Twi & 52.9 & 50.1 & 62.7 & 65.3 & ~~64.6 (+14.5)\hfill & 72.6 & ~~\textbf{73.5} (+23.4)\\
+    Wolof & 62.6 & 44.2 & 54.5 & 58.9 & ~~63.1 (+18.9)\hfill & 58.1\hfill & ~~\textbf{67.2} (+23.0) \\
+    isiXhosa & 69.5 & 24.0 & 61.7 & \textbf{71.1} & ~~70.4 (+46.4)\hfill & 52.7 & ~~69.2 (+45.2)\\
+    Yoruba & \textbf{58.2} & 36.0 & 38.1 & 36.8 & 41.4 (+5.4)\hfill & 49.1 & ~~58.0 (+22.0)\\
+    isiZulu & 60.2 & 43.9 & 68.9 & 73.0 & ~~\textbf{74.8} (+30.9)\hfill & 64.1 & ~~\textbf{76.9} (+33.0)\\
+    \midrule
+    AVG & 60.4 & 54.5 & 63.6     & 64.9           & 67.1 (+12.7)   & 65.8             & ~~\textbf{70.4} (+16.0)    \\
+    \bottomrule
+    \end{tabular}
+    }}
+    \end{center}
+\end{table}
+\paragraph{Results} 
+
+Table \ref{tab:masakhaner} shows the performance of different approaches on the test set of MasakhaNER2.0. 
+On average, label projection methods outperform both GPT-4 and FT\textsubscript{En} by a large margin. Among the label projection methods, \CD~achieves the best results in both translate-train and translate-test settings, on average. Compared to EasyProject, a similar method to \CD~but using a different decoding algorithm, \CD~has achieved better or comparable performance in most of the languages, with improvements of at least 1.5 F1 in nine languages. The improvement is especially evident for the chiShona language, which is +16.5 F1. Having higher translation quality may be the reason why \CD~can outperform EasyProject in many languages. One noticeable issue with the translation of EasyProject is that the label spans are more often left untranslated (similar to the example in Figure~\ref{subfig:easyproject}). In addition, we observe that cross-lingual NER in African languages favors translate-test approaches more than translate-train overall. Compared to when being used in the translate-train setting, both \CD~and Awes-align have significant increases in the translate-test. In the translate-test setting, \CD~also shows better results than the latter method in 13 out of 18 languages. Another interesting observation is that FT\textsubscript{En} achieves the best performance in Chichewa and Kiswahili, likely because the entities in these two languages are often kept the same as their English form. Therefore, fine-tuning the NER model on English data only is sufficient for the two languages in this setting. As for the EAE task, we observe a similar trend in Table \ref{tab:ace} that \CD~outperforms the other label projection approaches on average. In each language, \CD~also has comparable or better performance than each baseline. We only report the performance in the translate-train setting for the EAE task, because the typical experiment setup requires the gold event trigger as input, but for translate-test, this information in English can only achieved by another pass of label projection (from a target language to English) during inference time.
+
+
+\subsection{Ablation study}
+\label{subsec:ablation}
+In this section, we study the efficiency and accuracy of the two heuristic steps in \CD.
+
+\begin{wraptable}{R}{0.48 \linewidth}
+    \small
+    \begin{center}
+    \caption{F1 scores of different methods on ACE-2005 dataset in the translate-train setting.}
+    \label{tab:ace}
+    \setlength{\tabcolsep}{3pt}
+    {\renewcommand{\arraystretch}{1}
+    \begin{tabular}{ccccc}
+    \toprule
+    Lang.  & FT\textsubscript{en} &  Awes-align & EasyProject & \CD \\
+    \midrule
+    Arabic  & 44.8 & 48.3 & 45.4 & \textbf{48.4} \\
+    Chinese & 54.0 & 57.3 & \textbf{59.7} & 59.1 \\
+    \midrule
+    AVG     & 49.4 & 52.8 & 52.6 & \textbf{53.8} \\
+    \bottomrule
+    \end{tabular}}
+    
+    \end{center}
+\end{wraptable}
+\paragraph{Setup} We modify each module of \CD~and evaluate the performance of each setting in translate-dev on a sample of MasakhaNER2.0 dev set for five languages (i.e., Bambara, Fon, Mossi, Yoruba, and isiZulu). We evaluate the performance of \textbf{exact (+re\_rank)}: exact search algorithm, similar to \CD~except using the exact lower bound (discussed in \S \ref{sec:constrained_decoding}) and does not prune the opening marker positions; \textbf{exact}: similar to exact (+re\_rank) but does not conduct the re-ranking and only return hypothesis with the highest probability; \textbf{\CD~($\delta$=1)}, \textbf{\CD~($\delta$=3)}: \CD~ with different value of $\delta$, the hyperparameter of the heuristic lower bound in Eq. (\ref{eq:8}); \textbf{\CD~($\delta$=1+[)}, \textbf{\CD~($\delta$=3+[)}: \CD~ with different values of $\delta$ and does pruning the opening-marker positions. Since the exact search takes an extremely long time to complete, we sample only 100 examples with up to 5 label spans for each language.
+
+\paragraph{Results} The performance and decoding time of different search settings are shown in Figure \ref{fig:f1_ablation} and Figure \ref{fig:time_ablation}, respectively. Firstly, compared to \textit{exact (+re-rank)}, only returning the hypothesis with the highest probability (\textit{exact}) resulted in a significant drop in performance in all languages. This observation shows the necessity of the re-ranking step to choose the best hypothesis. In terms of the heuristic lower bound, \CD~($\delta$=3) has roughly the same F1 as \textit{exact (+re-rank)}, showing that the heuristic lower bound with $\delta=3$ is a good approximation of the exact lower bound while having a much better decoding speed. Finally, pruning the opening marker positions further speeds up the decoding speed by at least about 1.4 times when $\delta=3$, while causing only a slight drop of F1 (the biggest drop is 0.7 absolute F1 in Yoruba). One interesting observation is that pruning the possible opening-marker position can boost the performance in many cases (i.e., all languages when $\delta=1$; Fon, Mossi, and isiZulu when $\delta=3$). One explanation is that the translation model is imperfect and may give bad hypotheses high probabilities, sometimes even higher than the probability of the correct hypothesis. With the marker-position pruning step, those noisy hypotheses are avoided.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.47\textwidth}
+        \includegraphics[width=\linewidth]{iclr2024/images/ablation_study/F1_ablation.pdf}
+        \caption{F1 scores on dev set (translate-dev).}
+        \label{fig:f1_ablation} 
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.51\textwidth}
+        \includegraphics[width=\linewidth]{iclr2024/images/ablation_study/time_ablation.pdf}
+        \caption{Average decoding time per example.}
+        \label{fig:time_ablation}
+    \end{subfigure}
+    \caption{Ablation study on MasakhaNER2.0 dev set of different search settings for five languages, including Bambara (\textit{bam}), Fon (\textit{fon}), Mossi (\textit{mos}), Yoruba (\textit{yor}), and isiZulu (\textit{zul}). \textbf{exact (+re-rank)}: exact search with re-ranking; \textbf{exact}: exact search and return the top-1 hypothesis. `$\delta$' is the hyperparameter of the heuristic lower bound. `+ [' indicates pruning unlikely opening-marker positions beforehand. Compared to constrained decoding with exact search, \CD~with $\delta=3$ significantly reduces the decoding time, while retaining the performance measured by F1 scores.}
+\end{figure}
+
+
+
+\section{Manual assessment of \CD ~and Discussion}
+
+
+In this section, we analyze the behavior of each sub-component in \CD. In particular, we manually inspect outputs of \CD~when being used in translate-train and translate-test settings for the cross-lingual NER task from English to Chinese and Vietnamese (100 examples are inspected for each language). We categorize them into error types based on the source of errors: (1) \textbf{Translation}: error from the MT model, (2) \textbf{NER}: error from the NER tagger (translate-test only), (3) \textbf{\CD}: error from \CD. For all studies, we use the translation from Google Translation (GMT) API\footnote{\url{https://cloud.google. In addition, we also inspect the outputs of \CD ~in the scenarios when the outputs from the MT model and NER tagger are perfect (i.e., Oracle).
+\paragraph{Results} From Table~\ref{tab:analysis}, we see that there is a considerable amount of errors from \CD~in Chinese. Further inspecting the error outputs from \CD, we observe that in more than 60\% of the cases, the correct hypothesis is in the top-k found by \CD, but the re-ranking step fails to retrieve it. Therefore, studying how to select the best hypothesis is one promising direction to improve \CD~further. Also from the table, there are many errors from the MT models in the translate-test setting. In Vietnamese, most of the translation error is incorrectly translating the entities, while in Chinese, most of the time, the error is not due to incorrect translation but the translation style. Particularly, different styles of translation to English may change the entity type, e.g., ``Chinese\textsubscript{\textit{MISC}} journalists'' and ``journalists from China\textsubscript{\textit{LOC}}'' can be the translation from the same text, but have different entity types. One possible direction to tackle this issue is to use constrained decoding to control the translation style (e.g., use words that mean nation instead of nationality).
+
+\begin{table}[t]
+    \centering
+    \caption{Manual analysis of \CD~outputs in translate-train and translate-test settings for Vietnamese and Chinese. The number indicates how many examples out of the 100 sampled for each language are correct or have corresponding \colorbox{myred}{errors} (one example may have more than one error).}
+    \label{tab:analysis}
+    \setlength{\tabcolsep}{3pt}
+    \resizebox{0.8\linewidth}{!}{%
+    {\renewcommand{\arraystretch}{1}
+    \begin{tabular}{ccccccccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Language}}   & \multirow{2}{*}{\textbf{MT}} & \multicolumn{3}{c}{\textbf{Translate-train}} & \multicolumn{4}{c}{\textbf{Translate-test}} \\
+    \cmidrule(lr){3-5} \cmidrule(lr){6-9} &        & Correct    & \colorbox{myred}{Translation}    & \colorbox{myred}{\CD}    & Correct & \colorbox{myred}{NER} & \colorbox{myred}{Translation} & \colorbox{myred}{\CD} \\
+    \midrule
+    \multirow{2}{*}{Vietnamese} & GMT     & 94 & 2 & 4 & 51 & 33 & 14 & 13 \\
+                                & Oracle  & 96 & 0 & 4 & 85 &  0 &  0 & 15\\
+    \midrule
+    \multirow{2}{*}{Chinese}    & GMT     & 80 & 6 & 14& 34 & 36 & 24 & 16\\
+                                & Oracle  & 83 & 0 & 16& 69 &  0 & 0  & 31\\
+    \bottomrule
+    \end{tabular}
+    }}
+\end{table}
+
+
+
+\section{Related work}
+
+\paragraph{Label Projection}
+There has been research that involves projecting label spans between bilingual parallel texts for cross-lingual transfer. One popular approach is to utilize word alignment models to project the label span between the source and target sentence. This approach has been adopted for a wide range of tasks: Part-of-speech Tagging \citep{yarowsky-ngai-2001-inducing, duong-etal-2013-simpler, eskander-etal-2020-unsupervised}, Semantic Role Labeling \citep{akbik-etal-2015-generating, fei-etal-2020-cross}, Named Entity Recognition \citep{ni-etal-2017-weakly, stengel-eskin-etal-2019-discriminative, garcia2022t, behzad2023effect}, and Slot Filling \citep{xu-etal-2020-end}. With the advancement of the MT systems, several recent efforts have adopted the marker-based approach, which directly uses the MT system to perform the label projection \citep{lee2018semi, lewis2020mlqa, hu2020xtreme, bornea2021multilingual, chen-etal-2023-frustratingly}. Between the two directions, the alignment-based approach is more adaptable in terms of being applicable to both translate-train and translate-test, and can preserve the translation quality; however, it is shown to be less accurate than the marker-based approach \citep{chen-etal-2023-frustratingly}. \CD~has the advantages of both approaches. There is also research that takes different directions to transfer label spans, \citet{daza-frank-2019-translate} presents an encoder-decoder model to translate and generate Semantic Role labels on the target sentence at the same time, while \citet{guo2021constrained} proposes to use constrained decoding to construct the target sentence from pre-translated labeled entities. In parallel to our work, \citet{parekh2023contextual} also propose to translate the original sentence without markers, before label projection, to address the translation quality degradation. In addition to having access to a translation system, their approach requires an instruction-tuned large language model (currently not available in many languages) to detect the label spans in the target language. Different from their method, we adopt an approach based on constrained decoding, which only requires a translation model, such as NLLB, that can support a much wider range of low-resource languages. Outside the topic of label projection, \citet{razumovskaia2023transfer} share a similar idea of re-purposing multilingual models with ours, and introduces a two-stage framework to adapt multilingual encoders to the task of slot labeling, in the transfer-free scenarios, where no annotated English data is available.
+\paragraph{Lexically constrained decoding} While constrained decoding has previously been explored in machine translation and text generation, it is typically used to constrain the vocabulary or the length of the outputs \citep{anderson-etal-2017-guided,  hokamp-liu-2017-lexically, post-vilar-2018-fast, miao2019cgmh, zhang-etal-2020-language-generation, lu-etal-2021-neurologic, lu-etal-2022-neurologic, qin2022cold}. Compared to these past works, \CD~has some important features that make it more suitable for the label projection problem. Firstly, instead of only constraining the occurrence of some words, \CD~constrains the whole decoding sentence to follow a pre-defined template. This feature is important as it allows \CD~to do the projection to a fixed target sentence, which is a requirement for being applicable to the translate-test and preserving translation quality during translate-train. Secondly, \CD~also constrains the number of occurrences of each token, including the marker, which is essential as it prevents the generative model from dropping markers, addressing a serious issue with the marker-based approach for label projection. The idea of using constrained decoding to guarantee the validity of the output space has also been adopted in the task of semantic parsing \citep{scholak-etal-2021-picard}. 
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduced a new approach of using constrained decoding for cross-lingual label projection. Our new method -- \CD~-- not only addresses the problem of translation-quality degradation, which is a major issue of the previous marker-based label projection methods, but is also adaptable in terms of being applicable to both translate-train and translate-test. Experiments on two cross-lingual tasks over 20 languages show that, on average, \CD~has shown improvements over strong fine-tuning baseline and other label projection methods. 
+
+
+

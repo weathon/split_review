@@ -1,0 +1,258 @@
+\title{Forget the Data and Fine-Tuning! Just Fold the Network to Compress}
+
+\begin{abstract}
+We introduce model folding, a novel data-free model compression technique that merges structurally similar neurons across layers, significantly reducing the model size without the need for fine-tuning or access to training data. Unlike existing methods, model folding preserves data statistics during compression by leveraging k-means clustering, and using novel data-free techniques to prevent variance collapse or explosion. Our theoretical framework and experiments across standard benchmarks, including ResNet18 and LLaMA-7B, demonstrate that model folding achieves comparable performance to data-driven compression techniques and outperforms recently proposed data-free methods, especially at high sparsity levels. This approach is particularly effective for compressing large-scale models, making it suitable for deployment in resource-constrained environments.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Deep neural networks (DNNs) have emerged as a fundamental technology, driving progress across a multitude of applications from natural language processing to computer vision. However, the deployment of these models in real-world settings is often constrained by the computational and memory resources available, particularly on edge devices like smartphones and embedded systems (Wan et al., 2020; Kumar et al., 2017; Chen et al., 2020). This limitation poses a significant challenge, as the growing complexity and size of SOTA models demand increasingly substantial resources (Bommasani et al., 2021; Chang et al., 2024; Rombach et al., 2022).  
+
+Conventional model compression techniques, such as pruning (Han et al., 2015; LeCun et al., 1989; Li et al., 2016b; Hassibi et al., 1993) and quantization (Gupta et al., 2015; Zhou et al., 2017; Li et al., 2016a), have been developed to mitigate this issue by reducing the model size and computational requirements. These methods usually remove redundant or less critical parameters from the model, thereby reducing the overall size and computational load. For example, pruning eliminates weights that contribute minimally to the model’s output (Han et al., 2015; Li et al., 2016b). Quantization reduces the precision of the weights and activations (Gupta et al., 2015), which decreases memory usage and speeds up inference (Zhou et al., 2017). Despite their effectiveness, these approaches often introduce a degradation in model performance, necessitating a phase of fine-tuning to maintain the internal data statistics within the model (Jordan et al., 2022) and restore the original accuracy levels (Frankle & Carbin, 2018; Hassibi et al., 1993; Frantar & Alistarh, 2022). This requirement can be a significant drawback in scenarios where access to the original training data is limited.  
+
+Recent methods have sought to circumvent the need for extensive retraining or fine-tuning by exploring alternatives to traditional approaches. Instead, several recent strategies build on model merging techniques (Entezari et al., 2022; Ainsworth et al., 2023; Jordan et al., 2022) and achieve (multi-)model compression by fusing similar computational units. For example, ZipIt! (Stoica et al., 2024) merges two models of the same architecture by combining similar features both within and across models. They provide both theoretical and empirical evidence suggesting that features within the same model are more similar than those between models trained on different tasks. This method avoids the need for retraining the compressed model but requires training data to match features based on the similarity of their activations. Similarly, Yamada et al. (2023) examine various model merging techniques and conclude that merged models require a dataset—such as a coreset—for effective merging and to achieve high accuracy. This data is essential for adjusting internal data statistics  
+
+![](images/fb30fb97fae1b14cce6cf3cea7b55d38b2e17b4e1b2c8f764a81217ef303ddbe.jpg)  
+
+Figure 1: Model compression and repair of data statistics. Left: Model folding pipeline is applied layer-wise, consisting of three phases: weight tensor clustering and merging, and data statistics repair. Right: To maintain accuracy, the data variances of compressed and uncompressed models must align (i.e., the variance ratio must be close to 1), as variance collapse or explosion leads to suboptimal performance. Our data-free and fine-tuning-free model folding methods (Fold-AR and Fold-DIR) achieve performance comparable to data-driven statistics repair (Fold-R), while outperforming naive statistics repair (Fold-naive) and the recently proposed IFM (Chen et al., 2023). All methods were evaluated on a public ResNet18 checkpoint trained on CIFAR10. Lines connect the performance of different methods at the same weight sparsity level, applied uniformly across all layers. Variance ratio refers to the activation outputs in the last layer. A precise definition and analysis are in Sec. 3.  
+
+that are disrupted by weight fusion, such as updating the running mean and variance in BatchNorm layers (Ioffe & Szegedy, 2015). The process involves a simple forward pass through the model and is a well-established method to adapt models in low-resource environments (Leitner et al., 2023).  
+
+In contrast, IFM (Chen et al., 2023) offers a fully data-free and fine-tuning-free approach, utilizing weight matching (Ainsworth et al., 2023) to iteratively merge similar hidden units, similar to Stoica et al. (2024). However, despite a heuristic for preserving data statistics, we demonstrate that IFM fails to maintain performance across standard architectures and for high sparsity. Other data-free approaches, such as (Yin et al., 2020), generate synthetic images directly from the uncompressed model for fine-tuning to restore pruned model accuracy.  
+
+This paper presents a model compression technique, model folding, that exploits weight similarity through three phases: neuron clustering, merging, and data statistics repair, summarized in Fig. 1 (left). We demonstrate that $k$ -means clustering provides a theoretically optimal and data-free method for merging weights. Building on Jordan et al. (2022), which addresses variance collapse using REPAIR with training data, we introduce two data-free alternatives: Fold-AR (folding with approximate REPAIR) and Fold-DIR (folding with Deep Inversion-based REPAIR). Fold-AR estimates mean correlations within clusters assuming independent inputs, while Fold-DIR uses Deep Inversion (Yin et al., 2020) to synthesize a single batch of images for updating BatchNorm statistics via a forward pass. Both methods maintain data statistics and prevent variance collapse or explosion to avoid suboptimal compression performance, with Fold-AR standing out as a more resource-efficient option while still significantly surpassing existing methods. Fig. 1 (right) shows that the highest accuracy at any target sparsity is achieved when the mean variance ratio over the last layer between the compressed and uncompressed models stays close to one. Our contributions are:  
+
+• We introduce model folding, a novel model compression technique that merges structurally similar neurons within the same network to achieve compression. We provide both theoretical justification and empirical evidence demonstrating that $k$ -means clustering is an optimal and effective method for fusing model weights in a data-free manner. • To enable data-free model compression, we adapt the REPAIR framework proposed by Jordan et al. (2022) to address variance collapse of data statistics within a model after layer compression. We introduce data-free and fine-tuning-free versions of REPAIR, that effectively maintain model statistics and achieve high performance. • We demonstrate that model folding surpasses the performance of SOTA model compression methods which do not use data or fine-tune the pruned model, including recently proposed IFM (Chen et al., 2023), and INN (Solodskikh et al., 2023), in particularly at higher levels of sparsity and when applied to more complex datasets.  
+
+• We use model folding on LLaMa-7B without utilizing data or post-tuning and achieve comparable results to methods that require data and fine-tuning.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+Our work is inspired by recent advances in two key areas: neuron alignment algorithms for fusing model pairs in weight space, and data-driven methods for recovering from variance collapse in fused models. Below, we summarize the relevant results from the literature.  
+
+Neuron alignment algorithms. Model merging involves combining the parameters of multiple trained models into a single model, with a key challenge being the alignment of neurons across these models, particularly when they are trained on different datasets or tasks. Neuron alignment methods can be classified based on their dependency on the input data. Methods like the Straight Through Estimator (STE) (Ainsworth et al., 2023), Optimal Transport (OT) (Singh & Jaggi, 2020) and correlation-based activation matching (Li et al., 2015) require data for effective merging. In contrast, weight matching (Yamada et al., 2023; Ainsworth et al., 2023) is a data-free method, making it efficient in scenarios when training data is not available. In weight matching, neurons are aligned by minimizing the $L_{2}$ distance between the weight vectors of neurons across models. Given two models with weight matrices $\mathbf{W}_{A}$ and $\mathbf{W}_{B}$ , the goal is to find a permutation $\mathbf{P}$ of the weights in $\mathbf{W}_{B}$ that minimizes the distance:  
+
+$$
+\operatorname*{min}_{\mathbf{P}}\|\mathbf{W}_{A}-\mathbf{P}\mathbf{W}_{B}\|_{2}^{2},
+$$  
+
+where $\mathbf{PW}_{B}$ denotes the weight matrix $\mathbf{W}_{B}$ after applying the permutation $\mathbf{P}$ to align it with $\mathbf{W}_{A}$ . Once the optimal permutation is found, the models are merged by averaging the aligned weights:  
+
+$$
+{\bf W}_{\mathrm{merged}}=\frac{1}{2}\left({\bf W}_{A}+{\bf P}^{*}{\bf W}_{B}\right),
+$$  
+
+where $\mathbf{P}^{*}$ is the permutation that minimizes the $L_{2}$ distance. Weight matching solves an instance of the linear sum assignment problem (LSAP), usually solved by Hungarian algorithm (Kuhn, 1955) as done in (Jordan et al., 2022; Ainsworth et al., 2023), to layer-wise align weight vectors. Unlike merging different models, aligning neurons within a single model requires an acyclic matching graph, a challenge not addressed by LSAP, which assumes disjoint task and worker sets. To overcome the challenge Chen et al. (2023) and He et al. (2018) apply iterative approach greedily merging a pair of the most similar neurons in each iteration. This work extends weight matching to align clusters of similar neurons within the same model, remaining data-free. We show that IFM is inferior to clustering utilized by model folding as described in the next section.  
+
+Variance collapse and REPAIR. When interpolating between independently trained, neuron-aligned networks, (Jordan et al., 2022) observed a phenomenon they termed variance collapse. This occurs when the variance of hidden unit activations in the interpolated network significantly diminishes compared to the original networks, leading to a steep drop in performance. To solve this issue, Jordan et al. (2022) introduce the REPAIR method (Renormalizing Permuted Activations for Interpolation Repair) which uses input data to recompute the internal data statistics.  
+
+REPAIR works by rescaling the preactivations of the interpolated network to restore the statistical properties of the original networks. Specifically, it adjusts the mean and variance of the activations in each layer of the interpolated network to match those of the corresponding layers in the original networks. This is done by computing affine transformation parameters—rescaling and shifting coefficients—for each neuron, ensuring that the mean and standard deviation of activations in the interpolated network are consistent with those in the original models. REPAIR effectively mitigates the variance collapse, enabling the interpolated network to maintain performance closer to that of the original models. This technique has become essential in recent work to preserve model accuracy after merging (Ainsworth et al., 2023; Yamada et al., 2023; Jolicoeur-Martineau et al., 2024). While REPAIR relies on input data to preserve the network’s statistical properties, this paper proposes a data-free alternative.  
+
+![](images/aeeb7c1871a0e09b142644818a5b1ef7c21cb8e3dd801558615deff3c9b6ce8d.jpg)  
+Figure 2: Layer-wise correlation between matched channels in ResNet18 trained on CIFAR10. For each layer, we use activation matching with $\mathrm{L_{2}}$ distance measure to greedily pair similar neurons. Each subplot shows the correlation within all matched pairs.  
+
+
+
+\section{3 MODEL FOLDING  }
+
+
+In this section, we introduce model folding, a novel compression technique that reduces the computational complexity and size of neural networks by merging similar neurons in each layer without requiring training data. As illustrated in Fig. 1 (left), model folding processes the network layer by layer, involving filter clustering, merging, and correcting data statistics. Below, we present a theoretical analysis of our approach, supported by empirical results on ResNet18 using CIFAR10.  
+
+
+
+\section{3.1 CHANNEL CLUSTERING  }
+
+
+Channel similarity. Neural networks trained with stochastic gradient descent (SGD) tend to have many correlated hidden units, as illustrated in Fig. 2. Model folding exploits this observation, which is related to the implicit bias of SGD. As discussed in (Gunasekar et al., 2017), SGD exhibits a minimum norm bias, which can be viewed as a form of regularization when no explicit regularization is used. In contrast to $\mathrm{L_{1}}$ regularization, which promotes sparsity, the minimum Euclidean norm solution $\mathrm{L_{2}}$ norm) penalizes large weights, encouraging smaller, more regular weights. This not only prevents overftiting but also results in smoother decision boundaries (Bishop, 2006). Recently published methods (Stoica et al., 2024; Chen et al., 2023) leverage the same observation.  
+
+Folding as a clustering problem. This work extends weight matching (Ainsworth et al., 2023), which minimizes the $\mathrm{L_{2}}$ distance between weight vectors and operates without requiring training data. Instead of finding pairs of similar neurons by solving the linear sum assignment problem (LSAP) with a Hungarian algorithm (Kuhn, 1955) as done in (Jordan et al., 2022; Ainsworth et al., 2023), we achieve channel matching using $k$ -means clustering. In the following, we justify this approach as it provides an optimal weight matrix approximation.  
+
+Given a neural network layer $l$ with a weight matrix $\mathbf{W}_{l}\in\mathbb{R}^{n\times m}$ , we define the output of this layer as ${\bf y}_{l}=\sigma({\bf W}_{l}{\bf x}_{l})$ , where $\mathbf{x}_{l}\in\mathbb{R}^{m}$ is the input vector to this layer, $\mathbf{y}_{l}\in\mathbb{R}^{n}$ is the output vector, and $\sigma(\cdot)$ is a non-linear activation function applied element-wise.  
+
+To reduce the number of outputs of layer $l$ we cluster (fold) rows of $\mathbf{W}_{l}$ , i.e., $k$ cluster centroids are determined which serve as a prototype of the respective cluster of rows. All rows of a cluster are replaced by their cluster centroid. This can be formulated as  
+
+$$
+\mathbf{W}_{l}\approx\mathbf{U}\mathbf{M},
+$$  
+
+where $\mathbf{M}\,\in\,\mathbb{R}^{k\times m}$ contains the $k\,<\,n$ cluster centroids and the cluster matrix $\mathbf{U}\,\in\,\{0,1\}^{n\times k}$ determines the membership of a row: $u(i,j)=1$ if the $i$ -th row of $\mathbf{W}_{l}$ belongs to the $j$ -th cluster, and $u(i,j)=0$ otherwise.  
+
+As a measure of the approximation error when replacing the rows of $\mathbf{W}_{l}$ by $k<n$ prototypes, we use the Frobenius norm $\|\cdot\|_{F}^{2}$ of the difference between $\mathbf{W}_{l}$ and the low-rank factorization UM:  
+
+$$
+J=\|\mathbf{W}_{l}-\mathbf{UM}\|_{F}^{2}=\operatorname{tr}(\mathbf{W}_{l}\mathbf{W}_{l}^{T})+\operatorname{tr}(\mathbf{UMM}^{T}\mathbf{U}^{T})-2\mathrm{tr}(\mathbf{UMW}_{l}^{T}).
+$$  
+
+We determine the optimal matrix of cluster centroids by setting the derivative of $J$ with respect to M to zero:  
+
+$$
+\mathbf{M}=(\mathbf{U}^{T}\mathbf{U})^{-1}\mathbf{U}^{T}\mathbf{W}_{l}.
+$$  
+
+As a result, we can write  
+
+$$
+\mathbf{W}_{l}\approx\mathbf{U}\mathbf{M}=\mathbf{C}\mathbf{W}_{l}\quad\mathrm{with}\quad\mathbf{C}=\mathbf{U}(\mathbf{U}^{T}\mathbf{U})^{-1}\mathbf{U}^{T}.
+$$  
+
+As mentioned above, we use $k$ -means clustering for folding as this minimizes $J$ by determining the optimal clustering matrix $U$ and the corresponding cluster centroids $M$ , also see (Bauckhage, 2015).  
+
+Interdependence between layers. We will expand the above result to successive layers $l$ and $l+1$ . For simplicity of notation, we neglect the bias and get  
+
+$$
+\begin{array}{r}{\mathbf{y}_{l+1}=\sigma(\mathbf{W}_{l+1}\sigma(\mathbf{W}_{l}\mathbf{x}_{l})).}\end{array}
+$$  
+
+Following the above notation, we describe the folding of activations by some clustering matrix $\mathbf{U}$ and $\mathbf{C}=\mathbf{\bar{U}}(\mathbf{U}^{T}\mathbf{U})^{-1}\mathbf{U}^{T}$ 
+
+$$
+\tilde{\mathbf{y}}_{l+1}=\sigma(\mathbf{W}_{l+1}\sigma((\mathbf{CW}_{l})\mathbf{x}_{l})=\sigma((\mathbf{W}_{l+1}\mathbf{C}^{T})\sigma((\mathbf{CW}_{l})\mathbf{x}_{l})
+$$  
+
+$$
+J_{l,l+1}=\left\|\mathbf{W}_{l,l+1}-\mathbf{C}\mathbf{W}_{l,l+1}\right\|_{F}^{2}\quad\mathrm{with}\quad\mathbf{W}_{l,l+1}=\left[\mathbf{W}_{l}\mid\mathbf{W}_{l+1}^{T}\right].
+$$  
+
+If we perform $k$ -means clustering on $\mathbf{W}_{l,l+1}$ and use the resulting clustering matrix $\mathbf{U}$ in $\mathbf{C}=$ $\mathbf{U}(\mathbf{U}^{T}\mathbf{U})^{-1}\mathbf{U}^{T}$ , then the combined approximation error $J_{l,l+1}$ is minimized. This approach accounts for the impact of compressing one layer on the next, leading to more efficient compression that balances the process and preserves learned representations while reducing model size. Our folding methods outperforms other methods experimentally, see Fig. 3 for a comparison to other clustering methods and Iterative Greedy (greedy) adopted in SOTA.  
+
+Batch Normalization. Now, let us consider batch normalization in layer $l$ represented by two diagonal matrices $\Sigma_{s}$ (scaling) and $\Sigma_{n}$ (normalization), again neglecting the bias to reduce notation. In this case, we get  
+
+$$
+\begin{array}{r}{\mathbf{y}_{l+1}=\sigma\big(\mathbf{W}_{l+1}\sigma\big(\boldsymbol{\Sigma}_{s}\boldsymbol{\Sigma}_{n}\mathbf{W}_{l}\mathbf{x}_{l}\big)\big).}\end{array}
+$$  
+
+The folding of layer $l$ can be distributed to the matrices $\Sigma_{s}$ , $\pmb{\Sigma}_{n}$ , and $\mathbf{W}_{l}$ in various ways, depending on the chosen correction of the variance, see Sec. 3.2. For example, one can cluster each matrix separately, leading to  
+
+$$
+\widetilde{\mathbf{y}}_{l+1}=\sigma((\mathbf{W}_{l+1}\mathbf{C}^{T})\sigma((\mathbf{C}\boldsymbol{\Sigma}_{s})(\mathbf{C}\boldsymbol{\Sigma}_{n})(\mathbf{C}\mathbf{W}_{l})\mathbf{x}_{l})).
+$$  
+
+$$
+J_{\mathrm{tot}}=\|\mathbf{W}_{\mathrm{tot}}-\mathbf{C}\mathbf{W}_{\mathrm{tot}}\|_{F}^{2}\quad\mathrm{with}\quad\mathbf{W}_{\mathrm{tot}}=\left[\mathbf{W}_{l+1}^{T}\mid\mathbf{W}_{l}\mid\mathrm{diag}(\boldsymbol{\Sigma}_{s})\mid\mathrm{diag}(\boldsymbol{\Sigma}_{n})\right]
+$$  
+
+If we perform $k$ -means clustering on $\mathbf{W}_{\mathrm{tot}}$ then the total approximation error $J_{\mathrm{{tot}}}$ is minimized. This approach is used in the Deep Inversion (DI) REPAIR, see next section.  
+
+Instead, if we decompose the folding of layer $l$ according to  
+
+$$
+\begin{array}{r}{\tilde{\mathbf{y}}_{l+1}=\sigma((\mathbf{W}_{l+1}\mathbf{C}^{T})\sigma((\mathbf{C}\boldsymbol{\Sigma}_{s})(\mathbf{C}\boldsymbol{\Sigma}_{n}\mathbf{W}_{l})\mathbf{x}_{l})).}\end{array}
+$$  
+
+$$
+J_{\mathrm{tot}}=\|\mathbf{W}_{\mathrm{tot}}-\mathbf{C}\mathbf{W}_{\mathrm{tot}}\|_{F}^{2}\quad\mathrm{with}\quad\mathbf{W}_{\mathrm{tot}}=\left[\boldsymbol{\Sigma}_{n}\mathbf{W}_{l}\mathbf{\Lambda}|\mathrm{~diag}(\boldsymbol{\Sigma}_{s})\mathbf{\Lambda}|\mathbf{W}_{l+1}^{T}\right].
+$$  
+
+Again, if we perform $k$ -means clustering on this combined matrix $\mathbf{W}_{\mathrm{tot}}$ then the corresponding total approximation error $J_{\mathrm{{tot}}}$ is minimized. This approach is used in the approximate REPAIR, see Sec. 3.2.  
+
+Merging similar channels in each cluster. To fuse similar channels, various approaches have been proposed in the literature, such as fusing weights for multitasking, which involves Hessian calculations (He et al., 2018), or by combining the matched weights into a single channel (Chen et al., 2023). (Matena & Raffel, 2022) introduces Fisher-weighted averaging based on the Laplace approximation for merging weights, while (Jin et al., 2023) suggests computing a regression mean, which is both computationally efficient and scalable for merging multiple models. In our approach, we use above formulation of the optimization problem as $k$ -means clustering and use a simple mean to compute the cluster centroids.  
+
+3.2 MAINTAINING DATA STATISTICS IN A COMPRESSED MODEL  
+
+Variance collapse and variance overshooting. We use the conceptual framework in (Jordan et al., 2022) to analyze the performance of model compression methods. We use the following definition.  
+
+Definition 1 (Variance ratio). Consider a neural network $f(\mathbf{x},\Theta)$ with layer activations $\{\mathbf{x}_{l}\}_{1}^{L}$ and its compressed version $\tilde{f}(\mathbf{x},\Theta)$ with activations $\{\tilde{\mathbf{x}}_{l}\}_{1}^{L}$ . The variance ratio of the $l$ -th layer is:  
+
+$$
+\mu\left[\frac{\mathrm{Var}(\tilde{\mathbf{x}}_{l})}{\mathrm{Var}(\mathbf{x}_{l})}\right]=\frac{1}{|\mathbf{x}_{l}|}\sum_{k=1}^{|\mathbf{x}_{l}|}\frac{\mathrm{Var}(\tilde{\mathbf{x}}_{l,k})}{\mathrm{Var}(\mathbf{x}_{l,k})}.
+$$  
+
+We observe not only variance collapse but also variance overshooting phenomena. Specifically, when data statistics are not accurately corrected after channel merging, as in IFM, variance overshooting can occur, leading to network performance decline. Fig. 4 shows layerwise variance ratio between the compressed and uncompressed networks. Staying close to 1 is essential to miti  
+
+![](images/96b4f7e3136dc6636e589c93b28f02ed7e78b5b00aa8ca1b3ba3a67738e4df11.jpg)  
+
+Figure 3: $k$ -means (KM) outperforms other clustering methods: Spectral Clustering (SC), Agglomerative Clustering (AC) with different linkage criteria and Iterative Greedy (greedy) used to compress ResNet18 trained on CIFAR10. Data-based REPAIR was used to restore data statistics after clustering for all methods.  
+
+gate both phenomena. This highlights the critical need for precise statistical corrections during model merging.  
+
+Fold-AR: Folding with approximate REPAIR. In the context of model compression, particularly when using folding as a clustering method, it is crucial to ensure that the compressed model maintains accurate data statistics. This is especially important for layers involving operations like BatchNorm, where maintaining the correct statistical properties of activations is vital for model performance (Jordan et al., 2022; Yamada et al., 2023).  
+
+In the following explanation of the data-free approximate REPAIR, we neglect biases for ease of notation. Following the previous section, we consider folding of the normalized weight matrix with  
+
+$$
+\mathbf{z}_{l}=\mathbf{C}\pmb{\Sigma}_{n}\mathbf{W}_{l}\mathbf{x}_{l}
+$$  
+
+using the post-activation output $\mathbf{x}_{l}$ of the previous layer and the input $\mathbf{z}_{l}$ to the scaling matrix $\Sigma_{s}$ . A cluster $c$ is defined by the column of the clustering matrix $U$ , i.e., all values $z_{l}(i)$ with $u(i,c)=1$ belong to cluster $c$ . Moreover, by definition of $\mathbf{C}$ , all values $z_{l}(i)$ belonging to a single cluster $c$ equal the centroid $\hat{z}_{l}(c)$ of the cluster, i.e., the average of all values $\Sigma_{n}\mathbf{W}_{l}\mathbf{x}_{l}$ belonging to this cluster. More formally,  
+
+$$
+\begin{array}{r}{\forall u(i,c)==1\,:\,z_{l}(i)=\hat{z}_{l}(c)\ }\\ {\forall1\le c\le k\,:\,\hat{z}_{l}(c)=\displaystyle\frac{1}{N_{c}}\sum_{i\in I_{c}}\tilde{x}_{l}(i),}\end{array}
+$$  
+
+where $I_{c}\,=\,\{i\,:\,u(i,c)\,=\,1\}$ denotes the indices of all values belonging to cluster $c$ , $N_{c}=|I_{c}|$ denotes the number of values in the cluster, and $\widetilde{\mathbf{x}}_{l}=\Sigma_{n}\mathbf{W}_{l}\mathbf{x}_{l}$ . The batch normalization using $\pmb{\Sigma}_{n}$ ensures that the variances of all $\tilde{x}_{l}(i)$ equal 1. The averaging over all $\tilde{x}_{l}(i)$ belonging to a single cluster destroys this property and leads to the observed variance collapse. We will describe various methods to compensate this loss in variance, at first the data-free approximate REPAIR (Fold-AR).  
+
+The variance of the cluster centroid $\hat{z}_{l}(c)$ of cluster $c$ is given by  
+
+$$
+\mathrm{Var}(\hat{z}_{l}(c))=\frac{1}{N_{c}^{2}}\left[\sum_{i\in I_{c}}\mathrm{Var}(\tilde{x}_{l}(i))+\sum_{i,j\in I_{c}:i\neq j}\mathrm{Cov}(\tilde{x}_{l}(i),\tilde{x}_{l}(j))\right],
+$$  
+
+which further simplifies to $\begin{array}{r}{\mathrm{\mathop{Var}}(\hat{z}_{l}(c))=\frac{1}{N_{c}^{2}}\left[N_{c}+(N_{c}^{2}-N_{c})E[c]\right]}\end{array}$ , where $E[c]$ is the mean correlation within the cluster. To prevent variance collapse, we aim for $\mathrm{Var}(\hat{z}_{l}(c))=1$ , which would occur  
+
+![](images/e342de7e5d508d85ab125dc619dc97ad3e31eedebf5b4881ed2b9c7361f5a181.jpg)  
+Figure 4: Variance collapse and overshooting Figure 5: Data-free folding methods with apon ResNet18 with CIFAR10. The goal is to align proximate REPAIR (Fold-AR) and Deep Inthe layer-wise variance in the compressed network version (Yin et al., 2020) (Fold-DIR) and on to that of the uncompressed model. Naive aver- ResNet18 with CIFAR10 at various weight sparaging of statistics (Fold-Naive) leads to variance sity levels, uniformly distributed across layers. collapse (Jordan et al., 2022), while IFM over- Fold-DIR performs similarly to the data-based shoots. Fold-AR and Fold-DIR closely match the REPAIR (Fold-R). Both Fold-AR and Fold-DIR performance of the data-driven REPAIR (Fold-R). surpass IFM (Chen et al., 2023) by a significant Layer-wise sparsity is 0.5. margin.  
+
+if $E[c]=1$ , meaning all channels in the cluster are fully correlated. However, as $E[c]<1$ typically, we multiply each cluster centroid by a scaling parameter assuming an average cluster correlation $E[c]$  
+
+$$
+\hat{z}_{l}(c)\leftarrow\hat{z}_{l}(c)\frac{N_{c}}{\sqrt{N_{c}+(N_{c}^{2}-N_{c})E[c]}}.
+$$  
+
+Suppose now that the covariance matrix $\Sigma_{x_{l}}$ of the output $\mathbf{x}_{l}$ of the previous layer is available and that we define the normalized weight matrix $\begin{array}{r}{\tilde{\mathbf{W}}_{l}=\sum_{n}\mathbf{W}_{l}}\end{array}$ with rows $\tilde{\mathbf{w}}_{l}(i)$ . Then the correlation $E[c]$ can be computed as:  
+
+$$
+E[c]=\frac{1}{N_{c}^{2}-N_{c}}\sum_{\substack{i,j\in I_{c};i\neq j}}\frac{\tilde{\mathbf{w}}_{l}(i)\pmb{\Sigma}_{x_{l}}\tilde{\mathbf{w}}_{l}^{T}(j)}{\sqrt{(\tilde{\mathbf{w}}_{l}(i)\pmb{\Sigma}_{x_{l}}\tilde{\mathbf{w}}_{l}^{T}(i))(\tilde{\mathbf{w}}_{l}(j)\pmb{\Sigma}_{x_{l}}\tilde{\mathbf{w}}_{l}^{T}(j))}}.
+$$  
+
+In the absence of data, $E[c]$ can be estimated by assuming that the output values $\mathbf{x}_{l}$ of the previous layer are uncorrelated. As the individual variances of $\tilde{x}_{l}(i)$ equal 1 we obtain  
+
+$$
+E[c]=\frac{1}{N_{c}^{2}-N_{c}}\sum_{\substack{i,j\in I_{c};i\neq j}}\frac{\tilde{\mathbf{w}}_{l}(i)\tilde{\mathbf{w}}_{l}^{T}(j)}{\sqrt{(\tilde{\mathbf{w}}_{l}(i)\tilde{\mathbf{w}}_{l}^{T}(i))(\tilde{\mathbf{w}}_{l}(j)\tilde{\mathbf{w}}_{l}^{T}(j))}}.
+$$  
+
+We term this approach to maintain the data statistics within the model folding with approximate REPAIR (Fold-AR). This approach helps to ensure that the statistical properties of the data are preserved even after model compression, maintaining the performance of the network while reducing its size. Fig. 5 shows how the performance of Fold-AR compares to the data-driven REPAIR (Fold-R) and surpasses the SOTA data-free methods.  
+
+Fold-DIR: Correcting data statistics with deep inversion. Deep Inversion (DI) (Yin et al., 2020) is a technique that synthesizes realistic images directly from a pre-trained neural network without requiring access to the original data. The process involves inverting the model by optimizing random noise to produce class-conditional images that match the statistics of the data the model was trained on (Mordvintsev et al., 2015). DI leverages the BatchNorm layers within the network, which store the running mean and variance of activations during training. By using these stored statistics as a regularization term in  
+
+$$
+\mathcal{R}(\hat{\mathbf{x}})=\mathcal{L}_{c l a s s}(\hat{\mathbf{x}},t)+\sum_{l}\|\mu(\hat{\mathbf{x}}_{l})-\mu(\mathbf{x}_{l})\|_{2}^{2}+\sum_{l}\|\mathrm{Var}(\hat{\mathbf{x}}_{l})-\mathrm{Var}(\mathbf{x}_{l})\|_{2}^{2}+\|\hat{\mathbf{x}}\|_{2}^{2}+\|\hat{\mathbf{x}}\|_{T V}\,,
+$$  
+
+DI ensures that the generated images have similar statistical properties to the original training data, thus producing high-fidelity images. Here, $\mu(\hat{\bf x}_{l})$ and $\operatorname{Var}(\hat{\mathbf{x}}_{l})$ are the mean and variance of the feature map $\hat{\mathbf{x}}_{l}$ in the synthesized data, and $\mu(\mathbf{x}_{l})$ and $\operatorname{Var}(\mathbf{x}_{l})$ are the expected mean and variance of the feature map in the original data. The term $\mathcal{L}_{c l a s s}(\hat{\mathbf{x}},t)$ denotes classification loss of the synthetic sample, while $\left\|\hat{\mathbf{x}}\right\|_{2}^{2}$ and $\|\hat{\mathbf{x}}\|_{T V}$ denote the $L_{2}$ and Total Variation regularization terms over the synthetic sample $\mathbf{x}$ . Finally $t$ denotes the desired class of the synthetic sample $\hat{\bf x}$ .  
+
+![](images/bd276df8ea8de4a6353533dfe8b127bfc7f7830d498839f9efc0f6f96060490b.jpg)  
+Figure 6: Comparison with IFM (Chen et al., 2023) and structured magnitude pruning (Cai et al., 2020; Yin et al., 2022). Model folding, when tested on ResNet18 (top row) and VGG11-BN (bottom row) trained on CIFAR10 (left column) and ImageNet (right column), outperforms IFM with higher sparsity and increasing dataset difficulty.  
+
+We leverage a single batch of DI-synthesized data within model folding to preserve data statistics after channel merging, eliminating the need for training data. By generating synthetic images aligned with the network’s internal statistics, DI recalibrates the folded model’s parameters, ensuring that activation variance and mean are maintained. This helps the model retain its performance postfolding, mitigating issues such as variance collapse or explosion without requiring the original dataset. Notably, updating BatchNorm statistics requires only a forward pass, with no backpropagation needed. Thus, Fold-DIR offers a data-free and fine-tuning-free solution for maintaining data statistics. Fig. 5 shows that Fold-DIR closely follows the performance of the data-driven REPAIR (Fold-R), effectively maintaining the data statistics within the model. Fold-DIR outperforms Fold-AR at the cost of generating a batch of synthetic images and a forward pass through the network.  
+
+4 EXPERIMENTS  
+
+Following related works on model merging (Ainsworth et al., 2023; Chen et al., 2023; Jordan et al., 2022), we evaluate folding on convolutional architectures, including ResNets (He et al., 2016) and VGGs (Simonyan & Zisserman, 2014) of varying sizes on CIFAR10, CIFAR100 (Krizhevsky et al., 2009b) and ImageNet (Deng et al., 2009). For models trained on the CIFAR10 and CIFAR100 datasets, we used the hyperparameters available from online benchmarks12. For models trained on ImageNet, the pre-trained weights were taken from torchvision. For large language models (LLMs), we evaluate model folding on LLaMa-7B (Touvron et al., 2023a) with pre-trained weights from Hugging Face Hub. In all experiments, model sparsity denotes the proportion of weights that have been removed as a result of model compression.  
+
+![](images/f87587e3722c895761c3ceff90ffc9fa8db69a60dd93c3a7214af3a0462d0ff0.jpg)  
+
+on CIFAR10, as shown in Fig. 8. This ablation study reveals that increasing the layer width strengthens the matched correlations, suggesting greater potential for folding. Building on this, Fig. 9 demonstrates the application of model folding also to $1\,\mathrm{x}/2\mathrm{x}/3\mathrm{x}$ wider MLP and ResNet50 architectures, trained on CIFAR10 and CIFAR100, showing consistent performance gains as width increases.  
+
+Folding LLMs. LLMs are built with a large number of parameters, achieving strong performance across various tasks. However, structurally compressing these deep and large models remains a challenge. LLM-Pruner (Ma et al., 2023) performs structured pruning using gradient calculations, while Wanda (Sun et al., 2023) leverages an importance score by multiplying weights with their corresponding input activations. FLAP (An et al., 2023) dynamically computes a fluctuation pruning metric using calibration data. In Tab. 1, we compare model folding with these methods on LLaMa7B (Touvron et al., 2023a), focusing on perplexity on the WikiText2 (Merity et al., 2016) validation set and zero-shot performance across four tasks using the EleutherAI LM Harness (Gao et al., 2024). The folded model performs only very slightly worse than models compressed with data-driven methods. Following SOTA, the clustering phase of model folding was applied to LLaMa-7B, introducing $20\%$ and $50\%$ sparsity in the attention and feed-forward layers of decoder blocks 22-29, and $10\%$ and $40\%$ sparsity in the attention and feed-forward layers of decoder blocks 11-21, respectively. As there is no batchnorm layer in LLaMA-like LLMs, we just applied clustering in LLMs without REPAIR. Tab. Results of folding LLaMA2-7B (Touvron et al. When folding with $20\%$ sparsity, the pruned model continues to perform well.  
+
+![](images/3f352715bff1610c3a5de6073d331a780200c5412006ee8d8d1f429d12687e9b.jpg)  
+Figure 9: Model folding performance improves with increasing model width. The MLP model consists of three stacked mlp blocks (including a fully connected layer, a BN layer, and a ReLU layer), followed by a final classifier. Upscaled versions of MLP (left) and ResNet50 (right) architectures, trained on CIFAR10 and CIFAR100, demonstrate the consistent advantages of model folding.  
+
+![](images/bf57b5283b7f920e45bb89cbe107ed18543f37982ac7e8bc06f62fbcd7bd6297.jpg)  
+Table 1: Performance of structured pruning methods on LLaMA-7B without post-tuning, showing perplexity on WikiText2 and zero-shot performance across tasks. The "Average" is computed over four tasks. "Wanda_sp" represents an adapted Wanda method for structured pruning. Despite not using data or fine-tuning, model folding achieves comparable performance to data-driven methods.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we introduce model folding, a novel compression technique that reduces model size by merging similar channels across layers, without requiring fine-tuning or training data. Model folding achieves high sparsity while preserving data statistics, outperforming traditional pruning and data-free compression methods. Our experiments demonstrate that wider networks, such as VGG11 and ResNet50, offer greater opportunities for folding due to increased redundancy, further improving compression efficiency. In LLMs, model folding can prune models while maintaining performance comparable to data-driven methods, but without the need for data access or fine-tuning, which are typically required by most structured pruning techniques.  
+
+Limitations and future work. Model folding offers significant compression without data or finetuning, but its effectiveness may be limited in networks with low redundancy. Additionally, it does not optimize sparsity levels per layer, leaving this for future work.  
+
+
+

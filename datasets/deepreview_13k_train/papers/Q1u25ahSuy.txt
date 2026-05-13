@@ -1,0 +1,566 @@
+\title{SpQR: A Sparse-Quantized Representation for Near-Lossless LLM Weight Compression}
+
+\begin{abstract}
+
+    \vspace{-2px}Recent advances in large language model (LLM) pretraining have led to high-quality LLMs with impressive abilities. 
+    By compressing such LLMs via quantization to 3-4 bits per parameter, they can fit into memory-limited devices such as laptops and mobile phones, enabling personalized use. 
+    However, quantization down to 3-4 bits per parameter usually leads to moderate-to-high accuracy losses, especially for smaller models in the 1-10B parameter range, which are well-suited for edge deployments. 
+    To address this accuracy issue, we introduce the Sparse-Quantized Representation (SpQR), a new compressed format and quantization technique which enables for the first time \emph{near-lossless} compression of LLMs across model scales, while reaching similar compression levels to previous methods. 
+    SpQR works by identifying and isolating \emph{outlier weights}, which cause particularly-large quantization errors, and storing them in higher precision, while compressing all other weights to 3-4 bits, and achieves relative accuracy losses of less than $1\%$ in perplexity for highly-accurate LLaMA and Falcon LLMs. This makes it possible to run 33B parameter LLM on a single 24 GB consumer GPU without any performance degradation at 15\% speedup
+    thus making powerful LLMs available to consumer without any downsides. Specifically, we provide an efficient GPU inference algorithm for SpQR which yields faster inference than 16-bit baselines at similar accuracy, while enabling memory compression gains of more than 4x.
+    
+    
+    
+    
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Pretrained large language models (LLMs) improved rapidly from task-specific performance \citep{wang2018glue, devlin2018bert, radford2019language}, to performing well on general tasks if prompted with instructions \citep{brown2020language,wei2021finetuned,openai2023gpt}. 
+While the improved performance can be attributed to scaling in training data and parameters \citep{kaplan2020scaling,chowdhery2022palm} recent trends focused on smaller models trained on more data, that are easier to use at inference time~\citep{hoffmann2022training, biderman2023pythia, touvron2023llama}. For example, the 7B parameter LLaMA model trained on 1T tokens achieved an average performance only slightly lower than GPT-3 \citep{brown2020language} despite being 25x smaller. Current techniques for LLM compression can shrink these models further by a factor of about 4x, while preserving their performance \citep{dettmers2022llm,xiao2022smoothquant,frantar2022gptq,dettmers2022case}. This yields performance levels comparable to the largest GPT-3 model, with major reductions in terms of memory requirements. With such improvements, well-performing models could be efficiently served on end-user devices, such as laptops.  
+
+The main challenge is to compress models enough to fit into such devices while also preserving generative quality. 
+Specifically, studies show that, although accurate, existing techniques for 3 to 4-bit quantization still lead to significant accuracy degradation~\cite{dettmers2022case, frantar2022gptq}. 
+Since LLM generation is sequential, depending on previously-generated tokens, small relative errors can accumulate and lead to severely corrupted outputs. 
+To ensure reliable quality, it is critical to design low-bitwidth quantization that does not degrade predictive performance compared to the 16-bit model.
+
+In this work, we introduce Sparse-Quantized Representations (SpQR), 
+a hybrid sparse-quantized format which can compress accurate pretrained LLMs to 3-4 bits per parameter while staying \emph{near-lossless}: 
+specifically, SpQR is the first weight quantization method which is able to reach such compression ratios while 
+inducing end-to-end accuracy error as measured in perplexity of less than 1\% relative to the dense baseline. 
+SpQR works by combining two innovations. 
+First, we isolate \emph{outlier weights}, whose quantization we show to induce disproportionately high errors: these weights are kept in high precision, while the other weights are stored in a much lower, e.g. 3-bit, format.
+Second, we implement a variant of grouped quantization with very small group size, e.g. 16 contiguous elements, 
+but we show that one can quantize the quantization scales themselves to a 3-bit representation.
+
+To convert a given pretrained LLM into SpQR format, 
+we adopt an extended version of the post-training quantization (PTQ) approach recently introduced by GPTQ~\citep{frantar2022gptq}. 
+Specifically, the method passes calibration data through the uncompressed model; 
+to compress each layer, it applies a layer-wise solver with respect to the L2 error between the outputs of the uncompressed model, and those of the quantized weights. 
+Our approach splits this process into two steps: an ``outlier detection'' step, in which we isolate weights whose direct quantization has outsize impact on layer output behavior, and an actual compression step, in which most ($\geq 99\%$) of weights are compressed to low-bitwidth, the outliers are extracted, and the whole representation is rendered more efficient by further compressing the quantization metadata. 
+Our method is motivated by a new analysis showing that LLM weight quantization errors exhibit both vertical and horizontal group correlations, corresponding to systematic large errors corresponding to input feature dimensions and output hidden dimensions. While outlier input features have been observed before~\citep{dettmers2022llm,xiao2022smoothquant}, our work is the first to demonstrate that similar outliers occur \emph{in the weights, for particular output hidden dimensions}. Unlike input feature outliers, the output hidden dimension outliers occur only in small segments for a particular output hidden dimension. 
+
+Our quantization algorithm isolates such outliers and efficiently encodes a given model in SpQR format. 
+To exploit the resulting structure, we develop a specialized sparse-matrix multiplication algorithm based on the compressed sparse row (CSR) format. To use SpQR for token-by-token generation, we combine this sparse algorithm together with a dense-quantized matrix multiplication for 3-4 bit weights. With this, SpQR reduces the memory footprint of LLMs by a factor of about 3.4x or more without degradation in accuracy, measured as language modeling loss or perplexity, while also being 20-30\% faster for LLM generation compared to 16-bit inference. 
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{0.47\linewidth}
+        \includegraphics[width=\linewidth]{resources/quantization_method_comparison.pdf}
+    \end{subfigure}
+       \begin{subfigure}{0.47\linewidth}
+        \includegraphics[width=\linewidth]{resources/quantization_method_comparison_lm_eval.pdf}
+    \end{subfigure}
+    \caption{
+       Compressed LLM performance for LLaMA models. % Denis, shall i keep this sentence or do you have other plans?
+       (\textbf{left}) LM loss on WikiText2 vs model size.
+       (\textbf{right}) Average performance on zero-shot tasks vs model size. 
+    }
+    \label{fig:quantization_method_comparison}
+\end{figure}
+
+
+
+
+\section{Related Work}
+
+
+We focus our discussion on related \emph{post-training quantization (PTQ) methods}~\citep{nagel2020up}, referring the reader to the recent survey of Gholami et al.~\citep{gholami2021survey} 
+for full background on quantization. 
+PTQ methods are a popular approach for \emph{one-shot compression} of models with various sizes, based on a limited amount of calibration data, 
+using accurate solvers, usually focused on layer- or group-wise compression sub-problems.
+Most PTQ methods, such as AdaRound~\citep{nagel2020up}, BitSplit~\citep{wang2020towards}, AdaQuant~\citep{hubara2021accurate}, BRECQ~\citep{li2021brecq}, or OBQ~\citep{frantar2022obc}  were designed for vision models or small-scale language models, with less than 100M parameters. 
+All these recent approaches tend to use accurate solvers, which would not scale to GPT-scale models in terms of computational or memory cost, as they are 10-1000x larger in size.   
+
+Recently, there has been significant interest in obtaining accurate post-training methods that scale to such massive models. 
+Due to computational constraints, early work such as ZeroQuant~\citep{yao2022zeroquant}, LLM.int8()~\citep{dettmers2022llm}, and nuQmm~\citep{park2022nuqmm} 
+used direct rounding of weights to the nearest quantization level, while customizing the quantization granularity (i.e., group size) to trade off space for increased accuracy. LLM.int8()~\citep{dettmers2022llm} suggested isolating ``outlier features'' which would be quantized separately to higher bit-width. 
+These approaches are able to induce relatively low quantization error, e.g. 5.5\% relative LM Loss increase for LLaMA-7B at 4-bit weight quantization, provided that the quantization granularity is low enough. 
+GPTQ~\cite{frantar2022gptq} proposed a higher-accuracy approach (e.g., 4\% LM Loss increase in the above setting), which works via an approximate large-scale solver for the problem of minimizing the layer-wise squared error.  
+
+Dettmers et al.~\cite{dettmers2022case} provided an in-depth overview of the accuracy-compression trade-offs underlying these methods, 
+establishing that 4-bit quantization is an optimal point for round-to-nearest-based methods,  
+whereas higher compression can be achieved via data-aware methods such as GPTQ. 
+SparseGPT~\cite{frantar2023massive} presented an approach to jointly sparsify LLM weights to medium sparsities, together with quantization of the remaining weights to a fixed given bit-width. 
+One common drawback of existing methods is that the accuracy loss relative to the original model is still significant (see Table~\ref{tab:quantization_method_comparison_LLaMA}). 
+This is especially relevant to relatively small but easily deployable models, e.g. in the 7-13B parameter range, where existing methods show drastic accuracy drops. 
+We investigate this question here, and provide a new compression format which can lead to near-lossless 3-4 bits compression in this regime. 
+A related question is that of performing both activation and weight quantization. 
+There is early work~\cite{dettmers2022llm, xiao2022smoothquant, yao2022zeroquant}, 
+showing that both activations and weights could be quantized to 8-bits with relatively low accuracy impact. 
+These complementary investigations yield interesting insights into the causes of compression error in the case of LLMs. 
+Specifically, \cite{dettmers2022llm, xiao2022smoothquant} observe the presence of ``outlier features'' with significantly higher values in the input/output of large LLMs, which induce higher quantization error, and propose different mitigation strategies. 
+
+We analyze this phenomenon from the point of view of weight quantization. In particular, we investigate the outlier structure, beyond input feature outliers in the weight matrix. While we find that input feature outliers of the current layer are correlated to hidden unit outliers weight in the previous layer there is not a strict correspondence. Such partially-structured outlier patterns necessitate a fine-grained hybrid compression format that goes beyond algorithms that exploit the column structure of outlier features found in previous work.
+
+Hybrid sparse-quantized formats have been investigated generally for deep networks. 
+Some efficient CPU inference engines~\cite{deepsparse, gorbachev2019openvino} support a different block sparse-and-quantized format, 
+in which each block of $4$ consecutive weights is either completely sparse or quantized to 8-bit format, 
+whereas GPUs support a similar compound format in which every group of 4 weights contains 2 zero weights, 
+and the non-zero weights could be quantized. 
+The FBGEMM package~\cite{fbgemm} proposed a format in which certain ``outlier'' weights are quantized separately, 
+to reduce their impact on normalization. 
+However, in this format, ``outlier'' weights are still quantized to exactly the same bit-width (8-bit) as regular weights; 
+moreover, no procedure is given for converting a model to this format post-training. 
+By contrast, 
+1) we provide an efficient and accurate post-training compression algorithm which identifies outliers as weights inducing high output error, 
+2) we propose a format compressing outliers to a higher bit-width relative to regular weights, and 
+3) our format stores outliers in blocks, allowing for efficient implementation of GPU kernels, which we provide as well. 
+
+
+
+\section{Quantization sensitivity of LLM weights}
+
+\subsection{Parameter sensitivity under quantization}\label{sect:method_understand}
+
+Not all parameters in a neural network are equally important. 
+Intuitively, a weight could be seen as sensitive to quantization if its rounding error is large, i.e. it is not close to a quantization point, and/or the inputs it is usually multiplied with a large, amplifying even a small rounding error. These simple notions of sensitivity however disregard the fact that LLMs operate on very large vectors with significant correlations: a weight $w_a$ may have a large rounding error while being strongly correlated to another weight $w_b$, meaning that the error of rounding up $w_a$ can be well compensated by rounding down $w_b$. This idea is exploited by modern quantization algorithms \cite{frantar2022gptq, yao2022zeroquant} and can lead to major improvements over vanilla rounding, especially a low bitwidths. Properly capturing this aspect of sensitivity requires a more robust definition.
+
+For computational tractability, we assess sensitivity on a per-layer level using a small set of \emph{calibration inputs} $X$, collected by running them through the model up to the particular layer. We define the sensitivity $s_{ij}$ of some weight $w_{ij}$ in the layer's weight matrix $W$ as the minimum squared difference between the original predictions on $X$ and those of any weight matrix $W'$ where this weight is quantized, i.e. $w'_{ij} = \text{quant}(w_{ij})$:
+\begin{equation}
+    s_{ij} = \text{min}_{W'} \, ||WX - W'X||_2^2 \quad \text{s.t.} \quad w'_{ij} = \text{quant}(w_{ij})
+\end{equation}
+Crucially, all weights of $W'$ except for $w'_{ij}$ may take on arbitrary, not necessarily quantized, values in order to compensate for the quantization error incurred by rounding $w_{ij}$, thus capturing the correlation aspect discussed above. Further, as we allow continuous values, this problem admits a closed-form solution. This can be determined by following the generalized Optimal Brain Surgeon framework \cite{frantar2022obc}, where $(XX^\top)^{-1}$ is the inverse Hessian matrix corresponding to the optimization problem:
+\begin{equation}\label{eq:error}
+    s_{ij} = \frac{(w_{ij} - \text{quant}(w_{ij}))^2}{2(XX^\top)^{-1}}.
+\end{equation}
+This saliency measure can be approximated efficiently by quantization solvers, such as GPTQ~\cite{frantar2022gptq}. In more detail, GPTQ quantizes weight matrices column-by-column while in each step adjusting the not-yet-quantized part to compensate for the quantization error in a similar sense as defined above. Consequentially, instead of statically deciding all sensitivities in advance, they can be computed dynamically as the algorithm processes each column, by using the inverse of the Hessian subselection corresponding to all not yet quantized weights. This matrix is already efficiently computed by GPTQ and thus does not impose any additional overheads. The main advantage of this approach is that $s_{ij}$ is always determined based on the most current value of $w_{ij}$ and thus accounts for adjustments due to previously quantized weights as well.
+
+
+
+
+
+
+
+
+
+
+\subsection{Exploring parameter sensitivity}\label{sect:method_llama65}
+
+Before we define out main method, SpQR, we provide a motivating analysis of parameter sensitivity which uncovers that the location of sensitive weights in the weight matrix are not random but have particular structures. To highlight these structural elements during the quantization process, we calculate the the per-weight sensitivities and visualize them for the popular and highly-accurate LLaMA-65B model~\cite{touvron2023llama}. 
+As the quantization method, we use GPTQ quantization to 3-bit, without weight grouping, following~\citep{frantar2022gptq}. We use C4~\cite{C4} as the calibration dataset, and we estimate the error on 128 sequences of 2048 tokens each. 
+Figure~\ref{fig:patterns} depicts the output projection of the last self-attention layer of LLaMA-65B. 
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[height=150px]{resources/q_error_patterns_grid_0_blu_v2.pdf}
+    \caption{Weight log-sensitivities from the last attention layer of LLaMA-65B. Dark-blue shades indicate higher sensitivity. The image on the left is a high-level view, resized to 1:32 scale with max-pooling. The two images in the middle are zoomed in from the main figure. The two images on the right are taken from other weight matrices.}
+    \label{fig:patterns}
+\end{figure}
+Using the sensitivity analysis, we observe several patterns in the weight matrix, often in a single row or column. 
+Since the large weight matrices in LLaMA-65B have too many rows/columuns to be respresentable in a compact image (default: 8k $\times$ 32k pixels) we perform max pooling to visualize the matrices, that is we take the maximum sensitivity in each square of $32\times32$ rows and columns. This max pooling only affects the leftmost image.
+Using this visualization, we observe that the quantization error patterns vary both by layer type, for example attention vs multilayer perceptron (MLP), and layer depth. In particular, we find that more sensitive outliers are present for deeper layers.) 
+We now proceed to categorize outlier structures, taking this  attention weight matrix as an exemplar. We make the following observations:
+
+\begin{itemize}
+    \item \textbf{Row outliers} are shown in Figure~\ref{fig:patterns} bottom-center as regions of high sensitivity within one output unit. Some of these patterns span the entire row, while others are partial. In attention layers, some of the partial row outliers correspond to some subset of attention heads. \textbf{Column outliers} appear in Figure~\ref{fig:patterns}, bottom-right, showing high sensitivity in select input dimensions (columns) across all rows. The latter are correlated to the ``outlier feature'' phenomenon reported in Dettmers et al.~\cite{dettmers2022llm}.
+    
+    \item \textbf{Sensitive attention heads.} (Figure~\ref{fig:patterns}, top-center) -- regular stripes of width 128 highlight all weights corresponding to one attention head.  This could be related to some attention heads having more important functions~\cite{voita-etal-2019-analyzing,vig2019multiscale,olsson2022context}. 
+The corresponding ``stripes'' are horizontal for attention Q \& K projections, vertical in output projection, and absent from value projections and any MLP weights. Of note, there is significant variation in individual weight sensitivity even within the sensitive heads.
+    \item  
+\textbf{The Rotary embedding pattern}, a repeating vertical pattern of sensitivity with a period of 64 units. We attribute this to the use of rotary embeddings~\cite{su2021roformer}: each attention head (dim = 128) is split into two halves: the first 64 are ``rotated'' with cosine, and the other 64 use sine. Both sine and cosine rotation use the same set of frequencies. Typically, the weights that correspond to low-frequency sines and cosines are more sensitive than their high-frequency counterparts, as shown in Figure~\ref{fig:patterns} (top-right). As expected, this pattern is absent from any layer not using rotary embeddings.
+
+    \item 
+\textbf{Unstructured outliers.} Besides the above, each layer has a number of individual sensitivity weights that do not fit into any of the above patterns.
+These unstructured outliers occur more frequently for columns with largest input index (i.e. on the right side of the images).
+We believe is probably an artefact of the GPTQ algorithm, which compresses one by one, using yet-uncompressed weights to compensate the error. 
+Thus, the rightmost batch of weights accumulates the most error.
+
+\end{itemize}
+
+Next, we will leverage these findings to propose a compressed representation which can support all these different outlier types. 
+
+
+
+
+\section{SpQR: A Sensitivity-aware compressed representation}
+
+
+\subsection{Overview}
+
+Existing LLM quantization algorithms treat low- and high-sensitivity weights equally; however, our above discussion suggests that this may lead to sub-optimal quantization. 
+Ideally, we would want the representation to assign more of its ``size budget'' to sensitive weights. However, these weights are scattered in the weight matrix as either individual weights or small groups, for example, partial rows or attention head. To capture this structure, we are introducing two changes to the quantization procedure: one for capturing small sensitive groups, and another for capturing individual outliers.
+
+\textbf{Capturing small groups of weights with bilevel quantization.}
+In the previous section, we observed several cases where weights behave similarly in small consecutive groups, with abrupt changes between groups, for example for some attention head and partial row outliers (see Figure~\ref{fig:outliers_fig} left, bottom-center). When applying a standard approach, there will be many cases where these weights will be grouped together, sharing the same quantization statistics. To reduce the number of such cases, we use groupwise quantization with extremely small groups, typically of $\beta_1{=}8-32$ weights.
+That is, for every $\beta_1$ consecutive weights, there is a separate quantization scale and zero-point. 
+This choice runs contrary to current intuition: for instance, the recent work of Yao et al.~\cite{yao2023comprehensive}
+explicitly recommends against small groups, arguing that the overhead for storing quantization statistics would outweigh the precision advantages.
+
+To circumvent this issue, we quantize the groupwise statistics themselves using the same quantization algorithm as for weights --- asymmetric (min-max) quantization. Because of how min-max quantization works, the range of quantized values will fit to the groups with largest (or smallest) quantization scale, quantizing them perfectly.
+In other words, we group groupwise statistics from $\beta_2=16$ consecutive values and quantize them together in the same number of bits, such that groups with atypical quantization parameters end up using more of the ``quantization budget''. Finally, both first and second-level quantization is directly within the quantization process, allowing the algorithm to compensate the second-level quantization error where possible.
+
+\textbf{High-sensitivity outliers.} Our analysis showed the existence of cases where a small percentage of sensitive weights come in small groups (in the self-attention) or individual ``outliers'' (in the MLP). 
+In some cases, 1\% of the weights account for over 75\% of the total quantization error. 
+Since these weights appear to lead to high, irreducible error, we choose to keep these outliers in high precision (16-bit).
+As these outliers are often unstructured, we encode them individually in a row-wise arrangement similar to a compressed-sparse-row (CSR) representation~\cite{hoefler2021sparsity}. This can encode both individual outliers and small structures that do not fit into the above definition of groups.
+The procedure for detecting the outliers is described in detail in 
+Alg.~\ref{alg:main}. If follows a rough two-step procedure: (1) find and isolate outliers as 16-bit weights, (2) quantize the non-outlier ``base'' weights into 3-4 bit and transfer the remaining quantization into the the 16-bit outliers weights.
+For the outlier isolation step, the algorithm implements a filtering technique based on the sensitivity criterion in Eq.~\eqref{eq:error},  
+which is used to isolate and separate outliers from base weights. 
+Globally, for each matrix, the algorithm aims to pick a sensitivity threshold $\tau$ to obtain the desired number of outliers across the whole model, usually around $1\%$ of weights.
+Specifically, a particular weight is considered an outlier if keeping the weight in 16-bit reduces the error in Eq.~\eqref{eq:error} by at least $\tau$. 
+
+Following this first outlier detection step, we quantize the base weights ignoring all outliers that occur in the same quantization group. As such, the quantization statistics (e.g. scales) are computed by excluding outliers. This results in significant improvements in terms of error, since e.g. the min-max scales will be significantly reduced.  
+The algorithm then proceeds to apply GPTQ to quantize the remaining weights.  
+Interestingly, unlike~\cite{dettmers2022llm}, a weight can be chosen to be an outlier not only if it causes error by itself, but also if the GPTQ algorithm can employ this weight to compensate errors from many other weights. Thus, the resulting 16-bit value will contain not the original weight, but a weight that was adjusted to minimize the output error. As such, SpQR goes beyond mere detection of outliers towards the more general notion of isolating and treating outliers that occur {\it during} the quantization process.
+Finally, the algorithm gathers and compresses sparse outlier matrix as well as the final quantization statistics with bilevel quantization and returns the compressed weights and their metadata. 
+\begin{algorithm}
+\caption{SpQR quantization algorithm: the left snippet describes the full procedure, the right side contains subroutines for bilevel quantization and finding outliers.}
+\label{alg:main}
+\small
+\begin{minipage}{0.6\textwidth}
+    \texttt{func} \algname{SpQRQuantize($W, X, b, \beta_1, \beta_2, \tau, \lambda$)}
+    \begin{algorithmic}[1]
+      \Require $W\in \mathcal{R}^{m\times n}$ --- weight matrix,
+      \Statex \quad\space\space $X\in \mathcal{R}^{n\times d}$ --- calibration data,
+      \Statex \quad\space\space $b$ --- the base number of quantization bits,
+      \Statex \quad\space\space $\beta_1, \beta_2$ --- quantization group sizes,
+      \Statex \quad\space\space $\tau$ --- sensitivity outlier threshold
+      \Statex \quad\space\space $\lambda$ --- hessian regularizer,
+      \Statex
+      \State $E := \text{float\_matrix}(m, n)$ \quad // L2 error
+      \State $H := 2 X X^T$  \quad // L2 error hessian, $\mathcal{R}^{n \times n}$
+      \State $H^{\text{ic}} := \text{Cholesky}((H + \lambda \mathbf{I})^{-1})$
+      \State $Q := \text{int\_matrix}(m, n)$ \quad  // quantized weight
+      \State $\mathcal{O} := \emptyset$ \quad  // a set of all outliers
+      \State $\mathcal{S} := \emptyset$ \quad  // a set of quantization statistics
+      \For{$i = 1, \beta_1, 2 \beta_1, \dots n$}
+        \State $W_{:, i: i + \beta_1}, \mathcal{O} := \text{outliers}(W_{:, i: i + \beta_1}, H^{\text{ic}}_{i: (i + \beta_1), i: (i + \beta_1)} \mathcal{O})$
+        \State $\hat s, \hat z, \mathcal{S} := \text{fit\_statistics}(W_{:, i: i + \beta_1}, \mathcal{S}, \mathcal{O})$
+        \For{$j = i, \dots, i + \beta_1$}
+          \State $Q_{:, j} := \text{quantize}(W_{:, j}, \hat s, \hat z)$
+          \State $\vec w_q := \text{dequantize}(Q_{:, j}, \hat s, \hat z)$
+          \State $E_{:, j} := (W_{:, j} - \vec w_q) / H^{\text{ic}}_{j, j} \cdot (1 - \text{is\_outlier}(W_{:, j}, \mathcal{O}))$
+          \State $W_{:, j:(i + \beta_1)} := W_{:, j:(i + \beta_1)} - E \cdot H^{\text{ic}}_{j, j:(i + \beta_1)}$
+        \EndFor
+        \State $W_{:, (i + \beta_1) : n} := W_{:, (i + \beta_1):n} - E \cdot H^{\text{ic}}_{i: (i + \beta_1), i:(i + \beta_1)}$
+      \EndFor
+      \State $S_q, Z_q, S_s, Z_s, S_z, Z_z := \text{gather\_statistics}(\mathcal{S})$
+      \State $W_{sparse} = \text{gather\_outlier\_matrix}(W, \mathcal{O})$
+      \State\Return $Q, S_q, Z_q, S_s, Z_s, S_z, Z_z, W_{sparse}$
+    \end{algorithmic}
+    \texttt{func} $\textbf{quantize}(M, \vec s, \vec z)$
+    \begin{algorithmic}[1]
+    \State\Return $\lfloor M / \vec s + \vec z + 0.5 \rfloor$
+    \end{algorithmic}
+    \texttt{func} $\textbf{dequantize}(Q, \vec s, \vec z)$
+    \begin{algorithmic}[1]
+    \State\Return $\vec s \cdot (Q - \vec z)$
+    \end{algorithmic}
+\end{minipage}
+\hspace{10px}\begin{minipage}{0.35\textwidth}
+    \texttt{func} $\textbf{fit\_quantizer}(M, \beta)$
+    \begin{algorithmic}[1]
+    \State $\vec m := \text{flatten}(M)$
+    \State $\vec s, \vec z := \text{vectors()}$
+    \For{$i = 1, \beta_1, 2 \beta_1, \dots \text{dim(m)}$}
+      \State $s_i := \frac{\text{max}({\vec m}_{i: i + \beta}) - \text{min}({\vec m}_{i: i + \beta})}{2^b - 1}$
+      \State $z_i := - \text{min}({\vec m}_{i: i + \beta}) / s_i$
+    \EndFor
+    \State\Return $\vec s, \vec z$
+    \end{algorithmic}
+
+    \texttt{func} $\textbf{error}(W, H^{\text{ic}})$
+    \begin{algorithmic}[1]
+    \State $\vec s, \vec z := \text{fit\_quantizer}(W, \beta_1)$
+    \State $W_q := \text{quantize}(W, \vec s, \vec z)$
+    \State $E := (W - W_q) / H^{\text{ic}}$
+    \State\Return $E ^ 2$
+    \end{algorithmic}
+    
+    \texttt{func} $\textbf{outliers}(W, H^{\text{ic}}, \mathcal{O})$
+    \begin{algorithmic}[1]
+    \State $E_{\text{base}} = \text{error}(W, H^{\text{ic}})$
+    \For{$i = 1, \dots, \beta_1$}
+      \State $loo := \{1, 2, ..., \beta_1\} / \{i\}$
+      \State $E_{\text{ol}} = \text{error}(W_{:, \text{loo}}, H^{\text{ic}}_{\text{loo}, \text{loo}})$
+      \State $I_o = \text{select}(E_{\text{base}} - E_{\text{ol}} > \tau)$
+      \State $\mathcal{O} := \mathcal{O} \cup I_o$    
+    \EndFor
+    \State\Return $W, \mathcal{O}$
+    \end{algorithmic}
+    
+    \texttt{func} $\textbf{fit\_statistics}(W, \mathcal{S}, \mathcal{O})$
+    \begin{algorithmic}[1]
+        \State $W := W \cdot (1 - \text{is\_outlier}(W, O))$
+        \State $\vec s, \vec z := \text{fit\_quantizer}(W, \beta_1)$
+        \State // $\vec s$ for scales, $\vec z$ for zero points
+        \State $\vec s_s, \vec z_s := \text{fit\_quantizer}(\vec s, \beta_2)$
+        \State $\vec s_z, \vec z_z := \text{fit\_quantizer}(\vec z, \beta_2)$
+        \State $\vec s_q := \text{quantize}(\vec{s}, \vec s_s, \vec z_s)$
+        \State $\vec z_q := \text{quantize}(\vec{z}, \vec s_z, \vec z_z)$
+        \State $\mathcal{S} := \mathcal{S} \cup \{s_q, s_s, s_z, z_q, s_z, z_z\}$
+        \State $\hat s := \text{dequantize}(s_q, s_s, s_z)$
+        \State $\hat z := \text{dequantize}(z_q, z_s, z_z)$
+      \State\Return $\hat s, \hat z, \mathcal{S}$
+    \end{algorithmic}
+\end{minipage}
+
+\end{algorithm}
+\textbf{Implementation details.} Our algorithm also contains several optimizations. 
+As we are using small group sizes, it is often the case that a group contains all positive (or all negative) values. 
+Standard quantizers~\cite{frantar2022obc, frantar2022gptq} require the maximum value to be positive and the minimum value to be negative. 
+For small group sizes, removing this requirement results in slightly better quality. 
+As a by-product of quantizing the quantization statistics, our algorithm allows non-integer zero points. 
+We ablate these and other SpQR components in Section~\ref{sect:experiments}.
+\subsection{Implementing and Leveraging the Sparse Quantized Representation}\label{sect:method_representation_and_inference}
+
+Our algorithm converts homogeneous weights into several data structures of various sizes and precisions. Overall, the representation consists of (1) quantized weights, (2) first level quantized quantization statistics, second level quantization statistics, and (3) the CSR outlier indices and values. We summarize the overall structure of SpQR in Figure~\ref{fig:spqr} and describe each component below.
+
+\begin{figure}[t]
+    \centering
+    \hspace{-10px}\includegraphics [width=400px] {resources/fig_spqr_v3b.pdf} 
+    \caption{A high-level overview of the SpQR representation for a single weight tensor. The right side of the image depicts all stored data types and their dimensions.}
+    \label{fig:spqr}
+\end{figure}
+
+\textbf{Storing quantized groups.} All non-outlier weights are encoded as a structure that contains: 
+\begin{itemize}
+    \item a $b_w$-bit individual weight;
+    \item a $b_q$-bit scale and zero point for each group of size $B$; 
+    \item $16$-bit statistics for quantizing groups of $B_q$ quantization scales and zero-points. 
+\end{itemize}
+
+As a particular example for a SpQR representation, consider $b_w {=} b_q {=} 3$ and $B_w=B_q=16$. The weight matrix is split into groups of $B_q \times B_w = 256$ weights. A group contains 256 individual $b_w=3$-bit codes. Every 16 weights use a separate 3-bit scale and zero-point. Finally, there are four 16-bit scalars for the entire group used for second level quantization.
+To simplify GPU memory access, we keep the quantized values for outlier weights in place and adjust the 16-bit versions to compensate for that. We also store both quantized weights and quantized quantization statistics in a contiguous memory region for each group. When running on a different hardware (e.g. mobile CPUs), it is possible to further reduce the memory footprint by removing the quantized version of outliers. We leave this direction for future work.
+
+\textbf{Storing outliers.} 
+Recall that our outliers are unstructured; for storage, we sort them by their row first and column second, so that outliers in the same row are contiguous in memory. 
+For each outlier, we store two scalars: the 16-bit weight value and the 16-bit column index. For each row, we also store a single 32-bit number---the total number of outliers in the rows up to the current one for efficient inference.
+This results in an average storage cost of 32.03 to 32.1 bits per sensitive weight. 
+This could be reduced significantly by grouping outliers, which we leave as future work. 
+
+\textbf{Inference with SpQR.} 
+To illustrate the practicality of our approach, we design an efficient GPU-based decoding implementation for the SpQR format, focused on the popular token-by-token LLM generation as a use-case.  
+
+We leverage the fact that autoregressive inference on GPUs is memory-bound, so high compression rates can hide decoding overheads, to a significant extent. 
+At a high level, our algorithm loads group statistics and the quantized weights into shared memory (SRAM), dequantizes to 16-bits, and then performs matrix multiplication with 16-bit inputs.
+For handling outliers, we design a sparse matrix algorithm that takes advantage of outliers that occur in rows. Roughly, the algorithm works as follows
+
+First, (1) we divide the matrix into equally sized blocks.
+Then, each GPU core (thread block) (2) loads a large slice of outliers into shared memory (SRAM), and each GPU core (3) determines if outliers are part of the segment or not. The corresponding weights are (4) loaded from main memory; finally, the matrix multiplication is performed.
+This algorithm essentially performs load balancing through steps (1-3), while step (4) tends to have contiguous memory access due to the row-like patterns for the outliers. We will show in Section~\ref{sect:experiments} that this custom approach is faster than the sparse matrix algorithms in PyTorch.
+
+
+
+
+\section{Experimental Validation}
+
+
+\paragraph{Experimental setup.}
+We focus on three main settings: 1) evaluating what is the most compact representation with which SpQR can replicate the performance of a 16-bit model within 1\% perplexity, 2) controlling for the average number of bits per parameter across methods and assess the performance of SpQR compared to round-to-nearest and GPTQ baselines, 3) what is the best trade-off in terms of model size and performance. For these settings, we evaluate the full SpQR algorithm on publicly-available LLMs. We focus on the LLaMA $\{7,13,30,65\}$B model family~\cite{touvron2023llama} and Falcon$\{7,40\}$B model family~\cite{falcon2023}. We quantize LLaMa models using the RedPajama dataset and Falcon models on RefinedWeb dataset~\cite{refinedweb2023}, publicly-available replicas of the LLaMA and Falcon training data, respectively.
+
+We compare SpQR against two other post-training quantization schemes: GPTQ~\cite{frantar2022gptq} and simple rounding-to-nearest (RTN) quantization, which is used by most other LLM compression methods~\cite{dettmers2022llm, yao2022zeroquant}. 
+Both baselines use 4-bit quantization since it provides the best quality to size trade-off~\cite{dettmers2022case}. For SpQR, we consider both 3-bit and 4-bit base quantization, though the resulting model size can be slightly larger due to the presence of outliers.
+
+We evaluate quantized model performance by two metrics. 
+Firstly, we measure \emph{perplexity}, measured on the WikiText2~\cite{wikitext103}, Penn Treebank~\cite{PTB} and C4~\cite{C4} datasets. 
+Secondly, we measure zero-shot accuracy on five tasks: WinoGrande~\cite{DBLP:journals/cacm/winogrande2021}, PiQA~\cite{tata2003piqa}, HellaSwag, ARC-easy and ARC-challenge~\cite{arc_allenai}. We use the LM Evaluation Harness~\cite{eval-harness} with recommended parameters. 
+ 
+Our implementation takes around 4.5 hours on the largest model size (65B) on an NVIDIA A100 and about 6 on an A6000. 
+
+To control for model size, we evaluate RTN and GPTQ with 4-bit base quantization. 
+For SpQR we use 3-bit base quantization, a group size of 8 with 3-bit for the first quantization, a group size of 64 for the second quantization, and as many outliers as possible to still reach less than 4-bits per parameter on average.
+We aim to achieve \emph{near-lossless} compression, for which we adopt the definition of the MLCommons benchmark~\cite{reddi2020mlperf}: 
+1\% error relative to the uncompressed baseline. In all SpQR evaluations, we choose $\tau$ such that the proportion of outliers is under $1\%$.
+
+
+\paragraph{Main Results.}
+Figure~\ref{fig:quantization_method_comparison} measures actual model size versus perplexity on LLaMa models on WikiText2, and accuracy on zero-shot tasks. 
+We observe that SpQR outperforms GPTQ (and correspondingly RTN) at similar model size by a significant margin, especially on smaller models. 
+This improvement comes from both SpQR achieving more compression, while also reducing loss degradation. 
+In addition, if we measure the bits per parameter needed to come within 1\% of the 16-bit performance in terms of perplexity, Figure~\ref{fig:quantization_method_comparison} shows that SpQR with 4.6 to 4.71 bits per parameter approaches the non-quantized models with at most 1\% margin of error for all models (see Table~\ref{tab:quantization_method_comparison_LLaMA} and Table~\ref{tab:quantization_method_comparison_falcon} for exact values).
+The second set of results, presented in Table~\ref{tab:quantization_method_comparison_LLaMA} for LLaMa and Table~\ref{tab:quantization_method_comparison_falcon} for Falcon family models, controls model size by comparing SpQR and baseline methods with 4 bits per parameter. 
+These results show that SpQR improves over previous methods, with the gap between SpQR and the next best method GPTQ being as large as the improvement of GPTQ over naive RTN. For 4-bit, SpQR halves the error relative to the 16-bit baseline compared to GPTQ.
+
+\begin{figure}
+\footnotesize
+\centering
+\setlength\tabcolsep{4pt}
+\begin{floatrow}
+\capbtabbox{%
+\renewcommand{\arraystretch}{1.15}
+
+\begin{tabular}{lccccc}
+  \multicolumn{2}{l}{\bf{LLaMa}}  & \multicolumn{4}{c}{}\\
+
+ \toprule
+ \bf{Size} & \bf{Method} & \bf{Avg bits} & \bf{Wiki2} & \bf{C4} & \bf{PTB}\\
+ \midrule
+
+ \multirow{5}{*}{7B} & -- & 16.00 & 5.68 & 7.08 & 8.80\\
+  & SpQR & 4.63 & 5.73 & 7.13 & 8.88\\\cmidrule{2-6}
+ & RTN & 4 & 6.43 & 7.93 & 10.30\\
+ & GPTQ & 4 & 6.13 & 7.43 & 9.27\\
+ & SpQR & 3.94 & 5.87 & 7.28 & 9.07\\
+ \midrule
+ \multirow{5}{*}{13B} & -- & 16.00 & 5.09 & 6.61 & 8.07\\
+  & SpQR & 4.63 & 5.13 & 6.64 & 8.13\\\cmidrule{2-6}
+ & RTN & 4 & 5.55 & 6.98 & 8.65\\
+ & GPTQ & 4 & 5.40 & 6.84 & 8.44\\
+ & SpQR & 3.96 & 5.22 & 6.72 & 8.22\\
+ \bottomrule
+ \end{tabular}
+ \hfill
+ \begin{tabular}{lccccc}
+\multicolumn{6}{c}{}\\
+ \toprule
+  \bf{Size} & \bf{Method} & \bf{Avg bits} & \bf{Wiki2} & \bf{C4} & \bf{PTB}\\
+ \midrule
+ \multirow{5}{*}{30B} & -- & 16.00 & 4.10 & 5.98 & 7.30 \\
+  & SpQR & 4.69 & 4.14 & 6.01 & 7.33\\\cmidrule{2-6}
+ & RTN & 4 & 4.57 & 6.34 & 7.75\\
+ & GPTQ & 4 & 4.48 & 6.20 & 7.54\\
+ & SpQR & 3.89 & 4.25 & 6.08 & 7.38\\
+ \midrule
+ \multirow{5}{*}{65B} & -- & 16.00 & 3.53 & 5.62 & 6.91\\
+  & SpQR & 4.71 & 3.57 & 5.64 & 6.93 \\\cmidrule{2-6}
+ & RTN & 4 & 3.87 & 5.85 & 7.17\\
+ & GPTQ & 4 & 3.83 & 5.80 & 7.07\\
+ & SpQR & 3.90 & 3.68 & 5.70 & 6.99\\
+ \bottomrule
+\end{tabular}
+}
+{
+  \caption{Perplexity on WikiText2~\cite{wikitext103}, C4~\cite{C4} and Penn Treebank~\cite{PTB} for SpQR and round-to-nearest (RTN) and GPTQ baselines with LLaMa. We can see that SpQR reaches performances within 1\% of the perplexity with less than 4.71 bits per parameter. We also see that for 4-bits per parameter SpQR significantly improves on GPTQ with an improvement as large as the improvement from RTN to GPTQ. }%
+  \label{tab:quantization_method_comparison_LLaMA}
+}  
+\end{floatrow}
+\end{figure}
+
+\begin{figure}
+\footnotesize
+\centering
+\setlength\tabcolsep{4pt}
+\begin{floatrow}
+\capbtabbox{%
+\renewcommand{\arraystretch}{1.15}
+
+\begin{tabular}{lccccc}
+  \multicolumn{2}{l}{\bf{Falcon}}  & \multicolumn{4}{c}{}\\
+
+ \toprule
+ \bf{Size} & \bf{Method} & \bf{Avg bits} & \bf{Wiki2} & \bf{C4} & \bf{PTB}\\
+ \midrule
+
+ \multirow{5}{*}{7B} & -- & 16.00 & 6.59 & 9.50 & 9.90\\
+  & SpQR & 4.44 & 6.64 & 9.58 & 9.97\\\cmidrule{2-6}
+ & RTN & 4 & 8.73 & 12.56 & 13.76\\
+ & GPTQ & 4 & 6.91 & 9.93 & 10.33\\
+ & SpQR & 3.92 & 6.74 & 9.70 & 19.114\\
+ \bottomrule
+ \end{tabular}
+ \hfill
+ \begin{tabular}{lccccc}
+\multicolumn{6}{c}{}\\
+ \toprule
+  \bf{Size} & \bf{Method} & \bf{Avg bits} & \bf{Wiki2} & \bf{C4} & \bf{PTB}\\
+ \midrule
+ \multirow{5}{*}{40B} & -- & 16.00 & 5.23 & 7.76 & 7.83 \\
+  & SpQR & 4.46 & 5.26 & 7.79 & 7.86\\\cmidrule{2-6}
+ & RTN & 4 & 6.52 & 9.76 & 10.63\\
+ & GPTQ & 4 & 5.36 & 7.95 & 8.01\\
+ & SpQR & 3.90 & 5.29 & 7.85 & 7.91\\
+ \bottomrule
+\end{tabular}
+}
+{
+  \caption{Perplexity on WikiText2~\cite{wikitext103}, C4~\cite{C4} and Penn Treebank~\cite{PTB} for SpQR and round-to-nearest (RTN) and GPTQ baselines on Falcon model. We can see that SpQR reaches performances within 1\% of the perplexity with less than 4.5 bits per parameter. We also see that for 4-bits per parameter SpQR significantly improves on GPTQ with an improvement as large as the improvement from RTN to GPTQ.}%
+  \label{tab:quantization_method_comparison_falcon}
+}  
+\end{floatrow}
+\end{figure}
+
+\paragraph{Ablations.}
+The SpQR representation differs from standard quantization methods in two main ways: bilevel quantization with small quantization group size and unstructured outliers. To understand the effect of small group sizes, we compare 3-bit SpQR with group size 16, compressed using 3-bit bilevel quantization, versus a  setup with group size 48, keeping quantization statistics in 16-bit. Both configurations result in approximately 3.6 average bits per parameter. For simplicity, neither uses outliers.
+We report both in Table~\ref{Tab:ablation}, the ``3-bit statistics`` entry corresponds to group size 16 with 3-bit statistics and ``16-bit statistics`` stands for group size 16 with 16-bit statistics. Given the same (slightly smaller) memory footprint, using quantized statistics significantly improves language modeling loss.
+
+Next, we ask whether it is necessary to use unstructured outliers, considering two outlier types. First, we use the criterion of Dettmers et al.~\citep{dettmers2022case} to find column outliers and quantize them in higher precision. The alternative is to treat the entire rows (output units / hidden units / neurons) as outliers: we run SpQR without outliers, then select $k$ output units that have the highest quantization error (i.e. MSE between layer predictions) and treat the entire rows as 16-bit outliers. %We must also note that the unstructured outliers take up approximately twice as much space per outlier as row or column outliers.
+We compare the three outlier types on top of 3-bit SpQR and report the results in Figure~\ref{fig:outliers_fig}. Overall, unstructured outliers reduce perplexity significantly faster than their row counterpart and the criterion of~\cite{dettmers2022case}, even after accounting for the different memory footprint.
+
+Finally, we analyze the impact of the minor hyperparameter changes that we introduced at the end of Section~\ref{sect:method_compress}. In Table~\ref{Tab:ablation} (bottom), we evaluate quantization errors without these changes. The ``Round zero'' entry corresponds to a version of SpQR where the zero-point is a 3-bit integer. This reduces the memory footprint of SpQR, but results in a moderate increase in perplexity. Similarly, we evaluate SpQR without the ``act order'' flag. This option re-orders the input dimensions by the diagonal of the inverse hessian, which was introduced as a part of the GPTQ algorithm. Using this heuristic slightly improves loss, though not as much as from quantized groups.
+
+\begin{figure}
+\footnotesize
+\begin{floatrow}
+\capbtabbox{%
+\renewcommand{\arraystretch}{1.15}
+{\caption{Perplexity for LLaMA-65B model.}%
+\label{Tab:ablation}}
+\begin{tabular}{lcccc}
+ \toprule
+ \bf{Name} & \bf{Wiki2} & \bf{C4} & \bf{PTB} & \bf{Avg bits} \\
+ \midrule 
+ Uncompressed & 3.53 & 5.62 & 6.91 & 16\\
+ GPTQ (4 bit) & 3.83 & 5.80 & 7.07 & 4 \\
+ \midrule
+ 3-bit statistics & 3.74 & 5.73 & 7.02 & 3.63\\
+ 16-bit statistics & 3.84 & 5.83 & 7.12 & 3.67\\
+ \midrule
+ Round zero & 3.75 &  5.76 & 7.01 & 3.63\\
+ w/o act order & 3.74 & 5.76 & 7.05
+ & 3.63\\
+
+ \bottomrule
+\end{tabular}
+}
+
+  
+\ffigbox{%
+  \includegraphics[width=0.9\linewidth]{resources/Outliers_ablation.pdf}
+}{%
+  \caption{Different outlier types, LLaMA-65B. }%
+  \label{fig:outliers_fig}
+}
+\end{floatrow}
+\end{figure}
+
+To summarize, both small quantized groups and unstructured outliers independently improve perplexity and perform better than alternative strategies. SpQR also benefits from using the GPTQ activation order heuristic, though the gain is smaller than from outliers or small groups. Still, we opt to use the same activation order heuristic in the GPTQ baselines to ensure a fair comparison.
+
+
+\paragraph{Inference Time.}\label{sect:experiments_speed}
+Finally, we evaluate the inference speed of SpQR for autoregressive inference with a focus on measuring the token generation latency with batch size 1 on a single A100 GPU. We measure inference speed in two setups: i) generating 100 tokens from scratch and ii) adding 100 tokens on top of a 1024-token prefix (prompt). We compare our specialized sparse matrix multiplication algorithm with the algorithm implemented in PyTorch\nocite{pytorch} (cuSPARSE). We also compare against a 16-bit baseline. We measure the end-to-end latency as inference steps per second for the full SpQR algorithm, that is for both the dense and sparse multiplication part together.
+\begin{table}[h]
+    \scriptsize
+    \centering
+    \setlength\tabcolsep{2pt}
+    \begin{tabular}{c|cccc|cccc|cccc}
+         Method        & \multicolumn{4}{c|}{fp16 (baseline)} & \multicolumn{4}{c|}{SpQR (PyTorch)} & \multicolumn{4}{c}{SpQR (optimized)} \\
+         \midrule
+         LLaMA         & 7B     & 13B     & 30B     & 65B     & 7B     & 13B     & 30B     & 65B      & 7B     & 13B     & 30B     &     65B \\
+         scratch  & $47\pm2.3$ & $37\pm0.8$ & $19\pm1.1$ & OOM & $30\pm2.2$ & $24\pm1.2$ & $8.8\pm0.4$ & OOM & $\textbf{57}\pm2.4$ & $\textbf{44}\pm0.5$ & $\textbf{22}\pm0.9$ & $\textbf{12}\pm0.6$ \\
+         prefix 1024   & $46\pm2.4$ & $31\pm0.9$ & $17\pm0.8$ & OOM & $27\pm1.6$ & $21\pm1.1$ & $6.5\pm0.7$ & OOM & $\textbf{55}\pm2.1$ & $\textbf{37}\pm0.8$ & $\textbf{22}\pm1.3$ & $\textbf{11}\pm0.6$ \\\bottomrule
+    \end{tabular}
+    \caption{Inference speed comparison (tokens/s), OOM means the model did not fit in an A100 GPU. We see that our optimized SpQR algorithm is faster than the 16-bit baseline and almost 2.0x faster than quantized matrix multiplication + standard PyTorch sparse matrix multiplication baseline.}
+    \label{tab:inference}
+\end{table}
+Results are shown in Table~\ref{tab:inference}. We can see that while standard sparse matrix multiplication in PyTorch is not faster than 16-bit inference, our specialized sparse matrix multiplication algorithm yields speedups of about 20-30\%.
+
+
+\section{Discussion \& Limitations}
+
+
+We have presented SpQR, an quantization approach which quantizes sensitive outliers in higher precision, to achieve near-lossless 16-bit accuracy with less than 4.75 bits per parameter on average. We achieve even better quality-size-tradeoff when compressing to as little as 3.36 bits which makes SpQR an ideal method for compressing models for memory-limited devices.
+Despite our promising results, there are several limitations. The main limitation is that we do not evaluate the generative quality of quantized LLMs, but only the predictive performance in terms of zero-shot accuracy and perplexity. While we believe that perplexity measurements and generation quality are strongly related, this is a hypothesis we aim to investigate in future work. 
+While we devise a sparse matrix multiplication algorithm to accelerate the computation with outliers, another limitation is that we do not fuse sparse matrix multiplication with regular quantized matrix multiplication. Such an approach would yield even better inference time performance. However, such an approach is also very difficult to implement. We leave the implementation of such an algorithm to future work.
+
+
+
+\section{Acknowledgements}
+
+D.K. was supported by Russian Science Foundation, grant 21-11-00373. 
+D.A. and E.F. gratefully acknowledge funding from the European Research Council (ERC) under the European Union’s Horizon 2020 research and innovation programme (grant agreement No 805223 ScaleML). Authors also thank Ivan Komarov for his help in profiling and understanding the performance bottlenecks of SpQR on GPU. 
+
+
+
+
+
+
+
+
+
+

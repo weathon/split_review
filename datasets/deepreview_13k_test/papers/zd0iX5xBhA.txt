@@ -1,0 +1,403 @@
+\title{System 1.x: Learning to Balance Fast and Slow Planning with Language Models}
+
+\begin{abstract}
+Language models can be used to solve long-horizon planning problems in two distinct modes. In a \emph{fast} `\sysoneshort{}' mode, models directly generate plans without any explicit search or backtracking, and in a \emph{slow} `\systwoshort{}' mode, they plan step-by-step by explicitly searching over possible actions. While \systwoshort{} planning is typically more effective, it is also more computationally expensive, often making it infeasible for long plans or large action spaces. Moreover, isolated \sysoneshort{} or \systwoshort{} planning ignores the user's end goals and constraints (e.g., token budget), failing to provide ways for the user to control their behavior. To this end, we propose the \emph{\method{}}, a controllable planning framework with language models that is capable of generating hybrid plans and balancing between the two planning modes based on the difficulty of the problem at hand. \methodshort{} consists of (i) a controller, (ii) a \sysone{}, and (iii) a \systwo{}. Based on a user-specified hybridization factor $x$ governing the degree to which the system uses \sysoneshort{} vs. \systwoshort{}, the controller decomposes a planning problem into sub-goals, and classifies them as easy or hard to be solved by either \sysoneshort{} or \systwoshort{}, respectively. We fine-tune all three components on top of a single base LLM, requiring only search traces as supervision. Experiments with two diverse planning tasks -- Maze Navigation and Blocksworld -- show that our \method{} outperforms a \sysone{}, a \systwo{} trained to approximate \astar{} search, and also a symbolic planner (\astar{} search), given an exploration budget. We also demonstrate the following key properties of our planner: (1) \emph{controllability}: by adjusting the hybridization factor $x$ (e.g., System-$1.75$ vs. System-$1.5$) we can perform more (or less) search, improving performance, (2) \emph{flexibility}: by building a neuro-symbolic variant composed of a neural \sysoneshort{} planner and a symbolic \systwoshort{} planner, we can take advantage of existing symbolic methods, and (3) \emph{generalizability}: by learning from different search algorithms (BFS, DFS, A$^*$), we show that our method is robust to the choice of search algorithm used for training.x}}  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/intro.pdf}
+    \caption{Comparative overview of a \sysone{}, a \systwo{}, and our hybrid and controllable \method{}. Given a Maze Navigation task, a \sysone{} directly generates a plan as a sequence of steps without search, thus making it fast but inaccurate. A \systwo{} performs search before generating a plan and hence is more accurate but much slower. Our \method{} generates hybrid plans, where the level of hybridization is controlled by a user-defined hyperparameter. Hybrid plans balance \sysoneshort{} sub-plans for easier sub-goals and \systwoshort{} sub-plans for harder ones, making \methodshort{} fast, accurate, and controllable. 
+    }
+    \label{fig:intro}
+\end{figure*}
+
+A key feature of intelligence -- both human and artificial -- is the ability to plan. 
+Indeed, planning has been a major topic of research in AI for most of its history~\citep{russell2016artificial}, with applications ranging from navigation and robotics to manufacturing and story-telling. These days, auto-regressive Large Language Models (LLMs) are increasingly used for various long-horizon planning and reasoning tasks~\citep{bubeck2023sparks, wei2022chain, yao2024tree}. Despite some initial promise, recent careful investigations have highlighted LLMs' shortcomings on classical planning tasks~\citep{pallagani2023understanding, valmeekam2023planning, valmeekam2024planbench, momennejad2024evaluating}. 
+Supervising models with correct plans has also led to limited success, especially for out-of-distribution generalization~\citep{dziri2024faith}. 
+Fundamentally, this issue is attributed to a lack of explicit search, backtracking, or learning from mistakes~\citep{kambhampati2024llms, bachmann2024pitfalls, gandhi2024stream}, 
+all of which are essential components of standard planning systems. 
+In other words, LLMs directly generating plans generally resemble humans' \emph{fast} `\sysoneshort{}' decision-making process~\citep{kahneman2011thinking}, characterized by quick, intuitive judgments rather than slow, deliberate planning~\citep{kambhampati2024llms}. 
+
+As potential remedies, \emph{slow} `\systwoshort{}'-inspired LLM planning approaches have emerged that either (1) augment LLMs during inference with symbolic search algorithms~\citep{yao2024tree, sel2023algorithm, ahn2022can} or (2) directly teach LLMs to carry out search themselves~\citep{gandhi2024stream, lehnert2024beyond}. 
+While the former approach of using external search tools can enhance test-time performance, the latter approach -- training models to search -- has the advantage of resulting in a single unified search model and also discovering better and more efficient search strategies~\citep{gandhi2024stream}. 
+However, such training-time approaches also face challenges due to \emph{high computational demands and potential infeasiblity}. 
+For instance, one such recently proposed (trained) \systwoshort{} method, Searchformer, uses token sequences that verbalize entire search trajectories~\citep{lehnert2024beyond}.
+Consequently, during inference, based on the action space and the plan length, these models explore a large number of states, resulting in an increased number of generated tokens.
+The cost of exploration is further exacerbated by the fact that Transformers~\citep{vaswani2017attention} typically exhibit quadratic complexity w.r.t. the sequence length. Thus, as sequence length increases, the computational complexity grows, significantly impacting memory usage and speed, rendering many long-horizon tasks infeasible due to token limits.\footnote{For example, full \systwoshort{} on $5 \times 5$ mazes with a plan length of 8 requires $\sim 1500$ tokens on average.}
+A more promising alternative would thus be to avoid incurring a high cost on all samples and steps by training a planner with a smarter, more balanced allocation of compute, i.e. one that uses \sysoneshort{} for easier (sub-)problems while reserving the more expensive \systwoshort{} for harder (sub-)problems based on the budget. 
+
+To this end, we propose the \emph{\method{}}, drawing inspiration from the Dual-Process Theory~\citep{wason1974dual, kahneman2011thinking} that argues for the co-existence of fast and slow planning in humans. 
+The fast system relies on expertise and quick judgments that are learned from experience;
+it can be cheaply and quickly applied either instinctively (e.g., withdrawing one's hand from a hot object) or in areas where an individual has acquired expertise (e.g., avoiding an unexpected obstacle when driving). 
+The slow system is more costly, involving sequential processing and relying on working memory to formulate a more deliberate plan; it includes the consideration of hypothetical alternatives~\citep{evans2003two}.
+Crucially, people can switch between these two modes as determined by the task at hand \citep{kahneman2011thinking}. For example, imagine someone is taking a detour on their usual route home.
+While on the detour, they might require \systwoshort{} planning to handle navigation in an unfamiliar area but can switch to \sysoneshort{}'s ``autopilot'' as soon as they are back on their familiar route. 
+Based on this distinction, we develop the \method{}, a controllable framework for long-horizon planning with LLMs that is capable of generating hybrid plans interleaved with \sysoneshort{} and \systwoshort{} sub-plans. \methodshort{} offers 
+a promising middle ground between a fast but inaccurate \sysone{}, used for easy problems, and an accurate but slow \systwo{}, used for hard problems (see \cref{fig:intro} for an overview). 
+
+At its core, \methodshort{} is composed of three trained components: (1) a controller that decomposes a planning problem into easier and harder sub-goals, (2) a \sysone{} that solves the easier sub-goals without any explicit search or exploration, and (3) a \systwo{} that solves the harder sub-goals by deliberately searching over possible actions. One of the primary strengths of \methodshort{} is its \emph{train-time controllability} -- based on a user-specified hyperparameter $x \in [0, 1]$, we train a controller that ultimately governs the degree of hybridization between the \sysoneshort{} and $2$ planners.
+Moreover, it also offers \emph{test-time controllability}, by which an already trained controller can be adjusted towards solving more or fewer problems using \systwoshort{}, providing another level of inference-time compute.\footnote{E.g., we can train a System-$1.5$ model and then add a bias term to the controller at test time to increase the probability of \systwoshort{}, inducing it to \emph{act} like a \systwoshort{} model (or System-$1.25$, System-$1.75$, etc.).}
+Importantly, all three components are implemented by the same fine-tuned LLM, using only search traces supervision. \methodshort{} is thus a \emph{fully (LLM-based) neural planner} that does not rely on external solvers or verifiers and requires only one base LLM.
+By not relying on external tools, our method has an advantage over inference-time methods that rely on symbolic planners, as external tools may not exist for certain domains, making data-driven approaches like \methodshort{} self-contained and easier to apply to new domains and to scale up. 
+At the same time, \methodshort{} can also be seamlessly converted into a \emph{neuro-symbolic planner} by replacing the \systwo{} with a symbolic solver (e.g., \astar{}), allowing us to integrate powerful symbolic tools when they are available.
+
+We experiment with two diverse planning problems: Maze Navigation and Blocksworld. We demonstrate that our \method{} matches and generally outperforms a \sysone{}, a \systwo{}, and a \methodshort{} variant (without sub-goal decomposition) at all budgets 
+by up to $33\%$ absolute accuracy.
+We also report similar findings with our neuro-symbolic \methodshort{}, that in fact typically outperforms symbolic search, beating \astar{} by up to 39\% at a fixed budget and matching it at maximum budget. 
+Next, we show the controllability of our framework by training a System-$1.75$ Planner that, compared to a System-$1.5$ Planner, trades off efficiency for greater accuracy.
+This trend can be continued to recover the full \systwoshort{} performance.
+\methodshort{} also generalizes to different search algorithms (BFS, DFS, and \astar{}) and exhibits exploration behavior that closely resembles the corresponding algorithm it is trained on. 
+Overall, the \method{} introduces a novel way of applying LLMs to controllable and hybrid planning, optimizing for both accuracy and efficiency.
+This, in turn, allows \methodshort{} to outperform both \sysoneshort{} and \systwoshort{} at a fixed budget.
+By intelligently allocating more resources to harder sub-goals, \methodshort{} is able to save its \systwoshort{} budget for cases where it is necessary. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/method.pdf}
+    \caption{Overview of our \method{}. \textbf{Left:} The process for training data construction. We generate three kinds of data to fine-tune our three components: (1) \sysoneshort{} data (linear chains), (2) \systwoshort{} data (search trees), and (3) controller data (consisting of sub-goals and easy/hard annotations) conditioned on a user-specified hybridization factor $x$. \textbf{Right:} During inference, the controller generates the sub-goals and predicts whether each is easy or hard. Then, it invokes \sysoneshort{} and \systwoshort{} for easy and hard sub-goals respectively to construct the final plan.
+    }
+    \label{fig:method}
+\end{figure*}
+
+
+\section{\methodshort{}
+
+
+
+We start with the requisite background on planning problems and our setup (\cref{ssec:notation}), followed by an overview and a detailed description of our method \method{} in \cref{ssec:overview} and \cref{ssec:method}, respectively.
+\subsection{Background and Problem Setup}
+\label{ssec:notation}
+
+A planning problem can be modeled as a Markov Decision Process $\mathcal{M} = (\mathcal{S}, \mathcal{A}, \mathcal{T}, \mathcal{R})$ defined with a set of states $\mathcal{S}$, a set of actions $\mathcal{A}$ on any given state, a transition function $\mathcal{T} : \mathcal{S} \times \mathcal{A} \rightarrow \mathcal{S}$ defining transitions between pairs of states based on an action, and a reward function $\mathcal{R} : \mathcal{S} \rightarrow \mathbb{R}$ assigning a reward for reaching the goal state. 
+Given such a planning problem, a start state $s_0 \in \mathcal{S}$ and a goal state $s_g \in \mathcal{S}$, the objective of classical planning is to generate a plan $\mathcal{P} = (a_1, ..., a_n)$, as a sequence of $n$ actions $a_i \in \mathcal{A}$ that helps transition from the start state to the goal state. 
+Using this notation, we define some salient concepts in a planning problem below:
+\begin{itemize}[wide=0pt, leftmargin=*, after=\strut]
+\item \textbf{\sysone{}.} We use the term ``\sysone{}'' to denote any planner that directly generates a plan as a sequence of actions \emph{without} conducting any exploration or search. \sysoneshort{} Planners are typically only model-based, trained to only output the final plan. 
+Within the scope of this study, a \sysone{} will specifically refer to a neural LLM-based planner.
+
+\item \textbf{\systwo{}.} We use the term ``\systwo{}'' to denote planners that \emph{do} conduct search before generating a plan. Unlike model-based \sysoneshort{} Planners, \systwoshort{} Planners can either be symbolic or model-based. Symbolic \systwoshort{} Planners are search algorithms. Ones that \emph{do not} rely on heuristics to minimize the search space are called uninformed algorithms (e.g., Depth First Search or Breadth First Search), and the ones that \emph{do} are called informed (e.g., Greedy Best First or \astar{}). A model-based \systwo{}, within the scope of this study, will specifically refer to an LLM trained to verbalize search trajectories (defined below) before generating a plan. Thus, the terms \sysoneshort{} and \systwoshort{} will refer to LLM-based planners while symbolic algorithms will be addressed separately.
+
+\item \textbf{Search Trajectory.} Given a search algorithm, we define a search trajectory or a search trace as the step-by-step execution of the algorithm for an input problem; in the context of LLMs, this will mean a verbalized representation of a search trajectory.
+Trajectories consist of the final plan, all intermediate actions explored during search, their corresponding states, their validity, etc.
+
+\item \textbf{Valid Plan:} A plan $\mathcal{P} = (a_1, ..., a_n)$ is considered valid if starting from the start state $s_0$, sequentially executing all taken actions in the plan leads to the goal state $s_g$, or more formally, $\mathcal{T}(\mathcal{T}(... \mathcal{T}(s_0, a_1) ..., a_{n-1}), a_n) = s_g$.
+\emph{Plan Validity} is a metric measuring the percentage of valid plans, i.e., the accuracy of the generated plans in reaching the goal state. 
+\item  \textbf{\#States-Explored:} Given a planning problem and a planner (\sysoneshort{}, $2$, or $1.x$), we define \#States-Explored ($\mathit{SE}$, in short) as the set of all states (both valid as well as invalid) that are visited by the planner on its way to generating the plan. In the case of an LLM planner, this corresponds to the number of states that the planner needs to verbalize for exploration (see right of \cref{fig:method} for an example output), and thus adds to the token cost of generation.
+Since a \sysone{} generates a plan directly without any additional explorations, it only explores the states that are part of its plan, i.e., $\mathit{SE}_\textrm{Sys1} \!=\! n$, where $n$ is the length of the generated plan. A \systwo{}, on the other hand, will perform additional state explorations before generating a plan, resulting in $\mathit{SE}_\textrm{Sys2} \gg \mathit{SE}_\textrm{Sys1}$. Note that \#States-Explored for a \systwo{} will vary based on the underlying search algorithm or the LLM planner learning from that algorithm's traces. For example, \astar{}, being an informed search algorithm, will typically explore fewer states than Breadth First Search. Similarly, an LLM trained on such \astar{} traces is expected to be more efficient than the one trained on BFS's traces. \emph{Plan Validity} (i.e., plan accuracy) and \emph{\#States-Explored} will be our two metrics of interest, using which we will compare the performance at varying budgets of all planners (discussed in \cref{sec:results}).
+
+\item \textbf{Sub-goal.} Finally, planning problems are typically compositional, meaning that they can be decomposed into sub-problems, which we will refer to as sub-goals. 
+Formally, given a plan $P$ between states $s_0$ and $s_g$, a sub-goal can be characterized by a pair of states $(s_i, s_j)$ s.t. $i, j \in [0, g], i \leq j$, where $s_i$ and $s_j$ are intermediate states on the plan to get from $s_0$ to $s_g$. 
+
+\end{itemize}
+
+\paragraph{Problem Setup.} Having defined the key terms and metrics above, we now describe the setup underlying \method{}. 
+To build a \method{}, we assume access to two things: (1) a training dataset $\mathcal{D}$ of search trajectories for $N$ planning problems, and (2) a user-specified hybridization factor $x \in [0, 1]$. Given a planning problem of initial state $s_0$, goal state $s_g$, and a gold plan $\mathcal{P}$, let us denote the corresponding gold search trajectory as $\mathcal{T}$, making the training dataset $\mathcal{D} = \{(s_0^{(i)}, s_g^{(i)}), \mathcal{P}^{(i)}, \mathcal{T}^{(i)} \}_{i = 1}^{N}$. 
+In our experiments, the gold plans and the corresponding trajectories will be obtained using a symbolic \systwo{} (e.g., A$^*$ search) but more generally, the source of these trajectories could be any neural or symbolic engine capable of exploration or search. The hybridization factor $x$ is a user-defined hyperparameter that will determine the balance between \sysoneshort{} and \systwoshort{}.
+\subsection{\methodshort{} Overview}
+\label{ssec:overview}
+Using the setup described in \cref{ssec:notation}, we develop our \method{} that consists of three trained components: (i) a \textbf{\emph{Controller}} for 
+decomposing planning problems into sub-goals and classifying them into easy or hard sub-goals,
+(ii) a \textbf{\emph{\sysone{}}} for \emph{fast} planning of easy sub-goals, and (iii) a \textbf{\emph{\systwo{}}} for \emph{slow} planning of hard sub-goals.
+See \cref{fig:method} for an overview. 
+We train all three components by automatically generating data from the gold search traces in a way that also respects the user's constraints (specified in the form of the hybridization factor). In the following two subsections, we describe how we train each component and how all three join to make \methodshort{}.
+\subsection{Training Data Generation for \methodshort{}}
+\label{ssec:method}
+
+\paragraph{\sysoneshort{} Planner Training Data.} The training data for the \sysone{} is $\mathcal{D}_{\textrm{Sys1}}\!=\! \{(s_0^{(i)}, s_g^{(i)}), \mathcal{P}^{(i)} \}_{i = 1}^{N}$ where the input is a natural language description of the planning problem consisting of a start state $s_0^{(i)}$ and a goal state $s_g^{(i)}$ and the output is the corresponding plan in natural language $\mathcal{P}^{(i)}$ (see \cref{fig:app-maze,fig:app-bw} for examples). For the Maze domain, these gold plans are also optimal plans while for Blocksworld, they may include additional explorations, making them sub-optimal at times (though they are always valid). 
+
+\paragraph{\systwoshort{} Training Data.} Similar to \sysoneshort{}, the input to a \systwo{} is also a natural language description of the planning problem. However, the target output of the \systwo{} is a verbalized search trajectory $\mathcal{T}^{(i)}$ as described in \cref{ssec:notation} (refer to \cref{fig:app-maze,fig:app-bw} for examples). This yields a training dataset of $\mathcal{D}_{\textrm{Sys2}}\!=\! \{(s_0^{(i)}, s_g^{(i)}), \mathcal{T}^{(i)}\}_{i = 1}^{N}$.
+
+\paragraph{Controller Training Data.} 
+Recall that the \method{} is designed to minimize state explorations by only performing \systwoshort{} planning \emph{as needed}, i.e., saving states by employing System-1 for easier sub-goals and reserving search with System-2 for harder sub-goals. Hence, the role of the controller is two-fold: (i) decomposing a problem into sub-goals characterized by a start and end state $(s_i, s_j)$, and (ii) classifying those sub-goals as easy or hard so that System-2 can be invoked only for the hard sub-goals. 
+However, most planning domains lack gold annotations of sub-goal decompositions and their easy and hard classifications. 
+Therefore, we propose an automatic data generation process for training our controller, as described below and more formally in \cref{alg:train}. 
+The inputs to preparing the controller data are (1) the gold plans $\{\mathcal{P}^{(i)}\}_{i=1}^{N}$ that will be decomposed into sub-goals, (2) the user-defined hybridization factor $x$, and (3) a hardness function $h(\cdot, \cdot)$ for (sub-)goals. 
+\begin{algorithm}[ht]
+\caption{Training Data Generation for \methodshort{} Controller}
+\label{alg:train}
+\begin{algorithmic}{}
+    \State {\bfseries Input:} \sysoneshort{} Training Data $\mathcal{D}_{\textrm{Sys1}} = \{(s_0^{(i)}, s_g^{(i)}), \mathcal{P}^{(i)} \}_{i = 1}^{N}$, Hybridization Factor $x \in [0,1]$, Hardness Function $h(\cdot, \cdot)$  
+    \State {\bfseries Output:} Training Data $\mathcal{D}_c$ for \methodshort{} Controller
+    \State ${\tt sort}$$(\mathcal{D}_\textrm{Sys1}, {\tt{key}}\!=\!h(s_0, s_g))$ 
+    \textcolor{comm}{\footnotesize{\textit{// Ranking data points in increasing order of hardness}}}
+    \State $\mathcal{D}_c \gets \{\} $ 
+    \For{data point $((s_0^{(i)}, s_g^{(i)}), \mathcal{P}^{(i)}) \in \mathcal{D}_\textrm{Sys1}$}
+        \If{$i < (1-x)\times N$}
+        \State \textcolor{comm}{\footnotesize{\textit{// For the first ($1-x$)\% of instances (easiest), solve them directly using \sysoneshort{} planner}}}
+        \State $y^{(i)} \gets \{(s_0^{(i)}, s_g^{(i)}), \textrm{``Sys1''}\}$ 
+       \Else:
+       \State \textcolor{comm}{\footnotesize{\textit{// For the remaining x\% hardest instances, find the best decomposition into three sub-goals such that the middle sub-goal $(s_j, s_k)$ is solved using \systwoshort{} and has a length of x\% of the total plan length}}}
+       \State $(j, k) = \mathrm{argmin}_{u,v \in [0, g], u \leq v}(h(s_0^{(i)}, s_u) - h(s_u, s_v) + h(s_v, s_g^{(i)})) \text{ s.t. } |v - u| = x\times n$
+        \State $y^{(i)} \gets \{(s_0^{(i)}, s_j), \textrm{``Sys1''}\}$
+        \State $y^{(i)} \gets y^{(i)} + \{(s_j, s_k), \textrm{``Sys2''}\}$
+        \State $y^{(i)} \gets y^{(i)} + \{(s_k, s_g^{(i)}), \textrm{``Sys1''}\}$
+       \EndIf
+       \State $\mathcal{D}_c \gets \mathcal{D}_c + \{(s_0^{(i)}, s_g^{(i)}), y^{(i)}\}$ 
+    \EndFor
+       
+\State \Return{$\mathcal{D}_c$}
+\end{algorithmic}
+\end{algorithm}
+\begin{itemize}[nosep, wide=0pt, leftmargin=*, after=\strut]
+
+\item \textbf{Step 1: Defining and Ranking using a Hardness Function.} A hardness function $h(s_i, s_j)$ takes a start state $s_i$ and a goal state $s_j$ as input, and returns a scalar value estimating the hardness of the goal or the sub-goal. An example of a hardness function for a Maze Navigation task is the number of obstacles in a sub-maze, where a higher value indicates greater difficulty. Sections \cref{ssec:impl}, and \cref{ssec:analysis} more concretely describe and compare these hardness functions for different tasks, respectively. Generally, hardness functions can be constructed for most planning domains where heuristic searches like \astar{} are frequently applied. 
+Using this hardness function between the start and the goal state $h(s_0, s_g)$, we generate a rank ordering of the training examples.
+\item \textbf{Step 2: Annotating Easy Instances as \sysoneshort{}-only.} Intuitively, some planning problems in the train set can be solved successfully via only a \sysone{}. For such instances, no further decomposition is needed. These correspond to the first $(1-x)\times N$ easiest samples with the least $h(\cdot, \cdot)$. Note that this is a definition of hardness, and what is considered as easy is determined by the hybridization factor $x$. For example, when $x = 0.0$, all samples will be annotated as easy, making \methodshort{} the same as \sysoneshort{}.
+
+\item \textbf{Step 3: Annotating Hard Instances as Hybrid \sysoneshort{} + \systwoshort{}.}
+For the remaining $x\times N$ (hard) samples, 
+we assume that they can be decomposed into sub-goals, each of which can be assigned to either \sysoneshort{} or \systwoshort{}. However, to ensure overall task success, the decompositions should neither be too coarse, i.e., requiring further decompositions, nor too fine-grained, making them susceptible to decomposition errors~\citep{prasad2024adapt}. Hence, we adopt a sliding window approach that optimizes for the following: find a contiguous chunk of length $x \times n$ of an $n$-length plan to be assigned \systwoshort{}, such that it corresponds to the hardest sub-goal and the sub-goals on either side of it correspond to the easiest (and hence assigned \sysoneshort{}). More formally, this requires us to solve the following constrained optimization problem:
+\[ (j, k) = \mathrm{argmin}_{u,v \in [0, g], u \leq v}h(s_0, s_u) - h(s_u, s_v) + h(s_v, s_g) \text{, s.t. } |v - u| = x\times n \]
+Given a start state $s_0$ and goal state $s_g$, we want to find two intermediate states $s_j$ and $s_k$ between $s_0$ and $s_g$ along the length of the plan, such that the hardness of that sub-goal $h(s_j, s_k)$ is maximized (and hence assigned \systwoshort{}) while the hardness of the other two sub-goals $h(s_0, s_j)$ and $h(s_k, s_g)$ is minimized (and hence assigned \sysoneshort{}). 
+This process results in a three-way decomposition.\footnote{Note that when $u=0$ or $v=g$, there will be two decompositions rather than three.}
+The final result is a controller training dataset $\mathcal{D}_c = \{(s_0^{(i)}, s_g^{(i)}), \{\mathcal{G}^{(i)}\}_{j=1}^t \}_{i = 1}^{N}$ where for each planning problem, we have an annotated list of $t \in \{1,2,3\}$ sub-goals $\{\mathit{\mathcal{G}_j}^{(i)}\}_{j=1}^t$ and their corresponding \sysoneshort{}/\systwoshort{} assignments. See \cref{fig:app-maze,fig:app-bw} for examples of the controller data.
+In practice, the components we use for controller data generation (e.g. 
+\end{itemize}
+
+\subsection{Training and Inference of \method{}}
+\label{ssec:inference}
+Using the data generation process described above, we finetune a single base LLM to behave as a \sysone{}, a \systwo{}, or a controller. 
+During inference, we first use the controller to generate a meta-plan -- a list of sub-goals and their easy versus hard assignments. 
+After solving each with the appropriate planning model, we concatenate the sub-plans from the two planners, in order, to construct the final plan (see \cref{fig:method} for an example of a concatenated plan, denoted by `+').\footnote{In our experiments, we observe that the controller almost always generates continuous sub-goals (i.e., the end of the previous sub-goal matches the start of the next sub-goal).}
+\paragraph{Train- and Test-time Controllability.} We design \methodshort{} such that there is a single point of control for training the system, i.e., the hybridization factor $x$, and this control lies with the end-user. 
+Setting it adjusts the training data for the controller, i.e., what is annotated as easy versus hard, both across samples (Step 2 of the algorithm) and within samples (with sub-goals; Step 3 of the algorithm). This ultimately yields the user-specified level of hybridization. 
+Hence, \methodshort{} offers \emph{training-time control} of compute (e.g., one could train a System-$1.25$, $1.5$, or a $1.75$ Planner). 
+Furthermore, the controller's design also offers an additional degree of \emph{test-time control}: 
+since the controller classifies sub-goals as \sysoneshort{} or \systwoshort{}, the end-user could also re-balance the model towards \sysoneshort{} or $2$ based on the controller confidence threshold. 
+By default, the controller generates System `$1$' or `$2$' based on which token has a higher probability mass.
+However, the user can add a bias term to these token probabilities to solve a greater or smaller number of sub-goals using \sysoneshort{} or \systwoshort{}, adjusting the behavior of an already-trained \method{}.
+This means that a System-$1.5$ Planner, for example, can be biased to behave as a System-$1.25$ Planner or a System-$1.75$ Planner at test time.
+In our results in \cref{fig:main_results,fig:neuro_symbolic,fig:bfs-dfs,fig:sys75},  we explore how both train-time and test-time control impacts performance. 
+
+
+\section{Experimental Setup}
+
+
+\subsection{Tasks}
+
+We evaluate \method{} on two classical planning tasks that are challenging for LLMs~\citep{valmeekam2023planning, lehnert2024beyond}: (1) Maze Navigation and (2) Blocksworld.
+
+\paragraph{Maze Navigation.} We first experiment with a robotic maze navigation task -- given a 2D maze with some cells containing obstacles and four permissible actions \{`left', `right', `up', `down'\}, the objective is to find a path from a start state to a goal state by avoiding the obstacles. We randomly generate a balanced dataset of 4K planning problems for maze navigation using the following configuration -- 5x5 maze, 40\% of the cells containing obstacles, and an equal number of problems (500) with optimal plan lengths between 1 to 8. Controlling for the plan length allows us to study a planner's ability to solve harder planning problems. We remove duplicates (problems where the placement of the obstacles, the start state, and the goal state match exactly), and construct a 3200/400/400 (train/validation/test) balanced split for training our models.
+
+\paragraph{Blocksworld.} Additionally, to test out-of-distribution (OOD) generalization to longer plans, we experiment with Blocksworld, a classical planning problem from the International Planning Conference (IPC)-2000. The task consists of a table and a few blocks stacked on the table or on top of each other in one configuration. A robot is tasked to move blocks to another goal configuration by only moving one unstacked block at a time. Following the data creation algorithm in \cite{bohnet2024exploring}, we generate problems consisting of 4-7 blocks (without repetition). From there, we create a train/validation/test split of 3000/250/200 samples where the train and the validation split consist of samples with plan lengths 1-6 and the test split consists of samples with plan lengths 7-10. Different from maze which has a fixed action space of 4, Blocksworld has a much larger action space that also increases with the number of blocks.
+\subsection{Baselines} \label{ssec:baselines}
+
+We compare our \method{} with (1) a \sysone{}, (2) a \systwo{}, (3) a symbolic planner, specifically A$^{*}$, and (4)  a \method{} without sub-goal decomposition. The latter is also a hybrid planner but the controller is trained to predict an instance as either \emph{fully} \sysoneshort{} or \emph{fully} \systwoshort{}, thus allowing us to evaluate the effectiveness of sub-goal decomposition of our full \methodshort{} model. 
+Under the umbrella of \systwo{}s, we train multiple variants that are fine-tuned with data obtained from different search algorithms. In particular, we consider two uninformed search algorithms (Breadth-First Search and Depth-First Search) and an informed search algorithm (A$^{*}$). Given the superiority of \astar{}, our primary experiments will be based on \astar{} traces while we reserve the other search algorithms for further analysis in \cref{ssec:analysis}. Refer to \cref{sec:app_impl} for a short background on \astar{}.
+
+\subsection{Evaluation Metrics} 
+\label{ssec:eval_metric}
+We compare all methods along two axes: accuracy and cost. As defined in \cref{ssec:notation}, accuracy is given by the fraction of valid plans generated by a planner while for cost, we compute the average \#States-Explored by a planner before reaching the goal. 
+
+\paragraph{Reporting Results.} 
+Note that in order to fairly compare the performance of Systems $1$, $2$, and $1.x$, their \#States-Explored should be matched, such that we compare performance at a fixed budget for each system. 
+First, since \sysoneshort{} does not do any exploration, it is constant w.r.t. budget and hence has the same accuracy irrespective of \#States-Explored. 
+Next, to adapt \systwoshort{} and \methodshort{} to lower budgets, we truncate the search when the maximum number of states allowed by the budget has been reached. This value of maximum allowed states is given by the highest possible value such that the average \#States-Explored matches the desired budget. We refer to this as \textbf{truncation} below. 
+Finally, to adapt \methodshort{} to higher budgets, we use \methodshort{}'s test-time controllability, increasing the bias term on \systwoshort{} reasoning (cf. \cref{ssec:inference}).
+As this term increases, the model uses more and more \systwoshort{} planning, i.e., $x \rightarrow 1$ in \methodshort{}. 
+We refer to this as \textbf{test-time control}.
+We perform this matching and report plan validity (i.e., accuracy)  for the following values of \#States-Explored.
+First, we vary the maximum budget of states explored in intervals of 5 for Maze and 10 for Blocksworld, up to the number of states used by \systwoshort{} (the most compute-intensive system we consider). 
+We also consider two specific points in the range of \#States-Explored:
+we match \systwoshort{}'s \#States-Explored to the number of states that \methodshort{} uses by default.
+In the other direction, we match 
+\methodshort{}'s \#States-Explored to the number of states used by \systwoshort{}. 
+These points let us directly compare the two systems without any truncation or test-time control. In the main paper, we present our results with plots while we refer to the \cref{app:tables} for detailed tables.
+
+\subsection{Implementation Details}
+\label{ssec:impl}
+We choose Mistral-7B-Instruct-v0.2~\citep{jiang2023mistral} as the base LLM and fine-tune all our components with LoRA~\citep{hu2021lora} with a rank of 8 for a maximum of 3 epochs and a batch size of 4, resulting in three adapters for \sysoneshort{}, \systwoshort{}, and the controller. 
+For the purposes of \cref{sec:main_results}, \methodshort{} will specifically refer to a System-$1.5$ Planner (i.e., $x\!=\!0.5$, which is a balanced hybrid between a \sysone{} and \systwo{}) and fine-tuned from \astar{} traces. 
+
+\paragraph{Hardness Function for Maze Navigation.} Given two maze states $s_i = (a,b)$ and $s_j = (c,d)$ we define hardness of a sub-goal $h(s_i, s_j)$ as the number of obstacles in the rectangular sub-maze given the end-points. More obstacles will mean that the model might have to search more and would likely benefit from \systwoshort{} planning.
+
+\paragraph{Hardness Function for Blocksworld.} A state in Blocksworld is characterized by the configuration of the blocks. Our hardness function computes a distance metric for a sub-goal: For every block that is not in its correct position in the goal state (i.e., the blocks above and below it are different between the start and goal states), we add a cost of 1. Additionally, for a block that is \emph{not} on the table and also not in its correct position, we add 1 more to the cost, indicating greater hardness for moving blocks that are in the middle of a stack.
+
+Refer to \cref{sec:app_impl} for additional implementation details e.g., our \systwoshort{} implementations.
+
+
+\section{Results and Analysis}
+
+\label{sec:results}
+
+\subsection{\methodshort{} outperforms \sysoneshort{} and $2$} 
+\label{sec:main_results}
+
+\begin{figure}
+\centering
+  \subfigure[Maze Navigation]{\includegraphics[trim={0.25cm, 0.2cm, 0.5cm, 0.5cm},clip, scale=0.35]{figures/tablw1_plots.pdf}\label{fig:tab1fig}} 
+    \subfigure[Blocksworld]{\includegraphics[trim={0.25cm, 0.2cm, 0.5cm, 0.5cm},clip, scale=0.35]{figures/table_bw_plots.pdf}\label{fig:bw}} 
+  \caption{Comparison of \method{} (with and without sub-goals) with a \sysone{} and a \systwo{} on (a) Maze Navigation and (b) Blocksworld. (a) \methodshort{} with sub-goals matches or generally outperforms all baselines for Maze Navigation. (b) On out-of-distribution generalization in Blocksworld, \methodshort{} with sub-goals leads to much higher plan accuracy at lower \#States-Explored.}
+  \label{fig:main_results}
+\end{figure}
+
+\paragraph{Study Setup.} In this first set of experiments, we compare our \method{} with the following baselines (cf. \cref{ssec:baselines}) (1) a \sysone{}, (2) a \systwo{}, and (3) a \method{} without sub-goal decomposition.
+\textbf{Results for Maze Navigation.} \cref{fig:tab1fig} (cf. \cref{tab:main_maze}) shows the plan accuracy obtained by each planner at different \#States-Explored. The values of \#States-Explored are as described previously in \cref{ssec:eval_metric}. Based on this, we summarize our key findings.
+
+\begin{itemize}[nosep, wide=0pt, leftmargin=*, after=\strut]
+\item \textbf{\methodshort{} outperforms all baselines at all budgets.} Without truncation or test-time control, \methodshort{} ($x\!=\!0.5$) uses $13.6$ states on average. 
+At this number of states, it obtains an accuracy of $70.4\%$, outperforming the \sysone{} by 21\% (48.7\% $\rightarrow$ 70.4\%), the \systwo{} by 33\% (37.2\% $\rightarrow$ 70.4\%), and the \methodshort{} variant without sub-goal decomposition by 20\% (50.0\% $\rightarrow$ 70.4\%). 
+Next, to compare all methods at \emph{lower} budgets (i.e., with \#States-Explored of 5 and 10), we do state truncation (as described in \cref{ssec:eval_metric}) by limiting the search (generation) to a maximum number of states. We find that even at these lower budgets, \methodshort{} continues to be significantly more accurate compared to baselines, pointing to an effective allocation of resources. 
+Finally, \methodshort{}'s \emph{test-time control} capability lets us increase compute to match that of \systwoshort{} by biasing the controller and solving more sub-goals with \systwoshort{}. 
+Doing so eventually transforms a \method{} into a \emph{\systwo{} with sub-goal decomposition}, outperforming vanilla \systwoshort{} by 3\% and achieving the highest accuracy of $96.7\%$ at 27.3 states.
+This highlights the effectiveness of our sub-goal decomposition (more details below).
+
+\item \textbf{\methodshort{} benefits from sub-goal decomposition.} We validate the utility of sub-goal decomposition from two observations. First, the full \methodshort{} outperforms the \methodshort{} variant that does not perform sub-goal decomposition. Second, \systwoshort{} also benefits from sub-goal decomposition as shown by the maximum accuracy of 96.7\% which is achieved via \textit{test-time control} and biasing the controller to solve every sub-goal using \systwoshort{}. However, note that \systwoshort{} with decomposition still applies \systwoshort{} planning to every step, making \methodshort{} more performant at any given budget.
+
+\item \textbf{\sysoneshort{} is cheaper but not accurate.} On one extreme of the plot, \sysone{} is cheaper since it only explores the states that are part of its plan, amounting to an average of 3 states. However, this comes at a cost to performance: it also only achieves an accuracy of 49\%. Another limitation of a \sysone{} is that unlike \methodshort{}, it is not controllable and hence, there is no easy affordance for improving performance by exploring more states.
+
+\item \textbf{\systwoshort{} is more accurate but expensive.} On the other extreme, \systwo{} achieves a maximum accuracy of 94\% but explores a much higher 24.4 states in the process. While \systwoshort{} can be adapted to minimize \#States-Explored, such adaptivity is only possible during inference via state-truncation. 
+Test-time truncation of \#States-Explored is typically ad-hoc and not preferable because the loss in performance will only increase as the plan length grows. This is in contrast to the \method{}, which allows for systematic control of compute both at training-time (via a user-defined hybridization factor $x$), and at test-time (by biasing the controller).
+
+\end{itemize}
+\paragraph{Results for Blocksworld.} \cref{fig:bw} (cf. \cref{tab:ood_bw}) reports our results on Blocksworld (BW) that studies out-of-distribution generalization to longer plan lengths. Our first observation is that \sysoneshort{} only obtains an accuracy of 9\% and although \systwoshort{}'s accuracy is higher at 28\%, given the longer plan lengths, it also explores a significantly higher number of states (55).
+\begin{wrapfigure}{r}{0.525\textwidth}
+    \centering
+    \includegraphics[clip,scale=0.325]{figures/BS_example.pdf}
+    \caption{An example decomposition generated by System $1.5$ for Blocksworld. The adjacent blocks `C' and `F' (in the goal state) are separated by 4 blocks in the intital state. The controller generates an intermediate state $\mathcal{G}_1$ where blocks `C' and `F' are a block apart, with the sub-goal $s_0 \rightarrow \mathcal{G}_1$ being harder (solved using \systwoshort{}) and the sub-goal $\mathcal{G}_1 \rightarrow s_g$ being easier and solved via \sysoneshort{}. }
+    \label{fig:BS_example}
+\end{wrapfigure}
+Thus, when we perform truncation to get lower values of \#States-Explored, \systwoshort{}'s accuracy drops to almost 0\%. \methodshort{} without sub-goal decomposition also does not work for OOD test points because the controller predicts almost all samples as hard and solves them using \systwoshort{}. Hence, \methodshort{} without sub-goal decomposition practically becomes a \systwoshort{} in such scenarios, suffering major losses to performance with truncation. However, in contrast to all baselines, \methodshort{} \emph{with} sub-goal decomposition can solve a larger fraction of problems at lower budgets (e.g., 25\% at 30 states compared to \systwo{}'s 13\%) because of 
+its ability to leverage a \sysone{} for simpler sub-goals that have shorter plan lengths and are more likely to be in-distribution (refer to example in \cref{fig:BS_example}). At maximum \#States-Explored, \methodshort{} obtains comparable performance to a \systwo{}. Overall, when testing on OOD data, the results in \cref{fig:bw} highlight the key role that the \methodshort{} controller plays in decomposing longer-horizon planning problems. 
+Crucially, what is generally a weak \sysone{} for harder, OOD goals can be used effectively to solve easier, ID sub-goals, thereby saving a lot of compute.
+\begin{wrapfigure}{r}{0.525\textwidth}
+    \centering
+    \includegraphics[trim={0.25cm, 0.2cm, 0.5cm, 0.5cm},clip,scale=0.325]{figures/table3_plots.pdf}
+    \caption{Performance of \methodshort{} in conjunction with a symbolic (\astar{}) \systwo{} on Maze. The neuro-symbolic \method{} matches if not outperforms \astar{} search with the same budget of \#States-Explored, e.g., by 39\% at 11.6 states.}
+    \label{fig:neuro_symbolic}
+\end{wrapfigure}
+
+
+\subsection{Neuro-symbolic \methodshort{} outperforms or matches \astar{} at all budgets}
+\paragraph{Study Setup.} While we primarily designed \methodshort{} as a fully neural planner with all three components (System-$1$, $2$, and the controller) developed on top of the same LLM, we note that \methodshort{} can also act as a neuro-symbolic planner. This can be achieved by using a symbolic solver like \astar{} as the \systwoshort{} component. We follow this setup to report results on the Maze Navigation task, again setting $x\!=\!0.5$. 
+
+\paragraph{Results.} \cref{tab:neuro_symbolic} (cf. \cref{tab:neuro_symbolic}) compares the accuracy of all planners at different \#States-Explored. Our main result is that the conclusions drawn with a fully neural \methodshort{} also transfer to a neuro-symbolic \methodshort{}. Notably, at an average of 11.6 states, neuro-symbolic \methodshort{} outperforms \astar{} by a large margin of 39\% (31.0\% $\rightarrow$ 70.5\%). This can again be explained by the ineffectiveness of \#States-Explored truncation for \systwoshort{} Planners, symbolic or neural. 
+The trend is also consistent at all lower budgets. 
+\methodshort{} can be test-time controlled to obtain a near-perfect accuracy (99.2\%), matching that of \astar{}.
+
+
+\subsection{Analyses and Ablations of \method{}}
+\label{ssec:analysis}
+
+We conduct all analyses and ablations on the maze navigation task.
+\paragraph{Train-time Control: System-$\mathbf{1.75}$ trades off efficiency for accuracy compared to System-$\boldsymbol{1.5}$.} One of the core strengths of our planner is its \emph{training-time controllability}. 
+The hybridization factor $x$ allows the user to specify the \sysoneshort{} to \systwoshort{} balance they want in the final planner. 
+To demonstrate this capability, we train a System-$1.75$ Planner by setting $x=0.75$. \cref{tab:sys75} (cf. \cref{tab:sys75}) shows our results on the maze task. 
+By default, System-$1.75$ uses $16.6$ states on average and obtains an accuracy of $75.7\%$, compared to System-$1.5$'s $70.4\%$ with a default average of 13.6 states (\cref{tab:main_maze}) i.e., a 5\% gain at the cost of 3 more states.
+\begin{wrapfigure}{r}{0.525\textwidth}
+    \centering
+    \includegraphics[trim={0.2cm, 0.2cm, 0.5cm, 0.4cm},clip, scale=0.35]{figures/table4_plots.pdf}
+    \caption{Train-time controllability of \method{} by setting $x\!=\!0.75$. System-$1.75$ largely outperforms \systwoshort{}. Compared to \cref{fig:tab1fig}, System-$1.75$ yields an accuracy of 75.7\% vs. 70.4\% (with System-$1.5$) by utilizing 3 more states.}
+    \label{fig:sys75}
+\end{wrapfigure}
+Thus, as we increase the value of $x$, the \method{} will use more states and improve performance, converging to a \systwo{} that additionally performs sub-goal decomposition. 
+Compared to \systwoshort{}, System-$1.75$ is again significantly more performant at all budgets (e.g., by $28\%$ at $16.6$ states) and eventually obtains the highest accuracy of $96.7\%$ when acting as a \systwoshort{} with sub-goals. 
+This echoes our System-$1.5$ Planner findings, which also demonstrated similar gains at high budgets. 
+Broadly, these results showcase our controller's effectiveness, which in turn validates our hardness measures and sub-goal decompositions. 
+
+These experiments confirm our choices in \cref{ssec:impl}.
+
+
+\begin{figure}
+\centering
+  \subfigure[\methodshort{} with BFS]{\includegraphics[trim={0.25cm, 0.2cm, 0.5cm, 0.5cm},clip, scale=0.32]{figures/table5_plots.pdf}\label{fig:bfs}} 
+    \subfigure[\methodshort{} with DFS]{\includegraphics[trim={0.25cm, 0.2cm, 0.5cm, 0.5cm},clip, scale=0.32]{figures/table6_plots.pdf}\label{fig:dfs}} 
+  \caption{Comparison of \method{} on Maze Navigation using (a) Breadth-First Search and (b) Depth-First Search traces. The \method{} generally outperforms \systwo{} in both cases, converging to \systwoshort{}, showing robustness to the underlying search algorithm.}
+  \label{fig:bfs-dfs}
+\end{figure}
+\paragraph{Generalizability: \methodshort{} beats \systwoshort{} with all search algorithms (\astar{}, DFS, BFS).} We conducted our main experiments by leveraging supervision from \astar{} traces. In this experiment, we show that \methodshort{} is robust to different search algorithms, working with other options like Breadth First Search (BFS) and Depth First Search (DFS). 
+First, note that for mazes, BFS  explores all four actions (up, down, left, right) at each state and hence, on average, is the most expensive search strategy in terms of states explored. 
+However, for an unweighted maze, BFS  always generates optimal plans. 
+DFS, on the other hand, explores fewer states because it returns the first valid plan, though that plan may not necessarily be optimal. 
+\cref{fig:maze-bfs,maze-dfs} contains examples of BFS and DFS trajectories. 
+Based on \cref{fig:bfs-dfs} (cf. \cref{tab:bfs,tab:dfs}), we summarize our key findings:
+\begin{itemize}[nosep, wide=0pt, leftmargin=*, after=\strut]
+
+\item \methodshort{} continues to outperform \systwoshort{} and `\methodshort{} without sub-goal decomposition' by large margins (e.g., up to 39\% at 17.4 states for BFS and at 10 states for DFS), showcasing our planner's flexibility to learn from different algorithms.
+
+\item \methodshort{} closely resembles the behavior of the search algorithm it is trained on. 
+For example, \methodshort{} (BFS) is more accurate and generates a significantly higher number of optimal plans than \methodshort{} (DFS) because the former is trained on optimal plans (refer to \cref{tab:optimality} for a study on validity versus optimality). 
+In the process, however, System-$1.5$ (BFS) explores more states than \methodshort{} (DFS), similar to their symbolic counterparts. 
+Among the three algorithms studied in this paper, \methodshort{} (\astar{}) is the most accurate and efficient. 
+
+\end{itemize}
+\paragraph{Qualitative Analysis of System $\boldsymbol{1}$, $\boldsymbol{2}$, and $\boldsymbol{1.x}$.} \cref{fig:qualitative} shows an example from our test set where both \sysoneshort{} and \systwoshort{} fail but \methodshort{} succeeds. We consider a maze configuration where the plan length is quite long (8) and there is a solitary path to the goal, making the problem challenging for LLMs. We find that the \sysone{} generates an incorrect plan that ignores the placement of the obstacles. On the other hand, the \systwo{} avoids obstacles successfully initially but then takes a path that leads it to a dead end. It is unable to recover from that and the search does not terminate. Our \method{} is, however, able to solve the problem successfully by first breaking it up into 3 sub-goals and solving the easy sub-goals close to the start state and the goal state using \sysoneshort{} and the hard sub-goal in the middle (that includes a number of obstacles) with deliberate \systwoshort{} planning.  
+
+\begin{figure*}[ht!]
+    \includegraphics[width=1.0\textwidth]{figures/qualitative.pdf}
+    \caption{A qualitative example showing (1) a failure case for a \sysone{} because it generates a plan through the obstacles, (2) a failure case for a \systwo{} because the generated plan leads to a dead end and the model does not recover from it, and (3) a successful case for our \method{} that solves the easy sub-goals near the start state and the goal state using \sysoneshort{} and the hard sub-goal in the middle using \systwoshort{}.}
+    \label{fig:qualitative}
+\end{figure*}
+
+
+
+\section{Discussion and Limitations}
+
+
+
+\paragraph{Comparison to Dual-Process Theories.} While \methodshort{} draws on dual process theories of human cognition, it deviates in important ways.
+Crucially, most dual-process accounts hold that System-1 thinking occurs all the time, with System-2 occurring some of the time \citep{evans2003two}, whereas in our planning framework, the two are mutually exclusive.
+It is worth noting that, whether mutually exclusive or not, dual-process accounts require some control mechanism that triggers \systwoshort{}; errors in this controller can lead to compounding errors downstream, which has also been posited as a theory for breakdowns in human cognition \citep{tversky1974judgment, gilovich2002heuristics}.
+We also do not take a position on whether performing search by next-token prediction is optimal; indeed, our neuro-symbolic results in \cref{fig:neuro_symbolic} indicate that \methodshort{} is compatible with both neural implementations of search and symbolic search. 
+Dual-process accounts also typically rely on some form of metacognition, where agents reason not only about the task, but also form a \emph{model of reasoning} itself~\citep{ganapini2022thinking}. 
+This entails having not only a world model -- in our case, how actions affect the agent's state -- but also a model of reasoning, i.e., \emph{how difficult a particular goal is or what kind of planning it might require}. 
+This is implemented by the controller, which routes between \sysoneshort{} and \systwoshort{} based on the predicted hardness of a sub-goal.
+
+\paragraph{Inferring $x$ from a State Budget.}
+In our work, we set $x$ in \methodshort{}, as well as the test-time control values, inducing a maximum budget.
+By fitting a function to the points in  \cref{fig:main_results,fig:neuro_symbolic,fig:sys75,fig:bfs-dfs}, one can easily go the other direction, mapping a particular state budget (or token budget) to a corresponding value of $x$ or a corresponding control value. 
+This would allow users with specific compute constraints to ensure that the planner does not use more resources than allotted. 
+\paragraph{Limitations.}
+Firstly, like past work \citep{gandhi2024stream, lehnert2024beyond}, our work focuses on fully-observable and deterministic domains; however, many real-world problems are partially-observable and non-deterministic.
+Secondly, our method is based on model-generated sub-goals; we find in \cref{sec:main_results} that \systwoshort{} also benefits from sub-goals, indicating that they are generally beneficial to all methods. 
+Similarly, \methodshort{} relies on a \emph{relative} ranking of sub-goals by hardness; this can entail variable performance if the sub-goals are all easy or all hard (in absolute terms), in which case \methodshort{} may lose efficiency, solving the most difficult of the easy goals with \systwoshort{} when \sysoneshort{} would suffice, or lose performance, solving the easiest of a set of hard sub-goals with \sysoneshort{} despite them requiring \systwoshort{}. 
+This could be remedied by introducing an absolute threshold on hardness; however, this would entail finding that threshold using validation data, which our current method avoids.
+Finally, \methodshort{} training involves creating data with a sliding window of \systwoshort{} timesteps by assigning each sub-goal to \sysoneshort{} or \systwoshort{}.
+While this empirically works well for the problems we study, long plans with hundreds or thousands of steps might require more windows.  
+
+
+
+
+\section{Related Work}
+
+
+\paragraph{Combining LLMs and Symbolic Planners.}
+
+Despite the widespread success of LLMs in complex problem-solving, a large body of recent work has highlighted their shortcomings on long-horizon planning problems~\citep{valmeekam2023planning, valmeekam2024planbench, pallagani2023understanding, momennejad2024evaluating, hirsch2024s, zheng2024natural, aghzal2023can}, persisting across popular prompting techniques like Chain-of-Thought~\citep{wei2022chain}, ReAct~\citep{yao2022react}, and Reflexion~\citep{shinn2024reflexion}. 
+These methods can largely be grouped into \sysoneshort{} inference-time methods in which the LLM does not search, backtrack, or learn from incorrect actions. 
+Systematic search is either not performed at all or delegated to symbolic solvers \citep[e.g., ][discussed further below]{liu2023llm+, pan2023logic, xie2023translating}, thus deviating from the focus of this work on equipping LLMs to solve harder planning problems via search. 
+
+More related to our work are inference-time methods that \emph{do} involve planning, tree search, and backtracking.
+These \systwoshort{}-inspired methods have a search algorithm that operates \emph{on top of} and guides an LLM with reward models, value functions, or verifiers~\citep{hao2023reasoning, yao2024tree, besta2024graph, zhou2023language, sel2023algorithm, koh2024tree}. 
+In a similar spirit, neuro-symbolic planning systems like \emph{LLM-Modulo Frameworks} \citep{kambhampati2024llms}  have emerged that combine LLMs with symbolic planners~\citep{nye2021improving, liu2023llm+, pan2023logic, xie2023translating, kambhampati2024llms, zuo2024planetarium}
+\methodshort{} differs from this class of inference-time methods in two major ways. Firstly, it is a training-time method that teaches the LLM to search, with the goal of enhancing the LLM's intrinsic planning capabilities and discovering more effective search strategies, making it self-contained (as opposed to complex inference-time methods relying on external modules). 
+Secondly, it is also a hybrid system that can alternate between \sysoneshort{} and \systwoshort{}-style planning, whereas past work is capable of one or the other, but not both. Notably, this kind of hybridization distinguishes System-$1.x$ from other work that either creates hybrids between weaker and stronger models in the form of model cascades \citep{lin2024swiftsage, yue2023large} or between neural and symbolic methods (e.g., LLM-Modulo frameworks). 
+\paragraph{LLMs Generating Plans.}
+
+Methods combining LLMs and symbolic planners need some channel of communication between the LLM and the symbolic planning component.
+This is usually a value function or reward model producing a single score for a state, making the success of the method contingent on the quality of the reward model, or the LLM's ability to act as a value function (as in \citet{yao2024tree, lightman2023let}). 
+Furthermore, off-loading planning or search adds additional modules at test-time that may not always be available for certain domains. 
+It also assumes that the model's representation is already sufficient for the task and complicates finetuning the representation,
+since externalized search is typically non-differentiable.
+In an attempt to mitigate such concerns, a second line of work removes the dependency on separate reward models and external tools and teaches LLMs to conduct search by themselves~\citep{yang2022chain, gandhi2024stream, lehnert2024beyond}. For example, \citet{gandhi2024stream} introduce Stream-of-Search (SoS), which teaches LLMs to search by verbalizing trajectories and \citet{lehnert2024beyond} propose Searchformer, that learns from \astar{} search dynamics.
+This line of work predates LLMs: \citet{anthony2017thinking} generate data from tree search which they use to iteratively train a neural model to perform \sysoneshort{} planning.
+However, \citet{gandhi2024stream} and \citet{lehnert2024beyond} differ from our work in that their final models are \systwoshort{}-only, incurring a high computational cost for all examples and states by performing full planning at all times, whereas our method is a hybrid between Systems $1$ and $2$, dynamically allocating computation to more difficult parts of the plan. Moreover, to meet user budget constraints, \systwoshort{}-only methods also have to rely on approaches like post-hoc truncation while \methodshort{} offers more systematic controllability via its controller.
+
+
+
+\section{Conclusion}
+
+We introduced the \method{}, a novel neural planner that adaptively interleaves quick and cost-efficient \sysoneshort{} planning with more costly but performant \systwoshort{} planning.
+On two tasks, we showed that our method results in strong performance across a range of budgets: on Mazes, \methodshort{} beats obtains the best performance at every budget, and on Blocksworld it outperforms \systwoshort{} at all budgets except the highest, where it is comparable. 
+\method{} achieves this by decomposing problems into sub-goals and intelligently allocating \systwoshort{}'s additional resources to harder sub-goals while allowing \sysoneshort{} to quickly solve the easier ones. Furthermore, our method is adaptable, allowing users to control the cost and performance by specifying the degree to which the planner relies on \systwoshort{}.
+In our analysis, we find that \methodshort{} is controllable, generalizes to various search algorithms, and performs better out-of-distribution.
+We also ablate choices to our training data creation, including the choice of the hardness function and the search algorithm, finding \methodshort{} is robust to such changes. 
+
+
+

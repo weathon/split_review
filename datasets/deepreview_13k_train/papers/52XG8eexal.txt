@@ -1,0 +1,441 @@
+\title{State-space models can learn in-context by gradient descent}
+
+\begin{abstract}
+
+Deep state-space models (Deep SSMs) have shown capabilities for in-context learning on autoregressive tasks, similar to transformers. 
+However, the architectural requirements and mechanisms enabling this in recurrent networks remain unclear. 
+This study demonstrates that state-space model architectures can perform gradient-based learning and use it for in-context learning.
+We prove that a single structured state-space model layer, augmented with local self-attention, can reproduce the outputs of an implicit linear model with least squares loss after one step of gradient descent.
+Our key insight is that the diagonal linear recurrent layer can act as a gradient accumulator, which can be `applied' to the parameters of the implicit regression model.
+We validate our construction by training randomly initialized augmented SSMs on simple linear regression tasks. The empirically optimized parameters match the theoretical ones, obtained analytically from the implicit model construction. 
+Extensions to multi-step linear and non-linear regression yield consistent results.
+The constructed SSM encompasses features of modern deep state-space models, with the potential for scalable training and effectiveness even in general tasks. 
+The theoretical construction elucidates the role of local self-attention and multiplicative interactions in recurrent architectures as the key ingredients for enabling the expressive power typical of foundation models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The current generation of Large Language Models (LLMs) and foundation models are extremely capable and have started proliferating in several real-world applications.
+These models are based on the transformer architecture \citep{vaswani_attention_2017}, and a big part of their capability has been attributed to in-context learning~\citep{wei_larger_2023, lu_are_2023}.
+In-context learning in transformers is relatively well studied~\citep{wies_learnability_2023, pan_what_2023, guo_how_2023, garg_what_2023}.
+A prominent explanation for the mechanism  used by transformers to do in-context learning is that the model performs in-context learning by gradient descent~\citep{von_oswald_transformers_2023,akyurek_-context_2024}.
+But, the quadratic dependence of transformers on the input length makes them computationally expensive.
+To mitigate this, there has been much work on alternatives based on recurrent networks, such as state-space models~\citep{gu_efficiently_2021,gu_mamba_2023} and linear recurrent networks~\citep{orvieto2023resurrecting}.
+These recurrent models can perform inference efficiently since the computational complexity of recurrent networks is linear in the sequence length. 
+At the same time, linear recurrent networks  allow parallelization across the sequence during training using associative scan.
+The latest versions of these models are competitive with transformers at scale~\citep{dao_transformers_2024, de_griffin_2024}, and also capable of in-context learning~\citep{grazzi_is_2024}.
+However, the mechanism they use for in-context learning remains unclear.
+
+This work focuses on the in-context learning mechanism of State-Space Models (SSMs).
+Multiple variations of state-space models have recently shown competitive performance at scale~\citep{gu_mamba_2023,de_griffin_2024}, while earlier generations struggled with scaling~\citep{smith_simplified_2022,poli_hyena_2023}.
+All SSMs, linear attention models, and other linear recurrent networks share a common formalism of being linear recurrent networks interleaved with non-linear layers.
+On the other hand, the ability to do in-context learning seems to be a hallmark of most recent scalable variants ~\citep{grazzi_is_2024}.
+Which features of these successful models contribute to in-context learning, as opposed to earlier variants?
+Using a constructive approach, we pinpoint input-dependent input and output processing, as the key features required for in-context learning.
+
+We show that SSMs with local self-attention, a form of input-dependent input processing, can perform in-context learning analogously to transformers, i.e. through gradient descent steps on an implicit linear regression problem.
+The key insight we use is that the state of the recurrent network can be used to aggregate gradients of the parameters of the implicit linear model, which can later be `applied'  to the initial parameters of the implicit model.
+Using the general SSM formalism, we show how to design the recurrent and output equations that enable them to do in-context learning.
+Our construction, which we call \textit{GD-SSM}, is not restricted to in-context learning tasks and performs well on general-purpose prediction problems.
+
+In summary, our contributions are to show that:
+\begin{itemize}
+    \item one-layer SSMs with diagonal recurrence, two-dimensional state, and input-dependent input and output processing can perform one step of minibatch gradient descent on a an implicit least-squares loss function;
+    \item multi-step (minibatch) gradient descent can be achieved by stacking the 1-layer model;
+    \item gradient descent for an implicit non-linear regression problem can be achieved by augmenting the SSMs with non-linearities;
+    \item a randomly initialized model trained on regression tasks learns parameters that match our construction for in-context learning tasks based on regression.
+\end{itemize}
+
+
+
+\section{Background}
+
+
+A sequence model operates on an input sequence $\mS = \{\vs_t\}_{t=1}^T \in \R^{T \times f}$, where $T$ is also referred to as the context-length and $f$ is the feature dimension.
+
+Contemporary sequence models based on transformers interleave self-attention with MLP layers to perform sequence processing. 
+The self-attention performs sequence-mixing while the MLPs perform channel-mixing.
+The most common form of self-attention has been the scaled dot-product self-attention, which embeds the sequence into a query $\mQ = \mS \mW_Q$, key $\mK = \mS \mW_K$ and value $\mV = \mS \mW_V$, where $\mW_Q, \mW_K \in \R^{f \times m}, \mW_V \in \R^{f \times d}$, and then calculates the output of attention as
+\begin{align}
+    \text{SA}(\mS) = \text{softmax} \left( \frac{\mQ \mK^T}{\sqrt{m}} \right) \mV\,. \label{eq:attention}
+\end{align}
+Local self-attention~\citep{beltagy_longformer_2020} uses the same form as Eq.~\ref{eq:attention}, but on an input sequence that is a subset of the full sequence, with a sliding window.
+
+By discarding the softmax (and scaling for simplicity)
+, self-attention can be written in a linear form
+\begin{align}
+    \text{LSA}(\mS) &= \mQ \mK^T \mV \,. \label{eq:lsa}
+\end{align}
+
+Deep SSMs are sequence models that replace the self-attention with a linear recurrent network, to perform the sequence-mixing.
+In the most general form, the recurrent SSM block consists of a recurrent state $\mZ_t \in \R^{d \times m}$ updated iteratively as
+\begin{align}
+    \mZ_t = \mA(\vs_t) * \mZ_{t-1} + \mB(\vs_t)\,, \label{eq:ssm}
+\end{align}
+where $\mA, \mB: \R^f \rightarrow \R^{d \times m}$, and $*$ is some multiplication operator (e.g. matrix or element-wise multiplication).
+
+The output of the SSM is often calculated by an input-dependent linear transformation of the current state 
+\begin{align}
+    \vo_t =  \mZ_t\, \mU(\vs_t)\,, \label{eq:ssmout}
+\end{align}
+combined with a non-linearity as
+\begin{align*}
+    \vo'_t = \mU_2 \left( \vo_t \odot \sigma (\mU_1 \vo_t ) \right)\,,
+\end{align*}
+where $\odot$ is elementwise multiplication.
+
+Transformers with linear attention can also be written in this recurrent form~\cite{katharopoulos_transformers_2020}
+\begin{align}
+    \mZ_t = \mZ_{t-1} + \vv(\vs_t) \otimes \vk(\vs_t)\,, \label{eq:lsa-recurrent}
+\end{align}
+where $\vv(\vs_t) = \mW_V^T \vs_t \in \R^d$, $\vk(\vs_t) = \mW_K^T \vs_t \in \R^m$ and $\otimes$ is the outer product.
+This is a recurrent reformulation of the part of Eq.~\ref{eq:lsa} containing $\mV$ and $\mK$ in recurrent form.
+
+S4~\citep{gu_efficiently_2021} and multi-headed S5~\citep{smith_simplified_2022} can also be written in this form
+\begin{align}
+    \mZ_t = \mA \mZ_{t-1}  + \mB \vs_t\,, \label{eq:s5}
+\end{align}
+where $\mA$ and $\mB$ are learnable parameters of appropriate dimension, and $\mZ_t$ consists of $m$ heads of dimension $d$ each (although multiple heads are not used in the original paper).
+
+If local self-attention is used to process the input before being fed into the SSM, all instances of $\vs_t$ would be replaced by a context vector 
+\begin{align*}
+    \vc_t = \text{SA}(\mS')\quad\text{or}\quad\vc_t=\text{LSA}(\mS')\,,
+\end{align*}
+where $\mS' \subset \mS$ is a subsequence of the whole sequence, and (L)SA denotes the (linear) self-attention operation.
+
+
+
+\section{SSMs can emulate gradient descent on linear regression tasks}
+
+
+We will now show that an SSM as described in Section~\ref{sec:background} can perform gradient descent on an implicit linear model to minimize a least squares loss (for particular choices of parameters).
+Extensions to non-linear regression models are considered in Section \ref{sec:nonlinear}.
+
+Consider a linear regression problem. 
+The goal is to minimize the corresponding least squares loss using gradient descent. 
+The linear model will be the implicit model on which the SSM performs gradient descent.
+Performing mini-batch (batch size $>$ 1) gradient descent on the parameters of this implicit model involves two steps: (i) to accumulate gradients of the loss with respect to the parameters, and (ii) apply the accumulated gradient to the initial value of the parameters of the linear model to calculate the updated parameters.
+Predictions can be made with the updated parameters by combining them linearly with the input.
+
+Assume the training samples for the linear regression problem are provided as a sequence of inputs and targets. 
+A large enough SSM can then accumulate the gradients of the loss function in its state \emph{if a local self-attention-like layer processes the sequence inputs before the recurrence}\footnote{A SSM layer with input-dependent recurrence would be able to simulate a local self-attention layer, but with significantly increased computational and conceptual complexity. }.
+
+Given the accumulated gradients, the next-step emission of the SSM is equivalent to i) updating the parameters of the implicit model gradient and ii) computing the model output with the updated parameters.
+Multiple steps of gradient descent can be achieved by stacking multiple layers, while nonlinearity in the implicit model can be handled by adding nonlinear input-output embedding layers.
+We argue that the architecture that allows a single layer to perform gradient descent provides the inductive bias for the model to do in-context learning.
+
+\subsection{Single step 1-dimensional linear regression}\label{sec:1dregression}
+Consider a linear regression model with 1-d output for simplicity
+\begin{equation}
+    y = \vw^T \vx \,, \label{eq:linreg}
+\end{equation}
+for parameter $\vw \in \R^{f}$.
+This is the implicit linear model we aim to reproduce for in the 1-dimensional target case.
+Given dataset of $N$ samples $\mathcal{D} = \{\langle \vx_i, y_i \rangle\}_{i=0}^{N}, \vx \in \R^f, y \in \R$, the associated least squares loss is 
+\begin{align}
+    \L(\D; \vw) = \frac{1}{2N} \sum_{i=1}^N || \hat{y}_i - y_i ||_2^2 = \frac{1}{2N} \sum_i \left(\vw^T \vx_i - y_i \right)^2 \,. \label{eq:1dloss}
+\end{align}
+The best fit for $\vw$ is the minimum of $\L$ over $\vw \in \R^{f}$.
+
+The gradient of the loss calculated on the first $t$ samples of the dataset is
+\begin{align*}
+    \nabla_{\vw} \L(\D_{1:t}; \vw_0) &= \frac{1}{t} \sum_{i=1}^t \left( \vw_0^T \, \vx_i - y_i \right) \vx_i \,,
+\end{align*}
+where $\D_{1:t}$ denotes the first $t$ samples in $\D$. 
+The unscaled gradient, 
+\begin{align*}
+    \vg_{\vw_0} (\D_{1:t}) &= \sum_{i=1}^t \left( \vw_0^T \, \vx_i - y_i \right) \vx_i \,,
+\end{align*}
+can be recursively calculated as
+\begin{align}
+     \vg_{\vw_0} (\D_{1:t}) &= \vg_{\vw_0} (\D_{1:t-1}) + \left( \vw_0^T \, \vx_t - y_t \right) \vx_t \,. \label{eq:rec-gd}
+\end{align}
+
+Scaling the $\vg_{\vw_0} (\D_{1:t})$ gives the mini-batch gradient $\nabla_{\vw} \L(\D_{1:t}; \vw_0) = \frac{1}{t} \,g_{\vw_0} (\D_{1:t})$ for minibatch size $t$.
+
+To make a prediction, $\hat{y}$, we apply the gradient to the parameters of the linear model in Eq.~\ref{eq:linreg} and compute the corresponding output, i.e. 
+\begin{align*}
+    \hat{y}_{t+1} &= (\vw_0 - \eta \nabla_{\vw_0} \L(\D_{1:t}; \vw_0))^T \, \vx_{t+1} \,, \\
+                  &= (\vw_0 - \frac{\eta}{t} g_{\vw_0} (\D_{1:t}))^T \, \vx_{t+1} \,.
+\end{align*}
+
+When $\vw_0 = \vzero$, this reduces to
+\begin{align}
+    \hat{y}_{t+1} &=  - \frac{\eta}{t} \vg_{\vw_0} (\D_{1:t})^T \, \vx_{t+1} \,. \label{eq:predy}
+\end{align}
+\paragraph{Implementation as an SSM:}
+Equation~\ref{eq:rec-gd}, which is a linear recurrence equation, can be implemented by an appropriately constructed SSM.
+
+\begin{prop}
+    Given a diagonal linear recurrent layer, and tokens $\vs_j = \vc_j = [\vx_j \, y_j, \vx_{j+1}]$, for $j = 1, \ldots, N$, and $[\ldots]$ concatenation, $\vx_j, y_j$ drawn from a linear model, one can construct recurrent matrix $\mA(\vs_j)$, input $\mB(\vs_j)$ and output matrix $\mU(\vs_j)$ such that each recurrent step for every token $\vs_j$ produces $\hat{y}_{j+1} = -(\Delta \vw)^T \vx_{j+1}$ as output, where $\Delta \vw$ is one step of gradient descent, i.e. $\Delta \vw = \eta \nabla_\vw \L$.
+    The test input $\vx_{N+1}$ is contained in token $\vc_N$, and produces the test prediction $\hat{y}_{N+1}$.
+\end{prop}
+
+Specifically, if we use $\vz_t \in \R^f$ to denote the state of the recurrent network and let it directly correspond to the vector $\vg_{\vw_0} (\D_{1:t})$, the equivalent SSM layer is a linear recurrence equation,
+\begin{equation}
+    \vz_t = \mI \, \vz_{t-1} + (\vw_0^T \vx_t - y_t) \, \vx_t \,. \label{eq:1dlrnn}
+\end{equation}
+The state of the SSM,  $\vz_t$, represents the implicit linear regression problem through the \emph{unscaled accumulated gradients} of the least squares loss with respect to the parameters $\vw_0$ of the implicit linear model.
+
+As linear regression is performed on the training dataset $\mathcal{D} = \{\langle \vx_i, y_i \rangle\}_{i=0}^{N}$, the SSM receives the training data in the form of a sequence as input. 
+In the most general case, this is a sequence $\vs_1 = \vx_1, \vs_2 = [0, ..., y_1], \ldots$ where $[\ldots]$ denoting concatenation and $y_i$ is padded with $f-1$ zeros for its dimensions to match that of $\vx_i$.
+This more general case is discussed in the next section.
+But here, we will consider a case which simplifies our construction.
+
+}.
+If the sequence input weights $\mPsi \in \R^{2f \times f}$ are such that $\mPsi^T \vc_t = \vx_t y_t$, Eq.~\ref{eq:1dlrnn} can be written as an SSM (Eq.~\ref{eq:ssm}), i.e. 
+\begin{align}
+    \vz_t &= \mI \, \vz_{t-1} + \mPsi \, \vc_t \label{eq:1dssm}\,.
+\end{align}
+A parameter matrix, $\mPsi$, satisfies \eqref{eq:1dssm} if all but the first $f$ diagonal entries are zero.
+The state of this network is the unscaled gradient $t\,\nabla_{\vw_0} \L(\D_{1:t}; \vw_0)$ and the state recursion accumulates the gradients as in step (i) above.
+
+The accumulated gradient is then `applied' to the implicit model's initial parameters, $\vw_0$, before computing the $(N+1)$-th output.
+With $\vw_0 = \vzero$, the output is 
+\begin{align}
+    o_t &= \beta \vz_t^T \mTheta \vc_t  \,, \label{eq:1dssmout}
+\end{align}
+where $\beta=-\frac{\eta}{N}$, $\eta$ is the learning rate, and $N$ is the number of training points or, equivalently, the total length of the context.
+The SSM final output, $o_t$ above, corresponds to a prediction of the trained linear model, $\hat{y}_{t+1}$ in Eq.~\ref{eq:predy}, if  $\mTheta$ obeys $\mTheta \vc_t = \vx_\tpone$. 
+It is easy to check that $\mTheta$ satisfies this condition if all but its last $f$ diagonal entries are zero (see Figure~\ref{fig:ndmatrices} for a concrete example).
+Note that the output in  Eq.~\ref{eq:1dssmout} matches the general form of the SSM output in Eq.~\ref{eq:ssmout} (without the non-linearity).
+hows that the following SSM 
+\begin{align}
+\label{eq:overall}
+    \vc_t &= [\vx_t y_t, \vx_\tpone]\,, \\
+    \vz_t &= \mI \, \vz_{t-1} + \mPsi \, \vc_t\,,  \\
+    o_t &= \beta \vz_t^T \mTheta \vc_t = \hy_\tpone\,.
+\end{align}
+can perform gradient descent on the parameters $\vw_0$ of the implicit linear model and use this mechanism for in-context learning.
+The specific structure of the SSM in \eqref{eq:overall} demonstrates the importance of multiplicative processing, for both the inputs and outputs.
+
+\subsection{Single Step N-dimensional linear regression}
+\label{sec:ndregression}
+
+In this section, we generalize the construction above to the N-dimensional case.
+Without loss of generality, we assume the input and the target, $\vx$ and $\vy$, have both dimensions $f$ i.e. $\vx, \vy \in \R^f$.
+If this is not the case, the input and output dimensionality can be matched by defining appropriate embeddings\footnote{E.g. with dimensions $k,l$ into the same higher dimension $k+l=f$ by concatenation with appropriately sized zero vectors, or through a linear transformation to dimension $f$.}.
+We can then treat the N-dimensional system as $f$ 1-D linear regression problems, one for each element of $\vy$.
+\begin{prop}
+    Given a diagonal linear recurrent layer augmented with local self-attention with sliding window of size 3, and tokens $\vs_{2j} = \vx_j$ and $\vs_{2j+1} = \vy_j$, for $j = 1, \ldots, N$, $\vx_j, \vy_j$ drawn from a linear model, one can construct recurrent matrix $\mA(\vs_j)$, input $\mB(\vs_j)$ and output matrix $\mU(\vs_j)$ such that each recurrent step for every token $\vs_j$ produces $\hat{\vy}_{j+1} = -(\Delta \mW)^T \vx_{j+1}$ as output, where $\Delta \mW$ is one step of gradient descent, i.e. $\Delta \mW = \eta \nabla_\mW \L$.
+    The test input $\vx_{N+1}$ is contained in token $\vs_{2N+2}$, and produces the test prediction $\hat{\vy}_{N+1}$.
+\end{prop}
+
+Similar to Eq.~\ref{eq:1dlrnn}, we show the above by writing the SSM as
+\begin{align}
+     \mZ_t = \mZ_{t-1} + \vy_t \, \vx_t^T \,, \label{eq:ndlrnn}
+\end{align}
+}.
+The output is
+\begin{align}
+    \vo_t = \beta \mZ_t \, \vx_{t+1} \,. \label{eq:ndlrnn-output}
+\end{align}
+To see how this can be written in the form of Eq.~\ref{eq:ssm}, let the input sequence consist of the training dataset of the implicit linear regression problem (as before).
+This time, we cast the training dataset into a standard sequence $\vs_1, \vs_2, \ldots $, where 
+\begin{align}
+    \vs_{2j} &= \vx_j \,, \label{eq:seq-inputs-1} \\ 
+    \vs_{2j+1} &= \vy_j \,, \label{eq:seq-inputs-2}
+\end{align}
+and $\vs_i$ denotes the $i$-th sequence element of the input, such that $\vs_{2j+2} = \vx_{j+1}$.
+
+At each step, the state update, in Eq.~\ref{eq:ndlrnn}, and the output, in Eq.~\ref{eq:ndlrnn-output}, include $\vx_t, \vy_t, \vx_\tpone$.
+This necessitates the introduction of a quadratic (in ${\bf s}_i$) local self-attention mechanism.
+Let $\mC_t$ be the context matrix for the local self-attention, i.e.  a sliding window of length three running through the sequence, 
+\begin{align}
+    \mC_t &= \begin{bmatrix}
+        \vdots & \vdots & \vdots \\
+        \vx_t & \vy_t & \vx_\tpone \\
+        \vdots & \vdots & \vdots
+    \end{bmatrix}\,. \label{eq:context}
+\end{align}
+
+The local self-attention operation,  $\mC \mQ \mC^T$, is a truncated form of Eq.~\ref{eq:lsa}.
+When $\mQ = \left(\begin{smallmatrix}1 \\ 0 \\ 0\end{smallmatrix}\right) \left(\begin{smallmatrix}0 & 1 & 0\end{smallmatrix}\right) = \left[\begin{smallmatrix}0 & 1 & 0 \\ 0 & 0 & 0 \\ 0 & 0 & 0\end{smallmatrix}\right]$, plugging $\mC \mQ \mC^T$ into the second term in Eq.~\ref{eq:ndlrnn} produces an SSM with input $\vy_t \vx_t^T$.
+
+The SSM can now be written as in Eq.~\ref{eq:ssm}, i.e.
+\begin{align*}
+    \mZ_t =  \mZ_{t-1} + \mC_t \mQ \mC_t^T \,,
+\end{align*}
+with output
+\begin{align*}
+    \vo_t = \beta \mZ_t \, \mC_t \, \vq \,,
+\end{align*}
+where $\vq = \left(\begin{smallmatrix} 0 \\ 0 \\ 1 \end{smallmatrix}\right)$ makes the output $\hvy_\tpone$ as in  Eq.~\ref{eq:predy}.
+The output also matches the form of the general SSM output in  Eq.~\ref{eq:ssmout}. 
+The construction allows us to perform gradient descent on the parameters of an arbitrary dimensional implicit model.
+We call this type of SSM a GD-SSM.
+
+Eq.~\ref{eq:ssm} shows that the recurrent state of the SSM is $2$-dimensional,  as in most recently proposed SSMs~\citep{dao_transformers_2024}.
+The local self-attention reproduces the local linear self-attention of Eqs.~\ref{eq:lsa} and \ref{eq:lsa-recurrent}.
+As for the 1-dimensional case, the self-attention higher-order dependencies, $\mC \mQ \mC^T$, is key for making the SSM learn (in-context) an implicit (linear) regression model.
+
+\subsection{Generalising to any regression problem}
+\label{sec:nonlinear}
+\paragraph{Multi-step gradient descent:}
+The proposed construction can be extended to multi-step gradient descent.
+Since each layer of a GD-SSM produces the parameters of the implicit linear model updated by one step of GD, this is equivalent to stacking together multiple layers.
+In our derivations above, we assumed the initial parameter of the implicit linear model is $\vzero$.
+In the multi-step GD, all layers other than the first will correspond to a \emph{non-zero initialised implicit linear model}.
+Technically, extra gradient steps in the implicit model introduce one additional term in the gradient accumulation equation.
+Each of the two terms requires a separate (parallel) recurrence and is performed by a dedicated layer.
+At the end, the states are combined to obtain the multiple-step GD update, with minor extra computational burdens.
+\paragraph{Non-linear regression:}
+Non-linear regression can be handled by adding MLP layers to the GD-SSM.
+In the previous sections, we let GD-SSM accumulate the gradients of a linear regressor. 
+Additional MLP layers can learn to transform the state of these linear layers into quantities corresponding to the gradient of the implicit non-linear model.
+\paragraph{Regularisation terms in the loss:}
+As the recurrent layers only accumulate the gradients, we can separate the gradient calculation and accumulation from its application.
+This has a practical advantage. 
+Any input-independent regularisation term, e.g. L2 norms, can be added to the model without changing the recurrence structure.
+
+
+\section{Trained linear recurrent networks do emulate gradient descent on linear regression tasks}
+
+
+We investigated if the GD-SSM variant of the general SSM architecture does do gradient descent in-context learning.
+To do this, we trained a randomly initialised model on various in-context learning tasks for linear and non-linear regression.
+In each case, the sequence token input to the model consisted of the inputs $\vx$ and target values $\vy$ from the training dataset $\mathcal{D}$, and the model was expected to output the prediction for the query (test) $\vx$ given in the last timestep.
+The models were trained to minimize the mean squared error between the test prediction and target. 
+
+\subsection{Single step 1-dimensional linear regression}\label{sec:1dresults}
+
+\begin{figure}[htb]
+    \centering
+    \includegraphics[scale=0.3]{images/t_analyse.pdf}
+    \caption{
+    \textbf{Comparing one step of GD with a trained single layer GD-SSM for 1-dimensional regression}:
+    \textbf{A}: Trained single layer GD-SSM loss and GD-SSM loss with the parameters from our construction are identical. 
+    \textbf{B}: Cosine similarity and the L2 distance between models as well as their predictions.
+    \textbf{C}: Comparison of loss between Gradient Descent (GD) and the SSM layer model for different input sizes $N = N_x$.
+    \textbf{D}: The trained single 1-D SSM layer, and gradient descent show identically loss (in log-scale) when provided input data different than during training i.e. with scale of 1. We display the mean/std. or the single runs of 5 seeds.}
+    \label{fig:1dcomparisons}
+\end{figure}
+
+
+We first tested the simplest case of one-step gradient descent on a linear regression problem with scalar predictions/targets.
+This corresponds directly to the construction in Section~\ref{sec:1dregression}.
+To do this, similar to \cite{garg_what_2023, von_oswald_transformers_2023}, we randomly generated linear regression tasks consisting of training and test points, and trained the model to make a prediction for the test input using the training input as context.
+
+We generated randomly sampled linear regression tasks $\tau$ in the following way:
+Each task (context) $\tau$ consisted of a sequence of in-context training data $\mathcal{D}_\tau = \left\{ \langle \vx_{\tau,i}, y_{\tau,i} \rangle \right\}_{i=1}^{N}$ and test point $\langle \vx_{\tau,N+1}, y_{\tau,N+1} \rangle$.
+To generate this, the $\vx_{\tau,i}$s are sampled from a uniform distribution $\vx_{\tau,i} \sim U(-1, 1)^f$.
+Then, for each task $\tau$, the parameters of its implicit linear model $\vw_\tau$ is sampled from a normal distribution, so that each element $[\vw_\tau]_{i} \sim \mathcal{N}(0, 1)$.
+This is used to calculate the $y_{\tau,i}$s for each corresponding $\vx_{\tau,i}$ using $y_{\tau,i} = \vw_\tau^T \vx_{\tau,i}$.
+
+The sequence $\mS = \{\vs_{\tau, 1}, ..., \vs_{\tau, N}\}$ is constructed so that $\vs_{\tau, t} = \vc_{\tau, t} = [\vx_{\tau, t} y_{\tau, t}, \vx_{\tau, t+1}]$, with $[\ldots]$ denoting the vector concatenation operation, and $\vc_t$ is the constructed context vector.
+Note that this includes the query $\vx_{\tau, N+1}$ in $\vc_N$.
+We will use a more general construction in the next section.
+The outputs of the GD-SSM at time $T=N$ is the prediction for $\vx_{N+1}$ i.e. $SSM(\mS_\tau)_N = \hat{y}_{\tau, N+1}$, with target $y_{\tau, N+1} = \vw_\tau \vx_{\tau, N+1}$.
+The model was trained to minimize the expected squared prediction error, averaged over linear regression tasks $\tau$:
+\begin{align*}
+\min_{\theta} \mathbb{E}_{\tau} \left[ \left\| \hat{y}_{\theta} \left( \vc_{\tau,1}, \ldots, \vc_{\tau,N} \right) - y_{\tau,\text{test}} \right\|^2 \right]\,,
+\end{align*}
+where $\theta$ are the randomly initialised parameters of the GD-SSM.
+We evaluate our model on multiple metrics:
+\begin{enumerate}
+    \item L2 norm between the difference in predictions $\left\| \hat{y}_{\theta}(x_{\tau,\text{test}}) - \hat{y}_{\theta_{\text{GD}}}(x_{\tau,\text{test}}) \right\|_2$ where $\hat{y}_{\theta_{\text{GD}}}$ is the prediction from the GD based construction.
+    \item Cosine similarity between the sensitivities $\frac{\partial \hat{y}_{\theta_{\text{GD}}}(x_{\tau,\text{test}})}{\partial x_{\text{test}}} \quad \text{and} \quad \frac{\partial \hat{y}_{\theta}(x_{\tau,\text{test}})}{\partial x_{\text{test}}}$.
+    \item L2 norm between the sensitivites.
+    \item Loss of the two models where validation data is sampled from $ U(-\alpha, \alpha)^{n_i}$, with a different $\alpha$ than the one used in training.
+    \item The loss of two models when trained for different number of feature dimensions $f$.
+\end{enumerate}
+
+Figure~\ref{fig:1dcomparisons} shows the results of this comparisons.
+We find that these metrics show excellent agreement between the trained model and GD, over different hyperparameters.
+To test if the trained network has learned a general purpose learning rule as opposed to fitting to the dataset, that is to test if the trained network generalises to linear regression tasks outside the training distribution, we draw values of inputs from $U(-\alpha, \alpha)$.
+We see that our model generalises to both cases.
+\subsection{Single step N-dimensional linear regression}
+
+\begin{figure}[htb]
+    \centering
+    \includegraphics[scale=0.4]{images/gd_trained_normal_token.pdf}
+    \label{fig:Results-normal}
+    \caption{\textbf{Comparing one step of GD with a trained single layer GD-SSM for N-dimensional regression}: \textbf{A}: Trained single layer GD-SSM loss and GD-SSM loss with the parameters from our construction are identical. 
+    \textbf{B}: Cosine similarity and the L2 distance between models as well as their predictions.
+    \textbf{C}: Comparison of loss between Gradient Descent (GD) and the SSM layer model for different input sizes $f$.
+    \textbf{D}: The trained GD-SSM layer, and gradient descent show identically loss (in log-scale) when provided input data different than during training i.e. with scale of 1. We display the mean/std. or the single runs of 5 seeds.}
+    \label{fig:ndcomparisons}
+\end{figure}
+
+\begin{figure}[htb]
+    \centering
+    \includegraphics[scale=0.3]{images/normal_token_matrices.pdf}
+    \caption{Comparison of learned weights a GD-SSM with the GD-SSM parameters from our construction.
+    \textbf{A:} Comparison of local self attention weights of trained GD-SSM with the GD-SSM parameters from our construction.
+    \textbf{B:} Comparison of recurrent parameters of trained GD-SSM with the GD-SSM parameters from our construction. Since the recurrence parameters are tensors, for the ease of visualisation, each diagonal entry is the mean of the corresponding diagonal recurrence matrix.
+    \textbf{C:} Comparison of skip connection weights of trained GD-SSM with the GD-SSM parameters from our construction.}
+    \label{fig:ndmatrices}
+\end{figure}
+
+In the more general case where we allow the targets $\vy_{\tau, i}$ to be of arbitrary dimension, we also relax other assumptions in the form of the input.
+Notably, instead of constructing the inputs in a particular way, we let the sequence be similar to a more natural sequence of $\vx_1, \vy_1, \vx_2, \vy_2, \ldots$, i.e. $\vs_{2j}=\vx_j; \vs{2j+1}=\vy_j$. 
+This requires the introduction of a local self-attention mechanism with attention window of $3$ as discussed in Section~\ref{sec:ndregression}.
+The local self-attention mechanism allows the model to access inputs from multiple adjacent timesteps, and not just the current one.
+We perform the same comparisons as in Section~\ref{sec:1dresults}, and find that the model trained from a random initialisation has an excellent match with the construction, both in the output/loss metrics (Figure~\ref{fig:ndcomparisons}) and in the parameters it ends up with (Figure~\ref{fig:ndmatrices}).
+
+We compared loss metrics for GD-SSM with other standard models including one- and two-layer transformers, and S5~\citep{smith_simplified_2022}. 
+We found that, on exactly the same sequence token inputs, only the GD-SSM and a 2-layer transformer reached the same loss as actual GD, while other SSMs such as S5 struggle to perform ICL with 1 layer (Figure~\ref{fig:result-regression-multi-layer}C).
+\begin{figure}[htb]
+    \centering
+    \includegraphics[width=\textwidth]{images/regression_plot1.pdf}
+    \caption{\textbf{A}: Comparison of GD-SSM performance with single layer and two layers on regression task.
+    \textbf{B}: Comparison of GD-SSM performance with and without MLP layers in single layer and multi-layer setup on non-linear regression task.
+    \textbf{C}: Comparison with other models on 1-D regression. The GD-SSM model was evaluated with both 1-layer and 2-layer configurations, and the S5, Mamba, and Griffin models were included for comparison. TF refers to linear Transformer models, with both 1-layer and 2-layer variants tested to evaluate their performance.
+    }
+    \label{fig:result-regression-multi-layer}
+\end{figure}
+
+\subsection{Multi-step and non-linear regression}
+
+The token construction is identical to that used for N-dimensional linear regression, and each layer includes the local self-attention mechanism.
+In Figure~\ref{fig:result-regression-multi-layer}A, we show that that trained network is able to reach the same loss as the multi-step GD.
+
+Finally, to be able to handle any regression task, we tested GD-SSM with an MLP layer on non-linear regression tasks. 
+Again, we see that the trained model is able to reach the same level of performance as performing GD directly on the dataset (Figure~\ref{fig:result-regression-multi-layer}B).
+
+
+
+
+\section{Related work}
+
+
+In-context learning in transformers has been studied extensively, and various mechanisms have been proposed to explain it~\citep{hendel_-context_2023,von_oswald_transformers_2023,akyurek_what_2022}.
+Of those, the most prominent is that the self-attention mechanism performs gradient descent on a linear loss.
+A construction with linear self-attention was demonstrated by~\citet{von_oswald_transformers_2023}.
+While linear-self attention can be written as an RNN~\citep{katharopoulos_transformers_2020-1}, the results of \citet{von_oswald_transformers_2023} depends on the tokens being constructed in a specific way, which limits the generality of their construction.
+Moreover, the most common type of self-attention used is softmax scaled dot-product self-attention rather than linear self-attention, and the basic linear self-attention mechanism used in \citet{von_oswald_transformers_2023} is not competitive with softmax self-attention.
+Whereas, we show a construction that uses local-self attention with state-space models, which has been shown to be competitive with softmax self-attention transformers~\citep{de_griffin_2024}.
+
+\citet{liu_longhorn_2024} formulate the SSM layer as an online optimization objective with exact solution. 
+Similarly, \citet{sun_learning_2024} use the state of the SSM to perform GD.
+But both these papers consider online updates, that is minibatch size 1 updates. 
+One layer of their model is not capable of performing larger minibatch updates.
+Moreover, without local self-attention, their online optimization objective is limited to using single sequence tokens with a single-layer.
+And finally their goal is not to explain how in-context learning happens with existing architectures, but rather to develop entirely new SSM variants using the idea that an optimization process can be used for compressing information as well, which is the key property required of a recurrent network.
+
+The combination of local-self attention with Mamba has been used in for improving performance in multiple instances, including most recently~\citep{de_griffin_2024,ren_samba_2024}.
+But these papers do not specifically construct their model for ICL, nor do they attempt to distill inductive biases required for ICL in state-space models.
+
+
+
+
+\section{Discussion}
+
+
+
+This work establishes a clear connection between state-space models (SSMs) and gradient-based in-context learning. 
+We have demonstrated, both theoretically and empirically, that SSMs can emulate gradient descent on implicit regression models, providing a mechanistic explanation for their in-context learning capabilities.
+Our construction, GD-SSM, reveals the crucial role of architectural features such as local self-attention and multiplicative output interactions in enabling this behavior. 
+These findings not only explain the success of recent SSM variants in in-context learning tasks but also provide valuable insights for the design of future sequence models.
+
+The alignment between our theoretical construction and the behavior of trained models suggests that the gradient descent mechanism may be a natural inductive bias in these architectures. 
+This understanding opens new avenues for analyzing and improving sequence models, potentially leading to more efficient and effective architectures for a wide range of tasks.
+
+Future research could explore the implications of this mechanism in larger-scale models, more complex tasks, and real-world applications. 
+Additionally, investigating how this understanding can be leveraged to enhance the design and training of state-space models could yield significant advancements in the field of sequence modeling.
+
+
+
+

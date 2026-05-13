@@ -1,0 +1,281 @@
+\title{Beyond Auto-Regression: Fast LLMs via Self-Distillation Through Time}
+
+\begin{abstract}
+Autoregressive (AR) Large Language Models (LLMs) have demonstrated significant success across numerous tasks. However, the AR modeling paradigm presents certain limitations; for instance, contemporary autoregressive LLMs are trained to generate one token at a time, which can result in noticeable latency. Recent advances have indicated that search and repeated sampling can enhance performance in various applications, such as theorem proving, code generation, and alignment, by utilizing greater computational resources during inference. In this study, we demonstrate that diffusion language models are capable of generating at least 32 tokens simultaneously, while exceeding the performance of AR models in text quality and on the LAMBADA natural language understanding benchmark. This outcome is achieved through a novel distillation method for discrete diffusion models, which reduces the number of inference steps by a factor of 32-64. Practically, our models, even without caching, can generate tokens at a rate that is up to 8 times faster than AR models employing KV caching, and we anticipate further improvements with the inclusion of caching. Moreover, we demonstrate the efficacy of our approach for diffusion language models with up to 860M parameters.
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, autoregressive (AR) large language models (LLM)  have exceeded expectations \citep{vaswani2017attention, devlin2018bert, radford2019language, brown2020language, kaplan2020scaling, raffel2020exploring, fedus2022switch, hoffmann2022training, chowdhery2023palm, team2023gemini, touvron2023llama}. Importantly, many breakthroughs in coding \citep{chen2021evaluating}, mathematics, and reasoning \citep{trinh2024solving, Trinh2024, romera2024mathematical, hosseini2024v, wang2024mathshepherdverifyreinforcellms} were achieved based on decoding large amounts of completions from a base LLM. 
+
+Importantly, the benefits of repeated sampling can be so significant that it is often more efficient to use a smaller, faster model rather than a larger, slower one. More generally, one can improve the performance of a fixed model by scaling up computational resources at inference time \citep{madaan2023selfrefineiterativerefinementselffeedback, yao2023treethoughtsdeliberateproblem, snell2024scalingllmtesttimecompute, wu2024empiricalanalysiscomputeoptimalinference, chen2024llmcallsneedscaling, brown2024largelanguagemonkeysscaling, goyal2024thinkspeaktraininglanguage}, a phenomenon that was previously observed for games \citep{CAMPBELL200257, Silver2016, lerer2019improvingpoliciessearchcooperative, brown2020combiningdeepreinforcementlearning, jones2021scalingscalinglawsboard}. Hence, when tackling reasoning tasks, a major bottleneck is the latency of the model. In this work, we improve the decoding speed of LLMs by moving away from AR modeling.  We build on recent breakthroughs in discrete diffusion \citep{lou2023discrete, sahoo2024simpleeffectivemaskeddiffusion, shi2024simplifiedgeneralizedmaskeddiffusion, ou2024absorbingdiscretediffusionsecretly}. Our approach can generate text up to 8 times faster than AR models that use KV caching \citep{pope2022efficientlyscalingtransformerinference}.
+Diffusion models are typically trained to maximize the evidence lower bound (ELBO), which does not consider the desired number of inference steps. To improve text quality with fewer forward passes, we train a student model to match the distribution of samples produced using a large number of steps. This is a significant finding because faster decoding mechanisms allow exploring a larger search space in applications that require search, planning, and reranking. In summary, our core contributions are as follows:
+\begin{itemize}
+    \item We introduce \textit{Self-Distillation Through Time} (SDTT), which allows generating \textbf{at least} 32 tokens at a time, while achieving better perplexity than GPT-2 with nucleus sampling. Unlike many distillation methods for continuous diffusion models, SDTT does not rely on deterministic mappings such as DDIM \citep{song2022denoisingdiffusionimplicitmodels}. SDTT is very simple and easy to implement.
+    \item We show that SDTT can generate tokens up to 8 times faster than AR models that use KV caching. In particular, our model does not rely on activation caching, suggesting that there is potential for even greater efficiency gains.
+    \item We demonstrate the effectiveness of SDTT for language models with up to 860M parameters. To the best of our knowledge, this is the largest publicly available discrete diffusion language model.
+\end{itemize}
+
+
+\section{Background}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/main/lambada/objectives/acc.pdf}
+        \caption{Accuracy of the correct last word decoded from our model. Distillation with KLD loss leads the student model to outperform the teacher in terms of accuracy on LAMBADA.}
+        \label{fig:disillation_teacher_target}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/main/lambada/objectives/ppl.pdf}
+        \caption{Perplexity of the last word. The KLD preserves performance best, and even when the student is trained to sample with 16 instead of 1024 steps, the student still matches AR baselines.}
+        \label{fig:remasking_cls_train}
+    \end{subfigure}
+    \caption{\textbf{Performance on LAMBADA after multiple rounds of SDTT} with different distillation losses. We pre-train with the masked diffusion language modeling objective (MDLM) \citep{sahoo2024simpleeffectivemaskeddiffusion} and distill with 7 rounds of SDTT. The sampling step size (x-axis) denotes the expected number of decoding steps to match the MDLM teacher. For example, \texttt{1/256} denotes the student after 2 rounds of SDTT. Note that a single word in the LAMBADA data set often consists of multiple tokens. }
+    \label{fig:lambada_main}
+\end{figure}
+\subsection{Masked diffusion language modeling}
+\label{sec:masked_diffusion_lm}
+We follow the notation of \citet{sahoo2024simpleeffectivemaskeddiffusion} to introduce masked diffusion language modeling (MDLM.) Language modeling can be framed as the sequential prediction task of discrete tokens ($x_i$) coming from a vocabulary $\mathcal X = \mathbb Z^{<N} = \left\{0,~...,~N - 1\right\}$ that can take $N$ possible discrete values. A language model would predict sequences of length $L$, which can be defined as the sequences of $x_i$'s originating from $\mathcal X^L = \left\{\mathbf x^{(i)}=(x^{(i)}_0,~\dots,~x^{(i)}_{L-1})\right\}_{i \in \mathbb Z^{<K}}$. Let $\mathcal D := \left\{\mathbf x^{(0)},~\dots,~\mathbf x^{(K-1)} : \mathbf x^{(i)} \in \mathcal X^L\right\}$ denote the training set. The goal of language modeling is to sample from the unknown distribution $p_0 : \mathcal X^L \rightarrow [0, 1]$ that generated the samples in $\mathcal D$.
+
+Similarly to continuous diffusion, we sample from an approximation of $p_0$ by learning to denoise corrupted examples. One can sample from the model through ancestral sampling, starting from a stationary distribution. The stationary distribution of \citet{sahoo2024simpleeffectivemaskeddiffusion} is such that all tokens of the sentence are replaced with a special \texttt{MASK} token like the \texttt{MASK} token used for pre-training BERT models. However, a key difference between BERT and MDLM is that MDLM is trained on sequences with varying levels of corruption, while BERT uses a fixed ratio.
+\paragraph{Discrete absorbing diffusion process}
+MDLM defines a forward process to corrupt data and a backward process to learn to recover data. MDLM uses a continuous-time formulation, with the data distribution denoted as $p_0$ and the stationary noise distribution as $p_1 = \bm \pi$. The forward process linearly interpolates between the one-hot distribution defined by the original document $\mathbf x$ and the stationary distribution $\bm{\pi}$, which places all mass on the \texttt{MASK} token. Mathematically,
+\begin{equation}
+    q(\mathbf z_t | \mathbf x) := \text{Cat}(\mathbf z_t; \alpha_t \mathbf x + (1 - \alpha_t) \bm \pi),
+    \label{eq:diff-fwd}
+\end{equation}
+where the noise injection schedule is defined by $\alpha_t$, for $t \in [0, 1]$. The constraints on $\alpha_t$ are that $\alpha_t \in [0, 1]$, $\alpha_t$ should be a strictly decreasing function of $t$, and $\alpha_0 \approx 1, \alpha_1 \approx 0$. The forward process is called absorbing because once a token is assigned to a \texttt{MASK} token, it cannot be reverted to a real token.
+
+We can derive the analytical form of the reverse process $q(\mathbf z_s | \mathbf z_t, \mathbf x)$, with $t > s$ and $\ats = \frac{\at}{\as}$ as
+\begin{equation}
+    q(\z_s | \z_t, \x) =
+        \cat \left(\z_s;
+            \frac{[\ats \z_t + (1 - \ats)\vone  \prior^\top \z_t]  \odot [\as \x + (1 - \as) \prior]}{
+             \at \z_t^\top \x  + (1 - \at)\z_t^\top \prior} \right).
+ \label{eq:reverse_process}
+\end{equation}
+\paragraph{Objective and parameterization}
+To generate new samples, we can simulate the reverse process from \cref{eq:reverse_process}. Since the ground-truth sample $\x$ is unknown, \citet{sahoo2024simpleeffectivemaskeddiffusion} learn an approximation $\x_\theta$ using a neural network with parameters $\theta$. \citet{sahoo2024simpleeffectivemaskeddiffusion} then use $\x_\theta$ instead of $\x$ to simulate the reverse process. The sampling distribution is denoted as ${p_\theta(\z_s|\z_t) := q(\z_s | \z_t, \x_\theta(\z_t, t)})$. \cite{sahoo2024simpleeffectivemaskeddiffusion} optimizes $\theta$ using a continuous version of the negative evidence lower bound (ELBO) of \citet{pmlr-v37-sohl-dickstein15}. Previous research has shown that continuous-time objectives optimize the data likelihood better \citep{kingma2023variationaldiffusionmodels}. Due to the definition of the absorbing diffusion process, the ELBO simplifies to a weighted cross-entropy loss between the ground-truth $\x$ and the model predictions $ \x_\theta$:
+\begin{equation}
+        \lossnelbo = \mathbb{E}_{q}\int_{t=0}^{t=1} \frac{\dat}{1 - \at} \log \xapproxum \d t.
+        \label{eq:mdlm-objective}
+\end{equation}
+To derive \cref{eq:mdlm-objective}, \citet{sahoo2024simpleeffectivemaskeddiffusion} impose two properties on $p_\theta(\z_s|\z_t)$. First, denoised tokens are never re-masked during sampling.  Practically, this is achieved by manipulating the output of the neural network $\x_\theta(\z_t, t)$ to ensure that no  probability mass is assigned to the \texttt{MASK} token. Secondly, already-denoised tokens are carried-over to the next sampling step. \citet{sahoo2024simpleeffectivemaskeddiffusion} showed that both constraints lead to improved likelihood.
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/main_fig_iclr_2025.pdf}
+        \caption{The distillation targets are the log probabilities that lead to a token being denoised, concatenated with log probabilities of the last step for tokens that remain masked.}
+        \label{fig:distillation_teacher_target}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/main/latency.pdf}
+        \caption{Latency of the distilled models. Sampling with 16 steps achieves an 8x speedup against the AR baseline that uses KV caching.}
+        \label{fig:latency}
+    \end{subfigure}
+    \caption{\textbf{SDTT.} In figure (a), we illustrate how we prepare the distillation targets. In figure (b), we show the latency results with 16, 32, and 64 sampling steps.}
+    \label{fig:distill_and_remask}
+\end{figure}
+\subsection{Knowledge Distillation}
+\begin{algorithm}[t]
+\caption{Computing the \textit{Self-Distillation Through Time} targets $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$}
+\begin{algorithmic}[1]
+\State \textbf{Inputs:} Noisy tensor $\x_t \in \R^{N \times L}$, Starting sampling time $t_\text{start} \in [0, 1]^N$, Number of sampling steps $\nicefrac{m}{k} \geq 2$, such that $\nicefrac{m}{k} \in \mathbb N_+$, Sampling step size $\Delta \in (0, 1)$, Mask token index $M$ $\in \mathbb N$, Minimal sampling time $\epsilon$.
+\State \textbf{Output:} Distillation targets $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$
+\State \hrulefill
+\State target $\gets$ zeros($N$, $L$, $K$) \Comment{Allocate empty tensor for $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$}
+\State $\z \gets \x_t$
+\For{$i = 0, ..., \nicefrac{m}{k} - 1$}
+    \State $t_\text{curr} \gets \max (t_\text{start} - i \cdot \Delta, \epsilon)$ \Comment{Sampling step for the current time}
+    \State $\z_\text{new}, \ell_\text{teacher} \gets$ \texttt{reverse\_sample}($\z,~t_\text{curr},~\Delta$) \Comment{Updated $\z$ \& log-probabilities $x_\theta(\z, t_\text{curr})$}
+    \State U = $\z_\text{new} \neq \z$ \Comment{Create mask $U$ of tokens that were denoised}
+    \State target[$U$] $\gets \ell_\text{teacher}[U]$ \Comment{Extract log-probs for the denoised tokens}
+    \State $\z \gets \z_\text{new}$  \Comment{Update $\z$ for the next iteration}
+\EndFor
+\State target[$\z == M$] = $\ell_\text{teacher}[\z == M]$ \Comment{Use log-probs of the last denoising step for masked tokens}
+\State \Return target  \Comment{Target log-probs for all masked tokens in $\x_t$}
+\end{algorithmic}
+\label{algo:sdtt_targets}
+\end{algorithm}
+Knowledge distillation \citep{Bucila2006ModelC, hinton2015distillingknowledgeneuralnetwork} is a technique where a \textit{student} neural network is trained to imitate the predictions of a more complex \textit{teacher} model. One of the main advantages of distillation is the ability to reduce the inference cost associated with sampling from large LLMs while surpassing the performance of smaller models trained without distillation \citep{gu2024minillmknowledgedistillationlarge, agarwal2024onpolicydistillationlanguagemodels}. The most relevant to our work are the distillation methods that match the predictions of the teacher and the student using a divergence measure $\delta$: 
+\begin{equation}
+    \mathbb E_{\x \sim \mathcal D} \left[ \delta( \mu_s(\x_t | \x_{<t}); \mu_t (\x_t | \x_{< t})) \right],
+\end{equation}
+Where $\mu_s, \mu_t$ are the AR distributions of the student and teacher, respectively, and $\mathcal D$ represent the training dataset. Common divergence measures include $f$-divergences \citep{wen2023fdivergenceminimizationsequencelevelknowledge} such as the Kullback-Leibler divergence (KLD) or the total variation distance (TVD).
+
+
+\section{Method}
+
+
+\subsection{Self-Distillation Through Time}
+\label{sec:sdtt}
+As explained in \cref{sec:masked_diffusion_lm}, training the discrete diffusion language model involves optimizing the ELBO over the training examples. Fewer steps typically lead to lower sample quality because the approximation of the reverse process is less accurate, as visible in the teacher curve in \cref{fig:scaling-main}.
+
+To address the issue of low sample quality with fewer steps, we propose \textit{Self-Distillation Through Time} (SDTT). SDTT tunes a pre-trained MDLM to allow decoding with significantly fewer steps. Interestingly, our final model decodes samples with lower generative perplexity in 32 steps than the teacher would with 1024 forward passes. In short, SDTT improves the sampling speed by distilling the inference time computation to sample multiple steps into the student.
+Let $p_\theta^{(m)}$ be the distribution of samples generated with $m$ steps, using a denoiser with parameters $\theta$. SDTT trains a denoiser with parameters $\nu$ to minimize a divergence $d$ between $p_\theta^{(m)}$ and $p_\nu^{(k)}$. Here $k < m$, and $k$ divides $m$ (e.g., $m=1024$ and $k=512$):
+\begin{equation}
+    \min_\nu ~ d(p_\nu^{(k)} || p_\theta^{(m)} ).
+    \label{eq:obj_min_empirical_distr}
+\end{equation}
+Since $\x_\theta$ and $\x_\nu$ are the only learnable elements of the sampling process, they completely determine the sampling distributions $p_\theta^{(m)}$ and $p_\nu^{(k)}$. As such, training $\x_\nu$ to match the predictions of $\x_\theta$ with fewer steps minimizes \cref{eq:obj_min_empirical_distr}. We now present a method for generating targets $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$ to train $\x_\nu$. Mathematically, we optimize the following objective:
+\begin{equation}
+    \min_\nu ~ \mathbb E_{\z_0 \sim \mathcal D, \z_t \sim q_t(\z_t | \z_0)} \left[ \delta (\x_\nu(\z_t, t) || \tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k}))\right],
+    \label{eq:teacher_preds_matching}
+\end{equation}
+
+where $\delta$ a divergence measure between the student and the objectives $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k}))$. We consider the Kullback-Leibler divergence (KLD), Total Variation Distance (TVD), and Mean-Squared Error (MSE). See \cref{sec:div-measures} for details on those divergence measures.
+\begin{algorithm}[t]
+\caption{\textit{Self-Distillation Through Time} training loop.}
+\begin{algorithmic}[1]
+\State \textbf{Inputs:} Training set $\mathcal D$, Teacher $\x_\theta$, Divergence measure $\delta$, Number of sampling steps $\nicefrac{m}{k}$, Sampling step size $\Delta$, Mask token index $M$, Total number of training steps $H$
+\State \textbf{Output}: Distilled student $\x_\nu$.
+\State \hrulefill
+\State $\nu \gets \theta$\Comment{Initialize the student with the teacher weights}
+\For {$i = 0, ..., H - 1$ }
+    \State $\x_0 \gets $ \texttt{sample\_example} ($\mathcal D$) \Comment{Sample a training example}
+    \State $t_\text{start} \sim \mathcal U[0, 1]$ \Comment{Sample $t$ uniformly at random} 
+    \State $\x_t \sim q_t(\x_t | \x_0)$ \Comment{Forward diffusion process. See \cref{eq:diff-fwd}}
+    \State $\x_\text{student} \gets \x_\nu(\x_t, t)$
+    \State $\x_\text{teacher} \gets $ \texttt{teacher\_SDTT}($\x_t$, $t_\text{start}$, $\nicefrac{m}{k}$, $\Delta$, $M$, \texttt{1e-5}) \Comment{See \cref{algo:sdtt_targets}}
+    \State $\mathcal L \gets \delta (\x_\text{student} || \x_\text{teacher})$  \Comment{Compute divergence between student and SDTT targets.}
+    \State $\nu \gets$ \texttt{backprop\_optim($\mathcal L, \nu$)} \Comment{Update the parameters of the student with AdamW}
+\EndFor
+\State \Return $\x_\nu$
+\end{algorithmic}
+\label{algo:sdtt_train_loop}
+\end{algorithm}
+\paragraph{Generating the Teacher Targets}
+Following the terminology of knowledge distillation, we call the denoiser $\x_\theta$ used for many steps decoding from the \textit{teacher} and the denoiser $\x_\nu$ used for a few steps decoding from the \textit{student}. To train $\x_\nu$ to match the predictions of $\x_\theta$, we sample from the teacher for the $\nicefrac{m}{k}$ steps. Whenever a \texttt{MASK} token is denoised, we collect the log probabilities predicted by the teacher for this \texttt{MASK} token. These log-probabilities become the distillation targets $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$. \Cref{algo:sdtt_targets} outlines this process and \cref{fig:distill_and_remask} presents it visually. While \cref{fig:distill_and_remask} shows the distillation for two steps, the procedure can be extended to larger values of $\nicefrac{m}{k}$. The complete SDTT training loop is presented in \cref{algo:sdtt_train_loop}.
+
+
+\section{Experiments}
+
+We distill MDLMs on the OpenWebText dataset \citep{Gokaslan2019OpenWeb} as it was used to train recent discrete diffusion language models \citep{lou2023discrete, sahoo2024simpleeffectivemaskeddiffusion}. We use the Adam optimizer with a learning rate of $6e-5$, a batch size of 128 and no weight decay.  We linearly increase the learning rate for 500 steps and keep it constant afterwards. As a base model, we reuse the checkpoint released by \citet{sahoo2024simpleeffectivemaskeddiffusion}. See \cref{sec:impl-details} for more details.
+
+In \cref{sec:objective-ablation}, we evaluate 3 distillation divergences and show that SDTT can be applied iteratively to reduce the number of sampling steps by a factor 16-32. In \cref{sec:hparams-ablations}, we ablate on the importance of hyperparameters, including the duration of each SDTT round and the number of sampling steps to generate $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$. In \cref{sec:scaling-860M}, we scale SDTT to models with of up to 860M parameters. Finally, in \cref{sec:latency}, we compare the latency of SDTT against autoregressive models that use KV caching. 
+\paragraph{Unconditional generation}
+Following prior work \citep{dieleman2022continuous, lou2023discrete, sahoo2024simpleeffectivemaskeddiffusion}, we use a larger model to compute the perplexity of generated unconditional text examples. We evaluate the smallest students using GPT-2 (large) \citep{radford2019language}. In the scaling experiments, we use Llama3 8B \citep{touvron2023llama}, since we compare models with up to 860M parameters. We decode 1024 samples of 1024 tokens using from 16 to 1024 sampling steps, and compare the perplexity of samples generated by an AR model trained from scratch, as well as GPT2 using nucleus sampling with $p=0.95$.
+\paragraph{Conditional generation}
+To evaluate conditional generation, we use the MAUVE score\citep{pillutla2021mauve}. MAUVE measures how well a model follows a prompt by comparing multiple generations with a reference continuation. We use the first 1024 samples with at least 1024 tokens from the WebText dataset \citep{openai_gpt2_dataset}, use the first 50 tokens as a prompt, and generate 50 tokens of continuation. For each prompt, we generate five continuations, as done in \citet{lou2023discrete}.
+\paragraph{Downstream performance}
+We use the \textbf{LAMBADA dataset} \citep{paperno2016lambadadatasetwordprediction} as a downstream evaluation benchmark. We report an upper bound on the perplexity, computed using the ELBO (\ref{eq:mdlm-objective}). The LAMBADA accuracy is computed by masking all tokens of the last word and predicting all of them in a single forward pass, using the \texttt{argmax} of the predictions. The diffusion model is correct only if all the masked tokens are decoded correctly in a single step.
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/main/scaling_ppl_small.pdf}
+        \caption{SDTT on small models trained for 1M steps. \texttt{dt=1/k} means students matching teacher samples in $k$ steps. Successive lines correspond to additional SDTT rounds. SDTT can outperform the teacher and GPT-2 with nucleus sampling.}
+        \label{fig:sdtt-small}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/main/all_scales_ppl.pdf}
+        \caption{Scaling SDTT to 860M parameters. Each scale is distilled for 7 rounds and the performance of the final student is displayed. In all 3 experiments, the student and teacher have the same number of parameters. The small distilled student reaches lower perplexity than the large teacher.}
+        \label{fig:sdtt-scaling-main}
+    \end{subfigure}
+    \caption{\textbf{Sampling step ablations on perplexity.} Perplexity of samples after each round of iterated SDTT. \textbf{(a)}: Iterated SDTT on a small model trained for 1M step. \textbf{(b)}: Scaling SDTT to larger models trained for 400K steps.}
+    \label{fig:scaling-main}
+\end{figure}
+\subsection{Training objective and Iterated SDTT}
+\label{sec:objective-ablation}
+
+SDTT requires choosing a divergence $\delta$ and we study the Mean-Squared Error (MSE), Total Variation Distance (TVD) and (reverse) Kullback-Leibler Divergence (KLD). To further reduce the number of sampling steps, we apply SDTT multiple times, using the distilled student as the teacher for subsequent rounds of SDTT. We distill the original models for 7 rounds of $10k$ training steps, and generate $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$ with $2$ teacher steps (\cref{algo:sdtt_targets}). In this experiment, we used an exponential moving average (EMA) of the weights with a decay of $0.9999$ that we do not reset between rounds.
+
+Both \Cref{fig:lambada_main} and \Cref{fig:comparison-mse-tvd-kld-ppl} show that students distilled with the KLD clearly outperform students trained using the MSE and TVD. The LAMBADA accuracy of students tuned with the KLD slightly improves over the teacher, while the perplexity remains better or matches the AR baselines for all but the last round of SDTT. The improved accuracy on LAMBADA suggests that the model is better at predicting multiple tokens in parallel after distillation with SDTT, since we evaluates the accuracy by decoding all tokens of the last word simultaneously. \Cref{fig:mse-tvd-kld-mauve-main} shows that the KLD seem to outperform the MSE and TVD objectives on MAUVE. Since we generate sequences of 100 tokens only for MAUVE, following \citep{lou2023discrete}, we sample with at most 128 steps, and use samples generated with 128 sampling steps from the teacher as a baseline. Note that as observed by \citet{deschenaux2024promisesoutlookschallengesdiffusion}, discrete diffusion models typically achieve slightly lower MAUVE scores than AR models. Nonetheless, distillation with the KLD objective improves the MAUVE score of the students. \Cref{fig:comparison-mse-tvd-kld-ppl} shows that students distilled with KLD have higher generative perplexity than those distilled with the MSE. However, KLD is the only objective that preserves performance in the LAMBADA data set while still significantly reducing the generative perplexity compared to the teacher. Therefore, in the remainder of this work, we focus on the KLD.
+\subsection{Additional ablations}
+\label{sec:hparams-ablations}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/main/mauve/compare_objectives.pdf}
+    \caption{\textbf{MAUVE performance.} MAUVE performance of the student after distillation. The sub-title \texttt{dt=1/k} refers to the decoding step size that the student should use to match the teacher. For example, the plot with title \texttt{dt=1/256} showcases the MAUVE score after two rounds of SDTT. The teacher performance is computed from the original, non-distilled teacher using 128 decoding steps. The dashed line denotes the best MAUVE score achieved by the students being compared.}
+    \label{fig:mse-tvd-kld-mauve-main}
+\end{figure}
+\paragraph{Number of steps in each SDTT round}
+In \cref{sec:objective-ablation}, each round of SDTT consists of $10k$ steps. Since the magnitude of the distillation loss does not reliably indicate convergence, we experiment with shorter rounds. We find that reducing the number of steps to $5k$ or $2.5k$ negatively impacted conditional generation performance, as shown in \cref{fig:mauve-sdtt-num-iter-per-round}. However, shorter rounds slightly improved the final generative perplexity (\cref{fig:ppl-sdtt-num-iter-per-round}) and resulted in marginally better LAMBADA perplexity (\cref{fig:lambada-less-steps}). Since SDTT does not directly optimize the ELBO, an increase in perplexity is expected. Interestingly, the LAMBADA accuracy remains unchanged with shorter rounds.
+\paragraph{Number of sampling steps to generate the targets}
+In \cref{sec:objective-ablation}, the targets $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$ are generated using 2 sampling steps from the teacher. We explore distilling a larger number of sampling steps at once (4 or 8), since using more rounds of SDTT may induce more error accumulation in approximating the original teacher. \Cref{fig:ppl-more-steps-at-once} shows that distilling more than two steps at a time is difficult and results in weaker results on LAMBADA. This result suggests that the higher stochasticity of the targets generated with four or eight steps makes the task too difficult for the student.
+\paragraph{Generating targets with the analytical sampler} 
+\citet{lou2023discrete} observe that using an analytical sampler \citep{campbell2022continuous} results in higher quality samples compared to ancestral sampling. However, when generating targets $\tilde \x_\theta^\text{teacher}(\z_t, t, \nicefrac{m}{k})$ with analytical sampling, we observed minimal difference with ancestral sampling, as shown in \cref{fig:analytical-lambada-ppl} and \ref{fig:mauve-analytical}.
+\paragraph{Resetting the optimizer and Exponential Moving Average between rounds}
+Using an Exponential Moving Average (EMA) of the weights is known to improve the quality of samples from diffusion models \citep{nichol2021improved}. However, when applying SDTT for multiple rounds, it is unclear whether the EMA or current weights should be used as the teacher for successive rounds. Additionally, it could be favorable to reset the optimizer state between rounds as we grow the decoding step size. We experiment with two approaches: either resetting the optimizer state only, or resetting both the EMA and optimizer state. \Cref{fig:gen-ppl-reset-ema-and-optim} shows the generative perplexity when resetting the optimizer state and using the EMA as the teacher instead of the current weights, while \cref{fig:mauve-reset-ema-and-optim} presents the corresponding results for MAUVE. When using the EMA as teacher, since we accumulate updates in the EMA over 10k steps only, we use a slightly lower decay rate of 0.999. The results indicate that using the EMA of the weights as the teacher may slightly improve performance. 
+\subsection{Scaling SDTT to 860M parameters}
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/additional/ppl/kld_vs_mse.pdf}
+        \caption{KLD vs MSE}
+        \label{fig:ppl-kld-vs-mse}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/additional/ppl/kld_vs_tvd.pdf}
+        \caption{KLD vs TVD}
+        \label{fig:ppl-kld-vs-tvd}
+    \end{subfigure}
+    \caption{\textbf{Perplexity for different losses and decoding step size}. Generative perplexity over 7 rounds of SDTT with MSE, TVD and KLD. While the KLD leads to a higher perplexity than the MSE; we focus on the KLD because it is the only divergence that retains the performance on the LAMBADA dataset. The curve labeled as \texttt{dt=1/k} denotes the student trained to match the teacher distribution with $k$ decoding steps. For example, the performance of the student after 4 rounds of SDTT is labeled as \texttt{dt=1/128} as we double the decoding step size after each round of SDTT.}
+    \label{fig:comparison-mse-tvd-kld-ppl}
+\end{figure}
+\label{sec:scaling-860M}
+We apply SDTT to larger discrete diffusion models with up to 860M parameters. In this experiment, we train the models from scratch for 400k steps with a batch size of 512, a context length of 1024 and the Adam optimizer. We reuse the training configuration of \citet{sahoo2024simpleeffectivemaskeddiffusion} and scale the models to larger sizes. We train 3 model sizes, small (169M), medium (424M) and large (863M). Details of the model architecture for each scale are shown in \cref{tab:scaling}. As in the other experiments, the models are diffusion transformers \citep{peebles2023scalable} and we use an EMA with a decay of 0.9999. Although the results in \cref{sec:hparams-ablations} suggest that short distillation rounds might be sufficient, it is unclear whether this result also holds on larger scales. Therefore, we use $10k$ steps per round of SDTT. For simplicity, we generate targets using 2 teacher ancestral decoding steps and do not reset the optimizer state or EMA between rounds.
+
+Since we train larger models, we evaluate the generative perplexity using Llama3 8B \citep{touvron2023llama}. The generative perplexity over the 3 model sizes is shown in \cref{fig:sdtt-scaling-main}. Interestingly, the smaller diffusion model (169M) sampled from with 64 steps or more after distillation achieves better generative perplexity than the largest model (863M) when sampling with 1024 steps. In \cref{fig:mauve-md-vs-large}, we show that the MAUVE performance also improves after distillation for the medium and larger model. Finally, in \cref{fig:scaling-lambada}, we see that the LAMBADA accuracy improves after distillation, similar as in the smaller scale, when using the KLD objective.
+\subsection{Latency with SDTT}
+\label{sec:latency}
+While SDTT allows sampling from discrete diffusion models with 32-64 times less decoding steps, a quantity of interest to practitioners is the actual latency of text generation. Indeed, while the reduction in the number of sampling steps is large, since discrete diffusion uses a non-causal architecture, we cannot use KV caching \citep{pope2022efficientlyscalingtransformerinference}. KV caching improves the inference performance drastically for AR models, hence we compare the latency of SDTT with GPT-2 with KV caching. We successfully reproduce the results of \citet{deschenaux2024promisesoutlookschallengesdiffusion}, which showed a 4x improvement when sampling with 32 steps, only this time, we retain the text quality because of SDTT. We additionally measure the latency when decoding with 16 steps and observe an 8x speedup against the AR baseline. We compute the latency using untrained models with around 1.3B parameters, using the same hyperparameters as \citet{deschenaux2024promisesoutlookschallengesdiffusion}. We use a batch size of 8 and time the sampling 10 times after one warm-up step on a single A100 GPU with 80 GiB of RAM.
+
+\begin{tcolorbox}[colback=blue!10!white, colframe=blue!60!white, title=TL;DR, fonttitle=\bfseries, rounded corners, width=\textwidth, boxrule=0.5pt, coltitle=white]
+\begin{enumerate}
+    \item \textbf{Inference speed}: we reduce the number of sampling steps 32-64 folds.
+    \item \textbf{Num. distill steps}: distilling more than two steps at a time yields weaker students.
+    \item \textbf{SDTT is cheap}: distilling for 5-10$k$ steps per round is sufficient.
+    \item \textbf{Simplicity}: SDTT is easy to implement. The sampling code is unchanged.
+    \item \textbf{Objective}: the KLD is more effective than the MSE and TVD.
+    \item \textbf{Perplexity}: we match GPT-2 ($p=0.95$) with 32 sampling steps.
+    \item \textbf{LAMBADA}: SDTT fully preserves the teacher's NLU performance.
+\end{enumerate}
+\end{tcolorbox}
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\paragraph{Diffusion Models}
+Diffusion models \cite{sohldickstein2015deepunsupervisedlearningusing, ho2020denoising, song2020generativemodelingestimatinggradients} are the basis of many state-of-the-art text-to-image models \citep{ramesh2022hierarchicaltextconditionalimagegeneration, rombach2022highresolutionimagesynthesislatent, saharia2022photorealistictexttoimagediffusionmodels}. After their introduction by \citet{sohldickstein2015deepunsupervisedlearningusing}, \citet{ho2020denoising} showed that diffusion models can achieve FID \citep{NIPS2017_8a1d6947} scores comparable to GANs \cite{goodfellow2014generativeadversarialnetworks, arjovsky2017wassersteingan}.
+\paragraph{Discrete Diffusion \& Diffusion Language Models}
+Prior to \citet{sahoo2024simpleeffectivemaskeddiffusion, shi2024simplifiedgeneralizedmaskeddiffusion, ou2024absorbingdiscretediffusionsecretly}, \citet{lou2023discrete} introduced a novel discrete diffusion language model called SEDD. When decoding with a large number of steps, SEDD can match or surpass GPT-2 in unconditional text generation. The model of \citet{lou2023discrete} learn a discrete generalization of the score of continuous diffusion models \citep{song2020generativemodelingestimatinggradients, song2021scorebased}. \citet{campbell2022continuous, zhao2024unifieddiscretediffusioncategorical} developed the continuous-time discrete diffusion framework. \citet{hoogeboom2021argmaxflowsmultinomialdiffusion} extended Bernoulli diffusion \citep{sohldickstein2015deepunsupervisedlearningusing} to categorical distributions, and \citet{austin2023structureddenoisingdiffusionmodels} generalized the work of \citet{hoogeboom2021argmaxflowsmultinomialdiffusion} to more general corruption processes, including absorbing diffusion, a key component of later work. In parallel, several studies have explored continuous diffusion for language modeling \citep{li2022diffusionlmimprovescontrollabletext, dieleman2022continuous, han2023ssdlmsemiautoregressivesimplexbaseddiffusion, chen2023analog, gulrajani2024likelihood}. Despite recent breakthroughs, diffusion language models still have some drawbacks \citep{deschenaux2024promisesoutlookschallengesdiffusion}.
+\paragraph{Distillation of Continuous Diffusion models}
+Distilling continuous diffusion models is a well-studied area. For a comprehensive survey, see \cite{luo2023comprehensivesurveyknowledgedistillation}. Many distillation methods rely on Denoising Diffusion Implicit Models (DDIM) \citep{song2022denoisingdiffusionimplicitmodels}, which showed that diffusion models can be sampled deterministically. \citet{luhman2021knowledgedistillationiterativegenerative} unroll trajectories sampled with DDIM and train a student to map noise directly to images. \citet{luhman2021knowledgedistillationiterativegenerative} pre-compute a dataset of noise-image pairs. Close to our work, \citet{salimans2022progressivedistillationfastsampling} teaches the student to match multiple sampling steps of the teacher, given corrupted training examples. However, unlike \citet{salimans2022progressivedistillationfastsampling}, we cannot rely on the existence of a deterministic map via DDIM. Consistency distillation \citep{song2023consistencymodels} fine-tunes a pre-trained diffusion model to predict the final sample from intermediate points of the sampling trajectory, which enable faster sampling. \citet{luo2024diffinstructuniversalapproachtransferring} distills a pre-trained diffusion model into single-step generator through a novel loss, \textit{Integral Kullback-Leibler divergence}. \textit{SD-XL Turbo} \citep{sauer2023adversarialdiffusiondistillation} uses an adversarial formulation to sample with 1-4 steps from a latent diffusion model \citep{rombach2022highresolutionimagesynthesislatent}.
+\paragraph{Masked \& Non Auto-Regressive Language Modeling}
+BERT \citep{devlin2018bert} introduced the masked language modeling objective. While BERT focuses on representation learning, discrete diffusion language models are generative. XLNet \citep{yang2020xlnetgeneralizedautoregressivepretraining} uses a generalized AR pretrtaining method to model the text distribution over all permutations of the training sequences, outperforming BERT on downstream tasks. \citet{pannatier2024sigmagptsnewapproachautoregressive} adopt a similar objective to XLNet for generative modeling instead of natural language understanding.
+
+
+
+\section{Discussion}
+
+In this work, we introduce \textit{Self-Distillation Through Time} (SDTT), a distillation method for discrete diffusion models. Recent work \citep{lou2023discrete, sahoo2024simpleeffectivemaskeddiffusion, shi2024simplifiedgeneralizedmaskeddiffusion, ou2024absorbingdiscretediffusionsecretly} suggests that discrete diffusion models can match or outperform autoregressive models in text quality. However, those models require more inference resources than AR models to achieve good performance, because of the non-causal architecture of the neural network that prevents the use of KV caching. We show that SDTT can reduce the number of decoding steps while retaining performance. Our final student is up to 8x faster than AR models that use KV caching and we demonstrate that SDTT is applicable to larger models as well. In future work, we plan to evaluate SDTT on tasks that involve generating a large number of completions from a base language model.
+
+
+\section{Reproducibility Statement}
+
+We provide details on model architectures, hyperparameters, and provide pseudocode for our algorithm. We built on top of the open source model of \citet{sahoo2024simpleeffectivemaskeddiffusion}, which makes it relatively easy for researchers to reproduce our results.co/jdeschena/sdtt}{HuggingFace}.
+
+
+\section{Ethics Statement}
+
+Overall, language models are dual-use technologies, and thus, they can have unethical uses, such as fake content generation, and they can suffer from bias if applied to data sets that are not carefully curated. This paper focuses specifically on speeding up discrete diffusion language models at test time to reduce their computational demands; we do not have specific concerns with regard to this contribution.
+
+
+
+

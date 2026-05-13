@@ -1,0 +1,423 @@
+\title{World Model on Million-Length Video And Language With Blockwise RingAttention}
+
+\begin{abstract}
+Current language models fall short in understanding aspects of the world not easily described in words, and struggle with complex, long-form tasks. Video sequences offer valuable temporal information absent in language and static images, making them attractive for joint modeling with language. Such models could develop a understanding of both human textual knowledge and the physical world, enabling broader AI capabilities for assisting humans. However, learning from millions of tokens of video and language sequences poses challenges due to memory constraints, computational complexity, and limited datasets. To address these challenges, we curate a large dataset of diverse videos and books, utilize the Blockwise RingAttention technique to scalably train on long sequences, and gradually increase context size from 4K to 1M tokens. This paper makes the following contributions: (a) Largest context size neural network: We train one of the largest context size transformers on long video and language sequences, setting new benchmarks in difficult retrieval tasks and long video understanding. (b) Solutions for overcoming vision-language training challenges, including using masked sequence packing for mixing different sequence lengths, loss weighting to balance language and vision, and model-generated QA dataset for long sequence chat. (c) A highly-optimized implementation with RingAttention, Blockwise Transformers, masked sequence packing, and other key features for training on millions-length multimodal sequences. (d) Fully open-sourced a family of 7B parameter models capable of processing long text documents (LWM-Text, LWM-Text-Chat) and videos (LWM, LWM-Chat) of over 1M tokens.
+This work paves the way for training on massive datasets of long video and language to develop understanding of both human knowledge and the multimodal world, and broader capabilities.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\newpage
+\tableofcontents{}
+\clearpage
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.98\textwidth]{figure/video_chat/long_video_chat_main.pdf}
+\caption{\textbf{\ours can answer questions over a 1 hour YouTube video.} Qualitative comparison of \ours-Chat-1M against Gemini Pro Vision, GPT-4V, and open source models. Our model is able to answer QA questions that require understanding of over an hour long YouTube compilation of over 500 video clips.}
+\label{fig:long_video_chat_example}
+\end{figure}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=.99\textwidth]{figure/needle_comparison_baselines_log_linear_mix_rot.png}
+    \caption{\textbf{\ours can retrieval facts across 1M context with high accuracy.} Needle retrieval comparisons against Gemini Pro and GPT-4 for each respective max context length -- 32K and 128K. Our model performs competitively while being able to extend to 8x longer context length. Note that in order to show fine-grained results, the x-axis is log-scale from 0-128K, and linear-scale from 128K-1M.}
+    \label{fig:single_needle_baselines}
+\end{figure}
+
+Current approaches on modeling the world are mostly restricted to short sequences of language sequences or short sequences of images and clips ~\citep{brown2020language,touvron2023llama,touvron2023llama2,openai2023gpt4,team2023gemini}.
+resulting in models which lack understanding about parts of the world that are hard to represent in texts or short clips, and are unable to process complex long-form language and visual tasks. Temporal structure in video sequences provides helpful information that is missing from language or far less obvious in static images and short clips. Long language sequences encode information that short sequences cannot, crucial for various applications such as long document retrieval or coding. Long videos provide a rich context that short clips cannot grasp, showing how scenes connect, the development of events, and the cause and effect of actions within the temporal dimension of the video. This exposure to diverse long language and video scenarios also broadens the AI systems to generalize across various real-world situations. By jointly modeling both long videos and books, the model can develop an understanding of both the multimodal world and long sequences of texts and videos, leading to more advanced AI systems with a multimodal understanding, capable of assisting humans in a broader range of tasks.
+
+To learn from video and language sequences, we need to train a model that is capable of processing more than millions of tokens per sequence and train it on a very large dataset. However, modeling millions of tokens is extremely difficult due to high memory cost, computational complexity, and lack of suitable datasets. Luckily, we have Blockwise RingAttention~\citep{liu2023ring,liu2023blockwise}, a technique for scaling up context size arbitrarily without approximations or overheads, allowing for scalable training on long sequences. We curated a large dataset of videos and languages from public book and video datasets, consisting of videos of diverse activities and long-form books. Considering the high compute cost, we grow context size from a smaller 4K context to a larger 1M context size gradually to reduce this cost, and this approach performs well in extending context effectively. Furthermore, we identify challenges associated with training on video and language: we discovered that training on a mixture of video, image, and text is crucial for optimal performance, due to images represent higher visual quality, videos offer sequential information, and text retains language understanding. To achieve this, we implemented an efficient masked sequence packing to effectively train with different sequence lengths, rather than standard sequence packing mechanism. Moreover, determining the right balance between image, video, and text training is crucial for cross modality understanding, and we suggest a ratio that proved effective. Furthermore, to address the lack of long-form chat datasets, we developed a model-generated question-answering (QA) approach by using a short-context model to generate a QA dataset from books. We found this to be crucial for chat abilities over long sequences.
+
+The specific contributions of this paper are as follows: (a) we train one of the largest context size transformers to date on video and text sequences and achieved by far the best results ever reported in terms of long video understanding (see \eg, Figure~\ref{fig:long_video_chat_example}) and long context fact retrieval (see \eg, Figure~\ref{fig:single_needle_baselines}). (b) We discover a branch of challenges associated with training on video and text sequences, and propose solutions for them: loss weighting to balance language and vision, masked sequence packing to effectively train with different sequence lengths, and model-generated QA dataset for long sequence chat. (c) A highly-optimized, open-source implementation with RingAttention with Blockwise Transformer, masked sequence packing and other key features for millions-length multimodal training. (d) Fully open-sourced a family of 7B parameter models capable of processing long text documents (\textbf{LWM-Text}, \textbf{LWM-Text-Chat}) and videos (\textbf{LWM}, \textbf{LWM-Chat}) of 1M tokens.
+Our work paves the way for training on massive datasets of long video and language, and is useful for future development of AI systems with an understanding of both human knowledge and the multimodal world, and broader capabilities.
+
+\begin{figure}[!tb]
+\centering
+\includegraphics[width=1\textwidth]{figure/data.png}
+\caption{This figure illustrates the multimodal training of a \oursfn. Stage 1, LLM Context Extension, focuses on expanding context size using the Books3 dataset, with context size growing from 32K to 1M. Stage 2, Vision-Language Training, focuses on training on visual and video contents of varying lengths. The pie chart details the allocation of 495B tokens across images, short and long videos, and 33B tokens of text data. The lower panel shows interactive capabilities in understanding and responding to queries about complex multimodal world. 
+}
+\label{fig:data}
+\end{figure}
+
+
+\section{Overview}
+
+We train a large autoregressive transformer model with a very large context window of up to one million tokens, building upon Llama2 7B~\citep{touvron2023llama2}. To achieve this goal, we leverage several strategies: extending the context to 1M using books (Section~\ref{sec:stage_1}), followed by joint training on long multimodal sequences, including text-image, text-video data, and books (Section~\ref{sec:stage_2}).
+
+Our training stages and datasets are shown in Figure~\ref{fig:data} and the model architecture is shown in Figure~\ref{fig:model}.
+
+
+
+\section{Stage I: Learning Long-Context Language Models}
+
+\label{sec:stage_1}
+
+This stage aims at first developing \textbf{LWM-Text} and \textbf{LWM-Text-Chat}, a set of long-context language models learned by training on progressively increasing sequence length data with RingAttention and Blockwise Transformer, and modifying positional encoding parameters to account for longer sequence lengths (see Section~\ref{sec:extend_context}). The training steps for growing context size are shown in Section~\ref{sec:training_steps}. In Section~\ref{sec:chat_qa}, we show how to construct model-generated QA data for enabling long sequence conversations.
+
+\subsection{Extending Context}
+\label{sec:extend_context}
+Learning long-range dependencies over sequences of millions of tokens requires (1) scalable training on such long documents, as well as a need to (2) stably extend the context of our base language. 
+\textbf{Scalable Training on Long Documents.}\quad Training on long documents becomes prohibitively expensive due to memory constraints imposed by the quadratic complexity of computing the attention weights. In order to address these computational constraints, we use the Blockwise RingAttention~\citep{liu2023ring,liu2023blockwise} implementation that leverages block-wise transformer with sequence parallelism to theoretically extend to an infinite context, bounded only by the number of devices available. In general, given a large enough tokens per device, the communication cost during Blockwise Transformer and RingAttention  fully overlap with computation, and does not add any extra overhead.
+
+\textbf{Progressive Training on Increasing Context Length.}\quad Although our implementation allows us to train on long documents of millions of tokens, it still remains costly since the quadratic computational complexity of attention remains, where gradient step time scales roughly linearly with context size (given a fixed number of tokens per batch). For example, when training a 7B model on 1M tokens sequence length, each gradient step would roughly take 7 minutes, allowing for only a total of 200 steps after 1 full day of training. 
+
+Therefore, we adopt a training approach inspired from \cite{jin2023growlength}, where our model is trained on progressively longer sequence lengths, starting from 32K tokens and ending at 1M tokens in increasing powers of two. Intuitively, this allows the model to save compute by first learning shorter-range dependencies before moving onto longer sequences. By doing this, we are able to train on orders of magnitude more tokens compared to directly training on the maximum target sequence length. The progressive training of growing context sizes is shown in Figure~\ref{fig:data}.
+\textbf{Positional Extrapolation for Long Contexts.}\quad For extending positional embeddings on longer contexts, we adopt a simple, scaled up version of the approach explored in \cite{roziere2023code}, where the $\theta$ for RoPE~\citep{su2024roformer} is scaled up with context length. We generally found this approach to be a stable method to extend positional embeddings with context lengths due to its relatively simple nature of only needing to tune a single hyperparameter. We scale up the $\theta$ for RoPE along with context window sizes -- the values are shown in Table~\ref{table:lwm_text_training_stages_main}.
+
+\begin{figure}[!tb]
+\centering
+\includegraphics[width=0.85\textwidth]{figure/model.png}
+\caption{\ours is a autoregressive transformer on sequences of millions-length tokens. Each frame in the video is tokenized with VQGAN into 256 tokens. These tokens are concatenated with text tokens and fed into transformers to predict the next token autoregressively. The input and output tokens' order reflect the varied training data formats, including image-text, text-image, video, text-video, and purely text formats. The model is essentially trained in an any-to-any manner using multiple modalities. To differentiate between image and text tokens, and for decoding, we surround video and image tokens with the special delimiters \texttt{<vision>} and \texttt{</vision>}. We also include \texttt{<eof>} and \texttt{<eov>} vision tokens to mark the end of intermediate and final frames in images and videos. For simplicity, these delimiters are not shown.
+}
+\label{fig:model}
+\end{figure}
+
+\subsection{Training Steps}
+\label{sec:training_steps}
+We initialize from LLaMA-2 7B~\cite{touvron2023llama2} and progressively increase the effective context length of the model in 5 stages - 32K, 128K, 256K, 512K, and 1M. For each stage, we train on different filtered versions of the Books3 dataset from The Pile~\cite{gao2020pile}. Table~\ref{table:lwm_text_training_stages_main} details each information about each training stage, such as number of tokens, total time, and the Books3 dataset filtering constraints. Each successive run is initialized from the run of the prior sequence length.
+
+
+\subsection{Chat Fine-tuning for Long-Context Learning}
+\label{sec:chat_qa}
+
+\textbf{Constructing QA data for Long Context Reasoning.} \quad
+We construct a simple QA dataset for learning long-context chat abilities. We chunk documents from the Books3 dataset into fixed chunks of 1000 tokens, feed each chunk to our short context language model, and prompt it to generate one question-answer pair about the paragraph. Then, given a context length such as 32K, we construct a single 32K token example by concatenating adjacent chunks together, as well as appending relevant QA pairs towards the end of the sequence in chat form. 
+
+\textbf{Training Details.} \quad
+For chat fine-tuning, we train each model on a mix of UltraChat~\cite{ding2023enhancing} and our custom QA dataset, with roughly a 7:3 ratio. We found it crucial to pre-pack the UltraChat data to the training sequence length, and keep them separate from examples with our QA data, as UltraChat data generally has a much higher proportion of loss tokens (densely packed, short chat sequences), whereas our QA data has a much lower percentage of loss tokens per sequence (< 1\%) since there is no loss on the long documents that are in the given context. Table~\ref{table:lwm_text_chat_finetuning} shows further training details for each run. Note that progressive training is not performed very each of the chat models, and instead are initialized from their respective pretrained models at the same context length.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=.99\textwidth]{figure/single_needle/single_needle_1M.png}
+\caption{Needle retrieval task. Our \ourstc-1M have near perfect accuracy across different positions in 1M context window.}
+\label{fig:single_needle}
+\end{figure}
+
+\begin{figure}[!t]
+\centering    
+\includegraphics[width=.99\textwidth]{figure/multi_needle.png}
+\caption{Multiple needles retrieval task with \ours-1M. $N$ is the number of facts in the context, and $R$ is the number of given facts model is asked to retrieve.}
+\label{fig:multi_needle}
+\end{figure}
+\begin{table}[!htbp]\centering
+\caption{\ourst Training Stages}\label{table:lwm_text_training_stages_main}
+\begin{tabular}{lcccccc}\toprule
+&\textbf{32K} &\textbf{128K} &\textbf{256K} &\textbf{512K} &\textbf{1M} \\\midrule
+Parameters &7B &7B &7B &7B &7B \\
+Sequence Length &$2^{15}$ &$2^{17}$ &$2^{18}$ &$2^{19}$ &$2^{20}$ \\
+RoPE $\theta$ &1M &10M &10M &25M &50M \\
+Tokens per Batch &4M &4M &4M &4M &4M \\
+Total Tokens &4.8B &12B &12B &3B &1.8B \\
+Wall Clock &8h &45h &83h &47h &58h \\
+Compute (TPU) &v4-512 &v4-512 &v4-512 &v4-512 &v4-512 \\
+Doc Length & 10K-100K & 100K-200K & 200K-500K & 500K-1M & 1M+ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Language Evaluation Results}
+\label{sec:language_eval}
+\subsubsection{Single Needle Retrieval}
+\label{sec:single_needle_eval}
+We evaluate on the popular Needle In A Haystack task~\citep{gkamradt2023needle} - more specifically an easier to evaluate version~\citep{arize2023needle}
+that finds and retrieves random numbers assigned to randomized cities from the context. Figure~\ref{fig:single_needle} shows nearly perfect retrieval accuracy over the entire context of our 1M context model. In addition, Figure~\ref{fig:single_needle_baselines} shows that we can scale to far larger contexts compared to the current best available LLMs.
+
+\begin{table}[!htbp]\centering
+\caption{\ourstc Training Details}\label{table:lwm_text_chat_finetuning}
+\begin{tabular}{lccccc}\toprule
+&\textbf{128K} &\textbf{256K} &\textbf{512K} &\textbf{1M} \\\midrule
+Parameters &7B &7B &7B &7B \\
+Sequence Length &$2^{17}$ &$2^{18}$ &$2^{19}$ &$2^{20}$ \\
+RoPE $\theta$ &10M &10M &25M &50M \\
+Tokens per Batch &4M &4M &4M &4M \\
+Total Tokens &1.2B &1.2B &1.2B &1.2B \\
+Wall Clock &6h &10h &20h &40h \\
+Compute (TPU) &v4-512 &v4-512 &v4-512 &v4-512 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsubsection{Multi-Needle Retrieval}
+\label{sec:multi_needle_eval}
+We additionally examine the performance of our model on more complex variant of the needle retrieval task by mixing in multiple needles, as well as trying to retrieve a specific subset of them. Figure~\ref{fig:multi_needle} shows multi-needle retrieval results under different settings. Our model generalizes well when retrieving a single needle from multiple needles in context, with slight degradation when asked to retrieve more than one needle. Table~\ref{table:multi_needle_baseline} shows multi-needle comparisons between our model, Gemini Pro, and GPT-4, where our model is able to perform competitively or better than GPT-4 at retrieving one needle, or slightly lower performance when retrieving more than one needle. Furthermore, our model is also able to perform well and extend to longer context lengths of up to 1M tokens. However, we note that we see degradation in accuracy while increasing the difficulty of the needle retrieval task, suggesting that there is still more room to improve on the 1M context utilization of our model. We believe that our released model will provide a foundation for future work on developing longer context models, as well as encourage more challenging benchmarks that contain difficult long-range tasks that require higher levels of synthesis, rather than pure fact retrieval.
+\begin{table}[!htp]\centering
+\caption{Multi-Needle Retrieval Accuracy Baseline Comparison}\label{table:multi_needle_baseline}
+\scalebox{0.95}{
+\begin{tabular}{clcccc}\toprule
+Context Length &Model &$N=2, R=2$ &$N=4, R=1$ &$N=4, R=2$ \\\midrule
+\multirow{3}{*}{32K} &Gemini Pro &0.34 &0.44 &0.6 \\
+&GPT-4 &0.97 &0.95 &0.9 \\
+&\ourst-1M Ours) &0.84 &0.97 &0.84 \\
+\midrule
+\multirow{3}{*}{128K} &Gemini Pro &- &- &- \\
+&GPT-4 &0.92 &0.8 &0.82 \\
+&\ourst-1M (Ours) &0.83 &0.98 &0.83 \\
+\midrule
+\multirow{3}{*}{1M} &Gemini Pro &- &- &- \\
+&GPT-4 &- &- &- \\
+&\ourst-1M (Ours) &0.67 &0.84 &0.69 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsubsection{Short Context Language Evaluation}
+\label{sec:short_lm_eval}
+Table~\ref{tab:short_text_eval} presents a comparative analysis between the Llama2-7B model with a 4K context and its context-expanded counterparts, ranging from 32K to 1M. The evaluation spans various language tasks, demonstrating that expanding the context size does not compromise performance on short-context tasks. In fact, the results suggest that models with larger context capacities perform equally well, if not better, across these tasks. This evidence indicates the absence of negative effects from context expansion, highlighting the models' capability to adapt to different task requirements without losing efficiency in shorter contexts.
+
+\begin{table}[h]\centering
+\caption{Evaluation of language tasks: Comparison between Llama2-7B (4K context) and context-expanded versions of LWM-Text: 32K to 1M. Results indicate that expanding context does not negatively impact performance on short-context tasks.}\label{tab:short_text_eval}
+\begin{tabular}{lccccccc}\toprule
+& &\multicolumn{5}{c}{\textbf{LWM-Text}} \\\
+\textbf{Task / Metric} &\textbf{Llama-2 7B} &\textbf{32k} &\textbf{128k} &\textbf{256k} &\textbf{512k} &\textbf{1M} \\\midrule
+arc\_challenge/acc &0.4 &0.43 &0.45 &0.44 &0.44 &0.43 \\
+arc\_challenge/acc\_norm &0.43 &0.47 &0.47 &0.46 &0.46 &0.46 \\
+hellaswag/acc &0.57 &0.57 &0.57 &0.57 &0.56 &0.57 \\
+hellaswag/acc\_norm &0.77 &0.76 &0.76 &0.76 &0.75 &0.75 \\
+mmlu &0.39 &0.4 &0.41 &0.41 &0.36 &0.35 \\
+openbookqa/acc &0.32 &0.33 &0.31 &0.32 &0.33 &0.3 \\
+openbookqa/acc\_norm &0.44 &0.44 &0.44 &0.43 &0.41 &0.41 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsubsection{Chat Evaluation}
+\label{sec:chat_eval}
+We additionally evaluate the our model on MT-Bench~\citep{zheng2023judging} to test its conversation ability. Table~\ref{tab:mt_bench} shows the MT-Bench scores of for each of our models. Table~\ref{tab:chat-qa-tradeoff} illustrates the relationship between the mix of chat and fact retrieval tasks and the performance on MT-Bench score and Needle Retrieval accuracy. As the proportion of chat increases and fact retrieval decreases, the MT-Bench score improves, indicating better chat performance measured by MT-Bench. Conversely, Needle Retrieval accuracy decreases, suggesting a trade-off where increasing chat interaction capabilities may reduce the system's precision in retrieving specific information or 'needles' from input context. Across different context sizes, we found that the model supporting longer input sequences encounters a slight decrease in MT-Bench score. We hypothesize that this is because we chose to train with fewer examples on longer sequence training and can be improved by simply training on more data. In addition, this trade-off may be resolved by acquiring higher quality long-context chat data that is closer to the chat distribution of the UltraChat dataset.
+
+\begin{table}[h]
+\centering
+\begin{minipage}{0.49\textwidth}
+    \centering
+    \caption{Results on MT-Bench across different context sizes. Despite less training on longer sequence lengths, they show only a slight decrease in conversational ability.}\label{tab:mt_bench}
+    \small
+    \begin{tabular}{lc}\toprule
+    \textbf{Model} &\textbf{MT-Bench} \\\midrule
+    {LWM-Text-Chat-128k} &4.62 \\
+    {LWM-Text-Chat-256k} &5 \\
+    {LWM-Text-Chat-512k} &4.83 \\
+    {LWM-Text-Chat-1M} &4.19 \\
+    \bottomrule
+    \end{tabular}
+\end{minipage}
+\hspace{0.1cm}
+\begin{minipage}{0.49\textwidth}
+    \centering
+    \caption{Relationship between the mix of chat and fact retrieval tasks and the performance on MT-Bench score and Needle Retrieval accuracy.}\label{tab:chat-qa-tradeoff}
+    \small
+    \begin{tabular}{ccc}\toprule
+    \textbf{Chat / QA Mix} &\textbf{MT-Bench} &\textbf{Needle Acc} \\\midrule
+    0\% / 100\% &2.42 &100\% \\
+    40\% / 60\% &4.14 &100\% \\
+    70\% / 30\% &4.62 &96\% \\
+    90\% / 10\% &5.1 &55\% \\
+    100\% / 0\% &5.8 &31\% \\
+    \bottomrule
+    \end{tabular}
+\end{minipage}
+\end{table}
+
+
+\section{Stage II: Learning Long-Context Vision-Language Models}
+
+\label{sec:stage_2}
+
+Our second stage aims to effectively joint train on long video and language sequences. We will introduce architecture modifications for \textbf{LWM} and \textbf{LWM-Chat} to incorporate vision input in Section~\ref{sec:vision_arch_modif}. Training on varying sequence lengths is discussed in Section~\ref{sec:vision_language_training_steps}. The evaluation results are shown in Section~\ref{sec:vision_language_eval}. 
+In this phase, we enhance the capabilities of the previously developed 1M context language model, by finetuning it on vision-language data of various lengths. The datasets used and the steps involved in the training process are illustrated in Figure~\ref{fig:data}.
+
+\subsection{Architectural Modifications For Vision}
+\label{sec:vision_arch_modif}
+The model is illustrated in Figure~\ref{fig:model}. We use the pretrained VQGAN~\cite{esser2021taming} from aMUSEd~\cite{patil2024amused} that tokenizes $256\times 256$ input images to $16 \times 16$ discrete tokens. Videos are tokenized by applying the VQGAN per-frame, and concatenating the codes together. In order to distinguish between modalities when generating, as well as knowing when to switch, we introduce mechanims to mark the end of text generation / beginning of vision generation, and vice-versa.
+For defining the end of vision generation, we introduce new tokens, \texttt{<eof>} and \texttt{<eov>}, that represent end of frame (at the end of each video frame that is not the last video frame in the sequence), and end of vision (at the end of each single image, or at the end of the last frame in a video) boundaries respectively.
+For defining the end of text generation, we wrap the vision tokens with \texttt{<vision>} and \texttt{</vision>} (as text) text tokens.
+The model is trained with interleaved concatenations of vision and text tokens, and predicted autoregressively. 
+
+\begin{table}[!tb]\centering
+\caption{\ours and LWM-Chat Training Stages}\label{tab:lwm_training_stages}
+\begin{tabular}{lcccccc}\toprule
+&\textbf{1K} &\textbf{8K} &\textbf{Chat-32K} &\textbf{Chat-128K} &\textbf{Chat-1M} \\\midrule
+Parameters & 7B & 7B & 7B & 7B & 7B \\
+Sequence Length &$2^{10}$ &$2^{13}$ &$2^{15}$ &$2^{17}$ &$2^{20}$ \\
+RoPE $\theta$ & 50M &50M &50M &50M &50M \\
+Tokens per Batch &8M &8M &8M &8M &8M \\
+Total Tokens &363B &107B &10B &3.5B &0.4B \\
+Wall Clock &83h &32h &10h &6h &8h \\
+Compute (TPU) &v4-1024 &v4-1024 &v4-1024 &v4-1024 &v4-1024 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Training Steps}
+\label{sec:vision_language_training_steps}
+
+We initialize from our \ourst-1M text model, and perform a similar process of progressive training on a large amount of combined text-image and text-video data, with the exception that we do not additionally scale RoPE $\theta$, as it already supports up to 1M context.
+Table~\ref{tab:lwm_training_stages} shows details for each training stage, where the model is initialized from the prior shorter sequence length stage. For each stage, we train on the following data:
+\begin{itemize}[leftmargin=10pt, itemsep=1pt, topsep=1pt]
+    \item \textbf{\ours-1K}: We train on large set of text-image dataset comprising of a mix of LAION-2B-en~\cite{schuhmann2022laion} and COYO-700M~\cite{kakaobrain2022coyo-700m}. The datasets were filtered to only include images with at least 256 resolution -- in total roughly 1B text-image pairs. During training, we concatenate the text-image pairs and randomly swap the order of the modalities to model both text-image generation, unconditional image generation, and image captioning. We pack text-image pairs to sequences of 1K tokens.
+    \item \textbf{\ours-8K}: We train on a text-video dataset mix of WebVid10M~\cite{bain2021frozen} and 3M InternVid10M~\cite{wang2023internvid} examples. Similar to prior works~\cite{ho2022imagen,ho2022video,villegas2022phenaki}, we jointly train on both images and video with a 50-50 ratio of each modality. We pack images to sequences of 8K tokens, and 30 frame videos at 4FPS. Similar to image training, we randomly swap the order of modalities for each text-video pair.
+    \item \textbf{\ours-Chat-32K/128K/1M}: For the final 3 stages, we train on a combined mix of chat data for each downstream task: (1) text-image generation, (2) image understanding, (3) text-video generation, and (4) video understanding. We construct a simple version of text-image and text-video chat data by sampling random subsets of the pretraining data augmented with chat format. For image understanding, we using the image chat instruct data from ShareGPT4V~\cite{chen2023sharegpt4v}. Lastly, for the video understanding chat data, we use a combined mix of Valley-Instruct-73K~\cite{luo2023valley} and Video-ChatGPT-100K instruct data~\cite{maaz2023video}. For all short context data (image generation, image understanding, video generation), we pack sequences to the training context length. During packing, we found it crucial to mask out the attention so that each text-vision pair only attends to itself, as well as re-weighting losses to make computation identical to training in a non-packed + padding training regime. For video understanding data, we uniformly sample a max number of frames to fit the training context length of the model if the video is too long. During training, We allocate 25\% of each batch to each of the 4 downstream tasks.
+\end{itemize}
+For the first two stages of training (LWM-1K and LWM-8K), we additionally mix 16\% of the batch to be pure text data from OpenLLaMA~\cite{geng2023openllama}, as we found it beneficial to preserve language capabilities while training on vision data.
+
+\begin{figure}[!tb]
+\centering
+\begin{subfigure}{0.85\linewidth}
+  \includegraphics[width=\linewidth]{figure/video_chat/video_chat_2.pdf}
+  \caption{The assistant answers questions about a 3-minute video of animals.}
+\end{subfigure}
+\begin{subfigure}{0.95\linewidth}
+  \includegraphics[width=\linewidth]{figure/video_chat/video_chat_3.pdf}
+  \caption{The assistant answers a question about a 2-minute video of a man riding a bike down a trail.}
+  \label{fig:sub3}
+\end{subfigure}
+\caption{\ours can answer questions about videos. 
+}
+\label{fig:video_undertanding}
+\end{figure}
+
+\subsection{Vision-Language Evaluation Results}
+\label{sec:vision_language_eval}
+
+\subsubsection{Long Video Understanding}
+Although vision-language model~\cite{lin2023video,openai2023gpt4,team2023gemini} can ingest long videos, this is commonly done by performing large temporal subsampling of video frames due to limited context length. For example, Video-LLaVA~\cite{lin2023video} is restricted to uniformly sampling 8 frames from a video, no matter how long the original video may be. As such, models may lose more fine-grained temporal information that is important for accurately answering any questions about the video. In contrast, our model is trained on long sequences of 1M tokens, and as a result, can simultaneously attend thousands of frames of videos to retrieve fine-grained information over short time intervals. Figure~\ref{fig:long_video_chat_example} shows an example of our model correctly answering questions about a long, 1-hour YouTube compilation consisting of more than 500 individual clips. Our baseline methods, on the other hand, generally have difficulty answering the questions due to a limited number of frames.
+
+Although we demonstrate that our model can perform QA over complex, long-form videos, we note that there is still room to improve for better context utilization across all 1M tokens, as generated answers from our model may not always accurate, and the model still struggles with more complex questions that require higher-level understanding of the video. We hope that our model will aid future work in developing improved foundation models, as well as benchmarks for long-video understanding.
+
+\subsubsection{Image Understanding and Short Video Understanding}
+Tables~\ref{tab:image_eval} and \ref{tab:short_video_eval} show results on common benchmarks for image understanding and short video understanding. Figure~\ref{fig:image_chat} shows qualitative examples for image understanding. Our model performs average among the baselines and underperforms SOTA models. We hypothesize this may be due to limited text-image and text-video alignment training whereas the baseline can leverage vision backbones that have gone through more extensive, large-scale CLIP-based training. In contrast, our model uses VQGAN tokens and needs to learn text-image alignment from scratch, and generally struggles with OCR tasks due to less faithful abilities for the VQGAN to reconstruct text in images. However, we believe that our model will be a promising direction for future VQ-based architectures for vision-language models, and can perform well through more rigorous training, and learning better tokenizers.
+
+\begin{table}[h]\centering
+\caption{Image Understanding Benchmarks}\label{tab:image_eval}
+\small
+\centering
+\begin{adjustwidth}{-0.2cm}{}
+\scalebox{0.95}{
+\begin{tabular}{lccccccccc}\toprule
+\textbf{Method} &\textbf{Visual Token} &\textbf{VQAv2} &\textbf{GQA} &\textbf{VisWiz} &\textbf{SQA} &\textbf{TextVQA} &\textbf{POPE} &\textbf{MM-Vet} \\\midrule
+MiniGPT-4~\cite{zhu2023minigpt} & CLIP &- &30.8 &47.5 &25.4 &19.4 &- &22.1 \\
+Otter~\cite{li2023otter} &CLIP &- &38.1 &50 &27.2 &21.2 &- &24.6 \\
+InstructBLIP~\cite{dai2023instructblip} &CLIP &- &49.2 &34.5 &60.5 &50.1 &- &26.2 \\
+LLaVA-1.5~\cite{liu2023improved} &CLIP &78.5 &62 &38.9 &66.8 &58.2 &85.9 &30.5 \\
+\midrule
+LWM (ours) &VQGAN &55.8 &44.8 &11.6 &47.7 &18.8 &75.2 &9.6 \\
+\bottomrule
+\end{tabular}}
+\end{adjustwidth}
+\end{table}
+
+\begin{table}[h]\centering
+\caption{Video Understanding Benchmarks}\label{tab:short_video_eval}
+\small
+\centering
+\begin{adjustwidth}{-0.2cm}{}
+\scalebox{0.98}{
+\begin{tabular}{lccccccc}\toprule
+& &\multicolumn{2}{c}{\textbf{MSVD-QA}} &\multicolumn{2}{c}{\textbf{MSRVTT-QA}} &\multicolumn{2}{c}{\textbf{TGIF-QA}} \\
+\textbf{Method} &\textbf{Visual Token} &Accuracy &Score &Accuracy &Score &Accuracy &Score \\\midrule
+VideoChat~\cite{li2023videochat} &CLIP &56.3 &2.8 &45 &2.5 &34.4 &2.3 \\
+LLaMA-Adapter~\cite{gao2023llama} &CLIP &54.9 &3.1 &43.8 &2.5 &- &- \\
+Video-LLaMA~\cite{zhang2023video} &CLIP &51.6 &2.5 &29.6 &1.8 &- &- \\
+Video-ChatGPT~\cite{maaz2023video}&CLIP &64.9 &3.3 &49.3 &2.8 &51.4 &3 \\
+Video-LLaVA~\cite{lin2023video} & CLIP &70.7 &3.9 &59.2 &3.5 &70 &4 \\
+\midrule
+LWM (ours) & VQGAN &55.9 &3.5 &44.1 &3.1 &40.9 &3.1 \\
+\bottomrule
+\end{tabular}}
+\end{adjustwidth}
+\end{table}
+\subsubsection{Image and Video Generation}
+In addition to being able to perform image / video captions, as well as QA, our model can also generate images and video from text. Figure~\ref{fig:image_video_gen} shows some examples of such capabilities. We use classifier-free guidance~\cite{ho2022classifier} on the logits for autoregressive sampling in a manner similar to prior work~\cite{yu2022scaling,gafni2022make}. For the unconditional branch, we initialize each sequence with \texttt{<bos><vision>}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figure/video_gen/image_video_gen.pdf}
+    \caption{\textbf{\ours can generate images and videos given text input.} Examples of image and video generations.}
+    \label{fig:image_video_gen}
+\end{figure}
+\subsubsection{Masked Sequence Packing Ablation.}
+As mentioned in Section~\ref{sec:vision_language_training_steps}, correctly masking the attentions and re-weighting losses is crucial for some aspects of downstream tasks, particularly image understanding. Table~\ref{tab:packing_ablation} shows a comparison of our model with and without packing corrections. Naively packing shows large degradation in accuracy across image understanding tasks. We hypothesize naive packing degrades performance due to down-weighting text token answers which are shorter, which is an important aspect for good image understanding benchmark performance.
+
+\begin{table}[h]\centering
+\caption{Ablation study comparing standard and masked sequence packing mechanisms across three tasks. Masked sequence packing is crucial for performance.}\label{tab:packing_ablation}
+\begin{tabular}{lcccc}\toprule
+&\textbf{VQAv2} &\textbf{SQA} &\textbf{POPE} \\\midrule
+Naive Packing &48.3 &34.8 &62.5 \\
+LWM (Ours) &\textbf{55.8} &\textbf{47.7} &\textbf{75.2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Further Details}
+
+\textbf{MFU.} \quad
+We trained our models using TPUv4-1024, which is approximately equivalent to 450 A100s, with a batch size of 8M using FSDP~\cite{fbFullySharded}, Blockwise Transformer, and RingAttention for large contexts. Figure~\ref{fig:mfu} shows the model FLOPS utilization (MFU) for each training stage. Blue color bars show language training and orange color bars show vision-language training. Our training achieves good MFUs even for very large context sizes. 
+
+\begin{figure}[h]
+\centering
+    \begin{subfigure}{0.8\textwidth}
+        \centering
+        \includegraphics[width=0.95\textwidth]{figure/mfu_lwm_text.png}
+    \end{subfigure}
+    \begin{subfigure}{0.8\textwidth}
+        \centering
+        \includegraphics[width=0.95\textwidth]{figure/mfu_lwm.png}
+    \end{subfigure}
+    \caption{\textbf{High MFU training across sequence lengths.} Model flops utilization (MFU) of each training stage for LWM-Text (top), and LWM / LWM-Chat (bottom)}
+    \label{fig:mfu}
+\end{figure}
+\textbf{Training Loss Curves.} \quad
+Figures~\ref{fig:lwm_text_loss} and \ref{fig:lwm_loss} show the training loss curves for each stage of training the language and vision-language models respectively.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{figure/text_lwm_loss_curve.png}
+\caption{Train loss curve for each training stage for LWM-Text models.}
+\label{fig:lwm_text_loss}
+\end{figure}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\textwidth]{figure/lwm_loss_curve.png}
+\caption{Train loss curve for each training stage for LWM and LWM-Chat models. Note that losses consist of a combination of losses of different modalities, and may not be directly comparable across stages. The sharp peak in the middle of 1K training is due to newly incporating EOF and EOV tokens into the vision codebook.}
+\label{fig:lwm_loss}
+\end{figure}
+
+\textbf{Training Hyperparameters.}\quad
+\textbf{Scaling Inference}\quad
+We additionally scale our inference code to support million-length sequences by implementing RingAttention for decoding. Inference for such long sequences requires a minimum of v4-128 with a TPU mesh sharding of 32 tensor parallelism, and 4 sequence parallelism (ring dimension). We perform inference in pure single precision, where additional improvements can be made through techniques in scalability such as quantization.
+
+
+
+\section{Related Works}
+
+
+Our work is related to efforts that extend language models' context windows to allow more tokens~\citep[][\textit{inter alia}]{chen2023extending,tworkowski2023focused,liu2023scaling}, often by using novel extrapolation methods to expand pretrained positional encodings followed by finetuning the model on longer context data. Our model adopts a simple approach by gradually increasing $\theta$ in RoPE positional encodings along with the training context window sizes, and we found this method to be effective. There has been research into architectures that do not model pairwise interaction, such as sparse attention and sliding window~\citep{child2019generating,beltagy2020longformer}. Parallelization along the sequence dimension is studied in~\citep{li2021sequence}, but is not optimized for blockwise transformers and is incompatible with memory-efficient attention, which are crucial
+to large context training. \citep{korthikanti2022reducing} propose hybrid usage of tensor parallelism and sequence parallelism to better reduce memory cost on a single device. 
+Our work utilizes RingAttention and Blockwise Transformer~\citep{liu2023ring,liu2023blockwise} to model exact pairwise interactions in very long sequences for optimal performance. Concurrent to our work, Gemini 1.5~\citep{reid2024gemini} achieves millions of tokens context size.
+Further training performance improvement is also possible with the load balancing of skipping causal masked computation~\citep{brandon2023striped, li2023lightseq}.
+
+Our work is also related to works on instruction tuning~\citep[][\textit{inter alia}]{taori2023alpaca,vicuna2023,geng2023koala}.
+These studies focus on finetuning models using conversational data to enhance their capability across language tasks. Our approach seeks to advance models' understanding of complex, long sequences of videos and languages. To achieve this, we extend the models' context size by training on books and long videos, and finetuning on model-generated QA data to learn chat ability over long sequences.
+
+Our work is also related to efforts combining vision and language~\citep[][\textit{inter alia}]{liu2023visual,lin2023video,awadalla2023openflamingo,zhang2023llama,jin2023unified,aiello2023jointly}. These efforts often use CLIP~\citep{radford2021learning} or BLIP~\citep{li2022blip} to encode visual information into embeddings for inputting into language models. They have the potential advantages of leveraging CLIP’s cross-modal understanding for encoding textual information in images. However, they can only be trained to predict text given visual input but not vice versa, limiting their ability to learn from diverse formats of visual and language information. In cases where they do predict visual tokens~\cite{jin2023unified}, a stronger diffusion decoder is generally required due to the relatively lossy nature of CLIP embeddings. Our work, on the other hand, is autoregressive "tokens in, tokens out", allowing us to flexibly model diverse forms of image-text, text-image, text-video, video-text, and purely video, image, or text formats.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we address the challenge of learning models to understand the world better by combining language and video. We utilize RingAttention and Blockwise Transformers to scalably train on a massive dataset of long videos and books and gradually increase sequence length, from 32K to 1M tokens, to keep compute manageable. We develop masked sequence packing and loss weighting to effectively train on a diverse dataset of videos, images, and books. Finally, we demonstrate that \ours features a highly effective 1M context size, the largest to date, enabling it to successfully tackle complex tasks involving lengthy video and language sequences. We open source our optimized implementation of Blockwise RingAttention, masked sequence packing and other key features for training on millions-length sequences, as well as a 7B parameter model capable of processing over 1M multimodal tokens.
+We hope this work paves the way for advancing AI models with a reliable reasoning and a grounded understanding of the world and broader capabilities.
+
+\paragraph{Limitations and Future Work.} Although this work achieves an effective very large context of over 1M tokens for large autoregressive models, and shows promising results in understanding over 1-hour-long videos and long-form language sequences, it does have some limitations that need to be addressed:
+
+\begin{itemize}[leftmargin=2pt, itemsep=1pt, topsep=1pt]
+\item \textit{Better Video Tokenization.} This work uses image tokenizer for videos -- improving tokenization to be more compact could not only enhance video quality but also enable the processing of significantly more complex and longer videos, allowing more capable world model.
+\item \textit{More Modalities.} Our work paves the road for learning from additional modality sources such as audio and other long sequences, allowing a deeper and more holistic understanding about the world.
+\item \textit{Better and More Video Data.} Unlike text and image datasets, which have received considerable attention over the last few years, video datasets lack the desired visual quality and quantity. Future research can address this by sourcing YouTube videos.
+\end{itemize}
+
+
+

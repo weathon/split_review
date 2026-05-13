@@ -1,0 +1,469 @@
+\title{Breaking the Memory Barrier: Near Infinite Batch Size Scaling for Contrastive Loss}
+
+\begin{abstract}
+Contrastive loss is a powerful approach for representation learning, where larger batch sizes enhance performance by providing more negative samples to better distinguish between similar and dissimilar data. However, scaling batch sizes is constrained by the quadratic growth in GPU memory consumption, primarily due to the full instantiation of the similarity matrix.
+To address this, we propose a tile-based computation strategy that partitions the contrastive loss calculation to arbitrary small blocks, avoiding full materialization of the similarity matrix. Furthermore, we introduce a multi-level tiling strategy to leverage the hierarchical structure of distributed systems, employing ring-based communication at the GPU level to optimize synchronization and fused kernels at the CUDA core level to reduce I/O overhead.
+Experimental results show that the proposed method scales batch sizes to unprecedented levels. For instance, it enables contrastive training of a CLIP-ViT-L/14 model with a batch size of 4M or 12M using 8 or 32 A800 80GB without sacrificing any accuracy. 
+Compared to SOTA memory-efficient solutions, it achieves a two-order-of-magnitude reduction in memory while maintaining comparable speed. The code will be made publicly available.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Contrastive learning serves as a foundational technique across various applications, such as multi-modality retrieval~\citep{clip,clip4clip,imagebind}, self-supervised representation learning~\citep{simclr,moco,simcse}, and dense text retrieval~\citep{e5}.
+It learns an embedding space in which similar data pairs stay close while dissimilar ones are far apart~\citep{hadsell2006dimensionality,oord2018representation,weng2021contrastive}.
+Large batch sizes are critical to the success of contrastive learning due to their reliance on in-batch negatives~\citep{simclr,clip}. Specifically, larger batches provide a diverse set of negative samples, enhancing the model’s ability to learn discriminative representations~\citep{BASIC}.
+
+Despite the above benefits, scaling batch size in contrastive learning is severely limited by GPU memory. The memory needed for computing and storing image-text similarity matrices (Figure~\ref{fig:vanilla}(a)) grows quadratically with batch size, making further scaling impractical and limiting potential performance gains, even with advanced hardware. 
+Several methods have been proposed to mitigate memory limitations when scaling batch sizes in contrastive learning.
+Gradient-Cache~\citep{gradient_cache} reduces memory usage by decoupling model and loss computations, but the memory cost of the loss still poses a significant bottleneck. 
+OpenCLIP~\citep{ilharco_gabriel_2021_5143773} and DisCo-CLIP~\citep{disco_clip} enhance efficiency by distributing contrastive loss computation across $n$ GPUs, reducing memory consumption by a factor of $n$.
+Despite advances in memory-efficient techniques, most studies are limited to a batch size of 128$k$, restricting the potential of contrastive learning and the scaling demands of modern models and datasets~\citep{bsz_theory2,scaling}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/tile.pdf}
+    \caption{(a) \textbf{Vanilla implementation of contrastive loss} gathers features to all devices to calculate all similarity simultaneously, where the similarity with squared complexity are repeatedly stored in all devices, causing huge memory costs for loss calculation when batch size increases. (b) \textbf{Our Inf-CL} significant decreases the memory cost by serial and distributed tile-wise computation.}
+    \label{fig:vanilla}
+\end{figure}
+In this paper, we introduce \textbf{Inf-CL}, a novel approach to mitigate the quadratic memory cost in contrastive learning, which is caused by the full instantiation of the similarity matrix for log-sum-exp (LSE) computation. Instead of storing the entire matrix, \textbf{Inf-CL} partitions the LSE calculation into smaller, sequentially computed tiles, leveraging the cumulative property of LSE. This confines memory usage to the tile size and the number of parallel tiles, allowing for a trade-off between memory and computational efficiency. 
+To enhance practical efficiency, we propose a multi-level tiling strategy. At a coarse-grained level, image and text batches are distributed across multiple GPUs, with each GPU performing serial LSE computations on multiple rows. As computations proceed, asynchronous column-wise data exchange minimizes communication overhead, as illustrated in Figure~\ref{fig:vanilla}(b). At a fine-grained level, row-wise computations are parallelized across CUDA cores within each GPU, consolidating iterations into a single kernel to reduce I/O overhead.
+Theoretically, \textbf{Inf-CL} can compute contrastive loss with nearly infinite batch sizes using a small tile size, albeit with reduced speed. The multi-level tiling strategy is crucial to achieving practical scalability and efficiency, balancing memory reduction with computation speed.
+
+We evaluate \textbf{Inf-CL} on the image-text contrastive learning task. As shown in Figure~\ref{fig:memory_cost}, \textbf{Inf-CL} reduces space complexity from quadratic~(e.g., $\mathcal{O}(b^2)$ for CLIP, $\mathcal{O}(b^2/n)$ for OpenCLIP) to linear~($\mathcal{O}(b/n^2)$ for \textbf{Inf-CL}), where $b$ and $n$ are the batch size and the number of GPUs. 
+This substantial reduction in memory usage allows efficient training with large batch sizes.
+For instance, training a ViT-L/14 CLIP model with a batch size over 10M on 32 A800 GPUs (80 GB each) requires only 1.44 GB of memory per GPU—over a \textbf{30×} improvement over previous methods. Moreover, \textbf{Inf-CL} maintains precision consistent with existing approaches. In terms of computation time, \textbf{Inf-CL} matches the performance of prior methods, taking approximately 59 hours to process a 64k batch size on 8 A800 GPUs. The time cost scales nearly linearly with batch size, as demonstrated by a batch size increase from 64k to 256k resulting in a roughly 4× growth in training time~($220.3/49.4\approx4$).
+In summary, our contributions include:
+\begin{itemize}
+    \item We propose a tile-based contrastive loss implementation that iteratively accumulates the LSE term, removing the need to instantiate the full similarity matrix and significantly reducing memory overhead. This approach theoretically allows training with nearly infinite batch sizes using sufficiently small tiles.
+    \item We propose a multi-level tiling strategy for a distributed training system, which reasonably leverages parallelism to achieve a balance between memory and computational efficiency.
+    \item Our experiments demonstrate that \textbf{Inf-CL} scales batch sizes to unprecedented levels (e.g., 12M for CLIP-ViT-L/14 on 32 A800 80GB GPUs) while maintaining accuracy and comparable training speed to state-of-the-art methods.
+\end{itemize}
+
+
+\section{Preliminaries}
+
+
+\subsection{Distributed training system}
+\textbf{Cross-GPU Communication:}
+For scaling batch size, training across multiple GPUs is crucial to handle memory and computational demands. However, communication overhead between GPUs can limit performance. Techniques like hierarchical all-reduce and ring-based communication alleviate such overhead by optimizing synchronization between GPUs~\citep{ring_attention}. Blockwise parallelism, as employed in methods like ring attention, further improves efficiency by overlapping computation and communication.
+
+\textbf{GPU Memory and Execution:}
+The performance of modern deep learning models relies heavily on hardware resources, particularly GPU memory and execution capabilities.
+GPUs, like A100s, typically have two different types of memory: HBM~(High Bandwidth Memory) and SRAM~(Static Random Access Memory). 
+HBM serves as the primary memory with a capacity of up to 80GB. 
+In contrast, SRAM is much smaller~(usually measured in megabytes) but offers a significantly faster access speed, acting as a vital cache for frequently accessed data and enabling rapid computations.
+Techniques like FlashAttention~\citep{flash_attention1} show that fine-grained control over the memory access of HBM and the fuse the operations can achieve faster training and less memory usage.
+\subsection{Vanilla Implementation of Contrastive Loss}
+\label{sec:vanilla_impl}
+
+In contrastive learning, the objective is to learn an embedding space where similar samples~(positive pairs) are pulled closer, while dissimilar samples (negative pairs) are pushed away. 
+A typical implementation, exemplified by CLIP~\citep{clip}, is depicted in Figure~\ref{fig:vanilla}. The image and text encoders are trained with contrastive loss after extracting features. For brevity, we only discuss image-to-text contrastive loss as an example in the following sections, since the implementation of text-to-image loss is symmetric.
+Specifically, given a batch size of $b$, the in-batch $c$-dimensional visual feature $ \mI \in \sR^{b \times c} $, and textual feature $ \mT \in \sR^{b \times c} $, the contrastive loss is defined as
+\begin{equation}
+        \mathcal{L}_{I} = -\frac{1}{b} \sum_{i=1}^{b}\log\frac{e^{x_{i,i}}}{\sum_{j=1}^{b}e^{x_{i,j}}}, 
+\label{eq:loss}
+\end{equation}
+where $ x_{i,j} = \mI_i \cdot \mT_{j} $ is the scaled cosine similarity between the $i$-th image and $j$-th text, and $x_{i,i}$ represents the positive pair. Here, we omitted the temperature factor for simplicity. 
+
+The vanilla implementation first computes the similarity matrix $ \mX \in \sR^{b \times b}  = \mI \cdot \mT^\prime  $ and stores it in high-bandwidth memory (HBM). Afterward, softmax normalization followed by the calculation of negative log-likelihood is applied to the similarity matrix. The memory required to store $ \mX $ and its normalized results scales as $ \mathcal{O}(b^2) $, which can occupy a substantial amount of GPU memory when $ b $ is large.
+Figure~\ref{fig:vanilla} gives an example of training ViT-B/16 with a batch size of 64k, using model memory optimization techniques such as Gradient Cache~\citep{gradient_cache,BASIC}. As can be seen, the GPU memory footprint of the model itself is only 5.24GB while the loss calculation still requires 66GB.
+This indicates that, with  batch size scaling, the memory bottleneck during training lies in the loss calculation. Although large batch sizes are necessary for improving model performance~\citep{bsz_theory,bsz_theory2}, the traditional implementation struggles to support them due to excessive memory consumption in the loss calculation.
+
+
+
+\section{Method}
+
+
+
+\subsection{Tile-wise Contrastive Learning}
+\label{sec:tile-wise}
+As discussed in Section~\ref{sec:vanilla_impl}, the root cause of the quadratic memory growth in the vanilla implementation is the full materialization of the similarity matrix $\mX$.
+To eliminate the memory cost, we first decompose the operations related to $\mX$ from the loss function:
+\begin{equation}
+    \label{eq:loss_re}
+    \mathcal{L}_{I} = - \frac{1}{b}\sum_{i=1}^{b} (x_{i,i} - \log\sum_{j=1}^{b}e^{x_{i,j}}) =  - \frac{1}{b} \sum_{i=1}^{b} x_{i,i} + \frac{1}{b} \sum_{i=1}^{b} \log\sum_{j=1}^{b}e^{x_{i,j}},
+\end{equation}
+where the spatial complexity of the first part is $ \mathcal{O}(b) $, and for the second log-sum-exp (LSE) part, it is $ \mathcal{O}(b^2) $.
+Based on this formulation, we introduce a tile-wise contrastive learning method that avoids the full materialization of $ \mX $ by iterative accumulation between tiles.
+The following sections provide a detailed formulation of the forward and backward processes.
+\smallskip \noindent \textbf{Tile-Wise Forward.}
+To reduce the dependency on storing $\mX$ entirely, we adopt a tile-wise approach for calculating $\vl$. The process is show as below:
+
+\begin{equation}
+\underbrace{
+\left[
+\begin{array}{ccc}
+             \mX^{1,1} & \cdots & \mX^{1,n_c}  \\
+                         \vdots & \ddots  &  \vdots  \\
+            \mX^{n_r,1} &  \cdots & \mX^{n_r,n_c}
+\end{array}
+\right]}_{\text{Tiled computation of } \mX }  \rightarrow 
+\underbrace{
+\left[
+\begin{array}{ccc}
+             \vl^{1,1} & \cdots & \vl^{1,n_c}  \\
+                         \vdots & \ddots  &  \vdots  \\
+            \vl^{n_r,1} &  \cdots & \vl^{n_r,n_c}
+\end{array}
+\right]
+}_{\text{Merged serially via Eq.~\ref{eq:tile_lse}}} \rightarrow 
+\begin{pmatrix}
+        \vl^{1} \\
+        \vdots \\
+        \vl^{n_r} \\
+\end{pmatrix}
+=\vl 
+\end{equation}
+where $ n_r $ and $ n_c $ represent the number of tiles along the rows and columns, respectively. The computation proceeds by dividing $\mX$ into multiple tiles, denoted as $\mX^{i,j}$, and then calculating the intermediate LSE values $\vl^{i,j} = \lse(\mX^{i,j})$ within each tile. The resulting LSE values from each column of tiles are then merged serially along the rows to obtain the final global LSE vector $\vl$.
+
+To prevent numerical instability and overflow during the merging process, the following numerically stable operation is performed:
+\begin{equation}
+    \vl^i \leftarrow \vl^i + \log(1 + e^{\vl^{i,j} - \vl^i}),\ j = 1,\dots,n_c,
+    \label{eq:tile_lse}
+\end{equation}
+where the initial value of $ \vl^i $ is 0. In each iteration, the intermediate value $\vl^{i,j}$ is merged with $\vl^i$, and after processing all $n_c$ tiles, the global LSE vector $\vl$ is obtained.
+
+During the computation of $\lse(\mX^{i,j})$, direct exponentiation can lead to numerical overflow. To address this, we compute $\vl^{i,j}$ using the following stabilized formulation:
+\begin{equation}
+    \vl^{i,j} = \log \sum_{k}^{} e^{\mX^{i,j}_{:,k}} = \vm^{i,j} + \log \sum_{k}^{} e^{\mX^{i,j}_{:,k} - \vm^{i,j}},
+    \label{eq:lse}
+\end{equation}
+where $\vm^{i,j} = \max_k \mX^{i,j}_{:,k}$ is a vector, with each element representing the maximum value of the corresponding row in $\mX^{i,j}$. This vector acts as a normalization factor, ensuring that the values inside the exponential function remain numerically stable.
+
+This tile-wise approach significantly reduces the memory requirement by allowing each GPU to compute and store only a subset of the similarity matrix at any given time, rather than the entire \( b \times b \) matrix. 
+Additionally, this method facilitates scaling to larger batch sizes by enabling parallel computation of the tiles on multiple GPUs or across different nodes in a distributed system.
+
+\smallskip \noindent \textbf{Tile-Wise Backward.}
+According to the chain rule, the gradients \emph{w.r.t.} $ \mI_i $ and $ \mT_j $ are
+\begin{equation}
+    \frac{\partial \mathcal{L}_I}{\partial \mI_i} = \sum_j \frac{\partial \mathcal{L}_I}{\partial x_{i,j}} \cdot \frac{\partial x_{i,j}}{\partial \mI_i}, \quad \
+    \frac{\partial \mathcal{L}_I}{\partial \mT_j} = \sum_i \frac{\partial \mathcal{L}_I}{\partial x_{i,j}} \cdot \frac{\partial x_{i,j}}{\partial \mT_j}.
+\end{equation}
+Taking the gradients \emph{w.r.t.} $ \mI_i $ as an example, according to Equation~\ref{eq:loss_re}, the complete formulation is
+\begin{equation}
+\begin{aligned}
+    \frac{\partial \mathcal{L}_I}{\partial \mI_i} &= -\frac{1}{b} \sum_j (\frac{\partial \mathcal{L}_I}{\partial x_{i,i}} \cdot \frac{\partial x_{i,i}}{\partial x_{i,j}} \cdot \frac{\partial x_{i,j}}{\partial \mI_i} - \frac{\partial \mathcal{L}_I}{\partial l_i} \cdot \frac{\partial l_i}{\partial x_{i,j}} \cdot \frac{\partial x_{i,j}}{\partial \mI_i}) \\
+    & = -\frac{1}{b} \cdot \mT_i + \frac{1}{b} \sum_j e^{x_{i,j} - l_i} \cdot \mT_j.
+\end{aligned}
+\end{equation}
+From the formula, it can be seen that the second term requires the similarities $ x_{i,j} $ with $ \mathcal{O}(b^2) $ memory in common implementations, whether stored in the forward process or computed directly in the backward process.
+To tackle this, we apply the similar tile-based method as the forward process to compute the gradient.
+Specifically, we first store $ \vl $, which has only $ b $ elements during forward propagation, and calculate the gradient \emph{w.r.t} $ \mI_i $ by iterative accumulation in multiple tiles:
+\begin{equation}
+\begin{aligned}
+    & \mI_i^\prime \leftarrow \mI_i^\prime + e^{x_{i,j} - l_i} \cdot \mT_j,\ j = 1,\dots,n_c,\\
+    & \frac{\partial \mathcal{L}_I}{\partial \mI_i} = -\frac{1}{b} \cdot \mT_i + \frac{1}{b}\mI_i^\prime,
+\end{aligned}
+\end{equation}
+where $ \mI_i^\prime $ is a temporary variable for accumulation.
+
+
+\subsection{Multi-Level Tiling}
+\label{sec:multi_tile}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/ring_flash.pdf}
+    \caption{\textbf{Multi-level tiling strategy.} \textbf{Top}: for cross-GPU tiling, each GPU is assigned with multiple rows. The computation and the column-wise communication are performed asynchronously to reduce the cost. \textbf{Bottom}: for in-GPU tiling, the calculations in each GPU are further divided into tiles and the row-wise calculation is distributed to multiple CUDA cores. The accumulative operations of each row are merged into one kernel for reducing I/O times between SRAM and HBM.}
+    \label{fig:ring_flash}
+\end{figure}
+The scaling of batch size is usually accompanied by the scaling of the number of GPUs.
+In order to fully utilize the parallelism between multiple GPUs while exploiting partially serial computation on a single GPU to reduce the memory cost, we propose a multi-level tiling method that distributes the above LSE calculation to coarse-grained cross-GPU tiles and fine-grained in-GPU tiles.
+\smallskip \noindent \textbf{Cross-GPU Tile.}
+As shown in Algorithm~\ref{alg:cross_forward}, in data parallel training with $ n $ GPUs, the $ i $-th GPU first processes a portion of images and texts to visual features $ \mI^i \in \sR^{b_s \times c} $ and textual features $ \mT^i \in \sR^{b_s \times c} $, where $ b_s = b / n $ is the batch size in one GPU.
+Then for the calculation of the contrastive loss, we distribute computations of different rows to different GPUs and synchronize the columns between GPUs step-by-step, considering the row-wise characteristic.
+Specifically, the $ i $-th GPU is responsible for calculating $ \mX^{i,:} $ and the corresponding $ \vl^i $.
+For memory considerations, based on the tiling strategy described in Section~\ref{sec:tile-wise} where only one tile $ \mX^{i,j} $ is computed at a time, $ \mX^{i,:} $ is further divided into $ \mX^{i,j} $ for $ n $ step to calculate $ \vl^i $ following Equation~\ref{eq:tile_lse}, where the local LSE $ \vl^{i,j} $ is calculated by in-gpu tiling as described in the next part.
+Moreover, since the computation of $ \mX^{i,j} $ while $ i 
+\neq j $ requires the textual feature $ \mT^j $ stored in other GPUs, additional communication overhead is inevitable, especially as the number of GPUs grows.
+In order to reduce or even eliminate the communication overhead, we associate all GPUs with a ring topology, based on the idea of overlapping communication time and computation time overlap as much as possible.
+Concretely, starting with $ \mT^i $, each GPU process sends the current textual features to the next process and receives the textual features from the previous process using the ring topology while computing Equation~\ref{eq:tile_lse}.
+In this way, the communication time cost is negligible when it is greater than the computation time overhead.
+\begin{algorithm}[h]
+    \caption{Forward Process of Multi-level Tile-Wise Global LSE Calculation} 
+    \label{alg:cross_forward}
+    \begin{algorithmic}[1]
+        \REQUIRE Number of GPUs $ n $, in-memory visual features $ \mI^i \in \mathbb{R}^{b_s \times c}$ and textual features $\mT^i \in \mathbb{R}^{b_s \times c}$ for each GPU.
+        \FOR{$ counter $ = 1 \TO $ n $}
+            \STATE \textbf{Update LSE:}
+            \STATE \quad \quad Each GPU computes the local LSE vector via Algorithm~\ref{alg:intra_forward} with in-memory features.
+            \STATE \quad \quad Each GPU  updates the LSE vector via Equation~\ref{eq:tile_lse}.
+            \STATE \textbf{Asynchronously Communication:}
+            \STATE \quad \quad Each GPU sends the in-memory textual feature to the next GPU in the ring.
+            \STATE \quad \quad Each GPU receives the textual feature from the previous GPU in the ring.
+        \ENDFOR
+        \STATE Return the final LSE vector $\vl_i$ for each GPU .
+    \end{algorithmic}
+\end{algorithm}
+\smallskip \noindent \textbf{In-GPU Tile.}
+With the cross-GPU tiling technique, the memory complexity becomes $ \mathcal{O}(b_s^2) $ for directly storing $ \mX^{i,j} $ where $ b_s = b / n $.
+Since the number of GPU $ n $ is somehow limited, we further introduce in-GPU tiling to reduce the $ \mathcal{O}(b_s^2) $ memory cost to $ \mathcal{O}(b_s) $ for enabling further batch size scaling.
+Specifically, we first split $ \tilde{\mX} = \mX^{i,j} $ into tiles:
+\begin{equation}
+    \tilde{\mX} = [\tilde{\mX}^{i,j}],\ i=1,\dots,\tilde{n}_r,\ j=1,\dots,\tilde{n}_c,
+\end{equation}
+where $ \tilde{n}_r = \lceil b / t_r \rceil $ and $ \tilde{n}_c = \lceil b / t_c \rceil $ and $ t_r $ and $ t_c $ is the row-wise and column-wise size of a tile.
+For implementation, we distribute rows to multiple CUDA cores to make full use of the parallel computing power of the GPU, and serial process the row-wise tiles in each kernel by applying Equation~\ref{eq:lse} and Equation~\ref{eq:tile_lse} to $ \tilde{\mX}^{i,j} $, as shown in Algorithm~\ref{alg:intra_forward}.
+The iterative computation requires multiple memory access for variable $ \vl^i $.
+To avoid expensive I/O from HBM to SRAM, we fuse the row-wise iterative calculation into one kernel.
+Specifically, $ \vl^i $ and $ \tilde{\mX}^{i,j} $ are allocated in SRAM.
+In this way, the image features are loaded to SRAM only once at beginning, and $ \tilde{\vl}^i $ is written to HBM only once in the end, as shown in Figure~\ref{fig:ring_flash}.
+
+\begin{algorithm}[h]
+    \caption{Forward Process of Tile-Wise Local LSE Calculation} 
+    \label{alg:intra_forward}
+    \begin{algorithmic}[1]
+        \REQUIRE Visual features: $\tilde{\mI} \in \mathbb{R}^{b_s \times c}$ and textual features: $ \tilde{\mT} \in \mathbb{R}^{b_s \times c}$, the row-wise and column-wise size of a tile: $ t_r $ and $ t_c $.
+        \STATE  Divide  $ \tilde{\mI} $ into $ \tilde{\mI}^i $, where $ i = 1,2,\dots,\tilde{n}_r  $.
+        \STATE  Divide  $ \tilde{\mT} $ into $ \tilde{\mT}^j $, where $ j = 1,2,\dots,\tilde{n}_c$.
+        \STATE \textbf{parallel for} each $ \tilde{\mI}^i $ \textbf{do}
+            \STATE \quad Load $\tilde{\mI}^i$ from HBM to on-chip SRAM.
+            \STATE \quad Initialize $ \tilde{\vl^i} = \mathbf{0} \in \mathbb{R}^{t_r} $.
+            \STATE \quad \textbf{for} $j$ = 1 \textbf{to} $\tilde{n}_r $ \textbf{do} 
+                \STATE \quad \quad Load $\tilde{\mT}_j$ from HBM to on-chip SRAM.
+                \STATE \quad \quad On chip, compute $\tilde{\mX}^{i,j} = \tilde{\mI}^i \cdot {\tilde{\mT}^{j\prime}} \in \mathbb{R}^{t_r \times t_c} $.
+                \STATE \quad \quad On chip, calculate tile LSE $ \tilde{\vl}^{i,j}$ based on Equation~\ref{eq:lse}:
+                \STATE \quad \quad \quad \quad $\tilde{\vl}^{i,j} =  \tilde{\vm}^{i,j} + \lse  (\tilde{\mX}^{i,j} - \tilde{\vm}^{i,j}  )$, where $\tilde{\vm}^{i,j} = \mathrm{rowmax}(\tilde{\mX}^{i,j})$.
+                \STATE \quad \quad On chip, update LSE $ \tilde{\vl}^i $ based on Equation~\ref{eq:tile_lse}:
+                \STATE \quad \quad \quad \quad $\tilde{\vl}^i \leftarrow \tilde{\vl}^i + \log(1 + \exp(\tilde{\vl}^{i,j} - \tilde{\vl}^i))$.
+            \STATE \quad \textbf{end for}
+            \STATE \quad Write $ \tilde{\vl^i} $ to HBM.
+        \STATE \textbf{end parallel for}
+        \STATE Return $ \tilde{\vl}$.
+    \end{algorithmic} 
+\end{algorithm}
+
+\begin{table*}[t]
+\centering                         % 控制表格居中
+\renewcommand{\arraystretch}{1.3}  % 控制行高
+\setlength{\tabcolsep}{2mm}      % 控制列间距
+\normalsize                      % 控制字体大小
+\aboverulesep=0ex  % make vertical line contiguous: https://tex.stackexchange
+\belowrulesep=0ex
+\begin{tabular}{y{50}|z{55}|z{55}|z{55}|z{55}|z{55}}
+\noalign{\hrule height 1.5pt}
+\multirow{2}*{Model} & \multicolumn{5}{c}{\textbf{Loss~(Peak) Memory Cost~(GB)}} \\
+\cmidrule{2-6}
+& 32k & 64k & 128k & 256k & 1024k \\
+\hline
+\rowcolor{gray!20}
+\multicolumn{6}{c}{\it{8$\times$A800~($\approx8\times80$GB)}}\\
+\hline
+CLIP     & 16.67~(46.40) & 66.11~(77.94) & \xmark & \xmark & \xmark \\
+OpenCLIP & 2.27~(43.97)  & 8.63~(46.38)  & 33.64~(51.23) & \xmark & \xmark \\
+\cdashline{1-6}
+\rowcolor{alicegreen}
+Inf-CL     & 0.18~(44.20) & 0.36~(46.63) & 0.72~(51.46)  & 1.45~(61.13) & \xmark \\
+\rowcolor{alicegreen}
+Inf-CL$^*$ & 0.18~(42.40) & 0.36~(42.49) & 0.72~(42.69)  & 1.45~(43.07) & 6.53~(45.40) \\
+\hline
+\rowcolor{gray!20}
+\multicolumn{6}{c}{\it{32$\times$A800~($\approx32\times$80GB)}}\\
+\hline
+CLIP     & 16.66~(42.85)& 66.11~(75.52) & \xmark & \xmark & \xmark \\
+OpenCLIP & 0.71~(42.46) & 2.45~(43.06) & 8.98~(44.26) & 34.35~(46.71) & \xmark\\
+\cdashline{1-6}
+\rowcolor{alicegreen}
+Inf-CL   & 0.05~(42.48) & 0.09~(43.08) & 0.18~(44.30) & 0.35~(46.71) & 1.44~(61.20) \\
+\noalign{\hrule height 1.5pt}
+\end{tabular}
+\caption{
+\textbf{Training Memory Cost Across Different Hardware and Batch Sizes}. 
+Experiments utilize Data Parallelism with Automatic Mixed Precision for efficient distributed training.
+The baselines include the \textit{Vanilla loss} (CLIP) and \textit{Local loss} (OpenCLIP).
+To minimize memory consumption, Gradient Cache is adopted, with an accumulation batch size of 128. 
+$^*$ indicates the use of the data offload strategy, which reduces memory usage by transferring only a small data batch from CPU to GPU during each accumulation step. 
+\xmark\ denotes cases where the baseline exceeds the hardware memory limit for a given batch size, making training infeasible. 
+Memory cost is evaluated using the ViT-L/14 architecture and the AdamW optimizer.
+}
+\label{tab:main_res}
+\end{table*}
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Settings}
+
+\bmhead{Dataset and Data Processing.}
+We assess the effectiveness of our \textbf{Inf-CL} on Laion400M dataset~\citep{schuhmann2021laion} where we used 280M (out of 400M) samples for training due to the unavailability of images in the remaining samples.
+Images undergo preprocessing using RandomResizedCrop with a crop ratio of $[0.75, 1.33]$ and a scale of $[0.08, 1.0]$.
+
+\bmhead{Training Hyperparameters.} A modified AdaFactor optimizer~\citep{shazeer2018adafactor} is employed for training, following the settings of ViT-g~\citep{zhai2022scaling}. The optimizer is configured with a learning rate of $1 \times 10^{-3}$, weight decay of $1 \times 10^{-4}$, and coefficients $\beta_1 = 0.9$ and $\beta_2 = 0.95$~\citep{zhai2023sigmoid}. Training spans 8 epochs, using a cosine learning rate schedule with a linear warm-up during the first 0.5 epoch.
+
+\bmhead{Implementation Details.} For distributed training, we employ Data Parallelism~\citep{li2020pytorch} with Automatic Mixed Precision (float16)\citep{micikevicius2017mixed}. To support larger batch sizes, we adopt Gradient Cache~\citep{gradient_cache} which decouples contrastive loss computation from the model's forward and backward passes. Consequently, the peak memory cost per iteration, $M_{peak}$, is calculated as: 
+\begin{equation} 
+\label{eq:peak} 
+M_{peak} \approx M_{data} + \max(M_{loss}, M_{backbone}), 
+\end{equation} 
+where $M_{data}$ is the memory for data, $M_{loss}$ is for loss computation, and $M_{backbone}$ is for the model's forward and backward operations.
+
+\bmhead{Baselines.} We compare our method against two baselines: the \textit{vanilla loss} from CLIP and the \textit{local loss} from OpenCLIP/DisCo-CLIP. The \textit{vanilla loss} computes a $b \times b$ similarity matrix by gathering both row and column features from all GPUs, while the \textit{local loss} requires only column features to calculate a $b/n \times b$ similarity matrix, where $b$ and $n$ are the batch size and the number of GPUs.
+\begin{table*}[t]
+\centering                          % 控制表格居中
+\renewcommand{\arraystretch}{1.3}  % 控制行高
+\setlength{\tabcolsep}{1.5mm}       % 控制列间距
+\normalsize                         % 控制字体大小
+\aboverulesep=0ex  % make vertical line contiguous: https://tex.stackexchange
+\belowrulesep=0ex
+\begin{tabular}{z{40}|x{70}|x{70}|z{82}|z{94}}
+\noalign{\hrule height 1.5pt}
+\multirow{2}*{Budget} & \multicolumn{3}{c|}{\textbf{Maximum Batch Size~(Loss Memory Cost)}} & \multicolumn{1}{c}{Improvement} \\
+\cmidrule{2-4}
+& CLIP & OpenCLIP & \multicolumn{1}{c|}{Inf-CL} & \multicolumn{1}{c}{(Ours / Sota)} \\
+\hline
+\rowcolor{gray!20}
+\multicolumn{5}{c}{\it{ViT-B/16}}\\
+\hline
+8$\times$A800  & 68k~(74.39 GB) & 172k~(59.95 GB) & \cellcolor{alicegreen} \textbf{800k}\ ~(3.01 GB) & 4.65~(800k/172k) \\
+32$\times$A800 & 68k~(74.39 GB) & 360k~(66.29 GB) & \cellcolor{alicegreen} \textbf{3456k}~(3.27 GB) & 9.60~(3456k/360k) \\
+\hline
+\rowcolor{gray!20}
+\multicolumn{5}{c}{\it{ViT-L/14}}\\
+\hline
+8$\times$A800  & 64k~(66.11 GB) & 152k~(47.23 GB) & \cellcolor{alicegreen} \textbf{448k}\ ~(2.52 GB) & 2.94~(448k/152k) \\
+32$\times$A800 & 64k~(66.11 GB) & 352k~(64.13 GB) & \cellcolor{alicegreen} \textbf{2048k}~(2.89 GB) & 5.82~(2048k/256k) \\
+\hline
+\rowcolor{gray!20}
+\multicolumn{5}{c}{{\it{ViT-L/14}} {w/ data offload}}\\
+\hline
+8$\times$A800  & 64k~(66.11 GB) & 184k~(69.10 GB) & \cellcolor{alicegreen} \textbf{4096k}~(26.12 GB) & 22.26~(4096k/184k) \\
+32$\times$A800 & 64k~(66.11 GB) & 368k~(64.13 GB) & \cellcolor{alicegreen} \textbf{12288k}~(19.59 GB) & 33.39~(12288k/368k) \\
+\noalign{\hrule height 1.5pt}
+\end{tabular}
+\caption{
+\textbf{Maximum batch size} for model training using different hardware and contrastive loss methods. 
+The training setting of this experiment is aligned with Table~\ref{tab:main_res}. 
+}
+\label{tab:max_bs}
+\end{table*}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/speed.pdf}
+    \caption{ \textbf{Training Speed of ViT-L/14 CLIP on 8$\times$A800 for Varying Batch Sizes.} The left figure shows the time per iteration step, while the right displays the time per epoch.
+    Loss calculation contributes minimally to the total iteration time, making Inf-CL's iteration time comparable to previous methods.
+    Furthermore, the iteration time of \textbf{Inf-CL} scales linearly with batch size, leading to a stable training duration of approximately 59 hours per epoch.
+    }
+\label{fig:train_speed}
+\end{figure}
+
+\subsection{Cost Analysis}
+
+Our method, as detailed in Section~\ref{sec:multi_tile}, divides the calculation of contrastive loss into tiles and distributes them across different GPUs and GPU kernels. To rigorously assess its memory efficiency, we compare our approach with previous methods like CLIP and OpenCLIP by evaluating  ``Memory Consumption'',``Max Supported Batch Size'' and ``Speed'' across various model architectures and hardware settings. The effective memory cost is determined by peak memory~(Equation~\ref{eq:peak}), which is the maximum memory needed during an iteration.
+
+\bmhead{Memory Consumption}. 
+To illustrate the memory efficiency of Inf-CL, we compared it to previous methods using the same batch size. Table~\ref{tab:main_res} shows that for loss calculation, Inf-CL requires significantly less memory than its predecessors. Specifically, with a batch size of 128k on 8$\times$A800, Inf-CL only consumes 0.72 GB, whereas OpenCLIP requires 33.64 GB. 
+However, while the memory cost of loss calculation with Inf-CL is minimal, peak memory usage still increases rapidly with batch size due to growing data memory, as discussed in ``Max Supported Batch Size."
+By integrating Inf-CL with ``data offload", we can mitigate this memory increase, enabling us to train a ViT-L/14 model with a batch size of 1024k on 8$\times$A800.
+
+\bmhead{Maximum Batch Size.} 
+We compare the maximum batch size of Inf-CL with those of previous approaches under various model architectures~(ViT-B/16 or ViT-L/14) and training budgets~(8$\times$A800 or 32$\times$A800). As shown in Table~\ref{tab:max_bs}. 
+Inf-CL significantly outperforms previous SOTA methods, achieving improvements of 4.65$\times$ for ViT-B/16 on 8×A800, which is further increased to 9.60$\times$ when using 32$\times$A800. Notably, as we scale up the model size, the improvements decrease; for instance, from 4.65 to 2.94 when changing from ViT-B/16 to ViT-L/14. To understand this trend, we analyze peak memory usage. Since Inf-CL has negligible memory requirements, peak memory is primarily driven by $M_{backbone} + M_{data}$. $M_{backbone}$ is constant, meaning the rapid growth in peak memory is mainly due to increased $M_{data}$. Since ViT-L/14 has a larger $M_{backbone}$, the remaining memory can accommodate only a smaller batch size for $M_{data}$. 
+To address this issue, we implement ``data offload", which allows us to load only a small batch of data onto the GPU for each accumulation step, effectively stabilizing the data memory usage. 
+Therefore, by combining data offload with our Inf-CL, we can scale the batch size to over 10M on 32$\times$A800.
+
+\bmhead{Training Speed.}
+We compare the training speed of our Inf-CL with previous methods. As shown in Figure~\ref{fig:train_speed}, using Inf-CL to train ViT-L/14 on 8$\times$A800 has almost the same speed as previous methods. 
+Even when increasing batch size beyond the limits of previous methods, Inf-CL maintains a linear increase in iteration time, with one epoch consistently taking about 59 hours.
+
+\begin{table*}[t]
+\centering                         % 控制表格居中
+\renewcommand{\arraystretch}{1.3}  % 控制行高
+\setlength{\tabcolsep}{2mm}      % 控制列间距
+\normalsize                      % 控制字体大小
+\aboverulesep=0ex  % make vertical line contiguous: https://tex.stackexchange
+\belowrulesep=0ex
+\begin{tabular}{z{90}|x{38}x{38}x{38}x{38}|x{38}x{38}}
+\noalign{\hrule height 1.5pt}
+\multirow{2}{*}{Method~(Batch Size)} & \multicolumn{4}{c|}{ImageNet} & \multicolumn{2}{c}{MSCOCO~R@1} \\
+& Validation & v2 & ObjectNet & OOD & I$\rightarrow$T & T$\rightarrow$I \\
+\hline
+Vanilla\ \ \ \ ~(64K)  & 74.74 & \textbf{65.30} & 46.31 & 66.13 & 25.71 & 44.31 \\
+OpenCLIP\ \ \ \ ~(64K) & 74.86 & 65.22 & 46.29 & 66.75 & 25.98 & 44.02 \\
+\cdashline{1-6}
+\rowcolor{alicegreen}
+Inf-CL\ \ \ \ ~(64K)   & 74.93 & 65.27 & 46.13 & 66.77 & \textbf{26.01} & 43.95 \\
+\rowcolor{alicegreen}
+Inf-CL\ \ ~(256K)      & \textbf{75.12} & 65.12 & \textbf{46.44} & \textbf{67.15} & 25.90 & \textbf{44.61} \\
+\rowcolor{alicegreen}
+Inf-CL~(1024K)         & 73.58 & 63.87 & 44.55 & 64.60 & 24.53 & 41.58\\
+\noalign{\hrule height 1.5pt}
+\end{tabular}
+\caption{\textbf{Performance Verification.} The training strategies is consistent with Table~\ref{tab:max_bs}. We choose ViT-B/16 as the model architecture and adopt LiT strategy like Table~\ref{tab:main_abl}. 
+We evaluate zero-shot top-1 classification accuracy on several data sets, e.g., ImageNet-Validation~\cite{5206848}, ImageNet-v2~\citep{recht2019imagenet}, ObjectNet~\citep{barbu2019objectnet} and ImageNet-OOD~\citep{hendrycks2021natural}. We also evaluate zero-shot image-text top-1 retrieval accuracy on MSCOCO~\citep{chen2015microsoft}.
+}
+\label{tab:eval_res}
+\end{table*}
+
+\begin{table}[t]
+\centering                         % 控制表格居中
+\renewcommand{\arraystretch}{1.3}  % 控制行高
+\setlength{\tabcolsep}{1.6mm}        % 控制列间距
+\normalsize                        % 控制字体大小
+\begin{tabular}{x{45}x{35}|x{40}|y{45}z{35}|x{40}|x{40}|x{40}}
+\noalign{\hrule height 1.5pt}
+\multirow{2}{*}{Cross-GPU} & \multirow{2}{*}{In-GPU}  & Data & \multicolumn{2}{c|}{Loss} & Backbone & Peak & \multirow{2}{*}{ImageNet} \\
+\cline{3-7}
+& & Memory & Complexity & Memory & Memory & Memory & \\
+\hline
+\multicolumn{2}{l|}{(Vanilla)}     & 1.96 & $\mathcal{O}(b^2)$   & 66.21 & 8.26 & 69.24 & 74.82 \\
+\multicolumn{2}{l|}{(OpenCLIP)}    & 1.96 & $\mathcal{O}(b^2/n)$ & 16.96 & 8.26 & 20.79 & 74.86 \\
+\cdashline{1-8}
+\rowcolor{alicegreen}
+\cmark &                           & 1.96 & $\mathcal{O}(b^2/n^2)$ & 4.81 & 8.26 & 12.30 & 74.78 \\
+\rowcolor{alicegreen}
+\cmark & \cmark                    & 1.96 & $\mathcal{O}(b/n^2)$ & 0.81 & 8.26 & 12.30 & 74.93 \\
+\noalign{\hrule height 1.5pt}
+\end{tabular}
+\caption{\textbf{Ablation Study of Multi-level Tiling Strategy.} The training strategies is consistent with Table~\ref{tab:max_bs}, using the ViT-B/16 architecture. 
+To reduce memory consumption and expedite experimentation, we freeze the image encoder and load pretrained weights as done in LiT.
+The global batch size is fixed at 64k with an accumulation batch size of 256 per GPU. These experiments are conducted on 4$\times$A800~(80G) GPUs. 
+``Complexity" denotes the space complexity of loss calculation. 
+$b$ denotes batch size, while $n$ denotes the number of GPUs.
+}
+\label{tab:main_abl}
+\end{table}
+
+\subsection{Performance Analysis}
+
+In this section, we investigate whether introducing Inf-CL negatively affects CLIP performance and whether increasing batch size with Inf-CL enhances performance. 
+Due to the limit of GPU resources, we utilize the ViT-B/16 with Bert-Base~\citep{devlin2018bert}. We follow the training strategy of LiT~\citep{zhai2022lit} to freeze the visual backbone and use the pre-trained weights instead.
+
+\bmhead{Performance Verification}. 
+We evaluate CLIP models trained with different loss implementations, with the results presented in Table~\ref{tab:eval_res}. As shown, under the same batch size, our Inf-CL performs similarly to previous methods, with performance differences falling within the error margin, confirming that our design incurs no precision loss in the loss calculations.
+Furthermore, the results indicate that increasing the batch size within a certain range yields performance enhancements, thereby underscoring the significance of our method for helping scale the batch size.
+However, under our experimental conditions, we currently observe that an excessively large batch size—previously unexamined in the literatures—results in suboptimal performance.
+
+Since our work mainly focus on how to enable large batch size training, these factors warrant further investigation in future work.
+\bmhead{Ablation Study}. 
+We ablate multi-level tiling in Table~\ref{tab:main_abl} and show that our designs incur no precision loss in loss calculations. 
+This allows arbitrary combinations to achieve nearly the same zero-shot classification accuracy~(about 74.8\% on ImageNet for 64k batch size), while significantly reducing memory costs.
+According to the Equation~\ref{eq:peak}, their $M_{peak}$ is decided by $M_{backbone}$ + $M_{data}$ rather than $M_{loss}$ + $M_{data}$ as in prior methods.
+For complexity analysis, Cross-GPU tiling is $\mathcal{O}(b^2/n^2)$, resulting in a memory cost that is $1/n$ of OpenCLIP ($16.96/4.81\approx4$ in Table~\ref{tab:main_abl}). 
+Based on it, introducing In-GPU tiling can further reduce memory cost and make the growth of memory cost linear, i.e., $\mathcal{O}(b^2/n^2)\rightarrow\mathcal{O}(b/n^2)$.
+
+
+
+\section{Related Work}
+
+
+\textbf{Contrastive Learning:} The core idea of contrastive learning is to learn better representations by distinguishing between positive and negative pairs of samples~\citep{infonce,simclr2}. This approach demonstrates strong effectiveness across diverse tasks, as the nature of the paired samples varies depending on the specific application. In image foundation models, such as SimCLR~\citep{simclr} and MoCo~\citep{moco}, positive pairs are created by augmenting the same image in different ways. For cross-modal retrieval, as exemplified by CLIP~\citep{clip} and ALIGN~\citep{align}, the positive pairs consist of aligned image and text samples. Similarly, for dense text retrieval~\citep{dpr,e5,ar2}, the positive pairs are composed of query and document pairs.  Several works improve contrastive learning performance by enhancing dataset quality, modifying the loss function, or refining negative sample selection~\citep{vasu2024mobileclip,zhai2023sigmoid,zhang2023noisy}. Moreover, several studies, both empirical and theoretical, have demonstrated from various perspectives that larger batch sizes contribute to learning better representations~\citep{bsz_theory,bsz_theory2}.  Due to the quadratic growth of memory usage with batch size in classical contrastive loss, most existing studies have stopped scaling their batch sizes to 128k, even when leveraging hundreds of GPUs~\citep{clip,align,chinese-clip}.  
+
+\textbf{Memory-efficient Training:} As deep learning models continue to grow in size and complexity, the demand for computational resources, particularly GPU memory, has increased significantly. Techniques such as Gradient Checkpointing \citep{gradient_checkpointing} recompute activations during backpropagation to save memory at the expense of additional computation. Flash Attention \citep{flash_attention1} reduces memory overhead by computing attention in blocks without storing large intermediate states. Ring Attention \citep{ring_attention} distributes long sequence activations across multiple devices, overlapping computation and communication to train sequences far longer than previous methods. For contrastive learning, GradCache \citep{gradient_cache} and BASIC~\citep{BASIC} introduce a gradient caching technique that decouples backpropagation between contrastive loss and the encoder, which reduces memory usage in the model by accumulating gradients per mini-batch. OpenCLIP~\citep{ilharco_gabriel_2021_5143773} and DisCo-CLIP \citep{disco_clip} reducing memory consumption by distributing the computation of contrastive loss across multiple GPUs. 
+
+
+\section{Conclusion}
+
+This paper addresses the GPU memory bottleneck in scaling batch sizes for contrastive loss. To overcome the quadratic memory consumption resulting from the full instantiation of the similarity matrix, we proposed a tile-based computation strategy that partitions the calculation into smaller blocks, thus avoiding full matrix materialization. Furthermore, we introduced a multi-level tiling strategy that leverages ring-based communication and fused kernels to optimize synchronization and minimize I/O overhead. Our experiments demonstrated that our method scales contrastive loss batch sizes to unprecedented levels without compromising accuracy or training speed. This approach marks a significant advancement in large-scale contrastive learning, shedding light on further developments in areas such as self-supervised learning and dense text retrieval.
+
+
+
+
+
+

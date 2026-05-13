@@ -1,0 +1,367 @@
+\title{Rethinking Optimal Transport in Offline Reinforcement Learning}
+
+\begin{abstract}
+We propose a novel algorithm for offline reinforcement learning using optimal transport. Typically, in offline reinforcement learning, the data is provided by various experts and some of them can be sub-optimal. To extract an efficient policy, it is necessary to \emph{stitch} the best behaviors from the dataset. To address this problem, we rethink offline reinforcement learning as an optimal transportation problem. And based on this, we present an algorithm that aims to find a policy that maps states to a \emph{partial} distribution of the best expert actions for each given state. We evaluate the performance of our algorithm on continuous control problems from the D4RL suite and demonstrate improvements over existing methods.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep reinforcement learning (RL) has shown remarkable progress in complex tasks such as strategy games~\cite{vinyals2019alphastar}, robotics~\cite{mnih2015human}, and dialogue systems~\cite{ouyang2022training}. In online RL, agents operate in the environment and receive rewards that are used to update policies. However, in some domains, such as healthcare, industrial control, and robotics, interactions with the environment can be costly and risky. For these reasons, offline RL algorithms that use historical data of expert interactions with the environment are more applicable. Given only a dataset of experiences, offline RL algorithms learn a policy without any online actions~\cite{levine2020offline}. 
+
+Due to the off-policy nature of offline RL, naive training of online RL algorithms in offline settings does not provide effective solutions~\cite{levine2020offline}. This is primarily due to a distribution shift between the learned and the behavior policy~\cite{fujimoto2018addressing}, which causes the instability of the critic function during off-policy evaluation. To solve this problem and make actions of the learned policy more similar to the one on which critic function was trained, a Behavior Cloning (BC) objectives was proposed~\cite{wu2019behavior, levine2020offline}.  
+
+As an example of BC loss, Optimal Transport (OT)~\cite{villani2008optimal} distance has been introduced for RL. This application of OT is particularly relevant because by minimizing the OT distance between policies, we can efficiently clone the behavior~\cite{wu2019behavior, dadashi2020primal, papagiannis2020imitation, li2021optimal, haldar2022watch, cohen2021imitation, luo2023optimal}. But there is another problem, in offline RL, the dataset often consists of various experts demonstrations. Some of these demonstrations may be incorrect, or efficient only for certain parts of the environment. Consequently, cloning the behavior policy in such scenarios may limit policy improvement~\cite{kumar2022should}. To solve these types of problems, RL algorithms need to apply \emph{stitching}, which means that the algorithm selects the best action for each state and recombines different trajectories provided by multiple experts~\cite{kumar2022should}. %optimal policy based on the given dataset, offline RL needs to address the \emph{stitching} problem~\cite{kumar2022should}. 
+
+In our paper, we rethink OT as a framework for offline reinforcement learning that aims to stitch the best trajectories, rather than clone the policy. Unlike previous OT-based approaches in RL, we do not introduce a new OT-based regularization or a reward function~\citep{dadashi2020primal, papagiannis2020imitation}. Instead, we propose \textbf{a novel perspective that views the entire offline RL problem as an optimal transport problem} between state and actions distribution (\wasyparagraph\ref{sec:monge_rl}). By utilizing the $Q$-function as a transport cost and the policy as an optimal transport map, we formalize offline reinforcement learning as a Maximin OT optimization problem. 
+This opens doors for applying recent advantages of OT methods to RL directly. In particular, we propose an algorithm that trains a policy to identify the \emph{partial} distribution of the best actions for each given state. 
+
+\textbf{Contribution}: Based on optimal transport, we introduce \emph{Partial Policy Learning} (PPL) algorithm, which efficiently identifies the best action for each state in the dataset. We evaluated our method across various environments using the D4RL benchmark suite, achieving superior performance compared to existing OT-based offline RL methods and current state-of-the-art model-free offline RL techniques.
+
+ 
+
+
+
+
+
+\section{Background and Related Work}
+
+\subsection{Optimal Transport}
+\label{sec:OT_background} %of the two probability distributions $\mu$ and $\nu$ which minimize the cost function $c(x,y)$:
+\underline{\textbf{Primal}} form of the optimal transport problem was first proposed by Monge~\citep{villani2008optimal}. Suppose there are two probability distributions $\mu$ and $\nu$ over measurable spaces $\mathcal{X}$ and $\mathcal{Y}$ respectively, where $\mathcal{X},\mathcal{Y}\subset\mathbb{R}^{D}$. We want to find a measurable map $T: \mathcal{X}\rightarrow\mathcal{Y}$ such that the mapped distribution is equal to the target $\nu$, for a cost function $c:\mathcal{X}\times\mathcal{Y}\rightarrow\mathbb{R}$, the \emph{OT} problem between $\mu,\nu$:
+\begin{equation}
+    \min_{T \sharp \mu=\nu} \mathbb{E}_{x\sim \mu}\big[c(x, T(x))\big].
+    \label{eq:monge_OT}
+\end{equation}
+where $T \sharp$ is the push forward operator and respectively ${T} \sharp \mu=\nu$ represents the mass preserving condition. Informally, we can say that the cost is a measure of how hard it is to move a mass piece between points $x\in\mathcal{X}$ and $y\in \mathcal{Y}$ from distributions $\mu$ and $\nu$ correspondingly. That is, an OT map $T$ shows how to optimally move the mass of $\mu$ to $\nu$, i.e., with the minimal effort.
+A widely recognized alternative formulation for optimal transport was introduced by Kantorovich~\citep{kantorovitch1958translocation}. Unlike the Monge's OT problem formulation, this alternative allows for mass splitting. The Kantorovich OT problem can be written as:
+\begin{equation}\min_{g\in\Pi(\mu,\nu)}\mathbb{E}_{(x,y) \sim g}\big[c(x,y)\big].
+\label{eq:kant-primal-form}
+\end{equation}
+In this case, the minimum is obtained over the transport plans $g$, which refers to the couplings $\Pi$ with the respective marginals being $\mu$ and $\nu$. The optimal $g^{*}$ belonging to $\Pi(\mu,\nu)$ is referred to as the \emph{optimal transport plan}.
+
+\underline{\textbf{Dual}} form of optimal transport, following the Kantorovich-Rubinstein duality~\cite{villani2003topics}, can be obtained from \eqref{eq:kant-primal-form} and written as:
+\begin{equation}
+\max_{f}\mathbb{E}_{x\sim \mu} \big[f^{c}(x)\big]+\mathbb{E}_{y\sim \nu} \big[f(y)\big], 
+\label{eq:ot-dual-form-c}
+\end{equation}
+where $f: \mathcal{X}\rightarrow\mathbb{R}$ and ${f^{c}(x)\!=\!\min\limits_{y\in\nu}\!\big[c(x,y)\!-\!f(y)\!\big]}$ is referred to as the $c$-transform of potential $f$~\cite{villani2008optimal}. For cost function $c(x,y)=\|x-y\|_{2}$, the resulted OT cost is called the \emph{Wasserstein-1} distance, see \cite[\wasyparagraph 1]{villani2008optimal} or \cite[\wasyparagraph 1, 2]{santambrogio2015optimal}. It was shown that to compute \emph{Wasserstein-1} distance, instead of computing conjugate function $f^c$ we can simply consider $f$ to be from the set of \emph{1-Lipschitz} functions\cite{villani2008optimal, arjovsky2017wasserstein}. 
+
+\underline{\textbf{Maximin}} formulation for simultaneously computing the OT distance and recovering the OT map $T$ was recently proposed. According to \cite{korotin2022neural}, by applying the Rockafellar interchange theorem \cite[Theorem 3A]{rockafellar1976integral}, we can replace the optimization over points $y\in\nu$ with an optimization over functions $T: \mathcal{X}\rightarrow \mathcal{Y}$, which reformulates the problem~\eqref{eq:ot-dual-form-c} as a saddle-point optimization problem for the potential $f$ and map $T$:
+\begin{equation}
+    \max_{f}\min_{T}\mathbb{E}_{x \sim \mu}\big[c(x,T(x)) - f(T(x))\big]+\mathbb{E}_{y\sim \nu}\big[f(y)\big]
+    \label{dual_monge_OT}
+\end{equation}
+Using this formulation, significant progress has been achieved in utilizing neural networks for computing OT maps to address strong~\citep{makkuva2019optimal, korotin2019wasserstein, gulrajani2017improved}, weak~\citep{korotin2022neural}, and general~\citep{asadulaev2022neural} OT problems. Our work is inspired by these developments, as we leverage \underline{neural} optimal transport methods to improve offline reinforcement learning. 
+
+\underline{\textbf{Partial OT}}: In cases where it is necessary to ignore some data and map the input to \underline{part} of the target distribution, techniques like \emph{unbalanced} or \emph{partial} optimal transport are commonly employed~\citep{figalli2010optimal, bai2023sliced, gazdieva2023extremal}. For example, \textit{partial} optimal transport is useful in resource allocation problems where only a subset of resources needs to be optimally allocated to match a subset of demands~\cite{figalli2010optimal}.
+
+In our paper, we consider the partial OT formulation proposed by \citep{gazdieva2023extremal}. This framework, named \emph{extremal OT}, solves the partial alignment between the full input distribution and part of the target distribution. Essentially, for \emph{Euclidean} cost functions such as \(\ell^2\), partial transport maps can be seen as a tool for finding \textit{nearest neighbors} (maximally close) to the input samples from the target according to the cost function. Please see Figure 1 in \citep{gazdieva2023extremal}. Formally, this method can be written as:
+\begin{equation}
+\min_{\substack{ T\sharp \mu \leq w \nu  }}\mathbb{E}_{x \sim \mu}\big[c(x,T(x))\big].
+\label{eq:IPLw}
+\end{equation}
+We can call \( w \) a coefficient of unbalance. The intuition behind this formulation is as follows: when \( w=1 \), the constraint \( T\sharp \mu \leq w \nu \) is equivalent to \( T\sharp \mu = \nu \). This equivalence holds because there is only one probability measure that is less than or equal to \(\nu\), and it is \(\nu\) itself. However, with values of \( w \ge 1 \), the mass of the second measure is scaled. Consequently, it is sufficient to match \(\mu\) only to part of the second measure \(\nu\) to transfer the full mass contained in \(\mu\). Since the cost \( c \) is our objective, \( T \) will tend to map to the samples from \(\nu\) that are closest to the input distribution. It was shown that this formulation can also be considered in maximin settings \cite{gazdieva2023extremal}, which is actually the core of our method (Section \ref{sec:et_ot}).
+
+\subsection{Offline Reinforcement Learning}
+\label{sec:rl_background}
+\underline{\textbf{Reinforcement Learning}} is a well-established framework for decision-making processes in environments modeled as Markov Decision Processes (MDPs). The MDP is defined as $\mathcal{M}=(S,A,P,r,\gamma)$ by the state space $S$, action space $A$, transition probability $P(s' \mid s, a)$, reward function $r(s, a)$, and discount factor $\gamma$. The goal in RL is to find a policy $\pi(a|s)$ that maximizes the expected cumulative reward over time $t$: $J(\pi) \stackrel{def}{=} {\mathbb{E}_\pi}[\sum_{t=0}^{\infty} \gamma^{t} r(s_{t}, a_{t})]$. Also we define the distribution over the state space following policy $\pi$ as $d^\pi(s)$. To estimate of the expected cumulative reward following a given policy $\pi$ the critic function $Q^\pi$ is used:
+\begin{equation}
+    \left.Q^\pi\left(s, a\right)=r\left(s, a\right)+\gamma \mathbb{E}_{s' \sim T\left(s, a\right), a' \sim \pi\left(s'\right)}\left[Q^\pi\left(s', a'\right)\right)\right].
+\end{equation}
+In deep RL neural networks are used to parameterize critic $Q^{\pi}_\phi(s, a)$ and policy $\pi_\theta$. Critic can be learned by minimizing the mean squared Bellman error over the experience replay dataset $\mathcal{D} =\{(s_{i},a_{i},s_{i}^{\prime},r_{i})\}$, which consist of trajectories implied by policy $\pi$:
+\begin{equation}
+   \min_{Q^{\pi}_{\phi}}\mathbb{E}_{\left(s, a, s^{\prime}\right) \sim \mathcal{D}}\left[\left(r(s,a)+\gamma \mathbb{E}_{a'\sim \pi_\theta(s')}\left[Q^\pi_{\phi}(s', a')\right]- Q^{\pi}_{\phi}(s, a)\right)^2\right].
+   \label{eq:q_update}
+\end{equation}
+Using a trained critic function we can recover a near-optimal policy, for example, using Deterministic Policy Gradient (DPG)~\cite{silver2014deterministic} or its improved version named Twin Delayed Deep Deterministic Policy Gradient (TD3)~\cite{fujimoto2018addressing}. 
+
+\label{sec:offline_rl}
+\underline{\textbf{Offline RL}} is a fully data-driven approach for decision-making problems. Conventional offline RL algorithms use the \eqref{eq:q_update} formula to recover the $Q$ function, using data $\mathcal{D}$ collected according to the expert policy $\beta$. However, due to \emph{distribution shift} between actions from $\mathcal{D}$ and those induced by policy $\pi$, the $Q$ function may suffer from inefficiency and overestimation bias during evaluation \citep{fujimoto2018addressing}. To mitigate this issue, various offline RL algorithms with behavior cloning objectives was proposed. See the related work section (\wasyparagraph\ref{sec:related_work}) for more details.
+
+\underline{\textbf{OT in offline RL}} has been proposed primarily for efficient behavior cloning. The simplest method of integrating OT into offline RL is by utilizing the \emph{Wasserstein-1} distance as the measure of dissimilarity between the learned and expert policies. This method is known as the W-BRAC algorithm~\citep{wu2019behavior}. Given the critic function $Q(s, a)$, the \emph{Wasserstein-1} distance defined by $f$, and the behavior cloning coefficient ${\color{orange}\alpha}$, we have
+\begin{eqnarray}
+    &\min_{\pi} \max_{{\color{purple}\|f\|_L \leq 1}}\mathbb{E}_{s \sim \mathcal{D}, a\sim\pi(s)} \big[\underbrace{-Q^{\pi}(s, a)}_{\text{{\color{blue} Critic}}}\big] + {\color{orange}\alpha} \big(\underbrace{\mathbb{E}_{(s,a) \sim \mathcal{D}}\big[f(s,a)\big]-\mathbb{E}_{s \sim \mathcal{D}, a\sim\pi(s)}\big[f(s,a)\big]}_{\text{{\color{purple}\emph{Wasserstein-1} distance}}}\big)
+    \label{eq:WGAN_RL}
+\end{eqnarray}
+
+In real-world applications, collecting large and high-quality datasets may be too costly or impractical. Due to that, the provided data it is often collected by many expert playing several near-optimal policies and only a single expert can be optimal in dataset $\mathcal{D}$. The formulation $\eqref{eq:WGAN_RL}$ has no mechanism to infer the importance of each action, its just clone the entire data. Moreover, the problem is that computing \emph{Wasserstein-1} distance is typically \underline{\emph{complicated}}~\citep{korotin2022kantorovich}, because the potential $f$ is required to satisfy the \emph{1-Lipschitz} condition~\citep{arjovsky2017wasserstein}. It is also important to note that the coefficient ${\color{orange}\alpha}$ is task-dependent\citep{brandfonbrener2021offline}.
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+\section{Rethinking OT in RL}
+
+\label{sec:monge_rl}
+\subsection{Considering RL as OT problem} %$\min_{\pi \sharp \mathcal{S}=\mathcal{A}} \mathbb{E}_{s\sim \mathcal{S}}[ -Q(s, \pi(s))]$
+To extend a connection and apply OT methods in RL, we can view the entire offline RL problem as an optimal transport problem. For this purpose, let's consider \eqref{eq:monge_OT}. By replacing the cost function $c(x,y)$ with the critic $Q^\pi(s,a)$ and treating our policy $\pi$ as a map that moves mass from the state distribution $d^\beta(s)$, ($d(s)$ for shorthand), to the corresponding distribution of actions given by the behavior policy $\beta(\cdot|s)$, we obtain a \underline{primal} state-conditional Monge OT problem.
+$\mathbb{E}_{s \sim \mathcal{D}, a\sim \pi(s)}\min_{\substack{\pi \sharp  d(s) = \beta(\cdot|s)}}[-Q^{\pi}(s,a)]$ which is equal to:
+\begin{equation}
+\min_{\substack{\big\{\pi \sharp d(s) = \beta(\cdot|s)\big\}}}\mathbb{E}_{s \sim \mathcal{D}, a\sim \pi(s)}\big[-Q^{\pi}(s,a)\big].
+\label{eq:monge_cond}
+\end{equation} %
+The objective is to minimize the expectation of the negative critic function $Q^{\pi}$, (we can also consider $Q^{\beta}$) while mapping exclusively to the distribution of actions given by the expert policy $\beta$. 
+
+\textbf{Remark 1:} \emph{In this formulation, the imposed equality constraints force the policy to mimic the behavior of the expert policy. However, since the provided dataset often contains sub-optimal paths, this formulation remains inappropriate for avoiding inefficient actions provided by the expert policy.}
+
+In the following subsection, we introduce an algorithm that integrates Partial Optimal Transport~\cite{gazdieva2023extremal} for deep RL.
+
+\label{sec:algorithm}
+\begin{algorithm}[t!]
+   \caption{Partial Policy Learning}\label{alg:BW}
+\begin{algorithmic}
+   \STATE {\bfseries Input:} Dataset $\mathcal{D}(s,a,r,s')$
+   \STATE Initialize $Q_\phi, \pi_\theta$, $f_\omega$, $\beta$
+   \FOR{$k$ in  {1...N}}
+    \STATE $(s,a,r,s')\gets \mathcal{D}$: sample a batch of transitions from the dataset.
+    \STATE $Q^{k+1} \gets$ Update cost function $Q^{\pi}_\phi$ using the Bellman update in (2).
+    \STATE $f^{k+1} \gets$ Update $f_\omega$ using outputs of $\pi_\theta$ and samples from dataset: $ \argmin_{f}  - \mathbb{E}_{s \sim \mathcal{D}, a \sim \pi^k(s)}[f^{k}(s,a)] + w\mathbb{E}_{s, a \sim \mathcal{D}}[f^{k}(s,a)]$ 
+    \STATE  $\pi^{k+1} \gets$ Update policy $\pi_\theta$ as a transport map: $\argmin_\pi \mathbb{E}_{s \sim \mathcal{D}, a \sim \pi^k(s)}[-Q^{k}(s, a) - f^{k}(s,a)].$  
+   \ENDFOR
+\end{algorithmic}
+\label{algo:main}
+\end{algorithm}
+\subsection{\emph{Stitching} with Partial OT}
+\label{sec:et_ot}
+
+In many real-world applications, collecting high-quality datasets may be costly or impractical. Therefore, offline RL algorithms need to select the best actions provided by the experts and ignore sub-optimal ones. Our idea is that partial OT can help us deal with sub-optimal trajectories by mapping states only to the most relevant parts of the action distribution with respect to the critic function $Q$
+To obtain \underline{partial} formulation of \ref{sec:monge_rl}, instead of equality constraints, we need to consider optimization problem with the following \emph{inequality} constraints \citep{gazdieva2023extremal}:
+\begin{equation}
+\min_{\substack{  \big\{\pi\sharp d(s) \leq w(\beta(\cdot|s))\big\}  }}\mathbb{E}_{s \sim \mathcal{D}, a\sim \pi(s)}\big[-Q^{\pi}(s,a)\big].
+\label{eq:IPLw}
+\end{equation}
+As discussed in Section \ref{sec:OT_background}, the parameter $w$ scales the mass contained in the target distribution. For values of $w\ge 1$, the mass of the second measure is increased. Consequently, it is not necessary to cover the full distribution $\beta(\cdot|s)$ to transport the Dirac mass given by $d(s)$. As a result, a learned policy (map) matches the state only to part of the action distribution $\beta(\cdot|s)$. This is particularly relevant for offline RL, as the resulting policy will not clone all actions but will select only the most optimal ones, where optimality is defined by the critic function $Q$.
+
+\textbf{Proposition 1:} \emph{(Informal) for a critic-based cost function $Q^\beta$, an offline Policy trained by \eqref{eq:IPLw} improves over the behavior policy $\beta$.} 
+ 
+
+To find a practical solution to the given problem using neural networks, we can also consider a dual and maximin formulation for \eqref{eq:IPLw}. The \underline{dual} form for the partial transport problem\cite{gazdieva2023extremal} can be expressed as
+\begin{equation}
+\max_{f \ge 0}\mathbb{E}_{s\sim \mathcal{D}, a\sim \pi} \big[f^{c}(s,a)\big]+w\mathbb{E}_{s\sim \mathcal{D}, a\sim \beta} \big[f(s,a)\big],
+\label{eq:pot-dual-form-c}
+\end{equation}
+To obtain the \underline{maximin} formulation, we expand the c-transform~(\ref{eq:ot-dual-form-c}) using the function $Q$ as the cost $c$. This operation can be represented as $\mathbb{E}_{s\sim \mathcal{D}, a\sim \pi}[f^{c}(s,a)] =\mathbb{E}_{s\sim \mathcal{D}}[\min_{a}\left\lbrace -Q^\pi(s,a)-f(s,a)\right\rbrace]$. Subsequently, by applying the Rockafellar interchange theorem \citep[Theorem 3A]{rockafellar1976integral}, we replace the optimization over points $a$ with an equivalent optimization over functions $\pi:\mathcal{S}\rightarrow\mathcal{A}$. The solution can be computed using neural approximations, which is useful for RL tasks.
+\begin{eqnarray}
+    \max_{{\color{purple}{f \ge 0}}} \min_\pi \mathbb{E}_{s \sim \mathcal{D}, a\sim \pi(s)}\big[\underbrace{-Q^{\pi}(s, a)}_{\text{{\color{blue}Cost}}}-\underbrace{f(s,a)\big] + {\color{orange}w}\mathbb{E}_{(s,a) \sim \mathcal{D}}\big[f(s,a)\big]}_{\text{{\color{purple} Constraints}}}.
+    \label{eq:IPL-dual_cond}
+\end{eqnarray}
+\textbf{Remark 2:} \emph{In the~\citep[Proposition 4]{gazdieva2023extremal} it was shown that $f^{*}(s,a)=0$ vanishes on the outliers i.e on the samples outside the scaled target distribution. The policy update in (\ref{eq:IPL-dual_cond}), can be written as $\min_\pi \mathbb{E}_{s \sim \mathcal{D}, a \sim \pi(s)}[-Q(s,a) - f(s, a)]$. This reveals that if $f(s,a)=0$ exclusively on the outlier actions, it then applies extra weight to correct actions, which reduces the value of $-Q(s,a) - f(s,a)$.}% Consequently, the acquired policy will generally select a subset of actions for which $f(s,a)$ is non zero. 
+\textbf{Remark 3:}\emph{ The value of $w$ controls the size of the action space in which we map; the higher the value of $w$, the smaller the subset\cite{gazdieva2023extremal}. When the actions are provided by a single expert, scaling $w$ can be detrimental to performance.} 
+
+The primary distinction between our method \eqref{eq:IPL-dual_cond}, and previous OT for RL approaches, particularly \eqref{eq:WGAN_RL}, is as follows:
+\begin{itemize}
+\item OT is not treated as a component of the problem or as a regularization term with a coefficient of $\alpha$. Instead, the entire policy optimization is considered as OT.
+\item Our formulation for computing OT does not necessitate \emph{1-Lipschitz} function constraints on $f$, as it does not compute the \emph{Wasserstein-1} distance. Rather, it addresses a maxmin OT problem with a critic-based cost function, where $f$ can be any arbitrary scalar function satisfying $f\geq 0$.
+\item Unlike traditional OT approaches that fully aligns two distributions, our method maps only to the part of the target distribution containing the most relevant actions with respect to the critic.
+\end{itemize}
+
+
+
+In practice, we use neural networks $\pi_{\theta}: {S}\rightarrow A$ and $f_{\omega}:S\times A\rightarrow\mathbb{R}$ to parameterize $\pi$ and $f$ respectively. These neural networks serve as function approximators that can capture complex mappings of states. We train these neural networks using stochastic gradient ascent-descent (SGAD) by sampling random batches from the dataset $\mathcal{D}$. At each training step, we sample a batch of transitions from the offline dataset $\mathcal{D}$ and then adjust the value function $Q$, and the potential $f$, Then for the $k$ update step, given the last policy value function $Q^k$, and $f^k$, we update the policy, see Algorithm~\ref{algo:main}.
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+
+\section{Toy Experiments}
+
+\begin{figure}[h!]
+\begin{center}
+    \subfigure[\label{fig:task}]{\includegraphics[width=0.32\textwidth]{Images/Toy/Task_4.png}}
+    \subfigure[\label{fig:BC}]{\includegraphics[width=0.32\textwidth]{Images/Toy/Target_4.png}}
+    \subfigure[\label{fig:Ours}]{\includegraphics[width=0.32\textwidth]{Images/Toy/Ours_2.png}} %Actions performed by the policy $\pi(s)$ trained by minimizing the objective $-Q^\beta(s,\pi(s))$+BC. To visualize an example of the best possible actions that can be extracted from $\beta$, {\color{red} red} points are used.
+    \caption{\label{fig:TOY} Toy experiments. (a) Left point $S_0$ denoting start and $S_T$ is the only rewarded, target location. Black curves visualize behavior trajectories $\beta$. (b)  Best behavior policy $\beta^{*}$ according to the  data, and the optimal policy $\pi^{*}$ that provides the optimal (shortest path) solution. (c) Comparison of the policy $\beta$ trained by minimizing the objective $-Q^\beta(s,\pi(s))$+BC and our policy $\pi$ trained by the PPL algorithm \ref{algo:main}. }
+\end{center}
+\end{figure}
+To demonstrate the ability of our algorithm to extract the best policy from the sub-optimal behavior trajectories, we constructed a simplified offline RL dataset. The goal in this setup is to find the \underline{shortest path} from a starting location \(S_0\) to a reward point \(S_T\), navigating through 50 intermediate states \(S_t\) uniformly spaced along the x-axis from -1.3 to 0. The action space is continuous, with the agent's task being to determine the optimal y-values corresponding to each x-coordinate. Only the final state \(S_T\) yields a reward of 1, while all other intermediate states \(S_t\) have a reward of zero. The offline RL dataset consisted of three sub-optimal expert trajectories, as shown in Figure \ref{fig:task}. The best policy that can be extracted by recombining the expert trajectories and an actual optimal policy $\pi^*$ that provides the shortest path are highlighted in Figure \ref{fig:BC}.
+
+We compared our method with the offline RL algorithm based on behavior cloning. For this, we trained the critic \(Q^\beta\) by (2), using actions drawn from the observed behavior trajectories $\beta$ presented in the dataset $\mathcal{D}$. Given \(Q^\beta\), we minimize $\mathbb{E}_{s,a\sim \mathcal{D}}[-Q^\beta(s,\beta(s)) + \|\beta(s)-a\|^{2}]$ to obtain the policy \(\beta\).\footnote{We also tested direct minimization of \(-Q^\beta(s,a)\). However, even in toy settings this method suffered from overestimation bias, causing the resulting policy to consistently predict values equal to 1.} Next, using the given critic function \(Q^\beta\), we trained the policy $\pi(s)$ using our algorithm with parameter $w=8$. Our approach successfully identified an optimal straight trajectory, see Figure \ref{fig:Ours}. Compared to offline RL \ref{fig:BC}, which produced \emph{average expert} solutions, our method demonstrated superior performance by extracting and exploiting the most strategic insights from the data, ignoring all inefficient actions. 
+
+In all experiments, a single-layer neural network with 32 neurons and ReLU activation was used as the configuration for both the critic and policy networks. For our method, we used a Lagrangian network \(f(s,a)\) with similar parameters. There are 5000 steps was done for each network, with Adam~\cite{kingma2014adam} optimizer with a learning rate (lr) of 1e-3.
+
+    
+    
+
+
+
+\section{D4RL Experiments}
+
+\label{sec:experiments}
+\subsection{Benchmarks and Baselines} We evaluate our proposed method using the Datasets for Deep Data-Driven Reinforcement Learning (D4RL)~\citep{fu2020d4rl} benchmark suite, which is a collection of diverse datasets designed for training and evaluating deep RL agents in a variety of settings. It includes tasks in continuous control, discrete control, and multi-agent settings with a variety of reward structures and observation spaces. First, we tested our method on the Gym's \texttt{MuJoCo-v2} environments, such as Walker, Hopper, and HalfCheetah. We also tested our method on the complex \texttt{Antmaze-v2} and \texttt{Android-v1} environments.
+
+To compare the performance of our proposed method, we selected four state-of-the-art offline RL algorithms. These include Conservative $Q$-Learning (CQL)~\citep{kumar2020conservative}, Twin Delayed Deep Deterministic Policy Gradient with behavior Cloning (TD3+BC)~\citep{fujimoto2021minimalist}, Implicit $Q$-Learning IQL~\citep{kostrikov2021offline}, ReBRAC~\cite{tarasov2023revisiting}, and IQL with Optimal Transport Reward Labeling (IQL+OTR)~\citep{luo2023optimal}. More details on the methods are given in (\wasyparagraph \ref{sec:related_work}). The results of the supervised behavior cloning are also included.  
+
+\subsection{Settings}
+\label{sec:settings}
+
+\textbf{PPL}. First, to be consistent with Proposition 1, we considered our method in the One-Step RL settings. Following the original setting provided by One-Step RL~\citep{brandfonbrener2021offline}, we pre-trained $\beta$ for 500k steps. Next, we pre-trained $Q^\beta$ for 2 million steps. Then, to avoid overestimation bias, we applied a \emph{simplified} conservative update to $Q^\beta$ (see \citep[Eq.1]{kumar2020conservative}). Finally, to improve beyond the behavior policy $\beta$, we trained the policy $\pi$ for the 100k steps using our method~\ref{algo:main}. For these experiments, a two-layer feed-forward network with a hidden layer size of 1024 and a learning rate of 0.001 was used with the Adam optimizer~\citep{kingma2014adam}. We tested this approach for the \texttt{Mujoco} environment see Table \ref{tab:MuJoCo-side}, for the comparison with the OneStep RL method. 
+
+\textbf{$\text{PPL}^{\text{CQL}}$} Second, we tested our method in conjunction with the CQL method on the \texttt{Antmaze} problems. In this setting, no pre-trained models were used; we used the code provided by the CORL library~\citep{tarasov2022corl}, with all hyperparameters and architectures set identical to those originally used in CORL for the CQL method. We trained the algorithm for 1M steps, with $w$ set to 8 for all experiments. See the comparison with CQL in Table~\ref{tab:Antmaze}.
+
+\textbf{$\text{PPL}^{\text{R}}$} Finally, we coupled our method with the improved version of TD3+BC called ReBRAC~\cite{tarasov2023revisiting}. In these experiments, for a cost function, the TD3+BC objective was used, which combines the $Q$ function with a supervised loss. The same hyperparameters proposed by the authors for ReBRAC were kept in our experiments. No pre-trained models were used, we trained the agent from scratch for 1M steps. We have tested our method on the \texttt{Mujoco}, \texttt{Android}, and \texttt{Antmaze} datasets. While the ReBRAC framework recommends \underline{task-specific} hyperparameters~\cite{tarasov2023revisiting}, the results for the \texttt{Antmaze} are also reported for the best $w$ hyperparameter. The results can be found in the tables~\ref{tab:MuJoCo}, ~\ref{tab:Android} and ~\ref{tab:Antmaze} respectively. 
+\subsection{Results} 
+In the Table \ref{tab:Antmaze} we consider a side-by-side comparison, and the color \colorbox{blue!10}{purple} indicates the best results between two columns. In the Tables \ref{tab:MuJoCo} and \ref{tab:Android} the color indicates the top 3 results. We compared the results with those reported in the ReBRAC~\cite{tarasov2023revisiting} and OTR+IQL papers~\citep{luo2023optimal}. For the \texttt{Antmaze} datasets, the main comparison is with the \emph{oracle} method to which our method is coupled. For comparison, we reproduced the CQL and ReBRAC results using the code provided in CORL. For completeness, IQL and OTR+IQL results are also included in Table~\ref{tab:Antmaze}. 
+
+\begin{table}[h!]
+    \centering
+    \footnotesize
+    \caption{Averaged normalized scores on \texttt{Antmaze}-v2 tasks. Reported scores are the results of the final 100 evaluations and 5 random seeds.}
+    \begin{tabular}{ l|c c| c c |c c } 
+    \hline
+     Dataset                    &IQL                 &OTR+IQL        &CQL        &$\text{PPL}^{\text{CQL}}$(Ours)         &ReBRAC                  &$\text{PPL}^{\text{R}}$(Ours)\\
+    \hline
+    umaze                    &\colorbox{blue!10}{87.5 ± 2.6} &83.4 ± 3.3  &86.3 ±3.7     &\colorbox{blue!10}{90±2.6}          &{97.8 ± 1.0}    &\colorbox{blue!10}{98.0 ±14} \\ 
+    
+    umaze-diverse   &62.2 ± 13.8 &\colorbox{blue!10}{68.9 ± 13.6}            &34.6 ±20.9     &\colorbox{blue!10}{40±2.6}      &{88.3 ± 13.0}   &\colorbox{blue!10}{93.6±6.1} \\ 
+    
+    medium-play   &\colorbox{blue!10}{71.2 ± 7.3} &70.5 ± 6.6             &63.0 ±9.8       &\colorbox{blue!10}{67.3±10.1}   &{84.0 ± 4.2}    &\colorbox{blue!10}{90.2 ±3.1} \\  
+    medium-diverse    &70.0 ± 10.9 &\colorbox{blue!10}{70.4 ± 4.8}         &59.6 ±3.5       & \colorbox{blue!10}{65.3±8.0}          &{76.3 ± 13.5}   &\colorbox{blue!10}{84.8 ±14.7} \\ 
+    large-play    &39.6 ± 5.8 &\colorbox{blue!10}{45.3 ± 6.9}            &20.0 ±10.8       & \colorbox{blue!10}{25.6±3.7}          &{60.4 ± 26.1}   &\colorbox{blue!10}{ 76.8 ±4.0} \\  
+    large-diverse  &\colorbox{blue!10}{47.5 ± 9.5} &45.5 ± 6.2             &20.0 ±5.1       & \colorbox{blue!10}{23.6 ±11.0} &{54.4 ± 25.1}   &\colorbox{blue!10}{76.6 ± 7.4} \\ \hline
+    Total  &378 &384            &283.5    &311.8    &461.2   &\textbf{520} \\ \hline
+    \end{tabular}
+    \label{tab:Antmaze}
+\end{table}
+\begin{table*}[h!]
+    \centering
+    \footnotesize
+    \caption{Averaged normalized scores on \texttt{MuJoCo} tasks. Reported scores are the results of the final 10 evaluations and 5 random seeds.}
+    \begin{tabular}{ c|l|c c c c c c  c | c c} 
+    \hline
+     & Dataset   &BC	&One-RL	&CQL	&IQL	&OTR+IQL &TD3+BC &ReBRAC      &$\text{PPL}^{\text{R}}$(Ours) \\
+    \hline
+    \multirow{3}{1em}{M} 
+    & Half. &42.6    &48.4   &44.0   & 47.4     &43.3 &\colorbox{blue!10}{ 48.3}   &\colorbox{blue!10}{65.6}   &\colorbox{blue!10}{64.95±0.2} \\ 
+    & Hopper       &52.9    &59.6   &58.5   &66.3     &\colorbox{blue!10}{ 78.7} &59.3    &\colorbox{blue!10}{102.0}  &\colorbox{blue!10}{93.49±7.2}\\ 
+    & Walker       &75.3    &\colorbox{blue!10}{81.1}   &72.5   &78.3    &79.4 &65.5     &\colorbox{blue!10}{82.5}  &\colorbox{blue!10}{85.66±0.6} \\  \hline
+    \multirow{3}{1em}{MR} 
+    & Half.  &36.6    &38.1   &\colorbox{blue!10}{ 45.5}   &44.2      &41.3 & 44.6    &\colorbox{blue!10}{51.0}      &\colorbox{blue!10}{51.1±0.3}\\ 
+    & Hopper       &18.1    &\colorbox{blue!10}{97.5}   & 95.0   &94.7     &84.8  &60.9     &\colorbox{blue!10}{98.1}        &\colorbox{blue!10}{100.0±2}\\ 
+    & Walker       &26.0    &49.5   &\colorbox{blue!10}{77.3}   &73.9     &66.0 & \colorbox{blue!10}{81.8}              &77.3        &\colorbox{blue!10}{78.66±2.0} \\  \hline
+    \multirow{3}{1em}{ME} 
+    & Half.  &55.2    &\colorbox{blue!10}{93.4}   & 91.6    &86.7     &89.6  &90.7     &\colorbox{blue!10}{101.1}   &\colorbox{blue!10}{104.85±0.1}\\ %102 w8 
+    & Hopper       &52.5    &103.3   &105.4  &91.5      &93.2 &98.0                                     &\colorbox{blue!10}{107.0}     &\colorbox{blue!10}{109.0±1.2}\\ 
+    & Walker       &107.5   &\colorbox{blue!10}{113.0}  &108.8   &109.6   &109.3  & 110.1    &\colorbox{blue!10}{112.3}       &\colorbox{blue!10}{111.74±1.1}\\  \hline
+    &Total &467.7   &684.9  &698.6  &692.6   &685.6  & 659.2    &796.9       &\textbf{799.45}\\ \hline
+    \end{tabular}
+     \label{tab:MuJoCo}
+\end{table*}
+\begin{table}[h!]
+    \centering
+    \footnotesize
+    \caption{Averaged normalized scores on \texttt{Android} tasks. Reported scores are the results of the final 10 evaluations and 5 random seeds.}
+    \begin{tabular}{ c|c|c c c c c c | c c c} 
+    \hline
+     & Dataset   &BC	&TD3+BC	&CQL	&IQL	&OTR+IQL &ReBRAC      &$\text{PPL}^{\text{R}}$(Ours)  \\
+    \hline
+    \multirow{3}{3em}{Pen} 
+    & Human  &34.4    &\colorbox{blue!10}{81.8}   &37.5   & 81.5    &66.82 &\colorbox{blue!10}{103.5 }    &\colorbox{blue!10}{ 108.43} \\ 
+    & Cloned       &56.9    &61.4   &39.2   &46.8     &\colorbox{blue!10}{78.7} &\colorbox{blue!10}{91.8}     &\colorbox{blue!10}{113.97}  \\ 
+    & Expert       &85.1    &\colorbox{blue!10}{146.0}    &107.0   &133.6    &- &\colorbox{blue!10}{154.1}  &\colorbox{blue!10}{ 152.33} &\\  \hline
+    \multirow{3}{3em}{Door} 
+    & Human  &0.5    &-0.1   &\colorbox{blue!10}{9.9}   &3.1      &\colorbox{blue!10}{5.9} & 0.0   &1.0 &\\ 
+    & Cloned       &-0.1    &0.1   &0.4   &\colorbox{blue!10}{0.8}     &0.01  &\colorbox{blue!10}{1.1}            & \colorbox{blue!10}{0.44}  \\ 
+    & Expert       &34.9    &86.4   &101.5   &\colorbox{blue!10}{ 105.3}     &- & \colorbox{blue!10}{104.6} &\colorbox{blue!10}{ 104.66}  \\  \hline
+    \multirow{3}{3em}{Hammer} 
+    & Human  &1.5    &0.4   & 4.4    &2.5     &1.79 & 0.2               &\colorbox{blue!10}{ 2.0} \\ 
+    & Cloned       &0.8    &0.5   &\colorbox{blue!10}{2.1}  &1.1     &0.8 &\colorbox{blue!10}{ 6.7 }        &\colorbox{blue!10}{4.74}  \\ 
+    & Expert       &\colorbox{blue!10}{125.6}   &117.0   &86.7  &106.5   &-  & \colorbox{blue!10}{ 133.8}      &\colorbox{blue!10}{130.2} \\  \hline
+    \multirow{3}{3em}{Relocate} 
+    & Human  &0.0    &-0.2   & 0.2    &0.1    &-0.2 &0.0                    &\colorbox{blue!10}{0.23} \\ 
+    & Cloned       &-0.1    &-0.1   &-0.1  &\colorbox{blue!10}{0.2}     &0.1 &\colorbox{blue!10}{ 0.9 }     &\colorbox{blue!10}{0.45} \\ 
+    & Expert       &101.3   &\colorbox{blue!10}{107.3}   &95.0   &\colorbox{blue!10}{106.5}   &-  & \colorbox{blue!10}{ 106.6}    &92.99 \\  \hline
+    & Total       &340.9   &600.5   &484.8   &588.5   &-  & 703.2    &\textbf{711.44} \\  \hline
+    \end{tabular}
+     \label{tab:Android}
+\end{table}
+In offline RL, the problems are noisy, complex, and diverse, and task-specific hyperparameter search is required. Despite this fact, our method shows promising results. Our method consistently outperforms methods on which it is based. The most important result is a significant improvement in the achieved scores for the \texttt{Antmaze} problems (Table \ref{tab:Antmaze}). In particular, our method provides state-of-the-art results for all datasets on this task, and gives a significant improvement of ~(+16) and (+21) points for the complicated large-play-v2 and large-play-diverse-v2 environments.  Importantly, we consistently outperform the previous best OT-based offline RL algorithm, OTR+IQL. 
+
+    
+    
+
+We can interpret that \emph{our method lies between behavior cloning and direct maximization of the $Q$ function.} Recent studies have shown that direct maximization can lead to sub-optimal results due to overestimation bias~\citep{fujimoto2019off}. Conversely, being too close to the expert's policy prevents improvement~\citep{kumar2022should}. Intuitively, our extremal formulation allows us to strike a balance that maximizes $Q$ by taking actions from the expert action distribution that are not radically different from those on which the $Q$ function was trained.
+
+Our formulation aligns the state space with only a portion of the action space. This property is particularly relevant for offline datasets that contain a \emph{mixture} of expert demonstrations. Our method can help to select the best possible action from a set of expert trajectories~\citep{levine2020offline}. In other words, optimal $f$ is to encourage the discovery of new actions that can yield high rewards. To illustrate the task-specific dependence of the parameter $w$, we performed an ablation study for different values, see (\wasyparagraph \ref{sec:ablation})). 
+
+\underline{\textbf{Run time:}} The code is implemented in the \texttt{PyTorch}~\citep{paszke2019pytorch} and \texttt{JAX} frameworks and will be publicly available along with the trained networks. Our method converges within 2--3 hours on Nvidia 1080 (12 GB) GPU. We used WanDB~\citep{wandb} for babysitting training process. The code is available in supplementary materials. 
+
+\subsection{Parameter $w$}
+\label{sec:ablation}
+\begin{figure*}[h!]
+    \centering
+    \subfigure[umaze-v2]{\includegraphics[width=0.32\textwidth]{Images/Antmaze_IPL_ablation/umaze_ablation.png}}
+    \subfigure[umaze-diverse-v2]{\includegraphics[width=0.32\textwidth]{Images/Antmaze_IPL_ablation/umaze_diverse_ablation.png}} 
+    \subfigure[medium-play-v2]{\includegraphics[width=0.32\textwidth]{Images/Antmaze_IPL_ablation/medium_play_ablation.png}}
+\end{figure*}
+\begin{figure*}[h!]
+    \centering
+    \subfigure[medium-diverse-v2]{\includegraphics[width=0.32\textwidth]{Images/Antmaze_IPL_ablation/medium_diverse_ablation.png}}
+    \subfigure[large-play-v2]{\includegraphics[width=0.32\textwidth]{Images/Antmaze_IPL_ablation/large_play_ablation.png}}
+    \subfigure[large-diverse-v2]{\includegraphics[width=0.32\textwidth]{Images/Antmaze_IPL_ablation/large_diverse_ablation.png}} 
+    \caption{Exponential moving average (coef. 0.3) curves of the normalized score curves for the \texttt{Antmaze}. Different colors of the curves represent results for {\color{orange} $w=3$}, {\color{purple} $w=5$}, {\color{blue} $w=8$}, {\color{red} $w=12$}.}
+    \label{fig:ablation-ant}
+\end{figure*}
+The parameter $w$ influences the action selection process by determining the support range over which the policy operates. With the parameter $w$ equal to 1, our method considers all actions provided in the dataset for each state. By increasing this value, we consider the smaller subspace of possible actions, which can be useful when it is necessary to select the best one from the data. In a perfect scenario, we want to find as few actions as possible that maximize the score, so we usually favor the higher values of $w$. 
+
+For some datasets, reducing the action subspace is unnecessary. We studied different parameters $w$=[3,5,8,12] for the range of tasks, results for the \texttt{Antmaze} are presented in Figure \ref{fig:ablation-ant}. We can see that the biggest effect of the parameter was accrued for the large-play and large-diverse task s\ref{fig:ablation-ant} (c). This means that selecting the subspace of actions is important for this environments, and our method allows for this nuanced control depending on the task.
+
+
+
+
+
+\section{Related work}
+
+ \label{sec:related_work}
+There is a rich family of offline RL algorithms. To solve the distribution shift problem, several methods have been proposed \citep{brandfonbrener2021offline, kumar2019stabilizing, zhou2021plas, chen2022latent, kumardasco, fujimoto2021minimalist, kostrikov2021offline}. The simplest approach is the behavior regularized actor-critic (BRAC)~\citep{wu2019behavior}. Minimizing some divergence $D$, between the learned $\pi$ and the expert policy $\beta$, the BRAC framework can be written as \emph{distance regularized} policy optimization:
+Where ${D}(\pi(\cdot| s), \beta(\cdot| s))$ is BC loss. Based on BRAC framework \cite{fujimoto2021minimalist} proposed a TD3+BC approach that combines standard TD3~\citep{fujimoto2018addressing} with BC loss minimization between policy and expert actions, and showed strong performance. 
+
+Policy Gradient from Arbitrary Experience via DICE~\citep{nachum2019algaedice} proposes to incorporate $f$-divergence regularization into the critic function. Based on a similar concept, Conservative $Q$-Learning~\citep{kumar2020conservative} and Adversarial Trained Actor-Critic~\citep{cheng2022adversarially} extends the critic loss with \emph{pessimistic} terms that minimize the $Q$ values on the samples of a learned policy and maximize the values of the dataset actions. 
+
+Methods such as one-step RL~\citep{brandfonbrener2021offline}, solves stitching by approximating the behavior $Q^\beta$ function and extract the corresponding policy $\pi$ by weighting actions using the advantage function ${A}^\beta(s,a)$ to find the best action for the given state.~\citep{sutton2018reinforcement}. Based on this concept, Implicit $Q$-Learning (IQL)~\citep{kostrikov2021offline} approximates the policy improvement step by treating the state value function $V^\beta(s)$ as a random variable and taking a state-conditional upper expectile to estimate the value of the best actions in the state.
+
+Application of optimal transport in offline RL was wiedly explored for behavioral cloning. For example it was used to construct a \emph{pseudo-reward} function~\citep{dadashi2020primal, papagiannis2020imitation, li2021optimal, haldar2022watch, cohen2021imitation}. Primal Wasserstein Imitation Learning~\citep{dadashi2020primal} and Sinkhorn Imitation Learning~\citep{papagiannis2020imitation} use the OT distance between the expert and imitator to create a reward function. Recently, the Optimal Transport Reward Labeling (OTR) method~\citep{luo2023optimal} was proposed to generate a reward-annotated dataset that can then be used by various offline RL algorithms. However, like W-BRAC, these methods primarily use OT as an additional \emph{loss} function. 
+
+
+\section{Conclusion and Discussion}
+
+\label{sec;conclusion}
+In this paper, we have established the novel algorithm for offline reinforcement learning. Our work introduces the concept using the action-value function and the policy as components of the OT problem between states and actions. To demonstrate the potential of our formulation, we propose the practical algorithm that penalize the policy to avoid inefficient actions provided in the dataset. By applying partial optimal transport, our algorithm effectively selects and maps the best expert actions for each given state, ensuring efficient policy extraction from noisy or sub-optimal datasets. The \emph{limitation} of our method is that parameter $w$ is task dependent.
+This work is a step towards our larger vision towards deepening the connection between OT and offline RL RL. Using our formulation other OT methods also can be integrated into RL. For example, various regularizations ~\citep{korotin2022kernel, courty2016optimal} and general costs~\citep{paty2020regularized, asadulaev2022neural} can be used to incorporate task-specific information into the learned map, which can be particularly relevant in hierarchical RL problems~\citep{bacon2017option}. Additionally Weak Neural OT~\citep{korotin2022neural} can be relevant in RL where stochastic behavior is preferred for exploration in the presence of multimodal goals~\citep{haarnoja2017reinforcement}.
+
+\subsection{Reproducibility}
+To reproduce our experiment we provide source code in supplementary materials. Details on used hyperparameters are presented in settings (\wasyparagraph\ref{sec:settings}).
+\nocite{langley00}
+
+
+\section{Societal Impact}
+
+\label{sec:impact}
+This paper presents research aimed at advancing the field of RL. While our work may have various societal implications, we do not believe any particular ones need to be specifically emphasized here.
+
+
+
+
+
+

@@ -1,0 +1,495 @@
+\title{Bespoke Solvers for Generative Flow Models}
+
+\begin{abstract}
+Diffusion or flow-based models are powerful generative paradigms that are notoriously hard to sample as samples are defined as solutions to high-dimensional Ordinary or Stochastic Differential Equations (ODEs/SDEs) which require a large Number of Function Evaluations (NFE) to approximate well. Existing methods to alleviate the costly sampling process include model distillation and designing dedicated ODE solvers. However, distillation is costly to train and sometimes can deteriorate quality, while dedicated solvers still require relatively large NFE to produce high quality samples. In this paper we introduce \emph{``Bespoke solvers''}, a novel framework for constructing custom ODE solvers tailored to the ODE of a given pre-trained flow model. Our approach optimizes an order consistent and parameter-efficient solver (\eg, with 80 learnable parameters), is trained for roughly 1\% of the GPU time required for training the pre-trained model, and significantly improves approximation and generation quality compared to dedicated solvers. For example, a Bespoke solver for a CIFAR10 model produces samples with Fréchet Inception Distance (FID) of 2.73 with 10 NFE, and gets to 1\% of the Ground Truth (GT) FID (2.59) for this model with only 20 NFE. On the more challenging ImageNet-64$\times$64, Bespoke samples at 2.2 FID with 10 NFE, and gets within 2\% of GT FID (1.71) with 20 NFE.\vspace{-5pt}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models \citep{sohl2015deep,ho2020denoising}, and more generally flow-based models \citep{song2020score,lipman2022flow,albergo2022si}, have become prominent in generation of images \citep{dhariwal2021diffusion,rombach2021highresolution}, audio \citep{kong2020diffwave,le2023voicebox}, and molecules \citep{kong2020diffwave}. While training flow models is relatively scalable and efficient, sampling from a flow-based model entails solving a Stochastic or Ordinary Differential Equation (SDE/ODE) in high dimensions, tracing a velocity field defined with the trained neural network. Using off-the-shelf solvers to approximate the solution of this ODE to a high precision requires a large Number~(\ie, 100s) of Function Evaluations~(NFE), making sampling one of the main standing challenges in flow models. Improving the sampling complexity of flow models, without degrading sample quality, will open up new applications that require fast sampling, and will help reducing the carbon footprint and deployment cost of these models.
+
+Current approaches for efficient sampling of flow models divide into two main groups: (i) \emph{Distillation}: where the pre-trained model is fine-tuned to predict either the final sampling \citep{luhman2021knowledge} or some intermediate solution steps \citep{salimans2022progressive} of the ODE. Distillation does not guarantee sampling from the pre-trained model's distribution, but, when given access to the training data during distillation training, it is shown to empirically generate samples of comparable quality to the original model \citep{salimans2022progressive,meng2023distillation}. Unfortunately, the GPU time required to distill a model is comparable to the training time of the original model \cite{salimans2022progressive}, which is often considerable. (ii) \emph{Dedicated solvers}: where the specific structure of the ODE is used to design a more efficient solver \citep{song2020denoising,lu2022dpm,lu2022dpm-pp} and/or employ a suitable solver family from the literature of numerical analysis \citep{zhang2022fast,zhang2023improved}. The main benefit of this approach is two-fold: First, it is \emph{consistent}, \ie, as the number of steps (NFE) increases, the samples converge to those of the pre-trained model. Second, it does not require further training/fine-tuning of the pre-trained model, consequently avoiding long additional training times and access to training data. Related to our approach, some works have tried to learn an ODE solver within a certain class \citep{watson2021learning,duan2023optimal}; however, they do not guarantee consistency and usually introduce moderate improvements over generic dedicated solvers. 
+\begin{wrapfigure}[20]{r}{0.3\textwidth}
+  \begin{center}
+    \includegraphics[width=0.29\textwidth]{figures/3_paths/3_traj.pdf}
+  \caption{Using 10 NFE to sample using our Bespoke solver improves fidelity w.r.t.~the baseline (RK2) solver. Visualization of paths was done with the 2D PCA plane approximating the noise and end sample points. }\label{fig:3_paths}
+\end{wrapfigure}
+In this paper, we introduce \emph{Bespoke solvers}, a framework for learning consistent ODE solvers \emph{custom-tailored} to pre-trained flow models. 
+The main motivation for Bespoke solvers is that different models exhibit sampling paths with different characteristics, leading to local truncation errors that are specific to each instance of a trained model. 
+A key observation of this paper is that optimizing a solver for a particular model can significantly improve quality of samples for low NFE compared to existing dedicated solvers. Furthermore, Bespoke solvers use a very small number of learnable parameters and consequently are efficient to train. 
+Our work brings the following contributions:
+\begin{enumerate}
+    \item A differentiable parametric family of consistent ODE solvers. 
+    \item A tractable loss that bounds the global truncation error while allowing parallel computation. 
+    \item An algorithm for training a Bespoke $n$-step solver for a specific pre-trained model. 
+\end{enumerate}
+
+
+\section{Bespoke solvers}
+
+We consider a pre-trained flow model taking some prior distribution~(noise) $p$ to a target~(data) distribution $q$ in data space $\Real^d$. The flow model~\citep{chen2018neural} is represented by a time-dependent Vector Field (VF) $u:[0,1]\times\Real^d\too \Real^d$ that transforms a noise sample $x_0\sim p(x_0)$ to a data sample $x_1\sim q(x_1)$ by solving the ODE 
+\begin{equation}\label{e:ode}
+    \dot{x}(t) = u_t(x(t)),
+\end{equation}
+with the initial condition $x(0)=x_0\sim p(x_0)$, from time $t=0$ until time $t=1$, and $\dot{x}(t):=\tfrac{d}{dt}x(t)$. The solution at time $t=1$, \ie, $x(1)\sim q(x(1))$, is the generated target sample. 
+\begin{wrapfigure}[9]{R}{0.38\textwidth}
+    \begin{minipage}{0.37\textwidth}
+      \begin{algorithm}[H]
+        \caption{Numerical ODE solver.}\label{alg:odesolve}
+        \begin{algorithmic}
+            \Require $t_0,x_0$
+            \For{$i=0,1,\ldots,n-1$}
+            \State $(t_{i+1},x_{i+1}) = \odestep(t_i,x_i;u_t)$  
+        \EndFor
+        \State \Return $x_n$
+        \end{algorithmic}
+      \end{algorithm}
+    \end{minipage}
+  \end{wrapfigure}
+\textbf{Numerical ODE solvers.} Solving \eqref{e:ode} is done in practice with numerical ODE solvers. A numerical solver is defined by an update step:
+\begin{equation}\label{e:step}    (t_{\nextt},x_{\nextt}) = \odestep(t,x;u_t).
+\end{equation}
+The update step takes as input current time $t$ and approximate solution $x$, and outputs the next time step $t_\nextt$ and the corresponding approximation $x_\nextt$ to the true solution $x(t_\nextt)$ at time $t_{\nextt}$. To approximate the solution at some desired end time, \ie, $t=1$, one first initializes the solution at $t=0$ and repeatedly applies the update step in \eqref{e:step} $n$ times, as presented in Algorithm \ref{alg:odesolve}. 
+The $\odestep$ is designed so that $t_n=1$. 
+
+An ODE solver ($\odestep$) is said to be of \emph{order} $k$ if its local truncation error is 
+\begin{equation}
+    \norm{x(t_{\nextt}) - x_{\nextt}} = O\parr{(t_{\nextt}-t)^{k+1}}, 
+\end{equation}
+asymptotically as $t_{\nextt}\too t$, where $t\in [0,1)$ is arbitrary but fixed and $t_\nextt, x_\nextt$ are defined by the solver, \eqref{e:step}. A popular family of solvers that offers a wide range of orders is the Runge-Kutta (RK) family~\citep{iserles2009first}. Two of the most popular members of the RK family are (set $h=n^{-1}$): 
+\begin{align}\label{e:euler}
+    &\text{RK1 (Euler - order 1):} \qquad \ \odestep(t,x; u_t) = \parr{t+h \, ,\,  x + h u_{t}(x)}, \\ \label{e:midpoint}
+    &\text{RK2 (Midpoint - order 2):} \ \ \  \odestep(t,x; u_t) = \parr{t+h\,  ,\,  x + h u_{t+\frac{h}{2}}\parr{x + \frac{h}{2}u_{t}(x)}}.
+\end{align}
+
+\textbf{Approach outline.} Given a pre-trained $u_t$ and a target number of time steps $n$ our goal is to find a custom (Bespoke) solver that is optimal for approximating the samples $x(1)$ defined via \eqref{e:ode} from initial conditions sampled according to $x(0)=x_0\sim p(x_0)$. To that end we develop two components: (i) a differentiable parametric family of solvers $\odestep^\theta$, with parameters $\theta\in \Real^p$ (where $p$ is \textit{very} small); and (ii) a tractable loss bounding the \emph{global truncation error}, \ie, the Root Mean Square Error~(RMSE) between the approximate sample ${x}^\theta_n$ and the GT sample $x(1)$, 
+\begin{equation}\label{e:rmse}
+    \text{Global truncation error:} \quad \gL_{\text{RMSE}}(\theta) = \E_{x_0\sim p(x_0)}\norm{x(1)-{x}_n^{\theta}},
+\end{equation} 
+where ${x}_n^\theta$ is the output of Algorithm  \ref{alg:odesolve} using the candidate solver $\odestep^\theta$ and $\norm{x}=\sqrt{\frac{1}{d}\sum_{j=1}^d [x^{(j)}]^2}$.
+
+
+\subsection{Parametric family of ODE solvers through transformed sampling paths}
+
+Our strategy for defining the parametric family of solvers $\odestep^\theta$ is using a generic base ODE solver, such as RK1 or RK2, applied to a parametric family of \textit{transformed paths}. 
+
+\begin{wrapfigure}{r}{0.33\textwidth}
+\centering
+\includegraphics[width=0.3\textwidth]{figures/illustrations/transformed_path.pdf}
+\caption{Transformed paths.}
+\label{fig:paths}
+\end{wrapfigure}
+\textbf{Transformed sampling paths.}\label{ss:transformed_paths} We transform the sample trajectories $x(t)$ by applying two components: a time reparametrization and an arbitrary invertible transformation. That is,
+\begin{equation}\label{e:bar_x_r_from_x_t}
+    \bar{x}(r) = \varphi_r(x(t_r)),\quad r\in [0,1],
+\end{equation}
+where $t_r,\varphi_r(x)$ are arbitrary functions in a family $\gF$ defined by the following conditions: (i) \emph{Smoothness}: $t_r:[0,1]\too[0,1]$ is a diffeomorphism\footnote{A diffeomorphism is a $C^1$ continuously differentiable function with a $C^1$ continuous differentiable inverse.}, and $\varphi:[0,1]\times \Real^d \too \Real^d$ is $C^1$ and a diffeomorphism in $x$. We also assume $r_t$ and $\varphi_r^{-1}$ are Lipschitz continuous with a constant $L>0$. (ii) \emph{Boundary conditions}: $t_r$ satisfies $t_0=0$ and $t_1=1$, and $\varphi_0(\cdot)$ is the identity function, \ie, $\varphi_0(x)=x$ for all $x\in \Real^d$. Figure \ref{fig:paths} depicts a transformation of a path, $x(t)$. Note that $\bar{x}(0)=x(0)$, however the end point $\bar{x}(1)$ does not have to coincide with $x(1)$. Furthermore, as $t_r:[0,1]\too [0,1]$ is a diffeomorphism, 
+$t_r$ is strictly monotonically increasing. 
+
+The motivation behind the definition of the transformed trajectories is that it allows reconstructing $x(t)$ from $\bar{x}(r)$. Indeed, denoting $r=r_t$ the inverse function of $t=t_r$ we have 
+\begin{equation}\label{e:x_t_from_bar_x_r}
+x(t) = \varphi^{-1}_{r_t}(\bar{x}({r_t})). 
+\end{equation}
+Our hope is to find a transformation that simplifies sampling paths and allows the base solver to provide better approximations of the GT samples
+\begin{restatable}{proposition}{barut}\label{prop:bar_u_t}
+    Let $x(t)$ be a solution to \eqref{e:ode}. Denote $\dot{\varphi}_r := \tfrac{d}{dr}\varphi_r$ and $\dot{t}_r := \tfrac{d}{dr}t_r$. Then $\bar{x}(r)$ defined in \eqref{e:bar_x_r_from_x_t} is a solution to the ODE (\eqref{e:ode}) with the VF 
+    \begin{equation}\label{e:bar_u_t}
+        \bar{u}_r(x) = \dot{\varphi}_r(\varphi^{-1}_r(x)) + \dot{t}_r\partial_x \varphi_r(\varphi^{-1}_r(x))u_{t_r}(\varphi^{-1}_r(x)).
+    \end{equation}
+\end{restatable}
+\textbf{Solvers via transformed paths.   }
+We are now ready to define our parametric family of solvers $\odestep^\theta(t,x;u_t)$: First we transform the input sample $(t,x)$ according to \eqref{e:bar_x_r_from_x_t} to 
+\begin{equation}\label{e:step_parametric_1}
+    (r,\bar{x})=(r_t, \varphi_{r_t}(x)).
+\end{equation}
+Next, we perform a step with the base solver of choice, denoted here by $\odestep$, \eg, RK1 or RK2, 
+\begin{equation}\label{e:step_parametric_2}
+    (r_{\nextt},\bar{x}_{\nextt}) = \odestep(r, \bar{x}; \bar{u}_r),
+\end{equation}
+and lastly, transform back using \eqref{e:x_t_from_bar_x_r} to define the parametric solver $\odestep^\theta$ via
+\begin{equation}\label{e:step_parametric}
+    (t_\nextt, x_\nextt) = \odestep^\theta(x,t;u_t) =  \parr{t_{r_{\nextt}}, \varphi_{r_{\nextt}}^{-1}  (\bar{x}_{\nextt})}.
+\end{equation}
+The parameters $\theta$ denote the parameterized transformations $t_r$ and $\varphi_r$ satisfying the properties of $\gF$ and the choice of a base solver $\odestep$. In Section \ref{sec:use_cases} we derive the explicit rules we use in this paper. 
+
+\textbf{Consistency of solvers.} \label{ss:consistency} An important property of the parametric solver $\odestep^\theta$ is \emph{consistency}. Namely, due to the properties of $\gF$, regardless of the particular choice of $t_r,\varphi_r\in \gF$, the solver $\odestep^\theta$ has the same local truncation error as the base solver. 
+\begin{restatable}{theorem}{consistency}(Consistency of parametric solvers)\label{thm:consistency}
+    \begin{equation}
+\end{restatable}
+
+Therefore, as long as $t_r,\varphi_r(x)$ are in $\gF$, decreasing the base solver's step size $h\too 0$ will result in our approximated sample $x_n^\theta$ converging to the exact sample $x(1)$ of the trained model in the limit, \ie, $x^\theta_n \too x(1)$ as $n\too \infty$. 
+
+
+In our use cases, we consider a time-dependent scaling as our invertible transformation $\varphi_r$,
+\begin{equation}\label{e:scale}
+    \varphi_r(x)=s_r x, \text{ and its inverse }\varphi_r^{-1}(x) =  x/s_r,
+\end{equation}
+where $s:[0,1]\too \Real_{>0}$ is a strictly positive $C^1$ scaling function such that $s_0=1$ (\ie, satisfying the boundary condition of $\varphi$). The transformation of trajectories, \ie, equations \ref{e:bar_x_r_from_x_t} and \ref{e:x_t_from_bar_x_r}, take the form
+\begin{equation}\label{e:scale_time}
+    \bar{x}(r)=s_r x({t_r}),\text{ and } x(t) = \bar{x}(r_t)/{s_{t_r}}, 
+\end{equation}
+\begin{equation}\label{e:bar_u_t_scale}
+\end{equation}
+
+\textbf{Use case I: RK1-Bespoke.} We consider RK1 (Euler) method (\eqref{e:euler}) as the base solver $\odestep$ and denote $r_i=ih$, $i\in [n]$, where $[n]=\set{0,1,\ldots,n}$ and $h=n^{-1}$. Substituting \eqref{e:euler} in  \eqref{e:step_parametric_2}, we get from \eqref{e:step_parametric} that
+\begin{equation}\label{e:step_theta_euler}
+    \odestep^\theta(t_i,x_i;u_t) \vcentcolon= \parr{t_{i+1} , \frac{s_i+h\dot{s}_i}{s_{i+1}}x_i + h \dot{t}_i\frac{s_i}{s_{i+1}}u_{t_i}(x_i)  },
+\end{equation}
+where we denote $t_i=t_{r_i}$, $\dot{t}_i=\frac{d}{dr}\vert_{r=r_i}t_r$, $s_i=s_{r_i}$, $\dot{s}_i=\frac{d}{dr}\vert_{r=r_i}s_r$, and $i\in [n-1]$. The learnable parameters $\theta\in\Real^p$ and their constraints are derived from the fact that the functions $t_r,\varphi_r$ are members of $\gF$. There are $p=4n-1$ parameters in total: $\theta = (\theta^t,\theta^s)$, where  
+\begin{equation}    \label{e:theta_euler}
+\theta^t:\begin{cases} 0=t_0 < t_1 < \cdots < t_{n-1} < t_n=1 \\
+ \dot{t}_0, \ldots, \dot{t}_{n-1} > 0
+\end{cases}, \quad
+\theta^s:\begin{cases}
+    s_1, \ldots, s_n > 0 \ \ , \ \ s_0=1\\
+    \dot{s}_0,\ldots,\dot{s}_{n-1} 
+\end{cases}.
+\end{equation}
+Note that we ignore the Lipschitz constant constraints in $\gF$ when deriving the constraints for $\theta$. 
+
+\textbf{Use case II: RK2-Bespoke.} 
+Here we choose the RK2 (Midpoint) method (\eqref{e:midpoint}) as the base solver $\odestep$. Similarly to the above, substituting \eqref{e:midpoint} in \eqref{e:step_parametric_2}, we get
+\begin{equation}\label{e:step_theta_midpoint}
+    \odestep^\theta(t_i,x_i;u_t) \vcentcolon= \parr{t_{i+1}, \frac{s_i}{s_{i+1}}x_i + \frac{h}{s_{i+1}}\set{\frac{\dot{s}_{i+\frac{1}{2}}}{s_{i+\frac{1}{2}}}z_i + \dot{t}_{i+\frac{1}{2}}s_{i+\frac{1}{2}}u_{t_{i+\frac{1}{2}}}\parr{\frac{z_i}{s_{i+\frac{1}{2}}}}  } },
+\end{equation}
+where we set $r_{i+\frac{1}{2}} = r_i+\frac{h}{2}$, and accordingly $t_{i+\frac{1}{2}}$, $\dot{t}_{i+\frac{1}{2}}$, $s_{i+\frac{1}{2}}$, and $\dot{s}_{i+\frac{1}{2}}$ are defined, and
+\begin{equation}\label{e:z_i}
+    z_i = \parr{s_i + \frac{h}{2}\dot{s}_i}x_i + \frac{h}{2}s_i \dot{t}_i u_{t_i}(x_i).
+\end{equation}
+In this case there are $p=8n-1$ learnable parameters, $\theta=(\theta^t,\theta^s)\in\Real^{p}$, where 
+\begin{equation}\label{e:theta_midpoint}    
+\theta^t:\begin{cases} 0=t_0 < t_{\frac{1}{2}} < \cdots < t_n=1 \\
+ \dot{t}_0, \dot{t}_{\frac{1}{2}}, \ldots, \dot{t}_{n-1}, \dot{t}_{n-\frac{1}{2}} > 0 
+\end{cases}, \quad
+\theta^s:\begin{cases}
+ s_{\frac{1}{2}}, s_1, \ldots, s_n > 0 \ \ , \ \ s_0=1\\
+\dot{s}_0,\dot{s}_{\frac{1}{2}},\ldots,\dot{s}_{n-\frac{1}{2}} 
+\end{cases}.
+\end{equation}
+\textbf{Equivalence of scale-time transformations and Gaussian Paths.}\label{ss:equivalence}
+We note that our \textit{scale-time} transformation covers \textit{all} possible trajectories used by diffusion and flow models trained with Gaussian distributions.
+Denote by $p_t(x)$ the probability density function  of the random variable $x(t)$, where $x(t)$ is defined by a random initial sampling $x(0)=x_0\sim p(x_0)$ and solving the ODE in \eqref{e:ode}. 
+When training a Diffusion or Flow Matching models, $p_t$ has the form
+$p_t(x) = \int p_t(x|x_1)q(x_1)dx_1$, where $p_t(x|x_1)=\gN(x|\alpha_t x_1, \sigma_t^2 I)$. A pair of functions $\alpha,\sigma:[0,1]\too [0,1]$ satisfying  
+\begin{equation}\label{e:def_scheduler}
+    \alpha_0=0=\sigma_1,\ \  \alpha_1=1=\sigma_0, \ \text{ and strictly monotonic } \mathrm{snr}(t)=\alpha_t/\sigma_t
+\end{equation}
+is called a \emph{scheduler}\footnote{We use the convention of noise at time $t=0$ and data at time $t=1$.}. We use the term \emph{Gaussian Paths} for the collection of probability paths $p_t(x)$ achieved by different schedulers. The velocity vector field that generates $p_t(x)$ and results from zero Diffusion/Flow Matching training loss is
+\begin{equation}\label{e:u_t}
+    u_t(x) = \int u_t(x|x_1) \frac{p_t(x|x_1)q(x_1)}{p_t(x)}dx_1,
+\end{equation}
+where $u_t(x|x_1) = \frac{\dot{\sigma}_t}{\sigma_t}x + \brac{\dot{\alpha}_t - \dot{\sigma}_t\frac{\alpha_t}{\sigma_t}}x_1$, as derived in \cite{lipman2022flow}. Next, we generalize a result by \cite{kingma2021variational} and \cite{karras2022elucidating} to consider marginal sampling paths $x(t)$ defined by $u_t(x)$, and show that any two such paths are related by a scale-time transformation: 
+\begin{restatable}{theorem}{equivalence}(Equivalence of Gaussian Paths and scale-time transformation)\label{thm:equivalence}
+\begin{enumerate}[(i)]
+    \item For every other Gaussian Path defined by a scheduler $(\bar{\alpha}_r,\bar{\sigma}_r)$ with trajectories $\bar{x}(r)$ there exists a scale-time transformation with $s_1=1$ such that $\bar{x}(r)=s_r x(t_r)$.
+\end{enumerate}
+\end{restatable}
+) Assuming an ideal velocity field (\eqref{e:u_t}), \ie, the pre-trained model is optimal, this theorem implies that searching over the scale-time transformations is equivalent to searching over all possible Gaussian Paths. 
+Note, that in practice we allow $s_1\ne 1$, expanding beyond the standard space of Gaussian Paths. 
+\begin{wrapfigure}[24]{R}{0.47\textwidth}
+    \begin{minipage}{0.45\textwidth}
+      \begin{algorithm}[H]
+        \caption{Bespoke training.}\label{alg:bes_training}
+        \begin{algorithmic}
+            \Require pre-trained $u_t$, number of steps $n$
+            \State initialize $\theta\in \Real^p$         
+            \While{not converged}
+            \State $x_0 \sim p(x_0)$ \Comment{{\color{cyan}sample noise}}  
+            \State $x(t) \gets$ solve ODE \ref{e:ode} \Comment{{\color{cyan}GT path}}  
+            \State $\gL \gets 0$ \Comment{{\color{cyan}init loss}}
+            \For{$i=0,...,n-1$} 
+            \State $x^\theta_{i+1}\gets\odestep_x^{\theta}\parr{x^{\aux}_i(t_{i}),t_{i};u_t}$
+            \State $\gL \hspace{-1pt} \mathrel{{+}{=}} \hspace{-1pt} M^\theta_{i+1}\norm{x_{i+1}^{\aux}(t_{i+1}) - x^\theta_{i+1}}$
+            \EndFor
+            \State $\theta \gets \theta -\gamma \nabla_\theta\gL$  \Comment{{\color{cyan}optimization step}}
+            \EndWhile
+        \State \Return $\theta$
+        \end{algorithmic}
+      \end{algorithm}
+    \end{minipage}
+    \begin{minipage}{0.45\textwidth}      
+      \begin{algorithm}[H]
+        \caption{Bespoke sampling.}\label{alg:bes_sampling}
+        \begin{algorithmic}
+            \Require pre-trained $u_t$, trained $\theta$ 
+            \State $x_0 \sim p(x_0)$ \Comment{{\color{cyan}sample noise}} 
+            \State $r_0\gets 0$,\ $\bar{x}_0\gets x_0$ \Comment{{\color{cyan}initial conditions}} 
+            \For{$i=0,1,\ldots,n-1$}
+            \State $(r_{i+1},\bar{x}_{i+1}) \gets \odestep(r_i,\bar{x}_i;\bar{u}^\theta_r)$  
+        \EndFor
+        \State \Return $\varphi^{-1}_1(\bar{x}_n)$
+        \end{algorithmic}
+      \end{algorithm}
+    \end{minipage}
+  \end{wrapfigure}
+\subsection{RMSE upper bound loss}\label{ss:rmse_bound}
+The second component of our framework is a tractable loss that bounds the RMSE loss in \eqref{e:rmse} while enabling parallel computation of the loss over each step of the Bespoke solver. 
+To construct the bound, let us fix an initial condition $x_0\sim p(x_0)$ and denote as before $x(1)$ to be the exact solution of the sample path (\eqref{e:ode}). Furthermore, consider a candidate solver $\odestep^\theta$, and denote its $t$ and $x$ coordinate updates by $\odestep^\theta = (\odestep_t^\theta, \odestep_x^\theta)$. Applying Algorithm \ref{alg:odesolve} with $\odestep^\theta$ and initial condition $x_0$ produces a series of approximations $x^\theta_i$, each corresponds to a  time step $t_i$, $i\in [n]$. Lastly, we denote by 
+\begin{equation}\label{e:ei_di}
+    e^\theta_i = \norm{x(t_i)-x^\theta_i}, \quad d^\theta_i=\norm{x(t_i) - \odestep_x^\theta(t_{i-1},x(t_{i-1}); u_t)}
+\end{equation}
+the \emph{global} and \emph{local} truncation errors at time $t_i$, respectively. Our goal is to bound the global error at the final time  step $t_n=1$, \ie, $e^\theta_n$. Using the update step definition (\eqref{e:step}) and triangle inequality we can bound 
+\begin{align*}
+     e^\theta_{i+1}\hspace{-1pt}\leq\hspace{-1pt} \norm{x(t_{i+1})-\odestep^\theta_x(t_{i},x(t_{i});u_t)} \hspace{-2pt}+\hspace{-2pt} \norm{\odestep_x^\theta(t_{i},x(t_{i});u_t) - \odestep^\theta_x(t_{i},x^\theta_{i};u_t)}  \leq d^\theta_{i+1} + L^\theta_{i} e^\theta_{i},
+\end{align*}
+where $L^\theta_{i}$ is defined to be the Lipschitz constant of the function $\odestep_x^\theta(t_i,\cdot\,;u_t)$. To simplify notation we set by definition $L^\theta_n=1$ (this is possible since $L^\theta_n$ does not actually participate in the bound). Using the above bound $n$ times and noting that $e^\theta_0=0$ we get 
+\begin{equation}\label{e:bound}
+    e^\theta_n \leq \sum_{i=1}^n M^\theta_i d^\theta_i, \text{ where } M^\theta_i = \prod_{j=i}^n L^\theta_j.
+\end{equation}
+Motivated by this bound we define our RMSE-Bespoke loss: 
+\begin{center}			% Centering minipage
+    \colorbox{mygray} {		% Set's the color of minipage
+      \begin{minipage}{0.977\linewidth} 	% Starts minipage
+       \centering
+        \begin{equation}\label{e:loss_bes}
+\gL_{\text{bes}}(\theta) = \E_{x_0\sim p(x_0)}  \sum_{i=1}^n M^\theta_i d^\theta_i,   \end{equation}
+      \end{minipage}}			% End minipage
+\end{center}
+where $d^\theta_i$ is defined in \eqref{e:ei_di} and $M^\theta_i$ defined in \eqref{e:bound}. The constants $L^\theta_i$ depend both on the parameters $\theta$ and the Lipschitz constant $L_u$ of the network $u_t$. 
+Assuming that $L_\tau\geq L_u$, an immediate consequence of the bound in \eqref{e:bound} is that the RMSE-bespoke loss bounds the RMSE loss, \ie, the global truncation error defined in \eqref{e:rmse},
+\begin{equation}
+    \gL_{\text{RMSE}}(\theta) \leq \gL_{\text{bes}}(\theta).
+\end{equation}
+
+\textbf{Implementation of the RMSE-Bespoke loss.}\label{ss:implementaiton_of_the_rmse_bespoke_loss}
+We provide pseudocode for Bespoke training and sampling in Algorithms \ref{alg:bes_training} and \ref{alg:bes_sampling}, respectively. During training, we need to have access to the GT path $x(t)$ at times $t_i$, $i\in [n]$, which we compute with a generic solver. The Bespoke loss is constructed by plugging $\odestep^\theta$ (equations \ref{e:step_theta_euler} or \ref{e:step_theta_midpoint}) into $d_i$ (\eqref{e:ei_di}). The gradient $\nabla_\theta \gL_{\text{bes}}(\theta)$ requires the derivatives $\partial x(t_i) / \partial t_i$. Computing the derivatives of $x(t_i)$ can be done using the ODE it obeys, \ie, $\dot{x}(t_i)=u_{t_i}(x_i)$. Therefore, a simple way to write the loss ensuring correct gradients w.r.t.~$t_i$ is replace $x(t_i)$ with $x^{\aux}_i(t_i)$ where 
+\begin{equation}\label{e:x_aux}
+   \hspace{-2pt} x^{\aux}_i(t)\hspace{-1pt} = \hspace{-1pt} x(\llbracket t_i \rrbracket) + u_{\llbracket t_{i}\rrbracket}\hspace{-1pt}\left(x(\llbracket t_i \rrbracket)\right)(t - \llbracket t_i \rrbracket),
+\end{equation}
+where $\llbracket\cdot\rrbracket$ denotes the stop gradient operator; \ie, $x_i^{\aux}(t)$ is linear in $t$ and its value and derivative w.r.t.~$t$ coincide with that of $x(t_i)$ at time $t=t_i$. 
+
+
+
+
+\section{Previous Work}
+
+
+Diffusion models \citep{sohl2015deep,ho2020denoising} are a powerful paradigm for generative models that for sampling require solving a Stochastic Differential Equation~(SDE), or its associated ODE, describing a (deterministic) flow process \citep{song2020denoising}. Diffusion models have been generalized to paradigms directly aiming to learn a deterministic flow \citep{lipman2022flow,albergo2022si,liu2022flow}. Flow-based models are efficient to train but costly to sample. Previous works had tackled the sample complexity of flow models by building \emph{dedicated solver schemes} and \emph{distillation}.  
+
+\textbf{Dedicated Solvers.}
+This line of works introduced specialized ODE solvers exploiting the structure of the sampling ODE. \citet{lu2022dpm,zhang2022fast} utilize the semi-linear structure of the score/$\eps$-based sampling ODE to adopt a method of exponential integrators. 
+\citep{zhang2023improved} further introduced refined error conditions to fulfill desired order conditions and achieve better sampling, while \citet{lu2022dpm-pp} adapted the method to guided sampling. 
+\citet{karras2022elucidating} suggested transforming the ODE to sample a different Gaussian Path for more efficient sampling, while also suggesting non-uniform time steps. 
+
+In principle, all of these methods effectively proposed---based on intuition and heuristics---to apply a particular scale-time transformation to the sampling trajectories of the pre-trained model for more efficient sampling, while our Bespoke solvers search over the entire space of scale-time transformation for the \textit{optimal} transformation of a particular trained model.
+
+Other works also aimed at learning the solver: \citet{dockhorn2022genie}~(GENIE) introduced a higher-order solver, and distilled the necessary JVP for their method; \citet{watson2021learning} (DDSS) optimized a perceptual loss considering a family of generalized Gaussian diffusion models; \citet{lam2021bilateral} improved the denoising process using bilateral filters, thereby indirectly affecting the efficiency of the ODE solver; \citet{duan2023optimal} suggested to learn a solver for diffusion models by replacing every other function evaluation by a linear subspace projection. 
+Our Bespoke Solvers belong to this family of learnt solvers, however, they are consistent by construction~(Theorem ~\ref{thm:consistency}) and minimize a bound on the solution error~(for the appropriate Lipschitz constant parameter). 
+
+\begin{comment}
+\juan{I think we should include these papers as well:}
+\begin{itemize}
+    \item \textbf{Bilateral Denoising Diffusion Models}~\cite{lam2021bilateral}.
+The paper introduces Bilateral Denoising Diffusion Models (BDDMs), which aim to accelerate the sampling process in Denoising Diffusion Probabilistic Models (DDPMs). BDDMs use a score network and a scheduling network to parameterize the forward and reverse processes, respectively. The paper introduces a new lower bound for the log marginal likelihood, which is tighter than the conventional ELBO. BDDMs can generate high-quality samples with as few as 3 steps and offer a 62x speedup compared to traditional DDPMs that require 1000 steps. The paper is particularly relevant to our work as it focuses on optimizing the sampling process in generative models, specifically by\textbf{\textit{ learning the noise schedule}} within the network training framework.
+    \item \textbf{Learning Fast Samplers for Diffusion Models by Differentiating Through Sample Quality}~\cite{watson2021learning}.
+    The paper introduces Differentiable Diffusion Sampler Search (DDSS), a method for optimizing fast samplers for pre-trained diffusion models.
+    DDSS works by differentiating through sample quality scores and is compatible with any pre-trained diffusion model without fine-tuning.
+    The method significantly improves sample quality and efficiency, achieving strong results on various datasets.
+    This paper is closely related to this work as it also aims to improve the sampling efficiency of diffusion models, although it does not consider the ODE perspective.
+\end{itemize}
+\end{comment}
+\textbf{Distillation.} % : Data-Free and Data-Dependent.}
+
+
+\begin{comment}
+List for distillation papers:
+\begin{itemize}
+    \item 
+    \textbf{On Distillation of Guided Diffusion Models}~\cite{meng2023distillation}.
+    The paper focuses on the computational inefficiencies of classifier-free guided diffusion models in high-resolution image generation.
+    It proposes a two-stage distillation approach to significantly reduce the number of sampling steps required for generating high-quality images.
+    Empirical results show that the distilled models match or even outperform the original models in terms of FID and Inception scores.
+    The paper is directly relevant to this work as it also aims to accelerate the sampling process in generative models through a distillation approach.
+    \url{https://openaccess.thecvf.pdf}
+
+    \item \textbf{GENIE: Higher-Order Denoising Diffusion Solvers}~\cite{dockhorn2022genie}.
+    The paper introduces Higher-Order Denoising Diffusion Solvers (GENIE) to accelerate the sampling process in Denoising Diffusion Models (DDMs).
+    GENIE employs a novel second-order ODE solver based on truncated Taylor methods, which uses higher-order gradients of the perturbed data distribution.
+    The paper demonstrates that GENIE significantly outperforms all previous solvers in terms of speed and quality for DDMs.
+    The work is relevant as it focuses on optimizing the solver for generative models, similar to our approach but in the context of DDMs.
+    \url{https://proceedings.neurips.cc/paper_files/paper/2022/file/c281c5a17ad2e55e1ac1ca825071f991-Paper-Conference.pdf}
+
+    \item \textbf{Distilling the Knowledge in Diffusion Models}~\cite{dockhorn2023distilling}.
+    The paper proposes a method to distill the knowledge of large-scale diffusion models into smaller student models using an approximate score matching objective. 
+    The student models achieve comparable performance to their teacher models but require significantly less computational resources. 
+    The paper also presents initial experiments on distilling the knowledge of Stable Diffusion, a large-scale text-to-image diffusion model.
+    \url{https://generative-vision.io/workshop-CVPR-23/data/46.pdf}
+
+    \item \textbf{Diffusion Probabilistic Model Made Slim}~\cite{yang2023diffusion}.
+    The paper focuses on reducing the computational complexity of Diffusion Probabilistic Models (DPMs) without sacrificing performance. The authors introduce Spectral Diffusion (SD), a slim version of DPMs that incorporates wavelet gating and spectrum-aware distillation. SD achieves 8-18× computational complexity reduction compared to traditional DPMs while maintaining competitive image fidelity. The paper is relevant to this work as it addresses the issue of model complexity and efficiency, specifically through the use of distillation techniques.
+\url{https://openaccess.thecvf.pdf}
+
+    \item \textbf{SnapFusion: Text-to-Image Diffusion Model on Mobile Devices within Two Seconds}~\cite{li2023snapfusion}.
+    The paper presents an approach to run text-to-image diffusion models on mobile devices in less than 2 seconds. 
+    The authors introduce an efficient UNet architecture and improve step distillation to achieve this speedup. 
+    Experiments on MS-COCO show that their model with 8 denoising steps outperforms Stable Diffusion v1.5 with 50 steps in terms of FID and CLIP scores.
+    The paper is relevant to this work as it focuses on making generative models more efficient through distillation techniques, specifically for mobile devices.
+    \url{https://arxiv.org/pdf/2306.00980.pdf}
+\end{itemize}
+\paragraph{\textit{Paper TLDRs:}}
+\begin{itemize}
+    \item \textbf{Denoising Diffusion Implicit Models}~\cite{song2020denoising}.
+    The paper introduces Denoising Diffusion Implicit Models (DDIMs) to accelerate the sampling process in Denoising Diffusion Probabilistic Models (DDPMs).
+    DDIMs generalize DDPMs through non-Markovian diffusion processes.
+    Empirical results show that DDIMs can produce high-quality samples 10× to 50× faster than DDPMs.
+    The paper is relevant to this work as it also focuses on accelerating the sampling process in generative models, although it uses a different approach based on non-Markovian diffusion processes.
+
+    \item \textbf{DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps}~\cite{lu2022dpm}.
+    The paper addresses the slow sampling speed of Diffusion Probabilistic Models (DPMs) by introducing a specialized ODE solver, called DPM-Solver.
+    This solver takes advantage of the specific structure of diffusion ODEs to accelerate the sampling process.
+    Experimental results show that DPM-Solver can generate high-quality samples in only 10 to 20 function evaluations, achieving a 4 to 16× speedup compared to previous state-of-the-art training-free samplers.
+    The paper is directly relevant to this work as it also aims to accelerate the sampling process in generative models by designing a specialized ODE solver.
+
+    \item \textbf{DPM-Solver++: A Fast Diffusion ODE Solver for Guided Sampling in Diffusion Probabilistic Models}~\cite{lu2022dpm-pp}.
+    The paper focuses on the challenges of using high-order ODE solvers for guided sampling in Diffusion Probabilistic Models (DPMs).
+    It introduces DPM-Solver++, a specialized high-order ODE solver that addresses the issues of instability and train-test mismatch in guided sampling.
+    Experimental results show that DPM-Solver++ can generate high-quality samples in only 15 to 20 steps, outperforming previous training-free samplers for guided sampling.
+    The paper is directly relevant to this work as it also aims to develop a specialized ODE solver to accelerate the sampling process in generative models.
+
+    \item \textbf{Fast Sampling of Diffusion Models with Exponential Integrator}~\cite{zhang2022fast}.
+    The paper aims to address the slow sampling speed of Diffusion Models (DMs) by introducing a new sampling method called Diffusion Exponential Integrator Sampler (DEIS).
+    DEIS is based on the Exponential Integrator designed for discretizing ordinary differential equations (ODEs) and leverages the semilinear structure of the learned diffusion process to reduce discretization error.
+    Experimental results show that DEIS can generate high-quality samples in as few as 10 steps, achieving state-of-the-art performance in terms of the number of score function evaluations (NFEs).
+    The paper is directly relevant to this work as it also focuses on accelerating the sampling process in generative models by introducing a specialized method for solving the associated ODEs.
+
+    \item \textbf{Improved Order Analysis and Design of Exponential Integrator for Diffusion Models Sampling}~\cite{zhang2023improved}.
+    The paper focuses on improving the efficiency and robustness of exponential integrators (EIs) used in the sampling process of Diffusion Models (DMs).
+    It introduces a Refined Exponential Solver (RES) that fulfills essential order conditions, thereby achieving better error bounds and sampling efficiency.
+    Experimental results show that switching from DPM-Solver++ to RES can result in a reduction of numerical defects by 25.2\% and an FID improvement of 25.4\%.
+    The paper is directly relevant to this work as it also aims to improve the efficiency of ODE solvers used in the sampling process of generative models.
+
+    \item \textbf{Elucidating the Design Space of Diffusion-Based Generative Models}~\cite{karras2022elucidating}.
+    The paper aims to simplify the theory and practice of diffusion-based generative models by presenting a clear design space that separates various design choices.
+    It introduces several improvements to both the sampling and training processes, as well as to the preconditioning of score networks.
+    Experimental results show that these improvements lead to new state-of-the-art FID scores for CIFAR-10 and ImageNet-64, along with much faster sampling.
+    The paper is relevant to this work as it also focuses on improving the efficiency and quality of the sampling process in diffusion-based generative models.
+
+    \item \textbf{Fast Sampling of Diffusion Models via Operator Learning}~\cite{zheng2023fast}.
+    The paper aims to accelerate the sampling process in diffusion models by employing neural operators to solve the associated probability flow differential equations.
+    It introduces a method called Diffusion Model Sampling with Neural Operator (DSNO) that allows for parallel decoding of the solution trajectory.
+    Experimental results show that DSNO achieves state-of-the-art FID scores for CIFAR-10 and ImageNet-64 in a single-step-generation setting.
+    The paper is directly relevant to this work as it also focuses on accelerating the sampling process in generative models by introducing a specialized method for solving the associated ODEs.
+
+    \item \textbf{Optimal Linear Subspace Search: Learning to Construct Fast and High-Quality Schedulers for Diffusion Models}~\cite{duan2023optimal}.
+    The paper aims to tackle the slow generation process in diffusion models by introducing a novel scheduler called Optimal Linear Subspace Search (OLSS).
+    OLSS is designed to be lightweight and adaptive, focusing on finding the optimal path to approximate the complete generation process.
+    Experimental results show that OLSS can generate high-quality images with a very small number of steps and outperforms existing schedulers in terms of image quality.
+    The paper is directly relevant to this work as it also aims to accelerate the sampling process in generative models by introducing an adaptive scheduler.
+
+    \item \textbf{Progressive Distillation for Fast Sampling of Diffusion Models}~\cite{salimans2022progressive}.
+    The paper aims to address the slow sampling time in diffusion models by introducing a method called progressive distillation.
+    This method starts with a model that requires a large number of sampling steps and progressively distills it into new models that require fewer steps.
+    Experimental results show that the method can reduce the number of required sampling steps to as few as 4 while maintaining competitive FID scores.
+    The paper is directly relevant to this work as it also aims to accelerate the sampling process in generative models, specifically in diffusion models, by reducing the number of required sampling steps.
+
+    \item \textbf{Score-Based Generative Modeling through Stochastic Differential Equations}~\cite{song2020score}.
+    The paper aims to bridge the gap between score-based generative models and stochastic differential equations (SDEs).
+    It introduces a new framework that allows for the training of generative models using SDEs.
+    Experimental results show that this framework can produce high-quality samples and offers advantages in terms of flexibility and expressiveness.
+    The paper is relevant to this work as it also focuses on using differential equations to improve the efficiency and quality of generative models.
+
+    \item \textbf{Denoising Diffusion Probabilistic Models}~\cite{ho2020denoising}.
+    The paper presents diffusion probabilistic models as a class of latent variable models for high-quality image synthesis.
+    These models are trained using a weighted variational bound and are shown to produce high-quality samples, sometimes better than other types of generative models.
+    The paper also reveals an equivalence between diffusion models and denoising score matching with Langevin dynamics during training.
+    This paper is directly related to this work as it discusses diffusion models, which are a subset of the flow models you are focusing on. 
+    It also touches upon the quality of samples and the mathematical underpinnings, which could be relevant for the ODE-based approach.
+
+    \item \textbf{Generative Modeling by Estimating Gradients of the Data Distribution}~\cite{song2019generative}.
+    The paper introduces a generative model that uses Langevin dynamics and gradients of the data distribution estimated with score matching for sample generation.
+    The model perturbs data with Gaussian noise at different levels and estimates the corresponding scores, thereby facilitating better sampling.
+    The paper proposes an annealed Langevin dynamics approach for sampling, which starts with high noise levels and gradually reduces them.
+    This paper is relevant to this work as it also employs Langevin dynamics for generative modeling, and its focus on score matching and annealed Langevin dynamics could provide insights into the ODE-based approach.
+
+    \item \textbf{Improved Techniques for Training Score-Based Generative Models}~\cite{song2020improved}.
+    The paper presents improved techniques for training score-based generative models, focusing on high-resolution image generation.
+    It introduces a new theoretical framework for understanding score-based models and proposes methods like using an exponential moving average of model weights to enhance stability.
+    The paper successfully scales score-based generative models to high-resolution images, rivaling the performance of GANs.
+    This paper is relevant to your work as it delves into the intricacies of score-based generative models, which could offer insights into the stability and scalability aspects of ODE-based flow models.
+
+    \item \textbf{Deep Unsupervised Learning using Nonequilibrium Thermodynamics}~\cite{sohl2015deep}.
+    The paper introduces a generative model that uses a diffusion process to transform a simple known distribution (e.g., Gaussian) into a complex data distribution.
+    It employs ideas from non-equilibrium statistical physics to create a highly flexible and tractable generative model, capable of learning, sampling, and evaluating probabilities in deep generative models with thousands of layers or time steps.
+    This paper is relevant to this work as it also focuses on diffusion processes for generative modeling, and its emphasis on tractability and flexibility could be beneficial for the ODE-based approach.
+
+    \item \textbf{Flow Matching for Generative Modeling}~\cite{lipman2022flow}.
+    The paper introduces a new paradigm for generative modeling using Continuous Normalizing Flows (CNFs), presenting the concept of Flow Matching for training CNFs at an unprecedented scale.
+    Flow Matching allows for simulation-free training based on regressing vector fields of fixed conditional probability paths, and it is shown to be more efficient and robust than alternative diffusion-based methods.
+    This paper is highly relevant to your work as it also focuses on generative modeling through flows, specifically Continuous Normalizing Flows, and introduces a simulation-free training approach that could be adapted to your ODE-based models.
+
+    \item \textbf{Knowledge Distillation in Iterative Generative Models for Improved Sampling Speed}~\cite{luhman2021knowledge}.
+    The paper presents a technique that uses knowledge distillation to accelerate the sampling process in iterative generative models like denoising diffusion probabilistic models.
+    The method condenses the multi-step denoising process into a single step, achieving sampling speeds comparable to GANs and VAEs.
+    Experiments on various datasets like CIFAR-10 and CelebA show that the approach generates high-quality samples without adversarial training.
+    This paper is relevant to this work as it focuses on improving the sampling speed in denoising diffusion models, but it does so through knowledge distillation rather than custom ODE solvers.
+
+\end{itemize}
+\end{comment}
+\begin{comment}
+Solvers:
+https://arxiv.org/pdf/2010.02502.pdf (DDIM)
+https://arxiv.org/pdf/2211.01095.pdf (DPM++)
+https://arxiv.org/pdf/2206.00927.pdf (DPM)
+https://arxiv.org/pdf/2204.13902.pdf (exponential integrators)
+https://arxiv.org/pdf/2308.02157.pdf (exponential integrators++)
+https://arxiv.org/abs/2206.00364 (EDM)
+Learning solvers:
+https://arxiv.org/pdf/2211.13449.pdf (operator learning)
+https://arxiv.org/pdf/2305.14677.pdf (subspace search) 
+https://arxiv.org/pdf/2202.05830.pdf (differentiating sample quality) % this one not yet
+Distillations:
+
+https://arxiv.org/pdf/2202.00512.pdf (progressive distillation)
+https://arxiv.org/pdf/2210.03142.pdf (distillation of guided diffusion models)
+
+Others, TBD:
+https://arxiv.org/abs/2309.06380
+\end{comment}
+
+
+
+
+\section{Experiments}
+
+
+
+
+\input{tables/cifar_edm}
+\textbf{Models and datasets.} Our method works with pre-trained models: we use the pre-trained CIFAR10~\citep{krizhevsky2009learning} model of \citep{song2020score} with published weights from EDM \citep{karras2022elucidating}. Additionally, we trained diffusion/flow models on the datasets: CIFAR10, AFHQ-256~\citep{choi2020stargan} and ImageNet-64/128~\citep{deng2009imagenet}. Specifically, for ImageNet, as recommended by the authors \citep{imagenet_website} we used the official \emph{face-blurred} data (64$\times$64 downsampled using the open source preprocessing scripts from \citet{chrabaszcz2017downsampled}). For diffusion models, we used an $\eps$-Variance Preserving ($\eps$-VP) parameterization and schedule \citep{ho2020denoising,song2020score}. For flow models, we used Flow Matching~\citep{lipman2022flow} with Conditional Optimal Transport (FM-OT), and Flow Matching/$v$-prediction with Cosine Scheduling (FM/$v$-CS) \citep{salimans2022progressive,albergo2022si}. Note that Flow Matching  methods directly provide the velocity vector field $u_t(x)$, and we converted $\eps$-VP to a velocity field using the identity in \citet{song2020score}. For conditional sampling we apply classifier free guidance~\citep{ho2022classifier}, so each evaluation uses two forward passes.  
+
+\input{tables/table_cifar_10} 
+\textbf{Bespoke hyper-parameters and optimization.} 
+As our base ODE solvers, we tested RK1 (Euler) and RK2 (Midpoint). Furthermore, we have two hyper-parameters $n$ -- the number of steps, and $L_\tau$ -- the Lipschitz constant from lemmas \ref{lem:bound_L_euler}, \ref{lem:bound_L_midpoint}. We train our models with $n \in \set{4,5,8,10}$ steps and fix $L_\tau=1$. Ground Truth (GT) sample trajectories, $x(t_i)$, are computed with an adaptive RK45 solver~\citep{shampine1986some}. We compute FID~\citep{heusel2017GANs} and validation RMSE (\eqref{e:rmse}) is computed on a set of 10K fresh noise samples $x_0\sim p(x_0)$; Figure \ref{fig:rmse_vs_iteration_imagenet} depicts an example of RMSE vs.~training iterations for different $n$ values. Unless otherwise stated, below we report results on best FID iteration and show samples on best RMSE validation iteration. Figures \ref{fig_a:scheme_imagenet128}, \ref{fig_a:scheme_imagenet64}, \ref{fig_a:scheme_cifar10} depict the learned Bespoke solvers' parameters $\theta$ for the experiments presented below; note the differences across the learned schemes for different models and datasets.
+
+\textbf{Bespoke RK1 vs.~RK2.} We compared RK1 and RK2 and their Bespoke versions on CIFAR10 and ImageNet-64 models (FM-OT and FM/$v$-CS). Figure \ref{fig:euler_vs_midpoint} and Figures \ref{fig_a:rk1_vs_rk2_cifar10}, \ref{fig_a:rk1_vs_rk2_imagenet64} show best validation RMSE (and corresponding PSNR). Using the same budget of function evaluations RK2/RK2-Bespoke produce considerably lower RMSE validation compared to RK1/RK1-Bespoke, respectively. We therefore opted for RK2/RK2-Bespoke for the rest of the experiments below. 
+
+\textbf{CIFAR10.} We tested our method on the pre-trained CIFAR10 $\eps$-VP model \citep{song2020score} that was released by EDM~\citep{karras2022elucidating}. In Figure \ref{fig:bes_vs_edm}, we compare our RK2-Bespoke solver to the EDM method, which corresponds to a particular choice of scaling, $s_i$, and time step discretization, $t_i$. Euler and EDM curves computed as originally implemented in EDM, where the latter achieves FID=$3.05$ at 35 NFE, comparable to the result reported by EDM. Using our RK2-Bespoke Solver, we achieved an FID of $2.99$ with 20 NFE, providing a $42\%$ reduction in NFE. Additionally, we tested our method on three models we trained ourselves on CIFAR10, namely $\eps$-VP, FM/$v$-CS, and FM-OT. Table \ref{tab:cifar10_comprison} compares our best FID for each model with different baselines demonstrating superior generation quality for low NFE among all dedicated solvers; \eg, for NFE=10 we improve the FID of the runner-up by over 34\%  (from 4.17 to 2.73) using RK2-Bespoke FM-OT model. Table \ref{tab:cifar10_a} lists best FID values for different NFE, along with the ground truth FID for the model and the fraction of time Bespoke training took compared to the original model's training time; with 20 NFE, our RK2-Bespoke solvers achieved FID within 8\%, 1\%, 1\% (resp.)~of the GT solvers' FID. Although close, our Bespoke solver does not match distillation's performance, however our approach is much faster to train, requiring $\sim$1\% of the original GPU training time with our naive implementation that re-samples the model at each iteration. Figure \ref{fig:nfe_vs_fid_cifar10} shows FID/RMSE/PSNR vs.~NFE, where PSNR is computed w.r.t.~the GT solver's samples.  
+
+\input{tables/graphs_imagenet}
+
+\input{tables/imagenet_table}
+\textbf{ImageNet 64/128.}
+We further experimented with the more challenging ImageNet-64$\times$64 / 128$\times$128 datasets. For ImageNet-64 we also trained 3 models as described above. For ImageNet-128, due to computational budget constraints, we only trained FM-OT (training requires nearly 2000 GPU days). Figure \ref{fig:nfe_vs_fid_main} compares RK2-Bespoke to various baselines including DPM $2^{\text{nd}}$ order~\citep{lu2022dpm}. As can be seen in the graphs, the Bespoke solvers improve both FID and RMSE. Interestingly, the Bespoke sampling takes all methods to similar RMSE levels, a fact that can be partially explained by Theorem \ref{thm:equivalence}. In Table \ref{tab:imagenet_64_and_128}, similar to Table \ref{tab:cifar10_a}, we report best FID per NFE for the Bespoke solvers we trained, the GT FID of the model, the \% from GT achieved by the Bespoke solver, and the fraction of GPU time (in \%) it took to train this Bespoke solver compared to training the original pre-trained model. Lastly, Figures \ref{fig:imagenet-64}, \ref{fig:imagenet-128}, \ref{fig:imagenet64_fm_ot_a}, \ref{fig:imagenet64_fm_cs_a}, \ref{fig:imagenet64_eps_pred_a}, \ref{fig:imagenet_128_a_1}, \ref{fig:imagenet_128_a_2} depict qualitative sampling examples for RK2-Bespoke and RK2 solvers. Note the significant improvement of fidelity in the Bespoke samples to the ground truth. 
+
+\textbf{AFHQ-256.} We tested our method on the AFHQ dataset~\citep{choi2020starganv2} resized to 256$\times$256 where as pre-trained model we used a FM-OT model we trained as described above. Figure \ref{fig:nfe_vs_metrics_afhq} depicts PSNR/RMSE curves for the RK2-Bespoke solvers and baselines, and Figures \ref{fig:imagenet-128} and \ref{fig:afhq_a} show qualitative sampling examples for RK2-Bespoke and RK2 solvers. Notice the high fidelity of the Bespoke generation samples. 
+
+
+
+    
+\input{tables/imagenet64_samples}
+\input{tables/imagenet128_afhq_samples}
+
+
+
+
+
+\section{Conclusions}
+
+This paper develops an algorithm for finding low-NFE ODE solvers custom-tailored to general pre-trained flow models. Through extensive experiments we found that different models can benefit greatly from their own optimized solvers in terms of global truncation error (RMSE) and generation quality (FID). Currently, training a Bespoke solver requires roughly 1\% of the original model's training time, which can probably be still be made more efficient (\eg, by using training data samples and/or pre-processing sampling paths). Lastly, considering more elaborate models of $\varphi_r(\cdot),t_r$ could provide further benefits in fast sampling of pre-trained models. 
+
+
+
+
+

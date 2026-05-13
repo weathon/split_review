@@ -1,0 +1,168 @@
+# Mark My Words: Repurposing LLMs for Specialized Domains via Ability Tokens
+
+- Decision: Reject
+- Scores: 6, 5, 5, 5
+
+## Abstract
+Large Language Models (LLMs) have demonstrated remarkable proficiency in natural language understanding and generation. However, their capabilities wane in highly specialized domains, such as biomedical sciences, which are sparsely represented in the pretraining corpus. In this work, we explore how to repurpose general LMs as specialized task solvers. We introduce a novel and systematic framework for adding markup-style language extensions (which we term *`ability tokens"*) to pretrained LMs. These tokens are learned embeddings appended to the LM's embedding matrix, preserving the pretrained weights and the model's original capabilities. We introduce two types of ability tokens: *domain markers*, which delimit and aid in the processing of specialized inputs (e.g., molecular formulas), and *functional tokens*, which guide the model on how to leverage these inputs to solve specific tasks (e.g., predicting molecule properties). During inference, these tokens are inserted into the input text to wrap specialized information and provide problem context. Experimental results show that (i) our markup extensions significantly boost performance in various specialized domains, such as protein and molecular property prediction, matching and outperforming expert models specifically tailored to these tasks, and (ii) we can learn the ability tokens separately and combine them in a modular fashion, achieving zero-shot generalization to  unseen tasks. Overall, our framework offers a promising method to enhance LMs with domain-specific knowledge while maintaining their general capacities.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper discusses the limitations of Large Language Models (LLMs) in highly specialized fields such as biomedical sciences and introduces a new framework to improve their performance in specialized tasks. The authors propose the use of "ability tokens" as domain markers to guide the model in specific tasks.
+
+The setting of this paper is interesting. While adding ability tokens is a common practice in aligning language models with new tasks and modalities, it is non-trivial as it results in changes in the early layers of LLM embeddings. The three-stage hierarchical training protocol is both novel and practical. Additionally, the authors evaluate the method across a wide spectrum of tasks, further demonstrating its applicability.
+
+### Strengths
+1. The paper is well-written, and the claims of the paper are supported by comprehensive experiments on a wide spectrum of tasks. The drug discovery experiments, in particular, are solid, given that biosequences deviate significantly from text, thereby qualifying as a distinctive modality.
+2. The method has good generalization properties (could generalize to unseen tasks). 
+3. The study introduces a novel approach that provides contribution to the field, particularly when compared to traditional prompt-tuning methods. The hierarchical training of ability tokens as proposed in the paper enhances the potential for generalization across varied tasks, and allows the combination of ability tokens, making parameter-efficient methods more suitable for multi-task learning.
+
+### Weaknesses
+1. The paper lacks ablation results, which is crucial to demonstrate the effectiveness of the ability tokens.
+
+### Questions
+1. What is the effectiveness of the 3-stage training process and how much each stage contributed to generalization results? 
+2. A common practice in adapting Llama to specialized domains is to add specialized tokens as words, such as <molecule></molecule>.  However, these tokens are not added as new tokens, but are tokenized into multiple tokens '<', 'molecule', '>',  and then use LORA to adapt the llm to specialized tasks. This method has shown effective in [1][2]. What is the advantage of the proposed methods to this way of adding ability tokens? 
+3. What is the data efficiency of the proposed method, compared to prompt tuning and LORA? 
+
+
+[1] Zhu, Deyao, et al. "Minigpt-4: Enhancing vision-language understanding with advanced large language models." arXiv preprint arXiv:2304.10592 (2023).
+[2] Liu, Haotian, et al. "Visual instruction tuning." arXiv preprint arXiv:2304.08485 (2023).
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper explores the repurposing of general language models (LMs) as specialized task solvers, particularly in domains that have limited representation in pre-training corpora. The authors propose the use of ability tokens, specifically domain markers and functional tokens, to enhance LMs' ability to handle specialized inputs. Domain knowledge is encoded in domain markers, while specific task knowledge is encoded in functional tokens. However, a major concern is that the performance seems to be primarily driven by overlap between the training data of the LLMs and the downstream tasks. Additionally, the experiments are mainly focused on one specific domain without testing the generalization of the approach to other domains.
+
+### Strengths
+- The paper presents a straightforward method to incorporate domain knowledge into LMs while maintaining the original knowledge encoded in the models' parameters.
+- The performance of the approach is not sensitive to different context lengths.
+
+### Weaknesses
+ - The contribution of data contamination to the final performance is unclear. The ability tokens, which generally correspond to dataset or task names, may result in LMs memorizing information about the datasets during pretraining. An analysis of this phenomenon is needed to understand the effectiveness of the method.
+- The proposed method is specifically designed for effective domain adaptation of LLMs, but it is only evaluated in the biomedical domain. Evaluations in other domains would strengthen the paper's findings.
+- More ablation studies are required to demonstrate the effectiveness of the ability tokens. For example, evaluating the llama-7b model with and without ability tokens for different tasks.
+- The experiments only utilize one model. Including results from other models would further support the conclusions.
+
+### Questions
+- Is there any specific procedure for initializing the embedding for ability tokens, or is it done in a standard manner?
+- Are the lengths of domain markers and functional tokens always the same, or can they vary depending on the task?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors design a framework for adding trainable special tokens (called ability tokens) to pre-trained language models (LMs). Embeddings of these special tokens are learned on the corpus of specialized domains in order to adapt the model to these domains. The authors introduce two types of ability tokens: domain markers and functional tokens. Domain markers are trained on the single-domain unlabeled corpus. Functional tokens are trained on single-domain and multi-domain labeled samples. During inference, these special tokens are inserted into the input text. Experimental results on machine translation, protein, and molecular property prediction achieve better performance compared with other domain adaption methods, such as LoRA and prompt tuning.
+
+### Strengths
+1. This method achieves better performance in the medical domain than other PEFT methods.
+2. These ability tokens can be combined to generalize to unseen tasks.
+3. Only a few parameters need to be trained for the domain adaption.
+
+### Weaknesses
+1. This method is similar to existing PEFT methods like Prompt-Tuning. I think it may lack novelties.
+2. Ablation experiments show that the effectiveness of domain markers is relatively limited.
+3. I think that training regression heads for numerical prediction problems may cause an unfair comparison with other adaption methods based on text generation.
+
+### Questions
+1. What are the main differences between your approach and Prompt Tuning? It would be helpful to add a discussion about this.
+2. Do you use the task-specific linear heads for other baseline methods, like LoRA and prompt tuning?
+3. What is the difference between ability tokens with text instructions used in chat-aligned LLMs?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work proposes a parameter-efficient finetuning approach similar to "prompt tuning", which inserts special tokens to the input and learns to adapt domains and shift behaviors based on the special tokens. Specifically, two types of tokens can be learned: "domain markers", which prepends to the input to indicate specific domains, and "functional tokens", which appends to the input to indicate specific tasks. The authors conduct experiments on: 1) Machine Translation, to show the proposed approach can achieve modularity and compositionality of different domains; 2) Molecular Property Prediction & Drug-Drug Interaction, where the approach achieves better performance than other baselines when adopting regression heads (rather than to predict discrete tokens); 3) Binding Affinity Prediction, where the approach operates on both Protein and Drug domains and achieves good performance.
+
+### Strengths
+- The proposed approach is an effective application of "prompt tuning" with certain adaptation; especially, it is proven effective achieving modularity and compositionality through experiments on Machine Translation and Drug-Drug Interaction. It is shown that modularizing domains and tasks is possible through learning those special tokens, which could derive zero-shot performance on unseen task domains by composition.
+  
+- The proposed approach is evaluated on multiple datasets across different domains, especially including Protein and Chemical Compounds, which are quite distant from natural languages, where it is able to obtain good performance on all of them through finetuning only a small amount of parameters.
+
+### Weaknesses
+ - The proposed approach is similar to "prompt tuning" and its related techniques. The mere adaptation is to provide a different set of tokens per domain/task, which itself is relatively trivial. The ability to achieve modularity and compositionality is also not as surprising, though it is still valuable to show it empirically.
+  
+- The state-of-the-art performance on Protein and Chemical Compounds seems to mainly come from using regression heads, rather than from this specific way of using the prompt tuning, as shown by Figure 3. **There are no side-by-side experiments comparing the traditional prompt-tuning and the proposed tuning both adopting regression heads or regular LM heads**. In the end, the proposed approach is essentially equivalent to prompt tuning, if not considering task/domain composition. Adding this side-by-side experiments on a specific task could help to show the advantages of the proposed setting.
+
+### Questions
+Is it possible to show the results of the regular prompt tuning with regression heads on the task of Descriptor Prediction or QED Prediction alone?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

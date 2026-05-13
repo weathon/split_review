@@ -1,0 +1,382 @@
+\title{NIMBA : Towards Robust and Principled Processing of Point Clouds With SSMs}
+
+\begin{abstract}
+
+
+Transformers have become dominant in large-scale deep learning tasks across various domains, including text, 2D and 3D vision. However, the quadratic complexity of their attention mechanism limits their efficiency as the sequence length increases, particularly in high-resolution 3D data such as point clouds. Recently, state space models (SSMs) like Mamba have emerged as promising alternatives, offering linear complexity, scalability, and high performance in long-sequence tasks. The key challenge in the application of SSMs in this domain lies in reconciling the non-sequential structure of point clouds with the inherently directional (or bi-directional) order-dependent processing of recurrent models like Mamba. To achieve this, previous research proposed reorganizing point clouds along multiple directions or predetermined paths in 3D space, concatenating the results to produce a single 1D sequence capturing different views. In our work we introduce a method to convert point clouds into 1D sequences that maintains 3D spatial structure with no need for data replication, allowing Mamba’s sequential processing to be applied effectively in an almost permutation-invariant manner. In contrast to other works, we found that our method does not require positional embeddings, and allows for shorter sequence lengths while still achieving state-of-the-art results in ModelNet40 and ScanObjectNN datasets and surpassing Transformer-based models in both accuracy and efficiency.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Today, the transformer architecture is the most common technology powering large-scale deep learning systems. Since their introduction by~\citet{vaswani2017attention}, transformers have been widely adopted in text~\citep{dubey2024llama, team2023gemini}, image~\citep{dosovitskiy2020image, touvron2021training, liu2021swin}, and video~\citep{bertasius2021space, tong2022videomae, liu2022video,wang2023videomae} data, as well as in the multimodal setting~\citep{radford2021learning,liu2024visual}. In 3D vision and particularly point cloud analysis, transformers achieve state-of-the-art results~\citep{Guo_2021,yu2022point, pang2022masked, wu2024point}, often surpassing convolution-based approaches~\citep{wu2019pointconv, li2018pointcnn} at scale.
+ While the structure of transformers is favorable on modern hardware, their softmax attention mechanism drastically affects the model complexity with respect to the sequence length (in text) or the number of patches~(in image/video/point clouds) -- which scales quadratically with respect to these quantities. Over the years, this issue inspired extensive research on alternative \textit{sequence mixer strategies}, such as separable attention~\citep{wang2020linformer, choromanski2020rethinking,lee2021fnet, chen2021skyformer,wortsman2023replacing, arora2024simple,ramapuram2024theory}, as well as the development more efficient GPU implementations of softmax attention~\citep{dao2022flashattention,dao2023flashattention,shah2024flashattention}. However, the most relevant leap forward on this issue arguably came in recently and coincided with the design of state-space models such as Mamba~\citep{gu2023mamba} as well as other parallelizable token mixers~\citep{poli2023hyena,de2024griffin, yang2023gated, qin2024hgrn2, yang2024parallelizing, beck2024xlstm}. SSMs are highly parallelizable RNN-like\footnote{Alternatively, SSMs can be seen as fast and well-parametrized linear attention mechanisms~\citep{dao2024transformers, sieber2024understanding, ali2024hidden}. This connection between RNNs and linear attention dates back to earlier works~\citep{katharopoulos2020transformers,schlag2021linear}.} \textit{sequential} blocks that sparked from the seminal work of~\citet{gu2020hippo,gu2022efficiently}, where complexity scales linearly with sequence length, unlocking long-context processing in several challenging applications such as audio~\citep{goel2022sashimi} and DNA modeling~\citep{nguyen2024hyenadna}. On top of improved efficiency in the long-context setting, Mamba, xLSTMs, and other new RNN/linear attention variants often show general improvements in downstream performance~(see empirical study on text in ~\citet{waleffe2024empirical}) and reasoning capabilities e.g. in the long-range arena~\citep{tay2020long} and other challenging text tasks where transformers can struggle~\citep{beck2024xlstm}. 
+Along with 2D vision~\citep{liu2024vmambavisualstatespace, zhu2024vision, li2024videomamba}, Mamba was soon applied to several 3D data domains~\citep{xing2024segmamba, zhang2024motion} and specifically to point clouds~\citep{liang2024pointmambasimplestatespace, zhang2024point, liu2024point}, where looks particularly promising since datasets such as ScanNet~\citep{dai2017scannet}, often contain over $100k$ points. Compared to the 1D setting such as audio and text, where Mamba (just like any RNN variant) naturally processes data left-to-right or bidirectionally without the need for positional embeddings~\citep{waleffe2024empirical}, 2D and 3D data is inherently not sequential and hence pose an intriguing conceptual challenge for the application of Mamba. Note that instead non-causal attention-based models are \textit{set operations}\footnote{As noted by~\citet{kazemnejad2024impact}, BERT encoders~\citep{devlin2019bertpretrainingdeepbidirectional} on text without positional embeddings are a bag-of-words model. Deep causal self-attention (decoders) can instead recover positional information at the second layer.}, where position is often added directly to the features~\citep{vaswani2017attention, su2024roformer} or to the attention matrix~\citep{press2021train}. As such, while 1D/2D and 3D data are conceptually similar in attention (i.e., set operation + positional information as a feature, see e.g.~\citet{dosovitskiy2020image}), they become puzzling when an \textit{order-sensitive} sequential block processes inputs. This motivates our question, which we explore in the 3D setting:
+
+\begin{center}
+    \textit{How shall we apply a sequential model to non-sequential data, e.g. a point cloud?}
+\end{center}
+
+Addressing this question is scientifically intriguing, timely, and crucial for fully harnessing the potential of new efficient attention variants in the 3D domain. While inspecting the constantly growing literature on Mamba applications in 3D vision, we can see two recurring patterns\footnote{Similar discussion would hold for 2D data, see e.g.~\citet{liu2024vmambavisualstatespace}.}.
+
+\begin{enumerate}[leftmargin=8mm]
+    \item[(A)] 3D point cloud data has to be converted into an \textit{ordered} sequence before Mamba can be applied. This has been achieved with different strategies such as reordering the points along axis and replicating the sequence~\citep{liang2024pointmambasimplestatespace, zhang2024point} or scanning it from different directions~\citep{liu2024point}.
+    \item[(B)] Much like in transformers, positional embedding are used. This information is conceptually redundant since (1) positional information is contained in the feature themselves, and (2) the ordering of patches along the constructed sequence is already used by Mamba implicitly. Note that in text, Mamba is often applied without positional embeddings~\citep{waleffe2024empirical}.
+\end{enumerate}
+
+While the performance of Mamba in 3D data already shows promise, often surpassing transformers in accuracy and processing speed, points A and B above showcase that applying Mamba to point clouds poses nontrivial challenges, potentially affecting robustness and generalization out of distribution. Towards understanding and improving our understanding of the optimal preprocessing strategies for Mamba-powered models for 3D data, we introduce the following contributions:
+
+\begin{enumerate}[leftmargin=6mm]
+\item We draw attention to the problem of sequence construction when applying Mamba to 2D or 3D data. We complement our discussion with both theoretical considerations on invariances and positional embeddings~(Sec.~\ref{sec:arrow}) and ablations~(Sec.~\ref{sec:exp}).
+    \item We introduce \alg\footnote{The name \alg is derived from the combination of \texttt{Nimbus} (latin for ``dark cloud'') and \texttt{Mamba}.}, a Mamba-like model that feeds 3D data points based on an intuitive 3D-to-1D reordering strategy that preserves the spatial distance between points~(Sec.~\ref{sec:nimba}). This strategy allows for \textit{safe removal of positional embeddings} without affecting~(most times, improving) performance. This is in stark contrast to all previously introduced Mamba strategies in point clouds where our ablation reveal a performance drop when positional emebddings are not used. Along with improved efficiency, our results~(Sec.~\ref{sec:exp}) showcase how principled ordering along a point cloud can improve performance of Mamba models in this setting.
+    \item We show how our ordering strategy in \alg drastically improves robustness of the model against data transformations such as rotations and jittering~(Sec.~\ref{sec:exp}).
+\end{enumerate}
+We compare our contributions with previous work in Table \ref{tab:model_comparison}.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lcccc}
+        \toprule
+        \textbf{Model} & \textbf{Backbone}  & \textbf{Sequence length} &\textbf{Bidirectional} &\textbf{Pos embedding} \\
+        \midrule
+        PCT          & Transformer  & $N$& \texttimes & \checkmark \\
+        PointMAE     & Transformer & $N$ & \texttimes & \checkmark \\
+        PointMamba   & Mamba & $3N$ & \texttimes &\checkmark \\
+        Point Cloud Mamba & Mamba & $3N$ & \checkmark & \checkmark \\
+        OctreeMamba  & Mamba & $N$ & \checkmark & \checkmark\\
+        Point Tramba & Hybrid & $N$ & \checkmark & \checkmark \\
+        PointABM     & Hybrid & $N$ & \checkmark & \checkmark \\
+        \alg~(Ours)  & Mamba & $N$ & \texttimes &\texttimes \\
+        \bottomrule
+    \end{tabular}
+    \caption{Comparison of Models based on Architecture, Sequence Length, Directionality and Positional Embedding. We denote with $N$ number of points in the point cloud.}
+    \label{tab:model_comparison}
+\end{table}
+
+
+
+\section{Related Work}
+
+\label{sec:rw}
+\paragraph{Point Cloud Transformers.} Transformers, initially designed for NLP, have proven to be highly effective in point cloud analysis due to their global attention mechanisms and permutation invariance properties. Early models like Vision Transformer (ViT)~\citep{dosovitskiy2020image} demonstrated that transformers could outperform CNNs in classification by applying attention directly to patches. This success inspired their application to point clouds, where global feature modeling is crucial.\\
+Point-BERT~\citep{yu2022point} applied BERT’s masked modeling to 3D data, using a discrete tokenizer to convert point patches into tokens and self-supervised pre-training to recover masked points. Point-MAE~\citep{pang2022masked} further advanced this with masked autoencoding, learning latent representations by reconstructing missing parts from masked inputs. These methods outperformed traditional models by leveraging large unlabeled datasets, but their self-attention’s quadratic complexity limits scalability. OctFormer~\citep{Wang_2023} addressed this by using octree-based attention, reducing computational costs through local window partitioning while maintaining performance for large-scale tasks.PointGPT~\citep{chen2023pointgptautoregressivelygenerativepretraining} uses an autoregressive framework inspired by GPT, treating point patches as sequential data to predict the next patch. This pre-training strategy shows strong generalization in few-shot and downstream tasks, enhancing transformers’ flexibility in point cloud processing. Similarly, PCT~\citep{Guo_2021} leverages transformer architecture with permutation invariance to process unordered point sequences. By using farthest point sampling and nearest neighbor search, PCT captures local context effectively, achieving state-of-the-art performance in tasks like shape classification and part segmentation.
+
+
+\paragraph{Point Cloud State Space Models.} The use of SSMs in point cloud analysis has recently gained attention as a promising approach to address the computational limitations of transformer-based architectures. Although transformers effectively capture global dependencies, their quadratic complexity impedes scaling to high-resolution point clouds. In contrast, SSMs like the Mamba architecture offer linear complexity and efficient long-range modeling. Yet a primary challenge in applying SSMs to point clouds is the unordered nature of the data, which does not align well with the sequential processing of SSMs. To address this, researchers have already proposed methods to convert point clouds into sequences.
+
+One common strategy among recent works is to design ordering methods that preserve the spatial relationships within point clouds when converting them into sequences. For example, PointMamba~\citep{liang2024pointmambasimplestatespace} and Point Cloud Mamba (PCM)~\citep{zhang2024point} introduce axis-wise reordering techniques and sequence replication to improve SSMs' ability to capture both local and global structures. Other studies use hierarchical data structures to reflect the spatial hierarchy, such as octree-based ordering in OctreeMamba~\citep{liu2024point}, which organizes points in a $z$-order sequence, maintaining spatial relationships while capturing features at multiple scales. While preserving spatial relationships during serialization is crucial, enhancing local feature extraction within SSMs is equally important for point cloud analysis. Although SSMs model long-range dependencies efficiently, capturing fine-grained local details remains important. Mamba3D~\citep{han2024mamba3denhancinglocalfeatures} addresses this by introducing a Local Norm Pooling block to improve local geometric representation. It also employs a bidirectional SSM operating on both tokens and feature channels, balancing local and global structure modeling without increasing computational complexity.
+
+Following~\citep{waleffe2024empirical, dao2024transformers}, Another line of research combines the strengths of Transformers and SSMs for better performance and efficiency. PoinTramba~\citep{wang2024pointrambahybridtransformermambaframework} integrates Transformers to capture detailed dependencies within point groups, while Mamba models relationships between groups using a bidirectional importance-aware ordering strategy. By reordering group embeddings based on importance scores, this approach improves performance and addresses random ordering issues in SSMs. SSMs are also applied to point cloud completion and filtering. 3DMambaIPF~\citep{zhou20243dmambaipfstatespacemodel} uses Mamba’s selection mechanism with HyperPoint modules to reconstruct point clouds from incomplete inputs, preserving local details often lost in Transformers. For filtering, it combines SSMs with differentiable rendering to reduce noise in large-scale point clouds, improving alignment with real-world structures and handling datasets with hundreds of thousands of points where other methods struggle.
+
+These works show that SSMs effectively address key challenges in point cloud analysis, offering efficient and scalable solutions for various tasks. With advances in serialization, feature extraction, and hybrid architectures, SSMs have become a valuable approach for advancing 3D vision applications. In this work, our goal is to further strengthen these results by offering a simple, principled and robust solution for constructing input sequences input of Mamba-like models. 
+
+
+
+\section{Model Design}
+
+We start in Sec.~\ref{sec:basics} by overviewing the processing strategies common in the point cloud literature. In Sec.~\ref{sec:recap}, we continue by recalling the basic properties of Mamba and self attention, highlighting their connections. We continue in Sec.~\ref{sec:arrow} by describing how Mamba-like processing of point cloud data leads to interesting considerations around the effects of assigning an order to patches in 3D space. We then analyze the PointMamba strategy in Sec.~\ref{sec:pointmamba} and in Sec~\ref{sec:nimba} we describe our methodology.
+\subsection{Basic Strategies in Point Cloud Analysis}
+\label{sec:basics}
+
+We outline the typical pipeline used for point cloud analysis in recent deep models. These are not specific to our model, but will allow us to make connections and simplify the discussion.
+
+\paragraph{Preprocessing.} The goal of the preprocessing phase is to reduce the cardinality of the point cloud while preserving the structure of the data, allowing for more efficient computation in subsequent stages. Formally, let $\mathcal{P} = \{ \mathbf{p}_i \mid \mathbf{p}_i \in \mathbb{R}^3, i = 1, \dots, N \}$ represent the point cloud, where $N$ is the total number of points, and $\mathbf{p}_i = (x_i, y_i, z_i)$ denotes the 3D coordinates of each point. After normalizing the points, a 2-step process is often followed:
+\begin{enumerate}[leftmargin=5mm]
+    \item \textit{Center Selection:} $n_c$ points are selected using the Farthest Point Sampling (FPS) algorithm. FPS iteratively selects points that are farthest from each other, ensuring that the sample is representative of the original point cloud. These points are referred to as "centers" $\{C_i\}_{i=1}^{n_c}$, providing \textit{global} information about the object.
+
+    \item \textit{Patch Creation:} For each center, $n_p$ nearest points are selected using the k-Nearest Neighbors (kNN) algorithm. This results in a set of patches $\{P_i\}_{i=1}^{n_c}$, each centered around one of the chosen centers, capturing more localized information about the object.
+\end{enumerate}
+The values of $n_c$ and $n_p$ are hyperparameters of this preprocessing stage.
+\paragraph{Patch Embedding.} Each patch $P_i$ is embedded into a fixed-dimensional vector $\mathbf{p}_i$ through a sequence of expansions, convolutions, and linear projections. This embedding process is a pointwise transformation from $\mathbb{R}^{\text{BS} \times n_p \times 3} \to \mathbb{R}^{\text{BS}\times n_p \times d_e}$. Here $\text{BS}$ is the batch size, $n_p$ is the number of points per patch, and $d_e$ is the embedding dimension. This embedding captures local geometric information within each patch, which is crucial for understanding the finer details of the object structure.
+
+\paragraph{Center Embedding.} Each center $C_i$ is embedded into a fixed-dimensional vector $\mathbf{c}_i$ to capture global \textit{positional information} and provide context for the relationships between different patches. This embedding process is a pointwise transformation from $\mathbb{R}^{\text{BS} \times n_c \times 3} \to \mathbb{R}^{\text{BS}\times n_c \times d_e}$.
+Following the setting of transformer-based models ~\citep{vaswani2017attention}, the center embedding serves a similar purpose to positional embeddings in point cloud analysis. By focusing on capturing spatial relationships across the entire point cloud, it is believed to provide a complementary view to the local information captured by patch embeddings.
+
+\subsection{Attention and Mamba}
+\label{sec:recap}
+In this subsection, we denote by $X\in \R^{N\times d}$ a generic input consisting of $N$ elements in $d$ dimensions. In the context of Sec.~\ref{sec:basics}, $X$ is the sequence of patch embeddings possibly augmented with positional embeddings. We denote by $X_i$ the $i$-th row of $X$, corresponding to an input token in text or a patch/point cluster in vision. We describe attention and Mamba-like processing of $X$ yielding updated representations $Y\in \R^{N\times d}$.
+
+\paragraph{Attention.} The standard self-attention block~\citep{vaswani2017attention} consists of three matrices: $W_Q$, $W_K$, and $W_V$, which are the learnt parameters of the model. These matrices, when multiplied with the input $X\in \R^{N\times d}$, yield the queries $Q \in \mathbb{R}^{N\times d}$, keys $K \in\mathbb R^{N\times d}$, and values $V \in \mathbb R^{N\times d}$: $Q = XW_Q$, $K = XW_K$, $V = XW_V$. These are combined to produce the output $Y\in\R^{N\times d}$. 
+\begin{equation}\label{eqn:attention}
+    Y = \mathrm{softmax}\left(\frac{QK^\top}{\sqrt{d}}\right) V,
+\end{equation}
+where softmax is applied row-wise. Assuming for simplicity $W_V$ is the identity matrix, we get 
+\begin{equation}\label{eqn:attention_matrix}
+    Y = \Phi^X_{\text{SDPA}} \cdot X,
+\end{equation}
+where $\Phi_{\text{SDPA}}\in\R^{N\times N}$ mixes tokens as follows: 
+\begin{equation}\label{eq:att_sdpa}
+    \Phi_{\text{SDPA}}^X = \mathrm{softmax}\begin{pmatrix}
+    \frac{1}{\sqrt{d}}X_0 W_Q W_K^\top X_0^\top & \frac{1}{\sqrt{d}}X_0 W_Q W_K^\top X_1^\top & \cdots & \frac{1}{\sqrt{d}}X_0 W_Q W_K^\top X_N^\top \\
+    \frac{1}{\sqrt{d}}X_1 W_Q W_K^\top X_0^\top & \frac{1}{\sqrt{d}}X_1 W_Q W_K^\top X_1^\top & \cdots & \frac{1}{\sqrt{d}}X_1 W_Q W_K^\top X_N^\top \\
+    \vdots & \vdots & \ddots & \vdots \\
+    \frac{1}{\sqrt{d}}X_N W_Q W_K^\top X_0^\top & \frac{1}{\sqrt{d}}X_N W_Q W_K^\top X_1^\top & \cdots & \frac{1}{\sqrt{d}}X_N W_Q W_K^\top X_N^\top
+    \end{pmatrix}.
+\end{equation}
+In causal self-attention, used e.g. in language modeling, the upper triangular portion of $\Phi_{\text{SDPA}}$ is set to $0$. For vision applications, $\Phi_{\text{SDPA}}$ is often used without masking.
+
+\paragraph{Mamba.} Architectures based on state-space models~(SSMs)~\citep{gu2022efficiently,gu2023mamba,dao2024transformers} compute the output $Y$ through a dynamic recurrence of input signals. $X$ is seen as a time-series where time flows from left to right: $X_1, X_2, \dots, X_N$. Starting from $Z_{i-1}=0\in\mathbb{R}^n$
+\begin{subequations}\label{eq:ssm}
+\begin{align}
+    Z_{i} &= A_{i}Z_{i-1} + B_iX_i \\
+    Z_i &= C_iZ_i + D_i X_i,
+\end{align}
+\end{subequations}
+where $Z_i$ is the hidden state of the system, and the dynamic matrices of appropriate dimensions $A_i, B_i, C_i, D_i$ are functions of the model parameters as well as the input. The S6 block~\citep{gu2023mamba,dao2024transformers} parametrizes the recurrence as
+\begin{equation}\label{eq:mamba}
+     A_i = e^{-\Delta_i W_A}, \qquad B_i = \Delta_i W_B X_i, \qquad
+     C_i = W_C X_i, \qquad D_i = W_D X_i
+\end{equation}
+and $\Delta_i = \mathrm{softplus}(W_\Delta X_i + b_\Delta)$, with $W_\Delta$, $W_A$, $W_B$, $W_C$, $W_D$ as learnt \textit{matrices} of appropriate dimensions, and $b_\Delta$ is a learnt bias. It is well known~\citep{katharopoulos2020transformers, ali2024hidden, dao2024transformers, sieber2024understanding} that this system can be cast into an attention matrix representation~\footnote{In modern variants of Mamba such as Mamba2~\citep{dao2024transformers}, the hidden dimension of $Z$ in Eq.~\ref{eq:ssm} is such that $\Phi_{\text{S6}}\in\R^{N\times N}$. For earlier variants, the transformation is conceptually similar but has to be written in a slightly different form.}, also known in the SSM literature as \textit{convolutional} representation~\citep{gu2021combining}:
+\begin{equation}\label{eqn:attention_matrix_mamba}
+    Y = \Phi_{\text{S6}}^X \cdot X,
+\end{equation}
+where 
+\begin{equation}\label{eq:att_mamba}
+    \Phi^X_{\text{S6}} = \begin{pmatrix}
+    C_0B_0 + D_0 & 0 & \cdots & 0 \\
+    C_1A_1B_0 & C_1B_1 + D_1 & \cdots & 0 \\
+    \vdots & \ddots & \ddots & \vdots \\
+    C_N\prod_{k=1}^{N} A_k B_0 & \cdots & C_NA_{N}B_{N-1} & C_NB_N + D_N
+    \end{pmatrix}.
+\end{equation}
+
+\paragraph{Architecture.} Attention and S6 layers are often used in deep networks by interleaving with MLPs, normalization components and skip connections.
+\subsection{Positional Embeddings and arrow of \textit{time} in Mamba and Attention}
+\label{sec:arrow}
+There are two crucial macroscopic differences between $\Phi_{\text{SDPA}}$ and $\Phi_{\text{S6}}$:
+\begin{itemize}[leftmargin=4mm]
+    \item $\Phi_{\text{S6}}$ is lower triangular, while $\Phi_{\text{SDPA}}$ is not.
+    \item $\Phi_{\text{SDPA}}$ has an \textit{isotropic} structure: entries close to the diagonal are computed similarly to entries far from the diagonal. Instead, in $\Phi_{\text{S6}}$ the distance to the diagonal affects computation: it affects in the number of $A_i$s multiplied together in the formula for each entry.
+\end{itemize}
+This divergence between Mamba and Softmax attention is quite deep, and implications are strictly related to the two propositions below:
+
+\begin{proposition}[Softmax Attention]
+\label{prop:att_set}
+    $Y=\Phi^X_{\text{SDPA}}\cdot X$ is {invariant} to row-wise permutations $\Pi$ of the input. For all $X, \Pi$ and model parameters, we have $\Phi^{\Pi(X)}_{\text{SDPA}}\cdot\Pi(X)=\Pi(\Phi^X_{\text{SDPA}}\cdot X)$. 
+\end{proposition}
+
+\begin{proposition}[Mamba]
+    \label{prop:mamba_not_set}
+    $Y=\Phi_{\text{S6}}^X \cdot X$ is \textbf{not invariant} to row-wise permutations $\Pi$ of the input: there exists $X,\Pi$ and model parameters such that $\Phi^{\Pi(X)}_{\text{S6}}\cdot\Pi(X) \ne \Pi(\Phi_{\text{S6}}\cdot X)$.
+\end{proposition}
+
+ 
+
+\paragraph{Pros of being sequential.} \citet{cirone2024theoretical} proved that S6 -- with no need for positional embeddings -- can simulate any autonomous nonlinear dynamical system evolving in the direction $i\to i+1$. This result is rooted in more general statements regarding Turing Completeness of RNNs~\citep{siegelmann1992computational, chung2021turing}. Indeed, in language modeling, Mamba is used \textit{without positional embeddings}~\citep{waleffe2024empirical}, in contrast to Softmax Attention without masking which requires positional embedding information capture distance information within $X$\footnote{\citet{kazemnejad2024impact} recently proved that causal self-attention can instead recover positional information in 1D structures. Yet, modern practice still adopts positional embeddings by default also in this setting.}. 
+
+\paragraph{Cons of being sequential.} While in the text is convenient to drop positional embeddings, in the 2D and 3D applications, the notion of ``position'' cannot be easily captured by 1D ordering in a sequence: when processing data $X$ where each $X_i$ relates to a precise position in space, the output $Y$ crucially depends on the chosen order the $X_i$s are arranged into -- in contrast with softmax attention~(see propositions above). In a point cloud, we might order along the principal axis in 3D space and feed point clusters one at a time along these axes~\citep{liang2024pointmambasimplestatespace} or along an octree-determined path~\citep{liu2024point}. The output of S6, in this case, still depends on the processing order, regardless of the inclusion of additional positional embeddings in $X$ and despite the potential bidirectional application of such models.
+
+
+In this paper, our goal is to work towards a principled strategy for processing point clouds with inherently sequential models such as Mamba. We first describe in-depth one existing approach~\citep{liang2024pointmambasimplestatespace} in Sec.~\ref{sec:pointmamba} and then propose a patch reordering strategy that is able to match or improve performance compared to existing approaches, without requiring positional embedding but \textit{relying solely on the sequential patch ordering} we introduce. This both reveals sensitivity to Mamba in sequence construction and potential for future developments using our strategy.
+\subsubsection{PointMamba Strategy}
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/order.pdf}
+    \caption{Ordering Strategy of \alg and PointMamba.}
+    \label{fig:ordering}
+\end{figure}
+
+\label{sec:pointmamba}
+
+Despite the conceptual difficulty in processing 3D data with a sequential models, several approaches have been tested in the the literature~(see Sec.~\ref{sec:rw}). We here present the strategy proposed by PointMamba~\citep{liang2024pointmambasimplestatespace}: Following the notation of Sec.~\ref{sec:basics}, centers $\{C_i\}_{i=1}^{n_c}$ are first sorted along each axis $(x, y, z)$ independently, resulting in three separate \textit{ordered} sequences: $(C_i^x)_{i=1}^{n_c}$, $(C_i^y)_{i=1}^{n_c}$, and $(C_i^z)_{i=1}^{n_c}$. For each axis-sorted sequence, we obtain the corresponding patch embeddings $\{\mathbf{p}_i\}$ and center embeddings $\{\mathbf{c}_i\}$, which are then concatenated in the three orders above to form the input sequence $X$.
+
+This strategy allows for successful processing, as we report in Sec.~\ref{sec:exp}, yet has several weaknesses:
+\begin{itemize}[leftmargin=5mm]
+    \item The method results in the sequence length being tripled, introducing redundancy and negatively affecting efficiency.
+    \item Centers that are close in the 3D space may not be adjacent in the sequence, which can affect the model's robustness and ability to capture spatial relationships effectively
+    \item As we show in Sec.~\ref{sec:exp}, this method is highly sensitive to the presence of positional embedding information. While this is common in standard attention-based architectures, it is less natural in Mamba-based models. In addition, it increases number of parameters and introduces additional redundancy.
+\end{itemize}
+
+
+
+\subsubsection{\alg Strategy}
+\label{sec:nimba}
+To overcome the limitations of the PointMamba strategy, we propose the \textbf{\alg} approach, designed to better maintain geometric relationships by ensuring that consecutive centers in the 1D sequence fed to the model are close in 3D space. The \alg strategy is based on the concept of local proximity preservation:
+
+\begin{enumerate}[leftmargin=5mm]
+    \item \textit{Initial Axis-Wise Ordering:} Initially, centers are flattered by ordering along the y-axis. Any initial order could work, but we chose the y-axis as empirical results indicated that this ordering reduces the computational cost of the following phase.
+
+    \item \textit{Proximity Check:} We scan the sequence obtained previously and we iteratively check the distance between the current and the next center. If the distance exceeds a predefined threshold $r$, we look for a center along the sequence that is near enough to the starting center and place it next to it. If no suitable center is found within the threshold, the sequence proceeds to the next center without modification. In this way, we ensure that consecutive centers in the sequence have a distance less than $r$
+\end{enumerate}
+
+Mathematically, the proximity check can be described as $\| C_i - C_{i+1} \| < r$, where $\| \cdot \|$ represents the Euclidean distance in 3D space. The choice of $r$ is crucial: a high threshold value (e.g., $r \geq 2\sqrt{3}$, the diagonal of a unit cube) means that the sequence remains similar to the initial order since the requirement will always be satisfied. Instead, using a low threshold (e.g., $r = 0$) is computationally expensive since each center would be compared to all the others in the sequence, and will result in an ordering identical to the initial axis-wise order, as no centers will be considered close enough to trigger reordering. In our experiment we found $r = 0.8$ to be a good balance between quality of reordered sequence and computational cost. Figure \ref{fig:model} show the complete pipeline of \alg
+
+Figure \ref{fig:ordering} show the sequence created from the two strategies. When comparing to the PointMamba approach, \alg does not rely on positional embeddings and doesn't replicate the sequence: the reordering strategy proposed leverages the spatial relationships of points, allowing the model to rely only on the patch embedding, thus enhancing accuracy and stability.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]{figures/model.pdf}
+    \caption{Overview of \alg pipeline.}
+    \label{fig:model}
+\end{figure}
+
+
+
+
+
+
+
+
+\section{Experimental Results}
+
+\label{sec:exp}
+
+}. Rather than fine-tuning a pre-trained model, we trained from scratch to better highlight the difference between each setting. We report the grid search process used to select the learning rates for reproducing experiments from other models. We dedicate to all methods we reproduce the same tuning efforts as \alg, and repeat all experiments three times and report the results as mean accuracy $\pm$ standard deviation.
+\subsection{Object Classification}
+We evaluate our proposed model, \alg, against various baseline models on multiple object classification benchmarks, including ModelNet~\citep{wu20153dshapenetsdeeprepresentation} and three versions of ScanObjectNN (OBJ-BG, OBJ-ONLY, and PB-T50-RS from~\citet{uy2019revisitingpointcloudclassification}). Results are summarized in Table \ref{tab:accuracy_comparison}.
+
+\begin{table}[ht!]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Backbone} & \textbf{Param. (M)↓} & \multicolumn{4}{c}{\textbf{Accuracy (\%)↑}} \\ 
+\cmidrule(lr){4-7}
+               &                  &                    & \textbf{ModelNet}  &  \textbf{OBJ-BG} & \textbf{OBJ-ONLY} & \textbf{PB-T50-RS}\\ 
+\midrule
+PointNet~\citep{qi2017pointnetdeeplearningpoint}$^*$      & Neural Network        & 3.5    & 89.2    & 73.3  & 79.2 & 68.8           \\  
+PointNet++~\citep{qi2017pointnetdeephierarchicalfeature}$^*$ &      Neural Network         & 1.5     & 90.7    & 82.3    & 84.3 & 77.9       
+\\  
+PCT~\citep{Guo_2021}$^*$                 & Transformer & 2.9                 & 90.17              & -        & - & -            \\ 
+\midrule
+Point Mamba$^\dagger$ & Mamba     & 12.3    & 92.08 $\pm$ 0.16     &87.80 $\pm$ 0.72 & 87.20 $\pm$ 0.88 & 82.20 $\pm$ 0.45\\  
+\textbf{\alg~(Ours)}                      &                Mamba           & 12.3        & \textbf{92.10 $\pm$ 0.14}     & \textbf{89.06 $\pm$ 0.42} & \textbf{89.29 $\pm$ 0.23} & \textbf{83.91 $\pm$ 0.38}  \\ 
+\midrule
+Point-MAE$^\dagger$  &    Transformer    & 22.1    & 92.30 $\pm$ 1.02     & 86.77 $\pm$ 0.91    & 86.83 $\pm$ 0.78 & 81.23 $\pm$ 0.77 \\ 
+PointMamba$^\dagger$ & Mamba     & 23.86    &  92.08 $\pm$ 0.19     & 88.01 $\pm$ 0.77  & 86.49 $\pm$ 0.49 & 83.01 $\pm$ 0.82 \\  
+\textbf{\alg~(Ours)}                      &                Mamba           & 23.86        & \textbf{92.10 $\pm$ 0.14}     & \textbf{89.80 $\pm$ 0.36} & \textbf{89.76 $\pm$ 0.37} & \textbf{84.21 $\pm$ 0.65}\\ 
+\bottomrule
+\end{tabular}
+}
+\caption{Accuracy on classification tasks. Different scales are reported. $^*$ are values reported from the PointMamba paper ~\citep{liang2024pointmambasimplestatespace}, while $^\dagger$ are our reproducing choosing the best-performing learning rate for each model and task.}
+\label{tab:accuracy_comparison}
+\end{table}
+
+\textbf{Transformer-based Models.} Transformer-based models such as PCT and Point-MAE achieve competitive accuracies on these benchmarks. However, \alg surpasses these models by up to $\approx 2\%$ on several datasets while using fewer parameters. Importantly, \alg achieves these improvements without employing positional embeddings.
+
+\textbf{Mamba-based Models.} For Mamba-based architectures, our baseline PointMamba achieves strong performance. \alg exceeds PointMamba across all datasets, with accuracy improvements of up to 1.5\%. Additionally, when scaling up to 23.86M parameters, \alg continues to enhance its performance, surpassing the larger PointMamba model. These results demonstrate that \alg effectively leverages additional parameters to improve accuracy while maintaining efficiency.
+
+\begin{wraptable}[7]{r}{0.55\textwidth}  % 'r' for right, 'l' for left
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Models} & \textbf{Param.(M)↓} & \multicolumn{2}{c}{\textbf{Time (m)↓}} \\ 
+\cmidrule(lr){3-4}
+                 &  & \textbf{ModelNet}  & \textbf{ScanObjectNN} \\
+\midrule
+PointMamba$^\dagger$     & 17.4        & 500       & 240       \\ 
+\textbf{\alg(Ours)}  & \textbf{17.4} & \textbf{430} & \textbf{200}       \\ 
+\bottomrule
+\end{tabular}}
+\caption{Training time comparison : 300 epochs}
+\label{tab:time_comparison}
+\end{wraptable}
+\textbf{Training Efficiency.} Beyond accuracy, we also assess the training efficiency of \alg compared to PointMamba. As shown in Table \ref{tab:time_comparison}, \alg reduces the training time by $\approx 14\%$ on ModelNet and $\approx 17\%$ on ScanObjectNN after $300$ epochs of training. This improvement further highlights the efficiency of our model.
+
+Overall, \alg outperforms both transformer-based and Mamba-based baseline models without relying on positional embeddings, demonstrating its effectiveness in object classification tasks.
+
+
+\subsection{Part Segmentation}
+
+\begin{wraptable}[11]{r}{0.55\textwidth}  % 'r' for right, 'l' for left
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Models} & \textbf{Param.(M)↓} & \textbf{Cls. mIoU(\%)↑} & \textbf{Inst. mIoU(\%)↑} \\ 
+\midrule
+PointNet$^*$       & -           & 80.39       & 83.7        \\ 
+PointNet++$^*$     & -           & 81.85       & 85.1        \\ 
+Point-MAE$^\dagger$      & 27.1        & 83.91 $\pm$ 0.43       & 85.7 $\pm$ 0.23       \\ 
+PointMamba$^\dagger$     & 17.4        & 83.37 $\pm$ 0.17       & 85.07 $\pm$ 0.12        \\ 
+\textbf{\alg(Ours)}  & \textbf{17.4} & \textbf{84.36 $\pm$ 0.06} & \textbf{85.54 $\pm$ 0.05}       \\ 
+\bottomrule
+\end{tabular}}
+\caption{Performance comparison on the ShapeNetPart segmentation task. $^*$ indicates values reported in the PointMamba paper ~\citep{liang2024pointmambasimplestatespace}, while $^\dagger$ denotes our reproduced results using the best-performing learning rates for each method.}
+\label{tab:seg}
+\end{wraptable}
+We evaluate \alg on the part segmentation task using the ShapeNetPart dataset. As shown in Table \ref{tab:seg}, we report the mean IoU (mIoU) for both class-level (Cls.) and instance-level (Inst.) metrics. \alg achieves higher Cls. mIoU compared to both Transformer-based and Mamba-based models and demonstrates competitive performance in Inst. mIoU. Specifically, \alg outperforms our Mamba-based baseline, PointMamba, by $\approx 1\%$ in class-level accuracy while maintaining similar instance-level performance. Since all models are tuned to best independently, we attribute this performance boost to our improved reordering strategy.% These results highlight the effectiveness of \alg in accurately predicting detailed labels for each point within 3D models.
+
+
+\subsection{Ablations}
+Here, we present a series of ablation studies to investigate the impact of the different components even further. In particular, in Sec.~\ref{sub:pe} we show and compare the effects of positional embedding, in Sec.~\ref{sub:robustness} we test the robustness of models when augmentation and noise are applied and in Sec.~\ref{sub:hydra} we see how a bidirectional implementation of Mamba affects performances. All the ablations were made on the classification task on the ScanObjectNN dataset OBJ-BG variation.
+
+\subsubsection{Effect of Positional Embedding}\label{sub:pe}
+\begin{wraptable}[11]{r}{0.6\textwidth}  % 'r' for right, 'l' for left
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Models} & \textbf{Acc. with PE(\%)↑} & \textbf{Acc. without PE(\%)↑} & \textbf{Gap(\%)↓} \\ 
+\midrule
+Point-MAE$^\dagger$       & $86.77 \pm 0.91$     & $80.24 \pm 0.87$       & $6.53 \pm 1.78 $      \\
+PointMamba$^\dagger$      & $87.80 \pm 0.72$        & $83.69 \pm 0.76 $      & $4.11 \pm 1.48$       \\ 
+PoinTramba$^\dagger$     & $92.42 \pm 0.48$         & $86.46 \pm 0.34 $     & $5.96 \pm 0.82 $      \\ 
+\textbf{\alg(Ours)}  & \textbf{89.80} $\pm$ \textbf{0.36} & \textbf{88.12} $\pm$ \textbf{0.54} & \textbf{1.68} $\pm$ \textbf{0.90}       \\ 
+\bottomrule
+\end{tabular}}
+\caption{Performance comparison on the ShapeNetPart segmentation task. $^*$ indicates values reported in the PointMamba paper ~\citep{liang2024pointmambasimplestatespace}, while $^\dagger$ denotes our reproduced results using the best-performing learning rates.}
+\label{tab:positionembedding}
+\end{wraptable}
+
+To investigate the impact of positional embedding, we conducted a series of experiments comparing transformer, Mamba, and hybrid models. As shown in Table \ref{tab:positionembedding}, performance generally declines when positional embedding is removed, affecting both models with attention blocks and Mamba-based models. This includes PoinTramba, which, despite outperforming \alg under normal conditions, relies heavily on positional embedding. Without it, \alg achieves better results. We observed that many Mamba-like models using positional embedding often replicate sequences or add bidirectionality to maintain performance. We hypothesize this is due to redundancy: when sequences are insufficiently meaningful, the model scans them multiple times for better information retrieval. In contrast, \alg’s reordering strategy preserves sequence length and performs well without positional embedding.
+
+\subsubsection{Robustness}\label{sub:robustness}
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/nimba_ablation.pdf}
+    \caption{Results of applying noise to the training set, test set, or both. \alg demonstrates greater robustness compared to PointMamba, particularly when the noise does not alter the spatial distances between points, such as in the case of rotation.}
+    \label{fig:robustness}
+\end{figure}
+To further explore the differences between PointMamba and \alg, we tested both models by applying the following noise injections to the input point clouds:
+
+\begin{itemize}[leftmargin=5mm] 
+\item Rotation: A random 3D rotation of the object; 
+\item Random Horizontal Flip (RHF): A random flip along the horizontal axis; 
+\item Jittering: Points in the point cloud are perturbed with Gaussian white noise; 
+\item Random Input Dropout (RID): Points are randomly removed with a probability p; 
+\item All: A combination of all the noise types listed above. \end{itemize}
+
+Each type of noise was applied to the training set, the test set, or both. As shown in Figure \ref{fig:robustness}, our method \alg generally exhibits greater robustness to noise, particularly in the case of rotation, where we even observe an improvement in performance. This confirms that the reordering strategy employed by \alg is resilient to noise that preserves pairwise distances between points, such as after a rotation.
+
+\subsubsection{Hydra}\label{sub:hydra}
+\begin{wraptable}[7]{r}{0.5\textwidth}  % 'r' for right, 'l' for left
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Models} & \textbf{Param.(M)↓} & \textbf{Accuracy(\%)↑}\\ 
+\midrule
+PointMamba with hydra     & 12.85        & 86.23        \\ 
+\textbf{\alg with hydra}  & \textbf{12.85} & \textbf{86.4}       \\ 
+\bottomrule
+\end{tabular}}
+\caption{Results when substituting the Mamba block with the Hydra block in the architecture}
+\label{tab:hydra}
+\end{wraptable}
+Building on previous works that utilize scanning different directions~\citep{zhang2024point, liu2024point, wang2024pointrambahybridtransformermambaframework}, we explored the impact of replacing the Mamba block with Hydra~\citep{hwang2024hydrabidirectionalstatespace}, a bidirectional extension of Mamba using a quasiseparable matrix mixer, in both PointMamba and our \alg. Hydra scans sequences in both directions simultaneously, meaning PointMamba still processes a sequence of length $3N$, while \alg still processes length $N$. As shown in Table \ref{tab:hydra}, performance generally declined in both cases, likely due to the shift to Hydra, which is based on Mamba2~\citep{dao2024transformersssmsgeneralizedmodels}. We recommend future research to focus on optimizing Mamba2 in these contexts, as optimization remains a key challenge with such models.
+
+
+
+
+
+
+
+
+
+\section{Conlusion and Future Work}
+
+In this paper, we introduced \alg, a robust and principled approach for point cloud processing using state space models (SSMs). When using such casual models, a key challenge is to effectively convert a 3D set of data into a 1D sequence for proper analysis. We addressed this by proposing a spatially-aware reordering strategy that preserves spatial relationships between points. Differently from others, our method eliminates the need for positional embeddings and sequence replication, enhancing both efficiency and performance. Our experimental results demonstrate that \alg matches or surpasses transformer-based and other Mamba-based models on benchmark datasets such as ModelNet, ScanObject, and ShapeNetPart in classification and segmentation tasks.
+
+\textbf{Limitations and Future Work.} While \alg successfully addresses several challenges in point cloud analysis with SSMs, certain limitations remain. From an optimization standpoint, the model shows limited improvement when scaled. Additionally, when replacing the Mamba block with Mamba2 or integrating \alg into hybrid architectures, we observed performance declines, suggesting potential integration issues. We encourage further investigation into optimizing SSMs and leveraging their integration with transformer architecture for point cloud analysis. We believe this work offers a new perspective on applying non-transformer models in domains beyond natural language processing, highlighting the potential of SSMs in 3D vision applications.
+
+
+
+
+

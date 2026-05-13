@@ -1,0 +1,337 @@
+\title{Scaling up the Banded Matrix Factorization Mechanism for Large Scale Differentially Private ML}
+
+\begin{abstract}
+Correlated noise mechanisms such as DP Matrix Factorization (\dpmffamily) have proven to be effective alternatives to \dpsgd in large-epsilon few-epoch training regimes.  Significant work has been done to find the best correlated noise strategies, and the current state-of-the-art approach is \bandmf , which optimally balances the benefits of privacy amplification and noise correlation.  Despite it's utility advantages, severe scalability limitations prevent this mechanism from handling large-scale training scenarios where the number of training iterations may exceed $10^4$ and the number of model parameters may exceed $10^7$.  In this work, we present techniques to scale up \bandmf along these two dimensions, significantly extending it's reach and enabling it to effectively handle settings with over $10^6$ training iterations and $10^9$ model parameters, with negligible utility degradation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Modern machine learning is done at unprecedented scales; state-of-the-art large language models have billions of parameters and are trained on super computers with thousands of accelerators for hundreds of thousands of iterations \citep{kaplan2020scaling,chowdhery2023palm}.  Many applications would benefit from training these large-scale models on user data, but this raises a host of privacy concerns \citep{yao2024survey}.  Differential privacy (DP) offers a formal definition and algorithmic framework to train such models while protecting individual-level information.  The most widely used DP mechanism for machine learning is \dpsgd \citep{abadi2016deep}, of which there are many variants.   \dpsgd relies crucially on \emph{privacy amplification by subsampling}, and generally benefits significantly from training with huge batch sizes for many epochs \citep{ponomareva2023dp}, which can be difficult or infeasible in large-scale compute-constrained settings.  A promising alternative, the DP-FTRL algorithm \citep{kairouz2021practical} instead relies on \emph{carefully correlated noise}, and tends to work better than \dpsgd when training with smaller batches and fewer epochs, especially in the low privacy regime $(\epsilon \approx 10)$ that is common in real-world scenarios.
+
+There are many variants of the DP-FTRL algorithm that primarily differ in how they generate correlated noise \citep{kairouz2021practical,denisov2022improved,choquette2022multi,choquette2024amplified,mcmahan2024efficient,henzinger2022constant,henzinger2023almost,kalinin2024banded,choquette2023correlated}.
+The best variants of the DP-FTRL mechanism utilize numerical optimization to find the best noise correlation strategy, and are usually referred to as matrix factorization mechanisms (\dpmffamily).  The space of \dpmffamily mechanisms is rapidly evolving, with recent work focusing intensely on improving the constant factors \citep{denisov2022improved,choquette2022multi,choquette2024amplified}.  The variant with the best constant factors in this space is the Banded Matrix Factorization mechanism (\bandmf), which utilizes banded correlation matrices and enjoys the benefits of both privacy amplification and noise correlation.  By setting the number of bands to one, \bandmf reduces to \dpsgd, and by setting the number of bands equal to the number of training iterations, \bandmf reduces to un-amplified variants of \dpmffamily.  By optimally choosing the number of bands, \bandmf enjoys significantly better constant factors than both \dpsgd and other \dpmffamily-style mechanisms in many settings.  
+
+Despite its advantages, severe scalability limitations of \bandmf (and other \dpmffamily-style mechanisms more broadly) has hindered its wider use, and prevented it from scaling effectively to large-scale training regimes where typical models have billions of parameters and are trained for tens to hundreds of thousands of iterations.  
+Existing \bandmf implementations face computational bottlenecks stemming from two places: (1) an expensive optimization problem linked to the $n \times n$ \emph{strategy} matrix $\bfC$ (where $n$ is the number of training iterations), requiring $ O(n^3)$ time and $O(n^2)$ memory to evaluate the expected error, limiting its use to approximately $10^4$ training iterations. (2) During training, \bandmf incurs an $O(b \cdot d)$ memory overhead (where $b$ is the number of bands in $\bfC$, and $d$ is model dimensionality), which is $b\times$ more than \dpsgd but $\nicefrac{n}{b} \times$ less than \dpmf.  In this work, we develop techniques to overcome \bandmf's scalability limitations, without sacrificing on the constant factors that make it an appealing mechanism:
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Efficient Strategy Optimization}: We exploit the structure of banded strategies to reduce the per-iteration complexity of strategy optimization to $O(n^2 \cdot b)$ time and $O(n \cdot b)$ space, which allows \bandmf to scale to approximately $10^5$ training iterations. For scenarios demanding even more iterations (up to and beyond $10^6$), we restrict attention to banded Toeplitz strategies, whose structure enables $O(n \cdot b)$ time and $O(n)$ space complexity during strategy optimization.  Experiments show the approximation quality loss to be less than $2\%$ in terms of expected error.
+
+\item \textbf{Distributed Noise Generation}: Prior implementations of \dpmffamily-style mechanisms add noise on a single machine, even when training is coordinated across 1000's of machines \citep{denisov2022improved,choquette2022multi}.  We show how to effectively distribute the noise generation process, allowing \bandmf to effectively take advantage of multi-machine environments common in large scale training regimes, and scale to larger models and more bands than was previously possible.  Experiments demonstrate negligible training-time overhead compared to \dpsgd, even with hundreds of bands.
+
+\item \textbf{State-of-the-art Performance:} We conduct comprehensive experiments on expected error, and show that our scalable \bandmf mechanism offers lower expected error than all other scalable MF-style mechanisms across all settings tested, including \dpsgd, and concurrent works that also focus on improving scalability of \dpmffamily \citep{mcmahan2024efficient,mcmahan2024hassle,kalinin2024banded}.
+\end{itemize}
+
+
+
+\section{Background}
+
+
+\begin{algorithm}[!b]
+\caption{Banded Inverse Multiplication \citep{choquette2024amplified}} \label{alg:invlintrans}
+\begin{algorithmic}%[1]
+\State \textbf{Input:} lower triangular $b$-Banded matrix $\bfC \in \mathbb{R}^{n \times n}$, stream of vectors $\bfz_1, \dots, \bfz_n \in \mathbb{R}^d$, where $\bfZ$ is the matrix with rows $\bfz_i$.
+\State \textbf{Output:} $\bfY = \bfC^{-1} \bfZ$, one row at a time.
+\For{$i=1, \dots, n$}
+\State $\bfy_i = 
+(\bfz_i - \sum_{j=i-b+1}^{i-1} C_{ij} \bfy_j) / C_{ii} $
+\State \textbf{yield} $\bfy_i$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[t!]
+\caption{Iterative Machine Learning with \bandmf \label{alg:bandmf}}
+\begin{algorithmic}%[1]
+\State \textbf{Input:} $b$-banded strategy $\bfC \in \mathbb{R}^{n \times n}$, noise multiplier $\sigma$, loss function $\ell$, initial parameters $\bfomega_0$, dataset $D$, expected participations $k$, clipping norm $R$
+\State \textbf{Output:} Learned parameters $\bfomega_n$
+\State Partition $D$ into $b$ (approximately) equal sized subsets $D_0, \dots D_{b-1}$ arbitrarily
+\For{$\bfy_i$ in Algorithm 1($\bfC, \bfz_i \sim_{i.i.d} \mathcal{N}(0, 1)^d$)} \Comment{Stream of correlated noise}
+\State Sample $B \subseteq D_{i \mod b}$ by Poisson sampling each example with probability $\nicefrac{b k}{n}$.
+\State $\bfg_i = \sum_{x \in B} \text{clip}(\nabla \ell(\bfomega_{i-1}; x), R)$ \Comment{Clipped + aggregated gradient}
+\State $\tilde{\bfg}_i = \bfg_i + R \sigma \bfy_i$ \Comment{Noisy (privatized) gradient}
+\State $\bfomega_i = \text{Update}(\bfomega_{i-1}, \tilde{\bfg}_i)$ \Comment{Post-processing noisy gradient using any optimizer}
+\EndFor
+\State \textbf{return} $\bfomega_n$
+\end{algorithmic}
+\end{algorithm}
+
+We assume the reader has familiarity with differential privacy \citep{dwork2006differential,dwork2008differential}.  Below we provide background on \bandmf, which includes \dpsgd and \dpmffamily-style mechanisms as special cases.  \bandmf is completely characterized by a $b$-banded lower triangular \emph{strategy matrix}\footnote{sometimes simply referred to as the ``strategy''.} $\bfC \in \mathbb{R}^{n \times n}$ (i.e., $C_{ij} = 0$ if $i < j$ or $i \leq j + b$).
+
+\subsection{Training Dynamics}
+
+\bandmf (\cref{alg:bandmf}) is similar to the more well known \dpsgd algorithm \citep{abadi2016deep}: minibatches are sampled randomly, gradients are clipped and aggregated, and noise is added to preserve privacy.  The key innovation of \bandmf is in the noise addition step: while \dpsgd adds i.i.d. Gaussian noise in each iteration, \bandmf adds noise from a richer class.  Specifically, the strategy matrix $\bfC$ is used to generate noise that is correlated across iterations, and the key subroutine for generating this correlated noise is shown in \cref{alg:invlintrans}.
+
+When instantiated with $\bfC = \bfI$ (the identity matrix, $b=1$), \cref{alg:bandmf} is identical to \dpsgd, as it is easy to verify the output of \cref{alg:invlintrans} is simply the i.i.d. Gaussian noise vectors $\bfz_i$ passed as input.   When instantiated with a dense lower triangular strategy matrix $\bfC$ ($b=n$), \cref{alg:bandmf} captures \dpmf \citep{denisov2022improved}.  \dpsgd benefits from privacy amplification by sampling but uses uncorrelated noise while \dpmf benefits from correlated noise, but does not enjoy any privacy amplification due to sampling.  \dpsgd tends to work better in the small-epsilon, many-epoch regime, while \dpmf tends to work better in the large-epsilon, few-epoch regime \citep{choquette2024amplified}.  By using a $b$-banded strategy matrix, \bandmf operates between these two extremes and benefits from \emph{both} privacy amplification by sampling and correlated noise.  Specifically, the proposition below states that the privacy properties of \bandmf relate very naturally to the simpler \dpsgd mechanism whose privacy properties are well-understood.
+
+\begin{prop}[Noise Calibration \citep{choquette2024amplified}]
+Let $\sigma_{SGD}(\epsilon, \delta, k, n)$ denote the noise multiplier required for \dpsgd to achieve $(\epsilon, \delta)$-DP when run for $n$ iterations with sampling probability $\nicefrac{k}{n}$.  Given a $b$-banded strategy matrix $\bfC$ satisfying $\norm{\bfC}_{1,2} \leq 1$, \cref{alg:bandmf} satisfies $(\epsilon, \delta)$-DP for $\sigma_{BandMF} = \sigma_{SGD}(\epsilon, \delta, k, \nicefrac{n}{b})$.  
+\end{prop}
+
+The function $\sigma_{SGD}$ is typically computed using numerical privacy accounting methods such as the PLD accountant \citep{sommer2018privacy,doroshenko2022connect} or the RDP accountant \citep{mironov2017renyi}.
+
+\begin{remark}[Memory Overhead]
+\cref{alg:invlintrans} requires storing a state of size $b \times d$ ($\bfy_{i-1}, \dots, \bfy_{i-b+1}$), where $b$ is the number of bands and $d$ is the model dimensionality.  This is $b \times$ larger than \dpsgd, but $\nicefrac{n}{b} \times$ smaller than \dpmf.  For large models ($d \geq 10^8$) and many bands ($b \geq 100$), this can require hundreds of Gigabytes of space.
+\end{remark}
+
+\subsection{Strategy Optimization}
+
+In this section, we describe how \bandmf optimally selects the number of bands $b$ and the strategy matrix $\bfC$.  The matrix $\bfC$ and it's number of bands is chosen by solving a numerical optimization problem to minimize the expected total squared error added to the (clipped + aggregated) minibatch gradients during training.
+
+\begin{prop}[Expected Error \citep{choquette2024amplified}] \label{prop:expected_error}
+The expected total squared error of \bandmf given a $b$-banded strategy matrix $\bfC$ is equal to:
+$$\mathbb{E}[\norm{\bfA \bfC^{-1} \bfZ}_F^2] = \sigma^2_{BandMF}(\epsilon, \delta, b, k, n) \norm{\bfC}^2_{1,2} \norm{\bfA \bfC^{-1}}_F^2 $$
+where $\norm{\bfC}_{1,2}$ is the maximum $L_2$ column norm of $\bfC$ and is related to it's sensitivity, and $\bfA$ is the workload, typically taken to be the lower triangular matrix of ones\citep{kairouz2021practical,denisov2022improved,choquette2022multi}, and $\sigma_{BandMF}(\epsilon, \delta, b, k, n) = \sigma_{SGD}(\epsilon, \delta, k, \nicefrac{n}{b})$ is the noise multiplier required to run \bandmf under the given privacy budget.
+\end{prop}
+
+The optimization problem at the heart of \bandmf follows immediately from this expression and is stated below.  Note that smaller values of $b$ give better privacy amplification (smaller $\sigma_{BandMF}$), but reduces the benefits of correlated noise (more restricted space of strategies).  Since $b$ is a discrete parameter, we solve the un-amplified version of the problem for fixed $b \subseteq [1, n]$ (not accounting for $\sigma_{BandMF}$), and choose the strategy matrix and number of bands that minimizes expected error accounting for $\sigma_{BandMF}$ in a brute force manner.
+
+\begin{problem}[\bandmf Strategy Optimization \citep{choquette2024amplified}] \label{prob:bandedopt}
+Given a workload matrix $\bfA$, and the desired number of bands $b$, the optimization problem underlying \bandmf can be formulated as:
+\begin{equation} \label{eq:bandedopt}
+\begin{aligned}
+& \underset{\bfC}{\text{minimize}}
+& & \norm{\bfC}_{1,2}^2 \norm{\bfA \bfC^{-1}}_F^2 & \text{subject to } & \bfC_{ij} = 0 \:\: \text{ if } \:\: (j > i) \text{ or } (i \leq j + b) \\
+\end{aligned}
+\end{equation}
+\end{problem}
+
+Absent the bandedness constraint, this optimization problem has received considerable attention \citep{li2015matrix,yuan2016convex,mckenna2021hdmm,denisov2022improved}, and the algorithm for solving it in the banded case is closely related \citep{choquette2024amplified}.  
+Prior work \citep{choquette2024amplified} solves \cref{prob:bandedopt} by reformulating it in terms of the object $\bfX = \bfC^{\top} \bfC$.  This reformulation is convex and unconstrained, meaning standard optimization tools like L-BFGS can efficiently find the best solution with access to an oracle that computes the loss and gradient with respect to $\bfX$.  We note that the problem as it is stated in \cref{prob:bandedopt} is \emph{not} convex with respect to $\bfC$ \citep{li2015matrix,yuan2016convex,mckenna2021hdmm,mckenna2018optimizing}.  The drawback of this solution approach is that it materializes several $n \times n$ matrices in each iteration, even though there are only roughly $b \cdot n$ free (non-zero) variables.  As a result, it requires $O(n^3)$ time and $O(n^2)$ space to evaluate the objective once, and cannot be practically done beyond $n \approx 10^4$.  
+
+
+
+\section{Scalable Strategy Optimization and Noise Generation}
+
+
+In this section, we propose two approaches to \emph{implicitly} compute the objective function, bypassing the need to materialize $n \times n$ matrices explicitly.  These innovations enable scalability up to and beyond $n=10^5$ and $n=10^6$ respectively.  For simplicity, we specialize the presentation to the Prefix workload (lower triangular matrix of ones), banded strategies, and the expected total squared error objective (\cref{prop:expected_error}).  In \cref{sec:generalizations}, we show that the same core approach taken here easily translates to more general classes of workloads, strategies, and objective functions.
+
+\subsection{Efficient strategy optimization} \label{sec:implicit}
+
+The complexity of solving \cref{prob:bandedopt} using L-BFGS is proportional to the complexity of evaluating the objective function and its corresponding gradient.  
+Our first key idea to scale up \bandmf is to utilize \cref{alg:invlintrans} to efficiently evaluate the objective function.  
+Specifically, we will materialize one row of $\bfA \bfC^{-1}$ at a time and compute the norm in an online fashion as shown in \cref{alg:efficientobj}. 
+
+Let $\bfTheta$ be a $ b \times n$ matrix of parameters which will define our banded strategy matrix $\bfC(\bfTheta)$.  We define $\bfC(\bfTheta)$ to be the column-normalized $b$-banded matrix satisfying: $ C_{ij} = \nicefrac{\Theta_{(j-i+1)j}}{\sqrt{\sum_{j=1}^b \Theta_{ji}^2}}$.  By construction, we have $\norm{\bfC(\bfTheta)}_{1,2} = 1$.  Thus, to evaluate the objective function we simply need to compute $\norm{\bfA \bfC(\bfTheta)^{-1}}_F^2$, and \cref{alg:efficientobj} gives an algorithm for doing that efficiently.  The key idea is to generate rows of $\bfA \bfC(\bfTheta)^{-1}$ one at a time and compute the Frobenius norm in a streaming manner.  
+
+\begin{figure}[!t]
+\begin{algorithm}[H]
+\caption{\label{alg:efficientobj} (Efficient) Expected Total Squared Error}
+\begin{algorithmic}%[1]
+\State \textbf{Input:} $\bfTheta \in \mathbb{R}^{b \times n}$
+\State \textbf{Output:} $\norm{ \bfA \bfC(\bfTheta)^{-1} }_F^2$
+\State $\bfb_0 = \mathbf{0}$
+\State loss $=0$
+\For{$i=1, \dots, n$}
+\State $\bfe_i = $ $i^{th}$ row of the $n \times n$ identity matrix
+\State $c_i = \sqrt{ \sum_{j=1}^b \Theta_{ji}^2 }$ \Comment{Column normalization constant}
+\State $\bfy_i = c_i
+(\bfe_i - \sum_{j=1}^{b} \Theta_{ji} \bfy_j) / \Theta_{1i} $ \Comment{$i^{th}$ row of $\bfC(\bfTheta)^{-1}$}
+\State $ \bfb_i = \bfb_{i-1} + \bfy_i$ \Comment{$i^{th}$ row of $\bfA \bfC(\bfTheta)^{-1}$}
+\State loss += $\bfb_i^\top \bfb_i$ \Comment{partial squared Frobenius norm}
+\EndFor
+\State \textbf{return} loss
+\end{algorithmic}
+\end{algorithm}
+\end{figure}
+Each iteration of \cref{alg:efficientobj} requires $O(n \cdot b)$ time, as the vectors $\bfe_i$ and $\bfy_i$ are size $n$, and there is a sum over $b$ such vectors.  Thus, the total time complexity of \cref{alg:efficientobj} is $O(n^2 \cdot b)$.  The algorithm must keep track of $\bfy_{i-b}, \dots, \bfy_{i}$ in each iteration, and hence the space complexity is $O(n \cdot b)$.  This is a factor $\frac{n}{b}$ improvement in both the time and space complexity of \bandmf, which can be substantial when the number of bands is small (which it often is, as we demonstrate in \cref{sec:experiments}).  While \cref{alg:efficientobj} is specialized to the class of (column-normalized) banded strategies and the Prefix workload, the core approach is easy to generalize to other parameterized classes of strategies and more general workloads, as we discuss in \cref{sec:generalizations}.
+
+Our L-BFGS algorithm also requires the gradient of the objective function to run efficiently.  Depending on how the gradients are computed, the gradient computation can be more time and memory intensive than the loss calculation.  We provide some experiments on the scalability of this approach in \cref{sec:experiments}.  Using these ideas, we can scale $\bandmf$ up to roughly $n \approx 10^5$ under reasonable time and memory constraints, without sacrificing any solution quality over prior work \citep{choquette2024amplified}.
+
+\subsection{Optimizing Banded Toeplitz Strategies} \label{sec:toeplitz}
+
+We now explore another technique that is even more scalable, while only sacrificing a small amount in terms of expected error.  Our key idea is to restrict attention to the special class of \emph{banded Toeplitz strategies}.  This design decision was inspired by manual inspection of the optimal dense strategies, observing that they exhibit a near-Toeplitz structure.  By exploiting the special structure of this class of strategies, we can evaluate the objective function using only $O(n \cdot b)$ time and $O(n)$ space, and scale strategy optimization up to and beyond $n \approx 10^6$, as we show below:
+
+\begin{prop}[Banded Toeplitz Expected Total Squared Error] \label{prop:toeplitz_error}
+Let $\bftheta \in \mathbb{R}^b$ be Toeplitz coefficients, such that $\bfC(\bftheta)_{ij} = \bftheta_{i-j+1}$, and let $\bfw = \bfC(\bftheta)^{-1} \mathbf{1} $. The expected total squared error is equal to:
+$$\norm{\bfC(\bftheta)}_{1,2} = \norm{\bftheta}_2 \;\;\;\;\;\;\;\; \norm{\bfA \bfC(\bftheta)^{-1}}_F^2 = \sum_{i=1}^n (n-i+1) w_i^2 $$
+\end{prop}
+\begin{proof}
+The first expression states that the maximum $L_2$ column norm of a lower triangular Toeplitz matrix is equal to the norm of it's first column $\bftheta$.  By direct inspection, the first $n-b+1$ columns of $\bfC(\bftheta)$ all share the same non-zero entries of $\bftheta$, and the norms of these columns are thus $\norm{\bftheta}_2$.  The non-zero entries of the remaining $b-1$ columns of $\bfC(\bftheta)$ correspond to a subvector of $\bftheta$, and hence these columns have norm $\leq \norm{\bftheta}_2$. 
+The second expression states that the Frobenius norm can be calculated without explicitly materializing any matrices.  
+Note that both $\bfA$ and $\bfC(\bftheta)$ are lower triangular Toeplitz matrices, and %\citep{golub2013matrix,kucerovsky2016some,dogan2018some,lin2008explicit}.  
+if $\bfC(\bftheta)$ is invertible, then its inverse is also a lower triangular Toeplitz matrix \citep[Lemma 5]{lin2008explicit}.  Second note that multiplication is commutative within this class, and therefore $\bfA \bfC^{-1}(\bftheta) = \bfC^{-1}(\bftheta) \bfA$, and this product is itself a lower triangular Toeplitz matrix \citep[Lemma 5]{lin2008explicit}.  As such, it is completely defined by its first column $\bfw$.  Using the definition of matrix multiplication we can obtain $\bfw$ by multiplying $\bfC^{-1}(\bftheta)$ by the first column of $\bfA$, which is $\mathbf{1}$ \citep[Page 97]{lay2003linear}.  The squared Frobenius norm of a Toeplitz matrix with parameters $\bfw$ can be calculated directly over this vector by observing that $w_i$ is repeated along the $i^{th}$ diagonal band of the Toeplitz matrix and hence appears $(n-i+1)$ times, leading to the expression stated above for the squared Frobenius norm of $\bfA \bfC^{-1}(\bftheta)$.  
+\end{proof}
+
+The complexity of evaluating the objective function is determined by the cost of solving the linear Toeplitz system $\bfw = \bfC(\bftheta)^{-1} \mathbf{1} $, which can be done with \cref{alg:invlintrans} in $O(n \cdot b)$ time and $O(b)$ space.  We note that this approach generalizes to any Toeplitz-structured workload, as we show in \cref{sec:generalizations}.
+
+\paragraph{Column Normalization} 
+In general the column norms of Toeplitz matrices are not all equal, a property that optimal strategies are known to have in the single-participation setting \citep{zhang2018ektelo,yuan2016convex,mckenna2018optimizing} and a property built-in to \bandmf \citep{choquette2024amplified}.  When the number of bands is small, the loss in solution quality from not column normalizing is small, as the first $n-b$ columns of a banded Toeplitz strategy already have equal norm.  Moreover, we can always normalize the columns of the banded Toeplitz matrices as a post-processing step after strategy optimization, which we recommend in practice.
+
+\subsection{Distributed Noise Generation} \label{sec:noise_generation}
+
+At training time, \bandmf incurs a $b \cdot d$ memory overhead where $b$ is the number of bands and $d$ is the number of model parameters.   In large-scale settings $d$ may exceed $10^9$, and assuming $b = 256$ and 4-byte floats are used, this is a very significant one \emph{terabyte} cost.  In this section, we will argue that with a careful implementation, this is not a major issue in typical large-scale training regimes.
+
+We make two key observations.  First, in order to train large models with differential privacy, large batch sizes are typically needed, which requires a combination of coordinated \emph{training across many accelerators} and virtual batching \citep{de2022unlocking,anil2021large}.  For example, to train a 1 billion parameter model with DP, one might use $1024$ machines and $16 \times$ virtual batching to attain a reasonable batch size of $16384$ (assuming a per core batch size of $1$).  Second, we can effectively utilize multiple machines when generating noise by observing that \cref{alg:invlintrans} can be translated to an \emph{embarrassingly parallel} algorithm since each coordinate of the noise vectors are treated identically.  
+
+\begin{wrapfigure}{r}{0.23\textwidth}
+\includegraphics[width=0.23\textwidth]{figs/distributed_noise.pdf}
+\end{wrapfigure}
+In our implementation, each machine is in charge of producing a different shard of the noise vectors $\bfy_i$, and they keep track of the state required to generate that noise locally.\footnote{this strategy for distributing noise generation is very different from distributed differential privacy \citep{kairouz2021distributed}, where each client/machine generates an entire vector of noise with smaller variance.}   This state corresponds to the same shard of the previous $b-1$ correlated noise vectors ($\bfy_{i-1}, \dots, \bfy_{i-b+1}$), and this sharding strategy is illustrated in the figure to the right.  This benefit of this sharding strategy is that no communication is needed between machines until the noise is added to the clipped + aggregated gradient.  Using the example above, this implementation would have a very manageable overhead of one GB per machine (one TB split across $1024$ machines).
+
+In \cref{sec:experiments:numbands} we demonstrate that in practice the number of bands needed is typically far less than $256$, and that the overhead incurred by our distributed correlated noise generation algorithm is small compared to the cost of per-example gradient clipping, even when the number of bands is large. To better understand the scalability limits of this distributed noise generation approach in different settings, it is useful to look at a few more illustrative examples.
+
+\begin{example}
+Suppose we want to train a 4 million parameter model on a single GPU with a memory limit of $1$ GB.  We can afford to store roughly $64$ copies of the model assuming each parameter is represented as a $4$-byte float.  This allows us to use roughly $64$ bands overall.
+\end{example}
+
+\begin{example}
+Now suppose we want to train a larger $128$ million parameter model in parallel on $64$ machines, which is useful/needed to get the large batch sizes usually used with large models and DP training.  By parallelizing the noise generation code across these $64$ machines, we can afford to store $2$ copies of the model per machine, allowing us to use roughly $128$ bands overall.
+\end{example}
+
+\begin{example}
+Now suppose we want to finetune an $8$ billion parameter model on $64$ machines, and use a parameter-efficient fine-tuning method such as LoRA \citep{hu2021lora,yu2021differentially}.  Further, assume the number of learnable finetuning parameters is $4$ million.  Now, the cost of the forward/backward pass completely dwarfs any overhead of noise generation.  We can store $64$ copies of the model per machine, and parallelize computation across $64$ machines, allowing us to run \bandmf with up to $4096$ bands.
+\end{example}
+
+
+
+\section{Empirical Results}
+
+
+In this section, we empirically evaluate our proposed strategy optimization algorithms in terms of solution quality and scalability.  Then, we conduct experiments and perform analysis to understand the optimal number of bands as a function of the relevant parameters.  Our analysis reveals that in many scenarios of practical interest the optimal number of bands is small, and consequently the overhead of \bandmf at training time is small.  Our experiments focus on root-mean-squared-error (RMSE), which we compute in closed form using \cref{prop:expected_error}, dividing by $n$ and taking the square root.  Strategy optimization is done on an NVIDIA V100 Tensor Core GPU for up to 10K iterations.
+
+\subsection{Comparison to Prior and Concurrent Work}
+
+We begin by evaluating the solution quality of our strategies compared to prior and concurrent work.  We provide a thorough qualitative comparison between the mechanisms considered here in \cref{sec:qualatative_compare}.  In \cref{fig:suboptimality_n}, we fix $b=16$ while varying $n$, and compare our strategies obtained through implicit optimization to the strategies produced through explicit optimization as in prior work \citep{choquette2024amplified}.  We also include \bandsqrt as an additional baseline, which was proposed in concurrent work \citep{kalinin2024banded}, and avoids dense matrix representations through the same banded Toeplitz structure we consider.  We plot on the y-axis the \emph{RMSE Suboptimality Ratio}, which we define as the ratio of RMSE between a given strategy and the best available strategy for that setting.  Because all the strategies in this figure are $16$-banded, they enjoy the same privacy properties (whether they are used in an amplified or non-amplified setting), and therefore the RMSE Suboptimality Ratio's we report hold for all $\epsilon$.  The highlights from this experiment are four-fold:
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.42\linewidth}
+        \includegraphics[width=\linewidth]{figs/implicit_banded_mf_suboptimality_n}
+        \caption{$b=16$}
+        \label{fig:suboptimality_n}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.55 \linewidth}
+        \includegraphics[width=\linewidth]{figs/baseline_comparison.pdf}
+        \caption{$n=16384, k=8 \qquad\qquad\qquad\qquad$}
+        \label{fig:baseline_compare}
+    \end{subfigure}
+    \caption{(a-b) Ratio of RMSE of each strategy to the best strategy that scales to each setting.  (a) Compares our scalable banded and banded toeplitz strategies with other banded strategies.  (b) Compares our scalable \bandmf with non-banded strategies as a function of $\epsilon$.}
+\end{figure}
+
+\begin{itemize}[leftmargin=*]
+    \item The prior work that represents the strategy using dense matrices scaled up to $n < 10^4$, while our implicitly optimized banded strategies scaled up to $n>10^5$, and our banded Toeplitz strategies scaled up beyond $n>10^6$.
+    \item Our implicit strategy optimization algorithm for general banded matrices converges to the same solution as prior work \citep{choquette2024amplified} for all settings tested (where the latter successfully ran).  This is encouraging in light of the fact that we directly optimize $\bfC$ (rather than $\bfX = \bfC^\top \bfC$) and \cref{prob:bandedopt} is not convex with respect to $\bfC$.
+    \item The \bandsqrt baseline approach \citep{kalinin2024banded} achieves worse expected error across all settings than both of our approaches.  The suboptimality approaches up to $25\%$ in the settings we tested, with larger suboptimality for larger $n$.
+    \item Our (column-normalized) Toeplitz strategies are between $0$-$2\%$ suboptimal, with suboptimality increasing with the number of bands and decreasing with the number of iterations.  For large $n \geq 16384$ and small $b \leq 32$, which is the regime of most interest, the suboptimality is $ \leq 0.25\%$, indicating arbitrary banded strategies do not provide much benefit over the more restrictive class.
+\end{itemize}
+
+In \cref{fig:baseline_compare} we compare against several additional baseline mechanisms for $n=16384$ iterations and $k=8$ epochs while varying $\epsilon$.  We include results for \dpsgd \citep{abadi2016deep}, Tree Aggregation \citep{kairouz2021practical}, Stamping \citep{denisov2022improved}, FHU \citep{henzinger2022constant}, Buffered Toeplitz, \citep{mcmahan2024efficient,mcmahan2024hassle}, and our Unamplified and Amplified scalable \bandmf approach.  We omit from comparison \dpmf \citep{choquette2022multi} due to scalability limitations of that approach for $n \geq 16384$.  
+
+Here, \dpsgd and Amplified \bandmf benefit from privacy amplification, while the other mechanisms do not.  Our highlights from this experiment are two-fold:
+
+\begin{itemize}[leftmargin=*]
+\item Amplified \bandmf is better than all other mechanism across all settings evaluated.  The improvement over \dpsgd grows with $\epsilon$, while the improvement over other mechanisms decreases with $\epsilon$.  The best alternatives are either \dpsgd or Buffered Toeplitz, both of which have $\approx 2\times$ worse RMSE for $\epsilon = 1$.  Amplified \bandmf still enjoy a meaningful $19\%$ better RMSE than the best competitor for $\epsilon$ as large as $8$.
+\item Unamplified \bandmf is the best non-amplified mechanism that can scale to this setting, and enjoys $\sim 5\%$ lower RMSE than Buffered Toeplitz strategies for all $\epsilon$.  While our primary focus has been in centralized training regimes, this figure shows that \bandmf is also a state-of-the-art approach in federated scenarios where amplification is not feasible \citep{kairouz2021practical}.
+\end{itemize}
+
+While we focused on a single value of $n$ and $k$ in \cref{fig:baseline_compare}, our general findings remain unchanged for other settings, although the magnitude of the improvements do change.
+
+\subsection{Optimal Number of Bands} \label{sec:experiments:numbands}
+
+We now perform an ablation on \bandmf to understand how to select the number of bands in practice, and how the performance of \bandmf changes as a function of the number of epochs.  \cref{fig:bands_vs_rmse} plots the RMSE suboptimality ratio of \bandmf relative to the full-batch \dpsgd baseline for different values for epochs and bands fixing at $\epsilon = 1$.  \cref{fig:bands_vs_epochs_vs_epsilon} plots the optimal number of bands for different values of epochs and $\epsilon$.  Our findings from these experiments are three-fold:
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[c]{0.5\linewidth}
+    \includegraphics[width=\linewidth]{figs/bands_vs_rmse_log.pdf}
+    \caption{Bands vs. RMSE}
+    \label{fig:bands_vs_rmse}
+  \end{subfigure}%
+  \begin{subfigure}[c]{0.5\linewidth}
+    \includegraphics[width=\linewidth]{figs/bands_vs_epochs_vs_epsilon.pdf} 
+    \caption{Optimal Number of Bands}
+    \label{fig:bands_vs_epochs_vs_epsilon}
+  \end{subfigure}
+  \caption{(a) RMSE Suboptimality Ratio (relative to full-batch \dpsgd) of \bandmf as a function of $b$ for various epochs, with fixed $(\epsilon, \delta) = (1, 10^{-8})$ and $n=16384$.
+  (b) Optimal number of bands (within a factor of 2) as a function of the privacy budget and the number of epochs, fixing $n=4096$ and $\delta=10^{-8}$.
+  }
+\end{figure}
+\begin{itemize}[leftmargin=*]
+    \item With only $32$ epochs, \dpsgd ($b=1$) has nearly the same RMSE as full-batch \dpsgd ($16384$ epochs), but the RMSE degrades rapidly with fewer epochs.  Unamplified \bandmf ($b = \nicefrac{n}{k}$) achieves worse RMSE than \dpsgd when the number of epochs is large (and utility is the best), but it degrades more gracefully than \dpsgd, offering better utility in the few-epoch regime.  Amplified \bandmf ($b = b_*$) offers the best of both worlds: full-batch \dpsgd-level performance when the number of epochs is sufficiently large, and even more graceful degradation of RMSE with respect to number of epochs than Unamplified \bandmf.
+    \item The RMSE improves predictably with increasing epochs, but there are diminishing marginal returns.  For example, the RMSE of Amplified \bandmf is $< 2\times$ worse than the RMSE of full-batch \dpsgd with only two epochs, and $< 18\%$ worse with only eight epochs.  We note that RMSE only accounts for the noise added due to privacy; increasing the number of epochs under a fixed number of iterations increases the batch size, which also reduces the minibatch gradient variance.  
+    \item The optimal number of bands drops predictably with increasing epochs and decreasing epsilon.  Specifically, the dependence appears roughly linear in both parameters, and a good rule of thumb is that $b_* \approx \nicefrac{\epsilon \sqrt{n}}{k}$ should be near-optimal.  In some parameter regimes, like $k=1, \epsilon \geq 16$, $b_*$ may be too large to feasibly handle.  However, Amplified \bandmf with a suboptimal number of bands is still better than the alternative of \dpsgd.
+\end{itemize}
+
+The analysis above reveals what the optimal number of bands is for different settings, but not whether it is feasible to run the mechanism for that many bands.  In \cref{fig:noise_generation time} we plot the wall clock time to generate correlated noise as a function of the number of bands in a typical distributed training scenario with a 100M parameter \texttt{BertBase} model trained on $32$ accelerators.  Our primary finding for this experiment is:
+
+\begin{itemize}[leftmargin=*]
+    \item Using our distributed algorithm, correlated noise generation is not the primary bottleneck, even when the number of bands is fairly large (up to $b=128$, corresponding to $1.6$ GB overhead per accelerator).  The cost of per-example gradient clipping is one- to three- orders of magnitude more expensive, depending on the batch size.
+\end{itemize}
+\subsection{RMSE vs. Learning Performance} \label{sec:learning_performance}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[t]{0.34\linewidth}
+    \includegraphics[width=\linewidth]{figs/noise_generation_time.pdf}
+    \caption{Noise Generation Time}
+    \label{fig:noise_generation time}
+  \end{subfigure}%
+  \begin{subfigure}[t]{0.34\linewidth}
+    \includegraphics[width=\linewidth]{figs/rmse_vs_xent_adaptive.pdf}
+    \caption{\label{fig:adaptive} Adaptive Optimizer}
+  \end{subfigure}%
+  \begin{subfigure}[t]{0.31\linewidth}
+    \includegraphics[width=\linewidth]{figs/rmse_vs_xent_nonadaptive.pdf}
+    \caption{Non-Adaptive Optimizer}
+    \label{fig:nonadaptive}
+  \end{subfigure}
+  \caption{(a) Wall Clock Time for correlated noise generation and per-example gradient clipping for a 100M parameter \texttt{BertBase} model when run on $32$ TPU v3 cores.  (b-c) RMSE vs. Learning Performance (evaluation cross entropy) with an adaptive optimizer (b) and a non-adaptive optimizer (c). In both (b) and (c), a 4M parameter \texttt{BertTiny} model is trained on the StackOverflow dataset for various noise multipliers.}
+  \label{fig:rmse_vs_xent}
+\end{figure}
+
+Thus far we have primarily focused on RMSE on the prefix workload, but this is just a proxy for what we really care about: training-time learning performance.  In \cref{fig:rmse_vs_xent}(b-c) we aim to understand the relationship between RMSE and learning performance across a range of \dpmffamily strategies.  Our goal is not to compare different mechanisms across a different privacy budgets, as this has been done in prior work \citep{choquette2024amplified,choquette2023correlated,denisov2022improved}, and our mechanism is just a more scalable instantiation of the prior work.
+
+We consider strategies with differing numbers of bands, and for each setting we optimize the strategy for the prefix workload.  Note this is different from early work on matrix factorization where the strategy is optimized for a workload that encodes the optimizer parameters like momentum and learning rate cooldown \citep{denisov2022improved}.  Recent work on \bandmf suggest it is fine to configure the strategy for the prefix workload even when using SGD with momentum in practice \citep[Section I]{choquette2024amplified}.
+
+For each strategy under consideration, we train a \texttt{BertTiny} model with per-example clipping and correlated noise addition with a range of noise multiplies spanning 3 orders of magnitude.  We tune the learning rate for each setting and report results for the best value found.  We each experiment, we record the RMSE of the strategy / noise multiplier along with the evaluation set cross entropy, and plot the results in \cref{fig:adaptive,fig:nonadaptive}.  Our two main findings from this experiment are:
+
+\begin{itemize}[leftmargin=*]
+\item For an adaptive optimizer and the same RMSE, \emph{strategies with fewer bands provide better learning performance}, indicating that RMSE is not the best proxy for learning performance across multiple strategies.  These results suggest that one should set bands more conservatively than suggested by RMSE alone to optimize learning performance if using \bandmf with an adaptive optimizer.
+\item For a non-adaptive optimizer, the lines for $1$-, $8$-, $64$-, and $512$-banded strategies all line up, indicating that RMSE is a reasonable predictor of learning performance.  However, there is still a gap between $\bandmf$ and \blt ($5000$ bands), where fewer bands achieves better learning performance for the same RMSE.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\paragraph{More \dpmffamily Variants} \citet{koloskova2024gradient,choquette2023correlated} revisit the objective underlying \dpmffamily and propose new variants based on their analysis.  Like us, \citet{henzinger2023almost} and \citet{choquette2023correlated} use Toeplitz strategies, and bypass the $O(n^3)$ runtime of strategy optimization.  However, they consider ``full'' Toeplitz matrices and do not address the $O(n \cdot d)$ training-time memory overhead of the algorithm, preventing scalability in large-scale settings.  %Moreover, their central claim that correlated noise beats independent noise crucially relies on a single-epoch assumption.  In the $n$-epoch regime, \dpmf and \bandmf both reduce to \dpsgd, as correlation isn't believed to help in this setting \citep{choquette2024amplified}.  It seems natural that in the multi-epoch setting, something ``in between'' independent and correlated noise makes sense, as is offered by \bandmf.
+
+\paragraph{Scalable Approaches to the Matrix Mechanism}
+
+The optimization problem we studied in this work dates back to the Matrix Mechanism \citep{li2010optimizing}, and has been the subject of intense research for a different problem domain: answering workloads of linear counting queries over discrete databases \citep{li2010optimizing,li2015matrix,yuan2016convex,mckenna2018optimizing,mckenna2021hdmm,xiao2024optimal,nikolov2013geometry,edmonds2020power,mckenna2020workload,li2013optimal,xiao2024optimal}.  \citet{mckenna2021hdmm} and \citet{xiao2024optimal} restrict attention to special classes of strategies that enable efficient strategy optimization.  By exploiting the special structure in these strategies, they scale up to and beyond $n \approx 10^9$, but the specific strategies considered in those works do not directly apply in the context of iteratively training ML models.  
+
+Concurrently with our work, \citet{mcmahan2024efficient} proposed \blt, a memory-efficient approximation of single-epoch \dpmf, and extended to handle multiple epochs in follow-up work \citep{mcmahan2024hassle}. Their method scales to an arbitrary number of training iterations, and reduces the training-time memory complexity to $O(c \cdot d)$ for small and configurable $c \approx 3$, while only sacrificing 5-7.5\% in RMSE compared to Unamplified \bandmf.  %While the memory complexity of \blt is less than \bandmf, as we discussed in \cref{sec:noise_generation}, memory overhead is not the primary bottleneck in typical large-scale training scenarios.  In addition, since \blt does not currently benefit from amplification like \bandmf, the RMSE of our approach can be 15-300\% better depending on the regime (\cref{fig:amp_benefit}), which can matter significantly in practice.  In federated scenarios where amplification is not typically possible, and distributed noise generation may be impractical, \blt is a good alternative to \bandmf \citep{mcmahan2024efficient}.
+
+
+
+\section{Limitations}
+
+
+Here we discuss several limitations of this paper.
+First, the number of bands needed to maximize utility may differ from the number of bands that is feasible to use under compute constraints.  In \cref{sec:experiments:numbands} we provided an argument that in the regimes of most practical interest, the number of bands will be small.  However, it is conceivable for there to be situations when the optimal number of bands is larger than what can be supported under compute constraints.
+
+Second \bandmf relies on Poisson sampling to form minibatches, which can be tricky to integrate into modern ML infrastructure due to variable batch sizes.  %Furthermore, privacy amplification is what allows \bandmf to outperform \dpmf in RMSE, and why the optimal number of bands is typically small.  Without it, \bandmf would need $\nicefrac{n}{k}$ bands and may be infeasible to run for large $n$ and small $k$.
+
+Third, this work and nearly all work on DP Matrix Factorization relies on the assumption that expected error on the prefix sums of gradients is a good proxy for learning performance \citep{kairouz2021practical,denisov2022improved,choquette2023correlated,mcmahan2024efficient,kalinin2024banded}.  As demonstrated in \cref{sec:learning_performance}, this proxy is not perfect, particularly when combined with adaptive optimizers.  More research is needed to improve the objective function underlying \dpmffamily-style mechanisms, and how to configure them with adaptive optimizers.  
+
+Finally, our distributed noise generation procedure relies on the assumption that the worker machines responsible for computing each shard of the noise are not compromised, otherwise the privacy guarantees could be at risk.  In situations where noise must be generated on a single machine, \bandmf may not be able to scale to as many bands.  However, as we showed throughout \cref{sec:experiments}, \bandmf tends to work best with a small number of bands anyway.  
+
+
+
+\section{Conclusion}
+
+
+This work is motivated by the desire to train large-scale ML models with differential privacy.  Our work is best characterized by its simplicity, scalability, and state-of-the-art performance. Our key ideas are straightforward to understand and implement. Our algorithms for strategy optimization scale effectively up to and beyond $n=10^6$, and our algorithm for distributed noise generation can handle large models with little overhead.  Finally, our scalable \bandmf mechanism offers better expected error than any other \dpmffamily-style mechanism across a wide variety of settings.
+
+\newpage
+\paragraph{\textbf{Acknowledgements}}
+
+We would like to thank Keith Rush for discussions about scalable implementations of correlated noise generation plus for sharing knowledge about distributed Jax.  We would also like to thank Brendan McMahan, Arun Ganesh, and the anonymous reviewers for providing feedback on this work.
+
+
+
+
+

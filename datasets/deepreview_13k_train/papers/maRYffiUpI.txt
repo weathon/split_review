@@ -1,0 +1,327 @@
+\title{LLM-Assisted Code Cleaning For Training Accurate Code Generators}
+
+\begin{abstract}
+Natural language to code generation is an important application area of \llms{} and has received wide attention from the community. 
+The majority of relevant studies have exclusively concentrated on increasing the quantity and functional correctness of training sets while disregarding other stylistic elements of programs.
+More recently, data quality has garnered a lot of interest and multiple works have showcased its importance for improving performance.
+In this work, we investigate data quality for code and find that making the code more structured and readable leads to improved code generation performance of the system.
+We build a novel data-cleaning pipeline that uses these principles to transform existing programs by 1.) renaming variables, 2.) modularizing and decomposing complex code into smaller helper sub-functions, and 3.) inserting natural-language based plans via \llm{} based transformations.
+We evaluate our approach on two challenging algorithmic code generation benchmarks and find that fine-tuning \cllamaB{7} on our transformed modularized programs improves the performance by up to \textbf{30\%} compared to fine-tuning on the original dataset. 
+Additionally, we demonstrate improved performance from using a smaller amount of higher-quality data, finding that a model fine-tuned on the entire original dataset is outperformed by a model trained on 15\% of our cleaned dataset.
+Even in comparison to closed-source models, our models outperform the much larger \alphacode{} models~\citep{li2022competition}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Natural language to code generation has witnessed considerable advances in recent years with the advent of large language models (\llms{} for brevity). 
+These advances primarily arise from training on large web-scale data and are measured based on the functional correctness of the programs. 
+Thus, other aspects like readability, structuring, and styling and how they affect training and data quality are largely ignored by these works.
+On the flip side, many recent works have demonstrated the effectiveness of training on higher quality data during both pre-training~\citep{li2023textbooks2} and fine-tuning~\citep{zhou2023lima,cao2023instruction} phases.
+Even within the code-generation domain, ~\cite{gunasekar2023textbooks} demonstrated the benefits of training on a ``textbook'' quality dataset, generated synthetically using the \gptturbo{} model~\citep{ouyang2022training}. 
+However, these works do not provide an understanding of the factors that actually improve the data quality.
+
+In this work, we show that using programs following good programming practices and allowing for more readability leads to improved code generation performance compared to using programs that do not follow these practices.
+We use these insights to build a novel automated code data-cleaning pipeline that transforms programs while maintaining functional correctness using input-output examples. 
+In contrast to prior works that curate \textit{high quality} datasets by directly generating \textit{new} data using \llms{}, here we translate existing datasets into their \textit{parallel cleaned} versions while identifying attributes that actually improve data quality.
+
+We use \llms{} to perform the transformations used in our data-cleaning approach.
+We demonstrate that instruction-tuned models can take a user-identified attribute of data quality as a natural language instruction and perform the transformation accurately. 
+Our approach leverages the disparity in difficulty between generating a solution and editing an existing one.
+Therefore, it is particularly effective in domains where the existing model struggles to generate a correct solution but can effectively edit a given solution.
+We perform our data-cleaning transformations in three iterations: 1) renaming variables 2) modularizing complex code into subfunctions, and 3) adding planning annotations. 
+
+Figure~\ref{fig:intro:lmdt_diag} provides an overview of our approach. 
+Notice that the variable renaming step at the top adjusts the variable names to be contextually relevant (e.g. \code{a} to \code{root_u} and \code{d} to \code{graph}). 
+The modularization step (depicted on the right) identifies and decomposes the original program into several smaller subfunctions such as \code{find_root}, \code{merge_trees}, \code{build_graph}, etc. It then implements these subroutines and assembles the modular program. 
+Finally, our planning step (depicted at the bottom) constructs a plan by summarizing  functions in a top-down fashion (starting from the \code{main}). 
+
+\input{figures/introduction/lmdt_box.tex}
+We evaluate our approach in a niche, yet challenging, domain of algorithmic code generation.
+The goal is to generate a program for a given problem statement.
+The task is challenging because it requires both high-level algorithmic reasoning and low-level coding and is evaluated using a strict functional correctness metric.
+We use two well-known algorithmic code generation benchmarks, namely \apps~\citep{hendrycksapps2021} and \contests~\citep{li2022competition}.
+We transform the corresponding programs in the training sets and obtain \textit{parallel} datasets from our cleaning approach.
+Additionally, we utilize input-output examples to maintain functional equivalence between the original and transformed programs.
+We qualitatively analyze the generated dataset and find that it uses smaller helper sub-functions, each often implementing a standard algorithm or key program functionality, 
+and provide more in depth findings in Section~\ref{subsec:exp:data-analysis}.
+We further assess the impact of the transformed datasets on the performance on our downstream code generation task. 
+We fine-tune \cllamaB{7} model on the various collected datasets. 
+Our findings reveal that the model fine-tuned on our modularized dataset outperforms the model fine-tuned on the functionally equivalent original dataset by up to \textbf{30\%}.
+Beyond, performance improvement, we also demonstrate that improving data quality improves the data efficiency. In particular, a model fine-tuned on the entire original dataset is outperformed by a model trained on just 15\% of our cleaned dataset.
+
+We next study improving planning in a supervised learning setup similar to prior works~\citep{fu2023specializing,li-etal-2023-symbolic}.
+While we observe limited improvements in planning, we disentangle planning vs coding capabilities and find that our fine-tuned model is capable of using gold-annotated plans, extracted from the ground-truth solutions to accurately generate solutions for the complex programs. 
+This highlights planning for complex problems remaining a key bottleneck that does not seem to improve by merely increasing training datasets.
+Finally, in comparison to existing baselines, our fine-tuned models outperform the larger \alphacode{}~\citep{li2022competition} models. 
+
+
+
+\section{Methodology}
+
+\label{sec:methods}
+In this section, we present our general data transformation approach and then instantiate it for performing code data cleaning.
+
+\subsection{Transformations for data cleaning}
+Given a dataset $\gD$ consisting of $N$ instances $\rvd_i$, such that, $\gD = \{\rvd_i\}_{i=1}^N$.
+To achieve a desired data cleaning specification, the user additionally provides a data-cleaning instruction $\gI$, which highlights an attribute that needs to be modified. 
+Optionally, we also use an oracle equivalence checker ($\gO$) which ensures that the transformed data instance $\tilde{\rvd_i}$ is consistent with the original input based on some desired metric.
+For example, we can use edit-distance or functional equivalence based on input-output examples as our oracle checker. 
+
+We use a pre-trained language model (denoted by $\gM$) to generate the transformed instance ($\tilde{\rvd_i}$) by prompting the model with the transformation instruction ($\gI$) and the original answer ($\rvy$).
+We can perform either zero-shot or few-shot prompting for performing the data cleaning operation. 
+Finally, we extract the instance $\tilde{\rvd_i}$ generated by $\gM$, and apply our oracle equivalence checker ($\gO$) to ensure consistency with the original data. 
+If $\gO(\tilde{\rvd_i}, \rvd_i)=0$, i.e., the oracle reports a failure, we reject the generated output and retry the example within a sampling budget.
+
+While our transformation approach does not provide any guarantees about the quality of the performed transformation and relies on \llms{}, 
+we empirically observe that instruction-tuned \llms{}  can perform various unstructured data cleaning steps quite effectively. 
+We provide a detailed analysis of the generated outputs for our algorithmic code generation setting in Section~\ref{subsec:exp:data-analysis}. 
+Finally, in accordance with existing literature on prompting \llms{}, we found that using simple and precise, low-level instructions improves the performance and accuracy of the models in performing the operations. 
+Thus, for complex data cleaning operations (refactoring), we find improvements by breaking it down and performing multiple operations iteratively (renaming followed by modularization).
+
+\subsection{Code Data-Cleaning}
+We apply our transformations-based data cleaning approach to programming data. 
+Coding requires both -- low-level programming and high-level reasoning or planning skills.
+Therefore, we propose a three-step cleaning pipeline that improves the readability and program structuring targeting the low-level coding skills and inserts natural-language based plans data targeting the high-level reasoning skills.
+Our steps are detailed below.
+
+\begin{enumerate}
+    \item \textbf{Rename variables.} 
+    This step renames the variables in the program, making them descriptive and easier to follow. 
+    Figure~\ref{fig:intro:lmdt_diag} top provides an example of this transformation.
+    \item \textbf{Modularize functions.} 
+    Problem decomposition has been identified as a key approach for improving the reasoning capabilities of models~\citep{zhou2022least,wang2023plan}. 
+    We identify program decompositions and transform the program by extracting their functionality into smaller helper functions. 
+    Figure~\ref{fig:intro:lmdt_diag} right provides an example of this transformation.
+    \item \textbf{Plan annotations.} 
+    This step summarizes the helper functions in the already modularized program and prepends it to the programs in the form of a natural language plan. 
+    These natural language descriptions are analogous to prompting approaches that are used for solving reasoning problems like chain-of-thought prompting~\citep{wei2022chain}, parsel~\citep{zelikman2023parsel}, etc. 
+    Figure~\ref{fig:intro:lmdt_diag} bottom provides an example of this transformation.
+\end{enumerate}
+
+Additionally, while performing these transformations, we use the test cases provided in the dataset to construct our oracle equivalence checker ($\gO$). It ensures that our transformed programs maintain functional equivalence to the original program. 
+
+
+
+\section{Experimental Setup}
+
+\label{sec:exp}
+In this section, we detail our experimental setup and implementation. Section~\ref{subsec:setup:data} outlines the benchmarks and metrics used for the algorithmic code generation task, while Sections ~\ref{subsec:setup:lmdt} and~\ref{subsec:setup:experiments} delve into the specifics of our code cleaning approach and fine-tuning experiments respectively.
+\subsection{Benchmarks}
+\label{subsec:setup:data}
+We use two standard algorithmic code generation benchmarks,  \apps{} and \contests{}.
+The benchmarks provide a collection of problem statements described in natural language and corresponding test cases.
+The goal is to generate a program that successfully solves the problem.
+The evaluation is performed using a strict functional correctness metric.
+
+\textbf{\apps~\citep{hendrycksapps2021}.}
+This benchmark includes 10,000 problems, evenly split between training and test sets.
+It is sourced from multiple open-access competitive programming websites.
+It is further divided into \appsintro{}, \appsinter{}, and \appscompete{} subsets based on problem difficulty.
+In this study, we only consider problems sourced from a subset of the competition websites based on the number of test cases provided.
+
+\textbf{\contests~\citep{li2022competition}.}
+This benchmark includes 13,328 problems in the training set and 165 problems in the test set.
+We only use a subset of the training split that includes \verb|python| solutions satisfying the provided test cases.
+Additionally, since the training set provides over a hundred solutions per problem, we perform LSH based near-deduplication on the solutions and limit them to a maximum of 25 solutions per problem.
+
+
+\input{tables/data-statistics}
+
+\textbf{Metrics.}
+We assess the code generation performance of the models using the \passmetric{$K$} metric~\citep{kulal2019spoc,chen2021evaluating}, which evaluates the functional correctness of generated programs.
+For each problem, we generate $N$ solutions (where $N \geq 2K$) and compute the expected number of scenarios in which the problem is solved at least once when sub-selecting a random sample of $K$ solutions.
+We vary $K$ in $\{1, 10, 25\}$ for \apps{} dataset and $\{1, 10, 100\}$ for the \contests{} benchmark.
+
+\subsection{Data Transformations}
+\label{subsec:setup:lmdt}
+We apply our data transformation approach on the \apps{} and \contests{} datasets.
+Unless specified otherwise, we use \gptturbo{} as our default language model $\gM$ to perform the transformations and use a default temperature $0.3$.
+In case of failure, we retry up to 5 iterations.
+We obtain three \textit{parallel} datasets at the end of our cleaning process, one for each of renaming, modularization, and planning \rebuttal{(note that the transformations are applied sequentially)}. Table~\ref{tab:setup:transformed-datasets} provides a summary of the generated datasets along with the instructions used to generate them.
+
+We also simulate a simple direct synthetic data generation approach somewhat similar to~\cite{gunasekar2023textbooks}. 
+Specifically, we generate solutions for the training problems using the \gptturbo{} model.
+We use in-context learning with the two-shot prompt examples selected from our \modularD{} dataset.
+To ensure diverse solutions, we use three distinct few-shot examples and generate eight solutions for every prompt at a temperature of $0.5$.
+\rebuttal{Additionally, we filter the solutions for correctness based on the ground truth test cases provided in the dataset to ensure we are not training on incorrect programs. 
+Since it resembles a distillation-like setup, we refer to this dataset as \distillD{}.}
+\input{tables/transformations.tex}
+
+\subsection{Experiment Details}
+\label{subsec:setup:experiments}
+To evaluate the \textit{quality} of the transformed datasets, we measure how they impact the test benchmark accuracy.
+We study both in-context learning and fine-tuning using examples from our datasets.
+
+\textbf{Models.}
+We use the \cllamaB{7} model~\citep{roziere2023codellama} in all our experiments (referred as \cl{} ahead).
+We use the model checkpoint from huggingface\footnote{\url{https://huggingface.co/codellama/CodeLlama-7b-hf}}
+and perform batched inference through \vllm{}~\citep{kwon2023efficient}, necessary for computing the \passmetric{$K$} metric.
+We also present the numbers from \codedavinci{} and \gptturbo{} whenever available.
+
+\textbf{In-context learning.}
+We select two question-answer pairs from the \origD{} and \modularD{} training sets as our in-context learning example.
+For a fair comparison between the two evaluations, we use the same problem and corresponding solutions from the two datasets as examples.
+The examples are combined with appropriate delimiters and the model is then prompted with a new problem.
+Note that these in-context learning examples increase the sequence length by over 2,000 tokens and considerably slow the inference.
+
+\textbf{Fine-Tuning.}
+We perform full fine-tuning over the base \cl{} model on the different datasets.
+We train the models for two epochs on the \apps{} dataset and one epoch on the \contests{} dataset using a $5e^{-5}$ learning rate and an effective batch size of 256 on 4 A6000 GPUs.
+
+
+\section{Experimental Results}
+
+\label{sec:results}
+We present our experimental results in this section. Section~\ref{subsec:exp:data-analysis} first provides a qualitative overview of the transformed programs and Section~\ref{subsec:exp:main-results} presents the main code generation results.
+
+\subsection{Analysis of the transformed programs}
+\label{subsec:exp:data-analysis}
+\input{tables/apps-results}
+
+\textbf{Data statistics.}
+For the \contests{} dataset, out of 98,582 programs extracted from the original dataset (\origD), we can successfully transform 92,675 (94.0\%) into our modularized dataset (\modularD{}).
+
+On the contrary, the distilled dataset (\distillD{}), which is constructed by generating solutions directly using \gptturbo{} only finds a correct solution for about 50\% of the problems.
+\textbf{Analysis of the transformed programs.}
+We find that our transformation approach decomposes the original programs by inserting three new functions on a median ($\scriptstyle \sim$2.6 functions on average).%, thus ensuring a granular control flow in the program.
+To get a better understanding of the decomposition, we cluster the functions using their function names and signatures.
+We find that these helper functions often implement key program logic, standard algorithms, and utilities like handling inputs, outputs, and orchestrating the main function.
+Interestingly, we also find that the helper functions are often reused across problems, with small variations in implementations.
+For example, the top five most frequent helper functions, \code{dfs}, \code{build_graph}, \code{gcd}, \code{dp}, and \code{binary_search} occur in about 3-8\% of the problems.
+Additionally, we qualitatively analyze a hundred random samples from \origD{} and \modularD{} datasets to determine the quality of performed transformations.
+
+We find that most of the transformations are meaningful. 
+ \rebuttal{Finally, we use \gptfour{} as judge~\citep{zheng2023judging} evaluation to quantitatively assess the transformations in regards to their meaningfulness and about the consistency of original and transformed programs. We find that over 99\% of the transformations are regarded as helpful of which only 3-5\% of examples are judged as \textit{can do better}. Similarly, 99.4\% of the transformed programs are judged as consistent with the original programs. More detailed evaluation results in Table~\ref{app:tab:gpt4_judge}.}
+
+Unlike, generated code, we cannot constrain or check the generated natural language plans.
+Thus, we find that sometimes the plans can be imprecise and vary in detail. 
+While using a stronger pretrained model like \gptfour{} could alleviate some of these issues, we believe this will be a good avenue for applying something analogous to process supervision~\citep{lightman2023let}.
+
+\subsection{Main Results}
+\label{subsec:exp:main-results}
+Tables~\ref{tab:apps_results} and~\ref{tab:contests_results} provide our primary results on \apps{} and \contests{} datasets respectively.
+
+\subsubsection{Effect of modularization}
+We find that our data-cleaning approach improves the performance of the model on both \apps{} and \contests{} datasets in both in-context learning and fine-tuning settings. 
+\input{tables/combined-contests}
+
+\textbf{In-context Learning.}
+We first evaluate the performance of the model when provided with \textit{parallel} two-shot in-context learning examples from \origD{} and \modularD{} datasets each. 
+We find that the \passmetric{1} improves from 14.2 to 17.5 (a 23\% relative improvement) on the \appsintro{} dataset and \passmetric{100} improves from 7.2 to 9.3 (a 29\% relative improvement) on the \contests{} dataset.
+These results indicate that more readablity and better-structured coding is helpful to the model in solving more problems.
+
+\textbf{Fine-tuning.}
+Next, we fine-tune the model on the \origD{} and \modularD{} datasets and again find strong performance improvements from our transformation approach.
+Specifically, on the \appsintro{} dataset, the \passmetric{1} improves from 18.7 to 22.7 (a 23\% relative improvement). Similarly, the \contests{} dataset \passmetric{25} metric improves from 6.4 to 8.4 (30\% relative improvement).
+These results cement our above findings about the effect of cleaning the data.
+
+Interestingly, we also note that fine-tuning only provides modest improvements over the in-context learning performance.
+We hypothesize that this is due to the challenging nature of our task.
+\footnote{Note that the in-context examples add over 2,000 tokens to the prefix and lead to much slower decoding}
+
+\subsubsection{Effect of planning annotations}
+\label{subsec:exp:planning}
+Prior work has demonstrated considerable successes in improving reasoning in \llms{} ~\citep{yue2023mammoth,magister2022teaching,fu2023specializing} by performing supervised learning on natural language \textit{reasoning} or \textit{planning steps}. 
+We perform similar experiment, fine-tuning the model on \planD{} dataset consisting of plans generated by our approach on top of \modularD{}.
+We find that planning only provides a modest improvement over the \modularD{} dataset (\passmetric{25} improved from 42.6 to 43.9 on the \appsintro{} dataset) or often no improvements at all. 
+
+Upon inspection of the generated solutions, we find that often the generated plans are imprecise or incorrect, highlighting that planning still remains a bottleneck. 
+To disentangle the high-level planning from the coding component, we analyze the performance of the model when provided with ground-truth plans on the \contests{} dataset.
+We extract these ground-truth plans by applying our data transformation approach on the test set (similar to how \planD{} training set was created).
+Table~\ref{tab:results:gtplanresults} provides results on this subset of 109 problems from the \contests{} dataset for which we were able to extract the ground truth plans (since some problems don't have a valid \verb|python| solutions).
+While our model trained on the \planD{} dataset is incapable of synthesizing new plans, it can follow the generated plans correctly.
+All metrics improve significantly, e.g. \passmetric{100} improving from 17.8 to 28.1, well over the performance of \gptturbo{}, a much larger model! 
+
+\rebuttal{
+Our mixed results raise critical questions for future work on improving planning in \llms{}. In particular, poor performance might be attributed to any \textit{imprecision} in automatically generated plans. Future data curation techniques that filter or augment this imprecision would be valueable. 
+Alternatively, the supervised learning paradigm followed in this work might be insufficient for models to generalize \textit{planning} in complex domains. Future work can explore alternative learning algorithms, possibly over our modularization approach which naturally decomposes programs.
+}
+
+\input{figures/results/combined}
+
+\subsubsection{Ablations}
+\label{subsec:res:ablation}
+
+\paragraph{Effect of data size.} Beyond improving the quality of the resulting model, data quality is also attributed to improving the data efficiency.
+We evaluate this aspect by fine-tuning our model on different fractions of \origD{} and \modularD{} datasets and find similar results.
+Figure~\ref{fig:results:datasize} presents the performance of the model as a function of training set size.
+As shown in the figure, training on just 15\% of \modularD{} dataset achieves similar \passmetric{1} as fine-tuning on the entire \origD{}.
+
+\textbf{Effect of renaming.}
+We use variable renaming as an intermediate step in our cleaning process.
+We evaluate the performance of the model fine-tuned only on the \renameD{} dataset and find that renaming provides some performance improvements when compared to fine-tuning on \origD{} dataset. For example, \passmetric{1} improved from 17.2 to 19.1 on \appsintro{}.
+However, renaming still performs worse in comparison to fine-tuning on the \modularD{}. 
+This highlights that beyond just readable code, functional decomposition is also a key aspect of improving our performance.
+
+\textbf{Cleaning Transformations vs Distillation.}
+We compare our transformation approach with a direct distillation baseline where we directly generate solutions using \gptturbo{}, referred to as the \distillD{} dataset\footnote{Note that we generate these solutions using in-context examples from the \modularD{} dataset}.
+\rebuttal{This corresponds to various \llm{} instruction or fine-tuning approaches~\citep{xu2023wizardlm,li-etal-2023-symbolic} providing a strong baseline for data cleaning.}
+On the \appsintro{} dataset, we find that fine-tuning on the \modularD{} dataset achieves better performance compared to the \distillD{} dataset demonstrating the advantage of cleaning over the generation baseline. 
+
+\rebuttal{
+\textbf{Choice of transformation model.} 
+ 
+\gptfourturbo{}, a stronger model, performs the transformations successfully and the resulting model trained on this version of the modularized dataset achieves even higher accuracy.
+For instance, \passmetric{10} improves from 33.0 when using \modularD{} constructed with \gptturbo{} to 34.3 when using the \modularD{} constructed with \gptfourturbo{} (full results in Table~\ref{tab:app:model_ablation}).
+}
+\subsubsection{Comparison to Other Baselines}
+Beyond \cl{}, fine-tuned models outperform strong baselines like \alphacode{} on the \contests{} dataset but still lag behind larger \codedavinci{} and \gptturbo{} models.
+
+\subsubsection{Case study of generated modularized program}
+Figure~\ref{fig:results:casestudy} provides an example of a program correctly generated by a model fine-tuned on our \modularD{} dataset. 
+The problem requires removing rows and columns containing cells with certain attributes (i.e., if the cell is white)
+The modularized solution correctly identifies the steps required to solve the problem and implements them as separate helper functions, providing readable code.
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\textbf{Instruction tuning.} Instruction tuning refers to the process of finetuning a base pretrained \llm{} to perform general-purpose tasks and follow instructions. Recent works, ~\cite{zhou2023lima,cao2023instruction,chen2023maybe} have demonstrated that a small high-quality instruction corpus is sufficient for achieving good instruction tuning performance.
+Here, we perform task-specific fine-tuning of \llms{} and observe similar performance improvements.
+
+\textbf{Synthetic data for \llms{}.}\ \ \ 
+Recent works have explored using synthetic datasets for general-purpose or task-specific finetuning of \llms{}.
+These approaches work by generating synthetic datasets from a strong \llm{} (like \gptturbo or \gptfour) using a set of existing tasks~\citep{alpaca, vicuna2023} or generating new tasks using self-instruct~\citep{wang2022self} or evol-instruct~\citep{xu2023wizardlm} approaches.
+This has been also applied for task-specific finetuning -- in common-sense reasoning~\citep{west-etal-2022-symbolic}, text-summarization~\citep{sclar2022referee}, mathematical reasoning ~\citep{luo2023wizardmath,yue2023mammoth}, tool use~\citep{patil2023gorilla}, coding~\citep{luo2023wizardcoder}, and general-purpose reasoning~\cite{li-etal-2023-symbolic, zelikman2022star}.
+
+More specifically, ~\cite{yue2023mammoth} curates diverse corpus of mathematics problems with chain-of-thought or program-of-thought~\citep{chen2022program} annotations for mathematical reasoning analogous to our plans.
+~\cite{gunasekar2023textbooks} proposed pre-training models on programming ``textbooks'' generated synthetically from \gptturbo{}.
+~\cite{haluptzok2023language} similarly generates programming puzzles and corresponding solutions from language models. 
+Our work also studies curating synthetic data for code-generation space. 
+However, instead of directly generating data using \llms{}, we identify good programming patterns and clean existing datasets using them. 
+
+\textbf{Algorithmic Code Generation.}
+ We only discuss pertinent algorithmic code generation works here. 
+~\cite{hendrycksapps2021} released the \apps{} dataset while ~\cite{li2022competition} released the \contests{} dataset with the \alphacode{} models.
+~\cite{zhang2023planning} proposed a lookahead-search-based decoding algorithm for improving \textit{reasoning} in \llms{} and is orthogonal to our work. 
+~\cite{chen2022codet,zhang2023algo} proposed  \scripttextsc{CodeT} and \scripttextsc{ALGO}, that use generated tests (using \llm{} or brute-force solution) to re-rank the generated solutions.
+~\cite{zelikman2023parsel} proposed the \textsc{Parsel} approach which used the \codedavinci{} model to first generate a plan in their high-level problem-specification language and then generate a program using it. 
+~\cite{li2023explaining} also study disentangling the planning and code generation capabilities for closed source \llms{}, similar to our experiments on open models. Finally, recent work~\cite{le2023codechain} proposed a prompting based approach for modular code-generation.
+
+
+
+\section{Discussion and Conclusion}
+
+\label{sec:discuss}
+Traditionally, data quality has been linked to functional correctness, ignoring the rich stylistic aspects differing across programs.
+In this work, we demonstrate that these aspects like readability, and program structuring actually impact the performance of the trained model on downstream tasks and thus also contribute to \dquality{}.
+\rebuttal{
+    Next, we proposed a novel data-cleaning pipeline demonstrating that \llms{}
+    can be used for transforming existing datasets to improve their quality based on user-instructions and oracle equivalence checker.
+    While our evaluations focused on the algorithmic code generation task, we believe that this approach would also be useful for other domains for improving data quality as well. In particular, even in the absence of symbolic checkers (like test cases), we believe that there is an opportunity to use learned ``oracles'' for ensuring consistency and quality in other domains akin to how used in ~\cite{sclar2022referee}. Finally, beyond improving algorithmic code generation, we believe our modularization approach can be beneficial for general software engineering use cases (test generation, debugging, verification) where modularity is beneficial.
+}
+
+
+\paragraph{Acknowledgement} This work was supported in part by NSF grants CCF-1900968, CCF-1908870 and by SKY Lab industrial sponsors and affiliates Astronomer, Google, IBM, Intel, Lacework, Microsoft, Mohamed Bin Zayed University of Artificial Intelligence, Nexla, Samsung SDS, Uber, and VMware. Any opinions, findings, conclusions, or recommendations in this paper are solely those of the authors and do not necessarily reflect the position of the sponsors.
+Additionally, we thank Alex Gu, Manish Shetty, and anonymous reviewers for helpful discussion and feedback on the paper.
+
+
+
+
+

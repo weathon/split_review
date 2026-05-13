@@ -1,0 +1,458 @@
+\title{Self-Introspective Decoding: Alleviating Hallucinations for Large Vision-Language Models}
+
+\begin{abstract}
+
+Hallucination remains a significant challenge in Large Vision-Language Models (LVLMs). 
+To alleviate this issue, some methods, known as contrastive decoding, induce hallucinations by manually disturbing the raw vision or instruction inputs and then mitigate them by contrasting the outputs of the original and disturbed LVLMs.
+However, these holistic input disturbances sometimes induce potential noise and also double the inference cost.
+To tackle these issues, we propose a simple yet effective method named \textit{Self-Introspective Decoding} (SID). 
+Our empirical investigations reveal that pre-trained LVLMs can introspectively assess the importance of vision tokens based on preceding vision and text (both instruction and generated) tokens. Leveraging this insight, we develop the Context and Text-aware Token Selection (CT$^2$S) strategy, 
+which preserves only the least important vision tokens after the early decoder layers, thereby adaptively amplify vision-and-text association hallucinations during auto-regressive decoding.
+This strategy ensures that multimodal knowledge absorbed in the early decoder layers induces multimodal contextual rather than aimless hallucinations, and significantly reduces computation burdens. 
+Subsequently, the original token logits subtract the amplified fine-grained hallucinations, effectively alleviating hallucinations without compromising the LVLMs' general ability.
+Extensive experiments illustrate that SID generates less-hallucination and higher-quality texts across various metrics, without much additional computation cost.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recent advancements in Large Language Models (LLMs) \citep{llama, qwen, vicuna, llama2, llama3} have demonstrated great success over the past few years. Many efforts have been made to extend LLMs to Large Vision-Language Models (LVLMs) \citep{mplug, mimic, qwenvl, blip2, instructblip, llava1.5, fuyu, yi, llavanext}, achieving impressive performance across various vision tasks \citep{llavamed, gpt4roi} as well as more complex tasks like content comprehension \citep{ lisa} and generation \citep{instructdiffusion}.
+
+Despite their extraordinary versatility, LVLMs face a significant challenge known as the `hallucination'. Concretely, hallucinated texts are fluent and semantically coherent but contain incorrect or non-exist statements about the given image, e.g., generating irrelevant or meaningless responses, identifying inaccurate colors, numbers, and locations of objects not present in the image \citep{opera}. 
+This flaw in LVLMs poses a significant risk for real-world applications to become trustworthy AI assistants. For instance, in model-assisted computer-aided diagnosis scenarios \citep{chatcad}, such misinterpretation of medical images could lead to serious medical accidents.
+\begin{figure} \centering
+  \centering
+  \includegraphics[width=0.91\textwidth]{compare.pdf}
+  \captionsetup{font=footnotesize}
+  \caption{\textbf{Contrastive Decoding strategies:} (a) Visual Contrastive Decoding (VCD) \citep{vcd}  \textbf{manually} distort vision inputs. (b) Instruction Contrastive Decoding (ICD) \citep{icd, id} also \textbf{manually} design noisy instruction (negative prompt). Detailed analyses are in Sec. \ref{sec3.2}. We ablate other modules like the vision encoder and tokenizer for clarity. \textit{t}: \texttt{`Please describe this image in detail.'}; sys.: system prompt. $g$: generated text tokens. $\alpha$  in Eq. \ref{eq2} defaults to 1.}
+  \label{fig1}
+\end{figure}
+One mainstream approach to alleviating hallucinations in LVLMs involves developing training-free decoding strategies known as Contrastive Decoding (CD) \citep{vcd, vig, icd, id}, which adjusts the next-token logits in a contrastive manner.
+Concretely, Vision CD (VCD) manipulates vision inputs with Gaussian noise \citep{vcd} or directly ablates visual inputs \citep{vig} to amplify language priors. Instruction CD (ICD) \citep{icd, id} designs negative prompt.\footnote{negative prompts like \texttt{`You are a confused object detector.'} and \texttt{`Always respond with the opposite of what you're asked.'} for different tasks.} 
+The rationale is that disturbed inputs significantly exacerbate hallucinations, and CD subtracts hallucinated concepts from the original distribution to mitigate hallucinations.
+\textit{However}, input disturbances require elaborate designs for various downstream tasks, and the inference cost is inevitably doubled. \textit{Moreover}, the contrastive distributions are \textit{vision-and-text agnostic}, not necessarily amplify desired hallucinations but sometimes induce potential uncertainty noise for CD. Intuitive examples are illustrated in Fig. \ref{fig1}, and detailed analyses are in Sec. \ref{sec3.2}. 
+In Fig. \ref{fig1} (a) and (b), LVLMs directly infer the correct next token from multimodal inputs. For Vision CD, distorted vision input exacerbates hallucinated object logits such as \textit{football} and \textit{basketball}, while the holistic noise suppresses \textit{baseball} to a low logit value. Consequently, VCD might compromise normal decoding. Similarly, for Instruction CD, LVLMs tend to refuse to answer negative prompts in open-end generation task (as seen in Fig. \ref{fig_example1} and \ref{fig_example2}), and also suffer from potential uncertainty noise similar to VCD.
+To address the aforementioned issues, we propose a novel decoding strategy called \textit{Self-Introspective Decoding} (SID). 
+Our empirical investigations reveal that pre-trained LVLMs can introspectively assess the importance of vision tokens adaptively,
+based on preceding vision and text (both instruction and generated) tokens.
+SID leverages this capability to amplify and then subtract \textit{vision-and-text association} hallucinations by proposing token-level disturbances named Context and Text-aware Token Selection (CT$^2$S) strategy. This strategy induces multimodal contextual hallucinations, rather than aimless ones, by conducting token selection in the early decoder layers.
+In summary, our main contributions are three-fold:
+
+{\footnotesize \textbullet\ } We re-think CD methods in LVLMs and attribute their failure cases to vision-and-text agnostic input distributions that induce potential uncertainty noise.
+
+{\footnotesize \textbullet\ } To address this, we propose Self-Introspective Decoding (SID), where the CT$^2$S strategy adaptively amplifies and then subtracts vision-and-text association hallucinations. This approach is grounded in our investigations that pre-trained LVLMs can introspectively assess visual importance informed by preceding tokens. 
+{\footnotesize \textbullet\ } Through comprehensive comparisons, we demonstrate that SID generates high-quality texts with fewer hallucinations. Additionally, SID significantly reduces inference cost of contrastive decoding. 
+
+
+
+\section{Related Work}
+
+We review recent advances in \textbf{Hallucination in Foundation Models}.
+\textbf{Hallucination in Foundation Models.}
+Hallucination, defined as the generation of irrelevant, factually incorrect, or meaningless text in a given context \citep{chair, snowball, hallusionbench, ear}, is a significant bottleneck in current foundation models. 
+This issue can stem from overfitting specific patterns in the training data, a lack of understanding world knowledge, or an inability to effectively contextualize a given input \citep{hal_survey}. In the context of LLMs, hallucinations often manifest as generated content that conflicts with world knowledge or common sense. For LVLMs, the primary concern is whether the generated answer conflicts with the provided images. To mitigate the hallucination issue, 
+several solutions have been proposed, including \textbf{robust instruction tuning with curated datasets} \citep{factuality, dph, rit, hadpo, hacl, rlhfv, doctor, vista, eos}, \textbf{post-hoc utilizing auxiliary analysis networks} \citep{selfcheckgpt, lure,  pecker, halc, logical, collaboration}, and \textbf{various decoding strategies} \citep{contrastive, dola, pai, vcd, vig, icd, id, ibd}. However, robust instruction tuning requires massive high-quality datasets and advanced GPU clusters, making it resource-intensive; Post-hoc utilizing auxiliary networks heavily rely on the auxiliary network, leading to high inference costs. 
+As for decoding strategies, representative LVLMs hallucination alleviation methods \citep{vcd, vig, icd} manually disturb raw inputs to induce hallucinations and then contrast them to alleviate the issue. However, holistic disturbing raw inputs might bring additional noise during contrastive decoding, and double the inference cost. 
+In this paper, we propose an efficient Self-Introspective Decoding (SID) that induces and then mitigates vision-and-text association hallucination by token-level disturbances, greatly reducing the inference cost. 
+
+
+
+
+\section{Preliminary and Motivation}
+
+In the following, we first illustrate the generation paradigm of LVLMs to facilitate the understanding of SID. We then re-think the contrastive decoding in LVLMs and propose our motivation for SID. 
+
+\subsection{Paradigm of LVLMs Generation}\label{sec3.1}
+\textbf{Vision and Language Inputs.}
+The inputs of LVLMs consist of both image ($v$) and text ($t$). Generally, the raw images are commonly fed to the visual encoder, and then the cross-model projection module maps vision information into LLMs’ input space, which is denoted as vision tokens $v=\left \{ v_{1}, v_{2}...v_{n} \right \} $ ($n$ is the length of vision tokens). Similarily, text is processed by tokenizer and embedding modules, which is denoted as text tokens $t=\left \{ t_{1}, t_{2}...t_{m} \right \} $ ($m$ is length of text tokens). Then, the image ($v$) and text ($t$) tokens are concatenated as the final input of LLMs.
+
+\noindent \textbf{LVLMs Forward.}
+The backbone networks of LVLMs are pre-trained LLMs like Vicuna \citep{vicuna} and LLaMA 2 \citep{llama2}, parameterized by $\theta$. Given multimodal tokens $\left \{  v , t\right \}$, LVLMs predict the next token probability ($y_{i}$) at $i$ time step in an auto-regressive manner following the methodology of LLMs, over the vocabulary set $\nu$: 
+\begin{equation}
+p(y_{i}|v,t,y_{<i})=\mathrm{softmax}(logit_{\theta }(y_{i}|v,t,y_{<i})),  y_{i} \in \nu
+\label{eq1}
+\end{equation}
+
+\noindent \textbf{Next Token Decoding. 
+The decoded token is concatenated to the last original input token, for the next round of generation until the end of the generation process.
+
+\subsection{Re-thinking Contrastive Decoding in LVLMs}\label{sec3.2}
+\begin{table}[] \centering \footnotesize
+\begin{tabular}{cl|cccc}
+\hline
+\multicolumn{2}{c}{}                                 & \multicolumn{2}{|c}{\textbf{Greedy}} & \multicolumn{2}{c}{\textbf{Sampling}} \\ 
+\multicolumn{1}{l}{\textbf{Setting}} & \textbf{Method} & Accuracy $\uparrow$  & F1 Score $\uparrow$  & Accuracy $\uparrow$  & F1 Score $\uparrow$ \\ \hline
+\multirow{7}{*}{\textit{Random}}     & Normal            & 88.8{\tiny±0.05} &  88.6{\tiny±0.08}   & 84.9{\tiny±0.03} & 83.2{\tiny±0.01}\\ \cdashline{2-6}
+                                     & VCD               & 87.8{\tiny±0.02} &  87.9{\tiny±0.06}   &87.73 & 83.28        \\
+                                     & w/o Eq. \ref{eq3} &   -              &  -                 & 83.3{\tiny±0.04}  &82.2{\tiny±0.02}\\ \cdashline{2-6}
+                                     & ICD               & 87.9{\tiny±0.04} &  88.1{\tiny±0.02}    &  86.9{\tiny±0.03}  &  85.2{\tiny±0.04}        \\
+                                     &w/o Eq. \ref{eq3} &   -              &  -                 & {82.7\tiny±0.02} & {81.8\tiny±0.03} \\\cdashline{2-6}
+                                     & \textbf{Ours}     & \textbf{89.3}{\tiny±0.08} & \textbf{89.5}{\tiny±0.02}  & \textbf{88.8}{\tiny±0.03} & \textbf{88.7}{\tiny±0.02} \\
+                                      & w/o Eq. \ref{eq3}     &   -              &  -           & 87.2{\tiny±0.01} & 88.0{\tiny±0.02}  \\ \hline
+\multirow{7}{*}{\textit{Adversarial}}  & Normal            & {79.3\tiny±0.05} & 80.9{\tiny±0.09}  &78.7{\tiny±0.03} &78.9 {\tiny±0.02} \\\cdashline{2-6}
+                                     & VCD               & {80.9\tiny±0.06} & {81.0\tiny±0.04}  & 80.88 & 81.33        \\
+                                     &w/o Eq. \ref{eq3}   &   -              &  -     &{76.2\tiny±0.04} & {76.0\tiny±0.04}\\\cdashline{2-6}
+                                     & ICD               & {80.2\tiny±0.03} &  {81.3\tiny±0.01}         &79.1{\tiny±0.02} & 80.4{\tiny±0.04}        \\
+                                     & w/o Eq. \ref{eq3}  &   -              &  -            &75.4{\tiny±0.02} & 76.4{\tiny±0.04}        \\\cdashline{2-6}
+                                     &\textbf{Ours}      & \textbf{83.3}{\tiny±0.07} & \textbf{82.5}{\tiny±0.06}  & \textbf{82.6}{\tiny±0.05} & \textbf{82.1}{\tiny±0.06}\\
+                                     &w/o Eq. \ref{eq3}   &   -              &  -     & 82.2{\tiny±0.03} & 81.9{\tiny±0.01}\\\hline
+\end{tabular}
+\captionsetup{font=footnotesize}
+\caption{\textbf{Efficacy Analyses on CD strategies} on MSCOCO dataset. The \textit{Random} setting means objects
+absent from the image are chosen randomly, while the \textit{Adversarial} setting prioritizes co-occurring objects which are not present in the image. Results are from \citep{vcd} or the average of three running times conducted on LLaVA-1.5 7B for fair comparisons. $\alpha$ in Eq. \ref{eq2} defaults to 1 and Eq. \ref{eq3} has no effect on the greedy decoding.}
+\label{table1}
+\end{table}
+
+
+Following the seminal works \citep{contrastive} in natural language processing, which introduced the Contrastive Decoding (CD) mechanism to enhance coherence and informativeness by considering the differences between expert and amateur models, various studies have adapted this strategy to LVLMs by distorting the visual or instruction inputs for contrastive purposes.
+As the vision and instruction contrastive processes are symmetrical, we use visual contrastive decoding as an example. The contrastive decoded probability of next-token ($p_{cd}$) can be generally formulated as follows:
+\begin{equation}
+p_{cd}(y_{i}|v, v_{d}, t, y_{<i})=\mathrm{softmax}[(1+\alpha)logit_{\theta }(y_{i}|v,t,y_{<i}) - \alpha logit_{\theta  }(y_{i}|v_{d},t,y_{<i})]
+\label{eq2}
+\end{equation}
+where $d$ and $\alpha$ indicate distortion operation and hyperparameter, respectively. \textit{Generally}, CD methods employ an adaptive plausibility constraint to calibrate the entire output distribution, preventing implausible outputs from the augmented distribution \citep{contrastive, dola, vcd, vig, icd, id, ibd}:
+\begin{equation}
+\begin{split}
+\nu _{token}(y_{<i})=\left\{  y_i \in \nu: p_{\theta}(y_{i}|v, t, y_{<i}) \ge \beta \max_{\omega }  p_{\theta}(\omega|v, t, y_{<i}) \right\},
+\\
+p_{cd}(y_{i}|v,v_{d},t, y_{<i}))=0, \;\mathrm{if}\; y_{i}\notin \nu _{token}(y_{<i})
+\label{eq3}
+\end{split}
+\end{equation}
+where $\nu$ and $\nu_{token}$ are the output vocabulary and selected tokens.
+$\beta$ controls the strength of truncation, with larger $\beta$ indicating more aggressive truncation that retains only high-probability tokens.
+
+However, we argue that manually disturbing raw inputs might not trigger the desired hallucinations, while holistic disturbances will bring uncertainty noise that compromises the normal decoding. To validate our claim, we analyze the performances of normal decoding, VCD, and ICD using the POPE \citep{pope} metric, under both \textbf{sampling} and \textbf{greedy} decoding settings.
+POPE quantitatively converts the hallucination evaluation into a binary classification problem by using the question format to prompt the model: \texttt{`Is there a <object> in the image?'}, with expected answers being \texttt{`Yes'} or \texttt{`No'}. 
+From Table \ref{table1}, 
+under the \textbf{greedy} decoding setting, CD methods improve performance in the \textit{adversarial} setting, which are more challenging as they prioritize co-occurring confusing objects. CD methods achieve this by exacerbating and subtracting hallucinated concepts from the original distribution. However, in \textit{random} settings, where objects absent from the image are chosen randomly and are easily recognized, CD methods slightly underperform normal greedy decoding, which indicates that the correct token logit is somewhat compromised during contrastive decoding. In the \textbf{sampling} decoding setting, CD methods clearly outperform the normal sampling decoding.
+However, CD methods rely on the adaptive plausibility constraint (Eq. \ref{eq3}) to filter out low-probability tokens. Without Eq. \ref{eq3}, CD methods are inferior to normal decoding in both \textit{random} and \textit{adversarial} settings, validating that vision-and-text agnostic input distributions induces potential uncertainty noise after Eq. \ref{eq2}. To address these issues, we propose a decoding strategy named \textit{Self-Introspective Decoding} (SID). SID \textit{adaptively} amplifies \textit{vision-and-text association} hallucinations informed by generated tokens to guide LVLMs in exploring factualness. Details are illustrated in the Sec. \ref{sec4} and Fig. \ref{fig2}.
+
+
+
+\begin{figure*} [] \centering
+  \centering
+  \includegraphics[width=0.95\textwidth]{SID}
+  \captionsetup{font=footnotesize}
+  \caption{\textbf{Overview of Self-Introspective Decoding (SID).} CT$^2$S: Context and Text-aware Token Selection strategy. 
+  LLaVA-1.5 7B is utilized as an example to visualize visual tokens with low and high scores (Eq. \ref{eq5}).
+  }
+  \label{fig2}
+\end{figure*}
+
+
+\section{Methodology}
+
+
+ 
+
+\subsection{Understanding the Self-Introspective Pre-trained LVLMs.} \label{sec4.1}
+LLMs \citep{qwen, vicuna, llama2, llama3} have been scaled up to billions of paramters and pre-trained on trillions of tokens, endowing LLMs with encyclopedic ability like in-context learning \citep{icl}, zero \citep{zero-shot}/few-shot \citep{few-shot} ability. LVLMs extend LLMs to multimodal understanding capabilities by visual instruction tuning. Some works \citep{pumer, llava_pru, 0.5token} pointed out that vision information is redundant in LVLMs, and develop vision token reduction technologies to prune \citep{dynamicvit} and merge \citep{merging} tokens guided by importance metrics without further re-training. 
+Regarding the hallucination issue, we argue that vision tokens with low attention scores induce \textbf{vision-and-text association hallucination}.
+Formally, for the transformer block \citep{transformer} in the auto-regressive decoder \footnote{Here we illustrate the transformer block without KV Cache for better understanding.}, vision ($v$), text instruction ($t$), and generated tokens ($g$) are concatenated and projected into three distinct vectors: the query vector \textbf{Q}, the key vector \textbf{K}, and the value vector \textbf{V}, utilizing three linear transformations \textbf{$W_q$}, \textbf{$W_k$}, and \textbf{$W_v$}. The self-attention ($SA$) mechanism computes the relevance of each item to other items as follows:
+\begin{equation}
+\begin{split}
+\mathbf{R}= SA(\mathbf{Q},\mathbf{K},\mathbf{V})=\mathbf{A}\cdot \mathbf{V},
+\\
+\mathbf{A}=\mathrm{softmax}(\frac{\mathbf{Q}\cdot \mathbf{K}^{T}}{\sqrt{d_{l}} } + M )
+\label{eq4}
+\end{split}
+\end{equation}
+where $d_{l}$ represents the dimension of \textbf{Q}, \textbf{K}, \textbf{V}, $M$ represents the casual mask. $\mathbf{A} \in R^{(b, h, n, n)}$, where $b$, $h$, and $n$ denote batch size, number of key-value heads, and total token number, respectively. We denote the $\mathbf{A}_{i}$ as the attention matrix after \textit{Layer} $i$ of LVLMs. We then calculate vision token importance scores ($\mathrm{Score}_{i}(v)$) as shown in Fig. \ref{fig2} (\textbf{Selector}) based on $\mathbf{A}_{i}$:
+\begin{equation}
+\mathrm{Score}_{i}(v)  = \frac{1}{h}\sum_{j=1}^h\mathbf{A}_{i}^{(\cdot,j,\cdot,\cdot)}[-1]
+\label{eq5}
+\end{equation}
+where $v$ means vision token indexes. Contrary to token pruning/merging \citep{dynamicvit, merging}, we preserve a certain number of the least important vision tokens based on Eq. \ref{eq5}. 
+
+\noindent \textbf{Analyses.} Fig. \ref{fig3} and \ref{fig4} preliminarily valid the efficacy of $\mathrm{Score}_{i}(v)$ qualitatively. In Fig. \ref{fig3}, the preserved \textbf{least} important tokens mainly reflect areas opposite to the query. For instance, when querying \texttt{`cup'} in Fig. \ref{fig3} (left), LVLMs focus on \texttt{`cup'} in the foreground, thus preserving background tokens with low $\mathrm{Score}_{i}(v)$.
+Conversely, LVLMs pay attention to background items when querying \texttt{`couch'}. When querying existing items in Fig. \ref{fig3} (right), vision tokens of unrelated regions are mainly preserved. For open-end generative tasks in Fig. \ref{fig4}, auto-regressive decoded tokens are generated based on preceding vision ($v$), instruction ($t$), and generated text ($g$) tokens. The preserved vision tokens are \textbf{adaptively adjusted} according to preceding tokens at each decoding step, primarily focusing on spurious related regions.
+
+where Table \ref{table2} illustrates that vision tokens with high $\mathrm{Score}_{i}(v)$ greatly maintain original ability, while tokens with low $\mathrm{Score}_{i}(v)$ reach nearly $50\%$ accuracy in binary classification. 
+Above evaluations suggest that Eq. \ref{eq5} effectively assesses the importance of vision tokens.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{token_pruning}
+  \captionsetup{font=footnotesize}
+  \caption{\textbf{Visualization Results} of the \textbf{least} important vision tokens on discrimination tasks informed by preceding vision and text tokens. LLaVA-1.5 7B with Layer $i=3$ is utilized.}
+  \label{fig3}
+\end{figure*}
+\begin{figure*}
+  \centering
+  \includegraphics[width=0.95\textwidth]{token_pruning2}
+  \captionsetup{font=footnotesize}
+  \caption{\textbf{Visualization Results of \textit{Adaptively} Selecting} the \textbf{least} important vision tokens on open-end generative tasks informed by preceding vision and text tokens. LLaVA-1.5 7B with Layer $i=3$ is utilized.}
+  \label{fig4}
+\end{figure*}
+
+We further demonstrate the \textit{open-end generated hallucinations} induced by ours, Vision Disturbance (VD) \citep{vcd}, and Instruction Disturbance (ID) \citep{icd} in Fig. \ref{fig_example1} and \ref{fig_example2}. The hallucinations we amplified are more vision-and-text association compared to VD, while LVLMs usually refuse to response to ID. 
+ Interestingly, VD and ID do not degrades much, especially in discrimination tasks. Experiments imply that disturbed target logits still have the highest probability in most cases, and therefore, contrastive decoded target logits are not enhanced much after Eq. \ref{eq2}, while CD methods are susceptible to potential uncertainty noise.
+\begin{figure*} [b]
+\footnotesize
+  \centering
+  \includegraphics[width=1\textwidth]{example1}
+  \captionsetup{font=footnotesize}
+  \caption{\textbf{Instance Illustration of Different Disturbance Results.} Examples are from MSCOCO inferred by LLaVA-1.5 7B with $i=3$ and Top-k=50. Hallucinations are marked in \textcolor{red}{red}.}
+  \label{fig_example1}
+\end{figure*}
+
+
+
+\subsection{Context and Text-aware Token Selection (CT$^2$S) Strategy.} \label{4.2}
+Based on the above investigations, we argue that to induce context- and text-aware hallucinations for contrastive decoding, only a small percentage 
+of vision tokens with low attention scores should be preserved after the early decoder layers. 
+To validate our claims, we conduct the following experiments: 1) In Vision Encoder (VE), we preserve tokens with low attention values between the $\mathbf{[CLS]}$ token and vision tokens in the penultimate layer, calculated as: $\mathbf{A}=\mathrm{softmax}(\frac{\mathbf{[CLS]}\cdot \mathbf{K^{T}}}{\sqrt{d_{k}} } )$. 2) In the LLM decoder, we preserve tokens with low importance score (Eq. \ref{eq5}) across varying layers ($i$). Additionally, we adjust the number of preserved vision tokens. As shown in Fig. \ref{fig-i}, \textbf{firstly}, pruning vision tokens in VE based on $\mathbf{[CLS]}$ may not always yield positive gains, as the $\mathbf{[CLS]}$ token lacks information about instructions and generated texts, which are crucial for multimodal understanding. 
+Specifically, pruning all vision tokens resembles VIG \citep{vig}, which contrastively amplifies the vision importance over the language prior by ablating vision inputs. \textbf{Secondly}, 
+aggressive pruning vision tokens (i.e., 0$\%$) after the $Layer_{i=1}$ is not optimal. The loss of vision information for subsequent decoder layers results in losing the visual contexts, leading to aimless hallucinations without sufficient vision grounding. \textbf{Thirdly}, selecting tokens in the late decoder layers degrades contrastive decoding to normal decoding, as preceding layers of LVLMs already decode and understand multimodal information, which is consistent with LLMs' 
+\begin{wrapfigure}{r}{0.555\textwidth} % 'r'表示右侧，0.4为图片宽度
+    \centering
+      \centering
+      \includegraphics[width=0.545\textwidth]{msgreedy-sampling}
+      \captionsetup{font=footnotesize}
+      \caption{Analyses of varying $i$ and preserved ratios in CT$^2$S. 
+      VE: vision encoder; \textbf{$i$}: $i$-th decoder layer.}
+\label{fig-i}
+\end{wrapfigure}
+early-exiting mechanisms \citep{calm, exit}. In summary, the proposed CT$^2$S strategy selects Top-k least important vision tokens after the early layers based on attention score (Eq. \ref{eq5}), where the induced hallucinations are aware of both visual contexts and text information. Finally, following CD methods (Sec. \ref{sec3.2}), we contrastively subtract amplified vision-and-text association hallucinations for the next token prediction. 
+
+
+\noindent \textbf{Discussion.} Based on analyses of the self-introspective pre-trained LVLMs, could we enhance vision information informed by the proceeding vision and text tokens rather than utilizing the contrastive decoding? To explore this, we rewrite Eq. \ref{eq2} as follows:
+\begin{equation}
+p_{add}(y_{i}|v,v\uparrow,t,y_{<i})=\mathrm{softmax}[(1-\alpha)logit_{\theta }(y_{i}|v,t,y_{<i}) + \alpha logit_{\theta  }(y_{i}|v\uparrow,t,y_{<i})]
+\label{eq6}
+\end{equation}
+where we preserve vision tokens with high importance scores (Eq. \ref{eq5}) denoted as $v\uparrow$. From Table \ref{figadd}, 
+\begin{wraptable}{r}{0.4\textwidth} 
+\centering 
+\footnotesize
+\begin{tabular}{lcc}
+\hline
+\multicolumn{1}{c}{\textbf{Setting}} & \textit{Random} & \textit{Adversarial} \\ \hline
+Sampling                             & 84.7            & 78.7               \\
+VCD                                  & 87.7            & 80.9               \\
+\texttt{Add}                         & \textbf{88.9}   & 79.4               \\
+\textbf{Ours}                        & 88.8            & \textbf{82.6}      \\ \hline
+Greedy                               & 88.8            & 79.1               \\
+VCD                                  & 87.8            & 80.9               \\
+\texttt{Add}                         & 89.1            & 80.1               \\
+\textbf{Ours}                        & \textbf{89.3}   & \textbf{83.3}      \\ \hline
+\end{tabular}
+\captionsetup{font=footnotesize}
+\caption{\textbf{Analyses of Contrastive Decoding Mechanisms} on the POPE metric. Hyperparameters are consistent with  CD settings.}
+\label{figadd}
+\end{wraptable}
+we observe that enhancing vision information (i.e., \texttt{Add}) alleviates hallucinations to some extent, which also implicitly validates the efficacy of Eq. \ref{eq5}. 
+However, in the adversarial setting, enhancing vision information does not bring much benefits compared to ours. 
+Because our amplified hallucinations effectively associate co-occurring objects,
+reflected in \textbf{high logit values of hallucination token}, and then contrastively suppress them. 
+In contrast, enhancing vision information primarily boosts the original prediction's \textbf{target} logits grounded in attention scores, which does not significantly improve discrimination, especially in the adversarial setting.  
+
+
+ 
+
+ 
+
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Settings}\label{sec5.1}
+
+\noindent  \textbf{Models and Baselines.} We utilize four representative LVLMs: InstructBLIP \citep{instructblip}, Shikra \citep{shikra}, LLaVA-1.5 \citep{llava1.5} at the 7B scale, and LLaVA-NeXT \citep{llavanext} at the 8B scale. 
+
+Since our method aims to propose \textit{training-free} LVLM decoding strategies, we compare six decoding methods: Sampling (Top-p=1), Greedy, Dola \citep{dola}, and LVLM decoding strategies (VCD \citep{vcd}, ICD \citep{icd}, and OPERA \citep{opera}). For comprehensive comparisons, we apply VCD and ICD in both sampling (Top-p=1) and greedy decoding settings.
+
+
+\noindent  \textbf{Implementation Details.} As analyzed in Sec. \ref{4.2}, we set Layer $i$=3 and preserve top 10$\%$ least important vision tokens for Shikra, LLaVA-1.5, and LLaVA-NeXT and $i$=5 and top 10$\%$ least important vision tokens for Q-former based LVLMs (InstructBLIP) to induce fine-grained hallucinations. Hyperparameters in Eq. \ref{eq2} and \ref{eq3} follow VCD and ICD. 
+
+\subsection{Evaluation Results}\label{sec5.2}
+
+In this section, we follow previous methods \citep{vcd, icd, opera} to evaluate the SID on \textbf{CHAIR} \citep{chair} and \textbf{POPE} \citep{pope} metrics. Besides manually designed metrics, we also leverage \textbf{GPT-4 assisted benchmark} \citep{hadpo} to evaluate attribute, location, and relation hallucinations. \textbf{MME} \citep{mme} and \textbf{MMBench} \citep{mmbench} benchmarks are employed to assess the LVLM's general ability.
+
+
+
+
+\begin{wraptable}{r}{0.65\textwidth} 
+\centering 
+\scriptsize
+\begin{tabular}{l|cccccccc} \hline
+\multicolumn{1}{c|}{\multirow{2}{*}{\textbf{Setting}}} & \multicolumn{2}{c}{\textbf{LLaVA-1.5}} & \multicolumn{2}{c}{\textbf{InstructBLIP}} & \multicolumn{2}{c}{\textbf{Shikra}}    & \multicolumn{2}{c}{\textbf{LLaVA-NeXT}} \\ 
+\multicolumn{1}{c|}{}                                  & $C_S$$\downarrow$            & \multicolumn{1}{c}{$C_I$$\downarrow$} & $C_S$$\downarrow$              & \multicolumn{1}{c}{$C_I$$\downarrow$}  & $C_S$$\downarrow$            & \multicolumn{1}{c}{$C_I$$\downarrow$} & $C_S$$\downarrow$                 & $C_I$$\downarrow$                 \\ \hline 
+Sampling                                               & 51.3          & 16.8                    & 51.0            & 24.2                     & 48.9          & 14.7                    & 42.6               & 14.1               \\
+ICD$^{*}$                                             & 48.7          & 13.9                     & 48.3                & 16.7                         & 47.8          & 14.5                    & 42.7               & 13.6               \\
+VCD$^{*}$                                               & 48.0          & 14.3                   &47.9                 & 17.2                         & 48.1          & 13.8                    & 41.3               & 12.9               \\
+\textbf{Ours}$^{*}$                                              & 45.0          & \textbf{11.7}          & 43.6            & 13.1                     & 46.0          & 12.9                    & 38.4               & 11.4               \\ \cdashline{1-9} 
+Greedy                                                 & 49.6          & 14.4                    & 54.6            & 13.6                     & 47.1          & 13.9                    & 42.9               & 13.2               \\
+Dola$^{\star}$                                         & 47.1          & 13.8                    & 52.7            & 14.0                     & 46.8          & 14.2                    & 40.9               & 13.1               \\
+OPERA                                                  & 45.2          & 12.7                    & 47.4                & 12.9                  & \textbf{44.4} & 13.6                    & 39.4               & 11.8               \\
+ICD$^{\star}$                                           & 47.4          & 13.9                    &46.3                 & 15.3                 & 47.3          & 14.1                    & 42.1               & 12.6               \\
+VCD$^{\star}$                                          & 46.8          & 13.2                    & 44.0            & 13.6                     & 47.8          & 14.0                    & 41.1               & 12.9               \\
+\textbf{Ours}$^{\star}$                                                   & \textbf{44.2} & 12.2                    & \textbf{42.3}   & \textbf{12.4}            & 44.8          & \textbf{12.8}           & \textbf{38.1}      & \textbf{11.3}      \\ \hline
+\end{tabular}
+\captionsetup{font=footnotesize}
+\caption{\textbf{Results on the CHAIR metric.} $^{*}$ and $^{\star}$ denote adopting the same sampling and greedy decoding strategies, respectively.}
+\label{chair}
+\end{wraptable}
+\noindent\textbf{CHAIR and POPE Evaluations.}
+CHAIR \citep{chair} and POPE \citep{pope} are quantitative metrics to assess objection hallucinations of VLMs.
+As for \textbf{CHAIR}, Following \citep{icd, opera, eos}, we randomly select 500 images from the validation set of the MSCOCO \citep{mscoco} dataset and query different LVLMs with the prompt: \texttt{`Please describe this image in detail.'}. We set the max new tokens to 512 to generate responses for fair comparisons. As shown in Table \ref{chair}, our method outperforms other baselines in most cases, validating the effectiveness of SID in open-end generation tasks. Compared to CD methods, SID \textit{online adaptively} prunes attention-important vision tokens informed by instruction and generated text to induce fine-grained hallucinations for contrastive decoding during open-end text generations. 
+For the \textbf{POPE} metric, which comprises three datasets, we average the results in Table \ref{pope}. Our method performs best overall in \textit{random}, \textit{popular}, and \textit{adversarial} sampling settings. Specifically, in the sampling decoding setting, SID surpasses the normal sampling decoding by a large margin in a train-free manner. SID also clearly outperforms CD methods (Dola, ICD, and VCD) because the self-introspective decoding strategy amplifies \textit{vision-and-text association} hallucinations then subtracts them, rather than coarsely disturbing raw inputs. Additionally, owing to the context and text-aware token selection strategy, SID is more computation-efficient than CD methods, as analyzed in Table \ref{table_e}. Note that beam-search based OPERA \citep{opera} shows almost no gain in the POPE metric, primarily because answering the binary classification only requires a few tokens and selecting the best beam score in a decoded sequence ($N$=5) brings little improvement.
+
+
+
+\begin{table}[t] 
+\centering \scriptsize
+\begin{tabular}{cccc|cc|cc}
+\hline
+\multicolumn{2}{c}{\textbf{Setting}}               & \multicolumn{2}{c|}{\textit{Random}}                         & \multicolumn{2}{c|}{\textit{Popular}}                        & \multicolumn{2}{c}{\textit{Adversarial}}                      \\ \bottomrule
+\textbf{Model}                          & \textbf{Decoding} & \multicolumn{1}{l}{Accuracy$\uparrow$} & \multicolumn{1}{l|}{F1 Score$\uparrow$} & \multicolumn{1}{l}{Accuracy$\uparrow$} & \multicolumn{1}{c|}{F1 Score$\uparrow$} & \multicolumn{1}{l}{Accuracy$\uparrow$} & \multicolumn{1}{l}{F1 Score$\uparrow$} \\ \hline
+\multirow{10}{*}{\rotatebox{90}{\textbf{LLaVA-1.5}}}    & Sampling          & 84.77                        & 82.28                         & 79.98                        & 79.34                         & 76.03                        & 76.26                        \\
+                                        & ICD$^{*}$         & 87.51                        & 83.28                         & 83.15                        & 83.91                         & 79.13                        & 80.41                        \\
+                                        & VCD$^{*}$         & 86.84                        & 86.83                         & 82.65                        & 83.37                         & 77.31                        & 79.28                        \\
+                                        & \textbf{Ours}$^{*}$        & 88.91                        & 88.84                         & 83.97                        & 85.42                         & 82.54                        & 81.98                        \\ \cdashline{2-8}
+                                        & Greedy            & 88.81                        & 88.52                         & 82.76                        & 83.36                         & 79.11                       & 80.92                        \\
+                                        & Dola$^{\star}$    & 87.94                        & 87.97                         & 83.87                        & 84.68                         & 80.35                        & 81.21                        \\
+                                        & OPERA            & 88.85                        & 88.67                         & 82.77                        & 83.40                         & 79.16                        & 80.93                        \\
+                                        & ICD$^{\star}$         & 87.97                        & 87.84                         & 84.03                        & 84.22                         & 80.21                        & 80.97                        \\
+                                        & VCD$^{\star}$       & 87.02                        & 86.96                         & 83.53                        & 84.56                         & 78.12                        & 80.16                        \\
+                                        & \textbf{Ours}$^{\star}$      & \textbf{89.46}               & \textbf{89.62}                & \textbf{85.13}               & \textbf{85.94}                & \textbf{83.24}               & \textbf{82.21}               \\\bottomrule
+\multirow{10}{*}{\rotatebox{90}{\textbf{InstructBLIP}}} & Sampling          & 80.42                        & 80.94                         & 76.09                        & 77.65                         & 72.37                        & 75.42                        \\
+                                        & ICD$^{*}$         & 85.78                        & 85.73                         & 81.12                        & 82.25                         & 76.82                        & 78.99                        \\
+                                        & VCD$^{*}$         & 84.11                        & 84.13                         & 79.96                        & 80.80                         & 76.32                        & 78.08                        \\
+                                        & \textbf{Ours}$^{*}$        & 86.56                        & 85.94                         & 80.26                        & 81.75                         & 77.64                        & 80.41                        \\ \cdashline{2-8}
+                                        & Greedy            & 84.56                        & 83.75                         & 78.23                        & 79.16                         & 74.58                        & 76.34                        \\
+                                        & Dola$^{\star}$     & 84.67                        & 83.38                         & 78.21                        & 79.19                         & 75.69                        & 77.98                        \\
+                                        & OPERA            & 84.57                        & 83.74                         & 78.24                        & 79.15                         & 74.59                        & 76.33                        \\
+                                        & ICD$^{\star}$         & 84.36                        & 83.82                         & 77.88                        & 78.70                         & 75.17                        & 77.23                        \\
+                                        & VCD$^{\star}$      & 84.52                        & 83.63                         & 78.04                        & 78.45                         & 75.95                        & 77.76                        \\
+                                        & \textbf{Ours}$^{\star}$       & \textbf{87.23}               & \textbf{86.90}                & \textbf{81.16}               & \textbf{82.57}                & \textbf{78.51}               & \textbf{81.26}               \\ \bottomrule
+\multirow{10}{*}{\rotatebox{90}{\textbf{Shikra}}}       & Sampling          & 81.42                        & 82.46                         & 79.60                        & 80.78                         & 73.85                        & 76.39                        \\
+                                        & ICD$^{*}$         & 82.34                        & 82.82                         & 78.17                        & 80.43                         & 74.96                        & 77.68                        \\
+                                        & VCD$^{*}$        & 82.31                        & 82.73                         & 79.34                        & 80.93                         & 75.61                        & 77.96                        \\
+                                        & \textbf{Ours}$^{*}$        & 83.87                        & 83.94                         & 80.26                        & 82.07                         & 77.85                        & 78.94                        \\ \cdashline{2-8}
+                                        & Greedy            & 83.00                        & 83.19                         & 81.39                        & 81.90                         & 76.69                        & 78.31                        \\
+                                        & Dola$^{\star}$      & 82.87                        & 82.98                         & \textbf{82.42}             & 82.50                         & 76.85                        & 78.09                        \\
+                                        & OPERA             & 83.05                        & 83.20                         & 81.40                        & 81.89                         & 76.73                        & 78.31                        \\
+                                        & ICD$^{\star}$        & 82.67                        & 82.64                         & 80.73                        & 81.58                         & 75.98                        & 78.43                        \\
+                                        & VCD$^{\star}$       & 82.96                        & 82.63                         & 80.68                        & 81.27                         & 76.94                        & 78.32                        \\
+                                        & \textbf{Ours}$^{\star}$        & \textbf{84.46}               & \textbf{84.62}                & 82.38                    & \textbf{82.73}                & \textbf{78.67}               & \textbf{79.34}               \\  \bottomrule
+\multirow{10}{*}{\rotatebox{90}{\textbf{LLaVA-NeXT}}}   & Sampling          & 86.32                        & 83.11                         & 82.27                        & 81.03                         & 77.32                        & 76.96                        \\
+                                        & ICD$^{*}$         & 87.32                        & 84.03                         & 83.62                        & 83.54                         & 80.31                        & 80.41                        \\
+                                        & VCD$^{*}$         & 86.97                        & 86.71                         & 83.07                        & 83.65                         & 79.42                        & 80.28                        \\
+                                        & \textbf{Ours}$^{*}$        & 89.16                        & 88.92                         & 84.38                        & 85.76                         & 82.95                        & 81.98                        \\ \cdashline{2-8} 
+                                        & Greedy            & 89.37                        & 88.82                         & 83.68                        & 84.62                         & 80.08                        & 80.74                        \\
+                                        & Dola$^{\star}$     & 88.73                        & 88.67                         & 84.56                        & 84.96                         & 80.32                        & 80.68                        \\
+                                        & OPERA            & 89.36                        & 88.80                         & 83.65                        & 84.60                         & 80.10                        & 80.75                        \\
+                                        & ICD$^{\star}$        & 87.40                        & 87.96                         & 84.11                        & 83.79                         & 80.94                        & 80.67                        \\
+                                        & VCD$^{\star}$       & 87.83                        & 87.09                         & 82.68                        & 83.55                         & 79.61                        & 81.20                        \\
+                                        & \textbf{Ours}$^{\star}$        & \textbf{90.05}               & \textbf{89.97}                & \textbf{86.13}               & \textbf{85.69}                & \textbf{84.06}               & \textbf{82.95}               \\ \bottomrule
+
+\end{tabular}
+\captionsetup{font=footnotesize}
+\caption{\textbf{Average results on the POPE metric.} $^{*}$ and $^{\star}$ denote adopting the same sampling and greedy decoding strategies, respectively. Results are from the papers or re-implemented based on official codes.}
+\label{pope}
+\end{table}
+ 
+
+\noindent\textbf{GPT-4 Assisted Benchmark.} While CHAIR and POPE evaluate object-existence-level hallucinations, these metrics are unable to identify other types of hallucination, such as \textit{positional}, \textit{relational}, and \textit{attribute} hallucinations. Therefore, the GPT-4 assisted benchmark \citep{hadpo} utilizes the fine-grained object-level descriptions in the Visual Genome (VG) dataset \citep{vg} as ground-truth and relies on the advanced GPT-4 to judge the fine-grained hallucinations and calculate Sentence-level Hallucination Ratio (SHR).
+Moreover, we employ n-gram fluency (n = 1 and 2) metrics to measure the smoothness of generated text, and the number of generated words/sentences per image (WPI/SPI) to compare the detailedness of generated texts.
+As shown in Fig. \ref{gpt4}, SID achieves the best results in the SHR metric among the four LVLMs, outperforming others by a clear margin. 
+Regarding the quality of the generated texts, 
+Sampling decoding outperforms ours slightly in terms of 1-gram fluency and WPI. However, compared to other baselines, our approach alleviates hallucinations with minimal sacrifice in text generation quality regarding smoothness and detailness. For instance, OPERA generates text with fewer words and sentences due to penalization of the over-trust mechanism, and VCD impairs text fluency, possibly arising from the holistic and fixed disturbance of contrastive inputs.
+\begin{figure*}
+  \centering
+  \includegraphics[width=1\textwidth]{radar}
+  \captionsetup{font=footnotesize}
+  \caption{\textbf{GPT-4 assisted benchmark} \citep{hadpo}. \textbf{Hallucination} (SHR), \textbf{fluency} (1$\&$2-gram), and \textbf{detailness} (WPI and SPI) aspects are compared.  % Larger WPI, SPI, 1/2-gram and lower SHR are better. 
+  Larger areas mean better performances. VCD and ours adopt the same sampling decoding. Please zoom in for details.}
+  \label{gpt4}
+\end{figure*}
+
+
+\noindent\textbf{MME and MMBench Evaluations.}
+Besides, we test different decoding strategies on two popular LVLMs benchmark: MME \citep{mme} and MMBench \citep{mmbench}. MME comprises ten subtasks to evaluate
+models’ perceptual capabilities and four subtasks for assessing cognitive abilities, in the form of the yes/no question. MMBench systematically evaluates twenty ability dimensions of LVLMs. We
+present the results of LLaVA-1.5 7B as a representative in Table \ref{benchmark}, SID can maintain and improves the multimodal ability on LVLMs benchmarks. In contrast, other CD methods tend to compromise the general multimodal ability.
+
+\begin{table}[]
+\centering \footnotesize
+\begin{tabular}{lccccccc}
+\hline
+        & Greedy & Sampling & DoLa   & ICD    & VCD    & OPERA  & \textbf{SID}    \\ \hline
+MME     & 1510.7 & 1471.9   & 1480.1 & 1473.6 & 1488.7 & 1515.4 & \textbf{1520.2} \\
+MMbench & 64.3   & 64.0     & 63.8   & 63.1   & 63.9   & 64.4   & \textbf{65.1}   \\ \hline
+\end{tabular}
+\captionsetup{font=footnotesize}
+\caption{\textbf{LVLM benchmark evaluations.} ICD, VCD, and SID employ the same greedy decoding. }
+\label{benchmark}
+\end{table}
+
+
+\section{Ablation Analyses}
+
+In this section, we conduct ablation analyses on the computation efficiency and hyperparameter sensitivity.
+\begin{figure}[htbp]
+  \centering
+  \begin{minipage}[b]{0.5\textwidth}
+    \footnotesize
+    \begin{tabular}{lccc}
+    \hline
+    Methods  & \textbf{Time} $\downarrow$ & \textbf{Memory}$\downarrow$ & \textbf{Accuracy}$\uparrow$ \\ \hline
+    Normal  & 494  & 15673  & 79.11\\
+    VCD      & 904  & 16753  & 78.12     \\
+    ICD      & 974  & 16843  & 80.21     \\
+    OPERA    & 2643 & 21943  & 79.16        \\
+    \textbf{Ours}$_{40\%}$ & 704  & 15809  & 83.11     \\
+    \textbf{Ours}$_{10\%}$ & 668  & 15767  & 83.24     \\ \hline
+    \end{tabular}
+    \captionsetup{font=footnotesize}
+    \captionof{table}{\textbf{Efficiency Comparisons} on NVIDIA V100. 
+    $_{10\%}$ and $_{40\%}$ mean tokens preserved ratios.}
+    \label{table_e}
+  \end{minipage}
+\hspace{0.1cm}   % 添加一些空白或者可以使用 \quad 来增加空间
+  \begin{minipage}[b]{0.47\textwidth}
+    \includegraphics[width=\textwidth]{alpha_beta}
+    \captionsetup{font=footnotesize}
+    \caption{\textbf{Hyperparameter Sensitivity of $\alpha$ and $\beta$} with POPE metric (under the sampling decoding).}
+    \label{figab}
+  \end{minipage}
+\end{figure}
+\noindent\textbf{Computation Efficiency.} 
+One primary concern of hallucination alleviation decoding methods is the computational burden. We evaluate inference time (in seconds) and peak GPU memory (in MB) on the LLaVA-1.5 7B under the POPE adversarial setting, as shown in Table \ref{table_e}. Contrastive Decoding (CD) methods \citep{vcd, icd} involve constructing distorted raw inputs, resulting in \textbf{twice} the inference complexity. OPERA \citep{opera} is based on beam-search decoding and maintains a set of beams to enlarge the candidate range. Additionally, roll back mechanism in the retrospection-reallocation strategy further exacerbates computational complexity. Our SID induces vision-and-text association hallucinations by pruning \textit{large-ratio} attention-important tokens in the \textit{early layers}, 
+which greatly reduces the inference time of CD up to $\sim$30$\%$.
+
+
+
+ 
+
+ 
+
+
+\noindent\textbf{Hyperparameter Sensitivity.} Beyond the sensitivity analyses in Fig. \ref{fig-i}, we validate the robustness of SID concerning $\alpha$ and $\beta$ of Eq. \ref{eq2} and \ref{eq3}, compared to the contrastive decoding methods (i.e., VCD) on LLaVA-1.5 7B. From Fig. \ref{figab} (left), it is evident that as $\alpha$ decreases, the contrastive decoding mechanism diminishes. However, SID still achieves pleasant results, while VCD degrades close to Sampling when $\alpha$=0.1, as the CT$^2$S strategy induces informative \textit{vision-and-text association} hallucinations. When $\alpha$ increases, VCD degrades to some extent because holistic input disturbance does not always trigger contextual-related hallucination and might exacerbate uncertainty noise. Regarding $\beta$, a larger $\beta$ indicates more aggressive truncation of the output vocabulary. Fig. \ref{figab} (right) shows that VCD's performance heavily relies on large $\beta$ to retain only high-probability tokens. With mild or no adaptive plausibility constraint (Eq. \ref{eq3}), VCD performs worse than the sample decoding strategy due to output logits influenced by distorted visual inputs. Ours is robust to the $\beta$ setting as the CT$^2$S strategy induces discriminative contrastive logits to generate plausible tokens.
+
+
+
+
+
+
+
+
+\section{Conclusion and Future Work}
+
+
+In this paper, we firstly re-think contrastive decoding in LVLMs and empirically find that vision-and-text-agnostic input disturbances in CD do not always amplify desired hallucinations rather than induce potential uncertainty noise. To mitigate these issues, we propose a training-free decoding strategy named Self-Introspective Decoding (SID). 
+By developing Context and Text-aware Token Selection (CT$^2$S) strategy,
+SID amplifies \textit{vision-and-text association} hallucinations to guide LVLMs in contrastive decoding, thereby improving faithfulness. Extensive experiments validate the effectiveness and robustness of SID.\footnote{Codes are available at \texttt{https://anonymous.4open.science/r/SID-1795}.}
+
+As for \textbf{Future Work:} \textbf{1)} As the pruning ratios and layer are set manually, we consider training the external network to automatically determine optimal hyperparameters, inspired by \citep{diffrate}. \textbf{2)} Moreover, given that SID amplifies fine-grained hallucinations, we consider leveraging the CT$^2$S strategy to automatically construct high-quality negative instruction for robust visual instruction tuning rather than relying on expensive GPT-4 \citep{rit, hadpo}. 
+
+
+
+
+
+

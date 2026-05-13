@@ -1,0 +1,509 @@
+\title{Solving Differential Equations with Constrained Learning}
+
+\begin{abstract}
+(Partial) differential equations~(PDEs) are fundamental tools for describing natural phenomena, making their solution crucial in science and engineering. While traditional methods, such as the finite element method, provide reliable solutions, their accuracy is often tied to the use of computationally intensive fine meshes. Moreover, they do not naturally account for measurements or prior solutions, and any change in the problem parameters requires results to be fully recomputed. Neural network-based approaches, such as physics-informed neural networks and neural operators, offer a mesh-free alternative by directly fitting those models to the PDE solution. They can also integrate prior knowledge and tackle entire families of PDEs by simply aggregating additional training losses. Nevertheless, they are highly sensitive to hyperparameters such as collocation points and the weights associated with each loss. This paper addresses these challenges by developing a \emph{science-constrained learning}~(SCL) framework. It demonstrates that finding a (weak)~solution of a PDE is equivalent to solving a constrained learning problem with worst-case losses. This explains the limitations of previous methods that minimize the expected value of aggregated losses. SCL also organically integrates structural constraints~(e.g., invariances) and (partial)~measurements or known solutions. The resulting constrained learning problems can be tackled using a practical algorithm that yields accurate solutions across a variety of PDEs, neural network architectures, and prior knowledge levels without extensive hyperparameter tuning and sometimes even at a lower computational~cost.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+(Partial)~differential equations~(PDEs) are key tools in science and engineering, playing a central role in the solution of inverse problems, systems engineering, and the description of natural phenomena~\citep{Lustig08c, Potter10s, Molesky18i, Evans10p}. As such, a variety of numerical methods have been used to approximate their solutions, such as the celebrated finite element method~(FEM). Despite their approximation guarantees, the accuracy of these methods is often in proportion to the computational complexity associated with finer discretizations. Additionally, they do not naturally incorporate prior knowledge, such as real-world measurements or previous solutions to similar equations. Lastly, any change to the PDE problem, such as initial condition or mesh size, requires the solution to be recomputed~\citep{Brenner07t, LeVeque07f, Katsikadelis16t}.
+
+Methods based on neural network~(NN) architectures,
+such as physics-informed NNs~(PINNs)~\citep{Lagaris98a, Raissi19p, Lu21p}
+and neural operators~(NOs)~\citep{Li21f, Lu21l, Rahman23u},
+have been proposed in an attempt to address these challenges. Rather than discretizing the PDE, these mesh-free approaches directly fit NNs to its solution. What is more, they can be trained to simultaneously solve families of PDEs and leverage data from measurements or known solutions by incorporating additional losses in their training objectives~\citep{Li21f, Cho24p, Li24p}. Yet, the effectiveness of these methods is highly sensitive to hyperparameters such as the number of points used to evaluate the PDE and the weights used to combine the different training losses. These issues hinder their accuracy, especially for PDEs with non-smooth solutions~\citep{Krishnapriyan21c, Wight21s, Wang22w, Wang22i}. Though heuristics have been proposed to mitigate these issues, e.g.,~\citet{Nabian21e, Maddu22i, Wu23a, Daw23m}, they are often \emph{ad hoc}, derived for specific PDEs, and may strike poor compromises between performance and computational complexity.
+
+In this paper, we address these drawbacks using \emph{constrained learning}. In particular, we prove that obtaining a (weak)~solution of a PDE is equivalent to solving a constrained learning problem involving worst-case losses~(Sec.~\ref{sec:science_constrained_learning}).
+Hence, it is not enough to use adversarial training to estimate the worst-case losses~\citep{Wang22i} \emph{or} constrained formulations to manipulate the loss weights~\citep{Lu21p, Basir22p}.
+Instead, we use semi-infinite constrained learning techniques to develop a hybrid sampling-optimization algorithm that tackles both problems jointly without extensive hyperparameter tuning and training heuristics~(Sec.~\ref{sec:algorithm}).
+This approach also naturally incorporates prior scientific knowledge on the structure~(e.g., invariance) and observations~(e.g., measurements) of the solution, which is why we dub it \emph{science-constrained learning}~(SCL).
+We illustrate the effectiveness of SCL for a diverse set of PDEs, NN~architectures~(e.g., multilayer perceptrons, MLPs, and NOs), and prior knowledge levels. Our experiments show that it consistently yields accurate solutions for entire families of PDEs, sometimes at a lower computational cost~(Sec.~\ref{sec:experiments}).
+
+
+
+\section{Problem Formulation}
+
+
+\subsection{Boundary Value Problems}
+\label{sec:BVP}
+
+Consider a~(bounded, connected, open) region $\Omega \subset \mathbb{R}^d$ with (smooth)~boundary $\partial \Omega$ Consider a (partial)~differential operator~$D_\pi$ with coefficients~$\pi \in \Pi \subset \setR^q$ defined on the domain~$\calD = \Omega \times (0, T]$. Here, $\pi$ captures a (finite)~set of parameters for the phenomenon, such as the diffusion rate or viscosity. Given a space~$\calF$ of functions mapping~$\calD$ to~$\mathbb{R}$, we define a boundary value problem~(BVP) as
+\begin{prob}[\textup{BVP}]\label{eq:BVP}
+    \find& &&u \in \calF
+    \\
+    \suchthat& &&D_\pi[ u ] (x,t)  = \tau(x, t),
+    	&& (x, t) \in \Omega \times (0,T] && \text{(PDE)}
+    \\
+    &&&u(x, 0) = h(x,0),
+    	&& x \in \bar{\Omega} && \text{(IC)}
+    \\
+    &&&u(x, t) = h(x, t),
+    	&& (x, t) \in \partial \Omega \times (0,T] && \text{(BC)}
+\end{prob}
+where~$\tau: \calD \rightarrow \mathbb{R}$ is the \emph{forcing function} and~$h: \calB \rightarrow \mathbb{R}$ describes the boundary~(BC) and initial~(IC) conditions over~$\calB = \bar{\Omega} \times \{0\} \cup \del\Omega \times (0,T]$ for~$\bar{\Omega} = \Omega \cup \del\Omega$. In what follows, we always consider the initial condition as part of the boundary conditions and refer to them jointly as~BC. Note that the results in this paper also apply to formulations of~\eqref{eq:BVP} involving other BCs~(e.g., \emph{Neumann}, \emph{periodic}), parameterized BCs, and vector-valued PDEs. We showcase a variety of phenomena that can be described by~\eqref{eq:BVP} in App.~\ref{app:pdes} and refer to, e.g.,~\citep{Evans10p}, for a detailed treatment of~BVPs.
+
+In general, a (strong)~solution of~\eqref{eq:BVP} need not exist in any function space~$\calF$. This motivates the rise of relaxations such as the \emph{weak formulation} that replaces the pointwise equation~(PDE) in~\eqref{eq:BVP} by the integral equation%
+\footnote{Typically, the weak formulation only considers the spatial domain~$x$, handling~$t$ separately using time-stepping methods~\citep{Thomee13g}. Still, \eqref{eq:weak_form} is not uncommon and can be used to obtain weak formulations for parabolic PDEs~(see, e.g., \citep{Knabner03n, Evans10p, Steinbach20c}).}
+\begin{equation}\label{eq:weak_form}
+	\int_{\calD} D_\pi [ u ](x,t) \varphi(x,t) \, dx dt
+		= \int_{\calD} \tau(x, t) \varphi(x,t) \, dx dt, \quad \text{for all } \varphi \in \calT
+		\text{.}
+\end{equation}
+The~$\varphi$ are known as \emph{test functions} and~$\calT$ is typically taken to be a \emph{Sobolev space} due to its natural compatibility with this setting~(see App.~\ref{app:weak_formulation_to_statistical_problem} for further details). The name \emph{weak formulation} comes from the fact that a solution of~\eqref{eq:BVP}~(when it exists) is also a solution of~\eqref{eq:weak_form}, although the converse is not necessarily true. Indeed, \eqref{eq:weak_form} allows for a wider range of solutions with less stringent regularity requirements, particularly with respect to continuity and differentiability~\citep{Evans10p}. The BCs of~\eqref{eq:BVP} can often be homogeneized~(i.e.,~$h \equiv 0$) and imposed implicitly through~$\calT$, thus fully describing its weak solution by~\eqref{eq:weak_form}~\citep{Brenner07t, LeVeque07f, Katsikadelis16t}.
+
+
+\subsection{Solving boundary value problems}
+\label{sec:solving_bvp}
+
+There exists a wide range of numerical methods for solving BVPs, most of which rely on discretizing~\ref{eq:BVP}~(e.g., finite difference method, FDM) or its weak formulation~(e.g., finite element method, FEM). Some approaches, such as the boundary element method~(BEM), also take advantage of the PDE structure~(Green's function) to reduce the computational complexity associated with handling fine discretizations~~\citep{Brenner07t, LeVeque07f, Katsikadelis16t}. Though ubiquitous in scientific and engineering applications, these classical methods only tackle one BVP at a time and do not naturally incorporate prior knowledge, such as measurements or known (partial)~solutions.
+
+To address these challenges, methods based on parameterizing the solution~$u$ of BVPs have been proposed, most notably using NNs. While they may not achieve the precision of classical methods~\citep{Krishnapriyan21c, Wight21s, Grossmann24c}, they are able to provide solutions for whole families of BVPs, extrapolating new solutions from existing ones, and leverage extrinsic information, such as real-world measurements. Generally speaking, they can be separated into \emph{unsupervised methods}, that seek to solve~\eqref{eq:BVP} directly, and \emph{supervised methods}, that leverage previously computed or measured solutions.
+\paragraph{Unsupervised methods.}
+
+This approach directly fits a model~$u_\theta: \calD \times \Pi \to \setR$ with parameters~$\theta \in \Theta \subset \setR^p$ to~\eqref{eq:BVP}~(e.g., a multilayer perceptron, MLP). An eminent example of such methods are physics-informed neural networks~(PINNs), which train $u_\theta$ by solving
+\begin{prob}\label{eq:PINN}
+	\minimize_{\theta \in \Theta}\ %
+		\mu_\text{D} \lpde(\theta) + \mu_\text{BC} \lbc(\theta)
+\end{prob}
+for fixed weights $\mu_\text{D}, \mu_\text{BC} \geq 0$, where
+\begin{alignat*}{4}
+	\lpde(\theta) &\triangleq \sum_{i=1}^{I} \Bigg[
+	\frac{1}{M} \sum_{m=1}^{M}
+			\Big( D_{\pi_i} [ u_{\theta}(\pi_i) ](x_m,t_m)  - \tau (x_m, t_m) \Big)^2
+	\Bigg]
+    	\text{,} \quad&&(x_m, t_m) \in \calD \text{,} \ \ \pi_i \in \Pi
+    	\text{,}
+    \\
+    \lbc(\theta) &\triangleq \frac{1}{N} \sum_{n=1}^{N}
+    	\Big( f_{\theta}(x_n,t_n) - h(x_n, t_n) \Big)^2
+    	\text{,} &&(x_n, t_n) \in \calB
+    	\text{.}
+\end{alignat*}
+Note that we write~$u_\theta(\pi)(x,t)$ to emphasize that we evaluate~$u_\theta(\pi)$, that approximates the solution of~\eqref{eq:BVP} with coefficients~$\pi$, at~$(x,t) \in \calD$. In practice, however, the input of the model~$u_\theta$ is actually~$(x,t,\pi) \in \calD \times \Pi$.
+The losses~$\lpde$ and~$\lbc$ promote the requirements in~(PDE) and (IC)--(BC) from~\eqref{eq:BVP}, respectively. However, in contrast to the numerical techniques used by classical methods~(e.g., FEM), the former is computed via automatic differentiation. Some formulations also include an additional data term used to incorporate known solutions~\citep{Raissi19p, Lu21p}. Though the vast majority of PINNs target a single BVP, i.e., $I = 1$ in~\eqref{eq:PINN}, their extension to parameterized families of BVPs has also been explored~\citep{Cho24p}.
+
+Though effective in many applications, \eqref{eq:PINN} is very sensitive to its hyperparameters. Indeed, the number of collocation points~$(x,t)$~(typically sampled uniformly at random), the choice of PDE coefficients~$\pi_i$~(typically, a uniform grid), and the weights~$\mu_\text{D},\mu_\text{BC}$~(often hand-tuned) affect both the quality and computational complexity of~\eqref{eq:PINN}. These issues are exacerbated if the BVP has non-smooth solutions even for a few values of~$\pi$~\citep{Krishnapriyan21c, Wight21s, Wang21u}. Adaptive heuristics for collocation points~\citep{Nabian21e, Daw23m, Wu23a} and weighting rules~\citep{Wang22w, Maddu22i, McClenny23s} have been put forward to mitigate these challenges. Yet, they generally lack theoretical grounding, focusing on specific ``failure modes,'' and seldom address the non-trivial interactions of these hyperparameters. Hence, they may strike poor compromises between performance and computational complexity and their effectiveness often depends on the BVP.
+
+\paragraph{Supervised methods.}
+
+Rather than directly solving the BVP, supervised approaches fit the model~$u_\theta$ to a set of (partial)~solutions~$u^\dagger_n$ of~\eqref{eq:BVP}. In this setting, however, $u_\theta$ is typically a neural operators~(NOs) capable of handling infinite-dimensional~(functional) inputs and outputs. As such, they can model the solutions of a BVP for, e.g., different forcing functions~$\tau$ or IC~$h(x,0)$. Given, e.g., forcing-solution pairs~$(\tau_n,u^\dagger_n)$, these NOs are trained by solving
+\begin{prob}\label{eq:NO}
+    \minimize_{\theta \in \Theta}\ \frac{1}{N} \sum_{n=1}^{N}
+    	\big\| u_{\theta}(\tau_n) - u^\dagger_n \big\|_{L_2(\calD)}^2
+    	\text{.}
+\end{prob}
+In practice, the functions~$\tau_n$ and~$u^\dagger_n$ are discretized~(in the time or spectral domain) to enable computations~\citep{Li21f, Lu21l, Hao23g, Wei23s}. Note that MLPs can also be trained using supervised methods~(e.g., \citep{Raissi19p}), but they cannot directly handle infinite-dimensional inputs and are therefore restricted to BVPs with finite-dimensional coefficients~$\pi$~(as in, e.g., \citep{Cho24p}). Similarly, training NOs by directly using~\eqref{eq:BVP} as in~\eqref{eq:PINN} is challenging as it is not straightforward to compute~$D[u_{\theta}]$~\citep{Li24p}.
+
+While supervised methods can operate without explicit knowledge of the BVP, acquiring the (partial)~solutions they are trained on using classical methods~(e.g., FEM) or real-world measurements can be expensive. What is more, obtaining good performance from small datasets can be challenging since some BVPs are highly sensitive to their coefficients and IC~(see, e.g., Navier-Stokes in App.~\ref{app:pdes}). This issue is aggravated by the heterogeneous difficulty of fitting different solutions, which suggests the uniform weighting in~\eqref{eq:NO} is suboptimal. As with~\eqref{eq:PINN}, the performance of~\eqref{eq:NO} is also affected by the discretization used to evaluate its objective, though empirical evidence suggests this is less of an issue than with unsupervised methods~\citep{Li21f, Hao23g, Wei23s}.
+
+
+
+
+
+\section{Science-Constrained Learning}
+
+\label{sec:science_constrained_learning}
+
+In this section, we address the drawbacks of the previously introduced NN-based BVP solvers using \emph{constrained learning}~\cite{Chamon20p, Chamon23c}. Seen as~\eqref{eq:BVP} is itself a constrained problem, this approach yields a more natural formulation. Although constrained formulations of~\eqref{eq:PINN} have been proposed~\citep{Lu21p, Basir22p}, they fall short of guaranteeing a (weak)~solution. Indeed, we prove that the weak form~\eqref{eq:weak_form} leads to a \emph{different} constrained problem. We then demonstrate how other scientific knowledge can be integrated into this mechanistic description, such as the structure of the solution~(e.g., invariances) or (partial)~observations obtained from measurements or classical numerical methods. In Sec.~\ref{sec:algorithm} and~\ref{sec:experiments}, we show that this approach leads to a straightforward algorithm that performs well without training heuristics.
+
+We next introduce the framework used to cast these SCL problems~(Sec.~\ref{sec:constrained_learning}) and then show how mechanistic, structural, and observational knowledge can be formulated as learning objectives, i.e., statistical losses~(Sec.~\ref{sec:formulating_scl_problem}). In the remainder of this paper, we use~$u_\theta$ to refer to any parameterized model, regardless of its architecture~(e.g., MLP, NO, etc.).
+
+\subsection{Constrained and robust learning}
+\label{sec:constrained_learning}
+
+Consider distributions~$\fkD_i$ over data pairs~$(z, y) \in \mathcal{Z} \times \calY$ together with losses~$\ell_i: \setR^k \times \calY \to \setR_+$, $i = 0, \ldots, m$. Constrained learning seeks a model~$\phi_\theta: \calZ \to \setR^k$ parameterized by~$\theta \in \Theta$ that solves
+\begin{prob}[\textup{P-CSL}]\label{eq:csl_problem}
+	P^\star = \min_{\theta \in \Theta}& &&\E_{(z, y) \sim \fkD_0} \!\Big[
+		\ell_0 \big(\phi_\theta(z), y \big)
+	\Big]
+	\\
+	\subjectto& &&\E_{(z, y) \sim \fkD_i} \!\Big[
+		\ell_i \big( \phi_\theta(z), y \big)
+	\Big] \leq \epsilon_i, \quad i = 1, \ldots, I.
+\end{prob}
+Typically, we think of the objective~$\ell_0$ as a top-line metric~(e.g., accuracy), whereas the other~$\ell_i$ together with~$\epsilon_i$ define requirements of the solution~(e.g, robustness or invariance)~\cite{Cotter19o, Chamon20p, Chamon23c}. A common alternative to~\eqref{eq:csl_problem} is to combine the~$\{\ell_i\}$ into a single training objective~[as in, e.g.,~\eqref{eq:PINN}], leading to the \emph{penalty methods} ubiquitous in ML. Though the penalty and constrained approaches are sometimes related~(e.g., they are in fact equivalent in convex optimization~\citep{Bertsekas09c}), this is not the case in the non-convex settings of ML. Still, under typical conditions from (unconstrained)~learning theory and for rich enough parametrizations, the solution of~\eqref{eq:csl_problem} can be approximated by solving the \emph{empirical dual problem}~\citep{Chamon20p, Chamon23c, Elenter24n}
+\begin{prob}[\textup{\^{D}-CSL}]\label{eq:csl_dual}
+	\hat{D}^\star = \max_{\lambda_i \geq 0}\ \min_{\theta \in \Theta}\ \hat{L}(\theta, \lambda_i)
+	\text{,}
+\end{prob}
+where~$\hat{L}$ is the \emph{empirical Lagrangian} of~\eqref{eq:csl_problem} based on samples~$(z_{n_i},y_{n_i}) \sim \fkD_i$, namely,
+\begin{equation}\label{eq:lagrangian}
+	\hat{L}(\theta, \lambda_i) \triangleq
+		\dfrac{1}{N_0} \sum_{n_0=1}^{N_0} \ell_0 \big(\phi_\theta(z_{n_0}), y_{n_0} \big)
+	+ \sum_{i =1}^I \lambda_i \Bigg[
+		\dfrac{1}{N_i} \sum_{n_i=1}^{N_i} \ell_i \big( \phi_\theta(z_{n_i}), y_{n_i} \big) - \epsilon_i
+	\Bigg]
+		\text{.}
+\end{equation}
+Compared to penalty methods, \eqref{eq:csl_dual} does not require extensive tuning of coefficients~[such as~$\mu$ in~\eqref{eq:PINN}] and guarantees generalization individually for each constraint~(near-optimality and near-feasibility) rather than for their aggregated value. What is more, the duality between~\eqref{eq:csl_problem} and~\eqref{eq:csl_dual} endows the solution~$\lambda^\star_i$ of~\eqref{eq:csl_dual} with a sensitivity interpretation, despite their non-convexity~\citep{Chamon20p, Chamon23c, Hounie23r}. Explicitly, $\lambda^\star_i$ describes how much the objective~$P^\star$ would decrease for small relaxations of~$\epsilon_i$. Finally, \eqref{eq:csl_dual} is amenable to practical algorithms such as dual ascent, which updates~$\lambda_i^{(0)} = 0$ as
+\begin{equation}\label{eq:dual_ascent}
+	\lambda_{i}^{k+1} = \lambda_{i}^{k} + \eta \Bigg[
+		\dfrac{1}{N_i} \sum_{n_i=1}^{N_i}
+			\ell_i \big( \phi_{\theta^\dagger_k}(z_{n_i}), y_{n_i} \big) - \epsilon_i
+	\Bigg]_+
+	\text{,} \quad \text{for}\ \ %
+		\theta^\dagger_k \in \min_{\theta \in \Theta}\ \hat{L}(\theta, \lambda_{i}^{k})
+		\text{.}
+\end{equation}
+Even if the empirical Lagrangian minimizer~$\theta^\dagger_k$ is only computed approximately, \eqref{eq:dual_ascent} can be shown to converge to a neighborhood of a solution of~\eqref{eq:csl_dual}~\citep{Chamon23c, Elenter24n}.
+
+The ``in expectation'' constraints from~\eqref{eq:csl_problem} may be too lenient for certain applications. This is the case, for instance, for (adversarially)~robust learning problems, where requirements are cast in terms of the worst-case loss
+\begin{equation}\label{eq:robust_loss}
+	\bar{\ell}(z) = \max_{\tilde{z} \in \calR(z)}\ \ell(\phi_\theta(\tilde{z}))
+		\text{,}
+\end{equation}
+where~$\calR(z)$ is a compact \emph{robustness set}. For simplicity, we omit the label~$y$ in~\eqref{eq:robust_loss} as it can be incorporated in the loss~$\ell$. Although many algorithms have been proposed to tackle learning problems involving~$\bar{\ell}$~(e.g., \citep{Goodfellow15e, Madry18t}), it turns out to be closely related to the expected constraints in~\eqref{eq:csl_problem}. This fact is captured by the next proposition adapted from~\citep[Prop.~3.2]{Robey21a}, where~$\calP^2$ denotes the space of square-integrable probability distributions.
+
+\begin{proposition}\label{thm:robust_loss}
+	Suppose that~$\tilde{z} \mapsto \ell(\phi_\theta(\tilde{z})) \in L^2$ for~$\tilde{z} \in \calR(z)$. Then, for all~$\delta > 0$ there exists~$\alpha < \bar{\ell}(z)$ such that
+	$\bar{\ell}(z) = \sup_{\psi \in \calP^2}\ \E_{\tilde{z} \sim \psi} \!\big[
+		\ell(\phi_\theta(\tilde{z}))
+		\big]
+		\leq \E_{\tilde{z} \sim \psi_{\alpha}} \!\big[
+		\ell(\phi_\theta(\tilde{z}))
+	\big] + \delta
+	$,
+	where~$\psi_{\alpha} \in \calP^2$ is supported on~$\calR(z)$ and~$\psi_{\alpha}(\tilde{z}) \propto \big[ \ell(\phi_\theta(\tilde{z})) - \alpha \big]_+$ for~$[a]_+ = \max(0, a)$.
+\end{proposition}
+
+A proof is provided in~\cite[App.~C]{Robey21a}. Prop.~\eqref{thm:robust_loss} shows that the worst-case loss~\eqref{eq:robust_loss} can be arbitrarily well approximated by an expectation with respect to~$\psi_\alpha$, a distribution proportional to a truncation of the underlying loss~$\ell$. Hence, by sampling from~$\psi_{\alpha}$, we can use~\eqref{eq:csl_dual} to also tackle robust learning problem. In Section~\ref{sec:algorithm}, we investigate when and how this can be done efficiently. But first, we show how to cast~\eqref{eq:BVP} as a constrained learning problem that can also incorporate structural and observational prior knowledge.
+
+\subsection{The science-constrained learning problem}
+\label{sec:formulating_scl_problem}
+
+In this section, we explore how mechanistic, structural, and observational knowledge can be combined to find solutions of BVPs. For clarity, we first focus on a single BVP instance, omitting the dependence on $\pi$ and/or~$\tau$. We consider these extensions at the end of the section.
+\paragraph{Mechanistic knowledge.}
+
+We begin by showing how weak solutions of~\eqref{eq:BVP} can be obtained using constrained learning. To do so, we relax the BCs of~\eqref{eq:BVP} to relate the weak formulation~\eqref{eq:weak_form} to a robust learning constraint. This constraint is then written in terms of an expected loss using Prop.~\ref{thm:robust_loss}. Finally, the BCs are reintroduced using~\eqref{eq:csl_problem}. We start with the following proposition, where~$W^{k,p}$ refers to the $(k,p)$-th order Sobolev space~(see App.~\ref{app:weak_formulation_to_statistical_problem}).
+
+\begin{proposition}\label{thm:weak_formulation_to_statistical_problem}
+Let~$u^\dagger \in W^{k^\prime,2}(\calD)$, where $k^\prime \geq 1$ is the degree of the differential operator~$D$, be such that
+$\sup_{\psi \in \mathcal{P}^2} \E_{(x, t) \sim \psi} \!\Big[
+   	\big(D [ u^\dagger ](x,t) - \tau(x, t) \big)^2
+\Big]  = 0$.
+If the dimension~$d$ of~$\Omega$ satisfies~$d \leq 4 k^\prime - 1$ , then~$u^\dagger$ satisfies~\eqref{eq:weak_form} with~$\calT = W^{k^\prime,2}(\calD)$.
+\end{proposition}
+
+ Prop.~\ref{thm:weak_formulation_to_statistical_problem} elucidates the challenges arising from the choice of collocation points in unsupervised approaches such as~\eqref{eq:PINN}, most notably PINNs. Indeed, it is not enough to use a fixed distribution~(e.g., uniform): obtaining a weak solution requires training against an infinite number of them. Using Prop.~\ref{thm:robust_loss}, however, the infinite problem of satisfying the weak form~\eqref{eq:weak_form} can be reduced to a single statistical constraint, namely,
+\begin{equation}\label{eq:weak_form_inspired_loss}
+    \E_{(x, t) \sim \psi_\alpha} \!\Big[
+       	\big(D [ u_\theta ](x,t) - \tau(x, t) \big)^2
+    \Big] \leq \epsilon
+    	\text{,}
+\end{equation}
+for~$\psi_\alpha$ as in Prop.~\ref{thm:robust_loss} and~$\epsilon > 0$. Note that Prop.~\ref{thm:weak_formulation_to_statistical_problem} describes a sufficient condition for~$u^\dagger$ to satisfy~\eqref{eq:weak_form}. A necessary condition can also be obtained by restricting the set~$\calP^2$ to sufficiently smooth distributions, namely, those belonging to a Sobolev space.
+
+Yet, it is not enough to satisfy the integral equality~\eqref{eq:weak_form}: a weak solution of~\eqref{eq:BVP} must also satisfy its~BCs. Since Prop.~\ref{thm:robust_loss} imposes no restrictions on~$\calT$ to ensure this is the case, we combine the constraint~\eqref{eq:weak_form_inspired_loss} with a worst-case loss describing the BC satisfaction. By once again applying Prop.~\ref{thm:robust_loss}, we can find a weak solution of~\eqref{eq:BVP} by solving the constrained learning problem
+\begin{prob}\label{eq:PINN_Linf}
+	\minimize_{\theta \in \Theta}&
+		&&\E_{(x, t) \sim \psi_\alpha^\text{BC}} \!\Big[
+			\big( u_\theta(x,t) - h(x, t) \big)^2
+		\Big]
+	\\
+	\subjectto& &&\E_{(x, t) \sim \psi_\alpha^\text{PDE}} \!\Big[
+		\big( D [ u_\theta ](x,t) - \tau(x, t) \big)^2
+	\Big] \leq \epsilon
+		\text{.}
+\end{prob}
+We write~$\psi_\alpha^\text{BC}$ and~$\psi_\alpha^\text{PDE}$ to emphasize that they are different distributions, i.e.,
+$\psi_\alpha^\text{BC}(x,t) \propto \big[
+	\big( u_\theta(x,t) - h(x, t) \big)^2 - \alpha
+\big]_+$
+supported on~$\calB$
+and $\psi_\alpha^\text{PDE}(x,t) \propto\big[
+	\big( D [ u_\theta ](x,t) - \tau(x, t) \big)^2 - \alpha
+\big]_+$
+supported on~$\calD$. The presence of these distributions is what make~\eqref{eq:PINN_Linf} considerably different from other constrained formulations such as~\citep{Lu21p, Basir22p}. Indeed, only by using~$\psi_\alpha^\text{BC}$ and~$\psi_\alpha^\text{PDE}$ can we claim that~\eqref{eq:PINN_Linf} approximates (weak)~solutions of~\eqref{eq:BVP}~(Prop.~\ref{thm:robust_loss}).
+
+
+\paragraph{Structural knowledge.}
+
+It is often possible to obtain information about the structure of the solution of a BVP, such as invariances or symmetries, without explicitly solving it~\citep{Olver79s, Akhound-Sadegh23l}. While this structural information is already encoded in~\eqref{eq:PINN_Linf}, using it explicitly can reduce training time as well as the number of both collocation points and/or observations~[as in~\eqref{eq:NO}] needed. It also helps ensure the physical validity of outcomes by explicitly avoiding degenerate solutions, a common failure mode of unsupervised methods such as PINNs~\citep{Krishnapriyan21c}~(we do not observe such issues with~\eqref{eq:PINN_Linf}, see Sec.~\ref{sec:pinn_experiments}).
+
+While it is sometimes possible to incorporate structural knowledge into the model~$u_\theta$, e.g., using equivariant architectures~\citep{Cohen16g, Batzner22e}, it can also be imposed as a statistical constraint. This is convenient for when such models are intricate to design. Consider, for example, a (finite)~invariance group~$\calG$ whose elements~$\gamma_i$ act on the domain~$(x,t) \in \calD$ such that~$u^\dagger(x,t) = u^\dagger[\gamma_i(x,t)]$, where~$u^\dagger$ is a solution of~\eqref{eq:BVP}. This invariance can be enforced by
+\begin{equation}\label{eq:adversarial_invariance_loss}
+	\E_{(x, t) \sim \psi_\alpha^\text{ST}} \!\Big[
+		\big( u_\theta(x, t) - u_\theta[\gamma_i (x,t)] \big)^2
+	\Big] \leq \epsilon
+		\text{,} \quad \gamma_i \in \calG
+		\text{,}
+\end{equation}
+where~$\psi_\alpha^\text{ST}$ supported on~$\calD \times \calG$. Similar constraints can be constructed around other structures, such as equivariance. In contrast to~\eqref{eq:PINN_Linf}, where we want~$\epsilon \approx 0$, it can be beneficial to use a larger values in~\eqref{eq:adversarial_invariance_loss} to accommodate models~$u_\theta$ that cannot fully capture the solution invariances.
+
+\paragraph{Observational knowledge.}
+
+The last type of scientific knowledge we consider are (partial, noisy)~observations of the BVP solution, obtained either via classical methods~(e.g., FEM) or real-world measurements. Although this type of information is commonly associated with NOs, seen as they are typically trained in a supervised manner as in~\eqref{eq:NO}, it is not limited to that architecture. Given observations~$u^\dagger_j$, $j=1,\dots,J$, of solutions of~\eqref{eq:BVP}, we may formulate constraints of the kind
+\begin{equation}\label{eq:observational}
+\begin{aligned}
+	\E_{(x, t) \sim \psi_\alpha^\text{OB}} \!\Big[
+		\big( u_{\theta}(x, t) - u_j^\dagger(x, t) \big)^2
+	\Big] &\leq \epsilon
+		\text{,} \quad j = 1,\dots,J
+		\text{.}
+\end{aligned}
+\end{equation}
+If~$u^\dagger_j$ is only known for a subset of~$(x_q,t_q)$, then~$\psi_\alpha^\text{OB}$ becomes a discrete distribution over those points. This is the case, for instance, of Fourier NOs~(FNOs) that only make predictions on a regular grid~\citep{Li21f}. By considering each data point individually instead of averaging them as in~\eqref{eq:NO}, \eqref{eq:observational} accounts for the heterogeneous difficulty of fitting them. It also enables the tolerance~$\epsilon$ to be adjusted individually for each sample, e.g., using larger values for noisier observations.
+
+
+\paragraph{Science-constrained learning.}
+
+We can now combine~\eqref{eq:PINN_Linf} with \eqref{eq:adversarial_invariance_loss} and~\eqref{eq:observational} to formulate a constrained learning problem accommodating all knowledge sources considered so far. Explicitly,
+\begin{prob}[\textup{SCL}]\label{eq:scl_problem}
+	\minimize_{\theta \in \Theta}&
+		&&\E_{(x, t) \sim \psi_\alpha^\text{BC}} \!\Big[
+			\big( u_\theta(x,t) - h(x, t) \big)^2
+		\Big]
+		&&&\text{(M)}
+	\\
+	\subjectto& &&\E_{(x, t) \sim \psi_\alpha^\text{PDE}} \!\Big[
+		\big( D [ u_\theta ](x,t) - \tau(x, t) \big)^2
+	\Big] \leq \epsilon_\text{pde}
+		&&&\text{(M)}
+	\\
+	&&&\E_{(x, t) \sim \psi_\alpha^\text{ST}} \!\Big[
+		\big( u_\theta(x, t) - u_\theta[\gamma_i (x,t)] \big)^2
+	\Big] \leq \epsilon_\text{s}
+	\text{,} \quad \gamma_i \in \calG
+		&&&\text{(S)}
+	\\
+	&&&\E_{(x, t) \sim \psi_\alpha^\text{OB}} \!\Big[
+		\big( u_{\theta}(x, t) - u_j^\dagger(x, t) \big)^2
+	\Big] \leq \epsilon_\text{o}
+		\text{,} \quad j = 1,\dots,J
+		\text{.}
+		&&&\text{(O)}
+\end{prob}
+Note that only a subset of the constraints in~\eqref{eq:scl_problem} can be used depending on the information available. The objective of~\eqref{eq:scl_problem} is also not restricted to the BCs and can be replaced by any of the other terms. In fact, \eqref{eq:scl_problem} can be formulated without an objective, i.e., as a feasibility problem.
+
+
+Naturally, \eqref{eq:scl_problem} can be extended to simultaneously fit the solutions of a parameterized family of BVPs. However, rather than discretizing the parameter space as in~\eqref{eq:PINN}, we rely on the robust, worst-case formulation introduced in Sec.~\ref{sec:constrained_learning}. Explicitly, we rewrite~\eqref{eq:scl_problem} as
+\begin{prob}[\textup{SCL${}^\prime$}]\label{eq:scl_parametric}
+	\minimize_{\theta \in \Theta}&
+		&&\E_{(x, t, \pi) \sim \psi_\alpha^\text{BC},\,\tau \sim \fkm} \!\Big[
+			\big( u_\theta(\pi,\tau)(x,t) - h(x, t) \big)^2
+		\Big]
+		&&&\text{(M)}
+	\\
+	\subjectto& &&\E_{(x, t, \pi) \sim \psi_\alpha^\text{PDE},\,\tau \sim \fkm} \!\Big[
+		\big( D_\pi [ u_\theta(\pi,\tau) ](x,t) - \tau(x, t) \big)^2
+	\Big] \leq \epsilon_\text{pde}
+		&&&\text{(M)}
+	\\
+	&&&\E_{(x, t, \pi) \sim \psi_\alpha^\text{ST},\,\tau \sim \fkm} \!\bigg[
+		\Big( u_\theta(\pi,\tau)(x, t) - u_\theta(\pi,\tau)\big[\gamma_i(\pi) (x,t)\big] \Big)^2
+	\bigg] \leq \epsilon_\text{s}
+	\text{,} \quad \gamma_i \in \calG
+		&&&\text{(S)}
+	\\
+	&&&\E_{(x, t) \sim \psi_\alpha^\text{OB}} \!\Big[
+		\big( u_{\theta}(\pi_j, \tau_j)(x, t) - u_j^\dagger(x, t) \big)^2
+	\Big] \leq \epsilon_\text{o}
+		\text{,} \quad j = 1,\dots,J
+		\text{,}
+		&&&\text{(O)}
+\end{prob}
+where~$\fkm$ is a fixed distribution~(e.g., uniform), $u_j^\dagger$ is a solution of~\eqref{eq:BVP} with coefficients~$\pi_j$ and forcing function~$\tau_j$, and the invariance~$\gamma_i$ is now parametrized to account for the fact that its action may depend on~$\pi$~(e.g., translation invariance with different strides). By incorporating the coefficients~$\pi$ into the worst-case distribution~$\psi_\alpha$, we consider all of its possible values rather than only a finite subset, achieving performances that would require fine discretizations~(see Sec.~\ref{sec:experiments}). Additionally, since the~$\psi_\alpha$ are now supported on~$\calB \times \Pi$ or~$\calD \times \Pi$, it targets not only difficult BVPs but also the region of the domain responsible for this difficulty. In contrast, this approach is not directly applicable to infinite-dimensional parameters such as~$\tau$, since it would require sampling from a function space. We therefore leave this extension for future work, considering instead a fixed distribution~$\fkm$.
+
+Since~\eqref{eq:scl_problem} and~\eqref{eq:scl_parametric} are constrained learning problems, they can be solved using their empirical dual form~\eqref{eq:csl_dual}. Doing so, however, requires samples from the distributions~$\psi_\alpha$ whose closed-form we do not know~(see Prop.~\ref{thm:robust_loss}). Next, we address this challenge and develop a practical algorithm for solving SCL problems.
+
+
+
+
+\section{Algorithm}
+
+\label{sec:algorithm}
+
+The first step in developing a practical algorithm for~\eqref{eq:scl_problem}/\eqref{eq:scl_parametric} is to obtain samples from the different~$\psi_\alpha$. Yet, Prop.~\ref{thm:robust_loss} only describes these distributions implicitly. For instance, the PDE constraint in~\eqref{eq:weak_form_inspired_loss} uses~$
+\psi_\alpha^\text{PDE} \propto \big[
+	( D [ u_\theta ](x,t) - \tau(x, t) )^2 - \alpha
+\big]_+$. Without access to its partition function, sampling~$\psi_\alpha^\text{PDE}$ can be intricate. Additionally, the truncation threshold~$\alpha$ controls not only the approximation of the robust loss, but also the discontinuity and sparsity of~$\psi_\alpha^\text{PDE}$. Indeed, as the value of~$\alpha$ grows, $\psi_\alpha^\text{PDE}$ displays increasingly isolated modes. Sampling from such distributions is well-known to be challenging~\citep{Nishimura20d, Robert04m}.
+
+On the other hand, since the losses in~\eqref{eq:scl_problem} are non-negative, all the~$\psi_\alpha$ are smooth and fully supported for~$\alpha = 0$. They are therefore amenable to be sampled using Markov Chain Monte Carlo~(MCMC) techniques~\citep{Robert04m}. We use the gradient-free Metropolis-Hastings~(MH) algorithm~(see App.~\ref{app:mh_sampling}) in our experiments to avoid additional backward passes and the higher-order derivatives resulting from differentiating~$D_\pi$ as in~\cite{Wang22i}. Still, both~$\psi_0$ and MH turn out to provide strong practical results~(see Sec.~\ref{sec:experiments}). A similar pattern has been observed in other ML applications~\citep{Robey21a, Hounie23a}.
+Naturally, sampling from~$\psi_0$ remains computationally demanding. It is, however, possible to replace~$\psi_\alpha$ by a fixed distribution~(e.g., uniform) or even fixed points for some of the constraints in~\eqref{eq:scl_problem}/\eqref{eq:scl_parametric} at negligible accuracy costs. We find this is consistently the case, e.g., for the BC objective, although we emphasize that this is application-dependent. Additionally, certain architectures cannot make predictions on arbitrary domain points, such as FNOs that only consider regular grids~\citep{Li21f}. In those cases, it is more appropriate to take~$\psi_\alpha$ to be a uniform distribution over equispaced points.
+Having obtained samples from the~$\psi_\alpha$ in~\eqref{eq:scl_problem}/\eqref{eq:scl_parametric}, we can now construct its empirical dual problem~\eqref{eq:csl_dual} and proceed to solving it. Since obtaining Lagrangian minimizers can be time consuming, we replace the dual ascent method from~\eqref{eq:dual_ascent} by the alternating scheme in Alg.~\ref{alg:primal_dual}. Such gradient descent-ascent schemes are commonly used in convex optimization~\citep{Bertsekas15c}, although their convergence is less well understood in non-convex settings~\cite{Lin20n, Fiez21g, Yang22n}.
+Note that contrary to previous constrained approaches~\citep{Lu21p, Basir22p}, Alg.~\ref{alg:primal_dual} does not include training heuristics, such as conditional updates.
+Next, we showcase the results of SCL for a variety of applications.
+
+\newcommand{\dvar}[1]{\lambda^\text{#1}}
+\newcommand{\data}[1]{x^\text{#1}_n, t^\text{#1}_n}
+\newcommand{\datapar}[1]{\data{#1}, \pi^\text{#1}_n}
+\newcommand{\loss}[1]{\ell^\text{#1}}
+\begin{algorithm}[tb]
+\caption{Primal-dual method for \eqref{eq:scl_problem}}
+\label{alg:primal_dual}
+\begin{algorithmic}[1]
+
+\State \textbf{Inputs}: Differential operator~$D_\pi$, invariant transformations~$\gamma_i \in \calG$, observations set~$(\pi_j,\tau_j,u^\dagger_j)$, parameterized model~$u_\theta$
+
+\State \textbf{Initialize}: $\theta_0$ and~$\dvar{pde}_0 = \dvar{s${}_i$}_0 = \dvar{o${}_j$}_0 = 0$
+
+\For{$k = 1, \ldots, K$}
+	\State $\displaystyle
+		\loss{bc}_{k} = \frac{1}{N_\text{BC}} \sum_{n=1}^{N_\text{BC}}
+			\Big( u_{\theta_k}(\pi^\text{bc}_n)(\data{bc}) - h(\data{bc}) \Big)^2
+	$, \hfill $(\datapar{bc}) \sim \psi_0^\text{BC}$
+
+	\State $\displaystyle
+		\loss{pde}_{k} = \frac{1}{N_\text{pde}} \sum_{n=1}^{N_\text{pde}} \Big(
+			D_{\pi^\text{pde}_n} \left[ u_{\theta_k}(\pi^\text{pde}_n) \right](\data{pde}) - \tau(\data{pde})
+		\Big)^2
+	$, \hfill $(\datapar{pde}) \sim \psi_0^\text{PDE}$
+
+	\State $\displaystyle
+		\loss{s${}_i$}_{k} = \frac{1}{N_\text{s}} \sum_{n=1}^{N_\text{s}} \Big(
+			u_{\theta_k}(\pi^\text{s${}_i$}_n)(\data{s${}_i$})
+			- u_{\theta_k}(\pi^\text{s${}_i$}_n)
+				\big[ \gamma_i(\pi^\text{s${}_i$}_n) (\data{s${}_i$}) \big]
+		\Big)^2
+	$, \hfill $(\datapar{s${}_i$}) \sim \psi_0^\text{ST${}_i$}$
+
+	\State $\displaystyle
+		\loss{o${}_j$}_{k} = \frac{1}{N_\text{o}} \sum_{n=1}^{N_\text{o}} \Big(
+			u_{\theta_k}(\pi_j,\tau_j) (\data{o${}_j$}) - u_j^\dagger(\data{o${}_j$})
+			\Big)^2
+	$, \hfill $(\data{o${}_j$}) \sim \psi_0^\text{OB${}_j$}$
+
+	\State $\displaystyle
+	\theta_{k+1} = \theta_{k} - \eta_p \bigg[
+		\nabla_\theta \loss{bc}_{k}
+		+ \dvar{pde} \nabla_\theta \loss{pde}_{k}
+		+ \sum_{i=1}^I \dvar{s${}_i$}_{k} \nabla_\theta \loss{s${}_i$}_{k}
+		+ \sum_{j=1}^J \dvar{o${}_j$}_{k} \nabla_\theta \loss{o${}_j$}_{k}
+	\bigg]$
+
+    \State $\displaystyle
+		\dvar{pde}_{k+1} = \big[
+		\dvar{pde}_{k} + \eta_d (\loss{pde}_{k} - \epsilon_\text{pde})
+	\big]_+$;
+	$\displaystyle
+		\dvar{s}_{k+1} = \big[
+		\dvar{s}_{k} + \eta_d (\loss{s}_{k} - \epsilon_\text{s})
+	\big]_+$;
+	$\displaystyle
+		\dvar{o${}_j$}_{k+1} = \big[
+		\dvar{o${}_j$}_{k} + \eta_d (\loss{o${}_j$}_{k} - \epsilon_\text{o})
+	\big]_+$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section, we showcase the use of SCL to train both MLPs and FNOs~\citep{Li21f} to solve six different PDE problems~(convection, reaction-diffusion, eikonal, Burgers', diffusion-sorption, and Navier-Stokes). Throughout these experiments, we consider different subsets of constraints from~\eqref{eq:scl_problem}/\eqref{eq:scl_parametric} to illustrate a variety of knowledge settings. We denote by~\eqref{eq:scl_problem}(M) the problem~\eqref{eq:scl_problem} with only constraints~(M).
+For each setting, we consider only the most suitable model since our goal is not to exhaust the potential of SCL, but to illustrate some of its natural uses. Details of the experimental setups are provided in the appendices, including descriptions of the PDEs~(App.~\ref{app:pdes}), training procedures, hyperparameters~(App.~\ref{app:experimental_details}), and additional results~(App.~\ref{app:additional_experiments}).
+In the sequel, we use fixed points~$(x,t)$ for the BC objective rather than~$\psi_0^\text{BC}$ to illustrate how computational complexity can be reduced without significantly affecting the results. We still use~$\psi_0^\text{BC}$ for the marginal~$\pi$.
+
+\subsection{Solving a specific BVP}
+\label{sec:pinn_experiments}
+
+\begin{table}[b]
+	\renewcommand{\arraystretch}{1.2}
+	\caption{Relative $L_2$ error for solving specific BVPs.}
+	\label{tab:results_scl_pinn}
+	\begin{center}
+		\begin{tabular}{l|cc|cc|c}
+			& \multicolumn{2}{c|}{\textbf{Convection}} & \multicolumn{2}{c|}{\textbf{Reaction-Diffusion}} & \textbf{Eikonal} \\
+			& $\beta = 30$ & $\beta = 50$ & $(\nu, \rho) = (3, 3)$ & $(\nu, \rho) = (3, 5)$ & \\
+			\hline
+			PINN~\eqref{eq:PINN}        & $0.662 \,\%$ & $64.8\,\%$ & $0.755\,\%$ & $80.0\,\%$  & $106\,\%$ \\
+			R3~\citep{Daw23m} & $0.995 \,\%$ & $2.32\,\%$ & $0.854\,\%$ & $0.746\,\%$ & $100\,\%$ \\
+			\eqref{eq:scl_problem}(M)   & $0.591 \,\%$ & $2.50\,\%$ & $0.578\,\%$ & $0.493\,\%$ & $7.40\,\%$ \\
+		\end{tabular}
+	\end{center}
+	\label{tab:pinn}
+\end{table}
+
+We begin with a traditional use-case: solving~\eqref{eq:BVP} for a fixed coefficient~$\pi$, forcing function~$\tau$, and BCs. We use~\eqref{eq:scl_problem}(M) to train MLPs to solve convection, reaction-diffusion, and eikonal problems, comparing the results with PINNs~[i.e.,~\eqref{eq:PINN} with weights chosen as in~\citep{Daw23m}]. All experiments use~$1000$ collocation points per epoch obtained by (PINN)~sampling uniformly~(we find this performs better than using fixed points as in, e.g.,~\citep{Raissi19p, Lu21p}), (R3)~using the adaptive heuristic from~\citep{Daw23m}, and (SCL)~using MH after~$4000$ burn-in steps.
+Table~\ref{tab:pinn} shows that SCL matches and often outperforms other methods, particularly in challenging scenarios~(e.g., convection with~$\beta = 50$ or the non-linear eikonal). This is because it jointly adapts the weight of each loss and the points used to evaluate them during training~(see Alg.~\ref{alg:primal_dual}). Although R3 also targets points with high PDE residuals, it does not approximate the worst-case loss needed to guarantee a (weak)~solution~(Prop.~\ref{thm:weak_formulation_to_statistical_problem}). The improved performance of SCL comes at a higher computational cost~($\approx 5$x), although this is largely offset when solving parametric problems.
+
+
+
+\subsection{Solving parametric families of BVPs}
+\label{sec:param_sol_experiments}
+
+One of the key advantages of NN-based approaches is their ability to solve entire families of BVPs without retraining. Consider fitting an MLP~$u_\theta(x,t,\beta)$ to simultaneously solve convection problems for~$\beta \in [1,30]$ using~\eqref{eq:scl_parametric}(M) and~\eqref{eq:PINN} as in~\citet{Cho24p}. Note that we do not use their tailored ``\ppinn'' architecture, although it would be compatible with SCL. The~$\pi_j = \beta_j$ are taken to be 4, 7, and 30 equispaced values in~$[1,30]$. The results in Fig.~\ref{fig:param_sol_convection_helmholtz}a show that~\eqref{eq:PINN} can only reach the error of~\eqref{eq:scl_parametric}(M) for the finest discretization, at which point it evaluates the PDE loss 6~times more per epoch. The same pattern holds for reaction-diffusion~(4--7 times) and 2D~Helmholtz~(4--5 times) problems~(App.~\ref{app:additional_experiments}).
+The effectiveness of~\eqref{eq:scl_parametric}(M) is due to its worst-case loss jointly selecting~$(x,t,\beta)$ to target both challenging coefficients and the domain region responsible for that difficulty. In fact, by inspecting~$\psi_0^\text{PDE}$ at different stages of training~(Fig.~\ref{fig:param_sol_convection_helmholtz}b) it becomes clear that SCL begins by fitting the solution ``causally,'' focusing first on smaller values of~$t$. While doing so has been proposed to improve training~\citep{Krishnapriyan21c, Wang24r}, it arises naturally by solving~\eqref{eq:scl_parametric}(M). As training advances, however, Alg.~\ref{alg:primal_dual} shifts focus to fitting higher convection speeds~$\beta$. Note that this occurs \emph{without} any prior knowledge of the problems or manual tuning.
+
+\begin{figure}[tb]
+	\centering
+	\begin{minipage}{0.41\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{parametric_solution_heatmaps/param_sol_convection_domain_beta_1_30.pdf}
+
+		\hspace{7mm}{\small(a)}
+	\end{minipage}
+	\hfill
+	\begin{minipage}{0.575\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{parametric_solution_samples/parametric_solution_convection_samples_density.pdf}
+
+		\hspace{7mm}{\small(b)}
+	\end{minipage}
+	\caption{Solving parametric convection BVPs:
+		(a)~relative~$L_2$ error vs.~$\beta$~(legend reports number of differential operator evaluations per epoch). (b)~Samples from~$\psi_0^\text{PDE}$ at different training stages.}
+	\label{fig:param_sol_convection_helmholtz}
+\end{figure}
+
+\subsection{Leveraging invariance when solving BVPs}
+\label{sec:invariance_constraint_experiments}
+
+Next, we showcase how SCL can be used to overcome computational limitations or scarce mechanistic knowledge. Consider training an MLP to solve a convection BVP with~$\beta = 30$ and periodic initial condition~$h(0,x) = \sin(x)$. This problem is commonly used to showcase a ``failure mode'' of~\eqref{eq:PINN} since it yields degenerate solutions when using fixed collocation points~(Fig.~\ref{fig:invariance_constraint}a)~\citep{Krishnapriyan21c}.
+Note that the constrained~\eqref{eq:scl_problem}(M) also fails when using fixed collocations points~(Fig.~\ref{fig:invariance_constraint}b), even though its stochastic version finds accurate solutions~(Table~\ref{tab:pinn}).
+One way to overcome this limitation is by leveraging additional knowledge. In this case, we know from the BVP structure that its solution must be periodic with period~$\pi/15$. By incorporating this invariance using~\eqref{eq:scl_problem}(S), we can obtain accurate solutions despite our use of fixed collocation points for~\eqref{eq:scl_problem}(M)~(Fig.~\ref{fig:invariance_constraint}c). Note that the worst-case loss in~\eqref{eq:scl_problem}(S) is fundamental to avoid degenerate solutions.
+\begin{figure}[tb]
+	\centering
+	\includegraphics[width=\linewidth]{invariance_constraint/invariance_constraint_viridis.pdf}
+	\caption{Using invariance in convection BVPs~(BC and PDE losses in~\eqref{eq:PINN} and~\eqref{eq:scl_problem} are evaluated using a \emph{fixed set of collocation points}).
+	}
+	\label{fig:invariance_constraint}
+\end{figure}
+
+\subsection{Supervised solution of BVPs}
+\label{sec:pointwise_constrained_fno_experiments}
+
+We conclude by exploring supervised methods that rely only on pairs of initial conditions~$h_j(x,0)$ and corresponding (weak)~solutions~$u^\dagger_j$. To showcase the versatility of SCL, we train FNOs rather than MLPs, fixing~$\psi_\alpha^\text{OB}$ to a uniform distribution over a regular grid to accommodate their predictions. We also cast the SCL problem using only the observational constraints~\eqref{eq:scl_problem}(O), i.e., without any objective. In contrast to~\eqref{eq:NO}, which minimizes the average error, this formulation enforces a maximum error of~$\epsilon_\text{o}$ across samples. Though apparently minor, this leads to better prediction quality, as shown in Table~\ref{tab:results_NO}.
+This occurs because the difficulty of fitting PDE solutions varies across ICs. While the average tends to emphasize the majority of ``easy-to-fit samples,'' enforcing a maximum error gives more weight to challenging data points. This becomes clear in Fig.~\ref{fig:dual_variables_burgers}, which compares the magnitude of each IC in the training set with its final dual variables~$\dvar{OB${}_j$}$ for the Burgers' equation. Immediately, we notice a trend where ICs with either small or large magnitudes appear harder to fit. This information can be leveraged to guide the collection of additional data points or improve the NO architecture. Indeed, any model improvement can immediately take advantage of SCL since it is (virtually)~independent of the choice of$u_\theta$. The benefits of~$\dvar{OB}$ are exacerbated when predicting which IC is hard to fit is intricate, as is the case for the Navier-Stokes equation~(see App.~\ref{app:additional_experiments}).
+\begin{figure}[tb]
+		\begin{minipage}[c]{0.5\linewidth}
+		\centering
+		\captionof{table}{Relative $L_2$ error on test set~(FNO).}
+		\label{tab:results_NO}
+		\renewcommand{\arraystretch}{1.2}
+		\begin{tabular}{lccc}
+			& $\nu$ & \eqref{eq:NO} & \textbf{\eqref{eq:scl_problem}(O)}
+			\\\hline
+			\textbf{Burgers'}                       & $10^{-3}$ &$0.0539\,\%$ & $0.0457\,\%$
+			\\\hline
+			\multirow{3}{*}{\textbf{Navier-Stokes}} & $10^{-3}$ & $4.43\,\%$  & $3.30\,\%$  \\
+			& $10^{-4}$ & $31.8\,\%$  & $29.7\,\%$  \\
+			& $10^{-5}$ & $25.9\,\%$  & $24.6\,\%$
+			\\\hline
+			\multicolumn{2}{l}{\textbf{Diffusion-Sorption}} &$0.506\,\%$ & $0.347\,\%$
+			\\\hline
+		\end{tabular}
+	\end{minipage}
+	\hfill
+	\begin{minipage}[c]{0.46\columnwidth}
+		\centering
+		\includegraphics[width=\columnwidth]{pointwise_fno_dual_variables/burgers_eq_pointwise_fno_dual_variables_scatter.pdf}
+
+		\caption{Final value of dual variables~($\dvar{OB${}_j$}$) vs.\ magnitude of IC for Burgers' equation.}
+	\label{fig:dual_variables_burgers}
+	\end{minipage}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+This paper developed SCL, a technique for solving BVPs based on constrained learning. It demonstrated that finding (weak)~solutions of PDEs is equivalent to solving constrained learning problems with worst-case losses. It also showed how additional prior knowledge can be incorporated to the solution of the BVP, such as structural constraints~(e.g., invariances), real-world measurements, and previously known solutions. It then developed a practical algorithm to tackle these problems and showcased its performance across a variety of PDEs, NN~architectures, and prior knowledge levels. SCL not only yields accurate BVP solutions, but tackles many of the challenges faced by previous methods, such as extensive hyperparameter tuning, degenerate solutions, and fine discretizations of domain and/or coefficients. Future work includes exploring structures beyond invariance, worst-case losses for functional parameters such as~$\tau$, and active learning methods based on dual variables.
+
+
+
+

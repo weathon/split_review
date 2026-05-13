@@ -1,0 +1,259 @@
+\title{Teaching Large Language Models to Self-Debug}
+
+\begin{abstract}
+Large language models (LLMs) have achieved impressive performance on code generation. However, for complex programming tasks, generating the correct solution in one go becomes challenging, thus some prior works have designed program repair approaches to improve code generation performance. In this work, we propose \ours{}, which teaches a large language model to debug its predicted program via few-shot demonstrations. In particular, we demonstrate that \ours{} can teach the large language model to perform \emph{rubber duck debugging}; i.e., without any human feedback on the code correctness or error messages, the model is able to identify its mistakes by investigating the execution results and explaining the generated code in natural language. \ours{} achieves the state-of-the-art performance on several code generation benchmarks, including the Spider dataset for text-to-SQL generation, TransCoder for C++-to-Python translation, and MBPP for text-to-Python generation. On the Spider benchmark where there are no unit tests to verify the correctness of predictions, \ours{} with code explanation consistently improves the baseline by $2-3\%$, and improves the prediction accuracy on problems of the hardest level by $9\%$. On TransCoder and MBPP where unit tests are available, \ours{} improves the baseline accuracy by up to $12\%$. Meanwhile, by leveraging feedback messages and reusing failed predictions, \ours{} notably improves sample efficiency, and can match or outperform baseline models that generate more than 10$\times$ candidate programs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Code generation has been a long-standing challenge with a variety of applications, such as code synthesis from natural languages~\citep{yu-etal-2018-spider,chen2021evaluating,austin2021program,li2022competition}, programming by examples~\citep{devlin2017robustfill,bunel2018leveraging,chen2019execution}, and code translation~\citep{roziere2020unsupervised,chen2018tree}. In particular, recent large language models have demonstrated a significant leap in improvement over prior deep neural networks~\citep{chen2021evaluating,nijkamp2022codegen,zheng2023codegeex,xu2022systematic}. However, for many programming tasks, generating correct code with a single attempt is challenging. Inspired by observations that correct code is much more likely to be predicted when multiple programs are sampled from the model~\citep{chen2021evaluating,chowdhery2022palm,li2022competition}, one line of work has designed reranking techniques to select the best candidate from multiple samples, which typically requires tens of samples to start with~\citep{shi-etal-2022-natural,zhang2022coder,ni2023lever,li2022competition}.
+
+Intuitively, even for human programmers, there is no guarantee that the code written on the first try is always accurate. Instead of completely discarding the incorrect code, humans typically look into the code and investigate execution results, then make changes to resolve the implementation errors. Therefore, prior works propose deep learning techniques to repair the predicted code, which demonstrate notable performance gains on various coding tasks~\citep{gupta2020synthesize,wang2018dynamicnp,fu2019codaae,chen2023improving}. However, these approaches require additional training for the code repair model. While some recent works show that large language models have potential for generating feedback messages to critique and refine their outputs for some natural language and reasoning domains~\citep{shinn2023reflexion,madaan2023self,kim2023language,bai2022constitutional}, prior works suggest that such large language models are not yet capable of correcting code when lacking external feedback, such as unit tests or human instructions~\citep{chen2023improving}.
+
+In this work, we propose \ours{}, where we teach the large language model to debug its own predicted code via few-shot prompting. Without any additional model training, \ours{} instructs the model to execute the code, then generate a feedback message based on the code and its execution result. Different from prior works on utilizing human feedback for code repair, where the feedback message explains the code errors and how to fix them~\citep{chen2023improving,austin2021program}, \ours{} teaches the model to identify the implementation errors via investigating into execution results and explaining the code by itself. This debugging process is reminiscent of \emph{rubber duck debugging} for human programmers, where explaining the code line-by-line in natural language to a rubber duck significantly boosts debugging efficiency without expert guidance~\citep{hunt2000pragmatic}. Figure~\ref{fig:framework} illustrates the full procedure of \ours{}.
+
+We evaluate \ours{} on a variety of models, including \texttt{code-davinci-002}~\citep{chen2021evaluating}, \texttt{gpt-3.5-turbo}, \texttt{gpt-4}~\citep{openai2023gpt4} in the GPT model family, as well as StarCoder~\citep{li2023starcoder}, a strong open-source LLM for code generation. \ours{} achieves the state-of-the-art performance on different types of code generation tasks, including text-to-SQL generation, code translation and text-to-Python generation. On the Spider benchmark~\citep{yu-etal-2018-spider} for text-to-SQL generation where there are no unit tests in the problem description, with code explanation, \ours{} consistently improves the baseline by $2-3\%$ with different numbers of initial programs, and improves the prediction accuracy on the most complicated SQL queries by $9\%$. On both TransCoder for code translation~\citep{roziere2020unsupervised} and MBPP for text-to-Python generation~\citep{austin2021program}, utilizing unit tests along with code explanation boosts the accuracy by up to $12\%$, and code explanation alone without debugging also consistently improves the code translation performance by $2-3\%$. Meanwhile, \ours{} improves sample efficiency, and can match or outperform baseline models that sample more than 10$\times$ predictions. Our work indicates that besides improving their ability to generate code from scratch, teaching large language models to perform \ours{} without human guidance is another promising path to enhance coding capability and reduce the sampling cost required to accomplish challenging tasks.
+
+\begin{figure}[h]
+\centering
+  \includegraphics[width=0.85\linewidth]{figs/self-debugging.pdf}
+\caption{\ours{} for iterative debugging using a large language model. At each debugging step, the model first generates new code, then the code is executed and the model explains the code. The code explanation along with the execution results constitute the feedback message, based on which the model infers the code correctness and then adds this message to the feedback. The feedback message is then sent back to the model to perform more debugging steps. 
+When unit tests are not available, the feedback can be purely based on code explanation.}
+\label{fig:framework}
+\end{figure}
+
+
+\section{Prompting for Code Generation}
+
+\label{sec:background}
+
+In this section, we discuss the background on prompting for code generation using large language models. We first introduce few-shot prompting, then discuss how to select the final prediction from multiple samples based on code execution.
+
+\textbf{Few-shot prompting.} Few-shot prompting instructs the language model to solve a task with several input-output demonstrations~\citep{brown2020language}. Taking text-to-SQL generation as an example, the few-shot prompt prepends the question of interest with a list of (question, SQL) pairs, so that when the model is asked to predict subsequent tokens of the given prompt, it will follow the prompt format to generate the SQL query. Figure~\ref{fig:spider-sample} presents one exemplar for the prompt. Besides input-output demonstrations, we can optionally add an instruction in the prompt to provide a high-level task description~\citep{ouyang2022training,sanh2021multitask,suzgun2022challenging}. For example, in the first two steps of our \ours{} prompt shown in Figure~\ref{fig:prompt-spider}, both prompts start with instructions that ask the model to generate explanations.
+
+\textbf{Execution-based code selection.} Prior works demonstrate that decoding multiple samples can significantly improve the performance of large language models~\citep{wang2022self,shi-etal-2022-natural}. In particular, for code generation tasks, we can utilize code execution to select the final prediction~\citep{chen2019execution,li2022competition,shi-etal-2022-natural,zhang2022coder,ni2023lever}. One line of work selects the final prediction using the majority vote of execution results~\citep{chen2019execution,li2022competition,shi-etal-2022-natural}, while other works design reranking schemes to improve the performance~\citep{zhang2022coder,ni2023lever,yin2019reranking,zeng2022n}. In this work, when there are multiple predictions, we follow the first line of work to select the predicted code with the most frequent execution result among those that do not encounter execution errors, then apply \ours{} to the code.
+
+Some code generation tasks are accompanied with unit tests to specify the program execution behavior~\citep{chen2021evaluating,austin2021program,li2022competition,hendrycks2021measuring}. Specifically, the unit tests are a set of input-output pairs $\{(i_k, o_k)\}_{k=1}^K$, and a program $P$ passes unit tests when $P(i_k)=o_k,\forall k\in \{1, ..., K\}$. When unit tests are presented in the problem description, we filter out programs that do not pass the unit tests before performing the execution-based majority vote.
+
+
+
+\section{\ours{}
+
+\label{sec:approach}
+
+Figure~\ref{fig:framework} illustrates our \ours{} framework for iterative debugging, where we utilize a pretrained large language model without finetuning it. One turn of \ours{} consists of 3 steps: Generation, Explanation, and Feedback.
+\begin{itemize}[leftmargin=2em,topsep=0pt,partopsep=1ex,parsep=0ex]
+\item For the Generation step, given the problem description, the model predicts candidate programs.
+\item During the Explanation step, the model is prompted to process the predictions in a semantically useful way, such as explaining the prediction in natural language, or creating an execution trace of the predicted code for a sample input.
+\item Finally, for the Feedback step, a feedback message concerning the correctness of the predicted code is generated. This can be determined by asking the model itself, or can be generated externally from unit tests.
+\end{itemize}
+The debugging process terminates when the feedback message states that the prediction is correct, or a maximum allowed number of debugging turns is reached.
+
+In practice, a \ours{} turn does not always include all steps above. We discuss different types of feedback that can be automatically acquired and generated for \ours{} below.
+
+\textbf{Simple feedback.} The simplest form of automatic feedback is a sentence that just indicates the code correctness without more detailed information, which omits the Explanation step in a full \ours{} turn. For instance, in text-to-SQL generation, the few-shot prompt provides the feedback message \textit{``The SQL prediction above is correct!''} for all correct SQL queries, and \textit{``The SQL prediction above is wrong. Please fix the SQL.''} for wrong predictions.
+
+\textbf{Unit test feedback (UT).} For code generation tasks where the problem description includes unit tests, besides utilizing code execution to check code correctness, we can also incorporate the execution results in the feedback, which provides richer information for debugging. Figure~\ref{fig:prompt-transcoder} presents a sample unit test feedback message. Intuitively, inspecting runtime errors and execution results of failed unit tests also helps human programmers debug more effectively. In our experiments, we will demonstrate that leveraging unit tests whenever available consistently boosts the \ours{} performance.
+
+\textbf{Code Explanation feedback (Expl).} Despite recent promising progress showing that large language models can generate critiques to avoid harmful model outputs~\citep{ganguli2023capacity,bai2022constitutional} and improve their performance on some natural language tasks~\citep{shinn2023reflexion,kim2023language,saunders2022self}, prior work has yet to show the effectiveness of model-generated feedback on code generation~\citep{chen2023improving}. On the other hand, large language models have been shown to be capable of describing their generated problem solutions in both text~\citep{wei2022chain,kojima2022large,zhou2022least} and code~\citep{gao2022pal,chen2022program} formats.
+
+Inspired by these observations, instead of teaching the large language model to predict error messages, we propose \ours{} via explaining the generated code. This debugging process is reminiscent of \emph{rubber duck debugging}, where a programmer debugs code by explaining it line-by-line to a rubber duck~\citep{hunt2000pragmatic}. By describing the code implementation and comparing it to the problem description, human programmers are usually able to identify the bugs without extra guidance. Empirically, we observe that a large language model can also benefit from rubber duck debugging, especially when unit tests are not available.
+
+\textbf{Execution trace feedback (Trace).} Besides explaining the code itself, human programmers also often understand the code semantic meaning by simulating the execution process. Prior work on code repair has demonstrated that training the repair model on execution traces improves the debugging performance~\citep{wang2018dynamicnp,gupta2020synthesize}. Therefore, when unit tests are available, we examine another explanation feedback format where the LLM is instructed to explain the intermediate execution steps line-by-line. Note that both the execution trace and the line-by-line explanation come from model generation instead of code execution, thus the trace feedback does not require more information than the pure code explanation feedback; i.e., no access to intermediate execution states.
+
+
+\section{Applications}
+
+\label{sec:setup}
+
+In our evaluation, we showcase applications of \ours{} to different code generation domains: text-to-SQL generation, code translation, and text-to-Python generation. First, text-to-SQL generation represents the scenario where no unit tests are available, where \ours{} enables the model to identify errors and justify code correctness by explaining the predicted code. In code translation, we demonstrate how to utilize the execution of unit tests to provide feedback messages. Finally, the text-to-Python domain requires the model to infer prediction correctness when only a subset of unit tests are presented in the problem description.
+
+\input{figs/codefigs/spider_example}
+
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/prompts_spider.pdf}
+    \caption{An example of \ours{} prompting for text-to-SQL generation. The SQL query, explanation and feedback are all predicted by the model. When the returned table has more than 2 rows, only the first 2 rows are included in the prompt.}
+    \label{fig:prompt-spider}
+\end{figure*}
+
+\subsection{Text-to-SQL Generation}
+
+The goal of text-to-SQL tasks is to generate the corresponding SQL query given a question and the database information, and Figure~\ref{fig:spider-sample} presents an exemplar in our prompt for generating the SQL query. Following prior work evaluating large language models for text-to-SQL generation~\citep{rajkumar2022evaluating,shi-etal-2022-natural,ni2023lever}, we evaluate \ours{} on the development set of the Spider benchmark~\citep{yu-etal-2018-spider}. Since the unit tests are not available, it becomes more challenging for the model to infer the correctness of the predicted SQL queries. As will be shown in Section~\ref{sec:exp}, it is insufficient for accurately predicting SQL correctness when the few-shot prompt only contains simple feedback.
+
+ At a high level, the debugging process contains 3 steps. First, we prompt the model to summarize the question and infer the return type required by the question; i.e., the number of table columns of the corresponding SQL query. In the second step, we execute the SQL query and add the returned table to the model input for code explanation. The generated SQL explanation includes a detailed description of each clause, the number of columns included in the returned table, and the high-level meaning of the full SQL query. When the returned table has more than 2 rows, only the first 2 rows are included in the prompt. Finally, the model compares the inferred SQL explanation and question description, and then predicts the correctness of the current SQL query. The \ours{} process terminates when the SQL query is considered correct in step 3, or when it reaches the maximum number of debugging turns.
+
+\subsection{Code Translation}
+
+\input{figs/codefigs/transcoder_example}
+
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/prompts_transcoder.pdf}
+    \caption{Examples of \ours{} prompts for code translation. Left-aligned blocks are model predictions, and right-aligned blocks contain the input C++ code and feedback messages based on code execution.}
+    \label{fig:prompt-transcoder}
+\end{figure*}
+
+Next, we apply \ours{} to code translation, where the goal is to translate code in one programming language into another language. We use the TransCoder dataset~\citep{roziere2020unsupervised} for experiments, which includes a test set of parallel functions in different programming languages along with unit tests. Following~\citep{chowdhery2022palm}, we evaluate \ours{} on C++-to-Python translation, and we utilize the same test set with 560 problems and 10 unit tests per problem. The problem description includes both the C++ code and all unit tests, as shown in Figure~\ref{fig:transcoder_example}.
+
+Given the availability of unit tests, we apply \ours{} only when the predicted Python code does not pass all the unit tests, and thus the model does not need to predict the feedback messages. Figure~\ref{fig:prompt-transcoder} provides sample \ours{} prompts with unit test feedback and code explanation. We iteratively apply \ours{} until the predicted Python code passes all unit tests, or the model reaches a maximum number of debugging turns.
+
+\subsection{Text-to-Python Generation}
+
+In addition, we evaluate \ours{} in the setting where only a subset of unit tests are presented in the problem description, which is a common setup in coding assignments and competitions~\citep{austin2021program,li2022competition}. Specifically, we evaluate on the MBPP test set~\citep{austin2021program}, which contains 500 Python problems with text descriptions, where each problem has 3 unit tests. We follow prior work~\citep{shi-etal-2022-natural,ni2023lever} in including the first unit test in the prompt as part of the problem description, and keeping the remaining 2 unit tests hidden for full evaluation. Similar to code translation, we can also incorporate unit test execution results in the feedback message, but the main difference is that the model still needs to infer the code correctness even if the predicted code passes the given unit test.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We evaluate \ours{} on  \texttt{code-davinci-002} (~\cite{chen2021evaluating}, referred to as Codex), \texttt{gpt-3.5-turbo}, \texttt{gpt-4}~\citep{openai2023gpt4}, and StarCoder~\citep{li2023starcoder} with 15.5B parameters.
+For initial code generation, when starting from one program, we perform greedy decoding with temperature $\tau=0$. When sampling multiple programs for a problem, we set temperature $\tau=0.7$, then we perform execution-based selection described in Section~\ref{sec:background}. All experiments for \ours{} use greedy decoding to generate code explanations, feedback messages and new programs. We set the maximum number of debugging turns to be 10, though empirically the successful debugging processes mostly end within 3 turns.
+
+We evaluate \ours{} against two types of code reranking baselines as follows.
+
+\textbf{Models trained for the given task.} The Spider benchmark contains a training set of over 10K samples, and the state-of-the-art models are mostly finetuned on this training set. We compare \ours{} to T5-3B + N-best Reranking~\citep{zeng2022n}, where the T5-3B model is specially trained for text-to-SQL generation. Although LEVER~\citep{ni2023lever} also utilizes \texttt{code-davinci-002} to generate candidate SQL queries, they train a verifier to select the final prediction based on execution, and thus this approach also requires extra training.
+
+\textbf{Prompting-based approaches.} We compare \ours{} against recent approaches that also only perform prompting without any additional training. Specifically, Both MBR-Exec~\citep{shi-etal-2022-natural} and Coder-Reviewer~\citep{zhang2022coder} first generate multiple candidate programs by prompting the pretrained model. Afterward, MBR-Exec~\citep{shi-etal-2022-natural} selects the program with the most common execution output, while Coder-Reviewer~\citep{zhang2022coder} selects the program by utilizing both the likelihood of the predicted code given the problem description (Coder score) and the likelihood of the problem description given the predicted code (Reviewer score).
+
+\subsection{Main Results}
+\label{sec:main-eval}
+
+\input{figs/tables/baseline-table}
+
+First, we compare \ours{} to prior code reranking approaches in Table~\ref{tab:baseline-comparison}, where both \ours{} and prior prompting-based approaches use Codex. We demonstrate that \ours{} consistently improves the performance.
+
+\input{figs/tables/self-debug-table}
+
+Next, we compare different feedback formats for \ours{} with different LLMs in Table~\ref{tab:main}. On the Spider benchmark where unit tests are not available, simple feedback alone does not notably improve the performance, because the model typically struggles to distinguish between correct and wrong SQL queries without explanation, and does not produce meaningful changes to the initial predicted SQL queries. Note that on TransCoder and MBPP benchmarks where at least one unit test is available for \ours{}, simple feedback also utilizes the execution result to infer the code correctness even if the execution information is not presented in the feedback message, thus simple feedback still improves the model prediction for both applications. In Section~\ref{sec:no-exec}, we further present an ablation study showing that leveraging code execution is crucial for enabling a performance leap with \ours{}. For all tasks, models generally benefit from richer feedback for \ours{}, especially when the execution information is present in the feedback.
+
+By comparing different LLMs, we observe that:
+\begin{itemize}[leftmargin=2em,topsep=0pt,partopsep=1ex,parsep=0ex]
+\item Although GPT-4 is shown to be much stronger than previous GPT models on many tasks~\citep{openai2023gpt4}, on Spider, both its initial SQL generation and \ours{} performance are much worse than Codex. One possible reason is that GPT-4 is tuned for zero-shot prompting, and thus it does not follow few-shot exemplars as well as Codex. Meanwhile, both GPT-3.5 and GPT-4 might not be optimized for SQL generation, and thus their zero-shot results are more than 10\% worse than their few-shot counterparts.
+\item GPT-4 is significantly better than Codex and GPT-3.5 for initial Python code generation on MBPP. Meanwhile, its self-debugging performance gain is on par with Codex: over 12\% improvement on Transcoder, and 8\% improvement on MBPP.
+\item Despite that the baseline performance of StarCoder is considerably worse than GPT models, \ours{} with unit test execution also offers a significant performance gain, i.e., 6\% on MBPP with the execution trace feedback.
+\end{itemize}
+
+\subsection{Ablation studies}
+
+In this section, we present ablation studies to understand the effectiveness of \ours{} from different perspectives.
+
+\subsubsection{\ours{} Improves the Sample Efficiency}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{.45\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figs/samples_plot_spider.pdf}
+  \caption{}
+  \label{fig:sample-efficiency-spider}
+\end{subfigure}
+\begin{subfigure}[b]{.5\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figs/breakdown_spider.pdf}
+  \caption{}
+  \label{fig:breakdown-spider}
+\end{subfigure}
+\caption{Ablation studies on the Spider development set with Codex. (a) Accuracies with different numbers of initial samples. (b) Breakdown accuracies on problems with different hardness levels.}
+\label{fig:ablations-spider}
+\end{figure}
+
+Figure~\ref{fig:sample-efficiency-spider} demonstrates the effectiveness of \ours{} when applied to different numbers of initial samples, where \ours{} notably improves the sample efficiency. In particular, on Spider, applying \ours{} to predictions generated with greedy decoding matches the baseline accuracy using 16 samples, and \ours{} from 8 samples outperforms the baseline accuracy using 32 samples. Note that typically one debugging turn is sufficient, and the accuracy improvement after one turn is within $0.1\%$.
+
+\subsubsection{Importance of Code Execution}
+\label{sec:no-exec}
+
+\input{figs/tables/self-debug-no-exec-table}
+
+By default, we leverage unit test execution for \ours{} when applicable. In Table~\ref{tab:no-exec}, we examine the scenario where the \ours{} process does not involve code execution on Transcoder and MBPP, thus models need to fully rely on themselves to infer the code correctness as in Spider experiments. Our main findings are as follows:
+
+\begin{itemize}[leftmargin=2em,topsep=0pt,partopsep=1ex,parsep=0ex]
+\item With Codex, \ours{} still improves the performance by up to 5\%, and the execution trace feedback consistently improves over the simple feedback performance.
+\item GPT-4 without unit test execution improves the MBPP accuracy by 3.6\%, and the improvement on other benchmarks is up to around 1\%.
+\item Compared to Codex, few-shot prompting does not notably improve the \ours{} performance of GPT-3.5 and GPT-4, and thus their \ours{} procedures fully rely on their internal code knowledge. Without unit test execution, both models tend to be overconfident in their own initial predictions, while GPT-4 is better than GPT-3.5 on Python generation.
+\end{itemize}
+
+In summary, code execution plays an important role in \ours{}; however, sometimes LLMs can still improve their performance purely with self-generated feedback. In particular, execution trace feedback offers consistent improvement.
+
+\subsubsection{Error Types Fixed by \ours{}}
+
+\input{figs/codefigs/spider-hard-ex}
+
+To further understand how \ours{} improves performance, we first measure the breakdown accuracies on Spider problems with different difficulty levels, where the difficulty of each problem is annotated in the Spider benchmark based on the complexity of the ground truth SQL queries. Figure~\ref{fig:breakdown-spider} demonstrates that the improvement achieved by \ours{} is more significant on hard problems. In particular, on extra hard problems, \ours{} increases the accuracy by $9\%$. Table~\ref{tab:error-type-breakdown-spider} presents a categorization on error types that are successfully fixed by \ours{}. In general, we observe that the initial SQL queries generated by LLMs are usually not completely wrong, but they tend to make small mistakes when the questions require more complex SQL queries, e.g., missing a few WHERE conditions or SELECT columns. In this case, \ours{} with code explanation facilitates the LLM to identify the discrepancy between the question and the predicted SQL query, resulting in an accuracy boost for more complex tasks. Figure~\ref{fig:spider-hard-ex} presents an example where \ours{} fixes the prediction for an extra hard problem. 
+
+On the other hand, on Transcoder and MBPP, 60\%-70\% successful cases fix the output mismatch error when the initial wrong code is very close to a correct one, as shown in Table~\ref{tab:error-type-breakdown-python}. Specifically, on Transcoder, over 30\% of successful fixes address implementation differences between different programming languages, where the issue is made more obvious with code execution. On MBPP, while $2/3$ of the initial programs have problem-specific semantic errors, over 10\% of the initial programs can be fixed by switching the order of function arguments and matching the argument types.
+\begin{table}[h]
+\centering
+\caption{Breakdown on percentages of error types fixed by \ours{}.}
+\label{tab:error-type-breakdown}
+\begin{subtable}{0.49\linewidth}
+\caption{Breakdown on Spider with \texttt{code-davinci-002}.}
+\label{tab:error-type-breakdown-spider}
+\centering
+\scalebox{0.9}{
+\begin{tabular}{l c}
+ \toprule
+ Error type & \% \\
+ \hline
+Wrong WHERE conditions & 25.7 \\
+Missing the DISTINCT keyword & 17.1 \\
+Wrong JOIN clauses & 14.3 \\
+Wrong number of SELECT columns & 11.4 \\
+Wrong INTERSECT/UNION clauses & 8.6 \\
+Wrong aggregate functions and keywords & 5.8 \\
+Wrong COUNT columns & 5.7 \\
+Wrong column selection & 5.7 \\
+Missing nested conditions & 5.7 \\
+\bottomrule
+\end{tabular}}
+\end{subtable}
+\begin{subtable}{0.49\linewidth}
+\caption{Breakdown on Transcoder with \texttt{gpt-3.5-turbo}, and MBPP with \texttt{gpt-4}.}
+\label{tab:error-type-breakdown-python}
+\centering
+\begin{tabular}{lcc}
+ \toprule
+Error type & Transcoder & MBPP \\
+ \hline
+Output mismatch & 61.9 & 69.2 \\
+Runtime errors & 38.1 & 30.8 \\
+\bottomrule
+\end{tabular}
+\end{subtable}
+\end{table}
+
+
+\section{Related Work}
+
+\label{sec:work}
+
+\paragraph{Language models for code.} Recent years have witnessed rapid progress in deep neural networks for code generation~\citep{devlin2017robustfill,chen2019execution,yu-etal-2018-spider,roziere2020unsupervised}. While models designed and trained for specialized domains have achieved impressive performance in various applications such as text-to-code generation~\citep{li2023graphix,wang2020ratsql,scholak-etal-2021-picard,dong-lapata-2016-language,iyer-etal-2018-mapping} and code translation~\citep{chen2018tree,roziere2020unsupervised,roziere2021leveraging}, latest work on large language models demonstrate that a single pretrained model can achieve the state-of-the-art performance across a wide variety of coding tasks without specialized finetuning~\citep{chen2021evaluating,chowdhery2022palm,nijkamp2022codegen,zheng2023codegeex,xu2022systematic,athiwaratkun2022multi,orlanski2023measuring}.
+
+Despite showing the remarkable ability to follow natural language instructions, large language models still exhibit limited understanding of code execution~\citep{austin2021program,li2022competition}. Specifically, even when the unit tests are provided in the problem description, the generated programs may still violate them~\citep{li2022competition,shi-etal-2022-natural,ni2023lever}. Therefore, several approaches have been proposed to leverage code execution to choose the final prediction from multiple candidates, such as utilizing or training a language model for reranking~\citep{zhang2022coder,ni2023lever}, and performing selection based on the consensus on unit test execution outputs among samples~\citep{chen2019execution,chen2021latent,roziere2021leveraging,shi-etal-2022-natural,li2022competition,chen2022codet}. In this work, our main focus is to utilize and explain code execution for \ours{}, which improves the sample efficiency compared to utilizing execution solely for initial code generation.
+
+\paragraph{Prompting techniques.} Several prompting methods have been proposed to unlock latent abilities of large language models~\citep{wei2022chain,nye2021show,kojima2022large,zhou2022least,khot2022decomposed,zhou2022teaching,gao2022pal,chen2022program}. Rather than prompting a model to directly produce the desired result, these methods have the model first produce useful intermediate outputs. For example, chain-of-thought prompting asks the model to produce intermediate reasoning steps in natural language, which can be accomplished either with few-shot exemplars~\citep{wei2022chain} or in a zero-shot manner~\citep{kojima2022large}. Meanwhile, several prompting techniques explicitly direct the model to break down a problem into subproblems~\citep{zhou2022least,khot2022decomposed}. For example, decomposed prompting~\citep{khot2022decomposed} delegates subproblems to other LLM instances that are prompted to specialize in specific tasks. Our prompting format of code explanation is relevant in spirit to chain-of-thought prompting, as the line-by-line code explanation in natural language facilitates analysis of the code that is useful for the debugging task. On the other hand, \ours{} also decomposes the debugging process into several stages, and triggers separate prompts for code explanation and feedback generation.
+
+\textbf{Code repair.} Program repair is an area of research concerned with fixing bugs in code, where several neural network models have been developed to handle different types of bugs~\citep{gupta2017deepfix, yasunaga2021break, gupta2020synthesize,wang2018dynamicnp,le2022coderl}. While some methods train repair models that only take the code as input~\citep{gupta2017deepfix, yasunaga2021break}, other approaches incorporate additional information including execution traces~\citep{gupta2020synthesize,wang2018dynamicnp} as well as compiler and execution errors~\citep{yasunaga2020graph,le2022coderl}. Our \ours{} also uses additional information to aid in code repair, including execution results and self-generated code explanations. In contrast to prior work on training a separate model for code repair, \ours{} utilizes pretrained large language models for code, and teaches the model to debug via few-shot prompting.
+
+\paragraph{Training with feedback.} Training with feedback to improve the outputs of large language models, both in terms of correctness and alignment with human preferences, is an active research direction nowadays~\citep{ziegler2019fine,korbak2023pretraining,ganguli2023capacity,bai2022constitutional}. One popular technique is reinforcement learning from human feedback (RLHF)~\citep{ziegler2019fine,ouyang2022training}, and RLHF-trained models have demonstrated the ability to avoid harmful outputs when instructed to do so in the prompt~\citep{ganguli2023capacity}. Constitutional AI~\citep{bai2022constitutional} introduces another path toward training harmless models, where they use the pretrained model itself to create automated feedback for both supervised learning and RLHF: for the former, a set of principles are used to guide a language model in creating revisions of its own responses that it is then trained on, and for the latter the same principles are used to prompt a separate model for the feedback needed for RLHF.
+
+Another line of work trains a language model to refine the initial model outputs based on external feedback on prediction quality~\citep{welleck2022generating,liu2023chain}, which improves the performance on several natural language and reasoning tasks. For code generation, a number of works have trained models to perform code optimization~\citep{madaan2023learning}, interact with users for multi-turn code generation~\citep{yu-etal-2019-cosql,yao-etal-2019-model,nijkamp2022codegen}, and fix generated programs based on human feedback~\citep{iyer-etal-2017-learning,elgohary-etal-2020-speak,chen2023improving,le2022coderl}. On the other hand, \ours{} enables the model to generate feedback messages on its own at test time, and does not require extra training.
+
+\textbf{Prompting with feedback.} Recent works have shown the great promise of RLHF-trained models to generate critiques with prompting, which reduces harmful model outputs~\citep{bai2022constitutional,ganguli2023capacity} and improves the performance on some reasoning tasks~\citep{shinn2023reflexion,madaan2023self,kim2023language,nair2023dera}. Reflexion~\citep{shinn2023reflexion} prompts an agent powered with a large language model to reflect on its actions under certain situations (such as when its actions become repetitive) and stores these reflections in its memory, leading to reduced hallucination and more effective plans. Self-Refine~\citep{madaan2023self} shows that having a language model iteratively generate feedback and revisions of its outputs can greatly improve the final output quality on several tasks, such as text generation and math reasoning. RCI~\citep{kim2023language} demonstrates a related method combined with state and agent grounding that allows a large language model to accomplish computer control tasks in the MiniWoB++ benchmark~\citep{humphreys2022data}, and improves zero-shot performance on several math and commonsense reasoning benchmarks. Finally, DERA~\citep{nair2023dera} simulates a dialogue between two agents to improve the model's predictions in the clinical domain, with one agent providing feedback about important elements of the problem, and the other using the feedback to produce a final output. In this work, we focus on code generation applications, and \ours{} demonstrates the effectiveness of both self-generated feedback and unit test feedback acquired by code execution. In particular, \ours{} teaches the large language model to notice prediction errors via code explanation in the style of rubber duck debugging, which does not require the feedback message to explicitly explain the implementation errors and how to fix them.
+
+
+\section{Conclusion}
+
+In this work, we presented \ours{}, which enables a large language model to debug code generated by itself. In particular, we demonstrate that \ours{} empowers the model to perform \emph{rubber duck debugging}, so that the model can identify and fix bugs without human instructions. \ours{} achieves the state-of-the-art performance across several code generation domains, and notably improves sample efficiency. On text-to-SQL generation where there are no unit tests specified for the task, leveraging code explanation for \ours{} consistently improves the baseline by $2-3\%$, and provides a performance gain of $9\%$ on the hardest problems. For code translation and text-to-Python generation tasks where unit tests are available, \ours{} significantly increases the baseline accuracy by up to $12\%$.
+
+Our work highlights the promise of improving the coding performance of large language models by teaching them to iteratively debug their own predictions, instead of requiring the model to generate the correct code from scratch. \ours{} instructs the model to understand the code, identify the errors, and follow the error messages to fix the bugs. We consider improving the model's ability to conduct all these steps as important future work. In particular, we hypothesize that better code explanation ability leads to better debugging performance. One direction is to instruct the model to better describe the high-level semantic meaning of code along with the implementation details in its explanation. Another direction is to include additional debugging information in the model feedback, such as a description of potential bugs. Our preliminary results suggest that model-generated feedback messages about semantic errors do not provide additional benefits on top of line-by-line code explanation, and future work can explore techniques to predict more informative error messages.
+\label{sec:conc}
+
+
+
+

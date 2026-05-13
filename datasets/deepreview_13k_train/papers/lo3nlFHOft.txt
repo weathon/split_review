@@ -1,0 +1,479 @@
+\title{From Promise to Practice: Realizing High-performance Decentralized Training}
+
+\begin{abstract}
+Decentralized training of deep neural networks has attracted significant attention for its theoretically superior scalability over synchronous data-parallel methods like All-Reduce. However, realizing this potential in multi-node training is challenging due to the complex design space that involves communication topologies, computation patterns, and optimization algorithms. This paper identifies three key factors that can lead to speedups over All-Reduce training and constructs a runtime model to determine when, how, and to what degree decentralization can yield shorter per-iteration runtimes. Furthermore, to support the decentralized training of transformer-based models, we study a decentralized Adam algorithm that allows for overlapping communications and computations, prove its convergence, and propose an accumulation technique to mitigate the high variance caused by small local batch sizes. We deploy the proposed approach in clusters with up to 64 GPUs and demonstrate its practicality and advantages in both runtime and generalization performance under a fixed iteration budget.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+With the rapid advancement of deep neural networks (DNNs), distributed training has become the mainstream approach for efficiently scaling up models. Among the various parallelization strategies, data parallelism has emerged as the most straightforward and commonly used approach for distributing training across multiple devices. One of the most popular algorithms used in data-parallel training is All-Reduce \citep{li2020pytorch},  known for its simplicity and its ability to maintain consistency with single-machine training.
+\iffalse
+With the rapid advancement of deep neural networks (DNNs), distributed training has become the mainstream approach to scale up models efficiently. Among the various parallelization strategies, data parallelism, as the most straightforward parallel strategy, has first emerged and become the most commonly used method for scaling up training across multiple devices. One of the most popular algorithms used in data-parallel training is All-Reduce \citep{li2020pytorch}, which is favored for its simplicity and consistency with single-machine training.
+\fi
+
+However, All-Reduce training relies on high-speed network connections and homogeneous computational devices to ensure its efficiency \citep{zhang2020network, tandon2017gradient}. Large companies with abundant resources address these challenges by investing in specialized high-performance computing (HPC) clusters optimized for large-scale distributed training \citep{shoeybi2019megatron}. These clusters are equipped with cutting-edge uniform hardware and high-speed interconnects, making them ideal for All-Reduce-based training. Unfortunately, such resources are often inaccessible to the broader research community. Most researchers rely on self-built servers or shared clusters by universities or cloud service providers, which may lack the high-speed networking infrastructure necessary to fully leverage All-Reduce, thereby limiting the potential of the available computational resources.
+
+Decentralized algorithms, which originally gained attention in the fields of consensus algorithms \citep{johansson2007simple, shi2015finite} and privacy-preserving techniques \citep{yan2012distributed}, have recently been explored as alternatives to All-Reduce in distributed training, especially in environments with suboptimal network conditions. By replacing the costly All-Reduce operations with decentralized communication patterns, these algorithms can significantly reduce communication overhead. Over the past few years, decentralized algorithms have demonstrated promising practical speedup in setups with poor network performance~\citep{lian2017can, assran2019stochastic, yuan2022decentralized}. Research in this area has focused on the convergence properties of gossiping on different communication topologies~\citep{ying2021exponential, takezawa2024beyond}, decentralized optimization algorithms~\citep{lin2021quasi, yuan2021decentlam}, and alternative communication patterns~\citep{cattivelli2009diffusion}. Despite this growing interest, decentralized approaches have yet to achieve the same level of popularity as All-Reduce-based methods in distributed training.
+
+We believe there are several reasons for this: (1) Simply combining the best of each line of work does not necessarily lead to an effective overall system. The potential speedup of decentralized algorithms in real-world environments remains underexplored and poorly understood \citep{assran2019stochastic}. (2) The generalization performance of models trained with decentralized methods often falls short compared to those trained with All-Reduce under the same iteration budget, raising concerns about the effectiveness of decentralized training~\citep{lian2017can, assran2019stochastic}. (3) 
+Despite the growing interest in large language models (LLMs), there is still no well-suited decentralized version of the Adam optimizer, which is crucial for efficiently training transformer-based models in a decentralized setting.
+
+This paper aims to develop a deeper understanding of decentralized training in practical setups and includes the following key contributions:
+\begin{enumerate}
+    \item We propose a simple yet accurate runtime model that quantifies key environmental parameters and estimates potential speedups. This model is designed to optimize decentralized training configurations to achieve the best performance in different settings.
+    \item We design and analyze a decentralized variant of the Adam optimizer. Our algorithm leverages a collective gossip communication mechanism, enabling parallelism between computation and communication. In addition, it introduces a novel accumulation technique that enhances performance and delivers promising experimental results.
+    \item We implement a PyTorch extension for decentralized training across multiple GPUs and nodes. Our implementation demonstrates strong performance on typical machine learning workloads, including image classification, machine translation, and GPT-2 pre-training. Extensive experiments highlight the empirical evidence of the feasibility and practical benefits of decentralized training.
+\end{enumerate}
+\subsection{Related Work}
+
+\paragraph{Decentralized training} The combination of SGD updates with gossip communication \citep{lin2021quasi,yuan2021decentlam} has gained significant attention for its theoretical benefits: it retains the convergence rate as centralized/synchronous mini-batch SGD at a reduced communication cost. One line of work \citep{neglia2020decentralized, ying2021exponential, takezawa2024beyond} focuses on the design of the communication topology to improve the guaranteed convergence rate in terms of the number of iterations. However, these papers demonstrate improvements in terms of the number of iterations but do not show if these results translate into speedups in terms of total training time. A handful of more practical studies,~\emph{e.g.}, \citep{lian2017can, assran2019stochastic} report actual speedups of decentralized training with multiple workers, but they do not isolate system-level bottlenecks or bound the potential speedups. Moreover, \citet{lian2017can} focuses on low-bandwidth scenarios, and the implementation in \citet{assran2019stochastic} groups GPUs in a node as a single unit for decentralization, which can suffer from intra-node stragglers. Another line of work that is orthogonal to decentralized data parallelism is the slow momentum \citep{wang2019slowmo, lin2021quasi}, which maintains an outer-loop momentum to improve the training loss. However, the method introduces additional communication costs and parameters to tune.
+
+\paragraph{Variance in computation time} In the training of language models, one way to preprocess the input data is to group samples with similar lengths \citep{vaswani2017attention}, but this may introduce the straggler effect because non-uniform batches lead to an imbalanced workload. To solve this problem, one system-level way is to increase the number of local mini-batches to reduce the variance \citep{ott2019fairseq} or to drop samples on stragglers \citep{giladi2024dropcompute}, but this may worsen the generalization performance since it alters the effective global batch size \citep{keskar2016large}. To alleviate the straggler problem in pre-training LLMs, it is common to pack the sequences from different documents and insert a special token between them \citep{raffel2020exploring} to create uniform batches. However, the sequence pack technique has a negative influence on the training quality \citep{ding2024fewer}. Another possibility is to simply pad sequences to a fixed length \citep{smith2022using}, but this leads to lower resource utilization in the training. Moreover, the methods are not compatible with other tasks like video processing and seq-to-seq tasks. As for the performance of the decentralized training on imbalanced workloads, in \citet{assran2019stochastic}, the authors argued that decentralized training is more resilient to computation time variance by showing a smaller runtime variance. However, they did not explore whether decentralized training can also gain a speedup advantage. 
+
+\paragraph{Orthogonal scalability techniques} There are many other ways to improve scalability that are orthogonal to this work. This includes compression of gradients \citep{vogels2019powersgd} and models \citep{tang2018communication} to reduce the communication time, as well as model parallelism \citep{xu2023efficient} and pipeline parallelism \citep{li2021chimera} to scale up distributed training. These approaches could potentially be combined with our work to improve its scalability further.
+
+
+
+\section{Important aspects of multi-node decentralized training}
+
+
+The basic idea behind many decentralized optimization algorithms is to replace the global model parameter $x\in \mathbb{R}^{\scriptscriptstyle D}$ by local copies $x_i\in \mathbb{R}^{\scriptscriptstyle D}$ at each worker $i=1, 2, \dots, N$   and require that the local models reach consensus. In this spirit, a decentralized learning problem can be written as
+\begin{equation}\label{eq-prob-denc}
+\underset{\{x_1,\ldots, x_N\} }{\mbox{minimize}}\quad  \frac{1}{N} \sum\nolimits_{i=1}^N F_i(x_i), \quad \mbox{subject to}\; x_i=x_j,\; \forall i,j, 
+\end{equation}
+where $F_i(x_i)$ is the expected training loss of the local model $x_i$ on the data held by worker $i$. In our theoretical analysis, we let $F_i(x)=\mathbb{E}_{\xi_i\sim \mathcal{D}} [\ell(x;\xi_i)]$ where $\xi_i$ is a local data point of worker $i$ drawn from the distribution ${\mathcal D}$, and $\ell(\cdot)$ is a non-convex but smooth function. The assumption that each worker can draw samples from the same distribution $\mathcal{D}$ is reasonable if not for the privacy-preserving purpose \citep{ying2021exponential,lian2017can}.
+
+Decentralized algorithms for solving (\ref{eq-prob-denc}) allow the local model $x_i$ to disagree during the training process but drive them towards the same stationary point of the global training loss. We focus on adaptive momentum versions of decentralized gradient descent, 
+\begin{align}
+x_i^{(t)} &\leftarrow -\alpha^{(t)} d_i^{(t)} + \sum\nolimits_{j\in \mathcal{N}_i^{(t)}}w_{ij}^{(t)} x_j^{(t-1)}. \label{eqn:dsgd}  
+\end{align}
+Here, $\alpha^{\scriptscriptstyle (t)}$ is the learning rate, $-d_i^{\scriptscriptstyle ( t)}$ is an update direction that reduces the value of $F_i$ at $x_i^{\scriptscriptstyle ( t-1)}$ and the final term accounts for the averaged model parameters of neighboring workers and drives the local parameters towards the same first-order stationary point. For decentralized SGD, $d_i^{\scriptscriptstyle (t)}=\nabla \ell (x_i^{\scriptscriptstyle ( t-1)}; \xi_i^{\scriptscriptstyle ( t)})$ while the expression is more complex for the adaptive momentum variations that we develop in \S~\ref{sec:dadam}. The weights $w_{ij}^{\scriptscriptstyle ( t)}$ 
+satisfy $w_{ij}^{\scriptscriptstyle ( t)}>0$ if $i$ and $j$ communicate at iteration $t$ or $i=j$, 
+and $0$ otherwise. We define
+${\mathcal N}_i^{\scriptscriptstyle ( t)}$ as the set of workers $j$ (including $i$ itself) such that 
+\( w_{ij}^{\scriptscriptstyle ( t)} > 0 \).
+The weights are selected so that if $d_i^{\scriptscriptstyle ( t)}=0$ for all $i$ and all $t$ in (\ref{eqn:dsgd}), the local models will converge to the same value; see~\S~\ref{sec:dadam} for details. 
+
+Next, we will describe three factors that are essential to consider in order to implement (\ref{eqn:dsgd}) efficiently.
+\subsection{Exploiting overlapping communication and computation}\label{sec:overlap}
+
+\begin{figure}
+    \centering
+    \begin{adjustbox}{width=0.9\textwidth}
+    \begin{tikzpicture}
+
+        \tikzset{
+            every node/.append style={
+                inner sep=0pt,
+                outer sep=0pt,
+            }
+        }
+
+        \definecolor{fwcolor}{RGB}{142,207,201}
+        \definecolor{bwcolor}{RGB}{255,190,122}
+        \definecolor{cmcolor}{RGB}{250,127,111}
+        \definecolor{udcolor}{RGB}{130,176,210}
+        \definecolor{bucolor}{RGB}{190,184,220}
+
+        \def\noteW{0.75}
+        \def\noteH{0.75}
+        \def\noteTextGap{0.1}
+        \def\noteDisp{1.5}
+
+        \def\lineGap{-1.5}
+
+
+        \def\globalscale{0.7}
+        
+        \def\fone{1*\globalscale}
+        \def\ftwo{1*\globalscale}
+        \def\fthr{1*\globalscale}
+
+        \def\bone{2*\globalscale}
+        \def\btwo{2*\globalscale}
+        \def\bthr{2*\globalscale}
+
+        \def\cone{2.4*\globalscale}
+        \def\ctwo{2.4*\globalscale}
+        \def\cthr{2.4*\globalscale}
+
+        \def\uone{0.3*\globalscale}
+        \def\utwo{0.3*\globalscale}
+        \def\uthr{0.3*\globalscale}
+
+        \def\threadGap{1.5}
+        
+
+
+        
+
+
+
+
+
+            
+        
+        \begin{scope}[xshift=2cm,yshift=\lineGap cm]
+            \def\Disp{0.75}
+        
+
+            \node[anchor=west] at (-3,0) {Computation};
+            \node[anchor=west] at (-3,-\threadGap) {Communication};
+
+            \node[draw, fill=fwcolor, rounded corners, minimum width=\fone cm+\ftwo cm+\fthr cm, minimum height=\noteH cm, anchor=west] (fw) at (0,0) {$F$};
+
+            \node[draw, fill=bwcolor, rounded corners, minimum width=\bone cm, minimum height=\noteH cm, right=0 cm of fw] (bw1) {$B_3$};
+
+            \node[draw, fill=udcolor, rounded corners=\uone*0.5 cm, minimum width=\uone cm, minimum height=\noteH cm, right=0 cm of bw1] (ud1) {};
+
+            \node[minimum width=\uone cm, minimum height=\noteH cm, above=-0.2 cm of ud1] (ud1text) {$U_3$};
+
+            \node[draw, fill=bwcolor, rounded corners, minimum width=\btwo cm, minimum height=\noteH cm, right=0 cm of ud1] (bw2) {$B_2$};
+
+            \node[draw, fill=udcolor, rounded corners=\uone*0.5 cm, minimum width=\uone cm, minimum height=\noteH cm, right=0 cm of bw2] (ud2) {};
+
+            \node[minimum width=\uone cm, minimum height=\noteH cm, above=-0.2 cm of ud2] (ud2text) {$U_2$};
+
+            \node[draw, fill=bwcolor, rounded corners, minimum width=\bthr cm, minimum height=\noteH cm, right=0 cm of ud2] (bw3) {$B_1$};
+
+            \node[draw, fill=udcolor, rounded corners=\uone*0.5 cm, minimum width=\uone cm, minimum height=\noteH cm, right=0 cm of bw3] (ud3) {};
+
+            \node[minimum width=\uone cm, minimum height=\noteH cm, above=-0.2 cm of ud3] (ud3text) {$U_1$};
+
+            \node[draw, fill=cmcolor, rounded corners, minimum width=\cone cm, minimum height=\noteH cm, anchor=west] (cm1) at (\fone cm+\ftwo cm+\fthr cm+\bone cm +\uone cm,-\threadGap) {$C_3$};
+
+            \node[draw, fill=cmcolor, rounded corners, minimum width=\cone cm, minimum height=\noteH cm, right=0 of cm1] (cm2) {$C_2$};
+
+            \node[draw, fill=cmcolor, rounded corners, minimum width=\cone cm, minimum height=\noteH cm, right=0 of cm2] (cm3) {$C_1$};
+
+            \node[draw, fill=fwcolor, rounded corners, minimum width=\fone cm+\ftwo cm+\fthr cm, minimum height=\noteH cm, right=0 cm of ud3] (fwNext) {$F$};
+
+            \node[draw, fill=bwcolor, rounded corners, minimum width=\bone cm, minimum height=\noteH cm, right=0 cm of fwNext] (bw1Next) {$B_3$};
+
+            \node[draw, fill=udcolor, rounded corners=\uone*0.5 cm, minimum width=\uone cm, minimum height=\noteH cm, right=0 cm of bw1Next] (ud1Next) {};
+
+            \node[minimum width=\uone cm, minimum height=\noteH cm, above=-0.2 cm of ud1Next] (ud1textNext) {$U_3$};
+
+            \node[draw, fill=bwcolor, rounded corners, minimum width=\btwo cm, minimum height=\noteH cm, right=0 cm of ud1Next] (bw2Next) {$B_2$};
+
+            \node[draw, fill=udcolor, rounded corners=\uone*0.5 cm, minimum width=\uone cm, minimum height=\noteH cm, right=0 cm of bw2Next] (ud2Next) {};
+
+            \node[minimum width=\uone cm, minimum height=\noteH cm, above=-0.2 cm of ud2Next] (ud2textNext) {$U_2$};
+
+            \node[draw, fill=bwcolor, rounded corners, minimum width=\bthr cm, minimum height=\noteH cm, right=0 cm of ud2Next] (bw3Next) {$B_1$};
+
+            \node[draw, fill=udcolor, rounded corners=\uone*0.5 cm, minimum width=\uone cm, minimum height=\noteH cm, right=0 cm of bw3Next] (ud3Next) {};
+
+            \node[minimum width=\uone cm, minimum height=\noteH cm, above=-0.2 cm of ud3Next] (ud3textNext) {$U_1$};
+
+            \node[draw, fill=fwcolor, rounded corners, minimum width=\fone cm+\ftwo cm+\fthr cm, minimum height=\noteH cm, right=0 cm of ud3Next] (fwNext2) {$F$};
+
+            \node[draw, fill=cmcolor, rounded corners, minimum width=\cone cm, minimum height=\noteH cm, anchor=west] (cm1Next) at (2*\fone cm+2*\ftwo cm+2*\fthr cm+4*\bone cm +4*\uone cm,-\threadGap) {$C_3$};
+
+            \node[draw, fill=cmcolor, rounded corners, minimum width=\cone cm, minimum height=\noteH cm, right=0 of cm1Next] (cm2Next) {$C_2$};
+
+            \node[draw, fill=cmcolor, rounded corners, minimum width=\cone cm, minimum height=\noteH cm, right=0 of cm2Next] (cm3Next) {$C_1$};
+            
+            \draw[->] (ud1.south) -- (cm1.north);
+            \draw[->] (ud2.south) -- (cm2.north);
+            \draw[->] (ud3.south) -- (cm3.north);
+
+            \draw[->] (cm1.north) -- (ud1Next.south);
+            \draw[->] (cm2.north) -- (ud2Next.south);
+            \draw[->] (cm3.north) -- (ud3Next.south);
+
+            \draw[->] (ud1Next.south) -- (cm1Next.north);
+            \draw[->] (ud2Next.south) -- (cm2Next.north);
+            \draw[->] (ud3Next.south) -- (cm3Next.north);
+        \end{scope}
+
+
+        
+        
+    \end{tikzpicture}
+    \end{adjustbox}
+    \caption{\small Timelines and dependency relations of decentralized training. $F$: forward pass, $B$: backward pass, $C$: decentralized communication/aggregation of model parameters with other workers, $U$: update model parameters. An arrow from task $X$ to $Y$ means that task $Y$ can start only after $X$ finishes.}
+    \label{fig:three_timelines}
+\end{figure}
+
+Modern accelerators like Nvidia GPUs are capable of interleaving communications with computations. After deciding which training scheme to use, hiding communication by computation is one of the key optimizations in the design of an efficient distributed training system. For the decentralized implementation of (\ref{eqn:dsgd}), a general idea of achieving it is to restrict the search direction $d_i$ to only depend on the local model. While for DNN training, we can take this idea further.
+
+Inspired by the gradient bucketing technique used in data-parallel training in PyTorch \citep{li2020pytorch}, we divide both gradients and models into buckets corresponding to specific layers or groups of layers. Due to the sequential nature of backpropagation, we can begin communicating the gradients of earlier finished layers while the gradients of later layers are still being computed. As illustrated in Figure~\ref{fig:three_timelines}, we split the execution of the backward pass into buckets and interleave the corresponding local model updates. After updating a bucket, the corresponding communication can be initiated, and its results are not needed by the worker and its neighbors until the same bucket requires updating in the next iteration. This significant overlap is possible because we have made the decentralized update independent of neighbor information within the same iteration. All-Reduce is also considered in our experiments for comparison.}, which aggregates gradients instead of models, communication cannot overlap with the forward pass and the backward pass of the last bucket. This is because the forward pass needs the complete aggregation of gradients from the last iteration, and no gradient is available before the backward pass of the last bucket. This indicates that decentralized training, using the scheme described in~\eqref{eqn:dsgd}, can utilize simultaneous computational resources more efficiently.
+
+
+Making the update direction calculation independent of the local models at other workers in the same iteration is essential for overlapping computations and communications. Updates on the form
+
+
+\subsection{Respecting heterogeneous communication costs}\label{sec:heter_comm}
+
+A key advantage of well-designed decentralized training over All-Reduce training is the reduced communication cost due to the sparsity of gossip communication. Unlike All-Reduce, where all workers must participate in each iteration, decentralized training allows workers to communicate only with their immediate neighbors. A drawback with gossiping is that it only provides an approximate average that converges asymptotically to the true global average. Several studies have characterized how the convergence rate of gossiping, affecting both iteration complexity and generalization performance in decentralized training, is influenced by the communication topology~\citep{xiao2004fast, shi2015finite, nedic2018network, ying2021exponential, takezawa2024beyond}. In practical cluster environments, latency and bandwidth can vary significantly between nodes. While communication between GPUs within a single compute node is very fast, communication between nodes is slower and subject to congestion at switches and other network interfaces. Thus, when designing a communication topology for decentralized training in such environments, it is crucial to consider both the degree of connectivity, which affects the speed of information propagation, and the heterogeneity of networking connections, which impacts the execution time of each communication round.
+\begin{table}
+\centering
+\begin{tabular}{ccccc}
+\toprule
+Setups \textbackslash\ Topology & Complete  & One-peer Exp. & One-peer Ring & Alternating Exp Ring \\
+\midrule
+4$\times$4$\times$A100, 100Gbps & 55.31 s & 55.44 s & 32.97 s & \textbf{29.55} s \\
+\midrule
+4$\times$4$\times$A40, 25Gbps & 395.99 s & 429.47 s & 217.90 s & \textbf{185.93} s \\
+\bottomrule
+\end{tabular}
+\caption{Communication time of performing averaging operations for 8196 iterations over three 25MB FP32 tensors (selection of 25MB is based on the default bucket size used in PyTorch DDP \citep{li2020pytorch}). \textbf{Setup 1}: 16 A100 GPUs on 4 nodes inter-connected by 100Gbps Infiniband. \textbf{Setup 2}: 16 A40 GPUs on 4 nodes inter-connected by 25Gbps Ethernet. Here, Complete means global averaging.
+}\label{tab:comm_cost}
+\end{table}
+
+\begin{wrapfigure}{R}{0.40\textwidth}
+\centering
+\includegraphics[width=0.40\textwidth]{figures/svg/exp-ring.pdf}
+\caption{Comparison of consensus errors by communication rounds with four 4-GPU nodes.}
+\label{fig:node-based-ring-vs-ring}
+\end{wrapfigure}
+To demonstrate the practical impact of topology and heterogeneous connections on communication time, we set up an experiment with two scenarios: four nodes, each equipped with four Nvidia GPUs, are interconnected by either 25Gbps Ethernet or 100Gbps Infiniband, Table \ref{tab:comm_cost} shows the communication time of performing averaging operations with different communication topologies. Even though the One-peer Exponential topology enjoys rapid convergence of consensus errors in terms of iterations, it requires more time than the Complete topology in this setup due to frequent inter-node communication. The {One-peer Ring topology} nearly halves the per-iteration communication time compared to the {Complete} topology. However, it exhibits a slower convergence rate of consensus errors than both the Complete and the One-peer Exponential topology in terms of communication rounds, which could potentially influence the theoretical generalization guarantees. However, experiments in~\citep{kong2021consensus} have shown that as long as the consensus error is below a certain value, it does not negatively affect performance. We have observed the same phenomenon in our practical deployments.
+
+Unlike other implementations of decentralized training, such as those described in \citet{assran2019stochastic,lin2021quasi,ying2021exponential} which perform decentralized communication on the node level, we do not synchronize gradients within nodes. This implementation choice can provide  significant resilience to variations in computation time, which will be discussed in \S~\ref{sec:comp_var}. 
+ The last column in Table \ref{tab:comm_cost} and the comparison in Figure \ref{fig:node-based-ring-vs-ring} demonstrate that the proposed topology offers advantages in both communication time and convergence rate. Additionally, our numerical experiments in Section \ref{sec:numerical_exp} demonstrate that it is able to strike a favourable balance between the connectivity of communication topologies and per-iteration runtime while maintaining comparable test accuracy.
+
+It is important to note that the effectiveness of a specific topology may vary depending on the operational environment. By quantifying the communication costs associated with different connections and the congestion caused by concurrent communications, one can formulate an optimization problem that targets both the convergence rate and average runtime as objectives. We leave this as future work. 
+\subsection{Reducing the sensitivity to varying computation times}\label{sec:comp_var}
+
+The timeline in Figure~\ref{fig:three_timelines} shows a single worker and assumes that all other workers run their corresponding tasks in perfect synchrony. This is certainly not realistic. Even in homogeneous HPC environments, variable computation times appear due to system noise~\citep{hoefler2010characterizing} and workload imbalance~\citep{ott2019fairseq}. Figure~\ref{fig:comp_variance} shows the distribution of actual gradient computation times for two different tasks. For image classification with ResNet-50~\citep{he2016deep}, even though all mini-batches are of identical size, the variance still exceeds $0.001$. For neural machine translation, the variance is much higher since mini-batches vary in size even if we batch together sequences with similar lengths \citep{vaswani2017attention, ott2019fairseq}.
+
+In All-Reduce training, workers have to wait for the slowest one, which makes the approach sensitive to workload variability. If the computation times of workers would be i.i.d. and follow a normal distribution, the expected value of the maximum of the $N$ computation times is asymptotically $\Theta(\sqrt{\log N})$ \citep{giladi2024dropcompute}. Hence, we can expect it to be less efficient as $N$ increases. Simulations of the runtimes of All-Reduce and decentralized training, shown in Figure~\ref{fig:runtime_model_validation}, confirm these predictions. The runtime for All-Reduce increases with $N$, while the runtime for decentralized training remains essentially constant. 
+This suggests that decentralized training could achieve better strong scaling efficiency (fixed global batch size). 
+
+ However, this design becomes suboptimal in terms of runtime when the variance in computation time is non-negligible, since gradient synchronization is susceptible to intra-node stragglers. To better leverage the resilience of decentralized training to variations in computation time, we decouple the dependency of the local update on the gradient information of its neighbors within the same iteration. To demonstrate the benefits of the new design, we perform transformer experiments under heavy computation workloads (2$\times$4$\times$A100 and 100K tokens as global batch size) and fast network connections (NVLink within the node and 100Gbps Infiniband inter-connecting nodes) to make sure the network is not the bottleneck. The results show that removing the dependency decreases the per-iteration runtime by $10.95\%$ (from 225.09 ms to 200.43 ms). For more comparisons, see \S~\ref{sec:per-iter-runtime-scale}.
+\begin{figure}[thpb]
+\centering
+\begin{minipage}[c]{0.47\textwidth}
+\includegraphics[width=\textwidth]{figures/svg/compute_time_variance.pdf}
+\caption{\small Distributions of normalized computation times of ResNet-50 training for an image classification task and of transformer training for neural machine translation. The variances of the normalized computation time for the image task and the translation task are 0.0017 and 0.0134, respectively.}\label{fig:comp_variance}
+\end{minipage}
+\hfill
+\begin{minipage}[c]{0.47\textwidth}
+\includegraphics[width=\textwidth]{figures/svg/runtime_model_vs_actual_runtime.pdf}
+\caption{\small Comparison of the predicted runtime by runtime model and the actual runtime for translation task based on transformer model.
+The lines are predicted runtime based on the runtime model with scaling to the real runtime in milliseconds. The scatters are the measured runtime.
+}\label{fig:runtime_model_validation}
+\end{minipage}
+\end{figure}
+
+
+
+\section{Runtime model and design insight}
+
+
+In this section, we propose a runtime model that characterizes how the per-iteration runtime depends on critical system parameters and workload characteristics. 
+
+The model considers neural network training in an environment with $N$ workers and assumes that the model parameters are organized into $b$ buckets. It uses the time that a single worker needs to process the forward pass with the global batch size as unit time. In this way, the forward pass of one worker takes $1/N$ time units while the backward pass is assumed to take $2/N$ time units.  The time to update a bucket is $\theta$ time units. To characterize the system and the training workload, we introduce three additional parameters: (1) $\gamma\in(0,\infty)$ is the time taken for a global All-Reduce on one bucket; this parameter is large in systems with slow communication or many workers, (2) $\omega\in(0,1]$ is the ratio of the time taken by a decentralized communication round and a global All-Reduce. A small $\omega$ means a sparse decentralized communication topology, and (3) $\sigma^2$ is the variance of a truncated normal distribution that models the varying computation time. A large $\sigma^2$ means the computation time taken by the forward pass and backward pass may vary significantly. Based on the workload measurements in Figure \ref{fig:comp_variance}, we restrict the computation time between 0.5x and 1.5x of its average value.
+
+} In brief, it simulates randomly varying forward and backward pass calculation times and respects the dependency relationships between communication and update tasks described in Figure \ref{fig:three_timelines} and Figure \ref{fig:variance_timelines}.
+
+\begin{figure}[thpb]
+\centering
+\includegraphics[width=\textwidth]{figures/svg/analysis_plot.pdf}
+\caption[]{\small Simulation by the runtime model. In the simulation, $N=8$ (8 workers), $b=4$ (4 buckets, from ResNet-50 experiments), $\theta=0.2$ (time taken by updating one bucket is 0.2 unit time), and the communication topology of decentralized training is complete topology\footnotemark.}
+\label{fig:runtime_model}
+\end{figure}
+\footnotetext{Here, our decentralized algorithm with a complete topology means \( x_i^{\scriptscriptstyle ( t)} = -\alpha^{\scriptscriptstyle ( t)} d_i^{\scriptscriptstyle ( t)} +\sum_{j\in[N]} w_{ij} x_j^{\scriptscriptstyle ( t-1)}\) where $w_{ij}=1/N, \forall i,j$.}
+
+Figure \ref{fig:runtime_model} shows some representative results generated by the runtime model. The leftmost figure illustrates how the per-iteration runtime of All-Reduce and decentralized training depends on $\gamma$  when $\omega=1$ and $\sigma^2=0$. For decentralized training, the communication time can be completely hidden by the corresponding forward, backward, and bucket update times, as long as the network is fast enough $(\gamma\leq (3+\theta)/N)$. After this point, the per-iteration time increases as $\Theta(b\gamma)$. In All-Reduce training, on the other hand, the last bucket can never be hidden and the per-iteration time increases also for small values of $\gamma$. More importantly, since the All-Reduce time of buckets can only be hidden by the corresponding backward pass, the more rapid increase in runtime starts already at $\gamma=2/N$. 
+
+Figure~\ref{fig:runtime_model} (middle) shows the relative speedup of decentralized training over All-Reduce as a function of $\omega$ for different values of $\gamma N$. For $\omega=1$ and a fixed value of $\gamma N$, the speedup is just the ratio of the two curves shown in the leftmost figure. Decreasing $\omega$ reduces the time for a bucket communication in the decentralized setting, which effectively moves us to the left along the decentralized runtime graph. This leads to increasing speed-ups until $\omega\gamma= (3+\theta)/N$, after which no runtime improvements are obtained by decreasing $\omega$ further. This explains why no effect of $\omega$ is seen when $\gamma N\leq (3+\theta)$, and the speed-ups saturate below $\omega=(3+\theta)/\gamma N$. The model can also be used to estimate the best possible speedup. Specifically, when $\sigma^2=0$, we find
+
+\begin{equation}\label{eq:speedup}
+\text{best possible speedup}(\gamma)=\left\{
+\begin{array}{cc}
+1 + \frac{1}{b}\cdot\frac{N\gamma}{3+\theta N} & \gamma\in(0,2/N], \\
+1 + \frac{N\gamma-2 +2/b}{3+\theta N} & \gamma\in(2/N, \infty). \\
+\end{array}
+\right.
+\end{equation}
+As $N$ grows large, the second case suggests that the speedup tends towards $1+\gamma/\theta$. Since $\gamma$ increases with $N$, the model suggests that the speedups will increase in larger networks.
+
+Figure \ref{fig:runtime_model} (right) shows the resilience of the computation time variance of decentralized training. The three combinations of $\gamma$ and $\omega$ represent the scenarios that (a) computation-bound ($\gamma=1/N$, $\omega=1$) (b) communication-bound ($\gamma=4/N$, $\omega=1$) (c) communication-bound and using a decentralized communication topology ($\gamma=4/N$, $\omega=0.6$). In the three scenarios, increasing $\sigma^2$ brings moderate improvement in the speedup of decentralized training.
+
+In Figure~\ref{fig:runtime_model_validation}, we validate the accuracy of the runtime model by comparing the predictions with the actual runtime as $\gamma$ increases. The parameters $b=7$, $N=32$, $\theta=0.364$, $\sigma^2=6.95\times 10^{-3}$ measured from the profiling results are used for the predictions, and we manipulate the global batch size to mimic different values of $\gamma$. Given its simplicity, the model is surprisingly accurate.
+
+
+\section{Decentralized Adam and convergence}
+
+
+The per-iteration runtime that we have just studied is only part of the story. Equally important is the ability of the decentralized optimization algorithm to converge quickly and reliably toward a solution with good generalization properties. This section introduces a decentralized Adam algorithm (DAdam, described in Algorithm \ref{alg:decentadam}) that enables overlapping communications and computations and proves its convergence.
+\begin{algorithm}[H]
+\caption{Decentralized Adam on worker $i$}\label{alg:decentadam}
+\begin{algorithmic}[1]
+\State $m_{i}^{(0)}, v_{i}^{(0)} \gets 0$; $x_{i}^{(0)} \gets x^{(0)}$
+\For{$t=1,2,\dots,T$}
+\State $g_i^{(t)}\gets \nabla \ell\big(x_i^{(t-1)};\xi_i^{(t)}\big)$
+\State $m_i^{(t)} \gets \beta_1 m_i^{(t-1)} + (1-\beta_1) g_i^{(t)} $
+\State $v_i^{(t)} \gets \beta_2 v_i^{(t-1)} + (1-\beta_2) \big[g_i^{(t)}\big]^2 $
+\State $x_i^{(t)} \gets -\alpha \frac{m_i^{(t)}/(1 - \beta_1^{t})}{\sqrt{v_i^{(t)}/(1 - \beta_2^{t})} + \epsilon} + \sum_{j\in \mathcal{N}_i} w_{ij} x_j^{(t-1)}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:decentadam} can be cast into the form of \eqref{eqn:dsgd} with a particular search direction. For simplicity, we use a static topology with mixing matrix $W$, i.e., $W^{(t)}=W$ for all $t$. In every iteration, each worker $i$ first draws a mini-batch from its local data and computes a local stochastic gradient $g_i$. Then, it proceeds similarly to the standard Adam scheme to update the local first- and second-order momentum $m_i$ and $v_i$, respectively. Subsequently, worker $i$ implements the mixing of neighbor models and uses the result to update the local model where $\alpha$ is a step-size and $\epsilon, \beta_1, \beta_2$ are parameters. Note that $m_i$, $v_i$ and the resulting search direction do not depend on models $x_j$ of neighboring workers. Therefore, the algorithm supports overlapping communication and computations as discussed in Section~\ref{sec:overlap}. 
+
+Next, we establish convergence of Algorithm \ref{alg:decentadam}, based on the following Assumptions. 
+\begin{assumption}\label{assump-Lips}
+For each worker $i$, the gradient $\nabla F_i$ is $L$-Lipschitz continuous:
+\[\|\nabla F_i(x) - \nabla F_i(y)\|_2 \leq L\|x - y\|_2,~\forall x,y \in \mathbb{R}^D.\]
+\end{assumption}
+\begin{assumption}\label{assump-R}
+There exists a constant $R\ge \sqrt{\epsilon}$ such that $\|\nabla \ell(x;\xi_i)\|_\infty \leq R - \sqrt{\epsilon}$ almost surely.
+\end{assumption}
+
+\begin{assumption}\label{assump-W}
+The mixing matrix $W = [w_{ij}]$ is symmetric, non-negative,  and doubly stochastic. The eigenvalues of $W$ in order satisfies $1=\lambda_1> \lambda_2 \ge \cdots \ge \lambda_N> -1 $.
+\end{assumption}
+Assumptions \ref{assump-Lips} and \ref{assump-R} are used in \citet{defossez2020simple} to provide a simple analysis for centralized Adam.
+Assumption \ref{assump-W} is standard in decentralized learning and holds when the underlying communication topology is connected.
+Under Assumption \ref{assump-W}, we denote 
+$ \lambda = \max\{|\lambda_2|, |\lambda_N|\} \in [0,1)$.  
+Fix the number of iterations as $T$. We define ${\tau_T}$ as a random index from $\{0,\ldots, T-1\}$ with distribution
+\begin{equation}\label{eq-tau}
+\forall\; \widetilde{t}<T,\gap \mathbb{P}[~ \tau=\widetilde{t} ~]\propto 1-\beta_1^{T-\widetilde{t}},
+\end{equation}
+and denote $F(\bar{x}):=\frac{1}{N} \sum_{i=1}^N F_i(\bar{x})$ where $\bar{x}=\frac{1}{N} \sum_{i=1}^N x_i $. Then, we have the following theorem. 
+\begin{theorem}\label{thm-m}
+Under Assumptions \ref{assump-Lips}--\ref{assump-W}, if $0<\beta_1<\beta_2<1$, for Algorithm \ref{alg:decentadam}, we have
+\begin{equation}
+\E\left[\norm{\nabla F(\bar{x}^{(\tau)})}_2^2\right]\leq \frac{4R}{\alpha\tilde{T}}\left(F(\bar{x}^{(0)}) -F_*\right) + E\left[\frac{1}{\tilde{T}}\ln\left(1+\frac{R}{\epsilon(1-\beta_2)}\right)-\frac{T}{\tilde{T}}\ln(\beta_2)\right],
+\end{equation}
+where $\bar{x}^{(t)}=\frac{1}{N}\sum_{i=1}^{N} x_i^{(t)}$, $\tau$ is defined in \eqref{eq-tau}, $\tilde{T}=T-\frac{\beta_1}{1-\beta_1}$, $F_{*}$ is the optimal value of \eqref{eq-prob-denc},  and
+$E=\frac{24 D R^2\sqrt{1-\beta_1}}{\sqrt{1-\beta_2} (1-\beta_1/\beta_2)^{3/2}}+\frac{2 \alpha DLR(1-\beta_1)}{(1-\beta_2)(1-\beta_1/\beta_2)}
++ \frac{4 \alpha^2 L^2D\beta_1}{(1-\beta_1/\beta_2)(1-\beta_2)^{3/2}}+ \frac{8 \alpha^2 (1+\lambda^2)RL^2D\sqrt{1-\beta_1} }{(1-\lambda^2)^2(1-\beta_2)(1-\beta_1/\beta_2)\sqrt{\epsilon}}$.
+\end{theorem}
+ Compared to \citet[Theorem 4]{defossez2020simple} for the single-machine Adam, the error bound in Theorem \ref{thm-m} only has one additional term -- the last term in $E$ which is proportional to $\alpha^2$ and can be ignored for sufficiently small values of $\alpha$.
+
+
+\section{Numerical  experiments}
+
+In this section, we compare decentralized training with All-Reduce training and assess the generalization performance and practical training-time speedups in cluster environments. We consider three large-scale tasks: neural machine translation, image classification, and GPT-2 pretraining. For neural machine translation, following \citet{vaswani2017attention},
+we trained the transformer ($\sim$65M parameters for base variant and $\sim$213M parameters for big variant) on the English-German and English-French WMT14 dataset \citep{bojar2014findings}.
+In each run, we evaluate the trained model by BLEU \citep{papineni2002bleu} and METEOR \citep{banerjee2005meteor} on the test set. In the image classification task, we trained ResNet-50 \citep{he2016deep} on ImageNet-1K \citep{deng2009imagenet}. In each run, we evaluate the trained model by Top-1 and Top-5 accuracies on the validation set. For the GPT-2 pretraining task, we trained GPT-2 (small) \citep{radford2019language} on OpenWebText \cite{Gokaslan2019OpenWeb}, and we report the training and validation losses of the trained models.
+The baseline, All-Reduce training, uses Adam-based optimizers for all experiments.
+
+
+
+
+\subsection{Generalization performance}
+
+To make decentralized training useful, it should not compromise the generalization performance of the trained model. As shown in Tables  \ref{tab:res_transformer_base} and \ref{tab:res_image_resnet50},  decentralized training can obtain a generalization performance that is comparable with All-Reduce training. In all experiments, 
+AccumAdam outperforms the others, while DAdam and All-Reduce perform similarly.
+
+\noindent\begin{minipage}{\textwidth}
+\centering
+{
+\begin{tblr}{
+  row{even} = {c},
+  row{3} = {c},
+  row{5} = {c},
+  row{7} = {c},
+  cell{1}{3} = {c=2}{c},
+  cell{4}{1} = {r=2}{},
+  cell{6}{1} = {r=2}{},
+  hline{1,8} = {-}{0.08em},
+  hline{2-3} = {-}{},
+  hline{4,6} = {-}{dashed},
+}
+          &          & BLEU $\uparrow$ / METEOR $\uparrow$                          &                                         \\
+Method    & Topology & En-De / Transformer (base)              & En-Fr / Transformer (big)               \\
+AllReduce & Complete & 27.79 ± 0.16 / 0.5465 ± 0.0018          & 45.70 ± 0.30 / 0.6676 ± 0.0017          \\
+DAdam     & AER      & 27.58 ± 0.06 / 0.5440 ± 0.0013          & 45.60 ± 0.12 / 0.6664 ± 0.0014          \\
+          & Complete & 27.60 ± 0.18 / 0.5445 ± 0.0021          & 45.65 ± 0.22 / 0.6670 ± 0.0017          \\
+AccumAdam & AER      & 27.71 ± 0.09 / \textbf{0.5481 ± 0.0027} & 46.05 ± 0.03 / \textbf{0.6715 ± 0.0029} \\
+          & Complete & \textbf{27.80 ± 0.34} / 0.5474 ± 0.0027 & \textbf{46.18 ± 0.20 }/ 0.6704 ± 0.0017 
+\end{tblr}
+}
+\captionof{table}{\textbf{Neural Machine Translation on WMT14 \citep{bojar2014findings}}: The results show the generalization performance of training transformer (base) on English-to-German and transformer (big) on English-to-French. The last checkpoint of each method is evaluated by BLEU score \citep{papineni2002bleu} and METEOR \citep{banerjee2005meteor} the corresponding {newtest2014} testset. The number of workers is 16 and the number of workers per node is 4 for all experiments. The error bands with $\pm2\sigma$ based on 3 runs are reported.}
+\label{tab:res_transformer_base}
+{
+\begin{tabular}{ccc} 
+\toprule
+\multirow{3}{*}{Methods} & \multicolumn{2}{c}{Top-1 Acc. $\uparrow$ / Top-5 Acc. $\uparrow$ / Train Loss $\downarrow$} \\ 
+\cline{2-3}
+                         & Alternating Exp Ring & Complete \\ 
+\midrule
+AllReduce                & \multicolumn{2}{c}{76.01 / 93.05 / 1.864} \\
+DAdam                    & 75.31 / 92.54 / 1.998 & 75.27 / 92.60 / 1.993 \\
+AccumAdam                & \textbf{76.54} / \textbf{93.18} / \textbf{1.836} & \textbf{76.34} / \textbf{93.15} / \textbf{1.835} \\
+\bottomrule
+\end{tabular}
+}
+\captionof{table}{\textbf{Image Classification on ImageNet-1K \citep{deng2009imagenet}}:  The results are show the generalization of training ResNet-50 on ImageNet-1K for image classification. Top-1 and Top-5 accuracies and averaged training loss in the last epoch are reported, and the accuracies are evaluated on the ImageNet validation set. The number of workers is 32 and the number of workers per node is 8 for all experiments.
+}
+\label{tab:res_image_resnet50}
+\end{minipage}
+
+\subsection{Per-iteration Runtime and Scalability}\label{sec:per-iter-runtime-scale}
+
+We will now demonstrate the practicality of decentralized training by showing its superior runtime compared to All-Reduce training in various scenarios, including communication-bound, straggler-bound, and computation-bound cases. 
+For a fair comparison, we report strong scaling performance in Figure \ref{fig:trans-strong-scale}. Other works, such as \citet{assran2019stochastic, wang2019slowmo}, present weak scaling performance which keeps the worker batch size fixed. However, this results in fewer iterations and a larger effective global batch size for the same number of epochs, which alters the training dynamics. 
+
+As shown in Figure \ref{fig:trans-strong-scale}, the results align with the proposed runtime model: (1) a sparse communication topology enables more significant speedups in communication-limited scenarios compared to computation-limited scenarios; (2) decentralized training has better resilience to computation time variance; (3) decentralized training is more efficient than All-Reduce training in all tested scenarios. Additionally, we re-implement 1-OSGP \citep{assran2019stochastic} (the best asynchronous variant of SGP) with the one-peer exponential graph for comparison. Due to the extra intra-node broadcast required to synchronize the parameters, 1-OSGP may experience longer per-iteration runtimes when the intra-node connection is not significantly faster than the inter-node connection (nodes with 8$\times$T4 GPU with 100Gbps InfiniBand connection, for example). Consistent with the analysis in \S~\ref{sec:comp_var}, our implementations outperform 1-OSGP in all setups, especially in computation-bound scenarios. 
+
+To demonstrate the relationship between generalization performance and runtime, we present training curves for an En-De translation task in Figure~\ref{fig:base-16xA40}, showing a $\sim 60\%$ speedup at the same validation loss.
+
+We also conducted experiments on the pre-training of GPT-2 (small) \citep{radford2019language}. Compared to All-Reduce training, decentralized training with AccumAdam and the Alternating Exponential Ring graph achieves better training loss (2.8419 vs. 2.8468), validation loss (2.8561 vs. 2.8626), and runtime (30.41 hours vs. 32.461 hours) after 600k training steps on OpenWebText \citep{Gokaslan2019OpenWeb} using 4$\times$4$\times$A40 GPUs. Even though the workloads are balanced among the workers, it still achieves a relative speedup of 6.31\%. More speedup can be expected by replacing the sequence packing with other batching strategies that may introduce imbalance in workloads.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{figures/svg/transformer_strong_scaling.pdf}
+    \caption{The results show the strong scaling performance (fixed global batch size, 25K tokens) of All-Reduce, SGP \citep{assran2019stochastic} and our implementations by reporting the per-iteration runtime with various numbers of workers and network settings. Here, \texttt{Exp} and \texttt{AER} stand for one-peer exponential graph and alternating exponential ring, respectively.}
+    \label{fig:trans-strong-scale}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \begin{minipage}[c]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{figures/svg/base-16xA40-bleu.pdf}
+    \end{minipage}
+    \begin{minipage}[c]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{figures/svg/base-16xA40-meteor.pdf}
+    \end{minipage}
+    \begin{minipage}[c]{0.32\textwidth}
+        \includegraphics[width=\textwidth]{figures/svg/base-16xA40-valloss.pdf}
+    \end{minipage}
+    \caption{Training a transformer (base) model on the English-to-German translation task on four 4xA40 nodes with 25Gbps Ethernet connections. \texttt{AER} stands for the alternating exponential ring topology. The error bands of $\pm 2\sigma$ are based on three runs. The red dashed line on the left is the baseline (27.3 BLEU score) from \citet{vaswani2017attention}.}
+    \label{fig:base-16xA40}
+\end{figure}
+
+
+
+\section{Conclusions}
+
+This paper has aimed to address practical and sometimes overlooked aspects of decentralized training, to make it superior to All-Reduce in terms of total training time and generalization performance in practical settings. We identified key sources of speed-up in decentralized training of deep neural networks and developed a simple model to optimize per-iteration runtimes. We introduced a decentralized Adam algorithm that supports overlapping communication and computation and proposed an accumulation mechanism to mitigate the high variance that occurs in small local batch sizes. Numerous deployments of our methods in practical environments validated their effectiveness, achieving a faster training speed than standard All-Reduce training without compromising generalization.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\newpage
+
+
+
+

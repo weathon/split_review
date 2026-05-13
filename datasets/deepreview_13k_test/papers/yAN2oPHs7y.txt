@@ -1,0 +1,494 @@
+\title{Neuro-Symbolic Rule Lists}
+
+\begin{abstract}
+
+
+Machine learning models deployed in sensitive areas such as healthcare must be interpretable to ensure accountability and fairness.
+Rule lists (\textbf{if} $\texttt{Age} < 35 \,\land\,  \texttt{Priors}  > 0$ \textbf{then} $\texttt{Recidivism} = \texttt{True}$, \textbf{else if} Next Condition \dots)
+offer full transparency, making them well-suited for high-stakes decisions.
+However, learning such rule lists presents significant challenges.
+Existing methods based on combinatorial optimization require feature pre-discretization and impose restrictions on rule size. 
+Neuro-symbolic methods use more scalable continuous optimization yet place similar pre-discretization constraints and suffer from unstable optimization.
+To address the existing limitations, we introduce \ourmethod, an end-to-end trainable model that unifies discretization, rule learning, and rule order into a 
+single differentiable framework. 
+We formulate a continuous relaxation of the rule list learning problem that converges to a strict rule list through temperature annealing.
+\ourmethod learns both the discretizations of individual features, as well as their combination into conjunctive rules without any pre-processing or restrictions.
+Extensive experiments demonstrate that \ourmethod consistently outperforms both combinatorial and neuro-symbolic methods,
+effectively learning simple and complex rules, as well as their order, across a wide range of datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Machine learning models are increasingly used in high-stakes applications such as healthcare \citep{deo2015machine},
+credit risk evaluation \citep{bhatore2020machine}, and criminal justice \citep{lakkaraju2017learning}, where it 
+is vital that each decision is fair and reasonable.
+Proxy measures such as Shapley values can give the illusion of interpretability, but are highly problematic as they can not faithfully represent a non-additive models 
+decision process \citep{gosiewska2019not}.
+Instead, \cite{rudin2019stop} argues that it is crucial to use inherently interpretable models,
+to create systems with human supervision in the loop \citep{kleinberg2018human}.
+
+For particularly sensitive domains such as stroke prediction or recidivism, so called \emph{Rule Lists} are a popular choice \citep{letham2015interpretable} 
+due to their fully transparent decision making.  
+A rule list predicts based on nested "if-then-else" statements and naturally aligns with the human-decision making process.
+Each rule is active if its conditions are met, e.g.~\ruledesc{\textbf{if} Thalassemia = normal $\land$ Resting bps $< 151$},
+and carries a respective prediction, i.e.~\ruledesc{\textbf{then} $P(\text{Disease})=10\%$}.
+A rule list goes through a set of rules in a fixed order, and makes its prediction using the first applicable rule.
+We show an example rule list for the Heart disease \citep{detrano1989international}  learned with our method in Figure \ref{fig:nested_if_else_structure},
+which is highly accurate and easy to understand.
+
+Inferring rule lists from data is a challenging combinatorial optimization problem, as there are 
+super exponentially many options in the number of features. 
+Existing approaches use greedy heuristics \citep{proencca2020interpretable}, sample 
+based on fixed priors \citep{yang2017scalable} 
+and even attempt to find globally optimal solutions \citep{angelino2018learning} using branch-bound.
+However, they all depend on the pre-discretization of continuous features, which in practice deteriorates their performance.
+That is, features such as \ruledesc{Resting bps} are typically discretized using $2-5$ fixed thresholds. 
+Increasing the granularity of pre-processing leads to a combinatorial explosion of the search space, which creates issues in scalability for exact methods and in accuracy for heuristics.
+Recently, following the paradigm of neuro-symbolic learning, methods based on continuous optimization were proposed
+to solve rule learning problems with gradient descent \citep{wang2021scalable,qiao2021learning}.
+Nevertheless, neural methods too require to pre-discretize of the features.
+Most related is the work by \cite{dierckx2023rl}, who extend neuro-symbolic learning to rule lists by a fixed
+ordering layer such that the neural network resembles a proper rule list.
+However, their inability to adapt rule order or thresholds results in unstable training and often subpar accuracy.
+
+To overcome all limitations of prior works, we propose \ourmethod, a novel method for learning rule lists differentiably and end-to-end.
+That is, we unify the learning of predicates, their assembly into rules, and the final order of the rule list into a single architecture.
+Instead of relying on pre-discretized features, \ourmethod learns the discretization of the features as well as which features to
+aggregate to conjunctive rules.
+We employ soft approximations of threshold functions (predicates) and combine them using a novel differentiable logical conjunction,
+which alleviates vanishing gradients issues of previous work.
+Finally, we introduce a learnable rule priority that is grounded into a strict ordering at the end of training.
+Altogether, this gives us a holistic differentiable relaxation of rule lists, which can be learned end-to-end.
+Empirically, we show that \ourmethod
+outperforms the state-of-the-art on a plethora of datasets, especially where exact thresholding is required. 
+\input{texfigs/intro_rulelist.tex}
+
+
+\section{Preliminaries}
+
+
+We consider a dataset of $\nsamples$ pairs $\{(\featvec,\targ)\}_{i=1}^{\nsamples}$ consisting of 
+the \emph{descriptive feature vector} $\featvec\in\featdomain$ with $\nfeat$ real-valued features $\feat_i \in \R$,  and the discrete-valued \emph{target label} $y\in\targdomain$. 
+We assume each sample $(\featvec,\targ)$ to be a realization of a pair of random variables $(X, Y)\sim P_{X, Y}$, drawn iid.
+
+\subsection{Rules}
+We consider predictive rules $\rulef:\featdomain\to\targdomain$ for supervised classification, which map input samples to predictions.
+A rule is comprised of an \emph{antecedent} $\rulehead:\featdomain \to \{0,1\}$, which determines 
+whether the rule is applicable to a sample $\featvec$ or not.
+Should the antecedent's condition be met, the \emph{consequent} $\ruletail \in \targdomain$
+governs the models prediction.
+A predictive rule is defined as
+\begin{equation}\rulef(x) = \begin{cases}
+    &\ruletail \quad \text{if } \rulehead(x) = 1\\
+    &\bar{\ruletail} \quad\text{else}
+\end{cases}
+\end{equation}
+If the antecedent is not met, an alternate prediction $\bar{\ruletail}\in \targdomain$ is made.
+In rule lists, which are introduced shortly, the \emph{else} case is covered by yet another rule.
+
+The antecedent of a rule must be interpretable. In particular, we examine rules given in form of a \emph{logical conjunction}
+of predicates $\pred$, e.g.~the rule \ruledesc{\textbf{\textrm{if}} Thalassemia = normal $\land$ Resting bps $< 151$} from the introduction.
+Each predicate $\pred_i$ represents the presence/absence of a certain characteristic in an individual $\featvec$, e.g~\ruledesc{Resting bps $< 151$}.
+For tabular data, where $\featdomain = \R^{\nfeat}$, clear and meaningful semantic concepts are usually defined as \emph{parameterized thresholding} functions
+on individual feature variable $X_i$, i.e. 
+
+\begin{equation}
+    \pred\left(\feat_i;\lowerbound,\upperbound\right) = \lowerbound \leq \feat_i \leq \upperbound\;.
+\end{equation}
+
+As we are considering only rules based on logical conjunctions, the conjunction of multiple predicates on the same feature can always be represented by 
+a single set of thresholds.
+If no condition is placed on a feature $x_i$, then the corresponding thresholds are given by $- \infty$ and $\infty$ resp.
+This allows us to define the class of antecedent $\rulehead$ rule functions as a logical conjunction of predicates as per 
+
+\begin{equation}
+    \rulehead(\featvec;\ruleparams) = \bigwedge_{i=1}^{\nfeat} \pred\left(\feat_i;\lowerbound_i,\upperbound_i\right)\;,
+\end{equation}
+
+parameterized by $\ruleparams \in \R^{2*\nfeat}$.
+Hence, rule-based methods aggregate multiple rules into a performant classifier that is easily human interpretable.
+
+\textbf{Rule lists} \citep{cohen1995fast} model nested if-then-else classifiers. To make a prediction, we % 
+traverse the set of rules in a fixed order and use the consequent of the first rule, whose antecedent applies.
+Given a set of $\nrules$ rules tuples $(\rulehead_j, \ruletail_j)$,
+each rule is assigned its \emph{unique} priority $\priority_j \in \mathbb{N}$.
+To classify a sample $\featvec$ with a rule list, that rule $\rulef_j$ with the highest priority is used whose 
+antecedent holds, i.e.
+\begin{align}
+    &\rlist(\featvec;\Theta,\priorityvec) = \ruletail_j \\
+    \;\text{s.t.}\; &\rulehead_j(\featvec;\ruleparams_j)=1 \;\land\; \forall i \neq j: \rulehead_i(\featvec)=0 \lor \priority_j > \priority_i \;.
+    \label{eq:base_rulelist}
+\end{align}
+Informally, a rule list is as a nested if-then-else structure, as commonly used in programming.
+
+
+\section{Differentiable Rule Lists}
+
+\input{texfigs/architecture.tex}
+In this section we introduce \textbf{Neu}ro-Symbolic \textbf{Rule} List\textbf{s}, or short \ourmethod.
+We show the architecture of \ourmethod in Figure \ref{fig:architecture}.
+The first step is to transform the continuous input features into binary \textbf{\color{blue!50}{predicates}} such as \ruledesc{$18<$\texttt{Age}$<30$} to
+use as a basic building blocks
+for rule construction. 
+In contrast to all existing methods, \ourmethod avoids the need for pre-discretization and instead learns a task specific thresholding of the features.
+
+Next, we combine the learned predicates into \textbf{\color{red!60}{rules}} $\softrule_j(\featvec)$, where $\softrule$ is a differentiable function that
+behaves like a logical conjunction for binary predicates, but is also able to handle soft predicates $\softpred \in [0,1]$.
+In particular, our formulation encourages interpretable, succinct rules using weights $\andweightvec_j$ and alleviates the problem
+of vanishing gradients compared to previous formulations.
+
+Finally, we aggregate a set of $\nrules$ rules into a \textbf{\color{green!35}{rule list}} rule list as introduced in Eq.~\eqref{eq:base_rulelist}.
+$\indicator_j(\featvec)$ indicates if rule $j$ is to be used for the prediction, i.e.~whether it is active ($\softrule(\featvec)=1$) and has the highest priority $p_j$.
+We use the \textbf{\color{gray}{Gumbel-Softmax}}  function \cite{jang2016categorical}  to approximate this indicator and formulate a differentiable relaxation
+for the entire rule list that allows us to
+jointly optimize a rule list from discretization parameters to rule order.
+All our approximations converge towards strict logical operators at the end of training, i.e. \ourmethod converges to a crisp rule list. 
+
+\subsection{Conjunctive Rules}
+We begin with the antecedent $\rulehead$ of a rule that makes up the \ruledesc{\textbf{\textrm{if}} $\dots$} condition of a rule.
+
+\paragraph{Thresholding Layer.}
+As the building blocks of every rule we consider thresholding functions $\pi(x_i;\lowerbound,\upperbound) = \lowerbound \leq x_i \leq \upperbound$ on
+individual features $x_i$ as predicates $\pred$.
+It is common practice, to employ equal-width/-frequency binning for continuous features $X_i$ and thus 
+obtain a fixed number of predicates.
+By increasing the number of bins, the potential solution may become more accurate, but also comes at a 
+much higher optimization difficulty.
+
+Neural rule learning methods also require to pre-discretize continuous features.
+since the thresholding function is not continous at the bounds $\lowerbound$ and $\upperbound$, 
+and has gradient of $0$ elsewhere.
+To address these issues, we use the soft binning function as introduced by \cite{yang2018deep} as
+\begin{equation}
+  \softpred(x_i;\lowerbound,\upperbound,\temppred) = \frac{e^{\frac{1}{\temppred} (2x_i - \lowerbound_i)}}{e^{\frac{1}{\temppred}x_i} + e^{\frac{1}{\temppred}(2 x_i - \lowerbound_i)} + e^{\frac{1}{\temppred} (3 x_i - \lowerbound_i - \upperbound_i)}}\;.
+\end{equation}
+The resulting function approximates a thresholding function, where the softness of said function is controlled by a 
+temperature parameter $\temppred$.
+We show $\softpred$ using different temperatures $\temppred$ in Figure \ref{fig:soft-binning}.
+Just as the Figure suggests, in the limit $\temppred \to 0$ the soft predicate converges to the 
+e.
+\begin{equation}
+  \lim_{\temppred \to 0} \softpred(x_i;\lowerbound,\upperbound,\temppred) = \pi(x_i;\lowerbound,\upperbound)\;.
+\end{equation}
+Therefore, we use  temperature annealing to increase crispness of  the predicates $\lowerbound$
+and $\upperbound$ as the training progresses.
+We begin start with a higher temperature $\temppred$, which results in smoother predicates $\softpred$ and avoids exploding/vanishing
+gradients with respect to $\lowerbound, \upperbound$.
+That means that initially, our predicates are not strictly binary but soft instead, i.e.~$\softpred(x_i) \in [0,1]$.
+
+In the end, we seek to obtain strict logical rules for use in a rule list.
+Hence, we continuously decrease the temperature $\temppred$ so that in the end $\forall x_i: \softpred(x_i) \approx 1 \lor \softpred(x_i) \approx 0$,
+except at the boundaries itself, where if $x_i=\alpha \lor x_i = \beta: \softpred(x_i)=\frac{1}{2}$.
+We show the softness of rules based on soft predicates in Figure \ref{fig:soft-binning}.
+When the temperature is annealed close to zero, the predicates become increasingly binary and the difference to the true thresholding function vanishes. 
+
+\input{texfigs/boxfig.tex}
+\paragraph{Logical conjunction.}
+To learn rule antecedents, we need to flexibly combine the trainable predicates $\softpred(x_i)$ into a logical conjunction.
+To this end, we introduce a differentiable logical conjunction function $\softrule$ specifically designed for soft predicates. 
+We omit from the notation $\lowerbound, \upperbound$ and $\temppred$ for brevity.
+We require the logical conjunction to satisfy three conditions:
+\begin{equation}
+  \softrule(\predvec)=\begin{cases}
+      & 1 \text{, if }\forall \pred(x_i) = 1\\
+      & 0 \text{, if }\exists \pred(x_i) = 0\\
+      & \in [0,1] \text{ else.}
+  \end{cases}
+\end{equation}
+We base our approach on the \emph{reciprocal} of the predicate $\softpred(x)^{-1}$, aggregated 
+by the weighted harmonic mean proposed by \cite{xu:24:syflow}, which is given by
+\begin{equation}
+  \softrule(\featvec) = \frac{\sum_{i=1}^{\nfeat}\andweight_i}{\sum_{i=1}^{\nfeat}\andweight_i \softpred(x_i)^{-1}}\;.
+  \label{eq:basic-and}
+\end{equation}
+This function fulfills all the outlined criteria: if $\forall \softpred(x_i)=1$, the function evaluates to $1$, while
+if $\exists \softpred(x_i)=0 \rightarrow \softrule(\featvec)=0$.
+Additionally, by setting the corresponding weight of a predicate $\andweight_i$ to 0, the network can disable predicates and thus obtain 
+more succinct rules.
+Its main drawback is the issue of vanishing gradients in the case of $\softpred(x_i)=0$.
+
+The partial derivatives of the rule function $\softrule$ with respect to its parameters are given by 
+\begin{equation}
+  \frac{\partial \softrule(\featvec)}{\partial \softpred(x_j)} = 
+  \frac{\andweight_j \left(\sum_{i=1}^{\nfeat}\andweight_i\right)}{\softpred(x_j)^2\left(\sum_{i=1}^{\nfeat}\andweight_i \softpred(x_i)^{-1}\right)^2}\;,\quad
+  \frac{\partial \softrule(\featvec)}{\partial \andweight_j} = \frac{\sum_{i=1}^{\nfeat}\andweight_i (\softpred(x_i)^{-1} - \softpred(x_j)^{-1})}{(\sum_{i=1}^{\nfeat}\andweight_i \softpred(x_i)^{-1})^2}\;. 
+\end{equation}
+Consider the case where there is a predicate $\softpred(x_l)=0$ with $\andweight_l > 0$.
+Then the partial derivative of all other predicates $\softpred(x_j)$ is zero, as the reciprocal $\softpred(x_l)^{-1}$ is in the denominator and 
+$\lim_{x_l \to 0} \softpred(x_l)^{-1} = \infty$.
+Similar, with respect to the weights $\andweight_i$, the derivative is zero, as the squared reciprocal in the denominator dominates the term.
+This is a significant issue, as with increasingly crisp predicates $\softpred(x_i)\to 0$, the gradient vanishes if the rule has an inactive 
+predicate.
+
+We solve this issue by relaxing the requirements of the soft conjunction.
+That is, we allow a slack of $\epsilon$ when $\exists \softpred(x_i)=0$. 
+Hence, we do not require the conjunction to take a value of zero but only $\softrule(\featvec)\leq \epsilon$ instead.
+To this end, we modify the reciprocal and resulting logical conjunction using a weight dependent constant $\eta$ as
+\begin{gather}
+  \eta = \frac{\epsilon}{\sum_{i=1}^{\nfeat}\andweight_i}\;,\quad% \softpred(x)^{-1}\approx \frac{1+\eta}{\softpred(x)+\eta}
+  \softrule(\featvec) = \frac{\sum_{i=1}^{\nfeat}\andweight_i}{\sum_{i=1}^{\nfeat}\andweight_i \frac{1+\eta}{\softpred(x_i)+\eta}}\;.
+\end{gather}
+With this relaxed formulation, we now obtain gradients that do not vanish once a predicate is inactive.
+
+$\frac{\partial \softrule(\featvec)}{\partial \softpred(x_j)} \approx \frac{\andweight_j}{\sum_{i=1}^{\nfeat}\andweight_i}$  are still non-zero,
+whereas the $\frac{\partial \softrule(\featvec)}{\partial \andweight_j}>0$ if there is at least one active predicate $\softpred(x_i)>0$ with $\andweight_i > 0$.
+That is, the gradient does not vanish anymore if a rule contains an inactive predicate. Intuitively, the weight-dependent constant $\eta$
+automatically adjusts the amount of slack such that when the rule is mostly inactive, % mostly inactive is bad wording, should be improved
+i.e. most $w_i$ are small, the slack is increased and the gradient flow in
+this rule increases. While if a rule is mostly active, the slack is decreased and the gradient is not influenced by $\eta$.
+We perform an ablation in Section \ref{sec:ablation}, where we observe that using the relaxed conjunction instead of its unbounded counterpart 
+$\softrule(\featvec)\leq \epsilon$ improves the average $F_1$ score by $\mathbf{1.7}$x  and in some cases even by $4$x.
+
+\paragraph{Differentiable Rule.}
+With the predicates and the logical conjunction in place, the rule antecedent 
+\begin{equation}
+  \lim_{\temppred\to 0} \softrule(\featvec) = \begin{cases} 1 & \text{ if }\forall i: \andweight_i = 0 \lor \softpred(x_i) = 1\\
+    0 & \text{else}
+  \end{cases}
+\end{equation}
+can be flexibly learned.
+As the rule consequent, which is the \ruledesc{then $\dots$} part of a rule, we use a logit vector $\ruletail \in \R^{\nclasses}$ in the classification setting with $\nclasses$ classes.
+A singular rule is then defined as
+\begin{equation}
+  \text{if }\softrule(\featvec)=1 \text{ then } \arg \max_{l} \ruletail\;, \text{ else } \text{\dots}\;.
+\end{equation}
+The \ruledesc{\textbf{\textrm{else}}} case in a rule list is handled by a subsequent rule, the mechanism of which we will discuss in the following section.
+
+\subsection{Soft Rule Lists}
+A rule list consists of a set of $\nrules$ rule tuples $\left\{(\rulehead_j, \ruletail_j, \priority_j)\right\}_{j=1}^{\nrules}$, made up of
+an antecedent $\rulehead_j:\featdomain \to \{0,1\}$, a consequent $\ruletail_j \in \R^{\nclasses}$ and a unique priority $\priority_j \in \R^+$.
+A sample is classified using the prediction of the rule with highest priority and active antecedent, i.e.
+\begin{align}
+  &\rlist(\featvec) = \ruletail_j \\
+  \;\text{s.t.}\; &\rulehead_j(\featvec)=1 \;\land\; \forall i \neq j: \rulehead_i(\featvec)=0 \lor \priority_j > \priority_i \;.
+  \label{eq:base_rulelist}
+\end{align}
+To allow for continuous optimization, we reformulate the $\rlist(\featvec)$ as a linear combination of consequents $\ruletail_j$.
+That is, we combine the antecedent $\rulehead_j$ and priority $\priority_j$ into the \emph{active priority} $\ruleweight_j^p$ as
+\begin{equation}
+  \ruleweight_j^p(\featvec) = \rulehead_j(\featvec) \cdot \priority_j\;.
+\end{equation}
+The arg max indicator $\indicator_j(\featvec) = [j = \arg \max \ruleweightvec^p(\featvec)]$ of the active priority vector $\ruleweightvec^p$ indicates
+with which rule the prediction is to be made.
+Hence, we can re-write the rule list simply as
+$ \rlist(\featvec) = \sum_{j=1}^{\nrules} \indicator_j(\featvec) \ruletail_j$.
+The main difference between a boosted rule set and a rule list is the constraint that only one rule can be active per sample, which is the arg max of the active priority.
+Rule sets are more flexible but also less interpretable as $2^{\nrules}$ combinations of rules have to be interpreted.
+\paragraph{Continuous Relaxation.}
+To learn a rule list, we initially relax the constraint to $\sum_{j=1}^{\nrules} \hat{\indicator}_j(\featvec) = 1$ and hence allow multiple rules to contribute, weighted by their active priority $\ruleweight^p_j$.
+To this end, we use the \emph{Gumbel-Softmax} \citep{jang:17:gumbel}, which is a variant of the reparameterization trick and provides a differentiable approximation to the argmax function.
+Given the active priority $\ruleweightvec^p$ and a temperature $\temprl$, the Gumbel-Softmax is defined as
+\begin{equation}
+  \hat{\indicator}_j(\featvec;\temprl) = \text{softmax}\left(\frac{\ruleweightvec^p+\fvec{g}}{\temprl}\right)\;,
+\end{equation}
+where $\fvec{g} \in \R^{\nrules}$ is random noise sampled from the Gumbel distribution.
+The Gumbel-Softmax approach interpolates between the strict one-hot encoding of a rule list and a linear combination weighted by the rule priorities.
+In particular, in the limit $\temprl \to 0$, the Gumbel-Softmax converges to the arg max function.
+Thus, the soft rule list is given by
+\begin{equation}
+  \softrulelist(\featvec) = \sum_{j=1}^{\nrules} \ruletail_j \cdot \hat{\indicator}_j(\featvec)\;.
+\end{equation}
+\input{texfigs/temperature_figs.tex}
+We plot the impact of the relaxation with regard to different temperatures $\temppred$ in Figure \ref{fig:temprl}.
+We start training with a positive temperature $\temprl = 0.5$, where the rule with highest active priority has on average $0.75$ of the weight, whilst the other rules contribute the remaining $0.25$.
+We continuously decrease the temperature $\temprl$ towards zero, so that in the end the indicator $\hat{\indicator}_j$ of the actual rule dominates
+with a weight of $0.99$.
+With an appropriate annealing schedule \ourmethod starts training using a relaxed rule list, which it can optimize, and 
+continuously moves towards a strict rule list.
+
+\subsection{Entire Architecture}
+Our model takes as input any real-valued feature vector $\featvec \in \R^{\nfeat}$, where we first one-hot encode the categorical features into binary features.
+For any instantiation of our model, the number of rules $\nrules$ and the number of classes $\nclasses$ is fixed beforehand.
+We show the resulting architecture in Figure \ref{fig:architecture}.
+
+First, \ourmethod discretizes the input features into $j \in \{1,\dots,\nrules\}$ sets of $\nfeat$ predicates such as ~\ruledesc{$18<$\texttt{Age} $<30$}  or \ruledesc{\texttt{Diabetes} = True}. % changed to avoid orphans
+Each set of predicates is then composed into the antecedent of rule $j$, using the respective weights $\andweightvec_j \in \R^{\nfeat}$.
+The activation vector $\hat{\fvec{\rulehead}} \in [0,1]^{\nrules}$ represents the activation of rules such as \ruledesc{\textbf{\textrm{if }}\texttt{Age} $<30$ $\land$ \texttt{Diabetes} = True}.
+
+Next, \ourmethod computes the active priority $\ruleweight^p_j = \rulevec \circ \priorityvec$ and passes it 
+through the Gumbel-Softmax function to obtain the approximate arg max of the rule list $\hat{\fvec{\indicator}}$.
+The prediction $\rlist(\featvec)$ is computed by taking the weighted sum of consequents $\rlist(\featvec)=\sum_{j=1}^{\nrules} \hat{\indicator}_j \cdot \ruletail_j$.
+
+\subsection{Objective}
+Lastly, we turn to the learning setup.
+We train \ourmethod in a standard supervised learning setting 
+given an arbitrary loss function $\lossf$ and a sample of the data distribution $P_{X,Y}$.
+In the following, we use the cross-entropy loss for binary classification tasks, i.e.
+$\lossf(\rlist(\featvec;\Theta),y) = -y\log(\rlist(\featvec;\Theta)) - (1-y)\log(1-\rlist(\featvec;\Theta))$,
+though in principle any differentiable loss function $\lossf$ can be used.
+
+\paragraph{Minimum-Support}
+Besides the chosen loss function, we propose a regularization term to ensure that each rule represents a non-trivial amount of points.
+That is, akin to the minimum support requirement in classical rule lists or decision trees, we penalize rules that are never used or used too often.
+To this end, we add a regularization term based off the rule usage indicator $\hat{\indicator}_j(\featvec_i)$.
+We compute the coverage, i.e.~the fraction of points where each individual rules is active, over the training set $\{x_i\}_{i=1}^{\nsamples}$ as $\coverage_j = \frac{1}{\nsamples} \sum_{i=1}^{\nsamples} \hat{\indicator}_j(\featvec_i)$.
+The support regularizer is then given by
+\begin{equation}
+    \mathcal{R}(\Theta) = \frac{1}{\nrules} \sum_{j=1}^{\nrules} \max\left(0,\coverage_{\min} - \coverage_j\right)^2 + \max\left(0,\coverage_j - \coverage_{\max}\right)^2\;,
+\end{equation}
+where $\coverage_{\min}$ and $\coverage_{\max}$  are user-specified minimum and maximum supports. 
+We weight the regularization term using a hyperparameter $\lambda$.
+The overall objective given a training set $\{(\featvec_i,y_i)\}_{i=1}^{\nsamples}$ is then
+to optimize the rule list parameters $\Theta = (\upperboundvec_1,\lowerboundvec_1,\dots,\upperboundvec_{\nrules},\lowerboundvec_{\nrules},\andweightvec_1,\dots,\andweightvec_{\nrules},\priorityvec)$ as
+\begin{equation}
+    \arg \min_{\Theta} \frac{1}{\nsamples} \sum_{i=1}^{\nsamples} \lossf(\rlist(\featvec_i;\Theta),y_i) + \lambda \mathcal{R}(\Theta)\;.
+\end{equation}
+
+
+\section{Related Work}
+
+Rule lists were introduced in the early 90s \citep{cohen1995fast} and have since been used in various applications,
+such as healthcare \citep{deo2015machine}, criminal justice \citep{angelino2018learning}, and credit risk evaluation \citep{bhatore2020machine}.
+Similarly, decision trees \citep{breiman2017classification}, which can also be easily transformed into rules by tracing the path from the root to the leaf,
+have also been widely used in practice. The approaches use greedy combinatorial optimization to find the best rule set.
+Instead of relying on the greedy growing of the model, \cite{wang2017bayesian,yang2017scalable} propose Bayesian 
+rule lists, a probabilistic model, where the complexity of the model is controlled by a prior, which is specified by the user.
+In practice, these priors result in short rule lists but can harm the performance if misspecified. To automate the trade-off between complexity and accuracy,
+\cite{proencca2020interpretable, papagianni2023discovering} propose an MDL-based approach, 
+which uses an MDL-score for model selection. In practice, this results in more accurate and concise rule lists compared
+to previous approaches. There are also approaches that attempt to find optimal rule lists \citep{angelino2018learning,Avodji2022LeveragingIL}. 
+Due to the expensive combinatorial optimization, exact methods are not applicable beyond trivially sized datasets and have to 
+severely restrict the search space in terms of rule size, feature quantization and number of rules.
+
+Instead of using combinatorial optimization, neuro-symbolic approaches have been proposed to learn rule classifiers.
+\cite{qiao2021learning} proposes the first approach to learn rule sets in an end-to-end scheme. They formulate a novel
+neural architecture that uses continuous relaxations of logical operators. After training, the rules are extracted
+from the network.  This is extended by \cite{wang2021scalable} to a deeper architecture that allows to learn
+more complicated rules; however, this often results in worse interpretability.
+\cite{walter2024finding} propose to learn rules for binary data that are not only predictive but also descriptive, which improves explainability but reduces accuracy.
+\cite{dierckx2023rl} extend the approach of \cite{qiao2021learning} by introducing a hierarchy among the rules, 
+allowing to learn rule lists. Although these methods resolve the scalability issue, 
+they still rely on pre-discretization of the features, similar to the combinatorial approaches. In contrast, \ourmethod learns
+discretizations on the fly while being highly scalable and accurate.
+
+
+\section{Experiments}
+
+\input{tables/real_world_experiments}
+
+We compare \ourmethod against optimal rule lists (\corels, \citealt{angelino2018learning}), scalable Bayesian rule lists (\sbrl, \citealt{yang2017scalable}),
+MDL-based rule lists (\mdlrl, \citealt{proencca2020interpretable}), greedily learned rule lists from decision trees (\greedy),
+as well the neural rule lists (\rlnet, \citealt{dierckx2023rl}).
+Additionally, we compare with two neuro-symbolic rule set methods, namely \rrl (\citealt{wang2021scalable}) and \drnet (\citealt{qiao2021learning}), and provide a benchmark in form of \xgboost.
+We provide the source code in the Supplementary Material.
+
+\subsection{Real World}
+We begin with a comprehensive comparison on 20 real world datasets from domains such as medicine, finance, and criminal justice 
+for binary classification.
+To simulate real world conditions, in which interpretability is paramount, we limit each method to a budget of $\{10,15,\dots,30\}$ rules.
+We report the $F_1$ score weighted by class frequency, averaged over 5-fold cross validation for 10 rules in Table \ref{tab:real-world-exp},
+and show the trend for increasing budget in Figure \ref{fig:exp-increasing}.
+Experiments that timed out after 24 hours are indicated by $n/a$.
+\paragraph{Overall.} Across all datasets, the neural \rlnet and \rrl and the heuristic \mdlrl and \greedy are closely matched, 
+achieving an average rank between $3.5-4.5$ out of 8 methods, while the exact methods \corels and \sbrl performance is subpar.
+In contrast, \ourmethod performance stands out, achieving an average rank of $\textbf{2.30}$.
+Across all datasets, \ourmethod is either the best or close to the best performing method, which shows the robustness of our method across different domains.
+
+\paragraph{Rule List Length.} We plot the average  $F_1$ score, normalized by the dataset maximum, under an increasing number of rules in Figure \ref{fig:exp-increasing}.
+\ourmethod remains the best performing method for both short and long rule lists,
+where for short rule lists \greedy is closest but deteriorates with more rules,
+whereas \mdlrl is subpar for short rule lists but comes closer with more rules. 
+\input{texfigs/real-world-stats}
+
+We further analyze the length of individual rules learned by \ourmethod, i.e.~the number of predicates, in Figure \ref{fig:rule-lengths}.
+Over this diverse set of datasets, we see that the trend follows a power-law distribution, with a peak at 2 predicates.
+That is, most rules are simple and some are more complex.
+Whilst the majority of rules stays below 10 predicates, \ourmethod is able to learn rules with up to 25 predicates,
+which is a testament to its flexibility.
+This stands in stark contrast to \corels, \sbrl and \mdlrl, who are limited to a fixed number of predicates per rule.
+
+\paragraph{Ring dataset.}
+Amongst all datasets, \ourmethod performs particularly well on the \texttt{Ring} dataset, where it outperforms the next best method by \textbf{0.13} $F_1$ points.
+Upon closer inspection, the \texttt{Ring} dataset uniqueness lies in its exclusively continuous features, making it an ideal benchmark to evaluate the impact of continuous feature handling.
+Here, the ability of \ourmethod to learn exact thresholds becomes a significant competitive edge.
+For applications in medicine, where continuous biomarkers such as blood pressure or cholesterol levels are often key indicators, \ourmethod 
+could potentially improve the accuracy of rule lists whilst maintaining full interpretability.
+To more closely investigate under which conditions methods benefit/struggle, we turn to controlled conditions with 
+with known ground truth using synthetic data.
+
+\subsection{Synthetic Data}
+\input{texfigs/synthetic_experiments}
+Lastly, we compare the best performing rule list models under different challenging settings.
+We sample $\nfeat$ independent, uniform feature variables $X_i \sim \mathcal{U}(0,1)$.
+We generate $\nrules$ rules of $2-8$ predicates $\pred(x_i) = \lowerbound_i < x_i < \upperbound_i$ with random thresholds, and make them 
+predictive of class $Y=0$ or $Y=1$.
+\paragraph{Rule Complexity.}
+We begin by varying rule complexity through increasing the number of predicates $\pred_i$ per rule.
+We report the $F_1$ score in Figure \ref{fig:experiment_predicates}.
+Overall, \ourmethod is consistently the best performing method.
+In particular, \ourmethod is the only method that does not require pre-discretization of the features and can learn the thresholds of the predicates exactly.
+Especially for the most complex rules with  8 predicates, \ourmethod holds the biggest advantage over the other methods.
+Here, exact thresholding is crucial, as inaccuracies over multiple dimensions compound and limit the obtainable $F_1$ score with pre-discretized features.
+
+\paragraph{Number of Rules.}
+Next, we increase the number of rules $\nrules$ sampled in a rule list, whilst keeping each rule fixed at 2 predicates.
+We report the $F_1$ score in Figure \ref{fig:experiment_list_complexity}.
+\ourmethod maintains a consistent advantage over it competition in both the low and high rule list regime.
+
+\paragraph{Sample Complexity.}
+Lastly we examine the sample complexity of each method, reported in Figure \ref{fig:experiment_samples}.
+For 100 sampled datapoints, all methods are closely matched. \ourmethod gradient based optimization continuously improves as the number of samples increases,
+whilst \rlnet and \greedy improvement caps out at 1000 samples.
+In the high sample regime of 10.000 samples, \ourmethod holds the biggest advantage over the other methods.
+
+The synthetic experiments further highlight the advantage of fully flexible thresholding, especially for complex rules, and 
+show that \ourmethod scales well with the number of samples and rules.
+Therefore, in real world applications where the majority of features are continuous and with many samples, \ourmethod can offer a competitive edge over existing alternatives. 
+
+\paragraph{Ablation Study.} \label{sec:ablation} Finally, we perform an ablation to assess the efficacy of the relaxed conjunction $\softrule(\featvec) \leq \epsilon$. 
+To this end, we re-run \ourmethod on all datasets without this adjustment, i.e.~with $\epsilon = 0$, and plot the difference to the original $F_1$ score in Figure \ref{fig:ablation-eta}.
+We observe that on most datasets the relaxed conjunction outperforms the strict conjunction by a large margin, and on average by 0.3 $F_1$ points.
+The strict conjunction is not superior on any dataset to the relaxed conjunction.
+The extent of improvement stresses the importance of non-vanishing gradients and highlights the contribution of 
+relaxing the logical conjunction by \ourmethod.
+
+
+
+
+\section{Conclusion}
+
+We propose \ourmethod, a differentiable relaxation of the rule list learning problem that converges to a strict rule list through
+temperature annealing. \ourmethod learns both the discretizations of individual features,
+and how to compile these features into conjunctive rules without any pre-processing or
+restrictions. We also learn the rule-order differentiably by introducing a priority score that determines the ordering.
+\ourmethod is able to learn rules of any complexity using specifically optimized predicates and order them in a way that maximizes the predictive performance of the model.
+As a result, we obtain both highly interpretable, but also accurate rule lists that can assist decision making in a wide range of applications.
+We demonstrated the effectiveness of \ourmethod in extensive  real-world and synthetic experiments. We show that \ourmethod 
+consistently outperforms both combinatorial and neuro-symbolic methods on a variety of datasets.
+
+\subsection{Limitations}
+Whilst \ourmethod is a powerful tool for interpretable rule learning, it is not without limitations.
+First and foremost, the rules that \ourmethod learns do not allow to draw any causal conclusions about 
+the data generating process without any further assumptions.
+Thus, they should only be used to assist in decision making and not as a substitute for domain knowledge.
+Compared to \corels, we can not give any optimality guarantees on the learned rule list within the search space, but 
+explore a much larger search space that leads to empirically better results.
+
+The number of rules in a \ourmethod rule list is fixed and must be set beforehand.
+In addition, there are hyperparameters and temperature schedules that need to be set.
+Whilst we have observed a degree of robustness to these hyperparameters, they require tuning for optimal performance.
+Lastly, the current rule language is limited to logical conjunctions of thresholded features.
+Adding disjunctions and more complex logical predicates would be a natural extension of the current work and is 
+something we plan to explore in the future.
+
+
+\subsection{Future Work}
+In addition to the expansion of the rule language, there are several other directions in which \ourmethod could be extended.
+For example, the current rule list model is only designed for binary classification tasks, hence to extend it to multi-class
+classification, is crucial for a wider range of applications. In that context, we also plan to derive a propensity score from the rule list model
+for conformal prediction.
+Extending \ourmethod to regression tasks opens up a wide range of new applications to benefit from interpretable rule lists.
+Another exciting direction of future work is the adaption of \ourmethod to structured data, such as images or graphs.
+With appropriate predicate functions that extract meaningful concepts in those domains, rule list models could be used 
+as more interpretable and accountable deep learning models.
+
+
+
+
+
+
+
+
+

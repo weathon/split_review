@@ -1,0 +1,178 @@
+# Neuron-Enhanced AutoEncoder Matrix Completion and Collaborative Filtering: Theory and Practice
+
+- Decision: Accept
+- Scores: 8, 8, 6, 8
+
+## Abstract
+Neural networks have shown promising performance in collaborative filtering and matrix completion but the theoretical analysis is limited and there is still room for improvement in terms of the accuracy of recovering missing values. This paper presents a neuron-enhanced autoencoder matrix completion (AEMC-NE) method and applies it to collaborative filtering. Our AEMC-NE adds an element-wise autoencoder to each output of the main autoencoder to enhance the reconstruction capability. Thus it can adaptively learn an activation function for the output layer to approximate possibly complicated response functions in real data. We provide theoretical analysis for AEMC-NE as well as AEMC to investigate the generalization ability of autoencoder and deep learning in matrix completion, considering both missing completely at random and missing not at random. We show that the element-wise neural network has the potential to reduce the generalization error bound, the data sparsity can be useful, and the prediction performance is closely related to the difference between the numbers of variables and samples. The numerical results on synthetic data and benchmark datasets demonstrated the effectiveness of AEMC-NE in comparison to many baselines.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This work proposes a neuron-enhanced autoencoder matrix completion (AEMC-NE) method and applies it to collaborative filtering. AEMC-NE can adaptively learn an activation function for the output layer to approximate possibly complicated response functions in real data. The theoretical analysis and numerical results demonstrate the effectiveness of AEMC-NE in comparison to other methods.
+
+### Strengths
+1. The proposed algorithm is interesting and effective. It has lower RMSE than the compared method in the experiments of many benchmark datasets.
+2. The theoretical results are rich and nontrivial. Theorem 3.1 and Theorem 3.2 shows the generalization error bounds of matrix completion in the settings of MCAR and MNAR respectively. An appealing theoretical result is that ‘Filling the missing values with zeros is helpful’. This is an important result for collaborative filtering.
+
+### Weaknesses
+Please refer to my questions.
+
+### Questions
+1. As shown in Fig.1, for the autoencoder, items correspond to samples while users correspond to features. Can we exchange the roles of items and users? What is the possible impact on the recommendation performance?
+2. On page 4, it is stated that when the mechanism is missing not at random, the $Q$ in the objective function should be replaced by $S$. How to achieve $S$?
+3. On page 7, is it possible that $\sqrt{\frac{L_W^3 \zeta \bar{d}}{n}}$ is larger than 1? It would be much better if the authors can provide an example of the value of $L_W^3 \zeta \bar{d}$.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper studies the problem of matrix completion with neural network, which is quite different from classical low-rank matrix completion. The authors proposed a new method as well as theoretical analysis. The experiments on synthetic data and real data demonstrated showed the usefulness of the proposed method.
+
+### Strengths
+The theory of neural network based collaborative filtering hasn’t been well-studied in literature. This paper proposed a new autoencoder matrix completion method and analyzed the generalization ability for different missing mechanisms. The strengths of the paper are as follows.
+* The paper is well-organized. The literature review and related work are complete.
+* The paper provided two theorems. The analysis and results are solid.
+* The experiments are sufficient. The new method has been compared with more than five baselines on synthetic data, MovieLens 100k/1M/10, Doban and Flixter. And the performance is good.
+
+### Weaknesses
+Several minor issues are as follows.
+* It is not very clear how to determine the architectures of the two autoencoders. Is there a rule of thumb?
+* Some claims should be explained more detailedly. For instance, in the discussion for Theorem 3.2, more explanation about ‘$\sqrt{\sum_{(i, j) \in S} p_{i j}^{-2}} /(m n)$ is at the scale of $1 / \sqrt{|S|}$’ should be provided. In Table 2, a few results are missing. Why?
+
+### Questions
+* Do the two theorems provide any guidance for determine the architectures of the two autoencoders?
+* According to the formulation of the proposed method, both the layer-wise network and the element-wise network can be any MLPs, not necessarily autoencoders. Right?
+* In Analysis B of Section 3.1, is it possible that mean filling is better than zero filling for $\tilde{X}$?
+* In Analysis C of Section 3.1, the authors only discussed the impact of $n$ on the generalization bound. What is the impact of $m$? A larger $m$ leads to a tighter bound?
+* In Section 5.1, the latent dimension of the data generating model is 10, but as shown by the caption of Figure 2, the latent dimension of the layer-wise autoencoder was set to 30. What is the motivation of this setting? 
+* How to apply the proposed method to the collaborative filtering problem in the case of implicit feedback?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper presented a neuron-enhanced autoencoder based method for matrix completion. The main idea is to adds an element-wise autoencoder to each output of the main autoencoder to enhance the reconstruction. The paper has both theoretical results (generalization bounds) and numerical results (collaborative filtering).
+
+### Strengths
+1. The proposed network architecture is composed of a main autoencoder and an element-wise. The idea is new.
+
+2. There are two theorems of generalization analysis. One is for the case of missing completely with random, and the other is for the case of missing not at random. They verified the effectiveness of the proposed method theoretically.
+
+3. The paper included a lot of experiments and the proposed method outperformed many baselines in most cases.
+
+### Weaknesses
+1. The writing style could be improved. Currently, the section of experimental evaluation focuses on collaborative filtering. To be consistent, the section of introduction should provide more information or discussion about collaborative filtering rather than matrix completion. 
+
+2. The time costs haven’t been compared, though the theoretical analysis was provided at the bottom of page 4.
+
+### Questions
+1. In Eq.(2), the loss function is the square loss. Has the authors tried other loss functions such as the absolute loss? Is the proposed method applicable to the setting of implicit feedback?
+
+2. In Figure 1, is there an activation function in the output layer of the main network?
+
+3. In Theorem 3.1, when $|S|$ or $|S^c|$ is close to zero, the bound is very loose. How to explain this phenomenon?
+
+4. The results in Figure 2 look nice. But the motivation for the specific network architectures such as 300-100-30-100-300 should be illustrated.
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposed an autoencoder method for matrix completion and applied it to collaborative filtering. The corresponding generalization error bounds are also provided. The experiments showed the superiority of the proposed method over the baselines.
+
+### Strengths
+* This is a good work with new method, theory, and extensive experiments (many datasets, settings, baselines, and figures). 
+* The motivation is clear and the theoretical analysis, such as the bounds related to MCAR and MNAR, are insightful and practical for the recommendation systems.
+* The proposed AEMC-NE is able to outperform SVD++, LLORMA, AutoRec, DMF+, etc.
+
+### Weaknesses
+* The time cost of the proposed method AEMC-NE is higher than that of AEMC.
+* The motivation of conducting the experiments of Table 4 is not clear.
+* Some important results (e.g., time costs comparison, Theorem A.1) are presented in the appendix, not the main paper. Theorem A.1 is more useful than Theorem 3.2 because the former is based on the estimated probability.
+
+### Questions
+1. According to equation (1), is the model $f$ actually a denoising autoencoder, with a partial reconstruction loss, not a classical autoencoder?
+2. How does the data dimension $m$ affect the generalization error bounds? The authors only discussed $n$, the number of samples.
+3. Regarding Theorem 3.2, if $p_{ij}$ is close to zero, is the bound useless? Could the authors give more explanation about the roles of $p_{ij}^{-2}$?
+4. Are the values in Table 1 RMSEs?
+5. In Figure 2, it seems that if the middle layer width of the main network is set to 10, the true latent dimension of the data, the performance of AEMC-NE is not better than those with larger width. What is the possible reason?
+6. As shown by Table 2 and Table 3, the proposed AEMC-NE outperformed AEMC with ReLU output. Did the authors test AEMC with other activation function, such as sigmoid, in the output layer? How about their performance?
+7. In Table 5, as the observation probabilities are known, what objective function have the authors used in the proposed method? The one in (9) or (7)?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

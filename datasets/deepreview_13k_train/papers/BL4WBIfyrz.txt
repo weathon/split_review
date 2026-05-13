@@ -1,0 +1,399 @@
+\title{Lightweight Neural App Control}
+
+\begin{abstract}
+
+This paper introduces a novel mobile phone control architecture, termed ``app agents", for efficient interactions and controls across various Android apps. 
+The proposed Lightweight Multi-modal App Control (\textbf{LiMAC}) takes as input a textual goal and a sequence of past mobile observations, such as screenshots and corresponding UI trees, to generate precise actions. To address the computational constraints inherent to smartphones, within LiMAC, we introduce a small Action Transformer (\textbf{AcT}) integrated with a fine-tuned vision-language model (VLM) for real-time decision-making and task execution.  We evaluate LiMAC on two open-source mobile control datasets, demonstrating the superior performance of our small-form-factor approach against fine-tuned versions of open-source VLMs, such as Florence2 and Qwen2-VL. It also significantly outperforms prompt engineering baselines utilising closed-source foundation models like GPT-4o. More specifically, LiMAC increases the overall action accuracy by up to 19\% compared to fine-tuned VLMs, and up to 42\% compared to prompt-engineering baselines.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\let\thefootnote\relax\footnotetext{*Equal contribution.}
+\let\thefootnote\relax\footnotetext{\textsuperscript{\textdagger}Correspondence to:  shaokun2@huawei.com}
+Smartphone application agents, commonly known as app agents, are expanding the potential applications of artificial intelligence to smartphones and other mobile devices.
+Such agents could allow users to accomplish a range of tasks, from scheduling appointments and sending messages to purchasing items and booking flights, with minimal effort.
+Fundamentally, app agents observe user instructions and progressively interact with the smartphone's user interface---by clicking, scrolling, inputting text, etc.---to accomplish the task.
+However, due to the limited computational resources of smartphones, these agents must be optimised for efficiency, employing lightweight models with minimal memory usage and fast processing speeds.
+
+Recent advancements have leveraged foundation models to develop app agents that understand natural language instructions and execute complex user commands within the smartphone's interface \citep[e.g.,\ ][]{androidworld, digirl, mobileagent, mobileagentv2}.
+While foundation models enable sophisticated capabilities, relying on them for every action introduces significant drawbacks.
+Their substantial size and computational complexity make them resource-intensive and impractical for constant use on mobile devices.
+Alternatively, querying server-hosted foundation models, such as GPT-4o or Gemini, for each task can be prohibitively expensive due to the operational costs of running large models, making this approach impractical for everyday applications.
+For example, a state-of-the-art GPT-4o-based app agent~\citep[e.g.\ ][]{androidworld} may require one to two minutes to run and cost approximately \$1.00 per task on average, based on tasks from the evaluated datasets.
+
+To address these limitations, we propose a gated architecture that combines a lightweight transformer network with a small fine-tuned VLM.
+The task description and the smartphone state are first processed by a compact model ($\sim$500 million parameters) which effectively handles most actions.
+For actions that require natural language understanding, such as composing a text message or querying a search engine, a VLM is invoked to generate the necessary text.
+This hybrid approach reduces computational demands and improves responsiveness, resulting in significantly faster execution times---30 times faster, down to 3 seconds per task on average ---and improved accuracy.
+In the proposed architecture (Lightweight Multi-modal App Control, or \ourmethod), the initial processing stage is managed by an Action Transformer (\actionmethod), and is primarily responsible for determining the type of action required to fulfil a user's command. 
+\actionmethod first predicts the action type, such as clicking, inputting text, or scrolling, based on the current state of the smartphone's interface and the task description.
+For most action types, such as clicks and scrolls, \actionmethod autonomously executes the task.
+For predicting the targets of the \click action, we employ a contrastive objective between the outputs of \actionmethod and the embeddings of each user interface (UI) element. The specific approaches for predicting action types and handling click actions are detailed in \cref{sec:action-type-prediction,sec:predicting-click-targets}, respectively.
+
+However, when the action type predicted by \actionmethod is \inputtext or \openapp, which necessitate a deeper prior knowledge and understanding of natural language nuances, \ourmethod passes the selected action type and user's goal to a fine-tuned VLM to generate the appropriate textual content.
+This division of labour allows \actionmethod to handle straightforward interactions while leveraging the VLM's advanced capabilities for more complex text generation tasks, ensuring that the system remains both resource-efficient and capable of sophisticated responses. The process of integrating and fine-tuning the VLM in the app agent domain is detailed in \cref{sec:llm-finetunes}.
+
+In summary, the primary contributions of this work are as follows:
+\begin{itemize}[left=10pt]
+    \item We propose \textbf{\ourmethod}, an architecture for app agents that balances efficiency and natural language understanding by combining a lightweight transformer with a fine-tuned VLM.
+    \item We also introduce \textbf{\actionmethod}, a submodule of \ourmethod, which is designed to efficiently predict action types and UI element interactions, featuring a novel contrastive objective for click prediction.
+    \item We fine-tune and evaluate two open-source vision-language models (VLMs) specifically for handling text-based actions. Our fine-tuned VLMs achieve performance comparable to or exceeding GPT-4o methods while only having 2B parameters or less.
+    \item We present experimental results demonstrating that \ourmethod improves both task execution time and accuracy---up to \textbf{30 times faster} and \textbf{40\% higher accuracy}---compared to GPT-4o-based and fine-tuned VLM app agents.
+\end{itemize}
+
+
+
+\section{Technical preliminaries}
+
+
+\subsection{Problem formulation}
+
+We model phone interaction as a sequential decision-making process.
+Each task consists of a given goal $g$ that should be completed during an episode.
+At each timestep $t$ of the episode, the phone's internal state is denoted by $s_t$, while $o_t$ represents an observation of this state, including screen captures and UI element trees.
+The set of visible UI elements on the screen at timestep $t$ is defined as $\mathcal{I}_t$, with $o_{t,i}$ representing the $i$-th UI element at timestep $t$ where $i \in \mathcal{I}_t$. Each UI element $i$ is represented by three different components: the image that corresponds to the UI element that we denote as $o_{t,i}^{\text{img}}$, the text that corresponds to the UI element $o_{t,i}^{\text{txt}}$, and the related attributes of the UI element, such as whether it is clickable or not, that we denote as $o_{t,i}^{\text{attr}}$. Therefore, the representation of each UI element can be written as:
+\begin{equation}
+o_{t,i} = [o_{t,i}^{\text{img}}, o_{t,i}^{\text{txt}}, o_{t,i}^{\text{attr}}].
+\end{equation}
+
+The agent interacts with the phone through actions, denoted as $a_t$ at timestep $t$. Each action is characterised by two components: its type $a_t^{\text{type}} \in \mathcal{A}^{\text{type}}$ (e.g., \click, \scrolldown, \inputtext) and its specifications $a_t^{\text{spec}} \in \mathcal{A}^{\text{spec}}$. The specifications vary based on the action type: for clicks, $a_t^{\text{spec}}$ might represent the targeted UI element; for typing actions, it would contain the text to be input. Thus, an action can be represented as the tuple $a_t = (a_t^{\text{type}}, a_t^{\text{spec}})$. This formulation allows for a flexible representation of diverse actions while maintaining a consistent structure. 
+In this work, the main goal is to learn a model that will maximise action prediction accuracy, which corresponds to correctly predicting both the action type as well as the action specifications.
+To achieve this, we train \actionmethod, which predicts $a_t^{\text{type}}$. 
+If the predicted action type is \click, \actionmethod also predicts the $a_t^{\text{spec}}$ 
+in the form of UI element targets. 
+We focus on click targets because they are among the most difficult and common actions to predict, and \actionmethod's architecture 
+easily accommodates predicting them with a contrastive learning approach (see \cref{sec:predicting-click-targets}). 
+For actions that require natural language specifications (e.g., \inputtext), 
+we use a VLM fine-tuned on the same dataset.
+
+\subsection{Sequence modelling with transformers}
+Transformers \citep{attentionisallyouneed} have demonstrated exceptional effectiveness in modelling and generating sequential data across a wide range of domains. They excel in various sequence modelling tasks, including those related to language, video processing, and decision-making \citep{chen2021decision}. Regardless of the specific application, transformers begin by converting the input into a sequence of vectors. For text, this involves tokenising the input, with each token represented by an embedding vector. In the case of images, the input is typically divided into patches, where each patch is similarly represented by a vector, analogous to the tokenisation process in text. These embeddings, which map tokens or patches to vectors, can either be learned during the model’s training or sourced from pre-trained models~\citep[e.g.,\ ][]{bert}.
+However, one inherent limitation of the transformers is that treat the input as a set of unordered vectors, lacking any notion of temporal or spatial relationships. To address this, positional embeddings are added to the original token or patch embeddings to encode the position of each element in the sequence. 
+By incorporating this positional information, the transformer is able to understand the relative ordering of the input.
+The combined embeddings are fed through several multi-head self-attention layers, which are designed to capture dependencies and contextual relationships between different embeddings in the input sequence. These self-attention mechanisms allow the model to focus on relevant parts of the sequence when processing each embedding, enabling it to handle long-range dependencies more effectively.
+After passing through multiple layers, each consisting of self-attention and feed-forward components, the final activations from the transformer's last hidden layer are passed through a linear (fully connected) layer. This layer is typically tasked with mapping the learned representations to the output space, whether for classification, prediction, or another specific task. The entire model is trained end-to-end, with backpropagation adjusting both the self-attention layers and the final linear layer to optimise performance on the desired task.
+
+
+
+
+\section{The lightweight multi-modal app control framework}
+
+
+Our methodology processes the user’s goal $g$ and the phone’s state at time $t$, utilising  \actionmethod, to determine the action type $a^\text{type}_t$.
+If the predicted action type is either \inputtext or \openapp, then $g$, $o_t$, and $a^\text{type}_t$ are passed to a fine-tuned VLM, which is responsible for determining the specific action $a^\text{spec}_t$. 
+For actions involving clicks, \actionmethod handles the prediction directly but employs a different training objective that contrasts UI element embeddings to determine the most likely interaction target.
+Accordingly, this section is divided into three parts: predicting the action type, predicting specific actions for text input and app launching, and predicting clicks using our novel approach for interaction with UI elements. The full architecture of \ourmethod is presented in \Cref{sec:fram}.
+\subsection{Model inputs}\label{sec:our_model_inputs}
+\actionmethod, the model responsible for predicting the action type (and later the click target, as seen in \cref{sec:predicting-click-targets}), is built on top of a typical transformer architecture. However, unlike standard transformers, where tokens represent words or characters, our ``tokens'' are pretrained embeddings that are mapped to the hidden dimension of the transformer. 
+These tokens represent three key components: the user's goal $g$, the UI elements on the phone's screen $o_{t,i}$, and the possible actions. 
+By using these pretrained embeddings as input, we allow the model to effectively capture the relationships between the user's intent, the current state of the interface, and the set of available actions.
+We encode each key component (UI elements, actions, and goal) into embeddings that can be processed by the transformer. Below, we describe the encoding process for each type of input.
+
+\textbf{Goal:}
+We encode the user's textual goal \( g \) using a sentence encoder, resulting in the embedding \( e_g = f_{\text{txt}}(g) \).
+This embedding captures the user's intent and serves as the first token to the transformer.
+
+\textbf{UI Elements:}
+The observed representation of each UI element \( o_{t,i} \) at time \( t \) is transformed into a vector \( e^{\text{ui}}_{t,i} \) through several embedding functions.
+First, the text component is encoded using a sentence encoder (e.g., BERT) \( e^{\text{txt}}_{t,i} = f_{\text{txt}}(o_{t,i}^{\text{txt}}) \), and the image is encoded using a fine-tuned CLIP visual encoder~\citep{radford2021learning} \( e^{\text{img}}_{t,i} = f_{\text{img}}(o_{t,i}^{\text{img}}) \).
+Additionally, any other attributes (e.g., clickable, editable, nested) are encoded into \( e^{\text{attr}}_{t,i} = f_{\text{attr}}(o_{t,i}^{\text{attr}}) \).
+The final embedding for each UI element is the concatenation of these vectors, \( e^{\text{ui}}_{t,i} = [e^{\text{attr}}_{t,i};\, e^{\text{txt}}_{t,i};\, e^{\text{img}}_{t,i}] \).
+We fine-tune CLIP using the standard contrastive learning objective \citep{radford2021learning} using the screenshot of the observations and the related UI trees to allow adapting to app control datasets.
+We also add a positional encoding \( p_i \in \mathbb{R}^d \) to represent the order or nesting of UI elements: \( e^{\text{ui}}_{t,i} = e^{\text{ui}}_{t,i} + p_i \).
+This process is illustrated in Figure~\ref{fig:o-to-z}.
+To adapt the visual encoder \( f_{\text{img}} \) to our task, we fine-tune it using our dataset by minimising the InfoNCE loss~\citep{oord2018representation}, aligning image and text representations of UI elements.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{phone_diagram_v5.png}
+    \caption{Illustration of \actionmethod. A separate encoding of each UI element into a vector $e_{t,i}$ by using pretrained embedding models. The embeddings are then fed into the sequence of a transformer $x_t$ along with the previous timesteps in that episode. The prediction of the transformer is decoded to produce the next action which consists of $a^{\text{type}}_t$ and $a^{\text{spec}}_t$.}\label{fig:o-to-z}
+\end{figure}
+
+\textbf{Actions:}
+Each action is represented using two embeddings: the action type embedding which is mapped to its corresponding learnable embedding \( e^{\text{type}}\), and, for actions requiring a specification (e.g., the target of a \click action), the specification embedding \( e^{\text{spec}} \).
+Depending on the action type, the action specification embedding is computed differently (e.g., sentence embedding for the textual action, learnable embeddings mapped to the UI element's id for click targets, or a special token for empty specifications).
+Each action contributes two tokens to the transformer's input sequence, clearly separating action types from their parameters.
+
+\textbf{Positional Embeddings:}
+To represent temporal information, we also add a learnable positional encoding \( p_t \) for all the embeddings in a timestep.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{hier_arc3.png}
+    \caption{The architecture of \ourmethod. The history of observations-actions $\{o_{t}, a_{t-1}, o_{t-1}..\}$ and goal $g$ are processed to vector $x$ and passed to \actionmethod. 
+    The image observation  $o^{\text{img}}_t$ with the bounding boxes and the goal $g$ are passed as inputs to the VLM. 
+    The VLM is only called if an action that requires text completion is selected, based on the action type output of \actionmethod. The action is finally selected based on the protocol described in \Cref{sec:fram}.}
+    \label{fig:hier_arc}
+\end{figure}
+\subsection{Constructing the input sequence}
+
+After generating the goal, UI elements, and action embeddings, we organise them into a sequence representing the entire episode.
+Each episode in the dataset is encoded as a sequence of embeddings \( x \), which is fed into the transformer.
+The sequence starts with the goal embedding \( e_g \), followed by the UI element embeddings \( e^{\text{ui}}_{0,i} \) at timestep 0.
+Once all UI elements are encoded, a special end marker \( e^{\text{end}} \) is added.
+The action type \( e^{\text{type}}_0 \) and specification \( e^{\text{spec}}_0 \) embeddings for timestep 0 are then appended.
+This process repeats for each subsequent timestep: encoding UI elements, appending \( e^{\text{end}} \), and adding the action embeddings.
+For an episode with \( H \) timesteps, the final sequence is:
+\[
+x = \left[ e_g; e^{\text{ui}}_{0,0}; \, \ldots; \, e^{\text{ui}}_{0,n}; e^{\text{end}}; e^{\text{type}}_0; e^{\text{spec}}_0; \, \ldots; \, e^{\text{ui}}_{H-1,0}; \, \ldots; \, e^{\text{ui}}_{H-1,n}; e^{\text{end}}; e^{\text{type}}_{H-1}; e^{\text{spec}}_{H-1} \right]
+\]
+
+During training, the full sequence is fed into the transformer.
+For inference at timestep \( t \), the sequence up to the \( t \)-th observation is processed, with the hidden state \( h_t \) (up to \( e^{\text{end}} \)) used to predict the action.
+
+
+
+
+
+
+\subsection{Action type prediction}\label{sec:action-type-prediction}
+
+In our pipeline, the prediction of the next action begins with determining the action type.
+Predicting the action type \( a_t^{\text{type}} \) can be framed as a classification problem, where we identify ten distinct action types in the datasets used in this work.
+These action types represent various possible interactions, such as \click, \openapp, \scrolldown, \inputtext, or other essential commands. We implement the action type prediction with a specialised head.
+The action type head, denoted as \( f_{\text{type}} \), transforms the final hidden state \( h_t \) of the transformer (after the \( e^{\text{end}} \) token) into a probability distribution over the possible action types, $p(a_t^{\text{type}} | h_t) = f_{\text{type}}(h_t)$.
+The learning objective for this task is to minimise the cross-entropy loss between the predicted and actual action types.
+Given a dataset \( \mathcal{D} \), the cross-entropy loss for action type prediction is defined as:
+\begin{equation}
+    \mathcal{L}_{\text{type}} = -\mathbf{E}_{a^{\text{type}}, x \in \mathcal{D}} \left[ \log(p(a^{\text{type}} | h)) \right]
+\end{equation}
+Here, \( h \) represents the transformer's output corresponding to the final hidden state before action prediction, averaged over all observations in the dataset.
+This loss function ensures that the model is trained to correctly classify the action type based on the sequence of embeddings from previous steps.
+
+\subsection{Leveraging fine-tuned VLMs for text generation in action execution}
+\label{sec:llm-finetunes}
+As described in the previous section, our agent first predicts the action type. Among the ten action types, two specifically require textual specifications: i) the \inputtext action, where the specification is the text to be entered into a text box, and ii) the \openapp action, where the specification is the name of the application to be opened. For these actions, we rely on fine-tuning a VLM using an app control dataset.
+The dataset provides action data in a dictionary-like format, such as: \texttt{\{"action-type":"open-app","app-name":"Chrome"\}}, with one key corresponding to the action type and another to the action specification.
+The VLM is trained to generate the correct sequence of tokens that corresponds to the successful completion of each action, optimising for the likelihood of generating the proper tokens based on the observation at each timestep.
+
+During inference, after \actionmethod predicts the action type, it guides the VLM by enforcing the model to start its response with the predicted action type. For instance, if \actionmethod predicts \inputtext as the action type, the VLM is forced to begin its response with the following token pattern: \texttt{\{"action-type":"input-text","text":}.
+The model then completes the specification, producing $a_t^{\text{spec}}$, which is the textual content needed for the action. The full action selection pipeline is presented in \Cref{fig:hier_arc}.
+
+\subsection{Efficient click targeting using contrastive objectives with \actionmethod}\label{sec:predicting-click-targets}
+
+Having covered how action specifications are generated for textual actions, we now turn to the case of \click actions, where the specification is the UI element to interact with.
+To predict the correct UI element for a \click action, we employ a contrastive learning approach that operates over the entire episode, using cosine similarity and a learnable temperature parameter.
+Since the number of UI elements varies across timesteps and episodes, a contrastive method is better suited than classification, which can suffer from class imbalance and limitations when handling more UI elements in test episodes than seen during training.
+Let $h^{\text{type}}_t$ be the transformer's last hidden state up to embedding $e^{\text{type}}_t$, and $f_{\text{target}}$ be an affine transformation that projects the hidden states to an embedding space. Simultaneously, the hidden states of the transformer corresponding to the UI element embeddings, denoted as \( h^{\text{ui}} \), are also projected into the same embedding space:
+\begin{equation}
+q^{\text{type}} = f_{\text{target}}(h^{\text{type}}_t)
+\hspace{10pt}  \text{and} \hspace{10pt} 
+p^{\text{ui}} = f_{\text{target}}(h^{\text{ui}})
+\end{equation}
+Assuming the embedding space lies in \( \mathbb{R}^d \), the query embedding \( q^{\text{type}}_t \) has dimensions \( 1 \times D \), while the matrix \( p^{\text{ui}} \), representing all UI elements, has dimensions \( K \times D \), where \( K \) is the total number of UI elements in the episode.
+The goal is to train the model such that \( q^{\text{type}}_t \) aligns closely with the correct UI element's embedding at timestep $t$, using cosine similarity as the alignment measure.
+To achieve this, we adopt contrastive training techniques with the InfoNCE loss \citep{oord2018representation}.
+We first compute the similarity matrix between the query embedding \( q^{\text{type}}_t \) and all UI element embeddings, scaling the similarity by a learnable parameter \( \tau \) \citep[e.g.,\ ][]{radford2021learning}.
+The scaled cosine similarity matrix is defined as:
+\begin{equation}
+    S = \frac{q p^T}{\|q\| \cdot \|p\|_r} \tau
+\end{equation}
+where \( \|p\|_r \) is the L2 norm of each row of \( p \).
+For simplicity, we drop the superscripts in this equation.
+The InfoNCE loss for UI element selection across the episode is computed as:
+\begin{equation}
+\mathcal{L}_{\text{elem}} = - \mathbf{E} \left[ \log \frac{\exp(S_{+})}{\sum_{i=1}^K \exp(S_{i})} 
+\right]
+\end{equation}
+Here, \( S_{+} \) is the scaled similarity between the transformer's output and the correct UI element for the \click action, and \( S_{i} \) represents the similarity between the output and all other UI elements.
+During inference, for each action requiring a target element, the UI element with the highest similarity is selected.
+This contrastive approach enables \actionmethod to effectively learn which UI elements to interact with during a \click action by treating all other UI elements in the episode as negative examples.
+The use of cosine similarity focuses on the directional alignment of the embeddings, while the learnable temperature \( \tau \) adjusts the sharpness of the similarity distribution during training, allowing for more flexible and precise UI element selection.
+
+
+\section{Experiments}
+
+
+
+\subsection{Experimental setup}\label{sec:data}
+
+\textbf{Datasets:} Our experiments focus on two open mobile phone control datasets, AndroidControl~\citep{androidcontrol} and Android-in-the-Wild (AitW) \citep{aitw}. Both datasets contain extensive human demonstrations of mobile phone navigation across a wide variety of tasks. 
+In AndroidControl, every episode is defined by a specific goal, accompanied by a sequence of observations and actions. Each observation includes a screenshot from the phone and its corresponding UI tree. Conversely, observations in AitW lack the UI tree. As a result, it is necessary to extract the UI tree using an OCR system, which identifies all UI elements and provides a brief description of each.
+Further details on the goal format, observation space, and action space for each dataset can be found in \cref{appdx:datasets}.
+
+\textbf{GPT-4o Baselines: } 
+We compare our approach against four prompt-engineering baselines that use GPT-4 to generate actions in the evaluation dataset. First, we evaluate two baselines proposed by \citet{androidworld}: the text-based \textbf{T3A} and the multi-modal \textbf{M3A}. In T3A, the observation is represented as a list of UI elements, while M3A includes screenshots of the observation. Additionally, we evaluate two variants of the SeeAct agent \citep{seeact}, adapted for mobile app control tasks \citep{androidworld}. Specifically, we assess two SeeAct variants: $\textbf{SeeAct}_\textbf{choice}$ and $\textbf{SeeAct}_\textbf{ann}$, which use the UI tree text and screenshots of the observations, respectively, to determine the correct action. More details about the prompt engineering baselines are presented in \Cref{sec:gpt_baselines}.
+ 
+
+\textbf{Vision Language Models (VLMs):}  
+We fine-tune two VLMs for our experiments. The first, \textbf{Florence2}~\citep{xiao2024florence}, is an 820M-parameter VLM that takes as input an annotated screenshot with numbered bounding boxes, along with the task goal in natural language. Florence2 is trained to maximise the log-likelihood of the correct action tokens from the dataset.
+Similarly, we fine-tune \textbf{Qwen2-VL}~\citep{Qwen-VL}, a 2B-parameter VLM, using LoRA adapters~\citep{hu2021lora}. Qwen2-VL follows the same pipeline as Florence2, taking the annotated screenshot and goal as inputs, with supervision provided by the correct action. In most of our experiments, these fine-tuned VLMs are tested in conjunction with \actionmethod (forming \ourmethod).
+
+
+\begin{table}[t]
+\centering
+\caption{Comparison of models in terms of average inference time and overall accuracy on the AitW and AndroidControl datasets. The table presents the size of each model, the average inference time (in seconds, lower is better), and the overall accuracy (higher is better) for both datasets.\\}\label{tab:results}
+\label{tab:combined_res}
+\begin{tabular}{l lc  cc}
+\toprule
+\multirow{2}{*}{Model}      & \multirow{2}{*}{Size $\downarrow$} & \multirow{2}{*}{\makecell{Avg Inf.\\ Time (s)}$\downarrow$}  & \multicolumn{2}{c}{Overall $\uparrow$} \\ 
+\cmidrule(lr){4-5} 
+ & & & AitW & AndCtrl  \\ 
+\midrule
+
+ $\text{SeeAct}_\text{choice}$          & unk           & 9.81                    & 37.7  & 29.9  \\ 
+  $\text{SeeAct}_\text{ann}$     & unk           & 9.76            & 42.5  & 35.5  \\ 
+ T3A            & unk           & 4.87               & 26.9 & 53.1 \\ 
+ M3A             & unk           & 10.64               & 35.6 & 57.5 \\ 
+
+\midrule
+ Florence2                & 820M          & 0.50            & 70.8 & 57.0 \\ 
+ \ourmethod with Florence2 (ours)    &    +520M    & \textbf{0.34}     & \textbf{72.2}       & \textbf{63.1} \\
+\midrule
+
+      Qwen2-VL                 & 2B            & 3.03            & 51.0 & 52.2 \\
+ \ourmethod with Qwen2-VL (ours)    & +520M  & 0.63        & 70.9     & 62.5 \\ 
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+\subsection{Evaluation pipeline}
+\label{sec:eval_pipeline}
+We evaluate on the test set of two datasets, using the same process for all models, with only the observation format and model calling differing. For each timestep, we call the model with the relevant observation format to generate an action. VLMs are trained to return actions in a specific format, while pre-trained models use a detailed prompt with the observation, as in \citet{androidworld}.
+One can calculate strict accuracy by directly comparing returned actions to the ground truth. However, in this work we relax this metric for a more practical assessment. In the relaxed version, a UI element is deemed correct if its bounding box is within the target element, as described by \citet{androidcontrol}. For \inputtext actions, correctness is determined by a Jaccard index score of at least 0.5, reflecting the functional equivalence of similar inputs in search bars. 
+We only report the \emph{relaxed accuracy} metrics, found in \cref{tab:combined_res,tab:mix_model_acc}.
+
+In \cref{sec:results:ablations} we also evaluate models' \textit{action-type} and \textit{click-target} accuracy. 
+Action-type accuracy reflects how well the model predicts the correct type for an action, regardless of the specifications such as the text content or target element.
+Click-target accuracy measures how accurately the model predicts the correct target for \click actions when the action type is known. 
+Computing the click-target accuracy requires rerunning a full evaluation over the dataset, where the output of the model is constrained to predict the \click action and specify the target element.
+It should be noted that higher overall accuracy can still be achieved with lower action-type and/or click-target accuracy. This is because click-target accuracy is calculated separately, and because not all action types are equally advantageous for overall accuracy. Indeed, correctly predicting the type for actions that require additional specifications does not guarantee a positive overall outcome. Therefore, a method with slightly worse action-type accuracy, but prioritising actions without specifications, can achieve higher overall accuracy.
+For example, correctly predicting \wait will directly translate to a successful timestep, while predicting \inputtext is still dependent on having the correct text. 
+
+
+\subsection{Measuring end-to-end accuracy}\label{sec:results:end-to-end}
+
+
+In this section, we present the total action accuracy of our method, as well as the baselines. \Cref{tab:results}
+present the accuracy for action prediction in AndroidControl and AitW, respectively.
+In both AitW and AndroidControl, we observe that \ourmethod consistently outperforms Florence2, Qwen2-VL, and GPT-4o-based baselines with respect to the action prediction accuracy, demonstrating superior generalisation to the held-out test set.
+The overall improvement of \ourmethod in the accuracy compared to AndroidControl can be attributed to the closer alignment between the training and test sets, as the test set includes the same set of instructions but applied to mobile devices with varying characteristics, such as screen size and Android version.
+Additionally, we observe a significant performance drop in text-based baselines like T3A and image-text-based models like M3A and SeeAct. The absence of original UI trees in the AitW dataset can explain this decline. Since UI trees must be extracted from images using an annotation tool, inaccuracies are often introduced, which diminishes the performance of models that rely on text-based output conditioning. 
+This underscores a key advantage of \ourmethod, which remains robust even when UI trees are imprecise or completely missing (as seen in \Cref{tab:abl_ac_res}), with minimal impact on overall performance.
+
+\begin{table}
+\caption{Performance comparison of various model configurations using different combinations of modules across the AitW and AndroidControl datasets. Using \ourmethod but integrating \actionmethod with baseline methods improves accuracy and reduces inference time (and cost). Not all pairings are shown here for conciseness, the full list can be found in Table~\ref{tab:additional_results}.\\}
+\label{tab:mix_model_acc}
+\centering
+\begin{tabular}{llllccc}
+\toprule
+\multirow{2}{*}{\makecell{Framework}} & \multicolumn{3}{c}{Modules Used} & \multirow{2}{*}{\makecell{Avg Inf.\\ Time (s)}$\downarrow$} & \multicolumn{2}{c}{Overall$\uparrow$} \\
+\cmidrule(lr){2-4} \cmidrule(lr){6-7}
+& Type & Click & Text && AitW & AndCtrl \\
+\midrule
+T3A only & T3A & T3A & T3A & 4.87 & 26.9 & 53.1 \\
+LiMAC (ours) & AcT & T3A & T3A & 4.03 & 42.7 & \textbf{65.4} \\
+LiMAC (ours) & AcT & AcT & T3A & \textbf{1.04} & \textbf{69.8} & 63.2 \\
+\midrule
+M3A only & M3A & M3A & M3A & 10.64 & 35.6 & 57.5 \\
+LiMAC (ours) & AcT & M3A & M3A & 8.40 & 52.6 & \textbf{66.8}\\
+LiMAC (ours) & AcT & AcT & M3A & \textbf{1.87} & \textbf{70.0} & 62.5  \\
+\midrule
+Florence only & Florence2 & Florence2 & Florence2 & 0.50 & 70.8 & 57.0 \\
+LiMAC (ours) & AcT & Florence2 & Florence2 & 0.72 & 71.6 & 61.1 \\
+LiMAC (ours) & AcT & AcT & Florence2 & \textbf{0.34} & \textbf{72.2} & \textbf{63.1}\\
+\midrule
+Qwen only & Qwen2-VL & Qwen2-VL & Qwen2-VL & 3.03 & 51.0 & 52.2 \\
+LiMAC (ours) & AcT & Qwen2-VL & Qwen2-VL & 2.64 & 55.7 & 59.1 \\
+LiMAC (ours) & AcT & AcT & Qwen2-VL & \textbf{0.63} & \textbf{70.9} & \textbf{62.5}\\
+\midrule
+LiMAC (ours) & AcT & M3A & T3A & 7.57 & 52.4 & \textbf{67.4} \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Combining Different Modules}
+
+\ourmethod is a modular architecture that enables the integration of different modules for tasks such as predicting the action type, identifying the target element in \click actions, and generating text for \openapp and \inputtext. In this architecture, we primarily use \actionmethod to predict both the action type and the target element for \click actions. However, alternative modules can be employed for these predictions as well. In \Cref{tab:mix_model_acc}, we present combinations of different models, excluding SeeAct due to its low overall accuracy, and compare their performance across two datasets.
+
+In the AndroidControl dataset, we observe that using M3A for predicting the target elements in \click actions improves performance over using \actionmethod alone. This demonstrates that GPT-4o is highly effective at identifying the correct target element when the prompt specifies that the action is \click. This of courses comes at the cost of calling GPT-4o, which significantly increases the inference time. 
+The highest overall accuracy is achieved when \ourmethod is used to predict the action type, M3A is applied for target element prediction, and T3A is used for text generation
+In the AitW dataset, \ourmethod combined with Florence for text generation yields the highest accuracy. This outcome is expected, as both M3A and T3A show significantly lower accuracy in this dataset (see \Cref{tab:results}).
+
+
+\subsection{Ablation Studies}\label{sec:results:ablations}
+
+\begin{table}[t]
+\caption{Action-type, click-target, and text accuracies across module combinations on the AitW and AndroidControl datasets.  \ourmethod achieves the best action-type accuracy in both datasets and the best click-target accuracy in AitW, while our fine-tuned Florence2 excels at text prediction.\\}
+\label{tab:all_metrics}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{llllcccccc}
+\toprule
+ \multirow{2}{*}{\makecell{Framework}} & \multicolumn{3}{c}{Modules Used} & \multicolumn{2}{c}{Action Type} & \multicolumn{2}{c}{Click Target} & \multicolumn{2}{c}{Text} \\
+ \cmidrule(lr){2-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+& Type & Click & Text & AitW & AndCtrl & AitW & AndCtrl & AitW & AndCtrl \\
+\midrule
+
+SeeAct only & $\text{SeeAct}_\text{choice}$ & $\text{SeeAct}_\text{choice}$ & $\text{SeeAct}_\text{choice}$ & 67.1 & 66.8 & 36.9 & 48.5 & 69.4 & 67.1 \\
+SeeAct only & $\text{SeeAct}_\text{ann}$ & $\text{SeeAct}_\text{ann}$ & $\text{SeeAct}_\text{ann}$ & 68.2 & 66.8 & 44.7 & 55.7 & 66.0 & 61.8 \\
+T3A only & T3A & T3A & T3A & 56.2 & 67.7 & 33.5 & 71.1 & 66.5 & \textbf{78.4} \\
+M3A only & M3A & M3A & M3A & 63.8 & 69.8 & 48.3 & \textbf{77.1} & 67.3 & 74.3\\
+\midrule
+Qwen only & Qwen2-VL & Qwen2-VL & Qwen2-VL & 81.7 & 70.7 & 53.2 & 55.2 & 70.5 & 75.7 \\
+LiMAC (ours) & AcT & Qwen2-VL & Qwen2-VL & \textbf{86.9} & \textbf{82.3} & 53.2 & 55.2 & 70.5 & 75.7 \\
+LiMAC (ours) & AcT & AcT & Qwen2-VL & \textbf{86.9} & \textbf{82.3} & \textbf{77.4} & 65.4 & 70.5 & 75.7 \\
+\midrule
+Florence only & Florence2 & Florence2 & Florence2 & 86.4 & 79.6 & 76.2 & 62.0 & \textbf{84.2} & 77.5 \\
+LiMAC (ours) & AcT & Florence2 & Florence2 & \textbf{86.9} & \textbf{82.3} & 76.2 & 62.0 & \textbf{84.2} & 77.5 \\
+LiMAC (ours) & AcT & AcT & Florence2 & \textbf{86.9} & \textbf{82.3} & \textbf{77.4} & 65.4 & \textbf{84.2} & 77.5 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}  
+\begin{table}[t]
+\centering
+\caption{Evaluation of three ablated versions of \ourmethod using different types of input, on AndroidControl. For actions that require text completion, we use the fine-tuned Florence2.\\ }
+\label{tab:abl_ac_res}
+
+\begin{tabular}{@{}llccc@{}}
+\toprule
+               & Size & Action Type     & Click Target     & Overall  \\ 
+\midrule
+\ourmethod   &   520M    & 82.3            & 65.4              & \textbf{63.1}                   \\
+\ourmethod (no CLIP FT)    &   520M    & 81.9            & 62.3             & 60.0 \\ % from 436
+\ourmethod (no img)   &   433M    & 82.4            & 54.9              & 56.0                   \\ % from 410
+\ourmethod (no txt)    &   410M    & \textbf{83.2}            & \textbf{65.7}             & 63.0 \\ % from 412
+\bottomrule
+\end{tabular}
+\end{table}
+
+\cref{tab:all_metrics} presents the action-type, click-target, and text accuracies for various module combinations across the two datasets. The results show that \ourmethod, particularly the \actionmethod, achieves the best performance in action-type prediction. In the AndroidControl dataset, M3A and T3A perform well in click-target and text prediction but struggle with action-type accuracy, and they underperform in the automatically annotated AitW dataset. Overall, \actionmethod within \ourmethod excels at click-target predictions while being significantly smaller. Finally, our Florence fine-tune excels at text prediction, significantly outperforming GPT-4o baselines in AitW and remaining competitive in AndroidControl.
+
+Lastly, we present three ablation studies to further explore \actionmethod design choices. A core feature of \actionmethod is its ability to process each UI element as a distinct embedding within the transformer, created by concatenating the image, text, and attribute embeddings of the corresponding UI element. To assess the impact of the image and text modalities, as well as the CLIP fine-tuning on \ourmethod's performance, we compare it to three ablated versions: one that excludes the image component, another that omits the UI text in the embedding process, and one that uses the original CLIP for encoding the image embeddings instead of the fine-tuned version. The evaluation metrics for these comparisons in the AndroidControl dataset and using Florence2 for text completion are shown in \Cref{tab:abl_ac_res}.
+
+The results demonstrate that removing image embeddings significantly reduces accuracy across all metrics, highlighting the crucial role of visual information in \actionmethod. In contrast, omitting the text embeddings has only a slight effect on performance, suggesting that \actionmethod can function effectively using only screenshots of observations without accessing the UI tree. Additionally, we observe that fine-tuning CLIP (see \Cref{sec:our_model_inputs}) is an important factor in improving the overall accuracy of \ourmethod.
+
+These findings underscore the importance of visual features and the benefits of fine-tuning pre-trained models like CLIP in our context. The minimal impact of removing text embeddings indicates that \ourmethod is robust even when textual information is limited or unavailable, which is advantageous in scenarios where UI trees are inaccessible or incomplete. Future work could explore integrating other modalities or further optimising the embedding process to enhance performance.
+
+
+
+\section{Related Work on App Control}
+
+
+
+Though graphical user interface (GUI) control mainly started with web-based datasets and foundation model agents \citep{wob, miniwobplus, webshop, mind2web, webgum, webagentGur, seeact}, there has recently been a significant focus on mobile phone control. This can be seen both by the rapid development of Android navigation datasets and environments \citep{aitw, androidworld, androidcontrol}, and of mobile control agents \citep{appagent, mobileagent, mobileagentv2, autodroid, cogagent, androidworld, androidcontrol, digirl}. Though many agents are published with their own specific evaluation data, popular datasets such as Android-in-the-Wild~\citep{aitw} or AndroidControl~\citep{androidcontrol} are often used as benchmarks.
+
+The agents developed for this task can be divided into two clear input types: text-based, using UI accessibility tree or XML information to describe the screen, or image-based. Image-based agents require vision models, which are capable of directly processing image inputs, and are usually backed by VLMs. On the other hand, text-based agents are backed by classical LLMs. Image-based agents using VLMs also often take a combination of text and image as input to the model. 
+Many mobile control agents propose intricate prompting methods backed by off-the-shelf, often proprietary, LLMs such as GPT-4~\citep{androidworld, appagent, mobileagent, mobileagentv2, autodroid, seeact}. Though this requires little to no training, it can be both slow and expensive. Moreover, these models cannot be further tailored and trained for specific tasks.
+As such, another approach is to build mobile control agents around fine-tuned of foundation models on Android control datasets such as AitW or AndroidControl. Firstly, both AitW and AndroidControl present results for a fine-tuned LLM on their dataset, alongside the dataset itself. For example, \citet{androidcontrol} train various PaLM 2~\citep{palm2} models on their dataset. However, these models are proprietary and supposedly quite large, with the base PaLM 2 model reported to have over 300B parameters. CogAgent~\citep{cogagent} also performs fine-tuning on an 18B-large VLM. \citet{digirl} propose a different approach, called DigiRL, using RL to train their 1.3B VLM. This achieves strong performance but has its own limitations, notably the data gathering cost and simulation difficulty, leading to the model only being adept on a small subset of AitW.
+
+
+
+\section{Conclusion}
+
+
+In summary, we propose \ourmethod, a lightweight framework designed to address app control tasks. \ourmethod extracts UI elements from each phone screenshot and encodes them using specialised vision and text modules. These UI element encodings are then passed as embeddings to \actionmethod, which predicts the type and specifications of the next action. \actionmethod focuses on two key aspects of actions: the action type and the target element when the predicted action is \click. For actions requiring text generation, \ourmethod uses a fine-tuned VLM to ensure successful completion.
+We compare \ourmethod against six baselines supported by state-of-the-art foundation models and evaluate them on two open-source datasets. Our results show that \ourmethod can outperform the baselines while requiring significantly fewer computational time for both training and inference. This demonstrates that \ourmethod is capable of handling task completion on devices with limited computational capabilities.
+
+One of the main limitations of the proposed method is the limited training data. \ourmethod is trained on just 13K and 18K episodes for AndroidControl and AitW, respectively. The absence of any pretraining further hinders the model's ability to improve performance on more complex tasks. In the future, we aim to enhance the model's performance by incorporating online learning techniques, such as reinforcement learning.
+After the initial training stage presented in this work, \ourmethod could interact with an Android emulator to generate additional data. By using a suitable reward function, or even leveraging GPT-4 to evaluate the generated trajectories and assign rewards \citep{digirl}, we could fine-tune \ourmethod to improve the completion rate of tasks.
+
+\newpage
+
+
+
+

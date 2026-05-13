@@ -1,0 +1,594 @@
+\title{Learning an Inventory Control Policy with General Inventory Arrival Dynamics}
+
+\begin{abstract}
+	In this paper we address the problem of learning and backtesting inventory control policies in the presence of general arrival dynamics -- which we term as a quantity-over-time arrivals model (QOT).  We also allow for order quantities to be modified as a post-processing step to meet vendor constraints such as order minimum and batch size constraints -- a common practice in real supply chains. To the best of our knowledge this is the first work to handle either arbitrary arrival dynamics or an arbitrary downstream post-processing of order quantities. Building upon recent work \citep{madeka2022deep} we similarly formulate the periodic review inventory control problem as an {\it exogenous decision process}, where most of the state is outside the control of the agent. \citet{madeka2022deep} show how to construct a simulator that replays historic data to solve this class of problem. In our case, we incorporate a deep generative model for the arrivals process as part of the history replay. By formulating the problem as an exogenous decision process, we can apply results from \citet{madeka2022deep} to obtain a reduction to supervised learning. Via simulation studies we show that this approach yields statistically significant improvements in profitability over production baselines. Using data from a real-world A/B test, we show that Gen-QOT generalizes well to off-policy data and that the resulting buying policy outperforms traditional inventory management systems in real world settings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+The periodic review inventory control problem is that of determining how much inventory to hold in order to maximize revenue. This problem has been studied extensively in the operations research literature, and is often formulated as a Markov decision process \citep{porteus2002foundations}. Some complexities involved include stochastic demands with unknown seasonality, lost sales, stochastic vendor lead times, multiple shipments per order, unreliable replenishment, and order quantity restrictions. Classical approaches are typically able to handle only a subset of these complexities due to the curse of dimensionality and the fact that closed form solutions are not available as the problem setting increases in complexity. In fact, base stock policies (which are optimal for simplified settings and often used in practice) have been shown to perform worse than constant order policies in the presence of lost sales and stochastic demand \citep{zipkin2008old}.
+
+\citet{madeka2022deep} recently introduced the first Deep Reinforcement Learning periodic review inventory system which was able to handle many of the aforementioned challenges. By formulating inventory control as an {\it exogenous decision process} \citep{sinclair2023hindsight}, \citet{madeka2022deep} demonstrate a reduction in complexity of the learning problem to that of supervised learning. They also show how censored (unobserved) historic data can be  used for policy learning and backtesting by constructing a simulator that {\it replays historic data} rather than assuming a parametric form in order to simulate the future.
+
+One of the assumptions \citet{madeka2022deep} does maintain from the classical inventory control literature, however is the structure of inventory arrivals given an order quantity provided to the vendor. The authors handle the case of stochastic lead times (with unknown distribution), but in real-world settings there are several additional complexities that can arise. First, a single order placed to a vendor may arrive in multiple shipments at different future periods\footnote{To the best of our knowledge, no existing work considers this setting.}. \Cref{fig:multipleshipment} shows distributions of number of shipments and inter-arrival times from a set of purchase orders made by a large e-retailer.
+
+\begin{figure}[H]
+	\centering
+	\subcaptionbox{Number of distinct shipments per order\label{fig:multipleshipment-receives}}[0.49\textwidth]
+	{\includegraphics[width=0.49\textwidth]{plots/num_receive_events.pdf}}~
+	\subcaptionbox[0.9\textwidth]{Inter-arrival times for the same order \label{fig:multipleshipment-gaps}}
+	{\includegraphics[width=0.49\textwidth]{plots/periods_between_receives.pdf}}
+	\caption{Orders often arrive in multiple shipments, and spread out over multiple time periods.}
+	\label{fig:multipleshipment}
+\end{figure}
+
+Second, the supply may be unreliable and vendors may only partially fill orders that they receive -- for example an order for 100 units of an item may result in only 75 units being supplied. This may occur for multiple reasons, including that the vendor itself is out of stock. In the literature the proportion of the original order quantity retailer ultimately receives is referred to as the {\it yield} or {\it fill rate}. \Cref{fig:fills-vendor} shows the distribution of yields at a large e-retailer.
+
+\begin{figure}[h]
+	\centering
+	\subcaptionbox{Observed distribution of supplier fill rates\label{fig:fills-vendor}}[0.49\textwidth]
+	{\includegraphics[width=0.49\textwidth]{plots/vendor_fill_rate_hypothetical.pdf}}
+	\subcaptionbox[0.49\textwidth]{Overall yields, including any post-processing \label{fig:fills-system}}
+	{\includegraphics[width=0.49\textwidth]{plots/system_fill_rate.pdf}}
+	\caption{Example of yields -- multiplicative proportion of order quantity that is received -- for purchase orders at a large e-retailer, both before and after any post-processor is applied to the order quantity.}
+	\label{fig:fills}
+\end{figure}
+
+Finally, the order quantity dictated by the policy may not meet the requirements of the vendor and may need to be rounded before a purchase order is sent: for example minimum order quantities or batch size restrictions\footnote{For example, order quantities may need to be a multiple of case sizes or other unit of packaging} are quite common \citep{zhu2015effective}. The impact of such restrictions is difficult to analyze, is not well understood, and heuristic rules are typically employed \citep{robb1998inventory,zhu2015effective,zhou2007effective}. In real-world settings, this may be performed as a secondary post-processing step after the optimal order quantity has been determined -- for example by rounding up to the minimum order quantity \citep{kiesmller2011single,zhu2022simple}. \Cref{fig:fills-system} shows the distribution of ``end-to-end'' yields -- including both supply uncertainty and any post-processing steps to meet batch ordering or minimum order quantity constraints applied by ordering systems -- for replenishment decisions at a large e-retailer. Note how in many cases, the ``end-to-end'' yield can be greater than the original order quantity due to the presence of a post-processing step.
+
+
+\subsubsection*{Our Contributions and Organization}
+
+In this paper we address the problem of learning and backtesting inventory control policies in the presence of general arrival dynamics (which we term as a quantity-over-time model or QOT).  We also allow for order quantities to be modified as a post-processing step to meet vendor constraints such as order minimum and batch size constraints. To the best of our knowledge this is the first work to handle either arbitrary arrival dynamics or an arbitrary downstream post-processing of order quantities -- a common practice in real supply chains. \Cref{fig:diff-models} illustrates the difference in cumulative arrivals over time under the different types of arrival dynamics.
+
+\begin{figure}[h]
+	\centering
+	\includegraphics[width=0.5\textwidth]{plots/cumulative_receive_different_models.pdf}
+	\caption{Cumulative arrivals over time for a single purchase order under differing dynamics.}
+	\label{fig:diff-models}
+\end{figure}
+
+The remainder of this paper is organized as follows: in \Cref{sec:method} we formulate our problem as an exogenous interactive decision process and leverage results from \citet{madeka2022deep} to demonstrate a reduction to supervised learning. We also describe our approach to modeling the arrival dynamics for use as part of a simulator that replays historic data \citep{madeka2022deep}. Next, in \Cref{sec:eval-dynamics} we evaluate the performance of the learned dynamics model on  ``on-policy'' data -- that is, data generated by the same policy that generated the data used to fit the model.  Then, \Cref{sec:eval-sim} we demonstrate via backtests the impact a realistic arrivals model has on policy performance. Finally, in \Cref{sec:eval-real}, results from a large real-world A/B test in the supply chain of a large e-retailer show that (1) the RL policy learned using our methodology outperforms classic approaches to periodic review inventory control, and (2) our learned dynamics model generalizes well to ``off-policy'' data which validates our assumption that we have an accurate forecast of transitions under the learned policy.
+
+
+\section{Related Work}
+
+\label{sec:background}
+
+\subsection{Forecasting and Generative Modeling}
+\label{sec:background-fcst}
+
+All work which considers stochastic vendor lead times implicitly requires a forecast of lead times (even if the lead time distribution is assumed to be stationary). We have not found much study of forecasting lead times specifically, but approaches from the probabilistic time series forecasting community can be used to forecast lead times.  There is an extensive body of work which has successfully applied deep learning to time series forecasting, including in the supply chain for forecasting demand   \citep{nascimento2019stconv,yu2017long,gasparin2019deep,mukhoty2019seq,wen2017mqcnn,salinas2020deepar,wen2019deep,eisenach2020mqt,madeka2018sample}.
+\subsubsection*{Deep Generative Modeling}
+A number of deep generative techniques have been developed to estimate the likelihood of observations in training data and generate new samples from the underlying data distribution. These include generative adversarial networks \citep{goodfellow2014gan}, variational auto-encoders \citep{kingma2013auto,kingma2019intro}, and autoregressive models. Autoregressive models have been used successfully in image generation \citep{van2016pixel}, NLP \citep{brown2020language,devlin2019bert}, and time-series forecasting \citep{madeka2018sample,eisenach2020mqt,januschowski2022forecasting,wen2017mqcnn,salinas2020deepar,lim2019tft}. Our work employs autoregressive modeling by decomposing the full problem of estimating the joint distribution of arrivals into the simpler problem of merely predicting the next arrival in a sequence given the previously realized shipments.
+\nocite{augenblick2018belief,taleb2018election,taleb2019all,foster2021threshold}
+
+\subsection{Reinforcement Learning and Exogenous Sequential Decision Problems}
+\label{sec:background-exo}
+Reinforcement learning has been applied to many sequential decision-making problems including games and simulated physics models where many simulations are possible \citep{silver2016mastering,szepesvari2010algorithms,mnih2013playing, sutton2020reinforcement,schulman2017proximal,mnih2016asynchronous}. In general, one can require exponentially many samples (in the horizon of the problem) to learn a control policy.
+
+Recently, \citet{madeka2022deep} and \citet{sinclair2023hindsight} considered a class of problems called {\it exogenous interactive decision processes} wherein the state consists of a stochastic exogenous process (independent of the control) and an endogenous component that is governed by a known transition function $f$ of both the previous endogenous state and the exogenous process. In these cases, \citet{madeka2022deep,sinclair2023hindsight} prove a reduction in sample complexity to that of supervised learning -- an exponential improvement over the general RL setting. \nocite{efroni2022sample,efroni2022sparsity}
+
+\subsection{Periodic Review Inventory Systems}
+\label{sec:background-inv}
+Inventory control systems have been studied extensively in the literature under a variety of conditions (see \citet{porteus2002foundations} for a comprehensive overview). The simplest form is the newsvendor, which solves a myopic problem \citep{arrow1958studies}. Many extensions exist \citep{nahmias1979simple, arrow1958studies}, and the optimal policy in many variants takes the form of a {\it base stock policy} which, informally, consists of an optimal inventory level and then orders up to that level. However, outside the restrictive conditions under which optimal policies can be derived, \citet{zipkin2008old} showed that even constant order policies can be better than base stock policies.
+
+\subsubsection*{RL for Inventory Control}
+More recently, several authors have applied reinforcement learning to solve multi-period inventory control problems \citep{giannoccaro2002inventory,das1999solving,balaji2019orl,madeka2022deep}. We adopt the modeling approach of \citet{madeka2022deep}, and similarly treat the periodic review inventory control problem under general arrival dynamics as an exogenous decision process. Also following \citet{madeka2022deep}, we build a differentiable simulator \citep{suh2022differentiable,hu2019chainqueen,ingraham2018learning,clavera2020model} using historical supply chain data, and successfully train and backtest an RL agent to achieve improved real world performance over traditional methods.
+
+\nocite{alvo2023neural,mousa2023analysis,abbas2023plasticity,zhao2023policy,thomas2023towards,parmas2023model,gijsbrechts2022can, qi2023practical}
+
+\subsubsection*{Lead Times and Supply Reliability}
+There has been extensive work in the literature on how to handle stochastic lead times in periodic review inventory systems \citep{porteus2002foundations,song1996inventory,maggiar2022multi,nahmias1979simple,kaplan1970dynamic}. In addition, unreliable supply has been studied in a variety of settings. One form this often takes is a stochastic yield \citep{maddah2008economic,li2004periodic,henig1990structure, gerchak1988periodic,maggiar2022multi,bollapragada1999myopic}, for example via some portion of the supply being defective. A common heuristic is to simply adjust the order quantity for the mean yield \citep{bollapragada1999myopic}. The second standard formulation is to have the fill rate level be determined by the number of units the vendor has available, where vendors fill up to the amount of units they have available \citep{dada2007news}. The first setting is more common as it is more tractable to find analytic solutions. We are unaware of any work that considers the impact of a varying number of shipments per order placed with the supplier.
+
+In this work, we take the following approach: we assume that the vendor fills orders up to their capacity (which is exogenous to the retailer's replenishment decisions), but we add an arrival shares process which encodes how the filled amount arrives over future time periods.
+
+\subsubsection*{Minimum Order Quantities, Maximum Order Quantities and Batch Ordering}
+A {\it minimum order quantity} or {\it maximum order quantity} constraint means that the supplier will reject all orders under or over that amount, respectively. For minimum order quantity constraints, {\it we only consider the setting where the retailer can also choose to order 0 (i.e. not to order)} as otherwise the minimum quantity constraint is unimportant. Similarly, a {\it batch ordering} requirement means that the supplier only accepts order quantities that are an integer multiple of some specified batch quantity. Maximum constraints have been studied extensively in the literature and typically affect the policy a in benign way \citep{chan1999effects,federgruen1986inventory}. On the other hand, minimum order quantities \citep{fisher1996reducing,zhou2007effective,zhao2006structure,shen2019two} and batch requirements \citep{veinott1965optimal,zhu2015effective} -- although  widely adopted by suppliers in practice \citep{zhu2022simple} --  are relatively unstudied in the literature as they present significant difficulties in deriving the optimal order quantity. For minimum order quantities, even in highly simplified settings, optimal policies are only partially characterized and are too complicated to implement in practice \citep{zhao2006structure}. Instead, retailers use base stock policies with a heuristic rounding before placing the order \citep{zhou2007effective,kiesmller2011single}.
+
+
+
+
+\section{Mathematical Formulation and Methodology}
+
+\label{sec:method}
+
+In this section, we follow the Interactive Decision Process (IDP) formulation of \citet{madeka2022deep}, borrowing most of the conventions and notation, except we define and treat the ``lead time'' process differently. At a high level, a central planner is trying to determine how many units of inventory to order at every time step $t = 1,2,...,T$, in order to satisfy demands $D_t$. The goal is to maximize profits by balancing having enough inventory on hand to satisfy demand (we assume a lost sales customer model), with the cost of holding too much inventory.
+
+The dynamics we are most concerned with is how order quantities selected by the policy evolve into future arrivals at the retailer's warehouse. The standard formulation in the literature is the vendor lead time (VLT) arrivals model, whereupon placing an inventory order decision $a_t$ at time $t$, a single quantity $v_t$ is drawn from an exogenous lead time distribution, and the entire order arrives $v_t$ time steps later at time $t+v_t$. In the case of stochastic yields, there are two approaches in the literature: either the yield is a random multiplicative factor multiplied times the order quantity, or the vendor has a stochastic supply and fills up to the amount of their supply. Where we depart from \citet{madeka2022deep} is that our formulation allows that
+\begin{enumerate}[itemsep=0em]
+	\item inventory can arrive in multiple shipments for a single order,
+	\item yields can be stochastic, and
+	\item there can be a downstream system that applies a heuristic order quantity rounding to satisfy batch, minimum and maximum quantity constraints.
+\end{enumerate}
+
+We propose a novel quantity over time (QOT) arrivals model, which generalizes all the settings described above. In the QOT arrivals model, we assume that orders can arrive in multiple shipments over time, and the total arriving quantity may not necessarily sum up to the order quantity placed. At every time $t$, the vendor has allocated a supply $U_t$ that denotes the maximum number of units it can send (regardless the amount we order), which will arrive over from the current week up to $L$ weeks in the future according to an exogenous arrival shares vector $(\rho_{t,0},...,\rho_{t,L})$ where $\sum_l \rho_{t,l} = 1$. That is, the arrivals at lead time $j$ from order $a_t$ is equal to $\min(U_t, a_t)\rho_{t,j}$. We denote the arrival quantity as $o_{t,j} := \min(U_{t}, a_{t})\rho_{t,j}$. Here, we implicitly assume that orders necessarily arrive after $L$ time steps.
+
+We also allow for the existence of an order quantity post-processor $f_{p}$ that is arbitrary (but known) that modifies order quantities before they are sent to the supplier -- e.g. to ensure they meet any vendor constraints.
+
+\subsection{Mathematical notation}
+Denote by $\mathbb{R}$, $\mathbb{R}_{\geq 0}$, $\mathbb{Z}$, and $\mathbb{Z}_{\geq 0}$ the set of reals, non-negative reals, integers, and non-negative integers, respectively. We let $(\cdot)^+$ refer to the classical positive part operator i.e. $(\cdot)^{+} = \max(\cdot, 0)$. 
+Let $[\;\cdot\;]$ refer to the set of positive integers up to the argument, i.e. $[\;\cdot\;] = \{x \in \mathbb{Z} \, | \, 1 \leq x \leq \cdot \;\}$. The inventory management problem seeks to find the optimal inventory level for each product $i$ in the set of retailer's products, which we denote by $\mathcal{A}$. We assume our exogenous random variables are defined on a canonical probability space $(\Omega, \mathcal{F}, \mathbb{P})$, and policies are parameterized by $\theta$  in some parameter set $\Theta$.  We use $\mathbb{E}^{\mathbb{P}}$ to denote an expectation operator of a random variable with respect to some probability measure $\mathbb{P}$. Let $||X,Y||_{TV}$ denote the total variation distance between two probability measures $X$ and $Y$.
+\subsection{IDP Construction}
+\label{sec:idpconstruction}
+Our IDP is governed by external (exogenous) processes, a control process, inventory evolution dynamics, and a reward function. To succinctly describe our process, we focus on just one product $i \in \mathcal{A}$, though we note that decisions can be made jointly for every product.
+
+\paragraph{External Processes} At every time step $t$, for product $i$, we assume that there is a random demand process $D_t^{i} \in [0,\infty)$ that corresponds to customer demand during time $t$ for product $i$. We also assume that the random variables $p_t^{i} \in [0,\infty)$ and $c_t^{i} \in [0,\infty)$ are the random variables corresponding to selling price and purchase cost. We also assume any constraints the vendor imposes on the retailer's orders $\bM^i_t \in \RR^{d_v}$ -- such as minimum order quantities and batch sizes -- are exogenous to the ordering decisions. The supply $U^i_t \in [0,\infty)$ corresponds to the maximum amount of inventory the vendor is able to send. Finally, the arrival shares process $\boldsymbol\rho^i_t := \{\rho^i_{t,j}\}_{j=0}^L$ describes the arrivals over the next $L$ time steps from an order placed at the current time $t$ -- note that $\sum_{j=0}^L \rho^i_{t,j} = 1$ and $\rho^i_{t,j} > 0$ for all $i$, $t$, and $j$. Our exogenous state vector for product $i$ at time $t$ is all of this information:
+\[
+	s^i_t = (D_t^{i}, p_t^{i}, c_t^{i}, U^i_t, \bM^i_t, \boldsymbol\rho^i_t).
+\]
+To allow for the most general formulation possible, we consider policies that can leverage the history of all products. In our implementation, however, we learn a policy that only uses the history of that product and for our learnability results in \Cref{sec:learn} we will assume independence of the processes between products. Therefore, we will define the history
+\[
+	H_t :=\{( s_1^i,...,s_{t-1}^i)\}_{i=1}^{|\mathcal{A}|}
+\]
+as the joint history vector of the external processes for all the products up to time $t$.
+
+\paragraph{Control Processes} Our control process will involve picking actions for each product jointly from a set of all possible actions $\mathbb{A} := \mathbb{R}_{\geq 0}^{|\mathcal{A}|}$. For product $i$, the action taken is denoted by $a_t^{i} \in \mathbb{R}_{\geq 0}$, the order quantity for product $i$. For a class of policies parameterized by $\theta$, we can define the actions as
+\[
+	a_t^{i} = \pi_{\theta,t}^{i}(H_t).
+\]
+We characterize the set of these policies as $\Pi = \{\pi_{\theta,t}^{i}| \theta \in \Theta, i \in \mathcal{A}, t \in [0,T]\}.$
+
+\paragraph{Order Quantity Constraints} We allow for the existence of an order quantity post-processer $f_{p} : \RR_{\geq 0} \times \RR^{d_v} \rightarrow \RR_{\geq 0}$ that may modify the order quantity -- for example to satisfy the constraints given by $\bM^{i}_t$. The final order quantity requested from the vendor is denoted as $\tilde{a}^i_t := f_{p}(a_t^i, \bM^{i}_t)$. Note that we do not impose a requirement that any constraints encoded in $\bM_t^i$ be satisfied, merely that we permit the endogenous portion of the state's evolution to depend on such a function as they appear so often in real supply chains.
+
+\paragraph{Inventory Evolution Dynamics}
+We assume that the implicit endogenous inventory state follows standard inventory dynamics and conventions. Inventory arrives at the beginning of the time period, so the inventory state transition function is equal to the order arrivals at the beginning of the week minus the demand fulfilled over the course of the week. Both demand and arrivals may be censored due to having lower inventory on-hand or vendor having low supply, respectively. The amount arriving, according to our model of arrivals is:
+\begin{equation}
+	\label{eq:arrivals}
+	I^i_{t_-} = I^i_{t-1} + \sum_{j=0}^L \min(U^i_{t-j},\tilde{a}^i_{t-j})\rho^i_{t-j,j},
+\end{equation}
+where $I_t^i$ is the inventory at the end of time $t$, and $I_{t_-}^i$ is the inventory at the beginning of time $t$, after arrivals but before demand is fulfilled. Then, at the end of time $t$, the inventory position is:
+\[
+	I^i_{t} = \min(I^i_{t_-}- D^i_t, 0).
+\]
+
+\paragraph{Reward Function} The reward at time $t$ for product $i$ is defined as the selling price times the total fulfilled demand, less the total cost associated with any newly ordered inventory (that  will be charged by the vendor upon delivery):
+\begin{equation}
+	\label{eqn:rewardfunc}
+	R_t^{i} = p_t^i \min(D^i_t, I^i_{t_-}) -  c_t^i \min(U^i_t,\tilde{a}_t^i).
+\end{equation}
+Note that the cost charged is the {\it realized} order quantity, which is the standard practice in the literature.
+
+We will write $R_t(H_t, \theta)$ to emphasize that the reward is a function only of the exogenous $H_t$ and the policy parameters $\theta$. Recall that selling price and buying cost are determined exogenously. We assume all rewards $R_t^{i} \in [R^{min},R^{max}]$, and assume a multiplicative discount factor of $\gamma \in [0,1]$ representing the opportunity cost of reward to the business. Again, we make the dependence on the policy explicit by writing $R_t^{i}(\theta)$. The objective is to select the best policy (i.e., best $\theta \in \Theta$) to maximize the total discounted reward across all products, expressed as the following optimization problem:
+\begin{align*}
+	\max_{\theta}       & ~\mathbb{E}_{\mathbb{P}}\Biggl[\sum_{i\in \mathcal{A}} \sum_{t\in [0,T]} \gamma^t R_t^{i}(\theta)\Biggr] \numberthis \label{eq:obj} \\
+	\text{subject to: } &                                                                                                                         \\
+	I^i_0               & = k^i                                                                                                                   \\
+	a^i_t               & = \pi_{\theta,t}^i(H_t)                                                                                                 \\
+	\tilde{a}^i_t       & = f_p^i(a^i_t, H_t)                                                                                                     \\
+	I^i_{t_-}           & = I^i_{t-1} + \sum_{j=0}^L \min(U^i_{t-j},\tilde{a}^i_{t-j})\rho^i_{t-j,j}, \numberthis \label{eqn:invupdate}           \\
+	I^i_{t}             & = \min(I^i_{t_-}- D^i_t, 0).
+\end{align*}
+Here, $\mathbb{P}$ denotes the joint distribution over the exogenous processes. The inventory $I_0^i$ is initialized at $k_i$, a known quantity \emph{a priori}.
+
+\subsection{Learnability}
+\label{sec:learn}
+
+\subsubsection*{Learning Objective}
+For the policy to be efficiently learnable, we need to restrict the policy for product $i$ at time $t$ to be a function only of the history of item $i$, $H^i_t :=\{( s_1^i,...,s_{t-1}^i)\}$, and the learnable parameter $\theta$ is shared by all item's policies. The reward is therefore now a function $R_t(H^i_t, \theta)$ of only the history of item $i$ and the parameter $\theta$. The learning objective then becomes
+\[
+	J_T(\theta) := \EE\Biggl[\sum_{i\in \mathcal{A}} \sum_{t\in [0,T]} \gamma^t R_t^{i}(\theta)\Biggr],
+\]
+which we estimate via simulation with the objective
+\[
+	\hat{J}_T(\theta) := \sum_{i\in \mathcal{A}} \sum_{t\in [0,T]} \gamma^t R_t^{i}(\theta).
+\]
+This is clearly an unbiased estimate of $J_T$ as the historical data $H_T$ is exogenous to the choice of policy.
+
+\subsubsection*{Learnability}
+Our problem formulation fits under the framework described in \cite{madeka2022deep}, with additional exogenous variables $U_t$, $\boldsymbol\rho_t$, and $\bM_t$ as part of the external state process. Hence, assuming full observability of these processes, we can accurately simulate the value of any policy.  This follows immediately from Theorem 2\footnote{The addition of the post-processor $f_p$ does not impact the result.} of \citet{madeka2022deep} as we assume that the supply, arrival shares, and vendor constraint processes are exogenous.
+
+In reality, one does not fully observe the supply of the vendors ($U^i_t$) or the arrival shares ($\boldsymbol\rho^i_t$). The supply of the vendor $U_t^i$ is only observed historically at times when the vendor did not fully fill the order -- in which case, $U_t^i = \sum_{j=0}^L o_t^j$. The arrival shares $\boldsymbol\rho^i_t$ are fully observed historically whenever an order is placed and the vendor sends at least one unit.
+
+To proceed we require a way to obtain these missing values. First, for the supply $U_t^i$, the retailer could collect this data by asking vendors to share how many units they are able to supply\footnote{This problem is little studied in the literature, but in some scenarios it is known that the supplier is always at least as well off if they share capacity information \citep{bao2006supply}}.  Another approach is to treat this as a missing data problem, and then use additional exogenous observed context $x_t^i \in \RR^D$ that is available at time $t$ for product $i$, to forecast these unobserved components. The observed context history is denoted as  $X_T^i := (x_1^i,\dots,x_T^i)$. The latter is similar to the uncensoring of demand in \citet{madeka2022deep}.
+
+\begin{assumption}[Accurate Forecast of Supply and Arrival Shares]
+	\label{assm:fill-supply}
+	Let $H^i_{T,F} := (U^i_1,\boldsymbol\rho^i_1,\dots,U^i_T,\boldsymbol\rho^i_T)$ denote the history of the unobserved exogenous supply and arrival shares processes through time $T$. Likewise, denote the observed components of the exogenous history $H^i_T$ as $H^i_{T,O}$. Now, we can consider the distributions $\PP_F^i := \PP(H^i_{T,F} | H^i_{T,O}, X^i_T)$ and $\hat{\PP}_F^i := \hat{\PP}(H^i_{T,F} | H^i_{T,O}, X^i_T)$. If
+	\[
+		\frac{1}{|\cA|}\sum_{i\in \cA} ||\hat{\PP}_F^i, \PP_F^i||_{TV} \leq \epsilon_F,
+	\]
+	we call $\hat{\PP}_F^i$ an accurate forecast of $ \PP_F^i$.
+\end{assumption}
+
+Under \Cref{assm:fill-supply}, it follows from Theorem 3\footnotemark[2] of \citet{madeka2022deep} that the inventory control problem with general arrivals is efficiently learnable in the case where we do not observe the supply and arrival shares processes. In practice, we may choose to forecast {\it arrivals} instead of the supply and arrival shares processes -- see \Cref{rem:fcst-arrivals} below.
+
+\begin{remark}[Forecasting Arrivals]
+	\label{rem:fcst-arrivals}
+	Note that the dynamics \eqref{eqn:invupdate} and reward function \eqref{eqn:rewardfunc} depend only on the arrivals $o_{t,j}^i := \min(U^i_t,f_p(a_t^i,\bM^i_t))\rho^i_{t,j}$, so we forecast arrivals conditional on the action $a_t^i$ rather than the supply and arrival share processes for the purposes of constructing our simulator from historic data.
+\end{remark}
+
+\subsection{Modeling arrivals with Gen-QOT}
+\label{sec:gen-qot}
+Having established that our problem of interest is efficiently learnable, we proceed with describing the QOT model and then evaluating the model. Per \cref{rem:fcst-arrivals}, we forecast the arrival sequence directly rather than the supply and arrival processes. Formally, we forecast the distribution
+\[
+	p(o^i_{t,0},\dots, o^i_{t,L} | H_{t,O}^i, X_t^i).
+\]
+The model is trained to minimize log-likelihood of the forecasted distribution. See \Cref{sec:genqot} for a complete description of the model and training objective. It is worth emphasizing that modeling arrivals directly allows us to treat $f_p$ as part of the forecast of the arrivals process, which will be advantageous in \Cref{sec:method-sim} when we describe how to make the simulator differentiable.
+
+\Cref{fig:rl_qot_sample_paths} shows a set of sample paths generated from our Gen-QOT model alongside a set of real order-quantity normalized inventory arrivals.
+\begin{figure}[!htb]
+	\centering
+	\includegraphics[width=0.49\textwidth]{plots/inventory_receive_sample_pathsactual.pdf}
+	\includegraphics[width=0.49\textwidth]{plots/inventory_receive_sample_pathssampled.pdf}
+	\caption{A set of 256 real and simulated sample paths of order-quantity normalized inventory arrivals.}
+	\label{fig:rl_qot_sample_paths}
+\end{figure}
+A natural question then arises: how should one measure the quality of the generated sample paths? The simplest thing would be to compare against other methods for forecasting vendor lead times (this will be referred to as {\bf Criterion 1}). In addition, we might want to check that the generated paths satisfy several desirable properties that we anticipate may be relevant to the inventory control problem:
+\begin{enumerate}
+	\item {\bf Criterion 2} -- Does Gen-QOT predict the right amount of cumulative inventory $l$ weeks after an order is placed?
+	\item {\bf Criterion 3} -- Does Gen-QOT predict receiving zero inventory for the correct orders?
+	\item {\bf Criterion 4} -- Does Gen-QOT predict correctly whether there is an arrival in the first week after an order is placed?
+	\item {\bf Criterion 5} -- Does Gen-QOT predict correctly the time by which the order fully arrives?
+\end{enumerate}
+Accordingly, we propose five methods for evaluating the quality of the dynamics model:
+\begin{enumerate}
+	\item {\bf Criterion 1} -- Obtain the empirical distribution predicted by Gen-QOT and evaluate against with standard accuracy metrics such as CRPS and quantile loss.
+	\item {\bf Criterion 2} -- Regress the actual cumulative inventory received on the mean predicted cumulative inventory received for each week.
+	\item {\bf Criterion 3 and 4} -- Generate sequences and use as a classifier, then construct a classifier calibration plots for generated sequences.
+	\item {\bf Criterion 5} -- Generate sequences and use them to generate probabilistic forecasts of the arrival time of the full order, then compute the calibration.
+\end{enumerate}
+In \Cref{sec:eval-dynamics} we fit the Gen-QOT model to historic data and perform evaluations against the five criterion listed above.
+\subsection{Simulator Construction}
+\label{sec:method-sim}
+Our simulator is constructed similarly to \citet{madeka2022deep} aside from the change to the inventory transition dynamics. To handle the general arrival dynamics, the first approach is to estimate the partially observed $H^{i}_{t,F}$ and directly implement \eqref{eqn:invupdate} since $f_p$ is known. Alternatively, following \Cref{rem:fcst-arrivals}, we could forecast arrivals and simply sample that distribution at each step. The issue with both these approaches are that the simulator is no longer path-wise differentiable and if possible, we would prefer to leverage the fact that most of our dynamics {\it are differentiable} and thus the exact gradient can be computed analytically.
+
+The approach we take in our empirical work is the following: first, given the action $a_t$ and the exogenous $H_{t,O}^{i}$, $X_t^i$, sample the estimated forward model
+\begin{equation}
+	\label{eqn:arrival-sampling}
+	\hat{o}^i_{t,0},\dots, \hat{o}^i_{t,L} \sim \hat{p}(\cdot | H_{t,O}^{i}, X_t^i, a_t).
+\end{equation}
+The sampled arrivals can then be converted into a sampled sequence of partial fills $\bar{\alpha}^i_{t,l} = \frac{\hat{o}^i_{t,l}}{a^i_{t}}$ by rescaling by the action $a_t^i$. The inventory update in \eqref{eqn:invupdate} becomes
+\begin{equation}
+	\label{eqn:invupdate-sampled}
+	I^i_{t_-} = I^i_{t-1} + \sum_{j=0}^L \bar{\alpha}^i_{t-j,j} a^i_{t-j},
+\end{equation}
+This is similar in spirit to the approach in \citet{clavera2020model}, except they use the re-parametrization trick and then differentiate through the forward model, passing a noise process as input.
+
+
+
+\section{Empirical Results}
+
+\label{sec:eval}
+In this section we present some empirical results. First, in \Cref{sec:eval-dynamics} we evaluate the performance of the fitted Gen-QOT under the four criterion discussed in \Cref{sec:gen-qot}. Then in \Cref{sec:eval-sim} we demonstrate through backtests against historical data in a simulator based on the Gen-QOT model the difference in performance between baseline policies, an RL trained in a simulator with Gen-QOT dynamics and an RL under dynamics dictated by a classical vendor lead-time model. Finally, in \Cref{sec:eval-real} we show recent results from a real-world A/B test of the RL policy in the US store of a large e-retailer.
+
+\subsection{Evaluating the Gen-QOT Model}
+\label{sec:eval-dynamics}
+First, we evaluate our proposed Gen-QOT model as we require an accurate forecast in order for the policy backtest to be valid. The Gen-QOT model architecture and training objective can be found in \Cref{sec:genqot}.
+
+\subsubsection*{Training and Evaluation Data}
+We train Gen-QOT on purchase orders from 250K products from the US store of a large e-retailer from 2017-05-13 to 2019-02-01 and holdout 100K actions from 2019-02-01 to 2020-02-01 to evaluate model performance. This time period allows us to judge both in-time and out-of-time time generalization. The features used in our model can be found in \Cref{sec:featurization}.
+
+\subsubsection*{Results}
+\paragraph{VLT Forecasting} Because many inventory control systems rely on simplified optimization models that assume only random lead-time, we evaluate the Gen-QOT model against one that directly predicts quantiles of the vendor lead-time distribution. The architecture used is similar to Gen-QOT, but we replace the recurrent neural-net decoder with a simple multi-layer perceptron.\footnote{More precisely, the architecture is MQCNN which achieve SOTA performance on probabilistic forecasting tasks that use very similar data -- see ``MQ\_CNN\_wave'' in Figure 3 of \citet{wen2017mqcnn}. }
+
+To produce a forecast of the vendor lead time from Gen-QOT, samples are generated from Gen-QOT to obtain an empirical distribution from which quantiles can be determined. \Cref{table:genq-qot-vs-direct} shows the backtest results on data from 2019-02-01 to 2020-02-01, showing that Gen-QOT is competitive with traditional vendor lead time forecasting approaches. See \Cref{sec:metrics} for definitions of the CRPS and Quantile Loss metrics used.
+\begin{table}[H]
+	\caption{Backtest of generative model versus direct quantile forecast (lower values are better); 95\% confidence intervals are on the performance gap between the two models.}
+	\begin{center}
+		\begin{tabular}{ c c c c  }
+			\toprule
+			       & \multicolumn{2}{c}{Model} &                         \\
+			\cmidrule{2-3}
+			Metric & Direct Prediction         & Gen-QOT & 95\% CI       \\
+			\midrule
+			CRPS   & 100.00                    & 101.61  & [-0.23, 3.46] \\
+			P10 QL & 100.00                    & 99.92   & [-1.91, 1.75] \\
+			P30 QL & 100.00                    & 101.24  & [-0.57, 3.04] \\
+			P50 QL & 100.00                    & 102.41  & [0.38, 4.44]  \\
+			P70 QL & 100.00                    & 103.21  & [0.89, 5.54]  \\
+			P90 QL & 100.00                    & 102.22  & [0.50, 4.96]  \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	\label{table:genq-qot-vs-direct}
+\end{table}
+See \Cref{sec:neural-ablation} for an ablation study across different candidate architectures for Gen-QOT comparing their performance under the CRPS and Quantile Loss metrics.
+\paragraph{Calibration and Classifier Metrics} Next we check the calibration of the cumulative receives forecast and arrival time forecasts that can be inferred from Gen-QOT -- see \Cref{sec:metrics-cal} for how we define calibration in general, and \Cref{sec:arrival-time-cal} for arrival time calibration. \Cref{table:rl-qot-dbp-calibration} shows the calibration of Gen-QOT's forecasted distributions of cumulative arrivals. Most coefficients are close to one, showing that Gen-QOT predicts the cumulative quantity of inventory received for a specific order over time reasonably well, although it is not perfectly calibrated (coefficient of 1).
+
+\begin{table}[h]
+	\caption{Calibration of cumulative inventory received predicted $k$ weeks after submitting an order and actuals.}
+	\label{table:rl-qot-dbp-calibration}
+	\begin{center}
+		\begin{tabular}{ccccc}
+			\toprule
+			\multicolumn{1}{c}{} & \multicolumn{2}{c}{In Time Holdout} & \multicolumn{2}{c}{Out of Time Holdout}                               \\
+			\cmidrule{2-5}
+			Weeks After Order    & Estimate                            & 95\% CI                                 & Estimate & 95\% CI          \\
+			\midrule
+			1                    & 1.0577                              & [1.056,  1.060]                         & 1.0559   & [1.055,  1.057]  \\
+			2                    & 1.1393                              & [1.138,   1.141]                        & 1.1529   & [1.151,  1.154]  \\
+			3                    & 1.108                               & [1.107,     1.109]                      & 1.1311   & [1.130,   1.132] \\
+			4                    & 1.0866                              & [1.086,    1.087]                       & 1.1147   & [1.114,  1.115]  \\
+			5                    & 1.0789                              & [1.078,      1.079]                     & 1.1094   & [1.109,   1.110] \\
+			6                    & 1.0745                              & [1.074,    1.075]                       & 1.1021   & [1.102,   1.103] \\
+			7                    & 1.0694                              & [1.069,    1.070]                       & 1.0995   & [1.099,   1.100] \\
+			8                    & 1.063                               & [1.063,    1.063]                       & 1.0953   & [1.095,   1.096] \\
+			9                    & 1.0538                              & [1.053,    1.054]                       & 1.0895   & [1.089,   1.090] \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+\end{table}
+\Cref{fig:cumulative_recieve_week4_calibration} shows this on samples of actual vs. predicted mean for normalized cumulative inventory received at the end of the fourth week on the held out orders from the training period and the test period. The results on the out-of-time hold out set are very similar to those in the training period.
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}{0.4\textwidth}
+		\includegraphics[width=\textwidth]{plots/cumulative_recieve_week4_calibration_train_withyaxis.png}
+		\caption{}
+		\label{fig:cumulative_recieve_week4_calibration_intime}
+	\end{subfigure}
+	\begin{subfigure}{0.4\textwidth}
+		\includegraphics[width=\textwidth]{plots/cumulative_recieve_week4_calibration_withyaxis.png}
+		\caption{}
+		\label{fig:cumulative_recieve_week4_calibration_outoftime}
+	\end{subfigure}
+	\caption{Residual calibration plot for cumulative inventory received -- residuals are plotted against predicted values in the main figure, while the original plot is shown in an inner figure.}
+	\label{fig:cumulative_recieve_week4_calibration}
+\end{figure}
+
+For arrival time calibrations, intuitively, we are measuring: if the forecaster predicts with 25\% chance by a specific date, does it arrive by that date 25\% of the time? \Cref{tab:arrival-time-cal-backtest} shows that on both the in-time and out-of-time holdouts, the arrival time forecasts generated by Gen-QOT are well calibrated.  See \Cref{sec:arrival-time-cal-results} for full arrival time calibration metrics, further broken out by lead time.
+\begin{table}[H]
+	\caption{Calibration of arrival time for samples from two holdout sets, by forecasted probability}
+	\begin{center}
+		\begin{tabular}{cccccccc}
+			\toprule
+			\multicolumn{1}{c}{} & \multicolumn{3}{c}{In Time Holdout} & \multicolumn{3}{c}{Out of Time Holdout}                               \\
+			\cmidrule{2-7}
+			Probability & Avg. Pred. & Average & 95\% CI & Avg. Pred. & Average & 95\% CI \\
+			\midrule
+			0.0-0.1         &           0.04 &        0.05 &   [0.05, 0.05]   	&	  0.04 &        0.05 &   [0.05, 0.05]   \\
+			0.1-0.2         &           0.14 &        0.15 &   [0.15, 0.15]   	&	  0.14 &        0.14 &   [0.14, 0.14]   \\
+			0.2-0.3         &           0.25 &        0.24 &   [0.24, 0.24]   	&	  0.25 &        0.24 &   [0.24, 0.24]   \\
+			0.3-0.4         &           0.35 &        0.34 &   [0.34, 0.34]   	&	  0.35 &        0.33 &   [0.33, 0.33]   \\
+			0.4-0.5         &           0.45 &        0.43 &   [0.43, 0.43]   	&	  0.45 &        0.43 &   [0.43, 0.43]   \\
+			0.5-0.6         &           0.55 &        0.54 &   [0.53, 0.54]   	&	  0.55 &        0.53 &   [0.53, 0.53]   \\
+			0.6-0.7         &           0.65 &        0.64 &   [0.64, 0.64]   	&	  0.65 &        0.63 &   [0.63, 0.63]   \\
+			0.7-0.8         &           0.75 &        0.74 &   [0.74, 0.74]   	&	  0.75 &        0.74 &   [0.74, 0.74]   \\
+			0.8-0.9         &           0.85 &        0.84 &   [0.84, 0.84]   	&	  0.85 &        0.84 &   [0.84, 0.85]   \\
+			0.9-1.0         &           0.99 &        0.99 &   [0.99, 0.99]   	&	  0.99 &        0.99 &   [0.99, 0.99]   \\
+			\bottomrule
+		\end{tabular}
+		\label{tab:arrival-time-cal-backtest}
+	\end{center}
+\end{table}
+
+
+The classifier calibration plots are produced by discretizing and binning the predicted probabilities of the event we are interested in, and then estimating the mean of the actual classifications for each bin.  Ideally, the average actual will be equal to the mean of the predicted probabilities in each bin, and this point will fall along the 45$^{\circ}$ line.
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}{0.45\textwidth}
+		\includegraphics[width=\textwidth]{plots/classifier_calibration_calibration_traintime_withyaxis.pdf}
+		\caption{}
+		\label{fig:empty_calibration_intime}
+	\end{subfigure}
+	\begin{subfigure}{0.45\textwidth}
+		\includegraphics[width=\textwidth]{plots/classifier_calibration_calibration_withyaxis.pdf}
+		\caption{} 
+		\label{fig:empty_calibration_outoftime}
+	\end{subfigure}
+	\caption{Residual calibration plots for Gen-QOT -- residuals are plotted against predicted values in the main figure, while the original plot is shown in an inner figure.}
+	\label{fig:calibration-metrics}
+\end{figure}
+\Cref{fig:calibration-metrics} shows the calibration of Gen-QOT at predicting whether a purchasing action will yield zero inventory for both the in-time holdout (\Cref{fig:empty_calibration_intime}) and out-of-time holdout (\Cref{fig:empty_calibration_outoftime}). In both cases, points generally follow the ideal calibration line, with some slight and expected degradation in the out-of-time holdout.
+
+\subsubsection*{Model Behavior}
+Figure \Cref{fig:qot-counterfactuals} shows the response of the mean end-to-end yield predicted by the QOT model to varying order quantities for several randomly selected products. As we can see, for some products the model predicts nearly a full yield regardless of order quantity, while for others, the yield tapers off as the order quantity increases.
+
+\begin{figure}[h]
+	\centering
+		\includegraphics[width=0.49\textwidth]{plots/qot_behavior_combined.pdf}
+	\caption{QOT predicted receive versus orders}
+	\label{fig:qot-counterfactuals}
+\end{figure}
+\subsection{Backtest of Inventory Control Policies}
+\label{sec:eval-sim}
+Having demonstrated in \Cref{sec:eval-dynamics} that we have a dynamics model that achieves good accuracy on our dataset, the next thing we want to do is use our generative model to backtest various policies and measure their performance.
+
+\subsubsection*{Data}
+We use a similar dataset to that used to fit the Gen-QOT model. The training period is data from 2017-05-13 to 2019-02-01 and the backtest period is  2019-02-01 to 2020-02-01. The features used for the policy and the simulator can be found in \Cref{sec:featurization}.
+
+\subsubsection*{Policies  and Training}
+Because \citet{madeka2022deep} performed an exhaustive evaluation of various policies, we consider only a base stock baseline and two RL policies -- one trained on a gym that uses the inventory arrival dynamics from \citet{madeka2022deep} and one trained on gym with Gen-QOT arrival dynamics. These will be referred to as {\bf Newsvendor}, {\bf VLT-DirectBP}, and {\bf QOT-DirectBP}, respectively. The policy networks consist of a Wavenet encoder \citep{oord2016wavenet} and MLP decoder.
+
+Following \citet{madeka2022deep} we implement a differentiable simulator in PyTorch. All algorithms are trained using a single p3dn.24xlarge EC2 instance. We use the DirectBackprop algorithm to train the {\bf VLT-DirectBP} and {\bf QOT-DirectBP} agents.
+\subsubsection*{Results}
+\Cref{table:rl-qot-dbp-results} summarizes the changes in the sum of discounted reward of both policies relative to a baseline policy. QOT-DirectBP outperforms VLT-DirectBP when evaluated under the QOT transition dynamics. While it is unsurprising that the policy trained on the simulator (with Gen-QOT) used in evaluation performs best, this does underscore the impact of a ``Sim2Real'' gap -- in this case ``reality'' is the QOT simulator -- as the overall performance gain is ~8\%. Both policies still outperform the Newsvendor baseline, which is unsurprising given the results in \citet{madeka2022deep}.
+
+\begin{table}[h]
+	\caption{Comparison of RL policies in a backtest using Gen-QOT. 95\% confidence intervals are on the difference from baseline. }
+	\begin{center}
+		\begin{tabular}{ c c c}
+			\toprule
+			Policy              & Discounted Reward & 95\% CI             \\
+			\midrule
+
+			Newsvendor Baseline & 100.00\%          & --                  \\
+			VLT-DirectBP        & 109.64\%          & [8.83\% , 10.45\%]  \\
+			QOT-DirectBP        & \textbf{117.81}\% & [16.92\% , 18.69\%] \\
+
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	\label{table:rl-qot-dbp-results}
+\end{table}
+
+In addition to cumulative discounted reward, we can also consider the distribution of period-wise statistics. \Cref{fig:per-period-stats}. What is interesting is that QOT-DirectBP selects larger order quantities, which likely reflects the fact that Gen-QOT captures stochastic yields. We also note that QOT-DirectBP has higher mean and median reward than other policies. Indeed, \Cref{fig:gym-order-comparison} shows that for lower yield products, the mean order placed by QOT-DirectBP is higher than that of VLT-DirectBP. Put differently -- the QOT-DirectBP policy can adjust to variable yield rates at the product level.
+
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}{0.4\textwidth}
+		\includegraphics[width=\textwidth]{plots/orders_by_policy.pdf}
+		\caption{}
+	\end{subfigure}
+	\begin{subfigure}{0.4\textwidth}
+		\includegraphics[width=\textwidth]{plots/reward_by_policy.pdf}
+		\caption{}
+	\end{subfigure}
+	\caption{Distribution of per-period statistics for order quantity and rewards in the backtest period (2019-02 to 2020-02).}
+	\label{fig:per-period-stats}
+\end{figure}
+\begin{figure}[h]
+	\centering
+		\includegraphics[width=0.5\textwidth]{plots/order_vs_fill_rlagents.png}
+	\caption{Comparison of difference in mean order quantity between the QOT-DirectBP and VLT-DirectBP agents versus yield; the orange line shows the OLS regression line fit to the data. }
+	\label{fig:gym-order-comparison}
+\end{figure}
+
+
+\subsection{Real World A/B Test}
+\label{sec:eval-real}
+
+Finally, we ran A/B tests comparing RL inventory control policies to the existing production policy (a base stock policy) at a large e-retailer lasting several months and covering thousands of products. \Cref{table:ab-te} summarizes the treatment effect of all tests on several quantities of interest: reward, inventory level, order quantity and sales. Trial 1 evaluated the performance of the VLT-DirectBP policy while Trials 2 and 3 evaluated the QOT-DirectBP policy.
+
+\begin{table}[H]
+	\caption{Treatment effect estimate (percent change) on reward, inventory level, and order quantity in real world A/B tests -- all results shown are significant at the 95\% confidence level.}
+	\begin{center}
+		\begin{tabular}{c c c c}
+			\toprule
+			Quantity       & Trial 1 & Trial 2 & Trial 3         \\
+			\midrule
+			 Reward          & $\sim$ & 3.5\% & 2.7\% \\
+			 Inventory Level & -15.2\% &  11.1\% & 3.3\% \\
+			 Order Quantity  &  31.1\% &  -7.2\% & $\sim$           \\
+			 Sales 			 & $\sim$ &  3.4\% &  1.8\%\\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	\label{table:ab-te}
+\end{table}
+
+\subsubsection*{Trial 1: VLT-DirectBP}
+In the first trial, we used the VLT-DirectBP policy described above as the treatment\footnote{This is the same trial described in \citet{madeka2022deep}}. \Cref{fig:treatment-effect-real-qot-vlt} shows the treatment effect estimate on inventory level observed in the actual A/B test alongside the treatment effect estimate from rollouts using the {\it same data} in the QOT and VLT based simulators. We see that the point estimate of the treatment effect in the real supply chain is contained in the confidence interval. This suggests that -- at least as it pertains to inventory level -- the QOT based simulator captures what happens in the actual supply chain.
+
+\begin{figure}[h]
+	\centering
+		\includegraphics[width=0.5\textwidth]{plots/te_qot_vlt.pdf}
+	\caption{Treatment effect on inventory level of VLT-DirectBP: estimated on rollouts in real world, QOT simulator and VLT simulator.}
+	\label{fig:treatment-effect-real-qot-vlt}
+\end{figure}
+
+\subsubsection*{Trial 2 and Trial 3: QOT-DirectBP}
+Next, we ran two randomized control trials of the QOT-DirectBP agent in the US store of a large e-retailer lasting several months and covering thousands of products. The control arm used the existing production system (a base stock policy). The results of both these tests can be found in \Cref{table:ab-te}. In Trial 2, the inventory and reward increase by a statistically significant amount -- demonstrating that RL policies {\it can} outperform sophisticated base stock policies in real world settings. In Trial 3, we deployed a QOT-DirectBP policy that we expected (based on backtests) to hold a similar amount of inventory to the existing production system. 
+
+\subsubsection*{Gen-QOT Performance ``off-policy''}
+
+We use data from the Treatment and Control arms of the third A/B test described above to validate our assumption on the forecast accuracy of the QOT model. We already know from \Cref{sec:eval-dynamics} that the QOT model generalizes well out of sample and forward in time. But the question remains: does it generalize well out-of-sample {\it and off-policy}? This is critical because in order for our {\it inventory control backtest} to be accurate, we required \Cref{assm:fill-supply}.
+
+To validate our assumption that QOT does generalize off-policy, we check the forecast errors on the treatment arm versus the control arm.  In \Cref{tab:genqot-offpolicy-cal} and  \Cref{tab:genqot-offpolicy-ql} we see that the difference in forecast performance on-policy versus off-policy in the actual supply chain is not statistically significant.
+
+\begin{table}[H]
+	\centering
+	\begin{subfigure}[b]{0.58\textwidth}
+		\begin{center}
+			\begin{tabular}{ccc}
+				\toprule
+				 &\multicolumn{2}{c}{Change (Control - Treatment)} \\
+						\cmidrule{2-3}
+				Fcst. Probability & Mean &    95\% CI \\
+				\midrule
+				0.0-0.1 &   4.61\% & [-0.88\%, 10.11\% ] \\
+				0.1-0.2 &   3.17\% & [-0.98\%, 7.34\% ]\\
+				0.2-0.3 &   2.62\% & [-1.86\%,  7.12\%] \\
+				0.3-0.4 &   2.43\% & [-1.18\%,  6.05\%] \\
+				0.4-0.5 &   3.25\% & [0.89\%,  5.61\%] \\
+				0.5-0.6 &   1.43\% & [-0.25\%,  3.13\%] \\
+				0.6-0.7 &   0.17\% & [-1.57\%,  1.92\%] \\
+				0.7-0.8 &  -0.10\% & [-1.59\%,  1.37\%] \\
+				0.8-0.9 &   0.01\% & [-0.99\%,  1.02\%] \\
+				0.9-1.0 &  -0.01\% & [-0.21\%,  0.18\%] \\
+				\bottomrule
+				\end{tabular}
+			\label{tab:arrival-time-cal-labs}
+		\end{center}
+		\caption{Calibration of arrival times, by forecast probability}
+	\end{subfigure}
+	\begin{subfigure}[b]{0.41\textwidth}
+		\begin{center}
+			\begin{tabular}{ccc}
+				\toprule
+				    & \multicolumn{2}{c}{Change (Control - Treatment)}                       \\
+				\cmidrule{2-3}
+				$k$ & Mean                                             & 95\% CI             \\
+				\midrule
+				1   & 1.45\%                                           & [-8.41\%,  11.33\%] \\
+				2   & -0.88\%                                          & [-7.87\%,  6.09\%]  \\
+				3   & -0.87\%                                          & [-6.25\%,  4.51\%]  \\
+				4   & -1.96\%                                          & [-6.81\%,  2.88\%]  \\
+				5   & -2.19\%                                          & [-6.87\%,  2.48\%]  \\
+				6   & -1.09\%                                          & [-5.23\%,  3.04\%]  \\
+				7   & -0.08\%                                          & [-3.94\%,  3.78\%]  \\
+				8   & 0.54\%                                           & [-2.84\%,  3.94\%]  \\
+				9   & 0.85\%                                           & [-1.76\%,  3.47\%]  \\
+				\bottomrule
+			\end{tabular}
+		\end{center}
+		\caption{Calibration of cumulative inventory receives predicted $k$ weeks after ordering}
+	\end{subfigure}
+	\caption{Comparison of calibration metrics on-policy (control arm) versus off-policy (treatment arm) on data from real world A/B test.}
+	\label{tab:genqot-offpolicy-cal}
+\end{table}
+\begin{table}[H]
+		\begin{center}
+			\begin{tabular}{ccc}
+				\toprule
+				         & \multicolumn{2}{c}{Change (Control - Treatment)}                        \\
+				\cmidrule{2-3}
+				Quantile & Mean                                             & 95\% CI              \\
+				\midrule
+				P10      & -0.17\%                                          & [-3.06\%,    5.49\%] \\
+				P30      & 0.45\%                                           & [-4.25\%,   5.29\%]  \\
+				P50      & 0.47\%                                           & [-4.53\%,    5.86\%] \\
+				P70      & 0.30\%                                           & [-4.80\%,  6.88\%]   \\
+				P90      & -0.56\%                                          & [-6.21\%,   7.00\%]  \\
+				P98      & -6.26\%                                          & [-7.68\%,  9.61\%]   \\
+				\bottomrule
+			\end{tabular}
+		\end{center}
+	\caption{Comparison of quantile loss of VLT forecasts produced by Gen-QOT metrics on-policy (control arm) versus off-policy (treatment arm) on data from real world A/B test.}
+	\label{tab:genqot-offpolicy-ql}
+\end{table}
+
+\Cref{tab:arrival-time-cal-labs} shows the difference in calibration of arrival times on the treatment and control arms of the A/B test in the actual supply chain. We see that there is not a statistically significant difference in calibration between the arms, we conclude that the degradation is not attributable to the fact that the treatment arm is ``off-policy''. For full arrival time calibration results on the A/B test data, see \Cref{sec:arrival-time-cal-results}.
+\Cref{fig:labs-calibration-graphics} shows Criterion 2-4 on the off-policy data. We see that the classifier calibration is still reasonable, although the cumulative receives calibration appears to have degraded from the out-of-time backtest. We emphasize that this degradation is {\it not due to the off-policy issue} as \Cref{tab:genqot-offpolicy-cal} showed that the calibration errors were statistically indistinguishable across the two arms of the A/B test. For comparison we also include the same evaluation on the control arm in \Cref{fig:labs-calibration-graphics}.
+
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}{0.49\textwidth}
+		\includegraphics[width=\textwidth]{plots/cumulative_recieve_week4_calibration_lab_withyaxis.png}
+		\caption{Cumulative receives calibration on treatment arm}
+	\end{subfigure}
+	\begin{subfigure}{0.49\textwidth}
+		\includegraphics[width=\textwidth]{plots/classifier_calibration_calibration_lab_withyaxis.pdf}
+		\caption{Classifier calibration for first receive and empty receive on treatment arm}
+	\end{subfigure}
+	\begin{subfigure}{0.49\textwidth}
+		\includegraphics[width=\textwidth]{plots/cumulative_recieve_week4_calibration_lab_cntrl_withyaxis.png}
+		\caption{Cumulative receives calibration on control arm}
+	\end{subfigure}
+	\begin{subfigure}{0.49\textwidth}
+		\includegraphics[width=\textwidth]{plots/classifier_calibration_calibration_lab_cntrl_withyaxis.pdf}
+		\caption{Classifier calibration for first receive and empty receive on control arm}
+	\end{subfigure}
+	\caption{Residual calibration plot for cumulative receives and classifier calibration plots on A/B test data.}
+	\label{fig:labs-calibration-graphics}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+We extended existing work on periodic review inventory control systems to the case where inventory replenishments can arrive in multiple shipments over time. We also allow for learning an inventory control policy in the case where the retailer uses a post-processor to adjust order quantities suggested by the control policy before submitting them to the supplier -- a common practice used to ensure order quantities meet minimum order and batch sizing requirements. This is the first work to handle either of the two aforementioned complexities. We then performed extensive empirical evaluation to show the viability of the approach. We also validated that our learned dynamic model generalizes well off-policy by backtesting it on data from a real-world A/B test of our RL agent. Finally, we showed via A/B tests of the QOT-DirectBackprop agent that data-driven RL inventory control policies can outperform sophisticated base stock systems in real world settings. 
+
+Interesting, and important, directions of future work include further exploration of the minimal assumptions needed in order for the inventory control problem to be efficiently learnable. It is also of interest to better understand the precise conditions needed on the forward dynamics model (Gen-QOT) in order for the theoretical results to hold. This may in turn give insight into what evaluations practitioners should perform on the models they incorporate into a simulator.
+
+
+\clearpage
+
+
+
+

@@ -1,0 +1,440 @@
+\title{SimLayerKV: A Simple Framework for Layer-Level KV Cache Reduction}
+
+\begin{abstract}
+
+Recent advancements in large language models (LLMs) have extended their capabilities to handle long contexts. However, increasing the number of model layers and the length of input sequences significantly escalates the memory required to store key-value (KV) cache, posing challenges for efficient inference. To mitigate this issue, we present SimLayerKV, a simple yet effective method that reduces inter-layer KV cache redundancies by selectively dropping cache in identified lazy layers. Our approach is based on the observation that certain layers in long-context LLMs exhibit ``lazy'' behavior, contributing less to modeling long-range dependencies compared to non-lazy layers. By analyzing attention weight patterns, we find that the behavior of these lazy layers is consistent across tokens during generation for a given input. This insight motivates our SimLayerKV, which identifies lazy layers and reduces their KV cache accordingly. SimLayerKV is training-free, generalizable, and can be implemented with only seven lines of code. We conduct extensive experiments on three representative LLMs, e.g., LLaMA2-7B, LLaMA3-8B, and Mistral-7B across 16 tasks from the LongBench benchmark. The results demonstrate that SimLayerKV achieves a KV cache compression ratio of 5$\times$ with only a 1.2\% performance drop when combined with 4-bit quantization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer-based autoregressive large language models (LLMs) have demonstrated exceptional performance across a wide range of tasks, such as question answering and arithmetic reasoning~\citep{wei2022chain,wang2022self,zhou2022least,yao2023react}.
+Recent advancements have extended their capabilities to handle long contexts, with models like Llama-3.1 supporting context lengths up to 128K tokens~\citep{dubey2024llama} and Gemini-Pro-1.5 handling up to 1 million tokens~\citep{reid2024gemini}.
+A critical component of these models during inference is the key-value (KV) cache, which stores precomputed key and value tensors for each token in the language sequence to avoid recomputing them for each attention layer.
+However, as the number of model layers and input lengths increases, the memory required for storing the KV cache grows significantly, posing challenges for inference efficiency~\citep{zhang2024h2o,wang2024model,li2024snapkv}.
+For example, with an input sequence length of 128K tokens, the memory required for the KV cache in Llama2-7B amounts to approximately 62.5 GB GPU memory, which is significantly larger than the 13.2 GB needed for the model parameters.
+
+To address the challenge, various methods have been introduced to reduce the KV cache storage~\citep{zhang2024h2o,li2024snapkv,hooper2024kvquant,dong2024get,yang2024no}.
+One approach is quantization~\citep{hooper2024kvquant,dong2024get,yang2024no,dong2024qaq,kang2024gear,liu2024kivi,sheng2023flexgen}, which stores the KV cache in low-bit formats. 
+Another approach resorts to eviction~\citep{zhang2024h2o,li2024snapkv,zhang2024pyramidkv,yang2024pyramidinfer}, which only preserves the most important tokens selected based on carefully crafted metrics.
+However, these works mainly address intra-layer redundancies, neglecting the potential savings from inter-layer redundancies~\citep{liu2024minicache}, as illustrated in Figure~\ref{fig:intro}.\looseness=-1
+
+Recent studies~\citep{rajput2024inference,brandon2024reducing,wu2024layer,liao2024beyond,wu2024layer,liu2024minicache} have begun to explore inter-layer KV cache condense, leveraging redundancies across layers to reduce KV cache at the layer level.
+For example, Cross-Layer Attention (CLA)~\citep{brandon2024reducing} reuses the KV cache from the $n$-th layer for the subsequent $n$+1-th layer.
+While these methods are effective, they require additional training on existing LLMs~\citep{rajput2024inference,brandon2024reducing,wu2024layer,liao2024beyond,wu2024layer}, which hinders seamless plug-and-play integration.
+Our focus lies in methods that do not require retraining, with MiniCache~\citep{liu2024minicache} serving as a representative approach.
+By taking advantage of the similarity between the KV pairs across layers, MiniCache combines the cache of every two layers through spherical interpolation, effectively compressing KV cache across layers(see Figure~\hyperref[fig:intro]{1(b)}).
+However, MiniCache operates under the implicit assumption that all layers within the merged set contribute equally, which may not always hold true. In fact, research on layer sparsity~\citep{gromov2024unreasonable} shows that importance levels vary across layers within the same model, indicating that their contributions may differ.
+
+To investigate this character for the attention layer, we conducte preliminary experiments (Section~\ref{sec:obs}) and identified three key findings:
+(1) \textit{Certain layers in long-context LLMs exhibit ``lazy'' behavior}, primarily focusing on semantically unimportant tokens (e.g., the initial few tokens) and the most recent ones during answer generation.
+(2) \textit{Lazy layers are less important than non-lazy layers w.r.t.\ long-context capability}: trimming KV cache in non-lazy layers significantly degrades model performance, whereas trimming KV cache in lazy layers has relatively little impact;
+and (3) After analyzing attention weight patterns, we find that \textit{layer behavior is consistent across tokens for a given input}, and \textit{lazy layers can be easily identified}.
+
+\begin{figure}
+\centering
+\includegraphics[width=1\textwidth]{Figures/crop_intro.pdf}
+\caption{
+Comparison of intra-layer techniques (e.g., pruning and quantization) with two inter-layer methods: MinCache and our proposed SimLayerKV. (a) Intra-layer methods target KV redundancy within individual layers, applying compression independently to each layer; (b) MinCache reduces KV cache by merging adjacent layers through interpolation; (c) Our SimLayerKV selectively trims KV cache by identifying the functional role of each layer, reducing cache only in lazy layers.}
+\label{fig:intro}
+\end{figure}
+
+The appearance of lazy layers suggests that we can directly reduce the KV cache for these layers without altering the cache of non-lazy layers or merging cache across layers. 
+Building on this insight, we propose \textit{SimLayerKV}, a simple yet effective method for inter-layer KV cache reduction. 
+This dynamic, selective reduction in KV cache decreases the number of layers requiring cache retention, thereby enhancing computational efficiency.
+Specifically, we analyze the attention allocation patterns in each layer to determine whether it qualifies as a lazy layer. We then trim the KV cache in lazy layers while retaining the full KV cache in non-lazy layers (see Figure~\hyperref[fig:intro]{1(c)}).
+We conduct extensive experiments on three representative LLMs (i.e., LLama2-7B-chat~\citep{touvron2023llama}, LLama3-8B-Instruct~\citep{dubey2024llama}, and Mistral-7B-Instruct~\citep{jiang2023mistral}) across 16 tasks from LongBench~\citep{bai2023longbench}. 
+The results demonstrate that SimLayerKV achieves a KV cache compression ratio of 5$\times$ with only a 1.2\% drop in performance when combined with a 4-bit quantization~\citep{liu2024kivi}. 
+Meanwhile, it integrates seamlessly into popular inference frameworks with just seven lines of code. Additionally, we evaluate SimLayerKV on the Ruler~\citep{hsieh2024ruler} datasets using Mistral-7B-Instruct, focusing on tasks like Needle-in-a-Haystack (NIAH) and scaling the context length from 4K to 32K, where it performed strongly. Even with input texts at 32K, performance only dropped by 4.4\%.
+The contributions of this work are summarized as follows:
+
+\begin{itemize}%
+\item We observe the phenomenon of lazy layers in long-context LLMs and propose two strategies for identifying them at either the prefilling or decoding stage.
+\item We introduce SimLayerKV, a simple yet effective method for reducing inter-layer KV cache redundancies that can be implemented with only seven lines of code.
+\item Our SimLayerKV achieves a KV cache compression ratio of 5× with only a 1.2\% drop in performance on the LongBench benchmark on three representative LLMs.
+    
+\end{itemize}
+
+
+
+
+
+\section{Related work}
+
+
+Due to the autoregressive architectures of transformer-based LLMs, the key and value states of previously generated tokens can be stored as the KV cache, which facilitates the generation of subsequent tokens without redundant computations. 
+However, despite its benefits, caching introduces a significant bottleneck during inference as it must reside in GPU memory.
+Several works~\citep{prabhu2024vattention,kwon2023efficient,lin2024infinite,ye2024chunkattention} have focused on optimizing KV cache memory at the system level.
+Other research has investigated reducing KV cache memory requirements by modifying model architectures~\citep{shazeer2019fast,brandon2024reducing,goldstein2024goldfinch,nawrot2024dynamic,wang2024model,yu2024effectively}. For example, grouped-query attention (GQA)~\citep{ainslie2023gqa} divides the query heads into multiple groups, with each sharing its own set of keys and values.
+However, these techniques typically need to be applied during pre-training, which can be resource-intensive.
+
+A different line of research focuses on reducing the KV cache memory usage post pre-training. 
+Some techniques~\citep{xiao2023efficient,li2024snapkv,wang2024model,zhang2024h2o,liu2024scissorhands,yang2024pyramidinfer,zhang2024pyramidkv} identify redundant tokens within each attention layer and evict their associated KV cache, thereby effectively lowering memory usage. 
+Other methods ~\citep{hooper2024kvquant,dong2024get,yang2024no,dong2024qaq,kang2024gear,sheng2023flexgen} reduce memory consumption by quantizing KV cache from full precision to lower bit values.
+However, these methods primarily exploit intra-layer KV cache redundancies while overlooking those across layers.
+These techniques are orthogonal to our approach and can potentially be combined for further improvements.
+
+A distinct line of research~\citep{rajput2024inference,brandon2024reducing,wu2024layer,liao2024beyond,wu2024layer,liu2024minicache,ge2024little}, more closely aligned with our focus, explores the inter-layer KV cache redundancies. 
+For instance, CLA~\citep{brandon2024reducing} reduces overall KV cache storage by reusing the KV cache from the current layer in subsequent layers.
+Mix Attention~\citep{rajput2024inference} integrates cross-layer cache sharing with sliding window attention, which retains only a small subset of recent tokens in the KV cache, thereby further reducing memory usage. 
+LongGen~\citep{ge2024little}, Inheritune~\citep{sanyal2024inheritunetrainingsmallerattentive}, and Gemma 2~\citep{team2024gemma}  employs a predefined mixture of full
+attention and sliding window attention across different layers during training. However, these approaches rely on a fixed, predefined structure and lack adaptability to the input data. In contrast, our method dynamically identifies lazy layers based on their attention allocation patterns. 
+In addition, these methods require additional training, which is computationally demanding. 
+In contrast, MiniCache~\citep{reid2024gemini} offers a tuning-free solution by merging every two adjacent layers through spherical interpolation, assuming equal contribution from all layers within the merged set. 
+Our SimLayerKV approach differs by selectively trimming lazy layers, based on the observation that not all layers contribute equally to the overall generation.
+
+
+
+\section{Preliminary}
+
+Before introducing SimLayerKV, we formalize our notation and provide a brief overview of the generative inference in autoregressive LLMs, which is the key background knowledge for our method.
+We denote the input prompt $X = \{x_0, \cdots, x_{m-1}\}$, representing a sequence of tokens, where $m$ is the number of tokens in the input prompt, indicating the sequence length. The total number of tokens, including both the input prompt and the generated responses, is denoted as $n$. The key and value cache for token $x_i$ are represented by $K_{x_i}$ and $V_{x_i}$, respectively.
+
+\textbf{Inference stages.}
+The typical generative LLM inference process involves two stages: (1)~\textit{Prefilling}: the autoregressive LLM processes the input prompt $X$ by parallel computing, and also saves the KV cache of each token $x_i \in X $, where $i =0,1,\cdots,m-1$. The output of the last token in this stage is the first token $x_{m}$ of the response.
+(2)~\textit{Decoding}:
+after the prefilling stage is completed, the LLM generates output tokens $x_{j}$ one by one, where $j = m+1, m+2, \cdots$, and saves their KV cache.
+In each decoding step, a new token $x_{j}$ is generated based on the current token $x_{j-1}$ and the KV Cache stored from earlier steps, continuing until a stop criterion is met.
+
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\textwidth]{Figures/crop_sink.pdf}
+\label{fig:abl_neg_sel}
+\caption{Attention patterns during long-context generation in layers 0, 10, 20, and 30 of the LLaMA3-8B-Instruct model. 
+The \textcolor{darkgreen}{green} dashed box outlines the decoding stage.
+Notably, in certain layers (e.g., 20), the model predominantly focuses its attention on initial tokens and recent tokens during the decoding stage, a behavior we identify as characteristic of lazy layers.}
+\label{fig:obs1_1}
+\end{figure}
+
+
+
+\section{Observations}
+
+\label{sec:obs}
+In this section, we analyze the attention patterns during the prefilling and decoding phase in long-context LLMs,
+providing insights that motivate our approach to reducing KV cache based on the layer-specific roles in attention allocation.
+The study is conducted on the LLaMA3-8B-Instruct model~\citep{dubey2024llama} using random samples from the LongBench~\citep{bai2023longbench} benchmark.
+Our key findings are as follows:
+
+\textbf{Layer behavior in long context LLMs during decoding.}
+Previous research~\citep{xiao2023efficient} has shown that a large portion of attention in LLMs tends to focus on semantically unimportant tokens (e.g., the first few tokens) and the most recent tokens.
+We refer to this pattern as \textit{lazy} behavior, where the model ``takes shortcuts'' by primarily attending to the beginning and end of the sequence, similar to someone skimming a paper by only reading the first few words in the abstract and the conclusion.
+Although this phenomenon is also known as ``attention sink''~\citep{xiao2023efficient}, we choose to call it ``lazy behavior'' in our context to better highlight the model's tendency to overlook the middle portions of the sequence, emphasizing the shortcut nature.
+However, in our experiments (See Table~\ref{tbl:longbench} and Table~\ref{tbl:ruler}), we find that when KV cache are retained for only these tokens across all layers, the long-context capabilities of LLMs degrade sharply.
+This raises an important question: does this lazy behavior disappear when processing long texts?
+
+Through our analysis, we observe that even when handling long texts, many layers continue to exhibit this lazy behavior during decoding (e.g., about 55\% in LLama3-8B-Instruct in LongBench benchmark). Figure~\ref{fig:obs1_1} presents the attention patterns across four different layers (0, 10, 20, and 30).
+We observe that some layers (e.g., layer 0) do not follow a clear pattern in attention weight distribution, while others (e.g., 20) show a clear lazy behavior pattern.
+Based on this observation, we define a \textit{lazy layer} as one that primarily attends to a limited subset of tokens, including both the initial tokens $X_{\text{initial}}=\{x_0,x_1,x_2,x_3\}$ and recent $w$ tokens $X_{\text{recent}}$, while allocating minimal attention to the rest of the tokens in the sequence during decoding stage. 
+Intuitively, this suggests that in these lazy layers, most of the KV cache can be dropped, retaining only the portions the model relies on during its ``shortcut'' behavior, i.e., $X_{\text{initial}}$ and $X_{\text{recent}}$.
+
+\begin{figure}[t]
+\centering 
+\includegraphics[width=0.99\textwidth]{Figures/obs_2.pdf}
+\caption{
+Comparison of the importance of KV cache in lazy and non-lazy layers using LLama3-8B-Instruct. Performance is evaluated across three settings: (1)~lazy layers only: trimming KV cache in non-lazy layers, (2)~non-lazy layers only: trimming KV cache in lazy layers, and (3)~full: using the full KV cache for generation.
+}
+\label{fig:obs_2}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\textwidth]{Figures/crop_observation.pdf}
+\caption{
+Visualization of attention weights for each token (x-axis) with respect to the \textbf{initial} tokens and the \textbf{most recent 1024} tokens during the prefilling and decoding stages on LLama3-8B-Instruct, across all layers (y-axis), using a randomly selected sample. Layers with predominantly higher attention on the initial and recent tokens $\{X_\text{initial}, X_\text{recent}\}$ (indicated by \textcolor{red}{red} areas) are referred to as lazy layers. The \textcolor{brown}{brown} dashed box outlines one such lazy layer. 
+}
+\label{fig:obs_3}
+\end{figure}
+
+\textbf{Lazy layer is less important than non-lazy layer.}
+Although attention scores in lazy layers are concentrated on certain tokens, this does not necessarily indicate that these layers are unimportant for long-context capability. 
+To investigate this further, we conduct experiments on 6 random selected tasks from the LongBench benchmark~\citep{bai2023longbench}, including Qasper~\citep{dasigi2021dataset}, Dureader~\citep{he2017dureader}, Musique~\citep{trivedi2022musique}, GovReport~\citep{huang2021efficient}, MultiFieldQA-en~\citep{bai2023longbench}, and HotpotQA~\citep{yang2018hotpotqa}.
+We test the effect of trimming most of the KV cache, retaining only the cache for $\{X_\text{initial}, X_\text{recent}\}$ in two scenarios:
+(1) lazy layers, and (2) non-lazy layers.
+For a fair comparison, the number of trimmed layers is kept similar in both settings.
+We also evaluate the vanilla setting, which uses a complete KV cache, for reference.
+
+As shown in Figure~\ref{fig:obs_2}, trimming the KV cache in non-lazy layers lead to a significant performance drop, with an average decrease of 7.4\%. Interestingly, trimming the KV cache in lazy layers results in only an average 1.5\% decrease. These results suggest that lazy layers contribute less to the model's overall performance compared to non-lazy layers.
+\textbf{Layer behavior remains consistent for a given input.}
+To further explore whether a layer consistently functions as a lazy layer during generation, we visualize the attention weights for $\{X_\text{initial}, X_\text{recent}\}$ across all layers for all generated tokens in Figure~\ref{fig:obs_3}, using a randomly selected sample (additional examples are provided in Figure~\ref{fig:app_example}).
+Notably, for a given input prompt, layers that exhibit lazy behavior maintain this pattern relatively consistently across tokens. This suggests a certain degree of stability in attention dynamics throughout the generation process.
+
+
+
+\section{Methodology: SimLayerKV}
+
+ 
+
+In this section, we introduce our method SimLayerKV for reducing inter-layer KV cache usage in LLMs by leveraging the concept of \textit{lazy layers} to optimize memory efficiency across layers.
+Empirical observations in Section~\ref{sec:obs} reveal that in certain layers, LLMs tend to take shortcuts by predominantly allocating attention weights to the initial and most recent tokens, denoted as $X_\text{initial}$ and $X_\text{recent}$, respectively. 
+We refer to these layers as lazy layers because they contribute less to modeling long-range dependencies compared to non-lazy layers. 
+Notably, whether a layer functions as lazy remains relatively consistent given a specific input sequence. 
+This consistency suggests that attention patterns can be predicted from the allocation during the generation of previous tokens, enabling early identification of lazy layers in the generation process.
+
+Based on our observations of lazy layers, we aim to optimize memory usage by trimming the KV cache in these layers. 
+Some existing approaches have attempted to optimize attention mechanisms at different layers.
+For instance, Gemma 2~\citep{team2024gemma} employs a predefined mixture of full attention and sliding window attention across different layers during training, treating certain layers as lazy layers. 
+However, this approach relies on a fixed, predefined structure and lacks adaptability to the input data.
+In contrast, our method dynamically identifies lazy layers based on their attention allocation patterns, without the need for additional tuning or predefined settings. This dynamic identification allows our model to more flexibly optimize KV cache usage, adapting to different input data more efficiently.
+Our approach consists of two components: identifying the function of each layer (i.e., whether a layer is lazy) and trimming the KV cache in those identified lazy layers.
+
+\subsection{Identifying the layer function}
+To apply SimLayerKV, the first step is to identify which layers function as lazy layers based on their attention allocation patterns. 
+Once these layers are identified, we can proceed to trim their KV cache to optimize memory usage.
+In the following, we detail our strategies for identifying the layer function.
+Corresponding to the two stages of the inference process (i.e., prefilling and decoding), we propose two different identification strategies.
+
+1) \textit{Last tokens in prefilling}: 
+We analyze the attention weight allocation when processing the last $w_{\text{last}}$ processed tokens $X_{\text{last}} = \{x_{m-w_{\text{last}}+1}, \cdots, x_{m}\}$ to identify lazy layers during prefilling.
+For each layer $l$, we calculate the average attention weights directed toward the $X_{\text{initial}}$ and $X_{\text{recent}}$ for all tokens in $X_{\text{last}}$.
+If this average exceeds a predefined threshold $\delta$, we classify the layer $l$ as lazy; otherwise, it is considered non-lazy.
+This can be formalized as:
+\begin{equation}
+\text{Function}[l]=
+\begin{cases} 
+\text{lazy layer}, & \text{if} \quad \frac{1}{w_{\text{last}}}\left(\sum_{\hat{x} \in X_{\text{last}}}\left( \sum_{x \in \{X_{\text{initial}}, X_{\text{recent}}\}} A_l(\hat{x}, x)\right)\right) > \delta, \\
+\text{non-lazy layer}, & \text{otherwise},
+\end{cases}
+\end{equation}
+where $A_l(\hat{x}, x)$ represents the attention weight from token $\hat{x}$ to token $x$ in layer $l$ and the threshold $\delta$ is a predefined hyper-parameter. 
+
+2) \textit{First token in decoding}: We assess the attention weight distribution when generating the first token $x_{m+1}$ during the decoding phase to identify lazy layers. 
+Specifically, for each layer $l$, if the attention weights directed toward $\{X_\text{initial}, X_\text{recent}\}$ when generating $x_{m+1}$ exceed $\delta$, we classify the layer as lazy; otherwise, it is not considered lazy. This can be formalized as:
+\begin{equation}
+\text{Function}[l]=
+\begin{cases} 
+\text{lazy layer}, & \text{if} \quad \sum_{x \in \{X_{\text{initial}}, X_{\text{recent}}\}} A_l(x_{m+1}, x) > \delta, \\
+\text{non-lazy layer}, & \text{otherwise}.
+\end{cases}
+\end{equation}
+
+\textbf{Remark.} During the prefilling stage, flash attention~\citep{dao2023flashattention} is commonly used to accelerate computations. However, flash attention does not return explicit attention weights, making it challenging to apply the lazy layer identification strategy without recomputing the attention scores, which would introduce extra computational overhead. In contrast, during the decoding stage, tokens are generated one at a time without using flash attention, making the attention weights readily available. This allows us to apply our identification strategy without extra computation.
+In our experiment (See Table ~\ref{fig:abl_strategy}), we find that the two strategies perform
+comparably, with no significant differences.
+\looseness=-1
+\subsection{Cache strategy}
+
+Once lazy layers have been identified, we proceed to trim the KV cache for these specific layers.
+Lazy layers are characterized by their significant attention allocation to a limited subset of tokens, namely $\{X_\text{initial}, X_\text{recent}\}$. 
+Thus we retain only the KV cache corresponding to these tokens within lazy layers. 
+This selective retention strategy is similar to approaches used in methods like Gemma 2~\citep{team2024gemma}, which also retain KV cache for recent tokens in predefined layers. 
+
+Specifically, for any lazy layer $l$, we trim its KV cache by retaining only those of tokens in $\{X_{\text{initial}}, X_{\text{recent}}\}$.
+Otherwise, we retain the full cache. This process can be expressed as:
+\begin{equation}
+\text{Cache}[l] = 
+\begin{cases} 
+\{K_{\text{initial}}, V_{\text{initial}}, K_{\text{recent}}, V_{\text{recent}}\}, & \text{if\ \ } \text{Function}[l] = \text{lazy layer}, \\
+\text{full KV}, & \text{otherwise},
+\end{cases}
+\end{equation}
+where $\text{Cache}[l]$ represents the KV cache for layer $l$.
+
+
+
+\section{Experiments}
+
+In this section, we empirically validate that SimLayerKV can accelerate decoding while maintaining long-text capabilities and uncover several insightful findings.
+
+\begin{table*}[t]
+\centering
+\setlength\tabcolsep{3.4pt} 
+\caption{Performance comparison of SimLayerKV and baseline methods on LLaMA-2-7B-chat, LLaMA-3-8B-Instruct, and Mistral-7B-Intruct using LongBench. \textbf{Bold} denotes the best method, and the second best if the top method is Full KV.}
+\scalebox{0.9}{\begin{tabular}{llllllllllllllllllllllll}
+\toprule
+&\multicolumn{3}{c}{\textbf{Single-Doc. QA}}&\multicolumn{3}{c}{\textbf{Muti.-Doc. QA}}&\multicolumn{3}{c}{\textbf{Summary}}&\multicolumn{3}{c}{\textbf{Few-shot}}&\multicolumn{2}{c}{\textbf{Syn.}}&\multicolumn{2}{c}{\textbf{Code}}&\multirow{2}*{\rotatebox[origin=c]{90}{\textbf{Average}\ \ \ \ \ }}\\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}\cmidrule(lr){14-15}\cmidrule(lr){16-17}
+&\rotatebox[origin=c]{90}{NrtvQA}&\rotatebox[origin=c]{90}{Qasper}&\rotatebox[origin=c]{90}{MF-en}&\rotatebox[origin=c]{90}{HotpotQA}&\rotatebox[origin=c]{90}{Musique}&\rotatebox[origin=c]{90}{DuReader}&\rotatebox[origin=c]{90}{GovReport}&\rotatebox[origin=c]{90}{QMSum}&\rotatebox[origin=c]{90}{MultiNews}&\rotatebox[origin=c]{90}{TREC}&\rotatebox[origin=c]{90}{TriviaQA}&\rotatebox[origin=c]{90}{SAMSum}&\rotatebox[origin=c]{90}{PCount}&\rotatebox[origin=c]{90}{PRe}&\rotatebox[origin=c]{90}{LCC}&\rotatebox[origin=c]{90}{RB-P}\\
+\midrule
+\multicolumn{10}{l}{\textit{\textbf{LLaMA2-7B-chat}}}\\
+Full&\textbf{18.5}&\textbf{18.3}&\textbf{36.4}&26.3&7.6&7.9&\textbf{26.9}&\textbf{21.0}&26.0&\textbf{64.0}&83.2&\textbf{41.1}&\textbf{4.5}&\textbf{7.0}&59.9&54.7&\textbf{31.5}\\
+Str.&13.0&12.6&26.7&23.5&4.5&4.4&21.1&19.9&24.2&61.0&82.8&38.9&3.5&\textbf{3.5}&59.0&52.2&28.2\\ 
+Mini.&13.1&13.3&27.5&14.9&4.1&\textbf{9.8}&21.5&\textbf{20.9}&24.3&63.0&83.1&35.1&3.8&\textbf{3.5}&53.4&46.5&27.4\\
+\ \ +Q.&16.4&13.9&29.4&14.1&3.9&9.7&21.4&20.5&24.4&61.5&79.1&31.1&2.3&1.0&53.1&46.2&26.7\\
+Ours&
+\textbf{18.4}&\textbf{17.3}&30.9&27.3&7.7&7.2&26.3&20.4&\textbf{26.3}&\textbf{64.0}&\textbf{83.5}&\textbf{40.7}&2.5&2.0&\textbf{60.3}&\textbf{54.9}&\textbf{30.6}
+\\
+\ \ +Q.&17.3&16.5&\textbf{31.5}&\textbf{27.7}&\textbf{8.5}&6.9&\textbf{26.6}&20.5&\textbf{26.3}&62.5&81.8&39.8&\textbf{4.0}&2.5&57.5&51.9&30.1
+\\
+\midrule
+\multicolumn{10}{l}{\textit{\textbf{LlaMA-3-8B-Instruct}}}\\
+Full&23.4&\textbf{36.9}&\textbf{45.2}&47.0&\textbf{23.1}&\textbf{20.1}&\textbf{28.8}&\textbf{23.3}&\textbf{27.0}&73.5&\textbf{90.6}&\textbf{42.0}&3.5&72.0&58.1&51.3&\textbf{41.6}\\
+Str.&19.5&23.8&28.5&40.5&16.8&12.1&22.8&21.4&25.4&66.0&86.6&40.2&3.5&72.0&59.7&\textbf{54.2}&37.1\\
+Mini.&18.8&30.3&31.6&36.2&18.6&15.9&23.8&20.1&25.5&\textbf{74.5}&84.5&37.4&\textbf{4.9}&64.8&48.5&45.3&36.3\\
+\ \ +Q.&17.5&28.3&30.8&35.9&19.0&15.9&23.9&19.6&25.8&73.5&84.2&36.8&4.5&65.3&49.1&45.3&35.9\\
+Ours&
+\textbf{23.6}&\textbf{34.7}&\textbf{43.9}&\textbf{48.0}&\textbf{22.5}&17.0&\textbf{26.2}&22.5&\textbf{26.2}&73.5&89.3&\textbf{40.6}&3.5&\textbf{72.5}&58.0&50.7&\textbf{40.8}\\
+\ \ +Q.&\textbf{23.6}&33.6&42.5&45.4&21.8&\textbf{17.3}&25.8&\textbf{23.0}&26.0&72.4&\textbf{89.6}&40.3&3.2&70.6&\textbf{60.0}&49.8&40.3\\
+
+\midrule
+\multicolumn{10}{l}{\textit{\textbf{Mistral-7B-Instruct}}}\\
+Full&\textbf{29.3}&\textbf{41.1}&54.8&43.8&26.8&32.3&\textbf{33.8}&\textbf{24.3}&\textbf{28.0}&\textbf{74.0}&\textbf{88.4}&\textbf{47.2}&\textbf{3.5}&63.0&61.4&\textbf{61.8}&\textbf{44.6}\\
+Str.&21.3&27.5&31.7&39.5&17.9&17.7&24.3&20.5&25.6&67.5&87.0&45.5&\textbf{3.5}&54.0&61.8&58.9&37.8\\
+Mini.&22.2&32.1&44.8&41.7&23.0&20.3&24.8&21.3&26.0&65.0&86.7&40.4&\textbf{3.5}&46.0&52.8&47.9&37.4\\
+\ \ +Q.&22.2&31.4&42.8&41.0&22.8&20.1&24.4&21.6&25.9&66.0&86.3&40.2&\textbf{3.5}&47.0&52.4&47.4&37.2\\
+Ours&25.0&37.7&56.4&43.7&26.4&\textbf{33.5}&\textbf{33.1}&23.4&\textbf{27.4}&\textbf{74.0}&88.1&\textbf{47.1}&\textbf{3.5}&\textbf{64.5}&\textbf{62.3}&\textbf{61.3}&\textbf{44.2}\\
+\ \ +Q.&\textbf{25.1}&\textbf{38.7}&\textbf{56.5}&\textbf{44.4}&\textbf{27.2}&31.0&31.6&\textbf{23.7}&27.1&73.9&\textbf{88.4}&46.4&\textbf{3.5}&61.0&60.3&60.0&43.7\\
+\bottomrule
+\end{tabular}}
+\label{tbl:longbench}
+\end{table*}
+
+\subsection{Settings}
+\label{sec:setting}
+\textbf{Baselines.}
+To evaluate the effectiveness of our proposed SimLayerKV, we compare it against the following baselines:  
+1) Full KV (Full): A method that retains KV cache for all tokens at each layer during generation.  
+2) Streaming LLM (Str.)~\citep{xiao2023efficient}: An intra-layer KV cache reduction technique that keeps only the KV cache for the first four tokens and the most recent $w$ tokens at each attention layer during generation.  
+3) MiniCache (Mini.)~\citep{liu2024minicache}: An inter-layer KV cache reduction method that merges KV cache of every two adjacent layers after the model's midpoint using spherical interpolation while retaining important tokens to reduce cache storage.  
+Additionally, for both MiniCache and our SimLayerKV, we evaluate their performance when combined with 4-bit quantization~\citep{liu2024kivi} to assess their compatibility with quantization techniques.
+
+\textbf{Datastes and evaluation metrics.}  
+To evaluate SimLayerKV's performance on tasks with long-context inputs, we test it on the LongBench benchmark~\citep{bai2023longbench} and compare the results with baseline methods. LongBench is a multi-task benchmark designed to assess the long-context capabilities of LLMs, consisting of datasets that span various tasks such as single-document QA~\citep{kovcisky2018narrativeqa,dasigi2021dataset}, multi-document QA~\citep{yang2018hotpotqa,ho2020constructing,trivedi2022musique,he2017dureader}, summarization~\citep{huang2021efficient,zhong2021qmsum,fabbri2019multi,wu2023vcsum}, few-shot learning~\citep{joshi2017triviaqa,gliwa2019samsum,joshi2017triviaqa,nlpcc2014task}, synthetic tasks~\citep{raffel2020exploring}, and code generation~\citep{guo2023longcoder,liu2023repobench}. 
+For evaluation, we use the metrics recommended by LongBench. 
+Additionally, we provide the compression ratios for both the number of layers and memory usage of the KV cache. 
+For layers, the ratio is calculated as the total number of layers divided by the number of layers with reduced KV cache. 
+For the KV cache, the ratio is the original memory usage divided by the memory usage after compression.
+Due to space constraints, we only include the performance of 16 randomly selected tasks out of the 21 LongBench tasks in the main text.
+
+We also evaluate whether SimLayerKV can preserve in-context retrieval capabilities while trimming KV cache in lazy layers. 
+The evaluation is conducted on the Needle-In-A-Haystack (NIAH) benchmark~\citep{kamradt2023needle} including various types and quantities of needles, along with tasks such as aggregation for common/frequent words, question answering (QA), and multi-hop variable tracing (VT), all provided by the Ruler benchmark~\citep{hsieh2024ruler}.
+We report the performance 
+of Mistral-7B-Instruct with input context lengths of 4K, 8K, 16K, and 32K. 
+The evaluation is conducted using the metrics recommended by Ruler.
+
+\textbf{Implementation details.}
+Our experiments are based on widely used LLMs, specifically LLaMa2-7B-chat~\citep{touvron2023llama}, LLaMa3-8B-Instruct~\citep{dubey2024llama}, and Mistral-7B-Instruct~\citep{jiang2023mistral}. 
+The input context window sizes are 4K, 8K, and 32K, with average tokenized sequence lengths of approximately 13K, 10K, and 12K in LongBench. 
+It is worth noting that we do not use different thresholds for each task. Instead, we search for the optimal threshold based on the synthetic Need-in-a-Haystack task and apply the same threshold across all tasks in different benchmarks.
+The thresholds ($\delta$) for the models are 0.65, 0.9, and 0.8 respectively.
+We adopt a generative format where answers are produced using greedy decoding for all tasks.
+We chose the first token identification strategy during the decoding stage in our experiments.
+For MiniCache, as the code was not open-sourced before our submission, we reimplemented it based on the original paper and the SLERP~\citep{shoemake1985animating} code it references. We followed all the hyper-parameters outlined in the paper, except for the number of retention tokens. 
+To ensure a fair comparison, we set the number of retention tokens to 1024, matching the window size $w$ used in our SimLayerKV method. 
+Note that even with the same retention window size, MiniCache's compression ratio is still lower than that of our SimLayerKV as shown in Table~\ref{tbl:compress}.
+All the experiments are conducted using NVIDIA A100.
+\looseness=-1
+
+\subsection{Experiments on LongBench}
+
+Table~\ref{tbl:longbench} summarizes the performance across various tasks in the LongBench~\citep{bai2023longbench} benchmark, and Table~\ref{tbl:compress} shows the corresponding compression ratio. We have the following findings:\looseness=-1
+
+\begin{wraptable}{r}{0.61\linewidth}
+\centering
+\setlength\tabcolsep{3.5pt} 
+\vspace*{-0.4cm}
+\caption{Comparison Ratio of layer and KV cache memory on LongBench. The higher the ratio, the better the performance in terms of compression efficiency. \textbf{Bold} denotes the method with the highest compression ratio.
+}
+\scalebox{0.9}{\begin{tabular}{lcccccc}
+\toprule
+&\multicolumn{2}{c}{\textbf{LLaMA2-7B}}&\multicolumn{2}{c}{\textbf{LLaMA-3-8B}}&\multicolumn{2}{c}{\textbf{Mistral-7B}}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+&Layers&KV&Layers&KV&Layers&KV\\
+\midrule
+MiniCache&1.33$\times$&1.27$\times$&1.33$\times$&1.25$\times$&1.33$\times$&1.26$\times$\\
+\ \ + 4bit Q.&1.33$\times$ &3.95$\times$&1.33$\times$&3.88$\times$&1.33$\times$&3.92$\times$\\
+SLKV(ours)&\textbf{1.39}$\times$&1.35$\times$&\textbf{2.04}$\times$&1.85$\times$&\textbf{1.83}$\times$&1.71$\times$\\
+\ \ + 4bit Q.&1.35$\times$&\textbf{4.11}$\times$&1.96$\times$&\textbf{5.57}$\times$&1.81$\times$&\textbf{5.26}$\times$\\
+\bottomrule
+\end{tabular}}
+\label{tbl:compress}
+\end{wraptable}
+\textbf{LLMs exhibit redundancy across layers.} Table~\ref{tbl:compress} demonstrates that MiniCache and our SimLayerKV achieve average layer compression ratios of 1.33$\times$ and 1.75$\times$, respectively. 
+Our SimLayerKV demonstrates notably higher compression ratios in models with strong long-context capabilities (i.e., LLaMA-3-8B-Instruct and Mistral-7B-Instruct) than in those with weaker ones (i.e., LLaMA-2-7B-chat).
+Meanwhile, as indicated in Table~\ref{tbl:longbench}, while MiniCache shows some limitations, our SimLayerKV allows the model to continue effectively managing long-text tasks with minimal loss in performance (i.e., an average drop of 0.7\%). 
+After integrating 4-bit quantization, our SimLayerKV achieves a remarkable compression rate of 4.98$\times$ on average, while still maintaining robust performance. Compared to SimLayerKV without quantization, the average performance drop is only 0.5\%.
+
+\textbf{SimLayerKV outperforms MiniCache on average.}
+Unlike MiniCache, our approach does not rely on complex interpolation and retention strategies to merge KV cache from different layers.
+Instead, we simply identify lazy layers based on the attention weight patterns and trim the KV cache in those layers. 
+Additionally, our method seamlessly integrates reduction into the decoding process. 
+More importantly, as shown in Table~\ref{tbl:longbench} and Table~\ref{tbl:compress},  our results show a clear advantage over MiniCache, whether or not combined with quantization,  achieving 4.8\% higher performance and a 1.29$\times$ greater KV cache compression ratio, further emphasizing the efficiency and effectiveness of our approach.
+\begin{table*}[t]
+\centering
+\caption{Performance comparison of SimLayerKV and baseline methods on Ruler benchmark using Mistral-7B-Instruct. NIAH: Needle-In-A-Haystack, S: Single Key, MK: Multi-Keys, MV: Multi-Values, MQ: Multi-Queries, CWE: Common Words Extraction, FWE: Frequent Words Extraction, QA: Question Answering, VT: Variable Tracking.  \textbf{Bold} denotes the best method, and the second best if the top method is Full KV.}
+\scalebox{0.96}{\begin{tabular}{cllllllllllllllllllllll}
+\toprule
+\multirow{2}*{\makecell{\textbf{Context}\\\textbf{Length}}}&\multirow{2}*{\textbf{Method}}&\multicolumn{4}{c}{\textbf{Retrieval: NIAH}}&\multicolumn{2}{c}{\textbf{Aggregation}}&\multirow{2}*{\textbf{QA}}&\multirow{2}*{\textbf{VT}}&\multirow{2}*{\textbf{Avg.}}\\
+\cmidrule(lr){3-6}\cmidrule(lr){7-8}
+&&\textbf{S}&\textbf{MK}&\textbf{MV}&\textbf{MQ}&\textbf{CWE}&\textbf{FWE}\\
+\midrule
+\multirow{4}*{4096}&Full&\textbf{99.9}&\textbf{99.4}&87.2&\textbf{99.3}&\textbf{99.5}&85.9& \textbf{64.1}& \textbf{99.4}&\textbf{91.8}\\
+&MiniCache&37.2&18.1&20.6&30.9&77.3&77.4&55.8&77.8&49.4\\
+&SimLayerKV&\textbf{99.7}& \textbf{99.4}& \textbf{87.6}&\textbf{84.0}& \textbf{98.9}&\textbf{86.9}&\textbf{63.6}&\textbf{98.5}&\textbf{89.8}\\
+\midrule
+\multirow{3}*{8192}&Full&\textbf{99.9}& 98.5& \textbf{79.5}& \textbf{97.9}&\textbf{95.4} &\textbf{76.1}& \textbf{61.8}&\textbf{98.3}&\textbf{88.4}\\
+&MiniCache&21.6&5.3&7.9& 12.4&31.0&53.8&46.0&55.0&29.1\\
+&SimLayerKV&
+\textbf{99.8}&\textbf{98.6}&\textbf{79.0}&\textbf{89.1}&\textbf{87.8}&\textbf{76.1}&\textbf{60.4}&\textbf{95.0}&\textbf{85.7}\\
+\midrule
+\multirow{3}*{16384}&Full&\textbf{99.9}&\textbf{95.1}&\textbf{81.8}&\textbf{96.3}&\textbf{89.4}&\textbf{96.9}& \textbf{58.8}&\textbf{94.1}&\textbf{89.0}\\
+&MiniCache&14.0&1.2&3.1&3.1&15.9&49.3&38.3&34.0&19.9\\
+&SimLayerKV&\textbf{99.8}& \textbf{94.8}& \textbf{81.8}& \textbf{90.5}& \textbf{73.4}&\textbf{89.3}&\textbf{57.4}& \textbf{90.5}&\textbf{84.7}\\
+\midrule
+\multirow{3}*{32768}&Full&96.6&\textbf{78.9}&\textbf{87.0}&\textbf{93.9}&\textbf{75.1}&\textbf{93.3}& 51.2&\textbf{92.4}&\textbf{83.5}\\
+&MiniCache&5.5&0.7&0.5&0.8&7.5&20.3&30.5&22.1&11.0\\
+&SimLayerKV&\textbf{96.7}&\textbf{78.2}&\textbf{86.2}&\textbf{91.1}&\textbf{48.6}&\textbf{88.5}&\textbf{52.1}&\textbf{91.7}&\textbf{79.1}\\
+\bottomrule
+\end{tabular}}
+\label{tbl:ruler}
+\end{table*}
+
+\subsection{Experiments on Ruler}
+Table~\ref{tbl:ruler} summarizes the performance across various tasks in the Ruler~\citep{hsieh2024ruler} benchmark, with the context length ranging from 4K to 32K. 
+We find that SimLayerKV maintains strong performance on the Single Key, Multiple Keys, and Multiple Values Needle-In-A-Haystack (NIAH) tasks, exhibiting minimal to no degradation.
+For example, even with a 32K input context, SimLayerKV results in only a slight performance drop of 0.47\% compared to the full KV cache. 
+Our method also performs well on the Question Answering and Variable Tracking tasks, which involve long context capabilities similar to NIAH.
+However, we observe a performance drop (8.2\% on average) on the Mutliple Queries NIAH with SimLayerKV. This may be due to the data-dependent nature of lazy layer identification in our approach. Ideally, varying the number of queries should lead to different layers being identified as lazy and reduced accordingly, but currently, the same layers are reduced regardless of the query count.
+Additionally, we observe a similar phenomenon in aggregation tasks. Although the Common Words Extraction (CWE) and Frequent Words Extraction (FWE) tasks are quite similar, both aiming to return the top-$K$ frequent words in the context, our method shows a significantly more pronounced decline in performance on CWE. One possible reason is that, in the FWE task, the value of $K$ is consistently fixed at 3, while in the CWE task, $K$ increases with the context length, making the task progressively more challenging for our method.
+\looseness=-1
+\begin{figure}[t]
+\centering 
+\includegraphics[width=1\textwidth]{Figures/crop_threshold.pdf}
+\caption{Effect of threshold $\delta$ on lazy layer identification using LLama3-8B-Instruct: Increasing the threshold results in more layers being identified as non-lazy rather than lazy. }
+\label{fig:abl_threshold}
+\end{figure}
+\setcounter{subfigure}{4}
+\begin{figure}
+\centering
+\includegraphics[width=1\textwidth]{Figures/crop_strategy.pdf}
+\subfigure[]{
+\includegraphics[width=0.48\textwidth]{Figures/strategy_0.pdf}
+}
+\hspace{0.1cm}
+\subfigure[]{
+\includegraphics[width=0.465\textwidth]{Figures/strategy_1.pdf}
+}
+\caption{
+Different strategies for dropping KV cache at the layer level and their performance on LLama3-8B-Instruct: 1)~Full: Use full KV cache for all layers. 2)~Pyramid: KV cache are progressively reduced as the layers increase, forming a pyramid-like structure. 3)~Random: Drop the KV cache in randomly selected layers within the ranges $[0,16)$, $[16,32)$, and $[0,32)$. 4)~Our SimLayerKV (SLKV): Identify lazy layers during either the prefilling or decoding stages, and trim the KV cache accordingly.
+We keep a \textbf{same} number of dropped KV cache for all strategies, except Full.\looseness=-1
+}
+\label{fig:abl_strategy}
+\end{figure}
+
+\subsection{Ablation studies \& analysis}
+\label{sec:abl}
+\textbf{Impact of threshold on lazy layer identification.}
+To assess the impact of the threshold $\delta$ in identifying lazy layers, we conduct an ablation analysis using the LLama3-8B-Instruct model, varying $\delta$ from 0, 0.2, up to 1. As illustrated in Figure~\ref{fig:abl_threshold}, we observe that as the threshold increases, the model's performance shows little to no change or only slow improvement initially. However, after exceeding 0.6, the performance improves rapidly, and by 0.9, it approaches the performance seen when the threshold equals 1 in most tasks. 
+This indicates that as the threshold increases, the likelihood of accurately identifying and trimming truly lazy layers increases, allowing the model to maintain high performance while reducing unnecessary computations.
+\textbf{Effect of different strategies for dropping KV cache at layer level.} 
+As shown in Figure~\hyperref[fig:abl_strategy]{6 (a-d)}, we experiment with four different strategies.
+We ensured the same number of dropped KV cache for each strategy, except for Full. 
+The results shown in Figure~\hyperref[fig:abl_strategy]{6 (e-f)} indicate significant reductions for Pyramid and Random strategies, suggesting that the predefined expectations about each layer’s function may not fully align with their actual roles.
+Moreover, the performance difference between SLKV-prefill and SLKV-decode strategies is minimal, with only slight reductions compared to the full KV cache (0.20\% and 0.28\% on average, respectively).
+This indicates that both approaches are effective in reducing cache usage while maintaining performance, regardless of whether lazy layers are identified during the prefilling or decoding stages.
+
+
+\section{Conclusion}
+
+In this work, we introduced SimLayerKV, a simple yet effective method for compressing the KV cache in LLMs. By identifying lazy layers and trimming their KV cache, SimLayerKV effectively reduced inter-layer KV cache redundancies.
+Experiments on three different LLMs across 16 datasets from the LongBench benchmark demonstrated that SimLayerKV, with only seven lines of code, achieves a KV cache compression ratio of 5$\times$ with only a 1.2\% drop in performance when combined with 4-bit quantization. 
+For future work, we aim to combine our inter-layer KV cache compression method, SimLayerKV, with other powerful intra-layer compression methods like H2O~\citep{zhang2024h2o} to further enhance performance and efficiency.
+
+
+
+
+

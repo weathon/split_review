@@ -1,0 +1,450 @@
+\title{Diffusion Bridge Implicit Models}
+
+\begin{abstract}
+Denoising diffusion bridge models (DDBMs) are a powerful variant of diffusion models for interpolating between two arbitrary paired distributions given as endpoints. Despite their promising performance in tasks like image translation, DDBMs require a computationally intensive sampling process that involves the simulation of a (stochastic) differential equation through hundreds of network evaluations. In this work, we take the first step in fast sampling of DDBMs without extra training, motivated by the well-established recipes in diffusion models. We generalize DDBMs via a class of non-Markovian diffusion bridges defined on the discretized timesteps concerning sampling, which share the same marginal distributions and training objectives, give rise to generative processes ranging from stochastic to deterministic, and result in diffusion bridge implicit models (DBIMs). DBIMs are not only up to 25$\times$ faster than the vanilla sampler of DDBMs but also induce a novel, simple, and insightful form of ordinary differential equation (ODE) which inspires high-order numerical solvers. Moreover, DBIMs maintain the generation diversity in a distinguished way, by using a booting noise in the initial sampling step, which enables faithful encoding, reconstruction, and semantic interpolation in image translation tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models~\citep{song2020score,sohl2015deep,ho2020denoising} represent a family of powerful generative models, with high-quality generation ability, stable training, and scalability to high dimensions. They have consistently obtained state-of-the-art performance in various domains, including image synthesis~\citep{dhariwal2021diffusion,karras2022elucidating}, speech and video generation~\citep{chen2020wavegrad,ho2022imagen}, controllable image manipulation~\citep{nichol2021glide,ramesh2022hierarchical,rombach2022high,meng2021sdedit}, density estimation~\citep{song2021maximum,kingma2021variational,lu2022maximum,zheng2023improved} and inverse problem solving~\citep{chung2022diffusion,kawar2022denoising}. They also act as fundamental components of modern text-to-image~\citep{rombach2022high} and text-to-video~\citep{gupta2023photorealistic,bao2024vidu} synthesis systems, ushering in the era of AI-generated content.
+
+However, diffusion models are not well-suited for solving tasks like image translation or restoration, where the transport between two arbitrary probability distributions is to be modeled given paired endpoints. Diffusion models are rooted in a stochastic process that gradually transforms between data and noise, and the prior distribution is typically restricted to the ``non-informative'' random Gaussian noises. Adapting diffusion models to scenarios where a more informative prior naturally exists, such as image translation/restoration, requires cumbersome techniques like adding conditions to the model~\citep{ho2021classifier,saharia2022palette}, modifying the generation pipeline~\citep{meng2021sdedit,su2022dual} or adding extra guidance terms during sampling~\citep{chung2022diffusion,kawar2022denoising}. These approaches inevitably result in either sub-par performance or slow and resource-intensive inference processes.
+
+Recently, denoising diffusion bridge models (DDBMs)~\citep{zhou2023denoising} have emerged as a scalable and promising approach to solving the distribution translation tasks. By considering the reverse-time processes of a diffusion bridge, which represent diffusion processes conditioned on given endpoints, DDBMs offer a general framework for distribution translation. While excelling in image translation tasks with exceptional quality and fidelity, sampling from DDBMs requires simulating a (stochastic) differential equation corresponding to the reverse-time process. Even with the introduction of their hybrid sampler, achieving high-fidelity results for high-resolution images still demands over 100 steps. Compared to the efficient samplers for diffusion models~\citep{song2020denoising,zhang2022fast,lu2022dpm}, which require around 10 steps to generate reasonable samples, DDBMs are falling behind, urging the development of efficient variants.
+
+\begin{figure}[t]
+    \centering
+	\begin{minipage}[t]{.24\linewidth}
+		\centering
+		\includegraphics[width=1.0\linewidth]{figures/condition.png}
+		\scriptsize{(a) Condition}
+	\end{minipage}
+	\begin{minipage}[t]{.24\linewidth}
+		\centering
+		\includegraphics[width=1.0\linewidth]{figures/ddbm100.png}
+		\scriptsize{(b) \makecell{DDBM\\ NFE=100 (FID 6.46)}}
+	\end{minipage}
+	\begin{minipage}[t]{.24\linewidth}
+		\centering
+		\includegraphics[width=1.0\linewidth]{figures/dbim10.png}
+		\scriptsize{(c) \makecell{DBIM (\textbf{Ours})\\NFE=10 (FID 4.62)}}
+	\end{minipage}
+ \begin{minipage}[t]{.24\linewidth}
+		\centering
+		\includegraphics[width=1.0\linewidth]{figures/dbim_10_3rd.png}
+		\scriptsize{(c) \makecell{DBIM (3rd-order) (\textbf{Ours})\\NFE=10 (FID 4.42)}}
+	\end{minipage}
+	\caption{\label{fig:inpaint-main}\small{Inpainting results on the ImageNet 256$\times$256 dataset~\citep{deng2009imagenet} by DDBM~\citep{zhou2023denoising} with 100 number of function evaluations (NFE), and DBIM (ours) with only 10 NFE.}
+	}
+\end{figure}
+
+This work represents the first pioneering effort toward accelerated sampling of DDBMs. As suggested by well-established recipes in diffusion models, training-free accelerations of diffusion sampling primarily focus on reducing stochasticity (e.g. the prominent denoising diffusion implicit models, DDIMs) and utilizing higher-order information (e.g. high-order solvers). We present diffusion bridge implicit models (DBIMs) as an approach that explores both aspects within the diffusion bridge framework. Firstly, we investigate the continuous-time forward process of DDBMs on discretized timesteps and generalize them to a series of non-Markovian diffusion bridges controlled by a variance parameter, while maintaining identical marginal distributions and training objectives as DDBMs. Secondly, the induced reverse generative processes correspond to sampling procedures of varying levels of stochasticity, including deterministic ones. Consequently, DBIMs can be viewed as a bridge counterpart and extension of DDIMs. 
+Furthermore, in the continuous time limit, DBIMs can induce a novel form of ordinary differential equation (ODE), which is linked to the probability flow ODE (PF-ODE) in DDBMs while being simpler and significantly more efficient. The induced ODE also facilitates novel high-order numerical diffusion bridge solvers for faster convergence.
+
+We demonstrate the superiority of DBIMs by applying them in image translation and restoration tasks, where they offer up to 25$\times$ faster sampling compared to DDBMs and achieve state-of-the-art performance on challenging high-resolution datasets. Unlike conventional diffusion sampling, the initial step in DBIMs is forced to be stochastic with a booting noise to avoid singularity issues arising from the fixed starting point on a bridge. By viewing the booting noise as the latent variable, DBIMs maintain the generation diversity of typical generative models while enabling faithful encoding, reconstruction, and semantically meaningful interpolation in the data space.
+
+
+\section{Background}
+
+\subsection{Diffusion Models}
+Given a $d$-dimensional data distribution $q_0(\x_0)$, diffusion models~\citep{song2020score,sohl2015deep,ho2020denoising} build a diffusion process by defining a forward stochastic differential equation (SDE) starting from $\x_0\sim q_0$:
+\begin{equation}
+    \label{eq:forwardSDE}
+    \dm \x_t = f(t)\x_t \dm t + g(t)\dm\wv_t
+\end{equation}
+where $t \in [0, T]$ for some finite horizon $T$, $f,g:[0,T] \to \R$ is the scalar-valued drift and diffusion term, and $\wv_t \in \R^d$ is a standard Wiener process. As a linear SDE, the forward process owns an analytic Gaussian transition kernel 
+\begin{equation}
+\label{eq:diffusion-forward-kernel}
+    q_{0t}(\x_t|\x_0)=\Nc(\alpha_t\x_0,\sigma_t^2\Iv)
+\end{equation} 
+by Itô's 
+formula~\citep{ito1951formula}, where  
+$\alpha_t,\sigma_t$ are called \textit{noise schedules} satisfying $f(t)=\frac{\dm\log \alpha_t}{\dm t},\quad g^2(t)=\frac{\dm \sigma_t^2}{\dm t}-2\frac{\dm\log \alpha_t}{\dm t}\sigma_t^2$~\citep{kingma2021variational}. The forward SDE is accompanied by a series of marginal distributions $\{q_t\}_{t=0}^T$ of $\{\x_t\}_{t=0}^T$, and $f,g$ are properly designed so that the terminal distribution is approximately a pure Gaussian, i.e., $q_T(\boldsymbol{x}_T)\approx \Nc(\vect0,\sigma_T^2\Iv)$. 
+
+To sample from the data distribution $q_0(\x_0)$, we can solve the reverse SDE or probability flow ODE~\citep{song2020score} from $t=T$ to $t=0$: 
+\begin{align}
+    \dm\x_t &= [f(t)\x_t - g^2(t)\nabla_{\x_t} \log q_t(\x_t)] \dm t + g(t)\dm \bar{\wv}_t,\\
+    \dm\x_t &= \left[f(t)\x_t - \frac{1}{2}g^2(t)\nabla_{\x_t} \log q_t(\x_t)\right] \dm t.
+\end{align}
+They share the same marginal distributions $\{q_t\}_{t=0}^T$ with the forward SDE, where $\bar{\boldsymbol{w}}_t$ is the reverse-time Wiener process, and the only unknown term $\nabla_{\x_t}\log q_t(\x_t)$ is the \textit{score function} of the marginal density $q_t$. By denoising score matching (DSM)~\citep{vincent2011connection}, a score prediction network $\sv_\theta(\x_t,t)$ can be parameterized to minimize $\E_t\E_{\x_0\sim q_0(\x_0)}\E_{\x_t\sim q_{0t}(\x_t|\x_0)}\left[w(t)\|\sv_\theta(\x_t,t)-\nabla_{\x_t}\log q_{0t}(\x_t|\x_0)\|_2^2\right]$, where $q_{0t}$ is the analytic forward transition kernel and $w(t)$ is a positive weighting function. $\sv_\theta$ can be plugged into the reverse SDE and the probability flow ODE to obtain the parameterized diffusion SDE and diffusion ODE. There are various dedicated solvers for diffusion SDE or ODE~\citep{song2020denoising,zhang2022fast,lu2022dpm,gonzalez2023seeds}.
+\subsection{Denoising Diffusion Bridge Models}
+
+Denoising diffusion bridge models (DDBMs)~\citep{zhou2023denoising} consider driving the diffusion process in Eqn.~\eqref{eq:forwardSDE} to arrive at a particular point $\yv\in\R^d$ almost surely via Doob’s \textit{h}-transform~\citep{doob1984classical}:
+\begin{equation}
+\label{eq:doob-h}
+    \dm\x_t=f(t)\x_t\dm t+g^2(t)\nabla_{\x_t}\log q(\x_T=\yv|\x_t)+g(t)\dm\wv_t,\quad \x_0\sim q_0= p_{\data},\x_T=\yv.
+\end{equation}
+The endpoint $\yv$ is not restricted to Gaussian noise as in diffusion models, but instead chosen as informative priors (such as the degraded image in image restoration tasks). Given a starting point $\x_0$, the process in Eqn.~\eqref{eq:doob-h} also owns an analytic forward transition kernel
+\begin{equation}
+\label{eq:bridge-forward-kernel}
+q(\x_t|\x_0,\x_T)=\Nc(a_t\x_T+b_t\x_0,c_t^2\Iv),\quad a_t=\frac{\alpha_t}{\alpha_T}\frac{\SNR_T}{\SNR_t},b_t=\alpha_t(1-\frac{\SNR_T}{\SNR_t}),c_t^2=\sigma_t^2(1-\frac{\SNR_T}{\SNR_t})
+\end{equation}
+which forms a \textit{diffusion bridge}, and $\SNR_t=\alpha_t^2/\sigma_t^2$ is the signal-to-noise ratio at time $t$. DDBMs show that
+the forward process Eqn.~\eqref{eq:doob-h} is associated with a reverse SDE and a probability flow ODE starting from $\x_T=\yv$:
+\begin{align}
+    \label{eq:bridge-SDE}
+    \dm\x_t&=\left[f(t)\x_t-g^2(t)\left(\nabla_{\x_t}\log q(\x_t|\x_T=\yv)-\nabla_{\x_t}\log q_{tT}(\x_T=\yv|\x_t)\right)\right]\dm t+g(t)\dm\wv_t,\\
+    \label{eq:bridge-PF-ODE}
+    \dm\x_t&=\left[f(t)\x_t-g^2(t)\left(\frac{1}{2}\nabla_{\x_t}\log q(\x_t|\x_T=\yv)-\nabla_{\x_t}\log q_{tT}(\x_T=\yv|\x_t)\right)\right]\dm t.
+\end{align}
+They share the same marginal distributions $\{q(\x_t|\x_T=\yv)\}_{t=0}^T$ with the forward process, where $\bar{\boldsymbol{w}}_t$ is the reverse-time Wiener process, $q_{tT}$ is analytically known similar to Eqn.~\eqref{eq:diffusion-forward-kernel}, and the only unknown term $\nabla_{\x_t}\log q(\x_t|\x_T=\yv)$ is the \textit{bridge score function}. Denoising bridge score matching (DBSM) is proposed to learn the unknown score term $q(\x_t|\x_T=\yv)$ with a parameterized network $\sv_\theta(\x_t,t,\yv)$, by minimizing
+\begin{equation}
+\label{eq:L-objective}
+    \Lc_w(\theta)=\E_{t}\E_{(\x_0,\yv)\sim p_{\data}(\x_0,\yv)}\E_{\x_t\sim q(\x_t|\x_0,\x_T=\yv)}\left[w(t)\|\sv_\theta(\x_t,t,\yv)-\nabla_{\x_t}\log q(\x_t|\x_0,\x_T=\yv)\|_2^2\right]
+\end{equation}
+where $q(\x_t|\x_0,\x_T=\yv)$ is the forward transition kernel in Eqn.~\eqref{eq:bridge-forward-kernel} and $w(t)$ is a positive weighting function. To sample from diffusion bridges with Eqn.~\eqref{eq:bridge-SDE} and Eqn.~\eqref{eq:bridge-PF-ODE}, DDBMs propose a high-order hybrid sampler that alternately simulates the ODE and SDE steps to enhance the sample quality, inspired by the Heun sampler in diffusion models~\citep{karras2022elucidating}. However, it is not dedicated to diffusion bridges and lacks theoretical insights in developing efficient diffusion samplers.
+
+
+\section{Generative Model through Non-Markovian Diffusion Bridges}
+
+We start by examining the forward process of the diffusion bridge (Eqn.~\eqref{eq:doob-h}) on a set of discretized timesteps $0=t_0<t_1<\dots<t_{N-1}<t_N=T$ that will be used for reverse sampling. Since the bridge score $\nabla_{\x_t}\log q(\x_t|\x_T)$ only depends on the marginal distribution $q(\x_t|\x_T)$, we can construct alternative probabilistic models that induce new sampling procedures while reusing the learned bridge score $\sv_\theta(\x_t,t,\x_T)$, as long as they agree on the $N$ marginals $\{q(\x_{t_n}|\x_T)\}_{n=0}^{N-1}$.
+\subsection{Non-Markovian Diffusion Bridges as Forward Process}
+\label{sec:3-1}
+We consider a family of probability distributions $q^{(\rho)}(\x_{t_{0:N-1}}|\x_T)$, controlled by a variance parameter $\rho\in\R^{N-1}$:
+\begin{equation}
+    \label{eq:q-rho-joint-definition}
+    q^{(\rho)}(\x_{t_{0:N-1}}|\x_T)=q_0(\x_{t_0})\prod_{n=1}^{N-1} q^{(\rho)}(\x_{t_n}|\x_0,\x_{t_{n+1}},\x_T)
+\end{equation}
+where $q_0$ is the data distribution at time 0 and for $1\leq n\leq N-1$
+\begin{equation}
+\label{eq:q-rho-each}
+    q^{(\rho)}(\x_{t_n}|\x_0,\x_{t_{n+1}},\x_T)=\Nc(a_{t_n}\x_T+b_{t_n}\x_0+\sqrt{c^2_{t_n}-\rho^2_{n}}\frac{\x_{t_{n+1}}-a_{t_{n+1}}\x_T-b_{t_{n+1}}\x_0}{c_{t_{n+1}}},\rho_n^2\Iv)
+\end{equation}
+where $\rho_n$ is the $n$-th element of $\rho$ satisfying $\rho_{N-1}=c_{t_{N-1}}$, and $a_t,b_t,c_t$ are terms related to the noise schedule, as defined in the original diffusion bridge (Eqn.~\eqref{eq:bridge-forward-kernel}). Intuitively, this decreases the variance (noise level) of the bridge while incorporating additional noise components from the last step. Under this construction, we can prove that $q^{(\rho)}$ maintains consistency in marginal distributions with the original forward process $q$ governed by Eqn.~\eqref{eq:doob-h}.
+
+\label{proposition:marginal}
+    For $0\leq n\leq N-1$, we have $q^{(\rho)}(\x_{t_n}|\x_T)=q(\x_{t_n}|\x_T)$.
+\end{proposition}
+The definition of $q^{(\rho)}$ in Eqn.~\eqref{eq:q-rho-joint-definition} represents the inference process, since it is factorized as the distribution of $\x_{t_n}$ given $\x_{t_{n+1}}$ at the previous timestep. As $\x_{t_{n+1}}$ in $q^{(\rho)}$ can simultaneously depend on $\x_{t_{n}}$ and $\x_0$, we refer to it as \textit{non-Markovian diffusion bridges}, in contrast to Markovian ones (such as Brownian bridges, and the diffusion bridge defined by the forward SDE in Eqn.~\eqref{eq:doob-h}) which should satisfy $q(\x_{t_{n+1}}|\x_0,\x_{t_n},\x_T)=q(\x_{t_{n+1}}|\x_{t_n},\x_T)$.
+\subsection{Reverse Generative Process and Equivalent Training Objective}
+Eqn.~\eqref{eq:q-rho-joint-definition} can be naturally transformed into a parameterized and learnable generative model, by replacing the unknown $\x_0$ in Eqn.~\eqref{eq:q-rho-joint-definition} with a \textit{data predictor} $\x_\theta(\x_t,t,\x_T)$. Intuitively, $\x_t$ on the diffusion bridge is a weighted mixture of $\x_T,\x_0$ and some random Gaussian noise according to Eqn.~\eqref{eq:bridge-forward-kernel}, where the weightings $a_t,b_t,c_t$ are determined by the timestep $t$. The network $\x_\theta$ is trained to recover the clean data $\x_0$ given $\x_t,\x_T$ and $t$.
+
+Specifically, we define the generative process starting from $\x_T$ as
+\begin{equation}
+    \label{eq:p-theta-generative}
+    p_\theta(\x_{t_n}|\x_{t_{n+1}},\x_T)=
+    \begin{cases}
+        \Nc(\x_\theta(\x_{t_1},t_1,\x_T),\rho_0^2\Iv),\quad n=0\\
+        q^{(\rho)}(\x_{t_n}|\x_\theta(\x_{t_{n+1}},t_{n+1},\x_T),\x_{t_{n+1}},\x_T),\quad 1\leq n\leq N-1
+    \end{cases}
+\end{equation}
+and the joint distribution as $p_\theta(\x_{t_{0:N-1}}|\x_T)=\prod_{n=0}^{N-1} p_\theta(\x_{t_n}|\x_{t_{n+1}},\x_T)$. To optimize the network parameter $\theta$, we can adopt the common variational inference objective as in DDPMs~\citep{ho2020denoising}, except that the distributions are conditioned on $\x_T$:
+\begin{equation}
+\label{eq:J-loss-definition}
+    \Jc^{(\rho)}(\theta)=\E_{q(\x_T)}\E_{q^{(\rho)}(\x_{t_{0:N-1}}|\x_T)}\left[\log q^{(\rho)}(\x_{t_{1:N-1}}|\x_0,\x_T)-\log p_\theta(\x_{t_{0:N-1}}|\x_T)\right]
+\end{equation}
+It seems that the DDBM objective $\Lc_w$ in Eqn.~\eqref{eq:L-objective} is distinct from $\Jc^{(\rho)}$: respectively, they are defined on continuous and discrete timesteps; they originate from score matching and variational inference; they have different parameterizations of score and data prediction\footnote{The diffusion bridge models are usually parameterized differently from score prediction, but can be converted to score prediction.}. However, we show they are equivalent by focusing on the discretized timesteps and transforming the parameterization.
+
+\label{proposition:training-equivalence}
+For $\rho>\vect 0$, there exists certain weights $\gamma$ so that $\Jc^{(\rho)}(\theta)=\Lc_\gamma(\theta)+C$ on the discretized timesteps $\{t_{n}\}_{n=1}^{N}$, where $C$ is a constant irrelevant to $\theta$. Besides, the bridge score predictor $\sv_\theta$ in $\Lc_\gamma(\theta)$ has the following relationship with the data predictor $\x_\theta$ in $\Jc^{(\rho)}(\theta)$:
+\begin{equation}
+\label{eq:s-x-theta-relation}
+    \sv_\theta(\x_t,t,\x_T)=-\frac{\x_t-a_t\x_T-b_t\x_\theta(\x_t,t,\x_T)}{c_t^2}
+\end{equation}
+\end{proposition}
+ Hence, it is reasonable to reuse the network trained by $\Lc$ while leveraging various $\rho$ for improved sampling efficiency.
+
+
+\section{Sampling with Generalized Diffusion Bridges}
+
+Now that we have confirmed the rationality and built the theoretical foundations for applying the generalized diffusion bridge $p_\theta$ to pretrained DDBMs, a range of inference processes is now at our disposal, controlled by the variance parameter $\rho$. This positions us to explore the resultant sampling procedures and the effects of $\rho$ in pursuit of better and more efficient generation.
+\subsection{Diffusion Bridge Implicit Models}
+\label{sec:dbim}
+
+Suppose we sample in reverse time on the discretized timesteps $0=t_0<t_1<\dots<t_{N-1}<t_N=T$. The number $N$ and the schedule of sampling steps can be made independently of the original timesteps on which the bridge model is trained, whether discrete~\citep{liu20232} or continuous~\citep{zhou2023denoising}. According to the generative process of $p_\theta$ in Eqn.~\eqref{eq:p-theta-generative}, the updating rule from $t_{n+1}$ to $t_n$ is described by
+\begin{equation}
+    \label{eq:update-rule}\x_{t_n}=a_{t_n}\x_T+b_{t_n}\hat\x_0+\sqrt{c^2_{t_n}-\rho^2_{n}}\underbrace{\frac{\x_{t_{n+1}}-a_{t_{n+1}}\x_T-b_{t_{n+1}}\hat\x_0}{c_{t_{n+1}}}}_{\text{predicted noise } \hat\epsilonv}+\rho_n\epsilonv,\quad \epsilonv\sim\Nc(\vect 0,\Iv)
+\end{equation}
+where $\hat\x_0=\x_\theta(\x_{t_{n+1}},t_{n+1},\x_T)$ denotes the predicted clean data at time 0. 
+\paragraph{Intuition of the Sampling Procedure}
+Intuitively, the form of Eqn.~\eqref{eq:update-rule} resembles the forward transition kernel of the diffusion bridge in Eqn.~\eqref{eq:bridge-forward-kernel} (which can be rewritten as $\x_t=a_t\x_T+b_t\x_0+c_t\epsilonv,\epsilonv\sim\Nc(\vect 0,\Iv)$). In comparison, $\x_0$ is substituted with the predicted $\hat\x_0$, and a portion of the standard Gaussian noise $\epsilonv$ now stems from the predicted noise $\hat\epsilonv$. The predicted noise $\hat\epsilonv$ is derived from $\x_{t_{n+1}}$ at the previous timestep and can be expressed by the predicted clean data $\hat\x_0$.
+\begin{table}[t]
+    \centering
+    \caption{\label{tab:comparison}Comparison between different diffusion models and diffusion bridge models.}
+    \resizebox{\textwidth}{!}{% <------ Don't forget this %
+    \begin{tabular}{lccccccc}
+    \toprule
+    &\multicolumn{3}{|c|}{Diffusion Models}&\multicolumn{3}{c|}{Diffusion Bridge Models}\\
+    &\multicolumn{1}{|c}{\makecell{DDPM\\\citep{ho2020denoising}}}&\makecell{ScoreSDE\\\citep{song2020score}}&\multicolumn{1}{c|}{\makecell{DDIM\\\citep{song2020denoising}}}&\makecell{I$^2$SB\\\citep{liu20232}}&\makecell{DDBM\\\citep{zhou2023denoising}}&\multicolumn{1}{c|}{DBIM (\textbf{Ours})}\\
+    \midrule
+    
+    
+Noise Schedule&VP&Any&Any&VE&Any&Any\\
+    Timesteps&Discrete&Continuous&Discrete&Discrete&Continuous&Discrete\\
+    Forward Distribution&$q(\x_{n}|\x_0)$&$q(\x_t|\x_0)$&$q(\x_{n}|\x_{n-1},\x_0)$&$q(\x_n|\x_0,\x_N)$&$q(\x_t|\x_0,\x_T)$&$q(\x_{t_{n+1}}|\x_0,\x_{t_n},\x_T)$\\
+    Inference Process&$p_\theta(\x_{n-1}|\x_n)$&SDE/ODE&$p_\theta(\x_{n-1}|\x_n)$&$p_\theta(\x_{n-1}|\x_n)$&SDE/ODE&$p_\theta(\x_{t_n}|\x_{t_{n+1}},\x_T)$\\
+    Non-Markovian&\xmark&\xmark&\cmark&\xmark&\xmark&\cmark\\
+    \bottomrule
+    \end{tabular}% <------ Don't forget this %
+    }
+\end{table}
+
+\paragraph{Effects of the Variance Parameter} We investigate the effects of the variance parameter $\rho$ from the theoretical perspective by considering two extreme cases. Firstly, we note that when $\rho_n=\sigma_{t_n}\sqrt{1-\frac{\SNR_{t_{n+1}}}{\SNR_{t_n}}}$ for each $0\leq n\leq N-1$, the $\x_T$ term in Eqn.~\eqref{eq:update-rule} is canceled out. In this scenario, the forward process in Eqn. Besides, the inference process will get rid of $\x_T$ and simplify 
+to $p_\theta(\x_{t_n}|\x_{t_{n+1}})$, akin to the sampling mechanism in DDPMs~\citep{ho2020denoising}. Secondly, when $\rho_n=0$ for each $0\leq n\leq N-1$, the inference process will be free from random noise and composed of deterministic iterative updates, characteristic of an implicit probabilistic model~\citep{mohamed2016learning}. Consequently, we name the resulting model 
+\textit{diffusion bridge implicit models} (DBIMs), drawing parallels with denoising diffusion implicit models (DDIMs)~\citep{song2020denoising}. DBIMs serve as the bridge counterpart and extension of DDIMs, as illustrated in Table~\ref{tab:comparison}.
+
+When we choose $\rho$ that lies between these two boundary cases, 
+we can obtain non-Markovian diffusion bridges with intermediate and non-zero stochastic levels. Such bridges may potentially yield superior sample quality. We present detailed ablations in Section~\ref{sec:exp-main}.
+
+\begin{figure}[t]
+    \centering
+	\includegraphics[width=0.7\linewidth]{figures/pipeline-crop.pdf}
+\caption{\label{fig:pipeline}Illustration of the DBIM's deterministic sampling procedure when $\rho=0$.}
+\end{figure}
+
+\paragraph{The Singularity at the Initial Step for Deterministic Sampling} One important aspect to note regarding DBIMs is that its initial step exhibits singularity when $\rho=0$, a property essentially distinct from DDIMs in diffusion models. Specifically, in the initial step we have $t_{n+1}=T$, and $c_{t_{n+1}}$ in the denominator in Eqn.~\eqref{eq:update-rule} equals 0. This phenomenon can be understood intuitively: given a fixed starting point $\x_T$, the variable $\x_t$ for $t<T$ is typically still stochastically distributed (the marginal $p_\theta(\x_t|\x_T)$ is not a Dirac distribution). For instance, in inpainting tasks, there should be various plausible complete images corresponding to a fixed masked image. However, a fully deterministic sampling procedure disrupts such stochasticity.
+
+To be theoretically robust, we employ the other boundary choice $\rho_n=\sigma_{t_n}\sqrt{1-\frac{\SNR_{t_{n+1}}}{\SNR_{t_n}}}$ in the initial step\footnote{With this choice, $c_{t_{n+1}}$ in the denominator in Eqn.~\eqref{eq:update-rule} will be canceled out.}, which is aligned with our previous restriction that $\rho_{N-1}=c_{t_{N-1}}$. This will introduce an additional standard Gaussian noise $\epsilonv$ which we term as the \textit{booting noise}. It accounts for the stochasticity of the final sample $\x_0$ under a given fixed $\x_T$ and can be viewed as the latent variable. We illustrate the complete DBIM pipeline in Figure~\ref{fig:pipeline}.
+\subsection{Connection to Probability Flow ODE}
+\label{sec:connection-to-pf-ode}
+It is intuitive to perceive that the deterministic sampling can be related to solving an ODE. By setting $\rho=0,t_{n+1}=t$ and $t_{n+1}-t_n=\Delta t$ in Eqn.~\eqref{eq:update-rule}, the DBIM updating rule can be reorganized as
+$
+    \frac{\x_{t-\Delta t}}{c_{t-\Delta t}}=\frac{\x_t}{c_t}+\left(\frac{a_{t-\Delta t}}{c_{t-\Delta t}}-\frac{a_t}{c_t}\right)\x_T+\left(\frac{b_{t-\Delta t}}{c_{t-\Delta t}}-\frac{b_t}{c_t}\right)\x_\theta(\x_t,t,\x_T)
+$. As $a_t,b_t,c_t$ are continuous functions of time $t$ defined in Eqn.~\eqref{eq:bridge-forward-kernel}, the ratios $\frac{a_t}{c_t}$ and $\frac{b_t}{c_t}$ also remain continuous functions of $t$. Therefore, DBIM ($\rho=0$) can be treated as an Euler discretization of the following ordinary differential equation (ODE):
+\begin{equation}
+    \label{eq:neural-ODE}
+    \dm\left(\frac{\x_t}{c_t}\right)=\x_T\dm\left(\frac{a_t}{c_t}\right)+\x_\theta(\x_t,t,\x_T)\dm\left(\frac{b_t}{c_t}\right)
+\end{equation}
+Though it does not resemble a conventional ODE involving $\dm t$, the two infinitesimal terms $\dm\left(\frac{a_t}{c_t}\right)$ and $\dm\left(\frac{b_t}{c_t}\right)$ can be expressed with $\dm t$ by the chain rule of derivatives. The ODE form also suggests that with a sufficient number of discretization steps, we can reverse the sampling process and obtain encodings of the observed data, which can be useful for interpolation or other downstream tasks.
+
+In DDBMs, the PF-ODE (Eqn.~\eqref{eq:bridge-PF-ODE}) involving $\dm\x_t$ and $\dm t$ is proposed and used for deterministic sampling. We reveal in the following proposition that our ODE 
+in Eqn.~\eqref{eq:neural-ODE} can exactly yield the PF-ODE without relying on the advanced Kolmogorov forward (or Fokker-Planck) equation.
+
+\label{proposition:pf-ode}
+Suppose $\sv_\theta(\x_t,t,\x_T)$ is learned as the ground-truth bridge score $\nabla_{\x_t}\log q(\x_t|\x_T)$, and $\x_\theta$ is related to $\sv_\theta$ through Eqn.~\eqref{eq:s-x-theta-relation}, then Eqn.~\eqref{eq:neural-ODE} can be converted to the PF-ODE (Eqn.~\eqref{eq:bridge-PF-ODE}) proposed in DDBMs.
+\end{proposition}
+ We highlight our differences from the PF-ODE in DDBMs: (1) Our ODE has a novel form with exceptional neatness. (2) Despite their theoretical equivalence, our ODE describes the evolution of $\frac{\x_t}{c_t}$ rather than $\x_t$, and its discretization is performed with respect to $\dm\left(\frac{a_t}{c_t}\right)$ and $\dm\left(\frac{b_t}{c_t}\right)$ instead of $\dm t$. (3) Empirically, DBIMs ($\rho=0$) prove significantly more efficient than the Euler discretization of the PF-ODE, thereby accelerating DDBMs by a substantial margin. (4) In contrast to the fully deterministic ODE, DBIMs are capable of various stochastic levels to achieve the best generation quality under the same sampling steps.
+
+\subsection{Extension to High-Order Methods}
+The simplicity and efficiency of our ODE (Eqn.~\eqref{eq:neural-ODE}) also inspire novel high-order numerical solvers tailored for DDBMs, potentially bringing faster convergence than the first-order Euler discretization. Specifically, using the time change-of-variable $\lambda_t=\log\left(\frac{b_t}{c_t}\right)=\frac{1}{2}\left(\SNR_t-\SNR_T\right)$, the solution of Eqn.~\eqref{eq:neural-ODE} from time $t$ to time $s<t$ can be represented as
+\begin{equation}
+\label{eq:exact-solution}
+    \x_s=\frac{c_s}{c_t}\x_t+\left(a_s-\frac{c_s}{c_t}a_t\right)\x_T+c_s\int_{\lambda_t}^{\lambda_s} e^\lambda\x_\theta(\x_{t_\lambda},t_\lambda,\x_T)\dm\lambda
+\end{equation}
+where $t_\lambda$ is the inverse function of $\lambda_t$. The intractable integral can be approximated by Taylor expansion of $\x_\theta$ and finite difference estimations of high-order derivatives, following well-established numerical methods~\citep{hochbruck2005explicit} and their extensive application in diffusion models~\citep{zhang2022fast,lu2022dpm,gonzalez2023seeds}.
+
+
+\section{Experiments}
+
+\begin{figure}[t]
+
+\begin{minipage}{0.16\textwidth}
+    \centering
+\resizebox{1\textwidth}{!}{
+\includegraphics{figures/diode_small/y_0_crop.jpg}}
+\scriptsize{Condition}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\centering
+\resizebox{1\textwidth}{!}{
+\includegraphics{figures/diode_small/x_0_crop.jpg}
+}
+\scriptsize{Ground-truth}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\centering
+\resizebox{1\textwidth}{!}{
+\includegraphics{figures/diode_small/heun_20_crop.jpg}
+}
+\scriptsize{DDBM (NFE=20)}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\centering
+\resizebox{1\textwidth}{!}{
+\includegraphics{figures/diode_small/heun_100_crop.jpg}
+}
+\scriptsize{DDBM (NFE=100)}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\centering
+\resizebox{1\textwidth}{!}{
+\includegraphics{figures/diode_small/0.0_20_crop.jpg}
+}
+\scriptsize{DBIM (NFE=20)}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\centering
+\resizebox{1\textwidth}{!}{
+\includegraphics{figures/diode_small/0.0_100_crop.jpg}
+}
+\scriptsize{DBIM (NFE=100)}
+\end{minipage}
+
+\caption{\label{fig:diode-maintext} Image translation results on the DIODE-Outdoor dataset with DDBM and DBIM.}
+\end{figure}
+In this section, we show that DBIMs surpass the original sampling procedure of DDBMs by a large margin, in terms of both sample quality and sample efficiency. We also showcase DBIM's capabilities in latent-space encoding, reconstruction, and interpolation using deterministic sampling. All comparisons between DBIMs and DDBMs are conducted using identically trained models. For DDBMs, we employ their proposed hybrid sampler for sampling. For DBIMs, we control the variance parameter $\rho$ by interpolating between its boundary selections:
+\begin{equation}
+    \rho_n=\eta\sigma_{t_n}\sqrt{1-\frac{\SNR_{t_{n+1}}}{\SNR_{t_n}}},\quad \eta\in [0,1]
+\end{equation}
+where $\eta=0$ and $\eta=1$ correspond to deterministic sampling and Markovian stochastic sampling. 
+
+We conduct experiments including (1) image-to-image translation tasks on Edges$\to$Handbags~\citep{isola2017image} ($64\times64$) and DIODE-Outdoor~\citep{vasiljevic2019diode} ($256\times256$) (2) image restoration task of inpainting on ImageNet~\citep{deng2009imagenet} ($256\times256$)  with $128\times128$ center mask.
+We report the Fréchet inception distance (FID)~\citep{heusel2017gans} for all experiments, and additionally measure Inception Scores (IS)~\citep{barratt2018note}, Learned Perceptual Image Patch Similarity (LPIPS)~\citep{zhang2018unreasonable}, Mean Square Error (MSE) (for image-to-image translation) and Classifier Accuracy (CA) (for image inpainting), following previous works~\citep{liu20232,zhou2023denoising}. The metrics are computed using the complete training set for Edges$\to$Handbags and DIODE-Outdoor, and 10,000 images from validation set for ImageNet.
+
+\subsection{Sample Quality and Efficiency}
+\label{sec:exp-main}
+\begin{table}[t]   
+    \centering
+    \caption{Quantitative results in the image translation task. $^\dagger$Baseline results are taken directly from DDBMs, where they did not report the exact NFE.}
+    \resizebox{0.8\textwidth}{!}{% <------ Don't forget this %
+    \begin{tabular}{lccccccccc}
+    \toprule
+    && \multicolumn{4}{c}{Edges$\to$Handbags ($64 \times 64$)}& \multicolumn{4}{c}{DIODE-Outdoor ($256 \times 256$)} \\ 
+    \cmidrule(r){3-6} \cmidrule(l){7-10}
+    &NFE& FID $\downarrow$ & IS $\uparrow$ & LPIPS $\downarrow$ & MSE $\downarrow$ & FID $\downarrow$ & IS $\uparrow$ & LPIPS $\downarrow$& MSE $\downarrow$  \\
+    \midrule
+    Pix2Pix~\citep{isola2017image}&1 & 74.8 & 3.24 & 0.356 & 0.209 & 82.4 & 4.22 & 0.556 &  0.133 \\
+    
+    DDIB~\citep{su2022dual}& $\geq 40$$^\dagger$&186.84  &   2.04& 0.869 & 1.05 & 242.3&  4.22 & 0.798 & 0.794 \\
+    SDEdit~\citep{meng2021sdedit}& $\geq 40$& 26.5 &  \textbf{3.58} & 0.271 & 0.510 & 31.14 &  5.70& 0.714  &  0.534\\
+    
+    Rectified Flow~\citep{liu2022flow}& $\geq 40$&  25.3& 2.80 & 0.241 & 0.088 & 77.18 & 5.87 & 0.534 &0.157 \\
+    
+    I$^{2}$SB~\citep{liu20232}& $\geq 40$& 7.43 & 3.40 & 0.244  &0.191& 9.34 & 5.77 & 0.373 & 0.145 \\
+    DDBM~\citep{zhou2023denoising}& 118 & 1.83 &  3.73 & 0.142 & 0.040 & 4.43 & \textbf{6.21} &  0.244 & 0.084 \\
+    
+    \midrule
+
+    DDBM~\citep{zhou2023denoising}& 200  & \textbf{0.88} & 3.69 & 0.110 & 0.006 & 3.34 & 5.95 & 0.215 & 0.020 \\
+    DBIM (Ours)&20 & 1.74 & 3.64 & \textbf{0.095} & \textbf{0.005} & 4.99 & 6.10 & 0.201 & \textbf{0.017} \\
+    DBIM (Ours)&100 & \textbf{0.89} & 3.62 & 0.100 & 0.006 & \textbf{2.57} & 6.06 & \textbf{0.198} & 0.018 \\
+    \bottomrule
+    \end{tabular}% <------ Don't forget this %
+    }
+    \label{tab:MainResults_ImageTranlation}
+\end{table}
+\begin{table}[t]
+\centering
+\begin{minipage}{0.4\textwidth}
+  \centering
+    \caption{Quantative results in the image restoration task.}
+    \resizebox{1\textwidth}{!}{% <------ Don't forget this %
+    \begin{tabular}{lccc}
+    \toprule
+    Inpainting&&\multicolumn{2}{c}{ImageNet ($256 \times 256$)}\\
+    \cmidrule(r){3-4}
+    \textit{Center} ($128\times128$)&NFE& FID $\downarrow$ & CA $\uparrow$  \\
+    \midrule
+    DDRM~\citep{kawar2022denoising}&20& 24.4 & 62.1 \\
+    $\Pi$GDM~\citep{song2023pseudoinverseguided}&100 & 7.3 & \textbf{72.6} \\
+    DDNM~\citep{wang2023zeroshot}
+    &100& 15.1 & 55.9 \\
+    Palette~\citep{saharia2022palette}&1000 &  6.1 & {63.0} \\
+    
+    I$^2$SB~\citep{liu20232} &1000 & 4.9 & 66.1 \\
+    \midrule
+    DDBM~\citep{zhou2023denoising} &500 & 4.27& 71.8\\
+    DBIM\, (Ours)&20 &4.17 &72.2 \\
+    DBIM\, (Ours)&100 &\textbf{3.88} &\textbf{72.6} \\
+    \bottomrule
+    \end{tabular}% <------ Don't forget this %
+    }
+    \label{tab:MainResults_ImageRestoration}
+\end{minipage}\hfill
+\begin{minipage}{0.57\textwidth}
+  \centering
+    \caption{\label{tab:ablation-rho-2} Ablation of the variance parameter controlled by $\eta$ for image restoration, measured by FID.}
+    \resizebox{1\textwidth}{!}{
+    \begin{tabular}{cc|ccccccc}
+    \toprule
+    \multirow{2}{*}{Sampler}&& \multicolumn{7}{c}{NFE} \\
+    \cmidrule{3-9}
+    &&5&10&20&50&100&200&500\\
+    \midrule
+    &&\multicolumn{7}{l}{Inpainting, ImageNet ($256 \times 256$), \textit{Center} ($128\times128$)}\\
+    \arrayrulecolor{lightgray}\midrule
+    \arrayrulecolor{black}
+        \multirow{5}{*}{$\eta$}&0.0&\textbf{6.47}&\textbf{4.62}&\textbf{4.17}&4.00&3.95&3.95&3.95\\
+        &0.3&6.61&4.66&4.19&4.02&3.99&3.99&3.98\\
+        &0.5&6.77&4.69&4.19&3.98&3.92&3.94&3.94\\
+        &0.8&7.33&4.97&4.21&\textbf{3.91}&\textbf{3.88}&\textbf{3.86}&3.85\\
+        &1.0&8.90&5.73&4.53&4.02&3.91&3.87&\textbf{3.83}\\
+        \multicolumn{2}{c|}{DDBM}&275.25&57.18&29.65&10.63&6.46&4.95&4.27\\
+    \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\end{table}
+We present the quantitative results of DBIMs in Table~\ref{tab:MainResults_ImageTranlation} and Table~\ref{tab:MainResults_ImageRestoration}, compared with baselines including GAN-based, diffusion-based and bridge-based methods. We set the number of function evaluations (NFEs) of DBIM to 20 and 100 to demonstrate both efficiency at small NFEs and quality at large NFEs. We select $\eta$ from the set [0.0, 0.3, 0.5, 0.8, 1.0] for DBIM and report the best results.
+
+In image translation tasks, DDBM achieves the best sample quality (measured by FID) among the baselines, but requires $\text{NFE}>100$. In contrast, DBIM with only $\text{NFE}=20$ already surpasses all baselines, performing better than or on par with DDBM at $\text{NFE}=118$. When increasing the NFE to 100, DBIM further improves the sample quality and outperforms DDBM with $\text{NFE}=200$ on DIODE-Outdoor. In the more challenging image inpainting task on ImageNet $256\times256$, the superiority of DBIM is highlighted even further. In particular, DBIM with $\text{NFE}=20$ outperforms all baselines, including DDBM with $\text{NFE}=500$, achieving a 25$\times$ speed-up. With $\text{NFE}=100$, DBIM continues to improve sample quality, reaching a FID lower than 4 for the first time.
+
+The comparison of visual quality is illustrated in Figure~\ref{fig:inpaint-main} and Figure~\ref{fig:diode-maintext}, where DBIM produces smoother outputs with significantly fewer noisy artifacts compared to DDBM's hybrid sampler.
+\begin{table}[ht]
+    \centering
+    \caption{\label{tab:ablation-rho-1} Ablation of the variance parameter controlled by $\eta$ for image translation, measured by FID.}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{cc|ccccccc|ccccccc}
+    \toprule
+    \multirow{2}{*}{Sampler}&& \multicolumn{14}{c}{NFE} \\
+    \cmidrule{3-16}
+    &&5&10&20&50&100&200&500&5&10&20&50&100&200&500\\
+    \midrule
+    &&\multicolumn{7}{l|}{Image Translation, Edges$\to$Handbags ($64 \times 64$)}&\multicolumn{7}{l}{Image Translation, DIODE-Outdoor ($256 \times 256$)}\\
+    \arrayrulecolor{lightgray}\midrule
+    \arrayrulecolor{black}
+        \multirow{5}{*}{$\eta$}&0.0&\textbf{3.60}&\textbf{2.46}&\textbf{1.74}&\textbf{1.14}&\textbf{0.89}&\textbf{0.74}&0.65&\textbf{14.25}&\textbf{7.98}&\textbf{4.99}&\textbf{3.20}&\textbf{2.57}&\textbf{2.27}&\textbf{2.09}\\
+        &0.3&3.70&2.63&1.93&1.26&0.99&0.85&0.74&14.44&8.18&5.12&3.31&2.69&2.33&2.13\\
+        &0.5&3.78&2.76&1.99&1.35&1.04&0.88&0.74&14.89&8.63&5.50&3.62&2.91&2.46&2.21\\
+        &0.8&3.97&3.08&2.20&1.64&1.22&1.01&0.80&16.34&10.17&6.85&4.57&3.56&2.93&2.46\\
+        &1.0&4.28&3.50&2.64&2.03&1.50&1.19&0.92&19.09&12.53&8.80&5.97&4.53&3.63&2.85\\
+        \multicolumn{2}{c|}{DDBM}&317.22&137.15&46.74&7.79&2.40&0.88&\textbf{0.53}&328.33&151.93&41.03&15.19&6.54&3.34&2.26\\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\textbf{Ablation of the Variance Parameter}$\mbox{  }$ We investigate the impact of the variance parameter $\rho$ (controlled by $\eta$) to identify how the level of stochasticity affects sample quality across various NFEs, as shown in Table~\ref{tab:ablation-rho-2} and Table~\ref{tab:ablation-rho-1}. For image translation tasks, we consistently observe that employing a deterministic sampler with $\eta=0$ yields superior performance compared to stochastic samplers with $\eta>0$. We attribute it to the characteristics of the datasets, where the target image is highly correlated with and dependent on the condition, resulting in a generative model that lacks diversity. In this case, a straightforward mapping without the involvement of stochasticity is preferred. Conversely, for image inpainting on the more diverse dataset ImageNet 256$\times$256, the parameter $\eta$ exhibits significance across different NFEs. When $\text{NFE} \leq 20$, $\eta=0$ is the optimal choice, with FID steadily increasing as $\eta$ ascends. However, when $\text{NFE}\geq50$, a relatively large level of stochasticity at $\eta=0.8$ or even $\eta=1$ yields optimal FID. Notably, the FID of $\eta=0$ converges to 3.95 at $\text{NFE}=100$, with no further improvement at larger NFEs, indicating convergence to the ground-truth sample by the corresponding PF-ODE. This observation aligns with diffusion models, where deterministic sampling facilitates rapid convergence, while introducing stochasticity in sampling enhances diversity, ultimately culminating in the highest sample quality when NFE is substantial.
+
+\begin{table}[ht]
+    \centering
+    \caption{\label{tab:high-order} The effects of high-order methods, measured by FID.}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{c|ccccc|ccccc|ccccc}
+    \toprule
+    \multirow{2}{*}{Sampler}& \multicolumn{15}{c}{NFE} \\
+    \cmidrule{2-16}
+    &5&10&20&50&100&5&10&20&50&100&5&10&20&50&100\\
+    \midrule
+    &\multicolumn{10}{c|}{Image Translation}&\multicolumn{5}{c}{Inpainting}\\
+    \cmidrule{2-16}
+    &\multicolumn{5}{c|}{ Edges$\to$Handbags ($64 \times 64$)}&\multicolumn{5}{c|}{ DIODE-Outdoor ($256 \times 256$)}&\multicolumn{5}{c}{ ImageNet ($256 \times 256$)}\\
+    \arrayrulecolor{lightgray}\midrule
+    \arrayrulecolor{black}
+        DBIM ($\eta=0$)&3.60&2.46&1.74&1.14&0.89&14.25&7.98&4.99&3.20&2.57&6.47&4.62&4.17&\textbf{4.00}&\textbf{3.95}\\
+        DBIM (2nd-order)&3.44&2.15&1.46&0.97&0.78&13.70&7.23&4.37&2.87&2.41&5.85&4.45&4.15&\textbf{4.00}&3.97\\
+        DBIM (3rd-order)&\textbf{3.38}&\textbf{2.09}&\textbf{1.43}&\textbf{0.95}&\textbf{0.77}&\textbf{13.42}&\textbf{7.03}&\textbf{4.22}&\textbf{2.85}&\textbf{2.40}&\textbf{5.83}&\textbf{4.42}&\textbf{4.12}&\textbf{4.00}&3.96\\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+\paragraph{High-Order Methods} We further demonstrate the effects of high-order methods by comparing them to deterministic DBIM, the first-order case. As shown in Table~\ref{tab:high-order}, high-order methods consistently improve FID scores in image translation tasks, as well as in inpainting tasks when NFE$<50$, resulting in enhanced generation quality in the low NFE regime. Besides, the 3rd-order variant performs slightly better than the 2nd-order variant. However, in contrast to the numerical solvers in diffusion models, the benefits of high-order extensions are relatively minor in diffusion bridges and less pronounced than the improvement when adjusting $\eta$ from 1 to 0. Nevertheless, high-order DBIMs are significantly more efficient than DDBM's PF-ODE-based high-order solvers.
+
+As illustrated in Figure~\ref{fig:inpaint-main}, our high-order sampler produces images of similar semantic content to the first-order case, using the same booting noise. In contrast, the visual quality is improved with finer textures, resulting in better FID. This indicates that the high-order gradient information from past network outputs benefits the generation quality by adding high-frequency visual details.
+\subsection{Reconstruction and Interpolation}
+\label{sec:exp-recon-and-interp}
+\begin{figure}[ht]
+    \centering
+    \subfloat[Encoding/Reconstruction]{
+        \includegraphics[width=0.46\linewidth]{figures/reconstuction-crop.pdf}
+        \label{fig:reconstruction}
+    }
+    \subfloat[Semantic Interpolation]{
+        \includegraphics[width=0.46\linewidth]{figures/interpolation/ddib_interpolation.jpg}
+        \label{fig:interpolation}
+    }
+    \caption{Illustration of generation diversity with deterministic DBIMs.}
+\end{figure}
+As discussed in Section~\ref{sec:connection-to-pf-ode}, the deterministic nature of DBIMs at $\eta=0$ and its connection to neural ODEs enable faithful encoding and reconstruction by treating the booting noise as the latent variable. Furthermore, employing spherical linear interpolation in the latent space and subsequently decoding back to the image space allows for semantic image interpolation in image translation and image restoration tasks. These capabilities cannot be achieved by DBIMs with $\eta>0$, or by DDBM's hybrid sampler which incorporates stochastic steps. We showcase the encoding and decoding results in Figure~\ref{fig:reconstruction}, indicating that accurate reconstruction is achievable with a sufficient number of sampling steps. We also illustrate the interpolation process in Figure~\ref{fig:interpolation}.
+
+
+\section{Conclusion}
+
+In this work, we introduce diffusion bridge implicit models (DBIMs) for accelerated sampling of DDBMs without extra training. In contrast to DDBM's continuous-time generation processes, we concentrate on discretized sampling steps and propose a series of generalized diffusion bridge models including non-Markovian variants. The induced sampling procedures serve as bridge counterparts and extensions of DDIMs and are further extended to develop high-order numerical solvers, filling the missing perspectives in the context of diffusion bridges. Experiments on high-resolution datasets and challenging inpainting tasks demonstrate DBIM's superiority in both the sample quality and sample efficiency, achieving state-of-the-art FID scores with 100 steps and providing up to 25$\times$ acceleration of DDBM's sampling procedure.
+
+
+
+

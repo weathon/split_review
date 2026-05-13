@@ -1,0 +1,316 @@
+\title{Revisiting In-context Learning Inference Circuit in Large Language Models}
+
+\begin{abstract}
+\textbf{I}n-\textbf{c}ontext \textbf{L}earning (ICL) is an emerging few-shot learning paradigm on \textbf{L}anguage \textbf{M}odels (LMs) with inner mechanisms un-explored. There are already existing works describing the inner processing of ICL, while they struggle to capture all the inference phenomena in large language models. Therefore, this paper proposes a comprehensive circuit to model the inference dynamics and try to explain the observed phenomena of ICL. In detail, we divide ICL inference into 3 major operations: \textbf{(1) Summarize}: LMs encode every input text (demonstrations and queries) into linear representation in the hidden states with sufficient information to solve ICL tasks. \textbf{(2) Semantics Merge}: LMs merge the encoded representations of demonstrations with their corresponding label tokens to produce joint representations of labels and demonstrations. \textbf{(3) Feature Retrieval and Copy}: LMs search the joint representations similar to the query representation on a task subspace, and copy the searched representations into the query. Then, language model heads capture these copied label representations to a certain extent and decode them into predicted labels. The proposed inference circuit successfully captured many phenomena observed during the ICL process, making it a comprehensive and practical explanation of the ICL inference process. Moreover, ablation analysis by disabling the proposed steps seriously damages the ICL performance, suggesting the proposed inference circuit is a dominating mechanism. Additionally, we confirm and list some bypass mechanisms that solve ICL tasks in parallel with the proposed circuit.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\textbf{I}n-\textbf{C}ontext \textbf{L}earning (ICL)~\citep{radford2019language, dong2022survey} is an emerging few-shot learning paradigm: given the \textit{demonstrations} $\{(x_i,y_i)\}_{i=1}^k$ consisting of [input text]-[label token] pairs and a \emph{query} $x_q$, \textbf{L}anguage \textbf{M}odels (LMs) take the sequence $[x_1][s_1][y_1]\dots[x_k][s_k][y_k][x_q][s_q]$\footnote{In this paper, we denote \textit{tokenization} as $[\cdot]$.} as input and then predicts the label for $x_q$ by causal language modeling operation. Typically, the label tokens $y_i$ are preceded by and also predicted by \textit{forerunner tokens} $s_i$ (e.g., the colon in ``Label: ''). ICL has aroused widespread interest, but its underlying mechanism is still unclear. 
+
+There have been theoretical or empirical trials to characterize and explain the inference process of ICL~\citep{xie2021explanation, dai2023can, wang2023label, han2023explaining, jeoninformation, zheng2024distributed}. However, to capture all the operating dynamics and the observed interesting phenomenon of ICL in \textbf{L}arge \textbf{L}anguage \textbf{M}odels\footnote{\textit{Large} refers to scaled LMs trained by natural language data, such as Llama 3~\citep{llama3modelcard}, contrast to simplified work that uses simple models trained and test on well-embedded input in toy models.}(LLMs), a more comprehensive characterization is still necessary. Therefore, this paper proposes a unified inference circuit and measures various properties in LLMs for a conformation to the observed ICL phenomenon.
+
+As shown in Fig.~\ref{fig:1_overall}, we decompose ICL dynamics into 3 atomic operations on Transformer layers. \textbf{Step 1: \textsc{Summarize}}: LMs encode each input text $x_i$ into linear representations in the hidden state of its corresponding forerunner token $s_i$. \textbf{Step 2: \textsc{Semantics Merge}}: For demonstrations, LMs merge the encoded representations of $s_i$ with the hidden state of its corresponding label tokens $y_i$. %, where a certain degree of label semantic correction is conducted.
+\textbf{Step 3: \textsc{Feature Retrieval and Copy}}: LMs retrieve merged label representations $y_{1:k}$ from Step 2 similar to the query representation $s_q$ in a task-relevant subspace and then merge them with the query representation. Finally, LM heads predict the label for $x_q$ using the label-attached query representation $s_q$.
+Steps 2 and 3 form a typical induction circuit, which is a key mechanism of ICL but only examined in synthetic scenarios~\citep{elhage2021mathematical, singh2024needs, reddy2023mechanistic}.
+
+\setlength{\intextsep}{-1pt}
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{Figure/Fig1.png}
+    \caption{The 3-phase inference diagram of ICL. \textbf{Step 1}: LMs encode every input text into representations, \textbf{Step 2}: LMs merge the encoded text representations of demonstrations with their corresponding label semantics, \textbf{Step 3}: LMs retrieve merged label-text representations similar to the encoded query, and copy the retrieved representations into the query representation.}
+    \label{fig:1_overall}
+\end{wrapfigure}
+
+We empirically find evidence for the existence of each proposed step in LLMs, and conduct more fine-grained measurements to gain insights into some phenomena observed in ICL scenarios, such as (1) \textit{position bias}: the prediction is more influenced by the latter demonstration~\citep{zhao2021calibrate}, (2) \textit{noise robustness}: the prediction is not easy to be affected by demonstrations with noisy labels~\citep{min2022rethinking}, while larger models are less robust to noise~\citep{wei2023larger}, and (3) \textit{demonstration saturation}: the improvements plateau when sufficient demonstrations are given~\citep{agarwal2024many, bertsch2024context}, etc. (discussed in~\S\ref{subsec:explaination}). Moreover, we find multiple bypass mechanisms for ICL with the help of residual connections, while the 3-phase dynamics remains dominant.
+
+\textbf{Our contributions can be summarized as:} (1) We propose a comprehensive 3-step inference circuit to characterize the inference process of ICL, and find empirical evidence of their existence in LLMs. (2) We conduct careful measurements for each inference step and successfully capture a large number of interesting phenomena observed in ICL, which enhances the practicality of the proposed circuit. (3) Our ablation analysis suggests that the proposed circuit dominates, but some bypass mechanisms exist in parallel to perform ICL. We introduce some of these bypasses along with their empirical evidence.
+
+
+
+\section{Preparation}
+
+
+\subsection{Background \& Related Works}
+\label{sec:background}
+
+\textbf{In-context Learning.} Discovered by~\cite{radford2019language}, ICL is an emerging few-shot learning paradigm with only feed-forward calculation in LMs. Given demonstrations $\{(x_i,y_i)\}_{i=1}^k$ composed of structured input-label pairs and a query $x_q$, typical ICL creates a prompt $[x_1][s_1][y_1]\dots[x_k][s_k][y_k][x_q][s_q]$, with some structural connectors (e.g. ``Label: ") including forerunner token $s_i$ (e.g. ``: "), as shown in Fig.~\ref{fig:1_overall}. LMs receive such prompts and return the next token distribution, where the label token with the highest likelihood is chosen as the prediction. Explaining the principle of ICL is an unresolved research topic, although there have been some efforts on \textbf{the relationship between ICL capacity and pre-training data}~\citep{li2023finding, singh2024needs, singh2024transient, gu2023pre, han2023understanding, chan2022data}, the \textbf{feature attribution of input prompt}~\citep{min2022rethinking, yoo2022ground, pan2023context, kossen2024context}, and \textbf{reduction to simpler algorithms}~\citep{zhang2023trained, dai2023can, xie2021explanation, han2023explaining}. However, a comprehensive explanation of real-world LMs is needed to capture the operating dynamics of ICL.
+
+\textbf{Induction Circuit.} % Introduced by~\cite{elhage2021mathematical}, induction circuit is a modeling of some attention heads in two transformer layers that retrieve tokens with preceding tokens similar to the current token, and copy the features of the retrieved tokens into the attention output of the current token. 
+Introduced by~\cite{elhage2021mathematical}, an induction circuit is a pair of two cooperating attention heads from two transformer layers, where the ``previous token head'' writes information about the previous token to each token, and the ``induction head'' uses this information to identify a token that should follow each token. 
+Such a function is implemented by two atomic operations: (1) copy the representation of the previous token $[\mathrm{A}]$ to the next token $[\mathrm{B}]$, and (2) retrieve and copy similar representations on $[\mathrm{A}]$ to the current token $[\mathrm{A}']$.
+Concisely, it performs inference in the form of $[\mathrm{A}][\mathrm{B}]\dots[\mathrm{A}']\Rightarrow[\mathrm{B}]$, which is similar to ICL-styled data. Therefore, this circuit has been widely used to explain the inference dynamics of ICL~\citep{wang2023label} and the emergence of ICL during pre-training~\citep{olsson2022context, reddy2023mechanistic, singh2024needs}. Despite their valuable insights, their experiments rely on a synthetic setting: using simplified models and well-embedded (linearly separable) inputs, which differs from the practical ICL scenario using real-world LMs with many layers and complicated inputs. We bridge the gap between the synthetic and real-world settings, providing more detailed explanations for the inference dynamics of ICL based on real-world LLMs.
+
+\subsection{Experiment Settings}
+\label{sec:settings}
+
+\textbf{Models.} We mainly conduct experiments on 4 modern LMs: Llama 3 (8B, 70B)~\citep{llama3modelcard}, and Falcon (7B, 40B)~\citep{falcon40b}. Unless specified, we report the results on Llama 3 70B, since its deep and narrow structure (80 layers, 64 heads) makes it easier to show hierarchical inference dynamics (discussed in~\S\ref{sec:bypass}).more_results}.
+
+\textbf{Datasets.} We build ICL-formed test inputs from 6 sentence classification datasets: SST-2~\citep{sst2}, MR~\citep{MR}, Financial Phrasebank~\citep{FP}, SST-5~\citep{sst2}, TREC~\citep{trec1, trec2}, AGNews~\citep{Zhang2015CharacterlevelCN}specified, we report the average results on these datasets. 
+
+\textbf{Others.} Unless specified, we use $k = 4$ demonstrations in ICL inputs. For each dataset, we randomly sample $n=512$ test data and assign one order-fixed demonstration sequence for each test sample. About the prompt templates, etc.detailed_overall_exp}. 
+
+
+
+\section{Step 1, Summarize: Linear Representations in Hidden States}
+
+\label{sec:summarize}
+
+This section mainly confirms that LMs construct task-relevant and linearly separable semantic representations for every input text (demonstrations and queries) in the hidden states. Such linear representations are an important foundation for explaining the dynamics of ICL based on induction head, since attention-based feature retrieval, a key mechanism of induction head, can be easily done on linear representations. Current successful studies on simplified models and inputs~\citep{chan2022data, reddy2023mechanistic, singh2024needs} also assume the existence of such linear representations. % representations as the inputs towards later layers
+Moreover, we confirm some interesting properties of the input text representations: (1) It is based on the capacity in the model weights and can be enhanced by demonstrations in context (Fig.~\ref{fig:2_inner_representation} (Middle, Right)). (2) The similarity of representations is biased towards the encoding target's position.
+
+\subsection{LLMs Summarize Input Text on Forerunner Tokens in Hidden States}
+\label{subsec:summarize1}
+
+We first study the existence of input text encoding in hidden states and then explain their linear separability and task relevance in~\S\ref{subsec:summary.2}. For each text-label pair $(x_t, y_t)$ (\textit{encoding target}) sampled from the datasets, we prepend them with $k$ demonstrations, resulting in ICL-style inputs $[x_1][s_1][y_1]\dots[x_k][s_k][y_k][x_t][s_t][y_t]$. These inputs are then fed into an LM to extract the hidden states of a specific token in $[x_t][s_t][y_t]$ from each layer, serving as the ICL inner representations. To assess the quality of these representations as sentence representations, we use the sentence embedding of $x_t$ encoded by BGE M3~\citep{chen2024bge}, a SotA encoder-only Transformer, as a ``reference'' representation and then calculate the \textit{mutual nearest-neighbor kernel alignment}\footnote{Intuitively, kernel alignment measures similarity between two representations toward the same datasets, and according to~\cite{huh2024platonic}, a higher cross-model kernel alignment usually means a better representation.}~\citep{huh2024platonic} between these representations.kernel} for details.
+
+\textbf{Forerunner Tokens Encode Input Text Representations.} We plot the kernel alignment using 3 types of tokens in Fig.~\ref{fig:2_inner_representation} (Left). The forerunner token, while often overlooked in previous work, produces the best input text-encoding, emerging in the early phase (layers 0-28) of the inference process, and keeping a high level to the end of inference.background} for details), which is a critical supplement to previous work which suggests the label tokens are pivots for collecting the information of demontrations~\citep{wang2023label}. 
+
+\textbf{Input Text Encoding is Enhanced by Demonstrations.} We investigate the influence of contextual in on input text encoding by repeating the experiments with different $k$. As shown in Fig.~\ref{fig:2_inner_representation} (Middle), when the demonstrations increase, feature alignment is enhanced, which is counterintuitive since longer preceding texts are more likely to confuse encoding targets. 
+
+\textbf{Perplexed Texts are Encoded Worse.} We investigate the correlation between kernel alignment and the perplexity of encoding targets with different $k$. Fig.~\ref{fig:2_inner_representation} (Right, upper) shows a negative correlation for $k=0$, 
+that is, LMs generate poorer encodings for more complex input text when no demonstrations are given, which can be identified as an \textbf{I}n-\textbf{w}eight \textbf{L}earning (IWL) property of the inner text encoding.
+While, when demonstrations are given in context (Fig.~\ref{fig:2_inner_representation} (Right, lower)), the negative correlation disappears, which suggests that LMs effectively encode more complex samples with the help of demonstrations in context.acc_ppl}.
+
+The above findings suggest that the inner text encoding is a hybrid process of ICL and IWL: Basic encoding capability presents from LMs weights, and is enhanced by demonstrations in context, which can be a clue to how demonstrations help ICL. Moreover, we are about to illustrate that these encodings are sufficiently informative for ICL tasks and linearly separable, which meets the presumption of simplified models on the linear and well-embedded input features.
+
+\subsection{Text Summarization is Linear and Task-Relevant but Position-biased}
+\label{subsec:summary.2}
+
+\begin{figure}[t]
+\centering
+\subfloat{\includegraphics[width=0.295\linewidth]{Figure/Exp1_1_llama3_70b_INT4.pdf}} \hfill
+\subfloat{\includegraphics[width=0.372\linewidth]{Figure/Exp1_2_llama3_70b_INT4.pdf}} \hfill
+\subfloat{\includegraphics[width=0.294\linewidth]{Figure/Exp1_3_llama3_70b.pdf}}
+\caption{Input text encoding magnitudes (metricized by kernel alignment against feature encoded by encoder-structured models) of hidden states in various layers in ICL scenario (The controlled experiments are results between current 6 datasets and TEE~\citep{mohammad2018semeval}). \textbf{Left:} Encoding magnitudes on hidden states from various types of token. \textbf{Middle\protect\footnotemark:} Encoding magnitudes with different $k$ on the forerunner tokens. \textbf{Right:} Encoding magnitudes in layer 24 of Llama 3 70B against the causal language modeling loss of the input text with (upper) $k = 0$ and (lower) $k = 8$.}
+\label{fig:2_inner_representation}
+\end{figure}
+\footnotetext{Experiments of Fig.~\ref{fig:2_inner_representation} (Middle) on Llama 3 70B do not involve results on AGNews.}
+
+\setlength{\intextsep}{-1pt}
+\begin{wrapfigure}[14]{r}{0.32\textwidth}
+    \centering
+    \includegraphics[width=0.32\textwidth]{Figure/Exp2_1_llama3-70b.pdf}
+    \caption{Test results of centroid classifier trained on ICL hidden states. \textbf{Solid}: Centroid classification accuracy, \textbf{Dotted}: Kernel alignment.}
+    \label{fig:3_hidden_calibration}
+\end{wrapfigure}
+\textbf{Input Text Encoding is Linear Separable and Task-relevant.} We train a centroid classifier on hold-out 256 input samples~\citep{cho2024token}, using the hidden states of a specific token in $[x_t][s_t]$\footnote{We skip the experiments on label tokens because of the leakage of ground-truth label information.hiddenc} for details).
+The results are shown in Fig.~\ref{fig:3_hidden_calibration}. The considerably high classification accuracy of the forerunner token suggests the high linear separabilities of the hidden states in the task-semantic-relevant subspaces since the centroid classifier is linear.
+In addition, a similar emerging trend in accuracy and kernel alignment confirms the reliability of the kernel alignment measurement.
+
+\textbf{Input Text Encoding is Biased towards Position.} Ideally, the inner representations of similar queries should be highly similar regardless of their position in ICL inputs to support attention-based operations for classification. To verify this, for each encoding target, we extract the hidden states of forerunner tokens with various numbers of preceding demonstrations. We then calculate the cosine similarity between all possible pairs of the hidden states for the same target or different targets. As shown in Fig.~\ref{fig:4_similarity_wrt_k}, although the overall similarities on the same target are higher than on the different targets, they are both especially higher when their positions are close to each other. 
+As to be discussed in~\S\ref{subsec:explaination}, such positional similarity bias may lead to one flaw: demonstrations closer to the query have stronger impacts on ICL~\citep{zhao2021calibrate, lu2022fantastically, chang2023data, guo2024makes}.
+
+
+
+
+\section{Induction Circuits in Natural Language Models}
+
+
+\setlength{\intextsep}{-1pt}
+\begin{wrapfigure}[11]{r}{0.40\textwidth}
+    \centering
+    \includegraphics[width=0.19\textwidth]{Figure/Exp2_2_llama3_70b.pdf}
+    \includegraphics[width=0.19\textwidth]{Figure/Exp2_2_llama3_70brandom.pdf}
+    \caption{The similarities of ICL hidden states in different positions on layer 24 between the same queries \textbf{(Left)} or two different queries \textbf{(Right)} (on SST-2).}
+    \label{fig:4_similarity_wrt_k}
+\end{wrapfigure}
+
+This section mainly shows how LMs utilize the summarized linear text representations in induction circuits with a typical 2-step form~\citep{singh2024needs}: \textbf{Forerunner Token Heads} merge the demonstration text representations in the forerunner token into their corresponding label tokens with a selectivity regarding the compatibility of demonstrations and label semantics. \textbf{Induction Heads} copy the information in the label representations similar to the query representations back to the query. Such operations are done on task-specific subspaces, enabling LMs to solve multiple tasks by multiplexing hidden spaces.
+
+\subsection{Step 2, Forerunner Token Head: Copy from Text Feature to Label Token}
+\label{subsec:step2}
+This subsection mainly examines and measures the forerunner token heads, which copy the information in the forerunner into label tokens. We investigate the interaction between the forerunner tokens and label tokens, and focus on how the representations are merged, especially when the semantics of labels and text are disjoint, towards an explanation of why ICL are robust to wrong labels.
+
+\textbf{Text Representations are Copied to Label Tokens.} To confirm the existence of the representation copy process, we start by calculating the kernel alignment between the hidden state of forerunner token $s_t$ at layer $l$ (the copy source) and that of label token $y_t$ at layer $(l+1)$ (the copy target). To suppress the high background values caused by the semantics of labels, we use abstract label tokens $\{\mathrm{``A", ``B", ``C",}\dots\}$ instead of the original label tokens. The results are shown in Fig.~\ref{fig:5_next_token_copy} (Left), where the kernel alignment between the hidden states of the label token and the forerunner token gradually increases and then bumps up after the encoding in the forerunner token (described in \S\ref{sec:summarize}) finished improving. It indicates that the hidden states of the input text representation encoded in the forerunner tokens are merged into their label tokens, suggesting the existence of copy processing from the forerunner token to the label token.
+
+\textbf{Text Representations are Copied without Selectivity.} % We extract an attention score from a forerunner token (attention keys) to the corresponding label token (attention queries) in each attention head.
+For each attention head, we extract the attention score $\alpha_{y_t\rightarrow s_t}$ from a label token $y_t$ (as attention query) to the corresponding forerunner token $s_t$ (as attention keys). We then mark the head with $\alpha_{y_t\rightarrow s_t}\geqslant5/n_t$ ($n_t$: the length of tokens before $y_t$) as a Forerunner Token Head and count them in each layer.
+The results are shown in Fig.~\ref{fig:5_next_token_copy} (Middle, ``Correct Label''), where the peak matches the copy period in Fig.~\ref{fig:5_next_token_copy} (Left). Moreover, to investigate the influence of the correctness of label tokens, we replace $y_t$ with a wrong label token\footnote{For example, for a label space of ``positive" and ``negative", if $y_t$ is ``positive", then replace it to ``negative''.}, where the results in Fig.~\ref{fig:5_next_token_copy} (Middle, ``Wrong Label") are almost identical to the correct-label setting, suggesting that the forerunner token heads don't show selectivity toward the semantic consistency between input text and labels simply merge the input text representations into the label tokens.
+
+\textbf{Hidden States of Label Tokens are Joint Representations of Text Encodings and Label Semantics.} Given the findings above, we probe the content of hidden states of label tokens $[y_t]$, i.e., how the text representation interacts with the original label semantics. We first train two centroid classifiers to predict the corresponding label $y_t$: (1) $\mathcal{C}_f$ trained on the hidden states of \textit{forerunner tokens} $[s_t]$ and (2) $\mathcal{C}_l$ trained on the hidden states of \textit{label tokens} $[y_t]$. To check whether the label tokens include the information of forerunner tokens, we use $\mathcal{C}_f$ to predict the label on the hidden state of label token $[y_t]$ in Fig.~\ref{fig:5_next_token_copy} (Right, solid). It shows that, during the copy processing, high classification accuracies can be achieved both on the correct label tokens and wrong label tokens, suggesting that the text features in the forerunner tokens can be partly and linearly detected in the label tokens. Moreover, results using $\mathcal{C}_l$ (dotted line) shows extreme results, suggesting the label information remains in the label token. So, we can conclude that: hidden states of label tokens are joint representations of label semantics and text representations.
+\textbf{Label Denoising is Conducted on the Overlap of Label Semantics and Text Representations.} Notice that in Fig.~\ref{fig:5_next_token_copy} (Right, solid), compared to the \textcolor[HTML]{ff7f0e}{typical results} predicted on the forerunner tokens, accuracies are improved on the \textcolor[HTML]{008000}{correct label} and suppressed on the \textcolor[HTML]{ff0000}{wrong label}, which suggests that information consistent with the label semantics is easier to be enhanced by the label tokens and vice versa, showing a feature selectivity on the consistency between the text representations and the label semantics. Given the observation that the information on label semantics and text features can be extracted separately and linearly, we can confirm that these two kinds of information are located in different sub-spaces of the hidden states, and \textit{linearly} merged by the attention operation of forerunner heads. Moreover, given the fact that there is no selectivity is observed in the copy behavior of the forerunner token head (Fig.~\ref{fig:5_next_token_copy} (Middle)), it is intuitive that the feature selectivity shown in Fig.~\ref{fig:5_next_token_copy} (Right) comes from the arithmetical interaction of feature vectors on the \textit{overlap} of sub-spaces between the label semantics and text features, making ICL stable against label noise~\citep{min2022rethinking}. Moreover, as mentioned by~\cite{wei2023larger}, large models show poorer stability against label noise. We infer that the larger hidden dimensions in larger models lower the overlap between the sub-spaces of label semantics and text representations to reduce the interaction.
+\begin{figure}[t]
+\centering
+\subfloat{\includegraphics[width=0.320\linewidth]{Figure/Exp3_1_llama3_70b.pdf}} \hfill
+\subfloat{\includegraphics[width=0.350\linewidth]{Figure/Exp3_2_llama3-70b.pdf}} \hfill
+\subfloat{\includegraphics[width=0.275\linewidth]{Figure/Exp3_3_llama3-70b.pdf}}
+\caption{Hidden states copy magnitude from forerunner tokens to label tokens against layers. \textbf{Left:} Kernel alignment between the forerunner token (the copy source) and the label token of the next layer (the copy target). \textbf{Right:} Centroid classifier results predicted on the hidden states of correct and wrong \textit{label tokens}, on SST-2 and MR. (\textbf{Solid:} Predicted by classifiers $\mathcal{C}_f$ trained on hidden states of \textit{forerunners}. \textbf{Dotted:} Predicted by classifiers $\mathcal{C}_l$ trained on hidden states of \textit{label tokens}.)}
+\label{fig:5_next_token_copy}
+\end{figure}
+
+\subsection{Step 3, Induction Head: Feature Retrieval on Task Subspace}
+\label{subsec:step3}
+
+This subsection examines the existence of the aforementioned induction heads, which retrieve similar label token features as the queries' forerunner feature, and copy the retrieved features back to the query. We claim the necessity of multi-head attention in this process: correct feature retrieval can only be conducted on the subspace of the hidden space, which is captured by some attention heads.
+
+\textbf{Induction is Correct in Minority Subspaces.} Similar to Fig.~\ref{fig:5_next_token_copy} (Middle), we mark (1) the attention heads with the sum of attention scores from the query's forerunner token $s_q$ (as attention query) to all the label tokens $[y_1],\dots,[y_k]$ (as attention keys) in the demonstration more than $5k/n_t$ as induction heads, and (2) attention heads with the sum of scores to all the correct label tokens more than $5k/|\mathbb{Y}|n_t$ as \textit{correct} induction heads ($\mathbb{Y}$ is a label space). We show the number of both kinds of induction heads in Fig. Moreover, more than half of the induction heads are not correct ones, suggesting that task-specific feature similarity can only be caught on some \textit{induction subspaces} (defined by low-rank transition matrix $W_Q^{h\top} W_K^{h}$ of correct induction head $h$). We enhance this claim in Fig.details_fig6M}), where both vanilla attention (without transformation and head split) and attention scores averaged among heads show low assignment on correct label tokens, while some heads show considerable correctness. Considering the average value, 
+the majority of attention heads almost randomly copy label token information to the query, causing the prediction biased to the frequency of labels in the prompt~\citep{zhao2021calibrate}. As the reason, we infer that the hidden states are sufficient (Fig.~\ref{fig:3_hidden_calibration}) but not minimum for ICL, where redundant information interferes with the similarity calculation of attention. 
+
+\begin{figure}[t]
+\centering
+\subfloat{\includegraphics[width=0.333\linewidth]{Figure/Exp4_1_llama3-70b.pdf}} \hfill
+\subfloat{\includegraphics[width=0.333\linewidth]{Figure/Exp4_2_llama3-70b.pdf}} \hfill
+\subfloat{\includegraphics[width=0.25\linewidth]{Figure/Exp4_3_llama3-70b.pdf}}
+\caption{Measurements for induction heads. \textbf{Left:} The count of marked induction heads and correct induction heads against layers. \textbf{Middle:} The correctness of attention assignment (the sum of assignment towards correct label tokens normalized by assignment towards all the label tokens). (\textbf{Vanilla Attention:} attention scores directly calculated on full dimensionality. \textbf{Head Average:} the averaged attention scores among all the heads. \textbf{Best Ind. Head:} the scores of attention head with the most correctness.) \textbf{Right:} The correct induction heads overlap of all dataset pairs.}
+\label{fig:6_induction}
+\end{figure}
+
+\setlength{\intextsep}{-1pt}
+\begin{wrapfigure}[17]{r}{0.45\textwidth} 
+    \centering
+    \includegraphics[width=0.21\textwidth]{Figure/Exp4_4_meta-llama_Meta-Llama-3-70B31320.pdf} \hfill
+    \includegraphics[width=0.207\textwidth]{Figure/Exp4_4_meta-llama_Meta-Llama-3-70B3190.pdf}
+more_results_fig7}). $\circ$: ``positive" label, $\times$: ``negative" label, $\blacktriangle$: zero vector.details_fig7}).}
+    \label{fig:7_subspace_anchor}
+\end{wrapfigure}
+
+\textbf{Some Induction Subspaces are Task-specific.} We check if different tasks share the same induction subspaces based on the overlap of the correct induction heads across different datasets. Given $n_\mathcal{D}(h)$, the number of times $h$ is marked as correct induction head on dataset $\mathcal{D}$, the overlap rate $S$ is defined as:
+\begin{equation}
+    S(\mathcal{D}_1,\mathcal{D}_2) = \frac{2\sum_{\forall h} \mathrm{min}[n_{\mathcal{D}_1}(h), n_{\mathcal{D}_2}(h)]}{\sum_{\forall h} n_{\mathcal{D}_1}(h) + n_{\mathcal{D}_2}(h)}.
+\end{equation}
+The results are shown in Fig.~\ref{fig:6_induction} (Right), where: (1) A significant overlap of induction heads indicates that a part of correct induction heads is \textit{inherent} in the model, built by the pre-training process~\citep{reddy2023mechanistic, singh2024needs}. (2) Such overlap is not fully observed, suggesting that some induction subspaces are \textit{task-specific}: input texts evoke task-specific attention in induction heads, enabling the anisotropy multiplex of different sub-spaces in the hidden spaces to transmit relevant information for various tasks.
+Therefore, we can restore ICL to implicit end-to-end multi-task learning methods with hidden state multiplexing since they also use various task heads on common bottom network layers and informative hidden state~\citep{zhang2021survey}.
+
+\textbf{Demonstration Saturates on Induction Subspace.} We visualize the demonstrations' label token representations mapped on the induction subspaces by the transition matrix $W_Q^{h\top} W_K^{h}$ and principal component analysis in Fig.~\ref{fig:7_subspace_anchor}, indicating: (1) Compared to a correct induction head, a wrong induction head is easier to map label representations linearly inseparably. (2) In the early stage of demonstration ($k=1\rightarrow 2$), when a new demonstration is given, the morphology of attention assignment towards query changes significantly (shown as background color in Fig.details_fig7} for details), while in the late stage ($k=15\rightarrow16$), attention assignment morphology is stable. This can explain the demonstration saturation~\citep{agarwal2024many, bertsch2024context}: the performance is submodular against the demonstrations. Intuitively, since demonstrations follow a prior distribution, representation of a new demonstration is likely to be located within the closure of existing demonstrations, making it less contributable to the attention assignment in the induction subspace. 
+
+
+
+\section{Putting Things Together}
+
+
+So far, we have revealed the existence of the circuit with 3 steps, organized by the sequential inference process among Transformer layers. In this section, we find that the circuit is dominant in the ICL inference, while some bypass mechanisms activated by residual connection assist ICL inference. Moreover, a series of phenomena observed in ICL is successfully explained by the circuit.
+
+\subsection{Ablation Analysis}
+
+\begin{wraptable}[18]{r}{0.5\textwidth}
+\centering
+\caption{Accuracy variation (\%) with each inference step ablated on Llama 3 8B. Small numbers are controlled results of randomly ablating equivalent amounts of connections. Ablations are applied from the bottom to the top layers, and results with various ablated layers are reported.}
+\label{table:Ablation}
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{c@{}ccccc@{}}
+\toprule
+    
+\multirow{2}{*}[-0.5ex]{\#~~} & \multirow{2}{*}[-0.5ex]{\begin{tabular}[c]{@{}c@{}}\textbf{Attention Disconnected}\\ Key $\rightarrow$ Query\end{tabular}} & \multicolumn{4}{c}{\textbf{Affected Layers Ratio} (from layer 1)} \\ \cmidrule(l){3-6} 
+& & 25\% & 50\% & 75\% & 100\% \\ \midrule
+1~~ & \textbf{None} (4-shot baseline) & \multicolumn{4}{c}{$\pm 0$ (Acc. $68.55$)} \\
+\midrule
+\multicolumn{6}{c}{\textit{-- Step1: Summarize --}}   \\
+2~~ & \textbf{Demo. Texts $x_i$ $\rightarrow$ Forerunner $s_i$} & \begin{tabular}[c]{@{}c@{}}$-4.98$\\ [-1.2ex]{\tiny$-0.85$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-15.82$\\ [-1.2ex]{\tiny$-1.33$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-23.43$\\ [-1.2ex]{\tiny$-4.65$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-30.60$\\ [-1.2ex]{\tiny$-1.50$}\end{tabular} \\
+3~~ & \textbf{Query Texts $x_q$ $\rightarrow$ Forerunner $s_q$} & \begin{tabular}[c]{@{}c@{}}$-13.87$\\ [-1.2ex]{\tiny$-0.13$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-21.10$\\ [-1.2ex]{\tiny$-0.10$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-24.74$\\ [-1.2ex]{\tiny$-0.68$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-28.38$\\ [-1.2ex]{\tiny$-0.62$}\end{tabular} \\
+
+\midrule
+\multicolumn{6}{c}{\textit{-- Step2: Semantics Merge --}}   \\
+
+4~~ & \textbf{Demo. Forerunner $s_i$ $\rightarrow$ Label $y_i$} & \begin{tabular}[c]{@{}c@{}}$-2.24$\\ [-1.2ex]{\tiny$+0.07$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-3.45$\\ [-1.2ex]{\tiny$-0.20$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-3.39$\\ [-1.2ex]{\tiny$+0.10$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-3.42$\\ [-1.2ex]{\tiny$-0.26$}\end{tabular} \\
+
+\midrule
+\multicolumn{6}{c}{\textit{-- Step3: Feature Retrieval \& Copy --}} \\
+
+5~~ & \textbf{Label $y_i$ $\rightarrow$ Query Forerunner $s_q$} & \begin{tabular}[c]{@{}c@{}}$-5.14$\\ [-1.2ex]{\tiny$+0.07$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-10.03$\\ [-1.2ex]{\tiny$-0.07$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-11.36$\\ [-1.2ex]{\tiny$-0.03$}\end{tabular} & \begin{tabular}[c]{@{}c@{}}$-10.22$\\ [-1.2ex]{\tiny$-0.03$}\end{tabular} \\
+
+\midrule
+
+\multicolumn{6}{c}{\textit{Reference Value}} \\
+
+6~~ & \textbf{Zero-shot} & \multicolumn{4}{c}{$-17.90$ (Acc. $50.65$)} \\
+7~~ & \textbf{Random Prediction} & \multicolumn{4}{c}{$-36.05$ (Acc. $32.50$)} \\
+
+\bottomrule
+\end{tabular}
+}
+
+\end{wraptable} 
+
+To demonstrate that our 3-phase circuit dominates or at least participates in ICL process, we disconnect the related attention connection of each step in the proposed circuit, and test the accuracies without such connections as shown in Table~\ref{table:Ablation}. The results show that when the non-trivial connections designated by the proposed circuit are ablated, accuracies of ICL significantly decrease, supporting the existence of our circuit. However, the result doesn't fully match expectations, for example, the result without induction (line 5) should be consistent with zero-shot (line 6), since all the expected communication from demonstration to query is intercepted, but that's not the case; and the contribution of Step 1 in later layers are unexpectedly high, indicating the existence of some bypass mechanisms parallelly contributing to ICL accuracies.
+
+\subsection{Bypass Mechanism}
+\label{sec:bypass}
+
+Motivated by the ablation results, we believe that several mechanisms including our circuit run parallelly for ICL, since the residual connection supports complex paths among layers and attention heads. We list some possible bypasses and plan a complete enumeration as future work.
+
+\setlength{\intextsep}{-1pt}
+\begin{wrapfigure}[12]{r}{0.5\textwidth} 
+    \centering
+    \includegraphics[width=0.5\textwidth]{Figure/Parr.pdf} 
+details_fig8}).}
+    \label{fig:8_para}
+\end{wrapfigure}
+
+\textbf{Parallel Circuits.} Multiple 3-step circuits can execute in parallel, that is, one layer can assign multiple inference functions to different heads, causing dispersion and deserialization as shown in Fig.~\ref{fig:8_para}, where a narrow (fewer heads) and deep (more layers) model is more likely to generate localized inference, and vice versa.
+
+\textbf{Direct Decoding.} Residual connection to output embedding allows intermediate hidden states to be decoded directly. Intuitively, a shortcut from Step 1 encodings to the LM head enables ICL with zero-shot capacities, since we have confirmed that encoded representations are informative for ICL tasks, while the decoding methods should be selected carefully~\citep{cho2024token} (e.g. with essential calibration). On the other hand, shortcuts from insufficiently encoded features may lead to meaningless information decoded by language model heads, causing prediction bias, i.e.
+
+\begin{wraptable}[5]{r}{0.5\textwidth}
+\centering
+\caption{Accuracy drop with shortcut ablated.}
+\label{table:shortcut}
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Attention Disconnected} & 25\% & 50\% & 75\% & 100\% \\ \midrule
+\textbf{Forerunner $s_{1:i}$ $\rightarrow$ Forerunner $s_{i:q}$} & 
+\begin{tabular}[c]{@{}c@{}}$-1.30$\\ [-1.2ex]{\tiny$-0.00$}\end{tabular}& 
+\begin{tabular}[c]{@{}c@{}}$-0.75$\\ [-1.2ex]{\tiny$-0.16$}\end{tabular}& 
+\begin{tabular}[c]{@{}c@{}}$-0.78$\\ [-1.2ex]{\tiny$-0.16$}\end{tabular} & 
+\begin{tabular}[c]{@{}c@{}}$-1.56$\\ [-1.2ex]{\tiny$-0.71$}\end{tabular} \\
+\bottomrule 
+\end{tabular}
+}
+
+\end{wraptable} 
+\textbf{Shortcut Induction.} Note that a $k$-shot ICL input sequence always contains a $(k-1)$-shot sequence, where the $k$-th forerunner (once served as the query) is previously processed. So every forerunner can directly retrieve previously processed forerunners of demonstrations to copy their induction results directly. The non-trivial result (Table~\ref{table:shortcut}) with all forerunners disconnected from each other confirms such infer.
+
+\subsection{Explaination towards Observed ICL Phenomena}
+\label{subsec:explaination}
+
+\textbf{Difficulty-based Demonstration Selection.} In~\S\ref{subsec:summarize1}, we find that in the zero-shot scenario, perplexed texts are harder to be encoded, which explains the observation of PPL-ICL~\citep{gonen2023demystifying} selecting demonstrations with lower perplexity. Moreover, while the demonstrations increase, LMs can encode more complex inputs with diverse information to update the attention assignment shown in Fig.~\ref{fig:7_subspace_anchor}, making it beneficial to input harder demonstrations later, which explains the ICCL~\citep{liu2024let}, which build demonstrations sequence from easy to hard.
+
+\textbf{Prediction Bias. (2) Position Bias: As shown in~\S\ref{subsec:summary.2}, closer input texts are encoded more similarly, so label tokens near the query have more similar information to the query, causing more attention assignment in the induction processing, so that more influences on the prediction. (3) Frequency Bias: As shown in~\S\ref{subsec:step3}, in the induction, some attention heads are without selectivity towards labels, causing an averaged induction from label tokens to the query, triggering a prediction bias towards the label frequency in the demonstration, even if their contribution (absolute value of attention score on label tokens) is small. All three biases are observed by~\cite{zhao2021calibrate}, and can be removed by ICL calibration methods.
+
+\textbf{The Roles and Saturates of Demonstrations.} It is well known that demonstrations improve the performance of ICL. We decompose such performance improvement into 2 parts: (1) demonstrations help early layers encode better (\S\ref{subsec:summarize1}), and (2) more demonstrations provide larger label token closure, enabling more accurate attention assignment (\S\ref{subsec:step3}), while the volume of such closure is submodular to demonstrations, causing the saturates of ICL performance towards demonstrations.
+
+\textbf{The Effect of Wrong Label.} It is well-known that the label noise is less harmful in ICL~\citep{min2022rethinking} than in gradient-based learning~\citep{zhang2021understanding}. We have explained in~\S\ref{subsec:step2} that ICL implies labels denoise to stabilize ICL against label noise, while weakened by dimensionality.
+
+
+
+\section{Conclusion and Discussion}
+
+\label{sec:discussion}
+
+\textbf{Conclusion.} In summary, this paper restores ICL inference into 3 basic operations and confirms their existence. Careful measurements are conducted to capture and explain various phenomena successfully. Moreover, ablation studies show the proposed inference circuit dominates and reveals the existence of bypass mechanisms. We hope this paper can bring new insight into ICL practice.
+
+\begin{wraptable}[8]{r}{0.4\textwidth}
+\centering
+\caption{Performance of full and layer-pruned ICL inference.}
+\label{table:hiddenc}
+\resizebox{0.4\textwidth}{!}{
+\begin{tabular}{cccc}
+\toprule
+\textbf{Inference} & \textbf{Acc.} & \textbf{Para.\#} & \textbf{Speed}  \\ \midrule
+Full + LM Head & 66.19\% & 70.6B & 1$\times$ \\
+Full + Cent. & 83.24\%& 69.5B & 1.00$\times$ \\ \midrule
+Layer34 + LM Head & 49.29\% & 32.7B & 2.16$\times$ \\
+Layer34 + Cent. & \textbf{84.27\%} & \textbf{31.2B} & \textbf{2.38$\times$} \\
+\bottomrule
+\end{tabular}
+}
+
+
+\end{wraptable} 
+
+\textbf{The Role of Early and Later Layers.} Our framework and Fig.~\ref{fig:3_hidden_calibration} show: encoding result of Step 1 can be directly used for classification with reliable decoding, and later transformer layers are not contributing to centroid classification accuracies, leading to a taxonomy of \textit{Encoding} for Step 1 and \textit{Output Preparation} for Step 2 and 3. LMs complete multi-task classification implicitly in early layers, and verbalize it by merging task-specific label semantics in later layers.
+
+
+
+\textbf{Pre-training Possibility from Natural Language Data.} A large gap can be considered between such a precise circuit and gradient descent pre-training on the wild data. However, we believe the wild training target contains the ICL circuit \textit{functionally}. Moreover, our conclusion of Step 3 highlights the input data requirements for the later layers: These data should activate the multiplex of hidden space, i.e., it should implicate multi-task classification with a wide distribution, which is consistent with the aforementioned previous works.
+
+
+\textbf{Limitations.} (1) These 3 basic operations are not functionally indivisible. Ideally, one can reduce every operation in ICL inference to the interconnection of special attention heads to ulteriorly examine how the operating subspaces interact between steps. (2) Even though we have some insights into how pre-training promotes ICL in natural language models, its detailed dynamics are still unknown. One can start by decomposing pre-training targets into implicit tasks, and examine how these tasks can evoke the occurrence of the 3-step inference operations. (3) We only focus on classification tasks, while we believe that our findings can be applied to non-classification tasks, efforts are still needed to fill the gap.
+ 
+
+
+
+

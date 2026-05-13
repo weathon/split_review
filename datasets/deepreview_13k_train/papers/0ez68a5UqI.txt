@@ -1,0 +1,430 @@
+\title{Reinforcement Learning for Node Selection in Branch-and-Bound}
+
+\begin{abstract}
+A big challenge in branch and bound lies in identifying the optimal node within the search tree from which to proceed. 
+Current state-of-the-art selectors utilize either hand-crafted ensembles that automatically switch between naive sub-node selectors, or learned node selectors that rely on individual node data.
+We propose a novel simulation technique that uses reinforcement learning (RL) while considering the entire tree state, rather than just isolated nodes.
+To achieve this, we train a graph neural network that produces a probability distribution based on the path from the model's root to its ``to-be-selected'' leaves. Modelling node-selection as a probability distribution allows us to train the model using state-of-the-art RL techniques that capture both intrinsic node-quality and node-evaluation costs.
+Our method induces a high quality node selection policy on a set of varied and complex problem sets, despite only being trained on specially designed, synthetic travelling salesmen problem (TSP) instances.
+Using such a fixed pretrained policy shows significant improvements on several benchmarks in optimality gap reductions and per-node efficiency under strict time constraints.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:Introduction}
+
+The optimization paradigm of mixed integer programming plays a crucial role in addressing a wide range of complex problems, including scheduling~\citep{Bayliss2017ASS}, process planning~\citep{Floudas2005MixedIL}, and network design~\citep{MENON2013690}. 
+A prominent algorithmic approach employed to solve these problems is \emph{branch-and-bound (BnB)}, which recursively subdivides the original problem into smaller sub-problems through variable branching and pruning based on inferred problem bounds. BnB is also one of the main algorithms implemented in SCIP~\citep{BestuzhevaEtal2021OO,BestuzhevaEtal2021ZR}, a state-of-the art mixed integer linear and mixed integer nonlinear solver.
+
+
+An often understudied aspect is the node selection problem, which involves determining which nodes within the search tree are most promising for further exploration. 
+This is due to the intrinsic complexity of understanding the emergent effects of node selection on overall performance for human experts. Contemporary methods addressing the node selection problem typically adopt a per-node perspective~\citep{yilmazStudyLearningSearch2021,heLearningSearchBranch,MORRISON201679}, incorporating varying levels of complexity and relying on imitation learning (IL) from existing heuristics~\citep{yilmazStudyLearningSearch2021,heLearningSearchBranch}.
+However, they fail to fully capture the rich structural information present within the branch-and-bound tree itself.
+
+We propose a novel selection heuristic that leverages the power of bi-simulating the branch-and-bound tree with a neural network-based model and that employs reinforcement learning (RL) for heuristic training, see Fig.~\ref{fig:MethodOverview}. 
+To do so, we reproduce the SCIP state transitions inside our neural network structure (bi-simulation), which allows us to take advantage of the inherent structures induced by branch-and-bound.
+This allows the RL policy to directly account for the BnB tree's dynamics.
+
+We reason that RL specifically is a good fit for this type of training as external parameters outside the pure quality of a node have to be taken into account.
+For example, a node $A$ might promise a significantly bigger decrease in the expected optimality gap than a second node $B$, but node $A$ might take twice as long to evaluate, making $B$ the ``correct'' choice despite its lower theoretical utility.
+By incorporating the bi-simulation technique, we can effectively capture %the intricate interdependencies of nodes 
+and propagate relevant information throughout the tree. 
+
+
+
+
+\section{Branch and Bound}
+
+\label{sec:Background}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/system-figure.pdf}
+    \caption{
+    Our method:
+    (1) SCIP solves individual nodes and executes existing heuristics.
+    (2) Features are extracted from every branch-and-bound node and sent to individual normalization and embedding.
+    (3) The node embeddings are subject to $K$ steps of GNN message passing on the induced tree-structure.
+    (4) Based on the node embeddings, we generate root-to-leave paths, from which we sample the next node.
+    The resulting node is submitted to SCIP and we return to step 1.
+    }
+    \label{fig:MethodOverview}
+\end{figure*}
+
+BnB is one of the most effective methods for solving mixed integer programming (MIP) problems. It recursively solves relaxed versions of the original problem, gradually strengthening the constraints until it finds an optimal solution. The first step relaxes the original MIP instance into a tractable subproblem by dropping all integrality constraints such that the subproblem can later be strictified into a MIP solution.
+For simplicity, we focus our explanation to the case of mixed integer linear programs (MILP) while our method theoretically works for any type of constraint allowed in SCIP (see nonlinear results in Sec.~\ref{sec:exp:MINLPLIB}, and \citet{bestuzhevaGlobalOptimizationMixedInteger2023}. Concretely a MILP has the form
+\begin{equation}
+P_{\text{MILP}}=\min \{ c^T_1x + c^T_2y | Ax + By \geq  b, y\in \mathbb{Z}^n\},
+\end{equation}
+where $c_1$ and $c_2$ are coefficient vectors, $A$ and $B$ are constraint matrices, and $x$ and $y$ are variable vectors. The integrality constraint $y\in \mathbb{Z}^n$ requires $y$ to be an integer. In the relaxation step, this constraint is dropped, leading to the following simplified problem:
+\begin{equation}
+P_{\text{relaxed}} = \min \{ c^T_1x + c^T_2y | Ax + By \geq  b\}. \label{eq:principleRelax}
+\end{equation}
+Now, the problem becomes a linear program without integrality constraints, which can be exactly solved using the Simplex~\citep{DANTZIG198243} or other efficient linear programming algorithms.
+
+After solving the relaxed problem, BnB proceeds to the branching step: First, a non-integral $y_i$ is chosen. %i = c + q \geq b$ is selected, $c\in\mathbb{Z}$ being the integral and $q\in (0,1)$ being the fractional part of the solution. 
+The branching step then derives two problems: The first problem (Eq.~\ref{eq:rel1}) adds a lower bound to variable $y_i$, while the second problem (Eq.~\ref{eq:rel2}) adds an upper bound to variable $y_i$. 
+These two directions represent the rounding choices to enforce integrality for $y_i$:\footnote{There are non-binary, ``wide'' branching strategies which we will not consider here explicitly. However, our approach is flexible enough to allow for arbitrary branching width. See~\citet{MORRISON201679} for an overview.}
+\begin{align}
+    P_{\text{relaxed}}^1 &= \min \{ c^T_1x + c^T_2y | Ax + By \geq  b, y_i\leq \lfloor c\rfloor\}\label{eq:rel1}\\
+    P_{\text{relaxed}}^2 &= \min \{ c^T_1x + c^T_2y | Ax + By \geq  b, y_i\geq \lceil c\rceil\}\label{eq:rel2}
+\end{align}
+The resulting decision tree, with two nodes representing the derived problems can now be processed recursively. However, a naive recursive approach exhaustively enumerates all integral vertices, leading to an impractical computational effort. Hence, in the bounding step, nodes that are deemed worse than the currently known best solution are discarded.
+To do this, BnB stores previously found solutions which can be used as a lower bound to possible solutions. 
+If a node has an upper bound larger than a currently found integral solution, no node in that subtree has to be processed.
+
+The interplay of these three steps—relaxation, branching, and bounding—forms the core of branch-and-bound. It enables the systematic exploration of the solution space while efficiently pruning unpromising regions. Through this iterative process, the algorithm converges towards the globally optimal solution for the original MIP problem, while producing optimality bounds at every iteration.
+
+\begin{comment}
+The success of branch and bound hinges on the effective utilization of various heuristics throughout the optimization process. 
+Primal heuristics, for instance, aim to directly find integral solutions from non-integral subproblems, whereas variable selection heuristics strive to identify high-value variables to branch on. 
+All of these heuristics are of crucial importance for modern state-of-the-art solvers such as SCIP~\citep{BestuzhevaEtal2021OO,BestuzhevaEtal2021ZR}, as finding better results allows for much more aggressive pruning of the search tree, which can speed up the problem exponentially.
+
+There are many extensions to this method, such as the branch-and-cut algorithm~\citep{padbergBranchandCutAlgorithmResolution1991} that extends the ``derelaxation'' procedure using cutting planes which are necessary to reach high performance, but at its core branch-and-bound algorithms are the workhorse behind state-of-the-art MILP, due to their high degree of generality, excellent pruning and strong numerical stability.
+\end{comment}
+
+
+
+\section{Related Work}
+
+\label{sec:RelatedWork}
+
+While variable selection through learned heuristics has been studied a lot (see e.g.~\citet{Parsonson2022ReinforcementLF} or~\citet{Etheve2020ReinforcementLF}), learning node selection, where learned heuristics pick the best node to continue, have only rarely been addressed in research.
+We study learning algorithms for node selection in state-of-the-art branch-and-cut solvers.
+Prior work that learns such node selection strategies made significant contributions to improve the efficiency and effectiveness of the optimization.
+
+Notably, many approaches rely on per-node features and Imitation Learning (IL). \citet{ottenCaseStudyComplexity} examined the estimation of subproblem complexity as a means to enhance parallelization efficiency. By estimating the complexity of subproblems, the algorithm can allocate computational resources more effectively. \citet{yilmazStudyLearningSearch2021} employed IL to directly select the most promising node for exploration. Their approach utilized a set of per-node features to train a model that can accurately determine which node to choose. \citet{heLearningSearchBranch} employed support vector machines and IL to create a hybrid heuristic based on existing heuristics. By leveraging per-node features, their approach aimed to improve node selection decisions. While these prior approaches have yielded valuable insights, they are inherently limited by their focus on per-node features. 
+
+\citet{labassiLearningCompareNodes} proposed the use of Siamese graph neural networks, representing each node as a graph that connects variables with the relevant constraints. Their objective was direct imitation of an optimal diving oracle. This approach facilitated learning from node comparisons and enabled the model to make informed decisions during node selection. However, the relative quality of two nodes cannot be fully utilized to make informed branching decisions as interactions between nodes remain minimal (as they are only communicated through a final score and a singular global embedding containing the primal and dual estimate). While the relative quality of nodes against each other is used, the potential performance is limited as the overall (non-leaf) tree structure is not considered. Existing methods are further limited by their heavy reliance on pure IL that will be constrained by the performance of the existing heuristics. Hence, integrating RL to strategically select nodes holds great promise.  
+
+\begin{comment}
+{\color{blue}
+Classical selection schemes mostly rely on mixtures of depth-first search an pseudocost based selection (see \eg \cite{SCIPDoxygenDocumentation}).
+Computing this pseudocost is very expensive, meaning cold-started iterative estimation schemes are the norm.
+This is problematic, as an early node selection can give an exponential advantage to the search due to the rapid increase in tree size. Due to the high importance of early node selection and the fact that existing heuristics perform suffer poor pseudocost estimations, we propose a high quality selection scheme particularly for the start of the tree.
+Learned strategies allows one to balance diving deep into the tree to reduce the primal bound against picking nodes that maximally reduce the dual bound.
+}
+\end{comment}
+
+
+\section{Methodology}
+
+\label{sec:Method}
+
+We model the node selection process as a sequential Markov Decision Process (MDP).
+An MDP consists of a set of states $s\in\mathcal{S}$, actions $a\in \mathcal{A}$, reward $R(s)$ and a (typically unknown) transition distribution $T:\mathcal{S}\times\mathcal{A}\to\mathcal{S}$. We train a decision policy $\pi:\mathcal{S}\to\mathcal{A}$ that selects actions in states. Our objective is to find the policy $\pi^*$, which maximizes the expected discounted sum of future rewards:
+\begin{equation}
+    \pi^* =\operatorname{argmax}_\pi \mathbb{E}\left[\sum^{t_{\text{max}}}_{t=0} \gamma^t R(s_t)\pi(a_t|s_t)T(s_{t+1}|s_t,a_t)\right],%\label{eq:policy}
+\end{equation}
+where $0<\gamma<1$ is a factor to trade immediate over future rewards.~\citep{sutton2018reinforcement}
+
+RL is the process of solving such MDPs by repeatedly rolling out $\pi$ on an environment and using the resulting trajectory to maximize $\pi$.
+Several solvers for MDPs exist, such as DQN \citep{Mnih2015} or PPO \citep{Schulman2017ProximalPO}. In this paper we use PPO to solve the MDP.
+
+In our case, we phrase our optimization problem as an MDP, where states $s_t$ are represented using directed branch-and-bound trees, actions $a_t$ are all selectable leaf-nodes, and the reward $R$ is set according to Eq.~\ref{eq:reward} in Sec.~\ref{sec:RewardDefinition}.
+The transitions are given by the SCIP-solver and its heuristics.
+To solve the MDP, PPO needs a representation for the policy $\pi$ and a model describing the state-value-function, defined as $V(s) = \max_a Q(s_t,a)$ (see \citet{Schulman2017ProximalPO}).
+
+In our model, we represent the branch-and-bound tree as a directed graph neural network whose nodes and edges are in an 1:1 correspondence to the branch-and-bound nodes and edges.
+One benefit of this is that the resulting directed graph automatically grows/shrinks the action space as new nodes are added/pruned from the tree, since the policy's action-space is directly parameterized by the number of selectable leaves.
+This allows our network to phrase node selection as an explicit distributional problem, rather than the implicit comparison based one used by \citet{labassiLearningCompareNodes}.
+
+\subsection{Reward definition}\label{sec:RewardDefinition}
+A common issue in MIP training is the lack of good reward functions.
+For instance, the primal-dual integral used in \citet{Gasse2022TheML} has the issue of depending on the scale of the objective, needing a primally feasible solution at the root, and being very brittle if different instance difficulties exist in the instance pool.
+These issues where circumvented by generating similar instances, while also supplying a feasible solution at the root.
+However, to increase generality, we do not want to make as strict assumptions as having similar instance difficulties, introducing a need for a new reward function.
+A reasonable reward measure captures the achieved performance against a well-known baseline. 
+In our case, we choose our reward, to be
+\begin{equation}
+    r = -\left(\frac{\text{\textit{gap(node selector)}}}{\text{\textit{gap(scip)}}}-1\right),\label{eq:reward}
+\end{equation}
+which represents the relative performance of our selector over the performance achieved by SCIP.
+
+Intuitively, the aim of this reward function is to decrease the optimality gap achieved by our node-selector (i.e., \textit{gap(node selector)}), normalized by the results achieved by the existing state-of-the-art node-selection methods in the SCIP~\citep{BestuzhevaEtal2021OO} solver (i.e., \textit{gap(scip)}).
+This accounts for varying instance hardness in the dataset.
+Further, we shift this performance measure, such that any value $>0$ corresponds to our selector being superior to existing solvers, while a value $<0$ corresponds to our selector being worse, and clip the reward between $(1,-1)$ to ensure symmetry around zero as is commonly done in prior work (see, e.g. \citet{Mnih2015,DAYAL2022109241}).
+This formulation has the advantage of looking at relative improvements over a baseline, rather than absolute performance, which allows us to use instances of varying complexity during training.
+
+\subsection{Tree Representation}
+\label{subsec:MethodRepresentation}
+
+To represent the MDP's state, we propose a novel approach that involves bi-simulating the existing branch-and-bound tree using a graph neural network (GNN). 
+Specifically, we consider the state to be a directed tree $T=(V,E)$, where $V$ are individual subproblems created by SCIP, and $E$ are edges set according to SCIP's node-expansion rules. More precisely, the tree's root is the principle relaxation (Eq.~\ref{eq:principleRelax}), and its children are the two rounding choices (Eqs.~\ref{eq:rel1} and~\ref{eq:rel2}). BnB proceeds to recursively split nodes, adding the splits as children to the node it was split from.
+
+We ensure that the features stay at a constant size, independent from, e.g., the number of variables and constraints, to enable efficient batch-evaluation of the entire tree.
+
+{For processing the tree $T$, we use message-passing from the children to the parent.
+Pruned or missing nodes are replaced with a constant to maintain uniformity over the graph structure.
+Message-passing enables us to consider the depth-$K$ subtree under every node by running $K$ steps of message passing from the children to the parent.}
+Concretely, the internal representation can be thought of initializing $h_0(n) = x(n)$ (with $x(n)$ being the features associated with node $n$) and then running $K$ iterations jointly for all nodes $n$:
+\begin{equation}
+    h_{t+1}(n) = h_{t}(n) + \operatorname{emb}\left(\frac{h_t(\leftN(n)) + h_t(\rightN(n))}{2}\right),
+\end{equation}
+where $\leftN(n)$ and $\rightN(n)$ are the left and right children of $n$, respectively, $h_t(n)$ is the hidden representation of node $n$ after $t$ steps of message passing, and $\operatorname{emb}$ is a function that takes the mean hidden state of all embeddings and creates an updated node embedding.
+Doing this for $K$ steps aggregates the information of the depth-K limited subtree of $n$ into the node $n$.
+
+\subsection{RL for Node Selection}
+\label{subsec:MethodRL}
+
+While the GNN model is appealing, it is impossible to train using contemporary imitation learning techniques, as the expert's action domain (i.e., leaves) may not be the same as the policy's action domain, meaning that the divergence between these policies is undefined.
+
+To solve this problem, we choose to use model-free reinforcement learning techniques to directly maximize the probablity of choosing the correct node.
+State-of-the-art reinforcement learning techniques, such as proximal policy optimization (PPO)~\cite{Schulman2017ProximalPO}, need to be able to compute two functions: The value function $V(s) = \max_{a\in \mathcal{A}}Q(s,a)$, and the likelihood function $\pi(a | s)$.
+As it turns out, there are efficient ways to compute both of these values from a tree representation:
+Firstly, we can produce a probability distribution of node-selections (\ie our actions) by computing the expected ``weight'' across the unique path from the graph's root to the ``to-be-selected'' leaves.
+These weights are mathematically equivalent to the unnormalized log-probabilities of choosing a leaf-node by recursively choosing either the right or left child with probability $p$ and $1-p$ respectively.
+
+Concretely, let $n$ be a leaf node in the set of choosable nodes $\mathscr{C}$, also let $P(r,n)$ be the unique path from the root $r$ to the candidate leaf node, with $|P(r,n)|$ describing its length.
+We define the expected path weight $W'(n)$  to a leaf node $n\in\mathscr{C}$ as
+\begin{equation}
+    W'(n) = \frac{1}{|P(r,n)|} \sum_{u \in P(r,n)} W(h_K(u)).\label{eq:Weight}
+\end{equation}
+Selection now is performed in accordance to sampling from a selection policy $\pi$ induced by
+\begin{equation}
+    \pi(n|\operatorname{tree}) = \operatorname{softmax}\left(\{ W'(n) | \forall n\in\mathscr{C}\right\}).\label{eq:policy}
+\end{equation}
+Intuitively, this means that we select a node exactly if the expected utility along its path is high.
+Note that this definition is naturally self-correcting as erroneous over-selection of one subtree will lead to that tree being completed, which removes the leaves from the selection pool $\mathscr{C}$.
+{The general value function $V(s)$, can be constructed similarly by using the fact that $V(s) = \max_{a\in \mathcal{A}} Q(s,a)$ and the fact that our actions correspond to individual nodes:}
+\begin{align}
+    Q(n|s) &= \frac{\tilde Q(n|s)}{|P(r,n)|}\\
+    \tilde Q(n|s) &= \tilde Q(\text{left}|s)+ \tilde Q(\text{right}|s) + q(h_K(n)|s)\\
+    V(s) &= \left\{ \max Q(n) \hspace{2mm}|\hspace{2mm} \forall n\in \mathscr{C} \right\}
+\end{align}
+where $q(h_n)$ is the per-node estimator, $\tilde Q$ the unnormalized Q-value, and $\mathscr{C}$ is the set of open nodes as proposed by the branch-and-bound method.
+{Since we can compute the action likelihood $\pi(a|s)$, the value function $V(s)$, and the Q-function $Q(s,a)$, we can use any Actor-Critic method (like \cite{Schulman2017ProximalPO,schulmanHighDimensionalContinuousControl2015,Mnih2016AsynchronousMF}) for training this model.
+For this paper, we chose to use \citet{Schulman2017ProximalPO}, due to its ease of use and robustness.}
+
+{
+According to these definitions, we only need to predict the node embeddings for each node $h_K(n)$, the per-node q-function $q(h_K(n)|s)$, and the weight of each node $W(h_K(u))$.
+We parameterize all of these as MLPs (more architectural details app.~\ref{sec:architecture}.
+}
+
+This method provides low, but measurable overhead compared to existing node selectors, even if we discount the fact that our Python-based implementation is vastly slower than SCIP's highly optimized C-based implementations.
+Hence, we focus our model on being efficient at the beginning of the selection process, where good node selections are exponentially more important as finding more optimal solutions earlier allows to prune more nodes from the exponentially expanding search tree.
+Specifically we evaluate our heuristic at every node for the first 250 selections, then at every tenth node for the next 750 nodes, and finally switch to classical selectors for the remaining nodes.\footnote{This accounts for the ``phase-transition'' in MIP solvers where optimality needs to be proved by closing the remaining branches although the theoretically optimal point is already found~\citep{MORRISON201679}. Note that with a tuned implementation we could run our method for more nodes, where we expect further improvements.}
+
+\subsection{Data Generation \& Agent Training}
+\label{subsec:MethodData}
+
+In training MIPs, a critical challenge lies in generating sufficiently complex training problems. 
+First, to learn from interesting structures, we need to decide on some specific problem, whose \eg satisfiability is knowable as generating random constraint matrices will likely generate empty polyhedrons, or polyhedrons with many eliminable constraints (e.g., in the constraint set consisting of $c^Tx\leq b$ and $c^Tx\leq b+\rho$ with $\rho\neq 0$ one constraint is always eliminable).
+This may seem unlikely, but notice how we can construct aligned $c$ vectors by linearly combining different rows (just like in LP-dual formulations).
+In practice, selecting a sufficiently large class of problems may be enough as during the branch-and-cut process many sub-problems of different characteristics are generated.
+Since our algorithm naturally decomposes the problem into sub-trees, we can assume any policy that performs well on the entire tree also performs well on sub-polyhedra generated during the branch-and-cut.
+
+For this reason we consider the large class of Traveling Salesman Problem (TSP), which itself has rich use-cases in planning and logistics, but also in optimal control, the manufacturing of microchips and DNA sequencing (see~\citet{cook2011traveling}).
+For training, we would like to use random instances of TSP but generating them can be challenging.
+Random sampling of distance matrices often results in easy problem instances, which do not challenge the solver. 
+Consequently, significant effort has been devoted to devising methods for generating random but hard instances, particularly for problems like the TSP, where specific generators for challenging problems have been designed (see~\citet{vercesiGenerationMetricTSP2023} and~\citet{randomCut}).
+However, for our specific use cases, these provably hard problems may not be very informative as they rarely contain efficiently selectable nodes. 
+
+To generate these intermediary-difficult problems, we adopt a multi-step approach: We begin by generating random instances and then apply some mutation techniques~\citep{10.1145/3299904.3340307} to introduce variations, and ensure diversity within the problem set.
+Next, we select the instance of median-optimality gap from the pool, which produces an instance of typical difficulty.
+The optimality gap, representing the best normalized difference between the lower and upper bound for a solution found during the solver's budget-restricted execution, serves as a crucial metric to assess difficulty. 
+This method is used to produce 200 intermediary-difficult training instances.
+
+To ensure the quality of candidate problems, we exclude problems with more than $100\%$ or zero optimality gap, as these scenarios present challenges in reward assignment during RL.
+To reduce overall variance of our training, we limit the ground-truth variance in optimality gap.
+Additionally, we impose a constraint on the minimum number of nodes in the problems, discarding every instance with less than 100 nodes. 
+This is essential as we do not expect such small problems to give clean reward signals to the reinforcement learner.
+
+
+
+\section{Experiments}
+
+
+For our experiments we consider the instances of \textsc{TSPLIB}~\citep{TSPLib} and  \textsc{MIPLIB}~\citep{MIPLIB} which are one of the most used datasets for benchmarking MIP frameworks and thusly form a strong baseline to test against.
+We further test against the UFLP instance generator by \citep{Kochetov2005}, which specifically produces instances hard to solve for branch-and-bound, and against \textsc{MINLPLIB}~\citep{MINLPLIB}, which contains \emph{mixed integer nonlinear programs}, to show generalization towards very foreign problems.
+
+All training and experiments were done fully on a ryzen 7 5800x3d CPU and completes training in about 6\si{h}.
+We were generally not limited by compute, but rather by the fact that every policy rollout takes, by definition, 45\si{s} regardless of hardware used.
+
+\subsection{Baselines}
+\label{subsec:Experiments:Baselines}
+
+We run both our method and SCIP for 45s.
+We then filter out all runs where SCIP has managed to explore less than 5 nodes, as in these runs even perfect node selection makes no difference in performance.
+If we included those in our average, we would have a significant number of lines where our node-selector has zero advantage over the traditional SCIP one, not because our selector is better or worse than SCIP, but simply because it wasn't called in the first place. 
+We set this time-limit relatively low as our prototype selector only runs at the beginning of the solver process, meaning that over time the effects of the traditional solver take over. %Running the system for longer yields similar trends, but worse signal-to-noise ratio in the improvement due to the SCIP selector dominating the learnt solver in the long-runtime regime.
+
+{Additionally, we also consider an evaluation with a 5\si{min} time limit. For those runs, the limit until we switch to the naive node selector is set to 650 nodes to account for the higher time limit.
+In general, the relative performance of our method compared to the baseline increases with the 5\si{min} budget.}
+{
+Finally, we also benchmark against the previous state-of-the-art by \citet{labassiLearningCompareNodes}, which represents optimal node selection as a comparison problem where a siamese network is used to compare different leaf nodes against each other and picking the ``highest'' node as the next selection.
+}
+\begin{comment}
+\subsection{Evaluation Metrics}
+\label{subsec:Experiments:Metrics}
+
+A core issue in benchmarking is the overall breadth of difficulty and scale of problem instances.
+Comparing the performance of node selection strategies is challenging due to a lack of aggregatable metrics.
+Further, the difficulty of the instances in benchmarks do not only depend on the scale but also specific configuration, e.g., distances in \textsc{TSPLIB}: while \texttt{swiss42} can be solved quickly, \texttt{ulysses22} cannot be solved within our time limit despite only being half the size (see Table~\ref{tab:ExplorationData}).
+We can also see this at the range of optimality gaps in Table~\ref{tab:ExplorationData}.
+The gaps range from $1134\%$ to $0\%$.
+Computing the mean gap alone is not very meaningful as instances with large gaps dominate the average.\footnote{A gap decrease from $1,000\%$ down to $999\%$ has the same overall magnitude as a decrease from $1\%$ to $0\%$ -- but from a practical point of view the latter is much more meaningful.
+The degree of which a result can be improved also depends wildely on the problem's pre-existing optimality gap.
+For instance an improvement of $2\%$ from $1,000\%$ down to $998\%$ is easily possible, while becoming impossible for a problem whose baseline already achieves only $1\%$ gap.
+This would mean that in a simple average the small-gap problems would completely vanish under the size of large-gap instances.}
+
+The \textbf{Reward} (Eq.~\ref{eq:reward}) considers the shifted \emph{ratio} between the optimality gap of our approach and that of the baseline; positive values represent that our method is better and vice verse.
+This has the natural advantage of removing the absolute scale of the gaps and only considering relative improvements.
+The downside is that small differences can get blown-up in cases where the baseline is already small.\footnote{For example, if the baseline has a gap of $0.001$ and ours has a gap of $0.002$ our method would be $100\%$ worse, despite the fact that from a practical point of view both of them are almost identical.}
+Note that the function also has an asymmetric range, since one can have an infinitely negative reward, but can have at most have a $+1$ positive reward.
+Hence, we clip the reward in the range $\pm 1$ as this means a single bad result cannot destroy the entire valuation for either method.
+\end{comment}
+\subsection{Results}
+In addition to our ``reward'' metric we report the winning ratio of our method over the baseline, and the geometric mean of the gaps at the end of solving (lower is better).
+
+\begin{table*}[t]
+    \small
+    \centering
+    \caption{Performance across benchmarks (the policy only saw TSP instances during training).
+    }
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lcccccc}\toprule
+         Benchmark                &Reward&  Win-rate & geo-mean Ours & geo-mean SCIP \\\midrule
+         TSPLIB~\citep{TSPLib}     &0.184            & 0.50                     & 0.931                          & 0.957 \\
+         UFLP~\citep{Kochetov2005} &0.078          & 0.636                    & 0.491                          & 0.520 \\
+         MINLPLib~\citep{MINLPLIB} &0.487             & 0.852                    & 28.783                         & 31.185\\
+         MIPLIB~\citep{MIPLIB}     &0.140        & 0.769                    & 545.879                        & 848.628\\
+      TSPLIB@5min &0.192            & 0.600                    & 1.615                          & 2.000 \\
+     MINLPlib@5min&0.486            & 0.840                    & 17.409                         & 20.460\\
+     MINLPlib@5min&0.150            & 0.671                    & 66.861                         & 106.400\\
+         \bottomrule
+    \end{tabular}
+    }
+    \label{tab:otherTests}
+\end{table*}
+
+For benchmarking and training, we leave all settings, such as presolvers, primal heuristics, diving heuristics, constraint specialisations, etc. at their default settings to allow the baseline to perform best.
+All %instances get a budget of 45\si{s} and all 
+instances are solved using the same model without any fine-tuning.
+We expect that tuning, e.g., the aggressiveness of primal heuristics, increases the performance of our method, as it decreases the relative cost of evaluating a neural network, but for the sake of comparison we use the default parameters for all our tests. 
+We train our node selection policy on problem instances according to Sec.~\ref{subsec:MethodData} and apply it on problems from different benchmarks.
+
+First, we will discuss TSPLIB itself, which while dramatically more complex than our selected training instances, still contains instances from the same problem family as the training set (Sec.~\ref{sec:exp:TSPLIB}).
+Second, we consider instances of the Uncapacitated Facility Location Problem (UFLP) as generated by \cite{Kochetov2005}'s problem generator.
+These problems are designed to be particulary challenging to branch-and-bound solvers due to their large optimality gap (Sec.~\ref{sec:exp:UFLP}).
+While the first two benchmarks focused on specific problems (giving you a notion of how well the algorithm does on the problem itself) we next consider ```meta-benchmarks'' that consist of many different problems, but relatively few instances of each. MINLPLIB~\citep{MINLPLIB} is a meta-benchmark for \emph{nonlinear} mixed-integer programming (Sec.~\ref{sec:exp:MINLPLIB}), and MIPLIB~\citep{MIPLIB} a benchmark for mixed integer programming (Sec.~\ref{sec:exp:MIPLIB}).
+
+Our benchmarks are diverse and complex and allow to compare algorithmic improvements in state-of-the-art solvers.
+\subsubsection{TSPLIB}
+\label{sec:exp:TSPLIB}
+{
+From an aggregative viewpoint we outperform the SCIP node selection by $\approx 20\%$ in reward. 
+However, the overall ``win-rate'' is only $50\%$ as the mean-reward is dominated by instances where our solver has significant performance improvements: When our method looses, it looses by relatively little (\eg \texttt{att48}: ours $0.287$ vs base $0.286$), while when it wins, it usually does so by a larger margin.
+}
+
+Qualitatively, it is particularly interesting to study the problems our method still looses significantly against SCIP (in four cases).
+A possible reason why our method significantly underperforms on \texttt{Dantzig42} is that our implementation is just too slow, considering that the baseline manages to evaluate $\approx 40\%$ more nodes. A similar observation can be made on \texttt{eil51} where the baseline manages to complete $5\times$  more nodes.
+\texttt{rd100} is also similar to \texttt{Dantzig} and \texttt{eil51} as the baseline is able to explore $60\%$ more nodes.
+\texttt{KroE100} is the first instance our method looses against SCIP, despite exploring a roughly equal amount of nodes. We believe that this is because our method commits to the wrong subtree early and never manages to correct into the proper subtree.
+Ignoring these four failure cases, our method is either on par (up to stochasticity of the algorithm) or exceeds the baseline significantly.
+
+It is also worthwhile to study the cases where both the baseline and our method hit $0$ optimality gap.
+{Both algorithms reaching zero optimality gap can be seen as somewhat of a special case, since soley looking at the solution value is insufficient to figure out which method performs better in practice.}
+A quick glance at instances like \texttt{bayg29}, \texttt{fri26}, \texttt{swiss42} or \texttt{ulysses16} shows that our method tends to finish these problems with significantly fewer nodes explored.
+This is not captured by any of our metrics since those only look at solution quality, not the efficiency of reaching that solution.
+If the quality of the baseline and ours is the same, it makes sense to look at solution efficiency instead.
+Qualitatively, instances like \texttt{bayg29} manage to reach the optimum in only $\frac{1}{3}$ the number of explored nodes, which showcases a significant improvement in node-selection quality.
+It is worth noting that, due to the different optimization costs for different nodes, it not always true that evaluating fewer nodes is faster in wall-clock time.
+In practice, ``fewer nodes is better'' seems to be a good rule-of-thumb to check algorithmic efficiency.
+
+{
+\subsection{UFLP}
+The UFLP benchmark designed by \citet{Kochetov2005} is specifically built to be hard to solve by branch-and-bound solvers due to its large duality gap.
+Despite this, our method manages to outperform the baseline significantly.
+This is meaningful since this benchmark is a specially designed worst-case scenario: The fact that our method still outperforms the baseline provides good evidence of the efficacy of the method.
+}
+\subsubsection{MINLPLIB}
+\label{sec:exp:MINLPLIB}
+
+We now consider MINLPs. To solve these, SCIP and other solvers use branching techniques that cut nonlinear (often convex) problems from a relaxed master-relaxation towards true solutions.
+We consider MINLPLib~\citep{MINLPLIB}, a meta-benchmark consisting of hundreds of synthetic and real-world MINLP instances of varying different types and sizes.
+{As some instances take hours to solve even a single node, we filter out all problems with fewer than 5 nodes, as the performance in those cases is independent of the node-selectors performance}
+Our method still manages to outperform SCIP, even on MINLPs, despite never having seen a single MINLP problem before, see Table~\ref{tab:otherTests}.
+Qualitatively, our method either outperforms or is on par with the vast majority of problems, but also loses significantly in some problems, greatly decreasing the average.
+Studying the cases our method looses convincingly (see app.~\ref{sec:MINLP}), we find a similar case as in TSPLIB, where the baseline implementation is so much more optimized that significantly more nodes can get explored.
+{
+We suspect the reason our method has the biggest relative improvements on MINLPs is due to the fact that existing \eg pseudocost based selection methods do not perform as well on spatial-branch-and-bound tasks.
+}
+
+We expect features specifically tuned for nonlinear problems to increase performance by additional percentage points, but as feature selection is orthogonal to the actual algorithm design, we leave more thorough discussion of this to future work~\footnote{We are not aware of a learned BnB node-selection heuristic used for MINLPs, so guidance towards feature selection doesn't exist yet. Taking advantage of them presumably also requires to train on nonlinear problems.}.
+
+\subsubsection{MIPLIB}
+\label{sec:exp:MIPLIB}
+
+Last, but not least we consider the meta-benchmark MIPLIB~\citep{MIPLIB}, which consists of hundreds of real-world mixed-integer programming problems of varying size, complexity, and hardness. Our method is either close to or exceeds the performance of SCIP, see Table~\ref{tab:otherTests}.
+
+Considering per-instance results, we see similar patterns as in previous failure cases:
+Often we underperform on instances that need to close many nodes, as our method's throughput lacks behind that of SCIP.
+We expect that a more efficient implementation alleviates the issues in those cases.
+
+We also see challenges in problems that are far from the training distribution, specifically satisfaction problems.
+Consider \texttt{fhnw-binpack4-48}, were the baseline yields an optimality gap of $0$ while we end at $+\infty$.
+This is due to the design of the problem: Instead of a classical optimization problem, this is a satisfaction problem, where not an optimal value, but \emph{any} feasible value is searched, i.e., we either yield a gap of $0$ (solution found), or a gap of $+\infty$ (solution not found), as no other gap is possible.
+Notably, these kinds of problems may pose a challenge for our algorithm, as the node-pruning dynamics of satisfying MIPs are different than the one for optimizing MIPs: Satisfying MIPs can only rarely prune nodes since, by definition, no intermediary primally valid solutions are ever found.
+
+{
+\subsection{Comparison against ``Learning to compare nodes''}\label{sec:labassi}
+
+\begin{table*}[!htb]
+    \centering
+    \caption{Comparison against \citep{labassiLearningCompareNodes}. Note that we use a \emph{single} network, evaluated out-of-distribution, while \citep{labassiLearningCompareNodes} uses \emph{different} networks, all trained on that specific type of mixed integer linear program.
+    For all metrics, lower is better.
+    }
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{l cc cc cc cc}\toprule
+                 &\multicolumn{2}{c}{FMCNF} & \multicolumn{2}{c}{GISP} & \multicolumn{2}{c}{WPMS}\\\midrule
+                 &Nodes              & Runtime           & Nodes & Runtime          & Nodes & Runtime         \\\midrule
+    Labassi FMCNF& 339.53 $\pm$ 5.90 & 29.45 $\pm$ 2.13  & ---    & ---               & ---    & ---              \\
+    Labassi GISP & --- & ---  & 1219 $\pm$ 1.73    & 26.50 $\pm$ 1.55               & ---    & ---              \\
+    Labassi WPMS & --- & ---   & ---    & ---               & \textbf{215.26 $\pm$ 1.97}    & 10.46 $\pm$ 1.56              \\
+    Ours         & \textbf{187.33 $\pm$ 3.67} & \textbf{19.99 $\pm$ 2.25}   &  \textbf{1216.16 $\pm$ 1.91}   & \textbf{16.94 $\pm$ 1.49}               & 221.73 $\pm$ 1.78    & \textbf{8.04 $\pm$ 1.72}              \\\bottomrule
+    \end{tabular}}
+
+    \label{tab:labassi}
+\end{table*}
+
+Aside from comparisons against SCIP, we also compare against the previous state-of-the-art method by \citet{labassiLearningCompareNodes}. One complication when benchmarking against \citet{labassiLearningCompareNodes} was that labassi assumes a \emph{seperate model for each problem type}, while our method is already flexible enough to handle \emph{all problem types within a single model}.
+Since \citet{labassiLearningCompareNodes} needs to re-train for each instance type and only works for linear problems, we cannot test it against MIPLIB and MINLPLIB.
+Instead, we reproduce all benchmarks used by labassi (each with their own separate models), and compare against them against our single model. 
+
+\begin{comment}
+The most notable piece of prior work is the frequently mentioned \citep{labassiLearningCompareNodes}, which frames node selection as a ranking problem where one uses siamese networks to predict the most preferred action according to a learned pairwise comparison function.
+We compare against Labassi's work in Table~\ref{tab:labassi}, using the runtime-based benchmarking used in their work, using their large ``transfer'' instances (for more details on the datasets, see \citep{labassiLearningCompareNodes}).
+We utilize their benchmarking system as the instances they use are so small that they can all be solved within our time budget of $45\si{s}$, meaning the metrics we propose to test on large instances (see Sec~\ref{subsec:Experiments:Metrics}) do not make any sense here.
+\end{comment}
+
+As one can see in Table~\ref{tab:labassi}, we convincingly beat the prior work on every single benchmark (aside of WPMS node count), despite our method never having seen any of these problem types during training. %, and only using a single model to tackle \emph{all} problems, rather than having separate problems for each.
+This is surprising because \citep{labassiLearningCompareNodes} should have a convincing advantage due to the fact that not only did they train a dedicated agents for every single one of their problems, they also use the same generator for their training and testing instances.
+This implies that your single solver, evaluated out-of-distribution, manages to outperform the specialized agents proposed by \citep{labassiLearningCompareNodes} evaluated in-distribution.
+In general, our method improves upon \citep{labassiLearningCompareNodes} by between $30\%$ and $56\%$ wrt. runtime. 
+}
+
+
+\section{Limitations}
+
+There are still many open questions.
+Feature selection remains an area where we expect significant improvements, especially for nonlinear programming, which contemporary methods do not account for.
+We also expect significant improvements in performance through code optimization.
+An important area for research lies in generalized instance generation: Instead of focusing on single domain instances for training (e.g. from TSP), an instance generator should create problem instances with consistent, but varying levels of difficulty across different problem domains. 
+Further, the number of nodes used before switching to classical node selectors is only done heuristically. Finding optimal switching points between different node selectors is still an open problem even beyond learned solutions and represents an interesting place for further research.
+
+
+
+\section{Conclusion}
+
+
+We have proposed a novel approach to branch-and-bound node selection, that uses the structure of the branch-and-bound process and reinforcement learning to convincingly beat classical SCIP and learnt node selectors.
+By aligning our model with the branch-and-bound tree structure, we have demonstrated the potential to develop a versatile heuristic that can be applied across various optimization problem domains, despite being trained on a narrow set of instances.
+To our knowledge, this is the first demonstration of learned node selection to mixed-integer (nonlinear) programming.
+
+
+
+

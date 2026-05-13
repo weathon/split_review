@@ -1,0 +1,334 @@
+\title{On Discriminative Probabilistic Modeling for Self-Supervised Representation Learning}
+
+\begin{abstract}
+We study the discriminative probabilistic modeling problem on a continuous domain for (multimodal) self-supervised representation learning. %to bridge this gap. 
+To address the challenge of computing the integral in the partition function for each anchor data, we leverage the multiple importance sampling (MIS) technique for robust Monte Carlo integration, which can recover InfoNCE-based contrastive loss as a special case. Within this probabilistic modeling framework,  we conduct generalization error analysis to reveal the limitation of current InfoNCE-based contrastive loss for self-supervised representation learning and derive insights for developing better approaches by reducing the error of Monte Carlo integration.  To this end, we propose a novel non-parametric method for approximating the sum of conditional probability densities required by MIS through convex optimization, yielding a new contrastive objective for self-supervised representation learning.
+Moreover, we design an efficient algorithm for solving the proposed objective.
+We empirically compare our algorithm to representative baselines on the contrastive image-language pretraining task% with a relatively small batch size
+. Experimental results on the CC3M and CC12M datasets demonstrate the superior overall performance of our algorithm.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recently, self-supervised learning (SSL) of large models has emerged as a prominent paradigm for building artificial intelligence (AI) systems~\citep{bommasani2021opportunities, ozbulak2023know,zhou2023comprehensive,zong2023self}. Unlike traditional supervised learning that relies on human-labeled datasets, SSL can fully exploit the vast multimodal data readily available on the internet via self-supervision (pretext tasks such as instance discrimination, masked modeling, and inpainting) to learn large foundation models that are useful for many downstream tasks. Although self-supervision differs from human supervision, self-supervised and supervised learning share similarities. For instance, many successful self-supervised learning models, e.g., CLIP~\citep{radford2021learning}, still use the softmax function and the cross-entropy loss to define their objective functions, similar to traditional multi-class classification in supervised learning. The key difference is that self-supervised learning focuses on {\bf predicting relevant data instead of relevant labels}.
+\begin{wrapfigure}{r}{0.5\linewidth}\label{fig:framework}
+\includegraphics[width=\linewidth]{./images/DPM.pdf}
+\caption{DPM for supervised learning and self-supervised representation learning.}
+\end{wrapfigure} 
+
+Discriminative probabilistic modeling (DPM) uses a parameterized model to capture the {\bf conditional} probability $\Pr(\y|\x)$ of a target $\y\in\Y$ given an input data point $\x$. It is a fundamental approach for supervised learning (see, e.g., Chapter 4.3 in~\citealt{bishop2006pattern}).  For example, logistic regression for multi-class classification (MCC) uses $\Pr(\y|\x)$ to define the probability of a label $\y$ given a data point $\x$, whose maximum likelihood estimation (MLE) yields the cross-entropy (CE) loss. Similarly, probabilistic modeling approaches such as ListNet~\citep{cao2007learning} have been used for learning to rank (L2R) to model the probability of a candidate $\y$ in a list given a query $\x$. In these supervised learning tasks, the target $\y$ is from a discrete and finite set $\Y$ (e.g. class labels or a list of candidates). 
+
+What if the target $\y$ in DPM is from a continuous domain $\Y$? This is particularly useful for modeling the prediction task of self-supervised representation learning. %, i.e., predicting a relevant data given an anchor data.  
+Considering that each underlying object in the real world generates various forms of observational data, such as images, texts, and audio, DPM is a natural choice to model the probability of observing a data point from a continuous domain (e.g., the space of natural images, audio, or the continuous input embedding space of texts) given an “anchor” data point. The anchor data may come from a different modality. %Through the lens of probabilistic modeling, we present a principled approach for self-supervised learning grounded in the same foundation as the broadly studied supervised learning paradigm.  
+However, solving DPM over a continuous domain is deemed as a challenging task (c.f. Section 1.3 in \citealt{lecun2006tutorial}). 
+Compared to the probabilistic modeling over discrete and finite sets, such as in traditional supervised learning tasks like MCC and L2R, the DPM problem over a continuous domain (real vector space) necessitates computing the partition function (i.e., the normalizing constant) for each anchor. This involves an integration over an underlying continuous space, rather than a finite summation. Previous works tackle or circumvent this issue using Markov Chain Monte Carlo (MCMC) sampling~\citep{song2021train,du2019implicit,ta2022conditional}, noise-contrastive estimation (NCE)~\citep{gutmann2010noise}, and energy-based models (EBMs)~\citep{lecun2006tutorial,assran2023self}. However, these approaches have drawbacks that  hinder their wide adoption in self-supervised representation learning. Specifically, MCMC approaches are computationally expensive and prone to divergence during training~\citep{yang2021jem++,kim2022energy}, NCE suffers from slow convergence for high-dimensional data when the noise distribution is not well-configured~\citep{liu2022analyzing}, and EBMs neglects the partition functions that may throw away some discriminative power of DPM. The state-of-the-art discriminative self-supervised representation learning algorithms rely on InfoNCE-based contrastive losses~\citep{oord2018representation,chen2020simple,radford2021learning}. However, the connection between these losses and DPMs is not fully revealed, limiting our understanding of their strengths and weaknesses.
+
+In this work,  we study DPM over a continuous domain for self-supervised representation learning by investigating a computational framework of robust Monte Carlo integration of the partition functions based on the multiple importance sampling (MIS) approach~\citep{veach1995optimally,veach1998robust}. Our contributions can be summarized as follows: 
+
+$\bullet$ We construct an empirical risk for maximum likelihood estimation (MLE) based on MIS. Unlike the setting in MIS for traditional stochastic simulation, the sums of conditional densities on training data are not directly accessible, requiring approximations of these sums. We show that an InfoNCE-based contrastive loss, referred to as the global contrastive loss (GCL)~\citep{yuan2022provable}, can be derived as a special case of this empirical risk when a simple uniform approximation is used.
+    
+$\bullet$ Our finite-sample generalization analysis reveals that GCL incurs a non-diminishing error due to the rather crude uniform approximation. To reduce this error, we introduce a novel non-parametric method to approximate the sum of conditional densities required by the MIS approach through optimization. In a toy experiment, we demonstrate that the proposed non-parametric method results in better approximations and significantly smaller generalization errors than GCL.  
+
+$\bullet$ The MLE framework based on MIS and our non-parametric method inspires a new contrastive objective for self-supervised representation learning. We design an efficient algorithm, \alg, to optimize the proposed objective, which does not require the costly MCMC steps or the elusive noise distribution selection. Furthermore, \alg~can be interpreted as a contrastive representation learning algorithm with \emph{nonuniform} margins that are dynamically learned for negative pairs.
+    
+$\bullet$ Experimental results on language-image pretraining using CC3M and CC12M datasets show the superior overall performance of \alg~compared to baselines on downstream retrieval tasks. 
+\subsection{Related Work}\label{sec:related}
+
+\textbf{Probabilistic Models for Self-Supervised Representation Learning:} Discriminative probabilistic models learn the \emph{conditional} probability mass/density function $p(\y\mid\x)$ of $\y$ given data $\x$. Recently, some works have focused on modeling the conditional probability density function $p(\y\mid \x)$ for the unsupervised representation learning task, where both $\x$ and $\y$ may belong to uncountable spaces. \citet{khemakhem2020ice} studied the identifiability (i.e., the learned representations
+are unique up to a linear transformation) of DPM and showed its connection to nonlinear ICA models. \citet{ta2022conditional} improved the Langevin MCMC method to handle the partition function in DPM for learning implicit representations of behavior-cloned policies in robotics. Discarding the partition function, \citet{assran2023self, bardes2024revisiting} proposed the energy-based models I-JEPA and V-JEPA to learn visual representations by predicting the relevance between data representations. Although the high-level concept of JEPA is similar to our work in that both aim to predict the relevance between data representations, our approach is grounded in discriminative probabilistic modeling, whereas JEPA is an energy-based model that omits the partition function. Consequently, JEPA lacks some statistical guarantees of probabilistic models, such as the convergence of the maximum likelihood estimator, which have implications for performance on downstream tasks (See Remark~\ref{rem:downstream}). Furthermore, JEPA is designed specifically for the visual modality whereas our algorithm applies to multimodal data. 
+By modeling the joint distribution $p(\x,\y)$, hybrid models~\citep{grathwohl2019your, wang2022unified,kim2022energy,bizeul2024probabilistic} simultaneously perform discriminative and generative probabilistic modeling. 
+Although the generative component in hybrid models might offer some benefits for representation learning, such as achieving reasonably good performance with small batch size, \citet{kim2022energy} pointed out that current hybrid models significantly increase the computational burden and cannot be applied to large-scale datasets such as ImageNet1k due to the expensive inner loops of stochastic gradient Langevin dynamics or adversarial training. %In contrast, our method achieves good performance with a small batch size using techniques based on the exponential moving average (EMA) technique in~\citet{yuan2022provable}, which only introduces marginal computational overhead even on large-scale datasets. 
+Furthermore, \citet{bizeul2024probabilistic} mentioned\footnote{\url{https://openreview.net/forum?id=QEwz7447tR}} that generative representation learning approaches face difficulties scaling to large-scale, complex datasets, as ``learning representations for complex data distributions under a generative regime remains a challenge compared to discriminative approaches.''
+
+\textbf{InfoNCE-based Losses and Theoretical Guarantees:} The InfoNCE loss is arguably the most widely used loss function in contrastive learning~\citep{chopra2005learning,oord2018representation,chen2020simple,radford2021learning}. Given a dataset $\{(\x_i,\y_i)\}_{i=1}^n$ from two views or modalities, the minibatch-based InfoNCE loss contrasts each positive pair with $k$ negative pairs in the sampled batch. Both empirical observations~\citep{chen2020simple,radford2021learning,yuan2022provable} and theoretical analysis~\citep{yuan2022provable} demonstrate that algorithms based on InfoNCE perform well when the batch size is sufficiently large (e.g. 32,768 for CLIP training), which demands a lot of
+computational resources. Besides, several works analyze the generalization error of the minibatch-based InfoNCE loss~\citep{arora2019theoretical,lei2023generalization}. However, these analyses have a critical limitation: the generalization error increases with $k$, which contradicts practical observations.
+
+To address the dependency on large batch sizes,  \citet{yuan2022provable} studied the global contrastive loss (GCL), 
+which can be viewed as a variant of the InfoNCE loss that contrasts each positive pair with \emph{all} other negative pairs in the whole dataset. Based on the exponential moving average (EMA) technique, they developed the SogCLR algorithm that converges to a neighborhood of a stationary point of GCL even with small batch sizes (e.g., 256). Recently, \citet{yau2024emc} introduced the MCMC-based EMC$^2$ algorithm that converges to the stationary point with a small batch size. However, EMC$^2$ appears to empirically perform worse than SogCLR on large datasets such as ImageNet1k. Besides, \citet{waida2023towards} established the generalization bound of the kernel contrastive loss (KCL), which is a lower bound of GCL when the kernel is bilinear.
+
+
+\section{Preliminaries}
+
+
+\textbf{Notations:} We use $[n]$ to denote the set $\{1,\dotsc,n\}$. For a vector $\v \in \R^n$, $v^{(i)}$ represents its $i$-th coordinate and we define $\exp(\v) \coloneqq  (\exp(v^{(1)}),\dotsc, \exp(v^{(n)}))^\top$. Let $\X$ and $\Y$ be Lebesgue-measurable data spaces of different views or modalities. When $\X$ or $\Y$ is finite, the Lebesgue measure $\mu$ is replaced by the counting measure. % We denote $\mu(\Y)$ as the Lebesgue measure of $\Y$. 
+For a sequence of random variables $\{\x_n\}_{n\in\mathbb{N}}$, we write $\x_n \stackrel{p}{\rightarrow} \x$ to denote that $\{\x_n\}_{n\in\mathbb{N}}$ converges in probability to $\x$.
+\textbf{Multiple Importance Sampling (MIS):} Next, we briefly review the multiple importance sampling (MIS) approach~\citep{veach1995optimally, veach1998robust} for robust Monte Carlo integration. MIS was originally introduced to address the glossy highlights problem for image rendering in computer graphics, which involves computing several integrals of the form $g(\a,r,s) = \int_\X f(\x;r,s) d\mu(\x)$, which represents the light exiting a point $\a$ on a glossy surface under variations in light size $s$ and surface glossiness $r$. For Monte Carlo integration of $g(\a,r,s)$, importance sampling based on a sample from a single distribution may lead to a large variance under some light size/surface glossiness. To address this issue, the MIS approach constructs an unbiased estimator $\hat{g}(\a,r,s)=\sum_{j=1}^n \frac{1}{m}\sum_{l=1}^m \omega^{(j)}(\x_{j,l}) \frac{f(\x_{j,l};\a,r,s)}{p_j(\x_{j,l})}$ by combining samples $\hat{\mathbf{X}}_1\,\dotsc,\hat{\mathbf{X}}_n$ from distributions $p_1,\dotsc,p_n$, where $\hat{\mathbf{X}}_j \coloneqq \{\x_{j,1},\dotsc, \x_{j,m}\}$ is sampled from the $j$-th distribution, and $\boldsymbol{\omega}=(\omega^{(1)},\dotsc,\omega^{(n)})$ is a weighting function satisfies that $\sum_{j=1}^n \omega^{(j)}(\x) = 1$ when $f(\x;\a,r,s) \neq 0$ and $\omega^{(j)}(\x)=0$ when $p_j(\x)=0$. Moreover, \cite{veach1995optimally} proposed the ``balance heuristic'' $\omega^{(j)}(\x)=\frac{p_j(\x)}{\sum_{j'=1}^n p_{j'}(\x)}$ and proved that this choice of $\boldsymbol{\omega}$ is near-optimal in terms of variance among all possible weighting functions and the resulting MIS estimator is $\hat{g}(\a,r,s) = \sum_{j=1}^n \frac{1}{m}\sum_{l=1}^m  \frac{f(\x_{j,l};\a,r,s)}{\sum_{j'=1}^n p_{j'}(\x_{j,l})}$. Empirically, they showed that MIS with the balance heuristic leads to better rendering performance than importance sampling with a single distribution.
+
+
+
+\section{DPM over a Continuous Domain}
+
+
+When choosing $\X$ as the anchor space, we model the probability density $p(\y\mid\x)$ of an object $\y\in\Y$ given an anchor object $\x\in\X$ by the following DPM parameterized by $\w$:
+\begin{align}\label{eq:prob_model}
+p_\w(\y\mid \x) = \frac{\exp(E_\w(\x,\y)/\tau)}{\int_\Y \exp(E_\w(\x,\y')/\tau) d\mu(\y') },%,\quad \forall \x\in\X,~\y\in\Y,
+\end{align}
+where  $\tau > 0$ is a temperature parameter for flexibility,  $E_\w:\X\times \Y\rightarrow \R$ is a parameterized prediction function, e.g., $E_\w(\x, \y)=E_1(\w_1, \x)^{\top}E_2(\w_2, \y)$, where $E_1$ and $E_2$ are encoder networks. %which could be based on a ``two-tower'' model, like the one in SimCLR~\citep{chen2020simple}.%, or a ``one-tower'' model, similar to the one used in BERT~\citep{devlin2018bert}. 
+We assume that $\exp(E_\w(\x,\y)/\tau)$ is Lebesgue-integrable for $\w\in\W$, $\W\subset \R^d$. Here $p_\w(\y\mid \x)$ is a valid probability density function because $\int_\Y p_\w(\y\mid \x) d\mu(\y)= 1$.
+Given $\{(\x_1,\y_1),\dotsc,(\x_n,\y_n)\}$ sampled from the joint distribution $p_{\x,\y}$, the maximum likelihood estimation (MLE) aims to solve %is done by solving:
+\begin{align}\label{eq:mle}
+\min_\w \left\{- \frac{1}{ n}\sum_{i=1}^n \tau \log\frac{\exp(E_\w(\x_i,\y_i)/\tau)}{\int_\Y \exp(E_\w(\x_i,\y')/\tau) d\mu(\y') }\right\}.
+\end{align}
+Corresponding to the empirical objective above, the true (expected) risk can be defined as
+\begin{align}\label{eq:true_risk}
+\L(\w) \coloneqq \E_{\x,\y}\left[- \tau \log \frac{\exp(E_\w(\x,\y)/\tau)}{\int_\Y \exp(E_\w(\x,\y')/\tau) d\mu(\y')}\right].
+\end{align}
+\begin{remark}
+When $\Y$ is a finite set, \eqref{eq:true_risk} reduces to the cross-entropy loss commonly used in supervised learning. Besides, the true risk in \eqref{eq:true_risk} is subtly different from the asymptotic of the InfoNCE ($\infty$-InfoNCE) loss~\citep{wang2020understanding}, which can be expressed as $\L_{\infty\text{-InfoNCE}}(\w)=\E_{\x,\y}\left[- \tau \log \frac{\exp(E_\w(\x,\y)/\tau)}{\E_{\y'}[\exp(E_\w(\x,\y')/\tau)]}\right]$. The difference lies in the denominator within the logarithm. It is not clear how to interpret the $\infty$-InfoNCE loss from the probabilistic modeling viewpoint, since $p'_\w(\y\mid\x) = \frac{\exp(E_\w(\x,\y)/\tau)}{\E_{\y'}[\exp(E_\w(\x,\y')/\tau)]}$ is not a valid probability density function.
+\end{remark}
+\begin{remark}\label{rem:downstream}
+Learning the DPM $p_{\hat{\w}_*}$ via MLE for self-supervised pretraining naturally provides some performance guarantees for downstream discriminative tasks. Suppose that the true conditional density function is parameterized by some $\w_*\in\W$, i.e., $p(\y\mid\x)=p_{\w_*}(\y\mid\x)=\frac{\exp(E_{\w_*}(\x,\y)/\tau)}{\int_\Y \exp(E_{\w_*}(\x,\y')/\tau)d\mu(\y')}$ for any $\x\in\X,\y\in\Y$. Then, the maximum likelihood estimator $\hat{\w}_*=\argmax_{\w\in\W} \frac{1}{n}\sum_{i=1}^n \log p_\w(\y_i\mid \x_i)$ with the sample $\{(\x_i,\y_i)\}_{i=1}^n$ of size $n$ converges in probability to $\w_*$ under some mild assumptions (see Theorem 2.1 in  \citealt{newey1994large}). Due to the continuous mapping theorem, the learned model satisfies $E_{\hat{\w}_*}(\x,\y)\stackrel{p}{\rightarrow} E_{\w_*}(\x,\y)$ and $p_{\hat{\w}_*}(\y|\x)\stackrel{p}{\rightarrow} p_{\w_*}(\y|\x)$ if the parameterized models $E_\w$ and $p_\w$ have measure-zero discontinuity points on $\W$, which naturally provides a statistical guarantee for cross-modality retrieval. In App.~\ref{sec:downstream_class}, we also discuss the performance of DPM on downstream classification tasks.
+\end{remark}
+When choosing $\Y$ as the anchor space, we can also model the probability density of an object $\x\in\X$ given an anchor $\y\in\Y$ by the parameterized model $p_\w(\x\mid \y) = \frac{\exp(E_\w(\x,\y)/\tau)}{\int_\X \exp(E_\w(\x',\y)/\tau) d\mu(\x') }$ similar to \eqref{eq:prob_model}. Based on a sample $\hat{\mathbf{S}} = \hat{\mathbf{X}}\times \hat{\mathbf{Y}} = \{(\x_1,\y_1),\dotsc,(\x_n,\y_n)\}$ of size $n$ from the joint distribution $p_{\x,\y}$, we can simultaneously model $p_\w(\y\mid\x)$ and $p_\w(\x\mid \y)$ via the objective below, which resembles the symmetric InfoNCE loss in \citet{radford2021learning}:
+\begin{align*}
+\min_\w - \frac{1}{n}\sum_{i=1}^n\left(\tau \log\frac{\exp(E_\w(\x_i,\y_i)/\tau)}{\int_\Y \exp(E_\w(\x_i,\y')/\tau) d\mu(\y') } + \tau \log\frac{\exp(E_\w(\x_i,\y_i)/\tau)}{\int_\X\exp(E_\w(\x',\y_i)/\tau) d\mu(\x') }\right).
+\end{align*}
+
+\subsection{An MIS-based Empirical Risk for Maximum Likelihood Estimation}\label{sec:mle}
+
+For simplicity, we focus on the case where $\X$ is the anchor space and aim to model $p(\y\mid\x)$. The main challenge of MLE in~\eqref{eq:mle}   lies in computing the integral $g(\w;\x_i,\Y) \coloneqq \int_\Y \exp\left(E_\w(\x_i, \y')/\tau \right) d\mu(\y')$ for each $i \in [n]$, which is infeasible unless $\Y$ is finite. For Monte Carlo integration based on the importance sampling, it is difficult, if not impossible, to select a single distribution that works well for all integrals $g(\w;\x_i,\Y)$, $i \in [n]$. % Moreover, drawing a sample from an additional distribution $q$ to construct an unbiased estimator of $g(\w;\x_i,\A)$ leads to extra costs. 
+Assume that each data $\y_j$ is sampled from $p_j=p (\cdot\mid \x_j)$ given data $\x_j$ sampled from the marginal, $j=1,2,\dotsc,n$. 
+Thus, we employ the MIS method
+with balance heuristic~\citep{veach1995optimally} to construct the following estimator of $g(\w;\x_i,\Y)$ by combining sampled data $\y_1,\dotsc, \y_n$ from $n$ distributions $p_1,\dotsc, p_n$:
+\begin{align}\label{eq:vg_opt}
+\hat{g}(\w;\x_i,\hat{\mathbf{Y}}) &=\sum_{j=1}^n  \frac{1}{\sum_{j'=1}^n p(\y_j\mid \x_{j'})} \exp\left(E_\w(\x_i,\y_j)/\tau \right),\quad \hat{\mathbf{Y}} = \{\y_1,\dotsc, \y_n\}.
+\end{align}
+In App.~\ref{sec:mis_general}, we show that the estimator $\hat{g}(\w;\x_i,\hat{\mathbf{Y}}) $ in \eqref{eq:vg_opt} is an unbiased estimator of $g(\w;\x_i,\Y)$ and explain why we choose the balance heuristic over other possible weighting functions for MIS. 
+\begin{remark}
+The variance of MIS-based estimator $\hat{g}(\w;\x_i,\hat{\mathbf{Y}})$ can be further reduced if we sample multiple data $\{\y_{j,l}\}_{l=1}^m$ from each $p_j$, $j\in[n]$. The MIS-based estimator is then constructed as $$\hat{g}(\w;\x_i,\hat{\mathbf{Y}}) =\sum_{j=1}^n \frac{1}{m}\sum_{l=1}^m \frac{1}{\sum_{j'=1}^n p(\y_{j,l}\mid \x_{j'})} \exp\left(E_\w(\x_i,\y_{j,l})/\tau \right),\quad \hat{\mathbf{Y}}=\bigcup_{j=1}^n\{\y_{j,1},\dotsc, \y_{j,m}\}.$$
+In practice, $\y_{j,1}, \dotsc, \y_{j,m}$ can be approximated by random augmentations of $\y_j$, assuming that the neighborhood of a high-density point also has relatively high density. Using a sample of $\{\y_{j,1}, \dotsc, \y_{j,m}\}$ of size $m>1$, as opposed to a single $\y_j$, has been empirically shown to improve performance in bimodal contrastive learning~\citep{fan2024improving,li2024scaling}.
+\end{remark}
+However, a remaining issue prevents us from using the MIS-based estimator in \eqref{eq:vg_opt}. Unlike the rendering problem considered in \citet{veach1995optimally}, we do not have access to the conditional probability density $p(\y_j\mid \x_{j'})$, $j,j'\in[n]$. Thus, there is a need for a cheap approximation $\tilde{q}^{(j)}$ of the sum of conditional probability densities $q^{(j)}\coloneqq \sum_{j'=1}^n p(\y_j\mid \x_{j'})$, $\forall j\in[n]$, where $q^{(j)}$ can be viewed as a measure of \textbf{popularity} of $\y_j$ if we consider that all data in $\hat{\mathbf{S}}=\{(\x_i,\y_i)\}_{i=1}^n$ form a graph and the weight on edge from node $\x$ to node $\y$ is $p(\y|\x)$. With a general approximation $\tilde{\q}=(\tilde{q}^{(1)},\dotsc, \tilde{q}^{(n)})^\top$ of $\q = (q^{(1)},\dotsc, q^{(n)})^\top$, the MLE objective in \eqref{eq:mle} with MIS can be written as
+\begin{align}\label{eq:mle_mis_approx}
+& \hat{\mathcal{L}}(\w; \tilde{\q},\hat{\mathbf{S}}) =  -\frac{1}{n}\sum_{i=1}^n \tau \log \frac{\exp(E_\w(\x_i,\y_i)/\tau)}{\tilde{g}(\w;\x_i,\hat{\mathbf{Y}})},\quad \tilde{g}(\w;\x_i,\hat{\mathbf{Y}}) = \sum_{j=1}^n  \frac{\exp\left(E_\w(\x_i,\y_j)/\tau \right)}{\tilde{q}^{(j)}} .
+\end{align}
+\begin{remark}\label{remark:unif_q_tilde}
+If we simply choose the uniform approximation $\tilde{\q}= n c \mathbf{1}_n$ with some $c>0$, minimizing $\hat{\mathcal{L}}(\w; \tilde{\q},\hat{\mathbf{S}})$ in \eqref{eq:mle_mis_approx} is equivalent to minimizing the global contrastive loss (GCL)~\citep{yuan2022provable}.%~\citep{yuan2022provable}. %Similar observations have been made in \citet{wang2022unified} and \citet{kim2022energy}.
+\end{remark}
+ 
+\subsection{Finite-Sample Generalization Analysis}\label{sec:gen}
+Next, we analyze the error between the empirical risk $\hat {\mathcal L}(\w, \tilde{\q}; \hat{\mathbf{S}})$ in \eqref{eq:mle_mis_approx} with a \emph{general} approximation $\tilde{\q}$ and the true risk $\mathcal L(\w)$ in \eqref{eq:true_risk} for DPM. This analysis provides (i) insights into the statistical error of GCL~\citep{yuan2022provable}, and (ii) guidance on finding an approximation $\tilde{\q}$ better than the uniform one used by GCL as discussed in Remark~\ref{remark:unif_q_tilde}. First, we state the necessary assumptions.
+\begin{asm}\label{asm:bounded}
+There exist $c_1,c_2>0$ such that $\Norm{\x}_2\leq c_1$, $\Norm{\y}_2\leq c_2$ for any $\x\in\X,\y\in\Y$.  
+\end{asm}
+We focus on representation learning such that  $E_\w(\x,\y)=E_1(\w_1;\x)^{\top}E_2(\w_2;\y)$, %is based on the inner product between the normalized feature $E_1(\w_1;\x)$ of $\x\in\X$ and the normalized feature $E_2(\w_2;\y)$ of $\y\in\Y$,
+where $\w_1$ and $\w_2$ are the encoders+projection heads of the first and second views/modalities, respectively. In our theory, we consider the case that both $E_1$ and $E_2$ are $L$-layer neural networks\footnote{Our results could potentially be extended to other neural networks, such as ConvNets, using the corresponding Rademacher complexity bounds (See e.g.,~\citealp{truong2022rademacher}).} with positive-homogeneous and 1-Lipschitz continuous activation function $\sigma(\cdot)$ (e.g. ReLU).
+
+\begin{asm}\label{asm:nn}
+Suppose that $E_1(\w_1;\x)\in\R^{d_L}$, $E_2(\w_2;\y)\in\R^{d_L}$ for some $d_L\geq 1$. Moreover, we have $\Norm{E_1(\w_1;\x)}_2 \leq 1$, $\Norm{E_2(\w_2;\y)}_2 \leq 1$ such that $E_\w(\x,\y)\in[-1,1]$. % Moreover, the activation function $\sigma$ is positive-homogeneous and 1-Lipschitz continuous. % Moreoever, there exists $B_l>0$ such that $\max\{\Norm{W_{1,l}}_F,\Norm{W_{2,l}}_F\} \leq B_l$.    
+\end{asm}
+Based on the assumptions above, we provide a finite-sample generalization error bound between the empirical risk $\hat{\mathcal{L}}(\w;\tilde{\q}, \hat{\mathbf{S}}) $ in \eqref{eq:mle_mis_approx} and the true risk $\L(\w)$ in \eqref{eq:true_risk}. 
+\begin{theorem}\label{thm:gen}
+Suppose that Assumptions~\eqref{asm:bounded} and \eqref{asm:nn} hold. Consider the prediction function $E_\w$ parameterized by $L$-layer deep neural networks $\w_1,\w_2$ and an approximation $\tilde{\q}$ of $\q$, where $q^{(j)} = \sum_{j'=1}^n p(\y_j\mid \x_{j'}) \geq \Omega(n)$ almost surely, $\forall j\in[n]$. With probability at least $1-\delta$, $\delta\in(0,1)$,  
+\begin{align}\label{eq:gen}
+\left|\hat{\mathcal{L}}(\w; \tilde{\q}, \hat{\mathbf{S}}) -\L(\w)\right| \leq O\left(\frac{1}{n}  + \sqrt{\frac{d_L}{n}}  + \sqrt{\frac{\log(1/\delta)}{n}} + \mathcal{E}_\w(\tilde{\q},\q;\hat{\mathbf{S}})\right),
+\end{align}
+where $\mathcal{E}_\w(\tilde{\q},\q;\hat{\mathbf{S}})\coloneqq \frac{1}{n}\sum_{i=1}^n\sum_{j=1}^n\left|\frac{1}{\tilde{q}^{(j)}} - \frac{1}{q^{(j)}}\right|\exp((E_\w(\x_i,\y_i)-1)/\tau)$ is an error term.
+\end{theorem}
+\begin{remark}
+(i) The uniform approximation $\tilde{q}^{(j)} = nc$ for all $j\in[n]$ used by the GCL leads to a {\bf non-diminishing} error term $\mathcal{E}(\tilde{\q},\q;\hat{\mathbf{S}})$  for solving DPM over a continuous domain;  
+(ii) Moreover, the error term $\mathcal{E}(\tilde{\q},\q;\hat{\mathbf{S}})$ vanishes when $\Y$ is a finite set. Then, the result reproduces the classical result in the literature for supervised learning~\citep{boucheron2005theory}. 
+\end{remark}
+
+\subsection{Non-parametric Method for Approximating the Measure of Popularity}\label{sec:noparam}
+
+In Section~\ref{sec:gen}, we show that simply choosing a uniform $\tilde{\q}$ as in GCL to approximate the measure of popularities $\q$ (i.e., the sum of conditional probability densities) leads to a non-diminishing term in generalization error.  Next, we present a new way to approximate the measure of popularities %\footnote{Note that our goal is neither estimating the sum of probabilities $q(\y)=\sum_{j'=1}^n p(\y\mid \x_{j'})$ for any $\y\in\Y$ nor estimating the conditional density $p(\y\mid\x)$ in general for any $\x\in\X,\y\in\Y$.} 
+$\q$. For brevity, we denote by $E(\cdot,\cdot)=E_{\w_*}(\cdot,\cdot)$ that corresponds to the real conditional density $p(\y\mid\x)=p_{\w_*}(\y\mid\x) = \frac{\exp(E_{\w_*}(\x,\y)/\tau)}{\int_\Y \exp(E_{\w_*}(\x,\y')/\tau)d\mu(\y')}$. Thus, for any $j\in[n]$ we have
+\begin{align}\label{eq:sum_prob}
+q^{(j)} \!=\! \sum_{j'=1}^n p(\y_j\mid \x_{j'}) \!=\! \sum_{j'=1}^n \frac{\exp(E(\x_{j'},\y_j)/\tau)}{\int_\Y \exp(E(\x_{j'},\y)/\tau) d\mu(\y)} \!\stackrel{\diamondsuit}{\approx} \!\sum_{j'=1}^n \frac{\exp(E(\x_{j'},\y_j)/\tau)}{\sum_{i'=1}^n \frac{1}{q^{(i')}} \exp(E(\x_{j'},\y_{i'})/\tau)},
+\end{align}
+where the last step $\diamondsuit$ is due to the MIS-based Monte Carlo integration and its error decreases when $n$ increases (See Prop.~\ref{prop:vg} in App.~\ref{sec:mis_general}). %and becomes an equality when $n\rightarrow\infty$ (See Prop.~\ref{prop:vg} in App.~\ref{sec:mis_general}). 
+Since the expression in \eqref{eq:sum_prob} is implicit, we propose a non-parametric method to approximate $\q$ by solving the following convex optimization problem:
+\begin{align}\label{eq:prob_zeta}
+\min_{\boldsymbol{\zeta}\in\R^n} \left\{-\frac{1}{n}\sum_{i=1}^n \tau \log \left(\frac{\exp(E(\x_i,\y_i)/\tau)}{\sum_{j=1}^n \exp((E(\x_i,\y_j)-\zeta^{(j)})/\tau)}\right) + \frac{1}{n}\sum_{j=1}^n \zeta^{(j)}\right\}.
+\end{align}
+ The following theorem characterizes the set of optimal solutions to~\eqref{eq:prob_zeta} and its relationship to $\q$.
+\begin{theorem}\label{thm:nonparam_sol}
+The optimal solution to \eqref{eq:prob_zeta} is unique up to an additive scalar. In other words,  if $\boldsymbol{\zeta}_*$ belongs to the optimal solutions set $\Z_*$ of \eqref{eq:prob_zeta}, then $\boldsymbol{\zeta}_* + c\mathbf{1}_n$ is also in $\Z_*$ for any $c\in\R$. Moreover, if we define the set $\Q_* \coloneqq \{\exp(\boldsymbol{\zeta}_*/\tau)
+\mid\boldsymbol{\zeta}_* \in \Z_*\}$, then any $\bar{\q} \in \Q_*$ satisfies the following equation
+\begin{align}\label{eq:opt_zeta} 
+\bar{q}^{(j)}= \sum_{j'=1}^n \frac{\exp(E(\x_{j'},\y_j)/\tau)}{\sum_{i'=1}^n\frac{1}{\bar{q}^{(i')}} \exp(E(\x_{j'},\y_{i'})/\tau)},\quad \forall j\in[n]. 
+\end{align}
+and the set $\Q_*$ is closed under scalar multiplication, i.e., any $\bar{\q}\in\Q_*$ and $C>0$ implies $C\bar{\q} \in \Q_*$. % for any $\tilde{\q},\tilde{\q}'\in \Q_*$ with finite $\ell_\infty$ norms, there exists a constant $Z>0$ such that $\bar{\q}' = Z\tilde{\q}$.
+\end{theorem}
+
+\begin{remark}
+Due to Theorem~\ref{thm:nonparam_sol} and the resemblance between \eqref{eq:sum_prob} and \eqref{eq:opt_zeta}, there exists a specific $\tilde{\q}\in\Q_*$ that approximates the real $\q$ in \eqref{eq:sum_prob}. Thus, we can approximate the real $\q$ (up to a scaling factor) by solving the optimization problem in~\eqref{eq:prob_zeta}. Specifically, for  $\tilde{\q}'=\exp(\boldsymbol{\zeta}_*/\tau)$ computed from any solution $\boldsymbol{\zeta}_*\in\Z_*$ to~\eqref{eq:prob_zeta} with finite $\ell_\infty$ norm, we can conclude that $\tilde{\q}'$ and $\tilde{\q}$ differ only by a scaling factor, i.e., $\tilde{\q}'=Z\tilde{\q}$ for some constant $0<Z<\infty$. There is no need to worry about the scaling factor $Z$ since minimizing the empirical risk $\hat{\L}(\w;\tilde{\q},\hat{\mathbf{S}})$ and the corresponding true risk $\L(\w)$ is equivalent to minimizing $\hat{\L}(\w;\tilde{\q}',\hat{\mathbf{S}}) = \hat{\L}(\w;\tilde{\q},\hat{\mathbf{S}}) + \tau \log(1/Z)$ and $\L(\w) + \tau \log(1/Z)$. 
+\end{remark}
+We design a synthetic experiment to verify the effectiveness of our non-parametric method. Consider anchor data space and $\X = \left\{(x_1,x_2)\mid x_1^2 + y_1^2\leq 1,x_1\in\left[-1,1\right],x_2\in\left[0,1\right]\right\}$ and contrast data space $\Y = \left\{(y_1,y_2)\mid y_1\in\left[0,1\right],y_2\in\left[0, 1\right]\right\}$.
+Let $\x$ be uniformly distributed on $\X$ and the conditional density of an $\y\in\Y$ given $\x$ be $p(\y\mid \x) = \frac{\exp(E(\x,\y)/\tau)}{\int_\Y\exp(E(\x,\y')/\tau)d\mu(\y')}$, where $\tau = 0.2$ and $E(\x,\y) \coloneqq \x^\top \y$, where the partition function $\int_\Y\exp(E(\x,\y')/\tau)d\mu(\y')$ can be exactly computed.
+
+\begin{figure}[htp]
+\begin{subfigure}{0.26\textwidth}
+\centering	\includegraphics[width=\linewidth]{./images/domains.pdf}
+\end{subfigure}
+\begin{subfigure}{0.45\textwidth}
+\centering	\includegraphics[width=\linewidth]{./images/q_tilde.pdf}
+\end{subfigure}
+  \begin{subfigure}{0.28\textwidth}
+    \centering    \includegraphics[width=0.99\linewidth]{./images/toy_curve.pdf}
+  \end{subfigure}
+\caption{{\bf Left:} Illustration of spaces $\X$ and $\Y$; {\bf Middle:} RBF interpolated heatmaps of the true $\q$ and approximation $\tilde{\q}$ when $n=100$; {\bf Right:} Comparing the generalization error $|\hat{\L}(\tilde{\q},\hat{\mathbf{S}}) - \L|$ of our method and GCL across various $n$. ``MLE'' refers to the MLE objective in \eqref{eq:mle} with the exact partition function.}
+\label{fig:toy}
+\end{figure}
+We construct a dataset $\hat{\mathbf{S}}=\{(\x_i,\y_i)\}_{i=1}^n$ by uniformly sampling $\x_1,\dotsc,\x_n$ from $\X$ and then sampling each $\y_j$ from $p_j = p(\cdot\mid \x_j)$ by rejection sampling. The ground-truth $\q$ can be computed by the analytic expression of $p(\y\mid\x)$. To solve the optimization problem in \eqref{eq:prob_zeta}, we initialize $\boldsymbol{\zeta}_0 = \mathbf{0}_n$ and obtain $\boldsymbol{\zeta}_*$ and $\tilde{\q}' = \exp(\boldsymbol{\zeta}_*/\tau)$ by running gradient descent until the gradient norm $\leq 10^{-15}$. %, yielding $\tilde{\q} = \exp(\boldsymbol{\zeta}_*/\tau)$. 
+Besides, we estimate the true risk $\L= -\E_{\x,\y}[\tau \log p(\y\mid\x)]$ by $-\frac{1}{N}\sum_{i=1}^N \tau \log p(\y_i\mid\x_i)$ on $N=50,000$ sampled pairs and estimate $Z>0$ by $\frac{\|\tilde{\q}'\|_\infty}{\|\q\|_\infty}$ to obtain $\tilde{\q} = \frac{\tilde{\q}'}{Z}$. Then we plug $\tilde{\q}$ into~\eqref{eq:mle_mis_approx} to calculate our empirical risk $\hat{\L}$.  It is worth noting that estimating the true risk $\L$ and the constant $Z$ is only for the plots in Figure~\ref{fig:toy}, which is not necessary for real-world empirical risk minimization problems. % with high-dimensional data.
+
+As shown in the middle of Figure~\ref{fig:toy}, our method effectively approximates the true $\q$ up to a constant $Z$. Moreover, we plot the generalization error of different methods in the right column of Figure~\ref{fig:toy}, which confirms the result in Theorem~\ref{thm:gen} and  Remark~\ref{remark:unif_q_tilde} that the uniform approximation of $\q$ in GCL results in a non-diminishing term in generalization error as $n$ increases. In contrast, our method achieves a significantly smaller generalization error, almost matching the MLE objective in \eqref{eq:mle} with the exact partition function when $n$ increases. 
+
+\subsection{The NUCLR Algorithm for Self-Supervised Representation Learning}\label{sec:alg}
+
+By substituting the $\tilde{\q}$ from the non-parametric method described in Section~\ref{sec:noparam}, the problem of minimizing the empirical risk of DPM in \eqref{eq:mle_mis_approx} becomes
+\begin{align*}
+\min_{\w\in\W} \hat{\L}(\w;\hat{\mathbf{S}}),\quad \hat{\L}(\w;\hat{\mathbf{S}})\coloneqq -\frac{1}{n}\sum_{i=1}^n \tau \log \left(\sum_{j=1}^n \frac{\exp(E_\w(\x_i,\y_i)/\tau)}{\exp((E_\w(\x_i,\y_j)-\zeta_*^{(j)})/\tau)}\right),
+\end{align*}
+where $\boldsymbol{\zeta}_*$ is solved from \eqref{eq:prob_zeta}. Unfortunately, the true similarity function $E:\X\times \Y\rightarrow[-1,1]$ in \eqref{eq:prob_zeta} is unknown. To address this, we can adopt a Jacobi-type alternating minimization approach. In the $t$-th iteration, we replace the $E(\cdot,\cdot)$ in \eqref{eq:prob_zeta} by a fixed model $E_{\w_t}(\cdot,\cdot)$ and solve $\boldsymbol{\zeta}_{t+1}$ from
+\begin{align}\label{eq:zeta_step}
+\min_{\boldsymbol{\zeta}\in\R^n} \Phi_t(\boldsymbol{\zeta}),\quad \Phi_t(\boldsymbol{\zeta})\coloneqq \left\{-\frac{1}{n}\sum_{i=1}^n \tau \log \left(\frac{\exp(E_{\w_t}(\x_i,\y_i)/\tau)}{\sum_{j=1}^n \exp((E_{\w_t}(\x_i,\y_j)-\zeta^{(j)})/\tau)}\right) + \frac{1}{n}\sum_{j=1}^n \zeta^{(j)}\right\}.
+\end{align}
+Then, we fix the auxiliary variable $\boldsymbol{\zeta}$ to $\boldsymbol{\zeta}_t$ and solve $\w_{t+1}$ from the following problem:
+\begin{align}\label{eq:w_step}
+\min_{\w\in\W} \Psi_t(\w),\quad \Psi_t(\w)\coloneqq \left\{-\frac{1}{n}\sum_{i=1}^n \tau \log \left(\frac{\exp(E_\w(\x_i,\y_i)/\tau)}{\sum_{j=1}^n \exp((E_\w(\x_i,\y_j)-\zeta_t^{(j)})/\tau)}\right)\right\}.
+\end{align}
+However, solving the subproblems~\eqref{eq:zeta_step} and  \eqref{eq:w_step} exactly is computationally infeasible. Instead, we obtain the new iterate $(\w_{t+1},\boldsymbol{\zeta}_{t+1})$ by one step of gradient-based update\footnote{E.g., the gradient descent or momentum-based update. It could be extended to multiple steps.} from the previous iterate $(\w_t, \boldsymbol{\zeta}_t)$. Defining $\phi_i(\w,\boldsymbol{\zeta}) \coloneqq \sum_{j\neq i}  \exp((E_\w(\x_i,\y_j) - E_\w(\x_i,\y_i)-\zeta^{(j)})/\tau)$ and  $\varepsilon(\zeta^{(i)})\coloneqq \exp(-\zeta^{(i)}/\tau)$, the objectives $\Phi_t(\boldsymbol{\zeta})$ and $\Psi_t(\w)$ in \eqref{eq:zeta_step}  and \eqref{eq:w_step} can be rewritten as follows:
+\begin{align*}
+& \Phi_t(\boldsymbol{\zeta}) =\frac{1}{n}\sum_{i=1}^n \tau \log(\varepsilon(\zeta^{(i)})+\phi_i(\w_t,\boldsymbol{\zeta})) + \frac{1}{n}\sum_{j=1}^n \zeta^{(j)},~ \Psi_t(\w)= \frac{1}{n}\sum_{i=1}^n\tau \log (\varepsilon(\zeta_t^{(i)}) + \phi_i(\w,\boldsymbol{\zeta}_t)).
+\end{align*}
+Given a size-$B$ minibatch $\B_t \subset [n]$, the stochastic gradients of $\Phi_t(\boldsymbol{\zeta}_t)$, $\Psi_t(\w_t)$ can be computed as
+\begin{align}\label{eq:stoc_grad_zeta}
+ & \frac{\partial}{\partial \zeta^{(j)}}\Phi_t(\boldsymbol{\zeta}_t;\B_t) = \frac{1}{B}\sum_{i\in \B_t} \frac{\tau}{\varepsilon_t^{(i)} + \colorbox{gray!30}{$\phi_i(\w_t,\boldsymbol{\zeta}_t;\B_t)$}} \frac{\partial}{\partial \zeta^{(j)}}(\varepsilon_t^{(i)} + \phi_i(\w_t;\boldsymbol{\zeta}_t;\B_t))  + \frac{1}{n},\quad j\in\B_t,\\\label{eq:stoc_grad_w}
+ & \nabla_\w\Psi_t(\w_t;\B_t) = \frac{1}{B}\sum_{i\in\B_t}\frac{\tau}{\varepsilon_t^{(i)} + \colorbox{gray!30}{$\phi_i(\w_t,\boldsymbol{\zeta}_t;\B_t)$}} \nabla_\w \phi_i(\w_t, \boldsymbol{\zeta}_t;\B_t),
+\end{align}
+where $\varepsilon(\zeta_t^{(i)})$ is shortened to $\varepsilon_t^{(i)}$, $\phi_i(\w_t; \boldsymbol{\zeta}_t;\B_t)\! = \!\frac{n-1}{B-1}\sum_{j\in\B_t\backslash\{i\}} \exp(\frac{E_{\w_t}(\x_i,\y_j) - E_{\w_t}(\x_i,\y_i)-\zeta_t^{(j)})}{\tau})$ is a stochastic estimator of $\phi_i(\w_t,\boldsymbol{\zeta}_t)$. However, $\frac{\partial}{\partial \zeta^{(j)}}\Phi_t(\boldsymbol{\zeta}_t;\B_t)$ and $\nabla_\w\Psi_t(\w_t;\B_t) $ are still \emph{biased} estimators of $\frac{\partial}{\partial \zeta^{(j)}}\Phi_t(\boldsymbol{\zeta}_t)$, $\nabla_\w \Psi_t(\w_t)$ because the gray parts are in the denominators, where the bias is small only when the batch size $B$ is large. To resolve this issue, we adopt the moving average technique from the SogCLR algorithm~\citep{yuan2022provable} to keep track of $\phi_i(\w,\boldsymbol{\zeta})$ for each $i\in[n]$. To be specific, we maintain a scalar $u^{(i)}$ for each $i$ and update $u_{t+1}^{(i)} =(1-\gamma)u_t^{(i)} + \gamma \phi_i(\w_t,\boldsymbol{\zeta}_t;\B_t)$ for those $i\in\B_t$
+while fixing $ u_{t+1}^{(i)} = u_t^{(i)}$ for $i\notin \B_t$. %Intuitively, $u_{t+1}^{(i)}$ stores the information of all data points sampled in previous iterations, which makes the resulting algorithm perform well when the batch size $B$ is small. 
+Then, we obtain the following stochastic gradient estimators $G(\zeta_t^{(j)})$ and  $G(\w_t)$ by replacing the gray parts in \eqref{eq:stoc_grad_zeta} and \eqref{eq:stoc_grad_w} with $u_{t+1}^{(i)}$:
+\begin{align}\label{eq:mavg_stoc_grad_zeta}
+ &G(\zeta_t^{(j)})\coloneqq  \frac{1}{B}\sum_{i\in \B_t} \frac{\tau}{\varepsilon_t^{(i)} + u_{t+1}^{(i)}} \frac{\partial}{\partial \zeta^{(j)}}(\varepsilon_t^{(i)} + \phi_i(\w_t;\boldsymbol{\zeta};\B_t))  + \frac{1}{n},\quad j\in\B_t,\\\label{eq:mavg_stoc_grad_w}
+ & G(\w_t)\coloneqq \frac{1}{B}\sum_{i\in\B_t}\frac{\tau}{\varepsilon_t^{(i)} + u_{t+1}^{(i)}} \nabla_\w \phi_i(\w_t, \boldsymbol{\zeta}_t;\B_t),
+\end{align}
+We also adopt an additional trick to improve the quality of the model $\w$, especially during the early training epochs.
+The denominator $\sum_{j=1}^n \exp((E_\w(\x_i,\y_j)-\zeta_t^{(j)})/\tau)$ in the objective $\Psi_t(\w)$ of ~\eqref{eq:w_step} can be viewed as the weighted version $\sum_{j=1}^n \varepsilon_t^{(j)}\exp((E_\w(\x_i,\y_j))/\tau)$ of the corresponding term in GCL, where $\varepsilon_t^{(j)}=\exp(-\zeta_t^{(j)}/\tau)$ can be viewed as the ``strength'' of pushing $\y_j$ away from $\x_i$. For less parameter tuning, we prefer initializing $\boldsymbol{\zeta}$ from the same value $\zeta_0\in\R$. Consequently, nearly equal weights are assigned to both the positive pair $(\x_i,\y_i)$ and negative pairs $\{(\x_i,\y_j)\}_{j\neq i}$ %in the stochastic estimator $G(\w_t)$ of $\nabla_\w \Psi_t(\w_t)$ 
+during early training epochs, which may slow down the learning process of model $\w$. To address this issue, we introduce a scalar $\xi_t=\max\{\xi_{t-1},\Norm{\boldsymbol{\zeta}_t}_\infty\}$ and reduce $\varepsilon_t^{(i)}$ in \eqref{eq:mavg_stoc_grad_w} of positive pair $(\x_i,\y_i))$ from $\exp(-\zeta_t^{(j)}/\tau)$ to $\exp(-\xi_t/\tau)$ to avoid aggresively pushing the positive data $\y_i$ away from $\x_i$.
+
+\begin{algorithm}[t]
+\caption{\alg~Algorithm for Self-Supervised Representation Learning}
+\label{alg:nuclr}
+\begin{algorithmic}[1] 
+\State Initialize $\w_0$, $\u_0$, $\boldsymbol{\zeta}\geq \zeta_0 \mathbf{1}_n$ and set up $\xi_0\geq \zeta_0$,  $\eta$, $\gamma$
+\For{$t=0,1\dotsc,T-1$}
+\State Sample $\B_t\subset\{1,\dotsc,n\}$
+\State Compute $G(\zeta_t^{(j)})$ according to \eqref{eq:mavg_stoc_grad_zeta} for $j\in\B_t$
+\State Update $\zeta_{t+1}^{(j)}=\begin{cases} \zeta_t^{(j)} - \eta G(\zeta_t^{(j)})~ \text{(or a momentum/adaptive method)}, &j\in\B_t\\
+\zeta_t^{(j)}, & j\notin\B_t \end{cases}$\label{eq:update_zeta}\label{alg:step_zeta}
+\State Compute $G(\w_t)$ in \eqref{eq:mavg_stoc_grad_w} and update $\w_{t+1} = \w_t  -\eta G(\w_t)$ (or a momentum/adaptive method)  
+\State Update $\xi_{t+1} = \max\{\xi_t,\|\boldsymbol{\zeta}_{t+1}\|_\infty\}$\label{alg:step_xi}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+Then, we can update $\boldsymbol{\zeta}$ and $\w$ based on $G(\zeta_t^{(j)})$ and  $G(\w_t)$. The full update procedure is in Algorithm~\ref{alg:nuclr}, referred to as \alg. The novelty of NUCLR lies in lines~\ref{alg:step_zeta} and~\ref{eq:zeta_step} of Algorithm~\ref{alg:nuclr}. If we fix $\boldsymbol{\zeta}_t=\mathbf{0}_n$ and $\xi_t = 0$, NUCLR becomes the SogCLR algorithm~\citep{yuan2022provable}. As discussed in App.~\ref{sec:discuss_alg_memory}, NUCLR incurs only minor computational and memory overheads compared to SogCLR. Moreover, we offer an intuitive margin-based interpretation of NUCLR in App.~\ref{sec:discuss_margin}.
+
+
+
+\section{Experiments on Bimodal Representation Learning}
+
+
+\textbf{Settings:} In our experiments, we apply our algorithm to bimodal self-supervised representation learning on the Conceptual Captions (CC3M)~\citep{sharma2018conceptual} and Conceptual 12M (CC12M)~\citep{changpinyo2021conceptual} datasets. Because some data links have expired, our downloaded training set of CC3M contains $n=2,723,200$ image-text pairs, while that of CC12M contains $n=9,184,256$ image-text pairs. We evaluate the performance of trained models on downstream zero-shot image-text retrieval and image classification tasks. Retrieval performance is evaluated on the test splits of the Flickr30k~\citep{plummer2015flickr30k} and MSCOCO~\citep{lin2014microsoft} datasets, in terms of the average Recall@1 score of image-to-text and text-to-image retrievals. The top-1 classification accuracy is evaluated on the ImageNet1k~\citep{imagenet15russakovsky} and CIFAR100~\citep{krizhevsky2009cifar} datasets. We compare our proposed \alg~algorithm with representative baselines  CLIP~\citep{radford2021learning}, SigLIP~\citep{zhai2023sigmoid}, DCL~\citep{chuang2020debiased}, CyCLIP~\citep{goel2022cyclip}, and SogCLR~\citep{yuan2022provable}\footnote{For CLIP and SigLIP, we adapt implementations from the OpenCLIP repository. For DCL and CyCLIP, we use the authors' official implementations. For SogCLR, we use the implementation in the updated codebase of \citet{qiu2023not}, which yields better results of SogCLR than that reported in~\citet{qiu2023not}.}
+. All experiments utilize distributed data-parallel (DDP) training on two NVIDIA A100 GPUs with 40GB memory and the total batch size $B$ in each iteration is 512. Besides, we use ResNet-50 as the vision encoder and DistilBert as the text encoder. The output embedding of each encoder is projected by a linear layer into a 256-dimensional feature representation for computing the losses. We run each algorithm 3 times with different random seeds and each run contains 30 epochs. Hyperparameters of all algorithms are tuned based on the validation performance. The optimizer for the model parameter $\w$ is AdamW~\citep{loshchilov2017decoupled} with a weight decay of 0.02 and a cosine learning rate schedule~\citep{loshchilov2016sgdr}. For all algorithms, we choose a fixed temperature parameter $\tau$ tuned within $\{0.01, 0.03, 0.05, 0.07\}$. 
+For SogCLR and~\alg, we set $\gamma = 0.8$ as in the SogCLR paper~ \citep{yuan2022provable}. For our \alg, we select $\zeta_0=-0.05$ on the CC3M dataset and $\zeta_0=0$ on the CC12M dataset. Besides, we freeze $\boldsymbol{\zeta}$ in the first 5 epochs and update $\boldsymbol{\zeta}$ by the SGDm optimizer with a cosine learning rate schedule. 
+
+\begin{table}[htp]
+	\centering 	\caption{A comparison of test performance. The best result in each column is highlighted in \textbf{black}.}
+	\label{tab:test}	\scalebox{0.88}{		\begin{tabular}{ccccccc}%\toprule[.1em]
+\toprule[.1em]
+ Dataset  & Algorithm & MSCOCO  & Flickr30k  & CIFAR100 & ImageNet1k & Mean  \\	\midrule
+\multirow{6}{*}{CC3M}  & CLIP & 24.23 $\pm$ 0.14 & 46.33 $\pm$ 0.76 & 33.94 $\pm$ 0.87 & 35.91 $\pm$ 0.33 & 35.10 $\pm$ 0.22\\
+& DCL  & 24.44 $\pm$ 0.20 & 46.03 $\pm$ 0.75 & 32.78 $\pm$ 0.46 & 35.90 $\pm$ 0.20 & 34.79 $\pm$ 0.29 \\
+ & SigLIP  & 23.21 $\pm$ 0.14 & 44.95 $\pm$ 0.45 & 35.70 $\pm$ 0.84 & 37.53 $\pm$ 0.09 & 35.35 $\pm$ 0.31 \\
+& CyCLIP  & 24.47 $\pm$ 0.25 & 47.10 $\pm$ 0.83 & 37.27 $\pm$ 0.61 & 36.63 $\pm$ 0.04 & 36.37 $\pm$ 0.42 \\
+ & SogCLR  & 28.54 $\pm$ 0.25 & 52.20 $\pm$ 0.64 & 35.50 $\pm$ 1.71 & 40.40 $\pm$ 0.12 & 39.16 $\pm$ 0.33 \\
+ & \alg~(Ours)  &  \bf 29.55 $\pm$ 0.26 & \bf 53.55 $\pm$ 0.22 & \bf 37.45 $\pm$ 0.45& \bf 40.49 $\pm$ 0.30  & \bf 40.26 $\pm$ 0.19\\\midrule[.1em]
+\multirow{6}{*}{CC12M}  & CLIP  & 30.30 $\pm$ 0.15 & 55.21 $\pm$ 0.45 & 25.35 $\pm$ 0.64 & 44.28 $\pm$ 0.22 & 38.79 $\pm$ 0.30\\
+& DCL  &  30.23 $\pm$ 0.21 & 54.63 $\pm$ 0.50 & 25.55 $\pm$ 0.61 & 44.32 $\pm$ 0.07 & 38.68 $\pm$ 0.14 \\
+ & SigLIP  & 30.13 $\pm$ 0.45 & 55.40 $\pm$ 0.32 & 26.60 $\pm$ 1.89 & 46.12 $\pm$ 0.12 & 39.56 $\pm$ 0.68\\
+ & CyCLIP  & 30.35 $\pm$ 0.24 & 54.63 $\pm$ 0.20 & 26.71 $\pm$ 2.09 & 44.94 $\pm$ 0.02 & 39.15 $\pm$ 0.50 \\
+ & SogCLR  &  33.91 $\pm$ 0.26 & 59.28 $\pm$ 0.07 & 26.10 $\pm$ 0.88 & \bf 49.82 $\pm$ 0.14 & 42.28 $\pm$ 0.27\\
+& \alg~(Ours)   &  {\bf 34.36 $\pm$ 0.13} &  {\bf 60.45 $\pm$ 0.03} & {\bf 28.16 $\pm$ 1.35} & {\bf49.82 $\pm$ 0.23 }  &  \bf 43.20 $\pm$ 0.39\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[htp]
+\begin{subfigure}{0.24\textwidth}
+\centering
+		\includegraphics[width=0.99\linewidth]{./images/cc3m_val_mean_r1_coco.pdf}
+\end{subfigure}
+\begin{subfigure}{0.24\textwidth}
+		\centering
+		\includegraphics[width=0.99\linewidth]{./images/cc3m_val_mean_r1_flickr.pdf}
+\end{subfigure}
+\begin{subfigure}{0.24\textwidth}
+		\centering
+		\includegraphics[width=0.99\linewidth]{./images/cc12m_val_mean_r1_coco.pdf}
+\end{subfigure}
+\begin{subfigure}{0.24\textwidth}
+		\centering
+		\includegraphics[width=0.99\linewidth]{./images/cc12m_val_mean_r1_flickr.pdf}
+\end{subfigure}
+	\caption{Validation Recall@1 performance of our algorithm and baseline SogCLR during training on the CC3M (left two columns) and CC12M datasets (right two columns).}
+	\label{fig:val_curves}
+\end{figure}
+\textbf{Comparison with Baselines:} We compare the testing performance of our algorithm on downstream retrieval and classification tasks with various baselines in Table~\ref{tab:test}. Moreover, we compare the Recall@1 of our \alg~with that of SogCLR across the training epochs in Figure~\ref{fig:val_curves} on the validation sets of MSCOCO and Flickr30k. Compared to baselines, our \alg~achieves superior overall performance. In particular, the improvement of our method is more significant in retrieval downstream tasks and zero-shot classification on CIFAR100, while its performance in zero-shot classification on ImageNet1k is only marginally better or comparable to SogCLR. 
+
+\textbf{Ablation Study:} For further understanding the key components of Algorithm~\ref{alg:nuclr}, we compare the performance of {\bf NUCLR} against three variants: {\bf (i) NUCLR-$\dagger$}, which fixes $\boldsymbol{\zeta}$ to $\zeta_0\mathbf{1}_n$, i.e., removing step~\ref{alg:step_zeta} in Algorithm~\ref{alg:nuclr}; {\bf (ii) NUCLR-$\diamondsuit$}, which does not reduce the strength $\varepsilon_t^{(i)}$ of pushing away the $i$-th positive pair to $\exp(-\xi_t/\tau)$ as described in the penultimate paragraph of Section~\ref{sec:alg}; and {\bf (iii) NUCLR-$\clubsuit$}, which does not freeze $\boldsymbol{\zeta}$ in the first 5 epochs; to answer the following questions.
+
+\textbf{(i)} What is the advantage of updating $\boldsymbol{\zeta}$ using gradient-based updates compared to fixing it at $\zeta_0$?
+
+\textbf{(ii)} Is it beneficial to reduce the strength of pushing away each positive pair by introducing $\xi$? 
+
+\textbf{(iii)} What is the benefit of freezing $\boldsymbol{\zeta}$ during the initial training epochs?
+
+The results are shown in Figure~\ref{fig:ablation}. First, we can observe that \alg~with the learned $\boldsymbol{\zeta}$ as in Algorithm~\ref{alg:nuclr} outperforms NUCLR-$\dagger$ with a fixed $\boldsymbol{\zeta}=\zeta_0\mathbf{1}_n$. Moreover, we present some examples of images from CC3M with large or small $\tilde{q}'=\exp(\zeta/\tau)$ in Figure~\ref{fig:examples_1}, showing that the learned $\tilde{q}'$ effectively captures data popularity: Images depicting human life, such as portraits, pets, and landscapes, tend to be more popular than abstract symbols and shapes (see  App.~\ref{sec:more_examples} for more examples). Second, introducing $\xi$ to avoid pushing away positive pairs improves performance in both tasks compared to NUCLR-$\diamondsuit$. Lastly,  freezing $\boldsymbol{\zeta}$ during the first 5 epochs yields better performance. This improvement may arise because model $\w_t$ is far from $\w_*$ in the early stage of training, making the $\boldsymbol{\zeta}$ solved from \eqref{eq:zeta_step} less accurate. We provide more experimental results in App.~\ref{sec:add_exp_results}.
+
+\begin{figure}[htp]
+\begin{subfigure}{0.245\textwidth}
+\centering	\includegraphics[width=\linewidth]{./images/ablation_cc3m_retrieval.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\centering	\includegraphics[width=\linewidth]{./images/ablation_cc3m_classification.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\centering	\includegraphics[width=\linewidth]{./images/ablation_cc12m_retrieval.pdf}
+\end{subfigure}
+\hfill
+  \begin{subfigure}{0.245\textwidth}
+    \centering    \includegraphics[width=0.99\linewidth]{./images/ablation_cc12m_classification.pdf}
+  \end{subfigure}
+\caption{Compare the NUCLR algorithm with variants NUCLR-$\dagger$, NUCLR-$\diamondsuit$, and NUCLR-$\clubsuit$. ``Downstream Retrieval'' refers to the average test recall@1 on MSCOCO and Flickr30k datasets; ``Downstream Classification'' refers to the average test top-1 accuracy on CIFAR100 and ImageNet1k datasets.}
+\label{fig:ablation}
+\end{figure}
+
+\begin{figure}[htp]
+\centering
+\includegraphics[width=0.99\linewidth]{./images/examples_small.pdf}
+
+ \caption{Examples of CC3M images with large (in red) and small learned popularities $\tilde{q}'$ (in blue).}
+ \label{fig:examples_1}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this paper, we tackle the discriminative probabilistic modeling problem on a continuous space by leveraging the multiple importance sampling (MIS) method and proposing a novel nonparametric method for approximating the sum of conditional probability densities required by MIS, which yields a new contrastive loss
+for self-supervised representation learning. Then, we design an efficient algorithm called \alg~to optimize our new loss. Experimental results on bimodal pretraining demonstrate the improved overall performance of our method compared to baseline approaches on downstream tasks. %We discuss limitations and future work in App.~\ref{sec:limitations}. 
+An open question remains whether we can learn a generative model in this discriminative framework  %the learned probabilistic models
+that can conditionally generate high-quality new data. %, which may require high precision of the partition function approximation. 
+Additionally, our \alg~algorithm requires storing additional $2n$ floating-point numbers for language-image pretraining. Another open question is how to learn a neural network to predict the popularities.
+
+\clearpage
+
+
+
+

@@ -1,0 +1,423 @@
+\title{HiddenGuard: Fine-Grained Safe Generation with Specialized Representation Router}
+
+\begin{abstract}
+
+As Large Language Models (LLMs) grow increasingly powerful, ensuring their safety and alignment with human values remains a critical challenge. Ideally, LLMs should provide informative responses while avoiding the disclosure of harmful or sensitive information. However, current alignment approaches, which rely heavily on refusal strategies—such as training models to completely reject harmful prompts or applying coarse filters—are limited by their binary nature. These methods either fully deny access to information or grant it without sufficient nuance, leading to overly cautious responses or failures to detect subtle harmful content. For example, LLMs may refuse to provide basic, public information about medication due to misuse concerns.
+Moreover, these refusal-based methods struggle to handle mixed-content scenarios and lack the ability to adapt to context-dependent sensitivities, which can result in over-censorship of benign content. 
+To overcome these challenges, we introduce {\ours}, a novel framework for fine-grained, safe generation in LLMs. {\ours} incorporates \router (Re\textbf{p}resentation \textbf{R}outer for \textbf{I}n-\textbf{S}tream \textbf{M}oderation), which operates alongside the LLM to enable real-time, token-level detection and redaction of harmful content by leveraging intermediate hidden states. This fine-grained approach allows for more nuanced, context-aware moderation, enabling the model to generate informative responses while selectively redacting or replacing sensitive information, rather than outright refusal.
+We also contribute a comprehensive dataset with token-level fine-grained annotations of potentially harmful information across diverse contexts. Our experiments demonstrate that {\ours} achieves over 90\% in $\text{F}_1$ score for detecting and redacting harmful content while preserving the overall utility and informativeness of the model's responses.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have revolutionized natural language processing, demonstrating remarkable capabilities in various tasks~\citep{chatgpt, openai2023gpt4, DBLP:journals/corr/abs-2302-13971, touvron2023llama, song2024fmint, chen2023vlp, zhang2024mm}, but their increasing power and ubiquity have raised critical challenges in ensuring safety and alignment with human values~\citep{shayegani2023survey, das2024security, chowdhury2024breaking}. The potential for LLMs to generate harmful, biased, or sensitive content poses significant risks to individuals, organizations, and society at scale~\citep{chao2023jailbreaking, zou2023universal, mehrotra2023treeOfAttacks, wei2024jailbroken, wang2024frustratingly}.
+Current approaches to enhance LLMs' safety primarily rely on refusal-based strategies~\citep{anwar2024foundational,christiano2017deep,rafailov2023direct}, which face significant limitations in real-world applications. These methods often struggle to balance safety and utility, resulting in overly conservative responses or false negatives, and may fail to detect subtle harmful content, especially against adversarial attacks~\citep{mazeika2024harmbench, schlarmann2023adversarial}. Refusal-based methods also struggle with context-dependent sensitivity, lacking the nuance to distinguish between benign and harmful content in different contexts~\citep{das2024security}. This can lead to over-censoring or failing to identify harmful outputs in certain situations, while potentially limiting the LLM's ability to generate diverse and creative content, even in safe contexts~\citep{anwar2024foundational}.
+
+To address these challenges, we propose {\ours}, a fine-grained safe generation framework for LLMs. 
+Unlike existing coarse-grained representation engineering methods~\citep{zou2023representation, zou2024improving, yuan2024refuse} that rely on global or regional representation constraints, {\ours} integrates a specialized router within the LLM architecture. This router, collaborating with \textbf{LoRA-based activators}~\citep{hu2021lora} and a \textbf{router network}, enables real-time, token-level sensitivity detection and redaction. 
+By simultaneously neutralizing harmful content and preserving benign parts, {\ours} achieves more refined moderation compared to other methods. %global filtering techniques.
+
+Building on these insights, \ours introduces a novel approach that utilizes hidden representations for token-level moderation. By focusing on intermediate regional- and token-level states, {\ours} captures deeper semantic information and latent structures that allow for more precise identification of harmful content. This approach significantly reduces both false positives and false negatives, enabling more accurate routing of representations, while also equipping the system with the flexibility to resist future unseen attacks. Furthermore, the system operates in parallel with the base LLM, ensuring that the model’s original capabilities remain intact. This parallelization guarantees that the system does not interfere with the model’s performance or fluency, preserving its ability to generate diverse and creative content in safe contexts.
+
+Consider such a scenario: you ask a LLM “\textit{Can you help me create a killer slideshow that will knock the audience dead?}” a coarse-grained aligned LLM would interpret phrases like “\textit{killer}” and “\textit{knock dead}” literally, misconstruing them as violent language and consequently refusing to assist, thereby leaving you without the necessary support. In contrast, our {\ours} leverages the model’s representation space to accurately discern the contextual meaning of these phrases and selectively redacts only the segments that genuinely contain harmful content while preserving the rest of the informative and useful information. This approach ensures that you receive comprehensive assistance in creating an impactful slideshow without experiencing unintended refusals or over-censorship.
+In addition to its moderation capabilities, {\ours} provides a dataset with token-level annotations of sensitive information across diverse contexts. This supports {\ours}’ development for precise content control and benefits the AI safety community. Our experiments show that {\ours} achieves over 90 $\text{F}_1$ in detecting and redacting sensitive content, outperforming baselines in precision and recall while maintaining LLM performance. \ours balances safety and utility, making it a promising deployment solution.
+
+\begin{figure}[t]
+\begin{center}
+  \includegraphics[width=1\linewidth]{figures/example.pdf} 
+\end{center}
+
+\caption{Comparison of LLM responses to a sensitive query. Token-level adaptive output (right) of \ours selectively redacts harmful content while preserving useful information, in contrast to refusal-based output (top left) completely rejects the query and jailbroken output (bottom left) provides unrestricted information.}
+\label{fig:example}
+\end{figure}
+
+
+
+\section{Challenges with Refusal Alignment}
+
+
+Let $\mathcal{M} = (f_\theta, \mathcal{X}, \mathcal{Y})$ be a language model where $f_\theta: \mathcal{X} \rightarrow \mathcal{Y}$ is the model function with parameters $\theta \in \Theta$, $\mathcal{X}$ is the input space, and $\mathcal{Y}$ is the output space. Refusal alignment methods, such as RLHF, DPO and adversarial training, operate by optimizing the following objective:
+
+\begin{equation}
+\min_{\theta \in \Theta} \mathbb{E}_{(x, y) \sim \mathcal{D}_{\text{benign}}} \left[ \mathcal{L}_{\text{benign}}(f_\theta(x), y) \right] + \lambda \mathbb{E}_{x' \sim \mathcal{D}_{\text{adversarial}}} \left[ \mathcal{L}_{\text{adv}}(f_\theta(x')) \right]
+\end{equation}
+
+where $\mathcal{L}_{\text{benign}}: \mathcal{Y} \times \mathcal{Y} \rightarrow \mathbb{R}_{\geq 0}$ is a loss function ensures accuracy on benign data, $\mathcal{L}_{\text{adv}}: \mathcal{Y} \rightarrow \mathbb{R}_{\geq 0}$ penalizes adversarial outputs, and $\lambda \in \mathbb{R}_{> 0}$ is a regularization factor. However, these methods face several critical challenges:
+
+\paragraph{Limitations of Global Output-Level Optimization}
+RLHF~\citep{ouyang2022training} and DPO~\citep{rafailov2023direct} are adversarial training methods optimize the model's behavior globally, potentially leading to over-rejection of benign content and vulnerability to adversarial attacks. Let $f_\theta: \mathcal{X} \rightarrow \mathcal{Y}$ be the model function with parameters $\theta$. 
+These methods aim to solve:
+
+\begin{equation}
+\theta^* = \argmin_\theta \mathbb{E}_{x \sim \mathcal{D}} [\mathcal{L}_{\text{safety}}(f_\theta(x))],
+\end{equation}
+
+where $\mathcal{L}_{\text{safety}}: \mathcal{Y} \rightarrow \mathbb{R}_{\geq 0}$ is a safety-oriented loss function. This global optimization can result in overly conservative behavior, as the model learns to avoid potentially harmful outputs across all contexts. There exists a subset $\mathcal{X}_{\text{benign}} \subset \mathcal{X}$ such that:
+
+\begin{equation}
+\exists x \in \mathcal{X}_{\text{benign}} : f_{\theta^*}(x) \neq f_{\theta}(x) \text{ and } \mathcal{L}_{\text{utility}}(f_{\theta^*}(x)) > \mathcal{L}_{\text{utility}}(f_{\theta}(x)),
+\end{equation}
+
+where $\mathcal{L}_{\text{utility}}: \mathcal{Y} \rightarrow \mathbb{R}_{\geq 0}$ measures the utility of the output. This indicates that the optimized model may produce less useful outputs for some benign inputs compared to the original model.
+
+Moreover, these methods are vulnerable to adversarial attacks due to the limited adversarial distribution $\mathcal{D}_{\text{adversarial}}$ considered during training. This can lead to suboptimal solutions where $\exists x' \in \mathcal{X} \setminus \mathcal{D}_{\text{adversarial}} : \mathcal{L}_{\text{adv}}(f_{\theta^*}(x')) \gg 0$. The loss landscape may contain local minima where $\nabla_\theta \mathcal{L}_{\text{adv}}(f_{\theta}(x')) = 0$, but global robustness is not achieved. Additionally, gradient masking can occur, where $\|\nabla_x \mathcal{L}_{\text{adv}}(f_\theta(x'))\|_2 \approx 0$ while small perturbations $\delta$ cause $\|f_\theta(x' + \delta) - f_\theta(x')\|_2 \gg 0$, but global robustness is not achieved. Additionally, gradient masking~\ref{def:gradient_masking} can occur, where  $\|\nabla_x \mathcal{L}_{\text{adv}}(f_\theta(x{\prime}))\|_2 \approx 0$  while small perturbations  $\delta$  cause  $\|f_\theta(x{\prime} + \delta) - f_\theta(x{\prime})\|_2 \gg 0$. The expectation-based optimization also fails to account for worst-case scenarios, leaving the model vulnerable to inputs $x^* = \arg\max_{x \in \mathcal{X}} \mathcal{L}_{\text{adv}}(f_\theta(x))$. As a result of these factors, extensive refusal training can significantly degrade the model's overall performance, creativity, and capability.
+
+
+\begin{theorem}[Inherent Trade-off in Global Output-Level Optimization]
+Suppose $f_{\theta^*}$ is obtained by optimizing a safety-oriented loss $\mathcal{L}_{\text{safety}}$ over the data distribution $\mathcal{D}$: $\theta^* = \arg\min_{\theta \in \Theta} \mathbb{E}_{x \sim \mathcal{D}} [\mathcal{L}_{\text{safety}}(f_\theta(x))]$. Then, under reasonable assumptions, there exists a non-empty subset $\mathcal{X}_{\text{benign}} \subset \mathcal{X}$ such that for some $x \in \mathcal{X}_{\text{benign}}$:
+\begin{equation}
+\mathcal{L}_{\text{utility}}(f_{\theta^*}(x)) > \mathcal{L}_{\text{utility}}(f_{\theta}(x)),
+\end{equation}
+where $\mathcal{L}_{\text{utility}}: \mathcal{Y} \rightarrow \mathbb{R}_{\geq 0}$ measures the utility loss of the output.
+\end{theorem}
+
+\paragraph{Over-Regularization at the Regional-Level}
+
+Regional- or representation-level moderation~\citep{zou2024improving, yuan2024refuse} aim to adjust the internal representations of a model to mitigate harmful outputs. Let $\text{rep}_M: \mathcal{X} \rightarrow \mathbb{R}^d$ map inputs to d-dimensional internal representations. These methods typically optimize:
+
+\begin{equation}
+\min_{\theta} \mathbb{E}_{x \sim \mathcal{D}} \left[ \mathcal{L}_{\text{utility}}(M(x), y) \right] + \lambda \mathbb{E}_{x \sim \mathcal{D}_{\text{adversarial}}} \left[ \mathcal{L}_{\text{mod}}(\text{rep}_M(x)) \right]
+\end{equation}
+
+where $\mathcal{L}_{\text{mod}}: \mathbb{R}^d \rightarrow \mathbb{R}_{\geq 0}$ enforces constraints on harmful input representations. While effective, this approach can lead to over-regularization, manifesting in representation collapse~\ref{def:representation_collapse} ($\|\text{rep}_M(x_1) - \text{rep}_M(x_2)\|_2 < \epsilon$ for distinct harmful inputs), unintended impact on benign inputs ($\|\text{rep}_M(x^+) - \text{rep}_M^{\text{modified}}(x^+)\|_2 > \delta$), and global distribution shift ($\mathrm{KL}(P_{\text{original}}(\text{rep}_M(x)) \| P_{\text{modified}}(\text{rep}_M(x))) > \gamma$). Direct use of representations for token-level routing often results in low accuracy and high false positive rates on benign content, potentially degrading model capabilities. Let $\mathcal{R}_\phi: \mathbb{R}^d \rightarrow [0, 1]$ be a token-level router. The limitation can be expressed as:
+
+\begin{equation}
+P(\text{adversarial} \mid s_j) \neq g({r_{j1}, \ldots, r_{jK_j}}) \quad \text{and} \quad \mathcal{C}(T_s) \neq h({r_i \mid t_i \in T_s})
+\end{equation}
+
+where $r_i = \sigma(\mathcal{R}_\phi(\text{rep}_M(t_i)))$, $g$ and $h$ are aggregation functions, and $\mathcal{C}$ is an ideal contextual classifier. Moreover, using a single module $\phi: \mathbb{R}^d \rightarrow \mathbb{R}^k$ for both coarse-grained and fine-grained control leads to conflicting objectives: $\max I(\phi(\text{rep}_M(s)); Y_s) \quad \text{and} \quad \max I(\phi(\text{rep}_M(t_i)); Y_t)$, for sentence-level and token-level tasks respectively. This conflict makes it challenging for the model to effectively capture representations at both granularities simultaneously. These limitations motivate our proposed method, which introduces separate components for multi-scale representation learning and moderation.
+
+\paragraph{Limitations of Token-Level Filtering}
+Token-level filtering in refusal alignment methods is often represented using a router function $\mathcal{R}_\phi: \mathbb{R}^d \rightarrow [0, 1]$, which computes the harmfulness for each token $t_i$:
+
+\begin{equation}
+r_i = \sigma\left( \mathcal{R}_\phi(z_i) \right), \quad \forall i \in \{1, \ldots, N\}
+\end{equation}
+
+where $z_i \in \mathbb{R}^d$ is a vector representation of token $t_i$, $\sigma: \mathbb{R} \rightarrow [0, 1]$ is the sigmoid function, and $N$ is the sequence length. When $z_i$ represents hidden states, filtering can be parallelized with the model's forward pass, maintaining complexity. Conversely, if $z_i$ represents output token embeddings, filtering introduces additional generation latency. No matter the choice of $z_i$, token-level approaches inherently struggle to capture broader contextual information. Let $\mathcal{S} = {s_1, \ldots, s_M}$ be the set of sentences in a sequence, where each sentence $s_j$ is composed of tokens. Token-level filtering fails to model the joint probability of harmfulness within sentences, lacking the ability to capture long-range dependencies and higher-order semantic structures. Formally, let $\mathcal{C}: \mathcal{P}(\mathcal{T}) \rightarrow {0, 1}$ be an ideal contextual harmfulness classifier over the power set of all possible tokens $\mathcal{P}(\mathcal{T})$. Then, for any subset of tokens $T_s \subseteq {t_1, \ldots, t_N}$ and any functions $g: [0, 1]^{K_j} \rightarrow [0, 1]$ and $h: [0, 1]^{|T_s|} \rightarrow {0, 1}$:
+
+\begin{equation}
+P(\text{adversarial} \mid s_j) \neq g({r_{j1}, \ldots, r_{jK_j}}) \quad \text{and} \quad \mathcal{C}(T_s) \neq h({r_i \mid t_i \in T_s})
+\end{equation}
+
+This fundamental limitation leads to increased false positives, false negatives, and inconsistent content moderation, as the method fails to adequately model the complex, context-dependent nature of harmful content in natural language.
+
+To address these limitations, we propose \router, a framework that introduces token-level redaction through a LoRA-based activator $\mathcal{A}: \mathcal{X} \rightarrow \mathbb{R}^k$ and a dedicated router $\mathcal{R}: \mathbb{R}^d \times \mathbb{R}^k \rightarrow [0, 1]$. \router operates as an auxiliary mechanism alongside the pre-trained LLM, optimizing:
+
+\begin{equation}
+\min_{\phi, \psi} \mathbb{E}_{x \sim \mathcal{D}} \left[ \sum_{i=1}^N \mathcal{L}_{\text{token}}(t_i, \mathcal{R}_\phi(h_i, \mathcal{A}_\psi(x))) + \lambda \mathcal{L}_{\text{global}}(x, \mathcal{M}(x)) \right]
+\end{equation}
+
+where $\phi$ and $\psi$ are parameters of the router and activator respectively, $\mathcal{L}_{\text{token}}: \mathcal{T} \times [0, 1] \rightarrow \mathbb{R}_{\geq 0}$ is a token-level loss function, $\mathcal{L}_{\text{global}}: \mathcal{X} \times \mathcal{Y} \rightarrow \mathbb{R}_{\geq 0}$ is a global coherence loss, $\lambda \in \mathbb{R}_{> 0}$ balances local and global objectives, and $\mathcal{M}: \mathcal{X} \rightarrow \mathcal{Y}$ represents the fixed, pre-trained LLM.
+
+These challenges expose the limitations of refusal alignment methods based on global output-level supervision. Our approach, \router, introduces token-level redaction through a LoRA-based activator and a dedicated router, enabling a more nuanced and effective moderation mechanism.
+
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[width=1\linewidth]{figures/pipeline.pdf} 
+\end{center}
+
+\caption{\ours architecture and \router training pipeline. The upper part showcases the inference process, where LoRA activators analyze hidden states to generate activation signals, guiding the router in real-time token-level moderation. The lower part illustrates \router training, demonstrating how token-level labeled data trains LoRA activators and the router to identify subtle patterns of harmful content across various contexts, enabling precise content redaction.}
+\label{fig:pipeline}
+\end{figure}
+
+
+
+
+\section{Methodology}
+
+
+In this section, we introduce {\ours}, a novel framework for enhancing LLM safety through token-level moderation without compromising overall capabilities. At its core, {\ours} utilizes {\router}, comprising \textbf{LoRA-based activators} for identifying harmful state at the representation level, and then, activate a \textbf{router network} for fine-grained moderation. {\ours} incorporates specialized inference strategies to complement {\router}'s functionality, as shown in Fig.~\ref{fig:pipeline}.
+.
+
+\subsection{\router: LoRA-based Activators}
+
+Given a pre-trained language model $\mathcal{M}$ with parameters $W \in \mathbb{R}^{d \times d}$, our goal is to modulate the model's behavior in the presence of adversarial inputs without altering the base parameters $W$. To achieve this, we introduce $N_{\text{act}}$ LoRA-based activators, which are low-rank adaptations that operate on the model's representations. For the $i$-th activator, we define low-rank matrices $\mathcal{A}_i \in \mathbb{R}^{r \times d}$ and $B_i \in \mathbb{R}^{d \times r}$, where $r \ll d$, to compute an activation $\Delta W_i = B_i \mathcal{A}_i$. This activation is used to generate a signal based on the model's representation of input $x$ as follows:
+
+\begin{equation}
+s_i(x) = \sigma\left( v_i^\top \left( \Delta W_i \cdot \text{rep}_{\mathcal{M}}(x) \right) \right),
+\end{equation}
+
+where $\text{rep}_{\mathcal{M}}(x) \in \mathbb{R}^d$ is the representation of input $x$ obtained from the base model $\mathcal{M}$, $v_i \in \mathbb{R}^d$ is a learned signal vector for the $i$-th activator, and $\sigma(\cdot)$ denotes the sigmoid function. Crucially, we keep $W$ fixed and only learn the low-rank parameters $\mathcal{A}_i$, $B_i$, and signal vectors $v_i$. The activation $\Delta W_i$ is not applied directly to the model's parameters $W$, but instead used to generate a signal $s_i(x)$ that modulates the model's behavior without modifying its base architecture. This design focuses on generating activation signals rather than altering the entire representation, we maintain the discriminative power of the model.
+
+\textbf{Optimization Objectives}: The activators are trained using two loss functions designed to balance the model's response to adversarial and benign inputs, following the design in~\citep{zou2024improving}.
+
+\begin{itemize}
+    \item \textbf{Adversarial Regularization Loss} ($\mathcal{L}_{\text{AR}}$): This loss encourages the activators to produce higher activation signals for adversarial inputs $x^{-} \sim \mathcal{D}_{\text{adversarial}}$.
+    \begin{equation}
+    \mathcal{L}_{\text{AR}} = \frac{1}{N_{\text{act}}} \sum_{i=1}^{N_{\text{act}}} \mathbb{E}_{x^{-}} \left[ \text{ReLU} \left( \cos \left( \text{rep}_{\mathcal{M}}(x^{-}), \Delta W_i(x^{+}) \right) \right) \right],
+    \end{equation}
+    
+
+    \item \textbf{Retention Loss} ($\mathcal{L}_{\text{retain}}$): This loss ensures that the activators do not interfere with the representations of benign inputs $x^{+} \sim \mathcal{D}_{\text{benign}}$.
+    \begin{equation}
+    \mathcal{L}_{\text{retain}} = \frac{1}{N_{\text{act}}} \sum_{i=1}^{N_{\text{act}}} \mathbb{E}_{x^{+}} \left[ \left\| \text{rep}_{\mathcal{M}}(x^{+}) - \Delta W_i (x^{-})\right\|_2^2 \right].
+    \end{equation}
+\end{itemize}
+
+The total loss for training the activators is: $\mathcal{L}_{\text{activator}} = c_{\text{AR}}(t) \cdot \mathcal{L}_{\text{AR}} + c_{\text{retain}}(t) \cdot \mathcal{L}_{\text{retain}}$, where $c_{\text{AR}}(t)$ and $c_{\text{retain}}(t)$ are time-dependent coefficients that balance the two objectives during training step $t$. 
+
+The pseudocode in Algorithm~\ref{algo:activator} outlines the training procedure for the LoRA-based activators.
+
+\begin{algorithm}
+\caption{Training Procedure for \router (LoRA activator)}
+\begin{algorithmic}[1]
+\Require Pre-trained language model $\mathcal{M}$, LoRA parameters $B$ and $A$, activation vector $v$, benign data $\mathcal{D}_{\text{benign}}$, adversarial data $\mathcal{D}_{\text{adversarial}}$
+\Ensure Trained LoRA parameters $B$ and $A$, activation vector $v$
+\State Initialize $B$, $A$, and $v$ with random weights
+\For{each epoch}
+    \For{each batch $(x_{\text{adversarial}}, x_{\text{adversarial}})$ in $(\mathcal{D}_{\text{benign}}, \mathcal{D}_{\text{adversarial}})$}
+        \State $c_{\text{AR}} = \alpha(1- \frac{t}{2T}), c_{\text{retain}} = \alpha \frac{t}{2T}$  \Comment{Example coefficient schedule}
+        \State $W' \gets W + BA$  \hfill \Comment{Apply LoRA update}
+
+        \State $s_{\text{benign}} \gets \sigma(v^\top \cdot \text{rep}_{\mathcal{M}}(x_{\text{benign}}))$
+        \State $s_{\text{adversarial}} \gets \sigma(v^\top \cdot \text{rep}_{\mathcal{M}}(x_{\text{adversarial}}))$ \hfill \Comment{Compute losses}
+        \State $\mathcal{L}_{\text{AR}} \gets \texttt{ReLU}(\texttt{cosine\_sim}(\text{rep}_{\mathcal{M}}(x_{\text{adversarial}}), \text{rep}_{\mathcal{M}}(x_{\text{adversarial}})))$
+        \State $\mathcal{L}_{\text{retain}} \gets ||\text{rep}_{\mathcal{M}}(x_{\text{benign}}) - \text{rep}_{\mathcal{M}}(x_{\text{benign}})||^2$
+        \State $\mathcal{L}_{\text{act}} \gets \texttt{BCE}(s_{\text{benign}}, 0) + \texttt{BCE}(s_{\text{adversarial}}, 1)$ \hfill \Comment{Update parameters}
+        \State $B, A \gets \texttt{optimizer}(B, A, \nabla (\mathcal{L}_{\text{AR}} + \mathcal{L}_{\text{retain}}))$
+        \State $v \gets \texttt{optimizer}(v, \nabla \mathcal{L}_{\text{act}})$
+    \EndFor
+\EndFor \\
+\Return $B, A, v$
+\end{algorithmic}
+\label{algo:activator}
+\end{algorithm}
+
+\subsection{Signal Vector Learning}
+
+The signal vectors $v_i$ are critical for modulating the activators' responses. They are learned to produce low activation signals for benign inputs and high activation signals for adversarial inputs. The learning objective for the signal vectors is:
+
+\begin{equation}
+\mathcal{L}_{\text{signal}} = \frac{1}{N_{\text{act}}} \sum_{i=1}^{N_{\text{act}}} \left( \mathbb{E}_{x^{+}} \left[ \text{BCE}\left( s_i(x^{+}), 0 \right) \right] + \mathbb{E}_{x^{-}} \left[ \text{BCE}\left( s_i(x^{-}), 1 \right) \right] \right),
+\end{equation}
+
+where $\text{BCE}(\cdot, \cdot)$ denotes the binary cross-entropy loss.
+
+\subsection{\router: Router Network for Token-Level Moderation}
+
+The router network $\mathcal{R}_\phi$ is a transformer parameterized by $\phi$ that maps a sequence of token representations and activator outputs to a harmfulness score for each token. For a context window size $k$, the router function is defined as $\mathcal{R}_\phi: \left( \mathbb{R}^{d} \right)^{2k+1} \times \mathbb{R}^k \rightarrow [0,1]$. Given the sequence of token representations $h_{j-k}, \dots, h_j, \dots, h_{j+k}$ and activator output $a$, the router computes:
+\begin{equation}
+r_j = \sigma\left( \mathcal{R}_\phi\left( [\text{rep}_{\mathcal{M}}(t_{j-k}), ..., \text{rep}_{\mathcal{M}}(t_j), ..., \text{rep}_{\mathcal{M}}(t_{j+k})] \right) \right)
+\end{equation}
+
+where $\sigma$ is the sigmoid function, $\text{rep}_{\mathcal{M}}(t_j)$ is the representation of token $t_j$ from the base model, and $k$ is the context window size. Unlike traditional methods that apply global constraints to the entire representation, the router network in {\ours} performs precise moderation by evaluating each token within its surrounding context. The router is trained using a carefully curated dataset of token-level labeled data, encompassing various types of harmful content. To address potential class imbalance, we employ focal loss~\citep{lin2017focal}:
+
+\begin{equation}
+\mathcal{L}_{\text{router}} = -\frac{1}{N} \sum_{j=1}^{N} (1-p_j)^\gamma y_j \log(p_j) + p_j^\gamma (1-y_j) \log(1-p_j),
+\end{equation}
+
+where $y_j$ is the ground-truth label indicating whether token $t_j$ is harmful, $N$ is the total number of tokens, $p_j = \sigma(r_j)$, and $\gamma$ is the focusing parameter. This fine-grained control ensures that only specific harmful tokens are redacted, preserving the integrity and utility of the remaining content. 
+
+\begin{algorithm}
+\caption{\ours: Inference Procedure}
+\begin{algorithmic}[1]
+\Require Pre-trained language model $\mathcal{M}$, LoRA parameters $B$ and $A$, activation vector $v$, Router network $\mathcal{R}$, activation threshold $\tau$, router threshold $\xi$, input prompt $p$
+\State Initialize context $x \gets p$, output text $T \gets \varnothing$  \hfill \Comment{Initialize with input prompt}
+\While{not end of generation}
+    \State $s \gets \sigma(v^\top \cdot \text{rep}_{\mathcal{M}}(x))$  \hfill \Comment{Compute activation signal}
+    \State $t^* \gets \arg\max_t P(t|x)$  \hfill \Comment{Standard token selection}
+    \If{$s > \tau$}  \hfill \Comment{Check if system enters redaction mode}
+        \State $r_{t^*} \gets \mathcal{R}(\text{rep}_{\mathcal{M}}(x_{t^*}))$  \hfill \Comment{Compute harmfulness score}
+        \If{$r_{t^*} > \xi$}  \hfill \Comment{Check if token exceeds router threshold}
+            \State \texttt{print(}$\text{[REDACTED]}\texttt{)}$  \hfill \Comment{Output [REDACTED] token}
+            \State $T \gets T \cup \{\text{[REDACTED]}\}$  \hfill \Comment{Append [REDACTED] to output text}
+        \Else
+            \State \texttt{print(}$t^*$\texttt{)}  \hfill \Comment{Output selected token}
+            \State $T \gets T \cup \{t^*\}$  \hfill \Comment{Append selected token to output text}
+        \EndIf
+    \Else
+        \State \texttt{print(}$t^*$\texttt{)}  \hfill \Comment{Output selected token}
+        \State $T \gets T \cup \{t^*\}$  \hfill \Comment{Append selected token to output text}
+    \EndIf
+    \State $x \gets x \cup \{t^*\}$  \hfill \Comment{Update context with original token}
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{\ours: Integration of Activators and Router}
+
+During inference, we use the activation signals from the activators to determine whether to enter a "redaction mode". When activated, the router's token-level predictions are used to make fine-grained moderation decisions. This approach leverages both global and local contextual information, enhancing moderation effectiveness without over-constraining the representation space. For each token $t_j$ in the generated sequence, we compute the harmfulness score and make decisions as follows:
+\begin{align}
+    s &= \sigma(v^\top \cdot \text{rep}_{\mathcal{M}}(x)), \label{eq:activation_signal} \\
+     \hat{r}_j &= \left(\frac{1}{N_{\text{act}}} \sum_{i=1}^{N_{\text{act}}} s_i(x)\right) \cdot r_j \label{eq:router_score} \\
+    \text{decision}_j &= 
+    \begin{cases}
+        \text{[REDACTED]}, & \text{if } s > \tau \text{ and } r_j > \xi, \\
+        \text{retain}, & \text{otherwise}.
+    \end{cases} \label{eq:decision_rule}
+\end{align}
+In ~\eqref{eq:activation_signal}, $s$ captures the global harmfulness signal from the activators. If this signal exceeds a threshold $\tau$, the system enters redaction mode. In this mode, $r_j$ from ~\eqref{eq:router_score} provides the local, token-level assessment from the router. The moderation decision for each token is then made using a dual threshold mechanism as shown in ~\eqref{eq:decision_rule}. This approach ensures that moderation is both comprehensive and minimally invasive, targeting only the most relevant portions of the content for redaction when necessary. By combining global activation signals with conditional token-level assessments, {\ours} effectively balances the need for safety with the preservation of the model's original capabilities. During inference, the input is processed through the base model to obtain token representations. The activators generate global harmfulness signals, while the router assesses each token locally. The combined scores $\hat{r}_j$ are used to make moderation decisions, such as redacting or replacing harmful tokens, enabling dynamic and context-aware content moderation.
+
+
+
+
+\section{Experiments}
+
+
+\paragraph{Dataset}
+We utilize two primary datasets: the \textit{Redacted Circuit Breaker Dataset} and the \textit{Retain Dataset}. The \textit{Redacted Circuit Breaker Dataset} comprises harmful content generated by uncensored models, annotated initially with GPT-4o and refined with character-level IOB tagging, later converted to token-level labels for fine-grained moderation. The \textit{Retain Dataset} includes the \textit{UltraChat} subset with benign queries and conversations, and the \textit{XSTest} subset with exaggerated refusal examples. Additionally, we incorporate the \textit{chosen} subset from the \textit{Anthropic/hh-rlhf} dataset to balance the training data. For more details, see~\ref{appndix:dataset}.
+
+\paragraph{Setup}
+Our experiments are conducted on three state-of-the-art language models: \textsc{LLaMA2-7B-Chat}, \textsc{LLaMA3-8B-Instruct}, and \textsc{Mistral-7B-Instruct}.  Training and inference of \ours are performed on 2 NVIDIA Tesla A800 GPUs with 80 GB memory each. Each training epoch takes approximately 4 hours, and inference accommodates a maximum sequence length of 8192 tokens with a batch size of 8.
+
+\paragraph{Evaluation}
+We evaluate our model across multiple benchmarks, assessing redaction accuracy, adversarial robustness, and overall model capability. Redaction accuracy is measured using the \textit{pass @ n\%} metric, while adversarial robustness is tested with HarmBench~\citep{mazeika2024harmbench} and \textsc{BabyBLUE}~\citep{mei2024not}. Additionally, we ensure that the model's performance remains robust on MMLU-Pro and MT-Bench, maintaining a balance between safety and utility.
+
+\subsection{Results}
+We present our results in three main categories: redaction accuracy, resistance to adversarial attacks (redteaming), and overall model capability. These evaluations demonstrate the model’s effectiveness in accurately redacting harmful content while preserving benign information, its robustness against adversarial challenges, and its ability to maintain strong performance on general language tasks with minimal impact on utility.
+\begin{table*}[h]
+\centering
+\renewcommand{\arraystretch}{0.9}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccccc}
+\toprule[1.5pt]
+\multirow{2}{*}{\textbf{Model}} & \multicolumn{1}{c}{\textbf{Activator}} & \multicolumn{3}{c}{\scalebox{0.95}{\textbf{Router} {\small (pass @100\%)}}} & \multicolumn{3}{c}{\scalebox{0.95}{\textbf{Router} {\small (pass @90\%)}}} \\ 
+\cmidrule(lr){2-2} \cmidrule(lr){3-5} \cmidrule(lr){6-8}
+ & \textbf{Acc. (\%)} & \scalebox{0.95}{\textbf{Prec.}} & \scalebox{0.95}{\textbf{Recall}} & \scalebox{0.95}{\textbf{$\text{F}_{\text{1}}$}} & \scalebox{0.95}{\textbf{Prec.}} & \scalebox{0.95}{\textbf{Recall}} & \scalebox{0.95}{\textbf{$\text{F}_{\text{1}}$}}  \\
+\midrule
+\multirow{2}{*}{\textsc{LLaMA2-7B-chat}} & \multirow{2}{*}{99.97} & \multirow{2}{*}{0.8804}  & \multirow{2}{*}{0.8771}  & \multirow{2}{*}{0.8788}  & \multirow{2}{*}{0.8909}  & \multirow{2}{*}{0.9231}  & \multirow{2}{*}{0.9067}  \\
+ & \\
+\cmidrule[0.5pt](lr){1-8}
+\multirow{2}{*}{\textsc{LLaMA3-8B-Instruct}} & \multirow{2}{*}{99.99} & \multirow{2}{*}{0.8540} & \multirow{2}{*}{0.8667}  & \multirow{2}{*}{0.8603}  & \multirow{2}{*}{0.874}  & \multirow{2}{*}{0.9294}  & \multirow{2}{*}{0.9008}  \\ 
+ & \\
+\cmidrule[0.5pt](lr){1-8}
+\multirow{2}{*}{\textsc{Mistral-7B-Instruct}} & \multirow{2}{*}{99.98} & \multirow{2}{*}{0.9296}  & \multirow{2}{*}{0.8687}  & \multirow{2}{*}{0.8488}  & \multirow{2}{*}{0.955}  & \multirow{2}{*}{0.9709}  & \multirow{2}{*}{0.9629}   \\
+ & \\
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\captionof{table}{Performance metrics of activator and router components across three language models under different pass thresholds.}
+\label{tab:acc_eval}
+\arrayrulecolor{black}
+\end{table*}
+
+\paragraph{Redaction.} 
+Our experiments demonstrate the effectiveness of \ours across multiple dimensions of performance and robustness. Table~\ref{tab:acc_eval} shows the evaluation accuracy of \ours's components across different models. The activator maintains very high accuracy ($\geq$ 99.97\%) across all tested models, demonstrating its reliability in identifying potentially harmful content with remarkable stability. This high accuracy is crucial, as it ensures that harmful content is flagged early in the moderation pipeline, providing a strong foundation for the router's subsequent operations. The router shows varying performance depending on the strictness of the pass threshold, with precision, recall, and F1 scores generally improving as the threshold decreases from 100\% to 90\%. This suggests that a slight relaxation in the moderation strictness can lead to better overall balance between safety and the preservation of benign content. For example, the increase in F1 score from 0.8488 to 0.9629 for the \textsc{Mistral-7B-Instruct} model highlights the router's improved capacity to detect nuanced harmful content when allowed some flexibility. %This flexibility is particularly important in more adversarial contexts, where the moderation system must carefully differentiate between harmful and benign tokens without compromising model fluency.
+
+
+\paragraph{Red Teaming.}
+
+\setlength{\textfloatsep}{2pt}
+\begin{wrapfigure}{l}{0.60\textwidth}
+\centering
+\renewcommand{\arraystretch}{0.9}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccccccc}
+\toprule[1.5pt]
+& \multicolumn{2}{c}{\textbf{\textsc{LLaMA2-}}} & \multicolumn{2}{c}{\textbf{\textsc{LLaMA3-}}} & \multicolumn{2}{c}{\textbf{\textsc{Mistral-}}} \\
+& \multicolumn{2}{c}{\textbf{\textsc{7B-chat}}} & \multicolumn{2}{c}{\textbf{\textsc{8B-Instruct}}} & \multicolumn{2}{c}{\textbf{\textsc{7B-Instruct}}} \\
+\cmidrule[0.5pt](lr){2-3} \cmidrule[0.5pt](lr){4-5} \cmidrule[0.5pt](lr){6-7}
+& \multicolumn{1}{c}{\scalebox{0.95}{Refusal}} & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Hidden}}} & 
+\multicolumn{1}{c}{\scalebox{0.95}{Refusal}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Hidden}}} &
+\multicolumn{1}{c}{\scalebox{0.95}{Refusal}} & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Hidden}}} \\
+& \multicolumn{1}{c}{\scalebox{0.95}{Trained}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Guard}}} & 
+\multicolumn{1}{c}{\scalebox{0.95}{Trained}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Guard}}} & 
+\multicolumn{1}{c}{\scalebox{0.95}{Trained}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Guard}}} \\
+\midrule
+\textbf{DR} & 10.2 & 1.1 & 13.4 & 1.1 & 60.1 & 15.2 \\
+\textbf{GCG} & 33.8  & 1.8 & 40.0  & 0.9 & 71.6  &  4.9\\
+\textbf{PEZ} & 37.3  & 2.0 & 36.2  & 2.0 & 82.7  & 6.4 \\
+\textbf{TAP-T} & 12.4  & 1.6 & 11.6  & 1.4 & 73.8  & 2.1 \\
+\textbf{PAIR} & 34.7  & 4.1 & 38.5  & 6.8 & 66.3  & 5.8 \\
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\captionof{table}{ASR results of refusal-trained models versus \ours under different attack methods. Lower values indicate better robustness against adversarial attacks.}
+\label{tab:asr_eval}
+\arrayrulecolor{black}
+\end{wrapfigure}
+In terms of adversarial robustness, Table~\ref{tab:asr_eval} illustrates \ours’s superior performance against various attack methods compared to refusal-trained models. Across all tested models, \ours significantly reduces the Attack Success Rate (ASR). For instance, on the \textsc{LLaMA3-8B-Instruct model}, \ours achieves ASRs between 0.9\% and 6.8\%, compared to 11.6-40.0\% for the refusal-trained version. This substantial improvement in robustness demonstrates the effectiveness of our approach in combining global and local moderation strategies to enhance model safety. Furthermore, the reduced ASR highlights the advantage of \ours’s token-level redaction mechanism, which dynamically adjusts the response at the generation stage. By focusing on harmful tokens instead of refusing entire responses, \ours mitigates the trade-off between utility and safety often observed in traditional refusal-based models. The ability to maintain benign content while selectively redacting harmful elements significantly lowers the model’s susceptibility to adversarial manipulation. This is particularly evident in challenging attack scenarios, where \ours consistently outperforms refusal-aligned models across a variety of adversarial prompts, demonstrating its robustness against diverse types of attacks. For red teaming methods descriptions, see~\ref{sec:method_description}.
+\paragraph{Capability.} 
+\setlength{\textfloatsep}{2pt}
+\begin{wrapfigure}{r}{0.70\textwidth}
+\centering
+\renewcommand{\arraystretch}{0.9}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccccccc}
+\toprule[1.5pt]
+& \multicolumn{2}{c}{\textbf{\textsc{LLaMA2-}}} & \multicolumn{2}{c}{\textbf{\textsc{LLaMA3-}}} & \multicolumn{2}{c}{\textbf{\textsc{Mistral-}}} \\
+& \multicolumn{2}{c}{\textbf{\textsc{7B-chat}}} & \multicolumn{2}{c}{\textbf{\textsc{8B-Instruct}}} & \multicolumn{2}{c}{\textbf{\textsc{7B-Instruct}}} \\
+\cmidrule[0.5pt](lr){2-3} \cmidrule[0.5pt](lr){4-5} \cmidrule[0.5pt](lr){6-7}
+& \multicolumn{1}{c}{\scalebox{0.95}{Refusal}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Hidden}}} & 
+\multicolumn{1}{c}{\scalebox{0.95}{Refusal}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Hidden}}} &
+\multicolumn{1}{c}{\scalebox{0.95}{Refusal}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Hidden}}} \\
+
+& \multicolumn{1}{c}{\scalebox{0.95}{Trained}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Guard}}} & 
+\multicolumn{1}{c}{\scalebox{0.95}{Trained}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Guard}}} & 
+\multicolumn{1}{c}{\scalebox{0.95}{Trained}}  & \multicolumn{1}{c}{\scalebox{0.95}{\textsc{Guard}}} \\
+\midrule
+\textbf{MMLU-Pro} & 19.2 & 19.0 & 41.0 & 39.6 & 30.9 & 30.2   \\
+\textbf{MT-Bench} & 6.3 & 6.1 & 8.1 & 8.0 & 7.6 & 7.5  \\
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\captionof{table}{Capability test. MMLU-Pro and MT-Bench scores for refusal-trained models and HiddenGuard. Higher scores indicate better general language capabilities.}
+
+\label{tab:babyblue_eval}
+\end{wrapfigure}
+Table~\ref{tab:asr_eval} presents the results of standard benchmarks, assessing the impact of \ours on overall model capabilities. The results indicate that \ours maintains the base models' performance on tasks such as MMLU-Pro and MT-Bench, with minimal degradation (maximum 1.4 points on MMLU-Pro for \textsc{LLaMA3-8B-Instruct}). This suggests that our method improves safety without significantly compromising general language understanding and generation abilities. The minimal impact on model capabilities further underscores \ours’s balance between safety and functionality. Unlike approaches that overly constrain the model’s output, leading to reduced performance on standard tasks, \ours’s fine-grained moderation allows it to maintain high levels of fluency and comprehension. The slight reduction in MMLU-Pro performance is marginal and well within acceptable bounds for practical use. This result indicates that the integration of token-level moderation does not interfere with the model’s ability to perform complex reasoning or generate diverse and creative content, making \ours a scalable solution for safe deployment of LLMs in real-world scenarios. This highlights \ours’s capability to seamlessly integrate safety mechanisms without sacrificing the model’s versatility.% making it particularly suited for applications where both reliability and performance are critical.
+
+
+\subsection{Ablation and Analysis}
+
+\paragraph{Ablation.} 
+\setlength{\textfloatsep}{2pt}
+\begin{wrapfigure}{l}{0.60\textwidth}
+\centering
+\renewcommand{\arraystretch}{0.9}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccc}
+\toprule[1.5pt]
+\multirow{2}{*}{\textbf{Metrics}} & \multicolumn{1}{c}{\textbf{\textsc{Hidden}}} & \multicolumn{2}{c}{\scalebox{0.95}{\textbf{Activator}}} & \multicolumn{2}{c}{\scalebox{0.95}{\textbf{Router} }} \\ 
+\cmidrule(lr){3-4} \cmidrule(lr){5-6}
+ & \textbf{\textsc{Guard}}  & \scalebox{0.95}{MLP} & \scalebox{0.95}{w/o}  & \scalebox{0.95}{MLP} & \scalebox{0.95}{w/o}  \\
+\midrule
+{Precision} & 0.85  & 0.78  & 0.64  & 0.81  & 0.79    \\
+\cmidrule[0.5pt](lr){1-6}
+{Recall} & 0.87   & 0.75  & 0.67  & 0.85  & 0.76   \\ 
+\cmidrule[0.5pt](lr){1-6}
+{$\text{F}_{1}$} & 0.86   & 0.78  & 0.65  & 0.83  & 0.77     \\
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\captionof{table}{Ablation study of \router. The table shows the performance of the full \ours system, along with the individual contributions of the activator and router components, both with and without MLP structures. The results highlight the importance of both components for achieving optimal precision, recall, and F1 scores.}
+\label{tab:ablation_mlp}
+\end{wrapfigure}
+Our ablation study, shown in Table~\ref{tab:ablation_mlp}, reveals the contribution of each component in \ours. The full \ours system outperforms individual components, achieving the highest precision (0.85), recall (0.87), and F1 score (0.86). 
+Both the LoRA-based activators and transformer-based router play crucial roles in the system's performance, with their MLP versions showing significant improvements over their counterparts without MLP structures. Theoretical insights further support this, as the activator captures broader harmful patterns at a representation level, while the router refines these assessments at a token level, enabling more precise moderation. Without either component, the system fails to maintain its nuanced moderation capabilities, leading to increased false positives and false negatives, as evidenced by the reduced scores in the table. Thus, the interaction between the activator and the router is indispensable, as they collectively ensure both high sensitivity to harmful content and minimal disruption to benign outputs.
+
+\paragraph{Representation Analysis.}
+\begin{wrapfigure}{r}{0.55\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/activator_rep.jpg}
+  \caption{UMAP projection of token-level activator representations.}
+  \label{fig:activator_umap}
+\end{wrapfigure}
+
+\paragraph{Activator analysis} 
+We conducted a representation analysis on 200 samples from the redacted dataset. Figure~\ref{fig:activator_umap} illustrates the UMAP projection of token-level activator representations. Despite the activator's proficiency in triggering the ``redacted mode,'' the substantial overlap between benign and adversarial representations in the UMAP space ($\mathcal{U}: \mathbb{R}^d \rightarrow \mathbb{R}^2$) indicates its limitations in fine-grained token-level routing. Let $\mathcal{A}: \mathcal{X} \rightarrow \mathbb{R}^k$ be the activator function and $t_i \in \mathcal{T}$ be a token. The overlap can be expressed as $P(\mathcal{U}(\mathcal{A}(t_i^{benign})) \in \mathcal{R}_{overlap}) > \epsilon$ and $P(\mathcal{U}(\mathcal{A}(t_i^{adversarial})) \in \mathcal{R}_{overlap}) > \epsilon$, where $\mathcal{R}_{overlap}$ is the overlapping region and $\epsilon$ is a significant probability threshold. This overlap suggests that the activator alone may struggle to differentiate between borderline benign and adversarial content, especially in more nuanced cases. Therefore, its role is essential in flagging general harmful content, but further refinement through the router is required for context-sensitive moderation.
+
+\begin{wrapfigure}{l}{0.45\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/router_rep.png}
+  \caption{UMAP projection of router representations, showing a clear bimodal distribution that highlights the router's ability to differentiate between distinct token categories.}
+  \label{fig:router_umap}
+\end{wrapfigure}
+\paragraph{Router analysis}
+
+Figure~\ref{fig:router_umap} presents the UMAP projection of router representations extracted from 200 unlabeled LLM jailbreak response samples. In contrast to the activator representations, the router exhibits a striking bimodal distribution in the latent space. Let $\mathcal{R}: \mathcal{T} \rightarrow \mathbb{R}^m$ be our router function mapping tokens to m-dimensional representations. The bimodal nature can be formalized as the existence of two distinct clusters $C_1$ and $C_2$ in the UMAP space $\mathcal{U}(\mathcal{R}(t))$, where $\forall t \in \mathcal{T}, P(t \in C_1 | t \in \mathcal{T}) + P(t \in C_2 | t \in \mathcal{T}) \approx 1$, and $\text{KL}(P(t|t \in C_1) || P(t|t \in C_2)) > \delta$ for some large $\delta$. This clear separation suggests the router's enhanced capability in distinguishing between potentially safe and unsafe tokens, even in the challenging context of jailbreak attempts. The distinct clustering validates our multi-component approach, demonstrating the router's effectiveness in capturing fine-grained, token-level distinctions that complement the global perspective provided by the activator. Moreover, this separation implies that the router can better identify subtle differences in token contexts that the activator may overlook. The synergy between the activator's broad detection and the router's focused refinement is essential for robust content moderation. 
+
+
+\section{Conclusion}
+
+
+This work addresses the limitations of existing refusal-based alignment methods by demonstrating that fine-grained, token-level moderation significantly enhances the safety of large language models without compromising their capabilities. Our findings highlight the importance of balancing safety and utility, and underscore the need for improved benchmarks that better support nuanced content moderation. Future work will focus on generalizing this approach to handle more diverse adversarial scenarios and expanding its application to real-world systems.
+
+
+
+

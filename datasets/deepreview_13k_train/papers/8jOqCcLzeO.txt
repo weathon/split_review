@@ -1,0 +1,439 @@
+\title{Longhorn: State Space Models are Amortized Online Learners}
+
+\begin{abstract}
+Modern large language models are built on the straightforward principle of sequence modeling via next-token prediction.
+While the Transformer remains the dominant architecture for sequence modeling, its quadratic decoding complexity with respect to sequence length poses a major limitation. State-space models (SSMs) present a compelling alternative, offering linear decoding efficiency \DIFdelbegin \DIFdel{and high }\DIFdelend \DIFaddbegin \DIFadd{while maintaining }\DIFaddend parallelism during training. However, many existing SSMs rely on linear recurrence designs that appear somewhat ad hoc.
+In this work, we explore SSM design through the lens of online learning, conceptualizing SSMs as meta-modules for specific online learning problems. This approach links SSM design to formulating precise online learning objectives, with state transition rules derived from optimizing these objectives.
+Based on this insight, we introduce a novel deep SSM architecture based on the implicit update for optimizing an online regression objective. Our experimental results show that our models outperform state-of-the-art SSMs, including the Mamba model, on standard sequence modeling benchmarks and language modeling tasks.
+
+\begin{figure}[h!]
+    \centering
+    \DIFdelbeginFL %DIFDELCMD < \includegraphics[width=0.75\linewidth]{figures/validation_ppl.pdf}
+\DIFdelendFL \DIFaddbeginFL \includegraphics[width=0.8\linewidth]{figures/validation_ppl.pdf}
+    \captionsetup{width=0.8\linewidth}
+    \DIFaddendFL \caption{\textbf{(left)} The average perplexity on eight downstream datasets for GLA, Mamba\DIFaddbeginFL \DIFaddFL{, }\DIFaddendFL and \ours{} (1.3B model) over seen tokens on SlimPajama. \ours{} leads to a 1.8x speed up in sampling efficiency. \textbf{(right)} \ours{}, pretrained with 2048 context length, extrapolates up to 16x longer context at inference.}
+    \label{fig:fig1}
+\end{figure}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\DIFdelend 
+\label{sec::intro}
+The Transformer model has become the go-to architecture for sequence modeling in deep learning~\citep{vaswani2017attention}. However, its utility is constrained by the quadratic growth in training and decoding costs with increasing sequence length. 
+Despite various optimizations such as efficient decoding~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{chen2023accelerating,Kuperman2011IndividualDI}}\hspace{0pt}%DIFAUXCMD
+}\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{chen2023accelerating,Kuperman2011IndividualDI}}\hspace{0pt}%DIFAUXCMD
+}\DIFaddend , KV-cache compression~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{DeepSeekAI2024DeepSeekV2AS}}\hspace{0pt}%DIFAUXCMD
+}\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{DeepSeekAI2024DeepSeekV2AS}}\hspace{0pt}%DIFAUXCMD
+}\DIFaddend , and memory efficient implementation~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{Dao2022FlashAttentionFA}}\hspace{0pt}%DIFAUXCMD
+, 
+ scaling }\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{Dao2022FlashAttentionFA}}\hspace{0pt}%DIFAUXCMD
+, 
+ it remains a challenge to scale }\DIFaddend Transformers for autonomous and continual use with an infinite (or extremely long) context window\DIFdelbegin \DIFdel{remains a challenge}\DIFdelend . 
+
+Recent advances in linear attention models~\citep{katharopoulos2020transformers} and state-space models (SSMs)\DIFaddbegin \DIFadd{~}\DIFaddend \citep{gu2021efficiently} have demonstrated their potential. These models are specialized recurrent neural networks capable of efficiently computing outputs in parallel when input tokens are provided simultaneously during training, thus avoiding the inefficiencies of traditional backpropagation through time. During inference, the recurrent form is employed, resulting in linear decoding efficiency.
+Initially, these models underperformed compared to Transformers. However, recent SSMs~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{gu2023mamba,yang2023gated,peng2024eagle,de2024griffin,Beck2024xLSTMEL} }\hspace{0pt}%DIFAUXCMD
+}\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{gu2023mamba,yang2023gated,peng2024eagle,de2024griffin,Beck2024xLSTMEL} }\hspace{0pt}%DIFAUXCMD
+}\DIFaddend have achieved performance parity with Transformers in language modeling tasks. Despite extensive research into various design aspects of SSMs, a guiding principle for designing SSMs remains elusive.
+
+In this work, we propose one potential principle. We observe that one can view SSMs (or any sequence mixing layers) as ``meta modules" that compress the history \emph{online} into a memory state which is then used by later layers in the network for sequence modeling. From this perspective:
+\begin{center}
+\emph{The recurrent form of SSMs can be viewed as solving an online learning problem}.
+\end{center}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig1.pdf}
+    \caption{\textbf{(left)} Most existing sequence models consist of channel and sequence mixing layers. The sequence mixing layers can be viewed as ``meta-modules" that compress history into a state \DIFdelbeginFL \DIFdelFL{$s_t$}\DIFdelendFL \DIFaddbeginFL \DIFaddFL{$S_t$}\DIFaddendFL , which is then passed to later layers for sequence modeling. \textbf{(middle)} Sequence mixing can be seen as an online learning problem, where the SSM state \DIFdelbeginFL \DIFdelFL{$s_t$ }\DIFdelendFL \DIFaddbeginFL \DIFaddFL{$S_t$ }\DIFaddendFL optimizes an online objective. The recurrent update of \DIFdelbeginFL \DIFdelFL{$s_t$ }\DIFdelendFL \DIFaddbeginFL \DIFaddFL{$S_t$ }\DIFaddendFL is derived either by solving this objective in closed form or via a \DIFdelbeginFL \DIFdelFL{gradient step}\DIFdelendFL \DIFaddbeginFL \DIFaddFL{proximal update}\DIFaddendFL . \textbf{(right)} \ours{}'s \DIFdelbeginFL \DIFdelFL{dynamics is derived from solving an }\DIFdelendFL \DIFaddbeginFL \DIFaddFL{update solves }\DIFaddendFL online \DIFdelbeginFL \DIFdelFL{regression problem}\DIFdelendFL \DIFaddbeginFL \DIFaddFL{associative recall}\DIFaddendFL , where the goal is to recover \DIFdelbeginFL \DIFdelFL{$x \in \R$ (if }\DIFdelendFL $x \in \R^d$ \DIFdelbeginFL \DIFdelFL{we can run $d$ SSMs in parallel) }\DIFdelendFL based on a hint $k \in \R^m$ from a state \DIFdelbeginFL \DIFdelFL{vector $s \in \R^d$}\DIFdelendFL \DIFaddbeginFL \DIFaddFL{matrix $S \in \R^d$}\DIFaddendFL .
+    \DIFdelbeginFL \DIFdelFL{The closed-form solution to the online regression problem }\DIFdelendFL \DIFaddbeginFL \DIFaddFL{\ours{}'s update }\DIFaddendFL corresponds to the implicit online learning \DIFdelbeginFL \DIFdelFL{update}\DIFdelendFL \DIFaddbeginFL \DIFaddFL{solution}\DIFaddendFL , where \DIFdelbeginFL \DIFdelFL{$\Delta_t = \beta_t / (1 + \beta_t k_t^\top k_t)$}\DIFdelendFL \DIFaddbeginFL \DIFaddFL{$A_t = 1_{d \times m} - \varepsilon_t \otimes k^{\otimes 2}$ and $B_t = (\varepsilon \odot x_t) \otimes k_t$, and $\varepsilon_t = \beta_t / (1 + \beta_t k_t^\top k_t)$}\DIFaddendFL . \DIFdelbeginFL \DIFdelFL{Please see }\DIFdelendFL \DIFaddbeginFL \DIFaddFL{See }\DIFaddendFL the details in Section~\ref{sec::method} \DIFaddbeginFL \DIFaddFL{and Algorithm~\ref{alg:longhorn}}\DIFaddendFL .
+    }
+    \DIFaddendFL \label{fig:longhorn-online}
+\DIFdelendFL \end{figure}
+
+As a result, \textbf{we can draw inspiration from online learning and confine the design choices of SSMs to reflect those learning dynamics that solve specific online prediction problems}. The aim is that, by optimizing for the right objective, the model can achieve superior performance with fewer parameters or reduced computational costs. Furthermore, this online learning perspective may offer deeper insights into the function of SSM layers in large models. In particular, the recurrent update (i.e., state-transition dynamics) of an SSM can be interpreted as a \DIFdelbegin \DIFdel{gradient descent }\DIFdelend \DIFaddbegin \DIFadd{proximal update }\DIFaddend step or a closed-form solution to an online learning objective. We outline the corresponding objectives for several existing SSMs in Table~\ref{tab:ssms}. One \DIFdelbegin \DIFdel{particular appeal }\DIFdelend \DIFaddbegin \DIFadd{significant advantage }\DIFaddend of viewing SSMs through the lens of online learning is \DIFdelbegin \DIFdel{that they can thus be designed to adapt at deploymenttime, }\DIFdelend \DIFaddbegin \DIFadd{their ability to adapt }\DIFaddend post-training \DIFdelbegin \DIFdel{, based on an }\DIFdelend \DIFaddbegin \DIFadd{during deployment, allowing them to process }\DIFaddend arbitrarily long data \DIFdelbegin \DIFdel{sequence.
+For this reason, they may be able to deal with context lengths much longer than those used for training.
+}\DIFdelend \DIFaddbegin \DIFadd{sequences at inference.
+}\DIFaddend 
+
+Based on this insight, we propose a simple yet effective architecture (\ours{}), derived from the implicit closed-form update of an online associative recall problem. The closed-form update naturally leads to a stable recurrent form without a manually designed gating mechanism\DIFaddbegin \DIFadd{, automatically balancing }\emph{\DIFadd{forgetting}} \DIFadd{and }\emph{\DIFadd{learning}}\DIFaddend . Thus \ours{} does not need a separately parameterized forget gate, which saves parameters when the state size is large. We demonstrate that \ours{} performs comparably to or better than state-of-the-art SSMs like Mamba~\citep{gu2023mamba} on synthetic and large-scale sequence modeling tasks. In particular, \ours{} outperforms Mamba at the size of 1.3B-parameter when trained on 100B tokens from the SlimPajama dataset~\citep{cerebras2023slimpajama}. To summarize, our contributions are:
+
+\textbf{1) Theoretical Framework:} We propose a novel framework that views SSMs' recurrent update as solving online learning objectives. As a result, the design of SSMs reduces to the design of the online learning objectives. In particular, we introduce a novel, simple, and effective SSM, named \emph{\ours{}}, that explicitly solves an online associative recall problem. \ours{}'s recurrent update is obtained by the \emph{closed-form} solution to the online learning objective. Consequently, \ours{} does not require a separately parameterized forget gate that appears in most existing SSMs.
+
+\textbf{2) Empirical Results:} 
+\ours{} demonstrates better performance than existing SSMs including Mamba, across both synthetic associative recall tasks and the large-scale language modeling task. Moreover, it achieves 1.8x improvement in sample efficiency compared to Mamba (See Figure~\ref{fig:fig1} (left)). \ours{}'s training speed is as fast as Mamba, as we only replace the SSM module in the Mamba architecture with \ours{}'s recurrence. So it serves as a drop-in replacement for Mamba. Lastly, \ours{}, trained with 2048 context length can extrapolate to 32K context length at inference time without much perplexity drop (See Figure~\ref{fig:fig1} (right)).
+
+\paragraph{Notation}
+Throughout this work, we use $\odot$ to denote the Hadamard (elementwise) product, and $\otimes$ to denote the Kronecker (or outer) product between two tensors. Uppercase letters $A, B$, etc. denote matrices, while lowercase $k, v$ are in general vectors. $\norm{\cdot}$ by default refers to the $\ell_2$ norm for vectors.
+\begin{algorithm*}[t]
+    \caption{\ours{}'s Single-layer SSM Recurrence (Inference Time)}
+    \begin{algorithmic}[1]
+        \STATE \textbf{Parameters:} $W_q \in \RR^{m \times d}, W_k \in \RR^{m \times d}, W_\beta \in \RR^{d \times d}$, where $W_\beta$ can be low-rank, horizon $T$.
+        \STATE Initialize the memory state $S_0 \leftarrow 0^{d \times m}$.
+        \FOR{$t \in \{1, \dots, T\}$}
+            \STATE \textbf{1)} Receive input $x_t \in \RR^d$. \\
+            \STATE \textbf{2)} Compute the query $q_t$, key $k_t$ and  $\beta_t$\DIFdelbegin \DIFdel{(as in objective $||s - s_{t-1}||^2 + \beta_t ||s^\top k_t - x_t||^2$)}\DIFdelend : 
+            \begin{align*}
+            q_t = W_q x_t \in \RR^m, && k_t = W_k x_t \in \RR^m, &&\beta_t = \text{Sigmoid}(W_{\beta} x_t) \in (0, 1)^d. 
+            \end{align*}
+            \STATE \textbf{3)} Update the memory state $S_t \in \RR^{d\times m}$ via 
+            \begin{align*} 
+            S_t = \big(1\DIFaddbegin \DIFadd{_{d \times m} }\DIFaddend - \DIFdelbegin \DIFdel{\Delta}\DIFdelend \DIFaddbegin \DIFadd{\varepsilon}\DIFaddend _t \otimes k_t^{\odot 2}\big) \odot S_{t-1} + \big(\DIFdelbegin \DIFdel{\Delta}\DIFdelend \DIFaddbegin \DIFadd{\varepsilon}\DIFaddend _t \odot x_t\big) \otimes k_t, && \DIFdelbegin \DIFdel{\Delta}\DIFdelend \DIFaddbegin \DIFadd{\varepsilon}\DIFaddend _t = \beta_t / (1 + \beta_t k_t^\top k_t) \in (0, 1)^d.
+            \end{align*} 
+            \STATE \textbf{4)} Compute the output $o_t = S_t q_t \in \RR^d$. \\
+        \ENDFOR
+        \STATE \textbf{Note:} $\odot$ elementwise product and $\otimes$ is outer product.  $x_t$ in practice is preprocessed through a linear projection followed by a Conv1d operation as in Mamba~\citep{gu2023mamba}.
+    \end{algorithmic}
+    \label{alg:longhorn}
+\end{algorithm*}
+
+
+\section{Background}
+
+\label{sec::background}
+In this section, we provide a brief introduction to contemporary deep state space models (deep SSMs).
+
+Modern large language models are sequence-to-sequence models consisting of a stack of layers 
+$\bm{y} = \Phi_L \circ \cdots \circ \Phi_1(\bm{x})$ that sequentially processes an input sequence $\bm{x} =\{x_t\}_{t=1}^T$, where $T$ is the context length. 
+Specifically, transformers consist of alternative stacks of self-attention (SA) and multi-layer perceptron (MLP) layers that conduct \emph{mixing} (i.e., information aggregation) on the sequence and channel dimensions, respectively.
+
+Deep SSMs replace the SA layers with SSM layers.
+Some variants of SSM models leave the MLP layers unchanged~\citep{sun2023retentive,yang2023gated,de2024griffin}, while others fuse the SSM layer and the MLP layer into a single unified module~\citep{gu2023mamba}.
+But in both cases, the sequence mixing is done by the SSM module, and the channel mixing is done by the channel-wise MLP. Taking Mamba as an example~\citep{gu2023mamba}, a Mamba model consists of a stack of homogeneous modules named Mamba block (the \DIFdelbegin \DIFdel{$\Phi(\bm{x})$}\DIFdelend \DIFaddbegin \DIFadd{$\Phi_i(\bm{x})$}\DIFaddend ); we provide a visualization of a single Mamba block in Figure~\ref{fig:mamba-block}~\citep{gu2023mamba}, 
+which consists of an SSM block for sequence mixing (\DIFdelbegin \DIFdel{\textcolor{red}}%DIFDELCMD < {%%%
+\DIFdelend \DIFaddbegin \DIFadd{\textcolor{black}}{\DIFaddend red}), 
+and an MLP block for channel mixing (\DIFdelbegin \DIFdel{\textcolor{myblue}}%DIFDELCMD < {%%%
+\DIFdelend \DIFaddbegin \DIFadd{\textcolor{black}}{\DIFaddend blue}).
+
+\paragraph{SSM: General Form} 
+The SSM block (in \DIFdelbegin \DIFdel{\textcolor{red}}%DIFDELCMD < {%%%
+\DIFdelend \DIFaddbegin \DIFadd{\textcolor{black}}{\DIFaddend red}) plays the crucial role of sequence mixing. 
+It works by iteratively updating a memory state matrix $S_t\in \RR^{d\times m}$ with a linear recurrence: 
+\begin{align} 
+S_t = A(x_t) * S_{t-1} + B(x_t),
+&&\forall t \in\{ 1,\ldots, T\}, 
+&& S_0 = 0,
+\label{eq:ssm-general}
+\end{align}
+where $x_t$ is the input at time $t$, $S_t$ is the model's \emph{state}, $A_t, B_t \colon \RR^d \to \RR^{d\times m}$ are some functions and $*$ is a multiplication operation of choice, such as Hadamard product or matrix product. 
+
+\DIFdelbegin %DIFDELCMD < \begin{wrapfigure}{r}{0.23\textwidth}
+{%DIFAUXCMD
+\DIFdel{Mamba Block}}
+
+\DIFdelend Given the state $S_t$, 
+SSMs often give the output token at the next layer via a gated linear unit (GLU)~\citep{dauphin2017language}:
+\begin{align*}
+y_t = \mathtt{Readout}(S_t, x_t) = W_1 \big(o_t \odot \sigma(W_2 x_t)\big), && 
+o_t = C(x_t) S_t,
+\end{align*}
+where we first get $o_t$ 
+via a state-dependent linear projection on $S_t$, which is then fed into a subsequent channel mixing gated linear unit (blue in Figure~\ref{fig:mamba-block}), 
+where $\sigma(\cdot)$ is a non-linear activation function.
+
+A key feature of this design 
+in \Eqref{eq:ssm-general} 
+is that \DIFdelbegin \DIFdel{the update of $S_t$ is a }\emph{\DIFdel{linear}} %DIFAUXCMD
+\DIFdel{recurrencerelation.That is, $S_{t}$ is a linear function of }\DIFdelend \DIFaddbegin \DIFadd{$S_{t}$ has a linear recurrence, i.e., $S_t$ is linear in }\DIFaddend $S_{t-1}$. 
+\DIFdelbegin %DIFDELCMD < 
+
+\DIFdelend \DIFaddbegin \begin{wrapfigure}{r}{0.25\textwidth}
+  \centering
+  \includegraphics[width=0.25\textwidth]{figures/mamba_original_arch.pdf}
+  \caption{\DIFadd{Mamba Block}}
+  \label{fig:mamba-block}
+\end{wrapfigure}
+\DIFaddend Crucially, this allows us to express all $S_t$ in an explicit form that can be calculated in parallel: 
+when all $\bm{x} = \{x_t\}_t$ are available as in the training phase, $\{S_t\}_t$ can be written into  
+\begin{equation}
+S_t = 
+\sum_{t' \leq t} (\bar A_{t' \to t})  B(x_{t'}), ~~~~~~\text{where}~~~~~~~
+\bar A_{t'\to t} = \prod_{t'< \tau \leq t} A (x_\tau).
+\end{equation}
+Here $\prod$ denotes the product induced by multiplication operator $*$. The resulting cumulative product $\bar A_{t'\to t} $ can be implemented efficiently in parallel with the prefix scan algorithm~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{harris2007parallel}}\hspace{0pt}%DIFAUXCMD
+}\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{harris2007parallel}}\hspace{0pt}%DIFAUXCMD
+}\DIFaddend , which only requires \DIFdelbegin \DIFdel{$\mathcal{O}(\log t)$ ($t$ }\DIFdelend \DIFaddbegin \DIFadd{$\mathcal{O}(\log T)$ ($T$ }\DIFaddend is the sequence length) parallel operations. From now on, we will abbreviate $A(x_t)$ and $B(x_t)$ as $A_t$ and $B_t$, respectively.
+\paragraph{Designs of ($A_t$, $B_t$, $*$)} 
+Existing variants of SSMs 
+mainly differ in the design choices of the networks $A_t, B_t$, and the associated operator $*$ in the linear recurrence. 
+A core issue here is that the memory state $S_t \in \RR^{d\times m}$, designed to be $m$ times the input $x_t$ in size, 
+must be as large as possible to maintain sufficient information during recurrence. 
+This makes the architecture design of $A_t, B_t$, 
+both mapping $\RR^d$ to $\RR^{d\times m}$ challenging. 
+A naive linear lay would result in $d\times d\times m$ weights, which is prohibitively large. 
+This makes it necessary to impose certain low-dimensional structures in $A_t, B_t$, which is the main difference from existing designs of SSMs.
+
+
+\section{An Online Learning Perspective For Sequence Mixing}
+
+\label{sec::method}
+As demonstrated in the previous section, designing a state-space model (SSM) depends on the specific selection of $(A_t, B_t, *)$, which is intricate and somewhat artisanal. In this section, we propose to streamline SSM design through an online learning perspective. The main idea is to treat the SSM layers as learning modules that learn to compress information along the sequence dimension. From this perspective, the SSM layers are \emph{learning to learn}, such that during the inference time, these layers are still learning (compressing) new information online.  
+
+We begin with an overview of online learning and subsequently demonstrate how SSM can be framed as an online learning problem. Finally, we present a straightforward architecture based on the closed-form solution of the implicit online learning algorithm.
+
+\subsection{SSM as Online Learning}
+We advocate viewing the recurrence of SSM as solving an online learning problem. 
+In online learning, the agent picks a state $s_t$ at time $t$ and then incurs a loss $\ell_t(s_t)$. The goal is to minimize
+\begin{equation}
+\min_{\{s_t\}} \sum_t \ell_t(s_t).
+\label{eq:ocp-1}
+\end{equation}
+For instance, consider online linear prediction, where at each step the agent is given an input-label pair $(x_t, y_t)$ and $\ell_t(s_t) = \frac{1}{2}||s_t^\top x_t - y_t||^2$ is the $\ell_2$ regression loss, then the problem becomes an online regression problem, and the goal is to successfully predict $y_t$ given $x_t$ at future time steps, with the key feature that the prediction ($s_t$) can change with each new data point. 
+
+Online convex programming (OCP)\DIFaddbegin \DIFadd{~\mbox{%DIFAUXCMD
+\citep[e.g.,][]{zinkevich2003online} }\hspace{0pt}%DIFAUXCMD
+}\DIFaddend yields a principled approach to 
+solving \Eqref{eq:ocp-1} when $\ell_t$ are convex, by trading-off the ``stability" and ``\DIFdelbegin \DIFdel{plasiticity}\DIFdelend \DIFaddbegin \DIFadd{plasticity}\DIFaddend "~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{mermillod2013stability}}\hspace{0pt}%DIFAUXCMD
+}\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{mermillod2013stability}}\hspace{0pt}%DIFAUXCMD
+}\DIFaddend . Formally, an online convex programming algorithm updates $s_t$ by 
+solving a regularized cost function:
+\begin{equation}
+s_{t} = \argmin_s L_t(s),  ~~~~~~~ 
+L_t(s) = \underbrace{D_\phi(s, s_{t-1})}_{\text{stability}} + \underbrace{\beta_t \ell_t(s)}_{\text{plasticity}},
+\label{eq:ocp-stability-plasticity}
+\end{equation}
+where $\beta_t \in \RR^+$ and
+$D_\phi$ is a discrepancy measure, often a Bregman divergence induced by the convex function $\phi$ (e.g., when $\phi(x) =  \frac{1}{2}\norm{x}^2$, $D_\phi(s, s_{t-1}) = \frac{1}{2}||s - s_{t-1}||^2$).
+Here the first term ensures the updated $s$ will be close to the previous $s_{t-1}$, so the agent suffers less from \emph{catastrophic forgetting}, while the second term ensures the agent is incorporating new knowledge from minimizing the new loss $\ell_t(s)$. Hence, $\beta_t$ controls the trade-off between stability and plasticity.
+
+\subsection{The \ours{} Architecture}
+
+Under the online learning framework, the \textbf{design of an SSM reduces to the design of $D_\phi$ and $\ell_t$} in \Eqref{eq:ocp-stability-plasticity}. 
+ This provides a unified framework for the existing SSM variants. 
+ 
+
+In this work, we explore a highly simplified and natural design called   \emph{Longhorn} guided by the online principle (see the last row of Table~\ref{tab:ssms}).
+In particular, we consider $\{(k_t, x_t)\}_t$ as the input stream, where $k_t \in \RR^m$ and \DIFdelbegin \DIFdel{$x_t \in \RR$ }\DIFdelend \DIFaddbegin \DIFadd{$x_t \in \RR^d$ }\DIFaddend are the key-value pairs\DIFaddbegin \DIFadd{, just as in the Transformer model~\mbox{%DIFAUXCMD
+\citep{vaswani2017attention}}\hspace{0pt}%DIFAUXCMD
+}\DIFaddend . In practice, as in Mamba~\citep{gu2023mamba}, \DIFdelbegin \DIFdel{$x_t \in \R^d$ is often a vector and }\DIFdelend $k_t = W_k x_t \in \R^m$\DIFaddbegin \DIFadd{, where $W_k \in \R^{m \times d}$, }\DIFaddend is a linear mapping from $x_t$.
+
+We want to recurrently update hidden states \DIFdelbegin \DIFdel{$\{s_t\}_t$, where $s_t\in \RR^{m}$ is a vector that aims to summarize }\DIFdelend \DIFaddbegin \DIFadd{$\{S_t\}_t$, where $S_t\in \RR^{d \times m}$ is a matrix that summarizes }\DIFaddend the information up to time $t$. 
+We posit the following OCP objective for updating \DIFdelbegin \DIFdel{$s_t$: 
+}\DIFdelend \DIFaddbegin \DIFadd{$S_t$: 
+}\DIFaddend \begin{equation}
+\DIFdelbegin \DIFdel{s}\DIFdelend \DIFaddbegin \DIFadd{S}\DIFaddend _t = \argmin\DIFdelbegin \DIFdel{_{s\in \RR^m} }\DIFdelend \DIFaddbegin \DIFadd{_{S\in \RR^{d \times m}}}\left \{ \DIFaddend ||\DIFdelbegin \DIFdel{s }\DIFdelend \DIFaddbegin \DIFadd{S }\DIFaddend - \DIFdelbegin \DIFdel{s}\DIFdelend \DIFaddbegin \DIFadd{S}\DIFaddend _{t-1}||^2\DIFaddbegin \DIFadd{_\text{F} }\DIFaddend + \DIFdelbegin \DIFdel{\beta_t }\DIFdelend ||\DIFdelbegin \DIFdel{s^\top }\DIFdelend \DIFaddbegin \DIFadd{S }\DIFaddend k_t - x_t||^2\DIFaddbegin \DIFadd{_{\diag(\beta_t)} }\right\}\DIFaddend .
+\label{eq:longhorn-obj}
+\end{equation}
+Here, \DIFdelbegin \DIFdel{$\beta_t$ controls }\DIFdelend \DIFaddbegin \DIFadd{$||\cdot||_\text{F}$ denotes the Frobenius norm of a matrix, $\beta_t \in \R^d$ is a vector controlling }\DIFaddend how much new information about $x_t$ we want the model to incorporate \DIFaddbegin \DIFadd{for $S_t$}\DIFaddend . For instance, \DIFdelbegin \DIFdel{$\beta_t = 0$ implies $s_t = s_{t-1}$, }\DIFdelend \DIFaddbegin \DIFadd{$\beta_{t, i} = 0$ implies $S_{t, i} = S_{t-1, i}$ (i.e., the $i$-th row of $S$ remains unchanged), }\DIFaddend while a large \DIFdelbegin \DIFdel{$\beta_t$ }\DIFdelend \DIFaddbegin \DIFadd{$\beta_{t, i}$ }\DIFaddend implies the model \DIFdelbegin \DIFdel{sacrifices stability for plasticity}\DIFdelend \DIFaddbegin \DIFadd{empties some part of $S_i$ for incorporating $x_{t, i}$}\DIFaddend .
+
+From a high-level perspective, \Eqref{eq:longhorn-obj} is solving an online prediction problem of learning a weight \DIFdelbegin \DIFdel{$s$ }\DIFdelend \DIFaddbegin \DIFadd{matrix $S$ }\DIFaddend to predict $x_t$ given $k_t$ with a linear model \DIFdelbegin \DIFdel{$x_t \approx s \tt k_t$}\DIFdelend \DIFaddbegin \DIFadd{$x_t \approx S \tt k_t$}\DIFaddend .
+It is a supervised formulation of the 
+\emph{associative memory} problem of 
+memorize  $(k_t, x_t)$ pairs 
+by learning a mapping from $k_t$ to $x_t$, such that given a key (input) $k_t$ the model can retrieve (predict) its corresponding value (label) $x_t$. 
+
+\DIFaddbegin \DIFadd{The objective in }\Eqref{eq:longhorn-obj} \DIFadd{is motivated by the observation that the self-attention layer of the Transformer exhibits a form of online associative recall (often referred to as the induction head property)~\mbox{%DIFAUXCMD
+\citep{olsson2022context}}\hspace{0pt}%DIFAUXCMD
+. This capability has been shown to underpin the model's ability to perform in-context learning~\mbox{%DIFAUXCMD
+\citep{brown2020language}}\hspace{0pt}%DIFAUXCMD
+. To explain the connection, in-context learning refers to the model's ability, during inference, to generalize from a set of provided ${(k, x)}$ (question-answer) pairs and apply this understanding to a new question. This closely parallels associative recall, where the model retrieves relevant information from past interactions to address new inputs.
+}
+
+\DIFaddend Fortunately, this simple objective gives a closed-form solution for \DIFdelbegin \DIFdel{$s_t$}\DIFdelend \DIFaddbegin \DIFadd{$S_t$}\DIFaddend , which coincides with the implicit online learning method~\DIFdelbegin \DIFdel{\mbox{%DIFAUXCMD
+\citep{kulis2010implicit}}\hspace{0pt}%DIFAUXCMD
+}\DIFdelend \DIFaddbegin \DIFadd{\mbox{%DIFAUXCMD
+\citep[e.g.,][]{kulis2010implicit}}\hspace{0pt}%DIFAUXCMD
+
+\begin{thm}
+The closed form solution for \DIFdelbegin \DIFdel{$s_t$ }\DIFdelend \DIFaddbegin \DIFadd{$S_t$ }\DIFaddend for objective in \DIFdelbegin %DIFDELCMD < \eqref{eq:longhorn-obj} %%%
+\DIFdel{is
+}\DIFdelend \DIFaddbegin \Eqref{eq:longhorn-obj} \DIFadd{is
+}\DIFaddend \begin{equation}
+\DIFdelbegin \DIFdel{s_t }\DIFdelend \DIFaddbegin \DIFadd{S_{t, i} }\DIFaddend = (I - \DIFdelbegin \DIFdel{\Delta_t }\DIFdelend \DIFaddbegin \DIFadd{\varepsilon_{t, i} }\DIFaddend k_t k_t^\top) \DIFdelbegin \DIFdel{s_{t-1} }\DIFdelend \DIFaddbegin \DIFadd{S_{t-1, i} }\DIFaddend + \DIFdelbegin \DIFdel{\Delta_t }\DIFdelend \DIFaddbegin \DIFadd{\varepsilon_{t, i} }\DIFaddend k_t x\DIFdelbegin \DIFdel{_t}\DIFdelend \DIFaddbegin \DIFadd{_{t, i}}\DIFaddend , ~~~\text{where}~\DIFdelbegin \DIFdel{\Delta_t }\DIFdelend \DIFaddbegin \DIFadd{\varepsilon_{t, i} }\DIFaddend = \DIFdelbegin \DIFdel{\frac{\beta_t}{1 + \beta_t k_t^\top k_t} }\DIFdelend \DIFaddbegin \DIFadd{\frac{\beta_{t, i}}{1 + \beta_{t, i} k_t^\top k_t} }\DIFaddend \in [0, \infty).
+\label{eq:longhorn-closed-form}
+\end{equation}
+\label{thm:longhorn}
+\end{thm}
+\DIFaddbegin \DIFadd{Here, $S_{t, i}$ refers to the $i$-th row of $S_t$, $\beta_{t, i}$ refers to the $i$-th element of $\beta_t$. }\DIFaddend As $k_t k_t^\top$ is a matrix, it is hard to compute its cumulative product for conducting a parallel scan. As a result, in practice, we use the diagonal approximation \DIFdelbegin \DIFdel{$1_m - \Delta_t k_t^{\odot 2}$ }\DIFdelend \DIFaddbegin \DIFadd{$1_m - \varepsilon_{t,i} k_t^{\odot 2}$ }\DIFaddend in place of \DIFdelbegin \DIFdel{$I - \Delta_t k_t k_t^\top$, where $x^{\odot 2} = x \odot x$ }\DIFdelend \DIFaddbegin \DIFadd{$I - \varepsilon_{t,i} k_t k_t^\top$, where $a^{\odot 2} = a \odot a$ }\DIFaddend and $1_m$ is the $m$-dimensional all-one vector. \DIFdelbegin %DIFDELCMD < 
+
+\DIFdel{The above is under the simplified 1D setting. In practice, following }\DIFdelend \DIFaddbegin \DIFadd{Following }\DIFaddend Mamba~\citep{gu2023mamba} and Transformer~\citep{vaswani2017attention}, \DIFdelbegin \DIFdel{$x_t \in \R^d$ is a vector, and $k_t(x_t) = W_k x_t \in \R^m$ is a }\emph{\DIFdel{shared key}} %DIFAUXCMD
+\DIFdel{across $d$-dimension, which is a linear mapping from $x_t$. We similarly make $\beta(x_t) = \sigma(W_\beta x_t) \in \R^d$ a function }\DIFdelend \DIFaddbegin \DIFadd{we make $k_t = W_k x_t \in \R^m$ and $\beta_t = \sigma(W_\beta x_t) \in \R^d$ (both are functions }\DIFaddend of $x_t$\DIFdelbegin \DIFdel{, but add an }\DIFdelend \DIFaddbegin \DIFadd{), where the }\DIFaddend activation $\sigma$ (the Sigmoid function) \DIFaddbegin \DIFadd{is }\DIFaddend to ensure that \DIFdelbegin \DIFdel{$\beta(x_t)$ }\DIFdelend \DIFaddbegin \DIFadd{$\beta_t$ }\DIFaddend is positive and bounded. \DIFdelbegin \DIFdel{As a result, $x_t, \beta_t, \Delta_t \in \RR^d, k_t \in \R^m$, and the memory state $S_t \in \RR^{d \times m}$ is a matrix, \ours{} 's update then becomes:
+}\DIFdelend \DIFaddbegin \DIFadd{In summary, the final \ours{} update of $S_t$ becomes:
+}\DIFaddend \begin{equation}
+S_t = A_t \odot S_{t-1} + B_t, ~~\text{where}~~ A_t = (1\DIFaddbegin \DIFadd{_{d \times m} }\DIFaddend - \DIFdelbegin \DIFdel{\Delta}\DIFdelend \DIFaddbegin \DIFadd{\varepsilon}\DIFaddend _t \otimes k_t^{\odot 2} ),~~B_t = (\DIFdelbegin \DIFdel{\Delta}\DIFdelend \DIFaddbegin \DIFadd{\varepsilon}\DIFaddend _t \odot x_t) \otimes k_t.
+\label{eq:longhorn-ssm-matrix}
+\end{equation}
+The final architecture of \ours{} follows Mamba strictly (Figure~\ref{fig:mamba-block}), except that we replace the SSM block with \ours{}'s recurrence. We also provide an efficient CUDA kernel for it. 
+The full inference-time algorithm is provided in Algorithm~\ref{alg:longhorn}. One can compare \DIFdelbegin %DIFDELCMD < \eqref{eq:longhorn-ssm-matrix} %%%
+\DIFdel{to }%DIFDELCMD < \eqref{eq:mamba-ssm} %%%
+ \ours{} does not introduce an extra ``forgetting" gate (hence it has fewer parameters), because the \DIFdelbegin \DIFdel{forget }\DIFdelend \DIFaddbegin \DIFadd{forgetting }\DIFaddend gate is naturally derived from the key vector, i.e., \DIFdelbegin \DIFdel{$(1 - k^{\odot 2} \otimes \Delta_t)$}\DIFdelend \DIFaddbegin \DIFadd{$(1_{d \times m} - \varepsilon_t \otimes k_t^{\odot 2})$}\DIFaddend .
+
+\paragraph{Advantages of \ours{}} 
+\DIFdelbegin \textbf{\DIFdel{1)}} %DIFAUXCMD
+\DIFdelend \DIFaddbegin \begin{enumerate}
+    \item \DIFaddend While we can derive the learning objective for some of the existing SSMs, \ours{} is the first SSM designed for explicitly solving an online regression problem. 
+    \DIFdelbegin \textbf{\DIFdel{2)}} %DIFAUXCMD
+\DIFdelend \DIFaddbegin \item \DIFaddend \ours{} does not require a specific forget gate (e.g., $\alpha_t$ in GLA or $A$ matrix in Mamba). The forgetting is naturally linked to the key vector $k_t$ through the derivation. This saves about $\mathcal{O}(d \times m)$ parameters per SSM module, where $m$ is the dimension of $k_t$, and $d$ is the dimension of $x_t$. However, \ours{} demonstrates better performance even with fewer parameters than Mamba (See Figure~\ref{fig:fig1} (left), Table~\ref{tab:openwebtext_scaling_law}, Table~\ref{tab:slimpajama}). 
+    \DIFdelbegin \textbf{\DIFdel{3)}} %DIFAUXCMD
+\DIFdelend \DIFaddbegin \item \DIFaddend The closed-form solution in \Eqref{eq:longhorn-closed-form} \textbf{does not need any specific initialization}. In contrast, Mamba requires \DIFaddbegin \DIFadd{a special }\DIFaddend careful initialization of the $A$ and \DIFdelbegin \DIFdel{$\Delta_t$.
+    Compared to DeltaNet~\mbox{%DIFAUXCMD
+\citep{schlag2021linear, yang2024parallelizing}}\hspace{0pt}%DIFAUXCMD
+, we restrict the state-transition matrix to be diagonal, hence \ours{} can leverage both parallel scan (as in Mamba) and the chunk-wise parallelization (as in GLA). Therefore, it is as fast as existing SSMs. }\textbf{\DIFdel{4)}} %DIFAUXCMD
+\DIFdelend \DIFaddbegin \DIFadd{$\varepsilon_t$.
+    }\item \DIFaddend Unlike DeltaNet~\citep{yang2024parallelizing}, which struggles to extrapolate beyond training contexts, \ours{} successfully extrapolates to contexts \textbf{16x longer} than it was trained for (Figure~\ref{fig:fig1} (right)).
+\DIFaddbegin \end{enumerate}
+
+
+\section{Related Work}
+
+\label{sec::related}
+This section provides a summary of recent advances in linear attention and state space models.
+\paragraph{Linear Attention Models} Several methods reduce the quadratic complexity of Transformers by making attention linear with respect to context length. Linformer projects keys and values into a constant-size matrix, bypassing the scaling with sequence length \citep{wang2020linformer}. Linear Transformer replaces the Softmax function with a decomposable similarity function, achieving linear complexity \citep{katharopoulos2020transformers}. Performer approximates softmax attention using orthogonal random features \citep{choromanski2020rethinking}. RetNet adds constant forgetting and rotation \citep{sun2023retentive}, while Gated Linear Attention introduces learnable forget gates \citep{yang2023gated}. Linear attention can also be seen as a fast weight network where a slow net adapts a fast network's parameters online using inputs \citep{schlag2021linear}.
+\paragraph{State Space Models} State space models (SSMs) focus on parallelizable linear recurrent networks. Initially, a constant state transition matrix $A$ allows recurrence to be computed via convolution \citep{li2022makes, gu2021efficiently}. Key models include Diagonal State Space (DSS) \citep{gupta2022diagonal}, Gated State Space (GSS) \citep{mehta2022long}, S5 \citep{smith2022simplified}, Bidirectional Gated SSM (BiGS) \citep{wang2022pretraining}, H3 \citep{fu2022hungry}, and Mamba \citep{gu2023mamba}. Efficient recurrent networks often resemble SSMs, such as Deep Linear Recurrent Units (LRUs) \citep{orvieto2023resurrecting, de2024griffin}, Hierarchically Gated Linear RNNs (HGRN) \citep{qin2024hierarchically, qin2024hgrn2}, and RWKV \citep{peng2023rwkv, peng2024eagle}.
+\paragraph{Fast Weight Programmer} The idea of networks modifying their own weights in response to inputs dates back to the Fast-weight Programmer \citep{schmidhuber1992learning, schmidhuber1993reducing, schlag2017gated, schlag2021linear}. These models update a weight matrix $W \in \mathbb{R}^{d \times m}$ via the outer product of two vectors: \DIFdelbegin \DIFdel{$\Delta W = v(x_t) \otimes k(x_t)$}\DIFdelend \DIFaddbegin \DIFadd{$\Delta W = x_t \otimes k(x_t)$}\DIFaddend , a mechanism similar to Linear Attention. Our framework extends this concept by adapting the weight update process to suit specific online learning objectives, enhancing its use in dynamic learning environments.
+\paragraph{Concurrent Work} Two concurrent works share similar ideas with ours. \citet{yang2024parallelizing} propose a chunk-wise parallel approach to scale DeltaNet \citep{schlag2021linear} for large-scale language modeling. DeltaNet’s update rule, viewed as a gradient step for an online regression objective, results in a state transition matrix $A(x_t) = (I - \beta_t k_tk_t^\top)$, which can have eigenvalues \DIFdelbegin \DIFdel{>}\DIFdelend \DIFaddbegin \DIFadd{$>$}\DIFaddend 1, leading to instability. To address this, \citet{yang2024parallelizing} normalize the key vector $k_t$ by its $\ell_2$ norm, which can be restrictive. In contrast, \ours{} ensures stability with a closed-form update, using a diagonal approximation ($k_t^{\odot 2}$), allowing for both parallel scan (as in Mamba) and chunk-wise parallel training (as in GLA), making it as fast as existing SSMs. Additionally, we provide a parallel scan CUDA kernel, enabling \ours{} to serve as a drop-in replacement for Mamba. \citet{Sun2024LearningT} introduce the Test-Time Training framework, where state updates are derived from a gradient step on an online regression objective. To maintain parallelism, they assume each gradient step at $x_t$ uses the initial state $s_0$, enabling matrix multiplication. In contrast, \ours{} computes the closed-form solution for \emph{every} token, offering greater flexibility.
+
+
+\section{Experiments}
+
+\label{sec::experiment}
+
+We validate \ours{}'s performance through the following experiments:
+
+\textbf{1)}~~We compare \ours{} against other SSMs on the multi-query associative recall benchmark~\citep{arora2023zoology} and find that \textbf{\textcolor{myblue}{\ours{} is the only model to achieve near-perfect recall at sequence lengths up to 512 with a hidden dimension of 64}}.
+
+\textbf{2)}~~Using the OpenWebText dataset~\citep{Gokaslan2019OpenWeb}, we assess \ours{}'s performance on language modeling with model sizes of 120M and 350M, and context lengths of 1024 or 4096, showing \textbf{\textcolor{myblue}{it consistently outperforms other SSMs in validation perplexity}}.
+
+\textbf{3)}~~We train a 1.3B language model on the SlimPajama dataset~\citep{cerebras2023slimpajama} with 100B tokens and compare its performance across 8 benchmarks, where \textbf{\textcolor{myblue}{\ours{} achieves better final performance and $>$1.8x better sample efficiency than Mamba and GLA}}.
+\DIFdelend 
+
+\DIFdelend \DIFaddbegin 
+\DIFaddend \subsection{Multi-Query Associative Recall} 
+We first consider the synthetic benchmark Multi-Query Associative \DIFdelbegin \DIFdel{Recal }\DIFdelend \DIFaddbegin \DIFadd{Recall }\DIFaddend (MQAR)\DIFdelbegin \DIFdel{l}\DIFdelend ~\citep{arora2023zoology}. The agent observes a sequence of tokens $\{k_1, v_1, k_2, v_2, \dots, k_T, v_T\}$, where each consecutive two-tokens become a key-value pair. At test time, the agent is provided with multiple $k \sim \{k_1, \dots k_T\}$, the goal is to ``retrieve" the corresponding values. Following the original benchmark, we consider the sequence length $T \in \{64, 128, 256, 512\}$ and model dimension (size of the latent embedding of a token) $d \in \{64, 128, 256, 512\}$. We compare against 1) Transformer model (Attention), 2) Based architecture, which combines an SSM with local-attention, where the SSM is derived from the Taylor approximation of the self-attention~\citep{arora2024simple}, 3) Hyena~\citep{poli2023hyena}, which is a special SSM that adopts long convolution via fast fourier transform, 4) RWKV~\citep{peng2023rwkv}, which can be viewed as the division of two SSMs (i.e., $y = a / b$, where $a,b$ are outputs from two SSMs). The state-transition matrix is a scalar, 5) BaseConv~\citep{arora2023zoology}, an SSM that combines linear projection with convolution, and 6) Mamba~\citep{gu2023mamba}, the state-of-the-art SSM that has data-dependent $A$ and $B$ (See \eqref{eq:mamba-ssm}). Each experiment individually searches for the best learning rate from \DIFdelbegin \DIFdel{$\{1e-4, 4.6e-4, 2.2e-3, 1e-02\}$}\DIFdelend \DIFaddbegin \DIFadd{$\{10^{-4}, 4.6\times 10^{-4}, 2.2\times 10^{-3}, 10^{-2}\}$}\DIFaddend . Results are summarized in Figure~\ref{fig:mqar}.
+\begin{figure}[ht!]
+    \centering
+\DIFdelendFL \includegraphics[width=\textwidth]{figures/mqar.pdf}
+    \caption{Comparison of \ours{} to state-of-the-art SSMs on the MQAR benchmark. y-axis is the recall rate.}
+    \label{fig:mqar}
+\DIFdelendFL \end{figure}
+
+\myobs{Observation:} From the figure, we can see that \ours{}, which is designed to perform the associative recall task by solving the online prediction objective, outperforms existing SSM variants even at the sequence length of 512 and a small model dimension of 64. 
+\DIFdelend \subsection{Scaling Law on OpenWebText}
+In this section, we consider language modeling tasks on models with 120M or 350M parameters with 1024 or 4096 context length. We choose the OpenWebText dataset as it is small and serves as an easily accessible benchmark for quick benchmarks. We consider the following baseline models: LLaMA~\citep{touvron2023llama}, RetNet~\citep{sun2023retentive}, Mamba~\citep{gu2023mamba}, RWKV~\citep{peng2023rwkv}, and GLA~\citep{yang2023gated}. Then we experiment with 1024 or 4096 context length $T$ and model sizes around 120M or 350M.
+
+\DIFaddbegin \begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/scaling.pdf}
+    \caption{\DIFaddFL{Scaling law with 1024 and 4096 context length on OpenWebText with various SSM models and the LLaMA (strong Transformer) baseline.
+        }}
+    \label{fig:scaling_law}
+\end{figure}
+
+\DIFaddend \begin{table*}[h!]
+\centering
+\small
+\addtolength{\tabcolsep}{-2.5pt}  
+\begin{tabular}{l  c cc c cc}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\# Param. (M)} & \multicolumn{2}{c}{Val. Loss ($\downarrow$)} & \multirow{2}{*}{\# Param. (M)} & \multicolumn{2}{c}{Val. Loss ($\downarrow$)} \\
+    \cmidrule(lr){3-4} \cmidrule(lr){6-7}
+&               & $T=1024$ & $T=4096$ & & $T=1024$ & $T=4096$ \\
+\midrule 
+RetNet  & 129.1 & 3.569  & 3.492 & 373.2 & 3.362 & 3.227 \\ 
+GLA     & 123.8 & 3.381  & 3.364 & 361.1 & 3.018 & 3.001 \\ 
+RWKV    & 124.4 & 3.291  & 3.276 & 354.8 & 2.983 & 2.931 \\
+Mamba   & 129.2 & 3.238  & 3.231 & 371.5 & 2.902 & 2.868 \\ 
+LLaMA   & 124.4 & 3.247  & 3.273 & 357.7 & 2.891 & 2.883 \\ 
+\midrule 
+\ours   & 128.6 & \textbf{3.225}  & \textbf{3.192} & 369.8 & \textbf{2.888} & \textbf{2.859} \\ 
+\bottomrule
+\end{tabular}
+\addtolength{\tabcolsep}{2.5pt}    
+\centering
+\caption{Language modeling scaling law against LLaMA \citep{touvron2023llama}, RetNet \citep{sun2023retentive}, RWKV~\citep{peng2023rwkv}, and Mamba \citep{gu2023mamba}. All models are trained on the OpenWebText dataset~\citep{Gokaslan2019OpenWeb}. Models vary from  120-350M parameters and 1024-4096 context length.}
+\DIFdelendFL \label{tab:openwebtext_scaling_law}
+\end{table*}
+
+\myobs{Observation:} From the figure and table, we can see that \ours{} consistently outperforms baseline SSMs up to 350M and 4096 context length.
+\DIFdelend \DIFaddbegin 
+
+\DIFaddend \subsection{Large-scale Language Modeling}
+For the large-scale language modeling task, we followed the GLA~\citep{yang2023gated} setup, training a 1.3B parameter model on the SlimPajama~\citep{cerebras2023slimpajama} dataset with 100B tokens and a batch size of 2M. We used the AdamW optimizer~\citep{loshchilov2017decoupled} with a weight decay of 0.01, cosine learning rate decay (peak: $3e-4$, final: $3e-5$), and gradient clipping of 1.0. Comparisons were made against LLaMA, Mamba, and GLA models (context size: 2048). We evaluated on eight standard downstream tasks, including PIQA~\citep{bisk2020piqa}, HellaSwag (Hella)~\citep{zellers2019hellaswag}, WinoGrande (Wino)~\citep{sakaguchi2021winogrande}, ARC-easy (ARC-e) and ARC-challenge (ARC-c)~\citep{clark2018think}, OpenBookQA (OBQA)~\citep{mihaylov2018can}, Social Interaction QA (SIQA)~\citep{sap2019socialiqa}, and Boolean questions (BoolQ)~\citep{clark2019boolq}. We report the average perplexity across the above eight datasets throughout training in Figure~\ref{fig:fig1} (left). Then we summarize the downstream evaluation results in Table~\ref{tab:slimpajama}.
+
+\begin{table*}[h!]
+\centering
+\small
+\addtolength{\tabcolsep}{-2.5pt}  
+\DIFdelbeginFL %DIFDELCMD < \resizebox{\textwidth}{!}{
+\DIFdelendFL \DIFaddbeginFL \resizebox{\textwidth}{!}{
+\begin{tabular}{l r cccccccc c}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{State Size}} & \textbf{PIQA} &    \textbf{Hella} & \textbf{Wino.} & \textbf{ARC-e} &  \textbf{ARC-c} &  \textbf{OBQA} & \textbf{SIQA} & \textbf{BoolQ} & \multirow{2}{*}{\textbf{Avg.}} \\
+    \cmidrule{3-10}
+ & & acc $\uparrow$ &   acc\_norm $\uparrow$  & acc $\uparrow$  & acc $\uparrow$ & acc\_norm $\uparrow$ & acc $\uparrow$  & acc\_norm $\uparrow$ & acc $\uparrow$ &  \\
+\midrule
+LLaMA   & 8M  & 55.08 & 55.36 & 71.73 & 59.26 & 32.19 & 43.35 & 45.16 & 62.13 & 53.03 \\
+\midrule
+GLA     & 512K  & 55.55 & 49.10 & 71.12 & 58.86 & 28.11 & 41.67 & 44.91 & 59.21 & 51.07 \\
+Mamba   & 64K    & 54.21 & 53.61 & 71.67 & 61.05 & 30.15 & 43.94 & 44.18 & 59.22 & 52.25 \\
+\midrule 
+\ours   & 64K   & 55.78 & 52.30	& 71.00	& 60.63 & 29.53	& 43.55 &	44.68 &	61.29	& \textbf{52.35} \\
+\bottomrule
+\end{tabular}
+}
+\DIFaddendFL \addtolength{\tabcolsep}{2.5pt}    
+\centering
+\caption{Language modeling results against LLaMA \citep{touvron2023llama}, RetNet \citep{sun2023retentive}, and Mamba \citep{gu2023mamba}. All models are trained on the same subset of the SlimPajama dataset with the Mistral tokenizer. The 340M/1.3B models are trained for 15B/100B tokens respectively. \textbf{State Size} is the effective state size of an SSM per layer. For instance, GLA's state size (1024K) is computed by $md / h$, where the key and value dimensions are $m = 1024$ and $d = 2048$, and there are 4 heads $h=4$. The individual task performance is via zero-shot. The last column shows the average value over the results on all benchmarks.}
+\label{tab:slimpajama}
+\DIFdelendFL \end{table*}
+
+\myobs{Observation:} From Figure~\ref{fig:fig1} (left), it is evident that \ours{} not only achieves a lower average perplexity but also improves sampling efficiency by \textbf{1.8x} compared to Mamba. In other words, \ours{} reaches the same average perplexity with nearly half the training data required by Mamba. From the Table~\ref{tab:slimpajama}, we can see that up to a 1.3B model, \ours{} remains strong among all baseline models and achieves slightly better result than Mamba, even though it has a bit fewer parameters.
+\DIFdelend \DIFaddbegin 
+
+\DIFaddend \subsection{Ablation on Length Extrapolation} We evaluate how \ours{} extrapolates to a context length longer than 2048 (training context length) at inference time. In particular, we pick a disjoint validation set from SlimPajama dataset, rearrange it into batches of sequences of length $T \in \{2048, 4096, 8192, 16384, 32768\}$, and then evaluate the pretrained model's perplexity on those sequences. The results are summarized in Figure~\ref{fig:fig1} (right).
+
+\myobs{Observation:} From the figure, we observe that \ours{} successfully extrapolates to contexts up to \textbf{16x} longer than those used during training, this contrasts with DeltaNet~\citep{yang2024parallelizing}, which highlights a limitation in that the model cannot extrapolate to longer contexts. In contrast, LLaMA, as a Transformer-based model, fails to extrapolate beyond its training context length.
+\DIFaddbegin 
+
+\subsection{\DIFadd{Vision State Space Models}}
+\label{sec::apx-exp-vil}
+\DIFadd{In addition to language tasks, recent works have also applied state space models to the vision domain, leveraging their superior training efficiency. In particular, following the Vision Mamba (ViM)~\mbox{%DIFAUXCMD
+\citep{zhu2024vision}}\hspace{0pt}%DIFAUXCMD
+, we conduct experiments on the ImageNet~\mbox{%DIFAUXCMD
+\citep{deng2009imagenet} }\hspace{0pt}%DIFAUXCMD
+classification task. Similar to ViM, We apply a bi-directional scan with Longhorn SSM (ViL) and compare the results with ViM on both the }\textsc{\DIFadd{tiny}} \DIFadd{and }\textsc{\DIFadd{small}} \DIFadd{configurations described in the ViM paper.
+}
+
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{lcc}
+
+    \toprule
+       \DIFaddFL{Model }&  \DIFaddFL{\# Param }& \DIFaddFL{Top-1 Accuracy }\\
+       \midrule
+        \DIFaddFL{ViM-Tiny }&  \DIFaddFL{7M }& \DIFaddFL{76.1 }\\
+        \DIFaddFL{ViL-Tiny (ours) }& \DIFaddFL{7M }& \textbf{\DIFaddFL{76.4}} \\
+        \midrule
+        \DIFaddFL{ViM-Small }& \DIFaddFL{26M }& \DIFaddFL{80.5 }\\
+        \DIFaddFL{ViL-Small (ours) }& \DIFaddFL{26M  }& \textbf{\DIFaddFL{80.7}} \\
+      \bottomrule
+    \end{tabular}
+    \caption{\DIFaddFL{Top-1 Accuracy on ImageNet classification  for Vision Mamba (ViM) and Vision Longhorn (ViL).}}
+    \label{tab:vil}
+\end{table}
+
+\myobs{Observation:} \DIFadd{The results from Table~\ref{tab:vil} demonstrate that the Vision Longhorn model (ViL) achieves comparable (slightly better) performance to the original ViM. Note that we use the best hyperparameters for ViM without additional tuning, and ViL does not require two additional parameters for the forward and backward $A$ matrices, as they are computed directly based on the key $k$ vector.
+
+
+\section{Conclusion and Future Work}
+
+\label{sec::conclusion}
+This work introduces a novel approach to designing deep state-space models (SSMs) by conceptualizing the recurrence update as solving an online objective. Based on this, we propose \ours{}, a novel SSM model that explicitly solves online associative recall in closed form. \ours{} is parallelizable and achieves state-of-the-art performance among SSMs on MQAR, language modeling, and image classification tasks. One future direction is to explore other online learning objectives. Additionally, recent studies~\citep{ren2024samba} suggest that incorporating sliding-window attention with Mamba improves performance. We anticipate similar benefits for \ours{}.
+
+
+
+
+

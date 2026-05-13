@@ -1,0 +1,372 @@
+\title{MrT5: Dynamic Token Merging for Efficient Byte-level Language Models}
+
+\begin{abstract}
+Models that rely on subword tokenization have significant drawbacks, such as sensitivity to character-level noise like spelling errors and inconsistent compression rates across different languages and scripts.
+While character- or byte-level models like ByT5 attempt to address these concerns, they have not gained widespread adoption---processing raw byte streams without tokenization results in significantly longer sequence lengths, making training and inference inefficient.
+This work introduces \textbf{MrT5} (\textbf{M}e\textbf{r}ge\textbf{T5}), a more efficient variant of ByT5 that integrates a token deletion mechanism in its encoder to \emph{dynamically} shorten the input sequence length. After processing through a fixed number of encoder layers, a learnt \emph{delete gate} determines which tokens are to be removed and which are to be retained for subsequent layers. MrT5 effectively ``merges''  critical information from deleted tokens into a more compact sequence, leveraging contextual information from the remaining tokens.
+In continued pre-training experiments, we find that MrT5 can achieve significant gains in inference runtime with minimal effect on performance. When trained on English text, MrT5 demonstrates the capability to transfer its deletion feature zero-shot across several languages, with significant additional improvements following multilingual training.
+Furthermore, MrT5 shows comparable accuracy to ByT5 on downstream evaluations such as XNLI and character-level tasks while reducing sequence lengths by up to 80\%.
+Our approach presents a solution to the practical limitations of existing byte-level models.png}\hspace{0
+\end{abstract}
+
+\section{Introduction}
+
+
+\emph{Subword tokenization}, typically via algorithms such as byte-pair encoding \citep{sennrich-etal-2016-neural} or SentencePiece \citep{kudo-richardson-2018-sentencepiece}, is a fundamental text preprocessing step that has become ubiquitous in modern language models. Subword tokenizers divide text into meaningful units known as \emph{tokens}, which closely resemble words or parts of words. Tokenization can be seen as a form of compression, since it reduces the sequence length of the input passed to the compute-intensive Transformer \citep{vaswanietal2017}.
+However, subword tokenizers have several drawbacks. For example, they are not very robust to character-level noise and manipulations, such as spelling errors \citep{kaushal-mahowald-2022-tokens, huang-etal-2023-inducing}; they directly impact how models process digits and perform arithmetic \citep{singh2024tokenization}; and they have disproportionate compression rates for different languages and scripts \citep{ahia-etal-2023-languages, petrov2023language}. In addition, current language model APIs charge users per-token, and such discrepancies can cause users of certain languages to be overcharged due to poorer compression.\footnote{See also Andrej Karpathy's tweets on tokenization: \url{https://x
+
+As an alternative to subword models, \emph{tokenization-free} models skip the tokenization preprocessing step entirely by passing the raw character or byte stream directly as input.
+However, character- or byte-level sequences tend to be significantly longer than tokenized text sequences, which limits the practical utility of tokenization-free models.
+For example, ByT5 \citep{xue-etal-2022-byt5}, a byte-level counterpart of mT5 \citep{xue-etal-2021-mt5}, is competitive with mT5 on a number of tasks, but it has a much slower pre-training and inference runtime.
+Most other tokenization-free models perform explicit downsampling or pooling to reduce the sequence length \citep{clark-etal-2022-canine, tay2022charformer}. However, relevant units of meaning usually span a variable number of bytes/characters. Many of these methods also introduce significant alterations to the standard Transformer architecture that cannot be used to easily adapt existing pre-trained models.
+
+In this work, we propose \textbf{MrT5} (\textbf{M}e\textbf{r}ge\textbf{T5}), a variant of the ByT5 architecture that helps address its inefficiencies while allowing more flexibility than fixed-span downsampling methods (\Cref{sec:mrt5-architecture}). 
+MrT5 dynamically merges its encoder's input into a shorter sequence using a token deletion gating mechanism at a fixed, early encoder layer, as shown in \Cref{fig:soft_hard_deletion}.
+By allowing the first few encoder layers to process the entire sequence, the encoder creates contextualized representations of the tokens. When the gating mechanism then deletes a subset of the tokens, those that remain keep the contextual
+information about those that were removed, allowing information to be implicitly merged into a shorter sequence. During training, we use a deletion regularizer with a tunable weight that can adjust the amount of deletion MrT5 performs. MrT5 effectively learns to merge relevant tokens and delete extraneous ones in a completely unsupervised manner, by optimizing the balance between the regularization objective and language modeling.
+
+We first train several MrT5 models on diagnostic tasks (\Cref{sec:simulations}); we find that MrT5 not only drops tokens that are irrelevant to the tasks, but also compresses the relevant context into a shorter sequence by applying meaningful deletion patterns tailored to the tasks.
+Next, we perform continued pre-training experiments by fine-tuning the MrT5 gating mechanism on top of the pre-trained ByT5 Small (\Cref{sec:continued}). Our results show that MrT5 outperforms random and fixed token deletion baselines in terms of span corruption loss while removing an equivalent percentage of tokens. 
+We also conduct zero-shot tests across 15 diverse languages, showing that MrT5 trained only on English can apply its deletion mechanism to several languages; we also find that we can further improve MrT5's deletion rates across languages with different scripts through multilingual training. In our final set of experiments, we evaluate MrT5 on XNLI and character-level tasks (\Cref{sec:downstream}), showing that MrT5 achieves comparable accuracy to ByT5 while significantly improving inference runtimes by reducing the sequence length by up to 80\%.
+Our approach improves on the main limitations of ByT5, presenting a significant step toward the adoption of byte-level models and the elimination of subword tokenization from modern language models.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/soft_hard_deletion.pdf}
+\caption{MrT5's encoder during training and testing. During training, fully-differentiable \emph{soft deletion} masks out tokens using the output of MrT5's delete gate. During testing, \emph{hard deletion} removes columns from the computation, which reduces the sequence length and leads to efficiency gains. In this visual, the delete gate is placed at layer 2, but the gate placement may be tuned.}
+\label{fig:soft_hard_deletion}
+\end{figure}
+
+
+
+\section{Background: Tokenization-Free Models}
+
+
+Several specialized architectures for character- or byte-level modeling have employed explicit downsampling steps to reduce their input sequence lengths.
+For example, CANINE \citep{clark-etal-2022-canine} is a character-level model trained on the same languages as mBERT \citep{devlin-etal-2019-bert}, and it uses convolutional downsampling to reduce the sequence before feeding it to a 12-layer Transformer encoder stack. Charformer \citep{tay2022charformer} is another byte-level encoder-decoder model that learns a gradient-based ``soft tokenization'' using a block scoring function to select the byte embeddings to pool together for more efficient training and inference.
+More recently, MegaByte \citep{yu2023megabyte} demonstrated potential in scaling byte-level decoders to long-context tasks by segmenting sequences into fixed-length ``patches'' upon which local Transformer blocks are applied. However, these patches may not represent meaningful units of text. SpaceByte \citep{slagle2024spacebyte} takes a similar approach, adding larger global Transformer blocks to specific byte types, like spaces, though these bytes are also not chosen dynamically.
+This paper focuses on ByT5 \citep{xue-etal-2022-byt5}, a byte-level sequence-to-sequence Transformer architecture that serves as a counterpart to mT5 \citep{xue-etal-2021-mt5}, the multilingual version of T5 \citep{raffel2020exploring}. ByT5 requires significantly fewer parameters for its vocabulary matrix (which is comprised of only 256 embeddings). However, to compensate for the loss of these parameters, ByT5 has a ``heavy'' encoder with a larger number of layers than the decoder. While ByT5 shows impressive performance on a variety of downstream tasks,
+its heavy encoder, large model and feed forward dimensionalities, and short input sequence length (1024 bytes) make it quite inefficient. The architecture itself requires about 1.2 times more operations than mT5, which contributes to a 33\% longer pre-training wall clock time for ByT5, even though it was trained on only a quarter of the data used for mT5. In terms of inference speed on downstream tasks, ByT5 can be up to 10 times slower than mT5, depending on the input sequence length.
+
+MrT5 modifies the ByT5 architecture to make it more efficient. Unlike previous work, MrT5's deletion gating mechanism can be added to a pre-trained model like ByT5 with minimal fine-tuning using a small number of additional parameters. The gating can also be applied to models trained from scratch. While we focus here on byte-level modeling, our approach can also be applied to subword models, complementing existing work on long-context modeling (described in \Cref{sec:other-related-work}).
+
+
+
+\section{The MrT5 Model Architecture}
+
+
+The unique aspect of MrT5 is its deletion gating mechanism: after a fixed encoder layer, a \emph{delete gate} determines which tokens in the sequence should be kept to be processed by later layers, and which tokens may be deleted, thereby ``merging'' information into a shorter sequence. Our choice to delete tokens only in a single layer has three motivations: (1) we want to avoid the overhead of executing the deletion algorithm multiple times; (2) we observe that both the performance and the number of deleted tokens stabilize after a few initial layers (see \Cref{sec:gate-placement}); and (3) in terms of minimizing computation costs, the deletion is most beneficial if done in an early layer.\looseness=-1
+
+\subsection{Deletion Gating Mechanism}
+The MrT5 deletion gating mechanism is inspired by existing architectures with gating mechanisms such as Long-Short Term Memory \cite[LSTMs,][]{10.1162/neco.1997.9.8.1735}, Gated Recurrent Units \cite[GRUs,][]{cho-etal-2014-learning}, and Mixture-of-Experts \cite[MoEs,][]{shazeer2017}.
+MrT5's delete gate is placed after the output of a fixed encoder layer $l$ and is defined by the following function:
+\begin{align}
+\mathbf{G} &= k \sigma(\mathbf{H}_l\mathbf{W} + \mathbf{1}_N b)
+\end{align}
+where $\mathbf{H}_l \in \mathbb{R}^{N \times d}$ are the hidden states output by layer $l$; $\mathbf{W} \in \mathbb{R}^{d \times 1}$; $b \in \mathbb{R}$; $\mathbf{G} \in \mathbb{R}^{N \times 1}$; $k$ is a large negative constant; $N$ is the encoder input sequence length; $d$ is ByT5's hidden state/model dimensionality; and $\mathbf{1}_N \in \mathbb{R}^{N \times 1}$ is a vector of ones.
+The gating activation function is a rescaled and translated sigmoid function, bounded between $k$ and 0. In our experiments, we use $k=-30$.
+
+\paragraph{Hard and Soft Deletion.}
+During training, MrT5 deletes tokens \emph{softly}, where the outputs of the gating mechanism $\mathbf{G}$ are applied as a soft attention mask. The outputs are added directly to the 
+self-attention mechanism of the subsequent encoder layers, as well as the cross attentions between the decoder and encoder. As an example, the hidden states of encoder layer $l+1$ are defined as:
+\begin{align}
+\mathbf{H}_{l+1} &= \mathrm{softmax}\left(\frac{\mathbf{Q}\mathbf{K}^{\top}}{\sqrt{d}} + \mathbf{1}_N \mathbf{G}^\top \right) \mathbf{V}
+\end{align}
+where $\mathbf{Q}, \mathbf{K}, \mathbf{V}, \mathbf{H}_{l+1} \in \mathbb{R}^{N\times d}$ and $\mathbf{1}_N \in \mathbb{R}^{N \times 1}$ is a vector of ones.
+A token at sequence position $i \in [1,N]$ and $\mathbf{G}_i \approx 0$ will not be masked, whereas a token at sequence position $j \neq i \in [1,N]$ and $\mathbf{G}_j \approx k$ will be masked, since $k$ is a large negative constant.
+Though soft deletion does not reduce the sequence length, we apply it during training to emulate the effect of token deletion while being fully differentiable. To see efficiency gains during inference, we apply \emph{hard deletion}, where the hidden states are removed from the sequence, determined by a hard threshold; we set this threshold to be $\frac{k}{2}$, half of the range of the delete gate's output.
+
+For different samples in a given batch, different numbers of tokens may be deleted; when applying hard deletion, the new sequence length is determined by the example in the batch with the largest number of remaining tokens, and the other examples are padded to the new sequence length. In addition to deleting and padding the hidden states, since the T5 architecture uses relative position biases at each layer, the deletion and padding is also performed on the position biases. For a theoretical analysis of the compute savings gained by MrT5's hard deletion, see \Cref{app:theoretical}.
+
+\subsection{Gate Regularizer}
+MrT5 allows deletion rates to be adjusted using a tunable regularizer loss:
+\begin{align}
+\mathcal{L}_{\mathbf{G}} &= \frac{1}{N}\sum_{i=1}^N \mathbf{G}_i
+\end{align}
+This loss is the average of the gate output values, which encourages them to be more negative (i.e.\ closer to $k$, the minimum gate value). In other words, as this loss decreases, the number of deleted tokens increases. The total loss is defined as the sum
+$\mathcal{L} = \mathcal{L}_{\text{CE}} + \alpha\mathcal{L}_{\mathbf{G}}$, where $\mathcal{L}_{\text{CE}}$ is the cross entropy loss.
+Varying the hyperparameter $\alpha$ allows the MrT5 model to delete more or fewer tokens.
+
+\paragraph{Optimizing a Specific Deletion Ratio.} For most of our experiments, we set $\alpha$ by hand, which allows the model to dynamically discover the deletion ratio depending on the difficulty of the task. Alternatively, we can optimize for a specific ratio of deleted tokens. This can be done using an algorithm that resembles the proportional controller (P-controller) from classical control theory. Let's call the proportion of deleted tokens in the current batch $\delta_t \in [0,1]$, the regularization hyperparameter for the current batch $\alpha_t$ and the target deletion ratio $\hat\delta$. We update $\alpha$ as follows:
+\begin{align}
+    \alpha_{t+1} &= \mathrm{clamp} \left(\alpha_t + k_p (\hat\delta - \delta_t)\right)
+\end{align}
+where $\mathrm{clamp}(x) = \max(x,0)$. We found that using $k_p=10^{-6}$ and $\alpha_0=0.0$ and updating $\alpha$ after every 10 training steps worked well in practice. This method is easier to use than manually setting $\alpha$ and allows $\alpha$ to change dynamically as the model undergoes phase transitions during training, resulting in more stable learning.
+
+\paragraph{Softmax$_1$.} It is possible for all elements of $\mathbf{G}$ to equal the minimum gate value such that $\mathbf{G}_i = k$ for all $i \in [1,N]$. This $\mathbf{G}$ would satisfy the gate regularizer but fail to act as an attention mask, since adding the same value to all elements of the input to a standard $\mathrm{softmax}$ function does not affect its output. To help avoid this scenario, we use $\mathrm{softmax}_1$ \citep{Miller_2023} in the attention mechanism:
+\begin{align}
+    (\mathrm{softmax}_1(\mathbf{x}))_i = \frac{\exp (\mathbf{x}_i)}{1 + \sum_j \exp (\mathbf{x}_j)}
+\end{align}
+With the $\mathrm{softmax}_1$ function, if $\mathbf{G}_i = k$ for all $i \in [1,N]$, as $k$ becomes negative, the sum of attention scores approaches zero.
+This eliminates the failure case of using tokens that appear to be all deleted. For consistency, we use $\mathrm{softmax}_1$ 
+for both MrT5 and baseline ByT5 models.
+
+
+
+\section{Simulations}
+
+
+We first train tiny 31M-parameter MrT5 and T5 models with 9 encoder layers and 3 decoder layers from scratch on three diagnostic tasks: a simple vowel removal task, a contextual vowel removal task, and a sequence merge task. The purpose of these experiments is to verify that the architecture behaves as intended, particularly with regard to the merging patterns it learns. Does MrT5 merely drop tokens when they are irrelevant to the output, or does it effectively merge relevant context into a shorter sequence? These results help set the stage for our continued pre-training experiments in \Cref{sec:continued} and our downstream task evaluations in \Cref{sec:downstream}.
+
+\paragraph{Diagnostic Task Specifications.}
+Each of our three diagnostic tasks is a variant of a copy task, designed to assess MrT5's ability to identify unimportant or redundant information in the input sequence or merge relevant information from some tokens into other tokens. Input sequences are comprised of random lowercase and uppercase English characters, plus start and end tokens. Example inputs and labels are provided in \Cref{tab:diagnostic-tasks-descriptions}.
+\begin{enumerate}
+    \item \textbf{Simple Vowel Removal}: generate a copy of the input token sequence, except for any vowels. We expect MrT5 to delete vowels, which occur with 19\% probability. Thus, the optimal sequence length decrease is 19\%.
+    \item \textbf{Contextual Vowel Removal}: generate a copy of the input token sequence, except for any vowels that follow a lowercase consonant. We increase the probability of vowels such that, on average, they comprise 40\% of the sequence, and about 18\% of the sequence is comprised of vowels that follow a lowercase consonant. If MrT5 learns the relevant deletion pattern, we would expect a sequence length decrease of 18\%.
+    \item \textbf{Sequence Merge}: generate a copy of the input token sequence, and translate any occurrence of the character sequence \texttt{ABC} into the character \texttt{D}. \texttt{ABC} sequences are inserted into the input randomly and occur about 10 times per sequence on average. If MrT5 merges \texttt{ABC} into a single token, we would expect it to drop 20 tokens on average, which is 15.6\% of the sequence.
+\end{enumerate}
+
+For the model architecture and training configurations we use for the simulations, see \Cref{app:diagnostic-training-details}.
+
+\begin{table}
+    \centering
+    \resizebox{0.8\textwidth}{!}{
+    \begin{tabular}{@{}l l l@{}}
+        \toprule
+        \textbf{Task} & \textbf{Input} & \textbf{Target} \\
+        \midrule
+        Simple Vowel Removal & \texttt{z\textcolor{orange}{E}KRr\textcolor{orange}{e}JcBxG\textcolor{orange}{U}JQbZS\textcolor{orange}{Io}s} & \texttt{zKRrJcBxGJQbZSs} \\
+        Contextual Vowel Removal & \texttt{\textcolor{cyan}{EOu}bXg\textcolor{orange}{a}YVb\textcolor{orange}{i}\textcolor{cyan}{O}g\textcolor{orange}{i}\textcolor{cyan}{I}r\textcolor{orange}{E}nld} & \texttt{\textcolor{cyan}{EOu}bXgYVb\textcolor{cyan}{O}g\textcolor{cyan}{I}rnld} \\
+        Sequence Merge & \texttt{KjAxIp\textcolor{magenta}{ABC}ZCxBcni\textcolor{magenta}{ABC}s} & \texttt{KjAxIp\textcolor{magenta}{D}ZCxBcni\textcolor{magenta}{D}s} \\
+        \bottomrule
+    \end{tabular}
+    }
+    \caption{Diagnostic tasks with example input and target sequences. In our experiments, sequences are 128 characters/tokens long, including a start and end token. Legend: \textcolor{orange}{vowels to remove}, \textcolor{cyan}{vowels to keep}, \textcolor{magenta}{sequences to replace}.}
+    \label{tab:diagnostic-tasks-descriptions}
+\end{table}
+
+\paragraph{Results.}
+\Cref{tab:diagnostic-task-results} presents the performance of several MrT5 models that use different regularizer $\alpha$ values trained on each of our three diagnostic tasks. We vary $\alpha$ across model training runs to examine the different deletion patterns that emerge.
+In each of the three diagnostic tasks, several MrT5 models with optimal deletion rates outperformed or nearly matched the T5 model while using shorter sequence lengths. We also observed that some MrT5 models, when tuned with the optimal value of $\alpha$, developed token-dropping strategies that exactly aligned with the specific requirements of the tasks. For instance, in the simple vowel removal task, the MrT5 models that selectively dropped vowels but kept consonants intact showed improved performance.\footnote{For tasks requiring more contextual information, we found that these models have too much capacity for the diagnostic tasks, and even the T5 models only started to develop non-trivial attention patterns in very late layers. We found that placing the delete gate at later task layers allowed MrT5 to develop more contextual token deletion solutions.} These findings suggest that MrT5 can create complex deletion strategies that exploit patterns or redundancies in the input.
+
+\begin{table}[]
+\centering
+\begin{subtable}{\textwidth}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \textbf{Token-level} & \textbf{Seq.-level} & \textbf{Seq. Length} & \textbf{Delete Gate} & \textbf{Description of} \\
+ & \textbf{Accuracy (\%)} & \textbf{Accuracy (\%)} & \textbf{Reduction (\%)} & \textbf{Layer} & \textbf{Deleted Tokens} \\
+\midrule
+T5 & 99.97 & 96.44 & 0.00 & — & — \\
+MrT5 ($\alpha=0$) & 99.99 & 99.64 & 18.94 & 3 & Most vowels, and no consonants. \\
+MrT5 ($\alpha=1\text{e--}4$) & 99.75 & 77.51 & 51.13 & 3 & All vowels and many consonants. \\
+\bottomrule
+\end{tabular}
+}
+\caption{Models trained on the simple vowel removal task.  MrT5 solves this task effectively with a non-trivial deletion rate, but too much deletion—-beyond the optimal rate of 19\%-—results in a drop in performance.}
+\label{tab:subtable1}
+\end{subtable}
+\begin{subtable}{\textwidth}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \textbf{Token-level} & \textbf{Seq.-level} & \textbf{Seq. Length} & \textbf{Delete Gate} & \textbf{Description of} \\
+ & \textbf{Accuracy (\%)} & \textbf{Accuracy (\%)} & \textbf{Reduction (\%)} & \textbf{Layer} & \textbf{Deleted Tokens} \\
+\midrule
+T5 & 99.99 & 99.19 & 0.00 & — & — \\
+MrT5 ($\alpha=1\text{e--}3$) & 99.99 & 98.54 & 1.56 & 3 & Only start and end tokens. \\
+MrT5 ($\alpha=1\text{e--}3$) & 99.97 & 96.51 & 18.50 & 7 & Vowels after lowercase consonants. \\
+MrT5 ($\alpha=1\text{e--}3$) & 99.96 & 95.19 & 18.50 & 8 & Vowels after lowercase consonants. \\
+\bottomrule
+\end{tabular}
+}
+\caption{Models trained on the contextual vowel removal task. Due to the task's contextual nature, deletion works best in higher task layers. MrT5 learns to delete around the optimal 18\%, with only a slight performance drop.}
+\label{tab:subtable2}
+\end{subtable}
+\begin{subtable}{\textwidth}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \textbf{Token-level} & \textbf{Seq.-level} & \textbf{Seq. Length} & \textbf{Delete Gate} & \textbf{Description of} \\
+ & \textbf{Accuracy (\%)} & \textbf{Accuracy (\%)} & \textbf{Reduction} & \textbf{Layer} & \textbf{Deleted Tokens} \\
+\midrule
+T5 & 99.99 & 98.41 & 0.00 & — & — \\
+MrT5 ($\alpha=1\text{e--}3$) & 99.99 & 98.90 & 1.56 & 3 & Only start and end tokens. \\
+MrT5 ($\alpha=1\text{e--}3$) & 99.98 & 97.68 & 8.30 & 6 & `\texttt{B}' within `\texttt{ABC}' sequences. \\
+MrT5 ($\alpha=1\text{e--}3$) & 99.85 & 85.34 & 16.93 & 7 & All `\texttt{B}'s, and `\texttt{BC}' within `\texttt{ABC}' sequences. \\
+\bottomrule
+\end{tabular}
+}
+\caption{Models trained on the sequence merge task. MrT5 can learn to merge characters within \texttt{ABC} sequences at higher task layers, but exceeding the optimal 15.6\% deletion rate degrades performance.}
+\label{tab:subtable3}
+\end{subtable}
+\caption{Diagnostic task performance for T5 and MrT5 with different deletion strategies. Token-level accuracy measures the percentage of correctly predicted tokens, averaged across sequences; sequence-level accuracy measures the percentage of sequences with all tokens predicted correctly.}
+\label{tab:diagnostic-task-results}
+\end{table}
+
+
+
+\section{Continued Pre-training}
+
+
+In our main set of experiments, we train MrT5 models on the ByT5 span corruption task. In this pre-training objective, spans of tokens in unlabeled text data are replaced with a single \emph{sentinel} token ID per span, and the model must fill in the missing tokens. For ByT5 and MrT5, these are spans of bytes, and the masks can potentially interfere with word boundaries.
+
+We use the English C4 corpus \citep{raffel2020exploring} as well as the multilingual C4 (mC4) corpus \citep{xue-etal-2021-mt5} for continued pre-training.
+We first train several English-only MrT5 and baseline models on C4, and we analyze the performance differences for models with different deletion rates. We also train a multilingual MrT5 and ByT5 model on 15 typologically diverse languages from the mC4 corpus: English, French, Spanish, German, Greek, Bulgarian, Russian, Turkish, Arabic, Vietnamese, Thai, Chinese, Hindi, Swahili, and Urdu. We then compare monolingual and multilingual MrT5 in cross-lingual evaluations, analyzing the zero-shot transfer of English MrT5 and evaluating the performance gains achieved through multilingual training.
+
+\paragraph{Models.}
+
+We train several MrT5 models, varying the $\alpha$ hyperparameter of the deletion regularizer. In our experiments, we found that $\alpha \in [5\text{e--}3, 1.5\text{e--}2]$ resulted in a broad range of deletion rates.
+This is a continued pre-training setup; we load the pre-trained weights and use the architecture settings of ByT5 Small (300M parameters) and only randomly initialize the weights of MrT5's gating mechanism. Based on a sweep of different layers, we place the gating mechanism after encoder layer $l=3$ (see \Cref{sec:gate-placement}). In addition to the MrT5 models, we also train several baselines:
+\begin{enumerate}
+    \item \textbf{ByT5 baseline}: A ByT5 Small architecture with $\mathrm{softmax}_1$, but without deletion.\footnote{We found that the loss for ByT5 with $\mathrm{softmax}_1$ (0.7805) and the loss for an unaltered ByT5 (0.7815) were comparable, further motivating our use of $\mathrm{softmax}_1$. Model training settings are described in \Cref{app:pre-training-details}.}
+    \item \textbf{Random baseline}: We implement and train a set of models with a random gating mechanism, where the choice of how the tokens are deleted is random; some number of gate values are set to $k$, and the rest are set to 0. In our experiments, we train five random models with different average deletion rates: 15\%, 40\% 50\%, 60\%, and 70\%. 
+    \item \textbf{Fixed baseline}: We implement and train a set of models that delete the ends of words. We train five models that delete different percentages of the ends of words: 15\%, 40\% 50\%, 60\%, and 70\%. For details on the implementation of this baseline, see \Cref{app:fixed}.
+\end{enumerate}
+
+For the random and fixed baselines, the gating mechanism is placed at layer $l=3$, like the MrT5 models. All models use $\mathrm{softmax}_1$ in their attention mechanisms. The ByT5 baseline serves as a lower bound on the best possible span corruption loss, since it does not reduce the sequence length. For further details on model architectures, dataset preparation, and optimization, see \Cref{app:pre-training-details}.
+
+\paragraph{Monolingual Results.}
+
+Our first set of results are for the monolingual MrT5 models trained only on English data. We evaluate span corruption loss on a held-out test set of 10,000 examples.
+\Cref{fig:loss-vs-deletions-english} illustrates the relationship between span corruption cross entropy loss and sequence length reduction for each MrT5 model compared to their respective baselines. As anticipated, ByT5 achieves the lowest loss; however, it does not reduce sequence length. While the MrT5 models, along with the fixed and random baselines, exhibit higher losses overall, the MrT5 models consistently achieve lower losses than the other baselines at comparable deletion rates. For instance, MrT5 with $\alpha = 8\text{e--}3$ removes approximately 57\% of tokens, which is a similar deletion rate to the 60\% fixed and random baselines, yet MrT5 achieves the lowest loss. This pattern is consistent across all MrT5 models and baselines, showing the effectiveness of MrT5's gating mechanism in reducing the sequence length while minimizing loss.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/span_corruption_English.pdf}
+\caption{Span corruption cross entropy loss vs.\ sequence length reduction for each MrT5 and baseline model. MrT5 models consistently have much lower loss than the baselines, and are generally competitive with unmodified ByT5, even where they achieve very large sequence length reductions.}
+\label{fig:loss-vs-deletions-english}
+\end{figure}
+
+MrT5 models with a higher deletion rate also have a faster inference runtime, as shown in \Cref{tab:runtime_comparison}. In particular, MrT5 models that reduce the sequence length by more than 50\% can achieve 25\% speedup or greater, with our implementation.
+These results show that hard deletion improves the efficiency of MrT5 when compared to ByT5, and this speedup can be tuned.
+
+\begin{table}[]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}l|c|ccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{ByT5} & \multicolumn{5}{c}{MrT5} \\
+   &  & $\alpha=5\text{e--}3$ & $\alpha=6\text{e--}3$ & $\alpha=8\text{e--}3$ & $\alpha=1\text{e--}2$ & $\alpha=1.4\text{e--}2$ \\
+\midrule
+\textbf{Runtime} (ms) & 56.27 & 53.98 ($\downarrow$ 4.08\%) & 43.92 ($\downarrow$ 21.96\%) & 40.78 ($\downarrow$ 27.53\%) & 39.62 ($\downarrow$ 29.59\%) & 33.81 ($\downarrow$ 39.92\%) \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Average inference runtime for a single sequence (in milliseconds) for ByT5 and each MrT5 model. Percentage decrease in runtime relative to ByT5 is displayed in parentheses.}
+\label{tab:runtime_comparison}
+\end{table}
+
+\paragraph{Multilingual Results.}
+
+In our second set of results, we evaluate MrT5 and ByT5 models on 15 languages. For the monolingual models trained on English only, these are zero-shot evaluations. Each language's test set is sampled from its mC4 validation split and contains 10,000 examples, except for Swahili and Urdu, which only have 2,800 and 9,300 examples, respectively.
+\Cref{fig:multilingual-evals} shows the test set span corruption loss versus sequence length reduction for a monolingual MrT5 (with constant $\alpha = 1\text{e--}2$) and a multilingual MrT5 model (with constant $\alpha = 1.2\text{e--}2$) across 15 languages. We choose to compare these two models because they learned similar deletion rates for English ($\approx$63\%). We also include the corresponding ByT5 models' losses, trained on the same data, as a baseline.
+
+The monolingual MrT5 model achieves the highest sequence length reduction for English, as expected, and performs moderately well in zero-shot settings for Latin-script languages (e.g.\ Spanish, French, Vietnamese, and Russian), with reduction rates above 40\%. However, it struggles with sequence length reduction for Chinese, which uses a completely different script. In contrast, the multilingual MrT5 significantly improves the sequence length reduction across all languages, with most languages achieving 60\% reduction; at the same time, the loss increase compared to ByT5 shrinks across all languages. These results demonstrate that the MrT5 architecture can learn to perform contextual deletions and transfer this capability across languages, but its effectiveness in doing so, especially across different scripts, is greatly enhanced when trained with multilingual data.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/span_corruption_multilingual_eval.pdf}
+\caption{Average test set span corruption loss vs.\ sequence length reduction for monolingual (top) and multilingual (bottom) MrT5 models across 15 languages. ByT5 is shown for loss comparison only (it does not reduce the sequence length). MrT5 can transfer its deletion feature to new languages when trained in English, but performs best with multilingual training. A multilingual MrT5 model achieves over 50\% sequence length reduction in most languages with minimal effect on the loss.}
+\label{fig:multilingual-evals}
+\end{figure}
+
+
+
+\section{Downstream Task Evaluations}
+
+
+We next assess MrT5's performance on downstream tasks, specifically XNLI and two character-level tasks. XNLI evaluates MrT5's ability to understand semantic relationships between sentences, while the character-level tasks test whether it retains its sensitivity to character-level manipulations.
+
+\paragraph{Cross-lingual Natural Language Inference.}
+
+We first test our multilingual MrT5 model using the Cross-lingual Natural Language Inference (XNLI) corpus \citep{conneau2018xnli}, a benchmark for cross-lingual sentence classification with 5,000 parallel examples in 15 languages. These are the same 15 languages our multilingual MrT5 model was trained on. We selected XNLI for testing because the ByT5 authors noted it as one of the downstream tasks with the worst inference runtimes, primarily due to the long input sequences; ByT5 was 6.4 to 9.5 times slower than mT5. We fine-tune two models on the English MultiNLI corpus \citep{N18-1101}: our multilingual MrT5 model ($\alpha = 1.2\text{e--}2$) and the baseline multilingual ByT5 model. For training details, see \Cref{app:xnli-training-details}.
+
+\Cref{fig:xnli-results} presents the evaluation metrics for the ByT5 and MrT5 models on the XNLI English test split, as well as their average performance across all languages.
+On English, MrT5 outperforms ByT5's accuracy while reducing the sequence length by 52.56\% and cutting down the inference runtime by 38.0\%. Across languages, MrT5 significantly decreases both the sequence length and runtime, with a small accuracy decrease of just 1.7\% compared to ByT5. The XNLI task illustrates the efficiency of MrT5's fast encoder; a 50\% deletion rate results in substantial gains in runtime. This improvement can be attributed to the setup of the XNLI task, which requires large input sequences (up to 1,024 tokens) and short decoder sequences (a single token for classification).\footnote{We note that the accuracy of our ByT5 Small model on XNLI (51.3\%) falls short of the accuracy reported in the ByT5 paper (69.1\%). We attribute this discrepancy primarily to the significantly longer training duration used in their fine-tuning setup---262,144 steps, compared to our 4,000 steps.} 
+
+\begin{table}[]
+\centering
+\resizebox{0.87\textwidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Language}} & \multicolumn{2}{c}{\textbf{Accuracy (\%)}} & \multicolumn{2}{c}{\textbf{Average Runtime (ms)}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{MrT5 Runtime}\\ \textbf{Decrease (\%)}\end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{MrT5 Seq. Len.}\\ \textbf{Reduction (\%)}
+\end{tabular}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+                          & ByT5    & MrT5   & ByT5    & MrT5    &   &  \\
+\midrule
+English                   & 76.47   & 78.88   &  8.95  &  5.55   & 38.00 & 52.56  \\
+All Languages             & 51.34   & 49.63   & 14.25  &  8.19   & 42.50 & 46.82  \\
+\bottomrule
+\end{tabular}
+}
+\caption{XNLI evaluation metrics for ByT5 and MrT5 models. Except for English, all evaluations are zero-shot. Chance accuracy is 33\%. MrT5 achieves significantly reduced sequence lengths and faster runtimes compared to ByT5 while maintaining comparable accuracy, and it even outperforms ByT5 on English. See \Cref{fig:xnli-results-per-language} in \Cref{app:downstream-tasks} for metrics on each language individually. }
+\label{fig:xnli-results}
+\end{table}
+
+\paragraph{Character-level Tasks.}
+We fine-tune and evaluate an English MrT5 model on the \emph{Spelling Correction with Context} and \emph{Word Search} character-level tasks from \cite{huang-etal-2023-inducing}. In the Spelling Correction task, the input is a sentence containing a spelling error, and the goal is to generate the same sentence with the error corrected. In the Word Search task, the input follows the format \texttt{definition: letters}, and the objective is to identify the substring in \texttt{letters} that, when reversed, matches the given \texttt{definition}. We selected these two tasks from the suite because they both require understanding meaning and context and involve processing longer sequence lengths.
+For each character-level task, we fine-tune two models: our English-only MrT5 model ($\alpha = 1\text{e--}2$) and the baseline English-only ByT5 model. See \Cref{app:char-task-training-details} for fine-tuning optimization details.
+We evaluate on all test splits from \cite{huang-etal-2023-inducing}, which are designed to rigorously assess a model’s ability to integrate meaning and context in its predictions.
+
+\Cref{fig:character-task-results} displays the test set results for each character-level task. For both tasks, MrT5 reduces the sequence length by over 70\%, speeding up the inference runtime by 32.9\% for the Spelling Correction task and and 55.15\% for the Word Search task. At the same time, MrT5 maintains accuracy scores that are competitive with ByT5. These results show that MrT5's method of sequence merging effectively preserves its sensitivity to character-level information.
+
+\begin{table}[]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Task}} & \multicolumn{2}{c}{\textbf{Seq.-level Accuracy (\%)}} & \multicolumn{2}{c}{\textbf{Average Runtime (ms)}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{MrT5 Runtime}\\ \textbf{Decrease (\%)}\end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{MrT5 Seq. Len.}\\ \textbf{Reduction (\%)}\end{tabular}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+                          & ByT5    & MrT5   & ByT5    & MrT5    &   &  \\
+\midrule
+Spelling Correction     & 58.19   & 56.07   &  3.25  &  2.18   & 32.90 & 78.88  \\
+Word Search             & 75.37   & 74.30   &  4.95  &  2.22   & 55.15 & 73.91  \\
+\bottomrule
+\end{tabular}
+}
+\caption{Character-level task metrics for ByT5 and MrT5 models. MrT5 significantly reduces runtime and sequence lengths across both tasks, with a minimal accuracy trade-off in spelling correction and comparable accuracy in word search. See \Cref{fig:spelling-correction-all-splits} and \Cref{fig:word-search-all-splits} in \Cref{app:downstream-tasks} for metrics on individual test splits for each task.
+}
+\label{fig:character-task-results}
+\end{table}
+
+
+
+\section{Analysis}
+
+
+\paragraph{Per-sample Sequence Length Reduction.}
+We present a per-sample analysis of the cross entropy loss and sequence length reduction for the English MrT5 models and random baselines. We take a sample of 1,000 English sentences from the mC4 test set and calculate the percent increase in loss on a per-sample basis, using the English ByT5's loss as the baseline (i.e.\ the percent increase between the MrT5 model’s loss and ByT5’s loss for individual samples).
+For each sample, we also get the sequence length reduction.
+Across five MrT5 models with different deletion rates, we found no correlation between the percent increase in the loss and the percentage of tokens deleted (average correlation of $r = -0.014$).\footnote{When averaging correlation coefficients, we apply Fisher's Z transformation to stabilize the variance.}  This reflects what we would expect from the MrT5 models; for an individual sample, MrT5 learns when it can delete more tokens without incurring a large increase in the loss.
+In contrast, for five random models with different sequence length reduction rates, we found a moderate positive correlation (average correlation of $r = 0.298$). When the random model removes more tokens, it is more likely to cause an increase in loss. These results further support the observation that the MrT5 models more strategically and contextually delete tokens compared to the baselines. See \Cref{fig:correlations-per-sample} in \Cref{app:per-sample} for plots presenting the correlations for each individual MrT5 and random baseline model.
+
+\paragraph{Gate Placement.} \label{sec:gate-placement}
+We present an analysis of MrT5 models with delete gates placed at various encoder layers. To maximize efficiency, it is ideal to position the delete gate in the earliest encoder layer possible. However, placing the gate too early reduces the contextual information in the token representations, leading to more significant performance degradation compared to ByT5. We trained several English-only MrT5 models, all using the same training setup and architecture as described in \Cref{sec:continued}. The only variable was the placement of the delete gate, as shown in \Cref{fig:gate-placement}. We perform two experiments: one in which all models are trained with a fixed regularizer $\alpha = 1\text{e--}2$ (\Cref{fig:gate-placement-a}), and another where all models are trained with a P-controller that targets $\approx$50\% deletion (\Cref{fig:gate-placement-b}). In both setups, the loss is higher when the gate is placed in early layers.
+Since our goal is to place the gate as early as possible, we selected layer 3 as the optimal point for gate placement, since its loss and deletion rate is comparable to layers 4 and 5. This analysis provides further evidence that MrT5 merges information into fewer tokens, since deletion at earlier, less contextual layers results in a higher loss.\looseness=-1
+
+The gate placement sets an upper bound on the compute savings achievable with our model. We provide a detailed analysis of MrT5's theoretical compute savings in \Cref{app:theoretical}. With typical hyperparameters from our tasks, we can achieve a maximum speedup of around three times with reasonable deletion rates. 
+
+\begin{figure}[]
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/gate_placement_analysis.pdf}
+        \caption{MrT5s trained with fixed $\alpha = 1\text{e--}2$.}
+        \label{fig:gate-placement-a}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/gate_placement_analysis_pctrl50.pdf}
+        \caption{MrT5s trained with a P-controller with $\hat{\delta} = 0.5$.}
+        \label{fig:gate-placement-b}
+    \end{subfigure}
+    \caption{Cross entropy loss and sequence length reduction for MrT5 models with delete gates at different layers. We train two sets of models: (a) models trained with a fixed regularizer $\alpha$, and (b) models trained with a P-controller that targets $\approx$50\% deletion. In both experiments, loss is higher in early layers. Since the gate should be placed as early as possible, we select layer 3 as optimal.}
+    \label{fig:gate-placement}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+In this paper, we introduce \textbf{MrT5} (\textbf{M}e\textbf{r}ge\textbf{T5}), a variant of the ByT5 architecture designed to address the inefficiencies of byte-level language modeling. MrT5's token deletion mechanism forces the model to merge input tokens into a more compact sequence, allowing for computational savings while preserving model performance. Our diagnostic experiments demonstrate that MrT5 effectively merges relevant context into a shorter sequence using strategies that align with task-specific objectives. In our continued pre-training experiments, MrT5 outperforms both random and fixed deletion baselines when trained in English, and with multilingual training, MrT5 achieves over 50\% reduction in sequence length across multiple languages with minimal impact on the loss. Our model learns very fast: the continued pre-training requires only a few thousand additional training steps.
+Furthermore, MrT5 maintains competitive accuracy with ByT5 on downstream tasks such as XNLI and character-level manipulations while improving inference runtimes. This demonstrates MrT5's capacity to handle tasks requiring semantic information, while still effectively processing character-level details--the main advantage of byte-level modeling.
+Our work takes a significant step toward the viability of byte-level language models and eliminating the need for subword tokenization.
+
+
+

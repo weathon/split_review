@@ -143,6 +143,8 @@ def coerce_scores(raw) -> list[int]:
     out: list[int] = []
     if not raw:
         return out
+    if isinstance(raw, str):
+        raw = json.loads(raw)
     for s in raw:
         try:
             if isinstance(s, str):

@@ -1,0 +1,342 @@
+\title{Ordinal Preference Optimization: Aligning Human Preferences via NDCG}
+
+\begin{abstract}
+
+Aligning Large Language Models (LLMs) with diverse human preferences is a pivotal technique for controlling model behaviors and enhancing generation quality. Reinforcement Learning from Human Feedback (RLHF), Direct Preference Optimization (DPO), and their variants optimize language models by pairwise comparisons. However, when multiple responses are available, these approaches fall short of leveraging the extensive information in the ranking given by the reward models or human feedback. In this work, we propose a novel listwise approach named Ordinal Preference Optimization (OPO), which employs the Normalized Discounted Cumulative Gain (NDCG), a widely-used ranking metric, to better utilize relative proximity within ordinal multiple responses. We develop an end-to-end preference optimization algorithm by approximating NDCG with a differentiable surrogate loss. This approach builds a connection between ranking models in information retrieval and the alignment problem. In aligning multi-response datasets assigned with ordinal rewards, OPO outperforms existing pairwise and listwise approaches on evaluation sets and general benchmarks like AlpacaEval. Moreover, we demonstrate that increasing the pool of negative samples can enhance model performance by reducing the adverse effects of trivial negatives
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) trained on extensive datasets have demonstrated impressive capabilities in fields such as natural language processing and programming \citep{gpt4,team2023gemini,llama3}. Alignment with human preferences is crucial for controlling model behavior, where Reinforcement Learning from Human Feedback (RLHF)  demonstrates high effectiveness in practice \citep{rlhf1,rlhf2,rlhf3}. However, the RLHF procedure is resource-intensive and sensitive to hyperparameters due to its online multi-stage nature. Direct Preference Optimization (DPO) \citep{dpo}  integrates the multi-stage process into a single offline training objective by eliminating the separate reward model. %
+
+The success of RLHF and DPO 
+hinges on the human preferences elicited from pairwise comparisons. A variety of pairwise-based offline preference optimization methods have been developed, such as RRHF \citep{rrhf}, SLiC \citep{slic}, RPO \citep{rpo}, SimPO \citep{simpo}, and LiPO-$\lambda$ \citep{lipo}, which primarily modify DPO's reward function and Bradley-Terry (BT) paradigm \citep{bradley1952rank}. These pairwise contrastive methods essentially classify preferred and non-preferred responses as positive and negative samples, %
+naturally suited for the binary responses in data sets like Reddit TL;DR and AnthropicHH \citep{tldr, AnthropicHH}. 
+However, multi-response data are often available, where a single prompt corresponds to several responses with assigned rewards \citep{rlhf3,rrhf, raft,openassistant}. The rewards reflect the overall order of the list and the relative quality of each response compared to the others.
+Existing pairwise contrastive approaches optimize models by comparing all possible pairs, but they overlook relative proximities of responses. %
+Alternatively, listwise methods present a more comprehensive view of the entire list of responses. Existing listwise methods like DPO-PL, PRO, LIRE \citep{dpo, PRO, LIRE} mainly integrate the Plackett-Luce (PL) model \citep{PL1} to represent the likelihood of list permutations, which is relatively simplistic.
+
+
+
+In this work, we propose Ordinal Preference Optimization (OPO), a new and effective listwise approach to align ordinal human preferences. The training of OPO is based on the  
+ranking metric Normalized Discounted Cumulative Gain (NDCG) \citep{ndcg},  a widely accepted listwise evaluation metric in Learning to Rank (LTR) literature \citep{ndcg_ir2,ndcg_recommend,ndcg_recommend2}.
+One challenge of optimizing NDCG is its discontinuity for backpropagation. 
+We employ a smooth surrogate loss NeuralNDCG \citep{neuralndcg} to approximate the non-differentiable NDCG. We establish an explicit connection between aligning LLMs with human preferences and training a ranking model. From this view, alignment can be framed as optimizing a calibrated score function that assigns reward scores to responses. The objective is to learn to rank these responses to match the permutation derived from ground truth labels. This approach aligns LLMs' likelihood closely to human preferences across multi-response datasets, improving the quality of the generative outputs.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{images/illustration.png}
+    \caption{An illustration of Ordinal Preference Optimization (OPO) workflow. Each response is assigned a ground truth label by the reward model and pre-sorted in descending order. Reward scores are then derived from the policy and re-sorted to a new permutation. OPO calculates NDCG@K from the difference between two permutations and optimizes the policy model.}
+    \label{fig:ill}
+\end{figure}
+
+We construct a multiple response dataset assigned with ordinal rewards based on UltraFeedback \citep{cui2023ultrafeedback} and SimPO \citep{simpo}. Comprehensive experiments are conducted to evaluate model performance with various pairwise and listwise benchmarks across different list sizes and hyperparameters. Our method OPO consistently achieves the best performance on both evaluation datasets and general benchmarks like AlpacaEval \citep{alpaca_eval}. 
+We investigate the impact of positive-negative pairs of varying quality on pairwise preference alignment. Our findings reveal that employing a diverse range of negative samples enhances model performance compared to using only the lowest-quality response as negative under the same single positive sample. Moreover, aligning all pairs of listwise responses (i.e., multiple positives against multiple negatives) does not significantly boost performance compared to jointly aligning one positive against multiple negatives. This indicates that a larger pool of negative samples leads to better performance in the pairwise contrastive scenario, as trivial negatives can result in suboptimal outcomes.
+Our contributions are summarized as follows:
+\begin{itemize}
+    \item  We propose a new listwise alignment method named OPO that can leverage ordinal multiple responses, which demonstrates superior performance than existing pairwise and listwise approaches across various model scales.  
+    \item We establish a connection between ranking models in information retrieval and the alignment problem in LLMs by illustrating the effectiveness of directly optimizing ranking metrics for LLM alignment.
+    \item We construct an ordinal multiple responses dataset and demonstrate that increasing the pool of negative samples can enhance the performance of existing pairwise approaches.
+    
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+The traditional RLHF framework aligns large language models (LLMs) with binary human preferences in a contrastive manner, which maximizes the likelihood of the preferred response $y_w$ over the non-preferred $y_l$. In contrast, this paper adopts the Learning to Rank (LTR) framework, which learns how to permute a list of responses by ranking models. 
+
+\subsection{Problem Setting}
+Following the setup in LiPO \citep{lipo}, we assume access to an offline static dataset $\mathcal{D}=\{x^{(i)},\mathbf{Y}^{(i)},\mathbf{\Psi}^{(i)}\}_{i=1}^N$, where $\mathbf{Y}=(y_1,...,y_K)$ is a list of responses from various generative models of size K given the prompt $x$. Each response is associated with a label from $\mathbf{\Psi}=(\psi_1,...,\psi_K)$, also known as the \emph{ground truth labels} in the Learning to Rank literature. 
+The label $\psi$ measures the quality of responses, which can be generated from human feedback or a pre-trained reward model. 
+In the empirical study, we obtain the score $\mathbf{\Psi}$ from a reward model as
+\begin{align}
+    \psi_k=RM(x,y_k),
+\label{psi}
+\end{align}
+where $\psi_k \in [0,1]$. The label is fixed for a response, representing the degree of human preference. 
+
+For each prompt-response pair, we also compute a \emph{reward score} representing the likelihood of the generating probability of the response:
+\begin{align}
+s(x,y)=\beta \log \frac{\pi_{\theta}(y|x)}{\pi_{\text{ref}}(y|x)}. 
+\label{scores_eq}
+\end{align}
+Here, $\pi_{\text{ref}}$ is a reference model which we set as the SFT model. 
+$\pi_{\theta}(y|x)$ and $\pi_{\text{ref}}(y|x)$ means the probability of the response $y$ given the prompt $x$ under the policy model and the reference model.
+Similar to DPO \citep{dpo}, the partition function is omitted due to the symmetry in the choice model of multiple responses. %
+Unlike the fixed labels $\psi_k$, the 
+reward scores $\mathbf{s}=\{s(x,y_1),...,s(x,y_K)\}$ depend on the model $\pi_{\theta}$ and are updated during the model training. 
+\subsection{NDCG Metric}
+Normalized Discounted Cumulative Gain (NDCG) \citep{dcg,ndcg} is a widely-used metric for evaluating the ranking model performance, which directly assesses the quality of a permutation from listwise data. Assume the list of responses $\mathbf{Y}=(y_1,...,y_K)$ have been {pre-ranked in the descending order based on labels} $\mathbf{\Psi}=(\psi_1,...,\psi_K)$ from Eq \ref{psi}, where $\psi_i\geq\psi_j$  if $i\geq j$. The Discounted Cumulative Gain at k-th position ($k\leq K$) is defined as:
+\begin{equation}
+    \text{DCG@}k = \sum_{j=1}^{k} G(\psi_j) D(\tau(j)),
+\label{dcg}
+\end{equation}
+where $\psi_j$ denotes the ground truth labels of the response $y_j$, and $\tau(j)$ is the descending rank position of \(y_j\) based on the reward scores $\mathbf{s}$ computed by the current model $\pi_\theta$. Typically, the discount function and the gain function are set as \(D(\tau(j)) = \frac{1}{\log_2(\tau(j)+1)}\) and \(G(\psi_j) = 2^{\psi_j} - 1\).
+
+The NDCG at k is defined as
+\begin{equation}
+\text{NDCG@}k = \frac{1}{\text{maxDCG@}k} \text{DCG@}k,
+\label{ndcg}
+\end{equation}
+where \(\text{maxDCG@}k\) is the maximum possible value of \(\text{DCG@}k\), computed by ordering the responses $\mathbf{Y}$ by their ground truth labels $\mathbf{\Psi}$. The normalization ensures that NDCG is within the range (0, 1). 
+
+The value $k$ of NDCG@$k$ ($k\leq K$) indicates that we focus on the ranking of the top $k$ elements while ignoring those beyond $k$. For example, when $k=2$, we only need to correctly order the first 2 elements, regardless of the order of the remaining $K-2$ elements in the list. It means solely making $s_1\geq s_2$ (because $\psi_1\geq \psi_2$ always holds) leads to the maximum NDCG@2 value.
+
+
+
+\section{Ordinal Preference Optimization}
+
+In LLM alignment, the reward score $\mathbf{s}$ in Eq \ref{scores_eq} is the key component connecting the loss objective to model parameters $\theta$. However, there is a gap between using NDCG as an evaluation metric and a training objective, since the NDCG metric is non-differentiable with respect to reward scores $\mathbf{s}$, which prevents the utilization of gradient descent to optimize models.
+
+To overcome this limitation, surrogate losses \citep{ndcg_sur} have been developed. These losses approximate the NDCG value by converting its discrete and non-differentiable characteristics into a continuous and score-differentiable form, suitable for backpropagation. The original NDCG is computed by iterating over each list element's gain value and multiplying it by its corresponding position discount, a process known as the \emph{alignment between gains and discounts} (i.e., each gain is paired with its respective discount). Thus, surrogate losses can be interpreted in two parts: aligning gains and discounts to approximate the NDCG value, and ensuring these functions are differentiable with respect to the score to enable gradient descent optimization. We will leverage NeuralNDCG as such a surrogate loss \citep{neuralndcg}.
+\subsection{NeuralSort relaxation}
+NeuralNDCG incorporates a score-differentiable sorting algorithm to align gain values $G(\cdot)$ with position discounts $D(\cdot)$. This sorting operation is achieved by left-multiplying a permutation matrix $P_{\text{sort}(\mathbf{s})}$ with the score vector $\mathbf{s}$ to obtain a list of scores sorted in descending order. The element $P_{\text{sort}(\mathbf{s})}[i,j]$ denotes the probability that response $y_j$ is ranked in the $i$-th position after re-sorting based on $\mathbf{s}$. Applying this matrix to the gains $G(\cdot)$ results in the sorted gains vector $\widehat{G(\cdot)}$, which is aligned with the position discounts.
+
+To approximate the sorting operator, we need to approximate this permutation matrix. In NeuralSort \citep{neuralsort}, the permutation matrix is approximated using a unimodal row stochastic matrix $\widehat{P}_{\text{sort}(\mathbf{s})}(\tau)$, defined as:
+\begin{equation}
+\widehat{P}_{\text{sort}(\mathbf{s})}[i, :](\tau) = \text{softmax}\left[\frac{((n + 1 - 2i)\mathbf{s} - A_{\mathbf{s}} \mathbf{1})}{\tau}\right].
+\label{neural_sort}
+\end{equation}
+Here, $A_{\mathbf{s}}$ is the matrix of absolute pairwise differences of elements in $\mathbf{s}$, where $A_{\mathbf{s}}[i, j] = |s_i - s_j|$, and $\mathbf{1}$ is a column vector of ones. The row of $\widehat{P}_{\text{sort}(\mathbf{s})}$ always sums to one. The temperature parameter $\tau > 0$ controls the accuracy of the approximation.
+Lower values of $\tau$ yield better approximations but increase gradient variance. It can be shown that:
+\begin{equation}
+\lim_{\tau \to 0} \widehat{P}_{\text{sort}(\mathbf{s})}(\tau) = P_{\text{sort}(\mathbf{s})}.
+\label{neural_sort2}
+\end{equation}
+A more specific simulation is shown in Table \ref{tab_p_hat}. For simplicity, we refer to $\widehat{P}_{\text{sort}(\mathbf{s})}(\tau)$ as $\widehat{P}$.
+
+\subsection{OPO Objective with NeuralNDCG}
+Similar to the original NDCG, but with the gain function $G(\cdot)$ replaced by $\widehat{G(\cdot)} = \widehat{P} \cdot G(\cdot)$ to ensure proper alignment between gains and discounts. The estimated gain at rank $j$ can be interpreted as a weighted sum of all gains, where the weights are given by the entries in the $j$-th row of $\widehat{P}$. Since $\widehat{P}$ is a row-stochastic matrix, each row sums to one, though the columns may not. This can cause $\widehat{G}$ to disproportionately influence the NDCG value at certain positions. To address this issue, Sinkhorn scaling \citep{sinkhorn} is employed on $\widehat{P}$ to ensure each column sums to one. Then we get the NeuralNDCG \citep{neuralndcg} formula:
+\begin{equation}
+\begin{aligned}
+    \text{NeuralNDCG@}k\ (\tau;\mathbf{s}, \mathbf{\Psi}) = N_k^{-1} \sum_{j=1}^{k} (\text{scale}(\widehat{P}) \cdot G(\mathbf{\Psi}))_j \cdot D(j),
+\end{aligned}
+\label{neural_ndcg}
+\end{equation}
+where $N_k^{-1}$ represents the $\text{maxDCG@}k$ (for $k \leq K$) as defined in Equation \ref{ndcg}. The function $\text{scale}(\cdot)$ denotes Sinkhorn scaling, and $G(\cdot)$ and $D(\cdot)$ are the gain and discount functions, respectively, as in Equation \ref{dcg}. Intuitively, the gain function should be proportional to the label, effectively capturing the relative ranking of different responses. The discount function penalizes responses appearing later in the sequence, as in many generation or recommendation tasks the focus is on the top-ranked elements, especially the first. Thus, higher-ranked responses have a more significant impact on the overall loss in NeuralNDCG.
+
+Finally, we derive the OPO objective, which can be optimized using gradient descent:
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\text{NeuralNDCG@k}}(\pi_\theta;\pi_{\text{ref}})= -\mathbb{E}_{(x, \mathbf{Y}, \mathbf{\Psi}) \sim \mathcal{D}} \left[ N_k^{-1} \sum_{j=1}^{k} (\text{scale}(\widehat{P}) \cdot G(\mathbf{\Psi}))_j \cdot D(j)
+    \right].
+\end{aligned}
+\label{loss_neural}
+\end{equation}
+Note that setting $k=2$ with $K>2$ is not equivalent to having a list size of $K=2$. The former indicates a focus on the top-2 responses from the entire list, where a higher rank signifies superior response quality. Conversely, $K=2$ typically refers to a binary contrastive scenario, classifying responses as positive or negative samples and maximizing the likelihood of preferred response $y_w$ over non-preferred $y_l$. In high-quality response pairs, labeling one as negative may adversely impact the generation quality of LLMs. OPO provides a more comprehensive view of relative proximities within multiple ordinal responses. In this work, we set $k=K$ by default.
+
+\subsection{Other Approximation of NDCG}
+In addition to aligning gains and discounts, we can modify the discount function to be differentiable. ApproxNDCG \citep{approxndcg} is proposed as an approximation to the rank position in the NDCG equation (Eq \ref{dcg}) using the sigmoid function:
+\begin{equation}
+\begin{aligned}
+    \widehat{\tau(j)}=1+\sum_{i\ne j}\frac{\exp{(-\alpha(s_j-s_i))}}{1+\exp{(-\alpha(s_j-s_i))}}
+    =1+\sum_{i\ne j}\sigma(\alpha(s_i-s_j)).
+\end{aligned}
+\label{approx_rank}
+\end{equation}
+As observed, if $s_i \gg s_j$, the descending rank position of $y_j$ will increase by $1$. Note that the hyperparameter $\alpha$ controls the precision of the approximation. We then obtain the estimated $\widehat{\tau(j)}$ and subsequently the ApproxNDCG objective:
+\begin{equation}
+\begin{aligned}
+    \mathcal{L}_{\text{ApproxNDCG@k}}(\pi_\theta;\pi_{\text{ref}})= -\mathbb{E}_{(x, \mathbf{Y}, \mathbf{\Psi}) \sim \mathcal{D}} \left[ N_k^{-1} \sum_{j=1}^{k} G(\psi_j) \cdot D(\widehat{\tau(j)})
+    \right].
+\end{aligned}
+\label{loss_approx}
+\end{equation}
+
+
+
+\section{Experiments}
+
+Our empirical studies address two critical questions: \textit{Q1: Can we employ ranking metrics as training objectives in LLM alignment problem?} \textit{Q2: How does selecting different pairs on multi-response data impact the performance of DPO?} For Q1, we demonstrate that OPO outperforms other baselines across various evaluation benchmarks. To answer Q2, we compare three pairwise paradigms of DPO on multi-response data. Our findings show that increasing the pool of negative samples can enhance model performance by mitigating the effects of trivial negatives.
+
+\noindent\textbf{Baselines}\quad  To explore the connection between LLM alignment and ranking tasks, as well as the performance of OPO, we employ various pairwise and listwise alignment baselines. Their optimization objectives are detailed in \Cref{baselines}. We introduce three paradigms of positive-negative pairs for DPO on ordinal multiple responses. LiPO-$\lambda$ \citep{lipo} incorporates LambdaRank from the Learning to Rank (LTR) literature, acting as a weighted version of DPO. SLiC and RRHF employ a similar hinge contrastive loss. ListMLE utilizes the Plackett-Luce Model \citep{PL1} to represent the likelihood of list permutations.
+
+\textbf{Datasets}\quad We construct a multi-response dataset named \emph{ListUltraFeedback}\footnote{\url{https://huggingface.co/datasets/OPO-alignment/ListUltraFeedback}}. This dataset combines four responses from UltraFeedback\footnote{\url{https://huggingface.co/datasets/openbmb/UltraFeedback}} and five generated responses from the fine-tuned Llama3-8B model\footnote{\url{https://huggingface.co/datasets/princeton-nlp/llama3-ultrafeedback-armorm}} in SimPO \citep{cui2023ultrafeedback,simpo}, all based on the same prompts. All responses are assigned ordinal ground truth labels using the Reward Model ArmoRM \citep{ArmoRM}. This model is the leading open-source reward model, outperforming both GPT-4 Turbo and GPT-4o in RewardBench \citep{lambert2024rewardbench} at the time of our experiments. To ensure clear distinction between positive and negative samples, while maintaining diversity, we select two responses with the highest scores and two with the lowest. Additionally, we randomly draw four responses from the remaining pool. Details of the dataset are presented in Table \ref{tab_datasets}.
+
+\noindent\textbf{Training Details}\quad We select Qwen2-0.5B \citep{qwen2} and Mistral-7B \citep{jiang2023mistral7b} as our foundation models, representing different parameter scales. Following the training pipeline in DPO \citep{dpo}, Zephyr \citep{zephyr}, and SimPO \citep{simpo}, we start with supervised fine-tuning (SFT) \citep{qwen2} on UltraChat-200k \citep{ding2023enhancing} to obtain our SFT model. We then apply various pairwise and listwise approaches to align preferences on our ordinal multiple response dataset, ListUltraFeedback. Adhering to the settings in HuggingFace Alignment Handbook \citep{alignment_handbook2023}, we use a learning rate of $5 \times 10^{-7}$ and a total batch size of 128 for all training processes. The models are trained using the AdamW optimizer \citep{kingma2014adam} on 4 Nvidia V100-32G GPUs for Qwen2-0.5B models and 16 Nvidia V100-32G GPUs for Mistral-7B. Unless noted otherwise, we fix $\alpha=25$ for ApproxNDCG and $\tau=1$ for OPO to achieve optimal performance, as determined by ablation studies and hyperparameter sensitivity analysis presented in Section \ref{ablation_study}. Both models and datasets are open-sourced, ensuring high transparency and ease of reproduction.
+
+\begin{table}[t]
+\small
+\centering
+\begin{tabular}{@{} l c l @{}}
+\toprule
+\textbf{Method} & \textbf{Type} &\textbf{Objective} \\
+\midrule
+DPO - Single Pair (\ref{Single Pair}) &Pairwise& $-\log \sigma \left( s_1-s_K \right)$ \\
+\midrule
+DPO - BPR (\ref{BPR})&Pairwise& $-\frac{1}{K-1} \sum_{j\ne 1}^K\log \sigma \left( s_1-s_j \right)$ \\
+\midrule
+DPO - All Pairs (\ref{all pairs}) &Pairwise&$-\binom{K}{2}^{-1} \sum_{\psi_i>\psi_j}\log \sigma \left( s_i-s_j \right)$\\
+\midrule
+LambdaRank (\ref{lipo})&Pairwise&$-\binom{K}{2}^{-1}\sum_{\psi_i > \psi_j} \Delta_{i,j} \log \sigma \left( s_i-s_j \right)$\\
+&& where $\Delta_{i,j} = |G_i - G_j| \cdot \left| {D(\tau(i))} - {D(\tau(j))} \right|$\\
+\midrule
+SLiC (\ref{slic})&Pairwise&$-\binom{K}{2}^{-1}\sum_{\psi_i > \psi_j} \max(0,1-(s_i-s_j))$\\
+\midrule
+ListMLE (\ref{listmle})&Listwise&$-\log\prod_{k=1}^K \frac{exp(s_k)}{\sum_{j=k}^K exp(s_j)}$\\
+\midrule
+\midrule
+ApproxNDCG (\ref{loss_approx}) &Listwise&$-N_k^{-1} \sum_{j=1}^{k} G(\psi_j) \cdot D(\widehat{\tau(j)})$\\
+\midrule
+OPO (\ref{loss_neural}) &Listwise&$-N_k^{-1} \sum_{j=1}^{k} (\text{scale}(\widehat{P}) \cdot G(\mathbf{\Psi}))_j \cdot D(j)$\\
+\bottomrule
+\end{tabular}%
+\caption{Pairwise and listwise baselines given ordinal multiple-response data $\mathcal{D} = (x, \mathbf{Y}, \mathbf{\Psi})$.}
+\label{baselines}
+\end{table}
+\noindent\textbf{Evaluation}\quad The KL-divergence in the original RLHF pipeline is designed to prevent the Policy model from diverging excessively from the SFT model, thus avoiding potential manipulation of the Reward Model. As we employ ArmoRM in the construction of the training dataset,we incorporate various judging models and evaluation benchmarks, such as different Reward models and AlpacaEval \citep{alpaca_eval} with GPT-4, to reduce the impact of overfitting on ArmoRM. We design 2 pipelines to thoroughly analyze the performance of OPO, using the Win Rate of generated responses from aligned models compared to the SFT model as our primary metric. Details of evaluation datasets are presented in Table \ref{tab_datasets}.
+
+In the \textbf{Proxy Model} pipeline, we deploy the Scoring Reward Model ArmoRM\footnote{\url{https://huggingface.co/RLHFlow/ArmoRM-Llama3-8B-v0.1}} \citep{ArmoRM} and the Pair-Preference Reward Model\footnote{\url{https://huggingface.co/RLHFlow/pair-preference-model-LLaMA3-8B}} \citep{rlhflow} as Proxy Models to calculate the win rate on ListUltraFeedback. Both Proxy models surpass GPT-4 Turbo and GPT-4o in rewarding tasks on RewardBench \citep{lambert2024rewardbench}. The Scoring model provides a score in the range $(0,1)$ for a given prompt and response, while the Pair-Preference model outputs the winner when given a prompt and two responses, offering a more intuitive approach for pairwise comparisons.
+
+In the \textbf{General Benchmark} pipeline, we evaluate our models using two widely recognized benchmarks: AlpacaEval \citep{alpaca_eval} and MT-Bench \citep{mt-bench}, which assess the model's comprehensive conversational abilities across various questions. Consistent with the original setup, we employ GPT-4 Turbo \citep{gpt4} as the standard judge model to determine which of the two responses exhibits higher quality.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lccc}
+\toprule
+ \textbf{Datasets}& \textbf{Examples} & \textbf{Judge Model} & \textbf{Notes}  \\
+\midrule
+\textbf{UltraChat200k}&208k &-&SFT\\
+\textbf{ListUltraFeedback}$_{\text{train}}$&59.9k &-&Ordinal Preference Optimization\\
+\midrule
+\multirow{2}{*}{\textbf{ListUltraFeedback}$_{\text{test}}$} &\multirow{2}{*}{1968} & RLHFlow Pair-Preference & Pair-Preference win rates  \\
+ & & ArmoRM & Scoring win rates  \\
+\textbf{AlpacaEval} & 805 & GPT-4 Turbo & Pair-Preference win rates  \\
+\textbf{MT-Bench} & 80 &  GPT-4 Turbo & Scoring win rates \\
+\bottomrule
+\end{tabular}
+\caption{Details of training datasets and evaluation datasets.}
+\label{tab_datasets}
+\end{table}
+
+\subsection{Main Results}
+We list win rates of various alignment approaches across diverse evaluation benchmarks in Table \ref{tab: main results}. Pairwise contrastive methods that leverage extensive structural information from multiple responses outperform those relying solely on traditional single pairs. Both BPR and All Pairs methods exceed the performance of Single Pair, with no significant difference between BPR and All Pairs, particularly evident with the Mistral-7B model (\Cref{mistral7b}). This suggests that utilizing diverse negative samples is more crucial than varying positive samples in pairwise contrastive scenarios. Trivial negatives lead to suboptimal outcomes, but a larger pool of negative samples can reduce the uncertainty associated with their varying quality.
+
+When the list size is 8, the OPO algorithm, which directly optimizes an approximation of NDCG, achieves superior performance. OPO's advantage over pairwise and ListMLE methods lies in its ability to effectively utilize the relative proximities within ordinal multiple responses. Traditional contrastive pairwise approaches tend to crudely classify one response as negative and maximize the likelihood of the preferred response $y_w$ over the non-preferred $y_l$. It can adversely affect the generation quality of LLMs when high-quality responses are treated as negative samples. In contrast, OPO provides a more nuanced approach to handling the relationships between responses.
+\begin{table}[ht]
+\small
+    \centering
+    \begin{tabular}{lcccccc}
+        \toprule
+        \cmidrule(lr){3-4} \cmidrule(lr){5-6}
+        & & \textbf{Pair-Preference} &\textbf{Scoring} &   \textbf{AlpacaEval} & \textbf{MT-Bench} \\
+        \midrule
+        Single Pair & Pairwise& 60.75 & 56.86  &57.95 &52.81 \\
+        BPR & Pairwise & 60.32& 58.33 &58.74 &55.00 \\
+        All Pairs & Pairwise & 63.82& 60.54  & 57.23& 53.13 \\
+        SLiC & Pairwise & 63.31& 60.70  & 61.00& 53.75 \\
+        LambdaRank & Pairwise & 62.30& 59.04  & 58.72 &55.31 \\
+        ListMLE & Listwise & 63.03& 59.76  & 57.05 &53.13 \\
+        \midrule
+        ApproxNDCG & Listwise & 61.46& 58.59  &58.16 &\underline{\textbf{55.94}} \\
+        OPO & Listwise & \underline{\textbf{64.25}}& \underline{\textbf{61.36}}  & \underline{\textbf{61.64}} & 53.44 \\
+        \bottomrule
+    \end{tabular}%
+\caption{The proposed OPO and ApproxNDCG outperform existing baselines across various evaluation benchmarks. The win rates are derived from comparisons between the preference-aligned Qwen2-0.5B and its SFT model. We fix $\alpha=25$ for ApproxNDCG and $\tau=1$ for OPO. We also set $\beta=0.1$ in Eq \ref{scores_eq} for all methods except $\beta=0.05$ for SLiC to achieve the optimal performance. 
+}
+\label{tab: main results}
+\end{table}
+
+\subsection{Ablation Study}
+\label{ablation_study}
+\noindent\textbf{Score Function Scale}\quad The hyperparameter $\beta$ controls the scaling of the score function Eq \ref{scores_eq} and the deviation from the base reference policy $\pi_{\text{ref}}$, which is significantly influence models performance. Following the common setting in previous works \citep{dpo,simpo, lipo}, we set the hyperparameter space of $\beta$ as $[0.01, 0.05, 0.1, 0.5]$ and conduct sensitivity analysis over broad approaches. As illustrated in Fig \ref{fig_combine}, all methods achieve their best performance at $\beta=0.1$ except the SLiC method. OPO consistently achieves the best performance on both $\beta=0.05$ and $\beta=0.1$. More detailed results are shown in Table \ref{tab_sup_beta}.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{images/combine.png}
+    \caption{OPO outperforms other methods across different $\beta$ and list sizes. The Proxy win rates are calculated by Pair-Preference Proxy model by comparing preference-aligned Qwen2-0.5B against its SFT model.}
+    \label{fig_combine}
+\end{figure}
+
+\noindent\textbf{List Size}\quad To evaluate the effectiveness of listwise methods in leveraging the sequential structure of multiple responses compared to pairwise methods, we analyze performance across varying list sizes.\footnote{For the Single Pair approach, list sizes remain constant, as detailed in Section \ref{Single Pair}. In the case of BPR \citep{BPR}, since it focuses on the expected difference between the best response and others, list size has minimal impact in a random selection context.} The results, presented in Figure \ref{fig_combine}, indicate that models trained with multiple responses (more than two) significantly outperform those using binary responses. Many models achieve optimal performance with a list size of 8. Notably, the OPO method (Equation \ref{neural_ndcg}) consistently outperforms other approaches when $K>4$, with performance improving as list size increases. This trend is also evident across different values of $\beta$, as shown in the supplementary results \ref{tab_sup_list}.
+
+\noindent\textbf{Approximation Accuracy}\quad The temperature parameter $\tau$ controls the approximation accuracy and gradient variance of NeuralNDCG \citep{neuralndcg}. We visualize the values of NDCG and NeuralNDCG on specific data and assess model performance with various $\tau$. The results, shown in Figure \ref{fig_neural}, reveal that as NeuralNDCG more closely approximates true NDCG, model performance tends to decline. This may occur because training involves multiple high-quality responses with similar ground truth labels. Enforcing responses to conform to NDCG's step-wise structure can reduce the likelihood of these good responses. Additionally, as the approximation accuracy of NeuralNDCG increases, more plateaus appear due to NDCG's inherent step-wise nature. On these plateaus, gradients become zero, preventing model optimization on these data points.
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{images/neural_plot.png}
+\caption{Higher NDCG approximation accuracy doesn't always lead to better performance. Given ground truth label $\psi=[1.0,0.8,0.6,0.4,0.2]$ and the scores $\mathbf{s}=[x,0.8,0.6,0.4,0.2]$, an illustration of NeuralNDCG Approximation Accuracy with different $\tau$ and its corresponding absolute value of error and Pair-Preference Proxy model win rates against SFT.}
+\label{fig_neural}
+\end{figure}
+
+\noindent\textbf{OPO Setup}\quad We set $\tau=1.0$ and perform an ablation study on key components of OPO, with results shown in Table \ref{setup}.  (\romannumeral 1) When evaluating the NDCG@4 metric (Equation \ref{neural_ndcg}) for multiple responses with a list size of 8, the performance is comparable to OPO with a list size of 4. This suggests that OPO's effectiveness is more influenced by the quantity and size of listwise data rather than the specific metric calculation method. (\romannumeral 2) The choice of gain function, whether $G_i = 2^{\psi_i} - 1$ or $G_i = \psi_i$, does not significantly impact model performance. The critical factor is that the gain function provides the correct ranking order and reflects the relative proximity of different responses. (\romannumeral 3) Omitting Sinkhorn scaling \citep{sinkhorn} on $\widehat{P}$ significantly degrades performance. Without scaling, the permutation matrix $\widehat{P}$ may not be column-stochastic, meaning each column may not sum to one. This can cause the weighted sum of $G(\cdot)$ to disproportionately contribute to the estimated gain function $\widehat{G(\cdot)}$ (Equation \ref{neural_ndcg}), thereby adversely affecting results.
+
+\begin{table}[ht]
+\small
+    
+    \centering
+    
+    \begin{tabular}{lcccccc}
+        \toprule
+        \textbf{Method} &$\beta$& \textbf{Pair-Preference }& \textbf{Scoring } &$\beta$& \textbf{Pair-Preference }& \textbf{Scoring } \\
+        \cmidrule(lr){1-4} \cmidrule(lr){5-7}
+        All Pairs     &0.1& 63.82   & 60.54  &0.05& 62.12   & 58.36\\
+        OPO      &0.1 & \underline{\textbf{64.25}}  & \underline{\textbf{61.36}}  &0.05& 63.92   & \textbf{60.09}\\
+        
+        \cmidrule(lr){1-4} \cmidrule(lr){5-7}
+        Top-4    &0.1 & 61.92  & 59.35 &0.05& 61.36   & 58.64 \\
+        w/o Power  &0.1& 63.49& 61.28 &0.05& \textbf{64.05}   & 59.45 \\
+        w/o Scale   &0.1& 57.32& 56.20 &0.05& 57.49   & 55.72 \\
+        \bottomrule
+    \end{tabular}
+\caption{Ablation study results for OPO Setup on Qwen2-0.5B: (\romannumeral 1) Only calculate the top-4 NDCG metric; (\romannumeral 2) Replace the exponential function with the direct label as the gain function; (\romannumeral 3) Remove the Sinkorn Scale function in Eq \ref{loss_neural}.}
+\label{setup}
+\end{table}
+
+\noindent\textbf{Model Scale Up}\quad To thoroughly assess the performance of OPO, we employ the Mistral-7B model \citep{jiang2023mistral7b} as our large-scale language model. Following the SimPO pipeline \citep{simpo}, we use Zephyr-7B-SFT from HuggingFace \citep{zephyr} as the SFT model. Mistral-7B is then aligned with ordinal multiple preferences on ListUltraFeedback, and its performance is validated across evaluation sets and standard benchmarks, as shown in Table \ref{mistral7b}.
+\begin{table}[h]
+\small
+
+    
+    \centering
+    \begin{tabular}{lcccccc}
+        \toprule
+        
+        \cmidrule(lr){3-4} \cmidrule(lr){5-6}
+        &&  \textbf{Pair-Preference} &\textbf{Scoring} &   \textbf{AlpacaEval} & \textbf{MT-Bench} &\\
+        \midrule
+        Single Pair&Pairwise&71.90&70.66& 74.75& 52.19&\cellcolor{gray!20}67.38\\
+        BPR&Pairwise&84.43&82.37& 86.69& 63.44&\cellcolor{gray!20}79.23\\
+        All Pairs &Pairwise&\underline{\textbf{85.34}}&83.31& 82.79& 61.56&\cellcolor{gray!20}78.25\\
+        SLiC&Pairwise&84.12&83.46& 83.27& 66.25&\cellcolor{gray!20}79.28\\
+        LambdaRank&Pairwise&85.11&82.52&86.13&\underline{\textbf{69.06}}&\cellcolor{gray!20}80.71\\
+        ListMLE&Listwise&83.79&\underline{\textbf{83.61}}& 83.46& 66.56&\cellcolor{gray!20}79.35\\
+        \midrule
+        ApproxNDCG&Listwise&82.04&74.64&85.80& 67.50&\cellcolor{gray!20}77.50\\
+        OPO&Listwise&84.98&83.05& \underline{\textbf{87.54}}& 67.81&\cellcolor{gray!20}\underline{\textbf{80.85}}\\
+        \bottomrule
+    \end{tabular}
+    \caption{OPO outperforms other baselines on win rates of aligned Mistral-7B against Zephyr-7B-SFT. We set $\beta=0.01$ for Single Pair and $\beta=0.05$ for other approaches to achieve the best performance. The other settings are the same as in Table \ref{tab: main results}.}
+    \label{mistral7b}
+\end{table}
+OPO demonstrates competitive performance on win rates against the SFT model. To clearly illustrate OPO's advantages over other methods, we compare their generated responses and present OPO's win rates in Figure \ref{fig_compare}. More detailed comparisons can be found in Figure \ref{fig_sup_compare}.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{images/compare.png}
+    \caption{OPO outperforms other approaches on direct comparisons with Mistral-7B. The win rates are derived from comparisons between OPO and other methods on their optimal settings. We employ the Pair-Preference Proxy model on evaluation sets and GPT-4 on AlpacaEval as the judge models.}
+    \label{fig_compare}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\noindent\textbf{Pairwise Preference Optimization}\quad Direct Preference Optimization (DPO) \citep{dpo} removes the necessity for an explicit reward model within the RLHF framework by introducing a novel algorithm to compute reward scores for each response. Similar to RLHF, DPO uses the Bradley-Terry (BT) model \citep{bradley1952rank} to align binary human preferences in a contrastive manner. Subsequent research, including methods like IPO, KTO, RPO, SimPO, and others \citep{reject_sampling,cringe,ipo,rpo,kto,orpo,rdpo,simpo}, focus on refining the reward function and the BT model to enhance performance and simplify the process. Additionally, iterative methods are developed to align pairwise preferences with a dynamic reference model \citep{iter_nash,iter_reason,iter_sdpo,iter_self}. They classify preferred responses $y_w$ as positive samples and non-preferred responses $y_l$ as negative samples, with the objective of maximizing the likelihood of $r(x,y_w)$ over $r(x,y_l)$. These contrastive techniques are influenced by the quality and quantity of negative samples. As indicated by the contrastive learning literature, the presence of hard negatives and large batch size is crucial \citep{contrastive}. Incorporating trivial negatives can lead to suboptimal results; hence, leveraging multiple-response data can expand the pool of candidate samples, reducing the likelihood of trivial negatives.
+
+\noindent\textbf{Multiple Responses Alignment}\quad Recent research has introduced simple and efficient methods to align human preferences across multiple responses. These approaches expand candidate responses from various large language models (LLMs) such as ChatGPT, Alpaca, and GPT-4, assigning ordinal rewards via reward models or human feedback. RRHF\citep{rrhf} employs the same hinge objective as SLiC \citep{slic} on ordinal multiple responses through pairwise comparisons. LiPO-$\lambda$ \citep{lipo} incorporates LambdaRank \citep{lambda1} where higher-quality responses against lower-quality ones receive greater weights, acting as a weighted version of DPO. However, when handling high-quality response pairs, incorrectly classifying one of them as the negative sample and minimizing its likelihood can adversely affect LLM generation quality. Listwise methods offer a more nuanced approach to handling relationships between responses. DPO-PL \citep{dpo} and PRO \citep{PRO} employ the same PL framework \citep{PL1} but differ in their reward functions. LIRE \citep{LIRE} calculates softmax probabilities with a consistent denominator and multiplies them by corresponding rewards, functioning as a pointwise algorithm since permutations do not alter loss values. Despite their potential, current listwise techniques are not yet state-of-the-art in the learning-to-rank (LTR) literature, indicating a need for further research.
+
+\noindent\textbf{Learning to Rank}\quad Learning to Rank (LTR) involves a set of machine learning techniques widely applied in information retrieval, web search, and recommender systems \citep{liu2009learning, karatzoglou2013learning, BPR_rnn, li2024learning}. The goal is to train a ranking model by learning a scoring function $s = f(x, y)$ that assigns scores to elements for ranking purposes. The loss is computed by comparing the current permutation with the ground truth, which updates the model parameters $\theta$. Loss functions in LTR are generally categorized into three types: pointwise, pairwise, and listwise. Pointwise and pairwise methods convert the ranking task into classification problems, often overlooking the inherent structure of ordered data. Conversely, listwise approaches \citep{xia2008listwise} directly tackle the ranking problem by considering entire ranking lists as training instances. This approach fully exploits the relative proximities within ordinal multiple responses, providing a more comprehensive understanding of the ranking relationships.
+
+
+
+\section{Discussion}
+
+ In this work, we propose Ordinal Preference Optimization (OPO), a novel listwise preference optimization algorithm to align ordinal human preferences. By optimizing the standard ranking metric NDCG, OPO learns a score function that assigns reward scores to responses and ranks them properly, and it connects ranking models in information retrieval and LLM alignment. Empirical studies show that OPO consistently outperforms existing pairwise and listwise approaches across various training setups and evaluation benchmarks. %
+
+Our study has several limitations and suggests promising directions for future research.
+ In constructing ordinal multiple responses, a pre-trained Reward Model serves as the judge model, which might not fully align with real-world human preferences. Future study can develope more robust and secure data construction methods to ensure responses remain harmless and improve model alignment quality. Additionally, there is a lack of theoretical analysis on aligning human preferences as a Learning to Rank (LTR) task despite its empirical success. The extensive LTR literature remains underexplored, indicating potential for further research and applications in related fields.
+
+
+

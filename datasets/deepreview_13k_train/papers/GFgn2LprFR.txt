@@ -1,0 +1,466 @@
+\title{Efficient Active Imitation Learning with Random Network Distillation}
+
+\begin{abstract}
+
+
+Developing agents for complex and underspecified tasks, where no clear objective exists, remains challenging but offers many opportunities. This is especially true in video games, where simulated players (bots) need to play realistically, and there is no clear reward to evaluate them. While imitation learning has shown promise in such domains, these methods often fail when agents encounter out-of-distribution scenarios during deployment. Expanding the training dataset is a common solution, but it becomes impractical or costly when relying on human demonstrations. This article addresses active imitation learning, aiming to trigger expert intervention only when necessary, reducing the need for constant expert input along training. We introduce Random Network Distillation DAgger (RND-DAgger), a new active imitation learning method that limits expert querying by using a learned state-based out-of-distribution measure to trigger interventions. This approach avoids frequent expert-agent action comparisons, thus making the expert intervene only when it is useful. We evaluate RND-DAgger against traditional imitation learning and other active approaches in 3D video games (racing and third-person navigation) and in a robotic locomotion task and show that RND-DAgger surpasses previous methods by reducing expert queries. \small{\url{https://sites.google
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Imitation learning has increasingly become a favored approach for learning behaviors in complex environments, offering a compelling alternative to classical scripted behaviors implemented by domain specialists \citep{schaal1999imitation,hussein2017imitation}. It is particularly well suited in problems where there is not a clear performance measure (or reward). In video games, it is becoming more and more familiar to game developers that frequently address the problem of implementing bots in their games which must play in realistic ways  \citep{harmer2018imitation,yadgaroff2023improving,mao2024stylized}.
+Indeed, since the notion of realism is not well specified, it prevents the use of reinforcement learning-based approaches where a reward signal is mandatory. By observing and replicating human players, these bots are trained to execute complex strategies and actions that are both efficient and human-like.
+
+Imitation learning usually proceeds in two steps: first, a dataset of behaviors is built by leveraging experts interacting with the dynamical system. Then, a statistical model (e.g. a neural network) is learned to imitate actions in that dataset, thus expecting this model to generalize to unseen state and to behave like the experts. Consider a use case where the goal is to train a driving policy in a video game context capable of controlling a car on a track (see figure \ref{fig:main-fig}). In this scenario, the state is defined by sensor values at time $t$, which can include information such as the position of the car, its speed, and raycasts. In this context, Imitation Learning involves manually controlling the car for many laps to create a learning dataset, training a policy on this dataset using traditional algorithms like Behavioral Cloning \citep{bain1999framework}, and expecting that the resulting bot will control the car correctly. However, this approach is known to be unreliable, particularly due to the risk of a shift in the state distribution between training and testing \citep{dagger2011}, known as the problem of covariate shift \citep{nair2019covariate}. When covariate shift occurs, the agent struggles to determine the correct action, leading to compounding errors and ultimately undermining its performance.
+
+Facing this issue, the effectiveness of imitation learning hinges on the availability of extensive datasets comprised of player behaviors, often necessitating thousands of expert traces to achieve reasonable performance and exhibit credible behaviors \citep{vinyals2019grandmaster,mao2024stylized}. This dependency on large volumes of data poses a challenge, particularly in scenarios where collecting such data is either impractical or costly.
+
+In response to these limitations, some approaches involve human-in-the-loop training framework, often referred to as active imitation learning \citep{dagger2011,judah2012active,menda2019ensembledagger,hoque2021lazydagger}. Instead of gathering very large amounts of demonstrations, these methods focus on the strategic incorporation of human feedback to selectively guide the learning process, thereby enhancing the efficiency of the training phase. By prioritizing the acquisition of relevant and impactful expert traces, these approaches seek to expedite the agent's learning curve without relying on expansive datasets, and swiftly improve performance. In the aforementioned video game example, this corresponds to collecting a first set of players traces to bootstrap the agent using classical imitation learning, and then to gather additional traces in particular race settings during training, i.e. requiring a player to control the car in particular and relevant situations. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Main_figure_cropped.pdf}
+    \caption{\textbf{RND-DAgger overview}. (a) The learner’s policy controls the agent
+until (b) our Random Network Distillation-based out-of-distribution (OOD) measure is triggered.
+Then (c) the expert takes control until the OOD measure gets lower than the threshold for at least W steps. (d) At last, the current policy takes control of the agent to continue the episode, and
+can trigger the expert again later.}
+\label{fig:main-fig}
+\end{figure}
+
+To tackle these challenges, several recent models have been proposed to identify when the expert’s intervention is necessary to correct the agent’s suboptimal behavior \citep{Zhang2017safedagger, menda2019ensembledagger, kelly2019hg, hoque2021lazydagger}, with DAgger \citep{dagger2011} being one of the most well-known approaches. The primary objective of these methods is to minimize the time required for human feedback by concentrating interventions on the most critical situations where the agent is likely to make errors. This allows for a more efficient use of expert time, ensuring that corrective feedback is provided only when it is essential. But, as explained in Section \ref{sec:preliminaries}, many of these methods are not fully satisfying. 
+
+Despite these advancements, designing algorithms that effectively incorporate human feedback while reducing the overall expert effort remains an open research problem. Addressing this issue is the central focus of this article, as we aim to develop methods that optimize the interaction between the expert and the learning agent, thereby improving learning efficiency without overburdening the human supervisor.
+
+Our main contributions are threefold: i) We propose a new method called RND-DAgger which is a novel interactive imitation learning approach leveraging state-based out-of-distribution identification through random network distillation. ii) We perform a comparative analysis of RND-DAgger and existing methods on 3 tasks: a robotics scenario and two video-game  environments. iii) Throughout these experiments, we demonstrate that RND-DAgger either outperforms or matches existing approaches in terms of final performance while significantly reducing expert burden.
+\newpage
+
+
+\section{Preliminaries and Related Models}
+
+\label{sec:preliminaries}
+
+\paragraph{Notations}
+
+Let us consider a Partially Observable Markov Decision Process described by a state space $\mathcal{S}$, an observation space $\mathcal{O}$ and an action space $\mathcal{A}$. The dynamics of the process is defined by two unknown distributions: i) the observation distribution $P(o_t|s_t)$ with $(o_t,s_t) \in \mathcal{O} \times \mathcal{S}$ and ii) the transition function $P(s_{t+1}|a_t,s_t)$ where $a_t$ lies in $\mathcal{A}$. Note that we do not consider any reward in this setting since the task to solve is not explicit (e.g. driving a car), our objective being typically to imitate human behaviors that may be suboptimal and diverse (e.g. if considering multiple players or experts). An episode $\tau$ is composed of a sequence of observations and actions $\tau=(o_1,a_1,...,o_{T_{\#\tau}}, a_{T_{\#\tau}})$
+where $\#\tau$ is the size of the episode. Given a policy $\pi(a_t|o_t,a_{t-1},o_{t-1},....,o_1)$, it is possible to sample an episode by sequentially executing the policy until reaching a stop criterion. 
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.49\textwidth}
+        \begin{algorithm}[H]
+            \caption{DAgger}\label{alg:daggeralgo1} 
+            \small
+            \begin{algorithmic}[1]
+                \REQUIRE $K$, $\{\beta_i\}_{i\in[1,K]}$, $T$, $\pi_{exp}$
+                \State $\text{Instantiate } D \text{ dataset of expert trajectories}$
+                \State $\text{Instantiate } \pi_{0} \text{ BC policy trained on } D$
+                \State $t \gets 0$
+                \For {$i=0,\ldots,K$ DAgger iterations} 
+                \State $D_i \leftarrow \emptyset $
+                    \For {$T$ sampling steps} 
+                        \State $s_t \sim Env(a_{t-1})$ (Get a new state)
+                        \State $a_t \gets \beta_i \pi_{exp}(s_t) +  (1-\beta_i) \pi_{i}(s_t)$
+                        \State $D_i \gets D_i \cup \{ (a_t, \pi_{exp}(s_t))\}$
+                        \State $t \gets t+1$
+                    \EndFor
+                    \State Push $D \leftarrow D \cup D_i$
+                    \State $\text{Train } \pi_{i+1} \text{ on } D \text{ using BC}$
+                \EndFor
+                \State return $\pi_K$
+            \end{algorithmic}
+        \end{algorithm}
+        \caption{\textbf{Above}, the DAgger algorithm where the expert action is added to the training set at each timestep, the agent being alternatively controlled by the current policy and the expert one. \textbf{On the right}, in Lazy/Ensemble DAgger, the agent is controlled by the expert policy only if a given measure is higher than a threshold $\lambda$. Only actions generated when the expert controls the agent are added to the training set. }
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.49\textwidth}
+        \begin{algorithm}[H]
+            \caption{Lazy/Ensemble DAgger}\label{alg:daggeralgo2} 
+            \begin{algorithmic}[1]
+                \REQUIRE $K$, $\textsc{Condition}$, $T$, $\pi_{exp}$
+                \State $\text{Instantiate } D \text{ dataset of expert trajectories}$
+                \State $\text{Instantiate } \pi_{0} \text{ BC policy trained on } D$
+                \State $nswitch \gets 0$
+                \State $t \gets 0$
+                \State $D_i \leftarrow \emptyset $
+                \For {$i=0,\ldots,K$ iterations}
+                    \While {$\#D_i < T$  } 
+                        \State $s_t \sim Env(a_{t-1})$ (Get a new state)
+                        \State $C_t \gets \textsc{Condition}(\pi_{exp}, \pi_{i}, s_t)$
+                        \If{$C_t$}
+                            \State $a_t \gets \pi_{exp}(s_t)$
+                            \State $D_i \gets D_i \cup \{ (a_t, s_t) \}$
+                            \State $t \gets t+1$
+                            \If {$\textbf{not } C_{t-1}$}
+                                \State $nswitch \gets nswitch+1$
+                            \EndIf
+                        \Else
+                            \State $a_t \gets \pi_{i}(s_t)$                            
+                        \EndIf
+                        \State $t \gets t+1$
+                    \EndWhile
+                    \State $D \gets D \cup D_i$
+                    \State $\text{Train } \pi_{i+1} \text{ on } D \text{ using BC}$
+                \EndFor
+                \State return $\pi_K$
+            \end{algorithmic}
+            \label{alg:lazy-ensemble-algo}
+        \end{algorithm}
+    \end{minipage}
+\end{figure}
+
+\paragraph{Distributional shift:} Given a dataset of expert demonstrations \(\mathcal{D} = (\tau_1, \dots, \tau_n)\), a common approach to policy learning is Behavioral Cloning (BC) \citep{bain1995framework,ding2019goal}, a straightforward imitation learning algorithm. BC enables to learn policies by maximizing the log-likelihood of the expert actions within the dataset. 
+However, learning a policy from a fixed dataset can result in the policy encountering out-of-distribution (OOD) states during inference, where it has not been trained to make accurate decisions \citep{dagger2011}. This phenomenon is referred to as distributional shift. This shift in the distribution can cause the policy to perform poorly, as it may not know how to handle unseen situations. For example, consider a driving policy in a racing game. If the dataset is composed only of demonstrations from expert drivers, the learned policy might struggle to recover from rare events such as a spin-out, since such situations are absent from the expert demonstrations. Therefore, the policy may fail to generalize effectively to these unseen states. 
+
+This effect can be mitigated by providing more diverse and comprehensive training sets, ensuring that the policy is exposed to a wider range of scenarios, including edge cases. However, this raises the challenge of how to efficiently collect such datasets while minimizing the burden on experts. Gathering enough data to cover all possible situations can be time-consuming and costly, especially if it relies heavily on expert demonstrations. Thus, the key question becomes how to strategically collect diverse and representative data in a way that maximizes coverage of the state space while minimizing the amount of effort required from experts.
+
+\paragraph{DAgger and variants:} To address this issue, one can utilize the DAgger algorithm from \cite{dagger2011} (Algorithm \ref{alg:daggeralgo1}), which iteratively expands the training dataset through the intervention of an expert, represented by a \textbf{reference policy} denoted as \(\pi_{\text{exp}}\). The reference policy serves two key roles: first, it determines the appropriate action to execute at each timestep based on a specified decision rule (line 7) -- a mixture between the current policy and the expert one. Second, it helps augment the training set by adding new samples of states and corresponding expert actions, which are then used to improve the learned policy (line 11). At regular intervals, the policy is updated via imitation learning using the expanded dataset, and this process is repeated over multiple iterations. This method helps to mitigate the issue of distributional shift by continually refining the learned policy with fresh data that captures a broader range of states.
+
+To better sample relevant states, few variants of the DAgger algorithm have been proposed. One of the most relevant is Ensemble-DAgger \citep{menda2019ensembledagger} which introduces a decision rule to decide if the agent is controlled by the current policy, or by the expert one. Moreover,  pairs of state-actions are added to the learning dataset only when the action comes from the expert policy (see Figure \ref{alg:daggeralgo2} - right ). The decision rule is a discrepancy measure that computes the distance between the expert action and the policy action (combined with a disagreement measure between a mixture of experts) as shown in Algorithm \ref{fig:ensemble-lazy-measure}. This approach is not realistic when considering human experts. Indeed, let us revisit our car driving example, where the goal is to learn an effective driving policy for a video game. Using the DAgger and EnsembleDAgger approaches, the expert (i.e. the player) must continuously play the game during the active imitation learning process, while the car is only partially controlled by the current learned policy. This setup has two significant drawbacks: i) First, the player is placed in an unnatural setting, where they are expected to control a car that they do not fully manage. This can create a disorienting experience, as the player must constantly adapt to actions taken by the   policy, disrupting the natural flow of gameplay. ii) Second, the player remains engaged even when the car is exhibiting good behavior, spending time providing feedback that may not significantly contribute to discovering a better policy. This leads to inefficiencies, as the expert's time is not always optimally utilized, especially in situations where the current policy already performs well.
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.49\textwidth}
+        \begin{algorithm}[H]
+            \caption{\textsc{Condition} for Ensemble-DAgger}
+            \begin{algorithmic}[1]
+                \REQUIRE $\pi_{nov} \text{ a mixture of N policies}$,\newline
+                $\pi_{exp}$, $s_t$, $\chi, \tau$
+                \State $\sigma^2_{nov} \gets \text{doubt of the mixture } \pi_{nov}$
+                \State $m_{t} \gets \| \pi_{exp}(s_t) - \overline{\pi_{nov}(s_t))} \|^2$
+                \If{$\sigma^2_{nov} > \chi \textbf{ or } \text{measure} > \tau $}
+                    \State \textbf{return} \textsc{ True}
+                \Else
+                    \State \textbf{return} \textsc{ False}
+                \EndIf
+            \end{algorithmic} 
+        \end{algorithm}
+        
+    \end{minipage}
+    \begin{minipage}{0.49\textwidth}
+        \small
+        \begin{algorithm}[H]
+             \caption{\textsc{Condition} for Lazy-DAgger}
+             \begin{algorithmic}[1]
+                 \REQUIRE $f$, $s_t$, $\beta_H, \beta_R$
+                 \State $m_{t} \gets f(s_t) \text{ which estimates } \| \pi_{exp}(s_t) - \pi_{i}(s_t) \|^2$
+                 \If{$m_t > \beta_H $}
+                    \State \textbf{return} \textsc{ True}
+                \Else
+                    \If{$\text{measure} < \beta_R $}
+                        \State \textbf{return} \textsc{ False}
+        
+                    \Else
+                        \State \textbf{return} \textsc{ True}
+                    \EndIf
+        \EndIf
+             \end{algorithmic} 
+        \label{alg:ld}
+        \end{algorithm}        
+    \end{minipage}
+    \caption{In Ensemble-DAgger, the policy is a mixture, and the measure is based on both a disagreement between the models in this mixture, and a disagreement with the expert action. The computations of these measure require the expert to provide action at each timestep of the process. In Lazy-DAgger, the measure is based on the disagreement between the current policy and the expert one, but to avoid the query of the expert action at each timestep, a classifier $f$ is trained to predict if the discrepency measure
+    $\| \pi_{exp}(s_t) - \pi_{i}(s_t) \|^2$ is above a given threhsold $\beta_H$ or not.}
+    \label{fig:ensemble-lazy-measure}
+\end{figure}
+
+
+
+\section{Random Network Distillation-based DAgger}
+
+\label{sec:rnd-dagger}
+
+To address the aforementioned limitations of \cite{menda2019ensembledagger}, Lazy-DAgger \citep{hoque2021lazydagger} proposes to involve the expert only during critical moments rather than requiring continuous control. Instead of relying on the expert to partially guide the agent throughout the learning process, this approach alternates between periods where the agent is completely controlled by the current policy and periods where it is fully controlled by the expert. During the phases controlled by the current policy, the expert’s intervention is not required, thereby reducing the time the expert spends supervising the agent and making their interventions more targeted and efficient.
+
+    
+               
+                        
+                        
+
+\begin{figure}
+    \centering
+    \begin{minipage}[t]{.50\textwidth}
+    \begin{algorithm}[H]
+        \small
+        \begin{algorithmic}[1]
+            \REQUIRE $K$, $\pi_{exp}$, $f_{targ}$, $f_{pred}$, $\lambda$, $W$, $T$
+            \State $\text{Instantiate } D \text{ dataset of expert trajectories}$
+            \State $\text{Instantiate } \pi_{0} \text{ BC policy trained on } D$
+            \State $nswitch \gets 0$
+            \State $t \gets 0$
+            \State $D_0 \leftarrow \emptyset$
+            \For {$i=0,\ldots,K$ DAgger iterations} 
+               
+                \While {$\#D_i < T$  } 
+                    \State $s_t \sim Env(a_{t-1})$ (Get a new state)
+                    \State $m_t \gets \| f_{targ}(s_t) - f_{pred}(s_t) \|^2$
+                    \If{$m_t > \lambda$ \textbf{ or } $w<W$} 
+                        \If{$m_t \leq \lambda$} (Minimal demo time)
+                            \State $w \gets w+1$
+                        
+                        \Else
+                            \State $w \gets 0$
+                        \EndIf
+                        \State $a_t \gets \pi_{exp}(s_t)$
+                        \State $D_i \gets D_i \cup \{ (a_t, s_t) \}$
+                        \If {$m_{t-1} \leq \lambda$}
+                            \State $nswitch \gets nswitch+1$
+                        \EndIf
+                        
+                    \Else
+                            \State $w \gets 0$
+                            \State $a_t \gets \pi_{i}(s_t)$
+                    \EndIf
+                \State $t \gets t+1$
+                \EndWhile
+                \State Push $D \leftarrow D \cup D_i$
+                \State $\text{Train } \pi_{i+1} \text{ on } D \text{ using BC}$
+                \State $\text{Train } f_{pred} \text{ on } D\text{ to predict } f_{targ}$ 
+            \EndFor
+            \State return $\pi_K$
+            \label{alg:rnd-dagger}
+        \end{algorithmic}
+    \end{algorithm}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.4\textwidth}
+       \caption{The \textbf{RND-DAgger algorithm} proceeds in $K$ iterations. First a policy is trained on a small expert dataset (line 2). %Then at each iteration (line 6), it builds a new dataset $D_i$ composed of $T$ pairs of state and expert action (line 7).
+    Then at each iteration (line 6), it constructs a new dataset $D_i$ with $T$ state-action pairs from the expert (line 7).
+    At each timestep, the agent is by default controlled by the current policy (line 23). The OOD measure is computed by using the prediction network $f_{pred}$ and the target network $f_{targ}$ (line 9). If this measure is greater than a threshold (line 10), the expert takes over the policy to control the agent (line 16) and to add samples to the dataset (line 17). The number of context switches is the number of times the expert has taken control (line 19). At the end of the iteration, the built dataset is aggregated with the current learning set (line 27) and the policy is retrained (line 28). In addition, the $f_{pred}$ network is also updated (line 29) to allow the future detection of OOD states. The $w$ counter is used to ensure that the algorithm waits at least $W$ timesteps below the threshold before taking control back of the agent.}
+    \label{fig:rnd-dagger-algo} 
+    \end{minipage}
+\end{figure}
+
+Lazy-DAgger replaces the traditional action-based discrepancy measure between expert and policy actions with a classifier-based approximation — see Figure \ref{alg:ld}. This approach allows the algorithm to predict when expert intervention is necessary without requiring an expert action at every timestep, thereby significantly reducing the expert burden compared to methods like Ensemble-DAgger. However, this method has a notable drawback: similar to Ensemble-DAgger, it relies on comparing the actions of the expert and the current policy for a given state. While this approach works well when the expert is optimal and acts deterministically, it becomes problematic when dealing with humans or imperfect experts. Human experts often exhibit variability and may choose different actions for the same state depending on context or personal preference. This results in a noisy and unreliable measure of discrepancy, causing the method to trigger unnecessary interventions or overlook critical corrections, ultimately reducing its effectiveness.
+
+We propose the RND-DAgger algorithm, which builds upon Random Network Distillation (RND) \citep{burda2018exploration}. The core assumption of RND-DAgger is that expert feedback is only necessary when the agent encounters out-of-distribution (OOD) states—states that are not well represented in the training set and where the policy is more likely to fail. This is crucial because when an agent operates in OOD states, it faces a higher risk of taking suboptimal actions that could hinder learning or lead to unsafe outcomes. Once the agent returns to familiar, in-distribution states, the expert’s feedback is no longer required, and the intervention is ended. Our method differs fundamentally from existing approaches like Ensemble-DAgger and Lazy-DAgger, which rely on action-based discrepancy measures to determine when to intervene. Thus, our approach remains robust to variations in expert behavior and ensures that interventions only occur when the agent genuinely faces unfamiliar and potentially risky states.
+
+To further improve the stability of expert interventions, we introduce a mechanism called minimal demonstration time. This concept addresses the issue of overly frequent and brief expert interventions, which can interrupt learning and increase the cognitive load on the expert. Minimal demonstration time defines a lower bound on the duration for which the expert must maintain control once they start an intervention. The key idea is that the expert should provide a sufficient number of consecutive corrective actions to guide the agent back to a stable state, instead of immediately handing control back to the policy after a single correction. We describe these two components below. The detailed algorithm is provided in Algorithm \ref{fig:rnd-dagger-algo} with a complete explanation of the different steps. 
+
+\paragraph{Random Network Distillation} To measure if a state is OOD, RND-DAgger relies on the Random Network Distillation technique, which is a classical approach developed initially for the problem of exploration in Reinforcement Learning to detect new states to explore  \citep{burda2018exploration}. The principle of RND is to use a randomly initialized neural network as a fixed target $f_{targ}$ and train a second neural network $f_{pred}$ (the predictor) to approximate the output of the target network. As the predictor network improves over time, the error between the predictor and the target network decreases for familiar states (in-distribution), but remains high for unseen or out-of-distribution states. This prediction error thus serves as a measure of novelty, allowing the agent to recognize when it has encountered a new or unfamiliar state. In RND-DAgger, the measure is used to decide when to trigger the expert, and when to trigger back the current policy, alternating phases where the expert is controlling the agent and when the agent is controlled by the current policy. Note that, contrarily to the described baselines, this measure does not involve the expert action, thus avoiding the need to have an expert acting at each timestep. 
+
+  To account for this expert burden, we introduce the notion of minimal expert time. It is defined as $W$ the number of consecutive "in-distribution" frames to switch control back from the expert to the autonomous policy (e.g. then number of frames where $m_t < \| f_{targ}(s_t) - f_{pred}(s_t) \|^2$). This ensures that the expert will provide a minimal of information at each intervention, thus demonstrating fewer sequences but of longer length. 
+
+      
+    
+    
+
+
+
+\section{Experiments}
+
+
+The primary objectives of our experimental evaluation are twofold: first, to assess the efficiency of our approach in discovering an effective policy, and second, to evaluate its ability to reduce the expert’s burden. 
+
+ The goal of the agent is to locomote as fast as possible. The HalfCheetah is controlled by applying motor torques, and the agent manipulates a 6-degree-of-freedom (6-DOF) motor joint vector. The observation space consists of 18 values, which include the position and velocity of the agent's body, the angles and angular velocities of its six joints, as well as the angle of the center of mass. We also propose two new environments developed for video game research\footnote{The code of these environments that have been made using the Godot engine will be released upon acceptance}.   \textbf{RaceCar} (see Figure \ref{fig:envs}) features a physics-based car controller that must complete a single lap on a given track. After each lap, the car is reset to a random position on the starting line. The track presents several challenges, including speed bumps, a ramp in front of a pillar, and sharp 90-degree turns, making the optimal driving behavior non-trivial. Additionally, crossing the ramp and red sloped walls provides a speed boost, adding complexity to the strategy. The car is controlled using four discrete actions: forward, backward, left, and right. The observation space consists of 22 dimensions, including the car's 3D position, linear velocity (3D), angular velocity (3D), rotation (encoded as the cosine and sine of the angle), and data from seven raycasts to detect obstacles. At last, the \textbf{3D Maze} environment allows us to study our strategy in goal-conditioned navigation scenarios. A classical human-like character is spawned at a random location within the maze and tasked with reaching a randomly assigned goal. The agent is controlled using four movement actions: walk forward, walk backward, strafe left, and strafe right, as well as a one-dimensional rotation action to change its facing direction.The observation space consists of the agent’s absolute position (3D), the goal's position (3D), and 131 raycasts, which provide a low-resolution depth map of the surroundings. Since the objective in this environment is to navigate to any goal location, we replace the traditional Behavioral Cloning (BC) approach with a Goal-Conditioned Behavioral Cloning (GCBC) approach \citep{gcbc} as the base learning algorithm. This adaptation ensures that the agent learns not just to imitate expert trajectories, but also to generalize its navigation strategies based on varying goal positions within the maze.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.18\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/maps/racecar2.png}
+        \caption{RaceCar}
+        \label{fig:racecar}
+    \end{subfigure}
+    \hspace{0.25cm}
+    \begin{subfigure}[b]{0.30\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/maps/fpv.png}
+        \caption{RaceCar (Player view)}
+        \label{fig:racecarfpv}
+    \end{subfigure}
+    \hspace{0.05cm}
+    \begin{subfigure}[b]{0.25\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/maps/view0nav.png}
+        \caption{Maze}
+        \label{fig:maze}
+    \end{subfigure}
+    \hspace{0.05cm}
+    \begin{subfigure}[b]{0.20\textwidth}
+        \centering
+        \includegraphics[height=2.6cm]{figures/maps/halfcheetah.png}
+        \caption{HalfCheetah}
+        \label{fig:cheetah}
+    \end{subfigure}
+\caption{Illustration of the three different environments used in our experiments. The objective is to learn a good driving/navigating/walking policy while minimizing the interventions of the expert.}
+\label{fig:envs}
+\end{figure}
+\paragraph{Baselines: } We compare our approach RND-DAgger to multiple approaches from the active imitation learning literature: \textbf{DAgger} \cite{dagger2011}, a classical approach which queries the supervisor for an action in every state that the learner visits. \textbf{Ensemble-DAgger} \cite{menda2019ensembledagger}, which propose an automated approach to measure OOD and trigger expert demonstration. Ensemble-DAgger relies on two metrics: A disagreement measure defined as the correlation between an ensemble of policies, and a discrepancy measure computing the difference between the bot action and the expert action at every step. \textbf{Lazy-DAgger}  uses the same discrepancy measure as Ensemble-DAgger and reduce bot-expert context switching by using an additional threshold parameter to define a hysteresis band. Note that,  we rely on a simplified version proposed in \citep{hoque2021lazydagger} that has been shown to be more efficient and generates less context switches than the original version. This variant discards the classifier for the benefit of the true discrepancy measure. \textbf{Human-Gated DAgger (HG-DAgger)}\citep{kelly2019hg} involves a human supervisor monitoring the agent’s behavior in real-time and deciding when to take control. While similar in essence to our proposed RND-DAgger, HG-DAgger relies entirely on human judgment to identify when intervention is necessary, rather than using an automatic OOD measure. This requires the expert to continuously observe the agent’s actions at every timestep, leading to a higher cognitive load and less efficient use of expert time. Finally, we also consider \textbf{Behavioral Cloning (BC)} as the classical baseline, which does not include any active learning mechanism. 
+
+ For each method, a first training set is collected by the expert, without active imitation learning techniques. Then the different algorithms are executed to collect additional examples and to update the policy.
+
+\paragraph{Metrics: } To assess the performance of the methods considered, we rely on several key metrics: i) The \textit{Task Performance} measures whether the learned agent is successfully solving the environment. For the \textbf{Race Car} and \textbf{Maze} environments, we use the success rate (i.e., whether the agent completes a lap or reaches the goal). For \textbf{HalfCheetah}, we track the cumulative episode reward, which reflects the overall effectiveness of the agent's locomotion strategy. ii) The \textit{Dataset Size} indicates the number of expert actions added to the training dataset, providing insight into how much expert information is being utilized to train the agent. A smaller dataset size suggests the agent is learning efficiently with fewer expert interventions, while a larger dataset implies greater reliance on expert input. iii) The \textit{Context Switches} which corresponds to the $nswitch$ variable in Algorithms \ref{alg:daggeralgo1} and $\omega$ measures the number of contiguous periods during which the expert is actually controlling the agent. This helps quantify how often the expert is involved in directly providing relevant training samples.  For RND-DAgger, this measure accurately reflects the expert's involvement, as the agent is fully controlled by the policy between switches. The metrics are averaged over 8 seeded runs for each method.
+
+\subsection{Results}
+
+\begin{table}[t]
+
+    \centering        
+\small{
+\begin{tabular}{|l|c|c|c||c|c|c|}
+        \cline{2-7}
+        \multicolumn{1}{c|}{} & \multicolumn{3}{c||}{Task Performance} & \multicolumn{3}{c|}{\# Context Switch} \\%& \multicolumn{3}{c|}{Expert Frames}\\ 
+        \cline{1-7}
+        \diagbox{Method}{Env} & RC  & HC & Maze & RC & HC & Maze \\ 
+        \hline
+        BC              & 0.883 & 2455 & 0.367 & - & - & -\\
+        DAgger          & 0.940 & 2343 & 0.450 & - & - & -\\
+        Lazy-DAgger      & 0.939 & 2314 & 0.575 & 20990 & \textbf{312} & \underline{1238} \\
+        Ensemble-DAgger  & \textbf{0.952} & \underline{2489} & \underline{0.626} & \underline{18391} & 13883 & 2871 \\
+        RND-DAgger      & \underline{0.944} & \textbf{2490} & \textbf{0.717} & \textbf{368} & \underline{708} & \textbf{1214} \\ \hline
+        \end{tabular}}
+\caption{\textbf{Overall performance: } This table illustrates the performance of the different algorithms at the end of the $K$ iterations. It also provides the value of the $nswitch$ variable that accounts for the number of expert interventions.}
+\label{tab:results-tab}
+\end{table}
+
+\paragraph{Oracle-based Performance: } 
+To conduct extensive experiments, we replace the human expert with a predefined oracle policy. This substitution allows us to run multiple trials efficiently without depending on human participants, which would be impractical in terms of both time and resources (experiments using human experts are reported separately later in the section).  For the Race Car environment, the oracle is learned through a separate active imitation learning process with a large interaction budget, ensuring the agent has access to high-quality demonstrations. In the 3D Maze environment, the oracle is a NavMesh-based agent, which programatically solves any navigation scenario, making it easy to generate trajectory data. For HalfCheetah, we use an open-source reinforcement learning agent \citep{kuznetsov2020controlling} from the RL Zoo repository \citep{rl-zoo3} as the oracle, providing an optimal policy for locomotion tasks. This approach ensures consistency and scalability across experiments.
+
+Table \ref{tab:results-tab} and Figure \ref{fig:results-curves} present the performance metrics across the evaluated environments. To ensure a fair comparison, we report results based on the hyperparameter settings that achieve the highest final performance for each model.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/oracle/racecar/racecar_best_perfs.pdf}
+        \caption{Task performance RaceCar}
+        \label{fig:race-car-task-perf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/oracle/halfcheetah/halfcheetah_best_perfs.pdf}
+        \caption{Task performance HalfCheetah}
+        \label{fig:hc-task-perf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/oracle/nav/maze_best_perfs.pdf}
+        \caption{Task performance Maze}
+        \label{fig:maze-task-perf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/oracle/racecar/racecar_best_perfs_CS.pdf}
+        \caption{Context switches RaceCar}
+        \label{fig:racecar-cs}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/oracle/halfcheetah/halfcheetah_best_perfs_CS.pdf}
+        \caption{Context switches HalfCheetah}
+        \label{fig:hc-cs}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/oracle/nav/maze_best_perfs_CS.pdf}
+        \caption{Context switches Maze}
+        \label{fig:maze-cs}
+    \end{subfigure}
+    
+    \caption{Performance and context switches for the different environments. The X-axis corresponds to the size of the training set $D$ that increases at each iteration of the algorithms.}
+    \label{fig:results-curves}
+\end{figure}
+
+Our method, RND-DAgger, demonstrates competitive performance relative to Ensemble-DAgger and Lazy-DAgger, indicating that it effectively learns robust policies across different environments. For example, in the HalfCheetah environment, RND-DAgger achieves a cumulative reward of 2490, compared to 2489 for Ensemble-DAgger and 2314 for Lazy-DAgger. These results highlight that RND-DAgger is capable of discovering efficient policies, matching or surpassing the baselines in terms of overall task success. When analyzing performance relative to the size of the training set, RND-DAgger outperforms the other methods in the early stages of the active imitation learning process. This suggests that RND-DAgger is more effective at focusing on critical states where expert guidance is most needed, thereby gathering valuable feedback more efficiently. By concentrating on key interventions, RND-DAgger accelerates policy improvement and requires fewer training samples to achieve comparable or superior results, making it especially advantageous in scenarios with limited expert availability. In summary, the experimental results demonstrate that RND-DAgger not only achieves strong final performance but also exhibits a more sample-efficient learning curve compared to existing methods, validating its capability to optimize expert interventions and rapidly improve policy quality.
+When examining the number of context switches between the different methods, RND-DAgger consistently results in significantly fewer context switches compared to Ensemble-DAgger across all environments. This indicates that RND-DAgger is more stable and requires fewer handovers between the expert and the policy, reducing the burden on the expert. When compared to Lazy-DAgger, RND-DAgger shows mixed results. In the RaceCar environment, RND-DAgger generates fewer context switches, highlighting its efficiency in minimizing expert interventions. However, in the HalfCheetah and Maze environments, RND-DAgger produces a similar number of switches. This similarity in HalfCheetah can be attributed to the use of an oracle expert policy, which performs consistently without generating diverse actions. Under these circumstances, the discrepancy measure used by Lazy-DAgger, which relies on comparing expert and policy actions, remains effective for detecting when to switch. In the Maze environment, despite having a comparable number of context switches to Lazy-DAgger, RND-DAgger achieves a higher final performance. This suggests that even with similar intervention frequencies, RND-DAgger is more effective at leveraging expert feedback to improve the policy. Thus, in scenarios like Maze, where achieving high task performance is critical, RND-DAgger is the better choice due to its ability to make more meaningful corrections and drive the agent towards optimal behavior.
+
+Overall, these findings indicate that RND-DAgger strikes a favorable balance between reducing context switches and achieving strong policy performance, making it a more efficient and reliable choice.
+
+ As seen in the figure, both Ensemble-DAgger and Lazy-DAgger query the expert significantly more frequently, leading to a higher number of context switches compared to RND-DAgger. The visualization also reveals that RND-DAgger identifies and focuses on critical areas of the track that are challenging for the agent during early learning stages. Specifically, it requests expert intervention primarily in the problematic zones, such as the bottom section of the track near the bumpers and the obstacle immediately following the speeding ramp (top-left corner of the track). These are regions where the bot initially struggles, making precise interventions crucial for improving performance. This observation indicates that RND-DAgger not only minimizes the number of expert queries but also targets the most relevant segments of the environment where guidance is essential. By focusing on challenging states rather than spreading expert effort across all states, RND-DAgger makes more strategic use of expert supervision, resulting in fewer yet more impactful interventions.
+
+\begin{figure}[t]
+    \centering
+            \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/traces_visu/racecar_rnd.png}
+        \caption{RND-DAgger}
+        \label{fig:nav-traces-rnd}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/traces_visu/racecar_lazy.png}
+        \caption{Lazy-DAgger}
+        \label{fig:nav-traces-lazy}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/traces_visu/racecar_md.png}
+        \caption{Ensemble-DAgger}
+        \label{fig:nav-traces-md}
+    \end{subfigure}
+    \caption{In the RaceCar environment, blue trajectories represent states and actions generated by the agent’s policy, while red trajectories indicate those collected by the oracle. The visualization shows that RND-DAgger predominantly requests expert intervention in challenging sections of the track. This targeted approach results in fewer expert traces compared to baseline methods.}
+    \label{fig:qualit-racecar-traces}
+\end{figure}
+
+\paragraph{Human Expert-based performance: } 
+
+We conducted a series of experiments (Figure \ref{fig:human-exp}) using a real human expert instead of an oracle policy. In this setup, collecting expert actions while the agent was being controlled by its own policy (rather than having the expert take direct control) felt unintuitive for the human participants, making it challenging to apply traditional baselines effectively. As such we focused our comparison on HG-DAgger, which allows the human expert to decide when to intervene and take control from the agent. 
+
+Our results show that RND-DAgger performs comparably to HG-DAgger, but with a significant advantage: it does not require the human expert to continuously monitor the agent’s behavior. Instead, RND-DAgger automates the decision of when to request expert input based on state novelty, reducing the cognitive load on the expert. Figure \ref{fig:human-exp-fulltime} demonstrates the relationship between policy performance and the actual time the expert spends observing the screen. In RND-DAgger, the agent can run at accelerated speeds without the need for constant supervision, as the expert only needs to intervene at specific moments rather than watching the agent’s entire trajectory.
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.75\textwidth} % Adjust the width to your preference
+        \centering
+        \begin{subfigure}[b]{0.48\textwidth} % Adjust the subfigure width
+            \centering
+            \includegraphics[width=\textwidth]{figures/human_experiments/humanracecarbest_perfs.pdf}
+            \caption{Performance}
+            \label{fig:human-exp-perf}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{0.48\textwidth}
+            \centering
+            \includegraphics[width=\textwidth]{figures/human_experiments/humanracecarbest_perfs_fulltime.pdf}
+            \caption{Performance (time spent)}
+            \label{fig:human-exp-fulltime}
+        \end{subfigure}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.22\textwidth} % This controls the caption width on the right
+        \caption{Task performance on RaceCar with a real human as an expert. RND-DAgger achieves similar performance than HG-DAgger with roughly the same amount of demonstrations, but outperforms it in terms of expert time spent.}
+        \label{fig:human-exp}
+    \end{minipage}
+\end{figure}
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+In this work, we presented RND-DAgger, a novel approach to active imitation learning that efficiently minimizes the need for expert interventions by leveraging a state-based measure derived from Random Network Distillation (RND). Unlike traditional methods that rely on action-based discrepancies to detect when to seek expert guidance, RND-DAgger focuses on identifying out-of-distribution states where the agent is most at risk of making errors. This allows our method to selectively request expert feedback only when it is truly necessary, thereby reducing the number of context switches and optimizing the allocation of expert time. Overall, our method provides a step forward in developing more practical and human-efficient imitation learning algorithms, making it a valuable tool for training autonomous agents in complex environments. Future work will explore how to extend RND-DAgger to more challenging tasks and incorporate different forms of expert feedback to further improve learning efficiency and applicability.
+
+\clearpage
+
+
+
+\section{Reproducibility Statement}
+
+
+To ensure the reproducibility of our work, we provide detailed pseudo-code in section \ref{sec:preliminaries} and section \ref{sec:rnd-dagger}. The code, along with necessary dependencies, will be made available to reviewers for evaluation. Upon acceptance, we will release a comprehensive open-source codebase, including all environments, datasets, oracle model checkpoints, active learning algorithms, and a detailed guide on how to reproduce our experiments and results.
+
+
+
+
+

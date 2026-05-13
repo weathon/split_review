@@ -1,8 +1,8 @@
 # RTop-K: Ultra-Fast Row-Wise Top-K Selection for Neural Network Acceleration on GPUs
 
 - Decision: Accept
-- Avg Score: 3.40
-- Scores: 5, 1, 0, 6, 5
+- Avg Score: 6.50
+- Scores: 5, 10, 6, 5
 
 ## Abstract
 Top-k selection algorithms are fundamental in a wide range of applications, from high-performance computing and information retrieval to big data processing and neural network model training. In this paper, we present RTop-K, a highly efficient parallel row-wise top-k selection algorithm specifically designed for GPUs. RTop-K leverages a binary search-based approach to optimize row-wise top-k selection, providing a scalable and accelerated solution. We conduct a detailed analysis of early stopping in our algorithm, showing that it effectively maintains the testing accuracy of neural network models while substantially improving performance. Our GPU implementation of RTop-K demonstrates superior performance over state-of-the-art row-wise top-k GPU implementations, achieving speed-ups ranging from 4.25× to 9.51× with early stopping, and 3.94× without early stopping. Moreover, RTop-K is capable of accelerating the overall training workflow of MaxK-GNNs, delivering an average speed-up of 9.76% to 31.53% across different models and datasets.

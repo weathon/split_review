@@ -1,0 +1,452 @@
+\title{Small-scale proxies for large-scale Transformer training instabilities}
+
+\begin{abstract}
+\vspace*{-0.2cm}
+Teams that have trained large Transformer-based models have reported training instabilities at large scale that did not appear when training with the same hyperparameters at smaller scales.
+Although the causes of such instabilities are of scientific interest, the amount of resources required to reproduce them has made investigation difficult.
+In this work, we seek ways to reproduce and study training stability and instability at smaller scales.
+First, we focus on two sources of training instability described in previous work: the growth of logits in attention layers (Dehghani et al., 2023) and divergence of the output logits from the log probabilities (Chowdhery et al., 2022).
+By measuring the relationship between learning rate and loss across scales, we show that these instabilities also appear in small models when training at high learning rates, and that mitigations previously employed at large scales are equally effective in this regime.
+This prompts us to investigate the extent to which other known optimizer and model interventions influence the sensitivity of the final loss to changes in the learning rate.
+To this end, we study methods such as warm-up, weight decay, and the $\mu$Param (Yang et al., 2022),
+and combine techniques to train small models that achieve similar losses across orders of magnitude of learning rate variation.
+Finally, to conclude our exploration we study two cases where instabilities can be predicted before they emerge by examining the scaling behavior of model activation and gradient norms.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\vspace*{-0.225cm}
+\begin{figure}[h!]
+    \vspace*{0.5cm}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/qk-stable.pdf}
+    \caption{Qk-layernorm~\cite{dehghani2023scaling} enables stable training across three orders of magnitude of learning rate (LR) variation.
+    \textbf{(Top)} For transformers with $N$ parameters, we plot the effect of learning rate on final evaluation loss.
+    \textbf{(Bottom)} We use LR sensitivity to summarize the top plot. LR sensitivity measures the expected deviation from optimal when varying learning rate across three orders of magnitude.
+    Qk-layernorm reduces LR sensitivity, but LR sensitivity still increases with model scale.
+    }
+    \label{fig:qkln-lrs}
+\end{figure}
+Scaling up transformers has led to remarkable progress from chat models to image generation.
+However, not every training run is successful.
+When training large Transformers, researchers have reported instabilities which slow or destabilize learning~\cite{chowdhery2022palm, dehghani2023scaling, zhang2022opt, molybog2023theory, cohen2022adaptive}.
+As the resources required for large runs continue to grow,
+it is important to examine the ways that Transformer training can fail.
+
+In this report we reproduce, study, and predict training instability in Transformer models.
+We find that measuring the relationship between learning rate and loss across scales is a useful tool to identify instability (e.g., Figure~\ref{fig:qkln-lrs}).
+Therefore, we introduce learning rate (LR) sensitivity, which serves as a useful summary statistic for learning rate vs. loss curves.
+LR sensitivity measures the deviation from optimal performance when varying LR across orders of magnitude.
+
+We show that two sources of instability, which have previously been described at scale, can be reproduced in small Transformers.\footnote{We focus on instabilities which lead to slow divergence, not loss spikes (see Section~\ref{sec:related}).}
+This enables their study without access to large resource pools.
+In particular, we examine the growth of logits in attention layers~\cite{dehghani2023scaling, gilmernotpublished, zhai2023stabilizing} and divergence of the output logits from the log probabilities~\cite{chowdhery2022palm}.
+As evident from the learning rate vs. loss curves and by inspecting model characteristics, both instabilities appear at high learning rates in small models.
+Moreover, interventions which have previously been employed at scale are also successful in this regime (e.g., Figure~\ref{fig:qkln-lrs}).
+These interventions---qk-layernorm~\cite{dehghani2023scaling}\footnote{Based off currently unpublished investigations of~\citet{gilmernotpublished}.}
+and z-loss regularization~\cite{chowdhery2022palm}---reduce LR sensitivity and enable successful training across three orders of magnitude of LR variation.
+
+These observations raise the question of how other known optimizer and model interventions affect the shape of the learning rate vs. loss curves across scales.
+Therefore, we study the effect of techniques such as warm-up, weight decay, and $\mu$Param~\cite{yang2022tensor} in this context. When employing qk-layernorm and z-loss regularization, these other techniques usually have little impact on the range of learning rates at which models can be stably trained, but do affect the sensitivity to learning rate within this range.
+In line with previous work, we find that longer warm-up reduces learning rate sensitivity, as does the independent scaling of learning rate and weight decay recommended by~\citet{loshchilov2018decoupled}.
+One interesting finding is that scaling depth increases LR sensitivity at a faster rate than scaling width.
+
+
+The remainder of our investigation centers on the scaling behavior for model characteristics such as activation and gradient norms.
+Using the attention logit growth instability as an example, we show that it is possible to predict an instability before it emerges.
+This is in contrast to prior works on scaling which primarily focus on scaling trends related to loss~\cite{kaplan2020scaling, hoffmann2022training}.
+
+We conclude by using the scaling behavior of model characteristics to search for instabilities that are currently not well documented.
+Our investigation shows that gradient norms decrease with both scale and learning rate, such that the default AdamW~\cite{loshchilov2018decoupled} epsilon hyperparameter is too large.
+This causes updates that are too small.
+We connect this phenomenon and the attention logit growth instability to parameter norm growth~\cite{merrill2020effects, jaehoonnote}.
+
+Overall, we believe our work presents new scientific opportunities for studying training stability without access to large resource pools.
+
+
+
+\section{Experimental methodology}
+
+This section details our experimental set-up (Section~\ref{sec:setup}) and useful tools employed by our analysis: (i) measuring the relationship between learning rate and loss across scales (Section~\ref{sec:lrs}) and (ii) examining scaling trends for model characteristics (Section~\ref{sec:scalechar}).
+
+\subsection{Experimental set-up}\label{sec:setup}
+the models are decoder-only~\citep{generatingwiki} and trained with an auto-regressive loss (refer to Section~\ref{app:infra} for more infrastructure details).
+While we experimentally manipulate many of the following hyperparameters, this section provides their default values, which we use unless otherwise specified.
+
+By default, we use AdamW~\cite{loshchilov2018decoupled} with $\beta_1 = 0.9$, $\beta_2 = 0.95$, $\epsilon =$ 1e-8, and gradient clipping at global norm 1.
+The default warmup is 5e3 steps, and the default number of total steps is 1e5.
+We use a linear schedule for warmup and and a cosine-decay~\cite{loshchilov2016sgdr} schedule for the remainder, with minimum learning rate 1e-5.
+We use an independent weight decay of 1e-4 and auxiliary z-loss~\cite{chowdhery2022palm} with coefficient 1e-4.
+Sections~\ref{sec:int-wd} and~\ref{sec:zloss} respectively provide additional information and ablations on decoupled weight decay and z-loss.
+We use pre-normalization~\cite{radford2019language} Transformers with qk-layernorm~\cite{dehghani2023scaling} (see Section~\ref{sec:logitgrowth} for information).
+
+We jointly scale up the embedding size, depth, and number of heads when scaling parameters.
+We do not use weight tying of the first and last layer~\cite{press2017using}, and when reporting the number of parameters we exclude the embedding and head (as in~\citet{kaplan2020scaling}).
+We use rotary positional embeddings~\cite{su2021roformer}, and for training data we use C4~\cite{colin2020exploring}.
+Letting $d$ refer to the model dimension (i.e., the embedding size),
+the feed-forward component of the Transformer is an MLP with hidden dimension of 4$d$ and gelu~\cite{hendrycks2016gaussian} activations.
+As in~\citet{vaswani2017attention} we use factor $1/\sqrt{d}$ scaling in the self-attention.
+The embedding initialization is the default in Flax, which is normally distributed with standard deviation $1/\sqrt{d}$.
+The remainder of the weights are initialized with a truncated normal distribution with inverse root fan-in standard deviation~\cite{glorot2010understanding}.
+The default batch size is 256, where each batch element has a sequence length of 512 tokens.
+Sequences are packed so that no padding is required.
+Finally, we use the vocabulary from~\citet{raffel2020t5} which has size 32101 and uses a SentencePiece~\cite{kudo2018sentencepiece} tokenizer.
+
+\subsection{LR vs. loss curves and learning rate sensitivity} \label{sec:lrs}
+To investigate how model instability emerges with scale, it is useful to plot the relationship between learning rate (LR) and loss for models of different sizes.
+For instance, an instability is often characterized by an explosion in the loss at high learning rates. LR vs. loss curves can reveal how the lowest unstable learning rate changes as a function of model size.
+
+To summarize LR vs. loss curves, we use LR sensitivity.
+LR sensitivity measures the deviation in final validation loss from optimal when sweeping LR across three orders of magnitude.
+If a model fails to train at high learning rates, then LR sensitivity will be high.
+There are cases where LR vs.
+
+Let $\theta = \mathcal{A}(\eta)$ denote the model weights $\theta$ obtained when training with learning rate $\eta$, and let $\ell(\theta)$ denote the validation loss when using weights $\theta$. For a learning rate range $[a, b]$, let $\ell^*$ denote the loss obtained with the best learning rate, i.e., $\ell^* = \min_{\eta \in [a, b]} \ell\left( \mathcal{A}(\eta)\right)$.
+Moreover, let $\ell_0$ denote loss at initialization. Then, LR sensitivity is defined as $\mathbb{E}_{\eta \in [a, b]} \left[ \min\left( \ell\left( \mathcal{A}\left(\eta\right)\right), \ell_0 \right) - \ell^* \right]$.
+
+Unless otherwise mentioned, we use the learning rate range 3e-4 to 3e-1 with AdamW~\cite{loshchilov2018decoupled} to measure LR sensitivity,
+where LR refers to the maximum value in a cosine decay schedule with warm-up~\cite{loshchilov2016sgdr}.
+We consider LRs in \{3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1\} when computing the minimum and expectation.%
+\subsection{Scaling trends for model characteristics}\label{sec:scalechar}
+
+To study instability, we also find it useful to examine scaling trends for model characteristics such as gradient or activation norms. This method is helpful for predicting instabilities
+and contrasts with previous work on scaling, which primarily focuses on trends relating model scale and loss~\cite{kaplan2020scaling, hoffmann2022training}.
+
+
+
+\section{Results}
+
+This section presents our results on training stability for small Transformers.
+Equipped with LR sensitivity (Section~\ref{sec:lrs}), we study two known instabilities and their corresponding mitigation at small scale (Section~\ref{sec:instability}).
+This raises the question of how other model and optimizer interventions effect sensitivity of final loss to learning rate, which we investigate in Section~\ref{sec:interventions}.
+Finally, we examine whether instabilities can be reliably predicted before they emerge:
+Section~\ref{sec:predqk} predicts when the logit growth instability may cause divergence in a larger model, while Section~\ref{sec:new} aims to find other issues that may occur when scaling up with our default hyperparameters.
+\subsection{Reproducing two known instabilities at small scale} \label{sec:instability}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/giant_and_small_curves_nolines.pdf}
+    \caption{The attention logit growth instability~\cite{dehghani2023scaling, zhai2023stabilizing} appears in small models at high learning rates.
+    The mitigation of applying qk-layernorm proposed by~\citet{dehghani2023scaling} is equally effective in the small-scale regime.
+    The max attention logit is reported for layer 0, which we typically observe to have the largest logit values.}
+    \label{fig:qkln-example}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/zloss_overview2.pdf}
+    \caption{The effect of the output logit divergence instability~\cite{chowdhery2022palm} and the z-loss mitigation~\cite{chowdhery2022palm} (Section~\ref{sec:zloss}). Models in this experiment have qk-layernorm~\cite{dehghani2023scaling}.}
+    \label{fig:zloss-lrs}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/zloss.pdf}
+    \caption{An example of the output logit divergence instability~\cite{chowdhery2022palm} (Section~\ref{sec:zloss}) in a 2.4M parameter Transformer at learning rate 0.1.}
+    \label{fig:zloss-example}
+\end{figure}
+
+Here, we examine two instabilities that have previously been described at scale: the growth of logits in attention layers~\cite{dehghani2023scaling, gilmernotpublished, zhai2023stabilizing} and divergence of the output logits from the log probabilities~\cite{chowdhery2022palm}.
+By examining LR vs. loss curves, we show that these instabilities can be reproduced in small models by using high learning rates and that mitigations employed at scale are effective in this regime.
+
+\subsubsection{Attention logit growth}~\label{sec:logitgrowth}
+\vspace*{-0.6cm}
+
+Researchers have previously documented that Transformer training fails when the attention logits become large~\cite{dehghani2023scaling, zhai2023stabilizing}.
+In~\citet{dehghani2023scaling}, this issue emerged when training a ViT model~\cite{dosovitskiy2021an} with 22 billion parameters.
+
+In the self-attention layer of a Transformer~\cite{vaswani2017attention}, queries $q_i$ and keys $k_i$ are combined to compute the attention logits $z_{ij} = \langle q_i, k_j \rangle / \sqrt{d_h}$, where $d_h$ is the head dimension.
+Next, the attention logits are passed through a softmax to produce attention weights, which are used to combine values $v_i$. \citet{dehghani2023scaling} observed that the attention logits $z$ became large, which they refered to as attention logit growth.
+As a result, the attention weights collapse to one-hot vectors, which was named attention entropy collapse by~\citet{zhai2023stabilizing}.
+To resolve this issue, \citet{dehghani2023scaling} proposed qk-layernorm, which applies LayerNorm~\cite{ba2016layer} to the queries and keys before computing the attention logits.
+In our experiments, we find that models need not be large to exhibit instability related to attention logit growth. As shown in Figure~\ref{fig:qkln-lrs}, the maximum learning rate at which small models can be trained increases when using qk-layernorm.
+Without qk-layernorm, the learning rate at which models diverge becomes smaller with increasing model size.
+By contrast, models with qk-layernorm exhibit considerably lower LR sensitivity and train to low loss at high learning rates.
+As a highlight, qk-layernorm allows training a model with 1.2B parameters at learning rate 0.3.
+Both with and without qk-layernorm, LR sensitivity increases with scale.
+
+Figure~\ref{fig:qkln-example} displays the loss and max attention logit for two model scales that differ by three orders of magnitude.
+In both cases, the loss diverges without qk-layernorm.
+
+Instead, we hypothesize this instability could result from the quadratic dependence of attention logits on parameter norms.
+
+
+\subsubsection{Output logit divergence}~\label{sec:zloss}
+\vspace*{-0.6cm}
+
+Another instability reported by researchers training large models is divergence in the output logits from the log probabilities~\cite{chowdhery2022palm}.
+Just as before, we reproduce this instability with small models at large learning rates, and the proposed mitigation ameliorates the issue.
+Overall, Figure~\ref{fig:zloss-lrs} summarizes the effect.
+
+Let $y$ denote the model's output logits, which are used to compute class probabilities $p_i$ via a softmax $p_i = e^{y_i}/Z$ where $Z = \sum_j e^{y_j}$.
+This instability occurs when the logits diverge and become very negative, as illustrated in Figure~\ref{fig:zloss-example} for a 2.4M parameter model at learning rate 0.1.
+In contrast to the attention logit growth instability, this divergence occurs towards the end of training. The mitigation proposed by~\citet{chowdhery2022palm} is to encourage $\log Z$ to remain close to zero.
+They add an auxiliary loss $\log^2 Z$, referred to as z-loss, with coefficient 1e-4.
+
+As illustrated in Figures~\ref{fig:zloss-lrs} and \ref{fig:zloss-example}, we find that instability related to output logit divergence occurs in models with no weight decay regardless of scale, and z-loss resolves this instability. Weight decay also mitigates this instability for the larger models we test.
+
+\subsection{Measuring the effect of other known interventions} \label{sec:interventions}
+
+The previous section used the relationship between learning rate and loss as a useful tool for examining two known instabilities and their mitigation.
+This raises the question of how other known model and optimizer interventions affect the shape of LR vs. loss curves across scales.
+In particular, can LR sensitivity help identify additional issues or resolutions when scaling?
+This section aims to answer this question for common techniques such as warm-up, weight decay, and $\mu$Param \cite{yang2022tensor}.
+
+\subsubsection{Warm-up}~\label{sec:int-warm}
+\vspace*{-0.6cm}
+
+As illustrated by Figure~\ref{fig:warmup-lrs}, a longer warm-up period reduces LR sensitivity.
+This is most clear for the larger models, which are not stable at LR 3e-1 without long warm-up.
+The number of total steps is fixed to 1e5 in this experiment, and all models use qk-layernorm.
+The importance of warm-up for stability has previously been highlighted~\cite{gilmer2021loss, shazeer2018adafactor, liu2019variance}, although these works do not measure scaling behavior.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/warmup.pdf}
+    \caption{The effect of warm-up length for different model sizes.
+    Longer warm-up reduces LR sensitivity and loss, especially for the larger models we test.
+    Models in this experiment use qk-layernorm~\cite{dehghani2023scaling}.}
+    \label{fig:warmup-lrs}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/coupled.pdf}
+    \caption{Independently scaling LR without also scaling weight decay reduces LR sensitivity.
+    While this was recommended by~\citet{loshchilov2018decoupled}, it is not common practice in the default AdamW implementations in popular libraries.
+    Refer to Section~\ref{sec:int-wd} for more information.
+    Models in this experiment use qk-layernorm~\cite{dehghani2023scaling}.}
+    \label{fig:coupled-lrs}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/width.pdf}
+    \caption{Independently scaling depth increases LR sensitivity at a faster rate than scaling width, though also produces a model with lower loss at the largest scale we test.
+
+    }
+    \label{fig:scale-lrs}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/mup_yesqk_simpler_larger.pdf}
+    \caption{Measuring the effect of $\mu$Param on LR sensitivity for models with qk-layernorm~\cite{dehghani2023scaling}.
+    In our setting $\mu$Param succeeds in stabilizing the optimal LR, though it does not improve loss or reduce LR sensitivity.
+    For more information refer to Section~\ref{sec:int-mup}.
+    }
+    \label{fig:mup-yesqk}
+\end{figure}
+
+\subsubsection{Independent weight decay}\label{sec:int-wd}
+Parameterizing weight decay independently of learning rate reduces LR sensitivity, as illustrated in Figure~\ref{fig:coupled-lrs}. While this was recommended by~\citet{loshchilov2018decoupled}, it is not common practice in the default AdamW implementations of PyTorch~\cite{paszke2019pytorch} or Optax~\cite{deepmind2020jax}.
+We explain the differences below.
+
+For parameters $\theta$, let $\Delta = v/\left(\sqrt{u} + \epsilon\right)$ denote the AdamW update without learning rate or weight decay.
+For weight decay coefficient $\lambda$, max learning rate $\eta$, and schedule $s_t \in [0, 1]$, \citet{loshchilov2018decoupled} recommend the update $\theta \gets \theta - s_t (\eta \Delta - \lambda \theta)$, which we refer to as \textit{independent decay}.
+On the other hand, the default implementation in PyTorch or Optax applies the update
+$\theta \gets \theta - s_t \eta (\Delta - \lambda \theta)$, i.e., $\eta$ now scales both terms.
+
+When reporting LR sensitivity without independent decay in Figure~\ref{fig:coupled-lrs}, we report the minimum LR sensitivity over ranges [1e-4, 1e-1] and [3e-4, 3e-1] because the former is sometimes better centered on the minimum.
+The default setting in this paper is to use independent decay.
+When using independent decay we set $\lambda$=1e-4, and without independent decay we set $\lambda$=0.1.
+A sweep on weight decay values is conducted in Figure~\ref{fig:weightdecay}.
+
+\subsubsection{Scaling width vs. depth}~\label{sec:int-scale}
+\vspace*{-0.6cm}
+
+We have so far consistently observed that increasing the number of parameters increases LR sensitivity.
+We now examine which part of scaling is most responsible.%
+
+Our results, illustrated by Figure~\ref{fig:scale-lrs}, indicate that scaling depth increases LR sensitivity at a faster rate than scaling width.
+However, at the largest scale we test, independently scaling depth produces a model with lower validation loss.
+
+The standard practice of joint scaling performs best at the largest scale and also has a more reliable scaling prediction when extrapolating.
+
+When scaling depth, we use $d=512$, and when scaling width, we use 6 layers.
+The number of heads is scaled proportionally with width, so that the head dimension remains the same.
+Figure~\ref{fig:scale-lrs-noqk} repeats this experiment without qk-layernorm, finding that the attention logit growth instability occurs more frequently at scale regardless of whether width or depth are scaled.
+
+\subsubsection{$\mu$Param}~\label{sec:int-mup}
+\vspace*{-0.6cm}
+
+\citet{yang2021tensor} introduced the $\mu$Param method for parameterizing a neural network. As a product, the optimal LR remains consistent when scaling model width \cite{yang2022tensor}.
+This section tests the effect of $\mu$Param on LR sensitivity, and examines whether $\mu$Param alleviates the need for qk-layernorm~\cite{dehghani2023scaling}.
+
+As illustrated by Figure~\ref{fig:mup-yesqk}, $\mu$Param does succeed in stabilizing the optimal LR at the scale we test.
+However, $\mu$Param does not improve loss or reduce LR sensitivity in our experiments.
+
+Our results indicate that $\mu$Param does not alleviate the need for this intervention at high learning rates.
+We note that from a practical perspective, reducing LR sensitivity is not important if the optimal LR does not change.
+
+We refer to the variant of $\mu$Param that we use in these experiments as $\mu$Param (simple) because it maintains only the core feature of $\mu$Param.
+
+For $\mu$Param (simple) we make the following changes from our standard baseline: scale the LR for linear layers by $\text{base-fan-in}/\text{fan-in}$.
+For $\mu$Param (full) there are three additional changes:
+(i) initialize the head with standard deviation $\sqrt{\text{base-fan-in}}/\text{fan-in}$;
+(ii) change the $1/\sqrt{d_h}$ scaling factor in attention layers to $1/d_h$ where $d_h$ is the head dimension; and
+(iii) initialize the query projection weights with zeros.
+For base-fan-in we use the fan-in values for the smallest model we test, which has width 256.
+
+We comment briefly on the aforementioned changes (ii) and (iii).
+
+While this intervention reduces loss slightly at the smallest scale we test, the reverse is true for the largest scale we test.
+Also, removing the square root from the scaling factor in attention layers does not alleviate the need for qk-layernorm.
+Finally, with regards to change (iii), we note that in preliminary experiments this change had no noticeable effect.
+
+\subsubsection{Additional interventions}~\label{sec:misc}
+\vspace*{-0.6cm}
+This section recreates the previous plots with additional interventions or hyperparameter changes.
+
+\begin{itemize}
+
+    \item We try applying qk-layernorm across the whole model dimension instead of individually per-head with shared parameters. We use per-head qk-layernorm as the default in all other experiments.
+ When increasing batch size we decrease the number of training steps so that the amount of data seen is constant.
+
+    \item The effect of changing the weight decay from 1e-4 is illustrated in Figure~\ref{fig:weightdecay}.
+    Increasing decay appears to slightly shift the optimal LR right.
+
+\end{itemize}
+
+\subsection{Predicting attention logit growth instability from scaling behavior of model characteristics} \label{sec:predqk}
+\begin{figure*}
+    \centering
+    \includegraphics[width=\textwidth]{figures/extrapolate.pdf}
+    \caption{Predicting the attention logit growth instability via scaling behavior of model characteristics.
+    We extrapolate to predict that a larger model will become unstable at LR 1e-2, and run an experiment to confirm the prediction.
+    Refer to Section~\ref{sec:predqk} for more information.}
+    \label{fig:extrapolate}
+\end{figure*}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\columnwidth]{figures/fixed_scale.pdf}
+    \caption{Enforcing a max attention logit of approximately $\kappa$ in a small model to determine which value of $\kappa$ inhibits learning.}
+    \label{fig:transplant}
+\end{figure}
+
+A central question when studying instabilities is whether they can be predicted. We now examine whether it is possible to predict the logit growth instability before it occurs.
+We track the attention logit maximums across model scales and fit a curve to the data.
+We use this to predict that a 4.8B parameter model will be unstable at LR 1e-2 without qk-layernorm and run an experiment to confirm this prediction.
+
+Figure~\ref{fig:extrapolate} plots the number of parameters vs. max attention logit at different learning rate values.\footnote{We use block 0, which typically has the largest logits, and consider the value at step 2e3.
+Much earlier than 2e3 was uninformative, and much later the unstable points had long past diverged.} At each learning rate, we fit a quadratic to predict how the max attention logit will change with model scale.
+
+We first noticed that all points with attention logits above 1e4 diverged.
+Moreover, the quadratic fit predicted that for LR 1e-2 the next model scale would also cross that value.
+Based on this prediction, we trained a new 4.8B parameter model at LR 1e-2. This model diverged as predicted.
+Not only do we predict the divergence, but our fit closely extrapolates to predict the value of the max attention logit.
+
+One question unresolved by our analysis so far is whether we could have predicted that instability arises when the max attention logit exceeds 1e4 without manipulating learning rate and model size.
+We take initial steps towards an answer by transplanting different values of max attention logit into a small network with 10M parameters.
+For different constants $\kappa$ we pass the queries and keys through $g(z) = \sqrt{\kappa} \cdot z/\sqrt{\mathbb{E}_i[z_i^2]}$ before computing the attention logits.
+Results are illustrated in Figure~\ref{fig:transplant}.
+Loss deteriorates around $\kappa =$1e3, and by $\kappa=$1e4 the loss exceeds that of a zero-layer bigram model consisting of the Transformer we use without any self-attention or MLP layers.
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/scaling_stats_new.pdf}
+    \caption{Predicting a potential instability from the scaling behavior of model characteristics. The gradient root mean square (RMS) decreases with num params (left) and learning rate (middle).
+    These trends indicate that hyperparameter adjustment may be required to successfully scale further, as the RMS is approaching the default AdamW $\epsilon$ hyperparameter.
+    If the gradient RMS becomes too small without adjusting $\epsilon$ or weight decay, a layer may collapse.
+    The gradient RMS in the left and middle plot is reported for the first MLP layer of block 0, but we observe similar trends for other layers (e.g.
+    Gradient RMS across different blocks is also reported (right).
+}
+    \label{fig:normscale}
+\end{figure*}
+
+\subsection{Searching for new instabilities via scaling trends of model characteristics} \label{sec:new}
+
+This section examines whether the scaling behavior of model characteristics can be used to predict new issues with the default model and hyperparameter settings.
+
+In Figure~\ref{fig:normscale} we examine scaling trends for the gradient root mean square $\text{RMS}(g) = \sqrt{\mathbb{E}_i \left[ g_i^2 \right]}$.
+As models get larger, the value that grad RMS approaches is cause for concern.
+At the largest scale and learning rate we test, grad RMS is around the default AdamW $\epsilon$ hyperparameter.
+Recall that the unscaled AdamW update is $\Delta = v/\left(\sqrt{u} + \epsilon \right)$, where $v$ and $u$ are the first and second gradient moment EMA, respectively.
+If the grad RMS is on the same order as $\epsilon$, then $\Delta$ will decrease in magnitude as illustrated by Figure~\ref{fig:epsdata2}, and parameters will not receive learning signals as intended.
+
+An obvious mitigation for this issue is to simply lower the AdamW $\epsilon$ hyperparameter from its default of 1e-8.
+We conduct this experiment for a 4.8B parameter model at LR 0.3 and present the results in Figure~\ref{fig:eps-int}.
+Decreasing $\epsilon$ to 1e-15 improves loss and mitigates a collapse in grad RMS. We believe this improvement will only increase at scale.
+On the other hand, increasing $\epsilon$ to 1e-6 results in an instability (shown in Figure~\ref{fig:divergedeps}).
+
+Figure~\ref{fig:epsdata2} expands on this result by illustrating the grad and update RMS throughout training at the largest scale and learning rate we test. When the grad RMS reaches $\epsilon$, the update RMS becomes small.
+Figure~\ref{fig:epsdata} presents data from an analogous experiment at many different scales and LRs, demonstrating that this issue is most apparent for the larger models and LRs we test.
+
+Although we identified the instability above by empirically measuring the scaling behavior of the gradients, a mechanistic explanation exists.
+For larger networks and learning rates, the Transformer output RMS entering the final layernorm may grow. Since the layernorm gradients are scaled by the inverse of their input RMS, the gradient received by the Transformer will shrink.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{figures/eps_block_stats2_larger.pdf}
+    \caption{Decreasing the AdamW $\epsilon$ from its default value of 1e-8 to 1e-15 improves loss for a 4.8B parameter model at LR 0.3.
+    When increasing $\epsilon$ to 1e-6, loss diverged.
+    Grad RMS is averaged over the final 500 steps for the first layer in the MLP; refer to Figure~\ref{fig:epsdata2} for data throughout training.}
+    \label{fig:eps-int}
+\end{figure}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=\textwidth]{figures/eps_block_stats_larger.pdf}
+    \caption{The top row displays the root mean square (RMS) of the gradient for the first MLP layer at different blocks throughout the network. When the grad RMS drops below the AdamW $\epsilon$ hyperparameter, the magnitude of the update decreases, as illustrated by the bottom row.
+    Experiment conducted with a 4.8B parameter model trained with LR 0.3.
+    The experiment with $\epsilon$ = 1e-6 was stopped when loss diverged. %
+    }
+    \label{fig:epsdata2}
+\end{figure*}
+
+
+\section{Related work}
+
+
+
+This paper mainly focuses on the effect of known interventions and instabilities, and so related work has been primarily discussed when relevant.
+This includes the attention growth instability observed by~\citet{dehghani2023scaling, zhai2023stabilizing}, and the final logit divergence issue encountered by~\citet{chowdhery2022palm, thilak2022slingshot}.
+However, we highlight similar experimental methods in previous work.
+For instance, \citet{yang2022tensor} also measure the relationship between LR and loss across scales, but their focus is on centering the optimum (see Section~\ref{sec:int-mup}).
+In addition, \citet{zhai2023stabilizing} elicit instability in base models by doubling learning rate, and~\citet{dettmers2022llm} measure the presence of outlier features as a function of scale.
+
+There are also important instabilities and related topics we have not directly discussed so far.
+For instance, we have primarily focused on instabilities that lead to a slow divergence, and we now summarize research on \textit{fast loss spikes}.
+This instability is characterized by a quick increase in the loss that often eventually recovers.
+
+\textbf{The Edge of Stability and fast spikes}
+
+The conventional understanding of gradient descent predicts that loss instability only occurs when the learning rate exceeds $2/\lambda_\text{max}(H)$, where $H$ is the Hessian. 
+However recent investigations into large batch neural network training dynamics have revealed a more complicated picture via edge of stability (EoS)~\cite{cohen2021gradient}. 
+When training neural networks with large batch SGD, the loss curvature constantly evolves via the interaction of two processes: progressive sharpening and self stabilization. 
+Progressive sharpening is the empirical observation that when $\text{LR} < 2/\lambda_\text{max}(H)$, the curvature gradually increases until the stability threshold is violated. 
+When the learning rate becomes too large relative to the curvature, \textit{fast loss spikes} occur and the parameters oscillate into a region with smaller $\lambda_\text{max}(H)$ where stable training and progressive sharpening resumes. The latter process where instability results in smaller $\lambda_\text{max}(H)$ is self-stabilization, a theoretical model of which is given in~\citet{damian2022self}. Gradually shrinking $\lambda_\text{max}(H)$ via self stabilization was shown to be a primary mechanism behind the success of learning rate warmup in~\citet{gilmer2021loss}, who closely studied the connections between curvature, initialization, architecture and max trainable learning rates. 
+
+\citet{cohen2022adaptive} further analyze edge of stability of dynamics with adaptive optimizers, showing that progressive sharpening interacts with both the self-stabilization process and the adaptive optimizer state. This interaction results in the preconditioned sharpness $\lambda_\text{max}(P^{-1} H)$ oscillating around an optimizer specific threshold (38/LR in the case of Adam with $\beta_1$=0.9).
+Adaptive EoS (AEoS) can also result in periodic loss spikes when progressive sharpening pushes the preconditioned sharpness above the stability threshold, however the optimizer hyperparameters play a role. In particular, when LR$>$38/$\lambda_\text{max}(P^{-1} H)$, two mechanisms are now in play to resolve the step size being too big---either $H$ can shrink or $P^{-1}$ can shrink (or both). \citet{cohen2022adaptive} found that when $\beta_2$ is large, $H$ tends to shrink and fast loss spikes result during the process, resembling the self stabilization process observed with gradient descent. However when $\beta_2$ is small, $P^{-1}$ tends to shrink, no loss spikes are observed, and $\lambda_\text{max}(H)$ tends to gradually increase throughout training. 
+
+It is noteworthy that the adaptive edge of stability process (and the role of $\beta_2$) studied in \citet{cohen2022adaptive} offers a more complete understanding for loss spikes studied in a body of literature~\cite{shazeer2018adafactor,chowdhery2022palm, molybog2023theory, wortsman2023stable, zhai2023sigmoid, mocov3}. For example, \citet{shazeer2018adafactor} argue that during training of Transformers with adaptive optimizers the optimizer update can become too big resulting in a loss spike followed by recovery. This is sometimes attributed to the adaptive optimizer state becoming ``stale'', which is consistent with the observation the reducing $\beta_2$ resolves the loss spikes~\cite{shazeer2018adafactor, wortsman2023stable, zhai2023sigmoid}. This is perhaps the same observation as~\citet{cohen2022adaptive} that reducing $\beta_2$ allows $P^{-1}$ to change quicker to adjust to the process of progressive sharpening. AEoS also offers an explanation for the periodic loss spikes observed when training large transformer models~\cite{molybog2023theory}.
+
+
+\paragraph{Parameter-free methods and more parameterizations.} While our work has studied sensitivity to learning rate, there is also research that aims to eliminate the need to specify a learning rate~\cite{ivgi2023dog, defazio2023learning}.
+Based on their analysis, \citet{ivgi2023dog} set the step size for iteration $t$ to the maximum distance from the initialization divided by the root sum of historical gradient squares.
+Moreover, while our work investigated $\mu$Param, there are additional parameterizations for which it would be interesting to explore LR vs. loss~\cite{dinan2023effective, yaida2022meta, bordelon2023dynamics, jacot2018neural}.
+
+
+
+\section{Conclusion}
+
+
+As the compute required to train the largest models continues to increase, it becomes increasingly important to understand if training will be stable.
+This paper has shown that useful insights on stability can be found when studying small Transformers.
+We hope that this opens new opportunities for impactful research which benefits large runs without access to large resource pools.
+
+\subsection*{Acknowledgements}
+
+We thank George Dahl for thorough comments and suggestions,
+and Hugo Larochelle and Rif A. Saurous for helpful discussion.
+Also, we thank the members of the Google DeepMind PAGI team for their support of this effort, 
+Noah Fiedel, Noah Constant, Aaron Parisi, Alex Rizkowsky,  Avi Singh, Azade Nova, Bernd Bohnet, Daniel Freeman,  Gamaleldin Elsayed, Hanie Sedghi, Isabelle Simpson, James Harrison, Jiri Hron, Kathleen Kenealy, Kevin Swersky, Kshiteej Mahajan, Laura Culp, Max Bileschi, Merrie Morris, Rosanne Liu, Yundi Qian, Sharad Vikram, Tris Warkentin.
+
+\FloatBarrier
+
+{\small
+
+
+
+

@@ -1,0 +1,450 @@
+\title{Online Intrinsic Rewards for Decision Making Agents from Large Language Model Feedback}
+
+\begin{abstract}
+Automatically synthesizing dense rewards from natural language descriptions is a promising paradigm in reinforcement learning (RL), with applications to sparse reward problems, open-ended exploration, and hierarchical skill design. Recent works have made promising steps by exploiting the prior knowledge of large language models (LLMs). However, these approaches suffer from important limitations: they are either not scalable to problems requiring billions of environment samples; or are limited to reward functions expressible by compact code, which may require source code and have difficulty capturing nuanced semantics; or require a diverse offline dataset, which may not exist or be impossible to collect. In this work, we address these limitations through a combination of algorithmic and systems-level contributions. We propose \oni, a distributed architecture that simultaneously learns an RL policy and an intrinsic reward function using LLM feedback. Our approach annotates the agent's collected experience via an asynchronous LLM server,  which is then distilled into an intrinsic reward model. We explore a range of algorithmic choices for reward modeling with varying complexity, including hashing, classification, and ranking models. By studying their relative tradeoffs, we shed light on questions regarding intrinsic reward design for sparse reward problems. Our approach achieves state-of-the-art performance across a range of challenging, sparse reward tasks from the NetHack Learning Environment in a simple unified process, solely using the agent's gathered experience, without requiring external datasets nor source code. We make our code available at \url{URL} (coming soon). \looseness=-1
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Reward functions are central to reinforcement learning (RL), and are often assumed to be given as part of the problem definition \citep{Sutton1998}. 
+These functions are written to describe the task at hand, and often involve tradeoffs between ease of task definition and ease of policy optimization.  For example, assigning a reward of $+1$ for solving the task and $0$ otherwise is simple to define and accurately reflects the task goal, but is difficult to optimize due to providing zero gradients almost everywhere. 
+
+These difficulties have motivated the use of intrinsic rewards to aid policy optimization
+\citep{randlov1998shaping, ng1999rewardshaping, sorg2010internal, singh2010intrinsically}.  The reward designer can include additional reward shaping terms to create a denser learning signal, which can reflect task progress or guide the agent towards intermediate goals. However, designing intrinsic rewards can be remarkably challenging~\citep{booth23perils,  ibrahim2024comprehensive} 
+and places increased demands on human experts to provide task-specific knowledge. \looseness=-1
+
+Recently, several works have been proposed to leverage the vast prior knowledge encoded in large language models (LLMs) to automate the reward design process, based on a task description in natural language.
+They can be broadly categorized into two families:
+\begin{enumerate}[itemsep=3pt, leftmargin=0pt]
+\vspace*{-3pt}
+\item[] \textbf{1. Generating the reward function's code by LLM.}
+  A number of methods have been proposed to automatically generate
+  executable code that computes the reward directly~\citep{ma2023eureka, xie2023text2reward, yu2023language, li2024auto}. 
+  While they have demonstrated success in complex continuous control tasks, they either require access to environment source code to include in the prompt, or a detailed description of input parameters and reward function templates.
+  Furthermore, they are limited to reward functions compactly expressible via code,  describing explicit logic; and it is unclear how these approaches can easily process high-dimensional state representations such as images, or semantic features such as natural language. 
+  
+
+\item[] \textbf{2. Generating reward values by LLMs.} 
+  Motif~\citep{klissarovdoro2023motif} is a typical example of this category.
+  It ranks the captions of pairs of observations using an LLM and distills these preferences into a parametric reward model. Motif does not require access to environment source code nor numerical state representation, can process semantic input features, and can scale to problems requiring billions of environment samples.
+  Nevertheless, it also suffers from two important limitations. First, it requires a diverse, pre-existing dataset of captioned observations which are used to elicit preferences from the LLM. In many situations, such a dataset might not exist, and collecting it can increase the sample complexity.
+  More importantly, collecting a diverse dataset often requires a non-trivial reward function that is feasible to optimize,
+  which is the primary problem we aim to solve with intrinsic reward functions in the first place. 
+  Second, it involves a complex three-stage process, which sequentially annotates observations using an LLM, trains a reward model, and finally trains an RL agent. This is still time-consuming, given that the LLM annotation process can take several days' worth of GPU hours,
+  and is done prior to training the reward model and RL agent.
+  Alternatively, \citet{chu2023accelerating} query the LLM to directly label observations as having high or low reward at each timestep. 
+  However, querying an LLM for every observation is computationally infeasible for many RL applications, which involve 
+  millions or billions of observations.  \looseness=-1
+\end{enumerate}
+As a consequence, it would be desirable to have \emph{an integrated solution} that offers: 
+\begin{enumerate}[leftmargin=15pt]
+    \item[(1)] \emph{concurrent and fast online learning of both the intrinsic rewards and the policy 
+that requires no external data nor auxiliary reward functions,}
+    \item[(2)] \emph{expressible reward functions that can capture semantic features
+that are difficult to process with compact executable code.}
+\end{enumerate}
+In this work, we present \oni, a distributed online intrinsic reward and agent learning system.
+\oni assumes access to captions of observations, similar to previous work~\cite{klissarovdoro2023motif, chu2023accelerating}. 
+The captions of collected observations are annotated by an asynchronous LLM server, and both the policy and intrinsic reward model are simultaneously updated using LLM feedback.
+\oni removes the dependency on external datasets beyond the agent's own experience and enables large-scale RL training with ease. Such a learning framework allows us to systematically compare different algorithmic choices for synthesizing LLM feedback. Specifically, we explore three methods: the first one is retrieval-based and simply hashes the annotations; 
+the second builds a binary classification model to distill the sentiment labels returned by the LLM;
+and the third sends pairs of captions to the LLM server for preference labeling and learns a ranking model, similar to Motif. \looseness=-1
+By carefully comparing the three proposed algorithms, we provide valuable insights into several important questions regarding intrinsic reward design.
+We demonstrate that \oni is able to match Motif's performance across a range of challenging, sparse rewards from the NetHack Learning Environment (NLE)~\citep{kuettler2020nethack}, solely using the agent's gathered experience in a single, unified process. 
+
+
+
+
+
+
+   
+
+
+\section{Background}
+
+
+We consider a partially observed Markov decision process (POMDP) setting where the problem is defined by $\mathcal{M} = (\mathcal{S}, \mathcal{A}, \mathcal{O}, p_0, P, O, r, \gamma)$. 
+At each episode, an initial state $s_0 \in \mathcal{S}$ is sampled from the initial state distribution $p_0$. 
+At each time step $t$, the agents observes $o_t \in \mathcal{O}$
+which is computed by the emission function $O(s_t)$,  and takes an action $a_t \in \mathcal{A}$. 
+This action causes the environment to transition to a new state, $s_{t+1} \sim p(s_t, a_t)$. A new observation $o_{t+1}$ and a reward $r_{t+1} = r(o_{t+1})$ is given to the agent, and the process continues. The goal of the agent is to learn a policy $\pi: \mathcal{O} \rightarrow \Delta(\mathcal{A})$ which maximizes the expected return $\mathbb{E}_{\pi}\left[\sum_t \gamma^t r_t\right]$. In this work, we additionally assume each observation $o_t$ includes a textual caption $c_t$, which could be empty. 
+For observation spaces without textual captions, $c_t$ could in principle be provided by a captioning model as well. \looseness=-1
+
+In many situations, the extrinsic environment reward $r$ is sparse, and the resulting return objective is challenging to optimize. We therefore consider methods which make use of an auxiliary \textit{intrinsic} reward $\rint$ and define a composite surrogate reward:
+\begin{equation}
+\bar{r}(o_t) =  r(o_t) + \beta \cdot \rint(o_t).
+\label{eq:composed_reward}
+\end{equation}
+A key research question is how to define or learn the intrinsic reward $\rint$. 
+A first option is to manually define $\rint$ based on task-specific goals, for example a measure of the distance between the agent's current state and the goal state. However, handcrafting the intrinsic reward function can require significant domain knowledge and must be redone for each new task.
+A second option is to define $\rint$ to measure some notion of observation novelty, which encourages the agent to systematically explore the environment. This can work well in smaller environments, but fails in ones that cannot be exhaustively explored in a tractable amount of time. 
+A third class of methods, which we focus on in this work, leverage LLMs to automatically synthesize $\rint$ to reflect prior knowledge about the task. We discuss all three classes of methods in \Cref{sec:related}. 
+
+
+
+
+\section{Online Intrinsic Rewards}
+
+
+\subsection{System design: distributed PPO with LLM annotations}
+\label{sec:system}
+This section outlines the system we have built to learn online intrinsic rewards
+alongside the policy optimization.
+The engineering and design here is an important piece of our research,
+as the rest of our experimental studies are conducted within this system
+and influenced by the throughput of its interacting components.
+
+Our core system illustrated in \cref{fig:system}
+is built on top of the Sample Factory library v1.0~\citep{petrenko2020sf}
+and their asynchronous variant of proximal policy optimization
+\citep{schulman2017proximal}, referred to as APPO.
+APPO operates on a single machine and concurrently runs many
+environment instances while asynchronously updating policy and value
+estimates with the usual PPO rules, and
+adequately handles policy staleness and data transfers between these components.
+Concretely for NetHack, by running 480 environment instances
+APPO collects approximately 32k
+environment interactions per second on a Tesla A100-80GB GPU with 48 CPUs.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{plot/system.pdf}
+  \caption{Overall system diagram of \oni. Our additions to Sample Factory are highlighted in red.
+    We added an asynchronously executing LLM server and learned
+    reward function, and connect them back into the
+    main learning process in a way that does not
+    hurt the overall throughput of the policy and value learning.
+  }
+  \label{fig:system}
+\end{figure}
+
+For online reward learning via LLM annotations in this system\footnote{
+The prior work by \citet{klissarovdoro2023motif} in the offline setting
+was able to connect their intrinsic reward function into Sample Factory's
+APPO implementation with a few lines of code, as it just needed to load
+the  PyTorch module of the learned reward function.},
+we added 1) an LLM server hosted on a separate node,
+2) an asynchronously running process that passes observation captions to
+the LLM server via HTTP request, 
+3) a hash table that stores the captions and corresponding LLM annotations, and
+4) and learning code that dynamically updates a reward model 
+that learns on these annotations.
+Without being asynchronous, these components 
+have the potential to block the concurrent execution and
+can reduce the throughput of the overall system,
+because calling into an LLM and updating the reward model are time-consuming.
+We added them in a way that retains most of the throughput (!), 
+approximately 80-95\% of the original:
+the average throughput is 30k environment interactions per second if we do not train
+any additional reward model to distill the LLM annotations, 
+and 26k if a classification-based reward model is learned at the same time (see \Cref{sec:methods} for the description of those approaches).
+The throughput of LLM annotation depends on the actual LLM and prompt we are using. 
+For the reader's reference, when hosting a  LLaMA-3.1-8B server on a Tesla A100-80GB GPU
+using the prompt displayed in \Cref{app:prompts}, \oni annotates
+approximately 810k NetHack captions over the whole training process (2B environment steps, 19-20 hours).
+The rest of this section overviews the relevant components and
+how we have modified them. 
+\paragraph{Background: APPO's Distributed Execution and Shared Memory}
+APPO has three main types of workers:
+\begin{enumerate}[itemsep=3pt, leftmargin=5mm]
+\item the \textbf{learner worker} that coordinates most of the operations, updates
+the policy and value models, and sends the latest policy ID to the
+other workers so that they can retrieve it;
+\item the \textbf{rollout workers} that run copies of the environment, execute
+actions in them and save the observations; and
+\item the \textbf{policy workers} that query the policy on new states. 
+The policy workers are separate from the rollout workers so they can efficiently batch
+across observations.
+\end{enumerate}
+
+The workers here are individual processes forked off from a parent process.
+These all have shared CPU and GPU memory buffers, and
+efficiently communicate mostly via Python's multiprocessing queues,
+using pointers to locations in the shared memory.
+We next describe our new LLM worker, and how we connect it back into the learner.
+
+\paragraph{Our New Asynchronous LLM Worker and Remote LLM Server}
+This worker has input and output queues 
+that communicate
+back with the learner process, which we use so it does not block the
+main execution of the system.
+The LLM worker awaits new observations to label from the input queue, 
+formats them into
+prompts, calls into an LLM, and returns the annotations in the
+output queue. 
+Additionally, the prompt templates and other LLM options are configured by the LLM worker.
+We use an annotation and message format that support all the intrinsic reward
+labels that we consider in \Cref{sec:methods}.
+As Sample Factory already utilizes most of the free CPU and GPU
+capacity of the system, we opted to call into the LLM via an
+HTTP/REST interface rather than loading it in this process directly.
+The communication here adds minimal overhead, and also makes us not
+need to coordinate the shared memory of multiple GPUs between the main
+APPO code and LLM.
+Alongside every APPO run, we allocate an unloaded machine
+with a new instance of VLLM \citep{kwon2023efficient} to exclusively
+serve the queries from the RL run. \looseness=-1
+
+One important design decision is that the asynchronous LLM server is only able to
+process a small percentage of the overall observations encountered \footnote{often $\leq 0.04\%$
+for a  LLaMA-3.1-8B instance using a single A100-80GB GPU, or $\leq 0.02\%$ when using a V100-32GB GPU},
+because the environment rollout workers have a much higher throughput than the LLM.
+An alternative design would be to block the main APPO components and wait
+for the LLM to label more messages, but we find it more realistic to continue
+running the policy and label messages as the LLM throughput allows.
+This also creates the problem of needing to decide on what messages to
+send to the LLM: the last-in-first-out queue (LIFO), or some uncertainty-based selection.
+For this work, we use LIFO for simplicity, but note that it would be interesting to investigate alternate approaches in future work.
+
+\paragraph{Our Modified Learner}
+Lastly, we connect this new LLM worker back into the main learner,
+and dynamically learn a reward model on the annotations obtained from it.
+To do this, we modified the two threads of the learner worker:
+\begin{enumerate}[itemsep=3pt, leftmargin=5mm]
+\item the \textbf{training thread} is the main thread that
+a) aggregates the new trajectories from the latest environment interactions;
+b) decides which new observations to send to the LLM;
+c) updates the policy, value, and (now) our intrinsic reward model.
+\item The \textbf{feedback processing thread} (in fact, the initial thread of the learner worker) receives the latest
+  annotations from the LLM worker and updates the dataset (or hash table)
+  that the reward model is trained on.
+  This thread also initializes the reward model at the beginning. 
+\end{enumerate}
+To prevent overfitting the limited amount of annotations in the early stage of training,
+the training thread only continuously updates the reward model after we receive $25$k annotations. 
+Before that, the feedback processing thread run a few updates of the reward model every time we receive new annotations.\looseness=-1
+
+Now that we have a flexible way of annotating messages and fitting a reward
+model on top of them, we turn to defining the types of intrinsic reward functions.
+
+\subsection{Intrinsic Reward Functions}
+\label{sec:methods}
+\oni offers flexible algorithmic choices for querying an LLM and distilling its feedback. In this work, we consider the following
+three methods.
+
+\paragraph{Retrieval} The first and simplest approach we consider is based on binary labeling and retrieval. 
+The LLM is asked to assign a binary label $y_i \in \{0, 1\}$ indicating whether a caption $c_i$ is ``helpful'' or ``unhelpful'' for making progress on the task. The learner worker maintains a hash table $\mathcal{H}$ to store labeled pairs $(c_i, y_i)$, managed by the feedback processing thread.
+In the training thread, each time the RL agent receives an observation $o_t$ with caption $c_t$, we check if $c_t \in \mathcal{H}$ and
+the intrinsic reward is defined as:
+\begin{equation}
+    \rint(o_t) = \begin{cases}
+    \mathcal{H}(c_t) & \mbox{ if } c_t \in \mathcal{H}\\
+    0 & \mbox{ if } c_t \notin \mathcal{H}
+    \end{cases}
+\end{equation}
+If $c_t$ is unlabeled, it is placed into a last-in-first-out (LIFO) queue $Q$ managed by the LLM annotation process,
+and then sent to the LLM server. 
+The LLM continuously processes elements $c_i$ from $Q$ and returns their labels $y_i$ to the data processing thread of the learner worker, where the pairs $(c_i, y_i)$ are added into $\mathcal{H}$. As described in \Cref{sec:system}, the training thread and the feedback processing thread run asynchronously. Therefore, editing the hash table does not slow down policy training. % of the RL agent.
+This retrieval-based approach does not generalize to observations with unlabeled captions. However, the resulting intrinsic reward is simple and hyperparameter-free, and may work well when the set of captions belongs to a relatively small set.
+
+\paragraph{Classification} The second approach we consider is based on binary labeling together with training a classification model. Similarly to above, we label observation captions $c_i$ with labels $y_i \in \{0, 1\}$ indicating whether they are helpful or unhelpful via LLM. 
+We simultaneously train a binary classification model
+to predict $y_i$ from $o_i$. More precisely, we model $P(y = 1|o)$ by $\rint_\phi: \mathcal{O} \rightarrow [0, 1]$,
+which is then used to compute the binary intrinsic reward by thresholding it at $\eta$: \looseness=-1
+\begin{equation}
+ r^\mathrm{int}(o_t) = \mathbb{I}[\rint_\phi(o_t) > \eta],
+\end{equation}
+where $\mathbb{I}$ is the indicator function. We study the impact of $\eta$ in \Cref{sec:ablations}. Unlike the previous approach, this method has potential to generalize to observations whose captions are similar, but not identical, to the captions labeled by the LLM. However, like the previous approach, it will assign a same reward to observations which are slightly positive (such as finding a few gold pieces in NetHack) and very positive (finding hundreds of gold pieces or a rare artifact). 
+
+\paragraph{Ranking} The third approach we consider is based on ranking observations via pairwise classification, which is the approach taken by Motif. Here, pairs of observations $(o_1, o_2)$ are sent to the LLM, which returns a preference label $y \in \{1, 2, \varnothing \}$ indicating whether $o_1$ or $o_2$ is more desirable for accomplishing the task, or if they are equivalent. 
+A reward model $\rint_\phi: \mathcal{O} \rightarrow \mathbb{R}$ is trained by minimizing the negative log-likelihood :
+\begin{equation}
+\resizebox{0.93\textwidth}{!}{
+    $\displaystyle
+    - \mathbb{E}_{(o_1, o_2, y) \sim \H } \Big[ \Big(\mathbb{I}[y = 1] + \tfrac{1}{2} \mathbb{I}[y = \varnothing] \Big) \log P_\phi(o_1 \succ o_2) + \Big(\mathbb{I}[y = 2] + \tfrac{1}{2} \mathbb{I}[y = \varnothing]\Big) \log P_\phi(o_1 \prec o_2) \Big]
+    $
+}
+\end{equation}
+where we use average log-likelihood when $y=\varnothing$\footnote{In the equivalent cross entropy minimization formulation, this amounts to using a uniform target $[\frac12, \frac12]$ when $y=\varnothing$.}
+and use the Bradley-Terry model~\cite{bradley1952rank}
+$P_\phi (o_1 \succ o_2) = 1 - P_\phi (o_1 \prec o_2) = \exp\big( \rint_\phi(o_1)\big) / \big[  \exp\big({\rint_\phi(o_1)}\big) + \exp\big( \rint_\phi(o_2)\big) \big]$.
+Motif computes the mean $\mu_\D$, standard deviation $\sigma_\D$, and a fixed quantile $\nu_\D$ of $\rint_\phi$ over the offline dataset of annotations $\D$. During RL training, it normalizes and thresholds $\rint_\phi$ to give the reward 
+\begin{equation}
+\label{eq:motif_thresholding}
+  \rint_\text{motif}(o_t) = \mathbb{I}[(\rint_\phi(o_t) - \mu_\D) / \sigma_\D > \nu_\D] \cdot (\rint_\phi(o_t) - \mu_\D) / \sigma_\D
+\end{equation}
+For \oni-ranking, applying these steps directly is not possible since the annotation dataset is continuously changing. 
+Therefore, we replace $(\mu_\D, \sigma_\D)$ by a running mean and standard deviation $(\mu, \sigma)$ computed over the agent's experience, and replace the quantile $\nu_\D$ by a quantile of the standard normal distribution. 
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+\paragraph{Exploration Based on Novelty Bonuses} Learning from sparse or otherwise difficult-to-optimize reward functions is a long-standing problem in reinforcement learning.
+There is a large body of work which defines intrinsic rewards based on novelty bonuses \citep{schmidhuber1991possibility, E3, Rmax, stadie2015incentivizing,  PseudoCounts, ICM, RND, max, RIDE, ecoffet2019go, PCPG, NovelD, E3B,lu2024intelligent}. These methods tend to make minimal assumptions about the task at hand, operate online without requiring external data, and sometimes come with theoretical guarantees. However, since they are fundamentally \textit{tabula-rasa}, they must rediscover much of the structure in the task that might already be encoded as prior knowledge in an LLM. Therefore, they tend to have difficulty exploring environments of very high complexity, such as NetHack, in a tractable amount of time \citep{klissarovdoro2023motif}.
+\looseness=-1
+
+\paragraph{LLM-aided Reward Design}
+
+In addition to Motif~\citep{klissarovdoro2023motif}, several works have sought to leverage the prior knowledge encoded in LLMs to produce intrinsic rewards.
+Eureka \citep{ma2023eureka}, Auto-MC \citep{li2024auto}, L2R~\citep{yu2023language} and Text2Reward~\citep{xie2023text2reward}
+all use LLMs to generate executable code which computes intrinsic rewards from the underlying environment state, conditioned on a task description. The generated reward function code is then iteratively improved based on aggregate statistics from agents trained with the current reward.
+However, a disadvantage with intrinsic rewards represented as code is that they require access to an interpretable underlying state representation, and it is unclear how to leverage non-numerical features such as those provided by unstructured language captions.
+The works of \citet{kwon2023reward, chu2023accelerating} also successfully used LLMs conditioned on task descriptions to directly generate binary rewards in an online manner, and did not train a reward model. This was possible due to evaluating on environments and tasks which could be solved with a relatively small number of observations, whereas we consider complex open-ended environments with billions of observations, where labeling them all with an LLM would be computationally infeasible. Also of note is the work of \citet{wu2024read}, which additionally conditioned LLMs on user manuals to define the intrinsic reward. \looseness=-1
+
+\paragraph{Goal-conditioned Reward Design}
+A different approach to reward function design is to define rewards as the distance between the agent's current state and  the goal. For example, one line of work learns a state embedding in a self-supervised manner which converts geodesic distances in the original space to Euclidean distances in feature space  \citep{wu2018the, DBLP:journals/corr/abs-2107-05545, gomez2024properlaplacianrepresentationlearning}.
+Another line of work of \citep{fan2022minedojo, rocamonde2023vision, adeniji2023languagerewardmodulationpretraining,kim2024guide} leverages pretrained image and text encoders, and defines rewards to be some measure of similarity between embeddings of visual observations and embeddings of textual task descriptions.
+Using a question generation and answering system, \citet{carta2022eager} extract auxiliary objectives from the goal description and construct intrinsic rewards.
+An interesting combination of goal-conditioned and LLM-aided reward design is the work of \citet{pmlr-v202-du23f}, who used an LLM to generate candidate goals which might be relevant to the environment at hand, and then used distance in embedding space to define the reward.
+
+\paragraph{LLM for RL Broadly}
+Another way of leveraging the prior knowledge encoded in LLMs for decision making is to use the LLM directly as a policy. This approach has been successfully used in robotics \citep{ahn2022icanisay, driess2023palme},
+as well as open-ended exploration in MineCraft \citep{wang2024voyager}. Both settings require the LLM to operate at a higher level of abstraction, by having it call upon a set of semantically grounded skills which handle the low-level sensorimotor activity. These are in turn produced by imitation learning on expert trajectories or hardcoded APIs.
+\citet{jeurissen2024playing} prompt the LLM to choose a predefined skill to play NetHack.
+The prompts are constructed to represent past events, current observation, and the task description and hardcoded available skills are also included.
+More references on LLMs for decision making can be found in the survey paper of \citet{cao2024survey}.
+
+
+
+
+\section{Experiments}
+
+\label{sec:expr}
+\paragraph{Environment} We use the NetHack Learning Environment (NLE) \citep{kuettler2020nethack} as our experimental testbed, since it is one of the most challenging open-ended, long horizon and sparse reward environments available, and was also used as the main environment in the prior work we compare to. NetHack is a classic dungeon crawling game which presents a number of interesting challenges for RL agents: it is procedurally generated, requiring generalization; rewards are sparse for most tasks, requiring exploration; the environment is partially rather than fully observable; transitions are naturally stochastic; episodes are very long, requiring tens to hundreds of thousands of steps to win the game; the dynamics are highly complex, involving large numbers monsters, objects, non-player characters and other entities. Succeeding in the game requires mastering and balancing diverse behaviors including exploration, resource management, object use, combat, puzzle solving and skill progression. \looseness=-1
+
+\paragraph{Tasks and Metrics} 
+We evaluate our agents in two ways: how well they are able to succeed in tasks which have a (typically sparse) extrinsic reward, and how well they are able to progress in the game using the intrinsic reward only. For the former, we use one dense reward task and three sparse reward tasks used in prior work \citep{kuettler2020nethack, klissarovdoro2023motif}, listed below.
+\begin{enumerate}[leftmargin=25pt]
+    \item The \texttt{Score} task treats the in-game score\footnote{\url{https://nethackwiki.
+    \item The \texttt{Oracle} task requires finding the in-game Oracle character, which resides deep in the dungeon. The agent receives a reward of 50 if it manages to reach the Oracle, zero otherwise. 
+    \item The \texttt{StaircaseLvl3} and \texttt{StaircaseLvl4} tasks requires reaching the third or fourth level staircase and zero otherwise---this requires exploring multiple levels in order to find staircases which lead deeper into the dungeon, while fighting or escaping monsters to survive. 
+\end{enumerate}
+Previous work found that the \texttt{Oracle} task can in fact be solved in unexpected ways via reward hacking; however, this still constitutes a challenging sparse reward problem and we include it for completeness. 
+We also train agents with the intrinsic reward only and measure the game progress via four metrics: 
+
+{
+\hspace*{15pt} \emph{experience level, \; dungeon level, \; gold, \; and \, scout (number of unique locations explored)}. 
+}
+
+Removing the extrinsic reward gives us a clearer picture of what the intrinsic rewards are prioritizing. 
+
+\paragraph{Methods and Hyperparameters} 
+We instantiate \oni with the three reward functions described in \Cref{sec:methods}. We name the three approaches \oniretrieval, \onicls and \oniranking, respectively.
+For policy learning, we use the Chaotic Dwarven GPT5 (CDGPT5) architecture \citep{CDGPT5} used in prior work \citep{piterbarg2023nethack, kurenkov2023katakomba, klissarovdoro2023motif}. Architecture details can be found in \Cref{sec:architecture-details}.  
+All the methods are trained with two billion $(2 \times 10^9)$ environment steps.  We train \onicls with 
+with classification threshold $\eta=0.5$, where the intrinsic reward coefficient is $\beta = 0.1$ for the \texttt{Score} task and $\beta=0.4$ for all the other sparse-reward tasks and the reward-free agent. Similarly, \oniretrieval uses $\beta = 0.1$ for \texttt{Score} and $\beta=0.5$ for the others. 
+\oniranking is trained with $\beta=0.05$ and offset $\nu_\N = 1.96$ ($97.5$-th percentile of a standard normal). Full details of the training process can be found in \Cref{sec:rl-details}. 
+ 
+
+\paragraph{LLMs} We use the  LLaMA-3 herd of models \citep{dubey2024llama3herdmodels} as our LLMs.  All prompts are listed in \Cref{app:prompts}.1-70B-Instruct and LLaMA-3.1-8B-Instruct (see \Cref{app:llm_model_size}). We did not observe a significant difference in their performance on the \texttt{Oracle} or \texttt{Score} tasks.
+Therefore, we use LLaMA-3.1-8B-Instruct in our subsequent experiments to reduce computation. \looseness=-1
+
+\paragraph{Baselines} We compare to agents trained with extrinsic reward alone and Motif~\citep{klissarovdoro2023motif}. We use the default hyperparameters of Motif, listed in \Cref{sec:rl-details}.
+We note that \citet{klissarovdoro2023motif} found that other exploration methods based on novelty bonuses such as RND \citep{RND}, NovelD \citep{NovelD} and E3B \citep{E3B} did not improve over the extrinsic reward baseline on these tasks, hence we do not include them. \looseness=-1
+\subsection{Main Results}
+\label{sec:expr_main}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{\linewidth}
+        \includegraphics[width=\linewidth]{plot/main_results_return.pdf}
+        \caption{Performance on four different NetHack tasks.}
+        \label{fig:main}
+    \end{subfigure}
+     \begin{subfigure}[b]{\linewidth}
+        \includegraphics[width=\linewidth]{plot/main_reward_free.pdf}
+        \caption{Game progress of intrinsic rewards only agents. }
+         \label{fig:main_reward_free}
+    \end{subfigure}
+    \caption{\oni-based methods are able to match or closely track the performance of Motif without using an pre-collected dataset. This includes (a) reward-based and (b) reward-free settings. Motif's pre-collected dataset uses privileged information about dense reward functions to solve sparse-reward or reward-free environments while \oni-methods do not. }
+\end{figure}
+
+\paragraph{Task Performance}  We report the average performance
+and $95\%$ confidence intervals computed via standard errors over $5$ seeds in \Cref{fig:main}.
+The extrinsic reward agent performs reasonably well on the dense \texttt{Score} task, but completely fails on the others due to reward sparsity. We find that, despite not requiring any external data, our \onicls agent is able to match Motif on all tasks except \texttt{Oracle}, where it still performs well. 
+We note that Motif requires pre-collecting data from the \texttt{Score} task even for sparse reward tasks---this assumes access to an additional dense reward function, which is an often unrealistic assumption. It also incurs additional one billion ($10^9$) environment samples prior to policy training.
+All of our agents significantly outperform the extrinsic only baseline on the sparse reward tasks, demonstrating they are able to explore effectively while synthesizing their intrinsic rewards from online data alone. \looseness=-1
+Despite its simplicity, \oniretrieval performs surprisingly well, and its performance is often close to that of \onicls. This is likely a consequence of many messages with positive valence being repeated in the early game of NetHack, such as ``\emph{You find a hidden passage}'' that allows exploring the rest of the level, or ``\emph{You kill the} \{monster\}!'' which leads to experience gain. \onicls, which also predicts binary rewards but is able to generalize to unseen messages, provides a modest but consistent improvement over \oniretrieval across all environments. This suggests that learning a reward model is indeed helpful. We would expect this gap to increase in settings with added noise or caption diversity, since they increase the likelihood of observed captions being unique. \looseness=-1
+
+We do not observe any significant gains from using \oniranking over \onicls, despite it being more conceptually general and able to represent a continuous range of intrinsic rewards rather than binary values. This may be because our tasks take place at the very earliest part of the game of NetHack, where only a small fraction of all possible messages are observed, which would also explain the relatively strong performance of \oniretrieval. We hypothesize that more benefits will appear in settings with higher observation diversity.%, but this remains to be demonstrated. 
+
+\paragraph{Game Progress of Intrinsic-Reward-Only Agents} Results for all methods trained in the reward-free setting are shown in \Cref{fig:main_reward_free}. All of our \oni methods are able to make meaningful progress across all metrics. Interestingly, different variants appear to prioritize different forms of progress: \oniranking performs best in terms of experience level, whereas \onicls performs best according to the other metrics. We include the results of Motif for reference, yet emphasize it is actually inapplicable in a truly reward-free setup since it assumes access to dense rewards. % this setup since it assumes access to dense rewards.
+
+\subsection{Ablation Study}
+\label{sec:ablations}
+
+\paragraph{\onicls: the impact of the classification threshold} 
+As described in \Cref{sec:methods}, \onicls predicts binary rewards by modeling $P(y_t=1|o_t)$ and then thresholding with $\eta$.
+Instead of using binary reward, an alternative design choice is to use real valued reward
+\begin{equation}
+\label{eq:oni_classification_no_eta}
+    \rint(o_t) = P(y_t=1|o_t),
+\end{equation}
+where $\rint(o_t) \in [0, 1]$.
+\Cref{fig:ablation_eta} shows that the performance of \onicls on the four NetHack tasks
+is relatively robust to this hyperparameter $\eta$, and using $P(y_t=1|o_t)$ as the reward leads to similar performance.
+As the training progresses, our reward model outputs values close to 0 or 1\footnote{To increase the diversity of the captions in the training dataset, we do not requery the LLM server if a caption is already annotated before. 
+Therefore, every caption in our dataset only has a single label, resulting in this phenomenon.},
+and we hypothesize this is the reason why the final performance remains comparable.
+Moreover, the natural classification threshold $\eta=0.5$ % lead to a modest improvement of convergence speed and 
+marginally outperform the other values in the reward-free setting. 
+\begin{figure}[ht]
+    \centering
+        \includegraphics[width=\linewidth]{plot/ablation_db_returns.pdf}
+        \includegraphics[width=\linewidth]{plot/ablation_db_reward_free_no_fraction.pdf}
+    \caption{\textbf{(Top)} Performance of \onicls is robust to different choices of the classification threshold $\eta$ on the four NetHack tasks. 
+    \textbf{(Bottom)} $\eta = 0.5$ marginally outperform the other values for training intrinsic-reward-only agents. The result when using $P(y_t=1|o_t)$ as reward \eqref{eq:oni_classification_no_eta} is 
+    marked with legend \texttt{oni-classification (no eta)}.
+    }
+    \label{fig:ablation_eta}
+\end{figure}
+
+\paragraph{\oniranking: the impact of sampling strategy for LLM annotation and reward training}
+Unlike \onicls that uses a LIFO queue to rank captions for LLM annotation, it is more subtle to design the most effective sampling strategy for \oniranking, where we need to construct pairs of captions to annotate and use for reward model training.
+Here we study the effect of deduplicating captions before passing them to our pipeline. In either case, we maintain a message list $\mathcal{L}$, and sample pairs of captions $c_1, c_2 \sim \text{Uniform}(\mathcal{L} \times \mathcal{L})$ for annotation. The annotated message pairs are stored in another list which is sampled from uniformly when training the reward model.
+In the first option, each time the agent encounters a message, we check if it is already stored in $\mathcal{L}$ and only add it if not. This is similar to the approach used in \onicls. 
+In the second option, we simply add all captions encountered by the agent into $\mathcal{L}$, regardless of whether they have already been seen before. This approach is similar to that taken by the original Motif work, which does not perform any deduplication of the offline dataset. 
+
+\Cref{fig:ablation_ranking_offset_vs_thresholding} shows the performance and the number of captions stored in the replay buffer for both schemes. We see that for the deduplicated variant, the number of captions does not grow past a certain point (approximately $70k$ unique captions). For the non-deduplicated variant, the number of captions keeps growing linearly over time. The deduplicated variant fails to learn, which highlights the important effect which the annotation dataset can have. We hypothesize that the deduplicated variant may undersample captions that occur frequently in the agent's experience, for which it is important to reliably estimate reward. For example, the blank message occurs very frequently during policy learning, but is only included in a small fraction of the pairs sent to the LLM for annotation, since it is sampled with the same probability as the other $\sim 70k$ other captions. In contrast, the duplicated variant samples the blank message and other frequent captions with much higher probability. Still, this remains a simple strategy, and designing more sophisticated sampling mechanisms (for example, that account for the epistemic uncertainty of the reward model) would be an interesting direction for future work.
+
+
+  
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{plot/ablation_ranking_dedup_returns.pdf}
+    \caption{ 
+    Performance and number of captions in the replay buffer for agents trained with and without message deduplication. Keeping the natural distribution of captions, and not deduplicating, is important to enable our ranking-based method to learn. 
+    }
+    \label{fig:ablation_ranking_offset_vs_thresholding}
+\end{figure}
+
+\paragraph{Performance vs. LLM Annotation Throughput}
+We compared agents trained on the \texttt{Score} and \texttt{Oracle} tasks using either $1$ or $4$ Tesla V100-32GB GPUs in the LLM server node. 
+As shown in \Cref{fig:4gpu}, using 4 GPUs rather than 1 significantly increases the number of annotated observations. However, we do not find any significant change in performance between the two. Likewise, we have observed the performance is comparable when using A100-80GB GPU with higher throughput, see \Cref{app:a100_vs_v100}. This suggests that many of the labelled examples may contain redundant information, which is not useful for updating the reward model. Designing more sophisticated prioritization schemes, which can select maximally informative examples to send to the LLM, constitutes an interesting direction for future work. 
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{plot/ablation_gpu_score.pdf}
+    \includegraphics[width=\linewidth]{plot/ablation_gpu_oracle.pdf}
+    \caption{
+        Performance remains comparable despite doubling LLM annotations, as seen in results with LLM server utilizing 1 GPU vs. 4 GPUs. 
+        The number of annotations received by \oniranking is lower than the other two, as the LLM server analyzes two messages for each annotation (see the prompts in \cref{app:prompts}).
+    }
+    \label{fig:4gpu}
+\end{figure}
+
+\paragraph{Impact of Intrinsic Reward Coefficient $\beta$}
+
+For \onicls and \oniretrieval, we have used different values of $\beta$ for the \texttt{Score} task and other sparse reward tasks in \Cref{sec:expr_main}.
+Throughout our experiments, we have found that
+for these two methods, 
+larger values of $\beta$ lead to better performance for the sparse reward tasks, while smaller values of $\beta$ better balance between intrinsic and extrinsic rewards for the dense reward \texttt{Score} task. In comparison, \oniranking is relatively robust to this choice, where larger values of $\beta$ are still slightly favored for the sparse reward tasks.
+
+
+
+\section{Conclusion}
+
+We have introduced \oni, a distributed online intrinsic reward and agent learning system. We showed that we are able to match the state of the art across a range of challenging sparse reward tasks from the NetHack Learning Environment, while removing the need for a large pre-collected dataset or auxiliary dense reward function required by previous work. We explored three different instantiations of our system of varying levels of complexity and generality, and study their tradeoffs. Our work paves the way for intrinsic reward methods which can learn purely from agent experience, are not constrained by external dataset size or quality, and can leverage high-performance RL training. \looseness=-1
+
+
+
+
+
+
+

@@ -1,0 +1,465 @@
+\title{GSLoc: Efficient Camera Pose Refinement via 3D Gaussian Splatting}
+
+\begin{abstract}
+We leverage 3D Gaussian Splatting (3DGS) as a scene representation and propose a novel test-time camera pose refinement framework, \sysname. This framework enhances the localization accuracy of state-of-the-art absolute pose regression and scene coordinate regression methods. The 3DGS model renders high-quality synthetic images and depth maps to facilitate the establishment of 2D-3D correspondences. \sysname obviates the need for training feature extractors or descriptors by operating directly on RGB images, utilizing the 3D foundation model, MASt3R, for precise 2D matching. To improve the robustness of our model in challenging outdoor environments, we incorporate an exposure-adaptive module within the 3DGS framework. Consequently, \sysname enables efficient one-shot pose refinement given a single RGB query and a coarse initial pose estimation. Our proposed approach surpasses leading NeRF-based optimization methods in both accuracy and runtime across indoor and outdoor visual localization benchmarks, achieving new state-of-the-art accuracy on two indoor datasets. The project page is available at \url{https://gsloc.active.vision}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Camera relocalization, the task of determining the 6-DoF camera pose within a given environment based on a query image, is critical for numerous applications, including robotics, autonomous vehicles, augmented reality, and virtual reality. Current methods for camera pose estimation primarily fall into the categories of structure-based approaches and absolute pose regression (APR) techniques. Classic structure-based pipelines \cite{dusmanu2019d2, sarlin2019coarse, taira2018inloc, noh2017large, sattler2016efficient, sarlin2020superglue, lindenberger2023lightglue} rely on 2D-3D correspondences between a point cloud and the reference image. Another class of structure-based methods - Scene Coordinate Regression (SCR) \cite{brachmann2017dsac, brachmann2023accelerated, wang2024glace, brachmann2021visual} - uses neural networks for direct regression of 2D-3D correspondences. These 2D-3D correspondences are fed into Perspective-n-Point (PnP) ~\cite{gao2003complete} for pose estimation. APR methods \cite{kendall2015posenet, wang2019atloc, chen2021direct, shavit2021learning} employ neural networks to infer camera poses from query images directly. While APR approaches offer fast inference times, they often struggle with accuracy and generalization \cite{sattler2019understanding,10610903}. SCR methods generally achieve higher accuracy but at the cost of increased computational complexity.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{images/method.pdf}
+  \caption{Overview of \sysname. We assume the availability of a pre-trained pose estimator $\mathcal{F}$ and a pre-trained 3DGS model $\mathcal{H}$ of the scene. For a query image $I_q$, we first obtain an initial estimated pose $\hat{p}$ from the pose estimator $\mathcal{F}$. Our goal is to output a refined pose $\hat{p'}$. }
+\label{fig:framework}
+\end{figure}
+
+Given the above limitations, there has been a growing interest in pose refinement methods to enhance the accuracy of the \textit{initial} pose estimates of an underlying pose-estimation method. Recent approaches have leveraged Neural Radiance Fields (NeRF) for this purpose. For instance, NeFeS~\cite{chen2024neural} proposes a test-time refinement pipeline. However, it offers limited improvements in accuracy and suffers from slow convergence due to the computational demands of NeRF rendering and the requirement for backpropagation through the pose estimation model. Furthermore, a recent NeRF-based localization method - CrossFire~\cite{moreau2023crossfire} - establishes explicit 2D-3D matches using features rendered from NeRF. However, training a customized scene model together with the scene-specific localization descriptor is required, and it exhibits a lower accuracy compared to classic structure-based methods.
+
+To address the challenges of slow convergence, limited accuracy, and the need for training customized feature descriptors, we propose a novel test-time pose refinement framework, termed \sysname, as illustrated in Figure~\ref{fig:teaser}
+ and Figure~\ref{fig:framework}. \sysname employs 3D Gaussian Splatting (3DGS) \cite{kerbl20233d} for scene representation and leverages its high-quality, fast novel view synthesis (NVS) capabilities to render images and depth maps. This facilitates the efficient establishment of 2D-3D correspondences between the query image and the rendered image, based on the initial pose estimate from the underlying pose estimator (e.g., APR, SCR). We incorporate an exposure-adaptive module into the 3DGS model to improve its robustness to the domain shift between the query image and the rendered image. Secondly, our method operates directly on RGB images, utilizing the 3D vision foundation model MASt3R~\cite{leroy2024grounding} for precise matching, eliminating the need for training scene-specific feature extractors or descriptors~\cite{chen2024neural, moreau2023crossfire}. This significantly accelerates our method compared to iterative NeRF-based refinement methods~\cite{chen2024neural}, and makes our framework easier to deploy than CrossFire~\cite{moreau2023crossfire} and it's variants~\cite{zhou2024nerfect,liu2023nerf,zhao2024pnerfloc}.
+
+Lastly, we conduct comprehensive quantitative evaluations and ablation studies on the 7Scenes~\cite{glocker2013real,shotton2013scene}, 12Scenes~\cite{valentin2016learning}, and Cambridge Landmarks~\cite{kendall2015posenet} benchmarks. \sysname significantly enhances the pose estimation accuracy of both APR and SCR methods across these benchmarks, achieving new state-of-the-art accuracy on the two indoor datasets. Unlike previous NeRF-based methods~\cite{chen2024neural}, which fail to improve SCR methods, such as ACE~\cite{brachmann2023accelerated}, our method offers substantial improvements and outperforms other leading NeRF-based methods~\cite{germain2022feature, moreau2023crossfire, zhou2024nerfect, liu2023nerf,zhao2024pnerfloc}.
+
+
+\section{Related Work}
+
+\label{sec:rela}
+\textbf{Pose Estimation without 3D Representation.}
+A straightforward approach for coarse pose estimation is using image retrieval~\cite{arandjelovic2016netvlad, ge2020self, GARL17} to average poses from top-retrieved images, but this lacks precision. Absolute Pose Regression (APR) methods~\cite{kendall2015posenet,kendall2016modelling, kendall2017geometric, wang2019atloc, chen2021direct, chen2022dfnet, shavit2021learning, chen2024map, lin2024learning} directly regress a pose from a query image using trained models, bypassing 3D representations and geometric relationships. Despite being fast, APR methods suffer in accuracy and generalization~\cite{sattler2019understanding, 10610903} compared to structure-based techniques. LENS~\cite{moreau2022lens} enhances APR by augmenting views with NeRF, but matching the accuracy of 3D structure-based methods remains challenging. 
+To improve APR methods' accuracy, we used 3DGS as a 3D representation and utilized its geometry information to optimize the initial prediction.
+
+\textbf{Structure-based Pose Estimation.} 
+Classical 3D structure-based methods, like the hierarchical localization pipeline (HLoc)~\cite{dusmanu2019d2, sarlin2019coarse, taira2018inloc, noh2017large, sattler2016efficient, sarlin2020superglue, lindenberger2023lightglue}, predict camera poses using a point cloud and a database of reference images, requiring descriptor storage and 2D-3D correspondence through image retrieval. In contrast, Scene Coordinate Regression (SCR) methods~\cite{brachmann2017dsac, brachmann2023accelerated, wang2024glace, brachmann2021visual} directly regress 2D-3D correspondences using neural networks and apply PnP~\cite{gao2003complete} and RANSAC~\cite{fischler1981random} for pose estimation. Our \sysname eliminates the need for reference images and descriptor databases by using a 3DGS model for scene representation, further optimizing SCR outputs like ACE~\cite{brachmann2023accelerated}.
+
+ 
+
+\textbf{NeRF-based Pose Estimation.} 
+NeRF-based pose estimation methods~\cite{chen2024neural, yen2021inerf,lin2023parallel} rely on iterative rendering and pose updates, leading to slow convergence and limited accuracy. While NeFeS~\cite{chen2024neural} improves APR pose estimation, it faces difficulties in enhancing SCR results and suffers from long refinement runtime. HR-APR~\cite{10610903} speeds up optimization by 30\%, but the average runtime of each query still takes several seconds on a high-performance GPU. Other NeRF-based methods like FQN~\cite{germain2022feature}, CrossFire~\cite{moreau2023crossfire}, NeRFLoc~\cite{liu2023nerf}, and NeRFMatch~\cite{zhou2024nerfect} improve positioning by establishing 2D-3D matches but require specialized feature extractors and suffer from slow rendering and quality issues.
+
+\textbf{3DGS-based Pose Estimation.} 
+With the novel view synthesis (NVS) field transitioning from NeRF to 3DGS, iComMa~\cite{sun2023icomma}, like iNeRF~\cite{yen2021inerf}, uses an inefficient iterative refinement process for camera pose estimation by inverting 3DGS. In contrast, 6DGS~\cite{bortolon20246dgs} achieves a one-shot estimate by projecting rays from an ellipsoid surface, avoiding iteration. While both methods use 3DGS for visual localization, neither has been tested on large benchmarks~\cite{kendall2015posenet, valentin2016learning} or compared with mainstream methods like SCR and APR. We propose an approach using 3DGS for 2D-3D correspondences, similar to CrossFire~\cite{moreau2023crossfire}, but without requiring training feature extractors or feature matchers. Our method generates high-quality synthetic images and employs direct 2D-2D matching, making it faster and easier to deploy than previous NeRF-based methods such as NeFeS, CrossFire, and other variants~\cite{germain2022feature,zhou2024nerfect,liu2023nerf,10610903, zhao2024pnerfloc}.
+
+
+
+\section{Proposed Method}
+
+\label{sec:method}
+\sysname is a test-time camera pose refinement framework. We assume the availability of a pre-trained pose estimator and a 3DGS model of the scene. For a query image, we first obtain an initial estimated pose from the pose estimator. Our goal is to output a refined pose. 
+
+Given a query image $I_q \in \mathbb{R}^{H \times W \times 3}$ with camera intrinsics $K \in \mathbb{R}^{3 \times 3}$, a pose estimator $\mathcal{F}$ (typically an APR or SCR model) predicts an \textit{initial} 6-DoF pose $\hat{p} = [\mathbf{\hat{t}}|\mathbf{\hat{R}}]$, where $\mathbf{\hat{t}}\in \mathbb{R}^3$ and $\mathbf{\hat{R}} \in \mathbb{R}^{3 \times 3}$ represent the estimated translation and rotation respectively. Subsequently, for the viewpoint $\hat{p}$, a pretrained 3DGS model $\mathcal{H}$ renders an image $\hat{I_r} \in \mathbb{R}^{H \times W \times 3}$ and a depth map $\hat{I_d} \in \mathbb{R}^{H \times W \times 1}$. We use an exposure-adaptive affine color transformation (ACT) module $\mathcal{E}$ during this rendering process to enhance the robustness of our model to challenging outdoor environments (see Section~\ref{subsec:act}). A matcher $\mathcal{M}$ then establishes dense 2D-2D correspondences between $I_q$ and $\hat{I_r}$. Then we can establish the 2D-3D matches based on $\hat{I_q}$ and $\hat{I_d}$ (see Section~\ref{subsec:depth}).  Finally, we obtain the refined pose $\hat{p}'$ from these 2D-3D matches (see Section~\ref{subsec:depth}). An overview of our framework is depicted in Figure~\ref{fig:framework}.
+We also explore a faster pose refinement framework without 2D-3D matches depicted in Figure~\ref{fig:framework_rel} (see Section~\ref{subsec:sysrel}).
+
+\subsection{3DGS Test-time Exposure Adaptation}
+\label{subsec:act}
+
+Existing literature~\cite{kerbl20233d,lu2024scaffold} shows that 3DGS achieves high-quality novel view renderings but assumes training and testing without significant photometric distortions. In visual relocalization, mapping and query sequences often differ in lighting due to varying times, weather, and exposure. This creates a significant appearance gap between 3DGS renderings and query images, negatively impacting 2D-2D matching performance.
+
+To address this issue, we apply an exposure-adaptive affine color transformation module $\mathcal{E}$~\cite{chen2022dfnet, chen2024neural} to 3DGS, allowing the 3DGS to adaptively render appearances during testing and accurately reflect the exposure of $I_q$. Specifically, we use a 4-layer MLP that takes the luminance histogram of the query image as input and produces a 3x3 matrix $\mathbf{Q}$ along with a 3-dimensional bias vector $\mathbf{b}$.  These outputs are then directly applied to the rendered pixels of the 3DGS as shown in Equation~\ref{eq:act}, ensuring a closer match to the exposure of the query image. 
+
+\begin{equation}
+    \hat{\mathbf{C}}(\mathbf{r})=\mathbf{Q} \hat{\mathbf{C}}_{\text {rend }}(\mathbf{r})+\mathbf{b}
+\label{eq:act}
+\end{equation}
+where $\hat{\mathbf{C}}(\mathbf{r})$ is the final per-pixel color and $\hat{\mathbf{C}}_{\text {rend}}(\mathbf{r})$ is the
+rendered per-pixel color obtained from the 3DGS model $\mathcal{H}$.
+
+
+\subsection{Pose Refinement with 2D-3D Correspondences}
+\label{subsec:depth}
+\sysname estimates the camera pose by establishing 2D-3D correspondences between the query image $I_q$ and the scene representation. This process involves the following steps:
+
+\textbf{2D-2D Matching.} 
+First, an image $\hat{I}_r$ is rendered from the initial estimated viewpoint $\hat{p}$. A Matcher $\mathcal{M}$ is then used to establish 2D-2D pixel correspondences $C_{q,r}$ between the query image $I_q$ and the rendered image $\hat{I}_r$. In our implementation, the matcher $\mathcal{M}$ is a recently released 3D vision foundation model, MASt3R~\cite{leroy2024grounding}. MASt3R demonstrates strong robustness for 2D-2D matching across images pair with the sim-to-real domain gap.
+\textbf{3D Coordinate Map Generation.} Simultaneously, we use our trained 3DGS model $\mathcal{H}$ to render a depth map $\hat{I}_d$ from the viewpoint $\hat{p}$. We modify the rasterization engine of 3DGS to render the depth map as follows:
+\begin{equation}
+\hat{I}_d = \sum_{i\in N} d_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+\end{equation}
+where $d_i$ is the z-depth of each Gaussian in the viewspace and $\alpha_i$ is the learned opacity multiplied by the projected 2D covariance of the $i^{th}$ Gaussian. In our framework, ground truth depth maps are not required for supervision during training of the 3DGS model $\mathcal{H}$. Using the rendered depth map $\hat{I}_d$, camera intrinsics $K$, and pose $\hat{p}$, we obtain the 3D coordinate map $X_r^d \in \mathbb{R}^{H\times W\times 3}$ for the rendered image $\hat{I}_r$.
+
+\textbf{Establishing 2D-3D Correspondences.} By combining the 2D-2D correspondences $C_{q,r}$ with the 3D coordinate map $X_r^d$, we establish 2D-3D correspondences between $I_q$ and the scene. For each matched pixel in $I_q$, we obtain its corresponding 3D coordinate from $X_r^d$.
+
+\textbf{Pose Refinement.} Finally, we obtain the refined pose $\hat{p}'$ by feeding these 2D-3D correspondences into a PnP \cite{gao2003complete} solver with RANSAC \cite{fischler1981random} loop. This process does not require backpropagation through the pose estimator $\mathcal{F}$ or the 3DGS model $\mathcal{H}$, ensuring efficient computation and enabling its usage with any black-box pose estimator model.
+
+Using 2D-3D correspondences, coupled with PnP + RANSAC, provides a robust pose refinement that is much faster and more accurate than methods relying solely on on rendering and comparison~\cite{yen2021inerf, lin2023parallel,sun2023icomma}. Furthermore, our method eliminates the requirement of training specialized feature descriptors that previous approaches~\cite{chen2024neural,moreau2023crossfire,chen2022dfnet,zhao2024pnerfloc} rely on for robustness.
+\subsection{Faster Alternative with Relative Post Estimation}
+\label{subsec:sysrel}
+\begin{figure}[!ht]
+  \centering
+  \includegraphics[width=0.8\textwidth]{images/method_rel.pdf}
+  \caption{Overview of \sysrel. %Given a query image $I_q$, a pose estimator $\mathcal{F}$ outputs an initial pose estimation $\hat{p}$. A histogram extractor then extracts the histogram of $I_q$. Subsequently, a 3DGS model $\mathcal{H}$ with an exposure-adaptive affine color transformation (ACT) module $\mathcal{E}$ renders an RGB image $\hat{I_r}$ and the depth map $\hat{I_d}$. We then use MASt3R~\cite{leroy2024grounding} as $\mathcal{M}$ to get relative rotation $R_{rel}$ and relative translation $t_{rel}$ between $I_q$ and $\hat{I_r}$. 
+  Different from \sysname in Figure~\ref{fig:framework}, we use $\hat{I_d}$ to recover the scale $s$ of $\mathbf{t}_\text{rel}$. Then we calculate the refined pose $\hat{p}'$ based on $\mathbf{R}_\text{rel}$ and $s\mathbf{t}_\text{rel}$ without matching.}
+\label{fig:framework_rel}
+\end{figure}
+
+While \sysname provides high accuracy through 2D-3D correspondences, we also explore an alternative approach that prioritizes computational efficiency. This variant, which we call \sysrel, utilizes MASt3R's point map registration capabilities to estimate relative pose without matching. Figure~\ref{fig:framework_rel} shows an overview of the \sysrel approach.
+
+Specifically, MASt3R generates point maps $\mathbf{P}_q$ and $\mathbf{P}_r$ for both the query image $I_q$ and the rendered image $\hat{I}_r$ and predicts the relative rotation $\mathbf{R}_\text{rel}$ and translation $\mathbf{t}_\text{rel}$ between the two images. However, this relative pose predicted by MASt3R needs to be aligned to the scene's scale $s$. We recover the scale
+by aligning the pointmap $\mathbf{P}_r$ with the depth map $\hat{I}_d$ rendered from the 3DGS model $\mathcal{H}$. The final refined pose $\hat{p}'$ is computed as:
+\begin{equation}
+    \hat{p}' = [\hat{\mathbf{R}}' | \hat{\mathbf{t}}'] = [\mathbf{R}_\text{rel}\hat{\mathbf{R}} | \hat{\mathbf{t}} + s\mathbf{R}_\text{rel}\mathbf{t}_\text{rel}]
+\end{equation}
+where $\hat{\mathbf{R}}$, $\hat{\mathbf{t}}$ are the initial rotation and translation estimates. As shown in Table~\ref{tab:rel_compare} and \ref{tab:frame_eff}, \sysrel offers a trade-off between speed and accuracy,  making it ideal for rapid refinement of APR methods like DFNet \cite{chen2022dfnet}.
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+\subsection{Evaluation Setup}
+\noindent\textbf{Datasets.}
+We evaluate the performance of \sysname across three widely-used public visual localization datasets. The 7Scenes dataset~\cite{glocker2013real,shotton2013scene} comprises seven indoor scenes with volumes ranging from $1 \text{m}^3$ to $18 \text{m}^3$. The 12Scenes dataset~\cite{valentin2016learning} features 12 larger indoor scenes, with volumes spanning from $14 \text{m}^3$ to $79 \text{m}^3$. %, significantly surpassing those in the 7Scenes dataset. 
+The Cambridge Landmarks dataset~\cite{kendall2015posenet} represents a large-scale outdoor scenario, characterized by challenges such as moving objects and varying lighting conditions between query and training images. %For this dataset, we utilize the structure-from-motion (SfM) ground truth (GT) included with the dataset.
+
+\textbf{Evaluation Metrics.}
+We report two types of metrics to compare the performance of different methods. The first metric is the median translation and rotation error. The second metric is the recall rate, which measures the percentage of test images localized within \( a \) cm and \( b^\circ \).
+\textbf{Baselines.}
+In our experiment, to demonstrate the improvement capabilities of our framework, we use the initial estimates of APR and SCR methods as our baseline.  
+We employ our method on top of the prevailing APR methods, DFNet~\cite{chen2022dfnet} and Marepo~\cite{chen2024map}, as well as a well-known SCR method, ACE~\cite{brachmann2023accelerated}, as the pose estimator $\mathcal{F}$. We follow the default settings of these pose estimators to obtain the initial pose prior for each query image\footnote{Note that the original paper of Marepo reports results on 7Scenes using dSLAM GT; we retrained the ACE head of Marepo using SfM GT.}. The term \textit{APR/SCR + $\text{\sysname}$} denotes the one-shot refinement. Similar naming convention applies to \textit{APR/SCR + \sysrel}. We also include a comparison here with the state-of-the-art NeRF-based methods~\cite{chen2024neural,moreau2023crossfire,zhou2024nerfect,10610903, germain2022feature, zhao2024pnerfloc,liu2023nerf} and MCLoc~\cite{trivigno2024unreasonable}, which is a pose refinement framework agnostic to scene representation. MCLoc provides results using 3DGS models as scene representations for 7Scenes and Cambridge datasets. 
+\textbf{Implementation Details.}
+\label{subsec:implementation}
+\ul{GT Poses}:
+For both the 7Scenes and 12Scenes datasets, we adopt the SfM ground truth (GT) provided by~\cite{brachmann2021limits}. As demonstrated in NeFeS~\cite{chen2024neural}, SfM GT can render superior geometric details compared to dSLAM GT for the 7Scenes dataset.
+\ul{Gaussian Splatting}: For the training of the 3DGS model of each scene, we utilize the sparse point cloud of training frames generated by
+COLMAP~\cite{schonberger2016structure} as the initial input. We select Scaffold-GS~\cite{lu2024scaffold} as our 3DGS representation, incorporating modifications detailed in Sections~\ref{subsec:act} and~\ref{subsec:depth} to adapt exposure and enable depth rendering. Scaffold-GS reduces redundant Gaussians while delivering high-quality rendering compared to the vanilla 3DGS~\cite{kerbl20233d}. For the exposure-adaptive ACT module, we follow the default setting in~\cite{chen2024neural}, computing the query image's histogram in the YUV color space and binning the luminance channel into 10 bins. In addition, we apply temporal object filtering to filter out moving objects in the dynamic scene using an off-the-shelf method~\cite{cheng2022masked}, leading to better accurate scene reconstruction quality and pixel-matching performance. 
+\ul{Training Details:}
+We employ the official pre-trained MASt3R~\cite{leroy2024grounding} model without fine-tuning for 2D-2D matching and resize all images to 512 pixels on their largest dimension. The modified Scaffold-GS model is trained for each scene with 30,000 iterations on an NVIDIA A6000 GPU. We implement our framework with PyTorch~\cite{paszke2019pytorch}.
+
+\begin{table}[t]
+\caption{Comparisons on 7Scenes dataset.  The median translation and rotation errors (cm/$^\circ$) of different methods. The best results are in \textbf{bold} (lower is better). Second best results are indicated with an \underline{underline}. NRP denotes neural render pose estimation.}
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{l|c|ccccccc|c}
+\toprule    & Methods& Chess  & Fire  & Heads & Office &Pumpkin  & Redkitchen& Stairs  & Avg. $\downarrow$ [$\text{cm}/^\circ$] \\
+\midrule
+ \multirow{4}{*}{APR}& PoseNet~\cite{kendall2015posenet} & 10/4.02 & 27/10.0& 18/13.0 & 17/5.97& 19/4.67& 22/5.91 & 35/10.5 &  21/7.74\\
+ & MS-Transformer~\cite{shavit2021learning}& 11/6.38 &23/11.5 &13/13.0 &18/8.14 &17/8.42&  16/8.92& 29/10.3 & 18/9.51 \\
+ & DFNet~\cite{chen2022dfnet}& 3/1.12 &6/2.30 & 4/2.29& 6/1.54
+&7/1.92 & 7/1.74 & 12/2.63 & 6/1.93 \\
+ & Marepo~\cite{chen2024map}& 1.9/0.83 &2.3/0.92 &2.1/1.24 & 2.9/0.93& 2.5/0.88
+& 2.9/0.98 & 5.9/1.48 & 2.9/1.04
+ \\
+ \midrule
+\multirow{3}{*}{SCR} & DSAC*~\cite{brachmann2021visual}& \textbf{0.5}/\underline{0.17} &0.8/\underline{0.28} & \underline{0.5}/0.34& 1.2/0.34&1.2/0.28 &  \textbf{0.7}/0.21& 2.7/0.78 & 1.1/0.34 \\
+ & ACE~\cite{brachmann2023accelerated}& \textbf{0.5}/0.18 &0.8/0.33 & \underline{0.5}/0.33& \underline{1.0}/\underline{0.29}& \underline{1.0}/\textbf{0.22} & \underline{0.8}/\underline{0.2} & 2.9/0.81 & 1.1/0.34 \\
+ & GLACE~\cite{wang2024glace}& \underline{0.6}/0.18 & 0.9/0.34& 0.6/0.34& 1.1/\underline{0.29} &\textbf{0.9}/\underline{0.23} &\underline{0.8}/\underline{0.20}  & 3.2/0.93 &  1.2/0.36\\
+ \midrule
+\multirow{10}{*}{NRP}  &FQN-MN~\cite{germain2022feature} & 4.1/1.31 & 10.5/2.97 & 9.2/2.45 & 3.6/2.36 & 4.6/1.76& 16.1/4.42 & 139.5/34.67 & 28/7.3\\
+&CrossFire~\cite{moreau2023crossfire} & 1/0.4 &5/1.9 &3/2.3 & 5/1.6 & 3/0.8& 2/0.8 &12/1.9  &4.4/1.38\\
+& pNeRFLoc~\cite{zhao2024pnerfloc} & 2/0.8 & 2/0.88 & 1/0.83 & 3/1.05 & 6/1.51 & 5/1.54 & 32/5.73 & 7.3/1.76\\
+&DFNet + NeFeS$_{50}$~\cite{chen2024neural} &2/0.57&2/0.74 &2/1.28 &2/0.56 &2/0.55 & 2/0.57 &5/1.28 & 2.4/0.79  \\
+& HR-APR~\cite{10610903} & 2/0.55 &2/0.75 &2/1.45 & 2/0.64& 2/0.62&2/0.67  & 5/1.30 & 2.4/0.85 \\
+& NeRFMatch~\cite{zhou2024nerfect} & 0.9/0.3& 1.1/0.4& 1.5/1.0 &3.0/0.8 &2.2/0.6 &1.0/0.3 &10.1/1.7& 2.8/0.7 \\
+&MCLoc~\cite{trivigno2024unreasonable}  &2/0.8 &3/1.4 &3/1.3& 4/1.3& 5/1.6& 6/1.6& 6/2.0 & 4.1/1.43\\
+& DFNet + \textbf{\sysname(ours) } & 0.7/0.20 & 0.9/0.32& 0.6/0.36 & 1.2/0.32 & 1.3/0.31  & 0.9/0.25 & 2.2/0.61 & 1.1/0.34\\
+
+& Marepo + \textbf{\sysname (ours)} & \underline{0.6}/0.18 & \underline{0.7}/\underline{0.28} & \underline{0.5}/\underline{0.32} & 1.1/\underline{0.29}& \underline{1.0}/0.26& \underline{0.8}/0.21 & \underline{1.5}/\underline{0.44} & \underline{0.9/0.28}\\
+
+& ACE + \textbf{\sysname (ours) }& \textbf{0.5}/\textbf{0.15} & \textbf{0.6}/\textbf{0.25}& \textbf{0.4}/\textbf{0.28}& \textbf{0.9}/\textbf{0.26}& \underline{1.0}/\underline{0.23}& \textbf{0.7}/\textbf{0.17} & \textbf{1.4}/\textbf{0.42} & \textbf{0.8/0.25} \\
+
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:acc_7s}
+\end{table}
+
+\begin{table}[t]
+\caption{We report the average percentage (\%) of frames below a ($5\text{cm},5^\circ$) and ($2\text{cm},2^\circ$) pose error across 7Scenes. IR denotes image retrieval.} 
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{0.9\columnwidth}{!}{
+\begin{tabular}{l|c|c|c}
+\toprule    & Methods & Avg. $\uparrow$ [$5\text{cm},5^\circ$] &  Avg. $\uparrow$ [$2\text{cm},2^\circ$]\\
+\midrule
+\multirow{2}{*}{APR} & DFNet& 43.1 & 8.4\\
+ & Marepo& 84.0 & 33.7\\\midrule
+\multirow{2}{*}{IR+SfM points} & HLoc~\cite{sarlin2020superglue,sarlin2019coarse}&95.7& 84.5\\
+& DVLAD+R2D2~\cite{torii201524,revaud2019r2d2}&95.7&87.2\\
+\midrule
+ \multirow{3}{*}{SCR} & DSAC*& 97.8& 80.7\\
+ & ACE& 97.1& 83.3\\
+ & GLACE& 95.6& 82.2\\
+ \midrule
+\multirow{7}{*}{NRP}   
+&DFNet + NeFeS$_{50}$ & 78.3&45.9\\
+& HR-APR& 76.4& 40.2\\
+& NeRFMatch& 78.4& -\\
+& NeRFLoc~\cite{liu2023nerf}& 89.5& -\\
+& DFNet + \textbf{\sysname (ours) } & 94.2 & 76.5\\
+& Marepo + \textbf{\sysname (ours) } & \underline{99.4} & 
+\underline{89.6}\\
+& ACE + \textbf{\sysname (ours) }&  \textbf{100}& \textbf{93.1}\\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:recall_7s}
+\end{table}
+
+\subsection{Localization Accuracy}
+We conduct quantitative experiments on three datasets to evaluate the improved localization accuracy of our framework compared to the APR and SCR methods.
+\label{subsec:results}
+
+
+
+\textbf{7Scenes Dataset.} Using the 7Scenes dataset, we evaluate the performance of DFNet, Marepo, and ACE with \sysname. Table~\ref{tab:acc_7s} demonstrates that \sysname significantly reduces pose estimation errors for DFNet, Marepo, and ACE with one-shot refinement.  Table~\ref{tab:recall_7s} shows that \sysname significantly improves the proportion of query images below $5\text{cm}$, $5^\circ$ and $2\text{cm}$, $2^\circ$ pose error. It is worth noting that ACE + \sysname outperforms HLoc, indicating that 3DGS has the potential to replace traditional point cloud-based visual localization pipelines. Figure~\ref{fig:dia} (a) shows that after refinement using our \sysname, the rendered image of the estimated pose better matches the real image. 
+
+\textbf{Cambridge Landmarks Dataset.}
+We conduct a quantitative evaluation by deploying DFNet and ACE with \sysname. Marepo is not included in this comparison due to the absence of an official model for this dataset. Table~\ref{tab:acc_cam} demonstrates that \sysname significantly reduces pose estimation errors for both DFNet and ACE. %We present the median translation and rotation errors for Cambridge Landmarks dataset in Table~\ref{tab:acc_cam}.  %Specifically, DFNet + \sysname decreases the average median translation error by $76.5\%$ and the average median rotation error by $82.4\%$ across the Cambridge Landmarks dataset. ACE + \sysname decreases the average median translation error by $19\%$ and the average median rotation error by $29.7\%$ across the Cambridge Landmarks dataset.
+Specifically, the accuracy of DFNet + \sysname with one-shot optimization significantly surpasses that of CrossFire and DFNet + NeFeS with 30 and even 50 steps of optimization (see Table~\ref{tab:acc_cam}). This result fully demonstrates the efficiency of our \sysname. On the Kings College scene, DFNet + \sysname outperforms ACE after our refinement. ACE + \sysname consistently improves ACE accuracy across all four scenes. Refining the pose using our method results in a rendered image that aligns more accurately with the ground truth image as illustrated in Figure~\ref{fig:dia} (c).
+
+\textbf{12Scenes Dataset.} We conduct the quatitative evaluation using Marepo and ACE with \sysname. The former works~\cite{brachmann2023accelerated,wang2024glace} report the percentage of frames below a $5 \text{cm}, 5^\circ$ pose error. Since SCR methods have already achieved good results with this metric, in this paper we use a more stringent standard ($2 \text{cm}, 2^\circ$).  Table~\ref{tab:recall_12s} shows that \sysname significantly improves the percentage of query images below $2\text{cm},2^\circ$ pose error for Marepo and ACE. Even though the initial pose prior provided by ACE is accurate in most scenes, our approach can still improve accuracy in challenging scenes, such as office1/lounge, office2/5a and office2/5b. Figure~\ref{fig:dia} (b) shows that after refinement using our \sysname, the rendered image with our pose estimation aligns better with the real image.
+\begin{table}[t]
+\centering
+\caption{Comparisons on Cambridge Landmarks dataset.  We report the median translation and rotation errors (cm/$^\circ$) of different methods. Best results are in \textbf{bold} (lower is better) among the NRP-based approaches.}
+\setlength{\tabcolsep}{1pt} %
+\begin{threeparttable}
+\resizebox{0.8\columnwidth}{!}{
+\begin{tabular}{l|c|cccc|c}
+\toprule
+ &Methods & Kings  & Hospital  & Shop & Church  &Avg. $\downarrow$ [$\text{cm}/^\circ$]   \\\midrule
+ \multirow{5}{*}{APR}&PoseNet & 93/2.73 & 224/7.88 & 147/6.62 & 237/5.94 & 175/5.79 \\
+&MS-Transformer  & 85/1.45 &175/2.43& 88/3.20 & 166/4.12 & 129/2.80 \\
+&LENS~\cite{moreau2022lens} & 33/0.5 &44/0.9& 27/1.6 & 53/1.6 & 39/1.15 \\
+&DFNet & 73/2.37 & 200/2.98 & 67/2.21 & 137/4.02 & 119/2.90 \\
+& PMNet~\cite{lin2024learning}  & 68/1.97 & 103/1.31 &58/2.10 & 133/3.73 & 90/2.27\\
+\midrule
+\multirow{2}{*}{SCR}& ACE & 29/0.38 & 31/0.61 & 5/0.3 & 19/0.6 & 21/0.47 \\
+&GLACE & 19/0.32 & 18/0.42 & 5/0.22 & 9/0.3 & 13/0.32\\
+\midrule
+\multirow{7}{*}{NRP}  &FQN-MN & 28/0.4& 54/0.8 & 13/0.6 & 58/2 & 38/1 \\
+&CrossFire& 47/0.7& 43/0.7 & 20/1.2 & 39/1.4 & 37/1 \\
+&DFNet + NeFeS$_{30}$\tnote{1}& 37/0.64& 98/1.61 & 17/0.60 & 42/1.38 & 49/1.06 \\
+&DFNet + NeFeS$_{50}$& 37/0.54&52/0.88 &15/0.53& 37/1.14& 35/0.77 \\
+&HR-APR & 36/0.58&53/0.89 & 13/0.51 & 38/1.16 & 35/0.78\\
+&MCLoc &31/0.42& 39/0.73& 12/0.45& 26/0.8& 27/0.6\\
+&DFNet + \textbf{\sysname(ours)}&26/0.34&48/0.72&10/0.36&27/0.62& 
+28/0.51\\
+&ACE + \textbf{\sysname(ours)}&\textbf{25/0.29}&\textbf{26/0.38}&\textbf{5/0.23}&\textbf{13/0.41}& \textbf{17/0.33}\\
+\bottomrule %+ NeFeS$^{hs30}_{ls50}$
+\end{tabular}
+}
+\begin{tablenotes}
+\footnotesize
+\item[1] Results of DFNet + NeFeS$_{30}$ taken from \cite{10610903}.
+\end{tablenotes}
+\end{threeparttable}
+
+\label{tab:acc_cam}
+\end{table}
+\begin{table}[t]
+\caption{The average percentage (\%) of frames below a $2\text{cm}, 2^\circ$ pose error across 12Scenes.} 
+\centering
+\newcolumntype{d}{D{.}{.}{2}}
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{c cc cccc cccc cc c}
+\toprule
+Scene&\multicolumn{2}{c}{apt1}& \multicolumn{4}{c}{apt2} & \multicolumn{4}{c}{office1}&\multicolumn{2}{c}{office2} & Avg. $\uparrow$ \\
+\cmidrule(r){1-1}
+\cmidrule(r){2-3}
+\cmidrule(r){4-7}
+\cmidrule(r){8-11}
+\cmidrule(r){12-13}
+Methods& kitchen  & living  & bed & kitchen &living  & luke& gates362 & gates381 & lounge&manolis&5a&5b  & [$2\text{cm},2^\circ$]\\
+\midrule
+Marepo & 52.9 & 63.1 & 50.4 & 47.4& 57.1 & 41.2 &61.7 & 39.8& 57.8&55.1 &50.1 & 28.6 & 50.4\\
+DSAC* &  \textbf{99.7}& 98.2 & \textbf{100} & \textbf{99.6}& 95.3 & 95.5 &99.7 &95 & 89.9&91.3 & 94& 95.1 & 96.7 \\
+ACE & 99.4 & 99.8 & 97.1 & \textbf{99.6}& 99.2 & 98.4  & 99.5&96.7 &93.3 & 96.7&93.8 & 93.1 & 97.2\\
+GLACE & 99.4 & 99.6 & \textbf{100} & \textbf{99.6}& \textbf{100} & 96.2 & 99.7 &96.9 &97.6 &\textbf{97.6} &91.1 & 92.6 & 97.5 \\
+ 
+  Marepo + \textbf{\sysname (ours) }& 90.2 & 99.4 & 98.4 & \textbf{99.6} &93.6 &71.6 & 88.3& 92.7& 95.4 & 93.6& 88.1& 79.8& 90.9\\
+
+ACE + \textbf{\sysname (ours) }& \textbf{99.7} & \textbf{100} &  99.6&\textbf{99.6} & 99.2 & \textbf{98.9} & \textbf{100}& \textbf{99.5}& \textbf{98.5}& \textbf{97.6}& \textbf{96.4}& \textbf{95.8}& \textbf{98.7}\\
+ 
+\midrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:recall_12s}
+\end{table}
+
+\noindent\textbf{\sysname vs. \sysrel.} We compare \sysname, a pose refinement framework that use 2D-3D correspondence, with \sysrel, a faster pose refinement framework that use relative pose from MASt3R.
+Both frameworks are evaluated on 7Scenes and Cambridge Landmarks datasets using DFNet and ACE predictions. Table~\ref{tab:rel_compare} shows that \sysrel achieves notable accuracy improvement with DFNet on both indoor and outdoor datasets, though it is less effective than \sysname. However, \sysrel is significantly faster than \sysname and other NeRF-based methods, as discussed in Section~\ref{subsec:runtime}.  While \sysrel improves coarse pose estimates from APR methods like DFNet, it struggles with accurate pose estimates from SCR methods. 
+For ACE, \sysrel results in performance degradation because our pose refinement relies on the relative pose estimator MASt3R, which struggles to provide more accurate relative pose estimates when the ACE-predicted pose is already sufficiently close to the GT pose.
+Higher median rotation and translation errors in Table~\ref{tab:rel_compare} compared to \sysname indicate that scale recovery is not the only challenge for \sysrel, as rotation is scale-independent. %These results highlight the necessity of \sysname’s design, which employs MASt3R for obtaining 2D-3D matches.
+
+\begin{figure*}[!ht]
+  \centering
+  \includegraphics[width=\textwidth]{images/dia_all_patches.jpg}
+  \caption{Our \sysname enhances pose predictions for Marepo, DFNet, and ACE. Each subfigure is divided by a diagonal line, with the \textbf{bottom left} part rendered using the estimated/refined pose and the \textbf{top right} part displaying the ground truth image. Patches highlighting visual differences are emphasized with \textcolor{green}{green} insets for enhanced visibility. 
+}
+\label{fig:dia}
+\end{figure*}
+\begin{table}[t]
+\caption{Results of \sysrel in Figure~\ref{fig:framework_rel} and \sysname in Figure~\ref{fig:framework}. We report the average accuracy (\%), the percentage of frames meeting a $5\text{cm}, 5^\circ$ pose error threshold, and the median translation and rotation errors (cm/$^\circ$).} 
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{c c c c}
+\toprule     
+Datasets & \multicolumn{2}{c}{7Scenes} & Cambridge\\
+\cmidrule(r){1-1} \cmidrule(r){2-3} \cmidrule(r){4-4}
+Methods & Avg Acc $\uparrow$ [$5\text{cm},5^\circ$] & Avg Err $\downarrow$ [$\text{cm}/^\circ$] & Avg Err $\downarrow$ [$\text{cm}/^\circ$] \\\cmidrule(r){1-1} \cmidrule(r){2-2} \cmidrule(r){3-3} \cmidrule(r){4-4}
+ DFNet& 43.1&  6/1.93 & 119/2.9 \\
+ DFNet + \textbf{\sysrel (ours)} & 80.5& 2.7/0.38 & 55/0.57\\
+ DFNet + \textbf{\sysname (ours) } & \textbf{94.2} &  \textbf{1.1/0.34} & \textbf{28/0.51}\\\cmidrule(r){1-1} \cmidrule(r){2-2} \cmidrule(r){3-3} \cmidrule(r){4-4}
+ ACE& 97.1 &  1.1/0.34 & 21/0.47\\
+ ACE + \textbf{\sysrel (ours)} & 79.9& 2.8/0.43 & 47/0.54\\
+  ACE + \textbf{\sysname (ours) } & \textbf{100} &  \textbf{0.8/0.25} & \textbf{17/0.33}\\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:rel_compare}
+\end{table}
+
+\subsection{Runtime Analysis}
+\label{subsec:runtime}
+We evaluate the processing time of the proposed framework using an NVIDIA GeForce GTX 4090 GPU. On average, 3DGS rendering takes 3.7 ms on 7Scenes dataset and 12 ms on Cambridge Landmarks dataset (due to higher scene complexity and image resolution). 
+MASt3R relative pose estimation takes 71 ms. 
+MASt3R 2D-2D matching takes additional 42 ms, and PnP+RANSAC takes another 52 ms. 
+As a result, our \sysrel only adds 71 ms to the inference time of the pose estimator $\mathcal{F}$ and our \sysname adds less than 180 ms overhead. 
+All time measurements are averaged over 1,000 runs.
+We compare the runtime and accuracy with other methods in Table~\ref{tab:frame_eff}. On the Cambridge Landmarks dataset, MCLoc requires an average of 2.4s per query with 80 iterations~\cite{trivigno2024unreasonable}. In contrast, our ACE + \sysname with one-shot optimization only takes 0.18s per query. Therefore, in terms of efficiency and improvement, our GSLoc is better than MCLoc when using 3DGS as scene representation.
+Although \sysrel is less accurate than \sysname, it is more efficient. \sysrel provides a feasible solution to APR pose refinement when time budget is important. 
+\iffalse
+\begin{table}[t]
+\caption{Runtime Analysis (test on Cambridge Landmarks).} 
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{0.5\columnwidth}{!}{
+\begin{tabular}{c c c}
+\toprule   Methods & Avg. $\downarrow$ [$\text{cm}/^\circ$] & Avg. $\downarrow$ time (s)\\
+\midrule
+CrossFire& 37/1.0 & 0.3\\
+DFNet + NeFeS$_{50}$& 35/0.8 & 10\\
+HR-APR & 35/0.8 & 8.5\\
+MCLoc & \underline{27}/0.6 & 2.4 \\
+DFNet + \textbf{\sysrel(ours)} & 55/0.6 & \textbf{0.07}\\
+DFNet +\textbf{\sysname(ours)} & 28/\underline{0.5} & \underline{0.18}\\
+ACE +\textbf{\sysname(ours)} & \textbf{17/0.3} & \underline{0.18}\\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:frame_eff}
+\end{table}
+\fi
+\begin{table}[t]
+\caption{Runtime Analysis (test on Cambridge Landmarks).} 
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{c| c c c c c c c}
+\toprule
+Methods & CrossFire & DFNet + NeFeS$_{50}$ & HR-APR & MCLoc & DFNet + \textbf{\sysrel(ours)} & DFNet + \textbf{\sysname(ours)} & ACE + \textbf{\sysname(ours)} \\
+\midrule
+Avg. $\downarrow$ [$\text{cm}/^\circ$] & 37/1.0 & 35/0.8 & 35/0.8 & \underline{27}/0.6 & 55/0.6 & 28/\underline{0.5} & \textbf{17/0.3} \\
+Avg. $\downarrow$ time (s) & 0.3 & 10 & 8.5 & 2.4 & \textbf{0.07} & \underline{0.18} & \underline{0.18} \\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:frame_eff}
+\end{table}
+
+\subsection{Ablation study}
+\label{subsec:ablation}
+In this section, we first demonstrate the rationale behind selecting MASt3R as the matcher $\mathcal{M}$ in \sysname. Subsequently, we show that ACT effectively reduces the domain gap between the query image and the rendered image, thereby enhancing the refinement accuracy. 
+
+\textbf{Different Matchers.} We compare three matching methods: LoFTR~\cite{sun2021loftr}, DUSt3R, and MASt3R -- within \sysname on the 7Scenes dataset. For DUSt3R and MASt3R, we resize all images to 512 pixels on their largest dimension. For LoFTR, we use the pre-trained model for indoor scenes and maintain the frames in the 7Scenes dataset at $640 \times 480$. As shown in Table~\ref{tab:ablation_matchers}, Marepo + \sysname and ACE + \sysname using MASt3R as $\mathcal{M}$ achieve the highest improvement. Conversely, ACE + \sysname using DUSt3R does not yield any improvement. Marepo + \sysname using DUSt3R and Marepo/ACE + \sysname using LoFTR shows lower improvement compared to MASt3R. These results validate our design choice of using MASt3R as the matcher $\mathcal{M}$.
+\begin{table}[t]
+\caption{Results of different matchers (LoFTR, DUSt3R, and MASt3R) on the 7Scenes dataset. \sysname$^{\text{L}}$ denotes using LoFTR as the matcher $\mathcal{M}$, \sysname$^{\text{D}}$ denotes using DUSt3R as $\mathcal{M}$, and \sysname$^{\text{M}}$ denotes using MASt3R as $\mathcal{M}$. The table presents median translation and rotation errors (cm/$^\circ$) of the different methods.}
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{threeparttable}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{c |c c c c |c c c c}
+\toprule
+Methods & Marepo &  + \sysname$^{\text{L}}$ &  + \sysname$^{\text{D}}$ &  + \sysname$^{\text{M}}$ & ACE &  + \sysname$^{\text{L}}$ &  + \sysname$^{\text{D}}$ &  + \sysname$^{\text{M}}$ \\
+\midrule
+Avg. $\downarrow$ [cm/$^\circ$] & 2.9/1.04 & 1.5/0.40 &  2.1/0.7 & \textbf{0.9/0.28} & 1.1/0.34 & 1.0/0.31 & 1.5/0.6 & \textbf{0.8/0.25} \\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:ablation_matchers}
+\end{table}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{images/ablation_act.png}
+  \caption{Benefit of the ACT module. A regular 3DGS model tends to render images based on the lighting conditions and the appearance of its training frames, as demonstrated by the synthetic view of Scaffold-GS in (b). However, in challenging visual localization datasets, such as ShopFacade in the Cambridge Landmarks, some query frames may have different exposures compared to the training frames. (c) Our proposed Scaffold-GS + ACT can adaptively adjust the exposure based on the query's histogram.}
+\label{fig:ablation_act}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Ablation study for ACT module on Cambridge Landmarks dataset.  We report the median translation and rotation errors (cm/$^\circ$).}
+\setlength{\tabcolsep}{1pt} %
+\begin{threeparttable}
+\resizebox{0.7\columnwidth}{!}{
+\begin{tabular}{c|cccc|c}
+\toprule
+ Methods & Kings  & Hospital  & Shop  & Church  &Avg. $\downarrow$ [cm/$^\circ$]\\\midrule
+ DFNet + \sysname(w/o. ACT) &34/0.46&55/0.84&12/\textbf{0.34}&34/0.72&34/0.59\\
+DFNet + \sysname(w. ACT) &\textbf{26}/\textbf{0.34}&\textbf{48}/\textbf{0.72}&\textbf{10}/0.36&\textbf{27}/\textbf{0.62}&\textbf{28}/\textbf{0.51}\\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\label{tab:ablation_act}
+\end{table}
+
+\textbf{Affine Color Transformation.}
+To enhance the robustness of the 3DGS model in image rendering and to reduce the domain gap between the rendered image and the query image, we incorporated an ACT module into the Scaffold-GS model, as described in Section~\ref{subsec:act}. Figure~\ref{fig:ablation_act} illustrates the improvement in image rendering quality with the ACT module applied. The performance enhancement on \sysname from ACT module is demonstrated in Table~\ref{tab:ablation_act}. On Cambridge Landmarks dataset, employing the ACT module in DFNet + \sysname setup reduces average median translation and rotation error by 17.6\% and by 13.6\%, respectively.
+
+\subsection{Discussion}
+In this section, we provides additional insights and discussion of our design choices.
+
+\textbf{Replace Feature Descriptors.}
+Given that 3DGS can render high-quality synthetic images $\hat{I_r}$ in real-time, we show that using a pre-trained 3D fundation model, MASt3R, can directly establish accurate 2D-2D correspondences $C_{q,r}$ between $I_q$ and $\hat{I_r}$ with sim-to-real domain gap. As demonstrated in Section~\ref{subsec:results}, \sysname achieves significantly higher accuracy than NeRF-based refinement pipelines that rely on feature rendering. Direct RGB matching makes our framework more compact, reduces runtime, eliminates the need for training additional neural radiance features, and simplifies both deployment and usage.  
+
+\textbf{Efficient and Effective Pose Refinement.} 
+As a pose estimator, DFNet provides less accurate predictions than Marepo and ACE, but NeFeS reports the best results over DFNet.
+To ensure a fair comparison with NeFeS, we present examples in Figure~\ref{fig:nefes_vs_gsloc} illustrating that our \sysname outperforms NeFeS in both efficiency and effectiveness. With only one-shot optimization, our \sysname achieves higher accuracy than NeFeS with 50 optimization iterations when combined with DFNet on both the indoor 7Scenes and outdoor Cambridge Landmarks datasets. This superior performance is due to our method's leverage of 3D geometry (depth rendering) of the representation, unlike previous NeRF-based refinement methods~\cite{chen2024neural,yen2021inerf} that use only 2D feature/photometric information in an iterative process, rendering candidate poses and comparing them with the target image.
+\begin{figure}[!ht]
+  \centering
+  \includegraphics[width=\textwidth]{images/nefes_vs_gsloc.png}  \caption{A comparison between DFNet + \sysname and DFNet + NeFeS$_{50}$.}
+\label{fig:nefes_vs_gsloc}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+\label{sec:con}
+We present \sysname, a novel test-time camera pose refinement framework leveraging 3DGS for scene representation to improve the localization accuracy of state-of-the-art APR and SCR methods.
+\sysname enables one-shot pose refinement using only a single RGB query and a coarse initial pose estimate from APR and SCR methods. Our approach outperforms existing NeRF-based optimization methods in both accuracy and runtime across various indoor and outdoor visual localization benchmarks, achieving new state-of-the-art accuracy on two indoor datasets. These results demonstrate the effectiveness and efficiency of our proposed framework. %\zirui{can be shortten if needed}
+
+
+
+
+
+
+

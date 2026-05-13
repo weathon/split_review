@@ -1,0 +1,618 @@
+\title{Dreamguider: Improved Training free Diffusion-based Conditional Generation}
+
+\begin{abstract}
+
+Diffusion models have emerged as a formidable tool for training-free conditional generation.
+However, a key hurdle in inference-time guidance techniques is the need for compute-heavy backpropagation through the diffusion network for estimating the guidance direction. Moreover, these techniques often require handcrafted parameter tuning on a case-by-case basis.
+Although some recent works have introduced minimal compute methods for linear inverse problems, a generic lightweight guidance solution to both linear and non-linear guidance problems is still missing. To this end, we propose Dreamguider, a method that enables inference-time guidance without compute-heavy backpropagation through the diffusion network. The key idea is to regulate the gradient flow through a time-varying factor. Moreover, we propose an empirical guidance scale that works for a wide variety of tasks, hence removing the need for handcrafted parameter tuning. We further introduce an effective lightweight augmentation strategy that significantly boosts the performance during inference-time guidance. We present experiments using Dreamguider on multiple  tasks across multiple datasets and models to show the effectiveness of the proposed modules. To facilitate further research, we will make the code public after the review process.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+\indent
+Generative modeling utilizing Denoising Diffusion Probabilistic Models (DDPMs) \cite{sohl2015deep,ho2020denoising, dhariwal2021diffusion,song2021scorebased} has massively improved
+over the past few years. Multiple works have extended the use of diffusion models for text-to-image synthesis \cite{balaji2022ediffi,rombach2021highresolution, saharia2022image}, 3D synthesis~\cite{poole2022dreamfusion,jun2023shap}, video generation~\cite{ho2022imagen,blattmann2023align, wu2023tune}, as well as for conditioning to solve inverse problems. Moreover, like conditional generative adversarial networks (GANs)\cite{goodfellow2020generative,arjovsky2017wasserstein}, DDPMs can be adapted to tasks based on a labels \cite{rombach2021highresolution,dhariwal2021diffusion} or visual prior-based conditioning~\cite{saharia2022palette}. However, like conditional GANs~\cite{wang2018high,radford2015unsupervised}, DDPMs also need to be trained with annotated pairs of labels and instructions to obtain satisfactory results. This poses a limitation in many cases where there is a lack of paired data to train large diffusion models. Due to this reason, there has been recent interest in models that can perform conditional generation without the need for explicit training~\cite{yu2023freedom,chan2016plug,nguyen2017plug,graikos2022diffusion}.
+Progressing towards this direction is prior research in plug-and-play models. First introduced in \cite{nguyen2017plug}, the initial research on plug-and-play models~\cite{nguyen2017plug,graikos2022diffusion} enabled conditional sampling from GANs trained with unlabeled data. For this, a pre-trained classifier~\cite{simonyan2014very, hossain2019comprehensive} or a captioning model was used to estimate the deviation between the GAN-generated image and a given label, and based on this deviation, the GAN input noise was modulated until the generated sample satisfied the given text or class label. A similar approach that has been attempted for diffusion models to facilitate conditional sampling from unconditional diffusion models is classifier guidance~\cite{dhariwal2021diffusion, graikos2022diffusion}, where a noise-robust classifier is trained along with the diffusion model to guide the sampling towards a particular direction. However, classifier guidance brings in the computational costs of training a classifier, which is often undesirable. Some recent works have performed conditional generation without explicit training for the condition by utilizing the implicit guidance capabilities of the diffusion model~\cite{chung2023solving,yu2023freedom,nair2023steered,bansal2023universal,chung2023diffusion}. Diffusion posterior sampling (DPS) \cite{chung2023solving} proposed a technique of using an $L_2$ norm-based loss function to solve linear inverse problems using unconditional diffusion models. However, DPS often requires a large number of sampling steps for photorealistic results. Freedom \cite{yu2023freedom}, yet another work, proposed the use of general loss functions during sampling to achieve training-free conditional sampling. Some variants of DPS have also been proposed in the literature~\cite{song2023loss}. All the aforementioned loss-guided posterior sampling techniques involve a guidance function at each timestep that requires backpropagation through the diffusion UNet.
+Recently, \cite{he2023manifold} proposed Manifold Preserving Guided Diffusion Models (MGD) that remove the need for backpropagating through the diffusion U-Net by performing a gradient descent with respect to the Minimum Mean Square Error (MMSE). Although MGD~\cite{he2023manifold} works remarkably well for linear tasks that require more guidance towards the start of the guidance process, it may fail in some tasks where guidance happens earlier, for example, face semantics-to-image and sketch-to-image, where stronger guidance is required from a much earlier stage. Moreover, like \cite{yu2023freedom, nair2023steered}, MGD also requires a case-by-case handcrafted parameter. Hence, a generic lightweight method that works well for both linear and non-linear guidance functions is still missing. Moreover, the need to find a handcrafted guidance parameter on a case-by-case basis still remains an open challenge.
+
+In this paper, we introduce a new framework that can adaptively perform zero-shot generation using diffusion models without the need for any manual intervention by the user. We found a rather simple fix to the problem during the initial timesteps of diffusion, i.e., by utilizing the gradient with respect to the diffusion output noise in initial steps of inference. Combined with the guidance with respect to the MMSE estimate, we found that the combination generalizes well to tasks that require guidance at very early stages of guidance. \Cref{fig:intro2} presents the visualization of our approach over existing works present in the literature.
+Utilizing the correction term along with the correction with respect to the MMSE estimate significantly boosts the performance in non-linear tasks. We present the corresponding results in \Cref{sec:ablation}.
+Moreover, we treat the energy-based inference-time guidance~\cite{chung2023solving,yu2023freedom} as a stochastic gradient optimization of the MMSE estimate and the noise present in the image. This formulation enabled us to leverage recent research in parameter-free learning~\cite{defazio2023learning,ivgi2023dog} to develop a dynamic step size schedule. This step size adjusts itself adaptively based on the initial noise seed input of the diffusion model and guidance functions, hence removing the need for manual parameter tuning for inference-time guidance. Moreover, motivated by the effectiveness of differentiable augmentations while training GANs~\cite{zhao2020differentiable}, we found that utilizing multiple levels of matching differentiable augmentations to the MMSE estimate and guidance reference significantly improves the sampling quality, enabling very high-quality sampling with a low number of guidance steps. We present an overview of the different applications of our method in \Cref{fig:teaser} and an illustration of the difference of dreamguider with existing methods in \Cref{tab:ablation_design_component}.
+Namely, we present results using Stable Diffusion~\cite{rombach2021highresolution}, unconditional diffusion models released by \cite{nichol2021improved} for $256\times256$ guidance, and class-conditional diffusion models for high-resolution $512\times512$ conditional synthesis. The different functionalities of Dreamguider are tabulated in \Cref{fig:intro2}.
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\linewidth]{figs/comparev2.png}
+\caption{An illustration of the difference between the existing method and our method. Existing works backpropagate through the diffusion network to perform guidance at each timestep, whereas we find the gradients with respect to the MMSE estimate and the predicted noise based on the timesteps, thereby bypassing the expensive backpropagation operation.}
+\label{fig:intro2}
+\end{figure}
+
+We present experiments on publicly released models on generic images, face images, and stable diffusion to show the relevance of our method. We focus on the
+tasks of (1) Inpainting, (2) Super-resolution, (3) Colorization, (4) Gaussian Deblurring, (5) Semantic label-to-image generation, (6) Face sketch-to-image, (7) ID guidance and identity generation, and beat existing benchmarks that utilize diffusion models for these tasks, obtaining a significant boost in performance over existing methods leveraging loss-guided models. To summarize, our contributions are:
+
+\begin{itemize}
+\item We propose a zeroth-order loss-guided diffusion guidance that is applicable to both linear inverse problems and non-linear inverse problems.
+\item We remove the need for a manually tuned guidance scale for classifier guidance by proposing a scaling function that works for a wide variety of tasks.
+\item We propose a time-varying guidance scale for improving sampling quality.
+\item We propose a differentiable augmentation strategy to improve sampling quality.
+\end{itemize}
+\begin{table}[t]
+\caption{Table illustrating the difference over existing methods performing inference-time guidance.}
+
+\setlength{\tabcolsep}{2pt}
+\centering
+\resizebox{0.7\linewidth}{!}{%
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+
+Method & Zeroth order & Linear Tasks & Non-Linear Tasks & Automatic scaling \\
+\midrule
+DPS~\cite{chung2023diffusion} & \xmark & \cmark  & \xmark & \xmark \\
+$\pi$GDM~\cite{song2022pseudoinverse} & \xmark & \cmark  & \xmark & \xmark \\
+Freedom~\cite{yu2023freedom} & \xmark & \xmark  & \cmark & \xmark \\
+MGD~\cite{he2023manifold} & \cmark & \cmark  & \xmark & \xmark \\
+OURS & \cmark & \cmark  & \cmark & \cmark \\
+\bottomrule
+\end{tabular}}
+\label{tab:ablation_design_component}
+\end{table}
+
+
+
+\section{Background}
+
+
+\subsection{Training-free Conditional Sampling using Diffusion Models}
+Recently, there has been a rise in multiple works that propose utilizing unconditional diffusion models for conditional sampling~\cite{nair2023steered,bansal2023universal, chung2023PrompttuningLD,kawar2022denoising}. The earlier works proposed solving linear inverse problems using diffusion models with the help of priors dependent on the inverse transform of degradation. Recently, diffusion posterior sampling~\cite{chung2023solving} considered the degradation to be conditioned on a Gaussian distribution given any intermediate timestep and derived an $L_2$ norm-based regularization at each intermediate timestep to solve for linear inverse problems. Recent works such as Freedom~\cite{yu2023freedom} explored an energy-based perspective and extended guidance to non-linear functions using general loss functions. Universal diffusion guidance~\cite{aggarwal2018modl} extended this guidance process to stable diffusion and improved the performance by using forward-backward guidance. More recent works, such as manifold-guided diffusion~\cite{he2023manifold}, further proposed to constrain the manifold space by projecting for the latent space alone. 
+\subsection{Perturbed Markovian Kernel for Diffusion Transition}
+
+ Let us assume that $r(x_{t},y)$ gives a measure of the distance between an intermediate $x_t$ and the condition $y$ and is a positive bounded function. Hence, in the reverse process, the diffusion trajectory should proceed through distributions with a higher probability of being closer to the desired cases. We model these trajectory intermediate distributions with
+\begin{equation}
+\hat{p}(x_t)=p(x_t)r(x_t,y).
+\end{equation}
+Dickenson et al. \cite{sohl2015deep} first proposed the use of Markovian kernels to estimate the distribution of diffusion intermediates. Specifically, given the state $x_t$ at the equilibrium of the training process for a diffusion model, the intermediate of a diffusion model at a time instant, the distribution at a timestep $t-1$ can be estimated as
+\begin{equation}
+p(x_{t-1})= \int p(x_t) p_{\theta}(x_{t-1}|x_{t}) dx_t.
+\end{equation}
+As we know, the kernel $ p(x_{t-1}|x_{t})$ is a Gaussian distribution whose mean can be estimated using the diffusion UNet and $x_t$.
+To estimate a perturbed kernel $\hat{p}(x_{t-1}|x_t)$, the perturbed distribution is
+\begin{equation}
+p(x_{t-1})r(x_{t-1},y)= \int r(x_t,y) p(x_t) \hat{p}_{\theta}(x_{t-1}|x_t) dx_t.
+\end{equation}
+By merging the constant terms in the transition into the normalization factor, the transition step is
+\begin{equation}
+\hat{p}_{\theta}(x_{t-1}|x_{t})=  p_{\theta}(x_{t-1}|x_{t})r(x_{t-1},y).
+\end{equation}
+The proof is given in the supplementary material. Hence, we can see that rather than considering a Gaussian posterior, as in DPS~\cite{chung2023solving}, any distance or loss function can be used. Similarly, one other valid transition step of the perturbed process is
+\begin{equation}
+\hat{p}_{\theta}(x_{t-1}|x_{t})=  p_{\theta}(x_{t-1}|x_{t})\frac{r(x_{t-1},y)}{r(x_t,y)},
+\label{eq:samplerecip}
+\end{equation}
+which adopts the notion of reciprocal distance from the previous timestep.
+
+\subsection{Inference-time Guidance of Diffusion Models}
+\label{sec: cond_sample}
+
+For conditional generation tasks using an unconditional diffusion model, ideally, the model would predict intermediates closer to the condition. The  formulation can  be seen in terms of transition probabilities. Consider a pretrained unconditional diffusion model on a specific domain. The problem at hand needs to guide the diffusion model during inference time conditioned with a condition $y$. Dhariwal et al. \cite{dhariwal2021diffusion} proposed a general strategy to perform this by conditioning on the condition $y$ and finding the resultant marginal distribution
+\begin{equation}
+p(x_{t}|x_{t+1},y) = p(x_{t}|x_{t+1})p(y|x_{t}).
+\label{eq:sample}
+\end{equation}
+By assuming the distribution $p(y|x_{t})$ has much lower curvature compared to $p(x_{t}|x_{t+1})$, considering the marginal distribution close to $x_t$,
+\begin{align}
+\text{log } p(y|x_{t}) &=  (x_t-\mu)\nabla_{x_t} \text{log }p(y|x_{t}),\\\notag
+g &= \nabla_{x_t} \text{log }p(y|x_{t}).
+\end{align}
+Plugging back to $\log(p(x_{t}|x_{t+1},y))$,
+\begin{align}
+\log(p(x_{t}|x_{t+1},y)) &= (x-\mu-\Sigma g)^T\Sigma^{-1}(x-\mu-\Sigma g) + C,\label{eq:Dhari}\\\notag
+p(x_{t}|x_{t+1},y) & \sim  N(\mu+ \Sigma g,\Sigma).
+\end{align}
+Hence, the reverse sampling equation becomes,
+\begin{equation}
+x_{t-1}= \frac{1}{\sqrt{\alpha_t}}\left(x_t-\frac{1-\alpha_t}{\sqrt{1-\bar{\alpha_t}}}\epsilon_\theta(x_t)\right)+\sigma_t \epsilon  +  \Sigma\frac{d r(x_{t-1},y)}{d x_{t-1}}, \epsilon \sim \mathcal{N}(0,I).
+\end{equation}
+
+\subsection{Shortcomings of the Existing Methods}
+
+Although the energy-based guidance theory supports guidance as a function of the current latent estimate, almost all loss-based guidance techniques derive the distance function as a function of $x_{t}$ rather than $x_{t-1}$ and derive the gradient based on the previous sample. Although this approach works for many tasks, it requires backpropagating through the neural network and modeling the score function for the guidance correction term. This limits the use of classifier guidance since existing diffusion architectures that produce photorealistic results are often very bulky. One can see why the existing framework utilizes the derivative with respect to the previous sample works by taking a better look at \Cref{eq:samplerecip}. As we can see, a reciprocal distance over the previous timestep diffusion latent $x_t$ is a perfectly valid distance guidance function. In the next section, we elaborate on Dreamguider.
+
+
+
+\section{Proposed Method}
+
+\label{sec:method}
+
+Suppose $x_{t-1}$ denotes the current step and $x_{t}$ denotes the previous step in the inference process of the diffusion module. As mentioned in the previous section, existing works utilize the derivative with respect to the previous step for guidance; one reason for this is to use an off-the-shelf auxiliary distance function on the MMSE estimate at each step $\hat{x_t}$, which enables the use of general functions defined on image space for guidance. Here, the MMSE estimate is defined as
+\begin{align}
+\hat{x_t} &=\frac{x_t - \sqrt{1 - \bar{\alpha}_t} \epsilon_\theta(x_t)}{\sqrt{\bar{\alpha_t}}},
+\label{eq:implicit}
+\end{align}
+where $\bar{\alpha}$ denotes the variance schedule of the diffusion process and
+$\epsilon_\theta(x_t)$ is the noise estimated by the network. One other observation to note is that finding the derivative with respect to the current step requires finding $\hat{x}_{t-1}$, which again requires an additional propagation through the diffusion network. Hence, the dilemma of backpropagating through the UNet for guidance still remains unresolved.
+\subsection{Time Variant Classifier Guidance}
+
+We found a simple yet effective solution for this dilemma; if we take a look at the ODE estimate at each step proposed by Song et al. \cite{song2021maximum}.  Hence, rather than perturbing the Gaussian kernel at each timestep, we perturb the components $\hat{x_t}$ and $\epsilon_{\theta}(x_t)$  by a small amount. Specifically, we perform the following operations:
+\begin{align}
+\hat{x_t}&= \hat{x_t} -c \Sigma\frac{d r(\hat{x}_t,y)}{d\hat{x}_t}, t>t_0\nonumber\\
+\epsilon_{\theta}(x_t)&= \epsilon_{\theta}(x_t) -d \Sigma\frac{d r(\hat{x}_t,y)}{d\epsilon_{\theta}(x_t)},t<t_0\nonumber\\
+x_{t-1}&= \frac{1}{\sqrt{\alpha_t}}\left(x_t-\frac{1-\alpha_t}{\sqrt{1-\bar{\alpha_t}}}\epsilon_\theta(x_t)\right)+\sigma_t \epsilon -c_t \Sigma\frac{d r(\hat{x}_t,y)}{d\hat{x_t}}-d_t \Sigma\frac{d r(\hat{x}_t,y)}{d\epsilon_{\theta}(x_t)} \label{eq:to}
+\end{align}
+where $r(\hat{x}_t,y)$ is a non negative distance function that measures the distance between the MMSE estimate and condition, $\Sigma$ is the variance of the latent estimate at each timestep as in \Cref{eq:Dhari}. Please note that we perform a double descent here.  The intuition behind the double descent is that performing descent on one of the components, say $\hat{x_t}$, guides effectively at the end of the diffusion process where $\alpha_{t-1}$ is one and vice versa.
+Hence, during the guidance with the gradient w.r.t. $\hat{x_t}$, the maximum component of shift that happens to the sample is when we consider the flow of this correction through $\hat{x_t}$. Hence, we define the value as the maximum component of $x_{t-1}$ present in $\hat{x_t}$.
+\begin{equation}
+c_t = c\sqrt{\alpha_{t-1}}.
+\end{equation}
+Similarly, we define $d_t$ as the maximal component of $\epsilon_{\theta}(x_t)$ in $x_{t-1}$. Hence,
+\begin{equation}
+d_t = -d.\frac{1-\alpha_t}{\sqrt{\alpha_t}\sqrt{1-\bar{\alpha_t}}}.
+\end{equation}
+Hence, this term gives efficient guidance at all timesteps, bypassing the guidance at the later timesteps alone as in MGD~\cite{he2023manifold}. In the following section, we proceed to propose an effective empirical estimate for $c$ and $d$ that works for a wide range of tasks.
+
+\subsection{A Gradient-Dependent Scaling Factor Estimate}
+
+Recently, Distance over Gradients (DOG) \cite{ivgi2023dog} was proposed as an effective parameter-free dynamic step size schedule for SGD problems. Given any Stochastic Gradient Descent (SGD) optimization problem, the Distance over Gradient works as an effective learning rate. Recent works \cite{wu2023fast} have found the diffusion process as a stochastic optimization problem and have derived an SGD-based interpretation of the diffusion sampling process. Hence, inspired by both of these works, we attempted an empirical guidance estimate of the form:
+\begin{align}
+\gamma_t=\begin{cases}
+\frac{1e^{-5}}{\sqrt{g_T^2}}, & \text{if }  t=T\\
+\frac{\max_{i>t} |f_i-f_T|}{\sqrt{\Sigma_{i=i}^T g_t^2}}, & \text{otherwise}
+\end{cases}
+\label{eq:DOG}
+\end{align}
+where $g_t$ is the gradient of the loss function as defined in the equation, $f_t$ can be any of ${\hat{x_t},x_t, \epsilon_{\theta}(t)}$ at timestep $t$ and $f_0$ is the initial estimate of $f_t$. We noticed that this empirical estimate works well for the first-order sampling involving DPS~\cite{chung2023solving} as well. Hence, utilizing \Cref{eq:DOG}, we estimate $c$ and $d$ accordingly by substituting $f_i$ as $\hat{x}_t$ and $\epsilon_{\theta}(x_t)$
+\subsection{Differential Augmentation Classifier Guidance}
+
+A common practice while performing classifier guidance to augment diffusion models with specific regularization for guidance is to use the noisy estimate at timestep $t$ and utilize it to compute the loss function to regularize the current prediction. However, in many cases,
+such guidance can give results with artifacts and color shifts, as portrayed in \Cref{fig:imgnet} and \Cref{fig:nonlinearcomp}, due to excessive guidance or insufficient guidance at intermediate timesteps that shift the results off manifold or cause color shifts. One effective solution for this is to imitate different versions of artifacts or color shifts on both the source image and the target image and utilize these augmented versions for a boost in performance. Hence, to perform guidance with a much more robust guidance loss, we introduce DiffuseAugment, an augmentation strategy for diffusion guidance during inference time. Specifically, given an intermediate sample $x_t$ and condition $y$, we augment $\hat{x}_t$ and $y$ with differentiable augmentations denoted by
+\begin{align}
+\hat{x}^{aug}_t,y^{aug}= T(\hat{x}^{aug}_t,y^{aug}).
+\end{align}
+
+We choose three different types of augmentations for $T$ comprising random cutouts, random translations, and color saturations. Please note that the augmentation of $y$ is dependent on the input signal. For label-based conditioning such as identity or text, we do not perform augmentation for $y$. For image space augmentations, we augment $y$ with the same random augmentation as that of $x$. While computing the effective loss, we find the average across all augmentations. We find that DiffuseAugment significantly boosts the sampling fidelity and quality of the reconstructed image. We present these results in \Cref{sec:ablation}.
+
+
+
+\section{Experiments}
+
+
+Since our method comprises both linear and non-linear inverse tasks, for linear inverse tasks, we follow DPS and evaluate our method utilizing two different benchmarks: (1) ImageNet~\cite{deng2009imagenet} and (2) CelebA~\cite{liu2015faceattributes}. For non-linear tasks, we follow Freedom and evaluate using the CelebA dataset. For linear tasks, we evaluate our method quantitatively for Super-resolution ($\times4$), Colorization, Inpainting (Box), and Gaussian deblurring tasks.
+For non-linear tasks, we evaluate for Face Sketch guidance, Face Parse maps guidance, and Face ID guidance. Since our method falls into the category of loss-guided diffusion models, we perform all quantitative evaluations using existing methods that follow this kind of sampling. Please note that although we acknowledge the parallel field of research in tackling inverse problems without backpropagation~\cite{wang2023zeroshot, kawar2021stochastic}, we excluded these methods for comparison as they tackle solely Linear inverse problems. In contrast, loss-guided models are generic and applicable to a wider range of problems.
+
+\begin{figure}[tp]
+\hspace{-3mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-2mm}
+    \raisebox{0.18in}{\rotatebox[origin=t]{90}{\scriptsize Degraded}}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/degraded/ILSVRC2012_val_00000027.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/degraded/ILSVRC2012_val_00000029.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/degraded/ILSVRC2012_val_00000154.JPEG}
+    \tabularnewline
+    \raisebox{0.15in}{\rotatebox[origin=t]{90}{\scriptsize DPS\cite{chung2023solving}}}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/dps/ILSVRC2012_val_00000027.jpg}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/dps/ILSVRC2012_val_00000029.jpg}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/degraded/ILSVRC2012_val_00000154.JPEG}
+    \tabularnewline
+    \raisebox{0.15in}{\rotatebox[origin=t]{90}{\scriptsize MGD\cite{he2023manifold}}}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/mcg/ILSVRC2012_val_00000027.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/mcg/ILSVRC2012_val_00000029.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/mcg/ILSVRC2012_val_00000154.JPEG}
+    \tabularnewline
+    \raisebox{0.2in}{\rotatebox[origin=t]{90}{\scriptsize OURS}}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/ours/ILSVRC2012_val_00000027.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/ours/ILSVRC2012_val_00000029.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/deblur/ours/ILSVRC2012_val_00000154.JPEG}
+    \end{tabular}}
+    \label{fig:color1}
+\end{minipage}
+\hspace{3mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-1.5mm}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/degraded/ILSVRC2012_val_00000464.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/degraded/ILSVRC2012_val_00000008.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/degraded/ILSVRC2012_val_00000290.JPEG}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/dps/ILSVRC2012_val_00000464.jpg}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/dps/ILSVRC2012_val_00000008.jpg}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/dps/ILSVRC2012_val_00000290.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/mcg/ILSVRC2012_val_00000464.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/mcg/ILSVRC2012_val_00000008.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/mcg/ILSVRC2012_val_00000464.JPEG}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/ours/ILSVRC2012_val_00000464.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/ours/ILSVRC2012_val_00000008.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/color/ours/ILSVRC2012_val_00000290.JPEG}
+    \end{tabular}}
+    \label{fig:color2}
+\end{minipage}
+\hspace{1mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-1.5mm}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/degraded/ILSVRC2012_val_00000004.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/degraded/ILSVRC2012_val_00000018.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/degraded/ILSVRC2012_val_00000019.JPEG}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/dps/ILSVRC2012_val_00000004.jpg}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/dps/ILSVRC2012_val_00000018.jpg}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/dps/ILSVRC2012_val_00000019.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/mcg/ILSVRC2012_val_00000004.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/mcg/ILSVRC2012_val_00000018.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/mcg/ILSVRC2012_val_00000019.JPEG}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/ours/ILSVRC2012_val_00000004.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/ours/ILSVRC2012_val_00000018.JPEG}
+    \includegraphics[width=0.32\linewidth]{results/imgent/inpaint/ours/ILSVRC2012_val_00000019.JPEG}
+    \end{tabular}}
+    \label{fig:color3}
+\end{minipage}
+\tabularnewline
+{\hspace*{0.9cm}  Gaussian Deblurring \hspace {1.7cm} Colorization \hspace{2.5cm} Inpainting}
+\caption{Qualitative comparisons for Linear Tasks on ImageNet for 100 inference steps}
+\label{fig:imgnet}
+\end{figure}
+
+    
+
+\begin{figure}[tp]
+\hspace{-3mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-2mm}
+    \raisebox{0.18in}{\rotatebox[origin=t]{90}{\scriptsize Degraded}}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/degraded/00252.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/degraded/00267.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/degraded/00304.jpg}
+    \tabularnewline
+    \raisebox{0.15in}{\rotatebox[origin=t]{90}{\scriptsize DPS\cite{chung2023solving}}}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/dps/00252.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/dps/00267.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/degraded/00304.jpg}
+    \tabularnewline
+    \raisebox{0.15in}{\rotatebox[origin=t]{90}{\scriptsize MGD\cite{he2023manifold}}}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/mcg/00252.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/mcg/00267.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/mcg/00304.jpg}
+    \tabularnewline
+    \raisebox{0.2in}{\rotatebox[origin=t]{90}{\scriptsize OURS}}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/ours/00252.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/ours/00267.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/deblur/ours/00304.jpg}
+   
+\end{tabular}}
+\label{fig:color7}
+\end{minipage}
+\hspace{3mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-1.5mm}
+    \includegraphics[width=0.32\linewidth]{results/face/color/degraded/00219.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/degraded/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/degraded/00333.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/face/color/dps/00219.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/dps/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/dps/00333.jpg}
+    \tabularnewline
+        \includegraphics[width=0.32\linewidth]{results/face/color/mcg/00219.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/mcg/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/mcg/00333.jpg}
+    \tabularnewline
+        \includegraphics[width=0.32\linewidth]{results/face/color/ours/00219.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/ours/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/color/ours/00333.jpg}
+  
+
+\end{tabular}}
+\label{fig:color6}
+
+\end{minipage}
+\hspace{1mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-1.5mm}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/degraded/00204.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/degraded/00220.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/degraded/00221.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/dps/00204.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/dps/00220.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/degraded/00221.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/mcg/00204.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/mcg/00220.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/mcg/00221.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/ours/00204.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/ours/00220.jpg}
+    \includegraphics[width=0.32\linewidth]{results/face/inpaint/ours/00221.jpg}
+    
+\end{tabular}}
+
+\label{fig:color5}
+\end{minipage}
+\tabularnewline
+{  \hspace*{0.9cm}  Gaussian Deblurring \hspace {1.7cm} Colorization \hspace{2.5cm} Inpainting}
+\caption{Qualitative comparisons for Linear Tasks on CelebA dataset for 100 inference steps }
+\label{fig:face}
+\end{figure}
+\subsection{Implementation Details}
+
+We perform all experiments on NVIDIA A6000 GPUs. For ImageNet~\cite{deng2009imagenet} based tasks, we utilize the unconditional model released by Guided Diffusion. For Linear Tasks involving faces, we use the model trained on the FFHQ dataset~\cite{karras2017progressive} and perform experiments on the CelebA dataset~\cite{liu2015faceattributes} similar to DPS. For non-linear tasks, we follow Freedom and utilize the model trained unconditionally on the CelebA dataset. We evaluate using conditions derived from existing networks. For the high-resolution results presented in \Cref{fig:intro2}, we utilized the class-conditional model of resolution $512\times 512$ released by Guided Diffusion. For all experiments, we used 100 sampling steps. For style transfer, we utilized Stable Diffusion~\cite{rombach2021highresolution} v1.5. Please note that our sampling method is generic, and any sampler can be used. We fix the number of augmentations in DiffuseAugment for all the experiments to 8. For linear inverse problems we set the value of $t_0$ to 5 in \Cref{eq:to} to 30 and for linear inverse problems we set $t_0$ to 5
+
+\begin{table*}[t]
+\centering 
+\setlength{\tabcolsep}{0 pt}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{lcccccccccccccccc}
+\toprule
+{\textbf{}} & \multicolumn{4}{c}{\textbf{Inpaint (Box)}} & \multicolumn{4}{c}{\textbf{Colorization}}  &\multicolumn{4}{c}{\textbf{SR ($\times$ 4)}} &\multicolumn{4}{c}{\textbf{Gaussian Deblur}} \\
+\cmidrule(lr){2-5}
+\cmidrule(lr){6-9}
+\cmidrule(lr){10-13}
+\cmidrule(lr){14-17}
+{\textbf{Method}} & {PSNR $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$~}& {Cons $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$~} & {PSNR $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$}  & {PSNR $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$}\\
+\toprule
+
+Score-SDE~\cite{song2021scorebased}~ & 9.57 & 0.329 & 0.634 & 94.33 & 0.1627 & 0.3996 & 0.6609 & 118.86 & 20.75 & 0.5844 & 0.3851 & 53.22& 23.39 & 0.632 & 0.361 & 66.81  \\
+ILVR~\cite{song2021scorebased}~ & - & - & - & - & -  & - & - & - & 26.14 & 0.7403 & 0.2776&52.82 &- & - & - & -  \\
+DPS~\cite{chung2023diffusion} & 19.39  & 0.610  &0.3766 &58.89&0.0069  & 0.5404 & 0.5594 &55.61 & 17.36 &0.4969 &0.4613 & 56.08 & 20.52 &0.5824  &0.3756  &  52.64  \\
+MGD~\cite{chung2023diffusion} & 27.21  & 0.7460 &0.2197 &11.83&0.0018  & 0.6865 & 0.4549 &38.22 & 27.51 &0.7852 &0.2464 & 60.21 & 27.23 &\textbf{0.7695} &0.2327 &51.59    \\
+\midrule
+\rowcolor[gray]{0.90}Ours & \textbf{28.84} & \textbf{0.8491} & \textbf{0.1432}  & \textbf{5.96} & \textbf{0.0014} & \textbf{0.7775} & \textbf{0.3036}& \textbf{20.89} & \textbf{29.47}  & \textbf{0.8429} & \textbf{0.1757} & \textbf{46.95}& \textbf{27.30} & 0.7672 & \textbf{0.2202} & \textbf{42.70}    \\
+\bottomrule
+\end{tabular}
+}
+\caption{\centering
+Quantitative evaluation of image restoration tasks on CelebA 256$\times$256-1k with $\sigma_y=0.05$, We utilize 100 inference steps for all methods
+}
+\label{tab:results_face}
+\end{table*}
+
+\begin{table*}[t]
+\centering 
+\setlength{\tabcolsep}{0 pt}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{lcccccccccccccccc}
+\toprule
+{\textbf{}} & \multicolumn{4}{c}{\textbf{Inpaint (Box)}} & \multicolumn{4}{c}{\textbf{Colorization}}  &\multicolumn{4}{c}{\textbf{SR ($\times$ 4)}} &\multicolumn{4}{c}{\textbf{Gaussian Deblur}} \\
+\cmidrule(lr){2-5}
+\cmidrule(lr){6-9}
+\cmidrule(lr){10-13}
+\cmidrule(lr){14-17}
+{\textbf{Method}} & {PSNR $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$~}& {Cons $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$~} & {PSNR $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$}  & {PSNR $\uparrow$~} & {SSIM $\uparrow$~} & {LPIPS $\downarrow$~} & {FID $\downarrow$}\\
+\toprule
+
+Score-SDE~\cite{song2021scorebased}~ & 9.66 & 0.2087 & 0.7375 & 133.54 & 0.1723 & 0.3105 & 0.8197 & 194.87& 14.07 & 0.2468 & 0.6766 &129.91& 15.39 & 0.3158 & 0.620 & 134.67  \\
+ILVR~\cite{song2021scorebased}~ & - & - & - & - & -  & - & - & - & 15.51 & 0.4033 & 0.5253& 64.13&- & - & - & -  \\
+ DPS~\cite{chung2023diffusion} & 15.23   & 0.4261 & 0.6087 &97.90& 0.021 & 0.3774 & 0.8011 & 106.25 & 14.94 & 0.3258 & 0.6594 & 87.26 & 17.19& 0.3980 & 0.5817 &84.74   \\
+ MGD~\cite{chung2023diffusion} & 21.94   & 0.6920 & 0.2410 &40.30& 0.0057 & 0.5809 & 0.5427 & 73.75& 23.12 & 0.6025 & 0.3936 & 70.83 & 23.13& 0.6092& 0.3695 & 61.49   \\
+\midrule
+\rowcolor[gray]{0.90}Ours & \textbf{23.49} & \textbf{0.7271} & \textbf{0.2001}  & \textbf{30.72} & \textbf{0.0055} & \textbf{0.6804} & \textbf{0.3362} & \textbf{52.76}& \textbf{24.23} & \textbf{0.6818} & \textbf{0.2884} &\textbf{43.00} & \textbf{23.31} & \textbf{0.6157} & \textbf{0.3566} & \textbf{58.38}   \\
+\bottomrule
+\end{tabular}
+}
+\caption{\centering
+Quantitative evaluation of image restoration tasks on ImageNet 256$\times$256-1k with $\sigma_y=0.05$. \textbf{Bold}: best, We utilize 100 inference steps for all methods
+}
+\label{tab:table_imgnet}
+\end{table*}
+\subsection{Qualitative Analysis }
+
+We present results on Gaussian Deblurring, super-resolution, and colorization. As we can see, DPS fails since 100 steps of diffusion are used, and the DPS scaling factor is not strong enough to perform proper guidance within 100 steps of diffusion. We set the amount of posterior noise for the measurement as $0.05$ in all experiments. MGD works remarkably well for the deblurring and inpainting tasks; however, it fails for colorization since early guidance is required for the flow of natural colors.
+
+For ImageNet tasks, the performance of DPS falls more because the problem is more ill-posed. This can be seen in the eagle diagram, where the method is unable to reconstruct the eagle properly. In contrast, our method performs relatively better, producing much more realistic images. We highlight the performance improvement on colorization since we argue that these results are obtained because of the early flow of gradients. For non linear invere problems,  as we can see, Freedom is able to produce realistic-looking results for even the difficult task of Parse Maps to Faces. We argue that this is because backpropagation through the UNet purifies the gradient flow; hence, the generated images look much more naturalistic. 
+
+\subsection{Quantitative Analysis }
+We utilize Dreamguider and quantitatively evaluate CelebA and ImageNet datasets. The results for face restoration tasks are shown in \Cref{tab:results_face} and \Cref{tab:table_imgnet}. We evaluate these tasks utilizing four different metrics. SDEdit~\cite{meng2021sdedit} fails for the task of face inpainting and colorization as a single perturbation in the noisy domain throws the image off the manifold. DPS requires more inference steps for proper guidance. ILVR is originally designed for super-resolution. Hence, we quantitatively evaluate ILVR~\cite{choi2021ilvr} only for the task of super-resolution. Since DPS and MGD are applicable to all cases, we evaluate with these methods.
+As we can see, our approach obtains better results than the baselines because of the flow of gradients, which allows for better reconstruction quality. For faces, the difference is much more highlighted in the task of colorization, where we get a significant boost of 18 FID score above the baseline. General linear inverse problems in ImageNet are much more complex than in faces; hence, there is an overall drop in metrics for the natural domain images in ImageNet. In our case, DiffAugment purifies the gradient; hence, we look for much better realistic-looking images. However, MGD does not produce realistic results for sketch-to-image and anime-to-face synthesis.
+
+    
+
+\begin{figure}[tp!]
+\hspace{-3mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-2mm}
+    \raisebox{0.18in}{\rotatebox[origin=t]{90}{\scriptsize Degraded}}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/degraded/00392.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/degraded/00405.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/degraded/00406.jpg}
+    \tabularnewline
+    \raisebox{0.15in}{\rotatebox[origin=t]{90}{\scriptsize MGD}}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/mcg/00392.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/mcg/00405.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/mcg/00406.jpg}
+    \tabularnewline
+    \raisebox{0.15in}{\rotatebox[origin=t]{90}{\scriptsize Freedom}}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/freedom/00392.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/freedom/00405.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/freedom/00406.jpg}
+    \tabularnewline
+    \raisebox{0.2in}{\rotatebox[origin=t]{90}{\scriptsize OURS}}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/ours/00392.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/ours/00405.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/anime/ours/00406.jpg}
+   
+\end{tabular}}
+\label{fig:color14}
+\end{minipage}
+\hspace{3mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-1.5mm}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/degraded/00201.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/degraded/00217.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/degraded/00255.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/mcg/00201.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/mcg/00217.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/mcg/00255.jpg}
+    \tabularnewline
+        \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/freedom/00201.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/freedom/00217.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/freedom/00255.jpg}
+    \tabularnewline
+        \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/ours/00201.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/ours/00217.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/parse/ours/00255.jpg}
+  
+
+\end{tabular}}
+\label{fig:color12}
+
+\end{minipage}
+\hspace{1mm}
+\begin{minipage}{0.32\textwidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    {\small
+    \renewcommand{\arraystretch}{0.5} 
+    \begin{tabular}{c c c c c c}
+    \captionsetup{type=figure, font=scriptsize}
+    \hspace{-1.5mm}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/degraded/00232.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/degraded/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/degraded/00341.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/mcg/00232.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/mcg/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/mcg/00341.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/freedom/00232.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/freedom/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/freedom/00341.jpg}
+    \tabularnewline
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/ours/00232.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/ours/00249.jpg}
+    \includegraphics[width=0.32\linewidth]{results/nonlinear/id/ours/00341.jpg}
+    
+\end{tabular}}
+
+\label{fig:color11}
+\end{minipage}
+\tabularnewline
+{  \hspace*{0.9cm}  Face-sketch guidance \hspace {1.2cm} Face-parse guidance \hspace{1.7cm} ID guidance}
+\caption{Qualitative comparisons for Non-linear Tasks on CelebA dataset for 100 inference steps }
+\label{fig:nonlinearcomp}
+\end{figure}
+\begin{table}[t]
+\centering
+\label{tab:ablation_of_noise_level}
+\resizebox{0.9\linewidth}{!}{%
+\begin{tabular}{@{}lccccccccc@{}}
+\toprule
+& \multicolumn{3}{c}{Semantic Parsing} & \multicolumn{3}{c}{ID Guidance} & \multicolumn{3}{c}{Face Sketch} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+Method & Distance$\downarrow$ & LPIPS$\downarrow$ & FID$\downarrow$ & Distance$\downarrow$ & LPIPS$\downarrow$ & FID$\downarrow$ & Distance$\downarrow$ & LPIPS$\downarrow$ & FID$\downarrow$ \\
+\midrule
+\multicolumn{10}{c}{\textit{First-order}} \\
+Freedom~\cite{yu2023freedom} & 1864.51 & 0.6030 & 66.89 & 0.3767 & 0.7058 & 81.40 & 39.05 & 0.6583 & 86.51 \\
+\midrule
+\multicolumn{10}{c}{\textit{Zeroth-order}} \\
+MGD~\cite{he2023manifold} & \textbf{2698.27} & 0.6995 & 104.32 & 0.4291 & 0.7178 & 92.61 & 39.34 & 0.6576 & 70.42 \\
+Ours & 2722.51 & \textbf{0.6199} & \textbf{79.42} & \textbf{0.3780} & \textbf{0.5932} & \textbf{82.70} & \textbf{39.03} & \textbf{0.5509} & \textbf{69.51} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Non-linear tasks. Best results out of zeroth-order optimization algorithms are highlighted.}
+\end{table}
+
+
+
+
+\section{Ablation Studies}
+
+\label{sec:ablation}
+We perform extensive ablation studies with respect to the effect of DiffuseAugment as well as the effect of each guidance term. For the ablation experiments, rather than utilizing the whole testing dataset of 1000 images, we utilize 100 images and report the average LPIPS value.
+
+\subsection{Effect of DiffuseAugment}
+
+We notice that for linear tasks, even for low values of $T$ such as $T=20$, just by increasing the number of augmentations at the output to 8, the perceptual quality drastically improves, matching that of diffusion inference with $T=50$ with just 2 augmentations. Further, we notice that although the effect of augmentations is very significant for linear tasks, the
+performance is not that significant or rather drops in some cases for low $T$
+such as $T=20$; this is because with 20 diffusion steps, most intermediate MMSE estimates remain noisy, and hence the guidance network ArcFace~\cite{deng2019arcface} cannot handle such input and hence returns irregular gradients affecting the quality. However, we can see that as $T$ increases and when there are enough gradient steps, DiffuseAugment plays a significant role in boosting the performance.
+
+\begin{figure}[tp!]
+\centering
+\begin{minipage}{0.24\textwidth}
+    \includegraphics[width=\linewidth]{graphs/compo_linear_updated_ablation100ab.png}
+\end{minipage}
+\begin{minipage}{0.24\textwidth}
+    \includegraphics[width=\linewidth]{graphs/compo_linear_updated_ablation100nl.png}
+\end{minipage}
+\tabularnewline
+\begin{minipage}{0.24\textwidth}
+    \includegraphics[width=\linewidth]{graphs/aug_num_linear_enhanced.pdf}
+\end{minipage}
+\begin{minipage}{0.24\textwidth}
+    \includegraphics[width=\linewidth]{graphs/aug_num_nonlinear_enhanced.pdf}
+\end{minipage}
+\tabularnewline
+\caption{Ablation analysis on linear and non-linear tasks. FaceID guidance \& ImageNet superresolution  }
+\label{fig:ablation}
+\end{figure}
+\subsection{Effect of Different Components of Guidance}
+
+We present the ablation analysis of the effect of different terms of guidance in \Cref{fig:ablation}. Please note that for this experiment, we set the number of augmentations from DiffuseAugment as 1. We also turn off time travel sampling for this experiment. For this experiment, we perform guidance with respect to $\epsilon_{\theta}(t)$ until $t_0$ and perform guidance with respect to $\hat{x_t}$ for $t>t_0$. Here $t=100$ represents pure gaussian noise and $t=0$ represents the image. As we can see, guidance with $\hat{x}_t$ alone faces a drop in performance initially for a low number of inference steps for non linear cases. We argue that this is because the guidance flow through the MMSE estimate is weak during the earlier steps of diffusion. Although time travel sampling helps to alleviate this issue, careful parameter tuning is required to obtain satisfactory results. We also notice that guiding utilizing the gradients of the output noise of the network closer to the start of the generation process produces better results.
+
+
+\section{Limitations and Future Works}
+
+Although we illustrated the working across various tasks for pixel space diffusion models, the direct approach cannot be used for latent diffusion models for the task of linear inverse problems, and one might have to apply multiple steps of time travel sampling to fix this issue, making a large computational overhead of the overall sampling time. We emphasize that this problem arises due to the reconstruction error in the VAE that encodes the image to the latent space. In the future, we will attempt to improve upon this with better optimization techniques. Moreover, although the proposed empirical estimate based on distance over gradients works for most tasks and shows the existence of an optimal parameter estimate, a thorough mathematical evaluation and the most optimal parameters are still missing. We leave this problem up to future works to estimate the optimal guidance parameter.
+
+
+\section{Conclusion}
+
+In this paper, we proposed an improvement to existing loss-guided techniques for zero-shot conditional generation with an unconditional diffusion model. Specifically, we proposed a sampling technique that removes the need to backpropagate through the diffusion U-Net in order to tackle sampling for general inverse problems. We also present an empirical function for automatic scaling parameters that removes the need for manual scaling parameter tuning, which was previously a huge hurdle in using classifier-free guidance. The newly proposed scaling parameter also removes the need for model-specific tuning of start and end guidance steps. We also introduced a differentiable data augmentation method that significantly improves the sampling fidelity. We illustrated the working of our method across 4 linear and 3 non-linear tasks across faces and real image domains. Our sampling technique produces photorealistic samples with much lower sampling time and higher fidelity than existing methods.
+
+
+
+
+
+

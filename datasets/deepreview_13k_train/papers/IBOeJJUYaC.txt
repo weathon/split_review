@@ -1,0 +1,253 @@
+\title{A Neural Material Point Method for Particle-based Simulations}
+
+\begin{abstract}
+
+Mesh-free Lagrangian methods are widely used for simulating fluids, solids, and their complex interactions due to their ability to handle large deformations and topological changes.
+These physics simulators, however, require substantial computational resources for accurate simulations.
+To address these issues, deep learning emulators promise faster and scalable simulations, yet they often remain expensive and difficult to train, limiting their practical use.
+Inspired by the Material Point Method (MPM), we present NeuralMPM, a neural emulation framework for particle-based simulations.
+NeuralMPM interpolates Lagrangian particles onto a fixed-size grid, computes updates on grid nodes using image-to-image neural networks, and interpolates back to the particles. 
+Similarly to MPM, NeuralMPM benefits from the regular voxelized representation to simplify the computation of the state dynamics, while avoiding the drawbacks of mesh-based Eulerian methods.
+We demonstrate the advantages of NeuralMPM on several datasets, including fluid dynamics and fluid-solid interactions.
+Compared to existing methods, NeuralMPM reduces training times from days to hours, while achieving comparable or superior long-term accuracy, making it a promising approach for practical forward and inverse problems. A project page is available at \texttt{\url{https://neuralmpm.isach.be}}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The Navier-Stokes equations describe the time evolution of fluids and their interactions with solid materials. As analytical solutions rarely exist, numerical methods are required to approximate the solutions.
+On the one hand, Eulerian methods discretize the fluid domain on a fixed grid, simplifying the computation of the dynamics, but requiring high-resolution meshes to solve small-scale details in the flow. Lagrangian methods, on the other hand, represent the fluid as virtual moving particles defining the system's state, hence maintaining a high level of detail in regions of high density. While effective at handling deformations and topological changes \citep{Monaghan_review}, Lagrangian methods struggle with collisions and interactions with rigid objects \citep{challenges, review}. 
+
+Regardless of the discretization strategy, large-scale high-resolution numerical simulations are computationally expensive, limiting their practical use in downstream tasks such as forecasting, inverse problems, or computational design. To address these issues, deep learning emulators have shown promise in accelerating simulations by learning an emulator model that can predict the system’s state at a fraction of the cost. Next to their speed, neural emulators also have the strategic advantage of being differentiable, enabling their use in inverse problems and optimization tasks~\citep{allen2022physical, pmlr-v162-zhao22d, forte22}. 
+Moreover, they have the potential to be learned directly from real data, bypassing the costly and resource-intensive process of building a simulator~\citep{lam, pfaff2021learning, Lemos_2023, Jumper2021, He_2019}. 
+In this direction, particle-based neural emulators~\citep{alvaro, ummenhofer, prantl} have seen success in accurately simulating fluids and generalizing to unseen environments. These emulators, however, suffer from the same issues as traditional Lagrangian methods, with collisions and interactions with rigid objects being particularly challenging. These emulators may also require long training and inference times, limiting their practical use. 
+
+Taking inspiration from the hybrid Material Point Method (MPM) \citep{mpm_og, mpm_book} that combines the strengths of both Eulerian and Lagrangian methods, we introduce NeuralMPM, a neural emulation framework for particle-based simulations. As in MPM, NeuralMPM maintains Lagrangian particles to represent the system's state but models the system dynamics on voxelized representations. In this way, NeuralMPM benefits from a regular grid structure to simplify the computation of the state dynamics but avoids the drawbacks of mesh-based Eulerian methods. By interpolating the particles onto a fixed-size grid, it also bypasses the need to perform an expensive neighbor search at every timestep, substituting it with two interpolation steps based on cheap voxelization~\citep{voxel}. 
+By defining the system dynamics on a grid, NeuralMPM can also leverage well-established grid-to-grid neural architectures. The resulting inductive bias allows the model to more easily process the global and local structures of the point cloud, instead of having to discover them, and frees capacity for learning the dynamics of the system represented by the grid. Compared to previous data-driven approaches~\citep{alvaro, ummenhofer, prantl}, these improvements reduce the training time from days to hours, while achieving higher or comparable accuracy.
+
+
+
+\section{Computational Fluid Dynamics}
+
+
+Computational fluid dynamics simulations can be classified into two broad categories, Eulerian and Lagrangian, depending on the discretization of the fluid \citep{lagveuler}. In Eulerian simulations, the domain is discretized with a mesh, with state variables $u^t_i$ (such as mass or momentum) maintained at each mesh point $i$. Well-known examples of Eulerian simulations are the finite difference method, where the domain is divided into a uniform regular grid (also called an Eulerian grid), and the finite element method, where the domain is divided into regions, or elements, that may have different shapes and density, allowing to increase the resolution in only some areas of the domain \citep{pdebook1, pdebook2}. Lagrangian simulations, on the other hand, discretize the fluid as a set of virtual moving particles $\{p^t_i, u^t_i\}_{i=1}^N$, each described by its position $p^t_i$ and state variables $u^t_i$ that include the particle velocity $v^t_i$. To simulate the fluid, the particles move according to the dynamics of the system, producing a new set of particles $\{p^{t+1}_i, u^{t+1}_i\}_{i=1}^N$ at each timestep. Simulations in Lagrangian coordinates are particularly useful when the fluid is highly deformable, as the particles can move freely and adapt to the fluid's shape. Among Lagrangian methods, Smoothed Particle Hydrodynamics (SPH) is one of the most popular, where the fluid is represented by a set of particles that interact with each other through a kernel function that smooths the interactions. SPH has been widely used in large-scale astrophysical simulations, such as galactic dynamics \citep{Wissing23, Few23} or planetary collision \citep{Kegerreis_2022}, and in ocean engineering \citep{ocean, offshore, oed} to model deformations and fractures.
+
+Hybrid Eulerian-Lagrangian methods combine the strengths of both frameworks. Like Lagrangian methods, they carry the system state information via particles, thereby automatically adjusting the resolution to the local density of the system. By using a regular grid, however, they simplify gradient computation, make entity contact detection easier, and prevent cracks from propagating only along the mesh. Among hybrid methods, the Material Point Method has gained popularity for its ability to handle large deformations and topological changes. MPM combines a regular Eulerian grid with moving Lagrangian particles. It does so in four main steps: (1) the quantities carried by the particles are interpolated onto a regular grid $G^t = \textbf{p2g}(\{p^t_i, u^t_i\})$ using a particle-to-grid (\textbf{p2g}) function, (2) the equations of motion are solved on the grid, where derivatives and other quantities are easier to compute, resulting in a new grid state $G^{t+1} = f(G^t)$, (3) the resulting dynamics are interpolated back onto the particles as $\{u^{t+1}_i\} = \textbf{g2p}(G^{t+1}, \{p^t_i\})$, using a grid-to-particle (\textbf{g2p}) function, (4) the positions of the particles are updated by computing particle-wise velocities and using an appropriate integrator, such as Euler, i.e., $p^{t+1}_i = p^{t}_i + \Delta t v^{t+1}_i$. The grid values are then reset for the next step.
+MPM has been used in soft tissue simulations \citep{soft_tissue}, in molecular dynamics \citep{md_mpm}, in astrophysics \citep{astro_mpm}, in fluid-membrane interactions \citep{membrane_mpm}, and in simulating cracks \citep{crack_mpm} and landslides \citep{landslide}. MPM  is also widely used in the animation industry, perhaps most notably in Disney's 2013 film Frozen \citep{frozen}, where it was used to simulate snow.
+
+Notwithstanding the success of numerical simulators, they remain expensive, slow, and, most of the time, non-differentiable. In recent years, differentiable neural emulators have shown great promise in accelerating fluid simulations, most notably in a series of works to emulate SPH simulations in a fully data-driven manner. Graph network-based simulators (GNS)~\citep{alvaro} use a graph neural network (GNN) and a graph built from the local neighborhood of the particles to predict the acceleration of the system. The approach requires building a graph out of the point cloud at every timestep to obtain structural information about the cloud, which is an expensive operation. In addition, the GNN needs to extract global information from its nodes, which is only possible with a high number of message-passing steps, resulting in a large computational graph and long training and inference times. This large computational graph, along with repeated construction, makes fully autoregressive training over long rollouts impractical, as the gradients need to backpropagate all the way back to the first step. Cheaper strategies exist, like the push-forward trick \citep{brandstetter}, but they have been shown to be inferior to fully backpropagating through trajectories \citep{list2024temporal, rochman2023trick}. As autoregressive training is not available, the stability of the learned dynamics can be compromised, making the model prone to diverging or oscillating. Noise injection training strategies can be used to increase the stability of the rollouts, but the magnitude of the noise becomes a critical parameter.
+\citet{han2022learning} introduce improvements to GNS to make them subequivariant to certain transformations. They show increased accuracy on simulations involving solid objects.
+An alternative approach is the continuous convolution (CConv)~\citep{ummenhofer,sfbc}, an extension of convolutional networks to point clouds. In this method, a convolutional kernel is applied to each particle by interpolating the values of the kernel at the positions of its neighbors, which are found via spatial hashing on GPU, a cheaper alternative to tree-based searches that allows for autoregressive training. In \citep{prantl}, Deep Momentum Conserving Fluids (DMCF) build upon CConv to design a momentum-conserving architecture. Nevertheless, to account for long-range interactions, the authors introduce different branches, with different receptive fields, into their network. The number of branches, and their hyperparameters, need to be tuned to capture global dependencies, leading to long training times even with optimized CUDA kernels. 
+Finally, \citet{zhang2020FluidsNet}, propose an approach that uses nearest neighbors to construct the local features of each particle. Those local features are then averaged onto a regular grid. Like GNS, this method suffers from the need to repeat the neighbor search at every simulation timestep. Ultimately, the performance of point cloud-based simulators is tightly linked to the method used to process the spatial structure of the cloud. Brute force neighbour search is $\mathcal{O}(N^2)$, K-d trees are $\mathcal{O}(N \log{N})$, and voxelization and hashing are  $\mathcal{O}(N)$ \citep{voxel, hastings_optimization_2005}.
+
+An alternative to data-driven modeling is the use of hybrid models, where parts of a classical solver are replaced with learned components. For instance, \citet{yin_aphinity} employ a neural network to learn unknown physics, which is then integrated into a simulator. Similarly, \citet{li_mpmnet} use a neural network to bypass computational bottlenecks in MPM simulators, while \citet{ma_nclaw} learn general constitutive laws, allowing for one-shot trajectory learning. These approaches achieve impressive results by leveraging extensive physics knowledge, but this reliance also limits their applicability. Hybrid models inherit both the strengths and weaknesses of classical and ML methods.
+
+
+
+\section{NeuralMPM}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{fig/neuralmpm_v6.pdf}
+    \caption{NeuralMPM works in 4 steps. (1) The positions $P^t$ and velocities $V^t$ of the particles are used to compute the velocity $V^t_g$ and density $D^t_g$ of each grid node through voxelization. (2) From this grid, the processor neural network predicts the grid velocities at the next $m$ timesteps. The next $m$ positions are computed iteratively by (3) performing bilinear interpolation of the predicted velocities onto the previous positions and (4) updating the positions using the predicted velocities.}
+    \label{fig:NeuralMPM}
+\end{figure}
+
+We consider a Lagrangian system evolving in time and defined by the positions $p^t_i$ and velocities $v^t_i$ of a set of $N$ particles $i=1, ..., N$. We denote with $P^t$ and $V^t$ the set of positions and velocities of all particles at time $t$ and with $S^t = (P^t, V^t)$ the full state of the system. In a more complex setting, the state of the system can include other local properties, such as pressure or elastic stiffness of materials, and global properties, such as an external force. In this work, for simplicity, we let the network learn the relevant simulation parameters implicitly. The evolution of the particles is described by a function $f$ mapping the current state of the system to its next state $S^{t+1} = f(S^t)$. Given a starting system $S^0 = (P^0, V^0)$, its full trajectory, or rollout, is denoted by $S^{1:T}$. Our goal is to build an emulator $\hat{f}_\theta(\cdot)$ capable of predicting a full rollout $\hat{f}_\theta^{1:T}(S^0)$ of $T$ timesteps from the initial state $S^0$.
+Following MPM, NeuralMPM operates in four steps, as illustrated in Figure~\ref{fig:NeuralMPM}:
+
+\paragraph{Step 1: Voxelization.}
+Using the particle positions $P^t$, the velocities $V^t$ are interpolated onto a regular fixed-size grid. This interpolation is performed through \textit{voxelization}, which divides the domain into regular volumes (voxels). Each grid node is identified as the center of a voxel (e.g., square in 2D) in the domain, and the velocities of the particles in the voxel are averaged to give the node's velocity. Similarly, the density is computed as the normalized number of particles in the voxel. This results in the grid tensor $G^t$ that contains the grid velocities $V^t_g$ and density $D^t_g$.
+
+\paragraph{Step 2: Processing.}
+Taking advantage of the regular grid representation of the cloud, the grid velocities $\{\hat{V}^i\}_{i=t+1}^{t+m}$ of the next $m$ timesteps are predicted using a neural network. We chose a U-Net \citep{ronneberger2015unet} as it is a well-established image-to-image model, known to perform well in various tasks, including physical applications. The combination of kernels applied with different receptive fields (from smaller to larger) allows the U-Net to efficiently extract both local and global information. Nonetheless, any grid-to-grid architecture could be used. A fully convolutional U-Net and an FNO have the additional advantage of being able to generalize to different domain shapes, a desirable property (Section~\ref{subsec:general}).
+
+\paragraph{Step 3: Update of particle velocities.} 
+The predicted velocities $\hat{V}^{t+1}$ at the next timestep are then interpolated back to the particle level onto the positions $P^t$ using bilinear interpolation. The velocity of each particle is computed as a weighted average of the four surrounding grid velocities, based on its Euclidean distance to each of them.
+
+\paragraph{Step 4: Update of particle positions.} Finally, the positions of the particles are updated with Euler integration using the next velocities and known current positions of the particles, that is $\hat{P}^{t+1} = P^t + \Delta t \hat{V}^{t+1} $. Steps 3 and 4 are performed $m$ times to compute the next $m$ positions from the set of grid velocities computed at step 2.
+
+Additional features of the individual particles can be included in the grid tensor $G^t$ by interpolating them in the same way as the velocities. 
+Local, such as boundary conditions, or global, such as gravity or external forces, features are represented as grid channels. 
+For simulations with multiple types of particles, the features of each material are interpolated independently and stacked as channels in $G_t$.
+
+NeuralMPM is trained end-to-end on a set of trajectories $S^{0:T}$ to minimize the mean squared error $||P^{t+1} - \hat{P}_\theta^{t+1}(S^t)||^2_2$ between the ground-truth and predicted next positions of the particles.
+At inference time, the model is exposed to much longer sequences, which requires carefully stabilizing the rollout procedure to prevent the accumulation of large errors over time. 
+To address this, we first make use of autoregressive training~\citep{prantl, ummenhofer}, where the model is unrolled $K$ times on its own predictions, producing a sequence of $\hat{S}^{k} = \hat{f}_\theta(\hat{S}^{k-1})$ for $k=1, ..., K$ and initial input $\hat{S}^0 = S^0$, before backpropagating the error through the entire rollout. Unlike more costly methods that require alternative stabilization strategies, such as noise injection~\citep{alvaro}, NeuralMPM's efficiency makes autoregressive training possible. 
+Nevertheless, to further stabilize the training, we couple autoregressive training with time bundling~\citep{brandstetter}, resulting in a training strategy where the model predicts $m$ steps $\hat{S}^{1:m}$ at once from a single initial state, inside an outer autoregressive loop of $K$ steps of length $m$. We show in Section~\ref{sec:experiments} that this training strategy leads to more accurate rollouts.
+
+
+
+\section{Experiments}
+
+
+We conduct a series of experiments to demonstrate the accuracy, speed, and generalization capabilities of NeuralMPM. Specifically, we examine its robustness to hyperparameter and architectural choices through an ablation study (\ref{subsec:ablation}). We compare NeuralMPM to GNS and DMCF in terms of accuracy, training time, convergence, and inference speed (\ref{subsec:comparison}). We also evaluate the generalization capabilities of NeuralMPM (\ref{subsec:general}) and illustrate how its differentiability can be leveraged to solve an inverse design problem (\ref{subsec:inverse}). Through these experiments, we demonstrate that NeuralMPM is a flexible, accurate, and fast method for emulating complex particle-based simulations. The baselines established by \citet{sfbc} and hybrid simulators \citep{li_mpmnet, ma_nclaw} have promising results. However, we do not compare against them as they either use different benchmarks or are specifically tailored for certain physical domains, requiring material-specific knowledge. In contrast, NeuralMPM, like GNS and DMCF, requires only particle positions without being restricted to any particular domain.
+
+\paragraph{Data.} We consider 6 datasets with variable sequence lengths, numbers of particles, and materials. The first three datasets, \textsc{WaterRamps}, \textsc{SandRamps}, and \textsc{Goop}, contain a single material, water, sand, and goop, respectively, with different material properties. The first two datasets contain random ramp obstacles to challenge the model's generalization capacity. The fourth dataset, \textsc{MultiMaterial}, mixes the three materials together in the same simulations. These four datasets are taken from \cite{alvaro} and were simulated using the Taichi-MPM simulator \citep{taichi}. They each contain 1000 trajectories for training and 30 (\textsc{Goop}) or 100 (\textsc{WaterRamps}, \textsc{SandRamps}, \textsc{MultiMaterial}) for validation and testing. The fifth dataset, \textsc{Dam Break 2D}, was generated using SPH and contains 50 trajectories for learning, and 25 for validation and testing. The last dataset, \textsc{VariableGravity}, was also generated using Taichi-MPM. It consists of simulations with variable gravity of a water-like material, and contains 1000 trajectories for training and 100 for validation and testing.
+
+\paragraph{Protocol.} NeuralMPM is trained on trajectories with varying initial conditions and number of particles. The training batches are sampled randomly in time and across sequences. We use Adam~\citep{adam} with the following learning rate schedule: a linear warm-up over 100 steps from $10^{-5}$ to $10^{-3}$, $900$ steps at $10^{-3}$, then a cosine annealing \citep{cosinelr} for $100,000$ iterations.
+We use a batch size of $128$, $K=4$ autoregressive steps per iteration, bundle $m=8$ timesteps per model call (resulting in $24$ predicted states), and a grid size of $64 \times 64$. For most of our experiments, we use a U-Net \citep{ronneberger2015unet} with three downsampling blocks with a factor of $2$, $64$ hidden channels, a kernel size of $3$, and MLPs with three hidden layers of size $6$4 for pixel-wise encoding and decoding into a latent space. For a fair comparison, we ran training and inference for NeuralMPM, DMCF, and GNS on the exact same hardware. GNS and DMCF were trained until convergence (a maximum of 120 and 240 hours, respectively), while NeuralMPM required 20 hours or less to converge. For \textsc{WaterRamps}, \textsc{Sandramps}, \textsc{Goop}, and \textsc{MultiMaterial}, we use the same parameters as those reported by authors. We hyperparameter search DMCF for \textsc{Dam Break 2D} and both GNS and DMCF for \textsc{VariableGravity} and report the best performance obtained for a budget of 60 GPU-days per dataset.
+\begin{figure}[htp!]
+  \centering
+  \includegraphics[width=\textwidth]{figures/pdf/dataset_snapshots.pdf}
+  \caption{%
+    \textbf{Example snapshots.} 
+    We train and evaluate NeuralMPM on \textsc{WaterRamps}, \textsc{SandRamps} and \textsc{Goop}, each consisting of a single material, on \textsc{MultiMaterial} that mixes water, sand and goop, and on \textsc{Dam Break 2D}, a rectangular-shaped SPH dataset. NeuralMPM is able to learn various kinds of materials, their interactions, and their interactions with solid obstacles. Despite being inspired by MPM, it is not limited to data showing MPM-like behaviour.
+  }
+  \label{fig:snapshots}
+\end{figure}
+\begin{figure}[hbp!]
+    \centering
+    \includegraphics[width=\linewidth]{fig/ablation.pdf}
+    \caption{\textbf{Ablation results.} 
+    Mean squared error (MSE) of full rollouts on unseen test data for \textsc{Goop}. The default parameters are in blue. The dashed orange line shows the best rollout MSE of GNS as reported by \cite{alvaro} on the same data ($1.89 \times 10^{-3}$), while the dotted line ($2.4 \times 10^{-3}$) indicates the MSE we obtained for GNS after $240$ hours ($20$M training steps). NeuralMPM is robust to hyperparameter changes, with the biggest effects coming from the number of timesteps bundled together ($m$) and grid noise. For a rollout of length $T$, the model is called $T/m$ times, meaning lower values of $m$ require maintaining stability for longer. Autoregressive training coupled with time bundling is sufficient to stabilize the model, eliminating the need for noise injection. Although GNS reportedly outperforms NeuralMPM by a small margin, these results could not be reproduced in our experiments.} 
+    \label{fig:ablation}
+\end{figure}
+\begin{figure}[htp!]
+  \centering
+  \includegraphics[width=\textwidth]{figures/pdf/waterramps_trajs.pdf}
+  \caption{%
+    \textbf{Example \textsc{WaterRamps} trajectory against baselines.} Each method is unrolled starting from the initial conditions of a random test trajectory not seen during training. We display six snapshots evenly spaced in time.
+  }
+\label{fig:comparison}
+\end{figure}
+\subsection{Ablation study} \label{subsec:ablation}
+
+To study the robustness of NeuralMPM to hyperparameter and architectural choices, we start with the default architecture and hyperparameters and ablate its components individually to examine their impact on performance. We vary the number $K$ of autoregressive steps with and without noise, the number of bundled timesteps $m$ predicted by a single model call, and the depth and number of hidden channels of the network. We also investigate adding noise to stabilize rollouts, either directly to the particles' positions or to the grid-level representation after voxelization.
+
+Figure~\ref{fig:ablation} summarizes the ablation results. A larger number $K$ of autoregressive steps yields more accurate rollouts without the need to add noise. Indeed, injecting noise does not improve accuracy and is even detrimental for $K=4$. Individually tuning the noise levels for grids and particles can modestly lower error rates, but is either very sensitive or negligible. The model performs better when bundling more timesteps, enabling faster rollouts as a single forward pass predicts more steps. We found $m=8$ to be optimal with the other default hyperparameters, outperforming larger bundling. This is because more network capacity is needed to extract information for the next $16$ or $32$ timesteps from a single state. Instead, we opted for a shallower and narrower network to balance speed and memory footprint with performance gains. 
+In terms of network architecture, we chose a U-Net.
+We find the U-Net's width and depth to have a minor impact on performance, confirming that a larger network is not needed. The grid size, however, is critical. A low resolution loses fine details, while a high resolution turns meaningful structures, such as liquid blobs or walls, into isolated voxels.
+
+\subsection{Comparison with previous work} \label{subsec:comparison}
+
+We compare NeuralMPM against GNS and DMCF. We use the official implementations and training instructions to assess training times, inference times, as well as accuracy. We compare against both GNS and DMCF on \textsc{WaterRamps}, \textsc{Sandramps}, \textsc{Goop}, \textsc{Dam Break 2D}, and \textsc{VariabelGravity}. We also compare against GNS on \textsc{MultiMaterial}, but not against DMCF since it does not support multiple materials. 
+
+\paragraph{Accuracy.} We report quantitative results comparing the long-term accuracy in Table~\ref{table:comparison} and show trajectories of NeuralMPM in Figure~\ref{fig:snapshots}, as well as comparisons against baselines on \textsc{WaterRamps} in Figure~\ref{fig:comparison}. On the mono-material datasets \textsc{WaterRamps}, \textsc{SandRamps}, and \textsc{Goop}, NeuralMPM performs competitively with GNS and better than DMCF in terms of mean squared error (MSE). For \textsc{MultiMaterial}, NeuralMPM reduces the MSE by almost half, which we attribute to it being a hybrid method, known to better handle interactions, mixing, and collisions between different materials. In \textsc{Dam Break 2D}, NeuralMPM outperforms both baselines, despite the data being simulated using SPH. Finally, NeuralMPM surpasses the performance of DMCF in \textsc{VariableGravity}, even though the latter accounts for gravity explicitly. In terms of Earth Mover's Distance (EMD), NeuralMPM outperforms both baselines across all benchmarks, suggesting that NeuralMPM is better at capturing the spatial distribution of the particles. 
+
+\begin{table}%[htp!]
+  \centering
+  \begin{tabular}{rccC{1cm}C{0.9cm}C{0.9cm}C{0.9cm}C{0.9cm}C{0.9cm}}
+  \toprule
+      \textbf{Data (Simulator)} & $N$ & $T$  & \multicolumn{2}{c}{\textbf{NeuralMPM}}  & \multicolumn{2}{c}{\textbf{GNS}}  & \multicolumn{2}{c}{\textbf{DMCF}} \\ 
+      & & & MSE$\downarrow$ & EMD$\downarrow$ & MSE$\downarrow$ & EMD$\downarrow$ & MSE$\downarrow$ & EMD$\downarrow$ \\ \hline
+      \textsc{WaterRamps} (\texttt{MPM}) & 2.3k & 600 & 13.92 & {\bf 68} & {\bf 11.75} & 90 & 20.45 & 105 \\ 
+      \textsc{SandRamps} (\texttt{MPM}) & 3.3k & 400 & 3.12 & {\bf 61} & {\bf 3.11} & 84 &  6.22 & 91 \\ 
+      \textsc{Goop} (\texttt{MPM}) & 1.9k & 400 & {\bf 2.18} & {\bf 55} & 2.4 & 73 & 5.25 & 85 \\ 
+      \textsc{MultiMaterial} (\texttt{MPM}) & 2k & 1000 & {\bf 9.6} & {\bf 66} & 14.79 & 105  & - & - \\ 
+      \textsc{Dam Break 2D} (\texttt{SPH}) & 5k & 401 & {\bf 29.07} & {\bf 348} & 87.04 & 384 & 74.77 & 381 \\
+      \textsc{VariableGravity} (\texttt{MPM}) & 600 & 1000 & \textbf{14.48} & \textbf{92} & 134 & 350 & 28.77 & 97 \\
+      \bottomrule
+  \end{tabular}
+  \caption{Full rollout MSE \& EMD (both $\times 10^{-3}$) for NeuralMPM and the baselines on each dataset, with the maximum number of particles $N$ and sequence length $T$. Each method was trained until full convergence (NeuralMPM: 15h, GNS: 240h, DMCF: 120h), and the best model was used.}
+  \label{table:comparison}
+\end{table}
+\begin{figure}%[hp]
+\begin{minipage}[c]{6cm}
+  \centering
+\end{minipage}
+\hfill
+\begin{minipage}[bc]{8cm}
+  \centering
+\includegraphics[width=\linewidth]{figures/pdf/training_snapshots.pdf}
+  \end{minipage}
+\caption{%
+  \textbf{Training convergence.} (Left) NeuralMPM trains and converges much faster than GNS and DMCF. Note the log scale on both axes. (Right) Snapshots of models trained for increasing durations then unrolled until the same timestep on a held-out simulation. For a fair comparison, out-of-bounds particles in GNS and DMCF were clamped.
+}
+\label{fig:mse_training_time}
+\end{figure}
+\begin{figure}%[hpb!]
+  \centering
+  \includegraphics[width=\linewidth]{fig/fps_mem.pdf}
+  \caption{\textbf{Time and memory performance.} Average FPS (left) and GPU VRAM usage (right) for increasing numbers of particles for a traditional solver (Taichi-MPM \citep{hu2018mlsmpmcpic}), NeuralMPM, and the two baselines. The two baselines quickly require very large amounts of memory and become very slow. Although Taichi-MPM is more memory efficient for high numbers of particles, NeuralMPM remains much faster, emulating 30 million particles at 25FPS.}
+  \label{fig:time_mem_perf}
+\end{figure}
+
+\paragraph{Training.} In Figure~\ref{fig:mse_training_time}, we report the evolution of the mean squared error of full emulated rollouts on the held-out test set during training, for each method, along with predicted snapshots at increasing training durations. NeuralMPM converges significantly faster than both baselines while reaching lower error rates. Furthermore, the convergence of the training procedure and quality of the architecture can be assessed much earlier during training, effectively saving compute and enabling the development of more refined final models. Moreover, NeuralMPM is also more memory-efficient, which enables the use of higher batch sizes of 128, as opposed to only 2 in GNS and DMCF.
+
+
+\paragraph{Inference time and memory.} In Figure~\ref{fig:time_mem_perf}, we display the time and memory performance of NeuralMPM, the two baselines GNS and DMCF, and the reference solver Taichi-MPM. In terms of speed, NeuralMPM strongly outperforms all three methods, partly thanks to time bundling, which considerably reduces the number of model calls required for a given number of frames to emulate. In terms of memory, although NeuralMPM remains inferior to Taichi-MPM, which is highly optimized, it can emulate tens of millions of particles on a single GPU, while GNS and DMCF struggle to reach half a million.
+
+
+\subsection{Generalization} \label{subsec:general}
+
+\begin{figure}[H]%[htp!]
+  \centering
+  \includegraphics[width=\textwidth]{figures/pdf/generalization.pdf}
+  \caption{%
+    \textbf{Generalization.} (Left) NeuralMPM generalizes to domains with more particles ($\sim 4 \times$ here) with minimal inference time overhead due to the processing of the voxelized representation. (Right) A NeuralMPM model trained on a square domain can naturally generalize to larger rectangular domains (twice as wide here) when using a fully convolutional U-Net.
+  }
+  \label{fig:generalization_maintext}
+\end{figure}
+
+One notable advantage of NeuralMPM is its invariance to the number of particles, as the transition model only processes the voxelized representation. To demonstrate this, we train a model on \textsc{WaterRamps}, which contains about $2.3$k particles and $600$ timesteps, and evaluate it on \textsc{WaterDrop-XL}, which features about four times more particles, $1000$ timesteps, and no obstacles. An example snapshot is displayed in Figure~\ref{fig:generalization_maintext}. The larger number of particles only affects interpolation steps between the grid and particles, resulting in a negligible impact on total inference time, making the model nearly as fast despite 4 times more particles. We also validate generalization quantitatively by comparing the error rates on \textsc{WaterDrop-XL} of a model trained directly on it and the model trained solely on \textsc{WaterRamps}. With the same training budget, the latter achieves a lower MSE at $20.92 \times 10^{-3}$ against $28.09  \times 10^{-3}$. More trajectories are displayed in Figure~\ref{fig:app_trajs_waterdropxl}.
+
+If a domain-agnostic processor architecture is used, such as a fully convolutional U-Net or an FNO, then NeuralMPM can generalize to different domain shapes without retraining, as shown in Fig~\ref{fig:generalization_maintext}. We demonstrate this ability by considering a model solely trained on \textsc{WaterRamps}, a square domain of size $0.84 \times 0.84$ mapped to $64 \times 64$ grids. Without retraining, we perform inference with this model on larger unseen environments of size $1.68 \times 0.84$, and change the grid size to $128 \times 64$. The unseen environments were built by merging and modifying initial conditions of held-out test trajectories from \textsc{WaterRamps}. NeuralMPM emulates particles in this larger and rectangular domain despite being trained on a smaller square domain with a smaller grid, showing that a U-Net can generalize to other domains. No ground truth is displayed as \cite{alvaro} provide no information about the data generation. More trajectories are shown in Figure~\ref{fig:generalize_unet_rect}.
+
+
+\subsection{Inverse design problem} \label{subsec:inverse}
+
+
+Finally, we demonstrate the application of NeuralMPM for inverse problems on a toy inverse design task that consists in optimizing the direction of a ramp to make the particles reach a target location, similar to \citep{allen2022physical}. We place a blob of water at different starting locations, and we then place a ramp at some location, with a random initial angle $\alpha$. The goal is to spin the ramp by tuning $\alpha$ in order to make the water end up at a desired location. The main challenges of this task are the long-range time horizon of the goal and the presence of nonlinear physical dynamics. We proceed by selecting the point where we want the water to end up and compute the average distance between the point and particles at the last simulation frame.
+We then minimize the distance via gradient descent, leveraging the differentiability of NeuralMPM to solve this inverse design problem. 
+
+\begin{figure}[h]
+     \centering
+     {\centering
+        \setlength{\tabcolsep}{1.5pt}
+        \renewcommand{\arraystretch}{1}
+        \small
+        \hspace{-4.0mm}\begin{tabular}{C{0.7cm}C{2.05cm}C{2.05cm}C{2.05cm}} 
+            & Initial & Unoptimized & Optimized \\
+    
+              &
+            \frame{\begin{tikzpicture}
+    		\node[anchor=south west, inner sep=0] (image) at (0,0)
+    		{\includegraphics[height=2.0728125cm]{inverse/train_20/train_20_start/pred_1.png}};
+    		\begin{scope}[x={(image.south east)},y={(image.north west)}]
+    		\draw[red, line width=0.4mm] (0.5, 0.21) rectangle (0.6, 0.31);
+            \fill[red] (0.255, 0.255) circle (1.5pt);
+            \draw[red, line width=0.25mm] (0.10, 0.255) -- (0.4, 0.255);
+            \node[red] at (0.4, 0.335) {${\alpha}$};
+            \draw[red, line width=0.25mm] ([shift={(0.285, 0.255)}] 0:1mm) arc (0:94.5:1.5mm);
+            \end{scope} \end{tikzpicture}} &
+            \frame{\begin{tikzpicture}
+    		\node[anchor=south west, inner sep=0] (image) at (0,0)
+    		{\includegraphics[height=2.0728125cm]{inverse/train_20/train_20_start/pred_950.png}};
+    		\begin{scope}[x={(image.south east)},y={(image.north west)}]
+    		\draw[red, line width=0.4mm] (0.5, 0.21) rectangle (0.6, 0.31);
+            \fill[red] (0.255, 0.255) circle (1.5pt);
+            \end{scope} \end{tikzpicture}} &
+            \frame{\begin{tikzpicture}
+    		\node[anchor=south west, inner sep=0] (image) at (0,0)
+    		{\includegraphics[height=2.0728125cm]{inverse/train_20/train_20_solved/pred_950.png}};
+    		\begin{scope}[x={(image.south east)},y={(image.north west)}]
+    		\draw[red, line width=0.4mm] (0.5, 0.21) rectangle (0.6, 0.31);
+            \fill[red] (0.255, 0.255) circle (1.5pt);
+            \end{scope} \end{tikzpicture}}%[-0pt]
+        	\\%[-0pt]
+        \end{tabular}}
+    \caption{\textbf{Inverse design problem.} We exploit NeuralMPM's differentiability to optimize the angle $\alpha$ of a ramp, anchored at the red dot, in order to get the water close to the red square region.}
+    \label{fig:inverse_problem}	
+    \end{figure}
+
+
+
+\section{Conclusion}
+
+
+\paragraph{Summary.} We presented NeuralMPM, a neural emulation framework for particle-based simulations inspired by the hybrid Eulerian-Lagrangian Material Point Method. We have shown its effectiveness in simulating a variety of materials and interactions, its ability to generalize to larger systems and its use in inverse problems. Crucially, NeuralMPM trains in a fraction of the time it takes to train alternative approaches, and is substantially faster at inference time. By interpolating particles onto a fixed-size grid, global information is distilled into a voxelized representation that is easier to learn and process with powerful image-to-image models. The use of voxelization allows NeuralMPM to bypass expensive graph constructions, and the interpolation leads to easier generalization to a larger number of particles and constant runtime. The lack of expensive graph construction and message passing also allows for more autoregressive steps and parallel rollouts.
+
+\paragraph{Limitations. \label{sec:limitations}} Like other approaches, NeuralMPM is limited by the computation used to process the structure of the point cloud. In our case, voxelization means we cannot deal with particles that lie outside of the domain and are limited to regular grids. Additionally, the size of the voxels is directly related to the number of particles within a given volume. If the voxels are too large, the model will fail to capture finer details. Conversely, if they are too small, the model may struggle due to insufficient local structure. Similarly, performance can degrade in very sparse domains. Compressible fluids might also present challenges, though this requires further verification.
+
+\paragraph{Future work.} Our work is only a first step towards hybrid Eulerian-Lagrangian neural emulators, leaving many avenues for future research. Extending NeuralMPM to 3D systems is a natural continuation of this work. Future studies could also explore alternative particle-to-grid and grid-to-particle functions, like the non-uniform Fourier transform \citep{nufft}, or more sophisticated interpolation methods from classical MPM literature \citep{mpm_book}. 
+A less traditional direction is to make NeuralMPM probabilistic and encode richer distributional information about the particles in the grid nodes, instead of maintaining only a mean value. This could potentially improve NeuralMPM's ability to resolve subgrid phenomena. 
+Finally, advances in Lagrangian Particle Tracking \citep{tracking} will eventually make it possible to create datasets from real-world data, enabling the training of NeuralMPM directly from data without the need for the costly design process of a numerical simulator. 
+
+
+
+
+

@@ -1,0 +1,142 @@
+# SemiReward: A General Reward Model for Semi-supervised Learning
+
+- Decision: Accept
+- Scores: 6, 6, 6
+
+## Abstract
+Semi-supervised learning (SSL) has witnessed great progress with various improvements in the self-training framework with pseudo labeling. The main challenge is how to distinguish high-quality pseudo labels against the confirmation bias.
+However, existing pseudo-label selection strategies are limited to pre-defined schemes or complex hand-crafted policies specially designed for classification, failing to achieve high-quality labels, fast convergence, and task versatility simultaneously.
+To these ends, we propose a \textbf{Semi}-supervised \textbf{Reward} framework (\textbf{SemiReward}) that predicts reward scores to evaluate and filter out high-quality pseudo labels, which is pluggable to mainstream SSL methods in wide task types and scenarios. To mitigate confirmation bias, SemiReward is trained online in two stages with a generator model and subsampling strategy.
+With classification and regression tasks on 13 standard SSL benchmarks across three modalities, extensive experiments verify that SemiReward achieves significant performance gains and faster convergence speeds upon Pseudo Label, FlexMatch, and Free/SoftMatch.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work addressed the major challenge in semi-supervised learning, i.e. evaluating the quality of pseudo labels in anomaly detection. A rewarder network is introduced to predict good quality pseudo labels by training on real and generated samples. The proposed reward network is demonstrated to improve multiple semi-supervised learning baselines.
+
+### Strengths
+Strength:
+
+1. Evaluating the quality of pseudo label is a real and major challenge for semi-supervised learning.
+
+2. The experiment evaluation is extensive covering audio, nlp and computer vision tasks. The proposed rewarder also consistently improves the performance of multiple state-of-the-art semi-supervised learning baselines.
+
+### Weaknesses
+Weakness:
+
+1. It is not clear why this rewarder design could be effective. If such a rewarder function is effective can one infer the labels for unlabelled data by simply choosing the label that maximise the rewards score given an input sample? In addition, one may also infer the labels for testing data in the similar way. If this is true, does it mean one can use directly use the rewarder function for inference?
+
+2. According to Fig. 7, the semi-supervised training stage still requires a hard threshold to generate pseudo labels. The proposed method does not reduce the overall amount of hyperparameters to tune compared against existing SSL baselines.
+
+3. It is unclear the definition of fake label. Does it mean the fake label must deviate from the ground-truth label? But the objective of Eq (7) seems to encourage the fake label to be consistent with ground-truth label. There is not enough clarifications here.
+
+4. The current design seems to mix student model f_S with generator. Such a design may affect the training of student model.
+
+### Questions
+A more clear analysis of why the rewarder can predict the label quality and why the rewarder is not used for inference are encouraged.
+
+More discussions on hyper-parameters and the definitions of fake label are recommended.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper proposes Semi-supervised Reward (SemiReward), an add-on module that uses a reward network and a generator network in a two-stage training pipeline, to train a student model with labeled and unlabeled data. The rewarder network predicts scores to filter pseudo labels for the student training, and the generator network generates fake labels (to provide the rewarder with a variety of scenarios, including incorrect ones, so that it learns to distinguish good data from bad more effectively without affecting the training of the student network) that only train the rewarder. The paper proposes a two-stage training pipeline: 1) pre-training both the rewarder network and a generator network on a labeled dataset, 2)  the reward network is trained on a smaller, random subset of the labeled data along with selected unlabeled data. Empirical results on NLP, Vision and Audio datasets show the effectiveness of their framework.
+
+### Strengths
++ This paper is well-written and easy to follow, the motivation and formulation of the paper are sound
+
++ Figures and examples are informative and help understand the paper
+
++ Numerous ablation studies and qualitative comparisons help in understanding the setting
+
++ This paper shows strong empirical results that surpass current state-of-the-art methods on SSL
+
++ This paper adds non-trivial contributions and builds on prior work to present a novel framework for SSL
+
+### Weaknesses
+ - Missing experiments: recent works show the effectiveness of their proposed methods by varying the number of labeled samples, given the sensitivity of available data and their impact, it seems imperative to include such experiments to asses the proposed method.
+
+- Missing benchmarks: it is hard to asses the impact of the proposed framework without at least a large-scale experiment (e.g., ImageNet)
+
+- Some gains, especially in NLP and CV datasets seem marginal (e.g., TL +0.30)
+
+### Questions
+- The NLP experiments are performed using 1\% labels, what is the labeled \% used in the CV and Audio datasets?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper studies the problem of semi-supervised learning, where the labeled data is limited and unlabeled data are massive during training. Previous pseudo labeling based methods are limited to pre-defined schemes or complex hand-crafted policies specially designed for classification. To address this, the authors present the Semi-supervised Reward framework (SemiReward), which assesses and chooses high-quality pseudo labels through predicted reward scores and is adaptable to mainstream SSL methods for both classification and regression tasks.
+
+### Strengths
+1. The paper is well-written and easy to understand.
+2. The proposed integration of a reward model with an SSL model enhances pseudo label quality evaluation, with extensive experiments demonstrating its effectiveness across diverse tasks.
+3. The experimental protocol is detailed and conducive to reproduce the results.
+
+### Weaknesses
+1. The method involves multiple models and training processes, adding complexity.
+2. The manuscript would benefit from pseudo codes for improved clarity.
+2. The design of reward model and hyper-parameter selection influence the outcomes, affecting the method's feasibility in practical scenarios.
+
+### Questions
+See weaknesses.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

@@ -1,0 +1,400 @@
+\title{Action Mapping for Reinforcement Learning in Continuous Environments with Constraints}
+
+\begin{abstract}
+
+Deep reinforcement learning (DRL) has had success across various domains, but applying it to environments with constraints remains challenging due to poor sample efficiency and slow convergence. Recent literature explored incorporating model knowledge to mitigate these problems, particularly through the use of models that assess the feasibility of proposed actions. However, integrating feasibility models efficiently into DRL pipelines in environments with continuous action spaces is non-trivial. We propose \new{a novel DRL training strategy utilizing  \textit{action mapping}} that leverages feasibility models to streamline the learning process. By decoupling the learning of feasible actions from policy optimization, action mapping allows DRL agents to focus on selecting the optimal action from a reduced feasible action set. We demonstrate through experiments that action mapping significantly improves training performance in constrained environments with continuous action spaces, especially with imperfect feasibility models. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Deep Reinforcement learning (DRL) has emerged as a powerful tool across numerous application domains, ranging from robotics \citep{funk2022learn2assemble} and autonomous system \citep{trumpp2024racemop} to game-playing \citep{vinyals2019grandmaster} and other decision-making tasks \cite{bayerlein2021multi}. \new{The ability of DRL} to learn complex behaviors through trial and error makes \new{it} highly promising for solving challenging problems. \new{Despite the potential of DRL, its application is limited by poor sample efficiency and challenges in handling constraints that frequently arise in real-world tasks. Such constraints, such as safety requirements or physical limits, complicate the exploration and learning processes~\citep{achiam2017constrained}.}
+
+In many constrained environments, it is essential to prevent the agent from selecting actions that could violate certain constraints. \new{Therefore, it has been proposed to utilize feasibility models that assess the feasibility of proposed actions at a given state. Their application} is straightforward in discrete action spaces, where infeasible actions can simply be masked out, preventing the agent from choosing them \citep{huang2020closer}. Action masking has been successfully applied in various discrete action space problems, such as vehicle routing \citep{nazari2018reinforcement}, autonomous driving scenarios \citep{krasowski2020safe}, and task scheduling \citep{sun2024edge}. However, \new{integrating feasibility models} becomes significantly more challenging in continuous action spaces, as actions cannot be directly masked out.
+
+Several methods have been proposed for integrating feasibility \new{models} in continuous action spaces. \textit{Action replacement} substitutes infeasible actions with predefined feasible ones \citep{srinivasan2020learning}, while \textit{action resampling} rejects invalid actions and samples new ones until a feasible action is found \citep{bharadhwaj2020conservative}. Another approach is \textit{action projection}, which projects the agent's chosen action onto the nearest feasible one \citep{cheng2019end}. While these methods offer solutions, they often introduce inefficiencies or increase the computational cost of learning and decision-making, particularly in complex environments.
+
+\new{Inspired by the simplicity of action masking in discrete action spaces, \citet{theile2024learning} proposed \textit{action mapping}, a framework to address inefficiencies when incorporating feasibility models in continuous action spaces. In their framework, a feasibility policy is pretrained to generate all feasible actions by leveraging the feasibility model. This feasibility policy creates a state-dependent representation of feasible actions, enabling an objective policy to focus solely on optimizing the task's objective. While this concept shows promise, \citet{theile2024learning} only focussed on the feasibility policy, omitting the objective policy and thus leaving its practical benefits in DRL unexplored. In this paper, we refine their feasibility policy training and formulate the training procedure for the objective policy. We further demonstrate its implementation in safe RL, achieving significant improvements in both sample efficiency and constraint satisfaction compared to other safe RL methods.}
+
+Importantly, our focus is not on ensuring guaranteed constraint satisfaction. Instead, the primary objective is to leverage prior knowledge encapsulated in (potentially imperfect) feasibility models as an inductive bias to accelerate and improve the performance of DRL training. To that end, we test our approach in two constrained environments: (i) A robotic arm end-effector pose positioning task with obstacles using a perfect feasibility model, and (ii) a path planning environment with constant velocity and non-holonomic constraints, for which an approximate feasibility model is used. The experiments show that our action mapping approach outperforms \new{Lagrangian approaches~\citep{ha2020learning,ray2019benchmarking} and} an action projection approach, especially in scenarios with an approximate feasibility model. 
+
+\new{
+Our work bridges the gap between the conceptual framework of action mapping and its practical implementation in constrained environments, leading to the following contributions:
+\begin{itemize}
+    \item Development and implementation of the action mapping framework for DRL to efficiently incorporate feasibility models during training.
+    \item Demonstration of action mapping's (AM) effectiveness in constrained environments using perfect and approximate feasibility models with AM-PPO and AM-SAC implementations.
+    \item Empirical comparison with Lagrangian methods and action replacement, resampling, and projection, highlighting superior performance, especially with approximate models.
+    \item Showcasing action mapping's ability to express multi-modal action distributions, enhancing exploration and learning performance.
+\end{itemize}
+}
+
+
+
+\section{Preliminaries}
+
+
+\subsection{State-wise Constrained Markov Decision Process}
+
+A state-wise constrained Markov Decision Process (SCMDP) \citep{zhao2023state} can be defined through the tuple $(\mathcal{S}, \mathcal{A}, \mathrm{R}, \{\mathrm{C}_i\}_{\forall i}, \mathrm{P}, \gamma, \mathcal{S}_0, \mu)$, in which $\mathcal{S}$ and $\mathcal{A}$ are the state and action space. The reward function $\mathrm{R}:\mathcal{S}\times \mathcal{A}\to \mathbb{R}$ defines the immediate reward received for performing a specific action in a given state. A transition function $\mathrm{P}:\mathcal{S}\times \mathcal{A}\to\mathcal{P}(\mathcal{S})$ describes the stochastic evolution of the system, with $\mathcal{P}(\mathcal{S})$ defining a probability distribution over the state space. The discount factor $\gamma\in[0,1]$ weighs the importance of immediate and future rewards. Additionally, a set of initial states $\mathcal{S}_0$ and an initial state distribution $\mu = \mathcal{P}(\mathcal{S}_0)$ are provided. When following a stochastic policy $\pi:\mathcal{S}\to\mathcal{P}(\mathcal{A})$, the expected discounted cumulative reward is defined as
+\begin{equation}\label{eq:objective}
+    \mathrm{J}(\pi) = \mathbb{E}\left[ \sum_{t=0}^{\infty} \gamma^t \mathrm{R}(s_t, a_t)~|~ s_0\sim \mu, a_t\sim\pi(\cdot|s_t), s_{t+1} \sim \mathrm{P}(\cdot| s_t, a_t) \right].
+\end{equation}
+
+In contrast to a regular MDP \citep{sutton2018reinforcement}, in an SCMDP, a set of cost functions $\{\mathrm{C}_i\}_{\forall i}$ is defined, in which $\mathrm{C}_i: \mathcal{S}\times\mathcal{A}\times\mathcal{S}\to \mathbb{R}$, such that every transition is associated with a cost value. In a CMDP \citep{altman2021constrained}, the expected discounted cumulative cost for each cost function $\mathrm{C}_i$ needs to be bounded by a $w_i\in\mathbb{R}$. In an SCMDP, the cost functions are required to be bounded for \textit{each} transition individually, which is a stricter constraint. With all possible trajectories $\tau^\pi(s)$ when following $\pi$ starting from a state $s$, the SCMDP optimization problem is formulated as
+\begin{align}
+    \pi^* = & \operatorname{arg}\max_{\pi\in\Pi} \mathrm{J}(\pi) \nonumber \\
+    &\text{s.t.}~ \mathrm{C}_i(s_t, a_t, s_{t+1}) \leq w_i, \quad \forall i, \forall (s_t, a_t, s_{t+1})\sim \tau^\pi(s_0), \forall s_0\in\mathcal{S}_0. \label{eq:const_obj}
+\end{align}
+The optimization requires that each cost function $\mathrm{C}_i$ is bounded by $w_i$ for each transition $(s_t, a_t, s_{t+1})\sim \tau^\pi(s_0)$ along all possible trajectories of $\pi$ starting from all possible initial states in $\mathcal{S}_0$.
+
+\subsection{Deep Reinforcement Learning}
+
+In reinforcement learning, the goal is to learn a policy $\pi(a|s)$ that maximizes the expected cumulative reward as in \eqref{eq:objective} \citep{sutton2018reinforcement}. In DRL, policies are parameterized by deep neural networks, enabling agents to handle high-dimensional state and action spaces. For environments with continuous action spaces, two widely-used DRL algorithms are the off-policy Soft Actor-Critic (SAC) \citep{haarnoja2018soft} and on-policy Proximal Policy Optimization (PPO) \citep{schulman2017proximal} algorithms.
+
+\paragraph{Soft Actor-Critic (SAC).} SAC is an off-policy algorithm that maximizes a reward signal while encouraging exploration through an entropy regularization term. The policy $\pi$ in SAC aims to maximize both the expected cumulative reward and the policy entropy, encouraging stochasticity in action selection. The SAC objective is defined as
+\begin{equation} 
+\new{\mathrm{J}}(\pi) = \mathbb{E}_{(s_t, a_t) \sim \pi} \left[ \new{\mathrm{Q}}(s_t, a_t) + \alpha \mathcal{H}(\pi(\cdot | s_t)) \right], 
+\end{equation} 
+where $\new{\mathrm{Q}}(s_t, a_t)$ represents the Q-function, which estimates the expected return when taking action $a_t$ in state $s_t$, and $\mathcal{H}(\pi(\cdot | s_t))$ is the entropy of the policy. The hyperparameter $\alpha$ controls the trade-off between return maximization and exploration.
+
+\paragraph{Proximal Policy Optimization (PPO).} PPO is an on-policy algorithm that improves training stability by limiting the magnitude of policy updates to ensure smoother learning. The PPO objective is defined using a clipped surrogate loss to avoid large deviations from the current policy: 
+\begin{equation}\label{eq:ppo}
+\new{\mathrm{J}(\pi)} = \mathbb{E}_{t} \left[ \min \left( r_t(\new{\pi}) \hat{A}_t, \mathrm{clip}(r_t(\new{\pi}), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right], 
+\end{equation} 
+where $r_t(\new{\pi})$ is the probability ratio between the new and old policies, and $\hat{A}_t \approx \new{\mathrm{Q}}(s_t, a_t) - \mathrm{V}^{\new{\pi}}(s_t)$ is the approximate advantage function. In the advantage, the state value $\mathrm{V}^{\new{\pi}}$ is the expected value if following the current policy. The advantage is commonly estimated using the generalized advantage estimate (GAE) from \cite{schulman2015high}.
+
+\subsection{Feasibility Models}
+Given the individual cost functions for a transition, a joint cost function can be defined as
+\begin{equation}
+    \mathrm{C}(s_t, a_t, s_{t+1}) = \sum_{\forall i} \max \left\{ 0;~ \mathrm{C}_i(s_t, a_t, s_{t+1}) - w_i \right\},
+\end{equation}
+which is $0$ if no cost function exceeds its bound and otherwise the sum of the violations. With the joint cost function, a policy-dependent trajectory cost can be defined as
+\begin{equation}\label{eq:traj_cost}
+    \mathrm{C}^\tau(s; \pi) = \max_{(s_t, a_t, s_{t+1})\sim\tau^\pi(s)} \mathrm{C}(s_t, a_t, s_{t+1})
+\end{equation}
+that expresses the highest joint cost of any transition $(s_t, a_t, s_{t+1})$ along all possible trajectories, starting from some $s$ and following $\pi$. It is $0$ if no cost function exceeds its bound.
+
+A feasibility model $\mathrm{G}:\mathcal{S}\times\mathcal{A}\to\mathbb{R}$ defines the cost violation of the transition induced by applying action $a_t$ at state $s_t$, plus the cost violation of the most feasible policy from the next state. Formally, we define it as
+\begin{equation}\label{eq:feas_cont}
+    \mathrm{G}(s_t,a_t) = \max_{s_{t+1} \sim \mathrm{P}(\cdot | s_t, a_t)}\left[ \mathrm{C}(s_t, a_t, s_{t+1}) + \min_{\pi\in\Pi} \mathrm{C}^\tau(s_{t+1}; \pi) \right],
+\end{equation}
+with the maximization over all possible next states. A Boolean version of the feasibility model $\mathrm{g}:\mathcal{S}\times\mathcal{A}\to\mathbb{B}$ can be defined as 
+\begin{equation}\label{eq:feas_bool}
+    \mathrm{g}(s_t, a_t) = (\mathrm{G}(s_t, a_t) == 0),
+\end{equation}
+where ``$==$'' denotes Boolean equality. It indicates whether all possible transitions induced by $a_t$ at $s_t$ are feasible and whether a policy exists such that a cost violation can be avoided from any possible $s_{t+1}$.
+
+
+\section{Related Research}
+
+
+The majority of the safe RL literature focuses on discrete actions through action masking \citep{huang2020closer}, often through shielding \citep{alshiekh2018safe}. Action projection is usually proposed to incorporate feasibility models for continuous action spaces. \citet{donti2021dc} propose DC3 to perform action projection through gradient descent on a feasibility model, while \cite{cheng2019end} use control barrier functions. When the feasible action space is known and can be described as a convex polytope, a limiting assumption, \citet{stolz2024excluding} introduce a similar concept to action mapping that also improves performance. 
+
+Learning-based approaches incorporate constraints directly into the RL process, often using techniques like Lagrangian optimization or dual frameworks. CMDPs \citep{altman2021constrained} introduce cumulative cost constraints, while Constrained Policy Optimization (CPO) \citet{achiam2017constrained} extends trust-region policy optimization by ensuring monotonic improvement under safety constraints. \citet{bharadhwaj2020conservative} propose conservative safety critics that reject unsafe actions during exploration and resamples from the actor, while \cite{srinivasan2020learning} replaces the unsafe action with a null action. Penalized PPO (P30) \citep{zhang2022penalized} further incorporates constraint penalties, and Lagrangian PPO \citep{ray2019benchmarking} and feasible actor-critic \citep{ma2021feasible} use Lagrangian multipliers to balance reward maximization and constraint satisfaction.
+
+Combining model-based and learning approaches, learned feasibility models are often used to perform action projection. \cite{dalal2018safe} learn a linear approximation of the cost function and perform action projection using the linear model. \cite{chow2019lyapunov} learn a Lyapunov function and perform action or parameter projection. \cite{zhang2023evaluating} use DC3 with a learned safety critic, using it for iterative gradient descent-based action projection. Further approaches to safe RL can be found in surveys by \citet{gu2022review} and \citet{zhao2023state}.
+
+While recent works have primarily focused on action projection methods when incorporating feasibility models, we propose a novel method that describes a mapping instead of a projection, which we show can improve learning performance.
+
+\new{
+Besides the safe RL perspective, action mapping is also related to the research in action representation learning. In action representation, a continuous latent action representation of large (discrete) action spaces is learned \citep{chandak2019learning}. It has been extended to learn representation of sequences of actions~\citep{whitney2020dynamics}, mixed discrete and continuous actions~\citep{li2022hyar}, or specifically for offline RL~\citep{gu2022learning}. Action mapping can be thought of as finding an action representation for the state-dependent set of feasible actions.
+}
+
+
+\section{Action Mapping Methodology}
+
+
+If a feasibility model $\mathrm{g}$ from \eqref{eq:feas_bool} can be derived for an environment, the question is how to use it efficiently in RL. The intuition of \textit{action mapping} is to first learn \textit{all} feasible actions through interactions with $\mathrm{g}$ and subsequently train a policy through interactions with the environment to choose the best action among the feasible ones. By allowing the objective policy to choose only among feasible actions, the SCMDP is effectively transformed into an unconstrained MDP, as illustrated in Fig.~\ref{fig:am_arch}. Since unconstrained MDPs are generally easier to solve than SCMDPs--primarily due to reduced exploration complexity--action mapping can drastically improve training performance. In the following, the time index is dropped from $s_t$ and $a_t$ for improved readability.
+
+Formally, given $\mathrm{g}$, the state-dependent set of feasible actions $\mathcal{A}_s^+\subseteq\mathcal{A}$ contains all actions for which $\mathrm{g}(s, a) = 1$. To learn all feasible actions, \new{a feasibility policy is defined as}
+\begin{equation}
+    \pi_f : \mathcal{S} \times\mathcal{Z} \to \mathcal{A}_s^+,
+\end{equation}
+which is a generator that generates feasible actions for a given state. The latent space $\mathcal{Z}$ allows the policy $\pi_f$ to generate multiple feasible actions for the same state. \new{It} has the same cardinality as the action space $\mathcal{A}$. A perfect feasibility policy is a state-dependent surjective map from $\mathcal{Z}$ to $\mathcal{A}_s^+$, as it is able to generate all feasible actions without generating infeasible ones. \new{With a perfect feasibility policy, the latent space $\mathcal{Z}$ is an action representation of the set of feasible actions.}
+
+Given a feasibility policy $\pi_f$, an objective policy 
+\begin{equation}
+    \pi_o: \mathcal{S}\to \mathcal{P}(\mathcal{Z})
+\end{equation}
+can be trained to find the state-dependent optimal latent value distribution. Through the map $\pi_f$, the overall policy \begin{equation}
+    \pi = \pi_f \circ \pi_o: \mathcal{S}\to\mathcal{P}(\mathcal{A}_s^+)
+\end{equation} 
+thus learns the optimal distribution over the feasible actions.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{figures/am_arch.pdf}
+    \caption{Interaction architecture of action mapping, showing how a perfect feasibility policy $\pi_f$ can transform the SCMDP indicated by $\mathrm{P}$ into an unconstrained MDP with transition function $\mathrm{P}_f$ and action space $\mathcal{Z}$.}
+    \label{fig:am_arch}
+\end{figure}
+
+Fig.~\ref{fig:am_arch} shows the action mapping architecture. It illustrates that a perfect feasibility policy $\pi_f$ transforms the state-wise constrained environment with transition function $\mathrm{P}$ into an unconstrained environment with transition function $\mathrm{P}_f$ with action space $\mathcal{Z}$. The following describes how to train the feasibility and objective policies.
+
+\subsection{Feasibility Policy}
+
+To train the feasibility policy, we use the approach \new{from} \cite{theile2024learning}. The parameterized feasibility policy $\pi_f^\theta$ with parameters $\theta$ aims to be a state-dependent surjective map from the latent space $\mathcal{Z}$ to the set of feasible actions $\mathcal{A}_s^+$, to allow the objective policy to choose among all feasible actions. When sampling $z\sim\mathcal{U}(\mathcal{Z})$, i.e., uniformly from the latent space, $\pi_f^\theta$ becomes a generator with a conditional probability density function (pdf) $q^\theta(a|s)$. Since $\pi_f^\theta$ is task-independent, this generator should generate all feasible actions equally likely without any bias toward any specific feasible action. Therefore, the target of $q^\theta(a|s)$ is a uniform distribution in the feasible action space, i.e., $\mathcal{U}(\mathcal{A}_s^+)$.
+
+This uniform target distribution is given through the feasibility model $\mathrm{g}$ as 
+\begin{equation}
+    p(a|s) = \frac{\mathrm{g}(s,a)}{\mathrm{Z}(s)}, \quad \text{with} \quad \mathrm{Z}(s) = \int_\mathcal{A}\mathrm{g}(s,a')da'
+\end{equation}
+where $\mathrm{Z}(s)$ is a partition function, effectively indicating the \textit{volume} of feasible actions given a state. The objective of the feasibility policy is then 
+$
+    \min_{\theta} \mathrm{D}(p(\cdot|s) || q^\theta(\cdot|s)),
+$
+with a divergence measure $\mathrm{D}$. 
+
+Since $q^\theta$ and $p$ are not available in closed form, both need to be approximated. The distribution of the policy can be approximated through a kernel density estimate (KDE) based on $N$ samples from $q^\theta(\cdot|s)$ as
+\begin{equation}
+    \hat{q}^\theta_{\sigma}(a | s) = \frac{1}{N}\sum_{a_i \sim q^\theta(\cdot|s)}k_\sigma(a - a_i),
+    \label{eq:kde}
+\end{equation}
+with a kernel $k$ with bandwidth $\sigma$. To explore the feasibility of actions outside the support of $q^\theta$, Gaussian noise is added to the sampled actions as
+\begin{equation}
+    a_i^* = a_i + \epsilon_{\new{i}}, \quad \epsilon_{\new{i}}\sim \mathcal{N}(0, \sigma'),
+\end{equation}
+which is equivalent to sampling from the KDE with bandwidth $\sigma'$ as $a^*_i\sim \hat{q}^\theta_{\sigma'}(\cdot|s)$. \new{\citet{theile2024learning} propose to sample multiple actions per support point of the KDE, which our experiments showed to be unnecessary.} The distribution $\hat{q}^\theta_{\sigma'}$ with $\sigma' \geq \sigma$ is a proposal distribution used for the divergence estimate. Using these samples, the target distribution can be estimated as
+\begin{equation}
+    \hat{p}(a|s) = \frac{\mathrm{g}(s,a)}{\hat{\mathrm{Z}}(s)}, \quad \text{with} \quad \hat{\mathrm{Z}}(s) = \frac{1}{N}\sum_{a^*_i\sim \hat{q}^\theta_{\sigma'}(\cdot|s)}\frac{\mathrm{g}(s, a^*_i)}{\hat{q}^\theta_{\sigma'}(a^*_i|s)},
+\end{equation}
+where the partition function is approximated using Monte-Carlo importance sampling. Using the approximation $\hat{q}^\theta_\sigma$, the samples $a_i^*$ from the proposal distribution $\hat{q}^\theta_{\sigma'}$, and the approximation of the target distribution $\hat{p}$, the gradient of the Jensen-Shannon divergence can be approximated as
+\begin{equation}\label{eq:gradient}
+    \frac{\partial}{\partial\theta}\mathrm{D}_\text{JS}(p ~||~ q^\theta) \approx \frac{1}{2N}\sum_{a^*_i\sim \hat{q}^\theta_{\sigma'}} \frac{\hat{q}^\theta_\sigma(a^*_i)}{\hat{q}^\theta_{\sigma'}(a^*_i)} \log\left(\frac{2\hat{q}^\theta_\sigma(a^*_i)}{\hat{p}(a^*_i) + \hat{q}^\theta_\sigma(a^*_i)}\right) \frac{\partial}{\partial\theta}\log \hat{q}^\theta_\sigma(a^*_i),
+\end{equation}
+dropping the dependency on $s$ for readability. \new{\cite{theile2024learning} showed the Jensen-Shannon divergence yields} the best compromise between reaching all actions, even in disconnected sets of feasible actions, and minimizing the probability of generating infeasible actions.
+
+\subsection{Objective Policy}\label{sec:objective_policy}
+
+\begin{wrapfigure}{r}{0.5\textwidth} % 'r' for right, 'l' for left
+\begin{minipage}{\linewidth}
+\begin{algorithm}[H]
+\scriptsize
+\caption{\new{AM Training Procedure}} 
+\label{alg:obj_unified}
+\begin{algorithmic}[1] % Line numbering starts here
+\State Initialize $\pi_o^\phi$, and $\mathrm{Q}^\psi$ (AM-SAC) or $\mathrm{V}^\psi$ (AM-PPO)
+\State Initialize buffer $\mathcal{D}\leftarrow \{\}$
+\State Load or pretrain $\pi_f^\theta$ using Algorithm~\ref{alg:feas_pol}
+\State $s \leftarrow~$env.reset()
+\For{$1$ \textbf{to} Interaction Steps }
+    \State $\mu, \sigma \leftarrow \pi_o^\phi(s)$  \Comment{Get policy parameters}
+    \State $x \sim \mathcal{N}(\cdot|\mu, \sigma)$ \Comment{Sample from Gaussian} 
+    \State $z \leftarrow \tanh(x)$ \Comment{Squash into latent space} 
+    \State $a \leftarrow \pi_f^\theta(s, z)$  \Comment{Map to action space}
+    \State $\hat{V}_s \leftarrow \mathrm{V}^\psi(s)$ \Comment{for AM-PPO}
+    \State $\text{log}\pi\leftarrow \log \mathcal{N}(x|\mu, \sigma) - \log (1-z^2)$ \Comment{for AM-PPO}
+    \State $s', r, d \leftarrow~$ env.step($a$)
+    \State $\mathcal{D} \leftarrow \mathcal{D} \cup 
+        \begin{cases} 
+        (s, z, r, s', d), & \text{for AM-SAC} \\
+        (s, z, \text{log}\pi, \hat{V}_s, r, s', d), & \text{for AM-PPO} 
+        \end{cases}$
+    \State $s\leftarrow s'~\textbf{if}~~\neg d~~\textbf{else}~~$env.reset()
+    \If{$\mathcal{D}$ is ready for training}
+        \State \textbf{if} AM-SAC \textbf{then} $\pi_o^\phi, \mathrm{Q}^\psi\leftarrow~$ SAC train step
+        \State \textbf{if} AM-PPO \textbf{then} $\pi_o^\phi, \mathrm{V}^\psi\leftarrow~$ PPO train epoch, ~$\mathcal{D}\leftarrow\{\}$
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+\new{Algorithm~\ref{alg:obj_unified} shows our proposed training procedure for AM-SAC based on Soft Actor-Critc (SAC) and AM-PPO using Proximal Policy Optimization (PPO). For both algorithms, the objective policy $\pi_o^\phi$ parameterizes a Gaussian from which a value $x$ is sampled (lines 6-7). Since the Gaussian is not bounded, we squash it using a $\tanh$ yielding the latent value $z$ (line 8). The latent $z$ is then mapped to an action $a$ using $\pi_f^\phi$ (line 9). If using AM-PPO, the state-value estimate $\hat{V}_s$ and the log-likelihood of the latent are gathered (lines 10-11). For the log-likelihood, a term is added to compensate for the squashing effect. Using the action $a$, the environment steps to the next state $s'$, yielding reward $r$ and a termination flag $d$ (line 12), and the collected experience tuples are stored in the buffer $\mathcal{D}$ (line 13). The experience tuples do not contain the action $a$ but solely the latent $z$. 
+}
+
+\new{
+When the buffer is full (AM-PPO) or the buffer has sufficient samples for a batch (AM-SAC), the agent is trained (line 15). For AM-SAC, a standard SAC training step is performed in which the critic is updated to estimate the state-latent value, and the actor maximizes the critic's output with an added entropy term (line 16). For AM-PPO (line 17), the agent is trained on the full buffer as done in PPO, with the critic updated to predict the state value and the actor through standard policy optimization on the latent distribution. In AM-PPO, the buffer is reset after training. 
+}
+\newcommand{\pif}{\pi_f^\phi}
+\newcommand{\tpif}{$\pif$}
+\newcommand{\pio}{\pi_o^\theta}
+\newcommand{\tpio}{$\pio$}
+\newcommand{\Qpsi}{\mathrm{Q}^\psi(s,a)}
+\newcommand{\tQpsi}{$\Qpsi$}
+
+\new{
+In principle, \tpio~ could be trained on the actions $a$ instead of the latent $z$. However, this leads to problems in AM-PPO and AM-SAC. In AM-PPO, it would be challenging to estimate the log-likelihood of an action $a$ given the log-likelihood of latent $z$. While $\pi_f^\phi$ is trained to map uniformly into the set of feasible actions, it is neither perfect nor strictly bijective, and the log-likelihood for $a$ would require approximations, e.g., through KDEs. This is costly and likely creates ill-posed gradients for the training of \tpio. In AM-SAC, if training $\mathrm{Q}^\psi(s, a)$, the policy gradient for \tpio~ could propagate through \tpif. While this is tractable, \tQpsi~ is not trained on infeasible actions and thus likely yields arbitrary gradients near the feasibility border, preventing \tpio~ from jumping between disconnected sets of feasible actions. Additionally, the entropy in the action space is difficult to assess, similar to the log-likelihood. Preliminary experiments on training AM-SAC on $a$, with entropy in the latent space, showed no advantage compared with standard SAC training. 
+}
+\new{
+Consequently, training \tpio~ and, in AM-SAC, $\mathrm{Q}^\psi$ on the latent space is significantly more straightforward to implement and yields better results. A primary advantage of training on the latent space is that disconnected sets of feasible actions are very close in the latent space, allowing policy gradient and policy optimization algorithms to jump between the sets. Additionally, a single modal Gaussian in the latent space can be mapped to a multi-modal distribution in the action space, allowing for better exploration and decreasing the chance of being trapped in local optima. Fig.~\ref{fig:feas_opt} highlights and discusses the exploration benefit. Overall, as shown in Fig.~\ref{fig:am_arch}, the idea is to convert the SCMDP into an unconstrained MDP. Therefore, from the perspective of \tpio~ and $\mathrm{Q}^\psi$, the environment is given by $\mathrm{P}_f(s'|s,z) = \mathrm{P}(s'|s, \pi_f(s, z))$. 
+}
+
+
+
+
+
+
+
+
+
+\section{Experiment Setup}
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=0.63\linewidth]{figures/robgym.png}
+        \caption{Robotic arm end-effector pose environment with obstacles in gray and the target pose to the left.}
+        \label{fig:rob_gym}
+    \end{minipage}\hfill%
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=0.60\linewidth]{figures/scenario_legend.png}
+        \caption{Spline-based path planning environment with constant velocity and non-holonomic constraints.}
+        \label{fig:spline_gym}
+    \end{minipage}%
+\end{figure}
+
+\subsection{Applications}
+We define two different RL environments, shown in Figs.~\ref{fig:rob_gym} and~\ref{fig:spline_gym}, with continuous state and action spaces to demonstrate how action mapping can be implemented and to evaluate its performance compared with common approaches. The first experiment is a robotic arm end-effector pose tracking task with multiple obstacles. This task was designed so that a perfect feasibility model can be derived and a feasible null action exists. The second experiment is a path planning problem with constant velocity and non-holonomic constraints, which can be found using fixed-wing aircraft. Since a fixed-wing aircraft cannot stop or turn around instantaneously, deriving a perfect feasibility model is extremely challenging. Therefore, we utilize that environment to showcase action mapping's performance using approximate feasibility models. In both environments, the episode is terminated when a constraint is violated\new{, which exacerbates the challenge for DRL.} 
+
+\subsubsection{Robotic Arm End-effector Pose}
+
+In this environment, visualized in Fig.~\ref{fig:rob_gym}, the agent is a purely kinematic robot arm, neglecting inertia, loosely replicating a 7 DOF Franka Research 3 robotic arm \citep{franka}. Given a starting pose, the agent needs to move the joints such that its end-effector reaches a target pose without colliding with obstacles. The obstacles are represented by spheres, and the collision shape of the robot arm is defined by a series of capsules that can be seen as a pessimistic safety hull. The obstacles are sampled using rejection sampling to avoid intersections with the start and end configuration.
+
+\textbf{State space.} The state contains the 7 joint angles of the robot arm, the target pose (rotation + translation from the origin), and the parameters of up to 20 spherical obstacles. 
+
+\textbf{Action space.} The action is defined as a delta of the joint angles.
+
+\textbf{Constraints.} The agent is not allowed to exceed its joint limits or \new{predefined} maximum cartesian velocities of each joint. No part of the robot arm is allowed to collide with any of the obstacles. 
+\textbf{Reward function.} The reward function is a weighted sum of the decrement of the distance and angle of the end-effector pose to the target pose.
+
+\textbf{Feasibility model.} The feasibility model performs a one-step prediction and evaluates the constraint functions on joint limits, joint Euclidean velocities, and obstacle collision. 
+
+In this scenario, the feasibility model is perfect, and a feasible replacement action exists (no movement). We train different PPO configurations and compare their performance in the next section.
+
+\subsubsection{Non-holonomic Path Planning with Constant Velocity}
+
+This environment contains an agent that needs to collect targets while avoiding obstacles. The agent can be thought of as a fixed-wing aircraft that needs to maintain a constant velocity, and its turns cannot exceed a maximum curvature. The airplane in Fig.~\ref{fig:spline_gym} is for visualization purposes only; the agent's dimensions are assumed to be integrated into the obstacles.
+
+\textbf{State space.} The state space contains 30 randomly sampled rectangular obstacles and 10 randomly placed and sized circular targets. Additionally, the agent has a position and current velocity.
+
+\textbf{Action space.} The agent parameterizes 2D cubic Bezier curves, which are anchored at the agent's position and starting in the agent's current direction, yielding a 5D action space. The splines are followed for a constant time, after which a new spline is generated by the agent.
+
+\textbf{Constraints.} The agent is not allowed to collide with any obstacle or leave the squared area. While following the spline for \new{a} constant following time, the induced curvature must not exceed a curvature bound, and the agent must not reach the end of the spline.
+\textbf{Reward function.} The agent receives a reward of 0.1 when a target is collected and an additional reward of 1.0 when all targets are collected.
+
+\textbf{Feasibility model.} The approximate feasibility model generates 64 points along the spline and locally assesses collisions with obstacles, whether a point is out of bounds, and whether the local curvature exceeds the curvature bound. Additionally, it adds the Euclidean distances between the points to estimate the length of the spline. The spline length needs to be within length bounds.
+
+The idea behind the spline-based action space is to express a multi-step action with reduced dimensionality. Through this multi-step action, the feasibility model can assess whether a feasible path exists within a time horizon\new{, effectively expressing a short horizon policy that minimizes the future trajectory cost in the second term of \eqref{eq:feas_cont} }. Therefore, the minimum length of the generated spline for the feasibility model is set to a multiple of the distance traveled per time step (a factor of 2.5 in this experiment). The maximum length of a spline is defined to bound the action space (3.5 in the experiment), yielding a look-ahead of around two timesteps. We train different SAC configurations and compare their performance in the next section.
+}
+
+
+\subsection{Comparison}
+
+Given a feasibility model $\mathrm{G}$ from \eqref{eq:feas_cont} or its Boolean-valued version $\mathrm{g}$ from \eqref{eq:feas_bool}, the three common approaches to utilize it are action replacement, resampling, and projection.} \new{They} each offer distinct trade-offs in terms of computational cost and feasibility guarantees, and our experiments explore their performance in different settings.
+
+\new{Additionally to these methods utilizing feasibility models, we compare with model-free Lagrangian methods ``Lagrangian SAC''~\citep{ha2020learning} and ``Lagrangian PPO''~\citep{ray2019benchmarking}. In these methods, a safety critic is trained to estimate the expected cumulative cost or, in our case, the expected probability of constraint violation, and a policy aims to maximize a Lagrangian dual problem.}
+
+
+
+\section{Results}
+
+
+\subsection{Robot Arm}
+\begin{figure}
+    \centering    
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/rob_return.pdf}
+        \caption{\new{Robot arm -- Return}}
+        \label{fig:rob_return}
+    \end{subfigure}%
+    \begin{subfigure}{0.2\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{figures/rob_legend_legend.pdf}
+    \end{subfigure}%
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/rob_failed.pdf}
+        \caption{\new{Robot arm -- Constraint violation}}
+        \label{fig:rob_failed}
+    \end{subfigure}
+    
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/all_return.pdf}
+        \caption{\new{Path planning -- Return}}
+        \label{fig:pp_return}
+    \end{subfigure}%
+    \begin{subfigure}{0.2\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/all_success_legend.pdf}
+    \end{subfigure}%
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/all_failed.pdf}
+        \caption{\new{Path planning -- Constraint violation}}
+        \label{fig:pp_failed}
+    \end{subfigure}%
+    \caption{Training curves for the two applications with the results for the robot arm environment in (a)\new{+}(b) and for the path planning environment in (c)\new{+(d)}. For each configuration, 3 agents were trained, with the curves showing the median and the region between highest and lowest performance. \new{Both ``Replacement'' agents show no constraint violation in (b).}}
+\end{figure}
+
+To demonstrate the training performance in the robotic arm environment, Figs.~\ref{fig:rob_return} and~\ref{fig:rob_failed} show the cumulative return and constraint violations throughout training. It can be seen that the baseline PPO agent learns robustly, continuously increasing performance, even though showing high failure rates. \new{The Lagrangian PPO shows better constraint satisfaction with similar objective performance.} In contrast, action replacement and resampling appear to hamper performance. PPO with action replacement struggles to learn anything in the beginning, presumably because most proposed actions are replaced with the null action. Therefore, its failure rate is constant at zero. PPO with action resampling first learns faster than PPO but then exhibits instability, likely due to the wrong estimation of the policy ratio in the PPO objective.
+
+PPO with action projection and action mapping (AM-PPO\new{, AM-PPO + Replacement}) learn significantly faster with higher final performance than the \new{model-free baselines}. Action mapping yields slightly higher performance at the end of training, and it exhibits fewer constraint violations than action projection. \new{Adding action replacement to action mapping yields the best performance without constraint violations.} This application showed that action mapping and projection are both very beneficial with perfect feasibility models that are mostly convex, with action mapping having a slight edge. \new{Since in this example a safe action exists, action replacement can always be added to guarantee constraint satisfaction and together with action mapping, it also improves performance.
+
+\subsection{Path Planning}\label{sec:results_pp}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[trim={300 200 300 400},clip,width=0.5\linewidth]{figures/feas_begin.png}
+        \caption{$a\sim \pi_f^\theta(s,z)|_{z\sim\mathcal{U}(\mathcal{Z})}$}
+        \label{fig:all_feas}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[trim={300 200 300 400},clip,width=0.5\linewidth]{figures/opt_begin.png}
+        \caption{$a\sim\pi_f^\theta(s,z)|_{z\sim\pi_o^{\phi_b}(\cdot|s)}$}
+        \label{fig:opt_in_feas_before}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[trim={300 200 300 400},clip,width=0.5\linewidth]{figures/opt_end.png}
+        \caption{$a\sim\pi_f^\theta(s,z)|_{z\sim\pi_o^{\phi_e}(\cdot|s)}$}
+        \label{fig:opt_in_feas}
+    \end{subfigure}%
+    \caption{Visualization of 256 generated actions of $\pi_f^\theta$ for a given state (a) if $z$ is sampled uniformly, (b) if sampled from the distribution of $\pi_o^{\phi_b}$, being an objective policy in the beginning of training, and (c) if sampled from the distribution of $\pi_o^{\phi_e}$ which is the agent at the end of training.}
+    \label{fig:feas_opt}
+\end{figure}
+
+Before inspecting the training performance of the different approaches, Fig.~\ref{fig:feas_opt} shows the inner workings of action mapping. Fig.~\ref{fig:all_feas} shows the output distribution of the pretrained feasibility policy $\pi_f^\theta$ when sampling uniformly from the latent space $\mathcal{Z}$. The feasibility policy is able to generate actions in both disconnected sets of feasible actions, with only minimal actions between. Figs.~\ref{fig:opt_in_feas_before} and~\ref{fig:opt_in_feas} show how the objective policy can take advantage of this. At the beginning of training, the agent outputs a distribution with high entropy in the latent space, leading to a bi-modal distribution in the action space (Fig.~\ref{fig:opt_in_feas_before}). After training, the agent's output entropy is lower, and the resulting distribution in the action space usually collapses to a single mode (Fig.~\ref{fig:opt_in_feas}). This visualization shows a crucial aspect of action mapping. It allows an objective policy to express multi-modal action distributions by only parameterizing a single Gaussian distribution in the latent space, which can significantly improve exploration.
+
+Inspecting the training performance of the different approaches in the path planning environment in Figs.~\ref{fig:pp_return} and~\ref{fig:pp_failed}, it can be seen that SAC and SAC with resampling do not learn much. Their initial jump in performance occurs when the agent starts understanding the targets, but it usually fails to reach them because it does not learn to understand the obstacles. \new{Therefore, both agents always end their episodes through a constraint violation. The Lagrangian SAC agent focuses only on not violating constraints, which leads to slightly better constraint satisfaction but completely inhibits the learning of the objective.} In contrast, when the action projection agent learns to understand the targets, its performance jumps significantly higher. The reason is that when it tries to go straight to each target, action projection pushes it around the obstacles. 
+
+The action mapping agent (AM-SAC) exhibits a higher initial performance jump, indicating that action mapping more successfully nudges the agent around obstacles. Additionally, in contrast to all other approaches, the action mapping agent has a second jump in performance \new{and constraint satisfaction between 5M and 10M steps}. This leap can be attributed to the objective policy's understanding of the obstacles and incorporating them into the plan instead of only being nudged around by the feasibility policy. This application shows that action mapping outperforms action projection with approximate feasibility models. Fig.
+
+
+\section{Limitations}
+
+
+
+\section{Conclusion and Future Work}
+
+
+We proposed and implemented a novel \new{DRL training strategy based on} action mapping. Our results demonstrate that this approach performs exceptionally well, particularly when using approximate feasibility models. We highlighted how even approximate model knowledge can be effectively incorporated into the DRL process to enhance training performance, emphasizing the potential to integrate domain-specific insights into DRL frameworks. We further show how action mapping allows the agent to express multi-modal action distributions, which can significantly improve exploration.
+
+The use of KDE introduces some distance between the generated actions and the boundary of feasible actions, which may result in conservative action selection. Furthermore, the feasibility policy $\pi_f$ does not completely eliminate the generation of infeasible actions and, therefore, does not provide strict safety guarantees. Consequently, the learned $\pi_f^\theta$ is not surjective and does not remove all constraints from the SCMDP, but still significantly relaxes the constraints. 
+
+\new{While the assumption of having a feasibility model may be too restrictive in general, we show that deriving one and utilizing action mapping can substantially improve learning performance. Therefore, we advocate for exploring the utilization of feasibility models in practical applications where model-free RL's performance is insufficient.}
+
+Future work will explore whether weight-sharing or initialization of parameters from $\pi_f$ to the actor and critic of the policy $\pi_o$ could lead to more efficient learning. Furthermore, spline-based path planning, which has shown promising results, warrants further investigation, particularly in robotic path planning scenarios. Lastly, expanding action mapping to utilize learned feasibility models could be explored to offer an alternative to common approaches like Lagrangian multipliers or action projection.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

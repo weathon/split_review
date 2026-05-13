@@ -1,0 +1,342 @@
+\title{Headless Language Models: Learning without Predicting with Contrastive Weight Tying}
+
+\begin{abstract}
+Self-supervised pre-training of language models usually consists in predicting probability distributions over extensive token vocabularies. In this study, we propose an innovative method that shifts away from probability prediction and instead focuses on reconstructing input embeddings in a contrastive fashion via \textit{Constrastive Weight Tying} (CWT). We apply this approach to pretrain Headless Language Models in both monolingual and multilingual contexts. Our method offers practical advantages, substantially reducing training computational requirements by up to 20 times, while simultaneously enhancing downstream performance and data efficiency. We observe a significant +1.6 GLUE score increase and a notable +2.7 LAMBADA accuracy improvement compared to classical LMs within similar compute budgets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Natural Language Processing (NLP) has seen tremendous progress in recent years thanks to the development of large-scale neural language models. These models have been shown to be effective in a wide range of NLP tasks such as text classification, question answering, and machine translation, either in fine-tuning, few-shot and zero-shot settings. These approaches usually involve a self-supervised pre-training step, based on tasks requiring predictions of contextual probability distributions over a large vocabulary of tokens. This method allows the model to learn from large amounts of unlabeled data, which is much easier to obtain than labeled data.
+
+However, this approach has some limitations such as the need for a language modeling projection head which requires additional memory, slows down training and impedes scaling up to large token vocabularies. In this paper, we propose a novel approach called Headless Language Modeling, which removes the need to predict probability distributions and instead focuses on leveraging contrastive learning to reconstruct sequences of input embeddings. Instead of adding a projection head towards a high-dimensional vocabulary space in order to make a prediction about a given token, we teach those models to contrastively output static embeddings corresponding to this token. The static embeddings we use for this are the model's own input embeddings. Due to its resemblance with the well-established weight-tying trick \citep{press-wolf-2017-using,he2023debertav3}, we call this pre-training technique \textit{Contrastive Weight Tying} (CWT).
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/mlm_cwt_schema.pdf}
+    \caption{Masked Headless Language Modeling (HLM) using Contrastive Weight Tying. The CWT objective aims to contrastively predict masked input representations using in-batch negative examples.}
+    \label{fig:cwt_schema}
+\end{figure}
+
+We find that our approach outperforms usual language modeling counterparts in several aspects and by substantial margins. First, it drastically speeds up training by freeing up GPU memory and avoiding the costly language modeling projection, thus allowing up to 2$\times$ acceleration of the training throughput, and up to 20$\times$ less compute requirements to achieve similar performance. Moreover, given the same amount of training tokens, headless language models (HLMs) significantly outperform their classical counterparts on downstream tasks, as shown by a 2.7 gain in LAMBADA accuracy for our headless generative model. Finally, given similar compute budgets, HLMs bring substantial gains for NLU tasks, with our BERT reproduction scoring 1.6 points above its classical counterpart on the GLUE benchmark. We also show that headless models can benefit from larger token vocabularies at a much more reasonable cost than classical models.
+In terms of implementation, our approach can be used as a drop-in replacement in usual pretraining codebases, as it only requires a change in the loss computation that can be applied to any kind of language model.
+
+Overall, we make several contributions in this article:
+\begin{itemize}
+    \item We introduce a pretraining objective that replaces cross-entropy, thus removing the need to project on the vocabulary high-dimensional space and instead learning to contrastively predict latent representations of tokens;
+    \item Using this technique, we pretrain encoder models in English and multilingual settings, and decoder models in English;
+    \item We show the various benefits of headless training, in terms of data-efficiency, compute-efficiency, and performance;
+    \item We explore the effects of some pretraining hyperparameters, such as micro-batch size and vocabulary size, on downstream performance. 
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\paragraph{Efficient pre-training}
+With the dawn of pretrained language models, such as BERT \citep{devlin-etal-2019-bert}, RoBERTa \citep{roberta}, GPT-2 \citep{gpt2} or T5 \citep{2020t5}, improving training efficiency has become an important stake in NLP. 
+
+Subsequent works have focused on changing the training objectives to improve performance. ELECTRA \citep{electra} uses Replaced Token Detection as the unsupervised training task, and substantially improves both data-efficiency and compute-efficiency and downstream performance. Their work has also been extended using energy-based models \citep{clark-etal-2020-pre}. Building upon this work, the DeBERTa models \citep{deberta} further improve over ELECTRA by disentangling weight sharing. 
+
+\paragraph{Contrastive learning}
+The Contrastive Predictive Coding loss \citep{oord2019representation} initiated the use of pretraining approaches based on a contrastive learning objective, an idea that has obtained success in many modalities over the years \citep{sermanet2018timecontrastive,schneider19_interspeech, wav2vec2}. 
+
+In NLP, contrastive learning has proven efficient in the training of sentence-level models \citep{gao-etal-2021-simcse, yan-etal-2021-consert, klein-nabi-2023-micse}. Token-level approaches rely on contrastive auxiliary objectives that are added to the usual cross-entropy loss. SimCTG \citep{su2022contrastive} introduces a token-level contrastive objective using in-batch output representations as negative samples, and adds this objective to a sentence-level contrastive loss and a regular causal LM loss. TaCL \citep{su-etal-2022-tacl} relies on a similar technique for encoder models, where a teacher model is used to produce negative samples. ContraCLM \citep{jain-etal-2023-contraclm} uses an auxiliary contrastive loss for code generation.
+
+\paragraph{Tokenization and frequency}
+The importance of tokenization for language models has been discussed by several works \citep{rust-etal-2021-good,zouhar-etal-2023-tokenization}. As discussed in \citet{zouhar-etal-2023-tokenization}, tokenization choices impact token probability distributions both at contextual and general scales. It has been shown that skewed token distributions can impact the quality of representations \citep{GaoHTQWL19,zhou2021frequencybased,puccetti-etal-2022-outlier,yu-etal-2022-rare}. Removing the language modeling head could mitigate these issues.
+
+In the case of multilingual models, \citet{liang2023xlmv} have shown that increasing the vocabulary size leads to better performance, at the cost of added time and memory complexity.
+
+
+\section{Method}
+
+\subsection{Classical framework}
+\label{sec:cwt}
+\begin{figure*}[h]
+    \centering
+    \begin{subfigure}[b]{0.8\linewidth}
+         \includegraphics[width=\linewidth]{imgs/weight_tying.pdf}
+         \caption{Vanilla}
+         \label{fig:comparison_schema_wt}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.8\linewidth}
+         \includegraphics[width=\linewidth]{imgs/contrastive_weight_tying.pdf}
+         \caption{Contrastive (ours)}
+         \label{fig:comparison_schema_cwt}
+    \end{subfigure}
+    \caption{Schematic comparison of the classical weight tying approach and the Contrastive Weight Tying loss.}
+    \label{fig:comparison_schema}
+\end{figure*}
+
+We consider a batch $X = (x_{i,j})_{i \in [1, N], j \in [1,L]}$ of $N$ token sequences of length $L$. We also produce a slightly altered version of these sequences $\tilde{X} = (\tilde{x}_{i,j})_{i \in [1, N], j \in [1,\tilde{L}]}$, optionally using masking or random replacement for instance, as some pretraining objectives require. We introduce an embedding matrix $e_\theta \in \mathbb{R}^{V \times D}$ where $V$ is the token vocabulary size and $D$ is the hidden dimension, and a sequence-to-sequence model $T_\theta: \mathbb{R}^{N\times L\times D} \rightarrow \mathbb{R}^{N\times L\times D}$ both based on a set of parameters $\theta \in \mathbb{R}^P$.
+
+A classical language modeling approach consists in selecting a subset of tokens $X_\mathcal{S} = (x_{i,j})_{i,j \in \mathcal{S}}$, and then estimating a probability distribution over the token vocabulary for these tokens from the $(\tilde{x}_{i,j})$ sequences, using $e_\theta$ and $T_\theta$. Learning occurs as $X_\mathcal{S}$ is partially altered in $(\tilde{x}_{i,j})$ (e.g. in Masked Language Modeling) or internally in $T_\theta$ (e.g. decoder models), and contextual information is essential for $e_\theta$ and $T_\theta$ to accurately estimate the tokens in $X_\mathcal{S}$.
+
+A trick that has been used in many such approaches relies on using $e_\theta$'s transpose ($e_\theta^T$) as a projection from the output space of $T_\theta$ to $\mathbb{R}^V$. This approach, called weight tying, can be written for a given sequence at index $i \in [1, N]$ as:
+$$
+\hat{p}_{i, j} = softmax(e_\theta^T(T_\theta(e_\theta(\tilde{x}_{i}))_j))
+$$
+where $\hat{p}_{i, j}$ is the estimated distribution for the $j$-th word of the sequence. Weight tying has been shown to improve performance while reducing the number of parameters \citep{electra}. Cross-entropy loss is then used as an objective function:
+$$
+\mathcal{L}(\theta, X, \tilde{X}) = - \frac{1}{|\mathcal{S}|}\sum_{i,j \in \mathcal{S}} \mathbf{1}_{x_{i, j}} \cdot \log(\hat{p}_{i, j})
+$$
+
+\subsection{Headless modeling}
+
+While weight tying does not use additional parameters, the projection $e_\theta^T$ actually has a non-negligible computational cost, which increases as the token vocabulary grows. Like \citet{GaoHTQWL19}, we advocate that the weight tying approach tends to maximize the scalar product between the input embedding of the original token $e_\theta(x_{i, j})$ and the output representation at the same position $o^\theta_{i, j} = T_\theta(e_\theta(\tilde{x}_{i}))_j$, under the contrastive regularization of the softmax function.
+
+Based on this understanding, we design an objective that directly optimizes this scalar product while not requiring the computation of the $e_\theta^T$ projection. As we do not use this projection, we cannot rely on softmax regularization anymore, and instead introduce a contrastive loss using the in-batch samples from $\mathcal{S}$ as negatives. All in all, our contrastive loss can be written as:
+$$
+\mathcal{L}_c(\theta, X, \tilde{X}) = - \frac{1}{|\mathcal{S}|} \sum_{i,j \in \mathcal{S}} \frac{e^{o^\theta_{i, j} \cdot e_\theta(x_{i, j})}}{\sum_{k,l \in \mathcal{S}} e^{o^\theta_{i, j} \cdot e_\theta(x_{k, l})}}
+$$
+
+We call this objective \textit{Contrastive Weight Tying} (CWT), as weight sharing is not used \textit{per se} but is set as a contrastive objective. Across the paper, we \textit{do not combine} this loss function with the classical cross-entropy objective as in \citet{su2022contrastive}, and rather use it as the only pretraining objective. To the best of our knowledge, this work stands as the first attempt to train language models using an explicit contrastive loss as the sole objective.
+\subsection{Theoretical considerations}
+\label{sec:theory}
+In this section, we discuss theoretical differences between our approach and classical language modeling.
+
+First, in terms of time and memory complexity, Headless Language Models (HLMs) are more efficient than classical language models under usual conditions. If we focus on the computation of the loss \textit{on a single device} from $|\mathcal{S}| = K$ output representations, a neural probabilistic LM requires $O(KDV)$ operations while our headless approach performs $O(K^2D)$ operations\footnote{We could extend our CWT loss by picking a separate set $\mathcal{S}_N$ of negative samples. This allows to tune the number of negative samples, which is important in Contrastive Learning. However, for the sake of simplicity, and to avoid extensive hyperparameter tuning, we set $\mathcal{S}_N = \mathcal{S}$.}. Hence, when $K < V$, which is very common for micro-batch sizes that fit on one device, our CWT loss is more computationally efficient than cross-entropy. 
+
+In terms of memory requirements, our CWT loss is also more efficient than its classical counterpart. On the one hand, the cross-entropy loss with weight tying stores the outputs of the $e_\theta^T$ projection of dimension $K \times V$ in the forward pass. On the other hand, our CWT loss stores the scalar product matrix of dimension $K \times N$, which is again smaller when $K < V$.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}{\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/bert_train_speed_p13.png}
+         \caption{Training latency}
+         \label{fig:speedup}
+    \end{subfigure}
+    \begin{subfigure}{\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/bert_memory_use_p13.png}
+         \caption{Memory use}
+         \label{fig:norm_scratch_transformer}
+    \end{subfigure}
+    \caption{Comparison of time and memory complexities of a BERT-base model on a single RTX 8000 GPU.}
+    \label{fig:comparison}
+\end{figure}
+In \autoref{fig:comparison}, we provide an empirical analysis of the speed and memory improvements when training a BERT-base model using original hyperparameters, i.e. sequences of 512 tokens and 15\% masking. We use HuggingFace's implementation for the Transformers blocks, and run experiments on a single RTX 8000 GPU.
+We observe that training latency is significantly reduced by roughly 25\% for all batch sizes, and that the engine can handle a larger batch size due to the improvement in memory consumption.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We use the Contrastive Weight Tying objective for medium-scale pre-training experiments in different contexts. We focus on monolingual encoder and decoder architectures, but we also train one multilingual encoder as we believe the uniformity brought by our contrastive objective may improve cross-lingual alignment.
+We compare our HLMs with classical language models that we pretrain on the same data with roughly similar compute budgets.
+
+\subsection{Headless Monolingual Encoder}
+\label{sec:mono_encoder}
+We pretrain BERT-base architectures (110M parameters) for English on the OpenWebText2 dataset extracted from The Pile \citep{gao2020pile}. We use the tokenizer from the Pythia suite \citep{biderman2023pythia}, which was trained on The Pile and uses a 50k tokens vocabulary.
+We mostly use hyperparameters from BERT \citep{devlin-etal-2019-bert}, although we remove the NSP objective as in RoBERTa \citep{roberta}. For the sake of simplicity, we use a sequence length of 128 for the whole training. We give a detailed overview of the hyperparameters in \Cref{app:train_mono_enc}.
+
+We pretrain all models using 8 A100 GPUs, with a budget of roughly 1,000 hours each. To optimize training, we use memory-efficient self-attention as implemented in xFormers \citep{xFormers2022} for all experiments. For the vanilla MLM, we set a micro-batch size of 32 for each A100 GPU, then accumulate to the original 256 batch size at optimization level, and train on 1 million batches. For our headless approach, we observed that we could remain within compute budget when using a micro-batch size of 64. Hence, we use an effective batch size of 512 for the headless MLM (HMLM). Although the HMLM uses more pretraining sequences, it does not gain additional information compared to the vanilla MLM as both models perform several epochs on the OpenWebText2 dataset.
+We evaluate on the GLUE benchmark, where we exclude the RTE dataset due to high standard deviations in the obtained scores. We fine-tune our models for 10 epochs on every dataset, and compute validation metrics once every fine-tuning epoch. We use the AdamW optimizer with a learning rate of $10^{-5}$, a weight decay of $0.01$ and a balanced cross-entropy loss objective. See \Cref{app:ft} for more details.
+
+\begin{table*}[h]
+\small \centering
+\begin{tabular}{ccc|cccccccc}
+\toprule
+MLM type        & Tokens (B) & GPU hours & MRPC                        & COLA                        & STS-B                      & SST2                        & QNLI                        & QQP                         & MNLI                        & \textbf{Avg.} \\ \midrule
+Vanilla  &4.1& 989& \underline{85.87}          & 54.66          & 83.7         & 92.45        & 88.38      & 89.57         & 82.4       & 82.43 \tiny{($\pm$0.12)}         \\ 
+Headless &4.1& 444& 85.31                       & \underline{58.35}                       & \underline{84.54}                      & \textbf{93.23}                       & \underline{89.49}                       & \underline{89.62}                       & \underline{82.54}                       & \underline{83.29} \tiny{($\pm$0.15)}            \\ 
+Headless &8.2&888& \textbf{86.89} & \textbf{60.72} & \textbf{85.98 } & \underline{92.56} & \textbf{89.75} & \textbf{89.81} & \textbf{82.87 } & \textbf{84.08} \tiny{($\pm$0.14)} \\ \bottomrule
+\end{tabular}
+\caption{Results of Masked Language Models (MLMs) on the dev sets of the GLUE benchmark. Best results are \textbf{bold} and second best are \underline{underlined}. We compare models at similar amounts of pre-training tokens, and at similar pre-training durations. We report Matthews' correlation for COLA, Spearman correlation for STS-B, and accuracy elsewhere. MNLI validation datasets are concatenated. All scores are averaged over 3 different seeds.}
+\label{tab:glue_res}
+\end{table*}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}c|ccccc@{}}
+\toprule
+MLM type & BoolQ          & CB             & COPA           & WiC            & Avg.           \\ \midrule
+Vanilla  & 68.8          & \textbf{77.8} & 60.2          & 64.9          & 67.9 \tiny{($\pm$0.4)}          \\ 
+Headless & \textbf{69.8} & 74.7          & \textbf{62.7} & \textbf{67.2} & \textbf{68.6} \tiny{($\pm$0.6)} \\ \bottomrule
+\end{tabular}
+\caption{Results of Masked Language Models (MLMs) on the dev sets of datasets from the SuperGLUE benchmark. We report accuracy for all tasks. The scores are averaged over 10 fine-tuning runs.}
+\end{table}
+
+In \autoref{tab:glue_res}, we compare our headless MLM with the classical MLM on the GLUE benchmark. To ensure fair comparison, we display evaluations at similar amounts of tokens seen during pre-training, and at similar training durations on the same hardware. In both cases, the headless MLM outperforms the vanilla MLM by significant margins, showing that our CWT loss is both more data-efficient and compute-efficient in this setup.
+
+We extend this analysis at various intervals along pretraining, and plot results in \autoref{fig:train_curve_mlm}.
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.9\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/bert_compare_hours_p13.png}
+         \caption{Pretraining hours}
+         \label{fig:bert_compare_hours}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.9\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/bert_compare_tokens_p13.png}
+         \caption{Pretraining tokens}
+         \label{fig:bert_compare_tokens}
+    \end{subfigure}
+    \caption{Comparison of GLUE average scores along pretraining.}
+    \label{fig:train_curve_mlm}
+\end{figure}
+
+It shows that the headless MLM outperforms the downstream performance of its vanilla counterpart after using 25\% of its training compute. We notice that the performance gap is relatively constant across pretraining steps.
+\subsection{Headless Monolingual Decoder}
+\label{sec:mono_decoder}
+We pretrain Pythia-70M architectures for English, sticking to the Pythia procedure \citep{biderman2023pythia} as much as possible. We use OpenWebText2 as a pretraining dataset. We train on 143,000 batches of 1,024 sequences of length 2,048 split over 16 V100 GPUs. We use exactly the same hyperparameters as in the Pythia suite. The micro-batch size is set to 32 in both cases.
+
+We can easily adapt the Causal Language Modeling (CLM) objective using the Contrastive Weight Tying approach. Negative samples correspond to every input embedding at a different position in the batch. However, the resulting model is not directly able to generate text, as it has no projection head towards $\mathbb{R}^V$. A naive way to retrieve language generation capacities is to use the input embedding matrix transpose $e_{\theta}^T$ as a projection head.
+
+Nevertheless, we observe that this approach yields poor performance. Instead, we find that fine-tuning the headless model and a language modeling head using the predictive CLM objective on a small portion ($<$2\%) of the pre-training dataset allows recovering an effective language model that outperforms the vanilla CLM on zero-shot language generation. More precisely, we fine-tune our headless models with an LM head initialized with $e_{\theta}^T$ for 10000 steps using an effective batch size of 256 (4$\times$ smaller that during pretraining), a learning rate of $10^{-4}$, and a constant learning rate schedule with 2000 linear warm-up steps. All other hyperparameters are kept similar to pretraining.
+
+We evaluate our models on the LAMBADA dataset and report accuracy and perplexity for zero-shot generation in \autoref{fig:train_curve_lm}.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.8\linewidth}
+         \includegraphics[width=\linewidth]{imgs/lambada_acc_p13.png}
+         \caption{Accuracy}
+         \label{fig:lambada_acc}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.8\linewidth}
+         \includegraphics[width=\linewidth]{imgs/lambada_ppl_p13.png}
+         \caption{Perplexity}
+         \label{fig:lambada_ppl}
+    \end{subfigure}
+    \caption{Comparison of LAMBADA metrics along pretraining. We display results for vanilla causal language modeling and headless models before and after causal LM fine-tuning. The pretraining token count for the fine-tuned HLM takes fine-tuning tokens into account.}
+    \label{fig:train_curve_lm}
+\end{figure}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{c|ccc}
+\toprule
+\multirow{2}{*}{LM type} & Validation & \multicolumn{2}{c}{LAMBADA} \\
+        \cmidrule{2-2} \cmidrule{3-4}
+        {} & Ppl. & Ppl. & Acc. \\ \midrule
+Vanilla  &     \textbf{3.143}  &  170.23 & 19.52 \\ 
+Headless  &     -  &  524.44 & 18.26 \\ 
+Headless + FT & 3.283 & \textbf{153.5} & \textbf{22.2}\\ \bottomrule
+\end{tabular}
+\caption{Results of the causal language models on the validation set after training, and on the LAMBADA dataset.}
+\label{tab:lm_results}
+\end{table}
+
+We find that the HLM fine-tuned for predictive language modeling outperforms the vanilla model by a significant margin along training. We report language generation results in \autoref{tab:lm_results}. We observe that despite having a higher validation perplexity even after fine-tuning, the HLM is improving the zero-shot perplexity on the LAMBADA dataset.
+
+We also study the zero-shot performance of the causal models on datasets taken from the LM Evaluation Harness. At this model scale, many tasks are not relevant and thus discarded, as the results do not always significantly outperform a random baseline. We also discarded tasks where the sample size was below 1000 or where comparison was not meaningful due to low performance gaps compared to the variance level. Hence, a subset of tasks where comparison is relevant is shown in \autoref{tab:lm_zs_perf}.
+\begin{table*}[h]
+\centering \scriptsize
+\begin{tabular}{cc|cccccccc}
+\toprule
+LM type       &GPU hours & ARC \tiny{(easy)} & ARC \tiny{(chal.)}     & BoolQ          & CrowS-Pairs $\downarrow$   & RACE           & SciQ          & PubMedQA &  QASPER    \\ \midrule
+Vanilla       &1712 \tiny{(-)}& \textbf{40.2} \tiny{($\pm$1)}  & 17.4 \tiny{($\pm$1.1)} & 47.8 \tiny{($\pm$0.9)}          & 57.3 \tiny{($\pm$1.2)}         & 23.7 \tiny{($\pm$1.3)}           & \textbf{66.4} \tiny{($\pm$1.5)}  & 43.8 \tiny{($\pm$1.6)} &  41.9 \tiny{($\pm$4.8)}        \\ 
+HLM \tiny{+ FT} & 1052 \tiny{(61\%)}& 38.9 \tiny{($\pm$1)} & \textbf{18.6} \tiny{($\pm$1.1)}          & \textbf{53.0}$^\dagger$ \tiny{($\pm$0.9)}           & \textbf{56.0} \tiny{($\pm$1.2)}         & \textbf{26.0} \tiny{($\pm$1.4)}  & 64.5 \tiny{($\pm$1.5)}          & \textbf{47.5}$^\dagger$ \tiny{($\pm$1.6)}  & \textbf{66.0}$^\dagger$ \tiny{($\pm$3.1)}      \\ \bottomrule
+\end{tabular}
+\caption{Zero-shot evaluation of monolingual causal language models on datasets from the LM Evaluation Harness. We report the stereotype percentage for CrowS-Pairs and accuracy elsewhere. $^\dagger$: best scores that are significantly better than the second best score according to a one-tailed t-test with power 0.95.}
+\label{tab:lm_zs_perf}
+\end{table*}
+
+In \autoref{tab:lm_zs_perf}, we find that the fine-tuned HLM outperforms the vanilla causal model by significant margins on BoolQ \citep{clark-etal-2019-boolq}, PubMedQA \citep{jin-etal-2019-pubmedqa} and QASPER \citep{dasigi-etal-2021-dataset}. Although we observe less statistically significant gaps for the other datasets, we still note that our HLM performs at least comparably to the vanilla baseline.
+
+We also note that the HLM seems slightly less prone to stereotypes as measured by the CrowS-Pairs benchmark \citep{nangia-etal-2020-crows}.
+
+Overall, using the Contrastive Weight Tying loss in the context of causal LM allows obtaining models on par with vanilla counterparts at a lower compute cost. We notice that the resulting models can get surprisingly good results in challenging datasets, hence showing language understanding capabilities, while being outclassed in language generation benchmarks (before predictive fine-tuning). We believe that this study shows that language generation needs to be considered as a \textit{downstream task} for HLMs, as they are designed to generate representations instead of words.
+
+
+
+\section{Multilingual Encoder}
+
+\label{sec:multi_mlm}
+In this section, we pretrain small multilingual MLMs and evaluate their performance on the XNLI dataset \citep{conneau2018xnli}. 
+
+Due to compute limitations, we consider architectures similar to the distilled multilingual BERT\footnote{Available at \url{https://huggingface.co/distilbert-base-multilingual-cased}} trained by \citet{sanh2019distilbert}. This model has 137M parameters, and uses a vocabulary of 119k tokens. As in \Cref{sec:mono_encoder}, we train a vanilla MLM and a headless counterpart. However, we share training hyperparameters such as batch size and total number of steps between both models, without compute considerations. For both experiments, we pretrain our models on 400k batches of 64 sequences of 128 tokens taken from the multilingual Wikipedia dataset using a single RTX8000 GPU. We select 90 million entries from 10 languages (Arabic, German, English, Spanish, French, Hindi, Italian, Japanese, Korean, and Chinese). Training hyperparameters can be found in \Cref{app:train_multi_enc}.
+
+Models are then fine-tuned on the XNLI dataset, for both cross-lingual zero-shot transfer from English and target language fine-tuning. Fine-tuning hyperparameters can be found in \Cref{app:ft_multi_enc}.
+
+\begin{table*}[h]
+\small
+\centering
+\begin{tabular}{c|cccccccc}
+\toprule
+MLM type        & ar             & de             & en             & es             & fr          & hi             & zh             & Avg.           \\ \midrule
+\multicolumn{9}{l}{\textit{Fine-tuned on English only}} \\ \midrule
+Vanilla  & 46.83          & 56.71          & 71.66          & 59.93          & 58.34       & 43.16          & 50.99          & 55.37 \tiny{($\pm$0.11)}          \\ 
+Headless & \textbf{48.06} & \textbf{57.32} & \textbf{74.03} & \textbf{62.72} & \textbf{62} & \textbf{45.25} & \textbf{52.15} & \textbf{57.36} \tiny{($\pm$0.2)} \\ \midrule
+\multicolumn{9}{l}{\textit{Fine-tuned on target language}} \\ \midrule
+Vanilla  & 51.32          & 64.09          & 70.4           & 66.98          & 65.88          & 55.95 & 64.63          & 62.87 \tiny{($\pm$0.2)}         \\ 
+Headless & \textbf{54.25} & \textbf{66.95} & \textbf{73.96} & \textbf{69.14} & \textbf{67.22} & \textbf{60.04} & \textbf{67.22} & \textbf{65.54} \tiny{($\pm$0.22)} \\ \bottomrule
+\end{tabular}
+\caption{Evaluation of multilingual models on the XNLI benchmark. We report dev accuracy, averaged over 3 runs.}
+\end{table*}
+
+We display final results in \autoref{fig:train_curve_multilm}. We find that the headless approach leads to significantly better performance for every language in both cross-lingual transfer and language-specific fine-tuning. In average, the headless MLM outperforms its vanilla counterpart by 2 accuracy points in the cross-lingual scenario, and by 2.7 points in the language-specific fine-tuning experiments.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.8\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/xnli_translate_train_p13.png}
+         \caption{Translate-Train: target language fine-tuning}
+         \label{fig:translate_train}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.8\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/xnli_cross_p13.png}
+         \caption{Translate-Test: English fine-tuning}
+         \label{fig:translate_test}
+    \end{subfigure}
+    \caption{Comparison of XNLI average scores along pretraining for different setups. Models are fine-tuned/evaluated in Arabic, German, English, Spanish, French, Hindi and Chinese. We display the standard error across seeds.}
+    \label{fig:train_curve_multilm}
+\end{figure}
+
+In \autoref{fig:train_curve_multilm}, we evaluate the models at intermediate checkpoints along pretraining, and we plot the XNLI average score as a function of used GPU hours. We observe that our HLM finishes training within 45\% of the time required by the vanilla model. Moreover, our model outperforms the performance level of the fully trained vanilla model after only using 5\% as much compute in \autoref{fig:translate_train}, and 22\% in \autoref{fig:translate_test}.
+
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+\paragraph{Token vocabulary} Training language models without output vocabulary projection makes using large vocabularies more affordable in terms of compute. As a matter of fact, the time complexity of HLMs during training is theoretically constant as we increase the vocabulary size. With input embedding lookup tables that do not require fully loading the $e_\theta$ weights, the memory complexity can also be kept constant with respect to the size of the vocabulary. This property could be useful to improve the training speeds of multilingual models relying on considerable vocabulary sizes, such as XLM-V \citep{2023arXiv230110472L}.
+
+To verify this hypothesis, we pretrain models for different vocabulary sizes using the BERT-Small architecture from \citet{turc2019}. We use the CC-News dataset \citep{Hamborg2017}, and more details on hyperparameters can be found in \Cref{app:s_train_mono_enc}. For each vocabulary size, we train a BPE tokenizer similar to the BERT tokenizer, and pretrain a vanilla MLM and a headless MLM. We then compare average GLUE results, excluding RTE, MRPC and COLA, due to high variance at that model scale.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/bert_vocabsize_p13.png}
+         \caption{GLUE average score}
+         \label{fig:glue_tokencount}
+    \end{subfigure}
+    \begin{subfigure}[b]{\columnwidth}
+         \includegraphics[width=\linewidth]{imgs/speed_vocabsize_p13.png}
+         \caption{Training speed}
+         \label{fig:throughput_tokencount}
+    \end{subfigure}
+    \caption{Comparison of downstream performance and training speed for small models trained using different token vocabulary sizes.}
+    \label{fig:tokencount}
+\end{figure}
+
+\autoref{fig:tokencount} shows that HLMs can actually benefit from larger token vocabularies up to a certain extent, and that they outperform their vanilla counterparts for every vocabulary size. \autoref{fig:throughput_tokencount} demonstrate that increasing the vocabulary size comes at almost no decrease in training speed for the HLMs, contrary to vanilla MLMs. However, we observe a sudden throughput increase between 85k and 100k tokens vocabularies for both vanilla and headless models, which we attribute to a different handling of GPU memory and operations as the models get bigger.
+
+\paragraph{Batch size}
+
+As discussed in \Cref{sec:theory}, the micro-batch size used to compute the CWT loss is rather important as it impacts the training complexity by increasing the number of negative samples. Recent work on Contrastive Learning shows that there usually exists an optimal number of negative samples in terms of model performance \citep{contr1, contr2}. As a consequence, increasing the batch size when using a contrastive loss based on in-batch negative samples may not always be beneficial.
+
+To study the impact of batch size on downstream performance, we pretrain small decoder models using different batch sizes. Our models are inspired from the smallest architecture of GPT2 \citep{gpt2} where many hyperparameters are divided by 4. More details about the pretraining procedure of these models can be found in \Cref{app:s_train_mono_dec}. HLMs are fine-tuned similarly to \Cref{sec:mono_decoder}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{imgs/batch_size_hours_p13.png}
+    \caption{LAMBADA accuracy along pretraining for different batch sizes.}
+    \label{fig:batch_size}
+\end{figure}
+
+In \autoref{fig:batch_size}, we observe that increasing batch size  leads to better performance for our HLMs. While smaller batch sizes train even faster, the headless model with the greatest batch size (128) is the only one that is able to significantly outperform its vanilla counterpart at the end of training.
+
+
+\paragraph{Modeling considerations} From a linguistic point of view, we hypothesize that an important difference between our approach and classical predictive modeling is the fact that \textit{headless modeling mostly pushes for discrimination between co-occurring tokens}, instead of imposing a contextual hierarchy over the whole vocabulary. For instance, in the case of synonyms A and B, each occurrence of A (or B) is pushing the input representations of A and B apart for predictive modeling, due to weight tying. For headless modeling, an occurrence of A will only push the representations apart if B appears in the same batch. Hence, the CWT objective could let models identify A and B as synonyms more easily. We provide empirical evidence of this phenomenon in \Cref{app:cosine_input_embs}. Another advantage of pushing discrimination between co-occurring tokens only may be an improved feedback quality, as we expect distinguishing between co-occurring tokens to be more linguistically relevant than distinguishing between all tokens. We leave a thorough investigation of these hypotheses for future work.
+
+
+
+

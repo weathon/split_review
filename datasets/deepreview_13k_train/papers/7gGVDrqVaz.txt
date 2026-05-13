@@ -1,0 +1,693 @@
+\title{3D-Prover: Diversity Driven Theorem Proving With Determinantal Point Processes}
+
+\begin{abstract}
+        A key challenge in automated formal reasoning is the
+        intractable search space, which grows exponentially with the depth of the proof.
+        This branching is caused by
+        the large number of candidate proof tactics which can be applied to a given goal.
+        Nonetheless, many of these tactics are semantically similar or lead to an execution error, wasting valuable resources in both cases.
+        We address the problem of effectively pruning this search, using only synthetic data generated from
+        previous proof attempts.
+        We first demonstrate that it is possible to generate semantically aware tactic representations
+        which capture the effect on the proving environment, likelihood of success, and execution time.
+        We then propose a novel filtering mechanism which leverages these
+        representations to select semantically diverse and high quality tactics,
+        using Determinantal Point Processes.
+        Our approach, \sysname{}, is designed to be general, and to augment any underlying tactic generator.
+        We demonstrate the effectiveness of \sysname{} on the miniF2F-valid and miniF2F-test benchmarks by augmenting the ReProver LLM.
+        We show that our approach leads to an increase in the overall proof rate, as well as a significant improvement in the tactic success rate, execution time
+        and diversity. 
+    
+\end{abstract}
+
+\section{Introduction}
+
+
+    Interactive Theorem Proving, as the name suggests,
+    has traditionally involved a human guiding a proving system
+    to verify a formal proposition.
+    It has found applications in a wide range of fields, from secure software~\citep{tan_verified_2019} to the verification of mathematical results~\citep{hales_formal_2017}.
+    There has been significant interest in automating this process, with formalization
+    efforts requiring a high level of human expertise~\citep{klein_sel4_2009}.
+    Beyond this, it is considered a `grand challenge' for AI, requiring a high level of reasoning and planning
+    to be successful~\citep{reddy_foundations_1988}.
+    Even the largest current models struggle with the complexity of the task,
+    with for example GPT-4 only able to solve 13.5\%~\citep{thakur_-context_2023} of the high school level miniF2F-test~\citep{zheng_minif2f_2021} benchmark.
+    This has motivated the development of specialized models and search algorithms to address the unique challenges of the domain~\citep{wang_lego-prover_2024, polu_formal_2022, jiang_draft_2022, han_proof_2022, first_baldur_2023, zhao_decomposing_2023, wang_dt-solver_2023, whalen_holophrasm_2016, wu_int_2021, wang_first_2018, wang_learning, rabe_mathematical_2020, polu_generative_2020, magnus, loos_deep_2017, li_isarstep_2021, lewkowycz_solving_2022, jiang_lisa_2021, jiang_thor_2022, gauthier_tactictoe_2017}.
+
+    With most non-trivial proofs requiring long chains of correct reasoning,
+    it is a challenge to generate them in one pass without mistakes.
+    The addition of a search algorithm is common for addressing this, as is done
+    by the current state-of-the-art DeepSeek-Prover-V1.5~\citep{xin_deepseek-prover-v15_2024}.
+    Under this paradigm, candidate tactics are generated and executed in the proving system, which
+    (if successful) results in new subgoals to prove.
+    This generates a tree of possible proof paths,
+    where a search algorithm selects the most promising nodes to expand.
+    The primary challenge faced by these approaches is the exponential growth in the number of proof paths, limiting the complexity of the problems that can be solved efficiently.
+
+    Many of the generated tactics are equivalent, modulo variable renaming and other semantics-preserving transformations.
+    See Figure~\ref{fig:tree} for a sample search tree from the ReProver~\citep{yang_leandojo_2023} system,
+    where several semantically similar paths are explored, wasting valuable resources.
+    Simple lexical similarity scores fail to cover the semantics (meaning) of a tactic,
+    as captured by the effect of the tactic on the environment.
+    For example, an expression and its negation vary by only a single character, but have a large semantic difference.
+    It is therefore desirable to filter tactics by their semantic rather than syntactic diversity.
+    In addition, many tactics lead to an execution error from the prover.
+    From our experiments with miniF2F, we find approximately 75\% of tactics result in an execution error (Section~\ref{sec:transition_exp}).
+    With the execution of tactics in the environment being expensive, this further restricts
+    the space of proofs which can be explored efficiently.
+
+    \begin{figure}[t]
+        \centering
+        \includegraphics[width=\linewidth]{tree_v2.pdf}
+        \caption{An example node expansion for a failed ReProver 
+        attempt, which our DPP model was able to prove.
+        Tactics on the left result in the same proof state,
+            tactics on the right result in an error, and tactics in the centre result in a unique proof state.
+            The high error rate and tactic similarity motivates our filtering approach,
+            which prunes the search space to give a diverse set of subgoals.
+        }
+        \label{fig:tree}
+    \end{figure}
+    
+    These challenges motivate our proposed approach,
+    \textbf{D}iversity \textbf{D}riven \textbf{D}eterminantal \textbf{P}oint \textbf{P}rocess \textbf{P}rover
+    (\sysname{}).
+    \sysname{} adds an extra `dimension' to existing proving systems by including a filtering mechanism on top of the existing tactic generation and search components. 
+    \sysname{} uses Determinantal Point Processes~\citep{kulesza_determinantal_2012} to prune the proof search space by filtering tactic candidates to a diverse and high quality subset.
+    The large amount of synthetic data generated from proof attempts enables us to
+    learn the effect tactics have on the environment, including the likelihood of an error and
+    the execution time.
+    We leverage this to generate tactic representations which reflect their semantics,
+    which \sysname{} uses to filter tactics based on a combination of their diversity
+    and quality. %(effectiveness / efficiency).
+    \sysname{} allows for a direct tradeoff between search objectives, with hyperparameters controlling the
+    weighting of error, time and diversity in the filtering process.
+    \sysname{} is a general approach which can be used to augment any underlying tactic generator.
+    We demonstrate this by augmenting the open source ReProver LLM to obtain a
+    significant improvement in the success rate, execution time and diversity of tactics,
+    and the overall proof success rate.
+
+    We summarize our contributions as follows:
+    \begin{itemize}
+        \item We study the feasibility of learning the environment dynamics of proving systems.
+        We demonstrate tactic representations
+        which capture the likely effect on the environment, using them to predict the likelihood of success and execution time of a tactic,
+        as well as the resulting proof state or error message. 
+        \item We propose a novel edge filtering approach using Determinantal Point Processes~\citep{kulesza_k-dpps_2011},
+        which leverage these representations to
+        select semantically diverse subsets of quality tactics.
+        Our method is modular and can be used with any underlying tactic model.
+        \item We evaluate our approach by augmenting ReProver~\citep{yang_leandojo_2023} on the miniF2F~\citep{zheng_minif2f_2021} benchmark, where
+        we demonstrate a significant improvement in the tactic success rate, diversity and overall proof success rate.
+    \end{itemize}
+
+    \subsection{Related work}
+    There is little prior work on learning the effect of a tactic on the proving environment.
+    ~\cite{xin_deepseek-prover-v15_2024} recently included successful environment responses as an auxiliary learning objective,
+    however do not investigate the task in detail.
+    We extend this by modeling the error likelihood,
+    error messages and execution time, which we use to generate useful tactic representations.
+    Several approaches have used previous proof attempts to improve performance,
+    using the sparse binary signal from the proof status of a goal~\citep{bansal_holist_2019, wu_tacticzero_2021}.
+    This has been used to improve search algorithms, as done in~\citep{lample_hypertree_2022, polu_formal_2022, wang_dt-solver_2023}.
+    These approaches do not consider the diversity of the nodes expanded,
+    with nothing preventing the search from exploring semantically similar paths.
+    ~\cite{xin_deepseek-prover-v15_2024} uses intrinsic reward for exploration by rewarding new nodes in the search tree.
+    The addition of any node is rewarded equally, even if they are similar (but not identical) to existing nodes.
+    We instead select tactics based on their diversity with respect to the resulting nodes.
+    ~\cite{first_diversity-driven_2022} use a diverse ensemble of models to improve
+    proof performance, whereas we focus on diversity with respect to the environment response, given an arbitrary underlying model (or models).
+    
+
+    \subsection{Preliminaries}
+    \label{sec:prelim}
+    We first define the space of goals $\mathcal{S}$, tactics $\mathcal{T}$ and failures $\mathcal{F}$. 
+    For our purposes, these all contain arbitrary strings,
+    with the goal being a formal proposition, the tactic a command and the failure an error message.
+    A \textit{proof tree} is a DAG $G = (V, E)$ where $V \subset \mathcal{S}$ is the set of goals and $E$ the edges between them.
+    A \textit{proof attempt} for a goal $g_0$ first initialises the proof tree with $V = \{g_0\}, E = \emptyset$.
+    The \textit{search policy} $\pi_S: G \times V \rightarrow \mathbb R^+$ is a distribution over goals given a proof tree,
+    being used to select a goal $g$ to expand.
+    The \textit{tactic policy} $\pi_T: \mathcal{S} \times \mathcal{T} \to \mathbb R^+$ is a distribution over tactics given a goal,
+    where $N \in \mathbb{N}$ tactics are sampled to give tactics $\{t_i\}_{i=1}^N \subset \mathcal{T}$.
+    The goal, tactic pairs $(g, t_i)$ are then passed to the environment $\mathcal{E}: \mathcal{S} \times \mathcal{T} \to \mathcal{O}$.
+    For each pair, after $\tau_i \in \mathbb{R}$ seconds, it returns either a new set of goals $g_i' \subset \mathcal{S}$ or an error, $e_i \in \mathcal{F}$.
+    We define this response as the \textit{output} $o_i \in \mathcal{O}$ where $\gO := \mathcal{P}(\mathcal{S}) \cup \mathcal{F}$.
+    We further define the \textit{status} $s_i \in \{0, 1\}$ as $0$ if $o_i \in \mathcal{F}$, $1$ if $o_i \in \mathcal{P}(\mathcal{S})$
+    and the \textit{transition} as the tuple $(g, t_i, s_i, \tau_i, o_i)$.
+    The proof tree is then updated with $G = G \cup g_i'$ for all $g_i'$, and the associated transitions are added as edges to $E$.
+    This is repeated until a \textit{proof} is found, or a budget is exhausted.
+    A proof of $g$ is found when $\mathcal{E}(g, t_i) = \emptyset$ for any $t_i$,
+    or if all $\{g_i'\}$ are proven
+    for $\mathcal{E}(g, t_i) = \{g_i'\} \subset \mathcal{S}$.
+    The result of a proof attempt is the set of transitions $\{(g_k, t_{ki}, s_{ki}, \tau_{ki}, o_{ki})\}$ for
+    all selected goals $g_k$ and their expanded tactics $t_i$.
+
+
+\section{Transition Aware Representation Learning}
+
+    \label{sec:transition_learning}
+    \begin{figure}[t]
+        \centering
+        \includegraphics[width=\linewidth]{transition_model.pdf}
+        \caption{Our architecture for learning transition aware tactic embeddings.
+        The tokenized tactic $\bf{t}$ and goal $\bf{g}$ are concatenated and passed through the Encoder $E$.
+        A single representation vector $\bf{e}$ is generated by mean-pooling over the tactic token embeddings $\bf{t'}$.
+        The Predictor $P$ takes this embedding and predicts whether the tactic results in an error (Status), and the execution time (Time). 
+        The Decoder $D$ takes the embedding and goal to predict the 
+        environment response (Output), which is either an error message or new goals to prove.
+        The result is a
+        compact representation of the tactic which captures its effect on the proving environment, 
+            enabling our proposed filtering model.
+        }
+        \label{fig:tac_rep}
+    \end{figure}
+
+    One proof attempt can generate a rather large amount of data.
+    A single pass of the miniF2F-valid benchmark of 244 proofs results in approximately 500,000
+    transitions, capturing rich information about the error likelihood, execution time
+    and resulting proof state or error message.
+    This section explores the feasibility of using this transition data to learn how tactics affect the environment.
+    We operationalise this as a supervised learning task: given a goal and tactic,
+    we predict the error status, execution time and environment output.
+    We effectively learn these targets from only this synthetic data, and further
+    embed this information into a compact tactic representation.
+    The upshot, as we show in Section~\ref{sec:filtering}, is
+    that these representations can be utilised to improve the performance of subsequent proof attempts.
+
+    \subsection{Transition Models}
+
+    We assume a dataset $\mathcal{D}$ of transition tuples $\{(g_k, t_{ki}, s_{ki}, \tau_{ki}, o_{ki})\}$, as defined in~\ref{sec:prelim}.
+    We learn a \textit{transition model}
+    $\xi: \mathcal{S} \times \mathcal{T} \to \{0, 1\} \times \mathbb{R} \times \mathcal{O}$ which
+    maps a goal $g_k$ and tactic $t_{ki}$ to an estimate of the status $s_{ki}$, time $\tau_{ki}$ and output $o_{ki}$.
+    We construct our transition model $\xi$ with three components.
+    For $d \in \mathbb{N}$, the Encoder $E: \gS \times \gT \to \sR^d$ takes the goal $g_k$ and tactic $t_{ki}$ as input, and outputs a single embedding vector with unit norm,
+    $ E(g_k, t_{ki})= \ve_{ki}$, $||\ve_{ki}|| = 1$.
+    The Predictor $P: \sR^d \to [0,1] \times \sR $ maps this embedding to
+    a score for the time prediction and an error probability for the status,
+    with $P(\ve_{ki}) = (\hat{s}_{ki},\hat{\tau}_{ki})$.
+    The Decoder $D: \sR^d \times \gS \to \gO$ maps the embedding and goal
+    to the output prediction,
+    such that $D(\ve_{ki}, g_k) = \hat{o}_{ki}$.
+    The transition model is then
+    \begin{equation}
+        \xi(g_k, t_{ki}) = (P(E(g_k, t_{ki})), D(E(g_k, t_{ki}), g_k)) = (P(\ve_{ki}), D(\ve_{ki}, g_k)) = ( \hat{s}_{ki},\hat{\tau}_{ki}, \hat{o}_{ki}).
+    \end{equation}
+
+    \subsection{Experiments}
+    \label{sec:transition_exp}
+    \newcommand\combinedmodel{\textsc{Combined}}
+    \newcommand\separatemodel{\textsc{Separate}}
+    \newcommand\notacticmodel{\textsc{No Tactic}}
+    \newcommand\alltokensmodel{\textsc{All Tokens}}
+   For our experiments, we use an Encoder-Decoder Transformer for the Decoder $D$,
+    and an Encoder-Only Transformer for the Encoder $E$.
+ We take the pretrained ReProver~\citep{yang_leandojo_2023} LLM to initialise both components.
+    We implement the Predictor $P$ as a single hidden layer MLP,
+    with hidden dimension $d / 2$ (where $d=1472$) and two real valued output nodes.
+    The time prediction $\hat{\tau}_{ki}$ is the output of the first node, and the status prediction $\hat{s}_{ki}$
+    is taken as the sigmoid of the second.
+
+    We investigate four instances of the transition model $\xi$.
+    For the \textbf{\combinedmodel} model (Figure ~\ref{fig:tac_rep}), the tactic is concatenated with the goal, and the embeddings from the Encoder are computed for all tokens.
+    We then generate a single tactic embedding by mean-pooling over the tactic tokens.
+    We compare this with the \textbf{\separatemodel} model which encodes the tactic without attending to the goal.
+    We hypothesise that allowing the tactic tokens to attend to the goal will allow the Encoder to better represent
+    the semantics of the tactic.
+    To form a naive baseline, we implement a \textbf{\notacticmodel} model which does not use the tactic at all, and instead
+    uses only the goal tokens.
+    We do this to account for any inherent patterns in the goal which may be predictive of the outcome,
+    for example a particular goal which has a high error rate.
+    This allows us to ground our results in the performance of this baseline, so we can observe the direct effect of the tactic
+    in predictive performance.
+    We also compare with an \textbf{\alltokensmodel} model which uses all tactic tokens for the Decoder without reducing to a single embedding.
+    We maintain the pooling operation over the tactic tokens for the status and time prediction tasks,
+    but allow the Decoder to attend to all tokens for the output prediction.
+    We implement this comparison to see the degree of information loss induced by
+    reducing tactics to a single vector.
+
+    Given $\alpha_s, \alpha_{\tau}, \alpha_o \in \mathbb{R}^+$, with estimates $\hat{s}_{ki}, \hat{\tau}_{ki}, \hat{o}_{ki}$
+    and for a minibatch $\gB \subseteq \gD$, we optimise the transition loss %$\mathcal{L}_T$
+    \begin{equation}
+        \mathcal{L_T}(\gD, \xi) = \sum_{(g_k, t_{ki}, s_{ki}, \tau_{ki}, o_{ki}) \in \gB} \alpha_s\mathcal{L}_s(s_{ki}, \hat{s}_{ki}) + \alpha_{\tau}\mathcal{L}_\tau(\tau_{ki}, \hat{\tau}_{ki}) + \alpha_o\mathcal{L}_o(o_{ki}, \hat{o}_{ki}).
+    \end{equation}
+
+    The hyperparameters $\alpha_s, \alpha_{\tau}, \alpha_o$ control the weighting of the status, time and output losses.
+    For simplicity, we set these to 1, however they could be tuned to reflect the relative importance of each task.
+    We use the binary cross-entropy loss $\mathcal{L}_s$ for the status prediction, the mean squared error (MSE) $\mathcal{L}_\tau$ for the time prediction,
+    and the cross-entropy loss $\mathcal{L}_o$ for the output prediction.
+    
+    We obtain the dataset $\gD$ from a vanilla ReProver attempt on miniF2F-valid,
+    which results in 498,236 transitions, which we split randomly into 95\% training, 5\% testing. 
+    There is the possibility of dependence between the splits, as the test set 
+    includes goals seen in training with different tactics.
+    The \notacticmodel\ baseline should capture any of this,  
+    with our results in Section~\ref{sec:proof_perf} 
+    showing our representations generalise from miniF2F-valid to miniF2F-test.
+    For the error prediction task, we reweight classes to account for imbalance,
+    which is approximately 75\% error, 25\% success.
+    We use the AdamW optimizer, with a learning rate of $10^{-5}$ and a batch size of 1.
+    We train each model for 2 epochs on a single RTX4090, and report the results on the test set.
+
+    \subsubsection{Results}
+    \begin{table*}[ht]
+        \centering
+        \begin{tabular}{lccccccc}
+            & \multicolumn{3}{c}{Output} & \multicolumn{3}{c}{Status} & \multicolumn{1}{c}{Time} \\
+            \cmidrule(r){2-4}\cmidrule(r){5-7}\cmidrule(l){8-8}
+            Embedding  & BLEU & ROUGE-L F1 & Top-4 & F1 & TPR & TNR & MSE \\
+            \toprule
+            \alltokensmodel &  0.31 &  0.38    &   0.31   &  0.85                         & 0.82 & 0.96 & 0.17 \\
+            \midrule
+            \combinedmodel   &   \textbf{0.33}   &   \textbf{0.39}    &  \textbf{0.32}     & \textbf{0.88}                         & \textbf{0.85} & \textbf{0.97} & \textbf{0.16}      \\
+            \midrule
+            \separatemodel   &   0.27   &   0.34    &    0.27   &     0.76                       &0.71& 0.94& 0.28    \\
+            \midrule
+            \notacticmodel  &    0.17  &   0.22    &  0.13     &     0.22                     & 0.14 & 0.96 &  0.37   \\
+            \bottomrule
+        \end{tabular}
+        \caption{Results for predicting unseen environment responses given a goal and tactic, for transitions from miniF2F-valid.
+            The \notacticmodel\ result forms a baseline to assess the impact of the tactic representation. 
+            We observe that any tactic representation enables far better predictions,
+            and constraining these to a single vector (\combinedmodel\ and \separatemodel ) does not hurt the performance gain.
+            This demonstrates tactic representations which capture their effect on the environment,
+            enabling our filtering model in Section~\ref{sec:filtering}.
+            Comparing the \combinedmodel\ and \separatemodel\ models, allowing the representation to attend to the goal leads to a large improvement. 
+            }
+        \label{fig:embedding_results}
+    \end{table*}%
+    
+    To assess the Output prediction, we use beam search to generate 4 candidate outputs for each transition.
+    We use the BLEU~\citep{papineni_bleu_2002} and ROUGE-L~\citep{lin_rouge_2004} scores to assess the quality of the highest scoring beam
+    in comparison to the ground truth, which is either an error message or a new set of subgoals.
+    We also report the Top-4 accuracy, which is the proportion of samples which have
+    one beam identical to the ground truth.
+    For the Status prediction task, we take the prediction as $1$ if $\hat{s}_{ki} > 0.5$ and $0$ otherwise,
+    reporting the F1 score, true positive rate (TPR) and true negative rate (TNR).
+    The Time MSE is the mean squared error of the time prediction over the test set.
+    
+    Table~\ref{fig:embedding_results} summarises the performance of our transition models on the test set.
+    Our results suggest tactic representations which capture useful information about their effect on the environment,
+    which we can see by the clear improvement across all approaches compared to the \notacticmodel\ baseline. 
+    The higher scores across all metrics of the \combinedmodel\ versus the \separatemodel\ model support our hypothesis that we can better predict transitions when the tactic embedding attends to the goal.
+    The \alltokensmodel\ model, where we allow the Decoder to attend to the full tactic, does not increase performance in comparison to the \combinedmodel\ model.
+    This shows that we can effectively represent the tactic as a single embedding without any loss of information. 
+    Our results demonstrate the feasibility of learning the environment dynamics of proving systems, which is a difficult task. 
+    To illustrate this, we include all prediction examples for the \combinedmodel\ model, along with their ground truth, in the supplementary material. 
+    
+
+
+\section{Filtering Model}
+
+    \begin{figure}%
+        \centering
+        \subfloat[\centering Initial unit norm tactic embeddings $\bm{\phi_i}$, representing the predicted environment response.]{{\includegraphics[width=0.46\linewidth]{filtering_1} }}%
+        \qquad
+        \subfloat[\centering Embeddings scaled by quality ($q_i$), giving vectors $q_i\bm{\phi}_i$ to be filtered by $k$-DPP]{{\includegraphics[width=0.46\linewidth]{filtering_2}
+        }}%
+        \caption{DPP for tactic filtering. The tactic embeddings from the transition model
+        are scaled by quality scores, before a subset of tactics are selected using $k$-DPP.
+        Subsets are chosen proportionally to the area spanned by their elements,
+            giving a combination of quality and diversity.
+            For this simplified example, we take the 2D PCA projection of embeddings for tactics in Figure~\ref{fig:tree}, setting the quality to the scaled generator logits.
+            Comparing the shaded areas in (b) and assuming \texttt{subst\;c} and \texttt{rw h$_1$} have been selected,
+            we see that \texttt{symmetry} is favoured
+            over \texttt{simp\;[h$_1$]}. Although \texttt{simp\;[h$_1$]} is scored higher by the generator, it is less diverse with respect to $\texttt{subst\;c}$ and $\texttt{rw h$_1$}$.
+        }
+        \label{fig:dpp}%
+    \end{figure}
+
+    \label{sec:filtering}
+
+    In the previous section we used synthetic proof data to generate semantically aware tactic representations,
+    allowing us to predict the likelihood of success, execution time and environment response.
+    We now take this a step further by using these representations to augment proof search.
+    We first present the necessary background on Determinantal Point Processes, enabling us to introduce our
+    filtering model \sysname{}, which prunes tactic candidates based on their quality and the semantic diversity of their representations.
+    We show that \sysname{}{} is able to improve the performance of the ReProver LLM on the miniF2F-valid and miniF2F-test benchmarks,
+    particularly when a deeper search configuration is used.
+    We conclude with a multifaceted ablation study showing the effect of our filtering model on the success rate, number of unique responses and execution time.
+
+    \subsection{Determinantal Point Processes}
+
+    Determinantal Point Processes (DPPs) are a class of probabilistic models for sampling
+    subsets from a ground set $\mathcal{Y}$.
+    In line with~\cite{kulesza_determinantal_2012},
+    for $|\mathcal{Y}| = n$ we define the kernel $L \in \mathbb{R}^{n \times n}$   
+    of a DPP as the Gram matrix $L = B^TB$ for $B \in \mathbb{R}^{n \times d}$,
+    where column $\vb_i \in \mathbb{R}^d$ of $B$ is a vector representing element $i \in \{1, \dots, n\}$ of $\mathcal{Y}$.
+    These vectors $\vb_i$ are commonly decomposed into a set of unit norm diversity features $\bm{\phi}_i \in \mathbb{R}^d$ and quality scores $q_i \in \mathbb{R}^+$,
+    so that $\vb_i = q_i\bm{\phi}_i$, $||\bm{\phi}_i|| = 1$ for all $i \in \{1, \dots, n\}$.
+    The similarity matrix $S$ is then defined as $S_{ij} = \bm{\phi}_i^T\bm{\phi}_j$.
+
+    The probability of sampling a subset $A \subseteq \mathcal{Y}$ from a DPP is then proportional to the determinant of the submatrix of $L$ indexed by $A$,
+    $\mathbb{P}(A) \propto \text{det}(L_A) = (\prod_{i \in A} q_i^2) \text{det}(S_A)$.
+    Geometrically, this determinant is the volume of the parallelepiped spanned by the submatrix $L_A$, which
+    as we see in Figure~\ref{fig:dpp}, is maximised based on a combination of
+    the similarity and length (quality) of the chosen elements.
+    In this way, DPPs elegantly trade off between the quality and diversity of elements.
+    Normally the size of the sampled subset $|A|$ is variable, however~\cite{kulesza_k-dpps_2011} introduce $k$-DPPs which
+    restricts the size of the subset to a fixed $k \in \mathbb{N}$, and where the probability
+    of sampling $A$ is normalised over subsets of size $k$.
+    That is, for a $k$-DPP, $\mathbb{P}(A) \propto \text{det}(L_A) / \sum_{|A'| = k} \text{det}(L_{A'})$.
+
+    \subsection{Filtering Model}
+
+    
+\begin{algorithm}[h]
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+ \Input{
+ Goal $g$, 
+ candidate tactics $T = \{t_i\}_{i=1}^N$,
+ filter size $K$, 
+ Encoder $E$,
+ Predictor $P$, 
+ error weight $\lambda_s$,
+ time weight $\lambda_{\tau}$,
+ temperature $\theta$,
+ underlying tactic policy $\pi_0$
+ }
+ \Output{Filtered tactics $T' \subset T$} 
+ \tcp{Compute embeddings and scores for each tactic}
+ \For{$i$ in $\{1, \dots, N\}$}{
+$\bm{\phi}_i \gets E(g, t_i)$ \tcp*[r]{Compute tactic embedding} 
+ $(\tau_i, s_i) \gets P(\bm{\phi}_i)$ \tcp*[r]{Compute time and error scores} 
+$\tau_i \gets 1 - \frac{\tau_i}{||\bm{\tau}||}, \bm{\tau} = (\tau_1, .., \tau_N)$ \tcp*[r]{Normalise time scores}
+ $m_i \gets \frac{\text{exp}(\pi_0(t_i | g)\mathbin{/}\theta)}  {\sum_{j=1}^N \text{exp}(\pi_0(t_j | g) \mathbin{/} \theta)}$ 
+\tcp*[r]{Normalise model logits}
+ $q_i \gets m_i + \lambda_s s_i + \lambda_{\tau} \tau_i$ \tcp*[r]{Compute quality score} 
+} 
+\tcp{Filter tactics with $k$-DPP}
+$L \gets B^TB$, where $B = [q_1\bm{\phi}_1, \dots, q_N\bm{\phi}_N]$ \tcp*[r]{Compute kernel matrix} 
+Compute eigenvalues $\lambda_i$ and eigenvectors $\vv_i$ of $L$ \\
+Sample $J \subset \{1, \dots, N\}$ using Algorithm 2 of~\cite{kulesza_k-dpps_2011}, \\ $\;\;$with parameters $\{(\vv_i, \lambda_i)\}$, $k = K$ \\  
+\Return $T' = \{t_j\}_{j \in J}$ \\ 
+ \caption{\sysname{}}
+\label{alg:filtering}
+\end{algorithm}
+
+    Algorithm~\ref{alg:filtering} defines our filtering model, \sysname{},
+    which maps a list of tactics $T$ from the underlying tactic policy $\pi_{0}$ to a subset $T'$ of size $K$.
+    We use the Encoder $E$ and Predictor $P$ defined in Section~\ref{sec:prelim} to generate unit norm tactic embeddings $\bm{\phi}_i$ and predict the time and error likelihood.
+    The embeddings $\bm{\phi}_i$ encode the predicted environment response through their direction only, as they are unit norm (Figure~\ref{fig:dpp}).
+    The quality scores $q_i$ then scale these tactics based on the underlying model logits $m_i$, as well as the predicted error likelihood $s_i$ and execution time $\tau_i$.
+    We have hyperparameters for the normalisation temperature $\theta$, as well as the error and time weights $\lambda_s, \lambda_\tau$.
+    The parameter $\theta$ controls the scaling temperature of the model logits, with a higher temperature flattening out the distribution.
+    It therefore adjusts the diversity bias of the filtering model by 
+    reducing the impact of the quality scores when sampling.
+    We then compute the kernel $L$ from $q_i$ and $\bm{\phi}_i$, and sample a subset of tactics $T'$ using the $k$-DPP algorithm~\citep{kulesza_k-dpps_2011}.
+    \subsection{Experiments}
+    To test the performance of \sysname{}, we use ReProver~\citep{yang_leandojo_2023} as the underlying tactic policy $\pi_0$, with the Encoder $E$ and Predictor $P$ components as defined in Section~\ref{sec:prelim}.
+    We chose ReProver as it is a small ($\sim$ 300M parameters), popular and performant open source model, allowing us to run our experiments in a reasonable timeframe.
+    We run our experiments in Lean~3~\citep{felty_lean_2015} using the BAIT~\citep{lamont_bait_2024} platform with a modified LeanDojo~\citep{yang_leandojo_2023}
+    environment, where we set an environment timeout of 600 seconds per proof attempt.
+    We train a combined transition model on the miniF2F-valid benchmark,
+    and use the Encoder and Predictor components to generate tactic embeddings and quality scores as per Algorithm~\ref{alg:filtering}.
+    We first examine the performance of \sysname{}
+    without any hyperparameter tuning, setting 
+    $\lambda_s = \lambda_{\tau}= 0$, $\theta=1$.
+    We then perform ablation studies using miniF2F-valid to examine the influence of the hyperparameters on the tactic success rate, execution time and diversity of the environment response.
+    For miniF2F-test, we allow the model four attempts per proof to increase confidence in the results, 
+    while for miniF2F-valid we allow one attempt per configuration to facilitate a wider set of ablations.
+    
+    We set the search policy for all experiments to be Best First Search (BestFS), where nodes are expanded in order of their cumulative log probability.
+    For each node selected for expansion, we generate $N=64$ candidate tactics from the underlying ReProver model using beam search with default settings, as done in the original ReProver implementation.
+    This forms the ground set for the node, to be sub-sampled by the filtering algorithm.
+    We use beam search decoding because it is deterministic and so ensures that the ground set for a given node remains fixed across runs, allowing us to isolate and compare
+    the effect of the filtering algorithm. 
+    The filtering algorithm returns $K$ tactics, which are then executed in the environment
+    and used to update the proof tree, as outlined in~\ref{sec:prelim}.
+    We test three different levels of filtering, with $K \in \{8, 16, 32\}$.
+    Lower values of $K$ correspond to more filtering, for which the choice of filtering algorithm will have a greater impact.
+    We compare the filtering approach of \sysname{}, as outlined in Algorithm~\ref{alg:filtering}, with two baselines.
+    The \textbf{Top-$\mathbf{K}$} baseline
+    takes the top $K$ tactics from the ground set as judged by their log probabilities,
+    corresponding to the top $K$ beams. 
+    We take $K$ tactics at random from the ground set to form the \textbf{Random} baseline, 
+    as an exploration-focused comparison.
+
+    \subsubsection{Proof Performance}
+    \label{sec:proof_perf}
+
+\addtolength{\tabcolsep}{-0.1em}
+    \begin{table*}[ht]
+        \centering
+        \begin{tabular}{lcccc|cccc}
+             & \multicolumn{4}{c}{miniF2F-test} & \multicolumn{4}{c}{miniF2F-valid}\\
+            \cmidrule(l){2-5}\cmidrule(l){6-9}
+            $K$ & Top-$K$ & Random
+            & \sysname{} & Gain & Top-$K$ & Random & \sysname{} & Gain
+            \\
+            \toprule
+            8  & 22.4 & 19.0 $\pm$ 0.98 & \textbf{24.4 $\pm$ 0.22} & +8.9\% & 21.7 & 19.3 & \textbf{25.0} & +15.2\%\\
+            \midrule
+            16 & 26.5 & 25.4 $\pm$ 0.39 & \textbf{27.3 $\pm$ 0.21} & +3.0\% &26.6& 24.2& \textbf{29.1} & +9.4\%\\
+            \midrule
+            32 & 27.8 & 27.4 $\pm$ 0.26 & \textbf{28.2 $\pm$ 0.25} & +1.4\% &27.9& 27.5& \textbf{28.7} & +2.9\%\\
+            \bottomrule
+        \end{tabular}
+        \caption{Percentage of proofs found after one attempt (Pass@1) on miniF2F, with $K$ tactics selected per node, using tactics generated from ReProver. 
+        \sysname{} uses a transition model trained from miniF2F-valid transitions.
+        For miniF2F-test, we report the mean $\pm$ standard error over four runs,
+        with Top-$K$ being deterministic.
+        The Gain column reports the relative improvement over the Top-$K$ baseline.
+        We observe a clear improvement using \sysname{}, which increases as 
+        more filtering is applied (lower $K$). 
+        Our results on miniF2F-test show that 
+        \sysname{} can improve search even for proofs out of distribution of the transition model.
+     }
+        \label{pass1_test}
+    \end{table*}%
+    Table ~\ref{pass1_test} shows the Pass@1 results of our experiments on miniF2F,
+    which is the number of proofs successfully found after a single attempt.
+    We observe that \sysname{} significantly outperforms
+    both baseline approaches.
+    We also note that Top-$K$ selection performs better than the Random approach, which is unsurprising.
+    The influence of the filtering algorithm becomes more apparent as $K$ is decreased,
+    as there are more tactics filtered out.
+    Our results are consistent with this, with the magnitude of improvement given by \sysname{} increasing for lower values of $K$. 
+    \sysname{} is able to outperform both baselines by providing a tradeoff between
+    the quality, as represented by Top-$K$, and the diversity of the tactics.
+    The choice of $K$ also controls the depth of the proof search,
+    with larger $K$ giving broader search, and smaller $K$ deeper search.
+
+    Finding deep proofs has to date been a significant challenge (~\textit{e.g.}~\cite{polu_formal_2022}),
+    with the search tree growing exponentially with the proof depth.
+    The improvement given by \sysname{}, particularly for deeper search configurations,
+    is a step towards addressing this.
+
+    Tree search should be considered as an augmentation of the base model, with the degree of any improvement much smaller than what can be found by improving the generator itself.
+    This is unsurprising, as the generator forms the base set of candidates for the search to explore.
+    Improved search algorithms do however have the advantage of being applicable to different base models, which is important given the rapid advancement of new and better generators.
+    For example, the state-of-the-art DeepSeek-Prover-V1.5~\citep{xin_deepseek-prover-v15_2024} obtains around 2--4\% relative improvements  
+    in proof success over miniF2F-test with its novel tree search algorithm, compared to no search (Figure 5). 
+    In comparison, improving their base model yields a $\sim$36\% relative improvement (Table 1). 
+    Similarly, \cite{han_proof_2022} obtain $\sim$6--9\% relative improvements (Table 7) for search, with $\sim$40,000 GPU hours required for their best results.
+    We were able to find our improvements with 
+    significantly less resources, training
+    our transition model on only a single attempt per proof.
+    
+    We emphasise that these results were obtained without any hyperparameter tuning,
+    only using the representations as diversity features and model logits as quality scores.
+    We present ablation studies looking closer at these hyperparameters, however a comprehensive sweep
+    is prohibitively expensive with each full attempt taking at least 12h on our hardware. 
+    Despite this, we were able to obtain our improvements without any tuning,
+    demonstrating the effectiveness of our approach. We also highlight that the
+    miniF2F-test results were obtained by training with transitions from miniF2F-valid,
+    showing that \sysname{} remains effective 
+    for proofs out of distribution.
+
+    \subsubsection{Ablation Study}
+    \label{sec:ablation}
+    \paragraph{Effect of the Transition Model}
+
+    \begin{table*}[ht]
+        \centering
+        \begin{tabular}{lccc}
+            $K$ 
+            & Autoencoder & Transition Model & Gain
+            \\
+            \toprule
+            8  &  23.0  & \textbf{25.0} &     +8.7\%    \\
+            \midrule
+            16 &  27.9 & \textbf{29.1}   &   +4.3\%    \\
+            \midrule
+            32 &  27.0          & \textbf{28.7} & +6.3\% \\
+            \bottomrule
+        \end{tabular}
+        \caption{Percentage of proofs found after one attempt (Pass@1) on miniF2F-valid, comparing \sysname{} 
+        with a Transition Model Encoder to an Autoencoder trained to reconstruct the original tactics. We see that \sysname{} with the Transition Model gives a clear improvement in proof success over the Autoencoder, demonstrating the utility of our representation architecture in Section~\ref{sec:transition_learning}.}
+        \label{fig:autoenc}
+    \end{table*}%
+
+    To demonstrate the utility of our transition model representations,
+    we compare to an ablated \sysname{} where the transition model Encoder is
+    replaced by an Autoencoder of the same size. 
+    The Autoencoder is trained to reconstruct the original tactic,
+    and therefore generates representations which reflect only the syntax of the 
+    tactic. 
+    In this way, we can test our hypothesis that semantically aware tactic representations
+    are useful for proofs, justifying the inclusion of the transition model.
+    As we observe in Table~\ref{fig:autoenc}, the performance of \sysname{} with the transition model embeddings is indeed superior to that of the Autoencoder across all values of $K$.
+    This shows that selecting for diversity with respect to the predicted semantics, rather than the syntax, leads to a direct improvement in proof performance. 
+
+    
+    \begin{table*}[ht]
+        \centering
+        \begin{tabular}{lcccc}
+            & & & \multicolumn{2}{c}{\sysname{}} \\
+            \cmidrule(l){4-5}
+            $K$ & Top-$K$ & Random & $\lambda_s=0.1$ & $\lambda_s=0.5$ \\
+            \toprule
+            8  &  39.0 $\pm$ 0.1   & 33.4 $\pm$ 0.1  &    43.3 $\pm$ 0.1     &     \textbf{56.5 $\pm$ 0.1}    \\
+            \midrule
+            16  &  39.0 $\pm$ 0.1   & 30.9 $\pm$ 0.1  &    40.0 $\pm$ 0.1     &     \textbf{51.7 $\pm$ 0.1}    \\
+            \midrule
+            32  &  35.0 $\pm$ 0.2   & 29.7 $\pm$ 0.1  &    35.7 $\pm$ 0.1     &     \textbf{41.7 $\pm$ 0.1}    \\
+
+            \bottomrule
+        \end{tabular}
+        \caption{Tactic success percentage per node for miniF2F-valid (Mean $\pm$ Standard Error), where
+        $\lambda_s$ controls the error weight of quality score in \sysname{}.
+        These results demonstrate that \sysname{} leads to fewer errors on average, which can be controlled by increasing $\lambda_s$.
+        }
+        \label{tab:success}
+    \end{table*}%
+    \paragraph{Success Rate}
+
+    We observe from Table~\ref{tab:success} that the success rate of tactics chosen by \sysname{} is significantly improved compared to both baselines.
+    We also note that as $K$ decreases, this improvement increases in magnitude, 
+    reflecting the heightened influence of the filtering model. We see that
+    this improvement increases with the error weight $\lambda_s$, 
+    which scales the quality scores of tactics by their predicted probability of success.
+    This suggests the error weight term is directly influencing the tactic success rate, 
+    showing that it is working as intended.
+    \begin{table*}[thbp]
+        \centering
+        \begin{tabular}{lcccc}
+            & & & \multicolumn{2}{c}{\sysname{}} \\
+            \cmidrule(l){4-5}
+
+            $K$ & Top-$K$ & Random
+            & $\theta=1$ & $\theta=4$
+            \\
+            \toprule
+            8  & 83.9 $\pm$ 0.1 & 88.6 $\pm$ 0.1 & 90.8 $\pm$ 0.0 & \textbf{91.7 $\pm$ 0.0} \\
+            \midrule 
+            16 & 77.5 $\pm$ 0.1 & 81.4 $\pm$ 0.1 & 85.9 $\pm$ 0.1 & \textbf{86.6 $\pm$ 0.1} \\
+            \midrule
+            32 & 71.1 $\pm$ 0.1 & 72.7 $\pm$ 0.1 & 77.6 $\pm$ 0.1 & \textbf{78.1 $\pm$ 0.1} \\
+            \bottomrule
+        \end{tabular}
+        \caption{Percentage of unique environment responses per node in miniF2F-valid (Mean $\pm$ Standard Error). Unique 
+        defines either syntactically distinct error messages or responses including at least one previously unseen subgoal. 
+        $\theta$ controls the temperature of the model scores when calculating quality.
+        We see that \sysname{} gives a higher diversity of environment responses, increasing with $\theta$.} 
+        \label{tab:diversity}
+    \end{table*}%
+    \begin{table*}[thbp]
+        \centering
+        \begin{tabular}{lcccc}
+            & & & \multicolumn{2}{c}{\sysname{}} \\
+            \cmidrule(l){4-5}
+
+            $K$ & Top-$K$ & Random
+            & $\theta=1$ & $\theta=4$
+            \\
+            \toprule
+            8  & 85.3 $\pm$ 0.1 & 89.9 $\pm$ 0.1 & 90.1 $\pm$ 0.1 & \textbf{91.1 $\pm$ 0.1} \\
+            \midrule 
+            16 & 77.5 $\pm$ 0.1 & 84.1 $\pm$ 0.1 & 84.9 $\pm$ 0.1 & \textbf{85.5 $\pm$ 0.1} \\
+            \midrule
+            32 & 72.3 $\pm$ 0.2 & 76.3 $\pm$ 0.2 & 76.9 $\pm$ 0.2 & \textbf{77.5 $\pm$ 0.2} \\
+            \bottomrule
+        \end{tabular}
+        \caption{Percentage of successful tactics per node resulting in unique subgoal(s) over miniF2F-valid (Mean $\pm$ Standard Error).
+        $\theta$ controls the temperature of the model scores in \sysname{} when calculating quality.
+        We observe \sysname{} gives a higher number of unique subgoals per tactic, leading to a more diverse set of proof paths, with larger $\theta$ controlling this.} 
+        \label{tab:diversity1}
+    \end{table*}%
+
+    \paragraph{Diversity} 
+    To examine the diversity of a proof attempt, we consider two metrics. For the first, as in Table~\ref{tab:diversity}, we look at the percentage of unique environment responses to tactics executed per node, including responses with unique errors.
+    As it is difficult to select tactics guaranteed to be successful (see Table~\ref{tab:success}), an exploratory policy should generate tactics
+    which result in more varied outputs, so as to better explore the space.
+    Table~\ref{tab:diversity1} quantifies the likelihood of a successful tactic resulting in a new proof path, where we restrict only to successful tactics to account for the discrepancy in success rate between approaches. 
+    This gives a direct metric measuring the effectiveness of tactics in providing distinct proof paths to explore. 
+    We first observe that the Random baseline leads to higher diversity, as expected. 
+    \sysname{} outperforms both baselines, giving more diverse responses for both valid and invalid tactics.
+    As intended, increasing the parameter $\theta$ results in further improvements to diversity under these metrics. 
+    
+    
+    
+    \begin{table*}[htbp]
+        \centering
+        \begin{tabular}{lcccc}
+            & & & \multicolumn{2}{c}{\sysname{}} \\
+            \cmidrule(l){4-5}
+
+            $K$ & Top-$K$ & Random
+            & $\lambda_\tau=0.1$ & $\lambda_\tau=1.0$
+            \\
+            \toprule
+            8  & 206 $\pm$ 0.8   & 198 $\pm$ 0.9 & 155 $\pm$ 0.5 
+            & \textbf{136 $\pm$ 0.5}  \\
+            \midrule
+            16 & 220 $\pm$ 0.8 & 218 $\pm$ 0.9 & 176 $\pm$ 0.6 & \textbf{152 $\pm$ 0.5} \\
+            \midrule
+            32 &  224 $\pm$ 0.8 & 215 $\pm$ 0.8 & 191 $\pm$ 0.7 & \textbf{181 $\pm$ 0.6}\\
+            \bottomrule
+        \end{tabular}
+        \caption{Tactic execution time in milliseconds over miniF2F-valid proof attempts (Mean $\pm$ Standard Error). $\lambda_\tau$ controls the time weighting of the quality score in \sysname{}.
+        \sysname{} selects faster tactics on average, 
+        with larger $\lambda_\tau$ magnifying this.   
+        }
+        \label{tab:time}
+    \end{table*}%
+
+    
+    \paragraph{Execution Time}
+    Table~\ref{tab:time} shows the execution time for tactics over miniF2F-valid transitions.
+    Again we see that \sysname{} outperforms both baselines,
+    with the improvement increasing with more filtering. 
+    Increasing the time weight $\lambda_\tau$ results in further reductions to 
+    the average execution time, demonstrating the accuracy of the predictions, and that they can directly result in faster tactics when filtering. 
+
+
+
+\section{Conclusion}
+
+    
+    \paragraph{Future work}
+    One might consider structured DPPs~\citep{kulesza_determinantal_2012}, which operate at the tree level to select diverse paths, rather than the node level, which selects diverse edges.
+    Continual learning of the transition model is another avenue, where training on new data as it is generated could lead to more accurate assessments of diversity and quality.
+    Our approach could also be combined with a separate search algorithm such as HTPS~\citep{lample_hypertree_2022}, rather than BestFS. 
+    Testing larger models would be a natural extension, for both the transition model and
+    the underlying tactic generator.
+    Our methodology may also be useful to enhance search in domains beyond formal proving, such as code generation or game playing.
+
+
+    \paragraph{Summary}
+    We introduce \sysname{}, a method to augment
+    proof search by filtering candidate tactics to generate diverse and high quality subsets. 
+    By generating tactic representations which
+    reflect the response of the proving environment, 
+    \sysname{} is able to filter tactics based on their likely outcome.
+    We evaluate \sysname{} by augmenting the ReProver LLM on the standard miniF2F benchmark,
+    where we find an improvement in the overall proof success rate (Table~\ref{pass1_test}), particularly for deeper searches.
+    Our ablation studies confirm the utility
+    of our tactic representations, which allow the selection of tactics with improved success rates,
+    diversity, and/or execution time.
+    By effectively pruning the search space, \sysname{}
+    is a step towards enabling deeper automated proofs. 
+
+
+
+    
+    
+
+
+

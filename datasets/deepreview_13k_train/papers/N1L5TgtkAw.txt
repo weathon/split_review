@@ -1,0 +1,343 @@
+\title{Multi-Draft Speculative Sampling: Canonical Architectures and Theoretical Limits}
+
+\begin{abstract}
+We consider multi-draft speculative sampling, where the proposal sequences are sampled independently from different draft models.  At each step, a  token-level draft selection scheme takes a list of valid tokens as input and produces an output token whose distribution matches that of the target model. Previous works have demonstrated that the optimal scheme (which maximizes the probability of accepting one of the input tokens) can be cast as a solution to a linear program. In this work we show that the optimal scheme can be decomposed into a two-step solution: in the first step an importance sampling (IS) type scheme is used to select one intermediate token; in the second step (single-draft) speculative sampling is applied to generate the output token.  For the case of two identical draft models we further 1) establish a necessary and sufficient condition on the distributions of the target and draft models for the acceptance probability to equal one and 2) provide an explicit expression for the optimal acceptance probability.  Our theoretical analysis also motives a new class of token-level selection scheme based on weighted importance sampling. Our experimental results demonstrate consistent improvements in the achievable block efficiency and token rates over baseline schemes in a number of scenarios. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\let\thefootnote\relax\footnotetext{
+$^\ast$ Joint first authors $^\dagger$ Joint last authors $^\ddagger$ Qualcomm AI Research is an initiative of Qualcomm Technologies, Inc.
+Correspondence to \texttt{\small akhisti@ece.utoronto.ca} and \texttt{\small ebrahimi@qti.qualcomm.com}.
+}
+The transformer architecture \citep{vaswani2017attention} has revolutionized the field of natural language processing and deep learning. One of the key factors contributing to the success story of transformers, as opposed to prior recurrent-based architectures \citep{hochreiter1997long,chung2014empirical}, is their inherent train-time parallelization due to the attention mechanism. This allows for massive scaling and lead to the development of state-of-the-art Large Language Models (LLMs) \citep{touvron2023llama,achiam2023gpt,brown2020language,chowdhery2023palm} which have demonstrated remarkable performance across a wide range of tasks. Despite their parallelizable training, LLM inference is sequential, owing to their auto-regressive nature. This limits their text-generation to one token per one forward pass, which is known to be memory-bound \citep{shazeer2019fast}. 
+To alleviate the memory-bound nature of auto-regressive decoding of LLMs, speculative decoding \citep{chen2023accelerating,leviathan2023fast} leverages an arbitrary smaller language model (draft model) that generates multiple candidate tokens in an auto-regressive manner. The LLM (target model) is then used to score all the tokens in the draft \emph{in parallel}, and the draft tokens are verified through a sequence of token-level rejection sampling which guarantees that the final sequence follows the same distribution as that of the target model. In order for speculative decoding to be beneficial, the combined cost of auto-regressively sampling from the draft model and parallel verification via the target model should be smaller than auto-regressively sampling from the target model. Intuitively, this requires that the draft model distribution resembles that of the target model, which can be measured via the acceptance rate of the speculative decoding process, i.e., the rate at which we accept/reject draft tokens.
+
+A large number of works on speculative decoding \citep{sun2024spectr,jeon2024recursive,miao2024specinfer,sun2024optimal} have emerged recently in an effort to further improve decoding efficiency. The authors in~\citep{sun2024spectr} propose SpecTr, a multi-draft extension where the draft model generates $K$ candidate token sequences (which could be sampled in a batch) for each time-step (as opposed to one). The authors consider a token-level selection scheme with the objective of maximizing the probability of accepting some token in the set of available tokens. They demonstrate that this problem can be cast into the framework of optimal transport and solved using a linear program. However due to complexity reasons, the authors instead propose a modified sequential rejection sampling scheme. %of much lower complexity. 
+
+\subsection{Main Contributions}
+
+\begin{itemize}
+    \item We revisit the optimal transport framework  introduced in ~\citep{sun2024spectr} and introduce a canonical architecture --- we demonstrate that the optimal acceptance probability can be achieved by a two-step scheme: the first step involves selecting a token from the input set using a type of importance sampling; the second step involves speculative sampling using  the selected token and the target distribution. 
+    
+    \item For the case of $K=2$ identical draft models, we establish an analytical expression for the optimal acceptance probability. In this setting, we also establish a necessary and sufficient condition for the acceptance probability to equal one. We also discuss numerical evidence  for the case of more than $2$ drafts.
+    
+    \item We propose a new token-selection scheme based on weighted  importance sampling. To enable a faster implementation, we present  heuristic approaches that reduce computation while also penalizing the acceptance probability. 
+    
+    \item We present  experimental results involving the OPT model over a variety of tasks. We compare the performance of our proposed schemes with baselines  and demonstrate improvements in the block efficiency and token rates.
+\end{itemize}
+
+
+\section{Background and Related Work}
+
+\label{sec:background}
+Auto-regressive sampling from LLMs is inherently sequential and memory-bound \citep{shazeer2019fast}. Several approaches have been proposed in the literature to accelerate LLM inference \citep{shazeer2019fast,jaszczur2021sparse,frantar2022gptq,frantar2023sparsegpt,stern2018blockwise,chen2023accelerating,leviathan2023fast,jeon2024recursive,sun2024spectr,miao2024specinfer}. Model compression techniques, such as quantization \citep{frantar2022gptq,bondarenko2024quantizable} and sparsification \citep{jaszczur2021sparse,frantar2023sparsegpt} have been shown to reduce the overall complexity of LLMs at the expense of some degradation in decoding quality. 
+For lossless LLM inference acceleration, speculative decoding \citep{chen2023accelerating,leviathan2023fast,stern2018blockwise} has emerged as a promising and orthogonal alternative. Earlier works on greedy decoding can draft and predict multiple tokens by augmenting the base LLM \citep{stern2018blockwise} or aggressive decoding \citep{ge2022lossless}. However, LLM text-generation often requires sampling with non-zero temperature from the generated logits. To that end, speculative decoding \citep{chen2023accelerating,leviathan2023fast} was proposed. In speculative decoding, auto-regressive sampling is delegated to a smaller language model (draft model) that generates multiple candidate tokens. The LLM (target model) is then used to score all the tokens in the draft \emph{in parallel}, and the draft tokens are verified through a sequence of token-level rejection sampling. Speculative decoding guarantees that the final sequence follows the same distribution as that of the target model. The performance of speculative methods highly depends on the choice of the draft model. \citet{zhou2023distillspec} use knowledge distillation \citep{hinton2015distilling} to better align the draft and target models which results in higher token acceptance rates.
+
+More recently, the works of \cite{sun2024spectr,miao2024specinfer,jeon2024recursive} extend speculative decoding to the multi-draft setting where the draft model(s) generate multiple token sequences per time-step. Specifically, \citet{sun2024spectr} formulate the token-level draft selection problem as a discrete optimal transport problem with membership cost and propose SpecTr: a new decoding algorithm that allows for multiple candidates for each token in the draft. A related setting is also studied in~\cite{miao2024specinfer,jeon2024recursive} where the authors consider a token tree based construction for improving the draft sequences as well as a token-level selection method different form~\cite{sun2024spectr}  . Instead of using a dedicated draft model, \citet{cai2024medusa} propose augmenting the target model with extra decoding heads that can concurrently draft multiple tokens. The extra heads are fine-tuned using parameter-efficient methods, and can be added to any pre-trained target model. Orthogonally, \citet{sun2024optimal} study block-level verification in the single-draft setting as a block-level optimal transport problem. They propose a computationally-efficient algorithm that optimally solves the block-level transport problem, and report speedups over prior token-level verification \citep{leviathan2023fast}.
+
+
+
+\section{Token-Level Optimal Draft Selection: Theoretical Analysis}
+
+
+We focus on token-level optimal draft selection framework introduced in~\cite{sun2024spectr}. We assume that $\Omega=\{1,2,\ldots, n\}$ denotes the vocabulary of tokens and at a given step, say $t$,  $\cS = \{X_1, \ldots, X_K\}$, denotes the $K$ valid tokens under consideration. Each of these tokens is generated in an i.i.d.\ fashion from a distribution $p(\cdot)$ determined by the underlying draft model\footnote{{We also consider the case when the tokens are generated from different distributions. See Remarks~\ref{rem:thm1_gen} and~\ref{rem:non-id}, as well as the experimental results in Section~\ref{sec:experiments}}.} and the context sequence $u^t \in \Omega^t$ i.e, for each $y \in \Omega$, we have $p(y) = \cM_s(y|u^t)$, where $\cM_s$ denotes the distribution generated by the small (draft) model.  In a similar fashion we let $q(\cdot)$ be the distribution over $\Omega$ associated with the large model i.e., $q(y) = \cM_b(y|u^t)$ where $\cM_b$ denotes the distribution generated  by the large model. Note that we do not explicitly indicate the sequence $u^t$ when discussing $p(\cdot)$ and $q(\cdot)$, as it is fixed and common to both models throughout our analysis. 
+Given an input $\cS \sim \prod_{i=1}^K p(X_i)$ consisting of $K$ candidate tokens $(X_1, \ldots, X_K)$, a {\emph{token-level selection rule}} (TLSR) is a conditional distribution $\cP(\cdot | \cS)$ over $\Omega$.  A \emph{valid} TLSR must satisfy the constraint that for each $z\in \Omega$, $\sum_{\cS} \cP(z|\cS)p(\cS) =q(z)$. A natural metric to optimize for TLSR is the probability that one of the tokens is accepted i.e., if $Z \sim \cP(\cdot|\cS)$ denotes the output of the TLSR, then we wish to maximize $\Pr(Z \in \cS)$.
+\begin{Problem}[Optimal Token Level Selection Rule]
+    \label{prb-1}
+Given distributions $p(\cdot)$ and $q(\cdot)$ find a valid TLSR that maximizes the probability of acceptance: $P(\mrm{acc})= \Pr(Z \in \cS)$ and let $P^\star(\mrm{acc})$ be the optimal value.
+\end{Problem}
+    
+Problem~\ref{prb-1} was studied in~\cite{sun2024spectr} and shown to be an instance of optimal transport, which can be cast as a linear program. The authors used this framework to establish the optimality of speculative sampling~\citep{chen2023accelerating,leviathan2023fast} in the case of a single draft i.e., $K=1$. For $K>1$ the authors established an information theoretic upper bond on $P^\star(\mrm{acc})$.  In this work, we revisit Problem~\ref{prb-1} and develop new insights into the structure of the optimal solution. 
+In fact, we establish that the optimal solution in the case of multiple drafts has  a natural connection to importance sampling~\citep{tokdar2010importance}. For the case of $K=2$ drafts we exactly characterize $P^\star(\mrm{acc})$ and state necessary and sufficient conditions on $p(\cdot)$ and $q(\cdot)$ for $P^\star(\mrm{acc})$ to equal $1$. 
+
+We begin by defining a family of schemes that we will refer to as {\em importance weighted} sampling. 
+\begin{defn}[{Importance Weighted Sampling}]
+ An importance weighted sampling scheme takes as input the set of candidate tokens $\cS =\{X_1, \ldots, X_K\} $ and outputs a token $Y_I \in \cS$ defined by the conditional distribution: 
+ \begin{align}
+    \Pr(Y_I = y| X_{1:K} =x_{1:K}) &=\begin{cases}\beta_y(x_1,\ldots, x_K), & y\in \{x_1,\ldots, x_K\} \\
+    0, & y\notin\{x_1,\ldots, x_K\}
+    \end{cases}
+    \label{eq:iws}
+\end{align}
+where $\sum_{y\in \Omega}\beta_y(x_1,\ldots, x_K)=1$ for each $x_{1:K} \in \Omega^K$ and $0 \le \beta_y(x_1,\ldots, x_K) \le 1$.
+\label{def:IWS}
+\end{defn}
+Note that instead of considering the probability over the value of the selected token in~\eqref{eq:iws}, one can instead consider the probability of selecting an index $i$ between $\{1,\,\ldots, K\}$ i.e., $\Pr(I=i |X_{1:K} = x_{1:K})$. Such a distribution maps to~\eqref{eq:iws} by simply summing over all indices where $x_i=y$. We note that the form in~\eqref{eq:iws} will be more convenient in the sequel. Also note that the classical importance sampling scheme~\citep{tokdar2010importance} corresponds to the case where $\Pr(I=i |X_1^k = x_{1:K}) \propto q(x_i)/p(x_i)$. However the family of schemes in Definition~\ref{def:IWS} is not restricted to such a choice and we treat $\beta_y(x_1,\ldots,x_K)$ as free parameters that can be optimized. {While an importance weighted sampling scheme may not lead be a valid TLSR, as explained next, it is a key building block in a canonical architecture for token selection.}
+
+Our first result is a decomposition for the optimal token level selection rule that establishes a connection to the importance weighted sampling in Definition~\ref{def:IWS}.
+
+\begin{thm}[Optimal Acceptance Probability and Canonical Architecture]
+Let $P^\star(\mrm{acc})$ be the acceptance probability for the optimal token level selection rule in Problem~\ref{prb-1}. Then we can express:
+\begin{align}
+    P^\star(\mrm{acc}) = 
+    \max_{\{\beta_y(x_{1:K})\}} \left\{\sum_{y\in \Omega} \min\left(q(y),\sum_{x_1,\ldots, x_K \in \Omega} \beta_y(x_{1:K})  \cdot
+ \prod_{i=1}^K p(x_i)\right)\right\}, \label{eq:IS-opt1a} 
+\end{align}
+where the maximum is over $\beta_y(x_{1:K})$  for each $\{x_1, \ldots, x_K, y\} \in \Omega$ such that $0 \le \beta_y(x_{1:K})\le 1$,   and 
+\begin{align}
+    \sum_{y\in \Omega} \beta_y(x_{1:K})= 1,\quad \forall x_{1:K} \in \Omega^K,
+\end{align}
+and furthermore
+\begin{align}
+    \beta_y(x_{1:K}) = 0, \quad y \notin \{x_1,\ldots, x_K\}. \label{eq:IS-opt2xx}
+\end{align}
+In addition, if $\{\beta^\star_y(x_{1:K})\}$ denotes the parameters that achieve the maximum in~\eqref{eq:IS-opt1a}, then $P^\star(\mrm{acc})$ can be attained by a two step canonical architecture: in the first step, given the list of input tokens $\{x_1, \ldots, x_K\}$, we apply Importance Weighted Sampling in Definition~\ref{def:IWS}
+with parameters $\beta^\star_y(x_1,\ldots, x_K)$  to output an intermediate token $y \in \{x_1, \ldots, x_K\}$; in the second step we apply a single-draft speculative sampling scheme~\citep{chen2023accelerating, leviathan2023fast} on the selected token $y$ to generate the final output token.
+\label{thm:scheme}
+\end{thm}
+
+\begin{figure}
+  \centering
+    \includegraphics[width=\textwidth]{figures/IS_sampling.pdf}
+    \caption{Optimal Approach for Multi-Draft Speculative Sampling}
+\label{fig:opt_scheme}
+\end{figure}
+
+Figure~\ref{fig:opt_scheme} illustrates the proposed architecture Theorem~\ref{thm:scheme}, where the first step involves importance weighted sampling to output an intermediate token and the second step involves speculative sampling. This approach    requires computing the optimal $\beta^\star_y(x_{1:K})$. In practice one can use sub-optimal choices that are faster to compute, as will be discussed in the sequel.  
+\begin{remark}
+Although our theoretical development focuses on the case of identical drafts, we can also easily  extend  Theorem~\ref{thm:scheme} when the distributions of the $K$ tokens are not identical i.e.,  $\cS \sim \prod_{i=1}^K p_i(X_i)$. This is discussed in Section~\ref{subsec:non-iid} in the supplementary material.
+\label{rem:thm1_gen}
+\end{remark}
+
+We next build upon Theorem~\ref{thm:scheme} to establish new analytical results for the optimal acceptance probability involving $K=2$ drafts. Our first result is a characterization of the necessary and sufficient condition on the draft and target distributions $p(\cdot)$ and $q(\cdot)$ respectively that leads to $P^\star(\mrm{accept}) =1$. % for the case of $K=2$ drafts. 
+\begin{thm}
+    With $K=2$ drafts, a necessary and sufficient condition for $P^\star(\mrm{acc})=1$ in the Definition~\ref{def:IWS} is the following:
+    \begin{align}
+        \sum_{x \in \cS} q(x) \ge \left(\sum_{x \in \cS} p(x)\right)^2, \qquad \forall \cS \subseteq \Omega.
+        \label{eq:conj}
+    \end{align}
+    
+    
+    \label{thm:conj}
+\end{thm}
+
+Note that the acceptance probability can equal $1$ even when $p(\cdot)$ and $q(\cdot)$   are not identical. Thus when the distribution of the draft model is close to the target model but not equal  the acceptance probability can equal $1$. This is in contrast to the case of $K=1$, where it is known that the acceptance probability can only equal $1$ when  $p(\cdot)$ and $q(\cdot)$ are identical distributions~\citep{sun2024spectr}. Furthermore to the best of our knowledge, previously proposed schemes for the multi-draft setting, such as SpecTr \citep{sun2024spectr} and SpecInfer~\citep{miao2024specinfer} based on modified rejection sampling also require $p(\cdot)=q(\cdot)$ for the acceptance probability to be $1$. 
+Theorem~\ref{thm:scheme} is interesting in the context of our two-step architecture in Fig.~\ref{fig:opt_scheme}. In this case, the output of importance weighted sampling block $Y$ matches the target distribution $q(\cdot)$ and the second step involving speculative sampling is not needed.  
+\begin{Example}
+Consider $\Omega =\{1,2\}$ and let the draft and target distributions be given by $\bp = (p_1, p_2)$ and $\bq = (q_1, q_2)$ respectively. We assume $K=2$ drafts.  In this case~\eqref{eq:conj} reduces to $q_1 \ge p_1^2$ and $q_2\ge p_2^2$. If $p_1=p_2 =0.5$ then it follows that $P^\star(acc)=1$ if  and only if $0.25 \le q_1 \le 0.75$. In contrast for the optimal scheme for $K=1$ draft we have $P^\star(acc)=1$ only when $q_1=q_2=0.5$.
+\end{Example}
+
+ The proof is based on the Fourier-Motzkin (FM) elimination technique~\citep{ziegler2012lectures}. However a direct application of such a technique to satisfy the constraints $q(i) = p_I(i)$ for each $i\in \Omega$ becomes intractable. Our key idea is to demonstrate that instead considering a relaxation of the form $q(i)\ge p_I(i)$ leads to the same solution as the equality constraints and is amenable to analysis using Fourier-Motzkin elimination.
+
+The core technical challenge in the proof of Theorem~\ref{thm:conj} is in determining whether a system of linear equations has a non-negative solution. Such problems been studied previously in the literature, with~\cite{chernikova1964algorithm, dines1926positive} providing an algorithm. We explain how the double-description method~\citep{fukuda1995double} for finding dual representations of polyhedral cones can be used to numerically verify the necessary and sufficient condition for the acceptance probability to equal $1$. In fact this approach was used to verify analogous conditions to Theorem~\ref{thm:conj} for up to $K=6$ drafts and all alphabets of size $|\Omega|\le 14$, although we only provide an analytical proof of the condition for $K=2$ drafts in this paper. The reason for this is that our key step i.e.
+
+Our final result is an explicit expression for the optimal acceptance probability for the case of $K=2$ drafts. 
+\begin{thm}
+ For $K=2$ drafts and for a draft distribution $p(\cdot)$ and target distribution $q(\cdot)$ and arbitrary token alphabet $\Omega$, the  acceptance probability $P^\star(\mrm{acc})$  for the optimal token level selection rule is given by:
+ \begin{align}
+     P^\star(\mrm{acc}) = \min_{\cS \subseteq\Omega}\left\{\sum_{s \in \cS}q(s)  + \left(\sum_{s \in \cS^c} p(s)\right)^2  + 2\left(\sum_{s\in\cS}p(s)\right)\left(\sum_{s\in \cS^c} p(s)\right)\right\}, \label{eq:opt}
+ \end{align}
+ where $\cS^c = \Omega \setminus \cS$ is the complement of $\cS$. 
+ \label{thm:opt}
+\end{thm}
+
+To the best of our knowledge the result in Theorem~\ref{thm:opt}
+was not known before. Upper bounds on $P^\star(\mrm{acc})$ are presented in~\cite{sun2024spectr}, which are not necessarily tight. In contrast ~\eqref{eq:opt} provides an exact expression for the acceptance probability for the case of $K=2$ drafts when $X_1$ and $X_2$ are independently sampled from $p(\cdot)$.  The result in Theorem~\ref{thm:opt} implies the result in Theorem~\ref{thm:conj}. In particular, note that if \begin{align}
+    \sum_{s\in \cS} q(s) \ge \left(\sum_{s\in \cS}p(s)\right)^2
+\end{align} 
+it follows that:
+\begin{align}
+    \sum_{s \in \cS}q(s)  + \left(\sum_{s \in \cS^c} p(s)\right)^2  + 2\left(\sum_{s\in\cS}p(s)\right)\left(\sum_{s\in \cS^c} p(s)\right)\ge \left(\sum_{s\in \cS} p(s) + \sum_{s\in \cS^c}p(s)\right)^2 =1,
+\end{align}with equality when $\cS = \Omega$. The proof builds upon the proof of Theorem~\ref{thm:conj} but requires elimination of additional variables. 
+
+\begin{remark}
+    Note that~\eqref{eq:opt} can be expressed as:
+ \begin{align}
+     P^\star(\mrm{acc}) = \min_{\cS \subseteq\Omega}\left\{\sum_{s \in \cS}q(s)  - \left(\sum_{s \in \cS} p(s)\right)^2  + 1\right\}, \label{eq:opt_old}
+ \end{align}
+ which leads us to conjecture that the optimal acceptance probability in the general case of $K>2$ drafts is attained by replacing the exponent of $2$ in the second term in~\eqref{eq:opt_old} to $K$. 
+ \label{rem:conj2}
+ \end{remark}
+\begin{figure}
+\includegraphics[width=\textwidth]{figures/acc.pdf}
+\caption{Numerical evaluation of $Pr(\mrm{accept})$ for the optimal scheme (Theorem~\ref{thm:opt}) as well as two baseline schemes -- SpecTr~\citep{sun2024spectr} and SpecInfer~\citep{miao2024specinfer}. For sake of illustration we select alphabet $\Omega = \{1,2,3\}$  and $\bp = [1/3, 1/3, 1/3]$. The left plot sets  $\bq = [1/3, q_2, 2/3-q_2]$ while the right plot sets $\bq = [1/6, q_2, 5/6-q_2]$ where $q_2$ is varied on the x-axis.  }
+\label{fig:numerical}
+\end{figure}
+
+We provide  numerical evaluation of the optimal acceptance probability in Fig.~\ref{fig:numerical}. For sake of illustration we assume that $\Omega$ is of size three, and assume $\bp=[1/3,1/3,1/3]$. We consider $\bq = [1/3, q_2, 2/3-q_2]$ in the left plot and $\bq = [1/6, q_2, 5/6-q_2]$ in the right plot. The value of $q_2$ is varied on the $x$-axis. We compare the optimal acceptance probability in Theorem~\ref{thm:opt}
+with two baseline schemes SpecTr~\citep{sun2024spectr} and SpecInfer~\citep{miao2024specinfer}. We observe that the optimal acceptance probability can equal $1$ for a wide range of $q_2$. This is consistent with Theorem~\ref{thm:conj}. In contrast the baseline schemes seem to achieve an acceptance probability of $1$ only in the special case when $q_2=1/3$ so that $\bq=[1/3,1/3, 1/3]$. 
+
+
+
+
+\section{Faster Importance Weighted Speculative Sampling}
+
+\label{sec:low_comp}
+
+    
+
+In practice the distribution of the target and draft model is often concentrated over a small number of tokens. It has also been observed that sampling from a high probability set (such as the top-$k$ highest probability tokens) or the top-$p$ set (the set of high probability  tokens with aggregate probability exceeding a threshold) leads to more coherent outputs~\citep{nlp}. After such top-$p$ sampling the effective alphabet size, i.e., the number of tokens with non-zero probability is generally small. This motivates us to develop some approaches for speeding up our proposed solution by reducing the number of variables 
+required in optimization. 
+
+We focus on the case of $K=2$ drafts and explain how to extend the approach to the general case. Let $X_1$ and $X_2$ denote the input tokens and $Y$ denote the selected token.  When $X_1 = X_2 = i$ we have that $\beta_i(i,i)=1$. Furthermore  as discussed previously, due to symmetry we have $\beta_y(i,j) = \beta_y(j,i)$. It is more convenient to introduce a new set of variables $w_{i,j}$ which are defined as:
+\begin{align}
+    w_{i,j} = \Pr(Y = i~|~\{X_1, X_2\} = \{i,j\} ), \label{eq:w-def}
+\end{align}
+ i.e., $w_{i,j}$ denotes the probability that the output token is $i$ given that we see the pair $\{i,j\}$ at the input in any order.  For any given choice of $w_{i,j}$ the distribution of $Y$ can be computed as follows:
+ \begin{align}
+     p_I(k) = \Pr(Y=k) = p_k^2 + \sum_{i=1, i\neq k}^{n} 2p_i p_k w_{i,k} \label{eq:p_Ieq0}
+ \end{align}
+ where we use $\bp =(p_1, \ldots, p_n)$ as the probability vector for the draft model and $\bq =(q_1, \ldots, q_n)$ as the probability vector for the target model.  Our aim is to maximize the following objective
+$\sum_{i=1}^n \min\left(p_I(i), q_i\right)$
+over the variables $w_{i,j}$ that satisfy $0 \le w_{i,j} \le 1$ and $w_{i,j}+w_{j,i}=1$. This optimization can be cast as a linear programming problem with $O(n^2)$ variables which may be slow in practice. With this formulation as a starting point we discuss two approaches to reduce the number of variables needed to optimize.
+
+Our first observation is that the linear programming solution will not be sensitive to most choices of $w_{i,j}$ when the target and draft distributions are concentrated over a few values. As a result one can heuristically set most of the variables. We refer to this method as the  \emph{truncated LP} scheme and present the method in Algorithm~\ref{alg:lp}. Assume that the vocabulary $\Omega = \{1,2,\ldots,n\}$ has the tokens sorted in decreasing order i.e., $q_1-p_1^2 \ge q_2-p_2^2 \ldots \ge  q_n -p_n^2$. We partition $\Omega$ into two sets $\Omega_1 = \{1,2,\ldots, s\}$ and $\Omega_2 = \{s+1, \ldots, n\}$, where $s$ is a free parameter to select. We fix a subset of weights as follows:
+\begin{align}
+    w_{i,j} = \begin{cases}
+        1, & i \in \Omega_1, j \in \Omega_2 \\
+        1, & i \in \Omega_2, j \in \Omega_2, i < j 
+    \end{cases}
+    \label{eq:heur}
+\end{align}
+while we leave the weights $w_{i,j}$ for $i<j$ and $i,j \in \Omega_1$ as free parameters. The intuition behind the choice of weights in~\eqref{eq:heur} is that in these cases we prefer token $i$ over token $j$ to increase $p_I(i)$ further so as to decrease the difference between $q_i$ and $p_I(i)$.  Note that:
+\begin{align}
+     p_I(k) = \begin{cases}
+         p_k^2 + \sum_{i=1, i\neq k}^{s} 2p_i p_k w_{k,i}  + \sum_{i=s+1}^n 2p_i p_k, & k \in \Omega_1 \\
+         p_k^2 + \sum_{i=k+1}^n 2p_i p_k, & k \in \Omega_2 
+     \end{cases}\label{eq:p_Ieq}
+\end{align}
+The objective to maximize reduces to $\sum_{k=1}^s \min(p_I(k), q_k)$
+over the variables $w_{i,j}$. Thus the number of variables is reduced to $O(s^2)$
+\begin{align}
+    \tilde{P}(\mrm{acc}) \ge P^\star(\mrm{acc}) - \sum_{x \in \Omega_2}\left(q(x)-p^2(x)\right)^+
+\label{eq:p_acc_bnd}
+\end{align}
+
+\begin{algorithm}[b!]
+    \caption{Truncated LP} \label{alg:lp}
+    \begin{algorithmic}[1]
+        \STATE {\bfseries Input:} Threshold $s$, Input tokens $X_1, X_2$ sampled independently from $p(\cdot)$
+        \STATE {\bfseries Output:} Selected token $Y_I$, output distribution $p_I(\cdot)$. 
+        \STATE Order vocabulary $\Omega=\{1,2,\ldots, n\}$, sorted in decreasing order with $(q_i -p_i^2)$. 	
+        \STATE Set $\Omega_1 = \{1,\ldots, s\}$ and $\Omega_2 = \{s+1,\ldots, n\}$.
+        \STATE For  $i, j \in \Omega_2$ or $i \in \Omega_1$ and $j \in \Omega_2$ set $w_{i,j}$ in~\eqref{eq:heur} 
+        \STATE For $i,j \in \Omega_1$, compute $w_{i,j}$  as a solution to a linear program:
+        \begin{itemize}
+            \item Maximize:  $\sum_{i=1}^s \min(q_i, p_I(i))$, where $p_I(i)$ is defined in~\eqref{eq:p_Ieq}
+            \item Constraints: $w_{i,j}\ge 0$, $w_{i,j}+w_{j,i}=1$
+        \end{itemize}
+        \STATE Compute   $p_I(\cdot)$ according to~\eqref{eq:p_Ieq}.
+        \IF {$X_1 = X_2$}
+   	\STATE Set $Y_I = X_1$.
+        \ELSE 
+   	\STATE Let $\{X_1, X_2\}=\{i,j\}$  and $i < j$.  
+	\STATE Set $Y_I=i$ with probability $w_{i,j}$, and $Y_I=j$ otherwise.
+        \ENDIF
+    \end{algorithmic}
+\end{algorithm}
+
+Thus if $\Omega_2$ is selected so that the penalty term is small then the decrease in the acceptance probability can be kept small. 
+In the experiments we observed that for well-trained target models the drop in accuracy is negligible even for small values of $s$. Thus by appropriately truncating the number of variables to optimize in the linear program we expect to have a faster implementation. 
+
+Our second idea is to truncate the alphabet when performing importance sampling. In particular let $\Omega_0 \subseteq \Omega$ be a high probability subset of $\Omega$ under the target distribution. We re-normalize the target distribution to $\tilde{q}$ so that it is supported entirely over $\Omega_0$ and use this distribution in our proposed scheme to generate an output $Y \sim \tilde{q}(\cdot)$. Since we want the output to follow the distribution $q(\cdot)$, we perform the following post-processing. We  accept $Y$ with a probability $p_a =\sum_{x \in  \Omega_0} q(x)$ and reject with probability $p_r = 1-p_a$. If rejected, we output a token from $\Omega\setminus \Omega_0$ such that any $x \in \Omega\setminus \Omega_0$ is selected with probability proportional to $q(x)$. This  ensures that the output token follows the original distribution $q(\cdot)$. We refer to this scheme as the \emph{truncated alphabet} scheme.
+
+
+
+\begin{remark}
+ Although our discussion has focused on the case when both samples are drawn from the same draft distribution $p(\cdot)$, our approach can also be extended to the case when they are sampled from a different distribution, as outlined in the supplementary material in Section~\ref{sec:non-id}.    \label{rem:non-id} 
+\end{remark}
+\begin{remark}
+\label{rem:tokens}
+ To tackle the case of $K>2$ drafts we propose to group the input tokens into groups of size $2$ and then apply the two-draft importance sampling scheme in a multi-stage manner. For example if $S =\{X_1, X_2, X_3\}$ and $K=3$ we first apply the fast importance weighted sampling to the group $\{X_1, X_2\}$ to output an intermediate token $Y_1$ with distribution say $p_1(\cdot)$. Then we apply importance weighted sampling to the input $(Y_1, X_3)$, where the tokens now have non-identical distributions, and produce an output token $Y$ to which speculative sampling is applied.       
+\end{remark}
+
+
+ 
+
+
+\section{Experimental Results}
+
+
+\textbf{Setup}. We conduct experiments using an instance of A100 GPU with 80GB memory. We use the OPT model~\citep{zhang2022opt}, where the draft model has $125$M parameters and the target model has $13$B parameters. For evaluation purposes, we consider the datasets associated with the XSum~\citep{narayan2018don}, Databricks-Dolly-15k~\citep{Conover} and the WMT18~\citep{bojar-etal-2018-findings} tasks. All experiments were done over $4$ arbitrarily chosen seeds and the performance was averaged over these. 
+
+\textbf{Parameters}. In applying our Importance Sampling (IS) scheme to handle $K>2$ drafts, we utilize the successive selection scheme discussed in Remark~\ref{rem:tokens}. Throughout our experiments, unless specified otherwise, we employ both truncated LP (with $s=5$ as the truncation parameter) and truncated alphabet (to a size of $40$ tokens) as detailed in Section~\ref{sec:low_comp}. Additionally, we perform top-$p$ sampling with $p=0.95$ and generate $5$ tokens per call of the draft model across all schemes.
+
+\subsection{Identical Draft Models} \label{sec:identical}
+
+In our first set of experiments, we consider the case where identical draft models are used to generate candidate tokens sequences. We compare the performance of our method with SpecTr~\citep{sun2024spectr} and SpecInfer~\citep{miao2024specinfer}, as well as single-draft speculative sampling \citep{leviathan2023fast, chen2023accelerating}, where we use the same temperature for the draft model. 
+
+In Fig.~\ref{fig:temp_same}, we set the temperature of the target model to $1.0$, while we vary the temperature of the $K=2$ draft models between the range of $1.2$ to $2.4$, and we report the performance achieved by the different schemes across the three tasks discussed earlier. The top plots report the block efficiency, which is the average number of tokens that are accepted per use of the draft model~\citep{leviathan2023fast}. The bottom plots  show the percentage improvement in the token rate with respect to the baseline single draft scheme. 
+
+\begin{figure}[h]
+    \includegraphics[width=\textwidth]{figures/same_temps_2.pdf}
+    \caption{Performance comparison of different multi-draft schemes, while we vary the temperature of the two draft models.}
+    \label{fig:temp_same}
+\end{figure}
+
+We observe that the  IS scheme consistently outperforms the both SpecTr and SpecInfer across all three tasks. In fact when the temperature of the second draft is increased, the improvement in the block efficiency of both SpecTr and SpecInfer is rather negligible compared to the single draft baseline, while the token rate are in fact lower than the single draft baseline. On the other hand our proposed IS scheme is able to achieve consistent improvements in all the three tasks.
+\begin{table}[!t]
+    \centering
+    \caption{Block efficiency achieved in the Dolly task for different number of draft models.}
+    \label{tab:block_efficiency-dolly}
+    \begin{tabular}{lccccc}
+        \toprule
+        Scheme & $K=2$ & $K=3$ & $K=4$ & $K=5$ & $K=6$ \\
+        \midrule
+        IS & 2.13 $\pm$ 0.05 & 2.22 $\pm$ 0.05 & 2.26 $\pm$ 0.05 & 2.27 $\pm$ 0.05 & 2.28 $\pm$ 0.06 \\
+        SpecInfer & 1.76 $\pm$ 0.04 & 1.86 $\pm$ 0.05 & 1.95 $\pm$ 0.05 & 2.00 $\pm$ 0.04 & 2.04 $\pm$ 0.05 \\
+        SpecTr & 1.77 $\pm$ 0.04 & 1.89 $\pm$ 0.05 & 1.96 $\pm$ 0.05 & 2.03 $\pm$ 0.06 & 2.08 $\pm$ 0.04 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Table~\ref{tab:block_efficiency-dolly} compares the block efficiencies for different multi-draft speculative sampling methods using $K=2$ to $K=6$ drafts when all the drafts are identical and use a sampling temperature of $1.2$. We again see a consistent improvement by the proposed importance sampling scheme.
+
+
+        
+            
+
+            
+
+
+\subsection{Non-Identical Draft Models}\label{sec:nonidentical}
+
+We next consider the case of $K=2$ draft models, which share the same weights but use different temperatures for token generation. When the candidate tokens are generated from different distributions, to the best of our knowledge, the only multi-draft sampling scheme that has been considered in prior works is the SpecInfer scheme. As a result we are able to provide a direct comparison with this scheme. We set the temperature of the target model to $1.0$, and one that of the draft models to $1.2$ while we vary the temperature of the other draft model between the range of $1.0$ to $2.4$.  
+
+\begin{figure}[!htb]    \includegraphics[width=\textwidth]{figures/temp2.pdf}
+    \caption{Performance comparison of different multi-draft schemes. The temperature of the first draft model is set to $1.2$, while we vary the temperature of the other draft. 
+    }
+    \label{fig:temp2}
+\end{figure}
+
+ 
+In Fig.~\ref{fig:temp2} we report the performance achieved by the different schemes across three different datasets.
+We observe that the  IS scheme consistently outperforms SpecInfer across all three tasks. In fact when the temperature of the second draft is increased, the improvement in the block efficiency for SpecInfer is rather negligible compared to the single draft baseline.  On the other hand our proposed IS scheme is able to achieve consistent improvements. 
+ 
+As with the case of identical drafts, we again observe that when the temperature of the second draft increases, the gains are negative for the SpecInfer scheme as the computational time for the second draft does not translate into a sufficient improvement in the block efficiency. On the other hand our proposed importance sampling scheme shows a consistent improvement the token-rate over the baseline schemes due to improved block efficiency, despite the additional compute from  the second draft.
+
+\begin{table}[tb!]
+\centering
+\caption{Effect of LP Truncation and Alphabet Truncation}
+\label{tab:thr_maxel}
+\begin{tabular}{lccc}
+\toprule
+& & Block Efficiency & Token Rate \\&&& {\footnotesize(\% improvement to SD)} \\
+\midrule
+& 10 & 1.98 $\pm$ 0.03 & -0.57 $\pm$ 3.38\% \\
+Alphabet Truncation ($|\Omega_0|$) & 20 & 2.00 $\pm$ 0.04 & 1.00 $\pm$ 3.08\% \\
+& 40 & 2.05 $\pm$ 0.04 & 6.63 $\pm$ 3.18\% \\
+& 50 & 2.03 $\pm$ 0.05 & 3.22 $\pm$ 3.39\% \\
+\midrule
+& 5 & 2.05 $\pm$ 0.04 & 6.63 $\pm$ 3.18\% \\
+LP-Truncation Threshold ($s$) & 10 & 2.04 $\pm$ 0.05 & 1.52 $\pm$ 3.47\% \\
+& 15 & 2.04 $\pm$ 0.04 & 1.74 $\pm$ 2.36\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In Table~\ref{tab:thr_maxel} we study the effect of choosing different parameters for vocabulary truncation and LP truncation discussed in Section~\ref{sec:low_comp}. We use the same parameters as in the previous experiment but fix the temperature of the second draft to $2.0$.  As we increase the size of the vocabulary $\Omega_0$ from $10$ to $40$ we see  improvements in the block efficiency as well as the token rates. Beyond  $40$, it appears that the gains in the block efficiency saturate and the token rate decreases. We also find that the performance is not too sensitive to the choice of the parameter $s$ in the LP program and choosing $s=5$ yields the best token rate.
+
+
+\section{Conclusion}
+
+We revisit the problem of maximizing the acceptance probability for token-level multi-draft selection~\citep{sun2024spectr}. We first  present an architectural result that  demonstrates connection to importance sampling. For the case of $K=2$ drafts we establish a closed for solution for the acceptance probability and also present a necessary and sufficient condition for the acceptance probability to equal one. Building on our theoretical analysis, we present a new class of token selection schemes based on  importance sampling. We present experimental results using  OPT model and three tasks: Dolly, XSum and WMT to compare the performance of these schemes over baselines. 
+In particular we noted that our proposed schemes lead to a noticeable improvement in the block efficiency and token rates when the draft sequences are sampled from non-identical distributions.  
+
+\newpage
+
+
+

@@ -1,0 +1,310 @@
+\title{Mechanistically analyzing the effects of fine-tuning on procedurally defined tasks}
+
+\begin{abstract}
+Fine-tuning large pre-trained models has become the \textit{de facto} strategy for developing both task-specific and general-purpose machine learning systems, including developing models that are safe to deploy. 
+Despite its clear importance, there has been minimal work that explains how fine-tuning alters the underlying capabilities learned by a model during pretraining: does fine-tuning yield entirely novel capabilities or does it just modulate existing ones?
+We address this question empirically in \textit{synthetic, controlled} settings where we can use mechanistic interpretability tools (e.g., network pruning and probing) to understand how the model's underlying capabilities are changing. 
+We perform an extensive analysis of the effects of fine-tuning in these settings, and show that: (i) fine-tuning rarely alters the underlying model capabilities; (ii) a minimal transformation, which we call a `wrapper', is typically learned on top of the underlying model capabilities, creating the illusion that they have been modified; and (iii) further fine-tuning on a task where such ``wrapped capabilities'' are relevant leads to sample-efficient revival of the capability, i.e., the model begins reusing these capabilities after only a few gradient steps. 
+\textit{This indicates that practitioners can unintentionally remove a model's safety wrapper merely by fine-tuning it on a, e.g., superficially unrelated, downstream task.} 
+We additionally perform analysis on language models trained on the TinyStories dataset to support our claims in a more realistic setup.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+
+
+
+
+\label{sec:intro}
+Large language models (LLMs) pretrained on huge, web-crawled text datasets demonstrate extremely general capabilities~\citep{radford2018improving, radford2019language, brown2020language, bubeck2023sparks}. This has led to the current paradigm of machine learning, where practitioners often use model adaptation protocols such as fine-tuning to achieve unprecedented performance on a broad range of downstream tasks~\citep{raffel2020exploring, sanh2022multitask, reid2022can, driess2023palm, ahn2022can}. Relatedly, the generality of an LLM's capabilities implies the model also learns to exhibit several undesirable behaviors, e.g., producing sensitive, biased, or toxic outputs in the pursuit of completing a task~\citep{weidinger2021ethical, lin2021truthfulqa, jiang2021can, parrish2021bbq, zhou2021challenges, xu2021detoxifying, welbl2021challenges}. Fine-tuning with different training objectives has again seen immense usage in mitigating such ``unsafe'' capabilities, serving as an integral component of current state-of-the-art \textit{alignment} approaches like RLHF~\citep{ouyang2022training, go2023aligning, stiennon2020learning, bai2022training, glaese2022improving}. 
+
+Given its ubiquity in the design of both performant and safely deployable models, a natural question emerges: precisely how does fine-tuning influence a pretrained model's capabilities to adapt to a downstream dataset (see Fig.~\ref{fig:intro})? The generality of an LLM's capabilities opens the possibility that fine-tuning protocols merely identify the most relevant capabilities and amplify their use for a given set of inputs, while inhibiting the use of other capabilities. Arguably, results on jailbreaking alignment-finetuned LLMs via adversarially generated prompts to elicit undesirable behavior support this hypothesis~\citep{wei2023jailbroken, zou2023universal, shen2023anything, deng2023jailbreaker, liu2023jailbreaking}; however, a precise study to establish the phenomenology of fine-tuning remains absent from the literature. It therefore remains unclear how pernicious this problem is.
+
+\begin{figure}
+\centering
+        \includegraphics[width=\linewidth]{main_figs/intro.png}
+        \caption{\textbf{How does fine-tuning alter a model's capabilities?} (a) Pretraining on huge, web-crawled datasets leads to LLMs learning several capabilities that can justifiably process an input. The figure shows this using an illustrative query, ``write a story a 5-year old would understand.'' Via careful prompting, the desired answer can be retrieved, indicating both desired and undesired capabilities exist in an LLM. (b) Upon fine-tuning, e.g., to avoid use of undesirable capabilities, we hypothesize that three explanations are possible: (i) a minimal transformation of the original capability is learned, e.g., a negation of the original capability; (ii) the undesirable capability is deleted altogether; or (iii) the use of another relevant capability is amplified.
+        }
+        \label{fig:intro}
+\end{figure}
+
+Motivated by the above, we perform an extensive analysis of the effects of fine-tuning on a pretrained model's capabilities in \textit{controlled settings} where we can use mechanistic interpretability tools to understand precisely what is happening to the model's underlying capabilities as it is fine-tuned. 
+Specifically, we focus on the following two setups: (i) compiled transformer models based on the \textit{Tracr library}~\citep{lindner2023tracr, weiss2021thinking}, which allows encoding specific computational programs into a transformer, and (ii) procedurally generated setups involving \textit{probabilistic context-free grammars (PCFGs)}~\citep{sipser1996introduction, chomsky1956three}, a formal model designed to capture syntactic properties of natural and programmatic languages that has recently served as a testbed for mechanistically understanding language models~\citep{allen2023physics, deletang2022neural, shi2022learning}. While Tracr allows us to analyze models with perfectly encoded capabilities, models trained on PCFGs allow evaluation of the effects of design choices involved in the pretraining pipeline. Fine-tuning these models via the often-used protocol of further training a pretrained model on a downstream dataset with a sufficiently small learning rate, we make the following findings.
+\begin{itemize}[leftmargin=10pt, itemsep=0pt, topsep=0pt, parsep=0pt, partopsep=1pt]
+    \item \textbf{Fine-tuning alters pretraining capabilities by minimally transforming them.} 
+    We find that when a relevant pretraining capability is present, the fine-tuned model learns a minimally transformed version of it. We call the transformed portion a \textit{wrapper}.
+    
+    \item \textbf{Wrappers are generally very localized.} We show that the wrappers transforming a model's pretraining capabilities are often extremely localized: e.g., via mere pruning of a few weights or neurons, we show the model can start to reuse its pretraining capability and unlearn how to perform the downstream task. Relatedly, we find that via a simple linear probe, we are still able to retrieve outputs expected from the pretrained model.
+
+    \item \textbf{Reverse fine-tuning to ``revive'' a capability.} In scenarios where upon fine-tuning a model \textit{behaviorally} seems to not possesses a capability, we find that further fine-tuning the model on a subset of pretraining data leads to a sample-efficient ``revival'' of the capability. We corroborate these results in a realistic setup using the TinyStories dataset~\citep{eldan2023tinystories}.
+\end{itemize}
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+\textbf{Fine-tuning in the ``foundation model'' era.} Fine-tuning large-scale foundation models pretrained on huge datasets, such as LLMs~\citep{radford2019language, brown2020language} or large vision models~\citep{radford2021learning, caron2021emerging}, has become the norm in most domains of machine learning. Accordingly, several fine-tuning methods have been proposed in recent years, e.g., instruction fine-tuning~\citep{wei2021finetuned, liu2022few, askell2021general}, parameter-efficient fine-tuning~\citep{houlsby2019parameter, zaken2021bitfit, wang2022twostage}, low-rank adaptation~\citep{hu2021lora, pfeiffer2020AdapterHub, lialin2023scaling}, and weight averaging~\citep{gueta2023knowledge, matena2022merging}. The diversity of these protocols makes fine-tuning a general, umbrella term for related methods used to adapt a pretrained model to elicit its most relevant capabilities. \textit{For precision, we restrict this paper to fine-tuning protocols that continue training of a pretrained model on a smaller downstream dataset at a learning rate that is often one to three orders of magnitude lower than the average pretraining one.} Such protocols are widely used in practice, e.g., in instruction fine-tuning~\citep{wei2021finetuned}.
+
+\textbf{Understanding fine-tuning.} 
+A few papers theoretically analyze fine-tuning~\citep{lampinen2018analytic, tripuraneni2020theory, gerace2022probing, maddox2021fast, kumar2022fine} under strong assumptions such as relatively simple model classes (e.g., linear functions) or a kernel view of deep learning, which, as shown by \citet{yang2020feature}, trivializes the notion of feature transfer in fine-tuning / transfer learning (though see \citet{malladi2023kernel} for a notable exception). Prior works have also evaluated the effects of fine-tuning via the lens of mode connectivity~\citep{juneja2022linear, lubanaMechanisticModeConnectivity2022}, behavioral evaluations~\citep{lovering2021predicting}, and intrinsic dimensionality of the loss landscape~\citep{aghajanyan2020intrinsic}. In contrast, we aim to provide a mechanistic analysis of how fine-tuning changes model capabilities. Contemporary works by \citet{kotha2023understanding, prakash2024fine} claim that fine-tuning is unlikely to alter a model's capabilities---their results can be seen as further support for claims made in our work on other experimental setups.
+\textbf{Model interpretability via synthetic tasks.} Several recent works have focused on \textit{mechanistically} understanding how Transformers learn synthetic language generation tasks, such as learning formal grammars and board games~\citep{allen2023physics, zhao2023transformers, liEmergentWorldRepresentations2023, nanda2023emergent, liu2022transformers, valvoda2022benchmarking, liu2023exposing, zhou2023algorithms, chan2022data}. The goal of such papers, including ours, is not necessarily to provide accurate explanations for the success of LLMs, but to develop concrete hypotheses that can be used to develop grounded experiments or tools for understanding their behavior. For example, in a recent work, \citet{allen2023knowledge, allen2023manipulation} use a synthetically designed setup to develop hypotheses for how ``knowledge'' about an entity is stored in a pretrained model, showing such knowledge can often be manipulated via relatively simple linear transformations. Similarly, \citet{okawa2023compositional} use a procedurally defined multimodal dataset to demonstrate that emergent capabilities seen in neural networks are partially driven by the compositional nature of real world data. In another work, \citet{zhou2023algorithms} utilize Tracr compiled Transformers to hypothesize and demonstrate that if primitive operations involved in a formal algorithm can be implemented by a model, length generalization if practically feasible. 
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Defining our notion of capabilities}
+
+For precision and to motivate our experimental setup, we first discuss the notion of capabilities that we aim to capture for analyzing how fine-tuning alters a model (see Tab.~\ref{table:table_symbols} for a summary of notations). We use an idealized definition to communicate our primary intuition and emphasize that we do not expect all capabilities in a pretrained model will act as perfectly as the definition necessitates. However, for the procedural tasks used in this work, our idealized notion is fairly representative.
+Let \datapre denote a dataset sampled from a distribution $\mathcal{P}_{\mathrm{X}}$ over the domain $\mathrm{X}$. 
+We will assume the domain $\mathrm{X}$ can itself be factorized into two domains $\mathrm{X}_{I}$ and $\mathrm{X}_{D}$. 
+Correspondingly, a sample $x \in \mathrm{X}$ can be divided into a tuple of variables $(x_i \in \mathrm{X}_{I}, x_d \in \mathrm{X}_{D})$, where $x_i$ identifies which capability a model should use to process the information encoded by the variable $x_d$. 
+This decomposition captures the idea that different prompts can force a pretrained LLM to elicit different capabilities, as shown in Fig.~\ref{fig:intro}. 
+The identifier of capability $c$ is denoted $i_c$. 
+Pretraining on \datapre yields us an $\mathtt{L}$-layer model $\mathtt{M}(.)\colon \mathrm{X} \to \mathrm{Y}$, where often $\mathrm{Y} = \mathrm{X}$ for language models. Let $\mathtt{Read}_{l}(\mathtt{M}(.))$ denote the action where a linear layer is trained on intermediate outputs at layer $l$ of model $\mathtt{M}(.)$ using \datapre. 
+Under this setup, we define a capability as follows.
+\begin{definition}\textbf{\emph{(Capability.)}}
+\label{def:capability}
+    Define a surjective map $f_{\mathcal{C}}: \mathrm{X}_{\mathcal{D}} \to \mathrm{Y}_{\mathcal{C}}$, where $\mathrm{Y}_{\mathcal{C}} \subset \mathrm{Y}$. Let $\mathrm{X}_{\mathcal{C}} \subset \mathrm{X}$ be a sub-domain s.t.\ $\forall\, x \in X_{\mathcal{C}}$, the capability identifier variable is the same, i.e., $x_i = \mathtt{i}_\mathcal{C}$. Then, we say the model $\mathtt{M}(.)$ ``possesses a capability $\mathcal{C}$'' if for all $x \in \mathrm{X}_{\mathcal{C}}$, $\exists\, l \leq \mathtt{L}$ s.t.\ $\mathtt{Read_{l}}(M(x)) = f_{\mathcal{C}}(x_d)$.
+\end{definition}
+A linear readout at an intermediate layer is used in the definition above to emphasize that the notion of a capability need not correspond to only input--output behavior. Further, the definition is restricted to a sub-domain of the overall input space, which we argue is important to define a system's capabilities. For example, one can claim an 8-bit adder circuit possesses the capability to perform addition, but, technically, this is true only over the domain of 8-bit numbers; for inputs with more than 8-bit precision, the circuit will see an overflow error, generating an incorrect but syntactically valid output. Similarly, an LLM may possess the capability to identify the sentiment of a passage of text in a specific language, but \textit{possibly} fail when inputs in a different language are shown. Such structured failures imply claiming the existence of a capability should account for the input domain.
+
+We next consider how the fine-tuning distribution $\mathcal{P}^{\mathtt{FT}}_{\mathrm{X}}$ over the domain $\mathrm{X}$ can interact with capabilities exhibited in the pretrained model. Our goal here is to capture the fact that a large-scale pretraining corpora is likely to have non-zero probability under the fine-tuning distribution, i.e., it is unlikely that a pretrained model will lack \textit{any} capability relevant to the downstream task. This motivates a notion of ``relevance of a capability''. Specifically, let $\mathcal{D}_{\mathtt{FT}} \sim \mathcal{P}^{\mathtt{FT, E}}_{\mathrm{X}}$ denote the downstream dataset used for fine-tuning, where $\mathcal{P}^{\mathtt{FT, E}}_{\mathrm{X}}$ is the empirical distribution that captures a subset of the support with non-zero probability in the distribution $\mathcal{P}^{\mathtt{FT}}_{\mathrm{X}}$. 
+\begin{definition}\textbf{\emph{(Relevance of a Capability.)}}
+\label{def:relevance}
+    Assume the capability $\mathcal{C}$ in a pretrained model can be transformed to a map $\mathtt{g} \circ f_{\mathcal{C}}$ via fine-tuning on $\mathcal{D}_{\mathtt{FT}}$, where $|\mathcal{D}_{\mathtt{FT}}| \ll |\mathcal{D}_{\mathtt{PT}}|$, such that for all $x \sim \mathcal{P}^{\mathtt{FT, E}}_{\mathrm{X}}$, the correct output is produced. Then, if for all $x \sim \mathcal{P}^{\mathtt{FT}}_{\mathrm{X}}$, $\mathtt{g} \circ f_{\mathcal{C}}$ yields the correct output, we claim capability $\mathcal{C}$ is \textbf{strongly relevant} to the fine-tuning task; else, we call it \textbf{weakly relevant}.
+\end{definition}
+
+\setlength\intextsep{1pt}
+\begin{wrapfigure}{}{0.5\textwidth}
+  \centering
+    \includegraphics[width=\linewidth]{main_figs/relevance.png}
+        \caption{\textbf{Capability Relevance.} Consider the task of completing a passage while maintaining its narrative. Herein, the ability to recognize the sentiment of a text will be deemed \textit{strongly relevant} and the ability to recognize negative words \textit{weakly relevant}. Such words are often spuriously correlated with a negative sentiment.
+        }
+        \label{fig:relevance}
+\end{wrapfigure}
+
+For example, a \textit{weakly relevant} capability can involve the ability to recognize a spurious attribute that the model can learn to exploit to perform well on the fine-tuning dataset, without enabling generalization to the overall distribution that the fine-tuning dataset is sampled from. Meanwhile, a \textit{strongly relevant} capability is one that extracts a causally relevant feature for that task (see Fig.~\ref{fig:relevance} for an example). When a weakly relevant pretraining capability is available, we empirically observe that we can \textit{often} identify specific components in the latter half of the model (e.g., neurons or layers) that seem to implement the transform $\mathtt{g}$ in Def.~\ref{def:relevance}. In such cases, we call $\mathtt{g}$ a ``wrapper'' and $\mathtt{g} \circ \mathcal{C}$ a ``wrapped capability''. If we intervene on the model by either removing the wrapper or training it to forget the wrapper, we find the model starts to perform well on the pretraining task again. In such cases, we say the pretraining capability has been ``revived''.
+
+
+
+
+
+
+
+
+
+\WFclear
+
+
+\section{Building Capable Models: Tracr and PCFGs}
+
+\label{sec:setup}
+\begin{figure}[b]
+\centering
+        \includegraphics[width=\linewidth]{main_figs/dgp.png}
+        \caption{\textbf{Experimental setup.} We primarily analyze two setups: (i) Tracr ``compiled'' models with predefined capabilities and (ii) models trained to learn capabilities defined via a PCFG, following~\citet{allen2023physics}. During fine-tuning, we train the model on a dataset $\mathcal{D}_{\mathtt{FT}}$ that promotes learning of a capability $\mathcal{C}'$. We randomly embed spurious attributes in the fine-tuning dataset that correlate with features extracted by a pretraining capability $\mathcal{C}$ to operationalize capability relevance. 
+        }
+        \label{fig:dgp}
+\end{figure}
+We next describe the setup used in this work for analyzing how fine-tuning alters a model's capabilities (see Fig.~\ref{fig:dgp} and App.~\ref{sec:data_supp}). Due to lack of clarity on what capabilities a language model possesses or what training data it has seen, we primarily focus on procedurally defined setups that enable clear interpretability. 
+To understand how the relevance of a capability affects fine-tuning, we randomly embed a  predefined spurious attribute into the fine-tuning dataset. Specifically, the attribute correlates with the features extracted by the pretraining capability---if the attribute is ``simple'' enough, the model preferentially exploits it to reduce the downstream loss~\citep{shah2020pitfalls, lubanaMechanisticModeConnectivity2022, trivedi2023closer}. 
+\paragraph{Compiled capabilities with Tracr.} For a fully controllable system, we use the recently proposed Tracr library~\citep{lindner2023tracr}. Tracr enables ``compiling'' a transformer model with a set of predefined computational primitives over a string of characters from the English alphabet. Accordingly, we define a set of capabilities as a Tracr program and compile it into a Transformer via Tracr (see App.~\ref{sec:data_supp_tracr} for a detailed pipeline). The model is then fine-tuned on a downstream task to which the compiled capability may either be weakly or strongly relevant. 
+While we analyze two tasks in this setup, for the main body of the paper, we focus on only the following one. 
+\begin{itemize}[leftmargin=9pt, itemsep=-1pt, topsep=-1pt, parsep=-1pt, partopsep=-1pt]
+    \item \textbf{Counter:} Compile the capability to count the number of occurrences of a token \bgdbox{green}{$\mathtt{O}_{\mathtt{PT}}$} in a string into the model; fine-tune to count occurrences of another token \bgdbox{red}{$\mathtt{O}_{\mathtt{FT}}$}. If $\mathtt{r}(x, \text{\mybrown{$\mathtt{O}$}})$ denotes the number of occurrences of a token \text{\mybrown{$\mathtt{O}$}} in a string $x$, the spurious correlation is defined by enforcing a constant difference in token occurrences, i.e., $\mathtt{r}(x, \text{\bgdbox{red}{$\mathtt{O}_{\mathtt{FT}}$}}) - \mathtt{r}(x, \text{\bgdbox{green}{$\mathtt{O}_{\mathtt{PT}}$}}) = \mathtt{q}$. See also Alg.~\ref{fig:tracr_rasp_count} and Fig.~\ref{fig:tracr_count_example}.
+\end{itemize}
+
+As an example, note that in the Counter setup, the model can exploit its pretraining capability and get the correct output on the fine-tuning dataset by merely adding $\mathtt{q}$ to the count of \bgdbox{green}{$\mathtt{O}_{\mathtt{PT}}$} tokens. This \textit{wrapped capability} will however perform poorly on samples without the correlation.
+
+
+\paragraph{Learned capabilities with PCFGs.} In this setup, capabilities are ``learned'', akin to practical situations. 
+This allows us to probe the effects of different pretraining design choices, e.g., the distribution of the pretraining data.
+Specifically, we follow recent work by \citet{allen2023physics} and train a minGPT model~\citep{mingpt} via autoregressive training on probabilisitc context-free grammars (PCFGs), a formal model of language that captures syntactic properties. 
+Broadly, the data-generating process involves a tree traversal (see Fig.~\ref{fig:dgp}), starting from an initial root node and randomly choosing and navigating a set of production rules of the grammar from start/intermediate nodes to intermediate/terminal nodes, stopping only when a terminal node is reached. 
+ 
+We prepend special tokens \myblue{$\mathtt{T}$} and \mybrown{$\mathtt{O}$}, called ``task family'' and ``operand'' tokens, that specify a certain task must be performed on the string $x$; e.g., count the occurrences (a \myblue{task family}) of a certain token (\mybrown{operand}) in a string. 
+Overall, a specific pair of the task family and operand tokens instantiates a task in our setup.
+The ground truth output of this task and a special token indicating that the output should be produced at the next position are appended at the end of the string in the training data (see App.~\ref{app:pcfg} for further details and Fig.~\ref{fig:pcfg_sample} for an example). 
+Our experiments thus involve the following steps. (i) Pretrain a model on a set of task families. Every sample begins with the task family and operand tokens to specify the task; this ensures different tasks do not ``conflict'' (assign different labels to the same input), since, by construction, they have non-overlapping support. (ii) Fine-tune the model on a task which may or may not have been included during pretraining. (iii) Evaluate how this fine-tuning affects the model.
+The data-generating process involves a uniform prior over task family tokens; meanwhile, the set of operand tokens seen during pretraining, denoted \largebgdbox{green}{$\{\mathtt{O}_{\mathtt{PT}}\}$}, have a multinomial sampling prior. 
+Specifically, the probability of sampling a specific token $\bgdbox{green}{$\mathtt{O}_{\mathtt{PT}}$} \in \text{\largebgdbox{green}{$\{\mathtt{O}_{\mathtt{PT}}\}$}}$ under task \myblue{$\mathtt{T}$} is denoted $\mathcal{P}_{\myblue{\mathtt{T}}}(\bgdbox{green}{$\mathtt{O}_{\mathtt{PT}}$})$. 
+If this probability is low, the model may not learn the relevant capability to perform the task specified by the special tokens. 
+While we analyze the effect of fine-tuning in two broad setups, using a model pretrained on five distinct task families relating to counting and indexing elements of a string, we focus on only the following one in the main body of the paper. 
+\begin{itemize}[leftmargin=9pt, itemsep=-1pt, topsep=-1pt, parsep=-1pt, partopsep=-1pt]
+    \item 
+    \textbf{Counter:} We intentionally reuse this task to demonstrate the effects of compilation of a capability via Tracr versus learning the capability via PCFGs. Specifically, the model is pretrained to learn to count the occurrences of tokens from a \textit{set} of operand tokens \largebgdbox{green}{$\{\mathtt{O}_{\mathtt{PT}}\}$} and is fine-tuned to exclusively count occurrences of a token \bgdbox{red}{$\mathtt{O}_{\mathtt{FT}}$} $\in$ \largebgdbox{green}{$\{\mathtt{O}_{\mathtt{PT}}\}$}. 
+    By making the sampling probability of \bgdbox{red}{$\mathtt{O}_{\mathtt{FT}}$} tokens high during pretraining, we can make the model preemptively performant on the downstream task. This allows us to model the notion of capability relevance. 
+\end{itemize}
+
+
+
+
+
+
+
+
+
+
+
+\section{Experiments: Mechanistic analysis of Fine-tuning}
+
+We now provide several results indicating that fine-tuning rarely elicits meaningful changes to pretraining capabilities. To this end, we borrow several protocols commonly used in the field of mechanistic interpretability for our analysis (see Fig.~\ref{fig:mech_inter}), specifically \textbf{network pruning}~\citep{voita2019analyzing, tanaka2019deep}, \textbf{attention map visualizations}~\citep{serrano2019attention, wiegreffe2019attention, lai2019human}, and \textbf{probing classifiers}~\citep{tenney2019bert, voita2020information, geva2023dissecting, geva2022transformer}. We use multiple tools for all experiments since each tool, individually, is known to suffer from pitfalls~\citep{meister2021sparse, bai2021attentions, jain2019attention, belinkov2022probing, bolukbasi2021interpretability}. Demonstrating our claims consistently hold true across a diverse set of tools improves our conclusions' robustness to pitfalls of a specific tool. 
+Additionally, we propose a methodology called \textbf{reverse fine-tuning (\reft)}, wherein one takes a pretrained model, fine-tunes it on a downstream dataset, and then fine-tunes it again in the ``reverse'' direction, i.e., on a dataset sampled from the original pretraining distribution. 
+\begin{wrapfigure}{r}{0.44\textwidth}
+  \centering
+    \includegraphics[width=\linewidth]{main_figs/analysis_protocols.png}
+  \caption{\textbf{Analysis protocols.} We analyze how fine-tuning affects a pretrained model's capabilities by (i) reverse Fine-tuning, (ii) network pruning, (iii) attention visualization, and (iv) probing classifiers. We use (ii)---(iv) to show fine-tuning often yields wrapped capabilities. For further evidence, we use (i) and (ii) and find we can ``revive'' the original capabilities, i.e., the model starts performing well on the pretraining task again. See App.~\ref{sec:mechinterp_setup} for precise details.
+\label{fig:mech_inter}
+\end{wrapfigure}
+We argue if the behavior corresponding to a pretraining capability is retrieved in a few steps of \reft, fine-tuning did not meaningfully alter said capability (this claim can be formalized using results by \citet{bengio2019meta, le2021analysis}). 
+\begin{figure}[b]
+\centering
+        \includegraphics[width=1.0\linewidth]{plots/pcfg_count/pcfg_plot_WS_200k_full.pdf}
+        \caption{\textbf{Fine-tuning accuracy w.r.t.\ number of training iterations.} We vary the probability of sampling the token \bgdbox{red}{$\mathtt{O_{FT}}$} in the pretraining data and the spurious correlation in the fine-tuning datasets. When the prior is sufficiently high (a, b), we find the model learns to perform well on the downstream task. Meanwhile, if the prior is low (c), the model learns the downstream task only if a high enough learning rate is used and the spurious correlation is imperfect. This indicates the ability to extract information relevant for the downstream task is likely to be exploited during fine-tuning.}
+        \label{fig:pcfg_wc_count}
+\end{figure}
+We primarily focus on the learned capabilities setup of PCFG counter in the main paper, relegating most results on compiled capabilities with Tracr to App.~\ref{sec:tracr_results_sup} and other results with PCFGs to App.~\ref{sec:pcfg_results_Supp}---findings remain consistent across all settings. 
+In the PCFG counter setup, the model is pretrained, amongst other tasks, to count occurrences of tokens from the set $\text{\largebgdbox{green}{$\{\mathtt{O}_{\mathtt{PT}}\}$}} = \{\mathtt{a, b, c}\}$ in a given string; during fine-tuning, the model is trained to count occurrences of $\text{\bgdbox{red}{$\mathtt{O_{FT}}$}} = \mathtt{b}$. Here, the spurious correlation is defined by enforcing count of $\mathtt{b}$ to be $1$ more than that of $\mathtt{a}$. The probability a datapoint sampled from the train or test fine-tuning dataset contains a spurious correlation is denoted $C_{\mathtt{Tr}}$ and $C_{\mathtt{Te}}$, respectively. Here, $C_{\mathtt{Tr}} \in \{0.0, 0.5, 0.8, 1.0\}$ and $C_{\mathtt{Te}} \in \{0.0, 1.0\}$. We use three sets of sampling probabilities of the task operands in the pretraining data: $\mathcal{P}_{\myblue{\mathtt{T}}}^{L}=(0.999, 0.001, 0.000)$, $\mathcal{P}_{\myblue{\mathtt{T}}}^{M}=(0.9, 0.1, 0.0)$, or $\mathcal{P}_{\myblue{\mathtt{T}}}^{H}=(0.5, 0.3, 0.2)$. These priors indicate a low/medium/high probability of sampling \bgdbox{red}{$\mathtt{O}_{\mathtt{FT}}$}. We use the following learning rates (LR) for fine-tuning, $\eta_{M}=\nicefrac{\eta_{\mathtt{PT}}}{10^1}$ and $\eta_{S}=\nicefrac{\eta_{\mathtt{PT}}}{10^2}$, where $\eta_\mathtt{PT}$ is the \textit{average} pretraining learning rate. 
+
+\subsection{Results}
+\WFclear
+\begin{figure}[t]
+        \includegraphics[width=1.0\linewidth]
+        {plots/pcfg_count/pcfg_plot_RC_count_new.pdf}
+        \caption{\textbf{Impact of sampling prior on the pretraining task's accuracy as fine-tuning is performed.} We plot accuracy on the pretraining task w.r.t.\ fine-tuning iterations. When the sampling prior of the \bgdbox{red}{$\mathtt{O_{FT}}$} is low during pre-training, the pretraining task accuracy quickly plummets, especially if the spurious correlation is high; having a high sampling prior mitigates this behavior. This \textit{indicates} pretraining capabilities are affected the most when they are weakly relevant.
+        }
+        \label{fig:pcfg_RC_count}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{plots/pcfg_count_mech/pcfg_prune_lrs.pdf}
+\caption{\textbf{Pruning a few neurons is sufficient to retrieve pretraining task accuracy.} We plot accuracy w.r.t.\ number of neurons pruned to improve performance on the pretraining task. We see when a small learning rate is used for fine-tuning, the pretraining task's performance improves after just 5--15 neurons are pruned (top), while the fine-tuning task's performance reduces correspondingly (bottom). We argue these neurons serve as a wrapper to minimally alter the weakly relevant pretraining capability and exploit the spurious correlation present in the fine-tuning data.
+}
+\label{fig:pcfg_prune_lrs}
+\end{figure}
+
+\textbf{Behavioral assessment of fine-tuning.} We first evaluate the model's learning dynamics during fine-tuning (see Fig.~\ref{fig:pcfg_wc_count} and Tab.~\ref{table:pcfg_count_200k}). When the pretraining prior has low probability of sampling the token \bgdbox{red}{$\mathtt{O_{FT}}$}, we see the fine-tuned model performs well only when the spurious correlation is present, i.e., $C_{\mathtt{Te}} = 1$. As the sampling probability is increased, however, we observe this behavior significantly changes. In particular, even if the model is fine-tuned for a high value of $C_{\mathtt{Tr}}$, albeit less than 1, it starts to perform well on the test data regardless of the presence of the spurious attribute. Note that the performance is not high to begin with, indicating the ability to count \bgdbox{red}{$\mathtt{O_{FT}}$} was learned during fine-tuning; however, having a sufficiently large sampling probability for the token during pretraining leads the model to avoid the spurious correlation. This indicates a pretraining ability to extract information relevant for the downstream task is likely to be exploited during fine-tuning. This is further corroborated by the results in Fig.~\ref{fig:pcfg_RC_count}, where we observe that when the spurious correlation is present in the fine-tuning data, accuracy on the pretraining task is affected the most if sampling prior of the target token was low during pretraining. We next analyze these results mechanistically.
+
+
+
+\begin{figure}[t]
+\centering
+        \includegraphics[width=1.0\linewidth]{plots/iclr_rebuttal/pcfg_probe_lr_pretrained_PT.pdf}
+        \caption{\textbf{Probing the presence of pre-training (top) and fine-tuning (bottom) capabilities.} 
+        We plot probe accuracy versus the index of the block in the Transformer model. $C_{\mathtt{Te}}$ is set to 0. The pretrained model (left) acts as a baseline for the trend of performance through the model's blocks. In most scenarios, we find we can infer the count of \bgdbox{green}{$\mathtt{O_{PT}}$} with a similar trend as the pretrained model (left). A drop in performance is observed only when learning rate $\eta_{M}$ is used with a weakly relevant capability (low sampling prior). This indicates pretraining capabilities persist after fine-tuning.
+        }
+        \label{fig:pcfg_prob_lr}
+\end{figure}
+
+\textbf{Pruning / Probing fine-tuned models indicates learning of wrapped capabilities.} Our results above \textit{indicate} the model exploits its weakly relevant capabilities, i.e., the capability that helps exploit any spurious correlation, to solve the downstream task. We hypothesize that, at a mechanistic level, the model exploits the weakly relevant capability by learning a \textit{wrapper} over it. To evaluate this, we analyze the models fine-tuned with a low sampling prior via network pruning and linear probing (see App.~\ref{sec:mechinterp_setup} for setup details). Specifically, we prune the fine-tuned models to find the most salient weights for reducing loss on the pretraining task of counting \bgdbox{green}{$\mathtt{O_{PT}}$}. If the model learns a wrapper on this capability, the neurons we find should correspond to this wrapper, such that deleting them recovers the capability to count that token. As shown in Fig.~\ref{fig:pcfg_prune_lrs}, we find this is indeed the case---in a setup with weak relevance of capabilities, pruning a very small number of neurons is sufficient to revive the ability to perform well on the original task of counting \bgdbox{green}{$\mathtt{O_{PT}}$}. To assess this further, we train a linear probe on the residual output of every block of the transformer model and determine whether the count of \bgdbox{green}{$\mathtt{O_{PT}}$} can be accurately computed via the fine-tuned model. As shown in Fig.~\ref{fig:pcfg_prob_lr}, in the presence of spurious correlations, a linear probe can retrieve the count of the token \bgdbox{green}{$\mathtt{O_{PT}}$}, indicating intermediate outputs relevant to the pretraining capability are still being produced by the fine-tuned model. This observation is particularly evident when a smaller learning rate is used, which is common in practice. Overall, these results show that when a weakly relevant capability is present in the pretrained model, a \textit{wrapper}, i.e., a localized transformation of the pretraining capability, is learned during fine-tuning. 
+
+
+
+\textbf{\reft enables ``revival'' of pretraining capabilities.} To further corroborate our claims above, we use a model fine-tuned to count \bgdbox{red}{$\mathtt{O_{FT}}$} and reverse fine-tune it to re-learn the ability to count \bgdbox{green}{$\mathtt{O_{PT}}$}. 
+\setlength\intextsep{1pt}
+\begin{wrapfigure}{r}{0.47\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{plots/iclr_rebuttal/pcfg_reverse_plot_WC_new_mod.pdf}
+  \caption{\textbf{Reverse Fine-Tuning:} We set $C_{\mathtt{Te}}$ to be 0 to test if the model performs well regardless of a spurious correlation. Models are fine-tuned for $10$K iterations. 
+  We observe that when a strongly relevant capability is present (a, b), the model very quickly ($0.1$--$1$K iterations) starts to perform well on the task via \reft{}, even if behavior relevant to the capability ceased during pretraining (e.g., when $C_{\mathtt{Tr}}$ is 1). Meanwhile, when the model possesses a weakly relevant capability (c), this ``revival'' is \textit{slightly} slower ($3$K iterations). In contrast, the $\mathtt{Scr.+FT}$ baseline only reaches perfect accuracy at $4.5$K iterations and when using a larger learning rate, i.e., $\eta_{M}$. 
+  \label{fig:pcfg_reverse_plot_WC}
+  }
+\end{wrapfigure}
+As a baseline, we also report a protocol called  $\mathtt{Scr.+FT}$, wherein the model is initialized with parameters pre-trained to count \bgdbox{red}{$\mathtt{O_{FT}}$} and then fine-tuned to count \bgdbox{green}{$\mathtt{O_{PT}}$}. Note that this baseline and the \reft{} protocol differ in their initialization state: former is initialized with parameters pretrained to count \bgdbox{red}{$\mathtt{O_{FT}}$}, while latter is initialized with parameters pretrained to count \bgdbox{green}{$\mathtt{O_{PT}}$} and fine-tuned to count \bgdbox{red}{$\mathtt{O_{FT}}$}. Results are shown in Fig.~\ref{fig:pcfg_reverse_plot_WC}. 
+We see the model starts to perform well on the pre-training task even if a small learning rate is used for \reft, i.e., even minimally changing the fine-tuned model's parameters is sufficient to regain the pretraining capability! Further, increasing the sampling prior of \bgdbox{red}{$\mathtt{O_{FT}}$} accelerates this behavior. This indicates that when a strongly relevant capability is present, the model essentially amplifies its use, but does not catastrophically affect the pretraining capability itself; meanwhile, with a weakly relevant capability (low sampling prior during pretraining), even though the performance is initially poor on the pretraining task, in relatively few iterations (compared to baseline), the accuracy becomes perfect. 
+
+
+\setlength\intextsep{1pt}
+\begin{wrapfigure}{r}{0.47\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{plots/tracr/tracr_plot_count_main_tuned.pdf}
+\caption{\textbf{Visualizing attention maps of fine-tuned Tracr models.} Leftmost panel shows the Tracr compiled model's attention map on the counter task. Upon fine-tuning under different spurious correlations, we see the model continues to pay attention to the pretraining target \bgdbox{green}{$\mathtt{O_{PT}}$}$=a$. Only when a large enough learning rate and zero spurious correlation is used, there is a change in the attention pattern.
+\label{fig:tracr_attn_maps}
+}
+\end{wrapfigure}
+
+\textbf{Attention map visualizations further corroborate the wrappers hypothesis.} As we noted before, the results discussed above remain consistent across other experimental setups for both Tracr and PCFG models. However, by construction, Tracr yields particularly interpretable attention maps, allowing us to directly visualize the effects of fine-tuning. 
+We thus analyze the attention maps of a Tracr model on the Counter task described in Sec.~\ref{sec:setup}. Results are shown in Fig.~\ref{fig:tracr_attn_maps}. 
+The original Tracr compiled model serves as a baseline and clearly demonstrates that all tokens only attend the pretraining target token, \bgdbox{green}{$\mathtt{O_{PT}}$}$ = a$. Upon fine-tuning to count \bgdbox{red}{$\mathtt{O_{FT}}$}$ = b$, we find the model clearly continues to pay attention to \bgdbox{green}{$\mathtt{O_{PT}}$} if a small learning rate is used. A larger learning rate is, however, able to alter the model computation, but only if the pretraining capability is not weakly relevant to the fine-tuning task, i.e., when $C_\mathtt{Tr} = 0$; otherwise, we again find the model continues to pay attention to the pretraining target.
+
+
+
+\subsection{Validating our Hypotheses on TinyStories}
+\label{sec:tinystories}
+\begin{figure}
+\centering
+        \includegraphics[width=1.0\linewidth]{plots/tinystories/twist_probe_legend.png}
+        \includegraphics[width=0.499\linewidth]{plots/tinystories/twist_probe_twist_legend.pdf}\includegraphics[width=0.499\linewidth]{plots/tinystories/twist_recovery_legend.pdf}
+        \caption{\textbf{Validation on TinyStories.} Models are trained to produce stories with several features (e.g., $\mathtt{foreshadowing}$) and fine-tuned via different protocols to not produce stories with a ``forbidden'' feature (specifically, $\mathtt{twists}$) (see App. \textbf{Left:} We probe the existence of this feature at intermediate Transformer blocks. 
+        Probe accuracy on models pre-trained with or without $\mathtt{twist}$ data (\emph{Present}/\emph{Not in Pretraining}, respectively) act as upper and lower bounds on the expected accuracy, and are plotted for ease of comparison. Regardless of the fine-tuning protocol (Filtering, Filtering + Randomisation, Filtering + Mix \& Match), for the lower LR, no protocol removes a meaningful amount of information and a similar but less strong trend holds for the higher LR. 
+        \textbf{Right:} We plot the loss during reverse fine-tuning (\reft{}) to again produce stories with the forbidden feature.
+        Fine-tuned models' loss goes down very quickly (30--300 iterations) compared to baselines (which never reach the same loss; also see Tab.~\ref{tab:tinystoriesresults}). Both these results indicate the capability of identifying the forbidden feature, a necessary capability for story modelling, continues to persist after fine-tuning.}
+        \label{fig:tinystoriesprobe}
+\end{figure}
+
+\setlength\intextsep{1pt}
+\begin{wraptable}{R}{0.44\linewidth}
+\small
+\centering
+\begin{tabular}{@{}r|llll@{}}
+\toprule
+Deletion Type                   & \multicolumn{4}{c}{Twist Proportion at Iteration}  \\ \midrule
+  & 0 & 30 & 300 & 3000 \\ \midrule
+$\mathtt{F}$ ($\eta_M$) & 44\% & 81\% & 81\% & 82\% \\
+$\mathtt{F+RR}$ ($\eta_M$) & 12\% & 56\% & 69\% & 75\% \\
+$\mathtt{F+MM}$ ($\eta_M$) & 31\% & 88\% & 50\% & 75\% \\ \midrule
+$\mathtt{F}$ ($\eta_S$) & 69\% & 88\% & 75\% & 94\% \\
+$\mathtt{F+RR}$ ($\eta_S$) & 12\% & 44\% & 81\% & 81\% \\
+$\mathtt{F+MM}$ ($\eta_S$) & 50\% & 81\% & 62\% & 81\% \\ \midrule
+Not in $\mathtt{PT}$ & 12\% & 31\% & 44\% & 81\% \\ \bottomrule
+\end{tabular}
+\caption{\textbf{TinyStories \reft{} Analysis}. We report the percent of generations with a $\mathtt{twist}$ during reverse fine-tuning for the twist capability. $\mathtt{F}$, $\mathtt{R}$, and $\mathtt{MM}$ stand for our three fine-tuning protocols: Filtering, Randomisation and Mix \& Match (see App. Regardless of learning rate and protocol, models relearn to generate stories with $\mathtt{twist}$ more sample-efficiently than the control model pre-trained on data w/o twists and fine-tuned to generate them (Not in $\mathtt{PT}$).}
+\label{tab:tinystoriesresults}
+\end{wraptable}
+
+
+To give additional strength to our results, we perform an analysis using more realistic language models trained on the TinyStories-Instruct dataset \citep{eldan2023tinystories} (see App.~\ref{section:tinystoriesdata} for an example). These models are able to follow specific instructions to write coherent English stories over multiple paragraphs. We perform experiments analogous to the \reft{} and probing experiments in the previous sections, but now explicitly focus on whether fine-tuning can \textit{delete} capabilities present in pre-trained models. Models are pre-trained to generate stories with specific story features (such as containing a $\mathtt{twist}$, $\mathtt{foreshadowing}$, or $\mathtt{bad~ending}$) and fine-tuned to \textit{not} generate stories with a specific feature ($\mathtt{twist}$) (see App. We probe these models to detect the deleted feature from the intermediate model outputs in Fig.~\ref{fig:tinystoriesprobe}, where the dynamics of loss during \reft{} on learning to generate stories with the deleted feature are also shown. We also report the percentage of stories with the deleted feature generated by models during \reft{} in Table~\ref{tab:tinystoriesresults}, where the generated stories are processed by a fine-tuned GPT-3.5 classifier to predict if the story contains the deleted feature (see App. Overall, we find that ``deleted'' capabilities can be easily and sample-efficiently recovered (compared to the baseline), i.e., stories with that feature can be generated again, regardless of the fine-tuning protocol used. These results support our hypotheses that fine-tuning only minimally alters pre-trained model capabilities. We also highlight a few recent papers that propose similar protocols as \reft{} and experiments as ours with further realistic settings~\citep{qi2023fine, yang2023shadow, zhang2024dissecting, zhao2023learning}.
+
+
+
+
+\section{Conclusion}
+
+In this work, we show that fine-tuning generally alters pre-trained model via small, localized changes that only minimally transform their capabilities. We perform our analysis both with existing mechanistic interpretability tools as well as our proposed \reft method. Our results pave the way for future work both understanding how fine-tuning works in more realistic settings with larger models, as well as emphasize the need for developing methods beyond fine-tuning that alter pre-trained model capabilities more substantially, particularly deleting unsafe capabilities.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

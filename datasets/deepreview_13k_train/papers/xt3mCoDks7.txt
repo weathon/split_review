@@ -1,0 +1,313 @@
+\title{Unlocking the Power of Gradient Guidance for Structure-Based Molecule Optimization}
+
+\begin{abstract}
+Structure-based molecule optimization (SBMO) aims to optimize molecules with both continuous coordinates and discrete types against protein targets.
+A promising direction is to exert gradient guidance on generative models given its remarkable success in images, but it is challenging to guide discrete data and risks inconsistencies between modalities.
+To this end, we leverage a continuous and differentiable space derived through Bayesian inference, presenting Molecule Joint Optimization (MolJO), the first gradient-based SBMO framework that facilitates joint guidance signals across different modalities while preserving SE(3)-equivariance.
+We introduce a novel backward correction strategy that optimizes within a sliding window of the past histories, allowing for a seamless trade-off between explore-and-exploit during optimization.
+Our proposed MolJO achieves state-of-the-art performance on CrossDocked2020 benchmark (Success Rate 51.3% , Vina Dock -9.05 and SA 0.78), more than 4x improvement in Success Rate compared to the gradient-based counterpart, and 2x "Me-Better" Ratio as much as 3D baselines.
+Furthermore, we extend MolJO to a wide range of optimization settings, including multi-objective optimization and challenging tasks in drug design such as R-group optimization and scaffold hopping, further underscoring its versatility and potential.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Structure-based drug design (SBDD) plays a critical role in drug discovery by identifying threedimensional (3D) molecules that are favorable against protein targets (Isert et al., 2023). While recent SBDD focuses on the initial identification of potential drug candidates, these compounds must undergo a series of further modifications for optimized properties, a process that is both complex and time-consuming (Hughes et al., 2011). Therefore, structure-based molecule optimization (SBMO) has garnered increasing interest in real-world drug design (Zhou et al., 2024), emphasizing the practical need of optimizing 3D molecules to meet specific therapeutic criteria.  
+
+Concretely, SBMO can be viewed as a more advanced task within the broader scope of general SBDD, requiring precise control over molecular properties while navigating the chemical space. Specifically, SBMO addresses two key aspects: (1) SBMO prioritizes targeted molecular property enhancement according to expert-specified objectives, whereas generative models for SBDD primarily focus on maximizing data likelihood without special emphasis on property improvement (Luo et al., 2021; Peng et al., 2022). Therefore these models can only produce outputs similar to their training data, limiting the ability to improve molecular properties. (2) SBMO is capable of optimizing existing compounds with 3D structural awareness, addressing a critical gap left by previous molecule optimization methods with 1D SMILES or 2D graph representations (Bilodeau et al., 2022; Fu et al., 2022), and allowing for a more nuanced control. The focus on structure makes SBMO particularly suited for key design tasks, such as R-group optimization and scaffold hopping.  
+
+A pioneering work for SBMO is DecompOpt (Zhou et al., 2024), which designs a special 3D generative model conditioned on fragments, and employs a gradient-free sampling method within such decomposed fragment space through iterative oracle calls. One of the drawbacks is that it relies on oracle functions that can be computationally expensive especially in large-scale SBMO tasks, where running multiple rounds of costly simulations is impractical or even infeasible. Moreover, DecompOpt’s contribution lies in its novel generative paradigm based on fragment conditions, rather than exploring optimization within existing models, making it less adaptable to other frameworks.  
+
+![](images/194a406eb50aeb386109efe930f5111c941ed3291eae5c1885dd94dd8834578f.jpg)  
+
+Figure 1: Overview. A. Structure-based molecule optimization, including (1) guiding molecule design by expert-specified objectives, (2) optimizing existing compounds in the structure space. B. Study on the ratio of “me-better” molecules, where all other baselines fall short in the overall improvement. C. Overall illustration of MolJO, utilizing joint gradient signals over continuous-discrete data, where the distributions of $\pmb{\theta}$ (continuous $\pmb{\mu}$ and discrete z) are taken from true guided trajectories. D. Graphical model of our proposed backward correction strategy, keeping a sliding window of size $k$ .  
+
+One generalized solution is gradient guidance, addressing these issues by eliminating the need for expensive oracle simulations while being flexible enough to be incorporated into strong-performing generative models in a plug-and-play fashion, as demonstrated in a wide range of challenging real-world applications including image synthesis (Dhariwal & Nichol, 2021; Epstein et al., 2023).  
+
+However, current gradient-based methods have not fully realized their potential in SBMO, for they have historically suffered from the continuous-discrete challenges: (1) it is non-trivial to guide discrete variable within probabilistic generative process. More specifically, standard gradient guidance is designed for continuous variables that follow Gaussian distributions, making them not directly applicable to molecular data that involve discrete atom types. Methods attempting to adapt gradient guidance to discrete data often resort to approximating these variables as continuous, either by adding Gaussian noise (Bao et al., 2022) or by assuming that classifiers follow a Gaussian distribution (Vignac et al., 2023). Unfortunately, these approximations can lead to suboptimal results, as they do not accurately reflect the discrete nature (Kong et al., 2023). (2) Gradient guidance might introduce inconsistencies between modalities. For instance, TAGMol (Dorna et al., 2024) formalizes guidance exclusively over continuous coordinates, resulting in a disconnect between the discrete and continuous modalities. This may explain why TAGMol struggles to optimize overall molecular properties as shown in Figure 1, despite its improvement in Vina affinities. By solely guiding the continuous coordinates, TAGMol enhances spatial protein-ligand interactions but fails to optimize e.g. synthesizeability, which depends more on molecular topology, especially discrete atom types.  
+
+In this paper, we address the multi-modality challenge for gradient guidance by leveraging a continuous and differential space, representing an aggregation of noisy samples from the data space derived through Bayesian inference (Graves et al., 2023). We design MolJO (Molecule Joint Optimization), a general framework that enables gradient-based optimization of continuous and discrete variables in a structured manner. We introduce a novel sampling strategy called backward correction, enhancing the alignment of gradients over different steps. By maintaining a sliding window of past history for optimization, the backward correction strategy enforces explicit dependency on the past, effectively alleviating the issue of inconsistencies. Moreover, it balances the exploration of molecular space with the exploitation of better-aligned guidance signals, offering a flexible trade-off.  
+
+Our main contributions are summarized as follows:  
+
+• We propose MolJO, the joint gradient-based method for SBMO that establishes the guidance over molecules, offering better controllability and effectively integrating gradient guidance for continuous-discrete variables within a unified framework.  
+
+• We design a novel backward correction strategy for effective optimization. By keeping a sliding window and correcting the past given the current optimized version, we achieve betteraligned gradients and facilitate a flexible trade-off between exploration and exploitation. • MolJO achieves the best Vina Dock of -9.05, SA of 0.78 and Success Rate of $51.3\%$ , and “Me-Better” Ratio of improved molecules that is $\mathbf{2}\times$ as much as other 3D baselines. We generalize MolJO to various needs including R-group optimization and scaffold hopping, highlighting its versatility and potential in practical drug design.  
+
+2 RELATED WORK   
+Pocket-Aware Molecule Generation. Pocket-aware generative models aim to learn a conditional distribution over the protein-ligand complex data. Initial approaches adopt 1D SMILES or 2D graph representation (Bjerrum & Threlfall, 2017; Gómez-Bombarelli et al., 2018), and recent research has shifted its focus towards 3D molecule generation in order to better capture the interatomic interactions. Early atom-based autoregressive models (Luo et al., 2021; Peng et al., 2022; Liu et al., 2022) enforce an atom ordering to generate molecules atom-by-atom. Fragment-based methods (Powers et al., 2022; Zhang et al., 2023; Lin et al., 2023) alleviate the issue of ordering by decomposing molecules into motifs instead of atom-level generation, but they risk more severe error accumulation and thus generally require post-processing or multi-stage treatment. Non-autoregressive methods based on diffusions (Schneuing et al., 2022; Guan et al., 2022; 2023) and BFNs (Qu et al., 2024) target full-atom generation for enhanced performance and efficiency. However, the needs of optimizing certain properties and modifying existing compounds are not adequately addressed in the scope of previous methods, limiting their usefulness in drug design.   
+Gradient-Based Molecule Optimization. Inspired by classifier guidance for diffusions (Dhariwal & Nichol, 2021), pioneering approaches are committed to adapting the guidance method to handle the complicated molecular geometries in the setting of pocket-unaware generation. EEGSDE (Bao et al., 2022) derives an equivariant framework for continuous diffusion, and MUDM (Han et al., 2023) further explores time-independent property functions for guidance. As they enforce a continuous diffusion process for discrete variables, these methods are not applicable in advanced molecular modeling (Guan et al., 2022; 2023) where discrete data are processed by a discrete diffusion, for it is unnatural to apply progressive Gaussian noise that drives Categorical data away from the simplex. DiGress (Vignac et al., 2023) proposes classifier guidance for discrete diffusion of molecular graphs, yet it additionally assumes that the probability of classifier follows a Gaussian, which is ungrounded and often a problematic approximation. Based on the continuous-discrete diffusion for SBDD, TAGMol (Dorna et al., 2024) retains the guidance only for continuous coordinates, because there lacks a proper way to propagate the gradient over discrete types. The discrete part is affected only implicitly and belatedly in the generative process, and such imbalanced guidance would probably result in suboptimal performance for lack of joint optimization.   
+3 PRELIMINARY   
+3D Protein-Ligand Representation. A protein binding site $\mathbf{p}=(\mathbf{x}_{P},\mathbf{v}_{P})$ is represented as a point cloud of $N_{P}$ atoms where atom coordinates $\mathbf{x}_{P}=\{\mathbf{x}_{P}^{1},\hdots,\mathbf{x}_{P}^{N_{P}}\}\in\mathbb{R}^{N_{P}\times3}$ and $K_{P}$ -dimensional atom features $\mathbf{v}_{P}\,=\,\{\mathbf{v}_{P}^{1},\dots,\mathbf{v}_{P}^{N_{P}}\}\,\in\,\mathbb{R}^{N_{P}K_{P}}$ . Similarly, a ligand molecule $\mathbf{m}\,=\,(\mathbf{x}_{M},\mathbf{v}_{M})$ contains $N_{M}$ atoms, where $\mathbf{x}_{M}^{(i)}\in\mathbb{R}^{3}$ is the atomic coordinate and $\mathbf{v}_{M}^{(i)}\in\mathbb{R}^{K_{M}}$ the atom type. For brevity, the subscript for molecules · $M$ and the pocket condition are omitted unless necessary. Bayesian Flow Networks (BFNs). Operating in a non-autoregressive fashion, BFN views the generative modeling as message exchange between a sender and a receiver. The sender distribution $p_{S}(\mathbf{y}\mid\mathbf{x};\alpha)$ builds upon the accuracy level $\alpha$ applied to data $\mathbf{x}$ and defines the noised y. The varying noise levels constitute the schedule $\begin{array}{r}{\beta(t)=\int_{t^{\prime}=0}^{t}\alpha(t^{\prime})d t^{\prime}}\end{array}$ , similar to that in diffusion models. A key motivation for BFN is that the transmission ought to be continuous and smooth, therefore it does not directly operate on the noisy latent y as diffusions, but on the structured Bayesian posterior $\pmb{\theta}$ given noisy latents instead. The receiver holds a prior belief $\pmb{\theta}_{0}$ , and updates the belief by aggregating  
+
+noisy observations $\mathbf{y}$ , yielding the Bayesian update distribution:  
+
+$$
+p_{U}\big(\pmb{\theta}_{i}\mid\pmb{\theta}_{i-1},\mathbf{x};\alpha_{i}\big)=\underset{p_{S}(\mathbf{y}_{i}\mid\mathbf{x};\alpha_{i})}{\mathbb{E}}\delta\Big(\pmb{\theta}_{i}-h\big(\pmb{\theta}_{i-1},\mathbf{y}_{i},\alpha_{i}\big)\Big)
+$$  
+
+where $\delta(\cdot)$ is Dirac distribution, and Bayesian update function $h$ is derived through Bayesian inference. Note that $\theta_{i}$ can be viewed as the result of mapping given the sender distributions of $\mathbf{y}_{0}$ to $\mathbf{y}_{i}$ :  
+
+$$
+\pmb{\theta}_{i}=f(\mathbf{y}_{0},\mathbf{y}_{1},\ldots,\mathbf{y}_{i})
+$$  
+
+Intuitively, BFN aims to predict the clean sample given aggregated $\pmb{\theta}$ , i.e. conditioning on all previous latents. $\pmb{\theta}$ is fed into a neural network $\Phi$ to estimate the distribution of clean datapoint $\hat{\bf x}$ , i.e. the output distribution $p_{O}({\hat{\mathbf{x}}}\mid\Phi(\theta,t))$ . The receiver distribution is obtained by marginalizing out $\hat{\bf x}$ :  
+
+$$
+p_{R}(\mathbf{y}_{i}\mid\pmb{\theta}_{i-1};t_{i},\alpha_{i})=\underset{p_{O}(\hat{\mathbf{x}}|\pmb{\Phi}(\pmb{\theta}_{i-1},t_{i}))}{\mathbb{E}}p_{S}(\mathbf{y}_{i}\mid\hat{\mathbf{x}};\alpha_{i})
+$$  
+
+The training objective is to minimize the KL-divergence between sender and receiver distributions:  
+
+$$
+L^{n}(\mathbf{x})=\underset{\prod_{i=1}^{n}p_{U}(\pmb{\theta}_{i}|\pmb{\theta}_{i-1},\mathbf{x};\alpha_{i})}{\mathbb{E}}\sum_{i=1}^{n}D_{\mathrm{KL}}(p_{S}(\mathbf{y}_{i}\mid\mathbf{x};\alpha_{i})\parallel p_{R}(\mathbf{y}_{i}\mid\pmb{\theta}_{i-1},t_{i},\alpha_{i})).
+$$  
+
+
+
+\section{4 METHOD  }
+
+
+In this section, we introduce MolJO that guides the distribution over $\pmb{\theta}$ , utilizing aggregated information from previous latents. Though different from guided diffusions that operate on noisy latent $\mathbf{y}$ , this guidance aligns with our generative process conditioned on $\pmb{\theta}$ . By focusing on $\pmb{\theta}$ , we can effectively steer the clean samples towards desirable direction, ensuring a smooth gradient flow.  
+
+Notation. Following Kong et al. (2024) and denoting the guided distribution $\pi$ as product of experts (Hinton, 2002) modulated by energy function $E$ that predicts certain property, we have $\pi(\theta_{i}|\theta_{i-1})\propto$ $p_{\phi}(\pmb{\theta}_{i}|\pmb{\theta}_{i-1})p_{E}(\pmb{\theta}_{i})$ , where $\Phi$ is the pretrained network for BFN, $p_{E}(\pmb{\theta}_{i})=\exp\left[-E(\pmb{\theta}_{i},t_{i})\right]$ is the unnormalized Boltzmann distribution corresponding to the time-dependent energy function.  
+
+Overview. As illustrated in Figure 1, we introduce MolJO as follows: in Sec. 4.1, we propose the concept of gradient guidance over the multi-modality molecule space, derive the form of guided transition kernel $\pi(\pmb{\theta}_{i}|\pmb{\theta}_{i-1})$ via first-order Taylor expansion, and explain the underlying manipulations of distributions the guidance corresponds to. In Sec. 4.2, we present a generalized advanced sampling strategy termed backward correction for $p_{\phi}$ , which allows for a flexible trade-off between explore-and-exploit by maintaining a sliding window of past histories. We empirically demonstrate our strategy helps optimize consistency across steps, ultimately improving the overall performance.  
+
+4.1 EQUIVARIANT GUIDANCE FOR MULTI-MODALITY MOLECULAR DATA  
+
+In this section, we derive the detailed guidance over $\pmb{\theta}$ for molecule $\mathbf{m}=\left(\mathbf{x},\mathbf{v}\right)$ with $N$ atoms, where $\mathbf{x}\in\mathbb{R}^{N\times3}$ represent continuous atom coordinates and $\mathbf{v}\in\{1,\ldots,K\}^{N}$ for $K$ discrete atom types, and thus $\boldsymbol\theta:=[\boldsymbol\mu,\mathbf z]$ for the continuous and discrete modality, respectively.  
+
+Guidance over Multi-Modalities.1), followed by details for each modality.  
+
+Proposition 4.1. Suppose $\pmb{\mu}_{i}\sim\mathcal{N}(\pmb{\mu}_{\phi},\pmb{\sigma}\mathbf{I})$ and $\mathbf{y}_{i}\sim\mathcal{N}(\mathbf{y}_{\phi},\sigma^{\prime}\mathbf{I})$ in the original generative process of BFN, then we can approximate the guided transition kernel $\pi(\pmb{\theta}_{i}|\pmb{\theta}_{i-1})$ by sampling  
+
+$$
+\begin{array}{r l}&{\pmb{\mu}_{i}^{*}\sim\mathcal{N}(\pmb{\mu}_{\phi}+\sigma\mathbf{g}_{\pmb{\mu}},\sigma\mathbf{I})}\\ &{\mathbf{y}_{i}^{*}\sim\mathcal{N}(\mathbf{y}_{\phi}+\sigma^{\prime}\mathbf{g}_{\mathbf{y}},\sigma^{\prime}\mathbf{I})}\end{array}
+$$  
+
+where gradient $\mathbf{g}_{\mu}=-\nabla_{\mu}E(\pmb{\theta},t_{i})|_{\pmb{\theta=\theta}_{i-1}}$ , $\mathbf{g}_{\mathbf{y}}=-\nabla_{\mathbf{y}}E(\pmb{\theta},t_{i})|_{\pmb{\theta=\theta}_{i-1}}$ , recall $\theta:=[\mu,\mathbf{z}=f(\mathbf{y})]$  
+
+The guidance is formalized over both continuous coordinates and discrete types, and differs from previous guided diffusion for molecules in that (1) it guides the discrete data through Gaussiandistributed latent $\mathbf{y}$ and ensures that the discrete variables are still on the probability simplex without relying on assumptions (Vignac et al., 2023) or relaxations (Bao et al., 2022; Han et al., 2023), and (2) alleviates the inconsistencies between modalities (Dorna et al., 2024) by joint gradient signals.  
+
+Guiding $\pmb{\mu}$ for Continuous $\mathbf{x}$ . For continuous coordinates $\mathbf{x}\,\in\,\mathbb{R}^{N\times3}$ , it is natural to adopt a Gaussian sender distribution $\mathbf{y}^{x}\sim\mathcal{N}(\mathbf{x},\alpha^{-1}\mathbf{I})$ . With a prior belief $\pmb{\mu}_{0}=\mathbf{0}$ , we have the Bayesian update function for posterior $\pmb{\mu}_{i}$ given noisy $\mathbf{y}^{x}$ as in Graves et al. (2023):  
+
+$$
+h(\pmb{\mu}_{i-1},\mathbf{y}^{x},\alpha_{i})=\frac{\pmb{\mu}_{i-1}\rho_{i-1}+\mathbf{y}^{x}\alpha_{i}}{\rho_{i}}
+$$  
+
+with $\alpha_{i}=\beta_{i}-\beta_{i-1},\rho_{i}=1+\beta_{i}$ given the schedule $\beta_{i}=\sigma_{1}^{-2i/n}-1$ 1−2i/n−1 for a positive σ1 and n steps. Remark 4.2. In the continuous domain, guidance over $\pmb\theta\left(i.e.\;\pmb\mu\right)$ is analogous to guided diffusions, since guiding $\pmb{\mu}$ corresponds to guiding noisy latent $\mathbf{y}$ using the gradient over it:  
+
+$$
+\mu_{i}^{*}=\mu_{i}+\sigma\mathbf{g}_{\mu}=\frac{\mu_{i-1}\rho_{i-1}+(\mathbf{y}^{x}+\sigma\frac{\rho_{i}}{\alpha_{i}}\mathbf{g}_{\mu})\alpha_{i}}{\rho_{i}}=\frac{\mu_{i-1}\rho_{i-1}+(\mathbf{y}^{x}+\sigma\mathbf{g}_{\mathbf{y}^{x}})\alpha_{i}}{\rho_{i}}
+$$  
+
+where by chain rule gyx = −∇yxE(θ, ti)|θ=θi−1 = gµ ∂∂yhx = gµ ρi . This builds a connection between the guidance over $\pmb{\theta}$ and over latent $\mathbf{y}$ for continuous data.  
+
+Guiding ${\bf z}$ for Discrete $\mathbf{v}$ . For $N$ -dimensional discrete types $\mathbf{v}\in\{1,\ldots,K\}^{N}$ , the noisy latent represents the counts of each type among $K$ types, where we have $\mathbf{y}^{v}\sim\mathcal{N}(\mathbf{y}^{v}|\alpha^{\prime}(K\mathbf{e_{v}}-\mathbf{1}),\alpha^{\prime}K\mathbf{I})$ , $\dot{\mathbf{e_{v}}}\,=\,\bigl[\mathbf{e_{v^{(1)}}},\dots,\mathbf{e_{v^{(N)}}}\bigr]\,\in\,\mathbb{R}^{\dot{K}N}$ , $\mathbf{e}_{\mathbf{v}^{(j)}}\,=\,\delta_{\mathbf{v}^{(j)}}\,\in\,\mathbb{R}^{K}$ with Kronecker delta function $\delta$ .  
+
+The aggregated $\mathbf{z}_{i}$ as a posterior belief is updated given the prior $\begin{array}{r}{\mathbf{z}_{0}=\frac{\mathbf{1}}{\mathbf{K}}}\end{array}$ as:  
+
+$$
+h(\mathbf{z}_{i-1},\mathbf{y}^{v},\alpha_{i}^{\prime})=\frac{\exp(\mathbf{y}^{v})\mathbf{z}_{i-1}}{\sum_{k=1}^{K}\exp(\mathbf{y}_{k}^{v})(\mathbf{z}_{i-1})_{k}}
+$$  
+
+where the redundant $\alpha_{i}^{\prime}=\beta_{i}^{\prime}-\beta_{i-1}^{\prime}$ with βi = β1( n) , given a positive hyperparameter $\beta_{1}^{\prime}$  
+
+. Remark 4.3. In the discrete domain, guiding all latents $\mathbf{y}$ amounts to a reweight of the Categorical distribution for $\pmb{\theta}$ (i.e. z), changing the probability of each class in accordance with the gradient. Take an extreme case to illustrate, where $\mathbf{g}_{\mathbf{y}^{v}}$ is filled with one-hot vectors $\delta_{d}$ :  
+
+$$
+(\mathbf{z}_{i}^{*})_{k}=\frac{\exp(\mathbf{y}_{k}^{v})(\mathbf{z}_{i-1})_{k}}{\sum_{k^{\prime}=1}^{K}\exp(\mathbf{y}_{k^{\prime}}^{v})(\mathbf{z}_{i-1})_{k^{\prime}}+[\exp(\sigma^{\prime})-1]\exp(\mathbf{y}_{d}^{v})(\mathbf{z}_{i-1})_{d}}=(\mathbf{z}_{i})_{k}\frac{1}{1+C}<(\mathbf{z}_{i})_{k}
+$$  
+
+$k\ne d$ ,  owbhveiroeu $C\,=\,[\exp(\sigma^{\prime})-1]\exp(\mathbf{y}_{d}^{v})(\mathbf{z}_{i-1})_{d}/[\sum_{k^{\prime}=1}^{K}\exp(\mathbf{y}_{k^{\prime}}^{v})]\,>\,0$ ta ts hteh ef avvaorrieadn $\sigma^{\prime}\,>\,0$ $d$ redistributing the mass for discrete data in a more structured way than diffusion counterparts.  
+
+Equivariance.2.  
+
+Proposition 4.4. The guided sampling process preserves $S E(3)$ -equivariance when $\Phi$ is $S E(3)$ - equivariant, if the energy function $E(\pmb\theta,\mathbf p,t)$ is also parameterized with an $S E(3)$ -equivariant neural network, and the complex is shifted to the space where the protein’s Center of Mass $(C o M)$ is zero.  
+
+4.2 GUIDED BAYESIAN UPDATE WITH BACKWARD CORRECTION  
+
+Here we propose a general backward correction sampling strategy inspired from the optimization perspective, and analyze its effect on aligning the gradients. Recall that from Eq. 1 we can aggregate $\theta_{i}$ based on latents from the previous step:  
+
+$$
+p_{\phi}\big(\pmb{\theta}_{i}\mid\pmb{\theta}_{i-1}\big)=\underset{p_{O}(\hat{\mathbf{x}}_{i}\mid\pmb{\Phi}(\pmb{\theta}_{i-1},t_{i}))}{\mathbb{E}}p_{U}\big(\pmb{\theta}_{i}\mid\pmb{\theta}_{i-1},\hat{\mathbf{x}}_{i};\alpha_{i}\big)
+$$  
+
+Backward correction aims at “correcting the past to further optimize”. Since we obtain an optimized $\theta_{i}^{*}$ from the guided kernel $\pi(\pmb{\theta}_{i}|\pmb{\theta}_{i-1})$ , there will be an optimized version of $\hat{\mathbf{x}}_{i}^{*}=\hat{\mathbf{x}}_{i+1}$ for the next step. By backward correcting the Bayesian update distribution $p_{U}$ given the optimized $\hat{\mathbf{x}}^{*}$ , we are able to reinforce the current best possible parameter $\pmb{\theta}$ , instead of building on the suboptimal history.  
+
+Algorithm 1 Gradient Guided Sampling of MolJO with Backward Correction  
+
+Require: network $\Phi(\pmb\theta,t,\mathbf p)$ , noise schedules $[\beta(t),\beta^{\prime}(t)]$ , number of sample steps $n$ , back correc  
+tion steps $k$ , number of atom types $K$ , energy function $E(\pmb\theta,\mathbf p,t)$ , guidance scale $s$   
+1: Initialize belief $\begin{array}{r}{\pmb{\theta}:=[\pmb{\mu},\mathbf{z}]\leftarrow[\mathbf{\bar{0}},\frac{\mathbf{1}}{\mathbf{K}}]}\end{array}$ ▷Continuous aggregations for different modalities   
+2: for $i=1$ to $n$ do   
+3: $\begin{array}{r}{[t,t_{-k}]\leftarrow[\frac{i-1}{n},\operatorname*{max}(0,\frac{i-k-1}{n})]}\end{array}$ $\triangleright$ Discrete timesteps in $[0,1)$   
+4: $[\hat{\mathbf{x}},\hat{\mathbf{e}}_{\mathbf{v}}]\leftarrow\Phi(\pmb{\theta},t,\mathbf{p})$ $\triangleright$ Network predicts clean data   
+5: $[\mathbf{g}_{\mu},\bar{\mathbf{g_{y}}}]\gets[-\nabla_{\mu}E(\pmb{\theta},\mathbf{p},t),-\nabla_{\mathbf{y}}E(\pmb{\theta},\mathbf{p},t)]$ ▷Gradient guidance   
+6: $[\rho,\dot{\rho}_{-k},\Delta\beta,\Delta\beta^{\prime}]\gets[1+\beta(t),\bar{1}^{+}\beta(t_{-k}),\beta(t)-\beta(t_{-k}),\beta^{\prime}(t)-\beta^{\prime}(t_{-k})]$   
+7: Retrieve $\mu_{-k},{\bf z}_{-k}$ from the past ▷Backward correction starting point   
+8: Sample $\begin{array}{r}{\pmb{\mu}\sim\mathcal{N}([\frac{\rho(\Delta\beta\hat{\mathbf{x}}+\pmb{\mu}_{-k}\rho_{-k})+s\Delta\beta\mathbf{g}_{\pmb{\mu}}}{\rho^{2}},\frac{\Delta\beta}{\rho^{2}}\mathbf{I}]}\end{array}$ $\triangleright$ Guidance for continuous $\mathbf{x}$   
+9: Sample y $\mathbf{\nabla}\sim\mathcal{N}(\Delta\beta^{\prime}(t)(K\hat{\mathbf{e}}_{\mathbf{v}}-\mathbf{1}+s K\mathbf{g}_{\mathbf{y}}),\Delta\beta^{\prime}(t)K\mathbf{I})$ $\triangleright$ Guidance for discrete $\mathbf{v}$   
+10: Update z ← iK=1 exp(yi)−(kz−k)i $\triangleright$ Aggregate latents for discrete data   
+11: end for   
+12: $[\hat{\mathbf{x}},\hat{\mathbf{e}}_{\mathbf{v}}]\leftarrow\Phi(\theta,1,\mathbf{p})$ ▷Network predicts final output   
+13: $\hat{\mathbf{v}}\gets\arg\operatorname*{max}(\hat{\mathbf{e}}_{\mathbf{v}})$ $\triangleright$ Final discrete output from p.m.f.   
+14: return $[\hat{\mathbf{x}},\hat{\mathbf{v}}]$  
+
+By utilizing the property of additive accuracy once $p_{U}$ follows certain form as described by Graves et al. (2023), the one-step backward correction can be derived as follows:  
+
+$$
+\begin{array}{r l}&{p_{\phi}(\pmb{\theta}_{i}\mid\pmb{\theta}_{i-1},\pmb{\theta}_{i-2})=\underset{p_{O}(\hat{\mathbf{x}}_{i}\mid\pmb{\Phi}(\pmb{\theta}_{i-1},t_{i}))_{p_{U}}(\pmb{\theta}_{i-1}\mid\pmb{\theta}_{i-2},\hat{\mathbf{x}}_{i};\alpha_{i-1})}{\mathbb{E}}p_{U}(\pmb{\theta}_{i}\mid\pmb{\theta}_{i-1},\hat{\mathbf{x}}_{i};\alpha_{i})}\\ &{\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\downarrow}\\ &{\qquad\qquad\qquad\qquad\mathrm{originally}\,\hat{\mathbf{x}}_{i-1}\sim p_{O}(\hat{\mathbf{x}}_{i-1}\mid\Phi(\pmb{\theta}_{i-2},t_{i-1}))}\\ &{\qquad\qquad\qquad\qquad\qquad\qquad\qquad p_{U}(\pmb{\theta}_{i}\mid\pmb{\theta}_{i-2},\hat{\mathbf{x}}_{i};\alpha_{i-1}+\alpha_{i})}\end{array}
+$$  
+
+and we arrive at the $k-1$ step corrected estimation of $p_{\phi}$ :  
+
+$$
+p_{\phi}(\pmb{\theta}_{n}|\pmb{\theta}_{n-1},\pmb{\theta}_{n-k})=\underset{p_{O}(\hat{\mathbf{x}}_{n}|\pmb{\Phi}(\pmb{\theta}_{n-1},t_{n}))}{\mathbb{E}}p_{U}(\pmb{\theta}_{n}|\pmb{\theta}_{n-k},\hat{\mathbf{x}}_{n};\sum_{i=n-k+1}^{n}\alpha_{i})
+$$  
+
+Plugging Eq. 7 and 9 together with the sender distributions defined above into the right hand side according to Eq. 1, yields the form of the backward corrected Bayesian update  
+
+$$
+\begin{array}{l}{{\displaystyle p_{U}({\pmb\mu}_{n}|{\pmb\mu}_{n-k},\hat{\bf x}_{n})=\mathcal{N}\Big(\frac{\Delta\beta\hat{\bf x}_{n}+{\pmb\mu}_{n-k}\rho_{n-k}}{\rho_{n}},\frac{\Delta\beta}{\rho_{n}^{2}}{\bf I}\Big)}\ ~}\\ {{\displaystyle~p_{U}({\pmb\ z}_{n}|{\bf z}_{n-k},\hat{\bf v}_{n})=\underset{{\bf y}\sim\mathcal{N}({\bf y}|\Delta\beta^{\prime}(K{\bf e}_{\bar{\bf e}_{n}}-{\bf1}),\Delta\beta^{\prime}K{\bf I})}{\mathbb{E}}\delta\Big({\bf z}_{n}-\frac{\exp({\bf y}){\bf z}_{n-k}}{\sum_{i=1}^{K}\exp({\bf y}_{i})({\bf z}_{n-k})_{i}}\Big)}}\end{array}
+$$  
+
+where $\hat{\bf m}=[\hat{\bf x},\hat{\bf v}]$ is drawn from the output distribution $p_{O}(\hat{\mathbf{m}}\mid\Phi(\theta_{i-1},t_{i-1},\mathbf{p}))$ given pocket $\mathbf{p}$ , $\Delta\beta=\beta_{n}-\beta_{n-k}$ and $\Delta\beta^{\prime}=\beta_{n}^{\prime}-\beta_{n-k}^{\prime}$ are obtained from corresponding schedules.  
+
+The concept of sliding window unifies different sampling strategies proposed by Graves et al. (2023) $(\mathrm{k}{=}1)$ ) and ${{\mathrm{Qu}}}$ et al. (2024) $(\mathtt{k}{=}\mathtt{n})$ . To understand its effect, we visualize the cosine similarity of gradients at each step w.r.t. the previous step in Figure 2. By changing the size $k$ of sliding window, it succeeds in balancing sample quality (explore) and optimization efficiency (exploit), where it first focuses on exploring the molecular space with rapidly changing structures and gradients, and then exploits betteraligned guidance signals over gradually refined structures, achieving the best success rate as later shown.  
+
+In practice, we employ the gradient scale $s$ as a temperature parameter, which is equivalent to adopting $\mathbf{\bar{\rho}}_{E}^{s}(\pmb{\theta},t)\stackrel{-}{\propto}\exp\left[-s E(\pmb{\theta},t)\right]$ . The general sampling procedure is summarized in Algorithm 1.  
+
+![](images/5dc30430f6cc1efda31b6ea2a0a7d06c59ebd58b489c0555f85d7de011e70bb2.jpg)  
+Figure 2: Gradient similarity, where $k$ denotes backward correction window size. For $1<k<200$ , the similarity before timestep $k$ is omitted for it overlaps with $k=200$ , i.e. covering all the past.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+
+
+\section{5.1 EXPERIMENTAL SETUP  }
+
+
+We conduct two sets of experiments for structure-based molecule optimization (SBMO), although the constrained setting seems within the scope of unconstrained one, it is biologically meaningful and more practical in rational drug design, and further showcases the flexibility of our method.  
+
+Task. For a molecule $\mathbf{m}\in\mathcal{M}$ where $\mathcal{M}$ denotes the set of molecules, there are oracles $a_{i}(\mathbf{m})$ : $\mathcal{M}\rightarrow\mathbb{R}$ for property $i$ , each with a desired threshold $\delta_{i}\in\mathbb{R}$ . MolJO is capable of different levels of controllability: (1) unconstrained optimization, where we identify a set of molecules such that $\{\mathbf{m}\in\mathcal{M}\mid a_{i}(\dot{\mathbf{m}_{}})\geq\delta_{i},\forall i\}$ , i.e. the goal is to optimize a number of objectives. (2) constrained optimization, where we aim to find a set of molecules that contain specific substructures $s$ such that $\{\mathbf{\bar{m}}\in\mathcal{M}\mid a_{i}(\mathbf{m})\geq\delta_{i},s\subset\mathbf{m},\forall i\}$ .  
+
+Dataset. Following previous SBDD works (Luo et al., 2021; Peng et al., 2022; Guan et al., 2022), we utilize CrossDocked2020 (Francoeur et al., 2020) to train and test our model, and adopt the same processing that filters out poses with $\mathrm{RMSD}>1\mathring{\mathrm{A}}$ and clusters proteins based on $30\%$ sequence identity, yielding 100,000 training poses and 100 test proteins.  
+
+Baselines. We divide all baselines into the following: (1) Generative models (Gen.), including AR (Luo et al., 2021), GraphBP (Liu et al., 2022), Pocket2Mol (Peng et al., 2022), FLAG (Zhang et al., 2023), DiffSBDD (Schneuing et al., 2022), TargetDiff (Guan et al., 2022), DecompDiff (Guan et al., 2023), IPDiff (Huang et al., 2024) and MolCRAFT (Qu et al., 2024), (2) Oracle-based optimization (Oracle Opt.) that rely on docking simulation in each round, such as AutoGrow4 (Spiegel & Durrant, 2020), RGA (Fu et al., 2022), and DecompOpt (Zhou et al., 2024), (3) Gradient-guided (Grad. Opt.) TAGMol (Dorna et al., 2024).  
+
+Metrics. We employ the commonly used metrics as follows: (1) Affinity metrics calculated by Autodock Vina (Eberhardt et al., 2021), in which Vina Score calculates the raw energy of the given molecular pose residing in the pocket, Vina Min conducts a quick local energy minimization and scores the minimized pose, and Vina Dock performs a relatively longer search for optimal pose to calculate the lowest energy. Success Rate measures the percentage of generated molecules that pass certain criteria (Vina Dock $<-8.18$ , $\mathrm{QED}>0.25$ , $\mathrm{SA}>0.59)$ ) following Long et al. (2022) and Guan et al. (2022). (2) Molecular properties, including drug-likeness (QED) and synthesizability score (SA). (3) Metrics for sample distribution, such as diversity (Div).  
+
+
+
+\section{5.2 UNCONSTRAINED OPTIMIZATION  }
+
+
+In this section, we demonstrate the ability of our framework to improve molecular properties in both single and multi-objective optimization. We sample 100 molecules for each protein and evaluate MolJO in optimizing binding affinity and molecular properties.  
+
+MolJO effectively enhances molecular property w.r.t. generative models. The optimized distribution greatly improves upon the original generated distribution, as shown in the distribution shift in Figure 3 for single objective optimization, and Table 1 (row $14\,\nu s.$ . row 9).  
+
+MolJO outperforms gradient-based method with $4\times$ higher Success Rate. As shown in Table 1, our model achieves state-of-the-art in affinity-related metrics while being highly drug-like, with the best Success Rate of $51.3\%$ , a fourthfold improvement over TAGMol (row $14\,\nu s.$ . row 13).  
+
+MolJO has more potential than oracle-based baselines if equipped with oracles. RGA $\mathrm{Fu}$ et al., 2022) and DecompOpt (Zhou et al., 2024) show satisfactory Success Rate, enjoying the advantage of oracle-based screening at some expense of diversity, while AutoGrow4 (Spiegel & Durrant, 2020) falls short in QED, yielding a suboptimal Success Rate. Given the same concentration use of ${\cal Z}_{}$ -score (Zhou et al., 2024), we report a variant of MolJO with top-of- $\mathcal{N}$ , selecting a tenth  
+
+Table 1: Summary of different properties of reference molecules and generated molecules by our model and other baselines, where $\mathrm{G}+\mathrm{O}$ denotes equipping our method with top-of- $N$ in oracle simulations. (↑) / (↓) denotes a larger / smaller number is better. Top 2 results are highlighted with bold text and underlined text.  
+
+![](images/6b1876b04a12b5fd95055c2563e345530f53e2d42f3d284f4f3a2427e6e14aa0.jpg)  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+while retaining specific structures. We generalize our framework with such structural control and  
+
+Table 3: Constrained optimization results, where Redesign means R-group optimization with fragments of the same size redesigned, Growing means fragment growing into larger size, Hopping means scaffold hopping. (↑) / (↓) indicates a larger / smaller number is better. Top-1 highlighted in bold.  
+
+![](images/1d0a0798da345f60356692380e1ae77ead4b987795f230533cb3b15737d8c60e.jpg)  
+
+show its potential for pharmaceutical use cases including R-group optimization and scaffold hopping, achieved by infilling.2.  
+
+MolJO captures the complex environment of infliling. Table 3 shows that our method generates valid connected molecules and captures the complicated chemical environment with better molecular properties than all baselines, showcasing its potential for lead optimization. As for diffusion baselines, they generate fewer valid connected molecules especially in the challenging case with scaffold hopping, with diffusion baselines lower than $70\%$ validity, and proves to be less effective in proposing feasible candidates, with Success Rate $<20\%$ .  
+
+Optimized molecules form more key interactions for binding. The visualization for constrained optimization is shown in Figure 4. It can be seen that the optimized molecules establish more key interactions with the protein pockets, thus binding more tightly to the active sites. For example, the optimized molecule for 2PC8 retains the key interaction formed by its scaffold, with R-group grown deeper inside the pocket, forming another two $\pi{-}\pi$ stackings.  
+
+5.4 ABLATION STUDIES  
+
+We conduct ablation studies to thoroughly validate our design.2.  
+
+![](images/d61f0fd1a46a051429f5c9d049f26e056a3c19741252c851a4ec21b65d2250e8.jpg)  
+Figure 5: Ablation studies of joint optimization over atom types and coordinates, where w/o type means the gradient is disabled for types, w/o coord disables the gradient for coordinates.  
+
+Joint guidance is consistently better than single-modality guidance. To validate our choice of joint guidance over different modalities, we ablate the gradient for coordinates or types. As shown in Figure 5, utilizing gradients to guide both data modalities is consistently better than applying single-modality gradient only. For affinities, optimizing coordinates is effective in improving the spatial interactions, while for drug-like properties, guidance over atom types plays a crucial role. This underscores the significance of deriving appropriate guidance form jointly, and again supports our finding that a single coordinate guidance as in TAGMol is insufficient and yields suboptimal results.  
+
+Backward correction boosts both the unguided sampling and the effect of guidance. We denote sampling $\theta_{i}$ according to Eq. 11 Vanilla for sampling only one $y\sim p s$ in Eq. 1, Vanilla MC for a Monte Carlo estimate that integrates over multiple $y$ , and sampling proposed by MolCRAFT is denoted Full B.C. as it corresponds to setting $k=n=200$ in Eq. 13, and for $B.C.$ . we set $k=130$ as backward correction steps. Table 4 shows that our method of keeping a history and selectively correcting the past not only improves the original unguided sampling, but also yields better results with guidance. Note that for vanilla case, the gradient guidance does not work as much probably due to the suboptimal history, while correcting a sufficient number of past steps boosts the optimization.  
+
+Table 4: Performances of no backward correction (Vanilla & Vanilla MC), fully corrected strategy (Full B.C.) and backward correction strategy $(B.C.)$ . Positive numbers in green show the relative improvement under guidance, while non-positive numbers in black indicate no performance gain.  
+
+![](images/af025f5ac7f145fdaf247c5b6f6aea96c8558b80ce0fc67abf182b4c61e2196f.jpg)  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We present MolJO, the joint gradient-based SE(3)-equivariant framework to solve the structurebased molecule optimization problems, which only requires training energy functions as a proxy to predict molecular property, instead of expensive oracle simulations. The general framework further equips gradient-based optimization method with backward correction strategy, offering a flexible trade-off between exploration and exploitation. Experiments show that MolJO is able to improve the binding affinity of molecules by establishing more key interactions and enhance drug-likeness and synthesizability, achieving state-of-the-art performance when benchmarked on CrossDocked2020 (Success Rate $51.3\%$ , Vina Dock -9.05 and SA 0.78), together with $4\times$ improvement compared to gradient-based counterpart and $2\times$ “Me-Better” Ratio as much as other 3D baselines.  
+
+
+

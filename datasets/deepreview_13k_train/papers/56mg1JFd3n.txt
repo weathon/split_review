@@ -1,0 +1,727 @@
+\title{Writing in the Margins: Better Inference Patterns for Long-Context Retrieval}
+
+\begin{abstract}
+In this paper, we introduce Writing in the Margins (WiM), a new inference pattern for Large Language Models designed to optimize the handling of long input sequences in retrieval-oriented tasks. This approach leverages the chunked prefill of the key-value cache to perform segment-wise inference, which enables efficient processing of extensive contexts along with the generation and classification of intermediate information (``margins'') that guide the model towards specific tasks. This method increases computational overhead marginally while significantly enhancing the performance of off-the-shelf models without the need for fine-tuning. Specifically, we observe that WiM provides an average enhancement of $7.5\%$ in accuracy for reasoning skills (HotpotQA, MultiHop-RAG) and more than a $30.0\%$ increase in the F1-score for aggregation tasks (CWE). Additionally, we show how the proposed pattern fits into an interactive retrieval design that provides end-users with ongoing updates about the progress of context processing, and pinpoints the integration of relevant information into the final response.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{multicols}{2}
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width = 0.9\linewidth]{assets/Writing_in_the_Margins_Example_-_option_2.pdf}
+    \caption{\textbf{Writing in the Margins inference pattern.} Prefilling KV cache by segments allows to both process the context segment by segment and generate intermediate extractive summaries which can improve the final prediction.}
+    \label{wim_design}
+\end{figure*}
+The performance of Large Language Models (LLMs) tends to deteriorate when processing extensive inputs, a limitation linked directly to their fixed context window and attention mechanisms \cite{li2023looglelongcontextlanguagemodels, liu2023lostmiddlelanguagemodels}. In particular, LLMs struggle with tasks involving long contexts, especially when the relevant information is embedded in larger volumes of text \cite{bai2024longbenchbilingualmultitaskbenchmark, shaham2023zeroscrollszeroshotbenchmarklong}. Recent research thus highlights the importance of improving model capabilities to handle more extensive datasets without losing accuracy or requiring exponential increases in computational resources. 
+
+There have been various attempts to extend the usable context window of LLMs, such as sparse attention \cite{tworkowski2023focused, chen2024longloraefficientfinetuninglongcontext, mohtashami2023landmarkattentionrandomaccessinfinite}, length extrapolation \cite{dai2019transformerxlattentivelanguagemodels, su2023roformerenhancedtransformerrotary, peng2023yarnefficientcontextwindow}, and context compression \cite{ge2024incontextautoencodercontextcompression, mu2024learningcompresspromptsgist}. Concurrently, the field has witnessed the rise of sophisticated prompting strategies like Chain of Thought (CoT) and related structured reasoning methods \cite{wei2023chainofthoughtpromptingelicitsreasoning, yao2023treethoughtsdeliberateproblem, Besta_2024}. These approaches have significantly enhanced LLMs' ability to tackle complex tasks by systematically guiding the reasoning process through predefined structural patterns. 
+
+Our work bridges the gap between efficient transformers architecture research and development of new prompting strategies. Specifically, we identify a novel key-value (KV) cache aware reasoning pattern for existing off-the-shelf long context window LLMs in scenarios typical of retrieval-oriented tasks, where the context is substantial and the instructional prompt is comparatively short. We begin by recognizing that long-context prompts are commonly prefilled in the KV cache segment-wise in a process known as chunked prefill. From this insight, we introduce an inference pattern called Writing in the Margins (WiM), which concurrently generates query-based extractive summaries at each step of the prefill that are subsequently reintegrated at the end of the computation. We term these intermediate outputs ``margins'', drawing inspiration from the practice of making margin notes for improved comprehension of long contexts in human reading. Using methodologies similar to ``scratchpad'' techniques, which meticulously record step-by-step calculations, we incorporate margin notes into the final segment predictions. We show that this technique, which adds only minimal additional computation, significantly enhances long context comprehension. The WiM pattern can also provide end-users with real-time insights into computational progress through streamed margin notes, which ultimately help make AI decisions more transparent and explainable. This can enable users to (1) pinpoint the location of essential information and (2) reduce computational load by exiting early if the provided information satisfactorily addresses the query. 
+
+In Figure \ref{wim_design}, we provide an illustrative example of WiM inference, which we encourage readers to reference as a practical demonstration to complement the formal algorithm description that will be presented in the following sections.
+
+Our main contributions are as follows:
+\begin{tasks}
+\task We introduce a new inference pattern, Writing in the Margins (WiM), which achieves better performance on long-context window tasks with a relatively minor increase in computational cost.
+
+\task We demonstrate the application of WiM within an interactive long context retrieval setup, effectively increasing the transparency of the process and reducing the first response latency.
+
+\task We provide an implementation of this inference pattern using the Hugging Face Transformers library.
+\end{tasks}
+
+
+\section{Writing in the Margins}
+
+
+\paragraph{Chunked Prefill}
+
+\begin{figure*}[t]
+    \small
+    \centering
+    \includegraphics[width = 0.8\linewidth]{assets/Export_01.png}
+    
+    \caption{\small \textbf{Chunked Prefill.} Example of how the attention mask is set across different chunks during prefill iterations (first chunk at the top, second chunk at the bottom). Each new chunk needs to retain causality while attending to all previous chunks. Chunked prefill is mathematically equivalent to prefill without chunking.}
+    \label{kv_cache_chunked_prefill}
+\end{figure*}
+
+Typically, the process of inference for generative LLMs consists of two principal phases: the prefill phase and the decoding phase. When an LLM is requested to prefill a substantial prompt—in the range of hundreds of thousands of tokens—it is common practice to prefill the KV cache in chunks \cite{agrawal2023sarathiefficientllminference}. This method is known as chunked prefill and is supported by many inference frameworks, including vLLM \cite{vllmchunkedprefill}.
+
+Chunked prefill divides the prompt into fixed-size chunks to populate the KV cache at each layer of the Transformer model \cite{vaswani2023attention}. The rationale for chunked prefill is to reduce overall memory usage, as the quadratic memory complexity of the attention mechanism during prefilling can be prohibitive for larger prompts. By splitting a prompt of length $L$ into $N$ chunks, each of size $K$, where $N = L/K$, the overall memory complexity of prefilling is reduced from $O(L^{2})$ to $O(LK)$. The attention mask must be adjusted to allow each new chunk to attend to all tokens in the previous chunks while maintaining the causal structure only for the new chunk, as illustrated in Figure \ref{kv_cache_chunked_prefill}.
+
+Our work exploits the chunked prefill mechanism to generate intermediate “margins” that can then be appended to the prompt to better guide the model toward performing a specific task.
+
+\paragraph{Writing in the Margins}
+
+Consider a prompt $P$, composed of a context $C$, and an instruction $I$.
+\begin{equation}
+\text{P} = \text{C} + \text{I}
+\end{equation}
+
+Prefilling a decoder-only transformer model $T$ directly with the entire prompt $T(P)$ is computationally inefficient when the prompt is long. Moreover, as shown in \cite{liu2023lostmiddlelanguagemodels}, processing the entire prompt in one go can lead to mid-sequence forgetting.
+
+To make this process more efficient, we implement the prefill technique described in the previous paragraph, where the context $\text{C}$ is divided into $N$ segments.
+\begin{equation}
+\text{C} = c_1 + c_2 + ... + c_N
+\end{equation}
+
+For the first segment, the model $T$ operates on chunk $c_1$, resulting in output that includes past key values $\text{pkv}_1$. The model continues onto the second segment with the $\text{pkv}_1$ cached, i.e., $T(\text{pkv}_1, c_2)$, effectively emulating the scenario of processing $T(c_1 + c_2)$ in one step.
+As the procedure progresses, each sequential chunk, $c_k$, is processed with prefilled past key values, noted as $T(\text{pkv}_{[1..k-1]}, c_k)$, mimicking an uninterrupted run of $T$ on $\text{C}$.
+
+The Writing in the Margins (WiM) strategy addresses potential mid-sequence forgetting issues by appending an extractive instruction $I_A$ to each chunk, enhancing chunk-specific outputs. It transforms each step into $T(\text{pkv}_{[1..k-1]}, c_k + I_A)$, where the instruction $I_A$ is embedded alongside each context chunk, then dropped from the KV cache before the next chunk prefilling. The instruction $I_A$ is closely related to $I$ - the model is asked to copy over all relevant to $I$ information.
+
+Intermediate outputs from each chunk are referred to as margin notes $M_i$, cumulatively forming $N$ notes, described as $M = M_{[1..N]}$. Unhelpful notes, perhaps irrelevant to the instruction, are discarded, enhancing the final contextual construct to $\text{C} + \text{M} + \text{I}$, positioned advantageously towards the end to minimize mid-sequence memory loss. Intuitively, the model is allowed to use relevant intermediate predictions while answering the final query. 
+
+To summarize, we modify the chunked prefill algorithm by adding extra decoding steps (\textcolor{teal}{green} in Table \ref{extra-steps}). Most of these steps can be efficiently batched with the original prefill steps. The query-relevant information extracted from these steps is then added at the end of the context but before the instruction. 
+
+\begin{Figure}
+\scriptsize
+\begin{center}
+\begin{tabular}{ r l l l}
+\toprule
+ \textbf{step} & \textbf{Chunked Prefill} & \textbf{WiM} & \textbf{keep} \\
+ \midrule
+1 & $T(\emptyset,c_{1})^{\dagger}$ & $T(\emptyset,c_{1})^{\dagger}$ & $\text{pkv}_{[1]}$\\
+\midrule
+2 & $T(\text{pkv}_{[1]},c_{2})^{\dagger}$ & $T(\text{pkv}_{[1]},c_{2})^{\dagger}$ & $\text{pkv}_{[1..2]}$\\
+  && $\textcolor{teal}{T(\text{pkv}_{[1]}, I_{A})^{\dagger\ddagger}}$ & $\textcolor{teal}{M_{1}}$\\
+  \midrule
+  \vdots & \vdots & \vdots & \vdots\\
+  \midrule
+N & $T(\text{pkv}_{[1..N-1]}, c_{N})^{\dagger}$ & $T(\text{pkv}_{[1..N-1]}, c_{N})^{\dagger}$ & $\text{pkv}_{[1..N]}$\\
+& & $\textcolor{teal}{T(\text{pkv}_{[1..N-1]}, I_{A})^{\dagger\ddagger}}$ & \textcolor{teal}{$M_{N-1}$} \\
+\midrule
+\textcolor{teal}{N + 1} & & $\textcolor{teal}{T(\text{pkv}_{[1..N]}, I_{A})^{\dagger\ddagger}}$ & \textcolor{teal}{$M_{N}$} \\
+\midrule
+N + 2 & $T(\text{pkv}_{[1..N]}, I)^{\dagger\ddagger}$ & $T(\text{pkv}_{[1..N]}, \textcolor{teal}{M_{[1..N]}}+I )^{\dagger\ddagger}$ & \\
+&  &  & \\
+\bottomrule
+\end{tabular}
+\end{center}
+\captionof{table}{\small \textbf{Batching Chunked Prefill Steps with WiM margin generation.} The inference for generative LLMs consists of two principal phases: the prefill phase (\dagger) and the decoding phase (\ddagger). WiM algorithm adds extra decoding steps that mostly can be batched with chunked prefill steps. We keep margin notes $M_{i}$ produced in extra steps (\textcolor{teal}{green}) as plain text. We then prefill the model $T$ with all relevant notes $M_{[1..N]}$ before the final instruction $I$.}
+\label{extra-steps}
+\end{Figure}
+
+Algorithms \ref{pseudocode-chunked-prefill} and \ref{pseudocode-wim} present pseudocodes of inference with chunked-prefill and WiM respectively. 
+
+\paragraph{Generating and classifying margins}
+
+It is possible to use the same instance of the model for both generating the margins and classifying them, without affecting the prefilled KV cache. Having generated the margins, it is possible to inference the model with a classification prompt without using the KV cache (\texttt{past\_key\_value} in Algorithm \ref{pseudocode-wim}) generated by the prefilling operation. This way, the model will act as it had never been prefilled. Having classified the margins, it is possible to reuse the previously prefilled KV cache to append the classified margins and then generate the final output. The overhead of classifying a single margin, in terms of memory, is just the KV cache size of a single margin and the classification prompt, which is negligible compared to the prefilled long-context prompt.
+\begin{Figure}
+\small
+\begin{algorithm}[H]
+\label{pseudocode-chunked-prefill}
+\SetAlgoLined
+\SetKwData{Context}{context}
+\SetKwData{SystemMessage}{system\_message}
+\SetKwData{Instruction}{instruction}
+\SetKwData{LLM}{llm}
+\SetKwData{Segment}{segment}
+\SetKwData{Segments}{segments}
+\SetKwData{Output}{output}
+\SetKwData{PastKeyValue}{past\_key\_value}
+\SetKwData{OutputVar}{output}
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\SetKwFunction{SplitFN}{\textcolor{violet}{split}}
+\SetKwFunction{Prefill}{\textcolor{violet}{prefill}}
+\SetKwFunction{Generate}{\textcolor{violet}{generate}}
+\SetKwFunction{Append}{\textcolor{violet}{append}}
+\Input{\SystemMessage (string) \\ \Context (string) \\ \Instruction (string) \\ \LLM (object) }
+\Output{output (string)}
+ \Context $\leftarrow$ \SystemMessage\ $+$ \Context\;
+ \Segments $\leftarrow$ \SplitFN{\Context}\;
+ \PastKeyValue $\leftarrow$ []\;
+ \For{\Segment $\in$ \Segments}{
+    \tcp{\textcolor{gray}{add the segment to the KV cache}}
+    \Prefill{\LLM, \PastKeyValue, \Segment}\;
+ }
+ \OutputVar $\leftarrow$ \Generate{\LLM, \PastKeyValue, \Instruction}\;
+ \Return{\OutputVar}
+ \caption{Inference with Chunked Prefill}
+\end{algorithm}
+\end{Figure}
+
+\begin{Figure}
+\small
+\begin{algorithm}[H]
+\label{pseudocode-wim}
+\SetAlgoLined
+\SetKwData{Context}{context}
+\SetKwData{SystemMessage}{system\_message}
+\SetKwData{Instruction}{instruction}
+\SetKwData{ExtractiveSummaryPrompt}{extractive\_summary\_prompt}
+\SetKwData{ClassificationPrompt}{classification\_prompt}
+\SetKwData{LLM}{llm}
+\SetKwData{Segment}{segment}
+\SetKwData{Segments}{segments}
+\SetKwData{Margin}{margin}
+\SetKwData{Output}{output}
+\SetKwData{ClassificationResult}{classification\_result}
+\SetKwData{ClassificationInput}{classification\_input}
+\SetKwData{PastKeyValue}{past\_key\_value}
+\SetKwData{PositiveMargins}{positive\_margins}
+\SetKwData{AllPositiveMargins}{all\_positive\_margins}
+\SetKwData{OutputVar}{output}
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\SetKwFunction{SplitFN}{\textcolor{violet}{split}}
+\SetKwFunction{Prefill}{\textcolor{violet}{prefill}}
+\SetKwFunction{Generate}{\textcolor{violet}{generate}}
+\SetKwFunction{Format}{\textcolor{violet}{format}}
+\SetKwFunction{Append}{\textcolor{violet}{append}}
+\SetKwFunction{Concatenate}{\textcolor{violet}{concatenate}}
+\Input{\SystemMessage (string) \\ \Context (string) \\ \Instruction (string) \\ \ExtractiveSummaryPrompt (string) \\ \ClassificationPrompt (string) \\ \LLM (object) }
+\Output{output (string)}
+ \Context $\leftarrow$ \SystemMessage\ $+$ \Context\;
+ \Segments $\leftarrow$ \SplitFN{\Context}\;
+ \PastKeyValue $\leftarrow$ []\;
+ \PositiveMargins $\leftarrow$ []\;
+ \For{\Segment $\in$ \Segments}{
+    \tcp{\textcolor{gray}{add the segment to the KV cache}}
+    \Prefill{\LLM, \PastKeyValue, \Segment}\;
+    \tcp{\textcolor{gray}{generate using the content of the KV cache and then discard any \\tokens added to the KV cache by the prompt and the generated tokens}}
+    \Margin $\leftarrow$ \Generate{\LLM, \PastKeyValue, \ExtractiveSummaryPrompt}\;
+    \ClassificationInput $\leftarrow$ \Format{\ClassificationPrompt, \Margin, \Instruction}\;
+    }
+    \tcp{\textcolor{gray}{do not use any past KV cache to classify}}
+    \ClassificationResult $\leftarrow$ \Generate{\LLM, NULL, \ClassificationInput}\;
+    \If{\ClassificationResult $=$ true}{\Append{\PositiveMargins, \Margin}}
+    
+ \AllPositiveMargins $\leftarrow$ \Concatenate{\PositiveMargins}\;
+ \Prefill{\LLM, \PastKeyValue, \AllPositiveMargins}\;
+ \OutputVar $\leftarrow$ \Generate{\LLM, \PastKeyValue, \Instruction}\;
+ \Return{\OutputVar}
+ \caption{Writing in the Margins}
+\end{algorithm}
+\end{Figure}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width = \linewidth]{assets/Long_context_LLM_vs_RAG_vs_Writing_in_the_Margins_-_updated.pdf}
+    \caption{\textbf{Design Comparison.} Three inference designs for managing long context windows: (Top Left) Long Context LLM (LLM): This design feeds all context, without segmentation, directly to the model. (Top Right) Retrieval-Augmented Generation (RAG): Segments are selected based on a retrieval method (e.g., cosine similarity between vector representations of the query and the segment). All selected segments, along with the task instruction, are then concatenated and fed to a model. (Bottom) Writing in the Margins (WiM): The context is divided and processed segment by segment. At each step, the model is prompted to produce auxiliary information from each segment. This information is then classified and, if deemed positive, it is incorporated into the final step before the task description.}
+    \label{wim_example}
+\end{figure*}
+
+
+
+\section{Experimental Setup}
+
+
+\subsection{Datasets}
+Following the RULER \cite{hsieh2024rulerwhatsrealcontext} task categories, we measure the performance of an inference pattern on three types of skills: \textbf{(I) Multi-Hop Reasoning}, \textbf{(II) Needle Retrieval/ Single-Hop Reasoning}, and \textbf{(III) Aggregation}. Table \ref{datasets} presents the curated long context datasets used to benchmark all LLMs:
+
+\begin{Figure}
+\small
+\begin{center}
+\begin{tabular}{ l r r r r r}
+\toprule
+ \textbf{skill} & \textbf{benchmark} & \textbf{context length} & \textbf{\#} \\
+  \textbf{type} & \textbf{name} & \textbf{(tokens)} & \textbf{examples}\\
+ \midrule
+I & MultiHop-RAG \textsuperscript{$\clubsuit$} \cite{tang2024multihopragbenchmarkingretrievalaugmentedgeneration} & 13-32k & 100 \\
+I & HotpotQA \textsuperscript{\textdagger} \cite{yang2018hotpotqadatasetdiverseexplainable} & 16k/ 32k /64k & 100/ 100/ 100 \\
+II & SQuAD \textsuperscript{\textdagger} \cite{rajpurkar2018knowdontknowunanswerable} & 16k/ 32k/ 64k & 100/ 100/ 100 \\
+III & CWE \textsuperscript{\textdagger} \cite{hsieh2024rulerwhatsrealcontext} & 64k & 100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\captionof{table}{\small \textbf{Datasets} We have curated four datasets to evaluate long context window LLMs. Each set consists of $100$ examples, generated either using the RULER code (\textdagger) or by subsampling the longest examples from the original benchmark data ($\clubsuit$).}
+\label{datasets}
+\end{Figure}
+
+In the following paragraph, we briefly introduce the benchmarks used in each category, describe our curating rationale, and hypothesize the impact of WiM on each skill set.
+
+\begin{enumerate}[I]
+
+\item \textbf{Multi-Hop QA}
+The task aims to check the behavior of tracing entities with multi-hop connections based on the HotPotQA and MultiHop-RAG benchmarks \cite{tang2024multihopragbenchmarkingretrievalaugmentedgeneration, yang2018hotpotqadatasetdiverseexplainable}. Following RULER, we simulated long context retrieval scenarios by generating examples in three length variants: $16k$, $32k$, $64k$. We also selected the $100$ longest examples in the range of $13k$-$33k$ tokens from MultiHop-RAG - a large collection of multi-hop queries based on English news articles.\\
+\\
+\textit{Hypothesis} Transformers are known for not being able to emulate a for loop \cite{zhou2023algorithmstransformerslearnstudy}. In WiM we simulate going through the context twice which can improve the performance by aggregating all interconnected facts in one place at the end of the document.
+
+\item \textbf{Needle Retrieval/ Single-Hop Reasoning}
+ In the context of a long context window, the Needle Retrieval and Single-Hop QA task can be jointly seen as a kind of filter benchmark, where the task is to filter irrelevant content and either copy or transform the relevant information. We used the RULER code to generate examples based on SQuAD \cite{rajpurkar2018knowdontknowunanswerable} in three context length variants: $16k$, $32k$ and $64k$, collecting $100$ datapoints in each variant.\\ 
+ \\
+ \textit{Hypothesis} The reduction using the WiM inference pattern is in fact a reverse engineering of how filter-type benchmarks are created. The model is asked to filter out injected distractions and copy relevant parts into the margin in each segment-wise prediction step.
+\item \textbf{Aggregation}
+This type of task measures a model's ability to aggregate relevant information that spans long-range context. We use the Common Words Extraction (CWE) benchmark \cite{hsieh2024rulerwhatsrealcontext} where words are sampled from discrete distributions, with the number of common words fixed and increasing with the sequence length number of uncommon words. Following RULER, we generated $100$ examples of average length $64k$ tokens. We scaled original frequencies of common and uncommon words to match the extended length of samples: common words appear $500$ times in the sample, while uncommon words do not appear more than $50$ times. 
+We modified the task instruction to include the number of word occurrences in text to support aggregation over segments. \\
+\\
+\textit{Hypothesis} The performance of WiM in reduction tasks will be related to the concept of hierarchical reduction. We can think of a summarization task as being a summary of segment summaries, or any aggregate task as being a result over cumulative aggregation over segments. 
+\end{enumerate}
+
+\subsection{Long Context Window LLMs}
+We selected seven off-the-shelf models that officially support context windows up to $128k$ tokens: 
+\begin{itemize}
+\item Phi-3-small-128k-instruct\footnote{\label{phi-models}Phi-3 Technical Report: A
+Highly Capable Language Model Locally on Your
+Phone. \cite{abdin2024phi3technicalreporthighly}}
+\item Qwen2-7B-Instruct\footnote{\label{qwen-models}Qwen2 Technical Report. \cite{yang2024qwen2technicalreport}}
+\item Meta-Llama-3.1-8B-Instruct\footnote{\label{meta-models}The Llama 3 Herd of
+Models. \cite{dubey2024llama3herdmodels}}
+\item Phi-3-medium-128k-Instruct\footref{phi-models} 
+\item Palmyra-4-Chat-128K\footnote{Writer's proprietary model.}
+\item Meta-Llama-3.1-70B-Instruct\footref{meta-models}
+\item Qwen2-72B-Instruct\footref{qwen-models}
+\end{itemize}
+
+In all experiments, we used half precision models with identical sampling parameters — specifically, a temperature setting of $0.0$ and $2k$ maximum new tokens. We used $0$-shot prompts for all benchmarks. In MultiHop-RAG, HotPotQA and SQuAD experiments, we applied the same model-independent prepossessing step: we used nltk \cite{bird2009natural} to split the context into sentences, then grouped them in segments no longer than $4096$ tokens. This resulted in $4-16$ margin notes per datapoint. In CWE, where the datapoints contain only numbered words, we exchanged nltk for naive words split by space and used $8192$ segment length, which gave on average $8$ margins per sample. 
+In each case, we measured the relative differences of WiM pattern scores with respect to the following two baselines:
+
+\begin{itemize} 
+
+\item \textbf{Long Context LLM (LLM)} - all context without segmentation is fed to the LLM.
+
+\item \textbf{Retrieval Augmented Generation (RAG)} - segments are selected based on a retriever (ex. cosine similarity between vector representations of the query and the segment), then all selected segments and the task instruction are concatenated and fed to an LLM.
+
+\end{itemize}
+
+All three inference patterns, including WiM, are presented in Figure \ref{wim_example}.
+
+In order to make the results more comparable, we replaced the retriever in RAG with the classifier used in WiM. We expect the RAG results to be lower in the real RAG systems (especially for longer segment lengths), as vectorization is a form of lossy compression.
+
+\subsection{Prompting}
+
+For all benchmarks, we respected their original formulation. In all cases, the prompt strategy for the Long Context LLM baseline could be expressed as:
+
+\begin{lstlisting}
+{system_message}
+```text
+{context}
+```
+{instruction}
+{query}
+\end{lstlisting}
+
+Where \texttt{system\_message} and \texttt{instruction} were usually the task instructions split into two parts and appended before and after the main context respectively. 
+
+In the RAG approach, we used the original prompt but replaced \texttt{context} with all relevant segments concatenated by a newline sign.
+
+In WiM inference, all constructed prompts shared the common prefix:
+\begin{lstlisting}
+{system_message}
+```text
+{context}
+```
+\end{lstlisting}
+This was necessary for the efficient reuse of the KV cache. To ensure that predictions were comparable, we manually identified a promising prompt for the margin generation and final prediction steps for all evaluated models.
+
+\subsubsection{Margin generation}
+
+For each intermediate context $\texttt{context}_i = \Sigma^{i}_{1} c_{i}$ and instruction $I$, we used the following extractive summary prompt $I_{A}$ to generate a margin note $M_{i}$:
+
+\begin{lstlisting}
+I_A = """
+{system_message}
+```text
+{context_i}
+```
+Copy over all context relevant to the query: {query}
+Provide the answer in the format: <YES/NO>#<Relevant context>.
+Here are rules:
+- If you don't know how to answer the query - start your answer with NO#
+- If the text is not related to the query - start your answer with NO#
+- If you can extract relevant information - start your answer with YES#
+- If the text does not mention the person by name - start your answer with NO#
+Example answers:
+- YES#Western philosophy originated in Ancient Greece in the 6th century BCE with the pre-Socratics.
+- NO#No relevant context.
+"""
+\end{lstlisting}
+
+In our experiments, the margin generation step was combined with the classification step; the first token generated was a class label. We conditioned the generation of a margin based on the first token; i.e., we continued the generation only if the first token was \texttt{YES}. Additionally, the prompt included an explanation designed to enforce specific formatting and to prevent the model from inserting comments before delivering its judgment.
+
+\subsubsection{Final WiM prompt with accumulated margins}
+To distinguish the content of the margins from the original context, and to maintain the document's logic and structure, we explicitly named the writing-in-the-margins strategy in our last step, while aggregating all relevant margin notes.
+
+We used two variants of the prompt, depending on the number of retrieved margins. 
+\subsubsubsection{\textbf{Single margin}}
+
+\begin{lstlisting}
+{system_message}
+```text
+{context}
+```
+I asked my assistant to read and analyse the above content page by page to help you complete this task. This is a margin note left on the last page:
+```text
+QUERY: {query}
+ANSWER: {M_i}
+```
+Read again the note(s) and the provided content, take a deep breath and answer the query.
+{instruction}
+{query}
+\end{lstlisting}
+
+\subsubsubsection{\textbf{Multiple margins}}
+\begin{lstlisting}
+{system_message}
+```text
+{context}
+```
+I asked my assistant to read and analyse the above content page by page to help you complete this task. Those are margin notes left on each page:
+```text
+Page 0:
+QUERY: {query}
+ANSWER: {M_i}
+Page 1:
+QUERY: {query}
+ANSWER: {M_j}
+...
+```
+Read again the note(s) and the provided content, take a deep breath and answer the query.
+{instruction}
+{query}
+\end{lstlisting}
+
+We replaced the term ``segment'' with ``page'' to more closely replicate the human practice of writing in the margins. In our experiments, there was no relationship between the order of the segments and the page numbers; this is left as an optional implementation detail.
+
+\subsection{Evaluation}
+
+We used the same 3-shot prompt with GPT-4-turbo \cite{openaigpt4} and greedy sampling to evaluate models' accuracy in HotpotQA, MultiHop-RAG and SQuAD benchmarks. For the CWE benchmark we adjusted the prompt and examples to calculate precision (P), recall (R) and F1-score.
+
+
+
+\section{Results}
+
+
+Detailed results of the experiment are presented in Table \ref{all-results}. 
+
+\subsection{Multi-Hop Reasoning} 
+
+Notably, for almost all evaluated models, WiM improves multi-hop reasoning abilities, on average giving a $7.5\%$ boost with respect to the Long Context LLM inference and $9\%$ with respect to RAG. The most significant performance boost is observed in smaller models — replacing a vanilla Phi-3-small-128k-instruct inference with WiM leads to $19\%$ improvement in MultiHop-RAG benchmark and $12\%$ in HotpotQA. 
+
+By looking at different length variants of HotpotQA ($16k$, $32k$, $64k$) we see that all patterns lose accuracy as we add more context (LLM: from $0.65$ to $0.54$, RAG: from $0.61$ to $0.58$, WiM: from $0.72$ to $0.64$). This observation aligns with the notion that extending the context length in models degrades the performance of complex reasoning tasks. However, using WiM allows us to maintain almost the same accuracy for $64k$ as the LLM achieves on $16k$. 
+
+\subsection{Needle Retrieval and Single-Hop Question Answering}
+
+Analysis of the SQuAD benchmark results shows that all scores are distributed across similar values with a slight preference for RAG. It is advisable to reassess this conclusion with different model choices and context lengths; for instance, replacing an LLM with the WiM pattern consistently improves accuracy in SQuAD by $2\% - 17\%$ for Qwen2-7B-Instruct, whereas LLM is a preferred inference pattern for $16k$ context window for $4$ out of $7$ tested models. 
+
+Unsurprisingly, RAG emerges as the most optimal pattern for six out of seven evaluated models when extending the context length to 64k tokens in SQuAD. Indeed, for single-hop reasoning tasks, if the filtering process is successful (here we approximate the retriever by an LLM classifier), the challenge is reduced to a trivial task of retrieving a needle from a context window of $4096$ tokens. However, this assumption in the RAG setup is overly optimistic because the LLMs used in our experiment are at least $7B$ in model parameters, and such large models are not typically used as retrievers. In practical scenarios, one might expect the results to be even more favorable for both LLM and WiM compared to RAG.
+
+\subsection{Aggregation}
+
+The pattern across the data indicates that WiM either matches or substantially boosts the aggregation skills of off-the-shelf models, giving an LLM on average a $30\%$ increase in F1-score for the CWE benchmark, and outperforming RAG by $17\%$.
+
+We observe that CWE results can be grouped into four classes, which surprisingly tend to align more with the model families than with the model sizes. Models like Meta-Llama-3.1-8B-Instruct and Meta-Llama-3.1-70B-Instruct achieve a remarkably significant boost in F1-score when using WiM across all context lengths, reaching up to $72\%$ compared to the LLM baseline. Conversely, models like Phi-3-small-128k-instruct and Phi-3-medium-128k-instruct consistently prefer the vanilla LLM inference. Meanwhile, Qwen2-7B-Instruct and Qwen2-72B-Instruct point to WiM as the most optimal pattern, showing a moderate improvement ranging from $22\%$ to $59\%$. RAG is preferred only by Palmyra-4-Chat-128K, which outperforms the rest by $3\%-4\%$.
+
+After reviewing all comments provided by GPT-4-turbo during the evaluation of each data point, we observe that models often resort to writing Python code to solve the problem ($18.5\%$ of all answers), leading to incorrect or generic answers (resulting in on average $20\%$ drop in F1-score).
+
+\begin{table*}[t!]
+  \centering
+\begin{adjustbox}{width=\textwidth}
+\begin{tabular}{rl|rrr|R{1.5cm}|rrr|rrr|R{1.2cm}|}
+      &       & \multicolumn{3}{c|}{\textbf{HotpotQA}} & \multicolumn{1}{R{1.5cm}|}{\textbf{MultiHop RAG}} & \multicolumn{3}{c|}{\textbf{SQuAD}} & \multicolumn{3}{c|}{\textbf{CWE}} & \multicolumn{1}{l}{\cellcolor[rgb]{ .835,  1,  .953}\textbf{Average}} \\
+\cmidrule{3-12}      & \textbf{Context:} & \textbf{16k} & \textbf{32k} & \textbf{64k} & \textbf{13-32k} & \textbf{16k} & \textbf{32k} & \textbf{64k} & \multicolumn{3}{c|}{\textbf{64k}} & \cellcolor[rgb]{ .835,  1,  .953}\textbf{Excl. CWE} \\
+\midrule
+\multicolumn{1}{l}{\textbf{Model}} & \textbf{Pattern} & \textbf{Acc.} & \textbf{Acc.} & \textbf{Acc.} & \textbf{Acc.} & \textbf{Acc.} & \textbf{Acc.} & \textbf{Acc.} & \textbf{P} & \textbf{R} & \textbf{F1} & \cellcolor[rgb]{ .835,  1,  .953}\textbf{Acc.} \\
+\midrule
+\multicolumn{1}{l}{Phi-3-small-128k-instruct} & LLM   & 0.47  & 0.55  & 0.48  & 0.58  & \textbf{0.81} & 0.75  & \textbf{0.79} & \textbf{0.77} & \textbf{0.77} & \textbf{0.77} & \cellcolor[rgb]{ .835,  1,  .953}0.52 \\
+      & RAG   & 0.55  & 0.56  & 0.50  & 0.70  & \textbf{0.81} & \textbf{0.78} & \textbf{0.79} & 0.65  & 0.64  & 0.65  & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.58} \\
+      & WiM   & \textbf{0.66} & \textbf{0.64} & \textbf{0.56} & \textbf{0.77} & 0.65  & 0.74  & 0.64  & 0.70  & 0.69  & 0.69  & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.66} \\
+\midrule
+\multicolumn{1}{l}{Qwen2-7B-Instruct} & LLM   & 0.62  & 0.59  & 0.39  & 0.83  & 0.81  & 0.71  & 0.57  & 0.46  & 0.46  & 0.46  & \cellcolor[rgb]{ .835,  1,  .953}0.61 \\
+      & RAG   & 0.54  & 0.55  & \textbf{0.56} & 0.77  & \textbf{0.87} & \textbf{0.84} & \textbf{0.86} & 0.49  & 0.49  & 0.49  & \cellcolor[rgb]{ .835,  1,  .953}0.61 \\
+      & WiM   & \textbf{0.69} & \textbf{0.66} & \textbf{0.56} & \textbf{0.92} & 0.83  & 0.80  & 0.74  & \textbf{0.69} & \textbf{0.67} & \textbf{0.68} & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.71} \\
+\midrule
+\multicolumn{1}{l}{Meta-Llama-3.1-8B-Instruct} & LLM   & 0.65  & 0.64  & 0.60  & 0.85  & \textbf{0.90} & \textbf{0.92} & 0.87  & 0.22  & 0.21  & 0.22  & \cellcolor[rgb]{ .835,  1,  .953}0.69 \\
+      & RAG   & 0.67  & 0.65  & 0.59  & 0.77  & 0.87  & 0.91  & \textbf{0.91} & 0.47  & 0.47  & 0.47  & \cellcolor[rgb]{ .835,  1,  .953}0.67 \\
+      & WiM   & \textbf{0.77} & \textbf{0.71} & \textbf{0.73} & \textbf{0.86} & 0.88  & 0.85  & 0.82  & \textbf{0.94} & \textbf{0.93} & \textbf{0.93} & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.77} \\
+\midrule
+\multicolumn{1}{l}{Phi-3-medium-128k-instruct} & LLM   & 0.57  & 0.53  & 0.48  & 0.80  & 0.84  & 0.72  & 0.70  & \textbf{0.91} & \textbf{0.91} & \textbf{0.91} & \cellcolor[rgb]{ .835,  1,  .953}0.60 \\
+      & RAG   & 0.50  & 0.55  & 0.51  & 0.78  & \textbf{0.86} & \textbf{0.82} & \textbf{0.83} & \textbf{0.91} & \textbf{0.91} & \textbf{0.91} & \cellcolor[rgb]{ .835,  1,  .953}0.59 \\
+      & WiM   & \textbf{0.63} & \textbf{0.67} & \textbf{0.57} & \textbf{0.93} & 0.81  & 0.80  & 0.77  & 0.90  & 0.90  & 0.90  & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.70} \\
+\midrule
+\multicolumn{1}{l}{Palmyra-4-Chat-128K} & LLM   & \textbf{0.70} & 0.60  & 0.57  & 0.85  & \textbf{0.84} & 0.76  & 0.73  & 0.76  & 0.77  & 0.76  & \cellcolor[rgb]{ .835,  1,  .953}0.68 \\
+      & RAG   & 0.59  & 0.54  & 0.55  & 0.78  & 0.74  & 0.70  & 0.69  & \textbf{0.80} & \textbf{0.80} & \textbf{0.80} & \cellcolor[rgb]{ .835,  1,  .953}0.62 \\
+      & WiM   & 0.69  & \textbf{0.63} & \textbf{0.66} & \textbf{0.86} & 0.78  & \textbf{0.77} & \textbf{0.74} & 0.77  & 0.77  & 0.77  & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.71} \\
+\midrule
+\multicolumn{1}{l}{Meta-Llama-3.1-70B-Instruct} & LLM   & \textbf{0.80} & 0.74  & 0.70  & \textbf{0.91} & \textbf{0.93} & 0.85  & 0.87  & 0.37  & 0.36  & 0.36  & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.79} \\
+      & RAG   & 0.73  & 0.72  & 0.63  & 0.80  & 0.90  & \textbf{0.92} & \textbf{0.95} & 0.66  & 0.65  & 0.66  & \cellcolor[rgb]{ .835,  1,  .953}0.72 \\
+      & WiM   & 0.79  & \textbf{0.76} & \textbf{0.71} & 0.89  & 0.90  & 0.90  & 0.82  & \textbf{1.00} & \textbf{1.00} & \textbf{1.00} & \cellcolor[rgb]{ .835,  1,  .953}0.79 \\
+\midrule
+\multicolumn{1}{l}{Qwen2-72B-Instruct} & LLM   & 0.75  & 0.72  & 0.57  & \textbf{0.88} & 0.91  & 0.78  & 0.76  & 0.42  & 0.36  & 0.39  & \cellcolor[rgb]{ .835,  1,  .953}0.73 \\
+      & RAG   & 0.70  & 0.66  & \textbf{0.70} & 0.80  & \textbf{0.92} & 0.87  & \textbf{0.91} & 0.75  & 0.75  & 0.75  & \cellcolor[rgb]{ .835,  1,  .953}0.72 \\
+      & WiM   & \textbf{0.80} & \textbf{0.79} & \textbf{0.70} & \textbf{0.88} & 0.88  & \textbf{0.88} & 0.87  & \textbf{0.98} & \textbf{0.98} & \textbf{0.98} & \cellcolor[rgb]{ .835,  1,  .953}\textbf{0.79} \\
+\midrule
+\rowcolor[rgb]{ .835,  1,  .953} \multicolumn{1}{l}{\textbf{Average}} & LLM   & 0.65  & 0.62  & 0.54  & 0.81  & \textbf{0.86} & 0.78  & 0.76  & 0.56  & 0.55  & 0.55  & 0.66 \\
+\rowcolor[rgb]{ .835,  1,  .953}       & RAG   & 0.61  & 0.60  & 0.58  & 0.77  & 0.85  & \textbf{0.83} & \textbf{0.85} & 0.68  & 0.67  & 0.68  & 0.64 \\
+\rowcolor[rgb]{ .835,  1,  .953}       & WiM   & \textbf{0.72} & \textbf{0.69} & \textbf{0.64} & \textbf{0.87} & 0.82  & 0.82  & 0.77  & \textbf{0.85} & \textbf{0.85} & \textbf{0.85} & \textbf{0.73} \\
+\bottomrule
+\end{tabular}%
+\end{adjustbox}
+  \caption{\textbf{Main Results} We present results for seven off-the-shelf models and four benchmarks. We used the accuracy metric (Acc.) for all benchmarks except CWE, where we used precision (P), recall (R), and F1-score. Aggregated results (both model-wise and benchmark-wise) show that WiM maximizes performance in multi-hop reasoning and summarization-like tasks (HoppotQA, Multihop-RAG, and CWE). For single-hop reasoning (SQuAD), the results vary across models.}
+  \label{all-results}%
+\end{table*}%
+
+
+
+\section{Ablation Study}
+
+
+\subsection{No margins filtering}
+
+In this experiment, we excluded the margins classifier from the WiM pipeline, which resulted in all extractive summaries being appended directly to the context. 
+
+Table \ref{filtering} presents the accuracy scores aggregated over three benchmarks: HotpotQA, MultiHop-RAG, SQuAD. Including all margins in the context decreases the accuracy by up to $8\%$ compared to the original WiM pipeline. This effect is analogous to negative instruction manipulation, akin to telling the model to ``forget all previous instructions''. Ultimately, filtering margins—especially when combined with the margin generation step—not only saves computation by allowing irrelevant margins to be dropped, but also improves the overall performance.
+
+\begin{Figure}
+\small
+\begin{center}
+\begin{tabular}{ l r r}
+\toprule
+ \textbf{model name} & \textbf{filtered (WiM)} & \textbf{all} \\
+ \midrule
+Phi-3-small-128k-instruct & \textbf{0.58} & 0.54 \\
+Qwen2-7B-Instruct & \textbf{0.65} & 0.63 \\
+Meta-Llama-3.1-8B-Instruct & \textbf{0.70} & \textbf{0.70} \\
+Phi-3-medium-128k-instruct & \textbf{0.65} & 0.64 \\
+Palmyra-4-Chat-128K & \textbf{0.64} & 0.55 \\
+Meta-Llama-3.1-70B-Instruct & 0.72 & \textbf{0.73} \\
+Qwen2-72B-Instruct & \textbf{0.72} & 0.71 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\captionof{table}{\small \textbf{Ablation: Filtering Margins} Classification and removal of irrelevant margins yields better results for majority of evaluated models. Results aggregated over HotpotQA, Multihop-RAG and SQuAD benchmarks.} 
+\label{filtering}
+\end{Figure}
+\subsection{Replacing the content by margins}
+
+One appealing option is to reduce computational demands by entirely eliminating the KV cache in the final step and relying solely on the extracted positive margins. This approach transforms the long context document into a compressed version that is dependent on the query. While we anticipate that retaining the full context might be better at capturing the answer, we have also observed, as noted in the previous section, a decrease in model performance as the input length increases. 
+
+Table \ref{only_margins} presents aggregated results for HotpotQA, MultiHop-RAG and SQuAD, demonstrating that incorporating both margins and the complete document consistently maximized the performance for almost all evaluated models, except for Meta-Phi-3-small-128k-instruct. Employing a query-based extractive summary—specifically, using only the content from margins—gave mixed results across all models; e.g., Meta-Llama-3.1-70B-Instruct scores were consistent across all metrics ($0.72$), while Palmyra-4-Chat-128K scores saw a decrease from $0.64$ to $0.53$. On the other hand, the model Phi-3-small-128k-instruct experienced an increase from $0.58$ to $0.6$. We hypothesize that these outcomes might vary depending on the specific task at hand. It is plausible that for tasks such as filtering and improving recall (i.e., when models are fine-tuned for margin generation and classification tasks), using margins could prove beneficial as the filtered-out content would be entirely irrelevant.
+
+\begin{Figure}
+\small
+\begin{center}
+\begin{tabular}{ l r r r r}
+\toprule
+ \textbf{model name} & \textbf{only} & \textbf{only} & \textbf{both} \\ 
+& \textbf{margins} & \textbf{context} & \textbf{(WiM)}\\ 
+ \midrule
+Phi-3-small-128k-instruct & \textbf{0.60} & 0.55 & 0.58 \\
+Qwen2-7B-Instruct & 0.62 & 0.56 & \textbf{0.65} \\
+Meta-Llama-3.1-8B-Instruct & 0.68 & 0.68 & \textbf{0.70} \\
+Phi-3-medium-128k-instruct & 0.57 & 0.58 & \textbf{0.65} \\
+Palmyra-4-Chat-128K & 0.53 & 0.63 & \textbf{0.64} \\
+Meta-Llama-3.1-70B-Instruct & \textbf{0.72} & \textbf{0.72} & \textbf{0.72} \\
+Qwen2-72B-Instruct & \textbf{0.72} & 0.67 & \textbf{0.72} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\captionof{table}{\small \textbf{Ablation: Content Compression} Utilizing both margins and the entire context almost always maximizes the score despite the declining performance of the underlying model when faced with increasing input lengths. Results aggregated over HotpotQA, Multihop-RAG and SQuAD benchmarks.}
+\label{only_margins}
+\end{Figure}
+
+
+
+\section{Interactive Retrieval}
+
+
+\paragraph{Explainability}
+The design principles behind WiM focus not just on enhancing final benchmark performance, but also on improving the user experience. By presenting intermediate computation steps, WiM renders the decision-making process of LLMs transparent. This clarity in the model’s reasoning process aids not only in debugging but also provides insights that are crucial for both end-users and developers, ensuring outputs that are both understandable and reliable. 
+\paragraph{Latency}
+Handling long documents can degrade user experience due to significant latency, as the model becomes unresponsive during processing, which can take minutes without clear indications of wait time. Our design addresses this by providing relevant information during processing and by segment-wise processing that incorporates a progress bar, thus reducing the initial response latency.
+\paragraph{Early exit}
+WiM also offers an ``early exit'' option, allowing users to stop the computation if they find a satisfactory answer within any of the displayed margins. For example, in single-hop question-answering scenarios, once the answer is found in a particular section, there is no need to process further.
+\paragraph{Human in the Loop}
+
+Users have the ability to improve the decision-making process by adding labels to the margins displayed in WiM. In this design, the final answer considers both the full context and the user-labeled margins. Users can evaluate and label the streamed margins (e.g., with a thumbs up or down), and these inputs could be reintegrated into the final decision-making step. The proposed design, including this feedback loop, is illustrated in Figure \ref{wim_ui}.
+\begin{figure*}[t]
+    \small
+    \centering
+    \includegraphics[width = \linewidth]{assets/Chat_vs_Document_view.pdf}
+     \caption{\small \textbf{WiM interactive retrieval design.} On the right, the document view displays the progress of processed segments, which can also be labeled based on the relevance identified by the LLM classifier. On the left, the chat view includes a progress bar that reflects the processing of segments. Here, users can interact with the streamed margins by giving a thumbs up or down, and these interactions are considered in the final response. Each margin corresponds to a specific document segment.}
+    \label{wim_ui}
+\end{figure*}
+
+
+\section{Conclusion}
+
+
+In this paper, we have introduced a new inference pattern called Writing in the Margins (WiM), which leverages chunked prefill to add only a marginal computational cost, emulating the human behavior of making notes in the margins. We demonstrated that this inference pattern significantly boosts the performance of off-the-shelf models across various long-context, retrieval-oriented tasks, including multi-hop reasoning (by $7.5\%$ in HotpotQA, MultiHop-RAG), and aggregation (by $30.0\%$ in CWE). Remarkably, this method does not require finetuning and is compatible with any transformer model. %that supports the AutoModelForCausalLM model in the Hugging Face Transformers Library.
+
+Additionally, our approach improves end-user experience by increasing transparency in context processing. By streaming ``margins'' that contribute to the final model predictions, our design offers the potential for early engagement. Unlike conventional long-context inference methods, WiM allows the first relevant margin to be streamed immediately after processing the corresponding segment. This not only improves latency but also reduces computational demands by enabling an early exit strategy. This feature opens the door to including a human-in-the-loop in LLM's decision-making process, enhancing interaction and intervention possibilities.
+
+Our innovation represents a method of decoupling training and inference, a concept previously explored through strategies like CoT. By integrating KV cache management with specific prompting strategies, our approach serves as an orthogonal complement to existing purely prompt-based techniques.  We hope to open a new line of research on KV cache aware prompting strategies. These strategies have the potential to enhance the reasoning capabilities of LLMs while also introducing a layer of interpretability.
+
+
+
+\section{Future Directions}
+
+
+We see numerous unexplored opportunities to expand on our findings in future research:
+
+\begin{itemize}
+
+\item The efficiency and effectiveness of WiM inference pattern can be improved by focusing on both optimizing computational cost through better KV cache management and improving baseline models' performance by finetuning models specifically for the extraction and classification tasks. A further improvement could be also determining the optimal segment size (which can be different for each model).
+
+\item  We imagine our inference pattern to be a good choice for transformers performing attention in segmented context windows, instead of accessing the whole sequence. Examples include Transformer XL \cite{dai2019transformerxl} and transformers incorporating Infini-Attention \cite{munkhdalai2024leavecontextbehindefficient}. The latter attempts to compress past key values into Fast Weight Memory \cite{schlag2021learningassociativeinferenceusing}. We hypthesize that WiM could lower the requirements for the compressive memory that would represented only a limited past context whereas the (relevant) long term memory would be stored as WiM's margins. 
+
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\paragraph{External Memory and Retrieval Methods}
+Memory augmentation in Large Language Models (LLMs) involves integrating external memory banks, such as k-nearest neighbor (k-NN) models, to use textual similarities for generating context-aware completions \cite{khandelwal2020generalization}. These k-NN based LLMs excel in managing irregular patterns and factual data \cite{daelemans1998forgetting}. Additionally, approaches like Retrieval-Augmented Generation (RAG) \cite{lewis2021retrievalaugmented} and ``Entities as Experts'' \cite{févry2020entities} link LLMs with external data sources—ranging from structured knowledge graphs \cite{liu2022relational} to learned entity embeddings. Such methods allow LLMs to access and utilize external information to enhance response accuracy and relevance.
+
+\paragraph{Scratchpad Mechanisms}
+
+A method for intermediate computation in LLMs involves the use of ``scratchpads'' or CoT \cite{wei2023chainofthought} as a method for improving handling of sustained multi-step computations. Adopted from the findings of ``Show Your Work: Scratchpads for Intermediate Computation with Language Models'' \cite{nye2021work} this method enables LLMs to show their logic step-by-step, similar to a human using paper to jot down interim calculations. By training Transformers to sequentially output the results of intermediate steps rather than only final answers, LLMs demonstrate enhanced performance on complex tasks that go beyond single-step reasoning, such as long addition and program execution. This method not only helps the model maintain and extend context dynamically but also aids in debugging and understanding 
+model decisions \cite{austin2021program}. Further studies into length generalization \cite{anil2022exploring} have demonstrated that traditional fine-tuning techniques on tasks requiring such generalizations often encounter significant limitations. By integrating scratchpad-like methodologies, these language models can achieve a notable improvement in handling progressively longer text spans. This enhancement proves particularly valuable for challenges such as theorem proving and extensive text synthesis. Here, the in-context learning combined with the sequential output of computed steps substantially bolsters task accuracy and model robustness \cite{chen2021evaluating, wu2021int}.
+
+\paragraph{Context Aggregation}
+Efficiency in context aggregation for LLMs have evolved with methods like Fusion-in-Decoder (FiD) and Map Reduce. FiD, used in models such as T5 and BART, consolidates contextual embeddings via encoder and decoder components to ensure comprehensive information integration \cite{ivgi2023efficient, izacard2020leveraging}. Conversely, LangChain's Map Reduce processes segments in parallel to quickly synthesize responses into a refined final output \cite{langchain2022}. Parallel Context Windows (PCW) and Naive Bayes Context Extension (NBCE) further enhance handling of extended contexts by partitioning these into smaller segments for efficient parallel processing, optimizing both processing speed and response relevance \cite{nbce, ratner2022parallel}.
+
+\printbibliography
+\end{multicols}
+\newpage
+
+
+
+\section{Appendix - Decoupling Extraction and Classification}
+
+
+Writing in the margins generates supplemental information by leveraging a partially prefilled KV cache. Each subsequent segment $c$ in the KV cache can be used to generate an annotation, known as a ``margin note''. To avoid providing the model with all the margins, we ask the model to generate the first token corresponding to the margin classes: relevant vs. irrelevant. In this section, we explore the possibility of decoupling the extraction and classification steps, which will allow for using separate prompting strategies. This separation might further boost the performance of the WiM pattern. We demonstrate that one can use the same instance of the model to perform both the computation of the margins and their classification.
+
+In a naive implementation of such overlapped computation, the user may treat the classification request as an additional sequence and batch it with the prefilling request; this approach would require a very large number of padding tokens to align the two sequences. A more computationally efficient solution is to pack the classification request into the same sequence used to prefill the context and adjust the attention mask accordingly. This technique is utilized during the pre-training of language models to reduce the number of padding tokens.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.7\linewidth]{assets/Export_02.png}
+     \caption{\textbf{Sequence packing.} Sequence packing allows to pack multiple unrelated documents in the same sequence. By adjusting the attention mask, we can avoid cross-contamination. This speeds up training time by reducing the number of padding tokens. A similar technique can also be used to inference from multiple prompts using the same sequence.}
+
+\end{figure*}
+
+The first request to the language model would only contain the first segment $c_{1}$ and the additional extractive instruction $I_{A}$ (the``extractive summary prompt''). This would generate the first margin $M_{0}$. After generating $M_{0}$, the instruction prompt $I_{A}$ and all the subsequent tokens generated in $M_{0}$ can be removed from the KV cache, leaving the KV cache only with $c_{1}$. In order to not grow or shrink a dynamically allocated KV cache, it is possible to use a static KV cache, as the number of total tokens in each segment, extractive instruction and classification prompt is known in advance, so is the maximum number of tokens for each margin $M_{i}$ and classification result $\omega(I(M_{i}))$.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.7\linewidth]{assets/Export_03.png}
+     \caption{\textbf{Prefilling of the first segment $c_{1}$ along with the extractive instruction $I_{A}$.} Padding tokens are shown for clarity in case of a statically allocated KV cache, but they do not needed to be attended to or used in the KV sequence when calculating the attention. The KV sequence should be a \textit{slice} of the KV tensor that includes only non-padding tokens.}
+
+\end{figure*}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=0.7\linewidth]{assets/Export_04.png}
+     \caption{\textbf{Token generation using the prefilled KV cache.} Each generated token replaces a padding token in the KV cache.}
+
+\end{figure*}
+
+Having generated the first margin $M_{0}$, it is possible to add the second segment $c_{2}$ to generate the second margin $M_{1}$ while at the same time classifying the previously generated margin $M_{0}$. To do so, the KV cache is prefilled with subsequent tokens $c_{2}$, the extractive instruction $I_{A}$ and a number of padding tokens to accommodate the generated tokens of margin $M_{1}$. Moreover, the KV cache is also expanded by adding the classification instruction $I(M_{0})$ and a number of padding tokens to accommodate the generated tokens for the classification result $\omega(I(M_{0}))$.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\linewidth]{assets/Export_05.png}
+     \caption{\textbf{Prefilling of the second segment $c_{1}$ along with the extractive instruction $I_{A}$.} In this case the padding tokens between $I_{A}$ and $I(M_{0})$ must be included in the KV sequence when calculating the attention to retain the memory continuity of the tensor, but the terminal padding tokens need not to. Each token in the second segment $c_{2}$ needs to attend all tokens in the first segment $c_{1}$. The classification prompt $I(M_{0})$ be considered a completely separate document in the same sequence as prefilling.}
+
+\end{figure*}
+
+Autoregressive token generation of the margin $M_{1}$ and the classification result $\omega(I(M_{0}))$ can be done in parallel by projecting the last token of each sub-sequence into logits. Each generated token can then be added in place of a padding token in each subsequence to generate successive tokens.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=\linewidth]{assets/Export_06.png}
+     \caption{\textbf{Parallel token generation of the margin $M_{1}$ and the classification result $\omega(I(M_{0}))$.} Each generated token replaces a padding token in its specific subsequence.}
+
+\end{figure*}
+
+By using a statically allocated KV cache and by keeping track of how many tokens are used in it, it is possible to use a partial \textit{view} (also known as ``tensor slicing'') of the KV tensor without any computational overhead. It is also possible to use techniques like PagedAttention \cite{kwon2023efficientmemorymanagementlarge} to allocate the KV cache block by block, in order to optimize the memory consumption while benefiting from a partial static allocation.
+
+\newpage
+
+
+
+\section{Appendix - Prompts}
+
+
+\subsection{Evaluation}
+
+\subsubsection{Prompt used with accuracy metric for SQuAD, HtopotQA and MultiHop-RAG}
+\begin{lstlisting}
+Evaluate the following exam answer. I will provide you with the query, target answer(s) and the answer provided by the student.
+The student's answer does not need to preserve the casing of the target answers, and slight variations in phrasing are acceptable, provided the meaning remains correct.
+Provide the answer in the format: <YES/NO>#<Explanation>.
+
+Here are the rules:
+- If the student's answer is correct - start your answer with YES#
+- If the student's answer is wrong or it is missing - start your answer with NO#
+
+Example answers:
+
+QUERY: As of 2016, about what percentage of adults aged 18 years or older were overweight?
+TARGET: 40%, forty percent
+ANSWER: forty percent
+YES#The student's answer is correct.
+
+QUERY: What is the value of p in 24 = 2p?
+TARGET: 12, 12.0
+ANSWER: five
+NO#The student's answer is wrong.
+
+QUERY: What is the 'Lotus principle'?
+TARGET: The so-called Lotus principle is that 'restrictions upon the independence of States cannot therefore be presumed
+ANSWER: The Lotus principle is a horticultural technique developed in ancient Egypt for cross-pollinating lotus flowers with roses to create fragrant, floating gardens.
+NO#No, the student's explanation is wrong.
+
+QUERY: {query}
+TARGET: {target}
+ANSWER: {answer}
+\end{lstlisting}
+
+\subsubsection{Prompt used with F1 metric for CWE}
+\begin{lstlisting}
+Evaluate the following exam answer. The student's task was to identify the most common words in text. I will provide you with the target answer(s) - 10 words - and the student's response.
+The student's answer does not need to preserve the casing of the target words.
+Provide your assessment in the format: <Positive>#<Negative>#<Explanation>.
+
+Here are the rules:
+- <Positive> denotes the number of common words that the student has correctly identified (i.e., those included in the target list).
+- <Negative> represents the number of words the student has identified as common but are incorrect (i.e., not included in the target list).
+- If the student's answer is non-relevant, simply return: 0#10#The answer is garbage.
+- If the student's answer includes Python code, mention "python" in your explanation.
+- If the student provides the full answer twice, consider only the first submission.
+
+Example answers:
+
+TARGET: jealousy, access, chase, recess, head, animal, capon, hops, unequaled, mozzarella
+ANSWER: Based on the provided content and the margin notes, the 10 most common words in the input are:\n\n1. chase (100 occurrences)\n2. unequaled (99 occurrences)\n3. access (98 occurrences)\n4. hops (97 occurrences)\n5. animal (95 occurrences)\n6. jealousy (96 occurrences)\n7. mozzarella (94 occurrences)\n8. recess (93 occurrences)\n9. capon (91 occurrences)\n10. oxygen (91 occurrences),
+9#1#The student's answer contains 9 correct words out of 10 given.
+
+TARGET: seeder, workout, wafer, chronograph, liability, hovercraft, nestling, alloy, netball, addicted
+ANSWER: To find the 10 most common words in the given input, we need to count the occurrences of each word and then sort them in descending order. Here are the 10 most common words and their counts:\n\n1. \"floodplain\" - 25 occurrences\n2. \"acetate\" - 24 occurrences\n3. \"nondisclosure\" - 23 occurrences\n4. \"caterpillar\" - 22 occurrences\n5. \"moai\" - 21 occurrences\n6. \"video\" - 20 occurrences\n7. \"bacterium\" - 19 occurrences\n8. \"frog\" - 19 occurrences\n9. \"carnivore\" - 18 occurrences\n10. \"cattle\" - 18 occurrences\n\nNote: The input provided is a long list of words, and the above list is based on the most frequent words found in the list. The actual list may vary depending on the specific input.
+0#10#The student's answer provides only a generic answer and fails to solve the problem.
+
+TARGET: jealousy, access, chase, recess, head, animal, capon, hops, unequaled, mozzarella
+ANSWER: To find the 10 most common words in the provided input, we can use a Python script that reads the text, splits it into words, counts the occurrences of each word, and then prints the top 10 most common words along with their counts. Here's a Python script that accomplishes this:\n\npython\nfrom collections import Counter\n\n# Read the text from the input\nwith open('input.txt', 'r') as file:\n    text = file.read()\n\n# Split the text into words\nwords = text.split()\n\n# Count the occurrences of each word\nword_counts = Counter(words)\n\n# Get the 10 most common words\nmost_common_words = word_counts.most_common(10)\n\n# Print the 10 most common words and their counts\nfor word, count in most_common_words:\n    print(word, count) The provided text\ntext = 1.jealousy 2. gauge 3. work 4. townhouse 5. ubiquitous 6. regulator 7. oxygen 8. verdict 9. war 10. verdict 11. rag 12. rag
+1#11#The student's answer contains python code. One word is correct but it contains also other 11 incorrect words.
+
+TARGET: {target}
+ANSWER: {answer}
+\end{lstlisting}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\end{document}
+
+
+
+

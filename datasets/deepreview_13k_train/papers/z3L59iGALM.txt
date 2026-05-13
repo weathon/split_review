@@ -1,0 +1,488 @@
+\title{Massively Scalable Inverse Reinforcement Learning in Google Maps}
+
+\begin{abstract}
+Inverse reinforcement learning (IRL) offers a powerful and general framework for learning humans' latent preferences in route recommendation, yet no approach has successfully addressed planetary-scale problems with hundreds of millions of states and demonstration trajectories. In this paper, we introduce scaling techniques based on graph compression, spatial parallelization, and improved initialization conditions inspired by a connection to eigenvector algorithms. We revisit classic IRL methods in the routing context, and make the key observation that there exists a trade-off between the use of cheap, deterministic planners and expensive yet robust stochastic policies. This insight is leveraged in Receding Horizon Inverse Planning (\textsc{rhip}), a new generalization of classic IRL algorithms that provides fine-grained control over performance trade-offs via its planning horizon. Our contributions culminate in a policy that achieves a 16-24\% improvement in route quality at a global scale, and to the best of our knowledge, represents the largest published study of IRL algorithms in a real-world setting to date. We conclude by conducting an ablation study of key components, presenting negative results from alternative eigenvalue solvers, and identifying opportunities to further improve scalability via IRL-specific batching strategies.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Inverse reinforcement learning (IRL) is the problem of learning latent preferences from observed sequential decision making behavior. First proposed by Rudolf Kálmán in 1964 (when it went under the name of inverse optimal control \cite{Kalman1964}, and later structural estimation \cite{Rust1994}), IRL has now been studied in robotics \cite{Abbeel2008, Ratliff2009, Ratliff2007}, cognitive science \cite{Baker2009}, video games \cite{Tastan2011, Tucker2018}, human motion behavior \cite{Kitani2012, Rhinehart2020} and healthcare \cite{Imani2019, Yu2019}, among others.  
+
+In this paper, we address a key challenge in all these applications: scalability \cite{Chan2021,Michini2013,Wulfmeier2016}. With several notable exceptions, IRL algorithms require solving an RL problem at every gradient step, in addition to performing standard backpropagation \cite{Finn2016Gan,Swamy2023}. This is a significant computational challenge, and necessitates access to both an interactive MDP and a dataset of expert demonstrations that are often costly to collect. By addressing the scalability issue, we aim to leverage recent advancements in training foundation-sized models on large datasets.
+
+To illustrate our claims, we focus on the classic route finding task, due to its immediate practical significance and the availability of large demonstration datasets. Given an origin and destination location anywhere in the world, the goal is to provide routes that best reflect travelers' latent preferences. These preferences are only observed through their physical behavior, which implicitly trade-off factors including traffic conditions, distance, hills, safety, scenery, road conditions, etc. Although we primarily focus on route finding, the advancements in this paper are general enough to find use more broadly.
+
+We address the scalability challenge by providing both (a) practical techniques to improve IRL scalability and (b) a new view on classic IRL algorithms that reveals a novel generalization and enables fine-grained control of performance characteristics. Concretely, our contributions are as follows:
+\begin{itemize}
+    \item \textbf{MaxEnt\Plus\Plus} An improved version of MaxEnt IRL \cite{Ziebart2008} that is inspired by a connection to dominant eigenvectors to initialize the backward pass closer to the desired solution.
+    \item \textbf{Spatial parallelization} A simple, practical technique to shard the global MDP by leveraging a geography-based sparse mixture-of-experts.
+    \item \textbf{Graph compression strategies} Lossless and lossy methods to compress the graph matrices and reduce both the memory footprint and FLOP count across all IRL algorithms.
+    \item \textbf{Receding Horizon Inverse Planning (\textsc{rhip})} A novel IRL algorithm that generalizes MaxEnt\Plus\Plus, BIRL \cite{Ramachandran2007} and MMP \cite{Ratliff2006}. \textsc{rhip} leverages our insight that there exists a trade-off between the use of cheap, deterministic planners and expensive yet robust stochastic policies. Practically, \textsc{rhip} enables interpolating between classic algorithms to realize policies that are both fast and accurate.
+    \item \textbf{Alternative solvers} Secondary negative results when attempting to use Arnoldi iteration and a closed-form matrix geometric series in MaxEnt, which we defer to \cref{app:negative}.
+    \item \textbf{MaxEnt theory} Secondary theoretical analyses of MaxEnt, which we defer to \cref{app:maxent-convergence}.
+\end{itemize}
+Our work culminates in a global policy that achieves a 15.9\% and 24.1\% lift in route accuracy for driving and two-wheelers, respectively (\cref{fig:world}), and was successfully applied to a large scale setting in \ifRedact a popular directions app\else Google Maps\fi. To the best of our knowledge, this represents the largest published study of IRL methods in a real-world setting to date.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=1.0\textwidth]{figures/worldwide-lift-map.pdf}
+  \caption{\ifRedact Route \else Google Maps route \fi accuracy improvements in several world regions, when using our inverse reinforcement learning policy. Full results are presented in \cref{tab:results} and \cref{fig:nodes_vs_accuracy}.}
+  \label{fig:world}
+\end{figure}
+
+
+
+\section{Inverse Reinforcement Learning}
+
+
+A Markov decision process (MDP) $\mathcal{M}$ is defined by a discrete set of states $\mathcal{S}$, actions $\mathcal{A}$, transition kernel $\mathcal{T}$ and reward function $r$ (i.e.\ negative cost function). Given $\mathcal{M}\setminus r$ and a set of state-action trajectory demonstrations $\mathcal{D} = \{\tau_1, \dotsc, \tau_N \}$ sampled from a demonstration policy $\pi_E$, the goal of IRL is to recover the latent $r$.\footnote{This is an ill-conditioned problem, as multiple reward functions can induce the same trajectories. Methods impose regularization or constraints to form a unique solution, e.g.\ the principle of maximum entropy \cite{Ziebart2008}.} We denote the state and state-action distributions of trajectory $\tau$ by $\rho_\tau^s$ and $\rho_\tau^{sa}$, respectively.
+
+For expository purposes, we initially restrict our attention to the classic path-planning problem, and discuss extensions in \cref{sec:discussion}. In line with prior work \cite{Ziebart2008}, we define these MDPs as discrete, deterministic, and undiscounted where $r_\theta(s_i, s_j) \leq 0$ denotes the $\theta$-parameterized reward of transitioning from state $s_i$ to state $s_j$ and non-allowable transitions have reward $-\infty$. There exists a single self-absorbing zero-reward destination state $s_d$, which implies that each unique destination induces a slightly different MDP. However, for the sake of notational simplicity and without loss of generality, we consider the special case of a single origin state $s_o$ and single destination state $s_d$. We do not make this simplification for any of our empirical results. In the path-planning context, states (i.e. nodes) represent road segments and allowable transitions (i.e. edges) between nodes represent turns.
+
+Inverse reinforcement learning algorithms follow the two-player zero-sum game
+\begin{equation} \label{eq:two-player}
+\min_{\pi \in \Pi} \max_{\theta \in \Theta} J(\pi_E, r_\theta) - J(\pi, r_\theta) = \min_{\pi \in \Pi} \max_{\theta \in \Theta} f(\pi_E, \pi, r_\theta)
+\end{equation}
+where $J(\pi, r_\theta) = \mathbb{E}_{\tau \sim \pi} \sum_{(s_t, s_{t+1}) \in \tau} r_\theta(s_t, s_{t+1})$ denotes the value of the policy $\pi$ under reward function $r_\theta$. We consider primal strategies for the equilibrium computation, where the policy player follows a no-regret strategy against a best-response discriminative player \cite{Swamy2021}. Classic IRL algorithms follow from \cref{eq:two-player} by specifying certain policy classes and regularizers (see \cref{app:baselines} for details). Following \textcite{Ziebart2008}, we refer to the \emph{backward pass} as estimating the current policy $\pi$ and the \emph{forward pass} as rolling out the current policy. %The backward pass runtime in MMP and BIRL is governed by Dijkstra's algorithm, whereas the convergence of MaxEnt's backward pass is governed by the graph's second largest magnitude eigenvalue (see \cref{thm:rate}).
+
+\paragraph{Goal conditioning} Learning a function $r_\theta$ using IRL provides a concise representation of preferences and simplifies transfer across goal states $s_d$, as the reward function is decomposed into a general learned term and a fixed modification at the destination (self-absorbing, zero-reward). In the tabular setting, the number of reward parameters is $\mathcal{O}(SA)$ even when conditioning on $s_d$. This is in contrast to approaches that explicitly learn a policy, Q-function or value function (e.g. BC, IQ-Learn \cite{Garg2021}, ValueDICE \cite{Kostrikov2020}, GAIL \cite{Ho2016}, DAGGER \cite{Ross2010}), which require additional complexity when conditioning on $s_d$, e.g.~in the tabular setting, the number of policy parameters increases from $\mathcal{O(SA)}$ to $\mathcal{O}(S^2A)$. By learning rewards instead of policies, we can evaluate $r_\theta$ \emph{once offline} for every edge in the graph, store the results in a database, precompute contraction hierarchies \cite{Geisberger2012}, and use a fast graph search algorithm to find the highest reward path\footnote{The highest reward path is equivalent to the \emph{most likely} path under MaxEnt \cite{Ziebart2008}.} for online $(s_o, s_d)$ requests. This is in contrast to a learned policy, which must be evaluated \emph{online for every $(s_o, s_d)$ request} and for every step in the sampled route -- a computationally untenable solution in many online environments.
+
+
+
+\section{Related Work}
+
+
+IRL approaches can be categorized according to the form of their loss function.\footnote{The IRL route optimization problem is reducible to supervised classification with infinitely many classes, where each class is a valid route from the origin to the destination, the features are specified by the edges, and the label is the demonstration route. Unlike typical supervised learning problems, solving this directly by enumerating all classes is intractable, so IRL approaches take advantage of the MDP structure to efficiently compute loss gradients.} MaxEnt \cite{Ziebart2008} optimizes cross-entropy loss, MMP \cite{Ratliff2006} optimizes margin loss, and BIRL \cite{Ramachandran2007} optimizes sequential likelihood. LEARCH \cite{Ratliff2009} replaces the quadratic programming optimization in MMP \cite{Ratliff2006} with stochastic gradient descent. \textcite{Choi2011} replace the MCMC sampling in BIRL with maximum a posteriori estimation. 
+Extensions to continuous state-action spaces are possible through sampling-based techniques \cite{Finn2016GCL,Fu2018}. 
+Our work builds on \textcite{Wulfmeier2015} and \textcite{Mainprice2016}, who applied MaxEnt and LEARCH to the deep function approximator setting.
+
+Existing approaches to scale IRL consider several orthogonal and often complimentary techniques. \textcite{Michini2013} incorporate real-time dynamic programming \cite{Barto1995}, which is less applicable with modern accelerators' matrix operation parallelization. \textcite{Chan2021} apply a variational perspective to BIRL. 
+MMP is inherently more scalable, as its inner loop only requires calling a planning subroutine (e.g.\ Dijkstra) \cite{Ratliff2009}. However, it lacks robustness to real-world noise, and has lost favor to more stable and accurate probabilistic policies \cite{Osa2018}. 
+\textcite{Macglashan2015} similarly introduce a receding horizon to improve planning times.\footnote{\textcite{Macglashan2015} reduces to BIRL \cite{Ramachandran2007} with infinite horizon.} They assume zero reward beyond the horizon, whereas we assume a cheap deterministic planner beyond the horizon in order to propagate rewards from distant goal states.% \textcite{Snoswell2020,Snoswell2022} derive MaxEnt IRL based on a KL-divergence formulation, and provide a unified view with relative entropy IRL.
+
+Recently, imitation learning approaches that directly attempt to recover the demonstrator policy have gained increased attention \cite{Ho2016,Ke2021}. Behavior cloning avoids performing potentially expensive environment roll-outs, but suffers regret quadratic in the horizon \cite{Ross2010}. DAGGER solves the compounding errors problem by utilizing expert corrections \cite{Ross2011}.
+Recent approaches use the demonstrators' distribution to reduce exploration in the RL subroutine \cite{Swamy2023} and are complementary to our work. Mixed approaches such as GAIL simultaneously learn both a policy (generator) and reward function (discriminator) \cite{Finn2016Gan,Ho2016,Ke2021}, although can be susceptible to training instabilities \cite{xing2021algorithmic}.
+IQ-Learn \cite{Garg2021} and ValueDICE \cite{Kostrikov2020} directly learn a Q-function and value function, respectively. We avoid explicitly learning a policy, Q-function or value function due to the goal conditioning requirement discussed in \cref{sec:irl}.
+
+
+
+\section{Methods}
+
+\begin{figure}
+  \centering
+  \includegraphics[width=1.0\textwidth]{figures/system-overview.pdf}
+  \caption{Architecture overview. The final rewards are used to serve online routing requests.}
+  \label{fig:system-overview}
+\end{figure}
+
+The worldwide road network contains hundreds of millions of nodes and edges. At first glance, even attempting to fit the graph features into high-bandwidth memory to compute a single gradient step is infeasible.  In this section, we present a series of advancements which enable solving the world-scale IRL route finding problem, summarized in \cref{fig:system-overview}. At the end of \cref{sec:discussion}, we provide a useful summary of other directions which yield negative results.
+
+\paragraph{Parallelism strategies} We use a sparse Mixture of Experts (MoE) strategy \cite{Shazeer2017}, where experts are uniquely associated to geographic regions and each demonstration sample is deterministically assigned to a single expert (i.e.\ one-hot sparsity). This minimizes cross-expert samples and allows each expert to learn routing preferences specific to its region. Specifically, we shard the global MDP $\mathcal{M}$ and demonstration dataset $\mathcal{D}$ into $m$ disjoint subproblems $(\mathcal{M}_1, \mathcal{D}_1), \dotsc, (\mathcal{M}_m, \mathcal{D}_m)$. We train region-specific experts $r_{\theta_1}, \dotsc, r_{\theta_m}$ in parallel, and compute the final global rewards using $r(s, a) = r_{\theta_i}(s, a)$ where $(s, a) \in \mathcal{M}_i$. We additionally use standard data parallelism strategies within each expert to further partition minibatch samples across accelerator devices\iftoggle{arxiv}{ \cite{TensorflowMirrored}}{}.
+
+\paragraph{MaxEnt\Plus\Plus ~initialization}
+MaxEnt \cite{Ziebart2008} is typically initialized to the value  (i.e.\ log partition) function $v^{(0)}(s_i) = \log\mathbbm{I}[s_i=s_d]$, where $\mathbbm{I}[s_i=s_d]$ is zero everywhere except at the destination node (see \cref{app:baseline-maxent}). This propagates information outwards from the destination, and requires that the number of dynamic programming steps is at least the graph diameter for arbitrary destinations. Instead, we initialize the values $v^{(0)}$ to be the \emph{highest reward to the destination from every node}. This initialization is strictly closer to the desired solution $v$ by 
+{\setlength{\belowdisplayskip}{6pt}\begin{equation}
+   \underbrace{\mystrut{3.5ex}\mathbbm{I}[s_i=s_d]}_{\text{MaxEnt initialization}} \leq
+   \underbrace{\mystrut{3.5ex}\min_{\tau \in \mathcal{T}_{s_i, s_d}} e^{r(\tau)}}_{\text{MaxEnt\Plus\Plus~ initialization}} \leq
+   \underbrace{\mystrut{0ex}\sum_{\tau \in \mathcal{T}_{s_i, s_d}} e^{r(\tau)} = v(s_i)}_{\text{Solution}}
+\label{eq:maxentpp}
+\end{equation}}where $\mathcal{T}_{s_i, s_d}$ is the (infinite) set of all paths which begin at $s_i$ and end at $s_d$ (see proof in \cref{app:maxentpp}). Note that equality only holds on contrived MDPs, and the middle term can be cheaply computed via Dijkstra or A\textsuperscript{*}. We call this method MaxEnt\Plus\Plus~ (summarized in \cref{alg:maxent}).\footnote{a nod to the improved initialization of k-means++ \cite{Arthur2006}.}
+
+The correspondence between MaxEnt and power iteration provides a more intuitive perspective. Specifically, the MaxEnt backward pass initialization $e^{v^{(0)}}$ defines the initial conditions of power iteration, and the solution $e^v$ is the dominant eigenvector of the graph. By more closely aligning the initialization $v^{(0)}$ to the solution, the number of required power iteration steps is decreased.
+
+\paragraph{Receding Horizon Inverse Planning (\textsc{rhip})}
+
+\begin{figure}
+\centering
+\begin{minipage}{0.57\textwidth}
+\begin{algorithm}[H]
+\caption{\textsc{rhip} (Receding Horizon Inverse Planning)}\label{alg:rhip}
+\begin{algorithmic}
+\State \textbf{Input:} Current reward $r_\theta$, horizon $H$, \\
+demonstration $\tau$ with origin $s_o$ and destination $s_d$
+\State \textbf{Output:} Parameter update $\nabla_{\theta} f$
+\State 
+\State \texttt{\# Policy estimation}
+\State $v^{(0)}(s) \gets \mathrm{\textsc{Dijkstra}}(r_\theta, s, s_d)$
+\State $\pi_d(a | s) \gets \mathrm{Greedy}(r_\theta(s, a) + v^{(0)}(s'))$
+\For{$h = 1, 2, \dotsc, H$}
+\State $Q^{(h)}(s, a) \gets r_\theta(s, a) + v^{(h-1)}(s')$
+\State $v^{(h)}(s) \gets \log \sum_a \exp Q^{(h)}(s, a)$ \iftoggle{arxiv}{\Comment{logsumexp op \cite{TensorflowLogsumexp}}}{}
+\EndFor
+\State $\pi_s(a | s) \gets \frac{\exp Q^{(H)}(s, a)}{\sum_{a'} \exp Q^{(H)}(s, a')}$
+\State $\pi \gets \left[\left({\color{black}\pi_s}\right)_{\times H}, \left({\color{black}\pi_d}\right)_{\times \infty}\right]$  \Comment{\cref{eq:rhip}}
+\State
+\State \texttt{\# Roll-out ${\color{black}\pi_s} \to {\color{black}\pi_d}$}
+\State $\rho^{sa}_\theta \gets \mathrm{Rollout}(\pi, \rho_{\tau}^s)$
+\State $\rho^{sa}_* \gets \mathrm{Rollout}(\pi_{2:\infty}, \rho_{\tau_{2:\infty}}^s) + \rho_{\tau}^{sa}$
+\State
+\State $\nabla_{\theta} f \gets \sum_{s, a} (\rho^{sa}_*(s, a) - \rho^{sa}_\theta(s, a))\nabla_{\theta}r_{\theta}(s, a)$
+\State \Return $\nabla_{\theta} f$
+
+\end{algorithmic}
+\end{algorithm}
+
+\end{minipage}
+\quad
+\begin{minipage}{0.39\textwidth}
+\centering
+
+\iftoggle{arxiv}{
+    \def\rhipxoffseta{2}
+    \def\rhipxoffsetb{1.55}
+    \def\rhipxoffsetc{1.95}
+    \def\rhipxoffsetd{1.55}
+}{
+    \def\rhipxoffseta{2}
+    \def\rhipxoffsetb{1.64}
+    \def\rhipxoffsetc{1.95}
+    \def\rhipxoffsetd{1.66}
+}
+
+\begin{tikzpicture}[scale=0.86]
+    \draw (0, 0.05) node[inner sep=0] {\includegraphics[width=5.46cm]{figures/rhip-stochastic.pdf}};
+    \node[align=center] at (0, -2) {1. Roll-out stochastic policy $\bm{\pi_s}$\\for $H$ steps from demonstration};
+    \node[align=left] at (\rhipxoffseta, -.45) {\scriptsize Demonstration};
+    \node[align=left] at (\rhipxoffsetb, -.88) {\scriptsize Roll-out};
+    \node[align=left] at (-2.6, -.8) {\scriptsize $s_o$};
+    \node[align=left] at (1.75, 2.15) {\scriptsize $s_d$};
+\end{tikzpicture}
+\\
+\begin{tikzpicture}[scale=0.86]
+    \draw (0, 0.05) node[inner sep=0] {\includegraphics[width=5.46cm]{figures/rhip-deterministic.pdf}};
+    \node[align=center] at (0, -2.2) {2. Continue roll-out with\\ deterministic policy $\bm{\pi_d}$\\};
+    \iftoggle{arxiv}{
+        \node[align=left] at (\rhipxoffsetc, -.45) {\scriptsize Initial distrib.};
+        \node[align=left] at (\rhipxoffsetd, -.88) {\scriptsize Roll-out};
+    }{
+        \node[align=left] at (1.95, -.45) {\scriptsize Initial distrib.};
+        \node[align=left] at (1.66, -.88) {\scriptsize Roll-out};
+    }
+    \node[align=left] at (1.75, 2.15) {\scriptsize $s_d$};
+\end{tikzpicture}
+\end{minipage}
+\caption{\textsc{rhip} rolls out the computationally expensive stochastic policy $\pi_s$ for $H$ steps from the demonstration path before transitioning to the cheaper deterministic policy $\pi_d$, as described in \cref{eq:rhip}. \textsc{Dijkstra} computes the highest reward path from state $s$ to $s_d$ under $r_\theta$. $\mathrm{Greedy}(Q(s, a)) \in \{0, 1\}$ is the deterministic policy that selects the action with the highest $Q$-value. $\mathrm{Rollout}(\pi, \rho^s) = \rho^{sa}$ computes the state-action distribution $\rho^{sa}$ from rolling out the policy $\pi$ from the initial state distribution $\rho^s$ until convergence to the destination $s_d$. %In practice, we use a fused $\mathrm{logsumexp}$ operation to prevent numerical stability issues.
+}
+\end{figure}
+
+In this section, our key insight is that classic IRL algorithms exhibit a trade-off between the use of cheap, deterministic planners (e.g. MMP \cite{Ratliff2006}) and the use of expensive yet robust stochastic policies (e.g. MaxEnt \cite{Ziebart2008}). This insight reveals a novel generalized algorithm that enables fine-grained control over performance characteristics and provides a new view on classic methods.
+
+First, let $\pi_s$ denote the stochastic policy after $H$ steps of MaxEnt\Plus\Plus ~and $\pi_d$ denote the deterministic policy that follows highest reward path, i.e.\ $\pi_d(a | s) \in \{0, 1\}$. Let $\mathcal{T}_{s, a}$ denote the set of all paths which begin with state-action pair $(s, a)$. We introduce a new policy defined by
+\begin{equation}
+    \pi(a|s) \propto \sum_{\tau \in \mathcal{T}_{s, a}}\underbrace{\mystrut{2ex} \pi_d(\tau_{H+1})}_{\text{Deterministic policy}} \prod_{h=1}^H \underbrace{\mystrut{2ex}\pi_s(a_h | s_h)}_{\text{Stochastic policy}}. \label{eq:rhip}
+\end{equation}
+The careful reader will notice that \cref{eq:rhip} reduces to classic IRL algorithms for various choices of $H$. For $H{=}\infty$ it reduces to MaxEnt\Plus\Plus, for $H{=}1$ it reduces to BIRL \cite{Ramachandran2007}, and for $H{=}0$ it reduces to MMP \cite{Ratliff2006} with margin terms absorbed into $r_\theta$ (see \cref{app:baselines} for details).
+
+We call this generalization Receding Horizon Inverse Planning (\textsc{rhip}, pronounced \emph{rip}). As described in \cref{alg:rhip}, \textsc{rhip} performs $H$ backup steps of MaxEnt\Plus\Plus, rolls out the resulting stochastic policy $\pi_s$ for $H$ steps, and switches to rolling out the deterministic policy $\pi_d$ until reaching the destination. The receding horizon $H$ controls \textsc{rhip}'s compute budget by trading off the number of stochastic and deterministic steps. The stochastic policy $\pi_s$ is both expensive to estimate (backward pass) and roll-out (forward pass) compared to the deterministic policy $\pi_d$, which can be efficiently computed via Dijkstra's algorithm. 
+
+\paragraph{Graph compression} We introduce two graph compression techniques to reduce both the memory footprint and FLOP count across all IRL algorithms. The graph adjacency matrix is represented by a $B \times S \times V$ tensor, where entry $(b, s, v)$ contains the reward of the $v$'th edge emanating from node $s$ in batch sample $b$. Thus, $V$ is the maximum node degree valency, and nodes with fewer than $V$ outgoing edges are padded. For many problems, $V$ is tightly bounded, e.g. typically $V<10$ in road networks. First, we perform lossless compression by `spliting' nodes with degree close to $V$ into multiple nodes with lower degree. Since the majority of nodes have a much smaller degree than $V$, this slightly increases $S$ but can significantly decrease the effective $V$, thus reducing the overall tensor size $BSV$ in a lossless fashion. Second, we perform lossy compression by `merging' nodes with a single outgoing edge into its downstream node as there is only one feasible action. Feature vectors of the merged nodes are summed, which is lossless for linear $r_\theta$ but introduces approximation error in the nonlinear setting. Intuitively, these compression techniques balance the graph's node degree distribution to reduce both the tensor padding (memory) and FLOP counts.
+
+
+
+\section{Empirical Study}
+
+\begin{table}
+  \caption{Route quality of manually designed and IRL baselines. Due to the high computational cost of training the global model (bottom 3 rows), we also evaluate in a smaller, more computationally tractable set of metros (top section). Metrics are NLL (negative log-likelihood), Acc (accuracy, i.e.\ perfect route match) and IoU (Intersection over Union of trajectory edges). Numbers in bold are statistically significant with p-value less than .122 (see \cref{app:pvalue}). Two-wheeler data is unavailable globally.}
+  \centering
+  \begin{tabular}{llrrrrrrrr}
+    \toprule
+    \multicolumn{2}{c}{} & \multicolumn{3}{c}{Drive} & \multicolumn{3}{c}{Two wheelers} \\
+    \cmidrule(r){3-5} \cmidrule(r){6-8}
+    Policy class & Reward $r_\theta$                      & NLL & Acc & IoU & NLL & Acc & IoU  \\
+    \midrule
+    ETA                              & Linear          &  & .4034 & .6566 &  & .4506 & .7050 \\
+    ETA+penalties                    & Linear          &  & .4274 & .6823 &  & .4475 & .7146 \\
+    MMP/LEARCH [34, 35] & Linear &  & .4244 & .6531 & & .4687 & .7054 \\
+                                     & SparseLin    &  & .4853 & .7069 & & .5233 & .7457 \\
+    Deep LEARCH [29] & DNN             &  & .4241 & .6532 & & .4777 & .7141 \\
+                                    & DNN+SparseLin & & .4682 & .6781 & & .5220 & .7300 \\
+    BIRL [9, 32]  & Linear    & 3.933 & .4524 & .6945 & 3.629 & .4933 & .7314 \\
+                                     & SparseLin    & 26.840 & .4900 & .7084 & 8.975 & .5375 & .7508 \\
+    Deep BIRL                          & DNN           & 3.621 & .4617 & .6958 & 3.308 & .4973 & .7340 \\
+                                 & DNN+SparseLin    & 2.970 & .4988 & .7063 & 2.689 & .5546 & .7587 \\
+    MaxEnt [53], MaxEnt\Plus\Plus  & Linear                & 4.4409 & .4521 & .6941 & 3.957 & .4914 & .7293 \\
+                   & SparseLin                      & 26.749 & .4922 & .7092 & 8.876 & .5401 & .7522 \\
+    Deep MaxEnt [46]      & DNN        & 3.729 & .4544 & .6864 & 3.493 & .4961 & .7308 \\
+                                & DNN+SparseLin     & 2.889 & .5007 & .7062 & 2.920 & .5490 & .7516 \\
+    RHIP                        & Linear               & 3.930 & .4552 & .6965 & 3.630 & .4943 & .7319 \\
+                                & SparseLin         & 26.748 & .4926 & .7095 & 8.865 & .5408 & .7522 \\
+                                & DNN                  & 3.590 & .4626 & .6955 & 3.295 & .5000 & .7343 \\
+                                & DNN+SparseLin     & 2.881 & \textbf{.5030} & .7086 & 2.661 & \textbf{.5564} & .7591 \\
+    \midrule
+    Global ETA     & Linear          &  & .3891 & .6538 &  &  &  \\
+    Global ETA+penalties   & Linear          &  & .4283 & .6907 &  &  &  \\
+    Global RHIP    & DNN+SparseLin          & 8.194 & \textbf{.4958} & \textbf{.7208} &  &  &  \\
+    \bottomrule
+  \end{tabular}
+  \label{tab:results}
+\end{table}
+
+\paragraph{Road graph}
+Our 200M state MDP is created from \ifRedact a popular directions app's \else the Google Maps \fi road network graph. Edge features contain predicted travel duration (estimated from historical traffic) and other relevant static road properties, including distance, surface condition, speed limit, name changes and road type.
+
+\paragraph{Demonstration dataset}
+Dataset $\mathcal{D}$ contains de-identified users' trips collected during active navigation mode\ifRedact \else~\cite{GoogleMapsData}\fi. We filter for data quality by removing trips which contain loops, have poor GPS quality, or are unusually long. The dataset is a fixed-size subsample of these routes, spanning a period of two weeks and evenly split into training and evaluation sets based on date. Separate datasets are created for driving and two-wheelers, with the two-wheeler (e.g. mopeds, scooters) dataset being significantly smaller than the drive dataset due to a smaller region where this feature is available. The total number of iterated training and validation demonstration routes are 110M and 10M, respectively. See \cref{app:experiments} for details.
+
+\paragraph{Experimental region}
+Due to the high computational cost of training the global model, we perform initial hyperparameter selection on a smaller set of 9 experimental metros (Bekasi, Cairo, Cologne, Kolkata, Manchester, Manila, Nottingham, Orlando, and Syracuse). The top-performing configuration is used to train the global driving model. Two-wheeler data is unavailable globally and thus not reported.
+
+\paragraph{Baselines}
+We evaluate both manually designed and IRL baselines. For fixed baselines, we consider (1) \texttt{ETA}: The fastest route, i.e. edge costs are the predicted travel duration and (2) \texttt{ETA+penalties}: ETA plus manually-tuned penalties for intuitively undesirable qualities (e.g.\ u-turns, unpaved roads), delivered to us in a closed form without visibility into the full set of underlying features. For IRL policy baselines, we compare MaxEnt (\cref{alg:maxent}) \cite{Ziebart2008}, Deep MaxEnt \cite{Wulfmeier2015}, the LEARCH \cite{Ratliff2009} variation of MMP \cite{Ratliff2006} (\cref{alg:mmp}), Deep LEARCH \cite{Mainprice2016}, and the maximum a posteriori variation of BIRL \cite{Choi2011} (\cref{alg:birl}). We also consider a deep version of BIRL similar to \textcite{Brown2019DeepBR}.
+
+\paragraph{Reward model descriptions}
+We evaluate three MoE function approximator classes: (1) a simple linear model, (2) a dense neural network (DNN) and (3) an $\ell_1$-regularized reward parameter for every edge in the graph (SparseLin). The latter is of particular interest because it tends to highlight data-quality issues, for example in \cref{fig:data-errors}. These models have 3.9k, 144k, and 360M global parameters, respectively. We constrain model weights to produce non-positive rewards and fine-tune all models from the \texttt{ETA+penalties} baseline. DNN+SparseLin indicates additive DNN and SparseLin components. See \cref{app:hparams} for details.
+\begin{figure}
+    \centering
+    \begin{minipage}[t]{0.3\textwidth}
+        \centering
+        {\color{white}\textbf{Space}}
+         \includegraphics[width=1.0\textwidth]{figures/examples/nottingham-map.pdf}
+    \end{minipage}
+    \quad
+    \begin{minipage}[t]{0.3\textwidth}
+        \centering
+        {\color{darkblue}\textbf{\underline{Preferred route}}}
+        \begin{tikzpicture}
+            \draw (0, 0) node[inner sep=0] {\includegraphics[width=1.0\textwidth]{figures/examples/nottingham-good.jpg}};
+            \draw[white] (0.2, -1) node {\textbf{Open gate}};
+            \draw [->,line width=0.5mm,white] plot [] coordinates {(-.8,-.8) (-1.3,-.3)};
+            \draw [->,line width=0.5mm,white] plot [] coordinates {(1.2,-.8) (1.7,-.3)};
+        \end{tikzpicture}
+    \end{minipage}
+    \quad
+    \begin{minipage}[t]{0.3\textwidth}
+        \centering
+        {\color{darkred}\underline{\textbf{Detour route}}}
+                
+         \includegraphics[width=1.0\textwidth]{figures/examples/nottingham-bad.jpg}
+    \end{minipage}
+    \caption{Example of the 360M parameter sparse model finding and correcting a data quality error in Nottingham. The {\color{darkblue}preferred route} is incorrectly marked as private property due to the presence of a gate (which is never closed), and incorrectly incurs a high cost. The {\color{darkred}detour route} is long and narrow. The sparse model learns to correct the data error with a large positive reward on the {\color{darkblue}gated segment}. Additional examples are provided in \cref{app:experiments}.}
+    \label{fig:data-errors}
+\end{figure}
+
+\paragraph{Metrics}
+For serving online routing requests, we are interested in the highest reward path from $s_o$ to $s_d$ path under $r_\theta$ (and not a probabilistic sample from $\pi$ or a margin-augmented highest reward path). For accuracy, a route is considered correct if it perfectly matches the demonstration route. Intersection over Union (IoU) captures the amount of overlap with the demonstration route, and is computed based on unique edge ids. Negative log-likelihood (NLL) loss is reported where applicable.
+
+\subsection{Results}
+
+We train the final global policy for 1.4 GPU-years on a large cluster of V100 machines, which results in a significant 15.9\% and 24.1\% increase in route accuracy relative to the \texttt{ETA+penalties}  baseline models for driving and two-wheelers, respectively. As shown in \cref{tab:results}, this \textsc{rhip} policy with the largest 360M parameter reward model achieves state-of-the-art results with statistically significant accuracy gains of 0.4\% and 0.2\% compared to the next-best driving and two-wheeler IRL policies, respectively.
+
+We observe dynamic programming convergence issues and large loss spikes in MaxEnt which tend to occur when the rewards become close to zero. In \cref{app:maxent-convergence} we prove this phenomena occurs precisely when the dominant eigenvalue of the graph drops below a critical threshold of 1 (briefly noted in \textcite[pg. 117]{Ziebart2010}) and show the set of allowable $\theta$ is provably convex in the linear case. Fortunately, we are able to manage the issue with careful initialization, learning rates, and stopping conditions. %Backtracking line search is another possible mitigation strategy, and it's unknown whether an efficient projection exists. 
+Note that \textsc{rhip} (for $H < \infty$), BIRL and MMP provably do not suffer from this issue. All value functions (\cref{alg:rhip,alg:maxent,alg:birl}) are computed in log-space to avoid significant numerical stability issues.
+
+We empirically study the trade-off between the use of cheap, deterministic planners and more robust yet expensive stochastic policies in \cref{fig:tradeoff}. As expected, %MMP is fast but exhibits poor accuracy and unstable training, likely due to its lack of robustness to noise \cite{Osa2018}. On the other hand,
+MaxEnt has high accuracy but is slow to train due to expensive dynamic programming, and MaxEnt\Plus\Plus~is 16\% faster with no drop in accuracy. \textsc{rhip} enables realizing a broad set of policies via the choice of $H$. Interestingly, we find that $H{=}10$ provides both the best quality routes and 70\% faster training times than MaxEnt, i.e.\ MaxEnt is not on the Pareto front. We hypothesize this occurs due to improved policy specification. BIRL and MaxEnt assume humans probabilistically select actions according to the highest reward path or reward of all paths beginning with the respective state-action pair, respectively. However, in practice, humans may take a mixed approach -- considering all paths within some horizon, and making approximations beyond that horizon.
+
+\cref{tab:compression} shows the impact of graph compression in our experimental region. The \texttt{split} strategy is lossless (as expected), and the \texttt{split+merge} strategy provides a significant 2.7x speed-up with almost no impact on route quality metrics. All empirical results take advantage of the \texttt{split+merge} graph compression. We find that data structure choice has a significant impact on training time. We try using unpadded, coordinate format (COO) sparse tensors to represent the graph adjacency matrix, but profiling results in our initial test metro of Bekasi show it to be 50x slower.
+
+\iftoggle{arxiv}{
+    \def\tradeoffcolumnawidth{7.5cm}
+    \def\tradeoffcolumnsep{1cm}
+    \def\tradeoffcolumnbwidth{8.5cm}
+    \def\tradeoffscale{0.8}
+}{
+    \def\tradeoffcolumnawidth{5cm}
+    \def\tradeoffcolumnsep{.6cm}
+    \def\tradeoffcolumnbwidth{8cm}
+    \def\tradeoffscale{0.6}
+}
+\begin{table}[t]
+    \begin{tabular}{p{\tradeoffcolumnawidth}@{\hskip \tradeoffcolumnsep}p{\tradeoffcolumnbwidth}} % CHANGE first width from .37\textwidth. change middle from .6
+    \begin{tikzpicture}[scale=\tradeoffscale]
+\begin{axis}[
+        xmin=0.0,
+        ymin=0.4516,
+        xlabel={Training steps per second},
+        ylabel={Accuracy},
+        ytick={.452,.453,.454},
+        y tick label style={
+        /pgf/number format/.cd,
+        fixed,
+        precision=3,
+        /tikz/.cd
+    },
+    ]
+    \addplot[
+        scatter/classes={a={darkblue}, b={darkred}},
+        scatter, mark=*, only marks, 
+        scatter src=explicit symbolic,
+    ] table [meta=class] {
+        x y class label
+        0.31019781774 0.4520822433492976 a MaxEnt
+        0.3799923267324859 0.4520822433492976 b MaxEnt++
+        0.5114231907658277 0.45218411677000836 b B
+        0.698998940016945 0.45409328674550076 b C
+        1.1005080946204624 0.4524569972269642 b D
+        1.3918560602940553 0.4523540838670357 b BIRL
+    };
+    \draw [-stealth](axis cs: 0.31019781774-.1,0.4520822433492976-.00015) -- (axis cs: 0.31019781774-.02,0.4520822433492976-.00003);
+    \draw [-stealth](axis cs: 0.3799923267324859-.1,0.4520822433492976+.0002) -- (axis cs: 0.3799923267324859-.01,0.4520822433492976+.00005);
+    \node[] at (axis cs: 0.31019781774-.15,0.4520822433492976-.00025) {MaxEnt};
+    \node[] at (axis cs: 0.3799923267324859-.1,0.4520822433492976+.0003) {MaxEnt\Plus\Plus};
+    \node[] at (axis cs:  0.3799923267324859,0.4520822433492976-.00015) {\color{darkred}$\infty$};
+    \node[] at (axis cs: 0.5114231907658277,0.45218411677000836-.00015) {\color{darkred}$100$};
+    \node[] at (axis cs: 0.698998940016945,0.45409328674550076-.00015) {\color{darkred}$10$};
+    \node[] at (axis cs: 1.1005080946204624,0.4524569972269642-.00015) {\color{darkred}$2$};
+    \node[] at (axis cs: 1.2,0.454) {\color{darkred}\textsc{rhip}};
+    \node[] at (axis cs: 1.2,0.45383) {\color{darkred}(sweep over $H$)};
+    \node[] at (axis cs: 1.3918560602940553,0.4523540838670357-.00015) {\color{darkred}$1$};
+\end{axis}
+    \hfil \begin{tabular}{lrrrrr} %p{1.5cm
+    \toprule
+    \multicolumn{1}{l}{Graph} & \multicolumn{1}{c}{\multirow{2}{*}{$N$}} & \multicolumn{1}{c}{\multirow{2}{*}{$V$}} & \multicolumn{1}{c}{Steps} & \multicolumn{1}{c}{\multirow{2}{*}{NLL}} & \multicolumn{1}{c}{\multirow{2}{*}{Acc}} \\ %\multicolumn{1}{>{\raggedleft\arraybackslash}p{1.1cm}}{Steps per sec}
+    \multicolumn{1}{l}{compression} & & & \multicolumn{1}{c}{per sec} & & \\
+    \midrule
+    None              & 124,402 & 4.9 & .373 & 9.371 & .454 \\
+    Split             & 125,278 & 3.0 & .412 & 9.376 & .455 \\
+    Merge             & 84,069  & 4.9 & .843 & 9.381 & .455 \\
+    Split+Merge       & 84,944  & 3.0 & \textbf{.993} & 9.389 & .455 \\
+    \bottomrule
+  \end{tabular} \\
+    \captionof{figure}{Impact of the horizon on accuracy and training time. $H=10$ has the highest accuracy and trains 70\% faster than MaxEnt. \iftoggle{arxiv}{MaxEnt\Plus\Plus~($H=\infty$) provides a 16\% speedup over MaxEnt with no drop in accuracy.}{}}
+    \label{fig:tradeoff} &
+    \captionof{table}{Graph compression improves training time by 2.7x with insignificant impact on route quality metrics.}
+    \label{tab:compression}
+\end{table}
+
+In \cref{fig:cross-metro}, we study the local geographic preferences learned by each expert in the mixture by performing an out-of-region generalization test. The drop in off-diagonal performance indicates the relative significance of local preferences. In \cref{fig:nodes_vs_accuracy}, we examine the relationship between region size and the performance of the model. Accuracy is nearly constant with respect to the number of states. However, training is significantly faster with fewer states, implying more equally sized regions would improve computational load balancing.
+
+\paragraph{Negative results}
+We study several other ideas which, unlike the above contributions, do not meaningfully improve scalability. First, the MaxEnt backward pass is equivalent to applying power iteration to solve for the dominant eigenvector of the graph (\cref{eq:power-iteration}). Instead of using power iteration (\cref{alg:maxent}), we consider using Arnoldi iteration from \verb+ARPACK+ \cite{Lehoucq1998}, but find it to be numerically unstable due to lacking a log-space implementation (see results in \cref{app:arnoldi}). Second, the forward pass used in MaxEnt has a closed form solution via the matrix geometric series (\cref{eq:closed-form}). Using \verb+UMFPACK+ \cite{Davis2004} to solve for this solution directly is faster on smaller graphs containing up to around 10k nodes, but provides no benefit on larger graphs (see results in \cref{app:geometric-series}).
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.5\textwidth}
+        \centering
+\begin{tikzpicture}[scale=0.67]
+    \draw[step=0.25cm,color=white!20] (0,-2.5) grid (0,2.5);
+    \begin{axis}[
+            colormap={custom}{ 
+            color=(darkblue)
+            color=(lightblue)
+            color=(white)
+            color=(lightred)
+            color=(darkred)},
+            point meta min=-6,
+            point meta max=6,
+            xlabel=\textbf{Evaluation region},
+            xlabel style={yshift=-30pt},
+            ylabel=\textbf{Training region},
+            ylabel style={yshift=20pt,xshift=-10pt},
+            xticklabels={Barcelona, Enschede, Nottingham, Strasbourg, Syracuse},
+            xtick={0,...,4},
+            xtick style={draw=none},
+            yticklabels={Barcelona, Enschede, Nottingham, Strasbourg, Syracuse},
+            ytick={0,...,4},
+            ytick style={draw=none},
+            yticklabel style={
+              yshift=-10pt,
+              rotate=45,
+            },
+            enlargelimits=false,
+            colorbar,
+            colorbar style={
+                title=\% accuracy,
+                ylabel style={yshift=-70pt},
+            },
+            xlabel style={yshift=-5pt},
+            xticklabel style={
+              xshift=-10pt,
+              rotate=45,
+            },
+            nodes near coords align={},
+            nodes near coords={\pgfmathprintnumber[fixed,zerofill, precision=1]\pgfplotspointmeta},
+        ]
+        \addplot[
+            matrix plot,
+            mesh/cols=5,
+            point meta=explicit,draw=gray
+        ] table [meta=C] {
+            x y C
+            0 0 0
+            1 0 -6.0
+            2 0 -2.8
+            3 0 -3.7
+            4 0 -9.1
+            
+            0 1 -1.5
+            1 1 0
+            2 1 -1.7
+            3 1 -3.8
+            4 1 -3.1
+            
+            0 2 0.4
+            1 2 -2.8
+            2 2 0.0
+            3 2 -1.0
+            4 2 -4.4
+            
+            0 3 0.4
+            1 3 -3.3
+            2 3 -0.1
+            3 3 0.0
+            4 3 -2.5
+        
+            0 4 -0.2
+            1 4 -0.7
+            2 4 -1.2
+            3 4 -2.7
+            4 4 0
+        };
+    \end{axis}
+\end{tikzpicture}
+\caption{Sparse mixture-of-experts learn preferences specific to their geographic region, as demonstrated by the drop in off-diagonal performance.}
+    \label{fig:cross-metro}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.45\textwidth}
+        \centering
+        \begin{tikzpicture}[scale=0.67]
+        \draw[step=0.25cm,color=white!20] (0,-2.5) grid (0,2.5);
+    \begin{axis}[
+            xmode=log,
+            xlabel=Number of states,
+            xtick={200000,400000,800000,1600000},
+            xticklabels={200k,400k,800k,1.6M},
+            ytick={-10,0,10,20,30,40},
+            yticklabels={-10\%,0\%,10\%,20\%,30\%,40\%},
+            ylabel=Accuracy relative to baseline,
+            scatter/classes={a={mark=o,draw=black}}]
+        \addplot[scatter,only marks,mark options={darkblue,opacity=0.5},
+                scatter src=explicit symbolic]%
+            table [x=nodes, y=lift, col sep=comma] {lift_vs_n_nodes.csv};
+        \addplot+[name path=A,color=darkblue,fill=darkblue,opacity=0.3,no marks] coordinates {(200000,17.419068047840888)(300258.94457465014,16.582505302767494)(438989.6751594008,16.134831290666092)(517896.43774316425,15.954824557496666)(1035386.3891631619,15.639729799546053)(1980000,15.786112173040745)(1980000,11.99426643412543)(965929.1228508552,13.454898075702154)(509799.1177728384,14.480653363918533)(407330.132778588,14.696158713420422)(302448.16182531306,14.74562151802831)(200000,14.646734955826235)} -- cycle;
+        \addplot[color=darkblue] coordinates {
+    (200000,16.015)(1978753,13.81)
+    };
+    \end{axis}
+\end{tikzpicture}
+        \caption{Region accuracy for each expert in the worldwide mixture. Performance is consistent across the state space size.}
+        \label{fig:nodes_vs_accuracy}
+    \end{minipage}
+\end{figure}
+
+
+
+\section{Discussion}
+
+\paragraph{Future research}
+We study multiple techniques for improving the scalability of IRL and believe there exist several future directions which could lead to additional gains. First, demonstration paths with the same (or nearly the same) destination can be merged together into a single sample. Instead of performing one IRL backward and forward pass per mini-batch sample, we can now perform one iteration \emph{per destination}. This enables compressing large datasets and increasing the effective batch size, although it reduces shuffling quality, i.e. samples are correlated during training. Second, the graph could be pruned by removing nodes not along a `reasonable' path (i.e. within some margin of the current best path) from $s_o$ to $s_d$ \cite[pg. 119]{Ziebart2010}. However, this may be difficult to do in practice since the pruning is unique for every origin-destination pair. 
+
+From an accuracy perspective, we find that the sparse mixture-of-experts learn routing preferences specific to geographic regions. This vein could be further pursued with personalization, potentially via a hierarchical model \cite{Choi2014, Choi2012}. Due to engineering constraints, we use static ETA predictions, but would like to incorporate the dynamic GraphNet ETA predictions from \textcite{Derrow2021}. We find that sparse reward models tend to highlight groups of edges which were impacted by the same underlying data quality issue. A group lasso penalty may be able to leverage this insight. Including human domain knowledge may robustify and help shape the reward function \cite{Wulfmeier2016b,doi:10.1177/0278364917722396}. In this paper, we evaluate performance on driving and two-wheelers, and would like to incorporate other modes of transportation -- especially walking and cycling -- but are limited by engineering constraints.
+
+\paragraph{Extensions to other MDPs} For expository purposes, we restrict attention to discrete, deterministic, and undiscounted MDPs with a single self-absorbing destination state. Our contributions naturally extend to other settings. MaxEnt\Plus\Plus~ and \textsc{rhip} can be applied to any MDP where MaxEnt is appropriate and  $v^{(0)}$ can be (efficiently) computed, e.g.\ via Dijkstra's. Our parallelization extends to all MDPs with a reasonable partition strategy, and the graph compression extends to stochastic MDPs (and with further approximation, discounted MDPs).
+
+\paragraph{Limitations} IRL is limited by the quality of the demonstration routes. Even with significant effort to remove noisy and sub-optimal routes from $\mathcal{D}$, our policy will inadvertently learn some rewards which do not reflect users' true latent preferences. Our MoE strategy is based on \emph{geographic regions}, which limits the sharing of information across large areas. This could be addressed with the addition of global model parameters. However, the abundance of demonstrations and lack of correlation between region size and accuracy (\cref{fig:nodes_vs_accuracy}) suggests benefits may be minimal.
+
+
+
+\section{Conclusion}
+
+Increasing performance via increased scale -- both in terms of dataset size and model complexity -- has proven to be a persistent trend in machine learning. Similar gains for inverse reinforcement learning problems have historically remained elusive, largely due to additional challenges posed by scaling the MDP solver. We contribute both (a) techniques for scaling IRL to problems with hundreds of millions of states, demonstration trajectories, and reward parameters and (b) a novel generalization that enables interpolating between classic IRL methods and provides fine-grained control over accuracy and planning time trade-offs. Our final policy is applied in a large scale setting with hundreds of millions of states and demonstration trajectories, which to the best of our knowledge represents the largest published study of IRL algorithms in a real-world setting to date.
+
+
+\pagebreak
+
+\ifRedact \else
+
+

@@ -1,0 +1,269 @@
+\title{R-Sparse: Rank-Aware Activation Sparsity for Efficient LLM Inference}
+
+\begin{abstract}
+Large Language Models (LLMs), while demonstrating remarkable capabilities across various applications, present significant challenges during inference due to their substantial model size, especially when deployed on edge devices. Activation sparsity offers a promising solution to reduce computation and memory movement, enabling more efficient inference, particularly for small-batch on-device applications. However, current approaches face limitations with non-ReLU activation function, which are foundational to most advanced LLMs, or require heavy continual training. Additionally, the difficulty in predicting active channels and limited achievable sparsity ratios constrain the effectiveness of activation sparsity-based methods. In this paper, we introduce R-Sparse, a training-free activation sparsity approach capable of achieving high sparsity levels in advanced LLMs. We conducted two preliminary investigations into how different components contribute to the output within a single linear layer and found two key observations: (i) the non-sparse components of the input function can be regarded as a few bias terms, and (ii) The full computation can be effectively approximated by an appropriate combination of input channels and weight singular values. Building on this, we replace the linear layers in LLMs with a rank-aware sparse inference method that leverages the sparsity of input channels and singular value components, eliminating the need for active channel prediction like the output sparsity based approaches. Experiments on Llama-2/3 and Mistral models across ten diverse tasks demonstrate that R-Sparse achieves comparable performance at 50\% model-level sparsity, resulting in a significant 43\% end-to-end efficient improvements with customized kernels. Code will be made publicly available upon acceptance.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) have become ubiquitous due to their remarkable capabilities, powering applications from virtual assistants to automated content creation. However, their impressive performance comes with significant computational and memory costs due to their enormous parameter counts. This poses significant challenges for latency-sensitive applications, particularly for deployments on edge devices. To address this, network pruning or sparsity (Frantar & Alistarh, 2023; Sun et al., 2023; Yin et al., 2023; Ma et al., 2023) is an effective solution. These strategies operate in a data-independent manner with different levels of pruning granularity, e.g., unstructured, semistructured, or structured. While more structured pruning approaches leads to more limited sparsity levels, unstructured sparsity introduces greater challenges for efficient hardware implementation.  
+
+Recently, activation sparsity (Liu et al., 2023; Mirzadeh et al., 2023; Dong et al., 2024; Lee et al., 2024) has emerged as a promising solution that dynamically loads only the active channels and their corresponding weight rows or columns from off-chip HBM (NVIDIA, 2020) to on-chip SRAM, significantly alleviate the latency and memory cost when equipped with optimized system implementations (Song et al., 2023). Designing activation sparsity functions in a structured, data-dependent way, can make the specified network more hardware-friendly while also achieving higher sparsity levels compared to traditional pruning techniques.  
+
+Despite the promising progress, several challenges remain: (i) Feasibility for non-ReLU based LLMs: ReLU eliminates the negative part of activations, enabling a lossless approximation when skipping the computation of corresponding channels (Liu et al., 2023). However, most advanced LLMs now use non-ReLU activations like SiLU (Elfwing et al., 2018) and GELU (Hendrycks & Gimpel, 2016), which retain small negative values, requiring extensive continual pre-training to obtain meaningful activation sparsity (Song et al., 2024a; Zhang et al., 2024a; Mirzadeh et al., 2023; Song et al., 2024b). Such training process can involve up to 150B tokens, taking approximately one month on 64 A100 GPUs. (ii) Difficulty in Predicting Active Channels: Previous approaches identify critical channels within the hidden activations of MLP blocks, facing significant challenges in predicting the active channels before performing the computation. Common strategies include exploiting the similarity of activated channels across semantically similar tokens (Dong et al., 2024), leveraging the activations after the gate projection (Lee et al., 2024), or using a learnable predictor (Liu et al., 2023), while the accuracy of active channel prediction will highly affect their effectiveness. (iii) Limited Sparsity Levels: For approaches that do not rely on extensive retraining (Lee et al., 2024; Dong et al., 2024), only $50\%$ sparsity within MLP blocks can be achieved, leading to a model-level sparsity of one third. Achieving higher levels of overall sparsity remains a significant challenge.  
+
+This paper targets a training-free activation sparsity approach that is: (i) feasible for non-ReLU based LLMs; (ii) unaffected by the difficulty of predicting active channels; and (iii) capable of achieving higher sparsity levels. While previous methods focus on output activation sparsity (Liu et al., 2023; Lee et al., 2024), requiring prior prediction of important channels, our approach leverages input activation sparsity, identifying active channels directly from the input without the need of prediction. Furthermore, recent studies (Mirzadeh et al., 2023; Song et al., 2024a;b) have shown that directly removing the non-sparse components only achieves limited sparsity while with extensive training, sparsity ratios can be pushed to as high as $90\%$ . This sparsity gap raises an natural question: Is the non-sparse portion of the activation truly necessary for maintaining model performance, or can we employ a lightweight strategy to mitigate the non-sparse part without resorting to heavy pre-training? Motivated by this, we apply a multi-phase ReLU function to the non-sparse channels, the corresponding activations will then be rounded to a few discrete values. As the number of discrete values increases from 1 to 2, performance can be significantly improved, even at a sparsity level of $90\%$ . The output components associated with the non-sparse portion can then be approximated by a few bias terms, indicating a low-rank structure for these components.  
+
+To better understand the low-rank structure, we analyze the importance of each input channel in the activations and each singular value component of the weights, to the output activations.  
+
+As shown in Figure 1, we observe a highly sparse structure where an appropriate combination of input channels (green rectangle) and singular value components (yellow rectangle) can effectively approximate the full computation. Building on these, we propose R-Sparse, a simple yet effective framework that decompose the computation of each linear layer with a sparse and low-rank components. For the sparse portion, our approach identifies sparse channels by selecting those with large magnitude values and loads only the corresponding rows of weights into SRAM for computation. For the low-rank components, we route the non-sparse channels to a low-rank modules that obtained from an offline lowrank decomposition of the original weights. R-Sparse can be applied to both attention and MLP modules that achieves higher sparsity levels. Additionally, we find the patterns of sparse and low-rank combinations vary across different layers. With that, we employ an evolutionary search algorithm to identify the optimal ratios for the sparse components in each layer within LLMs, resulting in enhanced performance.  
+
+We conduct extensive experiments on three representative LLM families: Llama-2 (Touvron et al., 2023), Llama-3 (Dubey et al.,  
+
+![](images/305b336a491d53cfd6c95409642e3d998f1df8da1a0ca48f6e3b60663367db6b.jpg)  
+
+Figure 1: Contributions of each input channel and singular value components. The measurement metric is detailed in Section 3.3. Results are obtained from Llama-2-7B with 16 training samples from C4. Both the input channel and SVD components are sorted from small to large for better visualization.  
+
+2024), and Mistral (Jiang et al., 2023), across ten tasks, including common-sense reasoning, language modeling, and text summarization. Our approach achieves $50\%$ model-level sparsity while maintaining performance comparable to the full model. Additionally, by utilizing a customized kernel, we demonstrate up to $43\%$ end-to-end improvements in generation speed. Furthermore, R-Sparse is compatible with weight quantization for further efficiency gains.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+
+
+\section{2.1 EFFICIENT LLM INFERENCE  }
+
+
+The inference process of LLMs is typically memory-intensive due to the large number of parameters and the huge KV cache required to store intermediate key and value embeddings. To reduce memory overhead, various strategies have been investigated, including removing redundant components through pruning or sparsification (Frantar & Alistarh, 2023; Sun et al., 2023; Yin et al., 2023; Ma et al., 2023; Zhang et al., 2024b; Xiao et al., 2023b; Jiang et al., 2024); quantizing data into lower bit formats (Frantar et al., 2022; Lin et al., 2024; Xiao et al., 2023a; Chee et al., 2024; Kim et al., 2023; Egiazarian et al., 2024; Liu et al., 2024b); and distilling large models into smaller or more efficient architectures (Bick et al., 2024; Hinton, 2015; Sreenivas et al., 2024). Additionally, some approaches focus on developing efficient architectures (Gu & Dao, 2023; Peng et al., 2023; Yang et al., 2023) or optimizing hardware (Dao et al., 2022; Kwon et al., 2023; Alizadeh et al., 2023), enhancing the efficiency of LLM inference and making them more accessible on edge devices. This work focuses on mitigating the overhead from the large model sizes while compression techniques for KV cache are orthogonal to weight reduction and can be naturally combined that we will explore in the future.  
+
+
+
+\section{2.2 ACTIVATION SPARSITY  }
+
+
+Several studies have demonstrated that activations within the MLP blocks of transformers are highly sparse (Geva et al., 2020; Li et al., 2022; Dettmers et al., 2022). This sparsity primarily arises from ReLU activations, where negative values are zeroed out, providing a natural, lossless opportunity for accelerating inference in LLMs like OPT (Zhang et al., 2022). However, most modern LLMs use activation functions like SiLU or GeLU, which retain small negative values. Directly replacing with the ReLU activation would impair model functionality. To address this challenge, a common strategy is ”ReLUfication” where the original activations are replaced with ReLU, followed by extensive continual training to recover performance (Zhang et al., $2024\mathrm{a}$ ; Mirzadeh et al., 2023; Song et al., 2024b;a). However, this approach introduces significant computational overhead, limiting its accessibility. Recent training-free methods (Lee et al., 2024; Dong et al., 2024) have made progress in applying sparsity to non-ReLU models, achieving modest sparsity ratios (e.g., $50\%$ in MLP blocks and up to $33\%$ model-wide). Additionally, most previous works focus on the sparse structure of output activations, requiring extra effort to identify active channels before computation (Dong et al., 2024; Liu et al., 2023; Lee et al., 2024), with the accuracy of channel prediction significantly affecting performance. In our work, we shift the focus to the sparse structure of input channels and singular value components, eliminating the need for active channel prediction while feasible for both attention and MLP blocks, leading to higher sparse ratios without additional training. One concurrent work (Liu et al., 2024a) shares a similar intuition but focuses solely on input channels that can be viewed as a special case of our framework.  
+
+
+
+\section{3 METHODOLOGY  }
+
+
+This section starts from a brief overview of LLM inference and the notations used throughout the paper. Following this, we present two interesting observations: (I) the contribution of non-sparse (i.e., small-magnitude) input channels can be converted into biases, and (II) the full computation can be effectively approximated with an appropriate combination of input channels and singular value components. Motivated by these, we detail our proposed inference framework R-Sparse, along with the evolutionary search algorithm for determining the optimal sparsity recipe.  
+
+
+
+\section{3.1 PRELIMINARY  }
+
+
+LLM inference typically consists of two stages: $\pmb{\mathrm{\Sigma}}$ the pre-filling stage, where a batch of prompts containing multiple tokens is processed by the model, and $\pmb{\varphi}$ the decoding stage, where new tokens are generated incrementally. The decoding phase is often memory-bounded, and its iterative mechanism amplifies the overhead associated with loading parameters into on-chip memory, becoming the main bottleneck during inference. However, activation sparsity mitigates this by enabling the selective loading of only active rows or columns of the weights into SRAM at each decoding stage. In the following, we focus primarily on the decoding phase. Consider a typical LLM architecture, where each block contains seven linear layers. The attention part comprises four matrices: $\mathbf{W}_{q}$ $\boldsymbol{{\V}}_{q},\mathbf{W}_{k},\mathbf{W}_{v},\mathbf{W}_{o}\in\mathbb{R}^{n\times n}$ , while the widely used MLP block Touvron et al. (2023); Dubey et al. (2024) includes three matrices: $\mathbf{W}_{u p},\mathbf{W}_{g a t e}\in\mathbb{R}^{m\times n}$ and $\mathbf{W}_{d o w n}\in$ $\mathbb{R}^{n\times m}$ ( $\mathit{\Delta}n$ and $m$ stands for the dimension of model embedding and hidden activations within MLP blocks, respectively). The computational process of the MLP block can be formulated as $Y=H\mathbf{W}_{d o w n}^{T}$ , where $\dot{H_{}}=X\mathbf{W}_{u p}^{T}\odot\dot{\odot}\,\sigma(X\mathbf{W}_{g a t e}^{T})$ .  
+
+3.2 MOTIVATION CASE I: NON-SPARSE COMPONENTS ARE BIASES  
+
+We first carry out a preliminary investigation into how sparsification of input activations influences the final performance. We use a soft multi-phase ReLU function $\sigma_{\mathcal{T}}(\cdot)$ to approximate the non-ReLU activation functions $\sigma(\cdot)$ , which is defined as:  
+
+$$
+\sigma_{T}(x)=\left\{x\atop{\frac{T_{i}+T_{i+1}}{2}}\quad{\mathrm{if~}}x\geq T_{0}\right.
+$$  
+
+where $\boldsymbol{\mathcal{T}}\,=\,\{T_{0},T_{1},..,T_{l-1}\}$ and $l$ determines the softness of the sparsification operation. When $T_{0}=0$ and $l=1$ , this is equivalent to standard activation sparsity achieved by ReLU where all non-sparse part $(x<0)$ ) are masking out as zero. Additionally, we set $T_{l-1}$ as the minimum value of input and the sparsity is defined as the ratios of $x\,<\,T_{0}$ . As shown in Figure 2. By simply increasing $l$ from 1 to 2, the degraded performance can be easily recovered, even at a sparsity ratio of $90\%$ . Additionally, we use $u_{i}$ to represent the subset of channels in $H$ that satisfy $T_{i+1}\leq H_{k}<$ $T_{i}$ $(k\in\mathcal{U}_{i})$ ). The corresponding output $Y$ can then be decomposed into the sparse part $Y_{s}$ , where  
+
+![](images/fc034705d5f0c22dd73b4c967dc62c0d9140ec3e0ebedf2a78015214d3db89d1.jpg)  
+Figure 2: Accuracy of Llama-2-7B on OpenBookQA (Mihaylov et al., 2018a) (OBQA) and ARC Challenge (Clark et al., 2018a) (ARC-C) tasks.  
+
+$H_{k}\geq T_{0}$ , and the residual part $Y_{r}$ , as:  
+
+162   
+163   
+164   
+165   
+166   
+167   
+168   
+169   
+170   
+171   
+172   
+173   
+174   
+175   
+176   
+177   
+178   
+179   
+180   
+181   
+182   
+183   
+184   
+185   
+186   
+187   
+188   
+189   
+190   
+191   
+192   
+193   
+194   
+195   
+196   
+197   
+198   
+199   
+200   
+201   
+202   
+203   
+204   
+205   
+206   
+207   
+208   
+209   
+210   
+211   
+212   
+213   
+214   
+215  
+
+$$
+Y_{r}=\sum_{j=0}^{\cdot}\frac{l-2}{2}\left(\sum_{k\in\mathcal{U}_{j}}\mathbf{W}_{d o w n}^{T}[:,k]\right)
+$$  
+
+The subset of channels $\mathcal{U}_{j}$ is input-dependent and each term $\begin{array}{r}{\sum_{k\in\mathcal{U}_{j}}\mathbf{W}_{d o w n}^{T}[:,k]}\end{array}$ can be viewed as a data-dependent bias $B_{j}$ . This allows the non-sparse components to be effectively approximated with a few biases. We will show later how these data-dependent biases can be converted into static biases and being pre-computed. With only two biases, the sparsity ratio is significantly increased to $90\%$ .  
+
+![](images/9852d3054bfe1f18789bad6be35f4d298ba0efd7eefaf829ff0fdbfcd5720a3c.jpg)  
+3.3 MOTIVATION CASE II: RANK-AWARE ACTIVATION SPARSITY   
+Figure 3: Importance of each input channel and singular value. Zoom in for better visualization. Results are obtained with the pretrained Llama-2-7B model and 16 samples from the C4 training dataset, each with a sequence length of 4096. Each subfigure corresponds to the results of different layers, with the horizontal axis representing the input channel index and the vertical axis representing the singular value index. The top, middle, and bottom subfigures represent the results of the first, middle, and last layers, respectively.  
+
+Although it’s costly to obtain the input-dependent biases on the fly. we observe that the space spanned by the biases across thousands of tokens exhibits a low-rank structure, e.g., for each token $i$ , we use two biases to approximate the residual part $Y_{r}^{i}\,=\,B_{0}^{i}+B_{1}^{i}$ . By concatenating 4000 biases from 2000 tokens, we obtain a bias matrix $\mathbf{M}$ , where $\mathbf{M}[:,2i]=B_{0}^{i}$ and $\pmb{\Pi}[:,2i+1]=B_{1}^{i}$ $(i\,\in\,\{1,2,...,2000\})$ . We find the stable rank of $\mathbf{M}$ is approximately 400. Inspired by this, we further explore the relationship between weight SVD components and sparse activations. Given a pre-trained linear layer $Y=X\mathbf{\bar{W}}^{T}$ , $\mathbf{W}\in\mathbb{R}^{n\times m}(n\leq m)$ , we perform singular value decomposition (SVD) on the weight matrix, that $\begin{array}{r}{\mathbf{\dot{W}}=\mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^{T}=\sum_{i=1}^{n}\sigma_{i}\dot{\mathbf{U}}[:,i]\mathbf{V}^{T}[:,\bar{i}]}\end{array}$ . The output $Y$ can then be expressed as $\begin{array}{r}{Y\,=\,\sum_{i=1}^{n}\sum_{j=1}^{m}\sigma_{i}X_{j}\mathbf{V}[j,i]\mathbf{U}^{T}[:,{\dot{i}}]}\end{array}$ where $\mathbf{S}_{i,j}\,:=\,\sigma_{i}X_{j}\mathbf{V}[j,i]$ measures the contribution of the $j$ -th input channel and the $i$ -th SVD components. We collected the distribution of S for Llama-2-7B (Touvron et al., 2023) using 16 training samples from the C4 dataset (Dodge et al., 2021), each containing 4096 tokens. For better visualization, both the rows and columns of S were sorted independently. Across different linear layers in either Attention or MLP blocks, the primary contributions are concentrated in the lower-right corner. Additionally, almost all layers exhibit significant sparse property, although some variation exists across layer types and blocks. For instance, the $o$ .proj layer exhibits a greater reliance on smaller singular values compared to the q.proj and k.proj layers. This observation also aligns with with recent studies (Jaiswal et al., 2024), which demonstrate that q.proj and k.proj can be more easily compressed via low-rank approximation. Moreover, middle layers tend to display higher sparsity, while initial and final layers are more difficult to be sparsified, aligning with the general experience that the beginning and final layers of LLMs are harder to be compressed (Yin et al., 2023).  
+
+![](images/c8db4c148e246c0ed53860ee8811cef4469751c368ecefb4b74c1c49e2826cb3.jpg)  
+Figure 4: Illustration of various compression techniques with corresponding impact on different input channels and singular values. The horizontal axis of the heatmap represents the input channels, while the vertical axis corresponds to the singular value index.  
+
+Building on the observation of rank-aware activation sparsity, we propose the R-Sparse inference framework. An overview of R-Sparse and its comparison with other techniques is presented in Figure 4. For a given score matrix S, previous methods that based on activation sparsity typically remove the left portion of S, while low-rank compression techniques eliminate the upper portion. However, since the most significant components concentrate in the bottom-right area, an ideal approach would be to remove the top-left part. To efficiently implement this strategy, we decompose the computation of $Y=X\mathbf{W}^{T}$ into two components: the sparse $Y_{s}$ and low-rank $Y_{r}$ .  
+
+Sparsifying Input Activation: Firstly, we estimate the threshold for identifying the sparse components of the input $X$ . Given a pre-defined sparsity budget $s$ , the threshold $t(s)$ is estimated as the sth percentile of $X$ , i.e., $\mathbb{P}(|X|<\bar{t}(s))=s$ . Next, we apply the threshold to mask out the low-magnitude channels. The corresponding sparsification function $\sigma_{t(s)}(\cdot)$ , is defined as:  
+
+$$
+\sigma_{t(s)}(X)_{j}:={\left\{\begin{array}{l l}{X_{j}}&{{\mathrm{if~}}|X_{j}|\geq t(s)}\\ {0}&{{\mathrm{if~}}|X_{j}|<t(s)}\end{array}\right.}
+$$  
+
+Note that CATS Lee et al. (2024) employs a similar thresholding strategy to identify sparse components. However, while their approach targets sparsity in the output activation of the gate projection, our method focuses on input sparsity, which can be applied across all linear layers of LLMs.  
+
+R-Sparse Inference: The original linear layer $Y=X\mathbf{W}^{T}$ can then be approximated as $Y=Y_{s}\!+\!Y_{r}$ where $Y_{s}\;=\;\sigma_{t(s)}(X)\mathbf{W}^{T}$ and $Y_{r}\:=\:(\dot{X}\:-\:\sigma_{t(s)}(X))(\mathbf{A_{r}}\mathbf{B_{r}})^{T}\:$ . For the sparse part, we omit unnecessary columns corresponding to input channels with zero values. Additionally, the weights should be stored in a column-major format to enhance memory bandwidth utilization, as GPUs fetch consecutive memory entries during each access. For the low-rank part, we perform SVD on the pretrained weight matrix W and use its low-rank approximation, where $\mathbf{A_{r}}=\mathbf{U}_{r}\boldsymbol{\Sigma}_{r}^{\frac{1}{2}}$ and $\mathbf{B}_{\mathbf{r}}=\Sigma_{r}^{\frac{1}{2}}\mathbf{V}^{T}$ , with $r$ representing the selected rank. And we select the most important $r$ components based on the estimated scores in Figure 3. Since this low-rank approximation can be computed offilne through a single SVD operation, it won’t impact the latency during the inference. The memory I/O overhead is determined by two hyperparameters, $(r,s)$ , and is equal to $r^{\frac{m+n}{m n}}+s$ relative to that of a full linear layer. Additionally, we apply R-Sparse inference to all linear layers in both the attention and MLP blocks, aiming to achieve higher sparsity ratios.  
+
+3.5 OPTIMAL RECIPE FOR SPARSIFICATION  
+
+As illustrated in Figure 3, different layers demonstrate varying characteristics of rank-aware sparsity. To more accurately approximate the full computation, we develop an evolutionary strategy to search for the optimal ratio between the sparse and low-rank components within each layer. We begin by defining $\rho_{i}$ , which represents the relative ratio of the sparse part in layer $i$ . Given $C_{i}$ as the sparse budget of layer $i$ , the sparse part equals to $s_{i}=\rho_{i}C_{i}$ and the rank is $\begin{array}{r}{r_{i}=(1\!-\!\rho_{i})C_{i}\frac{m n}{m+n}.}\end{array}$ . We employ the search algorithm (Algorithm 1) to obtain the optimal $\rho^{*}=\{\rho_{1}^{*},\rho_{2}^{*},\ldots,\rho_{L}^{*}\}=\arg\operatorname*{min}_{\rho}\mathcal{L}(f,\rho)$ , where the loss $\mathcal{L}$ is the average perplexity over 16 randomly selected samples from the C4 training set and $f$ is the original LLMs. We retain the individuals with lower perplexity at each generation. To expedite the convergence of the search process, we implement a group-wise strategy with a group size of 28. In this approach, we optimize the variables of one group at a time, while holding the variables of the other groups at the values from the most recent best-performing individual.  
+
+![](images/d42c012a9c1ca4cee624b0740e23a02f941b73e12b3cbda563f6c657cdc4d9eb.jpg)  
+
+The population size is set to 32, with both the mutation rate $p_{m}$ and crossover rate $p_{c}$ equals 0.5, and the total number of generations is 5. The overhead of the search process is minimal, taking approximately one hour on a single A6000 GPU for the Llama-2-7B model.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+4.1 GENERAL SETUP  
+
+Models and Datasets. To evaluate the effectiveness of R-Sparse, we consider three representative large language model (LLM) families: Llama-2 (Touvron et al., 2023), Llama-3 (Dubey et al., 2024), and Mistral (Jiang et al., 2023). We assess the models on several popular tasks, including eight common-sense reasoning tasks: Winogrande (WG) (Sakaguchi et al., 2021), PIQA (Bisk et al., 2020),  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+  
+
+![](images/5d824a3eaf24a7f1f6fed0e27cbaefc8f601606521b4b32a11475f1a952cc272.jpg)  
+
+SciQ (Welbl et al., 2017), OpenBookQA (OBQA) (Mihaylov et al., 2018b), HellaSwag (HS) (Zellers et al., 2019), BoolQ (Clark et al., 2019), and ARC (ARC-Easy and ARC-Challenge) (Clark et al., 2018b). Evaluations are conducted using the lm-evaluation-harness framework (Gao et al., 2021). Additionally, we report results on text summarization tasks using XSUM (Narayan et al., 2018), as well as language modeling tasks on the validation set of WikiText-2 (Merity et al., 2016). For common-sense reasoning, we report accuracy, while summarization tasks are evaluated via Rouge-L scores and language modeling is assessed by perplexity.  
+
+Baselines. Since R-Sparse does not require additional training, we compare it against several competitive training-free methods. (i) ReLUfiction (Mirzadeh et al., 2023) where the non-ReLU activation functions in the MLP block are replaced with ReLU, and accuracy is reported without retraining. (ii) CATS(Lee et al., 2024) that sparsifies $\mathbf{W}_{u p}$ and $\mathbf{W}_{d o w n}$ based on the magnitude of output activations from ${\bf W}_{g a t e}$ . (iii) GRIFFIN (Dong et al., 2024): It sparsifies all layers in the MLP block, selecting important channels based on statistics from the pre-filling stage. Different from CATS and GRIFFIN, which focus only on the MLP blocks, R-Sparse sparsifies all linear layers, including the attention blocks. For a fair comparison, we report performance with the original reported sparsity ratios $50\%$ for the sparsified modules, corresponding to $22\%$ model-level sparsity for CATS and $33\%$ for GRIFFIN). We also compare the results with higher sparsity ratio by scaling up the MLP block sparsity for both methods. All sparsity ratios reported in the following experiments are measured at the model level.1.  
+
+
+
+\section{4.2 END-TO-END RESULTS  }
+
+
+We begin by presenting the end-to-end performance of R-Sparse and baseline methods across different models, tasks, and sparsity ratios. The results, shown in Table 1 and Figure 5, highlight several key observations: (I) R-Sparse consistently outperforms CATS (Lee et al., 2024) and GRIFFIN (Dong et al., 2024) across all common-sense reasoning, language modeling, and summarization tasks. With the same model-level sparsity budget (i.e. CAT $S_{40\%}$ v.s. R-Sparse40% and  
+
+![](images/bc06cca60346558062ef9d489f9cb8bd4c92cba6534b7d05d700b93959cfc412.jpg)  
+Figure 5: Comparison results of Llama-2-7B across different model-level sparsity ratios on common-sense reasoning, language modeling and summarization tasks.  
+
+GRIFF $\mathrm{\mathbb{IN}}_{50\%}$ v.s. R-Spar $S\,{\ominus}\,50\%$ ), $\mathrm{R}^{-}\mathrm{S}$ parse achieves an average performance gain of $18.74\%$ over CATS and $18.15\%$ over GRIFFIN on Llama-2-7B. This improvement primarily stems from three factors: $\pmb{\mathrm{\Sigma}}$ while CATS and GRIFFIN only sparsify the MLP block, $_{\mathrm{R-Sparse}}$ can be applied to both the attention and MLP blocks; $\pmb{\varphi}$ we extends standard activation sparsity with rank-aware sparsity, providing a better approximation of the full computation; $\pmb{\otimes}$ and we further leverages the adaptive rank properties of different layers by searching the optimal sparse-rank ratio $\rho$ . Detailed ablation studies on these factors are discussed in Section 4.4. (ii) R-Sparse achieves performance comparable to the full model with minimal degradation at a sparsity ratio around $50\%$ while in some tasks, e.g., SciQ, a matching performance can be achieved even at a sparsity ratio of $70\%$ . (iii) For some tasks, a moderate sparse treatment slightly enhances the accuracy, such as $1.60\%$ improvements at $30\%$ sparsity ratio on the OpenBookQA task.  
+
+![](images/d4a91f9f115873a2cfc964eb5e127c2b7f7b0316303fbaa300fc9baf6c1410ec.jpg)  
+4.3 EFFICIENCY   
+Figure 6: Generation speeds of Llama-2-7B and Llama-3-8B using a uniform $50\%$ sparsity in our method. The prompts consist of 2048 tokens, with generation lengths ranging from 128 to 2048. The generation speed is calculated as the number of generated tokens divided by the total generation time.  
+
+We demonstrate the end-to-end efficiency improvements of $\mathrm{R}^{-}\mathrm{S}$ parse. For this, we collected five samples that consists of 2048 tokens and generate new content ranging in length from 128 to 2048 tokens to evaluate performance across different generation lengths. Without losing generality, our implementation is based on the Hugging Face library with FP32 precision data format. All experiments are conducted on a single NVIDIA A6000 GPU without offloading. We applied a uniform $50\%$ sparsity to R-Sparse, achieving comparable performance as shown in Section 4.2 and utilized a customized Triton kernel to reduce data transfer between on-chip SRAM and HBM. As illustrated in Figure 6, R-Sparse achieved up to $42\%$ and $40\%$ improvements in generation speed for Llama-2-7B and Llama-3-8B, respectively, highlighting the effectiveness of our approach.  
+
+
+
+\section{4.4 ABLATION STUDY AND FURTHER INVESTIGATION  }
+
+
+We conduct extensive ablation studies of $_{\mathrm{R-Sparse}}$ , summarized by the following research questions: $Q I$ : Is R-Sparse compatible with weight quantization? $Q2$ : How does R-Sparse compare with vanilla activation sparsity? $Q3$ : What’s the benefit of optimal sparsification recipe?  
+
+![](images/000f55ceff5f92e0eccb6e7fa0332f84920c2a2af278573c1732fa3bd0208941.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+
+

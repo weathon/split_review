@@ -1,0 +1,363 @@
+\title{Enabling Weak LLMs to Judge Response Reliability via Meta Ranking}
+
+\begin{abstract}
+{\let\thefootnote\relax\footnotetext{*\ 
+Corresponding authors: P.Li (\href{mailto:pengli09@gmail.com}{\texttt{pengli09@gmail.com}}) and Y.Liu (\href{mailto:liuyang2011@tsinghua.edu.cn}{\texttt{liuyang2011@tsinghua.edu.cn}}) }}
+
+Despite the strong performance of large language models (LLMs) across a wide range of tasks, they still have reliability issues. Previous studies indicate that strong LLMs like GPT-4-turbo excel in evaluating the reliability of responses from LLMs, but face efficiency and local deployment issues. Thus, to enable weak LLMs to effectively assess the reliability of LLM responses, we propose a novel cross-query-comparison-based method called \emph{Meta Ranking} (MR). Unlike previous few-shot methods that solely based on in-context learning capabilities in LLMs, MR assesses reliability by pairwisely ranking the target query-response pair with multiple reference query-response pairs. We found that MR is highly effective in error detection for LLM responses, where weak LLMs, such as Phi-2, could surpass strong baselines like GPT-3.5-turbo, requiring only five reference samples and significantly improving efficiency.
+We further demonstrate that MR can enhance strong LLMs' performance in two practical applications: model cascading and instruction tuning. In model cascading, we combine open- and closed-source LLMs to achieve performance comparable to GPT-4-turbo with lower costs. In instruction tuning, we use MR for iterative training data filtering, significantly reducing data processing time and enabling LLaMA-7B and Phi-2 to surpass Alpaca-13B with fewer training tokens. These results underscore the high potential of MR in both efficiency and effectiveness.} 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/new_fig1.pdf}
+    \caption{Overview of our proposed \emph{Meta Ranking} (MR) method. (a) Left: The table summarizes MR and previous judgement methods with different backbone models. (b) Right: The sub-figure illustrates different methods. ``$\widehat{\text{S}}_\text{t}$'' denotes the estimated score for the target query-response pair. ``Query$_i$'' (Q$_i$), ``Response$_i$'' (R$_i$), and ``Score$_i$'' (S$_i$) ($i=1,2$) denote the references and its score (e.g., +1 for correct and -1 for incorrect responses). MR takes two query-response pairs for cross-query comparison on reliability with language models, then aggregates the estimated score of the target query and response. 
+    }
+    \label{fig:fs-profile-overview}
+\end{figure*}
+Large language models (LLMs) have demonstrated strong performance in various tasks~\citep{gpt4-tech-report, llama2, du-etal-2022-glm}. However, they still face reliability challenges. For example, these models often produce responses that seem plausible but are factually incorrect, a phenomenon known as ``hallucination''~\citep{hallucination-survey}. Fine-tuning and alignment techniques have been extensively studied to mitigate this issue~\citep{instructgpt, wang-etal-2023-self-instruct, rafailov2023direct, align-for-honesty, gupta2024language}. Recent studies sadly demonstrate that hallucination is inevitable~\citep{hallucination-inevitable}. Consequently, instead of resolving it directly, we focus on developing techniques to discriminate the reliability of responses from LLMs.
+
+Recent research has highlighted the potential of strong LLMs in evaluating response reliability~\citep{zheng2023judging}. Highly capable models, such as GPT-4~\citep{gpt4-tech-report}, have shown effective in assessing the quality of LLM responses through few-shot in-context learning (ICL)~\citep{yin-etal-2023-large}. However, these models are often prohibitively large, resulting in high computational and monetary costs. Also, most of these models are closed-source, which limits their deployment in local environments. On the other hand, weak models, are often better choices for efficiency and local setup. However, their performance is usually lower, probably due to the inherent low capacity in ICL (Figure~\ref{fig:fs-profile-overview} (a)). This raises a critical question: \emph{How can we enable weak LLMs to effectively judge the reliability of LLM responses?}
+
+To address this question, we propose a novel method named \emph{Meta Ranking} (MR). Inspired from the idea of pairwise ranking on responses to the same query~\citep{pandalm, critique-llm, judgelm}, we raised a core hypothesis of MR, that the reliability of a response can be discerned by comparing the query-response pair with other pairs of known reliability. Unlike traditional methods that let an LLM directly judge the response to a query, MR involves cross-query comparison of the target query-response pair with multiple reference pairs (Figure~\ref{fig:fs-profile-overview} (b)). Specifically, MR utilizes a fixed set of query-response pairs with pre-determined scores as reference. For any given target query-response pair, the LLM determines whether this pair is more reliable than each of the reference pairs. A voting mechanism is then employed to aggregate these comparisons and reach a final judgment. Here, ``reliable'' encompasses attributes such as correctness and quality as required by the context. Theoretically, it avoids item perturbation problems in few-shot ICL~\citep{few-shot-permutation} and over-confidence in judgement~\citep{xiong2024can} for language models. Experimental results demonstrate that MR enables weak LLMs to effectively judge the reliability of LLM responses on reasoning tasks, which is previously limited to those strong LLMs. 
+
+Moreover, we showcase the application of MR with a weak LLM in two practical scenarios for validation: (1) enhancing LLM inference through \emph{model cascading} between open- and closed-source LLMs, where queries are routed to the appropriate LLM based on reliability assessments. It demands high efficiency of the judgement process. MR achieves performance comparable to GPT-4-turbo while consuming less than half API tokens. And (2) iteratively filtering training datasets to improve LLMs during \emph{instruction tuning}, which prefers local deployment. MR leads to advancements over existing data selection methods on the Alpaca-52k dataset~\citep{alpaca}, in terms of effectiveness and efficiency. 
+
+In summary, our contributions are threefold:
+\begin{enumerate}
+    \item We introduce \emph{Meta Ranking} (MR), a novel method for assessing the reliability of LLM responses through cross-query comparison with reference query-response pairs.
+    \item We demonstrate that MR enables weak LLMs to judge the reliability of LLM responses, surpassing previous uncertainty estimation and prompting methods even with some strong LLMs, on effectiveness and efficiency.
+    \item Additionally, we explore two practical applications of MR, improving strong LLMs in both inference and training, respectively. These results underscore the considerable potential of our proposed method in both efficiency and effectiveness.
+\end{enumerate}
+
+
+
+\section{Meta Ranking}
+
+This section demonstrates how cross-query comparisons could reveal the reliability of the target query-response pair with limited reference examples from the same source LLM. The intuition is as follows: Taking correctness assessment as an example, \emph{the target pair is likely to be correct when ranked closer to a correct reference pair and likely to be incorrect otherwise}, as shown in Figure~\ref{fig:hypothesis}. Below, we outline the specific steps and considerations accordingly. 
+
+Formally, suppose we have $N$ reference query-response pairs
+\begin{equation}
+    \mathcal{X}=\left\{(Q_i, R_i, S_i)\right\}, 
+\end{equation}
+where  $i=1,\cdots,N$, $Q_i$ and $R_i$ are the $i$-th reference query and response, respectively. For each pair of $(Q_i, R_i)$, we have a score $S_i$ that represents its reliability. We aim to evaluate the reliability $S_{\mathrm{t}}$ of a target response $R_{\mathrm{t}}$ to the target query $Q_{\mathrm{t}}$. For binary classification scenarios (e.g., correctness assessment), $S_i, S_{\mathrm{t}}\in\{+1,-1\}$, where $+1$ denotes the response is $\mathrm{True}$ and $-1$ denotes $\mathrm{False}$.
+
+\paragraph{Cross-Query Comparison}
+The basic operation of \textit{Meta Ranking} is to compare the target query-response pair with each of the reference query-response pairs. For brevity, we denote the target query-response pair as $P_{\mathrm{t}}=(Q_{\mathrm{t}}, R_{\mathrm{t}})$, and the $i$-th reference query-response pair as $P_i=(Q_i, R_i)$. Then, the cross-query comparison operation and its result are denoted as follows:
+\begin{equation}
+    r_i=\mathrm{MR}\left(P_{\mathrm{t}}, P_i\right), i=1,\cdots,N, 
+\end{equation}
+where $r_i\in\{\pm1, 0\}$, $+1$, $0$, and $-1$ denote the target pair is better than, equal to, or worse than the $i$-th reference pair, respectively. In practice, $\mathrm{MR}(\cdot,\cdot)$ is implemented by directly prompting LLMs or using the relative magnitude of quality estimation scores of each response to its query. 
+
+\paragraph{Aggregation}
+The final judgement is obtained by aggregating the comparison results to arrive at the estimated reliability score of the target query-response pair. Specifically, we will upvote if the target air is ranked higher than a reference pair, i.e., $r_i=+1$, and downvote when ranked lower. Also, ranking higher than a correct reference and than an incorrect reference will result in different voting values. For each comparison between the target and the $i$-th reference pair, the individual voting value is 
+\begin{equation}\label{equ:si-def}
+s_i = S_i\cdot \delta_{\mathrm{sgn}(S_i)\cdot r_i}, i=1,\cdots,N, 
+\end{equation}
+where $\mathrm{sgn}(S_i)\cdot r_i \in \{\pm1, 0\}$, and thus $\delta_{\pm1}$ and $\delta_{0}$ are hyperparameters. 
+For instance, in terms of correctness, $\delta_{+1}$ is the absolute voting value when the target pair is ranked higher than a correct reference ($\mathrm{sgn}(S_i)=r_i=+1$), or lower than an incorrect one ($\mathrm{sgn}(S_i)=r_i=-1$). Note that we require that $\delta_{+1}>0, \delta_{-1}<0$.
+Formally, we denote the total vote value as $s$: 
+\begin{equation}\label{equ:mr}
+    s=\sum_{i=1}^N s_i = \sum_{i=1}^N S_i\cdot \delta_{\mathrm{sgn}(S_i)\cdot r_i}, 
+\end{equation}
+And we say the target response is reliable if $s\geq0$ and unreliable otherwise. Thus, the estimated target reliability score $\widehat{S_{\mathrm{t}}}\approx\mathrm{sgn}(s)$ for correctness assessment. In practice, $N$ is usually small due to efficiency and the limited labeled data. 
+
+ 
+Thus, $\mathrm{sgn}(s) \approx \mathrm{sgn}(S_{\mathrm{t}} - S_{\mathrm{avg}})$, where $S_{\mathrm{avg}}=\frac{1}{N}\sum_iS_i$. Hence, a negative $s$ means subpar reliability of the target response, and vice versa. 
+
+Under the formulation, there are several interesting properties of MR. First, MR is model-agnostic and permutation-agnostic towards references, which is different from few-shot ICL methods that fluctuate with the order of examples~\citep{few-shot-permutation}. Second, MR avoids the over-confidence issue in LLM judgement~\citep{xiong2024can}, because each reference pair is considered equally with the target pair. 
+Moreover, MR could be extended to continuous metrics ($S_i\in\mathbb{R}$, e.g., BLEU~\citep{papineni-etal-2002-bleu}) directly without modification,
+and the final judgement of the reliability is still determined by the sign of $s$.
+
+\begin{figure*}[t]
+    \begin{minipage}{0.35\linewidth}
+        \centering
+    \includegraphics[width=0.98\linewidth]{figs/new_fig2.pdf}
+    \caption{Example illustrations of MR process. The correctness of the target response ($\text{R}_\text{t}$) is considered according to comparisons with reference query-response pairs.}\label{fig:hypothesis}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.63\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/exp1.pdf}
+    \caption{The precision scores and inference time (gray bars) in error detection experiments for target responses from LLaMA-2 on the MMLU dataset. The \textcolor{red}{dashed red line} represents the random selection. We used examples in the development set as reference for few-shot methods. Stars denote the performance on MMLU of underlying LLMs of each method.}\label{fig:error-detect}
+    \end{minipage}
+\end{figure*}
+
+
+\section{Main Experiment: Error Detection with Meta Ranking}
+
+
+In the following section, we empirically demonstrate that \textit{Meta Ranking} can effectively judge the reliability of LLM responses concerning correctness. We leverage error detection on responses generated by LLMs for reasoning tasks for validation. Our findings indicate that the MR approach maintains consistent efficacy across varying base models, response accuracies, and languages.
+
+\subsection{Settings}
+
+The error detection task requires identifying whether a response from an LLM is incorrect given the query
+
+\noindent
+\textbf{Datasets}: We randomly selected two subjects of each category in the MMLU dataset~\citep{hendrycks2021measuring, hendrycks2021aligning} and one subject of each category in the CMMLU dataset~\citep{li2023cmmlu} as the Chinese benchmark. The datasets contain multi-choice questions from various areas, and each subject has five examples in the development set. 
+
+\noindent
+\textbf{Evaluation Metrics}: We adopted micro scores as the main metric to report, that scores are calculated across the whole MMLU or CMMLU dataset. We report precision for performance and seconds per iteration for inference time on a single A800 GPU (Figure~\ref{fig:error-detect}). Inference time are normalized that P(T) with GPT-4-turbo is the unit. AUROC-style metrics are not applicable because the MR algorithm uses a static threshold 0. 
+
+\noindent
+\textbf{Response Generation}: For different accuracy levels, we chose \texttt{LLaMA-2-chat-7B}~\citep{llama2} and \texttt{OpenChat-3.5}~\citep{openchat} to generate responses for English questions, and \texttt{ChatGLM-2-6B}~\citep{zeng2023glmb} and \texttt{Yi-6B-Chat}~\citep{yi-01ai} for Chinese ones. We first performed the target response generation on the test set, and then used the same model to generate responses for reference on the development set.
+
+\noindent
+\textbf{MR Settings}: We prompted LLaMA-2, ChatGLM-2, {OpenChat-3.5}, GPT-3.5-turbo, and Phi-2 to judge on different query-response pairs with \textit{Meta Ranking}. We also tested an LLM-as-a-Judge-tuned model \texttt{JudgeLM-7B-v1}~\citep{judgelm} in MR to see if the fine-tuning for the evaluation of responses to the same query helps. 
+By setting each label $S_i$ with the value $\pm1$ ($\{\mathrm{True}, \mathrm{False}\} \sim \{+1, -1\}$), we apply MR on this task by identifying incorrect responses depending on MR results on the query-response pairs according to Algorithm~\ref{alg:few-shot-new}. 
+
+\noindent
+\textbf{Baselines}: 
+We compare our method against several baselines with few-shot ICL to ensure a comprehensive evaluation, including (1) appending an \textbf{Unsure Choice}~\citep{p-true}, (2) a black-box uncertainty estimation method \textbf{NumSemSets}~\citep{gen-confidence}, (3) a white-box method \textbf{Entropy}~\citep{uncertainty-aware}, and (4) P(True) (\textbf{P(T)})~\citep{p-true} which directly asks an LLM about the correctness of a query-response pair. 
+\begin{figure*}[t]
+
+    \begin{minipage}{0.57\linewidth}
+        \centering
+        \captionof{table}{The micro precision scores on error detection experiments on the MMLU and CMMLU datasets with responses generated by different LLMs. The \textbf{bold font} denotes best results. LLMs in the second row of the header are sources of responses.}
+        \label{tab:error-detect-tasks}
+        \resizebox{\linewidth}{!}{
+        \begin{tabular}{lcccc}
+        \toprule
+        \multirow{2}{*}{\textbf{Method}}   &  \multicolumn{2}{c}{\textbf{MMLU} (En)}  &   \multicolumn{2}{c}{\textbf{CMMLU} (Zh)}   \\ \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+             &    LLaMA-2   &  OpenChat-3.5  &  ChatGLM-2  &  Yi \\
+             \midrule\midrule
+             \textcolor{gray}{\textit{Random Selection}}  &  \textcolor{gray}{\textit{0.50}}  &  \textcolor{gray}{\textit{0.50}}  &  \textcolor{gray}{\textit{0.50}}  &  \textcolor{gray}{\textit{0.50}} \\\midrule
+         P(T)  w/ OpenChat-3.5  &   0.62   &  0.38   &   0.31  &  0.35  \\
+       P(T)  w/ GPT-3.5-turbo  &   0.59   &   0.65   &   0.22  &  0.21  \\\midrule
+        \textbf{MR} w/  Phi-2  &   0.77   &   0.73   &  0.69   &  0.52  \\
+                 \textbf{MR}   w/ GPT-3.5-turbo  &   \textbf{0.78}   &   \textbf{0.79}   &   \textbf{0.75}   &  \textbf{0.73} \\
+             \bottomrule
+        \end{tabular}}
+
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.42\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/exp2.pdf}
+        \caption{The change of precision scores with the number of reference pairs on the MMLU dataset with target responses from LLaMA-2.}
+        \label{fig:fewshot-size}
+    \end{minipage}
+\end{figure*}
+\subsection{Discussion}\label{sec:ed-discuss}
+
+\paragraph{Effectiveness of Meta Ranking} 
+MR is effective across different LLM backbones, which might attribute to the position agnosticism to reference and judgement without overconfidence. In Figure~\ref{fig:error-detect}, we report results of all baselines and MR in error detection on LLaMA-2-generated responses, and the actual performance of LLMs on MMLU. Impressively, we found that MR with Phi-2 notably exceeds all baseline methods, except for P(T) with GPT-4-turbo, reaching a precision score of 0.77, more than double the performance of P(T) with Phi-2 and reaching 88\% GPT-4-turbo performance. With LLaMA-2 and ChatGLM-2, MR exceeds P(T) significantly. However, JudgeLM performs not as well as other pretrained or general instruction-tuned LLMs in the MR results and fails to generalize for the P(T) method. It might be the fine-tuning process limits its generalization. In short, MR consistently outperforms the random baseline to a greater margin than P(T), except for P(T) with GPT-4-turbo. GPT-4-turbo could accurately detect the error, probably relying on its strong reasoning capabilities and generalizability~\citep{gpt4-tech-report}. 
+\paragraph{Performance of MR with Weak LLMs}
+In Figure~\ref{fig:error-detect}, the performance of P(T) across different models displays a positive correlation with their actual performance on reasoning tasks, while MR has demonstrated strong robustness across models with different capabilities. 
+We further investigate the performance of LLMs with different capabilities across languages and tasks. 
+In Table~\ref{tab:error-detect-tasks}, we select top performing P(T) and MR methods and report the precision score across all target responses on the MMLU and CMMLU datasets. We omit GPT-4-turbo for the cost and its unparalleled capabilities to open-source models we have tested. From results, P(T) with OpenChat-3.5 performs worse than random selection when facing more accurate responses on MMLU. 
+In contrast, MR shows significant generalizability with weak models, e.g., the 2.7B Phi-2, across different accuracy levels of responses, impressively surpassing P(T) w/ GPT-3.5-turbo and OpenChat-3.5 on responses in different accuracy levels. 
+It positively indicates the effectiveness of weak LLMs in accurately detecting reasoning errors in LLM responses. 
+
+\paragraph{Impact of the Number of Reference Pairs} 
+In Figure~\ref{fig:fewshot-size}, we illustrate the change of precision scores with the number of reference pairs, where MR exhibits that it could function with far less labeled data compared to previous methods. Notably, other uncertainty-based methods are incompatible with the 1-shot setting since there are usually no correct examples for calibration. 
+Upon the ablation study, we observe that reducing five examples to one leads to a slightly decreased performance of MR, indicating the robustness of the cross-query comparison. Also, the result highlights the effectiveness of MR with limited labeled data compared to P(T). Without reference examples, P(T) faces a great performance drop even with capable models (e.g., GPT-3.5-turbo and OpenChat-3.5), showing inferior performance to random selection. It is also worth noting that uncertainty-based methods like NumSemSets and Entropy usually require hundreds of examples for calibration on distinguishing errors~\citep{uncertainty-aware, mielke-etal-2022-reducing}, explaining the relative low results of these uncertainty-based methods in Figure~\ref{fig:error-detect} when there are only five examples for reference. 
+\paragraph{Performance on Non-English Tasks}
+In Table~\ref{tab:error-detect-tasks}, the overall results on Chinese reasoning problems are significantly lower than on English ones, demonstrating that non-English languages do influence error detection performance. However, MR exhibits strong robustness across languages, though P(T) performs worse than random selection in all CMMLU results. 
+ 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figs/fig2b.pdf}
+    \caption{Two applications of \textit{Meta Ranking} for inference- and training-time LLM enhancement, respectively. (a) Model Cascading (left): MR identifies reliability of responses and routes unsolved queries from open-source LLMs towards closed-source LLMs for better results. (b) Instruction Tuning (right): MR filters low-quality data after each epoch in SFT and then tune LLMs with low- and high-quality data. MR results depend on the reference pairs generated from the LLM on samples of the training dataset. $Q_{\mathrm{i}}, R_{\mathrm{i}}$ denote reference query-response pairs for the MR algorithm, and Query$_\mathrm{t}$, Response$_\mathrm{t}$ denote the target pair.}\label{fig:apps}
+\end{figure*}
+
+
+
+\section{Applications of Meta Ranking}
+
+
+In this section, we present two practical applications to further validate the effectiveness of \textit{Meta Ranking}, as shown in Figure~\ref{fig:apps}. Each application is implemented by collecting \textbf{reference query-response pairs} and setting \textbf{reference reliability scores}. (a) With the assessment of the correctness of responses from open-source LLMs to the given queries, we identify and route unsolved queries to stronger closed-source LLMs. It could achieve better efficiency and remaining performance of closed-source models. However, it demands the model used for judgement is weaker than the open-source LLM in deployment, otherwise it is better in place to respond to queries. 
+(b) By evaluating the quality of instruction data, we can refine the supervised fine-tuning (SFT) for LLM instruction tuning, whose key factor is the quality of training data~\citep{deita}. By filtering low-quality data after each epoch and further introducing post-SFT training with mere instruction data, we achieve significant improvement against state-of-the-art SFT data selection methods. For data related application, the method is better to be locally deployed. 
+Thus, we decide MR with weak LLMs is suitable for judgement for these. 
+
+\subsection{Model Cascading}\label{sec:query-routing}
+
+Since LLMs exhibit varying degrees of accuracy across various tasks, we propose using MR within a model cascading system. As depicted in Figure~\ref{fig:apps} (a), this system employs MR to assess the reliability of generated responses from open-source LLMs. Queries with responses deemed unreliable by MR are routed to more powerful, but also more costly, closed-source LLMs for better answers. This system aims to achieve performance similar to that of closed-source models with improved efficiency.
+\subsubsection{Implementation}
+
+Assuming both the development and the test sets are drawn from the same underlying distribution. Given that the MR method requires reference query-response pairs, we first feed the queries in the development set to the open-source LLM and evaluate the generated responses against the ground truth. 
+Formally, for every query $Q_i$, let $R_i^{(\theta)}$ represent the response generated by an open-source LLM (parameterized by $\theta$), and $S_i^{(\theta)}$ denote the evaluation result according to the ground truth to $Q_i$ and an appropriate metric. By applying the model to each query in the development set with $N$ samples, we produce responses $\left\{R_i^{(\theta)}\right\}_{i=1}^{N}$ and form a set of \textbf{reference query-response pairs} $\mathcal{X} = \left\{P_i^{(\theta)} = (Q_i, R_i^{(\theta)})\right\}_{i=1}^{N}$, along with associated evaluation results $\left\{S_i^{(\theta)}\right\}_{i=1}^{N}$.
+
+There are \textbf{two reasonable ways to derive reliability scores} for $\mathcal{X}$ in MR. 
+The first is to directly define $S_i \triangleq S_i^{(\theta)}$, which we term MR$(\theta)$. 
+The second option is to compute the responses from the closed-source LLM ($\Theta$) and their evaluation results $\left\{S_i^{(\Theta)}\right\}_{i=1}^{N}$. We could define the label as follows:
+\begin{equation}\label{equ:ci}
+    S_i \triangleq S_i^{(\theta)} - S_i^{(\Theta)}, 
+\end{equation}
+which grants positive scores only when the response from open-source LLMs is better than the one from closed-source LLM, since the model cascading causes performance improvement vice versa. We denote it by MR$(\Delta)$, which considers the gap between open- and closed-source LLMs. 
+
+Accordingly, we can obtain estimated reliability for $P_t^{(\theta)}$ from the MR approach during inference on test sets. If the assessment indicates $R_t$ as an unreliable response, we direct $Q_t$ to a closed-source large language model (such as GPT-4-turbo) to secure a more precise response. Conversely, we preserve the original response for a positive MR result. Ideally, this approach can enhance performance with moderate costs, as it is generally observed that a poorly accurate response from open-source LLMs often corresponds to a difficult query, which requires strong LLMs to respond, and vice versa.
+
+\begin{table*}[t]
+    \small
+    \centering
+    \caption{The overall results in model cascading experiments. All routing strategies are implemented with Phi-2, whose results are \textcolor{gray}{gray}. ``Overall'' denotes the macro average value across tasks. The \textbf{bold font} denotes the best result using model cascading and the \uline{underlined numbers} denote the best result for each setting. The number in the parentheses denotes the improvement over the best among open-source LLMs and the ensemble baseline without model cascading. For notation, we use serial numbers to represent LLMs, e.g., ``\ding{172}/\ding{173} $+$ \ding{174}'' represents model cascading from LLaMA-2 or ChatGLM-2 to GPT-3.5-turbo. }
+    \label{tab:query-routing}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{llcccclc}
+    \toprule
+    \multirow{2}{*}{\textbf{Model}} & \textbf{Routing}  & \multicolumn{2}{c}{\textbf{Reasoning}} & \multicolumn{2}{c}{\textbf{Translation}} & \multirow{2}{*}{\textbf{Average}} &\textbf{\#Token (API)}  \\ \cmidrule(lr){3-4}\cmidrule(lr){5-6}
+      & \textbf{Strategy}  & \textbf{English}  &  \textbf{Chinese}  &  \textbf{Zh-En}  &  \textbf{En-Zh}  &   &  (Relative Value) \\  
+    \midrule\midrule
+    \textcolor{gray}{\textit{Phi-2}}  & \textcolor{gray}{-}  & \textcolor{gray}{\textit{22.48}} & \textcolor{gray}{\textit{24.84}} & \textcolor{gray}{\textit{42.32}} & \textcolor{gray}{\textit{23.18}}  &  \textcolor{gray}{\textit{28.21}}  & \textcolor{gray}{-} \\ \midrule\midrule
+    LLaMA-2 (\ding{172}) & \multirow{4}{*}{-}  &  34.37  &  32.86 &  58.53  &  51.33  & 44.27 & \multirow{3}{*}{-} \\
+     ChatGLM-2  (\ding{173}) & & 30.48   &  49.71 &  58.43 & 63.30 & 50.48 &  \\
+    \texttt{Ensemble} (\ding{172}\&\ding{173}) &  & 35.44 &  43.47  & 31.35  & 46.54 &  39.20  & \\ 
+     GPT-3.5-turbo (\ding{174}) &  &   \uline{52.91}  &  \uline{54.09}  & \uline{63.67} & \uline{69.14} & \uline{59.95}  &  1.00 \\
+    \midrule
+    \multirow{4}{*}{\ding{172}/\ding{173} $+$ \ding{174}}&  \texttt{Entropy}  &  38.75  &   47.03  &  58.32   &  65.45   &  52.39 (\textcolor{mydarkgreen}{+1.91}) &  0.38  \\
+    &  \texttt{Random}   &  41.89  &  48.32  &  58.97  &  64.83  &  53.50 (\textcolor{mydarkgreen}{+3.02}) &  0.45 \\
+    &   \textbf{MR}$(\Delta)$    &  44.30  &  48.67  &  59.80  &   65.87 &  54.66 (\textcolor{mydarkgreen}{+4.18})  &  \textbf{0.24} \\
+    &     \textbf{MR}$(\theta)$  &  \textbf{48.62} &  \textbf{52.76}  & \textbf{61.36}   &  \textbf{67.10} & \textbf{57.46} (\textcolor{mydarkgreen}{+\textbf{6.98}})    &  0.42 \\
+    \midrule\midrule
+    OpenChat-3.5 (\ding{175}) & \multirow{4}{*}{-}  &  45.42  & 40.19 & 61.35 & 60.77  & 51.93 & \multirow{3}{*}{-}  \\
+     Yi  (\ding{176}) &   &  42.08  &  61.96 &  60.87  &  62.07 & 56.74  & \\
+    \texttt{Ensemble} (\ding{175}\&\ding{176}) &   &  45.68   &  48.24  &  11.16  &  62.90  & 41.99 & \\ 
+     GPT-4-turbo (\ding{177}) &   &  \uline{72.86}  &   \uline{62.82}  & \uline{64.73} & \uline{69.95} & \uline{67.59} &  1.00  \\
+    \midrule
+    \multirow{3}{*}{\ding{175}/\ding{176} $+$ \ding{177}}&  \texttt{Random}  &  46.64  &  \textbf{61.96}  &  61.29  & 63.74 &  58.41 (\textcolor{mydarkgreen}{+1.67}) & 0.44 \\
+    &   \textbf{MR}$(\Delta)$  &  57.68  &  61.93 &  61.60  &  67.61 & 62.21 (\textcolor{mydarkgreen}{+5.47})  & \textbf{0.23} \\
+    &     \textbf{MR}$(\theta)$ &  \textbf{64.68}  &  61.93 & \textbf{62.60}  &  \textbf{68.11}  & \textbf{64.33} (\textcolor{mydarkgreen}{+\textbf{7.59}})  & 0.43 \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table*}
+
+\subsubsection{Experiment}
+
+\paragraph{Settings}
+We leverage reasoning and translation tasks to validate the effectiveness of model cascading. We use the same datasets for reasoning tasks as Section~\ref{sec:error-detect-exp} and randomly sampled test and development set from the FLORES-200 dataset~\citep{nllb-22}. For MR, we prompt Phi-2 in reasoning tasks, and in translation tasks, we adopt \texttt{wmt22-cometkiwi-da}~\citep{rei-etal-2022-cometkiwi} for reference-free quality estimation and thus compare the estimated scores between translations. Due to the diverse LLM capabilities and language biases, we have tested two combinations: (1) LLaMA-2 for English and ChatGLM-2 for Chinese tasks, with GPT-3.5-turbo as the closed-source model; (2) OpenChat-3.5 for English and Yi for Chinese problems, with GPT-4-turbo as the API. 
+For baselines, we validate the logits ensemble of the open-source models and implement model cascading with strategies of entropy-based uncertainty estimation~\citep{uncertainty-aware}. We omit the result of the latter for OpenChat-3.5 and Yi since it results in almost no routed queries, probably because the uncertainty threshold is too high to determine false answers. 
+
+\paragraph{Effectiveness of Cascading Guidance from MR}
+In Table~\ref{tab:query-routing}, we report the average accuracy on reasoning tasks and the average among BLEU, BLEURT~\citep{sellam-etal-2020-bleurt, pu-etal-2021-learning}, and COMET~\citep{rei-etal-2022-comet} scores on translation tasks. With the model cascading approach, we observe significant improvement against single open-source LLMs. MR$(\theta)$ and MR$(\Delta)$ manage to gain the highest performance improvement across tasks and languages with less than half token consumption. 
+Moreover, MR$(\Delta)$ consistently outperforms random selection with nearly half of the token consumption, demonstrating the effectiveness of Equation~\eqref{equ:ci}.
+
+\paragraph{Relation with Error Detection Performance}
+The performance of our model cascading mechanism is closely related to the effectiveness of error detection. For instance, in Table~\ref{tab:query-routing}, MR outperforms Random and Entropy on absolute performance and token consumption, which denotes MR detects errors in a larger quantity and with higher precision, respectively.  
+It suggests that error detection with MR is also robust on open-ended generation tasks with continuous labels, e.g., translation. 
+\subsection{Instruction Tuning}\label{sec:refine-train}
+
+Recent studies show that the quality of instruction data is essential to SFT performance~\citep{zhou2023lima}. For better instruction tuning on LLMs, we introduce an iterative training data filtering process based on \emph{Meta Ranking} and a post-SFT training stage, as shown in Figure~\ref{fig:apps} (b). The basic intuition is to continuously filter low-quality data, letting LLMs concisely learn from more reliable and fewer training samples at the first stage, and utilize less reliable data samples at the second stage for contrastive learning. MR makes it possible by judging the quality of instruction data rapidly with generated responses from an LLM that reflect its capabilities during training, and is better for local deployment with weak LLMs. 
+\subsubsection{Implementation}\label{sec:data-refine-impl}
+
+The application contains two stages (Figure~\ref{fig:apps} (b)): (1) SFT with MR guided data selection and (2) post-SFT training with both estimated low- and high-quality data from the last epoch at stage 1.  
+
+For the first stage, besides regular SFT, we extract a small set of queries from the training set and, after each epoch, ask the tuned LLM to respond to those queries. With \textbf{the generated responses and the queries as reference}, the MR method could judge whether a single sample in the original training dataset matches the quality of the reference. For simplicity in MR, we set \textbf{the reliability score of all reference pairs} to 1. Thus, we could filter training data samples that fail the judgment, i.e. unreliable, improving training efficiency and, potentially, LLM performance. 
+
+For the second stage, we want to utilize both the filtered low-quality and the high-quality data to further train the LLM. 
+Since post-SFT training methods (e.g., PPO~\citep{instructgpt}, DPO~\citep{rafailov2023direct}) require multiple responses of diverse human preferences or quality to the same query, they are not compatible. Recently, \citet{kto} proposed Kahneman-Tversky Optimization (KTO) to align LLMs towards desired and away from undesired query-response pairs contrastively.  
+However, we are aware that their objective is misaligned with our requirement because the low-quality data is derived from the SFT dataset, which is not completely negative. Therefore, in order to incorporate both high- and low-quality data as positive and partially positive samples, we propose positive-KTO (pKTO). Intuitively, pKTO differs from KTO only in dealing with low-quality data, where pKTO regulates the reward of these data with MSE loss instead of decreasing it unlimitedly. 
+
+\begin{figure*}[t]
+    \begin{minipage}{0.56\linewidth}
+    \small
+    \centering
+    \captionof{table}{Results on instruction tuning experiments, where MR is implemented with Phi-2. The \textbf{bold font} denotes best results. ``Full'' denotes the whole dataset.}
+    \label{tab:ref-training}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{lccc}
+    \toprule
+    \textbf{Method} & \textbf{MT-Bench}  & \textbf{AlpacaEval 2.0} & \textbf{\#Token} (M) \\
+    \midrule\midrule
+     \texttt{Alpaca-13B} & 4.53 & 2.65 & -\\
+     \texttt{Guanaco-13B} & - &  3.47  & - \\
+     \texttt{Phi-2} & 4.52  & 2.34  & - \\ 
+      \texttt{LLaMA-7B} &  2.62  &  0.43 & - \\
+    \midrule
+    \multicolumn{4}{c}{\textit{Phi-2-Based Results}} \\
+    \midrule
+     Full & 4.42 & 3.26 & 13.293 \\
+     Longest  &  4.56  &  3.32 & \phantom{(}1.008  \\
+     Deita  & 4.33 & 3.18  & \phantom{(}9.609\\
+     Deita (9k) &  4.64  &   3.29 & \phantom{(}3.981 \\
+     \textbf{MR} (Stage 1) & 4.70 & \textbf{3.56}  & \phantom{(}7.509 \\ 
+      + \textbf{pKTO} (Stage 2) & \textbf{4.77} & 3.47  & \phantom{(}1.205 \\ 
+    \midrule
+    \multicolumn{4}{c}{\textit{LLaMA-7B-Based Results}} \\
+    \midrule
+     Full &  4.36  & 2.53  & 13.293 \\
+     Longest  &  4.18  &  2.35 & \phantom{(}1.008 \\
+     Deita  & 4.37 & 2.60  & \phantom{(}9.609  \\
+     Deita (9k) &  4.48  &  2.86 & \phantom{(}3.981 \\
+     \textbf{MR} (Stage 1) & 4.52 & 2.93  & \phantom{(}2.412 \\
+      + \textbf{pKTO} (Stage 2) &  \textbf{4.69}  &  \textbf{3.24} & \phantom{(}0.907 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.42\linewidth}
+    \small
+    \centering
+    \captionof{table}{The multi-turn evaluation results from MT-Bench on instruction tuning experiments, which is unfolded from the second column in Table~\ref{tab:ref-training}. ``Avg.'' denotes the average score of different turns in MT-Bench. The \textbf{bold font} denotes the best result for each base model.}
+    \label{tab:multi-turn}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{lccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{MT-Bench}} \\ \cmidrule(lr){2-4}
+     & Turn 1  & Turn 2  &  Avg. \\
+    \midrule\midrule
+    \texttt{LLaMA-13B} & 3.26 & 1.95 & 2.61 \\
+    \texttt{Phi-2} & 6.37 & 2.66 & 4.52 \\
+     \texttt{Alpaca-13B} & 4.98 &  4.09  &  4.53 \\
+     \texttt{Falcon-40B-instruct} & 5.81 & 4.53  &  5.17 \\
+
+    \midrule
+    \multicolumn{4}{c}{\textit{Phi-2-Based post-SFT Results}} \\
+    \midrule
+    \textbf{MR} (Stage 1)  &   \textbf{6.33}  &  3.08  &  4.70 \\
+     $\quad$ + KTO \phantom{((} (Stage 2) & 6.12 &  2.94  &  4.53   \\
+     $\quad$ +  \textbf{pKTO} (Stage 2) & 6.27 &  \textbf{3.26} &  \textbf{4.77} \\
+    \midrule
+    \multicolumn{4}{c}{\textit{LLaMA-7B-Based post-SFT Results}} \\
+    \midrule
+     \textbf{MR}  (Stage 1) &  \textbf{5.47}  &  3.58  &  4.52\\
+     $\quad$ + KTO \phantom{((} (Stage 2)   &  5.15  &  3.60 &  4.38 \\
+    $\quad$ + \textbf{pKTO} (Stage 2) & 5.45 & \textbf{3.93}  &  \textbf{4.69} \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{minipage}
+\end{figure*}
+\subsubsection{Experiment}
+
+\paragraph{Settings}
+In all experiments, we only use the Alpaca-52k~\citep{alpaca} dataset with 52,002 samples from \texttt{text-davinci-003}~\citep{gpt3}, which is also the target pairs for MR. We utilize AlpacaEval 2.0~\citep{alpaca_eval} and MT-Bench~\citep{zheng2023judging} to benchmark instruction following capabilities. We select strong baselines on SFT data selection, including Deita~\citep{deita} and Longest \citep{long-is-more}. For base models, we choose \texttt{Phi-2} and \texttt{LLaMA-7B}~\citep{llama} for instruction tuning. For Phi-2, our method starts with the original 52k dataset. For LLaMA, \citet{chen2024alpagasus} empirically find a 9k subset of Alpaca is the most proper for SFT. We thus adopt the scorer from Deita and extract the top 9k data, noted by Deita (9k), as the initial training set for LLaMA at stage 1. 
+
+\paragraph{High-Quality SFT Data Filtering Guided by MR (Stage 1)}
+We report overall results and training tokens (calculated by LLaMA tokenizer) in Table~\ref{tab:ref-training}. For each base model, we found MR guided iterative training data filtering leads to significant improvement in both benchmarks with fewer training tokens. In the first stage of MR guided data selection, our method iteratively filters low-quality data after each epoch. After stage 1, Phi-2 and LLaMA already surpass all baselines, indicating MR effectively picks high-quality training samples in a curriculum way~\citep{curriculum}, which helps align LLMs better compared to selecting data at the beginning for SFT in baseline methods. 
+
+\paragraph{Post-SFT Training through MR-Filtered Data (Stage 2)}
+We also notice a significant enhancement of stage 2 in Table~\ref{tab:ref-training}. 
+We report the detailed scores on each turn of LLM responses from MT-Bench in Table~\ref{tab:multi-turn}. From empirical results, pKTO enhances the second-turn communication of LLMs to a great extent while preserving the instruction-following abilities from SFT at stage 1, which is indicated by the slight drops in first-turn scores. In contrast, KTO fails at this setting, which is aligned with our hypothesis in Section~\ref{sec:data-refine-impl}. By incorporating the low- and high-quality data distinguished from MR, stage 2 further elicits LLMs' capacity, especially for multi-turn scenarios. 
+
+
+
+\section{Related Work}
+
+
+\paragraph{Evaluation of LLM Responses}
+Extensive research has been conducted to evaluate responses from LLMs. Studies have focused on estimating uncertainty to gauge the potential reliability of LLM responses~\citep{kuhn2023semantic, rafailov2023direct}. Furthermore, LLMs are capable of providing uncertainty scores from itself by fine-tuning~\citep{chen-etal-2023-adaptation, gupta2024language}, which usually requires an amount of training data, or black-box measurements~\citep{gen-confidence}. However, these methods often require an amount of labeled data for calibration to determine a threshold~\citep{uncertainty-aware}. Additionally, the LLM-as-a-judge approach effectively assesses the accuracy of LLM responses from strong LLMs~\citep{zheng2023judging} with manual prompting rules. Contrarily, our \textit{Meta Ranking} method leverages weak LLMs and a training-free judgment based on cross-query comparisons with much fewer examples. 
+\paragraph{Model Cascading with LLMs}
+Recent studies on model cascading focus on how LLMs can selectively call tools or stronger models only in difficult situations for better efficiency. Tool calls or another trial happens on external feedback from environment~\citep{lin2023swiftsage, shinn2023reflexion}. For tasks with explicit criteria, e.g., coding, LLMs can call stronger models after their failure~\citep{zhang2023ecoassistant, yue2024large}. Selection can also be achieved through fine-tuning~\citep{uncertainty-api} or uncertainty estimation~\citep{uncertainty-aware, gupta2024language}.
+
+\paragraph{Data-Efficient Training for LLMs}
+Coresets~\citep{pmlr-v119-mirzasoleiman20a} are used in machine learning for a long period. For LLMs, several data selection methods are developed for SFT~\citep{deita, zhou2023lima, nuggets, chen2024alpagasus} and post-SFT stages~\citep{rest, rest-meet-react}. Inspired by the latter, we introduce MR guided instruction tuning, where training data are filtered iteratively based on MR results after each epoch, and used in post-SFT training.
+
+
+
+\section{Conclusion}
+
+
+We present \emph{Meta Ranking} (MR), a novel method effectively enabling weak LLMs to judge the reliability of LLM responses. By comparing a target query-response pair with a small number of reference pairs, MR outperforms strong baselines in error detection without fine-tuning. Furthermore, the method significantly enhances strong LLMs' performance and efficiency in two practical application scenarios, model cascading and instruction tuning. These findings highlight the potential of MR for broader inference- and training-time applications with LLMs.
+
+
+
+

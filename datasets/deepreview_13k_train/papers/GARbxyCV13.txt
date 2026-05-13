@@ -1,0 +1,304 @@
+\title{DINO-WM: World Models on Pre-trained Visual Features enable Zero-shot Planning}
+
+\begin{abstract}
+The ability to predict future outcomes given control actions is fundamental for physical reasoning. However, such predictive models, often called world models, have proven challenging to learn and are typically developed for task-specific solutions with online policy learning. We argue that the true potential of world models lies in their ability to reason and plan across diverse problems using only passive data. Concretely, we require world models to have the following three properties: 1) be trainable on offline, pre-collected trajectories, 2) support test-time behavior optimization, and 3) facilitate task-agnostic reasoning. To realize this, we present DINO World Model (DINO-WM), a new method to model visual dynamics without reconstructing the visual world. DINO-WM leverages spatial patch features pre-trained with DINOv2, enabling it to learn from offline behavioral trajectories by predicting future patch features. This design allows DINO-WM to achieve observational goals through action sequence optimization, facilitating task-agnostic behavior planning by treating desired goal patch features as prediction targets. We evaluate DINO-WM across various domains, including maze navigation, tabletop pushing, and particle manipulation. Our experiments demonstrate that DINO-WM can generate zero-shot behavioral solutions at test time without relying on expert demonstrations, reward modeling, or pre-learned inverse models. Notably, DINO-WM exhibits strong generalization capabilities compared to prior state-of-the-art work, adapting to diverse task families such as arbitrarily configured mazes, push manipulation with varied object shapes, and multi-particle scenarios.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Robotics and embodied AI has seen tremendous progress in recent years. Advances in imitation learning and reinforcement learning has enabled agents to learn complex behaviors across diverse tasks \cite{lee2024behaviorgenerationlatentactions, zhao2023learningfinegrainedbimanualmanipulation, ma2024eurekahumanlevelrewarddesign, hafner2024masteringdiversedomainsworld, hansen2024tdmpc2scalablerobustworld, agarwal2022leggedlocomotionchallengingterrains, haldar2024bakuefficienttransformermultitask}. Despite this progress, generalization remains a major challenge \cite{zhou2023trainofflinetestonline}. Existing approaches predominantly rely on policies that, once trained, operate in a feed-forward manner during deployment—mapping observations to actions without any further optimization or reasoning. Under this framework, successful generalization inherently requires agents to possess solutions to all possible tasks and scenarios once training is complete, which is only possible if the agent has seen similar scenarios during training \cite{brohan2023rt1roboticstransformerrealworld, brohan2023rt2visionlanguageactionmodelstransfer, reed2022generalistagent, etukuru2024robot}. However, it is neither feasible nor efficient to learn solutions for all potential tasks and environments in advance. 
+Instead of learning the solutions to all possible tasks during training, an alternate is to fit a dynamics model on training data and optimize task-specific behavior during runtime. These dynamics models, also called world models~\cite{https://doi.org/10.5281/zenodo.1207631}, have a long history in robotics and control~\cite{sutton1991dyna,todorov2005generalized,williams2017information}. More recently, several works have shown that world models can be trained on raw observational data \cite{hafner2019learninglatentdynamicsplanning, hafner2024masteringdiversedomainsworld, micheli2023transformerssampleefficientworldmodels, robine2023transformerbasedworldmodelshappy, hansen2024tdmpc2scalablerobustworld}. This enables flexible use of model-based optimization to obtain policies as it circumvents the need for explicit state-estimation. Despite this, significant challenges still remain in it use for solving general-purpose tasks.
+
+To understand the challenges in world modeling, let us consider the two broad paradigms in learning world models: online and offline. In the online setting, access to the environment is often required so data can be continuously collected to improve the world model, which in turn improves the policy and the subsequent data collection. However, the online world model is only accurate in the cover of the policy that was being optimized. Hence, while it can be used to train powerful task-specific policies~\cite{}, it requires retraining for every new task even in the same environment~\cite{}. Instead in the offline setting, the world model is trained on an offline dataset of collected trajectories in the environment, which removes its dependence on the task specificity given sufficient coverage in the dataset. However, when required to solve a task, methods in this domain require strong auxiliary information to overcome the lack of dense coverage on the task-specific domain. This auxiliary information can take the form of expert demonstrations~\cite{pathak2018zeroshotvisualimitation}, structured keypoints~\cite{ko2023learningactactionlessvideos, wen2024anypointtrajectorymodelingpolicy}, access to pretrained inverse models~\cite{du2023learninguniversalpoliciestextguided, ko2023learningactactionlessvideos} or dense reward functions~\cite{}, all of which reduce the generality of using offline world models. The central question to building better offline world models is if there is alternate auxiliary information that does not compromise its generality?
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/intro.png}
+    \caption{We present \method{}, a method for training visual models by using pretrained DINOv2 embeddings of image frames (a). Once trained, given a target observation $o_T$, we can directly optimize agent behavior by planning through \method{} using model-predictive control (b). The use of pretrained embeddings significantly improves performance over prior state-of-the-art world models (c).}
+    \label{fig:teaser}
+\end{figure*}
+In this work, we present \method{}, a new and simple method to build task-agnostic world models from an offline dataset of trajectories. \method{} models the dynamics of world on compact embeddings of the world, rather than the raw observations themselves. For the embedding, we use pretrained patch-features from the DINOv2 model, which provides both a spatial and object-centric representation prior. We conjecture that this pretrained representation enables robust and consistent world modeling, which relaxes the necessity for task-specific data coverage. Given these visual embeddings and actions, \method{} uses the ViT architecture to predict future embeddings. Once this model is trained, planning to solve tasks is constructed as visual goal reaching, i.e. to reach a future desired goal given the current observation. Since the predictions by \method{} are high quality (see Figure~\ref{fig:prediction}), we can simply use model-predictive control with inference-time optimization to reach desired goals without any without any extra information during testing.
+
+\method{} is experimentally evaluated on four environment suites spanning maze navigation, sliding manipulation, and particle manipulation tasks. Our experiments reveal the following findings:
+
+\begin{itemize}[leftmargin=*]
+    \item \method{} produce high-quality future world modeling that can be measured by improved visual reconstruction from trained decoders. On LPIPS metrics for our hardest tasks, this improves upon prior state-of-the-art work by 56\% (See Section~\ref{sec:img_score}).
+    \item Given the latent world models trained using \method{}, we show high success for reaching arbitrary goals on our hardest tasks, improving upon prior work by 45\% on average (See Section~\ref{planning_results}).
+    \item \method{} can be trained across environment variations within a task family (e.g. different maze layouts for navigation or different object shapes for manipulation) and achieve higher rates of success compared to prior work (See Section~\ref{generalizing_results}).
+\end{itemize}
+
+Code and models for \method{} will be open-sourced to ensure reproducibility and videos of policies are made available on our project website: \website{}.
+
+
+\section{Related Work}
+
+
+We build on top of several works in building world models, optimizing them, and using compact visual representations. For conciseness, we only discuss the ones most relevant to \method{}.
+
+\textbf{Model-based Learning:} Learning from models of dynamics has a rich literature spanning the fields of control, planning, and robotics~\cite{sutton1991dyna,todorov2005generalized,astolfi2008nonlinear,holkar2010overview,williams2017information}. Recent works have shown that modeling dynamics and predicting future states can significantly enhance vision-based learning for embodied agents across various applications, including online reinforcement learning \cite{hafner2024masteringdiversedomainsworld, micheli2023transformerssampleefficientworldmodels, hansen2024tdmpc2scalablerobustworld, robine2023transformerbasedworldmodelshappy}, exploration \cite{mendonca2021discoveringachievinggoalsworld, mendonca2023alanautonomouslyexploringrobotic, sekar2020planningexploreselfsupervisedworld}, planning \cite{finn2017deepvisualforesightplanning, ebert2018visualforesightmodelbaseddeep, hafner2019learninglatentdynamicsplanning}, and imitation learning \cite{pathak2018zeroshotvisualimitation}. Several of these approaches initially focused on state-space dynamics \cite{Deisenroth2011PILCOAM, chua2018deepreinforcementlearninghandful, Lenz2015DeepMPCLD, nagabandi2019deepdynamicsmodelslearning}, and has since been extended to handle image-based inputs, which we address in this work. These world models can predict future states in either pixel space \cite{finn2017deepvisualforesightplanning, ebert2018visualforesightmodelbaseddeep, ko2023learningactactionlessvideos, du2023learninguniversalpoliciestextguided} or latent representation space~\cite{yan2021learning}. Predicting in pixel space, however, is computationally expensive due to the need for image reconstruction and the overhead of using diffusion models \cite{}. On the other hand, latent-space prediction is typically tied to objectives of reconstructing images \cite{hafner2019learninglatentdynamicsplanning, hafner2024masteringdiversedomainsworld, micheli2023transformerssampleefficientworldmodels}, which raises concerns about whether the learned features contain sufficient information about the task. Moreover, many of these models incorporate reward prediction \cite{hafner2024masteringdiversedomainsworld, micheli2023transformerssampleefficientworldmodels, robine2023transformerbasedworldmodelshappy}, or use reward prediction as auxiliary objective to learn the latent representation \cite{hansen2024tdmpc2scalablerobustworld, hansen2022temporaldifferencelearningmodel}, inherently making the world model task-specific. In this work, we aim to decouple task-dependent information from latent-space prediction, striving to develop a versatile and task-agnostic world model capable of generalizing across different scenarios.
+
+\textbf{Generative Models as World Models:} With the recent excitement of large scale foundation models, 
+there have been initiatives on building large-scale video generation world models conditioned on agent's actions in the domain of self-driving \cite{hu2023gaia1}, control \cite{yang2023learning, bruce2024geniegenerativeinteractiveenvironments}, and general-purpose video generation \cite{liu2024sorareviewbackgroundtechnology}. These models aim to generate video predictions conditioned on text or high-level action sequences. While these models have demonstrated utility in downstream tasks like data augmentations, their reliance on language conditioning limits their application when precise visually indicative goals need to be reached. Additionally, the use of diffusion models for video generation makes them computationally expensive, further restricting their applicability for test-time optimization techniques such as MPC. In this work, we aim to build a world model in latent space rather than in the raw pixel space, which enables more precise planning and control.
+\textbf{Pretrained Visual Representations:}\quad Significant advancements have been made in the field of visual representation learning, where compact features that capture spatial and semantic information can be readily used for downstream tasks. Pre-trained models like ImageNet pre-trained ResNet~\cite{he2016deep}, I-JEPA~\cite{assran2023self}, and DINO \cite{caron2021emergingpropertiesselfsupervisedvision, oquab2024dinov2learningrobustvisual} for images, as well as V-JEPA \cite{bardes2024vjepa} for videos, and R3M \cite{nair2022r3muniversalvisualrepresentation}, MVP \cite{xiao2022maskedvisualpretrainingmotor} for robotics have allowed fast adaptation to downstream tasks as they contain rich spatial and semantic information. While many of these models represent images using a single global feature, the introduction of Vision Transformers (ViTs) \cite{dosovitskiy2021imageworth16x16words} has enabled the use of pre-trained patch features, as demonstrated by DINO \cite{caron2021emergingpropertiesselfsupervisedvision, oquab2024dinov2learningrobustvisual}. DINO employs a self-distillation loss that allows the model to learn representations effectively, capturing semantic layouts and improving spatial understanding within images. In this work, we leverage DINOv2's patch embeddings to train our world model, and demonstrate that it serves as a versatile encoder capable of handling multiple precise tasks.
+
+
+\section{DINO World Models}
+
+
+\textbf{Overview and Problem formulation:}\quad Our work follows the vision-based control task framework, which models the environment as a partially observable Markov decision process (POMDP). The POMDP is defined by the tuple \((\mathcal{O}, \mathcal{A}, p)\), where \(\mathcal{O}\) represents the observation space, and \(\mathcal{A}\) denotes the action space. The environment's dynamics are modeled by the transition distribution \(p(o_{t+1} \mid o_{\leq t}, a_{\leq t})\), which predicts future observations based on past actions and observations.  
+
+In this work, we aim to learn task-agonstic world models from pre-collected offline datasets, and use these world models to perform visual reasoning and control at test time. At test time, our system starts from an arbitrary environment state and is provided with a goal observation in the form of an RGB image, in line with prior works \cite{wu2020learningmanipulatedeformableobjects, ebert2018visualforesightmodelbaseddeep, mendonca2023structuredworldmodelshuman}, and is asked to perform a sequence of actions $a_0, ..., a_T$ such that the goal state can be achieved. This approach differs from world models used in online reinforcement learning (RL) where the objective is to optimize rewards for a fixed set of tasks at hand \cite{hafner2024masteringdiversedomainsworld, hansen2024tdmpc2scalablerobustworld}, or from text-conditioned world models, where goals are specified through text prompts \cite{du2023learninguniversalpoliciestextguided, ko2023learningactactionlessvideos}.
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/arch.pdf}
+    \caption{Architecture of \method{}. Given observations $o_{t-k:t}$, we optimize the sequence of actions $a_{t:T-1}$ to minimize the predicted loss to the desired goal $o_g$. All forward computation is done in the latent space $z$. Here $p_{\theta}$ indicates \method{}'s dynamics model, which is used for making future predictions.}
+    \label{fig:arch}
+\end{figure*}
+\subsection{DINO-based World Models (\method{})}
+We model the dynamics of the environment in the latent space. More specifically, at each time step $t$, our world model consists of the following components: 
+\begin{align*}
+    \text{Observation model:} & \quad z_t \sim \text{enc}_\theta(z_t \mid o_t) \\
+    \text{Transition model:} & \quad z_{t+1} \sim p_\theta(z_{t+1} \mid z_{t-H:t}, a_{t-H:t}) \\
+    \text{Decoder model (optional for visualization):} & \quad \hat{o}_t \sim q_\theta(o_t \mid z_t)
+\end{align*}
+where the observation model encodes image observations to latent states $z_t$, and the transition model takes in a history of past latent states of length $H$. The decoder model takes in a latent $z_t$, and reconstruct the image observation $o_t$. We use $\theta$ to denote the parameters of these models. Note that our decoder is entirely optional, as the training objectives for the decoder is independent for training the rest part of the world model. This eliminates the need to reconstructing images both during training and testing, which reduces computational costs compared to otherwise coupling together the training of the observational model and the decoder, as in \cite{hafner2024masteringdiversedomainsworld, micheli2023transformerssampleefficientworldmodels}. 
+
+\method{} models only the information available from offline trajectory data in an environment, in contrast to recent online RL world models that also require task-relevant information, such as rewards \cite{hansen2022temporaldifferencelearningmodel, hansen2024tdmpc2scalablerobustworld, hafner2020dreamcontrollearningbehaviors}, discount factors \cite{hafner2022masteringataridiscreteworld, robine2023transformerbasedworldmodelshappy}, and termination conditions \cite{hafner2024masteringdiversedomainsworld, micheli2023transformerssampleefficientworldmodels}.
+
+\subsubsection{Observation Model}
+
+With the goal of learning a generic world model across many environments and the real world, we argue that the observation model should 1) be task and environment independent, and 2) contain rich spatial information which is crucial in navigation and manipulation tasks. Contrary to previous works where the observation model is always learned for the task at hand \cite{hafner2024masteringdiversedomainsworld}, we argue instead that it is not always possible for world models to learn an observation model from scratch when facing a new environment, as perception is a general task that can be learned from the large corpus of internet data. Therefore, we choose the out-of-the-box pre-trained DINOv2 model as our world model's observation model, as it has been shown to excel at object detection, semantic segmentation, and depth estimation tasks which require substantial spatial understanding. The observation model is kept frozen throughout both training and testing time. At each time step $t$, it encodes an image $o_t$ to patch embeddings $z_t \in \mathbb{R}^{N \times E} $, where $N$ denotes the number of patches, and $E$ denotes the embedding dimension. This process is visualized in Figure~\ref{fig:arch}. 
+
+\subsubsection{Transition Model}
+
+We adopt the ViT \cite{dosovitskiy2021imageworth16x16words} architecture for the transition model as it is a natural choice for processing patch features. However, a few modifications are required to the architecture to allow for additional conditioning on proprioception and controller actions. 
+
+Our transition model takes in a history of past latent states $z_{t-H:t-1}$ and actions $a_{t-H:t-1}$, where $H$ is a hyperparameter denoting the context length of the model, and predicts the latent state at next time step $z_t$. To properly capture the temporal dependencies, where the world state at time $t$ should only depend on previous observations and actions, we implement a causal attention mechanism in the ViT model, enabling the model to predict latents autoregressively at a frame level. Specifically, each patch vector $z^i_t$ for the latent state $z_t$ attends to $\{ z^i_{t-H:t-1} \}_{i=1}^N$. This is different from past work IRIS~\cite{micheli2023transformerssampleefficientworldmodels} which similarly represent each observation as a sequence of vectors, but autoregressively predict $z^i_t$ at a token level, attending to \( \{ z^i_{t-H:t-1} \}_{i=1}^N \) as well as \( \{ z^i_t \}_{i=1}^{<k} \). We argue that predicting at a frame level and treating patch vectors of one observation as a whole better captures global structure and temporal dynamics, modeling dependencies across the entire observation rather than isolated tokens, leading to improved temporal generalization.
+
+To model the effect of the agent's action to the environment, we condition the world model's predictions on these actions. Specifically, we concatenate the \( K \)-dimensional action vector, mapped from the original action representation using a multi-layer perceptron (MLP), to each patch vector \( z^i_t \) for \( i = 1, \ldots, N \). When proprioceptive information is available, we incorporate it similarly by concatenating it to the observation latents, thereby integrating it into the latent states.
+
+We train the world model with teacher forcing. During training, we slice the trajectories in to segments of length $H + 1$, and compute a latent consistency loss on each of the $H$ predicted frames. For each frame, we compute
+\begin{equation}
+    \mathcal{L}_{pred} = \left\| p_{\theta}\left( \text{enc}_{\theta}(o_{t-H:t}), \phi(a_{t-H:t}) \right) - \text{enc}_{\theta} \left( o_{t+1} \right) \right\|^2
+\end{equation}
+where $\phi$ is the action encoder model that can map actions to higher dimensions. Note that our world model training is entirely performed in latent space, without the need to reconstruct the original pixel images.
+
+\subsubsection{Decoder for Interpretability}
+
+To aid in visualization and interpretability, we use a stack of transposed convolution layers to decode the patch representations back to image pixels, similar as in \cite{razavi2019generatingdiversehighfidelityimages}. Given a pre-collected dataset, we optimize the parameters \(\theta\) of the decoder \(q_\theta\) with a simple reconstruction loss defined as:
+\begin{equation}
+    \mathcal{L}_{rec} = \left\| q_{\theta}(z_t) - o_t \right\|^2, \quad \text{where} \quad z_t = \text{enc}_{\theta}(o_t)
+\end{equation}
+The training of the decoder is entirely independent of the transition model training, offering several advantages: \textbf{1)} The quality of the decoder does not affect the world model's reasoning and planning capabilities for solving downstream tasks, and \textbf{2)} During planning, there is no need to reconstruct raw pixel images, thereby reducing computational costs. Nevertheless, the decoder remains valuable as it enhances the interpretability of the world model's predictions.
+
+\subsection{Visual Planning with \method{}}
+
+Arguably, to evaluate the quality of the world model, it needs to be able to allow for downstream reasoning and planning. A standard evaluation metric is to perform trajectory optimization at test time with these world models and measure the performance. While the planning methods themselves are fairly standard, it serves as a means to emphasize the quality of the world models. For this purpose, our world model receives the current observation \( o_0 \) and a goal observation \( o_g \), both represented as RGB images. We formulate planning as the process of searching for a sequence of actions that the agent would take to reach \( o_g \). To achieve this, we employ model predictive control (MPC), which facilitates planning by considering the outcomes of future actions.
+
+We utilize the cross-entropy method (CEM), a stochastic optimization algorithm, to optimize the sequence of actions at each iteration. The planning cost is defined as the mean squared error (MSE) between the current latent state and the goal's latent state, given by 
+\[
+\mathcal{C} = \left\| \hat{z}_T - z_g \right\|^2, \quad \text{where} \quad \hat{z}_t = p(\hat{z}_{t-1}, a_{t-1}), \quad \hat{z}_0 = \text{enc}(o_0), \quad z_g = \text{enc}(o_g).
+\]
+
+Since our world model is differentiable, a possibly more efficient approach is to optimize this objective through gradient descent (GD), allowing the world model to directly guide the agent toward a specific goal. However, we empirically observe that CEM outperforms GD in our experiments. We hypothesize this is due to our choice to not constrain the terrain smoothness of the world model during training, potentially leading to issues with the gradient.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+ 
+
+\subsection{Environments and Tasks}
+\label{sec:exp}
+
+We consider five environment suites in our evaluations spanning simple navigation environments and manipulation environments with varying dynamics complexity. For all environments, the observation space is RGB images of size (224, 224).
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/env.png}
+    \caption{We evaluate \method{} on 5 environment suites, from left to right: PointMaze, Push-T, Two Room, Rope Manipulation, and Granular Manipulation.}
+    \label{fig:your_label}
+\end{figure}
+
+
+\begin{enumerate}[label=\alph*),leftmargin=*]
+    \item \textbf{Point Maze: } A simple 2D point maze navigation environment in the D4RL suite \cite{fu2021d4rldatasetsdeepdatadriven}. A point agent with 2-dimensional action space moves in a U-shape maze. The agent’s dynamics incorporate physical properties such as velocity, acceleration, and inertia, making the movement realistic. The objective of the task is to navigate the maze and reach arbitrary goal locations from arbitrary starting location.
+    
+    \item \textbf{Push-T: } This manipulation environment was introduced in \cite{chi2024diffusionpolicyvisuomotorpolicy} to study precise manipulation. The environment features a pusher agent interacting with a T-shaped block. The goal is to guide both the agent and the T-block from a randomly initialized state to a known feasible target configuration within 25 steps. The task requires both the agent and the T to match the target locations. Unlike previous setups, the fixed green T no longer represents the target position for the T-block but serves purely as a visual anchor for reference. Success requires precise understanding of the contact-rich dynamics between the agent and the object, making it a challenging test for visuomotor control and object manipulation. We also introduce a variant of this where we have multiple object shapes. 
+    
+    \item \textbf{Wall: } This custom 2D navigation environment featuring two rooms separated by a wall with a door opening. The task requires the agent to navigate from a randomized starting location in one room to a goal in the other room, which requires the agent to pass through the door. We introduce a variant of this environment where the positions of the wall and door are randomized to assess the model's ability to generalize to novel configurations of familiar environment dynamics.
+    
+    \item \textbf{Rope Manipulation: } This task is simulated with Nvidia Flex~\cite{zhang2024adaptigraphmaterialadaptivegraphbasedneural} and consists of an XArm interacting with a rope placed on a tabletop. The objective is to move the rope from an arbitrary start configuration to a specified goal configuration.
+    \item \textbf{Granular Manipulation:} Granular manipulation uses the same setting as Rope manipulation and manipulates about a hundred particles to form desired shapes.
+
+\end{enumerate}
+\subsection{Baselines}
+
+We compare \method{} with the following state-of-the-art models commonly used for control:
+\begin{enumerate}[label=\alph*), leftmargin=*]
+
+    \item \textbf{IRIS~\cite{micheli2023transformerssampleefficientworldmodels}: } IRIS employs a discrete autoencoder to translate visual inputs into tokens, and a GPT Transformer that predicts tokens of future observations. It combines these components to learn policies and value functions through imaginative procedures.
+
+        
+    \item \textbf{DreamerV3~\cite{hafner2024masteringdiversedomainsworld}: } DreamerV3 learns a world model to interpret visual inputs into categorical representation. It predicts future representations and rewards based on given action and trains an actor-critic policy from its imagined trajectories. 
+    
+    \item \textbf{TD-MPC2~\cite{hansen2024tdmpc2scalablerobustworld} : } TD-MPC2 learns a decoder-free world model in latent space and uses reward signals to optimize the latents. It serves as a strong baseline for reconstruction-free world modeling.
+    \item \textbf{AVDC~\cite{ko2023learningactactionlessvideos}:} AVDC leverages a diffusion model to generate an imagined video of task execution based on initial observation and a textual goal description. It then estimates optical flow between frames to capture object movements and generates robot arm commands.
+\end{enumerate}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/openloop4.png}
+    \caption{Openloop rollout of world models trained with various pre-trained encoders on Push-T and Granular environment. For each trajectory, the model is given the first frame as well as sequence of actions. The world models performs openloop rollout with these actions, and the images are reconstructed by a pre-trained decoder. For each environment, the bottom row denotes the ground truth. \method{} (Ours) rollouts are bolded and are visually indistinguishable from the ground truth observations.}
+    \label{fig:prediction}
+\end{figure}
+
+\subsection{Optimizing Behaviors with \method{}} 
+\label{planning_results}
+With a trained world model, we study if \method{} be used for zero-shot planning directly in the latent space. 
+
+For the PointMaze, Push-T, and Wall environments, we sample 50 initial and goal states to measure the success rate across all instances. Due to the environment stepping time for the Rope and Granular environments, we evaluate the Chamfer Distance (CD) on 10 instances for them. In the Granular environment, we sample a random configuration from the validation set, with the goal of pushing the materials into a square shape at a randomly selected location and scale.
+
+\begin{table}[ht]
+    \centering
+    \caption{Planning results for offline world models on five control environments.}
+    \begin{threeparttable}
+    \begin{adjustbox}{max width=\textwidth}
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Model} & \textbf{PointMaze} & \textbf{PushT} & \textbf{Wall} & \textbf{Rope} & \textbf{Granular}\\
+         & SR \(\uparrow\) & SR \(\uparrow\) & SR \(\uparrow\) & CD \(\downarrow\) & CD \(\downarrow\)\\
+        \midrule
+        IRIS & 0.74 & 0.32 & \needsupdate{0.04} & 1.11 & 0.37\\
+        DreamerV3 & \textbf{1.00} & 0.04 & \textbf{1.00} & \needsupdate{2.49} & \needsupdate{1.05}\\
+        TD-MPC2 & 0.00 & 0.00 & 0.00 & \needsupdate{2.52} & \needsupdate{1.21}\\
+        Ours & 0.98 & \textbf{0.90} & 0.96 & \textbf{0.41} & \textbf{0.26}\\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \end{threeparttable}
+    \label{table:main}
+\end{table}
+
+As seen in Table \ref{table:main}, on simpler environments such as Wall and PointMaze, \method{} is on par with state-of-art world models like DreamerV3. However, \method{} significantly outperforms prior work at manipulation environments where rich contact information and object dynamics need to be accurately inferred for task completion. We notice that for TD-MPC2, the lack of reward signal makes it difficult to learn good latent representations, which subsequently results in poor performance. Visualizations of some planning results can be found in Figure \ref{fig:plan_results}.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/plan_results2.png}
+    \caption{Planning visualizations for PointMaze, Push-T, and Granular, on randomly sampled initial and goal configurations. The task is defined by Start and Goal, denoting the initial and goal observations. Final shows the final state the system arrives at after planning with each world model. For comparison, we show the best performing world models DINO CLS and DreamerV3.}
+    \label{fig:plan_results}
+\end{figure}
+
+\subsection{Does pre-trained visual representations matter?}
+
+We use different pre-trained general-purpose encoders as the observation model of the world model, and evaluate their downstream planning performance. Specifically, we use the following encoders commonly used in robotics control and general perception: R3M~\cite{nair2022r3muniversalvisualrepresentation}, ImageNet pretrained ResNet-18~\cite{russakovsky2015imagenetlargescalevisual,he2016deep} and DINO CLS~\cite{caron2021emergingpropertiesselfsupervisedvision}.
+
+
+\begin{table}[ht]
+    \centering
+    \caption{Planning results for world models with various pre-trained encoders.}
+    \begin{threeparttable}
+    \begin{adjustbox}{max width=\textwidth}
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Model} & \textbf{PointMaze} & \textbf{PushT} & \textbf{Wall} & \textbf{Rope} & \textbf{Granular}\\
+         & SR \(\uparrow\) & SR \(\uparrow\) & SR \(\uparrow\) & CD \(\downarrow\) & CD \(\downarrow\)\\
+        \midrule
+        R3M & 0.94 & 0.42 & 0.34 & 1.13 & 0.95\\
+        ResNet & \textbf{0.98} & 0.2 & 0.12 & 1.08 & 0.90\\
+        DINO CLS & 0.96 & 0.44 & 0.58 & 0.84 & 0.79\\
+        DINOPatch (Ours) & \textbf{0.98} & \textbf{0.90} & \textbf{0.96} & \textbf{0.41} & \textbf{0.26}\\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \end{threeparttable}
+\end{table}
+
+In the PointMaze task, which involves simple dynamics and control, we observe that world models with various observation encoders all achieve near-perfect success rates. However, as the environment's complexity increases—requiring more precise control and spatial understanding—world models that encode observations as a single latent vector show a significant drop in performance. We posit that patch-based representations better capture spatial information, in contrast to models like R3M, ResNet, and DINO CLS, which reduce observations to a single global feature vector, losing crucial spatial details necessary for manipulation tasks.
+\subsection{Generalizing to Novel Environment Configurations}
+\label{generalizing_results}
+We would like to measure the generalization capability of our world models not just across different goals in an environment, but across different environments themselves. For this we construct three families of environments, where the world model will be deployed in an unseen environment for unseen goals. Visualizations of training and testing examples are shown in Figure \ref{fig:generalization_exps}.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/generalization_exps.png}
+    \caption{Training and testing visualizations for WallRandom, PushObj and GranularRandom. Test setups are highlighted in blue boxes, showcasing unseen configurations for assessing the model's generalization ability.}
+    \label{fig:generalization_exps}
+\end{figure}
+\begin{table}[ht]
+    \centering
+    \caption{Planning results for offline world models on three suites with unseen environment configurations.}
+    \label{table:unseen_envs}
+    \begin{threeparttable}
+    \begin{adjustbox}{max width=\textwidth}
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Model} & \textbf{WallRandom} & \textbf{PushObj} & \textbf{GranularRandom} \\
+        & SR \(\uparrow\) & SR \(\uparrow\)  & CD \(\downarrow\)\\
+        \midrule
+        IRIS  & 0.06 &  0.14 & 0.86 \\
+        Dreamerv3 & 0.76 & 0.18 & 1.53\\
+        R3M & 0.40 & \needsupdate{0.16} & 1.12 \\
+        ResNet & 0.40 & \needsupdate{0.14} & 0.98 \\
+        DINO CLS & 0.64 & \needsupdate{0.18} & 1.36 \\
+        Ours & \textbf{0.82} & \textbf{\needsupdate{0.34}} & \textbf{0.63} \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \end{threeparttable}
+\end{table}
+
+From Table~\ref{table:unseen_envs}, we observe that \method{} demonstrates significantly better performance in the WallRandom environment, indicating that the world model has effectively learned the general concepts of walls and doors, even when they are positioned in locations unseen during training. In contrast, other methods struggle to accurately identify the door's position and navigate through it. The PushObj task remains challenging for all methods, as the model was only trained on the four object shapes, which makes it difficult to infer physical parameters like the center of gravity and inertia precisely. In GranularRandom, the agent encounters fewer than half the particles present during training, resulting in out-of-distribution images compared to the training instances. Nevertheless, \method{} accurately encodes the scene and successfully gathers the particles into a designated square location with the lowest Chamfer Distance (CD) compared to the baselines, demonstrating better scene understanding. We hypothesize that this is due to \method{}'s observation model encoding the scene as patch features, making the variance in particle number still within the distribution for each image patch.
+
+\subsection{Qualitative comparisons with generative video models}
+Given the prominence of generative video models, it is reasonable to presume that they could readily serve as world models. To investigate the usefulness of \method{} over such video generative models, we compare it with imagined rollouts from AVDC~\cite{ko2023learningactactionlessvideos}, a diffusion-based generative model. As seen in Figure~\ref{fig:gen_comp}, we find that the diffusion model trained on benchmarks produce future images that are mostly visually realistic, however they are not physically plausible as we can see that large changes can occur in a single timestep of prediction, and may have difficulties in reaching to the exact goal state. Potentially stronger generative models in the future could alleviate this issue.
+
+We also compare \method{}~with a variant of AVDC, where the diffusion model is trained to generate the next observation $o_{t+1}$ conditioned on the current observation $o_{t}$ and action $a_t$, rather than generating an entire sequence of observations at once conditioned on a text goal.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/avdc_comp.png}
+    \caption{Comparison of plans generated by \method{} and AVDC, a diffusion-based generative model.}
+    \label{fig:gen_comp}
+\end{figure}
+\subsection{Decoding and Interpreting the Latents}
+\label{sec:img_score}
+Although \method{} operates in latent space and the observation model is not trained with pixel reconstruction objectives, training a decoder is still valuable for interpreting the model's predictions. We evaluate the image quality of predicted futures across all models and find that our approach outperforms others, even those whose encoders are trained with environment-specific reconstruction objectives. We show openloop rollout visualizations in Figure \ref{fig:prediction}. This demonstrates the robustness of \method{} despite the lack of explicit pixel-level supervision. We report two key metrics: Structural Similarity Index (SSIM) \cite{1284395} and Learned Perceptual Image Patch Similarity (LPIPS) \cite{DBLP:journals/corr/abs-1801-03924} on the reconstruction of world models' predicted future states. SSIM measures the perceived quality of images by evaluating structural information and luminance consistency between predicted and ground-truth images, with higher values indicating greater similarity. LPIPS, on the other hand, assesses perceptual similarity by comparing deep representations of images, with lower scores reflecting closer visual similarity. %\TODO{ref to figures with visuals}
+
+\begin{table}[ht]
+    \centering
+    \caption{Comparison of world models across different environments on LPIPS and SSIM metrics.}
+    \begin{threeparttable}
+    \begin{tabular}{l ccccc ccccc}
+            \toprule
+    & \multicolumn{4}{c}  {\textbf{LPIPS} \(\downarrow\)} & \multicolumn{4}{c}{\textbf{SSIM} \(\uparrow\)} \\
+    \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+    \textbf{Method} & \textbf{PushT} & \textbf{Wall} & \textbf{Rope} & \textbf{Granular} 
+                   & \textbf{PushT} & \textbf{Wall} & \textbf{Rope} & \textbf{Granular} \\
+    \midrule
+    R3M & 0.045 & 0.0083 & 0.023 & 0.08 & 0.956 & 0.994 & 0.982 & 0.917 \\
+    ResNet & 0.063 & 0.0024 & 0.025 & 0.08 & 0.950 & 0.996 & 0.980 & 0.915 \\
+    DinoCLS & 0.039 & 0.004 & 0.029 & 0.086 & 0.973 & 0.996 & 0.980 & 0.912 \\
+    AVDC & 0.046 & 0.030 & 0.060 & 0.106 & 0.959 & 0.983 & 0.979 & 0.909 \\
+    Ours & \textbf{0.007} & \textbf{0.0016} & \textbf{0.009} & \textbf{0.035} & \textbf{0.985} & \textbf{0.997} & \textbf{0.985} & \textbf{0.940} \\
+    \bottomrule
+
+    \end{tabular}
+    \end{threeparttable}
+\end{table}
+
+
+\section{Conclusion, Limitations \& Future Work}
+
+
+In this work, we introduce \method{}, a simple yet effective technique for modeling visual dynamics in latent space without the need for pixel-space reconstruction. We have demonstrated that \method{} captures environmental dynamics and generalizes to unseen configurations, independent of task specifications, enabling visual reasoning at test time and generating zero-shot solutions for downstream tasks through planning. \method{} takes a step toward bridging the gap between task-agnostic world modeling and reasoning and control, offering promising prospects for generic world models in real-world applications. For limitations, \method{} still relies on the availability of ground truth actions from agents, which may not always be feasible when training with vast video data from the internet. Additionally, while we currently plan in action space for downstream task solving, an extension of this work could involve developing a hierarchical structure that integrates high-level planning with low-level control policies to enable solving more fine-grained control tasks. 
+
+
+
+\newpage
+
+

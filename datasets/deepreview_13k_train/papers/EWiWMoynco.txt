@@ -1,0 +1,296 @@
+\title{NAQ: Nonlinearity-Aware Quantization}
+
+\begin{abstract}
+Transformer-based large language models and vision transformers have achieved remarkable performance, but at a high energy cost.
+Nonlinearities (e.g., GELU, softmax) have regions where the magnitude of the gradient is small, which means that errors in pre-nonlinearity inputs result in small output error.
+We propose Nonlinearity-Aware Quantization (NAQ), which involves computing the FC layer outputs and attention scores at low precision, predicting the magnitude of the gradient of the nonlinearity, and recomputing the pre-nonlinearity if the gradient magnitude is large.
+With future hardware support, models with NAQ would avoid up to 62% of full precision pre-nonlinearity computation and it would achieve up to 29% reduction in energy consumption, with small effects on model performance.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The transformer architecture (Vaswani et al., 2017) is the basis of large, pre-trained models that have achieved remarkable performance on language and vision modelling tasks, fuelling the recent excitement around generative AI. However, their growing energy consumption is a significant challenge, requiring the costly construction of new power plants to power this demand (Hiller, 2024). This increasing energy cost is hindering the availability and adoption of AI, such as on mobile platforms like smartphones and autonomous drones, requiring offloading of the most powerful models to cloud servers. A recent study shows model inference consumes $70\%$ of AI infrastructure power capacity compared to $10\%$ for experimentation and $20\%$ for training (Wu et al., 2022). This motivates the need for solutions that reduce the inference energy consumption of existing, trained models.  
+
+Common to all transformer architectures are building blocks of linear layers followed by an activation function (e.g., GELU) and attention weight computation followed by softmax. We find that some of this pre-nonlinearity (pre-activation and pre-softmax) computation can be computed at low precision with little effect on model performance, because nonlinearities have regions where the magnitude of the gradient is small. Fig. 1 (left) shows gradient of various element-wise, nonlinear activation functions plotted against pre-activation input value, and it shows that there are regions where the gradient has small magnitude. Fig. 1 (right) plots the gradient of softmax against the exponential of a given attention score $e^{z_{i}}$ for various values for sum of exponentials kK=1 ezk (shown in the legend). As the attention score exponential decreases or the sum of exponentials increases, the gradient magnitude decreases. When the gradient magnitude is small, errors in the pre-nonlinearity have little effect on the output of the nonlinearity, which presents an opportunity for less precise computation.  
+
+![](images/216f633a061e9d67ccd0277169970f338667a1bbdc573acf61d780ec6d227749.jpg)  
+Figure 1: (left) Gradients of activation functions is plotted against the input. Note that when the input is negative, the gradients of activation functions tend to have a small magnitude. (right) Gradient of the softmax function is plotted against the input exponential $e^{z_{i}}$ at a selection of values for the sum of exponentials $\sum_{k=1}^{K}e^{z_{k}}$ . Note that the gradient is negatively correlated to the sum of exponentials and is positivel y correlated to the input exponential.  
+
+Since the gradients of nonlinearities are functions of the pre-nonlinearity values (as shown in Fig. 1), pre-computing the gradient to determine how to quantize weights and inputs is not an option. In other words, the dilemma is that we need to know the result of the pre-nonlinearity computation before we know how to quantize the inputs to the pre-nonlinearity computation. We break this dependency loop by performing low-precision computation to gather information about the gradient magnitude, and then recomputing where the gradient magnitude is large. Since low-precision computation uses much less energy than full precision, the energy savings outweigh the cost of recomputation. We call this technique NAQ, and it specifically targets pre-activation fully-connected (FC) layer and the pre-softmax attention score computation. While prior works have also proposed hardware solutions predicting when the input to ReLU will be negative to avoid computation that will end being set to 0 (Akhlaghi et al., 2018; Kim et al., 2021a), their assumptions break down when applied to other nonlinearities $(\S\mathrm{A})$ . In contrast, our insights lead to a proposal called NAQ, which improves the energy efficiency for computation preceding all activation functions and softmax.  
+
+We make the following contributions:  
+
+• We observe that common nonlinearities in transformers (e.g., GELU and softmax) have regions of small gradient magnitude.   
+• We propose a technique called Nonlinearity-Aware Quantization (NAQ) that gathers information about the gradient with a low-precision pass before selectively recomputing pre-nonlinearity values where the gradient is predicted to be large.   
+• We apply NAQ on vision transformers (ViTs) and large language models (LLMs) quantized using GPTQ (Frantar et al., 2022) and PTQ4ViT (Yuan et al., 2022), resulting in avoiding up to $62\%$ of full precision pre-nonlinearity computation and achieving up to $29\%$ reduction in energy consumption, with small effects on model performance.  
+
+
+
+\section{2 BACKGROUND AND MOTIVATION  }
+
+
+In this section, we describe the components of the transformer architecture targeted by this work, analyze the gradients of nonlinearities, and profile transformers to provide the relevant context and motivation for our approach.  
+
+
+
+\section{2.1 RELATED WORK  }
+
+
+Transformer Quantization for inference has been heavily studied (Gholami et al., 2022) with quantization-aware training (QAT) (Bai et al., 2020; Zhang et al., 2020a; Kim et al., 2021b; Shen et al., 2020; Zafrir et al., 2019) and post-training quantization (PTQ) (Xiao et al., 2023; Frantar et al., 2022; Yuan et al., 2022; Kim et al., 2023; Yao et al., 2022; Lin et al., 2024). Since QAT requires re-training, we opt to focus on a PTQ-base approach for this work. In general, most recent PTQ work has rightly aimed to decrease model size and memory bandwidth requirements. While those are important goals, in this paper, we tackle a less explored goal of decreasing energy used in computation.  
+
+(Kim et al., 2023) has similarities to this paper in that it represents hard to quantize (sensitive) values in full precision, but our work differs in a few key ways. SqueezeLLM uses the full model Hessian to estimate sensitivity instead of nonlinearity gradient in this work. This means that our work does not require any of backpropagation steps that SqueezeLLM does. Additionally, SqueezeLLM finds sensitive values offilne, whereas in this work, large gradient magnitude values are determined dynamically after low-precision computation.  
+
+Some works propose ReLU-based early negative termination (Akhlaghi et al., 2018; Kim et al., 2021a), which are hardware approaches that terminate computation early if the output is predicted to be negative and consequently set to zero by ReLU. This approach does not extend to non-RELU activation functions, nor softmax. See App. A for details.  
+
+![](images/c7b2745faa5ec43fc203680ad313fc23b3263d75e65ac2dae437260fa72e5208.jpg)  
+Figure 2: NAQ reduces energy consumption in the pre-softmax attention probability computation and in the pre-activation FC layer.  
+
+
+
+\section{2.2 THE TRANSFORMER ARCHITECTURE  }
+
+
+Fig. 2 illustrates the modern transformer architecture, which is based on (Vaswani et al., 2017), and highlights in red the pre-nonlinearity computations that NAQ targets. In the attention block, matrix multiplication between query and key tensors yields attention scores, which are converted into attention weights by applying softmax, and multiplying these weights by the value tensor produces the output of the attention block. While there is some variation in implementation of attention blocks (Liu et al., 2021; Yu et al., 2022; Beltagy et al., 2020; Kitaev et al., 2020), attention blocks generally follow the pattern of linear transformation followed by softmax to produce attention weights. In the MLP block, there are typically two FC layers with an activation function layer in between. The common activation functions for transformers are GELU (Devlin et al., 2018; Workshop et al., 2022; Touvron et al., 2021; Radford et al., 2018; Liu et al., 2021; Dosovitskiy et al., 2021), SwiGLU (a linear transformation of SiLU) (Touvron et al., 2023), and ReLU (Zhang et al., 2022). NAQ supports many activations functions, even those not found in transformers (see App. B).  
+
+
+
+\section{2.3 GRADIENT OF NONLINEARITIES  }
+
+
+When the magnitude of the gradient of the output of a nonlinearity is small for a given value in a tensor, then that value would be a prime candidate for lower precision representation and computation, since the error from low precision computation would result in less output error. In other words, quantization error would be mitigated by the low gradient magnitude. This is similar to the idea of “sensitive values” in SqueezeLLM (Kim et al., 2023), where values that are estimated to be likely to impact the loss of the network through a Hessian heuristic are represented in full-precision. In our case, we consider “sensitive values” in terms of their direct effect on the output of the nonlinearity by estimating the gradient. In this subsection, we analyze nonlinearities to determine when the magnitude of their gradient is small with respect to elements of the pre-activation tensor and inputs to linear transformations that produce the pre-activation tensor.  
+
+2.3.1 FC LAYER AND ACTIVATION FUNCTION  
+
+Consider the innermost loop of the FC layer and activation function, for an output value $y_{i}$ :  
+
+$$
+y_{i}=\operatorname{Act}(w\cdot x+b)
+$$  
+
+where $w$ is the weight vector, $b$ is the bias term, $x$ is the input vector, and Act is the activation function. For convenience, define a pre-activation value as $z_{i}=w\cdot x+b$ , so $y=\operatorname{Act}(z_{i})$ .  
+
+The gradient of $\operatorname{Act}(z_{i})$ is depends on $z_{i}$ and this function $f(z_{i})$ is plotted for several activation functions in Fig. 1. Thus, the gradient of the output $y_{i}$ with respect to individual elements of $w$ and $x$ are functions of $z_{i}$ :  
+
+$$
+{\frac{\partial y}{\partial x_{i}}}={\frac{\partial\operatorname{Act}}{\partial z_{i}}}{\frac{\partial z_{i}}{\partial x_{i}}}={\frac{\partial\operatorname{Act}}{\partial z_{i}}}w_{i}=f(z_{i})w_{i}
+$$  
+
+$$
+{\frac{\partial y}{\partial w_{i}}}={\frac{\partial\operatorname{Act}}{\partial z_{i}}}{\frac{\partial z_{i}}{\partial w_{i}}}={\frac{\partial\operatorname{Act}}{\partial z_{i}}}x_{i}=f(z_{i})x_{i}
+$$  
+
+As the gradient of the activation function depends on the pre-activation $(z)$ , it is not possible to perfectly determine the gradient of the output with respect to the input without computing the preactivation. In other words, directly computing the gradient is not an option for determining how to quantize individual weight and input elements. NAQ (§3) tackles this problem through low-precision computation of the FC layer and recomputation where gradient magnitude is predicted to be large.  
+
+
+
+\section{2.3.2 ATTENTION WEIGHT  }
+
+
+The gradient of attention weights (output of softmax) with respect to attention scores (pre-softmax values) requires completing the pre-softmax computation, not dissimilar to the dependency loop for the gradient of activation functions. Since the calculation of attention scores varies from model to model, we consider a generic linear transformation. Consider the computation of an attention weight slice (or vector) of length $K$ , as a one-dimensional softmax is typically performed along the last dimension of the attention score tensor. The attention weight is given by  
+
+$$
+w_{a}=S(\mathrm{F_{s}}(x,\theta))
+$$  
+
+where $w_{a}$ is the attention weight slice, $S$ is the softmax function, $\mathrm{F_{s}}$ is the linear transformation on the inputs, $x$ , using parameters, $\theta$ , which can include layer weights (to map $x$ to keys and queries) and masks. For convenience, define the attention score $\bar{z}=\mathrm{F_{s}}(\bar{X})$ , so $w_{a}=S(z)$ .  
+
+The $i^{\mathrm{th}}$ element of the attention weight slice is given by  
+
+$$
+S(z_{i})=\frac{e^{z_{i}}}{\sum_{k=1}^{K}e^{z_{k}}},
+$$  
+
+where $K$ is the size of slice $z$ . The partial gradient of the $i^{\mathrm{th}}$ attention weight element with respect to the $j^{\mathrm{th}}$ attention score is  
+
+$$
+\frac{\partial S(z_{i})}{\partial z_{j}}=S(z_{i})(1\{i=j\}-S(z_{j}))=\frac{e^{z_{i}}}{\sum_{k=1}^{K}e^{z_{k}}}\left(1\{i=j\}-\frac{e^{z_{j}}}{\sum_{k=1}^{K}e^{z_{k}}}\right)
+$$  
+
+where $1\{i=j\}$ is 1 if $i=j$ and 0 otherwise (Kuribel, 2021).  
+
+Eqn. 6 shows that computing the gradient of the softmax requires computing the softmax itself. We can learn when magnitude of the gradient would be larger or smaller by analyzing the numerators and denominators in the equation, with the eventual goal of computing these heuristics with energyefficient low-precision computation. The exponential of the input $e^{z_{i}}$ is in the denominator and the sum of exponentials $\sum_{k=1}^{K}e^{z_{k}}$ is in the denominator, so we see the following relationships:  
+
+$$
+\frac{\partial S(z_{i})}{\partial z_{j}}\overset\propto\sim e^{z_{i}}\quad\mathrm{and}\quad\frac{\partial S(z_{i})}{\partial z_{j}}\overset\propto\sim\frac{1}{\sum_{k=1}^{K}e^{z_{k}}}
+$$  
+
+Fig. 1 illustrates the positive correlation between $\frac{\partial S(z_{i})}{\partial z_{j}}$ and $e^{z_{i}}$ and the negative correlation between $\frac{\partial S(z_{i})}{\partial z_{j}}$ i)and kK=1 ezk.  
+
+
+
+\section{2.4 QUANTIZATION  }
+
+
+Quantization reduces the number of bits required to represent a given value, by applying a mapping function $f$ to map the high precision value, $x_{\mathrm{{HP}}}$ , to the range [-1,1], multiplying by the maximum quantized representation for a given $N$ bits and rounding the result, and dequantization works in reverse:  
+
+$$
+x_{\mathrm{INT}}=\mathrm{round}\left(\left(2^{N-1}-1\right)f(x_{\mathrm{HP}})\right)
+$$  
+
+$$
+x_{\mathrm{HP,\,dequantized}}=f^{-1}\left(\frac{x_{\mathrm{INT}}}{2^{N-1}-1}\right)
+$$  
+
+The maximum quantized representation is $2^{N-1}-1$ because one bit is used as sign bit. For simplicity, we use a symmetric quantization function $\textstyle f(x)={\frac{x}{M}}$ , where $M$ is the maximum representable value. However, the quantization function can become more complex with the addition of zero-point (Jacob et al., 2018), group-wise quantization (Shen et al., 2020), and non-uniform quantization (Kim et al., 2023).  
+
+Quantization introduces quantization error through the rounding process, but computation with quantized values uses much less energy. Energy consumption for multiplications scales quadratically (a multiplication with half the bits will take one quarter the energy), while energy consumption for additions, scales linearly (Horowitz, 2014). This relationship is illustrated in (Horowitz, 2014), where the author lists the energy consumption of computing operations at different bitwidths. Using this relationship, we estimate that at $45\mathrm{nm}$ technology, an INT4 multiply-add costs $0.065\mathrm{pJ}$ while a 16-bit floating point multiply-add costs $1.5\mathrm{pJ}$ and INT8 multiply-add costs $0.23\mathrm{pJ}$ , so an INT4 multiply-add uses $23.1\times$ less energy than FP16 and $3.5\times$ less than INT8. The relative difference in energy consumption holds at other process nodes (Stillmaker & Baas, 2017). This highlights the tradeoff between energy consumption and model performance, where we aim to limit the model performance degradation as energy consumption is quadratically decreased.  
+
+![](images/dc3f8d26a6966299a575ded5e065af1dd5bbbf23f0a266c3ee976891237c7519.jpg)  
+2.5 PROPORTION OF ENERGY CONSUMPTION BY PRE-NONLINEARITY COMPUTATION  
+Figure 3: The pre-activation FC layer and the pre-softmax attention score computation combined account for $29\%{-}57\%$ of the energy consumed by computation.  
+
+In our baselines (§4.1), GPTQ performs computation in FP16 (after dequantizing weights from INT4) (Frantar et al., 2022), while PTQ4ViT performs computation in INT8 (Yuan et al., 2022). We measured multiply-adds using the torchprofile1 tool. As all multiply-adds are either FP16 or  
+
+INT8, we assign the proportion of computation energy consumed as the proportion of total multiplyadds required for inference. Fig. 3 shows that the pre-activation FC layer makes up $16\%{-31\%}$ of the total computation energy consumption of the transformer model and the pre-softmax attention score computation $12\%{-}28\%$ . Combined, the pre-nonlinearity computation consumes $29\%{-}57\%$ of the total computation energy. By targeting this energy intensive computation, we significantly reduce the overall amount of energy consumed by the model.  
+
+
+
+\section{3 NONLINEARITY-AWARE QUANTIZATION  }
+
+
+We propose Nonlinearity-Aware Quantization (NAQ) to exploit the small gradient magnitude regions in nonlinearities $(\S2.3)$ in order to reduce the energy consumption of pre-nonlinearity computation $(\S2.5)$ . In $\S2.3$ , we described a dependency loop where we need the nonlinearity gradients to selectively quantize the inputs, but we need to compute the pre-nonlinearity values from these inputs to determine the nonlinearity gradients. NAQ predicts when the gradient is large via low-precision computation and then uses the prediction to recompute at full precision when the gradient magnitude is large, thus breaking the dependency loop.  
+
+NAQ addresses energy efficiency because computing at low-precision uses much less energy than full precision $(\S2.4)$ and we only recompute a fraction of the total computation at full precision. However, recomputation adds latency as the critical path includes the original full precision computation and additional low-precision computation. For this reason, NAQ is not ideal for latency-sensitive applications, but NAQ is suited to energy-constrained applications, such as data centers that would like to lower energy costs and mobile platforms that are limited by battery life.  
+
+Quantization and dequantization are performed according to Eqn. 8 and Eqn. 9, respectively. Fixed point low-bitwidth computation is performed in the dot product and addition in the FC layer (Fig. 4 (left)), and in attention score computation (Fig. 4 (right)) if the parameters are quantized by model compression. In $\S4.1$ , we describe building on top of quantization-based model compression works.  
+
+![](images/dff96372da8c2c76ded7f37d6d18496fe58ca0881e17914a3ffe42e1f2df472f.jpg)  
+Figure 4: Flowchart demonstrating applying the NAQ technique to the pre-activation FC layer (left) and the pre-softmax attention score computation (right). The pre-nonlinearity computation is computed on quantized values to learn nonlinearity gradient information at lower energy consumption, then the gradient information informs how to selectively recompute where the gradient magnitude is predicted to be large.  
+
+3.1 FULLY-CONNECTED LAYER  
+
+The flowchart in Fig. 4 (left) shows how NAQ is applied to a fully-connected layer computation that produces the pre-activation tensor. First, the weights, activations, and biases fetched (green) and quantized (beige). Second, the quantized weights and activations are multiplied (dark blue) producing the quantized product (QP), then the quantized bias is added to produce the quantized pre-activation (QPA). Then, the QP is compared against the QP threshold $(T_{\mathrm{QP}})$ on an element-wise basis (light blue):  
+
+• If $Q P\leq T_{\mathrm{QP}}$ , then the QPA is dequantized (beige) and passed into the activation function. • If $Q P>T_{\mathrm{QP}}$ , then the QPA is discarded and the full-precision pre-activation (yellow) is computed and passed into the activation function.  
+
+We found that QP is a good predictor for the gradient. Increasing $T_{\mathrm{QP}}$ reduces the amount of recomputation at the cost of allowing more quantization error.  
+
+
+
+\section{3.2 ATTENTION SCORE  }
+
+
+The flowchart in Fig. 4 (right) shows how NAQ quantizes the attention score computation that produces the pre-softmax tensor. First, attention score is computed on quantized keys and queries. Second, the exponential of attention scores $(e^{z_{i}})$ and the sum of exponentials along the last dimension of the tensor $(\bar{\sum_{k=1}^{K}e^{z_{k}}})$ are compared to thresholds on an element-wise basis:  
+
+• If $e^{z_{i}}\leq T_{\mathrm{AS}}$ and $\begin{array}{r}{\sum_{k=1}^{K}e^{z_{k}}\geq T_{\mathrm{sum}}}\end{array}$ , then the quantized attention score is dequantized and   
+passed into the so ftmax.   
+• If not, then the quantized attention is discarded and the full-precision pre-activation is computed and passed into the activation function.  
+
+hBeoutrhi $e^{z_{i}}$ s  aton dp $\sum_{k=1}^{K}e^{z_{k}}$ laafrfgeec tt hteh eg rgardaideinet ntm amgangitnuitdue dwe il(ls ebee. $\S2.3.2$ and Fig. 2.3), so use both as  
+
+
+
+\section{3.3 QUANTIZATION THRESHOLDS  }
+
+
+NAQ uses quantization thresholds on the quantized product for the pre-activation fully-connected lNayAeQr  caondm pount $e^{z_{i}}$ uaanndt $\sum_{k=1}^{K}e^{z_{k}}$ nfloirn etahrei tpyr tee-nssooftrsm, awxh iactthe nwtiooulnd  sycioerled  icnoamccpuurtaattei ognr.a dTiehnist  visa lbueecs.a uWsee can empirically show a tradeoff in model performance and energy saved by changing the quantization thresholds. If there is more full-precision recomputation, then more energy will be used, but the model performance would also improve (§4).  
+
+3.4 HARDWARE IMPLEMENTATION  
+
+A limitation of NAQ is that there is not current hardware support to achieve energy efficiency gains. However, commodity hardware and computer architecture research is not far from being able to support NAQ. NVIDIA GPUs have support INT4 computation since 2019, with throughput around double INT8 (Dave Salvator & Emmart, 2019). Assuming the same power demand for INT4 compared to INT8, this would mean the energy per computation scales linearly, as opposed to quadratically like we believe is possible with specialized hardware. While commodity GPUs do not directly support the arbitrary sparse computation during full-precision recomputation, it is possible to repack the sparse computation into the 2:4 structured sparsity pattern (Choquette, 2023), though this would come with some data movement overheads in repacking. Recent computer architecture works (Zhang et al., 2020b; Srivastava et al., 2020) have shown one to two orders of magnitude improvements in throughput and energy efficiency compared to GPUs. We hope this study motivates further research and development of better support for sparsity.  
+
+
+
+\section{4 METHODOLOGY AND EVALUATION  }
+
+
+We study the potential of NAQ by implementing two PyTorch modules, one that replaces the first fully-connected layer and the subsequent activation function in the MLP block, and another that replaces the attention score computation and softmax in the Attention block. While these modules are not designed to show energy savings on commodity GPUs, they track the amount of full-precision recomputation, so that we can estimate the energy savings should specialized hardware be built. Quantization is performed as described in $\S2.4$ , with 4 bits and $M=4$ for inputs and $M$ being the maximum absolute value weight along the last dimension of the weight tensor. Energy consumption estimated from counting full precision and 4-bit multiply-adds and using the energy estimation in $\S2.4$  
+
+![](images/10a3e6996efc3e0c64e27c6ba3ecb5bbe4060daeda89ea4a553e7bf4aeb3e370.jpg)  
+Figure 5: Perplexity of BLOOM and OPT GPTQ models when NAQ is applied to pre-nonlinearity computation. The plot shows the trade-off between perplexity and the proportion of full-precision computation that NAQ avoids computing as we sweep NAQ quantization thresholds. $\times$ represents the baseline perplexity of the GPTQ model without NAQ.  
+
+![](images/91db031347b3de6074cded8b04a3a0ca28b8730571a15f69e8080456ad134849.jpg)  
+Figure 6: Perplexity of BLOOM and OPT GPTQ models when NAQ is applied to pre-nonlinearity computation. The plot shows the trade-off between perplexity and the relative energy consumption (lower is better) as we sweep NAQ quantization thresholds. $\times$ represents the baseline perplexity of the GPTQ model without NAQ.  
+
+
+
+\section{4.1 BASELINES  }
+
+
+Model compression is important for reducing the memory footprint and memory bandwidth usage of models, and it is synergistic with energy efficiency in terms of saving costs in data center hardware and energy use, as well as helping in deployment to mobile platforms. Thus, we evaluate all models building on prior quantization-based model compression works, PTQ4ViT (Yuan et al., 2022) and  
+
+![](images/e6ad310f6e40e84c0bad0c31ec5e11648d059f0dfeb68574f39b269050449c01.jpg)  
+
+Figure 7: ImageNet (Deng et al., 2009) top-1 accuracy plotted against the proportion of full-precision computation that NAQ avoids computing for the PTQ4ViT ViT and DeiT models when NAQ is applied to its pre-nonlinearity computation with a sweep of quantization thresholds. $\times$ represents the baseline accuracies of the pre-trained model without NAQ.  
+
+![](images/09b884c4f21e655a5b045c24c9c8d5220e29dbe180d0785abe634d71edb5d583.jpg)  
+
+Figure 8: ImageNet (Deng et al., 2009) top-1 accuracy plotted against relative energy consumption of the PTQ4ViT ViT and DeiT models when NAQ is applied to its pre-nonlinearity computation with a sweep of quantization thresholds. $\times$ represents the baseline accuracies of the pre-trained model without NAQ.  
+
+GPTQ (Frantar et al., 2022). For PTQ4ViT models, we use the W8A8 baseline, so INT8 computation as the baseline. The dataset is ImageNet-1K, performance measured as top-1 accuracy (higher is better). We evaluate ViT (Dosovitskiy et al., 2020) and DeiT (Touvron et al., 2021) models. For GPTQ, we use the 4-bit weight baseline, but computation is done in FP16 as the baseline. The dataset is c4 (Raffel et al., 2020), evaluating perplexity (lower is better). We evaluate on BLOOM (Workshop et al., 2022) and OPT (Zhang et al., 2022).  
+
+4.2 MODEL PERFORMANCE AND ENERGY SAVINGS TRADE-OFF  
+
+In our evaluation, we show how much full precision pre-nonlinearity computation (FP16 for GPTQ and INT8 for PTQ4ViT) can be avoided without significant degradation in model performance. Then, we apply our model of how computation energy consumption is reduced by quantization $(\S2.4)$ to determine how much energy the NAQ models consume relative to the baseline, and plot this against model performance. We account for the overhead of computing low precision values that end up not being used because they are recomputed.  
+
+achieve the best perplexity at the lowest relative energy consumption.   
+Results for PTQ4ViT models with NAQ are shown in Fig. 7 and Fig. 8. While over $40\%$ of full precision pre-nonlinearity computation can be avoided with small degradations in accuracy, NAQ struggles to reduce energy consumption. At most, it achieves a $10\%$ energy savings. The reason this is the case is that full-precision computation for PTQ4ViT is INT8, which uses just $3.5\times$ more energy than INT4 computation. The additional energy for INT4 computation that is discarded and recomputed means the energy efficiency gains are more modest.  
+
+More detailed results with the quantization thresholds and more detailed breakdown of computation avoided can be found in App. C.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we propose NAQ, which exploits the small gradient magnitude regions of nonlinearities in the transformer architecture. Where the gradient magnitude is small, quantization error can be tolerated. Under NAQ, all pre-nonlinearity computation is performed at low bit-width, which provides information about the which pre-nonlinearity elements correspond to high gradient magnitude, so those can be re-computed at full precision. We evaluate NAQ by building on top of prior model compression work and we find that with hardware support, models with NAQ would avoid up to $62\%$ of full precision pre-nonlinearity computation and it would achieve up to $29\%$ reduction in energy consumption, with small effects on model performance. We hope our work stimulates further research into the interplay between the choice of activation function and accelerated approximate computing.  
+
+
+
+\section{6 REPRODUCIBILITY STATEMENT  }
+
+
+  
+
+Vahideh Akhlaghi, Amir Yazdanbakhsh, Kambiz Samadi, Rajesh K Gupta, and Hadi Esmaeilzadeh. Snapea: Predictive early activation for reducing computation in deep convolutional neural networks. In 2018 ACM/IEEE 45th Annual International Symposium on Computer Architecture (ISCA), pp. 662–673. IEEE, 2018.  
+
+Haoli Bai, Wei Zhang, Lu Hou, Lifeng Shang, Jing Jin, Xin Jiang, Qun Liu, Michael Lyu, and Irwin King. Binarybert: Pushing the limit of bert quantization. arXiv preprint arXiv:2012.15701, 2020.  
+
+Iz Beltagy, Matthew E Peters, and Arman Cohan. Longformer: The long-document transformer. arXiv preprint arXiv:2004.05150, 2020.  
+
+Jack Choquette. Nvidia hopper h100 gpu: Scaling performance. IEEE Micro, 2023.  
+
+Milind Kulkarni Dave Salvator, Hao Wu and Niall Emmart. Int4 precision for ai inference, November 2019.  
+
+Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. Imagenet: A large-scale hierarchical image database. In 2009 IEEE conference on computer vision and pattern recognition, pp. 248–255. Ieee, 2009.  
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805, 2018.  
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929, 2020.  
+
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is worth 16x16 words: Transformers for image recognition at scale. In International Conference on Learning Representations, 2021. URL https://openreview. net/forum?id $\cdot=$ YicbFdNTTy.   
+Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. Gptq: Accurate post-training quantization for generative pre-trained transformers. arXiv preprint arXiv:2210.17323, 2022.   
+Amir Gholami, Sehoon Kim, Zhen Dong, Zhewei Yao, Michael W Mahoney, and Kurt Keutzer. A survey of quantization methods for efficient neural network inference. In Low-Power Computer Vision, pp. 291–326. Chapman and Hall/CRC, 2022.   
+Jennifer Hiller. Three mile island’s nuclear plant to reopen, help power microsoft’s ai centers, September 2024.   
+Kurt Hornik, Maxwell Stinchcombe, and Halbert White. Multilayer feedforward networks are universal approximators. Neural networks, 2(5):359–366, 1989.   
+Mark Horowitz. 1.1 computing’s energy problem (and what we can do about it). In 2014 IEEE international solid-state circuits conference digest of technical papers (ISSCC), pp. 10–14. IEEE, 2014.   
+Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural networks for efficient integer-arithmetic-only inference. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 2704–2713, 2018.   
+Namhyung Kim, Hanmin Park, Dongwoo Lee, Sungbum Kang, Jinho Lee, and Kiyoung Choi. Compreend: Computation pruning through predictive early negative detection for relu in a deep neural network accelerator. IEEE Transactions on Computers, 71(7):1537–1550, 2021a.   
+Sehoon Kim, Amir Gholami, Zhewei Yao, Michael W Mahoney, and Kurt Keutzer. I-bert: Integeronly bert quantization. In International conference on machine learning, pp. 5506–5518. PMLR, 2021b.   
+Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li, Sheng Shen, Michael W Mahoney, and Kurt Keutzer. Squeezellm: Dense-and-sparse quantization. arXiv preprint arXiv:2306.07629, 2023.   
+Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. arXiv preprint arXiv:2001.04451, 2020.   
+Thomas Kuribel. Derivative of the softmax function and the categorical cross-entropy loss. 2021, 2021.   
+Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. Awq: Activation-aware weight quantization for on-device llm compression and acceleration. Proceedings of Machine Learning and Systems, 6: 87–100, 2024.   
+Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and Baining Guo. Swin transformer: Hierarchical vision transformer using shifted windows. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), 2021.   
+Alec Radford, Karthik Narasimhan, Tim Salimans, Ilya Sutskever, et al. Improving language understanding by generative pre-training. 2018.   
+Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. Exploring the limits of transfer learning with a unified text-to-text transformer. Journal of Machine Learning Research, 21(140):1–67, 2020. URL http://jmlr.org/papers/v21/20-074.html.   
+Sheng Shen, Zhen Dong, Jiayu Ye, Linjian Ma, Zhewei Yao, Amir Gholami, Michael W Mahoney, and Kurt Keutzer. Q-bert: Hessian based ultra low precision quantization of bert. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 34, pp. 8815–8821, 2020.   
+Nitish Srivastava, Hanchen Jin, Jie Liu, David Albonesi, and Zhiru Zhang. Matraptor: A sparse-sparse matrix multiplication accelerator based on row-wise product. In 2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO), pp. 766–780. IEEE, 2020.   
+Aaron Stillmaker and Bevan Baas. Scaling equations for the accurate prediction of cmos device performance from $180\,\mathrm{nm}$ to 7 nm. Integration, 58:74–81, 2017.   
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Francisco Massa, Alexandre Sablayrolles, and Herve´ Je´gou. Training data-efficient image transformers & distillation through attention. In International conference on machine learning, pp. 10347–10357. PMLR, 2021.   
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timoth´ee Lacroix, Baptiste Rozi\`ere, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971, 2023.   
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems, 30, 2017.   
+BigScience Workshop, Teven Le Scao, Angela Fan, Christopher Akiki, Ellie Pavlick, Suzana Ili´c, Daniel Hesslow, Roman Castagn´e, Alexandra Sasha Luccioni, Franc¸ois Yvon, et al. Bloom: A 176b-parameter open-access multilingual language model. arXiv preprint arXiv:2211.05100, 2022.   
+Carole-Jean Wu, Ramya Raghavendra, Udit Gupta, Bilge Acun, Newsha Ardalani, Kiwan Maeng, Gloria Chang, Fiona Aga, Jinshi Huang, Charles Bai, et al. Sustainable ai: Environmental implications, challenges and opportunities. Proceedings of Machine Learning and Systems, 4: 795–813, 2022.   
+Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In International Conference on Machine Learning, pp. 38087–38099. PMLR, 2023.   
+Zhewei Yao, Reza Yazdani Aminabadi, Minjia Zhang, Xiaoxia Wu, Conglong Li, and Yuxiong He. Zeroquant: Efficient and affordable post-training quantization for large-scale transformers. Advances in Neural Information Processing Systems, 35:27168–27183, 2022.   
+Weihao Yu, Mi Luo, Pan Zhou, Chenyang Si, Yichen Zhou, Xinchao Wang, Jiashi Feng, and Shuicheng Yan. Metaformer is actually what you need for vision. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pp. 10819–10829, 2022.   
+Zhihang Yuan, Chenhao Xue, Yiqi Chen, Qiang Wu, and Guangyu Sun. Ptq4vit: Post-training quantization for vision transformers with twin uniform quantization. In European conference on computer vision, pp. 191–207. Springer, 2022.   
+Ofir Zafrir, Guy Boudoukh, Peter Izsak, and Moshe Wasserblat. Q8bert: Quantized 8bit bert. In 2019 Fifth Workshop on Energy Efficient Machine Learning and Cognitive Computing-NeurIPS Edition (EMC2-NIPS), pp. 36–39. IEEE, 2019.   
+Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen, Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria Lin, et al. Opt: Open pre-trained transformer language models. arXiv preprint arXiv:2205.01068, 2022.   
+Wei Zhang, Lu Hou, Yichun Yin, Lifeng Shang, Xiao Chen, Xin Jiang, and Qun Liu. Ternarybert: Distillation-aware ultra-low bit bert. arXiv preprint arXiv:2009.12812, 2020a.   
+Zhekai Zhang, Hanrui Wang, Song Han, and William J Dally. Sparch: Efficient architecture for sparse matrix multiplication. In 2020 IEEE International Symposium on High Performance Computer Architecture (HPCA), pp. 261–274. IEEE, 2020b.  
+
+
+

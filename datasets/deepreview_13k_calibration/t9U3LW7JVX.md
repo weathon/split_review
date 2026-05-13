@@ -1,8 +1,8 @@
 # Automated Design of Agentic Systems
 
 - Decision: Accept
-- Avg Score: 3.00
-- Scores: 1, 0, 8, 3, 3
+- Avg Score: 6.00
+- Scores: 10, 8, 3, 3
 
 ## Abstract
 Researchers are investing substantial effort in developing powerful general-purpose agents, wherein Foundation Models are used as modules within \emph{agentic systems} (e.g. Chain-of-Thought, Self-Reflection, Toolformer).

@@ -1,0 +1,466 @@
+\title{A Reparameterized Discrete Diffusion Model for Text Generation}
+
+\begin{abstract}
+This work studies discrete diffusion probabilistic models with applications to natural language generation. We derive an alternative yet equivalent formulation of the sampling from discrete diffusion processes and leverage this insight to develop a family of \textit{reparameterized discrete diffusion models}. The derived generic framework is highly flexible, offers a fresh perspective of the generation process in discrete diffusion models, and features more effective training and decoding techniques. We conduct extensive experiments to evaluate the text generation capability of our model, demonstrating significant improvements over existing diffusion models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion-based generative models \citep{sohl2015deep,ddpm,song2021scorebased}, or diffusion models for short, have achieved remarkable progress and shown great success in generating high-quality and photo-realistic images \citep{ramesh2022dalle2,saharia2022imagen,rombach2022high,balaji2022ediffi,peebles2022scalable}.
+Researchers have successfully extended diffusion models to various data modalities beyond 2D images, including audio \citep{kong2021diffwave}, video \citep{ho2022vdm}, as well as molecule generation \citep{hoogeboom22amolecule,jo22agraph}. There has also been a surge of interest in extending diffusion models to natural languages \citep{hoogeboom2021multinomialdiffusion,austin2021d3pm,li2022diffusionlm,dieleman2022cdcd}. Diffusion-based language models are appealing in that the generation process is typically conducted in a non-autoregressive manner, which features in-parallel decoding by design and potentially a faster runtime \citep{hoogeboom2021multinomialdiffusion, austin2021d3pm}. In addition, due to the iterative reconstruction process in diffusion-based models, it is often possible to refine the previously generated texts \citep{savinov2022sundae}. As a result, compared with the conventional auto-regressive models, diffusion-based language models are more flexible and attain better trade-offs between generation quality and efficiency.
+
+However, there are noticeably fewer success cases in employing diffusion models for large-scale text generation tasks. This is possibly due to the discrete nature of natural languages, while most conventional diffusion models focus on continuous-valued contents. To bridge the discrepancy, a recent line of work suggests conducting continuous diffusion processes over token embeddings \citep{li2022diffusionlm,gong2022diffuseq,strudel2022sed,dieleman2022cdcd} or logits \citep{han2022ssdlm,richemond2022simplex}. Nevertheless, these approaches often require designing a well-crafted rounding scheme to convert the diffused continuous vectors to the actual discrete tokens. In addition, existing continuous diffusion models often require a large number of sampling iterations to achieve the desired performance. This issue is exacerbated in the case of modeling texts, as the diffusing steps over text embeddings are hard to be translated to significant movements of token states due to the rounding quantization. This results in a considerably slower runtime than auto-regressive models. For example, a recent continuous text diffusion model \citep[DiffuSeq; ][]{gong2022diffuseq} runs several orders of magnitude slower than the auto-regressive baseline of a similar scale, as shown in \cref{fig:bleu_vs_speed}. Different from the above, another research direction focuses on diffusion processes that directly operate on discrete state spaces \citep[][see \cref{sec:bg}]{sohl2015deep,hoogeboom2021multinomialdiffusion,austin2021d3pm}. However, they are relatively under-explored and often achieve inferior results in text generation.
+
+\begin{wrapfigure}[17]{R}{0.37\textwidth}
+  \centering
+  {
+  \adjustbox{max totalsize={0.37\columnwidth}{\textheight},center}{
+      \begin{tikzpicture}
+  \tikzstyle{main}=[circle, minimum size = 9mm, thick, draw =black!80, node distance = 5mm]
+  \tikzstyle{connect}=[-latex, thick]
+  \tikzstyle{box}=[rectangle, draw=black!100]
+    \node[main, fill = black!10] (x0) { $\mbx_0$ };
+    \node[main, fill = white!100] (x1) [right=of x0] { $\mbx_1$ };
+    \node[main, fill = white!100] (x2) [right=of x1] { $\mbx_2$ };
+    \node[main, fill = white!100] (x3) [right=of x2] { $\mbx_3$ };
+    \path (x3) edge [connect] (x2)
+          (x2) edge [connect] (x1)
+          (x1) edge [connect] (x0);
+  \end{tikzpicture}
+  }
+  \subcaption{\emph{Conventional} discrete diffusion.}
+  }
+  {\adjustbox{max totalsize={0.35\columnwidth}{\textheight},center}{
+      \begin{tikzpicture}
+  \tikzstyle{main}=[circle, minimum size = 9mm, thick, draw =black!80, node distance = 5mm]
+  \tikzstyle{connect}=[-latex, thick]
+  \tikzstyle{box}=[rectangle, draw=black!100]
+    \node[main, fill = black!10] (x0) { $\mbx_0$ };
+    \node[main, fill = white!100] (x1) [right=of x0] { $\mbx_1$ };
+    \node[main, fill = white!100] (x2) [right=of x1] { $\mbx_2$ };
+    \node[main, fill = white!100] (x3) [right=of x2] { $\mbx_3$ };
+
+    \node[main, fill = white!100] (v1) [above=of x1] { $\mbv_1$ };
+    \node[main, fill = white!100] (v2) [right=of v1] { $\mbv_2$ };
+    \node[main, fill = white!100] (v3) [right=of v2] { $\mbv_3$ };
+
+    \path (x3) edge [connect] (x2)
+          (x2) edge [connect] (x1)
+          (x1) edge [connect] (x0)
+          (v3) edge [connect] (x3)
+          (v2) edge [connect] (x2)
+          (v1) edge [connect] (x1);
+  \end{tikzpicture}
+  }
+  \subcaption{\emph{Reparameterized} discrete diffusion.}
+  }
+  \caption{Graphical models of backward diffusion processes.}
+  \label{fig:pgm}
+\end{wrapfigure}
+
+
+In this work, we demonstrate that discrete diffusion models can serve as strong baselines for text generation. By re-examining the formulation, we observe that sampling from discrete diffusion models admits a novel yet equivalent \textit{reparameterization} (\cref{sec:reparam_backward_process}). Specifically, starting with a completely noisy sequence, the sampling procedure in a discrete diffusion model is equivalent to the following \textit{route-and-denoise} process where at each iteration, each token within the sequence is either denoised or reset to noisy states according to an underlying stochastic \textit{routing} mechanism (\cref{ssec:reparam_backward:sampling}). The router assigns the same probability to the decision for each token, processing the sequence in a uniform manner.
+Based on this insight, we propose \textbf{R}eparameterized \textbf{D}iscrete diffusion \textbf{M}odels (RDMs; \cref{fig:pgm}), a new family of models that respects the reparameterization and formulates the routing process explicitly. RDMs enjoy appealing properties for both training (\cref{ssec:rdm:training}) and sampling (\cref{ssec:rdm:decoding}): (1) \textit{Simplified training}. We demonstrate that the training objective for RDMs can be reduced to a re-weighted standard cross-entropy loss. Furthermore, the loss objective is invariant to different routing probabilities up to reweighting, indicating that the large family of RDMs with distinct routing processes can be trained with the same surrogate objective; (2) \textit{Flexible sampling}. The shared training objective makes sampling highly flexible and allows more expressive routing processes. In particular, we develop an adaptive routing strategy that routes tokens to the denoised state only if the router outputs high scores instead of uniformly processing all the tokens. Equipped with such training and decoding schemes, we demonstrate that RDMs significantly improve vanilla discrete diffusion models across several standard text generation benchmarks (\cref{sec:experiments}). They also achieve much better performance than the continuous diffusion models while running several orders faster.
+Our contributions can be summarized as follows:
+\begin{itemizesquish}
+    \item We analyze existing discrete diffusion probabilistic models and derive a more compact formulation that generalizes various diffusion processes and reveals an internal routing mechanism for selectively denoising tokens;
+    \item We introduce reparameterized diffusion models (RDMs), a new model family that parameterizes both routing and denoising processes. RDMs yield a greatly simplified training objective and enable more flexible decoding algorithms for text generation;
+    \item We provide extensive results and analyses across several benchmarks to demonstrate the improved text generation quality of RDMs.
+\end{itemizesquish}
+
+
+
+\section{Background}
+
+Let $\mbx_0 \sim p_{\text{data}}(\mbx_0)$ denote a discrete random variable with $K$ possible outcomes. To ease notation, we represent discrete variables as one-hot vectors in $\{0,1\}^K$, which is 0 everywhere except that the entry corresponding to the current state is 1. Discrete diffusion probabilistic models \citep{sohl2015deep,hoogeboom2021multinomialdiffusion,austin2021d3pm} are usually defined as a class of latent variable models characterized by a forward and backward process. The \textit{forward} process gradually transforms input data to some noise distribution $q_{\text{noise}}$ through $T$ intermediate latent variables $\mbx_1, \dots, \mbx_T \in \{0,1\}^K$, with the forward transition $q(\mbx_t | \mbx_{t-1}) = \beta_t\mbx_{t-1} + (1 - \beta_t)q_\text{noise}$. In this case, the distribution $q(\mbx_t|\mbx_0)$ is available in closed form,%
+\begin{equation}
+    q(\mbx_t | \mbx_0) = \alpha_t\mbx_{t-1} + (1 - \alpha_t)q_\text{noise},\label{eqn:q_xt_given_x0}
+\end{equation}
+where $\alpha_t \coloneqq \prod_{i=1}^t \beta_i$ is specified to decrease from 1 to 0 w.r.t. $t$. $q_{\text{noise}}$ characterizes different diffusion processes; for example, \textbf{multinomial diffusion} \citep{hoogeboom2021multinomialdiffusion} adopts a uniform noise distribution over the vocabulary $\{1,2,\dots,K\}$; alternatively, \textbf{absorbing diffusion} specifies $q_{\text{noise}}$ to be a point mass with all of the probability on an absorbing state \citep{austin2021d3pm}.
+
+The \textit{backward} process $q(\mbx_{t-1} | \mbx_t)$ is the key ingredient for diffusion-based generative modeling, based on which we can start with unstructured noise $x_T \sim q_\text{noise}$ and perform ancestral sampling $x_{t-1} \sim q(\mbx_{t-1} | \mbx_t)$ to obtain new draws from $p_{\text{data}}(\mbx_0)$. Unfortunately, the backward transition $q(\mbx_{t-1} | \mbx_t)$ is mostly intractable due to the marginalization over the entire data distribution. Therefore, we resort to approximating it with a parameterized distribution $p_{\mbtheta}(\mbx_{t-1} | \mbx_{t})$ at each step $t$. This results in a generative model $p_{\mbtheta}(\mbx_0, \mbx_1, \dots, \mbx_T) = p_{\mbtheta}(\mbx_T) \prod_{t = 1}^T p_{\mbtheta}(\mbx_{t-1} | \mbx_{t})$, which can be trained by maximizing the evidence lower bound (ELBO) of $\log p_{\mbtheta}(\mbx_0)$,%
+\begin{align*}
+    \log p_{\mbtheta}(\mbx_0) \geq \mathcal{L}_1(\mbtheta) - \sum_{t=2}^T \mathcal{L}_t(\mbtheta) + \text{const.},
+\end{align*}
+with $\mathcal{L}_t(\mbtheta) \coloneqq \E[q(\mbx_t|\mbx_0)]{\kl{q(\mbx_{t-1} | \mbx_{t} ,\mbx_0)}{p_{\mbtheta}(\mbx_{t-1} | \mbx_{t})}}$. For the case $t=1$, we have $\mathcal{L}_1(\mbtheta) \coloneqq \E[q(\mbx_1|\mbx_0)]{\log p_{\mbtheta}(\mbx_0|\mbx_1)}$.
+The ELBO decomposes into a sum of KL divergences between the \textit{conditional backward transition} $q(\mbx_{t-1} | \mbx_{t} ,\mbx_0)$ and $p_{\mbtheta}(\mbx_{t-1} | \mbx_{t})$ at each time step $t$. Note that $q(\mbx_{t-1} | \mbx_{t} ,\mbx_0) \propto q(\mbx_{t}|\mbx_{t-1})q(\mbx_{t-1}|\mbx_0)$ can be calculated analytically for most discrete diffusion models. To define the distribution $p_{\mbtheta}(\mbx_{t-1} | \mbx_{t})$, previous work \citep{hoogeboom2021multinomialdiffusion} suggests that it can be parameterized similarly to $q(\mbx_{t-1} | \mbx_{t}, \mbx_0)$ by letting $p_{\mbtheta}(\mbx_{t-1} | \mbx_{t}) = q(\mbx_{t-1} | \mbx_{t}, f(\mbx_t;\mbtheta))$, where a neural network $f(\mbx_t;\mbtheta)$ is adopted to predict $\mbx_0$. Typically $f(\mbx_t;\mbtheta) \in (0,1)^K$ is the model output normalized by a softmax function, representing the probability vector for each token. For text generation, each discrete text token within an input sequence is often assumed to be diffused independently. Thus to avoid cluttering the discussion, we focus initially on the diffusion process of a single token and address the entire sequence later in \cref{ssec:rdm:training} and \cref{ssec:rdm:decoding}. A more detailed discussion about the related work and derivations about discrete diffusion models are provided in \cref{app:sec:related_work,app:sec:detailed-bg}, respectively.
+
+
+\section{Reparameterizing the Backward Processes}
+
+\label{sec:reparam_backward_process}
+This section presents an in-depth study of discrete diffusion probabilistic models. We derive an alternative formulation for the backward process (\cref{ssec:reparam_backward:formulation}) and devise a reparameterized sampling scheme (\cref{ssec:reparam_backward:sampling}), which paves the way for a more generic family of discrete diffusion models (\cref{sec:rdm}). 
+
+\subsection{An Alternative Backward Formulation}
+\label{ssec:reparam_backward:formulation}
+We first elaborate on how the conditional backward transition of existing discrete diffusion models can be written in a more compact formulation (see \cref{app:sec:derivation_branching_formulation} for the proof).
+\begin{proposition}\label{prop:diffusion_as_branching}
+    Let the forward transition of discrete diffusion be $q(\mbx_t | \mbx_{t-1}) = \beta_t\mbx_{t-1} + (1 - \beta_t)q_\text{noise}$. Then the conditional backward transition $q(\mbx_{t-1} | \mbx_{t}, \mbx_0)$ can be equivalently written as
+    \begin{align*}
+    q(\mbx_{t-1} | \mbx_{t}, \mbx_0) = \begin{cases}
+        \lambda^{(1)}_{t-1}\mbx_t + \left(1-\lambda^{(1)}_{t-1}\right) q_\textup{noise}, &\textup{ if } \mbx_t = \mbx_0 \\
+        \lambda^{(2)}_{t-1}\mbx_0 + \left(1 - \lambda^{(2)}_{t-1}\right)q_\textup{noise}(\mbx_t), &\textup{ if } \mbx_t \neq \mbx_0.
+    \end{cases} \numberthis\label{eqn:q_xtm1_xt_x0_as_branching}
+    \end{align*}
+Here $q_\textup{noise}(\mbx_t) = \beta_t \mbx_t + (1 - \beta_t) q_\textup{noise}$ denotes a noise distribution that interpolates between $\mbx_t$ and $q_\textup{noise}$, $\lambda^{(1)}_{t-1} \coloneqq 1 - \frac{(1-\beta_t)(1-\alpha_{t-1})q_\textup{noise}(\mbu=\mbx_t)}{\alpha_{t} + (1 - \alpha_{t})q_\textup{noise}(\mbu=\mbx_t)}$, and $\lambda^{(2)}_{t-1} \coloneqq \frac{\alpha_{t-1}-\alpha_t}{1 - \alpha_{t}}$, where $q_\textup{noise}(\mbu=\mbx_t)$ is the probability of the noise equal to $\mbx_t$.
+\end{proposition}
+Intuitively, \cref{eqn:q_xtm1_xt_x0_as_branching} reveals that the main mechanism of the backward process is to shuttle discrete tokens between fully noisy states and the ground truth state $\mbx_0$, conditioned on the equality of $\mbx_t$ and $\mbx_0$. If $\mbx_t = \mbx_0$, the current token state is possibly noise-free, and the model either remains noise-free by copying the state $\mbx_{t-1} \!\gets\! \mbx_t$, or resets the state to the noise. If $\mbx_t \neq \mbx_0$, the current state is considered noisy, and the model opts to denoise $\mbx_t$ to $\mbx_0$ or remains noisy otherwise. The probability of moving noisy tokens to ground truth states or turning denoised tokens back to noise is governed by $\lambda^{(2)}_{t-1}$ and $1-\lambda^{(1)}_{t-1}$,  respectively.
+
+\subsection{Reparameterized Sampling}
+\label{ssec:reparam_backward:sampling}
+Next, we demonstrate that sampling from the backward transition can be conducted via an augmented path, leading to our full reparameterization. We make use of the simple fact that the mixture distribution in \cref{eqn:q_xtm1_xt_x0_as_branching} can be sampled in two steps: first, randomly select a component according to their weight, and then sample from the corresponding component distribution. Concisely, we have%
+\begin{align*}
+b_t &= \mbone_{\mbx_t = \mbx_0}\\
+v_{t-1}^{(1)} &\sim \operatorname{Bernoulli}\left(\lambda^{(1)}_{t-1}\right),\quad\mbu_{t}^{(1)} \sim q_\text{noise}\\
+v_{t-1}^{(2)} &\sim \operatorname{Bernoulli}\left(\lambda^{(2)}_{t-1}\right),\quad\mbu_{t}^{(2)} \sim q_\text{noise}(\mbx_t)\\
+\mbx_{t-1} &= b_t\left[v_{t-1}^{(1)}\mbx_t + \left(1-v_{t-1}^{(1)}\right)\mbu_{t}^{(1)}\right] + (1-b_t)\left[v_{t-1}^{(2)}\mbx_0 + \left(1-v_{t-1}^{(2)}\right)\mbu_{t}^{(2)}\right].\numberthis\label{eqn:reparam_backward}
+\end{align*}
+To simplify the notation, we denote $\mbv_{t-1} \coloneqq \left[v_{t-1}^{(1)}, v_{t-1}^{(2)}\right]$ and $\mblambda_{t-1} \coloneqq \left[\lambda^{(1)}_{t-1}, \lambda^{(2)}_{t-1}\right]$. 
+This reparameterized backward transition highlights an underlying \textit{routing} mechanism, where the model routes tokens to different distributions according to $\mbv_{t-1}$: given $b_t$ that discriminates which tokens are currently noisy, $v_{t-1}^{(2)}$ selects and denoises noisy tokens to recover the ground truth $\mbx_0$, while $v_{t-1}^{(1)}$ determines which denoised tokens revert to the noisy state.
+
+
+
+\section{Reparameterized Discrete Diffusion Models}
+
+\label{sec:rdm}
+In this section, we introduce our proposed diffusion models that reflect the reparameterization (\cref{ssec:rdm:model}), which imply effective training (\cref{ssec:rdm:training}) and sampling (\cref{ssec:rdm:decoding}) algorithms.
+
+\subsection{Joint Diffusion Modeling}
+\label{ssec:rdm:model}
+The routing mechanism in \cref{ssec:reparam_backward:sampling} works in a latent manner; that is, it is only active during the sampling process but marginalized when advancing the distribution of $\mbx_{t-1}$. To fully utilize the potential of the developed reparameterization, we propose to elevate the latent routing mechanism to the formulation explicitly and model the \textit{joint} $q(\mbx_{t-1}, \mbv_{t-1}|\mbx_t, \mbx_0) = q(\mbv_{t-1}) q(\mbx_{t-1} | \mbv_{t-1}, \mbx_{t}, \mbx_0)$, where %
+\begin{align*}
+q(\mbv_{t-1}) &= \operatorname{Bernoulli}\left(\mblambda_{t-1}\right) \\
+q(\mbx_{t-1} | \mbv_{t-1}, \mbx_{t}, \mbx_0) &= \begin{cases}
+    v^{(1)}_{t-1}\mbx_t + \left(1-v^{(1)}_{t-1}\right) q_\textup{noise}, &\textup{ if } b_t = 1 \\
+    v^{(2)}_{t-1}\mbx_0 + \left(1 - v^{(2)}_{t-1}\right)q_\textup{noise}(\mbx_t), &\textup{ if } b_t = 0.
+\end{cases}\numberthis\label{eqn:rdm:joint_q}
+\end{align*}
+Note that $b_t = \mbone_{\mbx_t = \mbx_0}$. This can be considered as a standard discrete diffusion model augmented with step-wise routing indicators $\{\mbv_{t-1}\}_{t=1}^T$ (see \cref{fig:pgm}). It closely relates to the conventional formulation (\cref{eqn:q_xtm1_xt_x0_as_branching}) in that the original backward process amounts to marginalizing out $\mbv_{t-1}$ at each time step: $q(\mbx_{t-1} | \mbx_{t}, \mbx_0) = \E[q(\mbv_{t-1})]{q(\mbx_{t-1} | \mbv_{t-1}, \mbx_{t}, \mbx_0)}$. Since the distribution over $\mbv_{t-1}$ is explicitly considered, this joint diffusion model offers improved flexibility and expressiveness. We refer to this class of models as \textit{reparameterized discrete diffusion models} (RDMs), as it yields an equivalent sampling process to the original formulation but via a reparameterized path.
+
+\subsection{Training}
+\label{ssec:rdm:training}
+Similar to previous diffusion models (\cref{sec:bg}), we define a joint generative process $p_{\mbtheta}(\mbx_{t-1}, \mbv_{t-1} | \mbx_t)$ and optimize the ELBO via the following factorization,%
+\begin{align*}
+    \log p(\mbx_0) \geq \E[q(\mbx_{1:T}, \mbv_{1:T}|\mbx_0)]{\log \frac{p_{\mbtheta}(\mbx_0, \mbx_{1:T}, \mbv_{1:T})}{q(\mbx_{1:T}, \mbv_{1:T}|\mbx_0)}} \coloneqq \mathcal{L}_1(\mbtheta) - \sum_{t=2}^T \mathcal{L}_t(\mbtheta) + \text{const.}.
+\end{align*}
+Following standard practices in diffusion models \citep{hoogeboom2021multinomialdiffusion,austin2021d3pm}, we randomly sample a time step $t$ and optimize $\mbtheta$ with respect to $\mcL_t(\mbtheta)$. In our case, $\mcL_1(\mbtheta) = \E[q(\mbx_{1}|\mbx_0)]{\log p_{\mbtheta}(\mbx_0|\mbx_1)}$; for $t > 1$, $\mcL_t$ decomposes into a sum of two expected KL divergences over $\mbv_{t-1}$ and $\mbx_{t-1}$ respectively (see \cref{app:sec:derivation_rdm_elbo} for the full derivation),
+\begin{align*}
+    \mcL_t(\mbtheta) = \mathbb{E}\left[\kl{q(\mbv_{t-1})}{p_{\mbtheta}(\mbv_{t-1})}\right] + \mathbb{E}\left[\kl{q(\mbx_{t-1} | \mbv_{t-1}, \mbx_t, \mbx_0)}{p_{\mbtheta}(\mbx_{t-1}|\mbv_{t-1}, \mbx_t)}\right], \numberthis\label{eqn:kl_loss}
+\end{align*}
+where the expectations are with respect to $q(\mbx_t|\mbx_0)$ and $q(\mbx_t|\mbx_0)q(\mbv_{t-1})$, respectively.
+
+\begin{wrapfigure}[14]{R}{0.5\textwidth}
+\resizebox{.5\columnwidth}{!}{%
+\begin{minipage}[t]{0.6\textwidth}
+\begin{algorithm}[H] %
+   \caption{Training RDMs}
+   \label{alg:rdm:training}
+    \begin{algorithmic}
+    \State {\bfseries Input:} neural network $f\left(\cdot;\mbtheta\right)$, data distribution $p_{\text{data}}(\mbx_{0,1:N})$, and a custom reweighting scalar $\textcolor{keywords}{\lambda_{t-1}}$.
+    \State {\bfseries Output:} model parameters $\mbtheta$.
+    \Repeat
+        \State Draw $\mbx_{0,1:N} \sim p_{\text{data}}(\mbx_{0,1:N})$;
+        \State Draw $t \in \operatorname{Uniform}(\{1,\dots,T\})$;
+        \For{$n = 1,2,\dots,N$}
+            \State Draw $\mbx_{t,n} \sim q(\mbx_{t,n} | \mbx_{0,n})$;
+            \State Let $b_{t,n} = \mbone_{\mbx_{t,n} = \mbx_{0,n}}$;
+        \EndFor
+        \State $\mcL(\mbtheta) = \!-\textcolor{keywords}{\lambda_{t-1}}\!\sum_{n=1}^N (1\!-\!b_{t,n})\mbx_{0,n}^\top\!\log f\left(\mbx_{t,n};\mbtheta\right)$;
+        \State Minimize $\mcL(\mbtheta)$ with respect to $\mbtheta$;
+    \Until{converged}
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+}
+\end{wrapfigure}
+
+\paragraph{Parameterization.} The decomposition in \cref{eqn:kl_loss} suggests parameterizing each conditional of $p_{\mbtheta}(\mbx_{t-1}, \mbv_{t-1} | \mbx_t) = p_{\mbtheta}(\mbx_{t-1} | \mbv_{t-1}, \mbx_t)p_{\mbtheta}( \mbv_{t-1} | \mbx_t)$ separately. To simplify the model representation, we constrain $p_{\mbtheta}(\mbv_{t-1}| \mbx_t)$ to be the same as $q(\mbv_{t-1})$ so that the first KL term vanishes. In terms of $p_{\mbtheta}(\mbx_{t-1} | \mbv_{t-1}, \mbx_t)$, it needs to approximate $q(\mbx_{t-1} | \mbv_{t-1}, \mbx_t, \mbx_0)$ for both $\mbx_0$ and $b_t = \mbone_{\mbx_t=\mbx_0}$. For the former, we approximate $\mbx_0$ with a neural network output $f(\mbx_t;\mbtheta)$ (\cref{sec:bg}); for the latter, it is circumvented via a \textit{teacher-forcing} approach. We leverage the fact that $b_t = \mbone_{\mbx_t=\mbx_0}$ is readily available during training and plug the oracle into $p_{\mbtheta}(\mbx_{t-1} | \mbv_{t-1}, \mbx_t)$, which works well empirically and yields interesting implications as presented below. 
+
+\paragraph{Simplified Training Objectives.}
+The discussion so far focuses on the diffusion process over a single token. We now slightly abuse the term and denote the sequence of tokens at step $t$ as $\mbx_{t,1:N} \coloneqq \{\mbx_{t,n}\}_{n=1}^N$, where the joint distribution factorizes over each token, $\mbx_{t,n}$ is the $n$-th token with $N$ being the sequence length.\footnote{We sometimes use $\mbx_{t}$ and $\mbx_{t,n}$ interchangeably to represent a single token when there is no ambiguity.} We show that the training objective $\mcL_t(\mbtheta)$ for sequence $\mbx_{t,1:N}$ at the $t$-th step can be reduced to a surprisingly simple expression (see \cref{app:sec:derivation_simple_loss} for the proof and its connection to previous works) as follows,
+\begin{align*}
+    \mcL_t(\mbtheta) =\E[p_{\text{data}}(\mbx_{0,1:N})\prod_{n=1}^N q(\mbx_{t,n}|\mbx_{0,n})]{-\lambda_{t-1}^{(2)}\sum_{n=1}^N (1-b_{t,n})\mbx_{0,n}^\top\log f\left(\mbx_{t,n};\mbtheta\right)}.\numberthis\label{eqn:simple_loss}
+\end{align*}
+Based on this result, training RDMs is equivalent to optimizing the standard \textit{multi-class cross-entropy} loss function, which is evaluated over noisy tokens and weighted by $\lambda_{t-1}^{(2)} = \E{\mbv_{t-1}^{(2)}}$. This formulation is conceptually simpler than that of the original discrete diffusion, which requires evaluating the KL divergence between two complicated categoricals \citep{hoogeboom2021multinomialdiffusion}. Besides, this formulation establishes the discrete analog of \textit{reweighting training strategies}, which are recognized as common practices for training continuous-domain diffusion models \citep{ddpm,nichol2021improvedddpm,vahdat2021lsgm,karras2022elucidating}. In particular, we can adjust the weight $\lambda_{t-1}^{(2)}$ to reweigh the cross-entropy function so that it is more amenable for training.
+
+More importantly, we note that the training loss function can be \textit{invariant} with respect to $q(\mbv_{t-1})$ up to reweighting, where different $q(\mbv_{t-1})$ lead to the same shared objective except for the weight $\lambda_{t-1}^{(2)}$. This makes it possible to train the neural network with one amenable distribution of $\mbv_{t-1}$ but share the trained model for sampling among a broad family of diffusion processes indexed by $q(\mbv_{t-1})$.
+
+
+\subsection{Sampling}
+\label{ssec:rdm:decoding}
+Decoding text from discrete diffusion processes usually starts with a sequence comprising only noisy tokens and proceeds by sampling a (partially) denoised sequence $\mbx_{t-1,1:N}$ from the previous step $\mbx_{t,1:N}$ for each $t$.
+
+\paragraph{Recursive Computation for $b_t$.}
+The key challenge in decoding is to compute $b_{t,n} = \mbone_{\mbx_{t,n} = \mbx_{0,n}}$ in \cref{eqn:rdm:joint_q}, which is intractable since we lack access to the ground truth $\mbx_{0,n}$ as in training. We circumvent this issue by leveraging a recursive computation based on the functionality of $\mbv_{t-1,n}$. Starting with $b_{T,n} = 0$, we compute $b_{t-1,n}$ as
+\begin{align*}
+    b_{t-1,n} = \left(b_{t,n} \land v_{t-1,n}^{(1)}\right)\lor v_{t-1,n}^{(2)}.\numberthis\label{eqn:recursive_bt}
+\end{align*}
+Intuitively, $b_{t,1:N}$ represents a frontier set that stores the denoised tokens up to the previous iteration. At the current iteration, we add new tokens to the set if $v_{t-1,n}^{(2)} = 1$ and remove elements from the set if the corresponding $v_{t-1,n}^{(1)} = 0$. The updated set is then read out to form $b_{t-1,1:N}$.\footnote{Technically, for certain noise distributions $q_\text{noise}$, these logic operations $\land$ and $\lor$ should also be noisy since they should compensate for the possibility that noises drawn from $q_\text{noise}$ can also coincide with $\mbx_0$; however, for most diffusion processes considered in this work, such probability is either zero or so small that it can be safely ignored.} Note that the update does not add extra computational costs. Equipped with these results, we can efficiently execute the sampling algorithm without difficulties.
+
+\begin{wrapfigure}[21]{R}{0.5\textwidth}
+\resizebox{.5\columnwidth}{!}{%
+\begin{minipage}{0.6\columnwidth}
+\begin{algorithm}[H] %
+   \caption{Sampling from RDMs}
+   \label{alg:rdm:sampling}
+    \begin{algorithmic}
+    \State {\bfseries Input:} trained network $f\left(\cdot;\mbtheta\right)$ and temperature $\tau$.
+    \State {\bfseries Output:} generated sample $\mbx_0$.
+    \For{$n = 1,2,\dots,N$}
+        \State Initialize $\mbx_{T,n} \sim q_{\text{noise}}$;
+        \State Initialize $b_{T,n} = 0$;
+    \EndFor
+    \For{$t = T,\dots,1$}
+        \For{$n = 1,2,\dots,N$}
+            \State Draw $\widetilde{\mbx}_{0,n} \sim \operatorname{Categorical}\left(f\!\left(\mbx_{t,n};\mbtheta\right)\!/\tau\right)$;
+            \State Generate $\mbv_{t-1,n}$ according to \cref{eqn:adaptive_v};
+            \If{$b_{t,n} = 1$}
+            \State Draw $\mbu_{t,n}^{(1)} \sim q_\text{noise}$;
+            \State $\mbx_{t-1,n} = v_{t-1,n}^{(1)}\mbx_{t,n} + \left(1-v_{t-1,n}^{(1)}\right)\mbu_{t,n}^{(1)}$;
+            \Else
+            \State Draw $\mbu_{t,n}^{(2)} \sim q_\text{noise}(\mbx_{t,n})$;
+            \State $\mbx_{t-1,n} = v_{t-1,n}^{(2)}\widetilde{\mbx}_{0,n} + \left(1-v_{t-1,n}^{(2)}\right)\mbu_{t,n}^{(2)}$;
+            \EndIf
+            \State Let $b_{t-1,n} = b_{t,n} \land v_{t-1,n}^{(1)} \lor v_{t-1,n}^{(2)}$;
+        \EndFor
+    \EndFor
+    \State {\bfseries Return} $\mbx_{0,1:N}$.
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}}
+\end{wrapfigure}
+
+\paragraph{Generating $\mbv_{t-1}$.} As shown in \cref{eqn:rdm:joint_q}, a naïve approach of generating $\mbv_{t-1}$ is by drawing $\mbv_{t-1,n} \sim \operatorname{Bernoulli}\left(\mblambda_{t-1}\right)$ for each token $n$. However, this assigns equal routing probability $\mblambda_{t-1}$ to all tokens, which may be sub-optimal for routing different tokens to distinct states. This observation motivates us to employ a more discriminative routing mechanism, where only tokens with high confidence from neural networks are denoised \citep{ghazvininejad-etal-2019-cmlm,savinov2022sundae,chang2022maskgit}. At each step, assume $\mbv_{t-1,n}^{(1)}$ and $\mbv_{t-1,n}^{(2)}$ are set to $1$ and $0$ by default, respectively. We feed the noisy sequence $\mbx_{t,1:N}$ into the neural network and collect the output $f(\mbx_{t,n};\mbtheta)$ for each token $n$. After that, We obtain token scores $s_{t,n}$ by taking the maximum value of $f(\mbx_{t,n};\mbtheta) \in (0,1)^K$, which reflects the model confidence. $\mbv_{t-1,n}$ is then set to 1 only when $s_{t,n}$ is among the $k$ largest scores. Formally,
+\begin{align*}
+    s_{t,n} \coloneqq \max\limits_{1\leq j \leq K} f_j(\mbx_{t,n};\mbtheta), \quad \mcP_{t-1} = \argtopk\limits_{1\leq n \leq N} \{s_{t,n}\}_{n=1}^N, \quad \mbv_{t-1,n}^{(i)} = \mbone_{n \in \mcP_{t-1}},\numberthis\label{eqn:adaptive_v}
+\end{align*}
+where $i = 1$ if $b_{t,n} = 1$ and $i = 2$ otherwise. This strategy is more informative, as the router can compare token scores to determine their states. 
+Note that $\mbv_{t-1}$ is now defined as a function of model scores and its explicit probability distribution is possibly different from the one used in training; however, thanks to \cref{ssec:rdm:training}, the diffusion model corresponding to this routing distribution can also be trained effectively with the shared surrogate objective, justifying the usage of the adaptive strategy.
+\subsection{Implementation}
+\label{ssec:rdm:implementation}
+\cref{alg:rdm:training,alg:rdm:sampling} list the full pseudo-codes for training and sampling of RDMs, respectively. Note that the loop over the sequence length $N$ is computed in parallel. The developed formulation of RDMs offers great flexibility for both training and sampling. For instance, we can pass a custom $\lambda_{t-1}$ to reweigh the loss for training, similar to continuous diffusion models. Besides, the denoised token states $\widetilde{\mbx}_0$ during decoding can be obtained in various ways, such as sampling with annealed temperatures or simply taking the $\arg\max$ of $f\left(\mbx_{t,n};\mbtheta\right)$. Please refer to \cref{app:sec:implementation_details} for the full implementation details.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We evaluate our model on various text generation benchmarks, including machine translation (\cref{ssec:exp:mt}), open-ended text generation (\cref{app:ssec:add_exp_for_otg}), question generation, and paraphrasing (\cref{ssec:exp:qg_and_qqp}). Our implementation is based on \texttt{FairSeq} toolkit \citep{ott-etal-2019-fairseq}; more detailed experimental setup and analyses can be found in \cref{app:sec:implementation_details,app:sec:addition_exp}, respectively.
+
+\subsection{Machine Translation}
+\label{ssec:exp:mt}
+\paragraph{Setup.} 
+We conducted machine translation experiments on three standard benchmarks: \iwsltdeen \citep{cettolo-etal-iwslt2014}, \wmtende \citep{bojar-etal-wmt2014}, and \wmtenro \citep{bojar-etal-wmt2016}, consisting of around 160K/7K/7K, 4.0M/3K/3K, and 610K/2K/2K training/validation/testing sentence pairs, respectively. We operate on original data for all translation tasks and do \textit{not} adopt knowledge distillation \citep{kim-rush-2016-sequence,gu2018nat} that replaces the target side of training data with outputs generated by a pre-trained autoregressive Transformer.
+
+\paragraph{Results.}
+As seen from \cref{tb:mt}, existing discrete diffusion models usually perform badly on the translation task and do not scale well for large-sized datasets. In particular, multinomial diffusion achieves worse translation quality albeit with more iterations and fails to decode decently on \wmtende dataset. The proposed reparameterization yields significant performance boosts (about 3\char`~20 BLEU improvements) on both absorbing and multinomial diffusion across all datasets and iteration steps. We also observe that the performance gain is much more significant for multinomial diffusion, which is possibly due to the fix of its degenerated behavior (more details are in \cref{ssec:exp:examples}). Our approach effectively scales diffusion models to larger datasets, outperforming previous non-autoregressive baselines \texttt{CMLM} \citep{ghazvininejad-etal-2019-cmlm}, and achieves promising results even competitive with autoregressive baselines. Besides, RDMs perform significantly better than continuous diffusion models \texttt{CDCD} \citep{dieleman2022cdcd} while running with more than $8\times$ fewer iterations.
+
+\begin{table*}[t]
+\centering
+\resizebox{\linewidth}{!}{    
+\begin{tabular}{l >{\centering}m{4cm}  c c c  c c c c}
+\toprule[.1em]
+\multirow{2}{*}{} & \multirow{2}{*}{Model} & \multirow{2}{*}{\# Iterations} & \multicolumn{2}{c}{\iwsltdeen} & \multicolumn{2}{c}{\wmtenro} & \multicolumn{2}{c}{\wmtende} \\
+& & & Vanilla & Reparam. & Vanilla & Reparam. & Vanilla & Reparam. \\
+\midrule
+\multirow{1}{*}{\textbf{Continuous Diffusion}}
+& \shortstack{CDCD\\ \citep{dieleman2022cdcd}} & 200 & \multicolumn{2}{c}{--} & \multicolumn{2}{c}{--} & \multicolumn{2}{c}{20.0\textsuperscript{*}} \\
+\midrule
+\multirow{10}{*}{\textbf{Discrete Diffusion}}
+& \multirow{5}{*}{\shortstack{Multinomial Diffusion\\ \citep{hoogeboom2021multinomialdiffusion}}} 
+  & 2  & 23.05 & {\cellcolor{solidago} 28.01} & 26.61 & {\cellcolor{solidago} 30.16} & 4.28 & {\cellcolor{solidago} 21.43} \\
+& & 4  & 24.24 & {\cellcolor{solidago} 30.57} & 27.81 & {\cellcolor{solidago} 31.70} & 4.31 & {\cellcolor{solidago} 24.05} \\
+& & 10 & 21.28 & {\cellcolor{solidago} 32.23} & 25.25 & {\cellcolor{solidago} 33.00} & 6.94 & {\cellcolor{solidago} 25.63} \\
+& & 16 & 20.59 & {\cellcolor{solidago} 32.58} & 24.36 & {\cellcolor{solidago} 33.11} & 6.07 & {\cellcolor{solidago} 25.64} \\
+& & 25 & 20.06 & {\cellcolor{solidago} 32.84} & 23.94 & {\cellcolor{solidago} 33.31} & 3.69 & {\cellcolor{solidago} 26.04} \\
+\cmidrule{2-9}
+& \multirow{5}{*}{\shortstack{Absorbing Diffusion\\ \citep{austin2021d3pm}}}
+   & 2  & 25.24 & {\cellcolor{solidago} 27.60} & 27.24 & {\cellcolor{solidago} 30.72} & 16.46 & {\cellcolor{solidago} 21.00} \\
+ & & 4  & 26.93 & {\cellcolor{solidago} 31.47} & 29.16 & {\cellcolor{solidago} 32.60} & 19.48 & {\cellcolor{solidago} 24.26} \\
+ & & 10 & 28.32 & {\cellcolor{solidago} 33.91} & 30.41 & {\cellcolor{solidago} 33.38} & 21.62 & {\cellcolor{solidago} 26.96} \\
+ & & 16 & 28.38 & {\cellcolor{solidago} 34.41} & 30.79 & {\cellcolor{solidago} 33.82} & 22.07 & {\cellcolor{solidago} 27.58} \\
+ & & 25 & 28.93 & {\cellcolor{solidago} 34.49} & 30.56 & {\cellcolor{solidago} 33.99} & 22.52 & {\cellcolor{solidago} \textbf{27.59}} \\
+\midrule
+\multirow{10}{*}{Non-autoregressive Models} 
+& \shortstack{CMLM\\ \citep{ghazvininejad-etal-2019-cmlm}} 
+& 16 & \multicolumn{2}{c}{32.18} & \multicolumn{2}{c}{32.90} & \multicolumn{2}{c}{25.00} \\
+\cmidrule{2-9}
+& \shortstack{CMLM+SMART\\ \citep{ghazvininejad2020smart}} 
+& 10 & \multicolumn{2}{c}{30.74\textsuperscript{*}} & \multicolumn{2}{c}{32.71\textsuperscript{*}} & \multicolumn{2}{c}{25.10\textsuperscript{*}} \\
+\cmidrule{2-9}
+& \shortstack{Levenshtein Transformer\\ \citep{gu2019levenshtein}}
+& Adaptive & \multicolumn{2}{c}{-} & \multicolumn{2}{c}{-} & \multicolumn{2}{c}{25.20\textsuperscript{*}} \\
+\cmidrule{2-9}
+& \shortstack{DisCo\\ \citep{kasai2020disco}} 
+& Adaptive & \multicolumn{2}{c}{-} & \multicolumn{2}{c}{-} & \multicolumn{2}{c}{25.64\textsuperscript{*}} \\
+\cmidrule{2-9}
+& \shortstack{CMLMC\\ \citep{huang2022improving}} 
+& 10 & \multicolumn{2}{c}{34.28\textsuperscript{*}} & \multicolumn{2}{c}{34.14\textsuperscript{*}} & \multicolumn{2}{c}{26.40\textsuperscript{*}} \\
+\midrule
+\textbf{Autoregressive Models} & \shortstack{Transformer-base\\ \citep{vaswani2017attention}} & n.a. & \multicolumn{2}{c}{\textbf{34.51}} & \multicolumn{2}{c}{\textbf{34.16}} & \multicolumn{2}{c}{27.53} \\
+\bottomrule[.1em]
+\end{tabular}}
+\caption{BLEU score comparisons on \iwsltdeen, \wmtende, and \wmtenro benchmarks. \textsuperscript{*} denotes results reported from previous work.}
+\label{tb:mt}
+\end{table*}
+\subsection{Question Generation and Paraphrasing}
+\label{ssec:exp:qg_and_qqp}
+\paragraph{Setup.}
+We also evaluate the performance of our model on general sequence-to-sequence generation tasks, following \citet{gong2022diffuseq}. Due to the limited computation budget, the tasks we focus on are 1) \textbf{question generation} (\qg) using the Quasar-T dataset \citep{dhingra2017quasar} with approximately 117K/2K/10K pairs for training/validation/testing, and 2) \textbf{paraphrasing} with Quora Question Pairs (\qqp) containing around 145K/2K/2.5K training/validation/testing question pairs.
+\paragraph{Results.}
+We report comparisons among discrete diffusion, continuous diffusion, and auto-regressive baselines in \cref{tb:qp_and_qqp}. We observe that either variant of RDMs not only improves their vanilla counterparts by a large margin but also outperforms the strong continuous diffusion baseline DiffuSeq as well as various auto-regressive baselines across several evaluation metrics. Besides, DiffuSeq needs 2000 steps to finish the decoding, while RDMs can produce higher-quality samples with 10 iterations, reducing runtime by over $200\times$. This implies that RDMs can attain a much better trade-off between generation quality and runtime. In addition, we also investigate the effect of candidate sample size in \cref{app:tb:qp_and_qqp_sample_size}. We notice that DiffuSeq benefits more from large sample sets (e.g., when the sample size increases from 1 to 10) than RDMs. We attribute this to the possibility that adding Gaussian noise to token embeddings in DiffuSeq might lead to more diverse samples. This helps make better use of the MBR decoding, indicating that there might be room to improve RDMs to leverage multiple decodes. 
+Nevertheless, RDMs still achieve better performance than DiffuSeq across both cases of single and multiple samples.  
+
+\subsection{Analysis}
+\label{ssec:exp:analysis}
+\paragraph{On the Effect of Training and Decoding Strategies.}
+
+\begin{wraptable}[12]{R}{0.5\columnwidth}
+\centering
+\resizebox{0.9\linewidth}{!}{    
+\begin{tabular}{l c c}
+\toprule[.1em]
+Reweighting training scheme & Vanilla & Improved \\
+\midrule
+Original $\left(\lambda_{t-1}^{(2)} \!=\! \frac{\alpha_{t-1} - \alpha_t}{1 - \alpha_t}\right)$ & 28.32 & 30.64 \\
+Linear $\left(\lambda_{t-1}^{(2)} \!=\! 1 - \frac{t-1}{T}\right)$ & \textbf{31.04} & \textbf{33.91} \\
+Constant $\left(\lambda_{t-1}^{(2)} \!=\! 1\right)$ & 29.75 & 32.57 \\
+\bottomrule[.1em]
+\end{tabular}}
+\caption{BLEU scores on \iwsltdeen with different reweighting schemes, evaluated under RDM-absorbing with 10 \emph{vanilla/improved decoding} steps.}
+\label{tb:ablation:reweighting}
+\end{wraptable}
+
+This section explores the impact of improved training and decoding techniques developed for RDMs. Concerning the \emph{training} aspect, we compare the derived loss objective, which takes the form of a reweighting cross-entropy function (\cref{ssec:rdm:training}), with that of traditional discrete diffusion models. As for \emph{decoding}, we evaluate the effectiveness of the discriminative routing mechanism (\cref{ssec:rdm:decoding}) against the vanilla strategy that randomly denoises tokens. The overall comparison is presented in \cref{fig:ablation:wmt14} (as well as \cref{app:fig:ablation:wmt16,app:fig:ablation:iwslt} in \cref{app:ssec:add_ablation_for_translation}). The results indicate that adopting either the improved training or decoding scheme leads to a significant performance boost over vanilla baselines, which can be further amplified by integrating both. In particular, we discover that the inferior performance of vanilla multinomial diffusion stems from \textit{both} inadequate training and ineffective decoding. Improving either the training or decoding process results in gains of over 10\char`~20 BLEU points, allowing the model to scale well for more decoding steps. Besides, we also ablate the design choice of reweighting strategies (\cref{ssec:rdm:training}) in \cref{tb:ablation:reweighting}, and observe that a linear heuristic proposed in \citep{bond2022unleashing} yields large improvements in performance on \iwsltdeen. Therefore, this reweighting scheme is adopted by default unless specified otherwise.
+
+\begin{figure}
+\centering
+\begin{subfigure}[t]{0.69\columnwidth} 
+\captionsetup{skip=1pt}
+\includegraphics[width=\columnwidth]{figs/wmt14_reparam_ablation.pdf}
+\caption{}
+\label{fig:ablation:wmt14}
+\end{subfigure}\rulesep
+\begin{subfigure}[t]{0.295\columnwidth} 
+\captionsetup{skip=1pt}
+\raisebox{2.5mm}{\includegraphics[width=\columnwidth]{figs/qqp_bleu_vs_speed.pdf}}
+\caption{}
+\label{fig:bleu_vs_speed}
+\end{subfigure}
+\caption{\textbf{Left}: ablation study of improved training and decoding strategies on \wmtende test set for absorbing and multinomial diffusion, respectively. \textbf{Right}: The quality-speed comparison among different models for \qqp dataset. The number annotation indicates the iteration \textit{steps} except for GPT2-base and Transformer-base, which generate auto-regressively and do not have a fixed number of iterations. The horizontal axis is in log scale.}
+\label{fig:ablation}
+\end{figure}
+
+\paragraph{On Decoding Speed.}
+This section visualizes the performance-runtime comparison among different text generation models. All models considered here have roughly the same parameter counts (90\char`~110M), and the speed is measured under the setting of 32 batch size on one NVIDIA GeForce RTX 3090 GPU, averaged by 30 runs. As shown in \cref{fig:bleu_vs_speed}, there is a clear trend that RDMs usually run up to $10\times$ faster than a similar-sized auto-regressive baseline GPT2 \citep{radford2019gpt2} or Transformer \citep{vaswani2017attention}, while to achieve similar performance, continuous diffusion models are several orders of magnitude slower than these baselines. Furthermore, discrete diffusion models here are trained with 50 time steps in total but are able to achieve satisfactory quality even with 2 or 5 steps. In contrast, the continuous diffusion model DiffuSeq, trained with 2000 time steps, mostly generates non-meaningful sentences (BLEU scores getting close to zero) under down-sampled time steps, even equipped with advanced samplers like DDIM \citep{song2021ddim}. This reveals the inherent difference between discrete and continuous diffusion, where discrete diffusion generalizes much better to various setups of iteration steps.
+\subsection{Examples}
+\label{ssec:exp:examples}
+This section illustrates the samples generated by RDMs. We focus on the case of multinominal diffusion and its reparameterized variant; a more comprehensive analysis can be found in \cref{app:ssec:qualitative_analysis}.
+
+\paragraph{Multinomial Diffusion Does Not Decode Iteratively.}
+As seen in \cref{tb:examples}, we observe that across all text generation tasks, vanilla multinomial diffusion only generates the hypothesis at the \textit{first} iteration and gets stuck in the same state thereafter. This means multinomial diffusion decodes in one shot and does not leverage the iterative process for further refinement. In \cref{app:ssec:qualitative_analysis}, we show that this abnormal behavior is primarily due to its degenerated backward formulation, which can be neatly fixed by our reparameterization. The resulting behavior is much more expected and leads to better generation quality.
+
+\paragraph{The Slow Convergence of Continuous Diffusion.}
+We also demonstrate the down-sampled dynamics during the generation of DiffuSeq. In contrast to discrete diffusion models, where relevant tokens emerge within only a few steps, continuous diffusion hardly decodes meaningful tokens until the $1000$-th iteration or later. This validates our hypothesis that the Gaussian diffusion over token embeddings is noisy and slow by design; furthermore, many diffusing steps are required to emit a significant change over token states due to the rounding quantization (see \cref{app:tb:qqp_example} for an illustration).
+
+\begin{table}[t]
+\begin{minipage}[t]{.47\columnwidth}
+    \centering
+    \resizebox{\columnwidth}{!}{    
+    \begin{tabular}{l l | c c c c }
+    \toprule[.1em]
+    \multirow{1}{*}{Task} & \multirow{1}{*}{Model} & BLEU $\uparrow$ & ROUGE-L $\uparrow$ & BERTScore $\uparrow$ & Dist-$1$$\uparrow$ \\
+    \midrule
+    \multirow{10}{*}{\qg} 
+    & Transformer-base\textsuperscript{\textdagger} & 0.1663 & 0.3441 & 0.6307 & 0.9309 \\
+    & GPT2-base FT\textsuperscript{\textdagger} & 0.0741 & 0.2714 & 0.6052 & 0.9602 \\
+    & GPT2-large FT\textsuperscript{\textdagger} & 0.1110 & 0.3215 & 0.6346 & \textbf{0.9670} \\
+    & GPVAE-T5\textsuperscript{\textdagger} & 0.1251 & 0.3390 & 0.6308 & 0.9381 \\
+    & NAR-LevT\textsuperscript{\textdagger} & 0.0930 & 0.2893 & 0.5491 & 0.8914 \\ 
+    & DiffuSeq\textsuperscript{\textdagger} & 0.1731 & \textbf{0.3665} & 0.6123 & 0.9056 \\
+    \cmidrule{2-6}
+    & Absorbing & 0.1738 & 0.3503 & 0.6312 & 0.9095 \\
+    & RDM-absorbing & 0.1791 & 0.3565 & \textbf{0.6393} & 0.9202 \\
+    & Multinomial & 0.1696 & 0.3429 & 0.6188 & 0.8990 \\
+    & RDM-multinomial & \textbf{0.1802} & 0.3550 & 0.6310 & 0.9082 \\
+    \midrule
+    \midrule
+    \multirow{10}{*}{\qqp} 
+    & Transformer-base\textsuperscript{\textdagger} & \textbf{0.2722} & 0.5748 & 0.8381 & 0.9748 \\
+    & GPT2-base FT\textsuperscript{\textdagger} & 0.1980 & 0.5212 & 0.8246 & 0.9798 \\
+    & GPT2-large FT\textsuperscript{\textdagger} & 0.2059 & 0.5415 & 0.8363 & 0.9819 \\
+    & GPVAE-T5\textsuperscript{\textdagger} & 0.2409 & 0.5886 & 0.8466 & 0.9688 \\
+    & NAR-LevT\textsuperscript{\textdagger} & 0.2268 & 0.5795 & 0.8344 & 0.9790 \\ 
+    & DiffuSeq\textsuperscript{\textdagger} & 0.2413 & 0.5880 & 0.8365 & 0.9807 \\
+    \cmidrule{2-6}
+    & Absorbing & 0.2382 & 0.5834 & 0.8294 & 0.9566 \\
+    & RDM-absorbing & 0.2510 & \textbf{0.5945} & \textbf{0.8472} & \textbf{0.9849}\\
+    & Multinomial & 0.2070 & 0.5539 & 0.7985 & 0.9175 \\
+    & RDM-multinomial & 0.2498 & 0.5886 & 0.8466 & 0.9817 \\
+    \bottomrule[.1em]
+    \end{tabular}}
+    \captionsetup{type=table}
+    \captionof{table}{Comparisons among different text generators on \qg and \qqp. \textsuperscript{\textdagger} numbers are taken from \citet{gong2022diffuseq}. All discrete diffusion models are run with 10 steps.}
+    \label{tb:qp_and_qqp}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{.48\columnwidth}
+    \centering
+    \resizebox{\columnwidth}{!}{    
+    \begin{tabular}{l c | l}
+    \toprule[.1em]
+    \multicolumn{3}{l}{\textbf{Source:} how can one increase concentration?} \\
+    \multicolumn{3}{l}{\textbf{Reference:} how can i improve my concentration?} \\
+    \midrule[.1em]
+    & \# Iter. & \multicolumn{1}{c}{Decodes} \\
+    \midrule
+    \parbox[t]{2mm}{\multirow{5}{*}{\rotatebox[origin=c]{90}{\scriptsize DiffuSeq}}}
+    & 0 & $\circ$ skeptical coli \#\#zam gael erika calves wharf [unused791]\textsuperscript{\textdaggerdbl} \\
+    & 500 & $\circ$ cessna i perez newark ? venezuelan regeneration 283 zhejiang\textsuperscript{\textdaggerdbl} \\
+    & 1000 & $\circ$ johanna 730 i improve terminals ? \\
+    & 1500 & $\circ$ how do i improve concentration ? \\
+    & 2000 & $\circ$ how do i improve concentration ? \\
+    \midrule
+    \parbox[t]{2mm}{\multirow{6}{*}{\rotatebox[origin=c]{90}{\scriptsize Multinomial}}}
+    & 0 & $\circ$ \#\#tly distances outline \#\#cera khmer curvature question \#\#tl \\
+    & 1 & $\circ$ how can i improve focus in concentration ? \\
+    & 2 & $\circ$ how can i improve focus in concentration ? \\
+    & 3 & $\circ$ how can i improve focus in concentration ? \\
+    & 4 & $\circ$ how can i improve focus in concentration ? \\
+    & 5 & $\circ$ how can i improve focus in concentration ? \\
+    \midrule
+    \parbox[t]{2mm}{\multirow{6}{*}{\rotatebox[origin=c]{90}{\scriptsize RDM-multinomial}}}
+    & 0 & $\circ$ lungs \#\#down intensity cortes \#\#lden ufo oldies \\
+    & 1 & $\circ$ worker blurted i \#\#kal caledonia concentration \#\#vb \\
+    & 2 & $\circ$ how trait i \#\#kal my concentration \#\#vb \\
+    & 3 & $\circ$ how trait i increase my concentration ? \\
+    & 4 & $\circ$ how trait i increase my concentration ? \\
+    & 5 & $\circ$ how do i increase my concentration ? \\
+    \bottomrule[.1em]
+    \end{tabular}}
+    \captionsetup{type=table}
+    \captionof{table}{Qualitative samples of test paraphrases generated from different diffusion models on \qqp dataset. \textsuperscript{\textdaggerdbl} texts are truncated to fit into the table. Words are in lower case.}
+    \label{tb:examples}
+\end{minipage}
+\end{table}
+
+
+
+
+
+\section{Conclusion}
+
+This work presents an extensive analysis of discrete diffusion models. Based on the developed understanding, we propose a family of \textit{reparameterized discrete diffusion models} (RDMs) that significantly improve previous work in both training and decoding. We evaluate the proposed model family in various text generation benchmarks and demonstrate the boosted generation quality.
+
+RDMs define a general framework for discrete diffusion processes and can be extended in several ways. For instance, RDMs are currently confined to generating \textit{fixed-length} sentences and rely on an explicit length prediction module to propose the sequence length. It would be interesting to extend the model to enable variable-length sequence generation. 
+Besides, our proposed adaptive routing mechanism (\cref{ssec:rdm:decoding}) makes the initial attempt to unleash the expressiveness of RDMs; the shared training objective (\cref{ssec:rdm:training}) allows more advanced search methods to be incorporated into the sampling process for better generation quality. A further investigation into this direction is left as future work.
+
+\subsubsection*{Acknowledgements}
+We would like to thank the HKU NLP group, the Shark NLP group, and the anonymous reviewers for their valuable suggestions that greatly helped improve this work. We also thank Runhao Shi and Zijing Ou for the initial discussion on an earlier draft of this work. This work is partially supported by the joint research scheme of the National Natural Science Foundation of China (NSFC) and the Research Grants Council (RGC) under grant number N\_HKU714/21.
+
+
+
+
+

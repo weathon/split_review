@@ -1,8 +1,8 @@
 # Task Calibration: Calibrating Large Language Models on Inference Tasks
 
 - Decision: Reject
-- Avg Score: 3.00
-- Scores: 6, 1, 0, 5
+- Avg Score: 7.00
+- Scores: 6, 10, 5
 
 ## Abstract
 Large language models (LLMs) have exhibited impressive zero-shot performance on inference tasks. However, LLMs may suffer from spurious correlations between input texts and output labels, which limits LLMs' ability to reason based purely on general language understanding. In other words, LLMs may make predictions primarily based on premise or hypothesis, rather than both components. 

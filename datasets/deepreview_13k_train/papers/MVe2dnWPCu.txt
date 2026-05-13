@@ -1,0 +1,355 @@
+\title{A Probabilistic Framework for Modular Continual Learning}
+
+\begin{abstract}
+Modular approaches that 
+use a different composition of modules for each problem 
+are a promising direction in continual learning (CL). However, searching through the large, discrete space of  module compositions is challenging, especially because evaluating a composition's performance requires a round of neural network training. We address this challenge through a modular CL framework, \PICLE, that 
+uses a probabilistic model to cheaply compute the fitness of each composition, allowing \PICLE\ to achieve both perceptual, few-shot and latent transfer. The model combines prior knowledge about good module compositions with dataset-specific information.
+We evaluate \PICLE using two benchmark suites designed to assess different desiderata of CL techniques. 
+Comparing to a wide range of approaches, we show that \PICLE is the first modular CL algorithm to achieve perceptual, few-shot and latent transfer while scaling well to large search spaces, 
+outperforming previous state-of-the-art modular CL approaches on long problem sequences.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\emph{Continual learning} (CL) \citep{thrun1995lifelong} demands algorithms that can solve a sequence of learning problems while performing better on every successive problem.
+A CL algorithm should avoid catastrophic forgetting, i.e., not allow later problems to overwrite knowledge
+learned from earlier ones, and achieve transfer across a large sequence of problems. 
+It should also be plastic, in the sense of being able to solve new problems, 
+and exhibit backward transfer, meaning performance on  
+previously encountered problems should increase after solving new ones. 
+Ideally, the algorithm should be capable of transfer across similar input distributions (\textit{perceptual transfer}), dissimilar input distributions and different input spaces 
+(transfer of latent concepts, i.e., \textit{latent transfer}), and to problems with few training examples (\textit{few-shot transfer}). 
+
+Recent work  \citep{valkov2018houdini, veniat2020efficient, ostapenko2021continual} has shown modular algorithms to be a promising approach to CL. These methods represent a neural network as a composition of reusable modules.
+During learning, the algorithms accumulate a library of diverse modules by solving the encountered problems in a sequence. Given a new problem, they seek to find the best composition of pre-trained and new modules
+as measured by the performance on a held-out dataset.
+
+Modular methods can achieve plasticity using fresh modules, while   
+using pre-trained modules to avoid catastrophic forgetting. 
+However, \emph{scalability} %in the number of problems 
+remains a key challenge in these methods, as the module ``library'' grows linearly in the number of problems, the set of all module compositions grows polynomially in the size of the library, and hence exponentially in the number of problems. Further, the evaluation of the quality of a composition requires the expensive training of its modules.  
+
+In this paper, we present a modular CL framework, called \PICLE \footnote{\PICLE, pronounced ``pickle'', stands 
+ for \textbf{P}robabilistic,  L\textbf{I}brary-based \textbf{C}ontinual \textbf{Le}arning.}, that mitigates this challenge through a probabilistic search  \citep{shahriari2015taking}. The central insight is that 
+searching over module compositions would be substantially cheaper if we could 
+compute a composition's fitness, proportional to its final performance, without training the new modules in it. Accordingly, \PICLE uses a probabilistic model to approximate the fitness of each composition.
+
+The benefit of such a probabilistic model is that it combines prior knowledge about good module compositions with 
+problem-specific information in a principled way.
+We introduce two different probabilistic models, specialized for different types of transfer: one for perceptual and few-shot transfer that is focused on modelling the distribution over input activations to each module (Section 4); one for latent transfer which is based on a Gaussian process to capture the idea that similar compositions of modules should have similar performance (Section 5). We make use of both models to create a scalable modular CL algorithm with constant training requirements, i.e., it evaluates a constant number of compositions and trains networks with a fixed size for each problem.
+
+We evaluate \PICLE on the popular CTrL benchmark suite \citep{veniat2020efficient},
+as well as a new extension of CTrL, which we call BELL, which introduces compositional tasks.
+Comparing to a wide range of approaches,
+our experiments demonstrate that \PICLE is the first modular CL algorithm to achieve perceptual, few-shot and latent transfer while scaling well to large search spaces, 
+outperforming previous state-of-the-art modular CL approaches on long problem sequences.
+
+
+
+\section{Background}
+
+
+A CL algorithm aims to solve a sequence of problems, usually provided one at a time. We consider the supervised setting, in which each problem is characterized by a training set $(\Xtr, \Ytr)$ and a validation set $(\Xval, \Yval).$
+The algorithm's goal is to transfer knowledge between the problems. It is considered \textit{scalable} if both its memory and computational requirements scale sub-linearly with the number of solved problems \citep{veniat2020efficient}.
+
+\begin{figure}
+\centering
+         \includegraphics[width=0.7\textwidth]{figures/picle_paths_set.pdf}
+         \caption{The set of all paths that a modular algorithm considers when solving the $4$th problem in a sequence. The modular architecture has $L=2$ layers.
+The shaded modules are re-used from previous problems.
+The library comprises all pre-trained modules: $\mathcal{L} = \{ m^1_1, m^1_3, m^2_1, m^2_2 \}$. Paths in $\Pi_{\text{PT}}^1$ (Section \ref{sec:PT})
+select a pre-trained module for the first layer, enabling perceptual transfer. Paths in $\Pi_{\text{PT}}^2$ reuse modules in both layers. They can perform few-shot transfer since they only require a few examples (to select the correct path). Paths in $\Pi_{\text{NT}}^1$ 
+(Section \ref{sec:NT})
+achieve latent
+transfer by reusing a module in the second layer, allowing applications to new input domains.}
+         \label{fig:paths_illustration}
+\end{figure}
+Modular approaches to CL \citep{valkov2018houdini, veniat2020efficient, ostapenko2021continual} 
+represent a deep neural network as a composition of modules, each of which is a parameterized 
+nonlinear transformation.
+Transfer learning is accomplished by reusing modules
+from previous learning problems.
+Each composition is represented by \emph{a path}: a sequence of modules $\pi = ( m^i )_{i=1}^L$
+that defines a %neural network as the 
+function composition $m^L \circ ... \circ m^2 \circ m^1$.
+We refer to each element of the path as a \emph{layer}.
+After solving $t-1$ problems, modular algorithms accumulate a library of frozen previously trained modules.
+We denote the set of all pre-trained modules in the library for layer $i$ as $\mathcal{L}^i$. 
+
+Given a new learning problem, one can construct different modular neural networks by 
+searching over the set of paths (Fig. \ref{fig:paths_illustration}). For each layer $i$, a path selects either a pre-trained module from the library $\mathcal{L}^i$ or introduces a new one $m^i_\text{new}$ that needs to be trained from scratch.
+In order to find the best path, a modular algorithm assesses different paths by training the resulting neural networks and evaluating their \textit{final validation performance} on the validation set, denoted as $f$.
+Thus, evaluating each path is costly, and furthermore, the number of paths grows rapidly with the size of the library.
+
+
+\section{A Probabilistic Framework for Modular CL}
+
+
+\PICLE is based on a probabilistic search over paths.
+For each path, we seek to
+compute, without training the path, %each path's \emph{fitness} of each path, which is indicative of the 
+a proxy for its
+validation accuracy. We compute this proxy, called \emph{fitness}, as a posterior distribution over the choice of pre-trained modules specified by a path, given the problem’s data.
+In doing so, we leverage both prior and problem-specific knowledge.
+
+We distinguish between two types of paths that lead to different types of transfer and require different probabilistic models: (i) Paths that enable \textit{perceptual transfer} (PT) between similar input distributions, by using pre-existing modules in the 
+first $l$ layers and new modules elsewhere (\autoref{sec:PT}); and (ii) 
+paths that allow \textit{latent transfer} or non-perceptual transfer (NT) between problems with different input distributions or different input spaces, by using pre-existing modules in the last $l$ layers and new modules before them. The two kinds of paths are illustrated in Fig. \ref{fig:paths_illustration}. 
+
+For PT paths, designing a probabilistic model is easier, as we can evaluate the pre-trained modules on data from the new problem. For NT paths, this is impossible because the initial modules in the network are untrained. Hence, we define a different probabilistic model, which employs a distance in function space across compositions of pre-trained modules.
+
+\input{algorithms/algorithm_main.tex}
+
+Our overall framework is shown in \autoref{alg:modular-cl}. For each new learning problem, \PICLE first evaluates a fully randomly initialized, i.e. a \emph{standalone} (SA), model in case no pre-trained module is useful. Afterwards, it searches for the best path, combining the PT and NT search strategies. Finally, the \textsc{UpdateLibrary} function adds modules from the best path to the library for future problems. 
+
+
+
+\section{Scalable Perceptual Transfer and Few-shot Transfer}
+
+
+\begin{wrapfigure}{l}{2in}
+ \centering
+         \includegraphics[width=0.3\textwidth]{figures/picle_pt_model.pdf}
+         \caption{Our probabilistic model for a PT path with three pre-trained modules, $m^1, m^2, m^3$ and their respective inputs $\mathbf{x}$, $\mathbf{h}^1$ and $\mathbf{h}^2$.}
+         \label{fig:pt_graphical_model}
+\end{wrapfigure}
+
+Our method searches through paths, which achieve perceptual transfer (PT paths) by reusing modules in the first $l$ layers (Fig. \ref{fig:paths_illustration}). This includes cases where \emph{all} layers are reused, potentially combining modules from different problems. Such a path can perform \emph{few-shot transfer}.
+
+The insight here is to select each pre-trained module so that its distribution over inputs on the new problem is similar to the input distribution it was trained on, minimizing distribution shift. %, potentially increasing the performance of the full network.
+Accordingly, we define a probabilistic model over the choice of pre-trained modules and their inputs, and introduce a search strategy that searches for the PT path with the highest probability.
+\input{algorithms/algorithm_pt_strategy}
+
+The set of  PT paths with prefix-length $\ell$ is the Cartesian product of library items $\mathcal{L}^i$ for the first $i \in \{1, ..., \ell\}$ layers and new modules in the other layers:
+$\Pi_{\text{PT}}^{\ell} = \mathcal{L}^1 \times ... \times \mathcal{L}^\ell \times \{ m_{\text{new}}^{\ell+1} \} \times ... \times \{ m_{\text{new}}^{L} \}.$
+This set grows polynomially with the size of the library, making a naive search strategy inapplicable. 
+
+Instead, 
+we introduce a strategy based on a generative 
+model
+of the input $\bx$, the choice of pre-trained modules $m^1 \ldots m^\ell,$ and
+the latent activations $\bh^1 \ldots \bh^{\ell-1}$ after each pretrained module, i.e.,
+$\bh^{j+1} = m^{j+1}(\bh_j).$ 
+We imagine sampling the \emph{highest-level} activation $\bh^{\ell-1}$ first, and then sequentially sampling each lower-level activation $\bh^j$ to satisfy the constraint $\bh^{j+1} = m^{j+1}(\bh^j).$ 
+This process is illustrated by the graphical model in Figure \ref{fig:pt_graphical_model}. That is, we model the joint distribution as
+\begin{equation}
+    p(m^1, ..., m^\ell, \bx, \bh^1 ..., \bh^{\ell-1}) = 
+p(\bx | \bh^1, m^1) \left(\prod_{i=1}^{\ell-2} p(\bh^i | \bh^{i+1}, m^{i+1}) \right)  p(\bh^{\ell-1} | m^\ell) \prod_{i=1}^{\ell} p(m^i).
+ \label{eq:epemoll_joint_general}
+\end{equation}
+This allows us to infer the distribution over pre-trained modules, given the observed inputs.
+Because $\bh^{j+1} = m^{j+1}(\bh^j)$, we can marginalize out the activations and express the posterior distribution over pre-trained modules using terms we can compute, namely, a prior $p(m^i)$ over pre-trained modules and an approximation of the input distribution $p(\bh^{i-1} | m^{i})$ for each pre-trained module:
+\begin{equation} \label{eq:epemoll_posterior_general_approximation}
+p(m^1, ..., m^\ell \,|\, \mathbf{x}) \propto
+p(m^1, ..., m^\ell, \mathbf{x}) 
+= 
+ p(\mathbf{x} | m^1)
+\left( 
+\prod_{i=2}^{\ell-1}  \frac{p(\mathbf{h}^{i-1} | m^i)}{\sum_{m \in \mathcal{L}_i}  p(\mathbf{h}^{i-1} | m) p(m)}
+\right)
+   \prod_{i=1}^\ell p(m^i).
+\end{equation}
+
+We consider that a pre-trained module's competence can be measured by the accuracy it achieved on the problem it was originally trained to solve.
+To approximate the training input distribution $p(\bh^{i-1} | m^i)$ of $m^i$, we first choose a low-rank Gaussian distribution.
+We estimate its parameters using the set of hidden activations $\bh^{i-1}_1 \ldots \bh^{i-1}_N \in \mathbb{R}^v$ that were provided as inputs to $m^i$ during its training.
+We use a random projection ~\citep{johnson1984extensions} to reduce each hidden activation's dimensionality to $k \ll v$. 
+Next, we approximate the distribution in the low-dimensional space by a multivariate Gaussian,
+by computing the sample mean and covariance of the projected data samples. This greatly reduces the number of parameters required to approximate the resulting distribution from $v + v^2$ to $k + k^2$. 
+
+approximation also leads to a more reliable search algorithm.
+
+\noindent \textbf{Search Strategy and Scalablity.} Our overall algorithm (\autoref{alg:pt-strategy}) uses
+a greedy search to find a PT path 
+of prefix-length $\ell \in \{1\ldots L\}$
+with the highest posterior probability $p(m_1 \ldots m_\ell \,|\, \Xtr)$. At each iteration $\ell$, the algorithm extends
+the current prefix with a library
+module $m_\ell \in \mathcal{L}^\ell$ which leads to the highest posterior probability. This leads to evaluating one path for each prefix-length $\ell \in \{1\ldots L\}$, and we return the single
+path with best validation performance. 
+Importantly, our greedy search strategy scales well in the number of problems: it trains $L$ networks 
+each of which contains $L$ modules, so the training requirements are constant in the size of the library.
+
+
+
+\section{Scalable Latent Transfer}
+
+
+In the latent transfer setting, the search space is the set of \emph{latent transfer (NT) paths} (Fig. \ref{fig:paths_illustration}). These are paths where the first $L-\ell$ modules are randomly initialised and the final $\ell$ modules, referred to as the \textit{pre-trained suffix}, are selected from the library. The set of all NT paths of \textit{suffix-length} $\ell$ is:
+$\Pi_{\text{NT}}^{\ell} = \{ m_{\text{new}}^{1} \} \times ... \times \{ m_{\text{new}}^{L-\ell}\} \times \mathcal{L}^{L-\ell+1} \times ... \times \mathcal{L}^{L}$
+, which grows exponentially in $\ell$. 
+
+For efficient search, we need a model that captures how good an NT path is at predicting the correct outputs after training.
+This is difficult as the distribution over inputs for the pre-trained modules depends on the earlier modules that we wish to avoid training. We overcome this challenge 
+by defining a model that directly approximates an NT path's generalization performance after training. We note that the final $\ell$ layers of an NT path define a function from input activations to output activations. This allows us to employ a similarity metric between NT paths in function space. Specifically, we use a Gaussian process based on the intuition that two paths that define similar functions are likely to perform similarly when stacked with new random modules and fine-tuned on a new dataset.
+
+Our model defines a distribution over the pre-trained modules of an NT path. For an NT path $\pi \in \Pi_\text{NT}^{\ell}$, we specify a prior over its pre-trained modules $p(m^{L-\ell+1},..., m^{L})$ and approximate the final validation performance that using these modules would achieve after training:
+$p(\mathbf{Y}^{\text{val}} | \mathbf{X}^{\text{val}}, m^{L-\ell+1},..., m^{L})$.
+Consequently, we express the posterior over an NT path's pre-trained modules given the validation dataset as:
+\begin{equation} \label{eq:nt_posterior}
+    p(m^{L-\ell+1},..., m^{L} | \mathbf{X}^{\text{val}}, \mathbf{Y}^{\text{val}}) \propto p(\mathbf{Y}^{\text{val}} | \mathbf{X}^{\text{val}}, m^{L-\ell+1},..., m^{L}) p(m^{L-\ell+1},..., m^{L}).
+\end{equation}
+Our prior states that pre-trained modules in the path must have all been used together to solve a previous problem. Therefore, $p(m^{L-\ell+1},..., m^L) \propto 1$ if and only if the modules $m^{L-\ell+1},..., m^L$ are a suffix of a previous solution characterised by some path $\pi^*$.
+This prior, used by \citet{veniat2020efficient} for perceptual transfer, reflects our assumption that using novel combination of modules for latent transfer is unnecessary for our sequences.
+
+To approximate the final validation performance of an NT path $p(\mathbf{Y}^{\text{val}} | \mathbf{X}^{\text{val}}, m^{L-\ell+1},..., m^{L})$, we first note that it is a function of the pre-trained suffix $\lambda = (m^{L-\ell+1}, ..., m^L)$, since the validation data is fixed for a given problem, and denote it as $f(\lambda)=p(\mathbf{Y}^{\text{val}} | \mathbf{X}^{\text{val}}, \lambda)$.
+Next, we approximate it
+by putting a Gaussian Process (GP) prior with kernel $\kappa$ on it:
+    $f(\lambda) \sim GP(\mathbf{0}, \kappa(\lambda, \lambda'))$.
+Here, $\lambda'$ denotes another pre-trained suffix of the same length.
+To define a kernel function $\kappa$, we note that the pre-trained modules for an NT path, $m^{L-\ell+1}, ..., m^{L}$ compute a function $m^{L-\ell+1} \circ ... \circ m^{L}$. We hypothesise that if two NT paths' pre-trained suffixes compute similar functions, then their final validation performances will be also be similar. Accordingly, we capture this by using the squared exponential kernel function
+    $\kappa (\lambda, \lambda') = \sigma^2 \exp\left\{ - d(\lambda, \lambda')^2/(2 \gamma^2) \right\}$,
+where $d$ is the distance between two functions and $\sigma$ and $\gamma$ are the kernel hyperparameters which are fit to maximize the marginal likelihood of a GP's training data \citep{rasmussen2006gaussian}. 
+
+ For pre-trained suffixes of length $\ell$, we store a few hidden activations from the input distribution of each pre-trained module at the first pre-trained layer $L-\ell+1$. Given a new problem, we create a set of function inputs by combining all the stored hidden activations.
+
+\input{algorithms/algorithm_nt_strategy}
+
+\noindent \textbf{Search Strategy and Scalability.}
+We can use our probabilistic model to define a scalable search strategy (Algorithm \ref{alg:npt-strategy}) over a set of NT paths. 
+Due to our prior, we only consider NT paths that have the same suffix as a previous solution.
+Denote by $\boldsymbol{\pi}^*$ the set of previous solutions, i.e., the paths that
+were used to solve previous learning problems.
+Our method first searches for the previous solution $\pi' \in \boldsymbol{\pi}^*$ that is most relevant to the current learning task, using Bayesian optimization.
+Then we search over the suffixes of $\pi'$ in particular, and choose exactly how many of its modules to reuse.
+
+Lines \ref{alg_nt_bo_start}-\ref{alg_nt_bo_end} of our algorithm use our probabilistic model to search for
+the most relevant previous solution $\pi'$. We assess the relevance of a solution
+by trying to transfer its last $\ell_{\text{min}}$ modules, and choosing the solution which leads to the best performance. The value
+ $\ell_{\text{min}}$ is a hyperparameter, which we choose to be the minimum number of pre-trained modules needed to obtain increased generalisation performance. 
+We evaluate up to $c$ paths, where $c$ is a hyperparameter. At each step, we have a sequence of already evaluated NT paths $\boldsymbol{\pi}$, their pre-trained suffixes $\boldsymbol{\lambda'}$, and their final validation performance $\mathbf{f}$. We use a GP and combine its predictive distribution $p_{\text{GP}}$ with the Upper Confidence Bound (UCB) \cite{srinivas2009gaussian} acquisition function, to predict each unevaluated path's final validation performance.
+This search results in the most relevant previous solution $\pi'$.
+Finally, in lines \ref{alg_nt_suffixsearch_start}-\ref{alg_nt_suffixsearch_end}, we evaluate NT paths created by transferring a
+different number of the last layers of $\pi'$, to see if re-using more layers leads to further improvement.
+
+Overall, this search through NT paths requires training and evaluating up to a constant number of paths, concretely up to $c+L-\ell_{\text{min}}-1$,
+in the size of the library, with each path specifying a with a constant number of $L$ modules, allowing it to scale well with the number of problems.
+
+
+
+\section{Experiments}
+
+
+We compare our algorithm against several competitive modular CL baselines:  RS, which randomly selects from the set of all paths (shown to be a competitive baseline in high-dimensional search spaces and in neural architecture search \citep{li2020random}); \HOUDINI{}  \citep{valkov2018houdini}, with a fixed neural architecture to keep the results comparable; MNTDP-D \citep{veniat2020efficient} which is a scalable modular CL algorithm for perceptual transfer; LMC \citep{ostapenko2021continual} which can achieve different transfer properties but has limited scalability. For completeness, we also compare to a standalone (SA) baseline which always trains a new network for every problem; a CL algorithm based on parameter regularisation, online EWC (O-EWC) \citep{schwarz2018progress, chaudhry2018riemannian}; and one based on experience replay, ER \citep{chaudhry2019tiny}.
+
+ For each baseline, we assess the performance on a held-out test dataset.
+To measure transfer learning performance, we report amount of forward transfer on the last problem, $\mathit{Tr}^{-1}$, computed as the difference in accuracy, compared to the standalone baseline (see  Eq. \ref{eq:tr_last}). We also report the average forgetting $\mathcal{F}$ across all sequences, measured by the difference between the accuracy achieved on each problem at the end of the sequence and initially (see  Eq. \ref{eq:forgetting}).
+Additionally, for completeness, we  report the average accuracy of the final model across all problems, $\mathcal{A}$ (see  Eq. \ref{eq:avg_accuracy}); this 
+averages over problems earlier in the sequence, for which no transfer is possible by design,
+so it is less helpful for comparing transfer learning approaches.
+\textbf{Compositional Benchmarks.}
+The CTrL benchmark \citep{veniat2020efficient} 
+has been the most popular for
+evaluating recent modular CL approaches \citep{veniat2020efficient,ostapenko2021continual}.
+It defines sequences of learning problems, each sequence being designed to evaluate a particular CL desideratum.
+We introduce
+a new, compositional extension of  
+CTrL, which we call BELL.
+Each problem in BELL is a binary classification task on a pair of images, which composes an image classification task with a pattern recognition task; for example,
+``do both images depict a number less than 5''.
+This allows us to sample a larger variety of random problems by choosing different classification and pattern recognition tasks.
+Most sequences contain $6$ problems, except for a sequence of length $60$ that tests scalability.
+Our neural architecture has $8$ modules, which leads to a large search space (e.g., for the $6$th problem, there are $\mathcal{O}(6^8)$ possible paths).
+ 
+For each sequence, we create $3$ versions by sampling different classification tasks,
+and averaging the metrics over these $3$ versions.
+
+\input{sections/s7_results_BELL}
+
+\textit{Results.} 
+Overall, \PICLE outperforms the other methods, achieving, on average across the short sequences, $+2.7$ higher final accuracy and $+9.02$ higher transfer on the last problem, compared to the second-best algorithm MNTDP-D (Tables~\ref{table:bell_sequences_res_llt} and \ref{table:bell_sequences_res_hlt}). \PICLE and MNTDP-D achieve similar performances on sequences evaluating their shared CL properties (perceptual transfer, plasticity, stability), but \PICLE also demonstrates few-shot transfer and latent transfer.
+LMC performed worse than standalone on these sequences despite our efforts to adjust it to this setting, so we do not report it. 
+Forgetting impacts O-EWC and ER's final accuracy but is avoided by modular algorithms.
+
+First, we evaluate the methods' \textit{perceptual transfer capabilities} via sequences $S^{-}$, $S^{\text{out}}$, $S^{\text{out*}}$, $S^{\text{out**}}$. These are listed in increasing order of difficulty; 
+the last problem in the sequence has an input domain similar to one of the previous problems but is represented by a low number of data points. We consider the amount of transfer achieved in the last problem, $Tr^{-1}$ of Table ~\ref{table:bell_sequences_res_llt}. HOUDINI fails to scale to the large search space, only achieving transfer on the easiest sequence $S^{-}$. As expected, we find that MNTDP-D and \PICLE are equally capable of perceptual transfer and both perform significantly better than other methods. However, on $S^{\text{out**}}$, we find that \PICLE achieves $+10.33$ higher transfer, made possible by the performance-based prior we defined in Section \ref{sec:PT} for PT paths.
+
+Second, \textit{few-shot transfer} is evaluated by the $S^{\text{few}}$ sequence (Table \ref{table:bell_sequences_res_llt}) in which the last problem is represented by a few examples and shares an input domain of one of the past problems, and the two-dimensional pattern of another. This requires an algorithm to recompose previously acquired knowledge. \HOUDINI\ demonstrates low amount of transfer due to the large search space. MNTDP-D selects the correct modules to process the input domain but is unable to compose them with modules from another solution, leading to sub-optimal performance. Finally, \PICLE successfully achieves few-shot transfer, attaining $+34.65$ higher transfer ($Tr^{-1}(S^{\text{few}})$) than MNTDP-D.
+
+Third, \textit{latent transfer} is evaluated by two sequences (Table \ref{table:bell_sequences_res_hlt}): $S^{\text{in}}$ and $S^{\text{sp}}$. In both, the last problem shares the two-dimensional pattern of the first problem, but has a new image input domain ($S^{\text{in}}$) or a new input space ($S^{\text{sp}}$). MNTDP-D does not achieve latent transfer: it transfers some perceptual knowledge on $S^{\text{in}}$ and fails on $S^{\text{sp}}$. \HOUDINI\ performs similarly to MNTDP-D on $S^{\text{in}}$ but achieves the largest amount of latent transfer on $S^{\text{sp}}$. In $S^{sp}$, the different input space necessitates a different modular architecture for the first $5$ modules, resulting in a much smaller search space, $\mathcal{O}(6^3 = 216)$. This allows non-scalable approaches, namely RS and HOUDINI, to also be effective on this sequence. Finally, \PICLE demonstrates latent transfer on both sequences, outperforming MNTDP-D and transferring $+14.67$ ($Tr^{-1}(S^{\text{in}})$) and $+23.65$ ($Tr^{-1}(S^{\text{sp}})$) compared to the PT-only ablation.
+
+An algorithm's \textit{plasticity}, i.e. ability to acquire new knowledge, is evaluated by $S^{\text{pl}}$ in which all problems are different. All modular algorithms demonstrate plasticity, as they can always introduce a new set of modules, achieving similar final accuracies $\mathcal{A}(S^{\text{pl}})$ (Table \ref{table:bell_sequences_res_llt}). The last short sequence $S^+$ evaluates the backward transfer by having the last problem be the same as the first one but with a larger dataset. All modular algorithms showed inability to attain backward transfer, due to their pre-trained modules being frozen, thus, achieving similar final accuracies $\mathcal{A}(S^{\text{few}})$.
+
+Finally,
+to measure scalability, we define $S^{\text{long}}$ which contains $60$ randomly-selected compositional problems. We compare to MNTDP-D as it was the only other method able to do well in the large search space of the short sequences. PT-only achieved $+7.37$ higher average accuracy than the standalone baseline demonstrating its ability to achieve perceptual transfer on a long sequence of problems. MNTDP-D achieved $+8.83$ higher average accuracy than SA which confirmed its scalability. \PICLE performed the best, attaining $+12.25$ higher average accuracy than SA. This shows that \PICLE can successfully attain perceptual and latent transfer across a long problem sequence.
+
+\input{sections/s7_results_CTrL}
+\begin{figure}
+\captionsetup[subfigure]{justification=Centering}
+
+\begin{subfigure}[t]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{figures/plot_FLOPs.png}
+    \caption{A logarithmic scale of the number of FLOPs required for a fixed number of updates, per problem (in trillions)}
+\end{subfigure}\hspace{\fill} % maximize horizontal separation
+\begin{subfigure}[t]{0.45\textwidth}
+    \includegraphics[width=\linewidth]{figures/plot_memory.png}
+    \caption{The maximum memory required by each algorithm for each problem. }
+\end{subfigure}
+\caption{Resource requirements for CTrL's $S^{\text{long}}$.}\label{fig:slong_resources}
+\end{figure}
+\textbf{CTrL benchmarks.}
+The CTrL benchmark suite 
+defines fewer sequences to evaluate different CL properties. Namely, they specify $S^{\text{pl}}$, $S^{\text{+}}$, $S^{-}$, $S^{\text{out}}$, $S^{\text{sp}}$ which are defined similarly to ours. In contrast, the sequences are over multi-class classification tasks of coloured images from different domains. They also use a different modular architecture based on ResNet18 \citep{he2016deep}, which is more complex than the architecture used in the previous benchmarks. Each network composes $5$ modules, leading to a smaller search space on the short sequences -- $\mathcal{O}(6^5)$.
+
+Our results (Table \ref{table:ctrl_sequences}) show similar performance of the different modular CL algorithms on the short sequences, with \PICLE achieving the highest average performance. The smaller search space alleviates \HOUDINI's and LMC's scalability issues. As a result, \PICLE, \HOUDINI, MNTDP-D and LMC demonstrate perceptual transfer ($S^{-}$, $S^{\text{out}}$), plasticity ($S^{\text{pl}}$) and stability ($S^{+}$). However, latent transfer ($S^{in}$) is exhibited by \PICLE, HOUDINI and LMC, but not by MNTDP-D. Overall, the demonstrated properties are consistent with the ones observed on the compositional benchmarks. We also find \PICLE to be effective on more complex input domains and neural architectures.
+
+CTrL also specifies $S^\text{long}$, which has $100$ problems. Each problem is constructed by first sampling one of 6 possible datasets (including CIFAR100~\citep{krizhevsky2009learning}), then 5 classes from that dataset at random. The 100 tasks represent a varying degree of task-relatedness and distribution shifts, making it representative of the typical CL benchmarks where one introduces new tasks (task-incremental), new classes (class-incremental) or new domains (domain-incremental). This more challenging sequence is designed to evaluate an algorithm's scalability. On it, \PICLE achieved the highest average accuracy ($\mathbf{69.65}$), compared to SA ($55.04$), MNTDP-D ($65.64$) and LMC ($64.49$). This demonstrates \PICLE's effectiveness on large search spaces.
+Moreover, Figure \ref{fig:slong_resources} plots the computational and memory demands of modular CL algorithms on this sequence. It can be seen that LMC's memory and HOUDINI's computational requirements scale poorly with the number of problems, while MNTDP-D and \PICLE's requirements grow slowly with the number of solved problems.
+
+These results are summarised in Table \ref{table:cl_properties}. MNTDP-D and LMC are closest to \PICLE\ in performance, but compared to MNTDP-D, \PICLE\ is capable of latent and few-shot transfer and compared to LMC, \PICLE\ has superior scalability. Our results demonstrate that \PICLE is the first modular CL algorithm to achieve perceptual, few-shot and latent transfer while scaling to long problem sequences.
+
+
+\section{Related Work}
+
+
+\begin{wraptable}{l}{3in}
+\centering
+\caption{\label{table:cl_properties} Observed CL properties of modular CL approaches.}
+{\scriptsize 
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+              & RS & HOUDINI   & LMC       & MNTDP-D   & PICLE     \\ \midrule
+Plasticity    & \checkmark     & \checkmark & \checkmark & \checkmark & \checkmark \\ \midrule
+Stability     & \checkmark     & \checkmark & \checkmark & \checkmark & \checkmark \\ \midrule
+Perceptual Tr & \checkmark     & \checkmark & \checkmark & \checkmark & \checkmark \\ \midrule
+Few-shot Tr   & \checkmark     & \checkmark & \checkmark & X         & \checkmark \\ \midrule
+Latent Tr     & \checkmark     & \checkmark & \checkmark & X         & \checkmark \\ \midrule
+Scalability   & X             & X         & X         & \checkmark & \checkmark \\ \midrule
+Backward Tr   & X             & X         & X         & X         & X         \\ \bottomrule
+\end{tabular}
+}
+\end{wraptable}
+
+
+This work considers the task-aware, data-incremental \citep{de2021continual} supervised setting of continual learning. Other settings can involve overlapping problems \citep{farquhar2018towards} or reinforcement learning \citep{khetarpal2020towards}. Our CL desiderata is derived from \citet{valkov2018houdini} and \citet{veniat2020efficient}. Other lists ~\citep{schwarz2018progress, hadsell2020embracing, delange2021continual} do not distinguish between different types of forward transfer.
+
+Continual learning methods can be categorized into ones based on regularisation, replay, or a dynamic architecture \citep{parisi2019continual}. The first two share the same parameters across all problems, which limits their capacity and, in turn, their plasticity \citep{kirkpatrick2017overcoming}.
+Dynamic architecture methods can share different parameters by learning problem-specific parameter masks \citep{mallya2018packnet} or adding more parameters \citep{rusu2016progressive}. This category includes modular approaches that share and introduce new modules, allowing groups of parameters to be trained and always reused together. Modular approaches mainly differ in their search space and their search strategy. PathNet \citep{fernando2017pathnet} uses evolutionary search to search through paths that combine up to $4$ modules per layer. \citet{rajasegaran2019random} use random search on the set of all paths. HOUDINI \citep{valkov2018houdini} uses type-guided exhaustive search on the set of all possible modular architectures and all paths. This method can attain the three types of forward transfer, but does not scale to large search spaces.
+
+MNTDP-D \citep{veniat2020efficient} is a scalable approach which uses a k-NN model to find the closest previous solution, and then restricts its search space to perceptual transfer paths derived from that solution.
+Similarly to our search through PT paths (Algorithm \ref{alg:pt-strategy}), MNTDP-D evaluates only $L+1$ paths per problem, however, the search space does not include novel combinations of pre-trained modules which prevents the method from achieving few-shot transfer, in addition to being unable to achieve latent transfer. In contrast, our approach can achieve all three types of forward transfer.
+
+While LMC \citep{ostapenko2021continual} also approximates each module's input distribution, \PICLE's PT uses orders of magnitude fewer parameters and unites the approximations within a probabilistic model, allowing us to define a prior over the choice of modules and incorporate additional assumptions in a principled way. For each layer, LMC computes a linear combination of the outputs of all available pre-trained modules, thus, the trained model grows linearly with the number of solved problems, preventing LMC from scaling well.
+Finally, LMC's performance deteriorates when applied to long problem sequences. 
+
+\newpage
+\paragraph{Reproducibility Statement.}
+
+We have taken multiple steps to ensure the reproducibility of the presented results. With respect to our claims, we provide derivation of the posterior distribution used for PT paths (Eq.
+
+
+
+
+
+\paragraph{Acknowledgements.}
+
+This research was partially supported by The NSF National AI Institute for Foundations of Machine Learning (IFML), ARO award \#W911NF-21-1-0009, and DARPA award \#HR00112320018.
+
+
+
+
+
+

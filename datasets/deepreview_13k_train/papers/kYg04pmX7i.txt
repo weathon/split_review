@@ -1,0 +1,203 @@
+\title{Molecular Active Learning: How can LLMs Help?}
+
+\begin{abstract}
+Drug discovery, and molecular discovery more broadly, can be framed as a sequential active learning problem ---facing a candidate pool, strategies are designed to sequentially acquire molecules to assay, aiming to find the best molecule within the fewest rounds of trial and error.
+To automate this process, Bayesian optimization (BO) methods can mimic the approach of human medicinal chemists by constructing \textit{representations} from existing knowledge, quantifying \textit{uncertainty} for the predictions, and designing \textit{acquisition} experiments that balance exploitation and exploration.
+Traditionally, these three stages are implemented using building blocks such as graph neural networks (GNN) as representations, variational inference (VI) or Gaussian process (GP) for uncertainty quantification, and analytical expressions as acquisition functions.
+To facilitate the integration of both domain-specific and general knowledge into various stages of this process, in this paper, we investigate which parts of this workflow can be augmented or replaced by large language models (LLM).
+To this end, we present \textbf{COLT}, a software library for \textbf{C}hemical \textbf{O}ptimization with \textbf{L}anguage- and \textbf{T}opology-based modules, and thoroughly benchmark the combination thereof.
+We found that \textit{none} of the LLMs, no matter incorporated at what stage, can outperform the simple and fast Bayesian baseline with GNN and GP.
+As a remedy, we offer a new tuning recipe with direct preference optimization (DPO), where the optimization of synthetic properties can be used to increase the efficiency of the acquisition in real-world tasks.
+\end{abstract}
+
+\section{1 INTRODUCTION: DRUG DISCOVERY AS SEQUENTIAL ACTIVE LEARNING  }
+
+
+A drug discovery campaign—the endeavor to search, from the vast chemical universe, for a new chemical entity with some desired therapeutic efficacy—takes decades and billions of dollars and has its decision-making process traditionally reliant on human experts [1; 2]. When a human expert makes a decision to prioritize a certain compound(s) in the pre-clinical stage of a drug discovery project, their thought process, not without some oversimplification (regarding the multitask, constrained, and batched nature of the optimization), could be broken down as follows: first, an understanding of the current chemical space is constructed from existing medicinal chemistry data, as well as general knowledge distilled from years of training and experience (sometimes referred to as the chemical intuition [3]); second, this understanding is applied to the chemical space yet to be assayed, providing predictions with associated uncertainty; finally, by leveraging expectation and uncertainty, while balancing exploration vs. interpolation, she selects candidates to be synthesized and characterized, generating assay data to refine her belief. This process is carried out iteratively until a therapeutic candidate suitable for clinical trials is identified.  
+
+Bayesian optimization methods [4; 5] can work analogously to human experts when optimizing over the chemical space, with the aforementioned three stages corresponding to representation, uncertainty quantification, and acquisition in the active learning process. We can use graph neural networks (GNNs) [6; 7; 8; 9; 10; 11; 12] to represent the molecule $(\S\ 2.1)$ , variational inference (VI) [13] or Gaussian process (GP) regression [14; 15] to quantify the uncertainty of the predictions $(\S\,2.2)$ , and analytical expressions as the acquisition functions $(\S\,2.3)$ .  
+
+![](images/cbb3696095d89c4a57a64a1548bc1599940e0d6d5fa338ba7a27ca7ecf3104e2.jpg)  
+Figure 1: Semantic illustration. The experiment design in drug discovery can be broken down into the representation, uncertainty quantification, and acquisition stages, working analogously to the chemical intuition of human medicinal chemists. Bayesian optimization $(\S\,2)$ typically employs GNN as representation $(\S\,2.1)$ , VI or GP $(\S\ 2.2)$ as uncertainty quantification, and analytical functions $(\S\,2.3)$ for acquisition, which can be modularly replaced by LLMs using the example prompts.  
+
+Notably, the majority of early-stage drug discovery problems dwell in the small-data regime. Unlike the abundant cat pictures or blog posts readily scraped from the internet, in drug discovery, each data point is the result of costly and time-consuming wet lab experiments. Consequently, even the largest pharmaceutical companies rarely work with a candidate pool larger than 1 million compounds [16]—the number being smaller in magnitude for biotech startups. ChEMBL [17], the largest public chemical data repository, contains merely 15 million assays of various kinds over 1.8 million compounds. On one hand, this makes principled Bayesian models particularly well suited, thanks to their inherent regularization and uncertainty quantification. On the other hand, while working with graph-structured data provides useful inductive biases, incorporating these biases into such Bayesian, graph-based models remains challenging [18; 19], unlike LLMs, which can easily absorb language-structured knowledge by training on texts. In the chemistry domain, for instance, the success of LLMs has been demonstrated through numerous models fine-tuned for diverse modeling tasks [20; 21; 22; 23].  
+
+Main contributions. In this paper, we offer a comparison between the efficacy of knowledge versus inductive bias by evaluating the optimization efficiency of LLMs against that of BO with graph-based representation. First, we review the abstractions underlying the building blocks of Bayesian active learning and propose solutions to replace each of them with LLMs. To this end, we introduce a package for Chemical Optimization with Language- and Topology-based models (COLT), which offers an easy-to-use API for molecular active learning. Using this program, we combinatorially benchmark the effect of LLMs when placed at various stages of active learning, and find that none of the solutions are as performant as the $\mathrm{GNN+GP}$ baseline. Offering a beacon of hope amidst the negative results, we provide a general tuning recipe based on direct preference optimization (DPO) [24], where learning occurs directly on the per-step acquisition trajectory, and find that tuning on synthetic datasets has a positive impact on optimizing real-world tasks.  
+
+Limitations. In this paper, we only consider the optimization on a finite candidate space, whereas the combinatorial chemical space is infinite and can be treated continuously [25]. Additionally, to enable rapid benchmarking with a limited computational footprint, we restrict our analysis to small datasets, resulting in high variance across the benchmark results. Similarly, we restrict our experiments to smaller, open-source LLMs.  
+
+2 BAYESIAN OPTIMIZATION (BO) FOR MOLECULAR ACTIVE LEARNING  
+
+First, we formalize the drug discovery campaign introduced in $\S\ 1$ . Given a finite pool of candidate chemical compounds, represented by chemical graphs $\mathcal{F}=\{\mathcal{G}_{i},i=1,2,\dots N\}$ , each associated with a potency $y(\mathcal{G}_{i})\in\mathbb{R}$ , of which a noisy observation is expensive to acquire, we are interested in finding the compound with the highest potency $\mathcal{G}^{*}=\mathrm{argmax}_{i}\,y(\mathcal{G}_{i})$ with fewest function evaulations. This can be achieved via active learning, starting with an empty portfolio $\mathcal{P}=\emptyset$ , and in each round, choosing a compound from the candidate pool, $\mathcal{F}$ , based on a decision informed by the current portfolio, $\hat{\mathcal{G}}\,=\,D(\mathcal{F}|\mathcal{P}),\hat{\mathcal{G}}\,\in\,\mathcal{F}$ . Subsequently, we subtract this compound from the candidate pool to add it to the portfolio, $\mathcal{F}\leftarrow\mathcal{F}\setminus\{\hat{\mathcal{G}}\},\mathcal{P}\leftarrow\mathcal{P}\cup\{\hat{\mathcal{G}}\}$ .  
+
+Bayesian optimization (BO) is a powerful approach in active learning where the decision $D({\mathcal{F}}|{\mathcal{P}})$ is constructed in a modular way. Firstly, we extract fixed $D$ -dimensional features from the compounds to form a representation: $\dot{H}\,=\,h(\mathcal{G})\,\in\,\mathbb{R}^{D}$ ; secondly, this representation is used to construct a predictive posterior distribution with uncertainty quantification: $p(y|\mathcal{G};\Theta),\Theta\,=\,\theta(H)$ , whose parameters $\Theta$ is is mapped from the graph representations. Lastly, an acquisition function, $\alpha$ , is applied on this predictive posterior to form a score, on the basis of which a decision is made: $\hat{G}=$ $\begin{array}{r}{\bar{D(\mathcal{F}|\mathcal{P})}=\mathrm{argmax}_{\mathcal{G}\in\mathcal{F}}\,\bar{\alpha_{}}(p(y|\mathcal{G}))}\end{array}$ .  
+
+In sum, the acquisition trajectory represents a sequential decision process, where the probability of a given trajectory can be written as:  
+
+$$
+\begin{array}{l}{\displaystyle p(\mathcal{P}=\{\mathcal{G}_{i}\})={p(\mathcal{G}_{0})}\prod_{t=0}^{t=|\mathcal{F}|}p(\mathcal{G}_{t}|\{\mathcal{G}_{t=0,\cdots,t}\})}\\ {\displaystyle=p(\mathcal{G}_{0})\prod_{t=0}^{t=|\mathcal{F}|}\int\mathrm{d}\,\Theta p(\Theta|\{\mathcal{G}_{t=0,\cdots,t}\})P[\alpha(p(y|\mathcal{G}_{t},\Theta))\geq\alpha(p(y|\mathcal{G}_{i},\Theta)),\forall\mathcal{G}_{i}\in\mathcal{F}].,}\end{array}
+$$  
+
+where the first equality (1) stands generally for active learning strategies surveyed in this paper $\S\,2$ and $\S\ 3$ ), and the second equality stands only for traditional Bayesian optimization $(\S\,2)$ .  
+
+2.1 REPRESENTATION: GRAPH NEURAL NETWORKS (GNN)  
+
+Graph neural networks (GNNs) have emerged to be the modern workhorse for graph representation. A GNN can be most generally defined as one adopting a layer-wise updating scheme that aggregates representations from a node’s neighborhood $\mathcal{N}(v)$ (based on the edges $\hat{A}_{u v}$ ) and updates its embedding:  
+
+$$
+\begin{array}{r}{\mathbf{X}_{v}^{\prime}=\phi(\mathbf{X}_{v},\rho(\mathbf{X}_{u},\hat{A}_{u v},u\in\mathcal{N}(v))),}\end{array}
+$$  
+
+where $\phi,\rho$ are the update and aggregate function, repsectively. Omitting the nonlinear transformation step $\phi$ , common to all neural network models, and assuming a convolutional aggregate function, $\rho=\mathrm{SUM}$ or $\rho={\mathrm{MEAN}}$ , a GNN layer is characterized by the aggregation/convolution operation that pools representations from neighboring nodes. This forms an intermediary representation $\mathbf{X^{\prime}}$ , which on a global level, with activation function $\sigma$ and weights $W$ , can be written as: $\mathbf{X}^{\prime}=\sigma(\hat{A}\mathbf{X}W)$ . The primary difference among architectures lies in the choice of effective adjacency matrix, $\hat{A}$ . The most classical examples include: graph convolutional networks [6] (GCN), which normalize $\hat{A}$ by the node in-degree, $\textstyle D_{i i}=\sum_{j}A_{i j}$ , and graph attention networks [11] (GAT), which take $\hat{A}$ to be the attention score;  
+
+$$
+\hat{A}_{\sf G C N}=D^{-\frac{1}{2}}A D^{-\frac{1}{2}};\hat{A}_{\sf G A T,i j}=\mathrm{Softmax}(\sigma(\mathrm{NN}({\bf X}_{i}||{\bf X}_{j})));
+$$  
+
+Stacking GNN layers, we can get a representation of the graph  
+
+$$
+H={\mathbf{X}}^{(l)}=\underbrace{\sigma(\hat{A}\sigma(\hat{A}\sigma(\hat{A}...\sigma(\hat{A}\mathbf{X}\underbrace{W..W})W)W)}_{l\;\mathrm{times}}.
+$$  
+
+2.2 UNCERTAINTY QUANTIFICATION: VARIATIONAL INFERENCE (VI) AND GAUSSIAN PROCESSES (GP) REGRESSION  
+
+Bayesian neural networks. Under the Bayesian formalism, given sets of (graph, measurement) pairs as training data $\mathcal{D}=\{\mathcal{G}^{(i)},y^{(i)},i=1,\dot{2},3,...,n\}$ , the probability distribution of the unknown  
+
+quantity of the measurement $y^{(n+1)}$ could be modelled with respect to the posterior distribution of the model $\mathcal{M}$ with parameters $\theta$ as:  
+
+$$
+p(y^{*}|\mathcal{M},\mathcal{D},\mathcal{G}^{*})=\int p(y^{*}|\mathcal{G}^{*},\Theta)P(\Theta|\mathcal{D})\operatorname{d}\theta.
+$$  
+
+This integral, of course, is not tractable, and fully Bayesian methods using a Markov chain Monte Carlo-based sampling scheme can turn out to be prohibitively expensive with realistically sized datasets and models. We review two common techniques to approximate Equation 6.  
+
+Variational inference on the parameter space. Variational inference [13] turns the sampling problem into an optimization problem by assuming the distribution belongs to a specific family and and then optimizing its parameters to best approximate the true distribution. Concretely, on a parameter space [26], we assume such class of distribution to be a multivariate Gaussian with diagonal covariance matrix $q(\Theta)=\mathcal{N}(\mu,\sigma)$ , whose parameters can be optimized by minimizing the Kullback-Leibler (KL) divergence between the variational and true Bayesian posterior (also known as variational free energy):  
+
+$$
+\iota^{*},\sigma^{*}=\underset{\mu,\sigma}{\arg\operatorname*{min}}\mathcal{D}_{\mathrm{KL}}[q(\theta|\mu,\sigma)||P(\theta|\mathcal{D})]=\underset{\mu,\sigma}{\arg\operatorname*{min}}\mathcal{D}_{\mathrm{KL}}[q(\theta|\mu,\sigma)||P(\theta)]-\mathbb{E}_{\theta\sim q(\mu,\sigma)}[\log P(\mathcal{D}|\theta)]
+$$  
+
+Gaussian process (GP) regression with deep kernel learning (DKL) Within the deep kernel learning framework [27], a graph kernel can be defined by applying a standard kernel (such as the radial basis function, RBF) with parameters $\gamma$ , to the output of GNNs.  
+
+$$
+k(\mathcal{G},\mathcal{G}^{\prime})=k_{\mathrm{RBF}}(\mathrm{GNN}(\mathcal{G}|\Theta),\mathrm{GNN}(\mathcal{G}^{\prime}|\Theta),\gamma)
+$$  
+
+Equation 6 can then be written as:  
+
+$$
+p(\mathbf{y}^{*}|\mathcal{G}^{*},\mathcal{D}=\{\mathcal{G}\})\sim\mathcal{N}(\mathbb{E}[y^{*}],\mathrm{cov}(y^{*})),
+$$  
+
+where:  
+
+$$
+\begin{array}{r l}&{\quad\mathbb{E}[\mathbf{y}^{*}]=K(\mathcal{G}^{*},\{\mathcal{G}\})[K(\{\mathcal{G}\},\{\mathcal{G}\})+\sigma_{n}^{2}I]^{-1}\mathbf{y};}\\ &{\mathrm{cov}(\mathbf{y}^{*})=K(\{\mathcal{G}^{*}\},\{\mathcal{G}^{*}\})-K(\{\mathcal{G}^{*}\},\{\mathcal{G}\})[K(\{\mathcal{G}\},\{\mathcal{G}\})+\sigma_{n}^{2}I]^{-1}K(\{\mathcal{G}\},\{\mathcal{G}^{*}\}).}\end{array}
+$$  
+
+The neural network and the kernel parameters $\{\Theta,\gamma\}$ can be jointly optimized to produce a maximum likelihood fit to the dataset.  
+
+
+
+\section{2.3 ACQUISITION FUNCTIONS  }
+
+
+Once the model is trained, we can use the predictive posterior, $p(y^{*}|\mathcal{G}^{*},\pmb{\theta})$ , of a given compound to prioritize compounds from a candidate pool by defining an acquisition function $\alpha$ and greedily selecting the candidate with the largest $\alpha$ for subsequent assaying. Popular choices include [28]:  
+
+Probability of Improvement $(P o I)$ ,  
+
+$$
+\alpha_{\mathrm{PI}}(\mathcal{G}^{*}|\mathcal{D},\Theta)=1-\Phi_{P(y^{*}|\mathcal{G}^{*},\pmb{\theta})}(\operatorname*{max}(y)),
+$$  
+
+characterizes the probability of the best current value, where $\Phi$ denotes the CDF of the corresponding distribution, and $\operatorname*{max}(y)$ is obtained within the training set $\mathcal{D}=\{\mathcal{G}_{i},y_{i}\}$  
+
+Expected improvement $(E I)$ ,  
+
+$$
+\alpha_{\mathrm{EI}}(\mathcal{G}^{*}|\mathcal{D},\Theta)=\mathbb{E}_{P(y^{*}|\mathcal{G}^{*},\theta)}\operatorname*{min}\{\{y^{*}\}-\operatorname*{max}(y),0\},
+$$  
+
+measures the expectation of improvement over the current best.  
+
+For tractable distributions such as the Gaussian family, these expressions can be evaluated analytically, though in general they can also be estimated via samples drawn from these distributions.  
+
+
+
+\section{3 MODULARLY REPLACING BO COMPONENTS WITH LLMS  }
+
+
+Large language models (LLMs)—neural networks composed primarily of transformer [29]—have shown surprising promise [30; 31; 32; 33] in representing and generating text-structured data and gained popularity very quickly in recent years. Their impressive generative ability led the field to describe them with personifying terms, such as understanding, and to employ them in seemingly impossible tasks, from reasoning [34] to planning [35].  
+
+In recent years, LLMs [31; 30] have been routinely incorporated into active learning pipelines, from hyperparameter search [36] to material design [37; 38]. Little attention, however, has been paid to dissecting which stage of the active learning process can LLMs be most effective in. To answer this question, and to compare the efficacy of LLMs with time-tested workflows, we propose three solutions to incorporate LLMs into molecular active learning by modularly replacing components outlined in $\S\ 2$ by LLMs.  
+
+Replacing the GNNs $(\S\ 2.1)$ , one can use an LLM as a feature extractor to come up with the representation of molecules. The input of the LLM is a string representation of the graph, such as the SMILES string [39] common in molecular representation. This is consistent with the method Kristiadi et al. [38] used for material discovery.  
+
+Even before the era of LLMs, to represent molecules as strings and feeding them into transformer- or recurrent neural networks (RNN)-based models have long been used in various pipelines of molecular modeling, from property prediction to active learning [25], where pretraining on large ensembles of data has been proven as an effective avenue towards better performance [40]. We are interested in testing whether the added complexity and knowledge in LLM would help refine this representation.  
+
+3.2 LLMS AS REPRESENTATION AND UNCERTAINTY QUANTIFICATION  
+
+![](images/474770237e6f065ecb0cf2228ab8e1e5f42d27d004aaf190416f7af9437d91b1.jpg)  
+
+The generation process of LLMs is intrinsically stochastic, and one can harvest the stochasticity of that process as a proxy of the uncertainty. Specifically, the predictions of a property of a molecule can be predicted by LLMs in a few-shot, in-context [41] manner, where a few examples are provided in the prompts, based on which a prediction of the desired property is made. This replaces both the representation $(\S\,2.1)$ and the uncertainty quantification (§ 2.2) stages of the Bayesian optimization. Ramos et al. [37] employed this method for quantifying the uncertainty of property predictions of materials. A natural challenge present here, as in all in-context learning methods, is the curse of the token limit, which allows very few samples to be included. When moving from the smalldata to big-data regime, this can be solved via selecting in-context learning examples via similarity measures.  
+
+3.3 LLMS AS REPRESENTATION, UNCERTAINTY QUANTIFICATION, AND ACQUISITION  
+
+![](images/9776ce6f2dce943defb9140c0dacc866439f6b6d3f91661da4315f65817a6945.jpg)  
+
+Finally, we can replace all building blocks introduced in $\S~2$ with LLMs and let them make final choices of compounds to assay in the next round. When the pool of candidates is large, the length of the prompt will grow quickly. To enable token-efficient search among large candidate pools, we introduce a tournament search model, where we separate the candidates into groups, and iteratively compare the best candidate within groups. As such, if the token limit can originally fit only $N$ candidates, the tournament search model can allow up to $N^{M}$ candidates to be compared within NM prompts.  
+
+4 COLT: A LIBRARY FOR MOLECULAR ACTIVE LEARNING.   
+
+![](images/c13e9a8712f1691283643e445305f0f5921266cd1c48d1008d1ac9467adf639e.jpg)  
+
+To rapidly benchmark the three strategies illustrated in Section 3, and to provide a platform for medicinal chemists to seamlessly integrate both traditional and language-based active learning approaches into their workflows – thereby accelerating the design of life-saving therapeutics – we introduce COLT, a software package for chemical optimization using language- and topology-based methods. The above is a illustration of the COLT library interface used to generate the results in $\S\,5$ , where representation ( $\S\,2.1$ or $\S\,3.1_{.}$ ), uncertainty quantification $\S\,2.2$ or $\S\,3.2)$ , and acquisition function $\mathbb{\S}\,2.3$ or $\S\ 3.3\rangle$ ) are modularly abstracted.  
+
+Speed. Designed for practical simulation, the efficiency in terms of wall time has been a focus of the design from the beginning. As such, in this PyTorch [42]-based package, the GNNs are implemented with generalized sparse matrix-matrix multiplication in deep graph library (DGL) [43], variational inference parallelized on GPU using Pyro [44] for variational inference, Gaussian processes regression with kernel interpolation [45] implemented in GPytorch [14], and fast deployment of LLMs with Huggingface [46] and vLLM [47].  
+
+Similar packages. GAUCHE [48] performs Gaussian process regression using graph- and stringbased kernels. Lapeft-Bayesopt [38] uses the representation from LLMs to perform Bayesian optimization to discover materials. COLT differs from these efforts in its ability to perform both traditional BO and LLM-based optimization, with both VI- and GP-based uncertainty quantification. It also stands out for its modular design and user-friendly interface.  
+
+
+
+\section{5 EXPERIMENTS: A BENCHMARK OF COMBINING BUILDING BLOCKS.  }
+
+
+Having introduced the machinery to modularly carry out the benchmark experiments on the molecular space, we benchmark the Bayesian graph- and language-based active learning strategies.  
+
+Data. While we are interested in benchmarking the ability of our active learning algorithms to optimize the potency of compounds, high-quality, consistent potency data in the public domain is scarce due to the close-source nature of most drug discovery campaigns. Nevertheless, from a methodological point of view, the potency function $f$ is no more than a mapping from the graph structure to $\mathbb{R}$ , and has the same functional signature as, and is dependent upon, the physiochemical properties of molecules. As such, we used the physical property datasets, ESOL [49], FreeSolv [50], and Lipophilicity from MoleculeNet [51]. The targets are normalized to be distributed within the range of [0, 1], so the reported metrics are problem-agnostic [52]. Following the conceptual framework outlined in $\S~2$ , for all experiments, we start with an empty set, randomly select the first candidate, and iteratively refine the model based on the data already evaluated.  
+
+LLMs are not as performant as more traditional models. Despite the high variance in the data, we notice that the best models uniformly arise from the composition of GNN, GP, and EI (except for the last row for the DPO model to be introduced). The more LLMs are involved in the active learning pipeline, the worse the acquisition efficiency is—they can pass as feature extractor [38] when coupled with a GP (this is consistent with the findings of Ramos et al. [37]), achieving similar performance as a simple transformer [53]; when used as uncertainty quantification in an in-context manner, their performance deteriorates; and when used in an end-to-end manner to pick candidates directly, they act no different than the random acquisition function. At the same time, each graphbased, Bayesian model completes trials within a minute, whereas LLM-based models require by magnitude more time.  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+
+![](images/b2e5e4192cf45c266e79df51537c1f32f210dec89c8e1797a0e979aa4a4077c2.jpg)  
+
+The effect of domain-specific models. There have been a plethora of LLMs for chemistry-related tasks [55], the most popular ones include Yu et al. [22]; Zhang et al. [20], which have been finetuned on instruction datasets [56]. Since they have “seen” more chemistry-related texts, it is reasonable to expect that they will perform better than the general-purpose models. This is the case for galactica [54], an LLM dedicated to science-related tasks, which outperforms the base Llama model.  
+
+![](images/ef91e29fe8fefbd576e8d885059a2142ca2ff0ebe694ec1509d38ce81803ce39.jpg)  
+Figure 2: Comparison of active learning algorithms on synthetic datasets. Kernel density estimate (KDE) over the normalized cumulative regret (↓) with $\mathrm{GCN}+\mathrm{GP}+\mathrm{EI}$ and LLM (Llama-8B) acquisitions over a range of synthetic targets defined in Equation 14. The candidate space is taken from the real-world dataset.  
+
+Does knowing the target help? Again, the datasets employed in this section are reliably measured physiochemical properties. We decorate the prompt with the physical meaning of the targets in the trials marked with “description”: aqueous solubility in ESOL, hydration free energies in FreeSolv, and the octanol/water distribution coefficient in Lipophilicity. Improvements are observed with descriptions added to the prompt.  
+
+Have LLMs already seen this data? A risk ubiquitous in benchmarking LLMs on real-world data in the public domain is that there is no guarantee that the data was not in the training set. For instance, the datasets benchmarked here are explicitly included in the training set of $\mathrm{Yu}$ et al. [22]. Despite this risk, Table 1 illustrates that even with possible leakage, LLMs is still less competitive compared to $\mathrm{GNN+GP}$ initialized afresh. For a fairer comparison nonetheless, we synthesize an artificial target:  
+
+$$
+f(\mathcal{G})=\sum_{i}\lambda_{i}K_{i}(\mathcal{G},g_{i}),
+$$  
+
+where $K$ is a set of pre-defined graph kernels comparing the graph with certain fragments $g_{i}$ , termed Morgan fingerprints [57], and $\lambda_{i}$ is taken from a Gaussian distribution. With each set of $\{\lambda_{i}\}$ , we can correspondingly define a target. As shown in Figure 2, with synthetic dataset, the difference between the traditional, graph- and GP-based acquisition and the LLM is even more obvious.  
+
+Experimental details and fixed degrees of freedom. Since the space of hyperparameter is vast and to find the best-performing model for each class is not in the scope of the paper, we prescribe a set of fixed experiment protocols for the graph-based Bayesian models benchmarked in Table 1. Within each round of acquisition, the neural network model is trained for 50 epochs with Adam [58] optimizer with learning rate $1e-3$ and L2 regularization factor $1e-5$ ; 8 samples are taken for all training and inference steps; and 1 attention head is used for GAT [11]. In this paper, we only consider exact GPs, leaving its variational counterpart [59] for future study. Even under these arbitrarily defined hyperparameters, these traditional models still perform better than more advanced LLMs.  
+
+6 DIRECT PREFERENCE OPTIMIZATION (DPO) PRETRAINING FOR MORE EFFICIENT OPTIMIZATION: TO THINK LIKE A GP, AND BETTER.  
+
+LLMs are routinely instruction-tuned [56] on supervised learning tasks to offer better predictions and “understandings” of certain candidate spaces. Without uncertainty calibration and carefully chosen acquisition functions, reliable predictions cannot be readily translated into efficient experimental design. In this section, we provide a general recipe to readily optimize the acquisition efficiency of LLMs in an end-to-end manner, i.e. taking over all of the representation, uncertainty quantification, and acquisition steps. We achieve this by learning from all of the choices (Equation 1) from successful trials driven by $\mathrm{GNN+GP}$ active learning algorithms.  
+
+Recall the sequential nature of the active learning—by assuming the greediness of Equation 1, we optimize the efficiency of the entire trial by optimizing that of each acquisition. We use direct preference optimization (DPO) [24] to achieve this goal. Specifically, note that in Table 1, the combination of $\mathrm{GNN+GP}$ is a uniformly strong baseline, we use this method to generate a cohort of $N$ trials, and find the most efficient trial, judged by the lowest normalized cumulative regret. Based upon our hypothesis, each step in the trial is efficient and worth encouraging. We therefore pair each acquisition step with a step generated from the random acquisition function as preferred and dispreferred samples, arriving at the policy objective:  
+
+$\begin{array}{r}{\mathcal{L}_{\mathtt{D P0}}=-\mathbb{E}(\mathcal{G}\in\mathcal{P},\mathcal{G}_{t}^{\mathcal{G P}}=\operatorname{argmax}_{\mathcal{G}\in\mathcal{F}}\alpha_{\mathtt{E I}}(p(y_{i})|\mathcal{G}),P(\mathcal{G}^{\mathtt{r a n d o m}})=\mathtt{C a t e g o r i c a l}(\mathcal{G}_{>t}))}\\ {\left[\log\sigma(\beta\log\frac{\pi_{\theta}(\mathcal{G}_{t}^{\mathcal{G P}}|\mathcal{G}_{<t})}{\pi_{0}(\mathcal{G}_{t}^{\mathcal{G P}}|\mathcal{G}_{<t})}-\beta\log\frac{\pi_{\theta}(\mathcal{G}_{t}^{\mathtt{r a n d o m}}|\mathcal{G}_{<t})}{\pi_{0}(\mathcal{G}_{t}^{\mathtt{r a n d o m}}|\mathcal{G}_{<t})})\right]}\end{array}$ (15) Descending this objective leads to the LLM active learner not only to think like a $\mathrm{GNN}\,+\,\mathrm{GP}$ algorithm, but also generating only the most successful trials. As shown in the last row of Table 1, this turns out to be a highly useful strategy. Starting from a particularly small model of $\mathsf{Q w e n}\!-\!0\;.\;5\mathrm{B}$ [60], we tune the acquisition efficiency to surpass that of the strong baseline of GNN $^+$ GP. Even though this particular experiment is small and only demonstrative, this only positive result amidst the discouraging performance of LLMs offers a promising avenue for tuning LLMs to directly make step-wise decisions in an active learning setting.   
+7 CONCLUSION.   
+In this paper, we abstract drug discovery as a sequential active learning process, and survey the Bayesian optimization (BO) building blocks that can lead to principled and efficient experiment design. Next, we review possible ways for these building blocks to be replaced by LLMs. A software package, COLT, is provided for carrying out active learning experiments and assessing its efficiency. Using this package, we thoroughly benchmark the effects of replacing BO building blocks with LLMs, and found that such replacement causes only slowdown and performance drop. This suggests that a large quantity of noisy knowledge (represented by LLMs) is not as effective as a principled model with appropriate inductive biases $(\mathrm{BO}+\mathrm{GNN})$ ). Nevertheless, under the framework of direct preference optimization (DPO), we provide a recipe for tuning LLMs directly for generating stepwise optimization decisions.   
+
+

@@ -1,0 +1,986 @@
+\title{KLay: Accelerating Neurosymbolic AI}
+
+\begin{abstract}
+A popular approach to neurosymbolic AI involves mapping logic formulas to arithmetic circuits (computation graphs consisting of sums and products) and passing the outputs of a neural network through these circuits. This approach enforces symbolic constraints onto a neural network in a principled and end-to-end differentiable way. Unfortunately, arithmetic circuits are challenging to run on modern AI accelerators as they exhibit a high degree of irregular sparsity.
+To address this limitation, we introduce knowledge layers (\klay), a new data structure to represent arithmetic circuits that can be efficiently parallelized on GPUs.
+Moreover, we contribute two algorithms used in the translation of traditional circuit representations to \klay and a further algorithm that exploits parallelization opportunities during circuit evaluations.
+We empirically show that \klay achieves speedups of multiple orders of magnitude over the state of the art, thereby paving the way towards scaling neurosymbolic AI to larger real-world applications.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Interest in neurosymbolic AI~\citep{hitzler2022neuro} continues to grow as the integration of symbolic reasoning and neural networks has been shown to increase reasoning capabilities~\citep{yi2018neural, trinh2024solving}, safety \citep{yang2023safe}, controllability~\citep{jiao2024valid}, and interpretability
+~\citep{koh2020concept}. Furthermore, neurosymbolic methods often require less data by allowing a richer and more explicit set of priors~\citep{diligenti2017semantic, manhaeve2018deepproblog}.
+
+However, as the computational structure of many neurosymbolic models is partially dense (in its neural component) and partially sparse (in its symbolic component)% 
+, efficiently learning neurosymbolic models still presents a challenge \citep{wan2024towards}.
+So far, the symbolic components of these neurosymbolic models have struggled to fully exploit the potential of modern AI accelerators.
+
+Our work focuses on a particular flavor of neurosymbolic AI, pioneered by \citet{xu2018semantic} and \citet{manhaeve2018deepproblog}, which performs probabilistic inference on the outputs of a neural network. 
+This is achieved by encoding the symbolic knowledge using arithmetic circuits.
+While arithmetic circuits are end-to-end differentiable, they also pose certain challenges. In particular, arithmetic circuits are ill-suited to be evaluated on AI accelerators, such as GPUs or TPUs, due to their high degree of irregular sparsity. This sparsity renders them inadequate to be formulated in terms of dense tensor operations.
+In this work, we address the challenge of optimizing neurosymbolic architectures to efficiently leverage available widely available hardware.
+To this end, we present \klay: a new data structure representing arithmetic circuits as \textbf{k}nowledge \textbf{lay}ers which can exploit the parallel compute present in modern AI accelerators.
+
+The main advantage of \klay is that it reduces arithmetic circuit evaluations to index and scatter operations -- operations already present in popular tensor libraries. This allows for the embarrassingly parallel nature of these knowledge layers to be harnessed.
+Importantly and in contrast to alternative approaches that speed up sparse neurosymbolic computation graphs~\citep{dadu2019towards,liuscaling},
+we forego the need for custom hardware-specific implementations.
+This makes \klay completely agnostic towards the underlying hardware. By leveraging the compiler stacks of open-source tensor libraries, \klay can furthermore considerably outperform existing hand-written CUDA kernels.
+
+
+
+
+\section{A Brief Primer on Neurosymbolic AI}
+
+
+The symbolic knowledge in neurosymbolic AI is commonly specified as Boolean logic. 
+\emph{Boolean circuits} are a compact representation of Boolean logic using directed acyclic graphs \citep{darwiche2021tractable}. More specifically, the leaves in Boolean circuits correspond to Boolean variables (or their negation), while inner nodes are either $\land$-gates or $\lor$-gates. We make the usual assumption that Boolean circuits do not contain negation, known as \emph{negation normal form} (NNF). Figure~\ref{fig:circuit_example:nnf} contains an example of a Boolean circuit. A circuit can be evaluated for a set of inputs by a simple post-order traversal of the graph, meaning children get evaluated before their parents. More formally, the value $v(n)$ of a node $n$ is a defined as
+\begin{align}
+    v(n) = \begin{cases}
+        l_n & \text{if $n$ is a leaf node,} \\
+        \bigwedge_{c \in \mathcal{C}_n} v(c) & \text{if $n$ is a $\land$-gate,} \\
+        \bigvee_{c \in \mathcal{C}_n} v(c) & \text{if $n$ is a $\lor$-gate.} \\
+    \end{cases}
+\end{align}
+We write $l_n$ for the Boolean input value of the leaf node $n$ and $\mathcal{C}_n$ for the set of children of an inner node $n$. The evaluation of a circuit is a function $\mathbb{B}^N \to \mathbb{B}$ which maps the Boolean inputs of the leaves to the value of the root node.
+
+In order to render Boolean circuits useful in the context of neurosymbolic AI, we first need to perform a so-called knowledge compilation step~\citep{darwiche2002knowledge}. This compilation step transforms an NNF circuit into \textit{deterministic decomposable negation normal form} (d-DNNF).
+\textit{Determinism}~\citep{darwiche2001tractable} and \textit{decomposability}~\citep{darwiche2001decomposable} are two properties that guarantee certain computations can be performed tractably, such as finding the number of satisfying assignments. We refer the reader to \citet{vergari2021compositional} for an in-depth discussion on tractable computations on circuits.
+Figure~\ref{fig:circuit_example:ddnnf} contains the d-DNNF circuit resulting from knowledge-compiling the circuit in Figure~\ref{fig:circuit_example:nnf}.
+
+The important advantage of d-DNNF circuits over general NNF circuits is that they allow linear time probabilistic inference. Assume first that the Boolean variables are not deterministic anymore but constitute Bernoulli random variables. We can then compute the probability of the d-DNNF circuit evaluating to true under the input distribution by labeling the leaves of the circuit with the probabilities of the Boolean variables and replacing $\land$- and $\lor$-gates with $\times$ and $+$ operations, respectively. The resulting circuit is also called an arithmetic circuit~\citep{darwiche2003differential} and is displayed in Figure~\ref{fig:circuit_example:ac}.
+
+\begin{figure}
+    \begin{subfigure}[t]{0.29\textwidth}
+        \centering
+        \resizebox{\linewidth}{!}{% 
+\tikzstyle{union} = [rounded corners,text centered, draw=black]
+\tikzstyle{intersection} = [rounded corners,text centered, draw=black]
+\tikzstyle{times} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{plus} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{int} = [circle, text centered, draw=black]
+\tikzstyle{leaf} = [rounded corners, text centered, draw=none, fill=none] %fill=gray!30
+\tikzstyle{arrow} = [thick,-,>=stealth]
+
+\begin{tikzpicture} [node distance=0.8cm]
+    \node (root) [plus] {$\lor$};
+    \node (anda) [times, below of=root, left of=root] {$\land$};
+    \node (andna) [times, below of=root, right of=root] {$\land$};
+    
+    \node (lita) [leaf, below of=anda, left of=anda] {$\neg a$};
+    \node (plusa) [plus, below of=anda] {$\lor$};
+    \node (litnb) [leaf, below of=plusa, left of=plusa] {$\neg b$};
+    \node (litnc) [leaf, below of=plusa] {$\neg c$};
+    \node (litd) [leaf, below of=plusa, right of=plusa] {$d$};
+
+    \node (litna) [leaf, below of=andna] {$a$};
+    \node (plusna) [plus, below of=andna, right of=andna] {$\lor$};
+    \node (litc) [leaf, below of=plusna, left of=plusna] {$c$};
+    \node (litnd) [leaf, below of=plusna] {$\neg d$};
+
+    \draw [arrow] (root) -- (anda);
+    \draw [arrow] (root) -- (andna);
+    \draw [arrow] (anda) -- (lita);
+    \draw [arrow] (anda) -- (plusa);
+    \draw [arrow] (andna) -- (litna);
+    \draw [arrow] (andna) -- (plusna);
+    
+    \draw [arrow] (plusa) -- (litnb);
+    \draw [arrow] (plusa) -- (litnc);
+    \draw [arrow] (plusa) -- (litd);
+    \draw [arrow] (plusna) -- (litc);
+    \draw [arrow] (plusna) -- (litnd);
+
+\end{tikzpicture}
+  
+
+        }
+        \caption{NNF circuit.}
+        \label{fig:circuit_example:nnf}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.33\textwidth}
+        \centering
+        \resizebox{\linewidth}{!}{% 
+\tikzstyle{union} = [rounded corners,text centered, draw=black]
+\tikzstyle{intersection} = [rounded corners,text centered, draw=black]
+\tikzstyle{times} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{plus} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{int} = [circle, text centered, draw=black]
+\tikzstyle{leaf} = [rounded corners, text centered, draw=none, fill=none] %fill=gray!30
+\tikzstyle{arrow} = [thick,-,>=stealth]
+
+\begin{tikzpicture} [node distance=0.8cm]
+        \node (n0) [plus] {$\lor$};
+        \node (n11) [times, below of=n0] {$\land$};
+        \node (n10) [times, left of=n11, xshift=-0.4cm] {$\land$};
+
+        \node (negB) [leaf, below of=n10, left of=n10, xshift=0.4cm] {$\neg b$};
+        \node (negA) [leaf, below of=n10, right of=n10, xshift=-0.4cm] {$\neg a$};
+
+        \node (nB) [leaf, below of=n11] {$b$}; 
+        \node (n20) [plus, right of=nB] {$\lor$};
+        \node (negC) [leaf, below of=n20, left of=n20, xshift=0.4cm] {$\neg c$};
+
+        \node (n30) [times, below of=n20, right of=n20, xshift=-0.4cm] {$\land$};
+        \node (nC) [leaf, below of=n30, left of=n30, xshift=0.4cm] {$c$};
+        \node (nD) [leaf, below of=n30, right of=n30, xshift=-0.4cm] {$d$};
+
+        \node (n21) [plus, above of=n30, right of=n30, xshift=-0.4cm] {$\lor$};
+        \node (negD) [leaf, below of=n21, right of=n21, xshift=-0.4cm] {$\neg d$};
+        \node (n12) [times, above of=n21] {$\land$};
+        \node (nA) [leaf, below of=n12, right of=n12] {$a$};
+        
+
+        \draw [arrow] (n0) -- (n10);
+        \draw [arrow] (n0) -- (n11);
+        \draw [arrow] (n0) -- (n12);
+
+        \draw [arrow] (n10) -- (negB);
+        \draw [arrow] (n10) -- (negA);
+
+        \draw [arrow] (n11) -- (negA);
+        \draw [arrow] (n11) -- (nB);
+
+        \draw [arrow] (n11) -- (n20);
+        \draw [arrow] (n20) -- (n30);
+        \draw [arrow] (n20) -- (negC);
+        \draw [arrow] (n21) -- (n30);
+        \draw [arrow] (n21) -- (negD);
+        \draw [arrow] (n12) -- (n21);
+        \draw [arrow] (n12) -- (nA);
+
+        \draw [arrow] (n30) -- (nC);
+        \draw [arrow] (n30) -- (nD);
+
+\end{tikzpicture}
+  
+
+        }
+        \caption{d-DNNF circuit.}
+        \label{fig:circuit_example:ddnnf}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.33\textwidth}
+        \centering
+        \resizebox{\linewidth}{!}{% 
+
+
+\tikzstyle{union} = [rounded corners,text centered, draw=black]
+\tikzstyle{intersection} = [rounded corners,text centered, draw=black]
+\tikzstyle{times} = [circle,text centered, draw=black, inner sep=1pt]
+\tikzstyle{plus} = [circle,text centered, draw=black, inner sep=1pt]
+\tikzstyle{int} = [circle, text centered, draw=black]
+\tikzstyle{leaf} = [rounded corners, text centered, draw=none, fill=none] %fill=gray!30
+\tikzstyle{arrow} = [thick,-,>=stealth]
+
+\begin{tikzpicture} [node distance=0.8cm]
+        \node (n0) [plus] {$+$};
+        \node (n11) [times, below of=n0] {$\times$};
+        \node (n10) [times, left of=n11, xshift=-0.5cm] {$\times$};
+
+        \node (negB) [leaf, below of=n10, left of=n10, xshift=0.4cm] {$p_{\neg b}$};
+        \node (negA) [leaf, below of=n10, right of=n10, xshift=-0.4cm] {$p_{\neg a}$};
+
+        \node (nB) [leaf, below of=n11] {$p_b$}; 
+        \node (n20) [plus, right of=nB] {$+$};
+        \node (negC) [leaf, below of=n20, left of=n20, xshift=0.4cm] {$p_{\neg c}$};
+
+        \node (n30) [times, below of=n20, right of=n20, xshift=-0.4cm] {$\times$};
+        \node (nC) [leaf, below of=n30, left of=n30, xshift=0.4cm] {$p_c$};
+        \node (nD) [leaf, below of=n30, right of=n30, xshift=-0.4cm] {$p_d$};
+
+        \node (n21) [plus, above of=n30, right of=n30, xshift=-0.4cm] {$+$};
+        \node (negD) [leaf, below of=n21, right of=n21, xshift=-0.4cm] {$p_{\neg d}$};
+        \node (n12) [times, above of=n21] {$\times$};
+        \node (nA) [leaf, below of=n12, right of=n12] {$p_{a}$};
+        
+
+        \draw [arrow] (n0) -- (n10);
+        \draw [arrow] (n0) -- (n11);
+        \draw [arrow] (n0) -- (n12);
+
+        \draw [arrow] (n10) -- (negB);
+        \draw [arrow] (n10) -- (negA);
+
+        \draw [arrow] (n11) -- (negA);
+        \draw [arrow] (n11) -- (nB);
+
+        \draw [arrow] (n11) -- (n20);
+        \draw [arrow] (n20) -- (n30);
+        \draw [arrow] (n20) -- (negC);
+        \draw [arrow] (n21) -- (n30);
+        \draw [arrow] (n21) -- (negD);
+        \draw [arrow] (n12) -- (n21);
+        \draw [arrow] (n12) -- (nA);
+
+        \draw [arrow] (n30) -- (nC);
+        \draw [arrow] (n30) -- (nD);
+        
+\end{tikzpicture}
+
+        }
+        \caption{Arithmetic circuit.}
+        \label{fig:circuit_example:ac}
+    \end{subfigure}
+    \caption{Example of (a) a Boolean circuit, (b) its d-DNNF version, and (c) the corresponding arithmetic circuit. 
+    The arithmetic circuit replaces Boolean variables with their probabilities.
+    Consequently, the arithmetic circuit computes the probability of the underlying Boolean circuit being satisfied. In a neurosymbolic setting, the input probabilities are predicted by a neural network.} 
+    \label{fig:circuit_example}
+\end{figure}
+
+While probabilistic inference on d-DNNF circuits has linear time complexity, transforming a NNF circuit into d-DNNF is \#P-hard~\citep{valiant1979complexity}. However, once the d-DNNF structure is obtained we can re-evaluate the circuit with different probabilities for the Boolean variables in the leaves. This approach has been very successful in probabilistic inference for a variety of models such as Bayesian networks~\citep{chavira2008probabilistic} and more general probabilistic programs~\citep{fierens2015inference}.
+
+This compile once and evaluate often paradigm has also gained traction in neurosymbolic systems~\citep{manhaeve2018deepproblog,ahmed2022semantic,desmet2023neural}. The high-level idea behind these approaches is to compile the symbolic knowledge once into an arithmetic circuit and let a neural network predict the probabilities to be fed into the arithmetic circuit. 
+Given that the arithmetic circuit consists only of sum and product operations, the resulting computation graph (neural network + arithmetic circuit) is end-to-end differentiable and the parameters can be optimized using standard gradient descent methods. Furthermore, as gradient descent is an iterative method, the circuit (and its gradient) needs to be evaluated repeatedly. This yields a convenient return on investment for the initial expensive knowledge compilation step, which now amortizes over multiple evaluations.
+
+As discussed in the introduction, arithmetic circuits currently hinder the efficient application of neurosymbolic methods as these circuits are not well-suited to modern AI accelerators. % 
+As a matter of fact, the standard way to evaluate an arithmetic circuit in a neurosymbolic context is to naively evaluate every node one by one \citep{manhaeve2018deepproblog,ahmed2022pylon,ahmed2022semantic} using a naive traversal of the arithmetic circuit. 
+Although this naive traversal of the circuit allows for a certain degree of data parallelism, it fails to fully utilize the capacity of modern GPUs. Consequently, many existing frameworks in practice just evaluate the entire computation graph on the CPU ~\citep{manhaeve2018deepproblog,ahmed2022semantic}.
+
+
+
+\section{Layerizing Circuits}
+
+\label{sec:layerization} 
+
+In this section, we show how to map a d-DNNF circuit to our layerized \klay representation. Afterward, in Section~\ref{sec:evaluation}, we discuss how the resulting \klay representation can be run efficiently on GPUs. Although our exposition focuses on d-DNNF circuits, it is more generally applicable to NNF circuits, meaning \klay could also be of interest to neurosymbolic systems based on, \eg fuzzy logic \citep{badreddine2022logic} or grammars \citep{winters2022deepstochlog}.
+\subsection{From Linked Nodes towards Layers}
+\label{sec:linked2layer}
+
+\begin{figure}
+    \centering
+\tikzstyle{union} = [rounded corners,text centered, draw=black]
+\tikzstyle{intersection} = [rounded corners,text centered, draw=black]
+\tikzstyle{times} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{plus} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{int} = [circle, text centered, draw=black]
+\tikzstyle{leaf} = [rounded corners, text centered, draw=none, fill=none] %fill=gray!30
+\tikzstyle{arrow} = [thick,-,>=stealth]
+
+\begin{tikzpicture} [node distance=0.8cm]
+        \node (nb) [leaf] {$\neg b$};
+        \node (na) [leaf, right of=nb] {$\neg a$};
+        \node (b) [leaf, right of=na] {$b$};
+        \node (nc) [leaf, right of=b] {$\neg c$};
+        \node (c) [leaf, right of=nc] {$c$};
+        \node (d) [leaf, right of=c] {$d$};
+        \node (nd) [leaf, right of=d] {$\neg d$};
+        \node (a) [leaf, right of=nd] {$a$};
+
+
+        \node (n10) [times, above of=nb] {$\land$};
+        \node (n11) [times, above of=na] {$\land$};
+        \node (n12) [times, dashed, above of=b] {$\land$};
+        \node (n13) [times, above of=nc] {$\land$};
+        \node (n14) [times, above of=d] {$\land$};
+        \node (n15) [times, dashed, above of=nd] {$\land$};
+        \node (n16) [times, dashed, above of=a] {$\land$};
+
+        \draw [arrow] (n10) -- (nb);
+        \draw [arrow] (n10) -- (na);
+        \draw [arrow] (n11) -- (na);
+        \draw [arrow] (n12) -- (b);
+        \draw [arrow] (n13) -- (nc);
+        \draw [arrow] (n14) -- (c);
+        \draw [arrow] (n14) -- (d);
+        \draw [arrow] (n15) -- (nd);
+        \draw [arrow] (n16) -- (a);
+
+        \node (n20) [times, dashed, above of=n10] {$\lor$};
+        \node (n21) [times, above of=n11] {$\lor$};
+        \node (n22) [times, dashed, above of=n12] {$\lor$};
+        \node (n23) [times, above of=n13] {$\lor$};
+        \node (n24) [times, above of=n15] {$\lor$};
+        \node (n25) [times, dashed, above of=n16] {$\lor$};
+        
+        \draw [arrow] (n10) -- (n20);
+        \draw [arrow] (n11) -- (n21);
+        \draw [arrow] (n12) -- (n22);
+        \draw [arrow] (n13) -- (n23);
+        \draw [arrow] (n14) -- (n23);
+        \draw [arrow] (n14) -- (n24);
+        \draw [arrow] (n15) -- (n24);
+        \draw [arrow] (n16) -- (n25);
+
+        
+        \node (n30) [plus, dashed, above of=n20] {$\land$};
+        \node (n31) [plus, above of=n22] {$\land$};
+        \node (n32) [plus, above of=n25] {$\land$};
+
+        \draw [arrow] (n30) -- (n20);
+        \draw [arrow] (n31) -- (n21);
+        \draw [arrow] (n31) -- (n22);
+        \draw [arrow] (n31) -- (n23);
+        \draw [arrow] (n32) -- (n24);
+        \draw [arrow] (n32) -- (n25);
+
+        \node (n40) [times, above of=n31, right of=n31] {$\lor$};
+        \draw [arrow] (n30) -- (n40);
+        \draw [arrow] (n31) -- (n40);
+        \draw [arrow] (n32) -- (n40);
+
+
+\node (l0t)   [right of=a, xshift=1cm] {layer $L_0$};
+\node (l1t)   [above of=l0t] {layer $L_1$};
+\node (l2t)   [above of=l1t] {Layer $L_2$};
+\node (l3t)   [above of=l2t] {layer $L_3$};
+\node (l4t)   [above of=l3t] {layer $L_4$};
+\end{tikzpicture}
+  
+
+    \caption{A layered version of the d-DNNF in Figure~\ref{fig:circuit_example:ddnnf}. Dashed nodes indicate nodes that are not present in the original d-DNNF and which are introduced during the layerization of the circuit.
+    }
+    \label{fig:lbcircuit}
+\end{figure}
+
+
+In order to parallelize a d-DNNF circuit, we group the nodes into sets of nodes that can be evaluated in parallel. We dub these groups layers -- reminiscent of layers in neural networks. Concretely, for each node $n$ in a circuit $C$ we compute its height in the circuit $h_n$, and nodes with the same height are assigned to the same layer.
+\begin{align}
+    L_i = \{ n \in C \mid h_n = i \}
+    \quad\text{where}\quad
+    h_n=
+    \begin{cases}
+            0, & \text{if $n$ is a leaf,}
+            \\
+            \max_{c\in \mathcal{C}_n} h_c + 1 & \text{otherwise}.
+            \label{eq:layers}
+    \end{cases}
+\end{align}
+
+Here, we use $\mathcal{C}_n$ to denote the set of children of a node $n$. Note that the height of all nodes can be efficiently evaluated in a single post-order circuit traversal.
+The initial layer, $L_0$, comprises all leaf nodes, while the last layer comprises the root node. 
+
+Without loss of generality, we can assume that $\lor$-gates only have $\land$-gates as children and that $\land$-gates have either $\lor$-gates or leaf nodes as children \citep{choi2020probabilistic}.
+This implies that $\land$- and $\lor$-gates appear in an alternating fashion throughout the circuit, which can be observed in Figure~\ref{fig:circuit_example:ddnnf}, and that all nodes in the same layer have the same type.
+
+If nodes are assigned to layers based on their height $h_n$, the child of a node can be in any of the previous layers. However, to transform the circuit evaluation into a sequence of parallel operations, it is more convenient if all children are in the immediately preceding layer. In such a structure, the next layer can be computed solely using the current layer.
+
+We obtain this layer-by-layer structure by introducing additional unary nodes.
+Whenever a node $n \in L_{h_n}$ has a child $c$ in a non-immediately preceding layer $L_{h_c}$, \ie ${h_c} + 1 < h_n$, we introduce a chain of unary nodes, one per layer between $L_{h_c}$ and $L_{h_n}$, to connect $n$ to $c$ via these unary nodes.
+This is illustrated in Figure~\ref{fig:lbcircuit}, where the newly introduced nodes are indicated by dashed circles. Note that the type of a unary node ($\lor$ or $\land$) is irrelevant and chosen to satisfy the assumption of alternating node types.
+
+\subsection{Multi-Rooted Circuits and Node Deduplication}\label{sec:multi-rooted-and-merging}
+
+Suppose now that we have multiple circuits over a (partially) shared set of variables. A set of $M$ circuits effectively computes a Boolean function $f: \mathbb{B}^N \to \mathbb{B}^M$. Such $M$-dimensional circuits are also called multi-rooted circuits and are rather common in the standard neurosymbolic setting.
+Indeed, unless all data has the same symbolic knowledge, batched training or inference requires multi-rooted circuits.
+For instance, the widely-known MNIST addition problem~\citep{manhaeve2018deepproblog} can be solved using a multi-rooted arithmetic circuit with 19 roots, as it has 19 different possible outputs.
+
+If all $M$ circuits comprising the multi-rooted circuit have already been layerized according to Section~\ref{sec:linked2layer}, we again have that nodes at the same height in different circuits are of the same type. We can hence simply combine the layers of the different circuits to further exploit parallelization.
+Additionally, different circuits might share equivalent sub-circuits amongst each other. By correctly identifying and merging shared nodes, we avoid redundant computations. Figure~\ref{fig:lbacircuitmultiroot} gives an example of a multi-rooted d-DNNF circuit with shared nodes.
+\begin{figure}
+    \begin{subfigure}[t]{0.4\textwidth}
+    \centering
+\tikzstyle{union} = [rounded corners,text centered, draw=black]
+\tikzstyle{intersection} = [rounded corners,text centered, draw=black]
+\tikzstyle{times} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{plus} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{int} = [circle, text centered, draw=black]
+\tikzstyle{leaf} = [rounded corners, text centered, draw=none, fill=none] %fill=gray!30
+\tikzstyle{arrow} = [thick,-,>=stealth]
+
+\begin{tikzpicture} [node distance=0.8cm]
+        \node (c) [leaf] {$c$};
+        \node (d) [leaf, right of=c] {$d$};
+        \node (nd) [leaf, right of=d] {$\neg d$};
+        \node (a) [leaf, right of=nd] {$a$};
+        \node (e) [leaf, right of=a] {$e$};
+        \node (na) [leaf, right of=e] {$\neg a$};
+
+
+        \node (n14) [times, above of=d] {$\land$};
+        \node (n15) [times, dashed, above of=nd] {$\land$};
+        \node (n16) [times, dashed, above of=a] {$\land$};
+        \node (n17) [times, above of=e] {$\land$};
+        \draw [arrow] (n14) -- (c);
+        \draw [arrow] (n14) -- (d);
+        \draw [arrow] (n15) -- (nd);
+        \draw [arrow] (n16) -- (a);
+        \draw [arrow] (n17) -- (na);
+        \draw [arrow] (n17) -- (e);
+        \node (n24) [times, above of=n15] {$\lor$};
+        \node (n25) [times, dashed, above of=n16] {$\lor$};
+        \node (n26) [times, dashed, above of=n17] {$\lor$};
+
+        
+        \draw [arrow] (n14) -- (n24);
+        \draw [arrow] (n15) -- (n24);
+        \draw [arrow] (n16) -- (n25);
+        \draw [arrow] (n17) -- (n26);
+        
+        \node (n32) [plus, above of=n25] {$\land$};
+        \node (n33) [plus, dashed, above of=n26] {$\land$};
+        \draw [arrow] (n32) -- (n24);
+        \draw [arrow] (n32) -- (n25);
+        \draw [arrow] (n33) -- (n26);
+
+
+        \node (n41) [times, above of=n33] {$\lor$};
+
+        \draw [arrow] (n32) -- (n41);
+        \draw [arrow] (n33) -- (n41);
+
+\end{tikzpicture}
+  
+
+    \caption{Layered d-DNNF circuit.}
+    \label{fig:lbcircuitroot2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.59\textwidth}
+    \centering
+\tikzstyle{union} = [rounded corners,text centered, draw=black]
+\tikzstyle{intersection} = [rounded corners,text centered, draw=black]
+\tikzstyle{times} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{plus} = [circle,text centered, draw=black, inner sep=2pt]
+\tikzstyle{int} = [circle, text centered, draw=black]
+\tikzstyle{leaf} = [rounded corners, text centered, draw=none, fill=none] %fill=gray!30
+\tikzstyle{arrow} = [thick,-,>=stealth]
+
+\begin{tikzpicture} [node distance=0.8cm]
+        \node (nb) [leaf] {$\neg b$};
+        \node (na) [leaf, right of=nb] {$\neg a$};
+        \node (b) [leaf, right of=na] {$b$};
+        \node (nc) [leaf, right of=b] {$\neg c$};
+        \node (c) [leaf, right of=nc] {$c$};
+        \node (d) [leaf, right of=c] {$d$};
+        \node (nd) [leaf, right of=d] {$\neg d$};
+        \node (a) [leaf, right of=nd] {$a$};
+        \node (e) [leaf, right of=a] {$e$};
+
+
+        \node (n10) [times, above of=nb] {$\land$};
+        \node (n11) [times, above of=na] {$\land$};
+        \node (n12) [times, dashed, above of=b] {$\land$};
+        \node (n13) [times, above of=nc] {$\land$};
+        \node (n14) [times, orange, above of=d] {$\land$};
+        \node (n15) [times, orange, dashed, above of=nd] {$\land$};
+        \node (n16) [times, orange, dashed, above of=a] {$\land$};
+        \node (n17) [times, above of=e] {$\land$};
+        \draw [arrow] (n10) -- (nb);
+        \draw [arrow] (n10) -- (na);
+        \draw [arrow] (n11) -- (na);
+        \draw [arrow] (n12) -- (b);
+        \draw [arrow] (n13) -- (nc);
+        \draw [arrow, orange] (n14) -- (c);
+        \draw [arrow, orange] (n14) -- (d);
+        \draw [arrow, orange] (n15) -- (nd);
+        \draw [arrow, orange] (n16) -- (a);
+        \draw [arrow] (n17) -- (e);
+        \draw (na) to[arrow, out=25, in=-150] (n17);
+
+        \node (n20) [times, dashed, above of=n10] {$\lor$};
+        \node (n21) [times, above of=n11] {$\lor$};
+        \node (n22) [times, dashed, above of=n12] {$\lor$};
+        \node (n23) [times, above of=n13] {$\lor$};
+        \node (n24) [times, orange, above of=n15] {$\lor$};
+        \node (n25) [times, orange, dashed, above of=n16] {$\lor$};
+        \node (n26) [times, dashed, above of=n17] {$\lor$};
+
+        
+        \draw [arrow] (n10) -- (n20);
+        \draw [arrow] (n11) -- (n21);
+        \draw [arrow] (n12) -- (n22);
+        \draw [arrow] (n13) -- (n23);
+        \draw [arrow] (n14) -- (n23);
+        \draw [arrow, orange] (n14) -- (n24);
+        \draw [arrow, orange] (n15) -- (n24);
+        \draw [arrow, orange] (n16) -- (n25);
+        \draw [arrow] (n17) -- (n26);
+        
+        \node (n30) [plus, dashed, above of=n20] {$\land$};
+        \node (n31) [plus, above of=n22] {$\land$};
+        \node (n32) [plus, orange, above of=n25] {$\land$};
+        \node (n33) [plus, dashed, above of=n26] {$\land$};
+        \draw [arrow] (n30) -- (n20);
+        \draw [arrow] (n31) -- (n21);
+        \draw [arrow] (n31) -- (n22);
+        \draw [arrow] (n31) -- (n23);
+        \draw [arrow, orange] (n32) -- (n24);
+        \draw [arrow, orange] (n32) -- (n25);
+        \draw [arrow] (n33) -- (n26);
+
+
+        \node (n40) [times, above of=n31, right of=n31] {$\lor$};
+        \node (n41) [times, above of=n33] {$\lor$};
+
+        \draw [arrow] (n30) -- (n40);
+        \draw [arrow] (n31) -- (n40);
+        \draw [arrow] (n32) -- (n40);
+        \draw [arrow] (n32) -- (n41);
+        \draw [arrow] (n33) -- (n41);
+
+\end{tikzpicture}
+  
+
+    \caption{Layered multi-rooted circuit.}
+    \label{fig:lbcircuitmerged}
+    \end{subfigure}
+    \caption{(\subref{fig:lbcircuitroot2}) contains a layered d-DNNF circuit over the variables $a$, $c$, $d$, and $e$. The dashed circles indicate again nodes introduced during the layerization process.
+    (\subref{fig:lbcircuitmerged}) illustrates a multi-rooted circuit where the upper left node computes the circuit from Figure~\ref{fig:lbcircuit} and where the upper right node computes the circuit from Figure~(\subref{fig:lbcircuitroot2}). Note how nodes at the same height in the multi-rooted circuit are of the same type and how the sub-circuit colored in orange is used to compute both root nodes. 
+    }
+    \label{fig:lbacircuitmultiroot}
+\end{figure}
+
+To merge all duplicate nodes, we need an efficient way to identify these nodes. We show that this is possible in linear time.
+
+\begin{restatable}{theorem}{thmmerkle}
+	\label{thm:merkle}
+Given a set of circuits, all identical sub-circuits can be identified in linear expected time complexity in the total number of edges in the circuits.
+\end{restatable}
+
+ For canonical circuits, such as SDDs with the same variable tree\footnote{A sentential decision diagram (SDD) is a subclass of d-DNNF circuits that are canonical given a variable tree. We refer to \cite{darwiche2011sdd} for more details.}, this result is strengthened from syntactically identical sub-circuits to semantic equivalence. We realize Theorem~\ref{thm:merkle} using Merkle hashes \citep{merkle1987digital}. That is, we associate a hash $hash(n)$ with every node $n$ in a recursive fashion. For each leaf node, we hash the associated (negated) variable. For each internal node, we combine the hashes of the children using a permutation invariant function.
+\begin{align}
+    hash(n)=
+    \begin{cases}
+            \text{mix\_hash}(l_n) & \text{if $n$ is leaf.}
+            \\
+            \bigoplus_{c \in \mathcal{C}_n} \text{mix\_hash}(hash(c)) & \text{otherwise.}
+            \label{eq:hash}
+    \end{cases}
+\end{align}
+Here, $l_n$ is a unique identifier for the (negated) variable of the leaf node $n$, $\bigoplus$ is a permutation-invariant operation such as XOR, and mix\_hash is a function that disperses the bits of the hash.
+
+We can now merge all equivalent nodes in a multi-rooted circuit by computing the node hashes in a bottom-up pass and merging all nodes with the same hash, \eg by storing the nodes in a hash map.
+
+
+The efficient deduplication via Merkle hashes is not only useful in the context of merging single-rooted circuits; duplicate nodes may also occur within a single circuit.
+This can, for instance, happen when the circuit is an SDD\footnote{An SDD node represents an $\lor$-gate, and is defined as a set of tuples each representing $\land$-gates. This structure typically does not share tuples, and thus does not automatically reuse duplicate $\land$-gates.}.
+Another source of duplicate nodes stems from the layerization procedure in Section~\ref{sec:linked2layer}.
+Concretely, the connection of a node $n$ to a higher-up node through a chain of unary nodes results in equivalent chains if node $n$ has multiple higher-up parent nodes. 
+Using Merkle hashes resolves this issue as it automatically merges multiple equivalent node chains, limiting the overhead of adding new nodes.
+
+Lastly, we make sure that all circuits have the same height by artificially extending a circuit with unary nodes at the root if necessary.
+This results in the last layer of our multi-rooted circuit containing the root nodes of every added circuit. % 
+
+
+\section{Tensorizing Layered Circuits}
+
+
+In the previous section, we organized d-DNNF circuits into layers by assigning each node $n$ in the circuit a height $h_n$. We also avoided duplicate nodes by computing a unique Merkle hash $hash(n)$ for each node.
+We proceed in this section with mapping the layered linked nodes to a layered computation graph where layers are evaluated sequentially and computations within a layer can be parallelized.
+
+To this end, we make a simple, yet powerful, observation: the current layer can be computed from the output of the previous layer by only using \emph{indexing and aggregation}. To see this, we first impose an arbitrary order on the nodes within each layer. This means we can write the values of all nodes in a layer $L_i$ as a vector $\nodes_i$.
+For our running example, we simply pick the order already insinuated by the graphical representation in Figure~\ref{fig:lbcircuit}, except for the input layer where we order lexicographically: $\nodes_0 = [p_a, p_{\neg a},p_b, p_{\neg b}, p_c, p_{\neg c}, p_d, p_{\neg d}]^\intercal$.
+
+Now, in order to compute $\nodes_l$ from $\nodes_{l-1}$ we use two vectors of indices: $\tS_l$ and $\tR_l$. For each edge between $\nodes_{l-1}$ and $\nodes_l$, $\tS_l$ contains the index of the input node, while $\tR_l$ contains the index of the output node. We exemplify this for a single layer in Figure~\ref{fig:segement_l1}. By imposing an order on the input nodes and by providing the set of vectors $\{ \tS_1\dots \tS_L  \}$ and $\{ \tR_1\dots \tR_L  \}$, we entirely characterize an arithmetic circuit. This means that we can use these vectors instead of a linked node representation to evaluate the circuit.
+
+\begin{figure}
+    \centering
+\begin{tikzpicture}
+
+\def\cellwidth{1} % Width of each cell
+\def\cellheight{0.3} % Height of each cell
+
+\def\intersep{0.8}
+\def\intrasep{0.5} 
+
+\foreach \x  in {0,1,...,7} {
+    \draw (\x*\cellwidth, 0) rectangle (\x*\cellwidth + \cellwidth, \cellheight);
+}
+
+\node at  (0*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{a}$};
+\node at  (1*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{\neg a}$};
+\node at  (2*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{b}$};
+\node at  (3*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{\neg b}$};
+\node at  (4*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{c}$};
+\node at  (5*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{\neg c}$};
+\node at  (6*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{d}$};
+\node at  (7*\cellwidth + 0.5*\cellwidth, -0.3) {$p_{\neg d}$};
+
+\foreach \x  in {0,1,...,8} {
+    \draw (\x*\cellwidth, \cellheight + \intersep) rectangle (\x*\cellwidth + \cellwidth,  2*\cellheight + \intersep);
+}
+
+\draw[fill=RoyalBlue]  (0*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (0*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=RoyalBlue]  (1*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (1*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=orange]  (2*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (2*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=RoyalBlue]  (3*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (3*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=orange]  (4*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (4*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=RoyalBlue]  (5*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (5*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=RoyalBlue]  (6*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (6*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=orange]  (7*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (7*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw[fill=RoyalBlue]  (8*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (8*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+
+\foreach \x  in {0,1,...,6} {
+    \draw (\x*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep) rectangle (\x*\cellwidth + \cellwidth,  4*\cellheight + 2*\intersep + \intrasep);
+}
+
+\node at (0*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $3$};
+\node at (1*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $1$};
+\node at (2*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $1$};
+\node at (3*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $2$};
+\node at (4*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $5$};
+\node at (5*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $4$};
+\node at (6*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $6$};
+\node at (7*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $7$};
+\node at (8*\cellwidth + 0.5*\cellwidth, \intersep + 1.5*\cellheight)  {\scriptsize $0$};
+
+\node at (0*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $0$};
+\node at (1*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $0$};
+\node at (2*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $1$};
+\node at (3*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $2$};
+\node at (4*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $3$};
+\node at (5*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $4$};
+\node at (6*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $4$};
+\node at (7*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $5$};
+\node at (8*\cellwidth + 0.5*\cellwidth, \intersep + \intrasep + 2.5*\cellheight)  {\scriptsize $6$};
+
+\foreach \x in {0,1,...,6} {
+    \draw (\x*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep) rectangle (\x*\cellwidth + \cellwidth,  4*\cellheight + 2*\intersep + \intrasep);
+    \node at (\x*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep + 0.5*\cellheight) {$\bm{\times}$};
+}
+
+\draw (3*\cellwidth + 0.5*\cellwidth, \cellheight) -- (0*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, \cellheight) -- (1*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, \cellheight) -- (2*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, \cellheight) -- (3*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth, \cellheight) -- (4*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth, \cellheight) -- (5*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (6*\cellwidth + 0.5*\cellwidth, \cellheight) -- (6*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (7*\cellwidth + 0.5*\cellwidth, \cellheight) -- (7*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+\draw (0*\cellwidth + 0.5*\cellwidth, \cellheight) -- (8*\cellwidth + 0.5*\cellwidth, \intersep + \cellheight);
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (0*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (1*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (0*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (2*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (1*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (3*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (2*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (4*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (3*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (5*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (4*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (6*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (4*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (7*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (5*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+\draw (8*\cellwidth + 0.5*\cellwidth, 3*\cellheight + \intersep + \intrasep) -- (6*\cellwidth + 0.5*\cellwidth, 3*\cellheight + 2*\intersep + \intrasep);
+
+\node[anchor=west] at (10*\cellwidth, 0.5*\cellheight) {node values $\nodes_0$};
+\node[anchor=west] at (10*\cellwidth, \intersep + 1.5*\cellheight) {edge indices $\tS_1$};
+\node[anchor=west] at (10*\cellwidth, \intersep + \intrasep + 2.5*\cellheight) {aggregation indices $\tR_1$};
+\node[anchor=west] at (10*\cellwidth, 2*\intersep + \intrasep + 3.5*\cellheight) {node values $\nodes_1$};
+\end{tikzpicture}
+    \caption{
+    The evaluation of the first layer in Figure~\ref{fig:circuit_example:ac}, as an indexing and aggregation operation. The symbols $\nodes_0$ and $\nodes_1$ denote the node values at layer $L_0$ and $L_1$ respectively. First, we index in $\nodes_0$ using the edge indices $\tS_1$, effectively creating a vector with the values of all edges in between $\nodes_0$ and $\nodes_1$. Next, the aggregation indices $\tR_1$ determine what edges are reduced together. As a result we obtain the node values $\nodes_1 = \text{scatter}(\nodes_0[\tS_1], \tR_1, \text{reduce}=\text{`product'})$. 
+    }
+    \label{fig:segement_l1}
+\end{figure}
+
+To compute $\nodes_l$, we first select relevant values from $\nodes_{l-1}$ using as index $\tS_l$, giving us $\tE_l = \nodes_{l-1}[\tS_l]$. The vector $\tE_l$ essentially contains the values of all the edges between $\nodes_l$ and $\nodes_{l-1}$. Next, we need to correctly segment the edges $\edges_l$ and aggregate the individual segments -- either by using sums or products, depending on the layer. This is done using $\tR_l$: all elements with the same index in $\tR_l$ are reduced together.
+ In Figure~\ref{fig:segement_l1}, these segments are indicated with alternating colors.
+Algorithm~\ref{alg:eval} contains pseudo-code for the layerwise circuit evaluations, where we use the common \texttt{scatter} function to segment and aggregate the $\edges_l$ vectors. 
+In Figure~\ref{fig:segment}, we show the full tensorized circuit representation of the arithmetic circuit in Figure~\ref{fig:circuit_example:ac}, which corresponds to the computation graph induced by Algorithm~\ref{alg:eval}. Although we depict the edge vectors $\tE_l$ in Figure~\ref{fig:segment}, we stress that these do not need to be represented explicitly because modern tensor libraries in practice fuse the indexing and segmentation operations together.
+
+
+\RestyleAlgo{ruled}
+\SetKwComment{Comment}{/* }{ */}
+\begin{algorithm}[hbt!]
+\caption{KLay Forward Evaluation}
+\label{alg:eval}
+\SetKwInput{KwData}{Input}
+\KwData{$\nodes_0$, selection indices $\tS_1, \tS_2, \dots, \tS_L$, reduction indices $\tR_1, \tR_2, \dots, \tR_L$}
+\For{$l \gets  1$ \KwTo $L$}{
+    $\edges_l \gets \nodes_{l-1}[\tS_l]$\;
+    \eIf{$l \bmod 2 = 0$}{
+        $\nodes_l \gets \text{scatter}(\edges_l, \tR_l , \text{reduce=`sum'})$\;
+    }{
+        $\nodes_l \gets \text{scatter}(\edges_l, \tR_l , \text{reduce=`product'})$\;
+    }
+}
+\KwRet{$\nodes_L$}\;
+\end{algorithm}
+
+\begin{figure}
+    \centering
+\begin{tikzpicture}
+
+\def\cellwidth{1} % Width of each cell
+\def\cellheight{0.37} % Height of each cell
+
+\def\intersep{0.7}
+\def\intrasep{0.5}
+
+\foreach \x  in {0,1,...,7} {
+    \draw (\x*\cellwidth, 0) rectangle (\x*\cellwidth + \cellwidth, \cellheight);
+}
+
+\node at  (0*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{a}$};
+\node at  (1*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{\neg a}$};
+\node at  (2*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{b}$};
+\node at  (3*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{\neg b}$};
+\node at  (4*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{c}$};
+\node at  (5*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{\neg c}$};
+\node at  (6*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{d}$};
+\node at  (7*\cellwidth + 0.5*\cellwidth, -0.4) {$p_{\neg d}$};
+
+
+
+\draw[fill=RoyalBlue] (0*\cellwidth, \cellheight + \intersep) rectangle (0*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=RoyalBlue] (1*\cellwidth, \cellheight + \intersep) rectangle (1*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=orange] (2*\cellwidth, \cellheight + \intersep) rectangle (2*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=RoyalBlue] (3*\cellwidth, \cellheight + \intersep) rectangle (3*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=orange] (4*\cellwidth, \cellheight + \intersep) rectangle (4*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=RoyalBlue] (5*\cellwidth, \cellheight + \intersep) rectangle (5*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=RoyalBlue] (6*\cellwidth, \cellheight + \intersep) rectangle (6*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=orange] (7*\cellwidth, \cellheight + \intersep) rectangle (7*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+\draw[fill=RoyalBlue] (8*\cellwidth, \cellheight + \intersep) rectangle (8*\cellwidth + \cellwidth, 2*\cellheight + \intersep);
+
+\draw (0*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (0*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw (1*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (1*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw (2*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (2*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw (3*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (3*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw (4*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (4*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw (5*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (5*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+\draw (6*\cellwidth, 2*\cellheight + \intersep + \intrasep) rectangle (6*\cellwidth + \cellwidth, 3*\cellheight + \intersep + \intrasep);
+
+\draw (3*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (3*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (5*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (6*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (6*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (7*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (7*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+\draw (0*\cellwidth + 0.5*\cellwidth, 1.0*\cellheight) -- (8*\cellwidth + 0.5*\cellwidth, \intersep + 1.0*\cellheight);
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (3*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (3*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (6*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (7*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (5*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+\draw (8*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 0*\intrasep + 2.0*\cellheight) -- (6*\cellwidth + 0.5*\cellwidth, 1*\intersep+ 1*\intrasep + 2.0*\cellheight);
+
+
+
+
+\draw[fill=RoyalBlue] (0*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (0*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=orange] (1*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (1*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=RoyalBlue] (2*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (2*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=orange] (3*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (3*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=orange] (4*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (4*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=RoyalBlue] (5*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (5*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=RoyalBlue] (6*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (6*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+\draw[fill=orange] (7*\cellwidth, 2*\intersep + 1*\intrasep + 3*\cellheight) rectangle (7*\cellwidth + \cellwidth, 2*\intersep + 1*\intrasep + 4*\cellheight);
+
+\draw (0*\cellwidth, 2*\intersep + 2*\intrasep + 4*\cellheight) rectangle (0*\cellwidth + \cellwidth, 2*\intersep + 2*\intrasep + 5*\cellheight);
+\draw (1*\cellwidth, 2*\intersep + 2*\intrasep + 4*\cellheight) rectangle (1*\cellwidth + \cellwidth, 2*\intersep + 2*\intrasep + 5*\cellheight);
+\draw (2*\cellwidth, 2*\intersep + 2*\intrasep + 4*\cellheight) rectangle (2*\cellwidth + \cellwidth, 2*\intersep + 2*\intrasep + 5*\cellheight);
+\draw (3*\cellwidth, 2*\intersep + 2*\intrasep + 4*\cellheight) rectangle (3*\cellwidth + \cellwidth, 2*\intersep + 2*\intrasep + 5*\cellheight);
+\draw (4*\cellwidth, 2*\intersep + 2*\intrasep + 4*\cellheight) rectangle (4*\cellwidth + \cellwidth, 2*\intersep + 2*\intrasep + 5*\cellheight);
+\draw (5*\cellwidth, 2*\intersep + 2*\intrasep + 4*\cellheight) rectangle (5*\cellwidth + \cellwidth, 2*\intersep + 2*\intrasep + 5*\cellheight);
+
+
+\draw (0*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (3*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (3*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (5*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (6*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+\draw (6*\cellwidth + 0.5*\cellwidth,  1*\intersep + 1*\intrasep + 3.0*\cellheight) -- (7*\cellwidth + 0.5*\cellwidth, 2*\intersep + 1*\intrasep + 3.0*\cellheight);
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (3*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (3*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (3*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (6*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+\draw (7*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 1*\intrasep + 4.0*\cellheight) -- (5*\cellwidth + 0.5*\cellwidth, 2*\intersep+ 2*\intrasep + 4.0*\cellheight);
+
+
+
+
+\draw[fill=RoyalBlue] (0*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (0*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw[fill=RoyalBlue] (1*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (1*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw[fill=orange] (2*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (2*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw[fill=orange] (3*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (3*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw[fill=orange] (4*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (4*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw[fill=RoyalBlue] (5*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (5*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw[fill=RoyalBlue] (6*\cellwidth, 3*\intersep + 2*\intrasep + 5*\cellheight) rectangle (6*\cellwidth + \cellwidth, 3*\intersep + 2*\intrasep + 6*\cellheight);
+\draw (0*\cellwidth, 3*\intersep + 3*\intrasep + 6*\cellheight) rectangle (0*\cellwidth + \cellwidth, 3*\intersep + 3*\intrasep + 7*\cellheight);
+\draw (1*\cellwidth, 3*\intersep + 3*\intrasep + 6*\cellheight) rectangle (1*\cellwidth + \cellwidth, 3*\intersep + 3*\intrasep + 7*\cellheight);
+\draw (2*\cellwidth, 3*\intersep + 3*\intrasep + 6*\cellheight) rectangle (2*\cellwidth + \cellwidth, 3*\intersep + 3*\intrasep + 7*\cellheight);
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (3*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+\draw (3*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (4*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (5*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth, 2*\intersep + 2*\intrasep + 5.0*\cellheight) -- (6*\cellwidth + 0.5*\cellwidth, 3*\intersep + 2*\intrasep + 5.0*\cellheight);
+
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+\draw (3*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+\draw (4*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+\draw (5*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+\draw (6*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 2*\intrasep + 6.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 3*\intersep+ 3*\intrasep + 6.0*\cellheight);
+
+
+
+\draw[fill=RoyalBlue] (0*\cellwidth, 4*\intersep + 3*\intrasep + 7*\cellheight) rectangle (0*\cellwidth + \cellwidth, 4*\intersep + 3*\intrasep + 8*\cellheight);
+\draw[fill=RoyalBlue] (1*\cellwidth, 4*\intersep + 3*\intrasep + 7*\cellheight) rectangle (1*\cellwidth + \cellwidth, 4*\intersep + 3*\intrasep + 8*\cellheight);
+\draw[fill=RoyalBlue] (2*\cellwidth, 4*\intersep + 3*\intrasep + 7*\cellheight) rectangle (2*\cellwidth + \cellwidth, 4*\intersep + 3*\intrasep + 8*\cellheight);
+
+\draw (0*\cellwidth, 4*\intersep + 4*\intrasep + 8*\cellheight) rectangle (0*\cellwidth + \cellwidth, 4*\intersep + 4*\intrasep + 9*\cellheight);
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 3*\intersep + 3*\intrasep + 7.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 4*\intersep + 3*\intrasep + 7.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 3*\intersep + 3*\intrasep + 7.0*\cellheight) -- (1*\cellwidth + 0.5*\cellwidth, 4*\intersep + 3*\intrasep + 7.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 3*\intersep + 3*\intrasep + 7.0*\cellheight) -- (2*\cellwidth + 0.5*\cellwidth, 4*\intersep + 3*\intrasep + 7.0*\cellheight);
+
+
+\draw (0*\cellwidth + 0.5*\cellwidth, 4*\intersep+ 3*\intrasep + 8.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 4*\intersep+ 4*\intrasep + 8.0*\cellheight);
+\draw (1*\cellwidth + 0.5*\cellwidth, 4*\intersep+ 3*\intrasep + 8.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 4*\intersep+ 4*\intrasep + 8.0*\cellheight);
+\draw (2*\cellwidth + 0.5*\cellwidth, 4*\intersep+ 3*\intrasep + 8.0*\cellheight) -- (0*\cellwidth + 0.5*\cellwidth, 4*\intersep+ 4*\intrasep + 8.0*\cellheight);
+
+\foreach \x in {0,1,...,6} {
+    \node at (\x*\cellwidth + 0.5*\cellwidth, 2*\cellheight + 1*\intersep + \intrasep + 0.5*\cellheight) {\small $\boldsymbol{\times}$};
+}
+
+\foreach \x in {0,1,...,5} {
+    \node at (\x*\cellwidth + 0.5*\cellwidth, 4*\cellheight + 2*\intersep + 2*\intrasep + 0.5*\cellheight) {\small $\boldsymbol{+}$};
+}
+
+\foreach \x in {0,1,2} {
+    \node at (\x*\cellwidth + 0.5*\cellwidth, 6*\cellheight + 3*\intersep + 3*\intrasep + 0.5*\cellheight) {\small $\boldsymbol{\times}$};
+}
+
+\node at (0.5*\cellwidth, 8*\cellheight + 4*\intersep + 4*\intrasep + 0.5*\cellheight) {\small $\boldsymbol{+}$};
+
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 0.5*\cellheight) {node values $\nodes_0$};
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, \intersep+1.5*\cellheight) {edge values $\edges_1$};
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, \intersep+\intrasep+2.5*\cellheight) {node values $\nodes_1$};
+
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 2*\intersep+1*\intrasep+3.5*\cellheight) {edge values $\edges_2$};
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 2*\intersep+2*\intrasep+4.5*\cellheight) {node values $\nodes_2$};
+
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 3*\intersep+2*\intrasep+5.5*\cellheight) {edge values $\edges_3$};
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 3*\intersep+3*\intrasep+6.5*\cellheight) {node values $\nodes_3$};
+
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 4*\intersep+3*\intrasep+7.5*\cellheight) {edge values $\edges_4$};
+\node[anchor=west] at  (9*\cellwidth + 0.5*\cellwidth, 4*\intersep+4*\intrasep+8.5*\cellheight) {node values $\nodes_4$};\end{tikzpicture}
+
+    \caption{Tensorized \klay representation of the arithmetic circuit in Figure~\ref{fig:circuit_example:ac}. We depict the segments of the edge vectors $\tE_l$ with alternating colors.}
+    \label{fig:segment}
+\end{figure}
+
+Finally, we note that in practice arithmetic circuits are usually evaluated in the logarithmic domain for numerical stability. This means that the reduction uses logsumexp and sum operations instead of the sum and product, respectively. More generally, any pair of operations that forms a semiring may be used to evaluate the circuit \citep{kimmig2017algebraic}, as long as the semiring operations can be expressed as reduction operations in the tensor library.
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+The closest related work is the arithmetic circuit layerization present in \juice~\citep{dang2021juice}. Similar to our circuit layerization scheme, \juice takes a Boolean circuit and maps it to a set of layers that can be evaluated sequentially, although not layer per layer. To this end, \citet{dang2021juice} implemented a custom SIMD implementation for the CPU and custom CUDA kernels for the GPU. This is in contrast to \klay where we reduce circuit evaluations to a sequence of index and scatter-reduce operations, which are already efficiently implemented in the modern deep learning stack. In our experiments, we show that \klay dramatically outperforms \juice in terms of run time on CPU and more importantly on GPU as well. Noteworthy here is that our experimental evaluation also shows that \juice's GPU implementation is slower than their CPU implementation -- hinting at missed parallelization opportunities. 
+
+The difficulty of running arithmetic circuits on GPUs was also pointed out by~\citet{shah2020acceleration,shah2021dpu}. While \citet{shah2020acceleration,shah2021dpu} focused on developing hardware accelerators for arithmetic circuits, they also implemented custom circuit evaluations exploiting to a certain degree SIMD instructions and GPU parallelization. They found that CPU circuit evaluations outperformed the GPU implementations. 
+\citet{shah2020acceleration} concluded that arithmetic circuits were simply too sparse to be run efficiently on GPUs. By layerizing arithmetic circuits and interpreting the product and sum layers as indexing and scatter-reduce operations, we are able to refute this claim. We provide experimental evidence for this in Section~\ref{sec:experiments}.
+
+Notable is also the work of \citet{vasimuddin2018parallel}, who proposed an efficient CPU implementation for evaluating arithmetic circuits deployed on multiple CPU cores. They deemed an efficient GPU implementation to be impractical due to the high demands on memory bandwidth. We can again refute this claim.
+
+Arithmetic circuits are closely related to the model class of probabilistic circuits~\citep{vergari2021compositional}. The main difference is that the sum units for the latter are parameterized using mixture weights, while the former does not contain such weights. 
+In order to run probabilistic circuits efficiently on the GPU, implementations usually rely on casting circuit evaluations as dense matrix-vector product~\citep{peharz2020random,peharz2020einsum,galindez2019towards,mari2023unifying,sommer2021spnc}. This idea has recently been generalized by \citet{liuscaling}, who allow for the presence of block-sparsity in the matrix that encodes a layer. By exploiting this sparsity via custom kernels, they widened the class of probabilistic circuits that can be run efficiently on GPUs. Nevertheless, probabilistic circuits are usually far more dense than arithmetic circuits that are compiled from a logical theory.
+Unfortunately, this prevents the techniques developed for probabilistic circuits to be effective in the context of arithmetic circuits. Similarly, having densely parameterized sum nodes also limits the relevance of techniques developed for arithmetic circuits for probabilistic circuits, \eg the indexing and segmenting scheme of \klay circuit evaluations.
+Besides algorithmic advances, specialized hardware solutions have also been proposed to deal with the irregularity of the computational graph of an arithmetic circuit~\citep{dadu2019towards,shah2020acceleration,shah2021dpu}. However, these approaches have the drawback that they would require the purchase of non-commoditized hardware. While this could partially be remedied by the use of FPGAs, as done by \citet{sommer2018automatic,weber2022exploiting,choi2023fpga}, any custom hardware retains a communication overhead.
+Specifically, in the context of neurosymbolic AI, one needs to pass the output of a neural network to an arithmetic circuit. If the neural net and the circuit are on two different devices, \eg a GPU and an FPGA, the latency of data transfer can counteract gains in evaluation speed.
+
+
+
+\section{Experimental Evaluation}
+
+\label{sec:experiments}
+
+We implement \klay as a Python library supporting two popular tensor libraries: PyTorch and Jax. 
+We evaluate the runtime performance of \klay on several synthetic benchmarks and neurosymbolic experiments.
+All experiments were conducted on the same machine, which has an NVIDIA GeForce RTX 4090 as GPU and an Intel i9-13900K as CPU.
+\subsection{Synthetic Benchmarks}
+
+We first consider the performance of \klay on a set of synthetic circuits, by randomly generating logical formulas in 3-CNF. By changing the number of variables and clauses in the CNF, we vary the size of the compiled circuits over 5 orders of magnitude. Figure~\ref{fig:sdd_bench} compares the performance of \klay with the native post-order traversal from PySDD implemented in C. We report results for both the real and logarithmic semiring. As \juice does not support the logarithmic semiring and Jax does not support backpropagation on scatter multiplication, these are excluded from the respective comparisons. % 
+
+Our results in Figure~\ref{fig:sdd_bench} indicate that on large circuits, \klay on GPU outperforms all baselines with over one order of magnitude. Due to SIMD and multi-core parallelization, \klay on CPU is still considerably faster than the baselines. \juice does not include results for the largest instances due to a timeout after 30 minutes. \klay attains best results with Jax, due to its superior JIT compilation and kernel fusion.
+
+In Figure~\ref{fig:sdd_stats}, we display the size and sparsity of the circuits in our synthetic benchmark. Remarkably, \klay on average has fewer nodes than the original SDD, meaning the node deduplication outweighs the overhead of introducing unary node chains. Figure~\ref{fig:sdd_stats} (right) shows that larger circuits are increasingly sparse, with less than one in a million edges being present for the largest circuits.
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/sdd_bench.pdf}
+    \caption{Cumulative runtime in milliseconds for the forward and backward pass on a circuit. That is, we plot the combined run time of the $n$ fastest circuit evaluations against the number of $n$ circuits. 
+    Timings are averaged over 10 runs per SDD. The SDDs are randomly generated from 3-CNF, where the difficulty is varied by the number of variables and clauses. The left and right figure show cumulative evaluation times for the logarithmic and real semiring, respectively.}
+    \label{fig:sdd_bench}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/sdd_stats.pdf}
+    \caption{(Left) Number of nodes in the original SDD, compared to the \klay representation. The instances are the same as in Figure~\ref{fig:sdd_bench}. (Right) The sparsity of \klay, meaning the number of edges in the circuit divided by the number of edges in a dense interconnection of all layers.}
+    \label{fig:sdd_stats}
+\end{figure}
+
+\subsection{Neurosymbolic Benchmarks}
+
+Next, we consider the use of \klay in neurosymbolic learning, by measuring the runtime of calculating the gradient on the circuits of several neurosymbolic tasks. As a baseline, we consider the naive evaluation in PyTorch, which is the standard approach performed by existing exact probabilistic neurosymbolic approaches where each node is evaluated individually. We take four different neurosymbolic benchmarks from the literature. The Sudoku benchmark is a classification problem, determining whether a $4\times 4$ grid of images forms a valid Sudoku \citep{augustine2022visual}. The Grid \citep{xu2018semantic} and Warcraft \citep{poganvcic2020differentiation} instances require the prediction of a valid low-cost path. Finally, hierarchical multi-level classification (HMLC) concerns the consistent classification of labels in a hierarchy~\citep{giunchiglia2020coherent}. The results in Table~\ref{tab:nesy} demonstrate the drastic speedups of \klay compared to the naive baseline, improving by as far as four orders of magnitude for the Warcraft experiment.
+
+\begin{table}
+    \caption{Runtime in milliseconds for one forward and backward pass on the circuits of various neurosymbolic experiments, using batch size 1. All circuits are compiled as SDDs, using PyTorch as autograd for both \klay and the naive baseline. For each circuit, we also report the number of nodes in the original SDD, as well as the number of nodes and layers in the \klay representation.}
+    \label{tab:nesy}
+    \centering
+    \begin{tabular}{l r r r r}
+    \toprule
+         & Sudoku ($4 {\times} 4$) & Grid ($4 {\times} 4$) & HMLC & Warcraft ($12{\times} 12$)  \\
+         \midrule
+        SDD Nodes & 2\,408 & 6\,610 & 9\,730 & 1\,110\,234 \\
+        \klay Nodes & 3\,926 & 6\,590 & 26\,306 & 1\,155\,063 \\
+        \klay Layers & 30 & 24 & 84 & 84 \\
+        \midrule
+        Naive (cpu) & $17.35 \pm 0.05$ & $46.12 \pm 0.49$ & $127.00 \pm 140.03$ & $11484.53 \pm 251.94$ \\
+        \klay (cpu) & $0.45 \pm 0.02$ & $0.53 \pm 0.03$ & $1.41 \pm \phantom{00}0.02$ & $18.55 \pm \phantom{00}0.14$ \\
+        \midrule
+        Naive (cuda) & $42.70 \pm 2.76$ & $107.78 \pm 4.67$ & $175.58 \pm 1.26$ & $18930.67 \pm 496.16$ \\
+        \klay (cuda) & $0.46 \pm 0.17$ & $0.49 \pm 0.19$ & $1.03 \pm 0.35$ & $1.59 \pm \phantom{00}0.25$ \\        
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+As a last experiment, we demonstrate the integration of \klay into a neurosymbolic framework. Specifically, we use \klay instead of conventional SDD circuits in DeepProbLog. We measure the training time of the MNIST-addition task in Table~\ref{tab:mnist_add}. MNIST-addition is a common neurosymbolic task where the input is two numbers represented as MNIST images and the model needs to predict their sum. For more details, we refer to \cite{manhaeve2018deepproblog}. As a reference, we also include Scallop, which aims to improve the scalability of DeepProbLog by approximating using top-k provenance \citep{li2023scallop}. While DeepProbLog and Scallop cannot perform batched inference, \klay can by using multi-rooted circuits. This is reflected in speed-ups of two orders of magnitude over the existing DeepProbLog implementation, even on rather small circuits. Even though \klay remains exact unlike Scallop, \klay also demonstrates large speedups here.
+
+\begin{table}
+    \caption{MNIST-addition training time in seconds for one epoch. We report the average and standard deviation over 10 epochs, using a batch size of 128. Both \klay and the baselines use PyTorch as autograd. T/O indicates a timeout after 2 hours.}
+    \label{tab:mnist_add}
+    \centering
+    \begin{tabular}{l r r r}
+        \toprule
+        Nb of Digits & 1 & 2 & 3 \\
+        \midrule
+        \klay Nodes & 776 & 12\,660 & 1\,015\,867 \\
+        \midrule
+        DeepProbLog (cpu) & $241.63 \pm 4.38$ & $323.26 \pm 22.20$ & \multicolumn{1}{c}{T/O} \\
+        Scallop (cpu, $k=3$) & $52.30 \pm 0.37$ & $601.20 \pm 14.65$ & $5345.78 \pm 171.47$ \\
+        \klay (cpu) & $2.08 \pm 0.12$ & $2.10 \pm \phantom{0}0.14$ & $71.54 \pm \phantom{00}0.46$ \\
+        \klay (cuda) & $1.26 \pm 0.03$ & $1.25 \pm \phantom{0}0.01$ & $8.85 \pm \phantom{00}0.02$  \\ % 
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+\section{Conclusions}
+
+
+The success of neural networks has been largely attributed to their scale \citep{kaplan2020scaling}, which is realized by their effective use of hardware accelerators.
+To compete, novel methods must run efficiently on the available hardware or risk losing out due to what \citet{hooker2021hardware} coined the hardware lottery.
+We tackled this issue for neurosymbolic AI by introducing \klay -- a new data structure to represent arithmetic circuits that is amenable to efficient evaluations on modern AI accelerators. 
+Along with this representation, we contributed three algorithms for \klay. The first two algorithms map the traditional linked node representation of arithmetic circuits to the corresponding \klay representation (Algorithm~\ref{alg:klay_layerization}~and~\ref{alg:klay_tensorization}). This representation is efficiently evaluated using the third algorithm, which exploits the parallelization opportunities (Algorithm~\ref{alg:eval}).
+
+Contrary to widely held belief, our experiments demonstrated that arithmetic circuits can be run efficiently on GPUs, despite their high degree of sparsity. To this end, a key aspect is the reduction of circuit evaluations to a sequence of indexing and scatter-reduce operations, as these can be implemented using highly optimized primitives available in modern tensor libraries.
+Resolving circuit evaluations as one of the major bottlenecks present in current neurosymbolic architectures allows to further scale neurosymbolic models and tackle new problems that have been out of reach so far.
+
+
+
+
+
+\subsubsection*{Author Contributions}
+
+PZD conceived the conceptual idea of \klay and made an initial prototype. JM worked out the technical details and implemented the methods with the help of VD. JM proposed and carried out the experiments. All authors contributed equally to the writing. PZD supervised the project.
+
+
+

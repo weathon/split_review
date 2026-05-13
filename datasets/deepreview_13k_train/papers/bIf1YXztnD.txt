@@ -1,0 +1,311 @@
+\title{Orient Anything}
+
+\begin{abstract}
+Orientation estimation is a fundamental task in 3D shape analysis which consists of estimating a shape's orientation axes: its side-, up-, and front-axes. Using this data, one can rotate a shape into canonical orientation, where its orientation axes are aligned with the coordinate axes. Developing an orientation algorithm that reliably estimates complete orientations of general shapes remains an open problem. We introduce a two-stage orientation pipeline that achieves state of the art performance on up-axis estimation and further demonstrate its efficacy on full-orientation estimation, where one seeks all three orientation axes. Unlike previous work, we train and evaluate our method on all of Shapenet rather than a subset of classes. We motivate our engineering contributions by theory describing fundamental obstacles to orientation estimation for rotationally-symmetric shapes, and show how our method avoids these obstacles.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\emph{Orientation estimation} is a fundamental task in 3D shape analysis which consists of estimating a shape's orientation axes: its side-, up-, and front-axes. Using this data, one can rotate a shape into \emph{canonical orientation}, in which the shape's orientation axes are aligned with the coordinate axes. This task is especially important as a pre-processing step in 3D deep learning, where deep networks are typically trained on datasets of canonically-oriented shapes but applied to arbitrarily-oriented shapes at inference time. While data augmentation or equivariant and invariant architectures may improve a model's robustness to input rotations, these techniques come at the cost of data efficiency and model expressivity \citep{kuchnik2018efficient, kim2023stable}. In contrast, orientation estimation allows one to pre-process shapes at inference time so that their orientation matches a model's training data.
+
+Orientation estimation is a challenging task, and developing an orientation pipeline that reliably estimates complete orientations of general shapes remains an open problem. The na{\"i}ve deep learning approach is to train a model with an $L^2$ loss to directly predict a shape's orientation from a point cloud of surface samples. However, this strategy fails for shapes with rotational symmetries, where the optimal solution to the $L^2$ regression problem is the \emph{Euclidean mean} \citep{moakher2002means} of a shape's orientations over all of its symmetries. In contrast, works such as \citet{poursaeed2020self} discretize the unit sphere into a set of fixed rotations and train a classifier to predict a probability distribution over these rotations, but find that this approach fails for any sufficiently dense discretization of the unit sphere.
+
+Our key insight is to divide orientation estimation into two tractable sub-problems. In the first stage (the \emph{quotient orienter}), we solve a continuous regression problem to recover a shape's orientation \emph{up to octahedral symmetries}. In the second stage (the \emph{flipper}), we solve a discrete classification problem to predict one of 24 octahedral flips that returns the first-stage output to canonical orientation. Octahedral symmetries form a small set covering a substantial proportion of the symmetries occurring in real-world shapes. Consequently, quotienting our first-stage regression problem by octahedral symmetries prevents its predictions from collapsing to averages, while also keeping the subsequent classification problem tractable. 
+
+Using this strategy, our method achieves state-of-the-art performance on the well-studied problem of up-axis prediction, and additionally performs well on full-orientation prediction, which few prior works have tackled. Unlike previous work, we train and evaluate our model on the \emph{entire} Shapenet dataset rather than a subset of classes. We further demonstrate its generalization capabilities on Objaverse, a large dataset of real-world 3D models of varying quality.
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Rotated shape]{\includegraphics[scale=0.15]{ICLR_2025_Template/figs/bench_rotated_isometric.png}}
+    \quad
+    \quad
+    \quad
+    \quad
+    \subfigure[Shape in canonical orientation]{\includegraphics[scale=0.15]{ICLR_2025_Template/figs/bench_isometric.png}}
+    \caption{\emph{Orientation estimation} allows users to rotate arbitrary shapes (a) into canonical orientation (b), in which the shape's orientation axes are aligned with the coordinate axes.}
+    \label{fig:teaser}
+\end{figure}
+
+A shape's ground truth orientation may be ambiguous. This challenge is especially salient for nearly-symmetric shapes, where multiple orientations may yield nearly indistinguishable shapes. To resolve this issue, we use conformal prediction to enable our flipper to output \emph{adaptive prediction sets} \citep{romano2020classification} whose size varies with the flipper model's uncertainty. For applications with a human in the loop, this enables the end user to choose from a small set of plausible candidate orientations, dramatically simplifying the orientation estimation task while preserving user control over the outputs.
+
+Our contributions include the following: (1) we identify fundamental obstacles to orientation estimation and study the conditions under which a na{\"i}ve regression-based approach to orientation estimation fails; (2) we propose a two-stage orientation estimation pipeline that sidesteps these obstacles; (3) we train and test our model on Shapenet and show that it achieves SOTA performance for orientation estimation; (4) we use conformal prediction to enable end users to resolve ambiguities in a shape's orientation; (5) we release our code and model weights to share our work with the ML community.
+
+
+\section{Related work}
+
+
+\paragraph{Classical methods.}
+
+A simple method for orientation estimation is to compute a rotation that aligns a shape's principal axes with the coordinate axes; \citet{kaye2015mesh} propose a robust variant of this method for mesh alignment. However, \citet{kazhdan2003rotation} find that PCA-based orientation estimation is not robust to asymmetries. \citet{jin2012unsupervised, wang2014upright} propose unsupervised methods that leverage low-rank priors on axis-aligned 2D projections and third-order tensors, respectively, constructed from input shapes. These priors are restrictive, and the resulting orientation pipelines also fail on asymmetric shapes.
+
+Another set of classical methods observe that as many man-made objects are designed to stand on flat surfaces, their up axis is normal to a \emph{supporting base}. Motivated by this observation, these methods attempt to identify a shape's supporting base rather than directly infer their up axis. \citet{fu-sheffer-08} generate a set of candidate bases, extract geometric features, and combine a random forest and SVM to predict a natural base from the candidates. \citet{lin2012automatic} simplify a shape's convex hull, cluster the resulting facets to obtain a set of candidate bases, and compute a hand-designed score to select the best base. Both of these methods rely heavily on feature engineering and fail on shapes that do not have natural supporting bases.
+
+\paragraph{Deep learning-based methods.}
+
+Motivated by the limitations of classical approaches, several works use deep learning for orientation estimation. \citet{liu2016upright} train two neural networks on voxel representations of 3D shapes. A first-stage network assigns each shape to one of $C$ classes. Based on this prediction, the shape is routed to one of $C$ second-stage networks that are independently trained to predict the up axis from voxel representations of shapes in their respective classes. This method is unable to handle shapes that lie outside the $C$ classes on which the networks were trained. 
+
+\citet{pang2022upright} draw inspiration from classical methods and train a segmentation network to predict points that belong to a shape's supporting base. They fit a plane to the predicted base points and output a normal vector to this plane as the predicted up axis. This method represents the current state of the art for orientation estimation, but struggles to handle shapes without well-defined natural bases and and only predicts a shape's up axis. In contrast, our method succeeds on general shapes and predicts a full rotation matrix that returns a shape to canonical orientation.
+
+\citet{chen2021uprightrl} use reinforcement learning to train a model to gradually rotate a shape into upright orientation. While this algorithm performs well, it is evaluated on few classes and is costly to train. \citet{kim2020category} adopt a similar perspective to \citet{fu-sheffer-08}, but use ConvNets to extract features for a random forest classifier that predicts a natural base. \citet{poursaeed2020self} use orientation estimation as a pretext task to learn features for shape classification and keypoint prediction.
+
+We also highlight a related literature on \emph{canonical alignment}. This literature includes works such as \citet{kim2023stable, sajnani2022condor, spezialetti2020learning}, which seek to map arbitrarily-rotated shapes to a class-consistent pose, as well as \citet{katzir2022shapepose, sun2021canonical}, which seek to learn pose-invariant representations of 3D shapes.
+These works only attempt to learn a consistent orientation within each class, but this orientation is not consistent across classes and is not generally aligned with the coordinate axes. In contrast, we tackle the more challenging task of inferring a canonical orientation that is consistent across \emph{all} objects. 
+
+
+
+\section{Method}
+
+
+In this section, we motivate and describe our orientation pipeline. We first identify fundamental obstacles to orientation estimation and show that learning a shape's orientation with the $L^2$ loss fails when the shape is rotationally symmetric. Motivated by these observations, we introduce our two-stage orientation pipeline consisting of a \emph{quotient orienter} followed by a \emph{flipper}. Our quotient orienter model solves a regression problem to recover a shape's orientation up to octahedral symmetries, which commonly occur in real-world shapes. The flipper then predicts one of 24 octahedral flips that returns the first-stage output to canonical orientation. We finally use conformal prediction to enable our flipper to output prediction sets whose size varies with the model's uncertainty. This allows end users to resolve ambiguities in a shape's orientation by choosing from a small set of plausible candidate orientations.
+
+\subsection{Orientation estimation under rotational symmetries}\label{sec:theory}
+
+\begin{wrapfigure}{r}{0.35\linewidth}
+    \centering
+    \includegraphics[scale=0.13]{ICLR_2025_Template/figs/bench_isometric_with_orientation.png}
+    \caption{A shape's \emph{orientation} $\Omega_S$ is a rotation matrix whose columns are the shape's side-, up-, and front-axes (plotted in yellow, magenta, cyan, resp).}
+    \label{fig:orientation-illustration}
+\end{wrapfigure}
+
+In this section, we introduce the orientation estimation problem and motivate our approach. Throughout these preliminaries, we consider 3D shapes $S \in \mathcal{S}$ lying in some space of arbitrary shape representations $\mathcal{S}$. \emph{Orientation estimation} consists of learning an \emph{orienter} function $f : \mathcal{S} \rightarrow SO(3)$ that maps a shape $S \in \mathcal{S}$ to a predicted orientation $\hat{\Omega}_S \in SO(3)$, where $SO(3)$ denotes the 3D rotation group. An \emph{orientation} is a rotation matrix $\Omega_S$ associated with a shape $S$ that is \emph{rotation-equivariant}: If one rotates $S$ by $R \in SO(3)$ to obtain $RS$, then $\Omega_{RS} = R\Omega_S$. We interpret the columns of $\Omega_S = (\omega_S^x, \omega_S^y, \omega_S^z)$ as the side-, up-, and front-axes of $S$, respectively, and say that $S$ is in \emph{canonical orientation} if $\Omega_S = I$. If $S$ is in canonical orientation, then its side-, up-, and front-axes are aligned with the $\{x,y,z\}$ coordinate axes, respectively. We depict a canonically-oriented shape $S$ along with its orientation $\Omega_S$ in Figure \ref{fig:orientation-illustration}.
+
+Given a training set $\mathcal{D}$ of shapes $S \in \mathcal{S}$ paired with their ground truth orientations $\Omega_S$, a natural strategy for orientation estimation is to define a loss function $\ell$ on the space of orientations, parametrize $f$ as a neural network $f_\theta$, and solve the following problem:
+
+\begin{equation}\label{eq:generic-orientation-estimation}
+    \min_{f_\theta} \underset{\substack{R \sim U(SO(3)) \\ (S,\Omega_S) \in \mathcal{D}}}{\E} \left [\ell\left(f_\theta(RS), R, \Omega_S \right) \right ],
+\end{equation}
+
+where $U(SO(3))$ is the uniform distribution over $SO(3)$. In the following section, we will motivate our approach by describing a theoretical obstacle to learning an orienter function $f$ \emph{regardless} of one's choice of loss $\ell$, and then describe specific challenges associated with solving \Eqref{eq:generic-orientation-estimation} using the $L^2$ loss.
+
+\paragraph{Theoretical challenges.}
+
+An ideal orienter $f$ should satisfy two desiderata: (1) It should accept arbitrarily-oriented shapes $RS$ as input and output their orientation $\Omega_{RS} = R\Omega_S$, and (2) it should succeed on most shapes $S$ that occur in the wild. As many real-world shapes possess at least one non-trivial rotational symmetry, an ideal orienter should therefore succeed on rotationally-symmetric shapes. We begin by showing that no function can simultaneously satisfy these desiderata. 
+
+\begin{proposition}\label{thm:impossibility-result}
+    Let $S \in \mathcal{S}$ be a fixed shape which is symmetric under a non-trivial group of rotations $\mathcal{R}_S \subseteq SO(3)$, and let $\Omega_S$ be its orientation. Then there is no function $f$ such that $f(RS) = R\Omega_S$ for all $R \in SO(3)$.
+\end{proposition}
+
+ Intuitively, if a shape $S$ is symmetric under some non-trivial rotation $R$, then $S$ is \emph{invariant} under $R$, but its orientation is \emph{equivariant} under $R$, so the map $RS \mapsto R\Omega_S$ is one-to-many and cannot be a function. This shows that any solution to the orientation estimation problem \ref{eq:generic-orientation-estimation} necessarily trades off some desirable property; there are no functions that can successfully orient a rotationally-symmetric shape given any input orientation.
+
+\begin{figure}[h]
+    \centering
+    \subfigure[Shape in canonical orientation]{\includegraphics[scale=0.15]{ICLR_2025_Template/figs/bench_isometric_with_orientation.png}}
+    \quad
+    \quad
+    \quad
+    \quad
+    \subfigure[Shape after $180^\circ$ rotation about the $y$-axis]{\includegraphics[scale=0.15]{ICLR_2025_Template/figs/bench_flipped_isometric_with_orientation.png}}
+    \caption{Rotating a shape by one of its symmetries changes its orientation while leaving the shape unchanged. Here, the front axis (in cyan) and side axis (in yellow) are flipped   when the shape is rotated $180^\circ$ about the $y$-axis.}
+    \label{fig:prop3.1}
+\end{figure}
+
+Previous works such as \citet{liu2016upright, poursaeed2020self} observe that orientation estimation via $L^2$ regression typically yields poor results. Motivated by this observation, we now characterize the solution to orientation estimation via $L^2$ regression for a single rotationally-symmetric shape and show that na{\"i}ve $L^2$ regression degenerates in this setting.
+
+\begin{proposition}\label{thm:l2-regression-fails}
+    Let $S \in \mathcal{S}$ be a fixed shape which is symmetric under a non-trivial group of rotations $\mathcal{R}_S \subseteq SO(3)$. Let $\Omega_S$ be the shape's orientation, and suppose $f^* : \mathcal{S} \rightarrow SO(3)$ solves the following regression problem:
+    \begin{equation}\label{eq:naive-l2-learning}
+    \min_{f : \mathcal{S} \rightarrow SO(3)} \underset{R \sim U(SO(3))}{\E} \left [\|f(RS) - R\Omega_S \|_F^2 \right ],
+\end{equation}
+
+Then $f^*(RS) = \textrm{proj}_{SO(3)} \left[ \frac{1}{|\mathcal{R}_S|} \sum_{Q \in \mathcal{R}_S} RQ\Omega_S \right] \neq R\Omega_S$, where $\textrm{proj}_{SO(3)}$ denotes the orthogonal projection onto $SO(3)$.
+\end{proposition}
+
+ Proposition \ref{thm:l2-regression-fails} shows that even when seeking to predict the rotated orientations $R\Omega_S$ of a \emph{single} rotationally-symmetric shape $S$, $L^2$ regression fails to learn the correct solution, and instead learns the \emph{Euclidean mean} of the rotated orientations $RQ\Omega_S$ across all rotations $Q$ in the symmetry group $\mathcal{R}_S$ \citep{moakher2002means}.
+
+This problem may be highly degenerate, even for shapes with a \emph{single} non-trivial symmetry. For example, consider the bench shape $S$ depicted in Figures \ref{fig:teaser}, \ref{fig:orientation-illustration}, \ref{fig:prop3.1}. As shown in Figure \ref{fig:prop3.1}, this shape has two rotational symmetries: The identity rotation, and a $180^\circ$ rotation about the $y$-axis. One may represent these rotations by the matrices $I$ and $Q := (-e_x, e_y, -e_z)$, resp., where $e_x, e_y, e_z$ are the standard basis vectors. 
+
+\begin{wrapfigure}{r}{0.4\linewidth}
+    \centering
+    \includegraphics[scale=0.15]{ICLR_2025_Template/figs/bench_rotated_about_y_axis_isometric.png}
+    \caption{The solution $f^*(S)$ to Problem \ref{eq:naive-l2-learning} evaluated at the bench shape $S$ may be any rotation about the $y$-axis.}
+    \label{fig:prop-3.2-illustration}
+\end{wrapfigure}
+
+Proposition \ref{thm:l2-regression-fails} states that one solves the $L^2$ regression problem \ref{eq:naive-l2-learning} for the bench shape by computing the arithmetic mean of $I$ and $Q$ and then orthogonally projecting this matrix onto $SO(3)$. The arithmetic mean of $I, Q$ is the matrix $M := (0, e_y, 0)$, and one computes its orthogonal projection onto $SO(3)$ by solving a special Procrustes problem \citep{gower2004procrustes}. However, the solution to this problem is non-unique, and $f^*(S)$ may be any rotation about the $y$-axis, which we illustrate in Figure \ref{fig:prop-3.2-illustration}. This shows that even a single non-trivial rotational symmetry leads to \emph{an entire submanifold of solutions} $f^*(S)$ to Problem \ref{eq:naive-l2-learning}.
+
+\paragraph{A partial solution.}
+
+The previous section shows that solving \Eqref{eq:generic-orientation-estimation} with the $L^2$ loss fails for rotationally-symmetric shapes, which are common in practice. We now present a partial solution to this problem. Suppose we know a finite group $\group \supseteq \mathcal{R}_S$ that contains a shape $S$'s rotational symmetries. We can then \emph{quotient} the $L^2$ loss by $\group$ to obtain the following problem:
+
+\begin{equation}\label{eq:quotient-l2-loss}
+    \min_{f: \mathcal{S} \rightarrow SO(3)} \underset{\substack{R \sim U(SO(3)) \\ (S,\Omega_S) \in \mathcal{D}}}{\E} \left [\min_{Q \in \group} \|f(RS) - RQ\Omega_S \|_F^2 \right ].
+\end{equation}
+
+This loss is small if $f(RS)$ is close to the orientation $RQ\Omega_S$ of the rotated shape $RQS$ for \emph{any} $Q \in \group$; \citet{mehr2018manifold} use similar techniques to learn latent shape representations that are invariant under a group of geometric transformations. Intuitively, whereas \Eqref{eq:naive-l2-learning} attempts to make $f(S)$ close to \emph{all} $Q\Omega_S$, a minimizer of \Eqref{eq:quotient-l2-loss} merely needs to make $f(S)$ close to \emph{any} $Q\Omega_S$. Formally:
+
+\begin{proposition}\label{thm:quotient-regression-succeeds}
+    Let $S \in \mathcal{S}$ be a fixed shape which is symmetric under a group of rotations $\mathcal{R}_S \subseteq \group \subseteq SO(3)$. Let $\Omega_S$ be the shape's orientation, and suppose $f^* : \mathcal{S} \rightarrow SO(3)$ is a solution to the following quotient regression problem:
+    
+    \begin{equation}\label{eq:quotient-regression-single-shape}
+    \min_{f: \mathcal{S} \rightarrow SO(3)} \underset{R \sim U(SO(3))}{\E} \left [\min_{Q \in \group} \|f(RS) - RQ\Omega_S \|_F^2 \right],
+\end{equation}
+
+Then for any $R \in SO(3)$, $f^*(RS) = RQ^*\Omega_S$ for some $Q^* \in \group$.
+\end{proposition}
+
+ In contrast to na{\"i}ve $L^2$ regression, quotient regression learns a function that correctly orients rotationally-symmetric shapes \emph{up to a rotation} in the group $\group$. While this is only a partial solution to the orientation estimation problem, the remainder reduces to a discrete classification problem: Predicting the rotation $Q^* \in \group$ such that $f^*(RS) = RQ^*\Omega_S$. In the following section, we will show how a solution to this problem allows one to map $RS$ to the canonically-oriented shape $S$.
+
+\paragraph{Recovering an orientation via classification.}
+
+By solving the quotient regression problem in \Eqref{eq:quotient-l2-loss}, one can recover an arbitrarily-rotated shape $RS$'s orientation up to a rotation $Q^* \in \group$. In this section, we propose training a classifier to predict this rotation $Q^*$ given the solution $f^*(RS) = RQ^*\Omega_S$ to the quotient regression problem. We now further assume that the shape $S$'s ground truth orientation $\Omega_S$ is the canonical orientation $\Omega_S = I$. We show that even if $S$ is symmetric under some group of symmetries $\mathcal{R}_S \subseteq \group$, the optimal classifier's predictions enable one to map $RS$ to the canonically-oriented shape $S$.
+
+Predicting a rotation $Q^* \in \group$ from the output $f^*(RS) = RQ^*$ of the quotient regression model is an $| \group |$-class classification problem. One may train an appropriate classifier by solving the following problem:
+
+\begin{equation}\label{eq:classifier-objective}
+    \min_{p_\phi : \mathcal{S} \rightarrow \Delta^{|\group|-1}} \underset{\substack{Q \sim U(\group) \\ S \in \mathcal{D}}}{\E} \left [\textrm{CE}\left(p_\phi(QS), \delta_Q \right) \right ],
+\end{equation}
+
+where $U(\group)$ denotes the uniform distribution on $\group$, $\textrm{CE}(\cdot)$ denotes the cross-entropy loss, and $\delta_Q \in \Delta^{|\group|-1}$ is a one-hot vector centered at the index of $Q \in \group$. While one may hope that composing the quotient regression model and this classifier yields an orienter that outputs correct orientations $\hat{\Omega}_{RS} = R\Omega_S$ regardless of its inputs' symmetries, recall that Proposition \ref{thm:impossibility-result} shows such an orienter does not exist. However, the following result shows that this pipeline recovers the orientation of a shape $RS$ up to one of its rotational symmetries, which is sufficient for mapping $RS$ to $S$.
+
+\begin{proposition}\label{thm:classifier-recovers-orientations}
+Let $S \in \mathcal{S}$ be a fixed shape which is symmetric under a group of rotations $\mathcal{R}_S \subseteq \group \subseteq SO(3)$, and suppose $S$ is canonically-oriented, so $\Omega_S = I$. Let $f^* : \mathcal{S} \rightarrow SO(3)$ be a solution to \Eqref{eq:quotient-l2-loss}, so that $f^*(RS) = RQ^*$ for some $Q^* \in \group$. Finally, suppose that $p^* : \mathcal{S} \rightarrow \Delta^{|\group|-1}$ solves the following problem:
+
+\begin{equation}\label{eq:classifier-objective-single-shape}
+    \min_{p : \mathcal{S} \rightarrow \Delta^{|\group|-1}} \underset{Q \sim U(\group)}{\E} \left [\textrm{CE}\left(p(QS), \delta_Q \right) \right ].
+\end{equation}
+
+Then for any $R \in SO(3)$, $p^*(f^*(RS)^\top RS)$ is the uniform distribution over $\left\{(Q^*)^\top F : F \in \mathcal{R}_S \right\}$. For any $(Q^*)^\top F$ in the support of this distribution, $\underbrace{((Q^*)^\top F)^\top}_{\textrm{second-stage prediction}} \underbrace{f^*(RS)^\top}_{\textrm{first-stage prediction}} RS = S$, so using $f^*$ and $p^*$, one may recover $S$ from the arbitrarily-rotated shape $RS$.
+\end{proposition}
+
+ How does one reconcile this result with Proposition \ref{thm:impossibility-result}? The orientation of $(Q^*)^\top F)^\top f^*(RS)^\top RS$ is $F^\top \neq I = \Omega_S$, so this result does \emph{not} contradict Proposition \ref{thm:impossibility-result}. Rather, it shows that when a shape $S$ is rotationally symmetric, one need only predict the orientation of $RS$ \emph{up to one of its symmetries} to recover the canonically-oriented $S$. We combine these results in the following section to implement a state-of-the-art method for orientation estimation.
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Quotient regression output]{\includegraphics[scale=0.13]{ICLR_2025_Template/figs/bench_flipped_prop_3.3_isometric.png}}
+    \quad
+    \quad
+    \subfigure[Classifier outputs]{\includegraphics[scale=0.13]{ICLR_2025_Template/figs/flipper_outputs.png}}
+    \caption{The quotient regression problem \ref{eq:quotient-regression-single-shape} correctly orients an arbitrarily rotated shape $RS$ up to a rotation in $\group$. The classification problem \ref{eq:classifier-objective-single-shape} then recovers the orientation of $RS$ up to one of its rotational symmetries, which suffices for mapping $RS$ to the canonically-oriented shape $S$.}
+    \label{fig:our-pipeline-bench}
+\end{figure}
+
+\subsection{Implementation}\label{sec:implementaton}
+
+Informed by our insights from Section \ref{sec:theory}, we now present our state-of-the-art method for orientation estimation. Our pipeline consists of two components. Our first component, which we call the \emph{quotient orienter}, is a neural network trained to solve Problem \ref{eq:quotient-l2-loss}. We quotient the $L^2$ objective by $\group := \mathcal{O} \subseteq SO(3)$, the \emph{octahedral group} containing the 24 rotational symmetries of a cube. This is among the largest finite subgroups of $SO(3)$ (only the cyclic group $C_n$ for $n \geq 48$ and dihedral group $D_n$ for $n \geq 4$ can contain more subgroups), and it includes many rotational symmetries that commonly occur in real-world shapes. Our second component, which we call the \emph{flipper}, is a neural network trained to solve the classification problem \ref{eq:classifier-objective}. We illustrate the output of each stage of this pipeline in Figure \ref{fig:our-pipeline-bench}. As many shapes possess multiple plausible orientations, we use conformal prediction to enable our flipper to output \emph{adaptive prediction sets} whose size varies with the flipper model's uncertainty. We provide further implementation details below.
+
+\paragraph{Quotient orienter.}
+
+We parametrize our quotient orienter by a DGCNN \citep{wang2019dynamic} operating on point clouds. To ensure that our predicted orientations lie in $SO(3)$, we follow \citet{bregier2021deep} and map model outputs from $\R^{3 \times 3}$ to $SO(3)$ by solving the special orthogonal Procrustes problem. We train the quotient orienter on point clouds sampled from the surfaces of meshes in Shapenet \citep{shapenet2015}. As these meshes are pre-aligned to lie in canonical orientation, we fix $\Omega_S = I$ for all training shapes $S$.
+
+In our experiments, we observe that our quotient orienter yields accurate predictions for most input rotations $R$ but fails for a small subset of rotations. To handle this, we follow \citet{liu2016upright} and employ test-time augmentation to improve our model's predictions. This consists of (1) randomly rotating the inputs $RS$ by $K$ random rotations $R_k \sim U(SO(3))$, $k=1,...,K$, (2) obtaining the quotient orienter's predictions $f_\theta(R_kRS)$ for each shape, (3) returning these predictions to the original input's orientation by computing $R_k^\top f_\theta(R_kRS)$, and (4) outputting the prediction $R_{k^*}^\top f_\theta(R_{k^*}RS)$ with the smallest average quotient distance to the remaining predictions.
+
+\paragraph{Flipper.}
+
+We also parametrize our flipper by a DGCNN operating on point clouds. We train the flipper on point clouds sampled from the surface of Shapenet meshes by optimizing \Eqref{eq:classifier-objective}. We draw rotations $Q \sim U(\mathcal{O})$ during training, and simulate inaccuracies in our quotient orienter's predictions by further rotating the training shapes about a randomly drawn axis by an angle uniformly drawn from $[0,10]$ degrees.
+
+We also employ test-time augmentation to improve our flipper model's predictions. Similarly to the case with the quotient orienter, we (1) randomly flip the inputs by $K$ random rotations $R_k \sim \group = \mathcal{O}$, (2) obtain the flipper's predictions for each shape, (3) return these predictions to the original input's orientation, and (4) output the plurality prediction.
+
+\paragraph{Adaptive prediction sets.}
+
+Many real-world shapes have several plausible canonical orientations, even when they lack rotational symmetries. Furthermore, the flipper model may map nearly-symmetric shapes with unique canonical orientations to a uniform distribution over their near-symmetries due to factors such as insufficiently dense point clouds or the smoothness of the flipper function.
+
+To mitigate this issue in pipelines with a human in the loop, we enable our flipper model to output \emph{adaptive prediction sets} whose size varies with the flipper's uncertainty \citep{romano2020classification}. This method uses a small \emph{conformal calibration set} drawn from the validation data to learn a tuning parameter $\tau > 0$ that controls the size of the prediction sets. Given the flipper model's output probabilities $p_\phi(S) \in \Delta^{|\group|-1}$ for some shape $S$, one sorts $p_\phi(S)$ in descending order and adds elements of $\group$ to the prediction set until their total mass in $p_\phi(S)$ reaches $\tau$. Intuitively, these sets will be small when the flipper is confident in its prediction and assigns large mass to the highest-probability classes. Conversely, the sets will be large when the flipper is uncertain and assigns similar mass to most classes.
+
+
+
+\section{Experiments}
+
+
+We now evaluate our method's performance on orientation estimation. We first follow the evaluation procedure in \citet{pang2022upright} and benchmark against their ``Upright-Net,'' which represents the current state of the art for orientation estimation. Upright-Net can only map shapes into upright orientation, where a shape's up axis is aligned with the $y$-axis; in contrast, our method recovers a full orientation $\Omega_S$ for each shape. We therefore follow this benchmark with an evaluation of our method on the more challenging task of full-orientation estimation. We incorporate adaptive prediction sets at this stage and demonstrate that our method reliably provides a plausible set of candidate orientations for diverse shapes unseen during training.
+
+\subsection{Upright orientation estimation}\label{sec:upright-experiments}
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Angular error histograms for Shapenet]{\includegraphics[scale=0.35]{ICLR_2025_Template/figs/up_axis_shapenet_histogram_log_scale.png}}
+    \quad
+    \quad
+    \subfigure[Angular error histograms for ModelNet40]{\includegraphics[scale=0.35]{ICLR_2025_Template/figs/up_axis_modelnet_histogram_log_scale.png}}
+    \caption{Comparison of angular errors between the estimated and ground truth up-axis on the Shapenet validation set (left) and on ModelNet40 (right). Frequencies are plotted in log scale. The dashed lines indicate the $10^\circ$ error threshold beyond which a prediction is treated as incorrect. Our algorithm's error rate is 64.6\% lower than the prior state of the art.}
+    \label{fig:up-axis-loss-histograms}
+\end{figure}
+
+We construct a random 90-10 train-test split of Shapenet, draw 10k point samples from the surface of each mesh, and train our quotient orienter and flipper on all classes in the training split. We train our quotient orienter for 1919 epochs and our flipper for 3719 epochs, sampling 2k points per point cloud at each iteration and fixing a learning rate of $10^{-4}$. We also train Upright-Net with 2048 points per cloud on the same data for 969 epochs at the same learning rate, at which point the validation accuracy has plateaued. We follow the annotation procedure in \citet{pang2022upright} to obtain ground truth segmentations of each point cloud into supporting base points and non-base points.
+
+We then follow the evaluation procedure in \citet{pang2022upright} to benchmark our method against their SOTA method for upright orientation estimation. We randomly rotate shapes $S$ in the validation set, use our two-stage pipeline and Upright-Net to estimate the up-axis $\omega_{RS}^y$ of each randomly rotated shape $RS$, and then measure the \emph{angular error} $\textrm{arccos}( \langle \hat{\omega}_{RS}^y,\omega_{RS}^y \rangle)$ between the estimated and ground truth up-axis. Our method's estimated up-axis is the second column of our estimated orientation matrix $\hat{\Omega}_{RS}$. In contrast, Upright-Net predicts a set of base points for $RS$, fits a plane to these points, and returns this plane's normal vector pointing towards the shape's center of mass. We follow \citet{pang2022upright} and define our methods' respective accuracies to be the proportion of validation meshes whose angular error is less than $10^\circ$.
+
+\begin{wraptable}{r}{0.5\linewidth}
+\caption{Up-axis estimation accuracy for our pipeline trained on Shapenet}
+\label{tab:ours-vs-uprightnet}
+\begin{center}
+\begin{tabular}{c|cc}
+\multicolumn{1}{c|}{\bf Method}  & \multicolumn{2}{c}{\bf Accuracy ($\uparrow$)} \\
+\hline
+&\multicolumn{1}{c}{Shapenet}
+&\multicolumn{1}{c}{ModelNet40}
+\\ \hline
+    Ours         & \bf 89.2 \% & \bf 77.7 \% \\ 
+Upright-Net             & 69.5 \% & 62.3 \%
+\end{tabular}
+\end{center}
+\end{wraptable}
+
+We depict the results of this benchmark in Table \ref{tab:ours-vs-uprightnet}. \textbf{Our method improves on Upright-Net's up-axis estimation accuracy by nearly 20 percentage points}, corresponding to a 64.6\% reduction in the error rate relative to the previous state of the art. To provide a more comprehensive picture of our respective models' performance, we also report angular loss histograms for our model and Upright-Net in the left panel of Figure \ref{fig:up-axis-loss-histograms}. Our model primarily fails by outputting orientations that are $90^{\circ}$ or $180^{\circ}$ away from the correct orientation, which correspond to failures of the flipper. In contrast, Upright-Net's failures are more evenly distributed across angular errors. Finally, we depict a grid of non-cherry-picked outputs of our model and Upright-Net in Figure \ref{fig:sec-4.1-grid} and highlight each model's failure cases in red. 
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Ours]{\includegraphics[scale=0.026]{ICLR_2025_Template/figs/sec_4.1_grid_ours_downsampled.jpg}}
+    \quad
+    \quad
+    \quad
+    \quad
+    \subfigure[Upright-Net]{\includegraphics[scale=0.026]{ICLR_2025_Template/figs/sec_4.1_uprightnet_grid_downsampled.jpg}}
+    \caption{Comparison of oriented shapes recovered from randomly rotated inputs using our algorithm (left) and Upright-Net (right). Failures are rendered in red. Our algorithm recovers correct upright and front-facing orientations for most shapes, whereas Upright-Net cannot recover front-facing orientations and fails over $2.8 \times$ as often at up-axis prediction.}
+    \label{fig:sec-4.1-grid}
+\end{figure}
+
+We quantitatively evaluate our model's generalization by performing the same experiment on ModelNet40 \citep{wu20153d}. Both models' performances deteriorate in this setting, but our algorithm continues to substantially outperform Upright-Net. Furthermore, the right panel of Figure \ref{fig:up-axis-loss-histograms} shows that our model's failures on ModelNet40 are more heavily weighted towards flipper failures (where the angular error is close to $90^\circ$ and $180^\circ$). In the following section, we will show how a human in the loop can resolve these failures by choosing from a small set of candidate flips, which substantially improves our pipeline's quantitative performance.
+
+These results demonstrate that our method significantly improves over the state of the art in upright orientation estimation. In the following section, we show that our method also successfully recovers the full orientation $\Omega_{RS}$ of a rotated shape, a more challenging task than the well-studied task of upright orientation estimation. Using our estimated orientations, we return a wide variety of shapes into canonical orientation.
+
+\subsection{Full-orientation estimation}\label{sec:full-orientation-experiments}
+
+We now evaluate our method's performance on full-orientation estimation, in which we use our model's full orientation matrix $\hat{\Omega}_{RS}$ to transform an arbitrarily-rotated shape $RS$ to the canonically-oriented shape $S$. To our knowledge, our algorithm is the first to solve this task for generic shapes without requiring class information at training time or at inference time. We now record the \emph{angular distance} between our estimated orientations $\hat{\Omega}_{RS}$ and the ground truth orientations $\Omega_{RS} = R\Omega_S = R$. This angular distance is defined as $d(\hat{\Omega}_{RS}, R) := \textrm{arccos}(\frac{\textrm{tr} R_\textrm{diff} - 1}{2})$, where $R_\textrm{diff} := \hat{\Omega}_{RS} R^\top$.
+
+As noted in Section \ref{sec:implementaton}, many real-world shapes have several plausible canonical orientations, and our flipper may also map nearly-symmetric shapes to a uniform distribution over their near-symmetries. In particular, while most real-world shapes have a well-defined upright orientation, their front-facing orientation is often ambiguous. To account for this, we incorporate adaptive prediction sets at this stage of our evaluation. We measure the angular distance between the estimated orientations $\hat{\Omega}^k_{RS}$ corresponding to the top $K=4$ flips in our flipper's model distribution and the ground truth orientation $\Omega_{RS}$, and take their maximum to obtain our reported angular errors. This resolves ambiguities in a shape's front-facing direction (there are 4 possible front-facing directions for each upright orientation) and also simulates the ability of a human in the loop to choose between a small set of candidate orientations.
+
+We describe our method's performance on full-orientation estimation in Table \ref{tab:ours-full-rotation}, where we adopt a $10^\circ$ accuracy threshold for full rotation estimation. Our method achieves high top-4 accuracy on full-orientation estimation, but its accuracy deteriorates in the $K=1$ case, where one can only consider the flipper's highest-probability class. This is partially attributable to ambiguities in the front-facing orientation of many shapes. To demonstrate this, the left panel of Figure \ref{fig:sec-4.2-grid} depicts shapes where our method's top-1 angular error is $>10^\circ$ in red. These failures primarily correspond to shapes that are symmetric with respect to rotations about the $y$-axis; these shapes are correctly oriented even though our method has recovered incorrect orientations.
+
+\begin{wraptable}{r}{0.45\linewidth}
+\caption{Full-orientation estimation accuracy}
+\label{tab:ours-full-rotation}
+\begin{center}
+\begin{tabular}{c|cc}
+\multicolumn{1}{c|}{\bf Method}  & \multicolumn{2}{c}{\bf Accuracy ($\uparrow$)} \\
+\hline
+&\multicolumn{1}{c}{Top-1}
+&\multicolumn{1}{c}{Top-4}
+\\ \hline
+    Ours         & 68.3 \% & 85.8 \%
+\end{tabular}
+\end{center}
+\end{wraptable}
+
+Figure \ref{fig:sec-4.2-grid} compares the shapes obtained using our model's outputs when $K=1$ (where we only consider the flipper's highest-probability predicted flip) and when $K=4$ (where we depict the best flip among the top 4 classes in the flipper's model distribution) to the canonically-oriented shapes. We highlight the model's failure cases in red. Even in the $K=1$ case, many of the model's failures correspond to orientations that are plausible or correct up to a symmetry of the shape.
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Top-1 outputs]{\includegraphics[scale=0.026]{ICLR_2025_Template/figs/grid_top1_full_rotation.jpg}}
+    \quad
+    \quad
+    \quad
+    \quad
+    \subfigure[Top-4 outputs]{\includegraphics[scale=0.026]{ICLR_2025_Template/figs/grid_top4_full_rotation.jpg}}
+    \caption{Comparison of oriented shapes recovered using the flipper's highest-probability flip (left) and the best flip among the top 4 classes in the flipper's model distribution (right). Our pipeline correctly infers the full orientation of most shapes, and many of its failures correspond to orientations that are acceptable in practice.}
+    \label{fig:sec-4.2-grid}
+\end{figure}
+ This dataset contains highly diverse meshes of varying quality and therefore serves as a useful test case for our method's performance on out-of-distribution shapes. (As these meshes are not consistently oriented in the dataset, we cannot train on them or report meaningful error metrics.) Using our orientation pipeline, one reliably recovers shapes that are canonically-oriented up to an octahedral flip. Our flipper has greater difficulty handling out-of-distribution meshes, but predicts an acceptable flip in many cases. We expect that training our flipper on a larger dataset of oriented shapes will further improve its generalization performance.
+
+
+
+\section{Conclusion}
+
+This work introduces a state-of-the-art method for 3D orientation estimation. Whereas previous approaches can only infer upright orientations for limited classes of shapes, our method successfully recovers entire orientations for general shapes. We show that na{\"i}ve regression-based approaches for orientation estimation degenerate on rotationally-symmetric shapes, which are common in practice, and develop a two-stage orientation pipeline that avoids these obstacles. Our pipeline first orients an arbitrarily rotated input shape up to an octahedral symmetry, and then predicts the octahedral symmetry that maps the first-stage output to the canonically-oriented shape.
+
+In the language of group theory, our two-stage approach first learns to map an input shape $RS$ onto the \emph{orbit} of the desired output $S$ under some symmetry group $\group$, and then learns a distribution over elements of this orbit. We anticipate that this factorization of geometric learning problems will be broadly applicable throughout 3D deep learning for tackling problems that are ill-posed due to the presence of symmetries. We also believe that our results can be further improved by training our quotient orienter and flipper models on larger datasets of consistently-oriented shapes as they become available.
+
+
+
+

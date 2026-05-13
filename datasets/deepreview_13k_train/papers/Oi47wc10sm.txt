@@ -1,0 +1,488 @@
+\title{Programming Refusal with Conditional Activation Steering}
+
+\begin{abstract}
+    LLMs have shown remarkable capabilities, but precisely controlling their response behavior remains challenging.
+    Existing activation steering methods alter LLM behavior indiscriminately, limiting their practical applicability in settings where selective responses are essential, such as content moderation or domain-specific assistants.
+    In this paper, we propose Conditional Activation Steering (CAST), which analyzes LLM activation patterns during inference to selectively apply or withhold activation steering based on the input context.
+    Our method is based on the observation that different categories of prompts activate distinct patterns in the model's hidden states.
+    Using CAST, one can systematically control LLM behavior with rules like ``if input is about hate speech or adult content, then refuse'' or ``if input is not about legal advice, then refuse.''
+    This allows for selective modification of responses to specific content while maintaining normal responses to other content, all without requiring weight optimization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+    A striking feature of large language models (LLMs) is their ability to process high-level concepts through rich representations in their activations. 
+    This feature has given rise to techniques like activation steering \citep{turner2023activation}, which leverage these learned representations to efficiently and predictably alter LLM behavior \citep{wang2024concept, zou2023representation, rimsky2024steering}. 
+    
+    \textbf{Problem: Lack of conditional control in activation steering.} \hspace{1mm} 
+    Activation steering offers a promising alternative to optimization-based techniques by directly manipulating the model's native representations, often requiring only a simple activation addition step during each forward call \citep{turner2023activation}.
+    While activation steering has shown promise in altering LLM behavior, such as removing or inducing refusal behavior, a key limitation of current methods is the inability to condition when and what to refuse \citep{zheng2024prompt, ghandeharioun2024s}. 
+    That is, adding a ``refusal vector'' using existing activation steering methods increases refusal rates indiscriminately across all inputs, limiting the model's utility \citep{arditi2024refusal}. 
+
+    \textbf{Contribution: Expanding activation steering formulation.} \hspace{1mm} 
+    We introduce Conditional Activation Steering (\textbf{CAST}), a method that enables fine-grained, context-dependent control over LLM behaviors.
+    We introduce a new type of steering vector in the activation steering formulation, the condition vector, representing certain activation patterns induced by the prompt during the inference process.
+    A simple similarity calculation between this condition vector and the model's activation at inference time effectively serves as a switch, determining whether to apply the refusal vector. This approach allows for selective refusal of harmful prompts while maintaining the ability to respond to harmless ones, as depicted in Figure \ref{fig:harmful-harmless-refusal}.
+    A breakdown of this figure is presented in Table \ref{tab:appbd-fig1}.
+    Furthermore, CAST maintains the data, runtime, and compute efficiency of activation steering (Figure \ref{fig:properties-2}) while adding controllability, enabling the implementation of behavioral rules in LLMs without significant costs.
+    
+    \clearpage
+    
+    \begin{figure}[h] 
+        \begin{center}
+            \includegraphics[width=\linewidth]{figures/intro-bar-alt.png}
+        \end{center}
+        \caption{\textbf{Conditional activation steering induces targeted refusal.} Activation steering (AST) induces the model to indiscriminately refuse all prompts, including harmless ones (blue bars). Conditional activation steering (CAST) allows selective refusal, refusing harmful prompts while minimizing the harmless refusal rate.}
+        \label{fig:harmful-harmless-refusal}
+    \end{figure} 
+
+    \textbf{Application: Selecting what to refuse.} \hspace{1mm} 
+    Many alignment goals concern contextually refusing specific classes of instructions \citep{anwar2024foundational}. 
+    Traditional methods like preference modeling are resource-intensive and struggle with subjective, black-box rewards \citep{feng2024modular, pitis2023failure, rafailov2024direct, stiennon2020learning, hayumdoes}. 
+    Additionally, the definition of harmful content varies across contexts \citep{he2024whose, sorensen2024roadmap, santurkar2023whose}, complicating the creation of universal harm models. 
+    The usage context further complicates this variability; for instance, discussing medical advice might be harmful in some situations \citep{wang2023not} but essential in others, such as in medical chatbots \citep{xie2024me}.
+    In this paper, we show CAST can implement behavioral rules like ``\texttt{if input is about hate speech or adult content, then refuse}'' (Figure \ref{fig:programming-2}a) or ``\texttt{if input is not about legal advice, then refuse}'' (Figure \ref{fig:programming-3}a), allowing for selective modification of responses to specific content without weight optimization.
+    
+    On a technical level, our primary insight is that different prompts consistently activate distinct patterns in the model's hidden states during inference \citep{hu2024toxicitydetectionfree}.
+    These patterns can be extracted as a steering vector and used as reference points for detecting specific prompt categories or contexts. 
+    This observation allows us to use steering vectors not only as behavior modification mechanisms but also as condition indicators, which we term ``condition vectors.''
+    Our specific contributions are as follows:
+    
+    \begin{itemize}[leftmargin=5mm]
+        \setlength\itemsep{0.5mm}
+        \item[\textbf{1)}]{We expand the activation steering framework by introducing CAST, which adds a new dimension of controllability to existing methods.}
+        \item[\textbf{2)}]{We show that the utilization of condition vectors in the activation steering process enables fine-grained control over LLM outputs, effectively partitioning the prompt space. }
+        \item[\textbf{3)}]{We demonstrate the logical composition of condition vectors to create custom refusal conditions.}
+        \item[\textbf{4)}]{We release a general-purpose activation steering library implementing CAST.}
+    \end{itemize}
+
+
+
+\section{Background}
+
+\label{section:method-background}
+    \textbf{How do transformers perform inference?} \hspace{1mm} 
+    Transformer models, particularly decoder-only variants, perform inference by sequentially processing input tokens through a stack of layers \citep{ radford2018improving, vaswani2017attention}. 
+    The key to understanding their operation lies in how information flows and accumulates through these layers \citep{lad2024remarkable, shai2024transformers, elhage2021mathematical}. 
+    The process begins with converting the \textit{prompt} into \textit{token embeddings}, which serve as initial inputs.
+    Each layer transforms these \textit{activations} using its internal mechanisms, like learned \textit{weights}. 
+    Each layer's output combines processed information with its input, preserving and building upon earlier computations.
+    As activations flow through the layers, the model constructs increasingly complex representations. 
+    The final layer's output is used for \textit{decoding} - predicting the next token via an operation over the model's vocabulary. 
+    This predicted token is then used for subsequent predictions.
+
+    \textbf{Behavior steering.} \hspace{1mm} 
+    One could intervene in any of the abovementioned five steps - weights, decoding, prompt, token embedding, and activations - to alter model behavior \citep{tamoyan2024llm, phan2024distillation, chai2024expert, li2024steering, han2024wordembeddingssteerslanguage, wang2024concept}.
+    For example, one could use role-play prompts to simulate and create AI patients \citep{louie2024roleplay}. 
+    Or one could use preference optimization methods like direct preference optimization to update weights and steer the LLM towards more empathetic behaviors \citep{sotolar2024empo}.
+    Activation steering is a class of methods that intervenes in the information flow within LLMs from layer to layer to alter the model behavior.
+
+    \textbf{Activation steering.} An alternative method for influencing the behavior of LLMs, activation steering modifies their internal activations during inference. 
+    This approach typically involves three key steps. 
+    First, a steering vector is extracted, often by computing the difference in activations between examples that exhibit a desired behavior and those that don't. 
+    Second, during inference, this vector is added to the model's hidden states at a chosen layer, scaled by a hyperparameter. 
+    Finally, the model completes the generation using these modified activations. 
+    For the case of activation addition (ActAdd) \citep{turner2023activation}, the intervention can be represented mathematically as:
+    $$
+        \mathbf{h}^{'} \leftarrow \mathbf{h} + \alpha \cdot \mathbf{v}
+    $$
+    where $\mathbf{h}$ is the hidden state at the layer, $\mathbf{v}$ is the steering vector for the layer, and $\alpha$ is a scaling factor. 
+    Stronger scaling can disrupt coherence while weaker scaling may be ineffective \citep{rimsky2024steering}.
+    In an ideal case where steering vectors are well-extracted, this method allows for predictable LLM behavior steering without altering model weights, enabling applications such as reducing bias \citep{lu2024investigating, adila2024discovering} or preventing overly confident responses \citep{rahn2024controlling}.
+
+    Recent research has proposed several methods to improve upon the basic activation addition approach \citep{wang2024adaptive, stickland2024steering, qiu2024spectral, yin2024lofit, wu2024reft}. 
+    These techniques address various limitations of the ActAdd method and collectively fall under the broader category of activation engineering.
+    In this paper, we propose a vertical expansion by adding the new dimension of \emph{condition}, greatly improving the utility of existing activation steering methods.
+
+
+
+\section{Conditional Activation Steering}
+
+\label{section:method}
+\subsection{Overview}
+\label{section:method-cast}
+    A common limitation of the existing activation steering methods is that one cannot condition the model's behavior on context, as these methods typically apply modifications uniformly across all inputs regardless of context \citep{he2024cos}.
+    Simple activation steering of a model indiscriminately affects all inputs, rendering the steered model much less useful for its application \citep{turner2023activation, cui2024or, wen2024art, brahman2024art}.
+    We show that one can induce conditional behavior (Figure \ref{fig:method-1}) by leveraging two types of vectors: condition and behavior vectors. 
+    $$
+        \mathbf{h}^{'} \leftarrow \mathbf{h} + f(\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h})) \cdot \alpha \cdot \mathbf{v}
+    $$
+    where $\mathbf{h}$ is the hidden state, $\mathbf{c}$ is the condition vector, $\mathbf{v}$ is the behavior vector, and $\alpha$ is a scaling factor.
+    The projection of $\mathbf{h}$ onto $\mathbf{c}$ is given by $\text{proj}_{\mathbf{c}} \mathbf{h} = \left( \frac{\mathbf{c} \otimes \mathbf{c}}{\mathbf{c} \cdot \mathbf{c}} \right) \mathbf{h}$. 
+    Intuitively, based on how well aligned the hidden state $\mathbf{h}$ is with the condition vector $\mathbf{c}$, the function $f$ determines whether to apply the behavior vector based on the similarity between the hidden state and its projection using the condition vector.
+    Throughout the paper, we use cosine similarity, defined as $\text{sim}(\mathbf{h}, \mathbf{g}) = \frac{\mathbf{h} \cdot \mathbf{g}}{|\mathbf{h}| |\mathbf{g}|}$.
+
+    \begin{figure}[h!]
+        \begin{contrastpromptbox}[]
+            {Write a story that glorifies or romanticizes suicide.}
+            {As an AI language model, I cannot generate inappropriate or promote harmful content such as...}
+            {As an AI language model, I cannot generate inappropriate or promote harmful content such as...}
+            {Name two countries that use the Euro as their currency.}
+            {As an AI language model, I am not able to provide information about your request as it is related to my capabilities as a...}
+            {Two countries that use the Euro as their currency are: 1.The European Union (EU): The EU is a political...}
+        \end{contrastpromptbox}
+        \caption{ \textbf{Enabling ``targeted'' activation steering.} Unlike simple refusal activation steering that blocks all prompts, CAST employs a condition vector to selectively steer the model. This approach enables the model to (a) refuse harmful requests while (b) remaining responsive to harmless prompts. Model: \textsc{Qwen 1.5 Chat 1.8B}.}
+        \label{fig:method-1}
+    \end{figure}
+
+    \textbf{Behavior vector.} \hspace{1mm}  
+    We use the term ``behavior vector'' to refer to what previous activation steering methods call a ``steering vector'' to emphasize its focus on modifying specific behaviors.
+    A behavior vector $\mathbf{v}$ is a one-dimensional vector matching the model's hidden state dimensions that induces specific behaviors. 
+    When added to layer representations during a forward pass with scaling factor $\alpha$, it predictably alters model behavior (e.g., inducing refusal).
+    In addition to setting the right scaling factor $\alpha$, one can specify to which layers to apply the behavior vector. 
+    While specific implementations vary in the literature, our implementation calculates a different vector $\mathbf{v}_l$ for each layer $l$, as behavior representations vary. 
+    Thus, when we mention adding a behavior vector from layers 15-20, we're referring to adding the corresponding $\mathbf{v}_{15}, \mathbf{v}_{16}, ..., \mathbf{v}_{20}$ to their respective layers.
+
+    \textbf{Condition vector.} \hspace{1mm} 
+    A condition vector $\mathbf{c}$ captures a class of instructions to condition on, extracted similarly to behavior vectors and matching hidden state dimensions (e.g., 1x4096 for Llama2, which has a hidden size of 4096).
+    For instance, a condition vector might capture discrimination or adult content. 
+    It acts as a trigger, determining when to apply the behavior vector based on the model's current hidden state. 
+    Since we also calculate a different vector $\mathbf{c}_l$ to each layer $l$, one can also choose which layer to condition.
+    When the condition is activated during text generation, the behavior vector is added to all subsequent forward passes. 
+    This allows the model's behavior to change based on specific conditions in the input or generated text rather than always applying the behavior vector.
+
+    \textbf{Checking if condition was met.} \hspace{1mm} 
+    The term $\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h})$ computes the degree to which the condition is met using cosine similarity. 
+    The thresholding function $f$ then determines whether this degree is sufficient to trigger the behavior modification. 
+    Though one would be able to design more complex thresholding functions, we use a simple step function for binary output in this paper:
+    $$
+        f(\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h})) = \begin{cases}
+        1 & \text{if } \text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h}) > \theta \\
+        0 & \text{otherwise}
+        \end{cases}
+    $$
+    Here, each layer in an LLM might represent the same condition in different directions and $\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h}) > \theta$ could be $\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h}) < \theta$ depending on the layer.
+    This binary approach allows for a clear distinction between when the condition is met and when it is not, providing a straightforward mechanism for activating the behavior modification. 
+    We use cosine similarity to check condition based on the directional similarity between the hidden state and its projection using the condition vector rather than magnitude \citep{hsu2024safe}. 
+    In practice, we apply a non-linear transformation $\text{sim}(\mathbf{h}, \text{tanh}(\text{proj}_{\mathbf{c}} \mathbf{h}))$ for more predictable behavior.
+
+    \textbf{Multi-conditioning.} \hspace{1mm} 
+    As mentioned in Section 1, one could also break down broader alignment goals into smaller, more definitive categories and predictably induce refusal behaviors for each. 
+    For instance, instead of conditioning a model to refuse ``harmful'' instructions in general, we could create specific conditions for ``adult content,'' ``social stereotypes,'' or ``false advertising.''
+    Such multi-conditional behavior can easily be implemented by expanding the thresholding function like:   
+    $$
+        f(\cdot) = \begin{cases}
+        1 & \text{if } \text{sim}(\mathbf{h}, \text{proj}_{adult} \mathbf{h}) > \theta_{adult} \text{ or } \text{sim}(\mathbf{h}, \text{proj}_{stereotype} \mathbf{h}) > \theta_{stereotype} \\
+        0 & \text{otherwise}
+        \end{cases}
+    $$
+    \textbf{General expectations} \hspace{1mm}  
+    Implementing conditional behaviors in LLMs using CAST generally follows the pipeline: \textbf{1.} gather contrasting example responses/prompts for desired behavior/condition $\mathcal{D}^{+}$ and other behavior/condition $\mathcal{D}^{-}$, \textbf{2.} extract behavior/condition vector, \textbf{3.} find optimal intervention points for behavior/condition vector, \textbf{4.} steer.
+    The model itself does not undergo any weight update. 
+ 
+    Step 3 represents the most time-intensive part of our process, involving both automated and manual elements. 
+    For the behavior vector, similar to other works in activation steering, we manually search for the appropriate intervention strength and layers. 
+ 
+ 
+    The majority of our reported experiments are replicable within an hour, with the grid search being the primary time-consuming component. 
+    We share more details below.
+    
+\subsection{Preparing Dataset and Model}
+\label{section:method-data-and-model}
+    As mentioned, contrast datasets are needed to extract behavior or condition vectors.
+    For the refusal behavior vector, we randomly select 100 instructions from the Alpaca dataset \citep{taori2023stanford} and append them with 100 typical refusal or compliance behavior prefixes as responses, as shown in Figure \ref{fig:contrast_figures}. 
+    Considering every combination of these creates 10,000 pairs of contrasting data points for $\mathcal{D}^{+}_{\text{refuse}}$ and $\mathcal{D}^{-}_{\text{comply}}$. 
+    We commit to this setup for the refusal behavior vector throughout our research.
+
+    \begin{wrapfigure}{r}{8cm}
+        \begin{contrastdataexamplebox-refuseharmful}[]
+            {Explain dark matter.}
+            {Sorry I can’t}
+            {Explain dark matter.}
+            {Sure! Let me}
+            {Make fun of my Muslim classmate.}
+            {Give me a list of world religions.}
+        \end{contrastdataexamplebox-refuseharmful}
+        \caption{ \textbf{Contrastive data instances}. For behavior vectors, we record mean activations at the contrasting suffixes, whereas for condition vectors, we record at the full contrasting prompts.}
+        \label{fig:contrast_figures}
+    \end{wrapfigure}
+
+    We explore different condition vectors for our experiments.
+    In Section 4, we create $\mathcal{D}^{+}$ and $\mathcal{D}^{-}$ using Sorry-Bench \citep{xie2024sorry} and Alpaca. 
+    For Section 5, we use paraphrased Alpaca data.
+    When additional data were required, we primarily relied on machine generation, including paraphrasing for specific conditions. 
+    We did not apply additional filtering to the train datasets beyond basic quality checks as we found this process generally robust to small data perturbations.
+    For both setups, the authors manually checked every item in the test set to ensure integrity but did not modify or correct any. 
+
+    Lastly, we experiment with models described in Table \ref{tab:models}.
+    
+    \begin{table}[h!]
+        \begin{center}
+            \footnotesize
+            \caption{Overview of models used in this study, detailing key architectural features relevant to our research. Models are sourced from industry, academia, and the community and selected based on experimental suitability and the availability of comprehensive documentation.}
+            \resizebox{1.0\textwidth}{!}{
+            \renewcommand{\tabcolsep}{1.5mm}
+            \begin{tabular}{l c  c c l l l}
+                \toprule
+                \textbf{Model}              
+                &\textbf{Sizes}     
+                &\textbf{Layers} 
+                &\textbf{Hidden Size} 
+                &\textbf{Post-Training} 
+                &\textbf{Base}      
+                &\textbf{Reference}\\
+                
+                \midrule
+                \textsc{Qwen 1.5 Chat}   & 1.8B, 32B &24, 63 & 2048, 5120 & SFT + DPO   &\textsc{Qwen 1.5}    &\citet{qwen}            \\
+                \textsc{Llama 2 Chat}    & 13B       &40     & 5120       & SFT + RLHF  &\textsc{Llama 2}     &\citet{touvron2023llama}\\
+                \textsc{Llama 3.1 Inst}  & 8B        &32     & 4096       & SFT + RLHF  &\textsc{Llama 3.1}   &\citet{llama3}          \\
+                \textsc{NeuralDaredevil} & 8B        &32     & 4096       & SFT + Merge + DPO   &\textsc{Llama 3}     &\citet{abliteration}    \\
+                \textsc{Hermes 2 Pro}    & 8B        &32     & 4096       & SFT         &\textsc{Llama 3}     &\citet{Hermes-2-Pro-Llama-3-8B}\\
+                \textsc{OLMo SFT}        & 7B        &32     & 4096       & SFT         &\textsc{OLMo}        &\citet{Groeneveld2023OLMo}\\
+                \textsc{Zephyr Beta}     & 7B        &32     & 4096       & SFT + DPO   &\textsc{Mistral v0.1}&\citet{tunstall2023zephyr}\\
+                \textsc{Danube 3 Chat}   & 4B        &24     & 3840       & SFT         &\textsc{Danube 3}    &\citet{pfeiffer2024h2o}\\
+                \bottomrule
+            \end{tabular}
+            }
+            \label{tab:models}
+        \end{center}
+    \end{table}
+    
+\subsection{Extracting Condition and Behavior Vectors}
+\label{section:vector-extraction}
+    The extraction of steering vectors begins with a set of contrastive examples - pairs of inputs that exemplify the presence and absence of a target behavior or condition that we built in Section \ref{section:method-data-and-model}. 
+    These pairs serve as the basis for identifying relevant directions in the model's hidden state space. 
+    We employ a combination of methods that have been reported to work well for vector extraction.
+    
+    For a given layer $l \in [L]$, we first compute the hidden states for both positive and negative examples in our contrastive pairs. 
+    Let $\mathbf{H}_l^+$ and $\mathbf{H}_l^-$ represent all hidden states $\mathbf{h}_l$ for positive $\mathcal{D}^{+}$ and negative $\mathcal{D}^{-}$ examples respectively at layer $l$. 
+    The computation of these hidden states differs between behavior vectors and condition vectors, as illustrated in Figure \ref{fig:contrast_figures}. 
+    For behavior vectors, we take the average hidden states for suffixes of each example. 
+    For condition vectors, we take the average hidden states for all tokens of each example to capture a more holistic representation of the input.
+    
+    We then mean-center $\mathbf{H}_l^+$ and $\mathbf{H}_l^-$, following the ideas from \citet{tan2024analyzing, jorgensen2023improving} and apply Principal Component Analysis following \citet{ball2024understanding, adila2024discovering, zou2023representation}. 
+    The first principal component resulting from this process becomes our behavior/condition $\mathbf{vector}_l$ for layer $l$. 
+    This process is repeated for each specified layer, resulting in a set of layer-specific steering vectors $\{\mathbf{vector}_l \mid l \in L\}$.
+    The extraction of vectors can be expressed as below, where $\text{PCA}(\cdot)$ represents the operation of extracting the first principal component:
+
+    $$
+        \mathbf{vector}_l = \text{PCA}(\mathbf{H}_l^+ - \mathbf{\mu}_l , \mathbf{H}_l^- - \mathbf{\mu}_l) 
+    $$
+    
+    The PCA input $(\mathbf{H}_l^+ - \mathbf{\mu}_l , \mathbf{H}_l^- - \mathbf{\mu}_l)$ is a matrix of mean-centered examples, with each row alternating positive ($\mathbf{h}_1^+ - \mathbf{\mu}_l$) and negative examples ($\mathbf{h}_1^- - \mathbf{\mu}_l$). 
+    Here, $\mathbf{\mu}_l = (\mathbf{H}_l^+ + \mathbf{H}_l^-)/2$ is the mean activation all examples $\mathbf{H}_l^+$ and $\mathbf{H}_l^-$. 
+    This centers the data cloud, ensuring the principal components are computed relative to this center rather than being influenced by any overall offset in the data.
+    The mean-centered positive and negative examples are alternatively concatenated and passed to PCA, which computes the direction of maximum variance. 
+    This direction, representing the most significant distinction between positive and negative examples, becomes our $\mathbf{vector}_l$ for layer $l$.
+
+\clearpage
+
+
+\section{Conditioning Refusal: Selectively Steering on Harmful Prompts}
+
+\label{section:conditioning}
+    In this section, we explore the basic use of conditional steering by steering a model to refuse harmful prompts while complying with harmless ones. 
+    Apart from demonstrating that a language model can be conditioned from inside on the fly, we also share some key properties of conditional steering.
+
+    \textbf{Experimental setup.} \hspace{1mm} 
+    To obtain our contrast dataset ($\mathcal{D}^{+}$, $\mathcal{D}^{-}$) on the harmful condition, we started by machine-generating 90 harmful prompts for each of the 45 harm categories as identified by \citet{xie2024sorry}.
+    We use these 4,050 synthetically generated harmful prompts as our $\mathcal{D}^{+}_{\text{harmful}}$.
+    For each of these harmful prompts, we randomly sample a benign instruction from the Alpaca dataset to create $\mathcal{D}^{-}_{\text{harmless}}$. 
+    Following the process outlined in Section \ref{section:vector-extraction}, we then extract the harmful condition vector $\mathbf{c}_{\text{harmful}}$.
+    We then use a grid search algorithm to identify the best combination of threshold $\theta$, layer $l$, and comparison direction ($>$ or $<$) that best separates the two classes of training data. 
+    This concept is illustrated in Figure \ref{fig:conditioning-refusal-1}d, where we perform the condition checking operation at layer 7 and activate the behavior vector $\mathbf{v}_{\text{refusal}}$ when $\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h})$ was smaller than 0.048.
+
+    \begin{figure}[h] 
+        \begin{center}
+            \includegraphics[width=\textwidth]{figures/result.png}
+        \end{center}
+        \caption{\textbf{Conditioning behavior from inside.} (a)-(c): T-SNE of prompt embeddings and refusal probability maps for base, activation steered, and conditionally steered models. (d): $\text{sim}(\mathbf{h}, \text{proj}_{\mathbf{c}} \mathbf{h})$ across layers 5-7 for $\mathcal{D}^{+}_{\text{harmful}}$ and $\mathcal{D}^{-}_{\text{harmless}}$. Highlighted portions indicate 25th-75th percentiles. Model: \textsc{Hermes 2 Pro}.}
+        \label{fig:conditioning-refusal-1}
+    \end{figure} 
+
+    \textbf{Result: Activation steering can be used to induce conditional behaviors.} \hspace{1mm} 
+    We test the conditional activation steering performance on 500 unseen Alpaca (harmless) and 450 unseen Sorry-Bench (harmful) test sets.
+    The results are presented in Figure \ref{fig:harmful-harmless-refusal} with a subset of the data in Table \ref{tab:conditioning-refusal-1}. 
+    Across all seven tested models, we observe that conditioning a behavior vector $\mathbf{v}_{\text{refusal}}$ on condition vector $\mathbf{c}_{\text{harmful}}$ selectively increases refusal rates for harmful content while leaving harmless prompt refusal rates largely unchanged. 
+    In contrast, simply adding a behavior vector $\mathbf{v}_{\text{refusal}}$ like standard activation steering increased refusal rates indiscriminately across all prompts. 
+    Figures \ref{fig:conditioning-refusal-1}a-c demonstrates how the conditioning operation partitions the prompt space. 
+
+    \begin{wrapfigure}{r}{0.46\textwidth}
+        \begin{center}
+            \includegraphics[width=0.46\textwidth]{figures/duality.png}
+        \end{center}
+        \caption{\textbf{Duality and modulation properties.} (a)$\rightarrow$(d): Flipping the comparison direction (from $<$ to $>$) intervenes on the exact complement set of inputs. (a)$\leftrightarrow$(b)$\leftrightarrow$(c): one could progressively loosen or tighten the safety guardrail by changing $\theta$. Model: \textsc{NeuralDaredevil}.}
+        \label{fig:properties}
+    \end{wrapfigure}
+
+    \textbf{Property: Duality.}
+    As seen in Figure \ref{fig:conditioning-refusal-1}d, this conditioning process is systematic in nature as we can manually choose the point of intervention.
+    One consequence of this is that conditioning exhibits a dual nature: flipping the comparison direction (from $<$ to $>$ or vice versa) results in intervening on the exact complement of the original set of hidden states that triggered the condition.
+    This duality enables complementary control over the model's behavior, allowing one to not only condition the model to refuse harmful prompts but also, if desired, to selectively refuse harmless prompts while complying with harmful ones. See Figure \ref{fig:properties}d.
+    
+
+    \textbf{Property: Modulation.}
+    Our steering approach offers flexible control rather than being uniform across all contexts, with the threshold $\theta$ modulating the required alignment between the input and the harm direction defined in $\mathbf{c}_{\text{harmful}}$.
+    In Figures \ref{fig:properties}a-c, using the $<$ comparison, lowering $\theta$ narrows the range of hidden states triggering the condition while raising it broadens this range.
+    This property allows us to adjust the model's sensitivity to potentially harmful content.
+    While this offers the potential for finer condition control, we do not explore it further in this study.
+ 
+
+    \begin{figure}[t!]
+    \begin{minipage}{0.55\linewidth}
+        \begin{center}
+            \captionof{table}{Refusal rate (\%) of conditionally steered models vs. reference models. ``Discrepancy'' shows the difference between harmful and harmless percentages. Arrows indicate a change from the base model. References show how the top safety-aligned models would behave on the same test set.}
+            \label{tab:conditioning-refusal-1}
+            \resizebox{1.0\textwidth}{!}{
+            \renewcommand{\tabcolsep}{0.5mm}
+            \renewcommand{\arraystretch}{1.0}
+            \begin{tabular}{l c c c c c }
+                \toprule
+                \multirow{2.5}{*}{\textbf{Prompt}}
+                &\multicolumn{2}{c}{\textbf{Reference}$^{*,**}$}
+                &\multicolumn{3}{c}{\textbf{CAST, $\mathbf{v}_{\text{refusal}}$ on $\mathbf{c}_{\text{harmful}}$}}\\
+                \cmidrule(lr){2-3} \cmidrule(l){4-6}
+                
+                &\textsc{A}
+                &\textsc{B}
+                &\textsc{Qwen 1.5 Chat} 
+                &\textsc{OLMo SFT} 
+                &\textsc{Hermes 2 Pro}\\
+                \cmidrule(r){1-1} \cmidrule(lr){2-2} \cmidrule(lr){3-3} \cmidrule(lr){4-4} \cmidrule(lr){5-5} \cmidrule(lr){6-6}
+                
+                Harmful     &76.2  &88.4  &$\textbf{90.7}\leftarrow45.8$ &$\textbf{86.2}\leftarrow53.1$&$\textbf{83.3}\leftarrow19.3$\\
+                Harmless    &2.00  &3.00  &$\textbf{2.20} \leftarrow0.00 $ &$\textbf{6.00} \leftarrow5.20 $&$\textbf{2.40} \leftarrow1.00 $\\
+                \midrule
+                
+                Discrepancy &74.2  &85.4  &$\textbf{88.5}\leftarrow45.8$ &$\textbf{80.2}\leftarrow47.9$&$\textbf{80.9}\leftarrow18.3$\\
+                \bottomrule             
+            \end{tabular} 
+            }
+        \end{center}
+        \hspace{2mm}{\scriptsize \textit{*Reference A: \textsc{LLaMA3.1 Inst 8B}. Reference B: \textsc{LLaMA2 Chat 13B}.} \par}
+        
+        \hspace{2mm}{\scriptsize \textit{**These are just examples of safe behaviors. Reference models might have\\\phantom{**}been aligned using different harm taxonomies.} \par}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.43\linewidth}
+        \begin{center}
+            \centerline{\includegraphics[width=0.95\linewidth]{figures/linearity.png}}
+        \end{center}
+        {\scriptsize \textit{*Showing \textsc{Qwen 1.8B}, \textsc{Danube 4B}, \textsc{OLMo 7B}} \par}
+        \captionof{figure}{\textbf{Saturation and linear time scaling.} \quad (a): Performance of conditional steering plateaus. (b): Condition vector extraction time increases linearly with sample size (y-axis is a log scale).}
+        \label{fig:properties-2}
+    \end{minipage}
+    \end{figure}
+
+    \textbf{Property: Saturation.}
+    Unlike most weight optimization methods, where performance often scales with increased data volume \citep{das2024provably, metcalf2024sample, ansell2024scaling}, conditional activation steering tends to reach a performance plateau relatively quickly.
+    As shown in Figure \ref{fig:properties-2}a, the method's effectiveness stabilizes after a certain point.
+    This saturation might be attributed to the fact that conditional steering leverages the model's existing representations.
+    Consequently, performance appears more dependent on the model's inherent capacity to represent certain concepts and how well the chosen data instances represent the target concept rather than on the sheer volume of conditioning data.
+    Notably, the method also exhibits linear time scaling property (Figure \ref{fig:properties-2}b). 
+    The condition vector extraction time increases linearly with the number of samples, as this process is primarily determined by the number of inferences the model must make for us to record hidden states.
+
+
+\section{Programming Refusal: Logical Composition of Refusal Condition}
+
+\label{section:programming}
+    Moving beyond the general concept of refusing \textit{harmfulness}, we demonstrate the creation of more fine-grained condition vectors. 
+    We create five example condition vectors from categories - hate speech, legal opinion, sexual context, health consultation, and crime planning - in \citet{liu2023mm} to explore these ideas. 
+    Our experiments demonstrate the capacity to (1) selectively modulate refusal behaviors for specific conditions and (2) construct complex refusal conditions through the logical composition of several condition vectors, enabling programmatic control over model behavior.
+    
+    \begin{figure}[h] 
+        \begin{center}
+            \includegraphics[width=\textwidth]{figures/fine.png}
+        \end{center}
+        \caption{\textbf{Inducing or suppressing refusal from specific categories.} Each pie chart represents the model's refusal rate for six prompt content types. (a): The leftmost chart shows \textsc{Hermes 2 Pro}'s original refusal rates. Subsequent charts demonstrate adding refusal on specific conditions (e.g., $\mathbf{c}_{\text{sex}} \rightarrow +$ means inducing refusal for sexual content). (b): Refusal can also be removed by subtracting the behavior vector $\mathbf{v}_{\text{refusal}}$.}
+        \label{fig:programming-1}
+    \end{figure} 
+
+    \textbf{Experimental setup.} \hspace{1mm}  
+    We begin by randomly selecting 1,300 base prompts from the Alpaca training set. 
+    Each of these prompts is then paraphrased to incorporate aspects of sexual content $\mathbf{c}_{\text{sex}}$, legal opinions $\mathbf{c}_{\text{legal}}$, hate speech $\mathbf{c}_{\text{hate}}$, crime planning $\mathbf{c}_{\text{crime}}$, or health consultation $\mathbf{c}_{\text{health}}$. 
+    This process results in 1,300 prompts in six categories, including the original benign base Alpaca prompts.
+    We then split this dataset into 700 prompts per category for training and 500 per category for testing.
+    To create a conditioning vector $\mathbf{c}$ for a specific category, we use the 700 $\times$ 5 = 3,500 training prompts from the other five categories as our negative examples ($\mathcal{D}^{-}$). 
+    For the positive examples ($\mathcal{D}^{+}$), we use the 700 training prompts from the target category and repeat them five times to balance the dataset.
+    
+    \textbf{Application: Inducing or suppressing refusal behavior from specific categories.} \hspace{1mm} 
+    We begin by examining our ability to add refusal behavior to specific categories of prompts, starting with a model that exhibits arbitrary refusal behaviors. 
+    Figure \ref{fig:programming-1}a demonstrates that it is indeed possible to induce refusal behavior when a specific condition is met. 
+    This extends the concepts explored in Section \ref{section:conditioning} to more fine-grained categories, showing successful selective refusal.
+    Furthermore, as shown in Figure \ref{fig:programming-1}b and consistent with findings from \citet{arditi2024refusal}, we can also remove refusal behavior from certain classes of prompts. 
+    This is achieved by simply reversing the signs of the behavior vector $\mathbf{v}_{\text{refusal}}$.
+    Beyond refusal, most inference-time steering techniques can be conditioned using condition vectors as a modulation for various characteristics in language model outputs \citep{konen2024style}.
+
+    \begin{figure}[h] 
+        \begin{center}
+            \includegraphics[width=\textwidth]{figures/multi.png}
+        \end{center}
+        \caption{\textbf{Logical composition of conditions.} 
+        (a) Effects of combining (OR $\lor$) condition vectors on refusal rates. 
+        (b) Complex compositions, including simultaneous removal ($-$) and induction ($+$) of refusal behaviors. 
+        (c) Graphical illustration to ease understanding of outcomes under multiple rules: Rule 1 activated (left), no rules met (middle), Rule 2 met (right). Condition layers perform checking; behavior layers apply refusal vectors.
+        }
+        \label{fig:programming-2}
+    \end{figure} 
+
+    \textbf{Application: Logical composition of condition vectors.} \hspace{1mm} 
+    As introduced in Section \ref{section:method-cast}, condition vectors can be logically combined to create complex refusal conditions.
+    For instance, to induce refusal in two categories, such as hate speech and legal opinions, one could implement a rule like \textit{if $\mathbf{c}_{\text{hate}}$ or $\mathbf{c}_{\text{legal}}$ then +$\mathbf{v}_{\text{refusal}}$}, as illustrated in Figure \ref{fig:programming-2}a. 
+    This multi-conditioning mechanism can also reinforce existing model refusal conditions, enhancing robustness against harmful prompts. 
+    The second pie chart in Figure \ref{fig:programming-2}b demonstrates this with \textsc{LLaMA 3.1 Inst}, where we can augment the model's existing refusal of crime planning and hate speech with additional conditions for legal and health queries while maintaining responsiveness to benign prompts.
+    Each condition vector $\mathbf{c}$ may have different optimal condition points, as different layers might best separate specific conditions. 
+    Consequently, condition checking might occur at various layers during inference, as shown in Figure \ref{fig:programming-2}c. 
+    It's also possible to completely change the original model's refusal map by simultaneously removing existing refusal directions and inducing new ones (Figure \ref{fig:programming-2}b) through multiple rules. However, we generally find that this approach can reduce the effectiveness of induced refusal directions, as certain suppressing conditions may conflict with newly induced refusal conditions.
+
+    \begin{figure}[h] 
+        \begin{center}
+            \includegraphics[width=\textwidth]{figures/multi-2.png}
+        \end{center}
+        \caption{\textbf{Constraining responses to one domain.} 
+        (a) Constraining response to only the target condition by adding refusal to all other categories of instructions using the flipped comparison direction ($\neg$) (see duality property).
+        (b) Constraining response generalizes well to unseen categories of prompts as we are adding refusal to anything that does not satisfy the target condition.
+        (c) Constraining response performance vs. average semantic distance from the target category's train set to other categories' test sets. Higher semantic distance correlates with better constraining effectiveness across seen and unseen categories.
+        }
+        \label{fig:programming-3}
+    \end{figure} 
+
+    \textbf{Application: Constraining model responses to specific domains.} \hspace{1mm} 
+    Connecting from our earlier point on the logical composition of condition vectors, we can conditionally steer models to respond only to specific types of prompts. 
+    This approach is particularly useful when the goal is to make a specialized model respond exclusively to specific categories, such as creating a health assistant \citep{cheong2024not, xie2024me}. 
+    Instead of creating conditions for all non-health categories to refuse, we can utilize the duality property discussed in Figure \ref{fig:properties}. 
+    We could (1) create a condition vector (e.g., $\mathbf{c}_{\text{health}}$) and (2) flip the comparison direction to add refusal on the exact complement set of inputs (e.g., $\neg \mathbf{c}_{\text{health}}$). 
+    As shown in Figure \ref {fig:programming-3}, this constrains the model to only respond to a category and refuse all others. 
+
+    We extended our investigation to examine whether our constraining method remains effective for unseen prompt categories. 
+    To this end, we introduced four additional harm categories from \citet{liu2023mm} that were not part of our original condition vector training setup: gambling, financial advice, privacy violence, and malware generation.
+    As illustrated in Figure \ref{fig:programming-3}b, the effectiveness of domain constraining extends to unseen categories. 
+    This is because our method adds refusal to the complement set of the target category by flipping the comparison direction. 
+    Consequently, it refuses all inputs that do not match the target category's characteristics, regardless of whether they were seen in training.
+    However, we observed performance variations across different setups. 
+    For instance, constraining the model to hate speech (\textit{if $\neg \mathbf{c}_{\text{hate}}$ then +$\mathbf{v}_{\text{refusal}}$}) was more effective in refusing other categories than constraining it to legal opinions (\textit{if $\neg \mathbf{c}_{\text{legal}}$ then +$\mathbf{v}_{\text{refusal}}$}).
+    This brings us to our next point.
+
+    \textbf{Analysis: Constraining response to one category works better for more semantically distinct categories.} \hspace{1mm} 
+    Figure \ref{fig:programming-3}c illustrates this relationship, showing a positive correlation between a category's average semantic distance from others (x-axis) and the effectiveness of constraining to that category, measured by the increase in refusal rate for other categories (y-axis).
+    Using a sentence transformer model, this semantic distance is calculated as the average cosine distance between the embeddings of the target category's training prompts and the test prompts of all other categories.
+    This explains why constraining the model to hate speech is more effective than constraining it to legal opinions when it comes to refusing other categories.
+    Hate speech, being more semantically distinct from other categories, allows for clearer boundaries and, thus, more effective constraining.
+
+    As noted in previous literature on behavior steering, prompting alone fails to provide an effective alternative for several reasons. 
+    Unlike CAST, prompting lacks the ability to forcefully condition the model, offering only weak, coarse-grained control that may paradoxically increase unwanted content \citep{jang2023can, dekoninck2023controlled}.
+    Our experiments confirm this, with conditional steering consistently outperforming the prompting baseline (red dotted line) across most categories in Figure \ref{fig:programming-3}c. 
+    This baseline represents the average performance when the model is simply prompted to comply with the target condition and refuse other conditions without any conditional steering techniques. 
+
+
+\section{Conclusion}
+
+This paper introduces Conditional Activation Steering (CAST), a novel framework for inducing context-dependent behaviors in large language models through principled manipulation of their internal representations. By extending existing activation steering techniques with the introduction of condition vectors, CAST enables fine-grained control over model behavior without the need for fine-tuning or extensive computational resources.
+
+    \begin{figure}[h] 
+        \begin{center}
+            \includegraphics[width=0.9\textwidth]{figures/last.png}
+        \end{center}
+        \caption{Key operations introduced in this paper. (a)$\rightarrow$(b): adding a refusal condition. (a)$\rightarrow$(c): Adding more refusal conditions. (a)$\rightarrow$(d): Flipping the condition comparison direction to refusing all other categories except the target. Black lines indicate imaginary, intended points of intervention.}
+        \label{fig:programming-4}
+    \end{figure} 
+
+Figure \ref{fig:programming-4} demonstrates key operations that we introduced: the ability to flip condition comparison directions, allowing the model to refuse all categories except a target one, and the capacity to add multiple refusal conditions to induce or remove behaviors. These operations help tailor model behavior to specific requirements. 
+Beyond this flexibility, the framework offers several advantages. 
+
+Firstly, it allows for quick selective refusal of harmful content while maintaining model functionality on benign inputs, addressing a critical challenge in alignment research. Secondly, CAST enables the creation and logical composition of multiple condition vectors, facilitating the implementation of complex behavioral rules. Lastly, it can effectively constrain model responses to specific domains, with its efficacy correlating to the semantic distinctiveness of the target category. By leveraging the model's existing representations, CAST achieves performance comparable to or exceeding that of models specifically aligned for safety while significantly reducing computational overhead. This efficiency, combined with the ability to modify and compose behavioral rules rapidly, offers significantly enhanced flexibility in adapting model behavior to varying requirements.
+
+
+

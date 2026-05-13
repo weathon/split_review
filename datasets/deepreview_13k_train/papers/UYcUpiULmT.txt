@@ -1,0 +1,409 @@
+\title{Generalizable Motion Planning via Operator Learning}
+
+\begin{abstract}
+    In this work, we introduce a planning neural operator (PNO) for predicting the value function of a motion planning problem. We recast value function approximation as learning a single operator from the cost function space to the value function space, which is defined by an Eikonal partial differential equation (PDE). 
+    Therefore, our PNO model, despite being trained with a finite number of samples at coarse resolution, inherits the zero-shot super-resolution property of neural operators. %any desired resolution. 
+    We demonstrate accurate value function approximation at $16\times$ the training resolution on the MovingAI lab's 2D city dataset and compare with state-of-the-art neural value function predictors on 3D scenes from the iGibson building dataset. 
+    Lastly, we investigate employing the value function output of PNO as a heuristic function to accelerate motion planning. We show theoretically that the PNO heuristic is $\epsilon$-consistent by introducing an inductive bias layer that guarantees our value functions satisfy the triangle inequality. With our heuristic, we achieve a $30\%$ decrease in nodes visited while obtaining near optimal path lengths on the MovingAI lab 2D city dataset, compared to classical planning methods ($A^\ast$, RRT$^\ast$). 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Classical tools for motion planning in complex environments face performance degradation as the dimension of the environment increases. Many modern approaches to motion planning introduce neural network models to enhance computational efficacy \citep{lehnert2024a}. Recent connections have been made between the motion planning and scientific machine learning communities in the context of solving partial differential equations (PDEs). In particular, the motion planning problem can be formulated from an optimal control perspective leading to the Eikonal PDE, 
+a simplified Hamilton-Jacobi-Bellman (HJB) PDE whose solution yields the optimal value function. Recent works, including \citet{ni2023ntfields}, \citet{WAHEED2021104833}, have explored solving the Eikonal equation via physics informed neural networks (PINNs) with the advantage that no expert training data is needed. However, as with classical PINNs, these approaches require retraining for each individual environment and, therefore, are computationally intractable for recomputing the solution quickly in dynamic environments governing the real-world. 
+
+In this work, we reformulate the solution to the Eikonal equation as an operator learning problem between function spaces. This reformulation enables the training of a single neural operator which maps an entire space of cost functions, with each cost function representing a separate environment, to a corresponding space of value functions. We design a new neural operator architecture, called Planning Neural Operator (PNO), that learns the solution operator of the Eikonal PDE. PNO approximates the optimal value function that can then be utilized for motion planning. Due to our architecture design, PNO can generalize to new environments with different obstacle geometries without retraining. Furthermore, we capitalize on the resolution invariance property of neural operators, enabling us to train using coarse resolution data (which is efficient) and apply the learned neural operator on new test maps with $16\times$ the training data resolution. This is illustrated in Fig. \ref{fig:nycSuperRes}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth,trim={0 4pt 0 0}, clip]{figures/superResExampleNYC.pdf}
+    \caption{Example of super-resolution capabilities of PNO for motion planning on a map of NYC. The operator is trained on a dataset of resolution $64\times64$ and the examples shown here (resolutions $256\times 256$, $512\times 512$, and $1024 \times 1024$) were not seen during training. See Sec.~\ref{sec:learning} for details.}
+    \label{fig:nycSuperRes}
+\end{figure}
+Our contributions can be summarized as follows. 
+\begin{enumerate}[label=(\alph*)]
+    \item We formulate the motion planning problem as an optimal control problem whose value function satisfies the solution to the Eikonal PDE. We then prove to arbitrarily tight accuracy, the existence of a neural operator approximation to the Eikonal PDE solution operator.
+    
+    \item We design a Planning Neural Operator (PNO) to approximate the solution operator of the Eikonal PDE and enable generalizable motion planning. By design, the architecture is (i) resolution invariant, (ii) encodes obstacle geometries into the learned weight space to enable generalization across different environments, and (iii) introduces a projection layer satisfying the triangle inequality to enable generalization across goal positions.  
+    
+    \item We develop four experiments to highlight PNO's advantages, including zero-shot super resolution yielding $\sim 20 \times$ speedups on the Moving AI city dataset, optimal path planning on real-world 3D iGibson building environments, and deployment as a heuristic function in $A^\ast$ reducing the expanded nodes by $33\%$ while maintaining near-optimal paths.
+\end{enumerate}
+
+\textbf{Related work.}
+This work builds on ideas from two fields -- PDEs and motion planning. Thus, we briefly review popular motion planning approaches while identifying connections between motion planning and PDEs. We then conclude with a brief introduction to operator learning. 
+\textbf{Motion planning.}
+Motion planning techniques can classically be split into two categories -- sample-based algorithms and search-based algorithms. Sampling-based motion planners generate random samples in configuration space to construct graph structures whose edges connect to form collision-free paths. The two most widely known algorithms are the probabilistic roadmap (PRM) \citep{508439}, which constructs a random graph in free space, and the rapidly-exploring random tree (RRT) \citep{10.5555/1213331,doi:10.1177/0278364911406761}, which grows a tree stemming from a single start node to find feasible paths. Since the development of these methods, there have been substantial improvements to the efficiency using ideas such as biased sampling with heuristic functions \citep{Gammell_2015,6942976}, parallelization \citep{sundaralingam2023curoboparallelizedcollisionfreeminimumjerk}, domain decomposition \citep{10.1109/ICRA48506.2021.9561104}, and potential fields \citep{qureshi_2015}.  We refer readers to \citet{annurev:/content/journals/10.1146/annurev-control-061623-094742} for a comprehensive review. 
+
+In contrast with sampling-based planners, search-based planners trade speed for accuracy to finding solutions of minimal cost. The most well known approaches are Dijkstra's algorithm \citep{dijkstra1959note} and A$^\ast$ \citep{4082128,ara_star}, which prioritizes the search order using a heuristic function. More recent search-based planners include \citet{5509685}, \citet{8264768} which plan in higher dimensional spaces using motion primitives. Lastly, we briefly mention planners based on Eikonal solvers such as \citet{Sethian1996Fast}, \citet{doi:10.1177/0278364915577958}, \citet{6582543}, \citet{1513161}. These approaches, instead of planning by exploring nodes in configuration space, aim to solve the Eikonal PDE yielding an optimal function for the resulting environment and then perform corresponding gradient descent.  
+Despite the success of classical planning methods, they suffer from computational limitations when scaling to higher dimensions. Thus, with the recent success of deep learning, neural motion planners (NMPs) have exploded in popularity for reducing the computational burden of motion planning. For example, the earliest works such as value iteration networks (VIN) \citep{NIPS2016_c21002f4} and motion planning networks (MPN) \citep{9154607} as well as more recent approaches such as \citet{8954347} and \citet {fishman2022motion} attempt to plan completely from neural networks designs. Additionally, many approaches instead augment classical algorithms. For example, \citet{Chen2020Learning}, \citet{zhang2022learningbased} speedup the collision checker in RRT and \citet{ichter2019learningsamplingdistributionsrobot}, \citet{9037111} learn sampling biases. Please refer to \citet{McMahon_2022} for a comprehensive review. Other approaches use gradient information directly from either Neural Distance Fields \citep{ortiz2022isdfrealtimeneuralsigned,liu2022regularizeddeepsigneddistance} or Neural Radiance Fields (NeRF) \citep{adamkiewicz2022visiononlyrobotnavigationneural}. Lastly, we mention two approaches, which are closely related to our formulation. The first, NTFields \citep{ni2023ntfields} learns a PINN for motion planning based on the Eikonal equation, but requires retraining for new environments. Meanwhile \citet{li2022learning} learns implicit functions for planning but has no guarantees of obstacle avoidance and pays large startup costs for data generation. 
+
+\textbf{Operator learning.}
+The goal of operator learning is the design of models for approximating infinite-dimensional mappings across function spaces. Neural operators were first introduced in a seminal paper by \citet{392253} that designed the first architecture and a corresponding universal operator approximation theorem for approximating PDE solutions. This work was recently rediscovered and extended using modern neural network models under the DeepONet framework \citep{Lu2021DeepONet, lu2021advectionDeepONet, 10.1093/imatrm/tnac001}. Almost concurrently, a new operator learning architecture, built on the Fourier transform was introduced in \citet{li2021fourier,JMLR:v24:21-1524,10.5555/3546258.3546548} for learning PDE solutions. Since, there have been a series of expansive papers addressing numerous challenges from non-uniform geometries \citep{liu2023domain, JMLR:v24:23-0064, NEURIPS2023_70518ea4, 10.1162/neco_a_01647} to architectural limitations \citep{seidman2022nomad, YOU2022111536,gupta2021multiwaveletbased, pmlr-v202-hao23c, furuya2023globally} of the original works. Furthermore, neural operators have been employed in an eclectic range of applications spanning, but not limit to, weather forecasting \citep{10.1145/3592979.3593412}, material modeling \citep{YOU2022115296}, seismic wave propagation \citep{10.1785/0320210026}, and control of PDEs \citep{bhan2023neural}. Lastly, from a theoretical perspective, \citet{lanthaler2023nonlocal} unified the neural operator framework, introducing an abstract formulation of the operator learning problem and a corresponding universal approximation theorem. This framework, named the \emph{nonlocal neural operator}, provides universal approximation theorems (see Theorem \ref{thm:nnoUniversalApprox}) for a wide array of architectures, including Fourier neural operator (FNO) and DeepONet.
+
+
+\section{Eikonal PDE formulation of the motion planning problem}
+
+
+
+\subsection{Motion planning as an optimal control problem}
+
+Consider a continuous-time dynamical system with state $\bm{x}(t) \in \mathcal{X} \subset \mathbb{R}^n$, compact state space $\mathcal{X}$, control input $\bm{u}(t) \in \mathcal{U} \subset \mathbb{R}^k$, compact control space $\mathcal{U}$, and dynamics:
+\begin{equation}\label{eq:system}
+    \dot{\bm{x}}(t) =f(\bm{x}(t), \bm{u}(t)).
+\end{equation}
+Given an initial condition $\bm{x}(0) = \bm{x}_0$, we aim to design a control policy $\pi: \mathcal{X} \rightarrow \mathcal{U}$ that maintains the system state $\bm{x}(t)$ in a \emph{safe set} $\mathcal{S} \subset \mathcal{X}$ for all $t$ and drives it to a \emph{goal set} $\mathcal{G} \subset \mathcal{S}$. We formulate this problem through an infinite-horizon first-exit optimal control problem (OCP) as \citet{bertsekas}
+\begin{subequations}  \label{eq:optimalControlProblem}
+\begin{align}
+    \min_{\pi} \;\;&  c_{\tau}(\bm{x}(\tau)) + \int_0^{\tau} c(\bm{x}(t), \pi(\bm{x}(t)))dt  \,,\label{eq:optimalControlProblem1a}\\ 
+    \text{s.t. }\;& \tau =\inf\{t \in \mathbb{R}_{\geq 0} \mid \bm{x}(t) \in \mathcal{G}\}, \label{eq:optimalControlProblem1b} \\
+     & \dot{\bm{x}}(t) = f(\bm{x}(t), \pi(\bm{x}(t)))\,, \; \bm{x}(0) = \bm{x}_0, \label{eq:optimalControlProblem1c} \\ 
+    & \bm{x}(t) \in \mathcal{S}\,,  \;  \forall t,\label{eq:optimalControlProblem1d}
+\end{align}
+\end{subequations}
+where $\tau$ is the \emph{first-exit time}, the smallest time at which the system reaches the goal region $\mathcal{G}$, $c: \mathcal{X} \times \mathcal{U} \to \mathbb{R}$ is the \emph{stage cost function} that measures the quality of the system trajectory, and $c_{\tau}: \mathcal{X} \to \mathbb{R}$ is a \emph{terminal cost function} evaluated when the system reaches the goal region. To ensure the well-posedness of \eqref{eq:optimalControlProblem}, we enforce the following standard assumption \citep{liberzonOC}. 
+
+\begin{assumption}\label{assumption:properPolicy}
+    There exists a policy $\pi: \mathcal{X} \to \mathcal{U}$ such that, for any initial condition $\bm{x}(0) \in \mathcal{S}$, the trajectories of the closed-loop system with $\bm{u}(t) = \pi(\bm{x}(t))$ in \eqref{eq:system}, reach the goal region $\mathcal{G}$ by a finite first-exit time $\tau < \infty$. 
+\end{assumption}
+
+
+
+As standard, the optimal value function $V: \mathcal{X} \to \mathbb{R}$ is the minimum cost attained in \eqref{eq:optimalControlProblem} given by
+\begin{equation}
+    \label{eq:optimalControlValueFunc}
+    V(\bm{x}) := \min_\pi \{ c_{\tau}(\bm{x}(\tau)) + \int_{0}^\tau c(\bm{x}(t), \pi(\bm{x}(t))) dt\},
+\end{equation}
+subject to the constraints in \eqref{eq:optimalControlProblem}. A sufficient condition for optimality is that the function $V$ satisfies the Hamilton-Jacobi-Bellman equation:
+\begin{subequations} \label{eq:optimalControlHJB}
+\begin{align}
+   0 &= \min_{\bm{u} \in \mathcal{U}} \left\{ 
+   \nabla V(\bm{x})^\top f(\bm{x}, \bm{u}) + c(\bm{x}, \bm{u})\right\}, \quad &\forall \bm{x} &\in \mathcal{S} \setminus \mathcal{G}, \label{eq:optimalControlHJB1a}\\ 
+    V(\bm{x}) &= c_{\tau}(\bm{x}), \quad &\forall \bm{x} &\in \mathcal{G}, \label{eq:optimalControlHJB1b}
+\end{align}
+\end{subequations}
+where $\nabla V$ denotes the gradient of $V$. As in \eqref{eq:optimalControlHJB1a}, \eqref{eq:optimalControlHJB1b}, to simplify notation, we omit the time argument for $\bm{x}(t)$ and $\pi(\bm{x}(t))$ in the remainder of the paper.
+
+\subsection{Eikonal equation for optimal motion planning}
+
+In this work, we capitalize on the structure of common motion planning problems to simplify the HJB equation. In practice, one commonly splits the OCP described above into two subproblems: i) a motion planning problem, which determines a reference path from the initial state $\bm{x}(0)$ to the goal region $\mathcal{G}$ without considering the dynamics constraint in \eqref{eq:optimalControlProblem1c}, and ii) a control problem, which determines a control policy for the system to track the planned reference path. We focus on the planning problem, which simplifies the system dynamics to be fully actuated, $\dot{\bm{x}}(t) = \bm{u}(t)$. 
+
+Since a path planned with these simplified dynamics may not be dynamically feasible for the original system, it is common to limit the magnitude of the control input $\bm{u}(t)$. Thus, we constrain the input to an admissible control set $\mathcal{U} = \{\bm{u} \in \mathbb{R}^k |  \|\bm{u}\| = 1\}$ of unit vectors. Finally, when the input magnitude is already constrained by $\mathcal{U}$, it is not necessary to penalize it in the stage cost. Hence, we let $c(\bm{x}, \bm{u}) = c(\bm{x})$ be a control-independent stage cost, and let $c_{\tau}(\bm{x}) = c(\bm{x})$ to simplify the presentation. With all the above simplifications, the optimal control problem in \eqref{eq:optimalControlProblem} reduces to the \emph{optimal motion planning} problem:
+\begin{subequations} 
+\begin{align}
+     \min_{\pi} \;\;& c(\bm{x}(\tau)) + \int_0^{\tau} c(\bm{x}(t)) dt \,,\label{eq:mpProblem1a}\\ 
+     \text{s.t. }& \tau =\inf\{t \in \mathbb{R}_{\geq 0} \mid  \bm{x}(t) \in \mathcal{G}\}, \label{eq:mpProblem1b} \\
+     & \dot{\bm{x}}(t) = \pi(\bm{x}(t))\,, \; \bm{x}(0) = \bm{x}_0, \label{eq:mpProblem1c} \\ 
+    & \bm{x}(t) \in \mathcal{S}, \quad \|\pi(\bm{x}(t))\| = 1,  \quad  \forall t,\label{eq:mpProblem1d}
+\end{align}
+\end{subequations}
+and the associated HJB equation in \eqref{eq:optimalControlHJB} simplifies to:
+\begin{subequations} \label{eq:planningPDE1}
+\begin{align} 
+   0 &= \min_{\bm{u} \in \mathcal{U}} \left\{\nabla V(\bm{x})^\top \bm{u} + c(\bm{x})\right\}, &\forall \bm{x} &\in \mathcal{S} \setminus \mathcal{G}, \label{eq:planningPDE1a}\\ 
+    V(\bm{x}) &= c(\bm{x}), &\forall \bm{x} &\in \mathcal{G}. \label{eq:planningPDE1b}
+\end{align}
+\end{subequations}
+Note that the minimization in \eqref{eq:planningPDE1a} is now linear in $\bm{u}$ with the constraint $\|\bm{u}\| = 1$. The minimizer is readily computable in closed-form $\bm{u} = - \frac{\nabla V(\bm{x})}{\|\nabla V(\bm{x})\|}$, yielding a PDE in the Eikonal class:
+\begin{subequations}\label{eq:eikonalProblem}
+\begin{align} 
+    \|\nabla V(\bm{x})\| &= c(\bm{x}),&\forall \bm{x} &\in \mathcal{S} \setminus \mathcal{G},  \label{eq:eikonalPDE1a}\\ 
+     V(\bm{x}) &= c(\bm{x}), &\forall \bm{x} &\in \mathcal{G}. \label{eq:eikonalPDE1b}
+\end{align}
+\end{subequations}
+
+
+
+\subsection{Properties and universal approximation of the Eikonal solution operator}
+The solution to the Eikonal PDE in \eqref{eq:eikonalProblem} can be viewed as an infinite-dimensional nonlinear operator $\Psi$ that maps cost functions $c(\bm{x})$ into corresponding value function solutions $V(\bm{x})$. Given an arbitrary cost function $c$, there is no known analytical representation for the operator $\Psi(c) = V$ and in fact, $V$ is not guaranteed to be continuous. 
+
+In this work, we ask is it possible to learn an approximation to the nonlinear operator $\Psi$ and, if so, how can we design a resolution invariant neural network architecture to approximate $\Psi$? To do so, we begin by theoretically justifying our methodology, proving the existence of such a neural operator approximation under mild regularity assumptions. 
+We begin by recalling the Universal Approximation Theorem of Neural Operators \citep[Theorem 2.1]{lanthaler2023nonlocal}, which provides the foundation for showing the existence of a neural operator $\hat{\Psi}$ that is an $\epsilon$-close approximations to a nonlinear operator $\Psi$. A \emph{neural operator} $\hat{\Psi}$ is a neural network architecture consisting of a lifting neural network, a kernel approximation neural network, and a projection neural network. %In practice, there are a different ways to design these neural operators, and we refer the reader to \citet{li2021fourier} and \citet{Lu2021DeepONet} for two popular architectures. 
+ 
+ 
+
+Following the universal approximation theorem, there are two challenges to establishing the existence of a neural operator $\hat{\Psi}$ for approximating the Eikonal PDE solution. First, we require that the domain is a compact set of continuous functions and second we require continuity of the operator. Let $\mathcal{F}_c$ be the function space of costs $\mathcal{X} \to \mathbb{R}$, namely $c(\cdot) \in \mathcal{F}_c$. Likewise, let $\mathcal{F}_v$ be the function space of value functions $\mathcal{X} \to \mathbb{R}$, that is $V(\cdot) \in \mathcal{F}_v$. To ensure well-posed solutions of Problem \eqref{eq:eikonalProblem}, we require the following assumption. 
+\begin{assumption}[Continuity and uniform boundedness of cost function space] 
+\label{assumption:continuity_boundedness}
+The cost function space $\mathcal{F}_c$ is uniformly equicontinuous. Further, there exists a constant $\theta > 0$ such that
+\begin{equation}
+    \inf_{\bm{x} \in \mathcal{X}} c(\bm{x}) > 1/\theta, \quad \sup_{\bm{x} \in \mathcal{X} } c(\bm{x}) < \theta\,, \quad  \forall c \in \mathcal{F}_c\,.
+\end{equation}
+\end{assumption}
+The set $\mathcal{F}_c$ needs to be equicontinuous to ensure the continuity of the operator $\Psi$. The uniform positivity of the cost $c$ is required to ensure the existence and uniqueness of viscosity solutions to the Eikonal PDE. Lastly, we note by the continuity of cost functions in Assumption \ref{assumption:continuity_boundedness} and the Arzel\'a Ascoli theorem \citep[Theorem 4.43]{folland}, $\mathcal{F}_c$ is compact. We are now ready to show the existence of a neural operator approximation to $\Psi$.   
+
+ 
+\begin{theorem} \label{thm:nopExistence} 
+Let Assumptions \ref{assumption:properPolicy}, \ref{assumption:continuity_boundedness} hold and consider $\Psi:\mathcal{F}_c \to \mathcal{F}_v $ as the solution to \eqref{eq:eikonalProblem}. 
+Then, for any $\epsilon > 0$, there exists a neural operator $\hat{\Psi}: \mathcal{F}_c \rightarrow \mathcal{F}_v$ such that 
+\begin{equation} \label{eq:nopError}
+    \sup_{c \in \mathcal{F}_c} \|\Psi(c) - \hat{\Psi}(c)\| \leq \epsilon\,.
+\end{equation} 
+\end{theorem}
+
+ While this shows the \emph{existence} of a neural operator for approximating the solution of the Eikonal PDE, it does not tell us how to design the neural operator $\hat{\Psi}$. This is the focus of the next section.
+
+
+
+
+
+\section{Designing Neural Operators for Eikonal PDEs}
+
+
+We introduce a new neural operator architecture, which we call \emph{Planning Neural Operator} (PNO), to approximate the solution operator $\Psi(c) = V$ of the Eikonal PDE in \eqref{eq:eikonalProblem}. 
+We ensure that our architecture achieves three goals: (i) invariance to resolution differences between train and test maps, (ii) generalization across environment geometries, and (iii) generalization across goal positions.
+To achieve property (i), we employ the popular resolution-invariant Fourier neural operator (FNO) architecture \citep{li2021fourier} with two key extensions. First, to enable generalization across environments, we \emph{hard encode} the environment geometries into the operator structure. Second, to achieve goal generalization, we redesign the output layer of the FNO model to ensure that the predicted value function satisfies the triangle inequality. Assuming that the goal set is a singleton $\mathcal{G} = \{\bm{g}\}$, to simplify the presentation, let $V(\bm{x},\bm{g})$ denote the solution to \eqref{eq:eikonalProblem} with goal $\bm{g}$. By the principle of optimality \citep{bellman}, the value function $V$ satisfies:
+\begin{equation}
+    V(\bm{x}, \bm{g})  \leq V(\bm{x}, \bm{y}) + V(\bm{y}, \bm{g}) \,, \quad \forall \bm{x}, \bm{y}, \bm{g} \in \mathcal{S}\,.
+\end{equation}
+Thus, we seek a neural operator $V(\bm{x}, \bm{g}) = (\hat{\Psi}(\bm{c}; \bm{g}))(\bm{x})$ that encodes this property of the value function. Next, we review the structure of the FNO model, which ensures property (i). Then, we present our PNO architecture that extends the FNO model to enable properties (ii) and (iii).
+
+\subsection{Review of FNO and DAFNO}
+An FNO model consist of three components: (1) a lifting neural network that maps to high dimensional space, (2) a series of Fourier layers, and (3) a projection neural network to the target resolution. It can be viewed as a mapping $\hat{\Psi} = Q \circ L_M \circ \cdots \circ \circ L_1 \circ R$, where $R(c(\bm{x}),\bm{x})$ is the lifting network, $L_m$ for $m = 1,\ldots,M$ are the hidden Fourier layers, and $Q$ is the projection network. The Fourier layers consist of applying a Fast Fourier transform (FFT) to the input, multiplying that transform by a learnable weight matrix and then transforming back via an Inverse FFT. The key idea is that, by learning in frequency space, the operator is resolution invariant as one can project any desired resolution to and from a pre-specified number of Fourier modes. 
+
+However, to perform a Fourier transform, the FNO model needs a rectangular domain and thus cannot be applied to non-uniform geometries. Recently, a new model, titled Domain Agnostic FNO (DAFNO) \citep{liu2023domain} addressed this issue. DAFNO circumscribes the non-uniform geometry of the solution operator into a rectangle and then encodes, in the Fourier layer, where the true solution domain is active. To achieve such an encoding, DAFNO explicitly introduces an indicator matrix into Fourier layer multiplication explicitly forcing the points in the domain padding to $0$. We take inspiration from this idea to explicitly encode the \emph{obstacles} in the motion planning problem using an indicator function. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.99\linewidth]{figures/planningArch.pdf}
+    \caption{PNO network architecture. The input to a PNO is a binary occupancy grid, which is transformed into a sign distance function (SDF) via an independently trained FNO. This, along with the original binary map is passed to a series of modified FNO layers which hard encode the obstacles. Finally, the result, along with the goal, is then fed to a projection layer (ensuring satisfaction of the triangle inequality) obtaining the final value function prediction.}
+    \label{fig:planOpArch}
+\end{figure}
+\subsection{PNO architecture: generalizing across environments}
+
+The PNO model maps a cost function to the corresponding value function of the motion planning problem. We consider a minimum-time motion planning problem by choosing the cost function as
+\begin{equation}
+    c(\bm{x}) = \begin{cases}
+    1 & \bm{x} \in \mathcal{S}, \\ 
+    \infty & \bm{x} \in \mathcal{X} \backslash {S},
+    \end{cases} \label{eq:cost}
+\end{equation}
+where we penalize the unsafe set with infinite cost. In practice, to avoid numerical instability, we use $1/c(\bm{x})$, or a binary occupancy map as the input function. We, then, employ a neural network for our lifting layer as in FNO. To achieve property (ii), we ensure that PNO explicitly captures the obstacle configuration of the environment. That is, we \emph{hard encode} the obstacle locations in the Fourier layer of our architecture. To do so, taking inspiration from DAFNO, we modify the Fourier layer by multiplying the learnable weight matrix with the following smoothed indicator function
+\begin{equation}\label{eq:indicator_approximation}
+    \tilde{\chi}(\bm{x}) := \tanh(\beta d_\mathcal{S}(\bm{x}))(1/c(\bm{x}) - 0.5) + 0.5\,.
+\end{equation}
+where $\beta$ is a smoothing hyperparameter and $d_\mathcal{S}$ is the sign distance function (SDF) given by
+\begin{equation}\label{eq:sdf}
+    d_\mathcal{S}(\bm{x}) = \begin{cases}
+      \displaystyle  \phantom{+}\inf_{\bm{y} \in \partial \mathcal{S}} \|\bm{x}-\bm{y}\|, & \text{if } \bm{x} \in \mathcal{S} \\ 
+        \displaystyle -\inf_{\bm{y} \in \partial \mathcal{S}} \|\bm{x}-\bm{y}\|, & \text{if } \bm{x} \notin \mathcal{S}\,. 
+    \end{cases} 
+\end{equation}
+where $\partial \mathcal{S}$ is the boundary of $\mathcal{S}$. Multiplication of the Fourier layer weights by $\tilde{\chi}$ achieves two goals. First, it ensures that the indicator approximation in \eqref{eq:indicator_approximation} is continuous and thus retains the guarantees of Theorem \ref{thm:nopExistence}. Second, for each environment, PNO ignores the unsafe space in the weight matrix multiplication, which greatly improves its ability to generalize to new obstacle configurations. 
+
+Computing the SDF in the smoothing function  \eqref{eq:indicator_approximation} itself can be computationally challenging, especially in large motion planning problems. However, note a key observation that \emph{a SDF $d_{\mathcal{S}}(\bm{x})$ is itself a solution to an Eikonal PDE}:
+\begin{equation}
+    \|\nabla d_\mathcal{S}(\bm{x}) \| = 1, \quad \bm{x} \in \mathcal{X}, \qquad d_\mathcal{S}(\bm{x}) = 0, \quad \bm{x} \in \partial \mathcal{S}\,. \label{eq:SDFEikonal}
+\end{equation}
+Thus, under Theorem \ref{thm:nopExistence}, there exists a neural operator approximation to \eqref{eq:SDFEikonal}. As such, we introduce a second neural operator, in the form of an FNO, trained independently, that maps from a binary occupancy map to the corresponding SDF, namely $1/c(\bm{x}) \mapsto d_\mathcal{S}(\bm{x})$. Thus, the occupancy function $1/c(\bm{x})$ and the SDF $d_\mathcal{S}(\bm{x})$ are taken as inputs to generate the smoothed indicator $\tilde{\chi}$ in \eqref{eq:indicator_approximation}, which in turn is used to modulate the kernel in the Fourier layers of PNO. Since we use an FNO to generate the SDF function, our entire architecture maintains property (i), namely resolution invariance.
+\subsection{PNO architecture: generalizing across goal positions}
+
+Given the lifting layer and the modified Fourier layers discussed above, we move to design the projection layer of PNO. The projection layer contains two inputs, namely the output from the last modified Fourier layer and the goal location $\bm{g}$. This goal location is equivalent to passing the boundary condition \eqref{eq:eikonalPDE1b} for the solution operator $\Psi$ into our network. As aforementioned, to enable goal generalization (iii), we exploit the fact that an optimal value function for a motion planning problem must satisfy the triangle inequality. Thus, we parameterize our output with an inductively biased Deepnorm layer $Q(\cdot, \cdot)$ \citep{pitis2020inductive} given by:%\NA{What are $v(\bm{x})$, $v(\bm{g})$, and $q$ below?}
+\begin{equation}
+    Q(L_M(\bm{x}), L_M(\bm{g})) = f_\theta(L_M(\bm{x})-L_M(\bm{g}))\,,
+\end{equation}
+where $L_M(\bm{x})$, $L_M(\bm{g})$ are the outputs from last modified Fourier layer at location $\bm{x}$ and goal $\bm{g}$,
+$f_\theta$ consists of regular neural network layers with a \emph{non-negative} activation function (e.g., ReLU) and a \emph{positive} weight matrix $W^+$.
+This ensures that our value function satisfies the triangle inequality with respect to goal position $\bm{g}$ \citep{pitis2020inductive} and greatly improves the generalization performance across different goal positions, achieving property (iii). The entire PNO architecture is summarized in Fig. \ref{fig:planOpArch}, starting from a binary occupancy input $1/c(\bm{x})$ and providing a value function as an output. 
+
+
+
+
+
+
+
+
+\section{Learning motion planning value functions}
+
+
+To validate the efficacy of our PNO architecture, we design three learning  experiments. First, we test our method on grid-world environments where the operator is compared against %trained over multiple small maps and compared against 
+learning-based motion planners. 
+Although, many planners have been successful on the small grid world dataset, the environments lack
+the complexity of real-world tasks.
+Thus, we introduce two other experiments - both on \emph{real world} datasets. In the first experiment, we highlight the super-resolution properties of PNO by training on small synthetic maps and evaluating on large real-world maps from the Moving AI 2D city maps dataset \citep{sturtevant2012benchmarks}. In the second experiment, we showcase the scalability of our approach on 3D environments from the iGibson dataset \citep{shen2021iGibson}.
+
+We compare our method against the fast marching method (FMM) \citep{Sethian1996Fast} which solves the Eikonal PDE numerically, state-of-the-art neural motion planners: VIN \citep{NIPS2016_c21002f4}, NTFields \citep{ni2023ntfields}, IEF2D \citep{li2022learning}, and two operator learning architectures: FNO \citep{li2021fourier}, DAFNO \citep{liu2023domain}. 
+
+\begin{wraptable}{r}{0.53\linewidth}
+\caption{Comparison of planning on learned value functions on the Grid World dataset at various sizes. The success rate and times are averaged over 1k maps.}
+\label{tab:gridWorld}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{|l|ccc|ccc|}
+\hline
+           & \multicolumn{3}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Avg. success \\ rate $\uparrow$\end{tabular}}} & \multicolumn{3}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Avg. computation\\  time (ms) $\downarrow$\end{tabular}}} \\ \hline
+           & \multicolumn{1}{c|}{$8^2$}              & \multicolumn{1}{c|}{$16^2$}             & $28^2$            & \multicolumn{1}{c|}{$8^2$}                  & \multicolumn{1}{c|}{$16^2$}                & $28^2$                \\ \hline
+VIN        & \multicolumn{1}{c|}{99.6}               & \multicolumn{1}{c|}{\textbf{99.3}}      & 96.7              & \multicolumn{1}{c|}{3.9}                    & \multicolumn{1}{c|}{22.7}                  & 82.1                  \\ \hline
+IEF2D      & \multicolumn{1}{c|}{99.7}               & \multicolumn{1}{c|}{98.3}               & 97.0              & \multicolumn{1}{c|}{13.3}                   & \multicolumn{1}{c|}{14.8}                  & 20.4                  \\ \hline
+PNO (ours) & \multicolumn{1}{c|}{\textbf{99.9}}      & \multicolumn{1}{c|}{97.3}               & \textbf{99.3}     & \multicolumn{1}{c|}{\textbf{2.6}}           & \multicolumn{1}{c|}{\textbf{4.7}}          & \textbf{6.4}          \\ \hline
+\end{tabular}
+}
+\end{wraptable}
+
+\textbf{Grid-world environments.}
+In the first experiment, we consider a small Grid-World dataset as in \citet{NIPS2016_c21002f4}, consisting of $5$k training maps and $1$k testing maps. We compare with VIN and IEF2D.
+For planning, we perform gradient descent on the test-map value function predictions from VIN, IEF2D, and PNO. In Table \ref{tab:gridWorld}, we present the computation time needed for value function prediction and the success rate of reaching the goal. We can see that all baselines perform quite well, with PNO outperforming both methods on the larger $28 \times 28$ sized mazes while achieving an improved computational time. The superior performance of PNO on the Grid World dataset is primarily due to the fact PNO satisfies the triangle inequality and guarantees obstacle avoidance where as both VIN and IEF2D lack such properties.  
+
+\textbf{Moving AI 2D city maps.}
+To highlight the advantage of reformulating motion planning as an operator learning problem in continuous function space, we demonstrate that our PNO architecture can be trained with a coarse resolution and deployed at a finer resolution in the Moving AI 2D real-world city maps (see Fig.~\ref{fig:nycSuperRes}). We, then, evaluate the super-resolution performance of our method in comparison with two operator learning architectures in Table \ref{tab:superResMain}. The importance of {encoding the obstacle geometry explicitly} can be seen in that both DAFNO and PNO clearly outperform FNO on the synthetic and real-world datasets. Furthermore, we see the effect of the inductive-bias projection layer (ensuring satisfaction of the triangle inequality) over DAFNO - particularly in the unseen real-world city dataset achieving a $50\%$ reduction in $L_2$ error. For the city dataset, PNO is the only method to produce value functions that are viable for planning as the errors in the other operator learning methods create large local minima. In the third column of Table \ref{tab:superResMain}, we see the computational speedup at scale of the PNO architecture. The SDF generation significantly slows DAFNO and we achieve almost $10\times$ speedup over the fast marching method (FMM). Lastly, we provide an example of navigating in a New York City map in Fig. \ref{fig:nycSuperRes}. In Fig. \ref{fig:nycSuperRes}, we see that the FNO is able to learn the SDF accurately (achieving a relative $L_2$ test error of $0.064$) and that the corresponding value function is accurately computed at all three super-resolution scales. 
+
+\begin{table}[h]
+\centering
+\caption{Average $L_2$ value function error of FNO, DAFNO, and PNO versus FMM. All models were trained on the synthetic obstcale dataset at $64\times64$ resolution.}\label{tab:superResMain}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{|l|cccccccc|cccc|}
+\hline
+                                                                         & \multicolumn{8}{c|}{\textbf{Avg. relative $L_2$ error $\downarrow$}}                                                                                                                                                                                                                & \multicolumn{4}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Avg. computation time $\downarrow$\end{tabular}}}                                 \\ \hline
+Map size                                                                 & \multicolumn{1}{l|}{$64^2$}            & \multicolumn{1}{l|}{$256^2$}           & \multicolumn{1}{l|}{$512^2$}           & \multicolumn{1}{l|}{$1024^2$}          & \multicolumn{1}{l|}{$64^2$} & \multicolumn{1}{l|}{$256^2$}           & \multicolumn{1}{l|}{$512^2$}           & \multicolumn{1}{l|}{$1024^2$} & \multicolumn{1}{l|}{$64^2$}          & \multicolumn{1}{l|}{$256^2$}         & \multicolumn{1}{l|}{$512^2$}         & \multicolumn{1}{l|}{$1024^2$} \\ \hline
+                                                                         & \multicolumn{4}{c|}{\begin{tabular}[c]{@{}c@{}}Synthetic obstacle dataset \\ (100 maps, in-distribution)\end{tabular}}                                    & \multicolumn{4}{c|}{\begin{tabular}[c]{@{}c@{}}MovingAI real-world city dataset\\ (90 maps, out-of-distribution)\end{tabular}}        & \multicolumn{4}{c|}{\begin{tabular}[c]{@{}c@{}}Synthetic + real-world city\\ (1000 maps, ms)\end{tabular}}                                 \\ \hline
+FNO                                                                      & \multicolumn{1}{c|}{0.1996}          & \multicolumn{1}{c|}{0.5771}          & \multicolumn{1}{c|}{0.6214}          & \multicolumn{1}{c|}{0.6405}          & \multicolumn{1}{c|}{—}    & \multicolumn{1}{c|}{0.7188}          & \multicolumn{1}{c|}{0.7519}          & 0.7692                      & \multicolumn{1}{c|}{1.62}          & \multicolumn{1}{c|}{\textbf{1.64}} & \multicolumn{1}{c|}{\textbf{1.66}}         & \textbf{2.28}                      \\ \hline
+DAFNO                                                                    & \multicolumn{1}{c|}{\textbf{0.0985}} & \multicolumn{1}{c|}{0.3868}          & \multicolumn{1}{c|}{0.4060}          & \multicolumn{1}{c|}{0.4120}          & \multicolumn{1}{c|}{—}    & \multicolumn{1}{c|}{0.4090}          & \multicolumn{1}{c|}{0.4259}          & 0.4315                      & \multicolumn{1}{c|}{3.10}          & \multicolumn{1}{c|}{4.97}          & \multicolumn{1}{c|}{11.44}         & 49.82                       \\ \hline
+PNO (ours)     & \multicolumn{1}{c|}{0.1136}          & \multicolumn{1}{c|}{\textbf{0.1197}} & \multicolumn{1}{c|}{\textbf{0.1190}} & \multicolumn{1}{c|}{\textbf{0.1194}}          & \multicolumn{1}{c|}{—}    & \multicolumn{1}{c|}{\textbf{0.1748}}          & \multicolumn{1}{c|}{\textbf{0.1885}}          & {\textbf{0.2034}}                      & \multicolumn{1}{c|}{5.57}          & \multicolumn{1}{c|}{5.31}          & \multicolumn{1}{c|}{6.33} & 8.31               \\ \hline
+\begin{tabular}[c]{@{}l@{}}Numerical \\ solver (FMM) \end{tabular}              & \multicolumn{1}{c|}{—}               & \multicolumn{1}{c|}{—}               & \multicolumn{1}{c|}{—}               & \multicolumn{1}{c|}{—}               & \multicolumn{1}{c|}{—}    & \multicolumn{1}{c|}{—}               & \multicolumn{1}{c|}{—}               & —                           & \multicolumn{1}{c|}{\textbf{0.34}} & \multicolumn{1}{c|}{5.96}          & \multicolumn{1}{c|}{25.66}         & 104.62            \\ \hline
+\end{tabular}}
+\end{table}
+
+\textbf{3D planning in iGibson environments. For comparison, we independently train NTFields models on the Bolton and Samuel environments. Each NTFields model takes $6$ hours to train \emph{per environment} (NVIDIA $A100$ GPU). To validate the generalization of our PNO, we ensure that our training dataset contains no instances of the Samuel environment, but does contain instances of the Bolton environment with different start goal positions than during testing. Generating our dataset takes approximately $1$ hour and the model training takes $4$ hours (NVIDIA $A100$ GPU).
+
+Fig.~\ref{fig:iGibson} shows predicted value functions sliced at $z=0$, where all three methods capture the general structure of the value function. However, both NTFields and PNO struggle when far from the target leaving opportunities for future work. On the top right, we showcase an example of planning. NTFields, due to the lack of obstacle encoding, is unable to guarantee valid paths whereas both PNO and FMM reach the goal successfully.  Lastly, the table of Fig. \ref{fig:iGibson}, we see that quantitatively that our method performs well compared to NTFields but may still have room for improvement especially on the unseen Samuel environment. Excitingly, it is clear that both neural solvers perform faster then the numerical solver achieving speedups of $2\times$ (NTFields) and $3\times$ (PNO) over FMM. 
+
+\begin{figure}[t]
+\begin{minipage}{0.7\linewidth}
+\includegraphics[width=\linewidth]{figures/fig4.pdf}
+\end{minipage}%
+\hfill%
+\begin{minipage}{0.29\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/pathExample2.png}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|cc|}
+\hline
+           & \multicolumn{1}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Average\\ relative \\ $L_2$ error $\downarrow$\end{tabular}}} & \textbf{\begin{tabular}[c]{@{}c@{}}Average\\ computation time\\ (100 inst, ms) $\downarrow$ \end{tabular}} \\ \hline
+           & \multicolumn{2}{c|}{\textbf{Bolton Environment}}                                                                                                                                                                    \\ \hline
+PNO (ours) & \multicolumn{1}{c|}{0.0877}                                                                                          & 33.60                                                                                        \\ \hline
+NTFields   & \multicolumn{1}{c|}{0.2529}                                                                                          & 56.07                                                                                        \\ \hline
+FMM        & \multicolumn{1}{c|}{—}                                                                                               & 101.05                                                                                       \\ \hline
+           & \multicolumn{2}{c|}{\textbf{Samuel Environment}}                                                                                                                                                                    \\ \hline
+PNO (ours) & \multicolumn{1}{c|}{0.2363}                                                                                          & 31.67                                                                                        \\ \hline
+NTFields   & \multicolumn{1}{c|}{0.3119}                                                                                          & 58.04                                                                                        \\ \hline
+FMM        & \multicolumn{1}{c|}{—}                                                                                               & 180.07                                                                                       \\ \hline
+\end{tabular}%
+}
+\end{minipage}
+\caption{(left) Comparison of 3D value function approximations for two iGibson environments (sliced at $z=0$). (right) On top, we show an example path in the Bolton environment. On the bottom, the value function approximations are compared quantitatively. The computation time only includes the forward inference time of the model - no training time.}
+\label{fig:iGibson}
+\end{figure}
+
+
+\section{Learned operator value functions as neural heuristics}
+
+
+Although one can plan on the learned value functions directly, they may exhibit local minima due to approximation error. To address this challenge, we capitalize on the rich set of classical planning algorithms by employing our learned value function as a heuristic 
+to guide the planning algorithm exploration.
+Typically, motion planners use the Euclidean norm as a heuristic given that it is both fast to compute and guarantees an optimal path ($1$-consistent). However, the Euclidean norm does not capture the geometry of the obstacles and thus regions surrounding obstacles can require extensive exploration before an optimal path is found. Thus, we propose using the learned value functions from PNO as an alternative heuristic to the Euclidean norm. We first prove that our heuristic is $\epsilon-$consistent and then showcase the advantage numerically, achieving a $33\%$ decrease in the number of explored nodes compared to the Euclidean norm when used in the $A^\ast$ algorithm.
+
+We begin by showing that PNO value function is an $\epsilon$-consistent heuristic, which is an important property for the $A^\ast$ algorithm to compute an $\epsilon$-optimal path \citep{ara_star}.
+\begin{definition} 
+    Let $V(\bm{x}, \bm{g})$ be the value function with goal position $\bm{g}$. A heuristic function $h(\bm{x}): \mathcal{X} \to \mathbb{R}$ is said to \textbf{admissible} if $h(\bm{x}) \leq V(\bm{x}, \bm{g})$ for any $\bm{x} \in \mathcal{X}$. It is said to be \textbf{consistent} if $h(\bm{x}) \leq V(\bm{x}, \bm{y}) + h(\bm{y})$. Furthermore, for any $\epsilon > 1$, a heuristic is \textbf{$\bm{\epsilon}$-consistent} if $h(\bm{x}) \leq \epsilon V(\bm{x}, \bm{y}) + h(\bm{y})$. 
+\end{definition}
+
+
+\begin{lemma}[$\epsilon$-consistency of neural heuristic]\label{lemma:epConsistent}
+Let Assumption \ref{assumption:properPolicy} hold and let $\mathcal{F}_c$ be the cost function space satisfying Assumption \ref{assumption:continuity_boundedness}. Let $\epsilon_{NO}$ be the neural operator approximation error as in \eqref{eq:nopError}. Then, $\hat{V}(\bm{x})$, generated from the neural operator is an $\epsilon$-consistent heuristic with: 
+\begin{equation}
+    \epsilon = \max_{\{\bm{x}, \bm{y} \in \mathcal{S} | \bm{x} \neq\bm{y}\}} 1+ 2 \epsilon_{NO}/V(\bm{x}, \bm{y})\,.
+\end{equation}
+Further, if one is interested in a neural operator satisfying a specific $\epsilon-$consistency for $\epsilon > 1$, then the neural operator must have error no worse than: 
+\begin{equation}
+    \epsilon_{NO} \leq \min_{\{\bm{x}, \bm{y} \in \mathcal{S} | \bm{x} \neq \bm{y}\}} (\epsilon-1)/V(\bm{x}, \bm{y})\,.
+\end{equation}
+\end{lemma}
+In continuous space, it is likely that $\epsilon \to \infty$ in Lemma \ref{lemma:epConsistent}. However, motion planning algorithms, such as $A^\ast$, discretize the space yielding $\epsilon < \infty$. Further, in Lemma \ref{lemma:epConsistent}, it is impossible to identify the true approximation error $\epsilon_{NO}$. Thus, we introduce a second, practical improvement. Our key idea is to "erode" the obstacles (as in Fig. \ref{fig:erosion}) with the intuition the neural operator applied to the eroded environment is more likely to be an under-approximation to the true value function. This encourages \emph{admissibility} which can improve the paths generated under the heuristic \citep{pearl}. To conduct the erosion, we remove the outermost layer from each obstacle \citep{10.5555/1098652} and repeat this operation several times depending on the environment size. Formally, this can be expressed as increasing the safe space as $\tilde{\mathcal{S}} \supset \mathcal{S}$, where $\tilde{\mathcal{S}}$ is the safe set after erosion. The eroded cost function then becomes
+\begin{equation}\label{eq:erodedCost}
+    \tilde{c}(\bm{x}) = \begin{cases}
+        1 & \bm{x} \in \tilde{\mathcal{S}}, \\ 
+        \infty & \bm{x} \in  \mathcal{X} \setminus \tilde{S}.
+    \end{cases} 
+\end{equation}
+The following result guarantees that our eroded PNO heuristic does not harm the $\epsilon$-consistency. 
+
+\begin{lemma}[Eroded heuristic is "more" consistent] \label{lemma:epImprovement} 
+Let Assumptions \ref{assumption:properPolicy}, \ref{assumption:continuity_boundedness} hold. For any $\epsilon_{NO} > 0$, let $\hat{\Psi}(c), \hat{\Psi}(\tilde{c})$ be the learned solutions to \eqref{eq:eikonalProblem} satisfying Theorem \ref{thm:nopExistence} with $\epsilon_{NO}$ according to costs $c, \tilde{c}$ defined in \eqref{eq:cost}, \eqref{eq:erodedCost} respectively. Let $\epsilon$ and $\tilde{\epsilon}$ be the $\epsilon-$consistent value functions generated by operators $\hat{\Psi}(c)$ and $\hat{\Psi}(\tilde{c})$ with $\epsilon_{NO}$ error as in Lemma \ref{lemma:epConsistent}. 
+Then, $\epsilon \geq \tilde{\epsilon}$. %for all $\bm{x}, \bm{y} \in \mathcal{X}$. 
+\end{lemma}
+
+Lastly, to ensure we do not significantly underestimate the value function, we combine our heuristic with the Euclidean norm via $h(\bm{x}) = \max 
+\{ \| \bm{x} - \bm{g} \|, \hat{\Psi}(\tilde{c}(\bm{x}))\}$ while preserving $\epsilon$-consistency. 
+We evaluate the impact of our PNO heuristic for motion planning on $1024\times1024$ Moving AI lab city maps. For planning, we use the $A^\ast$ algorithm with our PNO estimated value function as the heuristic. In Table \ref{tab:heuristicMain}, we see that the PNO heuristic with erosion achieves nearly optimal paths while expanding $33\%$ fewer nodes compared to the Euclidean norm heuristic. Furthermore, the value of the eroded heuristic is clear as without erosion, our PNO heuristic generates sub-optimal paths. Lastly, in Fig.~\ref{fig:erosion}, we highlight an example of planning where the PNO heuristic yields a similar path as the Euclidean norm despite expanding fewer nodes. 
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of heuristics in the $A^\ast$ algorithm, RRT and RRT* over 2D maps ($256^2$ implies $256 \times 256$). The computational time includes both the time for heuristic generation as well as the time for planning. The number of layers eroded is $12$, $14$, and $18$ for $256^2$ , $512^2$, and $1024^2$, respectively.}
+\label{tab:heuristicMain}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|ccc|ccc|ccc|ccc|}
+\hline
+\textbf{} 
+& \multicolumn{3}{c|}{\textbf{Avg. path length $\downarrow$}} 
+& \multicolumn{3}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}$\epsilon$ suboptimality \\ estimate $\downarrow$\end{tabular}}} 
+& \multicolumn{3}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Avg. number of \\ nodes expanded $\downarrow$\end{tabular}}} 
+& \multicolumn{3}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Avg. computational \\ time (50 inst., s) $\downarrow$\end{tabular}}} \\ \hline
+
+\textbf{Map size (2D)}  
+& \multicolumn{1}{c|}{$256^2$}  & \multicolumn{1}{c|}{$512^2$}  & $1024^2$ 
+& \multicolumn{1}{c|}{$256^2$}  & \multicolumn{1}{c|}{$512^2$}  & $1024^2$ 
+& \multicolumn{1}{c|}{$256^2$}  & \multicolumn{1}{c|}{$512^2$}  & $1024^2$ 
+& \multicolumn{1}{c|}{$256^2$}  & \multicolumn{1}{c|}{$512^2$}  & $1024^2$ \\ \hline
+
+\textbf{A* - Euclidean norm}    
+& \multicolumn{1}{c|}{\textbf{144.05}} & \multicolumn{1}{c|}{\textbf{311.21}} & \textbf{605.14} 
+& \multicolumn{1}{c|}{\textbf{1.000}}    & \multicolumn{1}{c|}{\textbf{1.000}}  & \textbf{1.000} 
+& \multicolumn{1}{c|}{3310}            & \multicolumn{1}{c|}{14850}           & 59965
+& \multicolumn{1}{c|}{0.186}           & \multicolumn{1}{c|}{0.868}           & 3.606 \\ \hline
+
+\textbf{A* - PNO (ours) w Erosion}
+& \multicolumn{1}{c|}{144.05}          & \multicolumn{1}{c|}{311.72}          & 608.54
+& \multicolumn{1}{c|}{\textbf{1.000}}   & \multicolumn{1}{c|}{\textbf{1.000}}   & \textbf{1.000} 
+& \multicolumn{1}{c|}{2024}            & \multicolumn{1}{c|}{9869}            & 41394
+& \multicolumn{1}{c|}{0.136}           & \multicolumn{1}{c|}{0.684}           & 2.759 \\ \hline
+
+\textbf{A* - PNO (ours) w/o Erosion}  
+& \multicolumn{1}{c|}{144.88}          & \multicolumn{1}{c|}{315.25}          &614.40
+& \multicolumn{1}{c|}{1.005}           & \multicolumn{1}{c|}{1.013}           &1.015
+& \multicolumn{1}{c|}{\textbf{1757}}   & \multicolumn{1}{c|}{\textbf{8882}}   & \textbf{39438}
+& \multicolumn{1}{c|}{0.121}  & \multicolumn{1}{c|}{0.587}  & 2.703\\ \hline
+
+\textbf{RRT}  
+& \multicolumn{1}{c|}{191.98}          & \multicolumn{1}{c|}{418.61}             &800.31
+& \multicolumn{1}{c|}{1.333}           & \multicolumn{1}{c|}{1.345}              &{1.322}
+& \multicolumn{1}{c|}{-}                & \multicolumn{1}{c|}{-}                 &- 
+& \multicolumn{1}{c|}{\textbf{0.014}}    & \multicolumn{1}{c|}{\textbf{0.045}}   &\textbf{0.066}\\ \hline
+
+\textbf{RRT*}  
+& \multicolumn{1}{c|}{177.29}          & \multicolumn{1}{c|}{403.56}             &783.83
+& \multicolumn{1}{c|}{1.231}           & \multicolumn{1}{c|}{1.297}              &{1.295}
+& \multicolumn{1}{c|}{-}                & \multicolumn{1}{c|}{-}                 &- 
+& \multicolumn{1}{c|}{0.120}    & \multicolumn{1}{c|}{0.600}   &2.71\\ \hline
+\end{tabular}%
+}
+\end{table}
+\begin{figure}[ht]
+    \includegraphics[width=\linewidth,trim={0 10pt 0 0},clip]{figures/effectoferosion.pdf}
+    \caption{Path planning using various heuristics on the Moving AI Shanghai city map. The top showcases the heuristic generated and the bottom visualizes the $A^\ast$ planning under the corresponding heuristic. The nodes expanded are in orange, the start in red, the goal in green, and the path in blue.}
+    \label{fig:erosion}
+\end{figure}
+
+
+
+\section{Conclusions, Limitations, and Future Work}
+
+We reformulated the motion planning problem as an Eikonal PDE and focused on learning its solution operator. To learn the operator, we developed the Planning Neural Operator (PNO) which is (i) {resolution invariant}, (ii) does not require retraining in new environments, and (iii) generalizes across goal positions. We evaluated our architecture on the $2D$ MovingAI city dataset and the $3D$ iGibson building dataset, showcasing super-resolution value function prediction while achieving speedups of $10\times$ over a numerical PDE solver. Lastly, we proved that our value function predictions can be used as $\epsilon$-consistent heuristics for motion planning algorithms, and demonstrated a $33\%$ decrease in expanded nodes in the $A^\ast$ algorithm compared to planning with a Euclidean norm heuristic. 
+
+In the future, we hope to address some limitations of PNO. For example, our heuristic is computed once without updates during planning. An interesting question is whether we can introduce dynamic heuristic evaluation as PNO exhibits fast forward inference time. In addition, we plan to validate PNO on real robot motion plannig problems. To do so, we aim to extend the PNO formulation to include the physical constraints of the robot dynamics. 
+Lastly, we considered cost functions with uniform step penalties. An exciting extension would be to train PNO in environments with non-uniform costs. 
+
+
+
+

@@ -1,0 +1,326 @@
+\title{Radar: Fast Long-Context Decoding for Any Transformer}
+
+\begin{abstract}
+Transformer models have demonstrated exceptional performance across a wide range of applications. Though forming the foundation of Transformer models, the dot-product attention does not scale well to long-context data since its time requirement grows quadratically with context length. In this work, we propose Radar, a training-free approach that accelerates inference by dynamically searching for the most important context tokens. For any pre-trained Transformer, Radar can reduce the decoding time complexity without training or heuristically evicting tokens. Moreover, we provide theoretical justification for our approach, demonstrating that Radar can reliably identify the most important tokens with high probability. We conduct extensive comparisons with the previous methods on a wide range of tasks. The results demonstrate that Radar achieves the state-of-the-art performance across different architectures with reduced time complexity, offering a practical solution for efficient long-context processing of Transformers.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Transformer models demonstrate an extraordinary ability on different sequential processing tasks, including language modeling (Vaswani et al., 2017; Devlin et al., 2019; Raffel et al., 2020; Touvron et al., 2023b), image classification (Dosovitskiy et al., 2021; Liu et al., 2021; Hassani et al., 2022; Zhu et al., 2023), translation (Tang et al., 2020; Yao & Wan, 2020), and many more (Carion et al., 2020; Ding et al., 2022; Chang et al., 2023; Xu et al., 2022; Fang et al., 2023). In particular, Transformer models take each input as a sequence of tokens and compute the embedding of each token for downstream tasks. Among all components, the dot-product attention has been shown to be critical to the success of Transformer models (Choromanski et al., 2021). It not only enables parallel computation of sequences during training (Vyas et al., 2020), but also provides a high-quality method for sequence modeling (Sanford et al., 2023).  
+
+Despite being at the core of Transformer models, the dot-product attention is not ideal for longcontext data: the time to process each token increases with context lengths, significantly slowing down the throughput on long-context data. Moreover, the maximum context length is limited during training, resulting in an inability to perform inference on long-context tasks. Yet, many real-world applications are naturally long-context (Tay et al., 2021; Beltagy et al., 2020). For example, a single code file could easily have more than 10K tokens (Lozhkov et al., 2024; Kocetkov et al., 2022). However, Llama-2 (Touvron et al., 2023b), a widely used Transformer-based model, is incapable of processing the full source code because it has a maximum context length of 4K tokens.  
+
+To improve Transformer’s long-context performance, a line of research proposes to replace the original attention with some faster variants (Xiao et al., 2024; Peng et al., 2021; Bertsch et al., 2023; Beltagy et al., 2020; Choromanski et al., 2021; Mohtashami & Jaggi, 2023; Peng et al., 2023). One notable example is attention kernalization, which reformulate the dot-product attention as a kernel and approximate the kernel with linear operations (Peng et al., 2021). By reordering the matrix chain multiplication, kernalization methods reduce the time complexity to $O(t)$ for the context of length t. However, such methods require a training process to fit the approximations, which becomes more and more infeasible given the fast parameter scaling of the current Transformer models.  
+
+Without the need for training, another line of work accelerates inference by evicting previous tokens used in each decoding step (Xiao et al., 2024; Zhang et al., 2023; Li et al., 2024). For instance, StreamingLLM (Xiao et al., 2024) proposes to only use the constant-length recent tokens and discard all other but the first tokens. Although they are faster in inference on long-context data, these methods lose previous information in the context that is potentially critical for future use. Using the code file as an example, StreamingLLM could fail to invoke a function if the function declaration is not in the recent tokens.  
+
+In this paper, we propose Radar (range search accelerated by random features), a training-free approach that dynamically selects the important context ranges to accelerate inference. Specifically, Radar groups the context into segments and maintains a “summarization representation” for each group by random projections. To generate a new token, Radar calculates the importance of each group and selects only the tokens in the most important segments. We theoretically justify our approach by showing that Radar is guaranteed to pick the most dominant tokens with high probabilities. For any pre-trained Transformers, our approach can instantly extend the maximum context length while reducing the overall complexity to $\tilde{O}(t^{1.5})$ .  
+
+We conduct extensive experiments to verify the effectiveness of our approach. Specifically, we compared our method with StreamingLLM (Xiao et al., 2024), Landmark attention (Mohtashami & Jaggi, 2023), $\mathrm{H_{2}O}$ (Zhang et al., 2023), and SnapKV (Li et al., 2024). The results across different models and tasks show that Radar generally achieves state-of-the-art performance with a low time complexity. Additionally, our in-depth analyses, while providing detailed information, highly corroborate our main results.  
+
+
+
+\section{2 METHODOLOGY  }
+
+
+In this section, we present Radar, a principled approach that is guaranteed to select the most important tokens with a high probability. We first introduce the notations and the problem formulation in Section 2.1. The algorithm of Radar is formally presented in Section 2.2 with a major focus on showing the time complexity. The correctness of our algorithm is rigorously shown in Section 2.3.  
+
+2.1 BACKGROUND  
+
+Dot-product attention. Without loss of generality, we focus on the single-head self-attention for simplicity. Specifically, it operates on the level of sequence. Each sequence contains several token embeddings $(\pmb{x}_{1},\cdot\cdot\cdot,\pmb{x}_{t})$ , where every embedding is a vector in the high dimensional space $\mathbb{R}^{d}$ . The attention first maps each embedding to query, key, and values by linear projections $\mathbf{\chi}_{\pmb{q}_{i}}\;=$ $W_{q}{\pmb x}_{i},{\pmb k}_{i}={\pmb W}_{k}{\pmb x}_{i}$ , and $\pmb{v}_{i}=\pmb{W}_{v}\pmb{x}_{i})$ ). The attention score is defined as  
+
+$$
+a_{i,j}:=\frac{1}{z_{i}}\mathbb{I}(j\leq i)\exp\!\left(q_{i}^{\top}k_{j}/\sqrt{d}\right)
+$$  
+
+for $1\,\leq\,i,j\,\leq\,t$ . Here, $z_{i}$ is a normalization factor such that $\textstyle\sum_{j=1}^{i}a_{i,j}\,=\,1$ . The dot-product attention then produces a sequence by  
+
+$$
+o_{i}:=\sum_{j=1}^{i}a_{i,j}v_{j},
+$$  
+
+indicating that $\pmb{o}_{i}$ is a fusion of $(\pmb{v}_{1},\ldots,\pmb{v}_{i})$ weighted by the attention scores $(a_{i,1},\ldots,a_{i,i})$ .  
+
+The two equations above show that the dot-product attention requires $O(t)$ to generate a new token, resulting in an overall $O(t^{2})$ time for the whole sequence. To reduce the complexity of the dotproduct attention, both operations should not be quadratic in $t$ .  
+
+Context reduction. Without the need for training, one popular strategy for accelerating inference is to reduce the number of tokens used in attention calculation. LongFormer (Beltagy et al., 2020) proposes to use local sliding window attention, which only needs to look into the tailing tokens, to accelerate decoding. More recently, StreamingLLM (Xiao et al., 2024) improves this by prepending sink tokens to stabilize the decoding for contexts beyond the pre-training length. However, these methods suffer from the issue of information loss, where the vast amount of middle tokens potentially containing important information are permanently lost. Other remedies such as the heavyhitter oracle $\left(\mathrm{H_{2}O}\right)$ use heuristics to partially retain some middle tokens. Despite this, they depend on heuristic rules and sometimes fail to completely prevent information loss.  
+
+![](images/33d61f5db0d0eda724833333f0071dc0735a7fbf2a821f28a1fcbb58fef5c560.jpg)  
+(a) Construction process for a single segment consists of three tokens $\pmb{k}_{4:6}$ . Radar first maps each token embedding to the random feature $\phi_{\Omega}(\pmb{k}_{i})$ . The segment embedding $\bar{\phi}_{\Omega}(\pmb{k}_{4:6})$ is then the average of random features.   
+Figure 1: Overview of the approach.  
+
+![](images/0a6c70a4e7f42b848fcecee3e737a4327c7d9854c85ddf9008b94739c799648e.jpg)  
+(b) Query process for a single query $\pmb q$ . The query token is first mapped to the random feature $\phi_{\Omega}(\mathbf{q})$ . The segment importance is obtained by inner products between random features $\phi_{\Omega}^{\top}({\pmb q})\bar{\phi}_{\Omega}({\pmb k}_{i:i+2})$ . In this example, the second segment has the highest (unnormalized) segment attention of 2.2.  
+
+Problem formulation. Given Equation (2), the attention score $a_{i,j}$ represents the importance of the $j$ th token to the current step $i$ . To ensure the selected tokens are important, we would like to select an index set $\mathbb{S}$ that  
+
+$$
+j\in\arg\operatorname{topk}{a_{i,l}}
+$$  
+
+for all $j\in\mathbb S$ . This gives us an approximation of the original attention and reduces the compute to $O(|\mathbb{S}|)$ . However, generating such an index set takes $O(\bar{t})$ time, failing to improve the overall time complexity. We aim to approximately solve this problem in sublinear time complexity.  
+
+2.2 THE PROPOSED ALGORITHM: RADAR  
+
+This section shows the algorithm of Radar with a focus on analyzing the time complexity. The correctness of the algorithm is deferred to Section 2.3.   
+Hierarchical structure. We manage the key embeddings $(\pmb{k}_{1},\ldots,\pmb{k}_{t})$ with a hierarchical data structure consisting of two layers of nodes. The bottom-layer nodes are the original key embeddings, whereas each top-layer node is a segment consisting of the bottom keys. The hierarchical structure enables a two-step attention calculation procedure: for the first step, we search for the important segments with the highest summed attention score; after that, we use the tokens in the selected segments to approximate the attention for attention calculation.   
+The benefit of applying the hierarchical paradigm is reducing the time complexity. Assume there are $t$ tokens and each segment contains $c$ tokens on average, then the overall query complexity is $O(\tau(c)\cdot t/c+c)$ , where $O(\tau(c))$ is the time complexity to obtain the importance score for a segment. The term $\mathcal{O}(t/c)$ comes from calculating the importance of $\lceil t/c\rceil$ segments and selecting the top ones; and the second term $O(c)$ is for the actual attention by Equations (1) and (2).  
+
+Accelerated segment search. To accelerate the segment search, we propose to assign each segment node a representation that “summarizes” the bottom-layer key embeddings. We resort to the attention kernelization technique to accomplish this. Specifically, we first apply a mapping $\phi_{\Omega}:\mathbb{R}^{d}\rightarrow\mathbb{R}^{n}$ in (Choromanski et al., 2021) for all keys  
+
+$$
+\phi_{\Omega}(k):=\frac{1}{\sqrt{n}}\Big(\exp\!\big(\omega_{1}^{\top}k^{\prime}-\|k^{\prime}\|_{2}^{2}/2\big),\dots,\exp\!\big(\omega_{n}^{\top}k^{\prime}-\|k^{\prime}\|_{2}^{2}/2\big)\Big).
+$$  
+
+Here, every element in $\Omega\in\mathbb{R}^{n\times d}$ is sampled from $\mathcal{N}_{0,1}$ and the vector $\omega_{i}\in\mathbb{R}^{d}$ is the $i$ th column of $\pmb{\Omega}$ . We let $k^{\prime}:=k/\sqrt[4]{d}$ for the scaling in attention. After projection, we average the projected features as the segment embedding. The embedding for a segment ranging from $i$ to $i+c$ is  
+
+$$
+\bar{\phi}_{\Omega}(k_{i:i+c}):=\frac{1}{c}\sum_{l=0}^{c-1}\phi_{\Omega}(k_{i+l}).
+$$  
+
+162   
+163   
+164   
+165   
+166   
+167   
+168   
+169   
+170   
+171   
+172   
+173   
+174   
+175   
+176   
+177   
+178   
+179   
+180   
+181   
+182   
+183   
+184   
+185   
+186   
+187   
+188   
+189   
+190   
+191   
+192   
+193   
+194   
+195   
+196   
+197   
+198   
+199   
+200   
+201   
+202   
+203   
+204   
+205   
+206   
+207   
+208   
+209   
+210   
+211   
+212   
+213   
+214   
+215   
+Algorithm 1 The overall algorithm of Radar   
+Require: head dimension $d\in\mathbb{N}$ , projection dimension $n\in\mathbb N$ , number of segment selection $k\in\mathbb{N}$   
+$\vartriangleright$ Initialize the Radar state   
+1: Current context length $t\gets0$   
+2: Current segment range $c\gets0$   
+3: Unregistered buffer $\mathbb{W}\gets\emptyset$   
+4: Sample $\Omega=(\omega_{1},...,\omega_{n})$ from $\mathcal{N}_{0,1}$   
+5: Obtain the projection function $\phi_{\Omega}$ according to Equation (4)   
+$\vartriangleright$ Decoding procedure   
+6: while taking a new token with $\mathbf{\nabla}q,k$ and $\pmb{v}$ do   
+7: $t\gets t+1$   
+8: if $\sqrt{t}\in\mathbb N$ then   
+9: $\vartriangleright$ Res√tructuring process descried in Section 2.2.   
+10: $c\gets\sqrt{t}$   
+11: Pre-calculate $\bar{\phi}(\pmb{k}_{l:l+c})$ for $l\in[1,1+c,1+2c,\ldots,1+(c-1)c]$ ▷O(t)   
+12: $\mathbb{W}\gets\emptyset$   
+13: else   
+14: $\mathbb{W}\leftarrow\mathbb{W}\cup\{t\}$ $\vartriangleright$ Append to the buffer otherwise   
+15: end if   
+$\vartriangleright$ Querying procedure in $O(\sqrt{t})$   
+16: for $l\in[1,1+c,1+2c,\ldots,1+(c-1)c]$ do   
+17: $a_{l:l+c}\gets\phi_{\Omega}^{\top}(\pmb{q})\bar{\phi}_{\Omega}(\pmb{k}_{l:l+c})$ ▷Calculate segment attentions according to Equation (6)   
+18: end for   
+19: Pick indices $\mathbb{S}$ in the $k$ segments with the highest $a_{l:l+c}$ $\mathsf{D}\bigcirc(\sqrt{t})$   
+20: $\mathbb{S}\leftarrow\mathbb{S}\bigcup\mathbb{W}$ $\vartriangleright$ Use the buffer as the sliding window   
+21: yield softmax(q⊤kS/ d)vS $\mathsf{\Omega}\mathsf{\Omega}\mathsf{D}(k\sqrt{t})$   
+22: end while  
+
+The segment embeddings can be pre-computed and stored. This construction process is illustrated in Figure 1a.  
+
+To search for the most important segments, we can search for  
+
+$$
+\arg\operatorname{topk}\left\{a_{l:l+c}:=\phi_{\Omega}^{\top}(\pmb{q})\bar{\phi}_{\Omega}(\pmb{k}_{l:l+c})\right\}
+$$  
+
+for $l\;\in\;\{1,1+c,\ldots,1+(\lceil t/c\rceil-1)c\}$ . By using this acceleration, the time for calculating the importance score of a single segment (i.e., $\tau(c))$ becomes constant, and consequently $O(\tau(c))=$ $O(1)$ . Therefore, the total time is $O(t/c)$ given there are $\lceil t/c\rceil$ segments. Based on our theoretical guarantees in Section 2.3, the obtained segments will likely contain the most important tokens that summed to the highest attention scores. This process is demonstrated in Figure 1b.  
+
+Dynamic restructuring. With the accelerat√ed searching, we have $O(t/c\!+\!c)$ time for each query. The optimal asymptotic time complexity $O({\sqrt{t}})$ is obtained when $c=O({\sqrt{t}})$ , indicating that the segment range should change with the length of the context. However, changing the segment range requires a reconstruction of the segment embeddings that takes $O(t)$ time. To address this, we propose a dynamic restructuring schedule, which √only performs reconstruction when $\sqrt{t}\in\mathbb{N}$ . This schedule indicates t√hat there will be maximum $\sqrt{t}$ times of restructuring happening for $t$ tokens, amortized to an $O({\sqrt{t}})$ time for each query step.  
+
+For all other steps that $\sqrt{t}\notin\mathbb{N}$ , we store the token in a buffer $\mathbb{W}$ , which serves as a sliding window with a maximum size of $2\sqrt{t}\textnormal{-}1$ . The sliding window is always used in querying steps. Al√though this adds more tokens in the attention calculation, the asymptotic complexity remains $O({\sqrt{t}})$ for each step.  
+
+The overall algorithm. Putting all together, we see that Radar demonstrates an overall time complexity of $O(t^{\overleftarrow{1.5}})$ to generate $t$ tokens. We provide the procedure of Radar in Algorithm 1 with detailed comments.  
+
+2.3 THEORETICAL JUSTIFICATIONS  
+
+In this section, we rigorously show that our algorithm described in Section 2.2 is guaranteed to solve the problem in Equation (3) with high probability.  
+
+We first show that the projection 4 is sound with the following lemma.  
+
+Lemma 1. Let $\phi_{\Omega}$ follow the definition (4) where $\Omega=(\omega_{1},\ldots,\omega_{n})$ is sampled from $\mathcal{N}_{0,1}$ . Given any $\pmb{u},\pmb{v}\in\mathbb{R}^{d}$ , we have $\mathbb{E}\Omega[\phi_{\Omega}^{\top}(u)\phi_{\Omega}(v)]=\exp\!\left(u^{\top}v/\sqrt{d}\right)$  
+
+Proof. This is first shown in (Choromanski et al., 2021). 口  
+
+Based on this, we build the following theorem to show the correctness of our algorithm.  
+
+Theorem 2. Let Radar be at a state of c segments where each segment contains c tokens. Without loss of generality, assume the first segment $k_{1:1+c}$ has the highest attention score $a_{1:1+c}\ w.r.t.$ . the current query $\pmb q$ . With confidence at least $1-\delta$ , we have  
+
+$$
+\phi_{\Omega}^{\top}(q)\bar{\phi}_{\Omega}({\pmb k}_{1:c+1})=\operatorname*{max}_{l}\phi_{\Omega}^{\top}(q)\bar{\phi}_{\Omega}({\pmb k}_{l:c+l})
+$$  
+
+if the minimum gap $\begin{array}{r}{a_{1:1+c}-\operatorname*{max}_{l}a_{l:l+c}\ge\frac{1}{c}\exp\!\left(\zeta^{2}/\sqrt{d}\right)\!\sqrt{\frac{8\log\left(2\left(c-1\right)/\delta\right)}{n}}}\end{array}$ 8 log(2(nc−1)/δ). Here, ζ is the maximum norm among $k_{i}$ and $\pmb q$ , whereas $l\in[1,1+c,1+2c,\ldots,1+(c-1)c]$ is the starting index of each segment.  
+
+Proof. 口  
+
+Our theorem asserts that as long as the projection dimension $n$ is large enough, we can correctly retrieve the segment with the highest attention up to any precision. In fact, with the growth of the sequence length, the difficulty of meeting this condition is not growing linearly because the attention gap needed is $O(\log(c)/c)$ for an average segment attention score of $O(1/c)$ , suggesting our approach is particularly favorable for long-context decoding.  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+In this section, we conduct extensive experiments to verify the effectiveness of Radar in comparison with other methods on diverse tasks and models. We additionally carry out in-depth analyses and ablation studies to demonstrate the effects of the length of prompts, the projection dimension, and the number of selected segments.  
+
+3.1 EVALUATING LONG-CONTEXT PERPLEXITY  
+
+Datasets. Following previous work (Xiao et al., 2024; Zhang et al., 2023), we use the perplexity on the first sample in the PG-19 dataset as the main test bed. Specifically, we evaluate the overall perplexity by feeding the ground-truth tokens one by one. Since PG-19 only contains natural language, we additionally use a code sample from The Stack (Lozhkov et al., 2024) for a broader comparison. The selected sample is an implementation of NASA’s CDF Project1in a single Python file. To simulate the real-world use cases, we prefill the first 16,384 tokens into the model as a prompt. The experiments without prompts are conducted in Section 3.3.  
+
+Competing methods. We consider the vanilla dot-product attention (Vaswani et al., 2017) and StreamingLLM (Xiao et al., 2024) as the baselines in this experiment. Following the default setting in previous work (Xiao et al., 2024; Zhang et al., 2023) the sliding window length is set to 1024 for all runs. For our Radar, we choose the top 64 segments for each query with the random projection dimension set to 2048. The effect of these two parameters is studied in Section 3.3. Each experiment is conducted on a single A100 GPU with 40GB of memory.  
+
+![](images/892e276c1568cd4f2a8b2b060a4c2ee360b209ef3b1fdc0aba62bd6cfb480987.jpg)  
+
+Figure 2: The performance comparison in perplexity (first row) and elapsed time (second row). The lower the better for both metrics. For the Llama model, we annotate the perplexity value at the last token; for the Mistral model, we annotate the perplexity at the maximum pre-training context length (shown by the vertical dashed lines) because the full context exceeds its modeling ability. We additionally show the generation throughput for all runs.  
+
+Models. Following previous work (Xiao et al., 2024), we choose two popular architectures in this experiment: Llama (Dubey et al., 2024) and Mistral (Jiang et al., 2023). Specifically, we use Llama-Meta-3.1-8B and Mistral-7B-v0.3 for each architecture, respectively.  
+
+Results. We show the results in Figure 2. The naive attention method achieves the best perplexity in all runs. However, its elapsed time grows quadratically regardless of the architecture. In practice, the generation throughput drops to 10 tokens/s or even lower at the end. On the other hand, StreamingLLM achieves a constantly high throughput at a cost of poor generation quality (measured in perplexity), as it evicts most of the context during generation. Our method Radar, in contrast, is able to effectively control the elapsed time while maintaining a similar perplexity by a maximum difference of around 0.2 compared with the vanilla attention. Notably, the performance degeneration of Radar is at most $10\%$ while the speed up is more than 2 times. The results confirm the effectiveness of our method in effectively utilizing the context while accelerating inference.  
+
+We present additional results with $\mathrm{H_{2}O}$ (Zhang et al., 2023) and SnapKV (Li et al.  
+
+3.2 LONG-CONTEXT BENCHMARKS  
+
+In Section 3.1 above, we only evaluated the perplexity without inspecting the down-stream performance. For a more comprehensive comparison, we additionally conduct the end-to-end evaluation on numerous long-context tasks.  
+
+Datasets. Following previous work (Li et al., 2024), we use the LongBench dataset (Bai et al., 2024) as the main benchmark. Specifically, we use all 16 subtasks in English and code languages. These tasks belong to 6 categories in total: single-doc QA, multi-doc QA, summarization, few-shot learning, synthetic, and code. Following the standard LongBench pipeline (Bai et al., 2024), we truncate the context from the middle of the prompt length exceeds the pre-training length. Each subtask is evaluated with a specific metric (e.g., ROUGE scores (Lin, 2004) for summarization tasks and accuracies for synthetic tasks). After evaluating all subtasks, we report the average scores as a summary on LongBench. It is worth noting that the metrics used by different subtasks can have very different scales, indicating the arithmetic average over all subtasks may not reflect the overall  
+
+Table 1: Performance comparisons of different methods on LongBench. On each model, the bestperforming method is highlighted in bold and the second-best method is underlined (excluding the vanilla method). Each table contains the results for one particular model.  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+(a) The LongBench benchmark results of different methods applied on Llama-7b. Each prompt contains   
+
+![](images/4023e59d60eeddb4e6aff79df8d53187699d3f33d1516c4666fffdde80fe54c6.jpg)  
+
+tasks as pointed out by the original paper (Bai et al., 2024)). To this end, we additionally include the average percentile over all 16 tasks ranked within the same base model. For instance, a percentile of $80\%$ means that the method is expected to be strictly better than $80\%$ of other methods.  
+
+Competing methods. We use all methods mentioned in Section 3.1, including $\mathrm{H_{2}O}$ (Zhang et al., 2023) and SnapKV (Li et al., 2024). Following the previous work (Li et al., 2024), all competing baselines can use a maximum of $32+n_{c}$ tokens, where 32 is the length of the sliding window and $n_{c}$ is the number of middle tokens varied from 1024 to 4096. For StreamingLLM, we simply extend the sliding window by $n_{c}$ . In addition to baselines used in previous work, we also evaluate the  
+
+Landmark attention (Mohtashami & Jaggi, 2023) method, which fine-tunes a pre-trained LLM with a landmark token to represent multiple tokens in inference. Since the Landmark attention requires a training phase, we only test it when the official weights are provided. Each experiment is conducted on one A100 GPU.  
+
+Models. We test a wide range of models in this experiment. We first choose the Llama-7b model (Touvron et al., 2023a) because Landmark attention is fine-tuned based on it. We also have Llama-2-7b-chat-hf, which is included in the original LongBench paper (Bai et al., 2024). Finally, we also test with Mistral-7B-Instruct-v0.2 following the previous work (Li et al., 2024).  
+
+Results. The results are shown in Table 1. In all three subtables, we see that the vanilla attention mechanism generally achieves the highest scores on all tasks, given that it has all the information presented in the context. StreamingLLM is oftentimes the worst method because it only uses the recent $32\!\+\!n_{c}$ tokens.  
+
+For the Llama-7b model (in Table 1a), we see that the Landmark attention method performs better than the vanilla method on QA tasks. This is likely due to the additional data in fine-tuning. However, the performance on other tasks is significantly deteriorated. Overall, it is ranked as the second-worst method in terms of the average percentile. For $\mathrm{H_{2}O}$ and SnapKV, we observe similar results as in Li et al. (2024), where SnapKV is better than $\mathrm{H_{2}O}$ in both average score and percentile. Radar achieves the highest average score and percentile ranking among all efficient baselines.  
+
+The results on Llama-2-7b-chat-hf are shown in Table 1b. Aligned with the observation in previous work (Li et al., 2024), SnapKV generally outperforms $\mathrm{H_{2}O}$ in this setting. However, Radar achieves the highest average scores and average percentiles across all $n_{c}$ settings. Notably, Radar with 1024 middle tokens outperforms SnapKV with 2048 middle tokens in terms of average score. The results strongly suggest the effectiveness of our method in utilizing the context.  
+
+Table 1c shows the results for Mistral-7B-Instruct-v0.2.2 Our method is consistently better than SnapKV when the ground-truth answers require long generation (e.g., the government report task). This not only suggests the effectiveness of Radar but also shows that Radar is utilizing different tokens at different steps of token generation. Remarkably, Radar achieves an average score close to the vanilla method with only $13\%$ of the tokens used $n_{c}=4096)$ .  
+
+
+
+\section{3.3 IN-DEPTH ANALYSES  }
+
+
+Generating without prompts. In Section 3.1, we prefill 16,384 tokens for all runs to simulate the usage of prompts in real-world applications. However, some previous work are focused on nonconditional generation, where no prompt is provided. To compare the performance in this setting, we conduct experiments similar to Section 3.1 without the prompts. The results are shown in Figure 3. Note that we cannot compare with SnapKV because it is only applied to prompts.  
+
+![](images/919392942174a2041273c9b68f7d70d689513210f12e6773c80c727b4a9d03fd.jpg)  
+Figure 3: Generation without prompts.  
+
+As observed, $\mathrm{H_{2}O}$ demonstrates a promising result on the Llama model—the overall perplexity is only worse than Radar by 0.05. However, the perplexity of the Mistral model starts to drastically  
+
+![](images/3400fbfd9766481a3d392c4c8eb66efba95a5a05eda99f4c66e2b0b31687af5a.jpg)  
+Figure 4: The effect of the hyper-parameters $n$ (the projection dimension for the random matrix) and $k$ (the number of top segments selected) introduced by Radar.  
+
+deteriorate after hundreds of tokens. On the contrary, Radar continues to perform steadily. This experiment suggests the versatility of Radar, offering acceleration with or without prompts on a wide range of model architectures.   
+The effect of $n$ and $k$ . Our method introduces hyper-parameters $n$ (the projection dimension for the random matrix) and $k$ (the number of top segments selected). We show the effect of these two hyper-parameters with the Figure 4a and Figure 4b, respectively.   
+Aligned with our theoretical prediction with Theorem 2, increasing $n$ improves the performance by providing better attention approximation. Similarly, increasing $k$ also improves the generation quality by using more tokens. However, a high $n$ or $k$ imposes the need for more memory and increases the computational overhead. Given these considerations, we use $n=2048$ and $k=64$ by default to balance the generation quality and hardware efficiency.   
+Ablation study. Our algorithm involves an approximated top- ${\cdot k}$ selection. To verify that such an approximation is functioning as intended, we conduct three ablation studies in Figure 5 by replacing it with three other strategies. The experiments are conduced with the Llama model on the PG-19 sample.  
+
+![](images/b1787ed6afb70c40d088e1910b2dc12340a49495e7dfdc7819520bc2f8689a52.jpg)  
+Figure 5: Ablation studies. Here, we compare with three different segment selection strategies.  
+
+As shown, when we select segments with the lowest approximated segment attention scores (left), the performance becomes similar to StreamingLLM, suggesting that the selected tokens with low segment attention scores are indeed not informative. In addition, our approximation is better than the random selection strategy (middle), showing that such an approximation is choosing more informative tokens than the “uneducated guess”. Lastly, we see that our approximation has the closest performance compared with the exact segment search (right), indicating our method, albeit potentially missing some tokens, is a reasonable approximation given its low time complexity.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Context reduction. Previous literature shows that Transformers with sparse attention patterns can generate with fewer context tokens while not sacrificing the generation quality (Child et al., 2019; Beltagy et al., 2020; Zaheer et al., 2020; Roy et al., 2020; Chen et al., 2021). In addition to the success of sparse attention architectures, researchers also empirically demonstrate that the vanilla Transformers do not need all tokens in the context to correctly generate the current token (O’Connor & Andreas, 2021; Sun et al., 2021; Liu et al., 2024). Our work entails this discovery.  
+
+Based on the discovery, there are some closely related methods proposed Han et al. (2023). For instance, StreamingLLM (Xiao et al., 2024) uses only the local sliding window along with a few beginning tokens to generate the current token. $\mathrm{H_{2}O}$ (Zhang et al., 2023) proposes to additionally retain middle tokens based on a scoring function to maximize hit rate. SnapKV (Li et al., 2024) proposes to retain middle tokens based on the attention pooling in a parallel manner. All these methods, albeit reducing the context length, cannot recover the lost information once the context token is evicted. Moreover, they still suffer from the quadratic time complexity. By contrast, our method is able to dynamically retrieve any tokens in the context with a low time complexity. Recently, Zandieh et al. (2024) propose to compress the KV cache for memory and time efficiency, posing an opportunity for better algorithm designs.  
+
+Efficient attention. The quadratic computing time of the dot-product attention becomes a bottleneck in long-context generation. Searching for an efficient design of the attention mechanisms is a long-standing topic for Transformers (Wang et al., 2020; Kitaev et al., 2020). Recently, Landmark Attention (Mohtashami & Jaggi, 2023) proposes to use grouped softmax with a special token to reduce computation. Another line of work reduces the time complexity is through attention kernelization, which reformulates the dot-product attention mechanism as a kernel (Tsai et al., 2019; Katharopoulos et al., 2020; Peng et al., 2021; Zandieh et al., 2023). These methods can achieve linear complexity in both training and inference by recurrence. However, the parameters are required to be trained/fine-tuned to fit the new architectures. On the contrary, our method is training-free and can be applied to any pre-trained Transformers.  
+
+Instead of modifying the vanilla attention, recent literature also focuses on improving the efficiency in implementation. For example, Flash Attention series (Dao et al., 2022; Dao, 2023) leverage the tiling technique to avoid memory-bound attention operations. Memory-efficient attention (Rabe & Staats, 2021) reorders the attention calculation to allocate only the constant space for any context length. Our work is orthogonal to these methods and can be combined together.  
+
+Long-context ability via retrieval. In certain cases, Transformers can gain the long-context ability by retrieving related documents like retrieval-augmented generation (Lewis et al., 2020) based on $k\mathrm{NN}$ search. For instance, Memorizing Transformer $\mathrm{\DeltaWu}$ et al., 2022) recurrently caches previous tokens in a $k\mathrm{NN}$ index. Unlimiformer (Bertsch et al., 2023) uses a $k\mathrm{NN}$ index to retrieve the encoded chunks in the encoder-decoder attention. However, these methods can only be used with the specialized architectures after training. They may also suffer from the exponential search quality degradation when the dimension increases (Beyer et al., 1999). Unlike these methods, Radar is a training-free method with a rigorous performance guarantee independent of the dimension.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we present Radar, a general and effective approach to accelerate inference for Transformers. Unlike previous methods that train other variants of the attention mechanism for replacement, Radar can accelerate any pre-trained Transformers without the need for training. In addition, we provide theoretical justifications that show Radar can reliably identify the most important tokens with high probability. More importantly, our empirical results across a wide range of tasks and models confirm the effectiveness of our method. Compared with prior training-free methods that evict tokens based on heuristics, Radar utilizes context tokens dynamically in a principled manner, resulting in significantly higher generation quality while achieving a lower time complexity.  
+
+We hope that Radar opens up opportunities for pre-trained Transformers to be applied out-of-thebox, without requiring expensive re-training, to long context settings (e.g. legal documents or financial transactions). We also hope our method further inspires advancements in high-quality generation with low time complexities for LLMs.  
+
+ETHICS STATEMENT  
+
+Our research focuses on accelerating pre-trained Transformers to reduce power and time consumption in inference. As far as we are aware, it does not pose any new ethical or societal risks that require specific attention.  
+
+REPRODUCIBILITY STATEMENT  
+
+In our paper, all of our models and datasets are publicly accessible. For the models, we download them from HuggingFace’s hub using the following identifiers:  
+
+• meta-llama/Meta-Llama-3.1-8B • meta-llama/Llama-2-7b-chat-hf • huggyllama/Llama-7b • mistralai/Mistral-7B-v0.3 • mistralai/Mistral-7B-Instruct-v0.2  
+
+For the datasets, we follow the previous work and similarly obtain them from HuggingFace:  
+
+• THUDM/LongBench • emozilla/pg19-test • bigcode/the-stack-smol  
+
+We run all of our experiments on A100 GPUs.  
+
+The procedure of Radar is explained in Algorithm 1 with the theoretical justification in Theorem 2.   
+We will provide our code during the rebuttal.  
+
+
+
+

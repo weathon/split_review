@@ -1,0 +1,515 @@
+\title{Dynamic Mixture of Experts: An Auto-Tuning Approach for Efficient Transformer Models}
+
+\begin{abstract}
+  The Sparse Mixture of Experts (SMoE) has been widely employed to enhance the efficiency of training and inference for Transformer-based foundational models, yielding promising results.
+  However, the performance of SMoE heavily depends on the choice of hyper-parameters, such as the number of experts and the number of experts to be activated (referred to as top-$k$), resulting in significant computational overhead due to the extensive model training by searching over various hyper-parameter configurations.
+  As a remedy, we introduce the \algmoe (\algabbr) technique.
+  \algabbr incorporates (1) a novel gating method that enables each token to automatically determine the number of experts to activate.
+  (2) An adaptive process automatically adjusts the number of experts during training.
+  Extensive numerical results across Vision, Language, and Vision-Language tasks demonstrate the effectiveness of our approach to achieve competitive performance compared to GMoE for vision and language tasks, and MoE-LLaVA for vision-language tasks, while maintaining efficiency by activating fewer parameters.
+  \looseness=-1
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+The scalable nature of Transformer models~\citep{kaplan2020scaling} has gained remarkable successes across a spectrum of applications, ranging from language~\citep{achiam2023gpt,touvron2023llama,touvron2023llama2} and vision~\cite{kirillov2023segment,peebles2023scalable} to cross-modality domains~\citep{liu2024visual,li2022blip,li2023blip}.
+To further enhance performance while maintaining high efficiency, Sparse Mixture of Experts (SMoE) has emerged as a promising technique that significantly reduces computation costs during both training and inference stages~\citep{fedus2022switch,lepikhin2020gshard,zhang2022moefication}, and has been shown to achieve comparable or superior performance compared to traditional dense models~\citep{li2022sparse,jiang2024mixtral,dai2024deepseekmoe}.
+
+Despite its success, SMoE has an unavoidable drawback: \textit{the performance of SMoE heavily relies on the choice of hyper-parameters}, such as the number of activated experts per token, referred as top-$k$, and the number of experts~\citep{clark2022unified,fan2024towards,yang2021m6}, denoted as $K$. As illustrated in Figure~\ref{fig:illustration-variance}, the performance discrepancy of MoE models under various configurations can be approximately 1\%-3\%.
+Notably, \textit{identifying the optimal hyper-parameter without a sufficient number of ablation studies is challenging.}
+As the size of the models continues to grow, this limitation could result in a significant waste of computational resources, and in turn, could hinder the efficiency of training MoE-based models in practice.
+\looseness=-1
+
+To tackle the above problems, the objective of this paper is to explore a novel training technique for MoE models, with the aim of addressing the following core question:
+
+\begin{center}
+    \textit{Is it possible to develop a MoE training strategy that can \textbf{automatically} determine the number of experts and the number of activated experts per token during the training process?}
+\end{center}
+
+\begin{figure}[!t]
+    \centering
+    
+    \subfigure[Performance Fluctuation Illustration]{\includegraphics[width=.4\textwidth]{./figures/lang/COLA-new.pdf} 
+    \label{fig:illustration-variance}
+    }
+    \subfigure[Performance-Efficiency Illustration]{\includegraphics[width=.44\textwidth]{./figures/acc_act.pdf}
+    \label{fig:illustration-efficiency}
+    }
+    \caption{
+    \textbf{Illustration of performance and efficiency of \algabbr.} In Figure~\ref{fig:illustration-variance}, we carried out experiments on GLUE benchmark~\citep{wang2018glue}, employing BERT-large~\citep{devlin2019bert} as backbone.
+In Figure\ref{fig:illustration-efficiency}, we follow the MoE-LLaVA~\citep{lin2024moe} settings, the $x$-axis represents the number of activated parameters, while the $y$-axis shows the performance on the Visual Question Answering (VQA) task.
+    }
+    \label{fig:illustration-sparse}
+\end{figure}
+
+Hence, we introduce the \algmoe (\algabbr) method, which addresses the aforementioned question through the introduction of two innovative components: (1) a top-any gating method that enables each token to autonomously determine the number of experts to activate, thereby allowing different tokens to activate varying numbers of experts; (2) an adaptive training process that dynamically adjusts the number of experts, increasing it when the current quantity is inadequate and removing redundant experts as necessary.
+Additionally, we introduce a new auxiliary loss function specifically designed to encourage sparsity when employing the top-any gating approach. This loss encourages different experts to be diverse, rather than mandating that all experts be activated with the same frequency.
+We summarize the contributions of this paper as follows:
+\begin{itemize}[nosep, leftmargin=12pt]
+    \item Introducing \algabbr, a novel method frees the burden of pivotal hyper-parameter selection for MoE training, which is capable of autonomously determining the number of experts and the number of experts to be activated per token. We provide Tutel and DeepSpeed-MoE implementations for ease of practical usage.
+    \item Conducting extensive empirical experiments across Vision, Language, and Vision-Language tasks.
+          The results illustrate that \algabbr achieves comparable or superior performance and efficiency compared to the well-tuned MoE settings (Figure~\ref{fig:illustration-efficiency}). 
+\end{itemize}
+
+
+\section{Related Works}
+
+The Sparse Mixture of Experts (SMoE) approach~\citep{eigen2013learning,shazeer2017outrageously,lepikhin2020gshard} has been proven to effectively enhance the training and inference efficiency of foundational models. Contemporary studies primarily modify the MLP layer of transformer models into multiple expert models and employ a gating network to determine which expert to select. They only choose a subset of experts for each token during both training and inference~\citep{lepikhin2020gshard,fedus2022switch}. Recently, the SMoE structure has shown success in various research areas. For instance, GMoE~\citep{li2023sparse} has demonstrated that SMoE can enhance generalization performance in vision tasks. Large Language Models (LLMs) have also employed MoE to simultaneously reduce training and inference costs while improving model performance~\citep{fedus2022switch,jiang2024mixtral,dai2024deepseekmoe,ren2023pangu,lin2024moe}. However, most of these models employ standard SMoE structures and apply the SMoE to various tasks. Our paper focuses on improving the MoE training process, which can be easily integrated with these methods.
+
+Recently, some attempts have been made to improve the architecture of MoE models. For example, researchers have investigated the benefits of sample-wise~\citep{ramachandran2018diversity,gross2017hard} and token-wise~\citep{shazeer2017outrageously,riquelme2021scaling,fedus2022switch} routing. Some studies introduce load balancing loss to ensure that the experts are activated an equal number of times~\citep{lepikhin2020gshard,fedus2022switch}. Expert choice routing~\citep{zhou2022mixture} addresses load balance by allowing experts to choose tokens; however, this approach also suffers from dropped tokens. SoftMoE~\citep{puigcerver2023sparse} uses a slot mechanism to simultaneously resolve the issues of load balance and dropped tokens. Nevertheless, these approaches also require pre-defined hyperparameters, such as the number of experts or the number of experts to be activated. In this paper, we tackle this problem by presenting \algabbr, an algorithm that automatically determines the number of activated experts for each token and dynamically adds or removes experts during the training process. Furthermore, we introduce a new auxiliary loss function that ensures sparsity when utilizing the \algabbr algorithm.
+
+
+
+\section{Method}
+
+
+\begin{wrapfigure}{r}{.45\textwidth}
+    \centering
+    \includegraphics[width=.45\textwidth]{./figures/moe-overview.pdf}
+    \caption{\textbf{Illustration of the top-any gating method.} The input tokens pass through the gating weights $\mW_{g,e}$ corresponding to each expert $e$, obtaining the gating scores. The scores surpass gates $\mG_e$ will activate the subsequent expert. Finally, the expert outputs are combined to produce the output tokens.}
+    \label{fig:top-any-gating}
+\end{wrapfigure}
+
+In this section, we introduce the \algmoe (\algabbr), an algorithm capable of automatically determining the number of experts and the number of experts to be activated for both training and inference stages.
+This is achieved through the incorporation of two crucial components:
+\begin{itemize}[nosep, leftmargin=16pt]
+    \item[(1)] \emph{The top-any gating method} (Figure~\ref{fig:top-any-gating}), which models the gating mechanism as a multi-label classification problem, allowing tokens to decide the number of experts to be activated on their own.
+        This enables different tokens to activate varying numbers of experts, including the option to activate no experts.
+    \item[(2)] \emph{A carefully designed adaptive process} that adds new experts when tokens choose to not activate any existing experts, and removes any surplus experts that have not been activated by any tokens.
+\end{itemize}
+The overall process is summarized in Algorithm~\ref{alg:algorithm-framework-general}.
+\subsection{Top-Any Gating}
+In this section, we present the superior gating method to eliminate the need for tuning the top-$k$ value.
+We further improve the test-time inference procedure and introduce an additional auxiliary loss to prevent token dropping and boost efficiency.
+\paragraph{Traditional top-$k$ gating and the limitations.}
+The traditional top-$k$ gating method uses the token embedding $\xx$ as inputs and uses an additional gating network $g$ to predict the scores that the input token embedding assigned to each expert.
+Typically, given token $\xx \in \R^{d}$ as input, the gating process is defined as the follows~\cite{rajbhandari2022deepspeed,hwang2023tutel}:
+\begin{align}
+    g(\xx) \in \R^{K} := \text{softmax}(\mW_g^{T} \xx) \,,
+\end{align}
+where $\mW_g \in \R^{d \times K}$ is the parameter of the gating network, and $K$ is the number of experts.
+Then the output of the MoE layer is defined by
+\begin{align}
+    \yy = \frac{1}{\sum_{e \in \text{Top-}k \left( g(\xx) \right) } g(\xx)_e } \sum_{e \in \text{Top-}k \left( g(\xx) \right) } g(\xx)_e E_e(\xx) \,,
+\end{align}
+where $ E_e(\xx) \in \R^{d} $ is the output of $e$-th expert given input $\xx$, and $g(\xx)_e$ is the $e$-th entry of $g(\xx)$.
+
+Despite the considerable success of the top-$k$ gating method in enhancing training and inference efficiency, two limitations persist:
+\begin{enumerate}[nosep, leftmargin=12pt]
+    \item \emph{The value of $k$ must be fine-tuned to optimize model performance.}
+          As demonstrated in Figure~\ref{fig:illustration-variance}, the performance of MoE models can vary significantly with different top-$k$ values.
+          This observation has also been noted in recent studies~\citep{clark2022unified, fan2024towards, yang2021m6}.
+          Consequently, substantial computational resources are needed to identify the optimal value of $k$.
+    \item \emph{The top-$k$ gating approach assumes that each token must activate the same number of experts, which may not always hold in practice.}
+          For instance, when considering different tasks, there could exist tokens shared by all tasks and those specific to certain tasks, i.e. different tokens could activate different numbers of experts.
+\end{enumerate}
+\paragraph{Addressing the limitations of top-$k$ gating by tuning-free top-any gating.}
+To address the aforementioned limitations, we propose the \emph{\textbf{top-any gating method}}, which does not require a pre-defined value of $k$ and allows different tokens to activate varying numbers of experts during both training and inference stages.
+
+The design of the top-any gating method draws inspiration from the multi-label classification problem.
+We consider each expert as an individual class and calculate the classification (gating) score for each class (expert) independently.
+Subsequently, all classes (experts) with scores exceeding the threshold are deemed positive (activated).
+In detail, given the expert representation matrix $\mW_g \in \R^{K \times d}$, where the $k$-th row of $\mW_g$ acts as the representation of expert $k$, and an input token $\xx \in \R^{d}$, the key steps of top-any gating can be formulated by the following equation:
+\begin{align}
+    s(\xx) & = \frac{\left \langle \xx, \mW_{g} \right \rangle}{\norm{\xx} \norm{\mW_{g}}} \,, \label{equ:gating-sim} \\
+    g(\xx) & = \text{sign} \left( \sigma \left( s(\xx) \right) - \sigma( \mG ) \right) \,, \label{equ:gating-score}
+\end{align}
+where $\mW_g \in \R^{K \times d}$ and $\mG \in \R^{K}$.
+To illustrate, we first compute the cosine similarities between the token and the expert representation matrix $\mW_g$ and obtain the similarity score $s(\xx) \in \R^{K}$.
+Then the sigmoid function $\sigma$ is applied to the similarity score $s(\xx)$ to obtain the scores between $0$ and $1$.
+Finally, experts with similarity scores greater than the trainable per-expert threshold $\mG$ are considered to activate experts for the token $\xx$.
+It is important to note that the sign function does not support back-propagation, and thus we customize the back-propagation process of this part by directly copying the gradient of $g(\xx)$ to $\sigma \left( s(\xx) \right) - \sigma ( \mG )$ to effectively bypass the sign function.
+
+Given the gating score $g(\xx) \in \R^{K}$, the number of activated experts is then defined by
+\begin{align}
+    k := \text{sum} \left( g(\xx) \right)  \,, \label{equ:gating-k}
+\end{align}
+where $k$ represents the number of experts to be activated for token $\xx$.
+The model output of the MoE layer with the top-any gating method can be derived as follows
+\begin{align}
+    \yy = \frac{1}{k} \sum_{g(\xx)_e > 0} E_{e}(\xx) \,. \label{equ:gating-outputs}
+\end{align}
+
+\begin{remark}[Discussion on not to consider the magnitude of scores when averaging the expert outputs.]
+    In our top-any gating approach, the scores of different experts are calculated independently. As a result, the scores of different experts may have different scales and ranges. For instance, there may be cases where the scores of Expert 1 are within the range of (0.1, 0.2), but the scores of Expert 2 are within the range of (0.8, 0.9). To avoid this mismatch, we have decided not to consider the magnitude of scores in Equation 6.
+\end{remark}
+\paragraph{Improving the top-any gating during test-time to prevent token dropping.}
+To facilitate the design of the adaptive expert number process, we did not impose a minimum value on $k$.
+Consequently, some tokens may not activate any experts.
+To address this issue, during model performance evaluation, we modify the top-any gating to enable top-$1$ gating for tokens that do not choose to activate any experts.
+In detail, for the input token $\xx$ with $\text{sum}(g(\xx)) = 0$, the modified gating score $\tilde{g}(\xx)$ is obtained by
+\begin{align}
+    \tilde{g}(\xx)_k =
+    \begin{split}
+        \left \{            \begin{array}{ll}
+            0               & k \not = \argmax_{k} \sigma (s(\xx)) \,, \\
+            \sigma (s(\xx)) & k = \argmax_{k} \sigma (s(\xx)) \,.
+        \end{array}
+        \right.
+    \end{split}
+\end{align}
+\paragraph{Guarding efficiency for top-any gating by auxiliary loss.}
+The primary goal of using MoE models is to improve the training and inference efficiency.
+However, in the absence of a cap on the maximum number of activated experts, tokens might activate all experts, which is counterproductive to our primary goal.
+
+Using an auxiliary loss as a regularization over experts may alleviate our issue.
+However, existing auxiliary loss methods~\citep{lepikhin2020gshard,fedus2022switch,wu2024multi} are primarily designed to ensure load balancing across experts and thus cannot align with our objectives.
+While activating all experts can indeed achieve load balancing, it contradicts our aim of improving efficiency by limiting the number of activated experts.
+Therefore, we need a solution that not only ensures load balancing but also restricts the number of activated experts.
+\looseness=-1
+
+As a remedy, we propose a new auxiliary loss, namely \emph{sparse and simple gating loss}, as shown in~\eqref{equ:gating-loss}.
+The \emph{diversity loss} and \emph{simplicity loss} in~\eqref{equ:gating-loss} work together to improve the efficiency of the model by addressing different aspects of the expert representations.
+On one hand, the \emph{diversity loss} encourages independence among the $\mW_g$ representations of various experts.
+It serves two purposes: First, it prevents a high degree of similarity between experts, thereby enhancing the model's representational capacity;
+Second, it guides tokens to avoid simultaneous activation of all experts, thereby promoting sparse gating for improved efficiency.
+On the other hand, the \emph{simplicity loss} normalizes $\mW_g$ to avoid excessively large values within the matrix, which helps maintain numerical stability and prevents overfitting due to extreme parameter values.
+The detailed loss function is defined as follows:
+\begin{align}
+    \textstyle
+    \cL = \underbrace{\norm{\mW_g^{T} \mW_g - \mI_K}_2}_{\emph{diversity loss}} + \underbrace{\frac{1}{K} \sum_{e=1}^{K} \norm{\ww_{g, e}}_2}_{\emph{simplicity loss}} \,, \label{equ:gating-loss}
+\end{align}
+where $\mI_K$ is the identity matrix with dimension $K$, and $\ww_{g, e} \in \R^{d}$ is the $e$-th element of $\mW_g$, indicating the representation of the $e$-th expert.
+\subsection{Adaptive Training Process}
+
+\begin{algorithm}[!t]
+    \small
+    \begin{algorithmic}[1]
+        \small
+        \Require{Input data $\xx$, initial gating network parameters $\mW_g$, $\mG$, and $\tau$, experts $E_1, \cdots, E_K$, start record routing flag $flag_{s}$, finish record routing flag $flag_{f}$.}
+        \Ensure{MoE layer output $\yy$, auxiliary loss value.}
+        \If{$flag_{s}$}
+        \myState{Set routing flag $flag_{rout} = 1$.}
+        \myState{Initialize routing records by $\mR_{\text{rout}} = \0_{K}$.}
+        \myState{Initialize non-activate sample records $\mR_{\text{sam}} = \0_{d}$.}
+        \EndIf
+        \myState{Get the gating outputs $g(\xx)$ and $\kk$ by Eq~\eqref{equ:gating-score}} and~\eqref{equ:gating-k}.
+        \myState{Get MoE layer output $\yy$ by Eq~\eqref{equ:gating-outputs}.}
+        \myState{Calculate auxiliary loss by Eq~\eqref{equ:gating-loss}.}
+        \If{$flag_{rout} = 1$}
+        \myState{$\mR_{E} = \mR_{E} + \text{sum}(g(\xx), \text{dim}=0)$.}
+        \myState{$\mR_{S} = \mR_{S} + \sum_{i=1}^{N} \1_{\kk_i = 0} \xx_i$}
+        \EndIf
+        \If{$flag_{f}$}
+        \myState{$flag_{rout} = 0$.}
+        \If{Exists $e$ that $\mR_{\text{E}}^{e} = \mathbf{0}$}
+        \myState{Remove experts $e$.}
+        \EndIf
+        \If{$\mR_{\text{S}, e} \not = \mathbf{0}$}
+        \myState{Add new expert $K + 1$ with expert representation $\mW_{g, K + 1} = \mR_{S} / \norm{\mR_{S}}$.}
+        \EndIf
+        \EndIf
+    \end{algorithmic}
+    \mycaptionof{algorithm}{\small Pseudo code of \algabbr on each iteration and MoE layer.}
+    \label{alg:algorithm-framework-general}
+\end{algorithm}
+
+In this section, we elaborate on the adaptive training process, which is designed to automatically determine the number of experts.
+As illustrated in Figure~\ref{fig:adaptive-proc}, the adaptive process consists of three parts, namely
+(1) \emph{Routing Recording}: recording the routing results during training;
+(2) \emph{Adding Experts}: adding new experts when tokens choose not to activate any existing experts;
+and (3) \emph{Removing Experts}: removing experts that have not been chosen by any tokens.
+To promising efficiency and avoiding burden communication, we only check if experts required to be added add or removed every 100-300 iterations.
+
+\paragraph{\emph{Routing Recording}.}
+To facilitate the removal and addition of experts, it is essential to track the routing status.
+Specifically, we record two key pieces of information for each MoE layer: (1) For each expert $e$, we record the time at which expert $e$ is activated, denoted as $\mR_{E} \in \R^{K}$ (as shown in Line 9 of Algorithm~\ref{alg:algorithm-framework-general}).
+(2) For input data that does not activate any expert, we compute the sum of their embeddings $\xx$ as $\mR_{S} \in \R^{d}$ (as outlined in Line 10 of Algorithm~\ref{alg:algorithm-framework-general}).
+Note that this approach simplifies the expert addition process: by using the token embeddings to initialize the expert representation $\mW_g$, we can achieve a high similarity score between these tokens and the new experts, ensuring that the new expert will be activated by these tokens when added.
+
+As demonstrated in Algorithm~\ref{alg:algorithm-framework-general}, we utilize $flag_{s}$ and $flag_{f}$ to determine when to start and stop routing recording.
+Users can control these two flags as needed.
+
+\paragraph{\emph{Adding Experts} when there exist tokens that choose not to activate any experts.}
+We add new experts when the recorded $\mR_{S} \not = \mathbf{0}$, as some tokens do not activate any experts and $\mR_{S}$ is the sum of these tokens.
+Therefore, given $K$ activated experts and new expert $K + 1$, we initialize $\mW_{g, K + 1} = \frac{\mR_{S}}{\norm{\mR_{S}}}$ and $\mG_{K+1} = \mathbf{0}$.
+Moreover, due to the device constrain, the maximum number of experts should be constrained. We set the maximum number of experts to 16 for vision and language tasks, and 4 for vision-language tasks in practice.
+
+\paragraph{\emph{Removing Experts} when there exist experts not activated by any token.}
+We remove experts when there is an expert $e$ such that $\mR_{E}^{e} = \mathbf{0}$ (as shown in Line 13 in Algorithm~\ref{alg:algorithm-framework-general}), which indicates that there is no token choose to activate the expert $e$.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\textwidth]{./figures/adaptive_proc.pdf}
+    \caption{
+        \textbf{Elaboration on the adaptive training process.}
+        We visualize the adaptive training process of \algabbr, including record routing, experts adding, and experts removing.
+        The green strip connecting the token and the expert indicates records of a token routing to an expert.
+        The red arrow at the bottom part of the figure shows where and when expert addition and removal happens.
+    }
+    \label{fig:adaptive-proc}
+\end{figure}
+
+
+\section{Experiments}
+
+In this section, we carry out experiments to address the following questions:
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item \textbf{Q1}: Can \algabbr achieve competitive performance among different MoE settings? See \ref{answer1}.
+    \item \textbf{Q2}: Can \algabbr handle tasks with varying modalities and scales? See \ref{answer2}.
+    \item \textbf{Q3}: Will the model trained by \algabbr maintain sparsity to ensure efficiency? See \ref{answer3}.
+    \item \textbf{Q4}: Can \algabbr offer insights that could guide the design of MoE models? See \ref{answer4}.
+\end{itemize}
+\subsection{Experiment Setup} To answer the above four questions, we conduct experiments on Vision, Language, and Vision-Language tasks. The details are shown in the following.
+\begin{itemize}[leftmargin=12pt, nosep]
+    \item \textbf{Vision Task.} For the vision tasks, we follow the same settings as in GMoE~\citep{li2023sparse}. We employ the pre-trained ViT-S/16~\cite{dosovitskiy2020image} model and evaluate it on the DomainBed~\citep{gulrajani2020search} benchmark.
+          Our experiments encompass four Domain Generalization datasets: PACS~\citep{li2017deeper}, VLCS~\citep{albuquerque2019generalizing}, OfficeHome~\citep{venkateswara2017deep}, and DomainNet~\citep{peng2019moment}.
+          All results are reported using the train-validation selection criterion.
+    \item \textbf{Language Task.} The language tasks adhere to the same settings as those in MoEfication~\citep{zhang2022moefication} and EMoE~\citep{qiu2023emergent}.
+          The MoE models are built upon the BERT-large~\citep{devlin2019bert} architecture using the MoEfication method and are fine-tuned on GLUE~\citep{wang2018glue} tasks, which include COLA~\citep{warstadt2019neural}, QNLI~\citep{wang2018glue}, RTE~\citep{bentivogli2009fifth}, MNLI~\citep{xu2020clue}, and MRPC~\citep{dolan2005automatically}.
+          For each MoE setting, we tune the learning rates in \{2e-5, 3e-5, 5e-5\} and report the best results. 
+    \item \textbf{Vision-Language Task.} The vision-language tasks follows the setting in MoE-LLaVA~\citep{lin2024moe}, where we use StableLM-2-1.6B~\citep{bellagente2024stable}, Qwen-1.8B~\citep{bai2023qwen} and Phi-2-2.7B~\citep{hughesPhi2SurprisingPower2023} as backbone language models, and use clip-vit-large-patch14-336~\citep{radford2021learning} as the vision encoder.
+          The models are evaluated on image understanding benchmarks including VQA-v2~\citep{goyal2017making}, GQA~\citep{hudson2019gqa}, VisWiz~\citep{gurari2018vizwiz}, ScienceQA-IMG~\citep{lu2022learn}, TextVQA~\citep{singh2019towards}, POPE~\citep{li2023evaluating}, MME~\citep{yin2023survey}, MMBench~\citep{liu2023mmbench}, LLaVA-Bench (in-the-Wild)~\citep{liu2024visual}, and MM-Vet~\citep{yu2023mm}. Furthermore, we keep routing records in our model during testing time. For each benchmark, we collect the number of experts' activations per MoE layer and total processed tokens during testing. The hyper-parameter settings are the same to MoE-LLaVA for fair comparision.
+\end{itemize}
+\subsection{\label{answer1}A1: \algabbr Achieves Competitive Performance among Various MoE Settings}
+In this section, we carry out experiments on the GLUE benchmark~\citep{wang2018glue}, varying the number of experts ($K$) and the value of top-$k$.
+The results of these experiments can be observed in Figure~\ref{fig:language}.
+
+\looseness=-1
+
+\paragraph{The performance of \algabbr surpasses the average performance among various MoE settings.}
+As seen in Figure~\ref{fig:language}, we can observe that
+\begin{enumerate}[nosep, leftmargin=12pt]
+    \item The \algabbr outperforms the average performance for various $K$ and top-$k$ values in most tasks. \algabbr also achieves the highest number of top-1/2 best performances among all MoE settings, demonstrating its competitive performance.
+    \item The performance fluctuates considerably with different $K$ and top-$k$ values, such as up to 3.0\% on the RTE task and 1.3\% on the COLA task.
+          \algabbr overcomes this issue by not requiring pre-defined $K$ and top-$k$ values.
+    \item  The performance gain of specific $K$ and top-$k$ choice is not consistent among tasks.
+          For instance, the $K = 16, k = 4$ setting performs well on QNLI but poorly on MRPC.
+          In contrast, the \algabbr always achieve competitive performance among tasks.
+\end{enumerate}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{./figures/lang/lang.pdf}
+    \caption{
+        \textbf{Performance of \algabbr on language tasks.}
+        We conduct experiments on the GLUE benchmark.
+        The $x$-axis represents MoE settings with varying $K$ and top-$k$ values.
+        The $y$-axis denotes the model's performance.
+        Dashed lines indicate the average performance across different settings, as well as the performance of \algabbr. For all the MoE settings, we tune the learning rates in \{2e-5, 3e-5, 5e-5\} and report the best results. We also report the times when each MoE setting attains the top-2 best results across all configurations.
+        \looseness=-1
+    }
+    \label{fig:language}
+\end{figure}
+
+\subsection{\label{answer2}A2: \algabbr Can Handle Vision, Language, and Vision-Language Tasks}
+
+In addition to Language tasks, we also conduct experiments on Vision and Vision-Language tasks to verify the performance of \algabbr on different modalities and task scales.
+The results can be found in Tables~\ref{tab:vision}, and~\ref{tab:vision-language}.
+
+\paragraph{The effectiveness of \algabbr remains consistent in both Vision and Vision-Language tasks.}
+Compared to the standard MoE,
+we can observe the following: 
+\textbf{A.} \algabbr outperforms standard MoE with well-tuned learning rate, number of experts, and top-$k$~\citep{qiu2023emergent} in Vision tasks. The performance difference between \algabbr and another well-tuned MoE setting in~\citep{li2023sparse}, falls within the range of random fluctuation. 
+\textbf{B.} When using StableLM-1.6B and Phi-2-2.7B as the backbone, the performance of \algabbr-LLaVA surpasses that of MoE-LLaVA. 
+\textbf{C.} With Qwen-1.8B as the backbone, the performance of \algabbr-LLaVA remains comparable to MoE-LLaVA. In this setting, the average top-$k$ of \algabbr-LLaVA (avg $k = 1.86$) is also close to the MoE-LLaVA setting ($k=2$).
+\textbf{D.} In the BERT experiments (Figure~\ref{fig:language}), \algabbr generally activate more experts for each token compared to larger scale MoE-LLaVA experiments (Table~\ref{tab:vision-language}). This observation aligns with the BERT experiments results obtained when using a fixed k value, i.e., k=4 generally performs better among the set \{1,2,4,8\}.
+\looseness=-1
+
+\begin{table}[!t]
+    \centering
+    \caption{
+        \textbf{Performance of \algabbr on vision tasks}:
+        Our study investigates the performance of \algabbr on vision tasks using the DomainBed benchmark, with ViT-small serving as the backbone model.
+        The effectiveness of GMoE is elucidated based on meticulously tuned results as presented in the previous works~\cite{li2023sparse} and~\cite{qiu2023emergent}.
+        In our implementation of \algabbr, we configure the maximum number of experts to $8$, with an initial setting of 6 experts.
+        The number of experts is dynamically adjusted in each iteration for \algabbr.
+        We also report the performance of \algabbr using Gshard loss~\citep{lepikhin2020gshard} as the auxiliary loss.
+    }
+    \resizebox{.9\textwidth}{!}{
+        \begin{tabular}{l c c c c c}
+            \toprule
+            Algorithms                                           & PACS & VLCS & OfficeHome & DomainNet & Average \\
+            \midrule
+            GMoE (in~\cite{li2023sparse})                        & 88.1 & 80.2 & 74.2       & 48.7      & 72.8    \\
+            GMoE (carefully tuned~\citep{qiu2023emergent})       & 87.7 & 79.6 & 73.1       & -         & -       \\
+            \midrule
+            GMoE (with \algabbr, Gshard Loss)                    & 88.4 & 79.4 & 73.6       & 47.4      & 72.2    \\
+            GMoE (with \algabbr, Diverse and Simple Gating Loss) & 87.6 & 80.3 & 73.5       & 48.2      & 72.4    \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:vision}
+\end{table}
+
+\begin{table}[!t]
+    \centering
+    \caption{
+        \textbf{Performance of \algabbr on vision-language tasks}: Our study investigates the performance of \algabbr-LLaVA on image understanding benchmarks.
+        Evaluation Benchmarks include VQA-v2; GQA; VisWiz; SQA$^I$ (ScienceQA-IMG); VQA$^T$ (TextVQA); POPE; MME; MMB (MMBench); LLaVA$^W$ (LLaVA-Bench (in-the-Wild)); MM-Vet.
+        For a fair comparison, we set the maximum number of experts to 4 for \algabbr-LLaVA (the same as the number of experts in MoE-LLaVA) and set the initial number of experts to $2$.
+        $N_{A}$ indicates the number of activated parameters.
+    }
+    \resizebox{1.\textwidth}{!}{
+        \begin{tabular}{l|c c|ccccc|ccccc}
+            \toprule
+            Algorithms                           & $N_{A}$                 & VQA$^{v2}$                  & GQA                         & VisWiz                      & SQA$^I$                     & VQA$^T$                     & POPE                        & MME                           & MMB                         & LLaVA$^W$                   & MM-Vet                      \\
+            \midrule
+            \textit{Dense}                                                                                                                                                                                                                                                                                                                                                                  \\
+            \makecell[r]{LLaVA-1.5 (Vicuna-13B)} & \textcolor{lightgray}{13B} & \textcolor{lightgray}{80.0} & \textcolor{lightgray}{63.3} & \textcolor{lightgray}{53.6} & \textcolor{lightgray}{71.6} & \textcolor{lightgray}{61.3} & \textcolor{lightgray}{85.9} & \textcolor{lightgray}{1531.3} & \textcolor{lightgray}{67.7} & \textcolor{lightgray}{70.7} & \textcolor{lightgray}{35.4} \\
+            \makecell[r]{LLaVA-1.5 (Vicuna-7B)}  & \textcolor{lightgray}{7B} & \textcolor{lightgray}{78.5} & \textcolor{lightgray}{62.0} & \textcolor{lightgray}{50.0} & \textcolor{lightgray}{66.8} & \textcolor{lightgray}{58.2} & \textcolor{lightgray}{85.9} & \textcolor{lightgray}{1510.7} & \textcolor{lightgray}{64.3} & \textcolor{lightgray}{63.4} & \textcolor{lightgray}{30.5} \\
+            \makecell[r]{LLaVA-Phi (Phi-2-2.7B)}   & 2.7B  &                     71.4                        & -                           & 35.9                        & 68.4                        & 48.6                        & 85.0                        & 1335.1                        & 59.8                        & -                           & 28.9                        \\
+            \midrule
+            \textit{Sparse (StableLM-1.6B)}                                                                                                                                                                                                                                                                                                                                                 \\
+            \makecell[r]{MoE-LLaVA                                                                                                                                                                                                                                                                                                                                                          \\($K=4,k=2$)} & \makecell{2.06B} &  76.7 & 60.3 & 36.2 & 62.6 & 50.1 & 85.7 & 1318.2 & 60.2 & 86.8 & 26.9 \\
+            \cmidrule(lr){2-12}
+            \makecell[r]{\algabbr-LLaVA                                                                                                                                                                                                                                                                                                                                                           \\(avg $k = 1.25$)} & 1.75B & 77.4 & 61.4 & 40.6 & 63.4 & 48.9 & 85.7 & 1300.9 & 63.2 & 86.4 & 28.1 \\
+            \midrule
+            \textit{Sparse (Qwen-1.8B)}                                                                                                                                                                                                                                                                                                                                                     \\
+            \makecell[r]{MoE-LLaVA                                                                                                                                                                                                                                                                                                                                                          \\($K=4,k=2$)} & \makecell{2.24B} & 76.2 & 61.5 & 32.6 & 63.1 & 48.0 & 87.0 & 1291.6 & 59.7 & 88.7 & 25.3 \\
+            \cmidrule(lr){2-12}
+            \makecell[r]{\algabbr-LLaVA                                                                                                                                                                                                                                                                                                                                                           \\(avg $k = 1.86$)} & 2.19B & 76.4 & 60.9 & 32.4 & 63.2 & 47.5 & 85.8 & 1302.4 & 61.3 & 89.2 & 24.2 \\
+            \midrule
+            \textit{Sparse (Phi-2-2.7B)}                                                                                                                                                                                                                                                                                                                                                      \\
+            \makecell[r]{MoE-LLaVA                                                                                                                                                                                                                                                                                                                                                          \\($K=4,k=2$)} & \makecell{3.62B} & 77.6 & 61.4 & 43.9 & 68.5 & 51.4 & 86.3 & 1423.0 & 65.2 & 94.1 & 34.3\\
+            \cmidrule(lr){2-12}
+            \makecell[r]{\algabbr-LLaVA                                                                                                                                                                                                                                                                                                                                                           \\(avg $k = 1.68$)} & 3.35B & 77.9 & 61.6 & 45.1 & 68.0 & 51.8 & 86.0 & 1429.6 & 66.6 & 95.6 & 33.6 \\
+            \bottomrule
+        \end{tabular}
+    }
+    \normalsize
+    \label{tab:vision-language}
+\end{table}
+\subsection{\label{answer3}A3: \algabbr Maintains Efficiency by Activating Less Parameters}
+In this section, we aim to demonstrate that although we did not enforce sparsity on the \algabbr models, the trained \algabbr models are still sparse, promising improved inference efficiency.
+
+\paragraph{\algabbr-LLaVA activates fewer parameters compared to MoE-LLaVA.} 
+In Table~\ref{tab:vision-language}, we display the number of activated parameters in the "$N_A$" column.
+When using StabeLM-1.6B as the backbone, \algabbr-LLaVA activates approximately 15.0$\%$ fewer parameters than MoE-LLaVA.
+For Qwen-1.8B, \algabbr-LLaVA activates about 2.2$\%$ fewer parameters than MoE-LLaVA.
+For Phi-2-2.7B, \algabbr-LLaVA activates about 7.5$\%$ fewer parameters than MoE-LLaVA.
+In these three cases, the reduction in activated parameters does not compromise the model's performance.
+
+\paragraph{Ablation studies on the value of top-$k$ during test.}
+In Table~\ref{tab:ablation-test-top-k}, we examine the performance of \algabbr-LLaVA when using different top-$k$ values during the testing phase.
+The results indicate that (1) The original \algabbr-LLaVA outperforms other settings in most cases while activating the fewest number of parameters.
+(2) Compared to the StableLM-1.6B backbone, \algabbr-LLaVA trained with the Qwen-1.8B backbone sometimes favors activating two experts.
+This observation aligns with the fact that \algabbr-LLaVA also chooses to activate about $2$ experts (see Table~\ref{tab:vision-language}).
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\textwidth]{./figures/stablelm/avg-topk-barchart.pdf}
+    \caption{\textbf{Average top-$k$ activated experts of \algabbr on vision-language benchmarks.} We record average top-$k$ activated experts for each MoE layer when using StableLM-1.6B as the language model backbone.}
+    \label{fig:avg-topk-stablelm}
+\end{figure}
+
+\begin{table}[!t]
+    \centering
+    \caption{\textbf{Ablation studies on the value of top-$k$ during test.}
+        We train the models using \algabbr and set different values of top-$k$ during the test.
+        Training and evaluation settings are identical to that of Table~\ref{tab:vision-language}.}
+    \resizebox{1.\textwidth}{!}{
+        \begin{tabular}{l|c|ccccc|ccccc}
+            \toprule
+            Algorithms       & $N_{A}$ & VQA$^{v2}$ & GQA  & VisWiz & SQA$^I$ & VQA$^T$ & POPE & MME    & MMB  & LLaVA$^W$ & MM-Vet \\
+            \midrule
+            \textit{StableLM-1.6B} \\
+            \algabbr-LLaVA         & 1.75B   & 77.4       & 61.4 & 40.6   & 63.4    & 48.9    & 85.7 & 1300.9 & 63.2 & 86.4      & 28.1   \\
+            \algabbr-LLaVA ($k=2$) & 2.06B   & 76.9       & 61.0 & 39.1   & 62.1    & 49.2    & 85.7 & 1320.4 & 62.4 & 73.6      & 28.2   \\
+            \algabbr-LLaVA ($k=3$) & 2.47B   & 76.8       & 60.7 & 37.0   & 62.6    & 48.9    & 85.5 & 1306.9 & 62.5 & 74.0      & 26.8   \\
+            \algabbr-LLaVA ($k=4$) & 2.89B   & 76.8       & 60.5 & 34.8   & 61.9    & 49.0    & 85.8 & 1321.9 & 61.9 & 75.8      & 27.8   \\
+            \midrule     \textit{Qwen-1.8B} \\
+            \algabbr-LLaVA         & 2.19B   & 76.2       & 61.5 & 32.6   & 63.1    & 48.0    & 87.0 & 1291.6 & 59.7 & 88.7      & 25.3   \\
+            \algabbr-LLaVA ($k=2$) & 2.24B   & 76.2       & 60.8 & 33.8   & 62.2    & 47.7    & 87.5 & 1281.3 & 60.4 & 91.3      & 23.0   \\
+            \algabbr-LLaVA ($k=3$) & 2.65B   & 76.2       & 60.5 & 32.2   & 62.9    & 48.1    & 88.4 & 1263.7 & 60.7 & 87.8      & 23.4   \\
+            \algabbr-LLaVA ($k=4$) & 3.05B   & 75.7       & 60.0 & 31.6   & 62.8    & 48.3    & 88.1 & 1263.4 & 61.0 & 86.7      & 23.7   \\
+            \midrule
+            \textit{Phi-2-2.7B} \\
+            \algabbr-LLaVA         & 3.35B   & 77.9       & 61.6 & 45.1   & 68.0    & 51.8    & 86.0 & 1429.6 & 66.6 & 95.6      & 33.6   \\
+            \algabbr-LLaVA ($k=2$) & 3.62B   & 77.8       & 61.5 & 41.6   & 67.6    & 51.8    & 85.5 & 1433.5 & 66.8 & 95.1      & 32.7   \\
+            \algabbr-LLaVA ($k=3$) & 4.46B   & 77.7       & 61.8 & 42.0   & 68.0    & 52.3    & 86.3 & 1438.1 & 66.8 & 94.3      & 30.8   \\
+            \algabbr-LLaVA ($k=4$) & 5.30B   & 77.5       & 61.4 & 41.7   & 68.0    & 52.4    & 87.0 & 1431.5 & 66.5 & 95.8      & 32.8   \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:ablation-test-top-k}
+\end{table}
+
+\begin{figure}[!t]
+    \centering
+    \subfigure[Activation frequency \footnotesize{(Qwen)}]{
+        \includegraphics[width=.315\textwidth]{./figures/qwen/VQAv2_layer_activations.pdf}
+    }
+    \subfigure[Activation frequency \footnotesize{(StableLM)}]{
+        \includegraphics[width=.315\textwidth]{./figures/stablelm/VQAv2_layer_activations.pdf}
+    }
+    \subfigure[Activation frequency \footnotesize{(Phi-2)}]{
+        \includegraphics[width=.315\textwidth]{./figures/phi/VQAv2_layer_activations.pdf}
+    }
+    \caption{
+        \textbf{Statistics of expert activation frequency in different layers.}
+        We report the frequency of expert activations in various layers for the VQA task.
+        Larger circles indicate experts that are activated more frequently.
+    }
+    \label{fig:expert-activation-freq}
+\end{figure}
+
+\begin{table}[!t]
+    \centering
+    \caption{
+        \textbf{Efficiency evaluation of \algabbr comparing to MoE-LLaVA.} We conduct experiments on single A100 GPU (80 GB) paired with 16 CPUs using identical environment and identical training/inference configurations. To ensure a fair evaluation, MoE-LLaVA employs the expert dispatching implementation from \algabbr by fixing the top-$k$ values.
+        The symbols $\downarrow$ and $\uparrow$ indicate that lower and higher values, respectively, denote better performance.
+    }
+    \setlength{\tabcolsep}{2pt}
+    {\fontsize{10}{8}\selectfont
+    \resizebox{1.\textwidth}{!}{  
+    \begin{tabular}{l c c c c c}  
+        \toprule  
+        Model & Training FLOPs $\downarrow$ & Inference FLOPs $\downarrow$ & Inference MACs $\downarrow$ & Throughput $\uparrow$ & Memory Usage $\downarrow$ \\[1.5pt]
+        & (TFLOPs/step) & (GFLOPs/token) & (GMACs/token) & (output token/s) & (GB) \\
+        \midrule  
+        MoE-LLaVA (StableLM) & 18.23 & 27.62 & 13.34 & 19 & 5.98\\
+        DynMoE-LLaVA (StableLM) & 17.97 & 25.25 & 12.13 & 26 & 5.98 \\
+        \midrule  
+        MoE-LLaVA (Qwen) & 34.27 & 23.36 & 11.30 & 18 & 6.37 \\
+        DynMoE-LLaVA (Qwen) & 34.61 & 22.17 & 10.73 & 23 & 6.37 \\
+        \midrule  
+        MoE-LLaVA (Phi-2) & 63.43 & 46.87 & 22.73 & 14 & 10.46 \\
+        DynMoE-LLaVA (Phi-2) & 63.36 & 44.92 & 21.72 & 18 & 10.46 \\
+        \bottomrule  
+    \end{tabular}  
+    }}
+    \label{tab:inference-efficiency}
+\end{table}
+
+\paragraph{Inference efficiency of \algabbr.} To further evaluate the inference efficiency of DynMoE, we have compared its FLOPs, MACs, speed, and memory usage to those of MoE-LLaVA. The results in Table~\ref{tab:inference-efficiency} show that: (1) \algabbr exhibits lower FLOPs and MACs, and higher throughput compared to MoE-LLaVA, which indicates the improved efficiency of \algabbr. (2) In the current implementation, all the experts in the expert pool (whether loaded or unloaded) occupy GPU memory. Consequently, DynMoE has the same memory usage as MoELLaVA. To enhance efficiency in practice, we can offload the unloaded experts from the GPU memory. 
+
+\paragraph{Training efficiency of \algabbr.} We present training FLOPs for Language (Figure~\ref{fig:performance-flops-illustration}) and Vision-Language (Table~\ref{tab:inference-efficiency}) experiments. The results indicate that \algabbr attains similar or lower FLOPs compared to standard MoE, ensuring efficiency and performance without the need for extensive parameter tuning.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.45\linewidth]{./figures/lang/train-flops-glue-COLA.pdf}
+    \includegraphics[width=0.45\linewidth]{./figures/lang/train-flops-glue-MRPC.pdf}
+    \caption{\textbf{Convergence curve w.r.t. training FLOPs.}  We present the convergence curve with respect to training FLOPs for \algabbr and the best-performance MoE setting on the GLUE benchmark. }
+    \label{fig:performance-flops-illustration}
+\end{figure}
+\subsection{\label{answer4}A4: \algabbr Provide Insights on MoE Architecture Design}
+\paragraph{MoE structure is required for bottom layer rather than top layer.}
+In Figures~\ref{fig:avg-topk-stablelm} and~\ref{fig:expert-activation-freq}, we present the average top-$k$ of \algabbr-LLaVA and the frequency of expert activation across various layers.
+Our observations indicate that:
+(1) In the top layer (the layer closest to the LM prediction head), tokens tend to select the same expert, while in the bottom layer, tokens activate all experts uniformly.
+This suggests that there is no need to convert the top layer to MoE layer, whereas the bottom layer should be transformed into MoE layer.
+(2) Different LLM backbones may exhibit distinct expert activation frequency patterns.
+For the StableLM backbone, most MoE layers activate only one dominant expert, whereas for the Phi-2 backbone, experts are more likely to be activated uniformly.
+
+\paragraph{Shared experts exist in each MoE layer.} Figures~\ref{fig:gates-stablelm}-~\ref{fig:gates-phi} display the threshold $\mG$ values for each MoE layer. We notice that typically, one expert per layer has a significantly lower threshold, making it more easier to be activated. This observation is consistent with Deepseek-MoE's~\citep{dai2024deepseekmoe} design of incorporating shared experts for all tokens in each MoE layer.\looseness=-1
+
+
+
+
+\section{Conclusion and Future Works}
+
+\label{sec:conclusion}
+In this paper, we introduce \algabbr, which automatically determines the number of experts and the number of experts to be activated. Our results demonstrate that \algabbr achieves comparable or even superior performance across various MoE model settings while maintaining efficiency. This highlights \algabbr's potential to save researchers' time and computational resources when tuning these hyperparameters. Furthermore, our visualization results reveal interesting observations, such as the reduced number of experts required for the top layers. We believe these insights may inspire future advancements in MoE model design.
+However, due to computational resource constraints, we did not test larger scale models. Additionally, the current adaptive process implementation keeps removed experts in a candidate pool, occupying GPU storage. Developing more efficient implementations in the future would be valuable.
+
+
+\clearpage
+
+
+
+

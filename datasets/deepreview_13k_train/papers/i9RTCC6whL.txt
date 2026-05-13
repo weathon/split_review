@@ -1,0 +1,242 @@
+\title{MAMBA STATE-SPACE MODELS ARE LYAPUNOV-STABLE LEARNERS}
+
+\begin{abstract}
+
+  Mamba~\cite{gu2023mamba, daotransformers} state-space models (SSMs) were recently shown to outperform state-of-the-art (SOTA) Transformer large language models (LLMs) across various tasks.  Despite subsequent widespread adaptation, little work has focused on Mamba LLMs' amenability for fine-tuning frameworks ubiquitously used for Transformer-based LLMs, e.g., mixed-precision fine-tuning (MPFT) and parameter-efficient fine-tuning (PEFT).  For the former, it currently remains an open question whether Mamba's recurrent dynamics are robust to small input changes, such as those encountered during MPFT.  Using dynamical systems theory (in particular, Lyapunov exponents), we answer this question in the affirmative.  We empirically validate this result through several experiments, showing that Mamba SSMs are significantly more stable to changes introduced by mixed-precision than comparable Transformers, even when both MPFT and PEFT are combined.  For PEFT, we show how targeting specific memory buffers in Mamba's customized CUDA kernels for low-rank adaptation regularizes SSM parameters, thus providing both parameter efficient learning and computational savings. 
+Finally, with both MPFT and PEFT enabled, we explore the impact of instruction tuning Mamba SSMs for in-context learning (ICL) on \emph{natural language tasks}.  While pretrained Mamba and Mamba-2 models only achieve 38\% and 82\% (respectively) of the ICL improvements of comparable Transformer-based LLMs, we show that instruction tuning allows Mamba models to narrow this gap to 81\% and Mamba-2 models to skyrocket over this gap to 132\%.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Innovating on previous state-space models (SSMs)~\cite{gu2022efficiently, dao2023hungry}, Mamba~\cite{gu2023mamba, daotransformers} has been recently proposed as an accurate, sub-quadratic alternative to Transformer large language models (LLMs).  Upon their introduction in \cite{gu2023mamba}, Mamba SSMs were shown to greatly outperform comparable attention-based LLMs~\cite{biderman2023pythia} across a large number of standard natural language benchmarks.  Subsequently, pretrained Mamba models have been widely adapted across a large number of data modalities~\cite{liu2024vmamba,li2024spmamba, quan2024multichannel, li2024stg}, tasks~\cite{xie2024promamba, wang2024graph}, and architectures ~\cite{anthony2024blackmamba, park2024can, lieber2024jamba}.  Despite such widespread adaptation and subsequent research threads~\cite{daotransformers, park2024can, wangmamba}, little work has been done to understand the amenability of Mamba SSMs for widely used fine-tuning frameworks, such as mixed-precision fine-tuning (MPFT)~\cite{micikevicius2018mixed} and parameter-efficient fine-tuning (PEFT)~\cite{he2021towards, hu2021lora}.
+
+MPFT and PEFT are arguably two of the most widely utilized techniques for LLM alignment~\cite{tunstall2023zephyr} and customization~\cite{vm2024fine}, and are typically combined to drastically decrease hardware demands needed to fine-tune modern LLMs~\cite{dettmers2024qlora}.  However, direct application of MPFT for Mamba SSMs is made difficult due to potential sensitivities of Mamba's state-space dynamics, a common concern for recurrent-based deep models~\cite{pascanu2013difficulty}.  Thus, it is currently an open question whether Mamba's recurrent dynamics are stable in the presence of small input deviations, such as those introduced in MPFT.
+
+To answer this question, we leverage theory from dynamical systems.  Deriving and bounding the Lyapunov exponents for both Mamba and Mamba-2 models, we show that small input changes within the SSM layer of either model do not lead to exponentially deviating outputs.  Empirically, we validate this theoretical result; compared to full-precision, deviations due to mixed-precision for Mamba inference are on par with those demonstrated by Transformer LLMs, while deviations due to MPFT are significantly more stable than those of comparable Transformers (Section~\ref{section:experiments}).  Furthermore, this trend continues when MPFT and PEFT are combined, where Mamba SSMs again produce significantly smaller deviations compared to comparable Transformer LLMs.  % (2.15 times more tokens-per-second) and memory savings (65.5\% reduced per-token-memory).
+
+For PEFT, we show that by targeting the large memory buffers exploited by Mamba's highly customized CUDA kernels, LoRA may be used for extremely efficient fine-tuning, while simultaneously regularizing the majority of Mamba's SSM parameters via weight tying.  We show that this leads to extremely efficient PEFT, resulting in up to 2.15 times faster training and 65.5\% reduced memory compared to the largest evaluated Mamba model without MPFT or PEFT.  Furthermore, this allows even the largest (2.8 billion parameter) Mamba LLMs to be fine-tuned on a single GPU with as little as 24GB of onboard memory.
+
+Finally, using both MPFT and PEFT, we complement existing studies~\cite{park2024can, leeattention} by exploring the ICL capabilities of instruction-tuned Mamba and Mamba-2 models on \emph{natural language tasks}.  In particular, the ICL capabilities of both pretrained Mamba and Mamba-2 models lag behind those of comparable Transformer models from the Pythia suite~\cite{biderman2023pythia}; averaged across five standard natural language benchmarks and foundation model sizes, Mamba and Mamba-2 models only achieve 38\% and 82\%, respectively, of the performance improvements (relative to zero-shot) of Pythia models.  However, after instruction-tuning, Mamba models are able to achieve as much as 81.5\% of the average few-shot learning improvement (relative to zero-shot) of comparable Transformers, while Mamba-2 models push this to 132\% of the ICL improvements achieved by Pythia models.  We note that, similar to Transformer foundation models~\cite{wei2022emergent}, (post) instruction tuning ICL appears as an emergent abilities for Mamba and Mamba-2 SSMs, manifesting for models of size 370 million parameters and greater, while failing to manifest for Mamba and Mamba-2 models of fewer parameter counts.
+
+We note that herein, when describing a particular foundation model or result, we use the term ``Mamba model'' to refer to one of the original models released in \cite{gu2023mamba} and ``Mamba-2 model'' to refer to models released in \cite{daotransformers}.  While there are subtle architectural differences between these two SSMs, they share important similarities which allow our theoretical results to extend to both sets of models.  In particular, Mamba and Mamba-2 models share the same state-space equations, support for SSM matrices, and  design scheme of storing the majority of SSM parameters in a large memory buffer.  Thus, we synonymously use the term \mambablock{} to refer to the SSM layer of both Mamba and Mamba-2 models.
+
+
+\section{Background}
+
+{\bf Mixed-precision and parameter-efficient fine-tuning}.  In the current era of extremely large foundation models, both MPFT and PEFT have become ubiquitous tools for the rapid adaptation of Transformer-based LLMs towards specific applications.  PEFT using adapters~\cite{he2021towards} allows a large pretrained model to be efficiently adapted for a particular downstream task by freezing the full model and training only a small number of extra parameters.  Arguably the most widely used such PEFT method is LoRA~\cite{hu2021lora}, which injects trainable low-rank matrices into Transformer layers to approximate weight updates.
+
+To further decrease the computational demands necessary for LLM fine-tuning and inference, MPFT via mixed-precision (i.e., \halfp{} or \bhalfp{})~\cite{kalamkar2019study,micikevicius2018mixed} and quantized low-precision~\cite{dettmers2024qlora} have proven effective strategies to reduce GPU memory and runtime requirements without deleterious effects on downstream performance~\cite{dettmers2024qlora, wu2020integer}.  Additionally, mixed-precision approaches have paved the way for hardware-aware optimizations within the self-attention module~\cite{dao2022flashattention}, greatly mitigating the quadratic complexity of Transformer LLMs.  Together, PEFT and MPFT have created a rich ecosystem with which varying combinations of these approaches may be used to meet the computational constraints of a given training system.  We note that post-fine-tuning quantization approaches~\cite{frantar2023gptq} may be further used to decrease Transformer LLM computational demands, but such approaches are not considered in this work.
+
+{\bf State-space Models}.  \emph{Structured state-space sequence} (S4) models~\cite{gu2022efficiently, fu2023hungry} are SSMs which leverage % exploit the efficiency afforded
+linear time-invariant (LTI) systems to combine the computational advantages of Transformers--i.e., highly parallelizable training--and recurrent neural networks (RNNs)--i.e., subquadratic autoregressive inference using recurrency.  Within the S4 layer, an input signal is discretized and LTI parameters representing the input's latent dynamics are learned.  Owing to the S4 block's latent dynamics being LTI, the S4 block's output may be thus compactly represented as a single convolution between the input and an \emph{SSM convolution kernel} (a matrix whose entries are products of LTI learnable parameters resulting from unrolling the state-space equations).  However, despite hardware efficiency and long-dependency-modeling improvements, LTI-based S4 models remained inferior to Transformers of comparable parameter-sizes for natural language tasks, even when augmenting S4 layers with attention-layers for hybrid architectures~\cite{gu2023mamba}.
+
+Innovating on these previous S4 approaches, Mamba utilizes time-\emph{varying} parameters to model latent dynamics, thus broadening the ability to capture nuanced changes evolving in discrete-time.  Without LTI dynamics, however, the input-output representation via the SSM convolution kernel is no longer applicable, thus voiding previous hardware-aware S4 optimizations~\cite{fu2023hungry}.  To enable hardware efficiency with time-varying SSM parameters, \cite{gu2023mamba} thus introduced extensively customized CUDA kernels which implement highly parallelized prefix sums to compute recurrent states.  Subsequently, \cite{daotransformers} considered the unrolled state-space equations and leveraged tensor contractions (i.e., einsum notation~\cite{rogozhnikov2021einops}) to efficiently calculate Mamba variables.  The resulting Mamba-2 foundation models contained significantly larger latent-variable dimensions than the Mamba models of \cite{gu2023mamba}, while maintaining efficiency on modern GPU accelerators.
+
+{\bf In-context learning}.  ICL provides an adaptable alternative to fine-tuning.  Rather than fine-tune the LLM directly, ICL augments a prompt with $n$ relevant examples (called \emph{shots}) preceding the query of interest.  Given sufficiently large models and pretraining data~\cite{brown2020language, wei2022emergent}, Transformer LLMs have proven adept at learning new concepts on the fly provided such few-shot prompting.
+However, it is worth noting that ICL inference time increases dramatically as the number of shots grows (due to self-attention's quadratic complexity) and PEFT (when possible) is known to produce more accurate downstream learning results~\cite{brown2020language, liu2022few}.
+
+
+
+\section{Mamba state-space models}
+
+For latent-variable dimension $d$ and maximum input sequence length $T$, the \mambablock{} defines state-space parameters $\BoldA, \BoldB_t,\BoldC_t, \BoldDelta_t \in \reals{}^{d \times d}$ for $t \in \{1, \dots, T \}$.  The matrix $\BoldDelta_t$ controls the discrete step-size.
+Given an input sequence $\Boldu_1, \dots, \Boldu_T \in \reals{}^d$, the following linear mapping through latent states $\Boldx_1, \dots, \Boldx_T \in \reals{}^d$  is used to produce the output $\Boldy_1, \dots, \Boldy_T \in \reals{}^d$:
+\begin{align}% \label{equation:stateSpace}
+  \Boldx_t &= \bar{\BoldA}_t \Boldx_{t-1} + \bar{\BoldB}_t \Boldu_{t}\label{equation:line1:stateSpace}\\
+  \Boldy_t & = \bar{\BoldC}_t \Boldx_t,\label{equation:line2:stateSpace}
+\end{align}
+where $\bar{\BoldDelta}_t = \softplus{\Linear{\BoldDelta_t}} \in \reals{}^{d \times d}$, $\bar{\BoldA}_t = \exp{(\bar{\BoldDelta}_{t} \BoldA)}$ and $\bar{\BoldB}_t = \BoldA^{-1}(\bar{\BoldA} - \I)\BoldB_t$.  In practice, $\BoldA, \BoldB_t,\BoldC_t$ and $\BoldDelta_t$ are diagonal matrices.
+  
+\subsection{Stable dynamics in the \mambablock{}}
+The Mamba foundation models were pretrained in full \fullp{} precision.  We answer the latter using theory from dynamical systems.  For Mamba's discrete dynamic system in Equations~\ref{equation:line1:stateSpace} and ~\ref{equation:line2:stateSpace}, define
+ \begin{align}\label{mamba:dds}
+ \Boldx_t &= F_{\theta}(\Boldx_{t-1}, \Boldu_t),
+ \end{align}
+ where $\theta$ denotes the time-varying parameters described in Section~\ref{section:mambaSSMs}.  For input sequence $\Boldu_1, \dots, \Boldu_T$ and initial latent state vector $\Boldx_0$, we thus write
+ \begin{align*}
+   \Boldx_T &= F_{\theta}( F_{\theta}(\dots F_{\theta}( \Boldx_{0}, \Boldu_1))) \coloneq F_{\theta}^{T-1}(\Boldx_{0}, \Boldu_1).
+ \end{align*}
+
+ The rate of divergence between two scalar $\varepsilon$-close inputs to a discrete dynamical system is bounded by the system's maximal Lyapunov exponent $\mle{}$~\cite{mikhaeil2022difficulty}.  Given $\mle{}$ and two initial values $( \Boldx_{0}, \Boldu_1)$ and $( \Boldx_{0} + \varepsilon, \Boldu_1 + \varepsilon)$, the maximum deviation between these points grows as~\cite{laffargue2013large, sayama2015introduction}:
+\begin{align*}
+   \max | F_{\theta}^N( \Boldx_{0}, \Boldu_1) - F_{\theta}^N( \Boldx_{0} + \varepsilon, \Boldu_1+ \varepsilon)| \in \bigo{\varepsilon \exp{(N \mle{} )}}.
+\end{align*}
+Thus, when $\lambda_{\texttt{max}} > 0$, nearby trajectories exponentially separate and, when $\lambda_{\texttt{max}} \leq 0$, nearby trajectories ultimately converge to the same fixed point or periodic cycles.
+
+ The maximal Lyapunov exponent is defined as
+ \begin{align*}
+   \mle{} &\coloneq \lim_{T \to \infty} \frac{1}{T}\log \norm{\prod_{t = 0}^T \frac{\partial \Boldx_t}{\partial \Boldx_{t-1}}},
+ \end{align*}
+ where $\norm{}$ denotes the spectral norm for matrices.  For an arbitrary \mambablock{}, we prove the following:
+ \begin{theorem}\label{theorem:mamba_mle}
+  Let $(\Boldx_{t-1},\Boldu_t)$ be the latent state and input at an arbitrary time $t \in \{1, \dots, T \}$ within a \mambablock{}.  Then small changes $(\Boldx_{t-1} + \varepsilon,\Boldu_t + \varepsilon)$ produce deviations which are exponentially non-increasing over discrete-time.  That is,  $\max | F_{\theta}^N( \Boldx_{t-1}, \Boldu_t) - F_{\theta}^N( \Boldx_{t-1} + \varepsilon, \Boldu_t+ \varepsilon)| \in \bigo{\varepsilon \exp{(N \zeta )}}$, for some scalar $\zeta \leq 0$.
+ \end{theorem}
+   
+  The main result subsequently follows.
+
+ Thus, the latent states of Mamba and Mamba-2 models are stable under small input changes.  However, variables $\Boldy_1, \dots, \Boldy_T$ are the primary outputs for such models, particularly for LLM applications.  We next show that, given Theorem~\ref{theorem:mamba_mle}, Mamba and Mamba-2 output variables are also stable.
+ \begin{theorem}\label{theorem:mamba_mle_output}
+   Assume $(\Boldx_{t-1} + \varepsilon,\Boldu_t + \varepsilon)$ produce deviations which are exponentially non-increasing over discrete-time.  Then small changes to the output $\Boldy_t$ are also exponentially non-increasing over discrete time.
+ \end{theorem}
+  Thus, by Theorems~\ref{theorem:mamba_mle} and ~\ref{theorem:mamba_mle_output}, the latent and output states of both Mamba and Mamba-2 models are stable to changes encountered during recurrency.
+ 
+\subsubsection{Consequences for automatic mixed-precision}
+During a forward pass, automatic mixed-precision (AMP) saves time and memory by computing forward activations in half-precision (\halfp{} or \bhalfp{}).  During a backward pass, AMP computes gradients in half-precision and up-casts to full-precision prior to updating.  In contrast to full-precision fine-tuning, MPFT within the \mambablock{} thus results in small differences to the inputs $\Boldu_1, \dots, \Boldu_T$ %% fed into the SSM scan
+(which are passed through a \texttt{Swish}), $\bar{\BoldDelta}_t$ (which is passed through a \texttt{softplus}), and the gradients calculated during training.
+
+For a discrete dynamical system with  $\lambda_{\texttt{max}} > 0$, changes due to AMP compound after repeated expansion of the recurrent state, thus leading to exponential deviations between quantities calculated using mixed- versus full-precision.  We note that Transformers are not recurrent, and thus not susceptible to such issues.  Yet, just as differences introduced by quantization/mixed-precision produce output differences in Transformer results, differences are expected in Mamba results using different precision strategies.  However, by Theorem~\ref{theorem:mamba_mle}, such differences do not exponentially compound over discrete-time within the \mambablock{}.
+
+\subsection{Hardware-aware optimizations and PEFT}\label{section:hardwarePeft}
+As matrices $\BoldB_t,\BoldC_t$ and $\BoldDelta_t$ are time-varying, S4 optimizations via the SSM convolution kernel~\cite{dao2023hungry} are no longer applicable.  However, by diagonality, each dimension %% in Equation~\ref{equation:line1:stateSpace} 
+may be computed in parallel.  Furthermore, the recurrence along every dimension %% in Equation~\ref{equation:line1:stateSpace}
+is a prefix sum (also called a \emph{scan}), which is highly parallelizable~\cite{blelloch1990prefix}.  \cite{gu2023mamba} thus capitalizes on this through extensively customized CUDA kernels wherein the majority of temporal variables are carefully laid out in a large buffer of GPU memory and manipulated.  Instantiated as a \texttt{PyTorch} linear layer's weight matrix, this memory buffer $\BoldW \in \reals{}^{T \times 3d}$  is used to store and access the diagonal elements of $\BoldB_t,\BoldC_t$ and $\BoldDelta_t$ for all $t \in \{1, \dots, T\}$, such that
+  \begin{align}\label{equation:mambaMemory}
+    \BoldW[t-1,:d] = \diag{\BoldDelta_{t}}, \BoldW[t-1,d:2d] = \diag{\BoldB_{t}}, \BoldW[t-1,2d:3d] = \diag{\BoldC_{t}}, 
+  \end{align}
+  where $\BoldW[0,:d] = \diag{\BoldDelta_{1}}, \BoldW[n-1,d:2d] = \diag{\BoldB_{T}}$, and so on.  The customized Mamba prefix scan kernel heavily relies on this memory layout to optimize the access pattern of $\BoldW$ in Equations~\ref{equation:line1:stateSpace} and~\ref{equation:line2:stateSpace}.
+
+  Similarly, Mamba-2 stores diagonal elements of $\BoldB_t,\BoldC_t$ and $\BoldDelta_t$ in a large memory buffer $\BoldW$.  However, rather than utilizing the underlying recurrence to directly compute the hidden state and output at each time-step, \cite{daotransformers} consider the matrix resulting from unrolling Equation~\ref{equation:line2:stateSpace} across all $t$.  Mamba-2 models thus leverage the structure of the ensuing semiseparable matrix to calculate $\Boldx_1, \dots, \Boldx_T$ and $\Boldy_1, \dots, \Boldy_T$ using tensor contractions, which are highly optimized on modern hardware accelerators.
+
+When fine-tuning using LoRA, low-rank matrices are used to adapt the frozen weight matrices of targeted linear layers.  The importance of $\BoldW$ for both Mamba and Mamba-2 models makes it a primary candidate for LoRA adaptation.  In such cases, selecting $\BoldW$ for LoRA adaptation results in the following:
+\begin{theorem}\label{theorem:peftRegularization}
+  Consider the weight matrix $\BoldW$ of a \mambablock{} from Equation~\ref{equation:mambaMemory}.  Targeting $\BoldW$ for LoRA during fine-tuning ties adaptation weights across $\BoldB_t,\BoldC_t$ and $\BoldDelta_t$.
+\end{theorem}
+
+
+\section{Related Work}
+
+Recent work has sought to understand how to efficiently increase Mamba's hidden-state dimension by restructuring SSM operations using tensor contractions~\cite{daotransformers}, leading to Mamba-2 models.  A separate line of work has sought to understand the in-context learning (ICL) capabilities of Mamba LLMs when trained from scratch for specific tasks~\cite{park2024can, leeattention}.  Another line of recent work has sought to understand how hybrid Mamba-Transformer models may be directly distilled from Transformer models~\cite{wangmamba}.  However, to the best of our knowledge, no existing works have either theoretically explored the effects small input changes (e.g., due to mixed-precision) have on Mamba's recurrent dynamics, empirically explored such effects downstream impact on fine-tuning and inference, or sought to understand the effects of LoRA adaptation on modules within the \mambablock{}.
+
+Lyapunov exponents have previously been considered for classic RNN structures (e.g., vanilla RNNs, LSTMs, GRUs, PLRNNs, etc.)~\cite{mikhaeil2022difficulty, vogt2022lyapunov}, to determine when such models exhibit chaotic dynamics and the impact on the exploding/vanishing gradient phenomena\footnote{We note that this continues a long line of research exploring RNNs sensitivity to initial conditions and their subsequent ability to produce chaotic output~\cite{ribeiro2020beyond, laurent2017recurrent, bertschinger2004real, bertschinger2004edge}, although previous work did not leverage Lyapunov exponents.}.
+For more recent S4 neural models,~\cite{goel2022s} used Hurwitz matrices to characterize the numerical stability of linear time-invariant (LTI) S4 models.  However, such analysis is not applicable to time-varying models, such as Mamba, nor does it characterize the effects of sensitive dependence on initial conditions (e.g., divergence of two $\varepsilon$ close inputs).  To the best of our knowledge, no previous works have used Lyapunov exponents to explore the effects of mixed-precision on recurrent neural models or Mamba architectures.
+
+As previously noted, recent works \cite{park2024can, leeattention} have studied Mamba's ability to perform ICL by training Mamba models for specific tasks.  Such tasks include logistic regression, decision trees, and learning other simple function classes, following the work of \cite{garg2022can}.  We emphasize that, in this set up, relatively small Mamba models--33 million and 90 million parameters for \cite{leeattention} and \cite{park2024can}, respectively--are trained from scratch for every evaluated task.  Indeed, \cite{park2024can} notes that subsequent work is necessary to understand Mamba's ICL capabilities for language modeling using standard natural language benchmarks, as well as for larger model sizes.  Thus, our study of both the pretrained and instruction tuned ICL capabilities of Mamba/Mamba-2 LLMs for natural language tasks are complimentary to previous works. 
+
+
+
+\section{Experiments}
+
+To demonstrate the implications of Theorem~\ref{theorem:mamba_mle_output}, we explore the performance difference between running inference with full-precision pretrained weights and using mixed-precision (\halfp{} and \bhalfp{}) weights.  {\bf Model performance is measured as percent accuracy} using the MMLU dataset~\cite{hendrycks2020measuring}.  The difference in model performance is reported as the mean \emph{divergence} (i.e., absolute difference) between the original full-precision and respective mixed-precision model, averaged over \{0, 1, 3, 5\}-shot percent accuracy.  Thus, {\bf a divergence greater than one denotes an average difference greater than one entire percentage of accuracy.}
+
+Mamba pretrained checkpoints are compared to pretrained Transformer models of similar parameter counts and no more than $\sim$300B total pretraining tokens (Pythia~\cite{biderman2023pythia}, OLMo~\cite{groeneveld2024olmo} 336B-token checkpoint, and Phi 1.5~\cite{li2023textbooks}).  We note that {\bf Pythia and Mamba models were both pretrained using the same corpus}~\cite{gao2020pile}, {\bf allowing the fairest comparison between SSMs and Transformers}.  To limit extraneous numerical effects within experiments (e.g., due to parameter aggregation across multiple GPUs), all models were run using a single GPU (Nvidia A10G, 24 GB total memory).  All models were evaluated using the LM evaluation harness from Eleuther AI~\cite{eval-harness}.  The results are available in Table~\ref{table:mambaTransformers_pretrained_mpft}.
+
+\begin{table}[htbp!]
+  \small
+ \caption{Mean full-precision (\fullp{}) divergence in MMLU performance for mixed-precision inference.  Divergence is averaged over \{0, 1, 3, 5\}-shot performance.  Pretrained checkpoints are used for Mamba (\texttt{M}), Pythia (\texttt{P}), OLMo~\cite{groeneveld2024olmo}, and Phi-1.5~\cite{li2023textbooks} (\texttt{Phi}) models.}
+  \label{table:mambaTransformers_pretrained_mpft}
+  \centering
+  \tabcolsep=0.18cm
+  \begin{tabular}{ccccccccccccc}
+    \toprule
+    \texttt{Model} &\texttt{M} & \texttt{P} & \texttt{M} & \texttt{P} & \texttt{M} & \texttt{P} & \texttt{OLMo} & \texttt{M} & \texttt{P} & \texttt{Phi} & \texttt{M} & \texttt{P} \\ \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}\cmidrule(lr){12-13}
+    \texttt{Size} & 130M&160M&370M&410M&\hspace{3pt}790M&\multicolumn{2}{c}{\hspace{-10pt}1B}&\multicolumn{2}{c}{1.4B}&\hspace{-3pt}1.5B&\multicolumn{2}{c}{2.8B}\\ \midrule
+    \halfp{} $\mu$ & 0.03 &0.35 & 0.05 & 0.06 & 0.21 & 0.05 & 0.04 & 0.04 & 0.07 & 0.03 & 0.15 &0.12\\ 
+    \bhalfp{} $\mu$ & 0.05 & 1.45 & 0.20 & 0.20 & 0.66 & 0.16 & 0.13 & 0.31 & 0.13 & 1.05 & 1.17 & 0.11 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+From Table~\ref{table:mambaTransformers_pretrained_mpft}, inferencing in Pythia using \halfp{} and \bhalfp{} result in an average 0.13 and 0.41 full-precision divergence, respectively.  Mamba displays similar averages in comparison: inferencing in Mamba using \halfp{} and \bhalfp{} result in an average 0.10 and 0.48 divergence, respectively.  Interestingly, both SSM and Transformer architectures exhibit \emph{large divergence spikes}--i.e., mean divergence greater than a percentage point--when using \bhalfp{}, which occurs once for Mamba and Phi 1.5 models and twice for Pythia models.  We note that, for comparable model sizes and mixed-precision, Mamba-2 models follow identical divergence trends as respective Mamba models. %  of comparable parameter counts in Table~\ref{table:mambaTransformers_pretrained_mpft}.
+
+In the following, we show that the observed large divergence spikes may be mitigated for Mamba SSMs by combining mixed-precision with parameter-efficient adapters during fine-tuning.
+
+\subsection{Mamba SSMs are stable learners}
+We next explore the implications of Theorem~\ref{theorem:mamba_mle} on fine-tuning, wherein mixed-precision is especially critical; MPFT combined with PEFT adapters have been shown to drastically reduce Transformer fine-tuning times~\cite{dettmers2024qlora}.  We are thus interested in the divergence between Mamba models fully fine-tuned (i.e., no adapters, all model weights are trained) in full-precision and models fine-tuned using mixed-precision and/or PEFT adapters.  We focus on utilizing LoRA~\cite{hu2021lora}, which is arguably the most widely used PEFT framework for LLMs.
+
+\begin{figure*}
+  \centering
+  \label{fig:finetuning_precisions}
+  \includegraphics[trim=0.11in 0.14in 0.1in 0.10in,
+    clip=true,scale=0.34]{figs/rebuttal_finetuning_precisions.pdf}
+  \caption{Mean full-precision (\fullp{}) divergence in MMLU performance for Mamba, Pythia, and OpenELM models.  Models are fine-tuned over the \texttt{Alpaca} dataset~\cite{alpaca} using different combinations of MPFT and PEFT.  Full fine-tuning (i.e., no PEFT adapters) is denoted as \texttt{Full}.}
+\end{figure*}
+
+Using the \texttt{Alpaca} dataset~\cite{alpaca}, \texttt{Mamba 160M}, \texttt{410M}, and \texttt{790M} models are fine-tuned for three epochs with a maximum sequence length of 512.  %% PEFT adapters are varied from full fine-tuning (no adapters), to targeting of all linear layers, and finally to targeting a subset of linear layers (which includes the \mambablock{}'s large memory cache, described in Theorem~\ref{theorem:peftRegularization}).
+We denote the targeting of all linear layers (ALL) for LoRA as \emph{ALL LoRA}, the targeting of a subset of linear layers (SLL) for LoRA as \emph{SLL LoRA}, and no adapters as \emph{Full} (i.e., full fine-tuning).  Both {\tt ALL} and {\tt SLL} {\tt LoRA} adapt the large memory buffer described in Theorem~\ref{theorem:peftRegularization}.
+
+Each fine-tuning run occurred on a single A10G GPU.  To further limit extraneous numerical effects, the same batch size is used for all \fullp{}, \halfp{}, and \bhalfp{} experiments for a given model size.  While this leads to hardware underutilization (i.e., non-saturated GPU memory for mixed-precision and LoRA experiments), this is necessary to guarantee no divergence is due to differences in parameter update schedules.  For comparison, two Transformer-based LLM families of similar parameter counts are fine-tuned using the same experimental setup: \texttt{Pythia} (sizes \texttt{160M}, \texttt{410M}, and \texttt{1B}) and \texttt{OpenELM}~\cite{mehta2024openelm} (sizes \texttt{270M} and \texttt{450M}).  The training recipe for all models was adapted from~\cite{tunstall2023zephyr}, with the \texttt{AdamW\_torch} optimizer and a \texttt{cosine annealing} schedule.
+For each Mamba, Pythia, and OpenELM model, Figure~\ref{fig:finetuning_precisions} shows the mean divergence calculated between the respective \fullp{} \full{} and mixed-precision {\tt ALL}/{\tt SLL} {\tt LoRA} fine-tuned models, averaged over \{0, 1, 3, 5\}-shot MMLU accuracy.
+
+Across mixed-precisions and adapter settings, Mamba displays smaller divergences than both Pythia and OpenELM models.  E.g., {\bf for \halfp{}, Mamba demonstrates an average divergence of 0.1, compared to 0.14 for Pythia and 0.54 for OpenELM}.  Similarly, for {\bf \bhalfp{}, Mamba demonstrates an average divergence of 0.18, compared to 0.28 for Pythia and 0.33 for OpenELM}.  Importantly, Mamba models do not exhibit large deviation spikes after fine-tuning, in contrast to both Pythia and OpenELM models.
+
+\begin{figure*}[htbp!]
+  \centering
+  \subfigure[Average tokens-per-second $\uparrow$.]{\label{fig:mamba_timing}\includegraphics[trim=0.1in 0.1in 0.0in 0.05in,
+      clip=true,scale=0.42]{figs/rebuttal_timing_boxPlot}}
+  \subfigure[Maximum memory-per-token $\downarrow$.]{\label{fig:mamba_memory}\includegraphics[trim=0.1in 0.1in 0.0in 0.04in,
+      clip=true,scale=0.42]{figs/rebuttal_memory_boxPlot}}
+  \label{fig:timing_memory}
+  {\small\caption{Timing and memory usage calculated Mamba model-sizes and PEFT combinations.  Each model was trained using the Alpaca dataset dataset for three epochs and maximum sequence length 512.  For each PEFT combination, the batch size was tuned to maximize GPU occupancy.  Full fine-tuning exceeds available GPU memory (24 GB) for models greater than 790 million parameters.}}
+\end{figure*}
+
+{\bf Hardware throughput and memory-utilization improvements}.  With stable dynamics and observed divergences smaller than comparable Transformers, we show that MPFT and PEFT may be used to significantly increase GPU-training throughput for Mamba SSMs.  To demonstrate such improvements, we utilize the previous fine-tuning settings for the Alpaca dataset.  However, we now adjust the batch size to maximize throughput per MPFT and PEFT configuration.
+
+For each MPFT and PEFT configuration, the \emph{average tokens-per-second} (ATPS) is calculated as the total tokens used for fine-tuning divided by total training time, and the \emph{maximum memory-per-token} (MMPT) is calculated as the maximum GPU memory utilization incurred (over the entire fine-tuning run) divided by the total number of tokens in each mini-batch.  Results are plotted in Figure~\ref{fig:timing_memory}.
+Both throughput and memory utilization improve as the number of Mamba parameters increases in Figure~\ref{fig:timing_memory}.  {\bf Compared to the full-precision full fine-tuning of \texttt{Mamba 790M}} (the largest model supported by an \texttt{A10G}'s memory capacity), evaluated {\bf MPFT and PEFT combinations result in an average 2.15 times more training tokens-per-second while reducing per-token memory utilization by an average 62.7\%}.  Across all model sizes, evaluated MPFT and PEFT combinations result in an average 1.74 times more training tokens-per-second while reducing per-token memory utilization by an average 47.2\% compared to respective full-precision fine-tuned runs.  Furthermore, while full fine-tuning is no longer possible on a single \texttt{A10G} for Mamba models greater than 790 million parameters, MPFT and PEFT allow training Mamba models up to 2.8 billion parameters on GPUs with as little as 24 GB onboard memory.
+
+\subsection{Instruction tuning impact on Mamba ICL for natural language tasks}
+Using both MPFT and PEFT, we next explore how instruction tuning affects Mamba and Mamba-2 ICL performance on natural language tasks.
+All Mamba and Mamba-2 pretrained models are instruction fine-tuned using {\tt ALL} {\tt LoRA} and the OpenHermes dataset~\cite{openhermes} (which consists of 242,000 supervised samples).  We use the training recipe of ~\cite{tunstall2023zephyr}, which includes \bhalfp{} utilization.
+
+Zero and few-shot performance is  evaluated using five standard natural language benchmarks: HellaSwag~\cite{zellers2019hellaswag}, PIQA~\cite{bisk2020piqa}, Arc-E~\cite{clark2018think}, Arc-C~\cite{clark2018think}, and WinoGrande~\cite{sakaguchi2021winogrande}.  ICL performance is reported as the \emph{average improvement percentage} of \{1, 3, 5\}-\emph{shot} versus 0-\emph{shot} (AIPSS).  For comparison, Pythia pretrained models are instruction fine-tuned using the same training recipe and {\tt ALL} {\tt LoRA} (i.e., all Pythia linear layers are adapted).  
+\begin{figure*}[htbp!]
+  \centering
+  \subfigure[{\small Mamba Pretrained}]{\label{fig:mamba_pretrained_icl}\includegraphics[trim=0.0in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.4]{figs/mamba_pretrained_icl}}
+  \subfigure[{\small Mamba-2 Pretrained}]{\label{fig:mamba2_pretrained_icl}\includegraphics[trim=0.4in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.399]{figs/mamba2_pretrained_icl}}
+  \subfigure[{\small Pythia Pretrained}]{\label{fig:pythia_pretrained_icl}\includegraphics[trim=0.4in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.399]{figs/pythia_pretrained_icl}}  
+  \subfigure[{\small Mamba \all{}}]{\label{fig:mamba_sft_icl}\includegraphics[trim=0.0in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.4]{figs/mamba_sft_icl}}  
+  \subfigure[{\small Mamba2 \all{}}]{\label{fig:mamba2_sft_icl}\includegraphics[trim=0.4in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.399]{figs/mamba2_sft_icl}}  
+  \subfigure[{\small Pythia \all{}}]{\label{fig:pythia_sft_icl}\includegraphics[trim=0.4in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.399]{figs/pythia_sft_icl}}  
+  \caption{Instruction tuning narrows the ICL gap between Mamba and Pythia, and creates a gap from Pythia to Mamba-2 models.  \all{} models were instruction tuned on the OpenHermes~\cite{openhermes} dataset for one epoch.  Performance is reported as the average improvement percentage of \{1, 3, 5\}-shot versus 0-shot over five standard natural language benchmarks.}
+  \label{fig:icl_plots}
+\end{figure*}
+
+Figure~\ref{fig:icl_plots} displays AIPSS for pretrained and instruction fine-tuned Mamba and Pythia models.  As previously noted, pretrained Mamba models do not display similar ICL ability as comparable Pythia models on the evaluated standard NLP benchmarks.  In particular, \texttt{Mamba 2.8B}, the largest pretrained Mamba model, displays inconsistent zero-shot improvements as the number of shots increase.  While pretrained Mamba-2 models display significantly better ICL ability than Mamba models, Mamba-2 models smaller than 780 million parameters struggle.
+
+However, after instruction tuning, all Mamba models larger than \texttt{Mamba 130M} consistently improve in ICL performance as the number of shots increase.  Similarly, the majority of Mamba-2 models larger than \texttt{Mamba 130M} greatly improve in ICL performance.  Thus, while pretrained Mamba and Mamba-2 models are only capable of 38\% and 82\% (respectively) of the AIPSS compared to similar pretrained Pythia models, instruction tuned Mamba and Mamba-2 models are capable of 81.5\% and 133\% of the AIPSS relative to similarly fine-tuned Pythia models.  We note that a significant difference between Mamba and Mamba-2 models is the larger (by a factor of four) latent dimension.  %% Thus, while \cite{daotransformers} showed increasing the latent dimension in Mamba-2 models greatly improved performance on associative recall~\cite{arora2024zoology}, we further compliment such work by showing 
+
+\subsection{ICL is an emergent ability of instruction tuned Mamba SSMs}
+We next study the emergent behavior (as a function of model size) of Mamba/Mamba-2 SSMs' ICL abilities on natural language tasks by comparing to a larger number of Transformer-based LLMs of varying sizes.  We compare to \texttt{OpenELM}~\cite{mehta2024openelm} (sizes \texttt{270M}, \texttt{450M}, and \texttt{1.1B}), \texttt{TinyLlama 1.1B}~\cite{zhang2024tinyllama}, and \texttt{OLMo 1.2B}~\cite{groeneveld2024olmo}.  To limit the emergent effects on both parameter size and pretraining token counts, we did not evaluate models greater than 2.8 billion parameters and chose open-source checkpoints as close as possible to the 300 billion total pretraining tokens used for Mamba, Mamba-2, and Pythia models.  Thus, pretraining token counts for OpenELM, TinyLlama, and OLMo models were 429 billion, 503 billion, and 336 billion, respectively.  We note this potentially biases ICL performance in favor of the newly evaluated Transformer-based LLMs, and that direct comparisons between Mamba, Mamba-2, and Pythia are the most fair (as these three classes of models were all pretrained on the same dataset for the same number of total pretraining tokens).
+
+We repeat the experiments from Figure~\ref{fig:icl_plots}, where we evaluate the pretrained and instruction tuned ICL capabilities of all models.  To understand the critical role of parameter counts, we group all models into two classes: LLMs containing 450 million parameters or less, and LLMs containing greater than 450 million parameters.  ICL performance measured by AIPSS is displayed in Figure~\ref{class_icl_plots}.
+
+\begin{figure*}[htbp!]
+  \centering
+  \subfigure[{\small $ 450\text{M} < \text{Parameter total}$, Pretrained}]{\label{fig:midclass_pretrain_icl}\includegraphics[trim=0.0in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.359]{figs/midclass2_comp_pretrain_icl}}
+  \subfigure[{\small $ 450\text{M} < \text{Parameter total}$, \all{}}]{\label{fig:midclass_sft_icl}\includegraphics[trim=0.4in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.359]{figs/midclass2_comp_sft_icl}}    
+  \subfigure[{\small $\text{Parameter total } \leq 450 \text{M}$, Pretrained}]{\label{fig:lowclass_pretrain_icl}\includegraphics[trim=0.0in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.359]{figs/lowclass_comp_pretrain_icl}}
+  \subfigure[{\small $\text{Parameter total } \leq 450 \text{M}$, \all{}}]{\label{fig:lowclass_sft_icl}\includegraphics[trim=0.4in 0.25in 0.2in 0.1in,
+      clip=true,scale=0.359]{figs/lowclass_comp_sft_icl}}
+  {\small \caption{Instruction tuning improves Mamba-2 ICL performance past Transformer LLMs.  \all{} models were instruction fine-tuned on the OpenHermes dataset for one epoch.  Performance is reported as the average improvement percentage of \{1, 3, 5\}-shot versus 0-shot over five standard natural language benchmarks: HellaSwag, PIQA, Arc-E, Arc-C, and WinoGrande.}}
+  \label{class_icl_plots}
+\end{figure*}
+
+From Figure~\ref{class_icl_plots}, it is clear that pretrained SSMs and Transformers of parameter counts 270 million and less display slight or detrimental ICL abilities (i.e., few-shot performance is worse than zero-shot).  For models of greater than 450 million parameters, the majority of SSMs and Transformers display positive ICL abilities, with \texttt{Mamba 1.4B} being an outlier in terms of poor performance.  With the exception of TinyLlama at 1-shot performance and \texttt{Mamba-2 2.7B} for 3- and 5-shot performance, the majority of other pretrained models cluster together.
+
+Instruction tuning greatly smooths ICL performance across both parameter classes.  While instruction tuned SSMs and Transformers of 160 million parameters or fewer continue to display slight or detrimental ICL abilities, all parameters of 270 million and greater show positive ICL abilities.  The instruction tuned \texttt{OpenELM} \texttt{450M} model displays particularly impressive ICL abilities, but it is difficult to determine whether it is strictly due to architecture and/or pretraining recipe, or partially due to $143\%$ more total pretraining tokens than Mamba/Mamba-2 and Pythia models.  For instruction tuned models of greater than 450 million parameters, all SSMs and Transformers show positive ICL abilities, with \texttt{Mamba-2} \texttt{2.7B} greatly outperforming all other models (both SSM and Transformer) in this class.
+
+Thus, in terms of ICL as a function of SSM model size, while no clear trend presents itself for pretrained models, ICL appears to emerge for instruction tuned Mamba and Mamba-2 SSMs of size 370 million and greater.
+
+
+
+\section{Discussion and Future Directions}
+
+Using dynamical systems theory, we've shown that the recurrent dynamics of Mamba SSMs are robust to small input perturbations.  We've extensively confirmed this result, showing that: a) Mamba inference differences due to mixed-precision align with Transformers,  (b) Mamba fine-tuning is significantly more robust to changes due to mixed-precision and PEFT than Transformers, and (c) combining MPFT and PEFT can more than halve training time and nearly triple memory efficiency for Mamba models. %% , and (d) differences in downstream performance for Mamba due to MPFT and PEFT can be more robust than Transformers
+Using both MPFT and PEFT, we've shown that instruction tuning Mamba and Mamba-2 SSMs greatly narrows the pretraining ICL gap on natural language tasks relative to comparable Transformer LLMs.  In particular, this allows Mamba-2 SSMs to greatly outperform the ICL abilities of a large number of instruction tuned, attention-based LLMs.  Furthermore, complimentary to recent studies, we've shown that ICL for natural language tasks can be characterized as an emergent ability of Mamba and Mamba-2 models of 370 millions parameters or greater.
+
+There are several avenues for future work.  In particular, adapting Mamba's CUDA kernels to support more aggressive low-precision PEFT methods~\cite{dettmers2024qlora} would further decrease the hardware needed to train Mamba models, while providing additional speedups and testing the limits of the derived stability results.  Future studies could further explore what known emergent abilities Mamba SSMs are (and aren't) capable of, as well as determining new Mamba-specific emergent abilities that are potentially not possible for Transformers to achieve.  Furthermore, our theoretical contributions open the door for follow up studies, both in terms of extending our stability results to more general error (and adversarial) robustness results, as well as deriving new Mamba SSM-specific LoRA schemes which leverage the implicit weight tying achieved by targeting \mambablock{} modules for either PEFT accuracy or efficiency improvements.
+
+
+

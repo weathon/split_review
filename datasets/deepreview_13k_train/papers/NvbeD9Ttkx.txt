@@ -1,0 +1,516 @@
+\title{FOSI: Hybrid First and Second Order Optimization}
+
+\begin{abstract}
+
+Popular machine learning approaches forgo second-order information due to the difficulty of computing curvature in high dimensions.
+We present FOSI, a novel meta-algorithm that improves the performance of any base first-order optimizer by efficiently incorporating second-order information during the optimization process.
+In each iteration, FOSI implicitly splits the function into two quadratic functions defined on orthogonal subspaces, then uses a second-order method to minimize the first, and the base optimizer to minimize the other.
+We formally analyze FOSI's convergence and the conditions under which it improves a base optimizer.
+Our empirical evaluation demonstrates that FOSI improves the convergence rate and optimization time of first-order methods such as Heavy-Ball and Adam, and outperforms second-order methods (K-FAC and L-BFGS).
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Consider the optimization problem $\min_{\theta} f(\theta)$ for a twice differential function $f: \mathbb{R}^n \rightarrow \mathbb{R}$.
+First-order optimizers such as gradient descent (GD) use only the gradient information to update $\theta$ \citep{adam_2014,tieleman2012lecture,10.5555/1953048.2021068,polyak1987introduction,nesterov2003introductory}.
+Conversely, second-order optimizers such as Newton's method update $\theta$ using both the gradient and the Hessian information.
+First-order optimizers are thus more computationally efficient as they only require evaluating and storing the gradient, and since their update step often involves only  element-wise operations, but have a lower convergence rate compared to second-order optimizers in many settings~\citep{Tan_2019}.
+Unfortunately, second-order optimizers cannot be used for large-scale optimization problems such as deep neural networks (DNNs) due to the intractability of evaluating the Hessian when the dimension $n$ is large.
+Despite recent work on hybrid optimizers that leverage second-order information without computing the entire Hessian~\citep{henriques2019small,10.5555/3045118.3045374,pmlr-v80-gupta18a,10.5555/3495724.3495925, sivan2022automon}, 
+first-order methods remain the preferred choice for two reasons.
+First, many hybrid methods approximate the Hessian rather than the inverse preconditioner directly, resulting in amplifying approximation error and noise~\citep{li2017preconditioned}.
+Second, no single optimizer is best across all problems: the performance of an optimizer can depend on the specific characteristics of the problem it is being applied to~\citep{nocedal1999numerical,wilson2017marginal,zhou2020towards}.
+
+\betterparagraph{Our Contributions}
+We propose FOSI (for \textbf{F}irst-\textbf{O}rder and \textbf{S}econd-order \textbf{I}ntegration), an alternative approach. Rather than creating a completely new optimizer, FOSI improves the convergence of any base first-order optimizer by incorporating second-order information.
+FOSI iteratively splits $\min_\theta f(\theta)$ into pairs of quadratic problems on orthogonal subspaces, then uses Newton's method to optimize one and the base optimizer to optimize the other.
+Unlike prior approaches, FOSI: 
+(a) estimates the inverse preconditioner directly, reducing errors due to matrix inversion;
+(b) only estimates the most extreme eignenvalues and vectors, making it more robust to noise; 
+(c) has low and controllable overhead; 
+(d) accepts a base first-order optimizer, making it well suited for a large variety of tasks;
+and (e) works as ``turn key'' replacement for the base optimizer without requiring additional tuning.
+We make the following contributions:
+\begin{itemize}[nosep,noitemsep,leftmargin=*]
+    \item A detailed description of the FOSI algorithm and a thorough spectral analysis of its preconditioner.
+    We prove FOSI converges under common assumptions, and 
+    that it improves the condition number of the problem for a large family of base optimizers.
+    \item An empirical evaluation of FOSI on common DNN training tasks with standard datasets, showing it improves over popular first-order optimizers in terms of convergence and wall time. 
+    The best FOSI optimizer achieves the same loss as the best first-order algorithm in 48\%--77\% of the wall time, depending on the task.
+    We also use quadratic functions to explore different features of FOSI, showing it significantly improves convergence of base optimizers when optimizing ill-conditioned functions with non-diagonally dominant Hessians.
+
+\end{itemize}
+
+
+
+
+\section{Background and Notation}
+
+
+Given $\theta_t$, the parameter vector at iteration $t$,
+second-order methods incorporate both the gradient $g_t = \nabla f (\theta_t)$ and the Hessian $H_t = \nabla^2 f(\theta_t)$ in the update step, while first-order methods use only the gradient.
+These algorithms typically employ an update step of the form $\theta_{t+1} = \theta_t + d_t$, where $d_t$ is a descent direction determined by the information (first and/or second order) from current and previous iterations.
+Usually, $d_t$ is of the form $- \eta P_t^{-1} \bar{g}_t $, where $P_t$ is a preconditioner matrix, $\bar{g}_t$ is a linear combination of current and past gradients, and $\eta > 0$ is a learning rate.
+This results in an effective condition number of the problem given by the condition number of $P_t^{-1} H_t$, which ideally is smaller than that of $H_t$~\citep{preconditioning_2002}.
+Note that in Newton’s method $P_t=H_t$, resulting in the ideal effective condition number of 1.
+
+Since evaluating $H_t$ for large $n$ is intractable, most prior work approximate it.
+This, however, results in amplification of approximation errors and gradient noise due to the need of computing the inverse $P_t^{-1}$~\citep{li2017preconditioned};
+techniques such as damping~\citep{10.5555/3045118.3045374} that artificially modify the approximated Hessian further increase the error.
+As we will later show, FOSI approximates $P_t^{-1}$ directly, which avoids the error amplification induced by matrix inversion.
+\betterparagraph{The Lanczos algorithm}
+To obtain information about the curvature of a function $f$ without computing its entire Hessian,
+we use the Lanczos algroithm~\citeyearpar{lanczos1950iteration}. 
+This is an iterative method that finds the $m$ extreme eigenvalues and eigenvectors of a symmetric matrix $A \in \mathbb{R}^{n \times n}$, where $m$ is usually much smaller than $n$.
+After running $m$ iterations, its output is a matrix $U \in \mathbb{R}^{n \times m}$ with orthonormal columns and a tridiagonal real symmetric matrix $T \in \mathbb{R}^{m \times m}$ which can then be used to extract the approximate eigenvalues and eigenvectors of $A$.
+
+The Lanczos approximation is more accurate for more extreme eigenvalues, thus to accurately approximate the $k$ largest and $\ell$ smallest eigenvalues, $m$ must be larger than $k+\ell$.
+Crucially, the Lanczos algorithm does not require storing $A$ explicitly. It only requires an operator that receives a vector $\vvec$ and computes the matrix-vector product $A\vvec$.
+In our case, $A$ is the Hessian $H_t$ of $f(\theta)$ at the point $\theta_t$.
+We denote by $hvp_t(\vvec): \mathbb{R}^n \rightarrow \mathbb{R}$ the operator that returns the Hessian vector product $H_t \vvec$.
+This operator can be evaluated in linear time (roughly two approximations of $f$'s gradient), using Pearlmutter’s algorithm~\citeyearpar{pearlmutter_19994}.
+\betterparagraph{Notations and definitions}
+We use $\diag{\vvec}$ for a diagonal matrix with diagonal $\vvec$, $\mathbf{0}_m$ or $\mathbf{1}_m$ for a row vector of zeros or ones of size $m$, and $[A, B]$ for concatenating two matrices $n \times m_1$, $n \times m_2$ into a single $n \times (m_1 + m_2)$ matrix.
+We also define several notations w.r.t a real symmetric matrix $A$ with eigenvalues $\lambda_1 > \myDots > \lambda_n$ and eigenvectors $\vvec_1, \myDots, \vvec_n$.
+Let $\ltop$  be the row vector with entries $\lambda_1, \myDots, \lambda_k$ and $\lambda_{n - \ell + 1}, \myDots, \lambda_n$ (the $k$ largest and $\ell$ smallest eigenvalues),
+and $\Vtop \in \mathbb{R}^{n \times k+\ell}$ the corresponding matrix whose columns are the eigenvectors of the eigenvalues in $\ltop$.
+Similarly, $\lbottom$ is the row vector $[\lambda_{k+1}, \myDots, \lambda_{n - \ell}]$ and
+$\Vbottom \in \mathbb{R}^{n \times n - k - \ell}$ is the corresponding matrix of eigenvectors.
+
+
+\section{First and Second-Order Integration}
+
+
+FOSI is a hybrid method that combines a first-order base optimizer with Newton's method by utilizing each to operate on a distinct subspace of the problem.
+The Lanczos algorithm, which provides curvature information of a function, is at the core of FOSI.
+We first provide an algorithm for approximating extreme eigenvalues and eigenvectors (\S\ref{sec:lanczos}).
+We next present FOSI (\S\ref{sec:fosi}), analyze its preconditioner (\S\ref{sec:diagonal-prec}),
+discuss use of momentum (\S\ref{sec:momentum}),
+and analyze convergence in stochastic settings such as DNN training (\S\ref{sec:stochastic}).
+We then discuss support for closed-form learning rates (\S\ref{sec:automatic_lr_scaling}), reducing spectrum estimation error, and FOSI's overhead (\S\ref{sec:implementation}).
+\subsection{Extreme Spectrum Estimation (ESE)} \label{sec:lanczos}
+FOSI uses the Lanczos algorithm to estimate the extreme eigenvalues and vectors of the Hessian $H_t$.
+Recently, \citet{doi:10.1137/20M1331470} presented probabilistic upper and lower bounds on the relative error of this approximation for arbitrary eigenvalues.
+While the upper bound is dependent on the true eigenvalues of $H_t$, which is unknown, the lower bound is dependent solely on $m$ and $n$.
+To maintain the lower bound small, it is necessary to set $m$ such that $m = \Theta (\ln n)$ and $m$ must be greater than $k + \ell$.
+We thus define a heuristic for determining $m$:
+$ m = \max \{ 4 (k + \ell), 2 \ln n \}. $
+
+We now describe the ESE procedure for obtaining the $k$ largest and $\ell$ smallest eigenvalues of $H_t$ and their eigenvectors using Lanczos.
+ESE takes as input the function $f$ and its parameter value $\theta_t$, and uses them to define a Hessian-vector product operator $hvp_t$.
+Next, it calls the Lanczos algorithm with a specified number of iterations, $m$, and the $hvp_t$ operator.
+Our implementation parallelizes $hvp_t$ computations across the batch dimension, since they involve gradient computation, and performs full orthogonalization w.r.t all previous vectors in each iteration to prevent numerical instability~\citep{meurant2006lanczos}.
+Finally, ESE extracts the desired eigenvalues and eigenvectors from Lanczos's outputs.
+
+
+\subsection{The FOSI Optimizer} \label{sec:fosi}
+
+FOSI takes as input the base optimizer, the function to be optimized, and an initial point, then performs iterative updates until convergence is reached.
+In each iteration $t$, FOSI computes the gradient $g_t=\nabla f (\theta_t)$, potentially updates the spectrum estimation, then uses both to update $\theta_t$.
+FOSI calls the ESE procedure every $T \ge 1$ iterations to obtain $\ltop$ and $\Vtop$, the largest $k$ and smallest $\ell$ eigenvalues of $H_t$ and their eigenvectors, and then computes $\uvec = 1 / \abs*{\ltop}$ using element-wise absolute values.
+To avoid approximation errors, we postpone the first invocation of the ESE procedure by $W$ warmup iterations (we discuss this further in \S\ref{sec:implementation})
+During these iterations, the updates are equivalent to those of the base optimizer, as $\uvec$ and $\Vtop$ are initialized as zeros.
+
+Next, FOSI updates $\theta_t$ using the following procedure:
+\begin{enumerate}[noitemsep,nosep,leftmargin=*]
+
+    \item Compute the sum of $g_t$'s projections on $\Vtop$'s columns, $g_1 = \Vtop ( \Vtop^T g_t )$, and the sum of $g_t$'s projections on $\Vbottom$'s columns, $g_2 = g_t - g_1$.
+    Due to the orthogonality of the eigenvectors, $g_1$ and $g_2$ are also orthogonal to each other.
+    
+    \item Compute the descent direction $d_1 = - \alpha \Vtop ( ( \Vtop^T g_1 ) \odot \uvec^T )$, where $\odot$ stands for the Hadamard product.
+    While the chance of encountering an eigenvalue that is exactly or nearly 0 when using small $k$ and $\ell$ values is very small, it is common to add a small epsilon to $\abs*{\ltop}$ to avoid division by such values~\citep{adam_2014} when computing $\uvec$.
+    Note that an equivalent computation to $d_1$ is $- \alpha \Vtop \diag{\uvec} \Vtop^T g_t$, which is an $\alpha$-scaled Newton's method step that is limited to $\Vtop$ subspace.
+    The resulting $d_1$ is a linear combination of $\Vtop$'s columns.
+
+    \item Call the base optimizer to compute a descent direction from $g_2$, denoted by $d_b$.
+
+    \item Subtract from $d_b$ its projection on $\Vtop$'s columns, $d_2 = d_b - \Vtop ( \Vtop^T d_b )$.
+    The new vector $d_2$ is orthogonal to $\Vtop$'s columns, hence also to $d_1$.
+
+    \item Update the parameters: $\theta_{t + 1} = \theta_t + d_1 + d_2$
+    
+\end{enumerate}
+Parentheses in the above steps are important as they allow for only matrix-vector products, reducing computational complexity.
+
+\betterparagraph{Splitting to Two Subspaces}
+For clarity, we define $\omega=\theta_t-\theta$, $H_1 = \Vtop \diag{\ltop} \Vtop^T$, and $H_2 = \Vbottom \diag{\lbottom} {\Vbottom}^T$.
+Then at each iteration $t$, FOSI implicitly uses the quadratic approximation $\Tilde{f} = f_t + \omega^T g_t + \frac{1}{2}\omega^T H_t \omega$ of $f$ and performs a step to minimize $\Tilde{f}$ as follows.
+It first divides the vector space that is the eigenvectors of $H_t$ into two orthogonal complement subspaces -- one is spanned by $\Vtop$'s columns and the other by $\Vbottom$.
+It then implicitly splits $\Tilde{f}$ into two quadratic functions $f_1$ and $f_2$ such that $\Tilde{f}$ is their sum:
+$f_1 = \frac{1}{2} f_t + \omega^T g_1 + \frac{1}{2}\omega^T H_1 \omega$
+and
+$f_2 = \frac{1}{2} f_t + \omega^T g_2 + \frac{1}{2}\omega^T H_2 \omega$.
+Note that $\Tilde{f} = f_1 + f_2$, since $g_t = g_1 + g_2$ and $H_t = H_1 + H_2$.
+Finally, FOSI minimizes $f_1$ and $f_2$ independently, while using a scaled Newton's step to minimize $f_1$ and the base optimizer step to minimize $f_2$.
+
+We observe that $f_1$ has similar slope and curvature as $\Tilde{f}$ in the subspace that is spanned by $\Vtop$ and zero slope and curvature in its orthogonal complement $\Vbottom$, while $f_2$ has similar slope and curvature as $\Tilde{f}$ in $\Vbottom$ and zero slope and curvature in $\Vtop$.
+To minimize $f_1$, FOSI changes $\theta$ in the direction $d_1$ that is a linear combination of $\Vtop$'s columns, and to minimize $f_2$, it changes $\theta$ in the direction $d_2$ that is a linear combination of $\Vbottom$'s columns. 
+Hence, we can look at each step of FOSI as two simultaneous and orthogonal optimization steps that do not affect the solution quality of each other, and their sum is a step in the minimization of $\Tilde{f}$.
+Figure~\ref{fig:fosi_illustration_contour} illustrates this idea for the quadratic function $f(\theta) = 1.25\theta_1^2 + 1.25 \theta_2^2 + 1.5 \theta_1 \theta_2$.
+
+\betterparagraph{Avoiding Matrix Inversion}
+We stress that unlike most hybrid methods, FOSI does not require inverting $H_1$.
+Rather, the inverse preconditioner is obtained directly and exactly using the output of ESE: $H_1^{-1} =  \Vtop \diag{\uvec} \Vtop^T$.
+This helps avoid error amplification due to matrix inversion~\citep{li2017preconditioned}.
+\begin{figure}
+    \centering
+    \large
+    $f$ \;
+    \raisebox{-0.5\height}{\includegraphics[width=0.15\linewidth]{figures/fosi_illustration_f.pdf}}
+    $ \quad = \quad f_1 \; $
+    \raisebox{-0.5\height}{\includegraphics[width=0.15\linewidth]{figures/fosi_illustration_f1.pdf}}
+    $ \quad + \quad f_2 \; $
+    \raisebox{-0.5\height}{\includegraphics[width=0.15\linewidth]{figures/fosi_illustration_f2.pdf}}
+    \caption{
+    FOSI's update steps (arrows) when minimizing a quadratic function $f(\theta)$. 
+    FOSI implicitly separates the space
+    into two orthogonal complement subspaces and then splits the original function $f$ into two functions $f_1$ and $f_2$ over these subspaces, such that $f = f_1 + f_2$.
+     FOSI solves $\min f$ by simultaneously solving $\min f_1$ with Newton's method and $\min f_2$ with the base optimizer.
+     The update step is the sum of $d_1$ and $d_2$, the updates to $f_1$ and $f_2$ respectively.
+    }
+    \label{fig:fosi_illustration_contour}
+\end{figure}
+\iffalse
+Figure~\ref{fig:fosi_illustration_contour} illustrates this concept.
+The function $f(\theta) = 1.25\theta_1^2 + 1.25 \theta_2^2 + 1.5 \theta_1 \theta_2$ has two eigenvalues, $\lambda_1 = 4$, $\lambda_2 = 1$, with the eigenvectors $v_1 = [1/\sqrt{2}, 1/\sqrt{2}]^T$, $v_2 = [-1/\sqrt{2}, 1/\sqrt{2}]^T$.
+The subspaces are $\Vtop = \{v_1\}$, $\Vbottom = \{v_2\}$.
+Since $f$ is quadratic, its Hessian is constant, so a quadratic approximation of $f$ around any point is exactly $f$, and the split to $f_1$ and $f_2$ is unique:
+$f_1 = \theta_1^2 + \theta_2^2 + 2 \theta_1 \theta_2$ and $f_2 = 0.25 \theta_1^2 +0.25 \theta_2^2 - 0.5 \theta_1 \theta_2$.
+To solve $\min f_1$ FOSI uses Newton's method.
+The update $d_1$ is parallel to $v_1$ and since $f_1$ is quadratic, this update brings $f_1$ to its minimum in one step.
+To solve $\min f_2$ FOSI uses the base optimizer, in this case GD, and the update $d_2$ is parallel to $v_2$.
+Since $f_1$ is constant along $v_2$ direction, an update to $\theta$ in this direction does not impact its value, and similarly for $f_2$ with $v_1$ direction.
+The sum $d_1 + d_2$ is the update applied to $\theta$.
+The next updates are only affected by updates to $f_2$, since $f_1(\theta_1)$ is at its minimum so $d_1$ is always zero.
+\fi
+
+\subsection{Preconditioner Analysis}
+\label{sec:diagonal-prec}
+
+We next analyze FOSI as a preconditioner.
+For simplicity, the $t$ subscript is omitted from $g_t$ and $H_t$ when it is clear from the text that the reference is to a specific point in time.
+
+For base optimizers that utilize a diagonal matrix as a preconditioner (e.g., Adam),
+the result is an efficient computation, as $P^{-1} g$ is equivalent to element-wise multiplication of $P^{-1}$'s diagonal with $g$.
+When using FOSI with such a base optimizer, the diagonal of the inverse preconditioner, denoted by $\qvec$, is calculated using $g_2$, instead of $g$.
+Hence, $d_b = -\eta\diag{\qvec} g_2$, for some learning rate $\eta > 0$.
+\begin{lemma} \label{lemma:diagonal_preconditioner}
+Let $f(\theta)$ be a convex twice differential function and let BaseOpt be a first-order optimizer that utilizes a positive definite diagonal preconditioner.
+Let $H$ be $f$'s Hessian at iteration $t$ of FOSI with BaseOpt, and let $V \diag{\lambdavec} V^T$ be an eigendecomposition of $H$ such that $V = [\Vtop, \Vbottom]$ and $\lambdavec = [\ltop, \lbottom]$.
+Then:
+\begin{enumerate}[noitemsep,nosep,leftmargin=*]
+    \item FOSI's inverse preconditioner is
+    $
+    P^{-1} = 
+        V 
+        \left(
+        \begin{array}{cc}
+        \alpha \diag{\uvec} & \mathbf{0} \\ 
+        \mathbf{0} & \eta M \\
+      \end{array}\right)
+        V^T
+    $,
+    where $M$ is the trailing $n - k - \ell$ principal submatrix (lower right corner submatrix) of $V^T \diag{\qvec} V$,
+    and $\diag{\qvec}$ is the inverse preconditioner produced by BaseOpt from $g_2$.
+    \item The preconditioner $P$ is symmetric and positive definite.
+    \item $\alpha$ is an eigenvalue of the effective Hessian $P^{-1}H$, and $\Vtop$’s columns are in the eigenspace of $\alpha$.
+\end{enumerate}
+\end{lemma}
+It includes expressing $d_1$ and $d_2$ as a product of certain matrices with $g$, substituting these expressions into $\theta_t+d_1+d_2$, and using linear algebra properties to prove that the resulting preconditioner is a symmetric positive definite matrix.
+Finally, we assign $P^{-1}$ expression to obtain $P^{-1} H$.
+Note that symmetric positive definite preconditioner is necessary for ensuring that the search direction always points towards a descent direction~\citep{li2017preconditioned}.
+
+As expected, we obtained a separation of the space into two subspaces.
+For the subspace that is spanned by $\Vtop$, for which FOSI uses scaled Newton's method, the condition number is 1.
+For the complementary subspace, the condition number is determined by BaseOpt's preconditioner.
+In the general case, it is hard to determine the impact of a diagonal preconditioner on the condition number of the problem, although it is known to be effective for diagonally dominant Hessian~\citep{qu2020diagonal,levy2019necessary}.
+
+We show that even in this case, which is ideal for a diagonal preconditioner, FOSI provides benefit, since it solves $f_1$ with Newton's method and provides the base optimizer with $f_2$, which is defined on a smaller subspace, hence can be viewed as of smaller dimensionality than $f$.
+\betterparagraph{Identity Preconditioner} \label{sec:identity_preconditioner}
+For base optimizers with identity preconditioner such as GD, we can perform a complete spectral analysis of FOSI's preconditioner and effective Hessian, even for non-diagonal $H$.
+This allows us to obtain the effective condition number and the conditions in which it is smaller than the original one.
+However, since FOSI uses two optimizers on orthogonal subspaces, a more relevant measure for improvement is whether the effective condition number of each subspace is smaller than the original one.
+We show that the condition number of the subspace that is spanned by $\Vtop$ is 1 and the condition number of $\Vbottom$ is $\lambda_{k+1} / \lambda_{n - \ell}$.
+Both condition numbers, of $f_1$ and $f_2$, are smaller than the condition number of the original $H$.
+
+\subsection{Momentum} \label{sec:momentum}
+
+Momentum accelerates convergence of first-order optimizers and is adapted by many popular optimizers~\citep{qian1999momentum,adam_2014}.
+When using momentum, the descent direction is computed on $\bar{g}$, instead of $g$, where $\bar{g}$ is a linear combination of the current and past gradients.
+Momentum could also be used by FOSI;
+however, FOSI and the base optimizer must apply the same linear combination on $g_1$ and $g_2$, which entails $\bar{g} = \bar{g_1} + \bar{g_2}$, to maintain the orthogonality of $f_1$ and $f_2$.
+We can use $\bar{g}, \bar{g_1}, \bar{g_2}$ in the proof of Lemma~\ref{lemma:diagonal_preconditioner}, instead of $g, g_1, g_2$ and obtain similar results.
+
+\subsection{Convergence in the Stochastic Setting} \label{sec:stochastic}
+We adopt the stochastic setting proposed by \citet{doi:10.1137/15M1053141}. Consider the stochastic optimization problem $\min_{\theta} f(\theta)$ for $f(\theta) = \mathbb{E}_x [ F(\theta, x) ]$, where $F: \mathbb{R}^n \times \mathbb{R}^d \rightarrow \mathbb{R}$ is twice differentiable w.r.t $\theta$ and $x \in \mathbb{R}^d$ denotes a random variable with distribution $P$.
+When stochastic optimization is used for DNN training, $f$ is usually approximated by a series of of functions:
+at each iteration $t$, a batch $b_t$ containing $m_t$ data samples $\{ x_1, x_2, \myDots, x_{m_t} \}$ is sampled and the function $f^t$ is set as $f^t(\theta) = \frac{1}{m_t} \sum_{i=1}^{m_t} F(\theta, x_i)$.
+Note that labels, if any, can be added to the data vectors to conform to this model.
+Adapting FOSI to stochastic DNN training requires a small change to FOSI's algorithm.
+at the beginning of each iteration, the first action would be to sample a batch $b_t$ and set $f^t$.
+We can call the ESE procedure with the current $f^t$, or with some predefined $f^i, i \le t$, as discussed in \S\ref{sec:implementation}.
+
+We now show convergence of FOSI in the common stochastic setting under common Lipschitz smoothness assumptions on $f$ and $F$, and assuming bounded noise level of the stochastic gradient.
+
+\begin{lemma} \label{lemma:convergence_stochastic}
+    Let BaseOpt be a first-order optimizer that utilizes a positive definite diagonal preconditioner and denote by $\nabla^2 F (\theta, x) = \frac{\partial^2 F}{\partial \theta^2}$ the Hessian of $F$ w.r.t $\theta$.
+    Assuming:
+    \begin{enumerate}[noitemsep,nosep,leftmargin=*]
+        \item $f(\theta)$ is $L$-smooth and lower bounded by a real number.
+        \item \label{step:assumption-bounded-variance}
+        For every iteration $t$, $\mathbb{E}_{x_t} [\nabla_{\theta} F(\theta_t, x_t)] = \nabla f(\theta_t)$ and $\mathbb{E}_{x_t} [\norm*{\nabla_{\theta} F(\theta_t, x_t) - \nabla f(\theta_t)}^2] \le \sigma^2$, where $\sigma > 0$, $x_t$ for $t=1,2,\myDots$ are independent samples, and for a given $t$ the random variable $x_t$ is independent of $\{ \theta_i \}_{i=1}^{t}$.
+        \item \label{step:assumption-bounded-hessian}
+        There exist a positive constant $z$ s.t. for every $\theta$ and $x$, $ \norm*{\nabla^2 F (\theta, x)} \le z$ and the diagonal entries of BaseOpt's preconditioner are upper bounded by $z$.
+    \end{enumerate}
+    Then, for a given $\epsilon \in (0, 1)$, the number of iterations $N$ needed to obtain $\frac{1}{N} \sum_{t=1}^{N} \mathbb{E} [ \norm*{ \nabla f (\theta_t) }^2 ] \le \epsilon$ when applying FOSI with BaseOpt is $N = O ( \epsilon^{-1/(1-\beta)} )$, for step size $\eta$ chosen proportional to $t^{-\beta}$, where $\beta \in (0.5, 1)$ is a constant.
+\end{lemma}
+
+8 of~\citet{doi:10.1137/15M1053141}, and proving the Theorem's conditions are satisfied.
+
+In the convex, non-stochastic scenario, the convergence rate of the base optimizer becomes the limiting factor, as Newton's method demonstrates a quadratic convergence rate on $f_1$.
+Therefore, FOSI's convergence rate mirrors that of the base optimizer for $f$, but with improved constants due to the smaller condition number of $f_2$.
+For instance, the convergence analysis of GD yields $f(\theta_t) - f(\theta^*) \le \|\theta_0 - \theta^* \|^2 / (2\alpha t)$ for $\alpha \le 1/L$.
+In the convex case, $L=\lambda_1$ (the maximal eigenvalue of the Hessian).
+Since FOSI-GD reduces the maximal eigenvalue to $\lambda_{k+1}$, its bound is tighter.
+\subsection{Automatic Learning Rate Scaling} \label{sec:automatic_lr_scaling}
+
+When the base optimizer has a closed-form expression of its optimal learning rate in the quadratic setting that is only dependant on the extreme eigenvalues, FOSI can adjust a tuned learning rate $\eta$ to better suit the condition number of $f_2$.
+Fortunately, in most cases of optimizers that utilize a diagonal preconditioner, such as GD, Heavy-Ball, and Nesterov, there are such closed-forms~\citep{doi:10.1137/15M1009597}.
+Specifically, when applying FOSI with such a base optimizer and given the relevant closed-form expression for the optimal learning rate, the adjusted learning rate at iteration $t$ would be $\eta_2 = \eta (\eta_2^* / \eta^*)$, where $\eta^*$ is the optimal learning rate for the quadratic approximation $\tilde{f}$ and $\eta_2^*$ is the optimal one for $f_2$.
+FOSI is able to compute this scaling, using the ESE outputs.
+
+The intuition behind this scaling is that the ratio between the optimal learning rates is proportional to the ratio between the condition number of $\tilde{f}$ and that of $f_2$.
+
+Note that $\eta_2^* / \eta^* \ge 1$.
+In practice, we suggest a more conservative scaling that involves clipping over this scaling factor as follows: $\eta_2 = \eta \min \{ \eta^*_2 / \eta^*, c \}$ for $c \ge 1$.
+For $c=1$, $\eta_2 = \eta$, and for extremely large $c$ ($\infty$), the scaling factor is not clipped.
+\subsection{Error and Overhead}
+\label{sec:implementation}
+
+\betterparagraph{ESE Approximation Error}
+Using Newton's method in non-quadratic settings in conjunction with inexact approximation of Hessian eigenvalues through the ESE procedure increases the risk of divergence.
+FOSI uses several techniques to address this: scaled Newton's method, extra numerical accuracy inside the ESE procedure, full orthogonalization, and warmup.
+In practice, our experiments on a variety of DNNs in \S\ref{sec:evaluation} demonstrate that FOSI is robust and substantially improves convergence.
+\betterparagraph{Runtime}
+FOSI’s runtime differs from that of the base optimizer due to additional computations in each update step and calls to the ESE procedure.
+For large and complex functions, the latency of the update step of both optimizers, the base optimizer and FOSI, is negligible when compared to the computation of the gradient in each iteration.
+Furthermore, since each Lanczos iteration is dominated by the Hessian-vector product operation which takes approximately two gradient evaluations, the latency of the ESE procedure can be approximated by $2 m \tau$, where $\tau$ is gradient computation latency and $m$ the number of Lanczos iterations (see \S\ref{sec:lanczos}).
+The ESE procedure is called every $T$ iterations, and the parameter $T$ should be set such that FOSI's runtime is at most $\rho$ times the base optimizer runtime, for a user-defined overhead $\rho > 1$.
+Thus, given the above approximations and assumptions, we can achieve overhead $\rho$ by setting:\quad
+$T = 2m/(\rho -1)$.
+This heuristic helps avoid the need to tune $T$, though FOSI can of course use any $T>0$.
+
+\betterparagraph{Memory}
+FOSI stores $k+\ell$ eigenvectors of size $O(n)$, and temporarily uses $O(mn)$ memory when performing the ESE procedure.
+In comparison, other second order methods such as K-FAC~\citep{10.5555/3045118.3045374} and Shampoo~\citep{pmlr-v80-gupta18a} incur $O(\sum_{i \in L} d_i^2 + p_i^2)$ memory overhead, where $d_i$ is the input dimension of layer $i$, $p_i$ the output dimension, and $L$ the total number of layers.
+
+
+\section{Evaluation}
+
+\label{sec:evaluation}
+
+We first evaluate FOSI's performance on benchmarks tasks including real-world DNNs with standard datasets, for both first- and second-order methods.
+We then validate our theoretical results by evaluating FOSI on a positive definite (PD) quadratic function with different base optimizers;
+we explore the effect of the dimension $n$, the eigenspectrum, the learning rate, the base optimizer, and the clipping parameter $c$ on FOSI's performance. 
+3.25.
+For experiments, we use an NVIDIA A40 GPU.
+\subsection{Deep Neural Networks} \label{experiment:dnn}
+
+We evaluated FOSI on five DNNs of various sizes using standard datasets, first focusing first-order methods in common use.
+We execute FOSI with $k=10$ and $\ell=0$, since small eigenvalues are usually negative.
+We set $\alpha=0.01$, $c=3$, and $W$ such that warmup is one epoch.
+$T$ is determined using the heuristic suggested in \S~\ref{sec:implementation} aiming at 10\% overhead ($\rho=1.1$), resulting in $T=800$ for all experiments.
+The base optimizers compared to FOSI are Heavy-Ball (HB) and Adam;
+we omit GD (SGD) as it performed worse than HB in most cases.
+We use the standard learning rate for Adam ($0.001$), and the best learning rate for HB out of ${0.1, 0.01, 0.001}$, with default momentum parameters $\beta_1=0.9, \beta_2=0.999$ for Adam and $\beta=0.9$ for HB.
+The five evaluated tasks are:
+\begin{enumerate}[nosep, leftmargin=*]
+
+    \item
+    \textbf{Audio Classification (AC): }
+    Training MobileNetV1 (approximately 4 million parameters) on the AudioSet dataset~\citep{audio_set}.
+    The dataset contains about 20,000 audio files, each 10 seconds long, with 527 classes and multiple labels per file.
+    We converted the audio files into 1-second mel-spectrograms and used them as input images for the DNN.
+    The multi-hot label vector of a segment is the same as the original audio file's label.
+    
+    \item
+    \textbf{Language Model (LM): }
+
+    For LM training batches are randomly sampled; there is no defined epoch and we use $W=T$.
+    
+    \item
+    \textbf{Autoencoder (AE): }
+    Training an autoencoder model with roughly 0.5 million parameters on the CIFAR-10 dataset.
+    Implementation is based on~\citet{lippe2022uvadlc} with latent dimension size 128.
+    We observed that the HB optimizer in this case is sensitive to the learning rate and diverges easily.
+    Therefore we run FOSI with $c=1$ (prevents learning rate scaling) and $W=T$, which enables extra warmup iterations (number of iteration per epoch is 175).
+    
+    \item
+    \textbf{Transfer Learning (TL): }
+    Transfer learning from ImageNet to CIFAR-10.
+    We start with a pre-trained ResNet-18 on ImageNet2012 and replace the last two layers with a fully-connected layer followed by a Softmax layer.
+    We train the added fully-connected layer (5130 params), while the other layers are frozen (11 million parameters).
+    
+    \item
+    \textbf{Logistic Regression (LR): }
+    Training a multi-class logistic regression model to predict the 10 classes of the MNIST dataset.
+    The model is a neural network with one fully connected layer of 784 input size followed by a Softmax layer of 10 outputs, containing 7850 parameters.
+    The input data is the flattened MNIST images.
+    Since logistic regression is a convex function, the model is also convex w.r.t.~the parameters of the network.
+
+\end{enumerate}
+
+\begin{figure}
+\begin{minipage}{.55\textwidth}
+
+\begin{table}[H]
+\centering
+\caption{Wall time in seconds to reach target validation accuracy (AC, TL, LR) or loss (LM, AE).
+The target (in parentheses) is the best one reached by the base optimizer.
+No single base optimizer is best for all tasks.
+}
+\label{table:time_to_accuracy}
+\begin{tabular}{@{}c @{~~~} r @{~~~} r@{~~}r r @{~~~} r@{~~}r@{}}
+\toprule
+    Task & \multicolumn{1}{c}{HB} & \multicolumn{2}{c}{FOSI-HB} & \multicolumn{1}{c}{Adam} & \multicolumn{2}{c}{FOSI-Adam}   \\
+    \midrule
+    \arrayrulecolor{lightgray}
+    
+    AC & 3822 & \textbf{1850} & (40.4\%) & 5042 & \textbf{3911} & (28.9\%) \\
+    \cmidrule(r){1-7}
+    LM & 269 & \textbf{207} & (1.71) & 270 & \textbf{219} & (1.76) \\
+    \cmidrule(r){1-7}
+    AE & 354 & \textbf{267} & (52.46) & 375 & \textbf{313} & (51.26) \\
+    \cmidrule(r){1-7}
+    TL & 93 & \textbf{53} & (79.1\%) & 68 & \textbf{33} & (79.0\%) \\
+    \cmidrule(r){1-7}
+    LR & 16 & \textbf{8} & (92.8\%) & \textbf{12} & 18 & (92.8\%) \\
+
+\arrayrulecolor{black}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{minipage}
+\hfill
+\begin{minipage}{.42\textwidth}
+    \centering
+
+    \includegraphics[width=1.0\linewidth] {figures/audioset_fosi_vs_base_train_val_over_time.pdf}
+    \captionof{figure}{
+    Training AC (MobileNetV1 on AudioSet data).
+    FOSI converges faster than HB and similar to Adam across wall time (left).
+    However, Adam overfits and generalizes poorly as indicated by its low validation accuracy (right).
+    }
+    \label{fig:audioset_fosi_vs_base}
+
+\end{minipage}
+\end{figure}
+Table~\ref{table:time_to_accuracy} summarize the experimental results, showing the wall time when reaching a target validation accuracy (for AC, TL, LR tasks) or target validation loss (for LM, AE tasks).
+The target metric (in parentheses) is the best one reached by the base optimizer.
+FOSI consistently reaches the target metric faster than the base optimizer (though Adam is faster than FOSI-Adam on LR, FOSI-HB is faster than both).
+The improvement in FOSI-HB is more significant than in FOSI-Adam, due to FOSI-HB's ability to adapt the learning rate according to the improved condition number of the effective Hessian.
+Figure~\ref{fig:audioset_fosi_vs_base} shows the optimizers' learning curves for the AC task.
+The training loss curves suggests that FOSI significantly improves the performance of HB, but does not help Adam.
+However, while Adam's training loss reaches zero quickly, it suffers from substantial overfitting and generalizes poorly, as indicated by its accuracy.
+This supports the idea that there is no single best optimizer for all problems~\citep{zhou2020towards}. 
+FOSI aims to improve the best optimizer for each specific task.
+In this case, HB is preferred over Adam as it generalizes much better, and FOSI improves over HB.
+It is important to note that when the base optimizer overfits, FOSI's acceleration of convergence also leads to an earlier overfitting point.
+This can be observed in the validation accuracy curve: HB begins to overfit near epoch 70 while FOSI begins to overfit at roughly epoch 35.
+Overall, throughout our experiments, we have not observed FOSI to overfit more than the base optimizer; FOSI always reaches the same or superior validation accuracy as the base optimizer.
+\betterparagraph{Summary} 
+FOSI improves convergence of the base optimizer, and is the fastest optimizer for all five tasks.
+On average, FOSI achieves the same loss as its base optimizer in 78\% of the time on the training set and the same accuracy/loss in 75\% of the time on the validation set.
+Thus while the average FOSI iteration takes longer than the base optimizer's, FOSI requires fewer iterations resulting in overall faster convergence.
+
+\subsection{Comparison to Second-Order Methods}
+
+We compare FOSI to two representative second-order techniques, K-FAC~\citep{10.5555/3045118.3045374} and L-BFGS~\citep{liu1989limited};
+these use a block-diagonal approximation of the Hessian as a preconditioner, subsequently perform its inversion.
+We repeat the five DNN training experiments and compare the results of both algorithms to FOSI-HB. 
+
+We used grid search to tune K-FAC's learning rate and momentum, and included K-FAC's \emph{adaptive} as one of the options. 
+We utilized adaptive damping and maintained the default and more precise $T_3$ (interval between two computations of the approximate Fisher inverse matrix) value of 5 after testing larger $T_3$ values and observing no variation in runtime.
+For tuning L-BFGS hyperparameters, we used line-search for the learning rate, and performed a search for the optimal $L$ (history size) for each task, starting from $L=10$ (similar to $k$ we used for FOSI) and up to $L=100$.
+The hyperparameters were selected based on the lowest validation loss obtained for each experiment.
+
+Overall, we observed that both K-FAC and L-BFGS algorithms have slower runtimes and poorer performance compared to FOSI.
+They occasionally diverge, can overfit, and rarely achieve the same level of validation accuracy as FOSI.
+ 
+
+\subsection{Quadratic Functions} \label{sec:experiment_quadratic_function}
+
+To evaluate FOSI's optimization performance across range of parameters, we use controlled experiments on PD quadratic functions of the form $f_H(\theta) = 0.5 \theta^T H \theta$.
+We use GD, HB, and Adam to minimize $f_H$, as well as FOSI with these base optimizers.
+We use the default momentum parameters $\beta_1=0.9, \beta_2=0.999$ for Adam and $\beta=0.9$ for HB.
+The learning rate $\eta$ for Adam was set to $0.05$ after tuning, for GD to the optimal value $2/(\lambda_1 + \lambda_n)$, and for HB we used $2 / (\sqrt{\lambda_1} + \sqrt{\lambda_n})^2$ which is half of the optimal value (due to using constant $\beta$ rather than optimal).
+FOSI runs with $k=10$, $\ell=0$, $\alpha=1$, and $c=\infty$ (no clipping on the scaling of the GD and HB learning rates, see \S\ref{sec:automatic_lr_scaling}).
+
+\betterparagraph{Dimensionality and Eigenspectrum}
+To study the effect of dimensionality and eigenspectrum on FOSI, 
+we created five $f_H$ functions for each $n \in \{100, 1500\}$ by varying $\lambda_1$ of the Hessian $H$ with $\lambda_1 \in \{5, 10, 20, 50, 200\}$. 
+The other eigenvalues were set to $\lambda_i = 1.5^{-(i-2)}$ and the eigenvectors were extracted from a symmetric matrix whose entries were randomly sampled from $U(0,1)$.
+\begin{figure}
+\centering
+{\includegraphics[width=0.9\columnwidth]{figures/quadratic_random_orthogonal_basis_4_funcs_flat.pdf}}
+\caption{
+    Learning curves for minimizing PD quadratic functions $f_H(\theta) = 0.5 \theta^T H \theta$ with varying $n$ and $\lambda_1$ values.
+    FOSI converges more than two orders of magnitude faster than its counterparts.
+}
+\label{fig:quadratic_random_orthogonal_basis_4_funcs}
+\end{figure}
+
+Figure~\ref{fig:quadratic_random_orthogonal_basis_4_funcs} shows learning curves of the optimizers on functions with $\lambda_1=5$ and $\lambda_1=200$.
+Similar results were obtained for other functions.
+FOSI converges at least two orders of magnitude faster than its counterparts.
+In this case, dimensionality has little impact on the performance of different optimizers.
+For a specific $n$ value, increasing $\lambda_1$ causes the base optimizers to converge to less optimal solutions, but has little impact on FOSI. 
+This is expected for GD and HB, whose learning rate is limited by the inverse of the largest eigenvalue, hence, larger $\lambda_1$ implies slower convergence. 
+FOSI reduces the largest eigenvalue, allowing for larger learning rate that is identical for all functions.
+Interestingly, this is observed for Adam as well.
+\betterparagraph{Ill-conditioning and diagonally dominance} \label{experiment:quadratic_diagonal_dominanc}
+We explore the effect of both the condition number and the diagonally dominance of the function's Hessian on the different optimizers.
+We use a set of quadratic functions with different condition number and different rotation w.r.t. the coordinate system, which impacts the dominance of the Hessian's diagonal.
+While all optimizers are negatively affected by large condition number, only Adam is affected by the rotation.
+FOSI improves over the base optimizer in all cases.
+
+\betterparagraph{Learning rate and momentum} \label{experiment:quadratic_learning_rate}
+We explored the effect of various learning rates and momentum parameters on the optimizers. We find that FOSI improves over Adam, HB, and GD for all learning rates and momentum (for HB and Adam).
+
+
+
+\section{Related Work}
+
+
+
+Partially second-order optimizers are 
+a group of optimization methods that incorporate some aspects of second-order information in their optimization process.
+Optimizers that use a diagonal preconditioner \citep{yao2021adahessian, jahani0SRMT22, henriques2019small, liu2023sophia}, and in fact approximate the Hessian diagonal, suffer when the assumption for diagonally dominance Hessian does not hold (see \S~\ref{sec:experiment_quadratic_function}).
+L-BFGS~\citep{liu1989limited}, which uses low-rank approximation of the Hessian, is sensitive to the rank parameter and an incorrect selection can lead to slow convergence or divergence.
+Additionally, it requires line search in each iteration, slowing down the optimization process further.
+Recent approaches, such as K-FAC~\citep{10.5555/3045118.3045374}, Shampoo~\citep{pmlr-v80-gupta18a}, K-BFGS~\citep{10.5555/3495724.3495925}, LocoProp~\citep{amid2022locoprop}, Eva~\citep{zhang23eva}, and~\cite{9916144} exploit the structure of the network to approximate a block diagonal preconditioner matrix, as an alternative to full second-order methods.
+However, these techniques approximate the preconditioner directly instead of approximating its inverse, potentially resulting in higher approximation errors and noise sensitivity~\citep{li2017preconditioned}.
+They also exhibit comparable limitations to those of diagonal preconditioners due to neglecting Hessian elements outside the diagonal blocks, such as inter-layer parameter correlations or rotated problems (\S\ref{sec:experiment_quadratic_function}).
+In contrast, by splitting the problem into two subspaces FOSI obtains a full low-rank representation of the Hessian for the first subspace $\Vtop$, which captures both the rotation and curvature of the sub-problem $f_1$. This contributes to accuracy and stability of the optimization, particularly as it is based on extreme eigenvalues and vectors that can be approximated more accurately.
+Other optimization approaches for stochastic settings involve the use of sub-sampling of $f^i$ functions and constructing an approximation of the Hessian based on the gradients of these functions at each iteration~\citep{10.1007/s10107-018-1346-5,10.5555/3157382.3157434}.
+However, these methods are limited to functions with only a few thousand parameters.
+Hessian-free optimization methods~\citep{martens2010deep, martens2011learning, frantar2021m} rely on conjugate gradient to incorporate second order information, which while more efficient than Lanczos in terms of memory, it still often requires many steps to converge and is more sensitive to noise.
+Finally, while these works propose a single improved optimizer, FOSI is a meta-optimizer.
+
+
+
+\section{Discussion and Future Work}
+
+FOSI is a hybrid meta-optimizer that combines a first-order base optimizer with Newton's method to improve the optimization process without additional tuning. 
+Evaluation on real and synthetic tasks demonstrates FOSI improves the wall time to convergence when compared to the base optimizer.
+Future research will focus on methods for automatic tuning of different parameters of FOSI, such as dynamically adjusting parameters $k$ and $\ell$ according to their impact on the effective condition number.
+We also plan to investigate the effect of stale spectrum estimation, which could allow running the ESE procedure on the CPU in parallel to the training process on the GPU.
+
+
+
+
+

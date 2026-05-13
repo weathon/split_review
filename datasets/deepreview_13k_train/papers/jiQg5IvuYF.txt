@@ -1,0 +1,349 @@
+\title{Corgi$^2$: A Hybrid Offline-Online Approach To Storage-Aware Data Shuffling For SGD}
+
+\begin{abstract}
+
+When using Stochastic Gradient Descent (SGD) for training machine learning models, it is often crucial to provide the model with examples sampled at random from the dataset. However, for large datasets stored in the cloud, random access to individual examples is often costly and inefficient.
+A recent work \cite{corgi}, proposed an online shuffling algorithm called CorgiPile, which greatly improves efficiency of data access, at the cost some performance loss, which is particularly apparent for large datasets stored in homogeneous shards (e.g., video datasets).
+In this paper, we introduce a novel two-step partial data shuffling strategy for SGD which combines an offline iteration of the CorgiPile method with a subsequent online iteration.
+Our approach enjoys the best of both worlds: 
+it performs similarly to SGD with random access (even for homogenous data) without compromising the data access efficiency of CorgiPile. We provide a comprehensive theoretical analysis of the convergence properties of our method and demonstrate its practical advantages through experimental results.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Modern machine learning pipelines, used for training large neural network models, necessitate the employment of extensive datasets, which are frequently stored on cloud-based systems due to their size surpassing the capacity of fast memory. Stochastic gradient descent (SGD) and its variants have emerged as the primary optimization tools for these models. However, SGD relies on independent and identically distributed (i.i.d.) access to the dataset, which is advantageous when random access memory is available. In contrast, when utilizing slower storage systems, particularly cloud-based ones, random access becomes costly, and it is preferable to read and write data sequentially \cite{aizman2019high}.
+
+This challenge is further compounded by the customary storage of data in shards \cite{bagui2015database}, which are horizontal (row-wise) partitions of the data. Each partition is maintained on a separate server or storage system to efficiently distribute the load. For example, image data is often acquired in the form of videos, leading to the storage of single or multiple clips within each shard. This results in highly homogeneous or non-diverse chunks of data. Consequently, running SGD with sequential reading of examples, without randomized access, will result in a suboptimal solution \cite{corgi, whyglobally}.
+
+One could shuffle the dataset fully before performing SGD, but this also requires random access to memory. A recent line of work \cite{corgi, tensorflow2022slidingwindow, feng2012towards, whyglobally} suggests an attractive alternative: performing a partial online shuffle during training time. In particular, \cite{corgi} recently suggested the CorgiPile shuffling algorithm, a technique that reads multiple shards into a large memory buffer, shuffles the buffer, and uses the partially shuffled examples for training. This approach gains data access efficiency, albeit at the expense of performance loss that is especially noticeable for large datasets stored in homogeneous shards. The goal of this work is to find a better trade-off between data access efficiency and optimization performance.
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth,height=\textheight,keepaspectratio]{images/randomness_comparison.png}
+    \caption{Comparing the uniformity of shuffling the set $\set{1,...,1000}$ using CorgiPile, $\corgii$ and full shuffle. It is evident that $\corgii$ is close to full shuffle of the data.}
+    \label{fig:fig1}
+\end{figure}
+In this paper, we present $\corgii$, a novel approach that enjoys the strengths of both offline and online data shuffling techniques. We propose adding another offline step that incurs a small overhead compared to Corgi (much cheaper than a full offline shuffle). Thus, our method entails a two-step partial data shuffling strategy, wherein an offline iteration of the CorgiPile method is succeeded by a subsequent online iteration (see schematic representation in Figure~\ref{fig:fig2}). This approach enables us to achieve performance comparable to SGD with random access, even for homogeneous data, without compromising the data access efficiency of CorgiPile. In Figure~\ref{fig:fig1} we illustrate the distribution of data indices after CorgiPile, $\corgii$ and Full Shuffle. It is evident that $\corgii$ spreads the data samples more uniformly across the shuffled buffer.
+
+We perform a comprehensive theoretical analysis of the convergence properties of our method, demonstrating its compatibility with SGD optimization. We further underscore the practical advantages of our approach through a series of experimental results, highlighting its potential to improve the way we train machine learning models in storage-aware systems.
+
+
+\textbf{Our Contributions.} We delineate our contributions as follows:
+
+\begin{enumerate}
+\item In Section~\ref{sec:setting} we introduce $\textrm{Corgi}^2$, a novel two-step partial data shuffling strategy that combines the strengths of both offline and online data shuffling techniques.
+\item We provide a comprehensive theoretical analysis of the convergence properties of our method in Section~\ref{sec:theory}, demonstrating its robustness and efficacy. Our analysis elucidates the conditions under which $\corgii$ converges and offers insights into the trade-offs between data access efficiency and optimization performance. 
+\item We conduct a series of experiments to empirically validate the effectiveness of $\corgii$ in Section~\ref{sec:exps1}. Our results underscore the practical advantages of $\corgii$ in various settings.
+\end{enumerate}
+
+To summarize, our work advances the understanding of data shuffling strategies in cloud-based storage systems, laying the foundation for future research on optimizing machine learning models in such environments.
+
+\textbf{Related Work}. 
+
+It is well established that SGD works well for large datasets given i.i.d  sample access to the data \cite{bottou2010large, gpt3, mae}. Since such access is costly in practice, it is often simulated by fully shuffling the dataset "offline" (before training), and reading the data sequentially "online" (during training). While this requires a lengthy and expensive offline phase, prior work demonstrated that the resulting convergence rate of training is comparable to that of random access SGD \cite{shamir2016without,safran2020good,gurbuzbalaban2019convergence,gurbuzbalaban2021random}.
+
+Recently, many approaches for "partial" shuffling have emerged, attempting to compromise on the uniformity of randomness in exchange for reduced sampling costs. Prominently, Tensorflow implements a sliding-window shuffling scheme that reads the data sequentially into a shuffled buffer. Other approaches include Multiplexed Reservoir Sampling (MRS)  \cite{feng2012towards}, where two concurrent threads are used to perform reservoir sampling and update a shared model and \cite{whyglobally}, 
+ where multiple workers read chunks of data in parallel and communicate shuffled data between each other. Finally, \cite{corgi} recently introduced the highly effective CorgiPile algorithm, which compares favorably to all the other approaches we're aware of, and which we seek to directly improve upon by prepending an \textit{efficient, partial} offline shuffle step to it.\cite{tensorflow2022slidingwindow}.
+
+While we focus our attention on the impact of partial randomization on the outcome of machine learning training processes, \cite{deckShuffle} analyzes some further probabilistic attributes of a very similar shuffle method to the one presented here.
+
+
+\section{Setting and Algorithm}
+
+\label{sec:setting}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth,height=\textheight,keepaspectratio]{images/corgi_visual_aids.pdf}
+    \caption{Schematic visualization of the end-to-end flow of $\corgii$. Samples of the same color belong to the same storage block before the process starts. (1) Sets of blocks are randomly selected from the datasets and stored in a local buffer. (2) The buffer is randomly shuffled and written in new blocks. (3) During training, sets of the new blocks are loaded at random into a buffer. (4) Each buffer is shuffled and processed with SGD.}
+    \label{fig:fig2}
+\end{figure}
+
+In this section, we present our notation and framework, which encapsulates the formalization of diverse machine learning tasks. Consider the following standard optimization problem, where our goal is to minimize an average of functions $\{f_1, \dots, f_m\}$:
+
+\begin{equation}
+\min_\mathbf{x} F(\mathbf{x}) = \frac{1}{m} \sum_{i=1}^m f_i(\mathbf{x})
+\end{equation}
+
+For instance, consider a dataset of $m$ examples, and let $f_i$ represent the loss over the $i$-th example. Then, the objective function $F(\mathbf{x})$ is the average loss over the individual examples across the entire dataset. Our task is to find the optimal value of $\mathbf{x}$ (e.g., the parameters of some machine learning model) that minimizes this objective function.
+
+Many of the prevalent modern approaches to machine learning involve optimizing this objective function using the Stochastic Gradient Descent (SGD) algorithm. An execution of SGD initializes the parameter vector $\mathbf{x}_0$ and then performs $\mathcal{T}$ \textit{epochs}, each consisting of multiple iterations of the following procedure:
+
+\begin{enumerate}[topsep=0pt, partopsep=0pt,leftmargin=10.5mm]
+    \item Sample an example $f_i$ from the dataset, where $i$ is selected uniformly at random.
+    \item Compute the gradient $\nabla f_i(\mathbf{x}_{j-1})$ and update $\mathbf{x}_j = \mathbf{x}_{j-1} - \eta_j \nabla f_i(\mathbf{x}_{j-1})$.
+\end{enumerate}
+
+The protocol is terminated upon reaching a predetermined number of epochs.
+
+SGD guarantees fast convergence under different assumptions (e.g., when the $f_i$-s are convex functions), but requires random access to individual examples, which is inefficient when training on large datasets stored in the cloud. The CorgiPile algorithm (see Algorithm~\ref{alg:corgi}) was proposed in \cite{corgi} as an alternative to SGD with random access, improving efficiency by accessing blocks of examples together. This algorithm assumes that the data is horizontally (i.e., row-wise) sharded across $N$ blocks of size $b$, resulting in a dataset size of $m=Nb$. CorgiPile operates by iteratively picking $n$ blocks randomly from the dataset to fill a buffer $S$, shuffling the buffer, and running SGD on the examples in the buffer.
+
+\begin{algorithm}[ht]
+\caption{CorgiPile}\label{alg:corgi}
+\begin{algorithmic}[1]
+\State \textbf{input:} Blocks $\{B_i\}_{i=1}^N$, each of size $b$, with a total of $Nb$ examples;\newline Model parameterized by $\mathbf{x}$; number of epochs $\mathcal{T} \geq 1$; buffer size $n \geq 1$.
+\For{$t=1,\dots,\mathcal{T}$}:
+    \State Randomly pick $n$ blocks (i.i.d without replacement).
+    \State Shuffle the indices of the resulting buffer, obtaining permutation $\Psi_t$ over $\{1,\dots,nb\}$.
+    \State $\x_0^{(t)} \leftarrow \x_{nb}^{(t-1)}$
+    \For{$j = 1,\dots, nb$}:
+        \State $\mathbf{x}_j^{(t)} = \mathbf{x}_{j-1}^{(t)} - \eta_t\nabla f_{\Psi_t(j)}\left( \mathbf{x}_{j-1}^{(t)}\right)$.
+    \EndFor
+\EndFor
+\State \textbf{return} $\mathbf{x}_{nb}^{(\mathcal{T})}$
+\end{algorithmic}
+\end{algorithm}
+In alignment with \cite{corgi}, we presume a read-write buffer $S$ with random access, capable of containing up to $nb$ examples simultaneously, namely $|S| = nb$. We introduce a new algorithm, $\text{Corgi}^2$ (see Algorithm \ref{alg:corgi2}), which improves the convergence guarantees of CorgiPile while maintaining efficient data access, at the cost of adding an efficient offline step that reorganizes the data before the training starts.
+More specifically, the $\text{Corgi}^2$ algorithm initially executes an offline, slightly modified version of CorgiPile, repurposed to redistribute examples among blocks in a manner that minimizes block variance (see Algorithm \ref{alg:offline-corgi}). 
+Subsequently, it runs the original online CorgiPile algorithm (Algorithm~\ref{alg:corgi}) on the preprocessed dataset.
+
+
+\begin{algorithm}
+\caption{OfflineCorgiShuffle}\label{alg:offline-corgi}
+\begin{algorithmic}[1]
+
+\State \textbf{input:} Blocks $\{B_i\}_{i=1}^N$, each of size $b$, with a total of $Nb$ examples; buffer size $n \ge 1$.
+\For{$l=1,...,N/n$}:
+    \State Randomly pick $n$ blocks (i.i.d with replacement), and fill the buffer $S$.
+    \For{$j=1,...,n$}:
+        \State Randomly pick $b$ examples from the $nb$ examples in $S$ (i.i.d with replacement).
+        \State Create a new block $\widetilde{B}_{l, j}$ with the chosen tuples.
+    \EndFor
+\EndFor
+\State \textbf{return} $\{\widetilde{B}_{l,j}\}$ for $j\in \{1,...,n\}$ and $l\in \{1,...,\frac{N}{n}\}$.
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+\caption{The $\corgii$ Algorithm}\label{alg:corgi2}
+\begin{algorithmic}[1]
+
+\State \textbf{Input:} blocks $\{B_i\}_{i=1}^N$, each of size $b$, with a total of $Nb$ examples; a model parameterized by $\mathbf{x}$; the number of epochs $\mathcal{T} \geq 1$; and a buffer size $n \geq 1$.
+
+\State \quad Execute the OfflineCorgiShuffle procedure to obtain the shuffled blocks $\{\widetilde{B}_{l,j}\}$.
+\State \quad Apply the CorgiPile method to the shuffled data $\{\widetilde{B}_{l,j}\}$.
+
+\State \textbf{Output:} The updated model parameters $\x_{nm}^{(\mathcal{T})}$ after $\mathcal{T}$ epochs.
+
+\end{algorithmic}
+\end{algorithm}
+
+We note that the additional cost in terms of time and number of data access queries due to using $\corgii$ is minimal, compared to the original CorgiPile algorithm (see Section \ref{sec:complexity}). However, a naive implementation of $\corgii$ doubles the cost of storage, which may be significant for large datasets. That said, we observe that with a small modification to the offline step of $\corgii$, namely by selecting blocks i.i.d. \emph{without} replacement, it is possible derive a variant of $\corgii$ that reorganizes the data in-place, and thus consumes no extra storage. While this variant is harder to analyze theoretically, it obtains similar (and often better) performance in practice.
+
+
+\section{Theory}
+
+\label{sec:theory}
+In this section, we analyze the convergence time of  $\corgii$ under some assumptions, and show that the cost of the additional offline step (in terms of data access) is relatively small. 
+
+\subsection{Notations and Assumptions}
+We make the following assumptions about the loss functions and the examples in the dataset. These assumptions are taken from the analysis in \cite{corgi}. 
+
+\begin{enumerate}
+\label{lst:assumptions}
+    \item $f_i(\cdot)$ are twice continuously differentiable.
+    
+    \item $L$-Lipschitz gradient: $\exists L \in \mathbb{R}_+$, $\|\nabla f_i (\x) - \nabla f_i (\y)\| \leq L \|\x-\y\|$ for all $i \in [m]$, $\forall\x,\mathbf{y}$.
+    
+    \item $L_H$-Lipschitz Hessian matrix: $\|H_i(\x) - H_i(\y)\| \leq L_H\|\x-\y\|$ for all $i\in [m]$, $\forall\x,\mathbf{y}$.% and $H_i(\cdot):=\nabla^2 f_i(\cdot)$ is symmetric.
+    
+   \item Bounded gradient: $\exists G \in \mathbb{R}_+$, $\|\nabla f_i (\x)  \| \leq G$ for all $i \in [m]$, $\forall\x$. 
+   
+    \item Bounded Variance: $\frac{1}{m}\sum_{i=1}^m\|\nabla f_i(\x)-\nabla F(\x)\|^2\leq \sigma^2$, $\forall\x$.
+    
+\end{enumerate}
+
+A crucial aspect in examining the original CorgiPile algorithm \cite{corgi} is the constraint on the block-wise gradient variance. Intuitively, this variance is minimized when the gradient of each block $\nabla f_{B_l}$ closely approximates the gradient over the entire data $\nabla F$. More formally,
+
+\begin{equation}
+\label{eq:blockwise_var}
+\frac{1}{N}\sum_{l=1}^N \left\|\nabla f_{B_l}(\x) - \nabla F(\x) \right\|^2 \leq h_D  \frac{\sigma^2}{b},
+\end{equation}
+
+where $\nabla f_{B_l}:=\frac{1}{b}\sum_{i\in B_l}\nabla f_i$ is the mean gradient in the block, and  $h_D$ represents a constant that characterizes the variability of this block-wise gradient.
+
+It is important to note that the inequality in Equation \ref{eq:blockwise_var} always holds for $h_D = b$, and the value of $h_D$ will be larger when each block exhibits greater homogeneity. For instance, consider an image dataset in which each block comprises sequential frames from a single video. In this case, the dataset would exhibit a high degree of homogeneity. Conversely, a well-shuffled dataset, wherein blocks possess highly similar distributions, could yield $h_D$ values approaching $1$. There are even edge cases, such as a perfectly balanced dataset with identical gradients across all blocks, that would result in $h_D=0$.
+\subsection{Main Result}
+We start by showing that after the offline step of $\corgii$ (i.e., after running OfflineCorgiShuffle), the block-wise variance decreases compared to the variance of the original blocks.
+\begin{theorem}
+    \label{thm:variance_bound}
+    Consider the execution of \emph{OfflineCorgiShuffle}  (refer to Algorithm \ref{alg:offline-corgi}) on a dataset characterized by a variance bound $\sigma^2$, a block-wise gradient variance parameter $h_D$, $N$ blocks each containing $b$ examples, and a buffer size $nb$. For all $\x$, the following inequality holds:
+    \begin{equation} \label{eq:thm2}
+        \mathbb{E}\left[\frac{1}{N}\sum_{l=1}^N \left\|\nabla f_{\widetilde{B}_l}(\x) - \nabla F(\x) \right\|^2\right] \leq h'_D\frac{\sigma^2}{b},
+    \end{equation}
+    where $h'_D = 1 + \left(\frac{1}{n} - \frac{1}{nb}\right)h_D$, and $f_{\widetilde{B}_l}(\x)$ denotes the average of examples in ${\widetilde{B}_l}$, the $l$-th block generated by the \emph{OfflineCorgiShuffle} algorithm.
+\end{theorem}
+
+The ratio between $h'_D$ and $h_D$ can thus be expressed as,
+\begin{equation}
+    \label{eq:hd_change}
+    \frac{h'_D}{h_D} = \frac{1}{h_D} + \frac{b-1}{nb}.
+\end{equation}
+This ratio is less than 1 whenever the following condition is satisfied:
+\begin{equation}
+    h_D > \frac{nb}{(n-1)b - 1}.
+\end{equation}
+This condition is trivially met when $n$ and $b$ assume realistic values (e.g., it holds if $n > 2$ and $b > 2$). It is worth noting that larger values of $h_D$ amplify the ratio, aligning with the intuitive understanding that datasets initially divided into more homogeneous blocks would undergo a more substantial reduction in variance during the offline shuffle phase.
+
+Blockwise variance significantly impacts the disparity between the anticipated distribution of a buffer comprising $n$ blocks and the overall dataset distribution. In turn, this lowers the convergence rate, bringing it closer to that of random access SGD during training. Further elaboration on this relationship is provided in Theorem \ref{thm:convergence}.
+\textbf{Theorem \ref{thm:variance_bound} Proof Sketch:} Since Offline Corgi works on each generated block $\Tilde{B}_{l}$ independently, we analyze a single iteration of the algorithm. We focus on the expression, 
+\[
+\var{S,\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}}:=\frac{1}{N}\sum_{l=1}^N \left\|\nabla f_{\widetilde{B}_l}(\x) - \nabla F(\x) \right\|^2.
+\]
+where $S$ is a vector representation of the buffer, $\widetilde{B_l}$ represents the block created from it by uniformly sampling from the buffer and $l$ is a uniformly sampled index.
+This is a measure of variance that generalizes scalar variance, expressed as a scalar rather than a matrix. Thus we can decompose the left hand side of the theorem equation using the law of total variance:
+
+\[
+\frac{1}{N}\sum_{l=1}^N \left\|\nabla f_{\widetilde{B}_l}(\x) - \nabla F(\x) \right\|^2 = \var{S,\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}(\x)} = 
+\underbrace{\var{S}{\expect{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S}}}_{(i)} + 
+\underbrace{\expect{S}{\var{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S}}}_{(ii)}  
+\]
+
+ When $S$ is fixed, each $\widetilde{B}_l$ is an unbiased i.i.d selection of $b$ examples from it.
+
+Thus, in $(i)$, given fixed $S$ we have $\expect{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S} = \nabla f_S := \frac{1}{nb}\sum_{i\in S}\nabla f_i $, i.e., the average gradient in the buffer. In turn, since $S$ is an i.i.d sampling of $n$ blocks, the variance of its average is equal to $\frac{1}{n}$ of the variance of sampling the average of a single block, which gives us
+\[
+    (i):  \var{S}{\expect{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S}} = \var{S}{\nabla f_S|S} = \frac{1}{n}\var{i}{\nabla f_{B_i}} \leq \frac{1}{n}h_D\frac{\sigma^2}{b}.
+\]
+Where $B_i$ is the $i^{\text{th}}$ block, before applying the Offline Corgi.
+
+For term $(ii)$, we apply Bienaymé's identity and use the fact that averaging $b$ i.i.d. elements decreases the variance by a factor of $\frac{1}{b}$ compared to the variance of sampling a single element.
+Given that, and letting $i$ be an index selected uniformly from $1,...,bn$, we observe that $\expect{S}{\var{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S}} = \frac{1}{b}\expect{S}{\var{i}{S_i|S}}$. This expression can be decomposed to,
+\[
+\expect{S}{\var{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S}} = \frac{1}{b}\expect{S}{\var{i}{S_i|S}} = 
+\frac{1}{b}
+\left(
+\underbrace{\var{i}{S_i}}_{\rom{1}} - 
+\underbrace{\var{S}{\expect{i}{S_i|S}} }_{\rom{2}}
+\right).
+\]
+Here ($\rom{1}$) is the variance of sampling one element from the buffer, before the buffer itself is known. Since every example from the dataset has the same probability of being the $i^\text{th}$ example in $S$, this variance is equal to the variance of the dataset itself, which is bounded by $\sigma^2$.
+
+Moreover, ($\rom{2}$) is the variance of the average of $S$, and exactly like in $(i)$, it equals the pre-shuffle blockwise variance. Put together,
+\[
+    (ii): \expect{S}{\var{\widetilde{B}_l}{\nabla f_{\widetilde{B}_l}|S}} = \frac{1}{b}\expect{S}{\var{i}{S_i|S}} \leq \left(1 - \frac{1}{nb}\right)\frac{\sigma^2}{b}
+\]
+
+Combining the bounds for $(i)$ and $(ii)$ yield the result.
+
+\subsubsection{Convergence Rate Analysis}
+The convergence rate of CorgiPile and $\corgii$ is expected to be slower (in terms of epochs) than that of random access SGD, especially when the individual buffers significantly differ from the distribution of the dataset as a whole. Specifically, larger values of $\frac{n}{N}$ would guarantee faster convergence time as more of the dataset is shuffled together in each iteration; and higher values of $h_D$ would hurt convergence time as the variance in each iteration is increased.
+
+In the following theorem we revisit the convergence rate upper bound associated with CorgiPile and establish the extent to which our approach contributes to its reduction.
+
+\begin{theorem} 
+\label{thm:convergence}
+Suppose that $F(\x)$ are smooth and $\mu$-strongly convex function. 
+Let $T = \mathcal{T}nb$ be the total number of examples seen during training, where $\mathcal{T}\geq 1$ is the number of buffers iterated. Choose the learning rate to be  $\eta_t = \frac{6}{bn\mu(t+a)}$ 
+where  $a \geq \max \left\{\frac{8LG + 24L^2 + 28L_H G}{\mu^2}, \frac{24L}{\mu} \right\}$. Then, $\corgii$, has the following convergence rate in the online stage for any choice of $\x_0$,
+
+\begin{align} \label{eq:thm3}
+    \E [F\left( \bar{\x}_{\mathcal{T}} \right) - F(\x^*)]  \le  ( 1-\alpha)h'_D\sigma^2 \frac{1}{T}  + \beta \frac{1}{T^2}  + \gamma \frac{  (Nb)^3}{T^3},
+\end{align}
+where $\bar{\x}_{\mathcal{T}} = \frac{\sum_t (t+a)^3 \x_t}{\sum_t (t+a)^3}$, and
+\begin{align*}
+\alpha := \frac{n-1}{N-1}, \beta := \alpha^2 + ( 1-\alpha)^2(b-1)^2, \gamma := \frac{n^3}{N^3}.
+\end{align*}
+\end{theorem}
+
+ The convergence rate for CorgiPile in the same setting is,
+
+\begin{align} \label{eq:thm1}
+    \E [F\left( \bar{\x}_{\mathcal{T}} \right) - F(\x^*)]  \le (1-\alpha)h_D \sigma^2 \frac{1}{T}  + \beta \frac{1}{T^2}  + \gamma \frac{  N^3b^3}{T^3},
+\end{align}
+
+Observe that the difference between the methods is expressed in the replacement of the blockwise variance parameter $h_D$ with $h'_D$. As is shown in Theorem \ref{thm:variance_bound}, $h'_D$ will be lower in practically all cases. Here we see that $h'_D$ controls the convergence rate, as it linearly impacts the leading term $\frac{1}{T}$. 
+
+ We now have a good grasp on the guiding principles of when $\corgii$ can be expected to converge significantly faster than CorgiPile. Specifically, when the original blocks are homogeneous, we expect that $h_D = \Theta(b)$, in which case $\corgii$ will improve the convergence rate by a factor of $1/n$ (where $n$ is the number of blocks in the buffer). On the other hand, when data is already shuffled, we expect that $h_D = \Theta(1)$, in which case $\corgii$ will not give a significant improvement, and can even hurt convergence. In the following subsection we show that, $\corgii$ improves data efficiency by a factor of $1/b$ over full shuffle.
+
+
+\subsection{Complexity Analysis}
+
+\begin{table}[ht]
+\small
+\caption{Number of data access queries for the different shuffling methods.}\label{tbl:complexity}
+\begin{center}
+\begin{tabular}{ c | c | c | c }
+\toprule
+Algorithm & \# Offline queries & \# Online queries & Total\\
+\hline
+ Random Access & $-$ &$\mathcal{T}m$ & $\mathcal{T}m$ \\ 
+ Shuffle-Once  & $m+m/b$ & $\mathcal{T}m/b$ & $m+(\mathcal{T}+1)m/b$  \\  
+ CorgiPile & $-$ & $\mathcal{T}m/b$ & $\mathcal{T}m/b$ \\
+ $\corgii$ & $2m/b$ & $\mathcal{T}m/b$ & $(\mathcal{T}+2)m/b$   \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\label{sec:complexity}
+
+Previous sections demonstrated that $\corgii$ improves the convergence rate of CorgiPile by a significant factor. We now turn our attention to quantifying the increase in query complexity that $\corgii$ induces.
+
+We model the storage system as maintaining \textit{chunks} of $b$ examples, such that each read/write operation accesses an entire chunk - meaning that reading a single example or all $b$ in the same chunk, incurs the same cost. This straightforward modeling accurately reflects the cost structure of cloud-based data storage, as providers such as Amazon Web Services (AWS) charge a fixed price for each object access, regardless of the object's size \cite{aws, azure}. With this model in mind, we can compare different shuffling algorithms according to the simple metric of \textit{number of data access operations}.
+
+Both CorgiPile and $\corgii$ are alternatives to more traditional approaches. For context, random access SGD requires $\mathcal{T} m$ queries, where $\mathcal{T}$ is the number of training epochs. The commonly applied approach of a single, full, offline shuffle and sequential online reading (see \cite{safran2020good}) requires $m+(\mathcal{T}+1)m/b$ queries: $m$ read operations for one example each, accompanied by $m/b$ write operations to recreate the dataset in shuffled chunks, and then $\mathcal{T}m/b$ read operations to fetch full chunks during training. 
+
+Meanwhile, CorgiPile costs only $\mathcal{T}m/b$ queries in total, since each chunk is read exactly once in each epoch. The online phase of $\corgii$ is identical to that, and the preceeding offline phase costs $2m/b$ queries (read + write). Thus, up to a small constant factor, $\corgii$ demands the same number of queries as CorgiPile. Table \ref{tbl:complexity} summarizes the  complexity of all algorithms.
+
+Lastly, we note that our metric expresses query complexity and not time complexity, since realistic executions of shuffle methods rely heavily on parallelization techniques, which might be limited by factors such as software implementation and the throughput limits of the storage system. The $\corgii$ algorithm itself imposes no bottlenecks on parallelization, meaning that it should enjoy similar benefits to runtime complexity as those of the other methods analyzed here.
+
+\subsection{Discussion}
+\label{sec:discussion}
+\subsubsection{Possible modifications}
+\begin{enumerate}
+    \item \textbf{Repeated offline shuffles:} One intuitive way to modify $\corgii$ is to repeat the offline phase (\ref{alg:offline-corgi}) multiple times, to further reduce block variance before the online phase. This would incur a cost in query complexity, as outlined in \ref{tbl:complexity}, but each such repetition would lower the parameter $h_D$ according to \ref{eq:hd_change} (and consequently improve the convergence rate as described in \ref{thm:convergence}). Thus, the magnitude of the reduction diminishes exponentially with each further repetition, but query complexity increases linearly. While scenarios where this modification is useful may very well exists, it will usually be more cost effective to boost performance by increasing the number of blocks in the buffer.  
+    \item \textbf{Sampling without replacement:} As mentioned in \ref{sec:setting}, the motivation for sampling with replacement in $\corgii$ was to streamline the theoretical analysis, despite understanding that sampling without replacement is preferred in real world applications. Empirically, most experiments in $\ref{sec:expms}$ were repeated in both ways, with no discernable differences.
+    \item \textbf{Overwriting blocks to conserve storage:} \ref{sec:setting} mentions a modification that avoids doubling the storage requirements during execution of $\corgii$. This modification will simply have \ref{alg:offline-corgi} delete each block it finishes reading, thus maintaining the number of blocks. We note that this modification will result in permanent data loss, unless combined with sampling without-replacement.
+    \item \textbf{Different parameters for offline and online stages: } The parameters $n$, $b$ have been assumed to be identical between \ref{alg:offline-corgi} and the online phase throughout the entire analysis. In practical applications it may be desirable to vary these values - for example, the offline phase may double up as an opportunity to restructure an existing dataset into blocks of a size better optimized for in the underlying storage system, in which case $b$ will be different between the phases.
+\end{enumerate}
+
+
+\section{Experiments}
+
+\label{sec:expms}
+
+\label{sec:exps1}
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.4\textwidth}
+    \includegraphics[width=\textwidth]{images/multiclass_accuracy.pdf}
+    \label{fig:image1}
+  \end{subfigure}
+  \hspace{0.05\textwidth}
+  \begin{subfigure}[b]{0.4\textwidth}
+    \includegraphics[width=\textwidth]{images/multiclass_loss.pdf}
+    \label{fig:image2}
+  \end{subfigure}
+  \hspace{0.05\textwidth}
+  \caption{Training performance comparison (accuracy and loss) between the shuffle methods on a proprietary image classification model.}
+  \label{fig:side_by_side_images}
+\end{figure}
+
+
+\label{sec:exps2}
+\begin{figure}[ht]
+    \centering    \includegraphics[width=0.4\textwidth,height=\textheight,keepaspectratio]{images/imagenet1.pdf}
+    \centering
+    \includegraphics[width=0.4\textwidth,height=\textheight,keepaspectratio]{images/cifar1.pdf}
+    \caption{Training performance comparison between full shuffle, CoriPile and $\corgii$. Left: Test accuracy for ResNet-50 on ImageNet, Right: Test accuracy for CIFAR-100 on ResNet-18.}
+    \label{fig:pic1}
+    \centering    \includegraphics[width=0.4\textwidth,height=\textheight,keepaspectratio]{images/n_b_plot_2.pdf}
+    \centering
+    \includegraphics[width=0.4\textwidth,height=\textheight,keepaspectratio]{images/n_b_plot.pdf}
+    \caption{Impact on training performance of ResNet50 on ImageNet as in figure 4 above, when changing block size (b) and number of blocks in each buffer (n). Left: buffer size set to 0.25\%. Right: buffer size set to 1\%.}
+\end{figure}
+
+Thus far, we have observed that $\corgii$ offers substantial improvements in terms of theoretical guarantees over the original CorgiPile method, particularly in the context of homogeneously sharded data. In this section, we aim to empirically investigate the performance of $\corgii$ for such datasets and compare it to CorgiPile and full data shuffle, where the data is randomly reshuffled every epoch. CorgiPile has been shown \cite{corgi} to achieve parity with a full shuffle for buffer sizes of about 2\% or more, but noticeably dip in performance below that threshold. Our tests explore buffer sizes as low as 0.25\%, which are viable with common hardware for datasets of even hundreds of terabytes. 
+
+Figure 3 displays the multiclass accuracy of an image classifier in Mobileye (an autonomous vehicle and computer vision company where this research was conducted). The model in question is tasked with classifying crops of objects taken out of real-world images, which in this experiment has been trained on 27TB of such data. The comparison is between a version of the dataset which was fully shuffled, and a version shuffled by a distributed $\corgii$ implementation where each node had 64GB of memory, for a buffer size of about 0.25\%.
+
+Figure 4 displays an open source experiment we performed. 
+
+We observe that while the ImageNet experiment lines up with the results on the internal experiment, in CIFAR100, ostensibly a less complex dataset, $\corgii$ does appear to lag behind full shuffle.
+
+Figure 5 demonstrates the tradeoff between block size and buffer size - the same block sizes result in considerably better performance in the right plot (with a buffer size of 1\%) than the left one (with a buffer size of 0.25\%). While smaller blocks will boost the training performance for a given buffer size, a careful balance must be struck in order to maintain good data access efficiency.
+
+
+

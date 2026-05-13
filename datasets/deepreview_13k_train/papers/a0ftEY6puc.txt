@@ -1,0 +1,342 @@
+\title{Investigating Language-Specific Calibration For Pruning Multilingual Large Language Models}
+
+\begin{abstract}
+Recent advances in large language model (LLM) pruning have shown state-of-the-art (SotA) compression results in post-training and retraining-free settings while maintaining high predictive performance. However, previous research mainly considered calibrating based on English text, despite the multilingual nature of modern LLMs and their frequent use in non-English languages. In this paper, we set out to investigate calibrating the pruning of multilingual language models for monolingual applications. We present the first comprehensive empirical study, comparing different calibration languages for pruning multilingual models across diverse languages, tasks, models, and SotA pruning techniques. Our results offer practical suggestions, for example, calibrating in the target language can efficiently retain the language modeling capability but does not necessarily benefit downstream tasks. Through further analysis of latent subspaces, pruning masks, and individual neurons within pruned models, we find that while pruning generally preserves strong language-specific features, it may fail to retain language-specific neuron activation patterns and subtle, language-agnostic features associated with knowledge and reasoning that are needed for complex tasks. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+State-of-the-art language models often rely on over-parameterization with millions or billions of parameters, resulting in significant memory and computational demands~\citep{zhang2017understanding,allen2019convergence,xu2023over}. Pruning is a model compression technique that removes unimportant weights to reduce memory footprint and inference computation~\citep{gholami2022survey,hoefler2021sparsity,kuzmin2023pruning}. Recent pruning methods for language models, such as SparseGPT~\citep{frantar2023sparsegpt} and Wanda~\citep{sun2024a}, demonstrated SotA performance in a post-training and retraining-free setting~\citep{zhu2023survey}. The pruning process involves passing a small number of examples, i.e. calibration data, to the model to determine the importance of weights for subsequent pruning~\citep{kuzmin2022fp8,frantar2023sparsegpt,kuzmin2023pruning}. 
+
+Notably, existing studies typically use calibration data in English and evaluate the post-pruning performance in English. On the other hand, most SotA LLMs are multilingual and frequently employed for tasks in non-English languages~\citep{touvron2023llama,achiam2023gpt,jiang2023mistral}. \textbf{It remains unclear how to calibrate pruning to optimize the post-pruning performance of multilingual LLMs on tasks in non-English languages.} In other words, the current literature provides little insight into efficient calibration strategies for multilingual LLMs targeting specific non-English languages. For example, if we aim to prune a multilingual LLM and use the pruned LLM for tasks in German, should we calibrate the compression process with text in English, German, or both?
+
+This research, as the first, presents an extensive study investigating the impact of calibration data language on pruning LLMs for language-specific tasks. Further, we performed a set of analyses at the latent subspace level, the matrix level, and the neuron level, within the pruned models, to investigate the underlying causes for our observations. We summarize our key findings as follows:
+
+\begin{itemize}
+    \item Calibrating on the target language consistently yields the lowest perplexity (Section~\ref{sec:subsection_perplexity}, but will not guarantee optimal performance on downstream tasks (Section~\ref{sec:downstream_performance}). 
+    \item Pruning generally impairs the language-agnostic features of multilingual models, such as reasoning capability (Section~\ref{sec:downstream_performance}) and the storage and retrieval of knowledge (Section~\ref{sec:open_domain_ansering}), which are essential for downstream tasks (Section~\ref{sec:analysis}). 
+    \item Pruning generally affects language-agnostic features, which is potentially associated with reasoning and knowledge storage, more than it impacts language-specific features (Section~\ref{sec:analysis_subspace}); Pruning struggles to consistently identify essential neurons in the attention output and FFN down projection, potentially responsible for reasoning (Section~\ref{sec:analysis_pruning_mask}); pruning also struggles to retain language-specific neurons with low activation probability (Section~\ref{sec:analysis_neurons}).
+\end{itemize}
+
+
+
+
+\section{Related Work}
+
+
+\subsection{Multilingual Language Models}
+
+Most SotA LMs, such as Llama-3~\citep{meta2024llama3} and Phi 3\citep{abdin2024phi}, are trained on multilingual data, enabling them to understand and generate text in multiple languages~\citep{huang-etal-2023-languages,holmstrom-etal-2023-bridging,xu2024survey,meta2024llama3}. 
+Although these multilingual LMs follow the general training paradigm of training monolingual LMs, they are often found to behave differently or show unique features from monolingual models~\citep{xu2024survey}. For example, \citet{deng2024multilingual} reveals that multilingual LMs are prone to generate unsafe outputs on malicious instructions in non-English languages, i.e. multilingual jailbreak. \citet{DBLP:journals/corr/abs-2310-00905} also identify that all LLMs tested in their study produce significantly more unsafe responses for non-English queries than English ones. Furthermore, previous work on model explanation finds that multilingual models are different from counterpart monolingual models in terms of their internal processes, i.e., different importance distributions on the same input~\citep{jorgensen-etal-2022-multilingual,zhao-aletras-2024-comparing}. A general conclusion drawn from these studies is that findings from monolingual settings, particularly those in English, are unlikely to hold in multilingual settings involving non-English languages.
+
+
+\subsection{Calibration of Post-training Pruning}
+
+Unlike sparse training~\citep{yuan2021mest,hoang2023revisiting,zhang2023epitopological} or pruning-aware training~\citep{liu2021sparse}, which require iterative training to achieve sparsity, post-training pruning~\citep{frantar2023sparsegpt,sun2024a} does not require training but eliminates redundant weights based on the importance of weights that are calculated with calibration data. The retraining-free feature of post-training pruning makes it a more efficient approach for LLMs.
+
+Prior research has primarily focused on calculating the importance of weight to optimize the performance of pruned models, examining importance metrics and importance ranking ranges~\citep{frantar2023sparsegpt,sun2024a,zhang2024plugandplay}. Two studies have investigated the impact of calibration data, looking at the quantity of calibration data~\citep{zhang2024plugandplay} and the sources of the data~\citep{williams2023doescalibration}. These studies have been limited to English. The effects of pruning on the multilingual capabilities of language models, and the impact of the language of calibration data on performance in other target languages remain unknown.
+
+
+
+
+
+\section{Methodology}
+
+
+To investigate the impact of the language of calibration data on the pruned model, we compare the performance (pruning error, Signal-to-noise ratio, perplexity, and downstream tasks) in a range of languages between pruned models and their counterpart full-sized models, where different calibration data are applied.  
+\textbf{Models}
+Our experiments use two SotA LLM families: Llama-3~\citep{meta2024introducing}, the open-source SotA at the time of writing, and Aya-23~\citep{aryabumi2024aya}, renowned for its multilingual pre-training.% Aya-23 is also selected due to its distinct model architecture compared to LLaMA. 
+As our evaluation focuses on instructed generation tasks, we employ the instruction-tuned versions of both families~\citep{chrysostomou2023lighter}. Consequently, our experimental setup includes Llama-3-instruction models in 8B and 70B parameter sizes, alongside Aya-instruction models in 8B and 35B parameter sizes.
+
+\textbf{Languages}
+We include seven languages in our study: Arabic (AR), German (DE), English (EN), Spanish (ES), Russian (RU), Swahili (SW), and Chinese (ZH). This selection spans six language families, four writing systems, and encompasses both high and mid-resource languages. We include Swahili as an outlier calibration language, as neither Llama-3 or Aya-23 includes it in their pre-training corpora.
+
+\textbf{Pruning and Calibration} We construct calibration sets in seven different languages from mC4~\citep{2019t5}. Specifically, following~\citet{frantar2023sparsegpt,sun2024a}, we randomly sample 128 sequences of 8192 tokens for each language, from the mC4 split for that language.\footnote{In the original implementation of Wanda and SparseGPT, each sample contains 2,048 tokens, matching the maximum context length of Llama 1. We increase the length to 8,192 tokens to match the maximum context of Llama-3. This is to avoid potential context length-dependence pruning behavior, although ~\citet{sun2024a} reports a negligible return from increased calibration set sizes. For mixing different calibration languages, we mix in equal shares and keep the budget of 128 samples.} 
+
+We focus on two SotA post-training \textit{pruning methods}, Wanda \citep{sun2024a} and SparseGPT \citep{frantar2023sparsegpt}. Unless stated otherwise, we prune for 50\% unstructured sparsity to impose fewer restrictions while keeping all other hyperparameters as in the original paper.
+
+\textbf{Evaluation Downstream Tasks}
+We compare the performance of the pruned models calibrated on different languages using the \textit{perplexity} on a subset of the mC4 validation set, and a selection of downstream tasks in different target languages: MMLU~\citep{hendrycks2021measuring}, MKQA~\citep{longpre2020mkqa}, and Belebele~\citep{bandarkar2023belebele}. To better isolate the impact of the calibration language, we also chose mARC and mHellaSwag~\citep{lai2023okapi} to compare with their original versions, ARC~\citep{clark2018think} and HellaSwag~\citep{zellers2019hellaswag} in English for their low sensitivity to the choice of calibration samples \citep{williams2023doescalibration}. 
+These tasks primarily assess commonsense reasoning, reading comprehension, and question answering using multiple choice questions. Unless stated otherwise, we evaluate in a zero-shot setting. 
+\subfile{tables/eval_ppl_snr_pe}\label{sec:perplexity}
+
+\textbf{Implementation Details}
+We adopt the code from~\citet{sun2024a} for implementing model pruning. We use EleutherAI Evaluation Harness~\citep{eval-harness} for a robust and reproducible evaluation. We use Huggingface~\citep{wolf-etal-2020-transformers} for loading datasets and models. All experiments are conducted with at most two NVIDIA A100 GPUs.
+
+
+
+
+\section{Results}
+
+
+
+\subsection{Pruning Results}\label{sec:subsection_perplexity}
+
+Table \ref{tab:perplexity} presents the perplexity (PPL), Signal-to-noise ratio (SNR) and pruning error of hidden states for models pruned to 50\% sparsity and calibrated on different languages. SNR and pruning error estimate the pruning accuracy (pruning performance); ideal pruning is able to preserve activations identical to the full model. Perplexity reflects the general language modeling capability. The column headers denote the evaluation languages, while the row headers indicate the calibration languages. 
+
+Overall, our findings reveal that no single calibration language consistently outperforms others across perplexity, pruning error, or SNR metrics. The optimal calibration language varies depending on the target evaluation language. Notably, \textbf{\textit{calibrating on the target language itself generally yields the best pruning performance and the lowest perplexity}}, as evidenced by the diagonal pattern in Table \ref{tab:perplexity}. There are a few exceptions. For instance, when evaluating Llama-3 pruned with Wanda on Chinese, Russian calibration performs optimally on perplexity (23.6), slightly outperforming Chinese calibration (24.4). 
+\subsection{Downstream Task Performance}\label{sec:downstream_performance}
+\subfile{tables/eval_single_calib_lang_selection}
+
+\textit{How to select the calibration language to optimize performance in downstream tasks?}
+
+Table \ref{tab:eval_single_calib_lang_selection} shows the models' performance on downstream tasks. The column headers denote the evaluation languages, while the row headers indicate the calibration languages. Given a downstream task in a specific language, we analyze the results column-wise; the lighter the color in a column, the better the performance on the specified downstream task.
+
+First, for both pruning methods, the calibration language affects downstream task performance. This impact is particularly pronounced when pruning Llama-3 8B model with SparseGPT or Aya-23 models with either Wanda or SparseGPT, as evidenced by the greater color difference in the table, compared to pruning Llama-3 8B with Wanda. For example, when evaluating Llama-3 8B model on Belebele in English, pruning with Wanda results in performance ranging from 58.5 with Spanish calibration to 65.0 with English calibration. In contrast, when pruning Llama-3 8B with SparseGPT the performance varies from 50.0 with Chinese calibration to 71.4 with English calibration. 
+
+Unlike the perplexity evaluation in Table \ref{tab:perplexity}, calibration with the target language does not reliably result in good performance. For instance, on MMLU, the pruned Llama-3 8B model mainly achieves higher accuracy on evaluation languages other than on its calibration languages. Overall, there are 50 evaluation groups, 25 columns for Wanda and 25 for SpareGPT, in 26 comparison cases. Calibration with the target language yields the best performance, 8 for Wanda and 18 for SparseGPT (e.g. Arabic on ARC and MMLU). For the remaining cases, calibration with the target language achieves the second-best or comparable performance.
+Therefore, calibrating using the target language typically results in acceptable, though not consistently the best performance. 
+
+
+In terms of downstream performance across different languages, the full-sized baseline models exhibit the strongest performance in English, followed by other Latin languages, with Russian next in line. Arabic and Chinese downstream tasks generally are the most challenging for models. Further, pruning can sometimes alter the original ranking of languages observed in the baseline models. For example, on the Belebele benchmark, the Llama-3 8B model achieves a baseline accuracy of $55.3$ for Arabic and $44.8$ for Chinese, but the pruned models reverse this trend and achieve an accuracy of $45.1$ for Arabic and $57.0$ for Chinese. That is, \textbf{\textit{pruning can shift which languages the model performs best or worst on.}}
+
+\textit{Calibrating on an outlier language or a similar one could benefit downstream tasks in non-English?}
+
+We include Swahili as an outlier language, which is out-of-domain for the model as it is not included in the pre-training corpora of Llama-3 and Aya-23. In column-wise comparison, the SW cell is consistently the darkest or relatively dark one. That is, in most cases, calibration with Swahili results in the worst or the second-worst performance across different calibration language strategies, given a downstream task.
+
+\begin{wraptable}[24]{R}{0.45\textwidth}
+    \centering
+    \resizebox{0.44\textwidth}{!}{
+        \begin{tabular}{ c c c|cccccc|}
+         &  &  & \multicolumn{6}{c|}{MKQA$_{[f1]}$} \\
+         &  &  & AR & DE & EN & ES & RU & ZH \\
+        \hline
+        \multirow{12}{*}{\rotatebox[origin=c]{90}{Llama-3-8B-Instruct}}
+         & - & - & \cellcolor{teal!0!white}8.9 & \cellcolor{teal!0!white}26.8 & \cellcolor{teal!0!white}38.3 & \cellcolor{teal!0!white}27.2 & \cellcolor{teal!0!white}16.4 & \cellcolor{teal!0!white}2.6 \\
+        \cline{2-9}
+         & \multirow{6}{*}{\rotatebox[origin=c]{90}{Wanda}}
+         & AR & \cellcolor{teal!75!white}0.9 & \cellcolor{teal!73!white}6.3 & \cellcolor{teal!82!white}18.4 & \cellcolor{teal!22!white}11.4 & \cellcolor{teal!45!white}5.6 & \cellcolor{teal!26!white}2.0 \\
+         &  & DE & \cellcolor{teal!92!white}0.3 & \cellcolor{teal!78!white}6.0 & \cellcolor{teal!35!white}19.5 & \cellcolor{teal!21!white}11.5 & \cellcolor{teal!43!white}5.7 & \cellcolor{teal!22!white}2.1 \\
+         &  & EN & \cellcolor{teal!96!white}0.2 & \cellcolor{teal!74!white}6.3 & \cellcolor{teal!36!white}19.4 & \cellcolor{teal!17!white}11.6 & \cellcolor{teal!72!white}4.5 & \cellcolor{teal!56!white}1.5 \\
+         &  & ES & \cellcolor{teal!97!white}0.1 & \cellcolor{teal!69!white}6.6 & \cellcolor{teal!30!white}19.6 & \cellcolor{teal!8!white}11.8 & \cellcolor{teal!49!white}5.4 & \cellcolor{teal!41!white}1.7 \\
+         &  & RU & \cellcolor{teal!90!white}0.4 & \cellcolor{teal!61!white}7.0 & \cellcolor{teal!47!white}19.2 & \cellcolor{teal!1!white}12.0 & \cellcolor{teal!46!white}5.5 & \cellcolor{teal!20!white}2.1 \\
+         &  & ZH & \cellcolor{teal!81!white}0.7 & \cellcolor{teal!100!white}4.8 & \cellcolor{teal!100!white}18.0 & \cellcolor{teal!70!white}10.1 & \cellcolor{teal!100!white}3.5 & \cellcolor{teal!18!white}2.1 \\
+        \cline{2-9}
+         & \multirow{6}{*}{\rotatebox[origin=c]{90}{SparseGPT}}
+         & AR & \cellcolor{teal!0!white}3.5 & \cellcolor{teal!44!white}8.0 & \cellcolor{teal!19!white}19.8 & \cellcolor{teal!28!white}11.3 & \cellcolor{teal!24!white}6.4 & \cellcolor{teal!92!white}0.9 \\
+         &  & DE & \cellcolor{teal!93!white}0.3 & \cellcolor{teal!0!white}10.5 & \cellcolor{teal!21!white}19.8 & \cellcolor{teal!32!white}11.2 & \cellcolor{teal!32!white}6.1 & \cellcolor{teal!49!white}1.6 \\
+         &  & EN & \cellcolor{teal!71!white}1.0 & \cellcolor{teal!14!white}9.7 & \cellcolor{teal!4!white}20.2 & \cellcolor{teal!0!white}12.1 & \cellcolor{teal!38!white}5.8 & \cellcolor{teal!54!white}1.5 \\
+         &  & ES & \cellcolor{teal!78!white}0.8 & \cellcolor{teal!37!white}8.4 & \cellcolor{teal!0!white}20.3 & \cellcolor{teal!2!white}12.0 & \cellcolor{teal!27!white}6.3 & \cellcolor{teal!0!white}2.4 \\
+         &  & RU & \cellcolor{teal!75!white}0.9 & \cellcolor{teal!26!white}9.0 & \cellcolor{teal!14!white}19.9 & \cellcolor{teal!7!white}11.9 & \cellcolor{teal!0!white}7.3 & \cellcolor{teal!39!white}1.8 \\
+         &  & ZH & \cellcolor{teal!100!white}0.1 & \cellcolor{teal!54!white}7.4 & \cellcolor{teal!94!white}18.1 & \cellcolor{teal!100!white}9.3 & \cellcolor{teal!58!white}5.1 & \cellcolor{teal!100!white}0.7 \\
+        \cline{2-9}
+        \hline
+        \multirow{12}{*}{\rotatebox[origin=c]{90}{Aya-23-8B}}
+         & - & - & \cellcolor{teal!0!white}14.8 & \cellcolor{teal!0!white}28.8 & \cellcolor{teal!0!white}46.8 & \cellcolor{teal!0!white}31.0 & \cellcolor{teal!0!white}22.7 & \cellcolor{teal!0!white}0.3 \\
+        \cline{2-9}
+         & \multirow{6}{*}{\rotatebox[origin=c]{90}{Wanda}}
+         & AR & \cellcolor{teal!0!white}6.3 & \cellcolor{teal!0!white}8.8 & \cellcolor{teal!75!white}16.0 & \cellcolor{teal!17!white}10.5 & \cellcolor{teal!24!white}7.3 & \cellcolor{teal!71!white}0.1 \\
+         &  & DE & \cellcolor{teal!19!white}5.8 & \cellcolor{teal!17!white}8.4 & \cellcolor{teal!30!white}18.0 & \cellcolor{teal!0!white}10.9 & \cellcolor{teal!0!white}7.8 & \cellcolor{teal!75!white}0.1 \\
+         &  & EN & \cellcolor{teal!42!white}5.2 & \cellcolor{teal!33!white}8.1 & \cellcolor{teal!42!white}17.5 & \cellcolor{teal!30!white}10.2 & \cellcolor{teal!35!white}7.0 & \cellcolor{teal!83!white}0.1 \\
+         &  & ES & \cellcolor{teal!28!white}5.6 & \cellcolor{teal!34!white}8.1 & \cellcolor{teal!57!white}16.8 & \cellcolor{teal!10!white}10.6 & \cellcolor{teal!10!white}7.6 & \cellcolor{teal!76!white}0.1 \\
+         &  & RU & \cellcolor{teal!16!white}5.9 & \cellcolor{teal!51!white}7.7 & \cellcolor{teal!66!white}16.4 & \cellcolor{teal!12!white}10.6 & \cellcolor{teal!4!white}7.7 & \cellcolor{teal!75!white}0.1 \\
+         &  & ZH & \cellcolor{teal!35!white}5.3 & \cellcolor{teal!15!white}8.5 & \cellcolor{teal!57!white}16.8 & \cellcolor{teal!22!white}10.4 & \cellcolor{teal!45!white}6.8 & \cellcolor{teal!75!white}0.1 \\
+        \cline{2-9}
+         & \multirow{6}{*}{\rotatebox[origin=c]{90}{SparseGPT}}
+         & AR & \cellcolor{teal!33!white}5.4 & \cellcolor{teal!18!white}8.4 & \cellcolor{teal!31!white}18.0 & \cellcolor{teal!13!white}10.6 & \cellcolor{teal!46!white}6.8 & \cellcolor{teal!83!white}0.1 \\
+         &  & DE & \cellcolor{teal!52!white}4.9 & \cellcolor{teal!46!white}7.8 & \cellcolor{teal!0!white}19.4 & \cellcolor{teal!100!white}8.6 & \cellcolor{teal!59!white}6.4 & \cellcolor{teal!100!white}0.0 \\
+         &  & EN & \cellcolor{teal!93!white}3.7 & \cellcolor{teal!58!white}7.5 & \cellcolor{teal!47!white}17.3 & \cellcolor{teal!42!white}9.9 & \cellcolor{teal!67!white}6.3 & \cellcolor{teal!77!white}0.1 \\
+         &  & ES & \cellcolor{teal!100!white}3.6 & \cellcolor{teal!49!white}7.7 & \cellcolor{teal!62!white}16.6 & \cellcolor{teal!88!white}8.8 & \cellcolor{teal!94!white}5.7 & \cellcolor{teal!57!white}0.2 \\
+         &  & RU & \cellcolor{teal!44!white}5.1 & \cellcolor{teal!76!white}7.1 & \cellcolor{teal!24!white}18.3 & \cellcolor{teal!47!white}9.8 & \cellcolor{teal!64!white}6.3 & \cellcolor{teal!0!white}0.4 \\
+         &  & ZH & \cellcolor{teal!63!white}4.6 & \cellcolor{teal!100!white}6.6 & \cellcolor{teal!100!white}14.9 & \cellcolor{teal!97!white}8.6 & \cellcolor{teal!100!white}5.5 & \cellcolor{teal!96!white}0.0 \\
+        \cline{2-9}
+        \hline
+        \end{tabular}
+    }
+    \caption{MKQA F1 accuracy over seven evaluation languages for the Llama-3 8B and Aya-23 8B models pruned with Wanda and SparseGPT for 50\% unstructured sparsity% in different calibration languages
+    .}
+    \label{tab:eval_mkqa}
+\end{wraptable}
+
+Furthermore, there is no consistent pattern related to the similarity of calibration-evaluation language pairs. For instance, Latin language pairs such as English-Spanish (calibrating in English and evaluating in Spanish) or pairs from the same language family, like English-German, do not always yield optimal performance. Conversely, pairs with different writing systems, such as Russian-English or Spanish-Arabic, do not consistently perform poorly.
+On the other hand, calibration with a dissimilar language, i.e. Chinese, often results in particularly low accuracy across many tasks and evaluation languages, as demonstrated by the darker row of ``ZH''. In summary, we observe \textbf{\textit{no benefit from calibrating with an outlier language or a similar language.}}
+\textit{Does the model or the pruning method matter?}
+
+Between Llama-3 8B and Aya-23 8B, despite their similar decoder-only architecture, Table \ref{tab:eval_single_calib_lang_selection} highlights distinct performance patterns between the two models under investigation. With its larger vocabulary size in the six non-English languages, Aya-23 8B generally outperforms the Llama-3 8B model in most evaluation languages and tasks, both before and after pruning. Notably, Aya-23 8B experiences less performance drop after pruning but shows less stable results, often performing better on languages other than the one used for calibration. Overall, these results suggest that vocabulary size and pre-training data impact baseline performance and accuracy after pruning in a multilingual context. 
+
+Between Wanda and SparseGPT, Llama-3 8B's performance degrades less after pruning with SparseGPT pruning, while the performance of the pruned Aya-23 8B model varies, that is, excelling with Wanda or SparseGPT depends on the task. Specifically, SparseGPT produces a distinct diagonal pattern for Aya-23 8B on ARC and HellaSwag, while Wanda often yields superior performance for calibration with non-target languages on Belebele and MMLU. No pruning technique consistently performs best in all tasks.
+
+
+\subsection{Open Domain Question Answering without Context}\label{sec:open_domain_ansering}
+\textit{How does pruning impact the knowledge stored in multilingual LLMs?}
+
+Table \ref{tab:eval_mkqa} shows the open-domain question-answering performance of Llama-3 8B and Aya-23 8B across various calibration-evaluation language pairs. This ``closed-book'' task, MKQA, provides no context in the prompt, and relies on the model's internal knowledge to generate answers. To ensure fair cross-languages comparisons, the MKQA dataset is fully parallel and primarily consists of entity-based and structured ``atomic'' answer types. First, we observe significant performance differences among the evaluation languages for the full-size models. While Latin languages perform best, Arabic and Chinese perform worst. Further, we notice a significant accuracy drop by pruning, even for performance in English. %On the other hand, pruning Llama-3 8B with SparseGPT improves performance on matching calibration and evaluation languages, though Chinese calibration still leads to poor results. 
+In summary, \textbf{\textit{pruning substantially impacts the storage and retrieval of knowledge in a multilingual model across different languages.}}
+
+\subsection{Multiple Calibration Languages}
+
+\subfile{tables/eval_multilingual_calib}
+
+\textit{Using more languages in the calibration, i.e. bilingual and multilingual calibration set, will benefit the performance of pruned multilingual models?}
+
+We repeat the experiments but include more languages in the calibration set. As English is the dominant language in pre-training data, we first test the combination of English and the target language for a bilingual calibration setup. We further experiment with including all seven languages in the calibration, i.e. multilingual setup. For all setups, the total calibration sample number remains the same, i.e. 128. 
+
+Comparing Table~\ref{tab:eval_multiligual_calib} with Table~\ref{tab:eval_single_calib_lang_selection}, we observe that bilingual and multilingual calibration sets generally outperform monolingual calibration for non-English target languages. For example, for Chinese on ARC, the seven-lingual calibration set, AR-DE-EN-ES-RU-SW-ZH, often yields higher accuracy than calibration with Chinese, i.e. the target language, across models and pruning methods. That is, AR-DE-EN-ES-RU-SW-ZH achieves 28.3 (Wanda, Llama-3 8B), 30.0 (SparseGPT, Llama-3 8B), 32.0 (Wanda, Aya-23 8B) and 30.9 (SparseGPT, Aya-23 8B), consistently higher or comparable to monolingual calibration set, i.e. 27.0, 30.1, 30.8 and 31.7 respectively. On the other hand, multilingual calibration pruning often degrades the downstream performance in English, particularly on ARC when pruning Aya-23 with SparseGPT and on MMLU when pruning Llama-3 with Wanda. Interestingly, the best bilingual combination does not necessarily contain the target language but English. For example, for Russian on ARC when pruning with Wanda, calibration with EN-ES and AR-EN leads to the optimal performance for Llama-3 8B and Aya-23 8B.
+
+In summary, \textbf{\textit{employing bilingual and multilingual calibration sets occasionally improves performance on downstream tasks, compared to monolingual calibration.}} However, there is no clear pattern identifying which specific language combinations are most effective for a given target downstream language.
+
+\subsection{Impact of Model Sizes}
+ Overall, pruning performance increases with higher baseline accuracy of the full-sized models. However, we observe that \textbf{\textit{the performance patterns and findings from the smaller models, mentioned above, do not consistently hold true on their bigger counterparts}}. 
+\subsection{Quantization}
+We further explore the impact of the calibration language in quantization on downstream task performance across different languages. We use GPTQ~\citep{frantar2023optq} to quantize weights to 4 bits with a group size of 128 and 8 bits with a group size of 128 (equivalent to 50\% sparsity in pruning) on LLaMA-3-8B. We follow our pruning setup for downstream tasks and languages for calibration and evaluation.
+
+
+\section{Analysis}
+
+
+In reviewing Table~\ref{tab:perplexity} and Table~\ref{tab:eval_single_calib_lang_full} together, we poist that calibrating on the target language effectively preserves language-related features but not language-agnostic features, such as knowledge memories and reasoning abilities. This implies that the smallest weights or weights of smallest activations contribute to the model’s nuanced reasoning or knowledge memorization and retrieval processes. 
+The rationale here is that both SNR and pruning error measure the extent of model change after pruning, which is dominated by large values, that pruning aims to preserve. 
+On the other hand, perplexity reflects the overall language modeling capability. The similar diagonal patterns across the three metrics, SNR, pruning error and perplexity, as shown in Table~\ref{tab:perplexity}, suggest that calibrating on the target language, i.e. identifying and pruning the smallest values, preserves the next-token prediction capability (perplexity) in the target language, along with the optimal pruning performance in terms of pruning the smallest values (SNR and pruning errors). 
+
+However, optimal performance in downstream tasks requires more than just surface-level language modeling; it also depends on robust reasoning capabilities. The suboptimal performance observed in downstream tasks may be attributed to the degradation of language-agnostic reasoning capabilities. 
+This phenomenon suggests that removing the weights or weights of the smallest activations might inadvertently compromise the model's ability to process reasoning, underscoring the reasoning role of these pruned weights, i.e. the smallest weights or weights of the smallest activations. 
+
+To validate our hypothesis, we investigate the internal changes of pruned models on three different levels: subspace level, matrix level, neuron level (columns in a matrix, followed by non-linearity). Previous studies on multilingualism of LLMs have sought to separate language-specific features from language-agnostic features, either at the neuron level~\citep{tang-etal-2024-language,zhao2024large,wang-etal-2024-probing-emergence} or from an extracted subspace perspective~\citep{xie2022discovering}. To comprehend the underlying mechanisms driving the disparities in pruning metrics and downstream performance when using different calibration languages, we examine the shifts in language-specific and agnostic features and neurons induced by the pruning process.
+
+\subsection{language-specific Subspace Representations}\label{sec:analysis_subspace}
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{\linewidth}
+        \centering
+        \includegraphics[width=.96\linewidth]{figures/comparison_selected_layers_a_llama3-8b-instruct_sparsegpt.pdf}
+        \label{fig:subfig_agnostic_diff}
+    \end{subfigure}
+    \begin{subfigure}[b]{\linewidth}
+        \centering
+        \includegraphics[width=.96\linewidth]{figures/comparison_selected_layers_s_llama3-8b-instruct_sparsegpt.pdf}
+
+        \label{fig:subfig_specific_diff}
+    \end{subfigure}
+    \caption{Magnitude difference of language-agnostic and specific features after pruning, averaged over 200 data per language from validation sets. The X-axis represents the evaluation language. The calibration languages are indicated by the color as: \textcolor{ar}{AR}, \textcolor{de}{DE}, \textcolor{es}{ES}, \textcolor{en}{EN}, \textcolor{ru}{RU}, \textcolor{sw}{SW}, \textcolor{zh}{ZH}. The greater $\Delta$ magnitude, the greater pruning error on language-agnostic features (Fig.b) or language-specific features (Fig.c).}
+    \label{fig:subspace}
+\end{figure}
+
+The core idea of Low-rank Subspace for language-Agnostic Representations (LSAR) by \citet{xie2022discovering} is to construct a mean embedding matrix $\mM \in \R^{d \times L}$ by concatenating L language embeddings. Subsequently, LSAR decomposes $\mM$ into a vector $\boldsymbol\mu$ representing shared signals across languages and a matrix $\mM_s$ specifying a low-rank subspace on which different languages express different linguistic signals. This decomposition process is achieved via singular value decomposition on solving: $\min_{\boldsymbol\mu,\mM_s,\mathbf{\Gamma}} \left\| \mM - \boldsymbol\mu\1^\top - \mM_s\mathbf{\Gamma}^\top \right\|_F^2 \text{ s.t. } \boldsymbol\mu \perp \text{Span}(\mM_s)$ with the orthogonality constraint. $\mathbf{\Gamma} \in \R^{L \times r}$ represents the coordinates of language-specific signals along the subspace’s $r$ components, and $\1 \in \R^d$ is a vector of all ones. 
+We can extract language-specific features $\va$ from a sentence embedding $\ve$ using $\mM_s$ by projecting $\ve$ into and back from the low-rank, language signal retaining subspace, $\va = \ve - \vs = \ve - \mM_s \mM_s^T \ve$. 
+ 
+
+We employ LSAR to decomposite the token-wise averaged embedding output of each layer of SparseGPT-pruned Llama-3 8B into language-specific and language-agnostic features, and estimate their changes after pruning.
+Figure \ref{fig:subspace} shows the layer-wise magnitude of differences ($\Delta$ magnitude) of (a) language-agnostic features and (b) language-specific features after pruning. From a high-level perspective, the greater $\Delta$ magnitude suggests the greater changes in terms of hidden state after pruning, thus the greater pruning error and the worse pruning performance. Unlike the pruning error presented in Table~\ref{tab:perplexity}, here we separately analyze the pruning error for language-agnostic and language-specific features.
+
+First, calibrating on the target language leads to relatively smaller pruning errors in terms of language-specific features as shown in the sub Figure (b) in Figure~\ref{fig:subspace}. This phenomenon is observed across layers, particularly noticeable in layer 32, as pinpointed by stars in Figure~\ref{fig:subspace}. This potentially explains the findings in Section~\ref{sec:subsection_perplexity} that calibration on the target language leads to the lowest perplexity, which is associated with a robust language-specific linguistic modeling capability. On the other hand, as indicated by the relatively flat horizontal lines across languages and layers in sub Figure (a), the pruning error on the language-agnostic features remains similar regardless of the calibration languages. This pattern helps explain the sub-optimal downstream task performance observed in Table~\ref{tab:eval_single_calib_lang_full}, where no single calibration language consistently yields optimal performance across downstream tasks, including cases where the calibration is performed on the target language.
+That is, \textit{\textbf{the selection of calibration language is unlikely to impact the language-agnostic features associated with understanding, reasoning, and knowledge retrieval. In contrast, the preservation of language-specific features, such as modeling capabilities related to perplexity, depends on the selection of calibration languages.}}
+
+Second, the middle layers (as shown in the second and third columns in Figure~\ref{fig:subspace}) exhibit greater $\Delta$ magnitude on language-agnostic feature representations and smaller $\Delta$ magnitude on language-specific feature representations. This indicates that pruning errors can be predominantly attributed to the pruning errors on language-agnostic features, with less pruning error arising from language-specific features. Therefore, we conclude \textit{\textbf{pruning generally affects language-agnostic features—potentially associated with reasoning and knowledge storage—more significantly than it impacts language-specific features.}}
+
+\subsection{Pruning Mask Similarity}\label{sec:analysis_pruning_mask}
+
+\begin{figure}[b!]
+    \centering
+    \begin{subfigure}[b]{0.98\textwidth}
+        \centering
+        \includegraphics[width=394pt, right]{figures/pruning_mask_similarity_merged.pdf}
+    \end{subfigure}
+    \caption{Pruning similarities (IoU) between using different calibration languages. Left: IoU of pruning masks for three calibration sets of the same language. Right: IoU between pruning masks for different calibration languages. The higher IoU (indicated as a lighter color), the more similar pruning masks between different calibration languages.} %, the more language-agnostic signal the component processes.
+\label{fig:pruning_mask_similarities}
+\end{figure}
+
+To better understand the internal changes within the model after pruning, we conduct a matrix-level analysis by calculating the Intersection over Union (IoU) of pruning masks across different calibration sets, obtaining a measure of pruning mask similarity. We use the pruning masks from the Llama-3 8B model pruned with SparseGPT for 50\% unstructured sparsity. To reduce calibration set-dependent noise as prevalent in the downstream tasks, we first compute the intersection $M_I^l$ of pruned neuron indices $M_i^l$ across three pruned models calibrated with different seeds $i$ but in the same language $l$. This intersection represents more stable neuron indices. 
+
+The IoU of the left side of Figure~\ref{fig:pruning_mask_similarities} depicts the proportion of $M_I^l$ with respect to all pruned neuron indices. It reveals high pruning mask similarity in the attention query, key and value in the first layer, while the attention output projection varies more significantly, especially after the 20th layer. 
+This suggests that \textit{\textbf{pruning struggles to consistently identify essential neurons in the attention output projection, partly responsible for the models reasoning capabilities}}. 
+The right plot compares the IoU of intersected neuron indices $M_i^l$ from the left plot across calibration in German, English, and Chinese. Notably, the attention query, key, and value in the first layer consistently achieve high IoUs above 0.95 across all languages, indicating that these components handle inputs similarly, irrespective of language differences.
+However, the attention output and FFN down projection show lower IoU, especially in early layers, with similarity peaking in middle layers (3rd to 15th) before decreasing again in later layers. 
+
+This pattern suggests that the attention output and FFN down projection in early and late layers handle language-specific signals, while middle layers process language-agnostic signals, supporting Figure~\ref{fig:subspace}. 
+In other words, \textit{\textbf{early layers focus on language comprehension, middle layers on language-independent reasoning, and later layers on generating language-specific predictions. }}
+This aligns with \citet{zhao2024large}, who proposes that LLMs first comprehend queries by converting multilingual inputs into English in the early layers, reason in English in the intermediate layers, and then generate responses aligned with the input language in the final layers. 
+
+
+
+
+
+
+
+
+\subsection{Language-specific Neurons}\label{sec:analysis_neurons}
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}\label{fig:language_entropy_base}
+        \includegraphics[width=194pt, left]{figures/entropy_base.pdf}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.48\textwidth}\label{fig:language_entropy_20_sparsity}
+        \centering
+        \includegraphics[width=194pt, right]{figures/entropy_sparsegpt-de-20.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.48\textwidth}\label{fig:language_entropy_50_sparsity}
+        \includegraphics[width=194pt, left]{figures/entropy_sparsegpt-de-50.pdf}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.48\textwidth}\label{fig:language_entropy_hist}
+        \includegraphics[width=194pt, right]{figures/entropy_max_activation_prob_DE.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.98\textwidth}\label{fig:entropy_sorted_activation_magnitude}
+        \includegraphics[width=388pt, right]{figures/mean_abs_activation_DE_meta-llama_Meta-Llama-3-8B-Instruct.pdf}
+    \end{subfigure}
+    \caption{Language Entropy for FFN neurons of Llama-3 8B and its SparseGPT-pruned versions calibrated for DE. The bottom-right plot visualizes the activation likelihood of neurons on DE. The bottom subfigure shows the mean absolute neuron outputs for DE input. %Both plots are for the full-sized reference model.
+    \textit{The lower the LAPE score, the more specialized the neuron is for a particular language.}
+    \label{fig:language_entropy_change}
+\end{figure}
+
+This section investigates neuron-level changes after pruning using Language Activation Probability Entropy (LAPE) as introduced by \citet{tang-etal-2024-language}. 
+We focus on neurons of the up projections of the feed-forward layers (FFNs) followed by the non-linearity. % to better understand the challenges in processing language-specific signals in the FFN down projection, first explored in Section \ref{sec:analysis_pruning_mask}. 
+A neuron is considered activated when the non-linearity output is greater than zero. LAPE measures the likelihood of individual neurons activating across different language inputs, taking neurons with high activation probability for one or two languages and lower probabilities for all others (i.e. low LAPE score) as language-specific. 
+ 
+
+In Figure \ref{fig:language_entropy_change}, each bar and boxplot corresponds to the same group of neurons, comprising 2\% of the total neuron population. Neurons in each plot are sorted in ascending order based on their LAPE score in the full-sized model, enabling a comparison of changes in LAPE scores after pruning.
+We only plot the neuron groups of the 30\% lowest LAPE score due to the rapidly diminishing variance for boxplots of higher LAPE scores. This suggests a lower impact of pruning on the activation frequency of high LAPE neurons, i.e. language-agnostic neurons. On the other hand, for the neuron group with the lowest LAPE scores (the leftmost boxplot), the higher the model-sparsity is, the longer whiskers (higher entropy variance) these neurons have. 
+This indicates that \textbf{\textit{pruning introduces LAPE noise, shifting the LAPE score distribution and creating new language-specific (low LAPE) and agnostic (high LAPE) neurons}}. The distribution shift of language-agnostic neurons in FFNs may contribute to performance degradation in downstream tasks. This hypothesis aligns with previous causal tracing studies, which have frequently identified FFNs are crucial for knowledge retention and retrieval~\citep{meng2022locating, meng2023massediting}.
+
+Moreover, by analysis of boxplots and the bottom-right plot together, we find that the neuron group of the lowest LAPE has the lowest activation probabilities, while neurons with the highest LAPE scores activate more frequently.
+This indicates that \textit{\textbf{pruning struggles to retain low activation probability of language-specific neurons}}. 
+We also examine the absolute neuron output magnitude for these neglected neurons. 
+The bottom plot in Figure~\ref{fig:language_entropy_change} shows that despite the low activation probability, low LAPE neurons tend to have high output magnitudes. %, with only the 0.05\% lowest LAPE and outlier-feature neurons exhibiting larger outputs. 
+Pruned models show no significant differences in output magnitudes, leading us to conclude that pruning retains neuron output magnitudes in FFN modules but may fail to preserve activation frequency. 
+
+
+
+
+
+
+
+\begin{comment}
+    
+
+
+
+\section{Recommendations}
+
+
+We summarize our findings into three recommendations for pruning multilingual language models to achieve optimal performance in specific languages.
+
+\textbf{Choice of Calibration Language} 
+    For a given target language, it is advisable to calibrate the pruning of the multilingual model specifically in that target language, even if the primary pre-training language of the model is English. However, such calibration with the target language may result only in optimal perplexity and reasonable downstream performance, particularly in tasks requiring deep language understanding and reasoning, not just superficial coherence and fluency.
+    
+\textbf{Choice of Pruning Method} Between Wanda and SparseGPT, there is no better one across model families, tasks, and languages. In general, Wanda is recommended for Aya-23 models and SparseGPT for the Llama-3 models. %To determine the best pruning technique for other model families, we advise starting with smaller models for quicker preliminary investigation.
+    
+
+\textbf{Evaluation} The perplexity score that is often used for evaluating pruning performance can be misleading for downstream task performance. For that reason, we recommend directly testing on the downstream tasks instead. Moreover, due to the known phenomenon of potentially significant performance variance depending on the calibration set choice for certain tasks \citep{williams2023doescalibration}, also demonstrated in the accuracy standard deviations in Table \ref{app:eval_single_calib_lang_full}, we further suggest validating performance over multiple pruning runs and evaluation tasks. 
+
+\end{comment}
+
+
+
+
+\section{Conclusion}
+
+
+In this paper, we empirically demonstrate that the choice of calibration language influences the downstream performance of pruned models across various evaluation languages. 
+Particularly, calibration with the target language mainly benefits preserving perplexity performance but does not necessarily help maintain the downstream task performance. 
+Our analysis of changes within the model after pruning indicates that calibrating in the test language does not reliably benefit layers associated with semantic understanding. Additionally, we recommend practitioners do not depend on perplexity for accessing the pruned model, or performance in English to estimate the performance on target languages. 
+
+
+
+
+
+
+

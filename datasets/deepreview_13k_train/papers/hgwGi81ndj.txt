@@ -1,0 +1,403 @@
+\title{Efficient Exploration and Discriminative World Model Learning with an Object-Centric Abstraction}
+
+\begin{abstract}
+    In the face of difficult exploration problems in reinforcement learning, we study whether giving an agent an object-centric mapping (describing a set of \textit{items} and their \textit{attributes}) allow for more efficient learning. We found this problem is best solved hierarchically by modelling items at a higher level of state abstraction to pixels, and attribute change at a higher level of temporal abstraction to primitive actions. This abstraction simplifies the transition dynamic by making specific future states easier to predict. We make use of this to propose a fully model-based algorithm that learns a discriminative world model, plans to explore efficiently with only a count-based intrinsic reward, and can subsequently plan to reach any discovered (abstract) states.
+    
+    We demonstrate the model's ability to (i) efficiently solve single tasks, (ii) transfer zero-shot and few-shot across item types and environments, and (iii) plan across long horizons. Across a suite of 2D crafting and MiniHack environments, we empirically show our model significantly out-performs state-of-the-art low-level methods (without abstraction), as well as performant model-free and model-based methods using the same abstraction. Finally, we show how to reinforce learn low level object-perturbing policies, as well as supervise learn the object mapping itself.
+    
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\sectionvspace
+\sectionvspace
+
+Since the inception of reinforcement learning (RL), the problems of exploration and world model learning have been major roadblocks. 
+RL requires an agent to learn both basic motor abilities, and explore long sequences of interactions in the environment. Currently, we have made tremendous progress on problems of low-level control for short-horizon problems. With well defined single tasks, given enough samples (or demonstrations), there are well-developed ways of training low level policies reliably \citep{Schulman2017ProximalPO,Hafner2023MasteringDD}.
+
+Perhaps a better way to explore complex environments is to treat the high-level exploration problem separately. We increasingly have the ability to get semantically rich abstractions: via representation learning \citep{Locatello2020Slot}, object segmentation~\citep{Kirillov2023SegmentA}, and visual-language models ~\citep{Alayrac2022FlamingoAV}; even in difficult control settings such as robotics \citep{liu2024ok}. In addition, with the recent explosion in the field of natural language processing, people are increasingly interested in addressing RL environments on a semantic level~\citep{andreas2017modular, jiang2019language, chen2020ask}. Thus, we ask a timely question: \textit{if} the agent has a good ability to perceive objects, what \textit{more} can we do other than tabula rasa learning at the level of pixels and primitive motor actions?
+
+In this work, we focus on exploration and world modelling at a semantic level. We explore a simple yet flexible abstraction: in addition to the agent's raw observations (e.g. pixels), it sees an abstract representation of a set of \textit{items} and their \textit{attributes} (i.e. object states). We find that to navigate these two levels effectively, it is best to construct a proxy decision process (\MDPNameShort) with state and temporal abstractions at the level of objects, with a handful of competent object-perturbing low level policies. By construction, dynamics on this semantic level becomes structured, and we make use of this to design a \textit{discriminative} model-based RL method that learns to predicts if a specific object perturbation will be \textit{successful}. Our method, \MethodNameLong (\textbf{\MethodNameShort}), is fit with a simple objective to model semantic level transitions, resulting in stable model improvements with no need for auxiliary objectives. It is fully online: the agent plans to explore without an extrinsic reward to learn about the world it inhabits using a count-based objective. The same model can be used at any point to plan to solve downstream tasks when given a goal function, without the need to train policy or value functions.
+
+The main results of this work investigates decision making at the semantic level as defined by the \MDPNameShort, assuming access to an object centric map and object perturbing policies. We empirically evaluate our method in a set of 2D crafting games, and MiniHack environments that are known to be very difficult to explore \citep{henaff2022e3b}.
+We then show how to \textit{learn} components of the \MDPNameShort when it is not given: by reinforcement learning object perturbation policies given an object mapping, and supervised learning of the object centric mapping itself. 
+
+
+The main contributions of this work are:
+\begin{itemize}
+    \item We define the \MDPNameShort: a simple human-understandable hierarchical MDP. The structure of this abstraction allows for pre-trained or from-scratch visual encoders to be used. It also allows our method (\MethodNameShort) to use a discriminative objective for world-model learning.
+    \item We introduce our model-learning method (\MethodNameShort). \MethodNameShort uses a stable discriminative objective to model item attribute changes, which is more efficient at learning than generative-based baselines and also allows for efficient inference-time planning.
+    \item We empirically show \MethodNameShort extracts an interpretable world model, accurately plans over long horizons, reaches competitive final performance on all levels with greater sample efficiency to strong baselines, and transfers well to new environments.
+    \item We demonstrate how to learn parts of the \MDPNameShort when it is not given: by reinforcement learning object-perturbing policies, and supervised learning the object-centric mapping.
+\end{itemize}
+
+\sectionvspace
+
+
+\section{Problem Setting}
+
+\sectionvspace
+\label{sec:problem-setting}
+We begin by considering a (reward free) ``base'' Markov Decision Process (MDP) as the tuple $\langle \mathcal{S}, \mathcal{A}, P\rangle$, with state space $\mathcal{S}$, primitive action space $\mathcal{A}$, and transition probability function $P : \mathcal{S} \times \mathcal{A} \times \mathcal{S} \rightarrow [0,1]$ \citep{Puterman1994Mdp}. Below we construct the ``abstracted'' space.
+
+\sectionvspace
+\subsection{Abstract states and behaviours}
+\sectionvspace
+\label{sec:absobs}
+
+We give the agent a deterministic object-centric mapping $\text{M}\!\!: \mathcal{S} \rightarrow \mathcal{X}$ from low level observations to an \textbf{abstract state} $X \in \mathcal{X}$. The abstract state is a discrete \textit{set} of items, each having form (item identity, item attribute). Denote the $i$-th item in this (ordered) set as $x^{(i)}$, each $x^{(i)} = (\alpha^{(i)}, \xi^{(i)})$ consists of an item's \textit{identity} $\alpha^{(i)}$ (e.g. ``potion''), and \textit{attribute} $\xi^{(i)}$ (e.g. ``in inventory''). In practice, each $X$ is represented as a $N \times (d_{\text{iden}} + d_{\text{attr}})$ matrix containing $N$ items (including empty items) each having a $d_{\text{iden}}$ dimensional identity embedding and $d_{\text{attr}}$ dimensional attribute embedding.
+
+Denote a space $\mathcal{B}$ of object perturbation policies which we call \textbf{behaviours}. Each behaviour has an associated $\pi_b : \mathcal{S} \rightarrow \mathcal{A}$. A behaviour $b=(\alpha^{(i)}, \xi')$ describes a single item id $\alpha^{(i)}$ and a desired \textit{new} attribute. For $N$ objects and $m$ attributes, there are $N \times m$ single item behaviours.\footnote{Here we define \textit{single item} behaviours.} Not all behaviours changes $\alpha^{(i)}$ to have $\xi'$ (due to the change being impossible from current $X$, or having a bad $\pi_b$). A behaviour is \textbf{competent} if executing behaviour policy $\pi_b$ from state $S,\, \text{M}(S) = X$, result in arriving at state $S',\, \text{M}(S') = X'$, $(\alpha^{(i)}, \xi') \in X'$, within $k$ steps with high probability. Executing competent behaviours lead to predictable changes.
+
+ For the main experiments we assume access to (learned or given) abstract states and behaviours and build on top. We address learning both in Section~\ref{sec:learning-low-levels}.
+
+\sectionvspace
+\subsection{\MDPNameLong}
+\label{sec:abstractmdp}
+\sectionvspace
+We now define an \MDPNameLong using the abstract state $\mathcal{X}$ and behaviour $\mathcal{B}$ spaces, which we refer to in brief as \textbf{\MDPNameShort}. The abstract mapping $\text{M}$ provides an \textit{state abstraction}. 
+We further define the \MDPNameShort to have a coarser temporal resolution than the low level MDP: an \textit{abstract transition} only occurs when an abstract state changes, or if the state stays the same but $k$ low level steps elapses (see Definition~\ref{def:abstract-transition} for more details). 
+
+Specifically, the \textbf{\MDPNameShort} is the tuple $\langle \mathcal{X}, \mathcal{B}, \textbf{T} \rangle$, with abstract states $\mathcal{X}$, abstract behaviours $\mathcal{B}$, and transition probability function $\textbf{T}: \mathcal{X} \times \mathcal{B} \times \mathcal{X} \rightarrow [0, 1]$. $\textbf{T} (X' | X, b)$ describes the probability of being in abstract state $X'$ when starting from $X$, executing behaviour $b$, and waiting until an abstract transition occurs. Figure~\ref{fig:abstract_level} provides an example of an abstract transition and associated low level steps.
+There is an intuitive relationship between the \textit{competence} of a behaviour and the transition probability function $\textbf{T}$. For instance, executing an incompetent behaviour $b$ from abstract state $X$ will likely lead to the next abstract state being itself, $X_{t+1} = X_t$, or some hard-to-predict distribution over next states. Executing a competent behaviour $b$ lead to a predictable next state that contains the proposed attribute change with high probability.
+
+In any case, we can treat the \MDPNameShort as a regular MDP use standard RL algorithms to solve it. This can be viewed as solving a proxy problem of the low level base MDP. \textbf{For the remainder of this paper, all methods are trained \textit{exclusively} within the \MDPNameShort} unless stated otherwise. %
+\begin{figure*}[h]
+    \begin{center}
+    \centerline{\includegraphics[width=0.88\textwidth]{figs/illustrate/abstract_transition.pdf}}
+
+    \caption{An example state transition in an \MDPNameShort (here defined in MiniHack). Abstract states are sets of (item identity, item attribute), and behaviour $b_1$ have structure (item, new attribute). An abstract state can correspond to multiple low level states, and an abstract behaviour multiple primitive actions. We provide legends for the item identities and attributes illustrated (left rectangles). 
+    }
+    \label{fig:abstract_level}
+    \end{center}
+\end{figure*}
+
+\sectionvspace
+
+
+\section{Methods}
+
+\label{sec:methods}
+\sectionvspace
+
+While any standard RL methods can be used to solve the \MDPNameShort, we develop a method to more fully make use of the item-attribute structure and item-perturbing behaviours. Specifically, we design a model-based method that efficiently explores and learn an accurate full world model. Our method, \MethodNameLong (\textbf{\MethodNameShort}) can be broken down into three components: (i) A forward model $f_{\theta}(X, b)$, (ii) A reward function $r(X, b)$, (iii) A planner which maximizes the reward function.
+Our forward model takes in the current abstract state $X$ and behaviour $b$, and predicts the \textit{probability of success} of the change proposed by the abstract behaviour. We describe the procedure for training the forward model in Section~\ref{sec:forwardmodel}.
+
+We use a different reward function and planner at training versus inference time. During training, the agent learns an accurate (abstract) world model without rewards. We use an intrinsic reward function $r_{\text{intr}}(X, b)$ that encourages infrequently visited states, and plan using Monte-Carlo Tree Search (MCTS) toward these states. Section~\ref{sec:exploration} describes the exploration phase in detail.
+
+At inference time, our aim is to reach a particular abstract state. We define our reward function $r_{\text{goal}}$ as $1$ for the goal abstract states and $0$ for all others. Because our forward model has been trained to accurately estimate state transitions, we simply run Dijkstra's algorithm using $f_\theta$ and $r_{\text{goal}}$ to maximize expected reward. Section~\ref{sec:onlineplanning} describes this.
+\sectionvspace
+\subsection{Forward model}
+\label{sec:forwardmodel}
+\sectionvspace
+
+A forward model takes in a current abstract state and behaviour to model the distribution over next states, $X_{t+1} \sim p(X_{t+1} | X_t, b_t)$. Typically, this distribution has support over the full state space $\mathcal{X}$. We observe that by construction, \MDPNameShort considers competent policies as ones that change \textit{single} item-attributes. Thus, we make the modelling assumption that an abstract transition would result in either (i) a single object's attribute changing (as specified by the executed behaviour), or (ii) the abstract state remaining unchanged. 
+\paragraph{Discriminative modelling}
+
+\begin{wrapfigure}{r}{0.50\textwidth}
+    \centering
+    \includegraphics[width=0.48\columnwidth]{figs/illustrate/abs_model_ld.pdf}
+    \caption{The forward model $f_\theta$ predicts the probability $p$ that the behaviour $b_t$ is successful from state $X_t$. The next state distribution is modelled as a binary distribution (Equation~\ref{eq:next-X-from-Xb}).}
+    \label{fig:forward_model_prediction}
+\end{wrapfigure}
+
+Given an abstract transition $(X_t, b_t, X_{t+1})$, we consider this transition \textbf{successful} if the next abstract state contains the attribute change proposed by the behaviour: $(\alpha^{(i)}, \xi') \in X_{t+1}$ for $b_t = (\alpha^{(i)}, \xi')$. \textit{Executing a competent policy has a high probability of leading to a successful transition}.
+We model this \textbf{success probability} directly,
+\begin{align}
+    q (X_t, &b_t) = \Pr(x' \in X_{t+1} | X_t, b_t)\,, 
+    \label{eq:success-probability}
+    \\ &\text{where } x' = b_t =  (\alpha^{(i)}, \xi')\,. \nonumber 
+\end{align}
+We refer to this way of modelling as \textbf{discriminative world modelling}, which models the probability that the state change specified by a behaviour is successful. As behaviours are by construction item perturbations, we can view this as asking a question about allowable item changes (``can I change  this item to have this attribute?''). This is different from \textit{generative world modelling} which models $\Pr(X_{t+1} | X_t, b_t)$ without any restrictions on possible future states (i.e. ``what are all possible outcomes of my action in this state''). We find this inductive bias leads to more data efficient learning and multi-step planning (Section~\ref{sec:generative-v-discriminative}).
+
+\paragraph{Forward Prediction} 
+We can model the next state after a \textit{successful} transition as,\footnote{We use set notations to denote removal of the item $x^{(i)} = (\alpha^{(i)}, \xi^{(i)})$ from the set $X$, and replacing it with new item $(\alpha^{(i)}, \xi')$.}
+\begin{align}
+    X' = \Delta(X, b) = X \setminus x^{(i)} \cup (\alpha^{(i)}, \xi') 
+    \,, \quad \text{for any } b = (\alpha^{(i)}, \xi') \,.
+    \label{eq:next-X-if-success}
+\end{align}
+Then, given success probability function $q$ (Equation~\ref{eq:success-probability}), we model the next state distribution as:
+\begin{equation}
+    \Pr(X_{t+1} | X_t, b_t) = 
+    \begin{cases}
+        \Delta(X_t, b_t) \, & \text{with probability } q(X_t, b_t) \,, \\
+        X_t & \text{with probability } 1 - q(X_t, b_t) \,.
+    \end{cases}
+    \label{eq:next-X-from-Xb}
+\end{equation}
+See Figure~\ref{fig:forward_model_prediction} for an example. 
+
+
+\paragraph{Model Learning}
+We use model function class $f_\theta : \mathcal{X} \times \mathcal{B} \rightarrow [0, 1]$ with trainbale parameters $\theta$, and fit it to approximate success probability (Equation~\ref{eq:success-probability}). We can estimate the empirical success probability from a dataset of trajectories simply by counting, and fit a binary cross entropy loss. We found this to be a stable, simple-to-optimize objective.
+\sectionvspace
+\subsection{Planning for exploration}
+\sectionvspace
+\label{sec:exploration}
+\begin{figure}[h]
+    \begin{subfigure}{0.5\textwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{figs/illustrate/mcts_r_intr.pdf}
+        \caption{Task agnostic training using MCTS and a count based reward to explore and learn the world model}
+        \label{fig:mcts_tree}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{figs/illustrate/learned_graph.pdf}
+        \caption{Dijkstra planning at evaluation time to maximize success probability of reaching any goal state}
+        \label{fig:learned-world-model}
+    \end{subfigure}
+    \caption{Planning within model's imagination to both explore, and to reach any goal state.}
+\end{figure}
+
+We want the agent to explore indefinitely to discover how the world works and represent it in its model $f_\theta$
+\begin{equation}
+    r_{\text{intr}} (X, b) = \sqrt{T / \left( \text{N}(X, b) + \epsilon T \right) }  \,,
+    \label{eq:intrinsic-reward}
+\end{equation}
+where $\text{N}(X, b)$ is a count of the number of times $(X, b)$ is visited, $T$ is the total number of (abstract) time-steps, and $\epsilon=0.001$ a smoothing constant. 
+
+We use Monte-Carlo Tree Search (MCTS) to find behaviours to reach states that maximizes Equation~\ref{eq:intrinsic-reward}. This is done within the partially learned model's imagination and allow the agent to plan toward novel states multiple steps in the future. The agent takes the first behaviour proposed. Further, since behaviours do not always succeed, one needs multiple state-visitations to estimate $q(X, b)$ well. We found MCTS exploration discovers more novel transition than exploring randomly (Section~\ref{sec:exploration-ablation}).
+\subsection{Planning for goal}
+\sectionvspace
+\label{sec:onlineplanning}
+
+Once the agent has sufficiently explored the environment and is well-fitted, the model $f_\theta$ usually contains a small set of high success probability edges between abstract states (see Figure~\ref{fig:learned-world-model}; most item-attribute changes are generally impossible). We can use this model $f_\theta$ to plan to reach any desired (abstract) world state. As our model is not trained to maximize external rewards, we simply give it a function that tells it when it is in a desired state: $r_{\text{goal}}(X) = 1 \,\text{if } X \text{ is a goal state, and } 0 \text{ otherwise}$.
+
+We use Dijkstra's algorithm which finds the shortest path in a weighted graph. We turn our world model into a graph weighted by success probabilities, using a negative log transform: 
+\begin{equation}
+    d\!\left(X, \Delta(X,b) \right) = -\log f_\theta (X, b) \,, \quad 
+    \text{ with $\Delta(X,b)$ defined in Equation~\ref{eq:next-X-if-success}.}
+\end{equation}
+Thus, finding the shortest path between current and goal state returns an abstract behaviour sequences that maximizes the probability of successfully reaching the goal.
+
+\sectionvspace
+
+
+\section{Results}
+
+\sectionvspace
+\label{sec:results}
+We use two sets of of environment. One is 2D crafting, which requires agent to craft objects following a Minecraft-like crafting tree with each crafting stage requiring multiple low level actions \citep{Chen2020AskYH}. Second is MiniHack \citep{samvelyan2021minihack}, which contains a series of extremely difficult exploration games \citep{henaff2022e3b}. 
+
+For baselines, we use strong model-free (asynch PPO, \citep{Schulman2017ProximalPO, petrenko2020sf}) and model-based (Dreamer-v3, \citep{Hafner2023MasteringDD,Sekar2020PlanningTE}) baselines. All the methods are trained in the \MDPNameShort. We report low level steps and plot 95 confidence interval.
+\sectionvspace
+\subsection{Learning from scratch in single environments}
+\label{sec:result-learning-scratch-single-env}
+\sectionvspace
+
+\begin{figure}[h]
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=1\textwidth]{figs/crafting/mazebase_scratch_3games.pdf}
+        \caption{2D crafting games}
+        \label{fig:2d_craft_scratch_3_games}
+    \end{subfigure}
+    \hspace{5pt}
+    \begin{subfigure}{0.55\textwidth}
+        \includegraphics[width=1\textwidth]{figs/main-results/minihack_scratch_5games_150k10mil.pdf}
+        \caption{MiniHack skill games}
+        \label{fig:minihack_scratch_5_games}
+    \end{subfigure}
+    
+    \caption{Results in games trained from scratch in \MDPNameShort. Triangles and stars denote low-level only methods. For MiniHack, we also show the final performance of state-of-the-art exploration methods in the low level MDP (star/triangle), from \citet{henaff2022e3b}. \textbf{X-axis on log scale}.}
+    \label{fig:from_scratch_games}
+\end{figure}
+Figure \ref{fig:from_scratch_games} shows the from-scratch \MDPNameShort training results for strong baselines and our method. We see that Dreamer-v3, a state-of-the-art model-based method, is highly sample efficient.
+PPO, a model-free method, stably optimizes the reward, but at a data budget of more than two orders of magnitude (hundreds of thousands versus 10 million). Our method learns the \MDPNameShort with an additional order of magnitude sample efficiency improvement compared to the already efficient Dreamer.
+For reference, we plot the performance for SOTA algorithms in the base MDP (without the \MDPNameShort) as triangles and stars. In particular in MiniHack tasks (Fig.\ref{fig:minihack_scratch_5_games}), model-free methods with random and global exploration bonuses (IMPALA, RND, ICM) perform poorly even after 50 million steps, and methods using episodic exploration bonus perform better (E3B). Nonetheless, all of them are less efficient than the least efficient method trained on the \MDPNameShort.  
+
+These results show that \MDPNameShort helps simplify the problem, with all methods reaching reasonable performances---a feat not achievable by most methods trained in the low level MiniHack MDP \citep{henaff2022e3b}. However, we also see that the problem is still non-trivial, with the model-free baseline still requiring millions of frames to achieve success. 
+Our method reaches the same peak performance as the model-free method while using fewer samples than the model-based baseline.
+
+\sectionvspace
+\subsection{Transfer and Compositions}
+\sectionvspace
+
+\begin{figure}[h]
+    \centering 
+    \hspace{-5pt}
+    \begin{subfigure}{0.18\textwidth}
+        \centerline{\includegraphics[width=\columnwidth]{figs/main-results/customused_pretrain_1game_bl_50k.pdf}}
+        \caption{Sandbox}
+        \label{fig:sandbox_pretrain_finetune}
+    \end{subfigure}
+    \hspace{-8pt}
+    \begin{subfigure}{0.38\textwidth}
+        \centerline{\includegraphics[width=\columnwidth]{figs/main-results/freeze_pretrain_1_game_50k.pdf}}
+        \caption{
+        Freeze-Random transfer
+        }
+        \label{fig:freeze_pretrain_finetune}
+    \end{subfigure}
+    \begin{subfigure}{0.44\textwidth}
+         \centerline{\includegraphics[width=\columnwidth]{figs/long_env/levitate-freeze-all-algos.pdf}}
+         \caption{Compositional environment.}
+         \label{fig:levitate-freeze-task}
+    \end{subfigure}
+    
+    \caption{Transfer experiments and a difficult compositional environment.}
+    \label{fig:transfer-and-composition-exps}
+\end{figure}
+Next, since the \MDPNameShort abstraction models object identities and shared attributes, we evaluate if the abstract level models can transfer object knowledge to new settings. Here we exclusively use the MiniHack environments due to their rich repertoire of object types and higher difficulty.
+
+\sectionvspace
+ The agent is allowed to interact with the environment with only an exploration reward (no task-specific reward) for 200k frames.
+We then fine-tune the agent in each of the environments. For our model, we continue to train $f_\theta$ within the new environment. For Dreamer-v3, we transfer only the world model (encoder, decoder and dynamics function) and re-initialize the policy and reward functions.\footnote{The point of this experiment is to evaluate world knowledge transfer. Nevertheless, fine-tuning the exploratory reward function and policy also achieves no better performance.} Results for all five environments follow similar trends, thus we show a representative example in Figure~\ref{fig:sandbox_pretrain_finetune} and present the full set in Figure~\ref{fig:sandbox_pretrain_finetune_full}.
+
+ A possible explanation is while the agent observe all object types, the data distribution is dominated by seeing \textit{more} objects on average in the training environment than in the evaluation environments, thus presenting a distribution shift. In contrast, our model exhibits good zero-shot performance, and reaches optimal performance efficiently.
+
+To help the Dreamer-v3 baseline further, we give it a reward function to ``use'' the items seen in the pre-training sandbox environment. This is a kind of privileged information which biases the model representation to better model the evaluation-time task. We observe that this variant of Dreamer-v3 exhibits positive transfer, hinting at Dreamer's representatin reliance on the reward function. Nevertheless, it does not exhibit the same degree of zero-shot or fine-tuning capability as our model.
+
+\sectionvspace
+\paragraph{Transfer across object classes}
+
+We further evaluate the ability of the models to transfer to new object types. For example, would a model learn to use a potion better, after it has learned to use a freeze wand, since the abstract level interactions of these objects are similar (the agent can stand on top of these objects, pick it up, and use them)? We take 200k frame checkpoints in the \texttt{Freeze Random} environment and re-train the model in the other 4 environments for an additional 50k frames.
+
+We again show one representative comparison in Figure~\ref{fig:freeze_pretrain_finetune} and present the full 4-environments result in Figure~\ref{fig:freeze_pretrain_finetune_full}. We see our model exhibits reasonable zero-shot performance and improves further through fine-tuning.} We again pre-train Dreamer-v3 with privileged reward information that matches the downstream task, but still requires generalization to novel objects.
+We see that in general this way of training dreamer resulted in positive transfer -- it learns to reach a higher reward with fewer samples compared to training from scratch. 
+
+It is somewhat surprising that our model transfer so well zero-shot to completely new objects in Levitate-Boots and Levitate-Potion.
+
+\sectionvspace
+\paragraph{Compositional planning environment}
+Finally, we designed an environment similar to the 5 difficult Minihack exploration levels, but with the required planning depth twice as long.\footnote{Previous environments need a minimum of three abstract transitions to complete; this one needs at least six.}    
+This is an even more challenging task where the agent needs to pick up both a freeze and a levitate object, make itself levitate (using the levitate object), then cast a freezing spell to terminate the episode. Further, the levitate spell must be cast \textit{after} all the objects have been picked up (since the agent cannot pickup objects while levitating), but before the freeze spell is cast. This is a challenging environment requiring precise sequences of abstract behaviours. %
+
+We observe in  Figure~\ref{fig:levitate-freeze-task} that when pre-trained on Freeze objects, our model trains more stably in 
+this environment
+(but no longer shows good zero-shot results), succeeding majority of times. Our from scratch model solves this task with better rewards. Our method also learns a highly complex yet still interpretable world graph, with a simplified version shown in Figure~\ref{fig:world-graphs-levitate-freeze}. In contrast, all other methods, with and without pre-training, do \textit{not} find the correct solution at all, but instead are stuck at a 0 reward local minima.
+
+\sectionvspace
+\subsection{Learning object perturbing policies and object-centric map}
+\label{sec:learning-low-levels}
+\sectionvspace
+
+\begin{figure}[h]
+    \centering 
+    \begin{subfigure}{0.21\textwidth}
+        \includegraphics[width=\columnwidth]{figs/low_lvl/learning_behaviour_probs.pdf}
+        \caption{Learning $\mathcal{B}$}
+        \label{fig:learning-behaviour-prob}
+    \end{subfigure}
+    \hspace{1pt}
+    \begin{subfigure}{0.24\textwidth}
+        \includegraphics[width=\columnwidth]{figs/low_lvl/learned_policies_freezewand.pdf}
+        \caption{Perf. with learned $\mathcal{B}$}
+        \label{fig:learned-behaviour-minihack}
+    \end{subfigure}
+    \hspace{12pt}
+    \begin{subfigure}{0.45\textwidth}
+        \includegraphics[width=\columnwidth]{figs/low_lvl/learned_encoder_freezehorn.pdf}
+        \caption{Performance with learned object mapping}
+        \label{fig:learned-object-map}
+    \end{subfigure}
+    \caption{Performance using learned \MDPNameShort components. All error bars denote 95 confidence interval of mean with exception of encoder accuracy which shows 1 standard deviation.}
+\end{figure}
+
+Up to this point we have assumed the \textit{existence} of an object-centric mapping and competent behaviours (Sec.~\ref{sec:absobs}), which can be combined with our method for efficient exploration and world model learning. We now demonstrate how one might \textit{learn} both components. 
+
+\sectionvspace
+\subsubsection{Learning low level policies}
+\sectionvspace
+
+We observe low level policies can be learned with RL if an object-centric map exists. Specifically, we reward the agent for achieving an abstract transition \textit{successfully}: from $X_t$, if executing behaviour $b=(\alpha^{(i)}, \xi')$ until an abstract transition results in $X_{t+1}$ containing item $(\alpha^{(i)}, \xi')$, the associated policy $\pi_b$ gets a reward of +1 (else -1). We train low level policies to replace all behaviours in the MiniHack single task environments, and observe the success probability can be stably optimized with PPO (Fig.\ref{fig:learning-behaviour-prob}; note it does not reach 1 as it is averaged over all attempted behaviours, some are for impossible transitions). Solving \MDPNameShort with learned behaviours perform similarly (Fig.\ref{fig:learned-behaviour-minihack}). The reported 2D Crafting results (Section~\ref{sec:result-learning-scratch-single-env}) already use learned behaviours.
+
+\sectionvspace
+\subsubsection{Learning object-centric map}
+\sectionvspace
+
+If we wish to also learn the object-centric mapping, we can do so using supervised learning. We generate a dataset of 100k transitions using a random policy in MiniHack's \texttt{Freeze-Horn} environment, and use the hand-crafted mapping to provide ground truth abstract state labels. We train a neural net to produce the abstract state $X$ from $S$. We compare planning performance using the learned object-centric mapping in Figure~\ref{fig:learned-object-map} and observe it reaches similar performance as the ground truth mapping, even though the encoder is not perfect in predicting the abstract states. We discuss alternative way of getting this mapping in Section~\ref{sec:discussion}.
+
+\sectionvspace
+\subsection{Ablations}
+\sectionvspace
+
+\sectionvspace
+\subsubsection{Generative vs. Discriminative Models}
+\label{sec:generative-v-discriminative}
+\sectionvspace
+
+\begin{wrapfigure}{r}{0.38\textwidth} %
+    \centering
+    \includegraphics[width=0.35\textwidth]{figs/abl/gen_discri_planning.pdf}
+    \caption{Planning performance with discriminative vs. generative models}
+    \label{fig:generative-v-discriminative-plan}
+\end{wrapfigure}
+
+A common way of learning a forward model is to model the next state \textit{generative-ly}, i.e. $\hat{X}_{t+1} \sim f(X_t, b_t)$, with support over the entire state space $\mathcal{X}$. In \MethodNameShort, we opted to constrain the possible future to either be the same as the current time-step, or one where there is a single item change (Fig.~\ref{fig:forward_model_prediction}). This has the disadvantage of being less flexible, but the advantage of being easier to model. To isolate only the effect of discriminative modelling, we design an experiment where we fit models to the same expert dataset, with the \textit{only} difference being the model type (fit to either predict success probability in the discriminative case, or to predict the distribution over next item-attribute sets), while keeping all other variables constant.  
+\sectionvspace
+\subsubsection{Count-based exploration}
+\sectionvspace
+\label{sec:exploration-ablation}
+\begin{wrapfigure}{r}{0.31\textwidth} %
+    \centering
+    \centerline{\includegraphics[width=0.3\textwidth]{figs/abl/discovered-transitions.pdf}}
+    \caption{Effect of count-based exploration in the Freeze-Wand environment. MCTS discovers more unique valid (item identity, item attribute, new attribute) transitions.}
+    \label{fig:exploration-ablation}
+\end{wrapfigure}
+
+We observe using the count-based intrinsic reward (Equation~\ref{eq:intrinsic-reward}) with MCTS was important for exploration. Figure~\ref{fig:exploration-ablation} (right) shows count-based exploration discovering many more valid object attribute transitions compared to a randomly exploring agent. Correspondingly, this leads to a model $f_\theta$ that is better at achieving goals (Figure~\ref{fig:exploration-ablation}, left). 
+\subsubsection{Parametric vs. Non-Parametric Models}
+\sectionvspace
+\label{sec:non-parametric}
+
+Instead of fitting a discriminative model to success probability, we can directly use the empirical count-based estimate from a dataset (a non parametric model). This is done to learn the model in \citet{zhang2018composable}.
+
+\sectionvspace
+
+
+\section{Related Work}
+
+\sectionvspace
+\paragraph{Hierarchical RL}
+
+ Within the Options Framework \citep{Sutton1999BetweenMA,Precup2000Temporal}, Option discovery remains an open and important question.  
+Existing methods typically do option discovery in a ``bottom-up'' fashion by learning structures from their training environments \citep{Bacon2016TheOA,Machado2017ALF,Ramesh2019SuccessorOA,Machado2021TemporalAI}. In contrast, our \MDPNameShort uses ``top-down'' prior knowledge in the form of object-perception, and define options that perturb objects' attributes. 
+
+\paragraph{Planning with abstract representations}
+Abstraction is a fundamental concept \citep{Abel2022TheoryAbstraction} and we select a subset of most relevant works. The \MDPNameShort can be viewed as a more structured MDP formulation in which learning and planning is simplified. This relates to OO-MDP \citep{Diuk2008OoMDP,Keramati2018FastEW}, which describes state as a set of object and object states which interact through relations. Also related is MaxQ and AMDP \citep{Dietterich1998TheMM,Gopalan2017AbstractMDP}, which provides a decomposition of a base MDP into multi-level sub-MDP hierarchies to plan more efficiently. Transition dynamics can also be defined as symbolic domain specific language \citep{Mao2023PDSketchIP}. Above works require pre-specifying additional interaction rules, functions, and object relations to simplify planning, whereas we only assume the ability to see objects and their attributes, and learn the forward model as a neural network.  
+More distantly related is \citet{Veerapaneni2019EntityAI} which focus more on learning good object-centric representations rather than effective usage of an abstract level. \citet{Nasiriany2019PlanningWG} tackles sub-policy learning and planning with abstraction, focusing on implicitly representing abstractions rather than using semantically meaningful ones. The DAC-MDP \citep{Shrestha2020DacMDP} clusters low level states into ``core states'' to solve by value iteration, with a focus on getting good policies in an offline RL setting rather than abstract world model learning.
+
+Most similar is~\citet{zhang2018composable}, which does model-based planning over abstract attributes. We differ in having a more expressive abstraction framework: modelling a flexible set of objects and shareable attributes, rather than a fixed, binary set of attributes only. We also use a parametric model to more efficiently learn and is able to transfer object information to new environments. We compare against their non-parametric approach and show better sample efficiency in Section~\ref{sec:non-parametric}. 
+
+\textbf{RL in semantic spaces}
+As language models have grown in interest and sophistication, there has been an increasing interest in semantic and linguistic abstractions in RL. Early works such as~\cite{andreas2017modular} looked at handcrafted abstract spaces such as we do here to show that creating abstractions allows for better learning and exploration. Other works such as~\cite{jiang2019language, chen2020ask} specifically use natural language as the abstract space. In others, the language space abstraction is used as a way of guiding exploration~\cite{Tam2022SemanticEF, Guo2023ImproveTE}. 
+
+
+
+\paragraph{Model-based RL}
+Our work is related to other work in Model-based Reinforcement Learning~\citep{Sutton1990DynaAI, Kaiser2019ModelBasedRL, Doya2002MultipleMR}. In particular we compare to the Dreamer line of work~\citep{Hafner2019DreamTC, Hafner2023MasteringDD, Sekar2020PlanningTE, Mendonca2021DiscoveringAA, Hafner2022DeepHP}. These methods were developed for a pixels setting and employ a two step learning strategy: learning a generative forward model to predicts the next states $X'$, then learning a policy in imagination. We compare directly to this in our experiments, where we show that our method (which employs a discriminative forward model) learns more quickly and transfers better in our setting.
+
+\paragraph{Exploration in RL} Exploration is a well-studied problem in RL. For a more extensive literature review, \citet{Amin2021ASO} gives a comprehensive picture. Most relevant to here are count-based methods such as~\citet{Raileanu2020RIDERI, Zhang2021NovelDAS}. Our work takes inspiration from the hard exploration problems from ~\citet{henaff2022e3b}. There are also many disagreement-based methods including \citet{Sekar2020PlanningTE} and~\citet{Mendonca2021DiscoveringAA};
+we compare directly to the former for our Dreamer benchmarks with pre-training. 
+\sectionvspace
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+\sectionvspace
+
+In this work we introduce the \MDPNameShort, which uses human understandable object-attribute relations to build an abstract MDP. This enables us to learn a discriminitive model-based planning method (\MethodNameShort) which explores and learns this semantic world model without extrinsic rewards.
+\textbf{Limitations} 
+The major limitation of the work is that the construction of \MDPNameShort requires the existence of an object-centric mapping.
+While we show how these components can be learned in Section~\ref{sec:learning-low-levels}, learning the object mapping still requires a labelled dataset. Promisingly, the field as a whole is moving in a direction where abstractions are becoming more easily obtainable. For instance, object-centric abstract maps can be acquired using segmentation models~\citep{Kirillov2023SegmentA} and visual language models~\citep{Alayrac2022FlamingoAV}. Similarly, the short-horizon (low level) manipulation policies can be acquired more efficiently 
+through imitation learning. In the robotics setting it's even been found that using off-the-shelf models for these perception and skill policies is possible~\citep{liu2024ok}. 
+Nevertheless, a method to automatically discover object-centric representations remains an open question.  %
+
+
+\section{Acknowledgements}
+
+
+This work is supported by ONR MURI \#N00014-22-1-2773 and ONR \#N00014-21-1-2758. AGC is supported by the Natural Sciences and Engineering Research Council of Canada (NSERC), PGSD3-559278-2021. \textit{Cette recherche a été financée par le Conseil de recherches en sciences naturelles et en génie du Canada (CRSNG), PGSD3-559278-2021}. We are grateful for insightful discussions with Rajesh Ranganath. We thank Ben Evans, Siddhant Haldar, Ulyana Piterbarg, Dongyan Lin, and Mandana Samiei for their helpful feedback on earlier drafts of this paper.
+
+
+
+
+
+

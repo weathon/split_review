@@ -1,0 +1,505 @@
+\title{3DTopia-XL: Scaling High-quality 3D Asset Generation via Primitive Diffusion}
+
+\begin{abstract}
+The increasing demand for high-quality 3D assets across various industries necessitates efficient and automated 3D content creation. 
+Despite recent advancements in 3D generative models, existing methods still face challenges with optimization speed, geometric fidelity, and the lack of assets for physically based rendering (PBR). 
+In this paper, we introduce \nickname, a scalable native 3D generative model designed to overcome these limitations. 
+\nickname\ leverages a novel primitive-based 3D representation, \representationname, which encodes detailed shape, albedo, and material field into a compact tensorial format, facilitating the modeling of high-resolution geometry with PBR assets. 
+On top of the novel representation, we propose a generative framework based on Diffusion Transformer (DiT), which comprises 1) Primitive Patch Compression, 2) and Latent Primitive Diffusion.
+\nickname\ learns to generate high-quality 3D assets from textual or visual inputs. 
+We conduct extensive qualitative and quantitative experiments to demonstrate that \nickname\ significantly outperforms existing methods in generating high-quality 3D assets with fine-grained textures and materials, efficiently bridging the quality gap between generative models and real-world applications. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+High-quality 3D assets are essential for various real-world applications like films, gaming, and virtual reality.
+However, creating high-quality 3D assets involves extensive manual labor and expertise.
+Therefore, it further fuels the demand for automatic 3D content creation techniques, which automatically generate 3D assets from visual or textual inputs by using 3D generative models.
+
+Fortunately, rapid progress has been witnessed in the field of 3D generative models recently.
+Existing state-of-the-art techniques can be sorted into three categories. 
+\textbf{1)} Methods based on Score Distillation Sampling (SDS) ~\citep{poole2022dreamfusion, tang2023dreamgaussian} lift 2D diffusion priors into 3D representation by per-scene optimization.
+However, these methods suffer from time-consuming optimization, poor geometry, and multifaceted inconsistency.
+\textbf{2)} Methods based on sparse-view reconstruction~\citep{hong2023lrm, xu2024instantmesh} that leverage large models to regress 3D assets from single- or multi-view images.
+Most of these methods are built upon triplane-NeRF~\citep{eg3d} representation.
+However, due to the triplane's parameter inefficiency, the valid parameter space is limited to low resolutions in those models, leading to relatively low-quality 3D assets.
+Plus, reconstruction-based models also suffer from a low-diversity problem as deterministic methods.
+\textbf{3)} Methods as native 3D generative models~\citep{yariv2023mosaic, li2024craftsman} aim to model the probabilistic distribution of 3D assets, generating 3D objects given input conditions.
+Yet, few of them are capable of generating high-quality 3D objects with Physically Based Rendering (PBR) assets, which are geometry, texture, and material packed into a GLB file.
+
+To address the limitations above, we propose \nickname, a high-quality native 3D generative model for 3D assets at scale.
+Our key idea is scaling the powerful diffusion transformer~\citep{Peebles2022DiT} on top of a novel primitive-based 3D representation.
+At the core of \nickname\ is an efficient 3D representation, \representationname, which encodes the shape, albedo, and material of a textured mesh in a compact $N\times D$ tensor, enabling the modeling of high-resolution geometry with PBR assets.
+In specific, we anchor $N$ primitives to the positions sampled on the mesh surface. Each primitive is a tiny voxel, parameterized by its 3D position, a global scale factor, and corresponding spatially varied payload for SDF, RGB, and material.
+Note that the proposed representation differentiates itself from the shape-only representation M-SDF~\citep{yariv2023mosaic} that \representationname\ encodes shape, color, and material in a unified way.
+It also supports efficient differentiable rendering, leading to the great potential to learn from not only 3D data but also image collections.
+Moreover, we carefully design initialization and fine-tuning strategy that enables \representationname\ to be rapidly tensorized from a textured mesh (GLB file) which is ten times faster than the triplane under the same setting.
+
+Thanks to the tensorial and compact \representationname, we scale the 3D generative modeling using latent primitive diffusion with Transformers, where we treat each 3D object as a set of primitives.
+In specific, the proposed 3D generation framework consists of two modules.
+\textbf{1)} Primitive Patch Compression uses a 3D VAE for spatial compression of each individual primitive to get latent primitive tokens;
+and \textbf{2)} Latent Primitive Diffusion leverages the Diffusion Transformers (DiT)~\citep{Peebles2022DiT} to model global correlation of latent primitive tokens for generative modeling.
+Notably, the permutation equivariance of \representationname\ naturally supports training Transformers without positional encoding.
+The significant efficiency of the proposed representation allows us to achieve high-resolution generative training using a clean and unified framework without super-resolution or post-hoc optimization-based mesh refinement.
+
+In addition, we also carefully design algorithms for high-quality 3D PBR asset extraction from \representationname, to ensure reversible transformations between \representationname\ and textured mesh.
+An issue for most 3D generation models~\citep{wang2024crm, xu2024instantmesh} is that they use vertex coloring to represent the object's texture, leading to a significant quality drop when exporting their generation results into mesh format. 
+Thanks to the high-quality surface modeled by Signed Distance Field (SDF) in \representationname, we propose to extract the 3D shape with zero-level contouring and sample texture and material values in a high-resolution UV space.
+This leads to high-quality asset extraction with considerably fewer vertices, which is also ready to be packed into GLB format for downstream tasks.
+
+Extensive experiments are conducted both qualitatively and quantitatively to evaluate the effectiveness of our method in text-to-3D and image-to-3D tasks.
+Moreover, we do extensive ablation studies to motivate our design choices for a better efficiency-quality tradeoff in the context of generative modeling with \representationname. 
+In conclusion, we summarize our contributions as follows:
+\textbf{1)} We propose a novel 3D representation, \representationname, for high-quality 3D content creation, which is efficient, tensorial, and renderable.
+\textbf{2)} We introduce a scalable generative framework, \nickname, tailored for generating high-quality 3D assets with high-resolution geometry, texture, and materials.
+\textbf{3)} Practical techniques for assets extraction from 3D representation to avoid quality gap.
+\textbf{4)} We demonstrate the superior quality and impressive applications of \nickname\ for image-to-3D and text-to-3D tasks.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Feed-Forward 3D Generative Models.}
+Early works on feed-forward 3D generation involves training a GAN~\citep{goodfellow2020gan} from 2D image datasets~\citep{gao2022get3d,eg3d,hong2022eva3d}.
+However, such methods fail to scale up to large-scale datasets with general 3D objects~\citep{deitke2023objaverse,deitke2023objaversexl}.
+Recent advancements have been focusing on feed-forward reconstruction methods that regress 3D assets from single- or multi-view images. 
+Large Reconstruction Model (LRM)~\citep{hong2023lrm,openlrm} has shown that end-to-end training of a triplane-NeRF regression model scales well to large datasets and can be highly generalizable. 
+Although it can significantly accelerate generation speed, the generated 3D assets still exhibit relatively lower quality due to representation inefficiency and suffer from a low-diversity problem as a deterministic method. 
+Subsequent works have extended this method to improve generation quality.
+For example, using multi-view images~\citep{xu2024instantmesh,li2023instant3d,wang2023pflrm,siddiqui2024meta3dgen,xie2024lrm0,wang2024crm, jiang2024real3d, boss2024sf3dstablefast3d} generated by 2D diffusion models as the input can effectively enhance the visual quality. 
+However, the generative capability is actually enabled by the frontend multi-view diffusion models~\citep{shi2023mvdream,li2024era3d,long2023wonder3d} which cannot produce multi-view images with accurate 3D consistency.
+Another direction is to use more efficient 3D representations such as Gaussian Splatting~\citep{kerbl20233d,tang2024lgm,xu2024grm,zhang2024gs,yi2024mvgamba,chen2024lara} and triangular mesh~\citep{zhang2024geolrm,li2024mlrm,wei2024meshlrm,zou2023triplane}.
+However, few of them can generate high-quality PBR assets with sampling diversity.
+\paragraph{3D Diffusion Generative Models.}
+Similar to 2D diffusion models for image generation, efforts have been made to train a 3D native diffusion model on conditional 3D generation. 
+However, unlike the universal image representation in 2D, there are many different choices for 3D representations.
+Voxel-based methods~\citep{muller2023diffrf} can be directly extended from 2D methods, but they are constrained by the demanding memory usage, and suffer from scaling up to high-resolution data.
+Point cloud based methods~\citep{nichol2022point,nash2017shape} are memory-efficient and can adapt to large-scale datasets, but they hardly represent the watertight and solid surface of the 3D assets.
+Implicit representations such as triplane-NeRF offer a better balance between memory and quality~\citep{jun2023shap,gupta20233dgen,cheng2023sdfusion,ntavelis2023autodecoding,cao2023large,chen2023single,wang2023rodin,liu2023one}
+There are also methods based on other representations such as meshes and primitives~\citep{liu2023meshdiffusion,yariv2023mosaic,chen2023primdiffusion,xu2024brepgen,yan2024object}.
+However, these methods still struggle with generalization or producing high-quality assets.
+Recent methods attempt to adapt latent diffusion models to 3D~\citep{zhang20233dshape2vecset,zhao2023michelangelo,zhang2024clay,wu2024direct3d,li2024craftsman,lan2024ln3diff,hong20243dtopia,tang2023volumediffusion}. 
+These methods first train a 3D compression model such as a VAE to encode 3D assets into a more compact form, which allows the diffusion model to train more effectively and show strong generalization.
+However, they either suffer from low-resolution results or are incapable of modeling PBR materials.
+In this paper, we propose a new 3D latent diffusion model based on a novel representation, \representationname, which can be efficiently computed from a textured mesh and unpacked into high-resolution geometry with PBR materials.
+
+
+
+\section{Methodology}
+
+
+\subsection{\representationname: An Efficient Representation for Shape, Texture, and Material}
+\label{sec:primx}
+Before diving into details, we outline the following design principles for 3D representation in the context of high-quality large-scale 3D generative models:
+\textbf{1)} Parameter-efficient: provides a good trade-off between approximation error and parameter count; 
+\textbf{2)} Rapidly tensorizable: can be efficiently transformed into a tensorial structure, which facilitates generative modeling with modern neural architectures;
+\textbf{3)} Differentiably renderable: compatible with differentiable renderer, enabling learning from both 3D and 2D data.
+
+Given the aforementioned principles, we propose a novel primitive-based 3D representation, namely \representationname, which represents the 3D shape, texture, and material of a textured mesh as a compact $N \times D$ tensor. 
+It can be efficiently computed from a textured mesh (typically a GLB file) and directly rendered into 2D images via a differentiable rasterizer.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/primx_illustration_v2.pdf}
+    \caption{\textbf{Illustration of \representationname.} We propose to represent the 3D shape, texture, and material of a textured mesh as a compact $N\times D$ tensor (Sec.~\ref{sec:primx-def}). We anchor $N$ primitives to the positions sampled on the mesh surface. Each primitive $\gV_k$ is a tiny voxel with a resolution of $a^3$, parameterized by its 3D position $\rvt_k \in \sR^3$, a global scale factor $s_k \in \sR^{+}$, and corresponding spatially varied payload $\mX_k \in \sR^{a\times a\times a\times 6}$ for SDF, RGB, and material. This tensorial representation can be rapidly computed from a textured mesh within 1.5 minutes (Sec.~\ref{sec:fitting}).
+    }\label{fig:primx}
+\end{figure}
+
+\subsubsection{Definition}
+\label{sec:primx-def}
+
+\paragraph{Preliminaries.}
+Given a textured 3D mesh, we denote its 3D shape as $\gS \in \sR^3$, where $\rvx \in \gS$ are spatial points inside the occupancy of the shape, and $\rvx \in \partial \gS$ are the points on the shape's boundary, \ie the shape's surface. 
+We model the 3D shape as SDF as follows:
+\begin{equation}
+\label{eq:sdf-def}
+    F_{\gS}^{\mathrm{SDF}}(\rvx) = 
+    \begin{cases}
+    -d(\rvx, \partial \gS), \;\; \rvx \in \gS \\
+    d(\rvx, \partial \gS), \;\; \mathrm{elsewise}
+    \end{cases} 
+    \;\; \mathrm{s.t.}\;\; d(\rvx, \partial \gS) = \min_{\rvy \in \gS}||\rvx - \rvy||_2.
+\end{equation}
+Moreover, given the neighborhood of shape surface, $\gU(\partial \gS, \delta) = \{d(\rvx, \partial \gS) < \delta\}$, the space-varied color function and material function of the target mesh are defined by:
+\begin{equation}
+\label{eq:rgbmat-def}
+    F_{\gS}^{\mathrm{RGB}}(\rvx) = 
+    \begin{cases}
+    C(\rvx), \;\; \rvx \in \gU \\
+    0, \;\; \mathrm{elsewise}
+    \end{cases}
+    F_{\gS}^{\mathrm{Mat}}(\rvx) = 
+    \begin{cases}
+    \rho(\rvx), \;\; \rvx \in \gU \\
+    0, \;\; \mathrm{elsewise}
+    \end{cases},
+\end{equation}
+where $C(\rvx): \sR^3 \xrightarrow{} \sR^3$ and $\rho(\rvx): \sR^3 \xrightarrow{} \sR^2$ are corresponding texture sampling functions to get albedo and material (metallic and roughness) from UV-aligned texture maps given the 3D point $\rvx$.
+Eventually, all shape, texture, and material information of a 3D mesh can be parameterized by the volumetric function  $F_{\gS} = (F_{\gS}^{\mathrm{SDF}}\oplus F_{\gS}^{\mathrm{RGB}}\oplus F_{\gS}^{\mathrm{Mat}}): \sR^3 \xrightarrow{} \sR^6$, where $\oplus$ denotes concatenation.
+
+\paragraph{\representationname\ Representation.}
+We aim to approximate $F_{\gS}$ with a neural volumetric function $F_{\gV}: \sR^3 \xrightarrow{} \sR^6$ parameterized by a $N\times D$ tensor $\gV$. For efficiency, our key insight is to define $F_{\gV}$ as a set of $N$ volumetric primitives distributed on the surface of the mesh:
+\begin{equation}
+\label{eq:prim-def}
+    \gV = \{\gV_k\}_{k=1}^{N}, \mathrm{where}\;\; \gV_k = \{\rvt_k, s_k, \mX_k\}.
+\end{equation}
+Each primitive $\gV_k$ is a tiny voxel with a resolution of $a^3$, parameterized by its 3D position $\rvt_k \in \sR^3$, a global scale factor $s_k \in \sR^{+}$, and corresponding spatially varied feature payload $\mX_k \in \sR^{a\times a\times a\times 6}$ within the voxel. 
+Note that, the payload in \representationname\ could be spatially varied features with any dimensions. 
+Our instantiation here is to use a six-channel local grid $\mX_k = \{\mX_k^{\mathrm{SDF}}, \mX_k^{\mathrm{RGB}}, \mX_k^{\mathrm{Mat}}\}$ to parameterize SDF, RGB color, and material respectively.
+
+Inspired by \citet{yariv2023mosaic} where mosaic voxels are globally weighted to get a smooth surface, the approximation of a textured mesh is then defined as a weighted combination of primitives:
+\begin{equation}
+\label{eq:prim-approx}
+    F_{\gV}(\rvx) = \sum_{k=1}^{N}w_k(\rvx)\gI(\gV_k, \frac{\rvx - \rvt_k}{s_k}),
+\end{equation}
+where $\gI(\gV_k, \rvx)$ denotes the trilinear interpolant over the voxel grid $\mX_k$ at position $\rvx$. 
+The weighting function $w_k(\rvx)$ of each primitive is defined as:
+\begin{equation}
+    w_k(\rvx) = \frac{\hat{w}_k(\rvx)}{\sum_{j=1}^{N}\hat{w}_j(\rvx)}, \;\; \mathrm{s.t.}\;\; \hat{w}_k(\rvx) = \max(0, 1-||\frac{\rvx - \rvt_k}{s_k}||_{\infty}).
+\end{equation}
+Once the payload of primitives is determined, we can leverage a highly efficient differentiable renderer to turn \representationname\ into 2D images. 
+In specific, given a camera ray $\rvr(t) = \rvo + t\rvd$ with camera origin $\rvo$ and ray direction $\rvd$, the corresponding pixel value $I$ is solved by the following integral:
+\begin{equation}
+\label{eq:diff-rast}
+    I = \int_{t_{\mathrm{min}}}^{t_{\mathrm{max}}}F_{\gV}^{\mathrm{RGB}}(\rvr(t))\frac{dT(t)}{dt}dt, \;\; \mathrm{s.t.}\;\; T(t) = \int_{t_{\mathrm{min}}}^t \exp{[-(\frac{F_{\gV}^{\mathrm{RGB}}(\rvr(t))}{\alpha})^2]} dt,
+\end{equation}
+where we use an exponent of the SDF field to represent the opacity field. 
+And $\alpha$ is the hyperparameter that controls the variance of the opacity field during this conversion. where we set $\alpha=0.005$.
+
+To wrap up, the learnable parameters of a textured 3D mesh modeled by \representationname\ are primitive position $\rvt \in \sR^{N\times 3}$, primitive scale $s \in \sR^{N\times 1}$, and voxel payload $\mX \in \sR^{N\times a^3 \times 6}$ for SDF, color, and material.
+Therefore, each textured mesh can be represented as a compact $N\times D$ tensor, where $D = 3 + 1 + a^3 \times 6$ by concatenation.
+
+\paragraph{PBR Asset Extraction.}
+Once \representationname\ is constructed, it encodes all geometry and appearance information of the target mesh within the $N\times D$. 
+Now, we introduce our efficient algorithm to convert \representationname\ back into a textured mesh in GLB file format.
+For geometry, we can easily extract the corresponding 3D shape with Marching Cubes algorithm on zero level set of $F_{\gV}^{\mathrm{SDF}}$.
+For PBR texture maps, we first perform UV unwrapping using xatlas in a 1k resolution UV space.
+Then, we get sampling points in 3D using nvdiffrast and query $F_{\gV}^{\mathrm{RGB}}, F_{\gV}^{\mathrm{Mat}}$ to get corresponding albedo and material values.
+Note that, we mask the UV space to get the index of valid vertices for efficient queries.
+Moreover, we dilate the UV texture maps and inpaint the dilated region with the nearest neighbors of existing textures, ensuring albedo and material maps smoothly blend outwards for anti-aliasing.
+Finally, we pack geometry, UV mapping, albedo, metallic, and roughness maps into a GLB file, which is ready for the graphics engine and various downstream tasks.
+
+\subsubsection{Computing \representationname\ from Textured Mesh}
+\label{sec:fitting}
+We introduce our efficient fitting algorithm in this section that computes \representationname\ from the input textured mesh in a short period of time so that it is scalable on large-scale datasets for generative modeling.
+Given a textured 3D mesh $F_{\gS}$, our goal is to compute \representationname\ such that $F_{\gV}(\rvx) \approx F_{\gS}(\rvx),\; \mathrm{s.t.}\; \rvx \in \gU(\partial \gS, \delta)$. 
+Our key insight is that the fitting process can be efficiently achieved via a good initialization followed by lightweight finetuning.
+
+\paragraph{Initialization.}
+We assume all textured meshes are provided in GLB format which contains triangular meshes, texture and material maps, and corresponding UV mappings.
+The vertices of the target mesh are first normalized within the unit cube.
+To initialize the position of primitives, we first apply uniform random sampling on the mesh surface to get $\hat{N}$ candidate initial points.
+Then, we perform farthest point sampling on this candidate point set to get $N$ valid initial positions for all primitives.
+This two-step initialization of position ensures good coverage of $F_{\gV}$ over the boundary neighborhood $\gU$ while also keeping the high-frequency shape details as much as possible.
+Then, we compute the L2 distance of each primitive to its nearest neighbors, taking the corresponding value as the initial scale factor for each primitive.
+
+To initialize the payload of primitives, we first compute candidate points in global coordinates using initialized positions $\rvt_k$ and scales $s_k$ as $\rvt_k + s_k \mI$ for each primitive, where $\mI$ is the unit local voxel grid with a resolution of $a^3$.
+To initialize the SDF value, we query the SDF function converted from the 3D shape at each candidate point, \ie $\mX_k^{\mathrm{SDF}}=F_{\gS}^{\mathrm{SDF}}(\rvt_k + s_k \mI)$. 
+Notably, it is non-trivial to get a robust conversion from arbitrary 3D shape to volumetric SDF function. 
+Our implementation is based on an efficient ray marching with bounding volume hierarchy that works well with non-watertight topology.
+To initialize the color and material values, we sample the corresponding albedo colors and material values from UV space using geometric functions $F_{\gS}^{\mathrm{RGB}}$ and $F_{\gS}^{\mathrm{Mat}}$.
+In specific, we compute the closest face and corresponding barycentric coordinates for each candidate point on 3D mesh, then interpolate the UV coordinates and sample from the texture maps to get the value.
+
+\paragraph{Finetuning.}
+Even if the initialization above offers a fairly good estimate of $F_{\gS}$, a rapid finetuning process can further decrease the approximation error via gradient descent.
+Specifically, we optimize the well-initialized \representationname\ with a regression-based loss on SDF, albedo, and material values:
+\begin{equation}
+\label{eq:fit-loss}
+    \gL(\rvx; \gV) = \lambda_{\mathrm{SDF}}||F_{\gS}^{\mathrm{SDF}}(\rvx) - F_{\gV}^{\mathrm{SDF}}(\rvx)||_1 + \lambda(||F_{\gS}^{\mathrm{RGB}}(\rvx) - F_{\gV}^{\mathrm{RGB}}(\rvx)||_1 + ||F_{\gS}^{\mathrm{Mat}}(\rvx) - F_{\gV}^{\mathrm{Mat}}(\rvx)||_1),
+\end{equation}
+where $\forall \rvx \in \gU$, and $\lambda_{\mathrm{SDF}}, \lambda$ are loss weights. 
+We employ a two-stage finetuning strategy where we optimize with $\lambda_{\mathrm{SDF}}=10$ and $\lambda=0$ for the first 1k iterations and $\lambda_{\mathrm{SDF}}=0$ and $\lambda=1$ for the second 1k iterations. 
+
+\subsection{Primitive Patch Compression}
+\label{sec:vae}
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/gen_model.pdf}
+    \caption{\textbf{Overview of \nickname.} As a native 3D diffusion model, \nickname\ is built upon a novel 3D representation \representationname\ (Sec.~\ref{sec:primx}). This compact and expressive representation encodes the shape, texture, and material of a textured mesh efficiently, which allows modeling high-resolution geometry with PBR assets. Furthermore, this tensorial representation facilitates our patch-based compression using primitive patch VAE (Sec.~\ref{sec:vae}). We then use our novel latent primitive diffusion (Sec.~\ref{sec:lpd}) for 3D generative modeling, which operates the diffusion and denoising process on the set of latent \representationname, naturally compatible with Transformer-based neural architectures.
+    }
+    \label{fig:overview}
+\end{figure}
+
+In this section, we introduce our patch-based compression scheme on primitives for two main purposes: 
+\textbf{1)} incorporating inter-channel correlations between geometry, color, and materials; 
+and \textbf{2)} compressing 3D primitives to latent tokens for efficient latent generative modeling.
+
+We opt for using a variational autoencoder~\citep{kingma2013auto} (VAE) operating on local voxel patches which compresses the payload of each primitive into latent tokens, \ie $F_{\mathrm{ae}}: \sR^D \xrightarrow{} \sR^d$.
+Specifically, the autoencoder $F_{\mathrm{ae}}$ consists of an encoder $E$ and a decoder $D$ building with 3D convolutional layers.
+The encoder $F_{\mathrm{ae}}$ has a downsampling rate of $48$ that compresses the voxel payload $\mX_k \in \sR^{a^3\times6}$ into the voxel latent $\hat{\mX}_k \in \sR^{(a/2)^3 \times 1}$.
+We train this variational autoencoder $F_{\mathrm{ae}} = \{E, D\}$ with KL-regularized reconstruction loss:
+\begin{equation}
+\label{eq:ae-loss}
+    \gL_{\mathrm{ae}}(\mX; E, D) = \frac{1}{N}\sum_{k=1}^{N}[||\mX_k - D(E(\mX_k))||_2 + \lambda_{\mathrm{kl}}\gL_{\mathrm{kl}}(\mX_k, E)],
+\end{equation}
+where $\lambda_{\mathrm{kl}}$ is the weight for KL regularization over the latent space of the autoencoder.
+Note that, unlike other works on 2D/3D latent diffusion models~\citep{3dldm, zhang2024clay, rombach2022high} that perform global compression over the collection of patches or global 3D latent, the proposed method only compresses each local primitive patch independently and defers the modeling of global semantics and inter-patch correlation to the powerful diffusion model.
+Once the VAE is trained, we can compress the raw \representationname\ as $\gV_k=\{\rvt_k, s_k, E(\mX_k)\}$.
+It leads to the low-dimensional parameter space for the diffusion model as $\gV \in \sR^{N\times d}$, where $d=3 + 1 + (a/2)^3$.
+In practice, this compact parameter space significantly allows allocating more model parameters given a fixed computational budget, which is the key to scaling up 3D generative models in high resolution.
+
+\subsection{Latent Primitive Diffusion}
+\label{sec:lpd}
+On top of \representationname\ (Sec.~\ref{sec:primx}) and the corresponding VAE (Sec.~\ref{sec:vae}), the problem of 3D object generation is then converted to learning the distribution $p(\gV)$ over large-scale datasets. 
+Our goal is to train a diffusion model~\citep{ho2020denoising} that takes as input random noise $\gV^T$ and conditions $\rvc$, and predicts \representationname\ samples. 
+Note that, the target space for denoising is $\gV^T \in \sR^{N\times d}$, where $d=3 + 1 + (a/2)^3$.
+
+In specific, the diffusion model learns to denoise $\gV^T \sim \gN(\mathbf{0}, \mathbf{I})$ through denoising steps $\{\gV^{T-1}, \dots, \gV^0\}$ given conditional signal $\rvc$.
+As a set of primitives, \representationname\ is naturally compatible with Transformer-based architectures, where we treat each primitive as a token. 
+Moreover, the permutation equivariance of \representationname\ removes the need for any positional encoding in Transformers. 
+
+Our largest latent primitive diffusion model $g_{\Phi}$ is a 28-layer transformer, with cross-attention layers to incorporate conditional signals, self-attention layers for modeling inter-primitive correlations, and adaptive layer normalization to inject timestep conditions.
+The model $g_{\Phi}$ learns to predict at timestep $t$ given input condition signal:
+\begin{equation}
+    g_{\Phi}(\gV^t, t, \rvc) = \{\mathrm{AdaLN}[\mathrm{SelfAttn}(\mathrm{CrossAttn}(\gV^t, \rvc, \rvc)), t]\}^{28},
+\end{equation}
+where $\mathrm{CrossAttn}(\rvq, \rvk, \rvv)$ denotes the cross-attention layer with query, key, and value as input. 
+$\mathrm{SelfAttn}(\cdot)$ denotes the self-attention layer.
+$\mathrm{AdaLN}(\cdot, t)$ denotes adaptive layer normalization layers to inject timestep conditioned modulation to cross-attention, self-attention, and feed-forward layers.
+Moreover, we employ the pre-normalization scheme~\citep{xiong2020layer} for training stability.
+For noise scheduling, we use discrete 1,000 noise steps with a cosine scheduler during training.
+We opt for ``v-prediction''~\citep{salimans2022progressive} with Classifier-Free Guidance (CFG)~\citep{ho2022classifier} as the training objective for better conditional generation quality and faster convergence:
+\begin{equation}
+    \gL_{\mathrm{diff}}(\Phi) = \mathbb{E}_{t\sim [1,T], \gV^0, \gV^t}[||(\sqrt{\Bar{\alpha}_t}\eps - \sqrt{1-\Bar{\alpha}_t} \gV^0) - g_{\Phi}(\gV^t, t, \Bar{\rvc}(b))||_2^2],
+\end{equation}
+where $\eps$ is the noise sampled from Gaussian distribution, $\Bar{\alpha}_t = \prod_{i=0}^{t}(1 - \beta_i)$ and $\beta_t$ comes from our cosine beta scheduler. And $b\sim \gB(p_{\mathrm{0}})$ is a random variable sampled from Bernoulli distribution taking 0, 1 with probability $p_{\mathrm{0}}$ and $1 - p_{\mathrm{0}}$ respectively. And the condition signal under CFG is defined as $\Bar{\rvc}(b) = b\cdot \rvc + (1 - b)\cdot \varnothing$, where $\varnothing$ is the learnable embedding for unconditional generation.
+
+
+\section{Experiments}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/our_results.pdf}
+    \caption{\textbf{\nickname\ can generate 3D assets directly from texts or single-view images.}}
+    \label{fig:our-results}
+\end{figure}
+
+\subsection{Implementation Details}
+\subsubsection{Data Standardization}
+\paragraph{Datasets.}
+The scale and quality of 3D data determine the quality and effectiveness of 3D generative models at scales.
+We filter out low-quality meshes, such as fragmented shapes and large-scale scenes, resulting in a refined collection of 256k objects from Objaverse~\citep{deitke2023objaverse}.
+Computing \representationname\ on large-scale datasets involves two critical steps: \textbf{1)} Instantiation of sampling functions $\{F_{\gS}^{\mathrm{SDF}}, F_{\gS}^{\mathrm{RGB}}, F_{\gS}^{\mathrm{Mat}}\}$ from a GLB file and \textbf{2)} Execution of the fitting algorithm in Sec.~\ref{sec:fitting}.
+Given the massive amount of meshes from diverse sources in Objaverse, there are challenges for properly instantiating the sampling functions in a universal way such as fragmented meshes, non-watertight shapes, and inconsistent UVs.
+Our standardized procedure starts with loading the GLB file as a connected graph.
+We filter out subcomponents that have less than 3 face adjacency which typically represent isolated planes or grounds.
+After that, all mesh subcomponents are globally normalized to the unit cube $[-1, 1]$ given one unique global bounding box.
+Then, we instantiate geometric sampling functions for each mesh subcomponent for SDF, texture, and material values.
+
+\paragraph{\representationname\ Hyperparameters.}
+\label{sec:primx-hyper}
+To get a tradeoff between computational complexity and approximation error, we choose our \representationname\ to have $N=2048$ primitives where each primitive's payload has a resolution of $a=8$.
+It indicates that the sequence length of our primitive diffusion Transformer is also $2048$ where each token has a dimension of $d=3+1+(a/2)^3=68$. 
+For the rapid finetuning stage for computing \representationname, we sample 500k points from the target mesh, where 300k points are sampled on the surface and 200k points are sampled with a standard deviation of 0.01 near the surface.
+The finetuning stage is run for 2k iterations with a batch size of 16k points using an Adam~\citep{kingma2014adam} optimizer at a learning rate of $1\times 10^{-4}$.
+
+\subsubsection{Condition Signals}
+\paragraph{Conditioners.}
+The conditional generation formulation in Sec.~\ref{sec:lpd} is compatible with most modalities.
+In this paper, we mainly explored conditional generation on two modalities, images and texts.
+For image-conditioned models, we leverage pretrained DINOv2 model~\citep{oquab2023dinov2}, specifically ``DINOv2-ViT-B/14'', to extract visual tokens from input images and take it as the input condition $\rvc$.
+For text-conditioned models, we leverage the text encoder of the pretrained image-language model~\citep{radford2021learning}, namely ``CLIP-ViT-L/14'', to extract language tokens from input texts.
+\paragraph{Images.}
+Thanks to our high-quality representation \representationname\ and its capability for efficient rendering, we do not need to undergo the complex and expensive rendering process like other works~\citep{hong2023lrm}, which renders all raw meshes into 2D images for training.
+Instead, we opt to use the front-view image rendered by Eq.~\ref{eq:diff-rast} which is \textbf{1)} efficient enough to compute on-the-fly, and \textbf{2)} consistent with the underlying representation compared with the rendering from the raw mesh.
+
+\paragraph{Text Captions.} We sample 200,000 data points from Objaverse to generate text captions. For each object, six different views are rendered against a white background. We then use GPT-4V to generate keywords based on these images, focusing on aspects such as geometry, texture, and style. While we pre-define certain keywords for each aspect, the model is also encouraged to generate more context-specific keywords. Once the keywords are obtained, GPT-4 is employed to summarize them into a single sentence, beginning with 'A 3D model of...'. These text captions are subsequently prepared as input conditions.
+
+\subsubsection{Model Details}
+\paragraph{Training.}
+We train the latent primitive diffusion model $g_{\Phi}$ using a Transformer-based architecture for scalability.
+Our final model is built with 28 layers with 16-head attentions and 1152 hidden dimensions, leading to a total number of $\sim$1B parameters. 
+We train $g_{\Phi}$ with a batch size of 1024 using an AdamW~\citep{loshchilov2017decoupled} optimizer.
+The learning rate is set to $1\times 10^{-4}$ with a cosine learning rate warmup for 3k iterations.
+The probability for condition dropout is set to $b = 0.1$.
+During training, we apply EMA (Exponential Moving Average) on the model's weight with a decay of 0.9999 for better stability.
+The image-conditioned model is trained on 16 nodes of 8 A100 GPUs for 350k iterations, which takes around 14 days to converge.
+The text-conditioned model is trained on 16 nodes of 8 A100 GPUs for 200k iterations, which takes around 5 days to converge.
+
+The 3D VAE for patch-wise primitive compression is built with 3D convolutional layers.
+We train the VAE on a subset of the entire dataset with 98k samples, finding it generalizes well on unseen data. 
+The training takes 60k iterations with a batch size of 256 using an Adam~\citep{kingma2014adam} optimizer with a learning rate of $1\times 10^{-4}$.
+Note that, this batch size indicates the total number of \representationname\ samples per iteration. 
+As our VAE operates on each primitive independently, the actual batch size would be $N\times 256$.
+We set the weight for KL regularization to $\lambda_{\mathrm{kl}}=5\times 10^{-4}$.
+The training is distributed on 8 nodes of 8 A100 GPUs, which takes about 18 hours.
+
+\paragraph{Inference.}
+By default, we evaluate our model with a 25-step DDIM~\citep{song2020denoising} sampler and CFG scale at 6.
+We find the optimal range of the DDIM sampling steps is 25 $\sim$ 100 while the CFG scale is $4\sim 10$. 
+The inference can be efficiently done on a single A100 GPU within 5 seconds. 
+
+\subsection{Representation Evaluation}
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/representaion_evaluation.pdf}
+    \caption{\textbf{Evaluations of different 3D representations.}
+    We evaluate the effectiveness of different representations in fitting the ground truth's shape, texture, and material (right). All representations are constrained to a budget of 1.05M parameters. \representationname\ achieves the highest fidelity in terms of geometry and appearance with significant strength in runtime efficiency (Table~\ref{tab:repr-eval}) at the same time.
+    }
+    \label{fig:repr-eval}
+\end{figure}
+
+\input{tables/representation_evaluation}
+
+\paragraph{Evaluation Protocol.}
+We first evaluate different designs of 3D representations in the context of 3D generative modeling.
+Our evaluation principles focus on two aspects: \textbf{1)} runtime from GLB mesh to the representation, and \textbf{2)} approximation error for shape, texture, and material given a fixed computational budget.
+Given 30 GLB meshes randomly sampled from our training dataset, we take the average fitting time till convergence as runtime, which is measured as the wall time on an A100 GPU.
+For geometry quality, we evaluate the Chamfer Distance (CD) between the ground truth mesh and extracted mesh after the fitting and the Peak Signal-to-Noise Ratio (PSNR) of SDF values of 500k points sampled near the shape surface.
+For appearance quality, we evaluate the PSNR of RGB (albedo) and materials values of 500k points sampled near the surface.
+
+\paragraph{Baselines.}
+Given our final hyperparameters of \representationname, where $N=2048, a=8$, we fix the number of parameters of all representations to $2048\times8^3 \approx 1.05\mathrm{M}$ for comparisons.
+We compare four alternative representations:
+\textbf{1) MLP}: a pure Multi-Layer Perceptron with 3 layers and 1024 hidden dimensions; 
+\textbf{2) MLP w/ PE}: the MLP baseline with Positional Encoding (PE)~\citep{mildenhall2020nerf} to the input coordinates;
+\textbf{3) Triplane}~\citep{eg3d}: three orthogonal 2D planes with a resolution of $128\times128$ and 16 channels, followed by a two-layer MLP decoder with 512 hidden dimensions.
+\textbf{4) Dense Voxels}: a dense 3D voxel with a resolution of $100\times100\times100$. All methods are trained with the same objectives (Eq.~\ref{eq:fit-loss}) and points sampling strategy (Sec.~\ref{sec:primx-hyper}) as ours.
+
+\paragraph{Results.}
+Quantitative results are presented in Table~\ref{tab:repr-eval}, which shows that \representationname\ achieves the least approximation error among all methods, especially for geometry (indicated by CD).
+Besides the best quality, the proposed representation demonstrates significant efficiency in terms of runtime with nearly 7 times faster convergence speed compared with the second best, making it scalable on large-scale datasets.
+Figure~\ref{fig:repr-eval} shows qualitative comparisons.
+MLP-based implicit methods appear to have periodic artifacts, especially for the geometry.
+Triplane and dense voxels yield bumpy surfaces as well as grid artifacts around the shape surface.
+Instead, \representationname\ produces the best quality with smooth geometry and fine-grained details like the thin and tapering beard.
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/i23d_comparisons_v2.pdf}
+    \caption{\textbf{Image-to-3D comparisons}. For each method, we take the textured mesh predicted from the input image into Blender and render it with the target environment map. We compare our single-view conditioned model with \textcolor{recon-method}{sparse-view reconstruction models} and \textcolor{diffusion-method}{image-conditioned diffusion models}. \nickname\ achieves the best visual and geometry quality among all methods. Thanks to our capability to generate spatially varied PBR assets shown on the rightmost, our generated mesh can also produce vivid reflectance with specular highlights and glossiness.
+    }
+    \label{fig:i23d-results}
+\end{figure}
+
+\subsection{Image-to-3D Generation}
+In this section, we compare our single-view conditioned generative model with state-of-the-art methods suitable for image-to-3D synthesis.
+\paragraph{Comparison Methods.}
+We run evaluations against two types of methods: \textbf{1) sparse-view reconstruction models}, and \textbf{2) image-conditioned diffusion models}.
+The reconstruction-based models, like LGM~\citep{tang2024lgm}, InstantMesh~\citep{xu2024instantmesh}, Real3D~\citep{jiang2024real3d}, CRM~\citep{wang2024crm}, are deterministic methods that learn to reconstruct 3D objects given four or six input views.
+They enable single-view to 3D synthesis by leveraging pretrained diffusion models~\citep{shi2023mvdream, li2024era3d} to generate multiple views from the input single image.
+However, as methods for reconstruction heavily rely on the input multi-view images, those methods suffer from multi-view inconsistency caused by the frontend 2D diffusion models.
+The feed-forward diffusion models, like CraftsMan~\citep{li2024craftsman}, Shap-E~\citep{jun2023shap}, LN3Diff~\citep{lan2024ln3diff}, are probabilistic methods that learn to generate 3D objects given input image conditions.
+All methods above only model the shape and color without considering roughness and metallic while our method is suitable to produce those assets.
+
+\paragraph{Results.}
+Figure~\ref{fig:i23d-results} demonstrates qualitative results. 
+To fairly compare the capability of generating 3D assets ready for rendering, we take the exported textured mesh from each method into Blender~\citep{blender} and render it with the target environment map.
+For methods that cannot produce PBR materials, we assign the default diffuse material.
+Existing reconstruction-based models fail to produce good results which may suffer from multiview inconsistency and incapability to support spatially varied materials.
+Moreover, these reconstruction models are built upon triplane representation which is not parameter-efficient.
+This downside limits the spatial resolution of the underlying 3D representation, leading to the bumpy surface indicated by the rendered normal.
+On the other hand, existing 3D diffusion models fail to generate objects that are visually aligned with the input condition.
+While CraftsMan is the only method that has comparable surface quality as ours, they are only capable of generating 3D shapes without textures and materials.
+In contrast, \nickname\ achieves the best visual and geometry quality among all methods. 
+Thanks to our capability to generate spatially varied PBR assets (metallic/roughness), our generated mesh can also produce vivid reflectance with specular highlights even under harsh environmental illuminations.
+\paragraph{User Study.}
+We conduct an extensive user study to quantitatively evaluate image-to-3D performance.
+We opt for an output evaluation~\citep{userstudy} for user study, where each volunteer is shown with a pair of results comparing a random method against ours, and asked to choose the better one in four aspects: \textbf{1)} Overall Quality, \textbf{2)} Image Alignment, \textbf{3)} Surface Smoothness, and \textbf{4)} Physical Correctness.
+A total number of 48 paired samples are provided to 27 volunteers for the flip test.
+We summarize the average preference percentage across all four dimensions in Figure~\ref{fig:user-study}.
+\nickname\ is the best one among all methods.
+Although the image alignment of our method is only a slight improvement against reconstruction-based methods like CRM, the superior quality of geometry and the ability to model physically based materials are the keys to producing the best overall quality in the final rendering.
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/user_study_figure.pdf}
+    \caption{\textbf{User Study.} We quantitatively evaluate comparison methods by conducting preference tests against our method on four dimensions. The results show that \nickname\ has the highest preference rate compared with each of other methods.}
+    \label{fig:user-study}
+\end{figure}
+\subsection{Text-to-3D Generation}
+We also demonstrate our capability for native text-to-3D generation as shown in Figure~\ref{fig:our-results}.
+Note that, as a 3D native diffusion model, our text-driven generation is done by directly conditioning the model on textual inputs, without relying on complicated text-to-multiview followed by reconstruction models.
+
+Moreover, we also conduct quantitative evaluations against native text-to-3D generative models.
+Given a set of unseen text prompts, we take the CLIP Score as the evaluation metric which is the cosine similarity between the text embedding and image embedding in the joint text-image space of the CLIP model~\citep{radford2021learning}.
+We take the front-view rendering from each method to compute the image embedding.
+We mainly compare two methods with open-source implementations: Shap-E~\citep{jun2023shap} and 3DTopia~\citep{hong20243dtopia}.
+Shap-E directly generates implicit functions of 3D objects conditioned on texts.
+3DTopia adopts a hybrid 2D and 3D diffusion prior by using feedforward triplane diffusion followed by optimization-based refinement.
+As shown in Table~\ref{tab:t23d}, our method achieves better alignment between input text and rendering of generated asset.
+
+\subsection{Further Analysis}
+\subsubsection{Number and Resolution of Primitives}
+As a structured 3D representation and a serialized representation, the number of primitives $N$ and the resolution of each primitive $a$ are two critical factors for the efficiency-quality tradeoff in \representationname.
+More and larger primitives often lead to better approximation quality.
+However, it results in a longer sequence length and deeper feature dimensions, causing inefficient long-context attention computation and training difficulty of the diffusion model.
+Therefore, we explore the impact of the number and resolution of primitives on different parameter budgets.
+We evaluate the PSNR of SDF, albedo, and material values given 500k points sampled near the surface.
+As shown in Table~\ref{tab:prim-abl}, given a fixed parameter count, a longer sequence of primitives appears to have a better approximation of SDF, texture, and material.
+Moreover, increasing the resolution of each primitive can reduce the approximation error.
+However, its benefit is marginal as the number of primitives is enough.
+The visualization in Figure~\ref{fig:prim-abl} also confirms this observation.
+The alternative with $(N=64, a=32)$ produces poor geometry even with more parameter count since larger local primitives have higher chances to waste parameters in empty space.
+Furthermore, a longer sequence will increase the GFlops of DiT which also leads to better generation quality (Table~\ref{tab:scaling}).
+Therefore, we tend to use a longer sequence of primitives with a relatively small local resolution.
+Note that, the compression rate of our VAE (Sec.~\ref{sec:vae}) also influences the hyperparameter of \representationname, which we will investigate in the next section.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/prim_abl_v2.pdf}
+    \caption{\textbf{Ablation studies of the number and resolution of primitives.}
+    Our final setting $(N=2048, a=8)$ has the optimal approximation quality of ground truth, especially for fine-grained details like thin rotor blades. We visualize the corresponding \representationname\ at the bottom.
+    }
+    \label{fig:prim-abl}
+\end{figure}
+
+\input{tables/prim_hyperparam_ablation}
+\subsubsection{Patch Compression Rate}
+The compression rate of our primitive patch-based VAE is also an important design choice.
+Overall, as a patch-based compression, we aim to do spatial compression of each primitive to save computation instead of semantic compression~\citep{rombach2022high}.
+Empirically, a higher compression rate leads to a more efficient latent diffusion model, indicating larger batch sizes or larger models when scaling up.
+On the contrary, extreme compression often accompanies loss of information.
+Therefore, we analyze different compression rates given two different sequence lengths $N=256$ and $N=2048$ with the same parameter count of \representationname.
+For the evaluation metric, we compute the PSNR between the VAE's output and input on 1k random samples from the dataset to measure its reconstruction quality.
+Table~\ref{tab:vae-compression} shows the results where the final choice of $N=2048$ with compression rate $f=48$ achieves the optimal VAE reconstruction.
+The setting with $N=256, f=48$ has the same compression rate but lower reconstruction quality and a latent space with higher resolution, which we find difficulty in the convergence of the latent primitive diffusion model $g_{\Phi}$.
+
+\input{tables/scaling}
+
+\input{tables/vae_compression_rate}
+
+\subsubsection{Scaling}
+We further investigate the scaling law of \nickname\ against model sizes and iterations.
+For metrics, we use Fréchet Inception Distance (FID) computed over 5k random samples without CFG guidance.
+Specifically, we consider Latent-FID which is computed in the latent space of our VAE and Rendering-FID which is computed on the DINO~\citep{oquab2023dinov2} embeddings extracted from images rendered with Eq.~\ref{eq:diff-rast}.
+Figure~\ref{fig:scaling} shows how Latent-FID and Rendering-FID change as the model size increases.
+We observe consistent improvements as the model becomes deeper and wider.
+Table~\ref{tab:scaling} also demonstrates that longer sequence (smaller patches) leads to better performance, which may come from the findings in the vanilla DiT that increasing GFlops leads to better performance.
+
+\subsubsection{Sampling Diversity}
+At last, we demonstrate the impressive sampling diversity of \nickname\ as a generative model, as shown in Figure~\ref{fig:diversity}.
+Given the same input image and varying random seeds, our model can generate diverse high-quality 3D assets with different geometry and spatially varied PBR materials.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/diversity_result.pdf}
+    \caption{\textbf{Sampling diversity.} Given the same input image, \nickname\ can generate diverse 3D assets by varying random seeds only. Zoom in for diverse spatially varied PBR materials and shapes.}
+    \label{fig:diversity}
+\end{figure}
+
+
+\section{Discussion}
+
+We present \nickname, a native 3D diffusion model for PBR asset generation given textual or visual inputs.
+Central to our approach is \representationname, an innovative primitive-based 3D representation that is parameter-efficient, tensorial and renderable. 
+It encodes shape, albedo, and material into a compact $N\times D$ tensor, enabling the modeling of high-resolution geometry with PBR assets.
+Tailored for \representationname, several training and inference techniques are introduced to ensure the generated results can be packed into the GLB file in high quality, ready for downstream applications in the graphics engine.
+Extensive evaluations demonstrate the superiority of \nickname\ in text-to-3D and image-to-3D tasks, showing its great potential for 3D generative foundation models.
+
+\paragraph{Limitations and Future Works.}
+It is important to note that \nickname\ has been trained on a considerably large-scale dataset.
+However, there is still room for improvement in terms of quality.
+Different from existing high-quality 3D diffusion models~\cite{yariv2023mosaic, zhang2024clay} which operate on 3D representations that are not differentiably renderable, \nickname\ maintains the ability to directly learn from 2D image collections thanks to \representationname 's capability of differentiable rendering (Eq.~\ref{eq:diff-rast}).
+This opens up new opportunities to learn 3D generative models from a mixture of 3D and 2D data, which can be a solution to the lack of high-quality 3D data.
+Moreover, as an explicit representation, \representationname\ is interpretable and easy to drive. 
+By manipulating primitives or groups of primitives, it is also fruitful to explore dynamic object generation and generative editing.
+
+
+
+
+
+
+

@@ -87,7 +87,7 @@ to appear balanced.
 
 - List all reasonable weaknesses in the main review.
 - Put less reasonable ones that were removed into a "Removed Points" section with brief justification.
-- Be thorough: surface all reasonable weaknesses while filtering noise, but put them in the correct tier (fatal, major, minor, trivial) correctly, make it clear if it is something making the paper weak or something minor to improve. 
+- Surface all reasonable weaknesses while filtering noise, but put them in the correct tier (fatal, major, minor, trivial) correctly, make it clear if it is something making the paper weak or something minor to improve. 
 Output your final review in this markdown format:
 
 ## Summary
@@ -144,9 +144,7 @@ If no genuinely novel insight emerges from the reviews beyond the paper's own co
 
 DO differentiate between papers of varying quality clearly.
 
-Do NOT be afraid to be harsh if the paper is very weak and do not be afraid to be nice if the paper is actually good.
-
-Do evaluate the paper on these axis using language first, do NOT be afraid to be harsh if the paper is very weak and do not be afraid to be nice if the paper is actually good.
+Do evaluate the paper on these axis using language first.
 Originality, importance of research question addressed, whether the claims are well supported, soundness of experiments, clarity of writing, and value to the research community
 
 ## Score and Decision
@@ -156,8 +154,7 @@ After you finish writing a review, assign a score to the review.
 
 If the FUNDAMENTAL ISSUES was triggered on top, rate the paper low accordingly. 
 
-Do NOT be afraid to give very high (>8) or very low (<4) scores when the
-paper warrants it. 
+
 
 Score round to .5 or .0. 
 
